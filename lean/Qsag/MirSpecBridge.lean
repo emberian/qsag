@@ -2736,7 +2736,8 @@ theorem round1CommitState12_injective
 
 /-- Concrete algebraic Round-1 commitment opening over the full 30-round width-12 `Poseidon2`
     Davies–Meyer compression: commits to `(nonceLimb, maskLimb, sessionTag, partyId)` together with
-    4 full `Goldilocks` blinding limbs `blind : Lane4` (~256 bits of hiding randomness). -/
+    4 full `Goldilocks` blinding limbs `blind : Lane4`. Hiding is not proved; this is a
+    model commitment, without a byte-level refinement to the deployed commitment construction. -/
 structure Round1Opening where
   committedB0 : Lane4
   nonceLimb : Goldilocks
@@ -2852,7 +2853,7 @@ private theorem mul_add_lt_mul {a A r p : Nat} (ha : a < A) (hr : r < p) :
   rw [Nat.add_mul, Nat.one_mul] at hLe
   omega
 
-private theorem mul_add_mod_div {q r p : Nat} (hr : r < p) :
+private theorem mul_add_mod_div (q : Nat) {r p : Nat} (hr : r < p) :
     (q * p + r) % p = r ∧ (q * p + r) / p = q := by
   have hp : 0 < p := Nat.lt_of_le_of_lt (Nat.zero_le r) hr
   have hComm : q * p + r = r + p * q := by rw [Nat.mul_comm, Nat.add_comm]
@@ -2884,8 +2885,10 @@ theorem encodeLane4Nat_lt (L : Lane4) : encodeLane4Nat L < goldilocksPrime ^ 4 :
 theorem encodeLane4Nat_injective {L₁ L₂ : Lane4}
     (h : encodeLane4Nat L₁ = encodeLane4Nat L₂) : L₁ = L₂ := by
   unfold encodeLane4Nat at h
-  have h3a := mul_add_mod_div L₁.x3.isLt
-  have h3b := mul_add_mod_div L₂.x3.isLt
+  have h3a := mul_add_mod_div
+    ((L₁.x0.val * goldilocksPrime + L₁.x1.val) * goldilocksPrime + L₁.x2.val) L₁.x3.isLt
+  have h3b := mul_add_mod_div
+    ((L₂.x0.val * goldilocksPrime + L₂.x1.val) * goldilocksPrime + L₂.x2.val) L₂.x3.isLt
   have hx3 : L₁.x3.val = L₂.x3.val := by
     have hm := congrArg (· % goldilocksPrime) h
     rwa [h3a.1, h3b.1] at hm
@@ -2893,16 +2896,16 @@ theorem encodeLane4Nat_injective {L₁ L₂ : Lane4}
       (L₂.x0.val * goldilocksPrime + L₂.x1.val) * goldilocksPrime + L₂.x2.val := by
     have hd := congrArg (· / goldilocksPrime) h
     rwa [h3a.2, h3b.2] at hd
-  have h2a := mul_add_mod_div L₁.x2.isLt
-  have h2b := mul_add_mod_div L₂.x2.isLt
+  have h2a := mul_add_mod_div (L₁.x0.val * goldilocksPrime + L₁.x1.val) L₁.x2.isLt
+  have h2b := mul_add_mod_div (L₂.x0.val * goldilocksPrime + L₂.x1.val) L₂.x2.isLt
   have hx2 : L₁.x2.val = L₂.x2.val := by
     have hm := congrArg (· % goldilocksPrime) hq2
     rwa [h2a.1, h2b.1] at hm
   have hq1 : L₁.x0.val * goldilocksPrime + L₁.x1.val = L₂.x0.val * goldilocksPrime + L₂.x1.val := by
     have hd := congrArg (· / goldilocksPrime) hq2
     rwa [h2a.2, h2b.2] at hd
-  have h1a := mul_add_mod_div L₁.x1.isLt
-  have h1b := mul_add_mod_div L₂.x1.isLt
+  have h1a := mul_add_mod_div L₁.x0.val L₁.x1.isLt
+  have h1b := mul_add_mod_div L₂.x0.val L₂.x1.isLt
   have hx1 : L₁.x1.val = L₂.x1.val := by
     have hm := congrArg (· % goldilocksPrime) hq1
     rwa [h1a.1, h1b.1] at hm
@@ -2913,15 +2916,13 @@ theorem encodeLane4Nat_injective {L₁ L₂ : Lane4}
 
 private def decodeOpening5Nat (k : Nat) : Goldilocks × Lane4 :=
   let p := goldilocksPrime
-  let d0 := Goldilocks.ofNat k
+  let n := Goldilocks.ofNat k
   let k1 := k / p
-  let d1 := Goldilocks.ofNat k1
-  let k2 := k1 / p
-  let d2 := Goldilocks.ofNat k2
-  let k3 := k2 / p
-  let d3 := Goldilocks.ofNat k3
-  let k4 := k3 / p
-  (Goldilocks.ofNat k4, ⟨d3, d2, d1, d0⟩)
+  let d3 := Goldilocks.ofNat k1
+  let d2 := Goldilocks.ofNat (k1 / p)
+  let d1 := Goldilocks.ofNat (k1 / p / p)
+  let d0 := Goldilocks.ofNat (k1 / p / p / p)
+  (n, ⟨d0, d1, d2, d3⟩)
 
 private theorem div_lt_of_lt_mul_right {a c p : Nat} (h : a < c * p) : a / p < c := by
   if hGe : c ≤ a / p then
@@ -2938,25 +2939,18 @@ private theorem div_mul_add_mod_right (x p : Nat) : (x / p) * p + x % p = x := b
 
 private theorem decodeOpening5Nat_reconstruct {k : Nat} (hk : k < goldilocksPrime ^ 5) :
     let (n, b) := decodeOpening5Nat k
-    n.val * (goldilocksPrime ^ 4) + encodeLane4Nat b = k := by
+    encodeLane4Nat b * goldilocksPrime + n.val = k := by
   dsimp only [decodeOpening5Nat, encodeLane4Nat, Goldilocks.ofNat]
   let p := goldilocksPrime
   have hPow5 : goldilocksPrime ^ 5 = (((p * p) * p) * p) * p := by
-    dsimp only [p]; simp [Nat.pow_succ, Nat.pow_zero]
-  have hPow4 : goldilocksPrime ^ 4 = ((p * p) * p) * p := by
     dsimp only [p]; simp [Nat.pow_succ, Nat.pow_zero]
   have hk1 : k / p < ((p * p) * p) * p := div_lt_of_lt_mul_right (hPow5 ▸ hk)
   have hk2 : k / p / p < (p * p) * p := div_lt_of_lt_mul_right hk1
   have hk3 : k / p / p / p < p * p := div_lt_of_lt_mul_right hk2
   have hk4 : k / p / p / p / p < p := div_lt_of_lt_mul_right hk3
-  change ((k / p / p / p / p) % p) * (goldilocksPrime ^ 4) +
-    (((((k / p / p / p) % p) * p + (k / p / p) % p) * p + (k / p) % p) * p + k % p) = k
-  rw [Nat.mod_eq_of_lt hk4, hPow4]
-  have hStep4 : (k / p / p / p / p) * (((p * p) * p) * p) +
-      (((((k / p / p / p) % p) * p + (k / p / p) % p) * p + (k / p) % p) * p + k % p) =
-      ((((k / p / p / p / p) * p + (k / p / p / p) % p) * p + (k / p / p) % p) * p + (k / p) % p) * p + k % p := by
-    simp only [Nat.add_mul, Nat.mul_assoc]
-  rw [hStep4,
+  change (((((k / p / p / p / p) % p * p + (k / p / p / p) % p) * p +
+    (k / p / p) % p) * p + (k / p) % p) * p + k % p) = k
+  rw [Nat.mod_eq_of_lt hk4,
       div_mul_add_mod_right (k / p / p / p) p,
       div_mul_add_mod_right (k / p / p) p,
       div_mul_add_mod_right (k / p) p,
@@ -3018,7 +3012,7 @@ theorem round1Commit_no_algebraic_inverse
   omega
 
 /-- Retired 1-round `sbox7` + `applyME` encoding (retained strictly for `#tooth` regression). -/
-private def retiredOneRoundApplyMECommitB0 (nonceLimb maskLimb sessionTag partyId : Goldilocks) : Lane4 :=
+def retiredOneRoundApplyMECommitB0 (nonceLimb maskLimb sessionTag partyId : Goldilocks) : Lane4 :=
   let dom := Goldilocks.ofNat 0x515341475231434D
   let st : Poseidon2State12 :=
     ⟨⟨sbox7 nonceLimb, sbox7 maskLimb, sbox7 sessionTag, sbox7 partyId⟩,
@@ -3046,8 +3040,7 @@ private theorem inv2G_mul_two_cancel (x : Goldilocks) :
     (CommRingOps.mul (Goldilocks.ofNat 2) x) = x
   rw [← LawfulCommRing.mul_assoc]
   have hOne : CommRingOps.mul (Goldilocks.ofNat 9223372034707292161) (Goldilocks.ofNat 2) =
-      CommRingOps.one :=
-    Goldilocks.ext (by rw [Goldilocks.mul_val]; decide)
+      CommRingOps.one := by decide
   rw [hOne]
   exact LawfulCommRing.one_mul x
 
@@ -3058,7 +3051,7 @@ private theorem applyM4_zero_local : applyM4 lane4Zero = lane4Zero := by
     exact congrArg Poseidon2State12.b0 hz
   unfold applyME at hME0
   dsimp only at hME0
-  rw [lane4Add_eq, lane4Add_eq, lane4Add_eq, lane4Zero_eq] at hME0
+  simp only [lane4Add_eq, lane4Zero_eq] at hME0
   have hCoord : ∀ x : Goldilocks,
       Goldilocks.add x (Goldilocks.add (Goldilocks.add x x) x) = Goldilocks.zero →
       x = Goldilocks.zero := by
@@ -3077,6 +3070,7 @@ private theorem applyM4_zero_local : applyM4 lane4Zero = lane4Zero := by
       rwa [h4] at hVal
     have hxLt : x.val < goldilocksPrime := x.isLt
     have hp : goldilocksPrime = 18446744069414584321 := rfl
+    rw [hp] at hMod4 hxLt
     apply Goldilocks.ext
     change x.val = 0
     omega
@@ -3088,7 +3082,8 @@ private theorem applyME_e0_b1 (u : Lane4) :
     (applyME ⟨u, lane4Zero, lane4Zero⟩).b1 = applyM4 u := by
   unfold applyME
   dsimp only
-  rw [applyM4_zero_local, lane4Add_eq, lane4Add_eq, lane4Add_eq, lane4Zero_eq]
+  rw [applyM4_zero_local]
+  simp only [lane4Add_eq, lane4Zero_eq]
   have h0L : ∀ x : Goldilocks, Goldilocks.add Goldilocks.zero x = x :=
     fun x => LawfulCommRing.zero_add x
   have h0R : ∀ x : Goldilocks, Goldilocks.add x Goldilocks.zero = x :=
@@ -3121,17 +3116,16 @@ private theorem oneRound_linear_extract (u d : Lane4) :
   rw [← lane4Zero_eq]
   unfold applyME
   dsimp only
-  rw [applyM4_zero_local, ← applyM4_scale_local (Goldilocks.ofNat 2) u]
+  rw [applyM4_zero_local, applyM4_scale_local (Goldilocks.ofNat 2) u]
   let mu := applyM4 u
   let md := applyM4 d
   change lane4SubCoord (lane4Add mu (lane4Add (lane4Add mu md) lane4Zero)) md =
     lane4Scale (Goldilocks.ofNat 2) mu
-  rw [lane4Add_eq, lane4Add_eq, lane4Add_eq, lane4Scale_eq, lane4Zero_eq]
+  simp only [lane4Add_eq, lane4Scale_eq, lane4Zero_eq]
   unfold lane4SubCoord
   dsimp only
   have hz : Goldilocks.zero = goldOfInt 0 := rfl
-  have h2 : Goldilocks.ofNat 2 = goldOfInt 2 :=
-    Goldilocks.ext (by simp [Goldilocks.ofNat, goldOfInt, goldP])
+  have h2 : Goldilocks.ofNat 2 = goldOfInt 2 := by decide
   apply Lane4.ext <;>
     (rw [← goldOfInt_nat mu.x0, ← goldOfInt_nat mu.x1, ← goldOfInt_nat mu.x2, ← goldOfInt_nat mu.x3,
          ← goldOfInt_nat md.x0, ← goldOfInt_nat md.x1, ← goldOfInt_nat md.x2, ← goldOfInt_nat md.x3];
@@ -3158,12 +3152,13 @@ theorem tooth_one_round_applyME_commitment_exposes_opening :
     intro n m s p
     unfold invertOneRoundApplyMECommitB0 retiredOneRoundApplyMECommitB0
     dsimp only
-    rw [oneRound_linear_extract, applyM4Inv_applyM4, lane4Scale_eq]
+    rw [oneRound_linear_extract, applyM4Inv_applyM4]
+    simp only [lane4Scale_eq]
     unfold sboxLane4InvCoord
     dsimp only
     rw [inv2G_mul_two_cancel, inv2G_mul_two_cancel, inv2G_mul_two_cancel, inv2G_mul_two_cancel]
     exact Lane4.ext (sbox7Inv_sbox7 n) (sbox7Inv_sbox7 m) (sbox7Inv_sbox7 s) (sbox7Inv_sbox7 p)
-  exact ⟨hAll, hAll _ _ _ _⟩
+  exact ⟨hAll, hAll (Goldilocks.ofNat 17) (Goldilocks.ofNat 23) (Goldilocks.ofNat 31) (Goldilocks.ofNat 47)⟩
 
 /-- Domain separation tag `"QSAG.MIR.POSEIDON2.MAC.V1"` for full-key, full-message 32-byte `Poseidon2` tags. -/
 def poseidon2MacDomainTag : List UInt8 :=
@@ -3176,8 +3171,9 @@ def poseidon2MacDomainTag : List UInt8 :=
 def poseidon2FullTagPreimage (sh msg : List UInt8) : List UInt8 :=
   encodeMultiFrame [poseidon2MacDomainTag, sh, msg]
 
-/-- Full-key, full-message 32-byte (`256`-bit) `Poseidon2` sponge MAC/tag over length-framed
-    `[poseidon2MacDomainTag, sh, msg]`. -/
+/-- Full-key, full-message test tag over length-framed `[poseidon2MacDomainTag, sh, msg]`.
+    This prefix-keyed hash has no proved MAC unforgeability here. Four-layer instantiations using
+    it witness conditional control-flow refinement, not cryptographic signing security. -/
 def poseidon2TagBytes (sh msg : List UInt8) : ByteArray :=
   packWire (poseidon2Hash32 (poseidon2FullTagPreimage sh msg))
 
@@ -3209,7 +3205,7 @@ def poseidon2FullTagPreimage_injective (sh₁ msg₁ sh₂ msg₂ : List UInt8)
     eq := packWire_injective hEqTag }
 
 /-- Retired 2-share-byte / 1-message-byte / 4-byte-output tag (retained strictly for `#tooth` regression). -/
-private def retiredTruncatedPrefixTagBytes (sh msg : List UInt8) : ByteArray :=
+def retiredTruncatedPrefixTagBytes (sh msg : List UInt8) : ByteArray :=
   let k0 := Goldilocks.ofNat (sh.getD 0 0).toNat
   let k1 := Goldilocks.ofNat (sh.getD 1 0).toNat
   let m0 := Goldilocks.ofNat (msg.getD 0 0).toNat
@@ -3245,14 +3241,23 @@ theorem tooth_truncated_prefix_tag_collides_ab_ac :
       Nonempty (HashCollisionWitness poseidon2Hash32)) ∧
     (poseidon2TagBytes key32A msgAB = poseidon2TagBytes key32B msgAB →
       Nonempty (HashCollisionWitness poseidon2Hash32)) := by
-  refine ⟨fun _ => rfl, fun _ => rfl, rfl, ?_, by decide, by decide, ?_, ?_⟩
+  intro key32A key32B msgAB msgAC
+  have hMsgNe : msgAB ≠ msgAC := by decide
+  have hKeyNe : key32A ≠ key32B := by decide
+  refine ⟨fun _ => rfl, fun _ => rfl, rfl, ?_, ?_, ?_, ?_, ?_⟩
   · unfold poseidon2TagBytes
     rw [unpackWire_packWire]
     exact poseidon2Hash32_length _
+  · intro hPre
+    exact hMsgNe (poseidon2FullTagPreimage_eq_iff.mp hPre).2
+  · intro hPre
+    exact hKeyNe (poseidon2FullTagPreimage_eq_iff.mp hPre).1
   · intro hEq
-    exact ⟨poseidon2FullTagPreimage_injective _ _ _ _ (by decide) hEq⟩
+    exact ⟨poseidon2FullTagPreimage_injective key32A msgAB key32A msgAC
+      (fun h => hMsgNe (Prod.mk.inj h).2) hEq⟩
   · intro hEq
-    exact ⟨poseidon2FullTagPreimage_injective _ _ _ _ (by decide) hEq⟩
+    exact ⟨poseidon2FullTagPreimage_injective key32A msgAB key32B msgAB
+      (fun h => hKeyNe (Prod.mk.inj h).1) hEq⟩
 
 /-- Round-2 wire opening supplied in `FourLayerReq`: carries ONLY `(wireId, xWire, macShare)`.
     The verifier-held global MAC scalar `verifierBginAlpha` and per-wire offset `storedKeyOffset`
@@ -3359,6 +3364,7 @@ theorem verifyFourLayerQuorumCert_eq_true {n : Nat}
         e.2 = computeValidatorAckTag authKey e.1.val req.reqEpoch msgBytes) :
     verifyFourLayerQuorumCert cfg q pkDigest msgBytes req = true := by
   unfold verifyFourLayerQuorumCert beltCertAuthenticated
+  dsimp only
   have hBs :
       BeltLatchCommitReq.signers
         ⟨pkDigest, req.reqEpoch, msgBytes, ByteArray.empty, req.quorumCert⟩ = req.quorum :=
@@ -3432,6 +3438,7 @@ theorem verifySessionRound1Openings_eq_true {n : Nat}
         computeRound1CommitB0 op.nonceLimb op.maskLimb op.sessionTag op.partyId op.blind) :
     verifySessionRound1Openings activeSessionTag storedRound1Commits quorum openings = true := by
   unfold verifySessionRound1Openings
+  dsimp only
   have hBL : ((storedRound1Commits.take quorum.length).length == quorum.length) = true :=
     beq_iff_eq.mpr hBatchLen
   have hAllB :
@@ -3970,7 +3977,6 @@ def sim_layer1_to_layer2 {n : Nat} (q : Nat) (pkDigest : List UInt8)
                   cases hN : u64MemBool req.tx.nonce s2.policy.burnedNonces
                   · rw [hN] at hStep1
                     simp only [Bool.false_eq_true, ↓reduceIte] at hStep1 ⊢
-                    dsimp only at hStep1 ⊢
                     cases hQ : verifyFourLayerQuorumCert s2.quorumCertConfig q pkDigest
                         (encodeTransactionIntent req.tx.toTransactionIntent) req
                     · rw [hQ] at hStep1; simp at hStep1
@@ -4080,7 +4086,6 @@ def sim_layer1_to_layer2 {n : Nat} (q : Nat) (pkDigest : List UInt8)
                   cases hN : u64MemBool req.tx.nonce s2.policy.burnedNonces
                   · rw [hN] at hNone1
                     simp only [Bool.false_eq_true, ↓reduceIte] at hNone1 ⊢
-                    dsimp only at hNone1 ⊢
                     cases hQ : verifyFourLayerQuorumCert s2.quorumCertConfig q pkDigest
                         (encodeTransactionIntent req.tx.toTransactionIntent) req
                     · rw [ite_eq_left Bool.not_false, ite_eq_left Bool.not_false]
@@ -4684,33 +4689,337 @@ theorem isa_to_ideal_preserves_multiturn_safety {PK : Type} {n q f : Nat}
     sim.lift_validTrace ⟨s2₀, h12₀, s3₀, h23₀, h34₀⟩ hTrace1
   exact ⟨hSafe, sim12_zeroIfPoisoned h12F⟩
 
-/-! ### Non-Vacuity Witness (`inhabited_four_layer_chain`) & `#tooth` Broken-Link Refutation -/
+/-! ### Multi-Share Shamir Algebra, `#tooth` Session-Gate Refutations & `inhabited_four_layer_chain` -/
+
+/-- Pack 4 canonical `Goldilocks` limbs into a 32-byte big-endian key/share slice. -/
+def packLane4Bytes32 (L : Lane4) : List UInt8 :=
+  be 8 L.x0.val ++ be 8 L.x1.val ++ be 8 L.x2.val ++ be 8 L.x3.val
+
+theorem packLane4Bytes32_length (L : Lane4) : (packLane4Bytes32 L).length = 32 := by
+  unfold packLane4Bytes32
+  simp [length_be]
+
+/-- Unpack a 32-byte big-endian key/share slice into a 4-limb `Lane4` element. -/
+def unpackLane4Bytes32 (bs : List UInt8) : Lane4 :=
+  ⟨Goldilocks.ofNat (ofBE (bs.take 8)),
+   Goldilocks.ofNat (ofBE ((bs.drop 8).take 8)),
+   Goldilocks.ofNat (ofBE ((bs.drop 16).take 8)),
+   Goldilocks.ofNat (ofBE ((bs.drop 24).take 8))⟩
+
+private theorem goldilocks_ofNat_val_eq (x : Goldilocks) : Goldilocks.ofNat x.val = x :=
+  Goldilocks.ext (Nat.mod_eq_of_lt x.isLt)
+
+theorem unpackLane4Bytes32_packLane4Bytes32 (L : Lane4) :
+    unpackLane4Bytes32 (packLane4Bytes32 L) = L := by
+  have hPow : (2 : Nat) ^ 64 = 256 ^ 8 := rfl
+  have hTake0 : (packLane4Bytes32 L).take 8 = be 8 L.x0.val := rfl
+  have hTake1 : ((packLane4Bytes32 L).drop 8).take 8 = be 8 L.x1.val := rfl
+  have hTake2 : ((packLane4Bytes32 L).drop 16).take 8 = be 8 L.x2.val := rfl
+  have hTake3 : ((packLane4Bytes32 L).drop 24).take 8 = be 8 L.x3.val := rfl
+  unfold unpackLane4Bytes32
+  rw [hTake0, hTake1, hTake2, hTake3,
+      ofBE_be (hPow ▸ Goldilocks.val_lt_two_pow_64 L.x0),
+      ofBE_be (hPow ▸ Goldilocks.val_lt_two_pow_64 L.x1),
+      ofBE_be (hPow ▸ Goldilocks.val_lt_two_pow_64 L.x2),
+      ofBE_be (hPow ▸ Goldilocks.val_lt_two_pow_64 L.x3),
+      goldilocks_ofNat_val_eq, goldilocks_ofNat_val_eq,
+      goldilocks_ofNat_val_eq, goldilocks_ofNat_val_eq]
+
+/-- Degree-2 Shamir polynomial $f(x) = \text{sk} + a_1 x + a_2 x^2$ on a single `Goldilocks` coordinate. -/
+def shamirEvalCoord (sk a₁ a₂ x : Goldilocks) : Goldilocks :=
+  Goldilocks.add sk (Goldilocks.add (Goldilocks.mul a₁ x)
+    (Goldilocks.mul a₂ (Goldilocks.mul x x)))
+
+/-- Degree-2 3-of-4 Shamir polynomial evaluation over 4-limb `Lane4` (`256`-bit secret space). -/
+def shamirEvalLane4 (sk a₁ a₂ : Lane4) (x : Goldilocks) : Lane4 :=
+  ⟨shamirEvalCoord sk.x0 a₁.x0 a₂.x0 x,
+   shamirEvalCoord sk.x1 a₁.x1 a₂.x1 x,
+   shamirEvalCoord sk.x2 a₁.x2 a₂.x2 x,
+   shamirEvalCoord sk.x3 a₁.x3 a₂.x3 x⟩
+
+/-- Non-zero evaluation point $x_p = p + 1 \in \{1, 2, 3, 4\}$ for custodian `p : Fin 4`. -/
+def shamirPoint (p : Fin 4) : Goldilocks :=
+  Goldilocks.ofNat (p.val + 1)
+
+/-- Multiplicative inverse of $x_p \in \{1, 2, 3, 4\}$ in `Goldilocks`. -/
+def shamirPointInv : Fin 4 → Goldilocks
+  | ⟨0, _⟩ => Goldilocks.ofNat 1
+  | ⟨1, _⟩ => Goldilocks.ofNat 9223372034707292161
+  | ⟨2, _⟩ => Goldilocks.ofNat 12297829379609722881
+  | ⟨3, _⟩ => Goldilocks.ofNat 13835058052060938241
+
+private theorem shamirPointInv_mul_point (p : Fin 4) :
+    Goldilocks.mul (shamirPointInv p) (shamirPoint p) = Goldilocks.one := by
+  rcases p with ⟨v, hv⟩
+  match v with
+  | 0 => dsimp only [shamirPointInv, shamirPoint]; decide
+  | 1 => dsimp only [shamirPointInv, shamirPoint]; decide
+  | 2 => dsimp only [shamirPointInv, shamirPoint]; decide
+  | 3 => dsimp only [shamirPointInv, shamirPoint]; decide
+  | n + 4 => omega
+
+/-- Unique degree-1 slope $a_1 = x_p^{-1}(y - (\text{sk} + a_2 x_p^2))$ mapping `sk` to single share `y`. -/
+def shamirRecoverSlopeCoord (p : Fin 4) (sk a₂ y : Goldilocks) : Goldilocks :=
+  let x := shamirPoint p
+  Goldilocks.mul (shamirPointInv p)
+    (Goldilocks.sub y (Goldilocks.add sk (Goldilocks.mul a₂ (Goldilocks.mul x x))))
+
+def shamirRecoverSlope (p : Fin 4) (sk a₂ y : Lane4) : Lane4 :=
+  ⟨shamirRecoverSlopeCoord p sk.x0 a₂.x0 y.x0,
+   shamirRecoverSlopeCoord p sk.x1 a₂.x1 y.x1,
+   shamirRecoverSlopeCoord p sk.x2 a₂.x2 y.x2,
+   shamirRecoverSlopeCoord p sk.x3 a₂.x3 y.x3⟩
+
+private theorem shamirEval_recover_coord (p : Fin 4) (sk a₂ y : Goldilocks) :
+    shamirEvalCoord sk (shamirRecoverSlopeCoord p sk a₂ y) a₂ (shamirPoint p) = y := by
+  unfold shamirEvalCoord shamirRecoverSlopeCoord
+  dsimp only
+  let x := shamirPoint p
+  let xInv := shamirPointInv p
+  let qTerm := Goldilocks.mul a₂ (Goldilocks.mul x x)
+  let diff := Goldilocks.sub y (Goldilocks.add sk qTerm)
+  have hCancelX : Goldilocks.mul (Goldilocks.mul xInv diff) x = diff := by
+    change CommRingOps.mul (CommRingOps.mul xInv diff) x = diff
+    rw [LawfulCommRing.mul_comm xInv diff, LawfulCommRing.mul_assoc]
+    change CommRingOps.mul diff (Goldilocks.mul xInv x) = diff
+    rw [shamirPointInv_mul_point p]
+    exact LawfulCommRing.mul_one diff
+  change Goldilocks.add sk (Goldilocks.add (Goldilocks.mul (Goldilocks.mul xInv diff) x) qTerm) = y
+  rw [hCancelX]
+  dsimp only [diff]
+  rw [← goldOfInt_nat sk, ← goldOfInt_nat y, ← goldOfInt_nat qTerm]
+  simp only [goldOfInt_add, goldOfInt_sub]
+  congr 1
+  omega
+
+private theorem shamirRecover_eval_coord (p : Fin 4) (sk a₁ a₂ : Goldilocks) :
+    shamirRecoverSlopeCoord p sk a₂ (shamirEvalCoord sk a₁ a₂ (shamirPoint p)) = a₁ := by
+  unfold shamirRecoverSlopeCoord shamirEvalCoord
+  dsimp only
+  let x := shamirPoint p
+  let xInv := shamirPointInv p
+  let qTerm := Goldilocks.mul a₂ (Goldilocks.mul x x)
+  have hSub :
+      Goldilocks.sub (Goldilocks.add sk (Goldilocks.add (Goldilocks.mul a₁ x) qTerm))
+        (Goldilocks.add sk qTerm) = Goldilocks.mul a₁ x := by
+    let lin := Goldilocks.mul a₁ x
+    change Goldilocks.sub (Goldilocks.add sk (Goldilocks.add lin qTerm)) (Goldilocks.add sk qTerm) = lin
+    rw [← goldOfInt_nat sk, ← goldOfInt_nat lin, ← goldOfInt_nat qTerm]
+    simp only [goldOfInt_add, goldOfInt_sub]
+    congr 1
+    omega
+  change Goldilocks.mul xInv
+    (Goldilocks.sub (Goldilocks.add sk (Goldilocks.add (Goldilocks.mul a₁ x) qTerm))
+      (Goldilocks.add sk qTerm)) = a₁
+  rw [hSub]
+  change CommRingOps.mul xInv (CommRingOps.mul a₁ x) = a₁
+  rw [LawfulCommRing.mul_comm a₁ x, ← LawfulCommRing.mul_assoc]
+  change CommRingOps.mul (Goldilocks.mul xInv x) a₁ = a₁
+  rw [shamirPointInv_mul_point p]
+  exact LawfulCommRing.one_mul a₁
+
+/-- **1-Share Information-Theoretic Independence (`singleShare_uniform_bijection`)**:
+    For EVERY custodian `p : Fin 4`, EVERY target secret `sk : Lane4`, and EVERY quadratic mask
+    `a₂ : Lane4`, `a₁ ↦ shamirEvalLane4 sk a₁ a₂ (shamirPoint p)` is an explicit constructive
+    bijection `Lane4 ≃ Lane4` inverted by `shamirRecoverSlope p sk a₂`: observing any single share
+    (such as Layer-1 custodian `1`'s share in `[0x180, 0x1A0)`) reveals zero information about `sk`. -/
+theorem singleShare_uniform_bijection (p : Fin 4) (sk a₂ : Lane4) :
+    (∀ y : Lane4,
+      shamirEvalLane4 sk (shamirRecoverSlope p sk a₂ y) a₂ (shamirPoint p) = y) ∧
+    (∀ a₁ : Lane4,
+      shamirRecoverSlope p sk a₂ (shamirEvalLane4 sk a₁ a₂ (shamirPoint p)) = a₁) := by
+  refine ⟨fun y => ?_, fun a₁ => ?_⟩
+  · exact Lane4.ext
+      (shamirEval_recover_coord p sk.x0 a₂.x0 y.x0)
+      (shamirEval_recover_coord p sk.x1 a₂.x1 y.x1)
+      (shamirEval_recover_coord p sk.x2 a₂.x2 y.x2)
+      (shamirEval_recover_coord p sk.x3 a₂.x3 y.x3)
+  · exact Lane4.ext
+      (shamirRecover_eval_coord p sk.x0 a₁.x0 a₂.x0)
+      (shamirRecover_eval_coord p sk.x1 a₁.x1 a₂.x1)
+      (shamirRecover_eval_coord p sk.x2 a₁.x2 a₂.x2)
+      (shamirRecover_eval_coord p sk.x3 a₁.x3 a₂.x3)
+
+/-- Exact Lagrange interpolation at $x = 0$ from quorum `{1, 2, 3}` ($x \in \{2, 3, 4\}$):
+    $\lambda_1(0) = 6,\; \lambda_2(0) = -8,\; \lambda_3(0) = 3$. -/
+def shamirReconstruct123Coord (y1 y2 y3 : Goldilocks) : Goldilocks :=
+  Goldilocks.add
+    (Goldilocks.sub (Goldilocks.mul (Goldilocks.ofNat 6) y1)
+                    (Goldilocks.mul (Goldilocks.ofNat 8) y2))
+    (Goldilocks.mul (Goldilocks.ofNat 3) y3)
+
+def shamirReconstruct123 (sh1 sh2 sh3 : Lane4) : Lane4 :=
+  ⟨shamirReconstruct123Coord sh1.x0 sh2.x0 sh3.x0,
+   shamirReconstruct123Coord sh1.x1 sh2.x1 sh3.x1,
+   shamirReconstruct123Coord sh1.x2 sh2.x2 sh3.x2,
+   shamirReconstruct123Coord sh1.x3 sh2.x3 sh3.x3⟩
+
+/-- Exact Lagrange interpolation at $x = 0$ from quorum `{0, 1, 2}` ($x \in \{1, 2, 3\}$):
+    $\lambda_0(0) = 3,\; \lambda_1(0) = -3,\; \lambda_2(0) = 1$. -/
+def shamirReconstruct012Coord (y0 y1 y2 : Goldilocks) : Goldilocks :=
+  Goldilocks.add
+    (Goldilocks.sub (Goldilocks.mul (Goldilocks.ofNat 3) y0)
+                    (Goldilocks.mul (Goldilocks.ofNat 3) y1))
+    y2
+
+def shamirReconstruct012 (sh0 sh1 sh2 : Lane4) : Lane4 :=
+  ⟨shamirReconstruct012Coord sh0.x0 sh1.x0 sh2.x0,
+   shamirReconstruct012Coord sh0.x1 sh1.x1 sh2.x1,
+   shamirReconstruct012Coord sh0.x2 sh1.x2 sh2.x2,
+   shamirReconstruct012Coord sh0.x3 sh1.x3 sh2.x3⟩
+
+theorem shamirReconstruct123_correct (sk a₁ a₂ : Lane4) :
+    shamirReconstruct123
+      (shamirEvalLane4 sk a₁ a₂ (shamirPoint ⟨1, by decide⟩))
+      (shamirEvalLane4 sk a₁ a₂ (shamirPoint ⟨2, by decide⟩))
+      (shamirEvalLane4 sk a₁ a₂ (shamirPoint ⟨3, by decide⟩)) = sk := by
+  have h2 : Goldilocks.ofNat 2 = goldOfInt 2 := by decide
+  have h3 : Goldilocks.ofNat 3 = goldOfInt 3 := by decide
+  have h4 : Goldilocks.ofNat 4 = goldOfInt 4 := by decide
+  have h6 : Goldilocks.ofNat 6 = goldOfInt 6 := by decide
+  have h8 : Goldilocks.ofNat 8 = goldOfInt 8 := by decide
+  have hCoord : ∀ s b1 b2 : Goldilocks,
+      shamirReconstruct123Coord
+        (shamirEvalCoord s b1 b2 (Goldilocks.ofNat 2))
+        (shamirEvalCoord s b1 b2 (Goldilocks.ofNat 3))
+        (shamirEvalCoord s b1 b2 (Goldilocks.ofNat 4)) = s := by
+    intro s b1 b2
+    unfold shamirReconstruct123Coord shamirEvalCoord
+    rw [h2, h3, h4, h6, h8, ← goldOfInt_nat s, ← goldOfInt_nat b1, ← goldOfInt_nat b2]
+    simp only [goldOfInt_add, goldOfInt_sub, goldOfInt_mul]
+    congr 1
+    omega
+  exact Lane4.ext
+    (hCoord sk.x0 a₁.x0 a₂.x0)
+    (hCoord sk.x1 a₁.x1 a₂.x1)
+    (hCoord sk.x2 a₁.x2 a₂.x2)
+    (hCoord sk.x3 a₁.x3 a₂.x3)
+
+theorem shamirReconstruct012_correct (sk a₁ a₂ : Lane4) :
+    shamirReconstruct012
+      (shamirEvalLane4 sk a₁ a₂ (shamirPoint ⟨0, by decide⟩))
+      (shamirEvalLane4 sk a₁ a₂ (shamirPoint ⟨1, by decide⟩))
+      (shamirEvalLane4 sk a₁ a₂ (shamirPoint ⟨2, by decide⟩)) = sk := by
+  have h1 : Goldilocks.ofNat 1 = goldOfInt 1 := by decide
+  have h2 : Goldilocks.ofNat 2 = goldOfInt 2 := by decide
+  have h3 : Goldilocks.ofNat 3 = goldOfInt 3 := by decide
+  have hCoord : ∀ s b1 b2 : Goldilocks,
+      shamirReconstruct012Coord
+        (shamirEvalCoord s b1 b2 (Goldilocks.ofNat 1))
+        (shamirEvalCoord s b1 b2 (Goldilocks.ofNat 2))
+        (shamirEvalCoord s b1 b2 (Goldilocks.ofNat 3)) = s := by
+    intro s b1 b2
+    unfold shamirReconstruct012Coord shamirEvalCoord
+    rw [h1, h2, h3, ← goldOfInt_nat s, ← goldOfInt_nat b1, ← goldOfInt_nat b2]
+    simp only [goldOfInt_add, goldOfInt_sub, goldOfInt_mul]
+    congr 1
+    omega
+  exact Lane4.ext
+    (hCoord sk.x0 a₁.x0 a₂.x0)
+    (hCoord sk.x1 a₁.x1 a₂.x1)
+    (hCoord sk.x2 a₁.x2 a₂.x2)
+    (hCoord sk.x3 a₁.x3 a₂.x3)
 
 def samplePolPin : List UInt8 := List.replicate 32 0xA5
 def sampleAuthPin : List UInt8 := List.replicate 32 0x5A
 def samplePkPin : List UInt8 := List.replicate 32 0x3C
-def sampleSecretShare : List UInt8 := List.replicate 32 0x77
 def sampleRecipient : List UInt8 := [0x01, 0x02, 0x03, 0x04]
+
+/-- Concrete 256-bit (`Lane4`) master secret key and non-zero degree-2 Shamir masking polynomials. -/
+def sampleSecretKeyLane4 : Lane4 :=
+  ⟨Goldilocks.ofNat 0x1020304050607081, Goldilocks.ofNat 0x2131415161718192,
+   Goldilocks.ofNat 0x32425262728292A3, Goldilocks.ofNat 0x435363738393A3B4⟩
+
+def sampleShamirA1 : Lane4 :=
+  ⟨Goldilocks.ofNat 0x1111222233334445, Goldilocks.ofNat 0x5555666677778889,
+   Goldilocks.ofNat 0x9999AAAABBBBCCCD, Goldilocks.ofNat 0xDDDDEEEEFFFF0003⟩
+
+def sampleShamirA2 : Lane4 :=
+  ⟨Goldilocks.ofNat 0x01030507090B0D0F, Goldilocks.ofNat 0x121416181A1C1E20,
+   Goldilocks.ofNat 0x232527292B2D2F31, Goldilocks.ofNat 0x3436383A3C3E4042⟩
+
+def sampleSecretKeyBytes : List UInt8 :=
+  packLane4Bytes32 sampleSecretKeyLane4
+
+/-- Distinct 32-byte Shamir share for party `p ∈ {0, 1, 2, 3}` evaluated at $x_p = p + 1$. -/
+def sampleShareLane4 (p : Fin 4) : Lane4 :=
+  shamirEvalLane4 sampleSecretKeyLane4 sampleShamirA1 sampleShamirA2 (shamirPoint p)
+
+def sampleShareBytes (p : Fin 4) : List UInt8 :=
+  packLane4Bytes32 (sampleShareLane4 p)
+
+/-- Custodian `1`'s local 32-byte Shamir share stored in Layer-1 ELF memory `[0x180, 0x1A0)`. -/
+def sampleCustodianShare1 : List UInt8 :=
+  sampleShareBytes ⟨1, by decide⟩
+
+/-- Genuine 4-party dealt-share map assigning each custodian its distinct degree-2 Shamir share. -/
+def sampleDealtShares : Nat → Option (List UInt8)
+  | 0 => some (sampleShareBytes ⟨0, by decide⟩)
+  | 1 => some (sampleShareBytes ⟨1, by decide⟩)
+  | 2 => some (sampleShareBytes ⟨2, by decide⟩)
+  | 3 => some (sampleShareBytes ⟨3, by decide⟩)
+  | _ => none
+
+/-- Reconstruct the 32-byte master key from 3 distinct Shamir shares `{1, 2, 3}` and compute the
+    full 32-byte `Poseidon2` sponge signature tag. -/
+def assembleShamirThresholdSig (shMap : Nat → Option (List UInt8)) (msg : List UInt8) : ByteArray :=
+  let sh1 := unpackLane4Bytes32 ((shMap 1).getD [])
+  let sh2 := unpackLane4Bytes32 ((shMap 2).getD [])
+  let sh3 := unpackLane4Bytes32 ((shMap 3).getD [])
+  poseidon2TagBytes (packLane4Bytes32 (shamirReconstruct123 sh1 sh2 sh3)) msg
+
+/-- Round-3 signature assembly combining local custodian `1`'s share from `[0x180, 0x1A0)` with
+    peer Shamir shares `(sh_2, sh_3)` via `shamirReconstruct123`. -/
+def signFromCustodianShare1WithPeers (localSh1 : List UInt8) (msg : List UInt8) : ByteArray :=
+  let sh1 := unpackLane4Bytes32 localSh1
+  let sh2 := unpackLane4Bytes32 (sampleShareBytes ⟨2, by decide⟩)
+  let sh3 := unpackLane4Bytes32 (sampleShareBytes ⟨3, by decide⟩)
+  poseidon2TagBytes (packLane4Bytes32 (shamirReconstruct123 sh1 sh2 sh3)) msg
+
+theorem sampleShares_distinct_and_reconstruct :
+    sampleShareBytes ⟨0, by decide⟩ ≠ sampleShareBytes ⟨1, by decide⟩ ∧
+    sampleShareBytes ⟨1, by decide⟩ ≠ sampleShareBytes ⟨2, by decide⟩ ∧
+    sampleShareBytes ⟨2, by decide⟩ ≠ sampleShareBytes ⟨3, by decide⟩ ∧
+    sampleShareBytes ⟨0, by decide⟩ ≠ sampleSecretKeyBytes ∧
+    sampleShareBytes ⟨1, by decide⟩ ≠ sampleSecretKeyBytes ∧
+    sampleShareBytes ⟨2, by decide⟩ ≠ sampleSecretKeyBytes ∧
+    sampleShareBytes ⟨3, by decide⟩ ≠ sampleSecretKeyBytes ∧
+    (∀ msg : List UInt8,
+      assembleShamirThresholdSig sampleDealtShares msg =
+        signFromCustodianShare1WithPeers sampleCustodianShare1 msg) ∧
+    (∀ msg : List UInt8,
+      assembleShamirThresholdSig sampleDealtShares msg =
+        poseidon2TagBytes sampleSecretKeyBytes msg) := by
+  refine ⟨by decide, by decide, by decide, by decide, by decide, by decide, by decide,
+    fun _ => rfl, fun msg => ?_⟩
+  dsimp only [assembleShamirThresholdSig, sampleDealtShares, sampleShareBytes, sampleShareLane4,
+    sampleSecretKeyBytes, Option.getD]
+  rw [unpackLane4Bytes32_packLane4Bytes32,
+      unpackLane4Bytes32_packLane4Bytes32,
+      unpackLane4Bytes32_packLane4Bytes32,
+      shamirReconstruct123_correct]
 
 def sampleElfMem : UInt64 → UInt8 :=
   writeBytesWindow
     (writeBytesWindow
       (writeBytesWindow (fun _ => 0) 0x100 samplePolPin)
       0x140 sampleAuthPin)
-    0x180 sampleSecretShare
+    0x180 sampleCustodianShare1
 
 private theorem sampleElfMem_pins :
     (∀ i : Nat, i < 32 →
       sampleElfMem (UInt64.ofNat 0x100 + UInt64.ofNat i) = samplePolPin.getD i 0) ∧
     (∀ i : Nat, i < 32 →
       sampleElfMem (UInt64.ofNat 0x140 + UInt64.ofNat i) = sampleAuthPin.getD i 0) ∧
-    readShareMem32 sampleElfMem = sampleSecretShare := by
+    readShareMem32 sampleElfMem = sampleCustodianShare1 := by
+  have hShLen : sampleCustodianShare1.length = 32 :=
+    packLane4Bytes32_length _
   refine ⟨?_, ?_, ?_⟩
   · intro i hi
     unfold sampleElfMem
     have h180 : ¬ (0x180 ≤ (UInt64.ofNat 0x100 + UInt64.ofNat i).toNat ∧
-        (UInt64.ofNat 0x100 + UInt64.ofNat i).toNat < 0x180 + sampleSecretShare.length) := by
-      rw [addr_offset_toNat (base := 0x100) (i := i) (by omega)]; omega
+        (UInt64.ofNat 0x100 + UInt64.ofNat i).toNat < 0x180 + sampleCustodianShare1.length) := by
+      rw [hShLen, addr_offset_toNat (base := 0x100) (i := i) (by omega)]; omega
     have h140 : ¬ (0x140 ≤ (UInt64.ofNat 0x100 + UInt64.ofNat i).toNat ∧
         (UInt64.ofNat 0x100 + UInt64.ofNat i).toNat < 0x140 + sampleAuthPin.length) := by
       rw [addr_offset_toNat (base := 0x100) (i := i) (by omega)]; omega
@@ -4719,40 +5028,532 @@ private theorem sampleElfMem_pins :
   · intro i hi
     unfold sampleElfMem
     have h180 : ¬ (0x180 ≤ (UInt64.ofNat 0x140 + UInt64.ofNat i).toNat ∧
-        (UInt64.ofNat 0x140 + UInt64.ofNat i).toNat < 0x180 + sampleSecretShare.length) := by
-      rw [addr_offset_toNat (base := 0x140) (i := i) (by omega)]; omega
+        (UInt64.ofNat 0x140 + UInt64.ofNat i).toNat < 0x180 + sampleCustodianShare1.length) := by
+      rw [hShLen, addr_offset_toNat (base := 0x140) (i := i) (by omega)]; omega
     rw [writeBytesWindow_miss h180]
     exact writeBytesWindow_hit (by simp [sampleAuthPin]; exact hi) (by simp [sampleAuthPin])
   · unfold sampleElfMem
-    exact readShareMem32_write _ sampleSecretShare rfl
+    exact readShareMem32_write _ sampleCustodianShare1 hShLen
+
+/-- Enrolled 32-byte validator authentication keys for `§4` quorum certificates. -/
+def sampleValidatorAuthKey (partyIdx : Nat) : List UInt8 :=
+  List.replicate 32 (UInt8.ofNat (0xC0 + partyIdx))
+
+def sampleQuorumCertConfig : QuorumCertConfig :=
+  { validatorAuthKeys :=
+      [(0, sampleValidatorAuthKey 0),
+       (1, sampleValidatorAuthKey 1),
+       (2, sampleValidatorAuthKey 2),
+       (3, sampleValidatorAuthKey 3)] }
+
+def mkSampleQuorumCert (quorum : List (Fin 4)) (epoch : Nat) (msgBytes : List UInt8) :
+    List (Fin 4 × List UInt8) :=
+  quorum.map (fun p =>
+    (p, computeValidatorAckTag (sampleValidatorAuthKey p.val) p.val epoch msgBytes))
+
+private theorem lookupSampleValidatorAuthKey (p : Fin 4) :
+    lookupValidatorAuthKey sampleQuorumCertConfig.validatorAuthKeys p.val =
+      some (sampleValidatorAuthKey p.val) := by
+  rcases p with ⟨v, hv⟩
+  match v with
+  | 0 => rfl
+  | 1 => rfl
+  | 2 => rfl
+  | 3 => rfl
+  | n + 4 => omega
+
+/-- Verifier-held non-zero `GF(2^128)` `BGIN19` MAC key `(α = X_7, keyOffset_0 = 1)` and valid wire opening. -/
+def sampleBginAlpha : Tower128 := towerX 7
+def sampleBginOffsets : List (Nat × Tower128) := [(0, towerOne 7)]
+def sampleHonestBginWires : List Round2WireOpening :=
+  [{ wireId := 0
+     xWire := towerOne 7
+     macShare := towerAdd 7 (towerMul 7 (towerX 7) (towerOne 7)) (towerOne 7) }]
+
+private theorem sampleHonestBginWires_ok :
+    verifySessionBginBatch sampleBginAlpha sampleBginOffsets sampleHonestBginWires = true := by
+  unfold verifySessionBginBatch verifySessionBginWire bginRelationHolds lookupBginKeyOffset
+    sampleBginAlpha sampleBginOffsets sampleHonestBginWires
+  dsimp only [List.all, List.any, List.find?, List.isEmpty, List.map]
+  rw [towerMul_one 7 (towerX 7)]
+  decide
+
+def mkSampleRound1Opening (nonceVal maskVal sessionVal partyVal blindSeed : Nat) : Round1Opening :=
+  let blind : Lane4 :=
+    ⟨Goldilocks.ofNat (blindSeed + 101), Goldilocks.ofNat (blindSeed + 202),
+     Goldilocks.ofNat (blindSeed + 303), Goldilocks.ofNat (blindSeed + 404)⟩
+  { committedB0 := computeRound1CommitB0
+      (Goldilocks.ofNat nonceVal) (Goldilocks.ofNat maskVal)
+      (Goldilocks.ofNat sessionVal) (Goldilocks.ofNat partyVal) blind
+    nonceLimb := Goldilocks.ofNat nonceVal
+    maskLimb := Goldilocks.ofNat maskVal
+    sessionTag := Goldilocks.ofNat sessionVal
+    partyId := Goldilocks.ofNat partyVal
+    blind := blind }
+
+/-- **`#tooth` Session-Gate Refutation 1 (`tooth_caller_zero_bgin_relation_rejected`)**:
+    1. Setting `verifierBginAlpha = 0` (`towerZero 7`) is unconditionally rejected,
+    2. Under honest verifier keys `(verifierBginAlpha = towerX 7, storedKeyOffset_0 = towerOne 7)`,
+       a forged zero-MAC wire opening `(wireId = 0, xWire = 1, macShare = 0)` is rejected by
+       `verifySessionBginBatch`, rejected by `layer1CompiledElfMachine` (`step = none`), sets
+       `cutPoisoned = true`, and physically zeroes all 32 share bytes `[0x180, 0x1A0)`. -/
+theorem tooth_caller_zero_bgin_relation_rejected :
+    let forgedZeroWire : Round2WireOpening := ⟨0, towerOne 7, towerZero 7⟩
+    let missingWire : Round2WireOpening := ⟨1, towerOne 7, towerOne 7⟩
+    let op1 := mkSampleRound1Opening 11 22 0 1 1000
+    let op2 := mkSampleRound1Opening 12 23 0 2 2000
+    let op3 := mkSampleRound1Opening 13 24 0 3 3000
+    let quorum1 : List (Fin 4) := [⟨1, by decide⟩, ⟨2, by decide⟩, ⟨3, by decide⟩]
+    let tx1 : MirTxIntent := ⟨sampleRecipient, 40, 7, samplePolPin, sampleAuthPin, 10, 0⟩
+    let msg1 := encodeTransactionIntent tx1.toTransactionIntent
+    let forgedReq : FourLayerReq 4 :=
+      { tx := tx1
+        reqEpoch := 0
+        quorum := quorum1
+        quorumCert := mkSampleQuorumCert quorum1 0 msg1
+        round1Openings := [op1, op2, op3]
+        round2Wires := [forgedZeroWire] }
+    let s1₀ : Layer1ElfState :=
+      { mem := sampleElfMem
+        windowId := 7
+        velocityWindowCap := 100
+        accumulatedSpend := 0
+        burnedNonces := []
+        allowedRecipients := [sampleRecipient]
+        perTxCap := 60
+        belt := ⟨samplePkPin, 0, none, false⟩
+        cutPoisoned := false
+        sharePresent := true
+        activeSessionTag := Goldilocks.ofNat 0
+        storedRound1Commits := [(1, op1.committedB0), (2, op2.committedB0), (3, op3.committedB0)]
+        verifierBginAlpha := sampleBginAlpha
+        verifierBginKeyOffsets := sampleBginOffsets
+        quorumCertConfig := sampleQuorumCertConfig }
+    let M1 := layer1CompiledElfMachine (n := 4) 3 samplePkPin
+      (fun m msg => signFromCustodianShare1WithPeers (readShareMem32 m) msg)
+    (∀ offsets wires, verifySessionBginBatch (towerZero 7) offsets wires = false) ∧
+    verifySessionBginBatch sampleBginAlpha sampleBginOffsets sampleHonestBginWires = true ∧
+    verifySessionBginBatch sampleBginAlpha sampleBginOffsets [forgedZeroWire] = false ∧
+    verifySessionBginBatch sampleBginAlpha sampleBginOffsets [missingWire] = false ∧
+    M1.step s1₀ forgedReq = none ∧
+    (M1.errStep s1₀ forgedReq).cutPoisoned = true ∧
+    (∀ i : Nat, i < 32 →
+      (M1.errStep s1₀ forgedReq).mem (UInt64.ofNat 0x180 + UInt64.ofNat i) = 0) := by
+  intro forgedZeroWire missingWire op1 op2 op3 quorum1 tx1 msg1 forgedReq s1₀ M1
+  have hZeroAlpha : ∀ offsets wires, verifySessionBginBatch (towerZero 7) offsets wires = false := by
+    intro offsets wires
+    unfold verifySessionBginBatch
+    have hF : decide (towerZero 7 ≠ towerZero 7) = false := by decide
+    rw [hF]
+    rfl
+  obtain ⟨hPinPol, hPinAuth, _⟩ := sampleElfMem_pins
+  have hCtPol : execElfCtEq32 sampleElfMem (UInt64.ofNat 0x100) samplePolPin = true := by
+    rw [execElfCtEq32_spec (pinned := samplePolPin) rfl (by omega) hPinPol]; rfl
+  have hCtAuth : execElfCtEq32 sampleElfMem (UInt64.ofNat 0x140) sampleAuthPin = true := by
+    rw [execElfCtEq32_spec (pinned := sampleAuthPin) rfl (by omega) hPinAuth]; rfl
+  have hQCert : verifyFourLayerQuorumCert sampleQuorumCertConfig 3 samplePkPin msg1 forgedReq = true := by
+    apply verifyFourLayerQuorumCert_eq_true rfl (by decide) (by decide)
+    intro e he
+    dsimp only [forgedReq, mkSampleQuorumCert, quorum1, List.map] at he
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at he
+    rcases he with rfl | rfl | rfl
+    · exact ⟨sampleValidatorAuthKey 1, rfl, rfl, rfl⟩
+    · exact ⟨sampleValidatorAuthKey 2, rfl, rfl, rfl⟩
+    · exact ⟨sampleValidatorAuthKey 3, rfl, rfl, rfl⟩
+  have hBginFalse : verifySessionBginBatch sampleBginAlpha sampleBginOffsets [forgedZeroWire] = false := by
+    unfold verifySessionBginBatch verifySessionBginWire bginRelationHolds lookupBginKeyOffset
+      sampleBginAlpha sampleBginOffsets
+    dsimp only [forgedZeroWire, List.all, List.any, List.find?, List.isEmpty, List.map]
+    rw [towerMul_one 7 (towerX 7)]
+    decide
+  have hMissingWireFalse :
+      verifySessionBginBatch sampleBginAlpha sampleBginOffsets [missingWire] = false := by
+    unfold verifySessionBginBatch sampleBginAlpha sampleBginOffsets
+    dsimp only [missingWire, List.all, List.any, List.isEmpty, List.map]
+    decide
+  have hPreCutFalse :
+      verifyPreCutTranscript (Goldilocks.ofNat 0)
+        [(1, op1.committedB0), (2, op2.committedB0), (3, op3.committedB0)]
+        sampleBginAlpha sampleBginOffsets quorum1 [op1, op2, op3] [forgedZeroWire] = false := by
+    unfold verifyPreCutTranscript
+    rw [hBginFalse, Bool.and_false]
+  have hOutcome :
+      M1.step s1₀ forgedReq = none ∧
+      (M1.errStep s1₀ forgedReq).cutPoisoned = true ∧
+      (∀ i : Nat, i < 32 →
+        (M1.errStep s1₀ forgedReq).mem (UInt64.ofNat 0x180 + UInt64.ofNat i) = 0) := by
+    dsimp only [M1, layer1CompiledElfMachine, PartyMachine.ofOutcome, s1₀, forgedReq, tx1]
+    rw [hCtPol, hCtAuth, hQCert, hPreCutFalse]
+    rw [ite_eq_right (show ¬ ((false || false || !true) = true) by decide)]
+    rw [ite_eq_right (show ¬ (((7 : UInt64) != (7 : UInt64)) = true) by decide)]
+    rw [ite_eq_right (show ¬ ((!true) = true) by decide)]
+    rw [ite_eq_right (show ¬ ((!true) = true) by decide)]
+    rw [ite_eq_right (fun hn : ¬ (sampleRecipient ∈ [sampleRecipient]) => hn (.head _))]
+    rw [ite_eq_right (show ¬ ¬ ((40 : UInt64).toNat ≤ (60 : UInt64).toNat) by decide)]
+    rw [ite_eq_right (show ¬ ¬ ((40 : UInt64).toNat ≤ ((100 : UInt64) - (0 : UInt64)).toNat) by decide)]
+    rw [ite_eq_right (show ¬ (u64MemBool 10 [] = true) by decide)]
+    rw [ite_eq_right (show ¬ ((!true) = true) by decide)]
+    rw [decide_eq_true (rfl : samplePkPin = samplePkPin)]
+    rw [ite_eq_right (show ¬ ((!(true && ((0 : Nat) == 0))) = true) by decide)]
+    simp only [Bool.not_false, ↓reduceIte]
+    exact ⟨rfl, rfl, (execElfMemzeroShare32_spec sampleElfMem).1⟩
+  exact ⟨hZeroAlpha, sampleHonestBginWires_ok, hBginFalse, hMissingWireFalse,
+    hOutcome.1, hOutcome.2.1, hOutcome.2.2⟩
+
+/-- **`#tooth` Session-Gate Refutation 2 (`tooth_unregistered_round1_commitment_rejected`)**:
+    1. A self-consistent fresh opening (`verifyRound1Opening = true`) submitted with empty
+       `storedRound1Commits = []` is rejected,
+    2. A self-consistent fresh opening for quorum member `1` absent from the stored batch
+       `[(2, c2), (3, c3), (0, c0)]` is rejected (`step = none`, `cutPoisoned = true`, and
+       `[0x180, 0x1A0)` wiped),
+    3. Replaying a stored Session-`0` commitment under `activeSessionTag = 1` is rejected. -/
+theorem tooth_unregistered_round1_commitment_rejected :
+    let op1 := mkSampleRound1Opening 11 22 0 1 1000
+    let op2 := mkSampleRound1Opening 12 23 0 2 2000
+    let op3 := mkSampleRound1Opening 13 24 0 3 3000
+    let op0 := mkSampleRound1Opening 14 25 0 0 4000
+    let quorum1 : List (Fin 4) := [⟨1, by decide⟩, ⟨2, by decide⟩, ⟨3, by decide⟩]
+    let wrongStored : List (Nat × Lane4) :=
+      [(2, op2.committedB0), (3, op3.committedB0), (0, op0.committedB0)]
+    let rightStored : List (Nat × Lane4) :=
+      [(1, op1.committedB0), (2, op2.committedB0), (3, op3.committedB0)]
+    let tx1 : MirTxIntent := ⟨sampleRecipient, 40, 7, samplePolPin, sampleAuthPin, 10, 0⟩
+    let msg1 := encodeTransactionIntent tx1.toTransactionIntent
+    let unregReq : FourLayerReq 4 :=
+      { tx := tx1
+        reqEpoch := 0
+        quorum := quorum1
+        quorumCert := mkSampleQuorumCert quorum1 0 msg1
+        round1Openings := [op1, op2, op3]
+        round2Wires := sampleHonestBginWires }
+    let s1Unreg : Layer1ElfState :=
+      { mem := sampleElfMem
+        windowId := 7
+        velocityWindowCap := 100
+        accumulatedSpend := 0
+        burnedNonces := []
+        allowedRecipients := [sampleRecipient]
+        perTxCap := 60
+        belt := ⟨samplePkPin, 0, none, false⟩
+        cutPoisoned := false
+        sharePresent := true
+        activeSessionTag := Goldilocks.ofNat 0
+        storedRound1Commits := wrongStored
+        verifierBginAlpha := sampleBginAlpha
+        verifierBginKeyOffsets := sampleBginOffsets
+        quorumCertConfig := sampleQuorumCertConfig }
+    let M1 := layer1CompiledElfMachine (n := 4) 3 samplePkPin
+      (fun m msg => signFromCustodianShare1WithPeers (readShareMem32 m) msg)
+    verifyRound1Opening op1 = true ∧
+    verifySessionRound1Openings (Goldilocks.ofNat 0) [] quorum1 [op1, op2, op3] = false ∧
+    verifySessionRound1Openings (Goldilocks.ofNat 0) wrongStored quorum1 [op1, op2, op3] = false ∧
+    verifySessionRound1Openings (Goldilocks.ofNat 1) rightStored quorum1 [op1, op2, op3] = false ∧
+    M1.step s1Unreg unregReq = none ∧
+    (M1.errStep s1Unreg unregReq).cutPoisoned = true ∧
+    (∀ i : Nat, i < 32 →
+      (M1.errStep s1Unreg unregReq).mem (UInt64.ofNat 0x180 + UInt64.ofNat i) = 0) := by
+  intro op1 op2 op3 op0 quorum1 wrongStored rightStored tx1 msg1 unregReq s1Unreg M1
+  have hVerOp1 : verifyRound1Opening op1 = true := verifyRound1Opening_of_eq rfl
+  have hEmptyFalse :
+      verifySessionRound1Openings (Goldilocks.ofNat 0) [] quorum1 [op1, op2, op3] = false := rfl
+  have hNotMem1 : (1, op1.committedB0) ∉ wrongStored.take 3 := by
+    intro hMem
+    dsimp only [wrongStored, List.take] at hMem
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hMem
+    rcases hMem with hEq | hEq | hEq
+    · injection hEq with hNat _; omega
+    · injection hEq with hNat _; omega
+    · injection hEq with hNat _; omega
+  have hWrongStoredFalse :
+      verifySessionRound1Openings (Goldilocks.ofNat 0) wrongStored quorum1 [op1, op2, op3] = false := by
+    unfold verifySessionRound1Openings
+    dsimp only
+    have hAllF :
+        ([op1, op2, op3].all (fun op =>
+          decide (op.sessionTag = Goldilocks.ofNat 0) &&
+          decide ((op.partyId.val, op.committedB0) ∈ wrongStored.take quorum1.length) &&
+          verifyRound1Opening op)) = false := by
+      dsimp only [quorum1, List.length, List.all]
+      have hDecF : decide ((op1.partyId.val, op1.committedB0) ∈ wrongStored.take 3) = false :=
+        decide_eq_false hNotMem1
+      rw [hDecF]
+      simp
+    rw [hAllF, Bool.and_false]
+  have hWrongSessionFalse :
+      verifySessionRound1Openings (Goldilocks.ofNat 1) rightStored quorum1 [op1, op2, op3] = false := by
+    unfold verifySessionRound1Openings
+    dsimp only
+    have hAllF :
+        ([op1, op2, op3].all (fun op =>
+          decide (op.sessionTag = Goldilocks.ofNat 1) &&
+          decide ((op.partyId.val, op.committedB0) ∈ rightStored.take quorum1.length) &&
+          verifyRound1Opening op)) = false := by
+      dsimp only [List.all]
+      have hTagF : decide (op1.sessionTag = Goldilocks.ofNat 1) = false := by decide
+      rw [hTagF]
+      simp
+    rw [hAllF, Bool.and_false]
+  obtain ⟨hPinPol, hPinAuth, _⟩ := sampleElfMem_pins
+  have hCtPol : execElfCtEq32 sampleElfMem (UInt64.ofNat 0x100) samplePolPin = true := by
+    rw [execElfCtEq32_spec (pinned := samplePolPin) rfl (by omega) hPinPol]; rfl
+  have hCtAuth : execElfCtEq32 sampleElfMem (UInt64.ofNat 0x140) sampleAuthPin = true := by
+    rw [execElfCtEq32_spec (pinned := sampleAuthPin) rfl (by omega) hPinAuth]; rfl
+  have hQCert : verifyFourLayerQuorumCert sampleQuorumCertConfig 3 samplePkPin msg1 unregReq = true := by
+    apply verifyFourLayerQuorumCert_eq_true rfl (by decide) (by decide)
+    intro e he
+    dsimp only [unregReq, mkSampleQuorumCert, quorum1, List.map] at he
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at he
+    rcases he with rfl | rfl | rfl
+    · exact ⟨sampleValidatorAuthKey 1, rfl, rfl, rfl⟩
+    · exact ⟨sampleValidatorAuthKey 2, rfl, rfl, rfl⟩
+    · exact ⟨sampleValidatorAuthKey 3, rfl, rfl, rfl⟩
+  have hPreCutFalse :
+      verifyPreCutTranscript (Goldilocks.ofNat 0) wrongStored sampleBginAlpha sampleBginOffsets
+        quorum1 [op1, op2, op3] sampleHonestBginWires = false := by
+    unfold verifyPreCutTranscript
+    rw [hWrongStoredFalse, Bool.false_and]
+  have hOutcome :
+      M1.step s1Unreg unregReq = none ∧
+      (M1.errStep s1Unreg unregReq).cutPoisoned = true ∧
+      (∀ i : Nat, i < 32 →
+        (M1.errStep s1Unreg unregReq).mem (UInt64.ofNat 0x180 + UInt64.ofNat i) = 0) := by
+    dsimp only [M1, layer1CompiledElfMachine, PartyMachine.ofOutcome, s1Unreg, unregReq, tx1]
+    rw [hCtPol, hCtAuth, hQCert, hPreCutFalse]
+    rw [ite_eq_right (show ¬ ((false || false || !true) = true) by decide)]
+    rw [ite_eq_right (show ¬ (((7 : UInt64) != (7 : UInt64)) = true) by decide)]
+    rw [ite_eq_right (show ¬ ((!true) = true) by decide)]
+    rw [ite_eq_right (show ¬ ((!true) = true) by decide)]
+    rw [ite_eq_right (fun hn : ¬ (sampleRecipient ∈ [sampleRecipient]) => hn (.head _))]
+    rw [ite_eq_right (show ¬ ¬ ((40 : UInt64).toNat ≤ (60 : UInt64).toNat) by decide)]
+    rw [ite_eq_right (show ¬ ¬ ((40 : UInt64).toNat ≤ ((100 : UInt64) - (0 : UInt64)).toNat) by decide)]
+    rw [ite_eq_right (show ¬ (u64MemBool 10 [] = true) by decide)]
+    rw [ite_eq_right (show ¬ ((!true) = true) by decide)]
+    rw [decide_eq_true (rfl : samplePkPin = samplePkPin)]
+    rw [ite_eq_right (show ¬ ((!(true && ((0 : Nat) == 0))) = true) by decide)]
+    simp only [Bool.not_false, ↓reduceIte]
+    exact ⟨rfl, rfl, (execElfMemzeroShare32_spec sampleElfMem).1⟩
+  exact ⟨hVerOp1, hEmptyFalse, hWrongStoredFalse, hWrongSessionFalse,
+    hOutcome.1, hOutcome.2.1, hOutcome.2.2⟩
+
+/-- **`#tooth` Session-Gate Refutation 3 (`tooth_unauthenticated_quorum_member_rejected`)**:
+    Listing an honest party (`1`) in `req.quorum = [0, 1, 2]` either (a) without a matching entry
+    in `req.quorumCert` or (b) with an unauthenticated/forged `ackTag := []` causes
+    `verifyFourLayerQuorumCert = false` and immediate rejection (`step = none`) at both Layer 1
+    (`layer1CompiledElfMachine`) and Layer 4 (`layer4IdealTsigMachine`). -/
+theorem tooth_unauthenticated_quorum_member_rejected :
+    let corrupt : List (Fin 4) := [⟨0, by decide⟩]
+    let quorum2 : List (Fin 4) := [⟨0, by decide⟩, ⟨1, by decide⟩, ⟨2, by decide⟩]
+    let op0 := mkSampleRound1Opening 31 41 0 0 5000
+    let op1 := mkSampleRound1Opening 32 42 0 1 6000
+    let op2 := mkSampleRound1Opening 33 43 0 2 7000
+    let tx1 : MirTxIntent := ⟨sampleRecipient, 40, 7, samplePolPin, sampleAuthPin, 10, 0⟩
+    let msg1 := encodeTransactionIntent tx1.toTransactionIntent
+    let missingCertReq : FourLayerReq 4 :=
+      { tx := tx1
+        reqEpoch := 0
+        quorum := quorum2
+        quorumCert :=
+          [(⟨0, by decide⟩, computeValidatorAckTag (sampleValidatorAuthKey 0) 0 0 msg1),
+           (⟨2, by decide⟩, computeValidatorAckTag (sampleValidatorAuthKey 2) 2 0 msg1)]
+        round1Openings := [op0, op1, op2]
+        round2Wires := sampleHonestBginWires }
+    let forgedTagReq : FourLayerReq 4 :=
+      { tx := tx1
+        reqEpoch := 0
+        quorum := quorum2
+        quorumCert :=
+          [(⟨0, by decide⟩, computeValidatorAckTag (sampleValidatorAuthKey 0) 0 0 msg1),
+           (⟨1, by decide⟩, []),
+           (⟨2, by decide⟩, computeValidatorAckTag (sampleValidatorAuthKey 2) 2 0 msg1)]
+        round1Openings := [op0, op1, op2]
+        round2Wires := sampleHonestBginWires }
+    let s1₀ : Layer1ElfState :=
+      { mem := sampleElfMem
+        windowId := 7
+        velocityWindowCap := 100
+        accumulatedSpend := 0
+        burnedNonces := []
+        allowedRecipients := [sampleRecipient]
+        perTxCap := 60
+        belt := ⟨samplePkPin, 0, none, false⟩
+        cutPoisoned := false
+        sharePresent := true
+        activeSessionTag := Goldilocks.ofNat 0
+        storedRound1Commits := [(0, op0.committedB0), (1, op1.committedB0), (2, op2.committedB0)]
+        verifierBginAlpha := sampleBginAlpha
+        verifierBginKeyOffsets := sampleBginOffsets
+        quorumCertConfig := sampleQuorumCertConfig }
+    let pol4₀ : StatefulPolicyGuard :=
+      { window_id := 7
+        velocity_window_cap := 100
+        accumulated_spend := 0
+        burned_intent_nonces := []
+        pinned_policy_digest := samplePolPin
+        pinned_authority_digest := sampleAuthPin
+        allowed_recipients := [sampleRecipient]
+        per_tx_cap := 60 }
+    let s4₀ : Layer4IdealState (List UInt8) :=
+      { policy := pol4₀
+        ideal := ⟨⟨samplePkPin, 3, 4, [0], [], []⟩, initWalLatchState samplePkPin, 0⟩
+        activeSessionTag := Goldilocks.ofNat 0
+        storedRound1Commits := [(0, op0.committedB0), (1, op1.committedB0), (2, op2.committedB0)]
+        verifierBginAlpha := sampleBginAlpha
+        verifierBginKeyOffsets := sampleBginOffsets
+        quorumCertConfig := sampleQuorumCertConfig }
+    let M1 := layer1CompiledElfMachine (n := 4) 3 samplePkPin
+      (fun m msg => signFromCustodianShare1WithPeers (readShareMem32 m) msg)
+    let M4 := layer4IdealTsigMachine (PK := List UInt8) (n := 4) corrupt id
+      (fun msg => poseidon2TagBytes sampleSecretKeyBytes msg)
+    verifyFourLayerQuorumCert sampleQuorumCertConfig 3 samplePkPin msg1 missingCertReq = false ∧
+    verifyFourLayerQuorumCert sampleQuorumCertConfig 3 samplePkPin msg1 forgedTagReq = false ∧
+    M1.step s1₀ missingCertReq = none ∧
+    M1.step s1₀ forgedTagReq = none ∧
+    M4.step s4₀ missingCertReq = none ∧
+    M4.step s4₀ forgedTagReq = none := by
+  intro corrupt quorum2 op0 op1 op2 tx1 msg1 missingCertReq forgedTagReq s1₀ pol4₀ s4₀ M1 M4
+  have hMissingFalse :
+      verifyFourLayerQuorumCert sampleQuorumCertConfig 3 samplePkPin msg1 missingCertReq = false := by
+    unfold verifyFourLayerQuorumCert
+    dsimp only
+    have hSignersF :
+        decide (BeltLatchCommitReq.signers
+          ⟨samplePkPin, missingCertReq.reqEpoch, msg1, ByteArray.empty, missingCertReq.quorumCert⟩ =
+          missingCertReq.quorum) = false := by decide
+    rw [hSignersF]
+    rfl
+  have hEmptyAckNe : [] ≠ computeValidatorAckTag (sampleValidatorAuthKey 1) 1 0 msg1 := by
+    intro hEq
+    have hLen := congrArg List.length hEq
+    unfold computeValidatorAckTag at hLen
+    rw [poseidon2Hash32_length] at hLen
+    cases hLen
+  have hForgedAck1False :
+      verifyValidatorAck sampleQuorumCertConfig (⟨1, by decide⟩ : Fin 4) 0 msg1 [] = false := by
+    unfold verifyValidatorAck
+    dsimp only
+    have hLk : lookupValidatorAuthKey sampleQuorumCertConfig.validatorAuthKeys 1 =
+        some (sampleValidatorAuthKey 1) := rfl
+    rw [hLk]
+    dsimp only
+    have hTagF : decide ([] = computeValidatorAckTag (sampleValidatorAuthKey 1) 1 0 msg1) = false :=
+      decide_eq_false hEmptyAckNe
+    rw [hTagF, Bool.and_false]
+  have hForgedFalse :
+      verifyFourLayerQuorumCert sampleQuorumCertConfig 3 samplePkPin msg1 forgedTagReq = false := by
+    unfold verifyFourLayerQuorumCert beltCertAuthenticated
+    dsimp only
+    have hAllF :
+        forgedTagReq.quorumCert.all (fun e =>
+          verifyValidatorAck sampleQuorumCertConfig e.1 forgedTagReq.reqEpoch msg1 e.2) = false := by
+      dsimp only [forgedTagReq, List.all]
+      rw [hForgedAck1False]
+      simp
+    rw [hAllF]
+    simp
+  obtain ⟨hPinPol, hPinAuth, _⟩ := sampleElfMem_pins
+  have hCtPol : execElfCtEq32 sampleElfMem (UInt64.ofNat 0x100) samplePolPin = true := by
+    rw [execElfCtEq32_spec (pinned := samplePolPin) rfl (by omega) hPinPol]; rfl
+  have hCtAuth : execElfCtEq32 sampleElfMem (UInt64.ofNat 0x140) sampleAuthPin = true := by
+    rw [execElfCtEq32_spec (pinned := sampleAuthPin) rfl (by omega) hPinAuth]; rfl
+  have hM1Rej : ∀ req : FourLayerReq 4,
+      req.tx = tx1 →
+      verifyFourLayerQuorumCert sampleQuorumCertConfig 3 samplePkPin msg1 req = false →
+      M1.step s1₀ req = none := by
+    intro req hTx hQF
+    dsimp only [M1, layer1CompiledElfMachine, PartyMachine.ofOutcome, s1₀]
+    rw [hTx]
+    dsimp only [tx1, msg1] at hQF ⊢
+    rw [hCtPol, hCtAuth, hQF]
+    rw [ite_eq_right (show ¬ ((false || false || !true) = true) by decide)]
+    rw [ite_eq_right (show ¬ (((7 : UInt64) != (7 : UInt64)) = true) by decide)]
+    rw [ite_eq_right (show ¬ ((!true) = true) by decide)]
+    rw [ite_eq_right (show ¬ ((!true) = true) by decide)]
+    rw [ite_eq_right (fun hn : ¬ (sampleRecipient ∈ [sampleRecipient]) => hn (.head _))]
+    rw [ite_eq_right (show ¬ ¬ ((40 : UInt64).toNat ≤ (60 : UInt64).toNat) by decide)]
+    rw [ite_eq_right (show ¬ ¬ ((40 : UInt64).toNat ≤ ((100 : UInt64) - (0 : UInt64)).toNat) by decide)]
+    rw [ite_eq_right (show ¬ (u64MemBool 10 [] = true) by decide)]
+    simp only [Bool.not_false, ↓reduceIte]
+  have hPol4Ok :
+      policyGuardStep pol4₀ tx1.toTransactionIntent =
+        .accepted
+          { pol4₀ with accumulated_spend := 40, burned_intent_nonces := [10] }
+          ⟨tx1.toTransactionIntent, msg1⟩ := by
+    unfold policyGuardStep
+    dsimp only [pol4₀, tx1, MirTxIntent.toTransactionIntent, msg1]
+    rw [ite_eq_right (show ¬ ((7 != 7) = true) by decide)]
+    rw [ite_eq_right (show ¬ ((samplePolPin != samplePolPin) = true) by decide)]
+    rw [ite_eq_right (show ¬ ((sampleAuthPin != sampleAuthPin) = true) by decide)]
+    rw [ite_eq_right (fun hn : ¬ (sampleRecipient ∈ [sampleRecipient]) => hn (.head _))]
+    rw [ite_eq_right (show ¬ ¬ ((40 : UInt64).toNat ≤ 60) by decide)]
+    rw [ite_eq_right (show ¬ ¬ (0 + (40 : UInt64).toNat ≤ 100) by decide)]
+    rw [ite_eq_right (show ¬ ((10 : UInt64).toNat ∈ ([] : List Nat)) by decide)]
+    rfl
+  have hM4Rej : ∀ req : FourLayerReq 4,
+      req.tx = tx1 →
+      verifyFourLayerQuorumCert sampleQuorumCertConfig 3 samplePkPin msg1 req = false →
+      M4.step s4₀ req = none := by
+    intro req hTx hQF
+    dsimp only [M4, layer4IdealTsigMachine, PartyMachine.ofOutcome, s4₀, initWalLatchState]
+    rw [hTx, ite_eq_right (by decide : ¬ (false = true)), hPol4Ok]
+    dsimp only
+    rw [hQF, Bool.false_and]
+    rfl
+  exact ⟨hMissingFalse, hForgedFalse,
+    hM1Rej missingCertReq rfl hMissingFalse,
+    hM1Rej forgedTagReq rfl hForgedFalse,
+    hM4Rej missingCertReq rfl hMissingFalse,
+    hM4Rej forgedTagReq rfl hForgedFalse⟩
 
 /-- **Non-Vacuity Witness (`inhabited_four_layer_chain`)**:
-    Exhibits a concrete `(n = 4, q = 3, f = 1)` 4-layer cluster (`2 * 3 > 4 + 1`) executing a
-    2-turn multi-quorum trace (`Q₁ = [1, 2, 3]` spending `40`, `Q₂ = [0, 1, 2]` spending `55`,
-    total `95 ≤ 100` despite `callerEchoedSpent = 0`) through `layer1CompiledElfMachine`
-    (running real decoded `qsag_asm_ct_eq_32_x86_64`) related to `layer4IdealTsigMachine` via
-    `isa_to_mir_to_protocol_to_ideal_sim`. -/
+    Exhibits a concrete `(n = 4, q = 3, f = 1)` 4-layer cluster (`2 * 3 > 4 + 1`) dealt 4 distinct
+    degree-2 Shamir shares (`sampleDealtShares`, proved 1-share uniform-bijective by
+    `singleShare_uniform_bijection` and distinct from `sampleSecretKeyBytes` by
+    `sampleShares_distinct_and_reconstruct`), executing a 2-turn multi-quorum trace
+    (`Q₁ = [1, 2, 3]` spending `40`, `Q₂ = [0, 1, 2]` spending `55`, total `95 ≤ 100` despite
+    `callerEchoedSpent = 0`) with `§4`-authenticated quorum certificates, 30-round blinded
+    `Poseidon2` Round-1 commitments, verifier-held `BGIN19` MAC keys, and genuine Lagrange
+    reconstruction matching `oracleFn`. -/
 theorem inhabited_four_layer_chain :
     let corrupt : List (Fin 4) := [⟨0, by decide⟩]
-    let signFn : List UInt8 → List UInt8 → ByteArray := poseidon2TagBytes
-    let dealt : Nat → Option (List UInt8) := fun _ => some sampleSecretShare
+    let signFn : List UInt8 → List UInt8 → ByteArray := signFromCustodianShare1WithPeers
+    let dealt : Nat → Option (List UInt8) := sampleDealtShares
     let assembleFn : (Nat → Option (List UInt8)) → List UInt8 → ByteArray :=
-      fun shMap msg => poseidon2TagBytes ((shMap 1).getD []) msg
-    let oracleFn : List UInt8 → ByteArray := fun msg => poseidon2TagBytes sampleSecretShare msg
+      assembleShamirThresholdSig
+    let oracleFn : List UInt8 → ByteArray :=
+      fun msg => poseidon2TagBytes sampleSecretKeyBytes msg
+    let hSigM : ∀ msg : List UInt8, assembleFn dealt msg = signFn sampleCustodianShare1 msg :=
+      sampleShares_distinct_and_reconstruct.2.2.2.2.2.2.2.1
+    let hOraE : ∀ msg : List UInt8, assembleFn dealt msg = oracleFn msg :=
+      sampleShares_distinct_and_reconstruct.2.2.2.2.2.2.2.2
     let sim := isa_to_mir_to_protocol_to_ideal_sim
       (PK := List UInt8) (n := 4) (q := 3) (f := 1)
-      corrupt id samplePkPin dealt sampleSecretShare signFn assembleFn oracleFn
+      corrupt id samplePkPin dealt sampleCustodianShare1 signFn assembleFn oracleFn
       (by decide) (by decide) (by decide) (by decide) (by decide)
-      (fun _ => rfl) (fun _ => rfl)
+      hSigM hOraE
     ∃ (s1₀ s1Final : Layer1ElfState)
       (s4₀ : Layer4IdealState (List UInt8))
       (trace : List (FourLayerReq 4 × FourLayerOut)),
       trace.length = 2 ∧
+      dealt 0 ≠ dealt 1 ∧
+      dealt 1 ≠ dealt 2 ∧
+      dealt 2 ≠ dealt 3 ∧
+      dealt 1 ≠ some sampleSecretKeyBytes ∧
       sim.Rel s1₀ s4₀ ∧
       (layer1CompiledElfMachine (n := 4) 3 samplePkPin
         (fun m msg => signFn (readShareMem32 m) msg)).ValidTrace s1₀ trace s1Final ∧
       FourLayerTraceSafe s4₀.policy.velocity_window_cap corrupt trace := by
-  intro corrupt signFn dealt assembleFn oracleFn sim
+  intro corrupt signFn dealt assembleFn oracleFn hSigM hOraE sim
+  let op1_s0 := mkSampleRound1Opening 11 22 0 1 1000
+  let op2_s0 := mkSampleRound1Opening 12 23 0 2 2000
+  let op3_s0 := mkSampleRound1Opening 13 24 0 3 3000
+  let op0_s1 := mkSampleRound1Opening 31 41 1 0 4000
+  let op1_s1 := mkSampleRound1Opening 32 42 1 1 5000
+  let op2_s1 := mkSampleRound1Opening 33 43 1 2 6000
+  let stored₀ : List (Nat × Lane4) :=
+    [(1, op1_s0.committedB0), (2, op2_s0.committedB0), (3, op3_s0.committedB0),
+     (0, op0_s1.committedB0), (1, op1_s1.committedB0), (2, op2_s1.committedB0)]
+  let stored₁ : List (Nat × Lane4) :=
+    [(0, op0_s1.committedB0), (1, op1_s1.committedB0), (2, op2_s1.committedB0)]
   let belt0 : MirBeltLatchState := ⟨samplePkPin, 0, none, false⟩
   let s1₀ : Layer1ElfState :=
     { mem := sampleElfMem
@@ -4764,7 +5565,12 @@ theorem inhabited_four_layer_chain :
       perTxCap := 60
       belt := belt0
       cutPoisoned := false
-      sharePresent := true }
+      sharePresent := true
+      activeSessionTag := Goldilocks.ofNat 0
+      storedRound1Commits := stored₀
+      verifierBginAlpha := sampleBginAlpha
+      verifierBginKeyOffsets := sampleBginOffsets
+      quorumCertConfig := sampleQuorumCertConfig }
   let pol2₀ : MirPolicyGuardState :=
     { windowId := 7
       velocityWindowCap := 100
@@ -4778,66 +5584,121 @@ theorem inhabited_four_layer_chain :
     { policy := pol2₀
       belt := belt0
       cut := MirRssCutSession.round1Committed zeroBytes32 zeroBytes32
-      shareBytes := some sampleSecretShare }
+      shareBytes := some sampleCustodianShare1
+      activeSessionTag := Goldilocks.ofNat 0
+      storedRound1Commits := stored₀
+      verifierBginAlpha := sampleBginAlpha
+      verifierBginKeyOffsets := sampleBginOffsets
+      quorumCertConfig := sampleQuorumCertConfig }
   let tsig₀ : IdealTsigState (List UInt8) (List UInt8) :=
     ⟨samplePkPin, 3, 4, [0], [], []⟩
   let wal₀ : WalLatchState := initWalLatchState samplePkPin
   let s3₀ : Layer3ProtocolState (List UInt8) :=
     { policy := pol2₀.toStatefulPolicyGuard
-      cluster := ⟨tsig₀, wal₀, 0, dealt⟩ }
+      cluster := ⟨tsig₀, wal₀, 0, dealt⟩
+      activeSessionTag := Goldilocks.ofNat 0
+      storedRound1Commits := stored₀
+      verifierBginAlpha := sampleBginAlpha
+      verifierBginKeyOffsets := sampleBginOffsets
+      quorumCertConfig := sampleQuorumCertConfig }
   let s4₀ : Layer4IdealState (List UInt8) :=
     { policy := pol2₀.toStatefulPolicyGuard
-      ideal := ⟨tsig₀, wal₀, 0⟩ }
+      ideal := ⟨tsig₀, wal₀, 0⟩
+      activeSessionTag := Goldilocks.ofNat 0
+      storedRound1Commits := stored₀
+      verifierBginAlpha := sampleBginAlpha
+      verifierBginKeyOffsets := sampleBginOffsets
+      quorumCertConfig := sampleQuorumCertConfig }
   obtain ⟨hPinPol, hPinAuth, hReadSh⟩ := sampleElfMem_pins
   have hRel12 : (sim_layer1_to_layer2 (n := 4) 3 samplePkPin signFn).Rel s1₀ s2₀ :=
     ⟨rfl, rfl, hPinPol, hPinAuth, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl,
+      ⟨rfl, rfl, rfl, rfl, rfl⟩,
       fun _ _ _ => congrArg some hReadSh.symm, fun hP => absurd hP (by decide)⟩
   have hRel23 :
       (sim_layer2_to_layer3 (PK := List UInt8) (n := 4) (q := 3) (f := 1)
-        corrupt id samplePkPin dealt sampleSecretShare signFn assembleFn
-        (by decide) (by decide) (by decide) (by decide) (by decide)
-        (fun _ => by dsimp only [assembleFn, dealt, signFn]; rfl)).Rel s2₀ s3₀ :=
-    ⟨by decide, rfl, rfl, rfl, rfl, ⟨rfl, rfl⟩, rfl, rfl, rfl, rfl, rfl, fun _ => ⟨rfl, rfl⟩⟩
+        corrupt id samplePkPin dealt sampleCustodianShare1 signFn assembleFn
+        (by decide) (by decide) (by decide) (by decide) (by decide) hSigM).Rel s2₀ s3₀ :=
+    ⟨by decide, rfl, rfl, rfl, rfl, ⟨rfl, rfl⟩, rfl, rfl, rfl, rfl, rfl,
+      ⟨rfl, rfl, rfl, rfl, rfl⟩, fun _ => ⟨rfl, rfl⟩⟩
   have hRel34 :
-      (sim_layer3_to_layer4 corrupt id dealt assembleFn oracleFn
-        (fun _ => by dsimp only [assembleFn, dealt, oracleFn]; rfl)).Rel s3₀ s4₀ :=
-    ⟨rfl, rfl, rfl, rfl, fun _ => rfl⟩
+      (sim_layer3_to_layer4 corrupt id dealt assembleFn oracleFn hOraE).Rel s3₀ s4₀ :=
+    ⟨rfl, rfl, rfl, rfl, ⟨rfl, rfl, rfl, rfl, rfl⟩, fun _ => rfl⟩
   have hRel14 : sim.Rel s1₀ s4₀ := ⟨s2₀, hRel12, s3₀, hRel23, hRel34⟩
-  let validOpening1 : Round1Opening :=
-    { committedB0 := computeRound1CommitB0 (Goldilocks.ofNat 11) (Goldilocks.ofNat 22)
-        (Goldilocks.ofNat 0) (Goldilocks.ofNat 1)
-      nonceLimb := Goldilocks.ofNat 11
-      maskLimb := Goldilocks.ofNat 22
-      sessionTag := Goldilocks.ofNat 0
-      partyId := Goldilocks.ofNat 1 }
-  let validOpening2 : Round1Opening :=
-    { committedB0 := computeRound1CommitB0 (Goldilocks.ofNat 33) (Goldilocks.ofNat 44)
-        (Goldilocks.ofNat 1) (Goldilocks.ofNat 2)
-      nonceLimb := Goldilocks.ofNat 33
-      maskLimb := Goldilocks.ofNat 44
-      sessionTag := Goldilocks.ofNat 1
-      partyId := Goldilocks.ofNat 2 }
-  let validBgin : List BginWireRelation :=
-    [{ xWire := towerOne 7, macShare := towerOne 7, keyOffset := towerZero 7, alpha := towerOne 7 }]
+  let quorum1 : List (Fin 4) := [⟨1, by decide⟩, ⟨2, by decide⟩, ⟨3, by decide⟩]
+  let quorum2 : List (Fin 4) := [⟨0, by decide⟩, ⟨1, by decide⟩, ⟨2, by decide⟩]
+  let tx1 : MirTxIntent := ⟨sampleRecipient, 40, 7, samplePolPin, sampleAuthPin, 10, 0⟩
+  let tx2 : MirTxIntent := ⟨sampleRecipient, 55, 7, samplePolPin, sampleAuthPin, 11, 0⟩
+  let intent1 := tx1.toTransactionIntent
+  let msg1 := encodeTransactionIntent intent1
+  let intent2 := tx2.toTransactionIntent
+  let msg2 := encodeTransactionIntent intent2
   let req1 : FourLayerReq 4 :=
-    { tx := ⟨sampleRecipient, 40, 7, samplePolPin, sampleAuthPin, 10, 0⟩
+    { tx := tx1
       reqEpoch := 0
-      quorum := [⟨1, by decide⟩, ⟨2, by decide⟩, ⟨3, by decide⟩]
-      round1Openings := [validOpening1]
-      round2Relations := validBgin }
+      quorum := quorum1
+      quorumCert := mkSampleQuorumCert quorum1 0 msg1
+      round1Openings := [op1_s0, op2_s0, op3_s0]
+      round2Wires := sampleHonestBginWires }
   let req2 : FourLayerReq 4 :=
-    { tx := ⟨sampleRecipient, 55, 7, samplePolPin, sampleAuthPin, 11, 0⟩
+    { tx := tx2
       reqEpoch := 1
-      quorum := [⟨0, by decide⟩, ⟨1, by decide⟩, ⟨2, by decide⟩]
-      round1Openings := [validOpening2]
-      round2Relations := validBgin }
+      quorum := quorum2
+      quorumCert := mkSampleQuorumCert quorum2 1 msg2
+      round1Openings := [op0_s1, op1_s1, op2_s1]
+      round2Wires := sampleHonestBginWires }
   let M1 := layer1CompiledElfMachine (n := 4) 3 samplePkPin (fun m msg => signFn (readShareMem32 m) msg)
   let M2 := layer2MirGuardedMachine (n := 4) 3 samplePkPin signFn
-  have hPreCut1 : ¬ ((!verifyPreCutTranscript [validOpening1] validBgin) = true) := by decide
-  have hPreCut2 : ¬ ((!verifyPreCutTranscript [validOpening2] validBgin) = true) := by decide
-  let intent1 := req1.tx.toTransactionIntent
-  let msg1 := encodeTransactionIntent intent1
-  let sig1 := signFn sampleSecretShare msg1
+  have hQCert1 : verifyFourLayerQuorumCert sampleQuorumCertConfig 3 samplePkPin msg1 req1 = true := by
+    apply verifyFourLayerQuorumCert_eq_true rfl (by decide) (by decide)
+    intro e he
+    dsimp only [req1, mkSampleQuorumCert, quorum1, List.map] at he
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at he
+    rcases he with rfl | rfl | rfl
+    · exact ⟨sampleValidatorAuthKey 1, rfl, rfl, rfl⟩
+    · exact ⟨sampleValidatorAuthKey 2, rfl, rfl, rfl⟩
+    · exact ⟨sampleValidatorAuthKey 3, rfl, rfl, rfl⟩
+  have hQCert2 : verifyFourLayerQuorumCert sampleQuorumCertConfig 3 samplePkPin msg2 req2 = true := by
+    apply verifyFourLayerQuorumCert_eq_true rfl (by decide) (by decide)
+    intro e he
+    dsimp only [req2, mkSampleQuorumCert, quorum2, List.map] at he
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at he
+    rcases he with rfl | rfl | rfl
+    · exact ⟨sampleValidatorAuthKey 0, rfl, rfl, rfl⟩
+    · exact ⟨sampleValidatorAuthKey 1, rfl, rfl, rfl⟩
+    · exact ⟨sampleValidatorAuthKey 2, rfl, rfl, rfl⟩
+  have hBginOk : verifySessionBginBatch sampleBginAlpha sampleBginOffsets sampleHonestBginWires = true :=
+    sampleHonestBginWires_ok
+  have hR1Ok1 : verifySessionRound1Openings (Goldilocks.ofNat 0) stored₀ quorum1
+      [op1_s0, op2_s0, op3_s0] = true := by
+    apply verifySessionRound1Openings_eq_true rfl rfl (by decide) (by decide)
+    intro op hop
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hop
+    rcases hop with rfl | rfl | rfl
+    · exact ⟨rfl, .head _, rfl⟩
+    · exact ⟨rfl, .tail _ (.head _), rfl⟩
+    · exact ⟨rfl, .tail _ (.tail _ (.head _)), rfl⟩
+  have hR1Ok2 : verifySessionRound1Openings (Goldilocks.ofNat 1) stored₁ quorum2
+      [op0_s1, op1_s1, op2_s1] = true := by
+    apply verifySessionRound1Openings_eq_true rfl rfl (by decide) (by decide)
+    intro op hop
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hop
+    rcases hop with rfl | rfl | rfl
+    · exact ⟨rfl, .head _, rfl⟩
+    · exact ⟨rfl, .tail _ (.head _), rfl⟩
+    · exact ⟨rfl, .tail _ (.tail _ (.head _)), rfl⟩
+  have hPreCut1 :
+      verifyPreCutTranscript (Goldilocks.ofNat 0) stored₀ sampleBginAlpha sampleBginOffsets
+        quorum1 [op1_s0, op2_s0, op3_s0] sampleHonestBginWires = true := by
+    unfold verifyPreCutTranscript
+    rw [hR1Ok1, hBginOk]
+    rfl
+  have hPreCut2 :
+      verifyPreCutTranscript (Goldilocks.ofNat 1) stored₁ sampleBginAlpha sampleBginOffsets
+        quorum2 [op0_s1, op1_s1, op2_s1] sampleHonestBginWires = true := by
+    unfold verifyPreCutTranscript
+    rw [hR1Ok2, hBginOk]
+    rfl
+  let sig1 := signFn sampleCustodianShare1 msg1
   let out1 : FourLayerOut := ⟨⟨intent1, msg1⟩, 0, sig1⟩
   let pol2₁ : MirPolicyGuardState :=
     { pol2₀ with
@@ -4847,9 +5708,14 @@ theorem inhabited_four_layer_chain :
     { policy := pol2₁
       belt := { belt0 with nextEpoch := 1, latchedRecord := some (0, msg1, sig1) }
       cut := MirRssCutSession.round1Committed zeroBytes32 zeroBytes32
-      shareBytes := some sampleSecretShare }
+      shareBytes := some sampleCustodianShare1
+      activeSessionTag := Goldilocks.ofNat 1
+      storedRound1Commits := stored₁
+      verifierBginAlpha := sampleBginAlpha
+      verifierBginKeyOffsets := sampleBginOffsets
+      quorumCertConfig := sampleQuorumCertConfig }
   have hPol1 : mirPolicyStep pol2₀ req1.tx = some (pol2₁, ⟨intent1, msg1⟩) := by
-    dsimp only [mirPolicyStep, pol2₀, req1, pol2₁, intent1, msg1]
+    dsimp only [mirPolicyStep, pol2₀, req1, tx1, pol2₁, intent1, msg1]
     rw [ite_eq_right (show ¬ (((7 : UInt64) != (7 : UInt64)) = true) by decide)]
     rw [ite_eq_right (show ¬ ((samplePolPin != samplePolPin) = true) by decide)]
     rw [ite_eq_right (show ¬ ((sampleAuthPin != sampleAuthPin) = true) by decide)]
@@ -4859,19 +5725,17 @@ theorem inhabited_four_layer_chain :
     rw [ite_eq_right (show ¬ (u64MemBool 10 [] = true) by decide)]
     rfl
   have hStep2_1 : M2.step s2₀ req1 = some (s2₁, out1) := by
-    dsimp only [M2, layer2MirGuardedMachine, PartyMachine.ofOutcome, MirRssCutSession.round1Committed, s2₀, req1, belt0]
-    rw [ite_eq_right (show ¬ ((false || false || (some sampleSecretShare).isNone) = true) by decide)]
+    dsimp only [M2, layer2MirGuardedMachine, PartyMachine.ofOutcome,
+      MirRssCutSession.round1Committed, s2₀, req1, belt0]
+    rw [ite_eq_right (show ¬ ((false || false || (some sampleCustodianShare1).isNone) = true) by decide)]
     rw [hPol1]
     dsimp only
-    rw [ite_eq_right (show ¬ ((!(decide ([⟨1, by decide⟩, ⟨2, by decide⟩, ⟨3, by decide⟩] : List (Fin 4)).Nodup &&
-          decide (3 ≤ ([⟨1, by decide⟩, ⟨2, by decide⟩, ⟨3, by decide⟩] : List (Fin 4)).length))) = true) by decide)]
+    rw [hQCert1, ite_eq_right (show ¬ ((!true) = true) by decide)]
     rw [decide_eq_true (rfl : samplePkPin = samplePkPin)]
     rw [ite_eq_right (show ¬ ((!(true && ((0 : Nat) == 0))) = true) by decide)]
-    rw [ite_eq_right hPreCut1]
+    rw [hPreCut1, ite_eq_right (show ¬ ((!true) = true) by decide)]
     rfl
-  let intent2 := req2.tx.toTransactionIntent
-  let msg2 := encodeTransactionIntent intent2
-  let sig2 := signFn sampleSecretShare msg2
+  let sig2 := signFn sampleCustodianShare1 msg2
   let out2 : FourLayerOut := ⟨⟨intent2, msg2⟩, 1, sig2⟩
   let pol2₂ : MirPolicyGuardState :=
     { pol2₁ with
@@ -4881,9 +5745,14 @@ theorem inhabited_four_layer_chain :
     { policy := pol2₂
       belt := { s2₁.belt with nextEpoch := 2, latchedRecord := some (1, msg2, sig2) }
       cut := MirRssCutSession.round1Committed zeroBytes32 zeroBytes32
-      shareBytes := some sampleSecretShare }
+      shareBytes := some sampleCustodianShare1
+      activeSessionTag := Goldilocks.ofNat 2
+      storedRound1Commits := []
+      verifierBginAlpha := sampleBginAlpha
+      verifierBginKeyOffsets := sampleBginOffsets
+      quorumCertConfig := sampleQuorumCertConfig }
   have hPol2 : mirPolicyStep pol2₁ req2.tx = some (pol2₂, ⟨intent2, msg2⟩) := by
-    dsimp only [mirPolicyStep, pol2₁, pol2₀, req2, pol2₂, intent2, msg2]
+    dsimp only [mirPolicyStep, pol2₁, pol2₀, req2, tx2, pol2₂, intent2, msg2]
     rw [ite_eq_right (show ¬ (((7 : UInt64) != (7 : UInt64)) = true) by decide)]
     rw [ite_eq_right (show ¬ ((samplePolPin != samplePolPin) = true) by decide)]
     rw [ite_eq_right (show ¬ ((sampleAuthPin != sampleAuthPin) = true) by decide)]
@@ -4893,15 +5762,18 @@ theorem inhabited_four_layer_chain :
     rw [ite_eq_right (show ¬ (u64MemBool 11 [10] = true) by decide)]
     rfl
   have hStep2_2 : M2.step s2₁ req2 = some (s2₂, out2) := by
-    dsimp only [M2, layer2MirGuardedMachine, PartyMachine.ofOutcome, MirRssCutSession.round1Committed, s2₁, req2, belt0]
-    rw [ite_eq_right (show ¬ ((false || false || (some sampleSecretShare).isNone) = true) by decide)]
+    dsimp only [M2, layer2MirGuardedMachine, PartyMachine.ofOutcome,
+      MirRssCutSession.round1Committed, s2₁, req2, belt0]
+    rw [ite_eq_right (show ¬ ((false || false || (some sampleCustodianShare1).isNone) = true) by decide)]
     rw [hPol2]
     dsimp only
-    rw [ite_eq_right (show ¬ ((!(decide ([⟨0, by decide⟩, ⟨1, by decide⟩, ⟨2, by decide⟩] : List (Fin 4)).Nodup &&
-          decide (3 ≤ ([⟨0, by decide⟩, ⟨1, by decide⟩, ⟨2, by decide⟩] : List (Fin 4)).length))) = true) by decide)]
+    rw [hQCert2, ite_eq_right (show ¬ ((!true) = true) by decide)]
     rw [decide_eq_true (rfl : samplePkPin = samplePkPin)]
     rw [ite_eq_right (show ¬ ((!(true && ((1 : Nat) == 1))) = true) by decide)]
-    rw [ite_eq_right hPreCut2]
+    rw [hPreCut2, ite_eq_right (show ¬ ((!true) = true) by decide)]
+    have hTagAdv : Goldilocks.add (Goldilocks.ofNat 1) Goldilocks.one = Goldilocks.ofNat 2 :=
+      Goldilocks.ext (by decide)
+    rw [hTagAdv]
     rfl
   have hStep1_1 : ∃ s1₁, M1.step s1₀ req1 = some (s1₁, out1) ∧
       (sim_layer1_to_layer2 (n := 4) 3 samplePkPin signFn).Rel s1₁ s2₁ := by
@@ -4931,15 +5803,21 @@ theorem inhabited_four_layer_chain :
   have hTr1 : M1.ValidTrace s1₀ [(req1, out1), (req2, out2)] s1₂ :=
     .accept hS1_1 (.accept hS1_2 (.nil s1₂))
   have hSafe := (isa_to_ideal_preserves_multiturn_safety
-    corrupt id samplePkPin dealt sampleSecretShare signFn assembleFn oracleFn
+    corrupt id samplePkPin dealt sampleCustodianShare1 signFn assembleFn oracleFn
     (by decide) (by decide) (by decide) (by decide) (by decide)
-    (fun _ => by dsimp only [assembleFn, dealt, signFn]; rfl)
-    (fun _ => by dsimp only [assembleFn, dealt, oracleFn]; rfl) hRel14 hTr1).1
-  exact ⟨s1₀, s1₂, s4₀, [(req1, out1), (req2, out2)], rfl, hRel14, hTr1, hSafe⟩
+    hSigM hOraE hRel14 hTr1).1
+  obtain ⟨hD01, hD12, hD23, _, hD1Sk, _⟩ := sampleShares_distinct_and_reconstruct
+  exact ⟨s1₀, s1₂, s4₀, [(req1, out1), (req2, out2)], rfl,
+    fun h => hD01 (Option.some.inj h),
+    fun h => hD12 (Option.some.inj h),
+    fun h => hD23 (Option.some.inj h),
+    fun h => hD1Sk (Option.some.inj h),
+    hRel14, hTr1, hSafe⟩
 
 /-- Mutated Layer-1 machine replacing ONLY Link 2's authoritative `accumulatedSpend` check with
     the untrusted caller-echoed velocity `req.tx.callerEchoedSpent` while keeping real ELF
-    `ct_eq_32`, `BeltLatch` `2 * q > n + f`, and pre-cut consistency barrier intact. -/
+    `ct_eq_32`, `§4`-authenticated `BeltLatch` `2 * q > n + f`, and session-bound pre-cut
+    consistency barrier intact. -/
 def statelessPolicyLayer1Machine {n : Nat} (q : Nat) (pkDigest : List UInt8)
     (signFromShareMem : (UInt64 → UInt8) → List UInt8 → ByteArray) :
     PartyMachine Layer1ElfState (FourLayerReq n) FourLayerOut :=
@@ -4957,38 +5835,43 @@ def statelessPolicyLayer1Machine {n : Nat} (q : Nat) (pkDigest : List UInt8)
     else if ¬ (req.tx.amountUnits.toNat ≤ (s.velocityWindowCap - req.tx.callerEchoedSpent).toNat) then
       .err s ()
     else if u64MemBool req.tx.nonce s.burnedNonces then .err s ()
-    else if !(decide req.quorum.Nodup && decide (q ≤ req.quorum.length)) then .err s ()
-    else if !(decide (pkDigest = s.belt.enrolledPkDigest) && (req.reqEpoch == s.belt.nextEpoch)) then
-      .err s ()
-    else if !verifyPreCutTranscript req.round1Openings req.round2Relations then
-      .err { s with mem := execElfMemzeroShare32 s.mem,
-                    belt := { s.belt with poisoned := true },
-                    cutPoisoned := true, sharePresent := false } ()
     else
       let intent := req.tx.toTransactionIntent
       let msgBytes := encodeTransactionIntent intent
-      let sigBytes := signFromShareMem s.mem msgBytes
-      let env : ApprovedIntentEnvelope := { intent := intent, canonicalBytes := msgBytes }
-      let belt' : MirBeltLatchState :=
-        { s.belt with
-          nextEpoch := req.reqEpoch + 1
-          latchedRecord := some (req.reqEpoch, msgBytes, sigBytes) }
-      let s' : Layer1ElfState :=
-        { s with
-          burnedNonces := req.tx.nonce :: s.burnedNonces
-          belt := belt' }
-      .ok s' { envelope := env, committedEpoch := req.reqEpoch, sigBytes := sigBytes }
+      if !verifyFourLayerQuorumCert s.quorumCertConfig q pkDigest msgBytes req then .err s ()
+      else if !(decide (pkDigest = s.belt.enrolledPkDigest) && (req.reqEpoch == s.belt.nextEpoch)) then
+        .err s ()
+      else if !verifyPreCutTranscript s.activeSessionTag s.storedRound1Commits
+          s.verifierBginAlpha s.verifierBginKeyOffsets req.quorum
+          req.round1Openings req.round2Wires then
+        .err { s with mem := execElfMemzeroShare32 s.mem,
+                      belt := { s.belt with poisoned := true },
+                      cutPoisoned := true, sharePresent := false } ()
+      else
+        let sigBytes := signFromShareMem s.mem msgBytes
+        let env : ApprovedIntentEnvelope := { intent := intent, canonicalBytes := msgBytes }
+        let belt' : MirBeltLatchState :=
+          { s.belt with
+            nextEpoch := req.reqEpoch + 1
+            latchedRecord := some (req.reqEpoch, msgBytes, sigBytes) }
+        let s' : Layer1ElfState :=
+          { s with
+            burnedNonces := req.tx.nonce :: s.burnedNonces
+            belt := belt'
+            activeSessionTag := Goldilocks.add s.activeSessionTag Goldilocks.one
+            storedRound1Commits := consumeRound1Commits s.storedRound1Commits req.quorum }
+        .ok s' { envelope := env, committedEpoch := req.reqEpoch, sigBytes := sigBytes }
 
 /-- **`#tooth` Broken-Link Refutation (`tooth_stateless_policy_link_breaks_four_layer_ideal_safety`)**:
     Breaking ONLY Link 2's authoritative spend invariant (`statelessPolicyLayer1Machine` trusting
-    `callerEchoedSpent = 0` while compiled ELF `ct_eq_32`, `2 * q > n + f` `BeltLatch`, and the
-    Round-2 pre-cut barrier remain intact) admits a 2-turn trace spending `60 + 60 = 120 > 100`,
+    `callerEchoedSpent = 0` while compiled ELF `ct_eq_32`, `§4`-authenticated `BeltLatch`, and the
+    session-bound pre-cut barrier remain intact) admits a 2-turn trace spending `60 + 60 = 120 > 100`,
     violates `FourLayerTraceSafe`, is rejected by `layer4IdealTsigMachine`, and makes ANY
     `ForwardSim statelessPolicyLayer1Machine layer4IdealTsigMachine` from `(s1₀, s4₀)` impossible! -/
 theorem tooth_stateless_policy_link_breaks_four_layer_ideal_safety :
     let corrupt : List (Fin 4) := [⟨0, by decide⟩]
-    let signFn : List UInt8 → List UInt8 → ByteArray := poseidon2TagBytes
-    let oracleFn : List UInt8 → ByteArray := fun msg => poseidon2TagBytes sampleSecretShare msg
+    let signFn : List UInt8 → List UInt8 → ByteArray := signFromCustodianShare1WithPeers
+    let oracleFn : List UInt8 → ByteArray := fun msg => poseidon2TagBytes sampleSecretKeyBytes msg
     let badM1 := statelessPolicyLayer1Machine (n := 4) 3 samplePkPin
       (fun m msg => signFn (readShareMem32 m) msg)
     let M4 := layer4IdealTsigMachine (PK := List UInt8) (n := 4) corrupt id oracleFn
@@ -5000,6 +5883,17 @@ theorem tooth_stateless_policy_link_breaks_four_layer_ideal_safety :
       (∀ s4Final, ¬ M4.ValidTrace s4₀ badTrace s4Final) ∧
       (∀ sim : ForwardSim badM1 M4, sim.Rel s1₀ s4₀ → False) := by
   intro corrupt signFn oracleFn badM1 M4
+  let op1_s0 := mkSampleRound1Opening 5 9 0 1 100
+  let op2_s0 := mkSampleRound1Opening 6 10 0 2 200
+  let op3_s0 := mkSampleRound1Opening 7 11 0 3 300
+  let op1_s1 := mkSampleRound1Opening 15 19 1 1 400
+  let op2_s1 := mkSampleRound1Opening 16 20 1 2 500
+  let op3_s1 := mkSampleRound1Opening 17 21 1 3 600
+  let stored₀ : List (Nat × Lane4) :=
+    [(1, op1_s0.committedB0), (2, op2_s0.committedB0), (3, op3_s0.committedB0),
+     (1, op1_s1.committedB0), (2, op2_s1.committedB0), (3, op3_s1.committedB0)]
+  let stored₁ : List (Nat × Lane4) :=
+    [(1, op1_s1.committedB0), (2, op2_s1.committedB0), (3, op3_s1.committedB0)]
   let belt0 : MirBeltLatchState := ⟨samplePkPin, 0, none, false⟩
   let s1₀ : Layer1ElfState :=
     { mem := sampleElfMem
@@ -5011,7 +5905,12 @@ theorem tooth_stateless_policy_link_breaks_four_layer_ideal_safety :
       perTxCap := 60
       belt := belt0
       cutPoisoned := false
-      sharePresent := true }
+      sharePresent := true
+      activeSessionTag := Goldilocks.ofNat 0
+      storedRound1Commits := stored₀
+      verifierBginAlpha := sampleBginAlpha
+      verifierBginKeyOffsets := sampleBginOffsets
+      quorumCertConfig := sampleQuorumCertConfig }
   let pol4₀ : StatefulPolicyGuard :=
     { window_id := 7
       velocity_window_cap := 100
@@ -5023,46 +5922,94 @@ theorem tooth_stateless_policy_link_breaks_four_layer_ideal_safety :
       per_tx_cap := 60 }
   let s4₀ : Layer4IdealState (List UInt8) :=
     { policy := pol4₀
-      ideal := ⟨⟨samplePkPin, 3, 4, [0], [], []⟩, initWalLatchState samplePkPin, 0⟩ }
-  let validOp : Round1Opening :=
-    { committedB0 := computeRound1CommitB0 (Goldilocks.ofNat 5) (Goldilocks.ofNat 9)
-        (Goldilocks.ofNat 0) (Goldilocks.ofNat 1)
-      nonceLimb := Goldilocks.ofNat 5
-      maskLimb := Goldilocks.ofNat 9
-      sessionTag := Goldilocks.ofNat 0
-      partyId := Goldilocks.ofNat 1 }
-  let validBgin : List BginWireRelation :=
-    [{ xWire := towerOne 7, macShare := towerOne 7, keyOffset := towerZero 7, alpha := towerOne 7 }]
+      ideal := ⟨⟨samplePkPin, 3, 4, [0], [], []⟩, initWalLatchState samplePkPin, 0⟩
+      activeSessionTag := Goldilocks.ofNat 0
+      storedRound1Commits := stored₀
+      verifierBginAlpha := sampleBginAlpha
+      verifierBginKeyOffsets := sampleBginOffsets
+      quorumCertConfig := sampleQuorumCertConfig }
+  let quorum1 : List (Fin 4) := [⟨1, by decide⟩, ⟨2, by decide⟩, ⟨3, by decide⟩]
+  let tx1 : MirTxIntent := ⟨sampleRecipient, 60, 7, samplePolPin, sampleAuthPin, 1, 0⟩
+  let tx2 : MirTxIntent := ⟨sampleRecipient, 60, 7, samplePolPin, sampleAuthPin, 2, 0⟩
+  let intent1 := tx1.toTransactionIntent
+  let msg1 := encodeTransactionIntent intent1
+  let intent2 := tx2.toTransactionIntent
+  let msg2 := encodeTransactionIntent intent2
   let req1 : FourLayerReq 4 :=
-    { tx := ⟨sampleRecipient, 60, 7, samplePolPin, sampleAuthPin, 1, 0⟩
+    { tx := tx1
       reqEpoch := 0
-      quorum := [⟨1, by decide⟩, ⟨2, by decide⟩, ⟨3, by decide⟩]
-      round1Openings := [validOp]
-      round2Relations := validBgin }
+      quorum := quorum1
+      quorumCert := mkSampleQuorumCert quorum1 0 msg1
+      round1Openings := [op1_s0, op2_s0, op3_s0]
+      round2Wires := sampleHonestBginWires }
   let req2 : FourLayerReq 4 :=
-    { tx := ⟨sampleRecipient, 60, 7, samplePolPin, sampleAuthPin, 2, 0⟩
+    { tx := tx2
       reqEpoch := 1
-      quorum := [⟨1, by decide⟩, ⟨2, by decide⟩, ⟨3, by decide⟩]
-      round1Openings := [validOp]
-      round2Relations := validBgin }
+      quorum := quorum1
+      quorumCert := mkSampleQuorumCert quorum1 1 msg2
+      round1Openings := [op1_s1, op2_s1, op3_s1]
+      round2Wires := sampleHonestBginWires }
   obtain ⟨hPinPol, hPinAuth, _⟩ := sampleElfMem_pins
   have hCtPol : execElfCtEq32 sampleElfMem (UInt64.ofNat 0x100) samplePolPin = true := by
-    rw [execElfCtEq32_spec (pinned := samplePolPin) rfl (by omega) hPinPol]
-    rfl
+    rw [execElfCtEq32_spec (pinned := samplePolPin) rfl (by omega) hPinPol]; rfl
   have hCtAuth : execElfCtEq32 sampleElfMem (UInt64.ofNat 0x140) sampleAuthPin = true := by
-    rw [execElfCtEq32_spec (pinned := sampleAuthPin) rfl (by omega) hPinAuth]
-    rfl
-  have hPreCutOk : ¬ ((!verifyPreCutTranscript [validOp] validBgin) = true) := by decide
-  let intent1 := req1.tx.toTransactionIntent
-  let msg1 := encodeTransactionIntent intent1
+    rw [execElfCtEq32_spec (pinned := sampleAuthPin) rfl (by omega) hPinAuth]; rfl
+  have hQCert1 : verifyFourLayerQuorumCert sampleQuorumCertConfig 3 samplePkPin msg1 req1 = true := by
+    apply verifyFourLayerQuorumCert_eq_true rfl (by decide) (by decide)
+    intro e he
+    dsimp only [req1, mkSampleQuorumCert, quorum1, List.map] at he
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at he
+    rcases he with rfl | rfl | rfl
+    · exact ⟨sampleValidatorAuthKey 1, rfl, rfl, rfl⟩
+    · exact ⟨sampleValidatorAuthKey 2, rfl, rfl, rfl⟩
+    · exact ⟨sampleValidatorAuthKey 3, rfl, rfl, rfl⟩
+  have hQCert2 : verifyFourLayerQuorumCert sampleQuorumCertConfig 3 samplePkPin msg2 req2 = true := by
+    apply verifyFourLayerQuorumCert_eq_true rfl (by decide) (by decide)
+    intro e he
+    dsimp only [req2, mkSampleQuorumCert, quorum1, List.map] at he
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at he
+    rcases he with rfl | rfl | rfl
+    · exact ⟨sampleValidatorAuthKey 1, rfl, rfl, rfl⟩
+    · exact ⟨sampleValidatorAuthKey 2, rfl, rfl, rfl⟩
+    · exact ⟨sampleValidatorAuthKey 3, rfl, rfl, rfl⟩
+  have hBginOk : verifySessionBginBatch sampleBginAlpha sampleBginOffsets sampleHonestBginWires = true :=
+    sampleHonestBginWires_ok
+  have hR1Ok1 : verifySessionRound1Openings (Goldilocks.ofNat 0) stored₀ quorum1
+      [op1_s0, op2_s0, op3_s0] = true := by
+    apply verifySessionRound1Openings_eq_true rfl rfl (by decide) (by decide)
+    intro op hop
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hop
+    rcases hop with rfl | rfl | rfl
+    · exact ⟨rfl, .head _, rfl⟩
+    · exact ⟨rfl, .tail _ (.head _), rfl⟩
+    · exact ⟨rfl, .tail _ (.tail _ (.head _)), rfl⟩
+  have hR1Ok2 : verifySessionRound1Openings (Goldilocks.ofNat 1) stored₁ quorum1
+      [op1_s1, op2_s1, op3_s1] = true := by
+    apply verifySessionRound1Openings_eq_true rfl rfl (by decide) (by decide)
+    intro op hop
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hop
+    rcases hop with rfl | rfl | rfl
+    · exact ⟨rfl, .head _, rfl⟩
+    · exact ⟨rfl, .tail _ (.head _), rfl⟩
+    · exact ⟨rfl, .tail _ (.tail _ (.head _)), rfl⟩
+  have hPreCut1 :
+      verifyPreCutTranscript (Goldilocks.ofNat 0) stored₀ sampleBginAlpha sampleBginOffsets
+        quorum1 [op1_s0, op2_s0, op3_s0] sampleHonestBginWires = true := by
+    unfold verifyPreCutTranscript; rw [hR1Ok1, hBginOk]; rfl
+  have hPreCut2 :
+      verifyPreCutTranscript (Goldilocks.ofNat 1) stored₁ sampleBginAlpha sampleBginOffsets
+        quorum1 [op1_s1, op2_s1, op3_s1] sampleHonestBginWires = true := by
+    unfold verifyPreCutTranscript; rw [hR1Ok2, hBginOk]; rfl
   let sig1 := signFn (readShareMem32 sampleElfMem) msg1
   let out1 : FourLayerOut := ⟨⟨intent1, msg1⟩, 0, sig1⟩
   let s1₁ : Layer1ElfState :=
     { s1₀ with
       burnedNonces := [1]
-      belt := { belt0 with nextEpoch := 1, latchedRecord := some (0, msg1, sig1) } }
+      belt := { belt0 with nextEpoch := 1, latchedRecord := some (0, msg1, sig1) }
+      activeSessionTag := Goldilocks.ofNat 1
+      storedRound1Commits := stored₁ }
   have hStep1 : badM1.step s1₀ req1 = some (s1₁, out1) := by
-    dsimp only [badM1, statelessPolicyLayer1Machine, PartyMachine.ofOutcome, s1₀, req1, belt0]
+    dsimp only [badM1, statelessPolicyLayer1Machine, PartyMachine.ofOutcome, s1₀, req1, tx1, belt0]
     rw [hCtPol, hCtAuth]
     rw [ite_eq_right (show ¬ ((false || false || !true) = true) by decide)]
     rw [ite_eq_right (show ¬ (((7 : UInt64) != (7 : UInt64)) = true) by decide)]
@@ -5072,21 +6019,22 @@ theorem tooth_stateless_policy_link_breaks_four_layer_ideal_safety :
     rw [ite_eq_right (show ¬ ¬ ((60 : UInt64).toNat ≤ (60 : UInt64).toNat) by decide)]
     rw [ite_eq_right (show ¬ ¬ ((60 : UInt64).toNat ≤ ((100 : UInt64) - (0 : UInt64)).toNat) by decide)]
     rw [ite_eq_right (show ¬ (u64MemBool 1 [] = true) by decide)]
-    rw [ite_eq_right (show ¬ ((!(decide ([⟨1, by decide⟩, ⟨2, by decide⟩, ⟨3, by decide⟩] : List (Fin 4)).Nodup &&
-          decide (3 ≤ ([⟨1, by decide⟩, ⟨2, by decide⟩, ⟨3, by decide⟩] : List (Fin 4)).length))) = true) by decide)]
+    dsimp only [intent1, msg1] at hQCert1
+    rw [hQCert1, ite_eq_right (show ¬ ((!true) = true) by decide)]
     rw [decide_eq_true (rfl : samplePkPin = samplePkPin)]
     rw [ite_eq_right (show ¬ ((!(true && ((0 : Nat) == 0))) = true) by decide)]
-    rw [ite_eq_right hPreCutOk]
-  let intent2 := req2.tx.toTransactionIntent
-  let msg2 := encodeTransactionIntent intent2
+    rw [hPreCut1, ite_eq_right (show ¬ ((!true) = true) by decide)]
+    rfl
   let sig2 := signFn (readShareMem32 sampleElfMem) msg2
   let out2 : FourLayerOut := ⟨⟨intent2, msg2⟩, 1, sig2⟩
   let s1₂ : Layer1ElfState :=
     { s1₁ with
       burnedNonces := [2, 1]
-      belt := { s1₁.belt with nextEpoch := 2, latchedRecord := some (1, msg2, sig2) } }
+      belt := { s1₁.belt with nextEpoch := 2, latchedRecord := some (1, msg2, sig2) }
+      activeSessionTag := Goldilocks.ofNat 2
+      storedRound1Commits := [] }
   have hStep2 : badM1.step s1₁ req2 = some (s1₂, out2) := by
-    dsimp only [badM1, statelessPolicyLayer1Machine, PartyMachine.ofOutcome, s1₁, s1₀, req2, belt0]
+    dsimp only [badM1, statelessPolicyLayer1Machine, PartyMachine.ofOutcome, s1₁, s1₀, req2, tx2, belt0]
     rw [hCtPol, hCtAuth]
     rw [ite_eq_right (show ¬ ((false || false || !true) = true) by decide)]
     rw [ite_eq_right (show ¬ (((7 : UInt64) != (7 : UInt64)) = true) by decide)]
@@ -5096,11 +6044,15 @@ theorem tooth_stateless_policy_link_breaks_four_layer_ideal_safety :
     rw [ite_eq_right (show ¬ ¬ ((60 : UInt64).toNat ≤ (60 : UInt64).toNat) by decide)]
     rw [ite_eq_right (show ¬ ¬ ((60 : UInt64).toNat ≤ ((100 : UInt64) - (0 : UInt64)).toNat) by decide)]
     rw [ite_eq_right (show ¬ (u64MemBool 2 [1] = true) by decide)]
-    rw [ite_eq_right (show ¬ ((!(decide ([⟨1, by decide⟩, ⟨2, by decide⟩, ⟨3, by decide⟩] : List (Fin 4)).Nodup &&
-          decide (3 ≤ ([⟨1, by decide⟩, ⟨2, by decide⟩, ⟨3, by decide⟩] : List (Fin 4)).length))) = true) by decide)]
+    dsimp only [intent2, msg2] at hQCert2
+    rw [hQCert2, ite_eq_right (show ¬ ((!true) = true) by decide)]
     rw [decide_eq_true (rfl : samplePkPin = samplePkPin)]
     rw [ite_eq_right (show ¬ ((!(true && ((1 : Nat) == 1))) = true) by decide)]
-    rw [ite_eq_right hPreCutOk]
+    rw [hPreCut2, ite_eq_right (show ¬ ((!true) = true) by decide)]
+    have hTagAdv : Goldilocks.add (Goldilocks.ofNat 1) Goldilocks.one = Goldilocks.ofNat 2 :=
+      Goldilocks.ext (by decide)
+    rw [hTagAdv]
+    rfl
   let badTrace := [(req1, out1), (req2, out2)]
   have hBadValid : badM1.ValidTrace s1₀ badTrace s1₂ :=
     .accept hStep1 (.accept hStep2 (.nil s1₂))
