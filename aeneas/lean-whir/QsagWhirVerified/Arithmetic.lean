@@ -361,219 +361,224 @@ private theorem modP_mul_right (x y : Int) :
     rw [Int.mul_emod, Int.emod_emod, ← Int.mul_emod]
   rw [h]
 
-/-- Constructive multivariate Horner polynomial over `Int` using purely structural recursion
-    so `FExpr.norm` reduces by kernel WHNF (`rfl`) with `0 Classical.choice`. -/
-private inductive HPoly where
-  | const : Int → HPoly
-  | var : Nat → HPoly → HPoly → HPoly
-  deriving DecidableEq
+/-- Constructive sorted sum-of-monomials (`SOP`) normalizer over `Int` using strictly
+    single-argument structural recursion on `List` so `FExpr.norm` reduces by kernel WHNF (`rfl`)
+    with `0 Classical.choice` and `0 WellFounded.fix`. -/
+private abbrev Mono := List Nat
 
-private def HPoly.eval (env : Nat → Int) : HPoly → Int
-  | .const c => c
-  | .var i p q => p.eval env * env i + q.eval env
+private def evalMono (env : Nat → Int) : Mono → Int
+  | [] => 1
+  | v :: vs => env v * evalMono env vs
 
-private def HPoly.mkVar (i : Nat) (p q : HPoly) : HPoly :=
-  match p with
-  | .const c => if c = 0 then q else .var i (.const c) q
-  | .var j p' q' => .var i (.var j p' q') q
+private def insertVar (v : Nat) : Mono → Mono
+  | [] => [v]
+  | u :: us => if v ≤ u then v :: u :: us else u :: insertVar v us
 
-private theorem HPoly.eval_mkVar (env : Nat → Int) (i : Nat) (p q : HPoly) :
-    (HPoly.mkVar i p q).eval env = p.eval env * env i + q.eval env := by
-  unfold HPoly.mkVar
-  cases p with
-  | const c =>
+private theorem evalMono_insertVar (env : Nat → Int) (v : Nat) :
+    ∀ (m : Mono), evalMono env (insertVar v m) = env v * evalMono env m
+  | [] => rfl
+  | u :: us => by
+    unfold insertVar
+    by_cases h : v ≤ u
+    · simp only [h, ↓reduceIte, evalMono]
+    · simp only [h, ↓reduceIte, evalMono, evalMono_insertVar env v us]
+      rw [← Int.mul_assoc (env u) (env v) (evalMono env us),
+          Int.mul_comm (env u) (env v),
+          Int.mul_assoc (env v) (env u) (evalMono env us)]
+
+private def monoMul : Mono → Mono → Mono
+  | [], ys => ys
+  | x :: xs, ys => insertVar x (monoMul xs ys)
+
+private theorem evalMono_monoMul (env : Nat → Int) :
+    ∀ (xs ys : Mono), evalMono env (monoMul xs ys) = evalMono env xs * evalMono env ys
+  | [], ys => (Int.one_mul _).symm
+  | x :: xs, ys => by
+    simp only [monoMul, evalMono_insertVar, evalMono, evalMono_monoMul env xs ys, Int.mul_assoc]
+
+private def monoLt : Mono → Mono → Bool
+  | [], [] => false
+  | [], _ :: _ => true
+  | _ :: _, [] => false
+  | x :: xs, y :: ys => if x < y then true else if y < x then false else monoLt xs ys
+
+private abbrev SOP := List (Int × Mono)
+
+private def evalSOP (env : Nat → Int) : SOP → Int
+  | [] => 0
+  | (c, m) :: rest => c * evalMono env m + evalSOP env rest
+
+private def sopInsert (c : Int) (m : Mono) : SOP → SOP
+  | [] => if c = 0 then [] else [(c, m)]
+  | (d, n) :: rest =>
+    if c = 0 then (d, n) :: rest
+    else if m = n then
+      if c + d = 0 then rest else (c + d, m) :: rest
+    else if monoLt m n then
+      (c, m) :: (d, n) :: rest
+    else
+      (d, n) :: sopInsert c m rest
+
+private theorem evalSOP_sopInsert (env : Nat → Int) (c : Int) (m : Mono) :
+    ∀ (s : SOP), evalSOP env (sopInsert c m s) = c * evalMono env m + evalSOP env s
+  | [] => by
+    unfold sopInsert
     by_cases hc : c = 0
-    · subst hc; simp [HPoly.eval]
-    · simp [hc, HPoly.eval]
-  | var j p' q' => rfl
+    · subst hc; simp [evalSOP]
+    · simp [hc, evalSOP]
+  | (d, n) :: rest => by
+    unfold sopInsert
+    by_cases hc : c = 0
+    · subst hc; simp [evalSOP]
+    · simp only [hc, ↓reduceIte]
+      by_cases hmn : m = n
+      · subst hmn
+        simp only [↓reduceIte]
+        by_cases hcd : c + d = 0
+        · simp only [hcd, ↓reduceIte, evalSOP]
+          have h0 : (c + d) * evalMono env m = 0 := by rw [hcd, Int.zero_mul]
+          rw [Int.add_mul] at h0
+          omega
+        · simp only [hcd, ↓reduceIte, evalSOP, Int.add_mul]
+          omega
+      · simp only [hmn, ↓reduceIte]
+        by_cases hlt : monoLt m n = true
+        · simp only [hlt, ↓reduceIte, evalSOP]
+          omega
+        · simp only [hlt, ↓reduceIte, evalSOP, evalSOP_sopInsert env c m rest]
+          omega
 
-private def HPoly.neg : HPoly → HPoly
-  | .const c => .const (-c)
-  | .var i p q => .var i p.neg q.neg
+private def sopAdd : SOP → SOP → SOP
+  | [], q => q
+  | (c, m) :: p, q => sopInsert c m (sopAdd p q)
 
-private theorem HPoly.eval_neg (env : Nat → Int) (p : HPoly) :
-    p.neg.eval env = -(p.eval env) := by
-  induction p with
-  | const c => rfl
-  | var i p q ihp ihq =>
-    simp only [HPoly.neg, HPoly.eval, ihp, ihq]
-    rw [Int.neg_mul]
+private theorem evalSOP_sopAdd (env : Nat → Int) :
+    ∀ (p q : SOP), evalSOP env (sopAdd p q) = evalSOP env p + evalSOP env q
+  | [], q => by simp [sopAdd, evalSOP]
+  | (c, m) :: p, q => by
+    simp only [sopAdd, evalSOP_sopInsert, evalSOP, evalSOP_sopAdd env p q]
     omega
 
-private def HPoly.addConst (c : Int) : HPoly → HPoly
-  | .const d => .const (c + d)
-  | .var j p q => HPoly.mkVar j p (HPoly.addConst c q)
+private def sopNeg : SOP → SOP
+  | [] => []
+  | (c, m) :: p => sopInsert (-c) m (sopNeg p)
 
-private theorem HPoly.eval_addConst (env : Nat → Int) (c : Int) (p : HPoly) :
-    (HPoly.addConst c p).eval env = c + p.eval env := by
-  induction p with
-  | const d => rfl
-  | var j p q _ ihq =>
-    simp only [HPoly.addConst, HPoly.eval_mkVar, HPoly.eval, ihq]
+private theorem evalSOP_sopNeg (env : Nat → Int) :
+    ∀ (p : SOP), evalSOP env (sopNeg p) = -(evalSOP env p)
+  | [] => rfl
+  | (c, m) :: p => by
+    simp only [sopNeg, evalSOP_sopInsert, evalSOP, evalSOP_sopNeg env p, Int.neg_mul]
     omega
 
-private def HPoly.add : HPoly → HPoly → HPoly
-  | .const c1, b => HPoly.addConst c1 b
-  | .var i p1 q1, b =>
-    let rec addVar : HPoly → HPoly
-      | .const c2 => HPoly.mkVar i p1 (HPoly.add q1 (.const c2))
-      | .var j p2 q2 =>
-        if i < j then
-          HPoly.mkVar i p1 (HPoly.add q1 (.var j p2 q2))
-        else if j < i then
-          HPoly.mkVar j p2 (addVar q2)
-        else
-          HPoly.mkVar i (HPoly.add p1 p2) (HPoly.add q1 q2)
-    addVar b
+private def sopMulTerm (c : Int) (m : Mono) : SOP → SOP
+  | [] => []
+  | (d, n) :: q => sopInsert (c * d) (monoMul m n) (sopMulTerm c m q)
 
-private theorem HPoly.eval_add (env : Nat → Int) :
-    ∀ (a b : HPoly), (HPoly.add a b).eval env = a.eval env + b.eval env
-  | .const c1, b => HPoly.eval_addConst env c1 b
-  | .var i p1 q1, b => by
-    have ihp : ∀ y, (HPoly.add p1 y).eval env = p1.eval env + y.eval env := HPoly.eval_add env p1
-    have ihq : ∀ y, (HPoly.add q1 y).eval env = q1.eval env + y.eval env := HPoly.eval_add env q1
-    change (HPoly.add.addVar i p1 q1 b).eval env = (HPoly.var i p1 q1).eval env + b.eval env
-    induction b with
-    | const c2 =>
-      simp only [HPoly.add.addVar, HPoly.eval_mkVar, HPoly.eval, ihq]
-      omega
-    | var j p2 q2 _ ihb_q =>
-      unfold HPoly.add.addVar
-      by_cases hij1 : i < j
-      · simp only [hij1, ↓reduceIte, HPoly.eval_mkVar, ihq, HPoly.eval]
-        omega
-      · by_cases hij2 : j < i
-        · simp only [hij1, hij2, ↓reduceIte, HPoly.eval_mkVar, ihb_q, HPoly.eval]
-          omega
-        · have hij : i = j := by omega
-          subst hij
-          simp only [Nat.lt_irrefl, ↓reduceIte, HPoly.eval_mkVar, ihp, ihq, HPoly.eval, Int.add_mul]
-          omega
+private theorem evalSOP_sopMulTerm (env : Nat → Int) (c : Int) (m : Mono) :
+    ∀ (q : SOP), evalSOP env (sopMulTerm c m q) = c * evalMono env m * evalSOP env q
+  | [] => by simp [sopMulTerm, evalSOP]
+  | (d, n) :: q => by
+    simp only [sopMulTerm, evalSOP_sopInsert, evalMono_monoMul, evalSOP, evalSOP_sopMulTerm env c m q]
+    have hmul : (c * d) * (evalMono env m * evalMono env n) =
+        (c * evalMono env m) * (d * evalMono env n) := by
+      calc
+        (c * d) * (evalMono env m * evalMono env n)
+            = c * (d * (evalMono env m * evalMono env n)) := Int.mul_assoc _ _ _
+        _ = c * (d * evalMono env m * evalMono env n) := by rw [← Int.mul_assoc d]
+        _ = c * (evalMono env m * d * evalMono env n) := by rw [Int.mul_comm d (evalMono env m)]
+        _ = c * (evalMono env m * (d * evalMono env n)) := by rw [Int.mul_assoc (evalMono env m)]
+        _ = (c * evalMono env m) * (d * evalMono env n) := (Int.mul_assoc _ _ _).symm
+    rw [hmul, Int.mul_add]
 
-private def HPoly.mulConst (c : Int) : HPoly → HPoly
-  | .const d => .const (c * d)
-  | .var i p q => HPoly.mkVar i (HPoly.mulConst c p) (HPoly.mulConst c q)
+private def sopMul : SOP → SOP → SOP
+  | [], _ => []
+  | (c, m) :: p, q => sopAdd (sopMulTerm c m q) (sopMul p q)
 
-private theorem HPoly.eval_mulConst (env : Nat → Int) (c : Int) (p : HPoly) :
-    (HPoly.mulConst c p).eval env = c * p.eval env := by
-  induction p with
-  | const d => rfl
-  | var i p q ihp ihq =>
-    simp only [HPoly.mulConst, HPoly.eval_mkVar, HPoly.eval, ihp, ihq]
-    rw [Int.mul_assoc, Int.mul_add]
+private theorem evalSOP_sopMul (env : Nat → Int) :
+    ∀ (p q : SOP), evalSOP env (sopMul p q) = evalSOP env p * evalSOP env q
+  | [], _ => by simp [sopMul, evalSOP]
+  | (c, m) :: p, q => by
+    simp only [sopMul, evalSOP_sopAdd, evalSOP_sopMulTerm, evalSOP, evalSOP_sopMul env p q, Int.add_mul]
 
-private theorem horner_mul_step (a b c d x : Int) :
-    ((a * c * x + (a * d + b * c)) * x + b * d) = (a * x + b) * (c * x + d) := by
-  have h1 : a * c * x * x = (a * x) * (c * x) := by
-    calc
-      a * c * x * x = a * (c * x) * x := by rw [Int.mul_assoc a c x]
-      _ = a * (x * c) * x := by rw [Int.mul_comm c x]
-      _ = a * x * c * x := by rw [← Int.mul_assoc a x c]
-      _ = (a * x) * (c * x) := by rw [Int.mul_assoc (a * x) c x]
-  have h2 : a * d * x = (a * x) * d := by
-    calc
-      a * d * x = a * (d * x) := by rw [Int.mul_assoc a d x]
-      _ = a * (x * d) := by rw [Int.mul_comm d x]
-      _ = (a * x) * d := by rw [← Int.mul_assoc a x d]
-  have h3 : b * c * x = b * (c * x) := Int.mul_assoc b c x
-  calc
-    ((a * c * x + (a * d + b * c)) * x + b * d)
-        = a * c * x * x + (a * d * x + b * c * x) + b * d := by
-          rw [Int.add_mul, Int.add_mul]
-    _ = ((a * x) * (c * x) + (a * x) * d) + (b * (c * x) + b * d) := by
-          rw [h1, h2, h3]
-          omega
-    _ = (a * x) * (c * x + d) + b * (c * x + d) := by
-          rw [← Int.mul_add, ← Int.mul_add]
-    _ = (a * x + b) * (c * x + d) := by
-          rw [← Int.add_mul]
+private theorem modP_emod (z : Int) :
+    modP (z % (18446744069414584321 : Int)) = modP z := by
+  apply UScalar.eq_of_val_eq
+  rw [modP_val, modP_val, Int.emod_emod]
 
-private def HPoly.mul : HPoly → HPoly → HPoly
-  | .const c1, b => HPoly.mulConst c1 b
-  | .var i p1 q1, b =>
-    let rec mulVar : HPoly → HPoly
-      | .const c2 => HPoly.mulConst c2 (.var i p1 q1)
-      | .var j p2 q2 =>
-        if i < j then
-          HPoly.mkVar i (HPoly.mul p1 (.var j p2 q2)) (HPoly.mul q1 (.var j p2 q2))
-        else if j < i then
-          HPoly.mkVar j (mulVar p2) (mulVar q2)
-        else
-          let pp := HPoly.mul p1 p2
-          let pq := HPoly.add (HPoly.mul p1 q2) (HPoly.mul q1 p2)
-          let qq := HPoly.mul q1 q2
-          HPoly.add (HPoly.mkVar i (HPoly.add (HPoly.mkVar i pp (.const 0)) pq) (.const 0)) qq
-    mulVar b
-
-private theorem HPoly.eval_mul (env : Nat → Int) :
-    ∀ (a b : HPoly), (HPoly.mul a b).eval env = a.eval env * b.eval env
-  | .const c1, b => HPoly.eval_mulConst env c1 b
-  | .var i p1 q1, b => by
-    have ihp : ∀ y, (HPoly.mul p1 y).eval env = p1.eval env * y.eval env := HPoly.eval_mul env p1
-    have ihq : ∀ y, (HPoly.mul q1 y).eval env = q1.eval env * y.eval env := HPoly.eval_mul env q1
-    change (HPoly.mul.mulVar i p1 q1 b).eval env = (HPoly.var i p1 q1).eval env * b.eval env
-    induction b with
-    | const c2 =>
-      simp only [HPoly.mul.mulVar, HPoly.eval_mulConst, HPoly.eval]
-      exact Int.mul_comm c2 _
-    | var j p2 q2 ihb_p ihb_q =>
-      unfold HPoly.mul.mulVar
-      by_cases hij1 : i < j
-      · simp only [hij1, ↓reduceIte, HPoly.eval_mkVar, ihp, ihq]
-        set rhs := (HPoly.var j p2 q2).eval env
-        change p1.eval env * rhs * env i + q1.eval env * rhs =
-          (p1.eval env * env i + q1.eval env) * rhs
-        rw [Int.add_mul, Int.mul_assoc (p1.eval env) rhs (env i),
-          Int.mul_comm rhs (env i), ← Int.mul_assoc (p1.eval env) (env i) rhs]
-      · by_cases hij2 : j < i
-        · simp only [hij1, hij2, ↓reduceIte, HPoly.eval_mkVar, ihb_p, ihb_q]
-          set lhs := (HPoly.var i p1 q1).eval env
-          change lhs * p2.eval env * env j + lhs * q2.eval env =
-            lhs * (p2.eval env * env j + q2.eval env)
-          rw [Int.mul_add, Int.mul_assoc]
-        · have hij : i = j := by omega
-          subst hij
-          simp only [Nat.lt_irrefl, ↓reduceIte, HPoly.eval_add, HPoly.eval_mkVar,
-            ihp, ihq, HPoly.eval, Int.add_zero]
-          exact horner_mul_step (p1.eval env) (q1.eval env) (p2.eval env) (q2.eval env) (env i)
-
-/-- Syntactic ring expressions over `U64` variables evaluated in `modP`. -/
+/-- Syntactic ring expressions over `U64` variables evaluated directly in `fieldAdd/Sub/Mul` and `Int`. -/
 private inductive FExpr where
-  | const : Int → FExpr
+  | lit : U64 → FExpr
   | var : Nat → FExpr
   | add : FExpr → FExpr → FExpr
   | sub : FExpr → FExpr → FExpr
   | mul : FExpr → FExpr → FExpr
 
-private def FExpr.norm : FExpr → HPoly
-  | .const c => .const c
-  | .var i => .var i (.const 1) (.const 0)
-  | .add a b => HPoly.add a.norm b.norm
-  | .sub a b => HPoly.add a.norm b.norm.neg
-  | .mul a b => HPoly.mul a.norm b.norm
+private def FExpr.norm : FExpr → SOP
+  | .lit c => sopInsert (toZ c) [] []
+  | .var i => [(1, [i])]
+  | .add a b => sopAdd a.norm b.norm
+  | .sub a b => sopAdd a.norm (sopNeg b.norm)
+  | .mul a b => sopMul a.norm b.norm
+
+private def FExpr.evalF (env : Nat → U64) : FExpr → U64
+  | .lit c => c
+  | .var i => env i
+  | .add a b => fieldAdd (a.evalF env) (b.evalF env)
+  | .sub a b => fieldSub (a.evalF env) (b.evalF env)
+  | .mul a b => fieldMul (a.evalF env) (b.evalF env)
 
 private def FExpr.evalZ (env : Nat → U64) : FExpr → Int
-  | .const c => c
+  | .lit c => toZ c
   | .var i => toZ (env i)
   | .add a b => a.evalZ env + b.evalZ env
   | .sub a b => a.evalZ env - b.evalZ env
   | .mul a b => a.evalZ env * b.evalZ env
 
-private theorem FExpr.eval_norm (env : Nat → U64) (e : FExpr) :
-    e.norm.eval (fun i => toZ (env i)) = e.evalZ env := by
+private theorem FExpr.evalSOP_norm (env : Nat → U64) (e : FExpr) :
+    evalSOP (fun i => toZ (env i)) e.norm = e.evalZ env := by
   induction e with
-  | const c => rfl
-  | var i => simp [FExpr.norm, FExpr.evalZ, HPoly.eval]
-  | add a b iha ihb => simp [FExpr.norm, FExpr.evalZ, HPoly.eval_add, iha, ihb]
-  | sub a b iha ihb =>
-    simp only [FExpr.norm, FExpr.evalZ, HPoly.eval_add, HPoly.eval_neg, iha, ihb]
+  | lit c =>
+    simp only [FExpr.norm, FExpr.evalZ, evalSOP_sopInsert, evalMono, evalSOP]
     omega
-  | mul a b iha ihb => simp [FExpr.norm, FExpr.evalZ, HPoly.eval_mul, iha, ihb]
+  | var i =>
+    simp only [FExpr.norm, FExpr.evalZ, evalSOP, evalMono]
+    omega
+  | add a b iha ihb =>
+    simp only [FExpr.norm, FExpr.evalZ, evalSOP_sopAdd, iha, ihb]
+  | sub a b iha ihb =>
+    simp only [FExpr.norm, FExpr.evalZ, evalSOP_sopAdd, evalSOP_sopNeg, iha, ihb]
+    omega
+  | mul a b iha ihb =>
+    simp only [FExpr.norm, FExpr.evalZ, evalSOP_sopMul, iha, ihb]
 
-private theorem modP_eq_of_fexpr (env : Nat → U64) (lhs rhs : FExpr)
+private theorem FExpr.toZ_evalF_emod (env : Nat → U64) (e : FExpr) :
+    toZ (e.evalF env) % (18446744069414584321 : Int) =
+      e.evalZ env % (18446744069414584321 : Int) := by
+  induction e with
+  | lit _ => rfl
+  | var _ => rfl
+  | add a b iha ihb =>
+    simp only [FExpr.evalF, FExpr.evalZ, fieldAdd_eq_modP, toZ_modP, Int.emod_emod]
+    rw [Int.add_emod, iha, ihb, ← Int.add_emod]
+  | sub a b iha ihb =>
+    simp only [FExpr.evalF, FExpr.evalZ, fieldSub_eq_modP, toZ_modP, Int.emod_emod]
+    rw [Int.sub_emod, iha, ihb, ← Int.sub_emod]
+  | mul a b iha ihb =>
+    simp only [FExpr.evalF, FExpr.evalZ, fieldMul_eq_modP, toZ_modP, Int.emod_emod]
+    rw [Int.mul_emod, iha, ihb, ← Int.mul_emod]
+
+private theorem FExpr.evalF_eq_modP (env : Nat → U64) (e : FExpr)
+    (hc : IsCanonical (e.evalF env)) :
+    e.evalF env = modP (e.evalZ env) := by
+  rw [← modP_toZ_of_canonical hc, ← modP_emod (toZ (e.evalF env)),
+      FExpr.toZ_evalF_emod env e, modP_emod]
+
+private theorem FExpr.evalF_eq_of_norm (env : Nat → U64) (lhs rhs : FExpr)
+    (hl : IsCanonical (lhs.evalF env)) (hr : IsCanonical (rhs.evalF env))
     (h : lhs.norm = rhs.norm) :
-    modP (lhs.evalZ env) = modP (rhs.evalZ env) := by
-  rw [← FExpr.eval_norm env lhs, ← FExpr.eval_norm env rhs, h]
+    lhs.evalF env = rhs.evalF env := by
+  rw [FExpr.evalF_eq_modP env lhs hl, FExpr.evalF_eq_modP env rhs hr,
+      ← FExpr.evalSOP_norm env lhs, ← FExpr.evalSOP_norm env rhs, h]
 
 /-! ### Simp Normalization of `fieldAdd` / `fieldSub` / `fieldMul` into `modP` -/
 
