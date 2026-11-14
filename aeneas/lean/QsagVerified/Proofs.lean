@@ -17,3 +17,6 @@ public import QsagVerified.Proofs.MultiTurnMediationAndReachability
 
 public import QsagVerified.Proofs.BeltAckProvenance
 public import QsagVerified.Proofs.CallerContracts
+public import QsagVerified.Proofs.BeltLatchKernel
+
+public import QsagVerified.Proofs.BdozConsumption
