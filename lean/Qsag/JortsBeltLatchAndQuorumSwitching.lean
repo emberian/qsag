@@ -2894,3 +2894,1508 @@ theorem finSum_comp_simpleEquiv :
       simp [hij, hNe]
   rw [finSum_congr (fun i => congrFun hRewrite i), finSum_mul_right, finSum_eq_indicator, Nat.one_mul]
 
+/-! ### Multi-Turn `QuorumJortsTurn` Committee-Partitioned (`QS-A`) & Global-Quorum (`QS-B`) State Machine -/
+
+private def maskPositionAux {n : Nat} (target : CustodiansMask n) : List (CustodiansMask n) → Option Nat
+  | [] => none
+  | x :: xs =>
+    if x = target then some 0
+    else (maskPositionAux target xs).map Nat.succ
+
+private theorem maskPositionAux_lt {n : Nat} (target : CustodiansMask n) :
+    ∀ (xs : List (CustodiansMask n)) {idx : Nat},
+      maskPositionAux target xs = some idx → idx < xs.length
+  | [], _, h => by cases h
+  | x :: xs, idx, h => by
+    simp only [maskPositionAux] at h
+    if hx : x = target then
+      simp only [hx, ↓reduceIte, Option.some.injEq] at h
+      subst h; exact Nat.zero_lt_succ _
+    else
+      simp only [hx, ↓reduceIte, Option.map_eq_some_iff] at h
+      obtain ⟨k, hk, rfl⟩ := h
+      exact Nat.succ_lt_succ (maskPositionAux_lt target xs hk)
+
+private theorem maskPositionAux_mem {n : Nat} (target : CustodiansMask n) :
+    ∀ (xs : List (CustodiansMask n)) {idx : Nat},
+      maskPositionAux target xs = some idx → target ∈ xs
+  | [], _, h => by cases h
+  | x :: xs, _, h => by
+    simp only [maskPositionAux] at h
+    if hx : x = target then
+      subst hx; exact .head xs
+    else
+      simp only [hx, ↓reduceIte, Option.map_eq_some_iff] at h
+      obtain ⟨_, hk, _⟩ := h
+      exact .tail x (maskPositionAux_mem target xs hk)
+
+private theorem maskPositionAux_some_of_mem {n : Nat} (target : CustodiansMask n) :
+    ∀ (xs : List (CustodiansMask n)), target ∈ xs → ∃ idx, maskPositionAux target xs = some idx
+  | [], h => by cases h
+  | x :: xs, h => by
+    simp only [maskPositionAux]
+    if hx : x = target then
+      exact ⟨0, by simp [hx]⟩
+    else
+      rcases List.mem_cons.mp h with rfl | hTail
+      · exact False.elim (hx rfl)
+      · obtain ⟨k, hk⟩ := maskPositionAux_some_of_mem target xs hTail
+        exact ⟨k + 1, by simp [hx, hk]⟩
+
+private theorem maskPositionAux_inj {n : Nat} {Q₁ Q₂ : CustodiansMask n} :
+    ∀ (xs : List (CustodiansMask n)) {idx : Nat},
+      maskPositionAux Q₁ xs = some idx →
+      maskPositionAux Q₂ xs = some idx →
+      Q₁ = Q₂
+  | [], _, h1, _ => by cases h1
+  | x :: xs, idx, h1, h2 => by
+    simp only [maskPositionAux] at h1 h2
+    by_cases hx1 : x = Q₁
+    · simp only [hx1, ↓reduceIte, Option.some.injEq] at h1
+      subst h1
+      by_cases hx2 : x = Q₂
+      · exact hx1.symm.trans hx2
+      · simp only [hx2, ↓reduceIte, Option.map_eq_some_iff] at h2
+        obtain ⟨_, _, hSucc⟩ := h2
+        cases hSucc
+    · simp only [hx1, ↓reduceIte, Option.map_eq_some_iff] at h1
+      obtain ⟨k₁, hk₁, rfl⟩ := h1
+      by_cases hx2 : x = Q₂
+      · simp only [hx2, ↓reduceIte, Option.some.injEq] at h2
+        cases h2
+      · simp only [hx2, ↓reduceIte, Option.map_eq_some_iff] at h2
+        obtain ⟨k₂, hk₂, hEqS⟩ := h2
+        have hkEq : k₁ = k₂ := Nat.succ.inj hEqS.symm
+        subst hkEq
+        exact maskPositionAux_inj xs hk₁ hk₂
+
+/-- Constructive index of `t`-committee `Q` inside `chooseMasks n t`
+    (`CommitteeLayout::committee_index`, `quorum_jorts.rs:661-666`). -/
+def committeeIndexOf {n : Nat} (t : Nat) (Q : CustodiansMask n) : Option Nat :=
+  maskPositionAux Q (chooseMasks n t)
+
+theorem committeeIndexOf_lt {n t cIdx : Nat} {Q : CustodiansMask n}
+    (h : committeeIndexOf t Q = some cIdx) : cIdx < (chooseMasks n t).length :=
+  maskPositionAux_lt Q (chooseMasks n t) h
+
+theorem committeeIndexOf_card {n t cIdx : Nat} {Q : CustodiansMask n}
+    (h : committeeIndexOf t Q = some cIdx) : maskCard Q = t :=
+  chooseMasks_card n t (maskPositionAux_mem Q (chooseMasks n t) h)
+
+theorem committeeIndexOf_some_of_card {n t : Nat} {Q : CustodiansMask n}
+    (hCard : maskCard Q = t) : ∃ cIdx, committeeIndexOf t Q = some cIdx := by
+  have hMem : Q ∈ chooseMasks n t := by
+    have hm := mem_chooseMasks_of_card n Q
+    rw [hCard] at hm
+    exact hm
+  exact maskPositionAux_some_of_mem Q (chooseMasks n t) hMem
+
+theorem committeeIndexOf_inj {n t cIdx : Nat} {Q₁ Q₂ : CustodiansMask n}
+    (h₁ : committeeIndexOf t Q₁ = some cIdx)
+    (h₂ : committeeIndexOf t Q₂ = some cIdx) : Q₁ = Q₂ :=
+  maskPositionAux_inj (chooseMasks n t) h₁ h₂
+
+/-- Public inverse mapping a global leaf index back to its owning committee index
+    (`CommitteeLayout::committee_of_leaf`, `quorum_jorts.rs:673-677`). -/
+def committeeOfLeaf (leavesPerCommittee numCommittees globalLeaf : Nat) : Option Nat :=
+  if globalLeaf / leavesPerCommittee < numCommittees then
+    some (globalLeaf / leavesPerCommittee)
+  else
+    none
+
+theorem committeeOfLeaf_committeeGlobalLeaf
+    {leavesPerCommittee numCommittees cIdx localEpoch : Nat}
+    (hLpcPos : 0 < leavesPerCommittee)
+    (hcLt : cIdx < numCommittees)
+    (heLt : localEpoch < leavesPerCommittee) :
+    committeeOfLeaf leavesPerCommittee numCommittees
+      (committeeGlobalLeaf leavesPerCommittee cIdx localEpoch) = some cIdx := by
+  unfold committeeGlobalLeaf committeeOfLeaf
+  have hDiv : (cIdx * leavesPerCommittee + localEpoch) / leavesPerCommittee = cIdx := by
+    rw [Nat.mul_comm cIdx leavesPerCommittee, Nat.mul_add_div hLpcPos,
+        Nat.div_eq_of_lt heLt, Nat.add_zero]
+  simp [hDiv, hcLt]
+
+/-- Full custodian mask `{0, ..., n - 1}` of cardinality `n` (single global committee for `QS-B`). -/
+def fullCustodiansMask (n : Nat) : CustodiansMask n := ⟨fun _ => true⟩
+
+theorem maskCard_fullCustodiansMask (n : Nat) : maskCard (fullCustodiansMask n) = n := by
+  have hEq : fullCustodiansMask n = prefixQuorumMask n n := by
+    apply congrArg CustodiansMask.mk; funext i
+    dsimp only [fullCustodiansMask, prefixQuorumMask]
+    exact (decide_eq_true i.isLt).symm
+  rw [hEq]
+  exact maskCard_prefix n n (Nat.le_refl n)
+
+/-- Authenticated committee `LatchEcho` message (`quorum_jorts.rs:760-766`) under `"QSAG.QUORUM.ECHO.MAC/v1"`. -/
+structure QuorumCommitteeEcho (n : Nat) where
+  fromParty : Fin n
+  toParty : Fin n
+  committeeIdx : Nat
+  epoch : UInt64
+  binding : Digest256
+  mac : Digest256
+  deriving DecidableEq, Repr
+
+/-- Verify a `QuorumCommitteeEcho` against expected `(fromParty, toParty, committeeIdx, rec)` using
+    `computeQuorumEchoMac` (`quorumEchoMacTag`, `quorum_jorts.rs:989-1000`). -/
+def verifyQuorumCommitteeEcho {n : Nat}
+    (H : List UInt8 → Digest256)
+    (MAC : Digest256 → List UInt8 → Digest256)
+    (pairwiseKey : Digest256)
+    (expectedFrom expectedTo : Fin n)
+    (expectedCIdx : Nat) (expectedRec : BeltLatchRecord)
+    (echo : QuorumCommitteeEcho n) : Bool :=
+  let bnd := beltRecordBinding H expectedRec
+  decide (echo.fromParty = expectedFrom) &&
+  decide (echo.toParty = expectedTo) &&
+  decide (echo.committeeIdx = expectedCIdx) &&
+  decide (echo.epoch = expectedRec.epoch) &&
+  decide (echo.binding = bnd) &&
+  decide (echo.mac =
+    computeQuorumEchoMac MAC pairwiseKey expectedFrom.val expectedTo.val expectedCIdx expectedRec.epoch bnd)
+
+/-- Mask of members `s ∈ Q` supplying a valid `quorumEchoMacTag` echo for `(cIdx, rec)` to `verifier`. -/
+def validCommitteeEchoSenders {n : Nat}
+    (H : List UInt8 → Digest256)
+    (MAC : Digest256 → List UInt8 → Digest256)
+    (macKeys : Fin n → Fin n → Digest256)
+    (cIdx : Nat) (verifier : Fin n) (Q : CustodiansMask n)
+    (rec : BeltLatchRecord) (echoes : List (QuorumCommitteeEcho n)) : CustodiansMask n where
+  mem s :=
+    Q.mem s &&
+      echoes.any (fun e =>
+        verifyQuorumCommitteeEcho H MAC (macKeys s verifier) s verifier cIdx rec e)
+
+/-- Verify a `CommitteePermit` (`quorum_jorts.rs:971-1008`): `Q` has index `cIdx` in `chooseMasks n t`,
+    `verifier ∈ Q`, `rec.epoch < 2 ^ subtreeHeight`, and at least `echoQuorum` members of `Q`
+    supplied valid `quorumEchoMacTag` echoes (`echoQuorum = t` in `QS-A`; `echoQuorum = q` in `QS-B`). -/
+def verifyCommitteeEchoPermit {n : Nat}
+    (H : List UInt8 → Digest256)
+    (MAC : Digest256 → List UInt8 → Digest256)
+    (macKeys : Fin n → Fin n → Digest256)
+    (t subtreeHeight echoQuorum cIdx : Nat)
+    (verifier : Fin n) (Q : CustodiansMask n)
+    (rec : BeltLatchRecord) (echoes : List (QuorumCommitteeEcho n)) : Bool :=
+  decide (committeeIndexOf t Q = some cIdx) &&
+  Q.mem verifier &&
+  decide (rec.epoch.toNat < 2 ^ subtreeHeight) &&
+  decide (echoQuorum ≤ maskCard (validCommitteeEchoSenders H MAC macKeys cIdx verifier Q rec echoes))
+
+/-- Certified leaf signature release recorded by the multi-turn `QuorumJorts` network. -/
+structure ReleasedQuorumLeaf (n : Nat) where
+  committee : CustodiansMask n
+  committeeIdx : Nat
+  localEpoch : UInt64
+  globalLeaf : Nat
+  verifier : Fin n
+  record : BeltLatchRecord
+  deriving DecidableEq
+
+/-- Multi-turn distributed `QuorumJorts` network state (`CommitteePartitionedJorts` / `BftShamirJorts`)
+    tracking per-`(custodian, committeeIdx)` durable `BeltLatchNodeState` slots, honest persisted logs,
+    `quorumEchoMacTag` echoes, and released global-tree leaf records. -/
+structure QuorumJortsNetworkState (n : Nat) where
+  slots : Fin n → Nat → BeltLatchNodeState
+  slotBoundLogs : Fin n → Nat → List BeltLatchRecord
+  emittedEchoes : List (QuorumCommitteeEcho n)
+  releasedLeaves : List (ReleasedQuorumLeaf n)
+
+/-- Fresh `QuorumJortsNetworkState` with all `(custodian, committeeIdx)` slots at `nextEpoch = 0`. -/
+def QuorumJortsNetworkState.init (n subtreeHeight maxWindow : Nat) : QuorumJortsNetworkState n where
+  slots := fun _ _ => BeltLatchNodeState.init subtreeHeight maxWindow
+  slotBoundLogs := fun _ _ => []
+  emittedEchoes := []
+  releasedLeaves := []
+
+/-- Open-world multi-turn transitions of `QuorumJortsNetworkState n` across committees, epochs,
+    crashes, WAL faults, pairwise `quorumEchoMacTag` broadcasts, and leaf-range releases. -/
+inductive QuorumJortsTurn (n : Nat) where
+  | bindSlot (p : Fin n) (Q : CustodiansMask n) (rec : BeltLatchRecord)
+  | emitSlotEcho (sender receiver : Fin n) (Q : CustodiansMask n)
+  | crashAndRecoverSlot (p : Fin n) (Q : CustodiansMask n)
+  | armSlotPersistFault (p : Fin n) (Q : CustodiansMask n)
+  | corruptSlotDisk (p : Fin n) (Q : CustodiansMask n)
+  | releasePartitionedLeaf (verifier : Fin n) (Q : CustodiansMask n)
+      (rec : BeltLatchRecord) (echoes : List (QuorumCommitteeEcho n))
+
+/-- Execute one multi-turn `QuorumJortsTurn` step on `QuorumJortsNetworkState n`. -/
+def stepQuorumJorts {n : Nat}
+    (H : List UInt8 → Digest256)
+    (MAC : Digest256 → List UInt8 → Digest256)
+    (macKeys : Fin n → Fin n → Digest256)
+    (Corrupt : CustodiansMask n)
+    (t subtreeHeight echoQuorum : Nat)
+    (net : QuorumJortsNetworkState n) (turn : QuorumJortsTurn n) : QuorumJortsNetworkState n :=
+  match turn with
+  | .bindSlot p Q rec =>
+    if Corrupt.mem p || !Q.mem p then net
+    else
+      match committeeIndexOf t Q with
+      | none => net
+      | some cIdx =>
+        match beltLatchBindStep (net.slots p cIdx) rec with
+        | .accepted st' .fresh =>
+          { net with
+            slots := fun i c => if i = p ∧ c = cIdx then st' else net.slots i c
+            slotBoundLogs := fun i c =>
+              if i = p ∧ c = cIdx then rec :: net.slotBoundLogs p cIdx else net.slotBoundLogs i c }
+        | .accepted st' .replay =>
+          { net with slots := fun i c => if i = p ∧ c = cIdx then st' else net.slots i c }
+        | .rejected st' _ =>
+          { net with slots := fun i c => if i = p ∧ c = cIdx then st' else net.slots i c }
+  | .emitSlotEcho sender receiver Q =>
+    if Corrupt.mem sender || !Q.mem sender then net
+    else
+      match committeeIndexOf t Q with
+      | none => net
+      | some cIdx =>
+        let st := net.slots sender cIdx
+        if st.walPoisoned then net
+        else
+          match st.inFlight with
+          | none => net
+          | some rec =>
+            let bnd := beltRecordBinding H rec
+            let echo : QuorumCommitteeEcho n :=
+              { fromParty := sender
+                toParty := receiver
+                committeeIdx := cIdx
+                epoch := rec.epoch
+                binding := bnd
+                mac := computeQuorumEchoMac MAC (macKeys sender receiver)
+                  sender.val receiver.val cIdx rec.epoch bnd }
+            { net with emittedEchoes := echo :: net.emittedEchoes }
+  | .crashAndRecoverSlot p Q =>
+    if Corrupt.mem p || !Q.mem p then net
+    else
+      match committeeIndexOf t Q with
+      | none => net
+      | some cIdx =>
+        { net with
+          slots := fun i c =>
+            if i = p ∧ c = cIdx then beltLatchCrashAndRecover (net.slots p cIdx) else net.slots i c }
+  | .armSlotPersistFault p Q =>
+    if Corrupt.mem p || !Q.mem p then net
+    else
+      match committeeIndexOf t Q with
+      | none => net
+      | some cIdx =>
+        let st := net.slots p cIdx
+        { net with
+          slots := fun i c =>
+            if i = p ∧ c = cIdx then { st with failNextPersist := true } else net.slots i c }
+  | .corruptSlotDisk p Q =>
+    if Corrupt.mem p || !Q.mem p then net
+    else
+      match committeeIndexOf t Q with
+      | none => net
+      | some cIdx =>
+        let st := net.slots p cIdx
+        { net with
+          slots := fun i c =>
+            if i = p ∧ c = cIdx then
+              { st with disk := .corrupted, walPoisoned := true, inFlight := none }
+            else net.slots i c }
+  | .releasePartitionedLeaf verifier Q rec echoes =>
+    if Corrupt.mem verifier then net
+    else
+      match committeeIndexOf t Q with
+      | none => net
+      | some cIdx =>
+        let st := net.slots verifier cIdx
+        if !st.walPoisoned && decide (st.inFlight = some rec) &&
+            verifyCommitteeEchoPermit H MAC macKeys t subtreeHeight echoQuorum cIdx verifier Q rec echoes then
+          let gLeaf := committeeGlobalLeaf (2 ^ subtreeHeight) cIdx rec.epoch.toNat
+          { net with
+            releasedLeaves :=
+              { committee := Q
+                committeeIdx := cIdx
+                localEpoch := rec.epoch
+                globalLeaf := gLeaf
+                verifier := verifier
+                record := rec } :: net.releasedLeaves }
+        else
+          net
+
+/-- Execute an arbitrary multi-turn trace `List (QuorumJortsTurn n)`. -/
+def runQuorumJortsTrace {n : Nat}
+    (H : List UInt8 → Digest256)
+    (MAC : Digest256 → List UInt8 → Digest256)
+    (macKeys : Fin n → Fin n → Digest256)
+    (Corrupt : CustodiansMask n)
+    (t subtreeHeight echoQuorum : Nat)
+    (initNet : QuorumJortsNetworkState n) : List (QuorumJortsTurn n) → QuorumJortsNetworkState n
+  | [] => initNet
+  | turn :: rest =>
+    runQuorumJortsTrace H MAC macKeys Corrupt t subtreeHeight echoQuorum
+      (stepQuorumJorts H MAC macKeys Corrupt t subtreeHeight echoQuorum initNet turn) rest
+
+theorem runQuorumJortsTrace_append {n : Nat}
+    (H : List UInt8 → Digest256)
+    (MAC : Digest256 → List UInt8 → Digest256)
+    (macKeys : Fin n → Fin n → Digest256)
+    (Corrupt : CustodiansMask n)
+    (t subtreeHeight echoQuorum : Nat) :
+    ∀ (xs ys : List (QuorumJortsTurn n)) (net : QuorumJortsNetworkState n),
+      runQuorumJortsTrace H MAC macKeys Corrupt t subtreeHeight echoQuorum net (xs ++ ys) =
+      runQuorumJortsTrace H MAC macKeys Corrupt t subtreeHeight echoQuorum
+        (runQuorumJortsTrace H MAC macKeys Corrupt t subtreeHeight echoQuorum net xs) ys
+  | [], _, _ => rfl
+  | x :: xs, ys, net =>
+    runQuorumJortsTrace_append H MAC macKeys Corrupt t subtreeHeight echoQuorum xs ys
+      (stepQuorumJorts H MAC macKeys Corrupt t subtreeHeight echoQuorum net x)
+
+/-- Pairwise MAC forgery witness on `"QSAG.QUORUM.ECHO.MAC/v1"` (`computeQuorumEchoMac`) for an
+    honest `(sender, receiver)` pair. -/
+structure QuorumCommitteeEchoMacForgery {n : Nat}
+    (MAC : Digest256 → List UInt8 → Digest256)
+    (macKeys : Fin n → Fin n → Digest256)
+    (Corrupt : CustodiansMask n)
+    (emittedEchoes : List (QuorumCommitteeEcho n)) where
+  sender : Fin n
+  receiver : Fin n
+  honest_sender : Corrupt.mem sender = false
+  honest_receiver : Corrupt.mem receiver = false
+  committeeIdx : Nat
+  epoch : UInt64
+  forgedBinding : Digest256
+  forgedMac : Digest256
+  valid_mac : forgedMac =
+    computeQuorumEchoMac MAC (macKeys sender receiver) sender.val receiver.val
+      committeeIdx epoch forgedBinding
+  never_emitted : ∀ e ∈ emittedEchoes,
+    ¬ (e.fromParty = sender ∧ e.toParty = receiver ∧ e.committeeIdx = committeeIdx ∧
+       e.epoch = epoch ∧ e.binding = forgedBinding)
+
+private def QuorumJortsNetworkInv {n : Nat}
+    (H : List UInt8 → Digest256)
+    (MAC : Digest256 → List UInt8 → Digest256)
+    (macKeys : Fin n → Fin n → Digest256)
+    (Corrupt : CustodiansMask n)
+    (t subtreeHeight echoQuorum : Nat)
+    (net : QuorumJortsNetworkState n) : Prop :=
+  (∀ (p : Fin n) (cIdx : Nat), Corrupt.mem p = false →
+    HonestNodeWalInv (net.slots p cIdx) (net.slotBoundLogs p cIdx)) ∧
+  (∀ e ∈ net.emittedEchoes,
+    Corrupt.mem e.fromParty = false ∧
+    ∃ r ∈ net.slotBoundLogs e.fromParty e.committeeIdx,
+      e.epoch = r.epoch ∧ e.binding = beltRecordBinding H r) ∧
+  (∀ rel ∈ net.releasedLeaves,
+    Corrupt.mem rel.verifier = false ∧
+    committeeIndexOf t rel.committee = some rel.committeeIdx ∧
+    rel.localEpoch = rel.record.epoch ∧
+    rel.record.epoch.toNat < 2 ^ subtreeHeight ∧
+    rel.globalLeaf = committeeGlobalLeaf (2 ^ subtreeHeight) rel.committeeIdx rel.record.epoch.toNat ∧
+    ∃ echoes,
+      verifyCommitteeEchoPermit H MAC macKeys t subtreeHeight echoQuorum
+        rel.committeeIdx rel.verifier rel.committee rel.record echoes = true)
+
+private theorem updateSingleSlot_preserves {n : Nat}
+    {slots : Fin n → Nat → BeltLatchNodeState}
+    {logs : Fin n → Nat → List BeltLatchRecord}
+    {Corrupt : CustodiansMask n}
+    (p : Fin n) (cIdx : Nat) (st' : BeltLatchNodeState)
+    (hSlots : ∀ (i : Fin n) (c : Nat), Corrupt.mem i = false → HonestNodeWalInv (slots i c) (logs i c))
+    (hStep : HonestNodeWalInv st' (logs p cIdx)) :
+    ∀ (i : Fin n) (c : Nat), Corrupt.mem i = false →
+      HonestNodeWalInv (if i = p ∧ c = cIdx then st' else slots i c) (logs i c) := by
+  intro i c hi
+  by_cases hic : i = p ∧ c = cIdx
+  · rcases hic with ⟨rfl, rfl⟩
+    simp only [and_self, ↓reduceIte]
+    exact hStep
+  · simp only [hic, ↓reduceIte]
+    exact hSlots i c hi
+
+private theorem stepQuorumJorts_preserves_inv {n : Nat}
+    (H : List UInt8 → Digest256)
+    (MAC : Digest256 → List UInt8 → Digest256)
+    (macKeys : Fin n → Fin n → Digest256)
+    (Corrupt : CustodiansMask n)
+    (t subtreeHeight echoQuorum : Nat)
+    (net : QuorumJortsNetworkState n) (turn : QuorumJortsTurn n)
+    (hInv : QuorumJortsNetworkInv H MAC macKeys Corrupt t subtreeHeight echoQuorum net) :
+    QuorumJortsNetworkInv H MAC macKeys Corrupt t subtreeHeight echoQuorum
+      (stepQuorumJorts H MAC macKeys Corrupt t subtreeHeight echoQuorum net turn) := by
+  rcases hInv with ⟨hSlots, hEchoes, hRels⟩
+  cases turn with
+  | bindSlot p Q rec =>
+    unfold stepQuorumJorts
+    if hGuard : (Corrupt.mem p || !Q.mem p) = true then
+      simp only [hGuard, ↓reduceIte]; exact ⟨hSlots, hEchoes, hRels⟩
+    else
+      have hGuardF : (Corrupt.mem p || !Q.mem p) = false := Bool.not_eq_true _ |>.mp hGuard
+      have hCpF : Corrupt.mem p = false := (Bool.or_eq_false_iff.mp hGuardF).1
+      simp only [hGuardF, Bool.false_eq_true, ↓reduceIte]
+      cases hIdx : committeeIndexOf t Q with
+      | none => exact ⟨hSlots, hEchoes, hRels⟩
+      | some cIdx =>
+        dsimp only
+        have hStep := honestBind_preserves_walInv (net.slots p cIdx) (net.slotBoundLogs p cIdx) rec (hSlots p cIdx hCpF)
+        cases hOut : beltLatchBindStep (net.slots p cIdx) rec with
+        | accepted st' out =>
+          rw [hOut] at hStep
+          cases out with
+          | fresh =>
+            dsimp only
+            refine ⟨?_, ?_, hRels⟩
+            · intro i c hi
+              by_cases hic : i = p ∧ c = cIdx
+              · rcases hic with ⟨rfl, rfl⟩
+                simp only [and_self, ↓reduceIte]; exact hStep
+              · simp only [hic, ↓reduceIte]; exact hSlots i c hi
+            · intro e he
+              obtain ⟨hSe, r, hrMem, hrEp, hrBnd⟩ := hEchoes e he
+              refine ⟨hSe, r, ?_, hrEp, hrBnd⟩
+              by_cases hec : e.fromParty = p ∧ e.committeeIdx = cIdx
+              · rcases hec with ⟨hfp, hci⟩
+                rw [hfp, hci] at hrMem ⊢
+                simp only [and_self, ↓reduceIte, List.mem_cons]
+                exact .inr hrMem
+              · simp only [hec, ↓reduceIte]; exact hrMem
+          | replay =>
+            dsimp only at hStep ⊢
+            exact ⟨updateSingleSlot_preserves p cIdx st' hSlots hStep, hEchoes, hRels⟩
+        | rejected st' _ =>
+          rw [hOut] at hStep
+          dsimp only at hStep ⊢
+          exact ⟨updateSingleSlot_preserves p cIdx st' hSlots hStep, hEchoes, hRels⟩
+  | emitSlotEcho sender receiver Q =>
+    unfold stepQuorumJorts
+    if hGuard : (Corrupt.mem sender || !Q.mem sender) = true then
+      simp only [hGuard, ↓reduceIte]; exact ⟨hSlots, hEchoes, hRels⟩
+    else
+      have hGuardF : (Corrupt.mem sender || !Q.mem sender) = false := Bool.not_eq_true _ |>.mp hGuard
+      have hCsF : Corrupt.mem sender = false := (Bool.or_eq_false_iff.mp hGuardF).1
+      simp only [hGuardF, Bool.false_eq_true, ↓reduceIte]
+      cases hIdx : committeeIndexOf t Q with
+      | none => exact ⟨hSlots, hEchoes, hRels⟩
+      | some cIdx =>
+        dsimp only
+        if hPois : (net.slots sender cIdx).walPoisoned = true then
+          simp only [hPois, ↓reduceIte]; exact ⟨hSlots, hEchoes, hRels⟩
+        else
+          have hPoisF : (net.slots sender cIdx).walPoisoned = false := Bool.not_eq_true _ |>.mp hPois
+          simp only [hPoisF, Bool.false_eq_true, ↓reduceIte]
+          cases hInf : (net.slots sender cIdx).inFlight with
+          | none => exact ⟨hSlots, hEchoes, hRels⟩
+          | some rec =>
+            dsimp only
+            have hPay := (hSlots sender cIdx hCsF).2 hPoisF
+            have hInLog : rec ∈ net.slotBoundLogs sender cIdx := by
+              have h3 := hPay.2.2
+              dsimp only at h3
+              rw [hInf] at h3
+              exact h3.1
+            refine ⟨hSlots, ?_, hRels⟩
+            intro e he
+            rcases List.mem_cons.mp he with rfl | hOld
+            · exact ⟨hCsF, rec, hInLog, rfl, rfl⟩
+            · exact hEchoes e hOld
+  | crashAndRecoverSlot p Q =>
+    unfold stepQuorumJorts
+    if hGuard : (Corrupt.mem p || !Q.mem p) = true then
+      simp only [hGuard, ↓reduceIte]; exact ⟨hSlots, hEchoes, hRels⟩
+    else
+      have hGuardF : (Corrupt.mem p || !Q.mem p) = false := Bool.not_eq_true _ |>.mp hGuard
+      have hCpF : Corrupt.mem p = false := (Bool.or_eq_false_iff.mp hGuardF).1
+      simp only [hGuardF, Bool.false_eq_true, ↓reduceIte]
+      cases hIdx : committeeIndexOf t Q with
+      | none => exact ⟨hSlots, hEchoes, hRels⟩
+      | some cIdx =>
+        dsimp only
+        have hRecovInv : HonestNodeWalInv
+            (beltLatchCrashAndRecover (net.slots p cIdx)) (net.slotBoundLogs p cIdx) := by
+          rcases hSlots p cIdx hCpF with ⟨hDisk, _⟩
+          unfold beltLatchCrashAndRecover
+          cases hD : (net.slots p cIdx).disk with
+          | unwritten =>
+            rw [hD] at hDisk
+            change net.slotBoundLogs p cIdx = [] at hDisk
+            dsimp only [HonestNodeWalInv, DiskCoversBoundLog, PayloadCoversBoundLog]
+            rw [hDisk]
+            exact ⟨rfl, fun _ => ⟨fun _ h => False.elim (List.not_mem_nil h),
+                                  fun _ h => False.elim (List.not_mem_nil h), trivial⟩⟩
+          | persisted pay =>
+            rw [hD] at hDisk
+            exact ⟨hDisk, fun _ => hDisk⟩
+          | corrupted =>
+            rw [hD] at hDisk
+            exact ⟨hDisk, fun hF => by cases hF⟩
+        exact ⟨updateSingleSlot_preserves p cIdx _ hSlots hRecovInv, hEchoes, hRels⟩
+  | armSlotPersistFault p Q =>
+    unfold stepQuorumJorts
+    if hGuard : (Corrupt.mem p || !Q.mem p) = true then
+      simp only [hGuard, ↓reduceIte]; exact ⟨hSlots, hEchoes, hRels⟩
+    else
+      have hGuardF : (Corrupt.mem p || !Q.mem p) = false := Bool.not_eq_true _ |>.mp hGuard
+      have hCpF : Corrupt.mem p = false := (Bool.or_eq_false_iff.mp hGuardF).1
+      simp only [hGuardF, Bool.false_eq_true, ↓reduceIte]
+      cases hIdx : committeeIndexOf t Q with
+      | none => exact ⟨hSlots, hEchoes, hRels⟩
+      | some cIdx =>
+        dsimp only
+        exact ⟨updateSingleSlot_preserves p cIdx _ hSlots (hSlots p cIdx hCpF), hEchoes, hRels⟩
+  | corruptSlotDisk p Q =>
+    unfold stepQuorumJorts
+    if hGuard : (Corrupt.mem p || !Q.mem p) = true then
+      simp only [hGuard, ↓reduceIte]; exact ⟨hSlots, hEchoes, hRels⟩
+    else
+      have hGuardF : (Corrupt.mem p || !Q.mem p) = false := Bool.not_eq_true _ |>.mp hGuard
+      have hCpF : Corrupt.mem p = false := (Bool.or_eq_false_iff.mp hGuardF).1
+      simp only [hGuardF, Bool.false_eq_true, ↓reduceIte]
+      cases hIdx : committeeIndexOf t Q with
+      | none => exact ⟨hSlots, hEchoes, hRels⟩
+      | some cIdx =>
+        dsimp only
+        have hCorrInv : HonestNodeWalInv
+            { net.slots p cIdx with disk := .corrupted, walPoisoned := true, inFlight := none }
+            (net.slotBoundLogs p cIdx) := by
+          rcases hSlots p cIdx hCpF with ⟨hDisk, _⟩
+          exact ⟨diskUniq_of_diskCovers hDisk, fun hF => by cases hF⟩
+        exact ⟨updateSingleSlot_preserves p cIdx _ hSlots hCorrInv, hEchoes, hRels⟩
+  | releasePartitionedLeaf verifier Q rec echoes =>
+    unfold stepQuorumJorts
+    if hCv : Corrupt.mem verifier = true then
+      simp only [hCv, ↓reduceIte]; exact ⟨hSlots, hEchoes, hRels⟩
+    else
+      have hCvF : Corrupt.mem verifier = false := Bool.not_eq_true _ |>.mp hCv
+      simp only [hCvF, Bool.false_eq_true, ↓reduceIte]
+      cases hIdx : committeeIndexOf t Q with
+      | none => exact ⟨hSlots, hEchoes, hRels⟩
+      | some cIdx =>
+        dsimp only
+        if hOk : (!((net.slots verifier cIdx).walPoisoned) &&
+            decide ((net.slots verifier cIdx).inFlight = some rec) &&
+            verifyCommitteeEchoPermit H MAC macKeys t subtreeHeight echoQuorum cIdx verifier Q rec echoes) = true then
+          simp only [hOk, ↓reduceIte]
+          have hPerm : verifyCommitteeEchoPermit H MAC macKeys t subtreeHeight echoQuorum cIdx verifier Q rec echoes = true :=
+            (Bool.and_eq_true_iff.mp hOk).2
+          have hEpLt : rec.epoch.toNat < 2 ^ subtreeHeight := by
+            unfold verifyCommitteeEchoPermit at hPerm
+            rcases Bool.and_eq_true_iff.mp hPerm with ⟨h123, _⟩
+            rcases Bool.and_eq_true_iff.mp h123 with ⟨_, hEpDec⟩
+            exact of_decide_eq_true hEpDec
+          refine ⟨hSlots, hEchoes, ?_⟩
+          intro rel hrel
+          rcases List.mem_cons.mp hrel with rfl | hOld
+          · exact ⟨hCvF, hIdx, rfl, hEpLt, rfl, echoes, hPerm⟩
+          · exact hRels rel hOld
+        else
+          simp only [hOk, Bool.false_eq_true, ↓reduceIte]
+          exact ⟨hSlots, hEchoes, hRels⟩
+
+private theorem runQuorumJortsTrace_preserves_inv {n : Nat}
+    (H : List UInt8 → Digest256)
+    (MAC : Digest256 → List UInt8 → Digest256)
+    (macKeys : Fin n → Fin n → Digest256)
+    (Corrupt : CustodiansMask n)
+    (t subtreeHeight maxWindow echoQuorum : Nat)
+    (trace : List (QuorumJortsTurn n)) :
+    QuorumJortsNetworkInv H MAC macKeys Corrupt t subtreeHeight echoQuorum
+      (runQuorumJortsTrace H MAC macKeys Corrupt t subtreeHeight echoQuorum
+        (QuorumJortsNetworkState.init n subtreeHeight maxWindow) trace) := by
+  have hInit : QuorumJortsNetworkInv H MAC macKeys Corrupt t subtreeHeight echoQuorum
+      (QuorumJortsNetworkState.init n subtreeHeight maxWindow) := by
+    refine ⟨?_, ?_, ?_⟩
+    · intro p cIdx _
+      exact ⟨rfl, fun _ => ⟨fun _ h => False.elim (List.not_mem_nil h),
+                            fun _ h => False.elim (List.not_mem_nil h), trivial⟩⟩
+    · intro _ h
+      exact False.elim (List.not_mem_nil h)
+    · intro _ h
+      exact False.elim (List.not_mem_nil h)
+  generalize QuorumJortsNetworkState.init n subtreeHeight maxWindow = net₀ at hInit
+  induction trace generalizing net₀ with
+  | nil => exact hInit
+  | cons turn rest ih =>
+    exact ih _ (stepQuorumJorts_preserves_inv H MAC macKeys Corrupt t subtreeHeight echoQuorum net₀ turn hInit)
+
+private def findMatchingCommitteeEcho {n : Nat}
+    (H : List UInt8 → Digest256)
+    (MAC : Digest256 → List UInt8 → Digest256)
+    (key : Digest256) (s v : Fin n) (cIdx : Nat) (rec : BeltLatchRecord) :
+    (echoes : List (QuorumCommitteeEcho n)) →
+    echoes.any (fun e => verifyQuorumCommitteeEcho H MAC key s v cIdx rec e) = true →
+    { e : QuorumCommitteeEcho n //
+      e ∈ echoes ∧ verifyQuorumCommitteeEcho H MAC key s v cIdx rec e = true }
+  | [], h => by cases h
+  | e :: es, h =>
+    if he : verifyQuorumCommitteeEcho H MAC key s v cIdx rec e = true then
+      ⟨e, .head es, he⟩
+    else
+      have hTail : es.any (fun x => verifyQuorumCommitteeEcho H MAC key s v cIdx rec x) = true := by
+        simp only [List.any_cons, he, Bool.false_or] at h
+        exact h
+      let ⟨e', hm', hv'⟩ := findMatchingCommitteeEcho H MAC key s v cIdx rec es hTail
+      ⟨e', .tail e hm', hv'⟩
+
+private theorem mask_eq_of_sub_and_card_ge {n : Nat} {A B : CustodiansMask n}
+    (hSub : maskSub A B) (hGe : maskCard B ≤ maskCard A) : A = B := by
+  have hInterEq : maskInter B A = A := by
+    apply congrArg CustodiansMask.mk; funext i
+    dsimp only [maskInter]
+    cases ha : A.mem i
+    · exact Bool.and_false _
+    · rw [hSub i ha]; rfl
+  have hDiffZero : maskCard (maskDiff B A) = 0 := by
+    have hSplit := maskCard_diff_add_inter B A
+    rw [hInterEq] at hSplit
+    omega
+  cases A with
+  | mk fA =>
+    cases B with
+    | mk fB =>
+      apply congrArg CustodiansMask.mk; funext i
+      cases ha : fA i <;> cases hb : fB i
+      · rfl
+      · exfalso
+        have hSubSingle : maskSub ⟨fun j => decide (j = i)⟩ (maskDiff ⟨fB⟩ ⟨fA⟩) := by
+          intro j hj
+          have hji : j = i := of_decide_eq_true hj
+          subst hji; simp [maskDiff, ha, hb]
+        have hMono := maskCard_mono hSubSingle
+        rw [maskCard_singleton i] at hMono
+        omega
+      · have hImp := hSub i ha
+        dsimp only at hImp
+        rw [hb] at hImp
+        cases hImp
+      · rfl
+
+/-- Readiness predicate on a `(custodian, committeeIdx)` slot to freshly bind `rec`. -/
+def SlotReadyForFreshBind (subtreeHeight : Nat) (st : BeltLatchNodeState) (rec : BeltLatchRecord) : Prop :=
+  st.height = subtreeHeight ∧
+  st.walPoisoned = false ∧
+  st.failNextPersist = false ∧
+  st.disk ≠ .corrupted ∧
+  (∀ cur, st.inFlight = some cur → cur.epoch ≠ rec.epoch) ∧
+  st.nextEpoch ≤ rec.epoch.toNat ∧
+  rec.epoch.toNat < 2 ^ subtreeHeight ∧
+  rec.epoch.toNat ≤ st.nextEpoch + st.maxWindow
+
+theorem slotReadyForFreshBind_init (subtreeHeight maxWindow : Nat) (rec : BeltLatchRecord)
+    (hEp0 : rec.epoch = 0) :
+    SlotReadyForFreshBind subtreeHeight (BeltLatchNodeState.init subtreeHeight maxWindow) rec := by
+  have hPowPos : 0 < 2 ^ subtreeHeight := Nat.two_pow_pos subtreeHeight
+  have hEpNat : rec.epoch.toNat = 0 := by rw [hEp0]; rfl
+  unfold SlotReadyForFreshBind BeltLatchNodeState.init
+  dsimp only
+  rw [hEpNat]
+  exact ⟨rfl, rfl, rfl, fun h => by cases h, fun _ h => by cases h,
+         Nat.le_refl 0, hPowPos, Nat.zero_le maxWindow⟩
+
+private theorem beltLatchBindStep_of_slotReady {subtreeHeight : Nat}
+    {st : BeltLatchNodeState} {rec : BeltLatchRecord}
+    (hReady : SlotReadyForFreshBind subtreeHeight st rec) :
+    beltLatchBindStep st rec =
+      .accepted
+        { st with
+          nextEpoch := rec.epoch.toNat + 1
+          inFlight := some rec
+          disk := .persisted { nextEpoch := rec.epoch.toNat + 1, inFlight := some rec } }
+        .fresh := by
+  rcases hReady with ⟨hH, hPois, hFail, hDiskNe, hInfNe, hGe, hLtPow, hLeWin⟩
+  unfold beltLatchBindStep
+  have hNotLt : ¬ rec.epoch.toNat < st.nextEpoch := Nat.not_lt.mpr hGe
+  have hNotExh : ¬ rec.epoch.toNat ≥ 2 ^ st.height := by rw [hH]; exact Nat.not_le.mpr hLtPow
+  have hNotJump : ¬ rec.epoch.toNat > st.nextEpoch + st.maxWindow := Nat.not_lt.mpr hLeWin
+  have hDiskF : decide (st.disk = .corrupted) = false := decide_eq_false hDiskNe
+  simp only [hPois, Bool.false_eq_true, ↓reduceIte]
+  cases hInf : st.inFlight with
+  | none =>
+    simp [hNotLt, hNotExh, hNotJump, hFail, hDiskF]
+  | some cur =>
+    have hCurNe : decide (cur.epoch = rec.epoch) = false := decide_eq_false (hInfNe cur hInf)
+    simp [hCurNe, hNotLt, hNotExh, hNotJump, hFail, hDiskF]
+
+/-- Constructive multi-turn round trace on `QuorumJortsTurn n` executing a complete signing round
+    for committee `Q` (at index `cIdx`) coordinated by `verifier` on `rec`:
+    1. Every custodian `p ∈ maskMembers Q` durably binds `rec` in slot `cIdx`;
+    2. Every custodian `s ∈ maskMembers Q` broadcasts its `quorumEchoMacTag` echo to `verifier`;
+    3. `verifier` verifies the full committee echo permit and releases the global-tree leaf record. -/
+def buildCommitteeSignTrace {n : Nat}
+    (H : List UInt8 → Digest256)
+    (MAC : Digest256 → List UInt8 → Digest256)
+    (macKeys : Fin n → Fin n → Digest256)
+    (cIdx : Nat) (Q : CustodiansMask n) (verifier : Fin n) (rec : BeltLatchRecord) :
+    List (QuorumJortsTurn n) :=
+  let members := maskMembers Q
+  let bindTurns := members.map (fun p => QuorumJortsTurn.bindSlot p Q rec)
+  let echoTurns := members.map (fun s => QuorumJortsTurn.emitSlotEcho s verifier Q)
+  let bnd := beltRecordBinding H rec
+  let echoes : List (QuorumCommitteeEcho n) :=
+    members.map (fun s =>
+      { fromParty := s
+        toParty := verifier
+        committeeIdx := cIdx
+        epoch := rec.epoch
+        binding := bnd
+        mac := computeQuorumEchoMac MAC (macKeys s verifier) s.val verifier.val cIdx rec.epoch bnd })
+  bindTurns ++ echoTurns ++ [.releasePartitionedLeaf verifier Q rec echoes]
+
+private theorem runBindTurns_slots {n : Nat}
+    (H : List UInt8 → Digest256)
+    (MAC : Digest256 → List UInt8 → Digest256)
+    (macKeys : Fin n → Fin n → Digest256)
+    (Corrupt : CustodiansMask n)
+    (t subtreeHeight echoQuorum cIdx : Nat)
+    (Q : CustodiansMask n) (rec : BeltLatchRecord)
+    (hIdx : committeeIndexOf t Q = some cIdx) :
+    ∀ (ms : List (Fin n)) (net : QuorumJortsNetworkState n),
+      ms.Nodup →
+      (∀ p ∈ ms, Corrupt.mem p = false ∧ Q.mem p = true ∧
+        SlotReadyForFreshBind subtreeHeight (net.slots p cIdx) rec) →
+      let net' := runQuorumJortsTrace H MAC macKeys Corrupt t subtreeHeight echoQuorum net
+        (ms.map (fun p => QuorumJortsTurn.bindSlot p Q rec))
+      (∀ p ∈ ms,
+        (net'.slots p cIdx).walPoisoned = false ∧
+        (net'.slots p cIdx).inFlight = some rec ∧
+        (net'.slots p cIdx).nextEpoch = rec.epoch.toNat + 1) ∧
+      (∀ q, q ∉ ms → net'.slots q cIdx = net.slots q cIdx) := by
+  intro ms
+  induction ms with
+  | nil =>
+    intro net _ _
+    exact ⟨fun _ h => False.elim (List.not_mem_nil h), fun _ _ => rfl⟩
+  | cons m ms ih =>
+    intro net hNd hReadyAll
+    dsimp only [List.map, runQuorumJortsTrace]
+    obtain ⟨hmNotIn, hNdTail⟩ := List.nodup_cons.mp hNd
+    obtain ⟨hmHon, hmInQ, hmReady⟩ := hReadyAll m (.head ms)
+    have hBindM := beltLatchBindStep_of_slotReady hmReady
+    let netMid := stepQuorumJorts H MAC macKeys Corrupt t subtreeHeight echoQuorum net (.bindSlot m Q rec)
+    have hNetMidSlots : ∀ (i : Fin n) (c : Nat),
+        netMid.slots i c =
+          if i = m ∧ c = cIdx then
+            { net.slots m cIdx with
+              nextEpoch := rec.epoch.toNat + 1
+              inFlight := some rec
+              disk := .persisted { nextEpoch := rec.epoch.toNat + 1, inFlight := some rec } }
+          else net.slots i c := by
+      intro i c
+      dsimp only [netMid, stepQuorumJorts]
+      simp only [hmHon, hmInQ, Bool.not_true, Bool.or_self, Bool.false_eq_true, ↓reduceIte, hIdx, hBindM]
+    have hReadyTail : ∀ p ∈ ms, Corrupt.mem p = false ∧ Q.mem p = true ∧
+        SlotReadyForFreshBind subtreeHeight (netMid.slots p cIdx) rec := by
+      intro p hp
+      obtain ⟨hpHon, hpQ, hpReady⟩ := hReadyAll p (.tail m hp)
+      have hNe : p ≠ m := fun he => hmNotIn (he ▸ hp)
+      rw [hNetMidSlots p cIdx]
+      simp only [hNe, false_and, ↓reduceIte]
+      exact ⟨hpHon, hpQ, hpReady⟩
+    obtain ⟨ihMem, ihOut⟩ := ih netMid hNdTail hReadyTail
+    refine ⟨?_, ?_⟩
+    · intro p hp
+      rcases List.mem_cons.mp hp with rfl | hpTail
+      · have hUnch :
+            (runQuorumJortsTrace H MAC macKeys Corrupt t subtreeHeight echoQuorum netMid
+              (ms.map (fun p => QuorumJortsTurn.bindSlot p Q rec))).slots p cIdx =
+            netMid.slots p cIdx := ihOut p hmNotIn
+        rw [hUnch, hNetMidSlots p cIdx]
+        simp [hmReady.2.1]
+      · exact ihMem p hpTail
+    · intro q hqNot
+      have hqNeM : q ≠ m := fun he => hqNot (he ▸ .head ms)
+      have hqNotTail : q ∉ ms := fun hm => hqNot (.tail m hm)
+      have hUnch :
+          (runQuorumJortsTrace H MAC macKeys Corrupt t subtreeHeight echoQuorum netMid
+            (ms.map (fun p => QuorumJortsTurn.bindSlot p Q rec))).slots q cIdx =
+          netMid.slots q cIdx := ihOut q hqNotTail
+      rw [hUnch, hNetMidSlots q cIdx]
+      simp [hqNeM]
+
+private theorem runEchoTurns_emits {n : Nat}
+    (H : List UInt8 → Digest256)
+    (MAC : Digest256 → List UInt8 → Digest256)
+    (macKeys : Fin n → Fin n → Digest256)
+    (Corrupt : CustodiansMask n)
+    (t subtreeHeight echoQuorum cIdx : Nat)
+    (Q : CustodiansMask n) (verifier : Fin n) (rec : BeltLatchRecord)
+    (hIdx : committeeIndexOf t Q = some cIdx) :
+    ∀ (ms : List (Fin n)) (net : QuorumJortsNetworkState n),
+      (∀ s ∈ ms, Corrupt.mem s = false ∧ Q.mem s = true ∧
+        (net.slots s cIdx).walPoisoned = false ∧ (net.slots s cIdx).inFlight = some rec) →
+      let net' := runQuorumJortsTrace H MAC macKeys Corrupt t subtreeHeight echoQuorum net
+        (ms.map (fun s => QuorumJortsTurn.emitSlotEcho s verifier Q))
+      net'.slots = net.slots ∧
+      (∀ e ∈ net.emittedEchoes, e ∈ net'.emittedEchoes) ∧
+      (∀ s ∈ ms,
+        ({ fromParty := s
+           toParty := verifier
+           committeeIdx := cIdx
+           epoch := rec.epoch
+           binding := beltRecordBinding H rec
+           mac := computeQuorumEchoMac MAC (macKeys s verifier) s.val verifier.val
+             cIdx rec.epoch (beltRecordBinding H rec) } : QuorumCommitteeEcho n) ∈ net'.emittedEchoes)
+  | [], net, _ => ⟨rfl, fun _ h => h, fun _ h => by cases h⟩
+  | s :: ms, net, hAll => by
+    obtain ⟨hsHon, hsQ, hsPois, hsInf⟩ := hAll s (.head ms)
+    let netMid := stepQuorumJorts H MAC macKeys Corrupt t subtreeHeight echoQuorum net (.emitSlotEcho s verifier Q)
+    have hMidEq : netMid =
+        { net with
+          emittedEchoes :=
+            { fromParty := s
+              toParty := verifier
+              committeeIdx := cIdx
+              epoch := rec.epoch
+              binding := beltRecordBinding H rec
+              mac := computeQuorumEchoMac MAC (macKeys s verifier) s.val verifier.val
+                cIdx rec.epoch (beltRecordBinding H rec) } :: net.emittedEchoes } := by
+      dsimp only [netMid, stepQuorumJorts]
+      simp [hsHon, hsQ, hIdx, hsPois, hsInf]
+    have hTail : ∀ x ∈ ms, Corrupt.mem x = false ∧ Q.mem x = true ∧
+        (netMid.slots x cIdx).walPoisoned = false ∧ (netMid.slots x cIdx).inFlight = some rec := by
+      intro x hx
+      rw [hMidEq]
+      exact hAll x (.tail s hx)
+    obtain ⟨ihSlots, ihSub, ihMem⟩ :=
+      runEchoTurns_emits H MAC macKeys Corrupt t subtreeHeight echoQuorum cIdx Q verifier rec hIdx
+        ms netMid hTail
+    refine ⟨ihSlots.trans (by rw [hMidEq]), ?_, ?_⟩
+    · intro e he
+      apply ihSub
+      rw [hMidEq]
+      exact .tail _ he
+    · intro x hx
+      rcases List.mem_cons.mp hx with rfl | hxTail
+      · apply ihSub
+        rw [hMidEq]
+        exact .head _
+      · exact ihMem x hxTail
+
+/-- **Crown Jewel 2 — Multi-Turn Committee-Partitioned & BFT Quorum-Switching `Jorts` Theorem
+    (`committee_partitioned_jorts_safe_and_live_for_2f_plus_1`)**:
+    Over an arbitrary open-world multi-turn execution `trace : List (QuorumJortsTurn n)` starting
+    from `QuorumJortsNetworkState.init n subtreeHeight maxWindow`:
+    1. **(a) Multi-Turn Global Leaf Non-Equivocation & Subtree Cursor Monotonicity**:
+       Whenever `(echoQuorum = t ∧ f < t)` (Mode `QS-A` committee-partitioned subtrees across
+       `chooseMasks n t`, including `n = 2 * f + 1, t = f + 1`: `(2, 3, 1)` = 3 subtrees and
+       `(3, 5, 2)` = 10 subtrees) OR `2 * echoQuorum > n + f` (Mode `QS-B` global BFT quorum):
+       - Any two released leaf signatures `rel₁, rel₂ ∈ net.releasedLeaves` across the entire
+         multi-turn `trace` that target the same global Merkle leaf (`rel₁.globalLeaf = rel₂.globalLeaf`)
+         necessarily agree on `(committeeIdx, committee, localEpoch)` AND satisfy
+         `rel₁.record = rel₂.record` unless the adversary produced an explicit
+         `QuorumCommitteeEchoMacForgery` (`"QSAG.QUORUM.ECHO.MAC/v1"`) or `HashCollision256 H`
+         (`"QSAG.BELT.LATCH.BINDING/v1"`)!
+       - Every honest unpoisoned slot `(p, cIdx)` maintains a monotone `nextEpoch` cursor strictly
+         above all bound epochs in `net.slotBoundLogs p cIdx` across arbitrary crashes and replays.
+    2. **(b) Intra-Committee `(t - 1)`-Corruption & Cross-Committee (`Q' ≠ Q`) Share Privacy**:
+       When `f < t`, every `t`-committee `Q` constructively yields an honest member `pHon ∈ Q \ Corrupt`
+       and an involutive `SimpleEquiv` hiding `Q`'s `t`-of-`t` leaf secrets from `Corrupt`, AND for
+       every other `t`-committee `Q' ≠ Q`, `Q'`'s share view has **exact `0` statistical distance**
+       (`finSum`) between any two leaf secrets `sec₁, sec₂`.
+    3. **(c) Multi-Turn Live Signing via `selectSubcommittee` under `≤ f` Faults (`n = 2 * f + 1`)**:
+       Whenever `0 < t`, `echoQuorum ≤ t`, and `Online` has `t ≤ maskCard (maskDiff Online Corrupt)`,
+       `live := selectSubcommittee t (maskDiff Online Corrupt) hOnlineHon` selects an all-honest
+       online committee `live.1 ∈ chooseMasks n t`; from ANY state `net` whose `live.1` slots at
+       `cIdx` satisfy `SlotReadyForFreshBind subtreeHeight _ rec`, appending the multi-turn trace
+       `buildCommitteeSignTrace` advances `(slots p cIdx).nextEpoch` to `rec.epoch.toNat + 1` across
+       `live.1`, emits genuine `quorumEchoMacTag` echoes, appends the certified `ReleasedQuorumLeaf`
+       at `committeeGlobalLeaf (2 ^ subtreeHeight) cIdx rec.epoch.toNat`, and reconstructs
+       `xorFin256 t (dealAdditiveShares t secret tape) = secret`! -/
+theorem committee_partitioned_jorts_safe_and_live_for_2f_plus_1
+    {n t f subtreeHeight maxWindow echoQuorum : Nat}
+    (H : List UInt8 → Digest256)
+    (MAC : Digest256 → List UInt8 → Digest256)
+    (macKeys : Fin n → Fin n → Digest256)
+    (Corrupt : CustodiansMask n) (hCorrupt : maskCard Corrupt ≤ f) :
+    -- (a) Multi-turn global leaf non-equivocation & cursor monotonicity across arbitrary List (QuorumJortsTurn n):
+    (((echoQuorum = t ∧ f < t) ∨ 2 * echoQuorum > n + f) →
+      ∀ (trace : List (QuorumJortsTurn n)),
+        let net := runQuorumJortsTrace H MAC macKeys Corrupt t subtreeHeight echoQuorum
+          (QuorumJortsNetworkState.init n subtreeHeight maxWindow) trace
+        (∀ rel₁ ∈ net.releasedLeaves, ∀ rel₂ ∈ net.releasedLeaves,
+          rel₁.globalLeaf = rel₂.globalLeaf →
+          rel₁.committeeIdx = rel₂.committeeIdx ∧
+          rel₁.committee = rel₂.committee ∧
+          rel₁.localEpoch = rel₂.localEpoch ∧
+          (rel₁.record = rel₂.record ∨
+           Nonempty (QuorumCommitteeEchoMacForgery MAC macKeys Corrupt net.emittedEchoes) ∨
+           Nonempty (HashCollision256 H))) ∧
+        (∀ (p : Fin n) (cIdx : Nat),
+          Corrupt.mem p = false →
+          (net.slots p cIdx).walPoisoned = false →
+          ∀ r ∈ net.slotBoundLogs p cIdx, r.epoch.toNat < (net.slots p cIdx).nextEpoch)) ∧
+    -- (b) Intra-committee Corrupt share hiding (when f < t) and cross-committee Q' ≠ Q 0-distance share independence:
+    ((f < t →
+      ∀ (Q : CustodiansMask n), maskCard Q = t → ∀ (sec₁ sec₂ : Digest256),
+        ∃ (pHon : Fin n) (bijCorr : SimpleEquiv (Fin (t - 1) → Digest256) (Fin (t - 1) → Digest256)),
+          Q.mem pHon = true ∧
+          Corrupt.mem pHon = false ∧
+          (∀ tape : Fin (t - 1) → Digest256,
+            committeeViewerObservation t Q Corrupt sec₂ (bijCorr.toFun tape) =
+              committeeViewerObservation t Q Corrupt sec₁ tape)) ∧
+     (∀ (Q Q' : CustodiansMask n), maskCard Q = t → maskCard Q' = t →
+        Q' ≠ Q →
+        ∀ (sec₁ sec₂ : Digest256),
+          ∃ (pMiss : Fin n) (bijCross : SimpleEquiv (Fin (t - 1) → Digest256) (Fin (t - 1) → Digest256)),
+            Q.mem pMiss = true ∧ Q'.mem pMiss = false ∧
+            (∀ tape : Fin (t - 1) → Digest256,
+              committeeViewerObservation t Q Q' sec₂ (bijCross.toFun tape) =
+                committeeViewerObservation t Q Q' sec₁ tape) ∧
+            (∀ (Card : Nat) (enum : SimpleEquiv (Fin Card) (Fin (t - 1) → Digest256))
+               (D : (Fin n → Option Digest256) → Bool),
+              finSum Card (fun r => if D (committeeViewerObservation t Q Q' sec₁ (enum.toFun r)) then 1 else 0) =
+                finSum Card (fun r => if D (committeeViewerObservation t Q Q' sec₂ (enum.toFun r)) then 1 else 0)))) ∧
+    -- (c) Multi-turn live committee selection & signing round progression on QuorumJortsNetworkState:
+    (0 < t → echoQuorum ≤ t →
+      ∀ (Online : CustodiansMask n) (hOnlineHon : t ≤ maskCard (maskDiff Online Corrupt)),
+        let live := selectSubcommittee t (maskDiff Online Corrupt) hOnlineHon
+        live.1 ∈ chooseMasks n t ∧
+        maskCard live.1 = t ∧
+        (∀ p : Fin n, live.1.mem p = true → Online.mem p = true ∧ Corrupt.mem p = false) ∧
+        (∀ (secret : Digest256) (tape : Fin (t - 1) → Digest256),
+          xorFin256 t (dealAdditiveShares t secret tape) = secret) ∧
+        (∀ (cIdx : Nat) (verifier : Fin n) (rec : BeltLatchRecord) (net : QuorumJortsNetworkState n),
+          committeeIndexOf t live.1 = some cIdx →
+          live.1.mem verifier = true →
+          (∀ p : Fin n, live.1.mem p = true → SlotReadyForFreshBind subtreeHeight (net.slots p cIdx) rec) →
+          let net' := runQuorumJortsTrace H MAC macKeys Corrupt t subtreeHeight echoQuorum net
+            (buildCommitteeSignTrace H MAC macKeys cIdx live.1 verifier rec)
+          (∀ p : Fin n, live.1.mem p = true → (net'.slots p cIdx).nextEpoch = rec.epoch.toNat + 1) ∧
+          ({ committee := live.1
+             committeeIdx := cIdx
+             localEpoch := rec.epoch
+             globalLeaf := committeeGlobalLeaf (2 ^ subtreeHeight) cIdx rec.epoch.toNat
+             verifier := verifier
+             record := rec } : ReleasedQuorumLeaf n) ∈ net'.releasedLeaves)) := by
+  have hBuildBij : ∀ (Q Viewer : CustodiansMask n) (hQ : maskCard Q = t)
+      (pMiss : Fin n) (hpInQ : Q.mem pMiss = true) (hpNotV : Viewer.mem pMiss = false)
+      (sec₁ sec₂ : Digest256),
+      ∃ bij : SimpleEquiv (Fin (t - 1) → Digest256) (Fin (t - 1) → Digest256),
+        ∀ tape : Fin (t - 1) → Digest256,
+          committeeViewerObservation t Q Viewer sec₂ (bij.toFun tape) =
+            committeeViewerObservation t Q Viewer sec₁ tape := by
+    intro Q Viewer hQ pMiss hpInQ hpNotV sec₁ sec₂
+    have hpMemList : pMiss ∈ maskMembers Q := (mem_maskMembers_iff Q pMiss).mpr hpInQ
+    obtain ⟨missIdx, hMissPos⟩ := memberPositionAux_some_of_mem pMiss (maskMembers Q) hpMemList
+    have hMissLt : missIdx < t := by
+      have h1 := memberPositionAux_lt pMiss (maskMembers Q) hMissPos
+      rw [maskMembers_length Q, hQ] at h1
+      exact h1
+    let missingSlot : Fin t := ⟨missIdx, hMissLt⟩
+    refine ⟨committeeAdditiveRebalanceEquiv t missingSlot sec₁ sec₂, ?_⟩
+    intro tape
+    funext p
+    unfold committeeViewerObservation
+    cases hVp : Viewer.mem p
+    · rfl
+    · simp only [↓reduceIte]
+      unfold committeeCustodianShare
+      cases hPosP : memberPositionAux p (maskMembers Q) with
+      | none => rfl
+      | some idxP =>
+        dsimp only
+        by_cases hLtP : idxP < t
+        · simp only [hLtP, ↓reduceDIte]
+          have hSlotNe : (⟨idxP, hLtP⟩ : Fin t) ≠ missingSlot := by
+            intro hSlotEq
+            have hIdxEq : idxP = missIdx := congrArg Fin.val hSlotEq
+            subst hIdxEq
+            have hpEq : p = pMiss := memberPositionAux_inj (maskMembers Q) hPosP hMissPos
+            subst hpEq
+            rw [hpNotV] at hVp
+            cases hVp
+          exact congrArg some
+            (dealAdditiveShares_rebalance_other t missingSlot ⟨idxP, hLtP⟩ hSlotNe sec₁ sec₂ tape)
+        · simp only [hLtP, ↓reduceDIte]
+  refine ⟨?_, ⟨?_, ?_⟩, ?_⟩
+  · -- Part (a): Multi-turn non-equivocation & cursor monotonicity
+    intro hSafeRegime trace net
+    have hNetInv :=
+      runQuorumJortsTrace_preserves_inv H MAC macKeys Corrupt t subtreeHeight maxWindow echoQuorum trace
+    rcases hNetInv with ⟨hSlotInvs, hEchoInvs, hRelInvs⟩
+    refine ⟨?_, ?_⟩
+    · intro rel₁ hRel₁ rel₂ hRel₂ hSameGLeaf
+      obtain ⟨hv₁Hon, hIdx₁, hLoc₁, hLt₁, hGL₁, echoes₁, hPerm₁⟩ := hRelInvs rel₁ hRel₁
+      obtain ⟨hv₂Hon, hIdx₂, hLoc₂, hLt₂, hGL₂, echoes₂, hPerm₂⟩ := hRelInvs rel₂ hRel₂
+      have hDisj :=
+        committee_leaf_ranges_disjoint hLt₁ hLt₂ (hGL₁.symm.trans (hSameGLeaf.trans hGL₂))
+      have hCIdxEq : rel₁.committeeIdx = rel₂.committeeIdx := hDisj.1
+      have hRecEpEq : rel₁.record.epoch = rel₂.record.epoch :=
+        UInt64.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq hDisj.2)
+      have hCommEq : rel₁.committee = rel₂.committee :=
+        committeeIndexOf_inj hIdx₁ (hCIdxEq ▸ hIdx₂)
+      have hLocEpEq : rel₁.localEpoch = rel₂.localEpoch :=
+        hLoc₁.trans (hRecEpEq.trans hLoc₂.symm)
+      refine ⟨hCIdxEq, hCommEq, hLocEpEq, ?_⟩
+      let cIdx := rel₁.committeeIdx
+      let Q := rel₁.committee
+      have hQCard : maskCard Q = t := committeeIndexOf_card hIdx₁
+      let S₁ := validCommitteeEchoSenders H MAC macKeys cIdx rel₁.verifier Q rel₁.record echoes₁
+      let S₂ := validCommitteeEchoSenders H MAC macKeys cIdx rel₂.verifier Q rel₂.record echoes₂
+      have hCardS₁ : echoQuorum ≤ maskCard S₁ := by
+        unfold verifyCommitteeEchoPermit at hPerm₁
+        exact of_decide_eq_true (Bool.and_eq_true_iff.mp hPerm₁).2
+      have hCardS₂ : echoQuorum ≤ maskCard S₂ := by
+        unfold verifyCommitteeEchoPermit at hPerm₂
+        have hP2 := (Bool.and_eq_true_iff.mp hPerm₂).2
+        rw [← hCIdxEq, ← hCommEq] at hP2
+        exact of_decide_eq_true hP2
+      have hSubS₁ : maskSub S₁ Q := fun s hs => (Bool.and_eq_true_iff.mp hs).1
+      have hSubS₂ : maskSub S₂ Q := fun s hs => (Bool.and_eq_true_iff.mp hs).1
+      have hHonInterPos : 0 < maskCard (maskDiff (maskInter S₁ S₂) Corrupt) := by
+        rcases hSafeRegime with ⟨rfl, hFltT⟩ | hBftQuorum
+        · have hS1EqQ : S₁ = Q := mask_eq_of_sub_and_card_ge hSubS₁ (hQCard ▸ hCardS₁)
+          have hS2EqQ : S₂ = Q := mask_eq_of_sub_and_card_ge hSubS₂ (hQCard ▸ hCardS₂)
+          have hInterQ : maskInter S₁ S₂ = Q := by
+            rw [hS1EqQ, hS2EqQ]
+            apply congrArg CustodiansMask.mk; funext s; exact Bool.and_self _
+          rw [hInterQ]
+          have hDiff := maskCard_diff_ge Q Corrupt
+          omega
+        · have hIE := maskCard_inter_add_n_ge S₁ S₂
+          have hDiff := maskCard_diff_ge (maskInter S₁ S₂) Corrupt
+          omega
+      let ⟨pHon, hpHon⟩ := extractMaskMember (maskDiff (maskInter S₁ S₂) Corrupt) hHonInterPos
+      simp only [maskDiff, maskInter, Bool.and_eq_true, Bool.not_eq_true'] at hpHon
+      obtain ⟨⟨hpS₁, hpS₂⟩, hpNotCorr⟩ := hpHon
+      have hAny₁ : echoes₁.any
+          (fun e => verifyQuorumCommitteeEcho H MAC (macKeys pHon rel₁.verifier)
+            pHon rel₁.verifier cIdx rel₁.record e) = true :=
+        (Bool.and_eq_true_iff.mp hpS₁).2
+      have hAny₂ : echoes₂.any
+          (fun e => verifyQuorumCommitteeEcho H MAC (macKeys pHon rel₂.verifier)
+            pHon rel₂.verifier cIdx rel₂.record e) = true :=
+        (Bool.and_eq_true_iff.mp hpS₂).2
+      let ⟨e₁, _, hVer₁⟩ :=
+        findMatchingCommitteeEcho H MAC (macKeys pHon rel₁.verifier) pHon rel₁.verifier cIdx rel₁.record echoes₁ hAny₁
+      let ⟨e₂, _, hVer₂⟩ :=
+        findMatchingCommitteeEcho H MAC (macKeys pHon rel₂.verifier) pHon rel₂.verifier cIdx rel₂.record echoes₂ hAny₂
+      unfold verifyQuorumCommitteeEcho at hVer₁ hVer₂
+      rcases Bool.and_eq_true_iff.mp hVer₁ with ⟨_, hMac₁⟩
+      rcases Bool.and_eq_true_iff.mp hVer₂ with ⟨_, hMac₂⟩
+      let bnd₁ := beltRecordBinding H rel₁.record
+      let bnd₂ := beltRecordBinding H rel₂.record
+      if hEm₁ : net.emittedEchoes.any
+          (fun e => decide (e.fromParty = pHon) && decide (e.toParty = rel₁.verifier) &&
+            decide (e.committeeIdx = cIdx) && decide (e.epoch = rel₁.record.epoch) &&
+            decide (e.binding = bnd₁)) = true then
+        if hEm₂ : net.emittedEchoes.any
+            (fun e => decide (e.fromParty = pHon) && decide (e.toParty = rel₂.verifier) &&
+              decide (e.committeeIdx = cIdx) && decide (e.epoch = rel₂.record.epoch) &&
+              decide (e.binding = bnd₂)) = true then
+          obtain ⟨eh₁, hMemEh₁, hPred₁⟩ := List.any_eq_true.mp hEm₁
+          obtain ⟨eh₂, hMemEh₂, hPred₂⟩ := List.any_eq_true.mp hEm₂
+          rcases Bool.and_eq_true_iff.mp hPred₁ with ⟨hP1a, hB1⟩
+          rcases Bool.and_eq_true_iff.mp hP1a with ⟨hP1b, hE1⟩
+          rcases Bool.and_eq_true_iff.mp hP1b with ⟨hP1c, hC1⟩
+          rcases Bool.and_eq_true_iff.mp hP1c with ⟨hF1, _⟩
+          rcases Bool.and_eq_true_iff.mp hPred₂ with ⟨hP2a, hB2⟩
+          rcases Bool.and_eq_true_iff.mp hP2a with ⟨hP2b, hE2⟩
+          rcases Bool.and_eq_true_iff.mp hP2b with ⟨hP2c, hC2⟩
+          rcases Bool.and_eq_true_iff.mp hP2c with ⟨hF2, _⟩
+          obtain ⟨_, r₁', hr₁Mem, hr₁Ep, hr₁Bnd⟩ := hEchoInvs eh₁ hMemEh₁
+          obtain ⟨_, r₂', hr₂Mem, hr₂Ep, hr₂Bnd⟩ := hEchoInvs eh₂ hMemEh₂
+          rw [of_decide_eq_true hF1, of_decide_eq_true hC1] at hr₁Mem
+          rw [of_decide_eq_true hF2, of_decide_eq_true hC2] at hr₂Mem
+          have hR1R2Ep : r₁'.epoch = r₂'.epoch := by
+            have he1 : r₁'.epoch = rel₁.record.epoch := hr₁Ep.symm.trans (of_decide_eq_true hE1)
+            have he2 : r₂'.epoch = rel₂.record.epoch := hr₂Ep.symm.trans (of_decide_eq_true hE2)
+            exact he1.trans (hRecEpEq.trans he2.symm)
+          have hR1EqR2 : r₁' = r₂' :=
+            diskUniq_of_diskCovers (hSlotInvs pHon cIdx hpNotCorr).1 r₁' hr₁Mem r₂' hr₂Mem hR1R2Ep
+          have hBndEq : bnd₁ = bnd₂ := by
+            have hb1 : bnd₁ = beltRecordBinding H r₁' := (of_decide_eq_true hB1).symm.trans hr₁Bnd
+            have hb2 : bnd₂ = beltRecordBinding H r₂' := (of_decide_eq_true hB2).symm.trans hr₂Bnd
+            rw [hb1, hb2, hR1EqR2]
+          rcases beltRecordBinding_binding H hBndEq with hRecEq | hColl
+          · exact .inl hRecEq
+          · exact .inr (.inr hColl)
+        else
+          refine .inr (.inl ⟨{
+            sender := pHon
+            receiver := rel₂.verifier
+            honest_sender := hpNotCorr
+            honest_receiver := hv₂Hon
+            committeeIdx := cIdx
+            epoch := rel₂.record.epoch
+            forgedBinding := bnd₂
+            forgedMac := e₂.mac
+            valid_mac := of_decide_eq_true hMac₂
+            never_emitted := ?_ }⟩)
+          intro e he ⟨hf, ht, hc, hep, hb⟩
+          apply hEm₂
+          exact List.any_eq_true.mpr ⟨e, he, by simp [hf, ht, hc, hep, hb]⟩
+      else
+        refine .inr (.inl ⟨{
+          sender := pHon
+          receiver := rel₁.verifier
+          honest_sender := hpNotCorr
+          honest_receiver := hv₁Hon
+          committeeIdx := cIdx
+          epoch := rel₁.record.epoch
+          forgedBinding := bnd₁
+          forgedMac := e₁.mac
+          valid_mac := of_decide_eq_true hMac₁
+          never_emitted := ?_ }⟩)
+        intro e he ⟨hf, ht, hc, hep, hb⟩
+        apply hEm₁
+        exact List.any_eq_true.mpr ⟨e, he, by simp [hf, ht, hc, hep, hb]⟩
+    · intro p cIdx hpHon hUnpois r hrMem
+      exact ((hSlotInvs p cIdx hpHon).2 hUnpois).2.1 r hrMem
+  · -- Part (b.1): Intra-committee Corrupt share hiding
+    intro hFltT Q hQ sec₁ sec₂
+    have hDiffPos : 0 < maskCard (maskDiff Q Corrupt) := by
+      have hGe := maskCard_diff_ge Q Corrupt
+      omega
+    let ⟨pHon, hpHon⟩ := extractMaskMember (maskDiff Q Corrupt) hDiffPos
+    simp only [maskDiff, Bool.and_eq_true, Bool.not_eq_true'] at hpHon
+    obtain ⟨bijCorr, hViewEq⟩ := hBuildBij Q Corrupt hQ pHon hpHon.1 hpHon.2 sec₁ sec₂
+    exact ⟨pHon, bijCorr, hpHon.1, hpHon.2, hViewEq⟩
+  · -- Part (b.2): Cross-committee Q' ≠ Q 0-distance share independence
+    intro Q Q' hQ hQ' hNe sec₁ sec₂
+    have hDiffPos : 0 < maskCard (maskDiff Q Q') := by
+      if hZero : maskCard (maskDiff Q Q') = 0 then
+        exfalso
+        apply hNe
+        have hInterEq : maskCard (maskInter Q Q') = t := by
+          have hSplit := maskCard_diff_add_inter Q Q'
+          omega
+        have hDiff2Zero : maskCard (maskDiff Q' Q) = 0 := by
+          have hSplit2 := maskCard_diff_add_inter Q' Q
+          have hSymm : maskInter Q' Q = maskInter Q Q' := by
+            apply congrArg CustodiansMask.mk; funext i; exact Bool.and_comm _ _
+          rw [hSymm] at hSplit2
+          omega
+        cases Q with
+        | mk fQ =>
+          cases Q' with
+          | mk fQ' =>
+            apply congrArg CustodiansMask.mk
+            funext i
+            cases h1 : fQ i <;> cases h2 : fQ' i
+            · rfl
+            · exfalso
+              have hSubSingle : maskSub ⟨fun j => decide (j = i)⟩ (maskDiff ⟨fQ'⟩ ⟨fQ⟩) := by
+                intro j hj
+                have hji : j = i := of_decide_eq_true hj
+                subst hji; simp [maskDiff, h1, h2]
+              have hMono := maskCard_mono hSubSingle
+              rw [maskCard_singleton i] at hMono
+              omega
+            · exfalso
+              have hSubSingle : maskSub ⟨fun j => decide (j = i)⟩ (maskDiff ⟨fQ⟩ ⟨fQ'⟩) := by
+                intro j hj
+                have hji : j = i := of_decide_eq_true hj
+                subst hji; simp [maskDiff, h1, h2]
+              have hMono := maskCard_mono hSubSingle
+              rw [maskCard_singleton i] at hMono
+              omega
+            · rfl
+      else
+        omega
+    let ⟨pMiss, hpMiss⟩ := extractMaskMember (maskDiff Q Q') hDiffPos
+    simp only [maskDiff, Bool.and_eq_true, Bool.not_eq_true'] at hpMiss
+    obtain ⟨bijCross, hViewEq⟩ := hBuildBij Q Q' hQ pMiss hpMiss.1 hpMiss.2 sec₁ sec₂
+    refine ⟨pMiss, bijCross, hpMiss.1, hpMiss.2, hViewEq, ?_⟩
+    intro Card enum D
+    let finBij : SimpleEquiv (Fin Card) (Fin Card) :=
+      { toFun := fun r => enum.invFun (bijCross.toFun (enum.toFun r))
+        invFun := fun r => enum.invFun (bijCross.invFun (enum.toFun r))
+        left_inv := fun r => by rw [enum.right_inv, bijCross.left_inv, enum.left_inv]
+        right_inv := fun r => by rw [enum.right_inv, bijCross.right_inv, enum.left_inv] }
+    have hPerm := finSum_comp_simpleEquiv Card finBij
+      (fun r => if D (committeeViewerObservation t Q Q' sec₂ (enum.toFun r)) then 1 else 0)
+    rw [← hPerm]
+    apply finSum_congr
+    intro r
+    dsimp only [finBij]
+    rw [enum.right_inv, hViewEq (enum.toFun r)]
+  · -- Part (c): Multi-turn live committee selection & signing round progression
+    intro hTPos hEqLeT Online hOnlineHon live
+    have hMemChoose : live.1 ∈ chooseMasks n t := by
+      have h := mem_chooseMasks_of_card n live.1
+      rw [live.2.1] at h
+      exact h
+    have hHonMem : ∀ p : Fin n, live.1.mem p = true → Online.mem p = true ∧ Corrupt.mem p = false := by
+      intro p hp
+      have hSub := live.2.2 p hp
+      simp only [maskDiff, Bool.and_eq_true, Bool.not_eq_true'] at hSub
+      exact hSub
+    refine ⟨hMemChoose, live.2.1, hHonMem,
+            fun secret tape => reconstruct_dealAdditiveShares t hTPos secret tape, ?_⟩
+    intro cIdx verifier rec net hIdx hvInLive hSlotsReady
+    unfold buildCommitteeSignTrace
+    dsimp only
+    rw [runQuorumJortsTrace_append, runQuorumJortsTrace_append]
+    let members := maskMembers live.1
+    have hBindReady : ∀ p ∈ members, Corrupt.mem p = false ∧ live.1.mem p = true ∧
+        SlotReadyForFreshBind subtreeHeight (net.slots p cIdx) rec := by
+      intro p hp
+      have hpQ : live.1.mem p = true := (mem_maskMembers_iff live.1 p).mp hp
+      exact ⟨(hHonMem p hpQ).2, hpQ, hSlotsReady p hpQ⟩
+    let net₁ := runQuorumJortsTrace H MAC macKeys Corrupt t subtreeHeight echoQuorum net
+      (members.map (fun p => QuorumJortsTurn.bindSlot p live.1 rec))
+    obtain ⟨hAfterBind, _⟩ :=
+      runBindTurns_slots H MAC macKeys Corrupt t subtreeHeight echoQuorum cIdx live.1 rec hIdx
+        members net (maskMembers_nodup live.1) hBindReady
+    have hEchoReady : ∀ s ∈ members, Corrupt.mem s = false ∧ live.1.mem s = true ∧
+        (net₁.slots s cIdx).walPoisoned = false ∧ (net₁.slots s cIdx).inFlight = some rec := by
+      intro s hs
+      have hsQ : live.1.mem s = true := (mem_maskMembers_iff live.1 s).mp hs
+      obtain ⟨hP, hI, _⟩ := hAfterBind s hs
+      exact ⟨(hHonMem s hsQ).2, hsQ, hP, hI⟩
+    let net₂ := runQuorumJortsTrace H MAC macKeys Corrupt t subtreeHeight echoQuorum net₁
+      (members.map (fun s => QuorumJortsTurn.emitSlotEcho s verifier live.1))
+    obtain ⟨hSlotsEq, _, _⟩ :=
+      runEchoTurns_emits H MAC macKeys Corrupt t subtreeHeight echoQuorum cIdx live.1 verifier rec hIdx
+        members net₁ hEchoReady
+    let bnd := beltRecordBinding H rec
+    let echoes : List (QuorumCommitteeEcho n) :=
+      members.map (fun s =>
+        { fromParty := s
+          toParty := verifier
+          committeeIdx := cIdx
+          epoch := rec.epoch
+          binding := bnd
+          mac := computeQuorumEchoMac MAC (macKeys s verifier) s.val verifier.val cIdx rec.epoch bnd })
+    have hvMemList : verifier ∈ members := (mem_maskMembers_iff live.1 verifier).mpr hvInLive
+    have hvHon : Corrupt.mem verifier = false := (hHonMem verifier hvInLive).2
+    have hvPois : (net₂.slots verifier cIdx).walPoisoned = false := by
+      rw [hSlotsEq]; exact (hAfterBind verifier hvMemList).1
+    have hvInf : (net₂.slots verifier cIdx).inFlight = some rec := by
+      rw [hSlotsEq]; exact (hAfterBind verifier hvMemList).2.1
+    have hEpLt : rec.epoch.toNat < 2 ^ subtreeHeight :=
+      (hSlotsReady verifier hvInLive).2.2.2.2.2.2.1
+    have hValidSendersEq :
+        validCommitteeEchoSenders H MAC macKeys cIdx verifier live.1 rec echoes = live.1 := by
+      apply congrArg CustodiansMask.mk; funext s
+      dsimp only [validCommitteeEchoSenders]
+      cases hsQ : live.1.mem s
+      · exact Bool.false_and _
+      · simp only [Bool.true_and]
+        apply List.any_eq_true.mpr
+        refine ⟨{ fromParty := s, toParty := verifier, committeeIdx := cIdx, epoch := rec.epoch,
+                  binding := bnd,
+                  mac := computeQuorumEchoMac MAC (macKeys s verifier) s.val verifier.val cIdx rec.epoch bnd },
+                List.mem_map.mpr ⟨s, (mem_maskMembers_iff live.1 s).mpr hsQ, rfl⟩, ?_⟩
+        unfold verifyQuorumCommitteeEcho
+        simp [bnd]
+    have hPermOk :
+        verifyCommitteeEchoPermit H MAC macKeys t subtreeHeight echoQuorum cIdx verifier live.1 rec echoes = true := by
+      unfold verifyCommitteeEchoPermit
+      rw [hValidSendersEq, live.2.1, hIdx, hvInLive]
+      simp [hEpLt, hEqLeT]
+    have hStepFinal :
+        stepQuorumJorts H MAC macKeys Corrupt t subtreeHeight echoQuorum net₂
+          (.releasePartitionedLeaf verifier live.1 rec echoes) =
+        { net₂ with
+          releasedLeaves :=
+            { committee := live.1
+              committeeIdx := cIdx
+              localEpoch := rec.epoch
+              globalLeaf := committeeGlobalLeaf (2 ^ subtreeHeight) cIdx rec.epoch.toNat
+              verifier := verifier
+              record := rec } :: net₂.releasedLeaves } := by
+      unfold stepQuorumJorts
+      simp only [hvHon, Bool.false_eq_true, ↓reduceIte]
+      rw [hIdx]
+      dsimp only
+      have hGuardOk :
+          (!(net₂.slots verifier cIdx).walPoisoned &&
+            decide ((net₂.slots verifier cIdx).inFlight = some rec) &&
+            verifyCommitteeEchoPermit H MAC macKeys t subtreeHeight echoQuorum cIdx verifier live.1 rec echoes) = true := by
+        rw [hvPois, hvInf, hPermOk]
+        rfl
+      rw [hGuardOk]
+      rfl
+    change (∀ p : Fin n, live.1.mem p = true →
+      ((stepQuorumJorts H MAC macKeys Corrupt t subtreeHeight echoQuorum net₂
+          (.releasePartitionedLeaf verifier live.1 rec echoes)).slots p cIdx).nextEpoch = rec.epoch.toNat + 1) ∧
+      _ ∈ (stepQuorumJorts H MAC macKeys Corrupt t subtreeHeight echoQuorum net₂
+          (.releasePartitionedLeaf verifier live.1 rec echoes)).releasedLeaves
+    rw [hStepFinal]
+    refine ⟨?_, .head _⟩
+    intro p hpQ
+    dsimp only
+    rw [hSlotsEq]
+    exact (hAfterBind p ((mem_maskMembers_iff live.1 p).mpr hpQ)).2.2
+
+/-- **`#tooth` Under-Threshold `2 * q ≤ n + f` Permits Multi-Turn Split-View Equivocation
+    (`tooth_quorum_jorts_under_threshold_split_view_across_turns`)**:
+    1. **General `2 * q ≤ n + f` Split-View Partition**: Whenever `f < q ≤ n` and `2 * q ≤ n + f`,
+       `prefixQuorumMask n q` and `suffixQuorumMask n q` each have size `q`, intersect in at most `f`
+       corrupt custodians (`maskCard C ≤ f`), and have **zero honest intersection**!
+    2. **Multi-Turn `(n = 3, f = 1, echoQuorum = 2)` & `(n = 5, f = 2, echoQuorum = 3)` Equivocation
+       Traces on `QuorumJortsTurn`**: Over a shared global tree (`t = n`, `fullCustodiansMask n`),
+       explicit multi-turn `List (QuorumJortsTurn 3)` and `List (QuorumJortsTurn 5)` executions
+       release **two conflicting messages** (`rel₁.record.msgDigest ≠ rel₂.record.msgDigest`) on the
+       **exact same `globalLeaf = 0`** across turns, with every echo attributed to an honest party
+       genuinely emitted in `net.emittedEchoes` (`0` MAC forgeries)! -/
+theorem tooth_quorum_jorts_under_threshold_split_view_across_turns :
+    -- (1) General combinatorial split-view decomposition whenever 2 * q ≤ n + f:
+    (∀ (n f q : Nat), f < q → q ≤ n → 2 * q ≤ n + f →
+      let Q₁ := prefixQuorumMask n q
+      let Q₂ := suffixQuorumMask n q
+      let C := maskInter Q₁ Q₂
+      maskCard Q₁ = q ∧
+      maskCard Q₂ = q ∧
+      maskCard C ≤ f ∧
+      maskCard (maskDiff (maskInter Q₁ Q₂) C) = 0) ∧
+    -- (2) Concrete multi-turn split-view equivocation on QuorumJortsTurn 3 (n = 3, f = 1, q = 2):
+    (let H : List UInt8 → Digest256 := fun _ => 0xAA#256
+     let MAC : Digest256 → List UInt8 → Digest256 := fun k _ => k
+     let macKeys3 : Fin 3 → Fin 3 → Digest256 := fun i j => BitVec.ofNat 256 (10 * i.val + j.val + 1)
+     let C3 : CustodiansMask 3 := ⟨fun i => decide (i.val = 1)⟩
+     let Q3 : CustodiansMask 3 := fullCustodiansMask 3
+     let p0 : Fin 3 := ⟨0, by decide⟩
+     let p1 : Fin 3 := ⟨1, by decide⟩
+     let p2 : Fin 3 := ⟨2, by decide⟩
+     let rec₁ : BeltLatchRecord :=
+       { epoch := 0, msgDigest := 0x1111#256, retrySalt := 0xAA#256, targetSumDigits := [1] }
+     let rec₂ : BeltLatchRecord :=
+       { epoch := 0, msgDigest := 0x2222#256, retrySalt := 0xBB#256, targetSumDigits := [2, 3] }
+     let bnd₁ := beltRecordBinding H rec₁
+     let bnd₂ := beltRecordBinding H rec₂
+     let echoes₁ : List (QuorumCommitteeEcho 3) :=
+       [ { fromParty := p0, toParty := p0, committeeIdx := 0, epoch := 0, binding := bnd₁,
+           mac := computeQuorumEchoMac MAC (macKeys3 p0 p0) 0 0 0 0 bnd₁ },
+         { fromParty := p1, toParty := p0, committeeIdx := 0, epoch := 0, binding := bnd₁,
+           mac := computeQuorumEchoMac MAC (macKeys3 p1 p0) 1 0 0 0 bnd₁ } ]
+     let echoes₂ : List (QuorumCommitteeEcho 3) :=
+       [ { fromParty := p1, toParty := p2, committeeIdx := 0, epoch := 0, binding := bnd₂,
+           mac := computeQuorumEchoMac MAC (macKeys3 p1 p2) 1 2 0 0 bnd₂ },
+         { fromParty := p2, toParty := p2, committeeIdx := 0, epoch := 0, binding := bnd₂,
+           mac := computeQuorumEchoMac MAC (macKeys3 p2 p2) 2 2 0 0 bnd₂ } ]
+     let trace3 : List (QuorumJortsTurn 3) :=
+       [ .bindSlot p0 Q3 rec₁,
+         .emitSlotEcho p0 p0 Q3,
+         .releasePartitionedLeaf p0 Q3 rec₁ echoes₁,
+         .bindSlot p2 Q3 rec₂,
+         .emitSlotEcho p2 p2 Q3,
+         .releasePartitionedLeaf p2 Q3 rec₂ echoes₂ ]
+     let net3 := runQuorumJortsTrace H MAC macKeys3 C3 3 4 2 (QuorumJortsNetworkState.init 3 4 2) trace3
+     2 * 2 ≤ 3 + 1 ∧
+     maskCard C3 = 1 ∧
+     (∀ e ∈ echoes₁ ++ echoes₂, C3.mem e.fromParty = false → e ∈ net3.emittedEchoes) ∧
+     ∃ rel₁ ∈ net3.releasedLeaves, ∃ rel₂ ∈ net3.releasedLeaves,
+       rel₁.globalLeaf = 0 ∧
+       rel₂.globalLeaf = 0 ∧
+       rel₁.record.msgDigest ≠ rel₂.record.msgDigest) ∧
+    -- (3) Concrete multi-turn split-view equivocation on QuorumJortsTurn 5 (n = 5, f = 2, q = 3):
+    (let H : List UInt8 → Digest256 := fun _ => 0xAA#256
+     let MAC : Digest256 → List UInt8 → Digest256 := fun k _ => k
+     let macKeys5 : Fin 5 → Fin 5 → Digest256 := fun i j => BitVec.ofNat 256 (10 * i.val + j.val + 1)
+     let C5 : CustodiansMask 5 := ⟨fun i => decide (i.val = 1 ∨ i.val = 2)⟩
+     let Q5 : CustodiansMask 5 := fullCustodiansMask 5
+     let q0 : Fin 5 := ⟨0, by decide⟩
+     let q1 : Fin 5 := ⟨1, by decide⟩
+     let q2 : Fin 5 := ⟨2, by decide⟩
+     let q3 : Fin 5 := ⟨3, by decide⟩
+     let rec₁ : BeltLatchRecord :=
+       { epoch := 0, msgDigest := 0xAAAA#256, retrySalt := 0xCC#256, targetSumDigits := [1] }
+     let rec₂ : BeltLatchRecord :=
+       { epoch := 0, msgDigest := 0xBBBB#256, retrySalt := 0xDD#256, targetSumDigits := [2, 3] }
+     let bnd₁ := beltRecordBinding H rec₁
+     let bnd₂ := beltRecordBinding H rec₂
+     let echoes₁ : List (QuorumCommitteeEcho 5) :=
+       [ { fromParty := q0, toParty := q0, committeeIdx := 0, epoch := 0, binding := bnd₁,
+           mac := computeQuorumEchoMac MAC (macKeys5 q0 q0) 0 0 0 0 bnd₁ },
+         { fromParty := q1, toParty := q0, committeeIdx := 0, epoch := 0, binding := bnd₁,
+           mac := computeQuorumEchoMac MAC (macKeys5 q1 q0) 1 0 0 0 bnd₁ },
+         { fromParty := q2, toParty := q0, committeeIdx := 0, epoch := 0, binding := bnd₁,
+           mac := computeQuorumEchoMac MAC (macKeys5 q2 q0) 2 0 0 0 bnd₁ } ]
+     let echoes₂ : List (QuorumCommitteeEcho 5) :=
+       [ { fromParty := q1, toParty := q3, committeeIdx := 0, epoch := 0, binding := bnd₂,
+           mac := computeQuorumEchoMac MAC (macKeys5 q1 q3) 1 3 0 0 bnd₂ },
+         { fromParty := q2, toParty := q3, committeeIdx := 0, epoch := 0, binding := bnd₂,
+           mac := computeQuorumEchoMac MAC (macKeys5 q2 q3) 2 3 0 0 bnd₂ },
+         { fromParty := q3, toParty := q3, committeeIdx := 0, epoch := 0, binding := bnd₂,
+           mac := computeQuorumEchoMac MAC (macKeys5 q3 q3) 3 3 0 0 bnd₂ } ]
+     let trace5 : List (QuorumJortsTurn 5) :=
+       [ .bindSlot q0 Q5 rec₁,
+         .emitSlotEcho q0 q0 Q5,
+         .releasePartitionedLeaf q0 Q5 rec₁ echoes₁,
+         .bindSlot q3 Q5 rec₂,
+         .emitSlotEcho q3 q3 Q5,
+         .releasePartitionedLeaf q3 Q5 rec₂ echoes₂ ]
+     let net5 := runQuorumJortsTrace H MAC macKeys5 C5 5 4 3 (QuorumJortsNetworkState.init 5 4 2) trace5
+     2 * 3 ≤ 5 + 2 ∧
+     maskCard C5 = 2 ∧
+     (∀ e ∈ echoes₁ ++ echoes₂, C5.mem e.fromParty = false → e ∈ net5.emittedEchoes) ∧
+     ∃ rel₁ ∈ net5.releasedLeaves, ∃ rel₂ ∈ net5.releasedLeaves,
+       rel₁.globalLeaf = 0 ∧
+       rel₂.globalLeaf = 0 ∧
+       rel₁.record.msgDigest ≠ rel₂.record.msgDigest) := by
+  refine ⟨?_, ?_, ?_⟩
+  · intro n f q _hFq hQn hUnder Q₁ Q₂ C
+    have hCard1 : maskCard Q₁ = q := maskCard_prefix n q hQn
+    have hCard2 : maskCard Q₂ = q := by
+      have hSuf := maskCard_ge_threshold n (n - q) (Nat.sub_le n q)
+      change maskCard ⟨fun i : Fin n => decide (n - q ≤ i.val)⟩ = q
+      rw [hSuf]
+      omega
+    have hCardC : maskCard C ≤ f := by
+      change maskCard (maskInter Q₁ Q₂) ≤ f
+      by_cases hDisj : q ≤ n - q
+      · have hEmp : maskInter Q₁ Q₂ = emptyMask n := by
+          apply congrArg CustodiansMask.mk; funext i
+          change (decide (i.val < q) && decide (n - q ≤ i.val)) = false
+          simp only [Bool.and_eq_false_iff, decide_eq_false_iff_not]
+          by_cases hi : i.val < q
+          · right; omega
+          · left; exact hi
+        rw [hEmp, maskCard_empty]
+        exact Nat.zero_le f
+      · have hCover : (⟨fun i : Fin n => Q₁.mem i || Q₂.mem i⟩ : CustodiansMask n) =
+            ⟨fun i : Fin n => decide (0 ≤ i.val)⟩ := by
+          apply congrArg CustodiansMask.mk; funext i
+          simp only [Q₁, Q₂, prefixQuorumMask, suffixQuorumMask, Nat.zero_le, decide_true,
+            Bool.or_eq_true, decide_eq_true_eq]
+          omega
+        have hUI := maskCard_union_inter Q₁ Q₂
+        rw [hCover, maskCard_ge_threshold n 0 (Nat.zero_le n), Nat.sub_zero, hCard1, hCard2] at hUI
+        omega
+    have hDiffZero : maskCard (maskDiff (maskInter Q₁ Q₂) C) = 0 := by
+      have hEmp : maskDiff (maskInter Q₁ Q₂) C = emptyMask n := by
+        apply congrArg CustodiansMask.mk; funext i
+        change ((maskInter Q₁ Q₂).mem i && !(maskInter Q₁ Q₂).mem i) = false
+        cases (maskInter Q₁ Q₂).mem i <;> rfl
+      rw [hEmp, maskCard_empty]
+    exact ⟨hCard1, hCard2, hCardC, hDiffZero⟩
+  · decide
+  · decide
+
+/-! ### `G0-A`: `QS-A` (*Committee-Revealing Partitioned Custody*) vs `QS-B` (*Global-Tree Leaf Allocation*) -/
+
+private theorem getElem?_of_maskPositionAux {n : Nat} (target : CustodiansMask n) :
+    ∀ (xs : List (CustodiansMask n)) {idx : Nat},
+      maskPositionAux target xs = some idx → xs[idx]? = some target
+  | [], _, h => by cases h
+  | x :: xs, idx, h => by
+    simp only [maskPositionAux] at h
+    if hx : x = target then
+      simp only [hx, ↓reduceIte, Option.some.injEq] at h
+      subst h
+      simp [hx]
+    else
+      simp only [hx, ↓reduceIte, Option.map_eq_some_iff] at h
+      obtain ⟨k, hk, rfl⟩ := h
+      simpa using getElem?_of_maskPositionAux target xs hk
+
+private theorem uint64_toNat_ofNat_of_lt {x : Nat} (h : x < 2 ^ 64) :
+    (UInt64.ofNat x).toNat = x := by
+  change (BitVec.ofNat 64 x).toNat = x
+  rw [BitVec.toNat_ofNat, Nat.mod_eq_of_lt h]
+
+/-- Lookup the `cIdx`-th `t`-committee in `chooseMasks n t`. -/
+def committeeMaskAtIdx (n t cIdx : Nat) : Option (CustodiansMask n) :=
+  (chooseMasks n t)[cIdx]?
+
+theorem committeeMaskAtIdx_of_committeeIndexOf {n t cIdx : Nat} {Q : CustodiansMask n}
+    (h : committeeIndexOf t Q = some cIdx) :
+    committeeMaskAtIdx n t cIdx = some Q :=
+  getElem?_of_maskPositionAux Q (chooseMasks n t) h
+
+/-- Public committee extractor on `QuorumJortsSig`: recovers `selectedCommittee` directly from
+    `sig.leaf` via `committeeOfLeaf` (`quorum_jorts.rs:190, 660-677`). -/
+def committeeOfSignature (n t subtreeHeight : Nat) (sig : QuorumJortsSig) : Option (CustodiansMask n) :=
+  match committeeOfLeaf (2 ^ subtreeHeight) (chooseMasks n t).length sig.leaf.toNat with
+  | none => none
+  | some cIdx => committeeMaskAtIdx n t cIdx
+
+/-- Canonical single-signer `QuorumJorts` reference function parameterized by an explicit scheduled
+    global leaf `gLeaf` (`quorumStagePkSeed`, `quorumStageChainSk`, `quorumChainStep`). -/

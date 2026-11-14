@@ -1344,3 +1344,1274 @@ structure WalRecordBody where
 
 /-- Width invariants on `WalRecordBody` (`256`-bit `vaultKeyId`, `40`-byte `lockGenesisId`,
     `64`-bit `epoch`, `< 2^32`-byte length-framed `payload`). -/
+def WalRecordBody.WellFormed (b : WalRecordBody) : Prop :=
+  b.vaultKeyId.length = 32 ∧
+  b.lockGenesisId.length = 40 ∧
+  b.epoch < 2 ^ 64 ∧
+  b.payload.length < 2 ^ 32
+
+/-- Full on-disk MAC-authenticated WAL record (`body` + 256-bit `keyedMac`). -/
+structure WalRecord where
+  body     : WalRecordBody
+  keyedMac : List UInt8 -- 32-byte (256-bit) keyed MAC tag
+  deriving Repr, DecidableEq
+
+/-- Width invariants on `WalRecord`. -/
+def WalRecord.WellFormed (r : WalRecord) : Prop :=
+  r.body.WellFormed ∧ r.keyedMac.length = 32
+
+/-- Canonical length-framed MAC preimage covering **every** field of `WalRecordBody`. -/
+def encodeWalBody (b : WalRecordBody) : List UInt8 :=
+  concatFramed [walMacDomainTag, b.vaultKeyId, b.lockGenesisId, encodeU64BeNat b.epoch, b.payload]
+
+/-- **MAC Preimage Collision-Freedom (`encodeWalBody_injective`)**:
+    Every field of `WalRecordBody` is length-framed via `concatFramed`, so distinct well-formed
+    record bodies **never** share a MAC preimage (`0 Classical.choice`). -/
+theorem encodeWalBody_injective {b₁ b₂ : WalRecordBody}
+    (h₁ : b₁.WellFormed) (h₂ : b₂.WellFormed)
+    (hEq : encodeWalBody b₁ = encodeWalBody b₂) : b₁ = b₂ := by
+  rcases h₁ with ⟨hk₁, hl₁, he₁, hp₁⟩
+  rcases h₂ with ⟨hk₂, hl₂, he₂, hp₂⟩
+  unfold encodeWalBody at hEq
+  have hBnd₁ : ∀ x ∈ [walMacDomainTag, b₁.vaultKeyId, b₁.lockGenesisId, encodeU64BeNat b₁.epoch, b₁.payload],
+      x.length < 2 ^ 32 := by
+    intro x hx
+    rcases List.mem_cons.mp hx with rfl | hx
+    · exact lt_two_pow_32_of_le_8192 (by decide)
+    · rcases List.mem_cons.mp hx with rfl | hx
+      · rw [hk₁]; exact lt_two_pow_32_of_le_8192 (by decide)
+      · rcases List.mem_cons.mp hx with rfl | hx
+        · rw [hl₁]; exact lt_two_pow_32_of_le_8192 (by decide)
+        · rcases List.mem_cons.mp hx with rfl | hx
+          · rw [encodeU64BeNat_length]; exact lt_two_pow_32_of_le_8192 (by decide)
+          · rcases List.mem_cons.mp hx with rfl | hx
+            · exact hp₁
+            · cases hx
+  have hBnd₂ : ∀ y ∈ [walMacDomainTag, b₂.vaultKeyId, b₂.lockGenesisId, encodeU64BeNat b₂.epoch, b₂.payload],
+      y.length < 2 ^ 32 := by
+    intro y hy
+    rcases List.mem_cons.mp hy with rfl | hy
+    · exact lt_two_pow_32_of_le_8192 (by decide)
+    · rcases List.mem_cons.mp hy with rfl | hy
+      · rw [hk₂]; exact lt_two_pow_32_of_le_8192 (by decide)
+      · rcases List.mem_cons.mp hy with rfl | hy
+        · rw [hl₂]; exact lt_two_pow_32_of_le_8192 (by decide)
+        · rcases List.mem_cons.mp hy with rfl | hy
+          · rw [encodeU64BeNat_length]; exact lt_two_pow_32_of_le_8192 (by decide)
+          · rcases List.mem_cons.mp hy with rfl | hy
+            · exact hp₂
+            · cases hy
+  have hListEq := FramedBytesCodec.concatFramed_injective hBnd₁ hBnd₂ hEq
+  injection hListEq with _ hTail1
+  injection hTail1 with hVk hTail2
+  injection hTail2 with hLg hTail3
+  injection hTail3 with hEpBytes hTail4
+  injection hTail4 with hPay _
+  have hEp := encodeU64BeNat_injective he₁ he₂ hEpBytes
+  cases b₁; cases b₂
+  dsimp only at hVk hLg hEp hPay
+  subst hVk hLg hEp hPay
+  rfl
+
+/-- Encode a complete `WalRecord` onto disk bytes using strict prefix-free framing. -/
+def encodeWalRecord (r : WalRecord) : List UInt8 :=
+  concatFramed [walFileMagicTag, r.body.vaultKeyId, r.body.lockGenesisId,
+                encodeU64BeNat r.body.epoch, r.body.payload, r.keyedMac]
+
+/-- Decode a complete `WalRecord` from disk bytes, rejecting truncated, torn, or trailing bytes. -/
+def decodeWalRecord (bs : List UInt8) : Option WalRecord :=
+  match unframeBytes bs with
+  | none => none
+  | some (magic, r1) =>
+    if magic != walFileMagicTag then none
+    else match unframeBytes r1 with
+    | none => none
+    | some (vkId, r2) =>
+      if vkId.length != 32 then none
+      else match unframeBytes r2 with
+      | none => none
+      | some (lgId, r3) =>
+        if lgId.length != 40 then none
+        else match unframeBytes r3 with
+        | none => none
+        | some (epBytes, r4) =>
+          match decodeU64BeNat epBytes, unframeBytes r4 with
+          | some ep, some (payload, r5) =>
+            match unframeBytes r5 with
+            | some (mac, []) =>
+              if mac.length == 32 then
+                some { body := { vaultKeyId := vkId
+                                 lockGenesisId := lgId
+                                 epoch := ep
+                                 payload := payload }
+                       keyedMac := mac }
+              else none
+            | _ => none
+          | _, _ => none
+
+theorem decodeWalRecord_encodeWalRecord {r : WalRecord} (hWf : r.WellFormed) :
+    decodeWalRecord (encodeWalRecord r) = some r := by
+  rcases hWf with ⟨⟨hVk, hLg, hEp, hPay⟩, hMac⟩
+  unfold decodeWalRecord encodeWalRecord
+  dsimp only [concatFramed]
+  have hm : walFileMagicTag.length < 2 ^ 32 := lt_two_pow_32_of_le_8192 (by decide)
+  have hvkLt : r.body.vaultKeyId.length < 2 ^ 32 := by
+    rw [hVk]; exact lt_two_pow_32_of_le_8192 (by decide)
+  have hlgLt : r.body.lockGenesisId.length < 2 ^ 32 := by
+    rw [hLg]; exact lt_two_pow_32_of_le_8192 (by decide)
+  have hepLt : (encodeU64BeNat r.body.epoch).length < 2 ^ 32 := by
+    rw [encodeU64BeNat_length]; exact lt_two_pow_32_of_le_8192 (by decide)
+  have hmacLt : r.keyedMac.length < 2 ^ 32 := by
+    rw [hMac]; exact lt_two_pow_32_of_le_8192 (by decide)
+  rw [FramedBytesCodec.unframe_frame_append hm]
+  dsimp only
+  have hMagFalse : (walFileMagicTag != walFileMagicTag) = false := rfl
+  rw [hMagFalse]
+  simp only [Bool.false_eq_true, ↓reduceIte]
+  rw [FramedBytesCodec.unframe_frame_append hvkLt]
+  dsimp only
+  have hVkNe : (r.body.vaultKeyId.length != 32) = false := by
+    rw [hVk]; rfl
+  rw [hVkNe]; simp only [Bool.false_eq_true, ↓reduceIte]
+  rw [FramedBytesCodec.unframe_frame_append hlgLt]
+  dsimp only
+  have hLgNe : (r.body.lockGenesisId.length != 40) = false := by
+    rw [hLg]; rfl
+  rw [hLgNe]; simp only [Bool.false_eq_true, ↓reduceIte]
+  rw [FramedBytesCodec.unframe_frame_append hepLt]
+  dsimp only
+  rw [decodeU64BeNat_encodeU64BeNat hEp,
+      FramedBytesCodec.unframe_frame_append hPay]
+  dsimp only
+  rw [FramedBytesCodec.unframe_frame_append hmacLt]
+  dsimp only
+  have hMacEq : (r.keyedMac.length == 32) = true := by rw [hMac]; rfl
+  simp only [hMacEq, ↓reduceIte]
+
+theorem decodeWalRecord_canonical {bs : List UInt8} {r : WalRecord}
+    (hDec : decodeWalRecord bs = some r) :
+    r.WellFormed ∧ encodeWalRecord r = bs := by
+  unfold decodeWalRecord at hDec
+  cases h1 : unframeBytes bs with
+  | none => rw [h1] at hDec; cases hDec
+  | some p1 =>
+    rcases p1 with ⟨magic, r1⟩
+    rw [h1] at hDec
+    dsimp only at hDec
+    by_cases hMag : (magic != walFileMagicTag) = true
+    · simp only [hMag, ↓reduceIte] at hDec; cases hDec
+    · simp only [hMag, Bool.false_eq_true, ↓reduceIte] at hDec
+      have hMagEq : magic = walFileMagicTag := eq_of_not_bne_true hMag
+      cases h2 : unframeBytes r1 with
+      | none => rw [h2] at hDec; cases hDec
+      | some p2 =>
+        rcases p2 with ⟨vkId, r2⟩
+        rw [h2] at hDec
+        dsimp only at hDec
+        by_cases hVk : (vkId.length != 32) = true
+        · simp only [hVk, ↓reduceIte] at hDec; cases hDec
+        · simp only [hVk, Bool.false_eq_true, ↓reduceIte] at hDec
+          have hVkEq : vkId.length = 32 := eq_of_not_bne_true hVk
+          cases h3 : unframeBytes r2 with
+          | none => rw [h3] at hDec; cases hDec
+          | some p3 =>
+            rcases p3 with ⟨lgId, r3⟩
+            rw [h3] at hDec
+            dsimp only at hDec
+            by_cases hLg : (lgId.length != 40) = true
+            · simp only [hLg, ↓reduceIte] at hDec; cases hDec
+            · simp only [hLg, Bool.false_eq_true, ↓reduceIte] at hDec
+              have hLgEq : lgId.length = 40 := eq_of_not_bne_true hLg
+              cases h4 : unframeBytes r3 with
+              | none => rw [h4] at hDec; cases hDec
+              | some p4 =>
+                rcases p4 with ⟨epBytes, r4⟩
+                rw [h4] at hDec
+                dsimp only at hDec
+                cases hEp : decodeU64BeNat epBytes with
+                | none => rw [hEp] at hDec; cases hDec
+                | some ep =>
+                  cases h5 : unframeBytes r4 with
+                  | none => rw [hEp, h5] at hDec; cases hDec
+                  | some p5 =>
+                    rcases p5 with ⟨payload, r5⟩
+                    rw [hEp, h5] at hDec
+                    dsimp only at hDec
+                    cases h6 : unframeBytes r5 with
+                    | none => rw [h6] at hDec; cases hDec
+                    | some p6 =>
+                      rcases p6 with ⟨mac, tail⟩
+                      rw [h6] at hDec
+                      cases tail with
+                      | cons _ _ => cases hDec
+                      | nil =>
+                        dsimp only at hDec
+                        by_cases hMac : (mac.length == 32) = true
+                        · simp only [hMac, ↓reduceIte] at hDec
+                          injection hDec with hRec
+                          subst hRec
+                          obtain ⟨_, hBs1⟩ := unframeBytes_canonical h1
+                          obtain ⟨_, hBs2⟩ := unframeBytes_canonical h2
+                          obtain ⟨_, hBs3⟩ := unframeBytes_canonical h3
+                          obtain ⟨_, hBs4⟩ := unframeBytes_canonical h4
+                          obtain ⟨hPayLt, hBs5⟩ := unframeBytes_canonical h5
+                          obtain ⟨_, hBs6⟩ := unframeBytes_canonical h6
+                          obtain ⟨hEpLt, hEpCan⟩ := decodeU64BeNat_canonical hEp
+                          have hMacLen : mac.length = 32 := Nat.eq_of_beq_eq_true hMac
+                          refine ⟨⟨⟨hVkEq, hLgEq, hEpLt, hPayLt⟩, hMacLen⟩, ?_⟩
+                          unfold encodeWalRecord
+                          dsimp only [concatFramed]
+                          rw [hMagEq] at hBs1
+                          rw [hEpCan, hBs1, hBs2, hBs3, hBs4, hBs5, hBs6]
+                        · simp only [hMac, Bool.false_eq_true, ↓reduceIte] at hDec; cases hDec
+
+/-- Keyed-MAC function type (`Key → Preimage → 32-byte Tag`, e.g. `KMAC256` / `HMAC-SHA3-256`). -/
+abbrev KeyedMacFn := List UInt8 → List UInt8 → List UInt8
+
+/-- Width invariant on a 256-bit `KeyedMacFn` (`∀ key msg, (macFn key msg).length = 32`). -/
+def WellFormedMacFn (macFn : KeyedMacFn) : Prop :=
+  ∀ key msg, (macFn key msg).length = 32
+
+/-- Compute a 32-byte keyed MAC over the domain-separated length-framed `WalRecordBody`. -/
+def computeWalMac (macFn : KeyedMacFn) (macKey : List UInt8) (b : WalRecordBody) : List UInt8 :=
+  macFn macKey (encodeWalBody b)
+
+/-- Attach a 256-bit `keyedMac` tag to `WalRecordBody`. -/
+def signWalRecord (macFn : KeyedMacFn) (macKey : List UInt8) (b : WalRecordBody) : WalRecord :=
+  { body := b, keyedMac := computeWalMac macFn macKey b }
+
+/-- Verify a `WalRecord`'s 256-bit `keyedMac`. -/
+def verifyWalMac (macFn : KeyedMacFn) (macKey : List UInt8) (r : WalRecord) : Bool :=
+  r.keyedMac == computeWalMac macFn macKey r.body
+
+theorem signWalRecord_wellFormed {macFn : KeyedMacFn} (hMacWf : WellFormedMacFn macFn)
+    (macKey : List UInt8) {b : WalRecordBody} (hb : b.WellFormed) :
+    (signWalRecord macFn macKey b).WellFormed :=
+  ⟨hb, hMacWf macKey (encodeWalBody b)⟩
+
+@[simp]
+theorem verifyWalMac_signWalRecord (macFn : KeyedMacFn) (macKey : List UInt8) (b : WalRecordBody) :
+    verifyWalMac macFn macKey (signWalRecord macFn macKey b) = true := by
+  simp [verifyWalMac, signWalRecord]
+
+/-- **Existential EUF-CMA `MacForgery` Predicate (`0 Classical.choice`)**:
+    Holds iff an adversary produces a well-formed `WalRecord` with a valid 256-bit `keyedMac`
+    whose `WalRecordBody` was **never** authenticated by the honest vault (`r.body ∉ honestBodies`). -/
+def MacForgery (macFn : KeyedMacFn) (macKey : List UInt8)
+    (honestBodies : List WalRecordBody) : Prop :=
+  ∃ r : WalRecord,
+    r.WellFormed ∧
+    r.body ∉ honestBodies ∧
+    verifyWalMac macFn macKey r = true
+
+/-- **Constructive Authentication Split (`verifyWalMac_authentic_or_macForgery`, `0 Classical`)**:
+    Branching via `DecidableEq WalRecordBody`, any well-formed `WalRecord` passing `verifyWalMac`
+    either belongs to `honestBodies` OR constructively witnesses `MacForgery`! -/
+theorem verifyWalMac_authentic_or_macForgery
+    {macFn : KeyedMacFn} {macKey : List UInt8}
+    {honestBodies : List WalRecordBody} {r : WalRecord}
+    (hWf : r.WellFormed) (hVer : verifyWalMac macFn macKey r = true) :
+    r.body ∈ honestBodies ∨ MacForgery macFn macKey honestBodies := by
+  by_cases hMem : r.body ∈ honestBodies
+  · exact Or.inl hMem
+  · exact Or.inr ⟨r, hWf, hMem, hVer⟩
+
+/-- Active locked vault handle held by a process after `openExisting` succeeds, bound to the
+    exact kernel `OpenDescriptionId` (`lockDescId`) owning the advisory `flock`! -/
+structure LockedVaultHandle where
+  pid           : Pid
+  basePath      : DirName
+  lockFd        : FdId
+  lockDescId    : OpenDescriptionId
+  lockInode     : InodeId
+  lockGenesisId : List UInt8
+  vaultKeyId    : List UInt8
+  ioPoisoned    : Bool := false
+  deriving Repr, DecidableEq
+
+/-- Fault-injection flags for testing `EIO` handling at every physical sync barrier. -/
+structure IoFaultSchedule where
+  failLockSync   : Bool := false
+  failRecordSync : Bool := false
+  failParentSync : Bool := false
+  deriving Repr, DecidableEq
+
+/-- **Hardened `provisionGenesis` Protocol**:
+    1. Checks **neither** `basePath` nor `walLockPath basePath` exists *before* creating anything,
+    2. Creates `.lock` (`O_CREAT | O_EXCL | O_NOFOLLOW`), locks its `InodeId`, writes the
+       `LockSidecarSeal` binding `(lockIno, genesisNonce)` + `posixSyncAllMedia`,
+    3. Creates `basePath` (`O_CREAT | O_EXCL | O_NOFOLLOW`), writes the epoch-`0` MAC-authenticated
+       `WalRecord` `(vaultKeyId, lockGenesisId, epoch := 0, initPayload, keyedMac)` +
+       `posixSyncAllMedia` + `posixSyncParentDir`, and closes provisioning descriptors. -/
+def provisionGenesis (st : PosixFsState) (pid : Pid) (basePath : DirName)
+    (vaultKeyId genesisNonce initPayload : List UInt8)
+    (macFn : KeyedMacFn) (macKey : List UInt8)
+    (faults : IoFaultSchedule := {}) :
+    PosixFsState × Except PosixErr (InodeId × WalRecord) :=
+  if vaultKeyId.length != 32 || genesisNonce.length != 32 || !(decide (initPayload.length < 2 ^ 32)) then
+    (st, .error .einval)
+  else
+    -- Pre-flight check: NEITHER `basePath` NOR `walLockPath basePath` may exist prior to genesis!
+    match assocLookup st.kernel.dirInode.unsyncedEntries basePath,
+          assocLookup st.kernel.dirInode.unsyncedEntries (walLockPath basePath) with
+    | some _, _ => (st, .error .eexist)
+    | _, some _ => (st, .error .eexist)
+    | none, none =>
+      match posixCreateExclNoFollow st pid (walLockPath basePath) with
+      | .error e => (st, .error e)
+      | .ok (st1, lockFd, lockIno) =>
+        match posixFlockExNb st1 pid lockFd with
+        | .error e => (st1, .error e)
+        | .ok st2 =>
+          match posixPwriteAll st2 pid lockFd
+                  (encodeLockSidecar { sealedLockInode := lockIno, genesisNonce := genesisNonce }) with
+          | .error e => (st2, .error e)
+          | .ok st3 =>
+            match posixSyncAllMedia st3 pid lockFd faults.failLockSync with
+            | (st4, .error e) => (st4, .error e)
+            | (st4, .ok ()) =>
+              match posixCreateExclNoFollow st4 pid basePath with
+              | .error e => (st4, .error e)
+              | .ok (st5, recFd, _) =>
+                match posixPwriteAll st5 pid recFd
+                        (encodeWalRecord (signWalRecord macFn macKey
+                          { vaultKeyId := vaultKeyId
+                            lockGenesisId := computeLockGenesisId lockIno genesisNonce
+                            epoch := 0
+                            payload := initPayload })) with
+                | .error e => (st5, .error e)
+                | .ok st6 =>
+                  match posixSyncAllMedia st6 pid recFd faults.failRecordSync with
+                  | (st7, .error e) => (st7, .error e)
+                  | (st7, .ok ()) =>
+                    match posixSyncParentDir st7 faults.failParentSync with
+                    | (st8, .error e) => (st8, .error e)
+                    | (st8, .ok ()) =>
+                      let st9 := (posixCloseFd st8 pid recFd).toOption.getD st8
+                      let st10 := (posixCloseFd st9 pid lockFd).toOption.getD st9
+                      (st10, .ok (lockIno, signWalRecord macFn macKey
+                        { vaultKeyId := vaultKeyId
+                          lockGenesisId := computeLockGenesisId lockIno genesisNonce
+                          epoch := 0
+                          payload := initPayload }))
+
+/-- **Hardened `openExisting` Protocol**:
+    1. Opens `.lock` with `O_NOFOLLOW` (**never** `O_CREAT`),
+    2. Acquires non-blocking `flock(LOCK_EX | LOCK_NB)` on `.lock`'s kernel `InodeId`,
+    3. Reads `LockSidecarSeal` from the locked fd and checks `actualLockIno == lockSeal.sealedLockInode`,
+    4. Opens `basePath` with `O_NOFOLLOW` (**never** `O_CREAT`), decodes `WalRecord`, closes the
+       transient record fd, and verifies **both** `rec.body.lockGenesisId == lockedGid` AND
+       `verifyWalMac macFn macKey rec == true`! -/
+def openExisting (st : PosixFsState) (pid : Pid) (basePath : DirName)
+    (expectedVaultKeyId : List UInt8)
+    (macFn : KeyedMacFn) (macKey : List UInt8) :
+    PosixFsState × Except PosixErr (LockedVaultHandle × WalRecord) :=
+  match posixOpenExistingNoFollow st pid (walLockPath basePath) true with
+  | .error e => (st, .error e)
+  | .ok (st1, lockFd) =>
+    match posixFlockExNb st1 pid lockFd with
+    | .error e =>
+      ((posixCloseFd st1 pid lockFd).toOption.getD st1, .error e)
+    | .ok st2 =>
+      match posixFstatDescAndInode st2 pid lockFd, posixPreadAll st2 pid lockFd with
+      | .ok (lockDescId, actualLockIno), .ok rawLockBytes =>
+        match decodeLockSidecar rawLockBytes with
+        | none =>
+          ((posixCloseFd st2 pid lockFd).toOption.getD st2, .error .elockseal)
+        | some lockSeal =>
+          if actualLockIno != lockSeal.sealedLockInode then
+            ((posixCloseFd st2 pid lockFd).toOption.getD st2, .error .elockseal)
+          else
+            match posixOpenExistingNoFollow st2 pid basePath false with
+            | .error e =>
+              ((posixCloseFd st2 pid lockFd).toOption.getD st2, .error e)
+            | .ok (st3, recFd) =>
+              match posixPreadAll st3 pid recFd with
+              | .error e =>
+                let st4 := (posixCloseFd st3 pid recFd).toOption.getD st3
+                ((posixCloseFd st4 pid lockFd).toOption.getD st4, .error e)
+              | .ok rawRecBytes =>
+                let st4 := (posixCloseFd st3 pid recFd).toOption.getD st3
+                match decodeWalRecord rawRecBytes with
+                | none =>
+                  ((posixCloseFd st4 pid lockFd).toOption.getD st4, .error .einval)
+                | some rec =>
+                  if rec.body.lockGenesisId !=
+                      computeLockGenesisId actualLockIno lockSeal.genesisNonce then
+                    ((posixCloseFd st4 pid lockFd).toOption.getD st4, .error .elockseal)
+                  else if rec.body.vaultKeyId != expectedVaultKeyId ||
+                          !(verifyWalMac macFn macKey rec) then
+                    ((posixCloseFd st4 pid lockFd).toOption.getD st4, .error .emac)
+                  else
+                    (st4, .ok ({ pid := pid
+                                 basePath := basePath
+                                 lockFd := lockFd
+                                 lockDescId := lockDescId
+                                 lockInode := actualLockIno
+                                 lockGenesisId := computeLockGenesisId actualLockIno lockSeal.genesisNonce
+                                 vaultKeyId := expectedVaultKeyId
+                                 ioPoisoned := false }, rec))
+      | .error e, _ =>
+        ((posixCloseFd st2 pid lockFd).toOption.getD st2, .error e)
+      | _, .error e =>
+        ((posixCloseFd st2 pid lockFd).toOption.getD st2, .error e)
+
+/-- Release an active `LockedVaultHandle` by closing its locked sidecar descriptor. -/
+def closeVaultHandle (st : PosixFsState) (h : LockedVaultHandle) : Except PosixErr PosixFsState :=
+  posixCloseFd st h.pid h.lockFd
+
+/-- Validate that `h` is currently an active, unpoisoned, `flock`-holding handle in `st`
+    whose `OpenDescriptionId` (`h.lockDescId`) has already been allocated (`< nextDescId`). -/
+def LockedVaultHandle.IsActiveIn (h : LockedVaultHandle) (st : PosixFsState) : Prop :=
+  h.ioPoisoned = false ∧
+  h.lockDescId < st.kernel.openFds.nextDescId ∧
+  (∃ desc : OpenFileDesc,
+    resolveOpenFd st.kernel.openFds h.pid h.lockFd = some (h.lockDescId, desc) ∧
+    desc.inode = h.lockInode ∧
+    desc.stickyFsyncErr = false) ∧
+  st.kernel.flockTable.owner h.lockInode = some h.lockDescId
+
+/-- **Hardened `replaceAtomic` Protocol** (with sticky `ioPoisoned := true` on any I/O failure):
+    1. Rejects immediately if `h.ioPoisoned = true` or `h.lockDescId` does not hold `flock` on `h.lockInode`,
+    2. Clears any stale `.tmp`, creates a fresh `.tmp` inode (`O_CREAT | O_EXCL | O_NOFOLLOW`),
+    3. Writes `encodeWalRecord newRec` to `.tmp`, calls `posixSyncAllMedia(.tmp)`, closes `.tmp`,
+    4. Atomically executes `posixRename(.tmp, h.basePath)`, and calls `posixSyncParentDir`! -/
+def replaceAtomic (st : PosixFsState) (h : LockedVaultHandle)
+    (newEpoch : Nat) (newPayload : List UInt8)
+    (macFn : KeyedMacFn) (macKey : List UInt8)
+    (faults : IoFaultSchedule := {}) :
+    PosixFsState × LockedVaultHandle × Except PosixErr WalRecord :=
+  if h.ioPoisoned then
+    (st, h, .error .epoisoned)
+  else if !(decide (newEpoch < 2 ^ 64)) || !(decide (newPayload.length < 2 ^ 32)) then
+    (st, { h with ioPoisoned := true }, .error .einval)
+  else
+    match resolveOpenFd st.kernel.openFds h.pid h.lockFd with
+    | none => (st, { h with ioPoisoned := true }, .error .ebadf)
+    | some (descId, lockDesc) =>
+      if descId != h.lockDescId || lockDesc.inode != h.lockInode || lockDesc.stickyFsyncErr ||
+         st.kernel.flockTable.owner h.lockInode != some h.lockDescId then
+        (st, { h with ioPoisoned := true }, .error .epoisoned)
+      else
+        let newBody : WalRecordBody :=
+          { vaultKeyId := h.vaultKeyId
+            lockGenesisId := h.lockGenesisId
+            epoch := newEpoch
+            payload := newPayload }
+        let newRec := signWalRecord macFn macKey newBody
+        let tmpPath := walTmpPath h.basePath
+        let stCleanTmp := posixUnlinkIfPresent st tmpPath
+        match posixCreateExclNoFollow stCleanTmp h.pid tmpPath with
+        | .error e => (stCleanTmp, { h with ioPoisoned := true }, .error e)
+        | .ok (stCreated, tmpFd, _) =>
+          match posixPwriteAll stCreated h.pid tmpFd (encodeWalRecord newRec) with
+          | .error e =>
+            let stCl := (posixCloseFd stCreated h.pid tmpFd).toOption.getD stCreated
+            (stCl, { h with ioPoisoned := true }, .error e)
+          | .ok stWritten =>
+            let (stSyncedTmp, syncTmpRes) :=
+              posixSyncAllMedia stWritten h.pid tmpFd faults.failRecordSync
+            let stClosedTmp := (posixCloseFd stSyncedTmp h.pid tmpFd).toOption.getD stSyncedTmp
+            match syncTmpRes with
+            | .error e => (stClosedTmp, { h with ioPoisoned := true }, .error e)
+            | .ok () =>
+              match posixRename stClosedTmp tmpPath h.basePath with
+              | .error e => (stClosedTmp, { h with ioPoisoned := true }, .error e)
+              | .ok stRenamed =>
+                let (stSyncedDir, syncDirRes) :=
+                  posixSyncParentDir stRenamed faults.failParentSync
+                match syncDirRes with
+                | .error e => (stSyncedDir, { h with ioPoisoned := true }, .error e)
+                | .ok () => (stSyncedDir, h, .ok newRec)
+
+private theorem prod3_mid_eq {α β γ : Type} {a₁ a₂ : α} {b₁ b₂ : β} {c₁ c₂ : γ}
+    (h : (a₁, b₁, c₁) = (a₂, b₂, c₂)) : b₁ = b₂ := by
+  exact (Prod.mk.inj (Prod.mk.inj h).2).1
+
+/-- Sticky Poisoning Lemma (`replaceAtomic_sticky_poison`):
+    Once `h.ioPoisoned = true`, `replaceAtomic` immediately refuses with `.epoisoned` without
+    mutating `PosixFsState`, and any error returned by `replaceAtomic` latches `ioPoisoned = true`. -/
+theorem replaceAtomic_sticky_poison (st : PosixFsState) (h : LockedVaultHandle)
+    (ep : Nat) (pay : List UInt8) (macFn : KeyedMacFn) (macKey : List UInt8)
+    (faults : IoFaultSchedule) :
+    (h.ioPoisoned = true →
+      replaceAtomic st h ep pay macFn macKey faults = (st, h, .error .epoisoned)) ∧
+    (∀ st' h' err,
+      replaceAtomic st h ep pay macFn macKey faults = (st', h', .error err) →
+      h'.ioPoisoned = true) := by
+  refine ⟨fun hP => by simp [replaceAtomic, hP], ?_⟩
+  intro st' h' err hRun
+  unfold replaceAtomic at hRun
+  by_cases hP : h.ioPoisoned = true
+  · simp only [hP, ↓reduceIte] at hRun
+    rw [← prod3_mid_eq hRun]
+    exact hP
+  · simp only [hP, Bool.false_eq_true, ↓reduceIte] at hRun
+    by_cases hBnd : (!(decide (ep < 2 ^ 64)) || !(decide (pay.length < 2 ^ 32))) = true
+    · simp only [hBnd, ↓reduceIte] at hRun
+      rw [← prod3_mid_eq hRun]
+    · simp only [hBnd, Bool.false_eq_true, ↓reduceIte] at hRun
+      cases hLk : resolveOpenFd st.kernel.openFds h.pid h.lockFd with
+      | none =>
+        rw [hLk] at hRun
+        rw [← prod3_mid_eq hRun]
+      | some dPair =>
+        rcases dPair with ⟨descId, lockDesc⟩
+        rw [hLk] at hRun
+        dsimp only at hRun
+        by_cases hInvalid :
+            (descId != h.lockDescId || lockDesc.inode != h.lockInode || lockDesc.stickyFsyncErr ||
+             st.kernel.flockTable.owner h.lockInode != some h.lockDescId) = true
+        · simp only [hInvalid, ↓reduceIte] at hRun
+          rw [← prod3_mid_eq hRun]
+        · simp only [hInvalid, Bool.false_eq_true, ↓reduceIte] at hRun
+          cases hCr : posixCreateExclNoFollow (posixUnlinkIfPresent st (walTmpPath h.basePath))
+              h.pid (walTmpPath h.basePath) with
+          | error e =>
+            rw [hCr] at hRun; rw [← prod3_mid_eq hRun]
+          | ok crTriple =>
+            rcases crTriple with ⟨stCreated, tmpFd, _⟩
+            rw [hCr] at hRun
+            dsimp only at hRun
+            cases hWr : posixPwriteAll stCreated h.pid tmpFd
+                (encodeWalRecord (signWalRecord macFn macKey
+                  { vaultKeyId := h.vaultKeyId, lockGenesisId := h.lockGenesisId,
+                    epoch := ep, payload := pay })) with
+            | error e =>
+              rw [hWr] at hRun; rw [← prod3_mid_eq hRun]
+            | ok stWritten =>
+              rw [hWr] at hRun
+              dsimp only at hRun
+              cases hSyPair : posixSyncAllMedia stWritten h.pid tmpFd faults.failRecordSync with
+              | mk stSyncedTmp syncTmpRes =>
+                rw [hSyPair] at hRun
+                dsimp only at hRun
+                cases syncTmpRes with
+                | error e =>
+                  rw [← prod3_mid_eq hRun]
+                | ok u =>
+                  cases u
+                  dsimp only at hRun
+                  cases hRn : posixRename
+                      ((posixCloseFd stSyncedTmp h.pid tmpFd).toOption.getD stSyncedTmp)
+                      (walTmpPath h.basePath) h.basePath with
+                  | error e =>
+                    rw [hRn] at hRun; rw [← prod3_mid_eq hRun]
+                  | ok stRenamed =>
+                    rw [hRn] at hRun
+                    dsimp only at hRun
+                    cases hSdPair : posixSyncParentDir stRenamed faults.failParentSync with
+                    | mk stSyncedDir syncDirRes =>
+                      rw [hSdPair] at hRun
+                      dsimp only at hRun
+                      cases syncDirRes with
+                      | error e =>
+                        rw [← prod3_mid_eq hRun]
+                      | ok u2 =>
+                        cases u2
+                        cases hRun
+
+/-! ## 5. Flagship Safety Theorems (Power-Loss Atomicity, Split-Brain Immunity, Multi-Crash Epoch Uniqueness) -/
+
+private theorem resolveOpenFd_insert_self (t : OpenFdTable) (p : Pid) (fd : FdId)
+    (descId : OpenDescriptionId) (desc : OpenFileDesc) :
+    resolveOpenFd
+      { fdRefs := assocInsert (p, fd) descId t.fdRefs
+        descriptions := assocInsert descId desc t.descriptions
+        nextDescId := descId + 1 } p fd = some (descId, desc) := by
+  simp [resolveOpenFd]
+
+private theorem posixCloseFd_preserves_storage (sA : PosixFsState) (p : Pid) (fd : FdId) :
+    let sB := (posixCloseFd sA p fd).toOption.getD sA
+    sB.kernel.dirInode = sA.kernel.dirInode ∧
+    sB.kernel.pageCache = sA.kernel.pageCache ∧
+    sB.driveCache = sA.driveCache ∧
+    sB.nand = sA.nand := by
+  dsimp only
+  unfold posixCloseFd
+  cases assocLookup sA.kernel.openFds.fdRefs (p, fd) with
+  | none => simp [Except.toOption]
+  | some descId =>
+    dsimp only
+    by_cases hRef : descHasAnyRef (assocErase (p, fd) sA.kernel.openFds.fdRefs) descId = true <;>
+      simp [hRef, Except.toOption]
+
+/-- Durable vault invariant at rest: both `.lock` (`lockIno`) and `basePath` (`recIno`) are
+    committed to `NandBlocks` with zero pending volatile writes and synced directory entries. -/
+def VaultDurableAt (st : PosixFsState) (basePath : DirName) (lockIno : InodeId)
+    (genesisNonce : List UInt8) (macFn : KeyedMacFn) (macKey : List UInt8)
+    (rec : WalRecord) : Prop :=
+  lockIno < st.nand.nextInode ∧
+  lockIno < 2 ^ 64 ∧
+  genesisNonce.length = 32 ∧
+  rec.WellFormed ∧
+  rec.body.lockGenesisId = computeLockGenesisId lockIno genesisNonce ∧
+  verifyWalMac macFn macKey rec = true ∧
+  st.driveCache.cachedDirEntries = none ∧
+  assocLookup st.kernel.dirInode.unsyncedEntries (walLockPath basePath) = some (.regular lockIno) ∧
+  assocLookup st.nand.dirNandEntries (walLockPath basePath) = some (.regular lockIno) ∧
+  assocLookup st.kernel.pageCache.dirtyFiles lockIno = none ∧
+  assocLookup st.driveCache.cachedFiles lockIno = none ∧
+  assocLookup st.nand.fileBlocks lockIno =
+    some (encodeLockSidecar { sealedLockInode := lockIno, genesisNonce := genesisNonce }) ∧
+  ∃ recIno : InodeId,
+    recIno < st.nand.nextInode ∧
+    assocLookup st.kernel.dirInode.unsyncedEntries basePath = some (.regular recIno) ∧
+    assocLookup st.nand.dirNandEntries basePath = some (.regular recIno) ∧
+    assocLookup st.kernel.pageCache.dirtyFiles recIno = none ∧
+    assocLookup st.driveCache.cachedFiles recIno = none ∧
+    assocLookup st.nand.fileBlocks recIno = some (encodeWalRecord rec)
+
+/-- Crash-consistency window invariant holding at **every** micro-step of `replaceAtomic`:
+    both `nand.dirNandEntries[basePath]` and `kernel.dirInode.unsyncedEntries[basePath]` point
+    to already-synced `NandBlocks` inodes holding exact `oldRec` or exact `newRec`. -/
+def VaultCrashSafeWindow (st : PosixFsState) (basePath : DirName) (lockIno : InodeId)
+    (genesisNonce : List UInt8) (macFn : KeyedMacFn) (macKey : List UInt8)
+    (oldRec newRec : WalRecord) : Prop :=
+  lockIno < st.nand.nextInode ∧
+  lockIno < 2 ^ 64 ∧
+  genesisNonce.length = 32 ∧
+  oldRec.WellFormed ∧
+  oldRec.body.lockGenesisId = computeLockGenesisId lockIno genesisNonce ∧
+  verifyWalMac macFn macKey oldRec = true ∧
+  newRec.WellFormed ∧
+  newRec.body.vaultKeyId = oldRec.body.vaultKeyId ∧
+  newRec.body.lockGenesisId = computeLockGenesisId lockIno genesisNonce ∧
+  verifyWalMac macFn macKey newRec = true ∧
+  st.driveCache.cachedDirEntries = none ∧
+  assocLookup st.kernel.dirInode.unsyncedEntries (walLockPath basePath) = some (.regular lockIno) ∧
+  assocLookup st.nand.dirNandEntries (walLockPath basePath) = some (.regular lockIno) ∧
+  assocLookup st.kernel.pageCache.dirtyFiles lockIno = none ∧
+  assocLookup st.driveCache.cachedFiles lockIno = none ∧
+  assocLookup st.nand.fileBlocks lockIno =
+    some (encodeLockSidecar { sealedLockInode := lockIno, genesisNonce := genesisNonce }) ∧
+  (∃ nandIno : InodeId,
+    nandIno < st.nand.nextInode ∧
+    assocLookup st.nand.dirNandEntries basePath = some (.regular nandIno) ∧
+    assocLookup st.kernel.pageCache.dirtyFiles nandIno = none ∧
+    assocLookup st.driveCache.cachedFiles nandIno = none ∧
+    (assocLookup st.nand.fileBlocks nandIno = some (encodeWalRecord oldRec) ∨
+     assocLookup st.nand.fileBlocks nandIno = some (encodeWalRecord newRec))) ∧
+  (∃ memIno : InodeId,
+    memIno < st.nand.nextInode ∧
+    assocLookup st.kernel.dirInode.unsyncedEntries basePath = some (.regular memIno) ∧
+    assocLookup st.kernel.pageCache.dirtyFiles memIno = none ∧
+    assocLookup st.driveCache.cachedFiles memIno = none ∧
+    (assocLookup st.nand.fileBlocks memIno = some (encodeWalRecord oldRec) ∨
+     assocLookup st.nand.fileBlocks memIno = some (encodeWalRecord newRec)))
+
+/-- Collect every intermediate `PosixFsState` produced along the micro-steps of `replaceAtomic`. -/
+def replaceAtomicSteps (st : PosixFsState) (h : LockedVaultHandle)
+    (newEpoch : Nat) (newPayload : List UInt8)
+    (macFn : KeyedMacFn) (macKey : List UInt8)
+    (faults : IoFaultSchedule := {}) : List PosixFsState :=
+  if h.ioPoisoned then
+    [st]
+  else if !(decide (newEpoch < 2 ^ 64)) || !(decide (newPayload.length < 2 ^ 32)) then
+    [st]
+  else
+    match resolveOpenFd st.kernel.openFds h.pid h.lockFd with
+    | none => [st]
+    | some (descId, lockDesc) =>
+      if descId != h.lockDescId || lockDesc.inode != h.lockInode || lockDesc.stickyFsyncErr ||
+         st.kernel.flockTable.owner h.lockInode != some h.lockDescId then
+        [st]
+      else
+        let newBody : WalRecordBody :=
+          { vaultKeyId := h.vaultKeyId
+            lockGenesisId := h.lockGenesisId
+            epoch := newEpoch
+            payload := newPayload }
+        let newRec := signWalRecord macFn macKey newBody
+        let tmpPath := walTmpPath h.basePath
+        let stCleanTmp := posixUnlinkIfPresent st tmpPath
+        match posixCreateExclNoFollow stCleanTmp h.pid tmpPath with
+        | .error _ => [st, stCleanTmp]
+        | .ok (stCreated, tmpFd, _) =>
+          match posixPwriteAll stCreated h.pid tmpFd (encodeWalRecord newRec) with
+          | .error _ =>
+            let stCl := (posixCloseFd stCreated h.pid tmpFd).toOption.getD stCreated
+            [st, stCleanTmp, stCreated, stCl]
+          | .ok stWritten =>
+            let (stSyncedTmp, syncTmpRes) :=
+              posixSyncAllMedia stWritten h.pid tmpFd faults.failRecordSync
+            let stClosedTmp := (posixCloseFd stSyncedTmp h.pid tmpFd).toOption.getD stSyncedTmp
+            match syncTmpRes with
+            | .error _ =>
+              [st, stCleanTmp, stCreated, stWritten, stSyncedTmp, stClosedTmp]
+            | .ok () =>
+              match posixRename stClosedTmp tmpPath h.basePath with
+              | .error _ =>
+                [st, stCleanTmp, stCreated, stWritten, stSyncedTmp, stClosedTmp]
+              | .ok stRenamed =>
+                let (stSyncedDir, _) :=
+                  posixSyncParentDir stRenamed faults.failParentSync
+                [st, stCleanTmp, stCreated, stWritten, stSyncedTmp, stClosedTmp,
+                 stRenamed, stSyncedDir]
+
+/-- Deterministic post-crash recovery theorem (`openExisting_of_crashed_durable`):
+    On any rebooted/crashed state (`openFds = {}`, `flockTable = {}`) satisfying `VaultDurableAt`,
+    `openExisting` deterministically succeeds and returns the exact `rec` without corruption. -/
+theorem openExisting_of_crashed_durable {st : PosixFsState} {basePath : DirName}
+    {lockIno : InodeId} {genesisNonce : List UInt8}
+    {macFn : KeyedMacFn} {macKey : List UInt8} {rec : WalRecord} (pid : Pid)
+    (hFdsEmpty : st.kernel.openFds = {})
+    (hFlkEmpty : st.kernel.flockTable = {})
+    (hDur : VaultDurableAt st basePath lockIno genesisNonce macFn macKey rec) :
+    ∃ st' hOut,
+      openExisting st pid basePath rec.body.vaultKeyId macFn macKey =
+        (st', .ok (hOut, rec)) := by
+  rcases hDur with ⟨_, hLock64, hNonceLen, hRecWf, hRecGid, hRecVer,
+    _, hLockUnsync, _, hLockPg, hLockDrv, hLockNand,
+    recIno, _, hRecUnsync, _, hRecPg, hRecDrv, hRecNand⟩
+  have hSealDec :
+      decodeLockSidecar (encodeLockSidecar { sealedLockInode := lockIno, genesisNonce := genesisNonce }) =
+        some { sealedLockInode := lockIno, genesisNonce := genesisNonce } :=
+    decodeLockSidecar_encodeLockSidecar ⟨hLock64, hNonceLen⟩
+  have hRecDec : decodeWalRecord (encodeWalRecord rec) = some rec :=
+    decodeWalRecord_encodeWalRecord hRecWf
+  let st1 : PosixFsState :=
+    { st with
+        kernel := { st.kernel with
+                      openFds := { fdRefs := [((pid, st.nextFd), 1)]
+                                   descriptions := [(1, { inode := lockIno, writable := true, stickyFsyncErr := false })]
+                                   nextDescId := 2 } }
+        nextFd := st.nextFd + 1 }
+  have hOp1 : posixOpenExistingNoFollow st pid (walLockPath basePath) true = .ok (st1, st.nextFd) := by
+    unfold posixOpenExistingNoFollow resolveDentryNoFollow
+    rw [hLockUnsync, hFdsEmpty]
+    rfl
+  let st2 : PosixFsState :=
+    { st1 with kernel := { st1.kernel with flockTable := { locks := [(lockIno, 1)] } } }
+  have hFlk : posixFlockExNb st1 pid st.nextFd = .ok st2 := by
+    unfold posixFlockExNb resolveOpenFd FlockTable.owner
+    dsimp only [st1]
+    rw [hFlkEmpty]
+    simp [assocInsert]
+  have hFst : posixFstatDescAndInode st2 pid st.nextFd = .ok (1, lockIno) := by
+    simp [posixFstatDescAndInode, resolveOpenFd, st2, st1]
+  have hPread1 :
+      posixPreadAll st2 pid st.nextFd =
+        .ok (encodeLockSidecar { sealedLockInode := lockIno, genesisNonce := genesisNonce }) := by
+    unfold posixPreadAll resolveOpenFd readInodeHierarchy pendingVolatileWrite
+    simp [st2, st1, hLockPg, hLockDrv, hLockNand]
+  let st3 : PosixFsState :=
+    { st2 with
+        kernel := { st2.kernel with
+                      openFds := { fdRefs := assocInsert (pid, st.nextFd + 1) 2 st2.kernel.openFds.fdRefs
+                                   descriptions := assocInsert 2 { inode := recIno, writable := false, stickyFsyncErr := false }
+                                                     st2.kernel.openFds.descriptions
+                                   nextDescId := 3 } }
+        nextFd := st.nextFd + 2 }
+  have hOp2 : posixOpenExistingNoFollow st2 pid basePath false = .ok (st3, st.nextFd + 1) := by
+    unfold posixOpenExistingNoFollow resolveDentryNoFollow
+    dsimp only [st2, st1]
+    rw [hRecUnsync]
+  have hPread2 : posixPreadAll st3 pid (st.nextFd + 1) = .ok (encodeWalRecord rec) := by
+    unfold posixPreadAll resolveOpenFd readInodeHierarchy pendingVolatileWrite
+    simp [st3, st2, st1, hRecPg, hRecDrv, hRecNand]
+  unfold openExisting
+  rw [hOp1]
+  dsimp +zetaDelta only
+  rw [hFlk]
+  dsimp +zetaDelta only
+  rw [hFst, hPread1]
+  dsimp +zetaDelta only
+  rw [hSealDec]
+  dsimp +zetaDelta only
+  simp only [bne_self_eq_false, Bool.false_eq_true, ↓reduceIte]
+  rw [hOp2]
+  dsimp +zetaDelta only
+  rw [hPread2]
+  dsimp +zetaDelta only
+  rw [hRecDec]
+  dsimp +zetaDelta only
+  have hGidFalse : (rec.body.lockGenesisId != computeLockGenesisId lockIno genesisNonce) = false := by
+    rw [hRecGid]; exact bne_self_eq_false _
+  rw [hGidFalse, bne_self_eq_false, hRecVer]
+  simp only [Bool.not_true, Bool.or_self, Bool.false_eq_true, ↓reduceIte]
+  exact ⟨_, _, rfl⟩
+
+/-- Crashing from any state inside `VaultCrashSafeWindow` produces a rebooted state with empty
+    handles/flocks satisfying `VaultDurableAt` for **either** `oldRec` **or** `newRec`! -/
+theorem crashStep_preserves_window_to_durable {mid crashed : PosixFsState}
+    {basePath : DirName} {lockIno : InodeId} {genesisNonce : List UInt8}
+    {macFn : KeyedMacFn} {macKey : List UInt8} {oldRec newRec : WalRecord}
+    (hWin : VaultCrashSafeWindow mid basePath lockIno genesisNonce macFn macKey oldRec newRec)
+    (hCrash : CrashStep mid crashed) :
+    crashed.kernel.openFds = {} ∧
+    crashed.kernel.flockTable = {} ∧
+    (VaultDurableAt crashed basePath lockIno genesisNonce macFn macKey oldRec ∨
+     VaultDurableAt crashed basePath lockIno genesisNonce macFn macKey newRec) := by
+  rcases hWin with ⟨hLockLt, hLock64, hNonceLen, hOldWf, hOldGid, hOldVer,
+    hNewWf, hVkEq, hNewGid, hNewVer, hDrvDir,
+    hLockMem, hLockNandDir, hLockPg, hLockDrv, hLockNandBytes,
+    ⟨nandIno, hNandInoLt, hBaseNandDir, hNandPg, hNandDrv, hNandBytes⟩,
+    ⟨memIno, hMemInoLt, hBaseMemDir, hMemPg, hMemDrv, hMemBytes⟩⟩
+  have hLockImm := (syncedInode_immune_to_crashStep hLockPg hLockDrv hCrash).1
+  have hNandImm := (syncedInode_immune_to_crashStep hNandPg hNandDrv hCrash).1
+  have hMemImm := (syncedInode_immune_to_crashStep hMemPg hMemDrv hCrash).1
+  cases hCrash with
+  | kernelPanic _ =>
+    have hFds : (KernelPanicCrash mid).kernel.openFds = {} := rfl
+    have hFlk : (KernelPanicCrash mid).kernel.flockTable = {} := rfl
+    refine ⟨hFds, hFlk, ?_⟩
+    rcases hNandBytes with hOldB | hNewB
+    · left
+      refine ⟨hLockLt, hLock64, hNonceLen, hOldWf, hOldGid, hOldVer, rfl, ?_, ?_, rfl, rfl, ?_,
+        nandIno, hNandInoLt, ?_, ?_, rfl, rfl, ?_⟩
+      · simp [KernelPanicCrash, hDrvDir, hLockNandDir]
+      · simp [KernelPanicCrash, hDrvDir, hLockNandDir]
+      · rw [hLockImm, hLockNandBytes]
+      · simp [KernelPanicCrash, hDrvDir, hBaseNandDir]
+      · simp [KernelPanicCrash, hDrvDir, hBaseNandDir]
+      · rw [hNandImm, hOldB]
+    · right
+      refine ⟨hLockLt, hLock64, hNonceLen, hNewWf, hNewGid, hNewVer, rfl, ?_, ?_, rfl, rfl, ?_,
+        nandIno, hNandInoLt, ?_, ?_, rfl, rfl, ?_⟩
+      · simp [KernelPanicCrash, hDrvDir, hLockNandDir]
+      · simp [KernelPanicCrash, hDrvDir, hLockNandDir]
+      · rw [hLockImm, hLockNandBytes]
+      · simp [KernelPanicCrash, hDrvDir, hBaseNandDir]
+      · simp [KernelPanicCrash, hDrvDir, hBaseNandDir]
+      · rw [hNandImm, hNewB]
+  | powerLoss dirPick tearFn _ =>
+    have hFds : (PowerLossCrash dirPick tearFn mid).kernel.openFds = {} := rfl
+    have hFlk : (PowerLossCrash dirPick tearFn mid).kernel.flockTable = {} := rfl
+    refine ⟨hFds, hFlk, ?_⟩
+    cases dirPick with
+    | revertToNand =>
+      rcases hNandBytes with hOldB | hNewB
+      · left
+        refine ⟨hLockLt, hLock64, hNonceLen, hOldWf, hOldGid, hOldVer, rfl, ?_, ?_, rfl, rfl, ?_,
+          nandIno, hNandInoLt, ?_, ?_, rfl, rfl, ?_⟩
+        · simp [PowerLossCrash, hLockNandDir]
+        · simp [PowerLossCrash, hLockNandDir]
+        · rw [hLockImm, hLockNandBytes]
+        · simp [PowerLossCrash, hBaseNandDir]
+        · simp [PowerLossCrash, hBaseNandDir]
+        · rw [hNandImm, hOldB]
+      · right
+        refine ⟨hLockLt, hLock64, hNonceLen, hNewWf, hNewGid, hNewVer, rfl, ?_, ?_, rfl, rfl, ?_,
+          nandIno, hNandInoLt, ?_, ?_, rfl, rfl, ?_⟩
+        · simp [PowerLossCrash, hLockNandDir]
+        · simp [PowerLossCrash, hLockNandDir]
+        · rw [hLockImm, hLockNandBytes]
+        · simp [PowerLossCrash, hBaseNandDir]
+        · simp [PowerLossCrash, hBaseNandDir]
+        · rw [hNandImm, hNewB]
+    | flushPendingDir =>
+      rcases hMemBytes with hOldB | hNewB
+      · left
+        refine ⟨hLockLt, hLock64, hNonceLen, hOldWf, hOldGid, hOldVer, rfl, ?_, ?_, rfl, rfl, ?_,
+          memIno, hMemInoLt, ?_, ?_, rfl, rfl, ?_⟩
+        · simp [PowerLossCrash, hDrvDir, hLockMem]
+        · simp [PowerLossCrash, hDrvDir, hLockMem]
+        · rw [hLockImm, hLockNandBytes]
+        · simp [PowerLossCrash, hDrvDir, hBaseMemDir]
+        · simp [PowerLossCrash, hDrvDir, hBaseMemDir]
+        · rw [hMemImm, hOldB]
+      · right
+        refine ⟨hLockLt, hLock64, hNonceLen, hNewWf, hNewGid, hNewVer, rfl, ?_, ?_, rfl, rfl, ?_,
+          memIno, hMemInoLt, ?_, ?_, rfl, rfl, ?_⟩
+        · simp [PowerLossCrash, hDrvDir, hLockMem]
+        · simp [PowerLossCrash, hDrvDir, hLockMem]
+        · rw [hLockImm, hLockNandBytes]
+        · simp [PowerLossCrash, hDrvDir, hBaseMemDir]
+        · simp [PowerLossCrash, hDrvDir, hBaseMemDir]
+        · rw [hMemImm, hNewB]
+
+theorem vaultDurableAt_to_window {st : PosixFsState} {basePath : DirName}
+    {lockIno : InodeId} {genesisNonce : List UInt8}
+    {macFn : KeyedMacFn} {macKey : List UInt8} {oldRec newRec : WalRecord}
+    (hDur : VaultDurableAt st basePath lockIno genesisNonce macFn macKey oldRec)
+    (hNewWf : newRec.WellFormed)
+    (hVkEq : newRec.body.vaultKeyId = oldRec.body.vaultKeyId)
+    (hNewGid : newRec.body.lockGenesisId = computeLockGenesisId lockIno genesisNonce)
+    (hNewVer : verifyWalMac macFn macKey newRec = true) :
+    VaultCrashSafeWindow st basePath lockIno genesisNonce macFn macKey oldRec newRec := by
+  rcases hDur with ⟨h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11, h12,
+    recIno, hInoLt, hMem, hNand, hPg, hDrv, hBytes⟩
+  exact ⟨h1, h2, h3, h4, h5, h6, hNewWf, hVkEq, hNewGid, hNewVer, h7, h8, h9, h10, h11, h12,
+    ⟨recIno, hInoLt, hNand, hPg, hDrv, Or.inl hBytes⟩,
+    ⟨recIno, hInoLt, hMem, hPg, hDrv, Or.inl hBytes⟩⟩
+
+/-- Every intermediate state in `replaceAtomicSteps` preserves `VaultCrashSafeWindow`! -/
+theorem replaceAtomicSteps_all_in_window {st mid : PosixFsState}
+    {h : LockedVaultHandle} {lockIno : InodeId} {genesisNonce : List UInt8}
+    {macFn : KeyedMacFn} (hMacWf : WellFormedMacFn macFn) {macKey : List UInt8}
+    {oldRec : WalRecord} {newEpoch : Nat} (hEpLt : newEpoch < 2 ^ 64)
+    {newPayload : List UInt8} (hPayLt : newPayload.length < 2 ^ 32)
+    (faults : IoFaultSchedule)
+    (hVkEqH : h.vaultKeyId = oldRec.body.vaultKeyId)
+    (hGidEqH : h.lockGenesisId = computeLockGenesisId lockIno genesisNonce)
+    (hDur : VaultDurableAt st h.basePath lockIno genesisNonce macFn macKey oldRec)
+    (hMid : mid ∈ replaceAtomicSteps st h newEpoch newPayload macFn macKey faults) :
+    let newRec := signWalRecord macFn macKey
+      { vaultKeyId := h.vaultKeyId
+        lockGenesisId := h.lockGenesisId
+        epoch := newEpoch
+        payload := newPayload }
+    VaultCrashSafeWindow mid h.basePath lockIno genesisNonce macFn macKey oldRec newRec := by
+  intro newRec
+  have hNewBodyWf : ({ vaultKeyId := h.vaultKeyId, lockGenesisId := h.lockGenesisId,
+                       epoch := newEpoch, payload := newPayload } : WalRecordBody).WellFormed := by
+    refine ⟨?_, ?_, hEpLt, hPayLt⟩
+    · rw [hVkEqH]; exact hDur.2.2.2.1.1.1
+    · rw [hGidEqH]; exact computeLockGenesisId_length hDur.2.2.1
+  have hNewWf : newRec.WellFormed := signWalRecord_wellFormed hMacWf macKey hNewBodyWf
+  have hNewVer : verifyWalMac macFn macKey newRec = true := verifyWalMac_signWalRecord _ _ _
+  have hBaseWin : VaultCrashSafeWindow st h.basePath lockIno genesisNonce macFn macKey oldRec newRec :=
+    vaultDurableAt_to_window hDur hNewWf hVkEqH hGidEqH hNewVer
+  unfold replaceAtomicSteps at hMid
+  by_cases hP : h.ioPoisoned = true
+  · simp only [hP, ↓reduceIte, List.mem_singleton] at hMid
+    subst hMid; exact hBaseWin
+  · simp only [hP, Bool.false_eq_true, ↓reduceIte] at hMid
+    have hBndFalse : (!(decide (newEpoch < 2 ^ 64)) || !(decide (newPayload.length < 2 ^ 32))) = false := by
+      simp [hEpLt, hPayLt]
+    rw [hBndFalse] at hMid
+    simp only [Bool.false_eq_true, ↓reduceIte] at hMid
+    cases hLk : resolveOpenFd st.kernel.openFds h.pid h.lockFd with
+    | none =>
+      rw [hLk] at hMid
+      simp only [List.mem_singleton] at hMid
+      subst hMid; exact hBaseWin
+    | some dPair =>
+      rcases dPair with ⟨descId, lockDesc⟩
+      rw [hLk] at hMid
+      dsimp only at hMid
+      by_cases hInv :
+          (descId != h.lockDescId || lockDesc.inode != h.lockInode || lockDesc.stickyFsyncErr ||
+           st.kernel.flockTable.owner h.lockInode != some h.lockDescId) = true
+      · simp only [hInv, ↓reduceIte, List.mem_singleton] at hMid
+        subst hMid; exact hBaseWin
+      · simp only [hInv, Bool.false_eq_true, ↓reduceIte] at hMid
+        rcases hDur with ⟨hLockLt, hLock64, hNonceLen, hOldWf, hOldGid, hOldVer, hDrvDir,
+          hLockMem, hLockNandDir, hLockPg, hLockDrv, hLockNandBytes,
+          oldIno, hOldInoLt, hOldMem, hOldNandDir, hOldPg, hOldDrv, hOldNandBytes⟩
+        let tmpPath := walTmpPath h.basePath
+        let stCleanTmp := posixUnlinkIfPresent st tmpPath
+        have hTmpNeBase : h.basePath ≠ tmpPath := fun he => walTmpPath_ne_base h.basePath he.symm
+        have hTmpNeLock : walLockPath h.basePath ≠ tmpPath :=
+          fun he => walTmpPath_ne_lockPath h.basePath he.symm
+        have hBaseNeLock : walLockPath h.basePath ≠ h.basePath := walLockPath_ne_base h.basePath
+        have hCleanWin :
+            VaultCrashSafeWindow stCleanTmp h.basePath lockIno genesisNonce macFn macKey oldRec newRec := by
+          refine ⟨hLockLt, hLock64, hNonceLen, hOldWf, hOldGid, hOldVer,
+            hNewWf, hVkEqH, hGidEqH, hNewVer, hDrvDir, ?_, hLockNandDir, hLockPg, hLockDrv, hLockNandBytes,
+            ⟨oldIno, hOldInoLt, hOldNandDir, hOldPg, hOldDrv, Or.inl hOldNandBytes⟩,
+            ⟨oldIno, hOldInoLt, ?_, hOldPg, hOldDrv, Or.inl hOldNandBytes⟩⟩
+          · simp [stCleanTmp, posixUnlinkIfPresent, hTmpNeLock, hLockMem]
+          · simp [stCleanTmp, posixUnlinkIfPresent, hTmpNeBase, hOldMem]
+        let tmpIno := st.nand.nextInode
+        let tmpFd := st.nextFd
+        let tmpDescId := st.kernel.openFds.nextDescId
+        let stCreated : PosixFsState :=
+          { kernel := { stCleanTmp.kernel with
+                         openFds := { fdRefs := assocInsert (h.pid, tmpFd) tmpDescId st.kernel.openFds.fdRefs
+                                      descriptions := assocInsert tmpDescId
+                                                        { inode := tmpIno, writable := true, stickyFsyncErr := false }
+                                                        st.kernel.openFds.descriptions
+                                      nextDescId := tmpDescId + 1 }
+                         dirInode := { unsyncedEntries :=
+                                         assocInsert tmpPath (.regular tmpIno)
+                                           stCleanTmp.kernel.dirInode.unsyncedEntries } }
+            driveCache := st.driveCache
+            nand := { st.nand with
+                       fileBlocks := assocInsert tmpIno [] st.nand.fileBlocks
+                       nextInode := tmpIno + 1 }
+            nextFd := tmpFd + 1 }
+        have hCrEq : posixCreateExclNoFollow stCleanTmp h.pid tmpPath = .ok (stCreated, tmpFd, tmpIno) := by
+          unfold posixCreateExclNoFollow
+          have hAbs : assocLookup stCleanTmp.kernel.dirInode.unsyncedEntries tmpPath = none := by
+            simp [stCleanTmp, posixUnlinkIfPresent]
+          rw [hAbs]
+          rfl
+        rw [hCrEq] at hMid
+        dsimp only at hMid
+        have hLockNeTmp : lockIno ≠ tmpIno := Nat.ne_of_lt hLockLt
+        have hOldNeTmp : oldIno ≠ tmpIno := Nat.ne_of_lt hOldInoLt
+        have hLockLtNext : lockIno < tmpIno + 1 := Nat.lt_succ_of_lt hLockLt
+        have hOldLtNext : oldIno < tmpIno + 1 := Nat.lt_succ_of_lt hOldInoLt
+        have hCreatedWin :
+            VaultCrashSafeWindow stCreated h.basePath lockIno genesisNonce macFn macKey oldRec newRec := by
+          refine ⟨hLockLtNext, hLock64, hNonceLen, hOldWf, hOldGid, hOldVer,
+            hNewWf, hVkEqH, hGidEqH, hNewVer, hDrvDir, ?_, hLockNandDir, hLockPg, hLockDrv, ?_,
+            ⟨oldIno, hOldLtNext, hOldNandDir, hOldPg, hOldDrv, Or.inl ?_⟩,
+            ⟨oldIno, hOldLtNext, ?_, hOldPg, hOldDrv, Or.inl ?_⟩⟩
+          · simp [stCreated, stCleanTmp, posixUnlinkIfPresent, hTmpNeLock, hLockMem]
+          · simp [stCreated, hLockNeTmp, hLockNandBytes]
+          · simp [stCreated, hOldNeTmp, hOldNandBytes]
+          · simp [stCreated, stCleanTmp, posixUnlinkIfPresent, hTmpNeBase, hOldMem]
+          · simp [stCreated, hOldNeTmp, hOldNandBytes]
+        let stWritten : PosixFsState :=
+          { stCreated with
+             kernel := { stCreated.kernel with
+                          pageCache := { dirtyFiles :=
+                                           assocInsert tmpIno (encodeWalRecord newRec)
+                                             st.kernel.pageCache.dirtyFiles } } }
+        have hWrEq : posixPwriteAll stCreated h.pid tmpFd (encodeWalRecord newRec) = .ok stWritten := by
+          unfold posixPwriteAll
+          simp [stCreated, resolveOpenFd_insert_self]
+        rw [hWrEq] at hMid
+        dsimp only at hMid
+        have hWrittenWin :
+            VaultCrashSafeWindow stWritten h.basePath lockIno genesisNonce macFn macKey oldRec newRec := by
+          refine ⟨hLockLtNext, hLock64, hNonceLen, hOldWf, hOldGid, hOldVer,
+            hNewWf, hVkEqH, hGidEqH, hNewVer, hDrvDir,
+            hCreatedWin.2.2.2.2.2.2.2.2.2.2.2.1,
+            hLockNandDir, ?_, hLockDrv, hCreatedWin.2.2.2.2.2.2.2.2.2.2.2.2.2.2.2.1,
+            ⟨oldIno, hOldLtNext, hOldNandDir, ?_, hOldDrv,
+              Or.inl (by simp [stWritten, stCreated, hOldNeTmp, hOldNandBytes])⟩,
+            ⟨oldIno, hOldLtNext,
+              by simp [stWritten, stCreated, stCleanTmp, posixUnlinkIfPresent, hTmpNeBase, hOldMem],
+              ?_, hOldDrv,
+              Or.inl (by simp [stWritten, stCreated, hOldNeTmp, hOldNandBytes])⟩⟩
+          · simp [stWritten, hLockNeTmp, hLockPg]
+          · simp [stWritten, hOldNeTmp, hOldPg]
+          · simp [stWritten, hOldNeTmp, hOldPg]
+        by_cases hFailRec : faults.failRecordSync = true
+        · have hSyFail :
+              posixSyncAllMedia stWritten h.pid tmpFd faults.failRecordSync =
+                ({ stWritten with
+                    kernel := { stWritten.kernel with
+                                  openFds := { stWritten.kernel.openFds with
+                                                 descriptions := assocInsert tmpDescId
+                                                   { inode := tmpIno, writable := true, stickyFsyncErr := true }
+                                                   stWritten.kernel.openFds.descriptions }
+                                  pageCache := { dirtyFiles :=
+                                    assocErase tmpIno stWritten.kernel.pageCache.dirtyFiles } }
+                    driveCache := { stWritten.driveCache with
+                                     cachedFiles := assocErase tmpIno st.driveCache.cachedFiles } },
+                 .error .eio) := by
+            unfold posixSyncAllMedia
+            simp [stWritten, stCreated, resolveOpenFd_insert_self, hFailRec]
+          rw [hSyFail] at hMid
+          dsimp only at hMid
+          let stSyErr := (posixSyncAllMedia stWritten h.pid tmpFd faults.failRecordSync).1
+          have hSyErrEq : stSyErr =
+              { stWritten with
+                  kernel := { stWritten.kernel with
+                                openFds := { stWritten.kernel.openFds with
+                                               descriptions := assocInsert tmpDescId
+                                                 { inode := tmpIno, writable := true, stickyFsyncErr := true }
+                                                 stWritten.kernel.openFds.descriptions }
+                                pageCache := { dirtyFiles :=
+                                  assocErase tmpIno stWritten.kernel.pageCache.dirtyFiles } }
+                  driveCache := { stWritten.driveCache with
+                                   cachedFiles := assocErase tmpIno st.driveCache.cachedFiles } } :=
+            congrArg Prod.fst hSyFail
+          have hSyErrWin :
+              VaultCrashSafeWindow stSyErr h.basePath lockIno genesisNonce macFn macKey oldRec newRec := by
+            rw [hSyErrEq]
+            refine ⟨hLockLtNext, hLock64, hNonceLen, hOldWf, hOldGid, hOldVer,
+              hNewWf, hVkEqH, hGidEqH, hNewVer, hDrvDir,
+              by simp [stWritten, stCreated, stCleanTmp, posixUnlinkIfPresent, hTmpNeLock, hLockMem],
+              hLockNandDir,
+              by simp [stWritten, hLockNeTmp, hLockPg],
+              by simp [hLockNeTmp, hLockDrv],
+              by simp [stWritten, stCreated, hLockNeTmp, hLockNandBytes],
+              ⟨oldIno, hOldLtNext, hOldNandDir,
+                by simp [stWritten, hOldNeTmp, hOldPg],
+                by simp [hOldNeTmp, hOldDrv],
+                Or.inl (by simp [stWritten, stCreated, hOldNeTmp, hOldNandBytes])⟩,
+              ⟨oldIno, hOldLtNext,
+                by simp [stWritten, stCreated, stCleanTmp, posixUnlinkIfPresent, hTmpNeBase, hOldMem],
+                by simp [stWritten, hOldNeTmp, hOldPg],
+                by simp [hOldNeTmp, hOldDrv],
+                Or.inl (by simp [stWritten, stCreated, hOldNeTmp, hOldNandBytes])⟩⟩
+          have hClosePreserves : ∀ s0 : PosixFsState,
+              VaultCrashSafeWindow s0 h.basePath lockIno genesisNonce macFn macKey oldRec newRec →
+              VaultCrashSafeWindow ((posixCloseFd s0 h.pid tmpFd).toOption.getD s0)
+                h.basePath lockIno genesisNonce macFn macKey oldRec newRec := by
+            intro s0 hW0
+            rcases posixCloseFd_preserves_storage s0 h.pid tmpFd with ⟨hDi, hPgC, hDrC, hNdC⟩
+            unfold VaultCrashSafeWindow
+            rw [hDi, hPgC, hDrC, hNdC]
+            exact hW0
+          rcases List.mem_cons.mp hMid with rfl | hMid
+          · exact hBaseWin
+          · rcases List.mem_cons.mp hMid with rfl | hMid
+            · exact hCleanWin
+            · rcases List.mem_cons.mp hMid with rfl | hMid
+              · exact hCreatedWin
+              · rcases List.mem_cons.mp hMid with rfl | hMid
+                · exact hWrittenWin
+                · rcases List.mem_cons.mp hMid with rfl | hMid
+                  · rw [← hSyErrEq] at hSyErrWin; exact hSyErrWin
+                  · rcases List.mem_cons.mp hMid with rfl | hMid
+                    · rw [← hSyErrEq] at hSyErrWin
+                      exact hClosePreserves _ hSyErrWin
+                    · cases hMid
+        · have hFailFalse : faults.failRecordSync = false := by
+            cases hB : faults.failRecordSync
+            · rfl
+            · exfalso; exact hFailRec hB
+          have hSyOk :
+              posixSyncAllMedia stWritten h.pid tmpFd faults.failRecordSync =
+                ({ stWritten with
+                    kernel := { stWritten.kernel with
+                                  pageCache := { dirtyFiles :=
+                                    assocErase tmpIno stWritten.kernel.pageCache.dirtyFiles } }
+                    driveCache := { stWritten.driveCache with
+                                     cachedFiles := assocErase tmpIno st.driveCache.cachedFiles }
+                    nand := { stWritten.nand with
+                               fileBlocks := assocInsert tmpIno (encodeWalRecord newRec)
+                                               stWritten.nand.fileBlocks } },
+                 .ok ()) := by
+            unfold posixSyncAllMedia readInodeHierarchy pendingVolatileWrite
+            simp [stWritten, stCreated, resolveOpenFd_insert_self, hFailFalse]
+          rw [hSyOk] at hMid
+          dsimp only at hMid
+          let stSyncedTmp : PosixFsState :=
+            { stWritten with
+               kernel := { stWritten.kernel with
+                            pageCache := { dirtyFiles :=
+                              assocErase tmpIno stWritten.kernel.pageCache.dirtyFiles } }
+               driveCache := { stWritten.driveCache with
+                                cachedFiles := assocErase tmpIno st.driveCache.cachedFiles }
+               nand := { stWritten.nand with
+                          fileBlocks := assocInsert tmpIno (encodeWalRecord newRec)
+                                          stWritten.nand.fileBlocks } }
+          have hSyncedTmpWin :
+              VaultCrashSafeWindow stSyncedTmp h.basePath lockIno genesisNonce macFn macKey oldRec newRec := by
+            refine ⟨hLockLtNext, hLock64, hNonceLen, hOldWf, hOldGid, hOldVer,
+              hNewWf, hVkEqH, hGidEqH, hNewVer, hDrvDir,
+              by simp [stSyncedTmp, stWritten, stCreated, stCleanTmp, posixUnlinkIfPresent, hTmpNeLock, hLockMem],
+              hLockNandDir,
+              by simp [stSyncedTmp, stWritten, hLockNeTmp, hLockPg],
+              by simp [stSyncedTmp, hLockNeTmp, hLockDrv],
+              by simp [stSyncedTmp, stWritten, stCreated, hLockNeTmp, hLockNandBytes],
+              ⟨oldIno, hOldLtNext, hOldNandDir,
+                by simp [stSyncedTmp, stWritten, hOldNeTmp, hOldPg],
+                by simp [stSyncedTmp, hOldNeTmp, hOldDrv],
+                Or.inl (by simp [stSyncedTmp, stWritten, stCreated, hOldNeTmp, hOldNandBytes])⟩,
+              ⟨oldIno, hOldLtNext,
+                by simp [stSyncedTmp, stWritten, stCreated, stCleanTmp, posixUnlinkIfPresent, hTmpNeBase, hOldMem],
+                by simp [stSyncedTmp, stWritten, hOldNeTmp, hOldPg],
+                by simp [stSyncedTmp, hOldNeTmp, hOldDrv],
+                Or.inl (by simp [stSyncedTmp, stWritten, stCreated, hOldNeTmp, hOldNandBytes])⟩⟩
+          let stClosedTmp := (posixCloseFd stSyncedTmp h.pid tmpFd).toOption.getD stSyncedTmp
+          have hClosedSameStorage := posixCloseFd_preserves_storage stSyncedTmp h.pid tmpFd
+          have hClosedWin :
+              VaultCrashSafeWindow stClosedTmp h.basePath lockIno genesisNonce macFn macKey oldRec newRec := by
+            rcases hClosedSameStorage with ⟨hDi, hPgC, hDrC, hNdC⟩
+            unfold VaultCrashSafeWindow
+            rw [hDi, hPgC, hDrC, hNdC]
+            exact hSyncedTmpWin
+          have hTmpPresent :
+              assocLookup stClosedTmp.kernel.dirInode.unsyncedEntries tmpPath =
+                some (.regular tmpIno) := by
+            dsimp only [stClosedTmp]
+            rw [hClosedSameStorage.1]
+            simp [stSyncedTmp, stWritten, stCreated]
+          have hRnEq :
+              posixRename stClosedTmp tmpPath h.basePath =
+                .ok { stClosedTmp with
+                       kernel := { stClosedTmp.kernel with
+                                    dirInode := { unsyncedEntries :=
+                                      if tmpPath == h.basePath then
+                                        assocInsert h.basePath (.regular tmpIno)
+                                          stClosedTmp.kernel.dirInode.unsyncedEntries
+                                      else
+                                        assocErase tmpPath
+                                          (assocInsert h.basePath (.regular tmpIno)
+                                            stClosedTmp.kernel.dirInode.unsyncedEntries) } } } := by
+            unfold posixRename
+            rw [hTmpPresent]
+            rfl
+          rw [hRnEq] at hMid
+          dsimp only at hMid
+          have hTmpBeqBase : (tmpPath == h.basePath) = false := by
+            cases hB : (tmpPath == h.basePath)
+            · rfl
+            · exfalso; exact walTmpPath_ne_base h.basePath (eq_of_beq hB)
+          let stRenamed : PosixFsState :=
+            { stClosedTmp with
+               kernel := { stClosedTmp.kernel with
+                            dirInode := { unsyncedEntries :=
+                              if tmpPath == h.basePath then
+                                assocInsert h.basePath (.regular tmpIno)
+                                  stClosedTmp.kernel.dirInode.unsyncedEntries
+                              else
+                                assocErase tmpPath
+                                  (assocInsert h.basePath (.regular tmpIno)
+                                    stClosedTmp.kernel.dirInode.unsyncedEntries) } } }
+          have hRenamedLockMem :
+              assocLookup stRenamed.kernel.dirInode.unsyncedEntries (walLockPath h.basePath) =
+                some (.regular lockIno) := by
+            dsimp only [stRenamed, stClosedTmp]
+            rw [hTmpBeqBase]
+            simp only [Bool.false_eq_true, ↓reduceIte, assocLookup_erase, hTmpNeLock,
+              assocLookup_insert, hBaseNeLock]
+            rw [hClosedSameStorage.1]
+            simp [stSyncedTmp, stWritten, stCreated, stCleanTmp, posixUnlinkIfPresent,
+              hTmpNeLock, hLockMem]
+          have hRenamedBaseMem :
+              assocLookup stRenamed.kernel.dirInode.unsyncedEntries h.basePath =
+                some (.regular tmpIno) := by
+            dsimp only [stRenamed]
+            rw [hTmpBeqBase]
+            simp [hTmpNeBase]
+          have hTmpCleaned :
+              assocLookup stClosedTmp.kernel.pageCache.dirtyFiles tmpIno = none ∧
+              assocLookup stClosedTmp.driveCache.cachedFiles tmpIno = none ∧
+              assocLookup stClosedTmp.nand.fileBlocks tmpIno = some (encodeWalRecord newRec) ∧
+              tmpIno < stClosedTmp.nand.nextInode := by
+            dsimp only [stClosedTmp]
+            rw [hClosedSameStorage.2.1, hClosedSameStorage.2.2.1, hClosedSameStorage.2.2.2]
+            refine ⟨by simp [stSyncedTmp], by simp [stSyncedTmp], by simp [stSyncedTmp], ?_⟩
+            simp [stSyncedTmp, stWritten, stCreated]
+          have hRenamedWin :
+              VaultCrashSafeWindow stRenamed h.basePath lockIno genesisNonce macFn macKey oldRec newRec := by
+            rcases hClosedSameStorage with ⟨_, hPgC, hDrC, hNdC⟩
+            refine ⟨?_, hLock64, hNonceLen, hOldWf, hOldGid, hOldVer,
+              hNewWf, hVkEqH, hGidEqH, hNewVer, ?_,
+              hRenamedLockMem, ?_, ?_, ?_, ?_,
+              ⟨oldIno, ?_, ?_, ?_, ?_, Or.inl ?_⟩,
+              ⟨tmpIno, hTmpCleaned.2.2.2, hRenamedBaseMem, hTmpCleaned.1, hTmpCleaned.2.1,
+                Or.inr hTmpCleaned.2.2.1⟩⟩
+            · dsimp only [stRenamed, stClosedTmp]; rw [hNdC]; exact hLockLtNext
+            · dsimp only [stRenamed, stClosedTmp]; rw [hDrC]; exact hDrvDir
+            · dsimp only [stRenamed, stClosedTmp]; rw [hNdC]; exact hLockNandDir
+            · dsimp only [stRenamed, stClosedTmp]; rw [hPgC]; simp [stSyncedTmp, stWritten, hLockNeTmp, hLockPg]
+            · dsimp only [stRenamed, stClosedTmp]; rw [hDrC]; simp [stSyncedTmp, hLockNeTmp, hLockDrv]
+            · dsimp only [stRenamed, stClosedTmp]; rw [hNdC]; simp [stSyncedTmp, stWritten, stCreated, hLockNeTmp, hLockNandBytes]
+            · dsimp only [stRenamed, stClosedTmp]; rw [hNdC]; exact hOldLtNext
+            · dsimp only [stRenamed, stClosedTmp]; rw [hNdC]; exact hOldNandDir
+            · dsimp only [stRenamed, stClosedTmp]; rw [hPgC]; simp [stSyncedTmp, stWritten, hOldNeTmp, hOldPg]
+            · dsimp only [stRenamed, stClosedTmp]; rw [hDrC]; simp [stSyncedTmp, hOldNeTmp, hOldDrv]
+            · dsimp only [stRenamed, stClosedTmp]; rw [hNdC]; simp [stSyncedTmp, stWritten, stCreated, hOldNeTmp, hOldNandBytes]
+          let stSyncedDir := (posixSyncParentDir stRenamed faults.failParentSync).1
+          have hSyncedDirWin :
+              VaultCrashSafeWindow stSyncedDir h.basePath lockIno genesisNonce macFn macKey oldRec newRec := by
+            dsimp only [stSyncedDir, posixSyncParentDir]
+            by_cases hFp : faults.failParentSync = true
+            · simp only [hFp, ↓reduceIte]; exact hRenamedWin
+            · simp only [hFp, Bool.false_eq_true, ↓reduceIte]
+              rcases hRenamedWin with ⟨w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, _,
+                w12, _, w14, w15, w16, _, wMem⟩
+              exact ⟨w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, rfl,
+                w12, w12, w14, w15, w16, wMem, wMem⟩
+          rcases List.mem_cons.mp hMid with rfl | hMid
+          · exact hBaseWin
+          · rcases List.mem_cons.mp hMid with rfl | hMid
+            · exact hCleanWin
+            · rcases List.mem_cons.mp hMid with rfl | hMid
+              · exact hCreatedWin
+              · rcases List.mem_cons.mp hMid with rfl | hMid
+                · exact hWrittenWin
+                · rcases List.mem_cons.mp hMid with rfl | hMid
+                  · exact hSyncedTmpWin
+                  · rcases List.mem_cons.mp hMid with rfl | hMid
+                    · exact hClosedWin
+                    · rcases List.mem_cons.mp hMid with rfl | hMid
+                      · exact hRenamedWin
+                      · rcases List.mem_cons.mp hMid with rfl | hMid
+                        · exact hSyncedDirWin
+                        · cases hMid
+
+/-- **Post-Commit Durability Lemma (`replaceAtomic_ok_durable`)**:
+    Whenever `replaceAtomic` returns `.ok committedRec`, `committedRec` is durably persisted on
+    `NandBlocks` (`VaultDurableAt st' ... committedRec`) and survives every subsequent `CrashStep`! -/
