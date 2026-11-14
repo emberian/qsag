@@ -673,12 +673,12 @@ def execX86Instr (ins : X86Instr) (pc : Nat) (st : X86State) : X86State × Leaka
 
 def execX86Block (blk : List X86Instr) (pc : Nat) (st : X86State) :
     X86State × List LeakageEvent :=
-  List.rec (motive := fun _ => Nat → X86State → X86State × List LeakageEvent)
-    (fun _ st => (st, []))
-    (fun ins _ run pc st =>
-      let first := execX86Instr ins pc st
-      let rest := run (pc + 1) first.1
-      (rest.1, first.2 :: rest.2)) blk pc st
+  match blk with
+  | [] => (st, [])
+  | ins :: rest =>
+    let (st1, ev) := execX86Instr ins pc st
+    let (st2, evs) := execX86Block rest (pc + 1) st1
+    (st2, ev :: evs)
 
 /-- Compose certified blocks at the advanced PC, preserving the full leakage trace. -/
 theorem execX86Block_append (a b : List X86Instr) (pc : Nat) (st : X86State) :
@@ -703,23 +703,23 @@ theorem execX86Block_suffix_pc_not_reset (st : X86State) :
 
 def execX86Loop (trips : Nat) (body : List X86Instr) (pc : Nat) (st : X86State) :
     X86State × List LeakageEvent :=
-  Nat.rec (motive := fun _ => Nat → X86State → X86State × List LeakageEvent)
-    (fun _ st => (st, []))
-    (fun _ run pc st =>
-      let first := execX86Block body pc st
-      let rest := run (pc + body.length) first.1
-      (rest.1, first.2 ++ rest.2)) trips pc st
+  match trips with
+  | 0 => (st, [])
+  | n + 1 =>
+    let (st1, evs1) := execX86Block body pc st
+    let (st2, evs2) := execX86Loop n body (pc + body.length) st1
+    (st2, evs1 ++ evs2)
 
 def execX86Prog (prog : List X86Stmt) (pc : Nat) (st : X86State) :
     X86State × List LeakageEvent :=
-  List.rec (motive := fun _ => Nat → X86State → X86State × List LeakageEvent)
-    (fun _ st => (st, []))
-    (fun stmt _ run pc st =>
+  match prog with
+  | [] => (st, [])
+  | stmt :: rest =>
     match stmt with
     | .instr ins =>
-      let first := execX86Instr ins pc st
-      let rest := run (pc + 1) first.1
-      (rest.1, first.2 :: rest.2)
+      let (st1, ev) := execX86Instr ins pc st
+      let (st2, evs) := execX86Prog rest (pc + 1) st1
+      (st2, ev :: evs)
     | .jccNz condReg thenBody elseBody =>
       let taken := st.gpr condReg != 0#64
       let brEv : LeakageEvent :=
@@ -729,13 +729,13 @@ def execX86Prog (prog : List X86Stmt) (pc : Nat) (st : X86State) :
           varLatencyOperands := []
           dirtyUpperYmmOnRet := false }
       let chosen := if taken then thenBody else elseBody
-      let first := execX86Block chosen (pc + 1) st
-      let rest := run (pc + 1 + chosen.length) first.1
-      (rest.1, brEv :: (first.2 ++ rest.2))
+      let (st1, evs1) := execX86Block chosen (pc + 1) st
+      let (st2, evs2) := execX86Prog rest (pc + 1 + chosen.length) st1
+      (st2, brEv :: (evs1 ++ evs2))
     | .pubLoop trips body =>
-      let first := execX86Loop trips body pc st
-      let rest := run (pc + trips * body.length) first.1
-      (rest.1, first.2 ++ rest.2)
+      let (st1, evs1) := execX86Loop trips body pc st
+      let (st2, evs2) := execX86Prog rest (pc + trips * body.length) st1
+      (st2, evs1 ++ evs2)
     | .ret =>
       let retEv : LeakageEvent :=
         { pc := pc
@@ -743,7 +743,7 @@ def execX86Prog (prog : List X86Stmt) (pc : Nat) (st : X86State) :
           memAddrs := []
           varLatencyOperands := []
           dirtyUpperYmmOnRet := st.ymmUpperDirty }
-      (st, [retEv])) prog pc st
+      (st, [retEv])
 
 structure X86TaintState where
   gpr : X86Gpr → SecLabel
@@ -1829,12 +1829,12 @@ def execArmInstr (ins : ArmInstr) (pc : Nat) (st : ArmState) : ArmState × Leaka
 
 def execArmBlock (blk : List ArmInstr) (pc : Nat) (st : ArmState) :
     ArmState × List LeakageEvent :=
-  List.rec (motive := fun _ => Nat → ArmState → ArmState × List LeakageEvent)
-    (fun _ st => (st, []))
-    (fun ins _ run pc st =>
-      let first := execArmInstr ins pc st
-      let rest := run (pc + 1) first.1
-      (rest.1, first.2 :: rest.2)) blk pc st
+  match blk with
+  | [] => (st, [])
+  | ins :: rest =>
+    let (st1, ev) := execArmInstr ins pc st
+    let (st2, evs) := execArmBlock rest (pc + 1) st1
+    (st2, ev :: evs)
 
 /-- Compose certified blocks at the advanced PC, preserving the full leakage trace. -/
 theorem execArmBlock_append (a b : List ArmInstr) (pc : Nat) (st : ArmState) :
@@ -1859,23 +1859,23 @@ theorem execArmBlock_suffix_pc_not_reset (st : ArmState) :
 
 def execArmLoop (trips : Nat) (body : List ArmInstr) (pc : Nat) (st : ArmState) :
     ArmState × List LeakageEvent :=
-  Nat.rec (motive := fun _ => Nat → ArmState → ArmState × List LeakageEvent)
-    (fun _ st => (st, []))
-    (fun _ run pc st =>
-      let first := execArmBlock body pc st
-      let rest := run (pc + body.length) first.1
-      (rest.1, first.2 ++ rest.2)) trips pc st
+  match trips with
+  | 0 => (st, [])
+  | n + 1 =>
+    let (st1, evs1) := execArmBlock body pc st
+    let (st2, evs2) := execArmLoop n body (pc + body.length) st1
+    (st2, evs1 ++ evs2)
 
 def execArmProg (prog : List ArmStmt) (pc : Nat) (st : ArmState) :
     ArmState × List LeakageEvent :=
-  List.rec (motive := fun _ => Nat → ArmState → ArmState × List LeakageEvent)
-    (fun _ st => (st, []))
-    (fun stmt _ run pc st =>
+  match prog with
+  | [] => (st, [])
+  | stmt :: rest =>
     match stmt with
     | .instr ins =>
-      let first := execArmInstr ins pc st
-      let rest := run (pc + 1) first.1
-      (rest.1, first.2 :: rest.2)
+      let (st1, ev) := execArmInstr ins pc st
+      let (st2, evs) := execArmProg rest (pc + 1) st1
+      (st2, ev :: evs)
     | .cbnz condReg thenBody elseBody =>
       let taken := st.gpr condReg != 0#64
       let brEv : LeakageEvent :=
@@ -1885,15 +1885,15 @@ def execArmProg (prog : List ArmStmt) (pc : Nat) (st : ArmState) :
           varLatencyOperands := []
           dirtyUpperYmmOnRet := false }
       let chosen := if taken then thenBody else elseBody
-      let first := execArmBlock chosen (pc + 1) st
-      let rest := run (pc + 1 + chosen.length) first.1
-      (rest.1, brEv :: (first.2 ++ rest.2))
+      let (st1, evs1) := execArmBlock chosen (pc + 1) st
+      let (st2, evs2) := execArmProg rest (pc + 1 + chosen.length) st1
+      (st2, brEv :: (evs1 ++ evs2))
     | .pubLoop trips body =>
-      let first := execArmLoop trips body pc st
-      let rest := run (pc + trips * body.length) first.1
-      (rest.1, first.2 ++ rest.2)
+      let (st1, evs1) := execArmLoop trips body pc st
+      let (st2, evs2) := execArmProg rest (pc + trips * body.length) st1
+      (st2, evs1 ++ evs2)
     | .ret =>
-      (st, [LeakageEvent.clean pc])) prog pc st
+      (st, [LeakageEvent.clean pc])
 
 structure ArmTaintState where
   gpr : ArmGpr → SecLabel
@@ -2809,38 +2809,8 @@ def keccakChiMpcAvx2Prog : List X86Stmt :=
   , .instr .vzeroupper
   , .ret ]
 
-/-- Execute an instruction prefix once before continuing with a statement suffix. -/
-private theorem execX86Prog_instrPrefix (code : List X86Instr) (rest : List X86Stmt)
-    (pc : Nat) (s : X86State) :
-    (execX86Prog (code.map X86Stmt.instr ++ rest) pc s).1 =
-      (execX86Prog rest (pc + code.length) (execX86Block code pc s).1).1 := by
-  induction code generalizing pc s with
-  | nil => simp only [List.map_nil, List.nil_append, List.length_nil, Nat.add_zero, execX86Block]
-  | cons ins code ih =>
-    simp only [List.map_cons, List.cons_append, execX86Prog, execX86Block, ih,
-      List.length_cons, Nat.add_assoc, Nat.add_comm 1]
-
-private def keccakChiPrefix : List X86Instr :=
-  (keccakChiMpcAvx2Prog.take 50).filterMap (fun | .instr i => some i | _ => none)
-
-private theorem keccakChi_split : keccakChiMpcAvx2Prog =
-    keccakChiPrefix.map X86Stmt.instr ++ keccakChiMpcAvx2Prog.drop 50 := rfl
-
-private theorem keccakChi_wipe (pc : Nat) (s : X86State) :
-    (execX86Prog (keccakChiMpcAvx2Prog.drop 50) pc s).1.ymm .ymm0 = Vec256.zero ∧
-    (execX86Prog (keccakChiMpcAvx2Prog.drop 50) pc s).1.ymm .ymm1 = Vec256.zero ∧
-    (execX86Prog (keccakChiMpcAvx2Prog.drop 50) pc s).1.ymm .ymm2 = Vec256.zero ∧
-    (execX86Prog (keccakChiMpcAvx2Prog.drop 50) pc s).1.ymm .ymm3 = Vec256.zero ∧
-    (execX86Prog (keccakChiMpcAvx2Prog.drop 50) pc s).1.ymm .ymm4 = Vec256.zero ∧
-    (execX86Prog (keccakChiMpcAvx2Prog.drop 50) pc s).1.ymm .ymm5 = Vec256.zero ∧
-    (execX86Prog (keccakChiMpcAvx2Prog.drop 50) pc s).1.ymm .ymm6 = Vec256.zero ∧
-    (execX86Prog (keccakChiMpcAvx2Prog.drop 50) pc s).1.ymm .ymm7 = Vec256.zero ∧
-    (execX86Prog (keccakChiMpcAvx2Prog.drop 50) pc s).1.ymm .ymm8 = Vec256.zero ∧
-    (execX86Prog (keccakChiMpcAvx2Prog.drop 50) pc s).1.ymm .ymm9 = Vec256.zero ∧
-    (execX86Prog (keccakChiMpcAvx2Prog.drop 50) pc s).1.ymm .ymm10 = Vec256.zero ∧
-    (execX86Prog (keccakChiMpcAvx2Prog.drop 50) pc s).1.ymm .ymm11 = Vec256.zero := by
-  exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
-
+set_option maxRecDepth 8192 in
+set_option maxHeartbeats 2000000 in
 /-- **Timing-Noninterference & Upper-YMM Hygiene of `qsag_asm_keccak_chi_mpc_avx2`**:
     Produces bit-identical leakage traces on all secret-varying states agreeing on public buffer
     pointers `(rdi, rsi, rdx, rcx)` and returns with `ymmUpperDirty = false` and wiped `ymm0..ymm11`. -/
@@ -2861,7 +2831,7 @@ theorem keccakChiMpcAvx2_constant_time
     (execX86Prog keccakChiMpcAvx2Prog 0 s₁).1.ymm .ymm9 = Vec256.zero ∧
     (execX86Prog keccakChiMpcAvx2Prog 0 s₁).1.ymm .ymm10 = Vec256.zero ∧
     (execX86Prog keccakChiMpcAvx2Prog 0 s₁).1.ymm .ymm11 = Vec256.zero := by
-  have hChk : (checkX86Prog true sysvPtrArgs4Taint keccakChiMpcAvx2Prog).isSome = true := by decide +kernel
+  have hChk : (checkX86Prog true sysvPtrArgs4Taint keccakChiMpcAvx2Prog).isSome = true := rfl
   rcases hOpt : checkX86Prog true sysvPtrArgs4Taint keccakChiMpcAvx2Prog with _ | τOut
   · simp [hOpt] at hChk
   · obtain ⟨hTrace, hLowOut⟩ :=
@@ -2869,13 +2839,10 @@ theorem keccakChiMpcAvx2_constant_time
         keccakChiMpcAvx2Prog sysvPtrArgs4Taint τOut 0 hOpt s₁ s₂ hLow
     have hClean : τOut.upperYmmClean = true := by
       have : (checkX86Prog true sysvPtrArgs4Taint keccakChiMpcAvx2Prog).map
-          (fun t => t.upperYmmClean) = some true := by decide +kernel
+          (fun t => t.upperYmmClean) = some true := rfl
       rw [hOpt] at this; exact Option.some.inj this
     refine ⟨hTrace, hLowOut.2.2.2.2.2.2.2.2.2 hClean, ?_⟩
-    have hWipe := keccakChi_wipe (0 + keccakChiPrefix.length)
-      (execX86Block keccakChiPrefix 0 s₁).1
-    rw [keccakChi_split, execX86Prog_instrPrefix]
-    exact hWipe
+    simp [keccakChiMpcAvx2Prog, execX86Prog, execX86Instr, X86State.setYmm, Vec256.zero]
 
 /-- Modeled 39-instruction `qsag_asm_keccak_sha3_neon` ISA abstraction (`aarch64_kernels.s:32-74`). -/
 def keccakSha3NeonProg : List ArmStmt :=
@@ -2924,38 +2891,8 @@ theorem bcax_eq_keccakChiLane (a0 a1 a2 : Vec128) :
   simp only [Vec128.bcax, keccakChiLane]
   congr 1 <;> rw [BitVec.and_comm]
 
-private theorem execArmProg_instrPrefix (code : List ArmInstr) (rest : List ArmStmt)
-    (pc : Nat) (s : ArmState) :
-    (execArmProg (code.map ArmStmt.instr ++ rest) pc s).1 =
-      (execArmProg rest (pc + code.length) (execArmBlock code pc s).1).1 := by
-  induction code generalizing pc s with
-  | nil => simp only [List.map_nil, List.nil_append, List.length_nil, Nat.add_zero, execArmBlock]
-  | cons ins code ih =>
-    simp only [List.map_cons, List.cons_append, execArmProg, execArmBlock, ih,
-      List.length_cons, Nat.add_assoc, Nat.add_comm 1]
-
-private def keccakNeonPrefix : List ArmInstr :=
-  (keccakSha3NeonProg.take 25).filterMap (fun | .instr i => some i | _ => none)
-
-private theorem keccakNeon_split : keccakSha3NeonProg =
-    keccakNeonPrefix.map ArmStmt.instr ++ keccakSha3NeonProg.drop 25 := rfl
-
-private theorem keccakNeon_wipe (pc : Nat) (s : ArmState) :
-    (execArmProg (keccakSha3NeonProg.drop 25) pc s).1.neon .v0 = Vec128.zero ∧
-    (execArmProg (keccakSha3NeonProg.drop 25) pc s).1.neon .v1 = Vec128.zero ∧
-    (execArmProg (keccakSha3NeonProg.drop 25) pc s).1.neon .v2 = Vec128.zero ∧
-    (execArmProg (keccakSha3NeonProg.drop 25) pc s).1.neon .v3 = Vec128.zero ∧
-    (execArmProg (keccakSha3NeonProg.drop 25) pc s).1.neon .v4 = Vec128.zero ∧
-    (execArmProg (keccakSha3NeonProg.drop 25) pc s).1.neon .v5 = Vec128.zero ∧
-    (execArmProg (keccakSha3NeonProg.drop 25) pc s).1.neon .v6 = Vec128.zero ∧
-    (execArmProg (keccakSha3NeonProg.drop 25) pc s).1.neon .v7 = Vec128.zero ∧
-    (execArmProg (keccakSha3NeonProg.drop 25) pc s).1.neon .v16 = Vec128.zero ∧
-    (execArmProg (keccakSha3NeonProg.drop 25) pc s).1.neon .v17 = Vec128.zero ∧
-    (execArmProg (keccakSha3NeonProg.drop 25) pc s).1.neon .v18 = Vec128.zero ∧
-    (execArmProg (keccakSha3NeonProg.drop 25) pc s).1.neon .v19 = Vec128.zero ∧
-    (execArmProg (keccakSha3NeonProg.drop 25) pc s).1.neon .v20 = Vec128.zero := by
-  exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
-
+set_option maxRecDepth 8192 in
+set_option maxHeartbeats 2000000 in
 theorem keccakSha3Neon_constant_time
     (s₁ s₂ : ArmState)
     (hLow : ArmLowEq (fun _ => .sec) aapcsPtrArgs3Taint s₁ s₂) :
@@ -2973,17 +2910,14 @@ theorem keccakSha3Neon_constant_time
     (execArmProg keccakSha3NeonProg 0 s₁).1.neon .v18 = Vec128.zero ∧
     (execArmProg keccakSha3NeonProg 0 s₁).1.neon .v19 = Vec128.zero ∧
     (execArmProg keccakSha3NeonProg 0 s₁).1.neon .v20 = Vec128.zero := by
-  have hChk : (checkArmProg true aapcsPtrArgs3Taint keccakSha3NeonProg).isSome = true := by decide +kernel
+  have hChk : (checkArmProg true aapcsPtrArgs3Taint keccakSha3NeonProg).isSome = true := rfl
   rcases hOpt : checkArmProg true aapcsPtrArgs3Taint keccakSha3NeonProg with _ | τOut
   · simp [hOpt] at hChk
   · obtain ⟨hTrace, _⟩ :=
       arm_ct_checker_sound (fun _ => .sec) true (fun _ _ => rfl)
         keccakSha3NeonProg aapcsPtrArgs3Taint τOut 0 hOpt s₁ s₂ hLow
     refine ⟨hTrace, ?_⟩
-    have hWipe := keccakNeon_wipe (0 + keccakNeonPrefix.length)
-      (execArmBlock keccakNeonPrefix 0 s₁).1
-    rw [keccakNeon_split, execArmProg_instrPrefix]
-    exact hWipe
+    simp [keccakSha3NeonProg, execArmProg, execArmInstr, ArmState.setNeon]
 
 /-! ### 7.2 `gf256_shamir_mul_gfni`: Wiedemann `𝒯₃ ↔ GFNI` Field Isomorphism & 32-Lane SIMD -/
 
@@ -4210,7 +4144,7 @@ def SlotBlocksForwardDisjoint (out inp : BitVec 64) (blocks : Nat) : Prop :=
 /-- Arithmetic sufficient condition: neither region wraps past `2^64`, and the input region
     starts at or after the output region or lies entirely below it. -/
 theorem slotBlocksForwardDisjoint_of_bounds (out inp : BitVec 64) (blocks : Nat)
-    (hOut : out.toNat + 32 * blocks ≤ 2 ^ 64) (hInp : inp.toNat + 32 * blocks ≤ 2 ^ 64)
+    (_hOut : out.toNat + 32 * blocks ≤ 2 ^ 64) (hInp : inp.toNat + 32 * blocks ≤ 2 ^ 64)
     (hOrder : out.toNat ≤ inp.toNat ∨ inp.toNat + 32 * blocks ≤ out.toNat) :
     SlotBlocksForwardDisjoint out inp blocks := by
   intro k j a b hkj hj ha hb e
@@ -4376,12 +4310,12 @@ private theorem gfniLoop_correct (n : Nat) : ∀ (pc : Nat) (s : X86State),
         intro j b' hj hb' e
         rw [hRdi, addr_blk_succ, addr_blk_split] at e
         exact hOut 0 (j + 1) b b' (by omega) (by omega) hb hb' e
-      rw [hFrame, readMem256_congr_mem hMem]
+      rw [hFrame, readMem256_congr_mem hMem, h14, h15]
       have hSame := readMem256_writeMem256 s (s.gpr .rdi + 0#64)
         (gfniBlockVec (s.ymm .ymm14) (s.ymm .ymm15)
           (s.readMem256 (s.gpr .rsi + 0#64)) (s.readMem256 (s.gpr .rdx + 0#64)))
       rw [h14, h15] at hSame
-      exact hSame
+      simpa only [show BitVec.ofNat 64 (32 * 0) = 0#64 from rfl] using hSame
     | succ k =>
       have hk' : k < n := by omega
       have hOut1 : SlotBlocksForwardDisjoint ((execX86Block gfniLoopBody pc s).1.gpr .rdi)
@@ -4476,7 +4410,11 @@ private theorem keccakChiMpcAvx2Prog_mem (st : X86State) :
     (execX86Prog keccakChiMpcAvx2Prog 0 st).1.mem =
       (keccakChiStore st (keccakChiStore st (keccakChiStore st (keccakChiStore st
         (keccakChiStore st st 0#64 32#64 64#64) 32#64 64#64 96#64) 64#64 96#64 128#64)
-        96#64 128#64 0#64) 128#64 0#64 32#64).mem := rfl
+        96#64 128#64 0#64) 128#64 0#64 32#64).mem := by
+  simp [keccakChiMpcAvx2Prog, execX86Prog, execX86Instr, X86State.setYmm,
+    X86State.writeMem256, X86State.writeMem64, X86State.readMem256,
+    keccakChiStore, keccakChiLaneAt, keccakChiMpcLane256, keccakChiMpcShareVec256,
+    Vec256.xor, Vec256.and]
 
 /-- Read-back of each stored lane; no aliasing assumption is needed because the five output
     blocks sit at distinct constant offsets from `rdi`. -/
@@ -4698,23 +4636,31 @@ private theorem bdozProg_mem (n : Nat) (s : X86State) :
     (execX86Prog (tower128BdozVpclmulProg n) 0 s).1.mem =
       (t.writeMem256 (t.gpr .rdi + 0#64) (bdozReduce (t.ymm .ymm0) (t.ymm .ymm1))).mem := rfl
 
+/-- The only memory effect is the final 32-byte result store. -/
+private theorem bdozProg_memory_correct (n : Nat) (s : X86State) :
+    let sums := bdozAccumulate s.readMem256 n (s.gpr .rsi) (s.gpr .rdx) Vec256.zero Vec256.zero
+    (execX86Prog (tower128BdozVpclmulProg n) 0 s).1.mem =
+      (s.writeMem256 (s.gpr .rdi) (bdozReduce sums.1 sums.2)).mem := by
+  let initial := (s.setYmm .ymm0 Vec256.zero).setYmm .ymm1 Vec256.zero
+  let t := (execX86Loop n bdozLoopBody 2 initial).1
+  obtain ⟨hm, hd, hv⟩ := bdozLoop_correct n 2 initial
+  have hm' : t.mem = s.mem := hm
+  have hd' : t.gpr .rdi = s.gpr .rdi := hd
+  have hv' : (t.ymm .ymm0, t.ymm .ymm1) =
+      bdozAccumulate s.readMem256 n (s.gpr .rsi) (s.gpr .rdx) Vec256.zero Vec256.zero := hv
+  have hr := congrArg (fun p : Vec256 × Vec256 => bdozReduce p.1 p.2) hv'
+  rw [bdozProg_mem]
+  change (t.writeMem256 (t.gpr .rdi + 0#64) (bdozReduce (t.ymm .ymm0) (t.ymm .ymm1))).mem = _
+  simp only [BitVec.add_zero, hd', hr, X86State.writeMem256, X86State.writeMem64, hm']
+
 /-- Full program refinement to the two-lane polynomial dot product followed by the
     degree-bounded `0x87` reduction, for every public trip count. -/
 theorem tower128BdozVpclmul_exec_correct (n : Nat) (s : X86State) :
     let sums := bdozAccumulate s.readMem256 n (s.gpr .rsi) (s.gpr .rdx) Vec256.zero Vec256.zero
     (execX86Prog (tower128BdozVpclmulProg n) 0 s).1.readMem256 (s.gpr .rdi) =
       bdozReduce sums.1 sums.2 := by
-  let initial := (s.setYmm .ymm0 Vec256.zero).setYmm .ymm1 Vec256.zero
-  let t := (execX86Loop n bdozLoopBody 2 initial).1
-  obtain ⟨_, hd, hv⟩ := bdozLoop_correct n 2 initial
-  have hv' : (t.ymm .ymm0, t.ymm .ymm1) =
-      bdozAccumulate s.readMem256 n (s.gpr .rsi) (s.gpr .rdx) Vec256.zero Vec256.zero := by
-    exact hv
-  rw [readMem256_congr_mem (bdozProg_mem n s)]
-  have hd' : t.gpr .rdi = s.gpr .rdi := hd
-  rw [show s.gpr .rdi = t.gpr .rdi + 0#64 by rw [hd', BitVec.add_zero]]
-  rw [readMem256_writeMem256]
-  exact congrArg (fun p : Vec256 × Vec256 => bdozReduce p.1 p.2) hv'
+  rw [readMem256_congr_mem (bdozProg_memory_correct n s)]
+  exact readMem256_writeMem256 s _ _
 
 /-! ### 8. Architectural Scalar `RFLAGS` Parity (`MUL`/`IMUL`/`SHL`/`SHR`/`ROR`/`SBB`) -/
 
@@ -4993,6 +4939,37 @@ theorem aligned_qword_simulates_byteMem (bm : ByteMem) (addr q val : BitVec 64)
     have hToNat := congrArg BitVec.toNat heq
     simp only [BitVec.toNat_add, BitVec.toNat_ofNat] at hToNat
     omega
+
+/-- Four aligned qword stores refine the complete little-endian SIMD byte store. -/
+theorem aligned_simd_simulates_byteMem (s : X86State) (bm : ByteMem)
+    (addr q : BitVec 64) (v : Vec256)
+    (hAddr : addr.toNat % 8 = 0) (hQ : q.toNat % 8 = 0) :
+    readByteLE64 (writeByteLE256 bm addr v) q =
+      ((s.withByteMem bm).writeMem256 addr v).mem q := by
+  have h8 : (addr + 8#64).toNat % 8 = 0 := by
+    simp only [BitVec.toNat_add, BitVec.toNat_ofNat] ; omega
+  have h16 : (addr + 16#64).toNat % 8 = 0 := by
+    simp only [BitVec.toNat_add, BitVec.toNat_ofNat] ; omega
+  have h24 : (addr + 24#64).toNat % 8 = 0 := by
+    simp only [BitVec.toNat_add, BitVec.toNat_ofNat] ; omega
+  unfold writeByteLE256
+  rw [aligned_qword_simulates_byteMem _ _ _ _ h24 hQ,
+    aligned_qword_simulates_byteMem _ _ _ _ h16 hQ,
+    aligned_qword_simulates_byteMem _ _ _ _ h8 hQ,
+    aligned_qword_simulates_byteMem _ _ _ _ hAddr hQ]
+  rfl
+
+/-- End-to-end byte-memory refinement: on every aligned observation address, the
+    executed kernel agrees with a single little-endian store of the algebraic result.
+    Input loads may be unaligned, and input/output aliasing is allowed. -/
+theorem tower128BdozVpclmul_byte_memory_correct (n : Nat) (s : X86State) (bm : ByteMem)
+    (q : BitVec 64) (hOut : (s.gpr .rdi).toNat % 8 = 0) (hQ : q.toNat % 8 = 0) :
+    let sums := bdozAccumulate (readByteLE256 bm) n (s.gpr .rsi) (s.gpr .rdx)
+      Vec256.zero Vec256.zero
+    readByteLE64 (writeByteLE256 bm (s.gpr .rdi) (bdozReduce sums.1 sums.2)) q =
+      (execX86Prog (tower128BdozVpclmulProg n) 0 (s.withByteMem bm)).1.mem q := by
+  rw [bdozProg_memory_correct]
+  exact aligned_simd_simulates_byteMem s bm (s.gpr .rdi) q _ hOut hQ
 
 /-- **Tooth (Unaligned 64-bit byte-overlap across all 7 sub-qword offsets `1..7`)**:
     Writing `0xFFEEDDCCBBAA9988` at `0x1000 + δ` for **every** `δ ∈ {1,2,3,4,5,6,7}` corrupts

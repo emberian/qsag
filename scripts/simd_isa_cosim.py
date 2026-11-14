@@ -466,6 +466,16 @@ int main(void) {
     print(f'AArch64 PMULL and NEON transpose: {cases} cases each; all canaries intact')
 
 
+def run_rust_test(name):
+    result = subprocess.run(['cargo', 'test', '--release', '-p', 'qsag-asm', '--lib',
+                             name, '--', '--exact'], cwd=ROOT, text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    print(result.stdout, end='', flush=True)
+    result.check_returncode()
+    if 'test result: ok. 1 passed; 0 failed;' not in result.stdout:
+        raise RuntimeError(f'{name}: required production test did not execute exactly once')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--pin', action='store_true')
@@ -490,9 +500,7 @@ def main():
         print(f'FAIL: fixture provenance: {error}; continuing independent execution checks', flush=True)
     # This production Rust test calls the actual public wrapper for every backend
     # at lengths 0, 1, 2, 3, 16, 17, 40, 41. Raw assembly requires positive counts.
-    subprocess.run(['cargo', 'test', '--release', '-p', 'qsag-asm', '--lib',
-                    'bitslice::tests::gf2_128_mul_acc_batch_matches_schoolbook_reference_on_every_backend',
-                    '--', '--exact'], cwd=ROOT, check=True)
+    run_rust_test('bitslice::tests::gf2_128_mul_acc_batch_matches_schoolbook_reference_on_every_backend')
     print('production Rust wrapper: n=0 and boundary counts passed', flush=True)
     for name in NAMES[:2]:
         isolated(name, lambda name=name: test_multiply(name, fixtures[name]['code'], args.cases))
@@ -501,9 +509,9 @@ def main():
         isolated(name, lambda name=name: test_extra(name, fixtures[name]['code'], args.cases))
     for test in ('gf256_every_simd_tail_matches_portable_and_preserves_sentinels',
                  'tower128_bdoz_2lane_mac_vpclmul_pclmul_wiedemann_parity',
-                 'keccak_batch_tails_match_independent_portable_states'):
-        subprocess.run(['cargo', 'test', '--release', '-p', 'qsag-asm', '--lib',
-                        'tests::' + test, '--', '--exact'], cwd=ROOT, check=True)
+                 'keccak_batch_tails_match_independent_portable_states',
+                 'bitsliced_basis_change_matches_scalar_and_tower_mac_matches_wiedemann_at_every_length'):
+        run_rust_test('tests::' + test)
     test_aarch64(fixtures, args.cases)
     if provenance_error is not None:
         raise provenance_error

@@ -451,12 +451,8 @@ def is_branchless_portable_primitive(sym: str) -> bool:
     return any(name in sym for name in straight_line_names)
 
 
-def audit_compiled_rust_x86_symbol(sym: str, instrs: list[tuple[str, str]]) -> list[str]:
-    """Check the independent upper-YMM call/return hygiene requirement.
-
-    The architecture-aware dataflow screen runs in `rust_errors` so the strict
-    flag and relocation metadata are preserved for both ELF architectures.
-    """
+def audit_compiled_rust_x86_symbol(sym: str, instrs: list[tuple[str, str]], strict=False) -> list[str]:
+    """Check upper-YMM hygiene and the shared architecture-aware taint screen."""
     errors = []
     ymm_dirty = False
     for idx, (mnem, ops) in enumerate(instrs):
@@ -466,7 +462,7 @@ def audit_compiled_rust_x86_symbol(sym: str, instrs: list[tuple[str, str]]) -> l
             ymm_dirty = False
         if mnem in ("call", "callq", "ret") and ymm_dirty:
             errors.append(f"{sym}[{idx}]: call/return with dirty upper YMM state")
-    return errors
+    return errors + rust_errors(sym, instrs, strict, machine=62)
 
 
 def audit_aarch64_symbol(sym: str, instrs: list[tuple[str, str]]) -> list[str]:
@@ -1173,6 +1169,7 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
                                      'wiedemann_', 'clmul', 'tower_mul', 'tower_scale'))
     taint = ({f'x{i}' for i in range(8)} if arm else
              {'rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9'}) if scalar else set()
+    taint.update(f'v{i}' for i in range(32))
     stack = {}
     if not arm and symbol.endswith('::gf2_128_scale_xor_with_backend'):
         # Seven-argument SysV signature: backend is the first stack argument;
@@ -1291,6 +1288,17 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
                         taint.discard(destination)
                 flags = value
                 continue
+            if not arm and mnemonic == 'push' and parts:
+                store_stack('rsp', secret(parts[0]), 8)
+                continue
+            if not arm and mnemonic == 'pop' and parts:
+                destination = reg(parts[0])
+                if destination:
+                    if any(stack.get(('rsp', byte - 8), True) for byte in range(8)):
+                        taint.add(destination)
+                    else:
+                        taint.discard(destination)
+                continue
             if not parts or conditional(mnemonic) or mnemonic in ('ret', 'jmp', 'b', 'nop', 'push'):
                 continue
             if mnemonic in ('call', 'callq', 'bl', 'blr'):
@@ -1339,11 +1347,16 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
                     value |= secret(parts[0])
             zero = (mnemonic in ('xor', 'sub', 'pxor', 'xorps', 'xorpd') and len(parts) == 2 and parts[0] == parts[1]) or (
                 mnemonic in ('vpxor', 'vxorps', 'vxorpd', 'eor', 'sub') and len(parts) == 3 and parts[1] == parts[2])
-            if arm and mnemonic in ('ins', 'bfi', 'bfxil'):
+            if arm and mnemonic in ('ins', 'bfi', 'bfxil', 'sli', 'sri', 'bsl', 'bit', 'bif'):
                 value |= secret(parts[0])
             if zero:
                 value = False
-            if mnemonic.startswith(('cmov', 'set')) or mnemonic in AARCH64_CSEL_MNEMONICS:
+            if not arm and dst and canon_x86_gpr(parts[0]) and not (
+                    parts[0] == dst or parts[0].startswith('e') or re.fullmatch(r'r[0-9]+d', parts[0])):
+                # Byte/word writes preserve higher bits of the enclosing GPR.
+                value |= dst in taint
+            if (mnemonic.startswith(('cmov', 'set')) or mnemonic in AARCH64_CSEL_MNEMONICS
+                    or mnemonic in ('adc', 'adcs', 'sbb', 'sbc', 'sbcs')):
                 value |= flags
             if dst:
                 is_public_pointer = public_symbol or (move and sources and reg(sources[0]) in public_pointer)
@@ -1370,7 +1383,7 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
             if not arm and mnemonic in ('rol', 'ror', 'rcl', 'rcr', 'inc', 'dec'):
                 flags |= value
             if (not arm and mnemonic in ('add', 'sub', 'and', 'or', 'xor', 'adc', 'sbb', 'inc', 'dec',
-                            'neg', 'shl', 'shr', 'sar')) or (arm and mnemonic in ('adds', 'subs', 'ands')):
+                            'neg', 'shl', 'shr', 'sar')) or (arm and mnemonic in ('adds', 'subs', 'ands', 'adcs', 'sbcs')):
                 flags = value
         finally:
             for successor in successors:
@@ -1456,6 +1469,19 @@ def self_tests():
                     ('ldp', 'x5, x3, [sp]'), ('subs', 'x3, x3, #1'), ('b.ne', '0x40')]
     assert not rust_errors('buffer_probe', paired_spill, True, 183)
     count += 1
+    for partial in ('al', 'ah', 'ax'):
+        stream = [('mov', 'rax, [rsi]'), ('mov', f'{partial}, 0'),
+                  ('test', 'rax, rax'), ('jne', '0x40')]
+        assert rust_errors('buffer_probe', stream, True, 62)
+        count += 1
+    assert rust_errors('buffer_probe', [('mov', 'rax, [rsi]'), ('push', 'rax'),
+                       ('pop', 'rcx'), ('shl', 'rdx, cl')], True, 62)
+    count += 1
+    for instruction in ('adc', 'sbb'):
+        stream = [('mov', 'rax, [rsi]'), ('cmp', 'rax, 0'), ('mov', 'ecx, 0'),
+                  (instruction, 'ecx, 0'), ('mov', 'rax, [rdi+rcx]')]
+        assert rust_errors('buffer_probe', stream, True, 62)
+        count += 1
     return count
 
 
@@ -1514,8 +1540,9 @@ def audit(path, objdump, strict, require_bitslice, require_namespaces=()):
             errors.extend(check(symbol, instructions))
         elif any(module in symbol for module in RUST_MODULES) or 'gf2_128_mul_acc_batch' in symbol:
             if machine == 62:
-                errors.extend(kernel_audit.audit_compiled_rust_x86_symbol(symbol, instructions))
-            errors.extend(rust_errors(symbol, instructions, strict, machine))
+                errors.extend(kernel_audit.audit_compiled_rust_x86_symbol(symbol, instructions, strict))
+            else:
+                errors.extend(rust_errors(symbol, instructions, strict, machine))
             branches += sum(conditional(m) for m, _ in instructions)
         else:
             continue
