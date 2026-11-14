@@ -124,7 +124,9 @@ impl Request {
         );
         Ok(bound.and_then(|(mut intent, _)| {
             let guards = trusted_dealer_setup_for_testing([0x99; 32], &[10, 20, 30, 40, 50]);
-            let initiator = guards.iter().find(|g| g.party_id == intent.initiator_party)
+            let initiator = guards
+                .iter()
+                .find(|g| g.party_id == intent.initiator_party)
                 .ok_or(PolicyViolation::UnauthenticatedInitiator)?;
             let bytes = initiator.authenticate_initiated_intent(policy, &mut intent)?;
             Ok((intent, bytes))
@@ -263,13 +265,17 @@ fn mint_release_tokens(
                 &[&key_id(), &guard.party_id.to_be_bytes()],
             );
             let ledger = FsPolicyDurableLedger::create_new(
-                work_dir.join("ledgers").join(format!("party-{}", guard.party_id)),
+                work_dir
+                    .join("ledgers")
+                    .join(format!("party-{}", guard.party_id)),
                 ledger_key,
                 guard,
             )
             .map_err(|e| CliError::io("creating policy ledger", e))?;
             let fence = FsPolicyGenerationFence::create_new(
-                work_dir.join("fences").join(format!("party-{}", guard.party_id)),
+                work_dir
+                    .join("fences")
+                    .join(format!("party-{}", guard.party_id)),
                 fence_key,
                 ledger.generation(),
             )
@@ -294,13 +300,14 @@ fn mint_release_tokens(
             fence
                 .ratchet_to(ledger.generation())
                 .map_err(|e| CliError::io("ratcheting policy generation fence", e))?;
-            let bound = token.matches_signing(&key_id(), signing_bytes, CONTEXT, &intent.quorum_ids)
-                && !token.matches_signing(
-                    &key_id(),
-                    b"another message",
-                    CONTEXT,
-                    &intent.quorum_ids,
-                );
+            let bound =
+                token.matches_signing(&key_id(), signing_bytes, CONTEXT, &intent.quorum_ids)
+                    && !token.matches_signing(
+                        &key_id(),
+                        b"another message",
+                        CONTEXT,
+                        &intent.quorum_ids,
+                    );
             if !bound {
                 return Err(CliError::verify(
                     "release token is not bound to the approved signing request",
@@ -322,14 +329,18 @@ fn mint_release_tokens(
                 &[&key_id(), &guard.party_id.to_be_bytes()],
             );
             let _recovered = FsPolicyDurableLedger::open_existing(
-                work_dir.join("ledgers").join(format!("party-{}", guard.party_id)),
+                work_dir
+                    .join("ledgers")
+                    .join(format!("party-{}", guard.party_id)),
                 ledger_key,
                 guard,
                 fence.generation(),
             )
             .map_err(|e| CliError::io("verifying fenced policy checkpoint", e))?;
             if !guard.is_nonce_burned(&intent.nonce) || !guard.is_session_burned(&SESSION) {
-                return Err(CliError::verify("fenced policy checkpoint lost burned state"));
+                return Err(CliError::verify(
+                    "fenced policy checkpoint lost burned state",
+                ));
             }
         }
         Ok(minted)

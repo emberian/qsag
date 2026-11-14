@@ -111,7 +111,9 @@ impl Scheme {
                     "FrontierSumFts (few-time hash-based)",
                     format!(
                         "{}-bit generic Grover preimage ceiling; {}-byte hash nodes, at most {} signatures per key",
-                        p.node_bytes * 4, p.node_bytes, p.max_safe_uses
+                        p.node_bytes * 4,
+                        p.node_bytes,
+                        p.max_safe_uses
                     ),
                     32 + p.node_bytes,
                     profile.signature_bytes(),

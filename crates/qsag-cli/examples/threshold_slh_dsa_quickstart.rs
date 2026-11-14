@@ -172,8 +172,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Enroll both 256-bit seed commitments before redistribution. Each commitment
     // evaluates a secret-keyed 32-byte SPDZ MPC PRF under full dishonest-majority
     // MAC authentication without reconstructing either seed.
-    let seed_root = custody_root(&sk_seed_old, old_t, &old_pts, shared_pk_seed32, 0xE0, &mut old_mesh)?;
-    let prf_root = custody_root(&sk_prf_old, old_t, &old_pts, shared_pk_seed32, 0xE1, &mut old_mesh)?;
+    let seed_root = custody_root(
+        &sk_seed_old,
+        old_t,
+        &old_pts,
+        shared_pk_seed32,
+        0xE0,
+        &mut old_mesh,
+    )?;
+    let prf_root = custody_root(
+        &sk_prf_old,
+        old_t,
+        &old_pts,
+        shared_pk_seed32,
+        0xE1,
+        &mut old_mesh,
+    )?;
     // Reuse one dedicated root-check mesh for both post-reshare commitments;
     // callbacks run inside a ceremony that already borrows new_mesh.
     let mut root_mesh = OtMesh::try_establish([0xE4; 32], &mut new_rngs)?;
@@ -189,8 +203,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mut new_rngs,
         &seed_root,
         |shares| {
-            custody_root(shares, new_t, &new_pts, shared_pk_seed32, 0xE2, &mut root_mesh)
-                .map_err(|_| DkgError::PublicRootMismatch)
+            custody_root(
+                shares,
+                new_t,
+                &new_pts,
+                shared_pk_seed32,
+                0xE2,
+                &mut root_mesh,
+            )
+            .map_err(|_| DkgError::PublicRootMismatch)
         },
     )?;
     let sk_prf_new = run_dealerless_reshare_seed32_gf256(
@@ -205,8 +226,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mut new_rngs,
         &prf_root,
         |shares| {
-            custody_root(shares, new_t, &new_pts, shared_pk_seed32, 0xE3, &mut root_mesh)
-                .map_err(|_| DkgError::PublicRootMismatch)
+            custody_root(
+                shares,
+                new_t,
+                &new_pts,
+                shared_pk_seed32,
+                0xE3,
+                &mut root_mesh,
+            )
+            .map_err(|_| DkgError::PublicRootMismatch)
         },
     )?;
 

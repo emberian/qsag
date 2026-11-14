@@ -205,7 +205,10 @@ mod tests {
     fn roundtrip_wrong_passphrase_and_tampering() {
         const { assert!(KDF_ROUNDS >= 100_000) };
         let (enc_a, mac_a) = derive(b"correct horse", &[7u8; 32], "test-a");
-        assert_ne!(enc_a.0, mac_a.0, "encryption and MAC subkeys must be separated");
+        assert_ne!(
+            enc_a.0, mac_a.0,
+            "encryption and MAC subkeys must be separated"
+        );
         let (enc_b, mac_b) = derive(b"correct horse", &[7u8; 32], "test-b");
         assert_ne!(enc_a.0, enc_b.0);
         assert_ne!(mac_a.0, mac_b.0);

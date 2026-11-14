@@ -149,7 +149,9 @@ pub const MAX_MSG_BYTES: u64 = 64 * 1024 * 1024;
 pub struct ZeroizingBuf(pub Vec<u8>);
 impl std::ops::Deref for ZeroizingBuf {
     type Target = [u8];
-    fn deref(&self) -> &[u8] { &self.0 }
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
 }
 impl Drop for ZeroizingBuf {
     fn drop(&mut self) {
@@ -257,7 +259,8 @@ fn open_nonblocking_regular(path: &str) -> Result<std::fs::File, CliError> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.custom_flags(0x100 | 0x4);
     }
-    opts.open(path).map_err(|e| CliError::io("opening input", e))
+    opts.open(path)
+        .map_err(|e| CliError::io("opening input", e))
 }
 
 pub fn read_bounded_file(path: &str, max_bytes: u64) -> Result<ZeroizingBuf, CliError> {
@@ -360,10 +363,13 @@ pub fn replace_secret(path: &str, contents: &[u8]) -> Result<(), CliError> {
     let tmp = format!("{path}.{}.tmp", crate::codec::to_hex(&os_random_32()?));
     let result = (|| {
         write_new(&tmp, contents, true)?;
-        std::fs::rename(&tmp, path).map_err(|e| CliError::io(format_args!("replacing {path}"), e))?;
+        std::fs::rename(&tmp, path)
+            .map_err(|e| CliError::io(format_args!("replacing {path}"), e))?;
         sync_parent(path)
     })();
-    if result.is_err() { let _ = std::fs::remove_file(&tmp); }
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
     result
 }
 
@@ -399,14 +405,22 @@ mod tests {
         ));
         let path = |name: &str| root.join(name).to_str().unwrap().to_owned();
         let mode = |name: &str| {
-            std::fs::symlink_metadata(path(name)).unwrap().permissions().mode() & 0o777
+            std::fs::symlink_metadata(path(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
         };
         // Missing ancestors are created private too.
         private_dir(&path("a/b"), true).unwrap();
         assert_eq!(mode("a"), 0o700);
         assert_eq!(mode("a/b"), 0o700);
         assert_eq!(
-            std::fs::symlink_metadata(&root).unwrap().permissions().mode() & 0o777,
+            std::fs::symlink_metadata(&root)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
             0o700
         );
         // Idempotent on a directory that is already private.
@@ -433,7 +447,10 @@ mod tests {
 
     #[test]
     fn failed_replace_removes_temporary_file() {
-        let dir = std::env::temp_dir().join(format!("qsag-replace-{}", crate::codec::to_hex(&os_random_32().unwrap())));
+        let dir = std::env::temp_dir().join(format!(
+            "qsag-replace-{}",
+            crate::codec::to_hex(&os_random_32().unwrap())
+        ));
         std::fs::create_dir(&dir).unwrap();
         let destination = dir.join("directory");
         std::fs::create_dir(&destination).unwrap();
