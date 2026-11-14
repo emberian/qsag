@@ -25,6 +25,12 @@ set_option maxRecDepth 4096
 
 /-! ## 1. Goldilocks & Quartic Extension Arithmetic Refinements -/
 
+theorem goldilocks_p_val : GOLDILOCKS_P.val = 18446744069414584321 := sorry
+
+theorem max_u64_word_val : MAX_U64_WORD.val = 18446744073709551615 := sorry
+
+theorem tag_canopy_merkle_internal_eq : TAG_CANOPY_MERKLE_INTERNAL = 0#u8 := sorry
+
 theorem add_refines (a b : U64) : add a b = .ok (fieldAdd a b) := sorry
 
 theorem sub_refines (a b : U64) : sub a b = .ok (fieldSub a b) := sorry
@@ -52,6 +58,9 @@ theorem decode_canonical_u64_some_iff (x y : U64) :
 
 theorem decode_canonical_u64_none_iff (x : U64) :
     decode_canonical_u64 x = .ok none ↔ goldilocksMod ≤ x.val := sorry
+
+theorem decode_canonical_u64_rejects_noncanonical (x : U64)
+    (h : GOLDILOCKS_P.val ≤ x.val) : decode_canonical_u64 x = .ok none := sorry
 
 theorem decode_canonical_ext4_some_iff (a b c d : U64) (out : Ext4) :
     decode_canonical_ext4 a b c d = .ok (some out) ↔
@@ -209,6 +218,11 @@ theorem step_merkle_pair_order_none_iff
     (idx : U64) (level : U32) (node sibling : Array U8 32#usize) :
     step_merkle_pair_order idx level node sibling = .ok none ↔ 64 ≤ level.val := sorry
 
+theorem step_merkle_pair_order_tag_eq
+    (idx : U64) (level : U32) (node sibling : Array U8 32#usize) (pair : MerklePair)
+    (h : step_merkle_pair_order idx level node sibling = .ok (some pair)) :
+    pair.tag = TAG_CANOPY_MERKLE_INTERNAL := sorry
+
 @[expose] def natSumU64 (xs : List U64) : Nat :=
   xs.foldl (fun acc x => acc + x.val) 0
 
@@ -236,6 +250,11 @@ theorem checked_quorum_sum_none_iff
     (counts minimums : Slice U64) (minimum_global : U64) :
     checked_quorum_sum counts minimums minimum_global = .ok none ↔
       ¬ ∃ s : Nat, QuorumSumSpec counts.val minimums.val minimum_global s := sorry
+
+theorem checked_quorum_sum_le_max_u64_word
+    (counts minimums : Slice U64) (minimum_global total : U64)
+    (h : checked_quorum_sum counts minimums minimum_global = .ok (some total)) :
+    natSumU64 counts.val ≤ MAX_U64_WORD.val := sorry
 
 /-! ## 6. Concrete `#tooth` Mutation-Sensitivity & Non-Vacuity Controls -/
 

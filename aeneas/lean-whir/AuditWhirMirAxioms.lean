@@ -14,6 +14,9 @@ import all Aeneas.Std.Types
 open Lean
 
 private def requiredWhirMirTheorems : Array Name := #[
+  ``qsag_whir_verified.proofs.goldilocks_p_val,
+  ``qsag_whir_verified.proofs.max_u64_word_val,
+  ``qsag_whir_verified.proofs.tag_canopy_merkle_internal_eq,
   ``qsag_whir_verified.proofs.add_refines,
   ``qsag_whir_verified.proofs.sub_refines,
   ``qsag_whir_verified.proofs.mul_refines,
@@ -37,9 +40,11 @@ private def requiredWhirMirTheorems : Array Name := #[
   ``qsag_whir_verified.proofs.decode_canonical_u64_spec,
   ``qsag_whir_verified.proofs.decode_canonical_u64_some_iff,
   ``qsag_whir_verified.proofs.decode_canonical_u64_none_iff,
+  ``qsag_whir_verified.proofs.decode_canonical_u64_rejects_noncanonical,
   ``qsag_whir_verified.proofs.decode_canonical_ext4_spec,
   ``qsag_whir_verified.proofs.decode_canonical_ext4_some_iff,
   ``qsag_whir_verified.proofs.decode_canonical_ext4_none_iff,
+  ``qsag_whir_verified.proofs.ext_eq_spec,
   ``qsag_whir_verified.proofs.ext_eq_sound,
   ``qsag_whir_verified.proofs.duet_fold_coset_sound,
   ``qsag_whir_verified.proofs.verify_affine_duet_fold_step_spec,
@@ -77,9 +82,11 @@ private def requiredWhirMirTheorems : Array Name := #[
   ``qsag_whir_verified.proofs.step_merkle_pair_order_spec,
   ``qsag_whir_verified.proofs.step_merkle_pair_order_some_iff,
   ``qsag_whir_verified.proofs.step_merkle_pair_order_none_iff,
+  ``qsag_whir_verified.proofs.step_merkle_pair_order_tag_eq,
   ``qsag_whir_verified.proofs.checked_quorum_sum_total,
   ``qsag_whir_verified.proofs.checked_quorum_sum_sound,
   ``qsag_whir_verified.proofs.checked_quorum_sum_none_iff,
+  ``qsag_whir_verified.proofs.checked_quorum_sum_le_max_u64_word,
   ``qsag_whir_verified.proofs.tooth_unchecked_mod_p_accepts_aliased_field_limb,
   ``qsag_whir_verified.proofs.tooth_decode_canonical_ext4_rejects_fourth_limb_alias,
   ``qsag_whir_verified.proofs.tooth_pow_rejects_excessive_bits_and_nonzero_low_bits,
@@ -95,11 +102,17 @@ private def requiredWhirMirTheorems : Array Name := #[
 /-! ## Symbol coverage
 
 Every Rust item extracted into `QsagWhirVerified.Funs` must occur in the *statement* of at
-least one theorem from the supplied list. Aeneas splits a Rust loop into `f_loop` and
-`f_loop.body`; these are not Rust items, so each is accepted only when the Rust function `f`
-it was split from is itself covered and reaches the helper through its definition. -/
+least one non-`tooth_*` specification or soundness theorem from the supplied list. Aeneas
+splits a Rust loop into `f_loop` and `f_loop.body`; these are not Rust items, so each is
+accepted only when the Rust function `f` it was split from is itself covered by a
+non-`tooth_*` theorem and reaches the helper through its definition. -/
 
 private def funsModule : Name := `QsagWhirVerified.Funs
+
+private def isToothTheorem (thm : Name) : Bool :=
+  match thm with
+  | .str _ s => s.startsWith "tooth_"
+  | _ => false
 
 private def extractedSymbols (env : Environment) : Array Name := Id.run do
   let mut out : Array Name := #[]
@@ -122,19 +135,20 @@ private def loopOrigin? (name : Name) : Option (Name × Name) :=
   match loopName with
   | .str pre s =>
     if s.endsWith "_loop" && s.length > 5 then
-      some (.str pre (s.take (s.length - 5)).toString, loopName)
+      some (.str pre (String.ofList (s.toList.take (s.length - 5))), loopName)
     else none
   | _ => none
 
-/-- Returns the extracted symbols and the subset no listed theorem statement covers. -/
+/-- Returns the extracted symbols and the subset no non-`tooth_*` theorem statement covers. -/
 private def symbolCoverage (env : Environment) (theorems : Array Name) :
     Array Name × Array Name := Id.run do
   let symbols := extractedSymbols env
   let mut mentioned : NameSet := {}
   for thm in theorems do
-    if let some (.thmInfo info) := env.find? thm then
-      for used in info.type.getUsedConstants do
-        mentioned := mentioned.insert used
+    if !isToothTheorem thm then
+      if let some (.thmInfo info) := env.find? thm then
+        for used in info.type.getUsedConstants do
+          mentioned := mentioned.insert used
   let mut gaps : Array Name := #[]
   for symbol in symbols do
     let covered :=
@@ -147,17 +161,19 @@ private def symbolCoverage (env : Environment) (theorems : Array Name) :
     if !covered then gaps := gaps.push symbol
   return (symbols, gaps)
 
-/-- The gate must notice a missing theorem: with no theorems every symbol is a gap, and
-without the `checked_quorum_sum` theorems that function and both loop helpers are gaps. -/
+/-- The gate must notice a missing specification theorem: with no theorems every symbol is a
+gap, with only `tooth_*` theorems every symbol is still a gap, and without the
+`checked_quorum_sum` theorems that function and both loop helpers are gaps. -/
 private def symbolCoverageControlsFail (env : Environment) (theorems : Array Name) : Bool :=
   let (symbols, allGaps) := symbolCoverage env #[]
+  let (_, toothOnlyGaps) := symbolCoverage env (theorems.filter isToothTheorem)
   let target := `qsag_whir_verified.checked_quorum_sum
   let withoutTarget := theorems.filter fun thm =>
     match env.find? thm with
     | some (.thmInfo info) => !info.type.getUsedConstants.contains target
     | _ => true
   let (_, targetGaps) := symbolCoverage env withoutTarget
-  symbols.isEmpty || allGaps.size != symbols.size ||
+  symbols.isEmpty || allGaps.size != symbols.size || toothOnlyGaps.size != symbols.size ||
     !(targetGaps.contains target &&
       targetGaps.contains `qsag_whir_verified.checked_quorum_sum_loop &&
       targetGaps.contains `qsag_whir_verified.checked_quorum_sum_loop.body)
