@@ -3854,6 +3854,27 @@ private theorem readShareMem32_write (m : UInt64 → UInt8) (sh : List UInt8) (h
   unfold readShareMem32
   rw [hGet, writeBytesWindow_hit (hLen ▸ hi) (by omega)]
 
+private def Layer12SessionEq (s1 : Layer1ElfState) (s2 : Layer2MirState) : Prop :=
+  s1.activeSessionTag = s2.activeSessionTag ∧
+  s1.storedRound1Commits = s2.storedRound1Commits ∧
+  s1.verifierBginAlpha = s2.verifierBginAlpha ∧
+  s1.verifierBginKeyOffsets = s2.verifierBginKeyOffsets ∧
+  s1.quorumCertConfig = s2.quorumCertConfig
+
+private def Layer23SessionEq {PK : Type} (s2 : Layer2MirState) (s3 : Layer3ProtocolState PK) : Prop :=
+  s2.activeSessionTag = s3.activeSessionTag ∧
+  s2.storedRound1Commits = s3.storedRound1Commits ∧
+  s2.verifierBginAlpha = s3.verifierBginAlpha ∧
+  s2.verifierBginKeyOffsets = s3.verifierBginKeyOffsets ∧
+  s2.quorumCertConfig = s3.quorumCertConfig
+
+private def Layer34SessionEq {PK : Type} (s3 : Layer3ProtocolState PK) (s4 : Layer4IdealState PK) : Prop :=
+  s3.activeSessionTag = s4.activeSessionTag ∧
+  s3.storedRound1Commits = s4.storedRound1Commits ∧
+  s3.verifierBginAlpha = s4.verifierBginAlpha ∧
+  s3.verifierBginKeyOffsets = s4.verifierBginKeyOffsets ∧
+  s3.quorumCertConfig = s4.quorumCertConfig
+
 /-- **Link 1 (`sim_layer1_to_layer2`)**:
     `ForwardSim` from `layer1CompiledElfMachine` (executing decoded `.rlib` x86-64 `ct_eq_32` and
     `ct_memzero` slices) to `layer2MirGuardedMachine`, proved via `ct_eq_32_x86_64_mc_refines`
@@ -3879,13 +3900,15 @@ def sim_layer1_to_layer2 {n : Nat} (q : Nat) (pkDigest : List UInt8)
     s1.belt = s2.belt ∧
     s1.cutPoisoned = s2.cut.poisoned ∧
     s1.sharePresent = s2.shareBytes.isSome ∧
+    Layer12SessionEq s1 s2 ∧
     (s1.cutPoisoned = false → s1.belt.poisoned = false → s1.sharePresent = true →
       s2.shareBytes = some (readShareMem32 s1.mem)) ∧
     (s1.cutPoisoned = true →
       ∀ i : Nat, i < 32 → s1.mem (UInt64.ofNat 0x180 + UInt64.ofNat i) = 0)
   sim_ok {s1 s1' s2 req out} hRel hStep1 := by
     rcases hRel with ⟨hPolLen, hAuthLen, hMemPol, hMemAuth, hWin, hVCap, hAcc, hBurn,
-      hRecip, hPTx, hBelt, hCutP, hShP, hShareEq, hZeroIfP⟩
+      hRecip, hPTx, hBelt, hCutP, hShP, hSess, hShareEq, _⟩
+    rcases hSess with ⟨hSTag, hSCom, hBAlp, hBKey, hQCfg⟩
     dsimp only [layer1CompiledElfMachine, layer2MirGuardedMachine, PartyMachine.ofOutcome] at hStep1 ⊢
     cases hQuar1 : (s1.cutPoisoned || s1.belt.poisoned || !s1.sharePresent)
     · have hCP0 : s1.cutPoisoned = false := by
@@ -3908,7 +3931,8 @@ def sim_layer1_to_layer2 {n : Nat} (q : Nat) (pkDigest : List UInt8)
           execElfCtEq32 s1.mem (UInt64.ofNat 0x140) req.tx.authorityDigest =
             decide (req.tx.authorityDigest = s2.policy.pinnedAuthorityDigest) :=
         execElfCtEq32_spec hAuthLen (by omega) hMemAuth
-      rw [hElfPol, hElfAuth, hWin, hVCap, hAcc, hBurn, hRecip, hPTx, hBelt] at hStep1
+      rw [hElfPol, hElfAuth, hWin, hVCap, hAcc, hBurn, hRecip, hPTx, hBelt,
+          hSTag, hSCom, hBAlp, hBKey, hQCfg] at hStep1
       have hBnePol :
           (!decide (req.tx.policyDigest = s2.policy.pinnedPolicyDigest)) =
             (req.tx.policyDigest != s2.policy.pinnedPolicyDigest) := by
@@ -3946,7 +3970,9 @@ def sim_layer1_to_layer2 {n : Nat} (q : Nat) (pkDigest : List UInt8)
                   cases hN : u64MemBool req.tx.nonce s2.policy.burnedNonces
                   · rw [hN] at hStep1
                     simp only [Bool.false_eq_true, ↓reduceIte] at hStep1 ⊢
-                    cases hQ : (decide req.quorum.Nodup && decide (q ≤ req.quorum.length))
+                    dsimp only at hStep1 ⊢
+                    cases hQ : verifyFourLayerQuorumCert s2.quorumCertConfig q pkDigest
+                        (encodeTransactionIntent req.tx.toTransactionIntent) req
                     · rw [hQ] at hStep1; simp at hStep1
                     · rw [hQ] at hStep1
                       simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hStep1 ⊢
@@ -3954,7 +3980,9 @@ def sim_layer1_to_layer2 {n : Nat} (q : Nat) (pkDigest : List UInt8)
                       · rw [hE] at hStep1; simp at hStep1
                       · rw [hE] at hStep1
                         simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hStep1 ⊢
-                        cases hC : verifyPreCutTranscript req.round1Openings req.round2Relations
+                        cases hC : verifyPreCutTranscript s2.activeSessionTag s2.storedRound1Commits
+                            s2.verifierBginAlpha s2.verifierBginKeyOffsets req.quorum
+                            req.round1Openings req.round2Wires
                         · rw [hC] at hStep1; simp at hStep1
                         · rw [hC] at hStep1
                           rw [hSomeSh]
@@ -3962,7 +3990,8 @@ def sim_layer1_to_layer2 {n : Nat} (q : Nat) (pkDigest : List UInt8)
                             Option.some.injEq, Prod.mk.injEq] at hStep1 ⊢
                           rcases hStep1 with ⟨rfl, rfl⟩
                           exact ⟨rfl, hPolLen, hAuthLen, hMemPol, hMemAuth, rfl, rfl, rfl, rfl,
-                            rfl, rfl, rfl, hCP0, hSP1, fun _ _ _ => rfl,
+                            rfl, rfl, rfl, hCP0, hSP1, ⟨rfl, rfl, hBAlp, hBKey, hQCfg⟩,
+                            fun _ _ _ => rfl,
                             fun hT => absurd hT (by rw [hCP0]; decide)⟩
                   · rw [hN] at hStep1; simp at hStep1
           · rw [hA] at hStep1; simp at hStep1
@@ -3970,8 +3999,10 @@ def sim_layer1_to_layer2 {n : Nat} (q : Nat) (pkDigest : List UInt8)
       · rw [hW] at hStep1; simp at hStep1
     · rw [hQuar1] at hStep1; simp at hStep1
   sim_err {s1 s2 req} hRel hNone1 := by
+    have hRelSaved := hRel
     rcases hRel with ⟨hPolLen, hAuthLen, hMemPol, hMemAuth, hWin, hVCap, hAcc, hBurn,
-      hRecip, hPTx, hBelt, hCutP, hShP, hShareEq, hZeroIfP⟩
+      hRecip, hPTx, hBelt, hCutP, hShP, hSess, hShareEq, _⟩
+    rcases hSess with ⟨hSTag, hSCom, hBAlp, hBKey, hQCfg⟩
     dsimp only [layer1CompiledElfMachine, layer2MirGuardedMachine, PartyMachine.ofOutcome] at hNone1 ⊢
     obtain ⟨hZeroMem, hPresBelow⟩ := execElfMemzeroShare32_spec s1.mem
     have hMemPolZero : ∀ i : Nat, i < 32 →
@@ -4002,7 +4033,6 @@ def sim_layer1_to_layer2 {n : Nat} (q : Nat) (pkDigest : List UInt8)
         cases hb : s1.belt.poisoned <;> simp [hCP0, hb] at hQuar1; rfl
       have hSP1 : s1.sharePresent = true := by
         cases hs : s1.sharePresent <;> simp [hCP0, hBP0, hs] at hQuar1; rfl
-      have hSomeSh : s2.shareBytes = some (readShareMem32 s1.mem) := hShareEq hCP0 hBP0 hSP1
       rw [hQuar1] at hNone1
       simp only [Bool.false_eq_true, ↓reduceIte] at hNone1 ⊢
       have hElfPol :
@@ -4023,26 +4053,8 @@ def sim_layer1_to_layer2 {n : Nat} (q : Nat) (pkDigest : List UInt8)
             (req.tx.authorityDigest != s2.policy.pinnedAuthorityDigest) := by
         if hEq : req.tx.authorityDigest = s2.policy.pinnedAuthorityDigest then simp [hEq]
         else simp [hEq, bne, beq_false_of_ne hEq]
-      rw [hElfPol, hElfAuth, hBnePol, hBneAuth, hWin, hVCap, hAcc, hBurn, hRecip, hPTx, hBelt] at hNone1 ⊢
-      have hRelUnchanged :
-          s2.policy.pinnedPolicyDigest.length = 32 ∧
-          s2.policy.pinnedAuthorityDigest.length = 32 ∧
-          (∀ i : Nat, i < 32 → s1.mem (UInt64.ofNat 0x100 + UInt64.ofNat i) = s2.policy.pinnedPolicyDigest.getD i 0) ∧
-          (∀ i : Nat, i < 32 → s1.mem (UInt64.ofNat 0x140 + UInt64.ofNat i) = s2.policy.pinnedAuthorityDigest.getD i 0) ∧
-          s1.windowId = s2.policy.windowId ∧
-          s1.velocityWindowCap = s2.policy.velocityWindowCap ∧
-          s1.accumulatedSpend = s2.policy.accumulatedSpend ∧
-          s1.burnedNonces = s2.policy.burnedNonces ∧
-          s1.allowedRecipients = s2.policy.allowedRecipients ∧
-          s1.perTxCap = s2.policy.perTxCap ∧
-          s1.belt = s2.belt ∧
-          s1.cutPoisoned = s2.cut.poisoned ∧
-          s1.sharePresent = s2.shareBytes.isSome ∧
-          (s1.cutPoisoned = false → s1.belt.poisoned = false → s1.sharePresent = true →
-            s2.shareBytes = some (readShareMem32 s1.mem)) ∧
-          (s1.cutPoisoned = true → ∀ i : Nat, i < 32 → s1.mem (UInt64.ofNat 0x180 + UInt64.ofNat i) = 0) :=
-        ⟨hPolLen, hAuthLen, hMemPol, hMemAuth, hWin, hVCap, hAcc, hBurn, hRecip, hPTx,
-          hBelt, hCutP, hShP, hShareEq, hZeroIfP⟩
+      rw [hElfPol, hElfAuth, hBnePol, hBneAuth, hWin, hVCap, hAcc, hBurn, hRecip, hPTx, hBelt,
+          hSTag, hSCom, hBAlp, hBKey, hQCfg] at hNone1 ⊢
       unfold mirPolicyStep
       cases hW : (req.tx.windowId != s2.policy.windowId)
       · rw [hW] at hNone1
@@ -4054,51 +4066,90 @@ def sim_layer1_to_layer2 {n : Nat} (q : Nat) (pkDigest : List UInt8)
           · rw [hA] at hNone1
             simp only [Bool.false_eq_true, ↓reduceIte] at hNone1 ⊢
             if hR : ¬ (req.tx.recipient ∈ s2.policy.allowedRecipients) then
-              rw [ite_eq_left hR, ite_eq_left hR]; dsimp only; exact ⟨rfl, hRelUnchanged⟩
+              rw [ite_eq_left hR, ite_eq_left hR]; dsimp only; exact ⟨rfl, hRelSaved⟩
             else
               simp only [hR, ↓reduceIte] at hNone1 ⊢
               if hPT : ¬ (req.tx.amountUnits.toNat ≤ s2.policy.perTxCap.toNat) then
-                rw [ite_eq_left hPT, ite_eq_left hPT]; dsimp only; exact ⟨rfl, hRelUnchanged⟩
+                rw [ite_eq_left hPT, ite_eq_left hPT]; dsimp only; exact ⟨rfl, hRelSaved⟩
               else
                 simp only [hPT, ↓reduceIte] at hNone1 ⊢
                 if hVC : ¬ (req.tx.amountUnits.toNat ≤ (s2.policy.velocityWindowCap - s2.policy.accumulatedSpend).toNat) then
-                  rw [ite_eq_left hVC, ite_eq_left hVC]; dsimp only; exact ⟨rfl, hRelUnchanged⟩
+                  rw [ite_eq_left hVC, ite_eq_left hVC]; dsimp only; exact ⟨rfl, hRelSaved⟩
                 else
                   simp only [hVC, ↓reduceIte] at hNone1 ⊢
                   cases hN : u64MemBool req.tx.nonce s2.policy.burnedNonces
                   · rw [hN] at hNone1
                     simp only [Bool.false_eq_true, ↓reduceIte] at hNone1 ⊢
-                    cases hQ : (decide req.quorum.Nodup && decide (q ≤ req.quorum.length))
+                    dsimp only at hNone1 ⊢
+                    cases hQ : verifyFourLayerQuorumCert s2.quorumCertConfig q pkDigest
+                        (encodeTransactionIntent req.tx.toTransactionIntent) req
                     · rw [ite_eq_left Bool.not_false, ite_eq_left Bool.not_false]
-                      dsimp only; exact ⟨rfl, hRelUnchanged⟩
+                      dsimp only; exact ⟨rfl, hRelSaved⟩
                     · rw [hQ] at hNone1
                       simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hNone1 ⊢
                       cases hE : (decide (pkDigest = s2.belt.enrolledPkDigest) && (req.reqEpoch == s2.belt.nextEpoch))
                       · rw [ite_eq_left Bool.not_false, ite_eq_left Bool.not_false]
-                        dsimp only; exact ⟨rfl, hRelUnchanged⟩
+                        dsimp only; exact ⟨rfl, hRelSaved⟩
                       · rw [hE] at hNone1
                         simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hNone1 ⊢
-                        cases hC : verifyPreCutTranscript req.round1Openings req.round2Relations
+                        cases hC : verifyPreCutTranscript s2.activeSessionTag s2.storedRound1Commits
+                            s2.verifierBginAlpha s2.verifierBginKeyOffsets req.quorum
+                            req.round1Openings req.round2Wires
                         · rw [ite_eq_left Bool.not_false, ite_eq_left Bool.not_false]
                           dsimp only
-                          exact ⟨rfl, hPolLen, hAuthLen, hMemPolZero, hMemAuthZero, rfl, rfl,
-                            rfl, rfl, rfl, rfl, rfl, rfl, rfl,
+                          exact ⟨rfl, hPolLen, hAuthLen, hMemPolZero, hMemAuthZero, hWin, hVCap,
+                            hAcc, hBurn, hRecip, hPTx,
+                            congrArg (fun b => { b with poisoned := true }) hBelt,
+                            rfl, rfl, ⟨hSTag, hSCom, hBAlp, hBKey, hQCfg⟩,
                             fun hF => absurd hF (by decide), fun _ => hZeroMem⟩
-                        · rw [hC] at hNone1
+                        · have hSomeSh : s2.shareBytes = some (readShareMem32 s1.mem) := hShareEq hCP0 hBP0 hSP1
+                          rw [hC] at hNone1
                           simp at hNone1
                   · rw [ite_eq_left (rfl : true = true), ite_eq_left (rfl : true = true)]
-                    dsimp only; exact ⟨rfl, hRelUnchanged⟩
+                    dsimp only; exact ⟨rfl, hRelSaved⟩
           · rw [ite_eq_left (rfl : true = true), ite_eq_left (rfl : true = true)]
-            dsimp only; exact ⟨rfl, hRelUnchanged⟩
+            dsimp only; exact ⟨rfl, hRelSaved⟩
         · rw [ite_eq_left (rfl : true = true), ite_eq_left (rfl : true = true)]
-          dsimp only; exact ⟨rfl, hRelUnchanged⟩
+          dsimp only; exact ⟨rfl, hRelSaved⟩
       · rw [ite_eq_left (rfl : true = true), ite_eq_left (rfl : true = true)]
-        dsimp only; exact ⟨rfl, hRelUnchanged⟩
+        dsimp only; exact ⟨rfl, hRelSaved⟩
     · rw [ite_eq_left (rfl : true = true), ite_eq_left (rfl : true = true)]
       dsimp only
       exact ⟨rfl, hPolLen, hAuthLen, hMemPolZero, hMemAuthZero, hWin, hVCap,
         hAcc, hBurn, hRecip, hPTx, congrArg (fun b => { b with poisoned := true }) hBelt,
-        rfl, rfl, fun hF => absurd hF (by decide), fun _ => hZeroMem⟩
+        rfl, rfl, ⟨hSTag, hSCom, hBAlp, hBKey, hQCfg⟩,
+        fun hF => absurd hF (by decide), fun _ => hZeroMem⟩
+
+private theorem sim12_zeroIfPoisoned {n : Nat} {q : Nat} {pkDigest : List UInt8}
+    {signFromShare : List UInt8 → List UInt8 → ByteArray}
+    {s1 : Layer1ElfState} {s2 : Layer2MirState}
+    (hRel : (sim_layer1_to_layer2 (n := n) q pkDigest signFromShare).Rel s1 s2) :
+    s1.cutPoisoned = true →
+      ∀ i : Nat, i < 32 → s1.mem (UInt64.ofNat 0x180 + UInt64.ofNat i) = 0 := by
+  rcases hRel with ⟨_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, hZero⟩
+  exact hZero
+
+private theorem quorumGate23_eq {PK : Type} {n q f : Nat}
+    (corrupt : List (Fin n)) (pkDigestOf : PK → List UInt8) (pk : PK)
+    (cfg : QuorumCertConfig) (msgBytes : List UInt8) (req : FourLayerReq n)
+    (tsig : IdealTsigState PK (List UInt8))
+    (hPk : tsig.pk = pk) (hNP : tsig.numParties = n) (hTh : tsig.threshold = q)
+    (hCorr1 : tsig.corruptParties = corrupt.map Fin.val)
+    (hCorr2 : tsig.identifiedCheaters = [])
+    (hBound : n + f < 2 * q) (hQPos : 0 < q) (hQLeN : q ≤ n)
+    (hCorruptNd : corrupt.Nodup) (hCorruptLe : corrupt.length ≤ f) :
+    (verifyFourLayerQuorumCert cfg tsig.threshold (pkDigestOf tsig.pk) msgBytes req &&
+      validThresholdApproval tsig
+        ((req.quorum.filter (fun p => !finMemBool p corrupt)).map Fin.val)) =
+    verifyFourLayerQuorumCert cfg q (pkDigestOf pk) msgBytes req := by
+  rw [hPk, hTh]
+  cases hV : verifyFourLayerQuorumCert cfg q (pkDigestOf pk) msgBytes req
+  · simp
+  · simp only [Bool.true_and]
+    obtain ⟨hNd, hLen⟩ := verifyFourLayerQuorumCert_implies_nodup_and_len hV
+    exact (mirBeltLatch_quorum_discharges_idealTsig_approval
+      corrupt req.quorum tsig hNP hTh hQPos hQLeN hCorr1 hCorr2
+      hCorruptNd hCorruptLe hBound hNd hLen).1
 
 /-- **Link 2 (`sim_layer2_to_layer3`)**:
     `ForwardSim` from fixed-width `layer2MirGuardedMachine` (`UInt64` policy + `2 * q > n + f`
@@ -4130,11 +4181,13 @@ def sim_layer2_to_layer3 {PK : Type} {n q f : Nat}
     s2.belt.latchedRecord = s3.cluster.honestWal.latchedRecord ∧
     s2.belt.poisoned = s3.cluster.honestWal.poisoned ∧
     s2.cut.poisoned = s3.cluster.honestWal.poisoned ∧
+    Layer23SessionEq s2 s3 ∧
     (s3.cluster.honestWal.poisoned = false →
       s2.shareBytes = some custodianShare ∧ s3.cluster.honestShares = dealtShares)
   sim_ok {s2 s2' s3 req out} hRel hStep2 := by
     rcases hRel with ⟨hInvPol, hPolEq, hPk, hNP, hTh, hCorr, hWalPk, hWalEp, hWalLat,
-      hBeltP, hCutP, hIntact⟩
+      hBeltP, hCutP, hSess, hIntact⟩
+    rcases hSess with ⟨hSTag, hSCom, hBAlp, hBKey, hQCfg⟩
     dsimp only [layer2MirGuardedMachine, layer3InteractiveProtocolMachine,
       PartyMachine.ofOutcome] at hStep2 ⊢
     cases hP3 : s3.cluster.honestWal.poisoned
@@ -4161,24 +4214,20 @@ def sim_layer2_to_layer3 {PK : Type} {n q f : Nat}
           injection hSpecPolOk with hPairPol
           rcases Prod.mk.inj hPairPol with ⟨hPolEq', rfl⟩
           dsimp only at hStep2 ⊢
-          cases hQ2 : (decide req.quorum.Nodup && decide (q ≤ req.quorum.length))
+          rw [← hQCfg, quorumGate23_eq corrupt pkDigestOf pk s2.quorumCertConfig env.canonicalBytes
+            req s3.cluster.tsig hPk hNP hTh hCorr.1 hCorr.2 _hBound _hQPos _hQLeN _hCorruptNd _hCorruptLe]
+          cases hQ2 : verifyFourLayerQuorumCert s2.quorumCertConfig q (pkDigestOf pk) env.canonicalBytes req
           · rw [hQ2] at hStep2; simp at hStep2
           · rw [hQ2] at hStep2
-            rcases Bool.and_eq_true_iff.mp hQ2 with ⟨hQNdB, hQLenB⟩
-            have hQNd : req.quorum.Nodup := of_decide_eq_true hQNdB
-            have hQLen : q ≤ req.quorum.length := of_decide_eq_true hQLenB
-            have hValApp := (mirBeltLatch_quorum_discharges_idealTsig_approval
-              corrupt req.quorum s3.cluster.tsig hNP hTh _hQPos _hQLeN hCorr.1 hCorr.2
-              _hCorruptNd _hCorruptLe _hBound hQNd hQLen).1
-            rw [hTh]
-            simp only [hQNdB, hQLenB, hValApp, Bool.and_self, Bool.not_true, Bool.false_eq_true,
-              ↓reduceIte] at hStep2 ⊢
-            rw [hPk, ← hWalPk, ← hWalEp]
+            simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hStep2 ⊢
+            rw [hPk, ← hWalPk, ← hWalEp, ← hSTag, ← hSCom, ← hBAlp, ← hBKey]
             cases hE : (decide (pkDigestOf pk = s2.belt.enrolledPkDigest) && (req.reqEpoch == s2.belt.nextEpoch))
             · rw [hE] at hStep2; simp at hStep2
             · rw [hE] at hStep2
               simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hStep2 ⊢
-              cases hC : verifyPreCutTranscript req.round1Openings req.round2Relations
+              cases hC : verifyPreCutTranscript s2.activeSessionTag s2.storedRound1Commits
+                  s2.verifierBginAlpha s2.verifierBginKeyOffsets req.quorum
+                  req.round1Openings req.round2Wires
               · rw [hC] at hStep2; simp at hStep2
               · rw [hC, hSomeSh] at hStep2
                 simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte,
@@ -4188,7 +4237,7 @@ def sim_layer2_to_layer3 {PK : Type} {n q f : Nat}
                 dsimp only
                 rw [hDealt, _hSigMatch]
                 exact ⟨rfl, hInvPol', hPolEq'.symm, rfl, hNP, rfl, hCorr, rfl, rfl, rfl,
-                  hBeltP.trans hP3, rfl, fun _ => ⟨rfl, rfl⟩⟩
+                  hBeltP.trans hP3, rfl, ⟨rfl, rfl, hBAlp, hBKey, hQCfg⟩, fun _ => ⟨rfl, rfl⟩⟩
     · have hQuar2 : (s2.cut.poisoned || s2.belt.poisoned || s2.shareBytes.isNone) = true := by
         rw [hCutP, hP3]; rfl
       rw [hQuar2] at hStep2
@@ -4196,25 +4245,12 @@ def sim_layer2_to_layer3 {PK : Type} {n q f : Nat}
   sim_err {s2 s3 req} hRel hNone2 := by
     have hRelSaved := hRel
     rcases hRel with ⟨hInvPol, hPolEq, hPk, hNP, hTh, hCorr, hWalPk, hWalEp, hWalLat,
-      hBeltP, hCutP, hIntact⟩
+      hBeltP, hCutP, hSess, hIntact⟩
+    rcases hSess with ⟨hSTag, hSCom, hBAlp, hBKey, hQCfg⟩
     dsimp only [layer2MirGuardedMachine, layer3InteractiveProtocolMachine,
       PartyMachine.ofOutcome] at hNone2 ⊢
-    have hQuorumGateEq :
-        (decide req.quorum.Nodup && decide (s3.cluster.tsig.threshold ≤ req.quorum.length) &&
-          validThresholdApproval s3.cluster.tsig
-            ((req.quorum.filter (fun p => !finMemBool p corrupt)).map Fin.val)) =
-        (decide req.quorum.Nodup && decide (q ≤ req.quorum.length)) := by
-      rw [hTh]
-      cases hNdB : decide req.quorum.Nodup
-      · simp
-      · cases hLenB : decide (q ≤ req.quorum.length)
-        · simp
-        · simp only [Bool.true_and]
-          exact (mirBeltLatch_quorum_discharges_idealTsig_approval
-            corrupt req.quorum s3.cluster.tsig hNP hTh _hQPos _hQLeN hCorr.1 hCorr.2
-            _hCorruptNd _hCorruptLe _hBound (of_decide_eq_true hNdB) (of_decide_eq_true hLenB)).1
     cases hP3 : s3.cluster.honestWal.poisoned
-    · obtain ⟨hSomeSh, hDealt⟩ := hIntact hP3
+    · obtain ⟨hSomeSh, _⟩ := hIntact hP3
       have hQuar2 : (s2.cut.poisoned || s2.belt.poisoned || s2.shareBytes.isNone) = false := by
         rw [hCutP, hBeltP, hP3, hSomeSh]; rfl
       rw [hQuar2] at hNone2 ⊢
@@ -4238,24 +4274,31 @@ def sim_layer2_to_layer3 {PK : Type} {n q f : Nat}
         cases hPol3 : policyGuardStep s3.policy req.tx.toTransactionIntent with
         | rejected _ _ => rw [hPol3] at hSpecPolOk; cases hSpecPolOk
         | accepted pol3' env3 =>
+          rw [hPol3] at hSpecPolOk
+          dsimp only [CustodyStepOutcome.toStepOutcome] at hSpecPolOk
+          injection hSpecPolOk with hPairPol
+          rcases Prod.mk.inj hPairPol with ⟨_, rfl⟩
           dsimp only at hNone2 ⊢
-          rw [hQuorumGateEq]
-          cases hQ2 : (decide req.quorum.Nodup && decide (q ≤ req.quorum.length))
+          rw [← hQCfg, quorumGate23_eq corrupt pkDigestOf pk s2.quorumCertConfig env.canonicalBytes
+            req s3.cluster.tsig hPk hNP hTh hCorr.1 hCorr.2 _hBound _hQPos _hQLeN _hCorruptNd _hCorruptLe]
+          cases hQ2 : verifyFourLayerQuorumCert s2.quorumCertConfig q (pkDigestOf pk) env.canonicalBytes req
           · rw [ite_eq_left Bool.not_false, ite_eq_left Bool.not_false]
             dsimp only; exact ⟨rfl, hRelSaved⟩
           · rw [hQ2] at hNone2
             simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hNone2 ⊢
-            rw [hPk, ← hWalPk, ← hWalEp]
+            rw [hPk, ← hWalPk, ← hWalEp, ← hSTag, ← hSCom, ← hBAlp, ← hBKey]
             cases hE : (decide (pkDigestOf pk = s2.belt.enrolledPkDigest) && (req.reqEpoch == s2.belt.nextEpoch))
             · rw [ite_eq_left Bool.not_false, ite_eq_left Bool.not_false]
               dsimp only; exact ⟨rfl, hRelSaved⟩
             · rw [hE] at hNone2
               simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hNone2 ⊢
-              cases hC : verifyPreCutTranscript req.round1Openings req.round2Relations
+              cases hC : verifyPreCutTranscript s2.activeSessionTag s2.storedRound1Commits
+                  s2.verifierBginAlpha s2.verifierBginKeyOffsets req.quorum
+                  req.round1Openings req.round2Wires
               · rw [ite_eq_left Bool.not_false, ite_eq_left Bool.not_false]
                 dsimp only [poisonRealCluster, walQuarantine]
                 exact ⟨rfl, hInvPol, hPolEq, hPk, hNP, hTh, hCorr, hWalPk, hWalEp, hWalLat,
-                  rfl, rfl, fun hF => absurd hF (by decide)⟩
+                  rfl, rfl, ⟨hSTag, hSCom, hBAlp, hBKey, hQCfg⟩, fun hF => absurd hF (by decide)⟩
               · rw [hC, hSomeSh] at hNone2
                 simp at hNone2
     · have hQuar2 : (s2.cut.poisoned || s2.belt.poisoned || s2.shareBytes.isNone) = true := by
@@ -4264,11 +4307,12 @@ def sim_layer2_to_layer3 {PK : Type} {n q f : Nat}
       rw [ite_eq_left (rfl : true = true), ite_eq_left (rfl : true = true)]
       dsimp only [poisonRealCluster, walQuarantine]
       exact ⟨rfl, hInvPol, hPolEq, hPk, hNP, hTh, hCorr, hWalPk, hWalEp, hWalLat,
-        rfl, rfl, fun hF => absurd hF (by decide)⟩
+        rfl, rfl, ⟨hSTag, hSCom, hBAlp, hBKey, hQCfg⟩, fun hF => absurd hF (by decide)⟩
 
 /-- **Link 3 (`sim_layer3_to_layer4`)**:
-    `ForwardSim` from `layer3InteractiveProtocolMachine` (with secret shares) to strictly `sk`-free
-    `layer4IdealTsigMachine` ($\mathcal{F}_{\text{tsig}}$). -/
+    Conditional `ForwardSim` from `layer3InteractiveProtocolMachine` (with secret shares) to
+    share-free `layer4IdealTsigMachine` parameterized by the threshold reconstruction equation
+    `_hOracleEq`. -/
 def sim_layer3_to_layer4 {PK : Type} {n : Nat}
     (corrupt : List (Fin n)) (pkDigestOf : PK → List UInt8)
     (dealtShares : Nat → Option (List UInt8))
@@ -4283,12 +4327,13 @@ def sim_layer3_to_layer4 {PK : Type} {n : Nat}
     s3.cluster.tsig = s4.ideal.tsig ∧
     s3.cluster.honestWal = s4.ideal.honestWal ∧
     s3.cluster.maskSessionCursor = s4.ideal.maskSessionCursor ∧
+    Layer34SessionEq s3 s4 ∧
     (s3.cluster.honestWal.poisoned = false → s3.cluster.honestShares = dealtShares)
   sim_ok {s3 s3' s4 req out} hRel hStep3 := by
-    rcases s3 with ⟨pol, ⟨tsig, ⟨wPk, wEp, wLat, wPois⟩, cur, shares3⟩⟩
-    rcases s4 with ⟨pol4, ⟨tsig4, wal4, cur4⟩⟩
-    dsimp only at hRel
-    rcases hRel with ⟨rfl, rfl, rfl, rfl, hSh⟩
+    rcases s3 with ⟨pol, ⟨tsig, ⟨wPk, wEp, wLat, wPois⟩, cur, shares3⟩, aTag, sCom, vAlp, vKey, qCfg⟩
+    rcases s4 with ⟨pol4, ⟨tsig4, wal4, cur4⟩, aTag4, sCom4, vAlp4, vKey4, qCfg4⟩
+    dsimp only [Layer34SessionEq] at hRel
+    rcases hRel with ⟨rfl, rfl, rfl, rfl, ⟨rfl, rfl, rfl, rfl, rfl⟩, hSh⟩
     dsimp only [layer3InteractiveProtocolMachine, layer4IdealTsigMachine,
       PartyMachine.ofOutcome] at hStep3 ⊢
     cases wPois
@@ -4299,7 +4344,7 @@ def sim_layer3_to_layer4 {PK : Type} {n : Nat}
       | accepted pol' env =>
         rw [hPG] at hStep3
         dsimp only at hStep3 ⊢
-        cases hQ : (decide req.quorum.Nodup && decide (tsig.threshold ≤ req.quorum.length) &&
+        cases hQ : (verifyFourLayerQuorumCert qCfg tsig.threshold (pkDigestOf tsig.pk) env.canonicalBytes req &&
             validThresholdApproval tsig
               ((req.quorum.filter (fun p => !finMemBool p corrupt)).map Fin.val))
         · rw [hQ] at hStep3; simp at hStep3
@@ -4309,7 +4354,8 @@ def sim_layer3_to_layer4 {PK : Type} {n : Nat}
           · rw [hE] at hStep3; simp at hStep3
           · rw [hE] at hStep3
             simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hStep3 ⊢
-            cases hC : verifyPreCutTranscript req.round1Openings req.round2Relations
+            cases hC : verifyPreCutTranscript aTag sCom vAlp vKey req.quorum
+                req.round1Openings req.round2Wires
             · rw [hC] at hStep3; simp at hStep3
             · rw [hC] at hStep3
               simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte,
@@ -4318,50 +4364,57 @@ def sim_layer3_to_layer4 {PK : Type} {n : Nat}
               rw [ite_eq_right (by decide : ¬ ((!true) = true))]
               dsimp only
               rw [hDealt, _hOracleEq]
-              exact ⟨rfl, rfl, rfl, rfl, rfl, fun _ => rfl⟩
+              exact ⟨rfl, rfl, rfl, rfl, rfl, ⟨rfl, rfl, rfl, rfl, rfl⟩, fun _ => rfl⟩
     · simp at hStep3
   sim_err {s3 s4 req} hRel hNone3 := by
-    rcases s3 with ⟨pol, ⟨tsig, ⟨wPk, wEp, wLat, wPois⟩, cur, shares3⟩⟩
-    rcases s4 with ⟨pol4, ⟨tsig4, wal4, cur4⟩⟩
-    dsimp only at hRel
-    rcases hRel with ⟨rfl, rfl, rfl, rfl, hSh⟩
+    rcases s3 with ⟨pol, ⟨tsig, ⟨wPk, wEp, wLat, wPois⟩, cur, shares3⟩, aTag, sCom, vAlp, vKey, qCfg⟩
+    rcases s4 with ⟨pol4, ⟨tsig4, wal4, cur4⟩, aTag4, sCom4, vAlp4, vKey4, qCfg4⟩
+    dsimp only [Layer34SessionEq] at hRel
+    rcases hRel with ⟨rfl, rfl, rfl, rfl, ⟨rfl, rfl, rfl, rfl, rfl⟩, hSh⟩
     dsimp only [layer3InteractiveProtocolMachine, layer4IdealTsigMachine,
       PartyMachine.ofOutcome] at hNone3 ⊢
     cases wPois
     · have hDealt : shares3 = dealtShares := hSh rfl
       simp only [Bool.false_eq_true, ↓reduceIte] at hNone3 ⊢
       cases hPG : policyGuardStep pol req.tx.toTransactionIntent with
-      | rejected _ _ => exact ⟨rfl, rfl, rfl, rfl, rfl, fun _ => hDealt⟩
+      | rejected _ _ => exact ⟨rfl, rfl, rfl, rfl, rfl, ⟨rfl, rfl, rfl, rfl, rfl⟩, fun _ => hDealt⟩
       | accepted pol' env =>
         rw [hPG] at hNone3
         dsimp only at hNone3 ⊢
-        cases hQ : (decide req.quorum.Nodup && decide (tsig.threshold ≤ req.quorum.length) &&
+        cases hQ : (verifyFourLayerQuorumCert qCfg tsig.threshold (pkDigestOf tsig.pk) env.canonicalBytes req &&
             validThresholdApproval tsig
               ((req.quorum.filter (fun p => !finMemBool p corrupt)).map Fin.val))
         · rw [ite_eq_left Bool.not_false, ite_eq_left Bool.not_false]
           dsimp only
-          exact ⟨rfl, rfl, rfl, rfl, rfl, fun _ => hDealt⟩
+          exact ⟨rfl, rfl, rfl, rfl, rfl, ⟨rfl, rfl, rfl, rfl, rfl⟩, fun _ => hDealt⟩
         · rw [hQ] at hNone3
           simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hNone3 ⊢
           cases hE : (decide (pkDigestOf tsig.pk = wPk) && (req.reqEpoch == wEp))
           · rw [ite_eq_left Bool.not_false, ite_eq_left Bool.not_false]
             dsimp only
-            exact ⟨rfl, rfl, rfl, rfl, rfl, fun _ => hDealt⟩
+            exact ⟨rfl, rfl, rfl, rfl, rfl, ⟨rfl, rfl, rfl, rfl, rfl⟩, fun _ => hDealt⟩
           · rw [hE] at hNone3
             simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hNone3 ⊢
-            cases hC : verifyPreCutTranscript req.round1Openings req.round2Relations
+            cases hC : verifyPreCutTranscript aTag sCom vAlp vKey req.quorum
+                req.round1Openings req.round2Wires
             · rw [ite_eq_left Bool.not_false, ite_eq_left Bool.not_false]
               dsimp only [poisonRealCluster, poisonIdealCluster, walQuarantine]
-              exact ⟨rfl, rfl, rfl, rfl, rfl, fun hF => absurd hF (by decide)⟩
+              exact ⟨rfl, rfl, rfl, rfl, rfl, ⟨rfl, rfl, rfl, rfl, rfl⟩,
+                fun hF => absurd hF (by decide)⟩
             · rw [hC] at hNone3; simp at hNone3
     · rw [ite_eq_left (rfl : true = true), ite_eq_left (rfl : true = true)]
       dsimp only [poisonRealCluster, poisonIdealCluster, walQuarantine]
-      exact ⟨rfl, rfl, rfl, rfl, rfl, fun hF => absurd hF (by decide)⟩
+      exact ⟨rfl, rfl, rfl, rfl, rfl, ⟨rfl, rfl, rfl, rfl, rfl⟩,
+        fun hF => absurd hF (by decide)⟩
 
-/-- **Crown-Jewel Compositional Theorem (`isa_to_mir_to_protocol_to_ideal_sim`)**:
-    Unified 4-layer transitive `ForwardSim` instantiating `ForwardSim.trans` across:
+/-- **Conditional 4-Layer Control-Flow & Authorization Refinement (`isa_to_mir_to_protocol_to_ideal_sim`)**:
+    Composes `ForwardSim.trans` across:
     `(1) Compiled ELF ISA Slice` $\to$ `(2) Fixed-Width Guard Model` $\to$
-    `(3) Multi-Party Interactive Wire Protocol` $\to$ `(4) sk-Free Ideal Functionality F_tsig`. -/
+    `(3) Multi-Party Interactive Wire Protocol` $\to$ `(4) Share-Free Target Authorization Model`.
+    Explicitly parameterized by the threshold reconstruction contracts `hSigMatch` and `hOracleEq`
+    (which are discharged algebraically via multi-share Lagrange interpolation in
+    `inhabited_four_layer_chain`, while cryptographic UC simulation lives in
+    `InteractiveUcEngine.lean`). -/
 @[expose]
 def isa_to_mir_to_protocol_to_ideal_sim {PK : Type} {n q f : Nat}
     (corrupt : List (Fin n)) (pkDigestOf : PK → List UInt8)
@@ -4432,7 +4485,8 @@ private theorem layer4_validTrace_safe {PK : Type} {n : Nat}
         rw [hPG] at hStep
         dsimp only at hStep
         let honApp := (req.quorum.filter (fun p => !finMemBool p corrupt)).map Fin.val
-        cases hQ : (decide req.quorum.Nodup && decide (s₀.ideal.tsig.threshold ≤ req.quorum.length) &&
+        cases hQ : (verifyFourLayerQuorumCert s₀.quorumCertConfig s₀.ideal.tsig.threshold
+            (pkDigestOf s₀.ideal.tsig.pk) env.canonicalBytes req &&
             validThresholdApproval s₀.ideal.tsig honApp)
         · rw [hQ] at hStep; simp at hStep
         · rw [hQ] at hStep
@@ -4442,7 +4496,9 @@ private theorem layer4_validTrace_safe {PK : Type} {n : Nat}
           · rw [hE] at hStep; simp at hStep
           · rw [hE] at hStep
             simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hStep
-            cases hC : verifyPreCutTranscript req.round1Openings req.round2Relations
+            cases hC : verifyPreCutTranscript s₀.activeSessionTag s₀.storedRound1Commits
+                s₀.verifierBginAlpha s₀.verifierBginKeyOffsets req.quorum
+                req.round1Openings req.round2Wires
             · rw [hC] at hStep; simp at hStep
             · rw [hC] at hStep
               simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte,
@@ -4516,7 +4572,8 @@ private theorem layer4_validTrace_safe {PK : Type} {n : Nat}
           rw [hPG] at hNone
           dsimp only at hNone ⊢
           let honApp := (req.quorum.filter (fun p => !finMemBool p corrupt)).map Fin.val
-          cases hQ : (decide req.quorum.Nodup && decide (s₀.ideal.tsig.threshold ≤ req.quorum.length) &&
+          cases hQ : (verifyFourLayerQuorumCert s₀.quorumCertConfig s₀.ideal.tsig.threshold
+              (pkDigestOf s₀.ideal.tsig.pk) env.canonicalBytes req &&
               validThresholdApproval s₀.ideal.tsig honApp)
           · rw [ite_eq_left Bool.not_false]
             dsimp only
@@ -4530,7 +4587,9 @@ private theorem layer4_validTrace_safe {PK : Type} {n : Nat}
               exact ⟨rfl, rfl, rfl⟩
             · rw [hE] at hNone
               simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hNone ⊢
-              cases hC : verifyPreCutTranscript req.round1Openings req.round2Relations
+              cases hC : verifyPreCutTranscript s₀.activeSessionTag s₀.storedRound1Commits
+                  s₀.verifierBginAlpha s₀.verifierBginKeyOffsets req.quorum
+                  req.round1Openings req.round2Wires
               · rw [ite_eq_left Bool.not_false]
                 dsimp only [poisonIdealCluster, walQuarantine]
                 exact ⟨rfl, rfl, rfl⟩
@@ -4623,7 +4682,7 @@ theorem isa_to_ideal_preserves_multiturn_safety {PK : Type} {n q f : Nat}
     exact ⟨hPolMain.2.2.1, hPolMain.2.2.2.1, hEpPair, hHon⟩
   obtain ⟨s4Final, _, s2Final, h12F, _⟩ :=
     sim.lift_validTrace ⟨s2₀, h12₀, s3₀, h23₀, h34₀⟩ hTrace1
-  exact ⟨hSafe, h12F.2.2.2.2.2.2.2.2.2.2.2.2.2.2⟩
+  exact ⟨hSafe, sim12_zeroIfPoisoned h12F⟩
 
 /-! ### Non-Vacuity Witness (`inhabited_four_layer_chain`) & `#tooth` Broken-Link Refutation -/
 
