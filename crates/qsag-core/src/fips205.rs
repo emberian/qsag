@@ -1339,3 +1339,1350 @@ pub fn fips205_h(
 }
 
 /// `T_l(PK.seed, ADRS, M_l) = SHAKE256(PK.seed || ADRS || M_l, 8n)`.
+pub fn fips205_th(n: usize, pk_seed: &[u8], adrs: &Fips205Adrs, blocks: &[SlhBlock]) -> SlhBlock {
+    debug_assert_eq!(pk_seed.len(), n);
+    let mut xof = Cshake256Xof::new_shake256();
+    xof.absorb(pk_seed);
+    xof.absorb(&adrs.to_bytes());
+    for b in blocks {
+        debug_assert_eq!(b.len(), n);
+        xof.absorb(b.as_slice());
+    }
+    let mut out = SlhBlock::zero(n);
+    xof.squeeze(&mut out.bytes[..n]);
+    out
+}
+
+/// Format FIPS 205 §9.2 / §10.2.1 pure `SLH-DSA` message `M' = 0x00 || (ctx.len() as u8) || ctx || msg`.
+pub fn format_pure_m_prime(msg: &[u8], ctx: &[u8]) -> Result<Vec<u8>, Fips205Error> {
+    if ctx.len() > FIPS205_MAX_CTX_LEN {
+        return Err(Fips205Error::ContextTooLong(ctx.len()));
+    }
+    let mut m_prime = Vec::with_capacity(2 + ctx.len() + msg.len());
+    m_prime.push(0x00);
+    m_prime.push(ctx.len() as u8);
+    m_prime.extend_from_slice(ctx);
+    m_prime.extend_from_slice(msg);
+    Ok(m_prime)
+}
+
+/// Format FIPS 205 §9.3 / §10.2.2 Pre-Hash `HashSLH-DSA` message
+/// `M' = 0x01 || (ctx.len() as u8) || ctx || OID || PH(msg)`.
+pub fn format_prehash_m_prime(
+    ph: SlhPreHash,
+    msg: &[u8],
+    ctx: &[u8],
+) -> Result<Vec<u8>, Fips205Error> {
+    if ctx.len() > FIPS205_MAX_CTX_LEN {
+        return Err(Fips205Error::ContextTooLong(ctx.len()));
+    }
+    let oid = ph.oid_der();
+    let digest = ph.hash_message(msg);
+    let mut m_prime = Vec::with_capacity(2 + ctx.len() + oid.len() + digest.len());
+    m_prime.push(0x01);
+    m_prime.push(ctx.len() as u8);
+    m_prime.extend_from_slice(ctx);
+    m_prime.extend_from_slice(&oid);
+    m_prime.extend_from_slice(&digest);
+    Ok(m_prime)
+}
+
+// ============================================================================
+// Base-16 WOTS+ Digits, Checksum (`csum << 4`), and Chain Evaluation (§5)
+// ============================================================================
+
+/// Fallible base-16 WOTS+ digit + checksum extractor rejecting block lengths outside `{16, 24, 32}` (`[P1-08]`).
+pub fn try_wots_base16_digits_and_csum(msg_n: &[u8]) -> Result<([u8; 67], usize), Fips205Error> {
+    let n = msg_n.len();
+    if n != 16 && n != 24 && n != 32 {
+        return Err(Fips205Error::InvalidNodeBytes {
+            expected: 32,
+            actual: n,
+        });
+    }
+    let ell1 = 2 * n;
+    let mut digits = [0u8; 67];
+    let mut csum: u32 = 0;
+    for i in 0..n {
+        let hi = msg_n[i] >> 4;
+        let lo = msg_n[i] & 0x0F;
+        digits[2 * i] = hi;
+        digits[2 * i + 1] = lo;
+        csum += (15 - hi as u32) + (15 - lo as u32);
+    }
+    let shifted = (csum << 4) as u16;
+    let cbytes = shifted.to_be_bytes();
+    digits[ell1] = cbytes[0] >> 4;
+    digits[ell1 + 1] = cbytes[0] & 0x0F;
+    digits[ell1 + 2] = cbytes[1] >> 4;
+    Ok((digits, ell1 + 3))
+}
+
+/// Compute the `2n + 3` base-16 WOTS+ digits (`2n` message nibbles + `3` big-endian checksum
+/// nibbles of `csum << 4`) for an `n`-byte message block (`n` in `{16, 24, 32}`).
+/// Clamps `msg_n` to `<= 32` bytes so untrusted slices can never panic in release builds (`[P1-08]`).
+pub fn wots_base16_digits_and_csum(msg_n: &[u8]) -> ([u8; 67], usize) {
+    let n = msg_n.len().min(32);
+    debug_assert!(msg_n.len() == 16 || msg_n.len() == 24 || msg_n.len() == 32);
+    let ell1 = 2 * n;
+    let mut digits = [0u8; 67];
+    let mut csum: u32 = 0;
+    for i in 0..n {
+        let hi = msg_n[i] >> 4;
+        let lo = msg_n[i] & 0x0F;
+        digits[2 * i] = hi;
+        digits[2 * i + 1] = lo;
+        csum += (15 - hi as u32) + (15 - lo as u32);
+    }
+    let shifted = (csum << 4) as u16;
+    let cbytes = shifted.to_be_bytes();
+    digits[ell1] = cbytes[0] >> 4;
+    digits[ell1 + 1] = cbytes[0] & 0x0F;
+    digits[ell1 + 2] = cbytes[1] >> 4;
+    (digits, ell1 + 3)
+}
+
+/// NIST FIPS 205 Algorithm 5 `chain(X, i, s, PK.seed, ADRS)` (wiping intermediate secret states).
+pub fn fips205_chain(
+    mut x: SlhBlock,
+    start_i: u32,
+    steps_s: u32,
+    pk_seed: &[u8],
+    base_adrs: Fips205Adrs,
+) -> SlhBlock {
+    let n = x.len();
+    for j in start_i..start_i.saturating_add(steps_s) {
+        let mut adrs = base_adrs;
+        adrs.f6 = j;
+        let next = fips205_f(n, pk_seed, &adrs, &x);
+        x.wipe();
+        x = next;
+    }
+    x
+}
+
+/// NIST FIPS 205 Algorithm 6 `wots_pkGen(SK.seed, PK.seed, ADRS)`.
+pub fn wots_pk_gen(
+    params: &Fips205Params,
+    sk_seed: &[u8],
+    pk_seed: &[u8],
+    adrs: Fips205Adrs,
+) -> SlhBlock {
+    let n = params.n;
+    let ell = params.ell();
+    let mut sk_adrs = adrs.with_type_and_clear(Fips205AdrsType::WotsPrf);
+    sk_adrs.key_pair = adrs.key_pair;
+
+    let mut chain_adrs = adrs.with_type_and_clear(Fips205AdrsType::WotsHash);
+    chain_adrs.key_pair = adrs.key_pair;
+
+    let mut tmp = [SlhBlock::zero(32); 67];
+    let mut i = 0;
+    while i < ell {
+        sk_adrs.f5 = i as u32;
+        let mut sk_i = fips205_prf(n, pk_seed, sk_seed, &sk_adrs);
+        chain_adrs.f5 = i as u32;
+        tmp[i] = fips205_chain(sk_i, 0, 15, pk_seed, chain_adrs);
+        sk_i.wipe();
+        i += 1;
+    }
+    let mut wotspk_adrs = adrs.with_type_and_clear(Fips205AdrsType::WotsPk);
+    wotspk_adrs.key_pair = adrs.key_pair;
+    fips205_th(n, pk_seed, &wotspk_adrs, &tmp[..ell])
+}
+
+/// NIST FIPS 205 Algorithm 7 `wots_sign(M, SK.seed, PK.seed, ADRS)`.
+pub fn wots_sign(
+    params: &Fips205Params,
+    msg_n: &SlhBlock,
+    sk_seed: &[u8],
+    pk_seed: &[u8],
+    adrs: Fips205Adrs,
+) -> Vec<SlhBlock> {
+    let n = params.n;
+    let (digits, ell) = wots_base16_digits_and_csum(msg_n.as_slice());
+    debug_assert_eq!(ell, params.ell());
+    let mut sk_adrs = adrs.with_type_and_clear(Fips205AdrsType::WotsPrf);
+    sk_adrs.key_pair = adrs.key_pair;
+
+    let mut chain_adrs = adrs.with_type_and_clear(Fips205AdrsType::WotsHash);
+    chain_adrs.key_pair = adrs.key_pair;
+
+    let mut sig = Vec::with_capacity(ell);
+    let mut i = 0;
+    while i < ell {
+        sk_adrs.f5 = i as u32;
+        let mut sk_i = fips205_prf(n, pk_seed, sk_seed, &sk_adrs);
+        chain_adrs.f5 = i as u32;
+        sig.push(fips205_chain(
+            sk_i,
+            0,
+            digits[i] as u32,
+            pk_seed,
+            chain_adrs,
+        ));
+        sk_i.wipe();
+        i += 1;
+    }
+    sig
+}
+
+/// NIST FIPS 205 Algorithm 8 `wots_pkFromSig(sig, M, PK.seed, ADRS)`.
+pub fn wots_pk_from_sig(
+    params: &Fips205Params,
+    sig: &[SlhBlock],
+    msg_n: &SlhBlock,
+    pk_seed: &[u8],
+    adrs: Fips205Adrs,
+) -> SlhBlock {
+    let n = params.n;
+    let (digits, ell) = wots_base16_digits_and_csum(msg_n.as_slice());
+    debug_assert_eq!(ell, params.ell());
+    let mut chain_adrs = adrs.with_type_and_clear(Fips205AdrsType::WotsHash);
+    chain_adrs.key_pair = adrs.key_pair;
+
+    let mut tmp = [SlhBlock::zero(32); 67];
+    for i in 0..ell {
+        let di = digits[i] as u32;
+        chain_adrs.f5 = i as u32;
+        tmp[i] = fips205_chain(sig[i], di, 15 - di, pk_seed, chain_adrs);
+    }
+    let mut wotspk_adrs = adrs.with_type_and_clear(Fips205AdrsType::WotsPk);
+    wotspk_adrs.key_pair = adrs.key_pair;
+    fips205_th(n, pk_seed, &wotspk_adrs, &tmp[..ell])
+}
+
+// ============================================================================
+// XMSS Subtrees (§6) & FORS (§8)
+// ============================================================================
+
+/// Build bottom-up Merkle root and authentication path (`auth[0]` = height-1 leaf sibling,
+/// `auth[height - 1]` = top child sibling) from precomputed leaves `leaves[0..2^height]`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Preserve the existing explicit protocol interface for callers"
+)]
+pub fn build_fips205_merkle_from_leaves(
+    n: usize,
+    pk_seed: &[u8],
+    base_adrs: Fips205Adrs,
+    node_adrs_type: Fips205AdrsType,
+    preserve_key_pair: bool,
+    leaves: &[SlhBlock],
+    height: usize,
+    tree_index_offset: u32,
+    local_idx: usize,
+) -> (SlhBlock, Vec<SlhBlock>) {
+    debug_assert_eq!(leaves.len(), 1usize << height);
+    let mut cur = leaves.to_vec();
+    let mut auth = Vec::with_capacity(height);
+    let mut idx = local_idx;
+    for z in 1..=height {
+        auth.push(cur[idx ^ 1]);
+        let next_len = cur.len() / 2;
+        let base_off = tree_index_offset >> z;
+        let mut next = Vec::with_capacity(next_len);
+        for base in (0..next_len).step_by(4) {
+            let count = (next_len - base).min(4);
+            let mut preimages = [[0u8; 128]; 4];
+            for (j, pre) in preimages.iter_mut().enumerate().take(count) {
+                let p = base + j;
+                let mut adrs = base_adrs.with_type_and_clear(node_adrs_type);
+                if preserve_key_pair {
+                    adrs.key_pair = base_adrs.key_pair;
+                }
+                adrs.f5 = z as u32;
+                adrs.f6 = base_off + p as u32;
+                pre[..n].copy_from_slice(pk_seed);
+                pre[n..n + 32].copy_from_slice(&adrs.to_bytes());
+                pre[n + 32..2 * n + 32].copy_from_slice(cur[2 * p].as_slice());
+                pre[2 * n + 32..3 * n + 32].copy_from_slice(cur[2 * p + 1].as_slice());
+            }
+            let inputs = core::array::from_fn(|j| &preimages[j][..3 * n + 32]);
+            let hashes = crate::sponge::keccak::shake256_4x_32(inputs)
+                .unwrap_or_else(|| inputs.map(crate::sponge::keccak::shake256_32));
+            for hash in hashes.iter().take(count) {
+                let mut block = SlhBlock::zero(n);
+                block.bytes[..n].copy_from_slice(&hash[..n]);
+                next.push(block);
+            }
+        }
+        cur = next;
+        idx >>= 1;
+    }
+    (cur[0], auth)
+}
+
+/// Walk a bottom-up FIPS 205 authentication path (`xmss_pkFromSig` / `fors_pkFromSig`).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Preserve the existing explicit protocol interface for callers"
+)]
+pub fn walk_fips205_auth_path(
+    n: usize,
+    pk_seed: &[u8],
+    base_adrs: Fips205Adrs,
+    node_adrs_type: Fips205AdrsType,
+    preserve_key_pair: bool,
+    mut node: SlhBlock,
+    mut global_leaf_idx: u32,
+    auth: &[SlhBlock],
+) -> SlhBlock {
+    for (k, sib) in auth.iter().enumerate() {
+        let z = (k + 1) as u32;
+        let mut adrs = base_adrs.with_type_and_clear(node_adrs_type);
+        if preserve_key_pair {
+            adrs.key_pair = base_adrs.key_pair;
+        }
+        adrs.f5 = z;
+        let parent_idx = global_leaf_idx >> 1;
+        adrs.f6 = parent_idx;
+        if (global_leaf_idx & 1) == 0 {
+            node = fips205_h(n, pk_seed, &adrs, &node, sib);
+        } else {
+            node = fips205_h(n, pk_seed, &adrs, sib, &node);
+        }
+        global_leaf_idx = parent_idx;
+    }
+    node
+}
+
+/// NIST FIPS 205 Algorithm 9 `xmss_node(SK.seed, 0, h', PK.seed, ADRS)` for a full subtree.
+pub fn xmss_subtree_root(
+    params: &Fips205Params,
+    sk_seed: &[u8],
+    pk_seed: &[u8],
+    base_adrs: Fips205Adrs,
+) -> SlhBlock {
+    let n_leaves = 1usize << params.hp;
+    let mut leaves = Vec::with_capacity(n_leaves);
+    for kp in 0..n_leaves {
+        let mut leaf_adrs = base_adrs;
+        leaf_adrs.key_pair = kp as u32;
+        leaves.push(wots_pk_gen(params, sk_seed, pk_seed, leaf_adrs));
+    }
+    let (root, _) = build_fips205_merkle_from_leaves(
+        params.n,
+        pk_seed,
+        base_adrs,
+        Fips205AdrsType::Tree,
+        false,
+        &leaves,
+        params.hp,
+        0,
+        0,
+    );
+    root
+}
+
+/// NIST FIPS 205 §8 `base_2^b(md, a, k)` + `(idx_tree, idx_leaf)` digest splitter,
+/// matching `Qsag.fipsSplitDigest` bit-for-bit across all 6 parameter sets.
+pub fn split_digest_indices(params: &Fips205Params, digest: &[u8]) -> (Vec<u32>, u128, u32) {
+    let ka_bytes = (params.k * params.a).div_ceil(8);
+    let tree_bits = params.h - params.hp;
+    let tree_bytes = tree_bits.div_ceil(8);
+    let leaf_bytes = params.hp.div_ceil(8);
+
+    let md = &digest[0..ka_bytes];
+    let tmp_idx_tree = &digest[ka_bytes..ka_bytes + tree_bytes];
+    let tmp_idx_leaf = &digest[ka_bytes + tree_bytes..ka_bytes + tree_bytes + leaf_bytes];
+
+    // base_2^b(md, a, k) (MSB-first bit stream per FIPS 205 Algorithm 4)
+    let mut fors_indices = Vec::with_capacity(params.k);
+    let mut bits_in_buf = 0usize;
+    let mut total: u64 = 0;
+    let mut in_off = 0usize;
+    let mask_a = (1u64 << params.a) - 1;
+    for _ in 0..params.k {
+        while bits_in_buf < params.a {
+            total = (total << 8) | (md[in_off] as u64);
+            in_off += 1;
+            bits_in_buf += 8;
+        }
+        bits_in_buf -= params.a;
+        let idx = ((total >> bits_in_buf) & mask_a) as u32;
+        fors_indices.push(idx);
+    }
+
+    let mut tree_acc: u128 = 0;
+    for &b in tmp_idx_tree {
+        tree_acc = (tree_acc << 8) | (b as u128);
+    }
+    let tree_mask = if tree_bits == 0 {
+        0u128
+    } else {
+        (1u128 << tree_bits) - 1
+    };
+    let idx_tree = tree_acc & tree_mask;
+
+    let mut leaf_acc: u32 = 0;
+    for &b in tmp_idx_leaf {
+        leaf_acc = (leaf_acc << 8) | (b as u32);
+    }
+    let leaf_mask = (1u32 << params.hp) - 1;
+    let idx_leaf = leaf_acc & leaf_mask;
+
+    (fors_indices, idx_tree, idx_leaf)
+}
+
+/// NIST FIPS 205 Algorithm 16 `fors_sign` + Algorithm 17 `fors_pkFromSig` root computation.
+pub fn fors_sign_and_pk(
+    params: &Fips205Params,
+    fors_indices: &[u32],
+    sk_seed: &[u8],
+    pk_seed: &[u8],
+    adrs: Fips205Adrs,
+) -> (Vec<(SlhBlock, Vec<SlhBlock>)>, SlhBlock) {
+    let n = params.n;
+    let t_leaves = 1usize << params.a;
+    let mut fors_trees = Vec::with_capacity(params.k);
+    let mut roots = Vec::with_capacity(params.k);
+
+    let mut sk_adrs = adrs.with_type_and_clear(Fips205AdrsType::ForsPrf);
+    sk_adrs.key_pair = adrs.key_pair;
+
+    let mut leaf_adrs = adrs.with_type_and_clear(Fips205AdrsType::ForsTree);
+    leaf_adrs.key_pair = adrs.key_pair;
+
+    let mut i = 0;
+    while i < params.k {
+        let idx_i = fors_indices[i] as usize;
+        let tree_off = (i * t_leaves) as u32;
+        let mut leaves = Vec::with_capacity(t_leaves);
+        let mut revealed_sk = SlhBlock::zero(n);
+        for u in 0..t_leaves {
+            let g_idx = tree_off + (u as u32);
+            sk_adrs.f6 = g_idx;
+            let mut sk_val = fips205_prf(n, pk_seed, sk_seed, &sk_adrs);
+            leaf_adrs.f5 = 0;
+            leaf_adrs.f6 = g_idx;
+            leaves.push(fips205_f(n, pk_seed, &leaf_adrs, &sk_val));
+            if u == idx_i {
+                revealed_sk = sk_val;
+            } else {
+                sk_val.wipe();
+            }
+        }
+        let (root_i, auth_i) = build_fips205_merkle_from_leaves(
+            n,
+            pk_seed,
+            adrs,
+            Fips205AdrsType::ForsTree,
+            true,
+            &leaves,
+            params.a,
+            tree_off,
+            idx_i,
+        );
+        roots.push(root_i);
+        fors_trees.push((revealed_sk, auth_i));
+        i += 1;
+    }
+
+    let mut pk_adrs = adrs.with_type_and_clear(Fips205AdrsType::ForsRoots);
+    pk_adrs.key_pair = adrs.key_pair;
+    let fors_pk = fips205_th(n, pk_seed, &pk_adrs, &roots);
+    (fors_trees, fors_pk)
+}
+
+/// NIST FIPS 205 Algorithm 17 `fors_pkFromSig(SIG_FORS, md, PK.seed, ADRS)`.
+pub fn fors_pk_from_sig(
+    params: &Fips205Params,
+    fors_trees: &[(SlhBlock, Vec<SlhBlock>)],
+    fors_indices: &[u32],
+    pk_seed: &[u8],
+    adrs: Fips205Adrs,
+) -> SlhBlock {
+    let n = params.n;
+    let t_leaves = (1usize << params.a) as u32;
+    let mut leaf_adrs = adrs.with_type_and_clear(Fips205AdrsType::ForsTree);
+    leaf_adrs.key_pair = adrs.key_pair;
+
+    let mut roots = Vec::with_capacity(params.k);
+    for i in 0..params.k {
+        let (ref sk_val, ref auth_i) = fors_trees[i];
+        let g_idx = (i as u32) * t_leaves + fors_indices[i];
+        leaf_adrs.f5 = 0;
+        leaf_adrs.f6 = g_idx;
+        let leaf_node = fips205_f(n, pk_seed, &leaf_adrs, sk_val);
+        let root_i = walk_fips205_auth_path(
+            n,
+            pk_seed,
+            adrs,
+            Fips205AdrsType::ForsTree,
+            true,
+            leaf_node,
+            g_idx,
+            auth_i,
+        );
+        roots.push(root_i);
+    }
+
+    let mut pk_adrs = adrs.with_type_and_clear(Fips205AdrsType::ForsRoots);
+    pk_adrs.key_pair = adrs.key_pair;
+    fips205_th(n, pk_seed, &pk_adrs, &roots)
+}
+
+// ============================================================================
+// Flat Byte Serialization & Keygen / Sign / Verify Entry Points (§9–§10)
+// ============================================================================
+
+/// Encode structured `SlhParsedSignature` into the flat `params.sig_bytes()` byte vector.
+pub fn encode_slh_sig(params: &Fips205Params, sig: &SlhParsedSignature) -> Vec<u8> {
+    let mut out = Vec::with_capacity(params.sig_bytes());
+    out.extend_from_slice(sig.r_rand.as_slice());
+    for (sk_val, auth) in &sig.fors_trees {
+        out.extend_from_slice(sk_val.as_slice());
+        for sib in auth {
+            out.extend_from_slice(sib.as_slice());
+        }
+    }
+    for (wots, auth) in &sig.ht_layers {
+        for blk in wots {
+            out.extend_from_slice(blk.as_slice());
+        }
+        for sib in auth {
+            out.extend_from_slice(sib.as_slice());
+        }
+    }
+    out
+}
+
+/// Decode flat signature bytes into `SlhParsedSignature` (panic-free, exact length check).
+pub fn decode_slh_sig(
+    params: &Fips205Params,
+    raw: &[u8],
+) -> Result<SlhParsedSignature, Fips205Error> {
+    if !params.is_valid() {
+        return Err(Fips205Error::InvalidParameterSet);
+    }
+    let expected = params.sig_bytes();
+    if raw.len() != expected {
+        return Err(Fips205Error::InvalidSignatureLength {
+            expected,
+            actual: raw.len(),
+        });
+    }
+    let n = params.n;
+    let ell = params.ell();
+    let mut off = 0usize;
+    let r_rand = SlhBlock::from_slice_checked(n, &raw[off..off + n])?;
+    off += n;
+
+    let mut fors_trees = Vec::with_capacity(params.k);
+    for _ in 0..params.k {
+        let sk_val = SlhBlock::from_slice_checked(n, &raw[off..off + n])?;
+        off += n;
+        let mut auth = Vec::with_capacity(params.a);
+        for _ in 0..params.a {
+            let sib = SlhBlock::from_slice_checked(n, &raw[off..off + n])?;
+            off += n;
+            auth.push(sib);
+        }
+        fors_trees.push((sk_val, auth));
+    }
+
+    let mut ht_layers = Vec::with_capacity(params.d);
+    for _ in 0..params.d {
+        let mut wots = Vec::with_capacity(ell);
+        for _ in 0..ell {
+            let blk = SlhBlock::from_slice_checked(n, &raw[off..off + n])?;
+            off += n;
+            wots.push(blk);
+        }
+        let mut auth = Vec::with_capacity(params.hp);
+        for _ in 0..params.hp {
+            let sib = SlhBlock::from_slice_checked(n, &raw[off..off + n])?;
+            off += n;
+            auth.push(sib);
+        }
+        ht_layers.push((wots, auth));
+    }
+    debug_assert_eq!(off, expected);
+    Ok(SlhParsedSignature {
+        r_rand,
+        fors_trees,
+        ht_layers,
+    })
+}
+
+/// NIST FIPS 205 Algorithm 18 `slh_keygen_internal(SK.seed, SK.prf, PK.seed)`.
+pub fn slh_keygen_internal(
+    params: &Fips205Params,
+    sk_seed: &[u8],
+    sk_prf: &[u8],
+    pk_seed: &[u8],
+) -> Result<(SlhSecretKey, SlhPublicKey), Fips205Error> {
+    if !params.is_valid() {
+        return Err(Fips205Error::InvalidParameterSet);
+    }
+    let n = params.n;
+    if sk_seed.len() != n || sk_prf.len() != n || pk_seed.len() != n {
+        return Err(Fips205Error::InvalidSecretKeyBytes(
+            sk_seed.len() + sk_prf.len() + pk_seed.len(),
+        ));
+    }
+    let mut top_adrs = Fips205Adrs::ZERO;
+    top_adrs.layer = (params.d - 1) as u32;
+    let pk_root = xmss_subtree_root(params, sk_seed, pk_seed, top_adrs);
+    let sk = SlhSecretKey::from_components(sk_seed, sk_prf, pk_seed, pk_root.as_slice())?;
+    let pk = sk.public_key();
+    Ok((sk, pk))
+}
+
+/// Deterministic seed-expanded keypair helper (`SHAKE256(seed, 3*n)` -> `(SK.seed, SK.prf, PK.seed)`).
+pub fn slh_keygen_from_seed(
+    params: &Fips205Params,
+    master_seed: &[u8],
+) -> Result<(SlhSecretKey, SlhPublicKey), Fips205Error> {
+    if !params.is_valid() {
+        return Err(Fips205Error::InvalidParameterSet);
+    }
+    let n = params.n;
+    let mut raw = shake256_xof(3 * n, master_seed);
+    let res = slh_keygen_internal(params, &raw[0..n], &raw[n..2 * n], &raw[2 * n..3 * n]);
+    wipe_slice(&mut raw);
+    res
+}
+
+/// NIST FIPS 205 Algorithm 19 `slh_sign_internal(M', SK, addrnd)`.
+/// Pass `addrnd = None` for deterministic signing (`opt_rand = PK.seed`).
+pub fn slh_sign_internal(
+    params: &Fips205Params,
+    m_prime: &[u8],
+    sk: &SlhSecretKey,
+    addrnd: Option<&[u8]>,
+) -> Result<Vec<u8>, Fips205Error> {
+    if !params.is_valid() || sk.n != params.n {
+        return Err(Fips205Error::InvalidParameterSet);
+    }
+    let n = params.n;
+    let opt_rand = match addrnd {
+        Some(r) => {
+            if r.len() != n {
+                return Err(Fips205Error::InvalidNodeBytes {
+                    expected: n,
+                    actual: r.len(),
+                });
+            }
+            r
+        }
+        None => sk.pk_seed_slice(),
+    };
+    let r_rand = fips205_prf_msg(n, sk.sk_prf_slice(), opt_rand, m_prime);
+    let digest = fips205_h_msg(
+        params.m,
+        r_rand.as_slice(),
+        sk.pk_seed_slice(),
+        sk.pk_root_slice(),
+        m_prime,
+    );
+    let (fors_indices, mut idx_tree, mut idx_leaf) = split_digest_indices(params, &digest);
+
+    let mut fors_adrs = Fips205Adrs::ZERO;
+    fors_adrs.set_tree_address(idx_tree);
+    fors_adrs.adrs_type = Fips205AdrsType::ForsTree;
+    fors_adrs.key_pair = idx_leaf;
+    let (fors_trees, mut cur_msg) = fors_sign_and_pk(
+        params,
+        &fors_indices,
+        sk.sk_seed_slice(),
+        sk.pk_seed_slice(),
+        fors_adrs,
+    );
+
+    let n_leaves = 1usize << params.hp;
+    let leaf_mask = (n_leaves as u128) - 1;
+    let mut ht_layers = Vec::with_capacity(params.d);
+    for layer in 0..params.d {
+        let mut layer_adrs = Fips205Adrs::ZERO;
+        layer_adrs.layer = layer as u32;
+        layer_adrs.set_tree_address(idx_tree);
+        layer_adrs.key_pair = idx_leaf;
+        let wots_sig = wots_sign(
+            params,
+            &cur_msg,
+            sk.sk_seed_slice(),
+            sk.pk_seed_slice(),
+            layer_adrs,
+        );
+
+        let mut leaves = Vec::with_capacity(n_leaves);
+        for kp in 0..n_leaves {
+            let mut leaf_adrs = layer_adrs;
+            leaf_adrs.key_pair = kp as u32;
+            if kp as u32 == idx_leaf {
+                leaves.push(wots_pk_from_sig(
+                    params,
+                    &wots_sig,
+                    &cur_msg,
+                    sk.pk_seed_slice(),
+                    leaf_adrs,
+                ));
+            } else {
+                leaves.push(wots_pk_gen(
+                    params,
+                    sk.sk_seed_slice(),
+                    sk.pk_seed_slice(),
+                    leaf_adrs,
+                ));
+            }
+        }
+        let (root_l, auth_l) = build_fips205_merkle_from_leaves(
+            n,
+            sk.pk_seed_slice(),
+            layer_adrs,
+            Fips205AdrsType::Tree,
+            false,
+            &leaves,
+            params.hp,
+            0,
+            idx_leaf as usize,
+        );
+        ht_layers.push((wots_sig, auth_l));
+        cur_msg = root_l;
+        idx_leaf = (idx_tree & leaf_mask) as u32;
+        idx_tree >>= params.hp;
+    }
+
+    Ok(encode_slh_sig(
+        params,
+        &SlhParsedSignature {
+            r_rand,
+            fors_trees,
+            ht_layers,
+        },
+    ))
+}
+
+/// NIST FIPS 205 Algorithm 20 `slh_verify_internal(M', SIG, PK)`.
+pub fn slh_verify_internal(
+    params: &Fips205Params,
+    m_prime: &[u8],
+    sig_bytes: &[u8],
+    pk: &SlhPublicKey,
+) -> bool {
+    if pk.n != params.n {
+        return false;
+    }
+    let Ok(parsed) = decode_slh_sig(params, sig_bytes) else {
+        return false;
+    };
+    let digest = fips205_h_msg(
+        params.m,
+        parsed.r_rand.as_slice(),
+        pk.pk_seed_slice(),
+        pk.pk_root_slice(),
+        m_prime,
+    );
+    let (fors_indices, mut idx_tree, mut idx_leaf) = split_digest_indices(params, &digest);
+
+    let mut fors_adrs = Fips205Adrs::ZERO;
+    fors_adrs.set_tree_address(idx_tree);
+    fors_adrs.adrs_type = Fips205AdrsType::ForsTree;
+    fors_adrs.key_pair = idx_leaf;
+    let mut node = fors_pk_from_sig(
+        params,
+        &parsed.fors_trees,
+        &fors_indices,
+        pk.pk_seed_slice(),
+        fors_adrs,
+    );
+
+    let leaf_mask = (1u128 << params.hp) - 1;
+    for (layer, (wots_sig, auth_l)) in parsed.ht_layers.iter().enumerate() {
+        let mut layer_adrs = Fips205Adrs::ZERO;
+        layer_adrs.layer = layer as u32;
+        layer_adrs.set_tree_address(idx_tree);
+        layer_adrs.key_pair = idx_leaf;
+        let wots_pk = wots_pk_from_sig(params, wots_sig, &node, pk.pk_seed_slice(), layer_adrs);
+        node = walk_fips205_auth_path(
+            params.n,
+            pk.pk_seed_slice(),
+            layer_adrs,
+            Fips205AdrsType::Tree,
+            false,
+            wots_pk,
+            idx_leaf,
+            auth_l,
+        );
+        idx_leaf = (idx_tree & leaf_mask) as u32;
+        idx_tree >>= params.hp;
+    }
+
+    ct_eq_bytes(node.as_slice(), pk.pk_root_slice())
+}
+
+/// NIST FIPS 205 §9.2 / §10.2.1 Algorithm 22 `slh_sign(M, ctx, addrnd, SK)`
+/// (pure SLH-DSA with `M' = 0x00 || |ctx| || ctx || M`, rejecting `|ctx| > 255`).
+pub fn slh_sign(
+    params: &Fips205Params,
+    msg: &[u8],
+    ctx: &[u8],
+    sk: &SlhSecretKey,
+    addrnd: Option<&[u8]>,
+) -> Result<Vec<u8>, Fips205Error> {
+    let m_prime = format_pure_m_prime(msg, ctx)?;
+    slh_sign_internal(params, &m_prime, sk, addrnd)
+}
+
+/// NIST FIPS 205 §9.2 / §10.3 Algorithm 24 `slh_verify(M, SIG, ctx, PK)` (pure SLH-DSA).
+pub fn slh_verify(
+    params: &Fips205Params,
+    msg: &[u8],
+    sig_bytes: &[u8],
+    ctx: &[u8],
+    pk: &SlhPublicKey,
+) -> bool {
+    let Ok(m_prime) = format_pure_m_prime(msg, ctx) else {
+        return false;
+    };
+    slh_verify_internal(params, &m_prime, sig_bytes, pk)
+}
+
+/// NIST FIPS 205 §9.3 / §10.2.2 Algorithm 23 `hash_slh_sign(M, ctx, PH, addrnd, SK)`
+/// (Pre-Hash `HashSLH-DSA` with `M' = 0x01 || |ctx| || ctx || OID || PH(M)`, rejecting `|ctx| > 255`
+/// and enforcing security-category compatibility between `params.n` and `ph` `[P1-08]`).
+pub fn hash_slh_sign(
+    params: &Fips205Params,
+    ph: SlhPreHash,
+    msg: &[u8],
+    ctx: &[u8],
+    sk: &SlhSecretKey,
+    addrnd: Option<&[u8]>,
+) -> Result<Vec<u8>, Fips205Error> {
+    if !params.is_valid() {
+        return Err(Fips205Error::InvalidParameterSet);
+    }
+    if !ph.is_allowed_for_security_n(params.n) {
+        return Err(Fips205Error::PreHashCategoryMismatch {
+            n: params.n,
+            pre_hash: ph,
+        });
+    }
+    let m_prime = format_prehash_m_prime(ph, msg, ctx)?;
+    slh_sign_internal(params, &m_prime, sk, addrnd)
+}
+
+/// NIST FIPS 205 §9.3 / §10.3 Algorithm 25 `hash_slh_verify(M, SIG, ctx, PH, PK)` (`HashSLH-DSA`,
+/// rejecting pre-hashes weaker than `params.n` per §9.3 `[P1-08]`).
+pub fn hash_slh_verify(
+    params: &Fips205Params,
+    ph: SlhPreHash,
+    msg: &[u8],
+    sig_bytes: &[u8],
+    ctx: &[u8],
+    pk: &SlhPublicKey,
+) -> bool {
+    if !params.is_valid() || !ph.is_allowed_for_security_n(params.n) {
+        return false;
+    }
+    let Ok(m_prime) = format_prehash_m_prime(ph, msg, ctx) else {
+        return false;
+    };
+    slh_verify_internal(params, &m_prime, sig_bytes, pk)
+}
+
+// ============================================================================
+// Sealed Cut-Boundary Distributed MPC Oracles (`[P0-08]`)
+// ============================================================================
+
+/// Non-forgeable typestate proof token witnessing that a batch BDOZ / SPDZ / RSS active-security
+/// consistency check (`MacCheck` / commit-then-open share equality) succeeded **strictly before**
+/// declassifying cut-boundary digests (`R`, FORS revealed leaf + sibling hashes, or WOTS+ chain nodes).
+///
+/// External callers **cannot** construct [`CutBoundaryMacToken`]: its constructor is `pub(crate)`
+/// and invoked strictly inside `qsag-core`'s verified committed `MacCheck` / RSS share-equality gates.
+#[must_use = "cut-boundary MAC verification token must be bound before opening"]
+#[derive(Debug)]
+pub struct CutBoundaryMacToken {
+    _sealed: (),
+}
+
+impl CutBoundaryMacToken {
+    /// Crate-private minting witness: ONLY minted by verified `commit_and_open_spdz_*` /
+    /// RSS commit-before-open equality barriers inside `qsag-core` (`keccak_mpc.rs`, `poseidon2_mpc.rs`).
+    /// Accepts no caller-controlled `bool` parameter (`[P0-08]`).
+    #[inline]
+    pub(crate) fn mint_verified() -> Self {
+        Self { _sealed: () }
+    }
+}
+
+pub(crate) mod sealed_mpc_oracles {
+    pub trait Sealed {}
+}
+
+/// Authorization issued by the signature driver for the WOTS signing oracle.
+pub struct OracleCallToken {
+    _private: (),
+}
+
+/// FORS values, public tree leaves, and their verified cut-boundary witness.
+pub type ForsMpcOutput = (Vec<SlhBlock>, Vec<Vec<SlhBlock>>, CutBoundaryMacToken);
+
+/// Sealed distributed MPC cut-boundary oracle trait (`[P0-08]`):
+/// - Sealed via `sealed_mpc_oracles::Sealed` so external crates cannot forge unverified oracles;
+/// - `SK.seed` and `SK.prf` are **NEVER** exposed in cleartext;
+/// - Every oracle method MUST execute a committed active-security `MacCheck` barrier *before*
+///   opening cut-boundary outputs and return a [`CutBoundaryMacToken`] proof witness;
+/// - WOTS+ evaluation is split into [`Self::eval_wots_pkgen_subtree_mpc`] (hardcoded `15` steps for
+///   keygen) and [`Self::eval_wots_layer_sign_and_siblings_mpc`] (which computes base-16 + checksum
+///   digits **internally** from `msg_to_sign`, making raw `target_steps = 0` step-0 SK-dumping
+///   unrepresentable in the type system!).
+pub trait SlhMpcOracles: sealed_mpc_oracles::Sealed {
+    /// Bind the suite and public seed before the first secret-derived output.
+    fn bind_key_params(&mut self, params: &Fips205Params, pk_seed: &[u8]) -> Result<(), Fips205Error>;
+
+    /// Evaluate `R = PRF_msg([SK.prf], opt_rand, M')` in MPC, verify cut-boundary MACs BEFORE
+    /// opening `R`, and return `(R, mac_token)`.
+    fn eval_prf_msg_mpc(
+        &mut self,
+        n: usize,
+        opt_rand: &[u8],
+        m_prime: &[u8],
+    ) -> Result<(SlhBlock, CutBoundaryMacToken), Fips205Error>;
+
+    /// Evaluate FORS across `k` trees of height `a` (`k * 2^a` leaves total), verify cut-boundary
+    /// MACs BEFORE opening, and return `(revealed_sks, fors_all_leaves, mac_token)`.
+    fn eval_fors_trees_mpc(
+        &mut self,
+        params: &Fips205Params,
+        pk_seed: &[u8],
+        base_adrs: Fips205Adrs,
+        fors_indices: &[u32],
+    ) -> Result<ForsMpcOutput, Fips205Error>;
+
+    /// Evaluate ONLY full-length step-`15` public WOTS+ chain endpoints across an entire XMSS
+    /// subtree `(layer, tree)` (`(1 << hp) * ell` endpoints; zero intermediate steps `< 15` opened!).
+    fn eval_wots_pkgen_subtree_mpc(
+        &mut self,
+        params: &Fips205Params,
+        pk_seed: &[u8],
+        layer: u32,
+        tree: u128,
+    ) -> Result<(Vec<SlhBlock>, CutBoundaryMacToken), Fips205Error>;
+
+    /// Evaluate hypertree layer `(layer, tree)` for `active_kp` signing `msg_to_sign`:
+    /// computes `try_wots_base16_digits_and_csum(msg_to_sign)` **internally** (never accepting
+    /// caller-chosen step counts!), evaluates `active_kp` chains to `digits[ch]` and all sibling
+    /// leaves `kp != active_kp` to step `15`, verifies cut-boundary MACs BEFORE opening, and returns
+    /// `(opened_nodes_len_nleaves_times_ell, mac_token)`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Preserve the existing explicit protocol interface for callers"
+    )]
+    fn eval_wots_layer_sign_and_siblings_mpc(
+        &mut self,
+        _authorization: crate::fips205::OracleCallToken,
+        params: &Fips205Params,
+        pk_seed: &[u8],
+        layer: u32,
+        tree: u128,
+        active_kp: u32,
+        msg_to_sign: &SlhBlock,
+    ) -> Result<(Vec<SlhBlock>, CutBoundaryMacToken), Fips205Error>;
+}
+
+/// Distributed MPC `SLH-DSA` key generation (`slhKeygenMpc`): derives `PK = (PK.seed, PK.root)`
+/// solely via step-15 WOTS+ chain endpoint openings (`SK.seed` & `SK.prf` never reconstructed!).
+pub fn slh_keygen_mpc<O: SlhMpcOracles>(
+    params: &Fips205Params,
+    oracles: &mut O,
+    pk_seed: &[u8],
+) -> Result<SlhPublicKey, Fips205Error> {
+    if !params.is_valid() {
+        return Err(Fips205Error::InvalidParameterSet);
+    }
+    if pk_seed.len() != params.n {
+        return Err(Fips205Error::InvalidPublicKeyBytes(pk_seed.len()));
+    }
+    oracles.bind_key_params(params, pk_seed)?;
+    let top_layer = (params.d - 1) as u32;
+    let n_leaves = 1usize << params.hp;
+    let ell = params.ell();
+
+    let (endpoints, _mac_tok) =
+        oracles.eval_wots_pkgen_subtree_mpc(params, pk_seed, top_layer, 0)?;
+    if endpoints.len() != n_leaves * ell {
+        return Err(Fips205Error::MpcActiveTamperDetected);
+    }
+
+    let mut top_adrs = Fips205Adrs::ZERO;
+    top_adrs.layer = top_layer;
+    let mut leaves = Vec::with_capacity(n_leaves);
+    for kp in 0..n_leaves {
+        let mut wotspk_adrs = top_adrs.with_type_and_clear(Fips205AdrsType::WotsPk);
+        wotspk_adrs.key_pair = kp as u32;
+        let slice = &endpoints[kp * ell..(kp + 1) * ell];
+        leaves.push(fips205_th(params.n, pk_seed, &wotspk_adrs, slice));
+    }
+    let (pk_root, _) = build_fips205_merkle_from_leaves(
+        params.n,
+        pk_seed,
+        top_adrs,
+        Fips205AdrsType::Tree,
+        false,
+        &leaves,
+        params.hp,
+        0,
+        0,
+    );
+    SlhPublicKey::new(pk_seed, pk_root.as_slice())
+}
+
+/// Distributed MPC `SLH-DSA` internal signing (`slhSignMpc`):
+/// - Takes ONLY sealed `oracles: &mut O` and public `pk: &SlhPublicKey` (`0` `SlhSecretKey`!);
+/// - Requires `CutBoundaryMacToken` barriers strictly before every cut opening;
+/// - Cross-checks `F(PK.seed, leaf_adrs_i, revealed_sks[i]) == fors_all_leaves[i][idx_i]` (`[P0-08]`);
+/// - Runs `slh_verify_internal(params, m_prime, &sig, pk)` before returning `Ok(sig)` (`[P0-08]`)!
+pub fn slh_sign_internal_mpc<O: SlhMpcOracles>(
+    params: &Fips205Params,
+    oracles: &mut O,
+    m_prime: &[u8],
+    pk: &SlhPublicKey,
+    addrnd: Option<&[u8]>,
+) -> Result<Vec<u8>, Fips205Error> {
+    if !params.is_valid() || pk.n != params.n {
+        return Err(Fips205Error::InvalidParameterSet);
+    }
+    oracles.bind_key_params(params, pk.pk_seed_slice())?;
+    let n = params.n;
+    let ell = params.ell();
+    let opt_rand = match addrnd {
+        Some(r) => {
+            if r.len() != n {
+                return Err(Fips205Error::InvalidNodeBytes {
+                    expected: n,
+                    actual: r.len(),
+                });
+            }
+            r
+        }
+        None => pk.pk_seed_slice(),
+    };
+
+    // 1. Evaluate R = PRF_msg([SK.prf], opt_rand, M') in MPC with mandatory MAC check before opening.
+    let (r_rand, _prf_mac_tok) = oracles.eval_prf_msg_mpc(n, opt_rand, m_prime)?;
+    if r_rand.len() != n {
+        return Err(Fips205Error::MpcActiveTamperDetected);
+    }
+    let digest = fips205_h_msg(
+        params.m,
+        r_rand.as_slice(),
+        pk.pk_seed_slice(),
+        pk.pk_root_slice(),
+        m_prime,
+    );
+    let (fors_indices, mut idx_tree, mut idx_leaf) = split_digest_indices(params, &digest);
+
+    // 2. Evaluate FORS trees in batched 64-way MPC with mandatory MAC check before opening.
+    let mut fors_adrs = Fips205Adrs::ZERO;
+    fors_adrs.set_tree_address(idx_tree);
+    fors_adrs.adrs_type = Fips205AdrsType::ForsTree;
+    fors_adrs.key_pair = idx_leaf;
+    let (revealed_sks, fors_all_leaves, _fors_mac_tok) =
+        oracles.eval_fors_trees_mpc(params, pk.pk_seed_slice(), fors_adrs, &fors_indices)?;
+
+    let t_leaves = 1usize << params.a;
+    if revealed_sks.len() != params.k || fors_all_leaves.len() != params.k {
+        return Err(Fips205Error::MpcActiveTamperDetected);
+    }
+    let mut fors_trees = Vec::with_capacity(params.k);
+    let mut fors_roots = Vec::with_capacity(params.k);
+    for i in 0..params.k {
+        let idx_i = fors_indices[i] as usize;
+        if fors_all_leaves[i].len() != t_leaves || idx_i >= t_leaves {
+            return Err(Fips205Error::MpcActiveTamperDetected);
+        }
+        let tree_off = (i * t_leaves) as u32;
+        // Cross-check revealed FORS secret value against its public leaf hash ([P0-08]):
+        let mut check_leaf_adrs = fors_adrs;
+        check_leaf_adrs.f5 = 0;
+        check_leaf_adrs.f6 = tree_off + (idx_i as u32);
+        let expected_leaf = fips205_f(n, pk.pk_seed_slice(), &check_leaf_adrs, &revealed_sks[i]);
+        if !ct_eq_bytes(
+            expected_leaf.as_slice(),
+            fors_all_leaves[i][idx_i].as_slice(),
+        ) {
+            return Err(Fips205Error::MpcActiveTamperDetected);
+        }
+
+        let (root_i, auth_i) = build_fips205_merkle_from_leaves(
+            n,
+            pk.pk_seed_slice(),
+            fors_adrs,
+            Fips205AdrsType::ForsTree,
+            true,
+            &fors_all_leaves[i],
+            params.a,
+            tree_off,
+            idx_i,
+        );
+        fors_roots.push(root_i);
+        fors_trees.push((revealed_sks[i], auth_i));
+    }
+    let mut pk_adrs = fors_adrs.with_type_and_clear(Fips205AdrsType::ForsRoots);
+    pk_adrs.key_pair = idx_leaf;
+    let mut cur_msg = fips205_th(n, pk.pk_seed_slice(), &pk_adrs, &fors_roots);
+
+    // 3. Evaluate hypertree layers 0..d via sealed `eval_wots_layer_sign_and_siblings_mpc`!
+    let n_leaves = 1usize << params.hp;
+    let leaf_mask = (n_leaves as u128) - 1;
+    let mut ht_layers = Vec::with_capacity(params.d);
+
+    for layer in 0..params.d {
+        let mut layer_adrs = Fips205Adrs::ZERO;
+        layer_adrs.layer = layer as u32;
+        layer_adrs.set_tree_address(idx_tree);
+        layer_adrs.key_pair = idx_leaf;
+
+        let (opened_nodes, _wots_mac_tok) = oracles.eval_wots_layer_sign_and_siblings_mpc(
+            OracleCallToken { _private: () },
+            params,
+            pk.pk_seed_slice(),
+            layer as u32,
+            idx_tree,
+            idx_leaf,
+            &cur_msg,
+        )?;
+        if opened_nodes.len() != n_leaves * ell || (idx_leaf as usize) >= n_leaves {
+            return Err(Fips205Error::MpcActiveTamperDetected);
+        }
+
+        let active_start = (idx_leaf as usize) * ell;
+        let wots_sig = opened_nodes[active_start..active_start + ell].to_vec();
+
+        let mut leaves = Vec::with_capacity(n_leaves);
+        for kp in 0..n_leaves {
+            let mut leaf_adrs = layer_adrs;
+            leaf_adrs.key_pair = kp as u32;
+            if kp as u32 == idx_leaf {
+                leaves.push(wots_pk_from_sig(
+                    params,
+                    &wots_sig,
+                    &cur_msg,
+                    pk.pk_seed_slice(),
+                    leaf_adrs,
+                ));
+            } else {
+                let mut wotspk_adrs = leaf_adrs.with_type_and_clear(Fips205AdrsType::WotsPk);
+                wotspk_adrs.key_pair = kp as u32;
+                let ep_slice = &opened_nodes[kp * ell..(kp + 1) * ell];
+                leaves.push(fips205_th(n, pk.pk_seed_slice(), &wotspk_adrs, ep_slice));
+            }
+        }
+        let (root_l, auth_l) = build_fips205_merkle_from_leaves(
+            n,
+            pk.pk_seed_slice(),
+            layer_adrs,
+            Fips205AdrsType::Tree,
+            false,
+            &leaves,
+            params.hp,
+            0,
+            idx_leaf as usize,
+        );
+        ht_layers.push((wots_sig, auth_l));
+        cur_msg = root_l;
+        idx_leaf = (idx_tree & leaf_mask) as u32;
+        idx_tree >>= params.hp;
+    }
+
+    let sig_bytes = encode_slh_sig(
+        params,
+        &SlhParsedSignature {
+            r_rand,
+            fors_trees,
+            ht_layers,
+        },
+    );
+    // Mandatory post-MPC signature verification against `pk` BEFORE releasing to caller ([P0-08]):
+    if !slh_verify_internal(params, m_prime, &sig_bytes, pk) {
+        return Err(Fips205Error::MpcActiveTamperDetected);
+    }
+    Ok(sig_bytes)
+}
+
+/// Pure NIST FIPS 205 §9.2 distributed MPC `SLH-DSA` signing (`ctx` <= 255 bytes).
+pub fn slh_sign_mpc<O: SlhMpcOracles>(
+    params: &Fips205Params,
+    oracles: &mut O,
+    msg: &[u8],
+    ctx: &[u8],
+    pk: &SlhPublicKey,
+    addrnd: Option<&[u8]>,
+) -> Result<Vec<u8>, Fips205Error> {
+    let m_prime = format_pure_m_prime(msg, ctx)?;
+    slh_sign_internal_mpc(params, oracles, &m_prime, pk, addrnd)
+}
+
+/// Pre-Hash NIST FIPS 205 §9.3 distributed MPC `HashSLH-DSA` signing (enforcing category strength).
+pub fn hash_slh_sign_mpc<O: SlhMpcOracles>(
+    params: &Fips205Params,
+    ph: SlhPreHash,
+    oracles: &mut O,
+    msg: &[u8],
+    ctx: &[u8],
+    pk: &SlhPublicKey,
+    addrnd: Option<&[u8]>,
+) -> Result<Vec<u8>, Fips205Error> {
+    if !params.is_valid() {
+        return Err(Fips205Error::InvalidParameterSet);
+    }
+    if !ph.is_allowed_for_security_n(params.n) {
+        return Err(Fips205Error::PreHashCategoryMismatch {
+            n: params.n,
+            pre_hash: ph,
+        });
+    }
+    let m_prime = format_prehash_m_prime(ph, msg, ctx)?;
+    slh_sign_internal_mpc(params, oracles, &m_prime, pk, addrnd)
+}
+
+impl core::error::Error for Fips205Error {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_all_six_fips205_shake_param_sizes_and_spki() {
+        let expected = [
+            (Fips205Params::SLH_DSA_SHAKE_128S, 16, 32, 64, 50, 7_856),
+            (Fips205Params::SLH_DSA_SHAKE_128F, 16, 32, 64, 50, 17_088),
+            (Fips205Params::SLH_DSA_SHAKE_192S, 24, 48, 96, 66, 16_224),
+            (Fips205Params::SLH_DSA_SHAKE_192F, 24, 48, 96, 66, 35_664),
+            (Fips205Params::SLH_DSA_SHAKE_256S, 32, 64, 128, 82, 29_792),
+            (Fips205Params::SLH_DSA_SHAKE_256F, 32, 64, 128, 82, 49_856),
+        ];
+        for (p, n, pk_len, sk_len, der_len, sig_len) in expected {
+            assert!(p.is_valid(), "{} must be valid", p.name);
+            assert_eq!(p.n, n);
+            assert_eq!(p.pk_bytes(), pk_len);
+            assert_eq!(p.sk_bytes(), sk_len);
+            assert_eq!(p.sig_bytes(), sig_len);
+            assert_eq!(Fips205Params::by_name(p.name), Some(p));
+
+            let seed = [0x5Au8; 32];
+            // Test SPKI DER roundtrip using synthetic n-byte root (instantaneous)
+            let pk = SlhPublicKey::new(&seed[..n], &[0xA5u8; 32][..n]).unwrap();
+            let der = pk.to_spki_der(&p).unwrap();
+            assert_eq!(der.len(), der_len);
+            let (dec_p, dec_pk) = SlhPublicKey::from_spki_der(&der).unwrap();
+            assert_eq!(dec_p, p);
+            assert_eq!(dec_pk, pk);
+        }
+        assert!(Fips205Params::SLH_DSA_SHAKE_COMPACT_TEST.is_valid());
+        assert_eq!(Fips205Params::SLH_DSA_SHAKE_COMPACT_TEST.sig_bytes(), 1_392);
+    }
+
+    #[test]
+    fn test_prehash_nist_vectors_and_hash_slh_dsa_domain_separation() {
+        // FIPS 180-4 SHA-256("abc")
+        assert_eq!(
+            sha256_digest(b"abc"),
+            [
+                0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae,
+                0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61,
+                0xf2, 0x00, 0x15, 0xad
+            ]
+        );
+        // FIPS 180-4 SHA-512("abc") first 8 bytes = ddaf35a193617aba
+        let s512 = sha512_digest(b"abc");
+        assert_eq!(
+            &s512[..8],
+            &[0xdd, 0xaf, 0x35, 0xa1, 0x93, 0x61, 0x7a, 0xba]
+        );
+        // FIPS 202 SHA3-256("abc") first 8 bytes = 3a985da74fe225b2
+        let s3_256 = SlhPreHash::Sha3_256.hash_message(b"abc");
+        assert_eq!(
+            &s3_256[..8],
+            &[0x3a, 0x98, 0x5d, 0xa7, 0x4f, 0xe2, 0x25, 0xb2]
+        );
+
+        let params = Fips205Params::SLH_DSA_SHAKE_COMPACT_TEST;
+        let (sk, pk) = slh_keygen_from_seed(&params, b"hash-slh-seed").unwrap();
+        let msg = b"domain-separated-message";
+        let ctx = b"qsag-v1-ctx";
+
+        for ph in [
+            SlhPreHash::Sha256,
+            SlhPreHash::Sha512,
+            SlhPreHash::Sha3_256,
+            SlhPreHash::Sha3_384,
+            SlhPreHash::Sha3_512,
+            SlhPreHash::Shake128,
+            SlhPreHash::Shake256,
+        ] {
+            let sig_ph = hash_slh_sign(&params, ph, msg, ctx, &sk, None).unwrap();
+            assert!(hash_slh_verify(&params, ph, msg, &sig_ph, ctx, &pk));
+            // Pure verify MUST reject Pre-Hash signature (`0x00` vs `0x01` domain byte)
+            assert!(!slh_verify(&params, msg, &sig_ph, ctx, &pk));
+            // Wrong context MUST reject
+            assert!(!hash_slh_verify(
+                &params,
+                ph,
+                msg,
+                &sig_ph,
+                b"other-ctx",
+                &pk
+            ));
+        }
+
+        let overlong_ctx = [0x42u8; 256];
+        assert_eq!(
+            hash_slh_sign(&params, SlhPreHash::Sha256, msg, &overlong_ctx, &sk, None),
+            Err(Fips205Error::ContextTooLong(256))
+        );
+
+        // FIPS 205 §9.3 pre-hash category downgrade refusal ([P1-08]):
+        assert!(!SlhPreHash::Sha256.is_allowed_for_security_n(24));
+        assert!(!SlhPreHash::Shake128.is_allowed_for_security_n(24));
+        assert!(SlhPreHash::Sha3_384.is_allowed_for_security_n(24));
+        assert!(!SlhPreHash::Sha3_384.is_allowed_for_security_n(32));
+        assert!(SlhPreHash::Sha512.is_allowed_for_security_n(32));
+        assert!(SlhPreHash::Shake256.is_allowed_for_security_n(32));
+    }
+
+    #[test]
+    fn test_fips205_128f_192f_256f_roundtrip_and_exact_128f_kat() {
+        let mut sk_seed = [0u8; 16];
+        let mut sk_prf = [0u8; 16];
+        let mut pk_seed = [0u8; 16];
+        for i in 0..16 {
+            sk_seed[i] = (i + 1) as u8;
+            sk_prf[i] = (i + 0x21) as u8;
+            pk_seed[i] = (i + 0x41) as u8;
+        }
+        let p128f = Fips205Params::SLH_DSA_SHAKE_128F;
+        let (sk, pk) = slh_keygen_internal(&p128f, &sk_seed, &sk_prf, &pk_seed).unwrap();
+        // Cross-verified bit-for-bit against OpenSSL 3.5.7 `SLH-DSA-SHAKE-128f` (`hexseed`):
+        assert_eq!(
+            pk.pk_root_slice(),
+            &[
+                0xbe, 0xa2, 0x2e, 0x4c, 0x51, 0xb2, 0xb7, 0xc6, 0x7d, 0xe2, 0x32, 0x12, 0x41, 0x09,
+                0x27, 0xbd
+            ]
+        );
+        let msg = b"qsag-openssl-test";
+        let sig = slh_sign(&p128f, msg, &[], &sk, None).unwrap();
+        assert_eq!(sig.len(), 17_088);
+        assert!(slh_verify(&p128f, msg, &sig, &[], &pk));
+
+        // Verify 192f (n=24, 35,664 B) and 256f (n=32, 49,856 B) sign/verify roundtrip + tamper refusal
+        for params in [
+            Fips205Params::SLH_DSA_SHAKE_192F,
+            Fips205Params::SLH_DSA_SHAKE_256F,
+        ] {
+            let (sk_hi, pk_hi) = slh_keygen_from_seed(&params, b"qsag-high-sec-seed").unwrap();
+            let sig_hi = slh_sign(&params, msg, b"ctx-192-256", &sk_hi, None).unwrap();
+            assert_eq!(sig_hi.len(), params.sig_bytes());
+            assert!(slh_verify(&params, msg, &sig_hi, b"ctx-192-256", &pk_hi));
+            assert!(!slh_verify(&params, msg, &sig_hi, b"wrong-ctx", &pk_hi));
+            let mut bad = sig_hi.clone();
+            bad[params.sig_bytes() / 2] ^= 0x80;
+            assert!(!slh_verify(&params, msg, &bad, b"ctx-192-256", &pk_hi));
+        }
+    }
+}
