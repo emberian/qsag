@@ -1,0 +1,549 @@
+//! `FrontierSumFts` — Clean-room Few-Time Signature over root-to-leaf binary-tree
+//! antichain frontiers + constant-sum Winternitz chains.
+//!
+//! Security & Constant-Time Guarantees:
+//! 1. Finite audited `FrontierFtsProfile` whitelist prevents unbounded DP allocation DoS.
+//! 2. Exact `U384` (and `u128` fast-view) factorized DP tables `M(h, w, L, S) = N(h, L) * D(L, S)`;
+//!    `unrank` / `rank` operate exclusively on **public** randomized message digests
+//!    `H_msg(R, pk, M, ctr)` (never secret ranks), while secret `SK.seed`/`SK.prf` expansion and
+//!    `U384` primitives exefrontiere in straight-line constant time.
+//! 3. Mandatory `SK.prf`-derived per-signature randomizer `R` + monotonic `UseBudgetLatch`
+//!    preventing deterministic 2-message reuse or unbounded `q >= 3` over-signing.
+//! 4. Full 256-bit message digest pre-binding across all profiles, with exact `514 B`, `770 B`,
+//!    `1,314 B`, and `Full256Bit` (`2,338 B`) wire profiles.
+
+use alloc::vec;
+use alloc::vec::Vec;
+use core::fmt;
+
+use qsag_accel::AcceleratorBackend;
+use qsag_accel::ct::{
+    RedactedSecret, ct_conditional_assign_bytes, ct_eq_bytes, ct_eq_u64, ct_lt_u64, ct_select_u64,
+    ct_zeroize_bytes,
+};
+use qsag_accel::keccak::cshake256_framed_xof;
+
+use crate::u384::U384;
+
+const TAG_LEAF: &[u8] = b"QSAG.FTS.LEAF.V1";
+const TAG_MERGE: &[u8] = b"QSAG.FTS.MERGE.V1";
+const TAG_CHAIN: &[u8] = b"QSAG.FTS.CHAIN.V1";
+const TAG_RAND: &[u8] = b"QSAG.FTS.RAND.V1";
+const TAG_MSG_PRE: &[u8] = b"QSAG.FTS.MSG256.V1";
+const TAG_HMSG: &[u8] = b"QSAG.FTS.HMSG.V1";
+
+/// Parameter profiles for `FrontierSumFts`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FrontierFtsProfile {
+    /// 16-byte nodes cap generic preimage strength at 128 classical / 64 Grover bits.
+    /// Ultra-compact `514 B` 1-use signature (`h=14, w=5, L=31, S=62, n=16, r=128, s=16`, `M` fits in `u128`!).
+    Compact514,
+    /// 16-byte nodes: 64-bit generic Grover preimage ceiling (not 128-bit PQ).
+    /// Compact `770 B` signature (`h=15, w=5, L=47, S=118, n=16, r=190, s=16`, >80-bit 2-use security).
+    Compact770,
+    /// 16-byte nodes: 64-bit generic Grover preimage ceiling (not 128-bit PQ).
+    /// High-resilience `1,314 B` signature (`h=15, w=5, L=81, S=162, n=16, r=335, s=16`, 128-bit 2-use).
+    Compact1314,
+    /// 32-byte nodes cap generic preimage strength at 256 classical / 128 Grover bits.
+    /// The constant-sum frontier domain contains every 256-bit message rank.
+    /// Full 256-bit chain-width `2,338 B` 1-use custody profile (`h=8, w=5, L=72, S=144, n=32, r=256, s=16`).
+    Full256Bit,
+    /// Fast small-tree 1-use profile (`h=5, w=4, L=8, S=12, n=32, r=24, s=16`, `290 B`) for rapid KATs & MPC bridges.
+    #[cfg(any(test, feature = "test-params"))]
+    Fast256Test,
+}
+
+/// Concrete validated parameters for `FrontierSumFts`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FrontierFtsParams {
+    pub node_bytes: usize,
+    pub tree_height: usize,
+    pub winternitz_w: usize,
+    pub frontier_len: usize,
+    pub target_sum: usize,
+    pub index_bits: usize,
+    pub counter_bits: usize,
+    pub max_safe_uses: u8,
+}
+
+impl FrontierFtsProfile {
+    pub const fn params(self) -> FrontierFtsParams {
+        match self {
+            Self::Compact514 => FrontierFtsParams {
+                node_bytes: 16,
+                tree_height: 14,
+                winternitz_w: 5,
+                frontier_len: 31,
+                target_sum: 62,
+                index_bits: 128,
+                counter_bits: 16,
+                max_safe_uses: 1,
+            },
+            Self::Compact770 => FrontierFtsParams {
+                node_bytes: 16,
+                tree_height: 15,
+                winternitz_w: 5,
+                frontier_len: 47,
+                target_sum: 118,
+                index_bits: 190,
+                counter_bits: 16,
+                max_safe_uses: 2,
+            },
+            Self::Compact1314 => FrontierFtsParams {
+                node_bytes: 16,
+                tree_height: 15,
+                winternitz_w: 5,
+                frontier_len: 81,
+                target_sum: 162,
+                index_bits: 335,
+                counter_bits: 16,
+                max_safe_uses: 2,
+            },
+            Self::Full256Bit => FrontierFtsParams {
+                node_bytes: 32,
+                tree_height: 8,
+                winternitz_w: 5,
+                frontier_len: 72,
+                target_sum: 144,
+                index_bits: 256,
+                counter_bits: 16,
+                max_safe_uses: 1,
+            },
+            #[cfg(any(test, feature = "test-params"))]
+            Self::Fast256Test => FrontierFtsParams {
+                node_bytes: 32,
+                tree_height: 5,
+                winternitz_w: 4,
+                frontier_len: 8,
+                target_sum: 12,
+                index_bits: 24,
+                counter_bits: 16,
+                max_safe_uses: 1,
+            },
+        }
+    }
+
+    /// Exact serialized byte length of a `FrontierSumFtsSignature`.
+    pub const fn signature_bytes(self) -> usize {
+        let p = self.params();
+        (p.frontier_len + 1) * p.node_bytes + p.counter_bits.div_ceil(8)
+    }
+
+    /// Canonical 56-byte big-endian parameter identifier (`PID`).
+    pub fn pid_bytes(self) -> [u8; 56] {
+        let p = self.params();
+        let mut pid = [0u8; 56];
+        pid[0..8].copy_from_slice(&(p.node_bytes as u64).to_be_bytes());
+        pid[8..16].copy_from_slice(&(p.tree_height as u64).to_be_bytes());
+        pid[16..24].copy_from_slice(&(p.winternitz_w as u64).to_be_bytes());
+        pid[24..32].copy_from_slice(&(p.frontier_len as u64).to_be_bytes());
+        pid[32..40].copy_from_slice(&(p.target_sum as u64).to_be_bytes());
+        pid[40..48].copy_from_slice(&(p.index_bits as u64).to_be_bytes());
+        pid[48..56].copy_from_slice(&(p.counter_bits as u64).to_be_bytes());
+        pid
+    }
+}
+
+/// Errors produced during `FrontierSumFts` ranking, signing, or verification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrontierFtsError {
+    ProfileMismatch,
+    PersistenceFailed,
+    RankOutOfRange,
+    InvalidAntichainFrontier,
+    InvalidDecorationSum,
+    UseBudgetExhausted,
+    GrindingExhausted,
+    MalformedSignatureLength,
+    SignatureVerificationFailed,
+}
+
+/// Deterministic combinatorics table `M(h, w, L, S) = N(h, L) * D(L, S)` computed purely from
+/// `(h, w, L, S)` over fixed-width `U384` (with lossless `u128` view whenever `M < 2^128`).
+#[derive(Clone, Debug)]
+pub struct FrontierDpTable {
+    pub params: FrontierFtsParams,
+    l_stride: usize,
+    s_stride: usize,
+    /// `sub_counts[t * l_stride + ell]` = number of antichain frontiers of size `ell` in a non-root
+    /// subtree of height `t` (`0 <= t < h`), and at `t = h` (`ell >= 2`) for the root split.
+    sub_counts: Vec<U384>,
+    /// `dec_counts[k * s_stride + u]` = `[x^u] (1 + x + ... + x^{w-1})^k`.
+    dec_counts: Vec<U384>,
+    pub frontier_cardinality: U384,
+    pub decoration_cardinality: U384,
+    pub total_cardinality: U384,
+}
+
+impl FrontierDpTable {
+    /// Build one of the fixed supported profiles. Cardinality overflow indicates
+    /// an invalid built-in profile and is a programming error.
+    pub fn build(profile: FrontierFtsProfile) -> Self {
+        let params = profile.params();
+        let h = params.tree_height;
+        let w = params.winternitz_w;
+        let l = params.frontier_len;
+        let s = params.target_sum;
+        assert!((1..=20).contains(&h));
+        assert!(l >= 2 && l <= (1usize << h));
+        assert!(w >= 1 && s <= l * (w - 1));
+
+        let l_stride = l + 1;
+        let mut sub_counts = vec![U384::ZERO; (h + 1) * l_stride];
+        // Base height t = 0 (leaf): only size 1 frontier (the leaf itself) exists.
+        sub_counts[1] = U384::ONE;
+
+        for t in 1..=h {
+            // For non-root subtrees (`t < h`), `ell = 1` frontiers directly at the subtree root node.
+            if t < h {
+                sub_counts[t * l_stride + 1] = U384::ONE;
+            }
+            let half_leaves = 1usize << (t - 1);
+            let max_ell = l.min(1usize << t);
+            for ell in 2..=max_ell {
+                let i_min = 1usize.max(ell.saturating_sub(half_leaves));
+                let i_max = half_leaves.min(ell - 1);
+                let mut acc = U384::ZERO;
+                for i in i_min..=i_max {
+                    let left = sub_counts[(t - 1) * l_stride + i];
+                    let right = sub_counts[(t - 1) * l_stride + (ell - i)];
+                    let prod = match left.checked_mul(right) { Some(value) => value, None => panic!("FrontierDpTable subtree product fits in U384") };
+                    acc = match acc.checked_add(prod) { Some(value) => value, None => panic!("FrontierDpTable subtree sum fits in U384") };
+                }
+                sub_counts[t * l_stride + ell] = acc;
+            }
+        }
+
+        let s_stride = s + 1;
+        let mut dec_counts = vec![U384::ZERO; (l + 1) * s_stride];
+        dec_counts[0] = U384::ONE;
+        for k in 1..=l {
+            for u in 0..=s {
+                let a_max = (w - 1).min(u);
+                let mut acc = U384::ZERO;
+                for a in 0..=a_max {
+                    acc = match acc.checked_add(dec_counts[(k - 1) * s_stride + (u - a)]) {
+                        Some(value) => value,
+                        None => panic!("FrontierDpTable decoration sum fits in U384"),
+                    };
+                }
+                dec_counts[k * s_stride + u] = acc;
+            }
+        }
+
+        let frontier_cardinality = sub_counts[h * l_stride + l];
+        let decoration_cardinality = dec_counts[l * s_stride + s];
+        let total_cardinality = match frontier_cardinality.checked_mul(decoration_cardinality) { Some(value) => value, None => panic!("FrontierDpTable total cardinality fits in U384") };
+
+        Self {
+            params,
+            l_stride,
+            s_stride,
+            sub_counts,
+            dec_counts,
+            frontier_cardinality,
+            decoration_cardinality,
+            total_cardinality,
+        }
+    }
+
+    /// Return `Some(total_cardinality as u128)` when `M < 2^128` (e.g. `Compact514`, `Fast256Test`).
+    pub fn total_cardinality_u128(&self) -> Option<u128> {
+        if self.total_cardinality.0[2] == 0
+            && self.total_cardinality.0[3] == 0
+            && self.total_cardinality.0[4] == 0
+            && self.total_cardinality.0[5] == 0
+        {
+            Some(self.total_cardinality.low_u128())
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn n_at(&self, t: usize, ell: usize) -> U384 {
+        if ell >= self.l_stride {
+            U384::ZERO
+        } else {
+            self.sub_counts[t * self.l_stride + ell]
+        }
+    }
+
+    #[inline]
+    fn d_at(&self, k: usize, u: usize) -> U384 {
+        if u >= self.s_stride {
+            U384::ZERO
+        } else {
+            self.dec_counts[k * self.s_stride + u]
+        }
+    }
+
+    /// Unrank a **public** message-digest decoration index `r_dec < D(L, S)` into `L` chain
+    /// offsets in `0..w` summing to `S` (fixed `0..w` inner loop without early break; caller passes
+    /// public `H_msg(R, pk, M, ctr)` digest ranks, never secret key material).
+    pub fn unrank_decorations(&self, mut r_dec: U384) -> Result<Vec<u8>, FrontierFtsError> {
+        if !r_dec.ct_lt(self.decoration_cardinality) {
+            return Err(FrontierFtsError::RankOutOfRange);
+        }
+        let l = self.params.frontier_len;
+        let w = self.params.winternitz_w;
+        let mut rem_sum = self.params.target_sum as u64;
+        let mut out = vec![0u8; l];
+
+        for (pos, slot) in out.iter_mut().enumerate() {
+            let rem_k = l - 1 - pos;
+            let mut chosen_a = 0u64;
+            let mut chosen_r = r_dec;
+            let mut found = false;
+
+            for a in 0..w {
+                let a_u64 = a as u64;
+                let fits_sum = !ct_lt_u64(rem_sum, a_u64);
+                let sub_u = ct_select_u64(fits_sum, rem_sum.wrapping_sub(a_u64), 0) as usize;
+                let bucket = U384::ct_select(fits_sum, self.d_at(rem_k, sub_u), U384::ZERO);
+                let in_bucket = r_dec.ct_lt(bucket);
+                let take = (!found) & fits_sum & in_bucket;
+
+                chosen_a = ct_select_u64(take, a_u64, chosen_a);
+                chosen_r = U384::ct_select(take, r_dec, chosen_r);
+
+                let (reduced, _) = r_dec.overflowing_sub(bucket);
+                r_dec = U384::ct_select(!found && !in_bucket, reduced, r_dec);
+                found |= take;
+            }
+            *slot = chosen_a as u8;
+            rem_sum -= chosen_a;
+            r_dec = chosen_r;
+        }
+        Ok(out)
+    }
+
+    /// Rank `L` public signature chain offsets in `0..w` summing to `S` back into `[0, D(L, S))`.
+    pub fn rank_decorations(&self, offsets: &[u8]) -> Result<U384, FrontierFtsError> {
+        let l = self.params.frontier_len;
+        let w = self.params.winternitz_w;
+        if offsets.len() != l {
+            return Err(FrontierFtsError::InvalidDecorationSum);
+        }
+        let mut sum = 0usize;
+        for &a in offsets {
+            if (a as usize) >= w {
+                return Err(FrontierFtsError::InvalidDecorationSum);
+            }
+            sum += a as usize;
+        }
+        if sum != self.params.target_sum {
+            return Err(FrontierFtsError::InvalidDecorationSum);
+        }
+
+        let mut rem_sum = self.params.target_sum as u64;
+        let mut rank = U384::ZERO;
+        for (pos, &cur_b) in offsets.iter().enumerate() {
+            let rem_k = l - 1 - pos;
+            let cur_a = cur_b as u64;
+            for a in 0..w {
+                let a_u64 = a as u64;
+                let lt_cur = ct_lt_u64(a_u64, cur_a);
+                let fits = !ct_lt_u64(rem_sum, a_u64);
+                let sub_u = ct_select_u64(fits, rem_sum.wrapping_sub(a_u64), 0) as usize;
+                let term = U384::ct_select(lt_cur & fits, self.d_at(rem_k, sub_u), U384::ZERO);
+                rank = rank.overflowing_add(term).0;
+            }
+            rem_sum -= cur_a;
+        }
+        Ok(rank)
+    }
+
+    fn unrank_subtree_frontier(
+        &self,
+        node: u32,
+        t: usize,
+        ell: usize,
+        r_f: U384,
+        out: &mut Vec<u32>,
+    ) {
+        if ell == 1 {
+            out.push(node);
+            return;
+        }
+        let half_leaves = 1usize << (t - 1);
+        let i_min = 1usize.max(ell.saturating_sub(half_leaves));
+        let i_max = half_leaves.min(ell - 1);
+
+        let mut cur_r = r_f;
+        let mut chosen_i = i_min as u64;
+        let mut chosen_r = U384::ZERO;
+        let mut chosen_right_cnt = U384::ONE;
+        let mut found = false;
+
+        // Fixed-iteration scan over all feasible left-subtree split cardinalities `i_min..=i_max`.
+        for i in i_min..=i_max {
+            let left_cnt = self.n_at(t - 1, i);
+            let right_cnt = self.n_at(t - 1, ell - i);
+            let bucket = left_cnt.wrapping_mul(right_cnt);
+            let in_bucket = cur_r.ct_lt(bucket);
+            let take = (!found) & in_bucket;
+
+            chosen_i = ct_select_u64(take, i as u64, chosen_i);
+            chosen_r = U384::ct_select(take, cur_r, chosen_r);
+            chosen_right_cnt = U384::ct_select(take, right_cnt, chosen_right_cnt);
+
+            let (reduced, _) = cur_r.overflowing_sub(bucket);
+            cur_r = U384::ct_select(!found && !in_bucket, reduced, cur_r);
+            found |= take;
+        }
+
+        let (r_left, r_right) = chosen_r.ct_divmod(chosen_right_cnt);
+        let left_sz = chosen_i as usize;
+        self.unrank_subtree_frontier(2 * node, t - 1, left_sz, r_left, out);
+        self.unrank_subtree_frontier(2 * node + 1, t - 1, ell - left_sz, r_right, out);
+    }
+
+    /// Unrank a **public** message-digest frontier index `r_front < N(h, L)` into a sorted
+    /// left-to-right binary-tree antichain frontier of `L` 1-indexed heap node indices (`v > 1`).
+    pub fn unrank_frontier(&self, r_front: U384) -> Result<Vec<u32>, FrontierFtsError> {
+        if !r_front.ct_lt(self.frontier_cardinality) {
+            return Err(FrontierFtsError::RankOutOfRange);
+        }
+        let mut out = Vec::with_capacity(self.params.frontier_len);
+        self.unrank_subtree_frontier(
+            1,
+            self.params.tree_height,
+            self.params.frontier_len,
+            r_front,
+            &mut out,
+        );
+        Ok(out)
+    }
+
+    /// Validate that `frontier` is a canonical left-to-right root-to-leaf antichain partition of
+    /// `[2^h, 2^{h+1})` of length `L`, and compute its exact rank `< N(h, L)`.
+    pub fn rank_frontier(&self, frontier: &[u32]) -> Result<U384, FrontierFtsError> {
+        if frontier.len() != self.params.frontier_len {
+            return Err(FrontierFtsError::InvalidAntichainFrontier);
+        }
+        self.rank_subtree_slice(1, self.params.tree_height, frontier)
+    }
+
+    fn node_leaf_interval(node: u32, h: usize) -> Result<(u32, u32), FrontierFtsError> {
+        if node <= 1 {
+            return Err(FrontierFtsError::InvalidAntichainFrontier);
+        }
+        let depth = 31usize.saturating_sub(node.leading_zeros() as usize);
+        if depth > h {
+            return Err(FrontierFtsError::InvalidAntichainFrontier);
+        }
+        let shift = h - depth;
+        let lo = node << shift;
+        let hi = (node + 1) << shift;
+        Ok((lo, hi))
+    }
+
+    fn rank_subtree_slice(
+        &self,
+        node: u32,
+        t: usize,
+        slice: &[u32],
+    ) -> Result<U384, FrontierFtsError> {
+        if slice.is_empty() {
+            return Err(FrontierFtsError::InvalidAntichainFrontier);
+        }
+        if slice.len() == 1 {
+            if node > 1 && slice[0] == node {
+                return Ok(U384::ZERO);
+            }
+            return Err(FrontierFtsError::InvalidAntichainFrontier);
+        }
+        if t == 0 {
+            return Err(FrontierFtsError::InvalidAntichainFrontier);
+        }
+
+        // Partition `slice` into nodes inside left child `2 * node` vs right child `2 * node + 1`.
+        let h = self.params.tree_height;
+        let depth = 31usize.saturating_sub(node.leading_zeros() as usize);
+        let shift = h - depth;
+        let mid_leaf = (2 * node + 1) << (shift - 1);
+
+        let mut split_idx = 0usize;
+        let mut expected_leaf = node << shift;
+        for (idx, &v) in slice.iter().enumerate() {
+            let (lo, hi) = Self::node_leaf_interval(v, h)?;
+            if lo != expected_leaf {
+                return Err(FrontierFtsError::InvalidAntichainFrontier);
+            }
+            expected_leaf = hi;
+            if hi <= mid_leaf {
+                split_idx = idx + 1;
+            }
+        }
+        let end_leaf = (node + 1) << shift;
+        if expected_leaf != end_leaf || split_idx == 0 || split_idx >= slice.len() {
+            return Err(FrontierFtsError::InvalidAntichainFrontier);
+        }
+
+        let ell = slice.len();
+        let half_leaves = 1usize << (t - 1);
+        let i_min = 1usize.max(ell.saturating_sub(half_leaves));
+        let i_max = half_leaves.min(ell - 1);
+        if split_idx < i_min || split_idx > i_max {
+            return Err(FrontierFtsError::InvalidAntichainFrontier);
+        }
+
+        let mut prefix_rank = U384::ZERO;
+        for i in i_min..=i_max {
+            let lt_split = ct_lt_u64(i as u64, split_idx as u64);
+            let bucket = self.n_at(t - 1, i).wrapping_mul(self.n_at(t - 1, ell - i));
+            prefix_rank = prefix_rank
+                .overflowing_add(U384::ct_select(lt_split, bucket, U384::ZERO))
+                .0;
+        }
+
+        let r_left = self.rank_subtree_slice(2 * node, t - 1, &slice[..split_idx])?;
+        let r_right = self.rank_subtree_slice(2 * node + 1, t - 1, &slice[split_idx..])?;
+        let right_cnt = self.n_at(t - 1, ell - split_idx);
+        let combined = r_left.wrapping_mul(right_cnt).overflowing_add(r_right).0;
+        Ok(prefix_rank.overflowing_add(combined).0)
+    }
+
+    /// Combined bijective unrank `R < M(h, w, L, S)` -> `(frontier_nodes, chain_offsets)`.
+    pub fn unrank(&self, rank: U384) -> Result<(Vec<u32>, Vec<u8>), FrontierFtsError> {
+        if !rank.ct_lt(self.total_cardinality) {
+            return Err(FrontierFtsError::RankOutOfRange);
+        }
+        let (r_front, r_dec) = rank.ct_divmod(self.decoration_cardinality);
+        let frontier = self.unrank_frontier(r_front)?;
+        let offsets = self.unrank_decorations(r_dec)?;
+        Ok((frontier, offsets))
+    }
+
+    /// Combined bijective rank `(frontier_nodes, chain_offsets)` -> `R < M(h, w, L, S)`.
+    pub fn rank(&self, frontier: &[u32], offsets: &[u8]) -> Result<U384, FrontierFtsError> {
+        let r_front = self.rank_frontier(frontier)?;
+        let r_dec = self.rank_decorations(offsets)?;
+        Ok(r_front
+            .wrapping_mul(self.decoration_cardinality)
+            .overflowing_add(r_dec)
+            .0)
+    }
+}
+
+// ============================================================================
+// Chained Binary Tree Key Generation, Signing, & Verification
+// ============================================================================
+
+/// Public key for `FrontierSumFts` (`32 B` `pk_seed` + `n_trunc`-byte `root`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrontierFtsPublicKey {
+    pub profile: FrontierFtsProfile,
+    pub pk_seed: [u8; 32],
+    pub root: Vec<u8>,
+}
+
+/// Signing key for `FrontierSumFts` with mandatory monotonic use-budget latch, `<REDACTED>` `Debug`,
+/// and `write_volatile` zeroization of both secret seeds AND cached chain states on `Drop`.
+/// Durable monotonic use reservation. Implementations must sync before returning.
+pub trait FtsEpochWal {
+    fn uses_completed(&self, key: &[u8; 32]) -> Result<u8, FrontierFtsError>;
+    fn reserve_use(&mut self, key: &[u8; 32], next: u8) -> Result<(), FrontierFtsError>;
+}
+
