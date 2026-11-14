@@ -252,12 +252,10 @@ theorem walTmpPath_ne_lockPath (base : DirName) : walTmpPath base ≠ walLockPat
   simp [walTmpPath, walLockPath] at hLen
 
 /-- Encode a natural number `< 2^64` as 8 big-endian bytes (`u64be`). -/
-@[expose]
 def encodeU64BeNat (n : Nat) : List UInt8 :=
   encodeU32BeNat (n / 4294967296) ++ encodeU32BeNat (n % 4294967296)
 
 /-- Decode 8 big-endian bytes into a natural number `< 2^64`. -/
-@[expose]
 def decodeU64BeNat (bs : List UInt8) : Option Nat :=
   if bs.length == 8 then
     match decodeU32BeNat (bs.take 4), decodeU32BeNat (bs.drop 4) with
@@ -359,6 +357,8 @@ theorem decodeU64BeNat_canonical {bs : List UInt8} {v : Nat}
         rw [hDiv, hMod, decodeU32BeNat_canonical hHi, decodeU32BeNat_canonical hLo, List.take_append_drop]
   · simp only [hLen, Bool.false_eq_true, ↓reduceIte] at h
     cases h
+
+attribute [irreducible] encodeU64BeNat decodeU64BeNat
 
 theorem unframeBytes_canonical {buf payload rest : List UInt8}
     (h : unframeBytes buf = some (payload, rest)) :
@@ -956,14 +956,14 @@ theorem same_pid_independent_opens_contend_flock_ewouldblock
     · exfalso; exact hDescNe (eq_of_beq hb)
   refine ⟨st1, fd₁, st2, st3, fd₁ + 1, ?_, ?_, ?_, ?_, ?_⟩
   · unfold posixOpenExistingNoFollow resolveDentryNoFollow
-    rw [hReg]; rfl
+    rw [hReg]
   · unfold posixFlockExNb resolveOpenFd
     dsimp only [st1]
     simp only [assocLookup_insert_self, hFree]
     rfl
   · unfold posixOpenExistingNoFollow resolveDentryNoFollow
     dsimp only [st2, st1]
-    rw [hReg]; rfl
+    rw [hReg]
   · unfold FdTable.lookupDescId
     dsimp only [st3, st1]
     simp only [assocLookup_insert, hFdNe, ↓reduceIte]
@@ -1264,28 +1264,30 @@ def decodeLockSidecar (bs : List UInt8) : Option LockSidecarSeal :=
         else none
       | _, _ => none
 
+private theorem match_some_pair {α β γ : Type} (a : α) (b : β)
+    (kNone : γ) (kSome : α → β → γ) :
+    (match (some (a, b) : Option (α × β)) with
+     | none => kNone
+     | some (x, y) => kSome x y) = kSome a b := rfl
+
 theorem decodeLockSidecar_encodeLockSidecar {s : LockSidecarSeal} (hWf : s.WellFormed) :
     decodeLockSidecar (encodeLockSidecar s) = some s := by
   rcases hWf with ⟨hIno, hNonce⟩
   unfold decodeLockSidecar encodeLockSidecar
   dsimp only [concatFramed]
-  have hm : lockSidecarMagicTag.length < 2 ^ 32 := lt_two_pow_32_of_le_8192 (by decide)
+  have hm : lockSidecarMagicTag.length < 2 ^ 32 := by
+    have h8 : lockSidecarMagicTag.length = 8 := rfl
+    rw [h8]; exact lt_two_pow_32_of_le_8192 (by decide)
   have hi : (encodeU64BeNat s.sealedLockInode).length < 2 ^ 32 := by
     rw [encodeU64BeNat_length]; exact lt_two_pow_32_of_le_8192 (by decide)
   have hn : s.genesisNonce.length < 2 ^ 32 := by
     rw [hNonce]; exact lt_two_pow_32_of_le_8192 (by decide)
-  rw [FramedBytesCodec.unframe_frame_append hm]
-  dsimp only
-  have hMagFalse : (lockSidecarMagicTag != lockSidecarMagicTag) = false := rfl
-  rw [hMagFalse]
-  simp only [Bool.false_eq_true, ↓reduceIte]
-  rw [FramedBytesCodec.unframe_frame_append hi]
-  dsimp only
-  rw [decodeU64BeNat_encodeU64BeNat hIno,
-      FramedBytesCodec.unframe_frame_append hn]
-  dsimp only
+  rw [FramedBytesCodec.unframe_frame_append hm, match_some_pair, bne_self_eq_false, if_neg Bool.false_ne_true]
+  rw [FramedBytesCodec.unframe_frame_append hi, match_some_pair]
+  rw [decodeU64BeNat_encodeU64BeNat hIno, FramedBytesCodec.unframe_frame_append hn]
   have hNBeq : (s.genesisNonce.length == 32) = true := by rw [hNonce]; rfl
-  simp only [hNBeq, ↓reduceIte]
+  change (if (s.genesisNonce.length == 32) = true then some s else none) = some s
+  rw [hNBeq, if_pos rfl]
 
 theorem decodeLockSidecar_canonical {bs : List UInt8} {s : LockSidecarSeal}
     (hDec : decodeLockSidecar bs = some s) :
@@ -1377,7 +1379,8 @@ theorem encodeWalBody_injective {b₁ b₂ : WalRecordBody}
       x.length < 2 ^ 32 := by
     intro x hx
     rcases List.mem_cons.mp hx with rfl | hx
-    · exact lt_two_pow_32_of_le_8192 (by decide)
+    · have h8 : walMacDomainTag.length = 8 := rfl
+      rw [h8]; exact lt_two_pow_32_of_le_8192 (by decide)
     · rcases List.mem_cons.mp hx with rfl | hx
       · rw [hk₁]; exact lt_two_pow_32_of_le_8192 (by decide)
       · rcases List.mem_cons.mp hx with rfl | hx
@@ -1391,7 +1394,8 @@ theorem encodeWalBody_injective {b₁ b₂ : WalRecordBody}
       y.length < 2 ^ 32 := by
     intro y hy
     rcases List.mem_cons.mp hy with rfl | hy
-    · exact lt_two_pow_32_of_le_8192 (by decide)
+    · have h8 : walMacDomainTag.length = 8 := rfl
+      rw [h8]; exact lt_two_pow_32_of_le_8192 (by decide)
     · rcases List.mem_cons.mp hy with rfl | hy
       · rw [hk₂]; exact lt_two_pow_32_of_le_8192 (by decide)
       · rcases List.mem_cons.mp hy with rfl | hy
@@ -1454,7 +1458,9 @@ theorem decodeWalRecord_encodeWalRecord {r : WalRecord} (hWf : r.WellFormed) :
   rcases hWf with ⟨⟨hVk, hLg, hEp, hPay⟩, hMac⟩
   unfold decodeWalRecord encodeWalRecord
   dsimp only [concatFramed]
-  have hm : walFileMagicTag.length < 2 ^ 32 := lt_two_pow_32_of_le_8192 (by decide)
+  have hm : walFileMagicTag.length < 2 ^ 32 := by
+    have h8 : walFileMagicTag.length = 8 := rfl
+    rw [h8]; exact lt_two_pow_32_of_le_8192 (by decide)
   have hvkLt : r.body.vaultKeyId.length < 2 ^ 32 := by
     rw [hVk]; exact lt_two_pow_32_of_le_8192 (by decide)
   have hlgLt : r.body.lockGenesisId.length < 2 ^ 32 := by
@@ -1463,30 +1469,27 @@ theorem decodeWalRecord_encodeWalRecord {r : WalRecord} (hWf : r.WellFormed) :
     rw [encodeU64BeNat_length]; exact lt_two_pow_32_of_le_8192 (by decide)
   have hmacLt : r.keyedMac.length < 2 ^ 32 := by
     rw [hMac]; exact lt_two_pow_32_of_le_8192 (by decide)
-  rw [FramedBytesCodec.unframe_frame_append hm]
-  dsimp only
-  have hMagFalse : (walFileMagicTag != walFileMagicTag) = false := rfl
-  rw [hMagFalse]
-  simp only [Bool.false_eq_true, ↓reduceIte]
-  rw [FramedBytesCodec.unframe_frame_append hvkLt]
-  dsimp only
-  have hVkNe : (r.body.vaultKeyId.length != 32) = false := by
-    rw [hVk]; rfl
-  rw [hVkNe]; simp only [Bool.false_eq_true, ↓reduceIte]
-  rw [FramedBytesCodec.unframe_frame_append hlgLt]
-  dsimp only
-  have hLgNe : (r.body.lockGenesisId.length != 40) = false := by
-    rw [hLg]; rfl
-  rw [hLgNe]; simp only [Bool.false_eq_true, ↓reduceIte]
-  rw [FramedBytesCodec.unframe_frame_append hepLt]
-  dsimp only
-  rw [decodeU64BeNat_encodeU64BeNat hEp,
-      FramedBytesCodec.unframe_frame_append hPay]
-  dsimp only
+  rw [FramedBytesCodec.unframe_frame_append hm, match_some_pair, bne_self_eq_false, if_neg Bool.false_ne_true]
+  have hVkNe : (r.body.vaultKeyId.length != 32) = false := by rw [hVk]; rfl
+  rw [FramedBytesCodec.unframe_frame_append hvkLt, match_some_pair, hVkNe, if_neg Bool.false_ne_true]
+  have hLgNe : (r.body.lockGenesisId.length != 40) = false := by rw [hLg]; rfl
+  rw [FramedBytesCodec.unframe_frame_append hlgLt, match_some_pair, hLgNe, if_neg Bool.false_ne_true]
+  rw [FramedBytesCodec.unframe_frame_append hepLt, match_some_pair]
+  rw [decodeU64BeNat_encodeU64BeNat hEp, FramedBytesCodec.unframe_frame_append hPay]
+  change (match unframeBytes (frameBytes r.keyedMac ++ []) with
+          | some (mac, []) =>
+            if mac.length == 32 then
+              some { body := { vaultKeyId := r.body.vaultKeyId
+                               lockGenesisId := r.body.lockGenesisId
+                               epoch := r.body.epoch
+                               payload := r.body.payload }
+                     keyedMac := mac }
+            else none
+          | _ => none) = some r
   rw [FramedBytesCodec.unframe_frame_append hmacLt]
-  dsimp only
   have hMacEq : (r.keyedMac.length == 32) = true := by rw [hMac]; rfl
-  simp only [hMacEq, ↓reduceIte]
+  change (if (r.keyedMac.length == 32) = true then some r else none) = some r
+  rw [hMacEq, if_pos rfl]
 
 theorem decodeWalRecord_canonical {bs : List UInt8} {r : WalRecord}
     (hDec : decodeWalRecord bs = some r) :
@@ -1564,6 +1567,8 @@ theorem decodeWalRecord_canonical {bs : List UInt8} {r : WalRecord}
                           rw [hMagEq] at hBs1
                           rw [hEpCan, hBs1, hBs2, hBs3, hBs4, hBs5, hBs6]
                         · simp only [hMac, Bool.false_eq_true, ↓reduceIte] at hDec; cases hDec
+
+attribute [irreducible] encodeLockSidecar decodeLockSidecar encodeWalBody encodeWalRecord decodeWalRecord
 
 /-- Keyed-MAC function type (`Key → Preimage → 32-byte Tag`, e.g. `KMAC256` / `HMAC-SHA3-256`). -/
 abbrev KeyedMacFn := List UInt8 → List UInt8 → List UInt8

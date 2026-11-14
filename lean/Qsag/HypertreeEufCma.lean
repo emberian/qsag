@@ -43,6 +43,7 @@ public import Qsag.Keccak
 public import Qsag.Poseidon2
 public import Qsag.UcGames
 public import Qsag.HashSigs
+import all Qsag.Keccak
 import all Qsag.HashSigs
 
 public section
@@ -4090,7 +4091,7 @@ def extractReachableHypertreeForgery_of_statelessLog
       obtain ⟨hI0, hPos0⟩ := wotsPosAddr_inj params hWf hLayers hOk.leaf_lt hStarLt hi hDPos hAddr0
       subst hI0
       simp only [Nat.zero_mul, Nat.pow_zero, Nat.div_one] at hPos0
-      simp only [hStateless, Bool.false_and, Bool.false_eq_true, ↓reduceIte,
+      simp only [hStateless, Bool.false_and, Bool.false_eq_true, beq_self_eq_true, ↓reduceIte,
                  Nat.zero_mul, Nat.pow_zero, Nat.div_one] at hRandEq hRootEq
       obtain ⟨fuel, dg, hm, hG, hC⟩ := hOk.layer 0 hi
       obtain ⟨hmEq, hdEq, hChk⟩ := grindTswCounterAux_sound hG
@@ -4859,7 +4860,7 @@ def checked_stateful_hypertree_euf_cma_extract_raw
           | some top =>
             rw [hV] at hAccept
             simp only [decide_eq_true_eq] at hAccept
-            exact ⟨hEqL, hLt, hV.trans (congrArg some hAccept)⟩
+            exact ⟨hEqL, hLt, congrArg some hAccept⟩
         · rcases Bool.or_eq_true_iff.mp hPre with hF | hD
           · simp [hF] at hAccept
           · simp [of_decide_eq_true hD] at hAccept
@@ -5118,16 +5119,19 @@ theorem checkedStatelessOracleLog_eq_signingOracleLog
     · simp only [Bool.not_false, ↓reduceIte]
       exact checkedStatelessOracleLog_eq_signingOracleLog suite params sk qs
     · simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+      have hSeed : (derivePublicKey suite params sk).pkSeed = sk.pkSeed := rfl
+      simp only [hSeed]
       cases hD : deriveStatelessInputs suite params
           (thPrfMsg suite sk.skPrf q.randomness
             (thPreHash suite sk.pkSeed (derivePublicKey suite params sk).pkRoot q.message))
           sk.pkSeed (derivePublicKey suite params sk).pkRoot
           (thPreHash suite sk.pkSeed (derivePublicKey suite params sk).pkRoot q.message) with
       | none =>
+        dsimp only
         exact checkedStatelessOracleLog_eq_signingOracleLog suite params sk qs
       | some pr =>
         rcases pr with ⟨leaf, idxs⟩
-        simp only [signingOracleLog]
+        dsimp only [signingOracleLog]
         cases evalSingleSign suite params sk q.message q.randomness leaf q.grindLimit <;>
           simp [checkedStatelessOracleLog_eq_signingOracleLog suite params sk qs]
 
@@ -5313,7 +5317,7 @@ theorem mutantUncheckedReuseSign_collision_free_forgery
       rcases Prod.mk.inj hT1 with ⟨_, hT1b⟩
       rcases Prod.mk.inj hT1b with ⟨hL1, hT1c⟩
       rcases Prod.mk.inj hT1c with ⟨_, hS1⟩
-      subst hL1; subst hS1
+      subst leaf₁; subst s1
       cases hEv₂ : evalSingleSign suite params sk m₂
           (buildStatefulDetOptDomain reqEp₂ sk.pkSeed) (reqEp₂ % 2 ^ params.maxSigsLog2) grind₂ with
       | none => rw [hEv₂] at hMut₂; cases hMut₂
@@ -5323,7 +5327,7 @@ theorem mutantUncheckedReuseSign_collision_free_forgery
         rcases Prod.mk.inj hT2 with ⟨_, hT2b⟩
         rcases Prod.mk.inj hT2b with ⟨hL2, hT2c⟩
         rcases Prod.mk.inj hT2c with ⟨_, hS2⟩
-        subst hL2; subst hS2
+        subst leaf₂; subst s2
         obtain ⟨hWf, hSt, _, _, _, hDPos, _, _⟩ := params.checkedStatefulValid_facts hValid
         have hBud₁ : reqEp₁ % 2 ^ params.maxSigsLog2 < 2 ^ params.maxSigsLog2 :=
           Nat.mod_lt _ (Nat.two_pow_pos _)
@@ -5434,7 +5438,6 @@ theorem mutantUncheckedReuseSign_collision_free_forgery
                       honestChainNode suite sk 0 tree0 kp0 r (digStar.getD r 0) := by
                   intro r hr
                   have hDomR := hDom r hr
-                  dsimp only at hDomR
                   rw [hDig1Eq, hDig2Eq] at hDomR
                   dsimp only [sigStar, forgeFromReusedLeafSigs, List.getD_cons_zero]
                   rw [list_getD_map_range params.ell1 _ [] hr]
@@ -5474,7 +5477,7 @@ theorem mutantUncheckedReuseSign_collision_free_forgery
                   have hLenL : (sigStar.layerSigs.getD 0 ⟨0, [], []⟩).wotsChains.length = params.ell1 := by
                     dsimp [sigStar, forgeFromReusedLeafSigs]; simp
                   apply List.ext_getElem
-                  · simp [hLenL]
+                  · rw [hLenL, List.length_map, List.length_range]
                   · intro r hr1 hr2
                     have hr : r < params.ell1 := by simp at hr2; exact hr2
                     rw [← list_getD_eq_getElem _ [] hr1, ← list_getD_eq_getElem _ [] hr2,
@@ -5487,8 +5490,7 @@ theorem mutantUncheckedReuseSign_collision_free_forgery
                   have hSubPos : 0 < 2 ^ params.subtreeHeight := Nat.two_pow_pos _
                   have hTreeLt : (reqEp₁ % 2 ^ params.maxSigsLog2) / 2 ^ params.subtreeHeight <
                       2 ^ (dRem * params.subtreeHeight) := by
-                    rw [hNumLayers, Nat.add_comm dRem 1, Nat.succ_mul, Nat.pow_add,
-                        Nat.mul_comm (2 ^ params.subtreeHeight)] at hLeafLt₁
+                    rw [hNumLayers, Nat.succ_mul, Nat.pow_add] at hLeafLt₁
                     exact (Nat.div_lt_iff_lt_mul hSubPos).mpr hLeafLt₁
                   have hRestInfo : restSigs₁.length = dRem ∧
                       verifyHypertreeLayers suite params sk.pkSeed pk.pkRoot [] 1
@@ -5501,7 +5503,7 @@ theorem mutantUncheckedReuseSign_collision_free_forgery
                       injection hRest₁ with hNil
                       subst hNil
                       have hTree0 : (reqEp₁ % 2 ^ params.maxSigsLog2) / 2 ^ params.subtreeHeight = 0 := by
-                        simp at hTreeLt; exact hTreeLt
+                        rw [Nat.zero_mul, Nat.pow_zero] at hTreeLt; omega
                       refine ⟨rfl, ?_⟩
                       rw [verifyHypertreeLayers_nil]
                       simp only [Option.some.injEq, pk, derivePublicKey, hNumLayers, Nat.zero_add,
@@ -5521,24 +5523,21 @@ theorem mutantUncheckedReuseSign_collision_free_forgery
                   have hSigLeaf : sigStar.leafGlobalIdx = reqEp₁ % 2 ^ params.maxSigsLog2 := hIdx₁
                   rw [hValid, hSigLeaf, decide_eq_true hBud₁]
                   simp only [Bool.true_and]
-                  unfold verifyPqHashSig
                   have hSigLen : sigStar.layerSigs.length = params.numLayers := by
                     dsimp [sigStar, forgeFromReusedLeafSigs]
                     rw [List.length_cons, hDrop1, hRestInfo.1, hNumLayers]
                   have hLeafLtStar : sigStar.leafGlobalIdx < 2 ^ (params.numLayers * params.subtreeHeight) := by
                     rw [hSigLeaf]; exact hLeafLt₁
                   have hForsEmpty : sigStar.forsOpenings = [] ∧ sigStar.msgTswCtr = 0 := ⟨rfl, rfl⟩
-                  simp only [hWf, Bool.not_true, Bool.false_eq_true, ↓reduceIte, hSigLen, ne_eq,
-                             not_true_eq_false, hLeafLtStar, decide_true, hSt, hForsEmpty.1,
-                             List.isEmpty_nil, hForsEmpty.2, decide_false, Bool.or_self]
                   have hVerLayers :
                       verifyHypertreeLayers suite params pk.pkSeed pk.pkRoot sigStar.rRand 0
                         sigStar.leafGlobalIdx (thPreHash suite pk.pkSeed pk.pkRoot msgStar) sigStar.layerSigs =
                       some pk.pkRoot := by
-                    change verifyHypertreeLayers suite params pk.pkSeed pk.pkRoot rStar 0 leaf
-                      (thPreHash suite pk.pkSeed pk.pkRoot msgStar)
-                      ((sigStar.layerSigs.getD 0 ⟨0, [], []⟩) :: restSigs₁) = some pk.pkRoot
-                    rw [verifyHypertreeLayers_cons]
+                    have hStarRand : sigStar.rRand = rStar := rfl
+                    have hStarIdx : sigStar.leafGlobalIdx = leaf := rfl
+                    have hStarLayers : sigStar.layerSigs = (sigStar.layerSigs.getD 0 ⟨0, [], []⟩) :: restSigs₁ := by
+                      dsimp [sigStar, forgeFromReusedLeafSigs]; rw [hDrop1]
+                    rw [hStarRand, hStarIdx, hStarLayers, verifyHypertreeLayers_cons]
                     have hTsw' : checkTargetSum params.w params.ell1 params.targetSum digStar = true := hTswStar
                     have hChLen' : (sigStar.layerSigs.getD 0 ⟨0, [], []⟩).wotsChains.length = params.ell1 := by
                       rw [hChainsListEq]; simp
@@ -5559,11 +5558,12 @@ theorem mutantUncheckedReuseSign_collision_free_forgery
                     dsimp only
                     rw [← computeXmssSubtreeRoot_eq]
                     simpa only [Nat.zero_add, leaf, hIdx₁] using hRestInfo.2
-                  rw [hDrop1]
-                  change (match verifyHypertreeLayers suite params pk.pkSeed pk.pkRoot sigStar.rRand 0
-                            sigStar.leafGlobalIdx (thPreHash suite pk.pkSeed pk.pkRoot msgStar) sigStar.layerSigs with
-                          | some computedTopRoot => decide (computedTopRoot = pk.pkRoot)
-                          | none => false) = true
+                  rcases (⟨sigStar, rfl⟩ : ∃ sStar, sStar = sigStar) with ⟨sStar, hSS⟩
+                  rw [← hSS] at hSigLen hLeafLtStar hForsEmpty hVerLayers ⊢
+                  unfold verifyPqHashSig
+                  simp only [hWf, Bool.not_true, Bool.false_eq_true, ↓reduceIte, hSigLen, ne_eq,
+                             not_true_eq_false, hLeafLtStar, decide_true, hSt, hForsEmpty.1,
+                             List.isEmpty_nil, hForsEmpty.2, decide_false, Bool.or_self]
                   rw [hVerLayers]
                   simp
                 · -- Prove `CheckedStatefulWotsTswWitness ... → False` when `params.numLayers = 1`
@@ -5601,7 +5601,6 @@ theorem mutantUncheckedReuseSign_collision_free_forgery
                   rw [hLog1] at hLt1
                   rw [hLog2] at hLt2
                   have hDomR := hDom w.chainIdx w.chain_lt
-                  dsimp only at hDomR
                   rw [hDig1Eq, hDig2Eq] at hDomR
                   change w.forgedDigit = digStar.getD w.chainIdx 0 at hFDig
                   rcases hDomR with hLe1 | hLe2 <;> omega
@@ -5626,10 +5625,10 @@ def toothDistinctSuite : TweakableHashSuite where
       List.replicate 32 0x1B
   rawHash_len := fun bytes => by
     split
-    · simp [List.length_replicate]
+    · simp
     · split
-      · split <;> simp [List.length_replicate]
-      · simp [List.length_replicate]
+      · split <;> simp
+      · simp
 
 /-- Concrete 1-layer stateful profile with budget `2 ^ 1 = 2` signatures (`maxSigsLog2 = 1`). -/
 def toothStatefulParams : PqHashParams := ⟨4, 128, 1, 1, 0, 0, 1, true⟩
@@ -5638,7 +5637,7 @@ def toothStatefulParams : PqHashParams := ⟨4, 128, 1, 1, 0, 0, 1, true⟩
     (`tooth_mutantUncheckedReuseSign_concrete_forgery`)**:
     1. Real `checkedStatefulSignStep` strictly enforces the epoch budget (`2^1 = 2`) and aborts on
        epoch `2` with `.error (.budgetExhausted 2 2)` (and aborts on epoch-`0` equivocation with
-       `.error (.equivocationAttempt 0)`);
+       `.error (.equivocationRefused 0)`);
     2. `mutantUncheckedReuseSign` wraps `reqEpoch = 2` onto leaf `0`, emitting two valid signatures
        `sig₁` (on `m₁ = [1]`) and `sig₂` (on `m₂ = [2]`) with distinct codewords `dig₁ ≠ dig₂`;
     3. `forgeFromReusedLeafSigs` (using ONLY public inputs, zero `sk`) forges `sigStar` on fresh
@@ -5654,10 +5653,10 @@ theorem tooth_mutantUncheckedReuseSign_concrete_forgery :
     (execCheckedStatefulOracle suite params sk initCheckedStatefulLatch
       [.signNext [1] 1, .signNext [9] 1, .signNext [2] 1]).abortError =
       some (.budgetExhausted 2 2) ∧
-    -- Real checked stateful oracle also aborts on direct epoch-0 equivocation (`equivocationAttempt 0`)
+    -- Real checked stateful oracle also aborts on direct epoch-0 equivocation (`equivocationRefused 0`)
     (execCheckedStatefulOracle suite params sk initCheckedStatefulLatch
       [.signEpoch 0 [1] 1, .signEpoch 0 [2] 1]).abortError =
-      some (.equivocationAttempt 0) ∧
+      some (.equivocationRefused 0) ∧
     -- Mutant signer succeeds on both `(reqEpoch = 0, [1])` and `(reqEpoch = 2, [2])` at leaf 0,
     -- and public `forgeFromReusedLeafSigs` forges fresh `msgStar = [3]` with 0 collisions & 0 inversions:
     ∃ st1 st2 sig₁ sig₂,
@@ -5693,52 +5692,44 @@ theorem tooth_mutantUncheckedReuseSign_concrete_forgery :
         | .ok (s1, _, _, _) =>
           (mutantUncheckedReuseSign toothDistinctSuite toothStatefulParams ⟨[], [], []⟩ s1 2 [2] 1).isOk) = true := by
         decide +kernel
-      rw [hM1, hM2] at hOk2; cases hOk2
+      rw [hM1] at hOk2; dsimp only at hOk2; rw [hM2] at hOk2; cases hOk2
     | ok q2 =>
       rcases q2 with ⟨st2, leaf2, m2Out, sig₂⟩
-      have hL1 : leaf1 = 0 ∧ m1Out = [1] := by
-        unfold mutantUncheckedReuseSign at hM1
-        simp only [toothStatefulParams, show (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams).checkedStatefulValid = true by decide,
-                   Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hM1
-        cases hE : evalSingleSign toothDistinctSuite ⟨4, 128, 1, 1, 0, 0, 1, true⟩ ⟨[], [], []⟩ [1]
-            (buildStatefulDetOptDomain 0 []) (0 % 2 ^ 1) 1 with
-        | none => rw [hE] at hM1; cases hM1
+      have hTV : toothStatefulParams.checkedStatefulValid = true := by decide +kernel
+      have hL1AndIdx : leaf1 = 0 ∧ m1Out = [1] ∧ sig₁.leafGlobalIdx = 0 := by
+        have hM1' := hM1
+        unfold mutantUncheckedReuseSign at hM1'
+        rw [hTV] at hM1'
+        dsimp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hM1'
+        cases hE1 : evalSingleSign toothDistinctSuite toothStatefulParams ⟨[], [], []⟩ [1]
+            (buildStatefulDetOptDomain 0 []) (0 % 2 ^ toothStatefulParams.maxSigsLog2) 1 with
+        | none => rw [hE1] at hM1'; cases hM1'
         | some s =>
-          rw [hE] at hM1; injection hM1 with hT
+          rw [hE1] at hM1'
+          injection hM1' with hT
           rcases Prod.mk.inj hT with ⟨_, hTb⟩
           rcases Prod.mk.inj hTb with ⟨hLeaf, hTc⟩
-          exact ⟨hLeaf.symm, (Prod.mk.inj hTc).1.symm⟩
+          rcases Prod.mk.inj hTc with ⟨hMsg, hS⟩
+          subst s
+          have hInv := (evalSingleSign_stateful_inv toothDistinctSuite toothStatefulParams ⟨[], [], []⟩ [1]
+            (buildStatefulDetOptDomain 0 []) (0 % 2 ^ toothStatefulParams.maxSigsLog2) 1 sig₁ rfl hE1).2.2.2.2.1
+          exact ⟨hLeaf.symm, hMsg.symm, hInv⟩
       have hL2 : leaf2 = 0 ∧ m2Out = [2] := by
-        unfold mutantUncheckedReuseSign at hM2
-        simp only [toothStatefulParams, show (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams).checkedStatefulValid = true by decide,
-                   Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hM2
-        cases hE : evalSingleSign toothDistinctSuite ⟨4, 128, 1, 1, 0, 0, 1, true⟩ ⟨[], [], []⟩ [2]
-            (buildStatefulDetOptDomain 2 []) (2 % 2 ^ 1) 1 with
-        | none => rw [hE] at hM2; cases hM2
+        have hM2' := hM2
+        unfold mutantUncheckedReuseSign at hM2'
+        rw [hTV] at hM2'
+        dsimp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hM2'
+        cases hE2 : evalSingleSign toothDistinctSuite toothStatefulParams ⟨[], [], []⟩ [2]
+            (buildStatefulDetOptDomain 2 []) (2 % 2 ^ toothStatefulParams.maxSigsLog2) 1 with
+        | none => rw [hE2] at hM2'; cases hM2'
         | some s =>
-          rw [hE] at hM2; injection hM2 with hT
+          rw [hE2] at hM2'
+          injection hM2' with hT
           rcases Prod.mk.inj hT with ⟨_, hTb⟩
           rcases Prod.mk.inj hTb with ⟨hLeaf, hTc⟩
           exact ⟨hLeaf.symm, (Prod.mk.inj hTc).1.symm⟩
-      subst hL1; subst hL2
-      have hSig1Idx : sig₁.leafGlobalIdx = 0 := by
-        unfold mutantUncheckedReuseSign at hM1
-        simp only [toothStatefulParams, show (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams).checkedStatefulValid = true by decide,
-                   Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hM1
-        cases hE : evalSingleSign toothDistinctSuite toothStatefulParams ⟨[], [], []⟩ [1]
-            (buildStatefulDetOptDomain 0 []) 0 1 with
-        | none =>
-          change (match evalSingleSign toothDistinctSuite toothStatefulParams ⟨[], [], []⟩ [1]
-                    (buildStatefulDetOptDomain 0 []) 0 1 with | none => _ | some _ => _) = _ at hM1
-          rw [hE] at hM1; cases hM1
-        | some s =>
-          change (match evalSingleSign toothDistinctSuite toothStatefulParams ⟨[], [], []⟩ [1]
-                    (buildStatefulDetOptDomain 0 []) 0 1 with | none => _ | some _ => _) = _ at hM1
-          rw [hE] at hM1; injection hM1 with hT
-          have hS : s = sig₁ := (Prod.mk.inj (Prod.mk.inj (Prod.mk.inj hT).2).2).2
-          subst hS
-          exact (evalSingleSign_stateful_inv toothDistinctSuite toothStatefulParams ⟨[], [], []⟩ [1]
-            (buildStatefulDetOptDomain 0 []) 0 1 sig₁ rfl hE).2.2.2.2.1
+      rcases hL1AndIdx with ⟨rfl, rfl, hSig1Idx⟩
+      rcases hL2 with ⟨rfl, rfl⟩
       have hTsw3 :
           let pk := derivePublicKey toothDistinctSuite toothStatefulParams ⟨[], [], []⟩
           let leaf := sig₁.leafGlobalIdx
@@ -5818,7 +5809,9 @@ theorem tooth_mutantUncheckedReuseSign_concrete_forgery :
                    (List.range 128).all (fun r => decide (d1.getD r 0 ≤ dS.getD r 0 ∨ d2.getD r 0 ≤ dS.getD r 0))
                  | .error _ => false
                | .error _ => false) = true := by decide +kernel
-          rw [hM1, hM2] at hClosed ⊢
+          rw [hM1] at hClosed ⊢
+          dsimp only at hClosed ⊢
+          rw [hM2] at hClosed ⊢
           exact hClosed
         rw [hM1, hM2] at hDecDom
         dsimp only at hDecDom ⊢
@@ -5828,7 +5821,7 @@ theorem tooth_mutantUncheckedReuseSign_concrete_forgery :
       obtain ⟨hVerStar, hChainsStar, hNoWots⟩ :=
         mutantUncheckedReuseSign_collision_free_forgery toothDistinctSuite toothStatefulParams ⟨[], [], []⟩
           [3] [] 0 hM1 hM2 (by decide) hTsw3 hDom3
-      refine ⟨st1, st2, sig₁, sig₂, rfl, rfl, by decide, hVerStar, ?_, hNoWots rfl⟩
+      refine ⟨st1, st2, sig₁, sig₂, hM1, hM2, by decide, hVerStar, ?_, hNoWots rfl⟩
       intro r hr
       have hC := hChainsStar r hr
       simpa only [hSig1Idx, Nat.zero_div, Nat.zero_mod, show UInt64.ofNat 0 = (0 : UInt64) from rfl,
@@ -5905,9 +5898,12 @@ theorem inhabited_checked_stateful_multi_sign_log :
       rw [hStr] at hOk; cases hOk
     | ok pair =>
       rcases pair with ⟨stFinal, log⟩
-      obtain ⟨_, _, hLogEq⟩ :=
-        (execCheckedStatefulStrict_eq_oracle crumbToySuite inhabitedStatefulParams ⟨[], [], []⟩
-          initCheckedStatefulLatch inhabitedStatefulQueries).mp hStr
+      have hOrcEq :=
+        ((execCheckedStatefulStrict_eq_oracle crumbToySuite inhabitedStatefulParams ⟨[], [], []⟩
+          inhabitedStatefulQueries initCheckedStatefulLatch).1 stFinal log).mp hStr
+      have hLogEq : log = (execCheckedStatefulOracle crumbToySuite inhabitedStatefulParams ⟨[], [], []⟩
+          initCheckedStatefulLatch inhabitedStatefulQueries).emittedLog :=
+        congrArg CheckedStatefulOracleRun.emittedLog hOrcEq.symm
       have hNext : stFinal.nextEpoch = 3 := by
         have hDec : (match execCheckedStatefulStrict crumbToySuite inhabitedStatefulParams ⟨[], [], []⟩
                         initCheckedStatefulLatch inhabitedStatefulQueries with
@@ -5915,7 +5911,7 @@ theorem inhabited_checked_stateful_multi_sign_log :
                      | .error _ => false) = true := by decide +kernel
         rw [hStr] at hDec
         exact of_decide_eq_true (by simpa [beq_iff_eq] using hDec)
-      exact ⟨stFinal, hLogEq ▸ hStr, hNext⟩
+      exact ⟨stFinal, by rw [← hLogEq]; exact hStr, hNext⟩
   · intro e he
     exact checkedStatefulOracle_accepts crumbToySuite inhabitedStatefulParams ⟨[], [], []⟩
       inhabitedStatefulQueries he
