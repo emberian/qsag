@@ -54,7 +54,6 @@ import all Qsag.Keccak
 public import Qsag.HashSigs
 import all Qsag.HashSigs
 public import Qsag.HypertreeEufCma
-public import Qsag.MaliciousSecurity
 
 public section
 namespace Qsag
@@ -770,6 +769,16 @@ instance : NoZeroDivisors GoldilocksExt4 where
           GoldilocksExt4.mul_inv_cancel ha, LawfulCommRing.one_mul] at hmul
       exact hmul
 
+/-- Quartic challenge field multiplicative inverse law (`z ≠ 0 → z * z⁻¹ = 1`). -/
+theorem goldilocksExt4_mul_inv_cancel {z : GoldilocksExt4} (hz : z ≠ GoldilocksExt4.zero) :
+    CommRingOps.mul z (GoldilocksExt4.inv z) = CommRingOps.one :=
+  GoldilocksExt4.mul_inv_cancel hz
+
+/-- Canonical 32-byte `GoldilocksExt4` byte-framing injectivity. -/
+theorem goldilocksExt4_encodeBytes32_injective {x y : GoldilocksExt4}
+    (h : GoldilocksExt4.encodeBytes32 x = GoldilocksExt4.encodeBytes32 y) : x = y :=
+  GoldilocksExt4.encodeBytes32_injective h
+
 /-- Quartic challenge field cardinality lower bound: `|F_{p^4}| = p^4 > 2^255`. -/
 theorem goldilocksExt4_card_gt_two_pow_255 : 2 ^ 255 < goldilocksPrime ^ 4 := by decide
 
@@ -1394,34 +1403,168 @@ structure AggPublicInstance where
   committee : List PqPublicKey
   signingModeDigest : List UInt8
 
+/-- Canonical little-endian base-256 byte framing of arbitrary `Nat` values (`0 ↦ []`). -/
+def encodeNatBytes : Nat → List UInt8
+  | 0 => []
+  | n + 1 => UInt8.ofNat ((n + 1) % 256) :: encodeNatBytes ((n + 1) / 256)
+termination_by n => n
+
+theorem encodeNatBytes_injective {a : Nat} :
+    ∀ {b : Nat}, encodeNatBytes a = encodeNatBytes b → a = b := by
+  induction a using Nat.strongRecOn with
+  | ind a ih =>
+    intro b h
+    cases a with
+    | zero =>
+      cases b with
+      | zero => rfl
+      | succ b' => rw [encodeNatBytes, encodeNatBytes] at h; cases h
+    | succ a' =>
+      cases b with
+      | zero => rw [encodeNatBytes, encodeNatBytes] at h; cases h
+      | succ b' =>
+        rw [encodeNatBytes, encodeNatBytes] at h
+        obtain ⟨hHead, hTail⟩ := List.cons.inj h
+        have hToNat : ((a' + 1) % 256) % 256 = ((b' + 1) % 256) % 256 :=
+          congrArg UInt8.toNat hHead
+        have hDiv : (a' + 1) / 256 = (b' + 1) / 256 :=
+          ih ((a' + 1) / 256) (Nat.div_lt_self (Nat.succ_pos a') (by decide)) hTail
+        omega
+
+def encodeBoolByte (b : Bool) : UInt8 := if b then 1 else 0
+
+theorem encodeBoolByte_injective {x y : Bool} (h : encodeBoolByte x = encodeBoolByte y) :
+    x = y := by
+  cases x <;> cases y <;> first | rfl | cases h
+
+private theorem list_map_inj {α β : Type} {f : α → β}
+    (hf : ∀ {x y : α}, f x = f y → x = y) :
+    ∀ {xs ys : List α}, xs.map f = ys.map f → xs = ys
+  | [], [], _ => rfl
+  | [], _ :: _, h => by cases h
+  | _ :: _, [], h => by cases h
+  | x :: xs, y :: ys, h => by
+    obtain ⟨hxy, hrest⟩ := List.cons.inj h
+    exact congrArg₂ List.cons (hf hxy) (list_map_inj hf hrest)
+
+def encodePqPublicKey (pk : PqPublicKey) : List UInt8 :=
+  encodeMultiFrame [pk.pkSeed, pk.pkRoot]
+
+theorem encodePqPublicKey_injective {p1 p2 : PqPublicKey}
+    (h : encodePqPublicKey p1 = encodePqPublicKey p2) : p1 = p2 := by
+  cases p1; cases p2
+  have hf := encodeMultiFrame_injective h
+  obtain ⟨hs, hf⟩ := List.cons.inj hf
+  obtain ⟨hr, _⟩ := List.cons.inj hf
+  exact congrArg₂ PqPublicKey.mk hs hr
+
+def encodeCommittee (committee : List PqPublicKey) : List UInt8 :=
+  encodeMultiFrame (committee.map encodePqPublicKey)
+
+theorem encodeCommittee_injective {c1 c2 : List PqPublicKey}
+    (h : encodeCommittee c1 = encodeCommittee c2) : c1 = c2 :=
+  list_map_inj encodePqPublicKey_injective (encodeMultiFrame_injective h)
+
+def encodePqHashParams (p : PqHashParams) : List UInt8 :=
+  encodeMultiFrame [encodeNatBytes p.w, encodeNatBytes p.ell1,
+    encodeNatBytes p.subtreeHeight, encodeNatBytes p.numLayers,
+    encodeNatBytes p.forsTrees, encodeNatBytes p.forsHeight,
+    encodeNatBytes p.maxSigsLog2, [encodeBoolByte p.statefulJorts]]
+
+theorem encodePqHashParams_injective {p1 p2 : PqHashParams}
+    (h : encodePqHashParams p1 = encodePqHashParams p2) : p1 = p2 := by
+  cases p1; cases p2
+  have hf := encodeMultiFrame_injective h
+  obtain ⟨e1, hf⟩ := List.cons.inj hf
+  obtain ⟨e2, hf⟩ := List.cons.inj hf
+  obtain ⟨e3, hf⟩ := List.cons.inj hf
+  obtain ⟨e4, hf⟩ := List.cons.inj hf
+  obtain ⟨e5, hf⟩ := List.cons.inj hf
+  obtain ⟨e6, hf⟩ := List.cons.inj hf
+  obtain ⟨e7, hf⟩ := List.cons.inj hf
+  obtain ⟨e8, _⟩ := List.cons.inj hf
+  have eb := encodeBoolByte_injective (List.cons.inj e8).1
+  simp only [PqHashParams.mk.injEq]
+  exact ⟨encodeNatBytes_injective e1, encodeNatBytes_injective e2,
+    encodeNatBytes_injective e3, encodeNatBytes_injective e4,
+    encodeNatBytes_injective e5, encodeNatBytes_injective e6,
+    encodeNatBytes_injective e7, eb⟩
+
+def encodeChildrenCommitment : Option (List UInt8 × List UInt8) → List UInt8
+  | none => [0]
+  | some (left, right) => 1 :: encodeMultiFrame [left, right]
+
+theorem encodeChildrenCommitment_injective {c1 c2 : Option (List UInt8 × List UInt8)}
+    (h : encodeChildrenCommitment c1 = encodeChildrenCommitment c2) : c1 = c2 := by
+  cases c1 with
+  | none =>
+    cases c2 with
+    | none => rfl
+    | some p => cases p; cases h
+  | some p1 =>
+    cases p1
+    cases c2 with
+    | none => cases h
+    | some p2 =>
+      cases p2
+      have hf := encodeMultiFrame_injective (List.cons.inj h).2
+      obtain ⟨hl, hf⟩ := List.cons.inj hf
+      obtain ⟨hr, _⟩ := List.cons.inj hf
+      exact congrArg Option.some (congrArg₂ Prod.mk hl hr)
+
 /-- Canonical injective instance framing binding `message`, `signingModeDigest`, `regime`,
-    `committee`, `params`, `bitmap`, `traceCommitment`, and `childrenCommitment`. -/
+    `suite.suiteId`, `committee`, `params`, `bitmap`, `traceCommitment`, and
+    `childrenCommitment`. -/
 def aggregateInstanceFrame (inst : AggPublicInstance) (agg : AggregatedSignature) : List UInt8 :=
   encodeMultiFrame [inst.message, inst.signingModeDigest, [inst.regime.tagByte],
-    encodeMultiFrame (inst.committee.map (fun pk => encodeMultiFrame [pk.pkSeed, pk.pkRoot])),
-    encodeMultiFrame ([inst.params.w, inst.params.ell1, inst.params.subtreeHeight,
-      inst.params.numLayers, inst.params.forsTrees, inst.params.forsHeight,
-      inst.params.maxSigsLog2].map (fun n => (toString n).toUTF8.toList)),
-    [if inst.params.statefulJorts then 1 else 0],
-    agg.bitmap.map (fun b => if b then 1 else 0), agg.traceCommitment,
-    match agg.childrenCommitment with
-    | none => []
-    | some (left, right) => encodeMultiFrame [left, right]]
+    inst.suite.suiteId,
+    encodeCommittee inst.committee,
+    encodePqHashParams inst.params,
+    agg.bitmap.map encodeBoolByte,
+    agg.traceCommitment,
+    encodeChildrenCommitment agg.childrenCommitment]
+
+/-- **Full Pre-Locked Instance & Header Framing Injectivity (`aggregateInstanceFrame_injective`)**:
+    Equality of `aggregateInstanceFrame` implies field-by-field equality across all nine public
+    instance and aggregate-header fields (`message`, `signingModeDigest`, `regime`, `suite.suiteId`,
+    `committee`, `params`, `bitmap`, `traceCommitment`, `childrenCommitment`). -/
+theorem aggregateInstanceFrame_injective (first second : AggPublicInstance)
+    (a b : AggregatedSignature)
+    (h : aggregateInstanceFrame first a = aggregateInstanceFrame second b) :
+    first.message = second.message ∧
+    first.signingModeDigest = second.signingModeDigest ∧
+    first.regime = second.regime ∧
+    first.suite.suiteId = second.suite.suiteId ∧
+    first.committee = second.committee ∧
+    first.params = second.params ∧
+    a.bitmap = b.bitmap ∧
+    a.traceCommitment = b.traceCommitment ∧
+    a.childrenCommitment = b.childrenCommitment := by
+  have hf := encodeMultiFrame_injective h
+  obtain ⟨hMsg, hf⟩ := List.cons.inj hf
+  obtain ⟨hMode, hf⟩ := List.cons.inj hf
+  obtain ⟨hReg, hf⟩ := List.cons.inj hf
+  obtain ⟨hSuite, hf⟩ := List.cons.inj hf
+  obtain ⟨hComm, hf⟩ := List.cons.inj hf
+  obtain ⟨hParams, hf⟩ := List.cons.inj hf
+  obtain ⟨hBm, hf⟩ := List.cons.inj hf
+  obtain ⟨hTr, hf⟩ := List.cons.inj hf
+  obtain ⟨hCh, _⟩ := List.cons.inj hf
+  exact ⟨hMsg, hMode, WhirSecurityRegime.tagByte_injective (List.cons.inj hReg).1,
+    hSuite, encodeCommittee_injective hComm, encodePqHashParams_injective hParams,
+    list_map_inj encodeBoolByte_injective hBm, hTr, encodeChildrenCommitment_injective hCh⟩
 
 theorem aggregate_frame_message_binding (first second : AggPublicInstance)
     (a b : AggregatedSignature)
     (h : aggregateInstanceFrame first a = aggregateInstanceFrame second b) :
-    first.message = second.message := by
-  exact (List.cons.inj (encodeMultiFrame_injective h)).1
+    first.message = second.message :=
+  (aggregateInstanceFrame_injective first second a b h).1
 
 theorem aggregate_frame_regime_binding (first second : AggPublicInstance)
     (a b : AggregatedSignature)
     (h : aggregateInstanceFrame first a = aggregateInstanceFrame second b) :
-    first.regime = second.regime := by
-  have hf := encodeMultiFrame_injective h
-  have h2 := (List.cons.inj (List.cons.inj hf).2).2
-  have hTag := List.cons.inj (List.cons.inj h2).1
-  exact WhirSecurityRegime.tagByte_injective hTag.1
+    first.regime = second.regime :=
+  (aggregateInstanceFrame_injective first second a b h).2.2.1
 
 /-- Canonical byte framing of a polynomial over `GoldilocksExt4`. -/
 def encodePolyExt4 (p : List GoldilocksExt4) : List UInt8 :=
@@ -2280,6 +2423,8 @@ def verifySuccinctAggregate (arith : RowArithmetization) (dom : WhirDomain)
   | sp0 :: _ =>
     decide (fsTranscript = aggregateInstanceFrame inst proof.agg) &&
     decide (proof.agg.regime = inst.regime) &&
+    decide (proof.agg.suite.suiteId = inst.suite.suiteId) &&
+    decide (proof.agg.params = inst.params) &&
     decide (sp0.stageRoot = proof.agg.traceCommitment) &&
     decide (proof.agg.challenges = deriveRowSumcheckChallenges fsTranscript proof.agg.roundPolys) &&
     verifyAggregateAlgebra inst.committee proof.agg &&
@@ -2897,9 +3042,34 @@ theorem succinct_acceptance_facts (arith : RowArithmetization) (dom : WhirDomain
     rcases Bool.and_eq_true_iff.mp h with ⟨h, c5⟩
     rcases Bool.and_eq_true_iff.mp h with ⟨h, c4⟩
     rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+    rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+    rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
     rcases Bool.and_eq_true_iff.mp h with ⟨c1, c2⟩
     exact ⟨of_decide_eq_true c1, of_decide_eq_true c2, of_decide_eq_true c4, c5,
       of_decide_eq_true c6, c7, c8⟩
+
+theorem succinct_acceptance_header_facts (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (proof : SuccinctAggregateProof) (fs : List UInt8)
+    (h : verifySuccinctAggregate arith dom inst proof fs = true) :
+    proof.agg.regime = inst.regime ∧
+    proof.agg.suite.suiteId = inst.suite.suiteId ∧
+    proof.agg.params = inst.params := by
+  unfold verifySuccinctAggregate at h
+  cases hSt : proof.stages with
+  | nil => rw [hSt] at h; cases h
+  | cons sp0 sps =>
+    rw [hSt] at h
+    dsimp only at h
+    rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+    rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+    rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+    rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+    rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+    rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+    rcases Bool.and_eq_true_iff.mp h with ⟨h, cParams⟩
+    rcases Bool.and_eq_true_iff.mp h with ⟨h, cSuite⟩
+    rcases Bool.and_eq_true_iff.mp h with ⟨_, cReg⟩
+    exact ⟨of_decide_eq_true cReg, of_decide_eq_true cSuite, of_decide_eq_true cParams⟩
 
 theorem verifyAggregateAlgebra_facts (committee : List PqPublicKey) (agg : AggregatedSignature)
     (h : verifyAggregateAlgebra committee agg = true) :
@@ -3272,6 +3442,282 @@ def succinct_merge_tree_knowledge_soundness (arith : RowArithmetization) (dom : 
     (succinct_aggregation_knowledge_soundness arith dom inst law p fs v hU.2.2.2.2.2 hB.1,
       succinct_merge_tree_knowledge_soundness arith dom inst law budget left vl hU.1 hB.2.1,
       succinct_merge_tree_knowledge_soundness arith dom inst law budget right vr hU.2.1 hB.2.2)
+
+/-- Propositional projection of `SuccinctOutcome`: either every active validator bit in
+    `proof.agg.bitmap` decodes from the committed Round-0 codeword `table0` to a valid
+    `verifyPqHashSig` signature, or one of the four transcript-indexed WHIR break witnesses
+    is inhabited. -/
+def SuccinctSoundOutcomeProp (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (proof : SuccinctAggregateProof)
+    (view : SuccinctExtractionView) : Prop :=
+  let table0 := (view.allTables.headD []).headD []
+  checkAllActiveSigners inst.suite inst.params inst.message inst.committee
+    proof.agg.bitmap (arith.decodeSigs table0) = true ∨
+  Nonempty (SumcheckSchwartzZippelHit 8 proof.agg.roundPolys
+    (adaptivePolys (arith.honestRound table0) proof.agg.challenges)
+    proof.agg.challenges) ∨
+  Nonempty (HashCollisionWitness pcsMerkleHash) ∨
+  Nonempty (WhirStageQueryMiss proof.finalWord dom view.allTables proof) ∨
+  Nonempty (WhirProximityHit arith dom proof.finalWord view.allTables proof)
+
+theorem succinctOutcome_to_prop {arith : RowArithmetization} {dom : WhirDomain}
+    {inst : AggPublicInstance} {proof : SuccinctAggregateProof} {view : SuccinctExtractionView}
+    (out : SuccinctOutcome arith dom inst proof view) :
+    SuccinctSoundOutcomeProp arith dom inst proof view :=
+  match out with
+  | .inl ⟨_, hAll⟩ => .inl hAll
+  | .inr (.inl hit) => .inr (.inl ⟨hit⟩)
+  | .inr (.inr (.inl col)) => .inr (.inr (.inl ⟨col⟩))
+  | .inr (.inr (.inr (.inl miss))) => .inr (.inr (.inr (.inl ⟨miss⟩)))
+  | .inr (.inr (.inr (.inr prox))) => .inr (.inr (.inr (.inr ⟨prox⟩)))
+
+/-- **`Prop` Knowledge Soundness of Multi-Stage `GoldilocksExt4` WHIR
+    (`succinct_aggregation_knowledge_soundness_thm`)**:
+    Proved directly by projecting the constructive `0 Classical.choice` `PSum` extractor
+    `succinct_aggregation_knowledge_soundness`. -/
+theorem succinct_aggregation_knowledge_soundness_thm (arith : RowArithmetization)
+    (dom : WhirDomain) (inst : AggPublicInstance) (law : arith.Lawful dom inst)
+    (proof : SuccinctAggregateProof) (fs : List UInt8) (view : SuccinctExtractionView)
+    (hAccept : verifySuccinctAggregate arith dom inst proof fs = true)
+    (hBound : StagesBound view.authPath dom.stages view.allTables proof.stages) :
+    SuccinctSoundOutcomeProp arith dom inst proof view :=
+  succinctOutcome_to_prop
+    (succinct_aggregation_knowledge_soundness arith dom inst law proof fs view hAccept hBound)
+
+/-- Propositional projection of the end-to-end hypertree EUF-CMA + WHIR unforgeability reduction. -/
+def SuccinctUnforgeabilityProp (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (sk_i : PqSecretKey)
+    (revealedFors : List (UInt64 × Nat × Nat))
+    (proof : SuccinctAggregateProof) (view : SuccinctExtractionView) : Prop :=
+  let table0 := (view.allTables.headD []).headD []
+  (∃ sig_i : PqHashSig,
+    Nonempty (HypertreeForgeryBreak inst.suite inst.params sk_i inst.message sig_i revealedFors)) ∨
+  Nonempty (SumcheckSchwartzZippelHit 8 proof.agg.roundPolys
+    (adaptivePolys (arith.honestRound table0) proof.agg.challenges)
+    proof.agg.challenges) ∨
+  Nonempty (HashCollisionWitness pcsMerkleHash) ∨
+  Nonempty (WhirStageQueryMiss proof.finalWord dom view.allTables proof) ∨
+  Nonempty (WhirProximityHit arith dom proof.finalWord view.allTables proof)
+
+private theorem unforgeabilityOutcome_to_prop {arith : RowArithmetization} {dom : WhirDomain}
+    {inst : AggPublicInstance} {sk_i : PqSecretKey}
+    {revealedFors : List (UInt64 × Nat × Nat)}
+    {proof : SuccinctAggregateProof} {view : SuccinctExtractionView}
+    (out :
+      let table0 := (view.allTables.headD []).headD []
+      PSum (Sigma fun sig_i : PqHashSig =>
+              HypertreeForgeryBreak inst.suite inst.params sk_i inst.message sig_i revealedFors)
+        (PSum (SumcheckSchwartzZippelHit 8 proof.agg.roundPolys
+            (adaptivePolys (arith.honestRound table0) proof.agg.challenges)
+            proof.agg.challenges)
+          (PSum (HashCollisionWitness pcsMerkleHash)
+            (PSum (WhirStageQueryMiss proof.finalWord dom view.allTables proof)
+              (WhirProximityHit arith dom proof.finalWord view.allTables proof))))) :
+    SuccinctUnforgeabilityProp arith dom inst sk_i revealedFors proof view :=
+  match out with
+  | .inl ⟨sig_i, brk⟩ => .inl ⟨sig_i, ⟨brk⟩⟩
+  | .inr (.inl hit) => .inr (.inl ⟨hit⟩)
+  | .inr (.inr (.inl col)) => .inr (.inr (.inl ⟨col⟩))
+  | .inr (.inr (.inr (.inl miss))) => .inr (.inr (.inr (.inl ⟨miss⟩)))
+  | .inr (.inr (.inr (.inr prox))) => .inr (.inr (.inr (.inr ⟨prox⟩)))
+
+/-- **`Prop` End-to-End Succinct `GoldilocksExt4` WHIR Aggregation Unforgeability Reduction
+    (`qsag_aggregate_unforgeability_reduction_thm`)**:
+    Proved directly by projecting the constructive `0 Classical.choice` extractor
+    `qsag_aggregate_unforgeability_reduction`. -/
+theorem qsag_aggregate_unforgeability_reduction_thm
+    (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (law : arith.Lawful dom inst)
+    (proof : SuccinctAggregateProof) (fs : List UInt8) (view : SuccinctExtractionView)
+    (i : Nat) (hPk : i < inst.committee.length) (hB : i < proof.agg.bitmap.length)
+    (sk_i : PqSecretKey)
+    (hKey_i : inst.committee[i]'hPk = derivePublicKey inst.suite inst.params sk_i)
+    (hActive_i : proof.agg.bitmap[i]'hB = true)
+    (queriedMsgs : List (List UInt8))
+    (qOracle : QueriedWotsOracle)
+    (revealedFors : List (UInt64 × Nat × Nat))
+    (hGeom : (inst.params.w = 4 ∧ inst.params.ell1 = 128) ∨
+      (inst.params.w = 16 ∧ inst.params.ell1 = 64))
+    (hFreshMsg : inst.message ∉ queriedMsgs)
+    (hAccept : verifySuccinctAggregate arith dom inst proof fs = true)
+    (hBound : StagesBound view.authPath dom.stages view.allTables proof.stages)
+    (hStatefulLeaf0Msg : ∀ sig : PqHashSig, inst.params.statefulJorts = true →
+      ∀ hRand hRoot hCtr hChains,
+        qOracle 0 (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
+          (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight) = some (hRand, hRoot, hCtr, hChains) →
+        ∃ mPrev ∈ queriedMsgs,
+          hRoot = thPreHash inst.suite sk_i.pkSeed
+            (derivePublicKey inst.suite inst.params sk_i).pkRoot mPrev)
+    (hStatelessLayer0Root : ∀ sig : PqHashSig, inst.params.statefulJorts = false →
+      ∀ hRand hRoot hCtr hChains,
+        qOracle 0 (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
+          (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight) = some (hRand, hRoot, hCtr, hChains) →
+        hRoot = computeForsPk inst.suite inst.params sk_i
+          (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
+          (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight))
+    (hUpperOracle : ∀ (l : Nat) (g : Nat), ReachableUpperHypertreePos inst.params l g →
+      let hRoot0 := computeXmssSubtreeRoot inst.suite inst.params sk_i
+        (UInt32.ofNat (l - 1)) (UInt64.ofNat g)
+      (∀ hRand hCtr hChains,
+        qOracle (UInt32.ofNat l) (UInt64.ofNat (g / 2 ^ inst.params.subtreeHeight))
+          (g % 2 ^ inst.params.subtreeHeight) = some (hRand, hRoot0, hCtr, hChains) →
+        let hmH := thHashMsg inst.suite hRand sk_i.pkSeed
+          (derivePublicKey inst.suite inst.params sk_i).pkRoot hRoot0
+          (UInt32.ofNat l) (UInt64.ofNat (g / 2 ^ inst.params.subtreeHeight))
+          (UInt32.ofNat (g % 2 ^ inst.params.subtreeHeight)) hCtr
+        let digH := extractBaseWDigits inst.params.w inst.params.ell1 hmH
+        checkTargetSum inst.params.w inst.params.ell1 inst.params.targetSum digH = true ∧
+        recoverWotsPkFromSig inst.suite inst.params sk_i.pkSeed (UInt32.ofNat l)
+          (UInt64.ofNat (g / 2 ^ inst.params.subtreeHeight))
+          (g % 2 ^ inst.params.subtreeHeight) digH hChains =
+        computeWotsPk inst.suite inst.params sk_i (UInt32.ofNat l)
+          (UInt64.ofNat (g / 2 ^ inst.params.subtreeHeight))
+          (g % 2 ^ inst.params.subtreeHeight)) ∧
+      (∀ hRand hR hCtr hChains,
+        qOracle (UInt32.ofNat l) (UInt64.ofNat (g / 2 ^ inst.params.subtreeHeight))
+          (g % 2 ^ inst.params.subtreeHeight) = some (hRand, hR, hCtr, hChains) → hR = hRoot0))
+    (hLayer0Valid : ∀ sig : PqHashSig, ∀ hRand hRoot0 hCtr hChains,
+      qOracle 0 (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
+        (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight) = some (hRand, hRoot0, hCtr, hChains) →
+      let hmH := thHashMsg inst.suite hRand sk_i.pkSeed
+        (derivePublicKey inst.suite inst.params sk_i).pkRoot hRoot0
+        0 (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
+        (UInt32.ofNat (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight)) hCtr
+      let digH := extractBaseWDigits inst.params.w inst.params.ell1 hmH
+      checkTargetSum inst.params.w inst.params.ell1 inst.params.targetSum digH = true ∧
+      recoverWotsPkFromSig inst.suite inst.params sk_i.pkSeed 0
+        (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
+        (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight) digH hChains =
+      computeWotsPk inst.suite inst.params sk_i 0
+        (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
+        (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight)) :
+    SuccinctUnforgeabilityProp arith dom inst sk_i revealedFors proof view :=
+  unforgeabilityOutcome_to_prop
+    (qsag_aggregate_unforgeability_reduction arith dom inst law proof fs view i hPk hB sk_i hKey_i
+      hActive_i queriedMsgs qOracle revealedFors hGeom hFreshMsg hAccept hBound
+      hStatefulLeaf0Msg hStatelessLayer0Root hUpperOracle hLayer0Valid)
+
+/-- **`Prop` Unforgeability Reduction Against an Executed Stateless Signing Oracle
+    (`qsag_aggregate_unforgeability_reduction_of_statelessLog_thm`)**. -/
+theorem qsag_aggregate_unforgeability_reduction_of_statelessLog_thm
+    (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (law : arith.Lawful dom inst)
+    (proof : SuccinctAggregateProof) (fs : List UInt8) (view : SuccinctExtractionView)
+    (i : Nat) (hPk : i < inst.committee.length) (hB : i < proof.agg.bitmap.length)
+    (sk_i : PqSecretKey)
+    (hKey_i : inst.committee[i]'hPk = derivePublicKey inst.suite inst.params sk_i)
+    (hActive_i : proof.agg.bitmap[i]'hB = true)
+    (queries : List PqSigningQuery)
+    (hGeom : (inst.params.w = 4 ∧ inst.params.ell1 = 128) ∨
+      (inst.params.w = 16 ∧ inst.params.ell1 = 64))
+    (hStateless : inst.params.statefulJorts = false)
+    (hLayers : inst.params.numLayers ≤ 2 ^ 32)
+    (hFreshMsg : inst.message ∉
+      (signingOracleLog inst.suite inst.params sk_i queries).map Prod.fst)
+    (hAccept : verifySuccinctAggregate arith dom inst proof fs = true)
+    (hBound : StagesBound view.authPath dom.stages view.allTables proof.stages) :
+    SuccinctUnforgeabilityProp arith dom inst sk_i
+      ((signingOracleLog inst.suite inst.params sk_i queries).flatMap fun e =>
+        (List.range inst.params.forsTrees).map fun j =>
+          (UInt64.ofNat (e.2.leafGlobalIdx / 2 ^ inst.params.subtreeHeight),
+           e.2.leafGlobalIdx % 2 ^ inst.params.subtreeHeight,
+           sigForsLeafIdx inst.suite inst.params
+             (derivePublicKey inst.suite inst.params sk_i) e.1 e.2 j))
+      proof view :=
+  unforgeabilityOutcome_to_prop
+    (qsag_aggregate_unforgeability_reduction_of_statelessLog arith dom inst law proof fs view
+      i hPk hB sk_i hKey_i hActive_i queries hGeom hStateless hLayers hFreshMsg hAccept hBound)
+
+/-- **`Prop` Unforgeability Reduction Against an Executed Checked Stateful Signing Oracle
+    (`qsag_aggregate_unforgeability_reduction_of_checkedStatefulLog_thm`)**. -/
+theorem qsag_aggregate_unforgeability_reduction_of_checkedStatefulLog_thm
+    (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (law : arith.Lawful dom inst)
+    (proof : SuccinctAggregateProof) (fs : List UInt8) (view : SuccinctExtractionView)
+    (i : Nat) (hPk : i < inst.committee.length) (hB : i < proof.agg.bitmap.length)
+    (sk_i : PqSecretKey)
+    (hKey_i : inst.committee[i]'hPk = derivePublicKey inst.suite inst.params sk_i)
+    (hActive_i : proof.agg.bitmap[i]'hB = true)
+    (queries : List CheckedStatefulQuery)
+    (hGeom : (inst.params.w = 4 ∧ inst.params.ell1 = 128) ∨
+      (inst.params.w = 16 ∧ inst.params.ell1 = 64))
+    (hValidParams : inst.params.checkedStatefulValid = true)
+    (hFreshMsg : inst.message ∉
+      ((execCheckedStatefulOracle inst.suite inst.params sk_i initCheckedStatefulLatch
+        queries).emittedLog.map fun e => e.2.1))
+    (hAccept : verifySuccinctAggregate arith dom inst proof fs = true)
+    (hBound : StagesBound view.authPath dom.stages view.allTables proof.stages) :
+    SuccinctUnforgeabilityProp arith dom inst sk_i [] proof view :=
+  unforgeabilityOutcome_to_prop
+    (qsag_aggregate_unforgeability_reduction_of_checkedStatefulLog arith dom inst law proof fs view
+      i hPk hB sk_i hKey_i hActive_i queries hGeom hValidParams hFreshMsg hAccept hBound)
+
+theorem verifyMergeTree_bitmap_length (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (budget : Nat) (node : MergeNode)
+    (h : verifyMergeTree arith dom inst budget node = true) :
+    node.certificate.bitmap.length = inst.committee.length := by
+  cases budget with
+  | zero => cases h
+  | succ b =>
+    cases node with
+    | leaf p fs =>
+      have hAcc := (Bool.and_eq_true_iff.mp h).2
+      exact (verifyAggregateAlgebra_facts inst.committee p.agg
+        (succinct_acceptance_facts arith dom inst p fs hAcc).2.2.2.1).1
+    | branch p fs left right =>
+      have hAcc := (succinct_merge_tree_children_sound arith dom inst b p fs left right h).2.2.2.2.2
+      exact (verifyAggregateAlgebra_facts inst.committee p.agg
+        (succinct_acceptance_facts arith dom inst p fs hAcc).2.2.2.1).1
+
+/-- Recursive propositional knowledge soundness + disjoint stake-popcount conservation across an
+    entire accepted `MergeNode` tree. -/
+def SuccinctMergeTreeSoundProp (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) : MergeNode → SuccinctViewTree → Prop
+  | .leaf p _, .leaf v => SuccinctSoundOutcomeProp arith dom inst p v
+  | .branch p _ left right, .branch v vl vr =>
+    SuccinctSoundOutcomeProp arith dom inst p v ∧
+    p.agg.childrenCommitment =
+      some (left.certificate.traceCommitment, right.certificate.traceCommitment) ∧
+    bitmapDisjointSpec left.certificate.bitmap right.certificate.bitmap = true ∧
+    p.agg.bitmap = bitmapUnionSpec left.certificate.bitmap right.certificate.bitmap ∧
+    bitmapPopcountSpec p.agg.bitmap =
+      bitmapPopcountSpec left.certificate.bitmap + bitmapPopcountSpec right.certificate.bitmap ∧
+    SuccinctMergeTreeSoundProp arith dom inst left vl ∧
+    SuccinctMergeTreeSoundProp arith dom inst right vr
+  | _, _ => False
+
+/-- **`Prop` Knowledge Soundness & Stake Conservation of Recursive Succinct Merge Trees
+    (`succinct_merge_tree_knowledge_soundness_thm`)**:
+    Proved directly by combining the constructive `0 Classical.choice` extractor
+    `succinct_merge_tree_knowledge_soundness` with `popcount_union_disjoint_eq_add` at every
+    internal branch node. -/
+theorem succinct_merge_tree_knowledge_soundness_thm (arith : RowArithmetization)
+    (dom : WhirDomain) (inst : AggPublicInstance) (law : arith.Lawful dom inst) :
+    ∀ (budget : Nat) (node : MergeNode) (views : SuccinctViewTree),
+      verifyMergeTree arith dom inst budget node = true →
+      ViewTreeBound dom node views →
+      SuccinctMergeTreeSoundProp arith dom inst node views
+  | 0, _, _, h, _ => False.elim (Bool.false_ne_true h)
+  | b + 1, .leaf p fs, .leaf v, h, hB =>
+    succinctOutcome_to_prop
+      (succinct_merge_tree_knowledge_soundness arith dom inst law (b + 1) (.leaf p fs) (.leaf v) h hB)
+  | _ + 1, .leaf _ _, .branch _ _ _, _, hB => False.elim hB
+  | _ + 1, .branch _ _ _ _, .leaf _, _, hB => False.elim hB
+  | budget + 1, .branch p fs left right, .branch v vl vr, h, hB => by
+    have hTree := succinct_merge_tree_knowledge_soundness arith dom inst law
+      (budget + 1) (.branch p fs left right) (.branch v vl vr) h hB
+    have hU := succinct_merge_tree_children_sound arith dom inst budget p fs left right h
+    have hLenL := verifyMergeTree_bitmap_length arith dom inst budget left hU.1
+    have hLenR := verifyMergeTree_bitmap_length arith dom inst budget right hU.2.1
+    have hPop : bitmapPopcountSpec p.agg.bitmap =
+        bitmapPopcountSpec left.certificate.bitmap +
+          bitmapPopcountSpec right.certificate.bitmap := by
+      rw [hU.2.2.2.2.1]
+      exact popcount_union_disjoint_eq_add left.certificate.bitmap right.certificate.bitmap
+        hU.2.2.2.1 (hLenL.trans hLenR.symm)
+    exact ⟨succinctOutcome_to_prop hTree.1, hU.2.2.1, hU.2.2.2.1, hU.2.2.2.2.1, hPop,
+      succinct_merge_tree_knowledge_soundness_thm arith dom inst law budget left vl hU.1 hB.2.1,
+      succinct_merge_tree_knowledge_soundness_thm arith dom inst law budget right vr hU.2.1 hB.2.2⟩
 
 end Aggregation
 
@@ -3948,6 +4394,61 @@ theorem whir_bciksJohnsonClassical128_total_error_bound {β : Type}
     rw [Nat.add_sub_cancel, hpow] at hJoint
     rw [hpow]
     exact error_arith _ _ _ _ _ _ _ _ hJoint hD hM (Nat.pow_pos hs) hT hs
+
+/-- **Joint `GoldilocksExt4` WHIR Unconditional `[BCIKS20]` QROM-128 Multi-Stage Transcript
+    Soundness (`whir_bciksJohnsonQrom128_total_error_bound`)**:
+    For EVERY stage `s ∈ whirSchedule4Stage .bciksJohnsonQrom128` (`q = (258, 130, 88, 66)`,
+    positive Johnson proximity slack `η = 1 / 1024 > 0`, list size `L ≤ 512`), over any
+    `S : List GoldilocksExt4` (`p^4 ≤ S.length`) with challenge events bounded by
+    `productionExt4RoundEventBudget` (`< 2^-211`), the joint bad `(challengeVector, queryTuple)`
+    fraction is strictly `< 2^-210` (`< 2^-211 + 2^-256`, yielding `> 128` QROM bits against
+    `Q_RO ≤ 2^40` challenge queries and `16`-bit PoW Grover query grinding). -/
+theorem whir_bciksJohnsonQrom128_total_error_bound {β : Type}
+    (s : WhirStageSpec) (hs : s ∈ whirSchedule4Stage .bciksJohnsonQrom128)
+    (S : List GoldilocksExt4) (n : Nat) (hn : 0 < n)
+    (E : List GoldilocksExt4 → GoldilocksExt4 → Bool) (d : Nat → Nat)
+    (hE : ∀ pre, (S.filter (E pre)).length ≤ d pre.length)
+    (hBudget : roundBoundSum d n ≤ productionExt4RoundEventBudget)
+    (hField : productionAggParams.fieldSize ≤ S.length)
+    (dom : List β) (hdom : s.numQueries ≤ dom.length)
+    (bad : List GoldilocksExt4 → β → Bool)
+    (hfar : ∀ cs ∈ challengeVectors S n, anyRoundEvent E cs = false →
+      (1024 - (1024 / s.johnsonSqrtBlowup + 1)) * dom.length ≤ 1024 * countGood (bad cs) dom) :
+    (badTranscriptPairs S n E dom s.numQueries bad).length * 2 ^ 210 <
+      S.length ^ n * (distinctTuples s.numQueries dom).length := by
+  have hAllLe : ∀ st ∈ whirSchedule4Stage .bciksJohnsonQrom128,
+      1024 / st.johnsonSqrtBlowup + 1 ≤ 1024 := by decide
+  have hLe : 1024 / s.johnsonSqrtBlowup + 1 ≤ 1024 := hAllLe s hs
+  have hSub : 1024 - (1024 - (1024 / s.johnsonSqrtBlowup + 1)) =
+      1024 / s.johnsonSqrtBlowup + 1 := by omega
+  have hJoint := transcript_bad_pairs_le S n E d hE dom s.numQueries
+    (1024 - (1024 / s.johnsonSqrtBlowup + 1)) 1024 bad hfar
+  rw [hSub] at hJoint
+  have hT : 0 < (distinctTuples s.numQueries dom).length := by
+    rw [distinctTuples_length]; exact fallingFactorial_pos _ _ hdom
+  have hField' : goldilocksPrime ^ 4 ≤ S.length := hField
+  have hsPos : 0 < S.length := Nat.lt_of_lt_of_le (by decide : 0 < goldilocksPrime ^ 4) hField'
+  have hC : 2 * (productionExt4RoundEventBudget * 2 ^ 210) ≤ goldilocksPrime ^ 4 := by decide
+  have hSlack := (bciksJohnsonQrom128_positive_slack s hs).2
+  have hM : 2 * ((1024 / s.johnsonSqrtBlowup + 1) ^ s.numQueries * 2 ^ 210) <
+      1024 ^ s.numQueries := by
+    have hPowLe : 2 * 2 ^ 210 ≤ 2 ^ 256 := by decide
+    have hRewrite : 2 * ((1024 / s.johnsonSqrtBlowup + 1) ^ s.numQueries * 2 ^ 210) =
+        (1024 / s.johnsonSqrtBlowup + 1) ^ s.numQueries * (2 * 2 ^ 210) := by
+      simp only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm]
+    rw [hRewrite]
+    exact Nat.lt_of_le_of_lt (Nat.mul_le_mul_left _ hPowLe) hSlack
+  have hD : 2 * (roundBoundSum d n * 2 ^ 210) ≤ S.length :=
+    Nat.le_trans (Nat.mul_le_mul_left 2 (Nat.mul_le_mul_right (2 ^ 210) hBudget))
+      (Nat.le_trans hC hField')
+  cases n with
+  | zero => exact absurd hn (Nat.lt_irrefl 0)
+  | succ k =>
+    have hpow : S.length ^ (k + 1) = S.length * S.length ^ k := by
+      rw [Nat.pow_succ, Nat.mul_comm]
+    rw [Nat.add_sub_cancel, hpow] at hJoint
+    rw [hpow]
+    exact error_arith _ _ _ _ _ _ _ _ hJoint hD hM (Nat.pow_pos hsPos) hT hsPos
 
 /-- Concrete duplicate-free `List GoldilocksExt4` sample of size `k` (eliminating `List Unit`). -/
 def canonicalExt4Sample (k : Nat) : List GoldilocksExt4 :=
@@ -5571,6 +6072,8 @@ theorem honestSbox7WhirProof_accepts (seed x0 b1 : Goldilocks) (msg : List UInt8
   have hFs : fs = aggregateInstanceFrame inst agg :=
     aggregateInstanceFrame_congr inst aggStub agg rfl rfl rfl
   have hReg : agg.regime = inst.regime := rfl
+  have hSuite : agg.suite.suiteId = inst.suite.suiteId := rfl
+  have hParams : agg.params = inst.params := rfl
   have hRoot : sp0.stageRoot = agg.traceCommitment :=
     sbox7Stage0Proof_stageRoot x0 b1 prior0 root1 rowChalls pr0
   have hCh : agg.challenges = deriveRowSumcheckChallenges fs agg.roundPolys := rfl
@@ -5594,8 +6097,8 @@ theorem honestSbox7WhirProof_accepts (seed x0 b1 : Goldilocks) (msg : List UInt8
           (rowChalls.headD GoldilocksExt4.zero), hRec0]
   have hFinalCw : (rsSbox7TraceArith seed root).isFinalCodeword finalWord = true :=
     isConstExt4Rs_replicate 8 pr0
-  rw [decide_eq_true hFs, decide_eq_true hReg, decide_eq_true hRoot, decide_eq_true hCh,
-      hAlgOk, decide_eq_true hTermEq, hFinalCw]
+  rw [decide_eq_true hFs, decide_eq_true hReg, decide_eq_true hSuite, decide_eq_true hParams,
+      decide_eq_true hRoot, decide_eq_true hCh, hAlgOk, decide_eq_true hTermEq, hFinalCw]
   simp only [Bool.true_and, rsSbox7WhirDomain, verifyWhirStages]
   rw [sbox7Stage1Proof_stageRoot prior1 pr0]
   exact Bool.and_eq_true_iff.mpr
@@ -5777,6 +6280,48 @@ theorem aggregate_message_substitution_rejected (arith : RowArithmetization) (do
   have hFs1 := (succinct_acceptance_facts arith dom inst1 proof fs hAcc1).1
   refine aggregate_wrong_instance_rejected arith dom inst2 proof fs (fun hFs2 => hMsg ?_)
   exact aggregate_frame_message_binding inst1 inst2 proof.agg proof.agg (hFs1.symm.trans hFs2)
+
+/-- `#tooth` `verifySuccinctAggregate` rejects mismatched `TweakableHashSuite.suiteId`. -/
+theorem tooth_whir_wrong_suite_rejected (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (proof : SuccinctAggregateProof) (fs : List UInt8)
+    (hNe : proof.agg.suite.suiteId ≠ inst.suite.suiteId) :
+    verifySuccinctAggregate arith dom inst proof fs = false := by
+  unfold verifySuccinctAggregate
+  cases proof.stages with
+  | nil => rfl
+  | cons _ _ => simp [decide_eq_false hNe]
+
+/-- `#tooth` `verifySuccinctAggregate` rejects mismatched `PqHashParams` header. -/
+theorem tooth_whir_wrong_params_rejected (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (proof : SuccinctAggregateProof) (fs : List UInt8)
+    (hNe : proof.agg.params ≠ inst.params) :
+    verifySuccinctAggregate arith dom inst proof fs = false := by
+  unfold verifySuccinctAggregate
+  cases proof.stages with
+  | nil => rfl
+  | cons _ _ => simp [decide_eq_false hNe]
+
+/-- `#tooth` `verifySuccinctAggregate` rejects committee substitution on the same transcript. -/
+theorem aggregate_committee_substitution_rejected (arith : RowArithmetization) (dom : WhirDomain)
+    (inst1 inst2 : AggPublicInstance) (proof : SuccinctAggregateProof) (fs : List UInt8)
+    (hComm : inst1.committee ≠ inst2.committee)
+    (hAcc1 : verifySuccinctAggregate arith dom inst1 proof fs = true) :
+    verifySuccinctAggregate arith dom inst2 proof fs = false := by
+  have hFs1 := (succinct_acceptance_facts arith dom inst1 proof fs hAcc1).1
+  refine aggregate_wrong_instance_rejected arith dom inst2 proof fs (fun hFs2 => hComm ?_)
+  exact (aggregateInstanceFrame_injective inst1 inst2 proof.agg proof.agg
+    (hFs1.symm.trans hFs2)).2.2.2.2.1
+
+/-- `#tooth` `verifySuccinctAggregate` rejects parameter substitution on the same transcript. -/
+theorem aggregate_params_substitution_rejected (arith : RowArithmetization) (dom : WhirDomain)
+    (inst1 inst2 : AggPublicInstance) (proof : SuccinctAggregateProof) (fs : List UInt8)
+    (hPar : inst1.params ≠ inst2.params)
+    (hAcc1 : verifySuccinctAggregate arith dom inst1 proof fs = true) :
+    verifySuccinctAggregate arith dom inst2 proof fs = false := by
+  have hFs1 := (succinct_acceptance_facts arith dom inst1 proof fs hAcc1).1
+  refine aggregate_wrong_instance_rejected arith dom inst2 proof fs (fun hFs2 => hPar ?_)
+  exact (aggregateInstanceFrame_injective inst1 inst2 proof.agg proof.agg
+    (hFs1.symm.trans hFs2)).2.2.2.2.2.1
 
 end Aggregation
 
