@@ -147,10 +147,18 @@ pub const MAX_SIG_PROOF_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_MSG_BYTES: u64 = 64 * 1024 * 1024;
 
 pub struct ZeroizingBuf(pub Vec<u8>);
+impl std::ops::Deref for ZeroizingBuf {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] { &self.0 }
+}
 impl Drop for ZeroizingBuf {
     fn drop(&mut self) {
-        self.0.fill(0);
-        core::hint::black_box(self.0.as_mut_slice());
+        let cap = self.0.capacity();
+        if cap > self.0.len() {
+            self.0.resize(cap, 0);
+        }
+        qsag_accel::ct::ct_zeroize_bytes(&mut self.0);
+        self.0.clear();
     }
 }
 
@@ -163,8 +171,7 @@ impl std::ops::Deref for Secret32 {
 }
 impl Drop for Secret32 {
     fn drop(&mut self) {
-        self.0.fill(0);
-        core::hint::black_box(&mut self.0);
+        qsag_accel::ct::ct_zeroize_bytes(&mut self.0);
     }
 }
 
@@ -245,9 +252,13 @@ pub fn write_new(path: &str, contents: &[u8], secret: bool) -> Result<(), CliErr
 /// rename it over the original, then sync the directory.
 pub fn replace_secret(path: &str, contents: &[u8]) -> Result<(), CliError> {
     let tmp = format!("{path}.{}.tmp", crate::codec::to_hex(&os_random_32()?));
-    write_new(&tmp, contents, true)?;
-    std::fs::rename(&tmp, path).map_err(|e| CliError::io(format_args!("replacing {path}"), e))?;
-    sync_parent(path)
+    let result = (|| {
+        write_new(&tmp, contents, true)?;
+        std::fs::rename(&tmp, path).map_err(|e| CliError::io(format_args!("replacing {path}"), e))?;
+        sync_parent(path)
+    })();
+    if result.is_err() { let _ = std::fs::remove_file(&tmp); }
+    result
 }
 
 /// 32 bytes from the operating system's entropy device.
@@ -272,6 +283,16 @@ mod tests {
         items.iter().map(|s| s.to_string()).collect()
     }
 
+    #[test]
+    fn failed_replace_removes_temporary_file() {
+        let dir = std::env::temp_dir().join(format!("qsag-replace-{}", crate::codec::to_hex(&os_random_32().unwrap())));
+        std::fs::create_dir(&dir).unwrap();
+        let destination = dir.join("directory");
+        std::fs::create_dir(&destination).unwrap();
+        assert!(replace_secret(destination.to_str().unwrap(), b"secret").is_err());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     #[test]
     fn parses_options_flags_and_positionals() {
         let args = Args::parse(

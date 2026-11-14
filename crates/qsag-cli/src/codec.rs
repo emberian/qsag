@@ -14,7 +14,7 @@ pub fn to_hex(bytes: &[u8]) -> String {
 }
 
 /// Strict hex: even length, `[0-9a-fA-F]` only. Surrounding ASCII whitespace is ignored.
-pub fn from_hex(text: &str) -> Result<Vec<u8>, CliError> {
+pub fn from_hex(text: &str) -> Result<crate::cli::ZeroizingBuf, CliError> {
     let text = text.trim();
     if !text.len().is_multiple_of(2) {
         return Err(CliError::input("hex string has odd length"));
@@ -29,12 +29,24 @@ pub fn from_hex(text: &str) -> Result<Vec<u8>, CliError> {
     for pair in text.as_bytes().as_chunks::<2>().0 {
         decoded.0.push(nibble(pair[0])? << 4 | nibble(pair[1])?);
     }
-    Ok(std::mem::take(&mut decoded.0))
+    Ok(decoded)
 }
 
 pub fn from_hex_exact<const N: usize>(text: &str, what: &str) -> Result<[u8; N], CliError> {
-    <[u8; N]>::try_from(crate::cli::ZeroizingBuf(from_hex(text)?).0.as_slice())
+    <[u8; N]>::try_from(from_hex(text)?.0.as_slice())
         .map_err(|_| CliError::input(format!("{what} must be exactly {N} bytes of hex")))
+}
+
+pub fn from_hex_secret32(text: &str, what: &str) -> Result<crate::cli::Secret32, CliError> {
+    let decoded = from_hex(text)?;
+    if decoded.len() != 32 {
+        return Err(CliError::input(format!(
+            "{what} must be exactly 32 bytes of hex"
+        )));
+    }
+    let mut secret = crate::cli::Secret32([0u8; 32]);
+    secret.0.copy_from_slice(&decoded);
+    Ok(secret)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -112,7 +124,7 @@ impl Json {
             .and_then(Json::as_u64)
             .ok_or_else(|| CliError::input(format!("missing or non-integer field \"{key}\"")))
     }
-    pub fn field_hex(&self, key: &str) -> Result<Vec<u8>, CliError> {
+    pub fn field_hex(&self, key: &str) -> Result<crate::cli::ZeroizingBuf, CliError> {
         from_hex(self.field_str(key)?)
     }
 
@@ -374,7 +386,7 @@ mod tests {
 
     #[test]
     fn hex_roundtrip_and_rejections() {
-        assert_eq!(from_hex(" 00ffA5\n").unwrap(), vec![0, 255, 0xA5]);
+        assert_eq!(from_hex(" 00ffA5\n").unwrap().0, vec![0, 255, 0xA5]);
         assert_eq!(to_hex(&[0, 255, 0xA5]), "00ffa5");
         assert!(from_hex("abc").is_err());
         assert!(from_hex("zz").is_err());

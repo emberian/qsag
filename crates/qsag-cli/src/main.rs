@@ -9,6 +9,7 @@ mod cli;
 mod codec;
 mod kat;
 mod keys;
+mod envelope;
 mod policy;
 mod schemes;
 mod vault;
