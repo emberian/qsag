@@ -1434,7 +1434,7 @@ private theorem int_cauchy_schwarz_finSum :
     ∀ (n : Nat) (u v : Fin n → Int),
       (finIntSum n (fun i => u i * v i)) ^ 2 ≤
         finIntSum n (fun i => u i * u i) * finIntSum n (fun i => v i * v i)
-  | 0, _, _ => by simp [finIntSum]
+  | 0, _, _ => by unfold finIntSum; decide
   | n + 1, u, v => by
     let u0 := u ⟨0, Nat.zero_lt_succ n⟩
     let v0 := v ⟨0, Nat.zero_lt_succ n⟩
@@ -1470,6 +1470,23 @@ private theorem int_cauchy_schwarz_finSum :
     rw [hSqL, hSqR]
     omega
 
+private theorem int_mul_nonneg {a b : Int} (ha : 0 ≤ a) (hb : 0 ≤ b) : 0 ≤ a * b := by
+  cases a with
+  | ofNat m =>
+    cases b with
+    | ofNat n => exact Int.ofNat_le.mpr (Nat.zero_le (m * n))
+    | negSucc n => cases hb
+  | negSucc m => cases ha
+
+private theorem int_mul_pos {a b : Int} (ha : 0 < a) (hb : 0 < b) : 0 < a * b := by
+  cases a with
+  | ofNat m =>
+    cases b with
+    | ofNat n =>
+      exact Int.ofNat_lt.mpr (Nat.mul_pos (Int.ofNat_lt.mp ha) (Int.ofNat_lt.mp hb))
+    | negSucc n => cases hb
+  | negSucc m => cases ha
+
 private theorem cs_combine_two {a1 b1 c1 a2 b2 c2 : Int}
     (ha1 : 0 ≤ a1) (hb1 : 0 ≤ b1) (ha2 : 0 ≤ a2) (hb2 : 0 ≤ b2)
     (h1 : c1 ^ 2 ≤ a1 * b1) (h2 : c2 ^ 2 ≤ a2 * b2) :
@@ -1477,8 +1494,14 @@ private theorem cs_combine_two {a1 b1 c1 a2 b2 c2 : Int}
   have p2 : ∀ x : Int, x ^ 2 = x * x := fun x => by
     change x ^ (1 + 1) = x * x
     rw [Int.pow_succ, Int.pow_succ, Int.pow_zero, Int.one_mul]
-  have hProd : c1 ^ 2 * c2 ^ 2 ≤ (a1 * b1) * (a2 * b2) :=
-    Int.mul_le_mul h1 h2 (by rw [p2]; exact int_sq_nonneg c2) (Int.mul_nonneg ha1 hb1)
+  have hProd : c1 ^ 2 * c2 ^ 2 ≤ (a1 * b1) * (a2 * b2) := by
+    have hs1 : 0 ≤ (a1 * b1 - c1 ^ 2) * c2 ^ 2 :=
+      int_mul_nonneg (by omega) (by rw [p2]; exact int_sq_nonneg c2)
+    rw [Int.sub_eq_add_neg, Int.add_mul, Int.neg_mul] at hs1
+    have hs2 : 0 ≤ (a1 * b1) * (a2 * b2 - c2 ^ 2) :=
+      int_mul_nonneg (int_mul_nonneg ha1 hb1) (by omega)
+    rw [Int.sub_eq_add_neg, Int.mul_add, Int.mul_neg] at hs2
+    omega
   have hAmGm : 4 * ((a1 * b1) * (a2 * b2)) ≤ (a1 * b2 + a2 * b1) ^ 2 := by
     have hDiffSq := int_sq_nonneg (a1 * b2 - a2 * b1)
     rw [p2]
@@ -1513,19 +1536,30 @@ private theorem cs_combine_two {a1 b1 c1 a2 b2 c2 : Int}
       rfl
     rw [h2c, Int.mul_assoc 4 (c1 * c1) (c2 * c2)]
   have hCrossSq : (2 * c1 * c2) ^ 2 ≤ (a1 * b2 + a2 * b1) ^ 2 := by
-    rw [h4L]
-    exact Int.le_trans (Int.mul_le_mul_of_nonneg_left hProd (by decide)) hAmGm
+    omega
   have hCross : 2 * c1 * c2 ≤ a1 * b2 + a2 * b1 := by
-    have hSN : 0 ≤ a1 * b2 + a2 * b1 :=
-      Int.add_nonneg (Int.mul_nonneg ha1 hb2) (Int.mul_nonneg ha2 hb1)
-    by_cases hc : 2 * c1 * c2 ≤ a1 * b2 + a2 * b1
-    · exact hc
-    · exfalso
-      rw [p2, p2] at hCrossSq
-      have hGt : a1 * b2 + a2 * b1 < 2 * c1 * c2 := by omega
-      have hPosR : 0 < 2 * c1 * c2 := by omega
-      have h1' := Int.mul_le_mul_of_nonneg_left (Int.le_of_lt hGt) hSN
-      have h2' := Int.mul_lt_mul_of_pos_right hGt hPosR
+    let u := 2 * c1 * c2
+    let v := a1 * b2 + a2 * b1
+    have hSN : 0 ≤ v := by
+      have pA := int_mul_nonneg ha1 hb2
+      have pB := int_mul_nonneg ha2 hb1
+      dsimp only [v]; omega
+    if hc : u ≤ v then
+      exact hc
+    else
+      exfalso
+      have hSqUV : u * u ≤ v * v := by
+        change (2 * c1 * c2) * (2 * c1 * c2) ≤ (a1 * b2 + a2 * b1) * (a1 * b2 + a2 * b1)
+        rwa [p2, p2] at hCrossSq
+      have hPosDiff : 0 < u - v := by omega
+      have hPosSum : 0 < u + v := by omega
+      have hPosProd : 0 < (u - v) * (u + v) := int_mul_pos hPosDiff hPosSum
+      have hDiffSq : (u - v) * (u + v) = u * u - v * v := by
+        calc (u - v) * (u + v)
+          _ = u * (u + v) - v * (u + v) := Int.sub_mul u v (u + v)
+          _ = (u * u + u * v) - (v * u + v * v) := by rw [Int.mul_add u u v, Int.mul_add v u v]
+          _ = (u * u + u * v) - (u * v + v * v) := by rw [Int.mul_comm v u]
+          _ = u * u - v * v := by omega
       omega
   have expL : (c1 + c2) ^ 2 = c1 ^ 2 + c2 ^ 2 + 2 * c1 * c2 := by
     rw [p2 (c1 + c2), Int.add_mul, Int.mul_add, Int.mul_add, Int.mul_comm c2 c1, ← p2 c1, ← p2 c2]
@@ -1552,7 +1586,7 @@ theorem born_prob_diff_sq_le_four_state_dist_sq {cardX w cardAnc : Nat}
         Int.ofNat (qsum M (fun i => GaussInt.normSq (GaussInt.add (z i) (g i)))) := by
     intro M z g
     induction M with
-    | zero => simp [finIntSum, qsum]
+    | zero => unfold finIntSum qsum; decide
     | succ m ihm =>
       let z0 := z ⟨0, Nat.zero_lt_succ m⟩
       let g0 := g ⟨0, Nat.zero_lt_succ m⟩
@@ -1593,7 +1627,7 @@ theorem born_prob_diff_sq_le_four_state_dist_sq {cardX w cardAnc : Nat}
         Int.ofNat (qsum N A) * Int.ofNat (qsum N B) := by
     intro N A B P Q hI
     induction N with
-    | zero => simp [qsum]
+    | zero => unfold qsum; decide
     | succ m ihm =>
       simp only [qsum, ofNat_add_eq]
       have hEqDiff : Int.ofNat (P ⟨0, Nat.zero_lt_succ m⟩) +
@@ -1643,7 +1677,7 @@ theorem born_prob_diff_sq_le_four_state_dist_sq {cardX w cardAnc : Nat}
     apply liftQsum
     intro x
     cases E x
-    · simp
+    · simp only [Bool.false_eq_true, ↓reduceIte]; decide
     · simp only [↓reduceIte]; exact hY x
   have hSubLe : QVec.measureNormSq E (ψ.sub φ) ≤ QVec.stateNormSq (ψ.sub φ) :=
     QVec.queryMassOn_le_stateNormSq E (ψ.sub φ)
