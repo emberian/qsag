@@ -150,13 +150,7 @@ impl BaggyParams {
         self.subtree_height.checked_mul(self.num_layers)
     }
 
-    pub const fn total_height(&self) -> usize {
-        match self.total_height_checked() {
-            Some(h) => h,
-            None => panic!("BaggyParams::total_height overflow"),
-        }
-    }
-
+    /// FORS trees that appear in a signature.
     pub const fn signed_fors_trees_checked(&self) -> Option<usize> {
         self.fors_trees.checked_sub(1)
     }
@@ -187,14 +181,6 @@ impl BaggyParams {
             return false;
         };
         total_bits <= 256 && self.sig_bytes_checked().is_some()
-    }
-
-    /// FORS trees that appear in a signature.
-    pub const fn signed_fors_trees(&self) -> usize {
-        match self.signed_fors_trees_checked() {
-            Some(k) => k,
-            None => panic!("BaggyParams::signed_fors_trees underflow"),
-        }
     }
 
     pub const fn sig_bytes_checked(&self) -> Option<usize> {
@@ -229,13 +215,6 @@ impl BaggyParams {
             return None;
         };
         prefix_bytes.checked_add(layers_bytes)
-    }
-
-    pub const fn sig_bytes(&self) -> usize {
-        match self.sig_bytes_checked() {
-            Some(len) => len,
-            None => panic!("BaggyParams::sig_bytes overflow"),
-        }
     }
 
     /// Domain-separated digest of every field. Two parameter sets that differ anywhere,
@@ -700,7 +679,7 @@ fn parse_hmsg(params: &BaggyParams, hash: &[u8; 32]) -> Option<(Vec<u32>, u64)> 
             idxs.push(idx);
         }
     }
-    let leaf = extract_bit_window_checked(hash, k * a, params.total_height())?;
+    let leaf = extract_bit_window_checked(hash, k * a, params.total_height_checked()?)?;
     Some((idxs, leaf))
 }
 
@@ -812,7 +791,7 @@ fn verified_path(
     sig: &BaggySig,
 ) -> Option<Vec<[u8; 32]>> {
     if !params.is_well_formed()
-        || sig.fors.len() != params.signed_fors_trees()
+        || Some(sig.fors.len()) != params.signed_fors_trees_checked()
         || sig.layers.len() != params.num_layers
         || sig.msg_ctr >= params.max_grind
     {
@@ -1457,9 +1436,10 @@ pub fn baggy_sign_mpc<L: FirstSignedLedger + ?Sized>(
     ledger: &mut L,
     msg: &[u8],
 ) -> Result<BaggySig, BaggyError> {
-    if !params.is_well_formed() {
-        return Err(BaggyError::InvalidParameters);
-    }
+    let signed_fors = match params.signed_fors_trees_checked() {
+        Some(k) if params.is_well_formed() => k,
+        _ => return Err(BaggyError::InvalidParameters),
+    };
     check_key_binding(engine, params, pk, binding)?;
     cache.check_identity(binding)?;
     let identity = binding.identity();
@@ -1505,7 +1485,7 @@ pub fn baggy_sign_mpc<L: FirstSignedLedger + ?Sized>(
     authenticate_cached_path(params, pk, leaf_idx, &plans)?;
     let fors_lane0 = lanes.len();
     let fors_leaves = 1usize << params.fors_height;
-    for j in 0..params.signed_fors_trees() as u32 {
+    for j in 0..signed_fors as u32 {
         for leaf in 0..fors_leaves as u32 {
             lanes.push(LaneSpec::fors(tree0, kp0, j, leaf));
         }
@@ -1523,7 +1503,7 @@ pub fn baggy_sign_mpc<L: FirstSignedLedger + ?Sized>(
         }
     }
     let endpoint_count = picks.len();
-    let fors_total = params.signed_fors_trees() * fors_leaves;
+    let fors_total = signed_fors * fors_leaves;
     picks.extend((0..fors_total).map(|i| (fors_lane0 + i, 1u8)));
     engine.mark_open_round();
     let opened = sweep.open_positions(engine, &picks)?;
@@ -1771,8 +1751,8 @@ mod tests {
         assert!(params.is_well_formed() && BaggyParams::SHA3_128F.is_well_formed());
         let big = BaggyParams::SHA3_128F;
         assert_eq!(
-            big.sig_bytes(),
-            36 + 32 * (32 + 32 * 6) + 16 * (4 + 32 * big.wots.chains + 32 * 2)
+            big.sig_bytes_checked(),
+            Some(36 + 32 * (32 + 32 * 6) + 16 * (4 + 32 * big.wots.chains + 32 * 2))
         );
         let (mut engine, sk) = test_engine(0xC1, 1);
         let mut cache = WaistbandCache::disabled();

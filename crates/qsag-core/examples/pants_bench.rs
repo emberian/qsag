@@ -129,7 +129,7 @@ fn main() {
             "BaggySha3 128f, no Waistband (1B)",
             wall,
             delta(e.stats(), before),
-            &format!("sig {} B", params.sig_bytes()),
+            &format!("sig {} B", params.sig_bytes_checked().unwrap()),
         );
 
         for top in [2usize, 3] {
@@ -177,7 +177,7 @@ fn main() {
         // levels.
         let chain_lanes =
             (params.num_layers - 3) * (1usize << params.subtree_height) * params.wots.chains;
-        let fors_lanes = params.signed_fors_trees() << params.fors_height;
+        let fors_lanes = params.signed_fors_trees_checked().unwrap() << params.fors_height;
         let waves =
             2 + 2 * (chain_lanes + fors_lanes).div_ceil(256) + 2 * chain_lanes.div_ceil(256);
         let before = e.stats();

@@ -228,6 +228,120 @@ pub fn gf2_128_mul_acc_batch(acc: &mut [u64; 2], a: &[[u64; 2]], b: &[[u64; 2]])
     gf2_128_mul_acc_batch_with_backend(acc, a, b, cpuid::detect_backend());
 }
 
+/// Elementwise `dst[i] ^= src[i] * scalar` in the polynomial field
+/// `GF(2)[x]/(x^128 + x^7 + x^2 + x + 1)`. Dispatch is amortized over the slice.
+/// This is not multiplication in the Wiedemann tower representation.
+pub fn gf2_128_scale_xor(dst: &mut [u128], src: &[u128], scalar: u128) {
+    gf2_128_scale_xor_with_backend(dst, src, scalar, cpuid::detect_backend());
+}
+
+/// Explicit-backend scale-XOR; unsupported hardware falls back safely.
+pub fn gf2_128_scale_xor_with_backend(
+    dst: &mut [u128],
+    src: &[u128],
+    scalar: u128,
+    backend: SimdBackend,
+) {
+    assert_eq!(dst.len(), src.len());
+    if dst.is_empty() {
+        return;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        let caps = cpuid::probe_capabilities();
+        if matches!(
+            backend,
+            SimdBackend::X86Avx2Pclmul | SimdBackend::X86Avx2GfniVpclmul
+        ) && caps.avx2
+            && caps.pclmulqdq
+        {
+            // SAFETY: AVX OS state and PCLMUL are checked. The nonempty slices
+            // have equal lengths and cannot overlap; unaligned loads are used.
+            unsafe {
+                poly_scale_xor_x86(dst, src, &scalar);
+            }
+            return;
+        }
+    }
+    let _ = backend;
+    let b = [scalar as u64, (scalar >> 64) as u64];
+    for (d, s) in dst.iter_mut().zip(src) {
+        let mut product = [0; 2];
+        // Retain the existing PMULL path on supported AArch64 CPUs.
+        gf2_128_mul_acc_batch_with_backend(
+            &mut product,
+            &[[*s as u64, (*s >> 64) as u64]],
+            &[b],
+            backend,
+        );
+        *d ^= u128::from(product[0]) | (u128::from(product[1]) << 64);
+        crate::volatile_fill(&mut product, 0);
+    }
+}
+
+/// One public-count loop, fixed-address stride, no stack scratch. Every touched
+/// vector register is cleared before returning, as in the dot-product kernels.
+#[cfg(target_arch = "x86_64")]
+unsafe fn poly_scale_xor_x86(dst: &mut [u128], src: &[u128], scalar: &u128) {
+    // SAFETY: caller checks features, slice lengths, and nonemptiness.
+    unsafe {
+        core::arch::asm!(
+            "vmovdqu xmm5, xmmword ptr [{scalar}]",
+            "vpshufd xmm9, xmm5, 0x4e",
+            "vpxor xmm9, xmm9, xmm5",
+            "mov {scratch:e}, 0x87",
+            "vmovq xmm10, {scratch}",
+            "2:",
+            "vmovdqu xmm4, xmmword ptr [{src}]",
+            "vpclmulqdq xmm0, xmm4, xmm5, 0x00",
+            "vpclmulqdq xmm1, xmm4, xmm5, 0x11",
+            "vpshufd xmm8, xmm4, 0x4e",
+            "vpxor xmm8, xmm8, xmm4",
+            "vpclmulqdq xmm2, xmm8, xmm9, 0x00",
+            "vpxor xmm2, xmm2, xmm0",
+            "vpxor xmm2, xmm2, xmm1",
+            "vpslldq xmm3, xmm2, 8",
+            "vpsrldq xmm2, xmm2, 8",
+            "vpxor xmm0, xmm0, xmm3",
+            "vpxor xmm1, xmm1, xmm2",
+            "vpclmulqdq xmm6, xmm1, xmm10, 0x01",
+            "vpslldq xmm7, xmm6, 8",
+            "vpsrldq xmm8, xmm6, 8",
+            "vpxor xmm0, xmm0, xmm7",
+            "vpxor xmm1, xmm1, xmm8",
+            "vpclmulqdq xmm6, xmm1, xmm10, 0x00",
+            "vpxor xmm0, xmm0, xmm6",
+            "vpxor xmm0, xmm0, xmmword ptr [{dst}]",
+            "vmovdqu xmmword ptr [{dst}], xmm0",
+            "add {src}, 16",
+            "add {dst}, 16",
+            "dec {count}",
+            "jnz 2b",
+            "vpxor xmm0, xmm0, xmm0",
+            "vpxor xmm1, xmm1, xmm1",
+            "vpxor xmm2, xmm2, xmm2",
+            "vpxor xmm3, xmm3, xmm3",
+            "vpxor xmm4, xmm4, xmm4",
+            "vpxor xmm5, xmm5, xmm5",
+            "vpxor xmm6, xmm6, xmm6",
+            "vpxor xmm7, xmm7, xmm7",
+            "vpxor xmm8, xmm8, xmm8",
+            "vpxor xmm9, xmm9, xmm9",
+            "vpxor xmm10, xmm10, xmm10",
+            "vzeroupper",
+            src = inout(reg) src.as_ptr() => _,
+            dst = inout(reg) dst.as_mut_ptr() => _,
+            count = inout(reg) dst.len() => _,
+            scalar = in(reg) scalar,
+            scratch = out(reg) _,
+            out("xmm0") _, out("xmm1") _, out("xmm2") _, out("xmm3") _,
+            out("xmm4") _, out("xmm5") _, out("xmm6") _, out("xmm7") _,
+            out("xmm8") _, out("xmm9") _, out("xmm10") _,
+            options(nostack),
+        );
+    }
+}
+
 /// [`gf2_128_mul_acc_batch`] on an explicit backend; falls back to the portable code when
 /// the CPU lacks the backend's features.
 pub fn gf2_128_mul_acc_batch_with_backend(
@@ -713,6 +827,44 @@ mod tests {
             }
         }
         [wide[0], wide[1]]
+    }
+
+    #[test]
+    fn polynomial_scale_xor_matches_schoolbook_and_preserves_boundaries() {
+        let mut rng = TestStream(0x7523_1a09_ac48_3345);
+        let mut src: Vec<u128> = (0..67)
+            .map(|_| u128::from(rng.next_u64()) | (u128::from(rng.next_u64()) << 64))
+            .collect();
+        src[..4].copy_from_slice(&[0, 1, 1 << 127, u128::MAX]);
+        let initial: Vec<u128> = (0..69)
+            .map(|_| u128::from(rng.next_u64()) | (u128::from(rng.next_u64()) << 64))
+            .collect();
+        for scalar in [0, 1, 2, 1 << 127, u128::MAX, initial[0]] {
+            let b = [scalar as u64, (scalar >> 64) as u64];
+            for len in 0..=src.len() {
+                let mut expected = initial.clone();
+                for (dst, x) in expected[1..1 + len].iter_mut().zip(&src) {
+                    let product = gf2_128_mul_reference([*x as u64, (*x >> 64) as u64], b);
+                    *dst ^= u128::from(product[0]) | (u128::from(product[1]) << 64);
+                }
+                for backend in BACKENDS {
+                    let mut actual = initial.clone();
+                    gf2_128_scale_xor_with_backend(
+                        &mut actual[1..1 + len],
+                        &src[..len],
+                        scalar,
+                        backend,
+                    );
+                    assert_eq!(actual, expected, "{backend:?}, len={len}, scalar={scalar}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn polynomial_scale_xor_rejects_mismatched_lengths() {
+        gf2_128_scale_xor(&mut [0; 2], &[0], 1);
     }
 
     #[test]

@@ -835,31 +835,13 @@ fn rss_ternary_expand(src: &[u64], out: &mut [u64; RSS_DZK_TERNARY]) {
     }
 }
 
-/// Transpose a 64x64 bit matrix in place: afterwards bit `i` of row `j` is the former bit `j`
-/// of row `i`.
-fn rss_transpose64(rows: &mut [u64; 64]) {
-    let mut j = 32usize;
-    let mut mask = 0x0000_0000_ffff_ffffu64;
-    while j != 0 {
-        let mut k = 0usize;
-        while k < 64 {
-            let t = ((rows[k] >> j) ^ rows[k + j]) & mask;
-            rows[k + j] ^= t;
-            rows[k] ^= t << j;
-            k = (k + j + 1) & !j;
-        }
-        j >>= 1;
-        mask ^= mask << j;
-    }
-}
-
 /// For the secret words `w_u` of a group and public coefficients `beta_u`, compute the 64 field elements
 /// `out[i] = sum_u beta_u * bit_i(w_u)`. `pattern[bit][g]` is the public nibble of coefficient
 /// bit `bit` over words `4g..4g+4`; only public values index memory.
 fn rss_bind_group(
     words: &[u64],
     pattern: &[[u8; RSS_DZK_NIBBLES]; 128],
-    planes: &mut [[u64; 64]; 2],
+    planes: &mut [[u64; 4]; 64],
     out: &mut [u128],
 ) {
     let mut tables = [[0u64; 16]; RSS_DZK_NIBBLES];
@@ -873,12 +855,13 @@ fn rss_bind_group(
         for g in 0..RSS_DZK_NIBBLES {
             acc ^= tables[g][nibbles[g] as usize];
         }
-        planes[bit / 64][bit % 64] = acc;
+        planes[bit % 64][bit / 64] = acc;
     }
-    rss_transpose64(&mut planes[0]);
-    rss_transpose64(&mut planes[1]);
+    // Two active columns share the existing four-column SIMD transpose.
+    // The unused columns start at zero and remain zero under transposition.
+    qsag_asm::transpose64x256(planes);
     for i in 0..64 {
-        out[i] = u128::from(planes[0][i]) | (u128::from(planes[1][i]) << 64);
+        out[i] = u128::from(planes[i][0]) | (u128::from(planes[i][1]) << 64);
     }
     qsag_asm::volatile_fill(&mut tables, [0; 16]);
 }
@@ -1050,10 +1033,7 @@ fn rss_fold_halves(table: &[Vec<u128>; 3], upper: usize, len: usize) -> [RssFold
 /// `lo[i] ^= scale * hi[i]` for each `(lo, hi, scale)` job, with public scales.
 fn rss_fold_scale_xor(jobs: &mut [(&mut [u128], &[u128], RssProofField)]) {
     let apply = |lo: &mut [u128], hi: &[u128], scale: RssProofField| {
-        let mul = RssFieldMultiplier::new(scale);
-        for (dst, src) in lo.iter_mut().zip(hi) {
-            *dst ^= mul.mul(RssProofField(*src)).0;
-        }
+        qsag_asm::bitslice::gf2_128_scale_xor(lo, hi, scale.0);
     };
     #[cfg(feature = "std")]
     if jobs
@@ -1428,21 +1408,29 @@ fn rss_dzk_pass(
     // proof messages and verification stay in exact sequential order.
     for s in 0..3 {
         let bind = |start: usize, x: &mut [u128], y: &mut [u128]| {
-            let mut planes = [[0u64; 64]; 2];
+            let mut planes = [[0u64; 4]; 64];
             for (g, (x, y)) in x
                 .chunks_mut(RSS_DZK_LANES)
                 .zip(y.chunks_mut(RSS_DZK_LANES))
                 .enumerate()
             {
                 let offset = (start + g) * RSS_DZK_GROUP_WORDS;
-                let w_mul = RssFieldMultiplier::new(block_weights[start + g]);
-                rss_bind_group(&pending.a[s][offset..], &pattern, &mut planes, x);
-                for (lane, value) in x.iter_mut().enumerate() {
-                    *value = w_mul.mul(RssProofField(*value).mul_t_pow(lane as u32)).0;
+                let mut weighted = SecretBuffer([0u128; RSS_DZK_LANES]);
+                rss_bind_group(
+                    &pending.a[s][offset..],
+                    &pattern,
+                    &mut planes,
+                    &mut *weighted,
+                );
+                for (lane, value) in weighted.iter_mut().enumerate() {
+                    *value = RssProofField(*value).mul_t_pow(lane as u32).0;
                 }
+                // x is freshly allocated zero storage. Fuse the fixed public
+                // group weight over all lanes in one hardware dispatch.
+                qsag_asm::bitslice::gf2_128_scale_xor(x, &*weighted, block_weights[start + g].0);
                 rss_bind_group(&pending.b[s][offset..], &pattern, &mut planes, y);
             }
-            qsag_asm::volatile_fill(&mut planes, [0; 64]);
+            qsag_asm::volatile_fill(&mut planes, [0; 4]);
         };
         #[cfg(feature = "std")]
         {
@@ -5873,11 +5861,13 @@ mod tests {
         };
         // Transpose.
         let rows: [u64; 64] = core::array::from_fn(|_| word());
-        let mut t = rows;
-        rss_transpose64(&mut t);
+        let mut t = rows.map(|row| [row, !row, 0, 0]);
+        qsag_asm::transpose64x256(&mut t);
         for (i, row) in rows.iter().enumerate() {
             for (j, col) in t.iter().enumerate() {
-                assert_eq!((col >> i) & 1, (row >> j) & 1);
+                assert_eq!((col[0] >> i) & 1, (row >> j) & 1);
+                assert_eq!((col[1] >> i) & 1, (!row >> j) & 1);
+                assert_eq!(col[2..], [0, 0]);
             }
         }
         // Ternary expansion: digit 0/1 selects a half, digit 2 is the XOR of both.
@@ -5911,7 +5901,7 @@ mod tests {
                 }
             }
         }
-        let mut planes = [[0u64; 64]; 2];
+        let mut planes = [[0u64; 4]; 64];
         let mut out = [0u128; 64];
         rss_bind_group(&src, &pattern, &mut planes, &mut out);
         for (lane, got) in out.iter().enumerate() {
