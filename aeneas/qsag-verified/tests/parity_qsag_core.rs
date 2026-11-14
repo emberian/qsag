@@ -2,8 +2,6 @@
 //! Aeneas-extracted `#![no_std]` crate `qsag-verified` and the production
 //! `crates/qsag-core` implementation across all shared cryptographic primitives.
 
-#![cfg_attr(qsag_nightly_const_option, feature(const_trait_impl, const_option_ops))]
-#![cfg_attr(qsag_nightly_const_option, allow(unused_features))]
 #![allow(unused)]
 extern crate alloc;
 
@@ -547,7 +545,7 @@ fn parity_belt_latch_kernel_against_qsag_core() {
             let msg = msgs[((r >> 16) % 2) as usize];
             let salt = salts[((r >> 17) % 2) as usize];
             let digits = digit_pool[((r >> 18) % 4) as usize];
-            let persist_ok = (r >> 24) % 16 != 0;
+            let persist_ok = !(r >> 24).is_multiple_of(16);
             if !persist_ok {
                 prod.wal_mut().fail_next_persist();
             }
@@ -580,7 +578,7 @@ fn parity_belt_latch_kernel_against_qsag_core() {
                 // Production never reached the log, so the armed failure is still pending.
                 disarm_pending_failure(prod.wal_mut());
             }
-            if prod.is_wal_poisoned() && (r >> 32) % 4 == 0 {
+            if prod.is_wal_poisoned() && (r >> 32).is_multiple_of(4) {
                 let (has, rec) = (kernel.has_in_flight(), kernel.in_flight());
                 let next_epoch = kernel.next_epoch();
                 prod = BeltLatch::recover(prod.into_wal(), capacity_log2).expect("recover");

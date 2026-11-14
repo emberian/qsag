@@ -644,25 +644,29 @@ pub fn derive_hybrid_transcript_digest(
     role: HybridRoleTag,
     suite_code: u16,
     id_commit: &[u8; 32],
-    message_digest: &[u8; 32],
+    pk_classical_digest: &[u8; 32],
+    pk_pq_digest: &[u8; 32],
+    message: &[u8],
 ) -> Option<[u8; 32]> {
-    if suite_code != SUITE_HYBRID_ED25519_MLDSA65 && suite_code != SUITE_HYBRID_SECP256K1_SLHDSA {
-        return None;
-    }
-    let magic14: [u8; 14] = [
-        0x51, 0x53, 0x41, 0x47, 0x2E, 0x48, 0x59, 0x42, // "QSAG.HYB"
-        0x52, 0x49, 0x44, 0x2E, 0x56, 0x32, // "RID.V2"
-    ];
-    let role_and_suite: [u8; 3] = [
-        role.to_u8(),
-        ((suite_code >> 8) & 0xFF) as u8,
-        (suite_code & 0xFF) as u8,
-    ];
+    // Canonical address-envelope suites: secp256k1/ML-DSA-44 and Ed25519/ML-DSA-65.
+    let algorithm = if suite_code == 0x0501 { 1u8 }
+        else if suite_code == 0x0502 { 2u8 }
+        else { return None; };
+    let magic: [u8; 14] = *b"QSAG.HYBRID.V2";
+    let header: [u8; 7] = [role.to_u8(), (suite_code >> 8) as u8, suite_code as u8,
+        0, algorithm, 1, algorithm];
+    let len = message.len() as u64;
+    let length: [u8; 8] = [(len >> 56) as u8, (len >> 48) as u8,
+        (len >> 40) as u8, (len >> 32) as u8, (len >> 24) as u8,
+        (len >> 16) as u8, (len >> 8) as u8, len as u8];
     let mut sp = Shake256Sponge::new_shake256();
-    sp.absorb(&magic14);
-    sp.absorb(&role_and_suite);
+    sp.absorb(&magic);
+    sp.absorb(&header);
     sp.absorb(id_commit);
-    sp.absorb(message_digest);
+    sp.absorb(pk_classical_digest);
+    sp.absorb(pk_pq_digest);
+    sp.absorb(&length);
+    sp.absorb(message);
     let mut out = [0u8; 32];
     sp.squeeze(&mut out);
     Some(out)
