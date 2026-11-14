@@ -1348,3 +1348,1326 @@ pub fn stage_bft_shamir(
 /// A custodian's acknowledgement that it bound `binding` at `leaf`, with one MAC per
 /// custodian so that any of them can check it.
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LatchAck {
+    pub from: usize,
+    pub leaf: u64,
+    pub binding: Node,
+    pub macs: Vec<Node>,
+}
+
+/// Acknowledgements of one binding at one leaf. Valid for a custodian when at least `q` of
+/// them, from distinct custodians, carry a MAC that custodian can verify.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LatchCertificate {
+    pub leaf: u64,
+    pub binding: Node,
+    pub acks: Vec<LatchAck>,
+}
+
+impl LatchCertificate {
+    /// Collect the acknowledgements that name `record`.
+    pub fn assemble(record: &LeafRecord, acks: impl IntoIterator<Item = LatchAck>) -> Self {
+        let binding = record.binding();
+        Self {
+            leaf: record.leaf,
+            binding,
+            acks: acks
+                .into_iter()
+                .filter(|a| a.leaf == record.leaf && a.binding == binding)
+                .collect(),
+        }
+    }
+}
+
+fn ack_mac_parts(from: usize, to: usize, leaf: u64) -> [[u8; 8]; 3] {
+    [
+        (from as u64).to_be_bytes(),
+        (to as u64).to_be_bytes(),
+        leaf.to_be_bytes(),
+    ]
+}
+
+/// One custodian of Mode QS-B: its Shamir shares, its latch and its MAC keys.
+pub struct ShamirCustodian<W: DurableWal> {
+    party: usize,
+    cfg: QuorumConfig,
+    tree: Arc<QuorumTree>,
+    mac_keys: SecretMacKeys,
+    latch: BeltLatch<W>,
+    leaves: SecretLeaves,
+    max_window: u64,
+}
+
+impl<W: DurableWal> ShamirCustodian<W> {
+    pub fn new(
+        cfg: QuorumConfig,
+        tree: Arc<QuorumTree>,
+        mut material: ShamirPartyMaterial,
+        wal: W,
+    ) -> Result<Self, QuorumError> {
+        if material.mac_keys.len() != cfg.n || material.party >= cfg.n {
+            return Err(QuorumError::InvalidConfig("one MAC key per custodian"));
+        }
+        let latch = BeltLatch::recover(wal, latch_capacity_log2(material.leaves.len() as u64))?;
+        Ok(Self {
+            party: material.party,
+            cfg,
+            tree,
+            mac_keys: SecretMacKeys(core::mem::take(&mut material.mac_keys)),
+            latch,
+            leaves: SecretLeaves(core::mem::take(&mut material.leaves)),
+            max_window: MAX_WINDOW,
+        })
+    }
+
+    pub fn party(&self) -> usize {
+        self.party
+    }
+
+    pub fn config(&self) -> &QuorumConfig {
+        &self.cfg
+    }
+
+    pub fn tree(&self) -> &Arc<QuorumTree> {
+        &self.tree
+    }
+
+    pub fn next_epoch(&self) -> u64 {
+        self.latch.next_epoch()
+    }
+
+    /// Storage of this custodian in bytes of share material.
+    pub fn share_bytes(&self) -> usize {
+        self.leaves.len() * LEAF_SHARE_NODES * 32
+    }
+
+    pub fn into_wal(self) -> W {
+        self.latch.into_wal()
+    }
+
+    fn derive(&self, leaf: u64, msg: &[u8]) -> Result<LeafRecord, QuorumError> {
+        if leaf >= self.leaves.len() as u64 {
+            return Err(QuorumError::Exhausted);
+        }
+        LeafRecord::derive(self.tree.public_key(), leaf, msg).ok_or(QuorumError::GrindFailed)
+    }
+
+    fn bind(&mut self, record: &LeafRecord) -> Result<(), QuorumError> {
+        let replay = self
+            .latch
+            .in_flight()
+            .is_some_and(|r| r.epoch == record.leaf);
+        window_check(
+            record.leaf,
+            self.latch.next_epoch(),
+            replay,
+            self.max_window,
+        )?;
+        self.latch.bind(
+            record.leaf,
+            &record.msg_hash,
+            &record.salt(),
+            &record.digits,
+        )?;
+        Ok(())
+    }
+
+    /// Bind the record of `msg` at `leaf` durably and acknowledge it to every custodian.
+    pub fn ack(&mut self, leaf: u64, msg: &[u8]) -> Result<(LeafRecord, LatchAck), QuorumError> {
+        let record = self.derive(leaf, msg)?;
+        self.bind(&record)?;
+        let binding = record.binding();
+        let macs = (0..self.cfg.n)
+            .map(|to| {
+                let parts = ack_mac_parts(self.party, to, leaf);
+                mac32(
+                    &self.mac_keys[to],
+                    TAG_ACK_MAC,
+                    &[&parts[0], &parts[1], &parts[2], &binding],
+                )
+            })
+            .collect();
+        let ack = LatchAck {
+            from: self.party,
+            leaf,
+            binding,
+            macs,
+        };
+        Ok((record, ack))
+    }
+
+    /// Count the acknowledgements of `cert` this custodian can verify (distinct custodians,
+    /// the certificate's leaf and binding, a valid MAC for this custodian) and require a
+    /// quorum of them.
+    pub fn verify_certificate(&self, cert: &LatchCertificate) -> Result<usize, QuorumError> {
+        let mut seen = vec![false; self.cfg.n];
+        let mut valid = 0usize;
+        for ack in &cert.acks {
+            if ack.from >= self.cfg.n
+                || seen[ack.from]
+                || ack.leaf != cert.leaf
+                || ack.binding != cert.binding
+                || ack.macs.len() != self.cfg.n
+            {
+                continue;
+            }
+            let parts = ack_mac_parts(ack.from, self.party, ack.leaf);
+            if mac32_verify(
+                &self.mac_keys[ack.from],
+                TAG_ACK_MAC,
+                &[&parts[0], &parts[1], &parts[2], &ack.binding],
+                &ack.macs[self.party],
+            ) {
+                seen[ack.from] = true;
+                valid += 1;
+            }
+        }
+        // The second condition restates the configuration invariant at the point of use.
+        if valid < self.cfg.q || 2 * valid <= self.cfg.n + self.cfg.f {
+            return Err(QuorumError::CertificateTooSmall {
+                valid,
+                required: self.cfg.q,
+            });
+        }
+        Ok(valid)
+    }
+
+    /// Open this custodian's Shamir shares of the nodes that the record of `msg` at `leaf`
+    /// reveals. Requires a valid certificate for exactly that record, and binds the record
+    /// in the local latch first, so a custodian that already bound the leaf to another
+    /// record refuses.
+    pub fn open(
+        &mut self,
+        leaf: u64,
+        msg: &[u8],
+        cert: &LatchCertificate,
+    ) -> Result<ShareOpening, QuorumError> {
+        let record = self.derive(leaf, msg)?;
+        if cert.leaf != leaf || cert.binding != record.binding() {
+            return Err(QuorumError::CertificateBindingMismatch);
+        }
+        self.verify_certificate(cert)?;
+        self.bind(&record)?;
+        Ok(select_shares(
+            self.party,
+            &record,
+            &self.leaves[leaf as usize],
+        ))
+    }
+}
+
+fn interpolate_nodes(openings: &[&ShareOpening]) -> Option<Vec<Node>> {
+    let points: Vec<TowerGf256> = openings.iter().map(|o| shamir_point(o.party)).collect();
+    let weights = lagrange_weights_zero_gf256(&points)?;
+    let mut nodes = vec![[0u8; 32]; WOTS_CHAINS];
+    for (opening, weight) in openings.iter().zip(&weights) {
+        for (acc, &s) in nodes
+            .as_flattened_mut()
+            .iter_mut()
+            .zip(opening.shares.as_flattened())
+        {
+            *acc ^= gf256_mul_ct(weight.0, s);
+        }
+    }
+    Some(nodes)
+}
+
+fn shamir_candidates<'a>(
+    cfg: &QuorumConfig,
+    record: &LeafRecord,
+    openings: &'a [ShareOpening],
+) -> Result<Vec<&'a ShareOpening>, QuorumError> {
+    let mut distinct: Vec<&ShareOpening> = Vec::new();
+    for opening in openings {
+        check_opening(opening, record)?;
+        if opening.party >= cfg.n || distinct.iter().any(|o| o.party == opening.party) {
+            return Err(QuorumError::BadOpeningSet);
+        }
+        distinct.push(opening);
+    }
+    if distinct.len() < cfg.t {
+        return Err(QuorumError::NotEnoughShares {
+            have: distinct.len(),
+            need: cfg.t,
+        });
+    }
+    distinct.sort_by_key(|o| o.party);
+    Ok(distinct)
+}
+
+fn shamir_signature(
+    tree: &QuorumTree,
+    record: &LeafRecord,
+    subset: &[&ShareOpening],
+) -> Result<QuorumJortsSig, QuorumError> {
+    let ends = tree
+        .chain_ends(record.leaf)
+        .ok_or(QuorumError::InvalidConfig("leaf is not assigned"))?;
+    let mut nodes = interpolate_nodes(subset).ok_or(QuorumError::BadOpeningSet)?;
+    for (chain, &digit) in record.digits.iter().enumerate() {
+        if usize::from(digit) == WOTS_STEPS {
+            nodes[chain] = ends[chain];
+        }
+    }
+    tree.finish_signature(record, nodes)
+}
+
+/// Reconstruct from the `t` lowest-numbered openings. A wrong share makes a chain miss its
+/// public end and is reported as [`QuorumError::ChainVerifyFailed`].
+pub fn combine_shamir(
+    cfg: &QuorumConfig,
+    tree: &QuorumTree,
+    record: &LeafRecord,
+    openings: &[ShareOpening],
+) -> Result<QuorumJortsSig, QuorumError> {
+    let distinct = shamir_candidates(cfg, record, openings)?;
+    shamir_signature(tree, record, &distinct[..cfg.t])
+}
+
+/// Like [`combine_shamir`], but with more than `t` openings it searches for a `t`-subset
+/// whose reconstruction verifies and returns, next to the signature, the custodians whose
+/// openings contradict it. The search visits `binom(openings, t)` subsets at worst.
+pub fn combine_shamir_robust(
+    cfg: &QuorumConfig,
+    tree: &QuorumTree,
+    record: &LeafRecord,
+    openings: &[ShareOpening],
+) -> Result<(QuorumJortsSig, Vec<usize>), QuorumError> {
+    let distinct = shamir_candidates(cfg, record, openings)?;
+    let mut last_error = QuorumError::BadOpeningSet;
+    let mut count = 1usize;
+    for k in 1..=cfg.t.min(distinct.len() - cfg.t) {
+        count = count.checked_mul(distinct.len() - k + 1).and_then(|n| n.checked_div(k))
+            .filter(|&n| n <= MAX_COMMITTEES)
+            .ok_or(QuorumError::InvalidConfig("robust reconstruction subset budget exceeded"))?;
+    }
+    for subset in combinations(distinct.len(), cfg.t) {
+        let chosen: Vec<&ShareOpening> = subset.iter().map(|&i| distinct[i]).collect();
+        match shamir_signature(tree, record, &chosen) {
+            Ok(sig) => {
+                let mut blamed = Vec::new();
+                for (i, other) in distinct.iter().enumerate() {
+                    if subset.contains(&i) {
+                        continue;
+                    }
+                    // Swap the outsider in for one member; a consistent share reconstructs
+                    // the same verified nodes.
+                    let mut probe = chosen.clone();
+                    probe[0] = other;
+                    if shamir_signature(tree, record, &probe).is_err() {
+                        blamed.push(other.party);
+                    }
+                }
+                return Ok((sig, blamed));
+            }
+            Err(e) => last_error = e,
+        }
+    }
+    Err(last_error)
+}
+
+/// All custodians of Mode QS-B driven in one process (tests and measurements; see the module
+/// documentation).
+/// QS-B uses quorum-independent leaf allocation from one global tree. A leaf
+/// index does not encode the signing committee as it does in QS-A.
+pub struct BftShamirJorts<W: DurableWal> {
+    pub cfg: QuorumConfig,
+    pub tree: Arc<QuorumTree>,
+    pub custodians: Vec<ShamirCustodian<W>>,
+}
+
+impl BftShamirJorts<MemoryWal> {
+    /// Stage a key with volatile logs.
+    pub fn stage(cfg: QuorumConfig, height: u8, seed: &Node) -> Result<Self, QuorumError> {
+        let staged = stage_bft_shamir(cfg, height, seed)?;
+        let custodians = staged
+            .parties
+            .into_iter()
+            .map(|material| {
+                ShamirCustodian::new(cfg, staged.tree.clone(), material, MemoryWal::new())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            cfg,
+            tree: staged.tree,
+            custodians,
+        })
+    }
+}
+
+impl<W: DurableWal> BftShamirJorts<W> {
+    pub fn public_key(&self) -> &QuorumPublicKey {
+        self.tree.public_key()
+    }
+
+    /// Collect acknowledgements of `msg` at `leaf` from `ackers`; custodians that refuse are
+    /// skipped. Returns `None` if nobody acknowledged.
+    pub fn certify(
+        &mut self,
+        ackers: &[usize],
+        leaf: u64,
+        msg: &[u8],
+    ) -> Option<(LeafRecord, LatchCertificate)> {
+        let mut record = None;
+        let mut acks = Vec::new();
+        for &p in ackers {
+            if let Ok((rec, ack)) = self.custodians[p].ack(leaf, msg) {
+                record = Some(rec);
+                acks.push(ack);
+            }
+        }
+        let record = record?;
+        let cert = LatchCertificate::assemble(&record, acks);
+        Some((record, cert))
+    }
+
+    /// Sign `msg` at the next leaf free at every custodian in `online`: all of them
+    /// acknowledge, and the `t` lowest-numbered open.
+    pub fn sign(&mut self, online: &[usize], msg: &[u8]) -> Result<QuorumJortsSig, QuorumError> {
+        let leaf = online
+            .iter()
+            .map(|&p| self.custodians[p].next_epoch())
+            .max()
+            .ok_or(QuorumError::BadOpeningSet)?;
+        let mut openers = online.to_vec();
+        openers.sort_unstable();
+        openers.truncate(self.cfg.t);
+        self.sign_at(online, &openers, leaf, msg)
+    }
+
+    /// Sign `msg` at `leaf` with acknowledgements from `ackers` and openings from `openers`.
+    pub fn sign_at(
+        &mut self,
+        ackers: &[usize],
+        openers: &[usize],
+        leaf: u64,
+        msg: &[u8],
+    ) -> Result<QuorumJortsSig, QuorumError> {
+        let (record, cert) =
+            self.certify(ackers, leaf, msg)
+                .ok_or(QuorumError::CertificateTooSmall {
+                    valid: 0,
+                    required: self.cfg.q,
+                })?;
+        let openings = openers
+            .iter()
+            .map(|&p| self.custodians[p].open(leaf, msg, &cert))
+            .collect::<Result<Vec<_>, _>>()?;
+        combine_shamir(&self.cfg, &self.tree, &record, &openings)
+    }
+}
+
+fn wipe_nodes(nodes: &mut [Node]) {
+    for node in nodes {
+        qsag_core::wipe::wipe_bytes32(node);
+    }
+}
+impl Drop for CommitteeShareStore {
+    fn drop(&mut self) {
+        for leaf in &mut self.leaves {
+            wipe_nodes(leaf);
+        }
+    }
+}
+impl Drop for CommitteePartyMaterial {
+    fn drop(&mut self) {
+        wipe_nodes(&mut self.mac_keys);
+    }
+}
+impl Drop for ShamirPartyMaterial {
+    fn drop(&mut self) {
+        wipe_nodes(&mut self.mac_keys);
+        for leaf in &mut self.leaves {
+            wipe_nodes(leaf);
+        }
+    }
+}
+macro_rules! redacted_debug {
+    ($($ty:ty),*) => { $(
+        impl core::fmt::Debug for $ty {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                f.write_str(concat!(stringify!($ty), "([REDACTED])"))
+            }
+        }
+    )* };
+}
+redacted_debug!(
+    ShareOpening,
+    CommitteeShareStore,
+    CommitteePartyMaterial,
+    ShamirPartyMaterial
+);
+
+impl Drop for ShareOpening {
+    fn drop(&mut self) {
+        wipe_nodes(&mut self.shares);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SEED: Node = [0x5a; 32];
+
+    #[test]
+    fn digits_use_the_full_digest_and_grinding_is_short() {
+        let pk = QuorumPublicKey {
+            pk_seed: [1; 32],
+            root: [2; 32],
+            height: 4,
+        };
+        let mut total = 0u64;
+        for i in 0..64u8 {
+            let record = LeafRecord::derive(&pk, 3, &[i]).unwrap();
+            assert_eq!(record.digits.len(), WOTS_CHAINS);
+            assert!(record.digits.iter().all(|&d| d < 4));
+            assert_eq!(
+                record.digits.iter().map(|&d| u32::from(d)).sum::<u32>(),
+                WOTS_TARGET_SUM
+            );
+            assert_eq!(
+                digits_at(&record.msg_hash, record.counter),
+                Some(record.digits.clone())
+            );
+            for earlier in 0..record.counter {
+                assert_eq!(digits_at(&record.msg_hash, earlier), None);
+            }
+            total += u64::from(record.counter) + 1;
+        }
+        // One counter in about 32 has digit sum 192; 64 samples average well below 64 tries.
+        assert!(total / 64 < 64, "mean grinding length {}", total / 64);
+        // The digits are the 2-bit groups of the digest, most significant first.
+        let record = LeafRecord::derive(&pk, 5, b"layout").unwrap();
+        let digest = h32(
+            TAG_DIGEST,
+            &[&record.msg_hash, &record.counter.to_be_bytes()],
+        );
+        let raw: Vec<u8> = digest
+            .iter()
+            .flat_map(|b| [(b >> 6) & 3, (b >> 4) & 3, (b >> 2) & 3, b & 3])
+            .collect();
+        assert_eq!(record.digits, raw);
+    }
+
+    #[test]
+    fn combinations_are_lexicographic_and_complete() {
+        assert_eq!(combinations(3, 2), vec![vec![0, 1], vec![0, 2], vec![1, 2]]);
+        assert_eq!(combinations(5, 3).len(), 10);
+        assert_eq!(combinations(7, 4).len(), 35);
+        assert_eq!(combinations(4, 4), vec![vec![0, 1, 2, 3]]);
+        assert!(combinations(2, 3).is_empty());
+    }
+
+    #[test]
+    fn committee_layout_partitions_the_leaves() {
+        for (t, n, height, committees) in [(2, 3, 4u8, 3usize), (3, 5, 6, 10), (4, 7, 7, 35)] {
+            let layout = CommitteeLayout::new(t, n, height).unwrap();
+            assert_eq!(layout.committees().len(), committees);
+            let per = layout.leaves_per_committee();
+            assert_eq!(per, (1u64 << height) / committees as u64);
+            let mut owner = BTreeMap::new();
+            for c in 0..committees {
+                for e in 0..per {
+                    assert!(owner.insert(layout.leaf_of(c, e), c).is_none());
+                    assert_eq!(layout.committee_of_leaf(layout.leaf_of(c, e)), Some(c));
+                }
+            }
+            assert!(owner.keys().all(|&leaf| leaf < 1u64 << height));
+        }
+        assert!(CommitteeLayout::new(3, 5, 3).is_err());
+        assert!(CommitteeLayout::new(1, 5, 6).is_err());
+        assert!(CommitteeLayout::new(6, 5, 6).is_err());
+    }
+
+    #[test]
+    fn two_of_three_committees_sign_and_verify_under_one_root() {
+        let mut jorts = CommitteePartitionedJorts::stage(2, 3, 4, &SEED).unwrap();
+        let pk = *jorts.public_key();
+        let mut leaves = Vec::new();
+        for online in [[0usize, 1], [0, 2], [1, 2], [1, 0]] {
+            let msg = [online[0] as u8, online[1] as u8, leaves.len() as u8];
+            let sig = jorts.sign(&online, &msg).unwrap();
+            assert!(quorum_jorts_verify(&pk, &msg, &sig));
+            assert!(!quorum_jorts_verify(&pk, b"other", &sig));
+            assert_eq!(sig.nodes.len(), 128);
+            assert_eq!(sig.wire_bytes(), 12 + 4096 + 32 * 4);
+            leaves.push(sig.leaf);
+        }
+        // Committee {0,1} advanced to its second leaf; the others used their first.
+        assert_eq!(leaves, vec![0, 5, 10, 1]);
+    }
+
+    #[test]
+    fn signature_tampering_is_rejected() {
+        let mut jorts = CommitteePartitionedJorts::stage(2, 3, 3, &SEED).unwrap();
+        let pk = *jorts.public_key();
+        let sig = jorts.sign(&[0, 2], b"msg").unwrap();
+        assert!(quorum_jorts_verify(&pk, b"msg", &sig));
+        let mut bad = sig.clone();
+        bad.nodes[17][0] ^= 1;
+        assert!(!quorum_jorts_verify(&pk, b"msg", &bad));
+        let mut bad = sig.clone();
+        bad.auth_path[1][31] ^= 0x80;
+        assert!(!quorum_jorts_verify(&pk, b"msg", &bad));
+        let mut bad = sig.clone();
+        bad.counter += 1;
+        assert!(!quorum_jorts_verify(&pk, b"msg", &bad));
+        let mut bad = sig.clone();
+        bad.leaf ^= 1;
+        assert!(!quorum_jorts_verify(&pk, b"msg", &bad));
+        let mut bad = sig.clone();
+        bad.nodes.pop();
+        assert!(!quorum_jorts_verify(&pk, b"msg", &bad));
+        let mut other = pk;
+        other.root[0] ^= 1;
+        assert!(!quorum_jorts_verify(&other, b"msg", &sig));
+        // An unassigned position has no chains: the last leaves of the tree are filler.
+        assert_eq!(jorts.tree.assigned_leaves(), 6);
+        assert_eq!(jorts.tree.chain_ends(7), None);
+    }
+
+    #[test]
+    fn additive_shares_are_held_by_committee_members_only() {
+        let staged = stage_committee_partitioned(3, 5, 6, &SEED).unwrap();
+        for material in &staged.parties {
+            // binom(4, 2) committees contain a given custodian.
+            assert_eq!(material.stores.len(), 6);
+            for store in &material.stores {
+                assert!(staged.layout.committees()[store.committee].contains(&material.party));
+                assert_eq!(store.leaves.len(), 6);
+                assert!(store.leaves.iter().all(|l| l.len() == LEAF_SHARE_NODES));
+            }
+        }
+        // The shares of a committee xor to chain states that reach the public ends, and
+        // any two of the three do not.
+        let committee = staged
+            .layout
+            .committee_index(&[1, 2, 4])
+            .expect("a committee");
+        let leaf = staged.layout.leaf_of(committee, 2);
+        let pk_seed = staged.tree.public_key().pk_seed;
+        let ends = staged.tree.chain_ends(leaf).unwrap();
+        let shares: Vec<&Vec<Node>> = [1usize, 2, 4]
+            .iter()
+            .map(|&p| {
+                let store = staged.parties[p]
+                    .stores
+                    .iter()
+                    .find(|s| s.committee == committee)
+                    .unwrap();
+                &store.leaves[2]
+            })
+            .collect();
+        for chain in [0usize, 63, 127] {
+            for step in 0..WOTS_STEPS {
+                let idx = chain * WOTS_STEPS + step;
+                let mut full = [0u8; 32];
+                let mut partial = [0u8; 32];
+                for (k, share) in shares.iter().enumerate() {
+                    for (acc, byte) in full.iter_mut().zip(share[idx]) {
+                        *acc ^= byte;
+                    }
+                    if k < 2 {
+                        for (acc, byte) in partial.iter_mut().zip(share[idx]) {
+                            *acc ^= byte;
+                        }
+                    }
+                }
+                assert_eq!(
+                    chain_walk(&pk_seed, leaf, chain, step, WOTS_STEPS, &full),
+                    ends[chain]
+                );
+                assert_ne!(
+                    chain_walk(&pk_seed, leaf, chain, step, WOTS_STEPS, &partial),
+                    ends[chain]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn committee_latch_replays_refuses_rebinding_and_enforces_the_window() {
+        let mut jorts = CommitteePartitionedJorts::stage(2, 3, 8, &SEED).unwrap();
+        let c = jorts.layout.committee_index(&[0, 1]).unwrap();
+        let first = jorts.custodians[0].bind(c, 0, b"m1").unwrap();
+        assert_eq!(jorts.custodians[0].bind(c, 0, b"m1").unwrap(), first);
+        assert_eq!(
+            jorts.custodians[0].bind(c, 0, b"m2"),
+            Err(QuorumError::Latch(BeltLatchError::EpochAlreadyBound))
+        );
+        // Skipping forward inside the window is allowed and burns the skipped epochs.
+        jorts.custodians[0].bind(c, 1 + MAX_WINDOW, b"m3").unwrap();
+        assert_eq!(
+            jorts.custodians[0].bind(c, 0, b"m1"),
+            Err(QuorumError::Latch(BeltLatchError::EpochConsumed))
+        );
+        let next = jorts.custodians[0].next_epoch(c).unwrap();
+        assert_eq!(
+            jorts.custodians[0].bind(c, next + MAX_WINDOW + 1, b"m4"),
+            Err(QuorumError::EpochOutOfWindow {
+                epoch: next + MAX_WINDOW + 1,
+                next_epoch: next
+            })
+        );
+        assert_eq!(
+            jorts.custodians[0].bind(c, jorts.layout.leaves_per_committee(), b"m5"),
+            Err(QuorumError::Exhausted)
+        );
+        // Custodian 2 is not in committee {0, 1}.
+        assert_eq!(
+            jorts.custodians[2].bind(c, 0, b"m1"),
+            Err(QuorumError::NotCommitteeMember {
+                party: 2,
+                committee: c
+            })
+        );
+    }
+
+    #[test]
+    fn committee_latch_survives_a_restart() {
+        let mut staged = stage_committee_partitioned(2, 3, 4, &SEED).unwrap();
+        let material = staged.parties.remove(0);
+        let wals = vec![MemoryWal::new(); material.stores.len()];
+        let mut custodian = CommitteeCustodian::new(
+            staged.layout.clone(),
+            staged.tree.clone(),
+            material,
+            wals,
+        )
+        .unwrap();
+        let c = staged.layout.committee_index(&[0, 2]).unwrap();
+        let record = custodian.bind(c, 1, b"before the crash").unwrap();
+        let wals = custodian.into_wals();
+        // Simulate loading the original sealed material from trusted provisioning.
+        let material = stage_committee_partitioned(2, 3, 4, &SEED).unwrap().parties.remove(0);
+        let mut restarted =
+            CommitteeCustodian::new(staged.layout.clone(), staged.tree.clone(), material, wals)
+                .unwrap();
+        assert_eq!(restarted.in_flight(c).unwrap(), Some(record.clone()));
+        assert_eq!(restarted.bind(c, 1, b"before the crash").unwrap(), record);
+        assert_eq!(
+            restarted.bind(c, 1, b"after the crash"),
+            Err(QuorumError::Latch(BeltLatchError::EpochAlreadyBound))
+        );
+        assert_eq!(
+            restarted.bind(c, 0, b"older epoch"),
+            Err(QuorumError::Latch(BeltLatchError::EpochConsumed))
+        );
+    }
+
+    #[test]
+    fn echo_checks_catch_missing_forged_and_conflicting_echoes() {
+        let mut jorts = CommitteePartitionedJorts::stage(3, 5, 6, &SEED).unwrap();
+        let c = jorts.layout.committee_index(&[0, 1, 2]).unwrap();
+        for p in [0usize, 1] {
+            jorts.custodians[p].bind(c, 0, b"agreed").unwrap();
+        }
+        jorts.custodians[2].bind(c, 0, b"something else").unwrap();
+        let e10 = jorts.custodians[1].echo_for(c, 0).unwrap();
+        let e20 = jorts.custodians[2].echo_for(c, 0).unwrap();
+        assert_eq!(
+            jorts.custodians[0].verify_echoes(c, &[e10]),
+            Err(QuorumError::MissingEcho { party: 2 })
+        );
+        assert_eq!(
+            jorts.custodians[0].verify_echoes(c, &[e10, e10, e20]),
+            Err(QuorumError::MissingEcho { party: 1 })
+        );
+        assert_eq!(
+            jorts.custodians[0].verify_echoes(c, &[e10, e20]),
+            Err(QuorumError::SplitView { party: 2 })
+        );
+        // Custodian 2 cannot repair its echo: changing the binding breaks the MAC, and an
+        // echo it made for custodian 1 does not verify at custodian 0.
+        let mut forged = e20;
+        forged.binding = e10.binding;
+        assert_eq!(
+            jorts.custodians[0].verify_echoes(c, &[e10, forged]),
+            Err(QuorumError::EchoMacInvalid { party: 2 })
+        );
+        let e21 = jorts.custodians[2].echo_for(c, 1).unwrap();
+        assert_eq!(
+            jorts.custodians[0].verify_echoes(c, &[e10, e21]),
+            Err(QuorumError::EchoMacInvalid { party: 2 })
+        );
+        // A reflected echo (custodian 0's own echo to 1, relabelled) does not verify either.
+        let mut reflected = jorts.custodians[0].echo_for(c, 1).unwrap();
+        reflected.from = 1;
+        assert_eq!(
+            jorts.custodians[0].verify_echoes(c, &[reflected, e20]),
+            Err(QuorumError::EchoMacInvalid { party: 1 })
+        );
+    }
+
+    #[test]
+    fn permits_open_only_the_record_they_were_issued_for() {
+        let mut jorts = CommitteePartitionedJorts::stage(2, 3, 4, &SEED).unwrap();
+        let c = jorts.layout.committee_index(&[0, 1]).unwrap();
+        for p in [0usize, 1] {
+            jorts.custodians[p].bind(c, 0, b"first").unwrap();
+        }
+        let echo = jorts.custodians[1].echo_for(c, 0).unwrap();
+        let permit = jorts.custodians[0].verify_echoes(c, &[echo]).unwrap();
+        let opening = jorts.custodians[0].open(&permit).unwrap();
+        assert_eq!(opening.shares.len(), WOTS_CHAINS);
+        // The custodian moves on; the old permit no longer opens anything.
+        jorts.custodians[0].bind(c, 1, b"second").unwrap();
+        assert_eq!(
+            jorts.custodians[0].open(&permit),
+            Err(QuorumError::PermitMismatch)
+        );
+        // A permit of custodian 0 is useless at custodian 1.
+        assert_eq!(
+            jorts.custodians[1].open(&permit),
+            Err(QuorumError::PermitMismatch)
+        );
+    }
+
+    #[test]
+    fn additive_combination_detects_a_flipped_share() {
+        let mut jorts = CommitteePartitionedJorts::stage(3, 5, 6, &SEED).unwrap();
+        let members = [0usize, 2, 3];
+        let c = jorts.layout.committee_index(&members).unwrap();
+        let mut record = None;
+        for &p in &members {
+            record = Some(jorts.custodians[p].bind(c, 0, b"msg").unwrap());
+        }
+        let record = record.unwrap();
+        let mut openings = Vec::new();
+        for &p in &members {
+            let echoes: Vec<LatchEcho> = members
+                .iter()
+                .filter(|&&q| q != p)
+                .map(|&q| jorts.custodians[q].echo_for(c, p).unwrap())
+                .collect();
+            let permit = jorts.custodians[p].verify_echoes(c, &echoes).unwrap();
+            openings.push(jorts.custodians[p].open(&permit).unwrap());
+        }
+        let sig = combine_additive(&jorts.tree, &record, &members, &openings).unwrap();
+        assert!(quorum_jorts_verify(jorts.public_key(), b"msg", &sig));
+        let chain = record.digits.iter().position(|&d| d < 3).unwrap();
+        let mut bad = openings.clone();
+        bad[1].shares[chain][5] ^= 0x10;
+        assert_eq!(
+            combine_additive(&jorts.tree, &record, &members, &bad),
+            Err(QuorumError::ChainVerifyFailed { chain })
+        );
+        assert_eq!(
+            combine_additive(&jorts.tree, &record, &members, &openings[..2]),
+            Err(QuorumError::BadOpeningSet)
+        );
+        let mut dup = openings.clone();
+        dup[2] = dup[1].clone();
+        assert_eq!(
+            combine_additive(&jorts.tree, &record, &members, &dup),
+            Err(QuorumError::BadOpeningSet)
+        );
+    }
+
+    /// Regression for quorum-switching equivocation in `(3, 5)`: custodians 3 and 4 are
+    /// corrupted and try to spend one leaf twice, first with custodian 0, then with
+    /// custodian 1.
+    #[test]
+    fn three_of_five_committees_block_quorum_switching_double_signing() {
+        let mut jorts = CommitteePartitionedJorts::stage(3, 5, 6, &SEED).unwrap();
+        let pk = *jorts.public_key();
+        let c034 = jorts.layout.committee_index(&[0, 3, 4]).unwrap();
+        let c134 = jorts.layout.committee_index(&[1, 3, 4]).unwrap();
+        assert_ne!(c034, c134);
+
+        // First signature: {0, 3, 4} sign M1 on their leaf.
+        let sig1 = jorts.sign(&[0, 3, 4], b"M1").unwrap();
+        assert!(quorum_jorts_verify(&pk, b"M1", &sig1));
+        let leaf = sig1.leaf;
+        assert_eq!(jorts.layout.committee_of_leaf(leaf), Some(c034));
+
+        // Attack 1: the corrupted pair asks custodian 1 to sign M2 on that leaf. Custodian 1
+        // holds no share of it: its only stores are for its own committees.
+        let epoch = leaf - jorts.layout.leaf_of(c034, 0);
+        assert_eq!(
+            jorts.custodians[1].bind(c034, epoch, b"M2"),
+            Err(QuorumError::NotCommitteeMember {
+                party: 1,
+                committee: c034
+            })
+        );
+
+        // Attack 2: go back to custodian 0 with M2 for the same leaf. Its latch refuses.
+        assert_eq!(
+            jorts.custodians[0].bind(c034, epoch, b"M2"),
+            Err(QuorumError::Latch(BeltLatchError::EpochAlreadyBound))
+        );
+
+        // Attack 3: the corrupted pair opens its own shares for M2's digits and fills in
+        // custodian 0's share with what it saw during the M1 signing. Wherever the digits of
+        // M2 differ from M1's, custodian 0 never opened the needed share.
+        let record2 = LeafRecord::derive(&pk, leaf, b"M2").unwrap();
+        let record1 = LeafRecord::derive(&pk, leaf, b"M1").unwrap();
+        assert_ne!(record1.digits, record2.digits);
+        let staged = stage_committee_partitioned(3, 5, 6, &SEED).unwrap();
+        let store_of = |p: usize| {
+            staged.parties[p]
+                .stores
+                .iter()
+                .find(|s| s.committee == c034)
+                .unwrap()
+                .leaves[epoch as usize]
+                .clone()
+        };
+        let corrupt3 = select_shares(3, &record2, &store_of(3));
+        let corrupt4 = select_shares(4, &record2, &store_of(4));
+        // What custodian 0 revealed for M1 (the adversary's view of its shares).
+        let seen0 = select_shares(0, &record1, &store_of(0));
+        let replayed0 = ShareOpening {
+            party: 0,
+            leaf,
+            shares: seen0.shares.clone(),
+        };
+        let forged = combine_additive(
+            &jorts.tree,
+            &record2,
+            &[0, 3, 4],
+            &[replayed0, corrupt3, corrupt4],
+        );
+        assert!(matches!(forged, Err(QuorumError::ChainVerifyFailed { .. })));
+
+        // Attack 4: {1, 3, 4} is a committee too, but it signs from its own range, so the
+        // result is a signature on a different leaf, not a second use of `leaf`.
+        let sig2 = jorts.sign(&[1, 3, 4], b"M2").unwrap();
+        assert!(quorum_jorts_verify(&pk, b"M2", &sig2));
+        assert_ne!(sig2.leaf, leaf);
+        assert_eq!(jorts.layout.committee_of_leaf(sig2.leaf), Some(c134));
+        // No signature on M2 exists for the first leaf: re-labelling does not verify.
+        let mut relabelled = sig2.clone();
+        relabelled.leaf = leaf;
+        assert!(!quorum_jorts_verify(&pk, b"M2", &relabelled));
+    }
+
+    /// `(3, 5)` stays live with any two custodians offline: the three that remain are a
+    /// committee, and all ten signatures verify under the one root on distinct leaves.
+    #[test]
+    fn three_of_five_signs_with_any_two_custodians_offline() {
+        let mut jorts = CommitteePartitionedJorts::stage(3, 5, 6, &SEED).unwrap();
+        let pk = *jorts.public_key();
+        let mut used = alloc::collections::BTreeSet::new();
+        for offline in combinations(5, 2) {
+            let online: Vec<usize> = (0..5).filter(|p| !offline.contains(p)).collect();
+            let msg = [offline[0] as u8, offline[1] as u8];
+            let sig = jorts.sign(&online, &msg).unwrap();
+            assert!(quorum_jorts_verify(&pk, &msg, &sig), "offline {offline:?}");
+            assert!(used.insert(sig.leaf));
+        }
+        assert_eq!(used.len(), 10);
+        // Two custodians are not a committee, and four must name which three sign.
+        assert_eq!(
+            jorts.sign(&[0, 1], b"x"),
+            Err(QuorumError::UnknownCommittee)
+        );
+        assert_eq!(
+            jorts.sign(&[0, 1, 2, 3], b"x"),
+            Err(QuorumError::UnknownCommittee)
+        );
+    }
+
+    #[test]
+    fn quorum_config_rejects_unsafe_and_dead_parameters() {
+        for (t, n, f, q) in [(2, 4, 1, 3), (3, 7, 2, 5), (4, 10, 3, 7), (7, 19, 6, 13)] {
+            let cfg = QuorumConfig::new(t, n, f).unwrap();
+            assert_eq!(cfg.quorum(), q);
+            assert!(2 * q > n + f);
+        }
+        for t in 1..=20usize {
+            let cfg = QuorumConfig::tight(t).unwrap();
+            assert_eq!(
+                (cfg.parties(), cfg.max_faults()),
+                (3 * t - 2, t - 1),
+                "t = {t}"
+            );
+            // The smallest safe quorum is also the largest live one: exactly n - f.
+            assert_eq!(cfg.quorum(), cfg.parties() - cfg.max_faults());
+            assert!(matches!(
+                QuorumConfig::with_quorum(t, 3 * t - 2, t - 1, cfg.quorum() - 1),
+                Err(QuorumError::QuorumTooSmall { .. }) | Err(QuorumError::InvalidConfig(_))
+            ));
+        }
+        assert_eq!(QuorumConfig::tight(3), QuorumConfig::new(3, 7, 2));
+        assert!(QuorumConfig::tight(0).is_err());
+        assert_eq!(
+            QuorumConfig::with_quorum(3, 7, 2, 4),
+            Err(QuorumError::QuorumTooSmall { q: 4, n: 7, f: 2 })
+        );
+        assert!(QuorumConfig::with_quorum(3, 7, 2, 5).is_ok());
+        // A quorum the honest custodians cannot reach alone.
+        assert!(matches!(
+            QuorumConfig::with_quorum(3, 7, 2, 6),
+            Err(QuorumError::InvalidConfig(_))
+        ));
+        assert!(matches!(
+            QuorumConfig::new(3, 6, 2),
+            Err(QuorumError::InvalidConfig(_))
+        ));
+        assert!(matches!(
+            QuorumConfig::new(2, 7, 2),
+            Err(QuorumError::InvalidConfig(_))
+        ));
+        assert!(matches!(
+            QuorumConfig::new(6, 7, 2),
+            Err(QuorumError::InvalidConfig(_))
+        ));
+    }
+
+    fn shamir_3_of_7() -> BftShamirJorts<MemoryWal> {
+        BftShamirJorts::stage(QuorumConfig::new(3, 7, 2).unwrap(), 3, &SEED).unwrap()
+    }
+
+    /// The staged material of [`shamir_3_of_7`] again (staging is deterministic).
+    fn staged_3_of_7() -> StagedShamirKeys {
+        stage_bft_shamir(QuorumConfig::new(3, 7, 2).unwrap(), 3, &SEED).unwrap()
+    }
+
+    /// An acknowledgement by a corrupted custodian: it has custodian `p`'s keys and no
+    /// latch to hold it back, so it acknowledges any record at any leaf.
+    fn rogue_ack(staged: &StagedShamirKeys, p: usize, leaf: u64, msg: &[u8]) -> LatchAck {
+        let mut rogue = ShamirCustodian::new(
+            staged.cfg,
+            staged.tree.clone(),
+            staged.parties[p].clone(),
+            MemoryWal::new(),
+        )
+        .unwrap();
+        rogue.ack(leaf, msg).unwrap().1
+    }
+
+    #[test]
+    fn shamir_storage_is_independent_of_the_threshold() {
+        for (t, n, f) in [(2usize, 4usize, 1usize), (3, 7, 2), (4, 10, 3)] {
+            let jorts = BftShamirJorts::stage(QuorumConfig::new(t, n, f).unwrap(), 2, &SEED)
+                .expect("staging");
+            for custodian in &jorts.custodians {
+                assert_eq!(custodian.share_bytes(), 4 * 12_288);
+            }
+        }
+    }
+
+    #[test]
+    fn shamir_signs_with_any_quorum_and_any_openers() {
+        let mut jorts = shamir_3_of_7();
+        let pk = *jorts.public_key();
+        let sig = jorts.sign(&[0, 1, 2, 3, 4], b"a").unwrap();
+        assert!(quorum_jorts_verify(&pk, b"a", &sig));
+        assert_eq!(sig.leaf, 0);
+        // Another quorum, two custodians of the first one offline.
+        let sig = jorts.sign(&[2, 3, 4, 5, 6], b"b").unwrap();
+        assert!(quorum_jorts_verify(&pk, b"b", &sig));
+        assert_eq!(sig.leaf, 1);
+        // Custodians that were offline for a leaf catch up inside the window; the openers
+        // need not be the lowest-numbered ones.
+        let sig = jorts
+            .sign_at(&[0, 1, 4, 5, 6], &[6, 1, 4], 2, b"c")
+            .unwrap();
+        assert!(quorum_jorts_verify(&pk, b"c", &sig));
+        // All seven may acknowledge.
+        let sig = jorts.sign(&[0, 1, 2, 3, 4, 5, 6], b"d").unwrap();
+        assert!(quorum_jorts_verify(&pk, b"d", &sig));
+        assert_eq!(sig.leaf, 3);
+    }
+
+    /// Regression for quorum switching in `(3, 7, f = 2)` with `q = 5`: custodians 5 and 6
+    /// are corrupted and acknowledge everything.
+    #[test]
+    fn three_of_seven_blocks_corrupt_quorum_switching() {
+        let mut jorts = shamir_3_of_7();
+        let pk = *jorts.public_key();
+        let sig1 = jorts
+            .sign_at(&[0, 1, 2, 5, 6], &[0, 1, 2], 0, b"M1")
+            .unwrap();
+        assert!(quorum_jorts_verify(&pk, b"M1", &sig1));
+
+        // The corrupted pair switches to the custodians that were not asked before. Only
+        // {3, 4, 5, 6} acknowledge M2 at leaf 0; custodians 0, 1, 2 refuse.
+        for p in [0usize, 1, 2] {
+            assert_eq!(
+                jorts.custodians[p].ack(0, b"M2").unwrap_err(),
+                QuorumError::Latch(BeltLatchError::EpochAlreadyBound)
+            );
+        }
+        let staged = staged_3_of_7();
+        let (record2, honest2) = jorts.certify(&[0, 1, 2, 3, 4], 0, b"M2").unwrap();
+        assert_eq!(honest2.acks.len(), 2);
+        let mut acks2 = honest2.acks.clone();
+        acks2.push(rogue_ack(&staged, 5, 0, b"M2"));
+        acks2.push(rogue_ack(&staged, 6, 0, b"M2"));
+        let cert2 = LatchCertificate::assemble(&record2, acks2);
+        assert_eq!(cert2.acks.len(), 4);
+        // Four acknowledgements are not a quorum: 2 * 4 <= 7 + 2. No honest custodian
+        // opens, including 3 and 4, who did bind M2.
+        for custodian in &mut jorts.custodians[..5] {
+            assert_eq!(
+                custodian.open(0, b"M2", &cert2),
+                Err(QuorumError::CertificateTooSmall {
+                    valid: 4,
+                    required: 5
+                })
+            );
+        }
+
+        // Padding the certificate does not help: a duplicate acknowledgement is counted
+        // once, an acknowledgement of M1 is for another binding, and a MAC made up for an
+        // honest custodian does not verify.
+        let (_, cert1) = jorts.certify(&[5, 6], 0, b"M1").unwrap();
+        let mut padded = cert2.clone();
+        padded.acks.push(cert2.acks[0].clone());
+        padded.acks.push(cert1.acks[0].clone());
+        let mut invented = cert2.acks[0].clone();
+        invented.from = 0;
+        padded.acks.push(invented);
+        assert_eq!(
+            jorts.custodians[3].open(0, b"M2", &padded),
+            Err(QuorumError::CertificateTooSmall {
+                valid: 4,
+                required: 5
+            })
+        );
+        // A certificate for M1 cannot be presented for M2.
+        let (_, good1) = jorts.certify(&[0, 1, 2, 5, 6], 0, b"M1").unwrap();
+        assert_eq!(good1.acks.len(), 5);
+        assert_eq!(
+            jorts.custodians[3].open(0, b"M2", &good1),
+            Err(QuorumError::CertificateBindingMismatch)
+        );
+        // ... and custodian 3, having bound M2, will not open M1 even with its certificate.
+        assert_eq!(
+            jorts.custodians[3].open(0, b"M1", &good1),
+            Err(QuorumError::Latch(BeltLatchError::EpochAlreadyBound))
+        );
+
+        // The corrupted pair alone holds two shares of a degree-2 sharing. Whatever third
+        // share they invent, the chains do not verify.
+        let mut openings: Vec<ShareOpening> = [5usize, 6]
+            .iter()
+            .map(|&p| select_shares(p, &record2, &staged.parties[p].leaves[0]))
+            .collect();
+        openings.push(ShareOpening {
+            party: 3,
+            leaf: 0,
+            shares: vec![[0x42; 32]; WOTS_CHAINS],
+        });
+        assert!(matches!(
+            combine_shamir(&jorts.cfg, &jorts.tree, &record2, &openings),
+            Err(QuorumError::ChainVerifyFailed { .. })
+        ));
+    }
+
+    /// The same attack against a quorum of four succeeds, which is why `q = 4` is rejected:
+    /// {0, 1, 5, 6} and {2, 3, 5, 6} intersect in corrupted custodians only.
+    #[test]
+    fn a_quorum_of_four_of_seven_would_be_double_signed() {
+        assert_eq!(
+            QuorumConfig::with_quorum(3, 7, 2, 4),
+            Err(QuorumError::QuorumTooSmall { q: 4, n: 7, f: 2 })
+        );
+        let mut jorts = shamir_3_of_7();
+        let pk = *jorts.public_key();
+        let staged = staged_3_of_7();
+        let (rec1, cert1) = jorts.certify(&[0, 1, 5, 6], 0, b"M1").unwrap();
+        let (rec2, honest2) = jorts.certify(&[2, 3], 0, b"M2").unwrap();
+        let mut acks2 = honest2.acks;
+        acks2.push(rogue_ack(&staged, 5, 0, b"M2"));
+        acks2.push(rogue_ack(&staged, 6, 0, b"M2"));
+        let cert2 = LatchCertificate::assemble(&rec2, acks2);
+        assert_eq!((cert1.acks.len(), cert2.acks.len()), (4, 4));
+        // The real custodians reject both four-acknowledgement certificates.
+        assert!(matches!(
+            jorts.custodians[0].open(0, b"M1", &cert1),
+            Err(QuorumError::CertificateTooSmall { .. })
+        ));
+        assert!(matches!(
+            jorts.custodians[2].open(0, b"M2", &cert2),
+            Err(QuorumError::CertificateTooSmall { .. })
+        ));
+        // Custodians that accepted four acknowledgements would hand over the shares below,
+        // and two signatures on one leaf would exist.
+        let open = |p: usize, rec: &LeafRecord| select_shares(p, rec, &staged.parties[p].leaves[0]);
+        let sig1 = combine_shamir(
+            &jorts.cfg,
+            &jorts.tree,
+            &rec1,
+            &[open(0, &rec1), open(5, &rec1), open(6, &rec1)],
+        )
+        .unwrap();
+        let sig2 = combine_shamir(
+            &jorts.cfg,
+            &jorts.tree,
+            &rec2,
+            &[open(2, &rec2), open(5, &rec2), open(6, &rec2)],
+        )
+        .unwrap();
+        assert_eq!(sig1.leaf, sig2.leaf);
+        assert!(quorum_jorts_verify(&pk, b"M1", &sig1));
+        assert!(quorum_jorts_verify(&pk, b"M2", &sig2));
+    }
+
+    #[test]
+    fn flipped_shamir_shares_fail_the_chain_check_and_are_attributed() {
+        let mut jorts = shamir_3_of_7();
+        let pk = *jorts.public_key();
+        let (record, cert) = jorts.certify(&[0, 1, 2, 3, 4], 0, b"msg").unwrap();
+        let mut openings: Vec<ShareOpening> = [0usize, 1, 2, 3, 4]
+            .iter()
+            .map(|&p| jorts.custodians[p].open(0, b"msg", &cert).unwrap())
+            .collect();
+        let sig = combine_shamir(&jorts.cfg, &jorts.tree, &record, &openings).unwrap();
+        assert!(quorum_jorts_verify(&pk, b"msg", &sig));
+        // Any three custodians reconstruct the same signature.
+        let other = combine_shamir(&jorts.cfg, &jorts.tree, &record, &openings[2..]).unwrap();
+        assert_eq!(other, sig);
+
+        let chain = record.digits.iter().position(|&d| d < 3).unwrap();
+        openings[1].shares[chain][0] ^= 1;
+        assert_eq!(
+            combine_shamir(&jorts.cfg, &jorts.tree, &record, &openings[..3]),
+            Err(QuorumError::ChainVerifyFailed { chain })
+        );
+        // With spare openings the bad one is identified and the signature still comes out.
+        let (robust, blamed) =
+            combine_shamir_robust(&jorts.cfg, &jorts.tree, &record, &openings).unwrap();
+        assert_eq!(robust, sig);
+        assert_eq!(blamed, vec![1]);
+        // With exactly t openings there is nothing to fall back on.
+        assert_eq!(
+            combine_shamir_robust(&jorts.cfg, &jorts.tree, &record, &openings[..3]),
+            Err(QuorumError::ChainVerifyFailed { chain })
+        );
+        assert_eq!(
+            combine_shamir(&jorts.cfg, &jorts.tree, &record, &openings[..2]),
+            Err(QuorumError::NotEnoughShares { have: 2, need: 3 })
+        );
+    }
+
+    /// Nothing about `y^(k)` for `k < d` leaves a custodian. Two stagings share every chain
+    /// (same secrets) but the test rewrites, in one of them, each custodian's shares of the
+    /// states below the opened digit: the openings are identical byte for byte. And the two
+    /// corrupted custodians' own shares of an unopened state are consistent with every value
+    /// of it.
+    #[test]
+    fn shamir_openings_do_not_depend_on_lower_chain_states() {
+        let cfg = QuorumConfig::new(3, 7, 2).unwrap();
+        let staged = stage_bft_shamir(cfg, 2, &SEED).unwrap();
+        let pk = *staged.tree.public_key();
+        let record = LeafRecord::derive(&pk, 1, b"msg").unwrap();
+        assert!(record.digits.iter().any(|&d| d > 0));
+        for party in [0usize, 3, 6] {
+            let original = &staged.parties[party].leaves[1];
+            let mut rewritten = original.clone();
+            let mut touched = 0usize;
+            for (chain, &digit) in record.digits.iter().enumerate() {
+                for step in 0..usize::from(digit).min(WOTS_STEPS) {
+                    rewritten[chain * WOTS_STEPS + step] = [0xEE; 32];
+                    touched += 1;
+                }
+            }
+            assert!(touched > 0);
+            assert_eq!(
+                select_shares(party, &record, original),
+                select_shares(party, &record, &rewritten)
+            );
+        }
+
+        // Custodians 5 and 6 hold two points of a degree-2 polynomial per byte. For every
+        // candidate secret byte there is exactly one such polynomial through both shares,
+        // so their view assigns the same weight to all 256 values.
+        let chain = record.digits.iter().position(|&d| d > 0).unwrap();
+        let idx = chain * WOTS_STEPS; // y^(0) of a chain opened at a later step
+        let (s5, s6) = (
+            staged.parties[5].leaves[1][idx][0],
+            staged.parties[6].leaves[1][idx][0],
+        );
+        let (x5, x6) = (shamir_point(5), shamir_point(6));
+        let mut consistent = 0usize;
+        for candidate in 0..=255u8 {
+            // Solve a1, a2 from p(x) = candidate + a1 x + a2 x^2 at the two points.
+            let r5 = TowerGf256(s5).add(TowerGf256(candidate));
+            let r6 = TowerGf256(s6).add(TowerGf256(candidate));
+            let det = x5.mul(x6.mul(x6)).add(x6.mul(x5.mul(x5)));
+            let det_inv = det.inv().expect("distinct non-zero points");
+            let a1 = r5.mul(x6.mul(x6)).add(r6.mul(x5.mul(x5))).mul(det_inv);
+            let a2 = r5.mul(x6).add(r6.mul(x5)).mul(det_inv);
+            let eval = |x: TowerGf256| TowerGf256(candidate).add(a1.mul(x)).add(a2.mul(x.mul(x)));
+            if eval(x5).0 == s5 && eval(x6).0 == s6 {
+                consistent += 1;
+            }
+        }
+        assert_eq!(consistent, 256);
+
+        // The independent polynomials per step matter: the shares of consecutive states of
+        // one chain are unrelated, and three of them still reconstruct each state.
+        let secret_of = |step: usize| {
+            let openings: Vec<ShareOpening> = [0usize, 1, 2]
+                .iter()
+                .map(|&p| ShareOpening {
+                    party: p,
+                    leaf: 1,
+                    shares: vec![staged.parties[p].leaves[1][idx + step]; WOTS_CHAINS],
+                })
+                .collect();
+            let refs: Vec<&ShareOpening> = openings.iter().collect();
+            interpolate_nodes(&refs).unwrap()[0]
+        };
+        let (y0, y1) = (secret_of(0), secret_of(1));
+        assert_eq!(
+            chain_step(&pk.pk_seed, 1, chain as u32, 0, &y0),
+            y1,
+            "state 1 is one hash step above state 0"
+        );
+    }
+
+    #[test]
+    fn shamir_window_and_restart_behave_like_the_committee_latch() {
+        let cfg = QuorumConfig::new(2, 4, 1).unwrap();
+        let staged = stage_bft_shamir(cfg, 6, &SEED).unwrap();
+        let material = staged.parties[0].clone();
+        let mut custodian =
+            ShamirCustodian::new(cfg, staged.tree.clone(), material.clone(), MemoryWal::new())
+                .unwrap();
+        let (record, _) = custodian.ack(2, b"m").unwrap();
+        assert_eq!(
+            custodian.ack(3 + MAX_WINDOW + 1, b"far").unwrap_err(),
+            QuorumError::EpochOutOfWindow {
+                epoch: 3 + MAX_WINDOW + 1,
+                next_epoch: 3
+            }
+        );
+        assert_eq!(
+            custodian.ack(64, b"beyond").unwrap_err(),
+            QuorumError::Exhausted
+        );
+        let wal = custodian.into_wal();
+        let mut restarted = ShamirCustodian::new(cfg, staged.tree.clone(), material, wal).unwrap();
+        assert_eq!(restarted.ack(2, b"m").unwrap().0, record);
+        assert_eq!(
+            restarted.ack(2, b"other").unwrap_err(),
+            QuorumError::Latch(BeltLatchError::EpochAlreadyBound)
+        );
+        assert_eq!(
+            restarted.ack(1, b"older").unwrap_err(),
+            QuorumError::Latch(BeltLatchError::EpochConsumed)
+        );
+    }
+}
+#[cfg(test)]
+mod bounds_tests {
+    use super::*;
+    #[test]
+    fn rejects_excessive_combinations_before_enumeration() {
+        assert!(stage_committee_partitioned(2, 3, 30, &[0; 32]).is_err());
+        assert!(stage_bft_shamir(QuorumConfig::tight(2).unwrap(), 30, &[0; 32]).is_err());
+        assert!(CommitteeLayout::new(32, 64, 30).is_err());
+        assert!(CommitteeLayout::new(2, usize::MAX, 30).is_err());
+        assert!(CommitteeLayout::new(2, 46, 30).is_err());
+        assert_eq!(
+            CommitteeLayout::new(2, 45, 30).unwrap().committees().len(),
+            990
+        );
+    }
+}

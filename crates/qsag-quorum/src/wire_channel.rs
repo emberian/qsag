@@ -308,3 +308,745 @@ fn wire_crypt(key: &[u8; 32], header: &[u8], payload: &mut [u8]) {
 /// be reset under the same key/session pair. Headers, lengths, rounds, direction,
 /// sequence numbers and payloads are MAC-bound. Use `new_encrypted` for secret
 /// shares; `new` authenticates while leaving payloads visible.
+pub struct MacSealedWireChannel<T: WireTransport> {
+    transport: T,
+    sequencer: FrameSequencer,
+    keys: Vec<[u8; 32]>,
+    encrypted: bool,
+}
+
+impl<T: WireTransport> MacSealedWireChannel<T> {
+    /// `keys[peer]` is the provisioned pairwise link key; the local entry is unused.
+    pub fn new(transport: T, session_id: [u8; 32], mut keys: Vec<[u8; 32]>)
+        -> Result<Self, TransportError>
+    {
+        if keys.len() != transport.parties() || transport.party() >= keys.len()
+            || keys.len() > usize::from(u16::MAX) + 1
+        {
+            for key in &mut keys { qsag_asm::volatile_fill(key, 0); }
+            return Err(TransportError::Malformed);
+        }
+        let sequencer = FrameSequencer::new(session_id, transport.party(), keys.len());
+        Ok(Self { transport, sequencer, keys, encrypted: false })
+    }
+
+    /// Authenticate and encrypt payloads using a separately domain-separated
+    /// cSHAKE stream. Both peers must select the same mode.
+    pub fn new_encrypted(transport: T, session_id: [u8; 32], keys: Vec<[u8; 32]>)
+        -> Result<Self, TransportError>
+    {
+        let mut channel = Self::new(transport, session_id, keys)?;
+        channel.encrypted = true;
+        Ok(channel)
+    }
+
+    fn seal(&mut self, peer: usize, round: u32, payload: &[u8]) -> Result<Vec<u8>, TransportError> {
+        // The outer transport must fit both our authenticated header and tag.
+        if payload.len() > MAX_FRAME_PAYLOAD - FRAME_HEADER_BYTES - 33 {
+            return Err(TransportError::PayloadTooLarge);
+        }
+        let mut body = Vec::with_capacity(payload.len() + 1);
+        body.push(u8::from(self.encrypted));
+        body.extend_from_slice(payload);
+        let framed = self.sequencer.seal(peer, round, &body);
+        qsag_core::wipe::wipe_bytes(&mut body);
+        let mut raw = framed?;
+        if self.encrypted {
+            let (header, body) = raw.split_at_mut(FRAME_HEADER_BYTES);
+            wire_crypt(&self.keys[peer], header, &mut body[1..]);
+        }
+        let tag = wire_mac(&self.keys[peer], &raw);
+        raw.extend_from_slice(&tag);
+        Ok(raw)
+    }
+
+    fn open(&mut self, peer: usize, round: u32, raw: &[u8]) -> Result<Vec<u8>, TransportError> {
+        self.sequencer.check_peer(peer)?;
+        if raw.len() < FRAME_HEADER_BYTES + 32 || raw.len() > MAX_FRAME_PAYLOAD {
+            return Err(TransportError::Malformed);
+        }
+        let (frame, tag) = raw.split_at(raw.len() - 32);
+        let expected = wire_mac(&self.keys[peer], frame);
+        let mut received = [0; 32];
+        received.copy_from_slice(tag);
+        if !qsag_core::wipe::ct_eq_bytes32(&expected, &received) {
+            return Err(TransportError::AuthenticationFailed);
+        }
+        let (_, body) = decode_frame(frame)?;
+        if body.first() != Some(&u8::from(self.encrypted)) {
+            return Err(TransportError::AuthenticationFailed);
+        }
+        let mut payload = self.sequencer.open(peer, round, frame)?;
+        if self.encrypted {
+            wire_crypt(&self.keys[peer], &frame[..FRAME_HEADER_BYTES], &mut payload[1..]);
+        }
+        payload.remove(0);
+        Ok(payload)
+    }
+}
+
+impl<T: WireTransport> WireTransport for MacSealedWireChannel<T> {
+    fn party(&self) -> usize { self.sequencer.party() }
+    fn parties(&self) -> usize { self.sequencer.parties() }
+    fn send_frame(&mut self, peer: usize, round: u32, payload: &[u8]) -> Result<(), TransportError> {
+        let raw = self.seal(peer, round, payload)?;
+        self.transport.send_frame(peer, round, &raw)
+    }
+    fn recv_frame(&mut self, peer: usize, round: u32) -> Result<Vec<u8>, TransportError> {
+        let raw = self.transport.recv_frame(peer, round)?;
+        self.open(peer, round, &raw)
+    }
+}
+
+impl<T: WireTransport> Drop for MacSealedWireChannel<T> {
+    fn drop(&mut self) {
+        for key in &mut self.keys { qsag_asm::volatile_fill(key, 0); }
+    }
+}
+
+#[cfg(any(test, feature = "std"))]
+pub use mesh::{
+    InMemoryEndpoint, InMemoryWireMesh, MeshStats, SentFrame, TcpEndpoint, TcpWireMesh,
+    TcpWireMeshBuilder,
+};
+
+#[cfg(any(test, feature = "std"))]
+mod mesh {
+    use super::{FRAME_HEADER_BYTES, FrameSequencer, TransportError, WireTransport, decode_header};
+    use std::io::{Read, Write};
+    use std::net::{Ipv4Addr, TcpListener, TcpStream};
+    use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use std::vec::Vec;
+
+    type Tx = Option<Sender<Vec<u8>>>;
+    type Rx = Option<Receiver<Vec<u8>>>;
+
+    /// One frame as it left a party.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct SentFrame {
+        pub from: usize,
+        pub to: usize,
+        pub round_tag: u32,
+        /// Bytes on the wire, header included.
+        pub wire_bytes: usize,
+    }
+
+    /// Log of every frame sent through a mesh, shared by its endpoints.
+    #[derive(Debug, Default)]
+    pub struct MeshStats {
+        frames: Mutex<Vec<SentFrame>>,
+    }
+
+    impl MeshStats {
+        fn record(&self, frame: SentFrame) {
+            self.frames.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(frame);
+        }
+
+        /// Every frame sent so far, in the order the sends were logged.
+        pub fn frames(&self) -> Vec<SentFrame> {
+            self.frames.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+        }
+
+        /// Bytes sent by all parties, headers included.
+        pub fn total_bytes(&self) -> u64 {
+            self.frames().iter().map(|f| f.wire_bytes as u64).sum()
+        }
+
+        pub fn total_frames(&self) -> usize {
+            self.frames.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).len()
+        }
+
+        /// Bytes sent by `party`, headers included.
+        pub fn bytes_sent_by(&self, party: usize) -> u64 {
+            self.frames()
+                .iter()
+                .filter(|f| f.from == party)
+                .map(|f| f.wire_bytes as u64)
+                .sum()
+        }
+
+        /// Frames `party` sent with a round tag accepted by `tag`.
+        pub fn frames_sent_by(&self, party: usize, tag: impl Fn(u32) -> bool) -> usize {
+            self.frames()
+                .iter()
+                .filter(|f| f.from == party && tag(f.round_tag))
+                .count()
+        }
+
+        /// Forget everything logged so far.
+        pub fn reset(&self) {
+            self.frames.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
+        }
+    }
+
+    /// A full mesh of in-process channels: one unbounded channel per ordered pair of
+    /// parties. Each endpoint is moved into the thread of its party.
+    pub struct InMemoryWireMesh;
+
+    impl InMemoryWireMesh {
+        /// Endpoints for `parties` parties of session `session_id`, and the shared log.
+        pub fn connect(
+            parties: usize,
+            session_id: [u8; 32],
+        ) -> (Vec<InMemoryEndpoint>, Arc<MeshStats>) {
+            let stats = Arc::new(MeshStats::default());
+            let mut senders: Vec<Vec<Tx>> = (0..parties)
+                .map(|_| (0..parties).map(|_| None).collect())
+                .collect();
+            let mut receivers: Vec<Vec<Rx>> = (0..parties)
+                .map(|_| (0..parties).map(|_| None).collect())
+                .collect();
+            for from in 0..parties {
+                for to in (0..parties).filter(|&to| to != from) {
+                    let (tx, rx) = channel();
+                    senders[from][to] = Some(tx);
+                    receivers[to][from] = Some(rx);
+                }
+            }
+            let endpoints = senders
+                .into_iter()
+                .zip(receivers)
+                .enumerate()
+                .map(|(party, (tx, rx))| InMemoryEndpoint {
+                    seq: FrameSequencer::new(session_id, party, parties),
+                    tx,
+                    rx,
+                    stats: stats.clone(),
+                    timeout: Duration::from_secs(30),
+                })
+                .collect();
+            (endpoints, stats)
+        }
+    }
+
+    /// One party's end of an [`InMemoryWireMesh`].
+    pub struct InMemoryEndpoint {
+        seq: FrameSequencer,
+        tx: Vec<Tx>,
+        rx: Vec<Rx>,
+        stats: Arc<MeshStats>,
+        timeout: Duration,
+    }
+
+    impl InMemoryEndpoint {
+        /// How long [`WireTransport::recv_frame`] waits for a silent peer.
+        pub fn set_timeout(&mut self, timeout: Duration) {
+            self.timeout = timeout;
+        }
+
+        pub fn stats(&self) -> &Arc<MeshStats> {
+            &self.stats
+        }
+
+        /// Put arbitrary bytes on the link to `to`, bypassing the frame codec. For tests
+        /// that play a party which does not follow the framing.
+        pub fn send_raw(&mut self, to: usize, raw: Vec<u8>) -> Result<(), TransportError> {
+            let tx = self
+                .tx
+                .get(to)
+                .and_then(Option::as_ref)
+                .ok_or(TransportError::UnknownPeer { peer: to })?;
+            self.stats.record(SentFrame {
+                from: self.seq.party(),
+                to,
+                round_tag: u32::MAX,
+                wire_bytes: raw.len(),
+            });
+            tx.send(raw)
+                .map_err(|_| TransportError::Closed { peer: to })
+        }
+    }
+
+    impl WireTransport for InMemoryEndpoint {
+        fn party(&self) -> usize {
+            self.seq.party()
+        }
+
+        fn parties(&self) -> usize {
+            self.seq.parties()
+        }
+
+        fn send_frame(
+            &mut self,
+            to_party: usize,
+            round_tag: u32,
+            payload: &[u8],
+        ) -> Result<(), TransportError> {
+            let frame = self.seq.seal(to_party, round_tag, payload)?;
+            let tx = self.tx[to_party]
+                .as_ref()
+                .ok_or(TransportError::UnknownPeer { peer: to_party })?;
+            self.stats.record(SentFrame {
+                from: self.seq.party(),
+                to: to_party,
+                round_tag,
+                wire_bytes: frame.len(),
+            });
+            tx.send(frame)
+                .map_err(|_| TransportError::Closed { peer: to_party })
+        }
+
+        fn recv_frame(
+            &mut self,
+            from_party: usize,
+            expected_round_tag: u32,
+        ) -> Result<Vec<u8>, TransportError> {
+            let rx = self
+                .rx
+                .get(from_party)
+                .and_then(Option::as_ref)
+                .ok_or(TransportError::UnknownPeer { peer: from_party })?;
+            let raw = rx.recv_timeout(self.timeout).map_err(|e| match e {
+                RecvTimeoutError::Timeout => TransportError::Timeout { peer: from_party },
+                RecvTimeoutError::Disconnected => TransportError::Closed { peer: from_party },
+            })?;
+            self.seq.open(from_party, expected_round_tag, &raw)
+        }
+    }
+
+    /// A full mesh of loopback TCP connections, one stream per pair of parties, with the
+    /// same frames as the channel mesh written to the socket. Sends block once the socket
+    /// buffers of a link are full, so a round in which every party sends before it reads
+    /// must keep its frames below the buffer size (the protocols here send at most a few
+    /// tens of kilobytes per round and link).
+    pub struct TcpWireMesh;
+
+    impl TcpWireMesh {
+        /// Connect `parties` endpoints over `127.0.0.1` and return them with the shared log.
+        pub fn loopback(
+            parties: usize,
+            session_id: [u8; 32],
+        ) -> std::io::Result<(Vec<TcpEndpoint>, Arc<MeshStats>)> {
+            Self::with_timeout(Duration::from_secs(30)).loopback(parties, session_id)
+        }
+
+        /// Configure finite read and write timeouts for every socket in the mesh.
+        pub fn with_timeout(timeout: Duration) -> TcpWireMeshBuilder {
+            TcpWireMeshBuilder { timeout }
+        }
+    }
+
+    pub struct TcpWireMeshBuilder {
+        timeout: Duration,
+    }
+
+    impl TcpWireMeshBuilder {
+        pub fn loopback(
+            self,
+            parties: usize,
+            session_id: [u8; 32],
+        ) -> std::io::Result<(Vec<TcpEndpoint>, Arc<MeshStats>)> {
+            if self.timeout.is_zero() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "timeout must be nonzero",
+                ));
+            }
+            let stats = Arc::new(MeshStats::default());
+            let mut streams: Vec<Vec<Option<TcpStream>>> = (0..parties)
+                .map(|_| (0..parties).map(|_| None).collect())
+                .collect();
+            let pairs = (0..parties).flat_map(|lo| (lo + 1..parties).map(move |hi| (lo, hi)));
+            for (lo, hi) in pairs {
+                let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+                let dialer = TcpStream::connect(listener.local_addr()?)?;
+                let (accepted, _) = listener.accept()?;
+                dialer.set_nodelay(true)?;
+                accepted.set_nodelay(true)?;
+                for stream in [&dialer, &accepted] {
+                    stream.set_read_timeout(Some(self.timeout))?;
+                    stream.set_write_timeout(Some(self.timeout))?;
+                }
+                streams[lo][hi] = Some(dialer);
+                streams[hi][lo] = Some(accepted);
+            }
+            let endpoints = streams
+                .into_iter()
+                .enumerate()
+                .map(|(party, streams)| TcpEndpoint {
+                    seq: FrameSequencer::new(session_id, party, parties),
+                    streams,
+                    stats: stats.clone(),
+                })
+                .collect();
+            Ok((endpoints, stats))
+        }
+    }
+
+    /// One party's end of a [`TcpWireMesh`].
+    pub struct TcpEndpoint {
+        seq: FrameSequencer,
+        streams: Vec<Option<TcpStream>>,
+        stats: Arc<MeshStats>,
+    }
+
+    impl TcpEndpoint {
+        /// How long [`WireTransport::recv_frame`] waits for a silent peer.
+        pub fn set_timeout(&mut self, timeout: Duration) -> std::io::Result<()> {
+            for stream in self.streams.iter().flatten() {
+                stream.set_read_timeout(Some(timeout))?;
+                stream.set_write_timeout(Some(timeout))?;
+            }
+            Ok(())
+        }
+
+        pub fn stats(&self) -> &Arc<MeshStats> {
+            &self.stats
+        }
+    }
+
+    fn io_error(peer: usize, e: &std::io::Error) -> TransportError {
+        match e.kind() {
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => {
+                TransportError::Timeout { peer }
+            }
+            _ => TransportError::Closed { peer },
+        }
+    }
+
+    impl WireTransport for TcpEndpoint {
+        fn party(&self) -> usize {
+            self.seq.party()
+        }
+
+        fn parties(&self) -> usize {
+            self.seq.parties()
+        }
+
+        fn send_frame(
+            &mut self,
+            to_party: usize,
+            round_tag: u32,
+            payload: &[u8],
+        ) -> Result<(), TransportError> {
+            let frame = self.seq.seal(to_party, round_tag, payload)?;
+            let stream = self.streams[to_party]
+                .as_mut()
+                .ok_or(TransportError::UnknownPeer { peer: to_party })?;
+            self.stats.record(SentFrame {
+                from: self.seq.party(),
+                to: to_party,
+                round_tag,
+                wire_bytes: frame.len(),
+            });
+            stream.write_all(&frame).map_err(|e| io_error(to_party, &e))
+        }
+
+        fn recv_frame(
+            &mut self,
+            from_party: usize,
+            expected_round_tag: u32,
+        ) -> Result<Vec<u8>, TransportError> {
+            let stream = self
+                .streams
+                .get_mut(from_party)
+                .and_then(Option::as_mut)
+                .ok_or(TransportError::UnknownPeer { peer: from_party })?;
+            let mut raw = std::vec![0u8; FRAME_HEADER_BYTES];
+            stream
+                .read_exact(&mut raw)
+                .map_err(|e| io_error(from_party, &e))?;
+            let (_, payload_len) = decode_header(&raw)?;
+            raw.resize(FRAME_HEADER_BYTES + payload_len, 0);
+            stream
+                .read_exact(&mut raw[FRAME_HEADER_BYTES..])
+                .map_err(|e| io_error(from_party, &e))?;
+            self.seq.open(from_party, expected_round_tag, &raw)
+        }
+    }
+    #[cfg(test)]
+    mod tcp_safety_tests {
+        use super::*;
+        use crate::wire_channel::{FrameHeader, encode_frame};
+        #[test]
+        fn deadlines_and_oversized_header() {
+            let (mut endpoints, _) = TcpWireMesh::with_timeout(Duration::from_millis(25))
+                .loopback(2, [0; 32])
+                .unwrap();
+            let stream = endpoints[0].streams[1].as_mut().unwrap();
+            assert_eq!(
+                stream.read_timeout().unwrap(),
+                Some(Duration::from_millis(25))
+            );
+            assert_eq!(
+                stream.write_timeout().unwrap(),
+                Some(Duration::from_millis(25))
+            );
+            let header = FrameHeader {
+                session_id: [0; 32],
+                from: 0,
+                to: 1,
+                round_tag: 0,
+                seq: 0,
+            };
+            let mut raw = encode_frame(&header, &[]).unwrap();
+            raw[52..56].copy_from_slice(&u32::MAX.to_be_bytes());
+            stream.write_all(&raw).unwrap();
+            assert_eq!(
+                endpoints[1].recv_frame(0, 0),
+                Err(TransportError::Malformed)
+            );
+            assert_eq!(
+                endpoints[0].recv_frame(1, 0),
+                Err(TransportError::Timeout { peer: 1 })
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SESSION: [u8; 32] = [7; 32];
+
+    #[test]
+    fn frame_layout_is_canonical_and_decoding_is_strict() {
+        let header = FrameHeader {
+            session_id: SESSION,
+            from: 2,
+            to: 0,
+            round_tag: 0x0102_0304,
+            seq: 9,
+        };
+        let frame = encode_frame(&header, b"payload").unwrap();
+        assert_eq!(frame.len(), FRAME_HEADER_BYTES + 7);
+        assert_eq!(&frame[..4], b"QSWF");
+        assert_eq!(&frame[4..36], &SESSION);
+        assert_eq!(&frame[36..40], &[0, 2, 0, 0]);
+        assert_eq!(&frame[40..44], &[1, 2, 3, 4]);
+        assert_eq!(&frame[44..52], &9u64.to_be_bytes());
+        assert_eq!(&frame[52..56], &7u32.to_be_bytes());
+        assert_eq!(decode_frame(&frame), Ok((header, &b"payload"[..])));
+        assert_eq!(
+            decode_frame(&frame[..frame.len() - 1]),
+            Err(TransportError::Malformed)
+        );
+        let mut longer = frame.clone();
+        longer.push(0);
+        assert_eq!(decode_frame(&longer), Err(TransportError::Malformed));
+        let mut bad_magic = frame.clone();
+        bad_magic[0] ^= 1;
+        assert_eq!(decode_frame(&bad_magic), Err(TransportError::Malformed));
+        assert_eq!(decode_frame(&frame[..20]), Err(TransportError::Malformed));
+        let empty = encode_frame(&header, b"").unwrap();
+        assert_eq!(decode_frame(&empty), Ok((header, &b""[..])));
+    }
+
+    #[test]
+    fn sequencer_rejects_foreign_replayed_misrouted_and_wrong_round_frames() {
+        let mut alice = FrameSequencer::new(SESSION, 0, 3);
+        let mut bob = FrameSequencer::new(SESSION, 1, 3);
+        let first = alice.seal(1, 5, b"one").unwrap();
+        let second = alice.seal(1, 6, b"two").unwrap();
+        assert_eq!(bob.open(0, 5, &first), Ok(b"one".to_vec()));
+        // Replay of the first frame.
+        assert_eq!(
+            bob.open(0, 5, &first),
+            Err(TransportError::SequenceMismatch {
+                expected: 1,
+                got: 0
+            })
+        );
+        // The second frame is for round 6; asking for round 7 consumes and refuses it.
+        assert_eq!(
+            bob.open(0, 7, &second),
+            Err(TransportError::RoundTagMismatch {
+                expected: 7,
+                got: 6
+            })
+        );
+        let third = alice.seal(1, 7, b"three").unwrap();
+        assert_eq!(bob.open(0, 7, &third), Ok(b"three".to_vec()));
+
+        // A frame for party 2 presented to party 1, and a frame claimed to come from 2.
+        let for_carol = alice.seal(2, 5, b"x").unwrap();
+        assert_eq!(
+            bob.open(0, 5, &for_carol),
+            Err(TransportError::RouteMismatch)
+        );
+        let fourth = alice.seal(1, 5, b"y").unwrap();
+        assert_eq!(bob.open(2, 5, &fourth), Err(TransportError::RouteMismatch));
+
+        // Another session.
+        let mut mallory = FrameSequencer::new([8; 32], 0, 3);
+        let foreign = mallory.seal(1, 5, b"z").unwrap();
+        assert_eq!(
+            bob.open(0, 5, &foreign),
+            Err(TransportError::SessionMismatch)
+        );
+
+        assert_eq!(
+            alice.seal(0, 5, b""),
+            Err(TransportError::UnknownPeer { peer: 0 })
+        );
+        assert_eq!(
+            alice.seal(3, 5, b""),
+            Err(TransportError::UnknownPeer { peer: 3 })
+        );
+    }
+
+    #[test]
+    fn channel_mesh_delivers_across_threads_and_counts_wire_bytes() {
+        let (endpoints, stats) = InMemoryWireMesh::connect(3, SESSION);
+        let results: Vec<Vec<u8>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = endpoints
+                .into_iter()
+                .map(|mut ep| {
+                    scope.spawn(move || {
+                        let me = ep.party();
+                        for peer in (0..3).filter(|&p| p != me) {
+                            ep.send_frame(peer, 1, &[me as u8; 10]).unwrap();
+                        }
+                        let mut got = Vec::new();
+                        for peer in (0..3).filter(|&p| p != me) {
+                            got.extend(ep.recv_frame(peer, 1).unwrap());
+                        }
+                        got
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(results[0], [[1u8; 10], [2u8; 10]].concat());
+        assert_eq!(results[1], [[0u8; 10], [2u8; 10]].concat());
+        assert_eq!(results[2], [[0u8; 10], [1u8; 10]].concat());
+        assert_eq!(stats.total_frames(), 6);
+        assert_eq!(stats.total_bytes(), 6 * (FRAME_HEADER_BYTES as u64 + 10));
+        assert_eq!(stats.bytes_sent_by(1), 2 * (FRAME_HEADER_BYTES as u64 + 10));
+        assert_eq!(stats.frames_sent_by(2, |tag| tag == 1), 2);
+    }
+
+    #[test]
+    fn channel_mesh_reports_closed_links_timeouts_and_raw_garbage() {
+        let (mut endpoints, _) = InMemoryWireMesh::connect(3, SESSION);
+        let mut carol = endpoints.pop().unwrap();
+        let mut bob = endpoints.pop().unwrap();
+        let mut alice = endpoints.pop().unwrap();
+        alice.set_timeout(std::time::Duration::from_millis(20));
+        assert_eq!(
+            alice.recv_frame(1, 1),
+            Err(TransportError::Timeout { peer: 1 })
+        );
+        bob.send_raw(0, b"not a frame".to_vec()).unwrap();
+        assert_eq!(alice.recv_frame(1, 1), Err(TransportError::Malformed));
+        carol.send_frame(0, 4, b"last words").unwrap();
+        drop(carol);
+        assert_eq!(alice.recv_frame(2, 4), Ok(b"last words".to_vec()));
+        assert_eq!(
+            alice.recv_frame(2, 4),
+            Err(TransportError::Closed { peer: 2 })
+        );
+        assert_eq!(
+            alice.send_frame(2, 4, b"anyone?"),
+            Err(TransportError::Closed { peer: 2 })
+        );
+        assert_eq!(
+            alice.recv_frame(0, 1),
+            Err(TransportError::UnknownPeer { peer: 0 })
+        );
+    }
+
+    #[test]
+    fn socket_mesh_carries_the_same_frames() {
+        let (endpoints, stats) = TcpWireMesh::loopback(3, SESSION).unwrap();
+        let big = vec![0xA5u8; 20_000];
+        let results: Vec<usize> = std::thread::scope(|scope| {
+            let handles: Vec<_> = endpoints
+                .into_iter()
+                .map(|mut ep| {
+                    let big = &big;
+                    scope.spawn(move || {
+                        let me = ep.party();
+                        for peer in (0..3).filter(|&p| p != me) {
+                            ep.send_frame(peer, 2, big).unwrap();
+                            ep.send_frame(peer, 3, &[me as u8]).unwrap();
+                        }
+                        let mut total = 0;
+                        for peer in (0..3).filter(|&p| p != me) {
+                            let payload = ep.recv_frame(peer, 2).unwrap();
+                            assert_eq!(&payload, big);
+                            assert_eq!(ep.recv_frame(peer, 3).unwrap(), vec![peer as u8]);
+                            total += payload.len();
+                        }
+                        total
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(results, vec![40_000; 3]);
+        assert_eq!(
+            stats.total_bytes(),
+            6 * (2 * FRAME_HEADER_BYTES as u64 + 20_001)
+        );
+    }
+}
+
+#[cfg(test)]
+mod frame_cap_tests {
+    use super::*;
+    #[test]
+    fn oversized_header_is_rejected_without_payload() {
+        let mut raw = [0u8; FRAME_HEADER_BYTES];
+        raw[..4].copy_from_slice(&FRAME_MAGIC);
+        raw[52..56].copy_from_slice(&((MAX_FRAME_PAYLOAD + 1) as u32).to_be_bytes());
+        assert_eq!(decode_header(&raw), Err(TransportError::Malformed));
+        raw[52..56].copy_from_slice(&(MAX_FRAME_PAYLOAD as u32).to_be_bytes());
+        assert_eq!(
+            decode_header(&raw).unwrap().1 + FRAME_HEADER_BYTES,
+            MAX_WIRE_FRAME_BYTES
+        );
+    }
+}
+
+#[cfg(test)]
+mod authenticated_tests {
+    use super::*;
+
+    #[test]
+    fn encrypted_frames_hide_payload_and_reject_mode_and_key_confusion() {
+        let (mut endpoints, _) = InMemoryWireMesh::connect(2, [1; 32]);
+        let bob = endpoints.pop().unwrap();
+        let alice = endpoints.pop().unwrap();
+        let mut alice = MacSealedWireChannel::new_encrypted(alice, [2; 32], vec![[3; 32]; 2]).unwrap();
+        let mut bob = MacSealedWireChannel::new_encrypted(bob, [2; 32], vec![[3; 32]; 2]).unwrap();
+        let payload = [0x5A; 300];
+        let raw = alice.seal(1, 1, &payload).unwrap();
+        assert_ne!(&raw[FRAME_HEADER_BYTES + 1..raw.len() - 32], &payload);
+        bob.encrypted = false;
+        assert_eq!(bob.open(0, 1, &raw), Err(TransportError::AuthenticationFailed));
+        bob.encrypted = true;
+        bob.keys[0][0] ^= 1;
+        assert_eq!(bob.open(0, 1, &raw), Err(TransportError::AuthenticationFailed));
+        bob.keys[0][0] ^= 1;
+        assert_eq!(bob.open(0, 1, &raw).unwrap(), payload);
+        assert!(bob.open(0, 1, &raw).is_err());
+        alice.send_frame(1, 2, &payload).unwrap();
+        assert_eq!(bob.recv_frame(0, 2).unwrap(), payload);
+    }
+
+    #[test]
+    fn authenticated_tcp_roundtrip_and_adversarial_frames() {
+        let (mut endpoints, _) = TcpWireMesh::loopback(2, [1; 32]).unwrap();
+        let bob = endpoints.pop().unwrap();
+        let alice = endpoints.pop().unwrap();
+        let mut alice = MacSealedWireChannel::new(alice, [2; 32], vec![[3; 32]; 2]).unwrap();
+        let mut bob = MacSealedWireChannel::new(bob, [2; 32], vec![[3; 32]; 2]).unwrap();
+        alice.send_frame(1, 7, b"share").unwrap();
+        assert_eq!(bob.recv_frame(0, 7).unwrap(), b"share");
+        let valid = alice.seal(1, 7, b"next").unwrap();
+        for index in 0..valid.len() {
+            let mut tampered = valid.clone();
+            tampered[index] ^= 1;
+            assert_eq!(bob.open(0, 7, &tampered), Err(TransportError::AuthenticationFailed));
+        }
+        assert_eq!(bob.open(0, 7, &valid).unwrap(), b"next");
+        assert!(matches!(bob.open(0, 7, &valid), Err(TransportError::SequenceMismatch { .. })));
+        alice.sequencer = FrameSequencer::new([9; 32], 0, 2);
+        let foreign = alice.seal(1, 7, b"foreign").unwrap();
+        assert_eq!(bob.open(0, 7, &foreign), Err(TransportError::SessionMismatch));
+    }
+}
