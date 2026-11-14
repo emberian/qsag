@@ -1049,3 +1049,1078 @@ theorem belt_mealy_authorize_inv
     · simp [hb] at h2
 
 /-- A refused step either leaves an uncorrupted core exactly as it was, or poisons it. -/
+theorem belt_mealy_errStep_cases (s : pants_and_quorum_guards.BeltQuorumCore)
+    (inp : pants_and_quorum_guards.BeltQuorumCoreInput) :
+    (beltQuorumMealy.errStep s inp = s ∧ beltGuardCorrupt s = false) ∨
+    beltQuorumMealy.errStep s inp = purePoisonBelt s := by
+  dsimp only [beltQuorumMealy]
+  cases beltGuardCorrupt s
+  · simp only [Bool.false_eq_true, ↓reduceIte]
+    cases inp with
+    | ProposeOrRetryEpoch ep tag walOk =>
+      dsimp only
+      cases walOk
+      · exact Or.inr rfl
+      · simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+        cases s.has_bound_epoch && decide (ep = s.bound_epoch)
+        · simp only [Bool.false_eq_true, ↓reduceIte]
+          cases decide (ep.val < s.next_epoch.val)
+          · exact Or.inl ⟨rfl, trivial⟩
+          · exact Or.inr rfl
+        · simp only [↓reduceIte]
+          cases decide (s.bound_msg_tag = tag)
+          · exact Or.inr rfl
+          · exact Or.inl ⟨rfl, trivial⟩
+    | RecordCustodianAck ackEp ackTag =>
+      dsimp only
+      cases s.has_bound_epoch
+      · exact Or.inl ⟨rfl, trivial⟩
+      · simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+        cases decide (ackEp ≠ s.bound_epoch)
+        · simp only [Bool.false_eq_true, ↓reduceIte]
+          cases decide (s.bound_msg_tag = ackTag)
+          · exact Or.inr rfl
+          · exact Or.inl ⟨rfl, trivial⟩
+        · exact Or.inl ⟨rfl, trivial⟩
+    | AuthorizeShares reqEp reqTag =>
+      dsimp only
+      cases s.has_bound_epoch
+      · exact Or.inl ⟨rfl, trivial⟩
+      · simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+        cases decide (reqEp ≠ s.bound_epoch)
+        · simp only [Bool.false_eq_true, ↓reduceIte]
+          cases decide (s.bound_msg_tag = reqTag)
+          · exact Or.inr rfl
+          · exact Or.inl ⟨rfl, trivial⟩
+        · exact Or.inl ⟨rfl, trivial⟩
+  · exact Or.inr rfl
+
+theorem belt_core_propose_ok_mealy
+    {s s' : pants_and_quorum_guards.BeltQuorumCore} {ep : Std.U64}
+    {tag : Array Std.U8 32#usize} {walOk : Bool} {u : Unit}
+    (h : pants_and_quorum_guards.BeltQuorumCore.propose_or_retry_epoch s ep tag walOk =
+      .ok (s', .Ok u)) :
+    beltQuorumMealy.step s (.ProposeOrRetryEpoch ep tag walOk) = some (s', .EpochBound) := by
+  have hstep : pants_and_quorum_guards.BeltQuorumCore.step s
+      (.ProposeOrRetryEpoch ep tag walOk) = .ok (s', .Ok .EpochBound) := by
+    unfold pants_and_quorum_guards.BeltQuorumCore.step
+    simp only [h, bind_eq_result_bind, result_bind_ok]
+  exact mirSim_ok_step_eq belt_quorum_step_sim hstep
+
+theorem belt_core_propose_err_mealy
+    {s s' : pants_and_quorum_guards.BeltQuorumCore} {ep : Std.U64}
+    {tag : Array Std.U8 32#usize} {walOk : Bool}
+    {e : pants_and_quorum_guards.PantsGuardError}
+    (h : pants_and_quorum_guards.BeltQuorumCore.propose_or_retry_epoch s ep tag walOk =
+      .ok (s', .Err e)) :
+    beltQuorumMealy.step s (.ProposeOrRetryEpoch ep tag walOk) = none ∧
+    s' = beltQuorumMealy.errStep s (.ProposeOrRetryEpoch ep tag walOk) := by
+  have hstep : pants_and_quorum_guards.BeltQuorumCore.step s
+      (.ProposeOrRetryEpoch ep tag walOk) = .ok (s', .Err e) := by
+    unfold pants_and_quorum_guards.BeltQuorumCore.step
+    simp only [h, bind_eq_result_bind, result_bind_ok]
+  exact mirSim_err_step_eq belt_quorum_step_sim hstep
+
+theorem belt_core_ack_ok_mealy
+    {s s' : pants_and_quorum_guards.BeltQuorumCore} {ep : Std.U64}
+    {tag : Array Std.U8 32#usize} {k : Std.U32}
+    (h : pants_and_quorum_guards.BeltQuorumCore.record_custodian_ack s ep tag =
+      .ok (s', .Ok k)) :
+    beltQuorumMealy.step s (.RecordCustodianAck ep tag) = some (s', .AckRecorded k) := by
+  have hstep : pants_and_quorum_guards.BeltQuorumCore.step s
+      (.RecordCustodianAck ep tag) = .ok (s', .Ok (.AckRecorded k)) := by
+    unfold pants_and_quorum_guards.BeltQuorumCore.step
+    simp only [h, bind_eq_result_bind, result_bind_ok]
+  exact mirSim_ok_step_eq belt_quorum_step_sim hstep
+
+theorem belt_core_ack_err_mealy
+    {s s' : pants_and_quorum_guards.BeltQuorumCore} {ep : Std.U64}
+    {tag : Array Std.U8 32#usize} {e : pants_and_quorum_guards.PantsGuardError}
+    (h : pants_and_quorum_guards.BeltQuorumCore.record_custodian_ack s ep tag =
+      .ok (s', .Err e)) :
+    beltQuorumMealy.step s (.RecordCustodianAck ep tag) = none ∧
+    s' = beltQuorumMealy.errStep s (.RecordCustodianAck ep tag) := by
+  have hstep : pants_and_quorum_guards.BeltQuorumCore.step s
+      (.RecordCustodianAck ep tag) = .ok (s', .Err e) := by
+    unfold pants_and_quorum_guards.BeltQuorumCore.step
+    simp only [h, bind_eq_result_bind, result_bind_ok]
+  exact mirSim_err_step_eq belt_quorum_step_sim hstep
+
+theorem belt_core_authorize_ok_mealy
+    {s s' : pants_and_quorum_guards.BeltQuorumCore} {ep : Std.U64}
+    {tag : Array Std.U8 32#usize} {g : pants_and_quorum_guards.BeltAuthorizationGrant}
+    (h : pants_and_quorum_guards.BeltQuorumCore.authorize_shares s ep tag =
+      .ok (s', .Ok g)) :
+    beltQuorumMealy.step s (.AuthorizeShares ep tag) = some (s', .SharesAuthorized g) := by
+  have hstep : pants_and_quorum_guards.BeltQuorumCore.step s
+      (.AuthorizeShares ep tag) = .ok (s', .Ok (.SharesAuthorized g)) := by
+    unfold pants_and_quorum_guards.BeltQuorumCore.step
+    simp only [h, bind_eq_result_bind, result_bind_ok]
+  exact mirSim_ok_step_eq belt_quorum_step_sim hstep
+
+theorem belt_core_authorize_err_mealy
+    {s s' : pants_and_quorum_guards.BeltQuorumCore} {ep : Std.U64}
+    {tag : Array Std.U8 32#usize} {e : pants_and_quorum_guards.PantsGuardError}
+    (h : pants_and_quorum_guards.BeltQuorumCore.authorize_shares s ep tag =
+      .ok (s', .Err e)) :
+    beltQuorumMealy.step s (.AuthorizeShares ep tag) = none ∧
+    s' = beltQuorumMealy.errStep s (.AuthorizeShares ep tag) := by
+  have hstep : pants_and_quorum_guards.BeltQuorumCore.step s
+      (.AuthorizeShares ep tag) = .ok (s', .Err e) := by
+    unfold pants_and_quorum_guards.BeltQuorumCore.step
+    simp only [h, bind_eq_result_bind, result_bind_ok]
+  exact mirSim_err_step_eq belt_quorum_step_sim hstep
+
+/-! ## 5. Authenticated belt guard: one call of the wrapper -/
+
+theorem uscalar_cast_val_eq {src : UScalarTy} (dst : UScalarTy) (x : UScalar src)
+    (h : x.val < 2 ^ dst.numBits) : (UScalar.cast dst x).val = x.val := by
+  change (x.bv.setWidth dst.numBits).toNat = x.bv.toNat
+  rw [BitVec.toNat_setWidth, Nat.mod_eq_of_lt h]
+
+theorem u64_succ_val {x : Std.U64} (h : x.val + 1 < 2 ^ 64) :
+    (⟨x.bv + (1#u64).bv⟩ : Std.U64).val = x.val + 1 :=
+  (BitVec.toNat_add _ _).trans (Nat.mod_eq_of_lt h)
+
+theorem u32_succ_val {x : Std.U32} (h : x.val + 1 < 2 ^ 32) :
+    (⟨x.bv + (1#u32).bv⟩ : Std.U32).val = x.val + 1 :=
+  (BitVec.toNat_add _ _).trans (Nat.mod_eq_of_lt h)
+
+/-- Bit of custodian `id` in the acknowledgment bitmap, as the wrapper computes it. -/
+@[expose]
+def beltCustodianBit (id : Std.U8) : Std.U64 := ⟨(1#u64).bv <<< id.val⟩
+
+theorem belt_zero_getLsbD (i : Nat) : (0#u64 : Std.U64).bv.getLsbD i = false :=
+  BitVec.getLsbD_zero
+
+theorem beltCustodianBit_getLsbD (id : Std.U8) (hk : id.val < 64) (i : Nat) :
+    (beltCustodianBit id).bv.getLsbD i = decide (id.val = i) := by
+  show ((1#u64 : Std.U64).bv <<< id.val).getLsbD i = decide (id.val = i)
+  rw [BitVec.getLsbD_shiftLeft]
+  have h1 : (1#u64 : Std.U64).bv.getLsbD (i - id.val) = decide (0 = i - id.val) := by
+    show ((2 : Nat) ^ 0).testBit (i - id.val) = decide (0 = i - id.val)
+    exact Nat.testBit_two_pow
+  rw [h1]
+  by_cases hi : i < 64
+  · by_cases hlt : i < id.val
+    · have hne : ¬ id.val = i := by omega
+      rw [decide_eq_true hi, decide_eq_true hlt, decide_eq_false hne]
+      rfl
+    · by_cases he : id.val = i
+      · have hz : 0 = i - id.val := by omega
+        rw [decide_eq_true hi, decide_eq_false hlt, decide_eq_true hz, decide_eq_true he]
+        rfl
+      · have hz : ¬ 0 = i - id.val := by omega
+        rw [decide_eq_true hi, decide_eq_false hlt, decide_eq_false hz, decide_eq_false he]
+        rfl
+  · have hne : ¬ id.val = i := by omega
+    rw [decide_eq_false hi, decide_eq_false hne]
+    rfl
+
+theorem beltCustodianBit_and_eq_zero {bm : Std.U64} {id : Std.U8} (hk : id.val < 64)
+    (h : bm &&& beltCustodianBit id = 0#u64) : bm.bv.getLsbD id.val = false := by
+  have h1 : (bm.bv &&& (beltCustodianBit id).bv).getLsbD id.val =
+      (0#u64).bv.getLsbD id.val :=
+    congrArg (fun x : Std.U64 => x.bv.getLsbD id.val) h
+  rw [BitVec.getLsbD_and, beltCustodianBit_getLsbD id hk, belt_zero_getLsbD,
+    decide_eq_true rfl, Bool.and_true] at h1
+  exact h1
+
+/-- What a caller observes from one `step`. -/
+inductive BeltObs where
+  | rejected
+  | epochBound
+  | ackRecorded
+  | granted (g : pants_and_quorum_guards.BeltAuthorizationGrant)
+
+@[expose]
+def beltObsOf :
+    core.result.Result authenticated_belt.BeltQuorumStepOutput
+      authenticated_belt.BeltAuthError → BeltObs
+  | .Ok .EpochBound => .epochBound
+  | .Ok (.AckRecorded _) => .ackRecorded
+  | .Ok (.SharesAuthorized g) => .granted g
+  | .Err _ => .rejected
+
+/-- Complete mediation of `VerifiedBeltQuorumGuard::step`: the seven ways a returned
+    state can relate to the state before the call. Nothing in it mentions the MAC or
+    WAL tags, so it holds whatever the tag functions compute. -/
+inductive BeltStepOutcome (st st' : authenticated_belt.VerifiedBeltQuorumGuard) :
+    BeltObs → Prop where
+  | rejected_unchanged : st' = st → BeltStepOutcome st st' .rejected
+  | rejected_poisoned :
+      st'.inner = purePoisonBelt st.inner → st'.ack_bitmap = 0#u64 →
+      BeltStepOutcome st st' .rejected
+  | retried : st' = st → BeltStepOutcome st st' .epochBound
+  | bound (ep : Std.U64) (msg : Array Std.U8 32#usize) :
+      beltGuardCorrupt st.inner = false →
+      ¬ (st.inner.has_bound_epoch = true ∧ ep = st.inner.bound_epoch) →
+      st.inner.next_epoch.val ≤ ep.val →
+      ep.val + 1 < 2 ^ 64 →
+      st' = { st with
+              inner := { st.inner with
+                         next_epoch := ⟨ep.bv + (1#u64).bv⟩,
+                         phase := .EpochBoundPendingQuorum,
+                         has_bound_epoch := true,
+                         bound_epoch := ep,
+                         bound_msg_tag := msg,
+                         ack_count := 0#u32 },
+              ack_bitmap := 0#u64 } →
+      BeltStepOutcome st st' .epochBound
+  | duplicate : st' = st → BeltStepOutcome st st' .ackRecorded
+  | acked (id : Std.U8) :
+      beltGuardCorrupt st.inner = false →
+      st.inner.has_bound_epoch = true →
+      id.val < st.inner.n.val →
+      id.val < 64 →
+      st.ack_bitmap.bv.getLsbD id.val = false →
+      st.inner.ack_count.val < st.inner.n.val →
+      st' = { st with
+              inner := { st.inner with
+                         ack_count := ⟨st.inner.ack_count.bv + (1#u32).bv⟩ },
+              ack_bitmap := st.ack_bitmap ||| beltCustodianBit id } →
+      BeltStepOutcome st st' .ackRecorded
+  | granted :
+      beltGuardCorrupt st.inner = false →
+      st.inner.has_bound_epoch = true →
+      st.inner.q.val ≤ st.inner.ack_count.val →
+      st' = { st with inner := { st.inner with phase := .SharesAuthorized } } →
+      BeltStepOutcome st st'
+        (.granted { authorized_epoch := st.inner.bound_epoch,
+                    msg_tag := st.inner.bound_msg_tag,
+                    certified_acks := st.inner.ack_count })
+
+@[expose]
+def beltObsOfPropose : core.result.Result Unit authenticated_belt.BeltAuthError → BeltObs
+  | .Ok _ => .epochBound
+  | .Err _ => .rejected
+
+@[expose]
+def beltObsOfAck : core.result.Result Std.U32 authenticated_belt.BeltAuthError → BeltObs
+  | .Ok _ => .ackRecorded
+  | .Err _ => .rejected
+
+@[expose]
+def beltObsOfAuthorize :
+    core.result.Result pants_and_quorum_guards.BeltAuthorizationGrant
+      authenticated_belt.BeltAuthError → BeltObs
+  | .Ok g => .granted g
+  | .Err _ => .rejected
+
+@[expose]
+def authProposeBitmap (st : authenticated_belt.VerifiedBeltQuorumGuard) (ep : Std.U64)
+    (inner : pants_and_quorum_guards.BeltQuorumCore)
+    (cr : core.result.Result Unit pants_and_quorum_guards.PantsGuardError) : Std.U64 :=
+  if inner.poisoned then 0#u64
+  else if st.inner.has_bound_epoch && decide (st.inner.bound_epoch = ep) then st.ack_bitmap
+  else
+    match cr with
+    | .Ok _ => 0#u64
+    | .Err _ => st.ack_bitmap
+
+@[expose]
+def authProposeResult (valid : Bool)
+    (cr : core.result.Result Unit pants_and_quorum_guards.PantsGuardError) :
+    core.result.Result Unit authenticated_belt.BeltAuthError :=
+  if valid then
+    match cr with
+    | .Ok _ => .Ok ()
+    | .Err e => .Err (.Core e)
+  else .Err .InvalidWalReceipt
+
+set_option linter.unusedSimpArgs false in
+/-- The wrapper's `propose_or_retry_epoch` is the core call under some WAL-validity
+    bit, followed by a bitmap update that depends only on the core's answer. -/
+theorem auth_belt_propose_peel
+    {st st' : authenticated_belt.VerifiedBeltQuorumGuard} {ep : Std.U64}
+    {msg rd rt : Array Std.U8 32#usize}
+    {r : core.result.Result Unit authenticated_belt.BeltAuthError}
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.propose_or_retry_epoch st ep msg rd rt =
+      .ok (st', r)) :
+    ∃ (valid : Bool) (inner : pants_and_quorum_guards.BeltQuorumCore)
+      (cr : core.result.Result Unit pants_and_quorum_guards.PantsGuardError),
+      pants_and_quorum_guards.BeltQuorumCore.propose_or_retry_epoch st.inner ep msg valid =
+        .ok (inner, cr) ∧
+      st' = { st with inner := inner, ack_bitmap := authProposeBitmap st ep inner cr } ∧
+      r = authProposeResult valid cr := by
+  unfold authenticated_belt.VerifiedBeltQuorumGuard.propose_or_retry_epoch at h
+  cases hw : authenticated_belt.wal_receipt_tag st.wal_key st.guard_key_commit ep msg rd with
+  | fail e => rw [hw] at h; cases h
+  | div => rw [hw] at h; cases h
+  | ok expected =>
+    rw [hw] at h
+    simp only [bind_eq_result_bind, result_bind_ok, ct_eq_bytes32_spec,
+      pants_and_quorum_guards.BeltQuorumCore.impl.has_bound_epoch,
+      pants_and_quorum_guards.BeltQuorumCore.impl.bound_epoch,
+      pants_and_quorum_guards.BeltQuorumCore.is_poisoned] at h
+    generalize decide (expected = rt) = valid at h
+    cases hcore : pants_and_quorum_guards.BeltQuorumCore.propose_or_retry_epoch
+        st.inner ep msg valid with
+    | fail e =>
+      rw [hcore] at h
+      cases hbb : st.inner.has_bound_epoch <;>
+        by_cases he : st.inner.bound_epoch = ep <;> (simp [hbb, he] at h; cases h)
+    | div =>
+      rw [hcore] at h
+      cases hbb : st.inner.has_bound_epoch <;>
+        by_cases he : st.inner.bound_epoch = ep <;> (simp [hbb, he] at h; cases h)
+    | ok p =>
+      rcases p with ⟨inner, cr⟩
+      rw [hcore] at h
+      refine ⟨valid, inner, cr, hcore, ?_⟩
+      cases cr <;> cases hpz : inner.poisoned <;> cases hbb : st.inner.has_bound_epoch <;>
+        by_cases he : st.inner.bound_epoch = ep <;> cases valid <;>
+        (simp [hpz, hbb, he] at h
+         obtain ⟨rfl, rfl⟩ := h
+         simp [authProposeBitmap, authProposeResult, hpz, hbb, he])
+
+theorem auth_belt_propose_outcome
+    {st st' : authenticated_belt.VerifiedBeltQuorumGuard} {ep : Std.U64}
+    {msg rd rt : Array Std.U8 32#usize}
+    {r : core.result.Result Unit authenticated_belt.BeltAuthError}
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.propose_or_retry_epoch st ep msg rd rt =
+      .ok (st', r)) :
+    BeltStepOutcome st st' (beltObsOfPropose r) := by
+  obtain ⟨valid, inner, cr, hcore, hst, hr⟩ := auth_belt_propose_peel h
+  subst hst; subst hr
+  cases cr with
+  | Ok u =>
+    obtain ⟨hc, hval, _, hcase⟩ := belt_mealy_propose_inv (belt_core_propose_ok_mealy hcore)
+    subst hval
+    have hp := (belt_not_corrupt_facts hc).1
+    rcases hcase with ⟨hb, he, _, hin⟩ | ⟨hnr, hge, _, hlt, hin⟩
+    · subst hin
+      have hbm : authProposeBitmap st ep st.inner (.Ok u) = st.ack_bitmap := by
+        simp [authProposeBitmap, hp, hb, he]
+      rw [hbm]
+      exact .retried rfl
+    · have hpi : inner.poisoned = false := by rw [hin]; exact hp
+      have hsame : (st.inner.has_bound_epoch && decide (st.inner.bound_epoch = ep)) = false := by
+        cases hb : st.inner.has_bound_epoch with
+        | false => rfl
+        | true =>
+          have hne : ¬ st.inner.bound_epoch = ep := fun he => hnr ⟨hb, he.symm⟩
+          simp [hne]
+      have hbm : authProposeBitmap st ep inner (.Ok u) = 0#u64 := by
+        simp [authProposeBitmap, hpi, hsame]
+      rw [hbm]
+      exact .bound ep msg hc hnr hge hlt (by rw [hin])
+  | Err e =>
+    obtain ⟨_, hin⟩ := belt_core_propose_err_mealy hcore
+    have hres : ∃ e', authProposeResult valid (.Err e) = .Err e' := by
+      cases valid <;> exact ⟨_, rfl⟩
+    obtain ⟨e', he'⟩ := hres
+    rw [he']
+    rcases belt_mealy_errStep_cases st.inner (.ProposeOrRetryEpoch ep msg valid) with
+      ⟨hsame, hc⟩ | hpois
+    · rw [hsame] at hin
+      subst hin
+      have hp := (belt_not_corrupt_facts hc).1
+      have hbm : authProposeBitmap st ep st.inner (.Err e) = st.ack_bitmap := by
+        simp [authProposeBitmap, hp]
+      rw [hbm]
+      exact .rejected_unchanged rfl
+    · rw [hpois] at hin
+      have hbm : authProposeBitmap st ep inner (.Err e) = 0#u64 := by
+        simp [authProposeBitmap, hin]
+      rw [hbm]
+      exact .rejected_poisoned hin rfl
+
+theorem belt_mealy_errStep_ack_mismatch (s : pants_and_quorum_guards.BeltQuorumCore)
+    (ep : Std.U64) (tag : Array Std.U8 32#usize)
+    (hb : s.has_bound_epoch = true) (he : ep = s.bound_epoch) (hne : s.bound_msg_tag ≠ tag) :
+    beltQuorumMealy.errStep s (.RecordCustodianAck ep tag) = purePoisonBelt s := by
+  dsimp only [beltQuorumMealy]
+  cases beltGuardCorrupt s
+  · simp only [Bool.false_eq_true, ↓reduceIte]
+    simp [hb, he, hne]
+  · rfl
+
+theorem auth_belt_ack_outcome
+    {st st' : authenticated_belt.VerifiedBeltQuorumGuard} {ep : Std.U64}
+    {msg tag : Array Std.U8 32#usize} {id : Std.U8}
+    {r : core.result.Result Std.U32 authenticated_belt.BeltAuthError}
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack st ep msg id tag =
+      .ok (st', r)) :
+    BeltStepOutcome st st' (beltObsOfAck r) := by
+  unfold authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack at h
+  simp only [pants_and_quorum_guards.BeltQuorumCore.impl.n,
+    pants_and_quorum_guards.BeltQuorumCore.is_poisoned,
+    pants_and_quorum_guards.BeltQuorumCore.impl.has_bound_epoch,
+    pants_and_quorum_guards.BeltQuorumCore.impl.bound_epoch,
+    pants_and_quorum_guards.BeltQuorumCore.impl.bound_msg_tag,
+    pants_and_quorum_guards.BeltQuorumCore.impl.ack_count,
+    ct_eq_bytes32_spec, hShlU_uscalar_eq,
+    bind_eq_result_bind, result_bind_ok, lift_eq_ok] at h
+  split at h
+  · obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Result.ok.inj h)
+    exact .rejected_unchanged rfl
+  · rename_i hin
+    split at h
+    · obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Result.ok.inj h)
+      exact .rejected_unchanged rfl
+    · cases hkey : Array.index_usize st.custodian_keys (UScalar.cast .Usize id) with
+      | fail e => rw [hkey] at h; cases h
+      | div => rw [hkey] at h; cases h
+      | ok key =>
+        rw [hkey] at h
+        simp only [result_bind_ok] at h
+        cases htag : authenticated_belt.custodian_ack_tag key st.guard_key_commit ep msg id with
+        | fail e => rw [htag] at h; cases h
+        | div => rw [htag] at h; cases h
+        | ok expected =>
+          rw [htag] at h
+          simp only [result_bind_ok] at h
+          split at h
+          · split at h
+            · obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Result.ok.inj h)
+              exact .rejected_unchanged rfl
+            · split at h
+              · rename_i hb
+                split at h
+                · obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Result.ok.inj h)
+                  exact .rejected_unchanged rfl
+                · rename_i hne
+                  have he : ep = st.inner.bound_epoch :=
+                    Decidable.byContradiction (fun hx => hne (bne_iff_ne.mpr hx))
+                  split at h
+                  · split at h
+                    · rename_i hlt
+                      simp only [result_bind_ok] at h
+                      split at h
+                      · obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Result.ok.inj h)
+                        exact .duplicate rfl
+                      · rename_i hused
+                        have hz : st.ack_bitmap &&& beltCustodianBit id = 0#u64 :=
+                          Decidable.byContradiction (fun hx => hused (bne_iff_ne.mpr hx))
+                        cases hcore : pants_and_quorum_guards.BeltQuorumCore.record_custodian_ack
+                            st.inner ep msg with
+                        | fail e => rw [hcore] at h; cases h
+                        | div => rw [hcore] at h; cases h
+                        | ok p =>
+                          rcases p with ⟨inner, cr⟩
+                          rw [hcore] at h
+                          cases cr with
+                          | Ok k =>
+                            simp only [result_bind_ok] at h
+                            obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Result.ok.inj h)
+                            obtain ⟨hc, _, _, _, hcnt, hin2, _⟩ :=
+                              belt_mealy_ack_inv (belt_core_ack_ok_mealy hcore)
+                            have hidn : id.val < st.inner.n.val := by
+                              have hc1 : (UScalar.cast .Usize id).val = id.val :=
+                                uscalar_cast_val_eq .Usize id
+                                  (Nat.lt_of_lt_of_le id.bv.isLt (by decide))
+                              have hc2 : (UScalar.cast .Usize st.inner.n).val = st.inner.n.val :=
+                                uscalar_cast_val_eq .Usize st.inner.n
+                                  (Nat.lt_of_lt_of_le st.inner.n.bv.isLt (by decide))
+                              have hnle : ¬ (UScalar.cast .Usize st.inner.n).val ≤
+                                  (UScalar.cast .Usize id).val :=
+                                fun hle => hin ((UScalar.le_iff_val _ _).mpr hle)
+                              omega
+                            exact .acked id hc hb hidn hlt
+                              (beltCustodianBit_and_eq_zero hlt hz) hcnt (by rw [hin2]; rfl)
+                          | Err e =>
+                            simp only [result_bind_ok] at h
+                            obtain ⟨_, hin2⟩ := belt_core_ack_err_mealy hcore
+                            rcases belt_mealy_errStep_cases st.inner
+                                (.RecordCustodianAck ep msg) with ⟨hsame, hc⟩ | hpois
+                            · rw [hsame] at hin2
+                              subst hin2
+                              have hp := (belt_not_corrupt_facts hc).1
+                              simp only [hp, Bool.false_eq_true, ↓reduceIte] at h
+                              obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Result.ok.inj h)
+                              exact .rejected_unchanged rfl
+                            · rw [hpois] at hin2
+                              subst hin2
+                              simp only [purePoisonBelt, ↓reduceIte] at h
+                              obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Result.ok.inj h)
+                              exact .rejected_poisoned rfl rfl
+                    · cases h
+                  · rename_i hm
+                    have hmne : st.inner.bound_msg_tag ≠ msg :=
+                      fun heq => hm (decide_eq_true heq.symm)
+                    cases hcore : pants_and_quorum_guards.BeltQuorumCore.record_custodian_ack
+                        st.inner ep msg with
+                    | fail e => rw [hcore] at h; cases h
+                    | div => rw [hcore] at h; cases h
+                    | ok p =>
+                      rcases p with ⟨inner, cr⟩
+                      rw [hcore] at h
+                      cases cr with
+                      | Ok k =>
+                        obtain ⟨_, _, _, htagEq, _⟩ :=
+                          belt_mealy_ack_inv (belt_core_ack_ok_mealy hcore)
+                        exact absurd htagEq hmne
+                      | Err e =>
+                        simp only [result_bind_ok] at h
+                        obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Result.ok.inj h)
+                        obtain ⟨_, hin2⟩ := belt_core_ack_err_mealy hcore
+                        exact .rejected_poisoned
+                          (hin2.trans (belt_mealy_errStep_ack_mismatch _ _ _ hb he hmne)) rfl
+              · obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Result.ok.inj h)
+                exact .rejected_unchanged rfl
+          · obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Result.ok.inj h)
+            exact .rejected_unchanged rfl
+
+theorem auth_belt_authorize_outcome
+    {st st' : authenticated_belt.VerifiedBeltQuorumGuard} {ep : Std.U64}
+    {msg : Array Std.U8 32#usize}
+    {r : core.result.Result pants_and_quorum_guards.BeltAuthorizationGrant
+      authenticated_belt.BeltAuthError}
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.authorize_shares st ep msg = .ok (st', r)) :
+    BeltStepOutcome st st' (beltObsOfAuthorize r) := by
+  unfold authenticated_belt.VerifiedBeltQuorumGuard.authorize_shares at h
+  cases hcore : pants_and_quorum_guards.BeltQuorumCore.authorize_shares st.inner ep msg with
+  | fail e => rw [hcore] at h; cases h
+  | div => rw [hcore] at h; cases h
+  | ok p =>
+    rcases p with ⟨inner, cr⟩
+    rw [hcore] at h
+    cases cr with
+    | Ok g =>
+      obtain ⟨hc, hb, _, _, hq, hin, hg⟩ :=
+        belt_mealy_authorize_inv (belt_core_authorize_ok_mealy hcore)
+      have hp := (belt_not_corrupt_facts hc).1
+      subst hin
+      injection hg with hg
+      subst hg
+      simp only [bind_eq_result_bind, result_bind_ok,
+        pants_and_quorum_guards.BeltQuorumCore.is_poisoned, hp, Bool.false_eq_true,
+        ↓reduceIte] at h
+      obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Result.ok.inj h)
+      exact .granted hc hb hq (by simp [hp])
+    | Err e =>
+      obtain ⟨_, hin⟩ := belt_core_authorize_err_mealy hcore
+      rcases belt_mealy_errStep_cases st.inner (.AuthorizeShares ep msg) with
+        ⟨hsame, hc⟩ | hpois
+      · rw [hsame] at hin
+        subst hin
+        have hp := (belt_not_corrupt_facts hc).1
+        simp only [bind_eq_result_bind, result_bind_ok,
+          pants_and_quorum_guards.BeltQuorumCore.is_poisoned, hp, Bool.false_eq_true,
+          ↓reduceIte] at h
+        obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Result.ok.inj h)
+        exact .rejected_unchanged rfl
+      · rw [hpois] at hin
+        subst hin
+        simp only [bind_eq_result_bind, result_bind_ok,
+          pants_and_quorum_guards.BeltQuorumCore.is_poisoned, purePoisonBelt,
+          ↓reduceIte] at h
+        obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Result.ok.inj h)
+        exact .rejected_poisoned rfl rfl
+
+/-- **Complete mediation of the authenticated belt guard.** Every returned call of the
+    extracted `step` is one of the `BeltStepOutcome` cases. -/
+theorem belt_step_outcome
+    {st st' : authenticated_belt.VerifiedBeltQuorumGuard}
+    {a : authenticated_belt.BeltQuorumStepInput}
+    {res : core.result.Result authenticated_belt.BeltQuorumStepOutput
+      authenticated_belt.BeltAuthError}
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.step st a = .ok (st', res)) :
+    BeltStepOutcome st st' (beltObsOf res) := by
+  unfold authenticated_belt.VerifiedBeltQuorumGuard.step at h
+  cases a with
+  | ProposeOrRetryEpoch ep msg rd rt =>
+    dsimp only at h
+    cases hf : authenticated_belt.VerifiedBeltQuorumGuard.propose_or_retry_epoch
+        st ep msg rd rt with
+    | fail e => rw [hf] at h; cases h
+    | div => rw [hf] at h; cases h
+    | ok p =>
+      rcases p with ⟨nx, r⟩
+      rw [hf] at h
+      have ho := auth_belt_propose_outcome hf
+      cases r <;>
+        (simp only [bind_eq_result_bind, result_bind_ok] at h
+         obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Result.ok.inj h)
+         exact ho)
+  | RecordCustodianAck ep msg id tag =>
+    dsimp only at h
+    cases hf : authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack
+        st ep msg id tag with
+    | fail e => rw [hf] at h; cases h
+    | div => rw [hf] at h; cases h
+    | ok p =>
+      rcases p with ⟨nx, r⟩
+      rw [hf] at h
+      have ho := auth_belt_ack_outcome hf
+      cases r <;>
+        (simp only [bind_eq_result_bind, result_bind_ok] at h
+         obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Result.ok.inj h)
+         exact ho)
+  | AuthorizeShares ep msg =>
+    dsimp only at h
+    cases hf : authenticated_belt.VerifiedBeltQuorumGuard.authorize_shares st ep msg with
+    | fail e => rw [hf] at h; cases h
+    | div => rw [hf] at h; cases h
+    | ok p =>
+      rcases p with ⟨nx, r⟩
+      rw [hf] at h
+      have ho := auth_belt_authorize_outcome hf
+      cases r <;>
+        (simp only [bind_eq_result_bind, result_bind_ok] at h
+         obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Result.ok.inj h)
+         exact ho)
+
+/-! ## 6. Signer sets: counting distinct custodians -/
+
+/-- Number of custodians whose bit is set in a 64-bit acknowledgment bitmap. -/
+@[expose]
+def beltPopcount (bm : Std.U64) : Nat :=
+  (List.range 64).countP (fun i => bm.bv.getLsbD i)
+
+theorem beltAckCountInvariant_iff (st : authenticated_belt.VerifiedBeltQuorumGuard) :
+    BeltAckCountInvariant st ↔ st.inner.ack_count.val = beltPopcount st.ack_bitmap :=
+  Iff.rfl
+
+theorem belt_zero_count_popcount : (0#u32 : Std.U32).val = beltPopcount 0#u64 := by decide
+
+theorem countP_range_or_single (f : Nat → Bool) (k : Nat) (hf : f k = false) :
+    ∀ n, k < n →
+      (List.range n).countP (fun i => f i || decide (k = i)) =
+        (List.range n).countP f + 1 := by
+  intro n
+  induction n with
+  | zero => intro h; exact absurd h (Nat.not_lt_zero _)
+  | succ n ih =>
+    intro hk
+    rw [List.range_succ, List.countP_append, List.countP_append]
+    by_cases hkn : k < n
+    · have hne : ¬ k = n := by omega
+      rw [ih hkn]
+      cases hfn : f n <;> simp [hfn, hne] <;> omega
+    · have hkeq : k = n := by omega
+      subst hkeq
+      have hsame : (List.range k).countP (fun i => f i || decide (k = i)) =
+          (List.range k).countP f := by
+        apply List.countP_congr
+        intro x hx
+        have hxk : ¬ k = x := by
+          have := List.mem_range.mp hx
+          omega
+        simp [hxk]
+      rw [hsame]
+      simp [hf]
+
+theorem countP_inter_union (p q : Nat → Bool) (l : List Nat) :
+    l.countP p + l.countP q =
+      l.countP (fun i => p i && q i) + l.countP (fun i => p i || q i) := by
+  induction l with
+  | nil => rfl
+  | cons a l ih =>
+    simp only [List.countP_cons]
+    cases p a <;> cases q a <;> simp <;> omega
+
+theorem countP_range_le_of_bounded (r : Nat → Bool) (n : Nat)
+    (hr : ∀ i, r i = true → i < n) :
+    ∀ m, (List.range m).countP r ≤ n ∧ (List.range m).countP r ≤ m := by
+  intro m
+  induction m with
+  | zero => exact ⟨Nat.zero_le _, Nat.le_refl _⟩
+  | succ m ih =>
+    rw [List.range_succ, List.countP_append]
+    cases hrm : r m with
+    | false =>
+      have h0 : [m].countP r = 0 := by
+        rw [List.countP_cons, hrm]; rfl
+      rw [h0]
+      exact ⟨ih.1, Nat.le_succ_of_le ih.2⟩
+    | true =>
+      have hmn := hr m hrm
+      have h1 : [m].countP r = 1 := by
+        rw [List.countP_cons, hrm]; rfl
+      rw [h1]
+      exact ⟨Nat.lt_of_le_of_lt ih.2 hmn, Nat.succ_le_succ ih.2⟩
+
+theorem beltPopcount_or_bit (bm : Std.U64) (id : Std.U8) (hk : id.val < 64)
+    (hf : bm.bv.getLsbD id.val = false) :
+    beltPopcount (bm ||| beltCustodianBit id) = beltPopcount bm + 1 := by
+  unfold beltPopcount
+  have hfun : (fun i => (bm ||| beltCustodianBit id).bv.getLsbD i) =
+      (fun i => bm.bv.getLsbD i || decide (id.val = i)) := by
+    funext i
+    show (bm.bv ||| (beltCustodianBit id).bv).getLsbD i = _
+    rw [BitVec.getLsbD_or, beltCustodianBit_getLsbD id hk]
+  rw [hfun]
+  exact countP_range_or_single (fun i => bm.bv.getLsbD i) id.val hf 64 hk
+
+theorem belt_or_bit_getLsbD_true {bm : Std.U64} {id : Std.U8} (hk : id.val < 64) {i : Nat}
+    (h : (bm ||| beltCustodianBit id).bv.getLsbD i = true) :
+    bm.bv.getLsbD i = true ∨ i = id.val := by
+  have h1 : (bm.bv ||| (beltCustodianBit id).bv).getLsbD i = true := h
+  rw [BitVec.getLsbD_or, beltCustodianBit_getLsbD id hk] at h1
+  cases hb : bm.bv.getLsbD i with
+  | true => exact Or.inl rfl
+  | false =>
+    rw [hb, Bool.false_or] at h1
+    exact Or.inr (of_decide_eq_true h1).symm
+
+/-- Two signer sets drawn from `n` custodians overlap in at least
+    `|a| + |b| - n` custodians. -/
+theorem beltPopcount_inter_ge (a b : Std.U64) (n : Nat)
+    (ha : ∀ i, a.bv.getLsbD i = true → i < n) (hb : ∀ i, b.bv.getLsbD i = true → i < n) :
+    beltPopcount a + beltPopcount b ≤ beltPopcount (a &&& b) + n := by
+  have hie : beltPopcount a + beltPopcount b =
+      (List.range 64).countP (fun i => a.bv.getLsbD i && b.bv.getLsbD i) +
+      (List.range 64).countP (fun i => a.bv.getLsbD i || b.bv.getLsbD i) :=
+    countP_inter_union _ _ _
+  have hun : (List.range 64).countP (fun i => a.bv.getLsbD i || b.bv.getLsbD i) ≤ n :=
+    (countP_range_le_of_bounded (fun i => a.bv.getLsbD i || b.bv.getLsbD i) n (by
+      intro i hi
+      cases hai : a.bv.getLsbD i with
+      | true => exact ha i hai
+      | false =>
+        rw [hai, Bool.false_or] at hi
+        exact hb i hi) 64).1
+  have hand : beltPopcount (a &&& b) =
+      (List.range 64).countP (fun i => a.bv.getLsbD i && b.bv.getLsbD i) := by
+    show (List.range 64).countP (fun i => (a.bv &&& b.bv).getLsbD i) = _
+    congr 1
+    funext i
+    exact BitVec.getLsbD_and
+  omega
+
+/-! ## 7. Authenticated belt guard: traces, fork-freedom, quorum intersection -/
+
+/-- Signer-set invariant of the authenticated guard: the core's acknowledgment counter
+    is the number of set bitmap bits, and only custodians below `n` are ever set. -/
+@[expose]
+def BeltGuardInv (n q : Std.U32) (st : authenticated_belt.VerifiedBeltQuorumGuard) : Prop :=
+  st.inner.n = n ∧ st.inner.q = q ∧
+  st.inner.ack_count.val = beltPopcount st.ack_bitmap ∧
+  (∀ i, st.ack_bitmap.bv.getLsbD i = true → i < n.val)
+
+/-- Every call preserves the signer-set invariant, whether it was accepted, refused
+    without effect, or refused with poisoning. -/
+theorem belt_outcome_preserves_inv {n q : Std.U32}
+    {st st' : authenticated_belt.VerifiedBeltQuorumGuard} {obs : BeltObs}
+    (hinv : BeltGuardInv n q st) (ho : BeltStepOutcome st st' obs) :
+    BeltGuardInv n q st' := by
+  obtain ⟨hn, hq, hcnt, hbits⟩ := hinv
+  cases ho with
+  | rejected_unchanged h => subst h; exact ⟨hn, hq, hcnt, hbits⟩
+  | rejected_poisoned h1 h2 =>
+    have e1 : st'.inner.ack_count = 0#u32 :=
+      congrArg pants_and_quorum_guards.BeltQuorumCore.ack_count h1
+    have e2 : st'.inner.n = st.inner.n :=
+      (congrArg pants_and_quorum_guards.BeltQuorumCore.n h1).trans rfl
+    have e3 : st'.inner.q = st.inner.q :=
+      (congrArg pants_and_quorum_guards.BeltQuorumCore.q h1).trans rfl
+    refine ⟨e2.trans hn, e3.trans hq, ?_, ?_⟩
+    · rw [e1, h2]; exact belt_zero_count_popcount
+    · intro i hi
+      rw [h2, belt_zero_getLsbD] at hi
+      cases hi
+  | retried h => subst h; exact ⟨hn, hq, hcnt, hbits⟩
+  | bound ep msg hc hnr hge hlt h =>
+    subst h
+    refine ⟨hn, hq, belt_zero_count_popcount, ?_⟩
+    intro i hi
+    have hi' : (0#u64 : Std.U64).bv.getLsbD i = true := hi
+    rw [belt_zero_getLsbD] at hi'
+    cases hi'
+  | duplicate h => subst h; exact ⟨hn, hq, hcnt, hbits⟩
+  | acked id hc hb hidn h64 hbit hcount h =>
+    subst h
+    refine ⟨hn, hq, ?_, ?_⟩
+    · show (⟨st.inner.ack_count.bv + (1#u32).bv⟩ : Std.U32).val =
+        beltPopcount (st.ack_bitmap ||| beltCustodianBit id)
+      have h2 : st.inner.n.val < 2 ^ 32 := st.inner.n.bv.isLt
+      have hlt32 : st.inner.ack_count.val + 1 < 2 ^ 32 := by omega
+      rw [u32_succ_val hlt32, beltPopcount_or_bit _ _ h64 hbit, hcnt]
+    · intro i hi
+      rcases belt_or_bit_getLsbD_true h64 hi with h1 | h1
+      · exact hbits i h1
+      · rw [h1, ← hn]; exact hidn
+  | granted hc hb hq' h => subst h; exact ⟨hn, hq, hcnt, hbits⟩
+
+/-- How one call moves the epoch binding: it keeps `(bound_epoch, bound_msg_tag,
+    next_epoch)`, or it binds a fresh epoch at or above the previous `next_epoch`. -/
+theorem belt_outcome_binding
+    {st st' : authenticated_belt.VerifiedBeltQuorumGuard} {obs : BeltObs}
+    (ho : BeltStepOutcome st st' obs) :
+    (st'.inner.has_bound_epoch = st.inner.has_bound_epoch ∧
+      st'.inner.bound_epoch = st.inner.bound_epoch ∧
+      st'.inner.bound_msg_tag = st.inner.bound_msg_tag ∧
+      st'.inner.next_epoch = st.inner.next_epoch) ∨
+    (st'.inner.has_bound_epoch = true ∧
+      st.inner.next_epoch.val ≤ st'.inner.bound_epoch.val ∧
+      st'.inner.bound_epoch.val < st'.inner.next_epoch.val) := by
+  cases ho with
+  | rejected_unchanged h => subst h; exact Or.inl ⟨rfl, rfl, rfl, rfl⟩
+  | rejected_poisoned h1 h2 => rw [h1]; exact Or.inl ⟨rfl, rfl, rfl, rfl⟩
+  | retried h => subst h; exact Or.inl ⟨rfl, rfl, rfl, rfl⟩
+  | bound ep msg hc hnr hge hlt h =>
+    subst h
+    refine Or.inr ⟨rfl, hge, ?_⟩
+    show ep.val < (⟨ep.bv + (1#u64).bv⟩ : Std.U64).val
+    rw [u64_succ_val hlt]
+    exact Nat.lt_succ_self _
+  | duplicate h => subst h; exact Or.inl ⟨rfl, rfl, rfl, rfl⟩
+  | acked id hc hb hidn h64 hbit hcount h => subst h; exact Or.inl ⟨rfl, rfl, rfl, rfl⟩
+  | granted hc hb hq h => subst h; exact Or.inl ⟨rfl, rfl, rfl, rfl⟩
+
+theorem belt_outcome_granted_inv
+    {st st' : authenticated_belt.VerifiedBeltQuorumGuard}
+    {g : pants_and_quorum_guards.BeltAuthorizationGrant}
+    (ho : BeltStepOutcome st st' (.granted g)) :
+    beltGuardCorrupt st.inner = false ∧
+    st.inner.has_bound_epoch = true ∧
+    g.authorized_epoch = st.inner.bound_epoch ∧
+    g.msg_tag = st.inner.bound_msg_tag ∧
+    g.certified_acks = st.inner.ack_count ∧
+    st.inner.q.val ≤ st.inner.ack_count.val ∧
+    st'.ack_bitmap = st.ack_bitmap := by
+  cases ho with
+  | granted hc hb hq h => subst h; exact ⟨hc, hb, rfl, rfl, rfl, hq, rfl⟩
+
+/-- A quorum certificate as a caller sees it: the grant returned by `step`, together
+    with the signer bitmap the guard held when it issued the grant. -/
+structure BeltCert where
+  grant : pants_and_quorum_guards.BeltAuthorizationGrant
+  signers : Std.U64
+
+abbrev BeltAction := authenticated_belt.BeltQuorumStepInput
+
+/-- Executions of `VerifiedBeltQuorumGuard::step` on arbitrary inputs: epoch proposals
+    and retries, acknowledgments in any order and with any repetition, authorization
+    requests, replays, and refused calls. The third index lists the certificates
+    issued, oldest first. -/
+inductive BeltTraceReachable :
+    authenticated_belt.VerifiedBeltQuorumGuard → List BeltAction → List BeltCert →
+    authenticated_belt.VerifiedBeltQuorumGuard → Prop where
+  | nil (st : authenticated_belt.VerifiedBeltQuorumGuard) : BeltTraceReachable st [] [] st
+  | bound {st st' stF : authenticated_belt.VerifiedBeltQuorumGuard} {a : BeltAction}
+      {acts : List BeltAction} {certs : List BeltCert} :
+      authenticated_belt.VerifiedBeltQuorumGuard.step st a = .ok (st', .Ok .EpochBound) →
+      BeltTraceReachable st' acts certs stF →
+      BeltTraceReachable st (a :: acts) certs stF
+  | acked {st st' stF : authenticated_belt.VerifiedBeltQuorumGuard} {a : BeltAction}
+      {acts : List BeltAction} {certs : List BeltCert} {k : Std.U32} :
+      authenticated_belt.VerifiedBeltQuorumGuard.step st a = .ok (st', .Ok (.AckRecorded k)) →
+      BeltTraceReachable st' acts certs stF →
+      BeltTraceReachable st (a :: acts) certs stF
+  | certified {st st' stF : authenticated_belt.VerifiedBeltQuorumGuard} {a : BeltAction}
+      {acts : List BeltAction} {certs : List BeltCert}
+      {g : pants_and_quorum_guards.BeltAuthorizationGrant} :
+      authenticated_belt.VerifiedBeltQuorumGuard.step st a =
+        .ok (st', .Ok (.SharesAuthorized g)) →
+      BeltTraceReachable st' acts certs stF →
+      BeltTraceReachable st (a :: acts) (⟨g, st'.ack_bitmap⟩ :: certs) stF
+  | failed {st st' stF : authenticated_belt.VerifiedBeltQuorumGuard} {a : BeltAction}
+      {acts : List BeltAction} {certs : List BeltCert}
+      {e : authenticated_belt.BeltAuthError} :
+      authenticated_belt.VerifiedBeltQuorumGuard.step st a = .ok (st', .Err e) →
+      BeltTraceReachable st' acts certs stF →
+      BeltTraceReachable st (a :: acts) certs stF
+
+/-- A refused call leaves the guard exactly as it was, or poisons the core and clears
+    the signer bitmap. It never advances an epoch and never adds a signer. -/
+theorem belt_failed_call_unchanged_or_poisoned
+    {st st' : authenticated_belt.VerifiedBeltQuorumGuard} {a : BeltAction}
+    {e : authenticated_belt.BeltAuthError}
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.step st a = .ok (st', .Err e)) :
+    st' = st ∨ (st'.inner = purePoisonBelt st.inner ∧ st'.ack_bitmap = 0#u64) := by
+  have ho : BeltStepOutcome st st' .rejected := belt_step_outcome h
+  cases ho with
+  | rejected_unchanged h1 => exact Or.inl h1
+  | rejected_poisoned h1 h2 => exact Or.inr ⟨h1, h2⟩
+
+/-- Where a certificate can sit relative to a guard state: it certifies the state's
+    current binding, or its epoch is at or above the state's `next_epoch`. -/
+@[expose]
+def BeltCertAhead (st : authenticated_belt.VerifiedBeltQuorumGuard) (c : BeltCert) : Prop :=
+  (st.inner.has_bound_epoch = true ∧
+    c.grant.authorized_epoch = st.inner.bound_epoch ∧
+    c.grant.msg_tag = st.inner.bound_msg_tag) ∨
+  st.inner.next_epoch.val ≤ c.grant.authorized_epoch.val
+
+theorem belt_cert_ahead_transfer
+    {st st' : authenticated_belt.VerifiedBeltQuorumGuard} {obs : BeltObs}
+    (ho : BeltStepOutcome st st' obs) {c : BeltCert} (h : BeltCertAhead st' c) :
+    BeltCertAhead st c := by
+  rcases belt_outcome_binding ho with ⟨hb, he, ht, hn⟩ | ⟨hb, hge, hlt⟩
+  · rcases h with ⟨h1, h2, h3⟩ | h4
+    · exact Or.inl ⟨hb.symm.trans h1, h2.trans he, h3.trans ht⟩
+    · rw [hn] at h4
+      exact Or.inr h4
+  · rcases h with ⟨h1, h2, h3⟩ | h4
+    · refine Or.inr ?_
+      rw [h2]
+      exact hge
+    · exact Or.inr (by omega)
+
+theorem belt_trace_certs_ahead
+    {st stF : authenticated_belt.VerifiedBeltQuorumGuard} {acts : List BeltAction}
+    {certs : List BeltCert} (hTr : BeltTraceReachable st acts certs stF) :
+    ∀ c ∈ certs, BeltCertAhead st c := by
+  induction hTr with
+  | nil st => intro c hc; exact False.elim (List.not_mem_nil hc)
+  | bound h _ ih =>
+    intro c hc
+    exact belt_cert_ahead_transfer (belt_step_outcome h) (ih c hc)
+  | acked h _ ih =>
+    intro c hc
+    exact belt_cert_ahead_transfer (belt_step_outcome h) (ih c hc)
+  | @certified st st' stF a acts certs g h _ ih =>
+    intro c hc
+    have ho : BeltStepOutcome st st' (.granted g) := belt_step_outcome h
+    rcases List.mem_cons.mp hc with rfl | hc
+    · obtain ⟨_, hb, hep, htag, _⟩ := belt_outcome_granted_inv ho
+      exact Or.inl ⟨hb, hep, htag⟩
+    · exact belt_cert_ahead_transfer ho (ih c hc)
+  | failed h _ ih =>
+    intro c hc
+    exact belt_cert_ahead_transfer (belt_step_outcome h) (ih c hc)
+
+/-- **Epoch monotonicity and fork-freedom along a trace.** For certificates in issue
+    order, a later certificate has a strictly larger epoch, or it has the same epoch
+    and the same message. From any starting state. -/
+theorem belt_trace_certs_monotone
+    {st stF : authenticated_belt.VerifiedBeltQuorumGuard} {acts : List BeltAction}
+    {certs : List BeltCert} (hTr : BeltTraceReachable st acts certs stF) :
+    certs.Pairwise (fun c1 c2 =>
+      c1.grant.authorized_epoch.val < c2.grant.authorized_epoch.val ∨
+      (c1.grant.authorized_epoch = c2.grant.authorized_epoch ∧
+        c1.grant.msg_tag = c2.grant.msg_tag)) := by
+  induction hTr with
+  | nil st => exact List.Pairwise.nil
+  | bound _ _ ih => exact ih
+  | acked _ _ ih => exact ih
+  | @certified st st' stF a acts certs g h hTail ih =>
+    refine List.Pairwise.cons ?_ ih
+    intro c2 hc2
+    have ho : BeltStepOutcome st st' (.granted g) := belt_step_outcome h
+    obtain ⟨hc, hb, hep, htag, _⟩ := belt_outcome_granted_inv ho
+    have hlt := (belt_not_corrupt_facts hc).2.2.2 hb
+    rcases belt_cert_ahead_transfer ho (belt_trace_certs_ahead hTail c2 hc2) with
+      ⟨_, h2, h3⟩ | h4
+    · exact Or.inr ⟨hep.trans h2.symm, htag.trans h3.symm⟩
+    · refine Or.inl ?_
+      show g.authorized_epoch.val < c2.grant.authorized_epoch.val
+      rw [hep]
+      omega
+  | failed _ _ ih => exact ih
+
+theorem pairwise_mem_cases {α : Type} {R : α → α → Prop} :
+    ∀ {l : List α}, l.Pairwise R → ∀ a ∈ l, ∀ b ∈ l, a = b ∨ R a b ∨ R b a
+  | [], _, a, ha, _, _ => (List.not_mem_nil ha).elim
+  | x :: xs, h, a, ha, b, hb => by
+    obtain ⟨hx, hxs⟩ := List.pairwise_cons.mp h
+    rcases List.mem_cons.mp ha with rfl | ha' <;> rcases List.mem_cons.mp hb with rfl | hb'
+    · exact Or.inl rfl
+    · exact Or.inr (Or.inl (hx b hb'))
+    · exact Or.inr (Or.inr (hx a ha'))
+    · exact pairwise_mem_cases hxs a ha' b hb'
+
+/-- **No fork at an epoch.** Two certificates of one trace with the same epoch certify
+    the same message, in whatever order and however many calls apart they were issued. -/
+theorem belt_trace_same_epoch_same_message
+    {st stF : authenticated_belt.VerifiedBeltQuorumGuard} {acts : List BeltAction}
+    {certs : List BeltCert} (hTr : BeltTraceReachable st acts certs stF) :
+    ∀ c1 ∈ certs, ∀ c2 ∈ certs,
+      c1.grant.authorized_epoch = c2.grant.authorized_epoch →
+      c1.grant.msg_tag = c2.grant.msg_tag := by
+  intro c1 h1 c2 h2 heq
+  have hval : c1.grant.authorized_epoch.val = c2.grant.authorized_epoch.val := by rw [heq]
+  rcases pairwise_mem_cases (belt_trace_certs_monotone hTr) c1 h1 c2 h2 with
+    rfl | hlt | hlt
+  · rfl
+  · rcases hlt with hlt | ⟨_, hm⟩
+    · omega
+    · exact hm
+  · rcases hlt with hlt | ⟨_, hm⟩
+    · omega
+    · exact hm.symm
+
+/-- Every certificate of a trace is backed by its signer bitmap: `certified_acks` is the
+    number of set bits, that number is at least `q`, and every signer is below `n`.
+    The invariant holds again at the end of the trace. -/
+theorem belt_trace_certs_quorum {n q : Std.U32}
+    {st stF : authenticated_belt.VerifiedBeltQuorumGuard} {acts : List BeltAction}
+    {certs : List BeltCert} (hTr : BeltTraceReachable st acts certs stF)
+    (hinv : BeltGuardInv n q st) :
+    (∀ c ∈ certs,
+      c.grant.certified_acks.val = beltPopcount c.signers ∧
+      q.val ≤ beltPopcount c.signers ∧
+      (∀ i, c.signers.bv.getLsbD i = true → i < n.val)) ∧
+    BeltGuardInv n q stF := by
+  induction hTr with
+  | nil st => exact ⟨fun _ hc => False.elim (List.not_mem_nil hc), hinv⟩
+  | bound h _ ih => exact ih (belt_outcome_preserves_inv hinv (belt_step_outcome h))
+  | acked h _ ih => exact ih (belt_outcome_preserves_inv hinv (belt_step_outcome h))
+  | @certified st st' stF a acts certs g h _ ih =>
+    have ho : BeltStepOutcome st st' (.granted g) := belt_step_outcome h
+    obtain ⟨ihc, ihF⟩ := ih (belt_outcome_preserves_inv hinv ho)
+    obtain ⟨_, _, _, _, hca, hq, hbm⟩ := belt_outcome_granted_inv ho
+    obtain ⟨hn, hqq, hcnt, hbits⟩ := hinv
+    refine ⟨?_, ihF⟩
+    intro c hc
+    rcases List.mem_cons.mp hc with rfl | hc
+    · refine ⟨?_, ?_, ?_⟩
+      · show g.certified_acks.val = beltPopcount st'.ack_bitmap
+        rw [hca, hbm]
+        exact hcnt
+      · show q.val ≤ beltPopcount st'.ack_bitmap
+        rw [hbm, ← hcnt, ← hqq]
+        exact hq
+      · intro i hi
+        have hi' : st'.ack_bitmap.bv.getLsbD i = true := hi
+        rw [hbm] at hi'
+        exact hbits i hi'
+    · exact ihc c hc
+  | failed h _ ih => exact ih (belt_outcome_preserves_inv hinv (belt_step_outcome h))
+
+/-- **Quorum intersection.** Under `n + f < 2 * q`, two signer sets of at least `q`
+    custodians below `n` share more than `f` custodians. -/
+theorem belt_quorum_intersection {n f q : Std.U32} {s1 s2 : Std.U64}
+    (hcfg : n.val + f.val < 2 * q.val)
+    (h1 : q.val ≤ beltPopcount s1) (hb1 : ∀ i, s1.bv.getLsbD i = true → i < n.val)
+    (h2 : q.val ≤ beltPopcount s2) (hb2 : ∀ i, s2.bv.getLsbD i = true → i < n.val) :
+    f.val < beltPopcount (s1 &&& s2) := by
+  have := beltPopcount_inter_ge s1 s2 n.val hb1 hb2
+  omega
+
+/-- What a successful `new_validated` establishes. -/
+theorem auth_belt_new_validated_inv
+    {n t f q : Std.U32} {gl : Bool} {e0 window : Std.U64}
+    {commit wal : Array Std.U8 32#usize} {keys : Array (Array Std.U8 32#usize) 64#usize}
+    {st0 : authenticated_belt.VerifiedBeltQuorumGuard}
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.new_validated
+      n t f q gl e0 window commit keys wal = .ok (.Ok st0)) :
+    ValidBeltQuorumConfigProp n t f q gl ∧
+    n.val ≤ 64 ∧
+    st0.inner.n = n ∧ st0.inner.q = q ∧
+    st0.inner.has_bound_epoch = false ∧
+    st0.inner.next_epoch = e0 ∧
+    st0.inner.poisoned = false ∧
+    st0.inner.ack_count = 0#u32 ∧
+    st0.ack_bitmap = 0#u64 := by
+  by_cases hn : n > 64#u32
+  · simp [authenticated_belt.VerifiedBeltQuorumGuard.new_validated, hn] at h
+  · by_cases hv : validBeltQuorumConfigBool n t f q gl = true
+    · simp [authenticated_belt.VerifiedBeltQuorumGuard.new_validated, hn,
+        pants_and_quorum_guards.BeltQuorumCore.new_validated,
+        validate_belt_quorum_config_eq, hv] at h
+      cases h
+      refine ⟨?_, ?_, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+      · obtain ⟨b, hb, hiff⟩ := validate_belt_quorum_config_spec n t f q gl
+        rw [validate_belt_quorum_config_eq] at hb
+        injection hb with hb
+        exact hiff.mp (hb.symm.trans hv)
+      · exact Nat.le_of_not_lt
+          (fun (hlt : (64#u32 : Std.U32).val < n.val) => hn ((UScalar.lt_iff_val _ _).mpr hlt))
+    · simp [authenticated_belt.VerifiedBeltQuorumGuard.new_validated, hn,
+        pants_and_quorum_guards.BeltQuorumCore.new_validated,
+        validate_belt_quorum_config_eq, hv] at h
+
+/-- **Unbounded multi-turn fork-freedom of the authenticated belt guard.** From a guard
+    created by `new_validated`, after any sequence of `step` calls on any inputs:
+    * the configuration satisfies `n + f < 2 * q`;
+    * certificate epochs never decrease in issue order, and a repeated epoch repeats
+      the message;
+    * every certificate's epoch is at least the initial `next_epoch`, its
+      `certified_acks` is the number of distinct custodians in its signer bitmap, that
+      number is at least `q`, and every signer is below `n`;
+    * any two certificates share more than `f` signers;
+    * the signer-set invariant holds in the final state. -/
