@@ -745,3 +745,3685 @@ fn squeeze_fp_challenge(xof: &mut WordSponge136, d: Domain) -> Value {
 
 // ============================================================================
 // Replicated Mixed-Domain Active Engine
+// ============================================================================
+
+/// Replicated additive field shares, with one entry per repetition lane.
+pub(crate) type FieldWord = Vec<[Value; 2]>;
+type PendingFieldTriple = (FieldWord, FieldWord, FieldWord);
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) enum FaultInjection {
+    BitAnd { call_countdown: usize, gate: usize, lane: usize },
+    FieldMul { domain: Domain, call_countdown: usize, lane: usize },
+}
+
+#[cfg(test)]
+impl FaultInjection {
+    pub(crate) fn to_raw(self) -> [usize; 4] {
+        match self {
+            Self::BitAnd {
+                call_countdown,
+                gate,
+                lane,
+            } => [0, call_countdown, gate, lane],
+            Self::FieldMul {
+                domain,
+                call_countdown,
+                lane,
+            } => {
+                let tag = match domain {
+                    Domain::Gold => 1,
+                    Domain::Secp => 2,
+                    Domain::Ed => 3,
+                    Domain::Bit => 0,
+                };
+                [tag, call_countdown, lane, 0]
+            }
+        }
+    }
+    fn from_raw([tag, a, b, c]: [usize; 4]) -> Self {
+        match tag {
+            0 => Self::BitAnd {
+                call_countdown: a,
+                gate: b,
+                lane: c,
+            },
+            1 => Self::FieldMul {
+                domain: Domain::Gold,
+                call_countdown: a,
+                lane: b,
+            },
+            2 => Self::FieldMul {
+                domain: Domain::Secp,
+                call_countdown: a,
+                lane: b,
+            },
+            _ => Self::FieldMul {
+                domain: Domain::Ed,
+                call_countdown: a,
+                lane: b,
+            },
+        }
+    }
+}
+
+pub(crate) struct Engine<T> {
+    pub party: usize,
+    session: [u8; 32],
+    keys: [[u8; 32]; 2],
+    mac_prefix: [[u64; 25]; 2],
+    pads: [WordSponge136; 2],
+    edge_sponges: [WordSponge136; 2],
+    coin_rng: WordSponge136,
+    sequence: u64,
+    poisoned: bool,
+    pending_bits_raw: Vec<u64>,
+    pending_secp: Vec<PendingFieldTriple>,
+    pending_ed: Vec<PendingFieldTriple>,
+    pending_gold: Vec<PendingFieldTriple>,
+    scratch_r: Vec<u64>,
+    scratch_s: Vec<u64>,
+    bit_scratch: Option<Box<BitCheckScratch>>,
+    #[cfg(test)]
+    pub(crate) fault: Option<FaultInjection>,
+    pub transport: T,
+}
+
+impl<T> Drop for Engine<T> {
+    fn drop(&mut self) {
+        for key in &mut self.keys {
+            ct_zeroize_bytes(key);
+        }
+        for pref in &mut self.mac_prefix {
+            ct_zeroize_u64s(pref);
+        }
+        ct_zeroize_u64s(&mut self.scratch_r);
+        ct_zeroize_u64s(&mut self.scratch_s);
+        ct_zeroize_u64s(&mut self.pending_bits_raw);
+        for list in [
+            &mut self.pending_secp,
+            &mut self.pending_ed,
+            &mut self.pending_gold,
+        ] {
+            for (a, b, c) in list {
+                for fw in [a, b, c] {
+                    for pair in fw {
+                        ct_zeroize_u64s(&mut pair[0]);
+                        ct_zeroize_u64s(&mut pair[1]);
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<T: Transport> Engine<T> {
+    pub fn new(
+        party: usize,
+        session: [u8; 32],
+        keys: [[u8; 32]; 2],
+        transport: T,
+    ) -> Result<Self, Error> {
+        if party >= 3 {
+            return Err(Error::InvalidConfiguration);
+        }
+        let mac_prefix = [
+            build_mac_prefix(&keys[0], &session),
+            build_mac_prefix(&keys[1], &session),
+        ];
+        let pads = keys.map(|key| {
+            let mut seed = cshake256_framed_32(b"QSAG.OUTER.PADS.V1", &[&key, &session]);
+            let sp = WordSponge136::from_shake_seed(&seed);
+            ct_zeroize_bytes(&mut seed);
+            sp
+        });
+        let prev = (party + 2) % 3;
+        let next = (party + 1) % 3;
+        let init_edge = |u: usize, v: usize| {
+            let mut s = WordSponge136::new();
+            s.absorb_u64(0x4544_4745_5f56_3100); // "EDGE_V1"
+            s.absorb_bytes32(&session);
+            s.absorb_u64((u as u64) | ((v as u64) << 8));
+            s
+        };
+        let edge_sponges = [init_edge(prev, party), init_edge(party, next)];
+        let mut coin_seed = cshake256_framed_32(
+            b"QSAG.OUTER.COIN.RNG.V1",
+            &[&session, &[party as u8], &keys[0], &keys[1]],
+        );
+        let coin_rng = WordSponge136::from_shake_seed(&coin_seed);
+        ct_zeroize_bytes(&mut coin_seed);
+        #[cfg(test)]
+        let fault = transport.test_fault_raw().map(FaultInjection::from_raw);
+        Ok(Self {
+            party,
+            session,
+            keys,
+            mac_prefix,
+            pads,
+            edge_sponges,
+            coin_rng,
+            sequence: 0,
+            poisoned: false,
+            pending_bits_raw: Vec::new(),
+            pending_secp: Vec::new(),
+            pending_ed: Vec::new(),
+            pending_gold: Vec::new(),
+            scratch_r: Vec::new(),
+            scratch_s: Vec::new(),
+            bit_scratch: None,
+            #[cfg(test)]
+            fault,
+            transport,
+        })
+    }
+
+    /// Hedge local coin-flipping randomness with custodian-private ceremony entropy.
+    pub fn mix_entropy(&mut self, entropy: &[u8; 32]) {
+        let current = self.coin_rng.squeeze_bytes32();
+        let mut next_seed =
+            cshake256_framed_32(b"QSAG.OUTER.COIN.HEDGE.V1", &[&current, entropy, &self.session]);
+        self.coin_rng = WordSponge136::from_shake_seed(&next_seed);
+        ct_zeroize_bytes(&mut next_seed);
+    }
+
+    #[inline]
+    pub fn constant(&self, x: u64) -> Bit {
+        Bit([
+            if self.party == 0 { x } else { 0 },
+            if (self.party + 1) % 3 == 0 { x } else { 0 },
+        ])
+    }
+
+    fn tag(
+        &self,
+        peer: usize,
+        sender: usize,
+        recipient: usize,
+        seq: u64,
+        payload: &[u64],
+    ) -> [u8; 32] {
+        let mut state = self.mac_prefix[peer];
+        let sr = (sender as u64 & 0xff) | ((recipient as u64 & 0xff) << 8);
+        let byte_len = (payload.len() as u64) * 8;
+        state[11] ^= 2u64;
+        state[12] ^= sr | (8u64 << 16);
+        state[13] ^= seq << 16;
+        state[14] ^= (seq >> 48) | (byte_len << 16);
+        let mut carry16 = byte_len >> 48;
+        let mut lane = 15usize;
+        for &w in payload {
+            state[lane] ^= carry16 | (w << 16);
+            carry16 = w >> 48;
+            lane += 1;
+            if lane == 17 {
+                keccak_f1600(&mut state);
+                lane = 0;
+            }
+        }
+        state[lane] ^= carry16 | (0x04u64 << 16);
+        state[16] ^= 0x8000_0000_0000_0000;
+        keccak_f1600(&mut state);
+        let mut out = [0u8; 32];
+        for (chunk, &w) in out.chunks_exact_mut(8).zip(&state[..4]) {
+            chunk.copy_from_slice(&w.to_le_bytes());
+        }
+        ct_zeroize_u64s(&mut state);
+        out
+    }
+
+    fn raw_exchange(&mut self, payloads: [Vec<u64>; 2]) -> Result<[Vec<u64>; 2], Error> {
+        if self.poisoned {
+            return Err(Error::MultiplicationCheck);
+        }
+        let peers = [(self.party + 2) % 3, (self.party + 1) % 3];
+        let seq = self.sequence;
+        let [p0, p1] = payloads;
+        let out_tag_0 = self.tag(0, self.party, peers[0], seq, &p0);
+        let out_tag_1 = self.tag(1, self.party, peers[1], seq, &p1);
+        let outgoing = [
+            Envelope {
+                tag: out_tag_0,
+                sender: self.party,
+                recipient: peers[0],
+                sequence: seq,
+                payload: p0,
+            },
+            Envelope {
+                tag: out_tag_1,
+                sender: self.party,
+                recipient: peers[1],
+                sequence: seq,
+                payload: p1,
+            },
+        ];
+        let mut incoming = self.transport.exchange(outgoing)?;
+        for (i, message) in incoming.iter().enumerate() {
+            let expected = self.tag(i, peers[i], self.party, seq, &message.payload);
+            if message.sender != peers[i]
+                || message.recipient != self.party
+                || message.sequence != seq
+                || ct_eq_bytes_mask(&expected, &message.tag) != u64::MAX
+            {
+                self.poisoned = true;
+                return Err(Error::Authentication(peers[i]));
+            }
+        }
+        // Record canonical directed-edge tags: edge 0 is `prev -> self`, edge 1 is `self -> next`.
+        self.edge_sponges[0].absorb_u64(seq);
+        self.edge_sponges[0].absorb_bytes32(&incoming[0].tag);
+        self.edge_sponges[0].absorb_bytes32(&out_tag_0);
+        self.edge_sponges[1].absorb_u64(seq);
+        self.edge_sponges[1].absorb_bytes32(&out_tag_1);
+        self.edge_sponges[1].absorb_bytes32(&incoming[1].tag);
+
+        self.sequence = seq.checked_add(1).ok_or(Error::InvalidConfiguration)?;
+        Ok(incoming.each_mut().map(|m| core::mem::take(&mut m.payload)))
+    }
+
+    fn raw_share_owned(&mut self, own: Vec<u64>) -> Result<(Vec<u64>, Vec<u64>), Error> {
+        let len = own.len();
+        let mut own_copy = Vec::with_capacity(len);
+        own_copy.extend_from_slice(&own);
+        let incoming = self.raw_exchange([own, Vec::new()])?;
+        if incoming[1].len() != len || !incoming[0].is_empty() {
+            ct_zeroize_u64s(&mut own_copy);
+            self.poisoned = true;
+            return Err(Error::InvalidConfiguration);
+        }
+        let [_, next_share] = incoming;
+        Ok((own_copy, next_share))
+    }
+
+    pub fn share(&mut self, own: &[u64]) -> Result<Word, Error> {
+        let (mut mine, mut next) = self.raw_share_owned(own.to_vec())?;
+        let out = mine
+            .iter()
+            .zip(&next)
+            .map(|(&a, &b)| Bit([a, b]))
+            .collect();
+        ct_zeroize_u64s(&mut mine);
+        ct_zeroize_u64s(&mut next);
+        Ok(out)
+    }
+
+    /// Share secret bits while enforcing that every custodian supplies uniform
+    /// 64-lane masks (`0` or `u64::MAX`), preventing cross-repetition witness splitting.
+    pub fn share_uniform_lanes(&mut self, own: &[u64]) -> Result<Word, Error> {
+        if own.iter().any(|&w| w != 0 && w != u64::MAX) {
+            return Err(Error::InvalidConfiguration);
+        }
+        let (mut mine, mut next) = self.raw_share_owned(own.to_vec())?;
+        if next.iter().any(|&w| w != 0 && w != u64::MAX) {
+            ct_zeroize_u64s(&mut mine);
+            ct_zeroize_u64s(&mut next);
+            self.poisoned = true;
+            return Err(Error::Disagreement((self.party + 1) % 3));
+        }
+        let out = mine
+            .iter()
+            .zip(&next)
+            .map(|(&a, &b)| Bit([a, b]))
+            .collect();
+        ct_zeroize_u64s(&mut mine);
+        ct_zeroize_u64s(&mut next);
+        Ok(out)
+    }
+
+    /// Two-round commit-then-open coin-flipping bound to the full three-edge
+    /// authenticated transcript up to `self.sequence`.
+    fn coin_flip(&mut self, domain: &[u8]) -> Result<[u8; 32], Error> {
+        let flip_seq = self.sequence;
+        let td_own = [
+            self.edge_sponges[0].digest_clone(),
+            self.edge_sponges[1].digest_clone(),
+        ];
+        let mut r_own = self.coin_rng.squeeze_bytes32();
+        let session = self.session;
+        let commit_for = |party: usize, td: &[[u8; 32]; 2], r: &[u8; 32]| {
+            cshake256_framed_32(
+                b"QSAG.OUTER.COIN.COMMIT.V1",
+                &[
+                    &session,
+                    &flip_seq.to_le_bytes(),
+                    &(party as u64).to_le_bytes(),
+                    domain,
+                    &td[0],
+                    &td[1],
+                    r,
+                ],
+            )
+        };
+        let c_own = commit_for(self.party, &td_own, &r_own);
+        let to_words4 = |b: &[u8; 32]| -> [u64; 4] {
+            core::array::from_fn(|i| {
+                let mut buf = [0u8; 8];
+                buf.copy_from_slice(&b[8 * i..8 * i + 8]);
+                u64::from_le_bytes(buf)
+            })
+        };
+        let from_words4 = |w: &[u64]| -> [u8; 32] {
+            let mut out = [0u8; 32];
+            for (chunk, &val) in out.chunks_exact_mut(8).zip(&w[..4]) {
+                chunk.copy_from_slice(&val.to_le_bytes());
+            }
+            out
+        };
+
+        let c_vec = to_words4(&c_own).to_vec();
+        let in_commits = self.raw_exchange([c_vec.clone(), c_vec])?;
+        if in_commits[0].len() != 4 || in_commits[1].len() != 4 {
+            ct_zeroize_bytes(&mut r_own);
+            self.poisoned = true;
+            return Err(Error::MultiplicationCheck);
+        }
+        let prev = (self.party + 2) % 3;
+        let next = (self.party + 1) % 3;
+        let mut commits = [[0u8; 32]; 3];
+        commits[self.party] = c_own;
+        commits[prev] = from_words4(&in_commits[0]);
+        commits[next] = from_words4(&in_commits[1]);
+
+        let mut open_words = Vec::with_capacity(24);
+        open_words.extend_from_slice(&to_words4(&r_own));
+        open_words.extend_from_slice(&to_words4(&td_own[0]));
+        open_words.extend_from_slice(&to_words4(&td_own[1]));
+        for c in &commits {
+            open_words.extend_from_slice(&to_words4(c));
+        }
+        let in_opens = self.raw_exchange([open_words.clone(), open_words])?;
+        if in_opens[0].len() != 24 || in_opens[1].len() != 24 {
+            ct_zeroize_bytes(&mut r_own);
+            self.poisoned = true;
+            return Err(Error::MultiplicationCheck);
+        }
+
+        let mut r_prev = from_words4(&in_opens[0][0..4]);
+        let td_prev = [
+            from_words4(&in_opens[0][4..8]),
+            from_words4(&in_opens[0][8..12]),
+        ];
+        let mut r_next = from_words4(&in_opens[1][0..4]);
+        let td_next = [
+            from_words4(&in_opens[1][4..8]),
+            from_words4(&in_opens[1][8..12]),
+        ];
+
+        // Verify echoed commitments match across all three parties, pairwise edge
+        // transcripts match on all three links, and both peer commitments open validly.
+        let mut valid_mask = ct_eq_bytes_mask(&td_prev[1], &td_own[0])
+            & ct_eq_bytes_mask(&td_next[0], &td_own[1])
+            & ct_eq_bytes_mask(&td_prev[0], &td_next[1]);
+        for (idx, expected_c) in commits.iter().enumerate() {
+            let echo_prev = from_words4(&in_opens[0][12 + 4 * idx..16 + 4 * idx]);
+            let echo_next = from_words4(&in_opens[1][12 + 4 * idx..16 + 4 * idx]);
+            valid_mask &= ct_eq_bytes_mask(&echo_prev, expected_c);
+            valid_mask &= ct_eq_bytes_mask(&echo_next, expected_c);
+        }
+        let expected_prev = commit_for(prev, &td_prev, &r_prev);
+        let expected_next = commit_for(next, &td_next, &r_next);
+        valid_mask &= ct_eq_bytes_mask(&expected_prev, &commits[prev]);
+        valid_mask &= ct_eq_bytes_mask(&expected_next, &commits[next]);
+
+        if valid_mask != u64::MAX {
+            ct_zeroize_bytes(&mut r_own);
+            ct_zeroize_bytes(&mut r_prev);
+            ct_zeroize_bytes(&mut r_next);
+            self.poisoned = true;
+            return Err(Error::MultiplicationCheck);
+        }
+
+        let mut r_xor = [0u8; 32];
+        for (i, dst) in r_xor.iter_mut().enumerate() {
+            *dst = r_own[i] ^ r_prev[i] ^ r_next[i];
+        }
+        let mut edges_by_party = [[0u8; 32]; 3];
+        edges_by_party[self.party] = td_own[0];
+        edges_by_party[prev] = td_prev[0];
+        edges_by_party[next] = td_next[0];
+
+        let out = cshake256_framed_32(
+            b"QSAG.OUTER.COIN.DERIVE.V1",
+            &[
+                &self.session,
+                &flip_seq.to_le_bytes(),
+                domain,
+                &edges_by_party[0],
+                &edges_by_party[1],
+                &edges_by_party[2],
+                &commits[0],
+                &commits[1],
+                &commits[2],
+                &r_xor,
+            ],
+        );
+        ct_zeroize_bytes(&mut r_own);
+        ct_zeroize_bytes(&mut r_prev);
+        ct_zeroize_bytes(&mut r_next);
+        ct_zeroize_bytes(&mut r_xor);
+        Ok(out)
+    }
+
+    fn open_raw_bits(&mut self, bits: &[Bit]) -> Result<Vec<u64>, Error> {
+        let mut own = Vec::with_capacity(bits.len() * 2);
+        for b in bits {
+            own.push(b.0[0]);
+            own.push(b.0[1]);
+        }
+        let incoming = self.raw_exchange([own.clone(), own])?;
+        if incoming.iter().any(|v| v.len() != bits.len() * 2) {
+            self.poisoned = true;
+            return Err(Error::InvalidConfiguration);
+        }
+        let mut out = Vec::with_capacity(bits.len());
+        for (i, b) in bits.iter().enumerate() {
+            if incoming[0][2 * i + 1] != b.0[0] {
+                self.poisoned = true;
+                return Err(Error::Disagreement((self.party + 2) % 3));
+            }
+            if incoming[1][2 * i] != b.0[1] || incoming[0][2 * i] != incoming[1][2 * i + 1] {
+                self.poisoned = true;
+                return Err(Error::Disagreement((self.party + 1) % 3));
+            }
+            out.push(b.0[0] ^ b.0[1] ^ incoming[0][2 * i]);
+        }
+        Ok(out)
+    }
+
+    fn reshare_gf128_lanes_many(
+        &mut self,
+        locals: &[Gf128Lanes],
+    ) -> Result<Vec<RepGf128Lanes>, Error> {
+        let total_u64 = locals.len() * 128;
+        self.scratch_r.resize(total_u64, 0);
+        self.scratch_s.resize(total_u64, 0);
+        self.pads[0].squeeze_u64s(&mut self.scratch_r);
+        self.pads[1].squeeze_u64s(&mut self.scratch_s);
+        let mut own = Vec::with_capacity(total_u64);
+        for (item_idx, local) in locals.iter().enumerate() {
+            let base = item_idx * 128;
+            for (lane_idx, &[w0, w1]) in local.iter().enumerate() {
+                let off = base + 2 * lane_idx;
+                own.push(w0 ^ self.scratch_r[off] ^ self.scratch_s[off]);
+                own.push(w1 ^ self.scratch_r[off + 1] ^ self.scratch_s[off + 1]);
+            }
+        }
+        let (mut mine, mut next) = self.raw_share_owned(own)?;
+        let mut out = Vec::with_capacity(locals.len());
+        for idx in 0..locals.len() {
+            let base = idx * 128;
+            let a: Gf128Lanes =
+                core::array::from_fn(|lane| [mine[base + 2 * lane], mine[base + 2 * lane + 1]]);
+            let b: Gf128Lanes =
+                core::array::from_fn(|lane| [next[base + 2 * lane], next[base + 2 * lane + 1]]);
+            out.push([a, b]);
+        }
+        ct_zeroize_u64s(&mut mine);
+        ct_zeroize_u64s(&mut next);
+        Ok(out)
+    }
+
+    fn prss_gf128_lanes(&mut self) -> RepGf128Lanes {
+        let mut raw0 = [0u64; 128];
+        let mut raw1 = [0u64; 128];
+        self.pads[0].squeeze_u64s(&mut raw0);
+        self.pads[1].squeeze_u64s(&mut raw1);
+        let s0: Gf128Lanes = core::array::from_fn(|lane| [raw0[2 * lane], raw0[2 * lane + 1]]);
+        let s1: Gf128Lanes = core::array::from_fn(|lane| [raw1[2 * lane], raw1[2 * lane + 1]]);
+        ct_zeroize_u64s(&mut raw0);
+        ct_zeroize_u64s(&mut raw1);
+        [s0, s1]
+    }
+
+    /// Batch-verify up to `MAX_PENDING_BITS` 64-lane Boolean `AND` triples over
+    /// `GF(2^128) = GF(2)[x]/(x^128 + x^7 + x^2 + x + 1)` via two independent lockstep
+    /// Arity-4 BBCGGI19 inner-product instances + randomized base-case sacrifice
+    /// (per-flush cheating probability `< (69 / (2^128 - 1))^2 < 2^-243.7 << 2^-126`).
+    fn verify_pending_bits_slice(&mut self, triples_raw: &[u64]) -> Result<(), Error> {
+        debug_assert_eq!(triples_raw.len() % 6, 0);
+        let n = triples_raw.len() / 6;
+        if n == 0 {
+            return Ok(());
+        }
+        let backend = detect_backend();
+        let m = n.div_ceil(D0_BITS);
+        let num_super = m.div_ceil(SUPER_BLOCKS);
+        let init_groups = if m <= 1 { 1 } else { m.div_ceil(FOLD_ARITY) };
+        let init_stride = fold_stride(init_groups);
+
+        let seed0 = self.coin_flip(b"QSAG.OUTER.MULCHECK.BITS.INIT.V1")?;
+        let mut xof0 = WordSponge136::from_shake_seed(&seed0);
+        let gammas: [Vec<Gf128>; 2] = core::array::from_fn(|_| {
+            (0..num_super)
+                .map(|_| u128_to_gf128(xof0.squeeze_u128()))
+                .collect()
+        });
+
+        // `scratch` implements `Drop` (calling `wipe_all` via `ct_zeroize_u64s`), ensuring
+        // deterministic zeroization on EVERY `Err` early return and when `Engine` drops.
+        let mut scratch = self
+            .bit_scratch
+            .take()
+            .unwrap_or_else(BitCheckScratch::new_boxed);
+        scratch.prepare(init_groups);
+
+        // Step 0 + Round 0: pack 8 consecutive 16-gate blocks (`128` gates) per super-block
+        // into 32 bit-planes (`z_s0`, `z_s1`, and 30 off-diagonal `T^s` slots) in cache-linear
+        // plane order, transpose via zero-`CPUID` butterfly, and accumulate against `gammas`.
+        let mut x0_blk = [0u64; D0_BITS];
+        let mut x1_blk = [0u64; D0_BITS];
+        let mut y01_blk = [0u64; D0_BITS];
+        let mut y0_blk = [0u64; D0_BITS];
+        let mut lanes_a = [[0u64; 2]; 64];
+        let mut lanes_b = [[0u64; 2]; 64];
+
+        for q0 in (0..num_super).step_by(STEP0_CHUNK) {
+            let q1 = (q0 + STEP0_CHUNK).min(num_super);
+            let chunk_len = q1 - q0;
+            let used_step0 = 32 * 64 * chunk_len;
+            if used_step0 > scratch.hwm_step0 {
+                scratch.hwm_step0 = used_step0;
+            }
+            for q_rel in 0..chunk_len {
+                let q = q0 + q_rel;
+                let super_start = q * SUPER_BITS * 6;
+                let super_end = (super_start + SUPER_BITS * 6).min(triples_raw.len());
+                let super_chunk = &triples_raw[super_start..super_end];
+                scratch.planes.fill([0u64; 128]);
+
+                for (b, blk_raw) in super_chunk.chunks(D0_BITS * 6).enumerate() {
+                    let base = b * D0_BITS;
+                    let blk_gates = blk_raw.len() / 6;
+                    for (u, g) in blk_raw.chunks_exact(6).enumerate() {
+                        x0_blk[u] = g[0];
+                        x1_blk[u] = g[1];
+                        y01_blk[u] = g[2] ^ g[3];
+                        y0_blk[u] = g[2];
+                        scratch.planes[0][base + u] = g[4];
+                        scratch.planes[1][base + u] = g[5];
+                    }
+                    for s in 0..(2 * D0_BITS - 1) {
+                        if s == D0_BITS - 1 {
+                            continue;
+                        }
+                        let slot = if s < D0_BITS - 1 { s } else { s - 1 };
+                        let plane = &mut scratch.planes[2 + slot];
+                        let u_min = s.saturating_sub(D0_BITS - 1);
+                        let u_max = (s + 1).min(D0_BITS).min(blk_gates);
+                        for u in u_min..u_max {
+                            let v = u + (D0_BITS - 1) - s;
+                            if v < blk_gates {
+                                plane[base + u] = (x0_blk[u] & y01_blk[v]) ^ (x1_blk[u] & y0_blk[v]);
+                            }
+                        }
+                    }
+                }
+
+                let sp = &mut *scratch;
+                for pair_idx in 0..16 {
+                    transpose_pair_bs128_to_lanes(
+                        &sp.planes[2 * pair_idx],
+                        &sp.planes[2 * pair_idx + 1],
+                        &mut lanes_a,
+                        &mut lanes_b,
+                        &mut sp.tr_rows,
+                    );
+                    for (lane, (&la, &lb)) in lanes_a.iter().zip(&lanes_b).enumerate() {
+                        sp.step0_buf[((2 * pair_idx) * 64 + lane) * chunk_len + q_rel] = la;
+                        sp.step0_buf[((2 * pair_idx + 1) * 64 + lane) * chunk_len + q_rel] = lb;
+                    }
+                }
+            }
+
+            let sp = &mut *scratch;
+            for p in 0..32 {
+                for lane in 0..64 {
+                    let base = (p * 64 + lane) * chunk_len;
+                    let src = &sp.step0_buf[base..base + chunk_len];
+                    gf128_dot_acc(&mut sp.step0_acc[0][p][lane], src, &gammas[0][q0..q1], backend);
+                    gf128_dot_acc(&mut sp.step0_acc[1][p][lane], src, &gammas[1][q0..q1], backend);
+                }
+            }
+        }
+        ct_zeroize_u64s(&mut x0_blk);
+        ct_zeroize_u64s(&mut x1_blk);
+        ct_zeroize_u64s(&mut y01_blk);
+        ct_zeroize_u64s(&mut y0_blk);
+        zeroize_gf128_slice(&mut lanes_a);
+        zeroize_gf128_slice(&mut lanes_b);
+
+        for t in 0..2 {
+            for slot in 0..30 {
+                scratch.h0_flat.push(scratch.step0_acc[t][2 + slot]);
+            }
+        }
+        let reshared_h0 =
+            ZeroizeRepGf128LanesVec(self.reshare_gf128_lanes_many(&scratch.h0_flat)?);
+
+        let seed_r0 = self.coin_flip(b"QSAG.OUTER.MULCHECK.BITS.R0.V1")?;
+        let mut xof_r0 = WordSponge136::from_shake_seed(&seed_r0);
+        let r0 = [
+            u128_to_gf128(xof_r0.squeeze_u128()),
+            u128_to_gf128(xof_r0.squeeze_u128()),
+        ];
+
+        // Evaluate `H_0^(t)(r_0^(t))` and precompute public `128 x 16` projection masks for `A`.
+        let mut pows_r0 = [[[0u64; 2]; 31]; 2];
+        let mut masks_a = [[0u16; 128]; 2];
+        let mut eval31 = [[0u64; 2]; 31];
+
+        for t in 0..2 {
+            pows_r0[t][0] = [1, 0];
+            for s in 1..31 {
+                pows_r0[t][s] = gf2_128_mul_portable(pows_r0[t][s - 1], r0[t]);
+            }
+            for side in 0..2 {
+                for lane in 0..64 {
+                    for (s, dst) in eval31[..15].iter_mut().enumerate() {
+                        *dst = reshared_h0.0[t * 30 + s][side][lane];
+                    }
+                    eval31[15] = scratch.step0_acc[t][side][lane];
+                    for (slot_hi, dst) in eval31[16..].iter_mut().enumerate() {
+                        *dst = reshared_h0.0[t * 30 + 15 + slot_hi][side][lane];
+                    }
+                    let mut acc = [0u64; 2];
+                    gf128_dot_acc(&mut acc, &eval31, &pows_r0[t], backend);
+                    scratch.c_claim[t][side][lane] = acc;
+                }
+            }
+
+            let xr0 = u128_to_gf128(poly128_mul_x(gf128_to_u128(r0[t])));
+            let mut cur_xr = [1u64, 0u64];
+            let mut cols_a = [0u128; 16];
+            for dst in &mut cols_a {
+                *dst = gf128_to_u128(cur_xr);
+                cur_xr = gf2_128_mul_portable(cur_xr, xr0);
+            }
+            masks_a[t] = transpose_cols16_to_u16(&cols_a);
+        }
+        zeroize_gf128_slice(&mut eval31);
+        drop(reshared_h0);
+
+        // Step 1: evaluate the `m` 16-gate blocks into Arity-4 strided `Gf128` vectors.
+        let mut x_blk = [[0u64; 16]; 2];
+        let mut y_blk = [[0u64; 16]; 2];
+        let mut lanes_s0 = [[0u64; 2]; 64];
+        let mut lanes_s1 = [[0u64; 2]; 64];
+
+        for (q, super_chunk) in triples_raw.chunks(SUPER_BITS * 6).enumerate() {
+            let mut cols_b = [[0u128; 16]; 2];
+            for t in 0..2 {
+                for v in 0..16 {
+                    cols_b[t][v] =
+                        gf128_to_u128(gf2_128_mul_portable(gammas[t][q], pows_r0[t][15 - v]));
+                }
+            }
+
+            let sp = &mut *scratch;
+            for (b, blk_raw) in super_chunk.chunks(D0_BITS * 6).enumerate() {
+                if b > 0 {
+                    for cols_t in &mut cols_b {
+                        for col in cols_t {
+                            *col = poly128_mul_x16(*col);
+                        }
+                    }
+                }
+                let masks_b = [
+                    transpose_cols16_to_u16(&cols_b[0]),
+                    transpose_cols16_to_u16(&cols_b[1]),
+                ];
+
+                x_blk = [[0u64; 16]; 2];
+                y_blk = [[0u64; 16]; 2];
+                for (u, g) in blk_raw.chunks_exact(6).enumerate() {
+                    x_blk[0][u] = g[0];
+                    x_blk[1][u] = g[1];
+                    y_blk[0][u] = g[2];
+                    y_blk[1][u] = g[3];
+                }
+
+                build_public_tabs_16(&x_blk[0], &mut sp.tabs);
+                let mut a0_s0 = eval_public_matrix_128x16(&masks_a[0], &sp.tabs);
+                let mut a1_s0 = eval_public_matrix_128x16(&masks_a[1], &sp.tabs);
+
+                build_public_tabs_16(&x_blk[1], &mut sp.tabs);
+                let mut a0_s1 = eval_public_matrix_128x16(&masks_a[0], &sp.tabs);
+                let mut a1_s1 = eval_public_matrix_128x16(&masks_a[1], &sp.tabs);
+
+                build_public_tabs_16(&y_blk[0], &mut sp.tabs);
+                let mut b0_s0 = eval_public_matrix_128x16(&masks_b[0], &sp.tabs);
+                let mut b1_s0 = eval_public_matrix_128x16(&masks_b[1], &sp.tabs);
+
+                build_public_tabs_16(&y_blk[1], &mut sp.tabs);
+                let mut b0_s1 = eval_public_matrix_128x16(&masks_b[0], &sp.tabs);
+                let mut b1_s1 = eval_public_matrix_128x16(&masks_b[1], &sp.tabs);
+
+                let j = q * SUPER_BLOCKS + b;
+                let u_slot = j % FOLD_ARITY;
+                let g_idx = j / FOLD_ARITY;
+
+                transpose_pair_bs128_to_lanes(
+                    &a0_s0,
+                    &a0_s1,
+                    &mut lanes_s0,
+                    &mut lanes_s1,
+                    &mut sp.tr_rows,
+                );
+                ct_zeroize_u64s(&mut a0_s0);
+                ct_zeroize_u64s(&mut a0_s1);
+                for (lane, (&s0, &s1)) in lanes_s0.iter().zip(&lanes_s1).enumerate() {
+                    let pos = fold_idx(0, u_slot, lane, g_idx, init_stride);
+                    sp.a_cur[0][pos] = s0;
+                    sp.a_cur[1][pos] = s1;
+                }
+
+                transpose_pair_bs128_to_lanes(
+                    &a1_s0,
+                    &a1_s1,
+                    &mut lanes_s0,
+                    &mut lanes_s1,
+                    &mut sp.tr_rows,
+                );
+                ct_zeroize_u64s(&mut a1_s0);
+                ct_zeroize_u64s(&mut a1_s1);
+                for (lane, (&s0, &s1)) in lanes_s0.iter().zip(&lanes_s1).enumerate() {
+                    let pos = fold_idx(1, u_slot, lane, g_idx, init_stride);
+                    sp.a_cur[0][pos] = s0;
+                    sp.a_cur[1][pos] = s1;
+                }
+
+                transpose_pair_bs128_to_lanes(
+                    &b0_s0,
+                    &b0_s1,
+                    &mut lanes_s0,
+                    &mut lanes_s1,
+                    &mut sp.tr_rows,
+                );
+                ct_zeroize_u64s(&mut b0_s0);
+                ct_zeroize_u64s(&mut b0_s1);
+                for (lane, (&s0, &s1)) in lanes_s0.iter().zip(&lanes_s1).enumerate() {
+                    let pos = fold_idx(0, u_slot, lane, g_idx, init_stride);
+                    sp.b_cur[0][pos] = s0;
+                    sp.b_cur[1][pos] = s1;
+                }
+
+                transpose_pair_bs128_to_lanes(
+                    &b1_s0,
+                    &b1_s1,
+                    &mut lanes_s0,
+                    &mut lanes_s1,
+                    &mut sp.tr_rows,
+                );
+                ct_zeroize_u64s(&mut b1_s0);
+                ct_zeroize_u64s(&mut b1_s1);
+                for (lane, (&s0, &s1)) in lanes_s0.iter().zip(&lanes_s1).enumerate() {
+                    let pos = fold_idx(1, u_slot, lane, g_idx, init_stride);
+                    sp.b_cur[0][pos] = s0;
+                    sp.b_cur[1][pos] = s1;
+                }
+            }
+        }
+        for s in [&mut x_blk, &mut y_blk] {
+            ct_zeroize_u64s(&mut s[0]);
+            ct_zeroize_u64s(&mut s[1]);
+        }
+        zeroize_gf128_slice(&mut lanes_s0);
+        zeroize_gf128_slice(&mut lanes_s1);
+
+        // Step 2: Arity-4 logarithmic BBCGGI19 inner-product folding (`4096 -> 1024 -> 256 -> 64 -> 16 -> 4 -> 1`).
+        if m == 1 {
+            for t in 0..2 {
+                for side in 0..2 {
+                    for lane in 0..64 {
+                        let pos = fold_idx(t, 0, lane, 0, init_stride);
+                        scratch.a_fin[t][side][lane] = scratch.a_cur[side][pos];
+                        scratch.b_fin[t][side][lane] = scratch.b_cur[side][pos];
+                    }
+                }
+            }
+        } else {
+            let mut cur_m = m;
+            let mut eval7 = [[0u64; 2]; 7];
+            let mut acc_bs_a = [0u64; 128];
+            let mut acc_bs_b = [0u64; 128];
+            while cur_m > 1 {
+                let groups = cur_m.div_ceil(FOLD_ARITY);
+                let stride = fold_stride(groups);
+                let active_len = 2 * FOLD_ARITY * 64 * stride;
+                {
+                    let sp = &mut *scratch;
+                    for ((dst, &b0), &b1) in sp.b_sum[..active_len]
+                        .iter_mut()
+                        .zip(&sp.b_cur[0][..active_len])
+                        .zip(&sp.b_cur[1][..active_len])
+                    {
+                        *dst = xor_gf128(b0, b1);
+                    }
+                    sp.h_fold.fill([[0u64; 2]; 64]);
+                    for t in 0..2 {
+                        for u in 0..FOLD_ARITY {
+                            for v in 0..FOLD_ARITY {
+                                if u == v {
+                                    continue;
+                                }
+                                let s = u + (FOLD_ARITY - 1) - v;
+                                let slot = if s < (FOLD_ARITY - 1) { s } else { s - 1 };
+                                for lane in 0..64 {
+                                    let base_a = fold_idx(t, u, lane, 0, stride);
+                                    let base_b = fold_idx(t, v, lane, 0, stride);
+                                    let dst = &mut sp.h_fold[t * 6 + slot][lane];
+                                    gf128_dot_acc(
+                                        dst,
+                                        &sp.a_cur[0][base_a..base_a + groups],
+                                        &sp.b_sum[base_b..base_b + groups],
+                                        backend,
+                                    );
+                                    gf128_dot_acc(
+                                        dst,
+                                        &sp.a_cur[1][base_a..base_a + groups],
+                                        &sp.b_cur[0][base_b..base_b + groups],
+                                        backend,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let reshared =
+                    ZeroizeRepGf128LanesVec(self.reshare_gf128_lanes_many(&scratch.h_fold)?);
+                let seed_rk = self.coin_flip(b"QSAG.OUTER.MULCHECK.BITS.FOLD.V1")?;
+                let mut xof_rk = WordSponge136::from_shake_seed(&seed_rk);
+                let rk = [
+                    u128_to_gf128(xof_rk.squeeze_u128()),
+                    u128_to_gf128(xof_rk.squeeze_u128()),
+                ];
+                let mut pows_rk = [[[0u64; 2]; 7]; 2];
+                for t in 0..2 {
+                    pows_rk[t][0] = [1, 0];
+                    for s in 1..7 {
+                        pows_rk[t][s] = gf2_128_mul_portable(pows_rk[t][s - 1], rk[t]);
+                    }
+                }
+
+                let sp = &mut *scratch;
+                for (t, pows_t) in pows_rk.iter().enumerate() {
+                    for side in 0..2 {
+                        for lane in 0..64 {
+                            for (s, dst) in eval7[..3].iter_mut().enumerate() {
+                                *dst = reshared.0[t * 6 + s][side][lane];
+                            }
+                            eval7[3] = sp.c_claim[t][side][lane];
+                            for (slot_hi, dst) in eval7[4..].iter_mut().enumerate() {
+                                *dst = reshared.0[t * 6 + 3 + slot_hi][side][lane];
+                            }
+                            let mut acc = [0u64; 2];
+                            gf2_128_mul_acc_batch_portable(&mut acc, &eval7, pows_t);
+                            sp.c_claim[t][side][lane] = acc;
+                        }
+                    }
+                }
+                drop(reshared);
+
+                let masks_rk: [[[[u16; 128]; 8]; 3]; 2] = core::array::from_fn(|t| {
+                    core::array::from_fn(|idx| build_public_mul_masks(pows_rk[t][idx + 1]))
+                });
+
+                if groups == 1 {
+                    for (t, masks_t) in masks_rk.iter().enumerate() {
+                        for side in 0..2 {
+                            acc_bs_a = [0u64; 128];
+                            acc_bs_b = [0u64; 128];
+                            for (idx, mask_pow) in masks_t.iter().enumerate() {
+                                let u_a = idx + 1;
+                                let u_b = 2 - idx;
+                                for lane in 0..64 {
+                                    sp.fold_in_a[lane] =
+                                        sp.a_cur[side][fold_idx(t, u_a, lane, 0, stride)];
+                                    sp.fold_in_b[lane] =
+                                        sp.b_cur[side][fold_idx(t, u_b, lane, 0, stride)];
+                                }
+                                transpose_pair_lanes_to_bs128(
+                                    &sp.fold_in_a,
+                                    &sp.fold_in_b,
+                                    &mut sp.fold_plane_a,
+                                    &mut sp.fold_plane_b,
+                                    &mut sp.tr_rows,
+                                );
+                                xor_bs128_by_public(
+                                    &sp.fold_plane_a,
+                                    mask_pow,
+                                    &mut sp.tabs,
+                                    &mut acc_bs_a,
+                                );
+                                xor_bs128_by_public(
+                                    &sp.fold_plane_b,
+                                    mask_pow,
+                                    &mut sp.tabs,
+                                    &mut acc_bs_b,
+                                );
+                            }
+                            transpose_pair_bs128_to_lanes(
+                                &acc_bs_a,
+                                &acc_bs_b,
+                                &mut sp.fold_in_a,
+                                &mut sp.fold_in_b,
+                                &mut sp.tr_rows,
+                            );
+                            for lane in 0..64 {
+                                sp.a_fin[t][side][lane] = xor_gf128(
+                                    sp.a_cur[side][fold_idx(t, 0, lane, 0, stride)],
+                                    sp.fold_in_a[lane],
+                                );
+                                sp.b_fin[t][side][lane] = xor_gf128(
+                                    sp.b_cur[side][fold_idx(t, 3, lane, 0, stride)],
+                                    sp.fold_in_b[lane],
+                                );
+                            }
+                        }
+                    }
+                    cur_m = 1;
+                } else {
+                    let next_groups = groups.div_ceil(FOLD_ARITY);
+                    let next_stride = fold_stride(next_groups);
+                    let next_len = 2 * FOLD_ARITY * 64 * next_stride;
+                    for next_buf in sp.a_next.iter_mut().chain(sp.b_next.iter_mut()) {
+                        next_buf[..next_len].fill([0u64; 2]);
+                    }
+                    for (t, masks_t) in masks_rk.iter().enumerate() {
+                        for side in 0..2 {
+                            for g in 0..groups {
+                                acc_bs_a = [0u64; 128];
+                                acc_bs_b = [0u64; 128];
+                                for (idx, mask_pow) in masks_t.iter().enumerate() {
+                                    let u_a = idx + 1;
+                                    let u_b = 2 - idx;
+                                    for lane in 0..64 {
+                                        sp.fold_in_a[lane] =
+                                            sp.a_cur[side][fold_idx(t, u_a, lane, g, stride)];
+                                        sp.fold_in_b[lane] =
+                                            sp.b_cur[side][fold_idx(t, u_b, lane, g, stride)];
+                                    }
+                                    transpose_pair_lanes_to_bs128(
+                                        &sp.fold_in_a,
+                                        &sp.fold_in_b,
+                                        &mut sp.fold_plane_a,
+                                        &mut sp.fold_plane_b,
+                                        &mut sp.tr_rows,
+                                    );
+                                    xor_bs128_by_public(
+                                        &sp.fold_plane_a,
+                                        mask_pow,
+                                        &mut sp.tabs,
+                                        &mut acc_bs_a,
+                                    );
+                                    xor_bs128_by_public(
+                                        &sp.fold_plane_b,
+                                        mask_pow,
+                                        &mut sp.tabs,
+                                        &mut acc_bs_b,
+                                    );
+                                }
+                                transpose_pair_bs128_to_lanes(
+                                    &acc_bs_a,
+                                    &acc_bs_b,
+                                    &mut sp.fold_in_a,
+                                    &mut sp.fold_in_b,
+                                    &mut sp.tr_rows,
+                                );
+                                let u_dst = g % FOLD_ARITY;
+                                let g_dst = g / FOLD_ARITY;
+                                for lane in 0..64 {
+                                    let dst_pos = fold_idx(t, u_dst, lane, g_dst, next_stride);
+                                    sp.a_next[side][dst_pos] = xor_gf128(
+                                        sp.a_cur[side][fold_idx(t, 0, lane, g, stride)],
+                                        sp.fold_in_a[lane],
+                                    );
+                                    sp.b_next[side][dst_pos] = xor_gf128(
+                                        sp.b_cur[side][fold_idx(t, 3, lane, g, stride)],
+                                        sp.fold_in_b[lane],
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    core::mem::swap(&mut sp.a_cur, &mut sp.a_next);
+                    core::mem::swap(&mut sp.b_cur, &mut sp.b_next);
+                    core::mem::swap(&mut sp.hwm_cur, &mut sp.hwm_next);
+                    cur_m = groups;
+                }
+            }
+            zeroize_gf128_slice(&mut eval7);
+            ct_zeroize_u64s(&mut acc_bs_a);
+            ct_zeroize_u64s(&mut acc_bs_b);
+        }
+
+        // Zero-knowledge randomized base-case sacrifice at `len == 1`.
+        scratch.u_mask = [self.prss_gf128_lanes(), self.prss_gf128_lanes()];
+        scratch.v_mask = [self.prss_gf128_lanes(), self.prss_gf128_lanes()];
+        for t in 0..2 {
+            for lane in 0..64 {
+                let a0 = scratch.a_fin[t][0][lane];
+                let a1 = scratch.a_fin[t][1][lane];
+                let b0 = scratch.b_fin[t][0][lane];
+                let b1 = scratch.b_fin[t][1][lane];
+                let u0 = scratch.u_mask[t][0][lane];
+                let u1 = scratch.u_mask[t][1][lane];
+                let v0 = scratch.v_mask[t][0][lane];
+                let v1 = scratch.v_mask[t][1][lane];
+                let v_sum = xor_gf128(v0, v1);
+                let b_sum = xor_gf128(b0, b1);
+
+                let mut d1 = [0u64; 2];
+                let mut lhs4 = [a0, a1, u0, u1];
+                let mut rhs4 = [v_sum, v0, b_sum, b0];
+                gf2_128_mul_acc_batch_portable(&mut d1, &lhs4, &rhs4);
+                zeroize_gf128_slice(&mut lhs4);
+                zeroize_gf128_slice(&mut rhs4);
+
+                let mut d2 = [0u64; 2];
+                let mut lhs2 = [u0, u1];
+                let mut rhs2 = [v_sum, v0];
+                gf2_128_mul_acc_batch_portable(&mut d2, &lhs2, &rhs2);
+                zeroize_gf128_slice(&mut lhs2);
+                zeroize_gf128_slice(&mut rhs2);
+
+                scratch.base_locals[2 * t][lane] = d1;
+                scratch.base_locals[2 * t + 1][lane] = d2;
+            }
+        }
+
+        let d_sh =
+            ZeroizeRepGf128LanesVec(self.reshare_gf128_lanes_many(&scratch.base_locals)?);
+        let seed_base = self.coin_flip(b"QSAG.OUTER.MULCHECK.BITS.BASE.V1")?;
+        let mut xof_base = WordSponge136::from_shake_seed(&seed_base);
+        let rb = [
+            u128_to_gf128(xof_base.squeeze_nonzero_u128()),
+            u128_to_gf128(xof_base.squeeze_nonzero_u128()),
+        ];
+        let rb_sq = [
+            gf2_128_mul_portable(rb[0], rb[0]),
+            gf2_128_mul_portable(rb[1], rb[1]),
+        ];
+
+        let mut to_open = ZeroizeBitVec(Vec::with_capacity(6 * 128));
+        for t in 0..2 {
+            let pows2 = [rb[t], rb_sq[t]];
+            for lane in 0..64 {
+                let mut alpha_sh = [[0u64; 2]; 2];
+                let mut beta_sh = [[0u64; 2]; 2];
+                let mut gamma_sh = [[0u64; 2]; 2];
+                for side in 0..2 {
+                    alpha_sh[side] = xor_gf128(
+                        scratch.a_fin[t][side][lane],
+                        gf2_128_mul_portable(scratch.u_mask[t][side][lane], rb[t]),
+                    );
+                    beta_sh[side] = xor_gf128(
+                        scratch.b_fin[t][side][lane],
+                        gf2_128_mul_portable(scratch.v_mask[t][side][lane], rb[t]),
+                    );
+                    let mut g_val = scratch.c_claim[t][side][lane];
+                    let d_arr = [d_sh.0[2 * t][side][lane], d_sh.0[2 * t + 1][side][lane]];
+                    gf2_128_mul_acc_batch_portable(&mut g_val, &d_arr, &pows2);
+                    gamma_sh[side] = g_val;
+                }
+                for item in [&alpha_sh, &beta_sh, &gamma_sh] {
+                    to_open.0.push(Bit([item[0][0], item[1][0]]));
+                    to_open.0.push(Bit([item[0][1], item[1][1]]));
+                }
+                zeroize_gf128_slice(&mut alpha_sh);
+                zeroize_gf128_slice(&mut beta_sh);
+                zeroize_gf128_slice(&mut gamma_sh);
+            }
+        }
+        drop(d_sh);
+
+        let mut opened = self.open_raw_bits(&to_open.0).map_err(|err| match err {
+            Error::Disagreement(_) => Error::MultiplicationCheck,
+            other => other,
+        })?;
+        drop(to_open);
+
+        let mut diff_acc = 0u64;
+        for t in 0..2 {
+            for lane in 0..64 {
+                let base = (t * 64 + lane) * 6;
+                let alpha = [opened[base], opened[base + 1]];
+                let beta = [opened[base + 2], opened[base + 3]];
+                let gamma = [opened[base + 4], opened[base + 5]];
+                let expected = gf2_128_mul_portable(alpha, beta);
+                diff_acc |= (gamma[0] ^ expected[0]) | (gamma[1] ^ expected[1]);
+            }
+        }
+        ct_zeroize_u64s(&mut opened);
+        if diff_acc != 0 {
+            self.poisoned = true;
+            return Err(Error::MultiplicationCheck);
+        }
+        // Return `scratch` to `self.bit_scratch` for reuse across flushes; `Drop` on
+        // `BitCheckScratch` deterministically wipes up to `hwm_*` when `Engine` drops.
+        self.bit_scratch = Some(scratch);
+        Ok(())
+    }
+
+    fn flush_pending_bits(&mut self) -> Result<(), Error> {
+        if self.pending_bits_raw.is_empty() {
+            return Ok(());
+        }
+        let mut batch = core::mem::take(&mut self.pending_bits_raw);
+        for chunk in batch.chunks(MAX_PENDING_BITS * 6) {
+            if let Err(err) = self.verify_pending_bits_slice(chunk) {
+                ct_zeroize_u64s(&mut batch);
+                return Err(err);
+            }
+        }
+        ct_zeroize_u64s(&mut batch);
+        batch.clear();
+        self.pending_bits_raw = batch;
+        Ok(())
+    }
+
+    fn reshare_fp_scalars(
+        &mut self,
+        locals: &[Value],
+        d: Domain,
+    ) -> Result<Vec<[Value; 2]>, Error> {
+        let mut own = Vec::with_capacity(locals.len() * 4);
+        let mut mine_vals = Vec::with_capacity(locals.len());
+        for &lv in locals {
+            let r0 = Self::field_pad(&mut self.pads[0], d);
+            let r1 = Self::field_pad(&mut self.pads[1], d);
+            let masked = d.add(lv, d.sub(r0, r1));
+            mine_vals.push(masked);
+            own.extend_from_slice(&masked);
+        }
+        let (_, next_raw) = self.raw_share_owned(own)?;
+        let mut out = Vec::with_capacity(locals.len());
+        for (mv, chunk) in mine_vals.into_iter().zip(next_raw.chunks_exact(4)) {
+            let nv: Value = [chunk[0], chunk[1], chunk[2], chunk[3]];
+            if !d.canonical(nv) {
+                self.poisoned = true;
+                return Err(Error::MultiplicationCheck);
+            }
+            out.push([mv, nv]);
+        }
+        Ok(out)
+    }
+
+    fn open_raw_fp_scalars(
+        &mut self,
+        shares: &[[Value; 2]],
+        d: Domain,
+    ) -> Result<Vec<Value>, Error> {
+        let mut payload = Vec::with_capacity(shares.len() * 8);
+        for pair in shares {
+            payload.extend_from_slice(&pair[0]);
+            payload.extend_from_slice(&pair[1]);
+        }
+        let received = self.raw_exchange([payload.clone(), payload])?;
+        if received.iter().any(|v| v.len() != shares.len() * 8) {
+            self.poisoned = true;
+            return Err(Error::InvalidConfiguration);
+        }
+        let mut out = Vec::with_capacity(shares.len());
+        for (i, a) in shares.iter().enumerate() {
+            let prev: [Value; 2] = core::array::from_fn(|j| {
+                let s = &received[0][8 * i + 4 * j..8 * i + 4 * j + 4];
+                [s[0], s[1], s[2], s[3]]
+            });
+            let next: [Value; 2] = core::array::from_fn(|j| {
+                let s = &received[1][8 * i + 4 * j..8 * i + 4 * j + 4];
+                [s[0], s[1], s[2], s[3]]
+            });
+            if prev[1] != a[0] {
+                self.poisoned = true;
+                return Err(Error::Disagreement((self.party + 2) % 3));
+            }
+            if next[0] != a[1] || prev[0] != next[1] || !d.canonical(prev[0]) {
+                self.poisoned = true;
+                return Err(Error::Disagreement((self.party + 1) % 3));
+            }
+            out.push(d.add(d.add(a[0], a[1]), prev[0]));
+        }
+        Ok(out)
+    }
+
+    /// Batch-verify large-prime (`Secp256k1` / `Ed25519`, `p > 2^254.99`) multiplications
+    /// via replicated BBCGGI19 inner-product folding + zero-knowledge base-case sacrifice
+    /// (cheating probability `< 30 / p < 2^-249 << 2^-128`).
+    fn verify_pending_large_prime_slice(
+        &mut self,
+        triples: &[PendingFieldTriple],
+        d: Domain,
+    ) -> Result<(), Error> {
+        if triples.is_empty() {
+            return Ok(());
+        }
+        let total = triples.len() * 64;
+        let seed0 = self.coin_flip(b"QSAG.OUTER.MULCHECK.FP.INIT.V1")?;
+        let mut xof0 = WordSponge136::from_shake_seed(&seed0);
+
+        struct FpScratch {
+            a_vec: Vec<[Value; 2]>,
+            b_vec: Vec<[Value; 2]>,
+            cap: usize,
+            c_claim: [Value; 2],
+            u_sh: [Value; 2],
+            v_sh: [Value; 2],
+            d_loc: [Value; 2],
+        }
+        impl Drop for FpScratch {
+            fn drop(&mut self) {
+                for vec_buf in [&mut self.a_vec, &mut self.b_vec] {
+                    if vec_buf.len() < self.cap && vec_buf.capacity() >= self.cap {
+                        vec_buf.resize(self.cap, [[0; 4]; 2]);
+                    }
+                    for pair in vec_buf.iter_mut() {
+                        ct_zeroize_u64s(&mut pair[0]);
+                        ct_zeroize_u64s(&mut pair[1]);
+                    }
+                }
+                for pair in [
+                    &mut self.c_claim,
+                    &mut self.u_sh,
+                    &mut self.v_sh,
+                    &mut self.d_loc,
+                ] {
+                    ct_zeroize_u64s(&mut pair[0]);
+                    ct_zeroize_u64s(&mut pair[1]);
+                }
+            }
+        }
+
+        let mut sc = FpScratch {
+            a_vec: Vec::with_capacity(total + 1),
+            b_vec: Vec::with_capacity(total + 1),
+            cap: total + 1,
+            c_claim: [[0; 4]; 2],
+            u_sh: [[0; 4]; 2],
+            v_sh: [[0; 4]; 2],
+            d_loc: [[0; 4]; 2],
+        };
+
+        for (x_fw, y_fw, z_fw) in triples {
+            for ((x, y), z) in x_fw.iter().zip(y_fw).zip(z_fw) {
+                let chi = squeeze_fp_challenge(&mut xof0, d);
+                sc.a_vec.push([d.mul(chi, x[0]), d.mul(chi, x[1])]);
+                sc.b_vec.push(*y);
+                sc.c_claim[0] = d.add(sc.c_claim[0], d.mul(chi, z[0]));
+                sc.c_claim[1] = d.add(sc.c_claim[1], d.mul(chi, z[1]));
+            }
+        }
+
+        let rep_local_mul = |x: &[Value; 2], y: &[Value; 2]| -> Value {
+            d.add(d.mul(x[0], d.add(y[0], y[1])), d.mul(x[1], y[0]))
+        };
+
+        while sc.a_vec.len() > 1 {
+            if sc.a_vec.len() % 2 == 1 {
+                sc.a_vec.push([[0; 4]; 2]);
+                sc.b_vec.push([[0; 4]; 2]);
+            }
+            let half = sc.a_vec.len() / 2;
+            sc.d_loc = [[0u64; 4]; 2];
+            for k in 0..half {
+                sc.d_loc[0] = d.add(sc.d_loc[0], rep_local_mul(&sc.a_vec[2 * k], &sc.b_vec[2 * k + 1]));
+                sc.d_loc[1] = d.add(sc.d_loc[1], rep_local_mul(&sc.a_vec[2 * k + 1], &sc.b_vec[2 * k]));
+            }
+            let mut reshared = self.reshare_fp_scalars(&sc.d_loc, d)?;
+            let seed_rk = match self.coin_flip(b"QSAG.OUTER.MULCHECK.FP.FOLD.V1") {
+                Ok(s) => s,
+                Err(e) => {
+                    for r in &mut reshared {
+                        ct_zeroize_u64s(&mut r[0]);
+                        ct_zeroize_u64s(&mut r[1]);
+                    }
+                    return Err(e);
+                }
+            };
+            let mut xof_rk = WordSponge136::from_shake_seed(&seed_rk);
+            let rk = squeeze_fp_challenge(&mut xof_rk, d);
+            let rk_sq = d.mul(rk, rk);
+
+            sc.c_claim = [
+                d.add(
+                    reshared[0][0],
+                    d.add(d.mul(rk, sc.c_claim[0]), d.mul(rk_sq, reshared[1][0])),
+                ),
+                d.add(
+                    reshared[0][1],
+                    d.add(d.mul(rk, sc.c_claim[1]), d.mul(rk_sq, reshared[1][1])),
+                ),
+            ];
+            for r in &mut reshared {
+                ct_zeroize_u64s(&mut r[0]);
+                ct_zeroize_u64s(&mut r[1]);
+            }
+            for k in 0..half {
+                let na = [
+                    d.add(sc.a_vec[2 * k][0], d.mul(rk, sc.a_vec[2 * k + 1][0])),
+                    d.add(sc.a_vec[2 * k][1], d.mul(rk, sc.a_vec[2 * k + 1][1])),
+                ];
+                let nb = [
+                    d.add(d.mul(rk, sc.b_vec[2 * k][0]), sc.b_vec[2 * k + 1][0]),
+                    d.add(d.mul(rk, sc.b_vec[2 * k][1]), sc.b_vec[2 * k + 1][1]),
+                ];
+                sc.a_vec[k] = na;
+                sc.b_vec[k] = nb;
+            }
+            sc.a_vec.truncate(half);
+            sc.b_vec.truncate(half);
+        }
+
+        let a0 = sc.a_vec[0];
+        let b0 = sc.b_vec[0];
+        sc.u_sh = [
+            Self::field_pad(&mut self.pads[0], d),
+            Self::field_pad(&mut self.pads[1], d),
+        ];
+        sc.v_sh = [
+            Self::field_pad(&mut self.pads[0], d),
+            Self::field_pad(&mut self.pads[1], d),
+        ];
+        sc.d_loc = [
+            d.add(rep_local_mul(&a0, &sc.v_sh), rep_local_mul(&sc.u_sh, &b0)),
+            rep_local_mul(&sc.u_sh, &sc.v_sh),
+        ];
+        let mut d_sh = self.reshare_fp_scalars(&sc.d_loc, d)?;
+
+        let seed_base = match self.coin_flip(b"QSAG.OUTER.MULCHECK.FP.BASE.V1") {
+            Ok(s) => s,
+            Err(e) => {
+                for r in &mut d_sh {
+                    ct_zeroize_u64s(&mut r[0]);
+                    ct_zeroize_u64s(&mut r[1]);
+                }
+                return Err(e);
+            }
+        };
+        let mut xof_base = WordSponge136::from_shake_seed(&seed_base);
+        let rb = loop {
+            let cand = squeeze_fp_challenge(&mut xof_base, d);
+            if cand != [0; 4] {
+                break cand;
+            }
+        };
+        let rb_sq = d.mul(rb, rb);
+
+        let alpha_sh = [
+            d.add(a0[0], d.mul(rb, sc.u_sh[0])),
+            d.add(a0[1], d.mul(rb, sc.u_sh[1])),
+        ];
+        let beta_sh = [
+            d.add(b0[0], d.mul(rb, sc.v_sh[0])),
+            d.add(b0[1], d.mul(rb, sc.v_sh[1])),
+        ];
+        let gamma_sh = [
+            d.add(
+                sc.c_claim[0],
+                d.add(d.mul(rb, d_sh[0][0]), d.mul(rb_sq, d_sh[1][0])),
+            ),
+            d.add(
+                sc.c_claim[1],
+                d.add(d.mul(rb, d_sh[0][1]), d.mul(rb_sq, d_sh[1][1])),
+            ),
+        ];
+        for r in &mut d_sh {
+            ct_zeroize_u64s(&mut r[0]);
+            ct_zeroize_u64s(&mut r[1]);
+        }
+        let mut to_open = [alpha_sh, beta_sh, gamma_sh];
+        let opened_res = self.open_raw_fp_scalars(&to_open, d);
+        for item in &mut to_open {
+            ct_zeroize_u64s(&mut item[0]);
+            ct_zeroize_u64s(&mut item[1]);
+        }
+        let opened = opened_res.map_err(|err| match err {
+            Error::Disagreement(_) => Error::MultiplicationCheck,
+            other => other,
+        })?;
+        if opened[2] != d.mul(opened[0], opened[1]) {
+            self.poisoned = true;
+            return Err(Error::MultiplicationCheck);
+        }
+        Ok(())
+    }
+
+    fn prss_g3(&mut self) -> RepGoldExt3 {
+        let sample = |sp: &mut WordSponge136| -> GoldExt3 {
+            core::array::from_fn(|_| loop {
+                let w = sp.squeeze_u64();
+                if w < GOLDILOCKS_P {
+                    return w;
+                }
+            })
+        };
+        [sample(&mut self.pads[0]), sample(&mut self.pads[1])]
+    }
+
+    fn reshare_g3_many(&mut self, locals: &[GoldExt3]) -> Result<Vec<RepGoldExt3>, Error> {
+        let mut own = Vec::with_capacity(locals.len() * 3);
+        let mut mine_vals = Vec::with_capacity(locals.len());
+        for &lv in locals {
+            let r = self.prss_g3();
+            let masked = g3_add(lv, g3_sub(r[0], r[1]));
+            mine_vals.push(masked);
+            own.extend_from_slice(&masked);
+        }
+        let (_, next_raw) = self.raw_share_owned(own)?;
+        let mut out = Vec::with_capacity(locals.len());
+        for (mv, chunk) in mine_vals.into_iter().zip(next_raw.chunks_exact(3)) {
+            let nv: GoldExt3 = [chunk[0], chunk[1], chunk[2]];
+            if !g3_canonical(nv) {
+                self.poisoned = true;
+                return Err(Error::MultiplicationCheck);
+            }
+            out.push([mv, nv]);
+        }
+        Ok(out)
+    }
+
+    fn open_raw_g3(&mut self, shares: &[RepGoldExt3]) -> Result<Vec<GoldExt3>, Error> {
+        let mut payload = Vec::with_capacity(shares.len() * 6);
+        for pair in shares {
+            payload.extend_from_slice(&pair[0]);
+            payload.extend_from_slice(&pair[1]);
+        }
+        let received = self.raw_exchange([payload.clone(), payload])?;
+        if received.iter().any(|v| v.len() != shares.len() * 6) {
+            self.poisoned = true;
+            return Err(Error::InvalidConfiguration);
+        }
+        let mut out = Vec::with_capacity(shares.len());
+        for (i, a) in shares.iter().enumerate() {
+            let prev: RepGoldExt3 = core::array::from_fn(|j| {
+                let s = &received[0][6 * i + 3 * j..6 * i + 3 * j + 3];
+                [s[0], s[1], s[2]]
+            });
+            let next: RepGoldExt3 = core::array::from_fn(|j| {
+                let s = &received[1][6 * i + 3 * j..6 * i + 3 * j + 3];
+                [s[0], s[1], s[2]]
+            });
+            if prev[1] != a[0] {
+                self.poisoned = true;
+                return Err(Error::Disagreement((self.party + 2) % 3));
+            }
+            if next[0] != a[1] || prev[0] != next[1] || !g3_canonical(prev[0]) {
+                self.poisoned = true;
+                return Err(Error::Disagreement((self.party + 1) % 3));
+            }
+            out.push(g3_add(g3_add(a[0], a[1]), prev[0]));
+        }
+        Ok(out)
+    }
+
+    /// Batch-verify Goldilocks (`p = 2^64 - 2^32 + 1`) multiplications lifted into the
+    /// irreducible cubic extension `GF(p)[u] / (u^3 - 7)` (`p^3 > 2^191.99`,
+    /// cheating probability `< 30 / p^3 < 2^-186 << 2^-128`).
+    fn verify_pending_gold_slice(&mut self, triples: &[PendingFieldTriple]) -> Result<(), Error> {
+        if triples.is_empty() {
+            return Ok(());
+        }
+        let total = triples.len() * 64;
+        let seed0 = self.coin_flip(b"QSAG.OUTER.MULCHECK.GOLD.INIT.V1")?;
+        let mut xof0 = WordSponge136::from_shake_seed(&seed0);
+
+        struct GoldScratch {
+            a_vec: Vec<RepGoldExt3>,
+            b_vec: Vec<RepGoldExt3>,
+            cap: usize,
+            c_claim: RepGoldExt3,
+            u_sh: RepGoldExt3,
+            v_sh: RepGoldExt3,
+            d_loc: [GoldExt3; 2],
+        }
+        impl Drop for GoldScratch {
+            fn drop(&mut self) {
+                for vec_buf in [&mut self.a_vec, &mut self.b_vec] {
+                    if vec_buf.len() < self.cap && vec_buf.capacity() >= self.cap {
+                        vec_buf.resize(self.cap, [[0; 3]; 2]);
+                    }
+                    for pair in vec_buf.iter_mut() {
+                        ct_zeroize_u64s(&mut pair[0]);
+                        ct_zeroize_u64s(&mut pair[1]);
+                    }
+                }
+                for pair in [
+                    &mut self.c_claim,
+                    &mut self.u_sh,
+                    &mut self.v_sh,
+                    &mut self.d_loc,
+                ] {
+                    ct_zeroize_u64s(&mut pair[0]);
+                    ct_zeroize_u64s(&mut pair[1]);
+                }
+            }
+        }
+
+        let mut sc = GoldScratch {
+            a_vec: Vec::with_capacity(total + 1),
+            b_vec: Vec::with_capacity(total + 1),
+            cap: total + 1,
+            c_claim: [[0; 3]; 2],
+            u_sh: [[0; 3]; 2],
+            v_sh: [[0; 3]; 2],
+            d_loc: [[0; 3]; 2],
+        };
+
+        for (x_fw, y_fw, z_fw) in triples {
+            for ((x, y), z) in x_fw.iter().zip(y_fw).zip(z_fw) {
+                let chi = squeeze_g3_challenge(&mut xof0);
+                let scale_base = |c: GoldExt3, v: u64| -> GoldExt3 {
+                    [gl_mul(c[0], v), gl_mul(c[1], v), gl_mul(c[2], v)]
+                };
+                sc.a_vec.push([scale_base(chi, x[0][0]), scale_base(chi, x[1][0])]);
+                sc.b_vec.push([[y[0][0], 0, 0], [y[1][0], 0, 0]]);
+                sc.c_claim[0] = g3_add(sc.c_claim[0], scale_base(chi, z[0][0]));
+                sc.c_claim[1] = g3_add(sc.c_claim[1], scale_base(chi, z[1][0]));
+            }
+        }
+
+        let rep_local_mul = |x: &RepGoldExt3, y: &RepGoldExt3| -> GoldExt3 {
+            g3_add(g3_mul(x[0], g3_add(y[0], y[1])), g3_mul(x[1], y[0]))
+        };
+
+        while sc.a_vec.len() > 1 {
+            if sc.a_vec.len() % 2 == 1 {
+                sc.a_vec.push([[0; 3]; 2]);
+                sc.b_vec.push([[0; 3]; 2]);
+            }
+            let half = sc.a_vec.len() / 2;
+            sc.d_loc = [[0u64; 3]; 2];
+            for k in 0..half {
+                sc.d_loc[0] = g3_add(sc.d_loc[0], rep_local_mul(&sc.a_vec[2 * k], &sc.b_vec[2 * k + 1]));
+                sc.d_loc[1] = g3_add(sc.d_loc[1], rep_local_mul(&sc.a_vec[2 * k + 1], &sc.b_vec[2 * k]));
+            }
+            let mut reshared = self.reshare_g3_many(&sc.d_loc)?;
+            let seed_rk = match self.coin_flip(b"QSAG.OUTER.MULCHECK.GOLD.FOLD.V1") {
+                Ok(s) => s,
+                Err(e) => {
+                    for r in &mut reshared {
+                        ct_zeroize_u64s(&mut r[0]);
+                        ct_zeroize_u64s(&mut r[1]);
+                    }
+                    return Err(e);
+                }
+            };
+            let mut xof_rk = WordSponge136::from_shake_seed(&seed_rk);
+            let rk = squeeze_g3_challenge(&mut xof_rk);
+            let rk_sq = g3_mul(rk, rk);
+
+            sc.c_claim = [
+                g3_add(
+                    reshared[0][0],
+                    g3_add(g3_mul(rk, sc.c_claim[0]), g3_mul(rk_sq, reshared[1][0])),
+                ),
+                g3_add(
+                    reshared[0][1],
+                    g3_add(g3_mul(rk, sc.c_claim[1]), g3_mul(rk_sq, reshared[1][1])),
+                ),
+            ];
+            for r in &mut reshared {
+                ct_zeroize_u64s(&mut r[0]);
+                ct_zeroize_u64s(&mut r[1]);
+            }
+            for k in 0..half {
+                let na = [
+                    g3_add(sc.a_vec[2 * k][0], g3_mul(rk, sc.a_vec[2 * k + 1][0])),
+                    g3_add(sc.a_vec[2 * k][1], g3_mul(rk, sc.a_vec[2 * k + 1][1])),
+                ];
+                let nb = [
+                    g3_add(g3_mul(rk, sc.b_vec[2 * k][0]), sc.b_vec[2 * k + 1][0]),
+                    g3_add(g3_mul(rk, sc.b_vec[2 * k][1]), sc.b_vec[2 * k + 1][1]),
+                ];
+                sc.a_vec[k] = na;
+                sc.b_vec[k] = nb;
+            }
+            sc.a_vec.truncate(half);
+            sc.b_vec.truncate(half);
+        }
+
+        let a0 = sc.a_vec[0];
+        let b0 = sc.b_vec[0];
+        sc.u_sh = self.prss_g3();
+        sc.v_sh = self.prss_g3();
+        sc.d_loc = [
+            g3_add(rep_local_mul(&a0, &sc.v_sh), rep_local_mul(&sc.u_sh, &b0)),
+            rep_local_mul(&sc.u_sh, &sc.v_sh),
+        ];
+        let mut d_sh = self.reshare_g3_many(&sc.d_loc)?;
+
+        let seed_base = match self.coin_flip(b"QSAG.OUTER.MULCHECK.GOLD.BASE.V1") {
+            Ok(s) => s,
+            Err(e) => {
+                for r in &mut d_sh {
+                    ct_zeroize_u64s(&mut r[0]);
+                    ct_zeroize_u64s(&mut r[1]);
+                }
+                return Err(e);
+            }
+        };
+        let mut xof_base = WordSponge136::from_shake_seed(&seed_base);
+        let rb = loop {
+            let cand = squeeze_g3_challenge(&mut xof_base);
+            if cand != [0; 3] {
+                break cand;
+            }
+        };
+        let rb_sq = g3_mul(rb, rb);
+
+        let alpha_sh = [
+            g3_add(a0[0], g3_mul(rb, sc.u_sh[0])),
+            g3_add(a0[1], g3_mul(rb, sc.u_sh[1])),
+        ];
+        let beta_sh = [
+            g3_add(b0[0], g3_mul(rb, sc.v_sh[0])),
+            g3_add(b0[1], g3_mul(rb, sc.v_sh[1])),
+        ];
+        let gamma_sh = [
+            g3_add(
+                sc.c_claim[0],
+                g3_add(g3_mul(rb, d_sh[0][0]), g3_mul(rb_sq, d_sh[1][0])),
+            ),
+            g3_add(
+                sc.c_claim[1],
+                g3_add(g3_mul(rb, d_sh[0][1]), g3_mul(rb_sq, d_sh[1][1])),
+            ),
+        ];
+        for r in &mut d_sh {
+            ct_zeroize_u64s(&mut r[0]);
+            ct_zeroize_u64s(&mut r[1]);
+        }
+        let mut to_open = [alpha_sh, beta_sh, gamma_sh];
+        let opened_res = self.open_raw_g3(&to_open);
+        for item in &mut to_open {
+            ct_zeroize_u64s(&mut item[0]);
+            ct_zeroize_u64s(&mut item[1]);
+        }
+        let opened = opened_res.map_err(|err| match err {
+            Error::Disagreement(_) => Error::MultiplicationCheck,
+            other => other,
+        })?;
+        if opened[2] != g3_mul(opened[0], opened[1]) {
+            self.poisoned = true;
+            return Err(Error::MultiplicationCheck);
+        }
+        Ok(())
+    }
+
+    fn flush_pending_domain(&mut self, d: Domain) -> Result<(), Error> {
+        let mut batch = match d {
+            Domain::Secp => core::mem::take(&mut self.pending_secp),
+            Domain::Ed => core::mem::take(&mut self.pending_ed),
+            Domain::Gold => core::mem::take(&mut self.pending_gold),
+            Domain::Bit => return self.flush_pending_bits(),
+        };
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let wipe = |items: &mut [PendingFieldTriple]| {
+            for (a, b, c) in items {
+                for fw in [a, b, c] {
+                    for pair in fw {
+                        ct_zeroize_u64s(&mut pair[0]);
+                        ct_zeroize_u64s(&mut pair[1]);
+                    }
+                }
+            }
+        };
+        for chunk in batch.chunks(MAX_PENDING_FIELD_WORDS) {
+            let res = if d == Domain::Gold {
+                self.verify_pending_gold_slice(chunk)
+            } else {
+                self.verify_pending_large_prime_slice(chunk, d)
+            };
+            if let Err(err) = res {
+                wipe(&mut batch);
+                return Err(err);
+            }
+        }
+        wipe(&mut batch);
+        Ok(())
+    }
+
+    /// Mandatory pre-open active multiplication verification barrier across all
+    /// Boolean and prime-field domains. Zero secret-dependent wire values may open
+    /// unless this barrier succeeds.
+    pub fn verify_all_pending(&mut self) -> Result<(), Error> {
+        if self.poisoned {
+            return Err(Error::MultiplicationCheck);
+        }
+        self.flush_pending_bits()?;
+        self.flush_pending_domain(Domain::Secp)?;
+        self.flush_pending_domain(Domain::Ed)?;
+        self.flush_pending_domain(Domain::Gold)?;
+        Ok(())
+    }
+
+    pub fn and(&mut self, pairs: &[(Bit, Bit)]) -> Result<Word, Error> {
+        if self.poisoned {
+            return Err(Error::MultiplicationCheck);
+        }
+        if pairs.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.scratch_r.resize(pairs.len(), 0);
+        self.scratch_s.resize(pairs.len(), 0);
+        self.pads[0].squeeze_u64s(&mut self.scratch_r);
+        self.pads[1].squeeze_u64s(&mut self.scratch_s);
+        let mut own = Vec::with_capacity(pairs.len());
+        for ((&(a, b), &r), &s) in pairs.iter().zip(&self.scratch_r).zip(&self.scratch_s) {
+            own.push((a.0[0] & (b.0[0] ^ b.0[1])) ^ (a.0[1] & b.0[0]) ^ r ^ s);
+        }
+        #[cfg(test)]
+        if let Some(FaultInjection::BitAnd {
+            ref mut call_countdown,
+            gate,
+            lane,
+        }) = self.fault
+        {
+            if *call_countdown == 0 {
+                let idx = gate.min(own.len() - 1);
+                own[idx] ^= 1u64 << (lane & 63);
+                self.fault = None;
+            } else {
+                *call_countdown -= 1;
+            }
+        }
+        let (mut mine, mut next) = self.raw_share_owned(own)?;
+        let out: Word = mine
+            .iter()
+            .zip(&next)
+            .map(|(&a, &b)| Bit([a, b]))
+            .collect();
+        ct_zeroize_u64s(&mut mine);
+        ct_zeroize_u64s(&mut next);
+        self.pending_bits_raw.reserve(pairs.len() * 6);
+        for (&(a, b), &z) in pairs.iter().zip(&out) {
+            self.pending_bits_raw
+                .extend_from_slice(&[a.0[0], a.0[1], b.0[0], b.0[1], z.0[0], z.0[1]]);
+        }
+        if self.pending_bits_raw.len() >= MAX_PENDING_BITS * 6 {
+            self.flush_pending_bits()?;
+        }
+        Ok(out)
+    }
+
+    /// Reconstruct only explicitly public data after verifying all pending
+    /// Boolean and prime-field multiplications. Both holders supply every
+    /// component; inconsistencies abort before the caller receives any output.
+    pub fn open(&mut self, bits: &[Bit]) -> Result<Vec<u64>, Error> {
+        self.verify_all_pending()?;
+        self.open_raw_bits(bits)
+    }
+
+    pub fn agree(&mut self, root: [u8; 32]) -> Result<(), Error> {
+        self.verify_all_pending()?;
+        let words: Vec<_> = root
+            .chunks_exact(8)
+            .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
+            .collect();
+        let received = self.raw_exchange([words.clone(), words.clone()])?;
+        for (i, r) in received.iter().enumerate() {
+            if r != &words {
+                self.poisoned = true;
+                return Err(Error::Disagreement(
+                    (self.party + if i == 0 { 2 } else { 1 }) % 3,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn number(&self, x: Value, n: usize) -> Word {
+        (0..n)
+            .map(|i| {
+                self.constant(if i < 256 && (x[i / 64] >> (i % 64)) & 1 != 0 {
+                    u64::MAX
+                } else {
+                    0
+                })
+            })
+            .collect()
+    }
+
+    pub fn xor(&self, a: &[Bit], b: &[Bit]) -> Word {
+        a.iter().zip(b).map(|(&a, &b)| a ^ b).collect()
+    }
+
+    #[cfg(test)]
+    pub fn select(&mut self, c: Bit, a: &[Bit], b: &[Bit]) -> Result<Word, Error> {
+        let pairs: Vec<_> = a.iter().zip(b).map(|(&a, &b)| (c, a ^ b)).collect();
+        Ok(self
+            .and(&pairs)?
+            .iter()
+            .zip(b)
+            .map(|(&x, &b)| x ^ b)
+            .collect())
+    }
+
+    pub fn select_many(
+        &mut self,
+        conds: &[Bit],
+        a_words: &[Word],
+        b_words: &[Word],
+    ) -> Result<Vec<Word>, Error> {
+        if a_words.is_empty() {
+            return Ok(Vec::new());
+        }
+        let width = a_words[0].len();
+        let mut pairs = Vec::with_capacity(a_words.len() * width);
+        for ((&c, a), b) in conds.iter().zip(a_words).zip(b_words) {
+            for (&ai, &bi) in a.iter().zip(b) {
+                pairs.push((c, ai ^ bi));
+            }
+        }
+        let prods = self.and(&pairs)?;
+        let mut out = Vec::with_capacity(a_words.len());
+        for (b, chunk) in b_words.iter().zip(prods.chunks_exact(width)) {
+            out.push(chunk.iter().zip(b).map(|(&p, &bi)| p ^ bi).collect());
+        }
+        Ok(out)
+    }
+
+    /// Parallel-prefix binary adder; logarithmic communication depth for single words.
+    #[cfg(test)]
+    pub fn add(&mut self, a: &[Bit], b: &[Bit], carry: Bit) -> Result<(Word, Bit), Error> {
+        let n = a.len();
+        let p = self.xor(a, b);
+        let mut pp = p.clone();
+        let mut g = self.and(&a.iter().copied().zip(b.iter().copied()).collect::<Vec<_>>())?;
+        let mut step = 1;
+        while step < n {
+            let indices: Vec<_> = (2 * step - 1..n).step_by(2 * step).collect();
+            self.prefix_layer(&indices, step, &mut pp, &mut g)?;
+            step *= 2;
+        }
+        step /= 4;
+        while step != 0 {
+            let indices: Vec<_> = (3 * step - 1..n).step_by(2 * step).collect();
+            self.prefix_layer(&indices, step, &mut pp, &mut g)?;
+            step /= 2;
+        }
+        let cs = self.and(&pp.into_iter().map(|p| (p, carry)).collect::<Vec<_>>())?;
+        for (gi, &csi) in g.iter_mut().zip(&cs) {
+            *gi = *gi ^ csi;
+        }
+        Ok((
+            (0..n)
+                .map(|i| p[i] ^ if i == 0 { carry } else { g[i - 1] })
+                .collect(),
+            g[n - 1],
+        ))
+    }
+
+    #[cfg(test)]
+    fn prefix_layer(
+        &mut self,
+        indices: &[usize],
+        step: usize,
+        p: &mut [Bit],
+        g: &mut [Bit],
+    ) -> Result<(), Error> {
+        if indices.is_empty() {
+            return Ok(());
+        }
+        let pairs: Vec<_> = indices
+            .iter()
+            .flat_map(|&i| [(p[i], g[i - step]), (p[i], p[i - step])])
+            .collect();
+        let products = self.and(&pairs)?;
+        for (k, &i) in indices.iter().enumerate() {
+            g[i] = g[i] ^ products[2 * k];
+            p[i] = products[2 * k + 1];
+        }
+        Ok(())
+    }
+
+    /// Vectorized 1-AND-per-bit Boyar-Peralta adder across `K` words in parallel.
+    pub fn add_many(
+        &mut self,
+        a_words: &[Word],
+        b_words: &[Word],
+        carry_mask: u64,
+    ) -> Result<(Vec<Word>, Vec<Bit>), Error> {
+        if a_words.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let k = a_words.len();
+        let n = a_words[0].len();
+        let mut sums: Vec<Word> = (0..k).map(|_| Vec::with_capacity(n)).collect();
+        let mut carries = vec![self.constant(carry_mask); k];
+        let mut pairs = Vec::with_capacity(k);
+        for bit in 0..n {
+            pairs.clear();
+            for ((a, b), (&c, sum_w)) in a_words
+                .iter()
+                .zip(b_words)
+                .zip(carries.iter().zip(&mut sums))
+            {
+                let ai = a[bit];
+                let bi = b[bit];
+                sum_w.push(ai ^ bi ^ c);
+                pairs.push((ai ^ c, bi ^ c));
+            }
+            let prods = self.and(&pairs)?;
+            for (c, &p) in carries.iter_mut().zip(&prods) {
+                *c = *c ^ p;
+            }
+        }
+        Ok((sums, carries))
+    }
+
+    /// Vectorized addition of `a_words` with a public constant `k_val` (`1` `AND` per bit).
+    fn add_public_many(
+        &mut self,
+        a_words: &[Word],
+        k_val: Value,
+        carry_mask: u64,
+        width: usize,
+    ) -> Result<(Vec<Word>, Vec<Bit>), Error> {
+        if a_words.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let k = a_words.len();
+        let k_bits = self.number(k_val, width);
+        let mut sums: Vec<Word> = (0..k).map(|_| Vec::with_capacity(width)).collect();
+        let mut carries = vec![self.constant(carry_mask); k];
+        let mut pairs = Vec::with_capacity(k);
+        for (bit, &kb) in k_bits.iter().enumerate() {
+            pairs.clear();
+            for (a, (&c, sum_w)) in a_words.iter().zip(carries.iter().zip(&mut sums)) {
+                let ai = a[bit];
+                sum_w.push(ai ^ kb ^ c);
+                pairs.push((ai ^ c, kb ^ c));
+            }
+            let prods = self.and(&pairs)?;
+            for (c, &p) in carries.iter_mut().zip(&prods) {
+                *c = *c ^ p;
+            }
+        }
+        Ok((sums, carries))
+    }
+
+    fn domain_c_const(d: Domain) -> Value {
+        match d {
+            Domain::Ed => [19, 0, 0, 0],
+            Domain::Secp => [0x1_0000_03d1, 0, 0, 0],
+            Domain::Gold => [0xffff_ffff, 0, 0, 0],
+            Domain::Bit => [0, 0, 0, 0],
+        }
+    }
+
+    /// Check `v < d.modulus()` across `v_words` (`width == d.width()`).
+    /// Since `p = 2^n - c`, `v < p <==> v + c < 2^n <==> carry_out_n(v + c) == 0`.
+    pub fn less_than_modulus_many(&mut self, v_words: &[Word], d: Domain) -> Result<Vec<Bit>, Error> {
+        if v_words.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (_, carries) = self.add_public_many(v_words, Self::domain_c_const(d), 0, d.width())?;
+        let ones = self.constant(u64::MAX);
+        Ok(carries.into_iter().map(|ge| ge ^ ones).collect())
+    }
+
+    #[cfg(test)]
+    pub fn reduce_once(&mut self, a: &[Bit], d: Domain) -> Result<Word, Error> {
+        let modulus = self.number(d.modulus(), a.len());
+        let not_m: Vec<_> = modulus
+            .iter()
+            .map(|&x| x ^ self.constant(u64::MAX))
+            .collect();
+        let (difference, ge) = self.add(a, &not_m, self.constant(u64::MAX))?;
+        Ok(self.select(ge, &difference, a)?[..d.width()].to_vec())
+    }
+
+    #[cfg(test)]
+    pub fn field_add(&mut self, a: &[Bit], b: &[Bit], d: Domain) -> Result<Word, Error> {
+        if d == Domain::Bit {
+            return Ok(self.xor(a, b));
+        }
+        let (mut s, c) = self.add(a, b, self.constant(0))?;
+        s.push(c);
+        self.reduce_once(&s, d)
+    }
+
+    pub fn field_add_many(
+        &mut self,
+        a_words: &[Word],
+        b_words: &[Word],
+        d: Domain,
+    ) -> Result<Vec<Word>, Error> {
+        if a_words.is_empty() {
+            return Ok(Vec::new());
+        }
+        if d == Domain::Bit {
+            return Ok(a_words
+                .iter()
+                .zip(b_words)
+                .map(|(a, b)| self.xor(a, b))
+                .collect());
+        }
+        let n = d.width();
+        let (sums, overflow) = self.add_many(a_words, b_words, 0)?;
+        // `0 <= a + b < 2p = 2^(n+1) - 2c`, so `overflow` and `carry_c` are mutually exclusive.
+        let (diffs, carry_c) = self.add_public_many(&sums, Self::domain_c_const(d), 0, n)?;
+        let ge: Vec<Bit> = overflow
+            .into_iter()
+            .zip(carry_c)
+            .map(|(ov, cc)| ov ^ cc)
+            .collect();
+        self.select_many(&ge, &diffs, &sums)
+    }
+
+    #[cfg(test)]
+    pub fn field_sub(&mut self, a: &[Bit], b: &[Bit], d: Domain) -> Result<Word, Error> {
+        if d == Domain::Bit {
+            return Ok(self.xor(a, b));
+        }
+        let not_b: Vec<_> = b.iter().map(|&x| x ^ self.constant(u64::MAX)).collect();
+        let (difference, no_borrow) = self.add(a, &not_b, self.constant(u64::MAX))?;
+        let modulus = self.number(d.modulus(), a.len());
+        let (corrected, _) = self.add(&difference, &modulus, self.constant(0))?;
+        self.select(no_borrow, &difference, &corrected)
+    }
+
+    pub fn field_sub_many(
+        &mut self,
+        a_words: &[Word],
+        b_words: &[Word],
+        d: Domain,
+    ) -> Result<Vec<Word>, Error> {
+        if a_words.is_empty() {
+            return Ok(Vec::new());
+        }
+        if d == Domain::Bit {
+            return Ok(a_words
+                .iter()
+                .zip(b_words)
+                .map(|(a, b)| self.xor(a, b))
+                .collect());
+        }
+        let ones = self.constant(u64::MAX);
+        let not_b: Vec<Word> = b_words
+            .iter()
+            .map(|b| b.iter().map(|&x| x ^ ones).collect())
+            .collect();
+        let (diffs, no_borrow) = self.add_many(a_words, &not_b, u64::MAX)?;
+        let (corrected, _) = self.add_public_many(&diffs, d.modulus(), 0, d.width())?;
+        self.select_many(&no_borrow, &diffs, &corrected)
+    }
+
+    /// Carry-save tree; all compressors at a level share one network round.
+    #[cfg(test)]
+    fn sum_rows(&mut self, mut rows: Vec<Word>, width: usize) -> Result<Word, Error> {
+        for r in &mut rows {
+            r.resize(width, self.constant(0));
+        }
+        while rows.len() > 2 {
+            let count = rows.len() / 3;
+            let pairs: Vec<_> = rows
+                .chunks_exact(3)
+                .flat_map(|r| (0..width).map(move |i| (r[0][i] ^ r[1][i], r[0][i] ^ r[2][i])))
+                .collect();
+            let products = self.and(&pairs)?;
+            let mut next = Vec::with_capacity(count * 2 + 2);
+            for (k, r) in rows.chunks_exact(3).enumerate() {
+                next.push((0..width).map(|i| r[0][i] ^ r[1][i] ^ r[2][i]).collect());
+                let mut carry = vec![self.constant(0)];
+                carry.extend((0..width - 1).map(|i| r[0][i] ^ products[k * width + i]));
+                next.push(carry);
+            }
+            next.extend(rows[count * 3..].iter().cloned());
+            rows = next;
+        }
+        if rows.len() == 1 {
+            Ok(rows.remove(0))
+        } else {
+            Ok(self.add(&rows[0], &rows[1], self.constant(0))?.0)
+        }
+    }
+    #[cfg(test)]
+    pub fn field_mul(&mut self, a: &[Bit], b: &[Bit], d: Domain) -> Result<Word, Error> {
+        if d == Domain::Bit {
+            return self.and(&[(a[0], b[0])]);
+        }
+        let n = d.width();
+        let pairs: Vec<_> = (0..n)
+            .flat_map(|i| (0..n).map(move |j| (a[i], b[j])))
+            .collect();
+        let products = self.and(&pairs)?;
+        let rows: Vec<_> = (0..n)
+            .map(|i| {
+                let mut row = vec![self.constant(0); i];
+                row.extend_from_slice(&products[i * n..(i + 1) * n]);
+                row
+            })
+            .collect();
+        let wide = self.sum_rows(rows, 2 * n)?;
+        self.reduce_wide(wide, d)
+    }
+    #[cfg(test)]
+    pub fn field_scale(&mut self, a: &[Bit], value: Value, d: Domain) -> Result<Word, Error> {
+        if d == Domain::Bit {
+            return Ok(if value[0] == 0 {
+                vec![self.constant(0)]
+            } else {
+                a.to_vec()
+            });
+        }
+        let mut coefficient = [value[0], value[1], value[2], value[3], 0];
+        let mut digits = Vec::new();
+        let mut shift = 0;
+        while coefficient.iter().any(|&x| x != 0) {
+            if coefficient[0] & 1 != 0 {
+                let negative = coefficient[0] & 3 == 3;
+                digits.push((shift, negative));
+                if negative {
+                    let mut carry = true;
+                    for limb in &mut coefficient {
+                        let (v, c) = limb.overflowing_add(u64::from(carry));
+                        *limb = v;
+                        carry = c;
+                    }
+                } else {
+                    coefficient[0] -= 1;
+                }
+            }
+            for i in 0..4 {
+                coefficient[i] = (coefficient[i] >> 1) | (coefficient[i + 1] << 63);
+            }
+            coefficient[4] >>= 1;
+            shift += 1;
+        }
+        if digits.is_empty() {
+            return Ok(vec![self.constant(0); d.width()]);
+        }
+        let width = d.width() + digits.last().unwrap().0 + 1;
+        let mut correction = 0;
+        let mut rows: Vec<_> = digits
+            .into_iter()
+            .map(|(shift, negative)| {
+                let mut row = vec![self.constant(0); shift];
+                row.extend_from_slice(a);
+                row.resize(width, self.constant(0));
+                if negative {
+                    correction += 1;
+                    for bit in &mut row {
+                        *bit = *bit ^ self.constant(u64::MAX);
+                    }
+                }
+                row
+            })
+            .collect();
+        if correction != 0 {
+            rows.push(self.number([correction, 0, 0, 0], width));
+        }
+        let wide = self.sum_rows(rows, width)?;
+        self.reduce_wide(wide, d)
+    }
+    #[cfg(test)]
+    fn reduce_wide(&mut self, mut wide: Word, d: Domain) -> Result<Word, Error> {
+        let n = d.width();
+        let c = match d {
+            Domain::Ed => 19u64,
+            Domain::Secp => 0x1_0000_03d1,
+            Domain::Gold => 0xffff_ffff,
+            Domain::Bit => unreachable!(),
+        };
+        let cbits = 64 - c.leading_zeros() as usize;
+        while wide.len() > n + 1 {
+            let high = wide[n..].to_vec();
+            let width = core::cmp::max(n, high.len() + cbits) + 1;
+            let mut rows = vec![wide[..n].to_vec()];
+            for shift in 0..cbits {
+                if (c >> shift) & 1 != 0 {
+                    let mut r = vec![self.constant(0); shift];
+                    r.extend_from_slice(&high);
+                    rows.push(r);
+                }
+            }
+            wide = self.sum_rows(rows, width)?;
+        }
+        self.reduce_once(&wide, d)
+    }
+
+    /// Lockstep 24-round `Keccak-f[1600]` across multiple 1600-bit states (`24` network rounds total).
+    pub fn permutations(&mut self, states: &mut [&mut [Bit]]) -> Result<(), Error> {
+        if states.is_empty() {
+            return Ok(());
+        }
+        const RHO: [usize; 24] = [
+            1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 2, 14, 27, 41, 56, 8, 25, 43, 62, 18, 39, 61, 20,
+            44,
+        ];
+        const PI: [usize; 24] = [
+            10, 7, 11, 17, 18, 3, 5, 16, 8, 21, 24, 4, 15, 23, 19, 13, 12, 2, 20, 14, 22, 9, 6, 1,
+        ];
+        let ones = self.constant(u64::MAX);
+        let zero = self.constant(0);
+        let mut pairs = Vec::with_capacity(states.len() * 1600);
+        let mut c_buf = [zero; 320];
+        let mut t_buf = [zero; 64];
+        let mut next_buf = [zero; 64];
+
+        for rc in KECCAK_RC {
+            pairs.clear();
+            for state in states.iter_mut() {
+                for (i, c_slot) in c_buf.iter_mut().enumerate() {
+                    let col = i / 64;
+                    let z = i % 64;
+                    *c_slot = state[col * 64 + z]
+                        ^ state[(col + 5) * 64 + z]
+                        ^ state[(col + 10) * 64 + z]
+                        ^ state[(col + 15) * 64 + z]
+                        ^ state[(col + 20) * 64 + z];
+                }
+                for x in 0..5 {
+                    for z in 0..64 {
+                        let d_xz =
+                            c_buf[((x + 4) % 5) * 64 + z] ^ c_buf[((x + 1) % 5) * 64 + (z + 63) % 64];
+                        for y in 0..5 {
+                            state[(x + 5 * y) * 64 + z] = state[(x + 5 * y) * 64 + z] ^ d_xz;
+                        }
+                    }
+                }
+                t_buf.copy_from_slice(&state[64..128]);
+                for (j, r) in PI.into_iter().zip(RHO) {
+                    next_buf.copy_from_slice(&state[j * 64..j * 64 + 64]);
+                    for z in 0..64 {
+                        state[j * 64 + z] = t_buf[(z + 64 - r) % 64];
+                    }
+                    t_buf = next_buf;
+                }
+                for i in 0..1600 {
+                    let row = (i / 320) * 320;
+                    let x = (i / 64) % 5;
+                    let z = i % 64;
+                    pairs.push((
+                        state[row + ((x + 1) % 5) * 64 + z] ^ ones,
+                        state[row + ((x + 2) % 5) * 64 + z],
+                    ));
+                }
+            }
+            let prods = self.and(&pairs)?;
+            for (state, chunk) in states.iter_mut().zip(prods.chunks_exact(1600)) {
+                for (s, &v) in state.iter_mut().zip(chunk) {
+                    *s = *s ^ v;
+                }
+                for (i, s) in state[..64].iter_mut().enumerate() {
+                    if (rc >> i) & 1 != 0 {
+                        *s = *s ^ ones;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn permutation(&mut self, state: &mut Word) -> Result<(), Error> {
+        self.permutations(&mut [state.as_mut_slice()])
+    }
+}
+
+pub(crate) struct Sponge {
+    pub(crate) state: Word,
+    pub(crate) pos: usize,
+}
+impl Drop for Sponge {
+    fn drop(&mut self) {
+        for b in &mut self.state {
+            ct_zeroize_u64s(&mut b.0);
+        }
+    }
+}
+impl Sponge {
+    pub fn new<T: Transport>(e: &Engine<T>) -> Self {
+        Self {
+            state: vec![e.constant(0); 1600],
+            pos: 0,
+        }
+    }
+    pub fn absorb<T: Transport>(&mut self, e: &mut Engine<T>, input: &[Bit]) -> Result<(), Error> {
+        for &b in input {
+            self.state[self.pos] = self.state[self.pos] ^ b;
+            self.pos += 1;
+            if self.pos == 1088 {
+                e.permutation(&mut self.state)?;
+                self.pos = 0;
+            }
+        }
+        Ok(())
+    }
+    pub fn public<T: Transport>(&mut self, e: &mut Engine<T>, bytes: &[u8]) -> Result<(), Error> {
+        let bits = public_bytes(e, bytes);
+        self.absorb(e, &bits)
+    }
+    pub fn pad_only<T: Transport>(&mut self, e: &Engine<T>, suffix: u8) {
+        for i in 0..8 {
+            if (suffix >> i) & 1 != 0 {
+                self.state[self.pos + i] = self.state[self.pos + i] ^ e.constant(u64::MAX);
+            }
+        }
+        self.state[1087] = self.state[1087] ^ e.constant(u64::MAX);
+        self.pos = 0;
+    }
+    #[cfg(test)]
+    pub fn finalize<T: Transport>(&mut self, e: &mut Engine<T>, suffix: u8) -> Result<(), Error> {
+        self.pad_only(e, suffix);
+        e.permutation(&mut self.state)?;
+        Ok(())
+    }
+    #[cfg(test)]
+    pub fn squeeze<T: Transport>(
+        &mut self,
+        e: &mut Engine<T>,
+        count: usize,
+    ) -> Result<Word, Error> {
+        let mut out = Vec::with_capacity(count);
+        for _ in 0..count {
+            if self.pos == 1088 {
+                e.permutation(&mut self.state)?;
+                self.pos = 0;
+            }
+            out.push(self.state[self.pos]);
+            self.pos += 1;
+        }
+        Ok(out)
+    }
+    /// Initialize a shared `cSHAKE256` sponge using the public pre-permuted `init_cshake256`
+    /// state directly (`0` MPC rounds for the public customization block).
+    pub fn cshake_public<T: Transport>(e: &Engine<T>, customization: &[u8]) -> Self {
+        let native = init_cshake256(b"", customization);
+        // Mirror the exact public 136-byte block permutation in constant shares.
+        let mut s = Self::new(e);
+        let _ = native;
+        fn left(x: usize) -> Vec<u8> {
+            let bytes = x.to_be_bytes();
+            let i = bytes
+                .iter()
+                .position(|&x| x != 0)
+                .unwrap_or(bytes.len() - 1);
+            let mut out = vec![(bytes.len() - i) as u8];
+            out.extend_from_slice(&bytes[i..]);
+            out
+        }
+        let mut prefix = left(136);
+        prefix.extend(left(0));
+        prefix.extend(left(customization.len() * 8));
+        prefix.extend_from_slice(customization);
+        prefix.resize(prefix.len().div_ceil(136) * 136, 0);
+
+        let mut st = [0u64; 25];
+        for block in prefix.chunks_exact(136) {
+            for (lane, chunk) in st[..17].iter_mut().zip(block.chunks_exact(8)) {
+                let mut buf = [0u8; 8];
+                buf.copy_from_slice(chunk);
+                *lane ^= u64::from_le_bytes(buf);
+            }
+            keccak_f1600(&mut st);
+        }
+        for (lane_idx, &w) in st.iter().enumerate() {
+            for bit in 0..64 {
+                s.state[lane_idx * 64 + bit] =
+                    e.constant(if (w >> bit) & 1 != 0 { u64::MAX } else { 0 });
+            }
+        }
+        s
+    }
+    #[cfg(test)]
+    pub fn cshake<T: Transport>(e: &mut Engine<T>, customization: &[u8]) -> Result<Self, Error> {
+        Ok(Self::cshake_public(e, customization))
+    }
+}
+
+/// Squeeze `counts[i]` bits from each `sponges[i]` in lockstep, sharing one
+/// `Engine::permutations` batch call per 1088-bit block across all sponges that need more output.
+pub(crate) fn squeeze_sponges_lockstep<T: Transport>(
+    e: &mut Engine<T>,
+    sponges: &mut [Sponge],
+    counts: &[usize],
+) -> Result<Vec<Word>, Error> {
+    let mut outs: Vec<Word> = counts.iter().map(|&c| Vec::with_capacity(c)).collect();
+    loop {
+        let mut need_perm = Vec::new();
+        for (idx, (sp, &target)) in sponges.iter_mut().zip(counts).enumerate() {
+            let rem = target - outs[idx].len();
+            if rem == 0 {
+                continue;
+            }
+            if sp.pos < 1088 {
+                let take = (1088 - sp.pos).min(rem);
+                outs[idx].extend_from_slice(&sp.state[sp.pos..sp.pos + take]);
+                sp.pos += take;
+            }
+            if outs[idx].len() < target && sp.pos == 1088 {
+                need_perm.push(idx);
+            }
+        }
+        if need_perm.is_empty() {
+            break;
+        }
+        let mut refs: Vec<&mut [Bit]> = Vec::with_capacity(need_perm.len());
+        // Split borrows safely across `sponges` in index order.
+        let mut cursor = 0usize;
+        let mut rest: &mut [Sponge] = &mut *sponges;
+        for &idx in &need_perm {
+            let (_, after) = rest.split_at_mut(idx - cursor);
+            let (first, tail) = after.split_first_mut().unwrap();
+            first.pos = 0;
+            refs.push(first.state.as_mut_slice());
+            rest = tail;
+            cursor = idx + 1;
+        }
+        e.permutations(&mut refs)?;
+    }
+    Ok(outs)
+}
+
+pub(crate) fn public_bytes<T: Transport>(e: &Engine<T>, bytes: &[u8]) -> Word {
+    bytes
+        .iter()
+        .flat_map(|b| (0..8).map(move |i| e.constant(if (b >> i) & 1 != 0 { u64::MAX } else { 0 })))
+        .collect()
+}
+pub(crate) fn lane_bytes(words: &[u64], lane: usize) -> Vec<u8> {
+    words
+        .chunks_exact(8)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .enumerate()
+                .fold(0, |v, (i, b)| v | (((b >> lane) & 1) as u8) << i)
+        })
+        .collect()
+}
+pub(crate) fn encode(out: &mut Word, value: &[Bit]) {
+    out.extend_from_slice(value);
+    out.resize(out.len().div_ceil(8) * 8, Bit::default());
+}
+
+impl<T: Transport> Engine<T> {
+    pub fn fconstant(&self, value: Value) -> FieldWord {
+        vec![
+            [
+                if self.party == 0 { value } else { [0; 4] },
+                if (self.party + 1) % 3 == 0 {
+                    value
+                } else {
+                    [0; 4]
+                }
+            ];
+            64
+        ]
+    }
+    pub fn fadd(&self, a: &FieldWord, b: &FieldWord, d: Domain) -> FieldWord {
+        a.iter()
+            .zip(b)
+            .map(|(a, b)| core::array::from_fn(|j| d.add(a[j], b[j])))
+            .collect()
+    }
+    pub fn fsub(&self, a: &FieldWord, b: &FieldWord, d: Domain) -> FieldWord {
+        a.iter()
+            .zip(b)
+            .map(|(a, b)| core::array::from_fn(|j| d.sub(a[j], b[j])))
+            .collect()
+    }
+    pub fn fscale(&self, a: &FieldWord, b: Value, d: Domain) -> FieldWord {
+        a.iter().map(|a| a.map(|v| d.mul(v, b))).collect()
+    }
+
+    fn field_pad(s: &mut WordSponge136, d: Domain) -> Value {
+        if d == Domain::Gold {
+            loop {
+                let w = s.squeeze_u64();
+                if w < GOLDILOCKS_P {
+                    return [w, 0, 0, 0];
+                }
+            }
+        }
+        loop {
+            let mut words = [0u64; 4];
+            s.squeeze_u64s(&mut words);
+            if d == Domain::Ed {
+                words[3] &= 0x7fff_ffff_ffff_ffff;
+            }
+            if d.canonical(words) {
+                return words;
+            }
+        }
+    }
+
+    fn frandom(&mut self, d: Domain) -> FieldWord {
+        (0..64)
+            .map(|_| {
+                [
+                    Self::field_pad(&mut self.pads[0], d),
+                    Self::field_pad(&mut self.pads[1], d),
+                ]
+            })
+            .collect()
+    }
+
+    pub fn fmul_many(
+        &mut self,
+        pairs: &[(&FieldWord, &FieldWord)],
+        d: Domain,
+    ) -> Result<Vec<FieldWord>, Error> {
+        if self.poisoned {
+            return Err(Error::MultiplicationCheck);
+        }
+        if pairs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let k = pairs.len();
+        let mut own_flat = Vec::with_capacity(k * 256);
+        let mut own_words: Vec<Vec<Value>> = Vec::with_capacity(k);
+        for (pair_idx, &(a, b)) in pairs.iter().enumerate() {
+            let masks = self.frandom(d);
+            let mut word_own = Vec::with_capacity(64);
+            #[cfg(test)]
+            let inject_lane = match self.fault {
+                Some(FaultInjection::FieldMul {
+                    domain,
+                    ref mut call_countdown,
+                    lane,
+                }) if domain == d && pair_idx == 0 => {
+                    if *call_countdown == 0 {
+                        let target_lane = lane & 63;
+                        self.fault = None;
+                        Some(target_lane)
+                    } else {
+                        *call_countdown -= 1;
+                        None
+                    }
+                }
+                _ => None,
+            };
+            #[cfg(not(test))]
+            let _ = pair_idx;
+            for (lane_idx, ((al, bl), r)) in a.iter().zip(b).zip(masks).enumerate() {
+                #[cfg(not(test))]
+                let _ = lane_idx;
+                let base_prod = d.add(
+                    d.add(d.mul(al[0], d.add(bl[0], bl[1])), d.mul(al[1], bl[0])),
+                    d.sub(r[0], r[1]),
+                );
+                #[cfg(test)]
+                let prod = if inject_lane == Some(lane_idx) {
+                    d.add(base_prod, [1, 0, 0, 0])
+                } else {
+                    base_prod
+                };
+                #[cfg(not(test))]
+                let prod = base_prod;
+                own_flat.extend_from_slice(&prod);
+                word_own.push(prod);
+            }
+            own_words.push(word_own);
+        }
+        let (_, next_raw) = self.raw_share_owned(own_flat)?;
+        let mut results = Vec::with_capacity(k);
+        for (word_own, word_next) in own_words.into_iter().zip(next_raw.chunks_exact(256)) {
+            let mut fw = Vec::with_capacity(64);
+            for (av, b_slice) in word_own.into_iter().zip(word_next.chunks_exact(4)) {
+                let bv: Value = [b_slice[0], b_slice[1], b_slice[2], b_slice[3]];
+                if !d.canonical(bv) {
+                    self.poisoned = true;
+                    return Err(Error::MultiplicationCheck);
+                }
+                fw.push([av, bv]);
+            }
+            results.push(fw);
+        }
+        let queue = match d {
+            Domain::Secp => &mut self.pending_secp,
+            Domain::Ed => &mut self.pending_ed,
+            Domain::Gold => &mut self.pending_gold,
+            Domain::Bit => return Err(Error::InvalidConfiguration),
+        };
+        for (&(a, b), z) in pairs.iter().zip(&results) {
+            queue.push((a.clone(), b.clone(), z.clone()));
+        }
+        if queue.len() >= MAX_PENDING_FIELD_WORDS {
+            self.flush_pending_domain(d)?;
+        }
+        Ok(results)
+    }
+
+    pub fn fmul(&mut self, a: &FieldWord, b: &FieldWord, d: Domain) -> Result<FieldWord, Error> {
+        Ok(self.fmul_many(&[(a, b)], d)?.pop().unwrap())
+    }
+
+    fn fopen_many(&mut self, words: &[FieldWord], d: Domain) -> Result<Vec<Vec<Value>>, Error> {
+        if words.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.verify_all_pending()?;
+        let k = words.len();
+        let mut payload = Vec::with_capacity(k * 512);
+        for w in words {
+            for pair in w {
+                payload.extend_from_slice(&pair[0]);
+                payload.extend_from_slice(&pair[1]);
+            }
+        }
+        let received = self.raw_exchange([payload.clone(), payload])?;
+        if received.iter().any(|v| v.len() != k * 512) {
+            self.poisoned = true;
+            return Err(Error::InvalidConfiguration);
+        }
+        let mut all_out = Vec::with_capacity(k);
+        for (w_idx, w) in words.iter().enumerate() {
+            let base_w = w_idx * 512;
+            let mut out = Vec::with_capacity(64);
+            for (lane, a) in w.iter().enumerate() {
+                let off = base_w + 8 * lane;
+                let prev: [Value; 2] = core::array::from_fn(|j| {
+                    let s = &received[0][off + 4 * j..off + 4 * j + 4];
+                    [s[0], s[1], s[2], s[3]]
+                });
+                let next: [Value; 2] = core::array::from_fn(|j| {
+                    let s = &received[1][off + 4 * j..off + 4 * j + 4];
+                    [s[0], s[1], s[2], s[3]]
+                });
+                if prev[1] != a[0] {
+                    self.poisoned = true;
+                    return Err(Error::Disagreement((self.party + 2) % 3));
+                }
+                if next[0] != a[1] || prev[0] != next[1] || !d.canonical(prev[0]) {
+                    self.poisoned = true;
+                    return Err(Error::Disagreement((self.party + 1) % 3));
+                }
+                out.push(d.add(d.add(a[0], a[1]), prev[0]));
+            }
+            all_out.push(out);
+        }
+        Ok(all_out)
+    }
+
+    /// Binary encoding of additive sharings without reconstructing their sums.
+    fn component_bits_many(
+        &mut self,
+        words: &[FieldWord],
+        d: Domain,
+    ) -> Result<Vec<Word>, Error> {
+        let width = d.width();
+        let make_owner = |owner: usize| -> Vec<Word> {
+            words
+                .iter()
+                .map(|a| {
+                    (0..width)
+                        .map(|bit| {
+                            Bit(core::array::from_fn(|j| {
+                                if (self.party + j) % 3 != owner {
+                                    0
+                                } else {
+                                    a.iter().enumerate().fold(0, |mask, (lane, value)| {
+                                        mask | (((value[j][bit / 64] >> (bit % 64)) & 1) << lane)
+                                    })
+                                }
+                            }))
+                        })
+                        .collect()
+                })
+                .collect()
+        };
+        let p0 = make_owner(0);
+        let p1 = make_owner(1);
+        let p2 = make_owner(2);
+        let sum01 = self.field_add_many(&p0, &p1, d)?;
+        self.field_add_many(&sum01, &p2, d)
+    }
+
+    /// Convert binary to additive sharing with fresh uniformly random field masks.
+    /// All pending multiplications are actively verified before `v - r` opens.
+    pub fn bits_to_field_many(
+        &mut self,
+        words: &[Word],
+        d: Domain,
+    ) -> Result<Vec<FieldWord>, Error> {
+        if words.is_empty() {
+            return Ok(Vec::new());
+        }
+        let width = d.width();
+        let mut all_out = Vec::with_capacity(words.len());
+        for chunk in words.chunks(CONVERT_CHUNK_WORDS) {
+            let mut r_list: Vec<FieldWord> = (0..chunk.len()).map(|_| self.frandom(d)).collect();
+            let rb_list = self.component_bits_many(&r_list, d)?;
+            let deltas = self.field_sub_many(chunk, &rb_list, d)?;
+            let mut flat = Vec::with_capacity(chunk.len() * width);
+            for dw in &deltas {
+                flat.extend_from_slice(dw);
+            }
+            let opened = self.open(&flat)?;
+            for (r_fw, op_slice) in r_list.iter_mut().zip(opened.chunks_exact(width)) {
+                for (lane, pair) in r_fw.iter_mut().enumerate() {
+                    let mut value = [0u64; 4];
+                    for (bit, &word) in op_slice.iter().enumerate() {
+                        value[bit / 64] |= ((word >> lane) & 1) << (bit % 64);
+                    }
+                    for (j, part) in pair.iter_mut().enumerate() {
+                        if (self.party + j) % 3 == 0 {
+                            *part = d.add(*part, value);
+                        }
+                    }
+                }
+            }
+            all_out.extend(r_list);
+        }
+        Ok(all_out)
+    }
+
+    #[cfg(test)]
+    pub fn bits_to_field(&mut self, v: &[Bit], d: Domain) -> Result<FieldWord, Error> {
+        Ok(self.bits_to_field_many(&[v.to_vec()], d)?.pop().unwrap())
+    }
+
+    /// Convert additive to binary sharing by opening only fresh masked differences
+    /// after actively verifying all pending Boolean and prime-field multiplications.
+    pub fn field_to_bits_many(
+        &mut self,
+        words: &[&FieldWord],
+        d: Domain,
+    ) -> Result<Vec<Word>, Error> {
+        if words.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut all_out = Vec::with_capacity(words.len());
+        for chunk in words.chunks(CONVERT_CHUNK_WORDS) {
+            let mut r_list: Vec<FieldWord> = (0..chunk.len()).map(|_| self.frandom(d)).collect();
+            let deltas: Vec<FieldWord> = chunk
+                .iter()
+                .zip(&r_list)
+                .map(|(v, r)| self.fsub(v, r, d))
+                .collect();
+            let opened_list = self.fopen_many(&deltas, d)?;
+            for (r_fw, opened) in r_list.iter_mut().zip(&opened_list) {
+                for (pair, &val) in r_fw.iter_mut().zip(opened) {
+                    for (j, part) in pair.iter_mut().enumerate() {
+                        if (self.party + j) % 3 == 0 {
+                            *part = d.add(*part, val);
+                        }
+                    }
+                }
+            }
+            all_out.extend(self.component_bits_many(&r_list, d)?);
+        }
+        Ok(all_out)
+    }
+
+    #[cfg(test)]
+    pub fn field_to_bits(&mut self, v: &FieldWord, d: Domain) -> Result<Word, Error> {
+        Ok(self.field_to_bits_many(&[v], d)?.pop().unwrap())
+    }
+
+    pub fn lift_bits_many(&mut self, bits: &[Bit], d: Domain) -> Result<Vec<FieldWord>, Error> {
+        if bits.is_empty() {
+            return Ok(Vec::new());
+        }
+        let make_owner = |owner: usize| -> Vec<FieldWord> {
+            bits.iter()
+                .map(|&bit| {
+                    (0..64)
+                        .map(|lane| {
+                            core::array::from_fn(|j| {
+                                if (self.party + j) % 3 == owner {
+                                    [(bit.0[j] >> lane) & 1, 0, 0, 0]
+                                } else {
+                                    [0; 4]
+                                }
+                            })
+                        })
+                        .collect()
+                })
+                .collect()
+        };
+        let p0 = make_owner(0);
+        let p1 = make_owner(1);
+        let p2 = make_owner(2);
+        let pairs01: Vec<_> = p0.iter().zip(&p1).collect();
+        let ab01 = self.fmul_many(&pairs01, d)?;
+        let firsts: Vec<FieldWord> = p0
+            .iter()
+            .zip(&p1)
+            .zip(&ab01)
+            .map(|((a, b), ab)| {
+                let sum = self.fadd(a, b, d);
+                self.fsub(&sum, &self.fscale(ab, [2, 0, 0, 0], d), d)
+            })
+            .collect();
+        let pairs12: Vec<_> = firsts.iter().zip(&p2).collect();
+        let ab12 = self.fmul_many(&pairs12, d)?;
+        Ok(firsts
+            .iter()
+            .zip(&p2)
+            .zip(&ab12)
+            .map(|((f, c), ab)| {
+                let sum = self.fadd(f, c, d);
+                self.fsub(&sum, &self.fscale(ab, [2, 0, 0, 0], d), d)
+            })
+            .collect())
+    }
+
+    pub fn finverse(&mut self, a: &FieldWord, d: Domain) -> Result<FieldWord, Error> {
+        let exponent = crate::scalar::sub(d.modulus(), [2, 0, 0, 0], d.modulus());
+        let mut out = self.fconstant([1, 0, 0, 0]);
+        for i in (0..d.width()).rev() {
+            out = self.fmul(&out, &out, d)?;
+            if (exponent[i / 64] >> (i % 64)) & 1 != 0 {
+                out = self.fmul(&out, a, d)?;
+            }
+        }
+        Ok(out)
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    extern crate std;
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc::{self, Receiver, Sender},
+    };
+
+    pub struct Network {
+        trace: Option<Arc<Trace>>,
+        stream: usize,
+        children: Vec<Network>,
+        sends: [Sender<Envelope>; 2],
+        receives: [Receiver<Envelope>; 2],
+    }
+
+    #[derive(Default)]
+    struct Trace {
+        observations: std::sync::Mutex<(u64, u64, u64)>,
+        candidates: std::sync::Mutex<Vec<[u8; 32]>>,
+        private_view: std::sync::Mutex<Vec<u8>>,
+    }
+    pub(crate) struct AuditHandle(Arc<Trace>);
+    impl AuditHandle {
+        pub fn candidates(&self) -> Vec<[u8; 32]> {
+            self.0.candidates.lock().unwrap().clone()
+        }
+    }
+    impl Trace {
+        fn new(_party: usize) -> Self {
+            Self::default()
+        }
+        fn record(&self, stream: usize, direction: u8, m: &Envelope) {
+            let private = self.private_view.lock().unwrap();
+            assert!(!private.is_empty());
+            assert_eq!(
+                private[0] as usize,
+                if direction == 0 {
+                    m.sender
+                } else {
+                    m.recipient
+                }
+            );
+            drop(private);
+            let mut observed = self.observations.lock().unwrap();
+            observed.0 += 1;
+            observed.1 += m.payload.len() as u64;
+            observed.2 =
+                observed.2.rotate_left(1) ^ (stream as u64) ^ u64::from(direction) ^ m.sequence;
+            for &word in &m.payload {
+                observed.2 ^= word;
+            }
+            for &byte in &m.tag {
+                observed.2 = observed.2.rotate_left(1) ^ u64::from(byte);
+            }
+        }
+        fn stats(&self) -> (u64, u64) {
+            let observed = self.observations.lock().unwrap();
+            (observed.0, observed.1)
+        }
+    }
+    impl Network {
+        fn record(&self, direction: u8, m: &Envelope) {
+            if let Some(trace) = &self.trace {
+                trace.record(self.stream, direction, m);
+            }
+        }
+    }
+    impl Transport for Network {
+        fn audit_transcript(&self) -> Option<(u64, u64)> {
+            self.trace.as_ref().map(|t| t.stats())
+        }
+        fn audit_candidates(&self, candidates: Vec<[u8; 32]>) {
+            self.trace
+                .as_ref()
+                .unwrap()
+                .candidates
+                .lock()
+                .unwrap()
+                .extend(candidates);
+        }
+        fn audit_private_state(
+            &self,
+            party: usize,
+            session: &[u8; 32],
+            witness: &[u8; 32],
+            entropy: &[u8; 32],
+            keys: &[[u8; 32]; 2],
+            statement: &crate::zk_engine::MigrationStatement,
+        ) {
+            if let Some(trace) = &self.trace {
+                let mut private = trace.private_view.lock().unwrap();
+                assert!(private.is_empty());
+                private.push(party as u8);
+                for bytes in [session, witness, entropy, &keys[0], &keys[1]] {
+                    private.extend_from_slice(bytes);
+                }
+                private.extend_from_slice(&statement.to_transcript_bytes());
+            }
+        }
+        fn fork(&mut self, _batch: usize) -> Option<Self> {
+            if self.children.is_empty() {
+                None
+            } else {
+                Some(self.children.remove(0))
+            }
+        }
+        fn exchange(&mut self, out: [Envelope; 2]) -> Result<[Envelope; 2], Error> {
+            for (s, m) in self.sends.iter().zip(out) {
+                self.record(0, &m);
+                s.send(m).map_err(|_| Error::Transport)?;
+            }
+            let messages = [
+                self.receives[0].recv().map_err(|_| Error::Transport)?,
+                self.receives[1].recv().map_err(|_| Error::Transport)?,
+            ];
+            for m in &messages {
+                self.record(1, m);
+            }
+            Ok(messages)
+        }
+    }
+    pub fn networks() -> [Network; 3] {
+        let mut roots = raw_networks();
+        for _ in 0..crate::zk_engine::MIT_REPETITIONS.div_ceil(64) {
+            for (root, child) in roots.iter_mut().zip(raw_networks()) {
+                root.children.push(child);
+            }
+        }
+        roots
+    }
+    fn raw_networks() -> [Network; 3] {
+        let mut sends: Vec<Vec<Option<Sender<Envelope>>>> =
+            (0..3).map(|_| (0..2).map(|_| None).collect()).collect();
+        let mut receives: Vec<Vec<Option<Receiver<Envelope>>>> =
+            (0..3).map(|_| (0..2).map(|_| None).collect()).collect();
+        for (p, row) in sends.iter_mut().enumerate() {
+            for (i, entry) in row.iter_mut().enumerate() {
+                let (s, r) = mpsc::channel();
+                *entry = Some(s);
+                let peer = (p + if i == 0 { 2 } else { 1 }) % 3;
+                receives[peer][1 - i] = Some(r);
+            }
+        }
+        core::array::from_fn(|p| Network {
+            trace: None,
+            stream: 0,
+            children: Vec::new(),
+            sends: core::array::from_fn(|i| sends[p][i].take().unwrap()),
+            receives: core::array::from_fn(|i| receives[p][i].take().unwrap()),
+        })
+    }
+    pub fn keys(p: usize) -> [[u8; 32]; 2] {
+        [[((p + 2) % 3 + 1) as u8; 32], [(p + 1) as u8; 32]]
+    }
+    pub fn run<F: Fn(usize, Network) + Sync>(f: F) {
+        std::thread::scope(|scope| {
+            for (p, n) in networks().into_iter().enumerate() {
+                let f = &f;
+                scope.spawn(move || f(p, n));
+            }
+        });
+    }
+    pub fn audited_networks() -> [(Network, AuditHandle); 3] {
+        let mut networks = networks().map(Some);
+        core::array::from_fn(|p| {
+            let mut network = networks[p].take().unwrap();
+            let trace = Arc::new(Trace::new(p));
+            for (batch, child) in network.children.iter_mut().enumerate() {
+                child.trace = Some(trace.clone());
+                child.stream = batch + 1;
+            }
+            network.trace = Some(trace.clone());
+            (network, AuditHandle(trace))
+        })
+    }
+
+    pub(crate) fn valid_mac_tag(
+        key: &[u8; 32],
+        session: &[u8; 32],
+        m: &Envelope,
+    ) -> [u8; 32] {
+        let bytes: Vec<u8> = m.payload.iter().flat_map(|w| w.to_le_bytes()).collect();
+        cshake256_framed_32(
+            b"QSAG.OUTER.MESSAGE.V1",
+            &[
+                key,
+                session,
+                &[m.sender as u8, m.recipient as u8],
+                &m.sequence.to_le_bytes(),
+                &bytes,
+            ],
+        )
+    }
+
+    #[test]
+    fn zero_alloc_mac_tag_and_word_sponge_match_reference_across_all_alignments() {
+        let session = [0x42u8; 32];
+        run(|p, n| {
+            let e = Engine::new(p, session, keys(p), n).unwrap();
+            if p == 0 {
+                for len in 0..=300usize {
+                    let payload: Vec<u64> = (0..len)
+                        .map(|i| 0x9e37_79b9_7f4a_7c15u64.wrapping_mul(i as u64 + 1))
+                        .collect();
+                    let seq = 0xfedc_ba98_7654_3210u64.wrapping_add(len as u64);
+                    let fast = e.tag(0, 0, 2, seq, &payload);
+                    let dummy = Envelope {
+                        sender: 0,
+                        recipient: 2,
+                        sequence: seq,
+                        payload,
+                        tag: [0; 32],
+                    };
+                    let reference = valid_mac_tag(&keys(0)[0], &session, &dummy);
+                    assert_eq!(fast, reference, "mismatch at payload len {len}");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn bitsliced_wiedemann_tower_and_gold_ext3_match_field_axioms() {
+        let backend = detect_backend();
+        let mut xof = WordSponge136::from_shake_seed(&[0x77; 32]);
+        let mut a = [0u64; 128];
+        let mut b = [0u64; 128];
+        xof.squeeze_u64s(&mut a);
+        xof.squeeze_u64s(&mut b);
+
+        // 1. Verify `poly128_mul_x` and `poly128_mul_x16` match `gf2_128_mul_portable`.
+        for _ in 0..64 {
+            let elem_u = xof.squeeze_u128();
+            let elem = u128_to_gf128(elem_u);
+            assert_eq!(
+                u128_to_gf128(poly128_mul_x(elem_u)),
+                gf2_128_mul_portable(elem, [2, 0])
+            );
+            assert_eq!(
+                u128_to_gf128(poly128_mul_x16(elem_u)),
+                gf2_128_mul_portable(elem, [1u64 << 16, 0])
+            );
+        }
+
+        // 2. Verify `transpose_pair_bs128_to_lanes` and `transpose_pair_lanes_to_bs128` round-trip.
+        let mut scratch = BitCheckScratch::new_boxed();
+        let mut lanes_a = [[0u64; 2]; 64];
+        let mut lanes_b = [[0u64; 2]; 64];
+        transpose_pair_bs128_to_lanes(&a, &b, &mut lanes_a, &mut lanes_b, &mut scratch.tr_rows);
+        for lane in 0..64 {
+            let mut al = 0u128;
+            let mut bl = 0u128;
+            for bit in 0..128 {
+                al |= (((a[bit] >> lane) & 1) as u128) << bit;
+                bl |= (((b[bit] >> lane) & 1) as u128) << bit;
+            }
+            assert_eq!(lanes_a[lane], u128_to_gf128(al), "lane_a {lane}");
+            assert_eq!(lanes_b[lane], u128_to_gf128(bl), "lane_b {lane}");
+        }
+        let mut rt_a = [0u64; 128];
+        let mut rt_b = [0u64; 128];
+        transpose_pair_lanes_to_bs128(&lanes_a, &lanes_b, &mut rt_a, &mut rt_b, &mut scratch.tr_rows);
+        assert_eq!(rt_a, a);
+        assert_eq!(rt_b, b);
+
+        // 3. Verify `gf2_128_mul_acc_batch_with_backend` and `xor_bs128_by_public` match `gf2_128_mul_portable`.
+        let mut acc_fast = [0u64; 2];
+        gf2_128_mul_acc_batch_with_backend(&mut acc_fast, &lanes_a, &lanes_b, backend);
+        let mut acc_ref = [0u64; 2];
+        for (&la, &lb) in lanes_a.iter().zip(&lanes_b) {
+            acc_ref = xor_gf128(acc_ref, gf2_128_mul_portable(la, lb));
+        }
+        assert_eq!(acc_fast, acc_ref);
+
+        let pub_c = u128_to_gf128(xof.squeeze_u128());
+        let pub_masks = build_public_mul_masks(pub_c);
+        let mut prod_bs = [0u64; 128];
+        xor_bs128_by_public(&a, &pub_masks, &mut scratch.tabs, &mut prod_bs);
+        let mut prod_lanes = [[0u64; 2]; 64];
+        let mut dummy_lanes = [[0u64; 2]; 64];
+        transpose_pair_bs128_to_lanes(
+            &prod_bs,
+            &[0u64; 128],
+            &mut prod_lanes,
+            &mut dummy_lanes,
+            &mut scratch.tr_rows,
+        );
+        for lane in 0..64 {
+            assert_eq!(
+                prod_lanes[lane],
+                gf2_128_mul_portable(lanes_a[lane], pub_c),
+                "xor_bs128_by_public lane {lane}"
+            );
+        }
+
+        // 4. Verify Four-Russians 32-gate evaluation (`eval_public_matrix_128x16` + `xor_public_matrix_128x16`)
+        //    matches per-lane `GF(2^128)` linear combination.
+        let cols_lo: [u128; 16] = core::array::from_fn(|_| xof.squeeze_u128());
+        let cols_hi: [u128; 16] = core::array::from_fn(|_| xof.squeeze_u128());
+        let masks_lo = transpose_cols16_to_u16(&cols_lo);
+        let masks_hi = transpose_cols16_to_u16(&cols_hi);
+        let mut w_lo = [0u64; 16];
+        let mut w_hi = [0u64; 16];
+        w_lo.copy_from_slice(&a[..16]);
+        w_hi.copy_from_slice(&a[16..32]);
+
+        build_public_tabs_16(&w_lo, &mut scratch.tabs);
+        let mut eval_bs = eval_public_matrix_128x16(&masks_lo, &scratch.tabs);
+        build_public_tabs_16(&w_hi, &mut scratch.tabs);
+        xor_public_matrix_128x16(&masks_hi, &scratch.tabs, &mut eval_bs);
+
+        let mut eval_lanes = [[0u64; 2]; 64];
+        transpose_pair_bs128_to_lanes(
+            &eval_bs,
+            &[0u64; 128],
+            &mut eval_lanes,
+            &mut dummy_lanes,
+            &mut scratch.tr_rows,
+        );
+        for (lane, &got) in eval_lanes.iter().enumerate() {
+            let mut expected = 0u128;
+            for (u, &col) in cols_lo.iter().enumerate() {
+                if (w_lo[u] >> lane) & 1 != 0 {
+                    expected ^= col;
+                }
+            }
+            for (u, &col) in cols_hi.iter().enumerate() {
+                if (w_hi[u] >> lane) & 1 != 0 {
+                    expected ^= col;
+                }
+            }
+            assert_eq!(got, u128_to_gf128(expected), "32-gate eval lane {lane}");
+        }
+
+        // 5. Verify `BitCheckScratch::wipe_all` deterministically zeroizes up to `hwm`.
+        scratch.prepare(4);
+        scratch.a_cur[0][0] = [0xdead_beef, 0xcafe_babe];
+        scratch.a_cur[0].truncate(1);
+        scratch.c_claim[0][0] = lanes_a;
+        scratch.wipe_all();
+        assert!(scratch.a_cur[0].is_empty());
+        assert_eq!(scratch.hwm_cur, 0);
+        assert!(scratch.c_claim[0][0].iter().all(|&w| w == [0, 0]));
+
+        // 6. Verify `u^3 - 7` is irreducible over Goldilocks: `3 | (p - 1)` and `7^((p-1)/3) != 1`.
+        let exp = (GOLDILOCKS_P - 1) / 3;
+        assert_eq!(exp * 3, GOLDILOCKS_P - 1);
+        let mut base = 7u64;
+        let mut acc = 1u64;
+        let mut e_rem = exp;
+        while e_rem > 0 {
+            if e_rem & 1 != 0 {
+                acc = gl_mul(acc, base);
+            }
+            base = gl_mul(base, base);
+            e_rem >>= 1;
+        }
+        assert_ne!(acc, 1, "7 must be a cubic non-residue mod Goldilocks p");
+
+        // Verify associativity & distributivity of `GoldExt3`.
+        let x = squeeze_g3_challenge(&mut xof);
+        let y = squeeze_g3_challenge(&mut xof);
+        let z = squeeze_g3_challenge(&mut xof);
+        assert_eq!(g3_mul(g3_mul(x, y), z), g3_mul(x, g3_mul(y, z)));
+        assert_eq!(g3_mul(x, g3_add(y, z)), g3_add(g3_mul(x, y), g3_mul(x, z)));
+    }
+
+    #[test]
+    fn replicated_arithmetic_and_shared_sponge_match_native() {
+        run(|p, n| {
+            let mut e = Engine::new(p, [27; 32], keys(p), n).unwrap();
+            let secret = e
+                .share(&[if p == 0 {
+                    0x5555
+                } else if p == 1 {
+                    0x3333
+                } else {
+                    0xf0f0
+                }])
+                .unwrap();
+            let square = e.and(&[(secret[0], secret[0])]).unwrap();
+            assert_eq!(e.open(&square).unwrap(), vec![0x5555 ^ 0x3333 ^ 0xf0f0]);
+            for d in [Domain::Gold, Domain::Secp, Domain::Ed] {
+                let a = d.sub(d.modulus(), [2, 0, 0, 0]);
+                let b = [0xfedc_ba98_7654_3211, 0, 0, 0];
+                let aa = e.number(a, d.width());
+                let bb = e.number(b, d.width());
+                let scale = d.sub(d.modulus(), [1, 0, 0, 0]);
+                for operation in 0..4 {
+                    let out = match operation {
+                        0 => e.field_add(&aa, &bb, d),
+                        1 => e.field_sub(&aa, &bb, d),
+                        2 => e.field_mul(&aa, &bb, d),
+                        _ => e.field_scale(&aa, scale, d),
+                    }
+                    .unwrap();
+                    let expected = match operation {
+                        0 => d.add(a, b),
+                        1 => d.sub(a, b),
+                        2 => d.mul(a, b),
+                        _ => d.mul(a, scale),
+                    };
+                    let clear = e.open(&out).unwrap();
+                    for (i, &bit) in clear.iter().enumerate() {
+                        assert_eq!(
+                            bit,
+                            if (expected[i / 64] >> (i % 64)) & 1 != 0 {
+                                u64::MAX
+                            } else {
+                                0
+                            },
+                            "domain {d:?}, operation {operation}, bit {i}"
+                        );
+                    }
+                }
+            }
+            let mut s = Sponge::cshake(&mut e, b"test").unwrap();
+            s.public(&mut e, &1u64.to_le_bytes()).unwrap();
+            s.public(&mut e, &3u64.to_le_bytes()).unwrap();
+            s.public(&mut e, b"abc").unwrap();
+            s.finalize(&mut e, 4).unwrap();
+            let hash = s.squeeze(&mut e, 256).unwrap();
+            assert_eq!(
+                lane_bytes(&e.open(&hash).unwrap(), 0),
+                cshake256_framed_32(b"test", &[b"abc"])
+            );
+        });
+    }
+
+    #[test]
+    fn arithmetic_matches_native_over_independent_lanes() {
+        run(|p, n| {
+            let mut e = Engine::new(p, [28; 32], keys(p), n).unwrap();
+            for d in [Domain::Gold, Domain::Secp, Domain::Ed] {
+                let values: Vec<[Value; 2]> = (0..64u8)
+                    .map(|lane| {
+                        core::array::from_fn(|side| {
+                            let bytes =
+                                cshake256_framed_32(b"OUTER.FIELD.TEST", &[&[lane, side as u8]]);
+                            let mut value = crate::scalar::decode(&bytes);
+                            if d == Domain::Gold {
+                                value = [value[0] >> 1, 0, 0, 0];
+                            } else {
+                                value[3] >>= 2;
+                            }
+                            value
+                        })
+                    })
+                    .collect();
+                let operands: [Word; 2] = core::array::from_fn(|side| {
+                    (0..d.width())
+                        .map(|bit| {
+                            e.constant(values.iter().enumerate().fold(0, |mask, (lane, v)| {
+                                mask | (((v[side][bit / 64] >> (bit % 64)) & 1) << lane)
+                            }))
+                        })
+                        .collect()
+                });
+                for operation in 0..4 {
+                    let out = match operation {
+                        0 => e.field_add(&operands[0], &operands[1], d),
+                        1 => e.field_sub(&operands[0], &operands[1], d),
+                        2 => e.field_mul(&operands[0], &operands[1], d),
+                        _ => e.field_scale(&operands[0], [27, 0, 0, 0], d),
+                    }
+                    .unwrap();
+                    let clear = e.open(&out).unwrap();
+                    for (lane, v) in values.iter().enumerate() {
+                        let expected = match operation {
+                            0 => d.add(v[0], v[1]),
+                            1 => d.sub(v[0], v[1]),
+                            2 => d.mul(v[0], v[1]),
+                            _ => d.mul(v[0], [27, 0, 0, 0]),
+                        };
+                        for (bit, &word) in clear.iter().enumerate() {
+                            assert_eq!((word >> lane) & 1, (expected[bit / 64] >> (bit % 64)) & 1);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn masked_field_conversions_and_products_match_all_lanes() {
+        run(|p, n| {
+            let mut e = Engine::new(p, [61; 32], keys(p), n).unwrap();
+            for d in [Domain::Gold, Domain::Secp, Domain::Ed] {
+                let values: Vec<[Value; 2]> = (0..64u8)
+                    .map(|lane| {
+                        core::array::from_fn(|side| {
+                            let mut value = crate::scalar::decode(&cshake256_framed_32(
+                                b"OUTER.CONVERT.TEST",
+                                &[&[lane, side as u8]],
+                            ));
+                            if d == Domain::Gold {
+                                value = [value[0] >> 1, 0, 0, 0];
+                            } else {
+                                value[3] >>= 2;
+                            }
+                            value
+                        })
+                    })
+                    .collect();
+                let bits: [Word; 2] = core::array::from_fn(|side| {
+                    (0..d.width())
+                        .map(|bit| {
+                            e.constant(values.iter().enumerate().fold(0, |v, (lane, x)| {
+                                v | (((x[side][bit / 64] >> (bit % 64)) & 1) << lane)
+                            }))
+                        })
+                        .collect()
+                });
+                let a = e.bits_to_field(&bits[0], d).unwrap();
+                let b = e.bits_to_field(&bits[1], d).unwrap();
+                let product = e.fmul(&a, &b, d).unwrap();
+                let outputs = [
+                    e.fadd(&a, &b, d),
+                    e.fsub(&a, &b, d),
+                    product,
+                    e.fscale(&a, [27, 0, 0, 0], d),
+                ];
+                for (op, output) in outputs.iter().enumerate() {
+                    let encoded = e.field_to_bits(output, d).unwrap();
+                    let clear = e.open(&encoded).unwrap();
+                    for (lane, x) in values.iter().enumerate() {
+                        let expected = match op {
+                            0 => d.add(x[0], x[1]),
+                            1 => d.sub(x[0], x[1]),
+                            2 => d.mul(x[0], x[1]),
+                            _ => d.mul(x[0], [27, 0, 0, 0]),
+                        };
+                        for (bit, word) in clear.iter().enumerate() {
+                            assert_eq!((word >> lane) & 1, (expected[bit / 64] >> (bit % 64)) & 1);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn authentication_rejects_altered_envelope() {
+        struct Tamper(Network, bool);
+        impl Transport for Tamper {
+            fn exchange(&mut self, mut out: [Envelope; 2]) -> Result<[Envelope; 2], Error> {
+                if self.1 {
+                    out[0].tag[0] ^= 1;
+                }
+                self.0.exchange(out)
+            }
+        }
+        run(|p, n| {
+            let mut e = Engine::new(p, [7; 32], keys(p), Tamper(n, p == 0)).unwrap();
+            let result = e.share(&[123]);
+            if p == 2 {
+                assert!(matches!(result, Err(Error::Authentication(0))));
+            } else {
+                assert!(result.is_ok());
+            }
+        });
+    }
+
+    #[test]
+    fn active_one_bit_boolean_and_fault_with_valid_mac_aborts_before_any_wire_opens() {
+        struct CorruptBoolReshare {
+            inner: Network,
+            is_corrupt: bool,
+            target_seq: u64,
+            key0: [u8; 32],
+            session: [u8; 32],
+            exchanges_after_check: Arc<AtomicUsize>,
+            check_finished: Arc<AtomicBool>,
+        }
+        impl Transport for CorruptBoolReshare {
+            fn exchange(&mut self, mut out: [Envelope; 2]) -> Result<[Envelope; 2], Error> {
+                if self.check_finished.load(Ordering::SeqCst) {
+                    self.exchanges_after_check.fetch_add(1, Ordering::SeqCst);
+                }
+                if self.is_corrupt && out[0].sequence == self.target_seq {
+                    // Flip exactly 1 bit in lane 37 of gate 19 and sign a valid MAC.
+                    out[0].payload[19] ^= 1u64 << 37;
+                    out[0].tag = valid_mac_tag(&self.key0, &self.session, &out[0]);
+                }
+                self.inner.exchange(out)
+            }
+        }
+
+        for corrupt_p in 0..3 {
+            let session = [0x91 + corrupt_p as u8; 32];
+            let after_check: [Arc<AtomicUsize>; 3] =
+                core::array::from_fn(|_| Arc::new(AtomicUsize::new(0)));
+            let flags: [Arc<AtomicBool>; 3] =
+                core::array::from_fn(|_| Arc::new(AtomicBool::new(false)));
+
+            run(|p, n| {
+                let transport = CorruptBoolReshare {
+                    inner: n,
+                    is_corrupt: p == corrupt_p,
+                    // seq 0 = share(x), seq 1 = share(y), seq 2 = `and` resharing!
+                    target_seq: 2,
+                    key0: keys(p)[0],
+                    session,
+                    exchanges_after_check: after_check[p].clone(),
+                    check_finished: flags[p].clone(),
+                };
+                let mut e = Engine::new(p, session, keys(p), transport).unwrap();
+                let x = e
+                    .share(&vec![0xdead_beef_cafe_babeu64.wrapping_add(p as u64); 33])
+                    .unwrap();
+                let y = e
+                    .share(&vec![0x0123_4567_89ab_cdefu64.wrapping_mul(p as u64 + 3); 33])
+                    .unwrap();
+                let pairs: Vec<_> = x.iter().copied().zip(y.iter().copied()).collect();
+                let z = e.and(&pairs).unwrap();
+
+                // Attempt to open `z`: pre-open check must fail before `open_raw_bits(&z)` runs.
+                let res = e.open(&z);
+                flags[p].store(true, Ordering::SeqCst);
+                if p != corrupt_p {
+                    assert_eq!(
+                        res,
+                        Err(Error::MultiplicationCheck),
+                        "honest custodian {p} must abort with MultiplicationCheck when {corrupt_p} cheats"
+                    );
+                    // Engine is poisoned: subsequent open attempts must fail with 0 network messages.
+                    assert_eq!(e.open(&x), Err(Error::MultiplicationCheck));
+                    assert_eq!(after_check[p].load(Ordering::SeqCst), 0);
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn active_one_limb_prime_field_fault_with_valid_mac_aborts_before_a2b_and_b2a_openings() {
+        struct CorruptFieldReshare {
+            inner: Network,
+            is_corrupt: bool,
+            corrupted_once: bool,
+            domain: Domain,
+            key0: [u8; 32],
+            session: [u8; 32],
+            opened_masked_diff: Arc<AtomicBool>,
+        }
+        impl Transport for CorruptFieldReshare {
+            fn exchange(&mut self, mut out: [Envelope; 2]) -> Result<[Envelope; 2], Error> {
+                // `fmul` resharing has 256 `u64`s to peer 0 and 0 `u64`s to peer 1.
+                if self.is_corrupt
+                    && !self.corrupted_once
+                    && out[0].payload.len() == 256
+                    && out[1].payload.is_empty()
+                {
+                    self.corrupted_once = true;
+                    // Add 1 modulo `p` to lane 13's share so it remains 100% canonical `< p`
+                    // AND carries a valid pairwise MAC!
+                    let off = 13 * 4;
+                    let cur: Value = out[0].payload[off..off + 4].try_into().unwrap();
+                    let bad = self.domain.add(cur, [1, 0, 0, 0]);
+                    out[0].payload[off..off + 4].copy_from_slice(&bad);
+                    out[0].tag = valid_mac_tag(&self.key0, &self.session, &out[0]);
+                }
+                // Detect if `fopen_many` (`512` `u64`s to both peers) or `open` of A2B/B2A delta
+                // (`d.width() * 2` `u64`s: `128`, `510`, or `512` `u64`s) ever gets transmitted!
+                let len0 = out[0].payload.len();
+                let len1 = out[1].payload.len();
+                let is_conversion_delta_open =
+                    len0 == len1 && (len0 == 512 || len0 == 510 || len0 == 128);
+                if is_conversion_delta_open {
+                    self.opened_masked_diff.store(true, Ordering::SeqCst);
+                }
+                self.inner.exchange(out)
+            }
+        }
+
+        for d in [Domain::Gold, Domain::Secp, Domain::Ed] {
+            for a2b in [true, false] {
+                for corrupt_p in 0..3 {
+                    let session = [0xa0 + (corrupt_p as u8) * 7 + u8::from(a2b); 32];
+                    let leaked: [Arc<AtomicBool>; 3] =
+                        core::array::from_fn(|_| Arc::new(AtomicBool::new(false)));
+
+                    run(|p, n| {
+                        let transport = CorruptFieldReshare {
+                            inner: n,
+                            is_corrupt: p == corrupt_p,
+                            corrupted_once: false,
+                            domain: d,
+                            key0: keys(p)[0],
+                            session,
+                            opened_masked_diff: leaked[p].clone(),
+                        };
+                        let mut e = Engine::new(p, session, keys(p), transport).unwrap();
+                        let a = e.fconstant([7, 0, 0, 0]);
+                        let b = e.fconstant([11, 0, 0, 0]);
+                        let bad_prod = e.fmul(&a, &b, d).unwrap();
+
+                        let res = if a2b {
+                            // A2B (`field_to_bits`): must abort BEFORE `v - r` (`512` `u64`s) opens!
+                            e.field_to_bits(&bad_prod, d).map(|_| ())
+                        } else {
+                            // B2A (`bits_to_field`): pending `fmul` fault must abort BEFORE `v - r` opens!
+                            let dummy_bits = e.number([5, 0, 0, 0], d.width());
+                            e.bits_to_field(&dummy_bits, d).map(|_| ())
+                        };
+                        if p != corrupt_p {
+                            assert_eq!(
+                                res,
+                                Err(Error::MultiplicationCheck),
+                                "domain {d:?}, a2b={a2b}, honest {p}, corrupt {corrupt_p}"
+                            );
+                            assert!(
+                                !leaked[p].load(Ordering::SeqCst),
+                                "honest custodian {p} must NEVER open masked A2B/B2A delta on failure!"
+                            );
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn consistent_share_additive_faults_are_caught_by_bbcggi19_check_with_zero_wire_openings() {
+        struct ConsistentFaultTransport {
+            inner: Network,
+            fault: Option<FaultInjection>,
+            wire_opened: Arc<AtomicBool>,
+        }
+        impl Transport for ConsistentFaultTransport {
+            fn test_fault_raw(&self) -> Option<[usize; 4]> {
+                self.fault.map(FaultInjection::to_raw)
+            }
+            fn exchange(&mut self, out: [Envelope; 2]) -> Result<[Envelope; 2], Error> {
+                let len0 = out[0].payload.len();
+                let len1 = out[1].payload.len();
+                // Detect any opening of secret wires (`33 * 2 = 66` u64s) or A2B/B2A deltas (`128`, `510`, `512`).
+                if len0 == len1 && matches!(len0, 66 | 128 | 510 | 512) {
+                    self.wire_opened.store(true, Ordering::SeqCst);
+                }
+                self.inner.exchange(out)
+            }
+        }
+
+        // 1. Consistent 1-bit Boolean `AND` additive fault (`z = (x & y) ^ (1 << 37)`):
+        //    All MACs, edge transcripts, and replicated share consistency checks pass;
+        //    ONLY the `GF(2^128)` BBCGGI19 algebraic sacrifice check catches this fault!
+        for corrupt_p in 0..3 {
+            let session = [0xb1 + corrupt_p as u8; 32];
+            let leaked: [Arc<AtomicBool>; 3] =
+                core::array::from_fn(|_| Arc::new(AtomicBool::new(false)));
+            run(|p, n| {
+                let transport = ConsistentFaultTransport {
+                    inner: n,
+                    fault: (p == corrupt_p).then_some(FaultInjection::BitAnd {
+                        call_countdown: 0,
+                        gate: 19,
+                        lane: 37,
+                    }),
+                    wire_opened: leaked[p].clone(),
+                };
+                let mut e = Engine::new(p, session, keys(p), transport).unwrap();
+                let x = e.share(&vec![0xaaaa_5555_f0f0_0f0fu64; 33]).unwrap();
+                let y = e.share(&vec![0x1234_5678_9abc_def0u64; 33]).unwrap();
+                let pairs: Vec<_> = x.iter().copied().zip(y.iter().copied()).collect();
+                let z = e.and(&pairs).unwrap();
+                assert_eq!(e.open(&z), Err(Error::MultiplicationCheck));
+                assert!(!leaked[p].load(Ordering::SeqCst));
+            });
+        }
+
+        // 2. Consistent 1-limb prime-field `fmul` additive fault (`z = x * y + 1 mod p`)
+        //    across `Gold` (`GF(p^3)`), `Secp`, and `Ed` before A2B and B2A openings!
+        for d in [Domain::Gold, Domain::Secp, Domain::Ed] {
+            for a2b in [true, false] {
+                for corrupt_p in 0..3 {
+                    let session = [0xc0 + (corrupt_p as u8) * 5 + u8::from(a2b); 32];
+                    let leaked: [Arc<AtomicBool>; 3] =
+                        core::array::from_fn(|_| Arc::new(AtomicBool::new(false)));
+                    run(|p, n| {
+                        let transport = ConsistentFaultTransport {
+                            inner: n,
+                            fault: (p == corrupt_p).then_some(FaultInjection::FieldMul {
+                                domain: d,
+                                call_countdown: 0,
+                                lane: 29,
+                            }),
+                            wire_opened: leaked[p].clone(),
+                        };
+                        let mut e = Engine::new(p, session, keys(p), transport).unwrap();
+                        let a = e.fconstant([13, 0, 0, 0]);
+                        let b = e.fconstant([17, 0, 0, 0]);
+                        let bad_prod = e.fmul(&a, &b, d).unwrap();
+                        let res = if a2b {
+                            e.field_to_bits(&bad_prod, d).map(|_| ())
+                        } else {
+                            let dummy_bits = e.number([9, 0, 0, 0], d.width());
+                            e.bits_to_field(&dummy_bits, d).map(|_| ())
+                        };
+                        assert_eq!(res, Err(Error::MultiplicationCheck));
+                        assert!(!leaked[p].load(Ordering::SeqCst));
+                    });
+                }
+            }
+        }
+    }
+}

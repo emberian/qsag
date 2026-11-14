@@ -1001,3 +1001,1006 @@ fn evaluate_inner<T: Transport>(
                     SharedValue::zero(d),
                 ],
                 Op::Input => {
+                    let NodeTape::InputBit { witness_idx, pos } = node_tapes[idx] else {
+                        unreachable!()
+                    };
+                    let a = squeezed[0][pos[0]];
+                    let b = squeezed[1][pos[1]];
+                    let secret = witness[witness_idx];
+                    [
+                        SharedValue::Bit(a),
+                        SharedValue::Bit(b),
+                        SharedValue::Bit(secret ^ a ^ b),
+                    ]
+                }
+                Op::Add(a, b) | Op::Sub(a, b) => {
+                    let wa = wires[a].as_ref().unwrap();
+                    let wb = wires[b].as_ref().unwrap();
+                    core::array::from_fn(|head| {
+                        if d == Domain::Bit {
+                            SharedValue::Bit(wa[head].bit() ^ wb[head].bit())
+                        } else if matches!(node.op, Op::Add(..)) {
+                            SharedValue::Field(e.fadd(wa[head].field(), wb[head].field(), d))
+                        } else {
+                            SharedValue::Field(e.fsub(wa[head].field(), wb[head].field(), d))
+                        }
+                    })
+                }
+                Op::Scale(a, value) => {
+                    let wa = wires[a].as_ref().unwrap();
+                    core::array::from_fn(|head| {
+                        if d == Domain::Bit {
+                            SharedValue::Bit(if value[0] == 0 {
+                                Bit::default()
+                            } else {
+                                wa[head].bit()
+                            })
+                        } else {
+                            SharedValue::Field(e.fscale(wa[head].field(), value, d))
+                        }
+                    })
+                }
+                Op::Lift(_, _) | Op::Digit(_, _, _) | Op::Mul(_, _) => unreachable!(),
+            };
+            wires[idx] = Some(val);
+        }
+        for &dead in &retire_at_wave[w] {
+            wires[dead] = None;
+        }
+    }
+
+    // 5g. Mandatory in-MPC output-residual zero check (`P0-1`): verify that every
+    // Boolean and prime-field output residual reconstructs to `0` across all 3 ZKBoo
+    // heads BEFORE converting views or opening any output shares / view commitments.
+    if verify_zero_outputs {
+        let mut residual_bits: Vec<Bit> = Vec::new();
+        for &out in &c.outputs {
+            if c.nodes[out].domain == Domain::Bit {
+                let w = wires[out].as_ref().unwrap();
+                residual_bits.push(w[0].bit() ^ w[1].bit() ^ w[2].bit());
+            }
+        }
+        for dom in [Domain::Gold, Domain::Secp, Domain::Ed] {
+            let mut sums: Vec<FieldWord> = Vec::new();
+            for &out in &c.outputs {
+                if c.nodes[out].domain == dom {
+                    let w = wires[out].as_ref().unwrap();
+                    let s01 = e.fadd(w[0].field(), w[1].field(), dom);
+                    sums.push(e.fadd(&s01, w[2].field(), dom));
+                }
+            }
+            if !sums.is_empty() {
+                let refs: Vec<&FieldWord> = sums.iter().collect();
+                let converted = e.field_to_bits_many(&refs, dom)?;
+                for fw in &mut sums {
+                    for pair in fw {
+                        ct_zeroize_u64s(&mut pair[0]);
+                        ct_zeroize_u64s(&mut pair[1]);
+                    }
+                }
+                for word in converted {
+                    residual_bits.extend(word);
+                }
+            }
+        }
+        let ones = e.constant(u64::MAX);
+        let zero_flags: Vec<Bit> = residual_bits.into_iter().map(|b| b ^ ones).collect();
+        let all_outputs_zero = fold_all_true_bits(e, zero_flags)?;
+        // Explicitly verify all circuit, conversion, and tree-AND multiplications
+        // BEFORE opening the single 1-bit `all_outputs_zero` predicate.
+        e.verify_all_pending()?;
+        let opened_ok = e.open(&[all_outputs_zero])?;
+        if opened_ok[0] != u64::MAX {
+            for rw in &mut raw_draw_words {
+                for b in rw {
+                    ct_zeroize_u64s(&mut b.0);
+                }
+            }
+            return Err(Error::InvalidProof);
+        }
+    }
+
+    // 6. Batch-convert all remaining `FieldWord`s needed for `views[0..3]` per domain.
+    for dom in [Domain::Gold, Domain::Secp, Domain::Ed] {
+        let mut to_convert_pairs: Vec<(usize, usize)> = Vec::new();
+        for (idx, node) in c.nodes.iter().enumerate() {
+            if node.domain != dom {
+                continue;
+            }
+            match node.op {
+                Op::Input => {
+                    if encodings[idx][2].is_none() {
+                        to_convert_pairs.push((idx, 2));
+                    }
+                }
+                Op::Mul(_, _) => {
+                    for (head, slot) in encodings[idx].iter().enumerate() {
+                        if slot.is_none() {
+                            to_convert_pairs.push((idx, head));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for &out in &c.outputs {
+            if c.nodes[out].domain == dom {
+                for (head, slot) in encodings[out].iter().enumerate() {
+                    if slot.is_none() && !to_convert_pairs.contains(&(out, head)) {
+                        to_convert_pairs.push((out, head));
+                    }
+                }
+            }
+        }
+        if !to_convert_pairs.is_empty() {
+            let refs: Vec<&FieldWord> = to_convert_pairs
+                .iter()
+                .map(|&(idx, head)| wires[idx].as_ref().unwrap()[head].field())
+                .collect();
+            let converted = e.field_to_bits_many(&refs, dom)?;
+            for ((idx, head), bits_w) in to_convert_pairs.into_iter().zip(converted) {
+                encodings[idx][head] = Some(bits_w);
+            }
+        }
+    }
+
+    // 7. Assemble `SharedView`s in exact `c.nodes` / `c.outputs` topological order.
+    let mut views: Vec<SharedView> = seeds
+        .iter()
+        .map(|seed| SharedView {
+            seed: seed.clone(),
+            inputs: Vec::new(),
+            products: Vec::new(),
+            outputs: Vec::new(),
+        })
+        .collect();
+
+    for (idx, node) in c.nodes.iter().enumerate() {
+        let d = node.domain;
+        match node.op {
+            Op::Input => {
+                if d == Domain::Bit {
+                    let w = wires[idx].as_ref().unwrap();
+                    for head in 0..3 {
+                        outer_mpc::encode(&mut views[head].inputs, &[w[head].bit()]);
+                    }
+                } else {
+                    let NodeTape::InputField { draws, .. } = node_tapes[idx] else {
+                        unreachable!()
+                    };
+                    outer_mpc::encode(&mut views[0].inputs, &raw_draw_words[draws[0]]);
+                    outer_mpc::encode(&mut views[1].inputs, &raw_draw_words[draws[1]]);
+                    outer_mpc::encode(
+                        &mut views[2].inputs,
+                        encodings[idx][2].as_ref().unwrap(),
+                    );
+                }
+            }
+            Op::Mul(_, _) => {
+                if d == Domain::Bit {
+                    let w = wires[idx].as_ref().unwrap();
+                    for head in 0..3 {
+                        outer_mpc::encode(&mut views[head].products, &[w[head].bit()]);
+                    }
+                } else {
+                    for head in 0..3 {
+                        outer_mpc::encode(
+                            &mut views[head].products,
+                            encodings[idx][head].as_ref().unwrap(),
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for &out in &c.outputs {
+        let d = c.nodes[out].domain;
+        if d == Domain::Bit {
+            let w = wires[out].as_ref().unwrap();
+            for head in 0..3 {
+                outer_mpc::encode(&mut views[head].outputs, &[w[head].bit()]);
+            }
+        } else {
+            for head in 0..3 {
+                outer_mpc::encode(
+                    &mut views[head].outputs,
+                    encodings[out][head].as_ref().unwrap(),
+                );
+            }
+        }
+    }
+
+    for rw in &mut raw_draw_words {
+        for b in rw {
+            ct_zeroize_u64s(&mut b.0);
+        }
+    }
+
+    Ok(views)
+}
+
+/// Compute the 256-bit `cSHAKE256("QSAG.MIGRATE.VIEW.V3")` view commitment shares
+/// for all 3 virtual heads in lockstep (`3x` fewer network rounds than sequential
+/// sponges, `0` rounds for the public customization block, and `0` wire openings).
+fn compute_view_commit_bits<T: Transport>(
+    e: &mut Engine<T>,
+    batch: usize,
+    views: &[SharedView],
+) -> Result<[Word; 3], Error> {
+    let rep: Word = (0..64)
+        .map(|bit| {
+            e.constant((0..64).fold(0, |v, lane| {
+                v | ((((batch * 64 + lane) as u64 >> bit) & 1) << lane)
+            }))
+        })
+        .collect();
+    let count6 = outer_mpc::public_bytes(e, &6u64.to_le_bytes());
+
+    let mut sponges: [Sponge; 3] =
+        core::array::from_fn(|_| Sponge::cshake_public(e, b"QSAG.MIGRATE.VIEW.V3"));
+    let streams: [Word; 3] = core::array::from_fn(|head| {
+        let head_bits = outer_mpc::public_bytes(e, &[head as u8]);
+        let frames: [&[Bit]; 6] = [
+            &rep,
+            &head_bits,
+            &views[head].seed,
+            &views[head].inputs,
+            &views[head].products,
+            &views[head].outputs,
+        ];
+        let total_bits = count6.len() + frames.iter().map(|f| 64 + f.len()).sum::<usize>();
+        let mut s = Vec::with_capacity(total_bits);
+        s.extend_from_slice(&count6);
+        for frame in frames {
+            let len_bits = outer_mpc::public_bytes(e, &((frame.len() / 8) as u64).to_le_bytes());
+            s.extend_from_slice(&len_bits);
+            s.extend_from_slice(frame);
+        }
+        s
+    });
+
+    debug_assert_eq!(streams[0].len(), streams[1].len());
+    debug_assert_eq!(streams[0].len(), streams[2].len());
+
+    let total_len = streams[0].len();
+    let mut offset = 0usize;
+    while offset < total_len {
+        let pos = sponges[0].pos;
+        let take = (1088 - pos).min(total_len - offset);
+        for h in 0..3 {
+            for i in 0..take {
+                sponges[h].state[pos + i] = sponges[h].state[pos + i] ^ streams[h][offset + i];
+            }
+            sponges[h].pos = pos + take;
+        }
+        offset += take;
+        if sponges[0].pos == 1088 {
+            for sp in &mut sponges {
+                sp.pos = 0;
+            }
+            let (s0, rest) = sponges.split_first_mut().unwrap();
+            let (s1, rest2) = rest.split_first_mut().unwrap();
+            let s2 = &mut rest2[0];
+            e.permutations(&mut [&mut s0.state, &mut s1.state, &mut s2.state])?;
+        }
+    }
+
+    for sp in &mut sponges {
+        sp.pad_only(e, 0x04);
+    }
+    {
+        let (s0, rest) = sponges.split_first_mut().unwrap();
+        let (s1, rest2) = rest.split_first_mut().unwrap();
+        let s2 = &mut rest2[0];
+        e.permutations(&mut [&mut s0.state, &mut s1.state, &mut s2.state])?;
+    }
+
+    Ok(core::array::from_fn(|h| sponges[h].state[..256].to_vec()))
+}
+
+#[cfg(test)]
+fn commit_views<T: Transport>(
+    e: &mut Engine<T>,
+    batch: usize,
+    views: &[SharedView],
+) -> Result<Vec<Vec<u64>>, Error> {
+    let bits = compute_view_commit_bits(e, batch, views)?;
+    bits.iter().map(|b| e.open(b)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+    use super::*;
+    use crate::{
+        circuit::Builder,
+        legacy::LegacyOwnershipWitness,
+        outer_mpc::{
+            FaultInjection,
+            tests::{Network, audited_networks, keys, run},
+        },
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    // Run the concrete former XOR attack with the live custody state, outer
+    // input replicas and actual verified published proof available. This is a
+    // regression for that attack, not an exhaustive adversarial computation.
+    pub(super) fn audit_old_attack<T: Transport>(
+        state: &CoZkCustodianShare,
+        engine: &Engine<T>,
+        physical_input: &[Bit],
+        inputs: &[[Word; 3]],
+        proof: &MigrationZkProof,
+    ) {
+        let Some((messages, words)) = engine.transport.audit_transcript() else {
+            return;
+        };
+        let mut candidates = Vec::with_capacity(MIT_REPETITIONS * 3);
+        assert_eq!(state.party, engine.party);
+        assert_eq!(physical_input.len(), 256);
+        assert!(messages > 0 && words > 0);
+        for (rep, opening) in proof.repetitions.iter().enumerate() {
+            let e = opening.opened_e as usize;
+            let hidden = (e + 2) % 3;
+            let lane = rep % 64;
+            for components in [1, 2, 3] {
+                let partial: Vec<_> = inputs[rep / 64][hidden]
+                    .iter()
+                    .map(|b| match components {
+                        1 => b.0[0],
+                        2 => b.0[1],
+                        _ => b.0[0] ^ b.0[1],
+                    })
+                    .collect();
+                let local = outer_mpc::lane_bytes(&partial, lane);
+                let mut recovered = [0u8; 32];
+                for bit in 0..256 {
+                    recovered[bit / 8] |=
+                        (local[bit] ^ opening.pair[0].inputs[bit] ^ opening.pair[1].inputs[bit])
+                            << (bit % 8);
+                }
+                candidates.push(recovered);
+            }
+            if e != state.party {
+                let locals: [[Vec<u8>; 3]; 2] = core::array::from_fn(|j| {
+                    core::array::from_fn(|mask| {
+                        let partial: Vec<_> = inputs[rep / 64][(state.party + j) % 3]
+                            .iter()
+                            .map(|b| match mask {
+                                0 => b.0[0],
+                                1 => b.0[1],
+                                _ => b.0[0] ^ b.0[1],
+                            })
+                            .collect();
+                        outer_mpc::lane_bytes(&partial, lane)
+                    })
+                });
+                let missing = (state.party + 2) % 3;
+                let published = &opening.pair[usize::from(e != missing)].inputs;
+                for a in &locals[0] {
+                    for b in &locals[1] {
+                        let mut recovered = [0u8; 32];
+                        for bit in 0..256 {
+                            recovered[bit / 8] |= (a[bit] ^ b[bit] ^ published[bit]) << (bit % 8);
+                        }
+                        candidates.push(recovered);
+                    }
+                }
+            }
+            for view in &opening.pair {
+                let mut recovered = [0u8; 32];
+                for bit in 0..256 {
+                    let local = ((physical_input[bit].0[0] ^ physical_input[bit].0[1]) >> lane) & 1;
+                    recovered[bit / 8] |= ((local as u8) ^ view.inputs[bit]) << (bit % 8);
+                }
+                candidates.push(recovered);
+            }
+        }
+        engine.transport.audit_candidates(candidates);
+    }
+
+    #[test]
+    fn shared_views_and_commitments_are_byte_identical_to_native() {
+        run(|p, n| {
+            let mut e = Engine::new(p, [51; 32], keys(p), n).unwrap();
+            let c = Builder::default();
+            let bit = c.input(1);
+            for d in [Domain::Gold, Domain::Secp, Domain::Ed] {
+                let a = c.lift(bit, d);
+                let b = c.add(a, c.small(d, 27));
+                let z = c.mul(a, b);
+                c.output(z);
+                if d == Domain::Gold {
+                    let inverse = c.inverse(z);
+                    c.output(inverse);
+                }
+                for b in c.bits(z) {
+                    c.output(b);
+                }
+            }
+            let c = c.finish();
+            let witness = e.share(&[if p == 0 { u64::MAX } else { 0 }]).unwrap();
+            let seeds: Vec<_> = (0..3)
+                .map(|head| {
+                    e.share(
+                        &(0..256)
+                            .map(|i| {
+                                if ((p + head + 1) >> (i % 8)) & 1 != 0 {
+                                    u64::MAX
+                                } else {
+                                    0
+                                }
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                    .unwrap()
+                })
+                .collect();
+            let views = evaluate(&mut e, &c, &witness, &seeds).unwrap();
+            let commitments = commit_views(&mut e, 0, &views).unwrap();
+            let clear_seeds: Vec<[u8; 32]> = seeds
+                .iter()
+                .map(|s| {
+                    outer_mpc::lane_bytes(&e.open(s).unwrap(), 0)
+                        .try_into()
+                        .unwrap()
+                })
+                .collect();
+            let native = zk_engine::simulate(&c, clear_seeds.try_into().unwrap());
+            for (head, view) in views.iter().enumerate() {
+                let bytes = outer_mpc::lane_bytes(&e.open(&view.bytes()).unwrap(), 0);
+                let expected: Vec<_> = [
+                    native[head].seed.as_slice(),
+                    &native[head].inputs,
+                    &native[head].products,
+                    &native[head].outputs,
+                ]
+                .concat();
+                assert_eq!(bytes, expected);
+                for lane in 0..64 {
+                    assert_eq!(
+                        outer_mpc::lane_bytes(&commitments[head], lane),
+                        zk_engine::commit(lane, head, &native[head])
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn published_pairs_do_not_complete_local_outer_shares_over_64_witnesses() {
+        let witnesses: Vec<_> = (0..64u64)
+            .map(|i| cshake256_framed_32(b"OUTER.PRIVACY.WITNESS", &[&i.to_le_bytes()]))
+            .collect();
+        run(|p, n| {
+            let mut e = Engine::new(p, [53; 32], keys(p), n).unwrap();
+            let c = Builder::default();
+            for _ in 0..256 {
+                c.input(0);
+            }
+            let c = c.finish();
+            let own: Vec<_> = (0..256)
+                .map(|i| {
+                    (0..64).fold(0, |v, lane| {
+                        let a = cshake256_framed_32(b"OUTER.PRIVACY.SHARE", &[&[0, lane as u8]]);
+                        let b = cshake256_framed_32(b"OUTER.PRIVACY.SHARE", &[&[1, lane as u8]]);
+                        let x = match p {
+                            0 => a[i / 8],
+                            1 => b[i / 8],
+                            _ => witnesses[lane][i / 8] ^ a[i / 8] ^ b[i / 8],
+                        };
+                        v | ((((x >> (i % 8)) & 1) as u64) << lane)
+                    })
+                })
+                .collect();
+            let witness = e.share(&own).unwrap();
+            let seeds: Vec<_> = (0..3u8)
+                .map(|head| {
+                    let own: Vec<_> = (0..256)
+                        .map(|i| {
+                            (0..64).fold(0, |v, lane| {
+                                let seed = cshake256_framed_32(
+                                    b"OUTER.PRIVACY.SEED",
+                                    &[&[p as u8, head, lane as u8]],
+                                );
+                                v | ((((seed[i / 8] >> (i % 8)) & 1) as u64) << lane)
+                            })
+                        })
+                        .collect();
+                    e.share(&own).unwrap()
+                })
+                .collect();
+            let views = evaluate(&mut e, &c, &witness, &seeds).unwrap();
+            let published: Vec<_> = views
+                .iter()
+                .enumerate()
+                .map(|(head, v)| {
+                    let mask = (0..64).fold(0, |m, lane| {
+                        if (lane % 3 + 2) % 3 != head {
+                            m | (1u64 << lane)
+                        } else {
+                            m
+                        }
+                    });
+                    let bits: Word = v
+                        .inputs
+                        .iter()
+                        .map(|b| Bit([b.0[0] & mask, b.0[1] & mask]))
+                        .collect();
+                    e.open(&bits).unwrap()
+                })
+                .collect();
+            for (lane, expected) in witnesses.iter().enumerate() {
+                let hidden = (lane % 3 + 2) % 3;
+                for components in [1u8, 2, 3] {
+                    let partial: Vec<_> = views[hidden]
+                        .inputs
+                        .iter()
+                        .map(|b| {
+                            if components == 1 {
+                                b.0[0]
+                            } else if components == 2 {
+                                b.0[1]
+                            } else {
+                                b.0[0] ^ b.0[1]
+                            }
+                        })
+                        .collect();
+                    let local = outer_mpc::lane_bytes(&partial, lane);
+                    let a = outer_mpc::lane_bytes(&published[lane % 3], lane);
+                    let b = outer_mpc::lane_bytes(&published[(lane % 3 + 1) % 3], lane);
+                    let mut recovered = [0u8; 32];
+                    for i in 0..256 {
+                        recovered[i / 8] |= (local[i] ^ a[i] ^ b[i]) << (i % 8);
+                    }
+                    assert_ne!(
+                        &recovered, expected,
+                        "custodian {p}, lane {lane}, components {components}"
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn complete_distributed_bitcoin_proof_verifies() {
+        complete_proof(false);
+    }
+
+    #[test]
+    fn complete_distributed_ed25519_proof_verifies() {
+        complete_proof(true);
+    }
+
+    fn complete_proof(ed: bool) {
+        use std::io::Read;
+        let mut completed = false;
+        for _attempt in 0..4 {
+            let mut master = [0u8; 32];
+            std::fs::File::open("/dev/urandom")
+                .unwrap()
+                .read_exact(&mut master)
+                .unwrap();
+            let derive = |label: &[u8], id: u8| cshake256_framed_32(label, &[&master, &[id]]);
+            let witness = LegacyOwnershipWitness::from_raw_secret(derive(
+                b"OUTER.FULL.WITNESS",
+                u8::from(ed),
+            ));
+            let kind = if ed {
+                witness.compute_slip0010_commitment()
+            } else {
+                witness.compute_bitcoin_hash160().unwrap()
+            };
+            let request = zk_engine::tests::request(kind);
+            let scalar = witness.normalize_spending_scalar(&kind).unwrap();
+            let statement = MigrationStatement {
+                legacy_commitment: kind,
+                target_pq_address: request.target,
+                epoch_anchor: request.epoch,
+                migration_domain: request.domain,
+                migration_nullifier: scalar.compute_nullifier(&request.domain),
+                witness_anchor: [0; 4],
+            };
+            let mut parts = [
+                derive(b"OUTER.FULL.INPUT", 0),
+                derive(b"OUTER.FULL.INPUT", 1),
+                *scalar.as_le_bytes(),
+            ];
+            let masks = [parts[0], parts[1]];
+            for (i, byte) in parts[2].iter_mut().enumerate() {
+                *byte ^= masks[0][i] ^ masks[1][i];
+            }
+            let session = derive(b"OUTER.FULL.SESSION", 0);
+            let pair_keys: [_; 3] =
+                core::array::from_fn(|p| derive(b"OUTER.FULL.PAIR.KEY", p as u8));
+            let entropy: [_; 3] =
+                core::array::from_fn(|p| derive(b"OUTER.FULL.ENTROPY", p as u8));
+            ct_zeroize_bytes(&mut master);
+            let states: [_; 3] = core::array::from_fn(|p| {
+                CoZkCustodianShare::new(
+                    p,
+                    session,
+                    parts[p],
+                    entropy[p],
+                    [pair_keys[(p + 2) % 3], pair_keys[p]],
+                )
+                .unwrap()
+            });
+            let start = std::time::Instant::now();
+            let outcomes = std::thread::scope(|scope| {
+                let handles: Vec<_> = states
+                    .into_iter()
+                    .zip(audited_networks())
+                    .map(|(state, (network, audit))| {
+                        let public = statement.clone();
+                        scope.spawn(move || (state.prove(&public, network), audit))
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap())
+                    .collect::<Vec<_>>()
+            });
+            let mut errors = Vec::new();
+            for (party, (result, audit)) in outcomes.into_iter().enumerate() {
+                match result {
+                    Ok(proof) => {
+                        zk_engine::verify_migration_proof(
+                            &statement,
+                            &proof,
+                            &statement.migration_domain,
+                            statement.epoch_anchor,
+                        )
+                        .unwrap();
+                        let candidates = audit.candidates();
+                        let former_attack_rounds = proof
+                            .repetitions
+                            .iter()
+                            .filter(|r| r.opened_e as usize != party)
+                            .count();
+                        assert_eq!(
+                            candidates.len(),
+                            MIT_REPETITIONS * 5 + former_attack_rounds * 9
+                        );
+                        for recovered in candidates {
+                            assert_ne!(&recovered, scalar.as_le_bytes());
+                        }
+                    }
+                    Err(error) => errors.push(error),
+                }
+            }
+            if errors.is_empty() {
+                std::eprintln!(
+                    "distributed 438-rep {}: {:?}",
+                    if ed { "Ed25519" } else { "Bitcoin HASH160" },
+                    start.elapsed()
+                );
+                completed = true;
+                break;
+            }
+            assert!(
+                errors.contains(&Error::InvalidTape),
+                "unexpected errors: {errors:?}"
+            );
+            assert!(
+                errors
+                    .iter()
+                    .all(|e| matches!(e, Error::InvalidTape | Error::Transport))
+            );
+        }
+        assert!(completed, "four independent tape rejections");
+    }
+
+    #[test]
+    fn one_custodian_valid_mac_equivocation_aborts_every_output() {
+        struct Equivocate(Network);
+        impl Transport for Equivocate {
+            fn exchange(&mut self, mut outgoing: [Envelope; 2]) -> Result<[Envelope; 2], Error> {
+                if outgoing[0].sender == 0 && outgoing[0].sequence == 0 {
+                    let m = &mut outgoing[0];
+                    m.payload[0] ^= 1;
+                    let bytes: Vec<_> = m.payload.iter().flat_map(|w| w.to_le_bytes()).collect();
+                    m.tag = cshake256_framed_32(
+                        b"QSAG.OUTER.MESSAGE.V1",
+                        &[
+                            &keys(0)[0],
+                            &[62; 32],
+                            &[m.sender as u8, m.recipient as u8],
+                            &m.sequence.to_le_bytes(),
+                            &bytes,
+                        ],
+                    );
+                }
+                self.0.exchange(outgoing)
+            }
+        }
+        let witness = LegacyOwnershipWitness::from_raw_secret([7; 32]);
+        let kind = witness.compute_bitcoin_hash160().unwrap();
+        let request = zk_engine::tests::request(kind);
+        let scalar = witness.normalize_spending_scalar(&kind).unwrap();
+        let statement = MigrationStatement {
+            legacy_commitment: kind,
+            target_pq_address: request.target,
+            epoch_anchor: request.epoch,
+            migration_domain: request.domain,
+            migration_nullifier: scalar.compute_nullifier(&request.domain),
+            witness_anchor: [0; 4],
+        };
+        run(|p, n| {
+            let result =
+                CoZkCustodianShare::new(p, [62; 32], [0; 32], [(p + 1) as u8; 32], keys(p))
+                    .unwrap()
+                    .prove(&statement, Equivocate(n));
+            if p == 2 {
+                assert!(matches!(result, Err(Error::Disagreement(0))));
+            } else {
+                assert!(matches!(result, Err(Error::Transport)));
+            }
+        });
+    }
+
+    const PRECOMMIT_SEQ: u64 = (2 + 3 * MIT_REPETITIONS.div_ceil(64)) as u64;
+
+    struct ZkbooFaultSpy {
+        inner: Network,
+        is_root: bool,
+        fault: Option<FaultInjection>,
+        precommit_or_view_opened: Arc<AtomicBool>,
+    }
+    impl Transport for ZkbooFaultSpy {
+        fn test_fault_raw(&self) -> Option<[usize; 4]> {
+            self.fault.map(FaultInjection::to_raw)
+        }
+        fn on_public_or_view_open(&self) {
+            self.precommit_or_view_opened.store(true, Ordering::SeqCst);
+        }
+        fn fork(&mut self, batch: usize) -> Option<Self> {
+            self.inner.fork(batch).map(|child| Self {
+                inner: child,
+                is_root: false,
+                // Inject the fault ONLY in batch 2 so all other batches are clean,
+                // proving the cross-batch barrier also blocks clean batches from opening!
+                fault: if batch == 2 { self.fault } else { None },
+                precommit_or_view_opened: self.precommit_or_view_opened.clone(),
+            })
+        }
+        fn exchange(&mut self, out: [Envelope; 2]) -> Result<[Envelope; 2], Error> {
+            // Root sequence 0 = STATEMENT, 1 = witness, 2..PRECOMMIT_SEQ = batch seeds, PRECOMMIT_SEQ = PRECOMMIT!
+            if self.is_root && out[0].sequence >= PRECOMMIT_SEQ {
+                self.precommit_or_view_opened.store(true, Ordering::SeqCst);
+            }
+            self.inner.exchange(out)
+        }
+    }
+
+    fn assert_zkboo_fault_aborts_cleanly(ed: bool, fault: FaultInjection, session_tag: u8) {
+        for seed_try in 0..8u8 {
+            let witness = LegacyOwnershipWitness::from_raw_secret([0x31 + seed_try; 32]);
+            let kind = if ed {
+                witness.compute_slip0010_commitment()
+            } else {
+                witness.compute_bitcoin_hash160().unwrap()
+            };
+            let request = zk_engine::tests::request(kind);
+            let scalar = witness.normalize_spending_scalar(&kind).unwrap();
+            let statement = MigrationStatement {
+                legacy_commitment: kind,
+                target_pq_address: request.target,
+                epoch_anchor: request.epoch,
+                migration_domain: request.domain,
+                migration_nullifier: scalar.compute_nullifier(&request.domain),
+                witness_anchor: [0; 4],
+            };
+            let p0 = [0x11; 32];
+            let p1 = [0x22; 32];
+            let mut p2 = *scalar.as_le_bytes();
+            for i in 0..32 {
+                p2[i] ^= p0[i] ^ p1[i];
+            }
+            let parts = [p0, p1, p2];
+            let session = [session_tag.wrapping_add(seed_try); 32];
+            let leaked: [Arc<AtomicBool>; 3] =
+                core::array::from_fn(|_| Arc::new(AtomicBool::new(false)));
+
+            let outcomes = std::thread::scope(|scope| {
+                let handles: Vec<_> = outer_mpc::tests::networks()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(p, net)| {
+                        let st = statement.clone();
+                        let flag = leaked[p].clone();
+                        scope.spawn(move || {
+                            let spy = ZkbooFaultSpy {
+                                inner: net,
+                                is_root: true,
+                                fault: (p == 1).then_some(fault),
+                                precommit_or_view_opened: flag,
+                            };
+                            CoZkCustodianShare::new(
+                                p,
+                                session,
+                                parts[p],
+                                [0x50 + p as u8 + seed_try; 32],
+                                keys(p),
+                            )
+                            .unwrap()
+                            .prove(&st, spy)
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap())
+                    .collect::<Vec<_>>()
+            });
+
+            // If a random seed hit upfront `InvalidTape` before reaching the injected gate, retry next seed.
+            if outcomes.iter().any(|r| matches!(r, Err(Error::InvalidTape))) {
+                continue;
+            }
+            for (p, res) in outcomes.into_iter().enumerate() {
+                assert_eq!(
+                    res,
+                    Err(Error::MultiplicationCheck),
+                    "custodian {p} must abort with MultiplicationCheck on ZKBoo fault"
+                );
+                assert!(
+                    !leaked[p].load(Ordering::SeqCst),
+                    "custodian {p} must NEVER reach PRECOMMIT or open commitments/views on ZKBoo fault!"
+                );
+            }
+            return;
+        }
+        panic!("8 consecutive upfront InvalidTape rejections in ZKBoo fault test");
+    }
+
+    #[test]
+    fn active_boolean_fault_in_zkboo_circuit_aborts_before_commitments_or_views_open() {
+        // `call_countdown: 600` injects a 1-bit consistent-share fault inside ZKBoo circuit /
+        // view-commitment evaluation on batch 2, after upfront `Tape` validation has passed.
+        assert_zkboo_fault_aborts_cleanly(
+            false,
+            FaultInjection::BitAnd {
+                call_countdown: 600,
+                gate: 7,
+                lane: 41,
+            },
+            0xd0,
+        );
+    }
+
+    #[test]
+    fn active_field_fault_in_zkboo_circuit_aborts_before_commitments_or_views_open() {
+        assert_zkboo_fault_aborts_cleanly(
+            false,
+            FaultInjection::FieldMul {
+                domain: Domain::Secp,
+                call_countdown: 5,
+                lane: 19,
+            },
+            0xe0,
+        );
+    }
+
+    #[test]
+    fn active_goldilocks_field_fault_in_zkboo_circuit_aborts_before_commitments_or_views_open() {
+        assert_zkboo_fault_aborts_cleanly(
+            true,
+            FaultInjection::FieldMul {
+                domain: Domain::Gold,
+                call_countdown: 5,
+                lane: 23,
+            },
+            0xf0,
+        );
+    }
+
+    fn assert_input_substitution_aborts(ed: bool, delta_64bit: bool, session_tag: u8) {
+        let mut verified = false;
+        for seed_try in 0..8u8 {
+            let witness = LegacyOwnershipWitness::from_raw_secret([0x41 + seed_try; 32]);
+            let kind = if ed {
+                witness.compute_slip0010_commitment()
+            } else {
+                witness.compute_bitcoin_hash160().unwrap()
+            };
+            let request = zk_engine::tests::request(kind);
+            let scalar = witness.normalize_spending_scalar(&kind).unwrap();
+            let statement = MigrationStatement {
+                legacy_commitment: kind,
+                target_pq_address: request.target,
+                epoch_anchor: request.epoch,
+                migration_domain: request.domain,
+                migration_nullifier: scalar.compute_nullifier(&request.domain),
+                witness_anchor: [0; 4],
+            };
+            let p0 = [0x15; 32];
+            let p1 = [0x2a; 32];
+            let mut p2 = *scalar.as_le_bytes();
+            for i in 0..32 {
+                p2[i] ^= p0[i] ^ p1[i];
+            }
+            // Malicious custodian 2 substitutes `share ^ Delta` (`64`-bit MITM delta or `1`-bit flip).
+            if delta_64bit {
+                for b in &mut p2[..8] {
+                    *b ^= 0xa5;
+                }
+            } else {
+                p2[0] ^= 0x08;
+            }
+            let parts = [p0, p1, p2];
+            let session = [session_tag.wrapping_add(seed_try); 32];
+            let leaked: [Arc<AtomicBool>; 3] =
+                core::array::from_fn(|_| Arc::new(AtomicBool::new(false)));
+
+            let outcomes = std::thread::scope(|scope| {
+                let handles: Vec<_> = outer_mpc::tests::networks()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(p, net)| {
+                        let st = statement.clone();
+                        let flag = leaked[p].clone();
+                        scope.spawn(move || {
+                            let spy = ZkbooFaultSpy {
+                                inner: net,
+                                is_root: true,
+                                fault: None,
+                                precommit_or_view_opened: flag,
+                            };
+                            CoZkCustodianShare::new(
+                                p,
+                                session,
+                                parts[p],
+                                [0x60 + p as u8 + seed_try; 32],
+                                keys(p),
+                            )
+                            .unwrap()
+                            .prove(&st, spy)
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap())
+                    .collect::<Vec<_>>()
+            });
+
+            if outcomes.iter().any(|r| matches!(r, Err(Error::InvalidTape))) {
+                continue;
+            }
+            for (p, res) in outcomes.into_iter().enumerate() {
+                assert_eq!(
+                    res,
+                    Err(Error::InvalidProof),
+                    "custodian {p} must abort with InvalidProof on input key-share substitution"
+                );
+                assert!(
+                    !leaked[p].load(Ordering::SeqCst),
+                    "custodian {p} must NEVER open output residuals, commitments, or views on input substitution!"
+                );
+            }
+            verified = true;
+            break;
+        }
+        assert!(
+            verified,
+            "8 consecutive upfront InvalidTape rejections in input-substitution test"
+        );
+    }
+
+    #[test]
+    fn custodian_input_key_share_substitution_aborts_before_any_output_or_commitment_opens() {
+        assert_input_substitution_aborts(false, true, 0xa0);
+    }
+
+    #[test]
+    fn custodian_ed25519_input_key_share_substitution_aborts_before_any_output_or_commitment_opens()
+    {
+        assert_input_substitution_aborts(true, false, 0xb0);
+    }
+}
