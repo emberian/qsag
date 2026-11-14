@@ -6301,5 +6301,174 @@ theorem tooth_production_coin_domains_distinct :
   unfold productionCoinCommitCustom productionCoinDeriveCustom
   decide +kernel
 
+/-! ### Private per-gate stream component
+
+This component takes private local gate inputs, with an independent pad for every
+gate. Its barrier compares the recorded private stream, never public hash-derived
+expected wires. The legacy `rssSlhInteractiveProtocol` above is not yet an
+instantiation of this component: a signing-trace refinement is still required.
+-/
+
+abbrev PrivateChiStream (M : Nat) := Fin M → Tower128
+
+def privateChiGateStream (M pid : Nat) (inputs : Fin M → RssPartyKeyShare)
+    (messages : Fin M → List UInt8) : PrivateChiStream M :=
+  fun i => unpackTower 7 ((computeHonestChiWord pid (inputs i) (messages i)).zeroExtend 128)
+
+def maskPrivateChiStream {M : Nat} (wires pads : PrivateChiStream M) : PrivateChiStream M :=
+  fun i => towerAdd 7 (wires i) (pads i)
+
+/-- Independent coordinate translation of the entire pad space. No pad is shared
+between gates, even when two gates happen to have equal inputs. -/
+def privateChiPadEquiv {M : Nat} (left right : PrivateChiStream M) :
+    SimpleEquiv (PrivateChiStream M) (PrivateChiStream M) where
+  toFun pads := fun i => towerAdd 7 (right i) (towerAdd 7 (left i) (pads i))
+  invFun pads := fun i => towerAdd 7 (left i) (towerAdd 7 (right i) (pads i))
+  left_inv pads := by funext i; simp only [towerAdd_cancel]
+  right_inv pads := by funext i; simp only [towerAdd_cancel]
+
+/-- Pointwise simulation of every gate under an explicit invertible pad map.
+The simulator needs only the target public dummy stream and fresh pads. -/
+theorem privateChiStream_simulation_privacy {M : Nat} (left right pads : PrivateChiStream M) :
+    maskPrivateChiStream left pads =
+      maskPrivateChiStream right ((privateChiPadEquiv left right).toFun pads) := by
+  funext i
+  exact (towerAdd_cancel 7 (right i) (towerAdd 7 (left i) (pads i))).symm
+
+def privateChiStreamList {M : Nat} (wires : PrivateChiStream M) : List Tower128 :=
+  (List.finRange M).map wires
+
+/-- The barrier fixes its length from the computation, not the adversary's frame. -/
+def verifyPrivateChiStream {M : Nat} (expected : PrivateChiStream M)
+    (sent : List Tower128) (gamma : Tower128) : Bool :=
+  decide (sent.length = M) &&
+    (bbcggiWireAccumulator sent gamma == bbcggiWireAccumulator (privateChiStreamList expected) gamma)
+
+theorem privateChiStream_complete {M : Nat} (expected : PrivateChiStream M) (gamma : Tower128) :
+    verifyPrivateChiStream expected (privateChiStreamList expected) gamma = true := by
+  simp [verifyPrivateChiStream, privateChiStreamList]
+
+/-- All M private gates are covered by one nonzero deviation polynomial. The
+expected stream and corrupt frame must be fixed before the challenge. -/
+theorem privateChiStream_active_forgery_count {M : Nat} (expected : PrivateChiStream M)
+    (sent : List Tower128) (hlen : sent.length = M)
+    (hbad : ∃ d ∈ zipXorTower 7 sent (privateChiStreamList expected), d ≠ towerZero 7) :
+    finSum (2 ^ 128) (fun c =>
+      if verifyPrivateChiStream expected sent (unpackTower 7 (BitVec.ofFin c)) then 1 else 0) ≤ M := by
+  have he : sent.length = (privateChiStreamList expected).length := by
+    simp [privateChiStreamList, hlen]
+  have hd : (zipXorTower 7 sent (privateChiStreamList expected)).length ≤ M :=
+    Nat.le_trans (zipXorTower_length_le_left 7 sent (privateChiStreamList expected)) (Nat.le_of_eq hlen)
+  have hc : ∀ c : Fin (2 ^ 128),
+      verifyPrivateChiStream expected sent (unpackTower 7 (BitVec.ofFin c)) =
+      (batchDeviationPoly (zipXorTower 7 sent (privateChiStreamList expected))
+        (unpackTower 7 (BitVec.ofFin c)) == towerZero 7) := by
+    intro c
+    simp only [verifyPrivateChiStream, hlen, decide_true, Bool.true_and]
+    exact bbcggiWireAccumulator_eq_iff_batchDeviationPoly he _
+  simp only [hc]
+  exact tower128_roots_finSum_le M _ hd hbad
+
+/-- Any altered gate, including deletion or insertion, is covered. A malformed
+length is rejected for every challenge; an equal-length modification supplies a
+constructively extracted nonzero coefficient to the polynomial root bound. -/
+theorem privateChiStream_any_changed_gate_count {M : Nat} (expected : PrivateChiStream M)
+    (sent : List Tower128) (hne : sent ≠ privateChiStreamList expected) :
+    finSum (2 ^ 128) (fun c =>
+      if verifyPrivateChiStream expected sent (unpackTower 7 (BitVec.ofFin c)) then 1 else 0) ≤ M := by
+  by_cases hl : sent.length = M
+  · apply privateChiStream_active_forgery_count expected sent hl
+    have he : sent.length = (privateChiStreamList expected).length := by
+      simp [privateChiStreamList, hl]
+    cases ha : (zipXorTower 7 sent (privateChiStreamList expected)).any
+        (fun d => decide (d ≠ towerZero 7)) with
+    | false => exact False.elim (hne (eq_of_zipXorTower_any_false 7 he ha))
+    | true =>
+      obtain ⟨d, hm, hd⟩ := List.any_eq_true.mp ha
+      exact ⟨d, hm, of_decide_eq_true hd⟩
+  · have hz : ∀ c : Fin (2 ^ 128),
+        (if verifyPrivateChiStream expected sent (unpackTower 7 (BitVec.ofFin c)) then 1 else 0) = 0 := by
+      intro c
+      simp only [verifyPrivateChiStream, hl, decide_false, Bool.false_and, Bool.false_eq_true, ↓reduceIte]
+    rw [finSum_congr hz, finSum_const, Nat.mul_zero]
+    exact Nat.zero_le M
+
+theorem tooth_privateChiStream_rejects_truncation {M : Nat}
+    (expected : PrivateChiStream M) (sent : List Tower128) (gamma : Tower128)
+    (h : sent.length ≠ M) : verifyPrivateChiStream expected sent gamma = false := by
+  simp [verifyPrivateChiStream, h]
+
+/-- Install the private-stream verifier in the real engine's mandatory pre-cut
+barrier. `expected` is read from private Round-2 state, not reconstructed from
+public transcript hashes. The base protocol still owns Round-3 computation. -/
+def withPrivateChiBarrier {PK ShareT Tape R1 R2 R3 : Type} (M : Nat)
+    (base : InteractiveThresholdProtocol PK ShareT Tape R1 R2 R3)
+    (expected : PK → SessionScheduleReq → R2 → PrivateChiStream M)
+    (challenge : R2 → Tower128)
+    (decode : List (Nat × ByteArray) → Option (List Tower128)) :
+    InteractiveThresholdProtocol PK ShareT Tape R1 R2 R3 :=
+  { base with preCutBarrier := fun pk req st hon corr =>
+      match decode corr with
+      | none => .inl .activeConsistencyFailed
+      | some sent =>
+        if verifyPrivateChiStream (expected pk req st) sent (challenge st) then
+          base.preCutBarrier pk req st hon corr
+        else .inl .activeConsistencyFailed }
+
+/-- Actual `RealProtocolExec` composition: every newly exposed opening has passed
+the private M-gate verifier on its recorded corrupt Round-2 message. -/
+theorem privateChiBarrier_RealProtocolExec_opening
+    {PK ShareT Tape R1 R2 R3 AdvState : Type} (M : Nat)
+    (base : InteractiveThresholdProtocol PK ShareT Tape R1 R2 R3)
+    (expected : PK → SessionScheduleReq → R2 → PrivateChiStream M)
+    (challenge : R2 → Tower128)
+    (decode : List (Nat × ByteArray) → Option (List Tower128))
+    (A : UcRushingAdversary AdvState) (numSessions : Nat)
+    (tapes : Nat → Tape) (cl : RealClusterState PK ShareT) (advSt : AdvState)
+    (rec : SessionWireRecord)
+    (hm : rec ∈ (RealProtocolExec (withPrivateChiBarrier M base expected challenge decode)
+      A numSessions tapes cl advSt).2.sessions)
+    (hopen : rec.honestRound3 ≠ []) :
+    ∃ pk st sent, decode rec.corruptRound2 = some sent ∧
+      verifyPrivateChiStream (expected pk rec.request st) sent (challenge st) = true := by
+  obtain ⟨pk, st, r3, hb⟩ := RealProtocolExec_openings_have_barrier_witnesses
+    (withPrivateChiBarrier M base expected challenge decode) A numSessions tapes cl advSt rec hm hopen
+  change (match decode rec.corruptRound2 with
+    | none => (PSum.inl AbortReason.activeConsistencyFailed : PSum AbortReason R3)
+    | some sent => if verifyPrivateChiStream (expected pk rec.request st) sent (challenge st) then
+        base.preCutBarrier pk rec.request st rec.honestRound2 rec.corruptRound2
+      else .inl .activeConsistencyFailed) = .inr r3 at hb
+  cases hd : decode rec.corruptRound2 with
+  | none => rw [hd] at hb; cases hb
+  | some sent =>
+    rw [hd] at hb
+    dsimp only at hb
+    cases hv : verifyPrivateChiStream (expected pk rec.request st) sent (challenge st) with
+    | false => rw [hv] at hb; cases hb
+    | true => exact ⟨pk, st, sent, rfl, hv⟩
+
+set_option maxRecDepth 4096 in
+/-- Query-bounded hidden-share hybrid at the production 256-bit coin width.
+Queries are indexed by the secret share and the (context, party) frame tag.
+This is a ROM theorem; replacing this oracle by concrete cSHAKE, or reducing the
+legacy 24-byte shell's `advCoinHide` to this game, is not asserted here. -/
+theorem production_coin_ro_query_hybrid_bound
+    (Q : Nat) (oracle : List UInt8 → List UInt8)
+    (programmed : ProductionCoinContext × UInt64 → List UInt8)
+    (A : OracleComp (Fin (2 ^ 256) × (ProductionCoinContext × UInt64)) (List UInt8) Bool)
+    (hQ : QueryBounded Q A) :
+    let base := fun q : Fin (2 ^ 256) × (ProductionCoinContext × UInt64) =>
+      oracle (productionCoinCommitFrame q.2.1 q.2.2 (BitVec.ofFin q.1))
+    let gap := natAbsDiff (keyedPrfRealAccept (2 ^ 256) base programmed A)
+      (keyedPrfIdealAccept (2 ^ 256) base A)
+    gap ≤ Q ∧ ratLe (gap, 2 ^ 256) (Q, 2 ^ 256) := by
+  intro base gap
+  have hb : gap ≤ Q := (hidingAdv_le (2 ^ 256) Q (Nat.two_pow_pos 256)
+    base programmed A hQ).1
+  refine ⟨hb, ?_⟩
+  unfold ratLe
+  dsimp only
+  exact ⟨Nat.two_pow_pos 256, Nat.two_pow_pos 256, Nat.mul_le_mul_right (2 ^ 256) hb⟩
+
 end Qsag
 end

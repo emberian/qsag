@@ -1537,5 +1537,63 @@ theorem uc_emulation_forgery_to_hypertree_hash_game
     exact congrArg Prod.snd
       (IdealFunctionalityExec_oracle_congr O O' sim hR3 A Q_s (simTapes ω) icl advSt hAgree)
 
+/-- A released opening has an actual successful barrier execution on the recorded
+request and Round-2 messages. This records the verifier equation, not a trusted
+Boolean label attached by a caller. -/
+def SessionBarrierJustified {PK ShareT SessionTape R1St R2St R3St : Type}
+    (proto : InteractiveThresholdProtocol PK ShareT SessionTape R1St R2St R3St)
+    (rec : SessionWireRecord) : Prop :=
+  rec.honestRound3 ≠ [] → ∃ (pk : PK) (r2 : R2St) (r3 : R3St),
+    proto.preCutBarrier pk rec.request r2 rec.honestRound2 rec.corruptRound2 = .inr r3
+
+theorem execRealSession_opening_has_barrier_witness
+    {PK ShareT SessionTape R1St R2St R3St AdvState : Type}
+    (proto : InteractiveThresholdProtocol PK ShareT SessionTape R1St R2St R3St)
+    (A : UcRushingAdversary AdvState) (cl : RealClusterState PK ShareT)
+    (advSt : AdvState) (tape : SessionTape) :
+    SessionBarrierJustified proto (execRealSession proto A cl advSt tape).2.2 := by
+  unfold SessionBarrierJustified execRealSession
+  dsimp only
+  cases validThresholdApproval cl.tsig (A.scheduleSession advSt).1.honestApprovers
+  · intro h; exact False.elim (h rfl)
+  · simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+    cases walPreSignStep cl.honestWal _ _ _ with
+    | err _ _ => intro h; exact False.elim (h rfl)
+    | ok _ auth =>
+      cases auth with
+      | replayCached _ => intro h; exact False.elim (h rfl)
+      | authorizedFresh _ =>
+        dsimp only
+        cases proto.verifyRound1 _ _ _ _ _ with
+        | inl _ => intro h; exact False.elim (h rfl)
+        | inr _ =>
+          dsimp only
+          cases hb : proto.preCutBarrier _ _ _ _ _ with
+          | inl _ => intro h; exact False.elim (h rfl)
+          | inr r3 =>
+            dsimp only
+            cases proto.finalizeCutOpen _ _ _ _ _ <;> intro _ <;>
+              exact ⟨cl.tsig.pk, _, r3, hb⟩
+
+/-- Every opening in every adaptively scheduled session is justified by the
+actual pre-cut verifier. Replayed signatures expose no new Round-3 messages. -/
+theorem RealProtocolExec_openings_have_barrier_witnesses
+    {PK ShareT SessionTape R1St R2St R3St AdvState : Type}
+    (proto : InteractiveThresholdProtocol PK ShareT SessionTape R1St R2St R3St)
+    (A : UcRushingAdversary AdvState) (numSessions : Nat)
+    (tapes : Nat → SessionTape) (cl : RealClusterState PK ShareT) (advSt : AdvState) :
+    ∀ rec ∈ (RealProtocolExec proto A numSessions tapes cl advSt).2.sessions,
+      SessionBarrierJustified proto rec := by
+  induction numSessions generalizing tapes cl advSt with
+  | zero => intro rec h; cases h
+  | succ n ih =>
+    rw [RealProtocolExec_succ]
+    dsimp only
+    intro rec h
+    rcases List.mem_cons.mp h with he | hr
+    · subst rec
+      exact execRealSession_opening_has_barrier_witness proto A cl advSt (tapes 0)
+    · exact ih _ _ _ rec hr
+
 end Qsag
 end
