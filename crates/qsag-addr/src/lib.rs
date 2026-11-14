@@ -705,10 +705,27 @@ impl HybridPinnedEnvelope {
         VP: FnOnce(&[u8], &[u8], &[u8]) -> bool,
     {
         let spec = self.validate_structure(expected_id_commit)?;
+        self.run_verifiers(&spec, msg, verify_classical, verify_pq)
+    }
+
+    /// Run both verifier callbacks over their role-separated transcripts. Callers must have
+    /// obtained `spec` from [`Self::validate_structure`] on this envelope. The post-quantum
+    /// verifier is not consulted once the classical one has rejected.
+    fn run_verifiers<VC, VP>(
+        &self,
+        spec: &HybridSuiteSpec,
+        msg: &[u8],
+        verify_classical: VC,
+        verify_pq: VP,
+    ) -> Result<(), AddrError>
+    where
+        VC: FnOnce(&[u8], &[u8], &[u8]) -> bool,
+        VP: FnOnce(&[u8], &[u8], &[u8]) -> bool,
+    {
         let transcript = |role| {
             Self::signing_transcript(
                 role,
-                &spec,
+                spec,
                 &self.id_commit,
                 &self.pk_classical_digest,
                 &self.pk_pq_digest,
@@ -786,31 +803,7 @@ impl HybridPinnedEnvelope {
         VP: FnOnce(&[u8], &[u8], &[u8]) -> bool,
     {
         let spec = self.validate_for_address(expected_address, expected_hrp)?;
-        let transcript = |role| {
-            Self::signing_transcript(
-                role,
-                &spec,
-                &self.id_commit,
-                &self.pk_classical_digest,
-                &self.pk_pq_digest,
-                msg,
-            )
-        };
-        if !verify_classical(
-            &self.pk_classical,
-            &transcript(HybridRole::Classical),
-            &self.sig_classical,
-        ) {
-            return Err(AddrError::HybridVerificationFailed);
-        }
-        if !verify_pq(
-            &self.pk_pq,
-            &transcript(HybridRole::PostQuantum),
-            &self.sig_pq,
-        ) {
-            return Err(AddrError::HybridVerificationFailed);
-        }
-        Ok(())
+        self.run_verifiers(&spec, msg, verify_classical, verify_pq)
     }
 
     /// Decode `encoded_address` strictly under `expected_hrp`, verify address binding, and run

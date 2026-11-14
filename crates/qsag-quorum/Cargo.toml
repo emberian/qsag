@@ -18,4 +18,4 @@ testing-ephemeral = []
 
 [[example]]
 name = "quorum_threaded_bench"
-required-features = ["std"]
+required-features = ["std", "testing-ephemeral"]

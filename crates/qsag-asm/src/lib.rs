@@ -691,6 +691,10 @@ pub fn ct_eq_bytes(a: &[u8], b: &[u8]) -> bool {
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
+        // Same scoped `PSTATE.DIT` as `ct_eq_32`: the portable loop is only data-independent
+        // on AArch64 cores while DIT is set.
+        #[cfg(target_arch = "aarch64")]
+        let _dit_guard = cpuid::ensure_aarch64_dit_enabled();
         portable::ct_eq_bytes_portable(a, b)
     }
 }

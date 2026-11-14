@@ -1,12 +1,22 @@
 //! Exclusive process lock and crash-atomic record replacement for durable callers.
 //!
-//! The containing directory must be trusted: final-component no-follow checks do not protect
-//! against replacement of ancestor directories. Sidecars must never be unlinked while in use.
-//! `File::sync_all` requests `fcntl(F_FULLFSYNC)` on macOS (including APFS) to drain volatile
-//! device caches. On Linux it uses
-//! `fsync`; filesystem/block-layer flushes use `REQ_PREFLUSH` / `REQ_FUA` as required by the
-//! storage stack, not necessarily both flags on every call. Durability still requires a device
-//! that honors flushes. An I/O failure cannot be repaired by retrying on the same handle.
+//! Trust and failure model:
+//! - The containing directory must be trusted: final-component no-follow checks do not protect
+//!   against replacement of ancestor directories. Sidecars must never be unlinked while in use.
+//! - `File::sync_all` requests `fcntl(F_FULLFSYNC)` on macOS (including APFS) to drain volatile
+//!   device caches. On Linux it uses `fsync`; filesystem/block-layer flushes use `REQ_PREFLUSH` /
+//!   `REQ_FUA` as required by the storage stack, not necessarily both flags on every call.
+//!   Durability still requires a device that honors flushes. An I/O failure cannot be repaired
+//!   by retrying on the same handle.
+//! - The sidecar header stores `st_dev || st_ino` of its own inode and every open compares it
+//!   with `fstat`. Restoring a sidecar by copy, or remounting the filesystem under a different
+//!   device number, therefore fails closed and needs operator re-provisioning.
+//! - Genesis is not resumable: a crash after the sidecar entry is created and before the first
+//!   [`LockedRecord::replace`] leaves a sidecar without a record. [`LockedRecord::create_new`]
+//!   then refuses, and [`LockedRecord::acquire`] reports a non-fresh handle, so a deleted record
+//!   can never be mistaken for a new one.
+//! - `NotFound` from the constructors means the record itself is absent. A present record whose
+//!   sidecar is missing is reported as `InvalidData`.
 use core::sync::atomic::{AtomicBool, Ordering};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -137,7 +147,12 @@ impl LockedRecord {
         }
         let name = side_path(&path, ".lock");
         regular_metadata(&name)?;
-        let open_present = || options()?.read(true).write(true).open(&name);
+        // A record without its sidecar is damage, not absence: keep `NotFound` for the record.
+        let open_present = || {
+            options()?.read(true).write(true).open(&name).map_err(|e| {
+                if present && e.kind() == io::ErrorKind::NotFound { invalid() } else { e }
+            })
+        };
         let (mut lock, fresh) = match sidecar {
             Sidecar::MustExist => (open_present()?, false),
             Sidecar::CreateOrOpen if present => (open_present()?, false),
@@ -426,8 +441,8 @@ mod tests {
         fs::remove_file(&lock).unwrap();
         assert_eq!(LockedRecord::create_new(&path).err().unwrap().kind(), io::ErrorKind::AlreadyExists);
         assert!(!lock.exists());
-        assert!(LockedRecord::open_existing(&path).is_err());
-        assert!(LockedRecord::acquire(&path).is_err());
+        assert_eq!(LockedRecord::open_existing(&path).err().unwrap().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(LockedRecord::acquire(&path).err().unwrap().kind(), io::ErrorKind::InvalidData);
         assert!(!lock.exists());
         assert!(first.read().is_err());
         assert!(first.replace(b"split").is_err());
