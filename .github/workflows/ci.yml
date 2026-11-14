@@ -1,0 +1,238 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Jobs only read the repository. No job uses a cache, so a pull request can not poison a
+# later run, and no job receives secrets.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+  # Library crates that must build without the standard library.
+  NO_STD_CRATES: >-
+    -p qsag-asm -p qsag-accel -p qsag-addr -p qsag-policy -p qsag-fts
+    -p qsag-hd -p qsag-cred -p qsag-migrate -p qsag-core -p qsag-agg
+
+jobs:
+  rust-suite:
+    name: Rust format, lint, no_std, tests, CLI and examples
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install the stable Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: The workspace has no registry dependencies
+        run: |
+          set -euo pipefail
+          cargo metadata --format-version 1 --locked 2>/dev/null > /tmp/metadata.json \
+            || cargo metadata --format-version 1 > /tmp/metadata.json
+          external="$(jq -r '.packages[] | select(.source != null) | .name' /tmp/metadata.json)"
+          if [ -n "$external" ]; then
+            echo "::error::registry dependencies found: $external"
+            exit 1
+          fi
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy with warnings denied
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Library crates build without default features
+        run: cargo check --no-default-features $NO_STD_CRATES
+
+      - name: Workspace tests in release mode
+        run: cargo test --workspace --release
+
+      - name: CLI known-answer tests and smoke run
+        run: |
+          set -euo pipefail
+          cargo build --release -p qsag-cli
+          qsag=target/release/qsag
+          "$qsag" info --json > /tmp/info.json
+          jq -e '.schemes | length >= 12' /tmp/info.json
+          "$qsag" kat
+          "$qsag" policy-demo
+          # A denied transfer must exit with the policy code, not succeed and not crash.
+          set +e
+          "$qsag" policy-demo --scenario over-single-cap
+          code=$?
+          set -e
+          test "$code" -eq 3
+          work="$(mktemp -d)"
+          printf '%064d' 7 > "$work/seed"
+          printf 'ci smoke message\n' > "$work/msg"
+          printf 'another message\n' > "$work/other"
+          "$qsag" keygen --scheme slh-dsa-shake-128f --seed-file "$work/seed" \
+            --secret-out "$work/sk" --public-out "$work/pk"
+          "$qsag" sign --secret "$work/sk" --in "$work/msg" --out "$work/sig"
+          "$qsag" verify --public "$work/pk" --in "$work/msg" --sig "$work/sig"
+          set +e
+          "$qsag" verify --public "$work/pk" --in "$work/other" --sig "$work/sig"
+          code=$?
+          set -e
+          test "$code" -eq 2
+
+      - name: Every example builds and runs
+        run: |
+          set -euo pipefail
+          cargo build --release -p qsag-cli --examples
+          for source in crates/qsag-cli/examples/*.rs; do
+            name="$(basename "$source" .rs)"
+            echo "::group::example $name"
+            timeout 120s "target/release/examples/$name"
+            echo "::endgroup::"
+          done
+
+  lean-6-kernel-paranoid:
+    name: Lean 4.35 build, axiom audit, 6-kernel comparator (${{ matrix.workdir }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - workdir: lean
+            audit_axioms: true
+          - workdir: aeneas/lean
+            audit_axioms: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install bubblewrap and allow unprivileged user namespaces
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bubblewrap curl git zstd jq
+          # The comparator replays proofs inside `bwrap --unshare-all`; Ubuntu 24.04 blocks
+          # unprivileged user namespaces through AppArmor unless this is switched off.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --ro-bind / / --tmpfs /tmp --unshare-all -- /bin/true
+
+      - name: Install elan and the pinned Lean toolchain
+        run: |
+          set -euo pipefail
+          curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+            | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Toolchain is Lean v4.35.0 and ships all six kernels
+        working-directory: ${{ matrix.workdir }}
+        run: |
+          set -euo pipefail
+          test "$(cat lean-toolchain)" = "leanprover/lean4:v4.35.0"
+          lean --version
+          sysroot="$(lean --print-prefix)"
+          for kernel in lean leanchecker-paranoid lean4lean nanoda_bin con-leche con-ron; do
+            test -x "$sysroot/bin/$kernel" || {
+              echo "::error::kernel binary $kernel is missing from $sysroot/bin"
+              exit 1
+            }
+          done
+
+      - name: Comparator configuration permits only propext and Quot.sound
+        working-directory: ${{ matrix.workdir }}
+        run: |
+          set -euo pipefail
+          test -f lake-manifest.json || {
+            echo "::error::${{ matrix.workdir }}/lake-manifest.json is missing; the comparator sandbox is read-only and can not resolve dependencies"
+            exit 1
+          }
+          jq -e '.permitted_axioms | sort == ["Quot.sound", "propext"]' comparator.json
+          jq -e '.theorem_names | length > 0' comparator.json
+
+      - name: lake build
+        working-directory: ${{ matrix.workdir }}
+        run: lake build
+
+      - name: lake build AuditAxioms (no forbidden axioms)
+        if: matrix.audit_axioms
+        working-directory: ${{ matrix.workdir }}
+        run: |
+          set -euo pipefail
+          lake build AuditAxioms 2>&1 | tee /tmp/audit-axioms.log
+          # The audit prints the axioms each audited theorem depends on. Anything other than
+          # propext and Quot.sound fails the job.
+          if grep -nE 'sorryAx|Lean\.ofReduceBool|Lean\.trustCompiler|Classical\.choice|native_decide' /tmp/audit-axioms.log; then
+            echo "::error::a forbidden axiom appears in the axiom audit"
+            exit 1
+          fi
+
+      - name: lake comparator --paranoid (bubblewrap sandbox, six kernels)
+        working-directory: ${{ matrix.workdir }}
+        run: lake comparator --paranoid
+
+  aarch64-cross-and-elf:
+    name: aarch64 no_std cross-check and constant-time ELF symbol audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install the stable Rust toolchain with the aarch64 target
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-unknown-linux-gnu
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends llvm clang binutils python3
+
+      - name: Library crates cross-check for aarch64 without default features
+        run: cargo check --target aarch64-unknown-linux-gnu --no-default-features $NO_STD_CRATES
+
+      - name: Constant-time symbol audit of the x86_64 and aarch64 kernels
+        run: |
+          set -euo pipefail
+          # Thin LTO would leave only bitcode in the archive; the audit disassembles the
+          # machine code that actually ships, so it is switched off for this build.
+          CARGO_PROFILE_RELEASE_LTO=false cargo build -p qsag-asm --release --target-dir target/ct-audit
+          python3 crates/qsag-asm/scripts/audit_elf_ct.py \
+            --rlib target/ct-audit/release/libqsag_asm.rlib \
+            --x86-asm-rs crates/qsag-asm/src/x86_64_asm.rs \
+            --aarch64-asm crates/qsag-asm/src/asm/aarch64_kernels.s \
+            --aarch64-apple-rs crates/qsag-asm/src/aarch64_asm.rs
+
+      - name: The aarch64 archive defines every assembly kernel symbol
+        run: |
+          set -euo pipefail
+          CARGO_PROFILE_RELEASE_LTO=false cargo build -p qsag-asm --release \
+            --target aarch64-unknown-linux-gnu --target-dir target/ct-audit
+          archive=target/ct-audit/aarch64-unknown-linux-gnu/release/libqsag_asm.rlib
+          llvm-nm --defined-only "$archive" > /tmp/aarch64-symbols.txt 2>/dev/null
+          missing=0
+          for symbol in $(grep -oE '^\s*\.globa?l\s+qsag_asm_[A-Za-z0-9_]+' crates/qsag-asm/src/asm/aarch64_kernels.s | awk '{print $2}' | sort -u); do
+            grep -qw "$symbol" /tmp/aarch64-symbols.txt || {
+              echo "::error::aarch64 kernel symbol $symbol is not defined in $archive"
+              missing=1
+            }
+          done
+          test "$missing" -eq 0
+          test -s /tmp/aarch64-symbols.txt
