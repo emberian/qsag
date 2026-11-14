@@ -3155,3 +3155,962 @@ impl StatefulEpochLatch for FsWalEpochLatch {
 
 /// The 32-byte value a committee latch quorum reserves for one signature: a commitment to the key
 /// identity `(pk_seed, pk_root)`, the one-time `epoch`, and the message digest `mu`.
+pub fn epoch_latch_binding(
+    pk_seed: &[u8; 32],
+    pk_root: &[u8; 32],
+    epoch: u64,
+    mu: &[u8; 32],
+) -> [u8; 32] {
+    let frame = encode_multi_frame(&[pk_seed, pk_root, &epoch.to_be_bytes(), mu]);
+    cshake256_hash32(TAG_EPOCH_LATCH_BINDING, &frame)
+}
+
+/// `true` iff any two sets of `acks` members out of `n` share more than `t - 1` members, i.e.
+/// `2 * acks > n + f` with `f = t - 1` corruptions: two such quorums always share an honest party.
+#[inline]
+pub fn latch_quorum_intersects_honestly(acks: usize, n: usize, t: usize) -> bool {
+    let (Some(twice), Some(f)) = (acks.checked_mul(2), t.checked_sub(1)) else {
+        return false;
+    };
+    match n.checked_add(f) {
+        Some(bound) => acks <= n && twice > bound,
+        None => false,
+    }
+}
+
+#[derive(PartialEq, Eq)]
+struct LatchMacAuthority(Vec<[u8; 32]>);
+impl fmt::Debug for LatchMacAuthority {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("LatchMacAuthority([REDACTED])") }
+}
+impl Drop for LatchMacAuthority {
+    fn drop(&mut self) { qsag_asm::volatile_fill(&mut self.0, [0; 32]); }
+}
+impl LatchMacAuthority {
+    fn tag(&self, party: usize, n: usize, t: usize, epoch: u64, binding: &[u8; 32], mask: &[u8]) -> [u8; 32] {
+        cshake256_hash32(b"QSAG.EPOCH.CUSTODIAN.ACK/v1", &encode_multi_frame(&[
+            &self.0[party], &(party as u64).to_be_bytes(), &(n as u64).to_be_bytes(),
+            &(t as u64).to_be_bytes(), &epoch.to_be_bytes(), binding, mask,
+        ]))
+    }
+}
+
+/// Evidence that a latch quorum of a committee reserved one `(epoch, binding)`.
+///
+/// Issued only by [`QuorumEpochLatchCluster::certify_epoch`], after `q` members with
+/// `2q > n + f` (`f = t - 1`) each moved their latch to `(epoch, binding)`. Any two such quorums
+/// share an honest member, and an honest member reserves an epoch for one binding only, so at
+/// most one binding is ever certified per epoch of a cluster. A stateful signer that releases
+/// shares only against a certificate therefore opens at most one codeword per one-time leaf, no
+/// matter which `t` members sign.
+///
+/// The fields are private and there is no other constructor. This is an in-process capability,
+/// like the rest of this crate's single-process protocol drivers: it carries per-custodian MACs verified with a private local authority; a
+/// deployment whose members run on separate hosts has to transport each acknowledgement over
+/// its own authenticated channels before treating it as one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EpochLatchCertificate {
+    n: usize,
+    t: usize,
+    epoch: u64,
+    binding: [u8; 32],
+    /// Acknowledging committee members, strictly increasing.
+    acks: Vec<usize>,
+    signer_mask: Vec<u8>,
+    tags: Vec<[u8; 32]>,
+    authority: Arc<LatchMacAuthority>,
+}
+
+impl EpochLatchCertificate {
+    /// Committee size the certificate was issued for.
+    #[inline]
+    pub const fn committee_size(&self) -> usize {
+        self.n
+    }
+
+    /// Signing threshold `t`; the certificate tolerates `f = t - 1` corrupt members.
+    #[inline]
+    pub const fn threshold(&self) -> usize {
+        self.t
+    }
+
+    /// The reserved one-time epoch.
+    #[inline]
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// The reserved [`epoch_latch_binding`].
+    #[inline]
+    pub const fn binding(&self) -> &[u8; 32] {
+        &self.binding
+    }
+
+    /// The members whose latches reserved `(epoch, binding)`, in increasing order.
+    #[inline]
+    pub fn acknowledging_parties(&self) -> &[usize] {
+        &self.acks
+    }
+
+    /// The signer's own check, made before it releases anything: the certificate is for this
+    /// committee `(n, t)`, its acknowledging set is a set of distinct members satisfying
+    /// `2q > n + (t - 1)`, and it reserves exactly `epoch` for exactly `binding`.
+    pub fn verify_for(
+        &self,
+        n: usize,
+        t: usize,
+        epoch: u64,
+        binding: &[u8; 32],
+    ) -> Result<(), EpochLatchError> {
+        let distinct_members = self.acks.windows(2).all(|w| w[0] < w[1])
+            && self.acks.last().is_none_or(|&p| p < n);
+        if t == 0 || self.n != n || self.t != t || !distinct_members {
+            return Err(EpochLatchError::CertificateCommitteeMismatch);
+        }
+        if !latch_quorum_intersects_honestly(self.acks.len(), n, t) {
+            let f = t - 1;
+            return Err(EpochLatchError::QuorumInsufficient {
+                accepted: self.acks.len(),
+                required_latch_quorum: (n.saturating_add(f) / 2).saturating_add(1),
+            });
+        }
+        if self.authority.0.len() != n || self.tags.len() != self.acks.len()
+            || self.signer_mask.len() != n.div_ceil(8) { return Err(EpochLatchError::CertificateCommitteeMismatch); }
+        let mut expected_mask = vec![0u8; n.div_ceil(8)];
+        let mut valid_acks = 0;
+        for (&party, tag) in self.acks.iter().zip(&self.tags) {
+            expected_mask[party / 8] |= 1 << (party % 8);
+            valid_acks += usize::from(ct_eq_bytes32(tag, &self.authority.tag(party, n, t, self.epoch, &self.binding, &self.signer_mask)));
+        }
+        if expected_mask != self.signer_mask || !latch_quorum_intersects_honestly(valid_acks, n, t) {
+            return Err(EpochLatchError::CertificateCommitteeMismatch);
+        }
+        if self.epoch != epoch {
+            return Err(EpochLatchError::CertificateEpochMismatch {
+                certified_epoch: self.epoch,
+                requested_epoch: epoch,
+            });
+        }
+        if !ct_eq_bytes32(&self.binding, binding) {
+            return Err(EpochLatchError::CertificateBindingMismatch { epoch });
+        }
+        Ok(())
+    }
+}
+
+/// Committee-wide epoch-latch cluster enforcing quorum intersection `2 * latch_quorum > n + f`.
+///
+/// One cluster belongs to one key: `signer_latches[p]` is member `p`'s latch for that key, and
+/// the uniqueness of a certified binding per epoch holds per cluster. The states are plain
+/// values mirrored from the custodians' durable WALs, persisted before certification.
+///
+/// ### Availability
+/// The latch quorum is `floor((n + f) / 2) + 1`, which is larger than the signing threshold
+/// `t = f + 1` whenever `n > t`, and it must be reached while up to `f` members are faulty:
+///
+/// | `(t, n, f)` | latch quorum | reachable with `f` members silent |
+/// |---|---|---|
+/// | `(2, 3, 1)` | 3 | no: all three members must acknowledge |
+/// | `(3, 5, 2)` | 4 | no: only 3 are guaranteed to respond |
+/// | `(3, 7, 2)` | 5 | yes |
+///
+/// A stateful key therefore stays live under `f = t - 1` faults only when `n >= 3t - 2`. In a
+/// `(2, 3)` committee any two members can run the signing MPC, but every signature first needs
+/// all three latches, so one unavailable member stops signing.
+pub struct QuorumEpochLatchCluster {
+    n: usize,
+    max_faulty: usize,
+    latch_quorum: usize,
+    signer_latches: Vec<EpochLatchState>,
+    authority: Arc<LatchMacAuthority>,
+    #[cfg(feature = "std")]
+    durable_latches: Option<Vec<FsWalEpochLatch>>,
+}
+
+impl QuorumEpochLatchCluster {
+    pub const fn committee_size(&self) -> usize { self.n }
+    pub const fn max_faulty(&self) -> usize { self.max_faulty }
+    pub const fn latch_quorum(&self) -> usize { self.latch_quorum }
+    pub fn signer_latches(&self) -> &[EpochLatchState] { &self.signer_latches }
+
+    #[cfg(test)]
+    pub fn new(n: usize, max_faulty: usize) -> Option<Self> {
+        let sum = n.checked_add(max_faulty)?;
+        let latch_quorum = (sum / 2).checked_add(1)?;
+        if latch_quorum > n || latch_quorum.checked_mul(2)? <= sum {
+            return None;
+        }
+        Some(Self {
+            n,
+            max_faulty,
+            latch_quorum,
+            signer_latches: (0..n).map(|_| EpochLatchState::new()).collect(),
+            authority: Arc::new(LatchMacAuthority((0..n).map(|i| cshake256_hash32(b"TEST-ONLY-LATCH-KEY", &(i as u64).to_be_bytes())).collect())),
+            #[cfg(feature = "std")]
+            durable_latches: None,
+        })
+    }
+
+    /// Production enrollment/recovery. Each custodian owns a locked, authenticated WAL.
+    /// MAC keys must be independently provisioned secrets, stable across recovery.
+    #[cfg(feature = "std")]
+    pub fn from_durable_latches(max_faulty: usize, latches: Vec<FsWalEpochLatch>, mac_keys: Vec<[u8; 32]>) -> Option<Self> {
+        let authority = Arc::new(LatchMacAuthority(mac_keys));
+        let n = latches.len();
+        let sum = n.checked_add(max_faulty)?;
+        let latch_quorum = sum.checked_div(2)?.checked_add(1)?;
+        if n == 0 || latch_quorum > n || authority.0.len() != n { return None; }
+        for p in 0..n {
+            if ct_eq_bytes32(&authority.0[p], &[0; 32])
+                || authority.0[..p].iter().any(|k| ct_eq_bytes32(k, &authority.0[p])) { return None; }
+        }
+        let signer_latches = latches.iter().map(|latch| EpochLatchState { high_water: latch.in_flight() }).collect();
+        Some(Self { n, max_faulty, latch_quorum, signer_latches,
+            authority, durable_latches: Some(latches) })
+    }
+
+    /// Authenticate a certificate using this cluster's provisioned custodian keys.
+    pub fn verify_certificate(&self, certificate: &EpochLatchCertificate, epoch: u64, binding: &[u8; 32]) -> Result<(), EpochLatchError> {
+        if self.authority.0.len() != certificate.authority.0.len() {
+            return Err(EpochLatchError::CertificateCommitteeMismatch);
+        }
+        let same_authority = self.authority.0.iter().zip(&certificate.authority.0)
+            .fold(true, |same, (a, b)| same & ct_eq_bytes32(a, b));
+        if !same_authority { return Err(EpochLatchError::CertificateCommitteeMismatch); }
+        certificate.verify_for(self.n, self.max_faulty + 1, epoch, binding)
+    }
+
+    /// The lowest epoch no member has reserved yet: the epoch to propose for the next signature.
+    /// `None` once a member's latch is at `u64::MAX`.
+    pub fn next_unreserved_epoch(&self) -> Option<u64> {
+        let mut next = 0u64;
+        for latch in &self.signer_latches {
+            if let Some((hw, _)) = latch.high_water {
+                next = next.max(hw.checked_add(1)?);
+            }
+        }
+        Some(next)
+    }
+
+    /// Validate quorum acceptance before persisting the accepted reservations.
+    /// A later I/O failure retains earlier durable burns and issues no certificate;
+    /// successful reservations return accepting members in increasing order.
+    fn reserve_quorum(
+        &mut self,
+        participating_signers: &[usize],
+        epoch: u64,
+        mu: [u8; 32],
+        required: usize,
+    ) -> Result<Vec<usize>, EpochLatchError> {
+        let mut seen = vec![false; self.n];
+        for &p in participating_signers {
+            if p >= self.n {
+                return Err(EpochLatchError::InvalidParticipant {
+                    party: p,
+                    committee_size: self.n,
+                });
+            }
+            if seen[p] {
+                return Err(EpochLatchError::DuplicateParticipant { party: p });
+            }
+            seen[p] = true;
+        }
+
+        let mut staged: Vec<EpochLatchState> =
+            self.signer_latches.iter().map(|s| s.stage_copy()).collect();
+        let mut accepted = Vec::with_capacity(participating_signers.len());
+        let mut first_err: Option<EpochLatchError> = None;
+        for &p in participating_signers {
+            match staged[p].step_epoch_latch(epoch, mu) {
+                Ok(()) => accepted.push(p),
+                Err(e) => {
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
+            }
+        }
+        if accepted.len() >= required {
+            // Persist each burn before certification. A partial I/O failure may burn capacity,
+            // but never issues a certificate or rolls an already durable reservation back.
+            #[cfg(feature = "std")]
+            if let Some(wals) = &mut self.durable_latches {
+                for &p in &accepted {
+                    wals[p].reserve_epoch_at(epoch, 62, &mu).map_err(|_| EpochLatchError::PersistenceFailure)?;
+                    self.signer_latches[p] = staged[p].stage_copy();
+                }
+            }
+            self.signer_latches = staged;
+            accepted.sort_unstable();
+            Ok(accepted)
+        } else if let Some(err) = first_err {
+            Err(err)
+        } else {
+            Err(EpochLatchError::QuorumInsufficient {
+                accepted: accepted.len(),
+                required_latch_quorum: required,
+            })
+        }
+    }
+
+    pub fn acquire_latch_quorum(
+        &mut self,
+        participating_signers: &[usize],
+        epoch: u64,
+        mu: [u8; 32],
+    ) -> Result<(), EpochLatchError> {
+        self.reserve_quorum(participating_signers, epoch, mu, self.latch_quorum)
+            .map(|_| ())
+    }
+
+    /// Reserve `(epoch, binding)` in a latch quorum and return the certificate a stateful signer
+    /// requires. `binding` is [`epoch_latch_binding`] of the key, `epoch` and the message digest.
+    ///
+    /// Fails, leaving every latch as it was, unless at least `latch_quorum` of
+    /// `participating_signers` accept: a member refuses an epoch below its high-water mark, and
+    /// refuses its high-water epoch for any other binding. Asking again for the same
+    /// `(epoch, binding)` is idempotent and returns an equal certificate for the same members.
+    pub fn certify_epoch(
+        &mut self,
+        participating_signers: &[usize],
+        epoch: u64,
+        binding: [u8; 32],
+    ) -> Result<EpochLatchCertificate, EpochLatchError> {
+        let (Some(t), Some(sum)) = (
+            self.max_faulty.checked_add(1),
+            self.n.checked_add(self.max_faulty),
+        ) else {
+            return Err(EpochLatchError::CertificateCommitteeMismatch);
+        };
+        // Recompute the intersection requirement from the immutable committee parameters.
+        let required = self.latch_quorum.max((sum / 2).saturating_add(1));
+        let acks = self.reserve_quorum(participating_signers, epoch, binding, required)?;
+        let mut signer_mask = vec![0u8; self.n.div_ceil(8)];
+        for &party in &acks { signer_mask[party / 8] |= 1 << (party % 8); }
+        let tags = acks.iter().map(|&p| self.authority.tag(p, self.n, t, epoch, &binding, &signer_mask)).collect();
+        let cert = EpochLatchCertificate {
+            n: self.n,
+            t,
+            epoch,
+            binding,
+            acks, signer_mask, tags, authority: Arc::clone(&self.authority),
+        };
+        cert.verify_for(self.n, t, epoch, &binding)?;
+        Ok(cert)
+    }
+}
+
+
+impl core::error::Error for DkgError {}
+
+impl core::fmt::Display for EpochLatchError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl core::error::Error for EpochLatchError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn durable_cluster_recovery_and_mac_corruption() {
+        let dir = std::env::temp_dir().join(format!("qsag-latch-cluster-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&dir).unwrap();
+        let wals = (0..3).map(|p| FsWalEpochLatch::create_new_for_fresh_key(dir.join(p.to_string()), [p+1; 32]).unwrap()).collect();
+        let keys = vec![[0x11; 32], [0x22; 32], [0x33; 32]];
+        let mut cluster = QuorumEpochLatchCluster::from_durable_latches(1, wals, keys.clone()).unwrap();
+        let cert = cluster.certify_epoch(&[0, 1, 2], 5, [8; 32]).unwrap();
+        cluster.verify_certificate(&cert, 5, &[8; 32]).unwrap();
+        let mut bad = cert.clone(); bad.tags[0][0] ^= 1;
+        assert!(cluster.verify_certificate(&bad, 5, &[8; 32]).is_err());
+        let mut bad = cert.clone(); bad.signer_mask[0] ^= 1;
+        assert!(cluster.verify_certificate(&bad, 5, &[8; 32]).is_err());
+        drop(cluster);
+        let wals = (0..3).map(|p| FsWalEpochLatch::open_existing(dir.join(p.to_string()), [p+1; 32]).unwrap()).collect();
+        let mut cluster = QuorumEpochLatchCluster::from_durable_latches(1, wals, keys).unwrap();
+        assert_eq!(cluster.next_unreserved_epoch(), Some(6));
+        cluster.verify_certificate(&cert, 5, &[8; 32]).unwrap();
+        assert!(cluster.certify_epoch(&[0, 1, 2], 5, [9; 32]).is_err());
+        assert!(cluster.certify_epoch(&[0, 1, 2], 4, [8; 32]).is_err());
+    }
+
+    fn make_rngs(n: usize, tag: u8) -> Vec<PartyPrivateRng> {
+        (0..n)
+            .map(|i| {
+                let mut s = [0u8; 32];
+                s[0] = tag;
+                s[1] = (i + 1) as u8;
+                PartyPrivateRng::from_seed(s, b"dkg-test")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_gf256_dkg_refresh_reshare_and_spdz_booleanity_adversarial_rejection() {
+        check_gf256_dkg(2, 2, 3, 3);
+    }
+
+    #[test]
+    #[ignore = "Larger committee DKG/refresh/reshare soak; the same protocol checks run with 2-of-2 to 3-of-3 by default"]
+    fn gf256_larger_committee_soak() {
+        check_gf256_dkg(3, 4, 4, 5);
+    }
+
+    fn check_gf256_dkg(old_t: usize, old_n: usize, new_t: usize, new_n: usize) {
+        let sid = [0x11; 32];
+        // Both default and soak profiles retain dishonest-majority thresholds.
+        let old_pts: Vec<TowerGf256> = (1..=old_n as u8).map(TowerGf256).collect();
+        let mut rngs = make_rngs(old_n, 0x20);
+        let mut old_mesh = OtMesh::establish(sid, &mut rngs);
+
+        // `[P0-10]` regression guard: `eval_points` zero or duplicate at index `>= t` MUST fail!
+        let mut bad_pts = old_pts.clone();
+        bad_pts[old_n - 1] = TowerGf256::ZERO;
+        assert_eq!(
+            run_dealerless_dkg_seed32_gf256(sid, old_t.min(old_n - 1), &bad_pts, &mut old_mesh, &mut rngs)
+                .unwrap_err(),
+            DkgError::InvalidEvaluationPoints
+        );
+
+        // 1. Dealerless two-round DKG.
+        let (mut old_shares, _pk_seed) =
+            run_dealerless_dkg_seed32_gf256(sid, old_t, &old_pts, &mut old_mesh, &mut rngs)
+                .unwrap();
+        let secret_initial =
+            shamir_reconstruct_seed32_gf256(&old_shares.iter().take(old_t).collect::<Vec<_>>())
+                .unwrap();
+
+        // Adversarial regression: a dealer sharing `\beta \in GF(2^8) \ GF(2)`
+        // (`TowerGf256(0x02)`) MUST be caught by `spdz_verify_seed256_boolean_gf256` at exact bit index!
+        let mut bad_bits = vec![[TowerGf256::ZERO; 256]; old_n];
+        let mut beta_coeffs = [TowerGf256(0x02), TowerGf256(0x55), TowerGf256(0xAA)];
+        for p in 0..old_n {
+            for b in 0..256 {
+                bad_bits[p][b] = old_shares[p].bit_shares[b];
+            }
+            bad_bits[p][137] = bad_bits[p][137].add(eval_poly_gf256(&beta_coeffs[..old_t], old_pts[p]));
+        }
+        wipe_gf256_slice(&mut beta_coeffs);
+        assert_eq!(
+            spdz_verify_seed256_boolean_gf256(
+                &[0x19; 32],
+                old_t,
+                &old_pts,
+                &mut old_mesh,
+                &bad_bits,
+                &mut rngs,
+            )
+            .unwrap_err(),
+            DkgError::NonBooleanSeedBitDetected { bit_idx: 137 }
+        );
+
+        // 2. Dealerless refresh.
+        let before_p0 = old_shares[0].bit_shares;
+        run_dealerless_refresh_seed32_gf256(
+            [0x12; 32],
+            old_t,
+            &old_pts,
+            &mut old_shares,
+            &mut rngs,
+        )
+        .unwrap();
+        assert_ne!(old_shares[0].bit_shares, before_p0);
+        assert_eq!(old_shares[0].generation, 1);
+        let secret_after_refresh =
+            shamir_reconstruct_seed32_gf256(&old_shares.iter().rev().take(old_t).collect::<Vec<_>>())
+                .unwrap();
+        assert_eq!(secret_after_refresh, secret_initial);
+
+        // Reshare to a larger dishonest-majority threshold.
+        let new_pts: Vec<TowerGf256> = (1..=new_n as u8).map(TowerGf256).collect();
+        let mut reshare_rngs = make_rngs(old_t, 0x30);
+        let mut new_rngs = make_rngs(new_n, 0x31);
+        let mut new_mesh = OtMesh::establish([0x13; 32], &mut new_rngs);
+        let new_shares = run_dealerless_reshare_seed32_gf256(
+            [0x14; 32],
+            old_t,
+            &(0..old_t).collect::<Vec<_>>(),
+            &mut old_shares,
+            new_t,
+            &new_pts,
+            &mut new_mesh,
+            &mut reshare_rngs,
+            &mut new_rngs,
+            &secret_initial,
+            |shares| shamir_reconstruct_seed32_gf256(&shares[..new_t].iter().collect::<Vec<_>>())
+                .ok_or(DkgError::PublicRootMismatch),
+        )
+        .unwrap();
+
+        for sh in &old_shares {
+            assert!(!sh.is_valid());
+            assert_eq!(sh.bit_shares, [TowerGf256::ZERO; 256]);
+        }
+
+        let reshared_secret = shamir_reconstruct_seed32_gf256(&new_shares.iter().rev().take(new_t).collect::<Vec<_>>())
+        .unwrap();
+        assert_eq!(reshared_secret, secret_initial);
+    }
+
+    #[test]
+    fn test_goldilocks_dkg_refresh_reshare_and_eval_points_guard() {
+        check_goldilocks_dkg(2, 2, 3, 3);
+    }
+
+    #[test]
+    #[ignore = "Larger committee DKG/refresh/reshare soak; the same protocol checks run with 2-of-2 to 3-of-3 by default"]
+    fn goldilocks_larger_committee_soak() {
+        check_goldilocks_dkg(3, 4, 4, 5);
+    }
+
+    fn check_goldilocks_dkg(old_t: usize, old_n: usize, new_t: usize, new_n: usize) {
+        let sid = [0x44; 32];
+        // Both default and soak profiles retain dishonest-majority thresholds.
+        let old_pts: Vec<Goldilocks> = (1..=old_n as u64).map(Goldilocks::from_u64_reduced).collect();
+        let mut rngs = make_rngs(old_n, 0x50);
+        let mut mesh = OtMesh::establish(sid, &mut rngs);
+
+        // `[P0-10]` regression guard on `eval_points[t..n]` (including an index outside the threshold)!
+        let mut bad_pts = old_pts.clone();
+        bad_pts[old_n - 1] = Goldilocks::ZERO;
+        assert_eq!(
+            run_dealerless_dkg_seed32_goldilocks(sid, old_t.min(old_n - 1), &bad_pts, &mut mesh, &mut rngs)
+                .unwrap_err(),
+            DkgError::InvalidEvaluationPoints
+        );
+
+        let (mut old_shares, _pk_seed) =
+            run_dealerless_dkg_seed32_goldilocks(sid, old_t, &old_pts, &mut mesh, &mut rngs)
+                .unwrap();
+        let secret_initial = shamir_reconstruct_seed32_goldilocks(&old_shares.iter().take(old_t).collect::<Vec<_>>())
+        .unwrap();
+
+        // Non-Boolean share injection (`bit 77` shifted by `2`) MUST fail SPDZ Booleanity check!
+        let mut bad_gl_bits = vec![[Goldilocks::ZERO; 256]; old_n];
+        let bad_poly = [
+            Goldilocks::from_u64_reduced(2),
+            Goldilocks::from_u64_reduced(9),
+            Goldilocks::from_u64_reduced(17),
+        ];
+        for p in 0..old_n {
+            bad_gl_bits[p] = old_shares[p].bit_shares;
+            bad_gl_bits[p][77] += eval_poly_goldilocks(&bad_poly[..old_t], old_pts[p]);
+        }
+        assert_eq!(
+            spdz_verify_seed256_boolean_goldilocks(
+                &[0x45; 32],
+                old_t,
+                &old_pts,
+                &mut mesh,
+                &bad_gl_bits,
+                &mut rngs,
+            )
+            .unwrap_err(),
+            DkgError::NonBooleanSeedDetected
+        );
+
+        // Refresh.
+        let p0_before = old_shares[0].byte_shares;
+        run_dealerless_refresh_seed32_goldilocks(
+            [0x46; 32],
+            old_t,
+            &old_pts,
+            &mut old_shares,
+            &mut rngs,
+        )
+        .unwrap();
+        assert_ne!(old_shares[0].byte_shares, p0_before);
+        let secret_refreshed = shamir_reconstruct_seed32_goldilocks(&old_shares.iter().rev().take(old_t).collect::<Vec<_>>())
+        .unwrap();
+        assert_eq!(secret_refreshed, secret_initial);
+
+        // Reshare to a larger dishonest-majority threshold.
+        let new_pts: Vec<Goldilocks> = (1..=new_n as u64).map(Goldilocks::from_u64_reduced).collect();
+        let mut reshare_rngs = make_rngs(old_t, 0x60);
+        let mut new_rngs = make_rngs(new_n, 0x61);
+        let mut new_mesh = OtMesh::establish([0x47; 32], &mut new_rngs);
+        let new_shares = run_dealerless_reshare_seed32_goldilocks(
+            [0x48; 32],
+            old_t,
+            &(0..old_t).collect::<Vec<_>>(),
+            &mut old_shares,
+            new_t,
+            &new_pts,
+            &mut new_mesh,
+            &mut reshare_rngs,
+            &mut new_rngs,
+            &secret_initial,
+            |shares| shamir_reconstruct_seed32_goldilocks(&shares[..new_t].iter().collect::<Vec<_>>())
+                .ok_or(DkgError::PublicRootMismatch),
+        )
+        .unwrap();
+        for sh in &old_shares {
+            assert!(!sh.is_valid());
+        }
+        let reshared_secret = shamir_reconstruct_seed32_goldilocks(&new_shares.iter().rev().take(new_t).collect::<Vec<_>>())
+        .unwrap();
+        assert_eq!(reshared_secret, secret_initial);
+    }
+
+    /// A latch certificate exists only for a quorum with `2q > n + f`, at most one binding is
+    /// certified per epoch, and the signer-side check rejects every mismatch.
+    #[test]
+    fn test_quorum_epoch_latch_certificate_quorum_and_binding_rules() {
+        // Latch quorum per (t, n, f = t - 1), and whether n - f responders can reach it.
+        for (t, n, quorum, live) in [(2usize, 3usize, 3usize, false), (3, 5, 4, false), (3, 7, 5, true), (2, 2, 2, false)] {
+            let cluster = QuorumEpochLatchCluster::new(n, t - 1).unwrap();
+            assert_eq!(cluster.latch_quorum, quorum);
+            assert!(latch_quorum_intersects_honestly(quorum, n, t));
+            assert!(!latch_quorum_intersects_honestly(quorum - 1, n, t));
+            assert_eq!(quorum <= n - (t - 1), live);
+        }
+        assert!(!latch_quorum_intersects_honestly(4, 3, 2));
+        assert!(!latch_quorum_intersects_honestly(3, 3, 0));
+
+        let (pk_seed, pk_root) = ([0x01; 32], [0x02; 32]);
+        let (mu_a, mu_b) = ([0xaa; 32], [0xbb; 32]);
+        let bind_a = epoch_latch_binding(&pk_seed, &pk_root, 4, &mu_a);
+        let bind_b = epoch_latch_binding(&pk_seed, &pk_root, 4, &mu_b);
+        // The binding separates key, epoch and message.
+        assert_ne!(bind_a, bind_b);
+        assert_ne!(bind_a, epoch_latch_binding(&pk_seed, &pk_root, 5, &mu_a));
+        assert_ne!(bind_a, epoch_latch_binding(&[0x03; 32], &pk_root, 4, &mu_a));
+        assert_ne!(bind_a, epoch_latch_binding(&pk_seed, &[0x03; 32], 4, &mu_a));
+
+        // (3, 5): quorum 4. Three acknowledgements certify nothing and reserve nothing.
+        let mut cluster = QuorumEpochLatchCluster::new(5, 2).unwrap();
+        assert_eq!(cluster.next_unreserved_epoch(), Some(0));
+        assert_eq!(
+            cluster.certify_epoch(&[0, 3, 4], 4, bind_a),
+            Err(EpochLatchError::QuorumInsufficient {
+                accepted: 3,
+                required_latch_quorum: 4
+            })
+        );
+        assert!(cluster.signer_latches.iter().all(|l| l.high_water.is_none()));
+        assert_eq!(
+            cluster.certify_epoch(&[0, 0, 3, 4], 4, bind_a),
+            Err(EpochLatchError::DuplicateParticipant { party: 0 })
+        );
+        assert_eq!(
+            cluster.certify_epoch(&[0, 3, 4, 5], 4, bind_a),
+            Err(EpochLatchError::InvalidParticipant {
+                party: 5,
+                committee_size: 5
+            })
+        );
+
+        let cert = cluster.certify_epoch(&[4, 0, 3, 2], 4, bind_a).unwrap();
+        assert_eq!(cert.acknowledging_parties(), &[0, 2, 3, 4]);
+        assert_eq!((cert.committee_size(), cert.threshold(), cert.epoch()), (5, 3, 4));
+        assert_eq!(cert.binding(), &bind_a);
+        assert_eq!(cluster.next_unreserved_epoch(), Some(5));
+        assert_eq!(cert.verify_for(5, 3, 4, &bind_a), Ok(()));
+        // Asking again for the same reservation returns the same certificate.
+        assert_eq!(cluster.certify_epoch(&[0, 2, 3, 4], 4, bind_a), Ok(cert.clone()));
+
+        // (t, n) = (3, 5) with P3 and P4 corrupt: they acknowledged (4, A) and now discard that
+        // state to acknowledge (4, B) together with P1, which was absent. Three acknowledgements
+        // are not a quorum, and the fourth has to come from P0 or P2, which hold (4, A).
+        cluster.signer_latches[3] = EpochLatchState::new();
+        cluster.signer_latches[4] = EpochLatchState::new();
+        assert_eq!(
+            cluster.certify_epoch(&[1, 3, 4], 4, bind_b),
+            Err(EpochLatchError::QuorumInsufficient {
+                accepted: 3,
+                required_latch_quorum: 4
+            })
+        );
+        for q2 in [[1usize, 3, 4, 0], [1, 3, 4, 2]] {
+            assert_eq!(
+                cluster.certify_epoch(&q2, 4, bind_b),
+                Err(EpochLatchError::EquivocationRefused { epoch: 4 })
+            );
+        }
+        assert!(cluster.certify_epoch(&[0, 1, 2, 3, 4], 4, bind_b).is_err());
+        // The refused attempts reserved nothing, also not in the absent honest member.
+        assert_eq!(cluster.signer_latches[1].high_water, None);
+        assert_eq!(cluster.signer_latches[0].high_water, Some((4, bind_a)));
+        // An epoch below the high-water mark is refused as stale.
+        assert_eq!(
+            cluster.certify_epoch(&[0, 2, 3, 4], 3, bind_b),
+            Err(EpochLatchError::StaleEpochReplay {
+                requested_epoch: 3,
+                high_water: 4
+            })
+        );
+
+        // Signer-side checks.
+        assert_eq!(
+            cert.verify_for(5, 3, 4, &bind_b),
+            Err(EpochLatchError::CertificateBindingMismatch { epoch: 4 })
+        );
+        assert_eq!(
+            cert.verify_for(5, 3, 5, &bind_a),
+            Err(EpochLatchError::CertificateEpochMismatch {
+                certified_epoch: 4,
+                requested_epoch: 5
+            })
+        );
+        assert_eq!(
+            cert.verify_for(4, 3, 4, &bind_a),
+            Err(EpochLatchError::CertificateCommitteeMismatch)
+        );
+        assert_eq!(
+            cert.verify_for(5, 2, 4, &bind_a),
+            Err(EpochLatchError::CertificateCommitteeMismatch)
+        );
+        // A certificate whose acknowledging set is too small for the signer's (n, t), has a
+        // repeated member, or names a non-member fails the signer's own recount.
+        let forged = |acks: &[usize]| EpochLatchCertificate {
+            n: 5,
+            t: 3,
+            epoch: 4,
+            binding: bind_a,
+            acks: acks.to_vec(),
+            ..cert.clone()
+        };
+        assert_eq!(
+            forged(&[0, 1, 2]).verify_for(5, 3, 4, &bind_a),
+            Err(EpochLatchError::QuorumInsufficient {
+                accepted: 3,
+                required_latch_quorum: 4
+            })
+        );
+        assert_eq!(
+            forged(&[0, 1, 1, 2]).verify_for(5, 3, 4, &bind_a),
+            Err(EpochLatchError::CertificateCommitteeMismatch)
+        );
+        assert_eq!(
+            forged(&[0, 1, 2, 5]).verify_for(5, 3, 4, &bind_a),
+            Err(EpochLatchError::CertificateCommitteeMismatch)
+        );
+
+        // A cluster whose public quorum field was lowered still cannot issue a certificate.
+        let mut lowered = QuorumEpochLatchCluster::new(3, 1).unwrap();
+        lowered.latch_quorum = 2;
+        assert_eq!(
+            lowered.certify_epoch(&[0, 1], 0, bind_a),
+            Err(EpochLatchError::QuorumInsufficient {
+                accepted: 2,
+                required_latch_quorum: 3
+            })
+        );
+        assert!(lowered.signer_latches.iter().all(|l| l.high_water.is_none()));
+    }
+
+    /// `reserve_epoch_at` on the per-member latch types: skip forward, idempotent on the
+    /// in-flight reservation, never backwards, never a second digest for one epoch.
+    #[test]
+    fn test_reserve_epoch_at_skips_forward_and_refuses_reuse() {
+        fn exercise<L: StatefulEpochLatch>(mut latch: L) {
+            let (mu_a, mu_b) = ([0x0a; 32], [0x0b; 32]);
+            assert_eq!(latch.peek_next_epoch(), 0);
+            assert_eq!(latch.check_reserve_epoch_at(5, 4, &mu_a), Ok(false));
+            assert_eq!(latch.peek_next_epoch(), 0);
+            assert_eq!(latch.reserve_epoch_at(5, 4, &mu_a), Ok(()));
+            assert_eq!(latch.peek_next_epoch(), 6);
+            assert_eq!(latch.peek_in_flight(), Some((5, mu_a)));
+            assert_eq!(latch.check_reserve_epoch_at(5, 4, &mu_a), Ok(true));
+            assert_eq!(latch.reserve_epoch_at(5, 4, &mu_a), Ok(()));
+            assert_eq!(
+                latch.reserve_epoch_at(5, 4, &mu_b),
+                Err(StatefulLatchError::EquivocationRefused)
+            );
+            assert_eq!(latch.reserve_epoch_at(3, 4, &mu_b), Err(StatefulLatchError::StaleEpoch));
+            assert_eq!(latch.reserve_epoch_at(16, 4, &mu_b), Err(StatefulLatchError::Exhausted));
+            assert_eq!(
+                latch.reserve_epoch_at(7, 0, &mu_b),
+                Err(StatefulLatchError::InvalidCapacity)
+            );
+            assert_eq!(latch.peek_next_epoch(), 6);
+            assert_eq!(latch.peek_in_flight(), Some((5, mu_a)));
+            assert_eq!(latch.reserve_next_epoch(4, &mu_b), Ok(6));
+            assert_eq!(latch.retry_latched_epoch(6, &mu_b), Ok(6));
+        }
+        exercise(MonotonicEpochLatch::new(0));
+        exercise(EpochLatchState::new());
+        #[cfg(feature = "std")]
+        {
+            let mut dir = std::env::temp_dir();
+            dir.push(alloc::format!("qsag_reserve_at_test_{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let wal_path = dir.join("signer0.wal");
+            exercise(FsWalEpochLatch::create_new_for_fresh_key(&wal_path, [0x77; 32]).unwrap());
+            // The skipped-to reservation is what a restart recovers.
+            let recovered = FsWalEpochLatch::open_existing(&wal_path, [0x77; 32]).unwrap();
+            assert_eq!(recovered.next_epoch(), 7);
+            assert_eq!(recovered.in_flight(), Some((6, [0x0b; 32])));
+            drop(recovered);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn test_epoch_latch_monotonicity_equivocation_refusal_and_auth_codec() {
+        let key = [0x7E; 32];
+        let mut latch = EpochLatchState::new();
+        let raw0 = latch.to_authenticated_bytes(&key);
+        assert_eq!(
+            EpochLatchState::from_authenticated_bytes(&raw0, &key).unwrap(),
+            latch
+        );
+
+        let mu1 = [0xAA; 32];
+        let mu2 = [0xBB; 32];
+        latch.step_epoch_latch(10, mu1).unwrap();
+        latch.step_epoch_latch(10, mu1).unwrap();
+        assert_eq!(
+            latch.step_epoch_latch(10, mu2),
+            Err(EpochLatchError::EquivocationRefused { epoch: 10 })
+        );
+        assert_eq!(
+            latch.step_epoch_latch(9, mu1),
+            Err(EpochLatchError::StaleEpochReplay {
+                requested_epoch: 9,
+                high_water: 10
+            })
+        );
+
+        let mut raw1 = latch.to_authenticated_bytes(&key);
+        assert_eq!(
+            EpochLatchState::from_authenticated_bytes(&raw1, &key).unwrap(),
+            latch
+        );
+        raw1[16] ^= 1;
+        assert_eq!(
+            EpochLatchState::from_authenticated_bytes(&raw1, &key),
+            Err(DkgError::LatchAuthenticationFailed)
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_fs_wal_epoch_latch_durable_crash_recovery_and_tamper_rejection() {
+        let mut dir = std::env::temp_dir();
+        dir.push(alloc::format!("qsag_wal_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let wal_path = dir.join("signer0.wal");
+        let mac_key = [0x5C; 32];
+        let mu0 = [0xA1; 32];
+        let mu1 = [0xB2; 32];
+
+        {
+            let mut wal = FsWalEpochLatch::create_new_for_fresh_key(&wal_path, mac_key).unwrap();
+            assert_eq!(wal.next_epoch(), 0);
+            assert!(FsWalEpochLatch::open_existing(&wal_path, mac_key).is_err());
+            let ep0 = wal.reserve_next_epoch(10, &mu0).unwrap();
+            assert_eq!(ep0, 0);
+            assert_eq!(wal.next_epoch(), 1);
+            // Simulate process crash right here (before signature completes)
+        }
+
+        {
+            // Reopen from `fsync` WAL file: `next_epoch` MUST be `1` (never `0`!)
+            let mut wal_recovered = FsWalEpochLatch::open_or_create(&wal_path, mac_key).unwrap();
+            assert_eq!(wal_recovered.next_epoch(), 1);
+            // Idempotent crash-retry on `(0, mu0)` succeeds; equivocation on `(0, mu1)` fails!
+            assert_eq!(wal_recovered.retry_latched_epoch(0, &mu0), Ok(0));
+            assert_eq!(
+                wal_recovered.retry_latched_epoch(0, &mu1),
+                Err(StatefulLatchError::EquivocationRefused)
+            );
+            // Next fresh reservation strictly advances to epoch `1`!
+            assert_eq!(wal_recovered.reserve_next_epoch(10, &mu1), Ok(1));
+        }
+
+        // Flip 1 byte in on-disk WAL -> `open_or_create` MUST fail closed!
+        let mut disk_bytes = std::fs::read(&wal_path).unwrap();
+        disk_bytes[15] ^= 0x01;
+        std::fs::write(&wal_path, &disk_bytes).unwrap();
+        assert_eq!(
+            FsWalEpochLatch::open_or_create(&wal_path, mac_key).unwrap_err(),
+            StatefulLatchError::PersistenceFailure
+        );
+
+        std::fs::remove_file(&wal_path).unwrap();
+        assert!(FsWalEpochLatch::open_existing(&wal_path, mac_key).is_err());
+        assert!(FsWalEpochLatch::create_new_for_fresh_key(&wal_path, mac_key).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod pre_dkg_regressions {
+    use super::*;
+
+    #[test]
+    fn unindexed_booleanity_error_does_not_invent_bit_zero() {
+        assert_eq!(DkgError::from(PreprocessError::NonBooleanBitDetected {
+            phase: "regression",
+        }), DkgError::NonBooleanSeedDetected);
+    }
+
+    #[test]
+    fn reshare_root_failure_preserves_old_custody_in_both_fields() {
+        let mut old = vec![ShamirSeedShare256::new(0, 0, TowerGf256::ONE,
+            [TowerGf256::ONE; 256])];
+        let result = finish_reshare(&mut old, Vec::new(), &[1; 32], |_| Ok([2; 32]),
+            ShamirSeedShare256::wipe_and_invalidate);
+        assert!(matches!(result, Err(DkgError::PublicRootMismatch)));
+        assert!(old[0].is_valid());
+        assert_eq!(old[0].bit_shares, [TowerGf256::ONE; 256]);
+        let mut old = vec![ShamirPoseidonSeedShare::from_bit_shares(0, 0, Goldilocks::ONE,
+            [Goldilocks::ONE; 256])];
+        for root in [Ok([2; 32]), Err(DkgError::NonBooleanSeedDetected)] {
+            assert!(finish_reshare(&mut old, Vec::new(), &[1; 32], |_| root,
+                ShamirPoseidonSeedShare::wipe_and_invalidate).is_err());
+            assert!(old[0].is_valid());
+            assert_eq!(old[0].bit_shares, [Goldilocks::ONE; 256]);
+        }
+        finish_reshare(&mut old, Vec::new(), &[1; 32], |_| Ok([1; 32]),
+            ShamirPoseidonSeedShare::wipe_and_invalidate).unwrap();
+        assert!(!old[0].is_valid());
+        assert_eq!(old[0].bit_shares, [Goldilocks::ZERO; 256]);
+    }
+
+    #[test]
+    fn unauthenticated_complaints_cannot_frame_an_honest_dealer() {
+        let sid = [0x51; 32];
+        let joint = [0x52; 32];
+        let pts = [Goldilocks::ONE, Goldilocks::from_u64_reduced(2)];
+        let (mut r1, pending, packets) = GoldilocksDealerRound1Commit::commit_round1(
+            &sid, 0, 1, &pts, vec![Goldilocks::ONE], vec![GoldilocksExt2::ONE],
+            &[[0x53; 32], [0x54; 32]], [0x55; 32], [0x56; 32],
+        ).unwrap();
+        let r2 = pending.open_round2(&sid, 1, &pts, &joint);
+        let honest = DkgShareComplaint {
+            recv_idx: 0,
+            committed_digest: r1.share_commitments[0],
+            dealer_opened_salt: packets[0].salt.to_vec(),
+            dealer_opened_share_bytes: packets[0].encode_share_bytes().to_vec(),
+        };
+        let mut false_share = honest.clone();
+        false_share.dealer_opened_share_bytes[0] ^= 1;
+        let mut false_salt = honest.clone();
+        false_salt.dealer_opened_salt[0] ^= 1;
+        let mut false_index = honest.clone();
+        false_index.recv_idx = usize::MAX;
+        let mut false_digest = honest.clone();
+        false_digest.committed_digest[0] ^= 1;
+        let mut malformed = honest.clone();
+        malformed.dealer_opened_share_bytes.clear();
+        for complaint in [honest, false_share.clone(), false_salt, false_index, false_digest, malformed] {
+            assert!(verify_and_qualify_dkg_dealer_goldilocks(&sid, 1, &pts, &joint,
+                &r1, &r2, &[complaint]));
+        }
+        // Once the dealer itself commits to the inconsistent value, the same
+        // opening becomes evidence and must disqualify it.
+        r1.share_commitments[0] = dkg_commit_share(0, 0,
+            &false_share.dealer_opened_salt, &false_share.dealer_opened_share_bytes);
+        assert!(!verify_and_qualify_dkg_dealer_goldilocks(&sid, 1, &pts, &joint,
+            &r1, &r2, &[false_share]));
+    }
+}
