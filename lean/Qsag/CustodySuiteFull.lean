@@ -5829,7 +5829,7 @@ theorem witness_cozk_pre_open_ceremony_inhabited :
           by rfl, by rfl, by rfl⟩
 
 
-/-! ## Operational custody boundary (Wave 2)
+/-! ## Operational custody boundary
 
 The preceding `*EvidenceStep` machines are private-state mathematical models, retained
 for source compatibility of their algebraic theorems and negative examples. Their

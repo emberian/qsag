@@ -2539,7 +2539,8 @@ def binarySpecRun (prog : List (DecodedInstr Qsag.X86Instr)) (pred : PredictorOr
 
 /-- Relational proof obligation for decoded programs with arbitrary forward and backward
     conditional branches. The invariant includes PC and halt agreement, every instruction's
-    public observation, and equality of every branch condition. -/
+    public observation, equality of every branch condition, and preservation of `R` across
+    predicted branch targets (including mispredicted wrong-path execution). -/
 structure BinaryPublicInvariant (prog : List (DecodedInstr Qsag.X86Instr))
     (R : Qsag.X86State → Qsag.X86State → Prop) : Prop where
   pc : ∀ a b, R a b → a.pc = b.pc
@@ -2547,7 +2548,10 @@ structure BinaryPublicInvariant (prog : List (DecodedInstr Qsag.X86Instr))
   step : ∀ d a b, findInstrAtPc a.pc prog = some d → R a b →
     (stepX86 d a).2 = (stepX86 d b).2 ∧ R (stepX86 d a).1 (stepX86 d b).1
   branch : ∀ d cc target a b, findInstrAtPc a.pc prog = some d →
-    d.instr = .jcc cc target → R a b → evalX86Cond cc a = evalX86Cond cc b
+    d.instr = .jcc cc target → R a b →
+    evalX86Cond cc a = evalX86Cond cc b ∧
+    ∀ nextPc, (nextPc = target.toNat ∨ nextPc = a.pc + d.byteLen) →
+      R { a with pc := nextPc } { b with pc := nextPc }
 
 theorem binaryTransient_public_ni (prog : List (DecodedInstr Qsag.X86Instr))
     (R : Qsag.X86State → Qsag.X86State → Prop) (inv : BinaryPublicInvariant prog R)
@@ -2560,21 +2564,32 @@ theorem binaryTransient_public_ni (prog : List (DecodedInstr Qsag.X86Instr))
     intro hist a b hab
     have hHalt := inv.halted a b hab
     have hPc := inv.pc a b hab
-    cases hd : findInstrAtPc a.pc prog with
-    | none => simp [binaryTransient, hHalt, hPc, hd]
-    | some d =>
-      obtain ⟨hObs, hNext⟩ := inv.step d a b hd hab
-      match hInstr : d.instr with
-      | .jcc cc target =>
-        simp only [binaryTransient, hHalt, hPc, hd, hInstr, hObs]
-        exact congrArg ((stepX86 d a).2 :: ·) (ih (pred a.pc hist :: hist) a b hab)
-      | _ =>
-        simp only [binaryTransient, hHalt, hPc, hd, hInstr, hObs]
-        exact congrArg ((stepX86 d a).2 :: ·) (ih hist _ _ hNext)
+    unfold binaryTransient
+    rw [← hHalt, ← hPc]
+    if hH : a.halted = true then
+      rw [ite_eq_left hH, ite_eq_left hH]
+    else
+      rw [ite_eq_right hH, ite_eq_right hH]
+      cases hd : findInstrAtPc a.pc prog with
+      | none => rfl
+      | some d =>
+        obtain ⟨hObs, hNext⟩ := inv.step d a b hd hab
+        rcases d with ⟨offset, byteLen, instr⟩
+        cases instr with
+        | jcc cc target =>
+          dsimp only
+          have hSpec := (inv.branch { offset := offset, byteLen := byteLen, instr := .jcc cc target }
+            cc target a b hd rfl hab).2
+            (if pred a.pc hist then target.toNat else a.pc + byteLen)
+            (by cases pred a.pc hist <;> simp)
+          rw [hObs, ih (pred a.pc hist :: hist) _ _ hSpec, hHalt]
+        | _ =>
+          dsimp only
+          rw [hObs, ih hist _ _ hNext]
 
 /-- Decoded-byte speculative NI for loops, not only straight-line code. Wrong-path execution
-    uses the original state and the architectural path uses the stepped state, exactly as in
-    `binarySpecRun`; both are covered by the same relational invariant. -/
+    uses the predicted branch PC on the pre-branch state and the architectural path uses the
+    stepped state, exactly as in `binarySpecRun`; both are covered by `BinaryPublicInvariant`. -/
 theorem binary_loop_fuel_bounded_speculative_ni (prog : List (DecodedInstr Qsag.X86Instr))
     (R : Qsag.X86State → Qsag.X86State → Prop) (inv : BinaryPublicInvariant prog R)
     (pred : PredictorOracle) (W fuel : Nat) :
@@ -2586,20 +2601,48 @@ theorem binary_loop_fuel_bounded_speculative_ni (prog : List (DecodedInstr Qsag.
     intro hist a b hab
     have hHalt := inv.halted a b hab
     have hPc := inv.pc a b hab
-    cases hd : findInstrAtPc a.pc prog with
-    | none => simp [binarySpecRun, hHalt, hPc, hd]
-    | some d =>
-      obtain ⟨hObs, hNext⟩ := inv.step d a b hd hab
-      match hInstr : d.instr with
-      | .jcc cc target =>
-        have hCond := inv.branch d cc target a b hd hInstr hab
-        simp only [binarySpecRun, hHalt, hPc, hd, hInstr, hObs, hCond]
-        rw [ih (evalX86Cond cc a :: hist) _ _ hNext]
-        split <;>
-          simp only [binaryTransient_public_ni prog R inv pred W _ a b hab, List.map_inj_left]
-      | _ =>
-        simp only [binarySpecRun, hHalt, hPc, hd, hInstr, hObs]
-        exact congrArg (BinarySpecObs.arch (stepX86 d a).2 :: ·) (ih hist _ _ hNext)
+    unfold binarySpecRun
+    rw [← hHalt, ← hPc]
+    if hH : a.halted = true then
+      rw [ite_eq_left hH, ite_eq_left hH]
+    else
+      rw [ite_eq_right hH, ite_eq_right hH]
+      cases hd : findInstrAtPc a.pc prog with
+      | none => rfl
+      | some d =>
+        obtain ⟨hObs, hNext⟩ := inv.step d a b hd hab
+        rcases d with ⟨offset, byteLen, instr⟩
+        cases instr with
+        | jcc cc target =>
+          obtain ⟨hCond, hSpec⟩ :=
+            inv.branch { offset := offset, byteLen := byteLen, instr := .jcc cc target }
+              cc target a b hd rfl hab
+          dsimp only
+          have hBr := hSpec (if pred a.pc hist then target.toNat else a.pc + byteLen)
+            (by cases pred a.pc hist <;> simp)
+          rw [hObs, ← hCond, ih (evalX86Cond cc a :: hist) _ _ hNext,
+            binaryTransient_public_ni prog R inv pred W (pred a.pc hist :: hist) _ _ hBr, hHalt]
+        | _ =>
+          dsimp only
+          rw [hObs, ih hist _ _ hNext]
+
+/-- Lower a public-trip loop with a reserved counter register. The zero-trip entry check and
+    the back-edge are both predictor-visible. `after` remains executable on a predicted exit.
+    Trips below 2^64 have the expected counter representation. -/
+def compilePubLoop (trips : Nat) (body : List ConstantTimeIsa.X86Instr) (after : PcCode) : PcCode :=
+  [.op (.movImm64 .rcx (BitVec.ofNat 64 trips)), .branch (.nz .rcx) 3,
+    .jump (body.length + 5)] ++
+    body.map .op ++ [.op (.addImm64 .rcx (-1)), .branch (.nz .rcx) 3] ++ after
+
+/-- A `pubLoop` lowering inherits fuel-bounded speculative NI from an invariant which holds on
+    both the loop and its continuation, not merely the architecturally executed iterations. -/
+theorem pubLoop_speculative_ni (trips : Nat) (body : List ConstantTimeIsa.X86Instr)
+    (after : PcCode) (R : ConstantTimeIsa.X86State → ConstantTimeIsa.X86State → Prop)
+    (inv : PcPublicInvariant (compilePubLoop trips body after) R)
+    (a b : ConstantTimeIsa.X86State) (h : R a b) (pred : PredictorOracle) (W fuel : Nat) :
+    pcSpecRun (compilePubLoop trips body after) pred W fuel 0 [] a =
+      pcSpecRun (compilePubLoop trips body after) pred W fuel 0 [] b :=
+  public_loop_fuel_bounded_speculative_ni _ R inv pred W fuel 0 [] a b h
 
 /-- Named loop-kernel families covered by the relational model. These are semantic program
     schemas; compiled-symbol claims still require a decoded fixture and its own invariant. -/
@@ -2627,7 +2670,7 @@ theorem namedCtKernelLoop_spectre_v1_immunity (kernel : NamedCtKernel) (trips : 
 
 /-- Every named schema has an actual predictor-visible back-edge at its final branch. -/
 theorem namedCtKernelLoop_has_back_edge (kernel : NamedCtKernel) (trips : Nat) :
-    (namedCtKernelLoop kernel trips)[namedCtKernelBody kernel |>.length + 4]? =
+    (namedCtKernelLoop kernel trips)[(namedCtKernelBody kernel).length + 4]? =
       some (.branch (.nz .rcx) 3) := by
   cases kernel <;> simp [namedCtKernelLoop, compilePubLoop, namedCtKernelBody]
 
@@ -2726,24 +2769,6 @@ theorem goldilocks_mul_rlib_spectre_v1_immunity (a b : Qsag.X86State)
     goldilocks_mul_rlib_speculation_certificate.2.2.1 goldilocks_mul_rlib_speculation_certificate.2.2.2
     a b hi pred W fuel
 
-
-/-- Lower a public-trip loop with a reserved counter register. The zero-trip entry check and
-    the back-edge are both predictor-visible. `after` remains executable on a predicted exit.
-    Trips below 2^64 have the expected counter representation. -/
-def compilePubLoop (trips : Nat) (body : List ConstantTimeIsa.X86Instr) (after : PcCode) : PcCode :=
-  [.op (.movImm64 .rcx (BitVec.ofNat 64 trips)), .branch (.nz .rcx) 3,
-    .jump (body.length + 5)] ++
-    body.map .op ++ [.op (.addImm64 .rcx (-1)), .branch (.nz .rcx) 3] ++ after
-
-/-- A `pubLoop` lowering inherits fuel-bounded speculative NI from an invariant which holds on
-    both the loop and its continuation, not merely the architecturally executed iterations. -/
-theorem pubLoop_speculative_ni (trips : Nat) (body : List ConstantTimeIsa.X86Instr)
-    (after : PcCode) (R : ConstantTimeIsa.X86State → ConstantTimeIsa.X86State → Prop)
-    (inv : PcPublicInvariant (compilePubLoop trips body after) R)
-    (a b : ConstantTimeIsa.X86State) (h : R a b) (pred : PredictorOracle) (W fuel : Nat) :
-    pcSpecRun (compilePubLoop trips body after) pred W fuel 0 [] a =
-      pcSpecRun (compilePubLoop trips body after) pred W fuel 0 [] b :=
-  public_loop_fuel_bounded_speculative_ni _ R inv pred W fuel 0 [] a b h
 
 /-- Only the pointer, loop counter and return hygiene are public. All memory and the loaded
     data register can differ. Thus extra speculative loads do not require in-bounds contents
@@ -4010,14 +4035,14 @@ theorem production_verify_before_release_adrs_unique_or_collision
     durable `diskJournal` permits two distinct `(root, tswCtr)` releases (`⟨[], 0⟩ ≠ ⟨[], 1⟩`)
     at the identical encoded `HashAdrs` `⟨1, 0, 0⟩.toEncodedAdrs` across a reboot. -/
 theorem tooth_volatile_only_cache_forgets_across_crash_allows_reuse :
-    let e0 : LayerRelease := ⟨⟨1, 0, 0⟩, ⟨[], 0⟩, counterToothOpening 0⟩
-    let e1 : LayerRelease := ⟨⟨1, 0, 0⟩, ⟨[], 1⟩, counterToothOpening 1⟩
-    AdrsCacheConsistent ([] ++ [e0]) ∧
-    ¬ AdrsCacheConsistent ([e0] ++ [e1]) ∧
-    AdrsCacheConsistent ([] ++ [e1]) ∧
-    e0.key.toEncodedAdrs = e1.key.toEncodedAdrs ∧
-    e0.signed ≠ e1.signed := by
-  refine ⟨?_, ?_, ?_, rfl, ?_⟩
+    ∃ e0 e1 : LayerRelease,
+      AdrsCacheConsistent ([] ++ [e0]) ∧
+      ¬ AdrsCacheConsistent ([e0] ++ [e1]) ∧
+      AdrsCacheConsistent ([] ++ [e1]) ∧
+      e0.key.toEncodedAdrs = e1.key.toEncodedAdrs ∧
+      e0.signed ≠ e1.signed := by
+  refine ⟨⟨⟨1, 0, 0⟩, ⟨[], 0⟩, counterToothOpening 0⟩,
+    ⟨⟨1, 0, 0⟩, ⟨[], 1⟩, counterToothOpening 1⟩, ?_, ?_, ?_, rfl, ?_⟩
   · simp [AdrsCacheConsistent]
   · intro h
     have he := h ⟨⟨1, 0, 0⟩, ⟨[], 0⟩, counterToothOpening 0⟩ (by simp)
@@ -4102,7 +4127,19 @@ theorem authenticated_upper_recovery_checks_anchor (st next : AuthenticatedUpper
       simp only [not_or, Decidable.not_not] at good
       exact ⟨good.2.2, good.1, good.2.1⟩
 
-#verify_inhabited pubLoop_speculative_ni publicPointerLoop_invariant
+theorem witness_pubLoop_speculative_ni :
+    ∃ (trips : Nat) (body : List ConstantTimeIsa.X86Instr) (after : PcCode)
+      (a b : ConstantTimeIsa.X86State),
+      PcPublicInvariant (compilePubLoop trips body after) PublicPointerEq ∧
+      PublicPointerEq a b :=
+  ⟨2, [.load64 .rax .rdi 0, .addImm64 .rdi 8], [.op (.load64 .rax .rdi 0), .ret],
+   ⟨fun _ => 0#64, fun _ => ConstantTimeIsa.Vec256.zero, ⟨false, false, false⟩,
+    fun _ => 0#64, true, false⟩,
+   ⟨fun r => if r == .rsi then 1#64 else 0#64, fun _ => ConstantTimeIsa.Vec256.zero,
+    ⟨false, false, false⟩, fun _ => 1#64, true, false⟩,
+   publicPointerLoop_invariant 2, ⟨rfl, rfl, rfl⟩⟩
+
+#verify_inhabited pubLoop_speculative_ni witness_pubLoop_speculative_ni
 #tooth_pair recoverable_production_journal_prevents_upper_wots_reuse_across_crashes vs
   tooth_volatile_only_cache_forgets_across_crash_allows_reuse
 

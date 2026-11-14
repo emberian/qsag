@@ -9717,9 +9717,20 @@ structure LockedRecordOpenEvidence where
 def LockedRecordOpenEvidence.handle (e : LockedRecordOpenEvidence) : LockedIdentityHandle :=
   ⟨e.device, e.inode, e.nonce, false⟩
 
+private theorem bytes_beq_self : ∀ xs : Bytes, (xs == xs) = true
+  | [] => rfl
+  | x :: xs => by
+    have hx : (x == x) = true := by
+      cases x with | ofBitVec bv => cases bv with | ofFin f => exact Nat.beq_refl f.val
+    show (List.beq (x :: xs) (x :: xs)) = true
+    simp only [List.beq, hx, Bool.true_and]
+    exact bytes_beq_self xs
+
 theorem lockedRecord_open_identity_seal (e : LockedRecordOpenEvidence) :
     verifyLockIdentity e.handle e.authenticated = (e.handle, true) := by
-  simp [verifyLockIdentity, LockedRecordOpenEvidence.handle, e.sealed]
+  unfold verifyLockIdentity LockedRecordOpenEvidence.handle
+  rw [e.sealed, bytes_beq_self]
+  rfl
 
 theorem lockedRecord_open_uses_locked_fd (e : LockedRecordOpenEvidence) :
     posixFstatDescAndInode e.lockedState e.pid e.fd = .ok (e.description, e.inode) ∧
@@ -10356,20 +10367,15 @@ private theorem decodeLedgerRecords_roundtrip_aux :
       apply List.any_eq_false.mpr
       intro old hOld hTrue
       exact hDisjoint old hOld (k, v) List.mem_cons_self (eq_of_beq hTrue)
-    simp only [List.length_cons, List.flatMap_cons, decodeLedgerRecords]
-    rw [splitExactBytes_append (by simp [u32le, pcwEncodeU32Be_length] :
-      (u32le k.length).length = 4)]
-    dsimp only
-    rw [splitExactBytes_append (by simp [u32le, pcwEncodeU32Be_length] :
-      (u32le v.length).length = 4)]
-    dsimp only
-    simp only [u32le, List.reverse_reverse]
-    rw [pcwDecodeU32Be_encodeU32Be hKv.1, pcwDecodeU32Be_encodeU32Be hKv.2]
-    dsimp only
-    rw [splitExactBytes_append rfl, splitExactBytes_append rfl]
-    dsimp only
-    rw [hNot]
-    dsimp only
+    have hKLen : (u32le k.length).length = 4 := by simp [u32le, pcwEncodeU32Be_length]
+    have hVLen : (u32le v.length).length = 4 := by simp [u32le, pcwEncodeU32Be_length]
+    have hKDec : pcwDecodeU32Be (u32le k.length).reverse = some k.length := by
+      simpa [u32le] using pcwDecodeU32Be_encodeU32Be hKv.1
+    have hVDec : pcwDecodeU32Be (u32le v.length).reverse = some v.length := by
+      simpa [u32le] using pcwDecodeU32Be_encodeU32Be hKv.2
+    simp only [List.length_cons, List.flatMap_cons, List.append_assoc, decodeLedgerRecords,
+      bind, Option.bind, splitExactBytes_append hKLen, splitExactBytes_append hVLen,
+      hKDec, hVDec, splitExactBytes_append rfl, hNot, Bool.false_eq_true, ↓reduceIte]
     have hNext : ∀ old ∈ acc ++ [(k, v)], ∀ r ∈ rest, old.1 ≠ r.1 := by
       intro old hOld r hr
       rcases List.mem_append.mp hOld with hPrev | hNew
@@ -10378,7 +10384,7 @@ private theorem decodeLedgerRecords_roundtrip_aux :
         intro hEq
         apply hFresh
         have hm : r.1 ∈ rest.map Prod.fst := List.mem_map.mpr ⟨r, hr, rfl⟩
-        rwa [← hEq]
+        exact Eq.mp (congrArg (· ∈ rest.map Prod.fst) hEq.symm) hm
     simpa only [List.append_assoc, List.cons_append, List.nil_append] using
       ih (acc ++ [(k, v)]) hNdTail
         (fun kv hkv => hBounds kv (List.mem_cons_of_mem (k, v) hkv)) hNext
@@ -10527,7 +10533,23 @@ theorem burnAppendHostOfFile_inv (tagFn : List UInt8 → List UInt8 → List UIn
     · obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Option.some.inj h)
       exact hOpen
 
-/-- A successful full-length `fsync` append is exactly the existing host `reserve` step. -/
+private theorem burnRecordBody_length (party epoch : Nat) :
+    (burnRecordBody party epoch).length = 10 := by
+  simp [burnRecordBody, encodeU64BeNat_length]
+
+private theorem burnRecord_take_10 (key keyId genesis previous : Bytes) (party epoch : Nat) :
+    (burnRecord key keyId genesis previous party epoch).take 10 = burnRecordBody party epoch := by
+  unfold burnRecord
+  exact List.take_left' (burnRecordBody_length party epoch)
+
+private theorem burnRecord_drop_10 (key keyId genesis previous : Bytes) (party epoch : Nat) :
+    (burnRecord key keyId genesis previous party epoch).drop 10 =
+      burnRecordTag key keyId genesis previous (burnRecordBody party epoch) := by
+  unfold burnRecord
+  exact List.drop_left' (burnRecordBody_length party epoch)
+
+/-- A successful full-length `fsync` append is an exact host `reserve` step and preserves
+    `BurnHostInv` on the resulting record-level host state. -/
 theorem burnAppend_sync_welds_host_reserve (key identity keyId genesis : Bytes)
     (s : BurnAppendState) (f : BurnJournalFile) (party epoch : Nat)
     (hOpen : openBurnJournal (burnRecordTag key keyId genesis)
@@ -10540,26 +10562,36 @@ theorem burnAppend_sync_welds_host_reserve (key identity keyId genesis : Bytes)
       (burnAppendHostOfFile s f)
       (burnAppendHostOfFile (syncBurnAppend s true).1
         (appendBurnRecord (burnRecordTag key keyId genesis) s.lastTag
+          (burnRecordBody party epoch) f)) ∧
+    BurnHostInv (burnRecordTag key keyId genesis) (burnGenesisTag key identity keyId genesis)
+      (burnAppendHostOfFile (syncBurnAppend s true).1
+        (appendBurnRecord (burnRecordTag key keyId genesis) s.lastTag
           (burnRecordBody party epoch) f)) := by
   let body := burnRecordBody party epoch
   let next : BurnAppendState :=
     { s with
       disk := s.visible
       bodies := s.bodies ++ [body]
-      lastTag := (burnRecord key keyId genesis s.lastTag party epoch).drop 10
+      lastTag := burnRecordTag key keyId genesis s.lastTag body
       pending := none
       failed := false
       dirty := false }
   have hSync : syncBurnAppend s true = (next, some body) := by
-    simp [syncBurnAppend, hPending, hVisible, next, body, burnRecord, burnRecordBody,
-      burnRecordTag, burnRecord_length]
-  rw [hSync]
+    simp only [syncBurnAppend, hPending, hVisible, burnRecord_length, and_self, ↓reduceIte,
+      burnRecord_take_10, burnRecord_drop_10, next, body]
   have hLive : (burnAppendHostOfFile s f).handle = some (s.bodies, s.lastTag) := by
     simp [burnAppendHostOfFile, hFailed]
-  have hStep := BurnHostStep.reserve (tagFn := burnRecordTag key keyId genesis)
+  have hStep0 := BurnHostStep.reserve (tagFn := burnRecordTag key keyId genesis)
     (genesisTag := burnGenesisTag key identity keyId genesis)
-    (burnAppendHostOfFile s f) s.bodies s.lastTag (burnRecordBody party epoch) hLive hFresh
-  simpa [burnAppendHostOfFile, burnRecord, burnRecordBody] using hStep
+    (burnAppendHostOfFile s f) s.bodies s.lastTag body hLive hFresh
+  have hStep :
+      BurnHostStep (burnRecordTag key keyId genesis) (burnGenesisTag key identity keyId genesis)
+        (burnAppendHostOfFile s f)
+        (burnAppendHostOfFile (syncBurnAppend s true).1
+          (appendBurnRecord (burnRecordTag key keyId genesis) s.lastTag body f)) := by
+    rw [hSync]
+    simpa only [burnAppendHostOfFile, Bool.false_eq_true, ↓reduceIte, next, body] using hStep0
+  exact ⟨hStep, burnHostStep_preserves hStep (burnAppendHostOfFile_inv _ _ s f hOpen)⟩
 
 /-- Independent unsynced metadata operations are not a whole-directory snapshot. Each
 writeback chooses one operation, preserving its order relative to other selected operations.
