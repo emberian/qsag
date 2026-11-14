@@ -7,17 +7,140 @@
 //! Every other opening (the randomizer, public-leaf endpoints, other parameter
 //! shapes) has no codeword at release time and uses the same hold, verify, release
 //! order with a local zero check.
+//!
+//! [`OpenedCandidates`] owns the candidates from the moment they are reconstructed
+//! and wipes every encoding of them when it is dropped, so an error before the gate
+//! exists leaves nothing behind. [`QuorumGate`] takes that buffer by move and holds
+//! one [`OutputGate`] per party; nothing is released until every party's residual
+//! has been accepted.
 use alloc::vec::Vec;
-use qsag_accel::ct::ct_zeroize_u128s;
+use qsag_accel::ct::{ct_zeroize_bytes, ct_zeroize_u128s};
 use qsag_verified::fts_spn_guard::{
     FtsDeferredMacSession, WOTS_CS_BASE_W, WOTS_CS_CHAINS, WOTS_CS_TARGET_SUM,
 };
 
 use crate::parallel_mpc::{ParallelSeededError, ParallelSeededParams};
 
+pub(crate) fn wipe_pairs(pairs: &mut [(u128, u128)]) {
+    for (lo, hi) in pairs {
+        ct_zeroize_u128s(core::slice::from_mut(lo));
+        ct_zeroize_u128s(core::slice::from_mut(hi));
+    }
+}
+
+/// Counts candidate buffers on the current thread, so a test can assert that a
+/// failed opening wiped every buffer it created and released none.
+#[cfg(test)]
+pub(crate) mod probe {
+    extern crate std;
+    use core::cell::Cell;
+
+    std::thread_local! {
+        static CREATED: Cell<usize> = const { Cell::new(0) };
+        static WIPED: Cell<usize> = const { Cell::new(0) };
+        static RELEASED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) struct Counts {
+        pub(crate) created: usize,
+        pub(crate) wiped: usize,
+        pub(crate) released: usize,
+    }
+
+    pub(crate) fn reset() {
+        CREATED.with(|c| c.set(0));
+        WIPED.with(|c| c.set(0));
+        RELEASED.with(|c| c.set(0));
+    }
+    pub(crate) fn counts() -> Counts {
+        Counts {
+            created: CREATED.with(Cell::get),
+            wiped: WIPED.with(Cell::get),
+            released: RELEASED.with(Cell::get),
+        }
+    }
+    pub(super) fn created() {
+        CREATED.with(|c| c.set(c.get() + 1));
+    }
+    pub(super) fn wiped() {
+        WIPED.with(|c| c.set(c.get() + 1));
+    }
+    pub(super) fn released() {
+        RELEASED.with(|c| c.set(c.get() + 1));
+    }
+}
+
+/// Reconstructed wire candidates that no MAC check has accepted yet, in the three
+/// encodings the check needs: the values, their byte string for the transcript
+/// digest, and the `(v, v)` pairs for the two-lane weighted fold.
+pub(crate) struct OpenedCandidates {
+    values: Vec<u128>,
+    digest_input: Vec<u8>,
+    pairs: Vec<(u128, u128)>,
+}
+
+impl OpenedCandidates {
+    /// The capacity is exact, so pushing `wires` candidates never reallocates and
+    /// leaves no unwiped copy behind.
+    pub(crate) fn with_capacity(wires: usize) -> Self {
+        #[cfg(test)]
+        probe::created();
+        Self {
+            values: Vec::with_capacity(wires),
+            digest_input: Vec::with_capacity(wires.saturating_mul(16)),
+            pairs: Vec::with_capacity(wires),
+        }
+    }
+
+    pub(crate) fn push(&mut self, value: u128) {
+        self.values.push(value);
+        self.digest_input.extend_from_slice(&value.to_le_bytes());
+        self.pairs.push((value, value));
+    }
+
+    pub(crate) fn digest_input(&self) -> &[u8] {
+        &self.digest_input
+    }
+
+    pub(crate) fn pairs(&self) -> &[(u128, u128)] {
+        &self.pairs
+    }
+
+    /// Wipes the digest and fold encodings once both have been consumed.
+    pub(crate) fn shed_encodings(&mut self) {
+        ct_zeroize_bytes(&mut self.digest_input);
+        self.digest_input.clear();
+        wipe_pairs(&mut self.pairs);
+        self.pairs.clear();
+    }
+
+    fn wipe(&mut self) {
+        ct_zeroize_u128s(&mut self.values);
+        ct_zeroize_bytes(&mut self.digest_input);
+        wipe_pairs(&mut self.pairs);
+    }
+}
+
+impl Drop for OpenedCandidates {
+    fn drop(&mut self) {
+        self.wipe();
+        #[cfg(test)]
+        {
+            assert!(self.values.iter().all(|&v| v == 0));
+            assert!(self.digest_input.iter().all(|&b| b == 0));
+            assert!(self.pairs.iter().all(|&p| p == (0, 0)));
+            probe::wiped();
+        }
+    }
+}
+
 enum Held {
     Verified(Vec<FtsDeferredMacSession>),
-    Local { values: Vec<u128>, mac_verified: bool },
+    Local {
+        values: Vec<u128>,
+        mac_verified: bool,
+    },
 }
 
 pub(crate) struct OutputGate {
@@ -176,6 +299,118 @@ impl Drop for OutputGate {
 }
 
 #[cfg(test)]
+impl OutputGate {
+    fn is_destroyed(&self) -> bool {
+        match &self.held {
+            Held::Verified(sessions) => sessions.iter().all(|s| s.is_quarantined()),
+            Held::Local {
+                values,
+                mac_verified,
+            } => values.is_empty() && !*mac_verified,
+        }
+    }
+}
+
+/// One [`OutputGate`] per party over the same candidates. A refusal by any party
+/// destroys every party's copy, and no copy is released before every party has
+/// accepted its own residual.
+pub(crate) struct QuorumGate {
+    gates: Vec<OutputGate>,
+}
+
+impl QuorumGate {
+    /// Consumes the candidates: each party's gate receives its own copy and the
+    /// source buffer is wiped before this returns.
+    pub(crate) fn hold(
+        params: &ParallelSeededParams,
+        signature_chains: bool,
+        session: [u8; 32],
+        spn_rounds: usize,
+        parties: usize,
+        candidates: OpenedCandidates,
+    ) -> Self {
+        let gates = (0..parties)
+            .map(|_| {
+                OutputGate::hold(
+                    params,
+                    signature_chains,
+                    session,
+                    spn_rounds,
+                    candidates.values.clone(),
+                )
+            })
+            .collect();
+        drop(candidates);
+        Self { gates }
+    }
+
+    fn wipe(&mut self) {
+        for gate in &mut self.gates {
+            gate.wipe();
+        }
+    }
+
+    /// `residuals[i]` is the residual party `i` computed from the frozen transcript.
+    /// Every party's check runs; one refusal destroys all copies.
+    pub(crate) fn verify_all(
+        &mut self,
+        residuals: &[[u128; 2]],
+    ) -> Result<(), ParallelSeededError> {
+        let mut accepted = !self.gates.is_empty() && residuals.len() == self.gates.len();
+        if accepted {
+            for (gate, residual) in self.gates.iter_mut().zip(residuals) {
+                accepted &= gate.verify_mac(*residual).is_ok();
+            }
+        }
+        if !accepted {
+            self.wipe();
+            return Err(ParallelSeededError::BdozMacCheckFailed);
+        }
+        Ok(())
+    }
+
+    /// Yields the candidates once, after [`Self::verify_all`] accepted, and only if
+    /// every party's gate releases the same values.
+    pub(crate) fn release(&mut self, digits: &[u8]) -> Result<Vec<u128>, ParallelSeededError> {
+        let mut accepted = !self.gates.is_empty();
+        let mut agreed: Option<Vec<u128>> = None;
+        for gate in &mut self.gates {
+            match gate.release(digits) {
+                Ok(mut values) => match &agreed {
+                    None => agreed = Some(values),
+                    Some(first) => {
+                        accepted &= *first == values;
+                        ct_zeroize_u128s(&mut values);
+                    }
+                },
+                Err(_) => accepted = false,
+            }
+        }
+        match agreed {
+            Some(values) if accepted => {
+                #[cfg(test)]
+                probe::released();
+                Ok(values)
+            }
+            other => {
+                if let Some(mut values) = other {
+                    ct_zeroize_u128s(&mut values);
+                }
+                self.wipe();
+                Err(ParallelSeededError::BdozMacCheckFailed)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+impl QuorumGate {
+    pub(crate) fn all_destroyed(&self) -> bool {
+        self.gates.iter().all(OutputGate::is_destroyed)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use alloc::vec;
@@ -265,5 +500,138 @@ mod tests {
             assert_eq!(gate.release(&[]).unwrap(), values);
             assert!(gate.release(&[]).is_err());
         }
+    }
+
+    fn opened(values: &[u128]) -> OpenedCandidates {
+        let mut candidates = OpenedCandidates::with_capacity(values.len());
+        for &value in values {
+            candidates.push(value);
+        }
+        candidates
+    }
+
+    /// The custody shape (verified sessions) and a shape held locally.
+    fn quorum_shapes() -> [(ParallelSeededParams, bool, Vec<u128>, Vec<u8>); 2] {
+        [
+            (CUSTODY, true, candidates(), codeword()),
+            (CUSTODY, false, vec![3u128, 4], Vec::new()),
+        ]
+    }
+
+    #[test]
+    fn opened_candidates_wipe_every_encoding() {
+        let mut held = opened(&[u128::MAX, 7, 1 << 100]);
+        assert_eq!(held.values, [u128::MAX, 7, 1 << 100]);
+        assert_eq!(held.digest_input().len(), 48);
+        assert_eq!(held.pairs()[1], (7, 7));
+
+        held.shed_encodings();
+        assert!(held.digest_input().is_empty() && held.pairs().is_empty());
+        assert_eq!(held.values, [u128::MAX, 7, 1 << 100]);
+
+        let mut held = opened(&[u128::MAX, 7, 1 << 100]);
+        held.wipe();
+        assert_eq!(held.values, [0; 3]);
+        assert_eq!(held.digest_input(), [0u8; 48]);
+        assert_eq!(held.pairs(), [(0, 0); 3]);
+    }
+
+    #[test]
+    fn dropping_unreleased_candidates_wipes_them() {
+        probe::reset();
+        drop(opened(&[5, 6]));
+        // The gate consumes the buffer, so it is wiped before any check runs.
+        let gate = QuorumGate::hold(&CUSTODY, false, [7; 32], 48, 3, opened(&[5, 6]));
+        assert_eq!(
+            probe::counts(),
+            probe::Counts {
+                created: 2,
+                wiped: 2,
+                released: 0
+            }
+        );
+        drop(gate);
+        assert_eq!(probe::counts().released, 0);
+    }
+
+    #[test]
+    fn quorum_releases_only_after_every_party_accepts() {
+        for (params, chains, values, digits) in quorum_shapes() {
+            probe::reset();
+            let mut gate = QuorumGate::hold(&params, chains, [7; 32], 48, 3, opened(&values));
+            assert_eq!(gate.gates.len(), 3);
+            assert_eq!(gate.gates[0].is_verified(), chains);
+            gate.verify_all(&[[0, 0]; 3]).unwrap();
+            assert_eq!(gate.release(&digits).unwrap(), values);
+            assert_eq!(probe::counts().released, 1);
+            // Released once.
+            assert!(gate.release(&digits).is_err());
+            assert!(gate.all_destroyed());
+        }
+    }
+
+    #[test]
+    fn one_refusing_party_destroys_every_copy() {
+        let refusals: [&[[u128; 2]]; 6] = [
+            // The refusing party is first, in the middle, or last.
+            &[[1, 0], [0, 0], [0, 0]],
+            &[[0, 0], [0, 1], [0, 0]],
+            &[[0, 0], [0, 0], [1, 1]],
+            // A residual is missing or surplus.
+            &[[0, 0], [0, 0]],
+            &[[0, 0]; 4],
+            &[],
+        ];
+        for (params, chains, values, digits) in quorum_shapes() {
+            for residuals in refusals {
+                probe::reset();
+                let mut gate = QuorumGate::hold(&params, chains, [7; 32], 48, 3, opened(&values));
+                assert_eq!(
+                    gate.verify_all(residuals),
+                    Err(ParallelSeededError::BdozMacCheckFailed)
+                );
+                assert!(gate.all_destroyed());
+                // The parties whose own residual was zero release nothing either.
+                assert!(gate.release(&digits).is_err());
+                assert!(gate.verify_all(&[[0, 0]; 3]).is_err());
+                assert!(gate.release(&digits).is_err());
+                assert!(gate.all_destroyed());
+                let counts = probe::counts();
+                assert_eq!((counts.created, counts.wiped, counts.released), (1, 1, 0));
+            }
+        }
+    }
+
+    #[test]
+    fn quorum_refuses_without_a_check_without_parties_and_on_a_bad_codeword() {
+        for (params, chains, values, digits) in quorum_shapes() {
+            probe::reset();
+            // No MAC check.
+            let mut gate = QuorumGate::hold(&params, chains, [7; 32], 48, 2, opened(&values));
+            assert!(gate.release(&digits).is_err());
+            assert!(gate.all_destroyed());
+            // No party.
+            let mut gate = QuorumGate::hold(&params, chains, [7; 32], 48, 0, opened(&values));
+            assert!(gate.verify_all(&[]).is_err());
+            assert!(gate.release(&digits).is_err());
+            assert_eq!(probe::counts().released, 0);
+        }
+        // Every party accepted the MAC check, then the codeword is refused.
+        probe::reset();
+        let mut gate = QuorumGate::hold(&CUSTODY, true, [7; 32], 48, 2, opened(&candidates()));
+        gate.verify_all(&[[0, 0]; 2]).unwrap();
+        let mut high = codeword();
+        high[0] = 3;
+        assert_eq!(
+            gate.release(&high),
+            Err(ParallelSeededError::BdozMacCheckFailed)
+        );
+        assert!(gate.all_destroyed());
+        assert!(gate.release(&codeword()).is_err());
+        // A chain step that did not run all 48 rounds.
+        let mut gate = QuorumGate::hold(&CUSTODY, true, [7; 32], 47, 2, opened(&candidates()));
+        assert!(gate.verify_all(&[[0, 0]; 2]).is_err());
+        assert!(gate.all_destroyed());
+        assert_eq!(probe::counts().released, 0);
     }
 }

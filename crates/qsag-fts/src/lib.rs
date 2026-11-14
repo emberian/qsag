@@ -14,8 +14,8 @@ mod release_gate;
 pub mod u384;
 
 pub use frontier::{
-    FtsEpochWal, FrontierDpTable, FrontierFtsError, FrontierFtsParams, FrontierFtsProfile, FrontierFtsPublicKey,
-    FrontierFtsSignature, FrontierFtsSigningKey, verify_frontier_fts,
+    FrontierDpTable, FrontierFtsError, FrontierFtsParams, FrontierFtsProfile, FrontierFtsPublicKey,
+    FrontierFtsSignature, FrontierFtsSigningKey, FtsEpochWal, verify_frontier_fts,
 };
 #[cfg(any(test, feature = "testing-ephemeral"))]
 pub use parallel_mpc::InMemoryBurnLog;

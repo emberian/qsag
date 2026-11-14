@@ -773,9 +773,7 @@ impl<'a> ParallelSeededSignSession<'a> {
                 };
                 verify_parallel_seeded_fts(&self.pk, &self.msg, &sig, &CpuReferenceBackend)?;
                 crate::parallel_mpc::verify_canonical_minimal_grind_counter(
-                    &self.pk,
-                    &self.msg,
-                    &sig,
+                    &self.pk, &self.msg, &sig,
                 )?;
                 ParallelSeededSignResult::Signature(sig)
             });
@@ -921,11 +919,7 @@ mod release_barrier_tests {
             target_sum: 6,
         };
         let mut setup = ParallelSeededThresholdSetup::trusted_dealer_setup_for_testing(
-            params,
-            2,
-            [0x4A; 32],
-            [0x5B; 32],
-            &accel,
+            params, 2, [0x4A; 32], [0x5B; 32], &accel,
         )
         .unwrap();
         let mut burn = InMemoryBurnLog::default();

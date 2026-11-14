@@ -8,7 +8,7 @@ description = "Post-quantum compact few-time hash signatures: constant-time bije
 
 [features]
 test-dealer = []
-testing-ephemeral = []
+testing-ephemeral = ["qsag-core/testing-ephemeral"]
 test-params = []
 default = ["alloc"]
 alloc = ["qsag-accel/alloc"]
@@ -18,3 +18,6 @@ std = ["alloc", "qsag-accel/std"]
 qsag-verified = { path = "../../aeneas/qsag-verified", default-features = false }
 qsag-core = { path = "../qsag-core", default-features = false }
 qsag-accel = { path = "../qsag-accel", default-features = false }
+
+[dev-dependencies]
+qsag-core = { path = "../qsag-core", features = ["testing-ephemeral"] }
