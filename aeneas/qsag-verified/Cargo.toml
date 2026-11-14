@@ -1,0 +1,20 @@
+[package]
+name = "qsag-verified"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+description = "Standalone no_std safe Rust core primitives of qsag extracted via Charon + Aeneas to Lean 4."
+
+[dependencies]
+# Strictly zero external dependencies.
+
+[[test]]
+name = "parity_qsag_core"
+harness = false
+
+[features]
+default = []
+std = []
+
+# Keep MIR extraction independent of the production workspace.
+[workspace]

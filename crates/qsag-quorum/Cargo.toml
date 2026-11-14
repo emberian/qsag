@@ -1,0 +1,19 @@
+[package]
+name = "qsag-quorum"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Generalized (t, n) quorum-switching Jorts protocols and isolated per-party wire-framed MPC nodes."
+
+[dependencies]
+# Workspace crates only; no external dependencies.
+qsag-core = { path = "../qsag-core", default-features = false }
+qsag-asm = { path = "../qsag-asm", default-features = false }
+
+[features]
+default = []
+std = ["qsag-core/std", "qsag-asm/std"]
+
+[[example]]
+name = "quorum_threaded_bench"
+required-features = ["std"]

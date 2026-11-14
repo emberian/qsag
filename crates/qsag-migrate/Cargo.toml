@@ -1,0 +1,16 @@
+[package]
+name = "qsag-migrate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Mixed-domain ZKBoo migration ownership and replicated outer-MPC proving"
+
+[features]
+default = ["alloc"]
+alloc = ["qsag-accel/alloc", "qsag-addr/alloc"]
+std = ["alloc", "qsag-accel/std", "qsag-addr/std"]
+[dependencies]
+qsag-asm = { path = "../qsag-asm", default-features = false }
+qsag-accel = { path = "../qsag-accel", default-features = false }
+qsag-addr = { path = "../qsag-addr", default-features = false }

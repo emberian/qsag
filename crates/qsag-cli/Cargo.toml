@@ -1,0 +1,20 @@
+[package]
+name = "qsag-cli"
+description = "Command-line key generation, signing, verification, aggregation, address, policy and KAT tool for qsag, plus runnable examples."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version = "1.89"
+
+[[bin]]
+name = "qsag"
+path = "src/main.rs"
+
+[dependencies]
+# Strictly zero external crates.io dependencies.
+qsag-accel = { path = "../qsag-accel", features = ["std"] }
+qsag-addr = { path = "../qsag-addr", features = ["std"] }
+qsag-agg = { path = "../qsag-agg", features = ["std"] }
+qsag-core = { path = "../qsag-core", features = ["std"] }
+qsag-fts = { path = "../qsag-fts", features = ["std", "test-dealer"] }
+qsag-policy = { path = "../qsag-policy", features = ["std", "test-dealer"] }

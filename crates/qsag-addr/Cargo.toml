@@ -1,0 +1,15 @@
+[package]
+name = "qsag-addr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Strict BIP-350 Bech32m post-quantum address codec (explicitly rejecting legacy BIP-173 Bech32), domain-separated cSHAKE256/Poseidon2 pubkey/script commitments, and non-malleable HybridPinnedEnvelope."
+
+[features]
+default = ["alloc"]
+alloc = ["qsag-accel/alloc"]
+std = ["alloc", "qsag-accel/std"]
+
+[dependencies]
+qsag-accel = { path = "../qsag-accel", default-features = false }

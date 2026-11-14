@@ -1,0 +1,277 @@
+# Migration proof version 3
+
+## Relation and encoding
+
+The witness is a nonzero canonical **spending scalar**, not a derivation seed.
+A GF(2) circuit checks its 256-bit encoding against the relevant subgroup order.
+Four-bit window selection feeds complete projective secp256k1 addition or
+complete extended Edwards addition. The inverse check rejects infinity. Both
+coordinate encodings are canonical.
+
+The four statements are:
+
+* Bitcoin: RIPEMD-160(SHA-256(compressed secp256k1 public key)).
+* Ethereum: the last 20 bytes of Keccak-256(uncompressed x || y).
+* Taproot: the x coordinate of an even-y secp256k1 output key.
+* Ed25519: canonical y with the parity of x in the high bit.
+
+SHA-256, RIPEMD-160 and Keccak-f[1600] execute as Boolean word circuits.
+Taproot witness normalization performs the tagged SHA-256 tweak and parity
+normalization before proving. The proved witness is the resulting output
+spending scalar: possession of the internal key or a particular derivation
+path is not part of the statement. Likewise, Ed25519 seed expansion is outside
+the relation; possession of the normalized scalar is sufficient to spend.
+
+The exact nullifier relation is
+
+```
+Poseidon2_hash_limbs(
+    0x4d49475f4e554c31,
+    [group_tag] || pack56(spending_scalar_be) || pack56(migration_domain)
+)
+```
+
+Group tags are 1 for secp256k1 and 2 for Ed25519. `pack56` is the existing
+injective, delimiter-terminated encoding from qsag-accel. The circuit uses the
+same width-12 Goldilocks permutation and rate-8 sponge padding as the native
+implementation. The same scalar bits feed the curve and the nullifier.
+The destination and every other public statement field are bound directly by
+the Fiat-Shamir transcript. The reserved `witness_anchor` must be zero.
+
+Use `prove_migration_in_domain` to allocate an application-wide replay domain
+independent of the destination. The compatibility entry point derives its
+domain from the epoch. Reusing a key in another domain or epoch intentionally
+produces another nullifier. Applications must track spent nullifiers and choose
+the replay scope; proof verification alone does not prevent replay.
+
+## Mixed-domain decomposition
+
+Arithmetic runs in GF(2), Goldilocks, the secp256k1 base field, and the Edwards
+base field. Values and transcript encodings are canonical. Public constants
+are injected into head 0. Public-only constant folding depends exclusively on
+node kinds, never on private wire values.
+
+To convert a Boolean shared bit into an arithmetic field, each head locally
+injects its own XOR share into a separately owned arithmetic wire. The circuit
+combines the three owned wires with `x XOR y = x + y - 2xy`. To convert an
+arithmetic shared value into bits, each head locally decomposes its canonical
+share into owned Boolean wires. Boolean adders and conditional subtraction
+compute the sum modulo the source field. These conversions introduce neither
+unconstrained witness hints nor cleartext coordinate checks. Each opened head's
+local conversion is replayed, including the neighboring head's conversions.
+
+At every multiplication the three-head evaluator uses
+
+```
+z_i = a_i*b_i + a_i*b_(i+1) + a_(i+1)*b_i + r_i - r_(i+1).
+```
+
+A challenge opens the ordered pair `(e, (e+1) mod 3)`. The verifier recomputes
+`z_e`, compares it exactly with the committed primary transcript, and consumes
+the neighboring head's committed multiplication outputs. It does not attempt
+to recompute that neighbor's multiplication without the third head's operands.
+Both opened views, every hidden output share, the repetition index and the
+head index are authenticated by the root committed before challenge selection.
+The verifier authenticates the complete root before gate replay and checks every
+recomputable multiplication residual and output share **exactly** across all
+opened `(e, (e+1) mod 3)` views; all public output constraints reconstruct to
+zero. Redundant residual-sumcheck scaffolding has been removed so proof
+verification relies solely on exact deterministic gate replay and `cSHAKE256`
+root binding.
+
+## Soundness, QROM Grover guarantee, and privacy assumptions
+
+For independently sampled interactive ternary challenges across
+`MIT_REPETITIONS = 438` repetitions, three-view consistency and commitment
+binding give classical soundness error
+
+```
+(2/3)^438 = 2^(-438 * log2(3/2))
+          = 2^-256.213575315866...
+          < 2^-256.
+```
+
+* **Classical soundness (interactive & ROM):** In the classical random-oracle
+  model (ROM), Fiat-Shamir challenge derivation over `QSAG.MIGRATE.ROOT.V3`
+  achieves `< 2^-256` classical soundness (well above 128-bit security after
+  standard `Q_RO` query accounting) composed with 256-bit `cSHAKE256`
+  commitment binding.
+* **Post-quantum 128-bit QROM Grover soundness & pre-Shor witness boundary:**
+  Against a quantum adversary querying the random oracle in superposition,
+  Grover amplitude amplification takes the square root of the 438-repetition
+  soundness error, yielding
+
+  ```
+  sqrt((2/3)^438) = (2/3)^219
+                  = 2^-128.106787657933...
+                  < 2^-128,
+  ```
+
+  providing **full 128-bit post-quantum QROM soundness** for the proof system
+  itself. Note the orthogonal source-chain witness boundary: the proved witness
+  is a legacy `secp256k1` or `Ed25519` discrete-logarithm spending scalar whose
+  public commitment on the source chain is recoverable in polynomial time by a
+  Shor-capable quantum computer, so legacy asset migrations must still settle
+  on-chain prior to cryptanalytically relevant quantum computers.
+
+The privacy target is computational zero knowledge, conditioned on the public
+legacy commitment, deterministic nullifier and remaining public statement.
+The assumptions are SHAKE256 pseudorandomness for independent seed-expanded
+tapes and cSHAKE256 commitment hiding/binding in the hash/ROM model. Fresh
+256-bit caller-provided entropy is required for each proof. Hidden seeds act
+as commitment randomness. Reusing the same tapes under multiple challenge
+transcripts can expose all three views and is prohibited. Privacy is not an
+information-theoretic claim, and the deterministic public outputs are not
+claimed to conceal their own information about the spending key.
+
+The standard ordered-pair reference is
+[ZKBoo, USENIX Security 2016](https://www.usenix.org/conference/usenixsecurity16/technical-sessions/presentation/giacomelli).
+This document records the concrete security model, bounds, and assumptions.
+
+## Distributed execution: active 1-of-3 outer replicated prover
+
+The previous replicated-*virtual-head* implementation and its feature flag have
+been removed. `CoZkCustodianShare::new` takes one physical custodian's XOR share
+of the normalized little-endian spending scalar, independent private entropy,
+a unique session identifier, and two pairwise channel keys. `prove` consumes
+this state by value. There is no dealer API accepting the complete witness.
+
+### Security threshold and non-goals
+
+* **Active 1-of-3 malicious security with abort:** The outer MPC tolerates at
+  most **one actively corrupted physical custodian** out of three, preserving
+  witness privacy and soundness with **non-identifiable abort** (`Err(...)`
+  before any secret-dependent wire opens).
+* **2-of-3 collusion reconstructs the witness:** Replication gives each
+  physical custodian two of the three additive/XOR components, so **any two
+  colluding custodians can immediately reconstruct the spending scalar**.
+* **Explicit non-goals:** Identifiable abort (attributing an algebraic
+  multiplication check failure or `all_outputs_zero` rejection to a specific
+  guilty custodian), fairness / guaranteed output delivery, and crash-resumable
+  state persistence are **not** provided. Initial physical witness shares must
+  be a uniformly random 3-of-3 XOR sharing; the protocol cannot repair a leaked
+  initial sharing.
+* **Channel & session requirements:** `Transport` must provide **confidential
+  point-to-point delivery** (pairwise keyed `cSHAKE256` tags authenticate
+  `session`, `sender`, `recipient`, `sequence`, and `payload`, but do not
+  encrypt payloads on a broadcast medium). Fresh independent 256-bit entropy
+  and a unique session identifier never reused under the same pairwise channel
+  keys are mandatory.
+
+### Mixed-domain sharing, masked conversions, and pre-open barriers
+
+Boolean wires use replicated XOR shares bitsliced across 64 repetitions;
+arithmetic wires use replicated additive shares in their native prime field
+(`Secp`, `Ed`, `Gold`). `share_uniform_lanes` reshares uniform 64-lane witness
+inputs across all repetitions.
+
+Conversions never open unmasked virtual values: a fresh uniform replicated field
+mask `R` is generated and decomposed into binary via a shared Boolean adder over
+its three separately owned components; B2A and A2B open **only** the masked
+difference `V - R` (in Boolean or prime-field form, respectively) **after**
+verifying all pending Boolean and prime-field multiplications. Auxiliary curve
+inverses are computed by shared Fermat exponentiation of the sum of the three
+virtual coordinate shares without opening any coordinate.
+
+### Mandatory active multiplication verification (`P0-01`)
+
+`Engine::verify_all_pending` executes **before every wire opening** (`open`,
+`fopen_many`, `agree`, masked A2B/B2A differences, upfront `Tape` `valid`,
+`all_outputs_zero`, view commitments, output shares, and challenged ZKBoo
+views). Any detected algebraic inconsistency poisons the engine (`self.poisoned = true`)
+and returns `Err(Error::MultiplicationCheck)` before any secret-dependent wire
+is transmitted:
+
+1. **Two-round transcript-bound coin-flipping (`Engine::coin_flip`):** Every
+   verification challenge commits (`QSAG.OUTER.COIN.COMMIT.V1`) to fresh hedged
+   randomness (`QSAG.OUTER.COIN.HEDGE.V1`) and both incident pairwise
+   `TranscriptSponge` digests, echoes peer commitments, verifies three-edge
+   transcript agreement and commitment openings in constant time, and derives
+   public coins via `QSAG.OUTER.COIN.DERIVE.V1`. No single rushing custodian can
+   bias challenges after sending multiplication shares.
+2. **64-lane Boolean `AND` verification (`< 2^-126` soundness):** Up to `65,536`
+   bitsliced 64-lane `AND` triples per flush are embedded into
+   `GF(2^128) = GF(2)[x]/(x^128 + x^7 + x^2 + x + 1)` (`128` gates per
+   super-block via constant-time butterfly transpose and `PCLMULQDQ` Karatsuba
+   accumulation) and checked by **two independent lockstep** Arity-4 BBCGGI19
+   inner-product instances plus PRSS-masked non-zero base-case sacrifice
+   (`r_b in GF(2^128)^*`). Per-flush false-acceptance probability is
+   `< (69 / (2^128 - 1))^2 < 2^-243.7 << 2^-126`.
+3. **Prime-field multiplication verification (`< 2^-128` soundness):**
+   * `Secp` and `Ed` (`|F_p| > 2^252`): Arity-2 logarithmic BBCGGI19 inner-product
+     reduction plus PRSS-masked base-case sacrifice directly over `F_p`, with
+     per-flush cheating probability `< (M + 2 log2 M + 2) / (p - 1) < 2^-240 << 2^-128`.
+   * `Gold` (`p = 2^64 - 2^32 + 1`): Lifted into the irreducible cubic extension
+     `F_p[u]/(u^3 - 7)` (`3 | (p - 1)`, `7^((p-1)/3) != 1`, `|F_{p^3}| > 2^191.99`),
+     giving per-flush cheating probability `< 2^-179 << 2^-128`.
+
+### Input-substitution closure (`P0-1`, `all_outputs_zero`)
+
+To prevent a malicious custodian from substituting a modified witness share and
+learning linear/differential information about honest custodians' shares from
+opened public-key or nullifier output residuals, `evaluate_inner` verifies inside
+MPC that **every** Boolean and prime-field circuit output reconstructs to zero
+across all 64 active lanes (`all_outputs_zero`, using Fermat exponentiation
+`s^(p - 2)` on prime-field outputs and Boolean NOR reduction), runs
+`verify_all_pending()`, and opens **only** that single 1-bit predicate. If any
+lane fails (`!= active_mask`), the ceremony aborts immediately with
+`Err(Error::InvalidProof)` before any output share, view commitment, or view
+opens.
+
+### Formal witness-independence of upfront `Error::InvalidTape` (`C0-5`)
+
+Tape expansion uses a fixed, data-oblivious schedule (`QSAG.MIGRATE.TAPE.V3`)
+followed by an upfront batched range check (`less_than_modulus_many` and
+`fold_valid_bits` at `co_zk_mpc.rs:720-751`). Opening the resulting `valid` mask
+has **identically zero mutual information with the witness scalar**:
+
+1. Every custodian's seed contribution is derived via `QSAG.OUTER.SEED.V1`
+   (`co_zk_mpc.rs:141-150`) exclusively from `(self.entropy, self.session,
+   statement_bytes, batch * 64 + lane, head)` — `self.witness_share` is never an
+   input to seed derivation.
+2. In `evaluate_inner`, `tape_sponges` absorb only `"QSAG.MIGRATE.TAPE.V3"` and
+   `seeds`, squeeze candidate tape bits, evaluate `less_than_modulus_many`, fold
+   `valid`, run `verify_all_pending()`, and open `valid` **strictly prior to
+   Step 5 (`Op::Input`)**, before `witness` is read by any gate or conversion.
+3. Consequently, the joint distribution of `(seeds, valid, Error::InvalidTape)`
+   is statistically independent of `witness` (`I(InvalidTape; witness) = 0`).
+   On `Err(Error::InvalidTape)`, `raw_draw_words` is wiped and no proof or wire
+   opening occurs. Any retry **must** allocate a fresh `session` and fresh
+   `entropy` because `CoZkCustodianShare` is single-use and pairwise PRSS/MAC
+   streams (`QSAG.OUTER.PAD.V1`) forbid session reuse.
+
+### Deterministic zeroization (`P3`) and ceremony freeze
+
+All secret-bearing scratch structures (`Engine`, `BitCheckScratch`,
+`ZeroizeRepGf128LanesVec`, `ZeroizeBitVec`, `ZeroizeFieldScratch`, and
+`raw_draw_words`) implement `Drop` wiping memory via volatile `ct_zeroize_u64s` /
+`ct_zeroize_bytes` on both `Ok` completion and `Err` early-return paths.
+
+All 438 repetitions' view commitments and verified-zero output shares feed the
+ceremony-wide `QSAG.MIGRATE.ROOT.V3` Merkle/transcript root. Custodians execute
+both cross-batch pre-commit (`QSAG.OUTER.PRECOMMIT.V1`) and post-root freeze
+(`QSAG.OUTER.FREEZE.V1`) agreements before opening the two Fiat-Shamir-selected
+ZKBoo views per repetition; the unchallenged third head's shares are zeroed
+prior to reconstruction. Each custodian runs the unchanged public verifier
+`verify_migration_proof` before final completion agreement
+(`QSAG.OUTER.COMPLETE.V1`).
+
+### Validation scope
+
+Unit and adversarial integration tests verify:
+
+* Polynomial-basis `GF(2^128)` transpose/Karatsuba identities, `GoldExt3` cubic
+  extension field axioms, `BitCheckScratch` high-water-mark zeroization, and
+  stack-streaming `Engine::tag` MAC equivalence.
+* Active 1-bit Boolean `AND` faults (both MAC-signed wire tampering and
+  algebraically consistent replicated share faults) aborting with
+  `Err(Error::MultiplicationCheck)` and zero secret wire openings.
+* Active 1-limb canonical prime-field `fmul` faults across `Gold`, `Secp`, and
+  `Ed` aborting before any A2B or B2A masked conversion difference opens.
+* End-to-end ZKBoo circuit `Bit` `AND` faults, `Field` `fmul` faults, and
+  malicious custodian witness-share substitution (`P0-1`) aborting before any
+  view commitment, output share, or view opens.
+* Byte-for-byte native ZKBoo view/commitment equivalence across 64 lanes, full
+  438-repetition distributed Bitcoin `HASH160` and `Ed25519` ceremonies under
+  online transcript observers and legacy XOR-reconstruction attack regressions,
+  and compile-fail linear consumption of `CoZkCustodianShare`.
