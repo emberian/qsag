@@ -1945,12 +1945,98 @@ pub fn retry_single_sign_stateful<S: TweakableHashSuite, L: StatefulEpochLatch>(
     .ok_or(EpochLatchError::PersistenceFailure)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaultCacheError { Rejected }
+
+/// A verified OTS input, indexed by its canonical WOTS public-key address.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FaultCacheRecord {
+    pub address: [u8; 32],
+    pub root: [u8; 32],
+    pub tsw_ctr: u32,
+}
+
+/// Transactional fault cache. Failure must prevent release of the candidate signature.
+pub trait FaultCacheJournal {
+    fn commit_verified(&mut self, key_id: [u8; 32], entries: &[FaultCacheRecord]) -> Result<(), FaultCacheError>;
+}
+
+/// Authenticated persistent upper-layer cache, matching `verifyBeforeReleaseAll`.
+/// Layer zero is intentionally excluded: the stateless FORS leaf can be revisited.
+#[cfg(feature = "std")]
+pub struct FsFaultCacheJournal(crate::durable_ledger::Ledger);
+
+#[cfg(feature = "std")]
+impl FsFaultCacheJournal {
+    pub fn create_new(path: impl Into<std::path::PathBuf>, mac_key: [u8; 32]) -> Result<Self, FaultCacheError> {
+        crate::durable_ledger::Ledger::create(path, mac_key, b"QSAG.TSW.FAULT.CACHE/v1")
+            .map(Self).map_err(|_| FaultCacheError::Rejected)
+    }
+    pub fn open_existing_at_least(path: impl Into<std::path::PathBuf>, mac_key: [u8; 32],
+        minimum: crate::durable_ledger::LedgerCheckpoint) -> Result<Self, FaultCacheError> {
+        crate::durable_ledger::Ledger::open(path, mac_key, b"QSAG.TSW.FAULT.CACHE/v1", minimum)
+            .map(Self).map_err(|_| FaultCacheError::Rejected)
+    }
+    pub fn checkpoint(&self) -> crate::durable_ledger::LedgerCheckpoint { self.0.checkpoint() }
+}
+
+#[cfg(feature = "std")]
+impl FaultCacheJournal for FsFaultCacheJournal {
+    fn commit_verified(&mut self, key_id: [u8; 32], entries: &[FaultCacheRecord]) -> Result<(), FaultCacheError> {
+        let mut records = self.0.read().map_err(|_| FaultCacheError::Rejected)?;
+        for entry in entries {
+            let mut key = key_id.to_vec();
+            key.extend_from_slice(&entry.address);
+            let mut value = entry.root.to_vec();
+            value.extend_from_slice(&entry.tsw_ctr.to_be_bytes());
+            if records.get(&key).is_some_and(|old| old != &value) {
+                return Err(FaultCacheError::Rejected);
+            }
+            records.insert(key, value);
+        }
+        self.0.commit(&records).map_err(|_| FaultCacheError::Rejected)
+    }
+}
+
+/// Verify every layer, then atomically commit the verified upper-layer `(root, tsw_ctr)`
+/// inputs before the caller releases the signature. Invalid candidates never alter the cache.
+pub fn verify_before_release_with_journal<S: TweakableHashSuite>(
+    suite: S, params: &PqHashParams, pk: &PqPublicKey, msg: &[u8], sig: &PqHashSig,
+    journal: &mut impl FaultCacheJournal,
+) -> Result<(), FaultCacheError> {
+    let mu = th_pre_hash(suite, &pk.pk_seed, &pk.pk_root, msg);
+    let mut entries = Vec::new();
+    if !verify_pq_hash_sig_collect(suite, params, pk, &mu, sig, &mut entries) {
+        return Err(FaultCacheError::Rejected);
+    }
+    let key_id = cshake256_32(b"QSAG.TSW.FAULT.KEY/v1", &pk.to_wire_bytes());
+    journal.commit_verified(key_id, &entries)
+}
+
+/// Opt-in persistent reference signing; legacy stateless entry points remain unchanged.
+#[expect(clippy::too_many_arguments, reason = "Reference signer plus caller-owned durable fault journal")]
+pub fn eval_single_sign_stateless_with_journal<S: TweakableHashSuite>(
+    suite: S, params: &PqHashParams, sk: &PqSecretKey, pk: &PqPublicKey, msg: &[u8],
+    opt_rand: &[u8], max_grind: u32, journal: &mut impl FaultCacheJournal,
+) -> Option<PqHashSig> {
+    let sig = eval_single_sign_stateless(suite, params, sk, pk, msg, opt_rand, max_grind)?;
+    verify_before_release_with_journal(suite, params, pk, msg, &sig, journal).ok()?;
+    Some(sig)
+}
+
 fn verify_pq_hash_sig_prehashed<S: TweakableHashSuite>(
+    suite: S, params: &PqHashParams, pk: &PqPublicKey, mu: &[u8; 32], sig: &PqHashSig,
+) -> bool {
+    verify_pq_hash_sig_collect(suite, params, pk, mu, sig, &mut Vec::new())
+}
+
+fn verify_pq_hash_sig_collect<S: TweakableHashSuite>(
     suite: S,
     params: &PqHashParams,
     pk: &PqPublicKey,
     mu: &[u8; 32],
     sig: &PqHashSig,
+    entries: &mut Vec<FaultCacheRecord>,
 ) -> bool {
     if !params.is_well_formed() || !params.leaf_idx_in_range(sig.leaf_global_idx) {
         return false;
@@ -2093,6 +2179,13 @@ fn verify_pq_hash_sig_prehashed<S: TweakableHashSuite>(
         ) else {
             return false;
         };
+        if layer_idx > 0 {
+            entries.push(FaultCacheRecord {
+                address: HashAdrs { layer: layer_u32, tree: tree_idx, kind: AdrsKind::WotsPk,
+                    key_pair: kp_u32, chain_idx: 0, hash_step: 0 }.to_bytes(),
+                root: cur_root, tsw_ctr: lsig.tsw_ctr,
+            });
+        }
         cur_root = next_root;
         cur_global = tree_idx_nat;
     }
@@ -2342,6 +2435,45 @@ impl core::error::Error for EpochLatchError {}
 mod tests {
     use super::*;
     use alloc::vec;
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn persistent_fault_cache_verifies_all_layers_and_commits_atomically() {
+        let dir = std::env::temp_dir().join(std::format!("qsag-fault-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("cache");
+        let params = PqHashParams::COMPACT_GOLDEN;
+        let sk = PqSecretKey { sk_seed: [1; 32], sk_prf: [2; 32], pk_seed: [3; 32] };
+        let pk = derive_public_key(Cshake256Suite, &params, &sk);
+        let mut journal = FsFaultCacheJournal::create_new(&path, [4; 32]).unwrap();
+        let sig = eval_single_sign_stateless_with_journal(Cshake256Suite, &params, &sk, &pk,
+            b"journal", &[0; 32], 100_000, &mut journal).unwrap();
+        let checkpoint = journal.checkpoint();
+        assert!(verify_before_release_with_journal(Cshake256Suite, &params, &pk, b"tampered", &sig, &mut journal).is_err());
+        assert_eq!(journal.checkpoint(), checkpoint);
+        drop(journal);
+        let mut journal = FsFaultCacheJournal::open_existing_at_least(&path, [4; 32], checkpoint).unwrap();
+        verify_before_release_with_journal(Cshake256Suite, &params, &pk, b"journal", &sig, &mut journal).unwrap();
+        let mu = th_pre_hash(Cshake256Suite, &pk.pk_seed, &pk.pk_root, b"journal");
+        let mut entries = Vec::new();
+        assert!(verify_pq_hash_sig_collect(Cshake256Suite, &params, &pk, &mu, &sig, &mut entries));
+        assert_eq!(entries.len(), params.num_layers - 1);
+        let key = cshake256_32(b"QSAG.TSW.FAULT.KEY/v1", &pk.to_wire_bytes());
+        let checkpoint = journal.checkpoint();
+        entries[0].root[0] ^= 1;
+        assert!(journal.commit_verified(key, &entries).is_err());
+        assert_eq!(journal.checkpoint(), checkpoint);
+        entries[0].root[0] ^= 1;
+        entries[0].tsw_ctr ^= 1;
+        assert!(journal.commit_verified(key, &entries).is_err());
+        // Conflicting duplicates in a new batch cannot partially commit.
+        let mut duplicate = entries[0].clone(); duplicate.root[0] ^= 1;
+        assert!(journal.commit_verified([9; 32], &[entries[0].clone(), duplicate]).is_err());
+        assert_eq!(journal.checkpoint(), checkpoint);
+        drop(journal);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn test_stateless_tsw_roundtrip_hmsg_leaf_binding_and_upper_layer_determinism() {
@@ -2593,15 +2725,15 @@ mod tests {
         assert_eq!(extract_base_w_digits_checked(8, 3, &[0xff]), None);
         // Non-dividing widths w = 32 (5 bits), 64 (6 bits), 128 (7 bits) span bytes cleanly.
         assert_eq!(
-            extract_base_w_digits_checked(32, 3, &[0b10001_010, 0b10_11111_0]),
+            extract_base_w_digits_checked(32, 3, &[0b1000_1010, 0b1011_1110]),
             Some(vec![17, 10, 31])
         );
         assert_eq!(
-            extract_base_w_digits_checked(64, 2, &[0b100001_11, 0b0011_0000]),
+            extract_base_w_digits_checked(64, 2, &[0b1000_0111, 0b0011_0000]),
             Some(vec![33, 51])
         );
         assert_eq!(
-            extract_base_w_digits_checked(128, 2, &[0b1000001_0, 0b111111_00]),
+            extract_base_w_digits_checked(128, 2, &[0b1000_0010, 0b1111_1100]),
             Some(vec![65, 63])
         );
     }

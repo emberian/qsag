@@ -6574,7 +6574,7 @@ mod tests {
         let sk_seed = [0x42; 32];
         let sk_prf = [0x24; 32];
         let pk_seed = [0x11; 32];
-        let keys = dealer.auth_key_shares(16, pk_seed, &sk_seed, &sk_prf);
+        let keys = dealer.key_shares(16, pk_seed, &sk_seed, &sk_prf);
         let mut vaults = dealer.vaults(4);
 
         let p_128s = Fips205Params::SLH_DSA_SHAKE_128S;

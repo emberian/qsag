@@ -1117,6 +1117,7 @@ fn linear_terms(
             return out;
         }
     }
+    #[expect(clippy::needless_range_loop, reason = "Transpose two proof terms into three party slots")]
     for s in 0..3 {
         let part = linear_terms_slot_range(pending, s, 0..groups, weights);
         for k in 0..2 {
@@ -1297,8 +1298,8 @@ fn bind_planes_chunk(
                 hi[t - 64] = acc;
             }
         }
-        qsag_asm::transpose64x256(&mut *lo);
-        qsag_asm::transpose64x256(&mut *hi);
+        qsag_asm::transpose64x256(&mut lo);
+        qsag_asm::transpose64x256(&mut hi);
         for q in 0..4 {
             for c in 0..64 {
                 let lane = 64 * q + c;
@@ -2461,8 +2462,8 @@ impl Rss256Engine {
                 };
                 let tabs = SecretBuffer(if weighted {
                     fold_round_sums(
-                        &*x,
-                        &*y,
+                        &x,
+                        &y,
                         len,
                         bits,
                         per_block >> bits,
@@ -2470,7 +2471,7 @@ impl Rss256Engine {
                         &mut scratch,
                     )
                 } else {
-                    fold_round_sums(&*x, &*y, len, bits, FOLD_BATCH_CHUNKS, None, &mut scratch)
+                    fold_round_sums(&x, &y, len, bits, FOLD_BATCH_CHUNKS, None, &mut scratch)
                 });
                 let shares = SecretBuffer(core::array::from_fn::<(Vec<Fe>, Vec<Fe>), 3, _>(|p| {
                     self.split_message(p, pass, round, &tabs[p], &mut share_prg[p])

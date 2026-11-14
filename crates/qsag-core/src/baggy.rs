@@ -2279,9 +2279,10 @@ mod tests {
 
         let mut ledger = MemoryFirstSigned::new();
         let key = StaticKeyId {
+            identity: [7; 32],
             layer: 1,
             tree: 0,
-            keypair: 2,
+            key_pair: 2,
         };
         let r1 = FirstSignedRecord {
             key,
