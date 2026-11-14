@@ -912,7 +912,7 @@ def extractShardQuorum (arith : RowArithmetization) (dom : WhirDomain)
       (HemShardBreak arith dom e.shard.proof e.view) :=
   have hF := verifyHemShard_facts h
   match succinct_aggregation_knowledge_soundness arith dom e.shard.inst e.law e.shard.proof
-      e.shard.fs e.view hF.2.2 e.bound with
+      e.shard.fs e.view hF.2.2.2.2 e.bound with
   | .inl ⟨_, hAll⟩ =>
     have hAll' : checkAllActiveSigners e.shard.inst.suite e.shard.inst.params
         (shardBoundMessage e.shard.shardId epochFloor msg) e.shard.inst.committee
@@ -951,8 +951,64 @@ def extractShardList (arith : RowArithmetization) (dom : WhirDomain)
             simp only [List.map_cons, hierarchicalClaimedWeight, List.length_append]
             omega⟩
 
+theorem hierarchicalThresholdSum_le_claimedWeight {arith : RowArithmetization} {dom : WhirDomain}
+    {epochFloor msg : List UInt8} :
+    ∀ shards : List HemShardProof,
+      (∀ s ∈ shards, verifyHemShard arith dom epochFloor msg s = true) →
+      hierarchicalThresholdSum shards ≤ hierarchicalClaimedWeight shards
+  | [], _ => Nat.le_refl _
+  | s :: rest, h => by
+    have hs := (verifyHemShard_facts (h s (List.mem_cons_self ..))).2.2.2.1
+    have ih := hierarchicalThresholdSum_le_claimedWeight rest
+      (fun s' hs' => h s' (List.mem_cons_of_mem _ hs'))
+    simp only [hierarchicalThresholdSum, hierarchicalClaimedWeight]
+    omega
+
+/-- Constructive policy-binding theorem for `verifyHierarchicalHem`: under an authenticated
+    registry digest `H (encodeRegistry registry) = registryDigest`, acceptance either yields a
+    concrete `HashCollisionWitness H`, or guarantees that `verifyHemHierarchyAgainstRegistry`
+    accepts, every shard's `(shardId, threshold, suiteId, params, committee)` equals its registered
+    row in `registry` with `1 ≤ threshold ≤ |committee|`, and
+    `hierarchicalThresholdSum shards = registryThresholdSum registry ≤ hierarchicalClaimedWeight shards`. -/
+def verifyHierarchicalHem_authenticates_registry (H : Hash) (arith : RowArithmetization)
+    (dom : WhirDomain) (registryDigest epochFloor msg : List UInt8)
+    (registry : List ShardRegistration)
+    (hReg : H (encodeRegistry registry) = registryDigest)
+    (shards : List HemShardProof)
+    (hAccept : verifyHierarchicalHem H arith dom registryDigest epochFloor msg shards = true) :
+    PSum
+      (PLift (verifyHemHierarchyAgainstRegistry arith dom registry epochFloor msg shards = true ∧
+        shards.map HemShardProof.registration = registry ∧
+        (∀ r ∈ registry, r.WellFormed = true ∧ 1 ≤ r.threshold ∧ r.threshold ≤ r.committee.length) ∧
+        hierarchicalThresholdSum shards = registryThresholdSum registry ∧
+        registryThresholdSum registry ≤ hierarchicalClaimedWeight shards))
+      (HashCollisionWitness H) :=
+  have hF := verifyHierarchicalHem_facts hAccept
+  if hEq : shards.map HemShardProof.registration = registry then
+    .inl ⟨by
+      have hWf : ∀ r ∈ registry,
+          r.WellFormed = true ∧ 1 ≤ r.threshold ∧ r.threshold ≤ r.committee.length := by
+        intro r hr
+        rw [← hEq] at hr
+        obtain ⟨s, hsMem, rfl⟩ := List.mem_map.mp hr
+        have hsF := verifyHemShard_facts (hF.2.2.2 s hsMem)
+        exact ⟨verifyHemShard_wellFormed (hF.2.2.2 s hsMem), hsF.2.1, hsF.2.2.1⟩
+      have hSumEq : hierarchicalThresholdSum shards = registryThresholdSum registry := by
+        rw [hierarchicalThresholdSum_eq_registryThresholdSum, hEq]
+      have hSumLe : registryThresholdSum registry ≤ hierarchicalClaimedWeight shards := by
+        rw [← hSumEq]
+        exact hierarchicalThresholdSum_le_claimedWeight shards hF.2.2.2
+      have hAgainst :
+          verifyHemHierarchyAgainstRegistry arith dom registry epochFloor msg shards = true := by
+        unfold verifyHemHierarchyAgainstRegistry
+        simp only [Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true]
+        exact ⟨⟨⟨⟨fun r hr => (hWf r hr).1, hEq⟩, hF.2.1⟩, hF.2.2.1⟩, hF.2.2.2⟩
+      exact ⟨hAgainst, hEq, hWf, hSumEq, hSumLe⟩⟩
+  else
+    .inr (registryCollision H hF.1 hReg hEq)
+
 /-- Left outcome of the tree extractor: one valid signature per active slot of every shard, for
-    exactly the registered committees. -/
+    exactly the registered policies (`shardId`, `threshold`, `suiteId`, `params`, `committee`). -/
 structure HierarchicalQuorumWitness (epochFloor msg : List UInt8)
     (registry : List ShardRegistration) (shards : List HemShardProof) where
   sigs : List (ExtractedQuorumSig epochFloor msg)
@@ -987,24 +1043,12 @@ def extractHierarchicalHemQuorums (H : Hash) (arith : RowArithmetization) (dom :
   else
     .inr (.inl (registryCollision H hF.1 hReg hEq))
 
-theorem hierarchicalThresholdSum_le_claimedWeight {arith : RowArithmetization} {dom : WhirDomain}
-    {epochFloor msg : List UInt8} :
-    ∀ shards : List HemShardProof,
-      (∀ s ∈ shards, verifyHemShard arith dom epochFloor msg s = true) →
-      hierarchicalThresholdSum shards ≤ hierarchicalClaimedWeight shards
-  | [], _ => Nat.le_refl _
-  | s :: rest, h => by
-    have hs := (verifyHemShard_facts (h s (List.mem_cons_self ..))).2.1
-    have ih := hierarchicalThresholdSum_le_claimedWeight rest
-      (fun s' hs' => h s' (List.mem_cons_of_mem _ hs'))
-    simp only [hierarchicalThresholdSum, hierarchicalClaimedWeight]
-    omega
-
 /-- **Two-layer hierarchical knowledge soundness
     (`recursive_hem_two_layer_knowledge_soundness`)**: an accepting root verification against a
     committed registry yields signatures `sigs` with one entry per active slot, at least
-    `Σ_j K_j` of them, under pairwise-distinct public keys taken from the registered committees;
-    otherwise there is a registry hash collision or a shard index with a single-layer break. -/
+    `registryThresholdSum registry` (`= Σ_j K_j`) of them, under pairwise-distinct public keys
+    taken from the registered committees with well-formed thresholds; otherwise there is a registry
+    hash collision or a shard index with a single-layer break. -/
 theorem recursive_hem_two_layer_knowledge_soundness (H : Hash) (arith : RowArithmetization)
     (dom : WhirDomain) (registryDigest epochFloor msg : List UInt8)
     (registry : List ShardRegistration) (hReg : H (encodeRegistry registry) = registryDigest)
@@ -1014,8 +1058,10 @@ theorem recursive_hem_two_layer_knowledge_soundness (H : Hash) (arith : RowArith
     (∃ sigs : List (ExtractedQuorumSig epochFloor msg),
       sigs.map (·.slot) = hierarchicalActiveSlots (envs.map (·.shard)) ∧
       sigs.length = hierarchicalClaimedWeight (envs.map (·.shard)) ∧
-      hierarchicalThresholdSum (envs.map (·.shard)) ≤ sigs.length ∧
+      hierarchicalThresholdSum (envs.map (·.shard)) = registryThresholdSum registry ∧
+      registryThresholdSum registry ≤ sigs.length ∧
       (sigs.map (·.slot.pk)).Nodup ∧
+      (∀ r ∈ registry, r.WellFormed = true) ∧
       (envs.map (·.shard)).map HemShardProof.registration = registry) ∨
     Nonempty (HemHierarchyBreak H arith dom envs) := by
   have hF := verifyHierarchicalHem_facts hAccept
@@ -1023,13 +1069,805 @@ theorem recursive_hem_two_layer_knowledge_soundness (H : Hash) (arith : RowArith
       envs hAccept with
   | .inr brk => exact .inr ⟨brk⟩
   | .inl w =>
-    refine .inl ⟨w.sigs, w.slots_eq, w.weight_eq, ?_, ?_, w.registry_eq⟩
-    · rw [w.weight_eq]
+    have hSumEq :
+        hierarchicalThresholdSum (envs.map (·.shard)) = registryThresholdSum registry := by
+      rw [hierarchicalThresholdSum_eq_registryThresholdSum, w.registry_eq]
+    refine .inl ⟨w.sigs, w.slots_eq, w.weight_eq, hSumEq, ?_, ?_, ?_, w.registry_eq⟩
+    · rw [w.weight_eq, ← hSumEq]
       exact hierarchicalThresholdSum_le_claimedWeight _ hF.2.2.2
     · have hMap : w.sigs.map (·.slot.pk) = (w.sigs.map (·.slot)).map HemSlot.pk := by
         rw [List.map_map]; rfl
       rw [hMap, w.slots_eq]
       exact (hierarchicalActiveSlots_pk_sublist _).nodup hF.2.2.1
+    · intro r hr
+      rw [← w.registry_eq] at hr
+      obtain ⟨s, hsMem, rfl⟩ := List.mem_map.mp hr
+      exact verifyHemShard_wellFormed (hF.2.2.2 s hsMem)
+
+/-! ### Prover commitment-opening transcript extraction (`StagesBound` grounding & query cost) -/
+
+/-- Additional Merkle duet opening collected from a rewound prover run at `(stagePos, layer, cosetIdx)`. -/
+structure RewoundDuetOpening where
+  stagePos : Nat
+  layer : Nat
+  cosetIdx : Nat
+  opening : FoldLayerOpening
+
+/-- Prover commitment-opening transcript for one WHIR proof: `stageLayerOpenings[pos][layer][g]`
+    records the prover's Merkle duet opening for coset `g` at `(stagePos = pos, layer)`, and
+    `rewoundOpenings` records any auxiliary coset openings from rewound prover runs against the
+    same committed Merkle roots. Contains zero unproved `Prop` assumptions. -/
+structure CommittedTableTranscript where
+  stageLayerOpenings : List (List (List FoldLayerOpening))
+  rewoundOpenings : List RewoundDuetOpening := []
+
+/-- Shard prover extraction bundle pairing a shard certificate with its `CommittedTableTranscript`. -/
+structure ShardProverTranscript (arith : RowArithmetization) (dom : WhirDomain) where
+  shard : HemShardProof
+  law : arith.Lawful dom shard.inst
+  transcript : CommittedTableTranscript
+
+/-- Number of coset duet openings required across `foldLayers` intra-stage folding layers
+    starting from `groups` initial cosets. -/
+def stageLayerQueryCost : Nat → Nat → Nat
+  | _, 0 => 0
+  | groups, k + 1 => groups + stageLayerQueryCost (groups / 2) k
+
+/-- Number of coset duet openings required to sweep all folding layers of stage `sdom`. -/
+def stageTranscriptQueryCost (sdom : WhirStageDomain) : Nat :=
+  stageLayerQueryCost sdom.groups0 sdom.foldLayers
+
+/-- Number of coset duet openings required to sweep every stage in `dom`. -/
+def domainTranscriptQueryCost (dom : WhirDomain) : Nat :=
+  dom.stages.foldr (fun sdom acc => stageTranscriptQueryCost sdom + acc) 0
+
+/-- Total base coset-sweep opening cost across `numShards` regional shards on `dom`. -/
+def hierarchyTranscriptQueryCost (dom : WhirDomain) (numShards : Nat) : Nat :=
+  numShards * domainTranscriptQueryCost dom
+
+def layerOpeningsCount : List (List FoldLayerOpening) → Nat
+  | [] => 0
+  | ops :: rest => ops.length + layerOpeningsCount rest
+
+def transcriptSweepOpeningCount (tr : CommittedTableTranscript) : Nat :=
+  tr.stageLayerOpenings.foldr (fun stOps acc => layerOpeningsCount stOps + acc) 0
+
+def transcriptTotalOpeningCount (tr : CommittedTableTranscript) : Nat :=
+  transcriptSweepOpeningCount tr + tr.rewoundOpenings.length
+
+def hierarchySweepOpeningCount {arith : RowArithmetization} {dom : WhirDomain}
+    (trs : List (ShardProverTranscript arith dom)) : Nat :=
+  trs.foldr (fun t acc => transcriptSweepOpeningCount t.transcript + acc) 0
+
+def defaultFoldOpening : FoldLayerOpening :=
+  ⟨GoldilocksExt4.zero, GoldilocksExt4.zero, []⟩
+
+def layerGroupsAt : Nat → Nat → Nat
+  | groups, 0 => groups
+  | groups, l + 1 => layerGroupsAt (groups / 2) l
+
+/-- Executable check that `op` is a valid Merkle duet opening at `(stageIdx, layer, g)` to `root`. -/
+def verifyDuetCosetOpening (stageIdx layer groups : Nat) (root : List UInt8)
+    (g : Nat) (op : FoldLayerOpening) : Bool :=
+  decide (op.path.length = merkleDepth groups) &&
+  decide (merklePathRoot pcsMerkleHash
+    (pcsMerkleHash (duetLeafFrame stageIdx layer g op.v0 op.v1)) g op.path = root)
+
+def verifyLayerSweepAux (stageIdx layer groups : Nat) (root : List UInt8) :
+    Nat → List FoldLayerOpening → Bool
+  | _, [] => true
+  | g, op :: ops =>
+    verifyDuetCosetOpening stageIdx layer groups root g op &&
+    verifyLayerSweepAux stageIdx layer groups root (g + 1) ops
+
+def verifyLayerSweep (stageIdx layer groups : Nat) (root : List UInt8)
+    (ops : List FoldLayerOpening) : Bool :=
+  decide (ops.length = groups) &&
+  verifyLayerSweepAux stageIdx layer groups root 0 ops
+
+def verifyStageLayerSweeps (stageIdx : Nat) :
+    Nat → Nat → List (List FoldLayerOpening) → List (List UInt8) → Bool
+  | _, _, [], [] => true
+  | layer, groups, ops :: restOps, root :: roots =>
+    verifyLayerSweep stageIdx layer groups root ops &&
+    verifyStageLayerSweeps stageIdx (layer + 1) (groups / 2) restOps roots
+  | _, _, _, _ => false
+
+def verifyAllStageSweeps :
+    List WhirStageDomain → List (List (List FoldLayerOpening)) → List WhirStageProof → Bool
+  | [], [], [] => true
+  | sdom :: sdoms, stOps :: restOps, sp :: sps =>
+    decide (stOps ≠ []) &&
+    verifyStageLayerSweeps sdom.stageIdx 0 sdom.groups0 stOps (stageAllRoots sp) &&
+    verifyAllStageSweeps sdoms restOps sps
+  | _, _, _ => false
+
+def verifyRewoundOpening (dom : WhirDomain) (proof : SuccinctAggregateProof)
+    (ro : RewoundDuetOpening) : Bool :=
+  match dom.stages[ro.stagePos]?, proof.stages[ro.stagePos]? with
+  | some sdom, some sp =>
+    match (stageAllRoots sp)[ro.layer]? with
+    | some root =>
+      let groups := layerGroupsAt sdom.groups0 ro.layer
+      decide (ro.cosetIdx < groups) &&
+      verifyDuetCosetOpening sdom.stageIdx ro.layer groups root ro.cosetIdx ro.opening
+    | none => false
+  | _, _ => false
+
+/-- Executable Boolean acceptor for a prover commitment-opening transcript against `(dom, proof)`. -/
+def verifyCommittedTableTranscript (dom : WhirDomain) (proof : SuccinctAggregateProof)
+    (tr : CommittedTableTranscript) : Bool :=
+  decide ((dom.stages.map (·.stageIdx)).Nodup) &&
+  verifyAllStageSweeps dom.stages tr.stageLayerOpenings proof.stages &&
+  tr.rewoundOpenings.all (verifyRewoundOpening dom proof)
+
+/-- Reconstruct the length-`2 * ops.length` layer codeword from its `ops.length` coset duet openings. -/
+def reconstructLayerTable (ops : List FoldLayerOpening) : List GoldilocksExt4 :=
+  ops.map (·.v0) ++ ops.map (·.v1)
+
+def lookupStageOpenings :
+    List WhirStageDomain → List (List (List FoldLayerOpening)) → Nat →
+      List (List FoldLayerOpening)
+  | sdom :: sdoms, stOps :: restOps, stageIdx =>
+    if sdom.stageIdx = stageIdx then stOps
+    else lookupStageOpenings sdoms restOps stageIdx
+  | _, _, _ => []
+
+def transcriptAuthPath (dom : WhirDomain) (tr : CommittedTableTranscript)
+    (stageIdx layer g : Nat) : List (List UInt8) :=
+  (((lookupStageOpenings dom.stages tr.stageLayerOpenings stageIdx).getD layer []).getD
+    g defaultFoldOpening).path
+
+/-- Reconstruct the `SuccinctExtractionView` directly from a `CommittedTableTranscript`. -/
+def reconstructSuccinctView (dom : WhirDomain) (tr : CommittedTableTranscript) :
+    SuccinctExtractionView where
+  allTables := tr.stageLayerOpenings.map (fun stOps => stOps.map reconstructLayerTable)
+  authPath := transcriptAuthPath dom tr
+
+private theorem getD_append_left {α : Type} (d : α) :
+    ∀ (xs ys : List α) (i : Nat), i < xs.length → (xs ++ ys).getD i d = xs.getD i d
+  | [], _, _, h => absurd h (Nat.not_lt_zero _)
+  | _ :: _, _, 0, _ => rfl
+  | _ :: xs, ys, i + 1, h => getD_append_left d xs ys i (Nat.lt_of_succ_lt_succ h)
+
+private theorem getD_append_right {α : Type} (d : α) :
+    ∀ (xs ys : List α) (i : Nat), (xs ++ ys).getD (i + xs.length) d = ys.getD i d
+  | [], _, _ => rfl
+  | _ :: xs, ys, i => by
+    have hEq : i + (xs.length + 1) = (i + xs.length) + 1 := by omega
+    rw [List.cons_append, List.length_cons, hEq]
+    exact getD_append_right d xs ys i
+
+private theorem getD_map_of_lt {α β : Type} (f : α → β) (da : α) (db : β) :
+    ∀ (xs : List α) (i : Nat), i < xs.length → (xs.map f).getD i db = f (xs.getD i da)
+  | [], _, h => absurd h (Nat.not_lt_zero _)
+  | _ :: _, 0, _ => rfl
+  | _ :: xs, i + 1, h => getD_map_of_lt f da db xs i (Nat.lt_of_succ_lt_succ h)
+
+private theorem reconstructLayerTable_getD_left (ops : List FoldLayerOpening) (g : Nat)
+    (hg : g < ops.length) :
+    (reconstructLayerTable ops).getD g CommRingOps.zero =
+      (ops.getD g defaultFoldOpening).v0 := by
+  unfold reconstructLayerTable
+  rw [getD_append_left _ _ _ g (by simpa using hg)]
+  exact getD_map_of_lt (·.v0) defaultFoldOpening CommRingOps.zero ops g hg
+
+private theorem reconstructLayerTable_getD_right (ops : List FoldLayerOpening) (g : Nat)
+    (hg : g < ops.length) :
+    (reconstructLayerTable ops).getD (g + ops.length) CommRingOps.zero =
+      (ops.getD g defaultFoldOpening).v1 := by
+  unfold reconstructLayerTable
+  have hLen : (ops.map (·.v0)).length = ops.length := List.length_map _
+  rw [← hLen, getD_append_right]
+  exact getD_map_of_lt (·.v1) defaultFoldOpening CommRingOps.zero ops g hg
+
+private theorem verifyLayerSweepAux_getD {stageIdx layer groups : Nat} {root : List UInt8} :
+    ∀ (ops : List FoldLayerOpening) (base i : Nat),
+      i < ops.length →
+      verifyLayerSweepAux stageIdx layer groups root base ops = true →
+      verifyDuetCosetOpening stageIdx layer groups root (base + i)
+        (ops.getD i defaultFoldOpening) = true
+  | [], _, _, hi, _ => absurd hi (Nat.not_lt_zero _)
+  | op :: _, base, 0, _, h => by
+    simpa only [Nat.add_zero] using (Bool.and_eq_true_iff.mp h).1
+  | _ :: ops, base, i + 1, hi, h => by
+    have ih := verifyLayerSweepAux_getD ops (base + 1) i (Nat.lt_of_succ_lt_succ hi)
+      (Bool.and_eq_true_iff.mp h).2
+    have hAdd : base + (i + 1) = (base + 1) + i := by omega
+    simpa only [hAdd] using ih
+
+private theorem verifyLayerSweep_at {stageIdx layer groups : Nat} {root : List UInt8}
+    {ops : List FoldLayerOpening}
+    (h : verifyLayerSweep stageIdx layer groups root ops = true) :
+    ops.length = groups ∧
+    ∀ g, g < groups →
+      verifyDuetCosetOpening stageIdx layer groups root g (ops.getD g defaultFoldOpening) = true := by
+  obtain ⟨hLen, hAux⟩ := Bool.and_eq_true_iff.mp h
+  have hEq : ops.length = groups := of_decide_eq_true hLen
+  refine ⟨hEq, fun g hg => ?_⟩
+  simpa only [Nat.zero_add] using
+    verifyLayerSweepAux_getD ops 0 g (hEq.symm ▸ hg) hAux
+
+private theorem verifyDuetCosetOpening_facts {stageIdx layer groups : Nat} {root : List UInt8}
+    {g : Nat} {op : FoldLayerOpening}
+    (h : verifyDuetCosetOpening stageIdx layer groups root g op = true) :
+    op.path.length = merkleDepth groups ∧
+    merklePathRoot pcsMerkleHash
+      (pcsMerkleHash (duetLeafFrame stageIdx layer g op.v0 op.v1)) g op.path = root := by
+  obtain ⟨h1, h2⟩ := Bool.and_eq_true_iff.mp h
+  exact ⟨of_decide_eq_true h1, of_decide_eq_true h2⟩
+
+private theorem stageLayersBound_of_sweeps (authPath : Nat → Nat → Nat → List (List UInt8))
+    (stageIdx : Nat) :
+    ∀ (stOps : List (List FoldLayerOpening)) (roots : List (List UInt8)) (baseLayer groups : Nat),
+      (∀ k g, authPath stageIdx (baseLayer + k) g =
+        ((stOps.getD k []).getD g defaultFoldOpening).path) →
+      verifyStageLayerSweeps stageIdx baseLayer groups stOps roots = true →
+      StageLayersBound authPath stageIdx baseLayer groups (stOps.map reconstructLayerTable) roots
+  | [], [], _, _, _, _ => trivial
+  | [], _ :: _, _, _, _, h => absurd h Bool.false_ne_true
+  | _ :: _, [], _, _, _, h => absurd h Bool.false_ne_true
+  | ops :: restOps, root :: roots, baseLayer, groups, hAuth, hSw => by
+    obtain ⟨hHead, hTail⟩ := Bool.and_eq_true_iff.mp hSw
+    obtain ⟨hLen, hAt⟩ := verifyLayerSweep_at hHead
+    refine ⟨fun g hg => ?_, ?_⟩
+    · have hgOps : g < ops.length := hLen.symm ▸ hg
+      have hOpen := verifyDuetCosetOpening_facts (hAt g hg)
+      have hPath : authPath stageIdx baseLayer g = (ops.getD g defaultFoldOpening).path := by
+        simpa only [Nat.add_zero] using hAuth 0 g
+      rw [reconstructLayerTable_getD_left ops g hgOps,
+          ← hLen, reconstructLayerTable_getD_right ops g hgOps, hLen, hPath]
+      exact ⟨hOpen.2, hOpen.1⟩
+    · apply stageLayersBound_of_sweeps authPath stageIdx restOps roots (baseLayer + 1) (groups / 2)
+      · intro k g
+        have hAdd : (baseLayer + 1) + k = baseLayer + (k + 1) := by omega
+        rw [hAdd]
+        exact hAuth (k + 1) g
+      · exact hTail
+
+private theorem lookupStageOpenings_of_nodup :
+    ∀ (sdoms : List WhirStageDomain) (allOps : List (List (List FoldLayerOpening)))
+      (pos : Nat) (sdom : WhirStageDomain) (stOps : List (List FoldLayerOpening)),
+      (sdoms.map (·.stageIdx)).Nodup →
+      sdoms[pos]? = some sdom →
+      allOps[pos]? = some stOps →
+      lookupStageOpenings sdoms allOps sdom.stageIdx = stOps
+  | [], _, _, _, _, _, hd, _ => by cases hd
+  | _ :: _, [], _, _, _, _, _, ha => by cases ha
+  | sd :: sds, ops0 :: rest, 0, sdom, stOps, _, hd, ha => by
+    cases hd; cases ha
+    simp [lookupStageOpenings]
+  | sd :: sds, ops0 :: rest, pos + 1, sdom, stOps, hNd, hd, ha => by
+    obtain ⟨hNotMem, hNdTail⟩ := List.nodup_cons.mp hNd
+    have hMem : sdom ∈ sds := List.mem_of_getElem? hd
+    have hNe : sd.stageIdx ≠ sdom.stageIdx := fun hEq =>
+      hNotMem (hEq ▸ List.mem_map.mpr ⟨sdom, hMem, rfl⟩)
+    simp only [lookupStageOpenings, hNe, ↓reduceIte]
+    exact lookupStageOpenings_of_nodup sds rest pos sdom stOps hNdTail hd ha
+
+private theorem stagesBound_of_sweeps (authPath : Nat → Nat → Nat → List (List UInt8)) :
+    ∀ (sdoms : List WhirStageDomain) (allOps : List (List (List FoldLayerOpening)))
+      (sps : List WhirStageProof),
+      (∀ pos sdom stOps, sdoms[pos]? = some sdom → allOps[pos]? = some stOps →
+        ∀ layer g, authPath sdom.stageIdx layer g =
+          ((stOps.getD layer []).getD g defaultFoldOpening).path) →
+      verifyAllStageSweeps sdoms allOps sps = true →
+      StagesBound authPath sdoms (allOps.map (fun stOps => stOps.map reconstructLayerTable)) sps
+  | [], [], [], _, _ => trivial
+  | [], _ :: _, _, _, h => absurd h Bool.false_ne_true
+  | [], [], _ :: _, _, h => absurd h Bool.false_ne_true
+  | _ :: _, [], _, _, h => absurd h Bool.false_ne_true
+  | _ :: _, _ :: _, [], _, h => absurd h Bool.false_ne_true
+  | sdom :: sdoms, stOps :: restOps, sp :: sps, hAuth, hSw => by
+    rcases Bool.and_eq_true_iff.mp hSw with ⟨h12, hRest⟩
+    rcases Bool.and_eq_true_iff.mp h12 with ⟨hNeDec, hLayers⟩
+    have hNe : stOps ≠ [] := of_decide_eq_true hNeDec
+    refine ⟨fun hMapNil => hNe (List.map_eq_nil_iff.mp hMapNil), ?_, ?_⟩
+    · apply stageLayersBound_of_sweeps authPath sdom.stageIdx stOps (stageAllRoots sp)
+        0 sdom.groups0
+      · intro k g
+        simpa only [Nat.zero_add] using hAuth 0 sdom stOps rfl rfl k g
+      · exact hLayers
+    · exact stagesBound_of_sweeps authPath sdoms restOps sps
+        (fun pos sd ops hd ha => hAuth (pos + 1) sd ops hd ha) hRest
+
+/-- Every accepted `CommittedTableTranscript` satisfies `StagesBound` on its reconstructed view. -/
+theorem reconstructSuccinctView_stagesBound (dom : WhirDomain) (proof : SuccinctAggregateProof)
+    (tr : CommittedTableTranscript)
+    (hTr : verifyCommittedTableTranscript dom proof tr = true) :
+    StagesBound (reconstructSuccinctView dom tr).authPath dom.stages
+      (reconstructSuccinctView dom tr).allTables proof.stages := by
+  rcases Bool.and_eq_true_iff.mp hTr with ⟨h12, _⟩
+  rcases Bool.and_eq_true_iff.mp h12 with ⟨hNdDec, hSweeps⟩
+  have hNd : (dom.stages.map (·.stageIdx)).Nodup := of_decide_eq_true hNdDec
+  apply stagesBound_of_sweeps (transcriptAuthPath dom tr) dom.stages tr.stageLayerOpenings
+    proof.stages _ hSweeps
+  intro pos sdom stOps hd ha layer g
+  unfold transcriptAuthPath
+  rw [lookupStageOpenings_of_nodup dom.stages tr.stageLayerOpenings pos sdom stOps hNd hd ha]
+
+private theorem verifyAllStageSweeps_at :
+    ∀ (sdoms : List WhirStageDomain) (allOps : List (List (List FoldLayerOpening)))
+      (sps : List WhirStageProof) (pos : Nat) (sdom : WhirStageDomain) (sp : WhirStageProof),
+      verifyAllStageSweeps sdoms allOps sps = true →
+      sdoms[pos]? = some sdom →
+      sps[pos]? = some sp →
+      verifyStageLayerSweeps sdom.stageIdx 0 sdom.groups0 (allOps.getD pos [])
+        (stageAllRoots sp) = true
+  | [], _, _, _, _, _, _, hd, _ => by cases hd
+  | _ :: _, [], _, _, _, _, h, _, _ => absurd h Bool.false_ne_true
+  | _ :: _, _ :: _, [], _, _, _, h, _, _ => absurd h Bool.false_ne_true
+  | sd :: _, stOps :: _, sp0 :: _, 0, sdom, sp, h, hd, hp => by
+    cases hd; cases hp
+    exact (Bool.and_eq_true_iff.mp (Bool.and_eq_true_iff.mp h).1).2
+  | _ :: sds, _ :: restOps, _ :: sps, pos + 1, sdom, sp, h, hd, hp =>
+    verifyAllStageSweeps_at sds restOps sps pos sdom sp (Bool.and_eq_true_iff.mp h).2 hd hp
+
+private theorem verifyStageLayerSweeps_at (stageIdx : Nat) :
+    ∀ (stOps : List (List FoldLayerOpening)) (roots : List (List UInt8))
+      (baseLayer groups layer : Nat) (root : List UInt8),
+      verifyStageLayerSweeps stageIdx baseLayer groups stOps roots = true →
+      roots[layer]? = some root →
+      verifyLayerSweep stageIdx (baseLayer + layer) (layerGroupsAt groups layer)
+        root (stOps.getD layer []) = true
+  | _, [], _, _, _, _, _, hr => by cases hr
+  | [], _ :: _, _, _, _, _, h, _ => absurd h Bool.false_ne_true
+  | ops :: _, r0 :: _, baseLayer, groups, 0, root, h, hr => by
+    cases hr
+    simpa only [Nat.add_zero, layerGroupsAt] using (Bool.and_eq_true_iff.mp h).1
+  | _ :: restOps, _ :: roots, baseLayer, groups, l + 1, root, h, hr => by
+    have ih := verifyStageLayerSweeps_at stageIdx restOps roots (baseLayer + 1) (groups / 2)
+      l root (Bool.and_eq_true_iff.mp h).2 hr
+    have hAdd : (baseLayer + 1) + l = baseLayer + (l + 1) := by omega
+    simpa only [hAdd, layerGroupsAt] using ih
+
+/-- Constructively cross-check one rewound opening against the base coset sweep: either the duet
+    values agree with the reconstructed table, or `duetOpeningCollision` extracts a concrete
+    `HashCollisionWitness pcsMerkleHash`. -/
+def checkOneRewoundOpening (dom : WhirDomain) (proof : SuccinctAggregateProof)
+    (tr : CommittedTableTranscript) (ro : RewoundDuetOpening)
+    (hSweeps : verifyAllStageSweeps dom.stages tr.stageLayerOpenings proof.stages = true)
+    (hRo : verifyRewoundOpening dom proof ro = true) :
+    let sweepOp := ((tr.stageLayerOpenings.getD ro.stagePos []).getD ro.layer []).getD
+      ro.cosetIdx defaultFoldOpening
+    PSum (PLift (ro.opening.v0 = sweepOp.v0 ∧ ro.opening.v1 = sweepOp.v1))
+      (HashCollisionWitness pcsMerkleHash) :=
+  let sweepOp := ((tr.stageLayerOpenings.getD ro.stagePos []).getD ro.layer []).getD
+    ro.cosetIdx defaultFoldOpening
+  if hEq : ro.opening.v0 = sweepOp.v0 ∧ ro.opening.v1 = sweepOp.v1 then
+    .inl ⟨hEq⟩
+  else
+    match hd : dom.stages[ro.stagePos]?, hp : proof.stages[ro.stagePos]? with
+    | none, _ => absurd (by simpa [verifyRewoundOpening, hd] using hRo) Bool.false_ne_true
+    | some _, none => absurd (by simpa [verifyRewoundOpening, hd, hp] using hRo) Bool.false_ne_true
+    | some sdom, some sp =>
+      match hr : (stageAllRoots sp)[ro.layer]? with
+      | none =>
+        absurd (by simpa [verifyRewoundOpening, hd, hp, hr] using hRo) Bool.false_ne_true
+      | some root =>
+        have hRo' : ro.cosetIdx < layerGroupsAt sdom.groups0 ro.layer ∧
+            verifyDuetCosetOpening sdom.stageIdx ro.layer
+              (layerGroupsAt sdom.groups0 ro.layer) root ro.cosetIdx ro.opening = true := by
+          have h0 : (decide (ro.cosetIdx < layerGroupsAt sdom.groups0 ro.layer) &&
+              verifyDuetCosetOpening sdom.stageIdx ro.layer
+                (layerGroupsAt sdom.groups0 ro.layer) root ro.cosetIdx ro.opening) = true := by
+            simpa [verifyRewoundOpening, hd, hp, hr] using hRo
+          exact ⟨of_decide_eq_true (Bool.and_eq_true_iff.mp h0).1, (Bool.and_eq_true_iff.mp h0).2⟩
+        have hStSw := verifyAllStageSweeps_at dom.stages tr.stageLayerOpenings proof.stages
+          ro.stagePos sdom sp hSweeps hd hp
+        have hLaySw : verifyLayerSweep sdom.stageIdx ro.layer
+            (layerGroupsAt sdom.groups0 ro.layer) root
+            ((tr.stageLayerOpenings.getD ro.stagePos []).getD ro.layer []) = true := by
+          simpa only [Nat.zero_add] using
+            verifyStageLayerSweeps_at sdom.stageIdx _ (stageAllRoots sp) 0 sdom.groups0
+              ro.layer root hStSw hr
+        have hSwOpen := verifyDuetCosetOpening_facts
+          ((verifyLayerSweep_at hLaySw).2 ro.cosetIdx hRo'.1)
+        have hRoOpen := verifyDuetCosetOpening_facts hRo'.2
+        .inr (duetOpeningCollision sdom.stageIdx ro.layer ro.cosetIdx
+          ro.opening.v0 ro.opening.v1 sweepOp.v0 sweepOp.v1
+          ro.opening.path sweepOp.path root hEq
+          (hRoOpen.1.trans hSwOpen.1.symm) hRoOpen.2 hSwOpen.2)
+
+def checkRewoundOpeningsList (dom : WhirDomain) (proof : SuccinctAggregateProof)
+    (tr : CommittedTableTranscript)
+    (hSweeps : verifyAllStageSweeps dom.stages tr.stageLayerOpenings proof.stages = true) :
+    (ros : List RewoundDuetOpening) →
+    ros.all (verifyRewoundOpening dom proof) = true →
+    PSum
+      (PLift (∀ ro ∈ ros,
+        let sweepOp := ((tr.stageLayerOpenings.getD ro.stagePos []).getD ro.layer []).getD
+          ro.cosetIdx defaultFoldOpening
+        ro.opening.v0 = sweepOp.v0 ∧ ro.opening.v1 = sweepOp.v1))
+      (HashCollisionWitness pcsMerkleHash)
+  | [], _ => .inl ⟨fun _ h => by cases h⟩
+  | ro :: ros, hAll =>
+    have hSplit := Bool.and_eq_true_iff.mp hAll
+    match checkOneRewoundOpening dom proof tr ro hSweeps hSplit.1 with
+    | .inr col => .inr col
+    | .inl ⟨hHead⟩ =>
+      match checkRewoundOpeningsList dom proof tr hSweeps ros hSplit.2 with
+      | .inr col => .inr col
+      | .inl ⟨hTail⟩ => .inl ⟨fun ro' hMem => by
+          rcases List.mem_cons.mp hMem with rfl | hRest
+          · exact hHead
+          · exact hTail ro' hRest⟩
+
+/-- **Constructive Prover-Transcript `HemShardEnv` Extractor (`extractShardEnvFromTranscript`,
+    `0 Classical.choice`)**:
+    Given an accepted `CommittedTableTranscript` for shard `t`, reconstructs the committed stage
+    tables and authentication paths, cross-checks all rewound openings against the sweep tables,
+    and returns either a verified `HemShardEnv arith dom` (with proved `StagesBound`) or a
+    concrete `HashCollisionWitness pcsMerkleHash`. -/
+def extractShardEnvFromTranscript (arith : RowArithmetization) (dom : WhirDomain)
+    (t : ShardProverTranscript arith dom)
+    (hTr : verifyCommittedTableTranscript dom t.shard.proof t.transcript = true) :
+    PSum (HemShardEnv arith dom) (HashCollisionWitness pcsMerkleHash) :=
+  have hSweeps : verifyAllStageSweeps dom.stages t.transcript.stageLayerOpenings
+      t.shard.proof.stages = true :=
+    (Bool.and_eq_true_iff.mp (Bool.and_eq_true_iff.mp hTr).1).2
+  have hRew : t.transcript.rewoundOpenings.all (verifyRewoundOpening dom t.shard.proof) = true :=
+    (Bool.and_eq_true_iff.mp hTr).2
+  match checkRewoundOpeningsList dom t.shard.proof t.transcript hSweeps
+      t.transcript.rewoundOpenings hRew with
+  | .inr col => .inr col
+  | .inl _ =>
+    .inl { shard := t.shard
+           law := t.law
+           view := reconstructSuccinctView dom t.transcript
+           bound := reconstructSuccinctView_stagesBound dom t.shard.proof t.transcript hTr }
+
+theorem extractShardEnvFromTranscript_inl_eq {arith : RowArithmetization} {dom : WhirDomain}
+    {t : ShardProverTranscript arith dom}
+    {hTr : verifyCommittedTableTranscript dom t.shard.proof t.transcript = true}
+    {env : HemShardEnv arith dom}
+    (h : extractShardEnvFromTranscript arith dom t hTr = .inl env) :
+    env.shard = t.shard ∧ env.view = reconstructSuccinctView dom t.transcript := by
+  unfold extractShardEnvFromTranscript at h
+  dsimp only at h
+  split at h
+  · cases h
+  · cases h; exact ⟨rfl, rfl⟩
+
+/-- `#tooth` Equivocation sensitivity of `extractShardEnvFromTranscript`: if an accepted prover
+    transcript contains any rewound opening `ro ∈ t.transcript.rewoundOpenings` whose duet pair
+    `(v0, v1)` differs from the base coset-sweep opening at `(ro.stagePos, ro.layer, ro.cosetIdx)`,
+    `extractShardEnvFromTranscript` cannot return `.inl` and constructively extracts a
+    `HashCollisionWitness pcsMerkleHash`. -/
+theorem extractShardEnvFromTranscript_equivocation_extracts_collision
+    (arith : RowArithmetization) (dom : WhirDomain)
+    (t : ShardProverTranscript arith dom)
+    (hTr : verifyCommittedTableTranscript dom t.shard.proof t.transcript = true)
+    (ro : RewoundDuetOpening) (hMem : ro ∈ t.transcript.rewoundOpenings)
+    (hDisagree : ¬ (ro.opening.v0 =
+        (((t.transcript.stageLayerOpenings.getD ro.stagePos []).getD ro.layer []).getD
+          ro.cosetIdx defaultFoldOpening).v0 ∧
+      ro.opening.v1 =
+        (((t.transcript.stageLayerOpenings.getD ro.stagePos []).getD ro.layer []).getD
+          ro.cosetIdx defaultFoldOpening).v1)) :
+    ∃ col : HashCollisionWitness pcsMerkleHash,
+      extractShardEnvFromTranscript arith dom t hTr = .inr col := by
+  unfold extractShardEnvFromTranscript
+  dsimp only
+  generalize hChk : checkRewoundOpeningsList dom t.shard.proof t.transcript _
+    t.transcript.rewoundOpenings _ = res
+  cases res with
+  | inr col => exact ⟨col, rfl⟩
+  | inl hall => exact False.elim (hDisagree (hall.down ro hMem))
+
+/-- Canonical honest-prover transcript builder converting any `StagesBound` view into a
+    `CommittedTableTranscript` (`rewoundOpenings = []`). -/
+def mapCosetsAux {α : Type} (f : Nat → α) : Nat → Nat → List α
+  | _, 0 => []
+  | base, k + 1 => f base :: mapCosetsAux f (base + 1) k
+
+def buildLayerOpeningsFromTable (authPath : Nat → Nat → Nat → List (List UInt8))
+    (stageIdx : Nat) : Nat → Nat → List (List GoldilocksExt4) → List (List FoldLayerOpening)
+  | _, _, [] => []
+  | layer, groups, w :: ws =>
+    mapCosetsAux
+      (fun g => { v0 := w.getD g CommRingOps.zero
+                  v1 := w.getD (g + groups) CommRingOps.zero
+                  path := authPath stageIdx layer g }) 0 groups ::
+      buildLayerOpeningsFromTable authPath stageIdx (layer + 1) (groups / 2) ws
+
+def buildStageOpeningsFromView (authPath : Nat → Nat → Nat → List (List UInt8)) :
+    List WhirStageDomain → List (List (List GoldilocksExt4)) →
+      List (List (List FoldLayerOpening))
+  | sdom :: sdoms, stTables :: restTables =>
+    buildLayerOpeningsFromTable authPath sdom.stageIdx 0 sdom.groups0 stTables ::
+      buildStageOpeningsFromView authPath sdoms restTables
+  | _, _ => []
+
+def transcriptOfBoundView (dom : WhirDomain) (view : SuccinctExtractionView) :
+    CommittedTableTranscript where
+  stageLayerOpenings := buildStageOpeningsFromView view.authPath dom.stages view.allTables
+  rewoundOpenings := []
+
+private theorem mapCosetsAux_length {α : Type} (f : Nat → α) :
+    ∀ (base k : Nat), (mapCosetsAux f base k).length = k
+  | _, 0 => rfl
+  | base, k + 1 => congrArg Nat.succ (mapCosetsAux_length f (base + 1) k)
+
+private theorem verifyLayerSweepAux_mapCosetsAux (stageIdx layer groups : Nat) (root : List UInt8)
+    (f : Nat → FoldLayerOpening) :
+    ∀ (base k : Nat),
+      (∀ g, base ≤ g → g < base + k → verifyDuetCosetOpening stageIdx layer groups root g (f g) = true) →
+      verifyLayerSweepAux stageIdx layer groups root base (mapCosetsAux f base k) = true
+  | _, 0, _ => rfl
+  | base, k + 1, h => by
+    simp only [mapCosetsAux, verifyLayerSweepAux, Bool.and_eq_true]
+    refine ⟨h base (Nat.le_refl _) (by omega),
+      verifyLayerSweepAux_mapCosetsAux stageIdx layer groups root f (base + 1) k
+        (fun g hge hlt => h g (by omega) (by omega))⟩
+
+private theorem verifyStageLayerSweeps_buildLayerOpenings
+    (authPath : Nat → Nat → Nat → List (List UInt8)) (stageIdx : Nat) :
+    ∀ (stTables : List (List GoldilocksExt4)) (roots : List (List UInt8)) (layer groups : Nat),
+      StageLayersBound authPath stageIdx layer groups stTables roots →
+      verifyStageLayerSweeps stageIdx layer groups
+        (buildLayerOpeningsFromTable authPath stageIdx layer groups stTables) roots = true
+  | [], [], _, _, _ => rfl
+  | [], _ :: _, _, _, hB => False.elim hB
+  | _ :: _, [], _, _, hB => False.elim hB
+  | w :: ws, root :: roots, layer, groups, hB => by
+    simp only [buildLayerOpeningsFromTable, verifyStageLayerSweeps, verifyLayerSweep,
+      Bool.and_eq_true, decide_eq_true_eq]
+    refine ⟨⟨mapCosetsAux_length _ 0 groups, ?_⟩,
+      verifyStageLayerSweeps_buildLayerOpenings authPath stageIdx ws roots (layer + 1) (groups / 2) hB.2⟩
+    apply verifyLayerSweepAux_mapCosetsAux
+    intro g _ hg
+    have hOpen := hB.1 g (by omega)
+    simp only [verifyDuetCosetOpening, Bool.and_eq_true, decide_eq_true_eq]
+    exact ⟨hOpen.2, hOpen.1⟩
+
+private theorem verifyAllStageSweeps_buildStageOpenings
+    (authPath : Nat → Nat → Nat → List (List UInt8)) :
+    ∀ (sdoms : List WhirStageDomain) (allTables : List (List (List GoldilocksExt4)))
+      (sps : List WhirStageProof),
+      StagesBound authPath sdoms allTables sps →
+      verifyAllStageSweeps sdoms (buildStageOpeningsFromView authPath sdoms allTables) sps = true
+  | [], [], [], _ => rfl
+  | [], _ :: _, _, hB => False.elim hB
+  | [], [], _ :: _, hB => False.elim hB
+  | _ :: _, [], _, hB => False.elim hB
+  | _ :: _, _ :: _, [], hB => False.elim hB
+  | sdom :: sdoms, stTables :: restTables, sp :: sps, hB => by
+    have hNe : buildLayerOpeningsFromTable authPath sdom.stageIdx 0 sdom.groups0 stTables ≠ [] := by
+      cases stTables with
+      | nil => exact False.elim (hB.1 rfl)
+      | cons _ _ => simp [buildLayerOpeningsFromTable]
+    simp only [buildStageOpeningsFromView, verifyAllStageSweeps, Bool.and_eq_true, decide_eq_true_eq]
+    exact ⟨⟨hNe, verifyStageLayerSweeps_buildLayerOpenings authPath sdom.stageIdx stTables
+      (stageAllRoots sp) 0 sdom.groups0 hB.2.1⟩,
+      verifyAllStageSweeps_buildStageOpenings authPath sdoms restTables sps hB.2.2⟩
+
+/-- Completeness of `transcriptOfBoundView`: every `StagesBound` view on a stage-distinct `WhirDomain`
+    produces a valid `CommittedTableTranscript` accepted by `verifyCommittedTableTranscript`. -/
+theorem verifyCommittedTableTranscript_transcriptOfBoundView (dom : WhirDomain)
+    (proof : SuccinctAggregateProof) (view : SuccinctExtractionView)
+    (hNodup : (dom.stages.map (·.stageIdx)).Nodup)
+    (hBound : StagesBound view.authPath dom.stages view.allTables proof.stages) :
+    verifyCommittedTableTranscript dom proof (transcriptOfBoundView dom view) = true := by
+  unfold verifyCommittedTableTranscript transcriptOfBoundView
+  simp only [Bool.and_eq_true, decide_eq_true_eq, List.all_nil, and_true]
+  exact ⟨hNodup, verifyAllStageSweeps_buildStageOpenings view.authPath dom.stages view.allTables
+    proof.stages hBound⟩
+
+private theorem layerOpeningsCount_eq_stageLayerQueryCost (stageIdx : Nat) :
+    ∀ (stOps : List (List FoldLayerOpening)) (roots : List (List UInt8)) (layer groups : Nat),
+      verifyStageLayerSweeps stageIdx layer groups stOps roots = true →
+      layerOpeningsCount stOps = stageLayerQueryCost groups roots.length
+  | [], [], _, _, _ => rfl
+  | [], _ :: _, _, _, h => absurd h Bool.false_ne_true
+  | _ :: _, [], _, _, h => absurd h Bool.false_ne_true
+  | ops :: restOps, _ :: roots, layer, groups, h => by
+    obtain ⟨hHead, hTail⟩ := Bool.and_eq_true_iff.mp h
+    have hLen := (verifyLayerSweep_at hHead).1
+    have ih := layerOpeningsCount_eq_stageLayerQueryCost stageIdx restOps roots
+      (layer + 1) (groups / 2) hTail
+    simp only [layerOpeningsCount, List.length_cons, stageLayerQueryCost, hLen, ih]
+
+private theorem verifyOneWhirStage_allRoots_len {rowChalls finalWord : List GoldilocksExt4}
+    {prior : List UInt8} {sdom : WhirStageDomain} {sp : WhirStageProof}
+    {nextInfo : Option (WhirStageDomain × List UInt8)}
+    (h : verifyOneWhirStage rowChalls finalWord prior sdom sp nextInfo = true) :
+    (stageAllRoots sp).length = sdom.foldLayers := by
+  unfold verifyOneWhirStage at h
+  dsimp only at h
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨_, hRoots⟩
+  exact of_decide_eq_true hRoots
+
+private theorem sweepCount_eq_domainCost_aux {rowChalls finalWord : List GoldilocksExt4} :
+    ∀ (prior : List UInt8) (sdoms : List WhirStageDomain)
+      (allOps : List (List (List FoldLayerOpening))) (sps : List WhirStageProof),
+      verifyWhirStages rowChalls finalWord prior sdoms sps = true →
+      verifyAllStageSweeps sdoms allOps sps = true →
+      allOps.foldr (fun stOps acc => layerOpeningsCount stOps + acc) 0 =
+        sdoms.foldr (fun sdom acc => stageTranscriptQueryCost sdom + acc) 0
+  | _, [], [], [], _, _ => rfl
+  | _, [], _ :: _, _, _, hSw => absurd hSw Bool.false_ne_true
+  | _, [], [], _ :: _, hVer, _ => absurd hVer Bool.false_ne_true
+  | _, _ :: _, [], _, _, hSw => absurd hSw Bool.false_ne_true
+  | _, _ :: _, _ :: _, [], _, hSw => absurd hSw Bool.false_ne_true
+  | prior, [sdom], [stOps], [sp], hVer, hSw => by
+    have hRootsLen := verifyOneWhirStage_allRoots_len hVer
+    have hLay := (Bool.and_eq_true_iff.mp (Bool.and_eq_true_iff.mp hSw).1).2
+    have hEq := layerOpeningsCount_eq_stageLayerQueryCost sdom.stageIdx stOps (stageAllRoots sp)
+      0 sdom.groups0 hLay
+    simp only [List.foldr_cons, List.foldr_nil, stageTranscriptQueryCost, hEq, hRootsLen]
+  | _, [_], _ :: _ :: _, [_], _, hSw =>
+    absurd (Bool.and_eq_true_iff.mp hSw).2 Bool.false_ne_true
+  | _, [_], _, _ :: _ :: _, hVer, _ => absurd hVer Bool.false_ne_true
+  | _, _ :: _ :: _, _, [_], hVer, _ => absurd hVer Bool.false_ne_true
+  | _, _ :: _ :: _, [_], _ :: _ :: _, _, hSw =>
+    absurd (Bool.and_eq_true_iff.mp hSw).2 Bool.false_ne_true
+  | prior, sdom :: nextDom :: restDoms, stOps :: nextOps :: restOps,
+      sp :: nextSp :: restSps, hVer, hSw => by
+    obtain ⟨hVer0, hVerRest⟩ := Bool.and_eq_true_iff.mp hVer
+    rcases Bool.and_eq_true_iff.mp hSw with ⟨hSw0, hSwRest⟩
+    have hRootsLen := verifyOneWhirStage_allRoots_len hVer0
+    have hLay := (Bool.and_eq_true_iff.mp hSw0).2
+    have hEq := layerOpeningsCount_eq_stageLayerQueryCost sdom.stageIdx stOps (stageAllRoots sp)
+      0 sdom.groups0 hLay
+    have ih := sweepCount_eq_domainCost_aux _ (nextDom :: restDoms) (nextOps :: restOps)
+      (nextSp :: restSps) hVerRest hSwRest
+    simp only [List.foldr_cons, stageTranscriptQueryCost, hEq, hRootsLen, ih]
+
+theorem transcriptSweepOpeningCount_eq_domainQueryCost {arith : RowArithmetization}
+    {dom : WhirDomain} {epochFloor msg : List UInt8}
+    {t : ShardProverTranscript arith dom}
+    (hShard : verifyHemShard arith dom epochFloor msg t.shard = true)
+    (hTr : verifyCommittedTableTranscript dom t.shard.proof t.transcript = true) :
+    transcriptSweepOpeningCount t.transcript = domainTranscriptQueryCost dom := by
+  have hAcc := (verifyHemShard_facts hShard).2.2.2.2
+  have hWhir := (succinct_acceptance_facts arith dom t.shard.inst t.shard.proof
+    t.shard.fs hAcc).2.2.2.2.2.2
+  have hSw := (Bool.and_eq_true_iff.mp (Bool.and_eq_true_iff.mp hTr).1).2
+  exact sweepCount_eq_domainCost_aux _ dom.stages t.transcript.stageLayerOpenings
+    t.shard.proof.stages hWhir hSw
+
+/-- **Exact Prover-Transcript Query Cost Accounting (`hierarchySweepOpeningCount_eq_queryCost`)**:
+    across any list `trs` of accepted shard certificates and prover commitment transcripts, the
+    total number of verified coset-sweep Merkle duet openings equals
+    `hierarchyTranscriptQueryCost dom trs.length` (`= trs.length * domainTranscriptQueryCost dom`). -/
+theorem hierarchySweepOpeningCount_eq_queryCost {arith : RowArithmetization}
+    {dom : WhirDomain} {epochFloor msg : List UInt8} :
+    ∀ (trs : List (ShardProverTranscript arith dom)),
+      (∀ t ∈ trs, verifyHemShard arith dom epochFloor msg t.shard = true ∧
+        verifyCommittedTableTranscript dom t.shard.proof t.transcript = true) →
+      hierarchySweepOpeningCount trs = hierarchyTranscriptQueryCost dom trs.length
+  | [], _ => by simp [hierarchySweepOpeningCount, hierarchyTranscriptQueryCost]
+  | t :: rest, h => by
+    have ht := h t (List.mem_cons_self ..)
+    have hHead := transcriptSweepOpeningCount_eq_domainQueryCost ht.1 ht.2
+    have ih := hierarchySweepOpeningCount_eq_queryCost rest
+      (fun t' ht' => h t' (List.mem_cons_of_mem _ ht'))
+    simp only [hierarchySweepOpeningCount, List.foldr_cons, List.length_cons,
+      hierarchyTranscriptQueryCost, hHead, ih, Nat.succ_mul]
+    omega
+
+/-- Shard-by-shard transcript conversion into `HemShardEnv`, preserving shards and reconstructed views. -/
+def extractShardEnvsFromTranscripts (arith : RowArithmetization) (dom : WhirDomain) :
+    (trs : List (ShardProverTranscript arith dom)) →
+    (∀ t ∈ trs, verifyCommittedTableTranscript dom t.shard.proof t.transcript = true) →
+    PSum { envs : List (HemShardEnv arith dom) //
+        envs.map (·.shard) = trs.map (·.shard) ∧
+        envs.length = trs.length ∧
+        ∀ (i : Nat) (he : i < envs.length) (ht : i < trs.length),
+          (envs[i]'he).shard = (trs[i]'ht).shard ∧
+          (envs[i]'he).view = reconstructSuccinctView dom (trs[i]'ht).transcript }
+      (Σ j : Fin trs.length, HashCollisionWitness pcsMerkleHash)
+  | [], _ => .inl ⟨[], rfl, rfl, fun _ h => absurd h (Nat.not_lt_zero _)⟩
+  | t :: ts, hTrs =>
+    have ht0 := hTrs t (List.mem_cons_self ..)
+    match hExt0 : extractShardEnvFromTranscript arith dom t ht0 with
+    | .inr col => .inr ⟨⟨0, Nat.succ_pos _⟩, col⟩
+    | .inl env0 =>
+      have hEq0 := extractShardEnvFromTranscript_inl_eq hExt0
+      match extractShardEnvsFromTranscripts arith dom ts
+          (fun t' ht' => hTrs t' (List.mem_cons_of_mem _ ht')) with
+      | .inr ⟨⟨j, hj⟩, col⟩ => .inr ⟨⟨j + 1, Nat.succ_lt_succ hj⟩, col⟩
+      | .inl ⟨envsRest, hMap, hLen, hIdx⟩ =>
+        .inl ⟨env0 :: envsRest, by
+          refine ⟨by simp [hEq0.1, hMap], congrArg Nat.succ hLen, ?_⟩
+          intro i he ht
+          cases i with
+          | zero => exact hEq0
+          | succ k =>
+            exact hIdx k (Nat.lt_of_succ_lt_succ he) (Nat.lt_of_succ_lt_succ ht)⟩
+
+/-- Unified break outcome for transcript-grounded hierarchical extraction. -/
+@[expose] def HemTranscriptHierarchyBreak (H : Hash) (arith : RowArithmetization)
+    (dom : WhirDomain) (trs : List (ShardProverTranscript arith dom)) : Type :=
+  PSum (HashCollisionWitness H)
+    (Σ j : Fin trs.length,
+      HemShardBreak arith dom (trs.get j).shard.proof
+        (reconstructSuccinctView dom (trs.get j).transcript))
+
+/-- **Transcript-Grounded Two-Layer Hierarchical Extractor (`extractHierarchicalHemFromTranscripts`,
+    `0 Classical.choice`)**:
+    Composes `extractShardEnvFromTranscript` with `extractHierarchicalHemQuorums` so hierarchical
+    extraction is grounded directly in prover commitment-opening transcripts (`CommittedTableTranscript`)
+    rather than externally assumed `StagesBound` proofs. -/
+def extractHierarchicalHemFromTranscripts (H : Hash) (arith : RowArithmetization)
+    (dom : WhirDomain) (registryDigest epochFloor msg : List UInt8)
+    (registry : List ShardRegistration)
+    (hReg : H (encodeRegistry registry) = registryDigest)
+    (trs : List (ShardProverTranscript arith dom))
+    (hTrs : ∀ t ∈ trs, verifyCommittedTableTranscript dom t.shard.proof t.transcript = true)
+    (hAccept : verifyHierarchicalHem H arith dom registryDigest epochFloor msg
+      (trs.map (·.shard)) = true) :
+    PSum (HierarchicalQuorumWitness epochFloor msg registry (trs.map (·.shard)))
+      (HemTranscriptHierarchyBreak H arith dom trs) :=
+  match extractShardEnvsFromTranscripts arith dom trs hTrs with
+  | .inr ⟨j, merkleCol⟩ => .inr (.inr ⟨j, .inr (.inl merkleCol)⟩)
+  | .inl ⟨envs, hShards, hLen, hIdx⟩ =>
+    have hAccEnvs : verifyHierarchicalHem H arith dom registryDigest epochFloor msg
+        (envs.map (·.shard)) = true := by
+      rwa [hShards]
+    match extractHierarchicalHemQuorums H arith dom registryDigest epochFloor msg registry hReg
+        envs hAccEnvs with
+    | .inl w =>
+      .inl ⟨w.sigs, hShards ▸ w.slots_eq, hShards ▸ w.weight_eq, hShards ▸ w.registry_eq⟩
+    | .inr (.inl rootCol) => .inr (.inl rootCol)
+    | .inr (.inr ⟨j, brk⟩) =>
+      let j' : Fin trs.length := ⟨j.val, hLen ▸ j.isLt⟩
+      have hPair := hIdx j.val j.isLt j'.isLt
+      have hProofEq : (envs.get j).shard.proof = (trs.get j').shard.proof :=
+        congrArg HemShardProof.proof hPair.1
+      have hViewEq : (envs.get j).view = reconstructSuccinctView dom (trs.get j').transcript :=
+        hPair.2
+      .inr (.inr ⟨j', by rw [← hProofEq, ← hViewEq]; exact brk⟩)
+
+theorem recursive_hem_transcript_knowledge_soundness (H : Hash) (arith : RowArithmetization)
+    (dom : WhirDomain) (registryDigest epochFloor msg : List UInt8)
+    (registry : List ShardRegistration) (hReg : H (encodeRegistry registry) = registryDigest)
+    (trs : List (ShardProverTranscript arith dom))
+    (hTrs : ∀ t ∈ trs, verifyCommittedTableTranscript dom t.shard.proof t.transcript = true)
+    (hAccept : verifyHierarchicalHem H arith dom registryDigest epochFloor msg
+      (trs.map (·.shard)) = true) :
+    (∃ sigs : List (ExtractedQuorumSig epochFloor msg),
+      sigs.map (·.slot) = hierarchicalActiveSlots (trs.map (·.shard)) ∧
+      sigs.length = hierarchicalClaimedWeight (trs.map (·.shard)) ∧
+      hierarchicalThresholdSum (trs.map (·.shard)) = registryThresholdSum registry ∧
+      registryThresholdSum registry ≤ sigs.length ∧
+      (sigs.map (·.slot.pk)).Nodup ∧
+      (∀ r ∈ registry, r.WellFormed = true) ∧
+      (trs.map (·.shard)).map HemShardProof.registration = registry) ∧
+      hierarchySweepOpeningCount trs = hierarchyTranscriptQueryCost dom trs.length ∨
+    Nonempty (HemTranscriptHierarchyBreak H arith dom trs) := by
+  have hF := verifyHierarchicalHem_facts hAccept
+  match extractHierarchicalHemFromTranscripts H arith dom registryDigest epochFloor msg registry
+      hReg trs hTrs hAccept with
+  | .inr brk => exact .inr ⟨brk⟩
+  | .inl w =>
+    have hSumEq :
+        hierarchicalThresholdSum (trs.map (·.shard)) = registryThresholdSum registry := by
+      rw [hierarchicalThresholdSum_eq_registryThresholdSum, w.registry_eq]
+    have hCost : hierarchySweepOpeningCount trs = hierarchyTranscriptQueryCost dom trs.length :=
+      hierarchySweepOpeningCount_eq_queryCost trs (fun t ht =>
+        ⟨hF.2.2.2 t.shard (List.mem_map.mpr ⟨t, ht, rfl⟩), hTrs t ht⟩)
+    refine .inl ⟨⟨w.sigs, w.slots_eq, w.weight_eq, hSumEq, ?_, ?_, ?_, w.registry_eq⟩, hCost⟩
+    · rw [w.weight_eq, ← hSumEq]
+      exact hierarchicalThresholdSum_le_claimedWeight _ hF.2.2.2
+    · have hMap : w.sigs.map (·.slot.pk) = (w.sigs.map (·.slot)).map HemSlot.pk := by
+        rw [List.map_map]; rfl
+      rw [hMap, w.slots_eq]
+      exact (hierarchicalActiveSlots_pk_sublist _).nodup hF.2.2.1
+    · intro r hr
+      rw [← w.registry_eq] at hr
+      obtain ⟨s, hsMem, rfl⟩ := List.mem_map.mp hr
+      exact verifyHemShard_wellFormed (hF.2.2.2 s hsMem)
 
 /-! ### Union bound `ε_hier ≤ ε_root + Σ_j ε_shard(j)` over a finite coin space -/
 
@@ -1096,9 +1934,10 @@ theorem countTrue_union_bound {Ω : Type} (coins : List Ω) (m : Nat)
 
 /-- **Composed soundness error of the two-layer hierarchy
     (`hierarchical_hem_soundness_error_bound`)**: over a finite coin space, let `hierBad` mark
-    coins where the root verifier accepts although no `HierarchicalQuorumWitness` exists, let
-    `rootBad` mark every coin whose run opens the registry digest to a second registry, and let
-    `shardBad j` mark every coin whose run contains a single-layer break at shard `j`. Then
+    coins where the root verifier accepts against the authenticated `registryDigest ω =
+    H (encodeRegistry (registry ω))` although no `HierarchicalQuorumWitness` exists, let `rootBad`
+    mark every coin whose run yields a concrete `HashCollisionWitness H`, and let `shardBad j` mark
+    every coin whose run contains a single-layer break at shard `j`. Then
     `#hierBad ≤ #rootBad + Σ_{j < m} #shardBad j`. -/
 theorem hierarchical_hem_soundness_error_bound {Ω : Type} (coins : List Ω) (m : Nat)
     (H : Hash) (arith : RowArithmetization) (dom : WhirDomain)
@@ -1112,8 +1951,8 @@ theorem hierarchical_hem_soundness_error_bound {Ω : Type} (coins : List Ω) (m 
         ((envs ω).map (·.shard)) = true ∧
       (HierarchicalQuorumWitness (epochFloor ω) (msg ω) (registry ω)
         ((envs ω).map (·.shard)) → False))
-    (hRoot : ∀ ω, ((envs ω).map (·.shard)).map HemShardProof.registration ≠ registry ω →
-      rootBad ω = true)
+    (hRegAuth : ∀ ω, hierBad ω = true → H (encodeRegistry (registry ω)) = registryDigest ω)
+    (hRoot : ∀ ω, HashCollisionWitness H → rootBad ω = true)
     (hShard : ∀ ω (j : Fin (envs ω).length),
       HemShardBreak arith dom ((envs ω).get j).shard.proof ((envs ω).get j).view →
       shardBad j.val ω = true) :
@@ -1130,14 +1969,83 @@ theorem hierarchical_hem_soundness_error_bound {Ω : Type} (coins : List Ω) (m 
     | .inr ⟨j, brk⟩ =>
       exact .inr ⟨j.val, Nat.lt_of_lt_of_le j.isLt (hLen ω), hShard ω j brk⟩
   else
-    exact .inl (hRoot ω hEq)
+    exact .inl (hRoot ω (registryCollision H hF.1 (hRegAuth ω hb) hEq))
 
-/-! ### `#tooth`: without shard scoping one shard certificate is counted `m` times -/
+/-- Transcript-grounded finite-coin union bound composing `extractHierarchicalHemFromTranscripts`
+    with `countTrue_union_bound`. -/
+theorem hierarchical_hem_transcript_soundness_error_bound {Ω : Type} (coins : List Ω) (m : Nat)
+    (H : Hash) (arith : RowArithmetization) (dom : WhirDomain)
+    (registryDigest epochFloor msg : Ω → List UInt8)
+    (registry : Ω → List ShardRegistration)
+    (trs : Ω → List (ShardProverTranscript arith dom))
+    (hLen : ∀ ω, (trs ω).length ≤ m)
+    (hierBad rootBad : Ω → Bool) (shardBad : Nat → Ω → Bool)
+    (hHier : ∀ ω, hierBad ω = true →
+      verifyHierarchicalHem H arith dom (registryDigest ω) (epochFloor ω) (msg ω)
+        ((trs ω).map (·.shard)) = true ∧
+      (∀ t ∈ trs ω, verifyCommittedTableTranscript dom t.shard.proof t.transcript = true) ∧
+      (HierarchicalQuorumWitness (epochFloor ω) (msg ω) (registry ω)
+        ((trs ω).map (·.shard)) → False))
+    (hRegAuth : ∀ ω, hierBad ω = true → H (encodeRegistry (registry ω)) = registryDigest ω)
+    (hRoot : ∀ ω, HashCollisionWitness H → rootBad ω = true)
+    (hShard : ∀ ω (j : Fin (trs ω).length),
+      HemShardBreak arith dom ((trs ω).get j).shard.proof
+        (reconstructSuccinctView dom ((trs ω).get j).transcript) →
+      shardBad j.val ω = true) :
+    countTrue hierBad coins ≤
+      countTrue rootBad coins + sumOver m (fun j => countTrue (shardBad j) coins) := by
+  apply countTrue_union_bound
+  intro ω hb
+  obtain ⟨hAcc, hTrs, hNo⟩ := hHier ω hb
+  match extractHierarchicalHemFromTranscripts H arith dom (registryDigest ω) (epochFloor ω)
+      (msg ω) (registry ω) (hRegAuth ω hb) (trs ω) hTrs hAcc with
+  | .inl w => exact (hNo w).elim
+  | .inr (.inl col) => exact .inl (hRoot ω col)
+  | .inr (.inr ⟨j, brk⟩) =>
+    exact .inr ⟨j.val, Nat.lt_of_lt_of_le j.isLt (hLen ω), hShard ω j brk⟩
+
+/-! ### `#tooth`: lowered shard threshold & unscoped shard replay refutations -/
+
+/-- Constructive forged-threshold refutation (`0 Classical.choice`): if any shard `i` presents a
+    threshold strictly below its registered threshold `(shards[i]).threshold < (registry[i]).threshold`
+    under `registryDigest = H (encodeRegistry registry)`, then `verifyHemHierarchyAgainstRegistry`
+    unconditionally rejects and either `verifyHierarchicalHem` rejects or `registryCollision`
+    constructively extracts a `HashCollisionWitness H`. -/
+def forgedLowerThreshold_rejected_or_collision (H : Hash)
+    (arith : RowArithmetization) (dom : WhirDomain)
+    (registryDigest epochFloor msg : List UInt8)
+    (registry : List ShardRegistration)
+    (hReg : H (encodeRegistry registry) = registryDigest)
+    (shards : List HemShardProof)
+    (i : Nat) (hiS : i < shards.length) (hiR : i < registry.length)
+    (hLower : (shards[i]'hiS).threshold < (registry[i]'hiR).threshold) :
+    PSum
+      (PLift (verifyHierarchicalHem H arith dom registryDigest epochFloor msg shards = false ∧
+        verifyHemHierarchyAgainstRegistry arith dom registry epochFloor msg shards = false))
+      (HashCollisionWitness H) :=
+  have hNe : shards.map HemShardProof.registration ≠ registry := fun hEq => by
+    have hAt : (shards.map HemShardProof.registration)[i]? = registry[i]? :=
+      congrArg (·[i]?) hEq
+    rw [List.getElem?_map, List.getElem?_eq_getElem hiS, List.getElem?_eq_getElem hiR,
+        Option.map_some, Option.some.injEq] at hAt
+    have hThr : (shards[i]'hiS).threshold = (registry[i]'hiR).threshold :=
+      congrArg ShardRegistration.threshold hAt
+    omega
+  have hDirectFalse :
+      verifyHemHierarchyAgainstRegistry arith dom registry epochFloor msg shards = false := by
+    unfold verifyHemHierarchyAgainstRegistry
+    simp [decide_eq_false hNe]
+  if hAcc : verifyHierarchicalHem H arith dom registryDigest epochFloor msg shards = true then
+    .inr (registryCollision H (verifyHierarchicalHem_facts hAcc).1 hReg hNe)
+  else
+    .inl ⟨Bool.eq_false_iff.mpr hAcc, hDirectFalse⟩
 
 /-- Root verifier with the shard-id and committee-disjointness checks removed. -/
 def verifyHierarchicalHemUnscoped (arith : RowArithmetization) (dom : WhirDomain)
     (shards : List HemShardProof) : Bool :=
   shards.all fun s =>
+    decide (1 ≤ s.threshold) &&
+    decide (s.threshold ≤ s.inst.committee.length) &&
     decide (s.threshold ≤ bitmapPopcountSpec s.proof.agg.bitmap) &&
     verifySuccinctAggregate arith dom s.inst s.proof s.fs
 
@@ -1188,9 +2096,9 @@ theorem tooth_unscoped_shard_id_allows_quorum_replay_multiplication (H : Hash)
     intro x hx
     rw [List.eq_of_mem_replicate hx]
     simp only [Bool.and_eq_true, decide_eq_true_eq]
-    exact ⟨hF.2.1, hF.2.2⟩
+    exact ⟨⟨⟨hF.2.1, hF.2.2.1⟩, hF.2.2.2.1⟩, hF.2.2.2.2⟩
   · rw [hierarchicalClaimedWeight_replicate]
-    exact Nat.mul_le_mul_left m hF.2.1
+    exact Nat.mul_le_mul_left m hF.2.2.2.1
   · apply Bool.eq_false_iff.mpr
     intro hAcc
     have hNodup := (verifyHierarchicalHem_facts hAcc).2.1
