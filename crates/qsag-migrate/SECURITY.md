@@ -189,14 +189,14 @@ is transmitted:
    transcript agreement and commitment openings in constant time, and derives
    public coins via `QSAG.OUTER.COIN.DERIVE.V1`. No single rushing custodian can
    bias challenges after sending multiplication shares.
-2. **64-lane Boolean `AND` verification (`< 2^-126` soundness):** Up to `65,536`
+2. **64-lane Boolean `AND` verification (`< 2^-126` soundness):** Up to `32,768`
    bitsliced 64-lane `AND` triples per flush are embedded into
    `GF(2^128) = GF(2)[x]/(x^128 + x^7 + x^2 + x + 1)` (`128` gates per
-   super-block via constant-time butterfly transpose and `PCLMULQDQ` Karatsuba
-   accumulation) and checked by **two independent lockstep** Arity-4 BBCGGI19
+   super-block via constant-time butterfly transpose and `VPCLMULQDQ`/`PCLMULQDQ`
+   accumulation) and checked by **two independent lockstep** Arity-2 BBCGGI19
    inner-product instances plus PRSS-masked non-zero base-case sacrifice
    (`r_b in GF(2^128)^*`). Per-flush false-acceptance probability is
-   `< (69 / (2^128 - 1))^2 < 2^-243.7 << 2^-126`.
+   `< (85 / (2^128 - 1))^2 < 2^-243.1 << 2^-126`.
 3. **Prime-field multiplication verification (`< 2^-128` soundness):**
    * `Secp` and `Ed` (`|F_p| > 2^252`): Arity-2 logarithmic BBCGGI19 inner-product
      reduction plus PRSS-masked base-case sacrifice directly over `F_p`, with
