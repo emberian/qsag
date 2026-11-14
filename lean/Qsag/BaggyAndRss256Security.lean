@@ -1063,3 +1063,1042 @@ def rss256RealCorruptView (corrupt : Fin 3)
 
 /-- Canonical dummy sharing constructed **solely** from `corrupt`'s 2 share slots (setting the
     missing honest slot to `0` and balancing `c1, c2` so `Valid` holds with zero secret knowledge!). -/
+def rss256SimDummyInputs (corrupt : Fin 3)
+    (x y : RssPlane256Share) (w : Bgin19Deg2Witness) :
+    RssPlane256Share × RssPlane256Share × Bgin19Deg2Witness :=
+  match corrupt with
+  | ⟨0, _⟩ =>
+    -- `P0` holds slots `(2, 0)` only; missing slot `1` is zeroed!
+    let xSim : RssPlane256Share := { s0 := x.s0, s1 := 0, s2 := x.s2 }
+    let ySim : RssPlane256Share := { s0 := y.s0, s1 := 0, s2 := y.s2 }
+    let x0Sim : RssTower128Share := { s0 := w.x0.s0, s1 := towerZero 7, s2 := w.x0.s2 }
+    let y0Sim : RssTower128Share := { s0 := w.y0.s0, s1 := towerZero 7, s2 := w.y0.s2 }
+    let dxSim : RssTower128Share := { s0 := w.dx.s0, s1 := towerZero 7, s2 := w.dx.s2 }
+    let dySim : RssTower128Share := { s0 := w.dy.s0, s1 := towerZero 7, s2 := w.dy.s2 }
+    let wantC1 := towerAdd 7 (towerMul 7 x0Sim.reconstruct dySim.reconstruct)
+                             (towerMul 7 dxSim.reconstruct y0Sim.reconstruct)
+    let wantC2 := towerMul 7 dxSim.reconstruct dySim.reconstruct
+    let c1Sim : RssTower128Share :=
+      { s0 := w.c1.s0, s1 := towerAdd 7 wantC1 (towerAdd 7 w.c1.s0 w.c1.s2), s2 := w.c1.s2 }
+    let c2Sim : RssTower128Share :=
+      { s0 := w.c2.s0, s1 := towerAdd 7 wantC2 (towerAdd 7 w.c2.s0 w.c2.s2), s2 := w.c2.s2 }
+    (xSim, ySim, { x0 := x0Sim, y0 := y0Sim, dx := dxSim, dy := dySim, c1 := c1Sim, c2 := c2Sim })
+  | ⟨1, _⟩ =>
+    -- `P1` holds slots `(0, 1)` only; missing slot `2` is zeroed!
+    let xSim : RssPlane256Share := { s0 := x.s0, s1 := x.s1, s2 := 0 }
+    let ySim : RssPlane256Share := { s0 := y.s0, s1 := y.s1, s2 := 0 }
+    let x0Sim : RssTower128Share := { s0 := w.x0.s0, s1 := w.x0.s1, s2 := towerZero 7 }
+    let y0Sim : RssTower128Share := { s0 := w.y0.s0, s1 := w.y0.s1, s2 := towerZero 7 }
+    let dxSim : RssTower128Share := { s0 := w.dx.s0, s1 := w.dx.s1, s2 := towerZero 7 }
+    let dySim : RssTower128Share := { s0 := w.dy.s0, s1 := w.dy.s1, s2 := towerZero 7 }
+    let wantC1 := towerAdd 7 (towerMul 7 x0Sim.reconstruct dySim.reconstruct)
+                             (towerMul 7 dxSim.reconstruct y0Sim.reconstruct)
+    let wantC2 := towerMul 7 dxSim.reconstruct dySim.reconstruct
+    let c1Sim : RssTower128Share :=
+      { s0 := w.c1.s0, s1 := w.c1.s1, s2 := towerAdd 7 wantC1 (towerAdd 7 w.c1.s0 w.c1.s1) }
+    let c2Sim : RssTower128Share :=
+      { s0 := w.c2.s0, s1 := w.c2.s1, s2 := towerAdd 7 wantC2 (towerAdd 7 w.c2.s0 w.c2.s1) }
+    (xSim, ySim, { x0 := x0Sim, y0 := y0Sim, dx := dxSim, dy := dySim, c1 := c1Sim, c2 := c2Sim })
+  | ⟨2, _⟩ =>
+    -- `P2` holds slots `(1, 2)` only; missing slot `0` is zeroed!
+    let xSim : RssPlane256Share := { s0 := 0, s1 := x.s1, s2 := x.s2 }
+    let ySim : RssPlane256Share := { s0 := 0, s1 := y.s1, s2 := y.s2 }
+    let x0Sim : RssTower128Share := { s0 := towerZero 7, s1 := w.x0.s1, s2 := w.x0.s2 }
+    let y0Sim : RssTower128Share := { s0 := towerZero 7, s1 := w.y0.s1, s2 := w.y0.s2 }
+    let dxSim : RssTower128Share := { s0 := towerZero 7, s1 := w.dx.s1, s2 := w.dx.s2 }
+    let dySim : RssTower128Share := { s0 := towerZero 7, s1 := w.dy.s1, s2 := w.dy.s2 }
+    let wantC1 := towerAdd 7 (towerMul 7 x0Sim.reconstruct dySim.reconstruct)
+                             (towerMul 7 dxSim.reconstruct y0Sim.reconstruct)
+    let wantC2 := towerMul 7 dxSim.reconstruct dySim.reconstruct
+    let c1Sim : RssTower128Share :=
+      { s0 := towerAdd 7 wantC1 (towerAdd 7 w.c1.s1 w.c1.s2), s1 := w.c1.s1, s2 := w.c1.s2 }
+    let c2Sim : RssTower128Share :=
+      { s0 := towerAdd 7 wantC2 (towerAdd 7 w.c2.s1 w.c2.s2), s1 := w.c2.s1, s2 := w.c2.s2 }
+    (xSim, ySim, { x0 := x0Sim, y0 := y0Sim, dx := dxSim, dy := dySim, c1 := c1Sim, c2 := c2Sim })
+
+private theorem rss256SimDummyInputs_valid (corrupt : Fin 3)
+    (x y : RssPlane256Share) (w : Bgin19Deg2Witness) :
+    (rss256SimDummyInputs corrupt x y w).2.2.Valid := by
+  match corrupt with
+  | ⟨0, _⟩ =>
+    constructor <;> {
+      dsimp [rss256SimDummyInputs, RssTower128Share.reconstruct]
+      simp only [towerAdd_assoc, towerAdd_comm, towerAdd_zero, towerAdd_cancel]
+    }
+  | ⟨1, _⟩ =>
+    constructor <;> {
+      dsimp [rss256SimDummyInputs, RssTower128Share.reconstruct]
+      simp only [towerAdd_assoc, towerAdd_comm, towerAdd_left_comm, towerAdd_zero, towerAdd_cancel]
+    }
+  | ⟨2, _⟩ =>
+    constructor <;> {
+      dsimp [rss256SimDummyInputs, RssTower128Share.reconstruct]
+      simp only [towerAdd_assoc, towerAdd_comm, towerAdd_left_comm, towerAdd_cancel]
+    }
+
+/-- Simulator view (depends **solely** on `corrupt`'s 2 slots and 2 PRG streams — zero honest secret bits!). -/
+def rss256SimCorruptView (corrupt : Fin 3)
+    (x y : RssPlane256Share) (w : Bgin19Deg2Witness)
+    (knownPrgA knownPrgB : Plane256)
+    (knownZpadA knownZpadB : Tower128 × Tower128)
+    (tau : Tower128)
+    (ω : Fin ((2 ^ 256) * (2 ^ 256))) : Rss256JointCorruptView :=
+  let (xSim, ySim, wSim) := rss256SimDummyInputs corrupt x y w
+  rss256RealCorruptView corrupt xSim ySim wSim knownPrgA knownPrgB knownZpadA knownZpadB tau ω
+
+/-- **Constructive Pad-Space Bijection (`rss256_and_bgin19_privacy_equiv`, `0 Classical.choice`)**:
+    Shifts the missing party's `(Plane256, Tower128 × Tower128)` pad stream so `rss256SimCorruptView`
+    matches `rss256RealCorruptView` identically on every sample point `ω`. -/
+def rss256_and_bgin19_privacy_equiv (corrupt : Fin 3)
+    (x y : RssPlane256Share) (w : Bgin19Deg2Witness) :
+    SimpleEquiv (Fin ((2 ^ 256) * (2 ^ 256))) (Fin ((2 ^ 256) * (2 ^ 256))) :=
+  let (xSim, ySim, wSim) := rss256SimDummyInputs corrupt x y w
+  let (rc0, rc1, rc2) := rss256CrossTerms x y
+  let (sc0, sc1, sc2) := rss256CrossTerms xSim ySim
+  let (rd1, rd2) := bgin19UnmaskedCoeffShares w
+  let (sd1, sd2) := bgin19UnmaskedCoeffShares wSim
+  let (deltaAnd, deltaD1, deltaD2) :=
+    match corrupt with
+    | ⟨0, _⟩ => (rc0 ^^^ sc0, towerAdd 7 rd1.s0 sd1.s0, towerAdd 7 rd2.s0 sd2.s0)
+    | ⟨1, _⟩ => (rc1 ^^^ sc1, towerAdd 7 rd1.s1 sd1.s1, towerAdd 7 rd2.s1 sd2.s1)
+    | ⟨2, _⟩ => (rc2 ^^^ sc2, towerAdd 7 rd1.s2 sd1.s2, towerAdd 7 rd2.s2 sd2.s2)
+  depProdFinEquiv (Nat.two_pow_pos 256)
+    (finBitVecXorEquiv 256 deltaAnd)
+    (fun _ => finBitVecXorEquiv 256 (packTower128Pair deltaD1 deltaD2))
+
+private theorem bv_xor_rearr (c sc k p : Plane256) :
+    sc ^^^ k ^^^ (p ^^^ (c ^^^ sc)) = c ^^^ k ^^^ p := by
+  apply BitVec.eq_of_getLsbD_eq
+  intro i _
+  simp only [BitVec.getLsbD_xor]
+  cases c.getLsbD i <;> cases sc.getLsbD i <;> cases k.getLsbD i <;> cases p.getLsbD i <;> rfl
+
+private theorem tower128_pad_shift_A (r0 s0 k p : Tower128) :
+    towerAdd 7 (towerAdd 7 s0 k) (towerAdd 7 p (towerAdd 7 r0 s0)) =
+      towerAdd 7 (towerAdd 7 r0 k) p := by
+  simp only [towerAdd_comm, towerAdd_left_comm, towerAdd_cancel]
+
+private theorem tower128_pad_shift_B {r0 r1 r2 s0 s1 s2 : Tower128}
+    (hRealZero : towerAdd 7 (towerAdd 7 r0 r1) r2 = towerZero 7)
+    (hSimZero : towerAdd 7 (towerAdd 7 s0 s1) s2 = towerZero 7)
+    (hOwnEq : s2 = r2)
+    (k p : Tower128) :
+    towerAdd 7 (towerAdd 7 s1 (towerAdd 7 p (towerAdd 7 r0 s0))) k =
+      towerAdd 7 (towerAdd 7 r1 p) k := by
+  have hr1 : r1 = towerAdd 7 r0 r2 := by
+    calc r1
+      _ = towerAdd 7 r0 (towerAdd 7 r0 (towerAdd 7 r1 (towerAdd 7 r2 r2))) := by
+        rw [towerAdd_self_zero, towerAdd_zero, towerAdd_cancel]
+      _ = towerAdd 7 (towerAdd 7 (towerAdd 7 r0 r1) r2) (towerAdd 7 r0 r2) := by
+        simp only [towerAdd_comm, towerAdd_left_comm]
+      _ = towerAdd 7 r0 r2 := by rw [hRealZero, towerZero_add]
+  have hs1 : s1 = towerAdd 7 s0 r2 := by
+    rw [hOwnEq] at hSimZero
+    calc s1
+      _ = towerAdd 7 s0 (towerAdd 7 s0 (towerAdd 7 s1 (towerAdd 7 r2 r2))) := by
+        rw [towerAdd_self_zero, towerAdd_zero, towerAdd_cancel]
+      _ = towerAdd 7 (towerAdd 7 (towerAdd 7 s0 s1) r2) (towerAdd 7 s0 r2) := by
+        simp only [towerAdd_comm, towerAdd_left_comm]
+      _ = towerAdd 7 s0 r2 := by rw [hSimZero, towerZero_add]
+  rw [hr1, hs1]
+  simp only [towerAdd_comm, towerAdd_left_comm, towerAdd_cancel]
+
+/-- **Exact 1-Corrupt `Rss256Engine` View Privacy (`rss256_one_corrupt_perfect_view_privacy`)**:
+    Under the corrected `(prg1, prg2, prg0)` mask-key assignment, for EVERY corrupt party
+    `corrupt ∈ {P0, P1, P2}`, EVERY secret 256-lane input `(x, y)`, EVERY valid `BGIN19` degree-2
+    witness `w`, EVERY challenge `τ ∈ GF(2^{128})`, and EVERY distinguisher `D`:
+    1. `rss256SimCorruptView` (using **0** bits of the missing honest share slot!) equals
+       `rss256RealCorruptView` point-for-point under `rss256_and_bgin19_privacy_equiv`;
+    2. Acceptance counts are equal and rational statistical distance is **identically `0`**! -/
+theorem rss256_one_corrupt_perfect_view_privacy
+    (corrupt : Fin 3)
+    (x y : RssPlane256Share) (w : Bgin19Deg2Witness) (hValid : w.Valid)
+    (knownPrgA knownPrgB : Plane256)
+    (knownZpadA knownZpadB : Tower128 × Tower128)
+    (tau : Tower128)
+    (D : Rss256JointCorruptView → Bool) :
+    let padCard := (2 ^ 256) * (2 ^ 256)
+    let bij := rss256_and_bgin19_privacy_equiv corrupt x y w
+    let realExec := rss256RealCorruptView corrupt x y w knownPrgA knownPrgB knownZpadA knownZpadB tau
+    let simExec := rss256SimCorruptView corrupt x y w knownPrgA knownPrgB knownZpadA knownZpadB tau
+    (∀ ω : Fin padCard, realExec ω = simExec (bij.toFun ω)) ∧
+    distAcceptCount padCard realExec D = distAcceptCount padCard simExec D ∧
+    ratLe (rationalAcceptDiff padCard realExec padCard simExec D) (0, 1) := by
+  intro padCard bij realExec simExec
+  have hCardPos : 0 < padCard := Nat.mul_pos (Nat.two_pow_pos 256) (Nat.two_pow_pos 256)
+  have hPointwiseGen : ∀ (c : Fin 3) (ω : Fin padCard),
+      rss256RealCorruptView c x y w knownPrgA knownPrgB knownZpadA knownZpadB tau ω =
+      rss256SimCorruptView c x y w knownPrgA knownPrgB knownZpadA knownZpadB tau
+        ((rss256_and_bgin19_privacy_equiv c x y w).toFun ω) := by
+    intro c ω
+    obtain ⟨hRealZ1, hRealZ2⟩ := bgin19UnmaskedCoeffShares_zero_sum hValid
+    obtain ⟨hSimZ1, hSimZ2⟩ := bgin19UnmaskedCoeffShares_zero_sum (rss256SimDummyInputs_valid c x y w)
+    have hSplitL : ∀ (dAnd dBgin : BitVec 256),
+        BitVec.ofFin (splitFinLeft (Nat.two_pow_pos 256)
+          ((depProdFinEquiv (Nat.two_pow_pos 256) (finBitVecXorEquiv 256 dAnd)
+            (fun _ => finBitVecXorEquiv 256 dBgin)).toFun ω)) =
+        BitVec.ofFin (splitFinLeft (Nat.two_pow_pos 256) ω) ^^^ dAnd := by
+      intro dAnd dBgin
+      dsimp [depProdFinEquiv, finBitVecXorEquiv]
+      rw [splitFinLeft_pairFin (Nat.two_pow_pos 256)]
+    have hSplitR : ∀ (dAnd dBgin : BitVec 256),
+        BitVec.ofFin (splitFinRight (Nat.two_pow_pos 256)
+          ((depProdFinEquiv (Nat.two_pow_pos 256) (finBitVecXorEquiv 256 dAnd)
+            (fun _ => finBitVecXorEquiv 256 dBgin)).toFun ω)) =
+        BitVec.ofFin (splitFinRight (Nat.two_pow_pos 256) ω) ^^^ dBgin := by
+      intro dAnd dBgin
+      dsimp [depProdFinEquiv, finBitVecXorEquiv]
+      rw [splitFinRight_pairFin (Nat.two_pow_pos 256)]
+    match c with
+    | ⟨0, hc⟩ =>
+      dsimp only [rss256SimCorruptView, rss256_and_bgin19_privacy_equiv, rss256RealCorruptView]
+      rw [hSplitL, hSplitR, unpackTower128Pair_xor_pack]
+      dsimp only [rss256AndWireCorrected]
+      have hOwnAnd : (rss256CrossTerms (rss256SimDummyInputs ⟨0, hc⟩ x y w).1
+                                       (rss256SimDummyInputs ⟨0, hc⟩ x y w).2.1).2.2 =
+                     (rss256CrossTerms x y).2.2 := rfl
+      have hOwnD1 : (bgin19UnmaskedCoeffShares (rss256SimDummyInputs ⟨0, hc⟩ x y w).2.2).1.s2 =
+                    (bgin19UnmaskedCoeffShares w).1.s2 := rfl
+      have hOwnD2 : (bgin19UnmaskedCoeffShares (rss256SimDummyInputs ⟨0, hc⟩ x y w).2.2).2.s2 =
+                    (bgin19UnmaskedCoeffShares w).2.s2 := rfl
+      have hInAnd := bv_xor_rearr (rss256CrossTerms x y).1
+        (rss256CrossTerms (rss256SimDummyInputs ⟨0, hc⟩ x y w).1
+                          (rss256SimDummyInputs ⟨0, hc⟩ x y w).2.1).1
+        knownPrgB (BitVec.ofFin (splitFinLeft (Nat.two_pow_pos 256) ω))
+      have hPA1 := tower128_pad_shift_A (bgin19UnmaskedCoeffShares w).1.s0
+        (bgin19UnmaskedCoeffShares (rss256SimDummyInputs ⟨0, hc⟩ x y w).2.2).1.s0
+        knownZpadB.1 (unpackTower128Pair (BitVec.ofFin (splitFinRight (Nat.two_pow_pos 256) ω))).1
+      have hPA2 := tower128_pad_shift_A (bgin19UnmaskedCoeffShares w).2.s0
+        (bgin19UnmaskedCoeffShares (rss256SimDummyInputs ⟨0, hc⟩ x y w).2.2).2.s0
+        knownZpadB.2 (unpackTower128Pair (BitVec.ofFin (splitFinRight (Nat.two_pow_pos 256) ω))).2
+      have hPB1 := tower128_pad_shift_B hRealZ1 hSimZ1 hOwnD1
+        knownZpadA.1 (unpackTower128Pair (BitVec.ofFin (splitFinRight (Nat.two_pow_pos 256) ω))).1
+      have hPB2 := tower128_pad_shift_B hRealZ2 hSimZ2 hOwnD2
+        knownZpadA.2 (unpackTower128Pair (BitVec.ofFin (splitFinRight (Nat.two_pow_pos 256) ω))).2
+      rw [hOwnAnd, hOwnD1, hOwnD2, hInAnd, hPA1, hPA2, hPB1, hPB2]
+    | ⟨1, hc⟩ =>
+      dsimp only [rss256SimCorruptView, rss256_and_bgin19_privacy_equiv, rss256RealCorruptView]
+      rw [hSplitL, hSplitR, unpackTower128Pair_xor_pack]
+      dsimp only [rss256AndWireCorrected]
+      have hOwnAnd : (rss256CrossTerms (rss256SimDummyInputs ⟨1, hc⟩ x y w).1
+                                       (rss256SimDummyInputs ⟨1, hc⟩ x y w).2.1).1 =
+                     (rss256CrossTerms x y).1 := rfl
+      have hOwnD1 : (bgin19UnmaskedCoeffShares (rss256SimDummyInputs ⟨1, hc⟩ x y w).2.2).1.s0 =
+                    (bgin19UnmaskedCoeffShares w).1.s0 := rfl
+      have hOwnD2 : (bgin19UnmaskedCoeffShares (rss256SimDummyInputs ⟨1, hc⟩ x y w).2.2).2.s0 =
+                    (bgin19UnmaskedCoeffShares w).2.s0 := rfl
+      have hInAnd := bv_xor_rearr (rss256CrossTerms x y).2.1
+        (rss256CrossTerms (rss256SimDummyInputs ⟨1, hc⟩ x y w).1
+                          (rss256SimDummyInputs ⟨1, hc⟩ x y w).2.1).2.1
+        knownPrgB (BitVec.ofFin (splitFinLeft (Nat.two_pow_pos 256) ω))
+      have hPA1 := tower128_pad_shift_A (bgin19UnmaskedCoeffShares w).1.s1
+        (bgin19UnmaskedCoeffShares (rss256SimDummyInputs ⟨1, hc⟩ x y w).2.2).1.s1
+        knownZpadB.1 (unpackTower128Pair (BitVec.ofFin (splitFinRight (Nat.two_pow_pos 256) ω))).1
+      have hPA2 := tower128_pad_shift_A (bgin19UnmaskedCoeffShares w).2.s1
+        (bgin19UnmaskedCoeffShares (rss256SimDummyInputs ⟨1, hc⟩ x y w).2.2).2.s1
+        knownZpadB.2 (unpackTower128Pair (BitVec.ofFin (splitFinRight (Nat.two_pow_pos 256) ω))).2
+      have hRealZ1' : towerAdd 7 (towerAdd 7 (bgin19UnmaskedCoeffShares w).1.s1
+                        (bgin19UnmaskedCoeffShares w).1.s2) (bgin19UnmaskedCoeffShares w).1.s0 = towerZero 7 := by
+        unfold RssTower128Share.reconstruct at hRealZ1
+        simpa only [towerAdd_comm, towerAdd_left_comm] using hRealZ1
+      have hSimZ1' : towerAdd 7 (towerAdd 7
+                       (bgin19UnmaskedCoeffShares (rss256SimDummyInputs ⟨1, hc⟩ x y w).2.2).1.s1
+                       (bgin19UnmaskedCoeffShares (rss256SimDummyInputs ⟨1, hc⟩ x y w).2.2).1.s2)
+                       (bgin19UnmaskedCoeffShares (rss256SimDummyInputs ⟨1, hc⟩ x y w).2.2).1.s0 = towerZero 7 := by
+        unfold RssTower128Share.reconstruct at hSimZ1
+        simpa only [towerAdd_comm, towerAdd_left_comm] using hSimZ1
+      have hRealZ2' : towerAdd 7 (towerAdd 7 (bgin19UnmaskedCoeffShares w).2.s1
+                        (bgin19UnmaskedCoeffShares w).2.s2) (bgin19UnmaskedCoeffShares w).2.s0 = towerZero 7 := by
+        unfold RssTower128Share.reconstruct at hRealZ2
+        simpa only [towerAdd_comm, towerAdd_left_comm] using hRealZ2
+      have hSimZ2' : towerAdd 7 (towerAdd 7
+                       (bgin19UnmaskedCoeffShares (rss256SimDummyInputs ⟨1, hc⟩ x y w).2.2).2.s1
+                       (bgin19UnmaskedCoeffShares (rss256SimDummyInputs ⟨1, hc⟩ x y w).2.2).2.s2)
+                       (bgin19UnmaskedCoeffShares (rss256SimDummyInputs ⟨1, hc⟩ x y w).2.2).2.s0 = towerZero 7 := by
+        unfold RssTower128Share.reconstruct at hSimZ2
+        simpa only [towerAdd_comm, towerAdd_left_comm] using hSimZ2
+      have hPB1 := tower128_pad_shift_B hRealZ1' hSimZ1' hOwnD1
+        knownZpadA.1 (unpackTower128Pair (BitVec.ofFin (splitFinRight (Nat.two_pow_pos 256) ω))).1
+      have hPB2 := tower128_pad_shift_B hRealZ2' hSimZ2' hOwnD2
+        knownZpadA.2 (unpackTower128Pair (BitVec.ofFin (splitFinRight (Nat.two_pow_pos 256) ω))).2
+      rw [hOwnAnd, hOwnD1, hOwnD2, hInAnd, hPA1, hPA2, hPB1, hPB2]
+    | ⟨2, hc⟩ =>
+      dsimp only [rss256SimCorruptView, rss256_and_bgin19_privacy_equiv, rss256RealCorruptView]
+      rw [hSplitL, hSplitR, unpackTower128Pair_xor_pack]
+      dsimp only [rss256AndWireCorrected]
+      have hOwnAnd : (rss256CrossTerms (rss256SimDummyInputs ⟨2, hc⟩ x y w).1
+                                       (rss256SimDummyInputs ⟨2, hc⟩ x y w).2.1).2.1 =
+                     (rss256CrossTerms x y).2.1 := rfl
+      have hOwnD1 : (bgin19UnmaskedCoeffShares (rss256SimDummyInputs ⟨2, hc⟩ x y w).2.2).1.s1 =
+                    (bgin19UnmaskedCoeffShares w).1.s1 := rfl
+      have hOwnD2 : (bgin19UnmaskedCoeffShares (rss256SimDummyInputs ⟨2, hc⟩ x y w).2.2).2.s1 =
+                    (bgin19UnmaskedCoeffShares w).2.s1 := rfl
+      have hInAnd := bv_xor_rearr (rss256CrossTerms x y).2.2
+        (rss256CrossTerms (rss256SimDummyInputs ⟨2, hc⟩ x y w).1
+                          (rss256SimDummyInputs ⟨2, hc⟩ x y w).2.1).2.2
+        knownPrgB (BitVec.ofFin (splitFinLeft (Nat.two_pow_pos 256) ω))
+      have hPA1 := tower128_pad_shift_A (bgin19UnmaskedCoeffShares w).1.s2
+        (bgin19UnmaskedCoeffShares (rss256SimDummyInputs ⟨2, hc⟩ x y w).2.2).1.s2
+        knownZpadB.1 (unpackTower128Pair (BitVec.ofFin (splitFinRight (Nat.two_pow_pos 256) ω))).1
+      have hPA2 := tower128_pad_shift_A (bgin19UnmaskedCoeffShares w).2.s2
+        (bgin19UnmaskedCoeffShares (rss256SimDummyInputs ⟨2, hc⟩ x y w).2.2).2.s2
+        knownZpadB.2 (unpackTower128Pair (BitVec.ofFin (splitFinRight (Nat.two_pow_pos 256) ω))).2
+      have hRealZ1' : towerAdd 7 (towerAdd 7 (bgin19UnmaskedCoeffShares w).1.s2
+                        (bgin19UnmaskedCoeffShares w).1.s0) (bgin19UnmaskedCoeffShares w).1.s1 = towerZero 7 := by
+        unfold RssTower128Share.reconstruct at hRealZ1
+        simpa only [towerAdd_assoc, towerAdd_comm, towerAdd_left_comm] using hRealZ1
+      have hSimZ1' : towerAdd 7 (towerAdd 7
+                       (bgin19UnmaskedCoeffShares (rss256SimDummyInputs ⟨2, hc⟩ x y w).2.2).1.s2
+                       (bgin19UnmaskedCoeffShares (rss256SimDummyInputs ⟨2, hc⟩ x y w).2.2).1.s0)
+                       (bgin19UnmaskedCoeffShares (rss256SimDummyInputs ⟨2, hc⟩ x y w).2.2).1.s1 = towerZero 7 := by
+        unfold RssTower128Share.reconstruct at hSimZ1
+        simpa only [towerAdd_assoc, towerAdd_comm, towerAdd_left_comm] using hSimZ1
+      have hRealZ2' : towerAdd 7 (towerAdd 7 (bgin19UnmaskedCoeffShares w).2.s2
+                        (bgin19UnmaskedCoeffShares w).2.s0) (bgin19UnmaskedCoeffShares w).2.s1 = towerZero 7 := by
+        unfold RssTower128Share.reconstruct at hRealZ2
+        simpa only [towerAdd_assoc, towerAdd_comm, towerAdd_left_comm] using hRealZ2
+      have hSimZ2' : towerAdd 7 (towerAdd 7
+                       (bgin19UnmaskedCoeffShares (rss256SimDummyInputs ⟨2, hc⟩ x y w).2.2).2.s2
+                       (bgin19UnmaskedCoeffShares (rss256SimDummyInputs ⟨2, hc⟩ x y w).2.2).2.s0)
+                       (bgin19UnmaskedCoeffShares (rss256SimDummyInputs ⟨2, hc⟩ x y w).2.2).2.s1 = towerZero 7 := by
+        unfold RssTower128Share.reconstruct at hSimZ2
+        simpa only [towerAdd_assoc, towerAdd_comm, towerAdd_left_comm] using hSimZ2
+      have hPB1 := tower128_pad_shift_B hRealZ1' hSimZ1' hOwnD1
+        knownZpadA.1 (unpackTower128Pair (BitVec.ofFin (splitFinRight (Nat.two_pow_pos 256) ω))).1
+      have hPB2 := tower128_pad_shift_B hRealZ2' hSimZ2' hOwnD2
+        knownZpadA.2 (unpackTower128Pair (BitVec.ofFin (splitFinRight (Nat.two_pow_pos 256) ω))).2
+      rw [hOwnAnd, hOwnD1, hOwnD2, hInAnd, hPA1, hPA2, hPB1, hPB2]
+  have hPointwise : ∀ ω : Fin padCard, realExec ω = simExec (bij.toFun ω) := hPointwiseGen corrupt
+  have hCountEq : distAcceptCount padCard realExec D = distAcceptCount padCard simExec D := by
+    unfold distAcceptCount
+    calc
+      finSum padCard (fun ω => if D (realExec ω) then 1 else 0) =
+        finSum padCard (fun ω => if D (simExec (bij.toFun ω)) then 1 else 0) :=
+          finSum_congr (fun ω => by rw [hPointwise ω])
+      _ = finSum padCard (fun ω => if D (simExec ω) then 1 else 0) :=
+          finSum_equiv_eq bij (fun ω => if D (simExec ω) then 1 else 0)
+  have hBad := bad_event_fundamental_lemma padCard hCardPos realExec simExec bij
+    (fun _ => false) (fun ω _ => hPointwise ω) D
+  have hZeroBad : finSum padCard (fun _ : Fin padCard => if false then 1 else 0) = 0 := by
+    simp [finSum_const]
+  have hRatDiff : ratLe (rationalAcceptDiff padCard realExec padCard simExec D) (0, 1) := by
+    obtain ⟨_, _, hR⟩ := hBad
+    rw [hZeroBad] at hR
+    refine ⟨hR.1, by decide, ?_⟩
+    have hNum0 : (rationalAcceptDiff padCard realExec padCard simExec D).1 * padCard ≤ 0 := by
+      simpa only [Nat.zero_mul] using hR.2.2
+    have hProd0 : (rationalAcceptDiff padCard realExec padCard simExec D).1 * padCard = 0 :=
+      Nat.eq_zero_of_le_zero hNum0
+    rcases Nat.mul_eq_zero.mp hProd0 with hN0 | hC0
+    · rw [hN0]; simp
+    · exact False.elim (Nat.ne_of_gt hCardPos hC0)
+  exact ⟨hPointwise, hCountEq, hRatDiff⟩
+
+/-- Verifier `P0`'s pad-cancellation extractor against the naive `(prg0, prg1, prg2)` assignment. -/
+def p0CancelNaivePads (u0Naive x0 y0 prg0 prg1 : Plane256) : Plane256 :=
+  u0Naive ^^^ prg0 ^^^ prg1 ^^^ (x0 &&& y0)
+
+/-- **`#tooth` Off-by-One `(prg0, prg1, prg2)` Mask-Key Assignment Leaks `(x0 & y1) ⊕ (x1 & y0)` (`tooth_off_by_one_prg_map_leaks_and_wire`)**:
+    Under the naive `(prg0, prg1, prg2)` assignment, gate reconstruction STILL passes (`u0 ⊕ u1 ⊕ u2 = x & y`),
+    yet verifier `P0` (holding `(x2, x0, y2, y0)` and `(prg0, prg1)`) cancels BOTH pads on `u0` and
+    recovers `(x0 &&& y1) ^^^ (x1 &&& y0)` with probability `1` (`distAcceptCount` difference = `2^256`)! -/
+theorem tooth_off_by_one_prg_map_leaks_and_wire
+    (x y : RssPlane256Share) (prg0 prg1 prg2 : Plane256) :
+    let uNaive := rss256AndWireNaiveOffByOne x y prg0 prg1 prg2
+    uNaive.reconstruct = (x.reconstruct &&& y.reconstruct) ∧
+    p0CancelNaivePads uNaive.s0 x.s0 y.s0 prg0 prg1 =
+      ((x.s0 &&& y.s1) ^^^ (x.s1 &&& y.s0)) ∧
+    (let xA : RssPlane256Share := { s0 := 0#256, s1 := BitVec.allOnes 256, s2 := 0#256 }
+     let xB : RssPlane256Share := { s0 := 0#256, s1 := 0#256, s2 := 0#256 }
+     let yFixed : RssPlane256Share := { s0 := BitVec.allOnes 256, s1 := 0#256, s2 := 0#256 }
+     xA.s0 = xB.s0 ∧ xA.s2 = xB.s2 ∧
+     finSum (2 ^ 256) (fun ω =>
+       if p0CancelNaivePads
+            (rss256AndWireNaiveOffByOne xA yFixed prg0 prg1 (BitVec.ofFin ω)).s0
+            xA.s0 yFixed.s0 prg0 prg1 == BitVec.allOnes 256 then 1 else 0) = 2 ^ 256 ∧
+     finSum (2 ^ 256) (fun ω =>
+       if p0CancelNaivePads
+            (rss256AndWireNaiveOffByOne xB yFixed prg0 prg1 (BitVec.ofFin ω)).s0
+            xB.s0 yFixed.s0 prg0 prg1 == BitVec.allOnes 256 then 1 else 0) = 0) := by
+  refine ⟨(rss256_and_gate_reconstructs x y prg0 prg1 prg2).2, ?_, ?_⟩
+  · apply BitVec.eq_of_getLsbD_eq
+    intro i _
+    simp only [p0CancelNaivePads, rss256AndWireNaiveOffByOne, rss256CrossTerms,
+      BitVec.getLsbD_xor, BitVec.getLsbD_and]
+    cases x.s0.getLsbD i <;> cases x.s1.getLsbD i <;>
+      cases y.s0.getLsbD i <;> cases y.s1.getLsbD i <;>
+      cases prg0.getLsbD i <;> cases prg1.getLsbD i <;> rfl
+  · dsimp only
+    have hExtractEq : ∀ (u : RssPlane256Share) (p2 : Plane256),
+        p0CancelNaivePads (rss256AndWireNaiveOffByOne u { s0 := BitVec.allOnes 256, s1 := 0#256, s2 := 0#256 } prg0 prg1 p2).s0
+          u.s0 (BitVec.allOnes 256) prg0 prg1 =
+        (u.s1 &&& BitVec.allOnes 256) := by
+      intro u p2
+      apply BitVec.eq_of_getLsbD_eq
+      intro i _
+      simp only [p0CancelNaivePads, rss256AndWireNaiveOffByOne, rss256CrossTerms,
+        BitVec.getLsbD_xor, BitVec.getLsbD_and, BitVec.getLsbD_zero]
+      cases u.s0.getLsbD i <;> cases u.s1.getLsbD i <;>
+        cases (BitVec.allOnes 256).getLsbD i <;>
+        cases prg0.getLsbD i <;> cases prg1.getLsbD i <;> rfl
+    refine ⟨rfl, rfl, ?_, ?_⟩
+    · have h1 : finSum (2 ^ 256) (fun ω =>
+          if p0CancelNaivePads
+               (rss256AndWireNaiveOffByOne { s0 := 0#256, s1 := BitVec.allOnes 256, s2 := 0#256 }
+                 { s0 := BitVec.allOnes 256, s1 := 0#256, s2 := 0#256 } prg0 prg1 (BitVec.ofFin ω)).s0
+               0#256 (BitVec.allOnes 256) prg0 prg1 == BitVec.allOnes 256 then 1 else 0) =
+          finSum (2 ^ 256) (fun _ => 1) := by
+        apply finSum_congr
+        intro ω
+        rw [hExtractEq { s0 := 0#256, s1 := BitVec.allOnes 256, s2 := 0#256 } (BitVec.ofFin ω)]
+        simp
+      rw [h1, finSum_const, Nat.mul_one]
+    · have h0 : finSum (2 ^ 256) (fun ω =>
+          if p0CancelNaivePads
+               (rss256AndWireNaiveOffByOne { s0 := 0#256, s1 := 0#256, s2 := 0#256 }
+                 { s0 := BitVec.allOnes 256, s1 := 0#256, s2 := 0#256 } prg0 prg1 (BitVec.ofFin ω)).s0
+               0#256 (BitVec.allOnes 256) prg0 prg1 == BitVec.allOnes 256 then 1 else 0) =
+          finSum (2 ^ 256) (fun _ => 0) := by
+        apply finSum_congr
+        intro ω
+        rw [hExtractEq { s0 := 0#256, s1 := 0#256, s2 := 0#256 } (BitVec.ofFin ω)]
+        dsimp only
+        have hNeOnes : ((0#256 &&& BitVec.allOnes 256) == BitVec.allOnes 256) = false := by
+          apply beq_false_of_ne
+          intro hEq
+          have hb := congrArg (fun v : BitVec 256 => v.getLsbD 0) hEq
+          rw [BitVec.zero_and, BitVec.getLsbD_zero, Qsag.Constructive.getLsbD_allOnes] at hb
+          cases hb
+        rw [hNeOnes]
+        rfl
+      rw [h0, finSum_const, Nat.mul_zero]
+
+private theorem finSum_mul_right_nat : ∀ (n c : Nat) (f : Fin n → Nat),
+    finSum n (fun i => f i * c) = finSum n f * c
+  | 0, _, _ => by simp [finSum]
+  | n + 1, c, f => by simp only [finSum, finSum_mul_right_nat n c, Nat.add_mul]
+
+/-- A full recorded AND gate, with three replicated-share components per wire. -/
+structure Rss256RecordedGate where
+  x : RssPlane256Share
+  y : RssPlane256Share
+  z : RssPlane256Share
+
+/-- Actual reconstructed gate error, rather than a caller-supplied validity flag. -/
+def Rss256RecordedGate.error (g : Rss256RecordedGate) : Plane256 :=
+  g.z.reconstruct ^^^ (g.x.reconstruct &&& g.y.reconstruct)
+
+/-- Each party holds two adjacent shares; these overlap exactly as in `(2,3)` RSS. -/
+def RssPlane256Share.partyViews (s : RssPlane256Share) :
+    (Plane256 × Plane256) × (Plane256 × Plane256) × (Plane256 × Plane256) :=
+  ((s.s2, s.s0), (s.s0, s.s1), (s.s1, s.s2))
+
+theorem rss256_replicated_share_binding (s : RssPlane256Share) :
+    s.partyViews.1.2 = s.partyViews.2.1.1 ∧
+    s.partyViews.2.1.2 = s.partyViews.2.2.1 ∧
+    s.partyViews.2.2.2 = s.partyViews.1.1 ∧
+    s.partyViews.1.1 ^^^ s.partyViews.1.2 ^^^ s.partyViews.2.1.2 = s.reconstruct := by
+  refine ⟨rfl, rfl, rfl, ?_⟩
+  apply BitVec.eq_of_getLsbD_eq
+  intro i _
+  simp only [RssPlane256Share.partyViews, RssPlane256Share.reconstruct, BitVec.getLsbD_xor]
+  cases s.s0.getLsbD i <;> cases s.s1.getLsbD i <;> cases s.s2.getLsbD i <;> rfl
+
+theorem rss256_honest_recorded_gate_error (x y : RssPlane256Share) (a b c : Plane256) :
+    (Rss256RecordedGate.mk x y (rss256AndWireCorrected x y a b c)).error = 0#256 := by
+  unfold Rss256RecordedGate.error
+  rw [(rss256_and_gate_reconstructs x y a b c).1, BitVec.xor_self]
+
+/-- Independent-coordinate linear combination. Coins are indexed by gate/lane, never
+    one scalar multiplied by the sum of all errors. A fresh stream is required per pass
+    and per folding round; the transcript errors are fixed before that stream is sampled. -/
+def rss256WeightedErrors : List Tower128 → (Nat → Tower128) → Tower128
+  | [], _ => towerZero 7
+  | e :: es, coins => towerAdd 7 (towerMul 7 e (coins 0))
+      (rss256WeightedErrors es (fun i => coins (i + 1)))
+
+/-- Expose one independently sampled coordinate, keeping all other coins fixed. -/
+def rss256PivotCheck (delta : Tower128) (rest : List Tower128)
+    (coins : Nat → Tower128) (r : Tower128) : Tower128 :=
+  rss256WeightedErrors (delta :: rest) (fun i => if i = 0 then r else coins (i - 1))
+
+theorem rss256PivotCheck_eq (delta : Tower128) (rest : List Tower128)
+    (coins : Nat → Tower128) (r : Tower128) :
+    rss256PivotCheck delta rest coins r =
+      towerAdd 7 (towerMul 7 delta r) (rss256WeightedErrors rest coins) := by
+  simp only [rss256PivotCheck, rss256WeightedErrors, ↓reduceIte,
+    Nat.add_one_ne_zero, Nat.add_sub_cancel]
+
+/-- Conditional on every other coin, a nonzero gate error pins at most one fresh
+    GF(2^128) challenge. Thus independent gate weighting has error at most 1/2^128.
+    The designated erroneous coordinate may be placed first in the batch. -/
+theorem rss256_independent_gate_weight_soundness (delta : Tower128)
+    (rest : List Tower128) (coins : Nat → Tower128) (hdelta : delta ≠ towerZero 7) :
+    ratLe (finSum (2^128) (fun r =>
+      if rss256PivotCheck delta rest coins (unpackTower 7 (BitVec.ofFin r)) == towerZero 7
+      then 1 else 0), 2^128) (1, 2^128) := by
+  have hCount : finSum (2^128) (fun r =>
+      if rss256PivotCheck delta rest coins (unpackTower 7 (BitVec.ofFin r)) == towerZero 7
+      then 1 else 0) ≤ 1 := by
+    apply finSum_indicator_le_one_of_unique
+    intro i j hi hj
+    have hi' := eq_of_beq hi
+    have hj' := eq_of_beq hj
+    rw [rss256PivotCheck_eq] at hi' hj'
+    have he := hi'.trans hj'.symm
+    have hc := congrArg (fun v => towerAdd 7 v (rss256WeightedErrors rest coins)) he
+    simp only [towerAdd_assoc, towerAdd_self_zero, towerAdd_zero] at hc
+    have hf := towerMul_cancel_left 7 delta _ _ hdelta hc
+    have hp := congrArg (packTower 7) hf
+    simp only [packTower_unpackTower] at hp
+    exact Fin.ext (congrArg BitVec.toNat hp)
+  exact ⟨Nat.two_pow_pos 128, Nat.two_pow_pos 128,
+    Nat.mul_le_mul_right (2^128) hCount⟩
+
+/-- Encode every lane of every recorded gate; false lanes contribute the nonzero field
+    element one. This binds the independent-coordinate check to the 256-lane RSS invariant. -/
+def rss256GateErrors (gates : List Rss256RecordedGate) : List Tower128 :=
+  gates.flatMap (fun g => (List.finRange 256).map (fun lane =>
+    if g.error.getLsbD lane.val then towerOne 7 else towerZero 7))
+
+def rss256Pass1Check (gates : List Rss256RecordedGate) (coins : Nat → Tower128) : Bool :=
+  rss256WeightedErrors (rss256GateErrors gates) coins == towerZero 7
+
+/-- Polynomial weighting (the production alternative to independently sampled gate
+    coordinates) uses distinct monomials. In the existing Horner convention coefficient
+    zero has weight chi, so the degree bound is the coefficient-list length. -/
+theorem rss256_polynomial_gate_weight_soundness (deg : Nat) (errors : List Tower128)
+    (hLen : errors.length ≤ deg) (hNz : ∃ e ∈ errors, e ≠ towerZero 7) :
+    ratLe (finSum (2^128) (fun r =>
+      if batchDeviationPoly errors (unpackTower 7 (BitVec.ofFin r)) == towerZero 7
+      then 1 else 0), 2^128) (deg, 2^128) := by
+  exact ⟨Nat.two_pow_pos 128, Nat.two_pow_pos 128,
+    Nat.mul_le_mul_right (2^128) (tower128_roots_finSum_le deg errors hLen hNz)⟩
+
+/-- A false bit of a reconstructed gate becomes an actual nonzero coefficient. -/
+theorem rss256_recorded_fault_nonzero (gates : List Rss256RecordedGate)
+    (g : Rss256RecordedGate) (hg : g ∈ gates) (lane : Fin 256)
+    (hFault : g.error.getLsbD lane.val = true) :
+    ∃ e ∈ rss256GateErrors gates, e ≠ towerZero 7 := by
+  refine ⟨towerOne 7, ?_, towerOne_ne_zero 7⟩
+  apply List.mem_flatMap.mpr
+  refine ⟨g, hg, ?_⟩
+  apply List.mem_map.mpr
+  exact ⟨lane, List.mem_finRange lane, by rw [hFault]; rfl⟩
+
+/-- End-to-end algebraic batching bound from an actual RSS gate/lane fault. This
+    is the polynomial-weight variant; it does not assume a caller's `relationValid`. -/
+theorem rss256_recorded_gate_polynomial_soundness (gates : List Rss256RecordedGate)
+    (g : Rss256RecordedGate) (hg : g ∈ gates) (lane : Fin 256)
+    (hFault : g.error.getLsbD lane.val = true) :
+    ratLe (finSum (2^128) (fun r =>
+      if batchDeviationPoly (rss256GateErrors gates)
+        (unpackTower 7 (BitVec.ofFin r)) == towerZero 7 then 1 else 0), 2^128)
+      ((rss256GateErrors gates).length, 2^128) :=
+  rss256_polynomial_gate_weight_soundness _ _ (Nat.le_refl _)
+    (rss256_recorded_fault_nonzero gates g hg lane hFault)
+
+/-- Pass and round are separate coordinates. Uniform independent sampling of this
+    family is the coin-model premise, not a claim that a deterministic XOF is random. -/
+structure Rss256ChallengeFamily where
+  gate : Fin 2 → Nat → Nat → Tower128
+  evaluation : Fin 2 → Nat → Tower128
+
+def rss256Pass1At (gates : List Rss256RecordedGate) (coins : Rss256ChallengeFamily)
+    (pass : Fin 2) (round : Nat) : Bool :=
+  rss256Pass1Check gates (coins.gate pass round)
+
+/-- Each folding polynomial must be fixed before its own evaluation coin is drawn.
+    The bound is conditional on the preceding transcript, including earlier rounds. -/
+theorem rss256_folding_round_soundness (deg : Nat) (errors : List Tower128)
+    (hLen : errors.length ≤ deg) (hNz : ∃ e ∈ errors, e ≠ towerZero 7) :
+    ratLe (finSum (2^128) (fun r =>
+      if batchDeviationPoly errors (unpackTower 7 (BitVec.ofFin r)) == towerZero 7
+      then 1 else 0), 2^128) (deg, 2^128) :=
+  rss256_polynomial_gate_weight_soundness deg errors hLen hNz
+
+/-- `#tooth`: identical weights erase two equal nonzero gate errors in characteristic 2. -/
+theorem tooth_rss256_reused_gate_weights (c : Tower128) :
+    towerOne 7 ≠ towerZero 7 ∧
+    rss256WeightedErrors [towerOne 7, towerOne 7] (fun _ => c) = towerZero 7 := by
+  constructor
+  · exact towerOne_ne_zero 7
+  · simp only [rss256WeightedErrors, towerAdd_zero, towerAdd_self_zero]
+
+/-- Post-wave 2-challenge `GF(2^{128})` (`Tower128`) check predicate over `Fin ((2 ^ 128) * (2 ^ 128))`. -/
+def postWaveTwoChallengeAccepts (waveCoeffs : List Tower128)
+    (ω : Fin ((2 ^ 128) * (2 ^ 128))) : Bool :=
+  let chi1 := unpackTower 7 (BitVec.ofFin (splitFinLeft (Nat.two_pow_pos 128) ω))
+  let chi2 := unpackTower 7 (BitVec.ofFin (splitFinRight (Nat.two_pow_pos 128) ω))
+  (batchDeviationPoly waveCoeffs chi1 == towerZero 7) &&
+  (batchDeviationPoly waveCoeffs chi2 == towerZero 7)
+
+/-- **Post-Wave Commit-Reveal 2-Challenge `GF(2^{128})` `BGIN19` / Horner Soundness
+    (`rss256_post_wave_two_challenge_bgin19_soundness`)**:
+    When the joint commit-then-open coin flip runs *after* the wave gate/Horner transcript
+    `waveCoeffs` (of degree `≤ 2 * deg` with at least one nonzero error coefficient) is committed,
+    both independent `GF(2^{128})` challenges accept on at most `(2 * deg) ^ 2` pairs out of
+    `(2 ^ 128) ^ 2`, establishing `ratLe (acceptCount, (2 ^ 128) ^ 2) ((2 * deg) ^ 2, (2 ^ 128) ^ 2)`. -/
+theorem rss256_post_wave_two_challenge_bgin19_soundness
+    (deg : Nat) (waveCoeffs : List Tower128)
+    (hDeg : waveCoeffs.length ≤ 2 * deg)
+    (hNonzero : ∃ c ∈ waveCoeffs, c ≠ towerZero 7) :
+    let acceptCount := finSum ((2 ^ 128) * (2 ^ 128))
+      (fun ω => if postWaveTwoChallengeAccepts waveCoeffs ω then 1 else 0)
+    acceptCount ≤ (2 * deg) ^ 2 ∧
+    ratLe (acceptCount, (2 ^ 128) ^ 2) ((2 * deg) ^ 2, (2 ^ 128) ^ 2) := by
+  intro acceptCount
+  let pass1 : Fin (2 ^ 128) → Bool :=
+    fun r => batchDeviationPoly waveCoeffs (unpackTower 7 (BitVec.ofFin r)) == towerZero 7
+  have hSingle : finSum (2 ^ 128) (fun r => if pass1 r then 1 else 0) ≤ 2 * deg :=
+    tower128_roots_finSum_le (2 * deg) waveCoeffs hDeg hNonzero
+  have hFactor :
+      acceptCount =
+      (finSum (2 ^ 128) (fun r => if pass1 r then 1 else 0)) *
+      (finSum (2 ^ 128) (fun r => if pass1 r then 1 else 0)) := by
+    dsimp only [acceptCount]
+    rw [finSum_prod_eq (2 ^ 128) (2 ^ 128)]
+    have hInner : ∀ r1 : Fin (2 ^ 128),
+        finSum (2 ^ 128) (fun r2 => if postWaveTwoChallengeAccepts waveCoeffs (pairFin r1 r2) then 1 else 0) =
+        (if pass1 r1 then 1 else 0) * finSum (2 ^ 128) (fun r2 => if pass1 r2 then 1 else 0) := by
+      intro r1
+      have hPt : ∀ r2 : Fin (2 ^ 128),
+          (if postWaveTwoChallengeAccepts waveCoeffs (pairFin r1 r2) then 1 else 0) =
+          (if pass1 r1 then 1 else 0) * (if pass1 r2 then 1 else 0) := by
+        intro r2
+        unfold postWaveTwoChallengeAccepts
+        rw [splitFinLeft_pairFin (Nat.two_pow_pos 128), splitFinRight_pairFin (Nat.two_pow_pos 128)]
+        change (if pass1 r1 && pass1 r2 then 1 else 0) = (if pass1 r1 then 1 else 0) * (if pass1 r2 then 1 else 0)
+        cases pass1 r1 <;> cases pass1 r2 <;> rfl
+      rw [finSum_congr hPt, finSum_mul_left]
+    rw [finSum_congr hInner, finSum_mul_right_nat]
+  have hSqLe : acceptCount ≤ (2 * deg) ^ 2 := by
+    rw [hFactor, Nat.pow_two]
+    exact Nat.mul_le_mul hSingle hSingle
+  have hDenPos : 0 < (2 ^ 128) ^ 2 := by
+    rw [Nat.pow_two]
+    exact Nat.mul_pos (Nat.two_pow_pos 128) (Nat.two_pow_pos 128)
+  refine ⟨hSqLe, hDenPos, hDenPos, Nat.mul_le_mul_right ((2 ^ 128) ^ 2) hSqLe⟩
+
+/-- Rushing attacker's nonzero fault pair `(e1, e2) = (χ, 1) ∈ ker(χ)` when `χ` is leaked pre-wave. -/
+def preWaveKernelFaultPair (chi : Tower128) : List Tower128 :=
+  [chi, towerOne 7]
+
+/-- Rushing attacker's nonzero 3-term fault `[χ1 * χ2, χ1 ⊕ χ2, 1]` annihilating BOTH pre-wave challenges `(χ1, χ2)`. -/
+def preWaveTwoChallengeKernelFault (chi1 chi2 : Tower128) : List Tower128 :=
+  [towerMul 7 chi1 chi2, towerAdd 7 chi1 chi2, towerOne 7]
+
+/-- **`#tooth` Pre-Wave Challenge Kernel Bypass (`tooth_pre_wave_challenge_kernel_bypass`)**:
+    If a rushing attacker learns `χ` before committing gate wire messages `u`, the explicit nonzero
+    fault pair `(e1, e2) = (χ, 1)` (`e2 = 1 ≠ 0`) lies in `ker(χ)` (`batchDeviationPoly [χ, 1] χ = 0`)
+    and passes verification on **100% of `Fin (2 ^ 128)`** (probability `1`), and similarly
+    `preWaveTwoChallengeKernelFault χ1 χ2` passes BOTH challenges on **100% of `Fin ((2 ^ 128) ^ 2)`**! -/
+theorem tooth_pre_wave_challenge_kernel_bypass :
+    (∀ chi : Tower128,
+      (∃ e ∈ preWaveKernelFaultPair chi, e ≠ towerZero 7) ∧
+      batchDeviationPoly (preWaveKernelFaultPair chi) chi = towerZero 7) ∧
+    finSum (2 ^ 128) (fun r =>
+      let chi := unpackTower 7 (BitVec.ofFin r)
+      if batchDeviationPoly (preWaveKernelFaultPair chi) chi == towerZero 7 then 1 else 0) = 2 ^ 128 ∧
+    (∀ chi1 chi2 : Tower128,
+      (∃ e ∈ preWaveTwoChallengeKernelFault chi1 chi2, e ≠ towerZero 7) ∧
+      batchDeviationPoly (preWaveTwoChallengeKernelFault chi1 chi2) chi1 = towerZero 7 ∧
+      batchDeviationPoly (preWaveTwoChallengeKernelFault chi1 chi2) chi2 = towerZero 7) ∧
+    finSum ((2 ^ 128) * (2 ^ 128)) (fun ω =>
+      let chi1 := unpackTower 7 (BitVec.ofFin (splitFinLeft (Nat.two_pow_pos 128) ω))
+      let chi2 := unpackTower 7 (BitVec.ofFin (splitFinRight (Nat.two_pow_pos 128) ω))
+      if postWaveTwoChallengeAccepts (preWaveTwoChallengeKernelFault chi1 chi2) ω then 1 else 0) =
+      (2 ^ 128) * (2 ^ 128) := by
+  have hOneEv : ∀ chi : Tower128, batchDeviationPoly (preWaveKernelFaultPair chi) chi = towerZero 7 := by
+    intro chi
+    change towerAdd 7 (towerZero 7)
+      (towerMul 7 chi (towerAdd 7 chi (towerMul 7 chi (towerAdd 7 (towerOne 7) (towerMul 7 chi (towerZero 7)))))) =
+      towerZero 7
+    simp only [towerMul_zero, towerAdd_zero, towerMul_one, towerAdd_self_zero]
+  have hTwoEv1 : ∀ chi1 chi2 : Tower128,
+      batchDeviationPoly (preWaveTwoChallengeKernelFault chi1 chi2) chi1 = towerZero 7 := by
+    intro chi1 chi2
+    change towerAdd 7 (towerZero 7)
+      (towerMul 7 chi1
+        (towerAdd 7 (towerMul 7 chi1 chi2)
+          (towerMul 7 chi1
+            (towerAdd 7 (towerAdd 7 chi1 chi2)
+              (towerMul 7 chi1 (towerAdd 7 (towerOne 7) (towerMul 7 chi1 (towerZero 7)))))))) =
+      towerZero 7
+    simp only [towerMul_zero, towerAdd_zero, towerMul_one, towerZero_add, towerMul_add_distrib]
+    simp only [towerAdd_comm, towerAdd_self_zero, towerAdd_cancel]
+  have hTwoEv2 : ∀ chi1 chi2 : Tower128,
+      batchDeviationPoly (preWaveTwoChallengeKernelFault chi1 chi2) chi2 = towerZero 7 := by
+    intro chi1 chi2
+    have hSwap : preWaveTwoChallengeKernelFault chi1 chi2 = preWaveTwoChallengeKernelFault chi2 chi1 := by
+      unfold preWaveTwoChallengeKernelFault
+      rw [towerMul_comm 7 chi1 chi2, towerAdd_comm 7 chi1 chi2]
+    rw [hSwap]
+    exact hTwoEv1 chi2 chi1
+  have hTwoAccept : ∀ (c1 c2 : Tower128) (ω : Fin ((2 ^ 128) * (2 ^ 128))),
+      c1 = unpackTower 7 (BitVec.ofFin (splitFinLeft (Nat.two_pow_pos 128) ω)) →
+      c2 = unpackTower 7 (BitVec.ofFin (splitFinRight (Nat.two_pow_pos 128) ω)) →
+      postWaveTwoChallengeAccepts (preWaveTwoChallengeKernelFault c1 c2) ω = true := by
+    intro c1 c2 ω hc1 hc2
+    unfold postWaveTwoChallengeAccepts
+    dsimp only
+    rw [← hc1, ← hc2, hTwoEv1 c1 c2, hTwoEv2 c1 c2]
+    simp only [beq_self_eq_true, Bool.and_self]
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · intro chi
+    exact ⟨⟨towerOne 7, .tail _ (.head _), towerOne_ne_zero 7⟩, hOneEv chi⟩
+  · have hAll1 : finSum (2 ^ 128) (fun r =>
+        let chi := unpackTower 7 (BitVec.ofFin r)
+        if batchDeviationPoly (preWaveKernelFaultPair chi) chi == towerZero 7 then 1 else 0) =
+        finSum (2 ^ 128) (fun _ => 1) := by
+      apply finSum_congr
+      intro r
+      dsimp only
+      rw [hOneEv (unpackTower 7 (BitVec.ofFin r))]
+      simp only [beq_self_eq_true, ↓reduceIte]
+    rw [hAll1, finSum_const, Nat.mul_one]
+  · intro chi1 chi2
+    exact ⟨⟨towerOne 7, .tail _ (.tail _ (.head _)), towerOne_ne_zero 7⟩,
+           hTwoEv1 chi1 chi2, hTwoEv2 chi1 chi2⟩
+  · have hAll2 : finSum ((2 ^ 128) * (2 ^ 128)) (fun ω =>
+        let chi1 := unpackTower 7 (BitVec.ofFin (splitFinLeft (Nat.two_pow_pos 128) ω))
+        let chi2 := unpackTower 7 (BitVec.ofFin (splitFinRight (Nat.two_pow_pos 128) ω))
+        if postWaveTwoChallengeAccepts (preWaveTwoChallengeKernelFault chi1 chi2) ω then 1 else 0) =
+        finSum ((2 ^ 128) * (2 ^ 128)) (fun _ => 1) := by
+      apply finSum_congr
+      intro ω
+      have hAcc := hTwoAccept
+        (unpackTower 7 (BitVec.ofFin (splitFinLeft (Nat.two_pow_pos 128) ω)))
+        (unpackTower 7 (BitVec.ofFin (splitFinRight (Nat.two_pow_pos 128) ω)))
+        ω rfl rfl
+      dsimp only
+      rw [hAcc]
+      rfl
+    rw [hAll2, finSum_const, Nat.mul_one]
+
+/-- Verification-barrier & plane-opening state of `Rss256Engine`. -/
+structure Rss256EngineState where
+  unverified : Bool
+  poisoned : Bool
+  pendingInlineValid : List Bool
+  pendingOpenedValid : List Bool
+  sharedPlane : Plane256
+  taintedSinceLastCleanCheck : Bool
+  deriving DecidableEq, Repr
+
+def Rss256EngineState.init : Rss256EngineState :=
+  { unverified := false
+    poisoned := false
+    pendingInlineValid := []
+    pendingOpenedValid := []
+    sharedPlane := 0
+    taintedSinceLastCleanCheck := false }
+
+inductive Rss256EngineOp where
+  | permuteInline (relationValid : Bool) (outPlane : Plane256)
+  | permuteBank (openingConsistent : Bool) (outPlane : Plane256)
+  | check
+  | openPlanes
+  deriving DecidableEq, Repr
+
+inductive Rss256EngineErr where
+  | enginePoisoned
+  | multiplicationCheckFailed
+  | openingConsistencyFailed
+  | openBeforeCheck
+  deriving DecidableEq, Repr
+
+/-- **Hardened `Rss256Engine` Transition (`rss256StepHardened`)**:
+    Every barrier failure or premature open irreversibly latches `poisoned = true` and wipes state;
+    every operation rejects a poisoned engine. -/
+@[expose] def rss256StepHardened (st : Rss256EngineState) (op : Rss256EngineOp) :
+    StepOutcome Rss256EngineState (Option Plane256) Rss256EngineErr :=
+  if st.poisoned then
+    .err st .enginePoisoned
+  else
+    let poisonNow : Rss256EngineState :=
+      { st with
+        poisoned := true
+        pendingInlineValid := []
+        pendingOpenedValid := []
+        sharedPlane := 0 }
+    match op with
+    | .permuteInline relOk outPlane =>
+      .ok { st with
+            unverified := true
+            pendingInlineValid := relOk :: st.pendingInlineValid
+            sharedPlane := outPlane
+            taintedSinceLastCleanCheck := st.taintedSinceLastCleanCheck || !relOk } none
+    | .permuteBank openOk outPlane =>
+      .ok { st with
+            unverified := true
+            pendingOpenedValid := openOk :: st.pendingOpenedValid
+            sharedPlane := outPlane
+            taintedSinceLastCleanCheck := st.taintedSinceLastCleanCheck || !openOk } none
+    | .check =>
+      if !st.unverified then
+        .ok st none
+      else if st.pendingInlineValid.any (fun b => !b) then
+        .err poisonNow .multiplicationCheckFailed
+      else if st.pendingOpenedValid.any (fun b => !b) then
+        .err poisonNow .openingConsistencyFailed
+      else
+        .ok { st with
+              unverified := false
+              pendingInlineValid := []
+              pendingOpenedValid := []
+              taintedSinceLastCleanCheck := false } none
+    | .openPlanes =>
+      if st.unverified then
+        .err poisonNow .openBeforeCheck
+      else
+        .ok st (some st.sharedPlane)
+
+/-- `PartyMachine` (`SimulationSpine`) instantiation of hardened `Rss256Engine`. -/
+def rss256HardenedMachine : PartyMachine Rss256EngineState Rss256EngineOp (Option Plane256) :=
+  PartyMachine.ofOutcome rss256StepHardened
+
+/-- Buggy pre-fix `Rss256Engine` transition:
+    clears `pendingInlineValid` / `pendingOpenedValid` on `check()` BEFORE returning `Err`,
+    without latching `poisoned = true`! -/
+def rss256StepBuggy (st : Rss256EngineState) (op : Rss256EngineOp) :
+    StepOutcome Rss256EngineState (Option Plane256) Rss256EngineErr :=
+  match op with
+  | .permuteInline relOk outPlane =>
+    .ok { st with
+          unverified := true
+          pendingInlineValid := relOk :: st.pendingInlineValid
+          sharedPlane := outPlane
+          taintedSinceLastCleanCheck := st.taintedSinceLastCleanCheck || !relOk } none
+  | .permuteBank openOk outPlane =>
+    .ok { st with
+          unverified := true
+          pendingOpenedValid := openOk :: st.pendingOpenedValid
+          sharedPlane := outPlane
+          taintedSinceLastCleanCheck := st.taintedSinceLastCleanCheck || !openOk } none
+  | .check =>
+    if !st.unverified then
+      .ok st none
+    else
+      -- `verify_rss_boolean_triples_seeded` clears `pending` unconditionally before returning!
+      let inlineFailed := st.pendingInlineValid.any (fun b => !b)
+      let stAfterInline := { st with pendingInlineValid := [] }
+      if inlineFailed then
+        .err stAfterInline .multiplicationCheckFailed
+      else
+        -- Mode-1A clears `self.opened` before returning `OpeningConsistencyFailed`!
+        let openedFailed := stAfterInline.pendingOpenedValid.any (fun b => !b)
+        let stAfterOpened := { stAfterInline with pendingOpenedValid := [] }
+        if openedFailed then
+          .err stAfterOpened .openingConsistencyFailed
+        else
+          .ok { stAfterOpened with unverified := false } none
+  | .openPlanes =>
+    if st.unverified then
+      .err st .openBeforeCheck
+    else
+      .ok st (some st.sharedPlane)
+
+/-- Run a multi-step call sequence and record `(finalState, releasedPlanes, stepOutcomes)`. -/
+def rss256RunTrace (stepFn : Rss256EngineState → Rss256EngineOp →
+      StepOutcome Rss256EngineState (Option Plane256) Rss256EngineErr) :
+    Rss256EngineState → List Rss256EngineOp → Rss256EngineState × List Plane256
+  | st, [] => (st, [])
+  | st, op :: rest =>
+    match stepFn st op with
+    | .ok st' (some p) =>
+      let (stFinal, ps) := rss256RunTrace stepFn st' rest
+      (stFinal, p :: ps)
+    | .ok st' none => rss256RunTrace stepFn st' rest
+    | .err st' _ => rss256RunTrace stepFn st' rest
+
+/-- Data-bearing entry point: the pending result is computed from every recorded
+    share relation under the two pass-specific coin streams. -/
+def rss256RecordedWaveOp (gates : List Rss256RecordedGate)
+    (coins : Rss256ChallengeFamily) (round : Nat) : Rss256EngineOp :=
+  .permuteInline (rss256Pass1At gates coins ⟨0, by decide⟩ round &&
+    rss256Pass1At gates coins ⟨1, by decide⟩ round)
+    (gates.foldl (fun _ g => g.z.reconstruct) 0#256)
+
+theorem rss256_recorded_wave_rejection_poison (gates : List Rss256RecordedGate)
+    (coins : Rss256ChallengeFamily) (round : Nat)
+    (hReject : rss256Pass1At gates coins ⟨0, by decide⟩ round = false) :
+    let result := rss256RunTrace rss256StepHardened Rss256EngineState.init
+      [rss256RecordedWaveOp gates coins round, .check, .check, .openPlanes]
+    result.1.poisoned = true ∧ result.2 = [] := by
+  simp only [rss256RecordedWaveOp, hReject, Bool.false_and]
+  exact ⟨rfl, rfl⟩
+
+/-- Multi-turn invariant of `rss256StepHardened`:
+    if `taintedSinceLastCleanCheck = true` and `poisoned = false`, then `unverified = true` and at
+    least one pending queue contains `false` (`any (!·) = true`). -/
+def Rss256SafeInvariant (st : Rss256EngineState) : Prop :=
+  st.poisoned = true ∨
+  (st.taintedSinceLastCleanCheck = false) ∨
+  (st.unverified = true ∧
+    (st.pendingInlineValid.any (fun b => !b) = true ∨
+     st.pendingOpenedValid.any (fun b => !b) = true))
+
+private theorem rss256StepHardened_preserves_inv (st : Rss256EngineState) (op : Rss256EngineOp)
+    (hInv : Rss256SafeInvariant st) :
+    match rss256StepHardened st op with
+    | .ok st' (some _) => Rss256SafeInvariant st' ∧ st.taintedSinceLastCleanCheck = false ∧ st.poisoned = false
+    | .ok st' none => Rss256SafeInvariant st'
+    | .err st' _ => Rss256SafeInvariant st' ∧ st'.poisoned = true := by
+  unfold rss256StepHardened
+  cases hp : st.poisoned
+  · simp only [Bool.false_eq_true, ↓reduceIte]
+    have hInvClean : st.taintedSinceLastCleanCheck = false ∨
+        (st.unverified = true ∧
+          (st.pendingInlineValid.any (fun b => !b) = true ∨
+           st.pendingOpenedValid.any (fun b => !b) = true)) := by
+      rcases hInv with hP | hRest
+      · rw [hp] at hP; cases hP
+      · exact hRest
+    cases op with
+    | permuteInline relOk outPlane =>
+      dsimp only [Rss256SafeInvariant]
+      cases relOk
+      · right; right
+        exact ⟨rfl, Or.inl (by simp)⟩
+      · rcases hInvClean with hTaint0 | ⟨_, hAny⟩
+        · right; left; simp [hTaint0]
+        · right; right
+          refine ⟨rfl, ?_⟩
+          rcases hAny with hIn | hOp
+          · exact Or.inl (by simp [hIn])
+          · exact Or.inr hOp
+    | permuteBank openOk outPlane =>
+      dsimp only [Rss256SafeInvariant]
+      cases openOk
+      · right; right
+        exact ⟨rfl, Or.inr (by simp)⟩
+      · rcases hInvClean with hTaint0 | ⟨_, hAny⟩
+        · right; left; simp [hTaint0]
+        · right; right
+          refine ⟨rfl, ?_⟩
+          rcases hAny with hIn | hOp
+          · exact Or.inl hIn
+          · exact Or.inr (by simp [hOp])
+    | check =>
+      cases hUnv : st.unverified
+      · simp only [Bool.not_false, ↓reduceIte]
+        exact hInv
+      · simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+        cases hInFail : st.pendingInlineValid.any (fun b => !b)
+        · simp only [Bool.false_eq_true, ↓reduceIte]
+          cases hOpFail : st.pendingOpenedValid.any (fun b => !b)
+          · simp only [Bool.false_eq_true, ↓reduceIte]
+            exact Or.inr (Or.inl rfl)
+          · simp only [↓reduceIte]
+            exact ⟨Or.inl rfl, trivial⟩
+        · simp only [↓reduceIte]
+          exact ⟨Or.inl rfl, trivial⟩
+    | openPlanes =>
+      cases hUnv : st.unverified
+      · simp only [Bool.false_eq_true, ↓reduceIte]
+        rcases hInvClean with hTaint0 | ⟨hUnvTrue, _⟩
+        · exact ⟨hInv, hTaint0, trivial⟩
+        · rw [hUnv] at hUnvTrue; cases hUnvTrue
+      · simp only [↓reduceIte]
+        exact ⟨Or.inl rfl, trivial⟩
+  · simp only [↓reduceIte]
+    exact ⟨Or.inl hp, hp⟩
+
+/-- **Sticky `poisoned = true` Terminal Absorption & Multi-Turn Anti-Fault Opening Safety
+    (`rss256_sticky_poison_terminal_absorption`)**:
+    1. **Terminal Absorption**: From ANY state with `st.poisoned = true`, across ANY call sequence
+       `ops : List Rss256EngineOp`, `poisoned` stays `true`, `rss256HardenedMachine.step` returns
+       `none` on every step, and `rss256RunTrace` releases `[]` (`0` planes)!
+    2. **Unverified/Faulted Wave Quarantine**: From `Rss256EngineState.init`, across ANY sequence
+       `ops` containing a faulted inline gate (`.permuteInline false _`) or inconsistent Mode-1A
+       opening (`.permuteBank false _`), NO plane is ever released after that fault! -/
+theorem rss256_sticky_poison_terminal_absorption :
+    (∀ (st : Rss256EngineState) (ops : List Rss256EngineOp),
+      st.poisoned = true →
+      (∀ op : Rss256EngineOp, rss256HardenedMachine.step st op = none) ∧
+      (rss256RunTrace rss256StepHardened st ops).1.poisoned = true ∧
+      (rss256RunTrace rss256StepHardened st ops).2 = []) ∧
+    (∀ (st : Rss256EngineState) (ops : List Rss256EngineOp),
+      Rss256SafeInvariant st →
+      st.taintedSinceLastCleanCheck = true →
+      (rss256RunTrace rss256StepHardened st ops).2 = []) := by
+  have hAbsorb : ∀ (st : Rss256EngineState) (ops : List Rss256EngineOp),
+      st.poisoned = true →
+      (rss256RunTrace rss256StepHardened st ops).1.poisoned = true ∧
+      (rss256RunTrace rss256StepHardened st ops).2 = [] := by
+    intro st ops hp
+    induction ops generalizing st with
+    | nil => exact ⟨hp, rfl⟩
+    | cons op rest ih =>
+      simp only [rss256RunTrace, rss256StepHardened, hp, ↓reduceIte]
+      exact ih st hp
+  refine ⟨?_, ?_⟩
+  · intro st ops hp
+    refine ⟨fun op => by simp [rss256HardenedMachine, PartyMachine.ofOutcome, rss256StepHardened, hp],
+            (hAbsorb st ops hp).1, (hAbsorb st ops hp).2⟩
+  · intro st ops hInv hTaint
+    induction ops generalizing st with
+    | nil => rfl
+    | cons op rest ih =>
+      have hStep := rss256StepHardened_preserves_inv st op hInv
+      cases hOut : rss256StepHardened st op with
+      | err st' errVal =>
+        rw [hOut] at hStep
+        simp only [rss256RunTrace, hOut]
+        exact (hAbsorb st' rest hStep.2).2
+      | ok st' mbPlane =>
+        rw [hOut] at hStep
+        cases mbPlane with
+        | some p =>
+          exfalso
+          rw [hTaint] at hStep
+          exact Bool.noConfusion hStep.2.1
+        | none =>
+          simp only [rss256RunTrace, hOut]
+          -- Show `st'.taintedSinceLastCleanCheck = true` (since `op` was `.ok st' none` and `st` was tainted!).
+          have hStillTainted : st'.taintedSinceLastCleanCheck = true := by
+            unfold rss256StepHardened at hOut
+            cases hp : st.poisoned
+            · rw [hp] at hOut; simp only [Bool.false_eq_true, ↓reduceIte] at hOut
+              cases op with
+              | permuteInline relOk outP =>
+                injection hOut with hStEq _
+                rw [← hStEq]; simp [hTaint]
+              | permuteBank openOk outP =>
+                injection hOut with hStEq _
+                rw [← hStEq]; simp [hTaint]
+              | check =>
+                rcases hInv with hP | hT0 | ⟨hUnv, hAny⟩
+                · rw [hp] at hP; cases hP
+                · rw [hTaint] at hT0; cases hT0
+                · simp only [hUnv, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hOut
+                  rcases hAny with hIn | hOp
+                  · rw [hIn] at hOut; simp at hOut
+                  · cases hIn2 : st.pendingInlineValid.any (fun b => !b) <;>
+                      simp [hIn2, hOp] at hOut
+              | openPlanes =>
+                cases hUnv : st.unverified <;> simp [hUnv] at hOut
+            · rw [hp] at hOut; simp at hOut
+          exact ih st' hStep hStillTainted
+
+/-- **`#tooth` Non-Sticky `check()` Clear Unlocks Unverified Opening (`tooth_non_sticky_check_clear_unlocks_unverified_open`, `Astra P0-1`)**:
+    In `rss256StepBuggy`, after a faulted inline wave (`.permuteInline false faultedPlane`) OR
+    an inconsistent Mode-1A wave (`.permuteBank false faultedPlane`):
+    - First `check()` returns `.err` after clearing `pending` / `opened`;
+    - Second `check()` sees empty queues, sets `unverified = false`, and returns `.ok`;
+    - `openPlanes()` then **succeeds and releases `[faultedPlane]`**, whereas `rss256StepHardened`
+      latches `poisoned = true` on the first `check()` and releases `[]`! -/
+theorem tooth_non_sticky_check_clear_unlocks_unverified_open (faultedPlane : Plane256) :
+    let inlineAttack : List Rss256EngineOp :=
+      [.permuteInline false faultedPlane, .check, .check, .openPlanes]
+    let bankAttack : List Rss256EngineOp :=
+      [.permuteBank false faultedPlane, .check, .check, .openPlanes]
+    (rss256RunTrace rss256StepBuggy Rss256EngineState.init inlineAttack).2 = [faultedPlane] ∧
+    (rss256RunTrace rss256StepBuggy Rss256EngineState.init bankAttack).2 = [faultedPlane] ∧
+    (rss256RunTrace rss256StepHardened Rss256EngineState.init inlineAttack).2 = [] ∧
+    (rss256RunTrace rss256StepHardened Rss256EngineState.init bankAttack).2 = [] ∧
+    (rss256RunTrace rss256StepHardened Rss256EngineState.init inlineAttack).1.poisoned = true ∧
+    (rss256RunTrace rss256StepHardened Rss256EngineState.init bankAttack).1.poisoned = true := by
+  exact ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+

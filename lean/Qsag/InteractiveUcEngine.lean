@@ -586,3 +586,573 @@ structure BlackBoxUcSimulator (PK SimTape SimR1 SimR2 SimR3 : Type) where
                       PSum AbortReason ByteArray
 
 /-- Strictly `sk`-free ideal-world state (`IdealTsigState` + public `WalLatchState` + session cursor). -/
+structure IdealClusterState (PK : Type) where
+  tsig              : IdealTsigState PK (List UInt8)
+  honestWal         : WalLatchState
+  maskSessionCursor : Nat
+
+/-- Quarantine the ideal-world WAL state upon simulated active consistency / MAC fault. -/
+def poisonIdealCluster {PK : Type} (icl : IdealClusterState PK) : IdealClusterState PK :=
+  { icl with honestWal := walQuarantine icl.honestWal }
+
+/-- Execute one session of `IdealFunctionalityExec` coupling `IdealTsig` with black-box `Sim`.
+    `idealSignOracle` is invoked **ONLY** when `validThresholdApproval = true` AND `walPreSignStep`
+    grants `.authorizedFresh`! -/
+def execIdealSession {PK SimTape SimR1 SimR2 SimR3 AdvState : Type}
+    (idealSignOracle : SessionScheduleReq → ByteArray)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (A : UcRushingAdversary AdvState)
+    (icl : IdealClusterState PK) (advSt : AdvState) (tape : SimTape) :
+    IdealClusterState PK × AdvState × SessionWireRecord :=
+  let (req, advSt1) := A.scheduleSession advSt
+  if !(validThresholdApproval icl.tsig req.honestApprovers) then
+    let out := SessionOutcome.abort .quorumRejected
+    let advStF := A.observeOutcome advSt1 out
+    (icl, advStF, ⟨req, [], [], [], [], [], [], out⟩)
+  else
+    let pkDig := sim.pkDigestOf icl.tsig.pk
+    let msgDig := sim.msgDigestOf req
+    match walPreSignStep icl.honestWal pkDig req.reqEpoch msgDig with
+    | .err wal' rej =>
+      let out := SessionOutcome.abort (mapWalRejectReason rej)
+      let advStF := A.observeOutcome advSt1 out
+      ({ icl with honestWal := wal' }, advStF, ⟨req, [], [], [], [], [], [], out⟩)
+    | .ok wal' (.replayCached cachedSig) =>
+      let out := SessionOutcome.signOk cachedSig
+      let advStF := A.observeOutcome advSt1 out
+      ({ icl with honestWal := wal' }, advStF, ⟨req, [], [], [], [], [], [], out⟩)
+    | .ok wal' (.authorizedFresh _) =>
+      let cursorUsed := icl.maskSessionCursor
+      let iclAfterCursor : IdealClusterState PK :=
+        { icl with honestWal := wal', maskSessionCursor := cursorUsed + 1 }
+      let (honR1, sR1) := sim.simRound1 icl.tsig.pk icl.tsig.corruptParties req cursorUsed tape
+      let (corrR1Fn, advSt2) := A.rushRound1 advSt1 honR1
+      let corrR1 := icl.tsig.corruptParties.map (fun c => (c, corrR1Fn c))
+      match sim.simVerifyRound1 icl.tsig.pk req sR1 honR1 corrR1 with
+      | .inl (r1Err, doPoison) =>
+        let iclErr := if doPoison then poisonIdealCluster iclAfterCursor else iclAfterCursor
+        let out := SessionOutcome.abort r1Err
+        let advStF := A.observeOutcome advSt2 out
+        (iclErr, advStF, ⟨req, honR1, corrR1, [], [], [], [], out⟩)
+      | .inr sR2Init =>
+        let (honR2, sR2) := sim.simRound2 icl.tsig.pk icl.tsig.corruptParties req sR2Init tape
+        let (corrR2Fn, advSt3) := A.rushRound2 advSt2 honR2
+        let corrR2 := icl.tsig.corruptParties.map (fun c => (c, corrR2Fn c))
+        match sim.simPreCutBarrier icl.tsig.pk req sR2 honR2 corrR2 with
+        | .inl barrierErr =>
+          let iclPoisoned := poisonIdealCluster iclAfterCursor
+          let out := SessionOutcome.abort barrierErr
+          let advStF := A.observeOutcome advSt3 out
+          (iclPoisoned, advStF, ⟨req, honR1, corrR1, honR2, corrR2, [], [], out⟩)
+        | .inr sR3Init =>
+          -- Pre-cut barrier succeeded under valid `t`-quorum approval: `IdealTsig` hands
+          -- `idealSigBytes ← idealSignOracle req` to `sim.simRound3`, and commits both
+          -- `approvedMsgs` and `walCommitAuthorized` ONLY upon Round-3 cut finalization!
+          let idealSigBytes := idealSignOracle req
+          let (honR3, sR3) :=
+            sim.simRound3 icl.tsig.pk icl.tsig.corruptParties req sR3Init idealSigBytes tape
+          let (corrR3Fn, advSt4) := A.rushRound3 advSt3 honR3
+          let corrR3 := icl.tsig.corruptParties.map (fun c => (c, corrR3Fn c))
+          match sim.simFinalizeCut icl.tsig.pk req sR3 idealSigBytes honR3 corrR3 with
+          | .inl cutErr =>
+            let iclPoisoned := poisonIdealCluster iclAfterCursor
+            let out := SessionOutcome.abort cutErr
+            let advStF := A.observeOutcome advSt4 out
+            (iclPoisoned, advStF, ⟨req, honR1, corrR1, honR2, corrR2, honR3, corrR3, out⟩)
+          | .inr outSigBytes =>
+            let committedWal := walCommitAuthorized wal' req.reqEpoch msgDig outSigBytes
+            let tsigNext := { icl.tsig with approvedMsgs := req.msg :: icl.tsig.approvedMsgs }
+            let iclOk : IdealClusterState PK :=
+              { iclAfterCursor with tsig := tsigNext, honestWal := committedWal }
+            let out := SessionOutcome.signOk outSigBytes
+            let advStF := A.observeOutcome advSt4 out
+            (iclOk, advStF, ⟨req, honR1, corrR1, honR2, corrR2, honR3, corrR3, out⟩)
+
+/-- Run `Q_s` adaptively scheduled interactive rushing sessions of `IdealFunctionalityExec`. -/
+def IdealFunctionalityExec {PK SimTape SimR1 SimR2 SimR3 AdvState : Type}
+    (idealSignOracle : SessionScheduleReq → ByteArray)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (A : UcRushingAdversary AdvState) :
+    (numSessions : Nat) → (Nat → SimTape) →
+    IdealClusterState PK → AdvState →
+    IdealClusterState PK × ExecTranscript AdvState
+  | 0, _, icl, advSt => (icl, ⟨advSt, []⟩)
+  | s + 1, tapes, icl, advSt =>
+    let (icl1, advSt1, rec1) := execIdealSession idealSignOracle sim A icl advSt (tapes 0)
+    let (iclF, trRest) := IdealFunctionalityExec idealSignOracle sim A s (fun i => tapes (i + 1)) icl1 advSt1
+    (iclF, ⟨trRest.finalAdvState, rec1 :: trRest.sessions⟩)
+
+theorem IdealFunctionalityExec_zero {PK SimTape SimR1 SimR2 SimR3 AdvState : Type}
+    (idealSignOracle : SessionScheduleReq → ByteArray)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (A : UcRushingAdversary AdvState) (tapes : Nat → SimTape)
+    (icl : IdealClusterState PK) (advSt : AdvState) :
+    IdealFunctionalityExec idealSignOracle sim A 0 tapes icl advSt = (icl, ⟨advSt, []⟩) := by rfl
+
+theorem IdealFunctionalityExec_succ {PK SimTape SimR1 SimR2 SimR3 AdvState : Type}
+    (idealSignOracle : SessionScheduleReq → ByteArray)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (A : UcRushingAdversary AdvState) (s : Nat) (tapes : Nat → SimTape)
+    (icl : IdealClusterState PK) (advSt : AdvState) :
+    IdealFunctionalityExec idealSignOracle sim A (s + 1) tapes icl advSt =
+      let (icl1, advSt1, rec1) := execIdealSession idealSignOracle sim A icl advSt (tapes 0)
+      let (iclF, trRest) := IdealFunctionalityExec idealSignOracle sim A s (fun i => tapes (i + 1)) icl1 advSt1
+      (iclF, ⟨trRest.finalAdvState, rec1 :: trRest.sessions⟩) := by rfl
+
+/-- **Quorum Provenance Invariant on `RealProtocolExec` (`realProtocolExec_approvedMsgs_provenance`)**:
+    Across any `Q_s`-session rushing execution against `< threshold` corrupt parties, every newly
+    recorded message in `tsig.approvedMsgs` came from an actual scheduled session where at least
+    one non-corrupt honest party approved (`validThresholdApproval = true`). -/
+theorem realProtocolExec_approvedMsgs_provenance
+    {PK ShareT SessionTape R1St R2St R3St AdvState : Type}
+    (proto : InteractiveThresholdProtocol PK ShareT SessionTape R1St R2St R3St)
+    (A : UcRushingAdversary AdvState) :
+    ∀ (numSessions : Nat) (tapes : Nat → SessionTape)
+      (cl : RealClusterState PK ShareT) (advSt : AdvState),
+      cl.tsig.corruptParties.length + 1 ≤ cl.tsig.threshold →
+      let (clF, tr) := RealProtocolExec proto A numSessions tapes cl advSt
+      clF.tsig.pk = cl.tsig.pk ∧
+      clF.tsig.corruptParties = cl.tsig.corruptParties ∧
+      clF.tsig.threshold = cl.tsig.threshold ∧
+      clF.tsig.numParties = cl.tsig.numParties ∧
+      (∀ m ∈ clF.tsig.approvedMsgs,
+        m ∈ cl.tsig.approvedMsgs ∨
+        ∃ rec ∈ tr.sessions,
+          rec.request.msg = m ∧
+          validThresholdApproval cl.tsig rec.request.honestApprovers = true ∧
+          ∃ h ∈ rec.request.honestApprovers, h < cl.tsig.numParties ∧ h ∉ cl.tsig.corruptParties)
+  | 0, _, cl, _, _ => ⟨rfl, rfl, rfl, rfl, fun _ hm => .inl hm⟩
+  | s + 1, tapes, cl, advSt, hDishonest => by
+    have hCheat1 : (execRealSession proto A cl advSt (tapes 0)).1.tsig.identifiedCheaters =
+        cl.tsig.identifiedCheaters := by
+      unfold execRealSession poisonRealCluster
+      dsimp only
+      cases validThresholdApproval cl.tsig (A.scheduleSession advSt).1.honestApprovers
+      · rfl
+      · simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+        cases walPreSignStep cl.honestWal _ _ _ with
+        | err _ _ => rfl
+        | ok _ resOut =>
+          cases resOut with
+          | replayCached _ => rfl
+          | authorizedFresh _ =>
+            dsimp only
+            cases proto.verifyRound1 _ _ _ _ _ with
+            | inl p1 => rcases p1 with ⟨_, b⟩; cases b <;> rfl
+            | inr _ =>
+              dsimp only
+              cases proto.preCutBarrier _ _ _ _ _ with
+              | inl _ => rfl
+              | inr _ =>
+                dsimp only
+                cases proto.finalizeCutOpen _ _ _ _ _ <;> rfl
+    simp only [RealProtocolExec]
+    have hStep :
+        let (cl1, _, rec1) := execRealSession proto A cl advSt (tapes 0)
+        cl1.tsig.pk = cl.tsig.pk ∧
+        cl1.tsig.corruptParties = cl.tsig.corruptParties ∧
+        cl1.tsig.threshold = cl.tsig.threshold ∧
+        cl1.tsig.numParties = cl.tsig.numParties ∧
+        (∀ m ∈ cl1.tsig.approvedMsgs,
+          m ∈ cl.tsig.approvedMsgs ∨
+          (rec1.request.msg = m ∧ validThresholdApproval cl.tsig rec1.request.honestApprovers = true)) := by
+      unfold execRealSession poisonRealCluster
+      dsimp only
+      cases hQuorum : validThresholdApproval cl.tsig (A.scheduleSession advSt).1.honestApprovers
+      · exact ⟨rfl, rfl, rfl, rfl, fun _ hm => .inl hm⟩
+      · simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+        cases walPreSignStep cl.honestWal _ _ _ with
+        | err _ _ => exact ⟨rfl, rfl, rfl, rfl, fun _ hm => .inl hm⟩
+        | ok wal' resOut =>
+          cases resOut with
+          | replayCached _ => exact ⟨rfl, rfl, rfl, rfl, fun _ hm => .inl hm⟩
+          | authorizedFresh _ =>
+            dsimp only
+            cases proto.verifyRound1 _ _ _ _ _ with
+            | inl p1 =>
+              rcases p1 with ⟨r1Err, doPoison⟩
+              cases doPoison <;> exact ⟨rfl, rfl, rfl, rfl, fun _ hm => .inl hm⟩
+            | inr r2Init =>
+              dsimp only
+              cases proto.preCutBarrier _ _ _ _ _ with
+              | inl _ => exact ⟨rfl, rfl, rfl, rfl, fun _ hm => .inl hm⟩
+              | inr r3Init =>
+                dsimp only
+                cases proto.finalizeCutOpen _ _ _ _ _ with
+                | inl _ => exact ⟨rfl, rfl, rfl, rfl, fun _ hm => .inl hm⟩
+                | inr sigBytes =>
+                  refine ⟨rfl, rfl, rfl, rfl, ?_⟩
+                  intro m hm
+                  rcases List.mem_cons.mp hm with rfl | hOld
+                  · exact .inr ⟨rfl, hQuorum⟩
+                  · exact .inl hOld
+    rcases h1Eq : execRealSession proto A cl advSt (tapes 0) with ⟨cl1, advSt1, rec1⟩
+    rw [h1Eq] at hStep hCheat1
+    obtain ⟨hPk1, hCorr1, hTh1, hNp1, hMsgs1⟩ := hStep
+    have hDishonest1 : cl1.tsig.corruptParties.length + 1 ≤ cl1.tsig.threshold := by
+      rw [hCorr1, hTh1]; exact hDishonest
+    have ih := realProtocolExec_approvedMsgs_provenance proto A s (fun i => tapes (i + 1)) cl1 advSt1 hDishonest1
+    rcases hRestEq : RealProtocolExec proto A s (fun i => tapes (i + 1)) cl1 advSt1 with ⟨clF, trRest⟩
+    rw [hRestEq] at ih
+    obtain ⟨hPkF, hCorrF, hThF, hNpF, hMsgsF⟩ := ih
+    have hValEq : ∀ apps, validThresholdApproval cl1.tsig apps = validThresholdApproval cl.tsig apps := by
+      intro apps
+      unfold validThresholdApproval
+      rw [hTh1, hNp1, hCorr1, hCheat1]
+    refine ⟨hPkF.trans hPk1, hCorrF.trans hCorr1, hThF.trans hTh1, hNpF.trans hNp1, ?_⟩
+    intro m hm
+    rcases hMsgsF m hm with hm1 | ⟨recR, hMemR, hEqR, hValR, hHonR⟩
+    · rcases hMsgs1 m hm1 with hm0 | ⟨hEq0, hVal0⟩
+      · exact .inl hm0
+      · exact .inr ⟨rec1, .head _, hEq0, hVal0,
+          thresholdApproval_requires_honest_party cl.tsig rec1.request.honestApprovers hDishonest hVal0⟩
+    · rw [hValEq] at hValR
+      rw [hNp1, hCorr1] at hHonR
+      exact .inr ⟨recR, .tail _ hMemR, hEqR, hValR, hHonR⟩
+
+/-! ## 4. Compositional Game-Hopping & Hybrid-Argument Combinators (`0 Classical.choice`) -/
+
+/-- Exact acceptance count of distinguisher `D : View → Bool` over finite random-tape space `Fin card`. -/
+@[expose] def distAcceptCount {View : Type} (card : Nat)
+    (exec : Fin card → View) (D : View → Bool) : Nat :=
+  finSum card (fun ω => if D (exec ω) then 1 else 0)
+
+/-- Exact cross-denominator rational addition `a.1 / a.2 + b.1 / b.2 = (a.1*b.2 + b.1*a.2) / (a.2*b.2)`. -/
+@[expose] def ratAdd (a b : Nat × Nat) : Nat × Nat :=
+  (a.1 * b.2 + b.1 * a.2, a.2 * b.2)
+
+/-- Exact rational distinguishing advantage `|Pr[D(exec₁)=1] - Pr[D(exec₂)=1]|` across arbitrary
+    positive finite sample-space cardinalities `card₁, card₂`. -/
+@[expose] def rationalAcceptDiff {View : Type}
+    (card₁ : Nat) (exec₁ : Fin card₁ → View)
+    (card₂ : Nat) (exec₂ : Fin card₂ → View)
+    (D : View → Bool) : Nat × Nat :=
+  (natAbsDiff (distAcceptCount card₁ exec₁ D * card₂)
+              (distAcceptCount card₂ exec₂ D * card₁),
+   card₁ * card₂)
+
+private theorem finSum_mul_right : ∀ (n c : Nat) (f : Fin n → Nat),
+    finSum n (fun i => f i * c) = finSum n f * c
+  | 0, _, _ => by simp [finSum]
+  | n + 1, c, f => by
+    simp only [finSum, finSum_mul_right n c, Nat.add_mul]
+
+private theorem finSum_swap : ∀ (m n : Nat) (g : Fin m → Fin n → Nat),
+    finSum m (fun i => finSum n (fun j => g i j)) =
+      finSum n (fun j => finSum m (fun i => g i j))
+  | 0, n, _ => by
+    simp only [finSum]
+    have h0 : finSum n (fun _ => 0) = 0 := by rw [finSum_const]; omega
+    exact h0.symm
+  | m + 1, n, g => by
+    simp only [finSum]
+    rw [finSum_swap m n (fun i j => g ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ j), ← finSum_add]
+
+private theorem finSum_point_decomp (n : Nat) (f : Fin n → Nat) (x : Fin n) :
+    finSum n (fun j => (if j = x then 1 else 0) * f j) = f x := by
+  have hCongr :
+      finSum n (fun j => (if j = x then 1 else 0) * f j) =
+      finSum n (fun j => (if j = x then 1 else 0) * f x) := by
+    apply finSum_congr
+    intro j
+    by_cases hj : j = x
+    · subst hj; rfl
+    · simp [hj]
+  rw [hCongr, finSum_mul_right, finSum_eq_indicator, Nat.one_mul]
+
+/-- **Constructive Measure-Preserving Bijection Invariance (`finSum_equiv_eq`)**:
+    Any `SimpleEquiv (Fin n) (Fin n)` preserves exact finite sums with `0 Classical.choice`. -/
+theorem finSum_equiv_eq {n : Nat} (bij : SimpleEquiv (Fin n) (Fin n)) (f : Fin n → Nat) :
+    finSum n (fun ω => f (bij.toFun ω)) = finSum n f := by
+  have hExpand :
+      finSum n (fun ω => f (bij.toFun ω)) =
+      finSum n (fun ω => finSum n (fun j => (if j = bij.toFun ω then 1 else 0) * f j)) :=
+    finSum_congr (fun ω => (finSum_point_decomp n f (bij.toFun ω)).symm)
+  rw [hExpand, finSum_swap]
+  apply finSum_congr
+  intro j
+  have hSwapCond :
+      finSum n (fun ω => (if j = bij.toFun ω then 1 else 0) * f j) =
+      finSum n (fun ω => (if ω = bij.invFun j then 1 else 0) * f j) := by
+    apply finSum_congr
+    intro ω
+    by_cases h1 : j = bij.toFun ω
+    · have h2 : ω = bij.invFun j := by rw [h1, bij.left_inv]
+      rw [ite_eq_left h1, ite_eq_left h2]
+    · have h2 : ω ≠ bij.invFun j := fun he => h1 (by rw [he, bij.right_inv])
+      rw [ite_eq_right h1, ite_eq_right h2]
+  rw [hSwapCond, finSum_mul_right, finSum_eq_indicator, Nat.one_mul]
+
+/-- **Combinator 1: Fundamental Lemma of Game-Playing with Measure-Preserving Bijection
+    (`bad_event_fundamental_lemma`)**:
+    Suppose `realExec` and `idealExec` over `Fin card` (`0 < card`) agree up to a random-tape
+    bijection `bij : SimpleEquiv (Fin card) (Fin card)` outside `bad : Fin card → Bool`, i.e.,
+    `∀ ω, bad ω = false → realExec ω = idealExec (bij.toFun ω)`.
+    Then for EVERY distinguisher `D : View → Bool` (including `OracleComp`-driven interactive
+    adversaries), the acceptance count difference is bounded by `badCount`, and both `(adv, card)`
+    and `rationalAcceptDiff` satisfy `ratLe ... (badCount, card)`. -/
+theorem bad_event_fundamental_lemma {View : Type}
+    (card : Nat) (hCardPos : 0 < card)
+    (realExec idealExec : Fin card → View)
+    (bij : SimpleEquiv (Fin card) (Fin card))
+    (bad : Fin card → Bool)
+    (hAgreeUnlessBad : ∀ ω : Fin card, bad ω = false → realExec ω = idealExec (bij.toFun ω))
+    (D : View → Bool) :
+    let badCount := finSum card (fun ω => if bad ω then 1 else 0)
+    let advCount := natAbsDiff (distAcceptCount card realExec D) (distAcceptCount card idealExec D)
+    advCount ≤ badCount ∧
+    ratLe (advCount, card) (badCount, card) ∧
+    ratLe (rationalAcceptDiff card realExec card idealExec D) (badCount, card) := by
+  intro badCount advCount
+  have hBijEq :
+      distAcceptCount card idealExec D =
+      finSum card (fun ω => if D (idealExec (bij.toFun ω)) then 1 else 0) := by
+    unfold distAcceptCount
+    exact (finSum_equiv_eq bij (fun ω => if D (idealExec ω) then 1 else 0)).symm
+  have hLe : advCount ≤ badCount := by
+    dsimp only [advCount, badCount]
+    rw [hBijEq]
+    exact finSum_indicator_diff_le
+      (fun ω => D (realExec ω))
+      (fun ω => D (idealExec (bij.toFun ω)))
+      bad
+      (fun ω hFalse => congrArg D (hAgreeUnlessBad ω hFalse))
+  have hMulAbs : ∀ (x y k : Nat), natAbsDiff (x * k) (y * k) = natAbsDiff x y * k := by
+    intro x y k
+    unfold natAbsDiff
+    by_cases hxy : x ≤ y
+    · have hxkyk : x * k ≤ y * k := Nat.mul_le_mul_right k hxy
+      simp [hxy, hxkyk, Nat.sub_mul]
+    · have hyx : y ≤ x := by omega
+      have hykxk : y * k ≤ x * k := Nat.mul_le_mul_right k hyx
+      by_cases hEq : x * k ≤ y * k
+      · have hk0 : x * k = y * k := Nat.le_antisymm hEq hykxk
+        have hSub0 : (x - y) * k = 0 := by rw [Nat.sub_mul, hk0, Nat.sub_self]
+        simp [hxy, hk0, hSub0]
+      · simp [hxy, hEq, Nat.sub_mul]
+  refine ⟨hLe, ⟨hCardPos, hCardPos, Nat.mul_le_mul_right card hLe⟩, ?_⟩
+  unfold ratLe rationalAcceptDiff
+  dsimp only
+  have hProdPos : 0 < card * card := Nat.mul_pos hCardPos hCardPos
+  refine ⟨hProdPos, hCardPos, ?_⟩
+  rw [hMulAbs]
+  change (advCount * card) * card ≤ badCount * (card * card)
+  rw [Nat.mul_assoc]
+  exact Nat.mul_le_mul_right (card * card) hLe
+
+private theorem finSum_snoc : ∀ (k : Nat) (g : Nat → Nat),
+    finSum (k + 1) (fun i => g i.1) = finSum k (fun i => g i.1) + g k
+  | 0, g => by simp [finSum]
+  | k + 1, g => by
+    conv => lhs; rw [finSum]
+    dsimp only
+    rw [finSum_snoc k (fun j => g (j + 1))]
+    conv => rhs; rw [finSum]
+    dsimp only
+    omega
+
+/-- **Combinator 2: Multi-Session Hybrid-Argument Telescope (`hybrid_multi_session_le`)**:
+    Given `Q_s + 1` hybrid games `hybrids 0, ..., hybrids Q_s` over `Fin card` (`0 < card`),
+    where each adjacent session hop `i → i + 1` has distinguishing count bounded by `hopBound i`:
+    1. Total advantage between `hybrids 0` and `hybrids Q_s` is `≤ finSum Q_s hopBound`;
+    2. `ratLe` holds against `(finSum Q_s hopBound, card)`; and
+    3. Under any per-session cap `∀ i, hopBound i ≤ eps`, `ratLe` holds against `(Q_s * eps, card)`. -/
+theorem hybrid_multi_session_le {View : Type}
+    (card Q_s : Nat) (hCardPos : 0 < card)
+    (hybrids : (i : Nat) → i ≤ Q_s → Fin card → View)
+    (hopBound : Fin Q_s → Nat)
+    (D : View → Bool)
+    (hHops : ∀ idx : Fin Q_s,
+      natAbsDiff (distAcceptCount card (hybrids idx.val (Nat.le_of_lt idx.isLt)) D)
+                 (distAcceptCount card (hybrids (idx.val + 1) idx.isLt) D) ≤ hopBound idx) :
+    let totalAdv := natAbsDiff (distAcceptCount card (hybrids 0 (Nat.zero_le Q_s)) D)
+                               (distAcceptCount card (hybrids Q_s (Nat.le_refl Q_s)) D)
+    totalAdv ≤ finSum Q_s hopBound ∧
+    ratLe (totalAdv, card) (finSum Q_s hopBound, card) ∧
+    (∀ eps : Nat, (∀ idx : Fin Q_s, hopBound idx ≤ eps) →
+      ratLe (totalAdv, card) (Q_s * eps, card)) := by
+  let g : Nat → Nat := fun i => if h : i < Q_s then hopBound ⟨i, h⟩ else 0
+  have hFinEq : ∀ (m : Nat) (hm : m ≤ Q_s),
+      finSum m (fun i => hopBound ⟨i.val, Nat.lt_of_lt_of_le i.isLt hm⟩) =
+      finSum m (fun i => g i.val) := by
+    intro m hm
+    apply finSum_congr
+    intro i
+    have hi : i.val < Q_s := Nat.lt_of_lt_of_le i.isLt hm
+    simp [g, hi]
+  have hTel :
+      ∀ (k : Nat) (hk : k ≤ Q_s),
+        natAbsDiff (distAcceptCount card (hybrids 0 (Nat.zero_le Q_s)) D)
+                   (distAcceptCount card (hybrids k hk) D) ≤
+          finSum k (fun i => hopBound ⟨i.val, Nat.lt_of_lt_of_le i.isLt hk⟩) := by
+    intro k
+    induction k with
+    | zero =>
+      intro _
+      simp [finSum, natAbsDiff]
+    | succ k ih =>
+      intro hkSucc
+      have hkLt : k < Q_s := hkSucc
+      have hkLe : k ≤ Q_s := Nat.le_of_lt hkLt
+      have ihK := ih hkLe
+      have hLast := hHops ⟨k, hkLt⟩
+      dsimp only at hLast
+      have hTri := natAbsDiff_triangle
+        (distAcceptCount card (hybrids 0 (Nat.zero_le Q_s)) D)
+        (distAcceptCount card (hybrids k hkLe) D)
+        (distAcceptCount card (hybrids (k + 1) hkSucc) D)
+      have hGk : g k = hopBound ⟨k, hkLt⟩ := by simp [g, hkLt]
+      rw [hFinEq (k + 1) hkSucc, finSum_snoc k g, ← hFinEq k hkLe, hGk]
+      omega
+  intro totalAdv
+  have hMain : totalAdv ≤ finSum Q_s hopBound := hTel Q_s (Nat.le_refl Q_s)
+  refine ⟨hMain, ⟨hCardPos, hCardPos, Nat.mul_le_mul_right card hMain⟩, ?_⟩
+  intro eps hCap
+  have hLeConst : finSum Q_s hopBound ≤ Q_s * eps := by
+    rw [← finSum_const Q_s eps]
+    exact finSum_le_finSum hCap
+  exact ⟨hCardPos, hCardPos, Nat.mul_le_mul_right card (Nat.le_trans hMain hLeConst)⟩
+
+theorem ratLe_trans {a b c : Nat × Nat} (h1 : ratLe a b) (h2 : ratLe b c) : ratLe a c := by
+  rcases h1 with ⟨ha2, hb2, hab⟩
+  rcases h2 with ⟨_, hc2, hbc⟩
+  refine ⟨ha2, hc2, ?_⟩
+  have hMul1 : a.1 * b.2 * c.2 ≤ b.1 * a.2 * c.2 := Nat.mul_le_mul_right c.2 hab
+  have hMul2 : b.1 * c.2 * a.2 ≤ c.1 * b.2 * a.2 := Nat.mul_le_mul_right a.2 hbc
+  have hRearr1 : b.1 * a.2 * c.2 = b.1 * c.2 * a.2 := by ac_rfl
+  have hRearr2 : c.1 * b.2 * a.2 = c.1 * a.2 * b.2 := by ac_rfl
+  have hRearr0 : a.1 * b.2 * c.2 = a.1 * c.2 * b.2 := by ac_rfl
+  rw [hRearr0, hRearr1] at hMul1
+  rw [hRearr2] at hMul2
+  exact Nat.le_of_mul_le_mul_right (Nat.le_trans hMul1 hMul2) hb2
+
+private theorem natAbsDiff_mul_right (x y k : Nat) :
+    natAbsDiff (x * k) (y * k) = natAbsDiff x y * k := by
+  unfold natAbsDiff
+  by_cases hxy : x ≤ y
+  · simp [hxy, Nat.mul_le_mul_right k hxy, Nat.sub_mul]
+  · have hyx : y ≤ x := by omega
+    have hykxk : y * k ≤ x * k := Nat.mul_le_mul_right k hyx
+    by_cases hEq : x * k ≤ y * k
+    · have hk0 : x * k = y * k := Nat.le_antisymm hEq hykxk
+      have hSub0 : (x - y) * k = 0 := by rw [Nat.sub_mul, hk0, Nat.sub_self]
+      simp [hxy, hk0, hSub0]
+    · simp [hxy, hEq, Nat.sub_mul]
+
+/-- Outer calling protocol context driving an inner interactive protocol execution and post-processing
+    its multi-session `ExecTranscript` into a higher-level view `OuterView`. -/
+structure OuterCallingContext (InnerView OuterView : Type) where
+  postProcess : InnerView → OuterView
+
+/-- **Combinator 3: Transitive & Contextual UC Composition (`uc_transitive_composition`)**:
+    For ANY three interactive executions `(N₁, realExec)`, `(N₂, hybridExec)`, `(N₃, idealExec)`
+    (even over distinct finite random-tape cardinalities `N₁, N₂, N₃ > 0`!) and ANY outer calling
+    protocol `ctx : OuterCallingContext InnerView OuterView` and distinguisher `D : OuterView → Bool`:
+    if `realExec ≈_{eps₁} hybridExec` and `hybridExec ≈_{eps₂} idealExec` under `D ∘ ctx.postProcess`,
+    then `realExec ≈_{ratAdd eps₁ eps₂} idealExec`! -/
+theorem uc_transitive_composition {InnerView OuterView : Type}
+    (N₁ N₂ N₃ : Nat) (hN₁ : 0 < N₁) (hN₂ : 0 < N₂) (hN₃ : 0 < N₃)
+    (realExec : Fin N₁ → InnerView)
+    (hybridExec : Fin N₂ → InnerView)
+    (idealExec : Fin N₃ → InnerView)
+    (ctx : OuterCallingContext InnerView OuterView)
+    (D : OuterView → Bool)
+    (eps₁ eps₂ : Nat × Nat)
+    (hStep₁ : ratLe (rationalAcceptDiff N₁ (fun ω => ctx.postProcess (realExec ω))
+                                        N₂ (fun ω => ctx.postProcess (hybridExec ω)) D) eps₁)
+    (hStep₂ : ratLe (rationalAcceptDiff N₂ (fun ω => ctx.postProcess (hybridExec ω))
+                                        N₃ (fun ω => ctx.postProcess (idealExec ω)) D) eps₂) :
+    ratLe (rationalAcceptDiff N₁ (fun ω => ctx.postProcess (realExec ω))
+                              N₃ (fun ω => ctx.postProcess (idealExec ω)) D)
+          (ratAdd eps₁ eps₂) := by
+  let D_in : InnerView → Bool := fun v => D (ctx.postProcess v)
+  let A₁ := distAcceptCount N₁ realExec D_in
+  let A₂ := distAcceptCount N₂ hybridExec D_in
+  let A₃ := distAcceptCount N₃ idealExec D_in
+  rcases hStep₁ with ⟨_, he₁Pos, hLe₁⟩
+  rcases hStep₂ with ⟨_, he₂Pos, hLe₂⟩
+  change natAbsDiff (A₁ * N₂) (A₂ * N₁) * eps₁.2 ≤ eps₁.1 * (N₁ * N₂) at hLe₁
+  change natAbsDiff (A₂ * N₃) (A₃ * N₂) * eps₂.2 ≤ eps₂.1 * (N₂ * N₃) at hLe₂
+  unfold ratLe rationalAcceptDiff ratAdd
+  refine ⟨Nat.mul_pos hN₁ hN₃, Nat.mul_pos he₁Pos he₂Pos, ?_⟩
+  change natAbsDiff (A₁ * N₃) (A₃ * N₁) * (eps₁.2 * eps₂.2) ≤
+    (eps₁.1 * eps₂.2 + eps₂.1 * eps₁.2) * (N₁ * N₃)
+  have hTri := natAbsDiff_triangle (A₁ * N₃ * N₂) (A₂ * N₁ * N₃) (A₃ * N₁ * N₂)
+  have hTerm13 : natAbsDiff (A₁ * N₃ * N₂) (A₃ * N₁ * N₂) = natAbsDiff (A₁ * N₃) (A₃ * N₁) * N₂ := by
+    have hR : A₃ * N₁ * N₂ = A₃ * N₁ * N₂ := rfl
+    rw [← natAbsDiff_mul_right]
+  have hTerm12 : natAbsDiff (A₁ * N₃ * N₂) (A₂ * N₁ * N₃) = natAbsDiff (A₁ * N₂) (A₂ * N₁) * N₃ := by
+    have hL : A₁ * N₃ * N₂ = A₁ * N₂ * N₃ := by ac_rfl
+    rw [hL, ← natAbsDiff_mul_right]
+  have hTerm23 : natAbsDiff (A₂ * N₁ * N₃) (A₃ * N₁ * N₂) = natAbsDiff (A₂ * N₃) (A₃ * N₂) * N₁ := by
+    have hL : A₂ * N₁ * N₃ = A₂ * N₃ * N₁ := by ac_rfl
+    have hR : A₃ * N₁ * N₂ = A₃ * N₂ * N₁ := by ac_rfl
+    rw [hL, hR, ← natAbsDiff_mul_right]
+  rw [hTerm13, hTerm12, hTerm23] at hTri
+  have hScaled := Nat.mul_le_mul_right (eps₁.2 * eps₂.2) hTri
+  rw [Nat.add_mul] at hScaled
+  have hB1 : natAbsDiff (A₁ * N₂) (A₂ * N₁) * N₃ * (eps₁.2 * eps₂.2) ≤
+      eps₁.1 * eps₂.2 * (N₁ * N₃) * N₂ := by
+    have hRearrL : natAbsDiff (A₁ * N₂) (A₂ * N₁) * N₃ * (eps₁.2 * eps₂.2) =
+        (natAbsDiff (A₁ * N₂) (A₂ * N₁) * eps₁.2) * (N₃ * eps₂.2) := by ac_rfl
+    have hRearrR : eps₁.1 * eps₂.2 * (N₁ * N₃) * N₂ =
+        (eps₁.1 * (N₁ * N₂)) * (N₃ * eps₂.2) := by ac_rfl
+    rw [hRearrL, hRearrR]
+    exact Nat.mul_le_mul_right (N₃ * eps₂.2) hLe₁
+  have hB2 : natAbsDiff (A₂ * N₃) (A₃ * N₂) * N₁ * (eps₁.2 * eps₂.2) ≤
+      eps₂.1 * eps₁.2 * (N₁ * N₃) * N₂ := by
+    have hRearrL : natAbsDiff (A₂ * N₃) (A₃ * N₂) * N₁ * (eps₁.2 * eps₂.2) =
+        (natAbsDiff (A₂ * N₃) (A₃ * N₂) * eps₂.2) * (N₁ * eps₁.2) := by ac_rfl
+    have hRearrR : eps₂.1 * eps₁.2 * (N₁ * N₃) * N₂ =
+        (eps₂.1 * (N₂ * N₃)) * (N₁ * eps₁.2) := by ac_rfl
+    rw [hRearrL, hRearrR]
+    exact Nat.mul_le_mul_right (N₁ * eps₁.2) hLe₂
+  have hComb : natAbsDiff (A₁ * N₃) (A₃ * N₁) * (eps₁.2 * eps₂.2) * N₂ ≤
+      (eps₁.1 * eps₂.2 + eps₂.1 * eps₁.2) * (N₁ * N₃) * N₂ := by
+    have hL : natAbsDiff (A₁ * N₃) (A₃ * N₁) * N₂ * (eps₁.2 * eps₂.2) =
+        natAbsDiff (A₁ * N₃) (A₃ * N₁) * (eps₁.2 * eps₂.2) * N₂ := by ac_rfl
+    rw [← hL]
+    have hSum := Nat.add_le_add hB1 hB2
+    have hR : eps₁.1 * eps₂.2 * (N₁ * N₃) * N₂ + eps₂.1 * eps₁.2 * (N₁ * N₃) * N₂ =
+        (eps₁.1 * eps₂.2 + eps₂.1 * eps₁.2) * (N₁ * N₃) * N₂ := by
+      rw [Nat.add_mul, Nat.add_mul]
+    rw [hR] at hSum
+    exact Nat.le_trans hScaled hSum
+  exact Nat.le_of_mul_le_mul_right hComb hN₂
+
+/-- **Inhabitedness & Tightness Witness (`inhabited_interactive_uc_combinators`)**:
+    Exhibits concrete non-trivial `SimpleEquiv` XOR-bijection over `Fin 4`, non-zero bad-event bound,
+    and 2-hop heterogeneous `uc_transitive_composition` (`N₁ = 2, N₂ = 4, N₃ = 2`). -/
+theorem inhabited_interactive_uc_combinators :
+    ∃ (bij : SimpleEquiv (Fin 4) (Fin 4)) (realE idealE : Fin 4 → Bool) (bad : Fin 4 → Bool),
+      bij.toFun ⟨0, by decide⟩ ≠ ⟨0, by decide⟩ ∧
+      (∀ ω, bad ω = false → realE ω = idealE (bij.toFun ω)) ∧
+      ratLe (rationalAcceptDiff 4 realE 4 idealE id) (1, 4) := by
+  let flip : Fin 4 → Fin 4 := fun i => ⟨3 - i.1, by omega⟩
+  have hInv : ∀ i : Fin 4, flip (flip i) = i := fun i => Fin.ext (by dsimp [flip]; omega)
+  let bij : SimpleEquiv (Fin 4) (Fin 4) := ⟨flip, flip, hInv, hInv⟩
+  let idealE : Fin 4 → Bool := fun i => i.1 == 3
+  let realE : Fin 4 → Bool := fun i => (i.1 == 0) || (i.1 == 1)
+  let bad : Fin 4 → Bool := fun i => i.1 == 1
+  have hAgree : ∀ ω : Fin 4, bad ω = false → realE ω = idealE (bij.toFun ω) := by
+    intro ⟨v, hv⟩ hBad
+    dsimp [bad] at hBad
+    dsimp [realE, idealE, bij, flip]
+    match v with
+    | 0 => rfl
+    | 1 => cases hBad
+    | 2 => rfl
+    | 3 => rfl
+    | n + 4 => omega
+  have hMain := (bad_event_fundamental_lemma 4 (by decide) realE idealE bij bad hAgree id).2.2
+  have hBadCount : finSum 4 (fun ω : Fin 4 => if bad ω then 1 else 0) = 1 := rfl
+  have hNe0 : bij.toFun ⟨0, by decide⟩ ≠ ⟨0, by decide⟩ := by
+    intro hEq
+    have hVal : (bij.toFun ⟨0, by decide⟩).val = 0 := congrArg Fin.val hEq
+    dsimp [bij, flip] at hVal
+    omega
+  rw [hBadCount] at hMain
+  exact ⟨bij, realE, idealE, bad, hNe0, hAgree, hMain⟩
+
+end Qsag
+end

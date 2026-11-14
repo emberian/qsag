@@ -1191,3 +1191,1143 @@ def idFinEquiv (n : Nat) : SimpleEquiv (Fin n) (Fin n) where
   right_inv _ := rfl
 
 /-- Decode a single `Fin (rssFullSessionCard L)` index into `RssSlhSessionTape L`. -/
+def decodeSingleFullTape (L : Nat) (cur : Fin (rssFullSessionCard L)) : RssSlhSessionTape L :=
+  let padIdx := splitFinLeft (Nat.two_pow_pos 128) cur
+  let gIdx := splitFinRight (Nat.two_pow_pos 128) cur
+  decodeRssSessionTape L padIdx gIdx
+
+/-- Secret-dependent session mask shifts `(wA, wB, rawTag0, rawTag1)` for one scheduled session. -/
+def honestSessionShifts (L : Nat) (cIdx : Fin 3)
+    (shares : Nat → Option RssPartyKeyShare) (req : SessionScheduleReq) :
+    BitVec 64 × BitVec 64 × BitVec (8 * L) × BitVec (8 * L) :=
+  let (hA, hB, _) := honestPairForCorrupt cIdx
+  let wA := match shares hA with
+            | some shA => computeHonestChiWord hA shA req.msg
+            | none => 0#64
+  let wB := match shares hB with
+            | some shB => computeHonestChiWord hB shB req.msg
+            | none => 0#64
+  match extractHonestQuorumViews L cIdx shares with
+  | some (_, _, rawTag0, rawTag1) => (wA, wB, rawTag0, rawTag1)
+  | none => (wA, wB, 0#(8 * L), 0#(8 * L))
+
+/-- Measure-preserving XOR pad bijection on `Fin (rssPadSessionCard L)`:
+    keeps `(nonceA, nonceB)` fixed and shifts `(chiMaskA, chiMaskB, cutMask0, cutMask1)` by
+    `(wA, wB, rawTag0, rawTag1)`. -/
+def sessionPadXorEquiv (L : Nat)
+    (wA wB : BitVec 64) (rawTag0 rawTag1 : BitVec (8 * L)) :
+    SimpleEquiv (Fin (rssPadSessionCard L)) (Fin (rssPadSessionCard L)) :=
+  let h1 : 0 < 2 ^ (8 * L) := Nat.two_pow_pos (8 * L)
+  let h2 : 0 < (2 ^ (8 * L)) * (2 ^ (8 * L)) := Nat.mul_pos h1 h1
+  let h3 : 0 < (2 ^ 64) * ((2 ^ (8 * L)) * (2 ^ (8 * L))) := Nat.mul_pos (Nat.two_pow_pos 64) h2
+  let h4 : 0 < (2 ^ 64) * ((2 ^ 64) * ((2 ^ (8 * L)) * (2 ^ (8 * L)))) := Nat.mul_pos (Nat.two_pow_pos 64) h3
+  let h5 : 0 < (2 ^ 64) * ((2 ^ 64) * ((2 ^ 64) * ((2 ^ (8 * L)) * (2 ^ (8 * L))))) := Nat.mul_pos (Nat.two_pow_pos 64) h4
+  depProdFinEquiv h5 (idFinEquiv (2 ^ 64)) (fun _ =>
+    depProdFinEquiv h4 (idFinEquiv (2 ^ 64)) (fun _ =>
+      depProdFinEquiv h3 (finBitVecXorEquiv 64 wA) (fun _ =>
+        depProdFinEquiv h2 (finBitVecXorEquiv 64 wB) (fun _ =>
+          depProdFinEquiv h1 (finBitVecXorEquiv (8 * L) rawTag0) (fun _ =>
+            finBitVecXorEquiv (8 * L) rawTag1)))))
+
+/-- Measure-preserving XOR bijection on one full session tape `Fin (rssFullSessionCard L)`,
+    leaving `gammaBits : BitVec 128` invariant. -/
+def sessionFullTapeXorEquiv (L : Nat)
+    (wA wB : BitVec 64) (rawTag0 rawTag1 : BitVec (8 * L)) :
+    SimpleEquiv (Fin (rssFullSessionCard L)) (Fin (rssFullSessionCard L)) :=
+  depProdFinEquiv (Nat.two_pow_pos 128)
+    (sessionPadXorEquiv L wA wB rawTag0 rawTag1)
+    (fun _ => idFinEquiv (2 ^ 128))
+
+private theorem decodeSingleFullTape_sessionFullTapeXorEquiv (L : Nat)
+    (wA wB : BitVec 64) (rawTag0 rawTag1 : BitVec (8 * L))
+    (cur : Fin (rssFullSessionCard L)) :
+    let t := decodeSingleFullTape L cur
+    decodeSingleFullTape L ((sessionFullTapeXorEquiv L wA wB rawTag0 rawTag1).toFun cur) =
+      { nonceA := t.nonceA
+        nonceB := t.nonceB
+        chiMaskA := wA ^^^ t.chiMaskA
+        chiMaskB := wB ^^^ t.chiMaskB
+        cutMask0 := rawTag0 ^^^ t.cutMask0
+        cutMask1 := rawTag1 ^^^ t.cutMask1
+        gammaBits := t.gammaBits } := by
+  unfold decodeSingleFullTape sessionFullTapeXorEquiv sessionPadXorEquiv
+    rssFullSessionCard rssPadSessionCard
+  dsimp only [depProdFinEquiv, idFinEquiv, finBitVecXorEquiv, id]
+  rw [splitFinLeft_pairFin, splitFinRight_pairFin]
+  unfold decodeRssSessionTape
+  dsimp only
+  rw [splitFinLeft_pairFin, splitFinRight_pairFin,
+      splitFinLeft_pairFin, splitFinRight_pairFin,
+      splitFinLeft_pairFin, splitFinRight_pairFin,
+      splitFinLeft_pairFin, splitFinRight_pairFin,
+      splitFinLeft_pairFin, splitFinRight_pairFin]
+  simp only [BitVec.ofFin_toFin]
+  rw [BitVec.xor_comm _ wA, BitVec.xor_comm _ wB,
+      BitVec.xor_comm _ rawTag0, BitVec.xor_comm _ rawTag1]
+
+/-- Cross-session lockstep state relation coupling `RealClusterState` and `IdealClusterState`. -/
+structure RealIdealClusterMatch (cIdx : Fin 3) (seedSh prfSh : RssByteShares)
+    (cl : RealClusterState SlhPublicKey RssPartyKeyShare)
+    (icl : IdealClusterState SlhPublicKey) : Prop where
+  pk_eq         : cl.tsig.pk = icl.tsig.pk
+  th_eq         : cl.tsig.threshold = icl.tsig.threshold
+  np_eq         : cl.tsig.numParties = icl.tsig.numParties
+  corr_eq       : cl.tsig.corruptParties = icl.tsig.corruptParties
+  wal_eq        : cl.honestWal = icl.honestWal
+  cursor_eq     : cl.maskSessionCursor = icl.maskSessionCursor
+  shares_intact : cl.honestWal.poisoned = false →
+                    cl.honestShares = dealHonestRssVault cIdx seedSh prfSh
+
+private theorem extractHonestQuorumViews_deal (L : Nat) (cIdx : Fin 3)
+    (seedSh prfSh : RssByteShares) (req : SessionScheduleReq) :
+    let (_, _, q) := honestPairForCorrupt cIdx
+    let (_, _, rawTag0, rawTag1) :=
+      honestSessionShifts L cIdx (dealHonestRssVault cIdx seedSh prfSh) req
+    extractHonestQuorumViews L cIdx (dealHonestRssVault cIdx seedSh prfSh) =
+      some (q.views seedSh, q.views prfSh, rawTag0, rawTag1) := by
+  rcases cIdx with ⟨_ | _ | _ | n, hv⟩
+  · rfl
+  · rfl
+  · rfl
+  · exact False.elim (Nat.not_lt_zero n (Nat.lt_of_add_lt_add_right hv))
+
+/-- Extract the adversary's non-zero Round-2 wire deviation batch `deltas` (`deltas.length ≤ deg`
+    and `∃ d ∈ deltas, d ≠ 0`) when Round-1/quorum/WAL gates pass — notice this depends **ONLY on
+    `padIdx : Fin (rssPadSessionCard p.sigBytes)`** and is completely independent of `gIdx : Fin (2 ^ 128)`! -/
+def extractSessionNonzeroDeltas {AdvState : Type}
+    (p : Fips205Params) (cIdx : Fin 3) (deg : Nat)
+    (A : UcRushingAdversary AdvState)
+    (cl : RealClusterState SlhPublicKey RssPartyKeyShare)
+    (advSt : AdvState)
+    (padIdx : Fin (rssPadSessionCard p.sigBytes)) : Option (List Tower128) :=
+  let proto := rssSlhInteractiveProtocol p cIdx deg
+  let (req, advSt1) := A.scheduleSession advSt
+  if !(validThresholdApproval cl.tsig req.honestApprovers) then none
+  else
+    let pkDig := proto.pkDigestOf cl.tsig.pk
+    let msgDig := proto.msgDigestOf req
+    match walPreSignStep cl.honestWal pkDig req.reqEpoch msgDig with
+    | .err _ _ => none
+    | .ok _ (.replayCached _) => none
+    | .ok _ (.authorizedFresh _) =>
+      let dummyTape := decodeRssSessionTape p.sigBytes padIdx ⟨0, Nat.two_pow_pos 128⟩
+      let (honR1, r1St) :=
+        proto.honestRound1 cl.tsig.pk cl.tsig.corruptParties req cl.maskSessionCursor cl.honestShares dummyTape
+      let (corrR1Fn, advSt2) := A.rushRound1 advSt1 honR1
+      let corrR1 := cl.tsig.corruptParties.map (fun c => (c, corrR1Fn c))
+      match proto.verifyRound1 cl.tsig.pk req r1St honR1 corrR1 with
+      | .inl _ => none
+      | .inr r2Init =>
+        let (honR2, r2St0) :=
+          proto.honestRound2 cl.tsig.pk cl.tsig.corruptParties req r2Init cl.honestShares dummyTape
+        let (corrR2Fn, _) := A.rushRound2 advSt2 honR2
+        let corrR2 := cl.tsig.corruptParties.map (fun c => (c, corrR2Fn c))
+        match corrR2.find? (fun pr => pr.1 == cIdx.val) with
+        | none => none
+        | some (_, cWire2) =>
+          match parseCorruptRound2Wire deg cWire2 with
+          | none => none
+          | some (nonceC, deltas) =>
+            if round1NonceCommit cl.tsig.pk req r2St0.cursor cIdx.val nonceC != r2St0.corrR1Commit then
+              none
+            else if deltas.any (fun d => decide (d ≠ towerZero 7)) then
+              some deltas
+            else
+              none
+
+private theorem extractSessionNonzeroDeltas_props {AdvState : Type}
+    (p : Fips205Params) (cIdx : Fin 3) (deg : Nat)
+    (A : UcRushingAdversary AdvState)
+    (cl : RealClusterState SlhPublicKey RssPartyKeyShare)
+    (advSt : AdvState)
+    (padIdx : Fin (rssPadSessionCard p.sigBytes))
+    {deltas : List Tower128}
+    (hSome : extractSessionNonzeroDeltas p cIdx deg A cl advSt padIdx = some deltas) :
+    deltas.length ≤ deg ∧ ∃ d ∈ deltas, d ≠ towerZero 7 := by
+  unfold extractSessionNonzeroDeltas at hSome
+  dsimp only at hSome
+  cases hVal : validThresholdApproval cl.tsig (A.scheduleSession advSt).1.honestApprovers
+  · rw [hVal] at hSome; simp at hSome
+  · rw [hVal] at hSome
+    simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hSome
+    cases hWal : walPreSignStep cl.honestWal
+        ((rssSlhInteractiveProtocol p cIdx deg).pkDigestOf cl.tsig.pk)
+        (A.scheduleSession advSt).1.reqEpoch
+        ((rssSlhInteractiveProtocol p cIdx deg).msgDigestOf (A.scheduleSession advSt).1) with
+    | err _ _ => rw [hWal] at hSome; cases hSome
+    | ok _ res =>
+      rw [hWal] at hSome
+      cases res with
+      | replayCached _ => cases hSome
+      | authorizedFresh _ =>
+        dsimp only at hSome
+        let dummyTape := decodeRssSessionTape p.sigBytes padIdx ⟨0, Nat.two_pow_pos 128⟩
+        let r1Out := (rssSlhInteractiveProtocol p cIdx deg).honestRound1
+          cl.tsig.pk cl.tsig.corruptParties (A.scheduleSession advSt).1
+          cl.maskSessionCursor cl.honestShares dummyTape
+        let corrR1 := cl.tsig.corruptParties.map
+          (fun c => (c, (A.rushRound1 (A.scheduleSession advSt).2 r1Out.1).1 c))
+        cases hVR1 : (rssSlhInteractiveProtocol p cIdx deg).verifyRound1
+            cl.tsig.pk (A.scheduleSession advSt).1 r1Out.2 r1Out.1 corrR1 with
+        | inl _ => rw [hVR1] at hSome; cases hSome
+        | inr r2Init =>
+          rw [hVR1] at hSome
+          dsimp only at hSome
+          let r2Out := (rssSlhInteractiveProtocol p cIdx deg).honestRound2
+            cl.tsig.pk cl.tsig.corruptParties (A.scheduleSession advSt).1
+            r2Init cl.honestShares dummyTape
+          let advSt2 := (A.rushRound1 (A.scheduleSession advSt).2 r1Out.1).2
+          let corrR2 := cl.tsig.corruptParties.map
+            (fun c => (c, (A.rushRound2 advSt2 r2Out.1).1 c))
+          cases hFind : corrR2.find? (fun pr => pr.1 == cIdx.val) with
+          | none => rw [hFind] at hSome; cases hSome
+          | some pr =>
+            rcases pr with ⟨_, cWire2⟩
+            rw [hFind] at hSome
+            dsimp only at hSome
+            cases hParse : parseCorruptRound2Wire deg cWire2 with
+            | none => rw [hParse] at hSome; cases hSome
+            | some nd =>
+              rcases nd with ⟨nonceC, ds⟩
+              rw [hParse] at hSome
+              dsimp only at hSome
+              cases hCmt : (round1NonceCommit cl.tsig.pk (A.scheduleSession advSt).1
+                  r2Out.2.cursor cIdx.val nonceC != r2Out.2.corrR1Commit)
+              · rw [hCmt] at hSome
+                simp only [Bool.false_eq_true, ↓reduceIte] at hSome
+                cases hAny : ds.any (fun d => decide (d ≠ towerZero 7))
+                · rw [hAny] at hSome; simp at hSome
+                · rw [hAny] at hSome
+                  simp only [↓reduceIte, Option.some.injEq] at hSome
+                  subst hSome
+                  obtain ⟨d, hdMem, hdDec⟩ := List.any_eq_true.mp hAny
+                  exact ⟨parseCorruptRound2Wire_length_le deg cWire2 hParse,
+                         d, hdMem, of_decide_eq_true hdDec⟩
+              · rw [hCmt] at hSome; simp at hSome
+
+/-- Single-session `GF(2^128)` (`Tower128`) Schwartz-Zippel bad hit indicator:
+    `true` iff the rushing adversary submits a non-zero wire deviation `deltas` in Round 2 AND
+    the independent uniform 128-bit challenge `gIdx` hits a root of `batchDeviationPoly deltas`. -/
+def sessionBadHit {AdvState : Type}
+    (p : Fips205Params) (cIdx : Fin 3) (deg : Nat)
+    (A : UcRushingAdversary AdvState)
+    (cl : RealClusterState SlhPublicKey RssPartyKeyShare)
+    (advSt : AdvState)
+    (cur : Fin (rssFullSessionCard p.sigBytes)) : Bool :=
+  let padIdx := splitFinLeft (Nat.two_pow_pos 128) cur
+  let gIdx := splitFinRight (Nat.two_pow_pos 128) cur
+  match extractSessionNonzeroDeltas p cIdx deg A cl advSt padIdx with
+  | none => false
+  | some deltas => batchDeviationPoly deltas (unpackTower 7 (BitVec.ofFin gIdx)) == towerZero 7
+
+/-- Single-session Schwartz-Zippel bad-event sum bound:
+    `badCount_1 ≤ rssPadSessionCard p.sigBytes * deg`, hence `badCount_1 * 2^128 ≤ deg * rssFullSessionCard`. -/
+private theorem sessionBadHit_finSum_le {AdvState : Type}
+    (p : Fips205Params) (cIdx : Fin 3) (deg : Nat)
+    (A : UcRushingAdversary AdvState)
+    (cl : RealClusterState SlhPublicKey RssPartyKeyShare)
+    (advSt : AdvState) :
+    finSum (rssFullSessionCard p.sigBytes)
+      (fun cur => if sessionBadHit p cIdx deg A cl advSt cur then 1 else 0) ≤
+    rssPadSessionCard p.sigBytes * deg := by
+  unfold rssFullSessionCard
+  rw [finSum_prod_eq (rssPadSessionCard p.sigBytes) (2 ^ 128)]
+  rw [← finSum_const (rssPadSessionCard p.sigBytes) deg]
+  apply finSum_le_finSum
+  intro padIdx
+  have hInner :
+      finSum (2 ^ 128) (fun gIdx =>
+        if sessionBadHit p cIdx deg A cl advSt (pairFin padIdx gIdx) then 1 else 0) =
+      finSum (2 ^ 128) (fun gIdx =>
+        if (match extractSessionNonzeroDeltas p cIdx deg A cl advSt padIdx with
+            | none => false
+            | some deltas => batchDeviationPoly deltas (unpackTower 7 (BitVec.ofFin gIdx)) == towerZero 7)
+        then 1 else 0) := by
+    apply finSum_congr
+    intro gIdx
+    unfold sessionBadHit
+    dsimp only
+    rw [splitFinLeft_pairFin, splitFinRight_pairFin]
+  rw [hInner]
+  cases hExt : extractSessionNonzeroDeltas p cIdx deg A cl advSt padIdx with
+  | none =>
+    simp only [Bool.false_eq_true, ↓reduceIte]
+    have h0 : finSum (2 ^ 128) (fun _ => 0) = 0 := by rw [finSum_const, Nat.mul_zero]
+    rw [h0]
+    exact Nat.zero_le deg
+  | some deltas =>
+    obtain ⟨hLen, hNz⟩ := extractSessionNonzeroDeltas_props p cIdx deg A cl advSt padIdx hExt
+    exact tower128_roots_finSum_le deg deltas hLen hNz
+
+/-- Per-session adaptive tape bijection conditioned on `(cl, advSt)`:
+    uses `honestSessionShifts` on the scheduled `req` when `cl` and `advSt` run Round 2. -/
+def adaptiveSingleSessionEquiv {AdvState : Type}
+    (p : Fips205Params) (cIdx : Fin 3)
+    (A : UcRushingAdversary AdvState)
+    (cl : RealClusterState SlhPublicKey RssPartyKeyShare)
+    (advSt : AdvState) :
+    SimpleEquiv (Fin (rssFullSessionCard p.sigBytes)) (Fin (rssFullSessionCard p.sigBytes)) :=
+  let (req, _) := A.scheduleSession advSt
+  let (wA, wB, rawTag0, rawTag1) := honestSessionShifts p.sigBytes cIdx cl.honestShares req
+  sessionFullTapeXorEquiv p.sigBytes wA wB rawTag0 rawTag1
+
+private theorem walPreSignStep_authorizedFresh_unpoisoned
+    {st wal' : WalLatchState} {pkDig : List UInt8} {ep epOut : Nat} {msgDig : List UInt8}
+    (hOk : walPreSignStep st pkDig ep msgDig = .ok wal' (.authorizedFresh epOut)) :
+    st.poisoned = false ∧ wal' = st := by
+  unfold walPreSignStep at hOk
+  cases hp : st.poisoned
+  · simp only [hp, Bool.false_eq_true, ↓reduceIte] at hOk
+    cases hPk : decide (pkDig = st.enrolledPkDigest)
+    · rw [hPk] at hOk; simp at hOk
+    · rw [hPk] at hOk
+      simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hOk
+      cases hLat : st.latchedRecord with
+      | none =>
+        rw [hLat] at hOk
+        cases hEp : (ep == st.nextEpoch)
+        · rw [hEp] at hOk; simp at hOk
+        · rw [hEp] at hOk
+          simp only [↓reduceIte, UcStepOutcome.ok.injEq] at hOk
+          exact ⟨rfl, hOk.1.symm⟩
+      | some rec0 =>
+        rcases rec0 with ⟨ep0, prevMd, prevSig⟩
+        rw [hLat] at hOk
+        dsimp only at hOk
+        cases hHit : (ep == ep0 && decide (msgDig = prevMd))
+        · rw [hHit] at hOk
+          simp only [Bool.false_eq_true, ↓reduceIte] at hOk
+          cases hEp : (ep == st.nextEpoch)
+          · rw [hEp] at hOk; simp at hOk
+          · rw [hEp] at hOk
+            simp only [↓reduceIte, UcStepOutcome.ok.injEq] at hOk
+            exact ⟨rfl, hOk.1.symm⟩
+        · rw [hHit] at hOk; simp at hOk
+  · simp [hp] at hOk
+
+private theorem honestSessionShifts_fst_snd (L : Nat) (cIdx : Fin 3)
+    (shares : Nat → Option RssPartyKeyShare) (req : SessionScheduleReq) :
+    (honestSessionShifts L cIdx shares req).1 =
+      (match shares (honestPairForCorrupt cIdx).1 with
+       | some shA => computeHonestChiWord (honestPairForCorrupt cIdx).1 shA req.msg
+       | none => 0#64) ∧
+    (honestSessionShifts L cIdx shares req).2.1 =
+      (match shares (honestPairForCorrupt cIdx).2.1 with
+       | some shB => computeHonestChiWord (honestPairForCorrupt cIdx).2.1 shB req.msg
+       | none => 0#64) := by
+  unfold honestSessionShifts
+  dsimp only
+  cases extractHonestQuorumViews L cIdx shares <;> exact ⟨rfl, rfl⟩
+
+private theorem dummyTape_fields_eq (L : Nat) (cur : Fin (rssFullSessionCard L)) :
+    let padIdx := splitFinLeft (Nat.two_pow_pos 128) cur
+    let dummy := decodeRssSessionTape L padIdx ⟨0, Nat.two_pow_pos 128⟩
+    let real := decodeSingleFullTape L cur
+    dummy.nonceA = real.nonceA ∧
+    dummy.nonceB = real.nonceB ∧
+    dummy.chiMaskA = real.chiMaskA ∧
+    dummy.chiMaskB = real.chiMaskB ∧
+    real.gammaBits = BitVec.ofFin (splitFinRight (Nat.two_pow_pos 128) cur) :=
+  ⟨rfl, rfl, rfl, rfl, rfl⟩
+
+private theorem sharedPreCutBarrier_extract_eq (cIdx : Fin 3) (deg : Nat) (pk : SlhPublicKey)
+    (req : SessionScheduleReq) (r2St : RssRound2State)
+    (corrR2 : List (Nat × ByteArray)) (r3Init : RssRound3State)
+    (hBar : sharedPreCutBarrier cIdx deg pk req r2St corrR2 = .inr r3Init) :
+    (match corrR2.find? (fun pr => pr.1 == cIdx.val) with
+     | none => none
+     | some (_, cWire2) =>
+       match parseCorruptRound2Wire deg cWire2 with
+       | none => none
+       | some (nonceC, deltas) =>
+         if round1NonceCommit pk req r2St.cursor cIdx.val nonceC != r2St.corrR1Commit then none
+         else if deltas.any (fun d => decide (d ≠ towerZero 7)) then some deltas
+         else none) =
+      (if r3Init.deltas.any (fun d => decide (d ≠ towerZero 7)) then some r3Init.deltas else none) ∧
+    (batchDeviationPoly r3Init.deltas (unpackTower 7 r2St.gammaBits) == towerZero 7) = true := by
+  unfold sharedPreCutBarrier at hBar
+  cases hFind : corrR2.find? (fun pr => pr.1 == cIdx.val) with
+  | none => rw [hFind] at hBar; cases hBar
+  | some pr =>
+    rcases pr with ⟨_, cWire2⟩
+    rw [hFind] at hBar
+    dsimp only at hBar ⊢
+    cases hParse : parseCorruptRound2Wire deg cWire2 with
+    | none => rw [hParse] at hBar; cases hBar
+    | some nd =>
+      rcases nd with ⟨nonceC, ds⟩
+      rw [hParse] at hBar
+      dsimp only at hBar ⊢
+      cases hCmt : (round1NonceCommit pk req r2St.cursor cIdx.val nonceC != r2St.corrR1Commit)
+      · rw [hCmt] at hBar
+        simp only [Bool.false_eq_true, ↓reduceIte] at hBar ⊢
+        cases hBatch : (batchDeviationPoly ds (unpackTower 7 r2St.gammaBits) == towerZero 7)
+        · rw [hBatch] at hBar; simp at hBar
+        · rw [hBatch] at hBar
+          simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hBar
+          injection hBar with hEq
+          have hDs : ds = r3Init.deltas := congrArg RssRound3State.deltas hEq
+          subst hDs
+          exact ⟨rfl, hBatch⟩
+      · rw [hCmt] at hBar; simp at hBar
+
+/-- **Core Single-Session Lockstep Equivalence (`execRealSession_eq_execIdealSession_unless_bad`)**:
+    Under `RealIdealClusterMatch cIdx seedSh prfSh cl icl`, whenever `sessionBadHit ... cur = false`,
+    `execRealSession` on `decodeSingleFullTape L cur` and `execIdealSession` on
+    `decodeSingleFullTape L ((adaptiveSingleSessionEquiv ...).toFun cur)` produce:
+    1. **Bit-for-bit identical** `(advSt', SessionWireRecord)` (including every wire `ByteArray` and
+       exact `AbortReason`), AND
+    2. Successor states `(cl', icl')` preserving `RealIdealClusterMatch`! -/
+theorem execRealSession_eq_execIdealSession_unless_bad {AdvState : Type}
+    (p : Fips205Params) (hWf : p.wellFormed = true)
+    (cIdx : Fin 3) (deg : Nat)
+    {seedSh prfSh : RssByteShares}
+    (hSeedWf : seedSh.WellFormed) (hPrfWf : prfSh.WellFormed)
+    (pkSeed : List UInt8)
+    (A : UcRushingAdversary AdvState)
+    (cl : RealClusterState SlhPublicKey RssPartyKeyShare)
+    (icl : IdealClusterState SlhPublicKey)
+    (advSt : AdvState)
+    (hMatch : RealIdealClusterMatch cIdx seedSh prfSh cl icl)
+    (hPkKey : cl.tsig.pk = (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).2)
+    (cur : Fin (rssFullSessionCard p.sigBytes))
+    (hNoBad : sessionBadHit p cIdx deg A cl advSt cur = false) :
+    let sk := (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).1
+    let tapeReal := decodeSingleFullTape p.sigBytes cur
+    let tapeSim := decodeSingleFullTape p.sigBytes
+                     ((adaptiveSingleSessionEquiv p cIdx A cl advSt).toFun cur)
+    let resR :=
+      execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt tapeReal
+    let resI :=
+      execIdealSession (slhIdealSignOracle p sk) (Sim_RssSlh p cIdx deg) A icl advSt tapeSim
+    resR.2.1 = resI.2.1 ∧
+    resR.2.2 = resI.2.2 ∧
+    resR.1.tsig.pk = cl.tsig.pk ∧
+    RealIdealClusterMatch cIdx seedSh prfSh resR.1 resI.1 := by
+  rcases hMatch with ⟨hPkEq, hThEq, hNpEq, hCorrEq, hWalEq, hCurEq, hSharesIntact⟩
+  have hQuorumEq : ∀ apps, validThresholdApproval cl.tsig apps = validThresholdApproval icl.tsig apps := by
+    intro apps
+    unfold validThresholdApproval
+    rw [hThEq, hNpEq, hCorrEq]
+  intro sk tapeReal tapeSim resR resI
+  dsimp only [resR, resI]
+  unfold execRealSession execIdealSession
+  dsimp only
+  rw [← hQuorumEq]
+  cases hQuorum : validThresholdApproval cl.tsig (A.scheduleSession advSt).1.honestApprovers
+  · exact ⟨rfl, rfl, rfl, ⟨hPkEq, hThEq, hNpEq, hCorrEq, hWalEq, hCurEq, hSharesIntact⟩⟩
+  · rw [ite_eq_right (by decide : ¬ ((!true) = true)),
+        ite_eq_right (by decide : ¬ ((!true) = true))]
+    have hPkDigR : (rssSlhInteractiveProtocol p cIdx deg).pkDigestOf = slhPkDigest := rfl
+    have hPkDigS : (Sim_RssSlh p cIdx deg).pkDigestOf = slhPkDigest := rfl
+    have hMsgDigR : (rssSlhInteractiveProtocol p cIdx deg).msgDigestOf = slhReqDigest := rfl
+    have hMsgDigS : (Sim_RssSlh p cIdx deg).msgDigestOf = slhReqDigest := rfl
+    rw [hPkDigR, hPkDigS, hMsgDigR, hMsgDigS, ← hWalEq, ← hPkEq]
+    cases hWalStep : walPreSignStep cl.honestWal (slhPkDigest cl.tsig.pk)
+                       (A.scheduleSession advSt).1.reqEpoch (slhReqDigest (A.scheduleSession advSt).1) with
+    | err wal' rej =>
+      dsimp only
+      refine ⟨rfl, rfl, rfl, ⟨hPkEq, hThEq, hNpEq, hCorrEq, rfl, hCurEq, ?_⟩⟩
+      intro hp'
+      have hUnfold := hWalStep
+      unfold walPreSignStep at hUnfold
+      cases hp0 : cl.honestWal.poisoned
+      · exact hSharesIntact hp0
+      · rw [hp0] at hUnfold
+        simp only [↓reduceIte, UcStepOutcome.err.injEq] at hUnfold
+        rcases hUnfold with ⟨rfl, _⟩
+        rw [hp0] at hp'; cases hp'
+    | ok wal' walAuth =>
+      cases walAuth with
+      | replayCached cachedSig =>
+        dsimp only
+        refine ⟨rfl, rfl, rfl, ⟨hPkEq, hThEq, hNpEq, hCorrEq, rfl, hCurEq, ?_⟩⟩
+        intro hp'
+        unfold walPreSignStep at hWalStep
+        cases hp0 : cl.honestWal.poisoned
+        · exact hSharesIntact hp0
+        · simp [hp0] at hWalStep
+      | authorizedFresh authEp =>
+        obtain ⟨hUnpoisoned, rfl⟩ := walPreSignStep_authorizedFresh_unpoisoned hWalStep
+        have hShares : cl.honestShares = dealHonestRssVault cIdx seedSh prfSh :=
+          hSharesIntact hUnpoisoned
+        let req := (A.scheduleSession advSt).1
+        let shifts := honestSessionShifts p.sigBytes cIdx cl.honestShares req
+        have hTapeSimEq : tapeSim =
+            { nonceA := tapeReal.nonceA
+              nonceB := tapeReal.nonceB
+              chiMaskA := shifts.1 ^^^ tapeReal.chiMaskA
+              chiMaskB := shifts.2.1 ^^^ tapeReal.chiMaskB
+              cutMask0 := shifts.2.2.1 ^^^ tapeReal.cutMask0
+              cutMask1 := shifts.2.2.2 ^^^ tapeReal.cutMask1
+              gammaBits := tapeReal.gammaBits } :=
+          decodeSingleFullTape_sessionFullTapeXorEquiv p.sigBytes
+            shifts.1 shifts.2.1 shifts.2.2.1 shifts.2.2.2 cur
+        have ⟨hSW1, hSW2⟩ := honestSessionShifts_fst_snd p.sigBytes cIdx cl.honestShares req
+        unfold rssSlhInteractiveProtocol Sim_RssSlh slhIdealSignOracle
+        dsimp only
+        rw [← hCurEq, ← hCorrEq, hTapeSimEq]
+        dsimp only [shifts]
+        rw [hSW1, hSW2]
+        cases hVR1 : sharedVerifyRound1 cIdx _ _ with
+        | inl p1 =>
+          rcases p1 with ⟨r1Err, doPoison⟩
+          cases doPoison
+          · dsimp only
+            exact ⟨rfl, rfl, rfl, ⟨hPkEq, hThEq, hNpEq, hCorrEq, rfl, rfl, fun _ => hShares⟩⟩
+          · dsimp only [poisonRealCluster, poisonIdealCluster, walQuarantine]
+            exact ⟨rfl, rfl, rfl, ⟨hPkEq, hThEq, hNpEq, hCorrEq, rfl, rfl, fun hp => by cases hp⟩⟩
+        | inr r2Init =>
+          dsimp only
+          cases hBar : sharedPreCutBarrier cIdx deg cl.tsig.pk _ _ _ with
+          | inl barrierErr =>
+            dsimp only [poisonRealCluster, poisonIdealCluster, walQuarantine]
+            exact ⟨rfl, rfl, rfl, ⟨hPkEq, hThEq, hNpEq, hCorrEq, rfl, rfl, fun hp => by cases hp⟩⟩
+          | inr r3Init =>
+            have hDeltasZero : r3Init.deltas.any (fun d => decide (d ≠ towerZero 7)) = false := by
+              by_cases hAny : r3Init.deltas.any (fun d => decide (d ≠ towerZero 7)) = true
+              · exfalso
+                have hDummy := dummyTape_fields_eq p.sigBytes cur
+                have hBadUnf := hNoBad
+                unfold sessionBadHit extractSessionNonzeroDeltas rssSlhInteractiveProtocol at hBadUnf
+                dsimp only at hDummy hBadUnf
+                rw [hQuorum] at hBadUnf
+                simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hBadUnf
+                rw [hWalStep] at hBadUnf
+                dsimp only at hBadUnf
+                rw [hDummy.1, hDummy.2.1, hDummy.2.2.1, hDummy.2.2.2.1] at hBadUnf
+                rw [hVR1] at hBadUnf
+                dsimp only at hBadUnf
+                obtain ⟨hExtEq, hBatchTrue⟩ := sharedPreCutBarrier_extract_eq cIdx deg cl.tsig.pk _ _ _ r3Init hBar
+                dsimp only at hExtEq hBatchTrue
+                rw [hExtEq, hAny] at hBadUnf
+                simp only [↓reduceIte] at hBadUnf
+                rw [← hDummy.2.2.2.2, hBatchTrue] at hBadUnf
+                cases hBadUnf
+              · exact Bool.eq_false_iff.mpr hAny
+            dsimp only
+            rw [hShares]
+            have hQuorumV := extractHonestQuorumViews_deal p.sigBytes cIdx seedSh prfSh req
+            dsimp only at hQuorumV
+            rw [hQuorumV]
+            dsimp only
+            let q := (honestPairForCorrupt cIdx).2.2
+            have hPkSeedEq : cl.tsig.pk.pkSeed = pkSeed := by
+              rw [hPkKey]; rfl
+            have hTrueSigEq :
+                rssQuorumSlhSignBytes p q (q.views seedSh) (q.views prfSh) cl.tsig.pk.pkSeed
+                  constZeroRssSeedTape (A.scheduleSession advSt).1.msg (A.scheduleSession advSt).1.optRand =
+                encodeSlhSig (slhSignInternal p (A.scheduleSession advSt).1.msg sk (A.scheduleSession advSt).1.optRand) := by
+              rw [hPkSeedEq]
+              exact (rss_threshold_sig_independent_of_quorum_and_sharing p hWf q q
+                hSeedWf hPrfWf hSeedWf hPrfWf rfl rfl pkSeed
+                constZeroRssSeedTape constZeroRssSeedTape
+                (A.scheduleSession advSt).1.msg (A.scheduleSession advSt).1.optRand).1
+            have hNoFault :
+                injectCutFaultIfNonzero p.sigBytes r3Init.deltas
+                  (rssQuorumSlhSignBytes p q (q.views seedSh) (q.views prfSh) cl.tsig.pk.pkSeed
+                    constZeroRssSeedTape (A.scheduleSession advSt).1.msg (A.scheduleSession advSt).1.optRand) =
+                encodeSlhSig (slhSignInternal p (A.scheduleSession advSt).1.msg sk (A.scheduleSession advSt).1.optRand) := by
+              unfold injectCutFaultIfNonzero
+              rw [hDeltasZero]
+              simp only [Bool.false_eq_true, ↓reduceIte]
+              exact hTrueSigEq
+            rw [hNoFault, unpackWireBytes_packWireBytes]
+            cases sharedFinalizeCutOpen p cIdx cl.tsig.pk _ _ _ with
+            | inl cutErr =>
+              dsimp only [poisonRealCluster, poisonIdealCluster, walQuarantine]
+              exact ⟨rfl, rfl, rfl, ⟨rfl, hThEq, hNpEq, rfl, rfl, rfl, fun hp => by cases hp⟩⟩
+            | inr outSigBytes =>
+              dsimp only
+              exact ⟨rfl, rfl, rfl, ⟨rfl, hThEq, hNpEq, rfl, rfl, rfl, fun _ => rfl⟩⟩
+
+/-- Multi-session adaptive XOR bijection over `Fin (rssMultiSessionCard p.sigBytes s)` built via
+    `depProdFinEquiv`: session `0` shifts by `(cl, advSt)`, and sessions `1..s-1` shift by the
+    adaptive successor state `(cl1, advSt1)` induced by `cur`! -/
+def multiSessionTapeEquiv {AdvState : Type}
+    (p : Fips205Params) (cIdx : Fin 3) (deg : Nat)
+    (A : UcRushingAdversary AdvState) :
+    (s : Nat) →
+    RealClusterState SlhPublicKey RssPartyKeyShare →
+    AdvState →
+    SimpleEquiv (Fin (rssMultiSessionCard p.sigBytes s)) (Fin (rssMultiSessionCard p.sigBytes s))
+  | 0, _, _ => idFinEquiv 1
+  | s + 1, cl, advSt =>
+    depProdFinEquiv (rssMultiSessionCard_pos p.sigBytes s)
+      (adaptiveSingleSessionEquiv p cIdx A cl advSt)
+      (fun cur =>
+        let (cl1, advSt1, _) :=
+          execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt
+            (decodeSingleFullTape p.sigBytes cur)
+        multiSessionTapeEquiv p cIdx deg A s cl1 advSt1)
+
+/-- Multi-session `GF(2^128)` Schwartz-Zippel bad-event indicator across all `s` scheduled sessions. -/
+def multiSessionBadHit {AdvState : Type}
+    (p : Fips205Params) (cIdx : Fin 3) (deg : Nat)
+    (A : UcRushingAdversary AdvState) :
+    (s : Nat) →
+    RealClusterState SlhPublicKey RssPartyKeyShare →
+    AdvState →
+    Fin (rssMultiSessionCard p.sigBytes s) → Bool
+  | 0, _, _, _ => false
+  | s + 1, cl, advSt, ω =>
+    let cur := splitFinLeft (rssMultiSessionCard_pos p.sigBytes s) ω
+    let rest := splitFinRight (rssMultiSessionCard_pos p.sigBytes s) ω
+    let (cl1, advSt1, _) :=
+      execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt
+        (decodeSingleFullTape p.sigBytes cur)
+    sessionBadHit p cIdx deg A cl advSt cur ||
+      multiSessionBadHit p cIdx deg A s cl1 advSt1 rest
+
+private theorem finSum_le_add_finSum : ∀ (n : Nat) (f g h : Fin n → Nat),
+    (∀ i, f i ≤ g i + h i) → finSum n f ≤ finSum n g + finSum n h
+  | 0, _, _, _, _ => Nat.le_refl 0
+  | n + 1, f, g, h, hLe => by
+    simp only [finSum]
+    have ih := finSum_le_add_finSum n
+      (fun i => f ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩)
+      (fun i => g ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩)
+      (fun i => h ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩)
+      (fun i => hLe ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩)
+    have h0 := hLe ⟨0, Nat.zero_lt_succ n⟩
+    omega
+
+private theorem finSum_mul_right_local : ∀ (n c : Nat) (f : Fin n → Nat),
+    finSum n (fun i => f i * c) = finSum n f * c
+  | 0, _, _ => by simp [finSum]
+  | n + 1, c, f => by simp only [finSum, finSum_mul_right_local n c, Nat.add_mul]
+
+private theorem multiSessionBadHit_pairFin {AdvState : Type}
+    (p : Fips205Params) (cIdx : Fin 3) (deg : Nat)
+    (A : UcRushingAdversary AdvState) (s : Nat)
+    (cl : RealClusterState SlhPublicKey RssPartyKeyShare) (advSt : AdvState)
+    (cur : Fin (rssFullSessionCard p.sigBytes))
+    (rest : Fin (rssMultiSessionCard p.sigBytes s)) :
+    multiSessionBadHit p cIdx deg A (s + 1) cl advSt (pairFin cur rest) =
+    (sessionBadHit p cIdx deg A cl advSt cur ||
+      let next := execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt
+                    (decodeSingleFullTape p.sigBytes cur)
+      multiSessionBadHit p cIdx deg A s next.1 next.2.1 rest) := by
+  simp only [multiSessionBadHit, splitFinLeft_pairFin, splitFinRight_pairFin]
+
+/-- **Multi-Session Schwartz-Zippel Bad-Event Bound (`multiSessionBadHit_finSum_bound`)**:
+    Across any `Q_s` adaptively scheduled rushing sessions, the total number of random tapes `ω`
+    hitting `multiSessionBadHit = true` satisfies:
+    `badCount * (2 ^ 128) ≤ (Q_s * deg) * rssMultiSessionCard p.sigBytes Q_s`! -/
+theorem multiSessionBadHit_finSum_bound {AdvState : Type}
+    (p : Fips205Params) (cIdx : Fin 3) (deg : Nat)
+    (A : UcRushingAdversary AdvState) :
+    ∀ (s : Nat) (cl : RealClusterState SlhPublicKey RssPartyKeyShare) (advSt : AdvState),
+      finSum (rssMultiSessionCard p.sigBytes s)
+        (fun ω => if multiSessionBadHit p cIdx deg A s cl advSt ω then 1 else 0) * (2 ^ 128) ≤
+      (s * deg) * rssMultiSessionCard p.sigBytes s
+  | 0, _, _ => by simp [multiSessionBadHit, rssMultiSessionCard, finSum]
+  | s + 1, cl, advSt => by
+    let F := rssFullSessionCard p.sigBytes
+    let M := rssMultiSessionCard p.sigBytes s
+    change finSum (F * M) (fun ω => if multiSessionBadHit p cIdx deg A (s + 1) cl advSt ω then 1 else 0) * (2 ^ 128) ≤
+      ((s + 1) * deg) * (F * M)
+    rw [finSum_prod_eq F M]
+    have hSplitOr :
+        finSum F (fun cur => finSum M (fun rest =>
+          if multiSessionBadHit p cIdx deg A (s + 1) cl advSt (pairFin cur rest) then 1 else 0)) ≤
+        finSum F (fun cur => finSum M (fun _ =>
+          if sessionBadHit p cIdx deg A cl advSt cur then 1 else 0)) +
+        finSum F (fun cur => finSum M (fun rest =>
+          let (cl1, advSt1, _) :=
+            execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt
+              (decodeSingleFullTape p.sigBytes cur)
+          if multiSessionBadHit p cIdx deg A s cl1 advSt1 rest then 1 else 0)) := by
+      apply finSum_le_add_finSum
+      intro cur
+      apply finSum_le_add_finSum
+      intro rest
+      rw [multiSessionBadHit_pairFin p cIdx deg A s cl advSt cur rest]
+      let b1 := sessionBadHit p cIdx deg A cl advSt cur
+      let next := execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt
+                    (decodeSingleFullTape p.sigBytes cur)
+      let b2 := multiSessionBadHit p cIdx deg A s next.1 next.2.1 rest
+      change (if (b1 || b2) = true then 1 else 0) ≤
+             (if b1 = true then 1 else 0) + (if b2 = true then 1 else 0)
+      cases b1 <;> cases b2 <;> decide
+    have hMulSplit := Nat.mul_le_mul_right (2 ^ 128) hSplitOr
+    rw [Nat.add_mul] at hMulSplit
+    have hTerm1 :
+        finSum F (fun cur => finSum M (fun _ =>
+          if sessionBadHit p cIdx deg A cl advSt cur then 1 else 0)) * (2 ^ 128) ≤
+        deg * (F * M) := by
+      have hConstM :
+          finSum F (fun cur => finSum M (fun _ =>
+            if sessionBadHit p cIdx deg A cl advSt cur then 1 else 0)) =
+          finSum F (fun cur => (if sessionBadHit p cIdx deg A cl advSt cur then 1 else 0) * M) := by
+        apply finSum_congr
+        intro cur
+        rw [finSum_const, Nat.mul_comm]
+      rw [hConstM, finSum_mul_right_local]
+      have hB1 := sessionBadHit_finSum_le p cIdx deg A cl advSt
+      have hScaled := Nat.mul_le_mul_right (M * (2 ^ 128)) hB1
+      have hL : finSum F (fun cur => if sessionBadHit p cIdx deg A cl advSt cur then 1 else 0) * M * (2 ^ 128) =
+          finSum F (fun cur => if sessionBadHit p cIdx deg A cl advSt cur then 1 else 0) * (M * (2 ^ 128)) :=
+        Nat.mul_assoc _ _ _
+      have hR : rssPadSessionCard p.sigBytes * deg * (M * (2 ^ 128)) = deg * (F * M) := by
+        dsimp only [F, rssFullSessionCard]
+        ac_rfl
+      rw [hL, ← hR]
+      exact hScaled
+    have hTerm2 :
+        finSum F (fun cur => finSum M (fun rest =>
+          let (cl1, advSt1, _) :=
+            execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt
+              (decodeSingleFullTape p.sigBytes cur)
+          if multiSessionBadHit p cIdx deg A s cl1 advSt1 rest then 1 else 0)) * (2 ^ 128) ≤
+        (s * deg) * (F * M) := by
+      rw [← finSum_mul_right_local]
+      have hCap : finSum F (fun _ => (s * deg) * M) = F * ((s * deg) * M) := finSum_const F _
+      have hLeCap :
+          finSum F (fun cur => finSum M (fun rest =>
+            let (cl1, advSt1, _) :=
+              execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt
+                (decodeSingleFullTape p.sigBytes cur)
+            if multiSessionBadHit p cIdx deg A s cl1 advSt1 rest then 1 else 0) * (2 ^ 128)) ≤
+          finSum F (fun _ => (s * deg) * M) := by
+        apply finSum_le_finSum
+        intro cur
+        exact multiSessionBadHit_finSum_bound p cIdx deg A s _ _
+      have hR : F * ((s * deg) * M) = (s * deg) * (F * M) := by ac_rfl
+      exact Nat.le_trans hLeCap (hCap ▸ hR ▸ Nat.le_refl _)
+    have hSum := Nat.add_le_add hTerm1 hTerm2
+    have hRhs : deg * (F * M) + (s * deg) * (F * M) = ((s + 1) * deg) * (F * M) := by
+      rw [Nat.succ_mul, Nat.add_comm (s * deg) deg, Nat.add_mul]
+    exact Nat.le_trans hMulSplit (hRhs ▸ hSum)
+
+/-- **Whole-Transcript Multi-Session Lockstep Equivalence (`multiSession_real_eq_ideal_unless_bad`)**:
+    Across ANY `Q_s` adaptively scheduled sessions, whenever `multiSessionBadHit ... ω = false`,
+    `RealProtocolExec` on `ω` and `IdealFunctionalityExec` (`IdealTsig` + `Sim_RssSlh`) on
+    `(multiSessionTapeEquiv ...).toFun ω` emit the **EXACT SAME `ExecTranscript AdvState`**! -/
+theorem multiSession_real_eq_ideal_unless_bad {AdvState : Type}
+    (p : Fips205Params) (hWf : p.wellFormed = true)
+    (cIdx : Fin 3) (deg : Nat)
+    {seedSh prfSh : RssByteShares}
+    (hSeedWf : seedSh.WellFormed) (hPrfWf : prfSh.WellFormed)
+    (pkSeed : List UInt8)
+    (A : UcRushingAdversary AdvState) :
+    ∀ (s : Nat)
+      (cl : RealClusterState SlhPublicKey RssPartyKeyShare)
+      (icl : IdealClusterState SlhPublicKey)
+      (advSt : AdvState),
+      RealIdealClusterMatch cIdx seedSh prfSh cl icl →
+      cl.tsig.pk = (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).2 →
+      ∀ (ω : Fin (rssMultiSessionCard p.sigBytes s)),
+        multiSessionBadHit p cIdx deg A s cl advSt ω = false →
+        let sk := (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).1
+        (RealProtocolExec (rssSlhInteractiveProtocol p cIdx deg) A s
+          (decodeMultiSessionTapes p.sigBytes s ω) cl advSt).2 =
+        (IdealFunctionalityExec (slhIdealSignOracle p sk) (Sim_RssSlh p cIdx deg) A s
+          (decodeMultiSessionTapes p.sigBytes s ((multiSessionTapeEquiv p cIdx deg A s cl advSt).toFun ω))
+          icl advSt).2
+  | 0, _, _, _, _, _, _, _ => rfl
+  | s + 1, cl, icl, advSt, hMatch, hPkKey, ω, hNoBad => by
+    let hMPos := rssMultiSessionCard_pos p.sigBytes s
+    let cur := splitFinLeft hMPos ω
+    let rest := splitFinRight hMPos ω
+    have hOrFalse :
+        (sessionBadHit p cIdx deg A cl advSt cur ||
+          multiSessionBadHit p cIdx deg A s
+            (execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt (decodeSingleFullTape p.sigBytes cur)).1
+            (execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt (decodeSingleFullTape p.sigBytes cur)).2.1
+            rest) = false := hNoBad
+    have hCurFalse : sessionBadHit p cIdx deg A cl advSt cur = false := by
+      cases hc : sessionBadHit p cIdx deg A cl advSt cur
+      · rfl
+      · rw [hc] at hOrFalse; simp at hOrFalse
+    have hRestFalse :
+        multiSessionBadHit p cIdx deg A s
+          (execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt (decodeSingleFullTape p.sigBytes cur)).1
+          (execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt (decodeSingleFullTape p.sigBytes cur)).2.1
+          rest = false := by
+      rw [hCurFalse, Bool.false_or] at hOrFalse
+      exact hOrFalse
+    have hHead0 :
+        decodeMultiSessionTapes p.sigBytes (s + 1) ω 0 = decodeSingleFullTape p.sigBytes cur := rfl
+    have hHeadSim0 :
+        decodeMultiSessionTapes p.sigBytes (s + 1)
+          ((multiSessionTapeEquiv p cIdx deg A (s + 1) cl advSt).toFun ω) 0 =
+        decodeSingleFullTape p.sigBytes ((adaptiveSingleSessionEquiv p cIdx A cl advSt).toFun cur) := by
+      simp only [multiSessionTapeEquiv, depProdFinEquiv, decodeMultiSessionTapes,
+                 decodeSingleFullTape, splitFinLeft_pairFin]
+      rfl
+    have hTailReal :
+        (fun i => decodeMultiSessionTapes p.sigBytes (s + 1) ω (i + 1)) =
+        decodeMultiSessionTapes p.sigBytes s rest := rfl
+    have hTailSim :
+        (fun i => decodeMultiSessionTapes p.sigBytes (s + 1)
+          ((multiSessionTapeEquiv p cIdx deg A (s + 1) cl advSt).toFun ω) (i + 1)) =
+        decodeMultiSessionTapes p.sigBytes s
+          ((multiSessionTapeEquiv p cIdx deg A s
+            (execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt (decodeSingleFullTape p.sigBytes cur)).1
+            (execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt (decodeSingleFullTape p.sigBytes cur)).2.1).toFun rest) := by
+      funext i
+      simp only [multiSessionTapeEquiv, depProdFinEquiv, decodeMultiSessionTapes,
+                 splitFinRight_pairFin]
+      rfl
+    have hStep := execRealSession_eq_execIdealSession_unless_bad p hWf cIdx deg
+      hSeedWf hPrfWf pkSeed A cl icl advSt hMatch hPkKey cur hCurFalse
+    dsimp only at hStep
+    rcases hR1 : execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt (decodeSingleFullTape p.sigBytes cur)
+      with ⟨cl1, advSt1, rec1⟩
+    rcases hI1 : execIdealSession (slhIdealSignOracle p (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).1)
+      (Sim_RssSlh p cIdx deg) A icl advSt
+      (decodeSingleFullTape p.sigBytes ((adaptiveSingleSessionEquiv p cIdx A cl advSt).toFun cur))
+      with ⟨icl1, advStI1, recI1⟩
+    rw [hR1, hI1] at hStep
+    dsimp only at hStep
+    obtain ⟨rfl, rfl, hPk1, hMatch1⟩ := hStep
+    rw [hR1] at hRestFalse hTailSim
+    dsimp only at hRestFalse hTailSim
+    intro sk
+    rw [RealProtocolExec_succ, IdealFunctionalityExec_succ, hHead0, hHeadSim0,
+        hTailReal, hTailSim, hR1, hI1]
+    dsimp only
+    have ih := multiSession_real_eq_ideal_unless_bad p hWf cIdx deg hSeedWf hPrfWf pkSeed A
+      s cl1 icl1 advSt1 hMatch1 (hPk1.trans hPkKey) rest hRestFalse
+    dsimp only at ih
+    rw [ih]
+
+/-- **Crown-Jewel Theorem 1 (`rss_slh_real_ideal_view_indistinguishable`)**:
+    Across ANY `Q_cuts` (`Q_s`) adaptively scheduled interactive rushing signing sessions with 1
+    static malicious party `cIdx : Fin 3`, ANY outer calling protocol context `ctx`, ANY distinguisher
+    `D`, and ANY real-world session-mask PRF generator `realPrfTapeGen : Fin prfCard → (Nat → RssSlhSessionTape p.sigBytes)`:
+    1. **Information-Theoretic Uniform-Mask Hybrid Bound**: Between `RealProtocolExec` (with uniform
+       session pads) and `IdealFunctionalityExec` (`IdealTsig` + `sk`-free `Sim_RssSlh`), the entire
+       multi-round, multi-session `ExecTranscript` (including wire `ByteArray`s and `Abort(reason)`
+       outcomes) satisfies `ratLe ... (Q_cuts * deg, 2 ^ 128)`!
+    2. **End-to-End Concrete Real-vs-Ideal Bound**: Composing with `realPrfTapeGen` via
+       `uc_transitive_composition`, the adversary's whole-protocol view advantage is bounded by
+       `ratAdd (Q_cuts * deg, 2 ^ 128) advPrf` (`0` cheat hypotheses, `0 Classical.choice`)! -/
+theorem rss_slh_real_ideal_view_indistinguishable {AdvState OuterView : Type}
+    (p : Fips205Params) (hWf : p.wellFormed = true)
+    (cIdx : Fin 3) (Q_cuts deg : Nat)
+    {seedSh prfSh : RssByteShares}
+    (hSeedWf : seedSh.WellFormed) (hPrfWf : prfSh.WellFormed)
+    (pkSeed : List UInt8)
+    (A : UcRushingAdversary AdvState)
+    (cl : RealClusterState SlhPublicKey RssPartyKeyShare)
+    (icl : IdealClusterState SlhPublicKey)
+    (advSt : AdvState)
+    (hMatch : RealIdealClusterMatch cIdx seedSh prfSh cl icl)
+    (hPkKey : cl.tsig.pk = (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).2)
+    (ctx : OuterCallingContext (ExecTranscript AdvState) OuterView)
+    (D : OuterView → Bool)
+    (prfCard : Nat) (hPrfPos : 0 < prfCard)
+    (realPrfTapeGen : Fin prfCard → (Nat → RssSlhSessionTape p.sigBytes)) :
+    let card := rssMultiSessionCard p.sigBytes Q_cuts
+    let sk := (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).1
+    let realPrfView : Fin prfCard → OuterView := fun κ =>
+      ctx.postProcess (RealProtocolExec (rssSlhInteractiveProtocol p cIdx deg) A Q_cuts
+        (realPrfTapeGen κ) cl advSt).2
+    let hybridUniformView : Fin card → OuterView := fun ω =>
+      ctx.postProcess (RealProtocolExec (rssSlhInteractiveProtocol p cIdx deg) A Q_cuts
+        (decodeMultiSessionTapes p.sigBytes Q_cuts ω) cl advSt).2
+    let idealSimView : Fin card → OuterView := fun ω =>
+      ctx.postProcess (IdealFunctionalityExec (slhIdealSignOracle p sk) (Sim_RssSlh p cIdx deg) A Q_cuts
+        (decodeMultiSessionTapes p.sigBytes Q_cuts ω) icl advSt).2
+    let advPrf := rationalAcceptDiff prfCard realPrfView card hybridUniformView D
+    ratLe (rationalAcceptDiff card hybridUniformView card idealSimView D)
+          (Q_cuts * deg, 2 ^ 128) ∧
+    ratLe (rationalAcceptDiff prfCard realPrfView card idealSimView D)
+          (ratAdd (Q_cuts * deg, 2 ^ 128) advPrf) := by
+  intro card sk realPrfView hybridUniformView idealSimView advPrf
+  have hCardPos : 0 < card := rssMultiSessionCard_pos p.sigBytes Q_cuts
+  let bij := multiSessionTapeEquiv p cIdx deg A Q_cuts cl advSt
+  let bad := multiSessionBadHit p cIdx deg A Q_cuts cl advSt
+  have hAgree : ∀ ω : Fin card, bad ω = false → hybridUniformView ω = idealSimView (bij.toFun ω) := by
+    intro ω hBadF
+    dsimp only [hybridUniformView, idealSimView]
+    exact congrArg ctx.postProcess (multiSession_real_eq_ideal_unless_bad p hWf cIdx deg
+      hSeedWf hPrfWf pkSeed A Q_cuts cl icl advSt hMatch hPkKey ω hBadF)
+  have hFund := (bad_event_fundamental_lemma card hCardPos hybridUniformView idealSimView bij bad hAgree D).2.2
+  have hBadLe : ratLe (finSum card (fun ω => if bad ω then 1 else 0), card) (Q_cuts * deg, 2 ^ 128) :=
+    ⟨hCardPos, Nat.two_pow_pos 128, multiSessionBadHit_finSum_bound p cIdx deg A Q_cuts cl advSt⟩
+  have hUniformBound : ratLe (rationalAcceptDiff card hybridUniformView card idealSimView D)
+      (Q_cuts * deg, 2 ^ 128) :=
+    ratLe_trans hFund hBadLe
+  have hPrfRefl : ratLe (rationalAcceptDiff prfCard realPrfView card hybridUniformView D) advPrf :=
+    ⟨Nat.mul_pos hPrfPos hCardPos, Nat.mul_pos hPrfPos hCardPos, Nat.le_refl _⟩
+  have hComp := uc_transitive_composition prfCard card card hPrfPos hCardPos hCardPos
+    (fun κ => (RealProtocolExec (rssSlhInteractiveProtocol p cIdx deg) A Q_cuts (realPrfTapeGen κ) cl advSt).2)
+    (fun ω => (RealProtocolExec (rssSlhInteractiveProtocol p cIdx deg) A Q_cuts (decodeMultiSessionTapes p.sigBytes Q_cuts ω) cl advSt).2)
+    (fun ω => (IdealFunctionalityExec (slhIdealSignOracle p sk) (Sim_RssSlh p cIdx deg) A Q_cuts (decodeMultiSessionTapes p.sigBytes Q_cuts ω) icl advSt).2)
+    ctx D advPrf (Q_cuts * deg, 2 ^ 128) hPrfRefl hUniformBound
+  have hAddComm : ratLe (ratAdd advPrf (Q_cuts * deg, 2 ^ 128)) (ratAdd (Q_cuts * deg, 2 ^ 128) advPrf) := by
+    unfold ratLe ratAdd
+    dsimp only
+    refine ⟨Nat.mul_pos (Nat.mul_pos hPrfPos hCardPos) (Nat.two_pow_pos 128),
+            Nat.mul_pos (Nat.two_pow_pos 128) (Nat.mul_pos hPrfPos hCardPos), ?_⟩
+    have hL : (advPrf.1 * (2 ^ 128) + (Q_cuts * deg) * advPrf.2) * ((2 ^ 128) * advPrf.2) =
+        ((Q_cuts * deg) * advPrf.2 + advPrf.1 * (2 ^ 128)) * (advPrf.2 * (2 ^ 128)) := by
+      rw [Nat.add_comm (advPrf.1 * (2 ^ 128)), Nat.mul_comm (2 ^ 128) advPrf.2]
+    rw [hL]
+    exact Nat.le_refl _
+  exact ⟨hUniformBound, ratLe_trans hComp hAddComm⟩
+
+/-- Right-nested product cardinality `B ^ t = B * (B * ... * 1)` avoiding `Nat.pow` WHNF expansion on `2 ^ 128`. -/
+def towerPadSpaceCard (B : Nat) : Nat → Nat
+  | 0 => 1
+  | t + 1 => B * towerPadSpaceCard B t
+
+private theorem towerPadSpaceCard_pos {B : Nat} (hB : 0 < B) : ∀ (t : Nat), 0 < towerPadSpaceCard B t
+  | 0 => Nat.zero_lt_one
+  | t + 1 => Nat.mul_pos hB (towerPadSpaceCard_pos hB t)
+
+theorem towerPadSpaceCard_eq_pow (B : Nat) : ∀ (t : Nat), towerPadSpaceCard B t = B ^ t
+  | 0 => rfl
+  | t + 1 => by
+    simp only [towerPadSpaceCard, towerPadSpaceCard_eq_pow B t, Nat.pow_succ, Nat.mul_comm]
+
+private def decodeGenericPadPoly {R : Type} [CommRingOps R] (B : Nat) (hB : 0 < B)
+    (dec1 : Fin B → R) : (t : Nat) → Fin (towerPadSpaceCard B t) → ShamirPadPoly R t
+  | 0, _ => ⟨[], rfl⟩
+  | t + 1, idx =>
+    let hRest := towerPadSpaceCard_pos hB t
+    let c0 := dec1 (splitFinLeft hRest idx)
+    let rest := decodeGenericPadPoly B hB dec1 t (splitFinRight hRest idx)
+    ⟨c0 :: rest.1, congrArg Nat.succ rest.2⟩
+
+private def encodeGenericPadPoly {R : Type} [CommRingOps R] (B : Nat)
+    (enc1 : R → Fin B) : (t : Nat) → ShamirPadPoly R t → Fin (towerPadSpaceCard B t)
+  | 0, _ => ⟨0, Nat.zero_lt_one⟩
+  | t + 1, ⟨c0 :: cs, hLen⟩ =>
+    pairFin (enc1 c0) (encodeGenericPadPoly B enc1 t ⟨cs, Nat.succ.inj hLen⟩)
+
+private theorem decode_encode_genericPadPoly {R : Type} [CommRingOps R] (B : Nat) (hB : 0 < B)
+    (dec1 : Fin B → R) (enc1 : R → Fin B) (hLeft : ∀ x : R, dec1 (enc1 x) = x) :
+    ∀ (t : Nat) (P : ShamirPadPoly R t),
+      decodeGenericPadPoly B hB dec1 t (encodeGenericPadPoly B enc1 t P) = P
+  | 0, ⟨[], _⟩ => rfl
+  | t + 1, ⟨c0 :: cs, hLen⟩ => by
+    simp only [encodeGenericPadPoly, decodeGenericPadPoly,
+               splitFinLeft_pairFin, splitFinRight_pairFin, hLeft,
+               decode_encode_genericPadPoly B hB dec1 enc1 hLeft t ⟨cs, Nat.succ.inj hLen⟩]
+
+private theorem encode_decode_genericPadPoly {R : Type} [CommRingOps R] (B : Nat) (hB : 0 < B)
+    (dec1 : Fin B → R) (enc1 : R → Fin B) (hRight : ∀ i : Fin B, enc1 (dec1 i) = i) :
+    ∀ (t : Nat) (idx : Fin (towerPadSpaceCard B t)),
+      encodeGenericPadPoly B enc1 t (decodeGenericPadPoly B hB dec1 t idx) = idx
+  | 0, idx => by
+    have hv : idx.val < 1 := idx.isLt
+    apply Fin.ext
+    change 0 = idx.val
+    omega
+  | t + 1, idx => by
+    simp only [decodeGenericPadPoly, encodeGenericPadPoly, hRight,
+               encode_decode_genericPadPoly B hB dec1 enc1 hRight t]
+    exact pairFin_splitFin (towerPadSpaceCard_pos hB t) idx
+
+/-- **`t`-of-`n` SPDZ Shamir Masked-Opening View Exact Indistinguishability
+    (`spdz_shamir_tower128_masked_view_stat_dist_zero`)**:
+    Over `Tower128` (`GF(2^128)`) with any threshold `t` and `< t` non-zero corrupt evaluation points
+    `corruptPts`, `shamir_rebalanceEquiv` induces an exact bijection over finite degree-`< t` pad
+    polynomials (`Fin (towerPadSpaceCard (2 ^ 128) t)`, cardinality `(2 ^ 128) ^ t`), proving
+    statistical distance **identically `0`** between the real Round-2 masked opening view
+    `(w + P(0), P|_{corruptPts})` of ANY secret wire `w : Tower128` and `simMaskedOpeningView`! -/
+def decodeTower128PadPoly (t : Nat) : Fin (towerPadSpaceCard (2 ^ 128) t) → ShamirPadPoly Tower128 t :=
+  decodeGenericPadPoly (2 ^ 128) (Nat.two_pow_pos 128) (fun i => unpackTower 7 (BitVec.ofFin i)) t
+
+def encodeTower128PadPoly (t : Nat) : ShamirPadPoly Tower128 t → Fin (towerPadSpaceCard (2 ^ 128) t) :=
+  encodeGenericPadPoly (2 ^ 128) (fun x => (packTower 7 x).toFin) t
+
+theorem spdz_shamir_tower128_masked_view_stat_dist_zero
+    (t : Nat) (corruptPts : List Tower128) (w : Tower128)
+    (hCard : corruptPts.length + 1 ≤ t)
+    (hNonZero : ∀ c ∈ corruptPts, c ≠ towerZero 7)
+    (D : (Tower128 × List Tower128) → Bool) :
+    let N := towerPadSpaceCard (2 ^ 128) t
+    let realView : Fin N → Tower128 × List Tower128 :=
+      fun idx => realMaskedOpeningView corruptPts w (decodeTower128PadPoly t idx)
+    let simView : Fin N → Tower128 × List Tower128 :=
+      fun idx => simMaskedOpeningView corruptPts (decodeTower128PadPoly t idx)
+    N = (2 ^ 128) ^ t ∧
+    natAbsDiff (distAcceptCount N realView D) (distAcceptCount N simView D) = 0 ∧
+    ratLe (rationalAcceptDiff N realView N simView D) (0, 1) := by
+  intro N realView simView
+  have hNPos : 0 < N := towerPadSpaceCard_pos (Nat.two_pow_pos 128) t
+  have hInv : ∀ x : Tower128, x ≠ CommRingOps.zero → CommRingOps.mul x (towerInv 7 x) = CommRingOps.one :=
+    fun x hx => towerMul_inv 7 x hx
+  have hSimBij := tsigSimulator_view_bijection_indep_of_secret (towerInv 7) hInv t corruptPts w hCard hNonZero
+  let eqvPoly := shamir_rebalanceEquiv (towerInv 7) t corruptPts w hCard
+  have hDecEnc : ∀ P : ShamirPadPoly Tower128 t, decodeTower128PadPoly t (encodeTower128PadPoly t P) = P :=
+    decode_encode_genericPadPoly (2 ^ 128) (Nat.two_pow_pos 128)
+      (fun i => unpackTower 7 (BitVec.ofFin i))
+      (fun x => (packTower 7 x).toFin)
+      (fun x => by simp only [BitVec.ofFin_toFin, unpackTower_packTower])
+      t
+  have hEncDec : ∀ idx : Fin N, encodeTower128PadPoly t (decodeTower128PadPoly t idx) = idx :=
+    encode_decode_genericPadPoly (2 ^ 128) (Nat.two_pow_pos 128)
+      (fun i => unpackTower 7 (BitVec.ofFin i))
+      (fun x => (packTower 7 x).toFin)
+      (fun i => by simp only [packTower_unpackTower, BitVec.toFin_ofFin])
+      t
+  let bijFin : SimpleEquiv (Fin N) (Fin N) :=
+    { toFun := fun idx => encodeTower128PadPoly t (eqvPoly.toFun (decodeTower128PadPoly t idx))
+      invFun := fun idx => encodeTower128PadPoly t (eqvPoly.invFun (decodeTower128PadPoly t idx))
+      left_inv := fun idx => by rw [hDecEnc, eqvPoly.left_inv, hEncDec]
+      right_inv := fun idx => by rw [hDecEnc, eqvPoly.right_inv, hEncDec] }
+  have hAgree : ∀ idx : Fin N, (false : Bool) = false → realView idx = simView (bijFin.toFun idx) := by
+    intro idx _
+    dsimp only [realView, simView, bijFin]
+    rw [hDecEnc]
+    exact (hSimBij.2.2 (decodeTower128PadPoly t idx)).symm
+  have hFund := bad_event_fundamental_lemma N hNPos realView simView bijFin (fun _ => false) hAgree D
+  have hBad0 : finSum N (fun _ : Fin N => if (false : Bool) = true then 1 else 0) = 0 := by
+    have h := finSum_const N 0; rw [Nat.mul_zero] at h; exact h
+  rw [hBad0] at hFund
+  have hZeroDiff : natAbsDiff (distAcceptCount N realView D) (distAcceptCount N simView D) = 0 :=
+    Nat.eq_zero_of_le_zero hFund.1
+  refine ⟨towerPadSpaceCard_eq_pow (2 ^ 128) t, hZeroDiff, ?_⟩
+  exact ratLe_trans hFund.2.2 ⟨hNPos, Nat.zero_lt_one, by simp⟩
+
+/-- **Inhabitedness Witness for Theorem 1 (`inhabited_rss_slh_real_ideal_uc`)**:
+    Exhibits a concrete 2-of-3 RSS cluster on `slhDsaShake128f` with corrupt Party `0`, honest
+    approvers `[1, 2]`, and active rushing adversary `A`, satisfying every premise of
+    `rss_slh_real_ideal_view_indistinguishable` (`Q_cuts = 2, deg = 4`). -/
+theorem inhabited_rss_slh_real_ideal_uc :
+    ∃ (cl : RealClusterState SlhPublicKey RssPartyKeyShare)
+      (icl : IdealClusterState SlhPublicKey)
+      (seedSh prfSh : RssByteShares)
+      (pkSeed : List UInt8),
+      seedSh.WellFormed ∧ prfSh.WellFormed ∧
+      RealIdealClusterMatch ⟨0, by decide⟩ seedSh prfSh cl icl ∧
+      cl.tsig.pk = (slhKeygenInternal slhDsaShake128f
+        (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).2 ∧
+      validThresholdApproval cl.tsig [1, 2] = true := by
+  let seedSh : RssByteShares := ⟨List.replicate 16 1, List.replicate 16 2, List.replicate 16 3⟩
+  let prfSh : RssByteShares := ⟨List.replicate 16 4, List.replicate 16 5, List.replicate 16 6⟩
+  let pkSeed : List UInt8 := List.replicate 16 7
+  let pk := (slhKeygenInternal slhDsaShake128f
+              (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).2
+  let tsig : IdealTsigState SlhPublicKey (List UInt8) :=
+    ⟨pk, 2, 3, [0], [], []⟩
+  let wal : WalLatchState := initWalLatchState (slhPkDigest pk)
+  let cl : RealClusterState SlhPublicKey RssPartyKeyShare :=
+    ⟨tsig, wal, 0, dealHonestRssVault ⟨0, by decide⟩ seedSh prfSh⟩
+  let icl : IdealClusterState SlhPublicKey := ⟨tsig, wal, 0⟩
+  have hS : seedSh.WellFormed := ⟨rfl, rfl⟩
+  have hP : prfSh.WellFormed := ⟨rfl, rfl⟩
+  have hMatch : RealIdealClusterMatch ⟨0, by decide⟩ seedSh prfSh cl icl :=
+    ⟨rfl, rfl, rfl, rfl, rfl, rfl, fun _ => rfl⟩
+  have hVal : validThresholdApproval cl.tsig [1, 2] = true := by decide +kernel
+  exact ⟨cl, icl, seedSh, prfSh, pkSeed, hS, hP, hMatch, rfl, hVal⟩
+
+/-! ## 4. Crown-Jewel Theorem 2: Interactive Rushing Threshold `EUF-CMA` Reduction (`0 Classical.choice`) -/
+
+/-- Deterministic child root signed by the WOTS+ key at `(layer, tree, leaf)` in NIST `FIPS 205 SLH-DSA`:
+    - `layer = 0`: signs the fixed FORS public key `fipsForsPkGen p skSeed pkSeed tree leaf`;
+    - `layer = l + 1`: signs the layer-`l` XMSS subtree root at `childTree = tree * 2^hp + leaf`.
+    Because `SLH-DSA` is a stateless hypertree of deterministic subtrees, **no** WOTS+ keypair ever
+    signs more than this single `n`-byte root across any number of signing sessions `Q_s`! -/
+def honestSlhWotsMsg (p : Fips205Params) (skSeed pkSeed : List UInt8)
+    (layer tree leaf : Nat) : List UInt8 :=
+  match layer with
+  | 0 => fipsForsPkGen p skSeed pkSeed tree leaf
+  | l + 1 => fipsXmssNode p skSeed pkSeed l (tree * (2 ^ p.hp) + leaf) p.hp 0
+
+/-- **1. `ActiveConsistencySoundnessBreak`**:
+    Explicit transcript-bound witness that in some session `rec ∈ tr.sessions`, the rushing corrupt
+    party `cIdx` transmitted a non-zero `GF(2^128)` (`Tower128`) wire deviation batch `deltas` of
+    degree `≤ deg` in Round 2 AND slipped past `preCutBarrier` into Round 3 (`rec.honestRound3 ≠ []`). -/
+structure ActiveConsistencySoundnessBreak {AdvState : Type}
+    (cIdx : Fin 3) (deg : Nat) (tr : ExecTranscript AdvState) where
+  sessRec        : SessionWireRecord
+  hMem           : sessRec ∈ tr.sessions
+  cWire2         : ByteArray
+  hWireMem       : (cIdx.val, cWire2) ∈ sessRec.corruptRound2
+  nonceC         : List UInt8
+  deltas         : List Tower128
+  hParse         : parseCorruptRound2Wire deg cWire2 = some (nonceC, deltas)
+  hDeg           : deltas.length ≤ deg
+  devElem        : Tower128
+  hDevMem        : devElem ∈ deltas
+  hDevNonzero    : devElem ≠ towerZero 7
+  hPassedBarrier : sessRec.honestRound3 ≠ []
+
+/-- **2. `XmssMerkleTcrBreak`**:
+    Explicit `SHAKE256` collision (`in1 ≠ in2`, `shake256Xof p.n in1 = shake256Xof p.n in2`) on an
+    XMSS `.tree` Merkle internal node hash under `pk.pkSeed`. -/
+structure XmssMerkleTcrBreak (p : Fips205Params) (pk : SlhPublicKey) where
+  coll      : Fips205ShakeCollision p.n
+  hSeedPref : pk.pkSeed <+: coll.in1 ∧ pk.pkSeed <+: coll.in2
+
+/-- **3. `WotsChainSmTcrBreak`**:
+    Explicit WOTS+ multi-target security break at a hypertree coordinate `(layer < p.d, tree, leaf < 2^hp)`
+    bound directly to `honestSlhWotsMsg p sk.skSeed sk.pkSeed layer tree leaf` (`0` free message parameter!):
+    either a `SHAKE256` tweakable-hash collision (`wotsHash` / `wotsPk`) OR a backward chain preimage
+    inverting `fipsF` strictly upstream of the honest revealed step `d₁ > 0`. -/
+inductive WotsChainSmTcrBreak (p : Fips205Params) (sk : SlhSecretKey) : Type where
+  | wotsHashCollision (coll : Fips205ShakeCollision p.n)
+  | wotsBackwardPreimage
+      (layer tree leaf : Nat)
+      (hLayerLt : layer < p.d)
+      (hLeafLt : leaf < 2 ^ p.hp)
+      (brk : Fips205ChainPreimageBreak p sk.pkSeed sk.skSeed
+               (honestSlhWotsMsg p sk.skSeed sk.pkSeed layer tree leaf) layer tree leaf)
+
+/-- **4. `PrfMsgBreak`**:
+    Explicit `SHAKE256` `H_msg` multi-target collision (`in1 ≠ in2`, `shake256Xof p.m in1 = shake256Xof p.m in2`)
+    between the forged `(sigStar.rRand, mStar)` and a quorum-approved session `(rRand_r, req.msg)` with `req.msg ≠ mStar`. -/
+structure PrfMsgBreak (p : Fips205Params) where
+  coll : Fips205ShakeCollision p.m
+
+/-- **5. `Fips205ForsItsrBreak` (NIST `FIPS 205` / `SPHINCS+` Interleaved Target Subset Resilience Break)**:
+    Explicit witness bound to `(p, sk, clInit, tr, mStar, sigStar)` showing EITHER:
+    - `forsHashCollision`: an explicit `SHAKE256` collision in `.forsTree` or `.forsRoots`;
+    - `forsUnqueriedPrfRecovery`: `sigStar` recovers the exact secret `sk.skSeed` `PRF` leaf key
+      `fipsPrf p.n sk.pkSeed sk.skSeed (mkFipsAdrs 0 idxTree .forsPrf idxLeaf 0 globalLeaf)` at a
+      FORS coordinate `(idxTree, idxLeaf, treeIdx, leafOffset)` **never opened** in any Round-3 session of `tr`;
+    - `forsInterleavedSubsetCover`: `0 < p.k` and every one of the `p.k` FORS leaf coordinates of
+      `H_msg(sigStar.rRand, pkSeed, pkRoot, mStar)` is covered by distinct-digest approved Round-3
+      sessions in `tr.sessions` (provably `False` on `tr.sessions = []` or whenever ≥ 1 FORS tree hits a fresh leaf!). -/
+inductive Fips205ForsItsrBreak {AdvState : Type}
+    (p : Fips205Params) (sk : SlhSecretKey)
+    (clInit : RealClusterState SlhPublicKey RssPartyKeyShare)
+    (tr : ExecTranscript AdvState)
+    (mStar : List UInt8) (sigStar : SlhSignature) : Type where
+  | forsHashCollision (coll : Fips205ShakeCollision p.n)
+  | forsUnqueriedPrfRecovery
+      (treeIdx : Nat)
+      (hTreeLt : treeIdx < p.k)
+      (hSkRecovered :
+        let dStar := fipsHMsg p.m sigStar.rRand sk.pkSeed sk.pkRoot mStar
+        let (mdStar, idxTreeStar, idxLeafStar) := fipsSplitDigest p dStar
+        let leafOffset := (base2b mdStar p.a p.k).getD treeIdx 0
+        (sigStar.forsSig.getD treeIdx ⟨[], []⟩).skVal =
+          fipsPrf p.n sk.pkSeed sk.skSeed
+            (mkFipsAdrs 0 idxTreeStar .forsPrf idxLeafStar 0 (treeIdx * (2 ^ p.a) + leafOffset)))
+      (hNeverOpened :
+        let dStar := fipsHMsg p.m sigStar.rRand sk.pkSeed sk.pkRoot mStar
+        let (mdStar, idxTreeStar, idxLeafStar) := fipsSplitDigest p dStar
+        let leafOffset := (base2b mdStar p.a p.k).getD treeIdx 0
+        ∀ rec ∈ tr.sessions,
+          validThresholdApproval clInit.tsig rec.request.honestApprovers = true →
+          rec.honestRound3 ≠ [] →
+          let rRec := fipsPrfMsg p.n sk.skPrf rec.request.optRand rec.request.msg
+          let dRec := fipsHMsg p.m rRec sk.pkSeed sk.pkRoot rec.request.msg
+          let (mdRec, tRec, lRec) := fipsSplitDigest p dRec
+          ¬ (tRec = idxTreeStar ∧ lRec = idxLeafStar ∧ (base2b mdRec p.a p.k).getD treeIdx 0 = leafOffset))
+  | forsInterleavedSubsetCover
+      (hKPos : 0 < p.k)
+      (hAllCovered :
+        let dStar := fipsHMsg p.m sigStar.rRand sk.pkSeed sk.pkRoot mStar
+        let (mdStar, idxTreeStar, idxLeafStar) := fipsSplitDigest p dStar
+        ∀ j : Nat, j < p.k →
+          ∃ rec ∈ tr.sessions,
+            validThresholdApproval clInit.tsig rec.request.honestApprovers = true ∧
+            rec.honestRound3 ≠ [] ∧
+            rec.request.msg ≠ mStar ∧
+            let rRec := fipsPrfMsg p.n sk.skPrf rec.request.optRand rec.request.msg
+            let dRec := fipsHMsg p.m rRec sk.pkSeed sk.pkRoot rec.request.msg
+            let (mdRec, tRec, lRec) := fipsSplitDigest p dRec
+            dRec ≠ dStar ∧
+            tRec = idxTreeStar ∧ lRec = idxLeafStar ∧
+            (base2b mdRec p.a p.k).getD j 0 = (base2b mdStar p.a p.k).getD j 0)
+
+/-- Constructive (`Type`-valued, `0 Classical.choice`) union of the 5 concrete security break witnesses. -/

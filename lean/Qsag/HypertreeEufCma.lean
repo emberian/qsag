@@ -4211,3 +4211,1717 @@ structure CheckedStatefulWotsTswWitness (suite : TweakableHashSuite) (params : P
       forgedDigit < (statefulLogLayerDigits suite params sk e i').getD chainIdx 0
 
 /-- Project a transcript-indexed `CheckedStatefulWotsTswWitness` to `WotsBackwardInversionWitness`. -/
+def CheckedStatefulWotsTswWitness.toWotsBackwardInversionWitness
+    {suite : TweakableHashSuite} {params : PqHashParams}
+    {sk : PqSecretKey} {log : List (Nat × List UInt8 × PqHashSig)}
+    {msgStar : List UInt8} {sigStar : PqHashSig}
+    (w : CheckedStatefulWotsTswWitness suite params sk log msgStar sigStar) :
+    WotsBackwardInversionWitness suite sk.pkSeed :=
+  let g := sigStar.leafGlobalIdx / 2 ^ (w.layerIdx * params.subtreeHeight)
+  let tree := UInt64.ofNat (g / 2 ^ params.subtreeHeight)
+  let kp := g % 2 ^ params.subtreeHeight
+  { layer := UInt32.ofNat w.layerIdx
+    tree := tree
+    kp := kp
+    chain := w.chainIdx
+    step := w.forgedDigit
+    revealedStep := w.forgedDigit + 1
+    step_lt := Nat.lt_succ_self w.forgedDigit
+    preimage := (sigStar.layerSigs.getD w.layerIdx ⟨0, [], []⟩).wotsChains.getD w.chainIdx []
+    revealedVal := honestChainNode suite sk (UInt32.ofNat w.layerIdx) tree kp w.chainIdx (w.forgedDigit + 1)
+    invertsChain := w.invertsHonest }
+
+private def thCall_eq_psum (suite : TweakableHashSuite)
+    {t₁ p₁ : List UInt8} {a₁ : HashAdrs} {xs₁ : List (List UInt8)}
+    {t₂ p₂ : List UInt8} {a₂ : HashAdrs} {xs₂ : List (List UInt8)}
+    (hEq : thCall suite t₁ p₁ a₁ xs₁ = thCall suite t₂ p₂ a₂ xs₂) :
+    PSum (t₁ = t₂ ∧ p₁ = p₂ ∧ a₁ = a₂ ∧ xs₁ = xs₂)
+         (thPreimage t₁ p₁ a₁ xs₁ ≠ thPreimage t₂ p₂ a₂ xs₂ ∧
+          suite.rawHash (thPreimage t₁ p₁ a₁ xs₁) = suite.rawHash (thPreimage t₂ p₂ a₂ xs₂)) :=
+  if hPre : thPreimage t₁ p₁ a₁ xs₁ = thPreimage t₂ p₂ a₂ xs₂ then
+    .inl (thPreimage_injective hPre)
+  else
+    .inr ⟨hPre, by rw [← thCall_eq, ← thCall_eq]; exact hEq⟩
+
+private def boundedSearchPSum (p : Nat → Prop) (hDec : ∀ i, PSum (p i) (¬ p i)) :
+    (n : Nat) → PSum { i : Nat // i < n ∧ p i } (∀ i, i < n → ¬ p i)
+  | 0 => .inr (fun i hi => absurd hi (Nat.not_lt_zero i))
+  | n + 1 =>
+    match boundedSearchPSum p hDec n with
+    | .inl ⟨i, hi, hp⟩ => .inl ⟨i, ⟨Nat.lt_succ_of_lt hi, hp⟩⟩
+    | .inr hNone =>
+      match hDec n with
+      | .inl hp => .inl ⟨n, ⟨Nat.lt_succ_self n, hp⟩⟩
+      | .inr hn => .inr (fun i hi => by
+          rcases Nat.lt_or_eq_of_le (Nat.le_of_lt_succ hi) with hlt | heq
+          · exact hNone i hlt
+          · rw [heq]; exact hn)
+
+private def listSearchPSum {α : Type} (p : α → Prop) (hDec : ∀ a, PSum (p a) (¬ p a)) :
+    (l : List α) → PSum { a : α // a ∈ l ∧ p a } (∀ a, a ∈ l → ¬ p a)
+  | [] => .inr (fun _ h => by cases h)
+  | x :: xs =>
+    match hDec x with
+    | .inl hp => .inl ⟨x, ⟨List.mem_cons_self, hp⟩⟩
+    | .inr hn =>
+      match listSearchPSum p hDec xs with
+      | .inl ⟨a, ⟨ha, hp⟩⟩ => .inl ⟨a, ⟨List.mem_cons_of_mem x ha, hp⟩⟩
+      | .inr hNone => .inr (fun a ha => by
+          rcases List.mem_cons.mp ha with heq | hTl
+          · rw [heq]; exact hn
+          · exact hNone a hTl)
+
+private def walkMerkle_meets_honest_psum (suite : TweakableHashSuite) (pkSeed : List UInt8)
+    (layer : UInt32) (tree : UInt64) (kind : AdrsKind) (leafFn : Nat → List UInt8) (C : Type)
+    (mkCol : ∀ (h n : Nat) (forged : List UInt8),
+      forged ≠ thPreimage tagThH pkSeed ⟨layer, tree, kind, 0, UInt32.ofNat (h + 1), UInt32.ofNat n⟩
+        [computeMerkleNode suite pkSeed layer tree kind leafFn h (2 * n),
+         computeMerkleNode suite pkSeed layer tree kind leafFn h (2 * n + 1)] →
+      suite.rawHash forged = suite.rawHash
+        (thPreimage tagThH pkSeed ⟨layer, tree, kind, 0, UInt32.ofNat (h + 1), UInt32.ofNat n⟩
+          [computeMerkleNode suite pkSeed layer tree kind leafFn h (2 * n),
+           computeMerkleNode suite pkSeed layer tree kind leafFn h (2 * n + 1)]) → C) :
+    ∀ (h nodeIdx localIdx : Nat) (leaf : List UInt8) (path : List (List UInt8)),
+      localIdx < 2 ^ h →
+      walkMerkleAuthPath suite pkSeed layer tree kind h nodeIdx localIdx leaf path =
+        some (computeMerkleNode suite pkSeed layer tree kind leafFn h nodeIdx) →
+      PSum (leaf = leafFn (nodeIdx * 2 ^ h + localIdx)) C
+  | 0, nodeIdx, localIdx, leaf, path, hLt, hW =>
+    match path, hW with
+    | [], hW => by
+      simp only [walkMerkleAuthPath, computeMerkleNode, Option.some.injEq] at hW
+      have h0 : localIdx = 0 := by rw [Nat.pow_zero] at hLt; omega
+      exact .inl (by rw [h0, Nat.pow_zero, Nat.mul_one, Nat.add_zero]; exact hW)
+    | _ :: _, hW => False.elim (by simp [walkMerkleAuthPath] at hW)
+  | h + 1, nodeIdx, localIdx, leaf, path, hLt, hW =>
+    match path, hW with
+    | [], hW => False.elim (by simp [walkMerkleAuthPath] at hW)
+    | sib :: rest, hW =>
+      have hMul : nodeIdx * 2 ^ (h + 1) = (2 * nodeIdx) * 2 ^ h := by
+        rw [Nat.pow_succ, ← Nat.mul_assoc, Nat.mul_comm (nodeIdx * 2 ^ h) 2, Nat.mul_assoc]
+      if hHalf : localIdx < 2 ^ h then
+        match hSub : walkMerkleAuthPath suite pkSeed layer tree kind h (2 * nodeIdx) localIdx leaf rest with
+        | none =>
+          False.elim (by simp only [walkMerkleAuthPath, hHalf, ↓reduceIte, hSub] at hW; cases hW)
+        | some sub =>
+          have hCallEq : thCall suite tagThH pkSeed ⟨layer, tree, kind, 0, UInt32.ofNat (h + 1), UInt32.ofNat nodeIdx⟩ [sub, sib] =
+              thCall suite tagThH pkSeed ⟨layer, tree, kind, 0, UInt32.ofNat (h + 1), UInt32.ofNat nodeIdx⟩
+                [computeMerkleNode suite pkSeed layer tree kind leafFn h (2 * nodeIdx),
+                 computeMerkleNode suite pkSeed layer tree kind leafFn h (2 * nodeIdx + 1)] := by
+            rw [computeMerkleNode_succ] at hW
+            simp only [walkMerkleAuthPath, hHalf, ↓reduceIte, hSub, Option.some.injEq] at hW
+            exact hW
+          match thCall_eq_psum suite hCallEq with
+          | .inl ⟨_, _, _, hArgs⟩ =>
+            have hSubEq : walkMerkleAuthPath suite pkSeed layer tree kind h (2 * nodeIdx) localIdx leaf rest =
+                some (computeMerkleNode suite pkSeed layer tree kind leafFn h (2 * nodeIdx)) := by
+              simp only [List.cons.injEq, and_true] at hArgs
+              rw [← hArgs.1]; exact hSub
+            match walkMerkle_meets_honest_psum suite pkSeed layer tree kind leafFn C mkCol
+                    h (2 * nodeIdx) localIdx leaf rest hHalf hSubEq with
+            | .inl hLeaf => .inl (by rw [hMul]; exact hLeaf)
+            | .inr c => .inr c
+          | .inr ⟨hNe, hHash⟩ => .inr (mkCol h nodeIdx _ hNe hHash)
+      else
+        match hSub : walkMerkleAuthPath suite pkSeed layer tree kind h (2 * nodeIdx + 1) (localIdx - 2 ^ h) leaf rest with
+        | none =>
+          False.elim (by simp only [walkMerkleAuthPath, hHalf, ↓reduceIte, hSub] at hW; cases hW)
+        | some sub =>
+          have hSubLt : localIdx - 2 ^ h < 2 ^ h := by rw [Nat.pow_succ] at hLt; omega
+          have hIdxEq : nodeIdx * 2 ^ (h + 1) + localIdx =
+              (2 * nodeIdx + 1) * 2 ^ h + (localIdx - 2 ^ h) := by
+            rw [hMul, Nat.add_mul, Nat.one_mul, Nat.add_assoc, Nat.add_sub_of_le (Nat.le_of_not_lt hHalf)]
+          have hCallEq : thCall suite tagThH pkSeed ⟨layer, tree, kind, 0, UInt32.ofNat (h + 1), UInt32.ofNat nodeIdx⟩ [sib, sub] =
+              thCall suite tagThH pkSeed ⟨layer, tree, kind, 0, UInt32.ofNat (h + 1), UInt32.ofNat nodeIdx⟩
+                [computeMerkleNode suite pkSeed layer tree kind leafFn h (2 * nodeIdx),
+                 computeMerkleNode suite pkSeed layer tree kind leafFn h (2 * nodeIdx + 1)] := by
+            rw [computeMerkleNode_succ] at hW
+            simp only [walkMerkleAuthPath, hHalf, ↓reduceIte, hSub, Option.some.injEq] at hW
+            exact hW
+          match thCall_eq_psum suite hCallEq with
+          | .inl ⟨_, _, _, hArgs⟩ =>
+            have hSubEq : walkMerkleAuthPath suite pkSeed layer tree kind h (2 * nodeIdx + 1)
+                (localIdx - 2 ^ h) leaf rest =
+                some (computeMerkleNode suite pkSeed layer tree kind leafFn h (2 * nodeIdx + 1)) := by
+              simp only [List.cons.injEq, and_true] at hArgs
+              rw [← hArgs.2]; exact hSub
+            match walkMerkle_meets_honest_psum suite pkSeed layer tree kind leafFn C mkCol
+                    h (2 * nodeIdx + 1) (localIdx - 2 ^ h) leaf rest hSubLt hSubEq with
+            | .inl hLeaf => .inl (by rw [hIdxEq]; exact hLeaf)
+            | .inr c => .inr c
+          | .inr ⟨hNe, hHash⟩ => .inr (mkCol h nodeIdx _ hNe hHash)
+
+private def wotsChain_meets_honest_psum (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (log : List (Nat × List UInt8 × PqHashSig))
+    (layer : UInt32) (tree : UInt64) (kp r : Nat) :
+    ∀ (k s : Nat) (x : List UInt8),
+      wotsChainSteps suite sk.pkSeed layer tree kp r s k x =
+        honestChainNode suite sk layer tree kp r (s + k) →
+      PSum (x = honestChainNode suite sk layer tree kp r s)
+           (CheckedStatefulCollisionWitness suite params sk log)
+  | 0, s, x, h => .inl (by rw [wotsChainSteps_zero, Nat.add_zero] at h; exact h)
+  | k + 1, s, x, h =>
+    have hNext : wotsChainSteps suite sk.pkSeed layer tree kp r (s + 1) k
+        (thChainF suite sk.pkSeed ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩ x) =
+        honestChainNode suite sk layer tree kp r ((s + 1) + k) := by
+      rw [wotsChainSteps_succ] at h
+      dsimp only at h
+      rw [show s + (k + 1) = (s + 1) + k by omega] at h
+      exact h
+    match wotsChain_meets_honest_psum suite params sk log layer tree kp r k (s + 1) _ hNext with
+    | .inr col => .inr col
+    | .inl hF =>
+      have hCallEq :
+          thCall suite tagThF sk.pkSeed
+            ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩ [x] =
+          thCall suite tagThF sk.pkSeed
+            ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩
+            [honestChainNode suite sk layer tree kp r s] := by
+        rw [← thChainF_eq, ← thChainF_eq, honestChainNode_succ]
+        exact hF
+      match thCall_eq_psum suite hCallEq with
+      | .inl ⟨_, _, _, hArgs⟩ => .inl (List.cons.inj hArgs).1
+      | .inr ⟨hNe, hHash⟩ =>
+        .inr { honestInput := _, forgedInput := _
+               targetKind := .chainStep layer tree kp r s
+               distinct := hNe, collides := hHash }
+
+private def allChains_meet_honest_psum (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (log : List (Nat × List UInt8 × PqHashSig))
+    (layer : UInt32) (tree : UInt64) (kp : Nat)
+    (digF : List Nat) (chains : List (List UInt8))
+    (hEnds : recoverWotsEndpoints suite params sk.pkSeed layer tree kp digF chains =
+      (List.range params.ell1).map fun r => honestChainNode suite sk layer tree kp r (params.w - 1))
+    (hTsw : checkTargetSum params.w params.ell1 params.targetSum digF = true) :
+    ∀ (m : Nat), m ≤ params.ell1 →
+      PSum (∀ r, r < m → chains.getD r [] = honestChainNode suite sk layer tree kp r (digF.getD r 0))
+           (CheckedStatefulCollisionWitness suite params sk log)
+  | 0, _ => .inl (fun _ hLt => by omega)
+  | m + 1, hmLe =>
+    match allChains_meet_honest_psum suite params sk log layer tree kp digF chains hEnds hTsw m (by omega) with
+    | .inr col => .inr col
+    | .inl hPrev =>
+      have hmLt : m < params.ell1 := by omega
+      have hStepEq :
+          wotsChainSteps suite sk.pkSeed layer tree kp m (digF.getD m 0)
+            (params.w - 1 - digF.getD m 0) (chains.getD m []) =
+          honestChainNode suite sk layer tree kp m (digF.getD m 0 + (params.w - 1 - digF.getD m 0)) := by
+        obtain ⟨hLenF, hBoundF, _⟩ := (checkTargetSum_iff _ _ _ _).mp hTsw
+        have hmLen : m < digF.length := by rw [hLenF]; exact hmLt
+        have hdLt : digF.getD m 0 < params.w := by
+          rw [list_getD_eq_getElem digF 0 hmLen]
+          exact hBoundF _ (List.getElem_mem hmLen)
+        have hSum : digF.getD m 0 + (params.w - 1 - digF.getD m 0) = params.w - 1 := by omega
+        have hAt := congrArg (fun l => l.getD m []) hEnds
+        rw [recoverWotsEndpoints_eq, list_getD_map_range params.ell1 _ [] hmLt,
+            list_getD_map_range params.ell1 _ [] hmLt] at hAt
+        rw [hSum]
+        exact hAt
+      match wotsChain_meets_honest_psum suite params sk log layer tree kp m
+              (params.w - 1 - digF.getD m 0) (digF.getD m 0) (chains.getD m []) hStepEq with
+      | .inr col => .inr col
+      | .inl hM =>
+        .inl (fun r hr => by
+          rcases Nat.lt_or_eq_of_le (Nat.le_of_lt_succ hr) with hlt | rfl
+          · exact hPrev r hlt
+          · exact hM)
+
+/-- Shared constructive layer extractor: from a valid XMSS Merkle walk at layer `i` reaching the
+    honest subtree root, either extracts a `CheckedStatefulCollisionWitness` or proves that every
+    chain `r < params.ell1` in `ls.wotsChains` equals `honestChainNode ... (digF.getD r 0)`. -/
+private def statefulLayerChains_extract (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (log : List (Nat × List UInt8 × PqHashSig))
+    (i G KP : Nat) (T : UInt64) (ls : LayerXmssSig) (digF : List Nat)
+    (hKP : KP = G % 2 ^ params.subtreeHeight)
+    (hTsw : checkTargetSum params.w params.ell1 params.targetSum digF = true)
+    (hWalk : walkMerkleAuthPath suite sk.pkSeed (UInt32.ofNat i) T .tree params.subtreeHeight 0 KP
+      (recoverWotsPkFromSig suite params sk.pkSeed (UInt32.ofNat i) T KP digF ls.wotsChains)
+      ls.authPath =
+      some (computeXmssSubtreeRoot suite params sk (UInt32.ofNat i) T)) :
+    PSum (∀ r, r < params.ell1 →
+            ls.wotsChains.getD r [] = honestChainNode suite sk (UInt32.ofNat i) T KP r (digF.getD r 0))
+         (CheckedStatefulCollisionWitness suite params sk log) :=
+  have hKpLt : KP < 2 ^ params.subtreeHeight := by
+    rw [hKP]; exact Nat.mod_lt _ (Nat.two_pow_pos _)
+  have hWalkNode : walkMerkleAuthPath suite sk.pkSeed (UInt32.ofNat i) T .tree params.subtreeHeight 0 KP
+      (recoverWotsPkFromSig suite params sk.pkSeed (UInt32.ofNat i) T KP digF ls.wotsChains)
+      ls.authPath =
+      some (computeMerkleNode suite sk.pkSeed (UInt32.ofNat i) T .tree
+        (computeWotsPk suite params sk (UInt32.ofNat i) T) params.subtreeHeight 0) := by
+    rw [← computeXmssSubtreeRoot_eq]; exact hWalk
+  match walkMerkle_meets_honest_psum suite sk.pkSeed (UInt32.ofNat i) T .tree
+          (computeWotsPk suite params sk (UInt32.ofNat i) T)
+          (CheckedStatefulCollisionWitness suite params sk log)
+          (fun h n forged hNe hHash =>
+            { honestInput := _, forgedInput := forged
+              targetKind := .xmssNode (UInt32.ofNat i) T h n
+              distinct := hNe, collides := hHash })
+          params.subtreeHeight 0 KP _ _ hKpLt hWalkNode with
+  | .inr col => .inr col
+  | .inl hPk =>
+    have hTlEq :
+        thCall suite tagThTl sk.pkSeed ⟨UInt32.ofNat i, T, .wotsPk, UInt32.ofNat KP, 0, 0⟩
+          (recoverWotsEndpoints suite params sk.pkSeed (UInt32.ofNat i) T KP digF ls.wotsChains) =
+        thCall suite tagThTl sk.pkSeed ⟨UInt32.ofNat i, T, .wotsPk, UInt32.ofNat KP, 0, 0⟩
+          ((List.range params.ell1).map fun r =>
+            honestChainNode suite sk (UInt32.ofNat i) T KP r (params.w - 1)) := by
+      rw [Nat.zero_mul, Nat.zero_add, recoverWotsPkFromSig_eq, computeWotsPk_eq,
+          thTweakTl_eq, thTweakTl_eq] at hPk
+      exact hPk
+    match thCall_eq_psum suite hTlEq with
+    | .inr ⟨hNe, hHash⟩ =>
+      .inr { honestInput := _, forgedInput := _
+             targetKind := .wotsPk (UInt32.ofNat i) T KP
+             distinct := hNe, collides := hHash }
+    | .inl ⟨_, _, _, hEnds⟩ =>
+      allChains_meet_honest_psum suite params sk log (UInt32.ofNat i) T KP digF ls.wotsChains
+        hEnds hTsw params.ell1 (Nat.le_refl _)
+
+/-- Constructive single-layer divergence extractor for checked stateful `Jorts` at any layer
+    `i < params.numLayers` (`i = 0` or `i > 0`) once we know `cur ≠ honestStatefulLayerRoot ... e_or_honest`. -/
+private def statefulLayerDivergence_extract (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (queries : List CheckedStatefulQuery)
+    (msgStar : List UInt8) (sigStar : PqHashSig)
+    (hGeom : (params.w = 4 ∧ params.ell1 = 128) ∨ (params.w = 16 ∧ params.ell1 = 64))
+    (hValid : params.checkedStatefulValid = true)
+    (hStarLt : sigStar.leafGlobalIdx < 2 ^ (params.numLayers * params.subtreeHeight))
+    (i : Nat) (hi : i < params.numLayers)
+    (cur : List UInt8)
+    (hLayer0Cur : i = 0 → cur = thPreHash suite sk.pkSeed (derivePublicKey suite params sk).pkRoot msgStar)
+    (hUpperDiff : 0 < i →
+      cur ≠ computeXmssSubtreeRoot suite params sk (UInt32.ofNat (i - 1))
+        (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight))))
+    (hFreshMsg : msgStar ∉ ((execCheckedStatefulOracle suite params sk initCheckedStatefulLatch queries).emittedLog.map fun e => e.2.1))
+    (ls : LayerXmssSig) (hLs : ls = sigStar.layerSigs.getD i ⟨0, [], []⟩)
+    (digF : List Nat)
+    (hDigF : digF = extractBaseWDigits params.w params.ell1
+      (thHashMsg suite (if i = 0 then sigStar.rRand else []) sk.pkSeed
+        (derivePublicKey suite params sk).pkRoot cur (UInt32.ofNat i)
+        (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) / 2 ^ params.subtreeHeight))
+        (UInt32.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight))
+        ls.tswCtr))
+    (hTsw : checkTargetSum params.w params.ell1 params.targetSum digF = true)
+    (hWalk : walkMerkleAuthPath suite sk.pkSeed (UInt32.ofNat i)
+      (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) / 2 ^ params.subtreeHeight))
+      .tree params.subtreeHeight 0
+      (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight)
+      (recoverWotsPkFromSig suite params sk.pkSeed (UInt32.ofNat i)
+        (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) / 2 ^ params.subtreeHeight))
+        (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight)
+        digF ls.wotsChains)
+      ls.authPath =
+      some (computeXmssSubtreeRoot suite params sk (UInt32.ofNat i)
+        (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) / 2 ^ params.subtreeHeight)))) :
+    let log := (execCheckedStatefulOracle suite params sk initCheckedStatefulLatch queries).emittedLog
+    PSum (CheckedStatefulCollisionWitness suite params sk log)
+         (CheckedStatefulWotsTswWitness suite params sk log msgStar sigStar) :=
+  let log := (execCheckedStatefulOracle suite params sk initCheckedStatefulLatch queries).emittedLog
+  let G := sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight)
+  let T := UInt64.ofNat (G / 2 ^ params.subtreeHeight)
+  let KP := G % 2 ^ params.subtreeHeight
+  have hFacts := params.checkedStatefulValid_facts hValid
+  have hWf : params.wellFormed = true := hFacts.1
+  have hLayers : params.numLayers ≤ 2 ^ 32 := hFacts.2.2.2.2.2.2.2
+  have hStrict : params.targetSum < (params.w - 1) * params.ell1 := by
+    rw [PqHashParams.targetSum_eq]
+    rcases hGeom with ⟨hw, hell⟩ | ⟨hw, hell⟩ <;> rw [hw, hell] <;> decide
+  have hInj : ∀ {a b : List UInt8}, a.length = 64 → b.length = 64 →
+      extractBaseWDigits params.w params.ell1 a = extractBaseWDigits params.w params.ell1 b →
+      a.take 32 = b.take 32 := by
+    intro a b ha hb hd
+    rcases hGeom with ⟨hw, hell⟩ | ⟨hw, hell⟩
+    · rw [hw, hell] at hd; exact extractBaseWDigits_4_128_take32_eq ha hb hd
+    · rw [hw, hell] at hd; exact extractBaseWDigits_base16_prefix_injective 32 (by omega) (by omega) hd
+  match statefulLayerChains_extract suite params sk log i G KP T ls digF rfl hTsw hWalk with
+  | .inr col => .inl col
+  | .inl hChainsEq =>
+    have hInv : ∀ r, r < params.ell1 →
+        thChainF suite sk.pkSeed
+          ⟨UInt32.ofNat i, T, .wotsHash, UInt32.ofNat KP, UInt32.ofNat r, UInt32.ofNat (digF.getD r 0)⟩
+          ((sigStar.layerSigs.getD i ⟨0, [], []⟩).wotsChains.getD r []) =
+        honestChainNode suite sk (UInt32.ofNat i) T KP r (digF.getD r 0 + 1) := by
+      intro r hr
+      rw [← hLs, hChainsEq r hr]
+      exact honestChainNode_succ suite sk (UInt32.ofNat i) T KP r (digF.getD r 0)
+    have hSearch := listSearchPSum
+      (fun e : Nat × List UInt8 × PqHashSig =>
+        ∃ i', i' < params.numLayers ∧
+          wotsPosAddr params e.2.2.leafGlobalIdx i' = wotsPosAddr params sigStar.leafGlobalIdx i)
+      (fun e =>
+        match boundedSearchPSum
+          (fun i' => wotsPosAddr params e.2.2.leafGlobalIdx i' = wotsPosAddr params sigStar.leafGlobalIdx i)
+          (fun i' =>
+            if hEqA : wotsPosAddr params e.2.2.leafGlobalIdx i' = wotsPosAddr params sigStar.leafGlobalIdx i then
+              .inl hEqA else .inr hEqA)
+          params.numLayers with
+        | .inl ⟨i', ⟨h1, h2⟩⟩ => .inl ⟨i', h1, h2⟩
+        | .inr hNone => .inr (fun ⟨i', h1, h2⟩ => hNone i' h1 h2))
+      log
+    match hSearch with
+    | .inl ⟨e, ⟨he, hEx⟩⟩ =>
+      match boundedSearchPSum
+          (fun i' => wotsPosAddr params e.2.2.leafGlobalIdx i' = wotsPosAddr params sigStar.leafGlobalIdx i)
+          (fun i' =>
+            if hEqA : wotsPosAddr params e.2.2.leafGlobalIdx i' = wotsPosAddr params sigStar.leafGlobalIdx i then
+              .inl hEqA else .inr hEqA)
+          params.numLayers with
+      | .inr hNone =>
+        False.elim (let ⟨i', hi', hAddr⟩ := hEx; hNone i' hi' hAddr)
+      | .inl ⟨i', ⟨hi', hAddr⟩⟩ =>
+        have hOk := checkedStatefulOracle_entryOk suite params sk queries he
+        have hInjRes := wotsPosAddr_inj params hWf hLayers hOk.leaf_lt hStarLt hi' hi hAddr
+        have hPos : e.2.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) = G := by
+          rw [← hInjRes.1]; exact hInjRes.2
+        if hRootMatch : cur = honestStatefulLayerRoot suite params sk e.2.1 i G then
+          if hI0 : i = 0 then
+            have hPreEq :
+                thCall suite tagHPre sk.pkSeed zeroAdrs [(derivePublicKey suite params sk).pkRoot, msgStar] =
+                thCall suite tagHPre sk.pkSeed zeroAdrs [(derivePublicKey suite params sk).pkRoot, e.2.1] := by
+              have hCur0 := hLayer0Cur hI0
+              simp only [honestStatefulLayerRoot, hI0, ↓reduceIte] at hRootMatch
+              rw [← thPreHash_eq, ← thPreHash_eq, ← hCur0]
+              exact hRootMatch
+            match thCall_eq_psum suite hPreEq with
+            | .inl ⟨_, _, _, hArgs⟩ =>
+              False.elim (by
+                simp only [List.cons.injEq, and_true] at hArgs
+                exact hFreshMsg (List.mem_map.mpr ⟨e, he, hArgs.2.symm⟩))
+            | .inr ⟨hNe, hHash⟩ =>
+              .inl { honestInput := _, forgedInput := _
+                     targetKind := .messagePreHash e he
+                     distinct := hNe, collides := hHash }
+          else
+            False.elim (by
+              have hUp := hUpperDiff (Nat.pos_of_ne_zero hI0)
+              simp only [honestStatefulLayerRoot, hI0, ↓reduceIte] at hRootMatch
+              exact hUp hRootMatch)
+        else
+          have hValidH := statefulLogLayerDigits_valid hOk i hi
+          if hDigEq : digF = statefulLogLayerDigits suite params sk e i then
+            have hTake :
+                (thHashMsg suite (if i = 0 then sigStar.rRand else []) sk.pkSeed
+                  (derivePublicKey suite params sk).pkRoot cur (UInt32.ofNat i) T
+                  (UInt32.ofNat KP) ls.tswCtr).take 32 =
+                (thHashMsg suite (honestStatefulLayerRand e i) sk.pkSeed
+                  (derivePublicKey suite params sk).pkRoot
+                  (honestStatefulLayerRoot suite params sk e.2.1 i (e.2.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight)))
+                  (UInt32.ofNat i)
+                  (UInt64.ofNat (e.2.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) / 2 ^ params.subtreeHeight))
+                  (UInt32.ofNat (e.2.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight))
+                  (e.2.2.layerSigs.getD i ⟨0, [], []⟩).tswCtr).take 32 := by
+              rw [hDigF, statefulLogLayerDigits_eq] at hDigEq
+              exact hInj (thHashMsg_length _ _ _ _ _ _ _ _ _) (thHashMsg_length _ _ _ _ _ _ _ _ _) hDigEq
+            have hCallEq :
+                thCall suite tagHMsg sk.pkSeed
+                  ⟨UInt32.ofNat i, T, .wotsHash, UInt32.ofNat KP, 0, UInt32.ofNat ls.tswCtr⟩
+                  [if i = 0 then sigStar.rRand else [], (derivePublicKey suite params sk).pkRoot, cur, be 4 ls.tswCtr] =
+                thCall suite tagHMsg sk.pkSeed
+                  ⟨UInt32.ofNat i,
+                   UInt64.ofNat (e.2.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) / 2 ^ params.subtreeHeight),
+                   .wotsHash,
+                   UInt32.ofNat (e.2.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight),
+                   0,
+                   UInt32.ofNat (e.2.2.layerSigs.getD i ⟨0, [], []⟩).tswCtr⟩
+                  [honestStatefulLayerRand e i,
+                   (derivePublicKey suite params sk).pkRoot,
+                   honestStatefulLayerRoot suite params sk e.2.1 i (e.2.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight)),
+                   be 4 (e.2.2.layerSigs.getD i ⟨0, [], []⟩).tswCtr] := by
+              rw [thHashMsg_eq, thHashMsg_eq, List.take_left' (thCall_length _ _ _ _ _),
+                  List.take_left' (thCall_length _ _ _ _ _)] at hTake
+              exact hTake
+            match thCall_eq_psum suite hCallEq with
+            | .inl ⟨_, _, _, hArgs⟩ =>
+              False.elim (by
+                simp only [List.cons.injEq] at hArgs
+                rw [hPos] at hArgs
+                exact hRootMatch hArgs.2.2.1)
+            | .inr ⟨hNe, hHash⟩ =>
+              .inl { honestInput := _, forgedInput := _
+                     targetKind := .layerDigest e he i hi
+                     distinct := hNe, collides := hHash }
+          else
+            have hIncomp := (tsw_incomparable_no_chain_forgery hValidH hTsw (fun hEq => hDigEq hEq.symm)).2
+            have hComplete := findBackwardCoord_complete
+              (let ⟨r', hr2, hr1, hlt, _⟩ := hIncomp; ⟨r', hr2, hr1, hlt⟩)
+            match hFind : findBackwardCoord (statefulLogLayerDigits suite params sk e i) digF with
+            | none =>
+              False.elim (by obtain ⟨_, _, _, hSome, _⟩ := hComplete; rw [hFind] at hSome; cases hSome)
+            | some r =>
+              have hBounds : r < params.ell1 ∧
+                  digF.getD r 0 < (statefulLogLayerDigits suite params sk e i).getD r 0 ∧
+                  (statefulLogLayerDigits suite params sk e i).getD r 0 < params.w := by
+                obtain ⟨r0, hrF, hrH, hSome, hlt⟩ := hComplete
+                rw [hFind] at hSome
+                injection hSome with hEqR
+                subst hEqR
+                obtain ⟨hLenH, hBoundH, _⟩ := (checkTargetSum_iff _ _ _ _).mp hValidH
+                have hFGet : digF.getD r 0 = digF[r]'hrF := list_getD_eq_getElem digF 0 hrF
+                have hHGet : (statefulLogLayerDigits suite params sk e i).getD r 0 =
+                    (statefulLogLayerDigits suite params sk e i)[r]'hrH := list_getD_eq_getElem _ 0 hrH
+                exact ⟨hLenH ▸ hrH, by rw [hFGet, hHGet]; exact hlt,
+                  by rw [hHGet]; exact hBoundH _ (List.getElem_mem hrH)⟩
+              .inr { layerIdx := i
+                     layer_lt := hi
+                     chainIdx := r
+                     chain_lt := hBounds.1
+                     signedLayerDigest := cur
+                     layer0_digest := hLayer0Cur
+                     forgedDigit := digF.getD r 0
+                     forgedDigit_eq := by rw [hDigF, hLs]
+                     digit_lt := by omega
+                     invertsHonest := hInv r hBounds.1
+                     unrevealedInLog := fun e' he' i'' hi'' hAddr' => by
+                       have hAddrE : wotsPosAddr params e.2.2.leafGlobalIdx i = wotsPosAddr params sigStar.leafGlobalIdx i := by
+                         cases hInjRes.1; exact hAddr
+                       obtain ⟨_, _, _, _, _, hDigConsistent, _⟩ :=
+                         checkedStatefulLog_unique_layer_codeword suite params sk queries he' he hi'' hi
+                           (hAddr'.trans hAddrE.symm)
+                       rw [hDigConsistent]
+                       exact hBounds.2.1 }
+    | .inr hNoUse =>
+      match hFind : findDigitLt (params.w - 1) digF with
+      | none =>
+        False.elim (by
+          obtain ⟨hLenF, _, hSumF⟩ := (checkTargetSum_iff _ _ _ _).mp hTsw
+          have hAllGe := findDigitLt_none_all_ge (params.w - 1) digF hFind
+          have hGe := sumDigits_ge_mul_of_all_ge (params.w - 1) digF hAllGe
+          rw [hLenF, hSumF] at hGe
+          omega)
+      | some r =>
+        have hRLt : r < params.ell1 ∧ digF.getD r 0 < params.w - 1 := by
+          obtain ⟨hLenF, _, _⟩ := (checkTargetSum_iff _ _ _ _).mp hTsw
+          obtain ⟨hrLen, hrVal⟩ := findDigitLt_sound (params.w - 1) hFind
+          rw [list_getD_eq_getElem digF 0 hrLen]
+          exact ⟨hLenF ▸ hrLen, hrVal⟩
+        .inr { layerIdx := i
+               layer_lt := hi
+               chainIdx := r
+               chain_lt := hRLt.1
+               signedLayerDigest := cur
+               layer0_digest := hLayer0Cur
+               forgedDigit := digF.getD r 0
+               forgedDigit_eq := by rw [hDigF, hLs]
+               digit_lt := hRLt.2
+               invertsHonest := hInv r hRLt.1
+               unrevealedInLog := fun e' he' i'' hi'' hAddr' =>
+                 absurd ⟨i'', hi'', hAddr'⟩ (hNoUse e' he') }
+
+/-- Constructive upward walk over upper hypertree layers (`i ≥ 1`) in checked stateful `Jorts`. -/
+private def statefulUpperWalk_extract (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (queries : List CheckedStatefulQuery)
+    (msgStar : List UInt8) (sigStar : PqHashSig)
+    (hGeom : (params.w = 4 ∧ params.ell1 = 128) ∨ (params.w = 16 ∧ params.ell1 = 64))
+    (hValid : params.checkedStatefulValid = true)
+    (hFreshMsg : msgStar ∉ ((execCheckedStatefulOracle suite params sk initCheckedStatefulLatch queries).emittedLog.map fun e => e.2.1))
+    (hStarLt : sigStar.leafGlobalIdx < 2 ^ (params.numLayers * params.subtreeHeight)) :
+    ∀ (sigs : List LayerXmssSig) (i : Nat) (cur : List UInt8),
+      0 < i →
+      (∀ j, sigs.getD j ⟨0, [], []⟩ = sigStar.layerSigs.getD (i + j) ⟨0, [], []⟩) →
+      i + sigs.length = params.numLayers →
+      verifyHypertreeLayers suite params sk.pkSeed (derivePublicKey suite params sk).pkRoot [] i
+        (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight)) cur sigs =
+        some (computeXmssSubtreeRoot suite params sk (UInt32.ofNat (params.numLayers - 1))
+          (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (params.numLayers * params.subtreeHeight)))) →
+      let log := (execCheckedStatefulOracle suite params sk initCheckedStatefulLatch queries).emittedLog
+      PSum (cur = computeXmssSubtreeRoot suite params sk (UInt32.ofNat (i - 1))
+              (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight))))
+           (PSum (CheckedStatefulCollisionWitness suite params sk log)
+                 (CheckedStatefulWotsTswWitness suite params sk log msgStar sigStar))
+  | [], i, cur, _, _, hLenEq, hVer => by
+    rw [verifyHypertreeLayers_nil] at hVer
+    simp only [Option.some.injEq] at hVer
+    have hIEq : i = params.numLayers := by rw [← hLenEq, List.length_nil, Nat.add_zero]
+    subst hIEq
+    exact .inl hVer
+  | lsig :: rest, i, cur, hIPos, hAlign, hLenEq, hVer =>
+    have hi : i < params.numLayers := by rw [← hLenEq, List.length_cons]; omega
+    have hStep : sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) / 2 ^ params.subtreeHeight =
+        sigStar.leafGlobalIdx / 2 ^ ((i + 1) * params.subtreeHeight) := by
+      have h := div_pow_mul_pow_mul sigStar.leafGlobalIdx i 1 params.subtreeHeight
+      rw [Nat.one_mul] at h; exact h
+    let G := sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight)
+    let T := UInt64.ofNat (G / 2 ^ params.subtreeHeight)
+    let KP := G % 2 ^ params.subtreeHeight
+    let digF := extractBaseWDigits params.w params.ell1
+      (thHashMsg suite [] sk.pkSeed (derivePublicKey suite params sk).pkRoot cur
+        (UInt32.ofNat i) T (UInt32.ofNat KP) lsig.tswCtr)
+    if hTsw : checkTargetSum params.w params.ell1 params.targetSum digF = true then
+      if hChLen : lsig.wotsChains.length = params.ell1 then
+        match hWalkOpt : walkMerkleAuthPath suite sk.pkSeed (UInt32.ofNat i) T .tree
+                params.subtreeHeight 0 KP
+                (recoverWotsPkFromSig suite params sk.pkSeed (UInt32.ofNat i) T KP digF lsig.wotsChains)
+                lsig.authPath with
+        | none =>
+          False.elim (by
+            rw [verifyHypertreeLayers_cons] at hVer
+            simp only [digF, G, T, KP, hTsw, Bool.not_true, Bool.false_eq_true, ↓reduceIte,
+                       hChLen, ne_eq, not_true_eq_false] at hVer
+            rw [hWalkOpt] at hVer; cases hVer)
+        | some next =>
+          have hRestVer :
+              verifyHypertreeLayers suite params sk.pkSeed (derivePublicKey suite params sk).pkRoot []
+                (i + 1) (sigStar.leafGlobalIdx / 2 ^ ((i + 1) * params.subtreeHeight)) next rest =
+              some (computeXmssSubtreeRoot suite params sk (UInt32.ofNat (params.numLayers - 1))
+                (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (params.numLayers * params.subtreeHeight)))) := by
+            rw [verifyHypertreeLayers_cons] at hVer
+            simp only [digF, G, T, KP, hTsw, Bool.not_true, Bool.false_eq_true, ↓reduceIte,
+                       hChLen, ne_eq, not_true_eq_false] at hVer
+            rw [hWalkOpt] at hVer
+            dsimp only at hVer
+            rw [← hStep]
+            exact hVer
+          match statefulUpperWalk_extract suite params sk queries msgStar sigStar
+                  hGeom hValid hFreshMsg hStarLt rest (i + 1) next (by omega)
+                  (fun j => by
+                    have h := hAlign (j + 1)
+                    rw [List.getD_cons_succ, show i + (j + 1) = i + 1 + j by omega] at h
+                    exact h)
+                  (by rw [List.length_cons] at hLenEq; omega)
+                  hRestVer with
+          | .inr brk => .inr brk
+          | .inl hNextEq =>
+            if hCurEq : cur = computeXmssSubtreeRoot suite params sk (UInt32.ofNat (i - 1)) (UInt64.ofNat G) then
+              .inl hCurEq
+            else
+              have hWalkHonest : walkMerkleAuthPath suite sk.pkSeed (UInt32.ofNat i) T .tree
+                  params.subtreeHeight 0 KP
+                  (recoverWotsPkFromSig suite params sk.pkSeed (UInt32.ofNat i) T KP digF lsig.wotsChains)
+                  lsig.authPath =
+                  some (computeXmssSubtreeRoot suite params sk (UInt32.ofNat i) T) := by
+                simp only [Nat.add_sub_cancel, ← hStep] at hNextEq
+                rw [← hNextEq]
+                exact hWalkOpt
+              have hLs0 : lsig = sigStar.layerSigs.getD i ⟨0, [], []⟩ := by
+                have h := hAlign 0
+                simpa only [List.getD_cons_zero, Nat.add_zero] using h
+              have hINe0 : i ≠ 0 := Nat.ne_of_gt hIPos
+              .inr (statefulLayerDivergence_extract suite params sk queries msgStar sigStar
+                hGeom hValid hStarLt i hi cur
+                (fun h0 => absurd h0 hINe0)
+                (fun _ => hCurEq)
+                hFreshMsg lsig hLs0 digF
+                (by simp [digF, G, T, KP, hINe0])
+                hTsw hWalkHonest)
+      else
+        False.elim (by
+          rw [verifyHypertreeLayers_cons] at hVer
+          simp [digF, G, T, KP, hTsw, hChLen] at hVer)
+    else
+      False.elim (by
+        rw [verifyHypertreeLayers_cons] at hVer
+        have hF : checkTargetSum params.w params.ell1 params.targetSum digF = false :=
+          Bool.eq_false_iff.mpr hTsw
+        simp [digF, G, T, KP, hF] at hVer)
+
+/-- Raw-verifier version of `checked_stateful_hypertree_euf_cma_extract` (`verifyPqHashSig = true`
+    under `params.checkedStatefulValid = true`). -/
+def checked_stateful_hypertree_euf_cma_extract_raw
+    (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (queries : List CheckedStatefulQuery)
+    (msgStar : List UInt8) (sigStar : PqHashSig)
+    (hGeom : (params.w = 4 ∧ params.ell1 = 128) ∨ (params.w = 16 ∧ params.ell1 = 64))
+    (hValidParams : params.checkedStatefulValid = true)
+    (hFreshMsg : msgStar ∉ ((execCheckedStatefulOracle suite params sk initCheckedStatefulLatch queries).emittedLog.map fun e => e.2.1))
+    (hAccept : verifyPqHashSig suite params (derivePublicKey suite params sk) msgStar sigStar = true) :
+    let log := (execCheckedStatefulOracle suite params sk initCheckedStatefulLatch queries).emittedLog
+    PSum (CheckedStatefulCollisionWitness suite params sk log)
+         (CheckedStatefulWotsTswWitness suite params sk log msgStar sigStar) :=
+  have hFacts := params.checkedStatefulValid_facts hValidParams
+  have hWf : params.wellFormed = true := hFacts.1
+  have hSt : params.statefulJorts = true := hFacts.2.1
+  have hDPos : 0 < params.numLayers := hFacts.2.2.2.2.2.1
+  have hUnpack : sigStar.layerSigs.length = params.numLayers ∧
+      sigStar.leafGlobalIdx < 2 ^ (params.numLayers * params.subtreeHeight) ∧
+      verifyHypertreeLayers suite params sk.pkSeed (derivePublicKey suite params sk).pkRoot
+        sigStar.rRand 0 sigStar.leafGlobalIdx
+        (thPreHash suite sk.pkSeed (derivePublicKey suite params sk).pkRoot msgStar)
+        sigStar.layerSigs =
+      some (derivePublicKey suite params sk).pkRoot := by
+    unfold verifyPqHashSig at hAccept
+    cases hLen : decide (sigStar.layerSigs.length = params.numLayers)
+    · have hNe : sigStar.layerSigs.length ≠ params.numLayers := of_decide_eq_false hLen
+      simp [hWf, hNe] at hAccept
+    · have hEqL := of_decide_eq_true hLen
+      cases hIdx : decide (sigStar.leafGlobalIdx < 2 ^ (params.numLayers * params.subtreeHeight))
+      · have hNot : ¬ (sigStar.leafGlobalIdx < 2 ^ (params.numLayers * params.subtreeHeight)) := of_decide_eq_false hIdx
+        simp [hWf, hEqL, hNot] at hAccept
+      · have hLt := of_decide_eq_true hIdx
+        have hSeed : (derivePublicKey suite params sk).pkSeed = sk.pkSeed := rfl
+        simp only [hWf, Bool.not_true, Bool.false_eq_true, ↓reduceIte, hEqL, ne_eq, not_true_eq_false,
+                   hLt, decide_true, hSt, hSeed] at hAccept
+        cases hPre : (!sigStar.forsOpenings.isEmpty || decide (sigStar.msgTswCtr ≠ 0))
+        · simp only [hPre, Bool.false_eq_true, ↓reduceIte] at hAccept
+          cases hV : verifyHypertreeLayers suite params sk.pkSeed (derivePublicKey suite params sk).pkRoot
+              sigStar.rRand 0 sigStar.leafGlobalIdx
+              (thPreHash suite sk.pkSeed (derivePublicKey suite params sk).pkRoot msgStar)
+              sigStar.layerSigs with
+          | none => rw [hV] at hAccept; cases hAccept
+          | some top =>
+            rw [hV] at hAccept
+            simp only [decide_eq_true_eq] at hAccept
+            exact ⟨hEqL, hLt, hV.trans (congrArg some hAccept)⟩
+        · rcases Bool.or_eq_true_iff.mp hPre with hF | hD
+          · simp [hF] at hAccept
+          · simp [of_decide_eq_true hD] at hAccept
+  match hSigs : sigStar.layerSigs with
+  | [] => False.elim (by have hL := hUnpack.1; rw [hSigs, List.length_nil] at hL; omega)
+  | ls0 :: rest =>
+    let muStar := thPreHash suite sk.pkSeed (derivePublicKey suite params sk).pkRoot msgStar
+    let tree0 := UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ params.subtreeHeight)
+    let kp0 := sigStar.leafGlobalIdx % 2 ^ params.subtreeHeight
+    let digF0 := extractBaseWDigits params.w params.ell1
+      (thHashMsg suite sigStar.rRand sk.pkSeed (derivePublicKey suite params sk).pkRoot
+        muStar 0 tree0 (UInt32.ofNat kp0) ls0.tswCtr)
+    have hVer0 : verifyHypertreeLayers suite params sk.pkSeed (derivePublicKey suite params sk).pkRoot
+        sigStar.rRand 0 sigStar.leafGlobalIdx muStar (ls0 :: rest) =
+        some (computeXmssSubtreeRoot suite params sk (UInt32.ofNat (params.numLayers - 1))
+          (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (params.numLayers * params.subtreeHeight)))) := by
+      have hDivTop : sigStar.leafGlobalIdx / 2 ^ (params.numLayers * params.subtreeHeight) = 0 :=
+        Nat.div_eq_of_lt hUnpack.2.1
+      rw [hDivTop]
+      change verifyHypertreeLayers suite params sk.pkSeed (derivePublicKey suite params sk).pkRoot
+          sigStar.rRand 0 sigStar.leafGlobalIdx muStar (ls0 :: rest) =
+          some (derivePublicKey suite params sk).pkRoot
+      rw [← hSigs]
+      exact hUnpack.2.2
+    if hTsw0 : checkTargetSum params.w params.ell1 params.targetSum digF0 = true then
+      if hChLen0 : ls0.wotsChains.length = params.ell1 then
+        match hWalk0 : walkMerkleAuthPath suite sk.pkSeed 0 tree0 .tree params.subtreeHeight 0 kp0
+                (recoverWotsPkFromSig suite params sk.pkSeed 0 tree0 kp0 digF0 ls0.wotsChains)
+                ls0.authPath with
+        | none =>
+          False.elim (by
+            rw [verifyHypertreeLayers_cons] at hVer0
+            have hU0 : UInt32.ofNat 0 = (0 : UInt32) := rfl
+            simp only [hU0, digF0, tree0, kp0, hTsw0, Bool.not_true, Bool.false_eq_true, ↓reduceIte,
+                       hChLen0, ne_eq, not_true_eq_false] at hVer0
+            rw [hWalk0] at hVer0; cases hVer0)
+        | some next0 =>
+          have hRestVer0 :
+              verifyHypertreeLayers suite params sk.pkSeed (derivePublicKey suite params sk).pkRoot []
+                1 (sigStar.leafGlobalIdx / 2 ^ (1 * params.subtreeHeight)) next0 rest =
+              some (computeXmssSubtreeRoot suite params sk (UInt32.ofNat (params.numLayers - 1))
+                (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (params.numLayers * params.subtreeHeight)))) := by
+            rw [verifyHypertreeLayers_cons] at hVer0
+            have hU0 : UInt32.ofNat 0 = (0 : UInt32) := rfl
+            simp only [hU0, digF0, tree0, kp0, hTsw0, Bool.not_true, Bool.false_eq_true, ↓reduceIte,
+                       hChLen0, ne_eq, not_true_eq_false, Nat.zero_add] at hVer0
+            rw [hWalk0] at hVer0
+            dsimp only at hVer0
+            rw [Nat.one_mul]
+            exact hVer0
+          match statefulUpperWalk_extract suite params sk queries msgStar sigStar
+                  hGeom hValidParams hFreshMsg hUnpack.2.1 rest 1 next0 (by decide)
+                  (fun j => by
+                    have h : (ls0 :: rest).getD (j + 1) ⟨0, [], []⟩ =
+                        sigStar.layerSigs.getD (1 + j) ⟨0, [], []⟩ := by
+                      rw [hSigs, show 1 + j = j + 1 by omega]
+                    simpa only [List.getD_cons_succ] using h)
+                  (by have hL := hUnpack.1; rw [hSigs, List.length_cons] at hL; omega)
+                  hRestVer0 with
+          | .inr brk => brk
+          | .inl hNextEq0 =>
+            have hWalkHonest0 : walkMerkleAuthPath suite sk.pkSeed (UInt32.ofNat 0)
+                (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (0 * params.subtreeHeight) / 2 ^ params.subtreeHeight))
+                .tree params.subtreeHeight 0
+                (sigStar.leafGlobalIdx / 2 ^ (0 * params.subtreeHeight) % 2 ^ params.subtreeHeight)
+                (recoverWotsPkFromSig suite params sk.pkSeed (UInt32.ofNat 0)
+                  (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (0 * params.subtreeHeight) / 2 ^ params.subtreeHeight))
+                  (sigStar.leafGlobalIdx / 2 ^ (0 * params.subtreeHeight) % 2 ^ params.subtreeHeight)
+                  digF0 ls0.wotsChains)
+                ls0.authPath =
+                some (computeXmssSubtreeRoot suite params sk (UInt32.ofNat 0)
+                  (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (0 * params.subtreeHeight) / 2 ^ params.subtreeHeight))) := by
+              have hU0 : UInt32.ofNat 0 = (0 : UInt32) := rfl
+              simp only [Nat.zero_mul, Nat.pow_zero, Nat.div_one, hU0]
+              simp only [Nat.sub_self, Nat.one_mul, hU0] at hNextEq0
+              rw [← hNextEq0]
+              exact hWalk0
+            statefulLayerDivergence_extract suite params sk queries msgStar sigStar
+              hGeom hValidParams hUnpack.2.1 0 hDPos muStar
+              (fun _ => rfl)
+              (fun hPos0 => absurd hPos0 (Nat.not_lt_zero 0))
+              hFreshMsg ls0
+              (by rw [hSigs, List.getD_cons_zero])
+              digF0
+              (by
+                have hU0 : UInt32.ofNat 0 = (0 : UInt32) := rfl
+                simp [digF0, tree0, kp0, Nat.zero_mul, Nat.pow_zero, Nat.div_one, hU0])
+              hTsw0 hWalkHonest0
+      else
+        False.elim (by
+          rw [verifyHypertreeLayers_cons] at hVer0
+          have hU0 : UInt32.ofNat 0 = (0 : UInt32) := rfl
+          simp [hU0, digF0, tree0, kp0, hTsw0, hChLen0] at hVer0)
+    else
+      False.elim (by
+        rw [verifyHypertreeLayers_cons] at hVer0
+        have hU0 : UInt32.ofNat 0 = (0 : UInt32) := rfl
+        have hF : checkTargetSum params.w params.ell1 params.targetSum digF0 = false :=
+          Bool.eq_false_iff.mpr hTsw0
+        simp [hU0, digF0, tree0, kp0, hF] at hVer0)
+
+/-- **End-to-End Checked/Stateful Hypertree EUF-CMA Constructive Witness Extractor
+    (`checked_stateful_hypertree_euf_cma_extract`, `0 Classical.choice`)**:
+    Across ANY multi-turn sequence `queries : List CheckedStatefulQuery` (including retries,
+    out-of-order epochs, equivocation attempts, and budget-exhausting aborts), if an adversary
+    outputs a signature `sigStar` passing `verifyCheckedStateful` on a message `msgStar` absent
+    from the emitted transcript `log`, this `Type`-valued algorithm constructively extracts
+    EITHER a transcript-indexed SM-TCR hash collision (`CheckedStatefulCollisionWitness`) OR a
+    transcript-indexed WOTS+C/TSW backward chain inversion (`CheckedStatefulWotsTswWitness`)! -/
+def checked_stateful_hypertree_euf_cma_extract
+    (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (queries : List CheckedStatefulQuery)
+    (msgStar : List UInt8) (sigStar : PqHashSig)
+    (hGeom : (params.w = 4 ∧ params.ell1 = 128) ∨ (params.w = 16 ∧ params.ell1 = 64))
+    (hFreshMsg : msgStar ∉ ((execCheckedStatefulOracle suite params sk initCheckedStatefulLatch queries).emittedLog.map fun e => e.2.1))
+    (hAccept : verifyCheckedStateful suite params (derivePublicKey suite params sk) msgStar sigStar = true) :
+    let log := (execCheckedStatefulOracle suite params sk initCheckedStatefulLatch queries).emittedLog
+    PSum (CheckedStatefulCollisionWitness suite params sk log)
+         (CheckedStatefulWotsTswWitness suite params sk log msgStar sigStar) :=
+  let hSound := verifyCheckedStateful_sound suite params (derivePublicKey suite params sk) msgStar sigStar hAccept
+  checked_stateful_hypertree_euf_cma_extract_raw suite params sk queries msgStar sigStar
+    hGeom hSound.1 hFreshMsg hSound.2.2
+
+/-- Strict-execution corollary of `checked_stateful_hypertree_euf_cma_extract`:
+    applies directly when `execCheckedStatefulStrict suite params sk initCheckedStatefulLatch queries = .ok (stFinal, log)`. -/
+def checked_stateful_strict_euf_cma_extract
+    (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (queries : List CheckedStatefulQuery)
+    (stFinal : CheckedStatefulLatchState)
+    (log : List (Nat × List UInt8 × PqHashSig))
+    (msgStar : List UInt8) (sigStar : PqHashSig)
+    (hGeom : (params.w = 4 ∧ params.ell1 = 128) ∨ (params.w = 16 ∧ params.ell1 = 64))
+    (hStrict : execCheckedStatefulStrict suite params sk initCheckedStatefulLatch queries = .ok (stFinal, log))
+    (hFreshMsg : msgStar ∉ (log.map fun e => e.2.1))
+    (hAccept : verifyCheckedStateful suite params (derivePublicKey suite params sk) msgStar sigStar = true) :
+    PSum (CheckedStatefulCollisionWitness suite params sk log)
+         (CheckedStatefulWotsTswWitness suite params sk log msgStar sigStar) :=
+  have hLogEq : log = (execCheckedStatefulOracle suite params sk initCheckedStatefulLatch queries).emittedLog :=
+    congrArg CheckedStatefulOracleRun.emittedLog
+      (((execCheckedStatefulStrict_eq_oracle suite params sk queries initCheckedStatefulLatch).1 stFinal log).mp hStrict).symm
+  hLogEq ▸ checked_stateful_hypertree_euf_cma_extract suite params sk queries msgStar sigStar
+    hGeom (hLogEq ▸ hFreshMsg) hAccept
+
+/-- Outcome of one coin in the multi-turn checked stateful EUF-CMA experiment. -/
+structure CheckedStatefulEufCmaOutcome where
+  sk      : PqSecretKey
+  queries : List CheckedStatefulQuery
+  msgStar : List UInt8
+  sigStar : PqHashSig
+
+/-- Winning predicate for the multi-turn checked stateful EUF-CMA experiment. -/
+def checkedStatefulEufCmaWin (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : CheckedStatefulEufCmaOutcome) : Bool :=
+  verifyCheckedStateful suite params (derivePublicKey suite params o.sk) o.msgStar o.sigStar &&
+  decide (o.msgStar ∉ ((execCheckedStatefulOracle suite params o.sk initCheckedStatefulLatch o.queries).emittedLog.map fun e => e.2.1))
+
+theorem checkedStatefulEufCmaWin_eq (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : CheckedStatefulEufCmaOutcome) :
+    checkedStatefulEufCmaWin suite params o =
+      (verifyCheckedStateful suite params (derivePublicKey suite params o.sk) o.msgStar o.sigStar &&
+       decide (o.msgStar ∉ ((execCheckedStatefulOracle suite params o.sk initCheckedStatefulLatch o.queries).emittedLog.map fun e => e.2.1))) := by
+  rfl
+
+/-- Regression: replaying any message signed in the multi-turn checked stateful transcript is rejected. -/
+theorem checkedStatefulEufCmaWin_rejects_signed_message
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : CheckedStatefulEufCmaOutcome) (ep : Nat) (sig : PqHashSig)
+    (hSigned : (ep, o.msgStar, sig) ∈ (execCheckedStatefulOracle suite params o.sk initCheckedStatefulLatch o.queries).emittedLog) :
+    checkedStatefulEufCmaWin suite params o = false := by
+  have hMem : o.msgStar ∈ ((execCheckedStatefulOracle suite params o.sk initCheckedStatefulLatch o.queries).emittedLog.map fun e => e.2.1) :=
+    List.mem_map.mpr ⟨(ep, o.msgStar, sig), hSigned, rfl⟩
+  rw [checkedStatefulEufCmaWin_eq, decide_eq_false (fun hn => hn hMem), Bool.and_false]
+
+/-- **Checked Stateful EUF-CMA Concrete Advantage Union Bound
+    (`checked_stateful_hypertree_euf_cma_advantage_bound`)**:
+    Over any finite coin space `coins : List Ω`, `Adv_EUF-CMA ≤ Adv_SM-TCR + Adv_WOTS-PRE`
+    with exact factor `1` on both terms (no FORS ITSR term in stateful `Jorts`). -/
+theorem checked_stateful_hypertree_euf_cma_advantage_bound {Ω : Type}
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (hGeom : (params.w = 4 ∧ params.ell1 = 128) ∨ (params.w = 16 ∧ params.ell1 = 64))
+    (coins : List Ω) (game : Ω → CheckedStatefulEufCmaOutcome)
+    (isCol isWotsPre : Ω → Bool)
+    (hCol : ∀ ω,
+      Nonempty (CheckedStatefulCollisionWitness suite params (game ω).sk
+        (execCheckedStatefulOracle suite params (game ω).sk initCheckedStatefulLatch (game ω).queries).emittedLog) →
+      isCol ω = true)
+    (hWotsPre : ∀ ω,
+      Nonempty (CheckedStatefulWotsTswWitness suite params (game ω).sk
+        (execCheckedStatefulOracle suite params (game ω).sk initCheckedStatefulLatch (game ω).queries).emittedLog
+        (game ω).msgStar (game ω).sigStar) →
+      isWotsPre ω = true) :
+    hitCount (fun ω => checkedStatefulEufCmaWin suite params (game ω)) coins ≤
+      hitCount isCol coins + hitCount isWotsPre coins := by
+  have hBound3 := hitCount_union_bound
+    (fun ω => checkedStatefulEufCmaWin suite params (game ω))
+    isCol isWotsPre (fun _ => false)
+    (fun ω hWin => by
+      rw [checkedStatefulEufCmaWin_eq, Bool.and_eq_true, decide_eq_true_eq] at hWin
+      obtain ⟨hVer, hFresh⟩ := hWin
+      cases checked_stateful_hypertree_euf_cma_extract suite params (game ω).sk (game ω).queries
+              (game ω).msgStar (game ω).sigStar hGeom hFresh hVer with
+      | inl col => exact .inl (hCol ω ⟨col⟩)
+      | inr wots => exact .inr (.inl (hWotsPre ω ⟨wots⟩)))
+    coins
+  have hZero : ∀ cs : List Ω, hitCount (fun _ : Ω => false) cs = 0 := fun cs => by
+    induction cs with
+    | nil => rfl
+    | cons _ _ ih => simp [hitCount, ih]
+  rw [hZero coins, Nat.add_zero] at hBound3
+  exact hBound3
+
+/-! ### Checked Stateless Signing Oracle (`evalStatelessCheckedSign` / `verifyStatelessChecked`) -/
+
+/-- Query to the HXOF-leaf-bound checked stateless signing oracle (`evalStatelessCheckedSign`). -/
+structure CheckedStatelessQuery where
+  message    : List UInt8
+  randomness : List UInt8
+  grindLimit : Nat
+  deriving DecidableEq, Repr
+
+/-- Transcript emitted by `evalStatelessCheckedSign` across a multi-turn query list. -/
+def checkedStatelessOracleLog (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) : List CheckedStatelessQuery → List (List UInt8 × PqHashSig)
+  | [] => []
+  | q :: qs =>
+    match evalStatelessCheckedSign suite params sk q.message q.randomness q.grindLimit with
+    | none => checkedStatelessOracleLog suite params sk qs
+    | some sig => (q.message, sig) :: checkedStatelessOracleLog suite params sk qs
+
+/-- Lower HXOF-derived `CheckedStatelessQuery` list to the exact `PqSigningQuery` list executed by `evalSingleSign`. -/
+def toLegacyStatelessQueries (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) : List CheckedStatelessQuery → List PqSigningQuery
+  | [] => []
+  | q :: qs =>
+    if !params.checkedDigitGeometry then
+      toLegacyStatelessQueries suite params sk qs
+    else
+      let pk := derivePublicKey suite params sk
+      let mu := thPreHash suite pk.pkSeed pk.pkRoot q.message
+      let rRand := thPrfMsg suite sk.skPrf q.randomness mu
+      match deriveStatelessInputs suite params rRand pk.pkSeed pk.pkRoot mu with
+      | none => toLegacyStatelessQueries suite params sk qs
+      | some (leaf, _) =>
+        ⟨q.message, q.randomness, leaf, q.grindLimit⟩ :: toLegacyStatelessQueries suite params sk qs
+
+theorem checkedStatelessOracleLog_eq_signingOracleLog
+    (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey) :
+    ∀ (qs : List CheckedStatelessQuery),
+      checkedStatelessOracleLog suite params sk qs =
+        signingOracleLog suite params sk (toLegacyStatelessQueries suite params sk qs)
+  | [] => rfl
+  | q :: qs => by
+    unfold checkedStatelessOracleLog toLegacyStatelessQueries
+    rw [evalStatelessCheckedSign_eq]
+    cases hG : params.checkedDigitGeometry
+    · simp only [Bool.not_false, ↓reduceIte]
+      exact checkedStatelessOracleLog_eq_signingOracleLog suite params sk qs
+    · simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+      cases hD : deriveStatelessInputs suite params
+          (thPrfMsg suite sk.skPrf q.randomness
+            (thPreHash suite sk.pkSeed (derivePublicKey suite params sk).pkRoot q.message))
+          sk.pkSeed (derivePublicKey suite params sk).pkRoot
+          (thPreHash suite sk.pkSeed (derivePublicKey suite params sk).pkRoot q.message) with
+      | none =>
+        exact checkedStatelessOracleLog_eq_signingOracleLog suite params sk qs
+      | some pr =>
+        rcases pr with ⟨leaf, idxs⟩
+        simp only [signingOracleLog]
+        cases evalSingleSign suite params sk q.message q.randomness leaf q.grindLimit <;>
+          simp [checkedStatelessOracleLog_eq_signingOracleLog suite params sk qs]
+
+/-- Constructive `Type`-valued witness extraction for HXOF-leaf-bound `evalStatelessCheckedSign` /
+    `verifyStatelessChecked` over finite query logs (`0 Classical.choice`). -/
+def checked_stateless_hypertree_euf_cma_extract
+    (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (queries : List CheckedStatelessQuery)
+    (msgStar : List UInt8) (sigStar : PqHashSig)
+    (hGeom : (params.w = 4 ∧ params.ell1 = 128) ∨ (params.w = 16 ∧ params.ell1 = 64))
+    (hLayers : params.numLayers ≤ 2 ^ 32)
+    (hFreshMsg : msgStar ∉ (checkedStatelessOracleLog suite params sk queries).map Prod.fst)
+    (hAccept : verifyStatelessChecked suite params (derivePublicKey suite params sk) msgStar sigStar = true) :
+    HypertreeForgeryBreak suite params sk msgStar sigStar
+      ((signingOracleLog suite params sk (toLegacyStatelessQueries suite params sk queries)).flatMap fun e =>
+        (List.range params.forsTrees).map fun j =>
+          (UInt64.ofNat (e.2.leafGlobalIdx / 2 ^ params.subtreeHeight),
+           e.2.leafGlobalIdx % 2 ^ params.subtreeHeight,
+           sigForsLeafIdx suite params (derivePublicKey suite params sk) e.1 e.2 j)) :=
+  let hSound := verifyStatelessChecked_sound suite params (derivePublicKey suite params sk) msgStar sigStar hAccept
+  extractReachableHypertreeForgery_of_statelessLog suite params sk
+    (toLegacyStatelessQueries suite params sk queries) msgStar sigStar
+    hGeom hSound.2.1 hLayers
+    (by rwa [← checkedStatelessOracleLog_eq_signingOracleLog])
+    hSound.2.2.1
+
+/-- Transcript-indexed `Prop` EUF-CMA break theorem for `evalStatelessCheckedSign` / `verifyStatelessChecked`. -/
+theorem checked_stateless_hypertree_euf_cma_break
+    (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (queries : List CheckedStatelessQuery)
+    (msgStar : List UInt8) (sigStar : PqHashSig)
+    (hGeom : (params.w = 4 ∧ params.ell1 = 128) ∨ (params.w = 16 ∧ params.ell1 = 64))
+    (hLayers : params.numLayers ≤ 2 ^ 32)
+    (hFresh : ∀ e ∈ checkedStatelessOracleLog suite params sk queries, e.1 ≠ msgStar)
+    (hAccept : verifyStatelessChecked suite params (derivePublicKey suite params sk) msgStar sigStar = true) :
+    let log := checkedStatelessOracleLog suite params sk queries
+    ForsItsrBreak suite params (derivePublicKey suite params sk) log msgStar sigStar ∨
+    SmTcrBreak suite params sk log ∨
+    PreimageBreak suite params sk log msgStar sigStar := by
+  obtain ⟨_, hStateless, hVerRaw, _⟩ :=
+    verifyStatelessChecked_sound suite params (derivePublicKey suite params sk) msgStar sigStar hAccept
+  have hLogEq := checkedStatelessOracleLog_eq_signingOracleLog suite params sk queries
+  dsimp only
+  rw [hLogEq]
+  exact hypertree_forgery_break_of_signingLog suite params sk
+    (toLegacyStatelessQueries suite params sk queries) msgStar sigStar
+    hGeom hStateless hLayers
+    (fun e he => hFresh e (hLogEq ▸ he))
+    hVerRaw
+
+/-! ### `#tooth` Mutation Witness (`mutantUncheckedReuseSign`) & Multi-Signature Inhabitedness Witness -/
+
+/-- **`#tooth` Mutant Stateful Signer (`mutantUncheckedReuseSign`)**:
+    Mutates `checkedStatefulSignStep` by omitting monotonic `nextEpoch` advancement and wrapping
+    `reqEpoch` modulo the leaf budget `2 ^ params.maxSigsLog2` rather than aborting with
+    `CheckedStatefulError.budgetExhausted` / `.staleOrOutOfOrderEpoch`. Even though deterministic
+    per-epoch `optRand` (`buildStatefulDetOptDomain reqEpoch sk.pkSeed`) is kept intact, leaf
+    wraparound / reuse exposes two distinct WOTS+C codewords on the same leaf and enables a
+    purely public black-box WOTS+C forgery without any hash collision or preimage inversion! -/
+def mutantUncheckedReuseSign (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (st : CheckedStatefulLatchState)
+    (reqEpoch : Nat) (msg : List UInt8) (grindLimit : Nat) :
+    Except CheckedStatefulError (CheckedStatefulLatchState × Nat × List UInt8 × PqHashSig) :=
+  if !params.checkedStatefulValid then
+    .error .invalidParams
+  else
+    let reusedLeaf := reqEpoch % (2 ^ params.maxSigsLog2)
+    let detOpt := buildStatefulDetOptDomain reqEpoch sk.pkSeed
+    match evalSingleSign suite params sk msg detOpt reusedLeaf grindLimit with
+    | none => .error (.grindExhausted reusedLeaf grindLimit)
+    | some sig => .ok (st, reusedLeaf, msg, sig)
+
+/-- **Black-Box Two-Time WOTS+C Leaf-Reuse Forger (`forgeFromReusedLeafSigs`)**:
+    Uses ONLY public `(pk, m₁, sig₁, m₂, sig₂, msgStar, rStar, ctrStar)` (zero `sk` access!)
+    to step forward from whichever revealed chain value (`sig₁` or `sig₂`) sits at or below
+    `digStar[r]`, reusing `sig₁`'s authentication path and upper hypertree layers. -/
+def forgeFromReusedLeafSigs (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (m₁ : List UInt8) (sig₁ : PqHashSig)
+    (m₂ : List UInt8) (sig₂ : PqHashSig)
+    (msgStar rStar : List UInt8) (ctrStar : Nat) : PqHashSig :=
+  let leaf := sig₁.leafGlobalIdx
+  let subLeaves := 2 ^ params.subtreeHeight
+  let kp0 := leaf % subLeaves
+  let tree0 := UInt64.ofNat (leaf / subLeaves)
+  let mu₁ := thPreHash suite pk.pkSeed pk.pkRoot m₁
+  let mu₂ := thPreHash suite pk.pkSeed pk.pkRoot m₂
+  let muStar := thPreHash suite pk.pkSeed pk.pkRoot msgStar
+  let ls₁ := sig₁.layerSigs.getD 0 ⟨0, [], []⟩
+  let ls₂ := sig₂.layerSigs.getD 0 ⟨0, [], []⟩
+  let dig₁ := extractBaseWDigits params.w params.ell1
+    (thHashMsg suite sig₁.rRand pk.pkSeed pk.pkRoot mu₁ 0 tree0 (UInt32.ofNat kp0) ls₁.tswCtr)
+  let dig₂ := extractBaseWDigits params.w params.ell1
+    (thHashMsg suite sig₂.rRand pk.pkSeed pk.pkRoot mu₂ 0 tree0 (UInt32.ofNat kp0) ls₂.tswCtr)
+  let digStar := extractBaseWDigits params.w params.ell1
+    (thHashMsg suite rStar pk.pkSeed pk.pkRoot muStar 0 tree0 (UInt32.ofNat kp0) ctrStar)
+  let forgedChains0 := (List.range params.ell1).map fun r =>
+    let dStarR := digStar.getD r 0
+    let d1R := dig₁.getD r 0
+    let d2R := dig₂.getD r 0
+    if d1R ≤ dStarR then
+      wotsChainSteps suite pk.pkSeed 0 tree0 kp0 r d1R (dStarR - d1R) (ls₁.wotsChains.getD r [])
+    else
+      wotsChainSteps suite pk.pkSeed 0 tree0 kp0 r d2R (dStarR - d2R) (ls₂.wotsChains.getD r [])
+  let lsStar0 : LayerXmssSig := { tswCtr := ctrStar, wotsChains := forgedChains0, authPath := ls₁.authPath }
+  { rRand := rStar
+    msgTswCtr := 0
+    leafGlobalIdx := leaf
+    forsOpenings := []
+    layerSigs := lsStar0 :: sig₁.layerSigs.drop 1 }
+
+/-- **Universal `#tooth` Collision-Free Two-Signature Forgery Theorem
+    (`mutantUncheckedReuseSign_collision_free_forgery`)**:
+    For ANY `TweakableHashSuite` (including `poseidon2Suite` and `cshake256Suite`), ANY valid
+    stateful parameter set, and ANY two `mutantUncheckedReuseSign` outputs on the same leaf
+    whose codewords `dig₁, dig₂` cover `digStar` (`min(dig₁[r], dig₂[r]) ≤ digStar[r]`),
+    `forgeFromReusedLeafSigs` (without `sk`) produces a signature `sigStar` such that:
+    1. `verifyCheckedStateful suite params pk msgStar sigStar = true`;
+    2. Every forged layer-0 chain value is **identically equal** to `honestChainNode` (zero hash
+       collisions anywhere in WOTS+C or Merkle verification); and
+    3. When `params.numLayers = 1`, `CheckedStatefulWotsTswWitness` over the 2-signature mutant
+       log is **uninhabited (`→ False`)** — proving leaf uniqueness is mathematically necessary! -/
+theorem mutantUncheckedReuseSign_collision_free_forgery
+    (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    {st₁ st₁' st₂ st₂' : CheckedStatefulLatchState}
+    {reqEp₁ reqEp₂ grind₁ grind₂ leaf₁ leaf₂ : Nat}
+    {m₁ outM₁ m₂ outM₂ : List UInt8}
+    {sig₁ sig₂ : PqHashSig}
+    (msgStar rStar : List UInt8) (ctrStar : Nat)
+    (hMut₁ : mutantUncheckedReuseSign suite params sk st₁ reqEp₁ m₁ grind₁ = .ok (st₁', leaf₁, outM₁, sig₁))
+    (hMut₂ : mutantUncheckedReuseSign suite params sk st₂ reqEp₂ m₂ grind₂ = .ok (st₂', leaf₂, outM₂, sig₂))
+    (hSameLeaf : reqEp₁ % (2 ^ params.maxSigsLog2) = reqEp₂ % (2 ^ params.maxSigsLog2))
+    (hTswStar :
+      let pk := derivePublicKey suite params sk
+      let leaf := sig₁.leafGlobalIdx
+      let tree0 := UInt64.ofNat (leaf / 2 ^ params.subtreeHeight)
+      let kp0 := leaf % 2 ^ params.subtreeHeight
+      checkTargetSum params.w params.ell1 params.targetSum
+        (extractBaseWDigits params.w params.ell1
+          (thHashMsg suite rStar pk.pkSeed pk.pkRoot
+            (thPreHash suite pk.pkSeed pk.pkRoot msgStar) 0 tree0 (UInt32.ofNat kp0) ctrStar)) = true)
+    (hDom :
+      let pk := derivePublicKey suite params sk
+      let leaf := sig₁.leafGlobalIdx
+      let tree0 := UInt64.ofNat (leaf / 2 ^ params.subtreeHeight)
+      let kp0 := leaf % 2 ^ params.subtreeHeight
+      let dig₁ := extractBaseWDigits params.w params.ell1
+        (thHashMsg suite sig₁.rRand pk.pkSeed pk.pkRoot
+          (thPreHash suite pk.pkSeed pk.pkRoot m₁) 0 tree0 (UInt32.ofNat kp0)
+          (sig₁.layerSigs.getD 0 ⟨0, [], []⟩).tswCtr)
+      let dig₂ := extractBaseWDigits params.w params.ell1
+        (thHashMsg suite sig₂.rRand pk.pkSeed pk.pkRoot
+          (thPreHash suite pk.pkSeed pk.pkRoot m₂) 0 tree0 (UInt32.ofNat kp0)
+          (sig₂.layerSigs.getD 0 ⟨0, [], []⟩).tswCtr)
+      let digStar := extractBaseWDigits params.w params.ell1
+        (thHashMsg suite rStar pk.pkSeed pk.pkRoot
+          (thPreHash suite pk.pkSeed pk.pkRoot msgStar) 0 tree0 (UInt32.ofNat kp0) ctrStar)
+      ∀ r, r < params.ell1 → dig₁.getD r 0 ≤ digStar.getD r 0 ∨ dig₂.getD r 0 ≤ digStar.getD r 0) :
+    let pk := derivePublicKey suite params sk
+    let sigStar := forgeFromReusedLeafSigs suite params pk m₁ sig₁ m₂ sig₂ msgStar rStar ctrStar
+    let leaf := sig₁.leafGlobalIdx
+    let tree0 := UInt64.ofNat (leaf / 2 ^ params.subtreeHeight)
+    let kp0 := leaf % 2 ^ params.subtreeHeight
+    let digStar := extractBaseWDigits params.w params.ell1
+      (thHashMsg suite rStar pk.pkSeed pk.pkRoot
+        (thPreHash suite pk.pkSeed pk.pkRoot msgStar) 0 tree0 (UInt32.ofNat kp0) ctrStar)
+    verifyCheckedStateful suite params pk msgStar sigStar = true ∧
+    (∀ r, r < params.ell1 →
+      (sigStar.layerSigs.getD 0 ⟨0, [], []⟩).wotsChains.getD r [] =
+        honestChainNode suite sk 0 tree0 kp0 r (digStar.getD r 0)) ∧
+    (params.numLayers = 1 →
+      CheckedStatefulWotsTswWitness suite params sk
+        [(leaf₁, m₁, sig₁), (leaf₂, m₂, sig₂)] msgStar sigStar → False) := by
+  unfold mutantUncheckedReuseSign at hMut₁ hMut₂
+  cases hValid : params.checkedStatefulValid
+  · simp [hValid] at hMut₁
+  · simp only [hValid, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hMut₁ hMut₂
+    cases hEv₁ : evalSingleSign suite params sk m₁
+        (buildStatefulDetOptDomain reqEp₁ sk.pkSeed) (reqEp₁ % 2 ^ params.maxSigsLog2) grind₁ with
+    | none => rw [hEv₁] at hMut₁; cases hMut₁
+    | some s1 =>
+      rw [hEv₁] at hMut₁
+      injection hMut₁ with hT1
+      rcases Prod.mk.inj hT1 with ⟨_, hT1b⟩
+      rcases Prod.mk.inj hT1b with ⟨hL1, hT1c⟩
+      rcases Prod.mk.inj hT1c with ⟨_, hS1⟩
+      subst hL1; subst hS1
+      cases hEv₂ : evalSingleSign suite params sk m₂
+          (buildStatefulDetOptDomain reqEp₂ sk.pkSeed) (reqEp₂ % 2 ^ params.maxSigsLog2) grind₂ with
+      | none => rw [hEv₂] at hMut₂; cases hMut₂
+      | some s2 =>
+        rw [hEv₂] at hMut₂
+        injection hMut₂ with hT2
+        rcases Prod.mk.inj hT2 with ⟨_, hT2b⟩
+        rcases Prod.mk.inj hT2b with ⟨hL2, hT2c⟩
+        rcases Prod.mk.inj hT2c with ⟨_, hS2⟩
+        subst hL2; subst hS2
+        obtain ⟨hWf, hSt, _, _, _, hDPos, _, _⟩ := params.checkedStatefulValid_facts hValid
+        have hBud₁ : reqEp₁ % 2 ^ params.maxSigsLog2 < 2 ^ params.maxSigsLog2 :=
+          Nat.mod_lt _ (Nat.two_pow_pos _)
+        obtain ⟨_, hLeafLt₁, hRand₁, _, hIdx₁, _, hLs₁⟩ :=
+          evalSingleSign_stateful_inv suite params sk m₁ _ _ grind₁ sig₁ hSt hEv₁
+        obtain ⟨_, _, hRand₂, _, hIdx₂, _, hLs₂⟩ :=
+          evalSingleSign_stateful_inv suite params sk m₂ _ _ grind₂ sig₂ hSt hEv₂
+        have hSameSigLeaf : sig₂.leafGlobalIdx = sig₁.leafGlobalIdx := by
+          rw [hIdx₁, hIdx₂, hSameLeaf]
+        obtain ⟨dRem, hNumLayers⟩ : ∃ dRem, params.numLayers = dRem + 1 :=
+          ⟨params.numLayers - 1, (Nat.sub_add_cancel hDPos).symm⟩
+        rw [hNumLayers, signHypertreeLayers_succ] at hLs₁ hLs₂
+        dsimp only at hLs₁ hLs₂
+        cases hG₁ : grindTswCounterAux suite params.w params.ell1 params.targetSum
+            (thPrfMsg suite sk.skPrf (buildStatefulDetOptDomain reqEp₁ sk.pkSeed)
+              (thPreHash suite sk.pkSeed (derivePublicKey suite params sk).pkRoot m₁))
+            sk.pkSeed (derivePublicKey suite params sk).pkRoot
+            (thPreHash suite sk.pkSeed (derivePublicKey suite params sk).pkRoot m₁)
+            (UInt32.ofNat 0)
+            (UInt64.ofNat ((reqEp₁ % 2 ^ params.maxSigsLog2) / 2 ^ params.subtreeHeight))
+            (UInt32.ofNat ((reqEp₁ % 2 ^ params.maxSigsLog2) % 2 ^ params.subtreeHeight))
+            0 grind₁ with
+        | none => rw [hG₁] at hLs₁; cases hLs₁
+        | some tr1 =>
+          rcases tr1 with ⟨ctr1, dg1, hm1⟩
+          rw [hG₁] at hLs₁; dsimp only at hLs₁
+          cases hRest₁ : signHypertreeLayers suite params sk (derivePublicKey suite params sk).pkRoot []
+              grind₁ 1 ((reqEp₁ % 2 ^ params.maxSigsLog2) / 2 ^ params.subtreeHeight)
+              (computeXmssSubtreeRoot suite params sk (UInt32.ofNat 0)
+                (UInt64.ofNat ((reqEp₁ % 2 ^ params.maxSigsLog2) / 2 ^ params.subtreeHeight))) dRem with
+          | none => rw [hRest₁] at hLs₁; cases hLs₁
+          | some restSigs₁ =>
+            rw [hRest₁] at hLs₁
+            injection hLs₁ with hSig1Cons
+            cases hG₂ : grindTswCounterAux suite params.w params.ell1 params.targetSum
+                (thPrfMsg suite sk.skPrf (buildStatefulDetOptDomain reqEp₂ sk.pkSeed)
+                  (thPreHash suite sk.pkSeed (derivePublicKey suite params sk).pkRoot m₂))
+                sk.pkSeed (derivePublicKey suite params sk).pkRoot
+                (thPreHash suite sk.pkSeed (derivePublicKey suite params sk).pkRoot m₂)
+                (UInt32.ofNat 0)
+                (UInt64.ofNat ((reqEp₂ % 2 ^ params.maxSigsLog2) / 2 ^ params.subtreeHeight))
+                (UInt32.ofNat ((reqEp₂ % 2 ^ params.maxSigsLog2) % 2 ^ params.subtreeHeight))
+                0 grind₂ with
+            | none => rw [hG₂] at hLs₂; cases hLs₂
+            | some tr2 =>
+              rcases tr2 with ⟨ctr2, dg2, hm2⟩
+              rw [hG₂] at hLs₂; dsimp only at hLs₂
+              cases hRest₂ : signHypertreeLayers suite params sk (derivePublicKey suite params sk).pkRoot []
+                  grind₂ 1 ((reqEp₂ % 2 ^ params.maxSigsLog2) / 2 ^ params.subtreeHeight)
+                  (computeXmssSubtreeRoot suite params sk (UInt32.ofNat 0)
+                    (UInt64.ofNat ((reqEp₂ % 2 ^ params.maxSigsLog2) / 2 ^ params.subtreeHeight))) dRem with
+              | none => rw [hRest₂] at hLs₂; cases hLs₂
+              | some restSigs₂ =>
+                rw [hRest₂] at hLs₂
+                injection hLs₂ with hSig2Cons
+                obtain ⟨hmEq1, hdEq1, _⟩ := grindTswCounterAux_sound hG₁
+                obtain ⟨hmEq2, hdEq2, _⟩ := grindTswCounterAux_sound hG₂
+                have hU0 : UInt32.ofNat 0 = (0 : UInt32) := rfl
+                have hPkSeed : (derivePublicKey suite params sk).pkSeed = sk.pkSeed := rfl
+                let pk := derivePublicKey suite params sk
+                let leaf := sig₁.leafGlobalIdx
+                let tree0 := UInt64.ofNat (leaf / 2 ^ params.subtreeHeight)
+                let kp0 := leaf % 2 ^ params.subtreeHeight
+                let digStar := extractBaseWDigits params.w params.ell1
+                  (thHashMsg suite rStar pk.pkSeed pk.pkRoot
+                    (thPreHash suite pk.pkSeed pk.pkRoot msgStar) 0 tree0 (UInt32.ofNat kp0) ctrStar)
+                let sigStar := forgeFromReusedLeafSigs suite params pk m₁ sig₁ m₂ sig₂ msgStar rStar ctrStar
+                have hLs1Get0 : sig₁.layerSigs.getD 0 ⟨0, [], []⟩ =
+                    { tswCtr := ctr1
+                      wotsChains := (List.range params.ell1).map fun r =>
+                        wotsChainSteps suite sk.pkSeed 0 tree0 kp0 r 0 (dg1.getD r 0)
+                          (wotsSecretBase suite sk 0 tree0 kp0 r)
+                      authPath := buildMerkleAuthPath suite sk.pkSeed 0 tree0 .tree
+                        (computeWotsPk suite params sk 0 tree0) params.subtreeHeight 0 kp0 } := by
+                  rw [← hSig1Cons, List.getD_cons_zero]
+                  simp only [hU0, leaf, tree0, kp0, hIdx₁]
+                have hLs2Get0 : sig₂.layerSigs.getD 0 ⟨0, [], []⟩ =
+                    { tswCtr := ctr2
+                      wotsChains := (List.range params.ell1).map fun r =>
+                        wotsChainSteps suite sk.pkSeed 0 tree0 kp0 r 0 (dg2.getD r 0)
+                          (wotsSecretBase suite sk 0 tree0 kp0 r)
+                      authPath := buildMerkleAuthPath suite sk.pkSeed 0 tree0 .tree
+                        (computeWotsPk suite params sk 0 tree0) params.subtreeHeight 0 kp0 } := by
+                  rw [← hSig2Cons, List.getD_cons_zero]
+                  simp only [hU0, leaf, tree0, kp0, hIdx₁, hSameLeaf]
+                have hDig1Eq :
+                    extractBaseWDigits params.w params.ell1
+                      (thHashMsg suite sig₁.rRand pk.pkSeed pk.pkRoot
+                        (thPreHash suite pk.pkSeed pk.pkRoot m₁) 0 tree0 (UInt32.ofNat kp0)
+                        (sig₁.layerSigs.getD 0 ⟨0, [], []⟩).tswCtr) = dg1 := by
+                  rw [hLs1Get0]
+                  dsimp only
+                  rw [hRand₁, hPkSeed]
+                  simp only [leaf, tree0, kp0, hIdx₁]
+                  rw [← hU0, ← hmEq1, ← hdEq1]
+                have hDig2Eq :
+                    extractBaseWDigits params.w params.ell1
+                      (thHashMsg suite sig₂.rRand pk.pkSeed pk.pkRoot
+                        (thPreHash suite pk.pkSeed pk.pkRoot m₂) 0 tree0 (UInt32.ofNat kp0)
+                        (sig₂.layerSigs.getD 0 ⟨0, [], []⟩).tswCtr) = dg2 := by
+                  rw [hLs2Get0]
+                  dsimp only
+                  rw [hRand₂, hPkSeed]
+                  simp only [leaf, tree0, kp0, hIdx₁, hSameLeaf]
+                  rw [← hU0, ← hmEq2, ← hdEq2]
+                have hChainStar : ∀ r, r < params.ell1 →
+                    (sigStar.layerSigs.getD 0 ⟨0, [], []⟩).wotsChains.getD r [] =
+                      honestChainNode suite sk 0 tree0 kp0 r (digStar.getD r 0) := by
+                  intro r hr
+                  have hDomR := hDom r hr
+                  dsimp only at hDomR
+                  rw [hDig1Eq, hDig2Eq] at hDomR
+                  dsimp only [sigStar, forgeFromReusedLeafSigs, List.getD_cons_zero]
+                  rw [list_getD_map_range params.ell1 _ [] hr]
+                  dsimp only
+                  change (if (extractBaseWDigits params.w params.ell1
+                            (thHashMsg suite sig₁.rRand pk.pkSeed pk.pkRoot
+                              (thPreHash suite pk.pkSeed pk.pkRoot m₁) 0 tree0 (UInt32.ofNat kp0)
+                              (sig₁.layerSigs.getD 0 ⟨0, [], []⟩).tswCtr)).getD r 0 ≤ digStar.getD r 0 then _ else _) = _
+                  rw [hDig1Eq, hDig2Eq]
+                  by_cases hLe1 : dg1.getD r 0 ≤ digStar.getD r 0
+                  · simp only [hLe1, ↓reduceIte]
+                    rw [hLs1Get0]
+                    dsimp only
+                    rw [list_getD_map_range params.ell1 _ [] hr, hPkSeed]
+                    have hStep := wotsChainSteps_add suite sk.pkSeed 0 tree0 kp0 r
+                      (dg1.getD r 0) (digStar.getD r 0 - dg1.getD r 0) 0
+                      (wotsSecretBase suite sk 0 tree0 kp0 r)
+                    rw [Nat.zero_add, Nat.add_sub_of_le hLe1] at hStep
+                    exact hStep
+                  · simp only [hLe1, ↓reduceIte]
+                    have hLe2 : dg2.getD r 0 ≤ digStar.getD r 0 := by
+                      rcases hDomR with h1 | h2
+                      · exact absurd h1 hLe1
+                      · exact h2
+                    rw [hLs2Get0]
+                    dsimp only
+                    rw [list_getD_map_range params.ell1 _ [] hr, hPkSeed]
+                    have hStep := wotsChainSteps_add suite sk.pkSeed 0 tree0 kp0 r
+                      (dg2.getD r 0) (digStar.getD r 0 - dg2.getD r 0) 0
+                      (wotsSecretBase suite sk 0 tree0 kp0 r)
+                    rw [Nat.zero_add, Nat.add_sub_of_le hLe2] at hStep
+                    exact hStep
+                have hChainsListEq :
+                    (sigStar.layerSigs.getD 0 ⟨0, [], []⟩).wotsChains =
+                      (List.range params.ell1).map fun r =>
+                        honestChainNode suite sk 0 tree0 kp0 r (digStar.getD r 0) := by
+                  have hLenL : (sigStar.layerSigs.getD 0 ⟨0, [], []⟩).wotsChains.length = params.ell1 := by
+                    dsimp [sigStar, forgeFromReusedLeafSigs]; simp
+                  apply List.ext_getElem
+                  · simp [hLenL]
+                  · intro r hr1 hr2
+                    have hr : r < params.ell1 := by simp at hr2; exact hr2
+                    rw [← list_getD_eq_getElem _ [] hr1, ← list_getD_eq_getElem _ [] hr2,
+                        list_getD_map_range params.ell1 _ [] hr]
+                    exact hChainStar r hr
+                refine ⟨?_, hChainStar, ?_⟩
+                · -- Prove `verifyCheckedStateful suite params pk msgStar sigStar = true`
+                  have hDrop1 : sig₁.layerSigs.drop 1 = restSigs₁ := by
+                    rw [← hSig1Cons]; rfl
+                  have hSubPos : 0 < 2 ^ params.subtreeHeight := Nat.two_pow_pos _
+                  have hTreeLt : (reqEp₁ % 2 ^ params.maxSigsLog2) / 2 ^ params.subtreeHeight <
+                      2 ^ (dRem * params.subtreeHeight) := by
+                    rw [hNumLayers, Nat.add_comm dRem 1, Nat.succ_mul, Nat.pow_add,
+                        Nat.mul_comm (2 ^ params.subtreeHeight)] at hLeafLt₁
+                    exact (Nat.div_lt_iff_lt_mul hSubPos).mpr hLeafLt₁
+                  have hRestInfo : restSigs₁.length = dRem ∧
+                      verifyHypertreeLayers suite params sk.pkSeed pk.pkRoot [] 1
+                        ((reqEp₁ % 2 ^ params.maxSigsLog2) / 2 ^ params.subtreeHeight)
+                        (computeXmssSubtreeRoot suite params sk 0 tree0) restSigs₁ =
+                      some pk.pkRoot := by
+                    cases dRem with
+                    | zero =>
+                      rw [signHypertreeLayers_zero] at hRest₁
+                      injection hRest₁ with hNil
+                      subst hNil
+                      have hTree0 : (reqEp₁ % 2 ^ params.maxSigsLog2) / 2 ^ params.subtreeHeight = 0 := by
+                        simp at hTreeLt; exact hTreeLt
+                      refine ⟨rfl, ?_⟩
+                      rw [verifyHypertreeLayers_nil]
+                      simp only [Option.some.injEq, pk, derivePublicKey, hNumLayers, Nat.zero_add,
+                                 Nat.sub_self, hU0, tree0, leaf, hIdx₁, hTree0]
+                      rfl
+                    | succ rRem =>
+                      have hSnd := signHypertreeLayers_sound suite params sk pk.pkRoot grind₁
+                        (rRem + 1) 1 ((reqEp₁ % 2 ^ params.maxSigsLog2) / 2 ^ params.subtreeHeight) []
+                        (computeXmssSubtreeRoot suite params sk (UInt32.ofNat 0)
+                          (UInt64.ofNat ((reqEp₁ % 2 ^ params.maxSigsLog2) / 2 ^ params.subtreeHeight)))
+                        restSigs₁ (Nat.succ_pos _) hTreeLt hRest₁
+                      refine ⟨hSnd.1, ?_⟩
+                      have hTopEq : UInt32.ofNat (1 + (rRem + 1) - 1) = UInt32.ofNat (params.numLayers - 1) := by
+                        rw [hNumLayers]; congr 1; omega
+                      simpa only [hU0, tree0, leaf, hIdx₁, pk, derivePublicKey, hTopEq] using hSnd.2
+                  rw [verifyCheckedStateful_eq]
+                  have hSigLeaf : sigStar.leafGlobalIdx = reqEp₁ % 2 ^ params.maxSigsLog2 := hIdx₁
+                  rw [hValid, hSigLeaf, decide_eq_true hBud₁]
+                  simp only [Bool.true_and]
+                  unfold verifyPqHashSig
+                  have hSigLen : sigStar.layerSigs.length = params.numLayers := by
+                    dsimp [sigStar, forgeFromReusedLeafSigs]
+                    rw [List.length_cons, hDrop1, hRestInfo.1, hNumLayers]
+                  have hLeafLtStar : sigStar.leafGlobalIdx < 2 ^ (params.numLayers * params.subtreeHeight) := by
+                    rw [hSigLeaf]; exact hLeafLt₁
+                  have hForsEmpty : sigStar.forsOpenings = [] ∧ sigStar.msgTswCtr = 0 := ⟨rfl, rfl⟩
+                  simp only [hWf, Bool.not_true, Bool.false_eq_true, ↓reduceIte, hSigLen, ne_eq,
+                             not_true_eq_false, hLeafLtStar, decide_true, hSt, hForsEmpty.1,
+                             List.isEmpty_nil, hForsEmpty.2, decide_false, Bool.or_self]
+                  have hVerLayers :
+                      verifyHypertreeLayers suite params pk.pkSeed pk.pkRoot sigStar.rRand 0
+                        sigStar.leafGlobalIdx (thPreHash suite pk.pkSeed pk.pkRoot msgStar) sigStar.layerSigs =
+                      some pk.pkRoot := by
+                    change verifyHypertreeLayers suite params pk.pkSeed pk.pkRoot rStar 0 leaf
+                      (thPreHash suite pk.pkSeed pk.pkRoot msgStar)
+                      ((sigStar.layerSigs.getD 0 ⟨0, [], []⟩) :: restSigs₁) = some pk.pkRoot
+                    rw [verifyHypertreeLayers_cons]
+                    have hTsw' : checkTargetSum params.w params.ell1 params.targetSum digStar = true := hTswStar
+                    have hChLen' : (sigStar.layerSigs.getD 0 ⟨0, [], []⟩).wotsChains.length = params.ell1 := by
+                      rw [hChainsListEq]; simp
+                    have hCtrStar : (sigStar.layerSigs.getD 0 ⟨0, [], []⟩).tswCtr = ctrStar := rfl
+                    have hAuthStar : (sigStar.layerSigs.getD 0 ⟨0, [], []⟩).authPath =
+                        buildMerkleAuthPath suite sk.pkSeed 0 tree0 .tree
+                          (computeWotsPk suite params sk 0 tree0) params.subtreeHeight 0 kp0 := by
+                      dsimp [sigStar, forgeFromReusedLeafSigs]; rw [hLs1Get0]
+                    simp only [hU0, tree0, kp0, hCtrStar, digStar, hTsw', Bool.not_true, Bool.false_eq_true,
+                               ↓reduceIte, hChLen', ne_eq, not_true_eq_false]
+                    rw [hChainsListEq, hAuthStar, hPkSeed]
+                    have hWotsEq := recoverWotsPkFromSig_eq_computeWotsPk suite params sk 0 tree0 kp0 digStar hTsw'
+                    rw [hWotsEq]
+                    have hWalk0 := walkMerkleAuthPath_buildMerkleAuthPath suite sk.pkSeed 0 tree0 .tree
+                      (computeWotsPk suite params sk 0 tree0) params.subtreeHeight 0 kp0 (Nat.mod_lt _ hSubPos)
+                    simp only [Nat.zero_mul, Nat.zero_add] at hWalk0
+                    rw [hWalk0]
+                    dsimp only
+                    rw [← computeXmssSubtreeRoot_eq]
+                    simpa only [Nat.zero_add, leaf, hIdx₁] using hRestInfo.2
+                  rw [hDrop1]
+                  change (match verifyHypertreeLayers suite params pk.pkSeed pk.pkRoot sigStar.rRand 0
+                            sigStar.leafGlobalIdx (thPreHash suite pk.pkSeed pk.pkRoot msgStar) sigStar.layerSigs with
+                          | some computedTopRoot => decide (computedTopRoot = pk.pkRoot)
+                          | none => false) = true
+                  rw [hVerLayers]
+                  simp
+                · -- Prove `CheckedStatefulWotsTswWitness ... → False` when `params.numLayers = 1`
+                  intro hNum1 w
+                  have hLay0 : w.layerIdx = 0 := by have := w.layer_lt; omega
+                  have hSD := w.layer0_digest hLay0
+                  have hFDig := w.forgedDigit_eq
+                  rw [hLay0] at hFDig
+                  simp only [↓reduceIte, Nat.zero_mul, Nat.pow_zero, Nat.div_one, hU0, hSD] at hFDig
+                  have hStarLeafEq : sigStar.leafGlobalIdx = leaf := rfl
+                  have hStarCtrEq : (sigStar.layerSigs.getD 0 ⟨0, [], []⟩).tswCtr = ctrStar := rfl
+                  rw [hStarLeafEq, hStarCtrEq] at hFDig
+                  have hAddr1 : wotsPosAddr params sig₁.leafGlobalIdx 0 =
+                      wotsPosAddr params sigStar.leafGlobalIdx w.layerIdx := by
+                    rw [hLay0]; rfl
+                  have hAddr2 : wotsPosAddr params sig₂.leafGlobalIdx 0 =
+                      wotsPosAddr params sigStar.leafGlobalIdx w.layerIdx := by
+                    rw [hLay0, hSameSigLeaf]; rfl
+                  have hLt1 := w.unrevealedInLog (reqEp₁ % 2 ^ params.maxSigsLog2, m₁, sig₁)
+                    List.mem_cons_self 0 (by omega) hAddr1
+                  have hLt2 := w.unrevealedInLog (reqEp₂ % 2 ^ params.maxSigsLog2, m₂, sig₂)
+                    (List.mem_cons_of_mem _ List.mem_cons_self) 0 (by omega) hAddr2
+                  have hLog1 : statefulLogLayerDigits suite params sk
+                      (reqEp₁ % 2 ^ params.maxSigsLog2, m₁, sig₁) 0 = dg1 := by
+                    rw [statefulLogLayerDigits_eq]
+                    simp only [honestStatefulLayerRand, honestStatefulLayerRoot, ↓reduceIte,
+                               Nat.zero_mul, Nat.pow_zero, Nat.div_one, hU0]
+                    exact hDig1Eq
+                  have hLog2 : statefulLogLayerDigits suite params sk
+                      (reqEp₂ % 2 ^ params.maxSigsLog2, m₂, sig₂) 0 = dg2 := by
+                    rw [statefulLogLayerDigits_eq]
+                    simp only [honestStatefulLayerRand, honestStatefulLayerRoot, ↓reduceIte,
+                               Nat.zero_mul, Nat.pow_zero, Nat.div_one, hU0, hSameSigLeaf]
+                    exact hDig2Eq
+                  rw [hLog1] at hLt1
+                  rw [hLog2] at hLt2
+                  have hDomR := hDom w.chainIdx w.chain_lt
+                  dsimp only at hDomR
+                  rw [hDig1Eq, hDig2Eq] at hDomR
+                  change w.forgedDigit = digStar.getD w.chainIdx 0 at hFDig
+                  rcases hDomR with hLe1 | hLe2 <;> omega
+
+/-- Domain-separated concrete hash suite for `#tooth` executable verification:
+    - `thPreHash` (`tagHPre`) maps 1-byte messages `[b]` to `[b, 0, ..., 0]` (pairwise distinct `mu`);
+    - `thHashMsg` (`tagHMsg`) maps `mu[0] = 1, 2, 3` to three pairwise distinct 128-crumb (`w = 4`)
+      codewords `d₁ ≠ d₂`, `dStar ≠ d₁`, `dStar ≠ d₂` all with target sum `192` and satisfying
+      `min(d₁[r], d₂[r]) ≤ dStar[r]` for every `r < 128`! -/
+def toothDistinctSuite : TweakableHashSuite where
+  suiteId := []
+  rawHash := fun bytes =>
+    if bytes.take 2 == [5, 14] && (bytes.drop 2).take 14 == tagHPre then
+      [bytes.getLastD 0] ++ List.replicate 31 0
+    else if bytes.take 2 == [7, 15] && (bytes.drop 2).take 15 == tagHMsg then
+      match bytes.getD (bytes.length - 37) 0 with
+      | 1 => [0x0F, 0xF0] ++ List.replicate 30 0x1B
+      | 2 => [0xF0, 0x0F] ++ List.replicate 30 0x1B
+      | 3 => [0x66, 0x99] ++ List.replicate 30 0x1B
+      | _ => List.replicate 32 0x1B
+    else
+      List.replicate 32 0x1B
+  rawHash_len := fun bytes => by
+    split
+    · simp [List.length_replicate]
+    · split
+      · split <;> simp [List.length_replicate]
+      · simp [List.length_replicate]
+
+/-- Concrete 1-layer stateful profile with budget `2 ^ 1 = 2` signatures (`maxSigsLog2 = 1`). -/
+def toothStatefulParams : PqHashParams := ⟨4, 128, 1, 1, 0, 0, 1, true⟩
+
+/-- **`#tooth` Concrete Executable Leaf-Reuse Forgery Witness
+    (`tooth_mutantUncheckedReuseSign_concrete_forgery`)**:
+    1. Real `checkedStatefulSignStep` strictly enforces the epoch budget (`2^1 = 2`) and aborts on
+       epoch `2` with `.error (.budgetExhausted 2 2)` (and aborts on epoch-`0` equivocation with
+       `.error (.equivocationAttempt 0)`);
+    2. `mutantUncheckedReuseSign` wraps `reqEpoch = 2` onto leaf `0`, emitting two valid signatures
+       `sig₁` (on `m₁ = [1]`) and `sig₂` (on `m₂ = [2]`) with distinct codewords `dig₁ ≠ dig₂`;
+    3. `forgeFromReusedLeafSigs` (using ONLY public inputs, zero `sk`) forges `sigStar` on fresh
+       `msgStar = [3] ∉ [[1], [2]]` with a third distinct codeword `digStar` passing
+       `verifyCheckedStateful = true`, with every forged chain value equal to `honestChainNode`
+       (`0` hash collisions) and `CheckedStatefulWotsTswWitness ... → False` (`0` backward inversions)! -/
+theorem tooth_mutantUncheckedReuseSign_concrete_forgery :
+    let suite := toothDistinctSuite
+    let params := toothStatefulParams
+    let sk : PqSecretKey := ⟨[], [], []⟩
+    let pk := derivePublicKey suite params sk
+    -- Real checked stateful oracle signs epochs 0 and 1, then aborts on epoch 2 (`budgetExhausted 2 2`)
+    (execCheckedStatefulOracle suite params sk initCheckedStatefulLatch
+      [.signNext [1] 1, .signNext [9] 1, .signNext [2] 1]).abortError =
+      some (.budgetExhausted 2 2) ∧
+    -- Real checked stateful oracle also aborts on direct epoch-0 equivocation (`equivocationAttempt 0`)
+    (execCheckedStatefulOracle suite params sk initCheckedStatefulLatch
+      [.signEpoch 0 [1] 1, .signEpoch 0 [2] 1]).abortError =
+      some (.equivocationAttempt 0) ∧
+    -- Mutant signer succeeds on both `(reqEpoch = 0, [1])` and `(reqEpoch = 2, [2])` at leaf 0,
+    -- and public `forgeFromReusedLeafSigs` forges fresh `msgStar = [3]` with 0 collisions & 0 inversions:
+    ∃ st1 st2 sig₁ sig₂,
+      mutantUncheckedReuseSign suite params sk initCheckedStatefulLatch 0 [1] 1 = .ok (st1, 0, [1], sig₁) ∧
+      mutantUncheckedReuseSign suite params sk st1 2 [2] 1 = .ok (st2, 0, [2], sig₂) ∧
+      [3] ∉ ([[1], [2]] : List (List UInt8)) ∧
+      let sigStar := forgeFromReusedLeafSigs suite params pk [1] sig₁ [2] sig₂ [3] [] 0
+      let digStar := extractBaseWDigits params.w params.ell1
+        (thHashMsg suite [] pk.pkSeed pk.pkRoot (thPreHash suite pk.pkSeed pk.pkRoot [3]) 0 0 0 0)
+      verifyCheckedStateful suite params pk [3] sigStar = true ∧
+      (∀ r, r < params.ell1 →
+        (sigStar.layerSigs.getD 0 ⟨0, [], []⟩).wotsChains.getD r [] =
+          honestChainNode suite sk 0 0 0 r (digStar.getD r 0)) ∧
+      (CheckedStatefulWotsTswWitness suite params sk [(0, [1], sig₁), (0, [2], sig₂)] [3] sigStar → False) := by
+  dsimp only
+  refine ⟨by decide +kernel, by decide +kernel, ?_⟩
+  cases hM1 : mutantUncheckedReuseSign toothDistinctSuite toothStatefulParams ⟨[], [], []⟩
+      initCheckedStatefulLatch 0 [1] 1 with
+  | error e =>
+    exfalso
+    have hOk1 : (mutantUncheckedReuseSign toothDistinctSuite toothStatefulParams ⟨[], [], []⟩
+        initCheckedStatefulLatch 0 [1] 1).isOk = true := by decide +kernel
+    rw [hM1] at hOk1; cases hOk1
+  | ok q1 =>
+    rcases q1 with ⟨st1, leaf1, m1Out, sig₁⟩
+    cases hM2 : mutantUncheckedReuseSign toothDistinctSuite toothStatefulParams ⟨[], [], []⟩
+        st1 2 [2] 1 with
+    | error e =>
+      exfalso
+      have hOk2 : (match mutantUncheckedReuseSign toothDistinctSuite toothStatefulParams ⟨[], [], []⟩
+          initCheckedStatefulLatch 0 [1] 1 with
+        | .error _ => false
+        | .ok (s1, _, _, _) =>
+          (mutantUncheckedReuseSign toothDistinctSuite toothStatefulParams ⟨[], [], []⟩ s1 2 [2] 1).isOk) = true := by
+        decide +kernel
+      rw [hM1, hM2] at hOk2; cases hOk2
+    | ok q2 =>
+      rcases q2 with ⟨st2, leaf2, m2Out, sig₂⟩
+      have hL1 : leaf1 = 0 ∧ m1Out = [1] := by
+        unfold mutantUncheckedReuseSign at hM1
+        simp only [toothStatefulParams, show (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams).checkedStatefulValid = true by decide,
+                   Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hM1
+        cases hE : evalSingleSign toothDistinctSuite ⟨4, 128, 1, 1, 0, 0, 1, true⟩ ⟨[], [], []⟩ [1]
+            (buildStatefulDetOptDomain 0 []) (0 % 2 ^ 1) 1 with
+        | none => rw [hE] at hM1; cases hM1
+        | some s =>
+          rw [hE] at hM1; injection hM1 with hT
+          rcases Prod.mk.inj hT with ⟨_, hTb⟩
+          rcases Prod.mk.inj hTb with ⟨hLeaf, hTc⟩
+          exact ⟨hLeaf.symm, (Prod.mk.inj hTc).1.symm⟩
+      have hL2 : leaf2 = 0 ∧ m2Out = [2] := by
+        unfold mutantUncheckedReuseSign at hM2
+        simp only [toothStatefulParams, show (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams).checkedStatefulValid = true by decide,
+                   Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hM2
+        cases hE : evalSingleSign toothDistinctSuite ⟨4, 128, 1, 1, 0, 0, 1, true⟩ ⟨[], [], []⟩ [2]
+            (buildStatefulDetOptDomain 2 []) (2 % 2 ^ 1) 1 with
+        | none => rw [hE] at hM2; cases hM2
+        | some s =>
+          rw [hE] at hM2; injection hM2 with hT
+          rcases Prod.mk.inj hT with ⟨_, hTb⟩
+          rcases Prod.mk.inj hTb with ⟨hLeaf, hTc⟩
+          exact ⟨hLeaf.symm, (Prod.mk.inj hTc).1.symm⟩
+      subst hL1; subst hL2
+      have hSig1Idx : sig₁.leafGlobalIdx = 0 := by
+        unfold mutantUncheckedReuseSign at hM1
+        simp only [toothStatefulParams, show (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams).checkedStatefulValid = true by decide,
+                   Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hM1
+        cases hE : evalSingleSign toothDistinctSuite toothStatefulParams ⟨[], [], []⟩ [1]
+            (buildStatefulDetOptDomain 0 []) 0 1 with
+        | none =>
+          change (match evalSingleSign toothDistinctSuite toothStatefulParams ⟨[], [], []⟩ [1]
+                    (buildStatefulDetOptDomain 0 []) 0 1 with | none => _ | some _ => _) = _ at hM1
+          rw [hE] at hM1; cases hM1
+        | some s =>
+          change (match evalSingleSign toothDistinctSuite toothStatefulParams ⟨[], [], []⟩ [1]
+                    (buildStatefulDetOptDomain 0 []) 0 1 with | none => _ | some _ => _) = _ at hM1
+          rw [hE] at hM1; injection hM1 with hT
+          have hS : s = sig₁ := (Prod.mk.inj (Prod.mk.inj (Prod.mk.inj hT).2).2).2
+          subst hS
+          exact (evalSingleSign_stateful_inv toothDistinctSuite toothStatefulParams ⟨[], [], []⟩ [1]
+            (buildStatefulDetOptDomain 0 []) 0 1 sig₁ rfl hE).2.2.2.2.1
+      have hTsw3 :
+          let pk := derivePublicKey toothDistinctSuite toothStatefulParams ⟨[], [], []⟩
+          let leaf := sig₁.leafGlobalIdx
+          let tree0 := UInt64.ofNat (leaf / 2 ^ toothStatefulParams.subtreeHeight)
+          let kp0 := leaf % 2 ^ toothStatefulParams.subtreeHeight
+          checkTargetSum toothStatefulParams.w toothStatefulParams.ell1 toothStatefulParams.targetSum
+            (extractBaseWDigits toothStatefulParams.w toothStatefulParams.ell1
+              (thHashMsg toothDistinctSuite [] pk.pkSeed pk.pkRoot
+                (thPreHash toothDistinctSuite pk.pkSeed pk.pkRoot [3]) 0 tree0 (UInt32.ofNat kp0) 0)) = true := by
+        dsimp only
+        rw [hSig1Idx]
+        decide +kernel
+      have hDom3 :
+          let pk := derivePublicKey toothDistinctSuite toothStatefulParams ⟨[], [], []⟩
+          let leaf := sig₁.leafGlobalIdx
+          let tree0 := UInt64.ofNat (leaf / 2 ^ toothStatefulParams.subtreeHeight)
+          let kp0 := leaf % 2 ^ toothStatefulParams.subtreeHeight
+          let dig₁ := extractBaseWDigits toothStatefulParams.w toothStatefulParams.ell1
+            (thHashMsg toothDistinctSuite sig₁.rRand pk.pkSeed pk.pkRoot
+              (thPreHash toothDistinctSuite pk.pkSeed pk.pkRoot [1]) 0 tree0 (UInt32.ofNat kp0)
+              (sig₁.layerSigs.getD 0 ⟨0, [], []⟩).tswCtr)
+          let dig₂ := extractBaseWDigits toothStatefulParams.w toothStatefulParams.ell1
+            (thHashMsg toothDistinctSuite sig₂.rRand pk.pkSeed pk.pkRoot
+              (thPreHash toothDistinctSuite pk.pkSeed pk.pkRoot [2]) 0 tree0 (UInt32.ofNat kp0)
+              (sig₂.layerSigs.getD 0 ⟨0, [], []⟩).tswCtr)
+          let digStar := extractBaseWDigits toothStatefulParams.w toothStatefulParams.ell1
+            (thHashMsg toothDistinctSuite [] pk.pkSeed pk.pkRoot
+              (thPreHash toothDistinctSuite pk.pkSeed pk.pkRoot [3]) 0 tree0 (UInt32.ofNat kp0) 0)
+          ∀ r, r < toothStatefulParams.ell1 →
+            dig₁.getD r 0 ≤ digStar.getD r 0 ∨ dig₂.getD r 0 ≤ digStar.getD r 0 := by
+        have hDecDom :
+            (match mutantUncheckedReuseSign toothDistinctSuite toothStatefulParams ⟨[], [], []⟩
+                     initCheckedStatefulLatch 0 [1] 1,
+                   mutantUncheckedReuseSign toothDistinctSuite toothStatefulParams ⟨[], [], []⟩
+                     st1 2 [2] 1 with
+             | .ok (_, _, _, s1), .ok (_, _, _, s2) =>
+               let pk := derivePublicKey toothDistinctSuite toothStatefulParams ⟨[], [], []⟩
+               let leaf := s1.leafGlobalIdx
+               let tree0 := UInt64.ofNat (leaf / 2 ^ toothStatefulParams.subtreeHeight)
+               let kp0 := leaf % 2 ^ toothStatefulParams.subtreeHeight
+               let d1 := extractBaseWDigits 4 128
+                 (thHashMsg toothDistinctSuite s1.rRand pk.pkSeed pk.pkRoot
+                   (thPreHash toothDistinctSuite pk.pkSeed pk.pkRoot [1]) 0 tree0 (UInt32.ofNat kp0)
+                   (s1.layerSigs.getD 0 ⟨0, [], []⟩).tswCtr)
+               let d2 := extractBaseWDigits 4 128
+                 (thHashMsg toothDistinctSuite s2.rRand pk.pkSeed pk.pkRoot
+                   (thPreHash toothDistinctSuite pk.pkSeed pk.pkRoot [2]) 0 tree0 (UInt32.ofNat kp0)
+                   (s2.layerSigs.getD 0 ⟨0, [], []⟩).tswCtr)
+               let dS := extractBaseWDigits 4 128
+                 (thHashMsg toothDistinctSuite [] pk.pkSeed pk.pkRoot
+                   (thPreHash toothDistinctSuite pk.pkSeed pk.pkRoot [3]) 0 tree0 (UInt32.ofNat kp0) 0)
+               (List.range 128).all (fun r => decide (d1.getD r 0 ≤ dS.getD r 0 ∨ d2.getD r 0 ≤ dS.getD r 0))
+             | _, _ => false) = true := by
+          -- Rewrite `st1` via `hM1` so the whole expression is closed!
+          have hClosed :
+              (match mutantUncheckedReuseSign toothDistinctSuite toothStatefulParams ⟨[], [], []⟩
+                       initCheckedStatefulLatch 0 [1] 1 with
+               | .ok (s1State, _, _, s1) =>
+                 match mutantUncheckedReuseSign toothDistinctSuite toothStatefulParams ⟨[], [], []⟩
+                         s1State 2 [2] 1 with
+                 | .ok (_, _, _, s2) =>
+                   let pk := derivePublicKey toothDistinctSuite toothStatefulParams ⟨[], [], []⟩
+                   let leaf := s1.leafGlobalIdx
+                   let tree0 := UInt64.ofNat (leaf / 2 ^ toothStatefulParams.subtreeHeight)
+                   let kp0 := leaf % 2 ^ toothStatefulParams.subtreeHeight
+                   let d1 := extractBaseWDigits 4 128
+                     (thHashMsg toothDistinctSuite s1.rRand pk.pkSeed pk.pkRoot
+                       (thPreHash toothDistinctSuite pk.pkSeed pk.pkRoot [1]) 0 tree0 (UInt32.ofNat kp0)
+                       (s1.layerSigs.getD 0 ⟨0, [], []⟩).tswCtr)
+                   let d2 := extractBaseWDigits 4 128
+                     (thHashMsg toothDistinctSuite s2.rRand pk.pkSeed pk.pkRoot
+                       (thPreHash toothDistinctSuite pk.pkSeed pk.pkRoot [2]) 0 tree0 (UInt32.ofNat kp0)
+                       (s2.layerSigs.getD 0 ⟨0, [], []⟩).tswCtr)
+                   let dS := extractBaseWDigits 4 128
+                     (thHashMsg toothDistinctSuite [] pk.pkSeed pk.pkRoot
+                       (thPreHash toothDistinctSuite pk.pkSeed pk.pkRoot [3]) 0 tree0 (UInt32.ofNat kp0) 0)
+                   (List.range 128).all (fun r => decide (d1.getD r 0 ≤ dS.getD r 0 ∨ d2.getD r 0 ≤ dS.getD r 0))
+                 | .error _ => false
+               | .error _ => false) = true := by decide +kernel
+          rw [hM1, hM2] at hClosed ⊢
+          exact hClosed
+        rw [hM1, hM2] at hDecDom
+        dsimp only at hDecDom ⊢
+        intro r hr
+        have hAll := List.all_eq_true.mp hDecDom r (List.mem_range.mpr hr)
+        exact of_decide_eq_true hAll
+      obtain ⟨hVerStar, hChainsStar, hNoWots⟩ :=
+        mutantUncheckedReuseSign_collision_free_forgery toothDistinctSuite toothStatefulParams ⟨[], [], []⟩
+          [3] [] 0 hM1 hM2 (by decide) hTsw3 hDom3
+      refine ⟨st1, st2, sig₁, sig₂, rfl, rfl, by decide, hVerStar, ?_, hNoWots rfl⟩
+      intro r hr
+      have hC := hChainsStar r hr
+      simpa only [hSig1Idx, Nat.zero_div, Nat.zero_mod, show UInt64.ofNat 0 = (0 : UInt64) from rfl,
+                  show UInt32.ofNat 0 = (0 : UInt32) from rfl] using hC
+
+/-- Concrete 2-layer (`d = 2`) stateful profile with budget `2 ^ 2 = 4` signatures (`maxSigsLog2 = 2`). -/
+def inhabitedStatefulParams : PqHashParams := ⟨4, 128, 1, 2, 0, 0, 2, true⟩
+
+/-- Multi-turn checked stateful query schedule exercising fresh `.signNext` across subtree
+    boundaries (`epoch = 0, 1`), crash-recovery `.retryEpoch 1`, and explicit `.signEpoch 2`. -/
+def inhabitedStatefulQueries : List CheckedStatefulQuery :=
+  [.signNext [10] 1, .signNext [20] 1, .retryEpoch 1 [20], .signEpoch 2 [30] 1]
+
+/-- Well-shaped 2-layer signature on leaf `0` accepted by `verifyCheckedStateful` under `crumbToySuite`. -/
+def inhabitedStatefulForgery : PqHashSig :=
+  { rRand := []
+    msgTswCtr := 0
+    leafGlobalIdx := 0
+    forsOpenings := []
+    layerSigs := [⟨0, List.replicate 128 [], [[]]⟩, ⟨0, List.replicate 128 [], [[]]⟩] }
+
+/-- **Inhabited Multi-Signature Constructive Extraction Witness (`inhabited_checked_stateful_multi_sign_extract`)**:
+    Directly executes `checked_stateful_hypertree_euf_cma_extract` on the 4-entry, 2-layer
+    multi-signature transcript produced by `inhabitedStatefulQueries` (`0 Classical.choice`). -/
+def inhabited_checked_stateful_multi_sign_extract :
+    let log := (execCheckedStatefulOracle crumbToySuite inhabitedStatefulParams ⟨[], [], []⟩
+                  initCheckedStatefulLatch inhabitedStatefulQueries).emittedLog
+    PSum (CheckedStatefulCollisionWitness crumbToySuite inhabitedStatefulParams ⟨[], [], []⟩ log)
+         (CheckedStatefulWotsTswWitness crumbToySuite inhabitedStatefulParams ⟨[], [], []⟩ log
+            [99] inhabitedStatefulForgery) :=
+  checked_stateful_hypertree_euf_cma_extract
+    crumbToySuite inhabitedStatefulParams ⟨[], [], []⟩
+    inhabitedStatefulQueries [99] inhabitedStatefulForgery
+    (.inl ⟨rfl, rfl⟩)
+    (by decide +kernel)
+    (by decide +kernel)
+
+/-- **Multi-Signature Inhabitedness Theorem (`inhabited_checked_stateful_multi_sign_log`)**:
+    Proves that all hypotheses of `checked_stateful_hypertree_euf_cma_extract` and
+    `checked_stateful_strict_euf_cma_extract` are jointly inhabited on a genuine 2-layer (`d = 2`),
+    multi-signature checked stateful execution:
+    1. `execCheckedStatefulStrict` succeeds (`abortError = none`) with `stFinal.nextEpoch = 3` and
+       `4` emitted log entries across epochs `[0, 1, 1, 2]` and messages `[[10], [20], [20], [30]]`;
+    2. Every emitted signature passes `verifyCheckedStateful = true`;
+    3. `msgStar = [99]` is fresh (`∉ log.map (·.2.1)`) and `inhabitedStatefulForgery` passes
+       `verifyCheckedStateful = true`; and
+    4. `checked_stateful_hypertree_euf_cma_extract` produces an inhabited transcript-indexed break witness! -/
+theorem inhabited_checked_stateful_multi_sign_log :
+    let suite := crumbToySuite
+    let params := inhabitedStatefulParams
+    let sk : PqSecretKey := ⟨[], [], []⟩
+    let pk := derivePublicKey suite params sk
+    let run := execCheckedStatefulOracle suite params sk initCheckedStatefulLatch inhabitedStatefulQueries
+    run.abortError = none ∧
+    (∃ stFinal, execCheckedStatefulStrict suite params sk initCheckedStatefulLatch inhabitedStatefulQueries =
+      .ok (stFinal, run.emittedLog) ∧ stFinal.nextEpoch = 3) ∧
+    run.emittedLog.length = 4 ∧
+    (run.emittedLog.map Prod.fst) = [0, 1, 1, 2] ∧
+    (run.emittedLog.map fun e => e.2.1) = [[10], [20], [20], [30]] ∧
+    (∀ e ∈ run.emittedLog, verifyCheckedStateful suite params pk e.2.1 e.2.2 = true) ∧
+    ([99] : List UInt8) ∉ (run.emittedLog.map fun e => e.2.1) ∧
+    verifyCheckedStateful suite params pk [99] inhabitedStatefulForgery = true ∧
+    (Nonempty (CheckedStatefulCollisionWitness suite params sk run.emittedLog) ∨
+     Nonempty (CheckedStatefulWotsTswWitness suite params sk run.emittedLog [99] inhabitedStatefulForgery)) := by
+  dsimp only
+  refine ⟨by decide +kernel, ?_, by decide +kernel, by decide +kernel, by decide +kernel, ?_,
+          by decide +kernel, by decide +kernel, ?_⟩
+  · cases hStr : execCheckedStatefulStrict crumbToySuite inhabitedStatefulParams ⟨[], [], []⟩
+        initCheckedStatefulLatch inhabitedStatefulQueries with
+    | error err =>
+      exfalso
+      have hOk : (execCheckedStatefulStrict crumbToySuite inhabitedStatefulParams ⟨[], [], []⟩
+          initCheckedStatefulLatch inhabitedStatefulQueries).isOk = true := by decide +kernel
+      rw [hStr] at hOk; cases hOk
+    | ok pair =>
+      rcases pair with ⟨stFinal, log⟩
+      obtain ⟨_, _, hLogEq⟩ :=
+        (execCheckedStatefulStrict_eq_oracle crumbToySuite inhabitedStatefulParams ⟨[], [], []⟩
+          initCheckedStatefulLatch inhabitedStatefulQueries).mp hStr
+      have hNext : stFinal.nextEpoch = 3 := by
+        have hDec : (match execCheckedStatefulStrict crumbToySuite inhabitedStatefulParams ⟨[], [], []⟩
+                        initCheckedStatefulLatch inhabitedStatefulQueries with
+                     | .ok (s, _) => s.nextEpoch == 3
+                     | .error _ => false) = true := by decide +kernel
+        rw [hStr] at hDec
+        exact of_decide_eq_true (by simpa [beq_iff_eq] using hDec)
+      exact ⟨stFinal, hLogEq ▸ hStr, hNext⟩
+  · intro e he
+    exact checkedStatefulOracle_accepts crumbToySuite inhabitedStatefulParams ⟨[], [], []⟩
+      inhabitedStatefulQueries he
+  · cases inhabited_checked_stateful_multi_sign_extract with
+    | inl col => exact .inl ⟨col⟩
+    | inr wots => exact .inr ⟨wots⟩
+
+end Qsag
+end
