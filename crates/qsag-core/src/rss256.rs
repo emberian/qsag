@@ -1332,3 +1332,2070 @@ pub(crate) struct ProofView {
 }
 
 /// The 256-lane replicated engine (see the module documentation).
+pub struct Rss256Engine {
+    cluster: RssSlhMpcCluster,
+    mode: AndMode,
+    /// Relation words per barrier before a check is forced (bounds proof memory).
+    max_pending_words: usize,
+    pending: PendingGates,
+    transcript: [TranscriptHasher4; 3],
+    prev_digest: [u8; 32],
+    last_seed: [u8; 32],
+    barrier_index: u64,
+    unverified: bool,
+    /// Set by the first failed barrier, coin flip or opening comparison; never cleared.
+    poisoned: bool,
+    staging: bool,
+    wave_index: u64,
+    bank: BeaverBank256,
+    opened: OpenedShares,
+    stats: WireStats,
+    #[cfg(test)]
+    faults: Vec<Fault256>,
+    #[cfg(test)]
+    captured_messages: Option<[Vec<Plane>; 3]>,
+    #[cfg(test)]
+    proof_view: Option<ProofView>,
+}
+
+impl Rss256Engine {
+    /// Default bound on relation words buffered between barriers: 400,000 gate planes, a
+    /// little over ten full waves. The buffer holds twelve planes per gate plane (about
+    /// 150 MiB at the bound) and the proof adds about 80 MiB of bound vectors per pass.
+    pub const DEFAULT_MAX_PENDING_WORDS: usize = 1_600_000;
+
+    pub fn new(
+        session_id: [u8; 32],
+        keys: [RssKeyShare256; 3],
+        party_rngs: [PartyPrivateRng; 3],
+    ) -> Result<Self, Rss256Error> {
+        let cluster = RssSlhMpcCluster::new(session_id, keys, party_rngs)?;
+        let prev_digest = [0u8; 32];
+        Ok(Self {
+            cluster,
+            mode: AndMode::InlineCnf,
+            max_pending_words: Self::DEFAULT_MAX_PENDING_WORDS,
+            pending: PendingGates::new(),
+            transcript: core::array::from_fn(|s| TranscriptHasher4::new(s as u64, &prev_digest)),
+            prev_digest,
+            last_seed: [0u8; 32],
+            barrier_index: 0,
+            unverified: false,
+            poisoned: false,
+            staging: false,
+            wave_index: 0,
+            bank: BeaverBank256::empty(),
+            opened: OpenedShares::new(),
+            stats: WireStats::default(),
+            #[cfg(test)]
+            faults: Vec::new(),
+            #[cfg(test)]
+            captured_messages: None,
+            #[cfg(test)]
+            proof_view: None,
+        })
+    }
+
+    pub fn session_id(&self) -> &[u8; 32] {
+        &self.cluster.session_id
+    }
+
+    pub fn keys(&self) -> &[RssKeyShare256; 3] {
+        &self.cluster.keys
+    }
+
+    pub fn mode(&self) -> AndMode {
+        self.mode
+    }
+
+    /// Record, in all three key shares, the identity of the hash-signature key they were
+    /// generated for (see [`RssKeyShare256::bind_scheme_identity`]). Refused if a share is
+    /// already bound to a different identity.
+    pub fn bind_key_identity(&mut self, identity: &[u8; 32]) -> Result<(), Rss256Error> {
+        self.guard()?;
+        if self
+            .cluster
+            .keys
+            .iter()
+            .any(|k| k.scheme_identity().is_some_and(|bound| bound != identity))
+        {
+            return Err(Rss256Error::Mpc(KeccakMpcError::KeyBindingMismatch));
+        }
+        for key in &mut self.cluster.keys {
+            key.bind_scheme_identity(identity)?;
+        }
+        Ok(())
+    }
+
+    /// The identity all three key shares are bound to, or `None` if none is bound. Shares
+    /// that disagree are an error.
+    pub fn key_identity(&self) -> Result<Option<[u8; 32]>, Rss256Error> {
+        let first = self.cluster.keys[0].scheme_identity().copied();
+        if self.cluster.keys.iter().any(|k| k.scheme_identity().copied() != first) {
+            return Err(Rss256Error::Mpc(KeccakMpcError::KeyBindingMismatch));
+        }
+        Ok(first)
+    }
+
+    /// True once a barrier, coin flip or opening comparison has failed. Permanent.
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned
+    }
+
+    #[inline]
+    fn guard(&self) -> Result<(), Rss256Error> {
+        if self.poisoned {
+            Err(Rss256Error::Poisoned)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Latch the poison flag, then drop everything that was awaiting verification.
+    fn poison<T>(&mut self, error: Rss256Error) -> Result<T, Rss256Error> {
+        self.poisoned = true;
+        self.cluster.poison();
+        self.pending.clear_and_wipe();
+        self.opened.clear();
+        self.bank = BeaverBank256::empty();
+        Err(error)
+    }
+
+    /// Select the AND protocol for subsequent waves. Requires a verified state.
+    pub fn set_mode(&mut self, mode: AndMode) -> Result<(), Rss256Error> {
+        self.guard()?;
+        if self.unverified {
+            return Err(Rss256Error::OpenBeforeCheck);
+        }
+        self.mode = mode;
+        Ok(())
+    }
+
+    /// Bound on buffered relation words (64 relations each; a gate plane is four words).
+    pub fn set_max_pending_words(&mut self, words: usize) {
+        self.max_pending_words = words.max(4 * GROUP_PLANES);
+    }
+
+    fn pending_words(&self) -> usize {
+        4 * self.pending.len()
+    }
+
+    pub fn stats(&self) -> WireStats {
+        self.stats
+    }
+
+    pub fn bank(&self) -> &BeaverBank256 {
+        &self.bank
+    }
+
+    /// Seed of the most recent barrier (public after the coin is opened).
+    pub fn last_check_seed(&self) -> &[u8; 32] {
+        &self.last_seed
+    }
+
+    /// True while gates exist that no barrier has accepted.
+    pub fn has_unverified_gates(&self) -> bool {
+        self.unverified
+    }
+
+    /// Declare that the waves evaluated next depend on the outputs of earlier waves: one more
+    /// sequential permutation level (24 gate rounds) for the round count.
+    pub fn mark_sequential_level(&mut self) {
+        self.stats.perm_levels += 1;
+    }
+
+    /// Declare one opening round: every opening requested until the next call travels in it.
+    pub fn mark_open_round(&mut self) {
+        self.stats.open_rounds += 1;
+    }
+
+    /// Account for a broadcast outside the engine's own protocol (for example a latch echo).
+    pub fn charge_broadcast(&mut self, bytes: u64, hops: u64) {
+        self.stats.open_bytes += bytes;
+        self.stats.open_rounds += hops;
+    }
+
+    /// Share slots of the replicated `sk_seed`.
+    pub(crate) fn sk_seed_slots(&self) -> [&[u8]; 3] {
+        core::array::from_fn(|s| self.cluster.keys[s].sk_seed_shares().0)
+    }
+
+    /// Share slots of the replicated `sk_prf`.
+    pub(crate) fn sk_prf_slots(&self) -> [&[u8]; 3] {
+        core::array::from_fn(|s| self.cluster.keys[s].sk_prf_shares().0)
+    }
+
+    pub fn pk_seed(&self) -> [u8; 32] {
+        self.cluster.keys[0].pk_seed
+    }
+
+    /// Fresh 32-byte value from a commit-then-open coin flip bound to `binding`.
+    pub fn joint_coin(
+        &mut self,
+        label: &[u8],
+        binding: &[u8; 32],
+    ) -> Result<[u8; 32], Rss256Error> {
+        self.guard()?;
+        self.stats.check_hops += 2;
+        self.stats.check_bytes += 64;
+        match run_commit_and_open_coin_with_hook(
+            &self.cluster.session_id,
+            label,
+            binding,
+            &mut self.cluster.party_rngs,
+            |_, _| {},
+        ) {
+            Ok(coin) => Ok(coin),
+            Err(e) => self.poison(Rss256Error::Mpc(KeccakMpcError::from(e))),
+        }
+    }
+
+    fn pad_stream(&self, slot: usize, purpose: u64, wave_ctr: u64) -> Shake256Prg256 {
+        Shake256Prg256::new(
+            &self.cluster.mask_session.prim[slot],
+            &self.cluster.session_id,
+            (purpose << 56) | wave_ctr,
+        )
+    }
+
+    fn next_wave_counter(&mut self) -> Result<u64, Rss256Error> {
+        let ctr = self.cluster.next_ctr();
+        if ctr > MAX_WAVE_COUNTER {
+            return Err(Rss256Error::WaveCounterOverflow);
+        }
+        Ok(ctr)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_fault(&mut self, fault: Fault256) {
+        self.faults.push(fault);
+    }
+
+    /// Like [`Self::inject_fault`], with a gate fault's `wave` counted from the next wave.
+    #[cfg(test)]
+    pub(crate) fn inject_fault_next_wave(&mut self, fault: Fault256) {
+        let fault = match fault {
+            Fault256::GateMessage {
+                wave,
+                round,
+                plane,
+                sender,
+                mask,
+            } => Fault256::GateMessage {
+                wave: wave + self.wave_index,
+                round,
+                plane,
+                sender,
+                mask,
+            },
+            other => other,
+        };
+        self.faults.push(fault);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn capture_next_messages(&mut self) {
+        self.captured_messages = Some([Vec::new(), Vec::new(), Vec::new()]);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_captured_messages(&mut self) -> Option<[Vec<Plane>; 3]> {
+        self.captured_messages.take()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn capture_proof_view(&mut self) {
+        self.proof_view = Some(ProofView::default());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_proof_view(&mut self) -> Option<ProofView> {
+        self.proof_view.take()
+    }
+
+    #[cfg(test)]
+    fn gate_fault(&self, wave: u64, round: usize, plane: usize, sender: usize) -> Plane {
+        let mut out = [0u64; 4];
+        for f in &self.faults {
+            if let Fault256::GateMessage {
+                wave: w,
+                round: r,
+                plane: p,
+                sender: s,
+                mask,
+            } = *f
+                && w == wave
+                && r == round
+                && p == plane
+                && s == sender
+            {
+                for (o, m) in out.iter_mut().zip(mask) {
+                    *o ^= m;
+                }
+            }
+        }
+        out
+    }
+
+    /// Evaluate `Keccak-f[1600]` on the low `lanes` lanes of `st`. Outputs stay shared; the
+    /// gates are unverified until [`Self::check`].
+    pub fn permute(&mut self, st: &mut SharedState256, lanes: usize) -> Result<(), Rss256Error> {
+        self.guard()?;
+        if lanes == 0 || lanes > LANES {
+            return Err(Rss256Error::InvalidParameters);
+        }
+        match self.mode {
+            AndMode::InlineCnf => self.permute_inline(st, lanes)?,
+            AndMode::BeaverBank => self.permute_bank(st, lanes)?,
+        }
+        self.stats.lane_perms += lanes as u64;
+        self.wave_index += 1;
+        if self.pending_words() >= self.max_pending_words {
+            self.run_barrier(false)?;
+        }
+        Ok(())
+    }
+
+    fn permute_inline(&mut self, st: &mut SharedState256, lanes: usize) -> Result<(), Rss256Error> {
+        let active = active_lane_mask(lanes);
+        let words = lanes.div_ceil(64);
+        let wave_ctr = self.next_wave_counter()?;
+        let mut pads: [Shake256Prg256; 3] =
+            core::array::from_fn(|s| self.pad_stream(s, PURPOSE_CHI_PAD, wave_ctr));
+        let mut lin: [Box<[Plane; STATE_PLANES]>; 3] = core::array::from_fn(|_| boxed_planes());
+        let mut pad: [Box<[Plane; STATE_PLANES]>; 3] = core::array::from_fn(|_| boxed_planes());
+        let mut msg: [Box<[Plane; STATE_PLANES]>; 3] = core::array::from_fn(|_| boxed_planes());
+        for s in 0..3 {
+            for planes in [
+                &mut self.pending.a[s],
+                &mut self.pending.b[s],
+                &mut self.pending.msg[s],
+                &mut self.pending.pad[s],
+            ] {
+                planes.reserve(AND_PLANES_PER_PERM);
+            }
+        }
+
+        for (round, &rc) in KECCAK_ROUND_CONSTANTS.iter().enumerate() {
+            for s in 0..3 {
+                keccak_linear_layer(&st.slot[s], &mut lin[s]);
+                pads[s].fill_planes(&mut pad[s][..], words);
+                // Lanes outside the wave carry no gate: their pads are not used.
+                for plane in pad[s].iter_mut() {
+                    for (x, m) in plane.iter_mut().zip(&active) {
+                        *x &= m;
+                    }
+                }
+            }
+            for p in 0..3 {
+                let [pad_p, pad_q] = sender_pad_slots(p);
+                let q = pad_q;
+                for lane in 0..25 {
+                    let row = 5 * (lane / 5);
+                    let l1 = (row + (lane + 1) % 5) * 64;
+                    let l2 = (row + (lane + 2) % 5) * 64;
+                    let l0 = lane * 64;
+                    for z in 0..64 {
+                        let ap = &lin[p][l1 + z];
+                        let aq = &lin[q][l1 + z];
+                        let bp = &lin[p][l2 + z];
+                        let bq = &lin[q][l2 + z];
+                        let rp = &pad[pad_p][l0 + z];
+                        let rq = &pad[pad_q][l0 + z];
+                        #[cfg(test)]
+                        let fault = self.gate_fault(self.wave_index, round, l0 + z, p);
+                        let out = &mut msg[p][l0 + z];
+                        for w in 0..4 {
+                            let u = and_message(ap[w], aq[w], bp[w], bq[w], rp[w], rq[w])
+                                & active[w];
+                            #[cfg(test)]
+                            let u = u ^ fault[w];
+                            out[w] = u;
+                        }
+                    }
+                }
+            }
+            #[cfg(not(test))]
+            let _ = round;
+            self.record_and_apply(st, &lin, &msg, &pad, &active, words, rc);
+        }
+        for s in 0..3 {
+            qsag_asm::volatile_fill(&mut lin[s][..], [0; 4]);
+            qsag_asm::volatile_fill(&mut pad[s][..], [0; 4]);
+            qsag_asm::volatile_fill(&mut msg[s][..], [0; 4]);
+        }
+        let gate_bytes = (AND_PLANES_PER_PERM * lanes).div_ceil(8) as u64;
+        if self.staging {
+            self.stats.staged_bytes += gate_bytes;
+        } else {
+            self.stats.and_bytes += gate_bytes;
+        }
+        self.unverified = true;
+        Ok(())
+    }
+
+    /// Bind the round's gate messages, record its AND relations and finish chi and iota.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one gate round: state, linear layer, messages, pads, lane mask and round constant"
+    )]
+    fn record_and_apply(
+        &mut self,
+        st: &mut SharedState256,
+        lin: &[Box<[Plane; STATE_PLANES]>; 3],
+        msg: &[Box<[Plane; STATE_PLANES]>; 3],
+        pad: &[Box<[Plane; STATE_PLANES]>; 3],
+        active: &Plane,
+        words: usize,
+        rc: u64,
+    ) {
+        for s in 0..3 {
+            for plane in msg[s].iter() {
+                self.transcript[s].absorb_words(&plane[..words]);
+            }
+            #[cfg(test)]
+            if let Some(cap) = &mut self.captured_messages {
+                cap[s].extend_from_slice(&msg[s][..]);
+            }
+            self.pending.msg[s].extend_from_slice(&msg[s][..]);
+            self.pending.pad[s].extend_from_slice(&pad[s][..]);
+            for lane in 0..25 {
+                let row = 5 * (lane / 5);
+                let l1 = (row + (lane + 1) % 5) * 64;
+                let l2 = (row + (lane + 2) % 5) * 64;
+                let l0 = lane * 64;
+                for z in 0..64 {
+                    let a = &lin[s][l1 + z];
+                    let b = &lin[s][l2 + z];
+                    let t = &msg[s][l0 + z];
+                    self.pending.a[s].push(core::array::from_fn(|w| a[w] & active[w]));
+                    self.pending.b[s].push(core::array::from_fn(|w| b[w] & active[w]));
+                    let out = &mut st.slot[s][l0 + z];
+                    for w in 0..4 {
+                        out[w] = lin[s][l0 + z][w] ^ b[w] ^ t[w];
+                    }
+                }
+            }
+        }
+        for (z, plane) in st.slot[0][..64].iter_mut().enumerate() {
+            if (rc >> z) & 1 == 1 {
+                for (x, m) in plane.iter_mut().zip(active) {
+                    *x ^= m;
+                }
+            }
+        }
+    }
+
+    fn permute_bank(&mut self, st: &mut SharedState256, lanes: usize) -> Result<(), Rss256Error> {
+        if self.bank.remaining_planes() < AND_PLANES_PER_PERM {
+            return Err(Rss256Error::BeaverBankExhausted);
+        }
+        let active = active_lane_mask(lanes);
+        let mut lin: [Box<[Plane; STATE_PLANES]>; 3] = core::array::from_fn(|_| boxed_planes());
+        for (round, &rc) in KECCAK_ROUND_CONSTANTS.iter().enumerate() {
+            #[cfg(not(test))]
+            let _ = round;
+            for (src, dst) in st.slot.iter().zip(lin.iter_mut()) {
+                keccak_linear_layer(src, dst);
+            }
+            let base = self.bank.cursor;
+            for lane in 0..25 {
+                let row = 5 * (lane / 5);
+                let l1 = (row + (lane + 1) % 5) * 64;
+                let l2 = (row + (lane + 2) % 5) * 64;
+                let l0 = lane * 64;
+                for z in 0..64 {
+                    let g = base + l0 + z;
+                    // Mask differences d = a + t_a and e = b + t_b, opened slot by slot. The
+                    // party that lacks slot `s` receives it from the forwarding holder and
+                    // computes with that copy; the primary holder's copy is kept alongside.
+                    let mut d_pub = [0u64; 4];
+                    let mut e_pub = [0u64; 4];
+                    #[allow(
+                        clippy::needless_range_loop,
+                        reason = "one slot index addresses several parallel per-slot tables"
+                    )]
+                    for s in 0..3 {
+                        let d: Plane = core::array::from_fn(|w| {
+                            (lin[s][l1 + z][w] ^ self.bank.a[s][g][w]) & active[w]
+                        });
+                        let e: Plane = core::array::from_fn(|w| {
+                            (lin[s][l2 + z][w] ^ self.bank.b[s][g][w]) & active[w]
+                        });
+                        self.opened.reference[s].extend_from_slice(&[
+                            [d[0], d[1]],
+                            [d[2], d[3]],
+                            [e[0], e[1]],
+                            [e[2], e[3]],
+                        ]);
+                        #[cfg_attr(not(test), expect(unused_mut, reason = "mutated by test faults"))]
+                        let mut sent = d;
+                        #[cfg(test)]
+                        for f in &self.faults {
+                            if let Fault256::BeaverOpening {
+                                wave,
+                                round: r,
+                                plane,
+                                slot,
+                                mask,
+                            } = *f
+                                && wave == self.wave_index
+                                && r == round
+                                && plane == l0 + z
+                                && slot == s
+                            {
+                                // The forwarding holder reports a different share of `d`.
+                                for (x, m) in sent.iter_mut().zip(mask) {
+                                    *x ^= m;
+                                }
+                            }
+                        }
+                        self.opened.forwarded[s].extend_from_slice(&[
+                            [sent[0], sent[1]],
+                            [sent[2], sent[3]],
+                            [e[0], e[1]],
+                            [e[2], e[3]],
+                        ]);
+                        for w in 0..4 {
+                            d_pub[w] ^= sent[w];
+                            e_pub[w] ^= e[w];
+                        }
+                        self.transcript[s].absorb_words(&sent);
+                        self.transcript[s].absorb_words(&e);
+                    }
+                    #[allow(
+                        clippy::needless_range_loop,
+                        reason = "one slot index addresses several parallel per-slot tables"
+                    )]
+                    for s in 0..3 {
+                        let ta = self.bank.a[s][g];
+                        let tb = self.bank.b[s][g];
+                        let tc = self.bank.c[s][g];
+                        let out = &mut st.slot[s][l0 + z];
+                        for w in 0..4 {
+                            let mut prod = tc[w] ^ (d_pub[w] & tb[w]) ^ (e_pub[w] & ta[w]);
+                            if s == 0 {
+                                prod ^= d_pub[w] & e_pub[w];
+                            }
+                            out[w] = lin[s][l0 + z][w] ^ lin[s][l2 + z][w] ^ (prod & active[w]);
+                        }
+                    }
+                }
+            }
+            for s in 0..3 {
+                qsag_asm::volatile_fill(&mut self.bank.a[s][base..base + STATE_PLANES], [0; 4]);
+                qsag_asm::volatile_fill(&mut self.bank.b[s][base..base + STATE_PLANES], [0; 4]);
+                qsag_asm::volatile_fill(&mut self.bank.c[s][base..base + STATE_PLANES], [0; 4]);
+            }
+            self.bank.cursor += STATE_PLANES;
+            for (z, plane) in st.slot[0][..64].iter_mut().enumerate() {
+                if (rc >> z) & 1 == 1 {
+                    for (x, m) in plane.iter_mut().zip(&active) {
+                        *x ^= m;
+                    }
+                }
+            }
+        }
+        for l in &mut lin {
+            qsag_asm::volatile_fill(&mut l[..], [0; 4]);
+        }
+        // Two opened bits per gate and party.
+        self.stats.and_bytes += 2 * (AND_PLANES_PER_PERM * lanes).div_ceil(8) as u64;
+        self.unverified = true;
+        Ok(())
+    }
+
+    /// Stage and verify enough single-use triples for `perms` 256-lane permutations
+    /// (Mode 1A). This is offline work: it costs what evaluating those permutations in
+    /// Mode 1B costs, and each party must store two of the three slots of every triple.
+    /// A failed proof poisons the engine and discards the bank.
+    pub fn stage_beaver_bank(&mut self, perms: usize) -> Result<(), Rss256Error> {
+        self.guard()?;
+        if self.unverified || self.mode != AndMode::InlineCnf {
+            return Err(Rss256Error::OpenBeforeCheck);
+        }
+        let active = [u64::MAX; 4];
+        self.staging = true;
+        let result = self.stage_inner(perms, &active);
+        let checked = result.and_then(|()| self.check());
+        self.staging = false;
+        match checked {
+            Ok(()) => Ok(()),
+            // Already poisoned by the barrier, or a counter overflow before it: either way
+            // the partly staged bank is never used.
+            Err(e) => self.poison(e),
+        }
+    }
+
+    fn stage_inner(&mut self, perms: usize, active: &Plane) -> Result<(), Rss256Error> {
+        let mut ta: [Box<[Plane; STATE_PLANES]>; 3] = core::array::from_fn(|_| boxed_planes());
+        let mut tb: [Box<[Plane; STATE_PLANES]>; 3] = core::array::from_fn(|_| boxed_planes());
+        let mut pad: [Box<[Plane; STATE_PLANES]>; 3] = core::array::from_fn(|_| boxed_planes());
+        for _ in 0..perms {
+            let wave_ctr = self.next_wave_counter()?;
+            let mut sa: [Shake256Prg256; 3] =
+                core::array::from_fn(|s| self.pad_stream(s, PURPOSE_BANK_A, wave_ctr));
+            let mut sb: [Shake256Prg256; 3] =
+                core::array::from_fn(|s| self.pad_stream(s, PURPOSE_BANK_B, wave_ctr));
+            let mut sp: [Shake256Prg256; 3] =
+                core::array::from_fn(|s| self.pad_stream(s, PURPOSE_BANK_PAD, wave_ctr));
+            for _round in 0..24 {
+                for s in 0..3 {
+                    // Both holders of slot `s` derive the same random triple-input shares.
+                    sa[s].fill_planes(&mut ta[s][..], 4);
+                    sb[s].fill_planes(&mut tb[s][..], 4);
+                    sp[s].fill_planes(&mut pad[s][..], 4);
+                }
+                for g in 0..STATE_PLANES {
+                    let mut msgs = [[0u64; 4]; 3];
+                    for (p, msg) in msgs.iter_mut().enumerate() {
+                        let [pad_p, pad_q] = sender_pad_slots(p);
+                        let q = pad_q;
+                        for w in 0..4 {
+                            msg[w] = and_message(
+                                ta[p][g][w],
+                                ta[q][g][w],
+                                tb[p][g][w],
+                                tb[q][g][w],
+                                pad[pad_p][g][w],
+                                pad[pad_q][g][w],
+                            ) & active[w];
+                        }
+                    }
+                    for s in 0..3 {
+                        self.transcript[s].absorb_words(&msgs[s]);
+                        self.pending.a[s].push(ta[s][g]);
+                        self.pending.b[s].push(tb[s][g]);
+                        self.pending.msg[s].push(msgs[s]);
+                        self.pending.pad[s].push(pad[s][g]);
+                        self.bank.a[s].push(ta[s][g]);
+                        self.bank.b[s].push(tb[s][g]);
+                        self.bank.c[s].push(msgs[s]);
+                    }
+                }
+                self.unverified = true;
+                if self.pending_words() >= self.max_pending_words {
+                    self.run_barrier(false)?;
+                }
+            }
+            self.stats.staged_lane_perms += LANES as u64;
+            self.stats.staged_bytes += (AND_PLANES_PER_PERM * LANES / 8) as u64;
+            // Two slots of (a, b, c) per plane triple.
+            self.stats.staged_state_bytes += (2 * 3 * AND_PLANES_PER_PERM * 32) as u64;
+        }
+        for s in 0..3 {
+            qsag_asm::volatile_fill(&mut ta[s][..], [0; 4]);
+            qsag_asm::volatile_fill(&mut tb[s][..], [0; 4]);
+            qsag_asm::volatile_fill(&mut pad[s][..], [0; 4]);
+        }
+        Ok(())
+    }
+
+    /// The verification barrier (see the module documentation). A failure poisons the engine:
+    /// nothing evaluated in this session can be opened afterwards.
+    pub fn check(&mut self) -> Result<(), Rss256Error> {
+        self.guard()?;
+        self.run_barrier(true)
+    }
+
+    fn run_barrier(&mut self, at_cut: bool) -> Result<(), Rss256Error> {
+        self.guard()?;
+        if !self.unverified {
+            return Ok(());
+        }
+        match self.run_barrier_steps(at_cut) {
+            Ok(()) => Ok(()),
+            Err(e) => self.poison(e),
+        }
+    }
+
+    fn run_barrier_steps(&mut self, at_cut: bool) -> Result<(), Rss256Error> {
+        // 1. Per-sender transcript digests, announced by both holders of each stream: the
+        // sender (party `s`) and the receiver (party `s - 1`).
+        let mut digests = [[0u8; 32]; 3];
+        for (s, digest) in digests.iter_mut().enumerate() {
+            let fresh = TranscriptHasher4::new(s as u64, &self.prev_digest);
+            *digest = core::mem::replace(&mut self.transcript[s], fresh).finalize();
+        }
+        #[cfg_attr(not(test), expect(unused_mut, reason = "mutated by test faults"))]
+        let mut announced: [[[u8; 32]; 2]; 3] = core::array::from_fn(|s| [digests[s]; 2]);
+        #[cfg(test)]
+        for f in &self.faults {
+            if let Fault256::TranscriptDigest { slot } = *f {
+                announced[slot][1][0] ^= 1;
+            }
+        }
+        for (slot, pair) in announced.iter().enumerate() {
+            if !qsag_asm::ct_eq_32(&pair[0], &pair[1]) {
+                return Err(Rss256Error::TranscriptMismatch { slot });
+            }
+        }
+        let mut xof = Cshake256Xof::new_shake256();
+        xof.absorb(b"QSAG-WAVE-TRANSCRIPT-v1");
+        xof.absorb(&self.cluster.session_id);
+        xof.absorb(&self.prev_digest);
+        xof.absorb(&self.barrier_index.to_le_bytes());
+        xof.absorb(&(self.pending.len() as u64).to_le_bytes());
+        xof.absorb(&(self.opened.reference[0].len() as u64).to_le_bytes());
+        for d in &digests {
+            xof.absorb(d);
+        }
+        let mut transcript_digest = [0u8; 32];
+        xof.squeeze(&mut transcript_digest);
+
+        // 2. Coin flip: commitments are bound to the transcript digest and opened afterwards.
+        #[cfg(test)]
+        let coin_fault = self.faults.iter().find_map(|f| match *f {
+            Fault256::CoinReveal { party } => Some(party),
+            _ => None,
+        });
+        #[cfg(not(test))]
+        let coin_fault: Option<usize> = None;
+        let coin = run_commit_and_open_coin_with_hook(
+            &self.cluster.session_id,
+            b"QSAG-WAVE-CHECK-COIN-v1",
+            &transcript_digest,
+            &mut self.cluster.party_rngs,
+            |party, share| {
+                if coin_fault == Some(party) {
+                    share[0] ^= 1;
+                }
+            },
+        )
+        .map_err(|e| match e {
+            PreprocessError::CoinCommitMismatch { party_id } => {
+                Rss256Error::CoinOpeningRejected { party: party_id }
+            }
+            other => Rss256Error::Mpc(KeccakMpcError::from(other)),
+        })?;
+        let mut xof = Cshake256Xof::new_shake256();
+        xof.absorb(b"QSAG-WAVE-CHECK-v1");
+        xof.absorb(&transcript_digest);
+        xof.absorb(&coin);
+        let mut seed = [0u8; 32];
+        xof.squeeze(&mut seed);
+        self.last_seed = seed;
+
+        // 3a. Mode 1B (and bank staging): product proof under two seed-derived challenges.
+        let mut bytes = 64 + 64u64;
+        let mut hops = 2u64;
+        if self.pending.len() > 0 {
+            let (b, h) = self.product_proof(&seed)?;
+            bytes += b;
+            hops += h;
+        }
+
+        // 3b. Mode 1A: for every slot, the primary holder's and the forwarding holder's copy
+        // of the opened mask-difference shares are evaluated at two seed-derived points; the
+        // evaluations must agree at both.
+        if !self.opened.is_empty() {
+            let mut xof = Cshake256Xof::new_shake256();
+            xof.absorb(b"QSAG-WAVE-HORNER-v1");
+            xof.absorb(&seed);
+            let points = [fe_from_xof(&mut xof), fe_from_xof(&mut xof)];
+            for slot in 0..3 {
+                for point in points {
+                    let primary = horner_eval(&self.opened.reference[slot], point);
+                    let forwarded = horner_eval(&self.opened.forwarded[slot], point);
+                    if (primary[0] ^ forwarded[0]) | (primary[1] ^ forwarded[1]) != 0 {
+                        return Err(Rss256Error::OpeningConsistencyFailed { slot });
+                    }
+                }
+            }
+            self.opened.clear();
+            bytes += 2 * 16;
+            // One more hop, after the product proof if both ran.
+            hops += 1;
+        }
+
+        if self.staging {
+            self.stats.staged_bytes += bytes;
+        } else {
+            self.stats.checks += 1;
+            if at_cut {
+                self.stats.cut_checks += 1;
+                self.stats.check_hops += hops;
+            }
+            self.stats.check_bytes += bytes;
+        }
+        self.prev_digest = transcript_digest;
+        self.barrier_index += 1;
+        self.unverified = false;
+        Ok(())
+    }
+
+    /// Joint coin of one product-proof round, bound to the barrier seed and the round.
+    fn proof_coin(&mut self, seed: &[u8; 32], pass: usize, round: u32) -> Result<[u8; 32], Rss256Error> {
+        let mut xof = Cshake256Xof::new_shake256();
+        xof.absorb(b"QSAG-WAVE-PRODUCT-ROUND-v2");
+        xof.absorb(&(pass as u64).to_le_bytes());
+        xof.absorb(seed);
+        xof.absorb(&round.to_le_bytes());
+        let mut binding = [0u8; 32];
+        xof.squeeze(&mut binding);
+        run_commit_and_open_coin_with_hook(
+            &self.cluster.session_id,
+            b"QSAG-WAVE-PRODUCT-COIN-v1",
+            &binding,
+            &mut self.cluster.party_rngs,
+            |_, _| {},
+        )
+        .map_err(|e| Rss256Error::Mpc(KeccakMpcError::from(e)))
+    }
+
+    /// Split the prover values `values[1..]` of proof `p` between its verifiers: `V1`
+    /// derives its share from `stream` (keyed by slot `p`, which `V2` does not hold) and `V2`
+    /// is sent the difference. Entry `0` of both shares is zero.
+    fn split_message(
+        &mut self,
+        p: usize,
+        pass: usize,
+        round: u32,
+        values: &[Fe],
+        stream: &mut Shake256Prg256,
+    ) -> (Vec<Fe>, Vec<Fe>) {
+        let mut v1 = vec![FE_ZERO; values.len()];
+        stream.fill_words(v1[1..].as_flattened_mut());
+        let mut v2: Vec<Fe> = values.iter().zip(&v1).map(|(v, m)| fe_add(*v, *m)).collect();
+        v2[0] = FE_ZERO;
+        #[cfg(test)]
+        {
+            for f in &self.faults {
+                if let Fault256::ProofMessage {
+                    prover,
+                    pass: fp,
+                    round: fr,
+                } = *f
+                    && prover == p
+                    && fp == pass
+                    && fr == round
+                {
+                    v2[1][0] ^= 1;
+                }
+            }
+            if let Some(view) = &mut self.proof_view {
+                view.received[(p + 1) % 3].extend_from_slice(&v2[1..]);
+            }
+        }
+        #[cfg(not(test))]
+        let _ = (p, pass, round);
+        (v1, v2)
+    }
+
+    /// The product proof over every recorded gate relation (see the module documentation).
+    /// Returns the bytes one party sends and the message hops. The recorded relations are
+    /// consumed.
+    ///
+    /// The two passes are independent proofs with common round structure; in a deployment
+    /// each round coin is freshly committed and opened after that pass sends its values.
+    /// Pass and round are bound separately, including in this sequential emulator.
+    fn product_proof(&mut self, seed: &[u8; 32]) -> Result<(u64, u64), Rss256Error> {
+        self.pending.pad_to_group();
+        let groups = self.pending.len() / GROUP_PLANES;
+        let blocks = 2 * groups;
+        let elems = groups * LANES;
+        let ctr = self.next_wave_counter()?;
+
+        let mut xof = Cshake256Xof::new_shake256();
+        xof.absorb(b"QSAG-WAVE-PRODUCT-WEIGHTS-v1");
+        xof.absorb(seed);
+        let weights: [PassWeights; 2] =
+            core::array::from_fn(|_| PassWeights::new(fe_from_xof(&mut xof), blocks));
+
+        // Per proof `p`: the stream `V1` shares with the prover (slot key `p`) for message
+        // shares and for the masks of its openings, and the stream `V2` shares with the
+        // prover (slot key `p + 1`) for the masks of its openings.
+        let mut share_prg: [Shake256Prg256; 3] =
+            core::array::from_fn(|p| self.pad_stream(p, PURPOSE_PROOF_SHARE, ctr));
+        let mut mask1_prg: [Shake256Prg256; 3] =
+            core::array::from_fn(|p| self.pad_stream(p, PURPOSE_PROOF_MASK_V1, ctr));
+        let mut mask2_prg: [Shake256Prg256; 3] =
+            core::array::from_fn(|p| self.pad_stream((p + 1) % 3, PURPOSE_PROOF_MASK_V2, ctr));
+
+        let linear = linear_terms(&self.pending, groups, &weights);
+        let mut tensor = tensor_tables(&self.pending, groups, &weights);
+
+        let mut rounds = 0u64;
+        let mut sums = 0u64;
+        let mut accepted = true;
+        for pass in 0..2 {
+            let w = &weights[pass];
+            // Claim shares of the two verifiers of every proof.
+            let mut claim1: [Fe; 3] = core::array::from_fn(|p| linear[pass][p][0]);
+            let mut claim2: [Fe; 3] = core::array::from_fn(|p| linear[pass][(p + 1) % 3][1]);
+            let mut round = 0u32;
+            let challenges = |coin: &[u8; 32], count: usize| -> Vec<Fe> {
+                let mut xof = Cshake256Xof::new_shake256();
+                xof.absorb(b"QSAG-WAVE-PRODUCT-CHALLENGE-v1");
+                xof.absorb(coin);
+                xof.absorb(&[pass as u8]);
+                (0..count).map(|_| fe_from_xof(&mut xof)).collect()
+            };
+
+            // Tensor round: bind the plane index inside every group.
+            let shares: [(Vec<Fe>, Vec<Fe>); 3] = core::array::from_fn(|p| {
+                self.split_message(p, pass, round, &tensor[pass][p], &mut share_prg[p])
+            });
+            let gammas = challenges(&self.proof_coin(seed, pass, round)?, TENSOR_BITS);
+            let coeff = round_coefficients(&gammas);
+            let boolean = w.boolean_weights();
+            for p in 0..3 {
+                claim1[p] = next_claim(claim1[p], &shares[p].0, &boolean, &coeff);
+                claim2[p] = next_claim(claim2[p], &shares[p].1, &boolean, &coeff);
+            }
+            if pass == 0 {
+                sums += (TENSOR_POINTS - 1) as u64;
+            }
+            round += 1;
+
+            // Bound vectors: `x` carries the lane weights, `y` does not. The block weights
+            // are applied to the round sums of the first fold and to `x` after it.
+            let eq = eq_table(&gammas);
+            let mut x: [Vec<Fe>; 3] = core::array::from_fn(|_| vec![FE_ZERO; elems]);
+            let mut y: [Vec<Fe>; 3] = core::array::from_fn(|_| vec![FE_ZERO; elems]);
+            for s in 0..3 {
+                bind_planes(&self.pending.a[s], &eq, true, &mut x[s]);
+                bind_planes(&self.pending.b[s], &eq, false, &mut y[s]);
+            }
+            let block_weights = &w.block;
+
+            // Folding rounds. While a block still spans more than `WEIGHTED_BLOCK_ELEMS`
+            // elements the round sums are accumulated block by block under the block
+            // weights; then the weights are multiplied into `x` and the rounds are plain.
+            let mut scratch = FoldScratch::new();
+            let mut len = elems;
+            let mut per_block = BLOCK_LANES;
+            while len > 1 {
+                let weighted = per_block > WEIGHTED_BLOCK_ELEMS;
+                let bits = if weighted {
+                    FIRST_FOLD_BITS
+                } else {
+                    FOLD_BITS.min((len - 1).ilog2() as usize + 1)
+                };
+                let tabs = if weighted {
+                    fold_round_sums(
+                        &x,
+                        &y,
+                        len,
+                        bits,
+                        per_block >> bits,
+                        Some(block_weights),
+                        &mut scratch,
+                    )
+                } else {
+                    fold_round_sums(&x, &y, len, bits, FOLD_BATCH_CHUNKS, None, &mut scratch)
+                };
+                let shares: [(Vec<Fe>, Vec<Fe>); 3] = core::array::from_fn(|p| {
+                    self.split_message(p, pass, round, &tabs[p], &mut share_prg[p])
+                });
+                let gammas = challenges(&self.proof_coin(seed, pass, round)?, bits);
+                let coeff = round_coefficients(&gammas);
+                let boolean: Vec<(usize, Fe)> = (1..1usize << bits)
+                    .map(|u| (boolean_point(u, bits), FE_ONE))
+                    .collect();
+                for p in 0..3 {
+                    claim1[p] = next_claim(claim1[p], &shares[p].0, &boolean, &coeff);
+                    claim2[p] = next_claim(claim2[p], &shares[p].1, &boolean, &coeff);
+                }
+                let eq = eq_table(&gammas);
+                let mut next = len;
+                for s in 0..3 {
+                    next = fold_vector(&mut x[s], len, &eq);
+                    fold_vector(&mut y[s], len, &eq);
+                }
+                len = next;
+                if weighted {
+                    per_block >>= bits;
+                    if per_block <= WEIGHTED_BLOCK_ELEMS {
+                        for xs in &mut x {
+                            for (j, v) in xs[..len].iter_mut().enumerate() {
+                                *v = gf128_mul(block_weights[j / per_block], *v);
+                            }
+                        }
+                    }
+                }
+                if pass == 0 {
+                    sums += 3u64.pow(bits as u32) - 1;
+                }
+                round += 1;
+            }
+            if pass == 0 {
+                rounds = u64::from(round) - 1;
+            }
+
+            // Final check of `x_p y_q + x_q y_p == claim` for every proof `p`, with the
+            // verifiers' elements masked by `r` values the other verifier does not hold.
+            let xf: [Fe; 3] = core::array::from_fn(|s| x[s][0]);
+            let yf: [Fe; 3] = core::array::from_fn(|s| y[s][0]);
+            let mut masks = [[FE_ZERO; 4]; 3];
+            let mut cross: [(Vec<Fe>, Vec<Fe>); 3] =
+                core::array::from_fn(|_| (Vec::new(), Vec::new()));
+            for p in 0..3 {
+                let q = (p + 1) % 3;
+                mask1_prg[p].fill_words(masks[p][..2].as_flattened_mut());
+                mask2_prg[p].fill_words(masks[p][2..].as_flattened_mut());
+                let [r1x, r1y, r2x, r2y] = masks[p];
+                let c0 = fe_add(gf128_mul(r1x, r2y), gf128_mul(r2x, r1y));
+                let c1 = fe_add(
+                    fe_add(gf128_mul(r1x, yf[q]), gf128_mul(xf[p], r2y)),
+                    fe_add(gf128_mul(r2x, yf[p]), gf128_mul(xf[q], r1y)),
+                );
+                cross[p] =
+                    self.split_message(p, pass, round, &[FE_ZERO, c0, c1], &mut share_prg[p]);
+            }
+            let tau = challenges(&self.proof_coin(seed, pass, round)?, 1)[0];
+            let tau_sq = gf128_mul(tau, tau);
+            for p in 0..3 {
+                let q = (p + 1) % 3;
+                let [r1x, r1y, r2x, r2y] = masks[p];
+                let open = |r: Fe, v: Fe| fe_add(r, gf128_mul(tau, v));
+                let masked_claim = |c: &[Fe], claim: Fe| {
+                    fe_add(fe_add(c[1], gf128_mul(tau, c[2])), gf128_mul(tau_sq, claim))
+                };
+                // `V1` opens its slot-`p` elements and claim share, `V2` its slot-`q` ones.
+                let from_v1 = [open(r1x, xf[p]), open(r1y, yf[p]), masked_claim(&cross[p].0, claim1[p])];
+                let from_v2 = [open(r2x, xf[q]), open(r2y, yf[q]), masked_claim(&cross[p].1, claim2[p])];
+                #[cfg(test)]
+                if let Some(view) = &mut self.proof_view {
+                    view.received[q].extend_from_slice(&from_v1);
+                    view.received[(p + 2) % 3].extend_from_slice(&from_v2);
+                }
+                let lhs = fe_add(
+                    gf128_mul(from_v1[0], from_v2[1]),
+                    gf128_mul(from_v2[0], from_v1[1]),
+                );
+                let rhs = fe_add(from_v1[2], from_v2[2]);
+                accepted &= (lhs[0] ^ rhs[0]) | (lhs[1] ^ rhs[1]) == 0;
+            }
+            for s in 0..3 {
+                qsag_asm::volatile_fill(&mut x[s], FE_ZERO);
+                qsag_asm::volatile_fill(&mut y[s], FE_ZERO);
+            }
+            qsag_asm::volatile_fill(&mut masks, [FE_ZERO; 4]);
+        }
+        for pass in &mut tensor {
+            for tab in pass.iter_mut() {
+                qsag_asm::volatile_fill(tab, FE_ZERO);
+            }
+        }
+        self.pending.clear_and_wipe();
+        if !accepted {
+            return Err(Rss256Error::MultiplicationCheckFailed);
+        }
+        Ok(product_proof_cost(rounds, sums))
+    }
+
+    /// Open shared planes. Refused while unverified gates exist. Each slot share reaches the
+    /// party that lacks it from both of its holders; the two copies are compared and a
+    /// difference poisons the engine before anything is reconstructed.
+    pub fn open_planes(&mut self, shares: [&[Plane]; 3]) -> Result<Vec<Plane>, Rss256Error> {
+        self.guard()?;
+        if self.unverified {
+            return Err(Rss256Error::OpenBeforeCheck);
+        }
+        let n = shares[0].len();
+        if shares[1].len() != n || shares[2].len() != n {
+            return Err(Rss256Error::InvalidParameters);
+        }
+        for (slot, share) in shares.iter().enumerate() {
+            // The copy sent by the second holder of this slot.
+            let mut echo: Vec<Plane> = share.to_vec();
+            #[cfg(test)]
+            for f in &self.faults {
+                if let Fault256::OpenShare {
+                    slot: fs,
+                    plane,
+                    mask,
+                } = *f
+                    && fs == slot
+                    && plane < n
+                {
+                    for (x, m) in echo[plane].iter_mut().zip(mask) {
+                        *x ^= m;
+                    }
+                }
+            }
+            let mut diff = 0u64;
+            for (x, y) in share.iter().zip(&echo) {
+                for (a, b) in x.iter().zip(y) {
+                    diff |= a ^ b;
+                }
+            }
+            qsag_asm::volatile_fill(&mut echo, [0; 4]);
+            if diff != 0 {
+                return self.poison(Rss256Error::OpenShareMismatch { slot });
+            }
+        }
+        let mut out = vec![[0u64; 4]; n];
+        for share in shares {
+            for (o, s) in out.iter_mut().zip(share) {
+                for (x, y) in o.iter_mut().zip(s) {
+                    *x ^= *y;
+                }
+            }
+        }
+        // One slot share per party plus a digest of the copy it holds as second holder.
+        self.stats.open_bytes += (n * 32) as u64 + 32;
+        Ok(out)
+    }
+
+    /// Open the lanes of `value` selected by `lane_mask` as 32-byte values (lanes outside the
+    /// mask are never revealed: every party masks its shares before sending).
+    pub fn open_digests(
+        &mut self,
+        value: &SharedDigest256,
+        lane_mask: &Plane,
+        lanes: usize,
+    ) -> Result<Vec<[u8; 32]>, Rss256Error> {
+        let mut masked = SharedDigest256::zeroed();
+        masked.xor_masked(value, lane_mask);
+        let bytes_before = self.stats.open_bytes;
+        let planes =
+            self.open_planes([&masked.slot[0][..], &masked.slot[1][..], &masked.slot[2][..]])?;
+        // Only the selected lanes carry data, so charge those.
+        let selected: u32 = lane_mask.iter().map(|w| w.count_ones()).sum();
+        // This API accounts compact digest payloads, not the full-plane opening frame.
+        self.stats.open_bytes = bytes_before + 32 * u64::from(selected);
+        Ok(digests_from_planes(&planes, lanes))
+    }
+}
+
+/// Bitsliced theta, rho and pi on one share slot of a wave (`plane = 64 * lane + bit`).
+fn keccak_linear_layer(st: &[Plane; STATE_PLANES], out: &mut [Plane; STATE_PLANES]) {
+    let mut c = [[[0u64; 4]; 64]; 5];
+    for (x, column) in c.iter_mut().enumerate() {
+        for (z, parity) in column.iter_mut().enumerate() {
+            for w in 0..4 {
+                parity[w] = st[x * 64 + z][w]
+                    ^ st[(x + 5) * 64 + z][w]
+                    ^ st[(x + 10) * 64 + z][w]
+                    ^ st[(x + 15) * 64 + z][w]
+                    ^ st[(x + 20) * 64 + z][w];
+            }
+        }
+    }
+    let mut d = [[[0u64; 4]; 64]; 5];
+    for (x, column) in d.iter_mut().enumerate() {
+        let prev = &c[(x + 4) % 5];
+        let next = &c[(x + 1) % 5];
+        for (z, value) in column.iter_mut().enumerate() {
+            let rotated = &next[(z + 63) & 63];
+            for w in 0..4 {
+                value[w] = prev[z][w] ^ rotated[w];
+            }
+        }
+    }
+    for source in 0..25 {
+        let x = source % 5;
+        let y = source / 5;
+        let target = y + 5 * ((2 * x + 3 * y) % 5);
+        let rot = KECCAK_ROTATION_OFFSETS[source] as usize;
+        for z in 0..64 {
+            let src_z = (z + 64 - rot) & 63;
+            let dst = &mut out[target * 64 + z];
+            for w in 0..4 {
+                dst[w] = st[source * 64 + src_z][w] ^ d[x][src_z][w];
+            }
+        }
+    }
+    qsag_asm::volatile_fill(&mut c, [[0; 4]; 64]);
+    qsag_asm::volatile_fill(&mut d, [[0; 4]; 64]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keccak_mpc::{TSW_SUITE_MIDSTATE, run_dealerless_rss_dkg_2of3};
+    use crate::sponge::keccak::{keccak_f1600, shake256_xof};
+
+    fn rngs(tag: u8) -> [PartyPrivateRng; 3] {
+        core::array::from_fn(|p| PartyPrivateRng::from_seed([tag ^ ((p as u8) << 4); 32], b"rss256"))
+    }
+
+    fn engine(tag: u8) -> Rss256Engine {
+        let sid = [tag; 32];
+        let mut r = rngs(tag);
+        let (keys, _) = run_dealerless_rss_dkg_2of3(sid, 32, &mut r).unwrap();
+        Rss256Engine::new(sid, keys, r).unwrap()
+    }
+
+    #[test]
+    fn independent_pass_coins_and_compact_open_accounting() {
+        let mut e0 = engine(0x45);
+        let mut e1 = engine(0x45);
+        // Identical entropy positions: pass-domain binding itself changes the coin.
+        let first = e0.proof_coin(&[9; 32], 0, 0).unwrap();
+        let second = e1.proof_coin(&[9; 32], 1, 0).unwrap();
+        assert_ne!(first, second);
+        let before = e0.stats.open_bytes;
+        let digest = SharedDigest256::zeroed();
+        e0.open_digests(&digest, &active_lane_mask(3), 3).unwrap();
+        assert_eq!(e0.stats.open_bytes - before, 3 * 32);
+    }
+
+    fn test_frames(n: usize, tag: u8) -> Vec<[u8; SHAKE256_RATE_BYTES]> {
+        (0..n)
+            .map(|lane| {
+                let seed = [tag, lane as u8, (lane >> 8) as u8];
+                let bytes = shake256_xof(SHAKE256_RATE_BYTES, &seed);
+                bytes.try_into().unwrap()
+            })
+            .collect()
+    }
+
+    /// Reference: the same absorb of public frame and secret key, then the permutation.
+    fn reference_states(
+        frames: &[[u8; SHAKE256_RATE_BYTES]],
+        key: &[u8; 32],
+        key_off: usize,
+    ) -> Vec<[u64; 25]> {
+        frames
+            .iter()
+            .map(|frame| {
+                let mut bytes = [0u8; 200];
+                for (chunk, word) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(&TSW_SUITE_MIDSTATE)
+                {
+                    *chunk = word.to_le_bytes();
+                }
+                for (b, f) in bytes.iter_mut().zip(frame) {
+                    *b ^= *f;
+                }
+                for (i, k) in key.iter().enumerate() {
+                    bytes[key_off + i] ^= *k;
+                }
+                let mut st = [0u64; 25];
+                for (word, chunk) in st.iter_mut().zip(bytes.as_chunks::<8>().0) {
+                    *word = u64::from_le_bytes(*chunk);
+                }
+                keccak_f1600(&mut st);
+                st
+            })
+            .collect()
+    }
+
+    fn reconstruct_key(engine: &Rss256Engine) -> [u8; 32] {
+        let slots = engine.sk_seed_slots();
+        core::array::from_fn(|i| slots[0][i] ^ slots[1][i] ^ slots[2][i])
+    }
+
+    fn load(engine: &Rss256Engine, frames: &[[u8; SHAKE256_RATE_BYTES]]) -> SharedState256 {
+        let mut st = SharedState256::from_public_frames(&TSW_SUITE_MIDSTATE, frames).unwrap();
+        let mask = active_lane_mask(frames.len());
+        st.xor_shared_key(40, engine.sk_seed_slots(), &mask).unwrap();
+        st
+    }
+
+    fn open_all(engine: &mut Rss256Engine, st: &SharedState256) -> Vec<Plane> {
+        engine
+            .open_planes([&st.slot[0][..], &st.slot[1][..], &st.slot[2][..]])
+            .unwrap()
+    }
+
+    fn assert_matches_reference(planes: &[Plane], want: &[[u64; 25]]) {
+        for (lane, state) in want.iter().enumerate() {
+            for (i, plane) in planes.iter().enumerate() {
+                let got = (plane[lane / 64] >> (lane % 64)) & 1;
+                let exp = (state[i / 64] >> (i % 64)) & 1;
+                assert_eq!(got, exp, "lane {lane} bit {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn prg_blocks_are_shake256_of_the_framed_nonce_and_domains_never_alias() {
+        let key = [0x11u8; 32];
+        let sid = [0x22u8; 32];
+        let domain = (PURPOSE_CHI_PAD << 56) | 0x0123_4567;
+        let mut prg = Shake256Prg256::new(&key, &sid, domain);
+        let mut words = [0u64; 3 * WORDS_PER_X4];
+        prg.fill_words(&mut words);
+        for counter in 0..12u64 {
+            let mut input = Vec::new();
+            input.extend_from_slice(&key);
+            input.extend_from_slice(&sid);
+            input.extend_from_slice(&domain.to_le_bytes());
+            input.extend_from_slice(&counter.to_le_bytes());
+            let want = shake256_xof(SHAKE256_RATE_BYTES, &input);
+            let call = (counter / 4) as usize;
+            let lane = (counter % 4) as usize;
+            for w in 0..SHAKE256_RATE_WORDS {
+                let got = words[call * WORDS_PER_X4 + 4 * w + lane];
+                let exp = u64::from_le_bytes(want[8 * w..8 * w + 8].try_into().unwrap());
+                assert_eq!(got, exp, "counter {counter} word {w}");
+            }
+        }
+        // Worker tags `t` and `t + 16` under a 20-bit shift used to collide after a further
+        // 40-bit shift; here the whole 64-bit domain is absorbed, so they cannot.
+        let first = |domain: u64| {
+            let mut p = Shake256Prg256::new(&key, &sid, domain);
+            let mut w = [0u64; 8];
+            p.fill_words(&mut w);
+            w
+        };
+        for t in 0..8u64 {
+            assert_ne!(first(t << 20), first((t + 16) << 20));
+        }
+        assert_ne!(first(1), first(1 << 56));
+    }
+
+    #[test]
+    fn inline_mode_matches_keccak_f1600_on_full_and_partial_waves() {
+        for (tag, lanes) in [(0x31u8, 256usize), (0x32, 58), (0x33, 1), (0x34, 129)] {
+            let mut e = engine(tag);
+            let frames = test_frames(lanes, tag);
+            let key = reconstruct_key(&e);
+            let mut st = load(&e, &frames);
+            e.permute(&mut st, lanes).unwrap();
+            // Opening before the barrier is refused.
+            assert_eq!(
+                e.open_planes([&st.slot[0][..], &st.slot[1][..], &st.slot[2][..]]),
+                Err(Rss256Error::OpenBeforeCheck)
+            );
+            e.check().unwrap();
+            let planes = open_all(&mut e, &st);
+            assert_matches_reference(&planes, &reference_states(&frames, &key, 40));
+            assert_eq!(e.stats().and_bytes, (AND_PLANES_PER_PERM * lanes).div_ceil(8) as u64);
+        }
+    }
+
+    #[test]
+    fn chained_waves_and_masked_digest_opening_match_reference() {
+        let lanes = 70;
+        let mut e = engine(0x35);
+        let frames = test_frames(lanes, 0x35);
+        let key = reconstruct_key(&e);
+        let mut st = load(&e, &frames);
+        e.permute(&mut st, lanes).unwrap();
+        let first = st.digest();
+        // Second wave: every lane absorbs the first wave's 32-byte output at offset 8.
+        let frames2 = test_frames(lanes, 0x36);
+        let mut st2 = SharedState256::from_public_frames(&TSW_SUITE_MIDSTATE, &frames2).unwrap();
+        st2.xor_shared_digest(8, &first);
+        e.permute(&mut st2, lanes).unwrap();
+        e.check().unwrap();
+        // Open only the odd lanes of the second output.
+        let mut mask = [0u64; 4];
+        for lane in (1..lanes).step_by(2) {
+            mask[lane / 64] |= 1 << (lane % 64);
+        }
+        let opened = e.open_digests(&st2.digest(), &mask, lanes).unwrap();
+        let ref1 = reference_states(&frames, &key, 40);
+        for lane in 0..lanes {
+            let mut d1 = [0u8; 32];
+            for (chunk, word) in d1.as_chunks_mut::<8>().0.iter_mut().zip(&ref1[lane][..4]) {
+                *chunk = word.to_le_bytes();
+            }
+            let want = reference_states(&frames2[lane..lane + 1], &d1, 8)[0];
+            let mut d2 = [0u8; 32];
+            for (chunk, word) in d2.as_chunks_mut::<8>().0.iter_mut().zip(&want[..4]) {
+                *chunk = word.to_le_bytes();
+            }
+            if lane % 2 == 1 {
+                assert_eq!(opened[lane], d2, "lane {lane}");
+            } else {
+                assert_eq!(opened[lane], [0u8; 32], "unselected lane {lane} must stay hidden");
+            }
+        }
+    }
+
+    #[test]
+    fn beaver_bank_mode_matches_reference_is_single_use_and_counts_double_wire() {
+        let lanes = 256;
+        let mut e = engine(0x41);
+        e.stage_beaver_bank(2).unwrap();
+        assert_eq!(e.bank().remaining_planes(), 2 * AND_PLANES_PER_PERM);
+        assert_eq!(e.stats().and_bytes, 0);
+        assert_eq!(e.stats().staged_lane_perms, 512);
+        assert_eq!(e.stats().staged_state_bytes, (2 * 2 * 3 * AND_PLANES_PER_PERM * 32) as u64);
+        e.set_mode(AndMode::BeaverBank).unwrap();
+        let key = reconstruct_key(&e);
+        for round in 0..2u8 {
+            let frames = test_frames(lanes, 0x42 + round);
+            let mut st = load(&e, &frames);
+            e.permute(&mut st, lanes).unwrap();
+            e.check().unwrap();
+            let planes = open_all(&mut e, &st);
+            assert_matches_reference(&planes, &reference_states(&frames, &key, 40));
+        }
+        assert_eq!(e.stats().and_bytes, 2 * 2 * (AND_PLANES_PER_PERM * lanes / 8) as u64);
+        assert_eq!(e.bank().remaining_planes(), 0);
+        // Consumed triples are gone; a third permutation must not reuse any.
+        let frames = test_frames(lanes, 0x44);
+        let mut st = load(&e, &frames);
+        assert_eq!(e.permute(&mut st, lanes), Err(Rss256Error::BeaverBankExhausted));
+    }
+
+    #[test]
+    fn check_seed_is_bound_to_every_transmitted_gate_message_and_to_the_coin() {
+        let run = |fault: Option<Fault256>, rng_tag: u8| {
+            let sid = [0x51; 32];
+            let mut r = rngs(0x51);
+            let (keys, _) = run_dealerless_rss_dkg_2of3(sid, 32, &mut r).unwrap();
+            // Fresh coin randomness per run, same keys and inputs.
+            let coin_rngs = rngs(rng_tag);
+            let mut e = Rss256Engine::new(sid, keys, coin_rngs).unwrap();
+            if let Some(f) = fault {
+                e.inject_fault(f);
+            }
+            let frames = test_frames(4, 0x51);
+            let mut st = load(&e, &frames);
+            e.permute(&mut st, 4).unwrap();
+            let result = e.check();
+            (*e.last_check_seed(), result)
+        };
+        let (seed_a, ok_a) = run(None, 0x60);
+        let (seed_a2, _) = run(None, 0x60);
+        let (seed_b, ok_b) = run(None, 0x61);
+        assert!(ok_a.is_ok() && ok_b.is_ok());
+        assert_eq!(seed_a, seed_a2);
+        assert_ne!(seed_a, seed_b, "fresh party randomness must change the seed");
+        // One flipped message bit: the transcript digest, hence the seed, changes, and the
+        // proof run under that seed rejects.
+        let (seed_c, bad) = run(
+            Some(Fault256::GateMessage {
+                wave: 0,
+                round: 23,
+                plane: 1599,
+                sender: 2,
+                mask: [1, 0, 0, 0],
+            }),
+            0x60,
+        );
+        assert_ne!(seed_c, seed_a);
+        assert_eq!(bad, Err(Rss256Error::MultiplicationCheckFailed));
+    }
+
+    /// Every deviation of one corrupted party is caught at the barrier (or at the opening
+    /// replica comparison), before any opening succeeds.
+    #[test]
+    fn active_faults_abort_before_any_opening() {
+        let lanes = 256usize;
+        let all = [u64::MAX; 4];
+        let mut cases: Vec<(&str, Vec<Fault256>, Rss256Error)> = Vec::new();
+        let gate = |wave, round, plane, sender, mask| Fault256::GateMessage {
+            wave,
+            round,
+            plane,
+            sender,
+            mask,
+        };
+        // Single-bit flips: first/last round, first/last plane, every sender, every word.
+        for (i, (round, plane, sender, word, bit)) in [
+            (0usize, 0usize, 0usize, 0usize, 0u32),
+            (0, 1599, 1, 3, 63),
+            (23, 0, 2, 1, 17),
+            (23, 1599, 0, 2, 5),
+            (11, 777, 1, 0, 40),
+            (5, 64, 2, 3, 0),
+            (17, 1535, 0, 1, 63),
+            (12, 800, 1, 2, 31),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut mask = [0u64; 4];
+            mask[word] = 1 << bit;
+            let _ = i;
+            cases.push((
+                "single-bit gate flip",
+                vec![gate(0, round, plane, sender, mask)],
+                Rss256Error::MultiplicationCheckFailed,
+            ));
+        }
+        // Second wave of the same barrier.
+        cases.push((
+            "single-bit flip in a later wave",
+            vec![gate(1, 3, 100, 0, [0, 1, 0, 0])],
+            Rss256Error::MultiplicationCheckFailed,
+        ));
+        // Multi-bit patterns across the 256 lanes of chi gates.
+        cases.push((
+            "whole plane flipped",
+            vec![gate(0, 7, 320, 1, all)],
+            Rss256Error::MultiplicationCheckFailed,
+        ));
+        cases.push((
+            "same gate flipped in two lanes",
+            vec![gate(0, 9, 5, 2, [0b11, 0, 0, 0])],
+            Rss256Error::MultiplicationCheckFailed,
+        ));
+        cases.push((
+            "one chi row flipped in every lane",
+            (0..5).map(|x| gate(0, 2, 64 * x + 9, 0, all)).collect(),
+            Rss256Error::MultiplicationCheckFailed,
+        ));
+        cases.push((
+            "same plane flipped in all 24 rounds",
+            (0..24).map(|r| gate(0, r, 1234, 1, all)).collect(),
+            Rss256Error::MultiplicationCheckFailed,
+        ));
+        cases.push((
+            "130 scattered bits",
+            (0..130usize)
+                .map(|i| {
+                    let mut mask = [0u64; 4];
+                    mask[i % 4] = 1 << (i % 64);
+                    gate(0, i % 24, (i * 37) % 1600, 2, mask)
+                })
+                .collect(),
+            Rss256Error::MultiplicationCheckFailed,
+        ));
+        cases.push((
+            "alternating-lane stripe over a full round",
+            (0..1600)
+                .map(|p| gate(0, 20, p, 0, [0x5555_5555_5555_5555; 4]))
+                .collect(),
+            Rss256Error::MultiplicationCheckFailed,
+        ));
+        cases.push((
+            "pair of flips in successive rounds of one lane",
+            vec![gate(0, 4, 10, 1, [1, 0, 0, 0]), gate(0, 5, 10, 1, [1, 0, 0, 0])],
+            Rss256Error::MultiplicationCheckFailed,
+        ));
+        // Coin flip and transcript deviations.
+        for party in 0..3 {
+            cases.push((
+                "bad coin-flip opening",
+                vec![Fault256::CoinReveal { party }],
+                Rss256Error::CoinOpeningRejected { party },
+            ));
+        }
+        cases.push((
+            "transcript digest disagreement",
+            vec![Fault256::TranscriptDigest { slot: 1 }],
+            Rss256Error::TranscriptMismatch { slot: 1 },
+        ));
+        assert!(cases.len() >= 20);
+
+        for (idx, (name, faults, want)) in cases.into_iter().enumerate() {
+            let mut e = engine(0x70 + idx as u8);
+            for f in faults {
+                e.inject_fault(f);
+            }
+            let frames = test_frames(lanes, 0x70);
+            let mut st = load(&e, &frames);
+            e.permute(&mut st, lanes).unwrap();
+            let mut st2 = load(&e, &frames);
+            e.permute(&mut st2, lanes).unwrap();
+            assert_eq!(e.check(), Err(want), "case {idx}: {name}");
+            // The barrier failed: the engine is poisoned and nothing can be opened, also
+            // not after asking for the check again.
+            assert!(e.has_unverified_gates() && e.is_poisoned(), "case {idx}: {name}");
+            assert_eq!(e.check(), Err(Rss256Error::Poisoned), "case {idx}: {name}");
+            assert_eq!(
+                e.open_planes([&st.slot[0][..], &st.slot[1][..], &st.slot[2][..]]),
+                Err(Rss256Error::Poisoned),
+                "case {idx}: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn beaver_bank_and_opening_faults_are_caught() {
+        // A corrupted product share while staging: the bank is rejected and discarded.
+        let mut e = engine(0x81);
+        e.inject_fault(Fault256::CoinReveal { party: 1 });
+        assert_eq!(
+            e.stage_beaver_bank(1),
+            Err(Rss256Error::CoinOpeningRejected { party: 1 })
+        );
+        assert_eq!(e.bank().remaining_planes(), 0);
+
+        // A forwarding holder lies about one opened mask-difference share.
+        for (slot, round, plane, mask) in [
+            (0usize, 0usize, 0usize, [1u64, 0, 0, 0]),
+            (1, 13, 900, [0, 0, 1 << 63, 0]),
+            (2, 23, 1599, [u64::MAX; 4]),
+        ] {
+            let mut e = engine(0x82 + slot as u8);
+            e.stage_beaver_bank(1).unwrap();
+            e.set_mode(AndMode::BeaverBank).unwrap();
+            e.inject_fault(Fault256::BeaverOpening {
+                wave: 0,
+                round,
+                plane,
+                slot,
+                mask,
+            });
+            let frames = test_frames(256, 0x82);
+            let mut st = load(&e, &frames);
+            e.permute(&mut st, 256).unwrap();
+            assert_eq!(e.check(), Err(Rss256Error::OpeningConsistencyFailed { slot }));
+            assert_eq!(e.check(), Err(Rss256Error::Poisoned));
+            assert_eq!(
+                e.open_planes([&st.slot[0][..], &st.slot[1][..], &st.slot[2][..]]),
+                Err(Rss256Error::Poisoned)
+            );
+        }
+
+        // After a clean barrier, one holder sends a different copy of an opened share.
+        let mut e = engine(0x86);
+        let frames = test_frames(8, 0x86);
+        let mut st = load(&e, &frames);
+        e.permute(&mut st, 8).unwrap();
+        e.check().unwrap();
+        e.inject_fault(Fault256::OpenShare {
+            slot: 2,
+            plane: 3,
+            mask: [1, 0, 0, 0],
+        });
+        assert_eq!(
+            e.open_planes([&st.slot[0][..], &st.slot[1][..], &st.slot[2][..]]),
+            Err(Rss256Error::OpenShareMismatch { slot: 2 })
+        );
+        // The mismatch is terminal as well.
+        assert_eq!(
+            e.open_planes([&st.slot[0][..], &st.slot[1][..], &st.slot[2][..]]),
+            Err(Rss256Error::Poisoned)
+        );
+    }
+
+    /// A failed barrier cannot be retried into success: the relation evidence is gone, so
+    /// the engine must refuse everything afterwards instead of accepting an empty check.
+    #[test]
+    fn a_failed_check_is_terminal_for_checks_openings_coins_and_evaluation() {
+        let mut e = engine(0xA1);
+        e.inject_fault(Fault256::GateMessage {
+            wave: 0,
+            round: 6,
+            plane: 42,
+            sender: 1,
+            mask: [0, 0, 4, 0],
+        });
+        let frames = test_frames(16, 0xA1);
+        let mut st = load(&e, &frames);
+        e.permute(&mut st, 16).unwrap();
+        assert!(!e.is_poisoned());
+        assert_eq!(e.check(), Err(Rss256Error::MultiplicationCheckFailed));
+        assert!(e.is_poisoned());
+        // Second check: must not pass on the emptied relation buffer.
+        assert_eq!(e.check(), Err(Rss256Error::Poisoned));
+        assert_eq!(
+            e.open_planes([&st.slot[0][..], &st.slot[1][..], &st.slot[2][..]]),
+            Err(Rss256Error::Poisoned)
+        );
+        assert_eq!(
+            e.open_digests(&st.digest(), &active_lane_mask(16), 16),
+            Err(Rss256Error::Poisoned)
+        );
+        assert_eq!(e.joint_coin(b"label", &[0; 32]), Err(Rss256Error::Poisoned));
+        assert_eq!(e.set_mode(AndMode::BeaverBank), Err(Rss256Error::Poisoned));
+        assert_eq!(e.stage_beaver_bank(1), Err(Rss256Error::Poisoned));
+        let mut st2 = load(&e, &frames);
+        assert_eq!(e.permute(&mut st2, 16), Err(Rss256Error::Poisoned));
+        assert!(e.is_poisoned() && e.has_unverified_gates());
+    }
+
+    /// A prover that deviates inside the proof (with honest gate messages) is rejected in
+    /// every round and pass: the verifiers act on what they are sent.
+    #[test]
+    fn a_wrong_proof_message_is_rejected_in_every_round_and_pass() {
+        // One 4-lane wave: 300 groups, six folding rounds, then the masked cross round.
+        for (i, (prover, pass, round)) in [
+            (0usize, 0usize, 0u32),
+            (1, 1, 0),
+            (2, 0, 1),
+            (0, 1, 2),
+            (1, 0, 3),
+            (2, 1, 6),
+            (0, 0, 7),
+            (1, 1, 7),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut e = engine(0xB0 + i as u8);
+            e.inject_fault(Fault256::ProofMessage {
+                prover,
+                pass,
+                round,
+            });
+            let frames = test_frames(4, 0xB0);
+            let mut st = load(&e, &frames);
+            e.permute(&mut st, 4).unwrap();
+            assert_eq!(
+                e.check(),
+                Err(Rss256Error::MultiplicationCheckFailed),
+                "prover {prover} pass {pass} round {round}"
+            );
+            assert!(e.is_poisoned());
+        }
+        // A round index past the last round touches nothing: the proof accepts.
+        let mut e = engine(0xBF);
+        e.inject_fault(Fault256::ProofMessage {
+            prover: 0,
+            pass: 0,
+            round: 8,
+        });
+        let frames = test_frames(4, 0xB0);
+        let mut st = load(&e, &frames);
+        e.permute(&mut st, 4).unwrap();
+        e.check().unwrap();
+    }
+
+    fn test_elems(stream: &mut Shake256Prg256, n: usize) -> Vec<Fe> {
+        let mut v = vec![FE_ZERO; n];
+        stream.fill_words(v.as_flattened_mut());
+        v
+    }
+
+    #[test]
+    fn monomial_multiplication_and_ternary_expansion_match_their_definitions() {
+        let mut stream = Shake256Prg256::new(&[5; 32], &[6; 32], 7);
+        for v in test_elems(&mut stream, 8) {
+            for i in 0..128u32 {
+                let monomial = if i < 64 { [1u64 << i, 0] } else { [0, 1u64 << (i - 64)] };
+                assert_eq!(fe_mul_x_pow(v, i), gf128_mul(v, monomial), "x^{i}");
+            }
+        }
+        for (bits, row) in [(1usize, 1usize), (2, 5), (3, 16), (4, 3), (TENSOR_BITS, 1)] {
+            let points = 3usize.pow(bits as u32);
+            let src = test_elems(&mut stream, (1 << bits) * row);
+            let mut buf = vec![FE_ZERO; points * row];
+            buf[..src.len()].copy_from_slice(&src);
+            ternary_expand(&mut buf, bits, row);
+            for e in 0..points {
+                for k in 0..row {
+                    let mut want = FE_ZERO;
+                    for u in 0..1usize << bits {
+                        let mut digits = e;
+                        let mut selected = true;
+                        for l in 0..bits {
+                            let d = digits % 3;
+                            digits /= 3;
+                            selected &= d == 2 || d == (u >> l) & 1;
+                        }
+                        if selected {
+                            want = fe_add(want, src[u * row + k]);
+                        }
+                    }
+                    assert_eq!(buf[e * row + k], want, "bits {bits} point {e} cell {k}");
+                }
+            }
+            for u in 0..1usize << bits {
+                let e = boolean_point(u, bits);
+                assert_eq!(&buf[e * row..(e + 1) * row], &src[u * row..(u + 1) * row]);
+            }
+        }
+    }
+
+    #[test]
+    fn bound_vectors_are_the_weighted_sums_of_the_selected_planes() {
+        let mut stream = Shake256Prg256::new(&[8; 32], &[9; 32], 10);
+        let groups = 2;
+        let mut planes = vec![[0u64; 4]; groups * GROUP_PLANES];
+        stream.fill_planes(&mut planes, 4);
+        let eq = test_elems(&mut stream, GROUP_PLANES);
+        for lane_weights in [false, true] {
+            let mut out = vec![FE_ZERO; groups * LANES];
+            bind_planes(&planes, &eq, lane_weights, &mut out);
+            for g in 0..groups {
+                for lane in 0..LANES {
+                    let mut want = FE_ZERO;
+                    for (u, weight) in eq.iter().enumerate() {
+                        let plane = &planes[g * GROUP_PLANES + u];
+                        if (plane[lane / 64] >> (lane % 64)) & 1 == 1 {
+                            want = fe_add(want, *weight);
+                        }
+                    }
+                    if lane_weights {
+                        want = fe_mul_x_pow(want, (lane % BLOCK_LANES) as u32);
+                    }
+                    assert_eq!(out[g * LANES + lane], want, "group {g} lane {lane}");
+                }
+            }
+        }
+    }
+
+    /// One folding round maps a true claim about the vectors to a true claim about the
+    /// folded vectors, with and without batch weights and with a partial last chunk.
+    #[test]
+    fn a_folding_round_carries_the_claim_to_the_folded_vectors() {
+        let mut stream = Shake256Prg256::new(&[11; 32], &[12; 32], 13);
+        let cross = |x: &[Vec<Fe>; 3], y: &[Vec<Fe>; 3], len: usize, p: usize, w: &dyn Fn(usize) -> Fe| {
+            let q = (p + 1) % 3;
+            let mut acc = FE_ZERO;
+            for j in 0..len {
+                let term = fe_add(gf128_mul(x[p][j], y[q][j]), gf128_mul(x[q][j], y[p][j]));
+                acc = fe_add(acc, gf128_mul(w(j), term));
+            }
+            acc
+        };
+        for (len, bits, batch_chunks, weighted) in [
+            (256usize, 4usize, 8usize, true),
+            (512, 2, 32, true),
+            (128, 2, 8, true),
+            (300, 4, 64, false),
+            (19, 4, 64, false),
+            (5, 3, 64, false),
+            (2, 1, 64, false),
+        ] {
+            let mut x: [Vec<Fe>; 3] = core::array::from_fn(|_| test_elems(&mut stream, len));
+            let mut y: [Vec<Fe>; 3] = core::array::from_fn(|_| test_elems(&mut stream, len));
+            let size = 1usize << bits;
+            let batches = len.div_ceil(size).div_ceil(batch_chunks);
+            let weights = test_elems(&mut stream, batches);
+            let weight_of = |j: usize| {
+                if weighted {
+                    weights[j / (size * batch_chunks)]
+                } else {
+                    FE_ONE
+                }
+            };
+            let mut scratch = FoldScratch::new();
+            let tabs = fold_round_sums(
+                &x,
+                &y,
+                len,
+                bits,
+                batch_chunks,
+                weighted.then_some(&weights[..]),
+                &mut scratch,
+            );
+            let gammas = test_elems(&mut stream, bits);
+            let coeff = round_coefficients(&gammas);
+            let boolean: Vec<(usize, Fe)> =
+                (1..size).map(|u| (boolean_point(u, bits), FE_ONE)).collect();
+            let claims: [Fe; 3] = core::array::from_fn(|p| cross(&x, &y, len, p, &weight_of));
+            let eq = eq_table(&gammas);
+            let mut folded = len;
+            for s in 0..3 {
+                folded = fold_vector(&mut x[s], len, &eq);
+                fold_vector(&mut y[s], len, &eq);
+            }
+            assert_eq!(folded, len.div_ceil(size));
+            let folded_weight = |c: usize| weight_of(c * size);
+            for p in 0..3 {
+                let next = next_claim(claims[p], &tabs[p], &boolean, &coeff);
+                assert_eq!(
+                    next,
+                    cross(&x, &y, folded, p, &folded_weight),
+                    "len {len} bits {bits} prover {p}"
+                );
+                // A false claim stays false.
+                let wrong = next_claim(fe_add(claims[p], FE_ONE), &tabs[p], &boolean, &coeff);
+                assert_ne!(wrong, next);
+            }
+        }
+    }
+
+    /// The tensor round maps the weighted gate claim to a claim about the bound vectors.
+    #[test]
+    fn the_tensor_round_carries_the_gate_claim_to_the_bound_vectors() {
+        let mut stream = Shake256Prg256::new(&[14; 32], &[15; 32], 16);
+        let groups = 3;
+        let mut pending = PendingGates::new();
+        for s in 0..3 {
+            for planes in [&mut pending.a[s], &mut pending.b[s], &mut pending.msg[s], &mut pending.pad[s]] {
+                planes.resize(groups * GROUP_PLANES, [0; 4]);
+                stream.fill_planes(planes, 4);
+            }
+        }
+        let chi = test_elems(&mut stream, 2);
+        let weights = [PassWeights::new(chi[0], 2 * groups), PassWeights::new(chi[1], 2 * groups)];
+        let tabs = tensor_tables(&pending, groups, &weights);
+        let linear = linear_terms(&pending, groups, &weights);
+        // Weight of bit `i` of block `h` of plane `u` of group `g`.
+        let block_sum = |w: &PassWeights, f: &dyn Fn(usize) -> Plane| {
+            let mut acc = FE_ZERO;
+            for g in 0..groups {
+                for u in 0..GROUP_PLANES {
+                    let plane = f(g * GROUP_PLANES + u);
+                    for h in 0..2 {
+                        let weight = gf128_mul(w.block[2 * g + h], w.plane[u]);
+                        acc = fe_add(acc, gf128_mul(weight, [plane[2 * h], plane[2 * h + 1]]));
+                    }
+                }
+            }
+            acc
+        };
+        for (pass, w) in weights.iter().enumerate() {
+            let gammas = test_elems(&mut stream, TENSOR_BITS);
+            let coeff = round_coefficients(&gammas);
+            let eq = eq_table(&gammas);
+            let mut x: [Vec<Fe>; 3] = core::array::from_fn(|_| vec![FE_ZERO; groups * LANES]);
+            let mut y: [Vec<Fe>; 3] = core::array::from_fn(|_| vec![FE_ZERO; groups * LANES]);
+            for s in 0..3 {
+                bind_planes(&pending.a[s], &eq, true, &mut x[s]);
+                bind_planes(&pending.b[s], &eq, false, &mut y[s]);
+            }
+            for p in 0..3 {
+                let q = (p + 1) % 3;
+                // The single-verifier terms are the weighted sums of their definitions.
+                let v1 = block_sum(w, &|k| {
+                    core::array::from_fn(|i| {
+                        pending.msg[p][k][i] ^ pending.pad[p][k][i] ^ (pending.a[p][k][i] & pending.b[p][k][i])
+                    })
+                });
+                assert_eq!(linear[pass][p][0], v1);
+                assert_eq!(linear[pass][q][1], block_sum(w, &|k| pending.pad[q][k]));
+                // Weighted cross-product claim, then the round.
+                let claim = block_sum(w, &|k| {
+                    core::array::from_fn(|i| {
+                        (pending.a[p][k][i] & pending.b[q][k][i]) ^ (pending.a[q][k][i] & pending.b[p][k][i])
+                    })
+                });
+                let next = next_claim(claim, &tabs[pass][p], &w.boolean_weights(), &coeff);
+                let mut want = FE_ZERO;
+                for j in 0..groups * LANES {
+                    let term = fe_add(gf128_mul(x[p][j], y[q][j]), gf128_mul(x[q][j], y[p][j]));
+                    want = fe_add(want, gf128_mul(w.block[j / BLOCK_LANES], term));
+                }
+                assert_eq!(next, want, "pass {pass} prover {p}");
+            }
+        }
+    }
+
+    /// Key wiring and one-time-pad structure of the product proof, and the balance of what
+    /// each party is sent in it.
+    #[test]
+    fn proof_messages_and_openings_are_padded_by_keys_the_observer_does_not_hold() {
+        // Proof of sender `p`: `V1 = p - 1` derives its shares and opening masks from slot key
+        // `p`; `V2 = p + 1` derives its opening masks from slot key `p + 1`.
+        for p in 0..3 {
+            let (v1, v2) = ((p + 2) % 3, (p + 1) % 3);
+            assert!(slots_held_by(p).contains(&p) && slots_held_by(v1).contains(&p));
+            assert!(!slots_held_by(v2).contains(&p), "V2 must not hold the share-stream key");
+            assert!(slots_held_by(p).contains(&v2) && slots_held_by(v2).contains(&v2));
+            assert!(!slots_held_by(v1).contains(&v2), "V1 must not hold V2's mask key");
+        }
+
+        // The value sent to `V2` is the prover value plus a stream word `V2` cannot compute:
+        // for any two prover values a shift of that word gives the same message. The same
+        // holds for an opening `r + tau * value` and its mask `r`.
+        let mut stream = Shake256Prg256::new(&[17; 32], &[18; 32], 19);
+        for _ in 0..32 {
+            let [v_a, v_b, mask, tau] = test_elems(&mut stream, 4)[..] else {
+                unreachable!()
+            };
+            let sent = fe_add(v_a, mask);
+            assert_eq!(fe_add(v_b, fe_add(mask, fe_add(v_a, v_b))), sent);
+            let opened = fe_add(mask, gf128_mul(tau, v_a));
+            let shifted = fe_add(mask, gf128_mul(tau, fe_add(v_a, v_b)));
+            assert_eq!(fe_add(shifted, gf128_mul(tau, v_b)), opened);
+        }
+
+        // Everything a party is sent in the proofs of a real barrier (its shares as `V2`, the
+        // other verifier's openings) should look uniform: the count of ones stays within six
+        // standard deviations of one half, and no value repeats.
+        let mut e = engine(0xC1);
+        let frames = test_frames(256, 0xC1);
+        let mut st = load(&e, &frames);
+        e.permute(&mut st, 256).unwrap();
+        e.capture_proof_view();
+        e.check().unwrap();
+        let view = e.take_proof_view().unwrap();
+        for (party, received) in view.received.iter().enumerate() {
+            // Two passes: tensor sums, folding rounds of 8, 8, 80, 80, 80 and 2 sums (76,800
+            // elements fold to 19,200, 4,800, 300, 19, 2, 1), two cross coefficients, and
+            // three openings from each of the two proofs it verifies.
+            assert_eq!(received.len(), 2 * (TENSOR_POINTS - 1 + 2 * 8 + 3 * 80 + 2 + 2 + 6));
+            let bits = (128 * received.len()) as f64;
+            let ones: u32 = received.iter().flatten().map(|w| w.count_ones()).sum();
+            let dev = (f64::from(ones) - bits / 2.0).abs();
+            assert!(dev < 6.0 * (bits / 4.0).sqrt(), "party {party}: {ones} ones");
+            let mut sorted = received.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(sorted.len(), received.len(), "party {party}: repeated value");
+        }
+    }
+
+    /// Pad-key wiring and one-time-pad structure of the gate messages.
+    #[test]
+    fn no_observer_holds_both_pads_and_each_view_is_a_shift_of_the_missing_pad() {
+        // Wiring: for every sender and every other party, at least one pad of the sender's
+        // message is keyed by a slot the observer does not hold.
+        for sender in 0..3 {
+            for observer in 0..3 {
+                if observer == sender {
+                    continue;
+                }
+                let held = slots_held_by(observer);
+                let unknown: Vec<usize> = sender_pad_slots(sender)
+                    .into_iter()
+                    .filter(|s| !held.contains(s))
+                    .collect();
+                assert_eq!(
+                    unknown.len(),
+                    1,
+                    "observer {observer} must miss exactly one pad of sender {sender}"
+                );
+            }
+            // The receiver of `u_sender` is party `sender - 1`: it misses pad `sender + 1`,
+            // the slot it also holds no share of.
+            let receiver = (sender + 2) % 3;
+            assert!(!slots_held_by(receiver).contains(&((sender + 1) % 3)));
+        }
+
+        // One-time pad: fix everything the receiver knows (the sender's slot-`p` inputs and
+        // pad `p`). For any two values of the slot-`q` inputs the receiver does not hold,
+        // shifting the missing pad by a fixed difference yields the identical message, so the
+        // message is a bijective image of a uniform pad and independent of those inputs.
+        let mut stream = Shake256Prg256::new(&[7; 32], &[9; 32], 1);
+        let mut w = [0u64; 9];
+        for _ in 0..64 {
+            stream.fill_words(&mut w);
+            let [a_p, b_p, pad_p, a_q1, b_q1, a_q2, b_q2, pad_q, _] = w;
+            let m1 = and_message(a_p, a_q1, b_p, b_q1, pad_p, pad_q);
+            let m2 = and_message(a_p, a_q2, b_p, b_q2, pad_p, pad_q);
+            let shift = m1 ^ m2;
+            assert_eq!(and_message(a_p, a_q2, b_p, b_q2, pad_p, pad_q ^ shift), m1);
+        }
+
+        // The three messages of a gate reconstruct the product: the pads cancel.
+        for _ in 0..64 {
+            let mut v = [0u64; 9];
+            stream.fill_words(&mut v);
+            let (a, b, r) = ([v[0], v[1], v[2]], [v[3], v[4], v[5]], [v[6], v[7], v[8]]);
+            let mut sum = 0u64;
+            for p in 0..3 {
+                let q = (p + 1) % 3;
+                sum ^= and_message(a[p], a[q], b[p], b[q], r[p], r[q]);
+            }
+            assert_eq!(sum, (a[0] ^ a[1] ^ a[2]) & (b[0] ^ b[1] ^ b[2]));
+        }
+    }
+
+    #[test]
+    fn engine_gate_messages_are_balanced_for_fixed_inputs() {
+        // With all inputs fixed, each sender's message stream over a full wave should look
+        // uniform: the count of ones stays within six standard deviations of one half.
+        let mut e = engine(0x91);
+        let frames = test_frames(256, 0x91);
+        let mut st = load(&e, &frames);
+        e.capture_next_messages();
+        e.permute(&mut st, 256).unwrap();
+        let captured = e.take_captured_messages().unwrap();
+        e.check().unwrap();
+        let bits = (AND_PLANES_PER_PERM * 256) as f64;
+        for (sender, planes) in captured.iter().enumerate() {
+            assert_eq!(planes.len(), AND_PLANES_PER_PERM);
+            let ones: u64 = planes
+                .iter()
+                .flat_map(|p| p.iter())
+                .map(|w| u64::from(w.count_ones()))
+                .sum();
+            let dev = (ones as f64 - bits / 2.0).abs();
+            assert!(dev < 6.0 * (bits / 4.0).sqrt(), "sender {sender}: {ones} ones");
+        }
+    }
+
+    #[test]
+    fn horner_eval_matches_naive_powers() {
+        let mut stream = Shake256Prg256::new(&[3; 32], &[4; 32], 5);
+        for n in [1usize, 2, 511, 512, 513, 1500] {
+            let mut flat = vec![0u64; 2 * n + 2];
+            stream.fill_words(&mut flat);
+            let point = [flat[0], flat[1]];
+            let words: Vec<[u64; 2]> = flat[2..].as_chunks::<2>().0.to_vec();
+            let mut want = [0u64; 2];
+            for (k, w) in words.iter().enumerate() {
+                let term = gf128_mul(*w, gf128_pow(point, n - k));
+                want[0] ^= term[0];
+                want[1] ^= term[1];
+            }
+            assert_eq!(horner_eval(&words, point), want, "n = {n}");
+        }
+    }
+}
