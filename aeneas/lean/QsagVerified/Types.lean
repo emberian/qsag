@@ -150,6 +150,68 @@ structure authenticated_belt.VerifiedBeltQuorumGuard where
   wal_key : Array Std.U8 32#usize
   ack_bitmap : Std.U64
 
+/-- [qsag_verified::belt_latch_kernel::BeltLatchDigits]
+    Source: 'src/belt_latch_kernel.rs', lines 35:0-41:1
+    Visibility: public -/
+structure belt_latch_kernel.BeltLatchDigits where
+  len : Std.U8
+  row0 : Array Std.U8 32#usize
+  row1 : Array Std.U8 32#usize
+  row2 : Array Std.U8 32#usize
+  row3 : Array Std.U8 32#usize
+
+/-- [qsag_verified::belt_latch_kernel::BeltLatchKernelRecord]
+    Source: 'src/belt_latch_kernel.rs', lines 63:0-68:1
+    Visibility: public -/
+structure belt_latch_kernel.BeltLatchKernelRecord where
+  epoch : Std.U64
+  msg_digest : Array Std.U8 32#usize
+  retry_salt : Array Std.U8 32#usize
+  digits : belt_latch_kernel.BeltLatchDigits
+
+/-- [qsag_verified::belt_latch_kernel::BeltLatchKernelError]
+    Source: 'src/belt_latch_kernel.rs', lines 72:0-92:1
+    Visibility: public -/
+@[discriminant isize]
+inductive belt_latch_kernel.BeltLatchKernelError where
+| InvalidCapacity : belt_latch_kernel.BeltLatchKernelError
+| Exhausted : belt_latch_kernel.BeltLatchKernelError
+| EpochAlreadyBound : belt_latch_kernel.BeltLatchKernelError
+| RetrySaltMismatch : belt_latch_kernel.BeltLatchKernelError
+| DigitsMismatch : belt_latch_kernel.BeltLatchKernelError
+| EpochConsumed : belt_latch_kernel.BeltLatchKernelError
+| EpochJumpTooLarge : belt_latch_kernel.BeltLatchKernelError
+| WalPoisoned : belt_latch_kernel.BeltLatchKernelError
+| WalPersistFailed : belt_latch_kernel.BeltLatchKernelError
+
+/-- [qsag_verified::belt_latch_kernel::BeltLatchBindOutcome]
+    Source: 'src/belt_latch_kernel.rs', lines 96:0-101:1
+    Visibility: public -/
+@[discriminant isize]
+inductive belt_latch_kernel.BeltLatchBindOutcome where
+| Fresh : belt_latch_kernel.BeltLatchBindOutcome
+| Replay : belt_latch_kernel.BeltLatchBindOutcome
+
+/-- [qsag_verified::belt_latch_kernel::BeltLatchBindRequest]
+    Source: 'src/belt_latch_kernel.rs', lines 105:0-113:1
+    Visibility: public -/
+structure belt_latch_kernel.BeltLatchBindRequest where
+  epoch : Std.U64
+  msg_digest : Array Std.U8 32#usize
+  retry_salt : Array Std.U8 32#usize
+  digits : belt_latch_kernel.BeltLatchDigits
+  persist_ok : Bool
+
+/-- [qsag_verified::belt_latch_kernel::BeltLatchKernel]
+    Source: 'src/belt_latch_kernel.rs', lines 116:0-122:1
+    Visibility: public -/
+structure belt_latch_kernel.BeltLatchKernel where
+  capacity_limit : Std.U64
+  next_epoch : Std.U64
+  has_in_flight : Bool
+  in_flight : belt_latch_kernel.BeltLatchKernelRecord
+  wal_poisoned : Bool
+
 /-- [qsag_verified::cred_and_hd_guards::CredHdGuardError]
     Source: 'src/cred_and_hd_guards.rs', lines 32:0-42:1
     Visibility: public -/

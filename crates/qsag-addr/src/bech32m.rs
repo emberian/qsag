@@ -147,7 +147,9 @@ pub fn convert_bits(
     let mut bits = 0u32;
     let maxv = (1u32 << to_bits) - 1;
     let max_acc = (1u32 << (from_bits + to_bits - 1)) - 1;
-    let capacity = data.len().checked_mul(from_bits as usize)
+    let capacity = data
+        .len()
+        .checked_mul(from_bits as usize)
         .ok_or(AddrError::InvalidBitConversion)?
         .div_ceil(to_bits as usize);
     let mut ret = Vec::with_capacity(capacity);
@@ -320,25 +322,48 @@ mod adversarial_tests {
         // Generic codec vectors, not Bitcoin witness-program semantics.
         // https://github.com/bitcoin/bips/blob/master/bip-0350.mediawiki
         for encoded in [
-            "A1LQFN3A", "a1lqfn3a",
+            "A1LQFN3A",
+            "a1lqfn3a",
             "an83characterlonghumanreadablepartthatcontainsthetheexcludedcharactersbioandnumber11sg7hg6",
             "abcdef1l7aum6echk45nj3s0wdvt2fg8x9yrzpqzd3ryx",
             "11llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllludsr8",
-            "split1checkupstagehandshakeupstreamerranterredcaperredlc445v", "?1v759aa",
+            "split1checkupstagehandshakeupstreamerranterredcaperredlc445v",
+            "?1v759aa",
         ] {
             let (hrp, data) = bech32m_decode_5bit(encoded).unwrap();
-            assert_eq!(bech32m_encode_5bit(&hrp, &data).unwrap(), encoded.to_ascii_lowercase());
+            assert_eq!(
+                bech32m_encode_5bit(&hrp, &data).unwrap(),
+                encoded.to_ascii_lowercase()
+            );
         }
         for encoded in [
-            " 1xj0phk", "\u{7f}1g6xzxy", "\u{80}1vctc34",
+            " 1xj0phk",
+            "\u{7f}1g6xzxy",
+            "\u{80}1vctc34",
             "an84characterslonghumanreadablepartthatcontainsthetheexcludedcharactersbioandnumber11d6pts4",
-            "qyrz8wqd2c9m", "1qyrz8wqd2c9m", "y1b0jsk6g", "lt1igcx5c0",
-            "in1muywd", "mm1crxm3i", "au1s5cgom", "M1VUXWEZ", "16plkw9", "1p2gdwpf",
+            "qyrz8wqd2c9m",
+            "1qyrz8wqd2c9m",
+            "y1b0jsk6g",
+            "lt1igcx5c0",
+            "in1muywd",
+            "mm1crxm3i",
+            "au1s5cgom",
+            "M1VUXWEZ",
+            "16plkw9",
+            "1p2gdwpf",
         ] {
             assert!(bech32m_decode_5bit(encoded).is_err(), "{encoded}");
         }
-        for legacy in ["A12UEL5L", "a12uel5l", "split1checkupstagehandshakeupstreamerranterredcaperred2y9e3w", "?1ezyfcl"] {
-            assert_eq!(bech32m_decode_5bit(legacy), Err(AddrError::LegacyBech32Rejected));
+        for legacy in [
+            "A12UEL5L",
+            "a12uel5l",
+            "split1checkupstagehandshakeupstreamerranterredcaperred2y9e3w",
+            "?1ezyfcl",
+        ] {
+            assert_eq!(
+                bech32m_decode_5bit(legacy),
+                Err(AddrError::LegacyBech32Rejected)
+            );
         }
     }
 
@@ -350,7 +375,9 @@ mod adversarial_tests {
         // case change is mixed case, whereas all-uppercase remains valid.
         for i in 0..original.len() {
             for replacement in 33..=126 {
-                if replacement == original[i] { continue; }
+                if replacement == original[i] {
+                    continue;
+                }
                 let mut changed = original.clone();
                 changed[i] = replacement;
                 assert!(bech32m_decode_5bit(core::str::from_utf8(&changed).unwrap()).is_err());
@@ -382,11 +409,23 @@ mod adversarial_tests {
         assert!(bech32m_encode_5bit(&"a".repeat(84), &[]).is_err());
         assert!(bech32m_encode_5bit("", &[]).is_err());
         for symbol in 32..=255 {
-            assert_eq!(bech32m_create_checksum(b"qsp", &[symbol]), Err(AddrError::InvalidCharacter));
-            assert_eq!(bech32m_encode_5bit("qsp", &[symbol]), Err(AddrError::InvalidCharacter));
+            assert_eq!(
+                bech32m_create_checksum(b"qsp", &[symbol]),
+                Err(AddrError::InvalidCharacter)
+            );
+            assert_eq!(
+                bech32m_encode_5bit("qsp", &[symbol]),
+                Err(AddrError::InvalidCharacter)
+            );
         }
-        assert_eq!(convert_bits(&[0, 1], 5, 8, false), Err(AddrError::NonZeroPadding));
-        assert_eq!(convert_bits(&[0], 5, 8, false), Err(AddrError::InvalidBitConversion));
+        assert_eq!(
+            convert_bits(&[0, 1], 5, 8, false),
+            Err(AddrError::NonZeroPadding)
+        );
+        assert_eq!(
+            convert_bits(&[0], 5, 8, false),
+            Err(AddrError::InvalidBitConversion)
+        );
         assert_eq!(convert_bits(&[0, 0], 5, 8, false).unwrap(), [0]);
     }
 }

@@ -768,30 +768,39 @@ private def Ext4Expr.sub (x y : Ext4Expr) : Ext4Expr :=
   ⟨.sub x.a y.a, .sub x.b y.b, .sub x.c y.c, .sub x.d y.d⟩
 
 private def Ext4Expr.mul (x y : Ext4Expr) : Ext4Expr :=
-  let seven := FExpr.const 7
+  let seven := FExpr.lit 7#u64
   ⟨.add (.mul x.a y.a) (.mul seven (.add (.add (.mul x.b y.d) (.mul x.c y.c)) (.mul x.d y.b))),
    .add (.add (.mul x.a y.b) (.mul x.b y.a)) (.mul seven (.add (.mul x.c y.d) (.mul x.d y.c))),
    .add (.add (.add (.mul x.a y.c) (.mul x.b y.b)) (.mul x.c y.a)) (.mul seven (.mul x.d y.d)),
    .add (.add (.mul x.a y.d) (.mul x.b y.c)) (.add (.mul x.c y.b) (.mul x.d y.a))⟩
 
-private def Ext4Expr.eval (env : Nat → U64) (e : Ext4Expr) : Ext4 :=
-  ⟨modP (e.a.evalZ env), modP (e.b.evalZ env), modP (e.c.evalZ env), modP (e.d.evalZ env)⟩
+private def Ext4Expr.evalF (env : Nat → U64) (e : Ext4Expr) : Ext4 :=
+  ⟨e.a.evalF env, e.b.evalF env, e.c.evalF env, e.d.evalF env⟩
 
 private theorem Ext4Expr.eq_of_norm (env : Nat → U64) (lhs rhs : Ext4Expr)
+    (hl : IsCanonicalExt4 (lhs.evalF env)) (hr : IsCanonicalExt4 (rhs.evalF env))
     (ha : lhs.a.norm = rhs.a.norm) (hb : lhs.b.norm = rhs.b.norm)
     (hc : lhs.c.norm = rhs.c.norm) (hd : lhs.d.norm = rhs.d.norm) :
-    lhs.eval env = rhs.eval env := by
-  refine Ext4.ext ?_ ?_ ?_ ?_
-  · exact modP_eq_of_fexpr env lhs.a rhs.a ha
-  · exact modP_eq_of_fexpr env lhs.b rhs.b hb
-  · exact modP_eq_of_fexpr env lhs.c rhs.c hc
-  · exact modP_eq_of_fexpr env lhs.d rhs.d hd
+    lhs.evalF env = rhs.evalF env :=
+  Ext4.ext
+    (FExpr.evalF_eq_of_norm env lhs.a rhs.a hl.1 hr.1 ha)
+    (FExpr.evalF_eq_of_norm env lhs.b rhs.b hl.2.1 hr.2.1 hb)
+    (FExpr.evalF_eq_of_norm env lhs.c rhs.c hl.2.2.1 hr.2.2.1 hc)
+    (FExpr.evalF_eq_of_norm env lhs.d rhs.d hl.2.2.2 hr.2.2.2 hd)
 
 private def envExt3 (x y z : Ext4) : Nat → U64
   | 0 => x.a | 1 => x.b | 2 => x.c | 3 => x.d
   | 4 => y.a | 5 => y.b | 6 => y.c | 7 => y.d
   | 8 => z.a | 9 => z.b | 10 => z.c | 11 => z.d
   | _ => 0#u64
+
+private theorem extZero_canonical : IsCanonicalExt4 extZero := by
+  unfold extZero IsCanonicalExt4 IsCanonical
+  exact ⟨by decide, by decide, by decide, by decide⟩
+
+private theorem extSeven_canonical : IsCanonicalExt4 extSeven := by
+  unfold extSeven IsCanonicalExt4 IsCanonical
+  exact ⟨by decide, by decide, by decide, by decide⟩
 
 /-! ### Full `Ext4` Commutative Ring Laws & Defining `u^4 = 7` Identity -/
 
@@ -807,9 +816,7 @@ theorem extAdd_zero {x : Ext4} (hx : IsCanonicalExt4 x) : extAdd x extZero = x :
   exact Ext4.ext (fieldAdd_zero ha) (fieldAdd_zero hb) (fieldAdd_zero hc) (fieldAdd_zero hd)
 
 theorem zero_extAdd {x : Ext4} (hx : IsCanonicalExt4 x) : extAdd extZero x = x := by
-  rw [extAdd_comm, extAdd_zero ha_hb_hc_hd]
-where
-  ha_hb_hc_hd := hx
+  rw [extAdd_comm, extAdd_zero hx]
 
 theorem extSub_self (x : Ext4) : extSub x x = extZero := by
   ext <;> exact fieldSub_self _
@@ -826,157 +833,67 @@ theorem extSub_add_cancel {x : Ext4} (hx : IsCanonicalExt4 x) (y : Ext4) :
   exact Ext4.ext (fieldSub_add_cancel ha _) (fieldSub_add_cancel hb _)
     (fieldSub_add_cancel hc _) (fieldSub_add_cancel hd _)
 
-theorem extMul_comm (x y : Ext4) : extMul x y = extMul y x := by
-  let env := envExt3 x y extZero
-  have hl : extMul x y = (Ext4Expr.mul (.var4 0) (.var4 4)).eval env := by
-    ext <;> simp only [extMul, Ext4Expr.eval, Ext4Expr.mul, Ext4Expr.var4, env, envExt3, FExpr.evalZ,
-      fieldAdd_eq_modP, fieldSub_eq_modP, fieldMul_eq_modP,
-      fieldAdd_modP_left, fieldAdd_modP_right, fieldAdd_modP_both,
-      fieldSub_modP_left, fieldSub_modP_right, fieldSub_modP_both,
-      fieldMul_modP_left, fieldMul_modP_right, fieldMul_modP_both,
-      toZ_zero, toZ_one, toZ_two, toZ_seven]
-  have hr : extMul y x = (Ext4Expr.mul (.var4 4) (.var4 0)).eval env := by
-    ext <;> simp only [extMul, Ext4Expr.eval, Ext4Expr.mul, Ext4Expr.var4, env, envExt3, FExpr.evalZ,
-      fieldAdd_eq_modP, fieldSub_eq_modP, fieldMul_eq_modP,
-      fieldAdd_modP_left, fieldAdd_modP_right, fieldAdd_modP_both,
-      fieldSub_modP_left, fieldSub_modP_right, fieldSub_modP_both,
-      fieldMul_modP_left, fieldMul_modP_right, fieldMul_modP_both,
-      toZ_zero, toZ_one, toZ_two, toZ_seven]
-  rw [hl, hr]
-  exact Ext4Expr.eq_of_norm env _ _ rfl rfl rfl rfl
+theorem extMul_comm (x y : Ext4) : extMul x y = extMul y x :=
+  Ext4Expr.eq_of_norm (envExt3 x y extZero)
+    (Ext4Expr.mul (.var4 0) (.var4 4))
+    (Ext4Expr.mul (.var4 4) (.var4 0))
+    (extMul_canonical x y) (extMul_canonical y x) rfl rfl rfl rfl
 
 theorem extMul_assoc (x y z : Ext4) :
-    extMul (extMul x y) z = extMul x (extMul y z) := by
-  let env := envExt3 x y z
-  have hl : extMul (extMul x y) z =
-      (Ext4Expr.mul (Ext4Expr.mul (.var4 0) (.var4 4)) (.var4 8)).eval env := by
-    ext <;> simp only [extMul, Ext4Expr.eval, Ext4Expr.mul, Ext4Expr.var4, env, envExt3, FExpr.evalZ,
-      fieldAdd_eq_modP, fieldSub_eq_modP, fieldMul_eq_modP,
-      fieldAdd_modP_left, fieldAdd_modP_right, fieldAdd_modP_both,
-      fieldSub_modP_left, fieldSub_modP_right, fieldSub_modP_both,
-      fieldMul_modP_left, fieldMul_modP_right, fieldMul_modP_both,
-      toZ_zero, toZ_one, toZ_two, toZ_seven]
-  have hr : extMul x (extMul y z) =
-      (Ext4Expr.mul (.var4 0) (Ext4Expr.mul (.var4 4) (.var4 8))).eval env := by
-    ext <;> simp only [extMul, Ext4Expr.eval, Ext4Expr.mul, Ext4Expr.var4, env, envExt3, FExpr.evalZ,
-      fieldAdd_eq_modP, fieldSub_eq_modP, fieldMul_eq_modP,
-      fieldAdd_modP_left, fieldAdd_modP_right, fieldAdd_modP_both,
-      fieldSub_modP_left, fieldSub_modP_right, fieldSub_modP_both,
-      fieldMul_modP_left, fieldMul_modP_right, fieldMul_modP_both,
-      toZ_zero, toZ_one, toZ_two, toZ_seven]
-  rw [hl, hr]
-  exact Ext4Expr.eq_of_norm env _ _ rfl rfl rfl rfl
+    extMul (extMul x y) z = extMul x (extMul y z) :=
+  Ext4Expr.eq_of_norm (envExt3 x y z)
+    (Ext4Expr.mul (Ext4Expr.mul (.var4 0) (.var4 4)) (.var4 8))
+    (Ext4Expr.mul (.var4 0) (Ext4Expr.mul (.var4 4) (.var4 8)))
+    (extMul_canonical (extMul x y) z) (extMul_canonical x (extMul y z)) rfl rfl rfl rfl
 
 theorem extMul_add (x y z : Ext4) :
-    extMul x (extAdd y z) = extAdd (extMul x y) (extMul x z) := by
-  let env := envExt3 x y z
-  have hl : extMul x (extAdd y z) =
-      (Ext4Expr.mul (.var4 0) (Ext4Expr.add (.var4 4) (.var4 8))).eval env := by
-    ext <;> simp only [extMul, extAdd, Ext4Expr.eval, Ext4Expr.mul, Ext4Expr.add, Ext4Expr.var4,
-      env, envExt3, FExpr.evalZ,
-      fieldAdd_eq_modP, fieldSub_eq_modP, fieldMul_eq_modP,
-      fieldAdd_modP_left, fieldAdd_modP_right, fieldAdd_modP_both,
-      fieldSub_modP_left, fieldSub_modP_right, fieldSub_modP_both,
-      fieldMul_modP_left, fieldMul_modP_right, fieldMul_modP_both,
-      toZ_zero, toZ_one, toZ_two, toZ_seven]
-  have hr : extAdd (extMul x y) (extMul x z) =
-      (Ext4Expr.add (Ext4Expr.mul (.var4 0) (.var4 4)) (Ext4Expr.mul (.var4 0) (.var4 8))).eval env := by
-    ext <;> simp only [extMul, extAdd, Ext4Expr.eval, Ext4Expr.mul, Ext4Expr.add, Ext4Expr.var4,
-      env, envExt3, FExpr.evalZ,
-      fieldAdd_eq_modP, fieldSub_eq_modP, fieldMul_eq_modP,
-      fieldAdd_modP_left, fieldAdd_modP_right, fieldAdd_modP_both,
-      fieldSub_modP_left, fieldSub_modP_right, fieldSub_modP_both,
-      fieldMul_modP_left, fieldMul_modP_right, fieldMul_modP_both,
-      toZ_zero, toZ_one, toZ_two, toZ_seven]
-  rw [hl, hr]
-  exact Ext4Expr.eq_of_norm env _ _ rfl rfl rfl rfl
+    extMul x (extAdd y z) = extAdd (extMul x y) (extMul x z) :=
+  Ext4Expr.eq_of_norm (envExt3 x y z)
+    (Ext4Expr.mul (.var4 0) (Ext4Expr.add (.var4 4) (.var4 8)))
+    (Ext4Expr.add (Ext4Expr.mul (.var4 0) (.var4 4)) (Ext4Expr.mul (.var4 0) (.var4 8)))
+    (extMul_canonical x (extAdd y z)) (extAdd_canonical (extMul x y) (extMul x z)) rfl rfl rfl rfl
 
 theorem add_extMul (x y z : Ext4) :
     extMul (extAdd x y) z = extAdd (extMul x z) (extMul y z) := by
   rw [extMul_comm, extMul_add, extMul_comm z x, extMul_comm z y]
 
 theorem extMul_sub (x y z : Ext4) :
-    extMul x (extSub y z) = extSub (extMul x y) (extMul x z) := by
-  let env := envExt3 x y z
-  have hl : extMul x (extSub y z) =
-      (Ext4Expr.mul (.var4 0) (Ext4Expr.sub (.var4 4) (.var4 8))).eval env := by
-    ext <;> simp only [extMul, extSub, Ext4Expr.eval, Ext4Expr.mul, Ext4Expr.sub, Ext4Expr.var4,
-      env, envExt3, FExpr.evalZ,
-      fieldAdd_eq_modP, fieldSub_eq_modP, fieldMul_eq_modP,
-      fieldAdd_modP_left, fieldAdd_modP_right, fieldAdd_modP_both,
-      fieldSub_modP_left, fieldSub_modP_right, fieldSub_modP_both,
-      fieldMul_modP_left, fieldMul_modP_right, fieldMul_modP_both,
-      toZ_zero, toZ_one, toZ_two, toZ_seven]
-  have hr : extSub (extMul x y) (extMul x z) =
-      (Ext4Expr.sub (Ext4Expr.mul (.var4 0) (.var4 4)) (Ext4Expr.mul (.var4 0) (.var4 8))).eval env := by
-    ext <;> simp only [extMul, extSub, Ext4Expr.eval, Ext4Expr.mul, Ext4Expr.sub, Ext4Expr.var4,
-      env, envExt3, FExpr.evalZ,
-      fieldAdd_eq_modP, fieldSub_eq_modP, fieldMul_eq_modP,
-      fieldAdd_modP_left, fieldAdd_modP_right, fieldAdd_modP_both,
-      fieldSub_modP_left, fieldSub_modP_right, fieldSub_modP_both,
-      fieldMul_modP_left, fieldMul_modP_right, fieldMul_modP_both,
-      toZ_zero, toZ_one, toZ_two, toZ_seven]
-  rw [hl, hr]
-  exact Ext4Expr.eq_of_norm env _ _ rfl rfl rfl rfl
+    extMul x (extSub y z) = extSub (extMul x y) (extMul x z) :=
+  Ext4Expr.eq_of_norm (envExt3 x y z)
+    (Ext4Expr.mul (.var4 0) (Ext4Expr.sub (.var4 4) (.var4 8)))
+    (Ext4Expr.sub (Ext4Expr.mul (.var4 0) (.var4 4)) (Ext4Expr.mul (.var4 0) (.var4 8)))
+    (extMul_canonical x (extSub y z)) (extSub_canonical (extMul x y) (extMul x z)) rfl rfl rfl rfl
 
-theorem extMul_one {x : Ext4} (hx : IsCanonicalExt4 x) : extMul x extOne = x := by
-  let env := envExt3 x extZero extZero
-  rcases hx with ⟨ha, hb, hc, hd⟩
-  have hl : extMul x extOne =
-      (Ext4Expr.mul (.var4 0) ⟨.const 1, .const 0, .const 0, .const 0⟩).eval env := by
-    ext <;> simp only [extMul, extOne, Ext4Expr.eval, Ext4Expr.mul, Ext4Expr.var4,
-      env, envExt3, FExpr.evalZ,
-      fieldAdd_eq_modP, fieldSub_eq_modP, fieldMul_eq_modP,
-      fieldAdd_modP_left, fieldAdd_modP_right, fieldAdd_modP_both,
-      fieldSub_modP_left, fieldSub_modP_right, fieldSub_modP_both,
-      fieldMul_modP_left, fieldMul_modP_right, fieldMul_modP_both,
-      toZ_zero, toZ_one, toZ_two, toZ_seven]
-  have hr : x = (Ext4Expr.var4 0).eval env :=
-    (Ext4.ext (modP_toZ_of_canonical ha) (modP_toZ_of_canonical hb)
-      (modP_toZ_of_canonical hc) (modP_toZ_of_canonical hd)).symm
-  rw [hl, hr]
-  exact Ext4Expr.eq_of_norm env _ _ rfl rfl rfl rfl
+theorem sub_extMul (x y z : Ext4) :
+    extMul (extSub x y) z = extSub (extMul x z) (extMul y z) := by
+  rw [extMul_comm, extMul_sub, extMul_comm z x, extMul_comm z y]
+
+theorem extMul_one {x : Ext4} (hx : IsCanonicalExt4 x) : extMul x extOne = x :=
+  Ext4Expr.eq_of_norm (envExt3 x extZero extZero)
+    (Ext4Expr.mul (.var4 0) ⟨.lit 1#u64, .lit 0#u64, .lit 0#u64, .lit 0#u64⟩)
+    (.var4 0)
+    (extMul_canonical x extOne) hx rfl rfl rfl rfl
 
 theorem one_extMul {x : Ext4} (hx : IsCanonicalExt4 x) : extMul extOne x = x := by
   rw [extMul_comm, extMul_one hx]
 
-theorem extMul_zero (x : Ext4) : extMul x extZero = extZero := by
-  let env := envExt3 x extZero extZero
-  have hl : extMul x extZero =
-      (Ext4Expr.mul (.var4 0) ⟨.const 0, .const 0, .const 0, .const 0⟩).eval env := by
-    ext <;> simp only [extMul, extZero, Ext4Expr.eval, Ext4Expr.mul, Ext4Expr.var4,
-      env, envExt3, FExpr.evalZ,
-      fieldAdd_eq_modP, fieldSub_eq_modP, fieldMul_eq_modP,
-      fieldAdd_modP_left, fieldAdd_modP_right, fieldAdd_modP_both,
-      fieldSub_modP_left, fieldSub_modP_right, fieldSub_modP_both,
-      fieldMul_modP_left, fieldMul_modP_right, fieldMul_modP_both,
-      toZ_zero, toZ_one, toZ_two, toZ_seven]
-  have hr : extZero = (⟨.const 0, .const 0, .const 0, .const 0⟩ : Ext4Expr).eval env :=
-    (Ext4.ext modP_zero modP_zero modP_zero modP_zero).symm
-  rw [hl, hr]
-  exact Ext4Expr.eq_of_norm env _ _ rfl rfl rfl rfl
+theorem extMul_zero (x : Ext4) : extMul x extZero = extZero :=
+  Ext4Expr.eq_of_norm (envExt3 x extZero extZero)
+    (Ext4Expr.mul (.var4 0) ⟨.lit 0#u64, .lit 0#u64, .lit 0#u64, .lit 0#u64⟩)
+    ⟨.lit 0#u64, .lit 0#u64, .lit 0#u64, .lit 0#u64⟩
+    (extMul_canonical x extZero) extZero_canonical rfl rfl rfl rfl
 
 theorem zero_extMul (x : Ext4) : extMul extZero x = extZero := by
   rw [extMul_comm, extMul_zero]
 
 /-- Defining quartic field relation `u^4 = 7` in `Ext4`. -/
 theorem extU_pow4_eq_seven :
-    extMul (extMul extU extU) (extMul extU extU) = extSeven := by
-  let env := envExt3 extZero extZero extZero
-  let uE : Ext4Expr := ⟨.const 0, .const 1, .const 0, .const 0⟩
-  let sE : Ext4Expr := ⟨.const 7, .const 0, .const 0, .const 0⟩
-  have hl : extMul (extMul extU extU) (extMul extU extU) =
-      (Ext4Expr.mul (Ext4Expr.mul uE uE) (Ext4Expr.mul uE uE)).eval env := by
-    ext <;> simp only [extMul, extU, uE, Ext4Expr.eval, Ext4Expr.mul, FExpr.evalZ,
-      fieldAdd_eq_modP, fieldSub_eq_modP, fieldMul_eq_modP,
-      fieldAdd_modP_left, fieldAdd_modP_right, fieldAdd_modP_both,
-      fieldSub_modP_left, fieldSub_modP_right, fieldSub_modP_both,
-      fieldMul_modP_left, fieldMul_modP_right, fieldMul_modP_both,
-      toZ_zero, toZ_one, toZ_two, toZ_seven]
-  have hr : extSeven = sE.eval env :=
-    (Ext4.ext modP_seven modP_zero modP_zero modP_zero).symm
-  rw [hl, hr]
-  exact Ext4Expr.eq_of_norm env _ _ rfl rfl rfl rfl
+    extMul (extMul extU extU) (extMul extU extU) = extSeven :=
+  let uE : Ext4Expr := ⟨.lit 0#u64, .lit 1#u64, .lit 0#u64, .lit 0#u64⟩
+  Ext4Expr.eq_of_norm (envExt3 extZero extZero extZero)
+    (Ext4Expr.mul (Ext4Expr.mul uE uE) (Ext4Expr.mul uE uE))
+    ⟨.lit 7#u64, .lit 0#u64, .lit 0#u64, .lit 0#u64⟩
+    (extMul_canonical _ _) extSeven_canonical rfl rfl rfl rfl
 
 /-! ### Karatsuba Quadratic-Over-Quadratic Tower `[1, u^2, u, u^3]` Isomorphism -/
 
@@ -1007,13 +924,12 @@ def towerMul (x y : Ext4) : Ext4 :=
 
 /-- Exact ring isomorphism between production Karatsuba tower multiplication and `extMul`. -/
 theorem towerToPoly_mul_hom (x y : Ext4) :
-    towerToPoly (towerMul x y) = extMul (towerToPoly x) (towerToPoly y) := by
-  let env := envExt3 x y extZero
+    towerToPoly (towerMul x y) = extMul (towerToPoly x) (towerToPoly y) :=
   let xT := Ext4Expr.var4 0
   let yT := Ext4Expr.var4 4
   let xP : Ext4Expr := ⟨.var 0, .var 2, .var 1, .var 3⟩
   let yP : Ext4Expr := ⟨.var 4, .var 6, .var 5, .var 7⟩
-  let seven := FExpr.const 7
+  let seven := FExpr.lit 7#u64
   let a0b0_0 := FExpr.add (.mul xT.a yT.a) (.mul seven (.mul xT.b yT.b))
   let a0b0_1 := FExpr.sub (.mul (.add xT.a xT.b) (.add yT.a yT.b)) (.add (.mul xT.a yT.a) (.mul xT.b yT.b))
   let a1b1_0 := FExpr.add (.mul xT.c yT.c) (.mul seven (.mul xT.d yT.d))
@@ -1030,23 +946,10 @@ theorem towerToPoly_mul_hom (x y : Ext4) :
   let c1_1 := FExpr.sub st_1 (.add a0b0_1 a1b1_1)
   let lhsE : Ext4Expr := ⟨c0_0, c1_0, c0_1, c1_1⟩
   let rhsE : Ext4Expr := Ext4Expr.mul xP yP
-  have hl : towerToPoly (towerMul x y) = lhsE.eval env := by
-    ext <;> simp only [towerToPoly, towerMul, lhsE, c0_0, c0_1, c1_0, c1_1, st_0, st_1, s0, s1, t0, t1,
-      a0b0_0, a0b0_1, a1b1_0, a1b1_1, xT, yT, seven, env, envExt3, Ext4Expr.eval, Ext4Expr.var4,
-      FExpr.evalZ, fieldAdd_eq_modP, fieldSub_eq_modP, fieldMul_eq_modP,
-      fieldAdd_modP_left, fieldAdd_modP_right, fieldAdd_modP_both,
-      fieldSub_modP_left, fieldSub_modP_right, fieldSub_modP_both,
-      fieldMul_modP_left, fieldMul_modP_right, fieldMul_modP_both,
-      toZ_zero, toZ_one, toZ_two, toZ_seven]
-  have hr : extMul (towerToPoly x) (towerToPoly y) = rhsE.eval env := by
-    ext <;> simp only [towerToPoly, extMul, rhsE, xP, yP, Ext4Expr.eval, Ext4Expr.mul,
-      env, envExt3, FExpr.evalZ, fieldAdd_eq_modP, fieldSub_eq_modP, fieldMul_eq_modP,
-      fieldAdd_modP_left, fieldAdd_modP_right, fieldAdd_modP_both,
-      fieldSub_modP_left, fieldSub_modP_right, fieldSub_modP_both,
-      fieldMul_modP_left, fieldMul_modP_right, fieldMul_modP_both,
-      toZ_zero, toZ_one, toZ_two, toZ_seven]
-  rw [hl, hr]
-  exact Ext4Expr.eq_of_norm env lhsE rhsE rfl rfl rfl rfl
+  Ext4Expr.eq_of_norm (envExt3 x y extZero) lhsE rhsE
+    ⟨fieldAdd_canonical _ _, fieldSub_canonical _ _, fieldAdd_canonical _ _, fieldSub_canonical _ _⟩
+    (extMul_canonical (towerToPoly x) (towerToPoly y))
+    rfl rfl rfl rfl
 
 /-! ## Duet Fold, CWYZ Fold, Bridge, Quadratic Sumcheck Wire, Cascade, & Horner Refinements -/
 
@@ -1075,18 +978,12 @@ private theorem scale_add_sub_even {even odd : Ext4} {y0 it : U64}
   have limb_recover : ∀ (e o : U64), IsCanonical e →
       fieldMul (fieldAdd (fieldAdd e (fieldMul o y0)) (fieldSub e (fieldMul o y0))) it = e := by
     intro e o he_c
-    have hsum : fieldAdd (fieldAdd e (fieldMul o y0)) (fieldSub e (fieldMul o y0)) = fieldMul 2#u64 e := by
-      let env : Nat → U64 := fun | 0 => e | 1 => o | 2 => y0 | _ => 0#u64
-      have h1 : fieldAdd (fieldAdd e (fieldMul o y0)) (fieldSub e (fieldMul o y0)) =
-          modP ((FExpr.add (.add (.var 0) (.mul (.var 1) (.var 2))) (.sub (.var 0) (.mul (.var 1) (.var 2)))).evalZ env) := by
-        simp only [env, FExpr.evalZ, fieldAdd_eq_modP, fieldSub_eq_modP, fieldMul_eq_modP,
-          fieldAdd_modP_left, fieldAdd_modP_right, fieldAdd_modP_both,
-          fieldSub_modP_left, fieldSub_modP_right, fieldSub_modP_both,
-          fieldMul_modP_left, fieldMul_modP_right, fieldMul_modP_both, toZ_two]
-      have h2 : fieldMul 2#u64 e = modP ((FExpr.mul (.const 2) (.var 0)).evalZ env) := by
-        simp only [env, FExpr.evalZ, fieldMul_eq_modP, toZ_two]
-      rw [h1, h2]
-      exact modP_eq_of_fexpr env _ _ rfl
+    let env : Nat → U64 := fun | 0 => e | 1 => o | 2 => y0 | _ => 0#u64
+    have hsum : fieldAdd (fieldAdd e (fieldMul o y0)) (fieldSub e (fieldMul o y0)) = fieldMul 2#u64 e :=
+      FExpr.evalF_eq_of_norm env
+        (.add (.add (.var 0) (.mul (.var 1) (.var 2))) (.sub (.var 0) (.mul (.var 1) (.var 2))))
+        (.mul (.lit 2#u64) (.var 0))
+        (fieldAdd_canonical _ _) (fieldMul_canonical _ _) rfl
     rw [hsum, fieldMul_comm 2#u64 e, fieldMul_assoc, hit, fieldMul_one he_c]
   rcases he with ⟨ha, hb, hc, hd⟩
   unfold extScale extAdd extSub
@@ -1098,19 +995,13 @@ private theorem scale_add_sub_odd {even odd : Ext4} {y0 iy : U64}
   have limb_recover : ∀ (e o : U64), IsCanonical o →
       fieldMul (fieldSub (fieldAdd e (fieldMul o y0)) (fieldSub e (fieldMul o y0))) iy = o := by
     intro e o ho_c
+    let env : Nat → U64 := fun | 0 => e | 1 => o | 2 => y0 | _ => 0#u64
     have hdiff : fieldSub (fieldAdd e (fieldMul o y0)) (fieldSub e (fieldMul o y0)) =
-        fieldMul o (fieldMul 2#u64 y0) := by
-      let env : Nat → U64 := fun | 0 => e | 1 => o | 2 => y0 | _ => 0#u64
-      have h1 : fieldSub (fieldAdd e (fieldMul o y0)) (fieldSub e (fieldMul o y0)) =
-          modP ((FExpr.sub (.add (.var 0) (.mul (.var 1) (.var 2))) (.sub (.var 0) (.mul (.var 1) (.var 2)))).evalZ env) := by
-        simp only [env, FExpr.evalZ, fieldAdd_eq_modP, fieldSub_eq_modP, fieldMul_eq_modP,
-          fieldAdd_modP_left, fieldAdd_modP_right, fieldAdd_modP_both,
-          fieldSub_modP_left, fieldSub_modP_right, fieldSub_modP_both,
-          fieldMul_modP_left, fieldMul_modP_right, fieldMul_modP_both, toZ_two]
-      have h2 : fieldMul o (fieldMul 2#u64 y0) = modP ((FExpr.mul (.var 1) (.mul (.const 2) (.var 2))).evalZ env) := by
-        simp only [env, FExpr.evalZ, fieldMul_eq_modP, fieldMul_modP_right, toZ_two]
-      rw [h1, h2]
-      exact modP_eq_of_fexpr env _ _ rfl
+        fieldMul o (fieldMul 2#u64 y0) :=
+      FExpr.evalF_eq_of_norm env
+        (.sub (.add (.var 0) (.mul (.var 1) (.var 2))) (.sub (.var 0) (.mul (.var 1) (.var 2))))
+        (.mul (.var 1) (.mul (.lit 2#u64) (.var 2)))
+        (fieldSub_canonical _ _) (fieldMul_canonical _ _) rfl
     rw [hdiff, fieldMul_assoc, hiy, fieldMul_one ho_c]
   rcases ho with ⟨ha, hb, hc, hd⟩
   unfold extScale extAdd extSub
@@ -1156,18 +1047,6 @@ theorem cwyz_bridge_claim_step_refines
   simp only [cwyz_bridge_claim_step, cwyzBridgeValue,
     ext_mul_refines, ext_add_refines, ext_sub_refines, bind_eq_result_bind, Result.bind]
 
-private def envExt9 (a0 a1 b0 b1 kn phi theta alpha beta : Ext4) : Nat → U64
-  | 0 => a0.a | 1 => a0.b | 2 => a0.c | 3 => a0.d
-  | 4 => a1.a | 5 => a1.b | 6 => a1.c | 7 => a1.d
-  | 8 => b0.a | 9 => b0.b | 10 => b0.c | 11 => b0.d
-  | 12 => b1.a | 13 => b1.b | 14 => b1.c | 15 => b1.d
-  | 16 => kn.a | 17 => kn.b | 18 => kn.c | 19 => kn.d
-  | 20 => phi.a | 21 => phi.b | 22 => phi.c | 23 => phi.d
-  | 24 => theta.a | 25 => theta.b | 26 => theta.c | 27 => theta.d
-  | 28 => alpha.a | 29 => alpha.b | 30 => alpha.c | 31 => alpha.d
-  | 32 => beta.a | 33 => beta.b | 34 => beta.c | 35 => beta.d
-  | _ => 0#u64
-
 /-- Dual-functional soundness of `cwyz_bridge_claim_step`: on honest cross-terms
     `w0 = a0*b0`, `w1 = a0*b1`, `w2 = a1*b0`, `claim = a0*b0 + a1*b1`, `w3 = a0*kn`, `w4 = a1*kn`,
     `cwyzBridgeValue` equals `c0' * k0' + c1' * kn` where
@@ -1180,57 +1059,27 @@ theorem cwyz_bridge_claim_step_dual_sound
       extAdd
         (extMul (extAdd a1 (extMul alpha (extAdd a0 (extMul theta a1)))) (extAdd b0 (extMul phi b1)))
         (extMul (extMul beta (extAdd a0 (extMul theta a1))) kn) := by
-  let env := envExt9 a0 a1 b0 b1 kn phi theta alpha beta
-  let ea0 := Ext4Expr.var4 0
-  let ea1 := Ext4Expr.var4 4
-  let eb0 := Ext4Expr.var4 8
-  let eb1 := Ext4Expr.var4 12
-  let ekn := Ext4Expr.var4 16
-  let ephi := Ext4Expr.var4 20
-  let etheta := Ext4Expr.var4 24
-  let ealpha := Ext4Expr.var4 28
-  let ebeta := Ext4Expr.var4 32
-  let ew0 := Ext4Expr.mul ea0 eb0
-  let ew1 := Ext4Expr.mul ea0 eb1
-  let ew2 := Ext4Expr.mul ea1 eb0
-  let ew3 := Ext4Expr.mul ea0 ekn
-  let ew4 := Ext4Expr.mul ea1 ekn
-  let eclaim := Ext4Expr.add ew0 (Ext4Expr.mul ea1 eb1)
-  let ef := Ext4Expr.add ew0 (Ext4Expr.mul ephi ew1)
-  let eg := Ext4Expr.add ew2 (Ext4Expr.mul ephi (Ext4Expr.sub eclaim ew0))
-  let lhsE := Ext4Expr.add (Ext4Expr.add eg (Ext4Expr.mul ealpha (Ext4Expr.add ef (Ext4Expr.mul etheta eg))))
-                (Ext4Expr.mul ebeta (Ext4Expr.add ew3 (Ext4Expr.mul etheta ew4)))
-  let ec0' := Ext4Expr.add ea1 (Ext4Expr.mul ealpha (Ext4Expr.add ea0 (Ext4Expr.mul etheta ea1)))
-  let ec1' := Ext4Expr.mul ebeta (Ext4Expr.add ea0 (Ext4Expr.mul etheta ea1))
-  let ek0' := Ext4Expr.add eb0 (Ext4Expr.mul ephi eb1)
-  let rhsE := Ext4Expr.add (Ext4Expr.mul ec0' ek0') (Ext4Expr.mul ec1' ekn)
-  have hl : cwyzBridgeValue
-      (extMul a0 b0) (extMul a0 b1) (extMul a1 b0) (extMul a0 kn) (extMul a1 kn)
-      (extAdd (extMul a0 b0) (extMul a1 b1)) phi theta alpha beta = lhsE.eval env := by
-    ext <;> simp only [cwyzBridgeValue, extAdd, extSub, extMul,
-      lhsE, ef, eg, eclaim, ew0, ew1, ew2, ew3, ew4,
-      ea0, ea1, eb0, eb1, ekn, ephi, etheta, ealpha, ebeta,
-      Ext4Expr.eval, Ext4Expr.add, Ext4Expr.sub, Ext4Expr.mul, Ext4Expr.var4,
-      env, envExt9, FExpr.evalZ,
-      fieldAdd_eq_modP, fieldSub_eq_modP, fieldMul_eq_modP,
-      fieldAdd_modP_left, fieldAdd_modP_right, fieldAdd_modP_both,
-      fieldSub_modP_left, fieldSub_modP_right, fieldSub_modP_both,
-      fieldMul_modP_left, fieldMul_modP_right, fieldMul_modP_both,
-      toZ_zero, toZ_one, toZ_two, toZ_seven]
-  have hr : extAdd
-      (extMul (extAdd a1 (extMul alpha (extAdd a0 (extMul theta a1)))) (extAdd b0 (extMul phi b1)))
-      (extMul (extMul beta (extAdd a0 (extMul theta a1))) kn) = rhsE.eval env := by
-    ext <;> simp only [extAdd, extSub, extMul, rhsE, ec0', ec1', ek0',
-      ea0, ea1, eb0, eb1, ekn, ephi, etheta, ealpha, ebeta,
-      Ext4Expr.eval, Ext4Expr.add, Ext4Expr.sub, Ext4Expr.mul, Ext4Expr.var4,
-      env, envExt9, FExpr.evalZ,
-      fieldAdd_eq_modP, fieldSub_eq_modP, fieldMul_eq_modP,
-      fieldAdd_modP_left, fieldAdd_modP_right, fieldAdd_modP_both,
-      fieldSub_modP_left, fieldSub_modP_right, fieldSub_modP_both,
-      fieldMul_modP_left, fieldMul_modP_right, fieldMul_modP_both,
-      toZ_zero, toZ_one, toZ_two, toZ_seven]
-  rw [hl, hr]
-  exact Ext4Expr.eq_of_norm env lhsE rhsE rfl rfl rfl rfl
+  set k0' := extAdd b0 (extMul phi b1)
+  have hf : extAdd (extMul a0 b0) (extMul phi (extMul a0 b1)) = extMul a0 k0' := by
+    rw [← extMul_assoc phi a0 b1, extMul_comm phi a0, extMul_assoc a0 phi b1, ← extMul_add]
+  have hsub : extSub (extAdd (extMul a0 b0) (extMul a1 b1)) (extMul a0 b0) = extMul a1 b1 := by
+    rw [extAdd_comm (extMul a0 b0) (extMul a1 b1), extAdd_sub_cancel (extMul_canonical a1 b1)]
+  have hg : extAdd (extMul a1 b0) (extMul phi (extSub (extAdd (extMul a0 b0) (extMul a1 b1)) (extMul a0 b0))) =
+      extMul a1 k0' := by
+    rw [hsub, ← extMul_assoc phi a1 b1, extMul_comm phi a1, extMul_assoc a1 phi b1, ← extMul_add]
+  have hcore : extAdd (extMul a1 k0') (extMul alpha (extAdd (extMul a0 k0') (extMul theta (extMul a1 k0')))) =
+      extMul (extAdd a1 (extMul alpha (extAdd a0 (extMul theta a1)))) k0' := by
+    rw [← extMul_assoc theta a1 k0',
+        ← add_extMul a0 (extMul theta a1) k0',
+        ← extMul_assoc alpha (extAdd a0 (extMul theta a1)) k0',
+        ← add_extMul a1 (extMul alpha (extAdd a0 (extMul theta a1))) k0']
+  have hshift : extMul beta (extAdd (extMul a0 kn) (extMul theta (extMul a1 kn))) =
+      extMul (extMul beta (extAdd a0 (extMul theta a1))) kn := by
+    rw [← extMul_assoc theta a1 kn,
+        ← add_extMul a0 (extMul theta a1) kn,
+        ← extMul_assoc beta (extAdd a0 (extMul theta a1)) kn]
+  dsimp only [cwyzBridgeValue]
+  rw [hf, hg, hcore, hshift]
 
 /-- Pure quadratic wire reconstruction `c0 + r * ((sum_claim - 2*c0 - c2) + c2 * r)`. -/
 def quadraticWireValue (c0 c2 sum_claim r : Ext4) : Ext4 :=
@@ -1247,33 +1096,19 @@ theorem eval_quadratic_sumcheck_wire_refines (c0 c2 sum_claim r : Ext4) :
 theorem eval_quadratic_sumcheck_wire_hypercube_sum
     (c0 c2 sum_claim : Ext4) (hs : IsCanonicalExt4 sum_claim) :
     extAdd (quadraticWireValue c0 c2 sum_claim extZero)
-           (quadraticWireValue c0 c2 sum_claim extOne) = sum_claim := by
-  let env := envExt3 c0 c2 sum_claim
-  rcases hs with ⟨hsa, hsb, hsc, hsd⟩
+           (quadraticWireValue c0 c2 sum_claim extOne) = sum_claim :=
   let ec0 := Ext4Expr.var4 0
   let ec2 := Ext4Expr.var4 4
   let esc := Ext4Expr.var4 8
-  let ez : Ext4Expr := ⟨.const 0, .const 0, .const 0, .const 0⟩
-  let eo : Ext4Expr := ⟨.const 1, .const 0, .const 0, .const 0⟩
+  let ez : Ext4Expr := ⟨.lit 0#u64, .lit 0#u64, .lit 0#u64, .lit 0#u64⟩
+  let eo : Ext4Expr := ⟨.lit 1#u64, .lit 0#u64, .lit 0#u64, .lit 0#u64⟩
   let ec1 := Ext4Expr.sub (Ext4Expr.sub esc (Ext4Expr.add ec0 ec0)) ec2
-  let lhsE := Ext4Expr.add
-    (Ext4Expr.add (Ext4Expr.mul (Ext4Expr.add (Ext4Expr.mul ec2 ez) ec1) ez) ec0)
-    (Ext4Expr.add (Ext4Expr.mul (Ext4Expr.add (Ext4Expr.mul ec2 eo) ec1) eo) ec0)
-  have hl : extAdd (quadraticWireValue c0 c2 sum_claim extZero)
-      (quadraticWireValue c0 c2 sum_claim extOne) = lhsE.eval env := by
-    ext <;> simp only [quadraticWireValue, extZero, extOne, extAdd, extSub, extMul,
-      lhsE, ec1, ec0, ec2, esc, ez, eo, Ext4Expr.eval, Ext4Expr.add, Ext4Expr.sub, Ext4Expr.mul, Ext4Expr.var4,
-      env, envExt3, FExpr.evalZ,
-      fieldAdd_eq_modP, fieldSub_eq_modP, fieldMul_eq_modP,
-      fieldAdd_modP_left, fieldAdd_modP_right, fieldAdd_modP_both,
-      fieldSub_modP_left, fieldSub_modP_right, fieldSub_modP_both,
-      fieldMul_modP_left, fieldMul_modP_right, fieldMul_modP_both,
-      toZ_zero, toZ_one, toZ_two, toZ_seven]
-  have hr : sum_claim = esc.eval env :=
-    (Ext4.ext (modP_toZ_of_canonical hsa) (modP_toZ_of_canonical hsb)
-      (modP_toZ_of_canonical hsc) (modP_toZ_of_canonical hsd)).symm
-  rw [hl, hr]
-  exact Ext4Expr.eq_of_norm env lhsE esc rfl rfl rfl rfl
+  Ext4Expr.eq_of_norm (envExt3 c0 c2 sum_claim)
+    (Ext4Expr.add
+      (Ext4Expr.add (Ext4Expr.mul (Ext4Expr.add (Ext4Expr.mul ec2 ez) ec1) ez) ec0)
+      (Ext4Expr.add (Ext4Expr.mul (Ext4Expr.add (Ext4Expr.mul ec2 eo) ec1) eo) ec0))
+    esc
+    (extAdd_canonical _ _) hs rfl rfl rfl rfl
 
 /-- Pure affine cascade claim step `acc + w0 * eval_at_point + w1 * shifted_eval`. -/
 def affineCascadeStepValue (acc w0 w1 eval_at_point shifted_eval : Ext4) : Ext4 :=

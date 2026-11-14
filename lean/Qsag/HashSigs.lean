@@ -2336,23 +2336,20 @@ theorem PqHashParams.productionWellFormed_w_ell1 (p : PqHashParams)
   rw [PqHashParams.productionWellFormed_eq] at h
   simp only [Bool.and_eq_true, decide_eq_true_eq, and_assoc] at h
   rcases h with ⟨_, h2, h256, hPow, hBits, _, _, _, _, _, _, _, _⟩
-  have hLgLe8 : Nat.log2 p.w ≤ 8 := by
-    by_contra hGt
-    have hGe9 : 9 ≤ Nat.log2 p.w := by omega
-    have hPow9 : 2 ^ 9 ≤ 2 ^ Nat.log2 p.w := Nat.pow_le_pow_right (by decide) hGe9
-    rw [hPow] at hPow9
-    omega
   match hLg : Nat.log2 p.w with
   | 0 => rw [hLg] at hPow; omega
-  | 1 => rw [hLg] at hPow; exact .inl ⟨hPow.symm, by omega⟩
-  | 2 => rw [hLg] at hPow; exact .inr (.inl ⟨hPow.symm, by omega⟩)
-  | 3 => omega
-  | 4 => rw [hLg] at hPow; exact .inr (.inr (.inl ⟨hPow.symm, by omega⟩))
-  | 5 => omega
-  | 6 => omega
-  | 7 => omega
-  | 8 => rw [hLg] at hPow; exact .inr (.inr (.inr ⟨hPow.symm, by omega⟩))
-  | _ + 9 => omega
+  | 1 => rw [hLg] at hPow hBits; exact .inl ⟨hPow.symm, by omega⟩
+  | 2 => rw [hLg] at hPow hBits; exact .inr (.inl ⟨hPow.symm, by omega⟩)
+  | 3 => rw [hLg] at hBits; omega
+  | 4 => rw [hLg] at hPow hBits; exact .inr (.inr (.inl ⟨hPow.symm, by omega⟩))
+  | 5 => rw [hLg] at hBits; omega
+  | 6 => rw [hLg] at hBits; omega
+  | 7 => rw [hLg] at hBits; omega
+  | 8 => rw [hLg] at hPow hBits; exact .inr (.inr (.inr ⟨hPow.symm, by omega⟩))
+  | n + 9 =>
+    have hPow9 : 2 ^ 9 ≤ 2 ^ p.w.log2 := Nat.pow_le_pow_right (by decide) (by omega)
+    rw [hPow] at hPow9
+    omega
 
 theorem PqHashParams.productionWellFormed_facts (p : PqHashParams)
     (h : p.productionWellFormed = true) :
@@ -3110,8 +3107,9 @@ theorem signProductionHypertreeLayers_sound
         (computeWotsPk suite params sk (UInt32.ofNat layerIdx) (UInt64.ofNat (globalIdx / 2 ^ params.subtreeHeight)))
         params.subtreeHeight 0 0 (globalIdx % 2 ^ params.subtreeHeight) (Nat.mod_lt _ hSubPos)
       simp only [Nat.zero_mul, Nat.zero_add] at hWalk
-      rw [hWalk, computeMerkleNodeKp_zero_eq, verifyProductionHypertreeLayers_nil,
-          computeXmssSubtreeRoot_eq, hDiv0, Nat.add_sub_cancel]
+      rw [hWalk, computeMerkleNodeKp_zero_eq]
+      dsimp only
+      rw [verifyProductionHypertreeLayers_nil, computeXmssSubtreeRoot_eq, hDiv0, Nat.add_sub_cancel]
       rfl
   | rem + 2, layerIdx, globalIdx, curRoot, layerSigs, _, hIdxLt, hSign => by
     rw [signProductionHypertreeLayers_succ] at hSign
@@ -3175,7 +3173,9 @@ theorem signProductionHypertreeLayers_sound
             (UInt64.ofNat (globalIdx / 2 ^ params.subtreeHeight)))
           params.subtreeHeight 0 0 (globalIdx % 2 ^ params.subtreeHeight) (Nat.mod_lt _ hSubPos)
         simp only [Nat.zero_mul, Nat.zero_add] at hWalk
-        rw [hWalk, computeMerkleNodeKp_zero_eq, ← computeXmssSubtreeRoot_eq, hRestVer]
+        rw [hWalk, computeMerkleNodeKp_zero_eq, ← computeXmssSubtreeRoot_eq]
+        dsimp only
+        rw [hRestVer]
         have hTopLayerEq : layerIdx + 1 + (rem + 1) - 1 = layerIdx + (rem + 2) - 1 := by omega
         rw [hTopLayerEq]
 
@@ -3781,119 +3781,124 @@ theorem decodeProductionSigWire_encodeProductionSigWire
     · simp only [hWf, hRange, Bool.not_true, Bool.or_self, Bool.false_eq_true, ↓reduceIte] at hEnc
       by_cases hLsLen : sig.layerSigs.length = params.numLayers
       · simp only [hLsLen, ne_eq, not_true_eq_false, ↓reduceIte] at hEnc
-        by_cases hHdrBad : (decide (sig.rRand.length ≠ 32) || decide (sig.msgTswCtr ≠ 0)) = true
-        · simp [hHdrBad] at hEnc
-        · simp only [hHdrBad, Bool.false_eq_true, ↓reduceIte] at hEnc
-          simp only [Bool.or_eq_true, decide_eq_true_eq, not_or, Decidable.not_not] at hHdrBad
-          obtain ⟨hRLen, hCtr0⟩ := hHdrBad
-          cases hForsOk : (if params.statefulJorts then sig.forsOpenings.isEmpty
-              else decide (sig.forsOpenings.length = params.forsTrees) &&
-                   sig.forsOpenings.all (checkForsOpeningFraming params))
-          · simp [hForsOk] at hEnc
-          · simp only [hForsOk, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hEnc
-            cases hLayersOk : sig.layerSigs.all (fun ls => decide (ls.tswCtr < 2 ^ 32) && checkLayerSigFraming params ls)
-            · simp [hLayersOk] at hEnc
-            · simp only [hLayersOk, Bool.not_true, Bool.false_eq_true, ↓reduceIte, Except.ok.injEq] at hEnc
-              subst hEnc
-              have hForsProps :
-                  sig.forsOpenings.length = (if params.statefulJorts then 0 else params.forsTrees) ∧
-                  ∀ op ∈ sig.forsOpenings, op.secretVal.length = 32 ∧ op.authPath.length = params.forsHeight ∧
-                    ∀ s ∈ op.authPath, s.length = 32 := by
-                cases hSt : params.statefulJorts
-                · simp only [hSt, Bool.false_eq_true, ↓reduceIte, Bool.and_eq_true, decide_eq_true_eq,
-                    List.all_eq_true, checkForsOpeningFraming] at hForsOk ⊢
-                  exact ⟨hForsOk.1, fun op hMem => ⟨hForsOk.2 op hMem |>.1.1, hForsOk.2 op hMem |>.1.2, hForsOk.2 op hMem |>.2⟩⟩
-                · simp only [hSt, ↓reduceIte, List.isEmpty_iff] at hForsOk ⊢
-                  rw [hForsOk]; exact ⟨rfl, fun _ h => by cases h⟩
-              have hLayerProps :
-                  ∀ ls ∈ sig.layerSigs, ls.tswCtr < 2 ^ 32 ∧
-                    ls.wotsChains.length = params.ell1 ∧ (∀ c ∈ ls.wotsChains, c.length = 32) ∧
-                    ls.authPath.length = params.subtreeHeight ∧ (∀ s ∈ ls.authPath, s.length = 32) := by
-                simp only [List.all_eq_true, Bool.and_eq_true, decide_eq_true_eq, checkLayerSigFraming] at hLayersOk
-                intro ls hMem
-                have hL := hLayersOk ls hMem
-                exact ⟨hL.1, hL.2.1.1.1, hL.2.1.1.2, hL.2.1.2, hL.2.2⟩
-              obtain ⟨hForsByteLen, hForsParse⟩ := parseForsOpeningsWire_encode params.forsHeight
-                sig.forsOpenings (encodeLayerSigsWire sig.layerSigs) hForsProps.2
-              obtain ⟨hLayerByteLen, hLayerParse⟩ := parseLayerSigsWire_encode params.ell1 params.subtreeHeight
-                sig.layerSigs [] hLayerProps
-              simp only [List.append_nil] at hLayerParse
-              have hMagicLen : pqWireMagic.length = 5 := rfl
-              have hBe4 : (be 4 sig.msgTswCtr).length = 4 := length_be 4 _
-              have hBe8 : (be 8 sig.leafGlobalIdx).length = 8 := length_be 8 _
-              have hWireLen :
-                  (pqWireMagic ++ sig.rRand ++ be 4 sig.msgTswCtr ++ be 8 sig.leafGlobalIdx ++
-                   encodeForsOpeningsWire sig.forsOpenings ++ encodeLayerSigsWire sig.layerSigs).length =
-                  params.wireSigBytes := by
-                rw [PqHashParams.wireSigBytes_eq]
-                simp only [List.length_append, hMagicLen, hRLen, hBe4, hBe8, hForsByteLen,
-                  hForsProps.1, hLayerByteLen, hLsLen]
-                cases params.statefulJorts <;> simp <;> omega
-              refine ⟨hWireLen, ?_⟩
-              unfold decodeProductionSigWire
-              have hRawGe5 : ¬ ((pqWireMagic ++ sig.rRand ++ be 4 sig.msgTswCtr ++ be 8 sig.leafGlobalIdx ++
-                  encodeForsOpeningsWire sig.forsOpenings ++ encodeLayerSigsWire sig.layerSigs).length < 5) := by
-                rw [hWireLen, PqHashParams.wireSigBytes_eq]; omega
-              have hAssoc :
-                  pqWireMagic ++ sig.rRand ++ be 4 sig.msgTswCtr ++ be 8 sig.leafGlobalIdx ++
-                    encodeForsOpeningsWire sig.forsOpenings ++ encodeLayerSigsWire sig.layerSigs =
-                  pqWireMagic ++ (sig.rRand ++ (be 4 sig.msgTswCtr ++ (be 8 sig.leafGlobalIdx ++
-                    (encodeForsOpeningsWire sig.forsOpenings ++ encodeLayerSigsWire sig.layerSigs)))) := by
-                simp only [List.append_assoc]
-              have hTakeMagic :
-                  (pqWireMagic ++ (sig.rRand ++ (be 4 sig.msgTswCtr ++ (be 8 sig.leafGlobalIdx ++
-                    (encodeForsOpeningsWire sig.forsOpenings ++ encodeLayerSigsWire sig.layerSigs))))).take 5 =
-                  pqWireMagic := List.take_left' hMagicLen
-              have hLeafLt64 : sig.leafGlobalIdx < 256 ^ 8 := by
-                obtain ⟨_, _, _, _, _, _, _, _, _, hTot62, _, _, _, _⟩ := params.productionWellFormed_facts hWf
-                have hRange' := hRange
-                rw [PqHashParams.productionLeafIdxInRange_eq] at hRange'
-                dsimp only at hRange'
-                have hLtCap : sig.leafGlobalIdx < 2 ^ (if params.statefulJorts && decide (params.maxSigsLog2 < params.numLayers * params.subtreeHeight) then params.maxSigsLog2 else params.numLayers * params.subtreeHeight) :=
-                  of_decide_eq_true hRange'
-                have hCapLe62 : (if params.statefulJorts && decide (params.maxSigsLog2 < params.numLayers * params.subtreeHeight) then params.maxSigsLog2 else params.numLayers * params.subtreeHeight) ≤ 62 := by
-                  split
-                  · rename_i hC; simp only [Bool.and_eq_true, decide_eq_true_eq] at hC; omega
-                  · exact hTot62
-                have hPowLe : 2 ^ (if params.statefulJorts && decide (params.maxSigsLog2 < params.numLayers * params.subtreeHeight) then params.maxSigsLog2 else params.numLayers * params.subtreeHeight) ≤ 2 ^ 62 :=
-                  Nat.pow_le_pow_right (by decide) hCapLe62
-                have h62Lt : (2 : Nat) ^ 62 < 256 ^ 8 := by decide
-                omega
-              rw [hAssoc] at hWireLen hRawGe5 ⊢
-              have hMagicBne : ((pqWireMagic ++ (sig.rRand ++ (be 4 sig.msgTswCtr ++ (be 8 sig.leafGlobalIdx ++
-                  (encodeForsOpeningsWire sig.forsOpenings ++ encodeLayerSigsWire sig.layerSigs))))).take 5 != pqWireMagic) = false := by
-                rw [hTakeMagic]; decide
-              simp only [hWf, Bool.not_true, hRawGe5, decide_false, hMagicBne, Bool.or_self,
-                Bool.false_eq_true, ↓reduceIte, hWireLen, ne_eq, not_true_eq_false]
-              have hDrop5 : (pqWireMagic ++ (sig.rRand ++ (be 4 sig.msgTswCtr ++ (be 8 sig.leafGlobalIdx ++
-                  (encodeForsOpeningsWire sig.forsOpenings ++ encodeLayerSigsWire sig.layerSigs))))).drop 5 =
-                  sig.rRand ++ (be 4 sig.msgTswCtr ++ (be 8 sig.leafGlobalIdx ++
-                    (encodeForsOpeningsWire sig.forsOpenings ++ encodeLayerSigsWire sig.layerSigs))) :=
-                List.drop_left' hMagicLen
-              have hDrop37 : (pqWireMagic ++ (sig.rRand ++ (be 4 sig.msgTswCtr ++ (be 8 sig.leafGlobalIdx ++
-                  (encodeForsOpeningsWire sig.forsOpenings ++ encodeLayerSigsWire sig.layerSigs))))).drop 37 =
-                  be 4 sig.msgTswCtr ++ (be 8 sig.leafGlobalIdx ++
-                    (encodeForsOpeningsWire sig.forsOpenings ++ encodeLayerSigsWire sig.layerSigs)) := by
-                rw [show (37 : Nat) = 5 + 32 by rfl, ← List.drop_drop, hDrop5, List.drop_left' hRLen]
-              have hDrop41 : (pqWireMagic ++ (sig.rRand ++ (be 4 sig.msgTswCtr ++ (be 8 sig.leafGlobalIdx ++
-                  (encodeForsOpeningsWire sig.forsOpenings ++ encodeLayerSigsWire sig.layerSigs))))).drop 41 =
-                  be 8 sig.leafGlobalIdx ++
-                    (encodeForsOpeningsWire sig.forsOpenings ++ encodeLayerSigsWire sig.layerSigs) := by
-                rw [show (41 : Nat) = 37 + 4 by rfl, ← List.drop_drop, hDrop37, List.drop_left' hBe4]
-              have hDrop49 : (pqWireMagic ++ (sig.rRand ++ (be 4 sig.msgTswCtr ++ (be 8 sig.leafGlobalIdx ++
-                  (encodeForsOpeningsWire sig.forsOpenings ++ encodeLayerSigsWire sig.layerSigs))))).drop 49 =
-                  encodeForsOpeningsWire sig.forsOpenings ++ encodeLayerSigsWire sig.layerSigs := by
-                rw [show (49 : Nat) = 41 + 8 by rfl, ← List.drop_drop, hDrop41, List.drop_left' hBe8]
-              rw [hDrop5, List.take_left' hRLen, hDrop37, List.take_left' hBe4, hCtr0]
-              have hOfBe0 : ofBE (be 4 0) = 0 := ofBE_be (by decide)
-              rw [hOfBe0]
-              simp only [ne_eq, not_true_eq_false, ↓reduceIte, hDrop41, List.take_left' hBe8,
-                ofBE_be hLeafLt64, hRange, Bool.not_true, Bool.false_eq_true, hDrop49]
-              rw [← hForsProps.1, hForsParse]
-              dsimp only
-              rw [← hLsLen, hLayerParse]
-              simp only [List.isEmpty_nil, Bool.not_true, Bool.false_eq_true, ↓reduceIte, Except.ok.injEq]
-              cases sig; dsimp only at hCtr0 ⊢; subst hCtr0; rfl
+        by_cases hRLen : sig.rRand.length = 32
+        · by_cases hCtr0 : sig.msgTswCtr = 0
+          · simp only [hRLen, hCtr0, not_true_eq_false, decide_false, Bool.or_self,
+              Bool.false_eq_true, ↓reduceIte] at hEnc
+            cases hForsOk : (if params.statefulJorts then sig.forsOpenings.isEmpty
+                else decide (sig.forsOpenings.length = params.forsTrees) &&
+                     sig.forsOpenings.all (checkForsOpeningFraming params))
+            · simp [hForsOk] at hEnc
+            · simp only [hForsOk, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hEnc
+              cases hLayersOk : sig.layerSigs.all (fun ls => decide (ls.tswCtr < 2 ^ 32) && checkLayerSigFraming params ls)
+              · simp [hLayersOk] at hEnc
+              · simp only [hLayersOk, Bool.not_true, Bool.false_eq_true, ↓reduceIte, Except.ok.injEq] at hEnc
+                subst hEnc
+                have hForsProps :
+                    sig.forsOpenings.length = (if params.statefulJorts then 0 else params.forsTrees) ∧
+                    ∀ op ∈ sig.forsOpenings, op.secretVal.length = 32 ∧ op.authPath.length = params.forsHeight ∧
+                      ∀ s ∈ op.authPath, s.length = 32 := by
+                  cases hSt : params.statefulJorts
+                  · simp only [hSt, Bool.false_eq_true, ↓reduceIte, Bool.and_eq_true, decide_eq_true_eq,
+                      List.all_eq_true, checkForsOpeningFraming] at hForsOk ⊢
+                    exact ⟨hForsOk.1, fun op hMem => ⟨hForsOk.2 op hMem |>.1.1, hForsOk.2 op hMem |>.1.2, hForsOk.2 op hMem |>.2⟩⟩
+                  · simp only [hSt, ↓reduceIte, List.isEmpty_iff] at hForsOk ⊢
+                    rw [hForsOk]; exact ⟨rfl, fun _ h => by cases h⟩
+                have hLayerProps :
+                    ∀ ls ∈ sig.layerSigs, ls.tswCtr < 2 ^ 32 ∧
+                      ls.wotsChains.length = params.ell1 ∧ (∀ c ∈ ls.wotsChains, c.length = 32) ∧
+                      ls.authPath.length = params.subtreeHeight ∧ (∀ s ∈ ls.authPath, s.length = 32) := by
+                  simp only [List.all_eq_true, Bool.and_eq_true, decide_eq_true_eq, checkLayerSigFraming] at hLayersOk
+                  intro ls hMem
+                  have hL := hLayersOk ls hMem
+                  exact ⟨hL.1, hL.2.1.1.1, hL.2.1.1.2, hL.2.1.2, hL.2.2⟩
+                obtain ⟨hForsByteLen, hForsParse⟩ := parseForsOpeningsWire_encode params.forsHeight
+                  sig.forsOpenings (encodeLayerSigsWire sig.layerSigs) hForsProps.2
+                obtain ⟨hLayerByteLen, hLayerParse⟩ := parseLayerSigsWire_encode params.ell1 params.subtreeHeight
+                  sig.layerSigs [] hLayerProps
+                simp only [List.append_nil] at hLayerParse
+                have hMagicLen : pqWireMagic.length = 5 := rfl
+                have hBe4 : (be 4 0).length = 4 := length_be 4 0
+                have hBe8 : (be 8 sig.leafGlobalIdx).length = 8 := length_be 8 _
+                have hWireLen :
+                    (pqWireMagic ++ sig.rRand ++ be 4 0 ++ be 8 sig.leafGlobalIdx ++
+                     encodeForsOpeningsWire sig.forsOpenings ++ encodeLayerSigsWire sig.layerSigs).length =
+                    params.wireSigBytes := by
+                  rw [PqHashParams.wireSigBytes_eq]
+                  simp only [List.length_append, hMagicLen, hRLen, hBe4, hBe8, hForsByteLen,
+                    hForsProps.1, hLayerByteLen, hLsLen]
+                  cases params.statefulJorts <;> simp <;> omega
+                refine ⟨hWireLen, ?_⟩
+                unfold decodeProductionSigWire
+                have hNotLt5 : ¬ (params.wireSigBytes < 5) := by
+                  rw [PqHashParams.wireSigBytes_eq]; dsimp only; omega
+                have hAssoc :
+                    pqWireMagic ++ sig.rRand ++ be 4 0 ++ be 8 sig.leafGlobalIdx ++
+                      encodeForsOpeningsWire sig.forsOpenings ++ encodeLayerSigsWire sig.layerSigs =
+                    pqWireMagic ++ (sig.rRand ++ (be 4 0 ++ (be 8 sig.leafGlobalIdx ++
+                      (encodeForsOpeningsWire sig.forsOpenings ++ encodeLayerSigsWire sig.layerSigs)))) := by
+                  simp only [List.append_assoc]
+                have hTakeMagic :
+                    (pqWireMagic ++ (sig.rRand ++ (be 4 0 ++ (be 8 sig.leafGlobalIdx ++
+                      (encodeForsOpeningsWire sig.forsOpenings ++ encodeLayerSigsWire sig.layerSigs))))).take 5 =
+                    pqWireMagic := List.take_left' hMagicLen
+                have hLeafLt64 : sig.leafGlobalIdx < 256 ^ 8 := by
+                  obtain ⟨_, _, _, _, _, _, _, _, _, hTot62, _, _, _, _⟩ := params.productionWellFormed_facts hWf
+                  have hRange' := hRange
+                  rw [PqHashParams.productionLeafIdxInRange_eq] at hRange'
+                  dsimp only at hRange'
+                  have hLtCap : sig.leafGlobalIdx < 2 ^ (if params.statefulJorts && decide (params.maxSigsLog2 < params.numLayers * params.subtreeHeight) then params.maxSigsLog2 else params.numLayers * params.subtreeHeight) :=
+                    of_decide_eq_true hRange'
+                  have hCapLe62 : (if params.statefulJorts && decide (params.maxSigsLog2 < params.numLayers * params.subtreeHeight) then params.maxSigsLog2 else params.numLayers * params.subtreeHeight) ≤ 62 := by
+                    split
+                    · rename_i hC; simp only [Bool.and_eq_true, decide_eq_true_eq] at hC; omega
+                    · exact hTot62
+                  have hPowLe : 2 ^ (if params.statefulJorts && decide (params.maxSigsLog2 < params.numLayers * params.subtreeHeight) then params.maxSigsLog2 else params.numLayers * params.subtreeHeight) ≤ 2 ^ 62 :=
+                    Nat.pow_le_pow_right (by decide) hCapLe62
+                  have h62Lt : (2 : Nat) ^ 62 < 256 ^ 8 := by decide
+                  omega
+                rw [hAssoc] at hWireLen ⊢
+                have hMagicBne : ((pqWireMagic ++ (sig.rRand ++ (be 4 0 ++ (be 8 sig.leafGlobalIdx ++
+                    (encodeForsOpeningsWire sig.forsOpenings ++ encodeLayerSigsWire sig.layerSigs))))).take 5 != pqWireMagic) = false := by
+                  rw [hTakeMagic]; decide
+                simp only [hWf, Bool.not_true, hWireLen, hNotLt5, decide_false, hMagicBne, Bool.or_self,
+                  Bool.false_eq_true, ↓reduceIte, ne_eq, not_true_eq_false]
+                dsimp only
+                have hDrop5 : (pqWireMagic ++ (sig.rRand ++ (be 4 0 ++ (be 8 sig.leafGlobalIdx ++
+                    (encodeForsOpeningsWire sig.forsOpenings ++ encodeLayerSigsWire sig.layerSigs))))).drop 5 =
+                    sig.rRand ++ (be 4 0 ++ (be 8 sig.leafGlobalIdx ++
+                      (encodeForsOpeningsWire sig.forsOpenings ++ encodeLayerSigsWire sig.layerSigs))) :=
+                  List.drop_left' hMagicLen
+                have hDrop37 : (pqWireMagic ++ (sig.rRand ++ (be 4 0 ++ (be 8 sig.leafGlobalIdx ++
+                    (encodeForsOpeningsWire sig.forsOpenings ++ encodeLayerSigsWire sig.layerSigs))))).drop 37 =
+                    be 4 0 ++ (be 8 sig.leafGlobalIdx ++
+                      (encodeForsOpeningsWire sig.forsOpenings ++ encodeLayerSigsWire sig.layerSigs)) := by
+                  rw [show (37 : Nat) = 5 + 32 by rfl, ← List.drop_drop, hDrop5, List.drop_left' hRLen]
+                have hDrop41 : (pqWireMagic ++ (sig.rRand ++ (be 4 0 ++ (be 8 sig.leafGlobalIdx ++
+                    (encodeForsOpeningsWire sig.forsOpenings ++ encodeLayerSigsWire sig.layerSigs))))).drop 41 =
+                    be 8 sig.leafGlobalIdx ++
+                      (encodeForsOpeningsWire sig.forsOpenings ++ encodeLayerSigsWire sig.layerSigs) := by
+                  rw [show (41 : Nat) = 37 + 4 by rfl, ← List.drop_drop, hDrop37, List.drop_left' hBe4]
+                have hDrop49 : (pqWireMagic ++ (sig.rRand ++ (be 4 0 ++ (be 8 sig.leafGlobalIdx ++
+                    (encodeForsOpeningsWire sig.forsOpenings ++ encodeLayerSigsWire sig.layerSigs))))).drop 49 =
+                    encodeForsOpeningsWire sig.forsOpenings ++ encodeLayerSigsWire sig.layerSigs := by
+                  rw [show (49 : Nat) = 41 + 8 by rfl, ← List.drop_drop, hDrop41, List.drop_left' hBe8]
+                rw [hDrop37, List.take_left' hBe4]
+                have hOfBe0 : ofBE (be 4 0) = 0 := ofBE_be (by decide)
+                rw [hOfBe0]
+                simp only [ne_eq, not_true_eq_false, ↓reduceIte]
+                dsimp only
+                rw [hDrop41, List.take_left' hBe8, ofBE_be hLeafLt64]
+                simp only [hRange, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+                dsimp only
+                rw [hDrop49, ← hForsProps.1, hForsParse]
+                dsimp only
+                rw [← hLsLen, hLayerParse]
+                simp only [List.isEmpty_nil, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+                rw [hDrop5, List.take_left' hRLen]
+                cases sig; dsimp only at hCtr0 ⊢; subst hCtr0; rfl
+          · simp [hCtr0] at hEnc
+        · simp [hRLen] at hEnc
       · simp [hLsLen] at hEnc
 
 end Qsag

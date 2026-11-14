@@ -43,12 +43,12 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use crate::belt_latch::{
-    BeltEcho, BeltLatch, BeltLatchError, BeltLatchRecord, DurableWal, EchoMacKeys,
-    OpenPermit, derive_echo_mac_key, permits_authorise,
+    BeltEcho, BeltLatch, BeltLatchError, BeltLatchRecord, DurableWal, EchoMacKeys, OpenPermit,
+    WalError, derive_echo_mac_key, permits_authorise,
 };
 use crate::keccak_mpc::RssKeyShare256;
 use crate::rss256::{Rss256Engine, Rss256Error};
-use crate::sponge::keccak::{cshake256_32, encode_multi_frame};
+use crate::sponge::keccak::cshake256_32_multi_frame;
 use crate::tsw_baggy::{
     AdrsKind, Cshake256Suite, HashAdrs, PqSecretKey, th_pre_hash, walk_merkle_auth_path,
 };
@@ -192,10 +192,7 @@ fn jorts_grinder(
     retry_salt: &[u8; 32],
     msg_digest: &[u8; 32],
 ) -> DigestGrinder {
-    let value = cshake256_32(
-        TAG_JORTS_BIND,
-        &encode_multi_frame(&[&pk.pk_root, retry_salt, msg_digest]),
-    );
+    let value = cshake256_32_multi_frame(TAG_JORTS_BIND, &[&pk.pk_root, retry_salt, msg_digest]);
     let adrs = HashAdrs {
         layer: 0,
         tree: 0,
@@ -343,6 +340,51 @@ pub struct JortsSigner<W: DurableWal> {
     windows: Vec<StagedWindow>,
 }
 
+/// Prepared immutable `Jorts` epoch binding returned by [`JortsSigner::prepare_sign_mode3a`]
+/// and [`JortsSigner::prepare_sign_mode3b`] after joint salt selection, digit grinding, and
+/// durable [`BeltLatch::bind`] persistence, before echo verification or any secret opening.
+///
+/// Not `Clone`; callers backing `JortsSigner` with [`crate::belt_latch::FsBeltWal`] commit
+/// per-party ceremony reservations against [`Self::records`] and install permits via
+/// [`JortsSigner::install_ceremony_permits`] (or [`JortsSigner::authorize_wals_with`]) before
+/// calling [`JortsSigner::complete_sign_mode3a`] / [`JortsSigner::complete_sign_mode3b`].
+#[derive(Debug, PartialEq, Eq)]
+pub struct PreparedJortsSign {
+    epoch: u64,
+    ctr: u32,
+    records: [BeltLatchRecord; 3],
+}
+
+impl PreparedJortsSign {
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    pub const fn ctr(&self) -> u32 {
+        self.ctr
+    }
+
+    pub fn retry_salt(&self) -> &[u8; 32] {
+        &self.records[0].retry_salt
+    }
+
+    pub fn records(&self) -> &[BeltLatchRecord; 3] {
+        &self.records
+    }
+
+    pub fn record(&self, party: usize) -> Option<&BeltLatchRecord> {
+        self.records.get(party)
+    }
+
+    pub fn bindings(&self) -> [[u8; 32]; 3] {
+        [
+            self.records[0].binding(),
+            self.records[1].binding(),
+            self.records[2].binding(),
+        ]
+    }
+}
+
 /// What the latch phase hands to the opening phase.
 struct Latched {
     record: BeltLatchRecord,
@@ -431,14 +473,15 @@ impl<W: DurableWal> JortsSigner<W> {
             .sum()
     }
 
-    /// Salt, digits, durable bind and echo exchange. `views[p]` is the message digest party
-    /// `p` was asked to sign; honest callers pass the same digest three times.
-    fn latch_and_echo(
+    /// Salt, digits, and durable bind across all three signers, stopping before echo
+    /// verification and WAL release consumption. `views[p]` is the message digest party `p`
+    /// was asked to sign; honest callers pass the same digest three times.
+    fn prepare_views(
         &mut self,
         engine: &mut Rss256Engine,
         epoch: u64,
         views: &[[u8; 32]; 3],
-    ) -> Result<Latched, JortsError> {
+    ) -> Result<PreparedJortsSign, JortsError> {
         if epoch >= self.params.capacity() {
             return Err(JortsError::EpochOutOfRange);
         }
@@ -471,6 +514,54 @@ impl<W: DurableWal> JortsSigner<W> {
                 ctr0 = ctr;
             }
         }
+        let r0 = self.latches[0]
+            .in_flight()
+            .cloned()
+            .ok_or(BeltLatchError::NothingBound)?;
+        let r1 = self.latches[1]
+            .in_flight()
+            .cloned()
+            .ok_or(BeltLatchError::NothingBound)?;
+        let r2 = self.latches[2]
+            .in_flight()
+            .cloned()
+            .ok_or(BeltLatchError::NothingBound)?;
+        Ok(PreparedJortsSign {
+            epoch,
+            ctr: ctr0,
+            records: [r0, r1, r2],
+        })
+    }
+
+    /// Install release authorization on each party's underlying [`DurableWal`] for the exact
+    /// persisted [`BeltLatchRecord`] in `prepared` before completing the echo/opening phase.
+    pub fn authorize_wals_with<E>(
+        &mut self,
+        prepared: &PreparedJortsSign,
+        mut authorize: impl FnMut(usize, &mut W, &BeltLatchRecord) -> Result<(), E>,
+    ) -> Result<(), E> {
+        for (party, (latch, rec)) in self
+            .latches
+            .iter_mut()
+            .zip(prepared.records.iter())
+            .enumerate()
+        {
+            authorize(party, latch.wal_mut(), rec)?;
+        }
+        Ok(())
+    }
+
+    /// Verify pairwise echoes and consume each WAL's release authorization for `prepared`.
+    fn verify_prepared_echoes(
+        &self,
+        engine: &mut Rss256Engine,
+        prepared: PreparedJortsSign,
+    ) -> Result<Latched, JortsError> {
+        for (latch, expected) in self.latches.iter().zip(prepared.records.iter()) {
+            if expected.epoch != prepared.epoch || latch.in_flight() != Some(expected) {
+                return Err(BeltLatchError::PermitMismatch.into());
+            }
+        }
         // 3. Echo exchange: every party sends each peer an echo tagged under their pairwise
         //    key, and checks both echoes addressed to it before anything can be opened.
         let mut echoes: Vec<BeltEcho> = Vec::with_capacity(6);
@@ -483,13 +574,10 @@ impl<W: DurableWal> JortsSigner<W> {
         let p0 = self.latches[0].verify_peer_echoes(&echoes)?;
         let p1 = self.latches[1].verify_peer_echoes(&echoes)?;
         let p2 = self.latches[2].verify_peer_echoes(&echoes)?;
-        let record = self.latches[0]
-            .in_flight()
-            .cloned()
-            .ok_or(BeltLatchError::NothingBound)?;
+        let [r0, _, _] = prepared.records;
         Ok(Latched {
-            record,
-            ctr: ctr0,
+            record: r0,
+            ctr: prepared.ctr,
             permits: [p0, p1, p2],
         })
     }
@@ -534,7 +622,33 @@ impl<W: DurableWal> JortsSigner<W> {
         msg: &[u8],
         views: &[[u8; 32]; 3],
     ) -> Result<JortsSig, JortsError> {
-        let latched = self.latch_and_echo(engine, epoch, views)?;
+        let prepared = self.prepare_views(engine, epoch, views)?;
+        self.complete_sign_mode3a(engine, prepared, msg)
+    }
+
+    /// Phase 1 of Mode 3A: draw or replay the joint retry salt, grind digits, and durably
+    /// persist `(epoch, msg_digest, retry_salt, digits)` on all three signers' WALs without
+    /// consuming WAL release authorization or opening any shares.
+    pub fn prepare_sign_mode3a(
+        &mut self,
+        engine: &mut Rss256Engine,
+        epoch: u64,
+        msg: &[u8],
+    ) -> Result<PreparedJortsSign, JortsError> {
+        let md = jorts_msg_digest(&self.key.pk, msg);
+        self.prepare_views(engine, epoch, &[md; 3])
+    }
+
+    /// Phase 2 of Mode 3A: verify pairwise echoes (consuming each WAL's release permit),
+    /// evaluate the epoch's leaf online, check multiplication proofs, and open selected nodes.
+    pub fn complete_sign_mode3a(
+        &mut self,
+        engine: &mut Rss256Engine,
+        prepared: PreparedJortsSign,
+        msg: &[u8],
+    ) -> Result<JortsSig, JortsError> {
+        let epoch = prepared.epoch;
+        let latched = self.verify_prepared_echoes(engine, prepared)?;
         let chains = self.params.wots.chains;
         let lanes: Vec<LaneSpec> = (0..chains as u32)
             .map(|c| LaneSpec::wots(0, 0, epoch as u32, c))
@@ -552,6 +666,21 @@ impl<W: DurableWal> JortsSigner<W> {
         self.open_and_assemble(engine, &sweep, 0, &latched, msg)
     }
 
+    /// Mode 3A with an inline WAL release-authorization callback invoked after durable
+    /// binding persistence and before echo verification / node opening.
+    pub fn sign_mode3a_authorized(
+        &mut self,
+        engine: &mut Rss256Engine,
+        epoch: u64,
+        msg: &[u8],
+        authorize: impl FnMut(usize, &mut W, &BeltLatchRecord) -> Result<(), WalError>,
+    ) -> Result<JortsSig, JortsError> {
+        let prepared = self.prepare_sign_mode3a(engine, epoch, msg)?;
+        self.authorize_wals_with(&prepared, authorize)
+            .map_err(BeltLatchError::Wal)?;
+        self.complete_sign_mode3a(engine, prepared, msg)
+    }
+
     /// Mode 3A: evaluate the epoch's leaf online and sign `msg` with it.
     pub fn sign_mode3a(
         &mut self,
@@ -559,8 +688,7 @@ impl<W: DurableWal> JortsSigner<W> {
         epoch: u64,
         msg: &[u8],
     ) -> Result<JortsSig, JortsError> {
-        let md = jorts_msg_digest(&self.key.pk, msg);
-        self.sign_mode3a_views(engine, epoch, msg, &[md; 3])
+        self.sign_mode3a_authorized(engine, epoch, msg, |_, _, _| Ok(()))
     }
 
     /// Mode 3B, background: evaluate and verify all chains of epochs
@@ -595,26 +723,41 @@ impl<W: DurableWal> JortsSigner<W> {
         Ok(())
     }
 
-    /// Mode 3B, online: sign `msg` at a staged epoch with no online gate evaluation. The
-    /// staged shares of the epoch are erased once its nodes have been opened.
-    pub fn sign_mode3b(
+    fn find_staged_epoch(&self, epoch: u64) -> Option<(usize, usize)> {
+        self.windows.iter().enumerate().find_map(|(w, win)| {
+            let idx = epoch.checked_sub(win.first_epoch)? as usize;
+            (idx < win.spent.len() && !win.spent[idx]).then_some((w, idx))
+        })
+    }
+
+    /// Phase 1 of Mode 3B: verify `epoch` is staged, draw or replay the joint retry salt,
+    /// grind digits, and durably persist the binding across all three WALs.
+    pub fn prepare_sign_mode3b(
         &mut self,
         engine: &mut Rss256Engine,
         epoch: u64,
         msg: &[u8],
+    ) -> Result<PreparedJortsSign, JortsError> {
+        if self.find_staged_epoch(epoch).is_none() {
+            return Err(JortsError::NotStaged);
+        }
+        let md = jorts_msg_digest(&self.key.pk, msg);
+        self.prepare_views(engine, epoch, &[md; 3])
+    }
+
+    /// Phase 2 of Mode 3B: verify pairwise echoes (consuming each WAL's release permit) and
+    /// open the pre-staged nodes of `prepared.epoch()` with zero online gate evaluation.
+    pub fn complete_sign_mode3b(
+        &mut self,
+        engine: &mut Rss256Engine,
+        prepared: PreparedJortsSign,
+        msg: &[u8],
     ) -> Result<JortsSig, JortsError> {
         let chains = self.params.wots.chains;
         let (window, index) = self
-            .windows
-            .iter()
-            .enumerate()
-            .find_map(|(w, win)| {
-                let idx = epoch.checked_sub(win.first_epoch)? as usize;
-                (idx < win.spent.len() && !win.spent[idx]).then_some((w, idx))
-            })
+            .find_staged_epoch(prepared.epoch)
             .ok_or(JortsError::NotStaged)?;
-        let md = jorts_msg_digest(&self.key.pk, msg);
-        let latched = self.latch_and_echo(engine, epoch, &[md; 3])?;
+        let latched = self.verify_prepared_echoes(engine, prepared)?;
         let sig = self.open_and_assemble(
             engine,
             &self.windows[window].sweep,
@@ -626,6 +769,61 @@ impl<W: DurableWal> JortsSigner<W> {
         win.spent[index] = true;
         win.sweep.wipe_lanes(index * chains..(index + 1) * chains);
         Ok(sig)
+    }
+
+    /// Mode 3B with an inline WAL release-authorization callback invoked after durable
+    /// binding persistence and before echo verification / node opening.
+    pub fn sign_mode3b_authorized(
+        &mut self,
+        engine: &mut Rss256Engine,
+        epoch: u64,
+        msg: &[u8],
+        authorize: impl FnMut(usize, &mut W, &BeltLatchRecord) -> Result<(), WalError>,
+    ) -> Result<JortsSig, JortsError> {
+        let prepared = self.prepare_sign_mode3b(engine, epoch, msg)?;
+        self.authorize_wals_with(&prepared, authorize)
+            .map_err(BeltLatchError::Wal)?;
+        self.complete_sign_mode3b(engine, prepared, msg)
+    }
+
+    /// Mode 3B, online: sign `msg` at a staged epoch with no online gate evaluation. The
+    /// staged shares of the epoch are erased once its nodes have been opened.
+    pub fn sign_mode3b(
+        &mut self,
+        engine: &mut Rss256Engine,
+        epoch: u64,
+        msg: &[u8],
+    ) -> Result<JortsSig, JortsError> {
+        self.sign_mode3b_authorized(engine, epoch, msg, |_, _, _| Ok(()))
+    }
+}
+
+#[cfg(feature = "std")]
+impl JortsSigner<crate::belt_latch::FsBeltWal> {
+    /// Install per-party [`crate::ceremony_journal::CeremonyReleasePermit`]s onto the three
+    /// filesystem belt WALs for `prepared` prior to [`Self::complete_sign_mode3a`] or
+    /// [`Self::complete_sign_mode3b`].
+    pub fn install_ceremony_permits(
+        &mut self,
+        prepared: &PreparedJortsSign,
+        journals: [&crate::ceremony_journal::FsCeremonyJournal; 3],
+        permits: [crate::ceremony_journal::CeremonyReleasePermit; 3],
+    ) -> std::io::Result<()> {
+        for ((latch, rec), (journal, permit)) in self
+            .latches
+            .iter_mut()
+            .zip(prepared.records.iter())
+            .zip(journals.into_iter().zip(permits))
+        {
+            if latch.in_flight() != Some(rec) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "prepared Jorts record does not match in-flight belt latch",
+                ));
+            }
+            latch.wal_mut().authorize_release(journal, permit)?;
+        }
+        Ok(())
     }
 }
 
@@ -907,5 +1105,132 @@ mod tests {
         );
         // Only the latch echo was broadcast; no chain share left any party.
         assert_eq!(engine.stats().open_bytes - opened_before, ECHO_WIRE_BYTES);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn fs_belt_wal_fresh_prepare_permit_install_and_crash_retry_flow() {
+        use crate::belt_latch::FsBeltWal;
+        use crate::ceremony_journal::{CeremonyReservation, FsCeremonyJournal};
+
+        let dir = std::env::temp_dir().join(std::format!(
+            "qsag-jorts-fs-wal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let params = JortsParams::with_height(2);
+        let (mut engine, _sk) = test_engine(0xB8);
+        let key = jorts_keygen_mpc(&mut engine, &params).unwrap();
+        let pk = key.pk;
+        let key_id = pk.pk_root;
+
+        let wals: [FsBeltWal; 3] = core::array::from_fn(|p| {
+            FsBeltWal::provision_genesis(dir.join(std::format!("belt-{p}")), [0x20 + p as u8; 32])
+                .unwrap()
+        });
+        let mut journals: [FsCeremonyJournal; 3] = core::array::from_fn(|p| {
+            FsCeremonyJournal::create_new(
+                dir.join(std::format!("journal-{p}")),
+                key_id,
+                [0x40 + p as u8; 32],
+            )
+            .unwrap()
+        });
+
+        let mut signer = JortsSigner::new(params, key.clone(), wals, engine.keys()).unwrap();
+
+        // 1. Fresh Mode 3A signing via prepare -> install_ceremony_permits -> complete.
+        let prepared0 = signer.prepare_sign_mode3a(&mut engine, 0, b"tx-epoch-0").unwrap();
+        let permits0: [_; 3] = core::array::from_fn(|p| {
+            journals[p]
+                .persist_epoch_before_release(
+                    prepared0.epoch(),
+                    CeremonyReservation {
+                        ceremony_id: [0x01; 32],
+                        key_id,
+                        epoch_or_codeword: prepared0.records()[p].binding(),
+                        seed_burn_cursor: 1,
+                        hedge_generation: 1,
+                    },
+                )
+                .unwrap()
+        });
+        signer
+            .install_ceremony_permits(&prepared0, [&journals[0], &journals[1], &journals[2]], permits0)
+            .unwrap();
+        let sig0 = signer
+            .complete_sign_mode3a(&mut engine, prepared0, b"tx-epoch-0")
+            .unwrap();
+        assert!(jorts_verify(&params, &pk, b"tx-epoch-0", &sig0));
+
+        // 2. Crash after prepare + journal reservation on epoch 1 BEFORE completing opening:
+        //    recovery clears in-memory WAL release permits, and commit_epoch_retry_attempt
+        //    mints a fresh attempt permit for the identical persisted binding!
+        let prepared1 = signer.prepare_sign_mode3a(&mut engine, 1, b"tx-epoch-1").unwrap();
+        let _lost_permits: [_; 3] = core::array::from_fn(|p| {
+            journals[p]
+                .persist_epoch_before_release(
+                    prepared1.epoch(),
+                    CeremonyReservation {
+                        ceremony_id: [0x02; 32],
+                        key_id,
+                        epoch_or_codeword: prepared1.records()[p].binding(),
+                        seed_burn_cursor: 2,
+                        hedge_generation: 2,
+                    },
+                )
+                .unwrap()
+        });
+        let wal_ckpts: [_; 3] = core::array::from_fn(|p| signer.latches()[p].wal().checkpoint());
+        let journal_ckpts: [_; 3] = core::array::from_fn(|p| journals[p].checkpoint());
+        drop((prepared1, signer, journals));
+
+        let reopened_wals: [FsBeltWal; 3] = core::array::from_fn(|p| {
+            FsBeltWal::open_existing_at_least(
+                dir.join(std::format!("belt-{p}")),
+                [0x20 + p as u8; 32],
+                wal_ckpts[p],
+            )
+            .unwrap()
+        });
+        let mut reopened_journals: [FsCeremonyJournal; 3] = core::array::from_fn(|p| {
+            FsCeremonyJournal::open_existing_at_least(
+                dir.join(std::format!("journal-{p}")),
+                key_id,
+                [0x40 + p as u8; 32],
+                journal_ckpts[p],
+            )
+            .unwrap()
+        });
+        let mut recovered_signer =
+            JortsSigner::new(params, key, reopened_wals, engine.keys()).unwrap();
+
+        let sig1 = recovered_signer
+            .sign_mode3a_authorized(&mut engine, 1, b"tx-epoch-1", |p, wal, rec| {
+                let permit = reopened_journals[p]
+                    .commit_epoch_retry_attempt(
+                        rec.epoch,
+                        CeremonyReservation {
+                            ceremony_id: [0x03; 32],
+                            key_id,
+                            epoch_or_codeword: rec.binding(),
+                            seed_burn_cursor: 3,
+                            hedge_generation: 3,
+                        },
+                    )
+                    .map_err(|_| WalError::Corrupt)?;
+                wal.authorize_release(&reopened_journals[p], permit)
+                    .map_err(|_| WalError::Io)
+            })
+            .unwrap();
+        assert!(jorts_verify(&params, &pk, b"tx-epoch-1", &sig1));
+
+        drop((recovered_signer, reopened_journals));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

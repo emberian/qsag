@@ -4590,15 +4590,16 @@ theorem rss256_recorded_step_preserves_checked (st : Rss256EngineState)
     | permuteInline w => exact h
     | permuteBank w => exact h
     | openPlanes =>
-      cases hEmp : st.pending.isEmpty <;> simp only [Bool.false_eq_true, ↓reduceIte] <;> exact h
+      dsimp only
+      cases hEmp : st.pending.isEmpty
+      · rw [ite_neg (by decide)]; exact h
+      · rw [ite_pos rfl]; exact h
     | check a b =>
       dsimp only
       cases ha : st.pending.all (fun w => w.check a b)
-      · rw [ha]
-        simp only [Bool.false_eq_true, ↓reduceIte]
+      · rw [ite_neg (by decide)]
         intro e he; cases he
-      · rw [ha]
-        simp only [↓reduceIte]
+      · rw [ite_pos rfl]
         intro e he
         rcases List.mem_append.mp he with ho | hn
         · exact h e ho

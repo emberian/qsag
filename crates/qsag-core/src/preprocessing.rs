@@ -46,10 +46,11 @@ pub use crate::field::tower::{
     bs_gf256_xor_assign, eval_poly_gf256, lagrange_weights_zero_gf256, wipe_tower128,
 };
 use crate::sponge::keccak::{
-    Cshake256Xof, Shake256Xof, cshake256_32, encode_multi_frame, keccak_f1600,
+    Cshake256Xof, Shake256Xof, cshake256_32, cshake256_32_multi_frame, keccak_f1600,
 };
 use crate::wipe::{
-    ct_eq_bytes32, wipe_bytes, wipe_bytes32, wipe_u16s, wipe_u64s, wipe_u128s,
+    SecretBuffer, ct_eq_bytes32, secret_vec_extend_from_slice, wipe_bytes, wipe_bytes32, wipe_u16s,
+    wipe_u64s, wipe_u128s,
 };
 
 // ============================================================================
@@ -58,8 +59,76 @@ use crate::wipe::{
 
 /// Sender's two 384-bit correlation pads for one extended OT.
 pub type OtPadPair = ([u8; 48], [u8; 48]);
-/// Pads for a complete correlated-OT batch, on both sides.
-pub type OtBatchPads = (Vec<OtPadPair>, Vec<[u8; 48]>);
+
+/// Zeroizing sender OT pad batch (`!Clone`, volatile-wiped on normal and early-return `Drop`).
+pub struct OtSendPads(pub(crate) Vec<OtPadPair>);
+
+impl fmt::Debug for OtSendPads {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OtSendPads").field("len", &self.0.len()).finish_non_exhaustive()
+    }
+}
+
+impl core::ops::Deref for OtSendPads {
+    type Target = [OtPadPair];
+    #[inline]
+    fn deref(&self) -> &[OtPadPair] {
+        &self.0
+    }
+}
+
+impl core::ops::DerefMut for OtSendPads {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut [OtPadPair] {
+        &mut self.0
+    }
+}
+
+impl Drop for OtSendPads {
+    fn drop(&mut self) {
+        for (p0, p1) in &mut self.0 {
+            wipe_bytes(p0);
+            wipe_bytes(p1);
+        }
+        black_box(&mut self.0);
+    }
+}
+
+/// Zeroizing receiver OT pad batch (`!Clone`, volatile-wiped on normal and early-return `Drop`).
+pub struct OtRecvPads(pub(crate) Vec<[u8; 48]>);
+
+impl fmt::Debug for OtRecvPads {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OtRecvPads").field("len", &self.0.len()).finish_non_exhaustive()
+    }
+}
+
+impl core::ops::Deref for OtRecvPads {
+    type Target = [[u8; 48]];
+    #[inline]
+    fn deref(&self) -> &[[u8; 48]] {
+        &self.0
+    }
+}
+
+impl core::ops::DerefMut for OtRecvPads {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut [[u8; 48]] {
+        &mut self.0
+    }
+}
+
+impl Drop for OtRecvPads {
+    fn drop(&mut self) {
+        for pad in &mut self.0 {
+            wipe_bytes(pad);
+        }
+        black_box(&mut self.0);
+    }
+}
+
+/// Pads for a complete correlated-OT batch, on both sides (`Drop`-wiped).
+pub type OtBatchPads = (OtSendPads, OtRecvPads);
 /// Party-major vectors of values of a given field/type.
 pub type PartyValues<T> = Vec<Vec<T>>;
 /// Two parallel 128-bit authentication lanes per party.
@@ -258,8 +327,7 @@ impl fmt::Debug for PartyPrivateRng {
 impl Drop for PartyPrivateRng {
     fn drop(&mut self) {
         wipe_bytes32(&mut self.seed);
-        self.buf.fill(0);
-        core::hint::black_box(&mut self.buf);
+        wipe_bytes(&mut self.buf);
     }
 }
 
@@ -277,10 +345,12 @@ impl PartyPrivateRng {
     }
 
     pub fn from_seed(party_seed: [u8; 32], domain_label: &[u8]) -> Self {
-        let derived = cshake256_32(
+        let mut seed_copy = party_seed;
+        let derived = cshake256_32_multi_frame(
             b"QSAG.PARTY.RNG.INIT/v1",
-            &encode_multi_frame(&[&party_seed, domain_label]),
+            &[&seed_copy, domain_label],
         );
+        wipe_bytes32(&mut seed_copy);
         Self {
             seed: derived,
             counter: 0,
@@ -306,6 +376,7 @@ impl PartyPrivateRng {
     }
 
     fn refill(&mut self) {
+        assert!(self.counter <= u64::MAX - 4, "PartyPrivateRng counter exhausted");
         // Four consecutive counter blocks preserve the scalar byte stream while
         // sharing one SIMD permutation. Padding and domain separation are identical.
         let mut states = [[0u64; 25]; 4];
@@ -416,14 +487,19 @@ pub const RLWE_Q: u16 = 12289;
 pub const RLWE_HALF_Q: u16 = 6144;
 
 #[inline]
+const fn rlwe_reduce_once(x: u32) -> u16 {
+    let d = x.wrapping_sub(RLWE_Q as u32);
+    (d.wrapping_add((RLWE_Q as u32) & 0u32.wrapping_sub(d >> 31))) as u16
+}
+
+#[inline]
 const fn rlwe_add(a: u16, b: u16) -> u16 {
-    let s = a + b;
-    if s >= RLWE_Q { s - RLWE_Q } else { s }
+    rlwe_reduce_once((a as u32) + (b as u32))
 }
 
 #[inline]
 const fn rlwe_sub(a: u16, b: u16) -> u16 {
-    if a >= b { a - b } else { a + RLWE_Q - b }
+    rlwe_reduce_once((a as u32) + (RLWE_Q as u32) - (b as u32))
 }
 
 #[inline]
@@ -709,12 +785,15 @@ impl RlwePoly {
         let mixed_sid = if *crs_coin == [0u8; 32] {
             *session_id
         } else {
-            cshake256_32(
-                b"QSAG.OT.RLWE.CRS.COIN/v1",
-                &encode_multi_frame(&[session_id, crs_coin]),
-            )
+            cshake256_32_multi_frame(b"QSAG.OT.RLWE.CRS.COIN/v1", &[session_id, crs_coin])
         };
         Self::from_crs_xof(&mixed_sid, sender_id, receiver_id, ot_idx, role)
+    }
+
+    /// Check whether every coefficient lies in canonical `[0, RLWE_Q)`.
+    #[inline]
+    pub fn is_canonical(&self) -> bool {
+        self.0.iter().all(|&c| c < RLWE_Q)
     }
 
     /// Sample short ternary noise polynomial in $\{-1, 0, +1\}^{1024}$ ($\eta = 1$) in strict
@@ -1253,6 +1332,9 @@ impl RlweReceiverZkPok {
         t_crs: &RlwePoly,
         pk0: &RlwePoly,
     ) -> bool {
+        if !t_crs.is_canonical() || !pk0.is_canonical() {
+            return false;
+        }
         let y0 = *pk0;
         let y1 = pk0.add(t_crs);
         let mut commitments = Vec::with_capacity(RLWE_ZKPOK_REPS);

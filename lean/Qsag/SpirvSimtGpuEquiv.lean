@@ -947,14 +947,22 @@ private theorem moduleToRawInsts_wf {m : SpirvModule} (hm : WellFormedSpirvModul
   · cases em <;> rfl
   · rcases d with ⟨_, dec⟩; cases dec <;> rfl
   · specialize hTys t ht
-    cases t <;> simp [SpirvTypeDecl.wf, RawSpirvInst.wf, encodeTypeRaw, List.length_cons,
-      Bool.and_eq_true, decide_eq_true_eq] at hTys ⊢ <;> omega
+    cases t with
+    | typeStruct res fields =>
+      simp only [SpirvTypeDecl.wf, decide_eq_true_eq] at hTys
+      simp only [encodeTypeRaw, RawSpirvInst.wf, List.length_cons, Bool.and_eq_true, decide_eq_true_eq]
+      omega
+    | _ => rfl
   · cases g <;> rfl
   · rfl
   · rfl
   · specialize hBody i hi
-    cases i <;> simp [SpirvInst.wf, RawSpirvInst.wf, encodeInstRaw, List.length_cons,
-      Bool.and_eq_true, decide_eq_true_eq] at hBody ⊢ <;> omega
+    cases i with
+    | opAccessChain ty res base indices =>
+      simp only [SpirvInst.wf, decide_eq_true_eq] at hBody
+      simp only [encodeInstRaw, RawSpirvInst.wf, List.length_cons, Bool.and_eq_true, decide_eq_true_eq]
+      omega
+    | _ => rfl
   · rfl
   · rfl
 
@@ -1201,10 +1209,10 @@ theorem writeSsboDword_comm (ssbo : Nat → Nat → UInt32) {b₁ a₁ b₂ a₂
   by_cases h2 : b = b₂ ∧ k = a₂
   · by_cases h1 : b = b₁ ∧ k = a₁
     · exact False.elim (hne (Prod.ext (h1.1.symm.trans h2.1) (h1.2.symm.trans h2.2)))
-    · simp only [h1, h2, ↓reduceIte]
+    · rw [if_pos h2, if_neg h1, if_pos h2]
   · by_cases h1 : b = b₁ ∧ k = a₁
-    · simp only [h1, h2, ↓reduceIte]
-    · simp only [h1, h2, ↓reduceIte]
+    · rw [if_neg h2, if_pos h1, if_pos h1]
+    · rw [if_neg h2, if_neg h1, if_neg h2]
 
 def readU64Dwords (f : Nat → UInt32) (elemIdx : Nat) : UInt64 :=
   u64OfLoHi32 (f (2 * elemIdx)) (f (2 * elemIdx + 1))
@@ -1806,13 +1814,13 @@ theorem stepWorkgroupWave_comm {env : SpirvModuleEnv} {cfg : WorkgroupConfig}
       simp only [Bind.bind, Except.bind, hw₁, hw₂, ↓reduceIte]
       cases stepWave32One env prog (st.waves w₁) st.mem with
       | error _ => rfl
-      | ok _ => simp [hw₂]
+      | ok _ => simp
   · by_cases hw₂ : w₂ < cfg.numWaves
     · unfold stepWorkgroupWave
       simp only [Bind.bind, Except.bind, hw₁, hw₂, ↓reduceIte]
       cases stepWave32One env prog (st.waves w₂) st.mem with
       | error _ => rfl
-      | ok _ => simp [hw₁]
+      | ok _ => simp
     · unfold stepWorkgroupWave
       simp [Bind.bind, Except.bind, hw₁, hw₂]
 
@@ -2058,6 +2066,12 @@ def twoWavePhase1CrossWaveRead : List SpirvInst :=
 
 def twoWaveCfg : WorkgroupConfig := ⟨0, 2, by decide⟩
 
+/-- Project a single `StorageBuffer` dword out of an execution result (`Option UInt32` has `DecidableEq`). -/
+def peekSsboDword (binding addr : Nat) (res : Except SimtExecError WorkgroupExecState) : Option UInt32 :=
+  match res with
+  | .ok s => some (s.mem.ssbo binding addr)
+  | .error _ => none
+
 /-- **`#tooth` Missing `OpControlBarrier` Causes Cross-Wave Shared-LDS Data Race
     (`tooth_missing_barrier_causes_cross_wave_lds_race`)**:
     In a 2-wave (`64`-thread) workgroup where Wave `0` and Wave `1` exchange values via `lds[tid ^ 32]`:
@@ -2078,19 +2092,25 @@ theorem tooth_missing_barrier_causes_cross_wave_lds_race :
                             List.replicate 8 0 ++ List.replicate 8 1
     let initSt := initWorkgroupExecState twoWaveReductionEnv twoWaveCfg initMem
     -- 1. Without OpControlBarrier, two valid 12-step-per-wave schedules disagree on outBuf[0]:
-    (runInterleavedSchedule twoWaveReductionEnv twoWaveCfg buggyNoBarrierProg schedWave0First initSt).map
-      (fun s => s.mem.ssbo 1 0) = .ok 10 ∧
-    (runInterleavedSchedule twoWaveReductionEnv twoWaveCfg buggyNoBarrierProg schedInterleaved initSt).map
-      (fun s => s.mem.ssbo 1 0) = .ok 52 ∧
-    (runInterleavedSchedule twoWaveReductionEnv twoWaveCfg buggyNoBarrierProg schedWave0First initSt).map
-      (fun s => s.mem.ssbo 1 0) ≠
-    (runInterleavedSchedule twoWaveReductionEnv twoWaveCfg buggyNoBarrierProg schedInterleaved initSt).map
-      (fun s => s.mem.ssbo 1 0) ∧
+    peekSsboDword 1 0
+      (runInterleavedSchedule twoWaveReductionEnv twoWaveCfg buggyNoBarrierProg schedWave0First initSt) = some 10 ∧
+    peekSsboDword 1 0
+      (runInterleavedSchedule twoWaveReductionEnv twoWaveCfg buggyNoBarrierProg schedInterleaved initSt) = some 52 ∧
+    peekSsboDword 1 0
+      (runInterleavedSchedule twoWaveReductionEnv twoWaveCfg buggyNoBarrierProg schedWave0First initSt) ≠
+    peekSsboDword 1 0
+      (runInterleavedSchedule twoWaveReductionEnv twoWaveCfg buggyNoBarrierProg schedInterleaved initSt) ∧
     -- 2. With OpControlBarrier separating the two epochs, Wave-0-first schedule produces 52 on both waves:
-    (runMultiWaveEpochs twoWaveReductionEnv twoWaveCfg
-      [twoWavePhase0WriteLds, twoWavePhase1CrossWaveRead]
-      [List.replicate 5 0 ++ List.replicate 5 1, List.replicate 8 0 ++ List.replicate 8 1]
-      initSt).map (fun s => (s.mem.ssbo 1 0, s.mem.ssbo 1 32)) = .ok (52, 52) := by
+    peekSsboDword 1 0
+      (runMultiWaveEpochs twoWaveReductionEnv twoWaveCfg
+        [twoWavePhase0WriteLds, twoWavePhase1CrossWaveRead]
+        [List.replicate 5 0 ++ List.replicate 5 1, List.replicate 8 0 ++ List.replicate 8 1]
+        initSt) = some 52 ∧
+    peekSsboDword 1 32
+      (runMultiWaveEpochs twoWaveReductionEnv twoWaveCfg
+        [twoWavePhase0WriteLds, twoWavePhase1CrossWaveRead]
+        [List.replicate 5 0 ++ List.replicate 5 1, List.replicate 8 0 ++ List.replicate 8 1]
+        initSt) = some 52 := by
   dsimp only
   decide
 
@@ -2106,18 +2126,20 @@ theorem tooth_single_wave_lds_wipe_corrupts_multiwave_reduction :
         pushConsts := fun _ => 0 }
     let initSt := initWorkgroupExecState twoWaveReductionEnv twoWaveCfg initMem
     let wipedWave1Prog := twoWavePhase0WriteLds ++ twoWavePhase1CrossWaveRead
-    (runMultiWaveEpochs twoWaveReductionEnv twoWaveCfg
-      [twoWavePhase0WriteLds, twoWavePhase1CrossWaveRead]
-      [canonicalEpochSchedule 2 5, canonicalEpochSchedule 2 8] initSt).map
-      (fun s => s.mem.ssbo 1 32) = .ok 52 ∧
-    (runInterleavedSchedule twoWaveReductionEnv twoWaveCfg wipedWave1Prog
-      (List.replicate 12 1) initSt).map (fun s => s.mem.ssbo 1 32) = .ok 42 ∧
-    (runMultiWaveEpochs twoWaveReductionEnv twoWaveCfg
-      [twoWavePhase0WriteLds, twoWavePhase1CrossWaveRead]
-      [canonicalEpochSchedule 2 5, canonicalEpochSchedule 2 8] initSt).map
-      (fun s => s.mem.ssbo 1 32) ≠
-    (runInterleavedSchedule twoWaveReductionEnv twoWaveCfg wipedWave1Prog
-      (List.replicate 12 1) initSt).map (fun s => s.mem.ssbo 1 32) := by
+    peekSsboDword 1 32
+      (runMultiWaveEpochs twoWaveReductionEnv twoWaveCfg
+        [twoWavePhase0WriteLds, twoWavePhase1CrossWaveRead]
+        [canonicalEpochSchedule 2 5, canonicalEpochSchedule 2 8] initSt) = some 52 ∧
+    peekSsboDword 1 32
+      (runInterleavedSchedule twoWaveReductionEnv twoWaveCfg wipedWave1Prog
+        (List.replicate 12 1) initSt) = some 42 ∧
+    peekSsboDword 1 32
+      (runMultiWaveEpochs twoWaveReductionEnv twoWaveCfg
+        [twoWavePhase0WriteLds, twoWavePhase1CrossWaveRead]
+        [canonicalEpochSchedule 2 5, canonicalEpochSchedule 2 8] initSt) ≠
+    peekSsboDword 1 32
+      (runInterleavedSchedule twoWaveReductionEnv twoWaveCfg wipedWave1Prog
+        (List.replicate 12 1) initSt) := by
   dsimp only
   decide
 
@@ -2775,6 +2797,7 @@ private theorem evalLanePureInst_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolic
       (rw [h1, h2] at hSh; try cases hSh)
     · cases hF : fieldIdx.toNat with
       | zero =>
+        dsimp only
         refine ⟨rfl, trivial, fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
         rw [hPub] at hCt; simp only [Bool.or_eq_true, beq_iff_eq] at hCt
         rcases hCt with hBad | hCompPub
@@ -2783,6 +2806,7 @@ private theorem evalLanePureInst_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolic
       | succ n =>
         cases n with
         | zero =>
+          dsimp only
           refine ⟨rfl, trivial, fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
           rw [hPub] at hCt; simp only [Bool.or_eq_true, beq_iff_eq] at hCt
           rcases hCt with hBad | hCompPub
@@ -2791,6 +2815,7 @@ private theorem evalLanePureInst_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolic
         | succ _ => rfl
     · cases hF : fieldIdx.toNat with
       | zero =>
+        dsimp only
         refine ⟨rfl, trivial, fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
         rw [hPub] at hCt; simp only [Bool.or_eq_true, beq_iff_eq] at hCt
         rcases hCt with hBad | hCompPub
@@ -2799,6 +2824,7 @@ private theorem evalLanePureInst_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolic
       | succ n =>
         cases n with
         | zero =>
+          dsimp only
           refine ⟨rfl, trivial, fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
           rw [hPub] at hCt; simp only [Bool.or_eq_true, beq_iff_eq] at hCt
           rcases hCt with hBad | hCompPub
@@ -2972,7 +2998,7 @@ private theorem applyLaneStore_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolicy}
           have hValPub : pol.regSec valId.toNat = .pub := by
             cases hSec : pol.regSec valId.toNat with
             | pub => rfl
-            | sec => rw [hSec, hInfo, hb'] at hFlowChk; simp at hFlowChk
+            | sec => rw [hSec, hInfo] at hFlowChk; dsimp only at hFlowChk; rw [hb'] at hFlowChk; cases hFlowChk
           have hvEq := hRegs.2.1 valId.toNat hValPub
           rw [hv1, hv2] at hvEq; cases hvEq
           funext k
@@ -2989,7 +3015,7 @@ private theorem applyLaneStore_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolicy}
           have hValPub : pol.regSec valId.toNat = .pub := by
             cases hSec : pol.regSec valId.toNat with
             | pub => rfl
-            | sec => rw [hSec, hInfo, hb'] at hFlowChk; simp at hFlowChk
+            | sec => rw [hSec, hInfo] at hFlowChk; dsimp only at hFlowChk; rw [hb'] at hFlowChk; cases hFlowChk
           have hvEq := hRegs.2.1 valId.toNat hValPub
           rw [hv1, hv2] at hvEq; cases hvEq
           funext k
@@ -3142,7 +3168,7 @@ private theorem stepWave32One_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolicy}
             dsimp only
             by_cases hSem : (sem == spirvSemWorkgroupAcqRel) = true
             · simp only [hSem, ↓reduceIte]
-              exact ⟨⟨hpc, rfl, hMask, hLanes⟩, hMem⟩
+              exact ⟨⟨rfl, rfl, hMask, hLanes⟩, hMem⟩
             · simp only [hSem, Bool.false_eq_true, ↓reduceIte]
           | _ => rfl
         | _ => cases ms <;> rfl
@@ -3161,10 +3187,10 @@ private theorem stepWave32One_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolicy}
           | ok m₂' =>
             rw [s1, s2] at hSt
             dsimp only
-            exact ⟨⟨by omega, hBar, hMask, hLanes⟩, hSt⟩
+            exact ⟨⟨rfl, rfl, hMask, hLanes⟩, hSt⟩
       | opLabel lbl =>
         dsimp only
-        exact ⟨⟨by omega, hBar, hMask, hLanes⟩, hMem⟩
+        exact ⟨⟨rfl, rfl, hMask, hLanes⟩, hMem⟩
       | opLoad _ _ _ | opAccessChain _ _ _ _ | opCompositeExtract _ _ _ _ | opUConvert _ _ _
       | opIAdd _ _ _ _ | opISub _ _ _ _ | opIMul _ _ _ _ | opUMulExtended _ _ _ _
       | opSelect _ _ _ _ _ | opIEqual _ _ _ _ | opUGreaterThanEqual _ _ _ _
@@ -3187,7 +3213,7 @@ private theorem stepWave32One_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolicy}
           | ok r₂' =>
             rw [p1, p2] at hPure
             dsimp only
-            exact ⟨⟨by omega, hBar, hMask, hPure⟩, hMem⟩
+            exact ⟨⟨rfl, rfl, hMask, hPure⟩, hMem⟩
 
 /-- **`SIMT-CT` Hardware Leakage-Trace Noninterference Theorem (`simt_ct_noninterference`)**:
     For every SPIR-V compute epoch `prog` passing `checkProgSimtCt env pol prog = true`,
@@ -3290,9 +3316,10 @@ theorem simt_ct_zero_exec_divergence (env : SpirvModuleEnv) (prog : List SpirvIn
                 | _ => cases ms <;> cases hStep
               | opStore ptrId valId =>
                 dsimp only at hStep
-                cases execWaveStoreLanes wSt.execMask wSt.laneRegs ptrId valId wave32Lanes mem with
-                | error _ => cases hStep
+                cases hE : execWaveStoreLanes wSt.execMask wSt.laneRegs ptrId valId wave32Lanes mem with
+                | error _ => rw [hE] at hStep; cases hStep
                 | ok _ =>
+                  rw [hE] at hStep
                   dsimp only at hStep
                   injection hStep with hPair; injection hPair with hWEq _; rw [← hWEq, hMask]
               | opLabel _ =>
@@ -3300,9 +3327,10 @@ theorem simt_ct_zero_exec_divergence (env : SpirvModuleEnv) (prog : List SpirvIn
                 injection hStep with hPair; injection hPair with hWEq _; rw [← hWEq, hMask]
               | _ =>
                 dsimp only at hStep
-                cases evalWavePureLanes env mem wSt.execMask wSt.laneRegs _ wave32Lanes with
-                | error _ => cases hStep
+                cases hP : evalWavePureLanes env mem wSt.execMask wSt.laneRegs _ wave32Lanes with
+                | error _ => rw [hP] at hStep; cases hStep
                 | ok _ =>
+                  rw [hP] at hStep
                   dsimp only at hStep
                   injection hStep with hPair; injection hPair with hWEq _; rw [← hWEq, hMask]
             exact ih wSt' mem' hMaskPres obs hTail

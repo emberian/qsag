@@ -830,6 +830,10 @@ impl<W: DurableWal> BeltLatch<W> {
         self.wal
     }
 
+    pub fn wal(&self) -> &W {
+        &self.wal
+    }
+
     pub fn wal_mut(&mut self) -> &mut W {
         &mut self.wal
     }
