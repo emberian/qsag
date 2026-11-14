@@ -216,18 +216,19 @@ impl BaggyParams {
         let Some(sub_auth_bytes) = 32usize.checked_mul(self.subtree_height) else {
             return None;
         };
-        let Some(layer_inner) = 4usize
-            .checked_add(wots_bytes)
-            .and_then(|v| v.checked_add(sub_auth_bytes))
-        else {
+        let Some(layer_head) = 4usize.checked_add(wots_bytes) else {
+            return None;
+        };
+        let Some(layer_inner) = layer_head.checked_add(sub_auth_bytes) else {
             return None;
         };
         let Some(layers_bytes) = self.num_layers.checked_mul(layer_inner) else {
             return None;
         };
-        36usize
-            .checked_add(fors_bytes)
-            .and_then(|v| v.checked_add(layers_bytes))
+        let Some(prefix_bytes) = 36usize.checked_add(fors_bytes) else {
+            return None;
+        };
+        prefix_bytes.checked_add(layers_bytes)
     }
 
     pub const fn sig_bytes(&self) -> usize {
@@ -1331,7 +1332,7 @@ fn baggy_randomiser_mpc(
     let opt_rand = st.digest();
     let (frame, off) = keyed_mu_frame(TAG_BAGGY_R, mu);
     let mut st = SharedState256::from_public_frames(&TSW_SUITE_MIDSTATE, &[frame])?;
-    st.xor_shared_digest(off, &opt_rand);
+    st.xor_shared_digest(off, &opt_rand)?;
     engine.mark_sequential_level();
     engine.permute(&mut st, 1)?;
     engine.check()?;

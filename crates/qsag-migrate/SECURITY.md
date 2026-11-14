@@ -191,13 +191,13 @@ is transmitted:
    bias challenges after sending multiplication shares.
 2. **64-lane Boolean `AND` verification (`< 2^-126` soundness):** Up to `262,144`
    bitsliced 64-lane `AND` triples per flush are embedded into
-   `GF(2^128) = GF(2)[x]/(x^128 + x^7 + x^2 + x + 1)` (`64`-gate blocks, `128`
+   `GF(2^128) = GF(2)[x]/(x^128 + x^7 + x^2 + x + 1)` (`32`-gate blocks, `128`
    gates per super-block via constant-time butterfly transpose and
    `VPCLMULQDQ`/`PCLMULQDQ` accumulation under a uniform `GF(2^128)` super-block
-   combiner, packed `256` gates per `Bs256` quad) and checked by **two independent
+   combiner, packed `128` gates per `Bs256` quad) and checked by **two independent
    lockstep** Arity-2 BBCGGI19 inner-product instances plus PRSS-masked non-zero
    base-case sacrifice (`r_b in GF(2^128)^*`). Per-flush false-acceptance
-   probability is `< 2^-128 + (152 / (2^128 - 1))^2 < 2^-127.99 << 2^-126`.
+   probability is `< 2^-128 + (90 / (2^128 - 1))^2 < 2^-127.99 << 2^-126`.
 3. **Prime-field multiplication verification (`< 2^-128` soundness):**
    * `Secp` and `Ed` (`|F_p| > 2^252`): Arity-2 logarithmic BBCGGI19 inner-product
      reduction plus PRSS-masked base-case sacrifice directly over `F_p`, with

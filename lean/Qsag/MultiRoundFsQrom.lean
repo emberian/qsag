@@ -2859,11 +2859,15 @@ theorem merkle_collision_or_unique_opening {D : Type} [DecidableEq D]
       else
         if hpar0 : idx % 2 = 0 then
           rw [if_pos hpar0, if_pos hpar0] at hpar
-          exact .inr ⟨lvl, idx / 2, leaf, sib, leaf', sib',
+          refine .inr ?_
+          unfold MerkleTweakCollision
+          exact ⟨lvl, idx / 2, leaf, sib, leaf', sib',
             if hl1 : leaf = leaf' then .inr (fun hs => hEq ⟨hl1, hs⟩) else .inl hl1, hpar⟩
         else
           rw [if_neg hpar0, if_neg hpar0] at hpar
-          exact .inr ⟨lvl, idx / 2, sib, leaf, sib', leaf',
+          refine .inr ?_
+          unfold MerkleTweakCollision
+          exact ⟨lvl, idx / 2, sib, leaf, sib', leaf',
             if hl1 : leaf = leaf' then .inl (fun hs => hEq ⟨hl1, hs⟩) else .inr hl1, hpar⟩
 
 /-- `#tooth`: a compression function that forgets its right child is not binding, and the
@@ -2871,8 +2875,10 @@ theorem merkle_collision_or_unique_opening {D : Type} [DecidableEq D]
 theorem tooth_merkle_right_blind_compression_collides :
     merkleRootFromPath (fun _ _ (a : Nat) _ => a) 0 0 7 [1] =
       merkleRootFromPath (fun _ _ (a : Nat) _ => a) 0 0 7 [2] ∧
-    MerkleTweakCollision (fun _ _ (a : Nat) _ => a) :=
-  ⟨rfl, 0, 0, 7, 1, 7, 2, .inr (by decide), rfl⟩
+    MerkleTweakCollision (fun _ _ (a : Nat) _ => a) := by
+  refine ⟨rfl, ?_⟩
+  unfold MerkleTweakCollision
+  exact ⟨0, 0, 7, 1, 7, 2, .inr (by decide), rfl⟩
 
 /-- Commitment-extraction CHARGE per committed Merkle root over `secBits`-bit digests:
     the single-target Grover term `8 (Q + 1)^2 / 2^secBits` plus the generic quantum collision

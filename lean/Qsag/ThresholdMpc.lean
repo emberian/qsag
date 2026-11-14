@@ -23,6 +23,13 @@ DKG, resharing, and Simplex quorum safety live in `Qsag.MaliciousSecurity`):
    for 2-of-3 RSS (`SlhThresholdRun.ofRss`), and quorum-recombination `SlhMpcOracles` interface for
    `(t, n)` Shamir FIPS 205 (`SlhThresholdRun.ofShamir`, while `(t, n)` Shamir share-level `Poseidon2`
    signing is realized end-to-end by `mkShamirPoseidon2MpcOracles` in Section 3).
+6. One actively corrupt party in a hedged signing run
+   (`active_malicious_threshold_sig_abort_or_exact_hedged_dist`): every run aborts, releases the
+   exact single-signer signature on hedge `honestCoin ⊕ corruptCoin`, or is a counted tag forgery;
+   the released law is the single-signer hedged law restricted to the corrupt party's release
+   set, and the abort pattern is independent of the key. The tag scheme is a parameter; the
+   independence of the corrupt coin share and of the share modification from later values is
+   built into the adversary type, not derived from a commitment.
 -/
 
 public import Qsag.Goldilocks

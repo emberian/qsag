@@ -4257,7 +4257,6 @@ impl<'a> SlhMpcOracles for SpdzSlhMpcCluster<'a> {
     ) -> Result<(Vec<SlhBlock>, Vec<Vec<SlhBlock>>, CutBoundaryMacToken), Fips205Error> {
         self.bind_key_params(params, pk_seed)?;
         let m = self.quorum_pts.len();
-        let n = params.n;
         if fors_indices.len() != params.k {
             return Err(Fips205Error::InvalidParameterSet);
         }

@@ -26,6 +26,8 @@ public import Qsag.Goldilocks
 public import Qsag.Poseidon2
 public import Qsag.UcGames
 public import Qsag.AdvancedMpcAndCreds
+public import Qsag.Tactic.AssuranceKit
+import all Qsag.AdvancedMpcAndCreds
 
 public section
 namespace Qsag
@@ -2860,7 +2862,7 @@ def rssZeroVec4 : PolyVec4 := fun _ => PolyTree.zero 8
 
 def rssSumVec4List : List PolyVec4 → PolyVec4
   | [] => rssZeroVec4
-  | v :: vs => addVec4 v (rssSumVec4List vs)
+  | v :: vsl => addVec4 v (rssSumVec4List vsl)
 
 private theorem matVecMul4_rssZeroVec4 (A : PolyMat4) :
     matVecMul4 A rssZeroVec4 = rssZeroVec4 := by
@@ -2891,11 +2893,11 @@ private theorem subVec4_eq_add_neg (a b : PolyVec4) :
   funext i; exact polyTree_sub_eq_add_neg (a i) (b i)
 
 private theorem matVecMul4_rssSumVec4List (A : PolyMat4) :
-    ∀ (vs : List PolyVec4),
-      matVecMul4 A (rssSumVec4List vs) = rssSumVec4List (vs.map (matVecMul4 A))
+    ∀ (vsl : List PolyVec4),
+      matVecMul4 A (rssSumVec4List vsl) = rssSumVec4List (vsl.map (matVecMul4 A))
   | [] => matVecMul4_rssZeroVec4 A
-  | v :: vs => by
-    simp only [rssSumVec4List, List.map_cons, matVecMul4_add, matVecMul4_rssSumVec4List A vs]
+  | v :: vsl => by
+    simp only [rssSumVec4List, List.map_cons, matVecMul4_add, matVecMul4_rssSumVec4List A vsl]
 
 private theorem rssSumVec4List_add_zip :
     ∀ (xs ys : List PolyVec4),
@@ -3254,8 +3256,12 @@ theorem rssProductsValid_eq_true_iff
   simp only [rssProductsValid, Bool.and_eq_true, polyVec4EqBool_eq_true_iff]
   constructor
   · rintro ⟨⟨⟨hw, hs1⟩, hs2⟩, ht⟩
-    cases inp.products
-    cases rssComputeProducts chalHash sampleInBall st inp.mu inp.ySubsets
+    revert hw hs1 hs2 ht
+    generalize rssComputeProducts chalHash sampleInBall st inp.mu inp.ySubsets = expected
+    generalize inp.products = supplied
+    cases supplied
+    cases expected
+    intro hw hs1 hs2 ht
     simp_all
   · intro h
     rw [h]
@@ -5023,7 +5029,7 @@ def toprfValueFor (H : List UInt8 → List UInt8)
   if evalKey = expectedKey then
     let target := H (toprfInputBindPreimage queriedInput)
     let rec findIdx : List (List UInt8) → List (List UInt8) → Option (List UInt8)
-      | d :: ds, v :: vs => if d = target then some v else findIdx ds vs
+      | d :: ds, v :: vsl => if d = target then some v else findIdx ds vsl
       | _, _ => none
     findIdx (enrolledInputs.map (fun x => H (toprfInputBindPreimage x))) values
   else
@@ -5186,7 +5192,7 @@ theorem toprf_input_root_blocks_relabeling_and_equivocation
       | cons x xs ih =>
         cases values with
         | nil => left; rfl
-        | cons v vs =>
+        | cons v vsl =>
           dsimp only [List.map, toprfValueFor.findIdx]
           if hHit : H (toprfInputBindPreimage x) = H (toprfInputBindPreimage queried) then
             right
@@ -5204,7 +5210,7 @@ theorem toprf_input_root_blocks_relabeling_and_equivocation
             exact hxNeQ hxEqQ
           else
             rw [ite_false_of hHit]
-            have ihRes := ih vs (fun z hz => hEnrLen z (.tail x hz)) (fun hq => hNotMem (.tail x hq))
+            have ihRes := ih vsl (fun z hz => hEnrLen z (.tail x hz)) (fun hq => hNotMem (.tail x hq))
             rcases ihRes with hNone | ⟨z, hzMem, hPreNe, hCol⟩
             · exact Or.inl hNone
             · exact Or.inr ⟨z, .tail x hzMem, hPreNe, hCol⟩
@@ -6722,13 +6728,13 @@ def honestIntRounds3 :
 def extractExtRoundsCoins :
     (rcs : List Poseidon2State12) → List PartyExtRoundView → Option (Vec ExtRoundCoins rcs.length)
   | [], [] => some .nil
-  | _ :: rcs, v :: vs => (extractExtRoundsCoins rcs vs).map (Vec.cons (extractExtRoundCoins v))
+  | _ :: rcs, v :: vsl => (extractExtRoundsCoins rcs vsl).map (Vec.cons (extractExtRoundCoins v))
   | _, _ => none
 
 def extractIntRoundsCoins :
     (rcs : List Goldilocks) → List PartySboxView → Option (Vec SboxCoins rcs.length)
   | [], [] => some .nil
-  | _ :: rcs, v :: vs => (extractIntRoundsCoins rcs vs).map (Vec.cons (extractSboxCoins v))
+  | _ :: rcs, v :: vsl => (extractIntRoundsCoins rcs vsl).map (Vec.cons (extractSboxCoins v))
   | _, _ => none
 
 private theorem extractExtRoundsCoins_honest :
@@ -6775,24 +6781,24 @@ private theorem pairCheckIntRounds_honest :
     exact pairCheckIntRounds_honest rcs (honestIntRound3 rc st (fun i => (cs i).head)).2 (fun i => (cs i).tail) e
 
 private theorem pairCheckExtRounds_extract3 :
-    ∀ (rcs : List Poseidon2State12) (st : VcState12_3) (vs : Fin 3 → List PartyExtRoundView)
+    ∀ (rcs : List Poseidon2State12) (st : VcState12_3) (vsl : Fin 3 → List PartyExtRoundView)
       {o0 o1 o2 : Poseidon2State12 × Poseidon2State12},
-      pairCheckExtRounds 0 rcs (vs 0) (vs 1) (vcPairAtState12 st 0) = some o0 →
-      pairCheckExtRounds 1 rcs (vs 1) (vs 2) (vcPairAtState12 st 1) = some o1 →
-      pairCheckExtRounds 2 rcs (vs 2) (vs 0) (vcPairAtState12 st 2) = some o2 →
+      pairCheckExtRounds 0 rcs (vsl 0) (vsl 1) (vcPairAtState12 st 0) = some o0 →
+      pairCheckExtRounds 1 rcs (vsl 1) (vsl 2) (vcPairAtState12 st 1) = some o1 →
+      pairCheckExtRounds 2 rcs (vsl 2) (vsl 0) (vcPairAtState12 st 2) = some o2 →
       ∃ stOut : VcState12_3,
         o0 = vcPairAtState12 stOut 0 ∧
         o1 = vcPairAtState12 stOut 1 ∧
         o2 = vcPairAtState12 stOut 2 ∧
         vcSumState12_3 stOut = runRounds externalRound rcs (vcSumState12_3 st)
-  | [], st, vs, o0, o1, o2, h0, h1, h2 => by
-    cases hv0 : vs 0 with
+  | [], st, vsl, o0, o1, o2, h0, h1, h2 => by
+    cases hv0 : vsl 0 with
     | cons _ _ => rw [hv0] at h0; cases h0
     | nil =>
-      cases hv1 : vs 1 with
+      cases hv1 : vsl 1 with
       | cons _ _ => rw [hv0, hv1] at h0; cases h0
       | nil =>
-        cases hv2 : vs 2 with
+        cases hv2 : vsl 2 with
         | cons _ _ => rw [hv1, hv2] at h1; cases h1
         | nil =>
           rw [hv0, hv1] at h0; rw [hv1, hv2] at h1; rw [hv2, hv0] at h2
@@ -6800,14 +6806,14 @@ private theorem pairCheckExtRounds_extract3 :
           injection h0 with ho0; injection h1 with ho1; injection h2 with ho2
           rw [runRounds_nil]
           exact ⟨st, ho0.symm, ho1.symm, ho2.symm, rfl⟩
-  | rc :: rcs, st, vs, o0, o1, o2, h0, h1, h2 => by
-    cases hv0 : vs 0 with
+  | rc :: rcs, st, vsl, o0, o1, o2, h0, h1, h2 => by
+    cases hv0 : vsl 0 with
     | nil => rw [hv0] at h0; cases h0
     | cons r0 rs0 =>
-      cases hv1 : vs 1 with
+      cases hv1 : vsl 1 with
       | nil => rw [hv0, hv1] at h0; cases h0
       | cons r1 rs1 =>
-        cases hv2 : vs 2 with
+        cases hv2 : vsl 2 with
         | nil => rw [hv1, hv2] at h1; cases h1
         | cons r2 rs2 =>
           rw [hv0, hv1] at h0; rw [hv1, hv2] at h1; rw [hv2, hv0] at h2
@@ -6836,24 +6842,24 @@ private theorem pairCheckExtRounds_extract3 :
                 exact ⟨stOut, e0, e1, e2, hSum⟩
 
 private theorem pairCheckIntRounds_extract3 :
-    ∀ (rcs : List Goldilocks) (st : VcState12_3) (vs : Fin 3 → List PartySboxView)
+    ∀ (rcs : List Goldilocks) (st : VcState12_3) (vsl : Fin 3 → List PartySboxView)
       {o0 o1 o2 : Poseidon2State12 × Poseidon2State12},
-      pairCheckIntRounds 0 rcs (vs 0) (vs 1) (vcPairAtState12 st 0) = some o0 →
-      pairCheckIntRounds 1 rcs (vs 1) (vs 2) (vcPairAtState12 st 1) = some o1 →
-      pairCheckIntRounds 2 rcs (vs 2) (vs 0) (vcPairAtState12 st 2) = some o2 →
+      pairCheckIntRounds 0 rcs (vsl 0) (vsl 1) (vcPairAtState12 st 0) = some o0 →
+      pairCheckIntRounds 1 rcs (vsl 1) (vsl 2) (vcPairAtState12 st 1) = some o1 →
+      pairCheckIntRounds 2 rcs (vsl 2) (vsl 0) (vcPairAtState12 st 2) = some o2 →
       ∃ stOut : VcState12_3,
         o0 = vcPairAtState12 stOut 0 ∧
         o1 = vcPairAtState12 stOut 1 ∧
         o2 = vcPairAtState12 stOut 2 ∧
         vcSumState12_3 stOut = runRounds internalRound rcs (vcSumState12_3 st)
-  | [], st, vs, o0, o1, o2, h0, h1, h2 => by
-    cases hv0 : vs 0 with
+  | [], st, vsl, o0, o1, o2, h0, h1, h2 => by
+    cases hv0 : vsl 0 with
     | cons _ _ => rw [hv0] at h0; cases h0
     | nil =>
-      cases hv1 : vs 1 with
+      cases hv1 : vsl 1 with
       | cons _ _ => rw [hv0, hv1] at h0; cases h0
       | nil =>
-        cases hv2 : vs 2 with
+        cases hv2 : vsl 2 with
         | cons _ _ => rw [hv1, hv2] at h1; cases h1
         | nil =>
           rw [hv0, hv1] at h0; rw [hv1, hv2] at h1; rw [hv2, hv0] at h2
@@ -6861,14 +6867,14 @@ private theorem pairCheckIntRounds_extract3 :
           injection h0 with ho0; injection h1 with ho1; injection h2 with ho2
           rw [runRounds_nil]
           exact ⟨st, ho0.symm, ho1.symm, ho2.symm, rfl⟩
-  | rc :: rcs, st, vs, o0, o1, o2, h0, h1, h2 => by
-    cases hv0 : vs 0 with
+  | rc :: rcs, st, vsl, o0, o1, o2, h0, h1, h2 => by
+    cases hv0 : vsl 0 with
     | nil => rw [hv0] at h0; cases h0
     | cons r0 rs0 =>
-      cases hv1 : vs 1 with
+      cases hv1 : vsl 1 with
       | nil => rw [hv0, hv1] at h0; cases h0
       | cons r1 rs1 =>
-        cases hv2 : vs 2 with
+        cases hv2 : vsl 2 with
         | nil => rw [hv1, hv2] at h1; cases h1
         | cons r2 rs2 =>
           rw [hv0, hv1] at h0; rw [hv1, hv2] at h1; rw [hv2, hv0] at h2
@@ -11631,7 +11637,6 @@ theorem cosetLde204_size {d : CosetDomain204} {evals : Poly256} {out : List Fq20
   split at h
   · cases h
     simp only [List.length_map, List.length_range, PolyTree.length_toList]
-    rfl
   · cases h
 
 theorem cosetLde204_ntt (d : CosetDomain204) (p : Poly256)
@@ -11807,10 +11812,11 @@ structure DecodedSignature204 where
 def decodeSignature204 (sig : List UInt8) : Option DecodedSignature204 := do
   if sig.length ≠ 2420 then none else do
     let hs ← decodeHintRows204 (sig.drop 2336) 4 0 0
-    pure { challenge := sig.take 32,
-      z := fun i => PolyTree.ofList 8 ((List.range 256).map (fun j =>
-        Fq204.ofInt (131072 - (readBits204 sig (256 + i.val * 4608 + 18 * j) 18 : Int)))),
-      hints := fun i => hs.getD i.val (hintTree204 8 []) }
+    pure
+      { challenge := sig.take 32
+        z := fun i => PolyTree.ofList 8 ((List.range 256).map (fun j =>
+          Fq204.ofInt (131072 - Int.ofNat (readBits204 sig (256 + i.val * 4608 + 18 * j) 18))))
+        hints := fun i => hs.getD i.val (hintTree204 8 []) }
 
 /-- Standalone, pure ML-DSA-44 verifier on wire bytes. Budget exhaustion fails closed.
     `t1` is decoded as ten-bit unsigned coefficients and scaled by `2^13` exactly once. -/
@@ -11861,6 +11867,12 @@ inductive RssDiskOutcome204 where
 def rssNonceMaterial204 (inp : RssMlDsaAttemptInput) : List UInt8 :=
   encodePolyVec4Bytes (rssSumVec4List inp.ySubsets)
 
+private theorem durableBurnReserve_failed_write (store : DurableNonceBurnStore)
+    (party : UInt16) (epoch : UInt64) (sid : List UInt8) (att : UInt32) :
+    (durableBurnReserve store party epoch sid att false).1 = false := by
+  unfold durableBurnReserve
+  cases durableBurnAvailable store party epoch sid att <;> rfl
+
 /-- Reserve before running any check or releasing any signing output. The nonce ledger is
     global to this key, so changing the session, epoch, attempt, or share decomposition does
     not permit reuse of the aggregate nonce. -/
@@ -11870,13 +11882,22 @@ def rssDurableReserve204 (party : UInt16) (diskResult : RssDiskOutcome204)
       2 ^ 64 ≤ inp.epoch ∨ 2 ^ 32 ≤ inp.attempt ∨ rssNonceMaterial204 inp ∈ st.disk.burnedNonces then
     (false, st)
   else
-    let reservation := durableBurnReserve st.disk.journal party (UInt64.ofNat inp.epoch)
-      inp.sessionId (UInt32.ofNat inp.attempt) (decide (diskResult = .committed))
-    if reservation.1 then
-      (true, { key := { st.key with epoch := st.key.epoch + 1, nextAttempt := st.key.nextAttempt + 1 },
-        disk := { journal := reservation.2,
-          burnedNonces := rssNonceMaterial204 inp :: st.disk.burnedNonces } })
-    else (false, { st with disk := { st.disk with journal := reservation.2 } })
+    match durableBurnReserve st.disk.journal party (UInt64.ofNat inp.epoch)
+        inp.sessionId (UInt32.ofNat inp.attempt) (decide (diskResult = .committed)) with
+    | (true, journal) =>
+      (true,
+        { key := { st.key with
+            epoch := st.key.epoch + 1
+            nextAttempt := st.key.nextAttempt + 1 }
+          disk :=
+            { journal := journal
+              burnedNonces := rssNonceMaterial204 inp :: st.disk.burnedNonces } })
+    | (false, journal) =>
+      (false,
+        { key := st.key
+          disk :=
+            { journal := journal
+              burnedNonces := st.disk.burnedNonces } })
 
 /-- Only a final signature escapes the durable boundary. Rejected attempts expose neither
     individual norms nor the caller-selected masked vectors of the aggregate reference model. -/
@@ -11886,29 +11907,39 @@ def rssDurableSign204
     (party : UInt16) (diskResult : RssDiskOutcome204)
     (st : RssDurableSigner204) (inp : RssMlDsaAttemptInput) :
     RssDurableSigner204 × Option ThresholdSignSig :=
-  let reservation := rssDurableReserve204 party diskResult st inp
-  if reservation.1 then
-    match rssThresholdSignStep chalHash sampleInBall st.key inp with
-    | .err _ _ => (reservation.2, none)
-    | .ok _ (_, sig) => (reservation.2, sig)
-  else (reservation.2, none)
+  ((rssDurableReserve204 party diskResult st inp).2,
+    match (rssDurableReserve204 party diskResult st inp).1 with
+    | false => none
+    | true =>
+      match rssThresholdSignStep chalHash sampleInBall st.key inp with
+      | .err _ _ => none
+      | .ok _ out => out.2)
 
-/-- Crash recovery preserves *all* durable nonce material and reconstructs the epoch from disk. -/
+/-- A crash loses volatile memory. The epoch is rebuilt from the journal, the in-epoch
+    attempt counter restarts, and the burned-nonce ledger is exactly what was on disk. -/
 def rssDurableRecover204 (party : UInt16) (st : RssDurableSigner204) : RssDurableSigner204 :=
-  { st with key := { st.key with
-      epoch := persistedNextEpochNat st.disk.journal.keyId party st.disk.journal.burns } }
+  { key := { st.key with
+      epoch := persistedNextEpochNat st.disk.journal.keyId party st.disk.journal.burns
+      nextAttempt := 0 }
+    disk := st.disk }
 
 theorem rssDurableReserve204_burns {party : UInt16} {result : RssDiskOutcome204}
     {st : RssDurableSigner204} {inp : RssMlDsaAttemptInput}
     (h : (rssDurableReserve204 party result st inp).1 = true) :
     (rssDurableReserve204 party result st inp).2.disk.burnedNonces =
       rssNonceMaterial204 inp :: st.disk.burnedNonces := by
-  unfold rssDurableReserve204 at *
-  split at *
-  · cases h
-  · split at *
+  unfold rssDurableReserve204 at h ⊢
+  split
+  · rename_i hc
+    rw [if_pos hc] at h
+    cases h
+  · rename_i hc
+    rw [if_neg hc] at h
+    split
     · rfl
-    · cases h
+    · rename_i hm
+      rw [hm] at h
+      cases h
 
 theorem rssDurableReserve204_monotone (party : UInt16) (result : RssDiskOutcome204)
     (st : RssDurableSigner204) (inp : RssMlDsaAttemptInput) :
@@ -11926,7 +11957,58 @@ theorem tooth_rssDurableReserve204_nonce_replay (party : UInt16) (result : RssDi
     (st : RssDurableSigner204) (inp : RssMlDsaAttemptInput)
     (h : rssNonceMaterial204 inp ∈ st.disk.burnedNonces) :
     (rssDurableReserve204 party result st inp).1 = false := by
-  simp [rssDurableReserve204, h]
+  unfold rssDurableReserve204
+  rw [if_pos (Or.inr (Or.inr (Or.inr (Or.inr h))))]
+
+/-- A failed durable write refuses the reservation, whatever the journal contained. -/
+theorem rssDurableReserve204_failed_write (party : UInt16)
+    (st : RssDurableSigner204) (inp : RssMlDsaAttemptInput) :
+    (rssDurableReserve204 party .failed st inp).1 = false := by
+  unfold rssDurableReserve204
+  split
+  · rfl
+  · have hw := durableBurnReserve_failed_write st.disk.journal party (UInt64.ofNat inp.epoch)
+      inp.sessionId (UInt32.ofNat inp.attempt)
+    have hd : decide (RssDiskOutcome204.failed = RssDiskOutcome204.committed) = false := by decide
+    rw [hd]
+    split
+    · rename_i hm
+      rw [hm] at hw
+      cases hw
+    · rfl
+
+/-- The durable state returned by signing is exactly the state committed by reservation. -/
+theorem rssDurableSign204_state
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256) (party : UInt16) (result : RssDiskOutcome204)
+    (st : RssDurableSigner204) (inp : RssMlDsaAttemptInput) :
+    (rssDurableSign204 chalHash sampleInBall party result st inp).1 =
+      (rssDurableReserve204 party result st inp).2 := by
+  rfl
+
+/-- No reservation, no output: a refused reservation releases nothing. -/
+theorem rssDurableSign204_none_of_refused
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256) (party : UInt16) (result : RssDiskOutcome204)
+    (st : RssDurableSigner204) (inp : RssMlDsaAttemptInput)
+    (h : (rssDurableReserve204 party result st inp).1 = false) :
+    (rssDurableSign204 chalHash sampleInBall party result st inp).2 = none := by
+  unfold rssDurableSign204
+  dsimp only
+  rw [h]
+
+theorem rssDurableSign204_reserved_of_release
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (party : UInt16) (result : RssDiskOutcome204)
+    (st : RssDurableSigner204) (inp : RssMlDsaAttemptInput) (sig : ThresholdSignSig)
+    (h : (rssDurableSign204 chalHash sampleInBall party result st inp).2 = some sig) :
+    (rssDurableReserve204 party result st inp).1 = true := by
+  cases hr : (rssDurableReserve204 party result st inp).1 with
+  | true => rfl
+  | false =>
+    rw [rssDurableSign204_none_of_refused chalHash sampleInBall party result st inp hr] at h
+    cases h
 
 theorem rssDurableSign204_release_burned
     (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
@@ -11936,36 +12018,124 @@ theorem rssDurableSign204_release_burned
     (h : (rssDurableSign204 chalHash sampleInBall party result st inp).2 = some sig) :
     rssNonceMaterial204 inp ∈
       (rssDurableSign204 chalHash sampleInBall party result st inp).1.disk.burnedNonces := by
-  unfold rssDurableSign204 at *
-  split at *
-  · rename_i hres
-    have hb := rssDurableReserve204_burns hres
-    cases rssThresholdSignStep chalHash sampleInBall st.key inp with
-    | err _ _ => cases h
-    | ok next out =>
-      rcases out with ⟨view, msig⟩
-      dsimp only
-      rw [hb]
-      simp
-  · cases h
+  rw [rssDurableSign204_state,
+    rssDurableReserve204_burns
+      (rssDurableSign204_reserved_of_release chalHash sampleInBall party result st inp sig h)]
+  exact .head _
+
+/-- Every released signature verifies under the signer's public key: the durable wrapper
+    releases exactly the checked transition's output. -/
+theorem rssDurableSign204_release_verifies
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (party : UInt16) (result : RssDiskOutcome204)
+    (st : RssDurableSigner204) (inp : RssMlDsaAttemptInput) (sig : ThresholdSignSig)
+    (h : (rssDurableSign204 chalHash sampleInBall party result st inp).2 = some sig) :
+    mldsaVerify chalHash sampleInBall st.key.A
+      (power2RoundHighVec4 (addVec4 (matVecMul4 st.key.A (rssSumVec4List st.key.s1Subsets))
+        (rssSumVec4List st.key.s2Subsets)))
+      inp.mu sig.cTilde sig.z sig.h = true := by
+  have hres := rssDurableSign204_reserved_of_release chalHash sampleInBall party result st inp sig h
+  unfold rssDurableSign204 at h
+  dsimp only at h
+  rw [hres] at h
+  dsimp only at h
+  cases hstep : rssThresholdSignStep chalHash sampleInBall st.key inp with
+  | err next reason => rw [hstep] at h; cases h
+  | ok next out =>
+    rw [hstep] at h
+    rcases out with ⟨view, msig⟩
+    dsimp only at h
+    subst h
+    exact ((rssThresholdSignStep_ok_meta hstep).2.2.2.2.2 sig rfl).2.2
 
 theorem rssDurableRecover204_preserves_burns (party : UInt16) (st : RssDurableSigner204) :
-    (rssDurableRecover204 party st).disk = st.disk := rfl
+    (rssDurableRecover204 party st).disk = st.disk := by
+  rfl
 
 theorem tooth_rssDurableSign204_failed_write
     (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
     (sampleInBall : List UInt8 → Poly256)
     (party : UInt16) (st : RssDurableSigner204) (inp : RssMlDsaAttemptInput) :
-    (rssDurableSign204 chalHash sampleInBall party .failed st inp).2 = none := by
-  have h : (rssDurableReserve204 party .failed st inp).1 = false := by
-    unfold rssDurableReserve204
-    split
-    · rfl
-    · by_cases ha : durableBurnAvailable st.disk.journal party (UInt64.ofNat inp.epoch)
-          inp.sessionId (UInt32.ofNat inp.attempt) = true
-      · simp [durableBurnReserve, ha]
-      · simp [durableBurnReserve, ha]
-  simp [rssDurableSign204, h]
+    (rssDurableSign204 chalHash sampleInBall party .failed st inp).2 = none :=
+  rssDurableSign204_none_of_refused chalHash sampleInBall party .failed st inp
+    (rssDurableReserve204_failed_write party st inp)
+
+inductive RssDurableTransition204
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256) (party : UInt16) :
+    RssDurableSigner204 → RssDurableSigner204 → Prop where
+  | sign (st : RssDurableSigner204) (result : RssDiskOutcome204) (inp : RssMlDsaAttemptInput) :
+      RssDurableTransition204 chalHash sampleInBall party st
+        (rssDurableSign204 chalHash sampleInBall party result st inp).1
+  | crash (st : RssDurableSigner204) :
+      RssDurableTransition204 chalHash sampleInBall party st (rssDurableRecover204 party st)
+
+inductive RssDurableTrace204
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256) (party : UInt16) :
+    RssDurableSigner204 → RssDurableSigner204 → Prop where
+  | nil (st : RssDurableSigner204) : RssDurableTrace204 chalHash sampleInBall party st st
+  | cons {a b c : RssDurableSigner204} :
+      RssDurableTransition204 chalHash sampleInBall party a b →
+      RssDurableTrace204 chalHash sampleInBall party b c →
+      RssDurableTrace204 chalHash sampleInBall party a c
+
+theorem rssDurableTransition204_monotone
+    {chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8}
+    {sampleInBall : List UInt8 → Poly256} {party : UInt16} {a b : RssDurableSigner204}
+    (h : RssDurableTransition204 chalHash sampleInBall party a b) :
+    ∀ material ∈ a.disk.burnedNonces, material ∈ b.disk.burnedNonces := by
+  intro material hm
+  cases h with
+  | sign result inp =>
+    rw [rssDurableSign204_state]
+    exact rssDurableReserve204_monotone party result a inp material hm
+  | crash => exact hm
+
+theorem rssDurableTrace204_monotone
+    {chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8}
+    {sampleInBall : List UInt8 → Poly256} {party : UInt16} {a b : RssDurableSigner204}
+    (h : RssDurableTrace204 chalHash sampleInBall party a b) :
+    ∀ material ∈ a.disk.burnedNonces, material ∈ b.disk.burnedNonces := by
+  induction h with
+  | nil => exact fun _ hm => hm
+  | cons step _ ih =>
+    intro material hm
+    exact ih material (rssDurableTransition204_monotone step material hm)
+
+/-- Replay remains rejected after any number of intervening signs, failures, and crashes. -/
+theorem tooth_rssDurableTrace204_replay
+    {chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8}
+    {sampleInBall : List UInt8 → Poly256} {party : UInt16} {a b : RssDurableSigner204}
+    (h : RssDurableTrace204 chalHash sampleInBall party a b)
+    (inp : RssMlDsaAttemptInput) (result : RssDiskOutcome204)
+    (hb : rssNonceMaterial204 inp ∈ a.disk.burnedNonces) :
+    (rssDurableReserve204 party result b inp).1 = false :=
+  tooth_rssDurableReserve204_nonce_replay party result b inp (rssDurableTrace204_monotone h _ hb)
+
+/-- Two signatures released anywhere along one durable execution, with arbitrary signing
+    attempts, failed writes and crashes in between, never share an aggregate nonce. The
+    session, epoch, attempt and share decomposition of the second attempt are unconstrained. -/
+theorem rssDurable204_released_nonces_distinct
+    {chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8}
+    {sampleInBall : List UInt8 → Poly256} {party : UInt16}
+    {a b : RssDurableSigner204} {r₁ r₂ : RssDiskOutcome204}
+    {inp₁ inp₂ : RssMlDsaAttemptInput} {sig₁ sig₂ : ThresholdSignSig}
+    (h₁ : (rssDurableSign204 chalHash sampleInBall party r₁ a inp₁).2 = some sig₁)
+    (htr : RssDurableTrace204 chalHash sampleInBall party
+      (rssDurableSign204 chalHash sampleInBall party r₁ a inp₁).1 b)
+    (h₂ : (rssDurableSign204 chalHash sampleInBall party r₂ b inp₂).2 = some sig₂) :
+    rssSumVec4List inp₁.ySubsets ≠ rssSumVec4List inp₂.ySubsets := by
+  intro hEq
+  have hBurned := rssDurableTrace204_monotone htr _
+    (rssDurableSign204_release_burned chalHash sampleInBall party r₁ a inp₁ sig₁ h₁)
+  have hMat : rssNonceMaterial204 inp₂ = rssNonceMaterial204 inp₁ := by
+    unfold rssNonceMaterial204
+    rw [hEq]
+  have hRefused := tooth_rssDurableReserve204_nonce_replay party r₂ b inp₂ (hMat ▸ hBurned)
+  rw [rssDurableSign204_none_of_refused chalHash sampleInBall party r₂ b inp₂ hRefused] at h₂
+  cases h₂
 
 theorem tooth_rssProductsValid_corrupted_output
     (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
@@ -12136,11 +12306,11 @@ theorem toprfActiveCross204_correct (bad : Fin 5) (fault : ToprfFault204) (gate 
   by_cases h0 : (toprfHolders i j).getD 0 0 = bad
   · have h1 : (toprfHolders i j).getD 1 0 ≠ bad := fun h => h01 (h0.trans h.symm)
     have h2 : (toprfHolders i j).getD 2 0 ≠ bad := fun h => h02 (h0.trans h.symm)
-    exact Or.inr (Or.inr ⟨by simp [h1], by simp [h2]⟩)
+    exact Or.inr (Or.inr ⟨if_neg h1, if_neg h2⟩)
   · by_cases h1 : (toprfHolders i j).getD 1 0 = bad
     · have h2 : (toprfHolders i j).getD 2 0 ≠ bad := fun h => h12 (h1.trans h.symm)
-      exact Or.inr (Or.inl ⟨by simp [h0], by simp [h2]⟩)
-    · exact Or.inl ⟨by simp [h0], by simp [h1]⟩
+      exact Or.inr (Or.inl ⟨if_neg h0, if_neg h2⟩)
+    · exact Or.inl ⟨if_neg h0, if_neg h1⟩
 
 /-- `getD` is unreachable on a failed decoder under the one-fault model, as proved above.
     The decoded values themselves feed every multiplication output. -/
@@ -12240,14 +12410,31 @@ theorem toprfActiveClient204_correct (bad : Fin 5) (fault : ToprfFault204)
       some (toprfPlaintext (sumLane4Shares5 keys) (sumLane4Shares5 inputs)) := by
   unfold toprfActiveClient204
   rw [toprfActivePerm204_eq]
-  apply (toprf_2of5_corrects_one_malicious_server id [] 0 0 1 (by decide) bad).2.2
-  intro p hp
-  simp only [hp, ↓reduceIte]
+  exact (toprf_2of5_corrects_one_malicious_server id [] 0 0 1 (by decide) bad).2.2
+    masks keys inputs _ (fun p hp => if_neg hp)
 
-/-- Removing the holder vote admits a forged multiplication message immediately. -/
+private theorem gold_one_ne_zero204 : Goldilocks.one ≠ Goldilocks.zero := by
+  intro h
+  have hv := congrArg Goldilocks.val h
+  exact absurd hv (by decide)
+
+/-- The same cross-term transport with the holder vote removed: the first holder's message
+    is consumed as received. -/
+def toprfUncheckedCross204 (bad : Fin 5) (fault : ToprfFault204) (gate : List Nat)
+    (i j : Fin 5) (term : Goldilocks) : Option Goldilocks :=
+  if (toprfHolders i j).getD 0 0 = bad then fault gate i j term else some term
+
+/-- Removing the holder vote admits a forged multiplication message immediately: the first
+    holder of cross-term `(0, 1)` is server `2`, and its forged value replaces the honest one. -/
 theorem tooth_toprf_unchecked_cross_message :
-    (some (Goldilocks.ofNat 1) : Option Goldilocks) ≠ some (Goldilocks.mul Goldilocks.zero Goldilocks.zero) := by
-  decide
+    toprfUncheckedCross204 2 (fun _ _ _ _ => some Goldilocks.one) [] 0 1 Goldilocks.zero ≠
+      some Goldilocks.zero := by
+  intro h
+  have hEval : toprfUncheckedCross204 2 (fun _ _ _ _ => some Goldilocks.one) [] 0 1
+      Goldilocks.zero = some Goldilocks.one := by
+    rfl
+  rw [hEval] at h
+  exact gold_one_ne_zero204 (Option.some.inj h)
 
 
 /-- Generic context indices are injective even beyond the u64 range. -/
@@ -12285,68 +12472,8 @@ theorem tooth_toprfActiveCross204_forgery :
     toprfActiveCross204 0 (fun _ _ _ _ => some Goldilocks.one) [] 0 1 Goldilocks.zero ≠
       some Goldilocks.one := by
   rw [toprfActiveCross204_correct]
-  decide
-
-
-/-- The durable state returned by signing is exactly the state committed by reservation. -/
-theorem rssDurableSign204_state
-    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
-    (sampleInBall : List UInt8 → Poly256) (party : UInt16) (result : RssDiskOutcome204)
-    (st : RssDurableSigner204) (inp : RssMlDsaAttemptInput) :
-    (rssDurableSign204 chalHash sampleInBall party result st inp).1 =
-      (rssDurableReserve204 party result st inp).2 := by
-  unfold rssDurableSign204
-  split
-  · cases rssThresholdSignStep chalHash sampleInBall st.key inp with
-    | err _ _ => rfl
-    | ok _ out => cases out; rfl
-  · rfl
-
-inductive RssDurableTransition204
-    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
-    (sampleInBall : List UInt8 → Poly256) (party : UInt16) :
-    RssDurableSigner204 → RssDurableSigner204 → Prop where
-  | sign (st : RssDurableSigner204) (result : RssDiskOutcome204) (inp : RssMlDsaAttemptInput) :
-      RssDurableTransition204 chalHash sampleInBall party st
-        (rssDurableSign204 chalHash sampleInBall party result st inp).1
-  | crash (st : RssDurableSigner204) :
-      RssDurableTransition204 chalHash sampleInBall party st (rssDurableRecover204 party st)
-
-inductive RssDurableTrace204
-    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
-    (sampleInBall : List UInt8 → Poly256) (party : UInt16) :
-    RssDurableSigner204 → RssDurableSigner204 → Prop where
-  | nil (st : RssDurableSigner204) : RssDurableTrace204 chalHash sampleInBall party st st
-  | cons {a b c : RssDurableSigner204} :
-      RssDurableTransition204 chalHash sampleInBall party a b →
-      RssDurableTrace204 chalHash sampleInBall party b c →
-      RssDurableTrace204 chalHash sampleInBall party a c
-
-theorem rssDurableTrace204_monotone
-    {chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8}
-    {sampleInBall : List UInt8 → Poly256} {party : UInt16} {a b : RssDurableSigner204}
-    (h : RssDurableTrace204 chalHash sampleInBall party a b) :
-    ∀ material ∈ a.disk.burnedNonces, material ∈ b.disk.burnedNonces := by
-  induction h with
-  | nil => exact fun _ hm => hm
-  | cons step tail ih =>
-    intro material hm
-    apply ih material
-    cases step with
-    | sign st result inp =>
-      rw [rssDurableSign204_state]
-      exact rssDurableReserve204_monotone party result st inp material hm
-    | crash st => exact hm
-
-/-- Replay remains rejected after any number of intervening signs, failures, and crashes. -/
-theorem tooth_rssDurableTrace204_replay
-    {chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8}
-    {sampleInBall : List UInt8 → Poly256} {party : UInt16} {a b : RssDurableSigner204}
-    (h : RssDurableTrace204 chalHash sampleInBall party a b)
-    (inp : RssMlDsaAttemptInput) (result : RssDiskOutcome204)
-    (hb : rssNonceMaterial204 inp ∈ a.disk.burnedNonces) :
-    (rssDurableReserve204 party result b inp).1 = false :=
-  tooth_rssDurableReserve204_nonce_replay party result b inp (rssDurableTrace204_monotone h _ hb)
+  intro h
+  exact gold_one_ne_zero204 (Option.some.inj h).symm
 
 
 /-- A corrupt *consumed* response product is rejected by the signing state machine itself,

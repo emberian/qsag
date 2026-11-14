@@ -137,6 +137,17 @@ fn curve(c: &Builder, bits: &[Wire], ed: bool) -> (Vec<Wire>, Vec<Wire>) {
             sel[12 + i] = c.sub(lo[i], c.add(c.add(sel[i], sel[4 + i]), sel[8 + i]));
         }
         let point = core::array::from_fn(|i| {
+            if i == 2 {
+                if ed {
+                    debug_assert!(table.iter().all(|p| p[2] == [1, 0, 0, 0]));
+                    return one;
+                }
+                debug_assert!(table[0][2] == ZERO && table[1..].iter().all(|p| p[2] == [1, 0, 0, 0]));
+                return c.sub(one, sel[0]);
+            }
+            if !ed && i == 3 {
+                return c.small(domain, 0);
+            }
             sel.iter()
                 .zip(&table)
                 .fold(c.small(domain, 0), |sum, (&w, p)| {

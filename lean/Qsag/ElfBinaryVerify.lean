@@ -3647,6 +3647,41 @@ private theorem evalX86Alu_congr (op : X86AluOp) (is64 : Bool)
   subst ha hb
   cases op <;> simp_all [evalX86Alu]
 
+private theorem evalX86AluOf_congr (op : X86AluOp) (is64 : Bool)
+    {a₁ a₂ b₁ b₂ : UInt64} {cf₁ cf₂ : Bool}
+    (ha : a₁ = a₂) (hb : b₁ = b₂)
+    (hcf : (if op == .adc || op == .sbb then true else false) = true → cf₁ = cf₂) :
+    evalX86AluOf op is64 a₁ b₁ cf₁ = evalX86AluOf op is64 a₂ b₂ cf₂ := by
+  subst ha hb
+  cases op <;> simp_all [evalX86AluOf]
+
+private theorem evalX86AluOf_sbb_self (is64 : Bool) (v : UInt64) (cf : Bool) :
+    evalX86AluOf .sbb is64 v v cf = false := by
+  unfold evalX86AluOf signedOutOfBounds
+  rw [Int.sub_self]
+  cases is64 <;> cases cf <;> decide
+
+private theorem evalX86Shift_fst_congr (sk : X86ShiftKind) (is64 : Bool) {v₁ v₂ : UInt64} (cnt : Nat)
+    (cf₁ of₁ zf₁ cf₂ of₂ zf₂ : Bool) (hv : v₁ = v₂) :
+    (evalX86Shift sk is64 v₁ cnt cf₁ of₁ zf₁).1 = (evalX86Shift sk is64 v₂ cnt cf₂ of₂ zf₂).1 := by
+  subst hv
+  unfold evalX86Shift
+  split
+  · rfl
+  · cases sk <;> rfl
+
+private theorem evalX86Shift_zf (sk : X86ShiftKind) (is64 : Bool) (v : UInt64) (cnt : Nat)
+    (cf of_ zf : Bool) :
+    (evalX86Shift sk is64 v cnt cf of_ zf).2.2.2 =
+      if x86ShiftPreservesZf sk is64 cnt then zf
+      else (evalX86Shift sk is64 v cnt cf of_ zf).1 == 0 := by
+  unfold evalX86Shift x86ShiftPreservesZf
+  split
+  · rename_i hc0
+    simp [hc0]
+  · rename_i hc0
+    cases sk <;> simp [hc0]
+
 private theorem evalX86Addr_public_eq {s₁₀ s₂₀ s₁ s₂ : X86State} {st : X86AbsState}
     {addr : X86MemAddr} (nextPc : Nat)
     (hAddrOk : x86AddrIsPublic st addr = true)
@@ -3659,7 +3694,14 @@ private theorem evalX86Addr_public_eq {s₁₀ s₂₀ s₁ s₂ : X86State} {st
     rw [evalX86Addr, evalX86Addr, RelX86Gpr_public_eq (hGpr base hRegsOk) hAddrOk]
   | ripDisp disp => rfl
   | absDisp disp => rfl
-  | indexedSib _ _ _ _ => cases hAddrOk
+  | indexedSib baseOpt idx scale disp =>
+    simp only [x86AddrIsPublic, x86AddrRegsValid, Bool.and_eq_true, decide_eq_true_eq] at hAddrOk hRegsOk
+    have hIdx := RelX86Gpr_public_eq (hGpr idx hRegsOk.1) hAddrOk.1
+    cases baseOpt with
+    | none => simp [evalX86Addr, hIdx]
+    | some b =>
+      have hBase := RelX86Gpr_public_eq (hGpr b hRegsOk.2) hAddrOk.2
+      simp [evalX86Addr, hIdx, hBase]
 
 private theorem isInPubMemRegion_bytes_eq {c : FuncContract} {s₁₀ s₂₀ s₁ s₂ : X86State}
     {st : X86AbsState} {addr : X86MemAddr} {wBytes : Nat} (nextPc : Nat)
@@ -3813,20 +3855,22 @@ private def checkLoopDecHelper : Bool :=
     if k == 0 then true
     else
       let res := maskGprWidth false (maskGprWidth false (UInt64.ofNat k) + (0 - 1))
-      (res == UInt64.ofNat (k - 1)) && ((res == 0) == (k - 1 == 0)))
+      let ofFlag := evalX86IncDecOf false false (UInt64.ofNat k)
+      (res == UInt64.ofNat (k - 1)) && ((res == 0) == (k - 1 == 0)) && !ofFlag)
 
 private theorem checkLoopDecHelper_true : checkLoopDecHelper = true := by decide
 
 private theorem loop_dec_ecx_step {k : Nat} (hk1 : 1 ≤ k) (hk25 : k ≤ 25) :
     let res := maskGprWidth false (maskGprWidth false (UInt64.ofNat k) + (0 - 1))
-    res = UInt64.ofNat (k - 1) ∧ (res == 0) = (k - 1 == 0) := by
+    res = UInt64.ofNat (k - 1) ∧ (res == 0) = (k - 1 == 0) ∧
+      evalX86IncDecOf false false (UInt64.ofNat k) = false := by
   have hHelper := checkLoopDecHelper_true
   unfold checkLoopDecHelper at hHelper
   have hMem : k ∈ List.range 26 := List.mem_range.mpr (by omega)
   have hAll := List.all_eq_true.mp hHelper k hMem
   have hk0 : (k == 0) = false := beq_false_of_ne (by omega)
-  simp only [hk0, Bool.false_eq_true, ↓reduceIte, Bool.and_eq_true, beq_iff_eq] at hAll
-  exact ⟨hAll.1, hAll.2⟩
+  simp only [hk0, Bool.false_eq_true, ↓reduceIte, Bool.and_eq_true, Bool.not_eq_true', beq_iff_eq] at hAll
+  exact ⟨hAll.1.1, hAll.1.2, hAll.2⟩
 
 private theorem RelX86Gpr_set {s₁₀ s₂₀ : X86State} {g : Bank16 RegOrigin} {b₁ b₂ : Bank16 UInt64}
     {dst : Nat} {orig : RegOrigin} {v₁ v₂ : UInt64}
@@ -4229,7 +4273,7 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
         injection hTr with hS; subst hS
         simp only [Bool.and_eq_true, beq_iff_eq] at hXorSelf
         rcases hXorSelf with ⟨rfl, rfl⟩
-        simp only [stepX86, hIns, evalX86Alu_xor_self, beq_self_eq_true, Bool.or_true, ↓reduceIte, true_and]
+        simp only [stepX86, hIns, evalX86Alu_xor_self, evalX86AluOf, true_and]
         exact Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2,
           RelX86Gpr_set hd16 rGpr ⟨rfl, rfl⟩,
           rYmm, fun _ => rfl, fun _ => rfl, fun _ => rfl, rDirty, rMem, rRbp, by simp [RelX86Loop]⟩
@@ -4239,9 +4283,8 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
           injection hTr with hS; subst hS
           simp only [Bool.and_eq_true, beq_iff_eq] at hSbbSelf
           rcases hSbbSelf with ⟨rfl, rfl⟩
-          simp only [stepX86, hIns, show (X86AluOp.sbb == .andOp || X86AluOp.sbb == .orOp || X86AluOp.sbb == .xorOp) = false from rfl,
-            Bool.false_eq_true, ↓reduceIte, true_and]
-          refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, ?_, rYmm, ?_, rOf, ?_, rDirty, rMem, rRbp,
+          simp only [stepX86, hIns, evalX86AluOf_sbb_self, true_and]
+          refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, ?_, rYmm, ?_, (fun _ => rfl), ?_, rDirty, rMem, rRbp,
             by simp [RelX86Loop]⟩
           · apply RelX86Gpr_set hd16 rGpr
             by_cases hCfB : st.cfPub = true
@@ -4271,9 +4314,7 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
           refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, ?_, rYmm,
             (fun hb => congrArg (fun t => t.2.1) (hAluEq hb)),
             (fun hOfB => by
-              by_cases hc : (op == .andOp || op == .orOp || op == .xorOp) = true
-              · simp [hc]
-              · simp [hc] at hOfB),
+              cases op <;> simp [evalX86AluOf] at hOfB ⊢),
             (fun hb => congrArg (fun t => t.2.2) (hAluEq hb)),
             rDirty, rMem, rRbp, by simp [RelX86Loop]⟩
           apply RelX86Gpr_set hd16 rGpr
@@ -4309,9 +4350,7 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
         refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, ?_, rYmm,
           (fun hb => congrArg (fun t => t.2.1) (hAluEq hb)),
           (fun hOfB => by
-            by_cases hc : (op == .andOp || op == .orOp || op == .xorOp) = true
-            · simp [hc]
-            · simp [hc] at hOfB),
+            cases op <;> simp [evalX86AluOf] at hOfB ⊢),
           (fun hb => congrArg (fun t => t.2.2) (hAluEq hb)),
           rDirty, rMem, rRbp, by simp [RelX86Loop]⟩
         apply RelX86Gpr_set hd16 rGpr
@@ -4327,7 +4366,7 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
         simp only [Bool.and_eq_true, beq_iff_eq] at hc1
         rcases hc1 with ⟨⟨⟨⟨rfl, rfl⟩, rfl⟩, rfl⟩, hSp4⟩
         have r4 := rGpr 4 (by omega); rw [hSp4] at r4; rcases r4 with ⟨h4_1, h4_2, h4eq⟩
-        simp only [stepX86, hIns, evalX86Alu, maskGprWidth, ↓reduceIte, beq_self_eq_true, Bool.true_or, true_and]
+        simp only [stepX86, hIns, evalX86Alu, evalX86AluOf, maskGprWidth, ↓reduceIte, true_and]
         exact Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2,
           RelX86Gpr_set (by omega) rGpr ⟨congrArg (· &&& 0xFFFFFFFFFFFFFFE0) h4_1,
             congrArg (· &&& 0xFFFFFFFFFFFFFFE0) h4_2, congrArg (· &&& 0xFFFFFFFFFFFFFFE0) h4eq⟩,
@@ -4391,9 +4430,7 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
             refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, ?_, rYmm,
               (fun hb => congrArg (fun t => t.2.1) (hAluEq hb)),
               (fun hOfB => by
-                by_cases hc : (op == .andOp || op == .orOp || op == .xorOp) = true
-                · simp [hc]
-                · simp [hc] at hOfB),
+                cases op <;> simp [evalX86AluOf] at hOfB ⊢),
               (fun hb => congrArg (fun t => t.2.2) (hAluEq hb)),
               rDirty, rMem, rRbp, by simp [RelX86Loop]⟩
             apply RelX86Gpr_set hValid rGpr
@@ -4412,13 +4449,13 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
         simp only [hLoop2, show (2 == 0) = false from rfl, show (2 == 1) = false from rfl,
           beq_self_eq_true, ↓reduceIte] at rLoop
         rcases rLoop with ⟨hFspEq, k, hk1, hk25, hk1_1, hk1_2, ha0_1, ha0_2⟩
-        rcases loop_dec_ecx_step hk1 hk25 with ⟨hDecVal, hDecZf⟩
-        simp only [stepX86, hIns, Bool.false_eq_true, ↓reduceIte, hk1_1, hk1_2, hDecVal, true_and]
+        rcases loop_dec_ecx_step hk1 hk25 with ⟨hDecVal, hDecZf, hDecOf⟩
+        simp only [stepX86, hIns, Bool.false_eq_true, ↓reduceIte, hk1_1, hk1_2, hDecVal, hDecOf, true_and]
         have hZfEq : (UInt64.ofNat (k - 1) == (0 : UInt64)) = (k - 1 == 0) := by
           simpa only [hDecVal] using hDecZf
         refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2,
           RelX86Gpr_set (by omega) rGpr rfl,
-          rYmm, rCf, rOf, fun _ => rfl, rDirty, rMem, rRbp, ?_⟩
+          rYmm, rCf, fun _ => rfl, fun _ => rfl, rDirty, rMem, rRbp, ?_⟩
         unfold RelX86Loop
         simp only [show (3 == 0) = false from rfl, show (3 == 1) = false from rfl,
           show (3 == 2) = false from rfl, beq_self_eq_true, ↓reduceIte]
@@ -4430,7 +4467,8 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
       · simp only [hcLoop, Bool.false_eq_true, ↓reduceIte] at hTr
         injection hTr with hS; subst hS
         simp only [stepX86, hIns, true_and]
-        refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, ?_, rYmm, rCf, rOf,
+        refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, ?_, rYmm, rCf,
+          (fun hp => by rw [RelX86Gpr_public_eq (rGpr dst hValid) hp]),
           (fun hp => by rw [RelX86Gpr_public_eq (rGpr dst hValid) hp]),
           rDirty, rMem, rRbp, by simp [RelX86Loop]⟩
         apply RelX86Gpr_set hValid rGpr
@@ -4442,7 +4480,7 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
       simp only [stepX86, hIns, true_and]
       refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, ?_, rYmm,
         (fun hp => by rw [RelX86Gpr_public_eq (rGpr dst hValid) hp]),
-        (fun h => nomatch h),
+        (fun hp => by rw [RelX86Gpr_public_eq (rGpr dst hValid) hp]),
         (fun hp => by rw [RelX86Gpr_public_eq (rGpr dst hValid) hp]),
         rDirty, rMem, rRbp, by simp [RelX86Loop]⟩
       apply RelX86Gpr_set hValid rGpr
@@ -4473,15 +4511,19 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
       refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, ?_, rYmm,
         (fun h => nomatch h), (fun h => nomatch h),
         (fun hp => by
+          rw [evalX86Shift_zf, evalX86Shift_zf]
           by_cases hPres : x86ShiftPreservesZf sk is64 cnt = true
           · simp only [hPres, ↓reduceIte] at hp ⊢
             exact rZf hp
           · simp only [hPres, Bool.false_eq_true, ↓reduceIte] at hp ⊢
-            rw [RelX86Gpr_public_eq (rGpr dst hValid) hp]),
+            rw [evalX86Shift_fst_congr sk is64 cnt _ _ _ _ _ _
+              (RelX86Gpr_public_eq (rGpr dst hValid) hp)]),
         rDirty, rMem, rRbp, by simp [RelX86Loop]⟩
       apply RelX86Gpr_set hValid rGpr
       by_cases hp : (st.gpr.get dst).isPublic = true
-      · simp only [hp, ↓reduceIte, RelX86Gpr]; rw [RelX86Gpr_public_eq (rGpr dst hValid) hp]
+      · simp only [hp, ↓reduceIte, RelX86Gpr]
+        exact evalX86Shift_fst_congr sk is64 cnt _ _ _ _ _ _
+          (RelX86Gpr_public_eq (rGpr dst hValid) hp)
       · simp [hp, RelX86Gpr]
     case cmovcc cc is64 dst src =>
       rcases hValid with ⟨hd16, hs16⟩
@@ -4492,34 +4534,144 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
       simp only [stepX86, hIns, true_and]
       refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, ?_, rYmm, rCf, rOf, rZf, rDirty, rMem, rRbp,
         by simp [RelX86Loop]⟩
-      intro r hr
-      by_cases heq : r = dst
-      · subst heq
-        simp only [Bank16.get_set_eq]
-        by_cases hp : (x86CondIsPublic cc st && (st.gpr.get r).isPublic && (st.gpr.get src).isPublic) = true
-        · simp only [hp, ↓reduceIte]
+      apply RelX86Gpr_set hd16 rGpr
+      by_cases hp : (x86CondIsPublic cc st && (st.gpr.get dst).isPublic && (st.gpr.get src).isPublic) = true
+      · simp only [hp, ↓reduceIte, RelX86Gpr]
+        simp only [Bool.and_eq_true] at hp
+        rw [evalX86Cond_public_eq hp.1.1 rCf rZf,
+            RelX86Gpr_public_eq (rGpr src hs16) hp.2,
+            RelX86Gpr_public_eq (rGpr dst hd16) hp.1.2]
+      · simp [hp, RelX86Gpr]
+    case testRegReg is64 r1 r2 =>
+      rcases hValid with ⟨hr1, hr2⟩
+      injection hTr with hS; subst hS
+      simp only [stepX86, hIns, true_and]
+      refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rGpr, rYmm,
+        (fun _ => rfl), (fun _ => rfl),
+        (fun hp => by
           simp only [Bool.and_eq_true] at hp
-          have hCondEq := evalX86Cond_public_eq hp.1.1 rCf rZf
-          have hDstEq := RelX86Gpr_public_eq (rGpr r hd16) hp.1.2
-          have hSrcEq := RelX86Gpr_public_eq (rGpr src hs16) hp.2
-          simp only [RelX86Gpr, hCondEq]
-          by_cases hc : evalX86Cond cc s₂ = true
-          · simp [hc, Bank16.get_set_eq, hSrcEq]
-          · simp [hc, hDstEq]
+          rw [RelX86Gpr_public_eq (rGpr r1 hr1) hp.1, RelX86Gpr_public_eq (rGpr r2 hr2) hp.2]),
+        rDirty, rMem, rRbp, by simp [RelX86Loop]⟩
+    case cmpRegReg is64 dst src =>
+      rcases hValid with ⟨hd16, hs16⟩
+      injection hTr with hS; subst hS
+      simp only [stepX86, hIns, true_and]
+      have hBoth : ((st.gpr.get dst).isPublic && (st.gpr.get src).isPublic) = true →
+          s₁.gpr.get dst = s₂.gpr.get dst ∧ s₁.gpr.get src = s₂.gpr.get src := by
+        intro hp; simp only [Bool.and_eq_true] at hp
+        exact ⟨RelX86Gpr_public_eq (rGpr dst hd16) hp.1, RelX86Gpr_public_eq (rGpr src hs16) hp.2⟩
+      refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rGpr, rYmm,
+        (fun hp => by rcases hBoth hp with ⟨e1, e2⟩; rw [e1, e2]),
+        (fun hp => by rcases hBoth hp with ⟨e1, e2⟩; rw [e1, e2]),
+        (fun hp => by rcases hBoth hp with ⟨e1, e2⟩; rw [e1, e2]),
+        rDirty, rMem, rRbp, by simp [RelX86Loop]⟩
+    case cmpImm is64 dst imm =>
+      injection hTr with hS; subst hS
+      simp only [stepX86, hIns, true_and]
+      refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rGpr, rYmm,
+        (fun hp => by rw [RelX86Gpr_public_eq (rGpr dst hValid) hp]),
+        (fun hp => by rw [RelX86Gpr_public_eq (rGpr dst hValid) hp]),
+        (fun hp => by rw [RelX86Gpr_public_eq (rGpr dst hValid) hp]),
+        rDirty, rMem, rRbp, by simp [RelX86Loop]⟩
+    case lea is64 dst addr =>
+      rcases hValid with ⟨hd16, hAddrReg⟩
+      injection hTr with hS; subst hS
+      simp only [stepX86, hIns, true_and]
+      refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, ?_, rYmm, rCf, rOf, rZf, rDirty, rMem, rRbp,
+        by simp [RelX86Loop]⟩
+      apply RelX86Gpr_set hd16 rGpr
+      by_cases hp : x86AddrIsPublic st addr = true
+      · simp only [hp, ↓reduceIte, RelX86Gpr]
+        rw [evalX86Addr_public_eq (d.offset + d.byteLen) hp hAddrReg rGpr]
+      · simp [hp, RelX86Gpr]
+    case storeImm8 addr imm =>
+      cases hAddrPub : x86AddrIsPublic st addr
+      · simp [hAddrPub] at hTr
+      · simp only [hAddrPub, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hTr
+        injection hTr with hS; subst hS
+        have hEaEq := evalX86Addr_public_eq (d.offset + d.byteLen) hAddrPub hValid rGpr
+        simp only [stepX86, hIns, hEaEq, true_and]
+        refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rGpr, rYmm, rCf, rOf, rZf, rDirty,
+          (fun h => nomatch h), ?_, by simp [RelX86Loop]⟩
+        intro hRbpOk
+        cases hRbpB : st.rbpSaved
+        · simp [hRbpB] at hRbpOk
+        · simp only [hRbpB, ↓reduceIte] at hRbpOk
+          rcases rRbp hRbpB with ⟨hSp0Eq, hM1, hM2⟩
+          rcases storePreservesSavedRbp_disjoint (d.offset + d.byteLen) hInit hRelFull hValid hRbpOk
+            with ⟨hDisj1, hDisj2⟩
+          refine ⟨hSp0Eq, ?_, ?_⟩
+          · rw [hEaEq] at hDisj1
+            rw [readMem64_congr (fun k hk =>
+              writeMem8_ne _ _ (by simpa [uint64_add_zero] using hDisj1 0 k (by omega) hk))]
+            exact hM1
+          · rw [readMem64_congr (fun k hk =>
+              writeMem8_ne _ _ (by simpa [uint64_add_zero] using hDisj2 0 k (by omega) hk))]
+            exact hM2
+    case notReg is64 dst =>
+      injection hTr with hS; subst hS
+      simp only [stepX86, hIns, true_and]
+      refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, ?_, rYmm, rCf, rOf, rZf, rDirty, rMem, rRbp,
+        by simp [RelX86Loop]⟩
+      apply RelX86Gpr_set hValid rGpr
+      by_cases hp : (st.gpr.get dst).isPublic = true
+      · simp only [hp, ↓reduceIte, RelX86Gpr]; rw [RelX86Gpr_public_eq (rGpr dst hValid) hp]
+      · simp [hp, RelX86Gpr]
+    case setcc cc dst =>
+      cases hSup : x86CondSupported cc
+      · simp [hSup] at hTr
+      · simp only [hSup, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hTr
+        injection hTr with hS; subst hS
+        simp only [stepX86, hIns, true_and]
+        refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, ?_, rYmm, rCf, rOf, rZf, rDirty, rMem, rRbp,
+          by simp [RelX86Loop]⟩
+        apply RelX86Gpr_set hValid rGpr
+        by_cases hp : (x86CondIsPublic cc st && (st.gpr.get dst).isPublic) = true
+        · simp only [hp, ↓reduceIte, RelX86Gpr]
+          simp only [Bool.and_eq_true] at hp
+          rw [evalX86Cond_public_eq hp.1 rCf rZf, RelX86Gpr_public_eq (rGpr dst hValid) hp.2]
         · simp [hp, RelX86Gpr]
-      · rw [Bank16.get_set_ne _ _ hd16 hr (Ne.symm heq)]
-        have hGet1 : (if evalX86Cond cc s₁ then s₁.gpr.set dst (maskGprWidth is64 (s₁.gpr.get src)) else s₁.gpr).get r =
-            s₁.gpr.get r := by
-          by_cases hc : evalX86Cond cc s₁ = true
-          · simp [hc, Bank16.get_set_ne _ _ hd16 hr (Ne.symm heq)]
-          · simp [hc]
-        have hGet2 : (if evalX86Cond cc s₂ then s₂.gpr.set dst (maskGprWidth is64 (s₂.gpr.get src)) else s₂.gpr).get r =
-            s₂.gpr.get r := by
-          by_cases hc : evalX86Cond cc s₂ = true
-          · simp [hc, Bank16.get_set_ne _ _ hd16 hr (Ne.symm heq)]
-          · simp [hc]
-        rw [hGet1, hGet2]
-        exact rGpr r hr
+    case bswap is64 dst =>
+      injection hTr with hS; subst hS
+      simp only [stepX86, hIns, true_and]
+      refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, ?_, rYmm, rCf, rOf, rZf, rDirty, rMem, rRbp,
+        by simp [RelX86Loop]⟩
+      apply RelX86Gpr_set hValid rGpr
+      by_cases hp : (st.gpr.get dst).isPublic = true
+      · simp only [hp, ↓reduceIte, RelX86Gpr]; rw [RelX86Gpr_public_eq (rGpr dst hValid) hp]
+      · simp [hp, RelX86Gpr]
+    case sseMovdquLoad dst addr =>
+      rcases hValid with ⟨hd16, hAddrReg⟩
+      cases hAddrPub : x86AddrIsPublic st addr
+      · simp [hAddrPub] at hTr
+      · simp only [hAddrPub, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hTr
+        injection hTr with hS; subst hS
+        have hEaEq := evalX86Addr_public_eq (d.offset + d.byteLen) hAddrPub hAddrReg rGpr
+        simp only [stepX86, hIns, hEaEq, true_and]
+        exact Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rGpr,
+          RelX86Vec_set hd16 rYmm trivial, rCf, rOf, rZf, rDirty, rMem, rRbp, by simp [RelX86Loop]⟩
+    case ssePcmpeqb dst src =>
+      rcases hValid with ⟨hd16, _⟩
+      injection hTr with hS; subst hS
+      simp only [stepX86, hIns, true_and]
+      exact Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rGpr,
+        RelX86Vec_set hd16 rYmm trivial, rCf, rOf, rZf, rDirty, rMem, rRbp, by simp [RelX86Loop]⟩
+    case ssePand dst src =>
+      rcases hValid with ⟨hd16, _⟩
+      injection hTr with hS; subst hS
+      simp only [stepX86, hIns, true_and]
+      exact Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rGpr,
+        RelX86Vec_set hd16 rYmm trivial, rCf, rOf, rZf, rDirty, rMem, rRbp, by simp [RelX86Loop]⟩
+    case ssePmovmskb dst src =>
+      rcases hValid with ⟨hd16, hs16⟩
+      injection hTr with hS; subst hS
+      simp only [stepX86, hIns, true_and]
+      refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, ?_, rYmm, rCf, rOf, rZf, rDirty, rMem, rRbp,
+        by simp [RelX86Loop]⟩
+      apply RelX86Gpr_set hd16 rGpr
+      by_cases hp : (st.ymm.get src).isPublic = true
+      · simp only [hp, ↓reduceIte, RelX86Gpr]; rw [RelX86Vec_public_eq (rYmm src hs16) hp]
+      · simp [hp, RelX86Gpr]
     case mulx hiDst loDst src =>
       rcases hValid with ⟨⟨hhi16, hlo16⟩, hs16⟩
       injection hTr with hS; subst hS
@@ -6069,7 +6221,7 @@ theorem x86_shift_flag_taint (c : FuncContract) (st : X86AbsState)
 theorem x86_shift_zero_flags (s : X86State) (sk : X86ShiftKind) (is64 : Bool) (dst : Nat) :
     let t := (stepX86 ⟨0, 4, .shiftImm sk is64 dst 0⟩ s).1
     t.cf = s.cf ∧ t.ofFlag = s.ofFlag ∧ t.zf = s.zf := by
-  cases is64 <;> cases sk <;> simp [stepX86, x86ShiftPreservesZf]
+  cases is64 <;> cases sk <;> simp [stepX86, evalX86Shift]
 
 /-- Executed one-operand multiply: the unsigned high half and signed sign extension differ. -/
 theorem x86_mulOneOp_executed_vectors :

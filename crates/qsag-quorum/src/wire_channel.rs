@@ -1303,7 +1303,7 @@ mod authenticated_tests {
         );
 
         let (mut endpoints, _) = InMemoryWireMesh::connect(2, [4; 32]);
-        let _bob_ep = endpoints.pop().unwrap();
+        let bob_ep = endpoints.pop().unwrap();
         let alice_ep = endpoints.pop().unwrap();
         let mut alice = ConfidentialWireChannel::new(alice_ep, [6; 32], shared.clone()).unwrap();
         let mut bob = ConfidentialWireChannel::new(bob_ep, [6; 32], shared).unwrap();

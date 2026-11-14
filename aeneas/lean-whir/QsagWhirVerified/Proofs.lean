@@ -1,5 +1,8 @@
 module
 public import QsagWhirVerified.Arithmetic
+import all QsagWhirVerified.Types
+import all QsagWhirVerified.Funs
+import all QsagWhirVerified.Arithmetic
 import all Aeneas
 import all Aeneas.Std.Types
 import all Aeneas.Std.Containers
