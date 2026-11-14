@@ -4,6 +4,7 @@ public import QsagVerified.Proofs.Common
 public import QsagVerified.Proofs.MirRefinementKit
 public import QsagVerified.Proofs.Wots
 public import QsagVerified.Proofs.FtsSpnGuard
+public import QsagVerified.Proofs.Sponge
 
 public section
 
@@ -3072,5 +3073,1279 @@ theorem tooth_duplicate_custodian_cannot_reach_quorum
     | zero => rfl
     | succ n ih => simp only [repeatCustodianAck, hstep, bind_eq_result_bind, result_bind_ok, ih]
   · omega
+
+set_option maxHeartbeats 200000
+
+private theorem result_bind_ok_iff {α β : Type} (x : Result α) (f : α → Result β) (b : β) :
+    Result.bind x f = .ok b ↔ ∃ a, x = .ok a ∧ f a = .ok b := by
+  cases x <;> simp [Result.bind]
+
+private theorem result_bind_fail {α β : Type} (e : Error) (f : α → Result β) :
+    Result.bind (.fail e) f = .fail e := rfl
+
+private theorem result_bind_div {α β : Type} (f : α → Result β) :
+    Result.bind .div f = .div := rfl
+
+/-- Enrollment material is immutable at the authenticated boundary. -/
+@[expose]
+def BeltEnrollmentUnchanged (st st' : authenticated_belt.VerifiedBeltQuorumGuard) : Prop :=
+  st'.guard_key_commit = st.guard_key_commit ∧
+  st'.custodian_keys = st.custodian_keys ∧ st'.wal_key = st.wal_key
+
+private theorem belt_propose_enrollment_unchanged
+    (st st' : authenticated_belt.VerifiedBeltQuorumGuard)
+    (ep : Std.U64) (msg digest tag : Array Std.U8 32#usize)
+    (r : core.result.Result Unit authenticated_belt.BeltAuthError)
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.propose_or_retry_epoch st ep msg digest tag =
+      .ok (st', r)) : BeltEnrollmentUnchanged st st' := by
+  unfold authenticated_belt.VerifiedBeltQuorumGuard.propose_or_retry_epoch at h
+  simp only [bind_eq_result_bind, result_bind_ok,
+    pants_and_quorum_guards.BeltQuorumCore.impl.has_bound_epoch,
+    pants_and_quorum_guards.BeltQuorumCore.impl.bound_epoch,
+    pants_and_quorum_guards.BeltQuorumCore.is_poisoned] at h
+  repeat (any_goals first
+    | simp only [result_bind_ok_iff, reduceCtorEq, ↓reduceIte] at h
+    | (obtain ⟨v, hv, h⟩ : ∃ v, _ ∧ _ := h)
+    | (split at h))
+  all_goals cases h <;> exact ⟨rfl, rfl, rfl⟩
+
+private theorem belt_ack_enrollment_unchanged
+    (st st' : authenticated_belt.VerifiedBeltQuorumGuard)
+    (ep : Std.U64) (msg tag : Array Std.U8 32#usize) (id : Std.U8)
+    (r : core.result.Result Std.U32 authenticated_belt.BeltAuthError)
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack st ep msg id tag =
+      .ok (st', r)) : BeltEnrollmentUnchanged st st' := by
+  unfold authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack at h
+  simp only [bind_eq_result_bind, result_bind_ok, lift,
+    pants_and_quorum_guards.BeltQuorumCore.impl.n,
+    pants_and_quorum_guards.BeltQuorumCore.impl.has_bound_epoch,
+    pants_and_quorum_guards.BeltQuorumCore.impl.bound_epoch,
+    pants_and_quorum_guards.BeltQuorumCore.impl.bound_msg_tag,
+    pants_and_quorum_guards.BeltQuorumCore.impl.ack_count,
+    pants_and_quorum_guards.BeltQuorumCore.is_poisoned] at h
+  repeat (any_goals first
+    | simp only [result_bind_ok_iff] at h
+    | (obtain ⟨v, hv, h⟩ : ∃ v, _ ∧ _ := h)
+    | (split at h))
+  all_goals cases h <;> exact ⟨rfl, rfl, rfl⟩
+
+private theorem belt_authorize_enrollment_unchanged
+    (st st' : authenticated_belt.VerifiedBeltQuorumGuard)
+    (ep : Std.U64) (msg : Array Std.U8 32#usize)
+    (r : core.result.Result pants_and_quorum_guards.BeltAuthorizationGrant authenticated_belt.BeltAuthError)
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.authorize_shares st ep msg =
+      .ok (st', r)) : BeltEnrollmentUnchanged st st' := by
+  unfold authenticated_belt.VerifiedBeltQuorumGuard.authorize_shares at h
+  simp only [bind_eq_result_bind, result_bind_ok,
+    pants_and_quorum_guards.BeltQuorumCore.is_poisoned] at h
+  repeat (any_goals first
+    | simp only [result_bind_ok_iff] at h
+    | (obtain ⟨v, hv, h⟩ : ∃ v, _ ∧ _ := h)
+    | (split at h))
+  all_goals cases h <;> exact ⟨rfl, rfl, rfl⟩
+
+ theorem authenticated_belt_step_enrollment_unchanged
+    (st st' : authenticated_belt.VerifiedBeltQuorumGuard)
+    (inp : authenticated_belt.BeltQuorumStepInput)
+    (r : core.result.Result authenticated_belt.BeltQuorumStepOutput authenticated_belt.BeltAuthError)
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.step st inp = .ok (st', r)) :
+    BeltEnrollmentUnchanged st st' := by
+  cases inp with
+  | ProposeOrRetryEpoch ep msg digest tag =>
+    unfold authenticated_belt.VerifiedBeltQuorumGuard.step at h
+    cases he : authenticated_belt.VerifiedBeltQuorumGuard.propose_or_retry_epoch st ep msg digest tag with
+    | fail e => simp [he, bind_eq_result_bind, Result.bind] at h
+    | div => simp [he, bind_eq_result_bind, Result.bind] at h
+    | ok v =>
+      rcases v with ⟨next, res⟩
+      have hk := belt_propose_enrollment_unchanged st next ep msg digest tag res he
+      cases res <;> simp [he, bind_eq_result_bind, Result.bind] at h <;> rcases h with ⟨rfl, rfl⟩ <;> exact hk
+  | RecordCustodianAck ep msg id tag =>
+    unfold authenticated_belt.VerifiedBeltQuorumGuard.step at h
+    cases he : authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack st ep msg id tag with
+    | fail e => simp [he, bind_eq_result_bind, Result.bind] at h
+    | div => simp [he, bind_eq_result_bind, Result.bind] at h
+    | ok v =>
+      rcases v with ⟨next, res⟩
+      have hk := belt_ack_enrollment_unchanged st next ep msg tag id res he
+      cases res <;> simp [he, bind_eq_result_bind, Result.bind] at h <;> rcases h with ⟨rfl, rfl⟩ <;> exact hk
+  | AuthorizeShares ep msg =>
+    unfold authenticated_belt.VerifiedBeltQuorumGuard.step at h
+    cases he : authenticated_belt.VerifiedBeltQuorumGuard.authorize_shares st ep msg with
+    | fail e => simp [he, bind_eq_result_bind, Result.bind] at h
+    | div => simp [he, bind_eq_result_bind, Result.bind] at h
+    | ok v =>
+      rcases v with ⟨next, res⟩
+      have hk := belt_authorize_enrollment_unchanged st next ep msg res he
+      cases res <;> simp [he, bind_eq_result_bind, Result.bind] at h <;> rcases h with ⟨rfl, rfl⟩ <;> exact hk
+
+private theorem belt_authorize_count_shape
+    (st next : pants_and_quorum_guards.BeltQuorumCore)
+    (ep : Std.U64) (msg : Array Std.U8 32#usize)
+    (r : core.result.Result pants_and_quorum_guards.BeltAuthorizationGrant pants_and_quorum_guards.PantsGuardError)
+    (h : pants_and_quorum_guards.BeltQuorumCore.authorize_shares st ep msg = .ok (next, r)) :
+    next.ack_count = if next.poisoned then 0#u32 else st.ack_count := by
+  unfold pants_and_quorum_guards.BeltQuorumCore.authorize_shares
+    pants_and_quorum_guards.poison_belt_guard at h
+  cases hp : st.poisoned <;> cases hphase : st.phase <;>
+    simp only [hp, hphase, bind_eq_result_bind, result_bind_ok, validate_belt_quorum_config_eq,
+      ct_eq_bytes32_spec, Bool.false_eq_true, ↓reduceIte] at h
+  repeat (any_goals first
+    | simp_all only [Bool.false_eq_true, ↓reduceIte]
+    | (split at h))
+  all_goals cases h <;> simp_all only [Bool.false_eq_true, ↓reduceIte]
+
+theorem authenticated_belt_authorize_preserves_count
+    (st st' : authenticated_belt.VerifiedBeltQuorumGuard)
+    (ep : Std.U64) (msg : Array Std.U8 32#usize)
+    (r : core.result.Result pants_and_quorum_guards.BeltAuthorizationGrant authenticated_belt.BeltAuthError)
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.authorize_shares st ep msg = .ok (st', r))
+    (hi : BeltAckCountInvariant st) : BeltAckCountInvariant st' := by
+  unfold authenticated_belt.VerifiedBeltQuorumGuard.authorize_shares at h
+  cases hc : pants_and_quorum_guards.BeltQuorumCore.authorize_shares st.inner ep msg with
+  | fail e => simp [hc, bind_eq_result_bind, Result.bind] at h
+  | div => simp [hc, bind_eq_result_bind, Result.bind] at h
+  | ok v =>
+    rcases v with ⟨next, res⟩
+    have hn := belt_authorize_count_shape st.inner next ep msg res hc
+    cases hb : next.poisoned <;> cases res <;>
+      simp only [hc, bind_eq_result_bind, result_bind_ok,
+        pants_and_quorum_guards.BeltQuorumCore.is_poisoned, hb,
+        Bool.false_eq_true, ↓reduceIte] at h <;> cases h
+    all_goals simp only [hb, Bool.false_eq_true, ↓reduceIte] at hn
+    all_goals unfold BeltAckCountInvariant
+    all_goals rw [hn]
+    all_goals first | exact hi | (change (0#u32).val = (List.range 64).countP (fun i => (0#u64).bv.getLsbD i); decide)
+
+/-- The trust assumption applies exactly to the enrolled committee slots. -/
+@[expose]
+def BeltProvisionedKeys (n : Std.U32)
+    (keys : Array (Array Std.U8 32#usize) 64#usize) : Prop :=
+  (∀ (i : Std.U8) key, i.val < n.val →
+    Array.index_usize keys (UScalar.cast .Usize i) = .ok key →
+    key ≠ Array.repeat 32#usize 0#u8) ∧
+  (∀ (i j : Std.U8) ki kj, i.val < n.val → j.val < n.val →
+    Array.index_usize keys (UScalar.cast .Usize i) = .ok ki →
+    Array.index_usize keys (UScalar.cast .Usize j) = .ok kj →
+    ki = kj → i = j)
+
+theorem authenticated_belt_step_preserves_provisioned_keys
+    (n : Std.U32) (st st' : authenticated_belt.VerifiedBeltQuorumGuard)
+    (inp : authenticated_belt.BeltQuorumStepInput)
+    (r : core.result.Result authenticated_belt.BeltQuorumStepOutput authenticated_belt.BeltAuthError)
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.step st inp = .ok (st', r))
+    (hk : BeltProvisionedKeys n st.custodian_keys) : BeltProvisionedKeys n st'.custodian_keys := by
+  rw [(authenticated_belt_step_enrollment_unchanged st st' inp r h).2.1]
+  exact hk
+
+/-- The tag computation terminates for all keys, including the public all-zero key. -/
+theorem custodian_ack_tag_total
+    (key commit msg : Array Std.U8 32#usize) (epoch : Std.U64) (id : Std.U8) :
+    ∃ tag, authenticated_belt.custodian_ack_tag key commit epoch msg id = .ok tag := by
+  let domain := Array.make 16#usize [81#u8, 83#u8, 65#u8, 71#u8, 46#u8, 66#u8,
+    69#u8, 76#u8, 84#u8, 46#u8, 65#u8, 67#u8, 75#u8, 46#u8, 118#u8, 49#u8]
+  let sp : keccak.Shake256Sponge := {
+    state := Array.repeat 25#usize 0#u64, buf := Array.repeat 136#usize 0#u8,
+    buf_len := 0#usize, suffix := 31#u8, squeezing := false, squeeze_offset := 0#usize }
+  have hepoch : ∃ bytes, authenticated_belt.encode_epoch epoch = .ok bytes := by
+    exact ⟨_, rfl⟩
+  obtain ⟨bytes, hepoch⟩ := hepoch
+  obtain ⟨s1, h1, hn1, hb1⟩ := sponge_absorb_short sp domain.to_slice rfl (by decide)
+  have hl (a : Array Std.U8 32#usize) : a.to_slice.val.length = 32 := a.property
+  obtain ⟨s2, h2, hn2, hb2⟩ := sponge_absorb_short s1 key.to_slice hn1
+    (by rw [hb1, hl]; decide)
+  obtain ⟨s3, h3, hn3, hb3⟩ := sponge_absorb_short s2 commit.to_slice hn2
+    (by rw [hb2, hb1, hl, hl]; decide)
+  obtain ⟨s4, h4, hn4, hb4⟩ := sponge_absorb_short s3 bytes.to_slice hn3
+    (by rw [hb3, hb2, hb1, hl, hl]; change 16 + 32 + 32 + bytes.val.length < 136;
+        rw [bytes.property]; decide)
+  obtain ⟨s5, h5, hn5, hb5⟩ := sponge_absorb_short s4 msg.to_slice hn4
+    (by rw [hb4, hb3, hb2, hb1, hl, hl, hl];
+        change 16 + 32 + 32 + bytes.val.length + 32 < 136; rw [bytes.property]; decide)
+  obtain ⟨s6, h6, hn6, hb6⟩ := sponge_absorb_short s5 (Array.make 1#usize [id]).to_slice hn5
+    (by rw [hb5, hb4, hb3, hb2, hb1, hl, hl, hl];
+        change 16 + 32 + 32 + bytes.val.length + 32 + 1 < 136; rw [bytes.property]; decide)
+  obtain ⟨out, hout⟩ := sponge_squeeze_short s6 (Array.repeat 32#usize 0#u8).to_slice
+    32 (by decide) hn6
+    (by rw [hb6, hb5, hb4, hb3, hb2, hb1, hl, hl, hl];
+        change 16 + 32 + 32 + bytes.val.length + 32 + 1 < 136; rw [bytes.property]; decide)
+    (by decide)
+  refine ⟨Array.from_slice (Array.repeat 32#usize 0#u8) out.2, ?_⟩
+  unfold authenticated_belt.custodian_ack_tag
+  simp only [keccak.Shake256Sponge.new_shake256, bind_eq_result_bind, result_bind_ok,
+    lift, hepoch, Array.to_slice_mut]
+  rw [h1]
+  simp only [result_bind_ok, h2, h3, h4, h5, h6, hout]
+
+theorem authenticated_belt_accepted_proposal_receipt
+    (st st' : authenticated_belt.VerifiedBeltQuorumGuard)
+    (ep : Std.U64) (msg digest tag : Array Std.U8 32#usize)
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.propose_or_retry_epoch st ep msg digest tag =
+      .ok (st', .Ok ())) :
+    authenticated_belt.wal_receipt_tag st.wal_key st.guard_key_commit ep msg digest = .ok tag := by
+  unfold authenticated_belt.VerifiedBeltQuorumGuard.propose_or_retry_epoch at h
+  cases hw : authenticated_belt.wal_receipt_tag st.wal_key st.guard_key_commit ep msg digest with
+  | fail e => simp [hw, bind_eq_result_bind, Result.bind] at h
+  | div => simp [hw, bind_eq_result_bind, Result.bind] at h
+  | ok expected =>
+    by_cases heq : expected = tag
+    · exact congrArg Result.ok heq
+    · simp only [hw, bind_eq_result_bind, result_bind_ok, ct_eq_bytes32_spec,
+        heq, decide_false, Bool.false_eq_true, ↓reduceIte,
+        pants_and_quorum_guards.BeltQuorumCore.impl.has_bound_epoch,
+        pants_and_quorum_guards.BeltQuorumCore.impl.bound_epoch,
+        pants_and_quorum_guards.BeltQuorumCore.is_poisoned] at h
+      repeat (any_goals first
+        | simp only [result_bind_ok_iff] at h
+        | (obtain ⟨v, hv, h⟩ : ∃ v, _ ∧ _ := h)
+        | (split at h))
+      all_goals cases h
+
+/-- A public all-zero slot key admits a publicly computable accepted tag.
+This is an inhabited counterexample to treating tag validity as secret-key provisioning. -/
+theorem authenticated_belt_zero_key_accepts_public_tag :
+    let zero := Array.repeat 32#usize 0#u8
+    let st : authenticated_belt.VerifiedBeltQuorumGuard := {
+      inner := {
+        n := 3#u32, t := 2#u32, f := 0#u32, q := 2#u32,
+        global_liveness_mode := false, next_epoch := 1#u64, max_jump_window := 1#u64,
+        phase := .EpochBoundPendingQuorum, has_bound_epoch := true,
+        bound_epoch := 0#u64, bound_msg_tag := zero, ack_count := 1#u32, poisoned := false },
+      guard_key_commit := zero, custodian_keys := Array.repeat 64#usize zero,
+      wal_key := zero, ack_bitmap := 1#u64 }
+    ∃ tag,
+      Array.index_usize st.custodian_keys (UScalar.cast .Usize 0#u8) = .ok zero ∧
+      authenticated_belt.custodian_ack_tag zero zero 0#u64 zero 0#u8 = .ok tag ∧
+      authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack st 0#u64 zero 0#u8 tag =
+        .ok (st, .Ok 1#u32) := by
+  dsimp only
+  obtain ⟨tag, htag⟩ := custodian_ack_tag_total
+    (Array.repeat 32#usize 0#u8) (Array.repeat 32#usize 0#u8)
+    (Array.repeat 32#usize 0#u8) 0#u64 0#u8
+  refine ⟨tag, rfl, htag, ?_⟩
+  exact authenticated_belt_duplicate_ack_unchanged _ _ _ _ _ _ 1#u64
+    (by decide) (by decide) rfl htag rfl rfl rfl rfl rfl (by decide)
+
+theorem authenticated_belt_accepted_ack_tag
+    (st st' : authenticated_belt.VerifiedBeltQuorumGuard)
+    (ep : Std.U64) (msg tag : Array Std.U8 32#usize) (id : Std.U8) (count : Std.U32)
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack st ep msg id tag =
+      .ok (st', .Ok count)) :
+    id.val < st.inner.n.val ∧ id.val < 64 ∧
+    ∃ key, Array.index_usize st.custodian_keys (UScalar.cast .Usize id) = .ok key ∧
+      authenticated_belt.custodian_ack_tag key st.guard_key_commit ep msg id = .ok tag := by
+  unfold authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack at h
+  simp only [bind_eq_result_bind, result_bind_ok, lift,
+    pants_and_quorum_guards.BeltQuorumCore.impl.n] at h
+  split at h
+  · cases h
+  · rename_i hin
+    split at h
+    · cases h
+    · rename_i h64
+      cases hk : Array.index_usize st.custodian_keys (UScalar.cast .Usize id) with
+      | fail e => simp only [hk, result_bind_fail, reduceCtorEq] at h
+      | div => simp only [hk, result_bind_div, reduceCtorEq] at h
+      | ok key =>
+        simp only [hk, result_bind_ok] at h
+        cases ht : authenticated_belt.custodian_ack_tag key st.guard_key_commit ep msg id with
+        | fail e => simp only [ht, result_bind_fail, reduceCtorEq] at h
+        | div => simp only [ht, result_bind_div, reduceCtorEq] at h
+        | ok expected =>
+          simp only [ht, result_bind_ok, ct_eq_bytes32_spec] at h
+          by_cases heq : expected = tag
+          · have hc8 : (UScalar.cast .Usize id).val = id.val := by
+              change (id.bv.setWidth 64).toNat = id.bv.toNat
+              rw [BitVec.toNat_setWidth, Nat.mod_eq_of_lt
+                (Nat.lt_of_lt_of_le id.bv.isLt (by decide : 2^8 ≤ 2^64))]
+            have hc32 : (UScalar.cast .Usize st.inner.n).val = st.inner.n.val := by
+              change (st.inner.n.bv.setWidth 64).toNat = st.inner.n.bv.toNat
+              rw [BitVec.toNat_setWidth, Nat.mod_eq_of_lt
+                (Nat.lt_of_lt_of_le st.inner.n.bv.isLt (by decide : 2^32 ≤ 2^64))]
+            change ¬ (UScalar.cast .Usize st.inner.n).val ≤ (UScalar.cast .Usize id).val at hin
+            rw [hc8, hc32] at hin
+            change ¬ 64 ≤ id.val at h64
+            exact ⟨Nat.lt_of_not_ge hin, Nat.lt_of_not_ge h64, key, rfl, heq ▸ ht⟩
+          · simp only [heq, decide_false, Bool.false_eq_true, ↓reduceIte] at h
+            cases h
+
+private theorem belt_propose_count_shape
+    (st next : pants_and_quorum_guards.BeltQuorumCore)
+    (ep : Std.U64) (msg : Array Std.U8 32#usize) (valid : Bool)
+    (r : core.result.Result Unit pants_and_quorum_guards.PantsGuardError)
+    (h : pants_and_quorum_guards.BeltQuorumCore.propose_or_retry_epoch st ep msg valid = .ok (next, r)) :
+    next.ack_count = if next.poisoned then 0#u32
+      else if st.has_bound_epoch && decide (st.bound_epoch = ep) then st.ack_count
+      else match r with | .Ok _ => 0#u32 | .Err _ => st.ack_count := by
+  rw [show decide (st.bound_epoch = ep) = decide (ep = st.bound_epoch) by simp only [eq_comm]]
+  cases r with
+  | Ok u =>
+    have hs := (belt_propose_step_sim st ep msg valid).1 next u h
+    dsimp only at ⊢
+    clear h
+    dsimp only [beltQuorumMealy] at hs
+    repeat (any_goals first
+      | (split at hs)
+      | simp only [reduceCtorEq] at hs)
+    all_goals cases hs
+    all_goals simp_all [beltGuardCorrupt]
+  | Err e =>
+    have hs := (belt_propose_step_sim st ep msg valid).2 next e h |>.2
+    dsimp only at ⊢
+    clear h
+    dsimp only [beltQuorumMealy] at hs
+    repeat (any_goals split at hs)
+    all_goals subst next
+    all_goals simp_all [beltGuardCorrupt]
+
+theorem authenticated_belt_propose_preserves_count
+    (st st' : authenticated_belt.VerifiedBeltQuorumGuard)
+    (ep : Std.U64) (msg digest tag : Array Std.U8 32#usize)
+    (r : core.result.Result Unit authenticated_belt.BeltAuthError)
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.propose_or_retry_epoch st ep msg digest tag = .ok (st', r))
+    (hi : BeltAckCountInvariant st) : BeltAckCountInvariant st' := by
+  unfold authenticated_belt.VerifiedBeltQuorumGuard.propose_or_retry_epoch at h
+  cases hw : authenticated_belt.wal_receipt_tag st.wal_key st.guard_key_commit ep msg digest with
+  | fail e => simp [hw, bind_eq_result_bind, Result.bind] at h
+  | div => simp [hw, bind_eq_result_bind, Result.bind] at h
+  | ok expected =>
+    cases hc : pants_and_quorum_guards.BeltQuorumCore.propose_or_retry_epoch
+        st.inner ep msg (decide (expected = tag)) with
+    | fail e =>
+      cases hb : st.inner.has_bound_epoch <;> by_cases he : st.inner.bound_epoch = ep <;>
+        simp [hw, ct_eq_bytes32_spec, hb, he, hc, bind_eq_result_bind, Result.bind,
+          pants_and_quorum_guards.BeltQuorumCore.impl.has_bound_epoch,
+          pants_and_quorum_guards.BeltQuorumCore.impl.bound_epoch] at h
+    | div =>
+      cases hb : st.inner.has_bound_epoch <;> by_cases he : st.inner.bound_epoch = ep <;>
+        simp [hw, ct_eq_bytes32_spec, hb, he, hc, bind_eq_result_bind, Result.bind,
+          pants_and_quorum_guards.BeltQuorumCore.impl.has_bound_epoch,
+          pants_and_quorum_guards.BeltQuorumCore.impl.bound_epoch] at h
+    | ok v =>
+      rcases v with ⟨next, res⟩
+      have hn := belt_propose_count_shape st.inner next ep msg (decide (expected = tag)) res hc
+      cases hb : st.inner.has_bound_epoch <;> by_cases he : st.inner.bound_epoch = ep <;>
+        cases hp : next.poisoned <;> cases res <;> by_cases ht : expected = tag
+      all_goals simp only [ht, decide_true, decide_false] at hc
+      all_goals simp only [hw, ct_eq_bytes32_spec, hc, bind_eq_result_bind, result_bind_ok,
+        pants_and_quorum_guards.BeltQuorumCore.impl.has_bound_epoch,
+        pants_and_quorum_guards.BeltQuorumCore.impl.bound_epoch,
+        pants_and_quorum_guards.BeltQuorumCore.is_poisoned, hb, he, hp, ht,
+        decide_true, decide_false, Bool.false_eq_true, ↓reduceIte] at h
+      all_goals cases h
+      all_goals simp only [hb, he, hp, Bool.false_and, Bool.true_and, decide_true,
+        decide_false, Bool.false_eq_true, ↓reduceIte] at hn
+      all_goals unfold BeltAckCountInvariant
+      all_goals rw [hn]
+      all_goals first | exact hi | (change (0#u32).val = (List.range 64).countP (fun i => (0#u64).bv.getLsbD i); decide)
+
+/-- Proposal projection pins the core Boolean to the extracted WAL MAC comparison. -/
+theorem authenticated_belt_propose_core_projection
+    (st st' : authenticated_belt.VerifiedBeltQuorumGuard)
+    (ep : Std.U64) (msg digest tag : Array Std.U8 32#usize)
+    (r : core.result.Result Unit authenticated_belt.BeltAuthError)
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.propose_or_retry_epoch st ep msg digest tag =
+      .ok (st', r)) :
+    ∃ expected cr,
+      authenticated_belt.wal_receipt_tag st.wal_key st.guard_key_commit ep msg digest = .ok expected ∧
+      pants_and_quorum_guards.BeltQuorumCore.propose_or_retry_epoch st.inner ep msg
+        (decide (expected = tag)) = .ok (st'.inner, cr) := by
+  unfold authenticated_belt.VerifiedBeltQuorumGuard.propose_or_retry_epoch at h
+  simp only [bind_eq_result_bind, result_bind_ok, ct_eq_bytes32_spec,
+    pants_and_quorum_guards.BeltQuorumCore.impl.has_bound_epoch,
+    pants_and_quorum_guards.BeltQuorumCore.impl.bound_epoch,
+    pants_and_quorum_guards.BeltQuorumCore.is_poisoned] at h
+  repeat (any_goals first
+    | simp only [result_bind_ok_iff, reduceCtorEq, ↓reduceIte] at h
+    | (obtain ⟨v, hv, h⟩ : ∃ v, _ ∧ _ := h)
+    | (split at h))
+  all_goals cases h
+  all_goals exact ⟨_, v.2, by assumption, hv⟩
+
+/-- Authentication failures and duplicate acknowledgments stutter; other acks enter the core. -/
+theorem authenticated_belt_ack_core_projection
+    (st st' : authenticated_belt.VerifiedBeltQuorumGuard)
+    (ep : Std.U64) (msg tag : Array Std.U8 32#usize) (id : Std.U8)
+    (r : core.result.Result Std.U32 authenticated_belt.BeltAuthError)
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack st ep msg id tag =
+      .ok (st', r)) :
+    st' = st ∨ ∃ cr, pants_and_quorum_guards.BeltQuorumCore.record_custodian_ack
+      st.inner ep msg = .ok (st'.inner, cr) := by
+  unfold authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack at h
+  simp only [bind_eq_result_bind, result_bind_ok, lift,
+    pants_and_quorum_guards.BeltQuorumCore.impl.n,
+    pants_and_quorum_guards.BeltQuorumCore.impl.has_bound_epoch,
+    pants_and_quorum_guards.BeltQuorumCore.impl.bound_epoch,
+    pants_and_quorum_guards.BeltQuorumCore.impl.bound_msg_tag,
+    pants_and_quorum_guards.BeltQuorumCore.impl.ack_count,
+    pants_and_quorum_guards.BeltQuorumCore.is_poisoned] at h
+  repeat (any_goals first
+    | simp only [result_bind_ok_iff] at h
+    | (obtain ⟨v, hv, h⟩ : ∃ v, _ ∧ _ := h)
+    | (split at h))
+  all_goals cases h
+  all_goals first | exact Or.inl rfl | (apply Or.inr; exact ⟨_, by assumption⟩)
+
+theorem authenticated_belt_authorize_core_projection
+    (st st' : authenticated_belt.VerifiedBeltQuorumGuard)
+    (ep : Std.U64) (msg : Array Std.U8 32#usize)
+    (r : core.result.Result pants_and_quorum_guards.BeltAuthorizationGrant authenticated_belt.BeltAuthError)
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.authorize_shares st ep msg = .ok (st', r)) :
+    ∃ cr, pants_and_quorum_guards.BeltQuorumCore.authorize_shares st.inner ep msg = .ok (st'.inner, cr) := by
+  unfold authenticated_belt.VerifiedBeltQuorumGuard.authorize_shares at h
+  simp only [bind_eq_result_bind, result_bind_ok,
+    pants_and_quorum_guards.BeltQuorumCore.is_poisoned] at h
+  repeat (any_goals first
+    | simp only [result_bind_ok_iff] at h
+    | (obtain ⟨v, hv, h⟩ : ∃ v, _ ∧ _ := h)
+    | (split at h))
+  all_goals cases h
+  all_goals exact ⟨_, by assumption⟩
+
+theorem authenticated_belt_trace_enrollment_unchanged
+    {st st_final : authenticated_belt.VerifiedBeltQuorumGuard}
+    {turns : List (MirTurn authenticated_belt.BeltQuorumStepInput
+      authenticated_belt.BeltQuorumStepOutput authenticated_belt.BeltAuthError)}
+    (htrace : MirTrace (adaptStateResult authenticated_belt.VerifiedBeltQuorumGuard.step)
+      st turns st_final) : BeltEnrollmentUnchanged st st_final := by
+  induction htrace with
+  | nil _ => exact ⟨rfl, rfl, rfl⟩
+  | @accept m m' mf inp out rest hstep htail ih =>
+    simp only [adaptStateResult, result_bind_ok_iff] at hstep
+    obtain ⟨⟨next, res⟩, hr, ho⟩ := hstep
+    cases res <;> cases ho
+    have hk := authenticated_belt_step_enrollment_unchanged m next inp _ hr
+    exact ⟨ih.1.trans hk.1, ih.2.1.trans hk.2.1, ih.2.2.trans hk.2.2⟩
+  | @reject m m' mf inp err rest hstep htail ih =>
+    simp only [adaptStateResult, result_bind_ok_iff] at hstep
+    obtain ⟨⟨next, res⟩, hr, ho⟩ := hstep
+    cases res <;> cases ho
+    have hk := authenticated_belt_step_enrollment_unchanged m next inp _ hr
+    exact ⟨ih.1.trans hk.1, ih.2.1.trans hk.2.1, ih.2.2.trans hk.2.2⟩
+
+theorem authenticated_belt_trace_preserves_provisioned_keys
+    (n : Std.U32) {st st_final : authenticated_belt.VerifiedBeltQuorumGuard}
+    {turns : List (MirTurn authenticated_belt.BeltQuorumStepInput
+      authenticated_belt.BeltQuorumStepOutput authenticated_belt.BeltAuthError)}
+    (htrace : MirTrace (adaptStateResult authenticated_belt.VerifiedBeltQuorumGuard.step)
+      st turns st_final)
+    (hk : BeltProvisionedKeys n st.custodian_keys) : BeltProvisionedKeys n st_final.custodian_keys := by
+  rw [(authenticated_belt_trace_enrollment_unchanged htrace).2.1]
+  exact hk
+
+private theorem belt_countP_disjoint (xs : List Nat) (f g : Nat → Bool)
+    (hd : ∀ i ∈ xs, (f i && g i) = false) :
+    xs.countP (fun i => f i || g i) = xs.countP f + xs.countP g := by
+  induction xs with
+  | nil => rfl
+  | cons a xs ih =>
+    have ha := hd a (by simp)
+    have ht := ih (fun i hi => hd i (List.mem_cons_of_mem a hi))
+    cases hf : f a <;> cases hg : g a <;>
+      simp_all <;> omega
+
+private theorem belt_single_bit (id : Nat) (hid : id < 64) (i : Nat) :
+    ((1 : BitVec 64) <<< id).getLsbD i = decide (i = id) := by
+  have hone : (1 : BitVec 64).getLsbD (i - id) = decide (i - id = 0) :=
+    BitVec.getLsbD_one
+  apply Bool.eq_iff_iff.mpr
+  simp only [BitVec.getLsbD_shiftLeft, hone, Bool.and_eq_true,
+    not_decide_eq_true, decide_eq_true_eq]
+  constructor
+  · rintro ⟨⟨_, hge⟩, hz⟩
+    exact Nat.le_antisymm (Nat.le_of_sub_eq_zero hz) (Nat.le_of_not_gt hge)
+  · intro he
+    subst i
+    exact ⟨⟨hid, Nat.lt_irrefl id⟩, Nat.sub_self id⟩
+
+private theorem belt_bitmap_insert_count
+    (bitmap : Std.U64) (id : Nat) (hid : id < 64)
+    (hfresh : bitmap.bv &&& ((1 : BitVec 64) <<< id) = 0) :
+    (List.range 64).countP (fun i => (bitmap.bv ||| ((1 : BitVec 64) <<< id)).getLsbD i) =
+      (List.range 64).countP (fun i => bitmap.bv.getLsbD i) + 1 := by
+  have hd (i : Nat) (_hi : i ∈ List.range 64) :
+      (bitmap.bv.getLsbD i && ((1 : BitVec 64) <<< id).getLsbD i) = false := by
+    rw [← BitVec.getLsbD_and, hfresh]
+    exact BitVec.getLsbD_zero
+  simp only [BitVec.getLsbD_or]
+  rw [belt_countP_disjoint _ _ _ hd]
+  have hcount : (List.range 64).countP (fun i => ((1 : BitVec 64) <<< id).getLsbD i) = 1 := by
+    simp only [belt_single_bit id hid]
+    change (List.range 64).count id = 1
+    exact List.Nodup.count_of_mem (by decide)
+      ((by decide : ∀ i : Fin 64, i.val ∈ List.range 64) ⟨id, hid⟩)
+  rw [hcount]
+
+/-- Authentication of an input against immutable enrollment material. This asserts MAC
+validity, not that the provisioned slot key is secret or nonzero. -/
+@[expose]
+def BeltAuthenticatedInput (commit wal : Array Std.U8 32#usize)
+    (keys : Array (Array Std.U8 32#usize) 64#usize) : authenticated_belt.BeltQuorumStepInput → Prop
+  | .ProposeOrRetryEpoch ep msg digest tag =>
+    authenticated_belt.wal_receipt_tag wal commit ep msg digest = .ok tag
+  | .RecordCustodianAck ep msg id tag => id.val < 64 ∧
+    ∃ key, Array.index_usize keys (UScalar.cast .Usize id) = .ok key ∧
+      authenticated_belt.custodian_ack_tag key commit ep msg id = .ok tag
+  | .AuthorizeShares _ _ => True
+
+theorem authenticated_belt_step_accepted_input
+    (st st' : authenticated_belt.VerifiedBeltQuorumGuard)
+    (inp : authenticated_belt.BeltQuorumStepInput) (out : authenticated_belt.BeltQuorumStepOutput)
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.step st inp = .ok (st', .Ok out)) :
+    BeltAuthenticatedInput st.guard_key_commit st.wal_key st.custodian_keys inp := by
+  cases inp with
+  | ProposeOrRetryEpoch ep msg digest tag =>
+    unfold authenticated_belt.VerifiedBeltQuorumGuard.step at h
+    cases he : authenticated_belt.VerifiedBeltQuorumGuard.propose_or_retry_epoch st ep msg digest tag with
+    | fail e => simp [he, bind_eq_result_bind, Result.bind] at h
+    | div => simp [he, bind_eq_result_bind, Result.bind] at h
+    | ok v =>
+      rcases v with ⟨next, res⟩
+      cases res with
+      | Err e => simp [he, bind_eq_result_bind, Result.bind] at h
+      | Ok u =>
+        cases u
+        exact authenticated_belt_accepted_proposal_receipt st next ep msg digest tag he
+  | RecordCustodianAck ep msg id tag =>
+    unfold authenticated_belt.VerifiedBeltQuorumGuard.step at h
+    cases he : authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack st ep msg id tag with
+    | fail e => simp [he, bind_eq_result_bind, Result.bind] at h
+    | div => simp [he, bind_eq_result_bind, Result.bind] at h
+    | ok v =>
+      rcases v with ⟨next, res⟩
+      cases res with
+      | Err e => simp [he, bind_eq_result_bind, Result.bind] at h
+      | Ok count =>
+        exact (authenticated_belt_accepted_ack_tag st next ep msg tag id count he).2
+  | AuthorizeShares _ _ => trivial
+
+/-- Every accepted proposal and acknowledgment in the actual multi-turn wrapper trace
+has a valid MAC under the initial enrollment material, including after rejected turns. -/
+theorem authenticated_belt_trace_mac_valid
+    {st st_final : authenticated_belt.VerifiedBeltQuorumGuard}
+    {turns : List (MirTurn authenticated_belt.BeltQuorumStepInput
+      authenticated_belt.BeltQuorumStepOutput authenticated_belt.BeltAuthError)}
+    (htrace : MirTrace (adaptStateResult authenticated_belt.VerifiedBeltQuorumGuard.step)
+      st turns st_final) :
+    ∀ p ∈ mirAcceptedPairs turns,
+      BeltAuthenticatedInput st.guard_key_commit st.wal_key st.custodian_keys p.1 := by
+  induction htrace with
+  | nil _ => intro p hp; exact False.elim (List.not_mem_nil hp)
+  | @accept m m' mf inp out rest hstep htail ih =>
+    simp only [adaptStateResult, result_bind_ok_iff] at hstep
+    obtain ⟨⟨next, res⟩, hr, ho⟩ := hstep
+    cases res <;> cases ho
+    have hk := authenticated_belt_step_enrollment_unchanged m next inp _ hr
+    intro p hp
+    simp only [mirAcceptedPairs, List.mem_cons] at hp
+    rcases hp with rfl | hp
+    · exact authenticated_belt_step_accepted_input m next inp out hr
+    · have ht := ih p hp
+      rw [hk.1, hk.2.1, hk.2.2] at ht
+      exact ht
+  | @reject m m' mf inp err rest hstep htail ih =>
+    simp only [adaptStateResult, result_bind_ok_iff] at hstep
+    obtain ⟨⟨next, res⟩, hr, ho⟩ := hstep
+    cases res <;> cases ho
+    have hk := authenticated_belt_step_enrollment_unchanged m next inp _ hr
+    intro p hp
+    have ht := ih p hp
+    rw [hk.1, hk.2.1, hk.2.2] at ht
+    exact ht
+
+private theorem belt_ack_success_shape
+    (st next : pants_and_quorum_guards.BeltQuorumCore) (ep : Std.U64)
+    (msg : Array Std.U8 32#usize) (c : Std.U32)
+    (h : pants_and_quorum_guards.BeltQuorumCore.record_custodian_ack st ep msg = .ok (next, .Ok c)) :
+    next.poisoned = false ∧ msg = st.bound_msg_tag ∧ next.ack_count.val = st.ack_count.val + 1 := by
+  have hs := (belt_ack_step_sim st ep msg).1 next c h
+  clear h
+  have hn := st.n.bv.isLt
+  dsimp only [beltQuorumMealy] at hs
+  repeat (any_goals first | (split at hs) | simp only [reduceCtorEq] at hs)
+  all_goals cases hs
+  all_goals simp_all [beltGuardCorrupt, BitVec.toNat_add]
+  all_goals omega
+
+private theorem belt_ack_error_shape
+    (st next : pants_and_quorum_guards.BeltQuorumCore) (ep : Std.U64)
+    (msg : Array Std.U8 32#usize) (e : pants_and_quorum_guards.PantsGuardError)
+    (h : pants_and_quorum_guards.BeltQuorumCore.record_custodian_ack st ep msg = .ok (next, .Err e)) :
+    next = st ∨ next = purePoisonBelt st := by
+  have hs := (belt_ack_step_sim st ep msg).2 next e h |>.2
+  dsimp only [beltQuorumMealy] at hs
+  repeat (any_goals split at hs)
+  all_goals subst next
+  all_goals first | exact Or.inl rfl | exact Or.inr rfl
+
+private theorem belt_ack_mismatch_poison
+    (st next : pants_and_quorum_guards.BeltQuorumCore) (ep : Std.U64)
+    (msg : Array Std.U8 32#usize)
+    (r : core.result.Result Std.U32 pants_and_quorum_guards.PantsGuardError)
+    (hb : st.has_bound_epoch = true) (he : ep = st.bound_epoch) (hm : msg ≠ st.bound_msg_tag)
+    (h : pants_and_quorum_guards.BeltQuorumCore.record_custodian_ack st ep msg = .ok (next, r)) :
+    next = purePoisonBelt st := by
+  cases r with
+  | Ok c => exact False.elim (hm (belt_ack_success_shape st next ep msg c h).2.1)
+  | Err e =>
+    have hs := (belt_ack_step_sim st ep msg).2 next e h |>.2
+    simpa [beltQuorumMealy, hb, he, Ne.symm hm] using hs.symm
+
+theorem authenticated_belt_ack_preserves_count
+    (st st' : authenticated_belt.VerifiedBeltQuorumGuard)
+    (ep : Std.U64) (msg tag : Array Std.U8 32#usize) (id : Std.U8)
+    (r : core.result.Result Std.U32 authenticated_belt.BeltAuthError)
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack st ep msg id tag = .ok (st', r))
+    (hi : BeltAckCountInvariant st) : BeltAckCountInvariant st' := by
+  by_cases h64 : id >= 64#u8
+  · simp [authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack,
+      pants_and_quorum_guards.BeltQuorumCore.impl.n, h64] at h
+    rcases h with ⟨rfl, rfl⟩
+    exact hi
+  · have hid : id.val < 64 := Nat.lt_of_not_ge h64
+    let bit : Std.U64 := ⟨(1 : BitVec 64) <<< id.val⟩
+    have hshift : (1#u64 <<< id : Result Std.U64) = .ok bit := by
+      change (if id.val < 64 then .ok bit else .fail .integerOverflow : Result Std.U64) = .ok bit
+      simp only [hid, ↓reduceIte]
+    cases hc : pants_and_quorum_guards.BeltQuorumCore.record_custodian_ack st.inner ep msg with
+    | fail e =>
+      unfold authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack at h
+      simp only [bind_eq_result_bind, result_bind_ok, lift, ct_eq_bytes32_spec,
+        pants_and_quorum_guards.BeltQuorumCore.impl.n,
+        pants_and_quorum_guards.BeltQuorumCore.impl.has_bound_epoch,
+        pants_and_quorum_guards.BeltQuorumCore.impl.bound_epoch,
+        pants_and_quorum_guards.BeltQuorumCore.impl.bound_msg_tag,
+        pants_and_quorum_guards.BeltQuorumCore.impl.ack_count,
+        pants_and_quorum_guards.BeltQuorumCore.is_poisoned,
+        h64, hshift, hc] at h
+      repeat (any_goals first
+        | simp only [result_bind_ok_iff, result_bind_fail, reduceCtorEq, ↓reduceIte] at h
+        | (obtain ⟨v, hv, h⟩ : ∃ v, _ ∧ _ := h)
+        | (split at h))
+      all_goals cases h
+      all_goals exact hi
+    | div =>
+      unfold authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack at h
+      simp only [bind_eq_result_bind, result_bind_ok, lift, ct_eq_bytes32_spec,
+        pants_and_quorum_guards.BeltQuorumCore.impl.n,
+        pants_and_quorum_guards.BeltQuorumCore.impl.has_bound_epoch,
+        pants_and_quorum_guards.BeltQuorumCore.impl.bound_epoch,
+        pants_and_quorum_guards.BeltQuorumCore.impl.bound_msg_tag,
+        pants_and_quorum_guards.BeltQuorumCore.impl.ack_count,
+        pants_and_quorum_guards.BeltQuorumCore.is_poisoned,
+        h64, hshift, hc] at h
+      repeat (any_goals first
+        | simp only [result_bind_ok_iff, result_bind_div, reduceCtorEq, ↓reduceIte] at h
+        | (obtain ⟨v, hv, h⟩ : ∃ v, _ ∧ _ := h)
+        | (split at h))
+      all_goals cases h
+      all_goals exact hi
+    | ok v =>
+      rcases v with ⟨next, res⟩
+      cases res with
+      | Ok c =>
+        obtain ⟨hp, hm, hn⟩ := belt_ack_success_shape st.inner next ep msg c hc
+        have hmdec : decide (msg = st.inner.bound_msg_tag) = true := decide_eq_true hm
+        by_cases hfresh : st.ack_bitmap &&& bit = 0#u64
+        · have hused : (st.ack_bitmap &&& bit != 0#u64) = false := by simp [hfresh]
+          have hpop := belt_bitmap_insert_count st.ack_bitmap id.val hid (congrArg UScalar.bv hfresh)
+          unfold authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack at h
+          simp only [bind_eq_result_bind, result_bind_ok, lift, ct_eq_bytes32_spec,
+            pants_and_quorum_guards.BeltQuorumCore.impl.n,
+            pants_and_quorum_guards.BeltQuorumCore.impl.has_bound_epoch,
+            pants_and_quorum_guards.BeltQuorumCore.impl.bound_epoch,
+            pants_and_quorum_guards.BeltQuorumCore.impl.bound_msg_tag,
+            pants_and_quorum_guards.BeltQuorumCore.impl.ack_count,
+            pants_and_quorum_guards.BeltQuorumCore.is_poisoned,
+            h64, hshift, hc, hmdec, hused] at h
+          repeat (any_goals first
+            | simp only [result_bind_ok_iff, reduceCtorEq, ↓reduceIte] at h
+            | (obtain ⟨v, hv, h⟩ : ∃ v, _ ∧ _ := h)
+            | (split at h))
+          all_goals cases h
+          all_goals first | exact hi | (change next.ack_count.val = (List.range 64).countP (fun i => (st.ack_bitmap.bv ||| ((1 : BitVec 64) <<< id.val)).getLsbD i); rw [hn, hpop]; exact congrArg (· + 1) hi)
+        · have hused : (st.ack_bitmap &&& bit != 0#u64) = true := by simp [hfresh]
+          unfold authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack at h
+          simp only [bind_eq_result_bind, result_bind_ok, lift, ct_eq_bytes32_spec,
+            pants_and_quorum_guards.BeltQuorumCore.impl.n,
+            pants_and_quorum_guards.BeltQuorumCore.impl.has_bound_epoch,
+            pants_and_quorum_guards.BeltQuorumCore.impl.bound_epoch,
+            pants_and_quorum_guards.BeltQuorumCore.impl.bound_msg_tag,
+            pants_and_quorum_guards.BeltQuorumCore.impl.ack_count,
+            pants_and_quorum_guards.BeltQuorumCore.is_poisoned,
+            h64, hshift, hc, hmdec, hused] at h
+          repeat (any_goals first
+            | simp only [result_bind_ok_iff, ↓reduceIte] at h
+            | (obtain ⟨v, hv, h⟩ : ∃ v, _ ∧ _ := h)
+            | (split at h))
+          all_goals cases h
+          all_goals exact hi
+      | Err e =>
+        rcases belt_ack_error_shape st.inner next ep msg e hc with hn | hn
+        · subst next
+          by_cases hp : st.inner.poisoned = true <;>
+            by_cases hb : st.inner.has_bound_epoch = true <;>
+            by_cases he : ep = st.inner.bound_epoch <;>
+            by_cases hm : msg = st.inner.bound_msg_tag
+          all_goals try
+            have hbad := belt_ack_mismatch_poison st.inner st.inner ep msg (.Err e) hb he hm hc
+            exact False.elim (hp (congrArg pants_and_quorum_guards.BeltQuorumCore.poisoned hbad))
+          all_goals try simp only [he, hm] at hc
+          all_goals
+            unfold authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack at h
+            simp only [bind_eq_result_bind, result_bind_ok, lift, ct_eq_bytes32_spec,
+              pants_and_quorum_guards.BeltQuorumCore.impl.n,
+              pants_and_quorum_guards.BeltQuorumCore.impl.has_bound_epoch,
+              pants_and_quorum_guards.BeltQuorumCore.impl.bound_epoch,
+              pants_and_quorum_guards.BeltQuorumCore.impl.bound_msg_tag,
+              pants_and_quorum_guards.BeltQuorumCore.impl.ack_count,
+              pants_and_quorum_guards.BeltQuorumCore.is_poisoned,
+              h64, hshift, hc, hp, hb, he, hm, bne_iff_ne] at h
+            repeat (any_goals first
+              | simp only [result_bind_ok_iff, reduceCtorEq, ↓reduceIte] at h
+              | (obtain ⟨v, hv, h⟩ : ∃ v, _ ∧ _ := h)
+              | (split at h))
+            all_goals cases h
+          all_goals first | exact hi | (simp_all only [decide_true, not_true_eq_false])
+        · subst next
+          unfold authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack at h
+          simp only [bind_eq_result_bind, result_bind_ok, lift, ct_eq_bytes32_spec,
+            pants_and_quorum_guards.BeltQuorumCore.impl.n,
+            pants_and_quorum_guards.BeltQuorumCore.impl.has_bound_epoch,
+            pants_and_quorum_guards.BeltQuorumCore.impl.bound_epoch,
+            pants_and_quorum_guards.BeltQuorumCore.impl.bound_msg_tag,
+            pants_and_quorum_guards.BeltQuorumCore.impl.ack_count,
+            pants_and_quorum_guards.BeltQuorumCore.is_poisoned,
+            h64, hshift, hc] at h
+          repeat (any_goals first
+            | simp only [result_bind_ok_iff, ↓reduceIte] at h
+            | (obtain ⟨v, hv, h⟩ : ∃ v, _ ∧ _ := h)
+            | (split at h))
+          all_goals cases h
+          all_goals first | exact hi | (change (0#u32).val = (List.range 64).countP (fun i => (0#u64).bv.getLsbD i); decide)
+
+theorem authenticated_belt_step_preserves_count
+    (st st' : authenticated_belt.VerifiedBeltQuorumGuard)
+    (inp : authenticated_belt.BeltQuorumStepInput)
+    (r : core.result.Result authenticated_belt.BeltQuorumStepOutput authenticated_belt.BeltAuthError)
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.step st inp = .ok (st', r))
+    (hi : BeltAckCountInvariant st) : BeltAckCountInvariant st' := by
+  cases inp with
+  | ProposeOrRetryEpoch ep msg digest tag =>
+    unfold authenticated_belt.VerifiedBeltQuorumGuard.step at h
+    cases he : authenticated_belt.VerifiedBeltQuorumGuard.propose_or_retry_epoch st ep msg digest tag with
+    | fail e => simp [he, bind_eq_result_bind, Result.bind] at h
+    | div => simp [he, bind_eq_result_bind, Result.bind] at h
+    | ok v =>
+      rcases v with ⟨next, res⟩
+      have hk := authenticated_belt_propose_preserves_count st next ep msg digest tag res he hi
+      cases res <;> simp [he, bind_eq_result_bind, Result.bind] at h <;> rcases h with ⟨rfl, rfl⟩ <;> exact hk
+  | RecordCustodianAck ep msg id tag =>
+    unfold authenticated_belt.VerifiedBeltQuorumGuard.step at h
+    cases he : authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack st ep msg id tag with
+    | fail e => simp [he, bind_eq_result_bind, Result.bind] at h
+    | div => simp [he, bind_eq_result_bind, Result.bind] at h
+    | ok v =>
+      rcases v with ⟨next, res⟩
+      have hk := authenticated_belt_ack_preserves_count st next ep msg tag id res he hi
+      cases res <;> simp [he, bind_eq_result_bind, Result.bind] at h <;> rcases h with ⟨rfl, rfl⟩ <;> exact hk
+  | AuthorizeShares ep msg =>
+    unfold authenticated_belt.VerifiedBeltQuorumGuard.step at h
+    cases he : authenticated_belt.VerifiedBeltQuorumGuard.authorize_shares st ep msg with
+    | fail e => simp [he, bind_eq_result_bind, Result.bind] at h
+    | div => simp [he, bind_eq_result_bind, Result.bind] at h
+    | ok v =>
+      rcases v with ⟨next, res⟩
+      have hk := authenticated_belt_authorize_preserves_count st next ep msg res he hi
+      cases res <;> simp [he, bind_eq_result_bind, Result.bind] at h <;> rcases h with ⟨rfl, rfl⟩ <;> exact hk
+
+theorem authenticated_belt_trace_preserves_count
+    {st st_final : authenticated_belt.VerifiedBeltQuorumGuard}
+    {turns : List (MirTurn authenticated_belt.BeltQuorumStepInput
+      authenticated_belt.BeltQuorumStepOutput authenticated_belt.BeltAuthError)}
+    (htrace : MirTrace (adaptStateResult authenticated_belt.VerifiedBeltQuorumGuard.step)
+      st turns st_final) (hi : BeltAckCountInvariant st) : BeltAckCountInvariant st_final := by
+  induction htrace with
+  | nil _ => exact hi
+  | @accept m m' mf inp out rest hstep htail ih =>
+    simp only [adaptStateResult, result_bind_ok_iff] at hstep
+    obtain ⟨⟨next, res⟩, hr, ho⟩ := hstep
+    cases res <;> cases ho
+    exact ih (authenticated_belt_step_preserves_count m next inp _ hr hi)
+  | @reject m m' mf inp err rest hstep htail ih =>
+    simp only [adaptStateResult, result_bind_ok_iff] at hstep
+    obtain ⟨⟨next, res⟩, hr, ho⟩ := hstep
+    cases res <;> cases ho
+    exact ih (authenticated_belt_step_preserves_count m next inp _ hr hi)
+
+private theorem belt_propose_core_trace
+    (st next : pants_and_quorum_guards.BeltQuorumCore) (ep : Std.U64)
+    (msg : Array Std.U8 32#usize) (valid : Bool)
+    (r : core.result.Result Unit pants_and_quorum_guards.PantsGuardError)
+    (h : pants_and_quorum_guards.BeltQuorumCore.propose_or_retry_epoch st ep msg valid = .ok (next, r)) :
+    ∃ pairs, beltQuorumMealy.ValidTrace st pairs next := by
+  cases r with
+  | Ok v =>
+    exact ⟨[(.ProposeOrRetryEpoch ep msg valid, .EpochBound)],
+      .accept ((belt_propose_step_sim st ep msg valid).1 next v h) (.nil next)⟩
+  | Err e =>
+    obtain ⟨hs, he⟩ := (belt_propose_step_sim st ep msg valid).2 next e h
+    exact ⟨[], .reject (.ProposeOrRetryEpoch ep msg valid) hs (by rw [he]; exact .nil next)⟩
+
+private theorem belt_ack_core_trace
+    (st next : pants_and_quorum_guards.BeltQuorumCore) (ep : Std.U64)
+    (msg : Array Std.U8 32#usize)
+    (r : core.result.Result Std.U32 pants_and_quorum_guards.PantsGuardError)
+    (h : pants_and_quorum_guards.BeltQuorumCore.record_custodian_ack st ep msg = .ok (next, r)) :
+    ∃ pairs, beltQuorumMealy.ValidTrace st pairs next := by
+  cases r with
+  | Ok v =>
+    exact ⟨[(.RecordCustodianAck ep msg, .AckRecorded v)],
+      .accept ((belt_ack_step_sim st ep msg).1 next v h) (.nil next)⟩
+  | Err e =>
+    obtain ⟨hs, he⟩ := (belt_ack_step_sim st ep msg).2 next e h
+    exact ⟨[], .reject (.RecordCustodianAck ep msg) hs (by rw [he]; exact .nil next)⟩
+
+private theorem belt_authorize_core_trace
+    (st next : pants_and_quorum_guards.BeltQuorumCore) (ep : Std.U64)
+    (msg : Array Std.U8 32#usize)
+    (r : core.result.Result pants_and_quorum_guards.BeltAuthorizationGrant pants_and_quorum_guards.PantsGuardError)
+    (h : pants_and_quorum_guards.BeltQuorumCore.authorize_shares st ep msg = .ok (next, r)) :
+    ∃ pairs, beltQuorumMealy.ValidTrace st pairs next := by
+  cases r with
+  | Ok v =>
+    exact ⟨[(.AuthorizeShares ep msg, .SharesAuthorized v)],
+      .accept ((belt_auth_step_sim st ep msg).1 next v h) (.nil next)⟩
+  | Err e =>
+    obtain ⟨hs, he⟩ := (belt_auth_step_sim st ep msg).2 next e h
+    exact ⟨[], .reject (.AuthorizeShares ep msg) hs (by rw [he]; exact .nil next)⟩
+
+private theorem authenticated_belt_authorized_grant_core
+    (st st' : authenticated_belt.VerifiedBeltQuorumGuard)
+    (ep : Std.U64) (msg : Array Std.U8 32#usize)
+    (grant : pants_and_quorum_guards.BeltAuthorizationGrant)
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.authorize_shares st ep msg = .ok (st', .Ok grant)) :
+    pants_and_quorum_guards.BeltQuorumCore.authorize_shares st.inner ep msg = .ok (st'.inner, .Ok grant) := by
+  unfold authenticated_belt.VerifiedBeltQuorumGuard.authorize_shares at h
+  cases hc : pants_and_quorum_guards.BeltQuorumCore.authorize_shares st.inner ep msg with
+  | fail e => simp [hc, bind_eq_result_bind, Result.bind] at h
+  | div => simp [hc, bind_eq_result_bind, Result.bind] at h
+  | ok v =>
+    rcases v with ⟨next, res⟩
+    cases res <;> cases hp : next.poisoned <;>
+      simp only [hc, bind_eq_result_bind, result_bind_ok,
+        pants_and_quorum_guards.BeltQuorumCore.is_poisoned, hp,
+        Bool.false_eq_true, ↓reduceIte] at h <;> cases h
+    all_goals rfl
+
+private theorem authenticated_belt_step_core_trace
+    (st st' : authenticated_belt.VerifiedBeltQuorumGuard)
+    (inp : authenticated_belt.BeltQuorumStepInput)
+    (r : core.result.Result authenticated_belt.BeltQuorumStepOutput authenticated_belt.BeltAuthError)
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.step st inp = .ok (st', r)) :
+    ∃ pairs, beltQuorumMealy.ValidTrace st.inner pairs st'.inner ∧
+      ∀ g, r = .Ok (.SharesAuthorized g) → ∃ p ∈ pairs, p.2 = .SharesAuthorized g := by
+  cases inp with
+  | ProposeOrRetryEpoch ep msg digest tag =>
+    unfold authenticated_belt.VerifiedBeltQuorumGuard.step at h
+    cases he : authenticated_belt.VerifiedBeltQuorumGuard.propose_or_retry_epoch st ep msg digest tag with
+    | fail e => simp [he, bind_eq_result_bind, Result.bind] at h
+    | div => simp [he, bind_eq_result_bind, Result.bind] at h
+    | ok v =>
+      rcases v with ⟨next, res⟩
+      obtain ⟨expected, cr, _, hc⟩ := authenticated_belt_propose_core_projection st next ep msg digest tag res he
+      obtain ⟨pairs, ht⟩ := belt_propose_core_trace st.inner next.inner ep msg (decide (expected = tag)) cr hc
+      cases res <;> simp [he, bind_eq_result_bind, Result.bind] at h <;> rcases h with ⟨rfl, rfl⟩
+      all_goals exact ⟨pairs, ht, fun g hg => by cases hg⟩
+  | RecordCustodianAck ep msg id tag =>
+    unfold authenticated_belt.VerifiedBeltQuorumGuard.step at h
+    cases he : authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack st ep msg id tag with
+    | fail e => simp [he, bind_eq_result_bind, Result.bind] at h
+    | div => simp [he, bind_eq_result_bind, Result.bind] at h
+    | ok v =>
+      rcases v with ⟨next, res⟩
+      have ht : ∃ pairs, beltQuorumMealy.ValidTrace st.inner pairs next.inner := by
+        rcases authenticated_belt_ack_core_projection st next ep msg tag id res he with hn | ⟨cr, hc⟩
+        · subst next; exact ⟨[], .nil _⟩
+        · exact belt_ack_core_trace st.inner next.inner ep msg cr hc
+      obtain ⟨pairs, ht⟩ := ht
+      cases res <;> simp [he, bind_eq_result_bind, Result.bind] at h <;> rcases h with ⟨rfl, rfl⟩
+      all_goals exact ⟨pairs, ht, fun g hg => by cases hg⟩
+  | AuthorizeShares ep msg =>
+    unfold authenticated_belt.VerifiedBeltQuorumGuard.step at h
+    cases he : authenticated_belt.VerifiedBeltQuorumGuard.authorize_shares st ep msg with
+    | fail e => simp [he, bind_eq_result_bind, Result.bind] at h
+    | div => simp [he, bind_eq_result_bind, Result.bind] at h
+    | ok v =>
+      rcases v with ⟨next, res⟩
+      cases res with
+      | Ok grant =>
+        simp [he, bind_eq_result_bind, Result.bind] at h
+        rcases h with ⟨rfl, rfl⟩
+        have hc := authenticated_belt_authorized_grant_core st next ep msg grant he
+        refine ⟨[(.AuthorizeShares ep msg, .SharesAuthorized grant)],
+          .accept ((belt_auth_step_sim st.inner ep msg).1 next.inner grant hc) (.nil _), ?_⟩
+        intro g hg
+        cases hg
+        exact ⟨_, List.mem_cons_self, rfl⟩
+      | Err e =>
+        simp [he, bind_eq_result_bind, Result.bind] at h
+        rcases h with ⟨rfl, rfl⟩
+        obtain ⟨cr, hc⟩ := authenticated_belt_authorize_core_projection st next ep msg (.Err e) he
+        obtain ⟨pairs, ht⟩ := belt_authorize_core_trace st.inner next.inner ep msg cr hc
+        exact ⟨pairs, ht, fun g hg => by cases hg⟩
+
+private theorem belt_core_trace_append
+    {s m f : pants_and_quorum_guards.BeltQuorumCore}
+    {xs ys : List (pants_and_quorum_guards.BeltQuorumCoreInput × pants_and_quorum_guards.BeltQuorumCoreOutput)}
+    (hx : beltQuorumMealy.ValidTrace s xs m) (hy : beltQuorumMealy.ValidTrace m ys f) :
+    beltQuorumMealy.ValidTrace s (xs ++ ys) f := by
+  induction hx with
+  | nil _ => exact hy
+  | accept h _ ih => exact .accept h (ih hy)
+  | reject inp h _ ih => exact .reject inp h (ih hy)
+
+/-- The authenticated trace has a core execution covering every released grant.
+Duplicate acknowledgments and early authentication errors contribute no core turns. -/
+theorem authenticated_belt_trace_core_projection
+    {st st_final : authenticated_belt.VerifiedBeltQuorumGuard}
+    {turns : List (MirTurn authenticated_belt.BeltQuorumStepInput
+      authenticated_belt.BeltQuorumStepOutput authenticated_belt.BeltAuthError)}
+    (htrace : MirTrace (adaptStateResult authenticated_belt.VerifiedBeltQuorumGuard.step)
+      st turns st_final) :
+    ∃ pairs, beltQuorumMealy.ValidTrace st.inner pairs st_final.inner ∧
+      ∀ p ∈ mirAcceptedPairs turns, ∀ g, p.2 = .SharesAuthorized g →
+        ∃ cp ∈ pairs, cp.2 = .SharesAuthorized g := by
+  induction htrace with
+  | nil _ => exact ⟨[], .nil _, fun p hp => False.elim (List.not_mem_nil hp)⟩
+  | @accept m m' mf inp out rest hstep htail ih =>
+    simp only [adaptStateResult, result_bind_ok_iff] at hstep
+    obtain ⟨⟨next, res⟩, hr, ho⟩ := hstep
+    cases res <;> cases ho
+    obtain ⟨xs, hx, hcov⟩ := authenticated_belt_step_core_trace m next inp _ hr
+    obtain ⟨ys, hy, hrest⟩ := ih
+    refine ⟨xs ++ ys, belt_core_trace_append hx hy, ?_⟩
+    intro p hp g hg
+    simp only [mirAcceptedPairs, List.mem_cons] at hp
+    rcases hp with rfl | hp
+    · obtain ⟨cp, hc, he⟩ := hcov g (congrArg core.result.Result.Ok hg)
+      exact ⟨cp, List.mem_append_left ys hc, he⟩
+    · obtain ⟨cp, hc, he⟩ := hrest p hp g hg
+      exact ⟨cp, List.mem_append_right xs hc, he⟩
+  | @reject m m' mf inp err rest hstep htail ih =>
+    simp only [adaptStateResult, result_bind_ok_iff] at hstep
+    obtain ⟨⟨next, res⟩, hr, ho⟩ := hstep
+    cases res <;> cases ho
+    obtain ⟨xs, hx, _⟩ := authenticated_belt_step_core_trace m next inp _ hr
+    obtain ⟨ys, hy, hrest⟩ := ih
+    refine ⟨xs ++ ys, belt_core_trace_append hx hy, ?_⟩
+    intro p hp g hg
+    obtain ⟨cp, hc, he⟩ := hrest p hp g hg
+    exact ⟨cp, List.mem_append_right xs hc, he⟩
+
+private theorem belt_core_trace_committee
+    {st final : pants_and_quorum_guards.BeltQuorumCore}
+    {pairs : List (pants_and_quorum_guards.BeltQuorumCoreInput × pants_and_quorum_guards.BeltQuorumCoreOutput)}
+    (ht : beltQuorumMealy.ValidTrace st pairs final) : final.n = st.n := by
+  induction ht with
+  | nil _ => rfl
+  | @accept st next final inp out rest hs ht ih =>
+    have hn : next.n = st.n := by
+      cases inp <;> dsimp only [beltQuorumMealy] at hs
+      repeat (any_goals first | (split at hs) | simp only [reduceCtorEq] at hs)
+      all_goals cases hs <;> rfl
+    exact ih.trans hn
+  | @reject st final inp rest hs ht ih =>
+    have hn : (beltQuorumMealy.errStep st inp).n = st.n := by
+      cases inp <;> dsimp only [beltQuorumMealy]
+      repeat (any_goals split)
+      all_goals rfl
+    exact ih.trans hn
+
+theorem authenticated_belt_step_committee_unchanged
+    (st st' : authenticated_belt.VerifiedBeltQuorumGuard)
+    (inp : authenticated_belt.BeltQuorumStepInput)
+    (r : core.result.Result authenticated_belt.BeltQuorumStepOutput authenticated_belt.BeltAuthError)
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.step st inp = .ok (st', r)) : st'.inner.n = st.inner.n := by
+  obtain ⟨_, ht, _⟩ := authenticated_belt_step_core_trace st st' inp r h
+  exact belt_core_trace_committee ht
+
+private theorem authenticated_belt_step_ack_range
+    (st st' : authenticated_belt.VerifiedBeltQuorumGuard)
+    (ep : Std.U64) (msg tag : Array Std.U8 32#usize) (id : Std.U8)
+    (out : authenticated_belt.BeltQuorumStepOutput)
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.step st (.RecordCustodianAck ep msg id tag) = .ok (st', .Ok out)) :
+    id.val < st.inner.n.val := by
+  unfold authenticated_belt.VerifiedBeltQuorumGuard.step at h
+  cases he : authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack st ep msg id tag with
+  | fail e => simp [he, bind_eq_result_bind, Result.bind] at h
+  | div => simp [he, bind_eq_result_bind, Result.bind] at h
+  | ok v =>
+    rcases v with ⟨next, res⟩
+    cases res with
+    | Err e => simp [he, bind_eq_result_bind, Result.bind] at h
+    | Ok count => exact (authenticated_belt_accepted_ack_tag st next ep msg tag id count he).1
+
+theorem authenticated_belt_trace_ack_range
+    {st st_final : authenticated_belt.VerifiedBeltQuorumGuard}
+    {turns : List (MirTurn authenticated_belt.BeltQuorumStepInput
+      authenticated_belt.BeltQuorumStepOutput authenticated_belt.BeltAuthError)}
+    (htrace : MirTrace (adaptStateResult authenticated_belt.VerifiedBeltQuorumGuard.step)
+      st turns st_final) :
+    ∀ p ∈ mirAcceptedPairs turns, ∀ ep msg id tag,
+      p.1 = .RecordCustodianAck ep msg id tag → id.val < st.inner.n.val := by
+  induction htrace with
+  | nil _ => intro p hp; exact False.elim (List.not_mem_nil hp)
+  | @accept m m' mf inp out rest hstep htail ih =>
+    simp only [adaptStateResult, result_bind_ok_iff] at hstep
+    obtain ⟨⟨next, res⟩, hr, ho⟩ := hstep
+    cases res <;> cases ho
+    have hn := authenticated_belt_step_committee_unchanged m next inp _ hr
+    intro p hp ep msg id tag hin
+    simp only [mirAcceptedPairs, List.mem_cons] at hp
+    rcases hp with rfl | hp
+    · cases hin
+      exact authenticated_belt_step_ack_range m next ep msg tag id out hr
+    · rw [← hn]
+      exact ih p hp ep msg id tag hin
+  | @reject m m' mf inp err rest hstep htail ih =>
+    simp only [adaptStateResult, result_bind_ok_iff] at hstep
+    obtain ⟨⟨next, res⟩, hr, ho⟩ := hstep
+    cases res <;> cases ho
+    have hn := authenticated_belt_step_committee_unchanged m next inp _ hr
+    intro p hp ep msg id tag hin
+    rw [← hn]
+    exact ih p hp ep msg id tag hin
+
+private theorem authenticated_belt_new_facts
+    (n t f q : Std.U32) (gl : Bool) (epoch window : Std.U64)
+    (commit wal : Array Std.U8 32#usize) (keys : Array (Array Std.U8 32#usize) 64#usize)
+    (st : authenticated_belt.VerifiedBeltQuorumGuard)
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.new_validated n t f q gl epoch window commit keys wal =
+      .ok (.Ok st)) :
+    ValidBeltQuorumConfigProp n t f q gl ∧ n.val ≤ 64 ∧
+    BeltStateInv n t f q gl epoch.val st.inner ∧
+    st.guard_key_commit = commit ∧ st.custodian_keys = keys ∧ st.wal_key = wal := by
+  by_cases hn : n > 64#u32
+  · simp [authenticated_belt.VerifiedBeltQuorumGuard.new_validated, hn] at h
+  · by_cases hv : validBeltQuorumConfigBool n t f q gl = true
+    · simp [authenticated_belt.VerifiedBeltQuorumGuard.new_validated, hn,
+        pants_and_quorum_guards.BeltQuorumCore.new_validated,
+        validate_belt_quorum_config_eq, hv] at h
+      cases h
+      refine ⟨(validBeltQuorumConfigBool_iff n t f q gl).mp hv,
+        Nat.le_of_not_gt hn, ?_, rfl, rfl, rfl⟩
+      exact ⟨rfl, rfl, rfl, rfl, rfl, hv, Nat.le_refl _, Nat.zero_le _,
+        fun h => Bool.noConfusion h, fun _ => rfl⟩
+    · simp [authenticated_belt.VerifiedBeltQuorumGuard.new_validated, hn,
+        pants_and_quorum_guards.BeltQuorumCore.new_validated,
+        validate_belt_quorum_config_eq, hv] at h
+
+/-- Authenticated multi-turn soundness, including rejected state transitions and duplicate
+acknowledgments. The cardinality invariant counts distinct bitmap positions; this theorem
+alone does not yet locate the historical acknowledgment turns backing each grant. -/
+theorem authenticated_belt_quorum_guard_multiturn_sound
+    (n t f q : Std.U32) (gl : Bool) (initial_next_epoch max_jump_window : Std.U64)
+    (commit wal : Array Std.U8 32#usize) (keys : Array (Array Std.U8 32#usize) 64#usize)
+    (st0 st_final : authenticated_belt.VerifiedBeltQuorumGuard)
+    (turns : List (MirTurn authenticated_belt.BeltQuorumStepInput
+      authenticated_belt.BeltQuorumStepOutput authenticated_belt.BeltAuthError))
+    (hnew : authenticated_belt.VerifiedBeltQuorumGuard.new_validated n t f q gl
+      initial_next_epoch max_jump_window commit keys wal = .ok (.Ok st0))
+    (htrace : MirTrace (adaptStateResult authenticated_belt.VerifiedBeltQuorumGuard.step)
+      st0 turns st_final) :
+    ValidBeltQuorumConfigProp n t f q gl ∧ n.val ≤ 64 ∧
+    (∀ p ∈ mirAcceptedPairs turns, ∀ ep msg digest tag,
+      p.1 = .ProposeOrRetryEpoch ep msg digest tag →
+      authenticated_belt.wal_receipt_tag wal commit ep msg digest = .ok tag) ∧
+    (∀ p ∈ mirAcceptedPairs turns, ∀ ep msg id tag,
+      p.1 = .RecordCustodianAck ep msg id tag →
+      id.val < n.val ∧ id.val < 64 ∧
+      ∃ key, Array.index_usize keys (UScalar.cast .Usize id) = .ok key ∧
+        authenticated_belt.custodian_ack_tag key commit ep msg id = .ok tag) ∧
+    (∀ p ∈ mirAcceptedPairs turns, ∀ g, p.2 = .SharesAuthorized g →
+      q.val ≤ g.certified_acks.val ∧ g.certified_acks.val ≤ n.val ∧
+      initial_next_epoch.val ≤ g.authorized_epoch.val) ∧
+    (∀ p1 ∈ mirAcceptedPairs turns, ∀ p2 ∈ mirAcceptedPairs turns, ∀ g1 g2,
+      p1.2 = .SharesAuthorized g1 → p2.2 = .SharesAuthorized g2 →
+      g1.authorized_epoch = g2.authorized_epoch → g1.msg_tag = g2.msg_tag) ∧
+    BeltAckCountInvariant st_final := by
+  obtain ⟨hcfg, hn, hinv, hcommit, hkeys, hwal⟩ :=
+    authenticated_belt_new_facts n t f q gl initial_next_epoch max_jump_window commit wal keys st0 hnew
+  obtain ⟨pairs, ht, hcover⟩ := authenticated_belt_trace_core_projection htrace
+  have hgrant := belt_grants_above_floor hinv ht
+  have hneq := (belt_validTrace_non_equivocation hinv ht).2
+  have hmac := authenticated_belt_trace_mac_valid htrace
+  rw [hcommit, hkeys, hwal] at hmac
+  have hrange := authenticated_belt_trace_ack_range htrace
+  rw [hinv.1] at hrange
+  refine ⟨hcfg, hn, ?_, ?_, ?_, ?_,
+    authenticated_belt_trace_preserves_count htrace
+      (authenticated_belt_initial_count_invariant n t f q gl initial_next_epoch max_jump_window
+        commit wal keys st0 hnew)⟩
+  · intro p hp ep msg digest tag hi
+    have hm := hmac p hp
+    rw [hi] at hm
+    exact hm
+  · intro p hp ep msg id tag hi
+    have hm := hmac p hp
+    rw [hi] at hm
+    exact ⟨hrange p hp ep msg id tag hi, hm⟩
+  · intro p hp g hg
+    obtain ⟨cp, hcp, hc⟩ := hcover p hp g hg
+    exact hgrant cp hcp g hc
+  · intro p1 hp1 p2 hp2 g1 g2 hg1 hg2 hep
+    obtain ⟨cp1, hcp1, hc1⟩ := hcover p1 hp1 g1 hg1
+    obtain ⟨cp2, hcp2, hc2⟩ := hcover p2 hp2 g2 hg2
+    exact hneq cp1 hcp1 cp2 hcp2 g1 g2 hc1 hc2 hep
+
+/-- Explicit enrollment trust strengthens actual accepted acknowledgments to nonzero,
+pairwise-distinct slot keys. Historical grant backing is a separate obligation. -/
+theorem authenticated_belt_provisioned_trace_ack_keys
+    (n t f q : Std.U32) (gl : Bool) (initial_next_epoch max_jump_window : Std.U64)
+    (commit wal : Array Std.U8 32#usize) (keys : Array (Array Std.U8 32#usize) 64#usize)
+    (st0 st_final : authenticated_belt.VerifiedBeltQuorumGuard)
+    (turns : List (MirTurn authenticated_belt.BeltQuorumStepInput
+      authenticated_belt.BeltQuorumStepOutput authenticated_belt.BeltAuthError))
+    (hnew : authenticated_belt.VerifiedBeltQuorumGuard.new_validated n t f q gl
+      initial_next_epoch max_jump_window commit keys wal = .ok (.Ok st0))
+    (htrace : MirTrace (adaptStateResult authenticated_belt.VerifiedBeltQuorumGuard.step)
+      st0 turns st_final) (hkeys : BeltProvisionedKeys n keys) :
+    (∀ p ∈ mirAcceptedPairs turns, ∀ ep msg id tag,
+      p.1 = .RecordCustodianAck ep msg id tag →
+      ∃ key, Array.index_usize keys (UScalar.cast .Usize id) = .ok key ∧
+        authenticated_belt.custodian_ack_tag key commit ep msg id = .ok tag ∧
+        key ≠ Array.repeat 32#usize 0#u8) ∧
+    (∀ p1 ∈ mirAcceptedPairs turns, ∀ p2 ∈ mirAcceptedPairs turns,
+      ∀ ep1 msg1 id1 tag1 ep2 msg2 id2 tag2,
+      p1.1 = .RecordCustodianAck ep1 msg1 id1 tag1 →
+      p2.1 = .RecordCustodianAck ep2 msg2 id2 tag2 → id1 ≠ id2 →
+      ∃ key1 key2,
+        Array.index_usize keys (UScalar.cast .Usize id1) = .ok key1 ∧
+        Array.index_usize keys (UScalar.cast .Usize id2) = .ok key2 ∧
+        authenticated_belt.custodian_ack_tag key1 commit ep1 msg1 id1 = .ok tag1 ∧
+        authenticated_belt.custodian_ack_tag key2 commit ep2 msg2 id2 = .ok tag2 ∧
+        key1 ≠ Array.repeat 32#usize 0#u8 ∧ key2 ≠ Array.repeat 32#usize 0#u8 ∧ key1 ≠ key2) := by
+  obtain ⟨_, _, _, hacks, _, _, _⟩ := authenticated_belt_quorum_guard_multiturn_sound
+    n t f q gl initial_next_epoch max_jump_window commit wal keys st0 st_final turns hnew htrace
+  constructor
+  · intro p hp ep msg id tag hi
+    obtain ⟨hn, _, key, hk, ht⟩ := hacks p hp ep msg id tag hi
+    exact ⟨key, hk, ht, hkeys.1 id key hn hk⟩
+  · intro p1 hp1 p2 hp2 ep1 msg1 id1 tag1 ep2 msg2 id2 tag2 hi1 hi2 hne
+    obtain ⟨hn1, _, key1, hk1, ht1⟩ := hacks p1 hp1 ep1 msg1 id1 tag1 hi1
+    obtain ⟨hn2, _, key2, hk2, ht2⟩ := hacks p2 hp2 ep2 msg2 id2 tag2 hi2
+    exact ⟨key1, key2, hk1, hk2, ht1, ht2,
+      hkeys.1 id1 key1 hn1 hk1, hkeys.1 id2 key2 hn2 hk2,
+      fun he => hne (hkeys.2 id1 id2 key1 key2 hn1 hn2 hk1 hk2 he)⟩
+
+private theorem authenticated_belt_ack_core_projection_strict
+    (st st' : authenticated_belt.VerifiedBeltQuorumGuard)
+    (ep : Std.U64) (msg tag : Array Std.U8 32#usize) (id : Std.U8)
+    (r : core.result.Result Std.U32 authenticated_belt.BeltAuthError)
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack st ep msg id tag =
+      .ok (st', r)) :
+    (st' = st ∧ ((∃ e, r = .Err e) ∨ r = .Ok st.inner.ack_count)) ∨ ∃ cr, pants_and_quorum_guards.BeltQuorumCore.record_custodian_ack
+      st.inner ep msg = .ok (st'.inner, cr) := by
+  unfold authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack at h
+  simp only [bind_eq_result_bind, result_bind_ok, lift,
+    pants_and_quorum_guards.BeltQuorumCore.impl.n,
+    pants_and_quorum_guards.BeltQuorumCore.impl.has_bound_epoch,
+    pants_and_quorum_guards.BeltQuorumCore.impl.bound_epoch,
+    pants_and_quorum_guards.BeltQuorumCore.impl.bound_msg_tag,
+    pants_and_quorum_guards.BeltQuorumCore.impl.ack_count,
+    pants_and_quorum_guards.BeltQuorumCore.is_poisoned] at h
+  repeat (any_goals first
+    | simp only [result_bind_ok_iff] at h
+    | (obtain ⟨v, hv, h⟩ : ∃ v, _ ∧ _ := h)
+    | (split at h))
+  all_goals cases h
+  all_goals first
+    | (apply Or.inr; exact ⟨_, by assumption⟩)
+    | (apply Or.inl; refine ⟨rfl, ?_⟩; first | exact Or.inl ⟨_, rfl⟩ | exact Or.inr rfl)
+
+/-- The named core input corresponding to a wrapper call. Proposal receipt validity is
+computed by the extracted WAL tag function, rather than supplied as an independent flag. -/
+@[expose]
+def BeltCoreInputFor (st : authenticated_belt.VerifiedBeltQuorumGuard)
+    (inp : authenticated_belt.BeltQuorumStepInput)
+    (ci : pants_and_quorum_guards.BeltQuorumCoreInput) : Prop :=
+  match inp with
+  | .ProposeOrRetryEpoch ep msg digest tag =>
+    ∃ expected, authenticated_belt.wal_receipt_tag st.wal_key st.guard_key_commit ep msg digest = .ok expected ∧
+      ci = .ProposeOrRetryEpoch ep msg (decide (expected = tag))
+  | .RecordCustodianAck ep msg _ _ => ci = .RecordCustodianAck ep msg
+  | .AuthorizeShares ep msg => ci = .AuthorizeShares ep msg
+
+theorem authenticated_belt_step_core_projection
+    (st st' : authenticated_belt.VerifiedBeltQuorumGuard)
+    (inp : authenticated_belt.BeltQuorumStepInput)
+    (r : core.result.Result authenticated_belt.BeltQuorumStepOutput authenticated_belt.BeltAuthError)
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.step st inp = .ok (st', r)) :
+    BeltEnrollmentUnchanged st st' ∧
+    ((st' = st ∧ ((∃ e, r = .Err e) ∨ r = .Ok (.AckRecorded st.inner.ack_count))) ∨
+      ∃ ci cr, BeltCoreInputFor st inp ci ∧
+        pants_and_quorum_guards.BeltQuorumCore.step st.inner ci = .ok (st'.inner, cr)) := by
+  refine ⟨authenticated_belt_step_enrollment_unchanged st st' inp r h, ?_⟩
+  cases inp with
+  | ProposeOrRetryEpoch ep msg digest tag =>
+    unfold authenticated_belt.VerifiedBeltQuorumGuard.step at h
+    cases he : authenticated_belt.VerifiedBeltQuorumGuard.propose_or_retry_epoch st ep msg digest tag with
+    | fail e => simp [he, bind_eq_result_bind, Result.bind] at h
+    | div => simp [he, bind_eq_result_bind, Result.bind] at h
+    | ok v =>
+      rcases v with ⟨next, res⟩
+      obtain ⟨expected, cr, hw, hc⟩ := authenticated_belt_propose_core_projection st next ep msg digest tag res he
+      have hcore : ∃ out, pants_and_quorum_guards.BeltQuorumCore.step st.inner
+          (.ProposeOrRetryEpoch ep msg (decide (expected = tag))) = .ok (next.inner, out) := by
+        cases cr <;> exact ⟨_, by simp only [pants_and_quorum_guards.BeltQuorumCore.step, hc,
+          bind_eq_result_bind, result_bind_ok]; rfl⟩
+      obtain ⟨out, hout⟩ := hcore
+      cases res <;> simp [he, bind_eq_result_bind, Result.bind] at h <;> rcases h with ⟨rfl, rfl⟩
+      all_goals exact Or.inr ⟨_, out, ⟨expected, hw, rfl⟩, hout⟩
+  | AuthorizeShares ep msg =>
+    unfold authenticated_belt.VerifiedBeltQuorumGuard.step at h
+    cases he : authenticated_belt.VerifiedBeltQuorumGuard.authorize_shares st ep msg with
+    | fail e => simp [he, bind_eq_result_bind, Result.bind] at h
+    | div => simp [he, bind_eq_result_bind, Result.bind] at h
+    | ok v =>
+      rcases v with ⟨next, res⟩
+      obtain ⟨cr, hc⟩ := authenticated_belt_authorize_core_projection st next ep msg res he
+      have hcore : ∃ out, pants_and_quorum_guards.BeltQuorumCore.step st.inner
+          (.AuthorizeShares ep msg) = .ok (next.inner, out) := by
+        cases cr <;> exact ⟨_, by simp only [pants_and_quorum_guards.BeltQuorumCore.step, hc,
+          bind_eq_result_bind, result_bind_ok]; rfl⟩
+      obtain ⟨out, hout⟩ := hcore
+      cases res <;> simp [he, bind_eq_result_bind, Result.bind] at h <;> rcases h with ⟨rfl, rfl⟩
+      all_goals exact Or.inr ⟨_, out, rfl, hout⟩
+  | RecordCustodianAck ep msg id tag =>
+    unfold authenticated_belt.VerifiedBeltQuorumGuard.step at h
+    cases he : authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack st ep msg id tag with
+    | fail e => simp [he, bind_eq_result_bind, Result.bind] at h
+    | div => simp [he, bind_eq_result_bind, Result.bind] at h
+    | ok v =>
+      rcases v with ⟨next, res⟩
+      rcases authenticated_belt_ack_core_projection_strict st next ep msg tag id res he with
+        ⟨hn, hdup⟩ | ⟨cr, hc⟩
+      · subst next
+        cases res with
+        | Err e =>
+          simp [he, bind_eq_result_bind, Result.bind] at h
+          rcases h with ⟨rfl, rfl⟩
+          exact Or.inl ⟨rfl, Or.inl ⟨e, rfl⟩⟩
+        | Ok c =>
+          rcases hdup with ⟨e, heq⟩ | heq
+          · cases heq
+          · cases heq
+            simp [he, bind_eq_result_bind, Result.bind] at h
+            rcases h with ⟨rfl, rfl⟩
+            exact Or.inl ⟨rfl, Or.inr rfl⟩
+      · have hcore : ∃ out, pants_and_quorum_guards.BeltQuorumCore.step st.inner
+            (.RecordCustodianAck ep msg) = .ok (next.inner, out) := by
+          cases cr <;> exact ⟨_, by simp only [pants_and_quorum_guards.BeltQuorumCore.step, hc,
+            bind_eq_result_bind, result_bind_ok]; rfl⟩
+        obtain ⟨out, hout⟩ := hcore
+        cases res <;> simp [he, bind_eq_result_bind, Result.bind] at h <;> rcases h with ⟨rfl, rfl⟩
+        all_goals exact Or.inr ⟨_, out, rfl, hout⟩
 
 end qsag_verified.proofs
