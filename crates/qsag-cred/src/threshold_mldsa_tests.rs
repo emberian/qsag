@@ -855,6 +855,27 @@ fn unsupported_configurations_and_quorums_are_rejected() {
             .validate()
             .is_ok()
     );
+    assert!(
+        config(MlDsaLevel::MlDsa44, 8, &(1..=16).collect::<Vec<_>>())
+            .validate()
+            .is_ok()
+    );
+    for parties in [17, 64] {
+        assert_eq!(
+            attempt(
+                config(
+                    MlDsaLevel::MlDsa44,
+                    2,
+                    &(1..=parties as u16).collect::<Vec<_>>()
+                ),
+                &mut net
+            ),
+            ThresholdMlDsaError::Mpc(MpcError::UnsupportedStructure {
+                parties,
+                threshold: 2
+            })
+        );
+    }
     assert_eq!(
         attempt(config(MlDsaLevel::MlDsa44, 2, &[1, 2, 2]), &mut net),
         ThresholdMlDsaError::DuplicateOrUnknownParty { party_id: 2 }
@@ -1596,7 +1617,7 @@ fn mldsa65_and_mldsa87_pq128_threshold_keygen_signing_and_negative_forgery() {
 }
 
 #[test]
-fn parametric_holder_sets_preserve_order_and_exceed_word_width() {
+fn parametric_holder_sets_preserve_order_and_bound_rss_allocation() {
     for n in 3usize..=9 {
         for t in 2..=n.div_ceil(2) {
             let st = Structure::new(n, t).unwrap();
@@ -1607,10 +1628,12 @@ fn parametric_holder_sets_preserve_order_and_exceed_word_width() {
             assert_eq!(st.subsets, old);
         }
     }
-    let st = Structure::new(67, 2).unwrap();
-    assert_eq!(st.subsets.len(), 67);
-    assert!(st.subsets.iter().all(|s| s.len() == 66));
-    assert_eq!(st.subsets_of(66).len(), 66);
+    let st = Structure::new(16, 2).unwrap();
+    assert_eq!(st.subsets.len(), 16);
+    assert!(st.subsets.iter().all(|s| s.len() == 15));
+    assert_eq!(st.subsets_of(15).len(), 15);
+    assert!(Structure::new(17, 2).is_err());
+    assert!(Structure::new(67, 2).is_err());
     assert!(Structure::new(3, usize::MAX).is_err());
     assert!(Structure::new(3, 3).is_err()); // dishonest-majority RSS remains unsound
 }

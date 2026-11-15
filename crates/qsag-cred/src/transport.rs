@@ -52,11 +52,42 @@ pub fn verify_transport_message(
         _ => return false,
     };
     matches.next().is_none()
-        && ml_dsa_verify(
-            level,
-            pk,
-            bytes,
-            b"QSAG.TRANSPORT.V1",
-            &signed.signature,
-        )
+        && ml_dsa_verify(level, pk, bytes, b"QSAG.TRANSPORT.V1", &signed.signature)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fips204_ntt::{ml_dsa_keygen_from_seed, ml_dsa_sign_deterministic};
+
+    #[test]
+    fn all_fips_levels_authenticate_the_same_envelope() {
+        let message = round_message(b"test", &[3; 32], 0, &[1, 2, 3], 2, 1, b"payload");
+        for level in [
+            MlDsaLevel::MlDsa44,
+            MlDsaLevel::MlDsa65,
+            MlDsaLevel::MlDsa87,
+        ] {
+            let (pk, sk) = ml_dsa_keygen_from_seed(level, &[7; 32]);
+            let signed = SignedRoundMessage {
+                signature: ml_dsa_sign_deterministic(&sk, &message, b"QSAG.TRANSPORT.V1").unwrap(),
+            };
+            let keys = [(2, pk.clone())];
+            assert!(verify_transport_message(&keys, 2, &message, &signed));
+            assert!(!verify_transport_message(&keys, 1, &message, &signed));
+            assert!(!verify_transport_message(&keys, 2, b"modified", &signed));
+            assert!(!verify_transport_message(
+                &[(2, pk.clone()), (2, pk.clone())],
+                2,
+                &message,
+                &signed
+            ));
+            assert!(!verify_transport_message(
+                &[(2, pk[..pk.len() - 1].to_vec())],
+                2,
+                &message,
+                &signed
+            ));
+        }
+    }
 }

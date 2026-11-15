@@ -2513,6 +2513,15 @@ pub(crate) mod test_support {
     }
 
     #[test]
+    fn rss_allocation_has_an_explicit_combinatorial_bound() {
+        assert_eq!(Structure::new(16, 2).unwrap().subsets.len(), 16);
+        assert_eq!(Structure::new(16, 8).unwrap().subsets.len(), 11_440);
+        assert!(Structure::new(17, 2).is_err());
+        assert!(Structure::new(usize::MAX, 2).is_err());
+        assert!(Structure::new(16, 9).is_err());
+    }
+
+    #[test]
     fn extension_field_is_a_field_extension() {
         fn pow(mut base: u32, mut exp: u32) -> u32 {
             let mut acc = 1;

@@ -420,6 +420,11 @@ fn check_parameters(
             num_parties: parties,
         });
     }
+    // Reject before starting any network round. The identifier limit is not a
+    // claim that this replicated engine implements polynomial secret sharing.
+    if parties > crate::rss_mpc::MAX_MPC_PARTIES {
+        return Err(MpcError::UnsupportedStructure { parties, threshold }.into());
+    }
     Ok(())
 }
 
@@ -1557,7 +1562,11 @@ fn apply_response_stream_cipher(
             xof.squeeze(bytes);
             for (coeff, block) in coeffs.iter_mut().zip(bytes.as_chunks::<16>().0) {
                 let mask = stream_word_mod_q(block);
-                *coeff = if encrypt { fq_add(*coeff, mask) } else { fq_sub(*coeff, mask) };
+                *coeff = if encrypt {
+                    fq_add(*coeff, mask)
+                } else {
+                    fq_sub(*coeff, mask)
+                };
             }
         }
     }
