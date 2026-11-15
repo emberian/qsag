@@ -70,6 +70,9 @@ const HEM_QSB_CHALLENGE_TAG: &[u8] = b"QSAG.HEM.QSB.CHAL/v1";
 const HEM_PUB_DIR_MAGIC: &[u8; 8] = b"QSAGHDIR";
 const HEM_CUSTODIAN_SHARE_MAGIC: &[u8; 8] = b"QSAGHSHR";
 
+/// Maximum custodian roster size supported by `HemDynamicShamirQuorum` and `HemSpdzSeedQuorum`.
+pub const MAX_HEM_QUORUM_PARTIES: usize = 256;
+
 // A session identifier is public protocol context, never key material. Each
 // custodian supplies its own evolving private RNG; deriving an operation stream
 // consumes fresh private randomness even if a caller retries with the same session ID.
@@ -1200,7 +1203,7 @@ impl HemShamirCustodianShare {
         let quorum_epoch = read_u64(bytes, &mut pos)?;
         let t = read_u32(bytes, &mut pos)? as usize;
         let n = read_u32(bytes, &mut pos)? as usize;
-        if t < 2 || t > n || party_id >= n {
+        if t < 2 || t > n || n > MAX_HEM_QUORUM_PARTIES || party_id >= n {
             return Err(HemQuorumError::MalformedVaultBytes);
         }
         let eval_point = read_gl(bytes, &mut pos)?;
@@ -1367,7 +1370,7 @@ impl HemDynamicShamirQuorum {
         n: usize,
         active_leaves: usize,
     ) -> Result<Self, HemQuorumError> {
-        if t < 2 || t > n || n > 64 {
+        if t < 2 || t > n || n > MAX_HEM_QUORUM_PARTIES {
             return Err(HemQuorumError::InvalidQuorum { t, n });
         }
         if active_leaves == 0 || active_leaves > HEM_JORTS_MAX_LEAVES {

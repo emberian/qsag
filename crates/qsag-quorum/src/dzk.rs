@@ -196,9 +196,23 @@ impl NodeBasis {
 
 /// `sum_j a_j * b_j`.
 pub fn dot(a: &[Gf128], b: &[Gf128]) -> Gf128 {
-    a.iter()
-        .zip(b)
-        .fold(Gf128::ZERO, |acc, (x, y)| acc.add(x.mul(*y)))
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return Gf128::ZERO;
+    }
+    let mut acc = [0u64; 2];
+    let mut lhs = [[0u64; 2]; 128];
+    let mut rhs = [[0u64; 2]; 128];
+    for (ca, cb) in a[..n].chunks(128).zip(b[..n].chunks(128)) {
+        for (i, (x, y)) in ca.iter().zip(cb).enumerate() {
+            lhs[i] = x.0;
+            rhs[i] = y.0;
+        }
+        qsag_asm::gf2_128_mul_acc_batch(&mut acc, &lhs[..ca.len()], &rhs[..ca.len()]);
+    }
+    qsag_asm::volatile_fill(lhs.as_flattened_mut(), 0);
+    qsag_asm::volatile_fill(rhs.as_flattened_mut(), 0);
+    Gf128(acc)
 }
 
 /// Layout of one proof: `gates` AND gates in `m` rows of `m / 2` gates (two products each).

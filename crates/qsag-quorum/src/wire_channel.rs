@@ -89,6 +89,16 @@ impl fmt::Display for TransportError {
     }
 }
 
+impl TransportError {
+    /// Returns `true` only when the directed link or sequence space is permanently unusable
+    /// (`Closed` or `SequenceExhausted`). Transient timeouts and unauthenticated/malformed/out-of-round
+    /// frames must not permanently brick the link (`CRITICAL-11`).
+    #[inline]
+    pub const fn is_fatal_link_error(&self) -> bool {
+        matches!(self, Self::Closed { .. } | Self::SequenceExhausted)
+    }
+}
+
 impl core::error::Error for TransportError {}
 
 /// Header of one frame.
@@ -530,8 +540,10 @@ impl<T: WireTransport> WireTransport for MacSealedWireChannel<T> {
         let raw = match self.transport.recv_frame(peer, round) {
             Ok(raw) => raw,
             Err(err) => {
-                if let Some(failed) = self.failed_links.get_mut(peer) {
-                    *failed = true;
+                if err.is_fatal_link_error() {
+                    if let Some(failed) = self.failed_links.get_mut(peer) {
+                        *failed = true;
+                    }
                 }
                 return Err(err);
             }
@@ -539,8 +551,10 @@ impl<T: WireTransport> WireTransport for MacSealedWireChannel<T> {
         match self.open(peer, round, &raw) {
             Ok(payload) => Ok(payload),
             Err(err) => {
-                if let Some(failed) = self.failed_links.get_mut(peer) {
-                    *failed = true;
+                if err.is_fatal_link_error() {
+                    if let Some(failed) = self.failed_links.get_mut(peer) {
+                        *failed = true;
+                    }
                 }
                 Err(err)
             }
@@ -631,8 +645,10 @@ impl<T: WireTransport> WireTransport for ConfidentialWireChannel<T> {
         match self.inner.recv_frame(peer, round) {
             Ok(payload) => Ok(payload),
             Err(err) => {
-                if let Some(failed) = self.failed_links.get_mut(peer) {
-                    *failed = true;
+                if err.is_fatal_link_error() {
+                    if let Some(failed) = self.failed_links.get_mut(peer) {
+                        *failed = true;
+                    }
                 }
                 Err(err)
             }
