@@ -12,7 +12,9 @@
 //! or auditors on Linux hosts with `lake` can regenerate vectors dynamically and verify zero drift.
 
 use blstrs::{G1Affine as BlsRefG1Affine, G1Projective as BlsRefG1Proj, Scalar as BlsRefScalar};
-use fips205::slh_dsa_shake_128f;
+use curve25519_dalek::constants::ED25519_BASEPOINT_POINT;
+use curve25519_dalek::scalar::Scalar as DalekScalar;
+use fips205::{slh_dsa_shake_128f, slh_dsa_shake_128s};
 use fips205::traits::{KeyGen, SerDes, Verifier};
 use ghash::universal_hash::{KeyInit, UniversalHash};
 use group::{Group, GroupEncoding};
@@ -29,8 +31,9 @@ use qsag_asm::{GFNI_MAT_POLY_TO_T3, GFNI_MAT_T3_TO_POLY};
 use qsag_core::field::goldilocks::{Goldilocks as CoreGoldilocks, GoldilocksExt2};
 use qsag_core::field::tower::{Tower128, TowerGf256, tower_mul_bits};
 use qsag_core::fips205::{
-    Fips205Adrs, Fips205AdrsType, Fips205Params, slh_keygen_internal, slh_sign, slh_verify,
-    try_wots_base16_digits_and_csum,
+    Fips205Adrs, Fips205AdrsType, Fips205Params, fips205_f, fips205_h_msg, fips205_prf,
+    fips205_prf_msg, format_pure_m_prime, slh_keygen_internal, slh_sign, slh_verify,
+    split_digest_indices, try_wots_base16_digits_and_csum,
 };
 use qsag_core::sponge::keccak::{cshake256_xof, keccak_f1600, shake256_xof};
 use qsag_core::sponge::poseidon2::{poseidon2_hash32, poseidon2_perm12};
@@ -39,7 +42,8 @@ use qsag_external_validation::{
     gfni_affine_byte, goldilocks_mul_u128_ref, poseidon2_perm12_inv_with_mats,
 };
 use qsag_migrate::{
-    BlsG1Point, FqPallas, FrBls381, PallasPoint,
+    BlsG1Point, FqPallas, FrBls381, PallasPoint, ScalarGroup, SpendingScalar,
+    ed25519_ct::public_key_from_clamped_scalar,
     secp256k1_ct::{SecpPoint, secp_scalar_neg_mod_n},
 };
 use serde::Deserialize;
@@ -66,6 +70,8 @@ struct ExternalOracleRoot {
     secp256k1_smul: Vec<SecpSmulVec>,
     pallas_orchard_smul: Vec<PallasSmulVec>,
     bls12_381_g1_smul: Vec<BlsSmulVec>,
+    ed25519_clamp_slip0010: Vec<Ed25519ClampVec>,
+    fips205_slh_dsa_shake_128s_hmsg: LeanFips205HMsg128sVec,
     fips205_slh_dsa_shake_128f: LeanFips205FullSigVec,
 }
 
@@ -155,6 +161,35 @@ struct BlsSmulVec {
     x_be_hex: String,
     y_be_hex: String,
     g1_compressed_48_hex: String,
+}
+
+#[derive(Deserialize)]
+struct Ed25519ClampVec {
+    raw_le_hex: String,
+    clamped_le_hex: String,
+    normalized_mod_l_le_hex: String,
+}
+
+#[derive(Deserialize)]
+struct LeanFips205HMsg128sVec {
+    m_bytes: usize,
+    md_bytes: usize,
+    tree_bytes: usize,
+    leaf_bytes: usize,
+    sk_seed_hex: String,
+    sk_prf_hex: String,
+    pk_seed_hex: String,
+    pk_root_hex: String,
+    opt_rand_hex: String,
+    ctx_hex: String,
+    msg_hex: String,
+    r_rand_hex: String,
+    h_msg_30_hex: String,
+    md_21_hex: String,
+    idx_tree: String,
+    idx_leaf: u32,
+    fors_indices: Vec<String>,
+    fors_leaf0_hex: String,
 }
 
 #[derive(Deserialize)]
@@ -611,6 +646,118 @@ fn lean_external_spec_oracle_agrees_with_qsag_rust_and_upstream_crates() {
         up_pk_decoded.verify(&msg, &oracle_sig_arr, &ctx),
         "Upstream `fips205` crate must accept the 17,088-byte signature produced by Lean 4 spec!"
     );
+
+    // 8. NIST FIPS 205 `SLH-DSA-SHAKE-128s` (`m = 30 = 21 + 7 + 2`) `H_msg`, digest splitting,
+    //    and FORS leaf 0 (`Fips205.lean` `slhDsaShake128s` vs `qsag_core::fips205` vs upstream `fips205`):
+    let s128 = &oracle.fips205_slh_dsa_shake_128s_hmsg;
+    let params_128s = &Fips205Params::SLH_DSA_SHAKE_128S;
+    assert_eq!(s128.m_bytes, 30, "FIPS 205 Table 2 mandates m=30 for 128s");
+    assert_eq!(s128.md_bytes, 21);
+    assert_eq!(s128.tree_bytes, 7);
+    assert_eq!(s128.leaf_bytes, 2);
+    assert_eq!(params_128s.m, s128.m_bytes);
+
+    let s_sk_seed: [u8; 16] = hex::decode(&s128.sk_seed_hex).unwrap().try_into().unwrap();
+    let s_sk_prf: [u8; 16] = hex::decode(&s128.sk_prf_hex).unwrap().try_into().unwrap();
+    let s_pk_seed: [u8; 16] = hex::decode(&s128.pk_seed_hex).unwrap().try_into().unwrap();
+    let s_pk_root: [u8; 16] = hex::decode(&s128.pk_root_hex).unwrap().try_into().unwrap();
+    let s_opt_rand: [u8; 16] = hex::decode(&s128.opt_rand_hex).unwrap().try_into().unwrap();
+    let s_ctx = hex::decode(&s128.ctx_hex).unwrap();
+    let s_msg = hex::decode(&s128.msg_hex).unwrap();
+    let expected_r_rand = hex::decode(&s128.r_rand_hex).unwrap();
+    let expected_h_msg = hex::decode(&s128.h_msg_30_hex).unwrap();
+    let expected_md = hex::decode(&s128.md_21_hex).unwrap();
+    let expected_idx_tree: u128 = s128.idx_tree.parse().unwrap();
+    let expected_fors_indices: Vec<u32> = s128
+        .fors_indices
+        .iter()
+        .map(|s| s.parse().unwrap())
+        .collect();
+    let expected_fors_leaf0 = hex::decode(&s128.fors_leaf0_hex).unwrap();
+
+    assert_eq!(expected_h_msg.len(), 30);
+    let m_prime_128s = format_pure_m_prime(&s_msg, &s_ctx).unwrap();
+    let got_r_rand = fips205_prf_msg(16, &s_sk_prf, &s_opt_rand, &m_prime_128s);
+    assert_eq!(got_r_rand.as_slice(), expected_r_rand.as_slice());
+    let got_h_msg = fips205_h_msg(
+        params_128s.m,
+        got_r_rand.as_slice(),
+        &s_pk_seed,
+        &s_pk_root,
+        &m_prime_128s,
+    );
+    assert_eq!(got_h_msg, expected_h_msg);
+    assert_eq!(&got_h_msg[..21], expected_md.as_slice());
+
+    let (got_fors_indices, got_idx_tree, got_idx_leaf) =
+        split_digest_indices(params_128s, &got_h_msg);
+    assert_eq!(got_idx_tree, expected_idx_tree);
+    assert_eq!(got_idx_leaf, s128.idx_leaf);
+    assert_eq!(got_fors_indices, expected_fors_indices);
+
+    let fors_sk_adrs = Fips205Adrs {
+        layer: 0,
+        tree: got_idx_tree,
+        adrs_type: Fips205AdrsType::ForsPrf,
+        key_pair: got_idx_leaf,
+        f5: 0,
+        f6: got_fors_indices[0],
+    };
+    let fors_leaf_adrs = Fips205Adrs {
+        layer: 0,
+        tree: got_idx_tree,
+        adrs_type: Fips205AdrsType::ForsTree,
+        key_pair: got_idx_leaf,
+        f5: 0,
+        f6: got_fors_indices[0],
+    };
+    let fors_sk0 = fips205_prf(16, &s_pk_seed, &s_sk_seed, &fors_sk_adrs);
+    let fors_leaf0 = fips205_f(16, &s_pk_seed, &fors_leaf_adrs, &fors_sk0);
+    assert_eq!(fors_leaf0.as_slice(), expected_fors_leaf0.as_slice());
+
+    // Cross-check full 7,856-byte `SLH-DSA-SHAKE-128s` signing & verification against upstream `fips205`!
+    let (q_sk_128s, q_pk_128s) =
+        slh_keygen_internal(params_128s, &s_sk_seed, &s_sk_prf, &s_pk_seed).unwrap();
+    let (up_pk_128s, up_sk_128s) =
+        slh_dsa_shake_128s::KG::keygen_with_seeds(&s_sk_seed, &s_sk_prf, &s_pk_seed);
+    assert_eq!(
+        q_pk_128s.to_bytes().as_slice(),
+        up_pk_128s.clone().into_bytes().as_slice()
+    );
+    let q_sig_128s =
+        slh_sign(params_128s, &s_msg, &s_ctx, &q_sk_128s, Some(&s_opt_rand)).unwrap();
+    assert_eq!(q_sig_128s.len(), slh_dsa_shake_128s::SIG_LEN);
+    let q_sig_128s_arr: [u8; slh_dsa_shake_128s::SIG_LEN] = q_sig_128s.clone().try_into().unwrap();
+    assert!(up_pk_128s.verify(&s_msg, &q_sig_128s_arr, &s_ctx));
+    assert!(slh_verify(params_128s, &s_msg, &q_sig_128s, &s_ctx, &q_pk_128s));
+    let _ = up_sk_128s;
+
+    // 9. Ed25519 RFC 8032 clamping & SLIP-0010 scalar normalization (`ActiveMigrationZeroTest.lean`
+    //    vs `qsag_migrate::ed25519_ct`, `SpendingScalar`, and `curve25519-dalek`!):
+    for row in &oracle.ed25519_clamp_slip0010 {
+        let raw_le: [u8; 32] = hex::decode(&row.raw_le_hex).unwrap().try_into().unwrap();
+        let lean_clamped: [u8; 32] = hex::decode(&row.clamped_le_hex).unwrap().try_into().unwrap();
+        let lean_norm: [u8; 32] = hex::decode(&row.normalized_mod_l_le_hex)
+            .unwrap()
+            .try_into()
+            .unwrap();
+
+        let mut rust_clamped = raw_le;
+        rust_clamped[0] &= 248;
+        rust_clamped[31] = (rust_clamped[31] & 127) | 64;
+        assert_eq!(rust_clamped, lean_clamped);
+
+        let dalek_scalar = DalekScalar::from_bytes_mod_order(rust_clamped);
+        assert_eq!(dalek_scalar.to_bytes(), lean_norm);
+
+        let spend_scalar = SpendingScalar::from_le_bytes(lean_norm, ScalarGroup::Ed25519)
+            .expect("normalized SLIP-0010 scalar must be canonical nonzero mod L");
+        assert_eq!(*spend_scalar.as_le_bytes(), lean_norm);
+
+        let dalek_pk = (ED25519_BASEPOINT_POINT * dalek_scalar).compress().to_bytes();
+        assert_eq!(public_key_from_clamped_scalar(&rust_clamped), dalek_pk);
+        assert_eq!(public_key_from_clamped_scalar(&lean_norm), dalek_pk);
+    }
 }
 
 #[test]

@@ -10,7 +10,7 @@ publish = false
 description = "External differential validation, property-based testing (proptest), NIST ACVP KATs, and Lean 4 executable spec-oracle suite for QSAG."
 
 [features]
-default = []
+default = ["quorum"]
 quorum = ["dep:qsag-quorum"]
 
 [dependencies]
@@ -23,7 +23,7 @@ qsag-cred = { path = "../crates/qsag-cred", features = ["std"] }
 qsag-fts = { path = "../crates/qsag-fts", features = ["std"] }
 qsag-addr = { path = "../crates/qsag-addr", features = ["std"] }
 qsag-migrate = { path = "../crates/qsag-migrate", features = ["std"] }
-qsag-quorum = { path = "../crates/qsag-quorum", features = ["std"], optional = true }
+qsag-quorum = { path = "../crates/qsag-quorum", features = ["std", "testing-ephemeral"], optional = true }
 qsag-policy = { path = "../crates/qsag-policy" }
 qsag-hd = { path = "../crates/qsag-hd" }
 

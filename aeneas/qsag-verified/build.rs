@@ -53,9 +53,15 @@ fn main() {
             "lib.rs",
             "cpuid.rs",
             "bitslice.rs",
+            "ntt_simd.rs",
             "portable.rs",
+            "sha2_hw.rs",
+            "avx512.rs",
+            "gf256_simd.rs",
             "x86_64_asm.rs",
             "aarch64_asm.rs",
+            "aarch64_simd.rs",
+            "durable.rs",
         ] {
             let p = asm_src.join(asm_rel);
             if p.is_file() {
