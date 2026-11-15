@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.ParallelSeededSpnPolyBasis — the tower SPN is the Rust polynomial-basis computation
+# Qsag.Oracle.ParallelSeededSpnPolyBasis — the tower SPN is the Rust polynomial-basis computation
 
 `ParallelSeededSpnSecurity` states its results for `spnDaviesMeyer48` over `Tower128`. This
 module transcribes the arithmetic of `crates/qsag-fts/src/parallel_mpc.rs` on Rust's `u128`
@@ -27,11 +27,11 @@ probability for fixed public constants (see `HashTrailSampling`). The Davies–M
 claimed injective, collision resistant or preimage resistant.
 -/
 
-public import Qsag.Tower128PolyBasisIso
-import all Qsag.Tower128PolyBasisIso
-import all Qsag.ParallelSeededSpnSecurity
-import all Qsag.ActiveMigrationZeroTest
-import all Qsag.SimulationSpine
+public import Qsag.Math.Tower128PolyBasisIso
+import all Qsag.Math.Tower128PolyBasisIso
+import all Qsag.Oracle.ParallelSeededSpnSecurity
+import all Qsag.Protocol.Migration.ActiveMigrationZeroTest
+import all Qsag.Exec.SimulationSpine
 
 public section
 namespace Qsag

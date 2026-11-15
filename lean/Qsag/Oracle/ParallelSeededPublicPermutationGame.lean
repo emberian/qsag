@@ -12,8 +12,8 @@ uniform ideal permutation, comparing the fixed deployed SPN with it, and proving
 any quantum preimage/collision bound are separate obligations. There is no claim
 that independently keyed random permutations model the cSHAKE-derived tweak family.
 -/
-public import Qsag.ParallelSeededPublicPermutation
-import all Qsag.ParallelSeededPublicPermutation
+public import Qsag.Oracle.ParallelSeededPublicPermutation
+import all Qsag.Oracle.ParallelSeededPublicPermutation
 public section
 namespace Qsag
 set_option autoImplicit false

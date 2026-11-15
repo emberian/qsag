@@ -8,8 +8,8 @@ The chain mode returns all 256 bits of P_t(x) XOR x: it has no rate/capacity spl
 padding or output truncation. It is not the sponge of the quantum sponge theorems.
 No random-permutation distribution or quantum security bound is asserted here.
 -/
-public import Qsag.ParallelSeededSpnPolyBasis
-import all Qsag.ParallelSeededSpnPolyBasis
+public import Qsag.Oracle.ParallelSeededSpnPolyBasis
+import all Qsag.Oracle.ParallelSeededSpnPolyBasis
 public section
 namespace Qsag
 set_option autoImplicit false

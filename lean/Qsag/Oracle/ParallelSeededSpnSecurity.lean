@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.ParallelSeededSpnSecurity — Algebraic Components of the 48-Round $x^7$ Davies–Meyer SPN
+# Qsag.Oracle.ParallelSeededSpnSecurity — Algebraic Components of the 48-Round $x^7$ Davies–Meyer SPN
 
 Constructive (`0` classical choice axioms, `0` external math libraries, `0` unproved goals)
 Lean 4.35 security analysis of the `ParallelSeededFts` 2-lane $\mathbb{F}_{2^{128}}^2$
@@ -30,10 +30,10 @@ Lean 4.35 security analysis of the `ParallelSeededFts` 2-lane $\mathbb{F}_{2^{12
    and `#tooth` mutation witnesses.
 -/
 
-public import Qsag.BinaryTower
-import all Qsag.BinaryTower
-public import Qsag.ConcreteSecurityBudget
-import all Qsag.ConcreteSecurityBudget
+public import Qsag.Math.BinaryTower
+import all Qsag.Math.BinaryTower
+public import Qsag.Oracle.ConcreteSecurityBudget
+import all Qsag.Oracle.ConcreteSecurityBudget
 
 public section
 namespace Qsag
