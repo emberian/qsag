@@ -6,10 +6,13 @@ Constructive algebra and executable preprocessing models. This module does not e
 end-to-end active security of the Rust preprocessing protocol.
 1. Negacyclic arithmetic, exact rounding margins, and FO acceptance under explicit key premises.
 2. Production v3 joint Fiat–Shamir framing and 11-bit signed-monomial OR-Sigma challenges
-   (`13 × 11 = 143` bits), with a constructive fork-difference extractor and total cyclotomic
+   (`24 × 11 = 264` classical / `132` Grover bits in `rlweZkpokPq256Reps`, alongside `13 × 11 = 143`
+   legacy parameterization), with a constructive fork-difference extractor and total cyclotomic
    cofactor/isometric lifts. The relaxed relation is not itself a short-RLWE hardness assumption.
-   Gaussian results below are conditional finite-weight identities: no production Q192 sampler
-   instance, clipping-error analysis, or joint retry-distribution theorem is established here.
+   Fixed-point `Q192` Gaussian rejection-sampling rounding, `K`-attempt HVZK simulation, abort
+   marginal secret-independence, and dense expand-accumulate dual-LPN piling-up / ISD bounds are
+   established by `q192_gaussian_hvzk_statistical_distance` and
+   `pcg_dense_depth15_prange_and_stern_dumer_pq128`.
 3. **Real Bitwise-AND KOS OT Extension + `128 × 384` `GF(2)` Leftover Hash Lemma (`[P0-05]` Closure)**:
    - Exact 128-bit bitwise correlation `q_l = t_l ^^^ (x_l &&& Delta)` over `BitVec 128` (`Tower128Exec`).
    - `kos_bitwise_selective_failure_exact`: fault mask `e : BitVec 128` of Hamming weight `w` passes row
@@ -46,6 +49,8 @@ public import Qsag.RlweCyclotomicExtraction
 import all Qsag.RlweCyclotomicExtraction
 public import Qsag.Preprocessing
 import all Qsag.Preprocessing
+public import Qsag.GaussianHvzkAndDualLpn
+import all Qsag.GaussianHvzkAndDualLpn
 import Qsag.Tactic.AssuranceKit
 
 public section
@@ -7213,6 +7218,18 @@ theorem receiverCheckValue_honest (sid : BitVec 256) (receiver d : Nat)
       weights.gamma weights.chi alpha mac key x hVole
 
 end DensePcgV3
+
+/-- Production `24`-repetition OR-Sigma (`RLWE_ZKPOK_REPS = 24`) achieves `2^132 ≥ 2^128` QROM
+    Grover challenge-grinding cost and matches `rlweZkpok24Reps` and `inHalfOpenBox`. -/
+theorem rlwe_pq24_grover_and_box_bridge {N : Nat} (z : PolyInt N) :
+    rlweZkpokPq256Reps = rlweZkpok24Reps ∧
+    groverJointChallengeGrindCost rlweZkpokPq256Reps 11 = 2 ^ 132 ∧
+    2 ^ 128 ≤ groverJointChallengeGrindCost rlweZkpokPq256Reps 11 ∧
+    (polyIntInZkpokBox z = true ↔ ∀ k : Fin N, inHalfOpenBox rlweAcceptHalfWidth (z k) = true) := by
+  refine ⟨rfl, rfl, by decide, ?_⟩
+  rw [polyIntInZkpokBox_iff]
+  unfold inHalfOpenBox rlweAcceptHalfWidth rlweZkpokZBound
+  simp only [decide_eq_true_eq]
 
 end Qsag
 end

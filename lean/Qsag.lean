@@ -31,6 +31,7 @@ public import Qsag.ElfInvCerts
 public import Qsag.ElfParse
 public import Qsag.FaultAndSpeculativeSafety
 public import Qsag.Fips205
+public import Qsag.GaussianHvzkAndDualLpn
 public import Qsag.Goldilocks
 public import Qsag.HashSigs
 public import Qsag.HdToprfAndMigrationSecurity
