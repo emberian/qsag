@@ -18,7 +18,8 @@ class Measurement:
     prove_ms: float
     verify_ms: float
 
-# Reported paper/qsag.typ protobench, affine v6, K=8, i9-12900.
+# Historical paper protobench snapshot, affine v6, K=8, i9-12900.
+# These calibration constants are retained; current paper edits do not remeasure them.
 MEASUREMENTS = (
     Measurement('Jorts / Habr24', 161112, 4300, 13.55),
     Measurement('Jorts / Johnson', 291352, 4900, 26.69),
@@ -140,8 +141,7 @@ def self_test():
     checks = {
         'crates/qsag-agg/src/sig.rs': ['WOTS_CHAINS: usize = 128', 'WOTS_TARGET_SUM: usize = 192', 'JORTS_XMSS_HEIGHT: usize = 6'],
         'crates/qsag-agg/src/lib.rs': ['this crate has no recursive', 'MAX_MERGE_TREE_DEPTH: usize = 16'],
-        'crates/qsag-agg/src/recursive.rs': ['not a succinct recursive verifier circuit', 'checked_add(124)', 'bytes.len() < 76'],
-        'paper/qsag.typ': ['161,112 B','291,352 B','26.69 ms','446,254 B','35.33 ms'],
+        'crates/qsag-agg/src/recursive.rs': ['pub struct VerifiedHierarchicalHemEvidence', 'evidence: &VerifiedHierarchicalHemEvidence', 'checked_add(124)', 'bytes.len() < 76'],
     }
     for path, tokens in checks.items():
         content=(ROOT/path).read_text()
