@@ -218,11 +218,15 @@ pub struct Shape {
     pub num_sbox: usize,
     /// Variables, including the constant and the masking variables.
     pub num_vars: usize,
+    /// Variables `1..=num_public` are public inputs: the verifier supplies their values and
+    /// the protocol checks the committed cells against them.
+    pub num_public: usize,
     /// First of the [`MASK_ROWS`] masking variables.
     pub mask_var_base: usize,
     pub a: Csr,
     pub b: Csr,
     pub c: Csr,
+    digest: [u8; 32],
 }
 
 impl Shape {
@@ -237,10 +241,22 @@ impl Shape {
         self.num_rows() - 4 * (3 - g)
     }
 
-    /// Binding digest of the whole relation, public constants included.
+    /// Binding digest of the whole relation, public constants included. Computed once by
+    /// [`ConstraintSystem::finish`].
+    #[inline]
     pub fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+
+    fn compute_digest(&self) -> [u8; 32] {
         let mut bytes = Vec::with_capacity(64 + 12 * (self.a.nnz() + self.b.nnz() + self.c.nnz()));
-        for n in [self.log_rows, self.num_sbox, self.num_vars, self.mask_var_base] {
+        for n in [
+            self.log_rows,
+            self.num_sbox,
+            self.num_vars,
+            self.num_public,
+            self.mask_var_base,
+        ] {
             bytes.extend_from_slice(&(n as u64).to_le_bytes());
         }
         self.a.absorb_into(&mut bytes);
@@ -271,6 +287,7 @@ impl Shape {
 /// by running the same synthesis on a placeholder assignment.
 pub struct ConstraintSystem {
     values: Vec<F>,
+    num_public: usize,
     sbox: Vec<(Lc, Lc)>,
     mul: Vec<(Lc, Lc, Lc)>,
 }
@@ -285,9 +302,22 @@ impl ConstraintSystem {
     pub fn new() -> Self {
         Self {
             values: vec![F::ONE],
+            num_public: 0,
             sbox: Vec::new(),
             mul: Vec::new(),
         }
+    }
+
+    /// Allocate a public input. All public inputs must be allocated before any other
+    /// variable, so that they occupy variables `1..=num_public`.
+    pub fn public_input(&mut self, value: F) -> Var {
+        assert_eq!(
+            self.values.len(),
+            1 + self.num_public,
+            "public inputs are allocated first"
+        );
+        self.num_public += 1;
+        self.alloc(value)
     }
 
     /// Allocate a free variable with the given assigned value.
@@ -396,15 +426,18 @@ impl ConstraintSystem {
                 }
             }
         }
-        let shape = Shape {
+        let mut shape = Shape {
             log_rows,
             num_sbox: self.sbox.len(),
             num_vars: self.values.len(),
+            num_public: self.num_public,
             mask_var_base,
             a,
             b,
             c,
+            digest: [0; 32],
         };
+        shape.digest = shape.compute_digest();
         (shape, self.values)
     }
 }
@@ -427,36 +460,63 @@ fn layer_matrix(layer: fn(&mut [F; 12])) -> [[F; 12]; 12] {
     m
 }
 
-fn apply_matrix(m: &[[F; 12]; 12], st: &mut [Lc; 12]) {
-    let next: [Lc; 12] = core::array::from_fn(|i| {
-        let parts: [(F, &Lc); 12] = core::array::from_fn(|j| (m[i][j], &st[j]));
-        Lc::combine(&parts)
-    });
-    *st = next;
-}
-
 /// The permutation `crate::sponge::poseidon2_perm12` on linear forms: 118 S-box rows, no
 /// other rows. Output lanes are linear forms over the last round's S-box outputs.
+///
+/// Inside the permutation every lane is a coefficient vector over a short local basis: the
+/// twelve inputs, then the twelve outputs of the latest full round plus one output per
+/// partial round since. A lane becomes a linear form only where an S-box row needs it.
 pub fn poseidon2_perm(cs: &mut ConstraintSystem, st: &mut [Lc; 12]) {
     let me = layer_matrix(poseidon2_apply_me);
     let mi = layer_matrix(poseidon2_apply_mi);
-    apply_matrix(&me, st);
+    let external: Vec<Vec<F>> = me.iter().map(|row| row.to_vec()).collect();
+    let form = |basis: &[Lc], coeffs: &[F], constant: F| -> Lc {
+        let parts: Vec<(F, &Lc)> = coeffs.iter().copied().zip(basis).collect();
+        Lc::combine(&parts).plus_const(constant)
+    };
+
+    let mut basis: Vec<Lc> = st.to_vec();
+    let mut lanes = external.clone();
     for tag in [0u64, 1, 2] {
         if tag == 1 {
             for r in 0..POSEIDON2_INT_ROUNDS {
-                let x = st[0].plus_const(poseidon2_const_at(1, r as u64, 0));
-                st[0] = cs.sbox7(&x).into();
-                apply_matrix(&mi, st);
+                let x = form(&basis, &lanes[0], poseidon2_const_at(1, r as u64, 0));
+                basis.push(cs.sbox7(&x).into());
+                let n = basis.len();
+                for lane in &mut lanes {
+                    lane.resize(n, F::ZERO);
+                }
+                lanes[0].fill(F::ZERO);
+                lanes[0][n - 1] = F::ONE;
+                // `M_I = J + diag(d)`: every lane gets the lane sum plus `d_j` times itself.
+                let mut sum = vec![F::ZERO; n];
+                for lane in &lanes {
+                    for (s, &c) in sum.iter_mut().zip(lane) {
+                        *s += c;
+                    }
+                }
+                for (j, lane) in lanes.iter_mut().enumerate() {
+                    let d = mi[j][j] - F::ONE;
+                    for (c, &s) in lane.iter_mut().zip(&sum) {
+                        *c = c.const_mul(d) + s;
+                    }
+                }
             }
         } else {
             for r in 0..POSEIDON2_HALF_EXT_ROUNDS {
-                for (lane, slot) in st.iter_mut().enumerate() {
-                    let x = slot.plus_const(poseidon2_const_at(tag, r as u64, lane as u64));
-                    *slot = cs.sbox7(&x).into();
-                }
-                apply_matrix(&me, st);
+                let outputs: Vec<Lc> = (0..12)
+                    .map(|lane| {
+                        let rc = poseidon2_const_at(tag, r as u64, lane as u64);
+                        cs.sbox7(&form(&basis, &lanes[lane], rc)).into()
+                    })
+                    .collect();
+                basis = outputs;
+                lanes = external.clone();
             }
         }
+    }
+    for (slot, lane) in st.iter_mut().zip(&lanes) {
+        *slot = form(&basis, lane, F::ZERO);
     }
 }
 
@@ -520,6 +580,13 @@ mod tests {
             assert_eq!(cs.eval(lc), want);
         }
         assert_eq!(cs.num_rows(), 118);
+        // The gadget relies on the internal layer being all-ones plus a diagonal.
+        let mi = layer_matrix(poseidon2_apply_mi);
+        for (i, row) in mi.iter().enumerate() {
+            for (j, &entry) in row.iter().enumerate() {
+                assert!(i == j || entry == F::ONE);
+            }
+        }
         let (shape, z) = cs.finish();
         assert_eq!(shape.num_sbox, 118);
         assert!(shape.is_satisfied(&z));
