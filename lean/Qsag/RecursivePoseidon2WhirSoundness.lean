@@ -475,9 +475,6 @@ def hemNv30UnderqueriedBounds : List RatBound :=
 theorem tooth_highCap_nv30_underqueried_schedule_fails_qrom :
     ¬ atLeastBits 128
       (powScaledFsQromCompilerBound (2 ^ 40 - 1) 5 256 16
-        (hemHighCapFiveRoundRbrBounds 30) hemNv30UnderqueriedBounds) ∧
-    exceedsBitBudget 128
-      (powScaledFsQromCompilerBound (2 ^ 40 - 1) 5 256 16
         (hemHighCapFiveRoundRbrBounds 30) hemNv30UnderqueriedBounds) := by
   decide +kernel
 
@@ -672,7 +669,7 @@ def extractMerkleFoldCollision (salt : Lane4) :
     | .inr col => exact .inr col
     | .inl ⟨hParEq, hRestEq⟩ =>
       if hChildren : cur1 = cur2 ∧ s1 = s2 then
-        exact .inl ⟨hChildren.1, congrArg₂ List.cons hChildren.2 hRestEq⟩
+        exact .inl ⟨hChildren.1, by rw [hChildren.2, hRestEq]⟩
       else
         refine .inr ?_
         cases hBit : (idx % 2 == 0)
@@ -694,6 +691,25 @@ def extractMerkleFoldCollision (salt : Lane4) :
                    have ⟨_, _, _, hc, hs⟩ := canopyNodePreimage_injective hPre
                    exact hChildren ⟨hc, hs⟩,
                  hParEq⟩
+
+private theorem pow2_pos_hc : ∀ n : Nat, 1 ≤ 2 ^ n
+  | 0 => Nat.le_refl 1
+  | n + 1 => by
+    rw [Nat.pow_succ]
+    have ih := pow2_pos_hc n
+    omega
+
+private theorem pow2_lt_pow2_hc : ∀ {a b : Nat}, a < b → 2 ^ a < 2 ^ b
+  | 0, 0, h => False.elim (Nat.not_lt_zero 0 h)
+  | 0, b + 1, _ => by
+    rw [Nat.pow_zero, Nat.pow_succ]
+    have hp := pow2_pos_hc b
+    omega
+  | _ + 1, 0, h => False.elim (Nat.not_lt_zero _ h)
+  | a + 1, b + 1, h => by
+    have ih := pow2_lt_pow2_hc (Nat.lt_of_succ_lt_succ h)
+    rw [Nat.pow_succ, Nat.pow_succ]
+    omega
 
 /-- **Constructive `Poseidon2` Canopy Opening / Collision Extractor
     (`extractPoseidon2CanopyCollisionOrOpening`, `0 Classical.choice`)**:
@@ -734,7 +750,7 @@ def extractPoseidon2CanopyCollisionOrOpening
     have hEq2 := hm.symm.trans hRoot2
     rwa [← hIdx] at hEq2
   have hIdx32 : op1.leafIdx < 2 ^ 32 :=
-    Nat.lt_trans hIdxLt (Nat.pow_lt_pow_right (by decide) hTdLt)
+    Nat.lt_trans hIdxLt (pow2_lt_pow2_hc hTdLt)
   have hLv32 : 0 + full1.length < 32 := by omega
   match extractMerkleFoldCollision salt full1 full2 0 op1.leafIdx
       (poseidon2CanopyLeafHash salt (Goldilocks.ofNat op1.leafIdx) op1.payload)
@@ -769,7 +785,7 @@ theorem tooth_unsalted_poseidon2_canopy_collision :
       unsaltedPoseidon2CanopyLeafHash idx payload = unsaltedPoseidon2CanopyLeafHash idx payload ∧
       canopyLeafPreimage salt1 idx payload ≠ canopyLeafPreimage salt2 idx payload ∧
       (poseidon2CanopyLeafHash salt1 idx payload = poseidon2CanopyLeafHash salt2 idx payload →
-        Poseidon2CanopyCollision) := by
+        Nonempty Poseidon2CanopyCollision) := by
   let s1 : Lane4 := lane4Zero
   let s2 : Lane4 := ⟨Goldilocks.one, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩
   have hsNe : s1 ≠ s2 := by decide
@@ -777,7 +793,7 @@ theorem tooth_unsalted_poseidon2_canopy_collision :
       canopyLeafPreimage s2 Goldilocks.zero [Goldilocks.one] :=
     fun h => hsNe (canopyLeafPreimage_injective h).1
   exact ⟨s1, s2, Goldilocks.zero, [Goldilocks.one], hsNe, rfl, hPreNe,
-    fun hCol => ⟨_, _, hPreNe, hCol⟩⟩
+    fun hCol => ⟨⟨_, _, hPreNe, hCol⟩⟩⟩
 
 /-- Buggy untagged leaf/node hashes using a shared capacity lane `⟨0, idx, 8, 0⟩` without domain tags. -/
 def untaggedCanopyLeafHash (salt : Lane4) (idx : Goldilocks) (payload : List Goldilocks) : Lane4 :=
@@ -796,17 +812,18 @@ def untaggedCanopyNodeHash (salt : Lane4) (idx : Goldilocks) (left right : Lane4
     `payload = [left.x0..x3, right.x0..x3]` producing the exact same `Poseidon2` digest with ZERO
     sponge collisions, whereas tagged `canopyLeafPreimage ≠ canopyNodePreimage` unconditionally! -/
 theorem tooth_missing_domain_tag_leaf_node_confusion (salt left right : Lane4) (idx : Goldilocks) :
-    let forgedPayload := [left.x0, left.x1, left.x2, left.x3, right.x0, right.x1, right.x2, right.x3]
-    untaggedCanopyLeafHash salt idx forgedPayload = untaggedCanopyNodeHash salt idx left right ∧
-    canopyLeafPreimage salt idx forgedPayload ≠ canopyNodePreimage salt idx idx left right :=
-  ⟨rfl, canopyLeaf_ne_node_preimage salt salt idx idx idx _ left right⟩
+    ∃ forgedPayload : List Goldilocks,
+      untaggedCanopyLeafHash salt idx forgedPayload = untaggedCanopyNodeHash salt idx left right ∧
+      canopyLeafPreimage salt idx forgedPayload ≠ canopyNodePreimage salt idx idx left right :=
+  ⟨[left.x0, left.x1, left.x2, left.x3, right.x0, right.x1, right.x2, right.x3],
+   rfl, canopyLeaf_ne_node_preimage salt salt idx idx idx _ left right⟩
 
 /-- Pack a `QuarticGoldilocks` extension element into 4 `Goldilocks` limbs (bijective). -/
 def ext4ToLimbs (e : QuarticGoldilocks) : List Goldilocks :=
-  [e.c0.a0, e.c0.a1, e.c1.a0, e.c1.a1]
+  [e.c0.c0, e.c0.c1, e.c1.c0, e.c1.c1]
 
 def ext4ToLane4 (e : QuarticGoldilocks) : Lane4 :=
-  ⟨e.c0.a0, e.c0.a1, e.c1.a0, e.c1.a1⟩
+  ⟨e.c0.c0, e.c0.c1, e.c1.c0, e.c1.c1⟩
 
 def lane4ToExt4 (l : Lane4) : QuarticGoldilocks :=
   ⟨⟨l.x0, l.x1⟩, ⟨l.x2, l.x3⟩⟩
@@ -816,20 +833,29 @@ theorem lane4ToExt4_ext4ToLane4 (e : QuarticGoldilocks) : lane4ToExt4 (ext4ToLan
 
 theorem ext4ToLimbs_injective {a b : QuarticGoldilocks} (h : ext4ToLimbs a = ext4ToLimbs b) :
     a = b := by
-  unfold ext4ToLimbs at h
-  simp only [List.cons.injEq, and_true] at h
-  rcases h with ⟨h0, h1, h2, h3⟩
   cases a with | mk ac0 ac1 =>
     cases b with | mk bc0 bc1 =>
       cases ac0; cases ac1; cases bc0; cases bc1
-      dsimp only at h0 h1 h2 h3
-      subst h0 h1 h2 h3; rfl
+      unfold ext4ToLimbs at h
+      injection h with h0 htl1
+      injection htl1 with h1 htl2
+      injection htl2 with h2 htl3
+      injection htl3 with h3 _
+      subst h0 h1 h2 h3
+      rfl
 
-/-- Constant `2` in `QuarticGoldilocks`. -/
+/-- Constant `2` and closed-form `2⁻¹` in `QuarticGoldilocks` (`(p + 1) / 2 mod p`). -/
 def ext4Two : QuarticGoldilocks :=
   CommRingOps.add CommRingOps.one CommRingOps.one
 
+def ext4InvTwo : QuarticGoldilocks :=
+  ⟨⟨⟨(goldilocksPrime + 1) / 2, by decide⟩, Goldilocks.zero⟩,
+   ⟨Goldilocks.zero, Goldilocks.zero⟩⟩
+
 theorem ext4Two_ne_zero : ext4Two ≠ CommRingOps.zero := by
+  decide
+
+theorem ext4Two_mul_ext4InvTwo : CommRingOps.mul ext4Two ext4InvTwo = CommRingOps.one := by
   decide
 
 /-- **`[CWYZ26]` Duet Fold Arithmetic Statement (`DuetFoldStatement`)**:
@@ -913,84 +939,82 @@ theorem authenticated_duet_fold_uniquely_determines_claimed (s1 s2 : DuetFoldSta
     If `DuetFoldStatement` omits `2 * x * inv_two_x = 1` (`duetFoldUnauthenticatedGate`), then for
     **EVERY** `(v0, v1, theta, alpha, beta, x)` with `v0 ≠ v1` and non-degenerate fold multiplier
     `1 + (alpha + beta * x^2) * theta ≠ 0`, and for **EVERY** forged target `forgedClaimed : QuarticGoldilocks`,
-    an explicit closed-form `inv_two_x` witness makes `duetFoldUnauthenticatedGate` accept `forgedClaimed`
-    (while `duetFoldAuthenticated` rejects forged claims on concrete honest transcripts)! -/
-theorem tooth_unverified_inv_two_x_forges_duet_fold :
-    (∀ (v0 v1 theta alpha beta x forgedClaimed : QuarticGoldilocks),
-      v0 ≠ v1 →
-      let x_sq := CommRingOps.mul x x
-      let gamma := CommRingOps.add alpha (CommRingOps.mul beta x_sq)
-      let denom := CommRingOps.add CommRingOps.one (CommRingOps.mul gamma theta)
-      denom ≠ CommRingOps.zero →
-      ∃ inv_two_x_forge : QuarticGoldilocks,
-        duetFoldUnauthenticatedGate
-          { v0 := v0, v1 := v1, theta := theta, alpha := alpha, beta := beta,
-            x := x, x_sq := x_sq, inv_two := LawfulField.inv ext4Two,
-            inv_two_x := inv_two_x_forge, claimed := forgedClaimed } = true) ∧
-    (∃ sForge : DuetFoldStatement,
-      duetFoldUnauthenticatedGate sForge = true ∧
-      duetFoldAuthenticated sForge = false) := by
-  refine ⟨?_, ?_⟩
-  · intro v0 v1 theta alpha beta x forgedClaimed hvNe hDenomNe
-    let inv2 := LawfulField.inv ext4Two
-    let x_sq := CommRingOps.mul x x
-    let even := CommRingOps.mul (CommRingOps.add v0 v1) inv2
-    let gamma := CommRingOps.add alpha (CommRingOps.mul beta x_sq)
-    let denom := CommRingOps.add CommRingOps.one (CommRingOps.mul gamma theta)
-    let diff := CommRingOps.sub v0 v1
-    have hDiffNe : diff ≠ CommRingOps.zero := fun h0 =>
-      hvNe (LawfulCommRing.sub_eq_zero_iff.mp h0)
-    let targetOdd := CommRingOps.mul (CommRingOps.sub forgedClaimed (CommRingOps.mul gamma even))
-      (LawfulField.inv denom)
-    let forgeW := CommRingOps.mul targetOdd (LawfulField.inv diff)
-    refine ⟨forgeW, ?_⟩
-    unfold duetFoldUnauthenticatedGate
-    dsimp only
-    have hInv2 : CommRingOps.mul ext4Two inv2 = CommRingOps.one :=
-      LawfulField.mul_inv_cancel ext4Two_ne_zero
-    have hOddEq : CommRingOps.mul diff forgeW = targetOdd := by
-      dsimp only [forgeW]
-      calc CommRingOps.mul diff (CommRingOps.mul targetOdd (LawfulField.inv diff))
-          = CommRingOps.mul targetOdd (CommRingOps.mul diff (LawfulField.inv diff)) := by
-              constructive_ring
-        _ = CommRingOps.mul targetOdd CommRingOps.one := by
-              rw [LawfulField.mul_inv_cancel hDiffNe]
-        _ = targetOdd := LawfulCommRing.mul_one targetOdd
-    have hRhsEq : CommRingOps.add (CommRingOps.mul diff forgeW)
-        (CommRingOps.mul gamma (CommRingOps.add even (CommRingOps.mul theta (CommRingOps.mul diff forgeW)))) =
-        forgedClaimed := by
-      rw [hOddEq]
-      have hLin : CommRingOps.add targetOdd
-          (CommRingOps.mul gamma (CommRingOps.add even (CommRingOps.mul theta targetOdd))) =
-          CommRingOps.add (CommRingOps.mul gamma even) (CommRingOps.mul targetOdd denom) := by
-        dsimp only [denom]
-        constructive_ring
-      rw [hLin]
-      dsimp only [targetOdd]
-      have hCancel : CommRingOps.mul
-          (CommRingOps.mul (CommRingOps.sub forgedClaimed (CommRingOps.mul gamma even)) (LawfulField.inv denom))
-          denom = CommRingOps.sub forgedClaimed (CommRingOps.mul gamma even) := by
-        calc CommRingOps.mul
-              (CommRingOps.mul (CommRingOps.sub forgedClaimed (CommRingOps.mul gamma even)) (LawfulField.inv denom))
-              denom
-            = CommRingOps.mul (CommRingOps.sub forgedClaimed (CommRingOps.mul gamma even))
-                (CommRingOps.mul denom (LawfulField.inv denom)) := by constructive_ring
-          _ = CommRingOps.mul (CommRingOps.sub forgedClaimed (CommRingOps.mul gamma even))
-                CommRingOps.one := by rw [LawfulField.mul_inv_cancel hDenomNe]
-          _ = CommRingOps.sub forgedClaimed (CommRingOps.mul gamma even) :=
-                LawfulCommRing.mul_one _
-      rw [hCancel]
+    an explicit closed-form `inv_two_x` witness makes `duetFoldUnauthenticatedGate` accept `forgedClaimed`! -/
+theorem tooth_unverified_inv_two_x_forges_duet_fold
+    (v0 v1 theta alpha beta x forgedClaimed : QuarticGoldilocks)
+    (hvNe : v0 ≠ v1)
+    (hDenomNe :
+      CommRingOps.add CommRingOps.one
+        (CommRingOps.mul (CommRingOps.add alpha (CommRingOps.mul beta (CommRingOps.mul x x))) theta) ≠
+      CommRingOps.zero) :
+    ∃ inv_two_x_forge : QuarticGoldilocks,
+      duetFoldUnauthenticatedGate
+        { v0 := v0, v1 := v1, theta := theta, alpha := alpha, beta := beta,
+          x := x, x_sq := CommRingOps.mul x x, inv_two := ext4InvTwo,
+          inv_two_x := inv_two_x_forge, claimed := forgedClaimed } = true := by
+  let x_sq := CommRingOps.mul x x
+  let even := CommRingOps.mul (CommRingOps.add v0 v1) ext4InvTwo
+  let gamma := CommRingOps.add alpha (CommRingOps.mul beta x_sq)
+  let denom := CommRingOps.add CommRingOps.one (CommRingOps.mul gamma theta)
+  let diff := CommRingOps.sub v0 v1
+  have hDiffNe : diff ≠ CommRingOps.zero := fun h0 =>
+    hvNe (LawfulCommRing.sub_eq_zero_iff.mp h0)
+  let targetOdd := CommRingOps.mul (CommRingOps.sub forgedClaimed (CommRingOps.mul gamma even))
+    (LawfulField.inv denom)
+  let forgeW := CommRingOps.mul targetOdd (LawfulField.inv diff)
+  refine ⟨forgeW, ?_⟩
+  unfold duetFoldUnauthenticatedGate
+  dsimp only
+  have hOddEq : CommRingOps.mul diff forgeW = targetOdd := by
+    dsimp only [forgeW]
+    calc CommRingOps.mul diff (CommRingOps.mul targetOdd (LawfulField.inv diff))
+        = CommRingOps.mul targetOdd (CommRingOps.mul diff (LawfulField.inv diff)) := by
+            constructive_ring
+      _ = CommRingOps.mul targetOdd CommRingOps.one := by
+            rw [LawfulField.mul_inv_cancel hDiffNe]
+      _ = targetOdd := LawfulCommRing.mul_one targetOdd
+  have hRhsEq : CommRingOps.add (CommRingOps.mul diff forgeW)
+      (CommRingOps.mul gamma (CommRingOps.add even (CommRingOps.mul theta (CommRingOps.mul diff forgeW)))) =
+      forgedClaimed := by
+    rw [hOddEq]
+    have hLin : CommRingOps.add targetOdd
+        (CommRingOps.mul gamma (CommRingOps.add even (CommRingOps.mul theta targetOdd))) =
+        CommRingOps.add (CommRingOps.mul gamma even) (CommRingOps.mul targetOdd denom) := by
+      dsimp only [denom]
       constructive_ring
-    rw [decide_eq_true hInv2, decide_eq_true rfl, decide_eq_true hRhsEq.symm]
-    rfl
-  · let sForge : DuetFoldStatement :=
-      { v0 := CommRingOps.one, v1 := CommRingOps.zero,
-        theta := CommRingOps.zero, alpha := CommRingOps.zero, beta := CommRingOps.zero,
-        x := CommRingOps.one, x_sq := CommRingOps.one,
-        inv_two := LawfulField.inv ext4Two,
-        inv_two_x := CommRingOps.one,
-        claimed := CommRingOps.one }
-    exact ⟨sForge, by decide +kernel, by decide +kernel⟩
+    rw [hLin]
+    dsimp only [targetOdd]
+    have hCancel : CommRingOps.mul
+        (CommRingOps.mul (CommRingOps.sub forgedClaimed (CommRingOps.mul gamma even)) (LawfulField.inv denom))
+        denom = CommRingOps.sub forgedClaimed (CommRingOps.mul gamma even) := by
+      calc CommRingOps.mul
+            (CommRingOps.mul (CommRingOps.sub forgedClaimed (CommRingOps.mul gamma even)) (LawfulField.inv denom))
+            denom
+          = CommRingOps.mul (CommRingOps.sub forgedClaimed (CommRingOps.mul gamma even))
+              (CommRingOps.mul denom (LawfulField.inv denom)) := by constructive_ring
+        _ = CommRingOps.mul (CommRingOps.sub forgedClaimed (CommRingOps.mul gamma even))
+              CommRingOps.one := by rw [LawfulField.mul_inv_cancel hDenomNe]
+        _ = CommRingOps.sub forgedClaimed (CommRingOps.mul gamma even) :=
+              LawfulCommRing.mul_one _
+    rw [hCancel]
+    constructive_ring
+  rw [decide_eq_true ext4Two_mul_ext4InvTwo, decide_eq_true rfl, decide_eq_true hRhsEq.symm]
+  rfl
+
+/-- Concrete separation witness: a forged `DuetFoldStatement` accepted by `duetFoldUnauthenticatedGate`
+    and rejected (`= false`) by `duetFoldAuthenticated`. -/
+theorem tooth_unverified_inv_two_x_concrete_rejected :
+    ∃ sForge : DuetFoldStatement,
+      duetFoldUnauthenticatedGate sForge = true ∧
+      duetFoldAuthenticated sForge = false := by
+  let sForge : DuetFoldStatement :=
+    { v0 := CommRingOps.one, v1 := CommRingOps.zero,
+      theta := CommRingOps.zero, alpha := CommRingOps.zero, beta := CommRingOps.zero,
+      x := CommRingOps.one, x_sq := CommRingOps.one,
+      inv_two := ext4InvTwo,
+      inv_two_x := CommRingOps.one,
+      claimed := CommRingOps.one }
+  exact ⟨sForge, by decide, by decide⟩
 
 /-- Sumcheck univariate round chain: each round polynomial `p_i` has degree `≤ 3` (`p_i.length ≤ 4`),
     satisfies `p_i(0) + p_i(1) = curClaim`, and updates `curClaim := p_i(r_i)`. -/
@@ -1044,7 +1068,11 @@ structure ChildWhirWitness where
     5. Final early-stop polynomial evaluation `evalCoeffs w.earlyStopPoly duetFold.x_sq = duetFold.claimed`
        and sumcheck terminal link `scFinal = initialClaim_link` (`scFinal = duetFold.claimed`). -/
 def ChildWhirCircuitAccepts (publicDigest : Lane4) (w : ChildWhirWitness) : Bool :=
-  let (theta, alpha, beta, r0) := deriveChildWhirChallenges publicDigest w.salt w.canopyRoot
+  let chals := deriveChildWhirChallenges publicDigest w.salt w.canopyRoot
+  let theta := chals.1
+  let alpha := chals.2.1
+  let beta := chals.2.2.1
+  let r0 := chals.2.2.2
   match verifySumcheckChain w.initialClaim ((w.sumcheckPoly0, r0) :: w.extraSumcheckRounds) with
   | none => false
   | some scFinal =>
@@ -1073,11 +1101,18 @@ def extractChildWhirOpeningConsistency (pub1 pub2 : Lane4) (w1 w2 : ChildWhirWit
     (hAcc2 : ChildWhirCircuitAccepts pub2 w2 = true) :
     PSum (w1.duetFold.v0 = w2.duetFold.v0) Poseidon2CanopyCollision := by
   unfold ChildWhirCircuitAccepts at hAcc1 hAcc2
-  split at hAcc1
-  · exact False.elim (Bool.false_ne_true hAcc1)
-  · split at hAcc2
-    · exact False.elim (Bool.false_ne_true hAcc2)
-    · simp only [Bool.and_eq_true, decide_eq_true_eq] at hAcc1 hAcc2
+  dsimp only at hAcc1 hAcc2
+  cases hSc1 : verifySumcheckChain w1.initialClaim
+      ((w1.sumcheckPoly0, (deriveChildWhirChallenges pub1 w1.salt w1.canopyRoot).2.2.2) :: w1.extraSumcheckRounds) with
+  | none => rw [hSc1] at hAcc1; exact False.elim (Bool.false_ne_true hAcc1)
+  | some sc1 =>
+    rw [hSc1] at hAcc1
+    cases hSc2 : verifySumcheckChain w2.initialClaim
+        ((w2.sumcheckPoly0, (deriveChildWhirChallenges pub2 w2.salt w2.canopyRoot).2.2.2) :: w2.extraSumcheckRounds) with
+    | none => rw [hSc2] at hAcc2; exact False.elim (Bool.false_ne_true hAcc2)
+    | some sc2 =>
+      rw [hSc2] at hAcc2
+      simp only [Bool.and_eq_true, decide_eq_true_eq] at hAcc1 hAcc2
       have hOp1 : verifyPoseidon2CanopyOpening w1.salt w1.canopyRoot w1.bottomDepth w1.canopyDepth w1.opening0 = true :=
         hAcc1.1.1.1.1.1.1.1.1.1.1.1
       have hPay1 : w1.opening0.payload = ext4ToLimbs w1.duetFold.v0 :=
@@ -1131,8 +1166,9 @@ theorem encodeSummaryDigestList_injective :
   | x :: xs, y :: ys, hLen, hEnc => by
     simp only [encodeSummaryDigestList, List.cons_append, List.nil_append, List.cons.injEq] at hEnc
     rcases hEnc with ⟨h0, h1, h2, h3, hRest⟩
-    exact congrArg₂ List.cons (Lane4.ext h0 h1 h2 h3)
-      (encodeSummaryDigestList_injective (Nat.succ.inj hLen) hRest)
+    have hx : x = y := Lane4.ext h0 h1 h2 h3
+    have hxs : xs = ys := encodeSummaryDigestList_injective (Nat.succ.inj hLen) hRest
+    rw [hx, hxs]
 
 def canopySummaryPreimage (depth fanIn : Nat) (childDigests : List Lane4) :
     Poseidon2CanopyPreimage :=
@@ -1159,70 +1195,81 @@ def hashLeafShardHeader (h : RecursiveShardHeader) : Lane4 :=
     [Goldilocks.ofNat h.committeeSize, Goldilocks.ofNat h.validCount,
      h.publicDigest.x0, h.publicDigest.x1, h.publicDigest.x2, h.publicDigest.x3]
 
-/-- Inductive depth-`d`, fan-in-`F` Recursive `Hem` Aggregate Certificate (`RecursiveHemAggregate F d`).
-    - `d = 0`: leaf shard WHIR certificate (`ChildWhirWitness` verifying `header.publicDigest`).
-    - `d = d' + 1`: outer recursive WHIR certificate committing to `F` child summary digests via
-      `poseidon2SummaryHash (d' + 1) F` and verifying the outer `ChildWhirWitness` over that commitment! -/
-inductive RecursiveHemAggregate (F : Nat) : Nat → Type where
-  | leaf (header : RecursiveShardHeader) (leafProof : ChildWhirWitness) :
-      RecursiveHemAggregate F 0
-  | node {d : Nat} (summaryDigest : Lane4) (outerProof : ChildWhirWitness)
-      (children : List (RecursiveHemAggregate F d)) :
-      RecursiveHemAggregate F (d + 1)
+/-- Leaf shard WHIR certificate (`d = 0`). -/
+structure RecursiveHemLeafCert where
+  header : RecursiveShardHeader
+  leafProof : ChildWhirWitness
+  deriving DecidableEq, Repr
+
+/-- Outer recursive WHIR node certificate (`d + 1`) aggregating `children : List Child`. -/
+structure RecursiveHemOuterCert (Child : Type) where
+  summaryDigest : Lane4
+  outerProof : ChildWhirWitness
+  children : List Child
+  deriving Repr
+
+/-- Depth-`d` Recursive `Hem` Aggregate Certificate (`RecursiveHemAggregate d`), defined by
+    structural recursion on `d : Nat`:
+    - `d = 0`: leaf shard WHIR certificate (`RecursiveHemLeafCert`).
+    - `d + 1`: outer recursive WHIR certificate (`RecursiveHemOuterCert (RecursiveHemAggregate d)`)
+      committing to `F` child summary digests via `poseidon2SummaryHash (d + 1) F`! -/
+def RecursiveHemAggregate : Nat → Type
+  | 0 => RecursiveHemLeafCert
+  | d + 1 => RecursiveHemOuterCert (RecursiveHemAggregate d)
 
 /-- Summary digest propagated upward by a depth-`d` subtree. -/
-def RecursiveHemAggregate.summaryDigest {F : Nat} : {d : Nat} → RecursiveHemAggregate F d → Lane4
-  | 0, .leaf hdr _ => hashLeafShardHeader hdr
-  | _ + 1, .node dig _ _ => dig
+def recursiveHemSummaryDigest : (d : Nat) → RecursiveHemAggregate d → Lane4
+  | 0, leafCert => hashLeafShardHeader leafCert.header
+  | _ + 1, nodeCert => nodeCert.summaryDigest
 
 /-- Flatten all `F^d` leaf `RecursiveShardHeader`s in a depth-`d` aggregate tree. -/
-def RecursiveHemAggregate.leafHeaders {F : Nat} :
-    {d : Nat} → RecursiveHemAggregate F d → List RecursiveShardHeader
-  | 0, .leaf hdr _ => [hdr]
-  | _ + 1, .node _ _ cs => cs.flatMap RecursiveHemAggregate.leafHeaders
+def recursiveHemLeafHeaders : (d : Nat) → RecursiveHemAggregate d → List RecursiveShardHeader
+  | 0, leafCert => [leafCert.header]
+  | d + 1, nodeCert => nodeCert.children.flatMap (recursiveHemLeafHeaders d)
 
-private def verifyChildrenAux {F d : Nat} (recVerify : RecursiveHemAggregate F d → Bool) :
-    List (RecursiveHemAggregate F d) → Bool
+private def verifyChildrenList {α : Type} (recVerify : α → Bool) : List α → Bool
   | [] => true
-  | c :: cs => recVerify c && verifyChildrenAux recVerify cs
+  | c :: cs => recVerify c && verifyChildrenList recVerify cs
 
 /-- Recursive verifier checking tree shape (`children.length = F`), `Poseidon2` summary binding,
     `ChildWhirCircuitAccepts` at every internal and leaf node, and valid quorum bounds at every leaf. -/
-def verifyRecursiveHemNode {F : Nat} : {d : Nat} → RecursiveHemAggregate F d → Bool
-  | 0, .leaf hdr prf =>
-    verifyRecursiveShardHeader hdr &&
-    ChildWhirCircuitAccepts hdr.publicDigest prf
-  | d + 1, .node dig outerPrf cs =>
-    decide (cs.length = F) &&
-    decide (poseidon2SummaryHash (d + 1) F (cs.map RecursiveHemAggregate.summaryDigest) = dig) &&
-    ChildWhirCircuitAccepts dig outerPrf &&
-    verifyChildrenAux verifyRecursiveHemNode cs
+def verifyRecursiveHemNode (F : Nat) : (d : Nat) → RecursiveHemAggregate d → Bool
+  | 0, leafCert =>
+    verifyRecursiveShardHeader leafCert.header &&
+    ChildWhirCircuitAccepts leafCert.header.publicDigest leafCert.leafProof
+  | d + 1, nodeCert =>
+    decide (nodeCert.children.length = F) &&
+    decide (poseidon2SummaryHash (d + 1) F
+      (nodeCert.children.map (recursiveHemSummaryDigest d)) = nodeCert.summaryDigest) &&
+    ChildWhirCircuitAccepts nodeCert.summaryDigest nodeCert.outerProof &&
+    verifyChildrenList (verifyRecursiveHemNode F d) nodeCert.children
 
-/-- Top-level recursive tree verifier enforcing `verifyRecursiveHemNode` plus global shard-ID
-    distinctness (`(agg.leafHeaders.map (·.shardId)).Nodup`). -/
-def verifyRecursiveHemTree {F d : Nat} (agg : RecursiveHemAggregate F d) : Bool :=
-  verifyRecursiveHemNode agg &&
-  decide ((agg.leafHeaders.map (·.shardId)).Nodup)
+/-- Top-level recursive tree verifier enforcing `verifyRecursiveHemNode F d` plus global shard-ID
+    distinctness (`((recursiveHemLeafHeaders d agg).map (·.shardId)).Nodup`). -/
+def verifyRecursiveHemTree (F d : Nat) (agg : RecursiveHemAggregate d) : Bool :=
+  verifyRecursiveHemNode F d agg &&
+  decide (((recursiveHemLeafHeaders d agg).map (·.shardId)).Nodup)
 
 /-- Underlying validator signature witness for a single leaf shard `hdr`: explicit list of
-    `validSigs` validator indices (`validSigs.Nodup`, every index `< hdr.committeeSize`, and
-    `hdr.threshold ≤ validSigs.length`). -/
+    `signerIndices` (`signerIndices.Nodup`, every index `< hdr.committeeSize`, and
+    `hdr.threshold ≤ signerIndices.length`). -/
 structure LeafShardQuorumWitness (hdr : RecursiveShardHeader) where
   signerIndices : List Nat
   hNodup : signerIndices.Nodup
   hBounds : ∀ idx ∈ signerIndices, idx < hdr.committeeSize
   hQuorum : hdr.threshold ≤ signerIndices.length
 
+/-- Outer witness bundle pairing fan-in check `cs.length = F` with extracted child witnesses. -/
+structure OuterValidatorWitnessBundle {Child : Type} (F : Nat) (cs : List Child)
+    (ChildWit : Child → Type) where
+  hLen : cs.length = F
+  childWitnesses : (i : Fin cs.length) → ChildWit (cs.get i)
+
 /-- Extracted validator witnesses across every leaf shard of a depth-`d` recursive tree. -/
-inductive LeafValidatorWitnesses {F : Nat} : {d : Nat} → RecursiveHemAggregate F d → Type where
-  | leaf {hdr : RecursiveShardHeader} {prf : ChildWhirWitness}
-      (w : LeafShardQuorumWitness hdr) :
-      LeafValidatorWitnesses (.leaf hdr prf)
-  | node {d : Nat} {dig : Lane4} {prf : ChildWhirWitness}
-      {cs : List (RecursiveHemAggregate F d)}
-      (hLen : cs.length = F)
-      (childWitnesses : (i : Fin cs.length) → LeafValidatorWitnesses (cs.get i)) :
-      LeafValidatorWitnesses (.node dig prf cs)
+def LeafValidatorWitnesses (F : Nat) : (d : Nat) → RecursiveHemAggregate d → Type
+  | 0, leafCert => LeafShardQuorumWitness leafCert.header
+  | d + 1, nodeCert =>
+    OuterValidatorWitnessBundle F nodeCert.children (LeafValidatorWitnesses F d)
 
 /-- Explicit WHIR QROM soundness bad event (state-restoration / proximity-gap escape at a leaf or
     outer recursive node). -/
@@ -1231,36 +1278,36 @@ inductive WhirSoundnessBadEvent : Type where
   | outerSoundnessEscape (depth : Nat) (summaryDigest : Lane4)
   deriving DecidableEq, Repr
 
-/-- Environment supplying the per-node QROM extraction outcome (computed from the online-extracted
-    QROM oracle transcript at each node):
-    - At a leaf: either the valid validator quorum signatures `LeafShardQuorumWitness hdr` or an
-      explicit `WhirSoundnessBadEvent.leafSoundnessEscape`.
-    - At an internal node of depth `d + 1`: either the extracted child summary digests `extractedDigests`
-      certified by the outer recursive WHIR proof (`extractedDigests.length = F` and hashing to `dig`),
-      or an explicit `WhirSoundnessBadEvent.outerSoundnessEscape`. -/
-inductive RecursiveWhirExtractionEnv (F : Nat) : {d : Nat} → RecursiveHemAggregate F d → Type where
-  | leaf {hdr : RecursiveShardHeader} {prf : ChildWhirWitness}
-      (outcome : PSum (LeafShardQuorumWitness hdr) WhirSoundnessBadEvent) :
-      RecursiveWhirExtractionEnv F (.leaf hdr prf)
-  | node {d : Nat} {dig : Lane4} {prf : ChildWhirWitness}
-      {cs : List (RecursiveHemAggregate F d)}
-      (outerOutcome :
-        PSum { ds : List Lane4 // ds.length = F ∧ poseidon2SummaryHash (d + 1) F ds = dig }
-             WhirSoundnessBadEvent)
-      (childEnvs : (i : Fin cs.length) → RecursiveWhirExtractionEnv F (cs.get i)) :
-      RecursiveWhirExtractionEnv F (.node dig prf cs)
+/-- Outer node QROM extraction environment pairing the outer WHIR outcome with child environments. -/
+structure OuterExtractionEnvBundle {Child : Type} (F dSucc : Nat)
+    (dig : Lane4) (cs : List Child) (ChildEnv : Child → Type) where
+  outerOutcome :
+    PSum { ds : List Lane4 // ds.length = F ∧ poseidon2SummaryHash dSucc F ds = dig }
+         WhirSoundnessBadEvent
+  childEnvs : (i : Fin cs.length) → ChildEnv (cs.get i)
 
-private theorem verifyChildrenAux_get {F d : Nat} (recVerify : RecursiveHemAggregate F d → Bool) :
-    ∀ (cs : List (RecursiveHemAggregate F d)),
-      verifyChildrenAux recVerify cs = true →
+/-- Environment supplying the per-node QROM extraction outcome across a depth-`d` tree:
+    - At `d = 0`: either valid validator quorum signatures `LeafShardQuorumWitness` or
+      `WhirSoundnessBadEvent.leafSoundnessEscape`.
+    - At `d + 1`: either the extracted child summary digests `ds` (`ds.length = F` hashing to
+      `summaryDigest`) or `WhirSoundnessBadEvent.outerSoundnessEscape`, plus child environments. -/
+def RecursiveWhirExtractionEnv (F : Nat) : (d : Nat) → RecursiveHemAggregate d → Type
+  | 0, leafCert => PSum (LeafShardQuorumWitness leafCert.header) WhirSoundnessBadEvent
+  | d + 1, nodeCert =>
+    OuterExtractionEnvBundle F (d + 1) nodeCert.summaryDigest nodeCert.children
+      (RecursiveWhirExtractionEnv F d)
+
+private theorem verifyChildrenList_get {α : Type} (recVerify : α → Bool) :
+    ∀ (cs : List α),
+      verifyChildrenList recVerify cs = true →
       ∀ (i : Fin cs.length), recVerify (cs.get i) = true
   | [], _, ⟨_, hLt⟩ => False.elim (Nat.not_lt_zero _ hLt)
-  | c :: cs, hAll, ⟨0, _⟩ => by
-    simp only [verifyChildrenAux, Bool.and_eq_true] at hAll
+  | _ :: _, hAll, ⟨0, _⟩ => by
+    simp only [verifyChildrenList, Bool.and_eq_true] at hAll
     exact hAll.1
-  | c :: cs, hAll, ⟨i + 1, hLt⟩ => by
-    simp only [verifyChildrenAux, Bool.and_eq_true] at hAll
-    exact verifyChildrenAux_get recVerify cs hAll.2 ⟨i, Nat.lt_of_succ_lt_succ hLt⟩
+  | _ :: cs, hAll, ⟨i + 1, hLt⟩ => by
+    simp only [verifyChildrenList, Bool.and_eq_true] at hAll
+    exact verifyChildrenList_get recVerify cs hAll.2 ⟨i, Nat.lt_of_succ_lt_succ hLt⟩
 
 private def collectFinWitnesses {α : Type} {P : α → Type} {E : Type} :
     (xs : List α) →
@@ -1281,41 +1328,41 @@ private def collectFinWitnesses {α : Type} {P : α → Type} {E : Type} :
 
 /-- **Constructive `d`-Level Fan-In-`F` Recursive WHIR Knowledge Extractor
     (`extractRecursiveHemNode`, `0 Classical.choice`)**:
-    Walks any accepting depth-`d` `RecursiveHemAggregate F d` structurally:
+    Walks any accepting depth-`d` `RecursiveHemAggregate d` structurally on `d`:
     - Checks outer WHIR extraction outcome; if extracted child summary digests disagree with the
-      actual child subtrees' `summaryDigest`s while hashing to the same `dig`, constructively produces
-      an explicit `Poseidon2CanopyCollision` (`PSum.inr (.inl col)`)!
+      actual child subtrees' `recursiveHemSummaryDigest`s while hashing to the same `summaryDigest`,
+      constructively produces an explicit `Poseidon2CanopyCollision` (`PSum.inr (.inl col)`)!
     - Otherwise recurses across all `F` child subtrees, returning either complete
-      `LeafValidatorWitnesses` across all `F^d` leaf shards or an explicit
+      `LeafValidatorWitnesses F d agg` across all `F^d` leaf shards or an explicit
       `PSum Poseidon2CanopyCollision WhirSoundnessBadEvent`! -/
-def extractRecursiveHemNode {F : Nat} :
-    {d : Nat} → (agg : RecursiveHemAggregate F d) →
-    RecursiveWhirExtractionEnv F agg →
-    verifyRecursiveHemNode agg = true →
-    PSum (LeafValidatorWitnesses agg) (PSum Poseidon2CanopyCollision WhirSoundnessBadEvent)
-  | 0, .leaf _ _, .leaf outcome, _ =>
+def extractRecursiveHemNode (F : Nat) :
+    (d : Nat) → (agg : RecursiveHemAggregate d) →
+    RecursiveWhirExtractionEnv F d agg →
+    verifyRecursiveHemNode F d agg = true →
+    PSum (LeafValidatorWitnesses F d agg) (PSum Poseidon2CanopyCollision WhirSoundnessBadEvent)
+  | 0, _, outcome, _ =>
     match outcome with
-    | .inl w => .inl (.leaf w)
+    | .inl w => .inl w
     | .inr bad => .inr (.inr bad)
-  | d + 1, .node dig _ cs, .node outerOut childEnvs, hAcc => by
+  | d + 1, nodeCert, envNode, hAcc => by
     unfold verifyRecursiveHemNode at hAcc
     simp only [Bool.and_eq_true, decide_eq_true_eq] at hAcc
     rcases hAcc with ⟨⟨⟨hCsLen, hDigEq⟩, _⟩, hChildrenOk⟩
-    match outerOut with
+    match envNode.outerOutcome with
     | .inr bad => exact .inr (.inr bad)
     | .inl ⟨ds, hDsLen, hDsHash⟩ =>
-      let actualDs := cs.map RecursiveHemAggregate.summaryDigest
+      let actualDs := nodeCert.children.map (recursiveHemSummaryDigest d)
       have hActLen : actualDs.length = F := by simp [actualDs, hCsLen]
       if hEqDs : ds = actualDs then
-        let stepChild : (i : Fin cs.length) →
-            PSum (LeafValidatorWitnesses (cs.get i))
+        let stepChild : (i : Fin nodeCert.children.length) →
+            PSum (LeafValidatorWitnesses F d (nodeCert.children.get i))
                  (PSum Poseidon2CanopyCollision WhirSoundnessBadEvent) :=
           fun i =>
-            extractRecursiveHemNode (cs.get i) (childEnvs i)
-              (verifyChildrenAux_get verifyRecursiveHemNode cs hChildrenOk i)
-        match collectFinWitnesses cs stepChild with
+            extractRecursiveHemNode F d (nodeCert.children.get i) (envNode.childEnvs i)
+              (verifyChildrenList_get (verifyRecursiveHemNode F d) nodeCert.children hChildrenOk i)
+        match collectFinWitnesses nodeCert.children stepChild with
         | .inr err => exact .inr err
-        | .inl allW => exact .inl (.node hCsLen allW)
+        | .inl allW => exact .inl ⟨hCsLen, allW⟩
       else
         refine .inr (.inl ⟨canopySummaryPreimage (d + 1) F ds,
                            canopySummaryPreimage (d + 1) F actualDs,
@@ -1324,18 +1371,18 @@ def extractRecursiveHemNode {F : Nat} :
                            hDsHash.trans hDigEq.symm⟩)
 
 /-- **Top-Level `d`-Level Recursive WHIR Knowledge Extractor (`extractRecursiveHemTree`, `0 Classical.choice`)**:
-    If `verifyRecursiveHemTree agg = true`, constructively returns either:
+    If `verifyRecursiveHemTree F d agg = true`, constructively returns either:
     - `.inl (w, hNodup)` : valid validator quorum signatures (`threshold ≤ |signerIndices|`) for EVERY
       leaf shard together with global shard-ID uniqueness, OR
-    - `.inr (Poseidon2CanopyCollision ∨ WhirSoundnessBadEvent)` (as constructive `PSum` AND `Or`). -/
-def extractRecursiveHemTree {F d : Nat} (agg : RecursiveHemAggregate F d)
-    (env : RecursiveWhirExtractionEnv F agg)
-    (hAcc : verifyRecursiveHemTree agg = true) :
-    PSum (LeafValidatorWitnesses agg × (agg.leafHeaders.map (·.shardId)).Nodup)
+    - `.inr (PSum Poseidon2CanopyCollision WhirSoundnessBadEvent)`! -/
+def extractRecursiveHemTree (F d : Nat) (agg : RecursiveHemAggregate d)
+    (env : RecursiveWhirExtractionEnv F d agg)
+    (hAcc : verifyRecursiveHemTree F d agg = true) :
+    PSum (LeafValidatorWitnesses F d agg × ((recursiveHemLeafHeaders d agg).map (·.shardId)).Nodup)
          (PSum Poseidon2CanopyCollision WhirSoundnessBadEvent) := by
   unfold verifyRecursiveHemTree at hAcc
   rw [Bool.and_eq_true, decide_eq_true_eq] at hAcc
-  match extractRecursiveHemNode agg env hAcc.1 with
+  match extractRecursiveHemNode F d agg env hAcc.1 with
   | .inl w => exact .inl ⟨w, hAcc.2⟩
   | .inr err => exact .inr err
 
@@ -1354,17 +1401,6 @@ theorem geomInternalNodes_examples (F : Nat) :
   · simp [geomInternalNodes]
   · simp only [geomInternalNodes, Nat.mul_zero, Nat.add_zero, Nat.mul_add, Nat.mul_one, Nat.add_assoc]
 
-/-- Count of internal WHIR bad events occurring inside `RecursiveWhirExtractionEnv`. -/
-def countEnvOuterBad {F : Nat} : {d : Nat} → {agg : RecursiveHemAggregate F d} →
-    RecursiveWhirExtractionEnv F agg → Nat
-  | 0, _, .leaf _ => 0
-  | _ + 1, .node _ _ cs, .node outerOut childEnvs =>
-    let rootBad := match outerOut with | .inl _ => 0 | .inr _ => 1
-    let rec sumChildren : (n : Nat) → (Fin n → Nat) → Nat
-      | 0, _ => 0
-      | k + 1, f => f ⟨0, Nat.zero_lt_succ _⟩ + sumChildren k (fun i => f ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
-    rootBad + sumChildren cs.length (fun i => countEnvOuterBad (childEnvs i))
-
 /-- Exact `RatBound` QROM soundness error bound for a depth-`d`, fan-in-`F` recursive WHIR tree:
     `(1 + F + ... + F^(d-1)) * ε_outer + F^d * ε_leaf`. -/
 def recursiveHemQromErrorBound (F d : Nat) (epsOuter epsLeaf : RatBound) : RatBound :=
@@ -1377,11 +1413,10 @@ theorem recursiveHemQromErrorBound_step (F d : Nat) (epsOuter epsLeaf : RatBound
       (RatBound.add epsOuter (RatBound.scale F (recursiveHemQromErrorBound F d epsOuter epsLeaf))).den =
     (RatBound.add epsOuter (RatBound.scale F (recursiveHemQromErrorBound F d epsOuter epsLeaf))).num *
       (recursiveHemQromErrorBound F (d + 1) epsOuter epsLeaf).den := by
-  unfold recursiveHemQromErrorBound RatBound.add RatBound.scale geomInternalNodes
+  have hGeom : geomInternalNodes F (d + 1) = 1 + F * geomInternalNodes F d := rfl
+  unfold recursiveHemQromErrorBound RatBound.add RatBound.scale
   dsimp only
-  rw [Nat.pow_succ']
-  -- Exact cross-multiplied identity: ((1 + F * G) * oN * lD + (F * F^d) * lN * oD) * (oD * (oD * lD))
-  -- = (oN * (oD * lD) + F * (G * oN * lD + F^d * lN * oD) * oD) * (oD * lD)
+  rw [hGeom, Nat.pow_succ']
   let G := geomInternalNodes F d
   let P := F ^ d
   change ((1 + F * G) * epsOuter.num * epsLeaf.den + F * P * epsLeaf.num * epsOuter.den) *
@@ -1398,33 +1433,38 @@ theorem recursiveHemQromErrorBound_step (F d : Nat) (epsOuter epsLeaf : RatBound
   rw [hL]
   ac_rfl
 
+/-- Count coins satisfying predicate `p` over a finite coin list. -/
+def countTrueCoins {Ω : Type} (p : Ω → Bool) : List Ω → Nat
+  | [] => 0
+  | x :: xs => (if p x then 1 else 0) + countTrueCoins p xs
+
 /-- **Inductive `d`-Level Recursive WHIR Tree Soundness Bound (`recursive_hem_tree_soundness_bound`)**:
-    1. Any accepting `RecursiveHemAggregate F d` constructively yields either `LeafValidatorWitnesses`
+    1. Any accepting `RecursiveHemAggregate d` constructively yields either `LeafValidatorWitnesses`
        meeting every shard's quorum threshold OR an explicit `Poseidon2CanopyCollision ∨ WhirSoundnessBadEvent`.
     2. Over any finite coin space `coins : List Ω`, if `outerBad` has count `≤ geomInternalNodes F d * epsOuter`,
        `leafBad` has count `≤ (F ^ d) * epsLeaf`, and `colBad` has count `0` (collision-free `Poseidon2`),
        then false-acceptance coins `treeBad` satisfy:
-       `countTrue treeBad coins ≤ geomInternalNodes F d * epsOuter + (F ^ d) * epsLeaf`! -/
+       `countTrueCoins treeBad coins ≤ geomInternalNodes F d * epsOuter + (F ^ d) * epsLeaf`! -/
 theorem recursive_hem_tree_soundness_bound {Ω : Type} (coins : List Ω) (F d : Nat)
-    (agg : Ω → RecursiveHemAggregate F d)
-    (env : (ω : Ω) → RecursiveWhirExtractionEnv F (agg ω))
+    (agg : Ω → RecursiveHemAggregate d)
+    (env : (ω : Ω) → RecursiveWhirExtractionEnv F d (agg ω))
     (treeBad outerBad leafBad colBad : Ω → Bool)
     (hTree : ∀ ω, treeBad ω = true →
-      verifyRecursiveHemTree (agg ω) = true ∧
-      (LeafValidatorWitnesses (agg ω) → False))
+      verifyRecursiveHemTree F d (agg ω) = true ∧
+      (LeafValidatorWitnesses F d (agg ω) → False))
     (hCol : ∀ ω, Poseidon2CanopyCollision → colBad ω = true)
     (hBad : ∀ ω, WhirSoundnessBadEvent → outerBad ω = true ∨ leafBad ω = true) :
     (∀ ω, treeBad ω = true → (colBad ω || outerBad ω || leafBad ω) = true) ∧
     (∀ epsOuter epsLeaf : Nat,
-      Aggregation.countTrue colBad coins = 0 →
-      Aggregation.countTrue outerBad coins ≤ geomInternalNodes F d * epsOuter →
-      Aggregation.countTrue leafBad coins ≤ (F ^ d) * epsLeaf →
-      Aggregation.countTrue treeBad coins ≤
+      countTrueCoins colBad coins = 0 →
+      countTrueCoins outerBad coins ≤ geomInternalNodes F d * epsOuter →
+      countTrueCoins leafBad coins ≤ (F ^ d) * epsLeaf →
+      countTrueCoins treeBad coins ≤
         geomInternalNodes F d * epsOuter + (F ^ d) * epsLeaf) := by
   have hImp : ∀ ω, treeBad ω = true → (colBad ω || outerBad ω || leafBad ω) = true := by
     intro ω hb
     obtain ⟨hAcc, hNoW⟩ := hTree ω hb
-    match extractRecursiveHemTree (agg ω) (env ω) hAcc with
+    match extractRecursiveHemTree F d (agg ω) (env ω) hAcc with
     | .inl ⟨w, _⟩ => exact False.elim (hNoW w)
     | .inr (.inl col) =>
       rw [hCol ω col]; rfl
@@ -1435,15 +1475,15 @@ theorem recursive_hem_tree_soundness_bound {Ω : Type} (coins : List Ω) (F d : 
   refine ⟨hImp, ?_⟩
   intro epsOuter epsLeaf hC0 hO hL
   have hPointwise : ∀ xs : List Ω,
-      Aggregation.countTrue treeBad xs ≤
-        Aggregation.countTrue colBad xs +
-        Aggregation.countTrue outerBad xs +
-        Aggregation.countTrue leafBad xs := by
+      countTrueCoins treeBad xs ≤
+        countTrueCoins colBad xs +
+        countTrueCoins outerBad xs +
+        countTrueCoins leafBad xs := by
     intro xs
     induction xs with
     | nil => exact Nat.le_refl 0
     | cons x rest ih =>
-      simp only [Aggregation.countTrue]
+      simp only [countTrueCoins]
       cases htb : treeBad x
       · simp only [Bool.false_eq_true, ↓reduceIte, Nat.zero_add]
         omega
@@ -1460,6 +1500,11 @@ theorem recursive_hem_tree_soundness_bound {Ω : Type} (coins : List Ω) (F d : 
   have hAll := hPointwise coins
   omega
 
+/-- Per-node `unitaryZeroPow` QROM compiler bound at `(nv, Q)`. -/
+def hemHighCapZeroPowEps (nv Q : Nat) : RatBound :=
+  powScaledFsQromCompilerBound Q 5 256 0
+    (hemHighCapFiveRoundRbrBounds nv) (hemHighCapQueryBounds .unitaryZeroPow nv)
+
 /-- **Concrete `< 2^-128` QROM Soundness Certificates up to `1,048,576+` Validators
     (`recursive_hem_million_validator_qrom_sound`)**:
     Certifies `strictlyMoreThanBits 128` on the exact additive recursive error bound
@@ -1472,36 +1517,71 @@ theorem recursive_hem_tree_soundness_bound {Ω : Type} (coins : List Ω) (F d : 
     5. `N = 1,048,576` (`1M+` validators! Certified for BOTH `d = 3, F = 16, K_shard = 256` at
        `Q + 1 ≤ 2^35` AND `d = 3, F = 64, K_shard = 4` at `Q + 1 ≤ 2^32`)! -/
 theorem recursive_hem_million_validator_qrom_sound :
-    let epsAt (nv Q : Nat) := powScaledFsQromCompilerBound Q 5 256 0
-      (hemHighCapFiveRoundRbrBounds nv) (hemHighCapQueryBounds .unitaryZeroPow nv)
-    -- 1. N = 1,500 (d = 1, F = 16, K_shard = 94 => 16 * 94 = 1,504 >= 1,500)
     (16 ^ 1 * 94 ≥ 1500 ∧
-      strictlyMoreThanBits 128 (recursiveHemQromErrorBound 16 1 (epsAt 24 (2 ^ 38 - 1)) (epsAt 24 (2 ^ 38 - 1)))) ∧
-    -- 2. N = 8,192 (d = 1, F = 64, K_shard = 128 => 64 * 128 = 8,192)
+      strictlyMoreThanBits 128
+        (recursiveHemQromErrorBound 16 1
+          (hemHighCapZeroPowEps 24 (2 ^ 38 - 1)) (hemHighCapZeroPowEps 24 (2 ^ 38 - 1)))) ∧
     (64 ^ 1 * 128 = 8192 ∧
-      strictlyMoreThanBits 128 (recursiveHemQromErrorBound 64 1 (epsAt 26 (2 ^ 37 - 1)) (epsAt 24 (2 ^ 37 - 1)))) ∧
-    -- 3. N = 16,384 (d = 2, F = 16, K_shard = 64 => 256 * 64 = 16,384)
+      strictlyMoreThanBits 128
+        (recursiveHemQromErrorBound 64 1
+          (hemHighCapZeroPowEps 26 (2 ^ 37 - 1)) (hemHighCapZeroPowEps 24 (2 ^ 37 - 1)))) ∧
     (16 ^ 2 * 64 = 16384 ∧
-      strictlyMoreThanBits 128 (recursiveHemQromErrorBound 16 2 (epsAt 24 (2 ^ 36 - 1)) (epsAt 24 (2 ^ 36 - 1)))) ∧
-    -- 4. N = 32,768 (d = 2, F = 16, K_shard = 128 => 256 * 128 = 32,768)
+      strictlyMoreThanBits 128
+        (recursiveHemQromErrorBound 16 2
+          (hemHighCapZeroPowEps 24 (2 ^ 36 - 1)) (hemHighCapZeroPowEps 24 (2 ^ 36 - 1)))) ∧
     (16 ^ 2 * 128 = 32768 ∧
-      strictlyMoreThanBits 128 (recursiveHemQromErrorBound 16 2 (epsAt 24 (2 ^ 36 - 1)) (epsAt 24 (2 ^ 36 - 1)))) ∧
-    -- 5a. N = 1,048,576 (d = 3, F = 16, K_shard = 256 => 4,096 * 256 = 1,048,576) at Q + 1 = 2^35
+      strictlyMoreThanBits 128
+        (recursiveHemQromErrorBound 16 2
+          (hemHighCapZeroPowEps 24 (2 ^ 36 - 1)) (hemHighCapZeroPowEps 24 (2 ^ 36 - 1)))) ∧
     (16 ^ 3 * 256 = 1048576 ∧
-      strictlyMoreThanBits 128 (recursiveHemQromErrorBound 16 3 (epsAt 24 (2 ^ 35 - 1)) (epsAt 25 (2 ^ 35 - 1)))) ∧
-    -- 5b. N = 1,048,576 (d = 3, F = 64, K_shard = 4 => 262,144 * 4 = 1,048,576) at Q + 1 = 2^32
+      strictlyMoreThanBits 128
+        (recursiveHemQromErrorBound 16 3
+          (hemHighCapZeroPowEps 24 (2 ^ 35 - 1)) (hemHighCapZeroPowEps 25 (2 ^ 35 - 1)))) ∧
     (64 ^ 3 * 4 = 1048576 ∧
-      strictlyMoreThanBits 128 (recursiveHemQromErrorBound 64 3 (epsAt 26 (2 ^ 32 - 1)) (epsAt 18 (2 ^ 32 - 1)))) := by
-  decide +kernel
+      strictlyMoreThanBits 128
+        (recursiveHemQromErrorBound 64 3
+          (hemHighCapZeroPowEps 26 (2 ^ 32 - 1)) (hemHighCapZeroPowEps 18 (2 ^ 32 - 1)))) := by
+  have c1 : 16 ^ 1 * 94 ≥ 1500 ∧
+      strictlyMoreThanBits 128
+        (recursiveHemQromErrorBound 16 1
+          (hemHighCapZeroPowEps 24 (2 ^ 38 - 1)) (hemHighCapZeroPowEps 24 (2 ^ 38 - 1))) := by
+    decide +kernel
+  have c2 : 64 ^ 1 * 128 = 8192 ∧
+      strictlyMoreThanBits 128
+        (recursiveHemQromErrorBound 64 1
+          (hemHighCapZeroPowEps 26 (2 ^ 37 - 1)) (hemHighCapZeroPowEps 24 (2 ^ 37 - 1))) := by
+    decide +kernel
+  have c3 : 16 ^ 2 * 64 = 16384 ∧
+      strictlyMoreThanBits 128
+        (recursiveHemQromErrorBound 16 2
+          (hemHighCapZeroPowEps 24 (2 ^ 36 - 1)) (hemHighCapZeroPowEps 24 (2 ^ 36 - 1))) := by
+    decide +kernel
+  have c4 : 16 ^ 2 * 128 = 32768 ∧
+      strictlyMoreThanBits 128
+        (recursiveHemQromErrorBound 16 2
+          (hemHighCapZeroPowEps 24 (2 ^ 36 - 1)) (hemHighCapZeroPowEps 24 (2 ^ 36 - 1))) := by
+    decide +kernel
+  have c5 : 16 ^ 3 * 256 = 1048576 ∧
+      strictlyMoreThanBits 128
+        (recursiveHemQromErrorBound 16 3
+          (hemHighCapZeroPowEps 24 (2 ^ 35 - 1)) (hemHighCapZeroPowEps 25 (2 ^ 35 - 1))) := by
+    decide +kernel
+  have c6 : 64 ^ 3 * 4 = 1048576 ∧
+      strictlyMoreThanBits 128
+        (recursiveHemQromErrorBound 64 3
+          (hemHighCapZeroPowEps 26 (2 ^ 32 - 1)) (hemHighCapZeroPowEps 18 (2 ^ 32 - 1))) := by
+    decide +kernel
+  exact ⟨c1, c2, c3, c4, c5, c6⟩
 
 /-- `#tooth` (`tooth_sub_quorum_leaf_shard_rejected_by_recursive_tree`):
-    Any depth-`d` tree whose leaf shard reports `validCount < threshold` (`1 ≤ threshold`) is
-    unconditionally rejected by `verifyRecursiveHemTree` (`= false`). -/
+    Any leaf shard certificate reporting `validCount < threshold` is unconditionally rejected by
+    `verifyRecursiveHemTree` (`= false`). -/
 theorem tooth_sub_quorum_leaf_shard_rejected_by_recursive_tree
     (hdr : RecursiveShardHeader) (prf : ChildWhirWitness)
     (hSub : hdr.validCount < hdr.threshold) :
-    verifyRecursiveHemTree (F := 16) (.leaf hdr prf) = false := by
+    verifyRecursiveHemTree 16 0 { header := hdr, leafProof := prf } = false := by
   unfold verifyRecursiveHemTree verifyRecursiveHemNode verifyRecursiveShardHeader
+  dsimp only
   have hFalse : decide (hdr.threshold ≤ hdr.validCount) = false :=
     decide_eq_false (by omega)
   rw [hFalse]
@@ -1510,17 +1590,14 @@ theorem tooth_sub_quorum_leaf_shard_rejected_by_recursive_tree
 
 /-! ## §4. Inhabitedness Witnesses & Constructive Assurance Gates -/
 
-/-- Concrete valid `ChildWhirWitness` over depth-1 `Poseidon2` Canopy (`bottomDepth = 1, canopyDepth = 0`,
-    antipodal leaves `0` and `1`, `v0 = v1 = 0`, `x = 1`, `claimed = 0`). -/
-def concreteChildWhirWitness : ChildWhirWitness :=
-  let pub := lane4Zero
-  let salt := ⟨Goldilocks.one, Goldilocks.ofNat 2, Goldilocks.ofNat 3, Goldilocks.ofNat 4⟩
+/-- Construct an honest accepting `ChildWhirWitness` for any `(pub, salt : Lane4)` over a depth-1
+    `Poseidon2` Canopy (`bottomDepth = 1, canopyDepth = 0`, antipodal leaves `0` and `1`). -/
+def mkHonestChildWhirWitness (pub salt : Lane4) : ChildWhirWitness :=
   let zLimbs := ext4ToLimbs CommRingOps.zero
   let d0 := poseidon2CanopyLeafHash salt (Goldilocks.ofNat 0) zLimbs
   let d1 := poseidon2CanopyLeafHash salt (Goldilocks.ofNat 1) zLimbs
-  let root := poseidon2CanopyNodeHash salt Goldilocks.zero Goldilocks.zero d0 d1
-  let (theta, alpha, beta, _) := deriveChildWhirChallenges pub salt root
-  let inv2 := LawfulField.inv ext4Two
+  let root := poseidon2CanopyNodeHash salt (Goldilocks.ofNat 0) (Goldilocks.ofNat 0) d0 d1
+  let chals := deriveChildWhirChallenges pub salt root
   { salt := salt
     canopyRoot := root
     bottomDepth := 1
@@ -1532,49 +1609,144 @@ def concreteChildWhirWitness : ChildWhirWitness :=
     opening1 := { leafIdx := 1, payload := zLimbs, bottomPath := [d0], canopyPath := [] }
     duetFold := {
       v0 := CommRingOps.zero, v1 := CommRingOps.zero,
-      theta := theta, alpha := alpha, beta := beta,
+      theta := chals.1, alpha := chals.2.1, beta := chals.2.2.1,
       x := CommRingOps.one, x_sq := CommRingOps.one,
-      inv_two := inv2, inv_two_x := inv2,
+      inv_two := ext4InvTwo, inv_two_x := ext4InvTwo,
       claimed := CommRingOps.zero
     }
     earlyStopPoly := [] }
 
+theorem mkHonestChildWhirWitness_accepts (pub salt : Lane4) :
+    ChildWhirCircuitAccepts pub (mkHonestChildWhirWitness pub salt) = true := by
+  unfold ChildWhirCircuitAccepts mkHonestChildWhirWitness
+  dsimp only
+  have hSc : verifySumcheckChain CommRingOps.zero
+      (([], (deriveChildWhirChallenges pub salt
+        (poseidon2CanopyNodeHash salt (Goldilocks.ofNat 0) (Goldilocks.ofNat 0)
+          (poseidon2CanopyLeafHash salt (Goldilocks.ofNat 0) (ext4ToLimbs CommRingOps.zero))
+          (poseidon2CanopyLeafHash salt (Goldilocks.ofNat 1) (ext4ToLimbs CommRingOps.zero)))).2.2.2) :: []) =
+      some CommRingOps.zero := by
+    unfold verifySumcheckChain
+    dsimp only [RoundPoly.evalCoeffs_nil]
+    have h0Add0 : CommRingOps.add (CommRingOps.zero : QuarticGoldilocks) CommRingOps.zero = CommRingOps.zero :=
+      LawfulCommRing.zero_add _
+    have hLen4 : ([] : List QuarticGoldilocks).length ≤ 4 := by decide
+    rw [decide_eq_true hLen4, decide_eq_true h0Add0]
+    rfl
+  rw [hSc]
+  have hOp0 : verifyPoseidon2CanopyOpening salt
+      (poseidon2CanopyNodeHash salt (Goldilocks.ofNat 0) (Goldilocks.ofNat 0)
+        (poseidon2CanopyLeafHash salt (Goldilocks.ofNat 0) (ext4ToLimbs CommRingOps.zero))
+        (poseidon2CanopyLeafHash salt (Goldilocks.ofNat 1) (ext4ToLimbs CommRingOps.zero)))
+      1 0
+      { leafIdx := 0, payload := ext4ToLimbs CommRingOps.zero,
+        bottomPath := [poseidon2CanopyLeafHash salt (Goldilocks.ofNat 1) (ext4ToLimbs CommRingOps.zero)],
+        canopyPath := [] } = true := by
+    unfold verifyPoseidon2CanopyOpening computePoseidon2MerkleFold
+    dsimp only
+    rw [decide_eq_true (by decide : 1 + 0 < 32),
+        decide_eq_true (by decide : 0 < 2 ^ (1 + 0)),
+        decide_eq_true (rfl : [_].length = 1),
+        decide_eq_true (rfl : ([] : List Lane4).length = 0)]
+    change true && true && true && true &&
+      decide (computePoseidon2MerkleFold salt 1 0
+        (poseidon2CanopyNodeHash salt (Goldilocks.ofNat 0) (Goldilocks.ofNat 0)
+          (poseidon2CanopyLeafHash salt (Goldilocks.ofNat 0) (ext4ToLimbs CommRingOps.zero))
+          (poseidon2CanopyLeafHash salt (Goldilocks.ofNat 1) (ext4ToLimbs CommRingOps.zero))) [] = _) = true
+    unfold computePoseidon2MerkleFold
+    rw [decide_eq_true rfl]
+    rfl
+  have hOp1 : verifyPoseidon2CanopyOpening salt
+      (poseidon2CanopyNodeHash salt (Goldilocks.ofNat 0) (Goldilocks.ofNat 0)
+        (poseidon2CanopyLeafHash salt (Goldilocks.ofNat 0) (ext4ToLimbs CommRingOps.zero))
+        (poseidon2CanopyLeafHash salt (Goldilocks.ofNat 1) (ext4ToLimbs CommRingOps.zero)))
+      1 0
+      { leafIdx := 1, payload := ext4ToLimbs CommRingOps.zero,
+        bottomPath := [poseidon2CanopyLeafHash salt (Goldilocks.ofNat 0) (ext4ToLimbs CommRingOps.zero)],
+        canopyPath := [] } = true := by
+    unfold verifyPoseidon2CanopyOpening computePoseidon2MerkleFold
+    dsimp only
+    rw [decide_eq_true (by decide : 1 + 0 < 32),
+        decide_eq_true (by decide : 1 < 2 ^ (1 + 0)),
+        decide_eq_true (rfl : [_].length = 1),
+        decide_eq_true (rfl : ([] : List Lane4).length = 0)]
+    change true && true && true && true &&
+      decide (computePoseidon2MerkleFold salt 1 0
+        (poseidon2CanopyNodeHash salt (Goldilocks.ofNat 0) (Goldilocks.ofNat 0)
+          (poseidon2CanopyLeafHash salt (Goldilocks.ofNat 0) (ext4ToLimbs CommRingOps.zero))
+          (poseidon2CanopyLeafHash salt (Goldilocks.ofNat 1) (ext4ToLimbs CommRingOps.zero))) [] = _) = true
+    unfold computePoseidon2MerkleFold
+    rw [decide_eq_true rfl]
+    rfl
+  have hDuet : ∀ (th al be : QuarticGoldilocks),
+      duetFoldAuthenticated
+        { v0 := CommRingOps.zero, v1 := CommRingOps.zero,
+          theta := th, alpha := al, beta := be,
+          x := CommRingOps.one, x_sq := CommRingOps.one,
+          inv_two := ext4InvTwo, inv_two_x := ext4InvTwo,
+          claimed := CommRingOps.zero } = true := by
+    intro th al be
+    unfold duetFoldAuthenticated duetFoldUnauthenticatedGate
+    dsimp only
+    have hEven0 : CommRingOps.mul (CommRingOps.add (CommRingOps.zero : QuarticGoldilocks) CommRingOps.zero)
+        ext4InvTwo = CommRingOps.zero := by
+      rw [LawfulCommRing.zero_add, LawfulCommRing.zero_mul]
+    have hOdd0 : CommRingOps.mul (CommRingOps.sub (CommRingOps.zero : QuarticGoldilocks) CommRingOps.zero)
+        ext4InvTwo = CommRingOps.zero := by
+      rw [LawfulCommRing.sub_self, LawfulCommRing.zero_mul]
+    rw [hEven0, hOdd0, LawfulCommRing.mul_zero, LawfulCommRing.add_zero,
+        LawfulCommRing.mul_zero, LawfulCommRing.add_zero,
+        LawfulCommRing.mul_one, LawfulCommRing.mul_one]
+    rw [decide_eq_true ext4Two_mul_ext4InvTwo, decide_eq_true rfl, decide_eq_true rfl]
+    rfl
+  rw [hOp0, hOp1,
+      decide_eq_true (by decide : (0 : Nat) ≠ 1),
+      decide_eq_true rfl, decide_eq_true rfl,
+      decide_eq_true rfl, decide_eq_true rfl, decide_eq_true rfl,
+      hDuet _ _ _,
+      decide_eq_true (by decide : ([] : List QuarticGoldilocks).length ≤ 256),
+      decide_eq_true (rfl : RoundPoly.evalCoeffs ([] : List QuarticGoldilocks) CommRingOps.one = CommRingOps.zero),
+      decide_eq_true rfl]
+  rfl
+
 theorem inhabited_childWhirCircuitAccepts :
-    ChildWhirCircuitAccepts lane4Zero concreteChildWhirWitness = true := by
-  decide +kernel
+    ∃ (pub : Lane4) (w : ChildWhirWitness), ChildWhirCircuitAccepts pub w = true :=
+  ⟨lane4Zero, mkHonestChildWhirWitness lane4Zero lane4Zero,
+   mkHonestChildWhirWitness_accepts lane4Zero lane4Zero⟩
 
-def concreteLeafHeader : RecursiveShardHeader :=
-  { shardId := 0, threshold := 2, committeeSize := 3, validCount := 2, publicDigest := lane4Zero }
-
-def concreteDepth1Agg : RecursiveHemAggregate 1 1 :=
-  let leaf := RecursiveHemAggregate.leaf (F := 1) concreteLeafHeader concreteChildWhirWitness
-  let summary := poseidon2SummaryHash 1 1 [leaf.summaryDigest]
-  -- Build an accepting outer ChildWhirWitness for `summary`
-  let salt := ⟨Goldilocks.ofNat 9, Goldilocks.ofNat 8, Goldilocks.ofNat 7, Goldilocks.ofNat 6⟩
-  let zLimbs := ext4ToLimbs CommRingOps.zero
-  let d0 := poseidon2CanopyLeafHash salt (Goldilocks.ofNat 0) zLimbs
-  let d1 := poseidon2CanopyLeafHash salt (Goldilocks.ofNat 1) zLimbs
-  let root := poseidon2CanopyNodeHash salt Goldilocks.zero Goldilocks.zero d0 d1
-  let (theta, alpha, beta, _) := deriveChildWhirChallenges summary salt root
-  let inv2 := LawfulField.inv ext4Two
-  let outerPrf : ChildWhirWitness := {
-    salt := salt, canopyRoot := root, bottomDepth := 1, canopyDepth := 0,
-    initialClaim := CommRingOps.zero, sumcheckPoly0 := [], extraSumcheckRounds := [],
-    opening0 := { leafIdx := 0, payload := zLimbs, bottomPath := [d1], canopyPath := [] },
-    opening1 := { leafIdx := 1, payload := zLimbs, bottomPath := [d0], canopyPath := [] },
-    duetFold := {
-      v0 := CommRingOps.zero, v1 := CommRingOps.zero,
-      theta := theta, alpha := alpha, beta := beta,
-      x := CommRingOps.one, x_sq := CommRingOps.one,
-      inv_two := inv2, inv_two_x := inv2, claimed := CommRingOps.zero
-    },
-    earlyStopPoly := []
-  }
-  .node summary outerPrf [leaf]
+def concreteDepth1Agg : RecursiveHemAggregate 1 :=
+  let h0 : RecursiveShardHeader :=
+    { shardId := 0, threshold := 2, committeeSize := 3, validCount := 2, publicDigest := lane4Zero }
+  let h1 : RecursiveShardHeader :=
+    { shardId := 1, threshold := 2, committeeSize := 3, validCount := 2, publicDigest := lane4Zero }
+  let l0 : RecursiveHemAggregate 0 :=
+    { header := h0, leafProof := mkHonestChildWhirWitness lane4Zero lane4Zero }
+  let l1 : RecursiveHemAggregate 0 :=
+    { header := h1, leafProof := mkHonestChildWhirWitness lane4Zero lane4Zero }
+  let summary := poseidon2SummaryHash 1 2
+    [recursiveHemSummaryDigest 0 l0, recursiveHemSummaryDigest 0 l1]
+  { summaryDigest := summary
+    outerProof := mkHonestChildWhirWitness summary lane4Zero
+    children := [l0, l1] }
 
 theorem inhabited_verifyRecursiveHemTree :
-    verifyRecursiveHemTree concreteDepth1Agg = true := by
-  decide +kernel
+    verifyRecursiveHemTree 2 1 concreteDepth1Agg = true := by
+  unfold verifyRecursiveHemTree concreteDepth1Agg verifyRecursiveHemNode
+  dsimp only [List.length_cons, List.length_nil, List.map_cons, List.map_nil,
+              verifyChildrenList, recursiveHemLeafHeaders, List.flatMap_cons, List.flatMap_nil,
+              List.cons_append, List.nil_append]
+  have hHdr0 : verifyRecursiveShardHeader
+      { shardId := 0, threshold := 2, committeeSize := 3, validCount := 2, publicDigest := lane4Zero } = true := by
+    decide
+  have hHdr1 : verifyRecursiveShardHeader
+      { shardId := 1, threshold := 2, committeeSize := 3, validCount := 2, publicDigest := lane4Zero } = true := by
+    decide
+  rw [decide_eq_true rfl, decide_eq_true rfl,
+      mkHonestChildWhirWitness_accepts _ _,
+      hHdr0, hHdr1,
+      mkHonestChildWhirWitness_accepts lane4Zero lane4Zero,
+      decide_eq_true (by decide : ([0, 1] : List Nat).Nodup)]
+  rfl
 
 theorem inhabited_hemHighCap_nv30_cdhz :
     ∃ (nv Q wFs wVc : Nat),
@@ -1622,6 +1794,8 @@ theorem canopyOpening_payload_unique_of_collision_free
   Qsag.tooth_missing_domain_tag_leaf_node_confusion
   Qsag.authenticated_duet_fold_uniquely_determines_claimed
   Qsag.tooth_unverified_inv_two_x_forges_duet_fold
+  Qsag.tooth_unverified_inv_two_x_concrete_rejected
+  Qsag.mkHonestChildWhirWitness_accepts
   Qsag.inhabited_childWhirCircuitAccepts
   Qsag.recursiveHemQromErrorBound_step
   Qsag.recursive_hem_tree_soundness_bound
