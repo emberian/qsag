@@ -46,7 +46,7 @@ pub struct PorsFpParams {
 
 impl PorsFpParams {
     /// 2048 leaves, 28 revealed, at most 128 multiproof nodes: 4,994 bytes at most, against
-    /// 7,168 for the `FORS+C` layer of [`crate::baggy::BaggyParams::SHA3_128F`], for the
+    /// 7,168 for the retired `FORS+C` layer, for the
     /// same number of leaves under MPC. About one subset in `2^10` passes the pruning test.
     pub const SHA3_128F: Self = Self {
         tree_height: 11,
@@ -612,9 +612,11 @@ mod tests {
             .map(|g| p.forgery_bits_milli(g).unwrap() / 1000)
             .collect();
         assert_eq!(bits, vec![209, 156, 136, 122]);
-        assert!(bits.iter().zip([210.2, 157.5, 136.3, 122.2]).all(|(lo, exact)| {
-            f64::from(*lo) <= exact && exact - f64::from(*lo) < 2.0
-        }));
+        assert!(
+            bits.iter()
+                .zip([210.2, 157.5, 136.3, 122.2])
+                .all(|(lo, exact)| { f64::from(*lo) <= exact && exact - f64::from(*lo) < 2.0 })
+        );
         assert_eq!(p.forgery_bits_milli(0), None);
         // Once every leaf is public nothing is left.
         assert_eq!(p.forgery_bits_milli(u32::MAX), Some(0));

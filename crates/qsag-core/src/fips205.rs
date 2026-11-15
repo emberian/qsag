@@ -16,6 +16,7 @@ use core::fmt;
 
 use crate::sponge::keccak::{Cshake256Xof, keccak_f1600, shake256_xof};
 use crate::wipe::{ct_eq_bytes, wipe_bytes32, wipe_slice};
+use qsag_accel::ct::ct_eq_mask_u64;
 
 /// Maximum context string length permitted by NIST FIPS 205 §9.2 / §9.3 (`|ctx| <= 255`).
 pub const FIPS205_MAX_CTX_LEN: usize = 255;
@@ -827,252 +828,11 @@ pub struct SlhParsedSignature {
 }
 
 // ============================================================================
-// Pure-Rust Zero-Dependency FIPS 180-4 & FIPS 202 Pre-Hash Suite (§9.3 / §10.2.2)
+// FIPS 180-4 & FIPS 202 Pre-Hash Suite (§9.3 / §10.2.2)
 // ============================================================================
 
-const SHA256_K: [u32; 64] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-];
-
-const SHA512_K: [u64; 80] = [
-    0x428a2f98d728ae22,
-    0x7137449123ef65cd,
-    0xb5c0fbcfec4d3b2f,
-    0xe9b5dba58189dbbc,
-    0x3956c25bf348b538,
-    0x59f111f1b605d019,
-    0x923f82a4af194f9b,
-    0xab1c5ed5da6d8118,
-    0xd807aa98a3030242,
-    0x12835b0145706fbe,
-    0x243185be4ee4b28c,
-    0x550c7dc3d5ffb4e2,
-    0x72be5d74f27b896f,
-    0x80deb1fe3b1696b1,
-    0x9bdc06a725c71235,
-    0xc19bf174cf692694,
-    0xe49b69c19ef14ad2,
-    0xefbe4786384f25e3,
-    0x0fc19dc68b8cd5b5,
-    0x240ca1cc77ac9c65,
-    0x2de92c6f592b0275,
-    0x4a7484aa6ea6e483,
-    0x5cb0a9dcbd41fbd4,
-    0x76f988da831153b5,
-    0x983e5152ee66dfab,
-    0xa831c66d2db43210,
-    0xb00327c898fb213f,
-    0xbf597fc7beef0ee4,
-    0xc6e00bf33da88fc2,
-    0xd5a79147930aa725,
-    0x06ca6351e003826f,
-    0x142929670a0e6e70,
-    0x27b70a8546d22ffc,
-    0x2e1b21385c26c926,
-    0x4d2c6dfc5ac42aed,
-    0x53380d139d95b3df,
-    0x650a73548baf63de,
-    0x766a0abb3c77b2a8,
-    0x81c2c92e47edaee6,
-    0x92722c851482353b,
-    0xa2bfe8a14cf10364,
-    0xa81a664bbc423001,
-    0xc24b8b70d0f89791,
-    0xc76c51a30654be30,
-    0xd192e819d6ef5218,
-    0xd69906245565a910,
-    0xf40e35855771202a,
-    0x106aa07032bbd1b8,
-    0x19a4c116b8d2d0c8,
-    0x1e376c085141ab53,
-    0x2748774cdf8eeb99,
-    0x34b0bcb5e19b48a8,
-    0x391c0cb3c5c95a63,
-    0x4ed8aa4ae3418acb,
-    0x5b9cca4f7763e373,
-    0x682e6ff3d6b2b8a3,
-    0x748f82ee5defb2fc,
-    0x78a5636f43172f60,
-    0x84c87814a1f0ab72,
-    0x8cc702081a6439ec,
-    0x90befffa23631e28,
-    0xa4506cebde82bde9,
-    0xbef9a3f7b2c67915,
-    0xc67178f2e372532b,
-    0xca273eceea26619c,
-    0xd186b8c721c0c207,
-    0xeada7dd6cde0eb1e,
-    0xf57d4f7fee6ed178,
-    0x06f067aa72176fba,
-    0x0a637dc5a2c898a6,
-    0x113f9804bef90dae,
-    0x1b710b35131c471b,
-    0x28db77f523047d84,
-    0x32caab7b40c72493,
-    0x3c9ebe0a15c9bebc,
-    0x431d67c49c100d4c,
-    0x4cc5d4becb3e42b6,
-    0x597f299cfc657e2a,
-    0x5fcb6fab3ad6faec,
-    0x6c44198c4a475817,
-];
-
-/// Pure-Rust FIPS 180-4 `SHA-256` digest (`32` bytes).
-pub fn sha256_digest(msg: &[u8]) -> [u8; 32] {
-    let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-        0x5be0cd19,
-    ];
-    let bit_len = (msg.len() as u64).wrapping_mul(8);
-    let mut padded = Vec::with_capacity(msg.len() + 72);
-    padded.extend_from_slice(msg);
-    padded.push(0x80);
-    while (padded.len() % 64) != 56 {
-        padded.push(0x00);
-    }
-    padded.extend_from_slice(&bit_len.to_be_bytes());
-
-    for blk in padded.as_chunks::<64>().0 {
-        let mut w = [0u32; 64];
-        for i in 0..16 {
-            w[i] = u32::from_be_bytes([blk[4 * i], blk[4 * i + 1], blk[4 * i + 2], blk[4 * i + 3]]);
-        }
-        for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
-        }
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
-        for i in 0..64 {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let ch = (e & f) ^ ((!e) & g);
-            let temp1 = hh
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(SHA256_K[i])
-                .wrapping_add(w[i]);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let temp2 = s0.wrapping_add(maj);
-            hh = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(temp1);
-            d = c;
-            c = b;
-            b = a;
-            a = temp1.wrapping_add(temp2);
-        }
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-        h[5] = h[5].wrapping_add(f);
-        h[6] = h[6].wrapping_add(g);
-        h[7] = h[7].wrapping_add(hh);
-    }
-
-    let mut out = [0u8; 32];
-    for (i, word) in h.iter().enumerate() {
-        out[4 * i..4 * i + 4].copy_from_slice(&word.to_be_bytes());
-    }
-    out
-}
-
-/// Pure-Rust FIPS 180-4 `SHA-512` digest (`64` bytes).
-pub fn sha512_digest(msg: &[u8]) -> [u8; 64] {
-    let mut h: [u64; 8] = [
-        0x6a09e667f3bcc908,
-        0xbb67ae8584caa73b,
-        0x3c6ef372fe94f82b,
-        0xa54ff53a5f1d36f1,
-        0x510e527fade682d1,
-        0x9b05688c2b3e6c1f,
-        0x1f83d9abfb41bd6b,
-        0x5be0cd19137e2179,
-    ];
-    let bit_len = (msg.len() as u128).wrapping_mul(8);
-    let mut padded = Vec::with_capacity(msg.len() + 144);
-    padded.extend_from_slice(msg);
-    padded.push(0x80);
-    while (padded.len() % 128) != 112 {
-        padded.push(0x00);
-    }
-    padded.extend_from_slice(&bit_len.to_be_bytes());
-
-    for blk in padded.as_chunks::<128>().0 {
-        let mut w = [0u64; 80];
-        let mut i = 0;
-        while i < 16 {
-            let o = 8 * i;
-            w[i] = u64::from_be_bytes([
-                blk[o],
-                blk[o + 1],
-                blk[o + 2],
-                blk[o + 3],
-                blk[o + 4],
-                blk[o + 5],
-                blk[o + 6],
-                blk[o + 7],
-            ]);
-            i += 1;
-        }
-        for i in 16..80 {
-            let s0 = w[i - 15].rotate_right(1) ^ w[i - 15].rotate_right(8) ^ (w[i - 15] >> 7);
-            let s1 = w[i - 2].rotate_right(19) ^ w[i - 2].rotate_right(61) ^ (w[i - 2] >> 6);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
-        }
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
-        for i in 0..80 {
-            let s1 = e.rotate_right(14) ^ e.rotate_right(18) ^ e.rotate_right(41);
-            let ch = (e & f) ^ ((!e) & g);
-            let temp1 = hh
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(SHA512_K[i])
-                .wrapping_add(w[i]);
-            let s0 = a.rotate_right(28) ^ a.rotate_right(34) ^ a.rotate_right(39);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let temp2 = s0.wrapping_add(maj);
-            hh = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(temp1);
-            d = c;
-            c = b;
-            b = a;
-            a = temp1.wrapping_add(temp2);
-        }
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-        h[5] = h[5].wrapping_add(f);
-        h[6] = h[6].wrapping_add(g);
-        h[7] = h[7].wrapping_add(hh);
-    }
-
-    let mut out = [0u8; 64];
-    for (i, word) in h.iter().enumerate() {
-        out[8 * i..8 * i + 8].copy_from_slice(&word.to_be_bytes());
-    }
-    out
-}
+/// FIPS 180-4 `SHA-256` (`32` bytes) and `SHA-512` (`64` bytes) digests.
+pub use qsag_accel::sha2::{sha256 as sha256_digest, sha512 as sha512_digest};
 
 /// Generic FIPS 202 sponge evaluator over `keccak_f1600` (`SHA3-256/384/512` with `suffix = 0x06`,
 /// `SHAKE128` with `rate = 168, suffix = 0x1F`).
@@ -1435,13 +1195,6 @@ pub fn fips205_chain(
 // ============================================================================
 // 8-Way (`AVX-512`) & 4-Way (`AVX2` / `AArch64 FEAT_SHA3`) Batch SHAKE256 Helpers
 // ============================================================================
-
-#[inline]
-fn ct_eq_u32_mask64(a: u32, b: u32) -> u64 {
-    let diff = core::hint::black_box((a ^ b) as u64);
-    let nz = (diff | diff.wrapping_neg()) >> 63;
-    nz.wrapping_sub(1)
-}
 
 #[inline]
 fn ct_ge_u32_mask64(a: u32, b: u32) -> u64 {
@@ -1903,10 +1656,7 @@ fn compute_xmss_subtree_leaves(
 ) -> Vec<SlhBlock> {
     let n_leaves = 1usize << params.hp;
     let mut leaves = Vec::with_capacity(n_leaves);
-    if matches!(params.n, 16 | 24 | 32)
-        && sk_seed.len() == params.n
-        && pk_seed.len() == params.n
-    {
+    if matches!(params.n, 16 | 24 | 32) && sk_seed.len() == params.n && pk_seed.len() == params.n {
         if n_leaves >= 8 {
             for kp_base in (0..n_leaves).step_by(8) {
                 wots_pk_gen_8_leaves(
@@ -2170,7 +1920,7 @@ pub fn wots_sign(
 
                     let done_step = step + 1;
                     for lane in 0..count {
-                        let mask = ct_eq_u32_mask64(done_step, targets[lane]);
+                        let mask = ct_eq_mask_u64(u64::from(done_step), u64::from(targets[lane]));
                         for (w, acc_row) in acc_rows.iter_mut().enumerate().take(n_words) {
                             acc_row[lane] = (acc_row[lane] & !mask) | (state.0[w][lane] & mask);
                         }
@@ -2241,7 +1991,7 @@ pub fn wots_sign(
 
                     let done_step = step + 1;
                     for lane in 0..count {
-                        let mask = ct_eq_u32_mask64(done_step, targets[lane]);
+                        let mask = ct_eq_mask_u64(u64::from(done_step), u64::from(targets[lane]));
                         for (w, acc_row) in acc_rows.iter_mut().enumerate().take(n_words) {
                             acc_row[lane] = (acc_row[lane] & !mask) | (state.0[w][lane] & mask);
                         }
@@ -2734,7 +2484,10 @@ pub fn fors_sign_and_pk(
                         *row = state.0[w];
                     }
                     for lane in 0..8 {
-                        let sel = ct_eq_u32_mask64((u_base + lane) as u32, target_idx_u32);
+                        let sel = ct_eq_mask_u64(
+                            u64::from((u_base + lane) as u32),
+                            u64::from(target_idx_u32),
+                        );
                         for (w, slot) in rev_words.iter_mut().enumerate().take(n_words) {
                             *slot |= sk_rows[w][lane] & sel;
                         }
@@ -2786,7 +2539,10 @@ pub fn fors_sign_and_pk(
                         *row = state.0[w];
                     }
                     for lane in 0..count {
-                        let sel = ct_eq_u32_mask64((u_base + lane) as u32, target_idx_u32);
+                        let sel = ct_eq_mask_u64(
+                            u64::from((u_base + lane) as u32),
+                            u64::from(target_idx_u32),
+                        );
                         for (w, slot) in rev_words.iter_mut().enumerate().take(n_words) {
                             *slot |= sk_rows[w][lane] & sel;
                         }
@@ -3270,12 +3026,8 @@ pub fn slh_sign_internal(
             layer_adrs,
         );
 
-        let leaves = compute_xmss_subtree_leaves(
-            params,
-            sk.sk_seed_slice(),
-            sk.pk_seed_slice(),
-            layer_adrs,
-        );
+        let leaves =
+            compute_xmss_subtree_leaves(params, sk.sk_seed_slice(), sk.pk_seed_slice(), layer_adrs);
         let (root_l, auth_l) = build_fips205_merkle_from_leaves(
             n,
             sk.pk_seed_slice(),
@@ -3598,7 +3350,8 @@ pub fn compute_hedged_r_commit_v1(
     r_share: &[u8],
     open_salt: &[u8; 32],
 ) -> [u8; 32] {
-    let mut preimage = Vec::with_capacity(R_COMMIT_DOMAIN_V1.len() + 32 + 8 + 8 + r_share.len() + 32);
+    let mut preimage =
+        Vec::with_capacity(R_COMMIT_DOMAIN_V1.len() + 32 + 8 + 8 + r_share.len() + 32);
     preimage.extend_from_slice(R_COMMIT_DOMAIN_V1);
     preimage.extend_from_slice(sid);
     preimage.extend_from_slice(&party_id.to_le_bytes());
@@ -3742,12 +3495,8 @@ impl CommittedHedgedRandomizer {
                     actual: open_entry.r_share.len(),
                 });
             }
-            let expected = compute_hedged_r_commit_v1(
-                sid,
-                pid,
-                &open_entry.r_share,
-                &open_entry.open_salt,
-            );
+            let expected =
+                compute_hedged_r_commit_v1(sid, pid, &open_entry.r_share, &open_entry.open_salt);
             if !ct_eq_bytes(&expected, &commit_entry.commit) {
                 wipe_slice(&mut combined);
                 return Err(Fips205Error::MpcActiveTamperDetected);
@@ -3973,31 +3722,6 @@ pub fn slh_sign_mpc<O: SlhMpcOracles>(
     slh_sign_internal_mpc(params, oracles, &m_prime, pk, addrnd)
 }
 
-/// Pre-Hash NIST FIPS 205 §9.3 distributed MPC `HashSLH-DSA` signing (enforcing category strength).
-/// Hedged randomness (`Some(...)`) requires a verified [`CommittedHedgedRandomizer`] from
-/// Round-1 `QSAG.R_COMMIT/v1` coin-tossing prior to Round-3 share release.
-pub fn hash_slh_sign_mpc<O: SlhMpcOracles>(
-    params: &Fips205Params,
-    ph: SlhPreHash,
-    oracles: &mut O,
-    msg: &[u8],
-    ctx: &[u8],
-    pk: &SlhPublicKey,
-    addrnd: Option<&CommittedHedgedRandomizer>,
-) -> Result<Vec<u8>, Fips205Error> {
-    if !params.is_valid() {
-        return Err(Fips205Error::InvalidParameterSet);
-    }
-    if !ph.is_allowed_for_security_n(params.n) {
-        return Err(Fips205Error::PreHashCategoryMismatch {
-            n: params.n,
-            pre_hash: ph,
-        });
-    }
-    let m_prime = format_prehash_m_prime(ph, msg, ctx)?;
-    slh_sign_internal_mpc(params, oracles, &m_prime, pk, addrnd)
-}
-
 impl core::error::Error for Fips205Error {}
 
 #[cfg(test)]
@@ -4033,6 +3757,76 @@ mod tests {
         }
         assert!(Fips205Params::SLH_DSA_SHAKE_COMPACT_TEST.is_valid());
         assert_eq!(Fips205Params::SLH_DSA_SHAKE_COMPACT_TEST.sig_bytes(), 1_392);
+    }
+
+    #[test]
+    fn sha2_digests_match_known_answers_at_every_padding_boundary() {
+        const LENS: [usize; 18] = [
+            0, 1, 55, 56, 57, 63, 64, 65, 111, 112, 113, 119, 120, 127, 128, 129, 200, 1000,
+        ];
+        // First 8 bytes of SHA-256 and last 8 bytes of SHA-512 over the message prefix.
+        const SHA256_HEAD: [u64; 18] = [
+            0xe3b0_c442_98fc_1c14,
+            0xef2d_127d_e37b_942b,
+            0xeeff_6ea9_e4c9_06be,
+            0xedff_44a9_9ed7_bcfa,
+            0x0613_b1cd_633b_5ac9,
+            0xd31a_ecb2_ae56_e7ea,
+            0xef95_829a_7f95_f9bb,
+            0x19ef_b4ee_3678_e72a,
+            0x92b0_02c2_9b31_82bf,
+            0x2b01_bd61_107b_9cd2,
+            0x9c45_75ac_ef5a_af8c,
+            0x10cc_4c74_0280_7680,
+            0x39ad_4f1d_0478_9409,
+            0xc3d7_aef8_2bd6_8713,
+            0xb79f_baee_773f_06b1,
+            0x0670_a3f9_abb6_6048,
+            0x5dea_0ddb_d6a2_5b16,
+            0x1714_ffef_fd0e_5e36,
+        ];
+        const SHA512_TAIL: [u64; 18] = [
+            0xa538_327a_f927_da3e,
+            0xf92f_fb9b_86d0_1e25,
+            0x8841_d35a_4e03_7020,
+            0x87f2_46b7_1d9c_a108,
+            0xda94_33bd_f8a2_165b,
+            0x3a8b_9505_4cf9_630b,
+            0xb3c4_1b3b_b401_bbc5,
+            0x5828_c5d0_6bc7_c11a,
+            0x7a44_d0ac_8918_16b2,
+            0xc87b_f4dc_3a8b_f40c,
+            0xdbb6_03dd_02f4_1aac,
+            0x15d8_9189_df55_898b,
+            0xc2ea_ac37_d472_4177,
+            0xd7f5_5eca_d1d6_cd1e,
+            0xbe5e_cf91_fd1e_780b,
+            0x2625_73f5_342d_7e90,
+            0x76be_87f7_9bd1_0d2f,
+            0x028e_4d65_b2b3_1fe2,
+        ];
+        let msg: Vec<u8> = (0..1000usize)
+            .map(|i| (i as u8).wrapping_mul(0x9d) ^ 0x35)
+            .collect();
+        for (i, &len) in LENS.iter().enumerate() {
+            let d256 = sha256_digest(&msg[..len]);
+            let d512 = sha512_digest(&msg[..len]);
+            let head = u64::from_be_bytes(d256[..8].try_into().unwrap());
+            let tail = u64::from_be_bytes(d512[56..].try_into().unwrap());
+            assert_eq!(head, SHA256_HEAD[i], "SHA-256 len={len}");
+            assert_eq!(tail, SHA512_TAIL[i], "SHA-512 len={len}");
+        }
+    }
+
+    #[test]
+    fn lane_select_mask_is_u32_equality() {
+        let edge = [0u32, 1, 2, 15, 16, 1 << 16, 1 << 31, u32::MAX - 1, u32::MAX];
+        for &a in &edge {
+            for &b in &edge {
+                let want = if a == b { u64::MAX } else { 0 };
+                assert_eq!(ct_eq_mask_u64(u64::from(a), u64::from(b)), want);
+            }
+        }
     }
 
     #[test]
@@ -4284,8 +4078,12 @@ mod tests {
     #[allow(clippy::needless_range_loop)]
     fn batch_x8_prf_f_h_match_scalar_across_all_security_widths() {
         for n in [16usize, 24, 32] {
-            let pk_seed: Vec<u8> = (0..n).map(|i| (0x31u8).wrapping_add((i as u8) * 7)).collect();
-            let sk_seed: Vec<u8> = (0..n).map(|i| (0xA5u8).wrapping_add((i as u8) * 13)).collect();
+            let pk_seed: Vec<u8> = (0..n)
+                .map(|i| (0x31u8).wrapping_add((i as u8) * 7))
+                .collect();
+            let sk_seed: Vec<u8> = (0..n)
+                .map(|i| (0xA5u8).wrapping_add((i as u8) * 13))
+                .collect();
 
             let adrs_prf: [Fips205Adrs; 8] = core::array::from_fn(|lane| {
                 let mut a = Fips205Adrs::ZERO;

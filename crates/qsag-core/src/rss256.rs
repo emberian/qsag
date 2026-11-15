@@ -102,7 +102,8 @@ use qsag_asm::{BitPlane256, KeccakState4x};
 use crate::keccak_mpc::{KeccakMpcError, RssKeyShare256, RssSlhMpcCluster};
 use crate::preprocessing::{PartyPrivateRng, PreprocessError, run_commit_and_open_coin_with_hook};
 use crate::sponge::keccak::{
-    Cshake256Xof, KECCAK_ROTATION_OFFSETS, KECCAK_ROUND_CONSTANTS, SHAKE256_RATE_BYTES,
+    Cshake256WordStream4, Cshake256Xof, KECCAK_ROTATION_OFFSETS, KECCAK_ROUND_CONSTANTS,
+    SHAKE256_RATE_BYTES, SHAKE256_RATE_LANES,
 };
 use crate::wipe::{
     SecretBuffer, secret_vec_extend_from_slice, secret_vec_push, secret_vec_reserve,
@@ -119,16 +120,15 @@ fn rss256_worker_threads() -> usize {
 /// One bit plane across the 256 lanes of a wave.
 pub type Plane = BitPlane256;
 /// Lanes per wave.
-pub const LANES: usize = 256;
+pub const LANES: usize = qsag_asm::BITSLICE_LANES;
 /// Bit planes per `Keccak-f[1600]` state.
-pub const STATE_PLANES: usize = 1600;
+pub const STATE_PLANES: usize = qsag_asm::KECCAK_STATE_BITS;
 /// Bit planes of a 32-byte value.
 pub const DIGEST_PLANES: usize = 256;
 /// Chi AND planes per permutation.
 pub const AND_PLANES_PER_PERM: usize = 24 * STATE_PLANES;
 
-const SHAKE256_RATE_WORDS: usize = SHAKE256_RATE_BYTES / 8;
-const WORDS_PER_X4: usize = 4 * SHAKE256_RATE_WORDS;
+const WORDS_PER_X4: usize = Cshake256WordStream4::WORDS_PER_BLOCK;
 
 /// Pad-stream purposes; the purpose is the top byte of the 64-bit PRG domain.
 const PURPOSE_CHI_PAD: u64 = 1;
@@ -305,7 +305,7 @@ impl Shake256Prg256 {
                 self.refill();
             }
             let take = (WORDS_PER_X4 - self.next).min(out.len() - written);
-            let rate = self.buf.0[..SHAKE256_RATE_WORDS].as_flattened();
+            let rate = self.buf.0[..SHAKE256_RATE_LANES].as_flattened();
             out[written..written + take].copy_from_slice(&rate[self.next..self.next + take]);
             self.next += take;
             written += take;
@@ -371,8 +371,8 @@ impl TranscriptHasher4 {
         }
         self.st.0[0] = core::array::from_fn(|i| self.st.0[0][i] ^ total);
         self.st.0[1] = core::array::from_fn(|i| self.st.0[1][i] ^ 0x1F);
-        self.st.0[SHAKE256_RATE_WORDS - 1] =
-            core::array::from_fn(|i| self.st.0[SHAKE256_RATE_WORDS - 1][i] ^ (1u64 << 63));
+        self.st.0[SHAKE256_RATE_LANES - 1] =
+            core::array::from_fn(|i| self.st.0[SHAKE256_RATE_LANES - 1][i] ^ (1u64 << 63));
         qsag_asm::keccak_f1600_x4(&mut self.st);
         let mut xof = Cshake256Xof::new_shake256();
         xof.absorb(b"QSAG-WAVE-STREAM-v1");
@@ -2912,7 +2912,7 @@ mod tests {
             let want = shake256_xof(SHAKE256_RATE_BYTES, &input);
             let call = (counter / 4) as usize;
             let lane = (counter % 4) as usize;
-            for w in 0..SHAKE256_RATE_WORDS {
+            for w in 0..SHAKE256_RATE_LANES {
                 let got = words[call * WORDS_PER_X4 + 4 * w + lane];
                 let exp = u64::from_le_bytes(want[8 * w..8 * w + 8].try_into().unwrap());
                 assert_eq!(got, exp, "counter {counter} word {w}");
@@ -2952,6 +2952,25 @@ mod tests {
                 e.stats().and_bytes,
                 (AND_PLANES_PER_PERM * lanes).div_ceil(8) as u64
             );
+        }
+    }
+
+    #[test]
+    #[ignore = "replicated 2-of-3 permutation performance measurement"]
+    fn measurement_replicated_wave() {
+        extern crate std;
+        for (tag, lanes) in [(0x51u8, 64usize), (0x52, 256)] {
+            let mut e = engine(tag);
+            let frames = test_frames(lanes, tag);
+            let key = reconstruct_key(&e);
+            let mut st = load(&e, &frames);
+            let started = std::time::Instant::now();
+            e.permute(&mut st, lanes).unwrap();
+            e.check().unwrap();
+            let elapsed = started.elapsed();
+            std::eprintln!("replicated 2-of-3 {lanes}-lane permutation with barrier: {elapsed:?}");
+            let planes = open_all(&mut e, &st);
+            assert_matches_reference(&planes, &reference_states(&frames, &key, 40));
         }
     }
 
