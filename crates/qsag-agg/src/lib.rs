@@ -2874,6 +2874,11 @@ mod tests {
                 verify_aggregate_with_regime(&pks, &mode, &proof, regime)
             })
         });
+        if regime.uses_poseidon2_canopy() {
+            let census = recursion_census::poseidon2_aggregate_merkle_census(&proof).unwrap();
+            std::println!("CHILD_MERKLE N={n} permutations={} trees={} leaves={} (excludes transcript and arithmetic)",
+                census.permutations().unwrap(), census.merkle_trees, census.opened_leaves);
+        }
         std::println!(
             "SCALE regime={regime:?} N={n} shard_signers={shard} shards={} batches={} \
              proof_bytes={} bytes_per_validator={:.1} keygen_sign_s={keygen_s:.1} \
