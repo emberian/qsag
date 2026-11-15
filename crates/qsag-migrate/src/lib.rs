@@ -1,5 +1,6 @@
 #![no_std]
 #![forbid(unsafe_code)]
+#![allow(clippy::chunks_exact_to_as_chunks, clippy::manual_is_multiple_of)]
 //! Classical spending-key ownership with 438-repetition mixed-domain ZKBoo proofs
 //! (`(2/3)^438 < 2^-256` classical soundness error; generic Grover search over the
 //! challenge space costs `> 2^128` oracle iterations).

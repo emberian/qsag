@@ -1365,6 +1365,7 @@ impl<T: Transport> Engine<T> {
     ///
     /// Per-flush false acceptance is `< (BIT_CHECK_NUMERATOR / (2^128 - 1))^2 =
     /// (63 / (2^128 - 1))^2 < 2^-244` (`> 122` bits quantum Grover).
+    #[allow(clippy::needless_range_loop)]
     fn verify_pending_bits_slice(&mut self, triples_raw: &[u64]) -> Result<(), Error> {
         debug_assert_eq!(triples_raw.len() % 6, 0);
         let n = triples_raw.len() / 6;
@@ -4030,9 +4031,9 @@ pub(crate) mod tests {
         for lane in 0..BIT_LANES {
             for col in 0..4 {
                 let mut expected = 0u128;
-                for u in 0..BIT_GROUP_WORDS {
-                    if (scratch.rows[u][col] >> lane) & 1 != 0 {
-                        expected ^= beta[u];
+                for (row, &beta_u) in scratch.rows.iter().zip(beta.iter()).take(BIT_GROUP_WORDS) {
+                    if (row[col] >> lane) & 1 != 0 {
+                        expected ^= beta_u;
                     }
                 }
                 assert_eq!(

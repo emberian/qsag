@@ -1,3 +1,5 @@
+#![allow(clippy::chunks_exact_to_as_chunks)]
+
 //! Dealerless distributed MPC subtree staging and proactive share refresh for
 //! quorum-switching `Jorts` (`QS-A` [`CommitteePartitionedJorts`] and `QS-B` [`BftShamirJorts`]).
 //!
@@ -275,6 +277,7 @@ impl core::error::Error for DealerlessStagingError {}
 /// Fault-injection hooks for adversarial unit tests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg(test)]
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum StagingFault {
     /// Flip a custodian's Round-2 `pk_seed` contribution after committing.
     CorruptPkSeedOpen { party: usize },
@@ -666,10 +669,10 @@ fn transpose_128_cols_to_u128_rows(cols: &[Vec<u64>], words: usize) -> Vec<u128>
     let mut tile = [[0u64; 4]; 64];
     for w_pair in (0..words).step_by(2) {
         let has_second = w_pair + 1 < words;
-        for bit_in_u128_half in 0..64 {
+        for (bit_in_u128_half, tile_row) in tile.iter_mut().enumerate() {
             let c_lo = bit_in_u128_half;
             let c_hi = 64 + bit_in_u128_half;
-            tile[bit_in_u128_half] = [
+            *tile_row = [
                 cols[c_lo][w_pair],
                 cols[c_hi][w_pair],
                 if has_second {
@@ -716,6 +719,8 @@ impl Drop for PairwiseSubfieldVole {
     }
 }
 
+type AuthBitRowsPair = (SecretBuffer<Vec<u128>>, SecretBuffer<Vec<u128>>);
+
 impl PairwiseSubfieldVole {
     /// Authenticate `payload_words` `u64` words owned by `self.owner` under `self.holder`'s
     /// 128-bit `delta_holder` key via KOS15 correlated OT extension (`+256` sacrificial bits).
@@ -727,7 +732,7 @@ impl PairwiseSubfieldVole {
         owner_words: &[u64],
         owner_rng: &mut PartyPrivateRng,
         holder_rng: &mut PartyPrivateRng,
-    ) -> Result<(SecretBuffer<Vec<u128>>, SecretBuffer<Vec<u128>>), DealerlessStagingError> {
+    ) -> Result<AuthBitRowsPair, DealerlessStagingError> {
         let payload_words = owner_words.len();
         let total_words = payload_words + 4; // +256 sacrificial bits masking KOS linear combination
         let ext_ctr = self.ext_ctr;
@@ -875,15 +880,15 @@ fn crh_2blocks_x8(
     st.0[16] = [1u64 << 63; 8];
 
     qsag_asm::keccak_f1600_x8_with_backend(&mut st, backend);
-    for w in 0..17 {
-        for s in 0..8 {
-            out[s][w] = st.0[w][s];
+    for (w, lane) in st.0.iter().enumerate().take(17) {
+        for (out_s, &val) in out.iter_mut().zip(lane.iter()) {
+            out_s[w] = val;
         }
     }
     qsag_asm::keccak_f1600_x8_with_backend(&mut st, backend);
-    for w in 0..17 {
-        for s in 0..8 {
-            out[s][17 + w] = st.0[w][s];
+    for (w, lane) in st.0.iter().enumerate().take(17) {
+        for (out_s, &val) in out.iter_mut().zip(lane.iter()) {
+            out_s[17 + w] = val;
         }
     }
     qsag_asm::volatile_fill(&mut st.0, [0u64; 8]);
@@ -902,6 +907,7 @@ fn make_crh_prefix(session_id: &[u8; 32], holder: usize, owner: usize, chunk_ctr
 }
 
 /// Evaluate 128-bit field product `x_holder * y_owner` over `128` Subfield-VOLE bit rows of `y_owner`.
+#[allow(clippy::too_many_arguments)]
 fn cot_field_mul_128(
     prefix: &[u64; 8],
     domain_idx_base: u64,
@@ -1985,8 +1991,8 @@ impl CommitteeBeaverReservoir {
                         if p == 0 {
                             out_sh ^= u64::MAX;
                         }
-                        for bit in 0..64 {
-                            out_mac[bit] ^= delta_p;
+                        for mac_word in &mut out_mac {
+                            *mac_word ^= delta_p;
                         }
                     }
                     states_sh[p][idx] = out_sh;
@@ -2014,6 +2020,9 @@ const fn col_mac_noop_u64(x: u64) -> u64 {
     x
 }
 
+type StagedCommitteeSubtreeOutcome =
+    Result<(Vec<CommitteeShareStore>, Vec<(u64, Vec<Node>)>), DealerlessStagingError>;
+
 /// Stage one `t`-member committee's assigned leaves in complete isolation from non-members.
 fn stage_single_committee_subtree_mpc(
     committee: usize,
@@ -2022,7 +2031,7 @@ fn stage_single_committee_subtree_mpc(
     committee_sid: [u8; 32],
     committee_rngs: &mut [PartyPrivateRng],
     #[cfg(test)] fault: Option<StagingFault>,
-) -> Result<(Vec<CommitteeShareStore>, Vec<(u64, Vec<Node>)>), DealerlessStagingError> {
+) -> StagedCommitteeSubtreeOutcome {
     let m = committee_rngs.len();
     #[cfg(test)]
     let inject_beaver_fault = matches!(
@@ -2245,9 +2254,7 @@ fn stage_committee_partitioned_inner(
         leaf_indices: Vec<u64>,
         committee_sid: [u8; 32],
         member_rngs: Vec<PartyPrivateRng>,
-        result: Option<
-            Result<(Vec<CommitteeShareStore>, Vec<(u64, Vec<Node>)>), DealerlessStagingError>,
-        >,
+        result: Option<StagedCommitteeSubtreeOutcome>,
     }
 
     let mut jobs = Vec::with_capacity(layout.committees().len());
@@ -2874,14 +2881,14 @@ fn stage_bft_shamir_inner(
                 let mut r_f = SecretBuffer(vec![vec![[0u64; 8]; STATE_BITS]; n]);
                 let mut r_2f = SecretBuffer(vec![vec![[0u64; 8]; STATE_BITS]; n]);
                 for idx in 0..STATE_BITS {
-                    for d in 0..n {
+                    for dealer_rng in party_rngs.iter_mut().take(n) {
                         let mut sec = [0u64; 8];
                         for pl in &mut sec {
-                            *pl = party_rngs[d].next_u64();
+                            *pl = dealer_rng.next_u64();
                         }
-                        let sh_f = share_bs_gf256_degree(&sec, f, &powers_f, &mut party_rngs[d]);
+                        let sh_f = share_bs_gf256_degree(&sec, f, &powers_f, dealer_rng);
                         let sh_2f =
-                            share_bs_gf256_degree(&sec, 2 * f, &powers_2f, &mut party_rngs[d]);
+                            share_bs_gf256_degree(&sec, 2 * f, &powers_2f, dealer_rng);
                         wipe_u64s(&mut sec);
                         for p in 0..n {
                             bs_xor_assign(&mut r_f[p][idx], &sh_f[p]);
@@ -2971,14 +2978,14 @@ fn stage_bft_shamir_inner(
         let mut check_masks_f = SecretBuffer(vec![vec![[0u64; 8]; n]; GF256_CHECK_REPS]);
         let mut check_masks_2f = SecretBuffer(vec![vec![[0u64; 8]; n]; GF256_CHECK_REPS]);
         for rep in 0..GF256_CHECK_REPS {
-            for d in 0..n {
+            for dealer_rng in party_rngs.iter_mut().take(n) {
                 let mut m_sec = [0u64; 8];
                 for pl in &mut m_sec {
-                    *pl = party_rngs[d].next_u64();
+                    *pl = dealer_rng.next_u64();
                 }
-                let mf_sh = share_bs_gf256_degree(&m_sec, f, &powers_f, &mut party_rngs[d]);
+                let mf_sh = share_bs_gf256_degree(&m_sec, f, &powers_f, dealer_rng);
                 wipe_u64s(&mut m_sec);
-                let z_sh = share_bs_gf256_degree(&[0u64; 8], 2 * f, &powers_2f, &mut party_rngs[d]);
+                let z_sh = share_bs_gf256_degree(&[0u64; 8], 2 * f, &powers_2f, dealer_rng);
                 for p in 0..n {
                     bs_xor_assign(&mut check_masks_f[rep][p], &mf_sh[p]);
                     bs_xor_assign(&mut check_masks_2f[rep][p], &z_sh[p]);

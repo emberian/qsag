@@ -188,10 +188,10 @@ fn sub4_mod(a: [u64; 4], b: [u64; 4], m: [u64; 4]) -> [u64; 4] {
 #[inline]
 fn cios_mont_mul4(a: [u64; 4], b: [u64; 4], m: [u64; 4], inv: u64) -> [u64; 4] {
     let mut t = [0u64; 6];
-    for i in 0..4 {
+    for &ai in &a {
         let mut carry = 0u128;
         for j in 0..4 {
-            let cur = (t[j] as u128) + (a[i] as u128) * (b[j] as u128) + carry;
+            let cur = (t[j] as u128) + (ai as u128) * (b[j] as u128) + carry;
             t[j] = cur as u64;
             carry = cur >> 64;
         }
@@ -2025,7 +2025,7 @@ mod tests {
 
         let backend = CpuReferenceBackend;
         let domain = [0x5au8; 32];
-        let epoch = 2026_11;
+        let epoch = 202_611;
 
         for (wit, comm) in [(&wit_ak, comm_ak), (&wit_rk, comm_rk)] {
             let req = PallasMigrationRequest {

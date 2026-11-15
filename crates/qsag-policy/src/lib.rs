@@ -2482,7 +2482,7 @@ pub fn finalize_distributed_policy_guard<O: PolicyAuthenticatedOt>(
             return Err(PolicyViolation::BarrierBdozMacFailed);
         }
         let mut macs = Vec::with_capacity(BDOZ_PREPROC_SLOTS);
-        for chunk in selected.chunks_exact(256) {
+        for chunk in selected.as_chunks::<256>().0 {
             macs.push([
                 chunk[..128].iter().fold(0, |a, b| a ^ b),
                 chunk[128..].iter().fold(0, |a, b| a ^ b),

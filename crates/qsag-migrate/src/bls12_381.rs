@@ -201,10 +201,10 @@ fn sub6_mod(a: [u64; 6], b: [u64; 6], m: [u64; 6]) -> [u64; 6] {
 #[inline]
 fn cios_mont_mul6(a: [u64; 6], b: [u64; 6], m: [u64; 6], inv: u64) -> [u64; 6] {
     let mut t = [0u64; 8];
-    for i in 0..6 {
+    for &ai in &a {
         let mut carry = 0u128;
         for j in 0..6 {
-            let cur = (t[j] as u128) + (a[i] as u128) * (b[j] as u128) + carry;
+            let cur = (t[j] as u128) + (ai as u128) * (b[j] as u128) + carry;
             t[j] = cur as u64;
             carry = cur >> 64;
         }
@@ -303,10 +303,10 @@ fn sub4_mod(a: [u64; 4], b: [u64; 4], m: [u64; 4]) -> [u64; 4] {
 #[inline]
 fn cios_mont_mul4(a: [u64; 4], b: [u64; 4], m: [u64; 4], inv: u64) -> [u64; 4] {
     let mut t = [0u64; 6];
-    for i in 0..4 {
+    for &ai in &a {
         let mut carry = 0u128;
         for j in 0..4 {
-            let cur = (t[j] as u128) + (a[i] as u128) * (b[j] as u128) + carry;
+            let cur = (t[j] as u128) + (ai as u128) * (b[j] as u128) + carry;
             t[j] = cur as u64;
             carry = cur >> 64;
         }
@@ -2029,6 +2029,7 @@ fn bls_seeds(entropy: &[u8; 32], stmt_bytes: &[u8], rep: usize) -> [[u8; 32]; 3]
 }
 
 /// Prove Ethereum Beacon validator `BLS12-381` ownership in the default epoch campaign domain.
+#[allow(clippy::too_many_arguments)]
 pub fn prove_bls_migration<B: AcceleratorBackend>(
     witness: &BlsOwnershipWitness,
     commitment: BlsValidatorCommitment,

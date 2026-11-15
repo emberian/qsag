@@ -3003,7 +3003,12 @@ mod tests {
         let new_points = canonical_eval_points(5);
         let mut public_mask = Goldilocks::ZERO;
         let mut vulnerable_recipient = Goldilocks::ZERO;
-        for party in 0..2 {
+        for (party, (&weight, share)) in weights
+            .iter()
+            .zip(quorum.shares.iter())
+            .enumerate()
+            .take(2)
+        {
             let seed = cshake256_32(
                 b"QSAG.HEM.QSB.DEALER.RNG/v1",
                 &encode_multi_frame(&[&sid, &0u64.to_le_bytes(), &(party as u32).to_le_bytes()]),
@@ -3014,7 +3019,7 @@ mod tests {
             let _ = shamir_share_ext2(3, &new_points, mask_secret, &mut replay);
             let mask = shamir_share_goldilocks(3, &new_points, Goldilocks::ZERO, &mut replay)[0];
             public_mask += mask;
-            vulnerable_recipient += weights[party] * quorum.shares[party].leaf_vals[0][0] + mask;
+            vulnerable_recipient += weight * share.leaf_vals[0][0] + mask;
         }
         assert_eq!(vulnerable_recipient - public_mask, secret);
 
