@@ -918,3 +918,1169 @@ impl Drop for PalNode {
 }
 
 /// Mixed-domain ZKBoo circuit for Zcash Orchard `Pallas` / `RedPallas` ownership.
+pub struct PallasOwnershipCircuit {
+    nodes: Vec<PalNode>,
+    outputs: Vec<Wire>,
+}
+
+#[derive(Default)]
+struct PalBuilder {
+    nodes: RefCell<Vec<PalNode>>,
+    outputs: RefCell<Vec<Wire>>,
+}
+
+impl PalBuilder {
+    fn push(&self, domain: PalDom, op: PalOp, value: Val4) -> Wire {
+        let mut ns = self.nodes.borrow_mut();
+        let w = ns.len();
+        if ns.len() == ns.capacity() {
+            let mut grown = Vec::with_capacity(ns.capacity().saturating_mul(2).max(64));
+            grown.extend(ns.iter().map(|n| PalNode {
+                domain: n.domain,
+                op: n.op,
+                value: n.value,
+            }));
+            *ns = grown;
+        }
+        ns.push(PalNode { domain, op, value });
+        w
+    }
+
+    fn finish(self) -> PallasOwnershipCircuit {
+        PallasOwnershipCircuit {
+            nodes: self.nodes.into_inner(),
+            outputs: self.outputs.into_inner(),
+        }
+    }
+
+    fn value(&self, w: Wire) -> Val4 {
+        self.nodes.borrow()[w].value
+    }
+
+    fn domain(&self, w: Wire) -> PalDom {
+        self.nodes.borrow()[w].domain
+    }
+
+    fn known(&self, w: Wire) -> Option<Val4> {
+        match self.nodes.borrow()[w].op {
+            PalOp::Constant(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    fn constant(&self, d: PalDom, x: Val4) -> Wire {
+        self.push(d, PalOp::Constant(x), x)
+    }
+
+    fn small(&self, d: PalDom, x: u64) -> Wire {
+        self.constant(d, [x, 0, 0, 0])
+    }
+
+    fn input_bit(&self, bit: u8) -> Wire {
+        self.push(PalDom::Bit, PalOp::Input, [u64::from(bit & 1), 0, 0, 0])
+    }
+
+    fn input_fp(&self, x: FpPallas) -> Wire {
+        self.push(PalDom::PallasFp, PalOp::Input, x.0)
+    }
+
+    fn add(&self, a: Wire, b: Wire) -> Wire {
+        let d = self.domain(a);
+        assert_eq!(d, self.domain(b));
+        match (self.known(a), self.known(b)) {
+            (Some(x), Some(y)) => self.constant(d, d.add(x, y)),
+            (Some(ZERO4), _) => b,
+            (_, Some(ZERO4)) => a,
+            _ => self.push(d, PalOp::Add(a, b), d.add(self.value(a), self.value(b))),
+        }
+    }
+
+    fn sub(&self, a: Wire, b: Wire) -> Wire {
+        let d = self.domain(a);
+        assert_eq!(d, self.domain(b));
+        if a == b {
+            return self.constant(d, ZERO4);
+        }
+        match (self.known(a), self.known(b)) {
+            (Some(x), Some(y)) => self.constant(d, d.sub(x, y)),
+            (_, Some(ZERO4)) => a,
+            _ => self.push(d, PalOp::Sub(a, b), d.sub(self.value(a), self.value(b))),
+        }
+    }
+
+    fn scale_val(&self, a: Wire, c: Val4) -> Wire {
+        let d = self.domain(a);
+        if c == ZERO4 {
+            return self.constant(d, ZERO4);
+        }
+        if c == [1, 0, 0, 0] {
+            return a;
+        }
+        let v = d.mul(self.value(a), c);
+        if self.known(a).is_some() {
+            self.constant(d, v)
+        } else {
+            self.push(d, PalOp::Scale(a, c), v)
+        }
+    }
+
+    fn scale(&self, a: Wire, c: u64) -> Wire {
+        self.scale_val(a, [c, 0, 0, 0])
+    }
+
+    fn mul(&self, a: Wire, b: Wire) -> Wire {
+        let d = self.domain(a);
+        assert_eq!(d, self.domain(b));
+        match (self.known(a), self.known(b)) {
+            (Some(x), Some(y)) => self.constant(d, d.mul(x, y)),
+            (Some(x), _) => self.scale_val(b, x),
+            (_, Some(y)) => self.scale_val(a, y),
+            _ => self.push(d, PalOp::Mul(a, b), d.mul(self.value(a), self.value(b))),
+        }
+    }
+
+    fn not(&self, a: Wire) -> Wire {
+        self.add(a, self.small(PalDom::Bit, 1))
+    }
+
+    fn select(&self, b: Wire, t: Wire, f: Wire) -> Wire {
+        self.add(f, self.mul(b, self.sub(t, f)))
+    }
+
+    fn output(&self, a: Wire) {
+        self.outputs.borrow_mut().push(a);
+    }
+
+    fn equal(&self, a: Wire, b: Wire) {
+        self.output(self.sub(a, b));
+    }
+
+    fn lift(&self, a: Wire, d: PalDom) -> Wire {
+        assert_eq!(self.domain(a), PalDom::Bit);
+        let parts: [Wire; 3] = core::array::from_fn(|p| {
+            self.push(
+                d,
+                PalOp::Lift(a, p),
+                if p == 0 { self.value(a) } else { ZERO4 },
+            )
+        });
+        let xor = |x, y| self.sub(self.add(x, y), self.scale(self.mul(x, y), 2));
+        xor(xor(parts[0], parts[1]), parts[2])
+    }
+
+    fn pack_gold(&self, bits: &[Wire]) -> Wire {
+        bits.iter().rev().fold(self.small(PalDom::Gold, 0), |a, &b| {
+            self.add(self.scale(a, 2), self.lift(b, PalDom::Gold))
+        })
+    }
+
+    fn add_bits(&self, a: &[Wire], b: &[Wire], carry: Wire) -> (Vec<Wire>, Wire) {
+        let mut c = carry;
+        let out = a
+            .iter()
+            .zip(b)
+            .map(|(&x, &y)| {
+                let xc = self.add(x, c);
+                let yc = self.add(y, c);
+                let s = self.add(xc, y);
+                c = self.add(c, self.mul(xc, yc));
+                s
+            })
+            .collect();
+        (out, c)
+    }
+
+    fn constant_bits(&self, x: Val4, width: usize) -> Vec<Wire> {
+        (0..width)
+            .map(|i| self.small(PalDom::Bit, (x[i / 64] >> (i % 64)) & 1))
+            .collect()
+    }
+
+    fn require_canonical(&self, bits: &[Wire], order: Val4) {
+        let comp: Vec<_> = self
+            .constant_bits(order, 256)
+            .into_iter()
+            .map(|b| self.not(b))
+            .collect();
+        let (_, ge) = self.add_bits(bits, &comp, self.small(PalDom::Bit, 1));
+        self.output(ge);
+    }
+
+    fn require_nonzero(&self, bits: &[Wire]) {
+        let all_zero = bits
+            .iter()
+            .fold(self.small(PalDom::Bit, 1), |a, &b| self.mul(a, self.not(b)));
+        self.output(all_zero);
+    }
+
+    /// Compute `(a + b) mod q_pallas` on canonical 256-bit LE bit vectors (`a, b < q < 2^255`).
+    fn add_mod_q_bits(&self, a: &[Wire], b: &[Wire]) -> Vec<Wire> {
+        let (sum, carry) = self.add_bits(a, b, self.small(PalDom::Bit, 0));
+        // Since `a, b < 2^255`, `a + b < 2^256`, so `carry == 0`; include `carry` for completeness.
+        let mut sum257 = sum;
+        sum257.push(carry);
+        let mut q_bits = self.constant_bits(PALLAS_Q, 256);
+        q_bits.push(self.small(PalDom::Bit, 0));
+        let comp: Vec<_> = q_bits.into_iter().map(|w| self.not(w)).collect();
+        let (diff, ge_q) = self.add_bits(&sum257, &comp, self.small(PalDom::Bit, 1));
+        sum257
+            .iter()
+            .zip(&diff)
+            .take(256)
+            .map(|(&s, &d)| self.select(ge_q, d, s))
+            .collect()
+    }
+}
+
+fn pallas_rcb_add(c: &PalBuilder, a: [Wire; 3], b: [Wire; 3]) -> [Wire; 3] {
+    let mut t0 = c.mul(a[0], b[0]);
+    let mut t1 = c.mul(a[1], b[1]);
+    let zz = c.mul(a[2], b[2]);
+    let t2 = c.scale(zz, 15);
+    let t3 = c.sub(c.mul(c.add(a[0], a[1]), c.add(b[0], b[1])), c.add(t0, t1));
+    let t4 = c.sub(c.mul(c.add(a[1], a[2]), c.add(b[1], b[2])), c.add(t1, zz));
+    let cross = c.scale(
+        c.sub(c.mul(c.add(a[0], a[2]), c.add(b[0], b[2])), c.add(t0, zz)),
+        15,
+    );
+    t0 = c.scale(t0, 3);
+    let z = c.add(t1, t2);
+    t1 = c.sub(t1, t2);
+    [
+        c.sub(c.mul(t3, t1), c.mul(t4, cross)),
+        c.add(c.mul(t1, z), c.mul(cross, t0)),
+        c.add(c.mul(z, t4), c.mul(t0, t3)),
+    ]
+}
+
+/// Precompute 64 public 4-bit affine window tables `[v * 16^w] SpendAuthG` using a single batch inversion.
+fn spend_auth_window_tables() -> Vec<[[Val4; 3]; 16]> {
+    let mut tables = Vec::with_capacity(64);
+    let mut base = PallasPoint::ORCHARD_SPEND_AUTH_G;
+    for _ in 0..64 {
+        let mut p = PallasPoint::IDENTITY;
+        let table: [[Val4; 3]; 16] = core::array::from_fn(|v| {
+            if v != 0 {
+                p = p.complete_add(&base);
+            }
+            [p.x.0, p.y.0, p.z.0]
+        });
+        tables.push(table);
+        for _ in 0..4 {
+            base = base.complete_add(&base);
+        }
+    }
+    let mut prefixes = Vec::with_capacity(64 * 15);
+    let mut prod = FpPallas::ONE;
+    for table in &tables {
+        for p in &table[1..] {
+            prefixes.push(prod);
+            prod = prod * FpPallas(p[2]);
+        }
+    }
+    let mut inv = prod.inv_or_zero();
+    for table in tables.iter_mut().rev() {
+        for p in table[1..].iter_mut().rev() {
+            let z_inv = inv * prefixes.pop().unwrap();
+            inv = inv * FpPallas(p[2]);
+            p[0] = (FpPallas(p[0]) * z_inv).0;
+            p[1] = (FpPallas(p[1]) * z_inv).0;
+            p[2] = FpPallas::ONE.0;
+        }
+    }
+    tables
+}
+
+fn fixed_base_spend_auth_mul(c: &PalBuilder, bits: &[Wire]) -> [Wire; 3] {
+    let tables = spend_auth_window_tables();
+    let one = c.small(PalDom::PallasFp, 1);
+    let pairs = |a, b| {
+        let ab = c.mul(a, b);
+        let a_only = c.sub(a, ab);
+        let b_only = c.sub(b, ab);
+        [c.sub(c.sub(one, a_only), b), a_only, b_only, ab]
+    };
+    let mut acc: Option<[Wire; 3]> = None;
+    for (nibble, table) in bits.chunks_exact(4).zip(tables) {
+        let b: [Wire; 4] = core::array::from_fn(|i| c.lift(nibble[i], PalDom::PallasFp));
+        let lo = pairs(b[0], b[1]);
+        let hi = pairs(b[2], b[3]);
+        let mut sel = [c.small(PalDom::PallasFp, 0); 16];
+        for j in 0..3 {
+            for i in 0..3 {
+                sel[j * 4 + i] = c.mul(lo[i], hi[j]);
+            }
+            sel[j * 4 + 3] = c.sub(
+                hi[j],
+                c.add(c.add(sel[j * 4], sel[j * 4 + 1]), sel[j * 4 + 2]),
+            );
+        }
+        for i in 0..4 {
+            sel[12 + i] = c.sub(lo[i], c.add(c.add(sel[i], sel[4 + i]), sel[8 + i]));
+        }
+        let pt: [Wire; 3] = core::array::from_fn(|coord| {
+            if coord == 2 {
+                return c.sub(one, sel[0]);
+            }
+            sel.iter()
+                .zip(&table)
+                .fold(c.small(PalDom::PallasFp, 0), |sum, (&w, p)| {
+                    c.add(sum, c.scale_val(w, p[coord]))
+                })
+        });
+        acc = Some(match acc {
+            None => pt,
+            Some(prev) => pallas_rcb_add(c, prev, pt),
+        });
+    }
+    acc.unwrap()
+}
+
+fn big_endian_bits(bits: &[Wire]) -> Vec<Wire> {
+    bits.chunks_exact(8).rev().flatten().copied().collect()
+}
+
+fn poseidon_me(c: &PalBuilder, st: &mut [Wire; 12]) {
+    let mut ys = *st;
+    for row in ys.chunks_exact_mut(4) {
+        let old: [Wire; 4] = core::array::from_fn(|i| row[i]);
+        let s = old.iter().copied().reduce(|a, b| c.add(a, b)).unwrap();
+        for (i, x) in row.iter_mut().enumerate() {
+            *x = c.add(s, c.add(old[i], c.scale(old[(i + 1) % 4], 2)));
+        }
+    }
+    for (i, x) in st.iter_mut().enumerate() {
+        *x = c.add(ys[i], c.add(c.add(ys[i % 4], ys[i % 4 + 4]), ys[i % 4 + 8]));
+    }
+}
+
+fn poseidon_mi(c: &PalBuilder, st: &mut [Wire; 12]) {
+    let s = st.iter().copied().reduce(|a, b| c.add(a, b)).unwrap();
+    st[0] = c.sub(s, c.scale(st[0], 2));
+    st[1] = c.add(s, st[1]);
+    for (i, x) in st.iter_mut().enumerate().skip(2) {
+        *x = c.add(s, c.scale(*x, 1 << (i - 1)));
+    }
+}
+
+fn poseidon_sbox(c: &PalBuilder, x: Wire, rc: u64) -> Wire {
+    let x = c.add(x, c.small(PalDom::Gold, rc));
+    let x2 = c.mul(x, x);
+    let x3 = c.mul(x2, x);
+    let x4 = c.mul(x2, x2);
+    c.mul(x3, x4)
+}
+
+fn poseidon_perm(c: &PalBuilder, st: &mut [Wire; 12]) {
+    poseidon_me(c, st);
+    for r in 0..4 {
+        for (i, x) in st.iter_mut().enumerate() {
+            *x = poseidon_sbox(c, *x, poseidon2_const_at(0, r, i as u64));
+        }
+        poseidon_me(c, st);
+    }
+    for r in 0..22 {
+        st[0] = poseidon_sbox(c, st[0], poseidon2_const_at(1, r, 0));
+        poseidon_mi(c, st);
+    }
+    for r in 0..4 {
+        for (i, x) in st.iter_mut().enumerate() {
+            *x = poseidon_sbox(c, *x, poseidon2_const_at(2, r, i as u64));
+        }
+        poseidon_me(c, st);
+    }
+}
+
+fn poseidon_sponge(c: &PalBuilder, domain: u64, input: &[Wire]) -> [Wire; 4] {
+    let mut st = [c.small(PalDom::Gold, 0); 12];
+    for (i, v) in [(8, 8), (9, 4), (10, domain), (11, POSEIDON2_CONST_IV)] {
+        st[i] = c.small(PalDom::Gold, v);
+    }
+    let mut pos = 0;
+    for &x in input {
+        st[pos] = c.add(st[pos], x);
+        pos += 1;
+        if pos == 8 {
+            poseidon_perm(c, &mut st);
+            pos = 0;
+        }
+    }
+    st[pos] = c.add(st[pos], c.small(PalDom::Gold, 1));
+    st[7] = c.add(st[7], c.small(PalDom::Gold, 1 << 56));
+    poseidon_perm(c, &mut st);
+    [st[0], st[1], st[2], st[3]]
+}
+
+fn pack56_gold(c: &PalBuilder, bytes_bits: &[Wire]) -> Vec<Wire> {
+    let mut marked = bytes_bits.to_vec();
+    for &b in &[1u8, 0, 0] {
+        for i in 0..8 {
+            marked.push(c.small(PalDom::Bit, u64::from((b >> i) & 1)));
+        }
+    }
+    marked
+        .chunks_exact(56)
+        .map(|chunk| {
+            let little: Vec<_> = chunk.chunks_exact(8).rev().flatten().copied().collect();
+            c.pack_gold(&little)
+        })
+        .collect()
+}
+
+/// Build the mixed-domain ZKBoo circuit for `statement` (ready for single-prover or MPC replay).
+pub fn build_pallas_ownership_circuit(
+    statement: &PallasMigrationStatement,
+    expected_affine: (FpPallas, FpPallas),
+    ask_le: &[u8; 32],
+    alpha_le: &[u8; 32],
+) -> PallasOwnershipCircuit {
+    let c = PalBuilder::default();
+    let ask_bits: Vec<_> = ask_le
+        .iter()
+        .flat_map(|&b| (0..8).map(move |i| (b >> i) & 1))
+        .map(|b| c.input_bit(b))
+        .collect();
+    c.require_canonical(&ask_bits, PALLAS_Q);
+    c.require_nonzero(&ask_bits);
+
+    let (eff_bits, nul_tag) = if statement.commitment.is_rerandomized() {
+        let alpha_bits: Vec<_> = alpha_le
+            .iter()
+            .flat_map(|&b| (0..8).map(move |i| (b >> i) & 1))
+            .map(|b| c.input_bit(b))
+            .collect();
+        c.require_canonical(&alpha_bits, PALLAS_Q);
+        let sum_bits = c.add_mod_q_bits(&ask_bits, &alpha_bits);
+        c.require_nonzero(&sum_bits);
+        (sum_bits, NULLIFIER_TAG_PALLAS_RK)
+    } else {
+        (ask_bits, NULLIFIER_TAG_PALLAS_AK)
+    };
+
+    let proj = fixed_base_spend_auth_mul(&c, &eff_bits);
+    let z_val = FpPallas(c.value(proj[2]));
+    let z_inv = c.input_fp(z_val.inv_or_zero());
+    // Constrain `Z * z_inv == 1` (proving `Z != 0`) and `(X, Y) == (x_pub * Z, y_pub * Z)`.
+    c.equal(c.mul(proj[2], z_inv), c.small(PalDom::PallasFp, 1));
+    c.equal(proj[0], c.scale_val(proj[2], expected_affine.0.0));
+    c.equal(proj[1], c.scale_val(proj[2], expected_affine.1.0));
+
+    let mut nul_in = alloc::vec![c.small(PalDom::Gold, nul_tag)];
+    nul_in.extend(pack56_gold(&c, &big_endian_bits(&eff_bits)));
+    nul_in.extend(
+        pack_bytes32_to_limbs56(&statement.migration_domain).map(|v| c.small(PalDom::Gold, v)),
+    );
+    let nul = poseidon_sponge(&c, NULLIFIER_DOMAIN, &nul_in);
+    for (w, expected) in nul.into_iter().zip(statement.migration_nullifier) {
+        c.equal(w, c.small(PalDom::Gold, expected));
+    }
+    c.finish()
+}
+
+struct PalTape {
+    sponge: crate::tape_sponge::TapeSponge,
+    bit_buf: u64,
+    bit_rem: u8,
+}
+
+impl Drop for PalTape {
+    fn drop(&mut self) {
+        qsag_asm::volatile_fill(core::slice::from_mut(&mut self.bit_buf), 0);
+        qsag_asm::volatile_fill(core::slice::from_mut(&mut self.bit_rem), 0);
+    }
+}
+
+impl PalTape {
+    fn new(seed: &[u8; 32]) -> Self {
+        Self {
+            sponge: crate::tape_sponge::TapeSponge::new(seed),
+            bit_buf: 0,
+            bit_rem: 0,
+        }
+    }
+
+    fn sample(&mut self, d: PalDom) -> Val4 {
+        match d {
+            PalDom::Bit => {
+                if self.bit_rem == 0 {
+                    let mut raw = [0u8; 8];
+                    self.sponge.squeeze(&mut raw);
+                    self.bit_buf = u64::from_le_bytes(raw);
+                    self.bit_rem = 64;
+                }
+                let b = self.bit_buf & 1;
+                self.bit_buf >>= 1;
+                self.bit_rem -= 1;
+                [b, 0, 0, 0]
+            }
+            PalDom::Gold => [self.sponge.gold(), 0, 0, 0],
+            PalDom::PallasFp => loop {
+                let mut raw = [0u8; 32];
+                self.sponge.squeeze(&mut raw);
+                let mut v = crate::scalar::decode(&raw);
+                ct_zeroize_bytes(&mut raw);
+                v[3] &= 0x7fff_ffff_ffff_ffff;
+                if lt4(v, PALLAS_P) {
+                    return v;
+                }
+            },
+        }
+    }
+}
+
+fn pal_put(out: &mut Vec<u8>, d: PalDom, v: Val4) {
+    match d {
+        PalDom::Bit => out.push((v[0] & 1) as u8),
+        PalDom::Gold => out.extend_from_slice(&v[0].to_le_bytes()),
+        PalDom::PallasFp => out.extend_from_slice(&crate::scalar::encode(v)),
+    }
+}
+
+fn pal_take(input: &mut &[u8], d: PalDom) -> Result<Val4, MigrateError> {
+    let len = d.byte_len();
+    if input.len() < len {
+        return Err(MigrateError::MalformedProofStructure);
+    }
+    let v = match d {
+        PalDom::Bit => [u64::from(input[0]), 0, 0, 0],
+        PalDom::Gold => [u64::from_le_bytes(input[..8].try_into().unwrap()), 0, 0, 0],
+        PalDom::PallasFp => crate::scalar::decode(input[..32].try_into().unwrap()),
+    };
+    *input = &input[len..];
+    if !d.canonical(v) {
+        return Err(MigrateError::MalformedProofStructure);
+    }
+    Ok(v)
+}
+
+fn pal_put_packed(out: &mut Vec<u8>, bit: &mut u8, d: PalDom, v: Val4) {
+    if d == PalDom::Bit {
+        if *bit == 0 {
+            out.push(0);
+        }
+        *out.last_mut().unwrap() |= (v[0] as u8 & 1) << *bit;
+        *bit = (*bit + 1) % 8;
+    } else {
+        *bit = 0;
+        pal_put(out, d, v);
+    }
+}
+
+struct PalPackedReader<'a> {
+    input: &'a [u8],
+    bit: u8,
+}
+
+impl<'a> PalPackedReader<'a> {
+    fn new(input: &'a [u8]) -> Self {
+        Self { input, bit: 0 }
+    }
+
+    fn align(&mut self) -> Result<(), MigrateError> {
+        if self.bit != 0 {
+            if self.input[0] >> self.bit != 0 {
+                return Err(MigrateError::MalformedProofStructure);
+            }
+            self.input = &self.input[1..];
+            self.bit = 0;
+        }
+        Ok(())
+    }
+
+    fn take(&mut self, d: PalDom) -> Result<Val4, MigrateError> {
+        if d != PalDom::Bit {
+            self.align()?;
+            return pal_take(&mut self.input, d);
+        }
+        let byte = self
+            .input
+            .first()
+            .ok_or(MigrateError::MalformedProofStructure)?;
+        let v = [u64::from((byte >> self.bit) & 1), 0, 0, 0];
+        self.bit = (self.bit + 1) % 8;
+        if self.bit == 0 {
+            self.input = &self.input[1..];
+        }
+        Ok(v)
+    }
+
+    fn finish(&mut self) -> Result<(), MigrateError> {
+        self.align()?;
+        if !self.input.is_empty() {
+            return Err(MigrateError::MalformedProofStructure);
+        }
+        Ok(())
+    }
+}
+
+struct PalWires(Vec<Val4>);
+impl Drop for PalWires {
+    fn drop(&mut self) {
+        ct_zeroize_u64s(self.0.as_mut_slice().as_flattened_mut());
+    }
+}
+
+#[inline]
+fn pal_local(node: &PalNode, party: usize, wires: &[Val4]) -> Val4 {
+    let d = node.domain;
+    match node.op {
+        PalOp::Constant(v) => {
+            if party == 0 {
+                v
+            } else {
+                ZERO4
+            }
+        }
+        PalOp::Add(a, b) => d.add(wires[a], wires[b]),
+        PalOp::Sub(a, b) => d.sub(wires[a], wires[b]),
+        PalOp::Scale(a, v) => d.mul(wires[a], v),
+        PalOp::Lift(a, owner) => {
+            if party == owner {
+                wires[a]
+            } else {
+                ZERO4
+            }
+        }
+        PalOp::Input | PalOp::Mul(_, _) => ZERO4,
+    }
+}
+
+#[inline]
+fn pal_gate(d: PalDom, a: [Val4; 2], b: [Val4; 2], r: [Val4; 2]) -> Val4 {
+    if d == PalDom::Bit {
+        return [
+            ((a[0][0] & b[0][0]) ^ (a[0][0] & b[1][0]) ^ (a[1][0] & b[0][0]) ^ r[0][0] ^ r[1][0])
+                & 1,
+            0,
+            0,
+            0,
+        ];
+    }
+    d.add(
+        d.add(
+            d.add(d.mul(a[0], b[0]), d.mul(a[0], b[1])),
+            d.mul(a[1], b[0]),
+        ),
+        d.sub(r[0], r[1]),
+    )
+}
+
+fn simulate_pallas(c: &PallasOwnershipCircuit, seeds: [[u8; 32]; 3]) -> [PartyView; 3] {
+    let mut tapes = seeds.map(|s| PalTape::new(&s));
+    let mut views = seeds.map(|seed| PartyView {
+        seed,
+        inputs: Vec::new(),
+        products: Vec::new(),
+        outputs: Vec::new(),
+    });
+    let mut wires: [PalWires; 3] =
+        core::array::from_fn(|_| PalWires(Vec::with_capacity(c.nodes.len())));
+    let mut prod_bits = [0u8; 3];
+    for node in &c.nodes {
+        let d = node.domain;
+        let shares = match node.op {
+            PalOp::Input => {
+                let a = tapes[0].sample(d);
+                let b = tapes[1].sample(d);
+                let s = [a, b, d.sub(node.value, d.add(a, b))];
+                for (view, v) in views.iter_mut().zip(s) {
+                    pal_put(&mut view.inputs, d, v);
+                }
+                s
+            }
+            PalOp::Mul(a, b) => {
+                let masks = core::array::from_fn::<_, 3, _>(|p| tapes[p].sample(d));
+                let s = core::array::from_fn(|p| {
+                    let n = (p + 1) % 3;
+                    pal_gate(
+                        d,
+                        [wires[p].0[a], wires[n].0[a]],
+                        [wires[p].0[b], wires[n].0[b]],
+                        [masks[p], masks[n]],
+                    )
+                });
+                for ((view, bit), v) in views.iter_mut().zip(&mut prod_bits).zip(s) {
+                    pal_put_packed(&mut view.products, bit, d, v);
+                }
+                s
+            }
+            _ => core::array::from_fn(|p| pal_local(node, p, &wires[p].0)),
+        };
+        for (w, v) in wires.iter_mut().zip(shares) {
+            w.0.push(v);
+        }
+    }
+    for (v, w) in views.iter_mut().zip(&wires) {
+        let mut bit = 0;
+        for &i in &c.outputs {
+            pal_put_packed(&mut v.outputs, &mut bit, c.nodes[i].domain, w.0[i]);
+        }
+    }
+    views
+}
+
+fn replay_pallas(
+    c: &PallasOwnershipCircuit,
+    rep: usize,
+    view: &OpenedRepetitionView,
+) -> Result<(), MigrateError> {
+    let e = view.opened_e as usize;
+    let mut tapes = view.pair.each_ref().map(|v| PalTape::new(&v.seed));
+    let mut inputs = view.pair.each_ref().map(|v| v.inputs.as_slice());
+    let mut products = view.pair.each_ref().map(|v| PalPackedReader::new(&v.products));
+    let mut wires: [PalWires; 2] =
+        core::array::from_fn(|_| PalWires(Vec::with_capacity(c.nodes.len())));
+    for (gate_idx, node) in c.nodes.iter().enumerate() {
+        let d = node.domain;
+        let values = match node.op {
+            PalOp::Input => {
+                let mut vals = [ZERO4; 2];
+                for (j, slot) in vals.iter_mut().enumerate() {
+                    *slot = pal_take(&mut inputs[j], d)?;
+                    if (e + j) % 3 != 2 && *slot != tapes[j].sample(d) {
+                        return Err(MigrateError::MalformedProofStructure);
+                    }
+                }
+                vals
+            }
+            PalOp::Mul(a, b) => {
+                let masks = [tapes[0].sample(d), tapes[1].sample(d)];
+                let claimed = products[0].take(d)?;
+                let next = products[1].take(d)?;
+                let actual = pal_gate(
+                    d,
+                    [wires[0].0[a], wires[1].0[a]],
+                    [wires[0].0[b], wires[1].0[b]],
+                    masks,
+                );
+                if claimed != actual {
+                    return Err(MigrateError::OpenedPartyGateFailed {
+                        rep,
+                        gate: gate_idx,
+                    });
+                }
+                [claimed, next]
+            }
+            _ => core::array::from_fn(|j| pal_local(node, (e + j) % 3, &wires[j].0)),
+        };
+        for (w, v) in wires.iter_mut().zip(values) {
+            w.0.push(v);
+        }
+    }
+    for p in &mut products {
+        p.finish()?;
+    }
+    if inputs.iter().any(|s| !s.is_empty()) {
+        return Err(MigrateError::MalformedProofStructure);
+    }
+    let mut outputs = view.pair.each_ref().map(|v| PalPackedReader::new(&v.outputs));
+    let mut hidden = PalPackedReader::new(&view.hidden_outputs);
+    for &w in &c.outputs {
+        let d = c.nodes[w].domain;
+        let a = outputs[0].take(d)?;
+        let b = outputs[1].take(d)?;
+        let h = hidden.take(d)?;
+        if a != wires[0].0[w] || b != wires[1].0[w] || d.add(d.add(a, b), h) != ZERO4 {
+            return Err(MigrateError::PublicOutputShareMismatch);
+        }
+    }
+    for out in outputs.iter_mut().chain(core::iter::once(&mut hidden)) {
+        out.finish()?;
+    }
+    Ok(())
+}
+
+fn pallas_transcript(
+    statement: &PallasMigrationStatement,
+    root: &[u8; 32],
+) -> InterleavedTranscript {
+    let mut t = InterleavedTranscript::new(b"QSAG.PALLAS.MIGRATE.V1", &statement.to_transcript_bytes());
+    t.absorb(b"VIEWS", root);
+    t
+}
+
+fn pallas_seeds(entropy: &[u8; 32], stmt_bytes: &[u8], rep: usize) -> [[u8; 32]; 3] {
+    core::array::from_fn(|p| {
+        cshake256_framed_32(
+            b"QSAG.PALLAS.SEEDS.V1",
+            &[entropy, stmt_bytes, &(rep as u64).to_le_bytes(), &[p as u8]],
+        )
+    })
+}
+
+/// Prove Zcash Orchard `Pallas` / `RedPallas` spending-key ownership in the default epoch domain.
+pub fn prove_pallas_migration<B: AcceleratorBackend>(
+    witness: &PallasOwnershipWitness,
+    commitment: PallasCommitmentKind,
+    target: QsagAddress,
+    epoch: u64,
+    entropy: [u8; 32],
+    accel: &B,
+) -> Result<(PallasMigrationStatement, MigrationZkProof), MigrateError> {
+    let domain = cshake256_framed_32(b"QSAG.PALLAS.CAMPAIGN.V1", &[&epoch.to_le_bytes()]);
+    prove_pallas_migration_in_domain(
+        witness,
+        PallasMigrationRequest {
+            commitment,
+            target,
+            epoch,
+            domain,
+        },
+        entropy,
+        accel,
+    )
+}
+
+/// Prove Zcash Orchard `Pallas` / `RedPallas` spending-key ownership in an explicit campaign domain.
+pub fn prove_pallas_migration_in_domain<B: AcceleratorBackend>(
+    witness: &PallasOwnershipWitness,
+    request: PallasMigrationRequest,
+    mut entropy: [u8; 32],
+    accel: &B,
+) -> Result<(PallasMigrationStatement, MigrationZkProof), MigrateError> {
+    let result = (|| {
+        if !witness.matches_commitment(&request.commitment) {
+            return Err(MigrateError::WitnessMismatchWithLegacyCommitment);
+        }
+        let pub_pt = PallasPoint::from_nonidentity_bytes(request.commitment.compressed_bytes())
+            .ok_or(MigrateError::WitnessMismatchWithLegacyCommitment)?;
+        let expected_affine = pub_pt
+            .to_affine()
+            .ok_or(MigrateError::WitnessMismatchWithLegacyCommitment)?;
+        let (ask, alpha, rsk) = witness
+            .effective_scalar(&request.commitment)
+            .ok_or(MigrateError::WitnessMismatchWithLegacyCommitment)?;
+        let tag = if request.commitment.is_rerandomized() {
+            NULLIFIER_TAG_PALLAS_RK
+        } else {
+            NULLIFIER_TAG_PALLAS_AK
+        };
+        let statement = PallasMigrationStatement {
+            commitment: request.commitment,
+            target_pq_address: request.target,
+            epoch_anchor: request.epoch,
+            migration_domain: request.domain,
+            migration_nullifier: rsk.compute_nullifier(tag, &request.domain),
+        };
+        let mut ask_bytes = ask.to_le_bytes();
+        let mut alpha_bytes = alpha.to_le_bytes();
+        let circuit =
+            build_pallas_ownership_circuit(&statement, expected_affine, &ask_bytes, &alpha_bytes);
+        if circuit
+            .outputs
+            .iter()
+            .any(|&w| circuit.nodes[w].value != ZERO4)
+        {
+            ct_zeroize_bytes(&mut ask_bytes);
+            ct_zeroize_bytes(&mut alpha_bytes);
+            return Err(MigrateError::WitnessMismatchWithLegacyCommitment);
+        }
+        let stmt_bytes = statement.to_transcript_bytes();
+        entropy = cshake256_framed_32(
+            b"QSAG.PALLAS.HEDGE.V1",
+            &[&entropy, &ask_bytes, &alpha_bytes, &stmt_bytes],
+        );
+        ct_zeroize_bytes(&mut ask_bytes);
+        ct_zeroize_bytes(&mut alpha_bytes);
+
+        let views = crate::parallel::map(MIT_REPETITIONS, |rep| {
+            simulate_pallas(&circuit, pallas_seeds(&entropy, &stmt_bytes, rep))
+        });
+        let commitments = crate::batch_hash::commit_views(accel, &views);
+        let mut all_views = Vec::with_capacity(MIT_REPETITIONS);
+        let mut roots = Vec::with_capacity(MIT_REPETITIONS * 32);
+        for (rep, rep_views) in views.into_iter().enumerate() {
+            let commits = core::array::from_fn(|p| commitments[3 * rep + p]);
+            roots.extend_from_slice(&rep_root(
+                rep,
+                &commits,
+                core::array::from_fn(|p| rep_views[p].outputs.as_slice()),
+            ));
+            all_views.push((rep_views, commits));
+        }
+        let root = cshake256_framed_32(b"QSAG.MIGRATE.ROOT.V3", &[&roots]);
+        let mut t = pallas_transcript(&statement, &root);
+        let es = challenges(&mut t);
+        let mut repetitions = Vec::with_capacity(MIT_REPETITIONS);
+        for ((mut rep_views, commits), &e) in all_views.into_iter().zip(&es) {
+            let e_idx = e as usize;
+            let hidden = (e_idx + 2) % 3;
+            let hidden_outputs = core::mem::take(&mut rep_views[hidden].outputs);
+            repetitions.push(OpenedRepetitionView {
+                opened_e: e,
+                pair: [
+                    rep_views[e_idx].clone(),
+                    rep_views[(e_idx + 1) % 3].clone(),
+                ],
+                hidden_party_commit: commits[hidden],
+                hidden_outputs,
+            });
+        }
+        Ok((
+            statement,
+            MigrationZkProof {
+                views_merkle_root: root,
+                repetitions,
+            },
+        ))
+    })();
+    ct_zeroize_bytes(&mut entropy);
+    result
+}
+
+/// Verify a Zcash Orchard `Pallas` / `RedPallas` post-quantum ownership migration proof.
+pub fn verify_pallas_migration(
+    statement: &PallasMigrationStatement,
+    proof: &MigrationZkProof,
+    expected_domain: &[u8; 32],
+    expected_epoch: u64,
+) -> Result<(), MigrateError> {
+    verify_pallas_migration_with_backend(
+        statement,
+        proof,
+        expected_domain,
+        expected_epoch,
+        &qsag_accel::CpuReferenceBackend,
+    )
+}
+
+/// Verify a Zcash Orchard `Pallas` / `RedPallas` migration proof on a selected `AcceleratorBackend`.
+pub fn verify_pallas_migration_with_backend<B: AcceleratorBackend>(
+    statement: &PallasMigrationStatement,
+    proof: &MigrationZkProof,
+    expected_domain: &[u8; 32],
+    expected_epoch: u64,
+    accel: &B,
+) -> Result<(), MigrateError> {
+    if &statement.migration_domain != expected_domain || statement.epoch_anchor != expected_epoch {
+        return Err(MigrateError::SessionMismatch);
+    }
+    if proof.repetitions.len() != MIT_REPETITIONS
+        || statement
+            .migration_nullifier
+            .iter()
+            .any(|&v| v >= GOLDILOCKS_PRIME)
+    {
+        return Err(MigrateError::MalformedProofStructure);
+    }
+    let pub_pt = PallasPoint::from_nonidentity_bytes(statement.commitment.compressed_bytes())
+        .ok_or(MigrateError::MalformedProofStructure)?;
+    let expected_affine = pub_pt
+        .to_affine()
+        .ok_or(MigrateError::MalformedProofStructure)?;
+
+    let mut t = pallas_transcript(statement, &proof.views_merkle_root);
+    let es = challenges(&mut t);
+    if proof
+        .repetitions
+        .iter()
+        .zip(&es)
+        .any(|(v, &e)| v.opened_e != e)
+    {
+        return Err(MigrateError::MalformedProofStructure);
+    }
+    let indexed: Vec<_> = proof
+        .repetitions
+        .iter()
+        .enumerate()
+        .flat_map(|(rep, view)| {
+            let e = view.opened_e as usize;
+            [(rep, e, &view.pair[0]), (rep, (e + 1) % 3, &view.pair[1])]
+        })
+        .collect();
+    let opened_commits = crate::batch_hash::commit_indexed(accel, &indexed);
+    let roots: Vec<u8> = crate::parallel::map(MIT_REPETITIONS, |rep| {
+        let view = &proof.repetitions[rep];
+        let e = view.opened_e as usize;
+        let mut commits = [[0u8; 32]; 3];
+        commits[e] = opened_commits[2 * rep];
+        commits[(e + 1) % 3] = opened_commits[2 * rep + 1];
+        commits[(e + 2) % 3] = view.hidden_party_commit;
+        let mut outs = [&[][..]; 3];
+        outs[e] = &view.pair[0].outputs;
+        outs[(e + 1) % 3] = &view.pair[1].outputs;
+        outs[(e + 2) % 3] = &view.hidden_outputs;
+        rep_root(rep, &commits, outs)
+    })
+    .into_iter()
+    .flatten()
+    .collect();
+    if cshake256_framed_32(b"QSAG.MIGRATE.ROOT.V3", &[&roots]) != proof.views_merkle_root {
+        return Err(MigrateError::ViewsMerkleRootMismatch);
+    }
+    let dummy_one = [1u8; 32];
+    let circuit = build_pallas_ownership_circuit(statement, expected_affine, &dummy_one, &[0; 32]);
+    for res in crate::parallel::map(MIT_REPETITIONS, |rep| {
+        replay_pallas(&circuit, rep, &proof.repetitions[rep])
+    }) {
+        res?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::format;
+    use qsag_accel::CpuReferenceBackend;
+    use qsag_addr::{KeyIdentityKind, WitnessSuiteTag};
+
+    fn sample_pq_dest(tag: &[u8]) -> QsagAddress {
+        QsagAddress::from_pubkey_poseidon2(
+            "qsp",
+            WitnessSuiteTag::MlDsa65,
+            KeyIdentityKind::SingleOrThreshold,
+            tag,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn pasta_pallas_and_orchard_generator_constants_hold() {
+        // Verify `(p - 1)^2 == 1 (mod p)` (`p^2` wraparound check) and Fermat inversion.
+        let pm1 = FpPallas([
+            PALLAS_P[0] - 1,
+            PALLAS_P[1],
+            PALLAS_P[2],
+            PALLAS_P[3],
+        ]);
+        assert_eq!(pm1 * pm1, FpPallas::ONE);
+        assert_eq!(pm1 + FpPallas::ONE, FpPallas::ZERO);
+        let five_inv = FpPallas::B.inv_or_zero();
+        assert_eq!(five_inv * FpPallas::B, FpPallas::ONE);
+
+        // Both Pasta `(-1, 2)` and Zcash Orchard `SpendAuthG` lie on `y^2 = x^3 + 5`
+        // and satisfy exact prime subgroup order `[q]G = O`!
+        assert!(PallasPoint::PASTA_GENERATOR.is_on_curve());
+        assert!(PallasPoint::ORCHARD_SPEND_AUTH_G.is_on_curve());
+        assert!(
+            PallasPoint::PASTA_GENERATOR
+                .scalar_mul_limbs_ct(&PALLAS_Q)
+                .is_identity()
+        );
+        assert!(
+            PallasPoint::ORCHARD_SPEND_AUTH_G
+                .scalar_mul_limbs_ct(&PALLAS_Q)
+                .is_identity()
+        );
+
+        // `[q - 1] SpendAuthG == -SpendAuthG`
+        let qm1 = FqPallas([
+            PALLAS_Q[0] - 1,
+            PALLAS_Q[1],
+            PALLAS_Q[2],
+            PALLAS_Q[3],
+        ]);
+        assert_eq!(
+            PallasPoint::spend_auth_mul_ct(&qm1),
+            PallasPoint::ORCHARD_SPEND_AUTH_G.neg_point()
+        );
+
+        // Compressed 32-byte encoding round-trips and rejects `[0u8; 32]` (identity).
+        let comp = PallasPoint::ORCHARD_SPEND_AUTH_G.to_compressed_bytes();
+        assert_eq!(
+            PallasPoint::from_nonidentity_bytes(&comp).unwrap(),
+            PallasPoint::ORCHARD_SPEND_AUTH_G
+        );
+        assert!(PallasPoint::from_nonidentity_bytes(&[0u8; 32]).is_none());
+
+        // RedPallas rerandomization homomorphism: `ak + [alpha] SpendAuthG == [ask + alpha] SpendAuthG`!
+        let mut ask_le = [0u8; 32];
+        ask_le[0] = 42;
+        let mut alpha1 = [0u8; 32];
+        alpha1[0] = 99;
+        alpha1[7] = 0x13;
+        let mut alpha2 = [0u8; 32];
+        alpha2[0] = 201;
+        alpha2[9] = 0x77;
+
+        let ask = FqPallas::from_nonzero_le_bytes(&ask_le).unwrap();
+        let a1 = FqPallas::from_le_bytes(&alpha1).unwrap();
+        let a2 = FqPallas::from_le_bytes(&alpha2).unwrap();
+        let ak = PallasPoint::spend_auth_mul_ct(&ask);
+        let rk1_hom = ak.complete_add(&PallasPoint::spend_auth_mul_ct(&a1));
+        let rk1_dir = PallasPoint::spend_auth_mul_ct(&ask.add_mod(&a1));
+        let rk2_dir = PallasPoint::spend_auth_mul_ct(&ask.add_mod(&a2));
+        assert_eq!(rk1_hom, rk1_dir);
+        assert_ne!(rk1_dir, ak);
+        assert_ne!(rk1_dir, rk2_dir);
+    }
+
+    #[test]
+    fn pallas_and_redpallas_zk_migration_roundtrip_and_negative_rejections() {
+        let mut ask_le = [0u8; 32];
+        ask_le[0] = 0x37;
+        ask_le[1] = 0x9a;
+        let mut alpha_le = [0u8; 32];
+        alpha_le[0] = 0xc5;
+        alpha_le[4] = 0x11;
+
+        let wit_ak = PallasOwnershipWitness::from_spend_auth_scalar_le(ask_le).unwrap();
+        assert!(format!("{wit_ak:?}").contains("<REDACTED>"));
+        let comm_ak = wit_ak.compute_spend_auth_key().unwrap();
+
+        let wit_rk = PallasOwnershipWitness::from_rerandomized_le(ask_le, alpha_le).unwrap();
+        let comm_rk = wit_rk.compute_rerandomized_rk().unwrap();
+        assert_ne!(comm_ak.compressed_bytes(), comm_rk.compressed_bytes());
+
+        let backend = CpuReferenceBackend;
+        let domain = [0x5au8; 32];
+        let epoch = 2026_11;
+
+        for (wit, comm) in [(&wit_ak, comm_ak), (&wit_rk, comm_rk)] {
+            let req = PallasMigrationRequest {
+                commitment: comm,
+                target: sample_pq_dest(b"zcash-orchard-tachyon-pq"),
+                epoch,
+                domain,
+            };
+            let (stmt, mut proof) =
+                prove_pallas_migration_in_domain(wit, req.clone(), [0x42; 32], &backend).unwrap();
+            assert_eq!(
+                verify_pallas_migration(&stmt, &proof, &domain, epoch),
+                Ok(())
+            );
+
+            // Wrong key rejected at prover gate:
+            let mut wrong_ask = ask_le;
+            wrong_ask[0] ^= 1;
+            let wrong_wit = PallasOwnershipWitness::from_spend_auth_scalar_le(wrong_ask).unwrap();
+            assert_eq!(
+                prove_pallas_migration_in_domain(&wrong_wit, req, [0x11; 32], &backend),
+                Err(MigrateError::WitnessMismatchWithLegacyCommitment)
+            );
+
+            // Mutated destination PQ address rejected:
+            let mut bad_dest = stmt.clone();
+            bad_dest.target_pq_address = sample_pq_dest(b"attacker-pq-dest");
+            assert!(verify_pallas_migration(&bad_dest, &proof, &domain, epoch).is_err());
+
+            // Session / domain / nullifier tampering rejected:
+            assert_eq!(
+                verify_pallas_migration(&stmt, &proof, &[0xff; 32], epoch),
+                Err(MigrateError::SessionMismatch)
+            );
+            assert_eq!(
+                verify_pallas_migration(&stmt, &proof, &domain, epoch + 1),
+                Err(MigrateError::SessionMismatch)
+            );
+            let mut bad_nul = stmt.clone();
+            bad_nul.migration_nullifier[0] ^= 1;
+            assert!(verify_pallas_migration(&bad_nul, &proof, &domain, epoch).is_err());
+
+            // Forged party view products & hidden outputs rejected:
+            proof.repetitions[0].pair[0].products[0] ^= 1;
+            assert!(verify_pallas_migration(&stmt, &proof, &domain, epoch).is_err());
+            proof.repetitions[0].pair[0].products[0] ^= 1;
+
+            proof.repetitions[0].hidden_outputs[0] ^= 1;
+            assert!(verify_pallas_migration(&stmt, &proof, &domain, epoch).is_err());
+            proof.repetitions[0].hidden_outputs[0] ^= 1;
+
+            assert_eq!(
+                verify_pallas_migration(&stmt, &proof, &domain, epoch),
+                Ok(())
+            );
+        }
+    }
+}
