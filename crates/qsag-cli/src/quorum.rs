@@ -316,6 +316,67 @@ fn decode_jorts_sig(params: &JortsParams, bytes: &[u8]) -> Result<JortsSig, CliE
     })
 }
 
+fn reject_hem_unsupported_keygen_args(args: &Args) -> Result<(), CliError> {
+    for opt in [
+        "tree-height",
+        "anchor-dir",
+        "policy-ledger-dir",
+        "policy-anchor-dir",
+        "policy-passphrase-env",
+        "policy-passphrase-file",
+    ] {
+        if args.get(opt).is_some() {
+            return Err(CliError::usage(format!(
+                "--{opt} is only supported with --scheme {SCHEME_NAME}"
+            )));
+        }
+    }
+    for flag in [
+        "allow-single-disk-anchor",
+        "policy-allow-single-disk-anchor",
+    ] {
+        if args.flag(flag) {
+            return Err(CliError::usage(format!(
+                "--{flag} is only supported with --scheme {SCHEME_NAME}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn reject_hem_unsupported_sign_args(args: &Args) -> Result<(), CliError> {
+    for opt in [
+        "anchor-dir",
+        "policy-id-hex",
+        "spend-amount",
+        "policy-ledger-dir",
+        "policy-intent",
+        "policy-anchor-dir",
+        "policy-passphrase-env",
+        "policy-passphrase-file",
+    ] {
+        if args.get(opt).is_some() {
+            return Err(CliError::usage(format!(
+                "--{opt} is only supported with --scheme {SCHEME_NAME}"
+            )));
+        }
+    }
+    for flag in [
+        "allow-single-disk-anchor",
+        "policy-allow-single-disk-anchor",
+        "policy-retry",
+        "retry",
+        "deterministic",
+    ] {
+        if args.flag(flag) {
+            return Err(CliError::usage(format!(
+                "--{flag} is only supported with --scheme {SCHEME_NAME}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub fn run(raw: &[String]) -> Result<(), CliError> {
     let Some((sub, rest)) = raw.split_first() else {
         eprint!("{QUORUM_HELP}");
@@ -372,7 +433,10 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
     }
     args.no_positionals()?;
     match args.get("scheme") {
-        Some(crate::quorum_hem::HEM_SCHEME_NAME) => return crate::quorum_hem::keygen(&args),
+        Some(crate::quorum_hem::HEM_SCHEME_NAME) => {
+            reject_hem_unsupported_keygen_args(&args)?;
+            return crate::quorum_hem::keygen(&args);
+        }
         Some(SCHEME_NAME) | None => {
             if args.get("threshold").is_some()
                 || args.get("parties").is_some()
@@ -649,6 +713,7 @@ fn sign(raw: &[String]) -> Result<(), CliError> {
         None => crate::quorum_hem::is_hem_vault(vault_dir),
     };
     if use_hem {
+        reject_hem_unsupported_sign_args(&args)?;
         return crate::quorum_hem::sign(&args);
     }
     if args.get("signers").is_some() || args.get("ackers").is_some() {
@@ -1105,11 +1170,7 @@ fn sign(raw: &[String]) -> Result<(), CliError> {
 }
 
 fn verify(raw: &[String]) -> Result<(), CliError> {
-    let args = Args::parse(
-        raw,
-        &["public", "in", "message", "sig"],
-        &["json", "help"],
-    )?;
+    let args = Args::parse(raw, &["public", "in", "message", "sig"], &["json", "help"])?;
     if args.flag("help") {
         print!("{QUORUM_VERIFY_HELP}");
         return Ok(());
@@ -1177,4 +1238,93 @@ fn verify(raw: &[String]) -> Result<(), CliError> {
         println!("VALID ({SCHEME_NAME}, epoch {})", sig.epoch);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod hem_flag_guard_tests {
+    use super::*;
+
+    #[test]
+    fn hem_keygen_rejects_unsupported_jorts2of3_flags_before_dispatch() {
+        for bad in [
+            vec!["--tree-height", "4"],
+            vec!["--anchor-dir", "/tmp/nonexistent-anchor"],
+            vec!["--allow-single-disk-anchor"],
+            vec!["--policy-ledger-dir", "/tmp/nonexistent-ledger"],
+            vec!["--policy-anchor-dir", "/tmp/nonexistent-pol-anchor"],
+            vec!["--policy-passphrase-env", "QSAG_TEST_NO_SUCH_ENV"],
+            vec!["--policy-passphrase-file", "/tmp/nonexistent-pass"],
+            vec!["--policy-allow-single-disk-anchor"],
+        ] {
+            let mut argv: Vec<String> = vec![
+                "keygen".into(),
+                "--scheme".into(),
+                crate::quorum_hem::HEM_SCHEME_NAME.into(),
+                "--vault-dir".into(),
+                "/tmp/qsag-cli1-should-never-touch".into(),
+                "--public-out".into(),
+                "/tmp/qsag-cli1-should-never-touch.pub".into(),
+            ];
+            argv.extend(bad.iter().map(|s| (*s).to_owned()));
+            let err = run(&argv).expect_err("unsupported HEM keygen flag must fail closed");
+            assert_eq!(
+                err.code, 1,
+                "expected usage exit code 1 for {bad:?}: {}",
+                err.message
+            );
+            assert!(
+                err.message
+                    .contains("only supported with --scheme jorts-2of3-sha3"),
+                "unexpected error message for {bad:?}: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn hem_sign_rejects_unsupported_jorts2of3_flags_before_dispatch() {
+        for bad in [
+            vec!["--anchor-dir", "/tmp/nonexistent-anchor"],
+            vec!["--allow-single-disk-anchor"],
+            vec![
+                "--policy-id-hex",
+                "1111111111111111111111111111111111111111111111111111111111111111",
+            ],
+            vec!["--spend-amount", "100"],
+            vec!["--policy-ledger-dir", "/tmp/nonexistent-ledger"],
+            vec!["--policy-intent", "/tmp/nonexistent-intent"],
+            vec!["--policy-anchor-dir", "/tmp/nonexistent-pol-anchor"],
+            vec!["--policy-passphrase-env", "QSAG_TEST_NO_SUCH_ENV"],
+            vec!["--policy-passphrase-file", "/tmp/nonexistent-pass"],
+            vec!["--policy-allow-single-disk-anchor"],
+            vec!["--policy-retry"],
+            vec!["--retry"],
+            vec!["--deterministic"],
+        ] {
+            let mut argv: Vec<String> = vec![
+                "sign".into(),
+                "--scheme".into(),
+                crate::quorum_hem::HEM_SCHEME_NAME.into(),
+                "--vault-dir".into(),
+                "/tmp/qsag-cli1-should-never-touch".into(),
+                "--message".into(),
+                "/tmp/qsag-cli1-msg".into(),
+                "--out".into(),
+                "/tmp/qsag-cli1-sig".into(),
+            ];
+            argv.extend(bad.iter().map(|s| (*s).to_owned()));
+            let err = run(&argv).expect_err("unsupported HEM sign flag must fail closed");
+            assert_eq!(
+                err.code, 1,
+                "expected usage exit code 1 for {bad:?}: {}",
+                err.message
+            );
+            assert!(
+                err.message
+                    .contains("only supported with --scheme jorts-2of3-sha3"),
+                "unexpected error message for {bad:?}: {}",
+                err.message
+            );
+        }
+    }
 }
