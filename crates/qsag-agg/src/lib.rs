@@ -54,13 +54,16 @@ pub use recursive::{
     ShardHemBatch, ShardHemPolicy, ShardHemSummary, ShardHemWitness,
     SuccinctHierarchicalHemAggregate, VerifiedHierarchicalHemEvidence,
     check_hierarchical_hem_commitment, check_hierarchical_hem_commitment_with_regime,
-    checked_sum_usize, compress_verified_hierarchical_hem,
-    compute_framed_message_digest, compute_policy_registry_root, encode_policy_registry,
+    checked_sum_usize, compact_summary_chain_digest, compress_verified_hierarchical_hem,
+    compute_framed_message_digest,
+    compute_policy_registry_root, encode_policy_registry,
     hierarchical_hem_message, prove_hierarchical_hem, prove_succinct_hierarchical_hem,
-    verify_hierarchical_hem, verify_hierarchical_hem_evidence, verify_hierarchical_hem_prepared,
-    verify_succinct_hierarchical_hem,
+    verify_hierarchical_hem, verify_hierarchical_hem_evidence,
+    verify_hierarchical_hem_evidence_prepared, verify_hierarchical_hem_prepared,
+    verify_succinct_hierarchical_hem, verify_succinct_hierarchical_hem_prepared,
     verify_succinct_hierarchical_hem_with_regime,
 };
+pub mod recursion_census;
 pub mod sig;
 pub mod sponge;
 pub mod trace;

@@ -16,7 +16,7 @@
 //!      default the system temp dir) is reported with its filesystem type.
 //!    - `Votor` all-to-all vote broadcast and `Rotor` erasure-coded slice relay bandwidth model
 //!      (`QSAG_ROTOR_SHREDS`, `QSAG_ROTOR_DATA_SHREDS`).
-//! 2. **Section 2 — `Hem` Succinct Finality Certificate Compression (`BciksJohnsonQrom128`)**:
+//! 2. **Section 2 — `Hem` Finality Certificates (`BciksJohnsonQrom128`)**:
 //!    - Full-density `K = 128` single shard (`max_shard_signers(JortsPoseidon2) = 128`), warm
 //!      prover latency as one distributed shard aggregator would see it,
 //!    - The full `1,200`-validator 80% fast-finality committee by default (`9 x 128 + 48`,
@@ -25,7 +25,9 @@
 //!      compression with its verification latency,
 //!    - Unconditional Johnson-radius QROM (`BciksJohnsonQrom128`) only; refuted capacity-proximity
 //!      conjectures (`[CS25]`, `[KKH26]`) are purged.
-//!    - `QSAG_ALPENGLOW_FULL_COMMITTEE=1` gives every compact FTS profile 1,500 distinct key trees.
+//!    - `QSAG_ALPENGLOW_FULL_COMMITTEE=1` gives every compact FTS profile 1,500 distinct key trees;
+//!      `QSAG_ALPENGLOW_JOINT_WORKERS=n` bounds the single-host whole-committee proves' concurrency.
+//!    - `QSAG_ALPENGLOW_SECTIONS=1`, `=2` or `=1,2` (default) selects the sections to run.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -38,8 +40,8 @@ use qsag_agg::{
     ValidatorPublicKey, ValidatorSignature, WhirSecurityRegime, aggregate_signatures_with_config,
     compress_verified_hierarchical_hem, compute_policy_registry_root, hierarchical_hem_message,
     prove_hierarchical_hem, verify_aggregate_with_regime, verify_hierarchical_hem,
-    verify_hierarchical_hem_prepared, verify_individual_signature,
-    verify_succinct_hierarchical_hem, with_worker_limit,
+    verify_hierarchical_hem_evidence, verify_hierarchical_hem_prepared,
+    verify_individual_signature, verify_succinct_hierarchical_hem, with_worker_limit,
 };
 use qsag_fts::{
     EpochKeyLink, FrontierDpTable, FrontierFtsError, FrontierFtsProfile, FrontierFtsPublicKey,
@@ -902,7 +904,7 @@ fn bench_section2_hem_finality_compression(
     let jorts_raw_b = AggSigProfile::JortsPoseidon2.raw_signature_bytes();
 
     println!(
-        "\n[Section 2] `Hem` Succinct Finality Certificate Compression (`JortsPoseidon2`, `{regime:?}`)"
+        "\n[Section 2] `Hem` Finality Certificate (distributed shards, joint batch, compact commitment) (`JortsPoseidon2`, `{regime:?}`)"
     );
     println!(
         "  Security Regime: `BciksJohnsonQrom128` — unconditional BCIKS20 Johnson-radius QROM (`ceil(512/log2(B)) + 2` queries + 16-bit PoW)."
@@ -1032,14 +1034,19 @@ fn bench_section2_hem_finality_compression(
     joint_cfg.max_signers_per_shard = shard_cap;
     joint_cfg.max_shards_per_batch = 16; // Jointly witness full 128-signer shards under one WHIR opening!
 
+    // Single-host proves over the whole committee hold per-shard prover state for every shard in
+    // flight; `QSAG_ALPENGLOW_JOINT_WORKERS` bounds that concurrency on memory-capped hosts.
+    let joint_workers = env_usize("QSAG_ALPENGLOW_JOINT_WORKERS", workers);
     let t_prove_joint = Instant::now();
-    let joint_proof = aggregate_signatures_with_config(
-        &joint_pks,
-        &joint_bm,
-        &SigningMode::SharedMessage(msg_joint),
-        &joint_sigs,
-        &joint_cfg,
-    )
+    let joint_proof = with_worker_limit(joint_workers, || {
+        aggregate_signatures_with_config(
+            &joint_pks,
+            &joint_bm,
+            &SigningMode::SharedMessage(msg_joint),
+            &joint_sigs,
+            &joint_cfg,
+        )
+    })
     .expect("joint multi-shard Hem proof");
     let joint_prove_ms = t_prove_joint.elapsed().as_secs_f64() * 1_000.0;
     let joint_wire = joint_proof.to_bytes();
@@ -1126,14 +1133,16 @@ fn bench_section2_hem_finality_compression(
     hier_cfg.regime = regime;
 
     let t_prove_hier = Instant::now();
-    let hier_agg = prove_hierarchical_hem(
-        &policies,
-        &hier_witnesses,
-        hier_epoch,
-        hier_msg,
-        min_global,
-        &hier_cfg,
-    )
+    let hier_agg = with_worker_limit(joint_workers, || {
+        prove_hierarchical_hem(
+            &policies,
+            &hier_witnesses,
+            hier_epoch,
+            hier_msg,
+            min_global,
+            &hier_cfg,
+        )
+    })
     .expect("Alpenglow 2-layer hierarchical Hem");
     let hier_prove_ms = t_prove_hier.elapsed().as_secs_f64() * 1_000.0;
     let hier_wire = hier_agg.to_bytes();
@@ -1186,8 +1195,18 @@ fn bench_section2_hem_finality_compression(
     let (hier_all_p50, hier_all_p99) = measure_hier_verify(None);
     let (hier_1c_p50, hier_1c_p99) = measure_hier_verify(Some(1));
 
-    // 2D. Succinct Outer Commitment-Chain Compression (`SuccinctHierarchicalHemAggregate`):
-    //     compresses M regional shard proofs into 1 outer `BciksJohnsonQrom128` WHIR proof!
+    // 2D. Compact hierarchy commitment (`SuccinctHierarchicalHemAggregate`). Its outer proof
+    //     certifies the summary hash chain, not the child proofs, so it is checked against
+    //     `VerifiedHierarchicalHemEvidence` produced by a full child verification.
+    let evidence = verify_hierarchical_hem_evidence(
+        &policies,
+        hier_epoch,
+        hier_msg,
+        min_global,
+        regime,
+        &hier_decoded,
+    )
+    .expect("Alpenglow child proofs verify into evidence");
     let t_prove_succ = Instant::now();
     let succ_agg = compress_verified_hierarchical_hem(
         &policies,
@@ -1215,6 +1234,7 @@ fn bench_section2_hem_finality_compression(
                         hier_msg,
                         min_global,
                         &succ_decoded,
+                        &evidence,
                     )
                 }),
                 None => verify_succinct_hierarchical_hem(
@@ -1223,9 +1243,10 @@ fn bench_section2_hem_finality_compression(
                     hier_msg,
                     min_global,
                     &succ_decoded,
+                    &evidence,
                 ),
             };
-            assert!(ok, "Alpenglow succinct outer Hem must verify");
+            assert!(ok, "Alpenglow compact commitment must match the evidence");
             samples.push(t0.elapsed().as_secs_f64() * 1_000.0);
         }
         samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -1241,7 +1262,7 @@ fn bench_section2_hem_finality_compression(
         .unwrap_or_else(|| "n/a".to_string());
 
     println!(
-        "\n  Live Prover & Verifier Measurements (`BciksJohnsonQrom128`, peak_rss = {rss_str}):"
+        "\n  Live Prover & Verifier Measurements (`BciksJohnsonQrom128`, peak_rss = {rss_str}, single-host proves on {joint_workers} workers):"
     );
     println!(
         "  {:<32} {:>7} {:>10} {:>10} {:>10} {:>9} {:>9} {:>10} {:>11} {:>11}",
@@ -1290,7 +1311,7 @@ fn bench_section2_hem_finality_compression(
             hier_1c_p99,
         ),
         (
-            "Succinct Outer Recursive Hem",
+            "Compact Commitment (+evidence)",
             target_signers,
             succ_wire.len(),
             succ_prove_ms,
@@ -1302,15 +1323,23 @@ fn bench_section2_hem_finality_compression(
     ] {
         let raw_jorts = k * jorts_raw_b;
         let raw_mldsa = k * ML_DSA_44_SIG_BYTES;
+        // The compact commitment is not a standalone certificate, so it has no compression ratio.
+        let ratio = |raw: usize| {
+            if label.starts_with("Compact") {
+                "-".to_string()
+            } else {
+                format!("{:.2}x", raw as f64 / wire_len as f64)
+            }
+        };
         println!(
-            "  {:<32} {:>7} {:>10.1} {:>10.1} {:>10.1} {:>8.2}x {:>8.2}x {:>10.2} {:>5.2}/{:<5.2} {:>5.2}/{:<5.2}",
+            "  {:<32} {:>7} {:>10.1} {:>10.1} {:>10.1} {:>9} {:>9} {:>10.2} {:>5.2}/{:<5.2} {:>5.2}/{:<5.2}",
             label,
             k,
             raw_jorts as f64 / 1024.0,
             raw_mldsa as f64 / 1024.0,
             wire_len as f64 / 1024.0,
-            raw_jorts as f64 / wire_len as f64,
-            raw_mldsa as f64 / wire_len as f64,
+            ratio(raw_jorts),
+            ratio(raw_mldsa),
             p_ms,
             all_50,
             all_99,
@@ -1367,40 +1396,42 @@ fn bench_section2_hem_finality_compression(
         );
     }
 
-    // Distributed finality certificate: each shard aggregator proves its own shard in parallel,
-    // gossips the shard batch, and one node compresses all `M` shard batches.
+    // Distributed finality certificate: each shard aggregator proves its own shard in parallel and
+    // gossips its shard batch; a verifier without evidence checks every child proof.
     let m = policies.len();
     let shard_gossip_b = hier_wire.len() - 76;
     println!(
         "\n  Distributed {target_signers}-validator finality certificate (M = {m} shards, measured on this host):"
     );
     println!(
-        "    shard aggregator prove (1 x 128, warm p50) = {single_prove_ms:.1} ms (cold first call {single_cold_ms:.1} ms)"
+        "    shard aggregator prove (1 x 128, warm p50)  = {single_prove_ms:.1} ms (cold first call {single_cold_ms:.1} ms)"
     );
     println!(
-        "    shard batches gossiped to the compressor   = {:.1} KiB ({:.1} KiB/shard)",
+        "    hierarchy a verifier must receive           = {:.1} KiB ({:.1} KiB/shard)",
         shard_gossip_b as f64 / 1024.0,
         shard_gossip_b as f64 / 1024.0 / m as f64,
     );
     println!(
-        "    M = {m} outer compression (incl. re-verify)  = {succ_prove_ms:.1} ms -> {:.1} KiB certificate",
+        "    verify all {m} child proofs                  = {hier_all_p50:.2} ms multi-core p50, {hier_1c_p50:.2} ms 1-core p50"
+    );
+    println!(
+        "    compact commitment (off path)               = {:.1} KiB, built in {succ_prove_ms:.1} ms, checked against evidence in {succ_all_p50:.2} ms",
         succ_wire.len() as f64 / 1024.0
     );
     println!(
-        "    certificate verify                          = {succ_all_p50:.2} ms multi-core p50, {succ_1c_p50:.2} ms 1-core p50"
+        "    single-host alternative: jointly-batched    = {:.1} KiB proof over all {target_signers} signers, {joint_prove_ms:.0} ms to prove, {joint_all_p50:.2} ms to verify",
+        joint_wire.len() as f64 / 1024.0
     );
-    let compute_ms = single_prove_ms + succ_prove_ms + succ_all_p50;
+    let compute_ms = single_prove_ms + hier_all_p50;
     println!(
-        "    compute on the certificate path             = {compute_ms:.1} ms ({:.1}x the {FAST_BUDGET_MS:.0} ms fast-finality round, {:.1}x the {SLOW_BUDGET_MS:.0} ms slot)",
+        "    compute on the distributed path             = {compute_ms:.1} ms ({:.1}x the {FAST_BUDGET_MS:.0} ms fast-finality round, {:.1}x the {SLOW_BUDGET_MS:.0} ms slot)",
         compute_ms / FAST_BUDGET_MS,
         compute_ms / SLOW_BUDGET_MS,
     );
     println!(
-        "    Finality itself is reached by the individual votes above; the `Hem` certificate is a compact"
+        "    Finality itself is reached by the individual votes above; the `Hem` aggregate is a proof of"
     );
-    println!(
-        "    proof of that finality for light clients and bridges, produced after the round closes."
-    );
+    println!("    that finality for light clients and bridges, produced after the round closes.");
 }
 
 fn main() {
@@ -1435,72 +1466,80 @@ fn main() {
     let wal_dir = wal_root_dir();
     let wal_fstype = mount_fstype(&wal_dir).unwrap_or_else(|| "unknown".to_string());
 
-    let row_514 = bench_fts_rotor_profile(
-        "Frontier::Compact514",
-        "128b classical / 64b Grover (16B node, 1-use h=14)",
-        FrontierFtsProfile::Compact514,
-        false,
-        full_committee,
-        workers,
-        batch_iters,
-        durable_samples,
-    );
-    let row_770 = bench_fts_rotor_profile(
-        "Frontier::Compact770",
-        "128b classical / 64b Grover (16B node, 2-use h=15)",
-        FrontierFtsProfile::Compact770,
-        false,
-        full_committee,
-        workers,
-        batch_iters,
-        durable_samples,
-    );
-    let row_1122 = bench_fts_rotor_profile(
-        "Frontier::Compact1122",
-        "256b nodes / 128b generic Grover (1-use h=8 w=96; 1 datagram @1232)",
-        FrontierFtsProfile::Compact1122,
-        false,
-        true,
-        workers,
-        batch_iters,
-        durable_samples,
-    );
-    let row_rotated = bench_fts_rotor_profile(
-        "RotatedEpochVote/1122",
-        "Compact1122 vote + next epoch key root (forward-secret rotation)",
-        FrontierFtsProfile::Compact1122,
-        true,
-        true,
-        workers,
-        batch_iters,
-        durable_samples,
-    );
-    let row_256 = bench_fts_rotor_profile(
-        "Frontier::Full256Bit",
-        "PQ128: 256b classical / 128b Grover (32B node, 1-use h=8, < ML-DSA-44)",
-        FrontierFtsProfile::Full256Bit,
-        false,
-        true,
-        workers,
-        batch_iters,
-        durable_samples,
-    );
+    let sections = std::env::var("QSAG_ALPENGLOW_SECTIONS").unwrap_or_else(|_| "1,2".to_string());
+    let run_section = |n: &str| sections.split(',').any(|s| s.trim() == n);
 
-    // The Jorts committee is the full 80% fast-finality committee that Section 2 certifies.
+    // The Jorts committee is the full 80% fast-finality committee that Section 2 certifies; its
+    // per-vote row joins the Section 1 matrix.
     let (mut jorts_validators, row_jorts) =
         build_jorts_committee_and_bench_rotor(FAST_QUORUM_80PCT, workers, batch_iters);
 
-    let rows = [row_514, row_770, row_1122, row_rotated, row_256, row_jorts];
-    print_section1_rotor_votor_matrix(&rows, &wal_dir, &wal_fstype);
-    print_rotor_votor_bandwidth(&rows);
+    if run_section("1") {
+        let row_514 = bench_fts_rotor_profile(
+            "Frontier::Compact514",
+            "128b classical / 64b Grover (16B node, 1-use h=14)",
+            FrontierFtsProfile::Compact514,
+            false,
+            full_committee,
+            workers,
+            batch_iters,
+            durable_samples,
+        );
+        let row_770 = bench_fts_rotor_profile(
+            "Frontier::Compact770",
+            "128b classical / 64b Grover (16B node, 2-use h=15)",
+            FrontierFtsProfile::Compact770,
+            false,
+            full_committee,
+            workers,
+            batch_iters,
+            durable_samples,
+        );
+        let row_1122 = bench_fts_rotor_profile(
+            "Frontier::Compact1122",
+            "256b nodes / 128b generic Grover (1-use h=8 w=96; 1 datagram @1232)",
+            FrontierFtsProfile::Compact1122,
+            false,
+            true,
+            workers,
+            batch_iters,
+            durable_samples,
+        );
+        let row_rotated = bench_fts_rotor_profile(
+            "RotatedEpochVote/1122",
+            "Compact1122 vote + next epoch key root (forward-secret rotation)",
+            FrontierFtsProfile::Compact1122,
+            true,
+            true,
+            workers,
+            batch_iters,
+            durable_samples,
+        );
+        let row_256 = bench_fts_rotor_profile(
+            "Frontier::Full256Bit",
+            "PQ128: 256b classical / 128b Grover (32B node, 1-use h=8, < ML-DSA-44)",
+            FrontierFtsProfile::Full256Bit,
+            false,
+            true,
+            workers,
+            batch_iters,
+            durable_samples,
+        );
+
+        let rows = [row_514, row_770, row_1122, row_rotated, row_256, row_jorts];
+        print_section1_rotor_votor_matrix(&rows, &wal_dir, &wal_fstype);
+        print_rotor_votor_bandwidth(&rows);
+    }
 
     let next_checkpoint_epoch = (ALPENGLOW_VALIDATORS.div_ceil(jorts_validators.len()) + 1) as u32;
-    bench_section2_hem_finality_compression(
-        &mut jorts_validators,
-        next_checkpoint_epoch,
-        workers,
-        verify_iters,
-    );
+    if run_section("2") {
+        bench_section2_hem_finality_compression(
+            &mut jorts_validators,
+            next_checkpoint_epoch,
+            workers,
+            verify_iters,
+        );
+    }
 
     #[cfg(feature = "vulkan")]
     if let Some((submissions, receipts, fallbacks)) = qsag_agg::vulkan_execution_counts() {
