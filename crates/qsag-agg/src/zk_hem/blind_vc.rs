@@ -82,6 +82,10 @@ impl Drop for BlindVcWitness {
         qsag_asm::volatile_fill(&mut self.attrs, F::ZERO);
         qsag_asm::volatile_fill(&mut self.holder_blind, F::ZERO);
         qsag_asm::volatile_fill(&mut self.presentation_blind, F::ZERO);
+        qsag_asm::volatile_fill(&mut self.path_bits, false);
+        for sibling in &mut self.siblings {
+            qsag_asm::volatile_fill(sibling, F::ZERO);
+        }
     }
 }
 
