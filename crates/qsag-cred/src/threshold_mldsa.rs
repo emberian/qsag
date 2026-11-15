@@ -1076,8 +1076,8 @@ fn mpc_derive_challenge<T: MpcTransport>(
     let mut flat_w1_bits = engine.zeros(total_w1_bits)?;
     for i in 0..comps {
         for m in 0..w_len {
-            for d in 0..b_width {
-                flat_w1_bits.c[i][m * b_width + d] = w1_bit_planes[d].c[i][m];
+            for (d, plane) in w1_bit_planes.iter().enumerate().take(b_width) {
+                flat_w1_bits.c[i][m * b_width + d] = plane.c[i][m];
             }
         }
     }
@@ -1121,9 +1121,7 @@ fn mpc_derive_challenge<T: MpcTransport>(
     // 3. Sponge 2: SampleInBall(c_tilde) over 232 candidate bytes (< 2^-157 shortfall).
     let mut state2: [BinSh; 25] =
         core::array::from_fn(|_| engine.zeros_bin(1).expect("engine active"));
-    for w in 0..c_tilde_words {
-        state2[w] = state1[w].clone();
-    }
+    state2[..c_tilde_words].clone_from_slice(&state1[..c_tilde_words]);
     state2[c_tilde_words] = state2[c_tilde_words].xor(&pad_start);
     state2[16] = state2[16].xor(&pad_end);
     mpc_keccak_f1600(engine, &mut state2)?;
@@ -1215,10 +1213,10 @@ fn mpc_derive_challenge<T: MpcTransport>(
     for p in 0..4 {
         let b0 = [&nj_bits[2 * p], &j_bits[2 * p]];
         let b1 = [&nj_bits[2 * p + 1], &j_bits[2 * p + 1]];
-        for hi in 0..2 {
-            for lo in 0..2 {
-                r1_lhs.push(b0[lo]);
-                r1_rhs.push(b1[hi]);
+        for &hi_bit in &b1 {
+            for &lo_bit in &b0 {
+                r1_lhs.push(lo_bit);
+                r1_rhs.push(hi_bit);
             }
         }
     }
@@ -1248,10 +1246,10 @@ fn mpc_derive_challenge<T: MpcTransport>(
     // Tree decode round 3: full byte 0..256 (256 products of length tau).
     let mut r3_lhs: Vec<&BinSh> = Vec::with_capacity(MLDSA_N);
     let mut r3_rhs: Vec<&BinSh> = Vec::with_capacity(MLDSA_N);
-    for hi in 0..16 {
-        for lo in 0..16 {
-            r3_lhs.push(&lo4[lo]);
-            r3_rhs.push(&hi4[hi]);
+    for hi_nibble in &hi4 {
+        for lo_nibble in &lo4 {
+            r3_lhs.push(lo_nibble);
+            r3_rhs.push(hi_nibble);
         }
     }
     let r3_prod = engine.bit_and(&BinSh::concat(&r3_lhs), &BinSh::concat(&r3_rhs))?;
@@ -1259,8 +1257,8 @@ fn mpc_derive_challenge<T: MpcTransport>(
     for v in 0..MLDSA_N {
         let oh_v = r3_prod.slice(v * tau, tau);
         for i in 0..comps {
-            for k in 0..tau {
-                sel[k].c[i][v / 64] |= (oh_v.c[i][k] & 1) << (v % 64);
+            for (k, sel_k) in sel.iter_mut().enumerate().take(tau) {
+                sel_k.c[i][v / 64] |= (oh_v.c[i][k] & 1) << (v % 64);
             }
         }
     }
