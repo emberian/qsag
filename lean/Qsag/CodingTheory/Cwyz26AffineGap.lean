@@ -16,7 +16,7 @@ decomposition which is proved in this directory and states the remainder as one 
   `|E| ≤ Dy` of excluded challenges are discharged here.
 
 * `nonExcludedBound_sliced`: `NonExcludedBound` holds with
-  `rest = ℓ·max{|S|, n(n-1)/2} + |S|·Dy²·(n·Dy·2dDy/(A-B) + 1)` for every `B` with
+  `rest = ℓ·max{|S|, n(n-1)/2} + |S|·z·Dy·(n·z·2dDy/(A-B) + 1)` for every `B` with
   `d + 1 ≤ B < A` and `n(d + 1) < B²`, when `1, …, Dy` are invertible in `F`. The first
   summand is `[CWYZ26]` Lemma 4.5 (`PersistentPairsBound`); the second is the nonpersistent
   count of `SlicedJetIncidence`, taken one slope `β` and one multiplicity stratum at a time.
@@ -26,7 +26,8 @@ decomposition which is proved in this directory and states the remainder as one 
 `4d²M²D³(n/(A - B))²` does not grow with the challenge set; the term proved here is linear in
 `|S|`. Divided by `|S|²` both vanish as `|S|` grows, and by `affineMcaBound_ge_card` every
 valid bound is at least `|S|`, so the order in `|S|` of the total is the same. The constant
-in front of `|S|` is larger here (`Dy²·(n·Dy·2dDy/(A-B) + 1)` against `ℓ`). Recovering the
+in front of `|S|` is larger here (`z·Dy·(n·z·2dDy/(A-B) + 1)`, `z = min{Dy, (Wx+Dy-1)/d}`, against
+`ℓ`). Recovering the
 paper's constant needs the second incidence round of Claim 4.8 on space curves, including
 components whose projection to a plane curve is not injective; that is not proved.
 The characteristic hypothesis replaces the paper's inseparable-factor bookkeeping (`eᵢ ≤ M`).
@@ -156,18 +157,9 @@ theorem cwyz26_affineMcaBound_of_nonExcluded (D S : List F) (d A m Wx Dy rest : 
   have hsum := length_filter_add_not (fun p : F × F => decide (lineSpec Q p.1 p.2 = zero)) pairs
   omega
 
-theorem degZ_le_degYZ (Q : Poly3 F) : Q.degZ ≤ Q.degYZ := by
-  if h : Q = zero then
-    show Q.coeffs.length - 1 ≤ _
-    rw [h, coeffs_zero]; exact Nat.zero_le _
-  else
-    have hl := le_wdeg UPoly.natDeg 1 Q Q.natDeg (lead_ne_zero h)
-    show Q.natDeg ≤ Q.wdeg UPoly.natDeg 1
-    omega
-
 /-- **The residual count, proved.** For `d + 1 ≤ B < A` with `|D|·(d + 1) < B²` and
     `1, …, Dy` invertible, the explainer of Lemma 4.2 has at most
-    `ℓ·max{|S|, n(n-1)/2} + |S|·Dy·Dy·(n·Dy·2dDy/(A-B) + 1)` non-excluded exceptional
+    `ℓ·max{|S|, n(n-1)/2} + |S|·z·Dy·(n·z·2dDy/(A-B) + 1)` non-excluded exceptional
     challenges. -/
 theorem nonExcludedBound_sliced (D S : List F) (d A B m Wx Dy : Nat)
     (hD : D.Nodup) (hS : S.Nodup)
@@ -177,25 +169,26 @@ theorem nonExcludedBound_sliced (D S : List F) (d A B m Wx Dy : Nat)
     NonExcludedBound D S d A m Wx Dy
       (((D.length * (B - (d + 1))) / (B * B - D.length * (d + 1))) *
           Nat.max S.length (D.length * (D.length - 1) / 2) +
-        S.length * (Dy * (Dy * (D.length * (Dy * (2 * d * Dy)) / (A - B) + 1)))) := by
+        S.length * ((Nat.min Dy ((Wx + Dy - 1) / d)) *
+          (Dy * (D.length * ((Nat.min Dy ((Wx + Dy - 1) / d)) * (2 * d * Dy)) / (A - B) + 1)))) := by
   intro x hFar L hNd hL
-  obtain ⟨_, hQdeg, _, _⟩ := explainer_spec x.1 x.2 D m d Wx Dy hcount
+  obtain ⟨_, hQdeg, hQw, _⟩ := explainer_spec x.1 x.2 D m d Wx Dy hcount
   have hZ : (explainer x.1 x.2 D m d Wx Dy).degZ ≤ Dy :=
     Nat.le_trans (degZ_le_degYZ _) hQdeg
   have h := nonExcluded_pairs_card_le x D S hD hS d A B Dy hd hDy hAB hB hDen
-    (explainer x.1 x.2 D m d Wx Dy) hQdeg (fun k h1 h2 => hchar k h1 (Nat.le_trans h2 hZ))
+    (explainer x.1 x.2 D m d Wx Dy) hQdeg (Wx + Dy - 1) hQw
+    (fun k h1 h2 => hchar k h1 (Nat.le_trans h2 hZ))
     L hNd (fun p hp => by
       obtain ⟨h1, h2, P, hPd, hPa, hroot⟩ := hL p hp
       refine ⟨h1, h2, P, hPd, hPa, hroot, ?_⟩
       rintro ⟨Fp, Gp, hF, hG, hAg, _⟩
       exact hFar ⟨Fp, Gp, hF, hG, hAg⟩)
-  exact Nat.le_trans h (Nat.add_le_add_left
-    (Nat.mul_le_mul_left _ (Nat.mul_le_mul_right _ hZ)) _)
+  exact h
 
 /-- **Mutual correlated agreement beyond unique decoding, without a residual hypothesis.**
     Under the interpolation count (4.5), `Wx + Dy ≤ m·A`, `d + 1 ≤ B < A`,
     `|D|·(d + 1) < B²` and `1, …, Dy` invertible, at most
-    `Dy + ℓ·max{|S|, n(n-1)/2} + |S|·Dy·Dy·(n·Dy·2dDy/(A-B) + 1)` challenges are
+    `Dy + ℓ·max{|S|, n(n-1)/2} + |S|·z·Dy·(n·z·2dDy/(A-B) + 1)` challenges are
     exceptional. -/
 theorem cwyz26_affineMcaBound_sliced (D S : List F) (d A B m Wx Dy : Nat)
     (hD : D.Nodup) (hS : S.Nodup)
@@ -206,7 +199,8 @@ theorem cwyz26_affineMcaBound_sliced (D S : List F) (d A B m Wx Dy : Nat)
     AffineMcaBound D S d A
       (Dy + (((D.length * (B - (d + 1))) / (B * B - D.length * (d + 1))) *
           Nat.max S.length (D.length * (D.length - 1) / 2) +
-        S.length * (Dy * (Dy * (D.length * (Dy * (2 * d * Dy)) / (A - B) + 1))))) :=
+        S.length * ((Nat.min Dy ((Wx + Dy - 1) / d)) *
+          (Dy * (D.length * ((Nat.min Dy ((Wx + Dy - 1) / d)) * (2 * d * Dy)) / (A - B) + 1))))) :=
   cwyz26_affineMcaBound_of_nonExcluded D S d A m Wx Dy _
     (nonExcludedBound_sliced D S d A B m Wx Dy hD hS hcount hd hDy hB hDen hAB hchar)
     hD hS hcount hWA

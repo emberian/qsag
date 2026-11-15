@@ -14,11 +14,14 @@ incidence counting suffices and no space curve appears.
 * `Poly3.jetEq`, `Poly3.jetEq_pt`, `Poly3.deg_jetEq_le`: the agreement equation in the jet
   ring, its value `s^(2d-1)·(P(ζ) - f(ζ) - (α + βζ)·g(ζ))` at the jet of a simple root, and
   its degree.
-* `Poly3.slice_card_le`: for one `R` and one `β`, at most `h·(|D|·h·2dh/(A-B) + 1)` values
-  of `α` carry a nonpersistent simple root with agreement at least `A`.
-* `Poly3.nonExcluded_pairs_card_le`: for any `Q` with `deg_{Y,Z} Q ≤ h`, the non-excluded
-  challenges that carry an accepted root of `Q` without a polynomial explanation number at
-  most `ℓ·max{|S|, n(n-1)/2} + |S|·deg_Z Q·h·(|D|·h·2dh/(A-B) + 1)`.
+* `Poly3.slice_card_le`: for one `R` with `deg_Z R ≤ zb` and one `β`, at most
+  `h·(|D|·zb·2dh/(A-B) + 1)` values of `α` carry a nonpersistent simple root with agreement
+  at least `A`.
+* `Poly3.nonExcluded_pairs_card_le`: for any `Q` with `deg_{Y,Z} Q ≤ h` and
+  `deg_{1,1,d} Q ≤ W`, the non-excluded challenges that carry an accepted root of `Q` without
+  a polynomial explanation number at most
+  `ℓ·max{|S|, n(n-1)/2} + |S|·z·h·(|D|·z·2dh/(A-B) + 1)` with `z = min{h, W/d}`, which bounds
+  both the number of multiplicity strata and the `Z`-degree of every curve leaf.
 
 The second summand is linear in `|S|` where `[CWYZ26]` Lemma 4.7 has `4d²M²D³(n/(A-B))²`,
 independent of `|S|`: the slope is enumerated instead of being eliminated by the second
@@ -244,6 +247,22 @@ theorem npow_ne_zero_field {K : Type} [LawfulField K] [DecidableEq K] {s : K} (h
       (show mul (CRing.npow s n) s = zero from e) with h | h
     · exact npow_ne_zero_field hs n h
     · exact hs h
+
+/-- A factor of a product of nonzero polynomials over a domain has at most its degree. -/
+theorem natDeg_le_prodList {R : Type} [LawfulCommRing R] [DecidableEq R] [NoZeroDivisors R]
+    [NontrivialRing R] : ∀ (ps : List (UPoly R)), (∀ p ∈ ps, p ≠ zero) → ∀ c ∈ ps,
+      c.natDeg ≤ (UPoly.prodList ps).natDeg
+  | [], _, _, hc => nomatch hc
+  | p :: ps, hne, c, hc => by
+    have hp : p ≠ zero := hne p (.head _)
+    have hps : UPoly.prodList ps ≠ zero :=
+      UPoly.prodList_ne_zero ps (fun q hq => hne q (.tail _ hq))
+    have hmul : (UPoly.prodList (p :: ps)).natDeg = p.natDeg + (UPoly.prodList ps).natDeg :=
+      UPoly.natDeg_mul hp hps
+    rcases List.mem_cons.mp hc with hEq | hc'
+    · rw [hEq, hmul]; exact Nat.le_add_right _ _
+    · have ih := natDeg_le_prodList ps (fun q hq => hne q (.tail _ hq)) c hc'
+      rw [hmul]; exact Nat.le_trans ih (Nat.le_add_left _ _)
 
 end SlicedJet
 
@@ -496,13 +515,13 @@ theorem jetPt_inj (β : F) (Pf : F → UPoly F) (a a' : F) (e : jetPt β Pf a = 
 
 private theorem slice_card_le_of_mem (x : (F → F) × (F → F)) (D : List F) (hD : D.Nodup)
     (d A B h : Nat) (hd : 1 ≤ d) (hh : 1 ≤ h) (hAB : B < A) (hB : d + 1 ≤ B)
-    (R : Poly3 F) (hR : R.degYZ ≤ h) (β : F) (as : List F)
+    (R : Poly3 F) (hR : R.degYZ ≤ h) (zb : Nat) (hz : R.degZ ≤ zb) (β : F) (as : List F)
     (hgood : ∀ a ∈ as, ∃ P : UPoly F, P.natDeg ≤ d ∧
       A ≤ (D.filter (foldAgreePt x a β P)).length ∧ evalAffineLine R a β P = zero ∧
       evalAffineLine (hasseZ 1 R) a β P ≠ zero ∧ ¬ IsPersistent x D d B a β P)
     (hnd : as.Nodup)
     (a₀ : F) (ha₀ : a₀ ∈ as) :
-    as.length ≤ h * (D.length * (h * (2 * d * h)) / (A - B) + 1) := by
+    as.length ≤ h * (D.length * (zb * (2 * d * h)) / (A - B) + 1) := by
   obtain ⟨Pf, hPf⟩ := list_finite_choice (fun (a : F) (P : UPoly F) => P.natDeg ≤ d ∧
       A ≤ (D.filter (foldAgreePt x a β P)).length ∧ evalAffineLine R a β P = zero ∧
       evalAffineLine (hasseZ 1 R) a β P ≠ zero ∧ ¬ IsPersistent x D d B a β P) zero as hgood
@@ -548,7 +567,7 @@ private theorem slice_card_le_of_mem (x : (F → F) × (F → F)) (D : List F) (
         · exact npow_ne_zero_field hs _ h1
         · exact hag (LawfulCommRing.sub_eq_zero_iff.mp (scalK_inj _ h1)))).trans
         (decide_eq_false hag).symm
-  obtain ⟨Cs, hsum, hcov, hleaf⟩ := NonpersistentIncidence.nonpersistent_curve_cover
+  obtain ⟨Cs, hprod, hsum, hcov, hleaf⟩ := NonpersistentIncidence.nonpersistent_curve_cover
     (F := RatFunc F) x D hD d A B (2 * d * h) hAB hB
     (Poly2.primY (liftK.toFun R)) hprim (by rw [hpdeg]; exact hC0deg)
     (fun ζ => (specV (scalK.toFun β)).toFun (jetEq R d (x.1 ζ) (x.2 ζ) ζ))
@@ -567,52 +586,80 @@ private theorem slice_card_le_of_mem (x : (F → F) × (F → F)) (D : List F) (
   have hcount := cover_count
     (fun (Ci : Poly2 (RatFunc F)) (pt : RatFunc F × RatFunc F) =>
       decide (Ci.eval2 pt.1 pt.2 = zero)) Poly2.tdeg
-    (D.length * (h * (2 * d * h)) / (A - B) + 1) Cs (as.map (jetPt β Pf)) hptsNd
+    (D.length * (zb * (2 * d * h)) / (A - B) + 1) Cs (as.map (jetPt β Pf)) hptsNd
     (fun Ci hCi => by
       obtain ⟨_, hpos, hb⟩ := hleaf Ci hCi
-      have hmem : Poly2.tdeg Ci ≤ h := by
-        have hle := le_sum_of_mem (Cs.map Poly2.tdeg) (Poly2.tdeg Ci)
-          (List.mem_map.mpr ⟨Ci, hCi, rfl⟩)
-        rw [hsum] at hle
-        exact Nat.le_trans hle hT
-      exact Nat.le_trans hb (leaf_bound_arith D.length (Poly2.tdeg Ci) Ci.natDeg (2 * d * h) h
-        (A - B) (Nat.le_trans hpos (Poly2.natDeg_le_tdeg Ci))
-        (Nat.le_trans (Poly2.natDeg_le_tdeg Ci) hmem) (Nat.sub_pos_of_lt hAB)))
+      have hleafZ : Ci.natDeg ≤ zb := by
+        have h1 := natDeg_le_prodList Cs (fun c hc => (hleaf c hc).1.1) Ci hCi
+        rw [← hprod, hpdeg] at h1
+        have hnat : (liftK.toFun R).natDeg = R.natDeg := natDeg_mapHom _ map_of_inj R
+        rw [hnat] at h1
+        exact Nat.le_trans h1 hz
+      exact Nat.le_trans hb (leaf_bound_arith D.length (Poly2.tdeg Ci) Ci.natDeg (2 * d * h) zb
+        (A - B) (Nat.le_trans hpos (Poly2.natDeg_le_tdeg Ci)) hleafZ (Nat.sub_pos_of_lt hAB)))
     (fun pt hpt => by
       obtain ⟨Ci, hCi, hz⟩ := hcov pt hpt
       exact ⟨Ci, hCi, decide_eq_true hz⟩)
   rw [hsum, List.length_map] at hcount
   exact Nat.le_trans hcount (Nat.mul_le_mul_right _ hT)
 
-/-- **Nonpersistent count on one slice.** Fix `R` with `deg_{Y,Z} R ≤ h` and a slope `β`.
-    At most `h·(|D|·h·2dh/(A-B) + 1)` intercepts `α` admit a simple root `P` of `R` on the
+/-- **Nonpersistent count on one slice.** Fix `R` with `deg_{Y,Z} R ≤ h`, `deg_Z R ≤ zb` and a
+    slope `β`. At most `h·(|D|·zb·2dh/(A-B) + 1)` intercepts `α` admit a simple root `P` of `R` on the
     line `Y = α + βX` of degree at most `d` that agrees with the fold on at least `A`
     coordinates and is not `B`-persistent. -/
 theorem slice_card_le (x : (F → F) × (F → F)) (D : List F) (hD : D.Nodup)
     (d A B h : Nat) (hd : 1 ≤ d) (hh : 1 ≤ h) (hAB : B < A) (hB : d + 1 ≤ B)
-    (R : Poly3 F) (hR : R.degYZ ≤ h) (β : F) (as : List F)
+    (R : Poly3 F) (hR : R.degYZ ≤ h) (zb : Nat) (hz : R.degZ ≤ zb) (β : F) (as : List F)
     (hgood : ∀ a ∈ as, ∃ P : UPoly F, P.natDeg ≤ d ∧
       A ≤ (D.filter (foldAgreePt x a β P)).length ∧ evalAffineLine R a β P = zero ∧
       evalAffineLine (hasseZ 1 R) a β P ≠ zero ∧ ¬ IsPersistent x D d B a β P)
     (hnd : as.Nodup) :
-    as.length ≤ h * (D.length * (h * (2 * d * h)) / (A - B) + 1) := by
+    as.length ≤ h * (D.length * (zb * (2 * d * h)) / (A - B) + 1) := by
   cases as with
   | nil => exact Nat.zero_le _
   | cons a₀ rest =>
-    exact slice_card_le_of_mem x D hD d A B h hd hh hAB hB R hR β (a₀ :: rest) hgood hnd a₀
+    exact slice_card_le_of_mem x D hD d A B h hd hh hAB hB R hR zb hz β (a₀ :: rest) hgood hnd a₀
       (.head _)
 
 /-! ## All slopes and strata, with the persistent pairs -/
+
+/-- The `Z`-degree is at most the `(1, 1, d)`-weighted degree divided by `d`. -/
+theorem degZ_le_div (R : Poly3 F) (d W : Nat) (hd : 1 ≤ d) (hW : R.deg11d d ≤ W) :
+    R.degZ ≤ W / d := by
+  if h0 : R = zero then
+    have hz : R.degZ = 0 := by rw [h0]; rfl
+    rw [hz]; exact Nat.zero_le _
+  else
+    have hl := le_wdeg (fun q : UPoly (UPoly F) => q.wdeg natDeg 1) d R R.natDeg (lead_ne_zero h0)
+    have hl' : d * R.natDeg ≤ W :=
+      Nat.le_trans (Nat.le_trans (Nat.le_add_left _ _) hl) hW
+    rw [Nat.mul_comm] at hl'
+    exact (Nat.le_div_iff_mul_le hd).mpr hl'
+
+theorem degZ_le_degYZ (Q : Poly3 F) : Q.degZ ≤ Q.degYZ := by
+  if h : Q = zero then
+    show Q.coeffs.length - 1 ≤ _
+    rw [h, coeffs_zero]; exact Nat.zero_le _
+  else
+    have hl := le_wdeg UPoly.natDeg 1 Q Q.natDeg (lead_ne_zero h)
+    show Q.natDeg ≤ Q.wdeg UPoly.natDeg 1
+    omega
+
+theorem deg11d_hasseZ_le (d k : Nat) (Q : Poly3 F) : (hasseZ k Q).deg11d d ≤ Q.deg11d d :=
+  Nat.le_trans (wdeg_hasse_le (fun q : UPoly (UPoly F) => q.wdeg natDeg 1)
+    (degFn_wdeg degFn_natDeg 1) d k Q) (Nat.sub_le _ _)
 
 /-- **The non-excluded count, candidate by candidate.** Let `deg_{Y,Z} Q ≤ h`, let
     `1, …, deg_Z Q` be invertible, `d + 1 ≤ B < A` and `|D|·(d + 1) < B²`. The challenges
     `(α, β) ∈ S × S` on which `Q` does not vanish identically and which carry a root `P` of
     `Q` of degree at most `d` with agreement at least `A` and no polynomial explanation with
     correlated agreement `A - 1` number at most
-    `ℓ·max{|S|, n(n-1)/2} + |S|·deg_Z Q·h·(n·h·2dh/(A-B) + 1)`. -/
+    `ℓ·max{|S|, n(n-1)/2} + |S|·z·h·(n·z·2dh/(A-B) + 1)`, where `z = min{h, W/d}` and
+    `deg_{1,1,d} Q ≤ W`. -/
 theorem nonExcluded_pairs_card_le (x : (F → F) × (F → F)) (D S : List F) (hD : D.Nodup)
     (hS : S.Nodup) (d A B h : Nat) (hd : 1 ≤ d) (hh : 1 ≤ h) (hAB : B < A) (hB : d + 1 ≤ B)
     (hDen : D.length * (d + 1) < B * B) (Q : Poly3 F) (hQ : Q.degYZ ≤ h)
+    (W : Nat) (hW : Q.deg11d d ≤ W)
     (hchar : ∀ k, 1 ≤ k → k ≤ Q.degZ → (CRing.natCast k : F) ≠ zero)
     (L : List (F × F)) (hNd : L.Nodup)
     (hL : ∀ p ∈ L, p ∈ prodPool S ∧ lineSpec Q p.1 p.2 ≠ zero ∧
@@ -621,7 +668,7 @@ theorem nonExcluded_pairs_card_le (x : (F → F) × (F → F)) (D S : List F) (h
         ¬ HasPolynomialExplanation x D d (A - 1) p.1 p.2 P) :
     L.length ≤ ((D.length * (B - (d + 1))) / (B * B - D.length * (d + 1))) *
         Nat.max S.length (D.length * (D.length - 1) / 2) +
-      S.length * (Q.degZ * (h * (D.length * (h * (2 * d * h)) / (A - B) + 1))) := by
+      S.length * ((Nat.min h (W / d)) * (h * (D.length * ((Nat.min h (W / d)) * (2 * d * h)) / (A - B) + 1))) := by
   apply Decidable.byContradiction
   intro hGt
   let Sel : F × F → Bool × UPoly F × Nat → Prop := fun p w =>
@@ -654,7 +701,7 @@ theorem nonExcluded_pairs_card_le (x : (F → F) × (F → F)) (D S : List F) (h
   have hclass : ∀ (b : F) (k : Nat),
       (((L.filter (fun p => !(wf p).1)).filter (fun p => decide (p.2 = b))).filter
         (fun p => decide ((wf p).2.2 = k))).length ≤
-        h * (D.length * (h * (2 * d * h)) / (A - B) + 1) := by
+        h * (D.length * ((Nat.min h (W / d)) * (2 * d * h)) / (A - B) + 1) := by
     intro b k
     have hmemL : ∀ p ∈ ((L.filter (fun p => !(wf p).1)).filter
         (fun p => decide (p.2 = b))).filter (fun p => decide ((wf p).2.2 = k)),
@@ -672,7 +719,10 @@ theorem nonExcluded_pairs_card_le (x : (F → F) × (F → F)) (D S : List F) (h
         (nodup_filter (fun p : F × F => !(wf p).1) L hNd))
     rw [← List.length_map (f := Prod.fst)]
     apply slice_card_le x D hD d A B h hd hh hAB hB (hasseZ k Q)
-      (Nat.le_trans (Nat.le_trans (degYZ_hasseZ_le k Q) (Nat.sub_le _ _)) hQ) b
+      (Nat.le_trans (Nat.le_trans (degYZ_hasseZ_le k Q) (Nat.sub_le _ _)) hQ) (Nat.min h (W / d))
+      (Nat.le_min.mpr ⟨Nat.le_trans (degZ_le_degYZ _)
+          (Nat.le_trans (Nat.le_trans (degYZ_hasseZ_le k Q) (Nat.sub_le _ _)) hQ),
+        degZ_le_div (hasseZ k Q) d W hd (Nat.le_trans (deg11d_hasseZ_le d k Q) hW)⟩) b
     · intro a ha
       obtain ⟨p, hp, hpa⟩ := List.mem_map.mp ha
       obtain ⟨hpL, hlab, hpb, hpk⟩ := hmemL p hp
@@ -682,19 +732,21 @@ theorem nonExcluded_pairs_card_le (x : (F → F) × (F → F)) (D S : List F) (h
     · exact List.pairwise_map.mpr (List.Pairwise.imp_of_mem (fun {p q} hp hq hne hfst =>
         hne (Prod.ext hfst ((hmemL p hp).2.2.1.trans (hmemL q hq).2.2.1.symm))) hLNd)
   have hN : (L.filter (fun p => !(wf p).1)).length ≤
-      S.length * (Q.degZ * (h * (D.length * (h * (2 * d * h)) / (A - B) + 1))) :=
+      S.length * (Q.degZ * (h * (D.length * ((Nat.min h (W / d)) * (2 * d * h)) / (A - B) + 1))) :=
     JohnsonBound.count_partition_le Prod.snd _ _ S
       (fun p hp => (mem_prodPool_iff.mp (hL p (List.mem_filter.mp hp).1).1).2)
       (fun b _ => by
         have hk := JohnsonBound.count_partition_le (fun p : F × F => (wf p).2.2)
-          (h * (D.length * (h * (2 * d * h)) / (A - B) + 1))
+          (h * (D.length * ((Nat.min h (W / d)) * (2 * d * h)) / (A - B) + 1))
           ((L.filter (fun p => !(wf p).1)).filter (fun p => decide (p.2 = b))) (upTo Q.degZ)
           (fun p hp => mem_upTo
             (hwf p (List.mem_filter.mp (List.mem_filter.mp hp).1).1).2.2.2.1)
           (fun k _ => hclass b k)
         rw [length_upTo] at hk
         exact hk)
-  have hsum := Nat.add_le_add hP hN
+  have hsum := Nat.add_le_add hP (Nat.le_trans hN (Nat.mul_le_mul_left _
+    (Nat.mul_le_mul_right _ (Nat.le_min.mpr
+      ⟨Nat.le_trans (degZ_le_degYZ Q) hQ, degZ_le_div Q d W hd hW⟩))))
   rw [hsplit] at hsum
   exact hsum
 

@@ -4495,10 +4495,12 @@ theorem goldilocksExt4_welch_berlekamp_affine_proximity_gap
   welch_berlekamp_affine_proximity_gap f g D S d A badPairs P_of
     hD hS hAD hWB hBadNd hBadSub hBadDeg hBadAgree hBadExc
 
-/-- `[CWYZ26]` Theorem 4.8 + Theorem 5.1 (`Eq. 5.7`) commit-phase equal-degree affine folding
-    error bound `whirAffineStageSimpleNum w / p^4` across `w.sFolds` binary folds over
-    `QuarticGoldilocks` (certified upper-bounding `whirAffineStageExactNumQ2 w (p^4) / (p^4)^2`
-    whenever `checkWhirAffineWitness w (goldilocksPrime ^ 4) = true`). -/
+/-- Conditional paper/profile input for equal-degree affine folding:
+    `whirAffineStageSimpleNum w / p^4`. The arithmetic witness checker compares the paper's
+    two numerator formulas; it does not prove an adversary-event bound. Applying this input
+    needs the stronger nonpersistent incidence constant, the equal-degree three-challenge
+    lift, and all intermediate-fold geometries. The proved sliced binary-fold counts in
+    `CodingTheory.Cwyz26DeployedStages` are larger and do not instantiate this input. -/
 def whirAffineEqualDegreeCommitFoldBound (w : WhirAffineWitness) : RatBound :=
   ⟨whirAffineStageSimpleNum w, goldilocksExt4Card, goldilocksExt4Card_pos⟩
 
@@ -4578,8 +4580,10 @@ def whirDualOodListPinBound (st : WhirStageBudget) (etaScale : Nat) : RatBound :
    goldilocksExt4Card ^ 2,
    Nat.pow_pos goldilocksExt4Card_pos⟩
 
-/-- Soundness extractor turning a validated `WhirAffineWitness` (`checkWhirAffineWitness = true`,
-    `whirAffineStageSimpleNum < 1900`) into exact rational and QROM bit-security bounds. -/
+/-- Arithmetic validation of a paper/profile input. These bit inequalities hold for the
+    defined rational expressions; they do not establish commit-fold soundness or a QROM
+    acceptance bound. The event-level obligations of `whirAffineEqualDegreeCommitFoldBound`
+    remain necessary. The exact distinct-fiber query expression is checked separately. -/
 theorem whirAffineWitness_sound_of_valid (w : WhirAffineWitness)
     (hok : checkWhirAffineWitness w (goldilocksPrime ^ 4) = true)
     (hSimple : whirAffineStageSimpleNum w < 1900) :
@@ -4623,17 +4627,14 @@ theorem whirAffineWitness_sound_of_valid (w : WhirAffineWitness)
     rw [ha]
     exact Nat.le_trans hm1 (Nat.le_trans hm2 hb)
 
-/-- **`[CWYZ26]` All-Stage `nv = 20` & `nv = 24` Affine WHIR + Dual-OOD Soundness Theorem
-    (`cwyz26_affine_whir_nv20_and_nv24_stage_soundness`)**:
-    1. Every stage witness across `nv = 20` (`3` stages) and `nv = 24` (`4` stages) for both
-       `BciksJohnsonClassical128` (`129, 65, 44, 33`) and `BciksJohnsonQrom128` (`258, 130, 88, 66`)
-       satisfies `whirAffineStageExactNumQ2 ≤ whirAffineStageSimpleNum * p^4`, achieves
-       **`atLeastBits 244`** commit-folding soundness (replacing `[BCIKS20]`'s `132–175` bits!),
-       achieves **`strictlyMoreThanBits queryTargetBits`** (`> 128` classical / `> 256` QROM) exact
-       distinct-fiber `s_i`-loss query soundness BEFORE PoW, and survives QROM Grover grinding at **`atLeastBits 130`**
-       for ALL `qHash + 1 ≤ 2 ^ 56`!
-    2. Dual-OOD (`m_OOD = 2`) list pinning achieves **`strictlyMoreThanBits 441`** across all 4
-       `bciksJohnsonQrom128` stages! -/
+/-- Arithmetic checks for the `nv = 20,24` paper/profile expressions. Despite the historical
+    theorem name, `atLeastBits 244` here is about `whirAffineEqualDegreeCommitFoldBound`,
+    not a proved commit-fold event. Likewise the scaled 130-bit conclusion needs the
+    reduction establishing that profile input before it becomes security. This theorem
+    also checks the distinct-fiber query and dual-OOD expressions. See the unconditional
+    sliced binary-fold counts in `CodingTheory.Cwyz26DeployedStages` for the current proved
+    decomposition bounds; they cannot be silently substituted into the three-challenge,
+    multi-fold protocol. -/
 theorem cwyz26_affine_whir_nv20_and_nv24_stage_soundness :
     (∀ w ∈ whirAffineStageWitnesses 20 false ++ whirAffineStageWitnesses 20 true ++
            whirAffineStageWitnesses 24 false ++ whirAffineStageWitnesses 24 true,

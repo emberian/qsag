@@ -211,13 +211,13 @@ theorem nonpersistent_curve_cover {E : Type} [LawfulField E] [DecidableEq E]
     (hnonpers : ∀ p ∈ pts, ¬ IsPersistent x D d B (α p) (β p) (P p))
     (hmatch : ∀ p ∈ pts, ∀ z ∈ D,
       decide ((equation z).eval2 p.1 p.2 = zero) = foldAgreePt x (α p) (β p) (P p) z) :
-    ∃ Cs : List (Poly2 F), (Cs.map tdeg).sum = tdeg C ∧
+    ∃ Cs : List (Poly2 F), C = UPoly.prodList Cs ∧ (Cs.map tdeg).sum = tdeg C ∧
       (∀ p ∈ pts, ∃ Ci ∈ Cs, Ci.eval2 p.1 p.2 = zero) ∧
       ∀ Ci ∈ Cs, IsPrimY Ci ∧ 1 ≤ Ci.natDeg ∧
         (pts.filter (fun p => decide (Ci.eval2 p.1 p.2 = zero))).length ≤
           Nat.max 1 ((D.length * (tdeg Ci * M * Ci.natDeg)) / (A - B)) := by
   obtain ⟨Cs, hprod, hsum, hvalid, hrefined⟩ := splitAgainstList C (D.map equation) hprim hC
-  refine ⟨Cs, hsum, ?_, ?_⟩
+  refine ⟨Cs, hprod, hsum, ?_, ?_⟩
   · intro p hp
     apply root_of_prodList Cs p.1 p.2
     rw [← hprod]
