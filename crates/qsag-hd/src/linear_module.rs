@@ -331,7 +331,7 @@ pub fn col1_mul(
 pub enum ShareScheme {
     /// Degree `t - 1` Shamir sharing at validated nonzero distinct evaluation point `eval_point`.
     Shamir { threshold: u16, eval_point: u32 },
-    /// $n$-of-$n$ additive sharing (`party_id == 0` absorbs public linear shift $\mathbf{r}_i$).
+    /// Sum sharing with an exact full-committee opening roster and unit weights.
     Additive { num_parties: u16 },
 }
 
@@ -388,6 +388,7 @@ pub struct LinearModuleXPub {
 pub struct LinearModulePartyShare {
     pub(crate) party_id: u16,
     pub(crate) scheme: ShareScheme,
+    additive_source_threshold: Option<u16>,
     pub(crate) seed_a: [u8; 32],
     pub(crate) t_vec: [RingPoly; MODULE_K],
     chain_code: RedactedSecret<32>,
@@ -430,6 +431,45 @@ impl Drop for LinearModulePartyShare {
     }
 }
 impl LinearModulePartyShare {
+    /// Convert this share to a sum sharing over the complete committee. Every
+    /// custodian must perform the same conversion before evaluation. Privacy is
+    /// inherited from the original sharing; this does not strengthen its corruption
+    /// threshold. For a Shamir n-of-n input the output is an n-of-n additive sharing.
+    pub fn into_additive(mut self) -> Result<Self, HdError> {
+        let ShareScheme::Shamir {
+            threshold,
+            eval_point,
+        } = self.scheme
+        else {
+            return Ok(self);
+        };
+        if self.committee.is_empty() || self.committee.len() > crate::MAX_CUSTODIANS {
+            return Err(HdError::InvalidThresholdParameters);
+        }
+        let xs: Vec<_> = self.committee.iter().map(|entry| entry.1).collect();
+        validate_shamir_eval_points(&xs)?;
+        if !self.committee.contains(&(self.party_id, eval_point)) {
+            return Err(HdError::InvalidThresholdParameters);
+        }
+        let weight = interpolation_weight(&xs, eval_point);
+        for poly in &mut self.s_shares {
+            poly.0 = poly.expose().scale(weight);
+        }
+        for lane in &mut self.spdz_macs {
+            for poly in lane {
+                poly.0 = poly.expose().scale(weight);
+            }
+        }
+        for alpha in &mut self.spdz_alpha_shares {
+            *alpha = mod_q_mul(*alpha, weight);
+        }
+        self.additive_source_threshold = Some(threshold);
+        self.scheme = ShareScheme::Additive {
+            num_parties: self.committee.len() as u16,
+        };
+        Ok(self)
+    }
+
     /// Explicit opt-in for isolated tests without persistent custody. Absent from
     /// builds without `cfg(test)` or the `testing-ephemeral` feature (regression on
     /// [`DEALER_FREE_PUBLIC_API`]).
@@ -772,6 +812,7 @@ pub(crate) fn setup_shamir_linear_module(
                     threshold,
                     eval_point: x,
                 },
+                additive_source_threshold: None,
                 seed_a,
                 t_vec: t_vec.clone(),
                 chain_code: RedactedSecret::new(chain_code),
@@ -831,6 +872,18 @@ pub(crate) fn setup_shamir_linear_module(
     ))
 }
 
+fn interpolation_weight(xs: &[u32], own_x: u32) -> u32 {
+    let mut numerator = 1;
+    let mut denominator = 1;
+    for &x in xs {
+        if x != own_x {
+            numerator = mod_q_mul(numerator, mod_q_sub(0, x));
+            denominator = mod_q_mul(denominator, mod_q_sub(own_x, x));
+        }
+    }
+    mod_q_mul(numerator, mod_q_inv_or_zero(denominator))
+}
+
 #[cfg(test)]
 fn quorum_weights(
     quorum: &[LinearModulePartyShare],
@@ -842,9 +895,14 @@ fn quorum_weights(
     let first = quorum.first().ok_or(HdError::InvalidThresholdParameters)?;
     let threshold = match first.scheme {
         ShareScheme::Shamir { threshold, .. } => threshold,
-        _ => return Err(HdError::InvalidThresholdParameters),
+        ShareScheme::Additive { num_parties } => num_parties,
     };
     if threshold == 0 || quorum.len() < usize::from(threshold) {
+        return Err(HdError::InvalidThresholdParameters);
+    }
+    let additive = matches!(first.scheme, ShareScheme::Additive { .. });
+    if additive && (quorum.len() != usize::from(threshold) || quorum.len() != first.committee.len())
+    {
         return Err(HdError::InvalidThresholdParameters);
     }
     let mut xs = Vec::with_capacity(quorum.len());
@@ -867,9 +925,17 @@ fn quorum_weights(
             ShareScheme::Shamir {
                 threshold: t,
                 eval_point: x,
-            } if t == threshold => xs.push(x),
+            } if !additive && t == threshold => xs.push(x),
+            ShareScheme::Additive { num_parties }
+                if additive
+                    && num_parties == threshold
+                    && sh.committee == first.committee
+                    && first.committee.iter().any(|entry| entry.0 == sh.party_id) => {}
             _ => return Err(HdError::InvalidThresholdParameters),
         }
+    }
+    if additive {
+        return Ok(alloc::vec![1; quorum.len()]);
     }
     validate_shamir_eval_points(&xs)?;
     Ok(xs
@@ -949,7 +1015,9 @@ const fn public_inverse(x: u32) -> u32 {
     let mut b = x as u64;
     let mut e = MODULE_Q - 2;
     while e != 0 {
-        if e & 1 != 0 { acc = acc * b % MODULE_Q as u64; }
+        if e & 1 != 0 {
+            acc = acc * b % MODULE_Q as u64;
+        }
         b = b * b % MODULE_Q as u64;
         e >>= 1;
     }
@@ -1124,7 +1192,9 @@ fn pack_coefficients(values: &[u32], out: &mut [u8]) {
             bits -= 8;
         }
     }
-    if bits != 0 { out[cursor] = buffer as u8; }
+    if bits != 0 {
+        out[cursor] = buffer as u8;
+    }
 }
 fn unpack_coefficients(bytes: &[u8], values: &mut [u32]) {
     let mut buffer = 0u64;
@@ -1208,7 +1278,12 @@ pub(crate) fn trusted_dealer_rekey_child(
     if parents.len() != first.committee.len()
         || parents.iter().zip(&first.committee).any(|(p, &(id, x))| {
             p.party_id != id
-                || !matches!(p.scheme,ShareScheme::Shamir{eval_point,..} if eval_point==x)
+                || match p.scheme {
+                    ShareScheme::Shamir { eval_point, .. } => eval_point != x,
+                    ShareScheme::Additive { num_parties } => {
+                        usize::from(num_parties) != parents.len()
+                    }
+                }
         })
     {
         return Err(HdError::InvalidThresholdParameters);
@@ -1254,7 +1329,7 @@ pub(crate) fn trusted_dealer_rekey_child(
     let xs: Vec<_> = first.committee.iter().map(|entry| entry.1).collect();
     let threshold = match first.scheme {
         ShareScheme::Shamir { threshold, .. } => threshold,
-        _ => unreachable!(),
+        ShareScheme::Additive { num_parties } => num_parties,
     };
     let (random_pk, mut children) =
         setup_shamir_linear_module(*seed.expose(), threshold, &xs, expected.max_depth)?;
@@ -1298,6 +1373,12 @@ pub(crate) fn trusted_dealer_rekey_child(
             child.budget = parent.budget.clone();
         }
     }
+    if matches!(first.scheme, ShareScheme::Additive { .. }) {
+        children = children
+            .into_iter()
+            .map(LinearModulePartyShare::into_additive)
+            .collect::<Result<_, _>>()?;
+    }
     let checked = reconstruct_for_recovery_or_test(&children, &pk)?;
     if checked != target {
         return Err(HdError::MacCheckFailed);
@@ -1308,6 +1389,31 @@ pub(crate) fn trusted_dealer_rekey_child(
 #[cfg(test)]
 mod regression_tests {
     use super::*;
+    #[test]
+    fn additive_reconstruction_and_rekey_require_the_entire_committee() {
+        let (pk, shamir) = setup_shamir_linear_module([73; 32], 3, &[1, 7, 31], 4).unwrap();
+        let expected = reconstruct_for_recovery_or_test(&shamir, &pk).unwrap();
+        let mut additive: Vec<_> = shamir
+            .into_iter()
+            .map(|s| s.into_additive().unwrap())
+            .collect();
+        assert_eq!(
+            reconstruct_for_recovery_or_test(&additive, &pk).unwrap(),
+            expected
+        );
+        assert!(reconstruct_for_recovery_or_test(&additive[..2], &pk).is_err());
+        let (child_pk, child) =
+            trusted_dealer_rekey_child(&mut additive, &pk, 7, [38; 32], false).unwrap();
+        assert_eq!(child_pk, pk.derive_child(7).unwrap());
+        assert!(
+            child
+                .iter()
+                .all(|s| matches!(s.scheme, ShareScheme::Additive { num_parties: 3 }))
+        );
+        assert!(reconstruct_for_recovery_or_test(&child, &child_pk).is_ok());
+        assert!(reconstruct_for_recovery_or_test(&child[..2], &child_pk).is_err());
+    }
+
     #[test]
     fn reducer_cache_hash_and_codec_preserve_mappings() {
         for seed in [0, 1, 19, 255] {

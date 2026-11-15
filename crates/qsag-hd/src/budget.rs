@@ -10,9 +10,9 @@ use qsag_accel::keccak::cshake256_framed_32;
 use qsag_asm::durable::LockedRecord;
 use qsag_core::{ExternalMonotoneAnchor, LedgerCheckpoint};
 use std::fs::{self, File, Metadata, OpenOptions};
-use std::io::{self, Seek, SeekFrom};
 #[cfg(any(not(unix), test))]
 use std::io::Write;
+use std::io::{self, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const LIMIT: u64 = 128;
@@ -193,7 +193,9 @@ fn verify_hwm_slot(
     if raw.len() != HWM_SLOT_BYTES {
         return Err(HdError::BudgetStorageFailed);
     }
-    let used_le: [u8; 8] = raw[..8].try_into().map_err(|_| HdError::BudgetStorageFailed)?;
+    let used_le: [u8; 8] = raw[..8]
+        .try_into()
+        .map_err(|_| HdError::BudgetStorageFailed)?;
     let used_hwm = u64::from_le_bytes(used_le);
     let tip_mac: [u8; 32] = raw[8..40]
         .try_into()
@@ -266,7 +268,8 @@ impl DurableQueryBudget {
         let journal = Self::open_guarded(path.as_ref(), family, key_secret)?;
         let current = journal.checkpoint();
         if current.generation < minimum.generation
-            || (current.generation == minimum.generation && !ct_eq_bytes(&current.tag, &minimum.tag))
+            || (current.generation == minimum.generation
+                && !ct_eq_bytes(&current.tag, &minimum.tag))
         {
             return Err(HdError::BudgetStorageFailed);
         }
@@ -298,7 +301,8 @@ impl DurableQueryBudget {
         let mut journal = Self::open_guarded(path.as_ref(), family, key_secret)?;
         let current = journal.checkpoint();
         if current.generation < minimum.generation
-            || (current.generation == minimum.generation && !ct_eq_bytes(&current.tag, &minimum.tag))
+            || (current.generation == minimum.generation
+                && !ct_eq_bytes(&current.tag, &minimum.tag))
         {
             return Err(HdError::BudgetStorageFailed);
         }
