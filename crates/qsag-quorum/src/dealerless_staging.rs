@@ -19,8 +19,8 @@
 //!      256-bit shares `y_i^(0)` (`0` communication for `y^(0)`) and evaluate the three tweaked
 //!      `SHAKE256` steps `y^(0) -> y^(1) -> y^(2) -> y^(3)` across all `128 * leaves_per_committee`
 //!      chains via authenticated binary `GF(2)` Subfield-SPDZ MPC (post-quantum Ring-LWE Base OTs
-//!      via [`OtMesh`], KOS15 correlated OT extension, 16-round `GF(2^128)` inner-product triple
-//!      sacrifice, post-sacrifice `2 -> 1` combiner, and committed SPDZ `MacCheck`).
+//!      via [`OtMesh`], KOS15 correlated OT extension for inputs, Beaver triples from
+//!      qsag-core's `Π_triple_f2` in its additive output mode, and committed SPDZ `MacCheck`).
 //!    - Secret chain states `y^(0), y^(1), y^(2)` remain strictly `t`-of-`t` XOR-shared inside `C`
 //!      and are never reconstructed by staging; **only** `y^(3)` is released after `MacCheck`
 //!      accepts, and all `n` custodians deterministically assemble and cross-verify `pk_root`.
@@ -57,7 +57,10 @@ use qsag_core::field::tower::{
     BitslicedGf256x64, PublicGf256Matrix, TowerGf256, bs_gf256_extract_lane,
     bs_gf256_mul_planes_ct, eval_poly_gf256, lagrange_weights_zero_gf256, wipe_gf256,
 };
-use qsag_core::preprocessing::{OtMesh, PartyPrivateRng, PreprocessError};
+use qsag_core::field::tower::{Tower128, wipe_tower128};
+use qsag_core::preprocessing::{
+    OtMesh, PartyPrivateRng, PreprocessError, run_dealerless_pi_triple_f2_additive_with_fault,
+};
 use qsag_core::sponge::keccak::{Cshake256Xof, KECCAK_ROUND_CONSTANTS};
 use qsag_core::wipe::{
     SecretBuffer, SecretWipe, ct_eq_bytes32, wipe_bytes, wipe_bytes32, wipe_u64s, wipe_u128s,
@@ -83,6 +86,7 @@ const TAG_MAC_COMMIT: &[u8] = b"QSAG.QUORUM.STAGE.MAC.COMMIT/v1";
 const TAG_ABIT_COL: &[u8] = b"QSAG.QUORUM.STAGE.ABIT.COL/v1";
 const TAG_ABIT_CHI: &[u8] = b"QSAG.QUORUM.STAGE.ABIT.CHI/v1";
 const TAG_SAC_CHI: &[u8] = b"QSAG.QUORUM.STAGE.SAC.CHI/v1";
+const TAG_TRIPLE_REFILL: &[u8] = b"QSAG.QUORUM.STAGE.TRIPLE.REFILL/v1";
 const TAG_SHAMIR_COMMIT: &[u8] = b"QSAG.QUORUM.STAGE.SHAMIR.COMMIT/v1";
 const TAG_REFRESH_PAIR: &[u8] = b"QSAG.QUORUM.REFRESH.PAIR/v1";
 const TAG_REFRESH_MASK: &[u8] = b"QSAG.QUORUM.REFRESH.MASK/v1";
@@ -91,14 +95,10 @@ const TAG_REFRESH_MASK: &[u8] = b"QSAG.QUORUM.REFRESH.MASK/v1";
 const STATE_BITS: usize = 1600;
 /// Bit offset of the 32-byte secret chain input inside the framed `TAG_CHAIN` `SHAKE256` block.
 const CHAIN_INPUT_BIT_OFFSET: usize = 800;
-/// Number of `u64` words per raw authenticated Boolean Beaver chunk (`2^16 = 65,536` bits).
-const RAW_CHUNK_WORDS: usize = 1024;
-/// Number of bits per raw authenticated Boolean Beaver chunk (`65,536`).
-const RAW_CHUNK_BITS: usize = RAW_CHUNK_WORDS * 64;
-/// Halving rounds folding `2^16` triples to `1` (`16`).
-const HALVING_ROUNDS: usize = 16;
-/// Usable leak-free `u64` words produced per chunk after `2 -> 1` combiner (`512` words).
-const USABLE_CHUNK_WORDS: usize = RAW_CHUNK_WORDS / 2;
+/// Triple words staged per refill: what one 64-lane `Keccak-f[1600]` evaluation consumes
+/// (`24` rounds of `1600` `Chi` gates). At this size the factory's bucket combine reaches its
+/// `2^-40` bound with three raw triples per output.
+const REFILL_WORDS: usize = 24 * STATE_BITS;
 /// Number of independent `GF(2^8)` HVZK checks (a fixed nonzero linear relation survives with probability `2^{-128}`).
 const GF256_CHECK_REPS: usize = 16;
 
@@ -586,29 +586,6 @@ fn bit_mask128(bit: u64) -> u128 {
     0u128.wrapping_sub((black_box(bit) & 1) as u128)
 }
 
-#[inline]
-/// The even-indexed and the odd-indexed elements of `values`, as owned secret vectors.
-fn split_even_odd(values: &[u128]) -> (SecretBuffer<Vec<u128>>, SecretBuffer<Vec<u128>>) {
-    let (pairs, _) = values.as_chunks::<2>();
-    (
-        SecretBuffer(pairs.iter().map(|p| p[0]).collect()),
-        SecretBuffer(pairs.iter().map(|p| p[1]).collect()),
-    )
-}
-
-/// Halve `values` in place over `GF(2^128)`: element `j` becomes `even_j ^ r * odd_j`, or
-/// `r * even_j ^ odd_j` when `scale_even`. One batched kernel call per vector; the vacated
-/// upper half is wiped.
-fn fold_pairs(values: &mut Vec<u128>, r: u128, scale_even: bool) {
-    let (even, odd) = split_even_odd(values);
-    let half = even.len();
-    let (keep, scaled) = if scale_even { (odd, even) } else { (even, odd) };
-    values[..half].copy_from_slice(&keep);
-    qsag_asm::bitslice::gf2_128_scale_xor(&mut values[..half], &scaled, r);
-    wipe_u128s(&mut values[half..]);
-    values.truncate(half);
-}
-
 fn gf128_mul(a: u128, b: u128) -> u128 {
     // Use the core polynomial-basis kernel, including its CPU feature checks and
     // portable fallback. The Wiedemann Tower128 encoding is a different field basis.
@@ -941,101 +918,6 @@ impl PairwiseSubfieldVole {
     }
 }
 
-/// Evaluate 8 parallel 2-block `SHAKE256` correlation-robust hashes (`34` `u64` words each)
-/// on 128-bit Subfield-VOLE rows using `qsag_asm::keccak_f1600_x8`.
-#[inline]
-fn crh_2blocks_x8(
-    prefix: &[u64; 8],
-    indices: [u64; 8],
-    rows: &[u128; 8],
-    backend: qsag_asm::SimdBackend,
-    out: &mut [[u64; 34]; 8],
-) {
-    let mut st = qsag_asm::KeccakState8x::default();
-    for (w, &word) in prefix.iter().enumerate() {
-        st.0[w] = [word; 8];
-    }
-    for s in 0..8 {
-        st.0[8][s] = indices[s];
-        st.0[9][s] = rows[s] as u64;
-        st.0[10][s] = (rows[s] >> 64) as u64;
-    }
-    st.0[11] = [0x1f; 8];
-    st.0[16] = [1u64 << 63; 8];
-
-    qsag_asm::keccak_f1600_x8_with_backend(&mut st, backend);
-    for (w, lane) in st.0.iter().enumerate().take(17) {
-        for (out_s, &val) in out.iter_mut().zip(lane.iter()) {
-            out_s[w] = val;
-        }
-    }
-    qsag_asm::keccak_f1600_x8_with_backend(&mut st, backend);
-    for (w, lane) in st.0.iter().enumerate().take(17) {
-        for (out_s, &val) in out.iter_mut().zip(lane.iter()) {
-            out_s[17 + w] = val;
-        }
-    }
-    qsag_asm::volatile_fill(&mut st.0, [0u64; 8]);
-}
-
-fn make_crh_prefix(session_id: &[u8; 32], holder: usize, owner: usize, chunk_ctr: u64) -> [u64; 8] {
-    let mut prefix = [0u64; 8];
-    prefix[0] = u64::from_le_bytes(*b"QSAG.QSA");
-    prefix[1] = u64::from_le_bytes(*b".CRH.V01");
-    for i in 0..4 {
-        prefix[2 + i] = u64::from_le_bytes(core::array::from_fn(|b| session_id[8 * i + b]));
-    }
-    prefix[6] = ((holder as u64) << 32) | (owner as u64);
-    prefix[7] = chunk_ctr;
-    prefix
-}
-
-/// Evaluate 128-bit field product `x_holder * y_owner` over `128` Subfield-VOLE bit rows of `y_owner`.
-#[allow(clippy::too_many_arguments)]
-fn cot_field_mul_128(
-    prefix: &[u64; 8],
-    domain_idx_base: u64,
-    q_rows_128: &[u128],
-    t_rows_128: &[u128],
-    delta_holder: u128,
-    x_holder: u128,
-    y_owner: u128,
-    backend: qsag_asm::SimdBackend,
-) -> (u128, u128) {
-    let mut send_acc = 0u128;
-    let mut recv_acc = 0u128;
-    let mut o0 = [[0u64; 34]; 8];
-    let mut o1 = [[0u64; 34]; 8];
-    let mut or = [[0u64; 34]; 8];
-
-    for base in (0..128).step_by(8) {
-        let idx: [u64; 8] = core::array::from_fn(|s| domain_idx_base + (base + s) as u64);
-        let r0: [u128; 8] = core::array::from_fn(|s| q_rows_128[base + s]);
-        let r1: [u128; 8] = core::array::from_fn(|s| q_rows_128[base + s] ^ delta_holder);
-        let rr: [u128; 8] = core::array::from_fn(|s| t_rows_128[base + s]);
-        crh_2blocks_x8(prefix, idx, &r0, backend, &mut o0);
-        crh_2blocks_x8(prefix, idx, &r1, backend, &mut o1);
-        crh_2blocks_x8(prefix, idx, &rr, backend, &mut or);
-        for s in 0..8 {
-            let bit_idx = base + s;
-            // Shift `x_holder` by `X^{bit_idx}` in GF(2^128) via basis power `1 << bit_idx`.
-            let basis = 1u128 << bit_idx;
-            let payload = gf128_mul(x_holder, basis);
-            let h0 = (o0[s][0] as u128) | ((o0[s][1] as u128) << 64);
-            let h1 = (o1[s][0] as u128) | ((o1[s][1] as u128) << 64);
-            let hr = (or[s][0] as u128) | ((or[s][1] as u128) << 64);
-            let corr = h0 ^ h1 ^ payload;
-            let y_bit = ((black_box(y_owner) >> bit_idx) & 1) as u64;
-            send_acc ^= h0;
-            recv_acc ^= hr ^ (corr & bit_mask128(y_bit));
-        }
-    }
-    for buf in [&mut o0, &mut o1, &mut or] {
-        qsag_asm::volatile_fill(buf, [0u64; 34]);
-    }
-    (send_acc, recv_acc)
-}
-
 /// Committed SPDZ `GF(2^128)` batch `MacCheck` on opened `u64` words `(opened_words, party_word_macs)`.
 /// Every member commits to its `sigma_u` share in Round 1 before any peer opens in Round 2.
 fn run_committed_spdz_mac_check_words(
@@ -1137,107 +1019,19 @@ fn run_committed_spdz_mac_check_words(
     Ok(())
 }
 
-/// Committed SPDZ `GF(2^128)` `MacCheck` on opened 128-bit field elements `(val, mac_shares)`.
-fn run_committed_spdz_mac_check_fields(
-    committee: usize,
-    step_id: usize,
-    session_id: &[u8; 32],
-    deltas: &[u128],
-    opened_fields: &[u128],
-    party_field_macs: &[Vec<u128>],
-    party_rngs: &mut [PartyPrivateRng],
-) -> Result<(), DealerlessStagingError> {
-    if opened_fields.is_empty() {
-        return Ok(());
-    }
-    let m = deltas.len();
-    let count = opened_fields.len();
-    let mut xof = Cshake256Xof::new_shake256();
-    xof.absorb(session_id);
-    xof.absorb(&(committee as u64).to_be_bytes());
-    xof.absorb(&(step_id as u64).to_be_bytes());
-    for &v in opened_fields {
-        xof.absorb(&v.to_le_bytes());
-    }
-    let mut transcript_digest = [0u8; 32];
-    xof.squeeze(&mut transcript_digest);
-
-    let chal_seed = coin_toss_public_seed(
-        session_id,
-        "qsa_field_mac_check",
-        &transcript_digest,
-        party_rngs,
-    )?;
-    let mut chi_u64 = vec![0u64; 2 * count];
-    expand_u64_stream(TAG_SAC_CHI, &[session_id, &chal_seed], &mut chi_u64);
-    let chis: Vec<u128> = chi_u64
-        .chunks_exact(2)
-        .map(|w| (w[0] as u128) | ((w[1] as u128) << 64))
-        .collect();
-    wipe_u64s(&mut chi_u64);
-
-    let val_comb = qsag_asm::gf2_128_dot(opened_fields, &chis);
-    let mut salts = SecretBuffer(vec![[0u8; 32]; m]);
-    let mut sigmas = SecretBuffer(vec![0u128; m]);
-    let mut commits = Vec::with_capacity(m);
-    for u in 0..m {
-        let mac_comb = qsag_asm::gf2_128_dot(&party_field_macs[u], &chis);
-        sigmas[u] = mac_comb ^ gf128_mul(val_comb, deltas[u]);
-        salts[u] = party_rngs[u].next_bytes32();
-        let u_be = (u as u64).to_be_bytes();
-        commits.push(h32(
-            TAG_MAC_COMMIT,
-            &[
-                session_id,
-                &transcript_digest,
-                &u_be,
-                &salts[u],
-                &sigmas[u].to_le_bytes(),
-            ],
-        ));
-    }
-
-    let mut sigma_xor = 0u128;
-    for u in 0..m {
-        let u_be = (u as u64).to_be_bytes();
-        let expected = h32(
-            TAG_MAC_COMMIT,
-            &[
-                session_id,
-                &transcript_digest,
-                &u_be,
-                &salts[u],
-                &sigmas[u].to_le_bytes(),
-            ],
-        );
-        if !ct_eq_bytes32(&expected, &commits[u]) {
-            return Err(DealerlessStagingError::CommitmentMismatch {
-                phase: "spdz_field_mac_check",
-                party: u,
-            });
-        }
-        sigma_xor ^= sigmas[u];
-    }
-    for s in salts.iter_mut() {
-        wipe_bytes32(s);
-    }
-    wipe_u128s(&mut sigmas);
-
-    if black_box(sigma_xor) != 0 {
-        return Err(DealerlessStagingError::TripleSacrificeFailed { committee });
-    }
-    Ok(())
-}
-
 /// Authenticated `u64`-bitsliced Boolean Beaver reservoir for one `t`-member committee.
 struct CommitteeBeaverReservoir {
     committee: usize,
     session_id: [u8; 32],
     m: usize,
     deltas: SecretBuffer<Vec<u128>>,
+    /// Each member's share of the second MAC lane the triple factory checks its own openings
+    /// under. Staging consumes lane 0 (`deltas`) only.
+    factory_lane: SecretBuffer<Vec<u128>>,
+    ot_mesh: OtMesh,
     pair_voles: Vec<PairwiseSubfieldVole>,
     chunk_ctr: u64,
-    /// Buffered verified triples: `[party][word]` (`512` words per refill).
+    /// Buffered verified triples: `[party][word]` (`REFILL_WORDS` words per refill).
     buf_a: SecretBuffer<Vec<Vec<u64>>>,
     buf_b: SecretBuffer<Vec<Vec<u64>>>,
     buf_c: SecretBuffer<Vec<Vec<u64>>>,
@@ -1259,12 +1053,14 @@ impl CommitteeBeaverReservoir {
         let m = party_rngs.len();
         let mut ot_mesh = OtMesh::try_establish(session_id, party_rngs)?;
         let mut deltas = SecretBuffer(vec![0u128; m]);
+        let mut factory_lane = SecretBuffer(vec![0u128; m]);
         for u in 0..m {
             let mut d = party_rngs[u].next_u128();
             if d == 0 {
                 d = 1;
             }
             deltas[u] = d;
+            factory_lane[u] = party_rngs[u].next_u128();
         }
 
         let mut pair_voles = Vec::with_capacity(m * (m - 1));
@@ -1301,6 +1097,8 @@ impl CommitteeBeaverReservoir {
             session_id,
             m,
             deltas,
+            factory_lane,
+            ot_mesh,
             pair_voles,
             chunk_ctr: 0,
             buf_a: SecretBuffer(vec![Vec::new(); m]),
@@ -1359,554 +1157,68 @@ impl CommitteeBeaverReservoir {
         Ok(macs)
     }
 
-    /// Authenticate 128-bit field shares `elems_per_party[u][0..K]` (`u128` per element).
-    fn authenticate_field_elements(
-        &mut self,
-        elems_per_party: &[Vec<u128>],
-        party_rngs: &mut [PartyPrivateRng],
-    ) -> Result<SecretBuffer<Vec<Vec<u128>>>, DealerlessStagingError> {
-        let k_len = elems_per_party[0].len();
-        let mut packed_words = SecretBuffer(vec![vec![0u64; 2 * k_len]; self.m]);
-        for u in 0..self.m {
-            for (idx, &el) in elems_per_party[u].iter().enumerate() {
-                packed_words[u][2 * idx] = el as u64;
-                packed_words[u][2 * idx + 1] = (el >> 64) as u64;
-            }
-        }
-        let bit_macs = self.authenticate_words(&packed_words, party_rngs)?;
-        for u in 0..self.m {
-            wipe_u64s(&mut packed_words[u]);
-        }
-        let mut field_macs = SecretBuffer(vec![vec![0u128; k_len]; self.m]);
-        for u in 0..self.m {
-            for idx in 0..k_len {
-                let mut acc = 0u128;
-                for b in 0..64 {
-                    acc ^= gf128_mul(bit_macs[u][2 * idx][b], 1u128 << b);
-                }
-                for b in 0..64 {
-                    acc ^= gf128_mul(bit_macs[u][2 * idx + 1][b], 1u128 << (64 + b));
-                }
-                field_macs[u][idx] = acc;
-            }
-        }
-        Ok(field_macs)
-    }
-
-    /// Generate, actively sacrifice (`16`-round `GF(2^128)` inner-product halving + masked `L = 1`
-    /// check), and `2 -> 1` Fisher–Yates combine `USABLE_CHUNK_WORDS` (`512`) `u64` words.
+    /// Stage `REFILL_WORDS` fresh triple words from qsag-core's `Π_triple_f2` in its additive
+    /// output mode, under this committee's key: lane 0 of the factory's two-lane MAC is
+    /// `deltas`, which also authenticates the committee's inputs.
     fn refill(&mut self, party_rngs: &mut [PartyPrivateRng]) -> Result<(), DealerlessStagingError> {
         let m = self.m;
         let chunk_ctr = self.chunk_ctr;
         self.chunk_ctr = self.chunk_ctr.wrapping_add(1);
-        let backend = qsag_asm::detect_backend();
-
-        // 1. Sample raw `a` (`1024` words) and `b` (`1024` words + `2` words = `128` bits for `B_mask`).
-        let b_ext_words = RAW_CHUNK_WORDS + 2;
-        let mut raw_a = SecretBuffer(vec![vec![0u64; RAW_CHUNK_WORDS]; m]);
-        let mut raw_b = SecretBuffer(vec![vec![0u64; b_ext_words]; m]);
-        let mut raw_c = SecretBuffer(vec![vec![0u64; RAW_CHUNK_WORDS]; m]);
-        for u in 0..m {
-            for w in 0..RAW_CHUNK_WORDS {
-                raw_a[u][w] = party_rngs[u].next_u64();
-                raw_b[u][w] = party_rngs[u].next_u64();
-                raw_c[u][w] = raw_a[u][w] & raw_b[u][w];
-            }
-            raw_b[u][RAW_CHUNK_WORDS] = party_rngs[u].next_u64();
-            raw_b[u][RAW_CHUNK_WORDS + 1] = party_rngs[u].next_u64();
-        }
-
-        // 2. Authenticate `raw_b` via KOS15 Subfield-VOLE and retain per-pair `(t_rows, q_rows)`
-        //    so `crh_2blocks_x8` extracts BOTH `a * b` AND all 16 halving cross-term pads in ONE pass.
-        let mut mac_b_full = SecretBuffer(vec![vec![[0u128; 64]; b_ext_words]; m]);
-        for u in 0..m {
-            let d_u = self.deltas[u];
-            for w in 0..b_ext_words {
-                let word = raw_b[u][w];
-                for bit in 0..64 {
-                    mac_b_full[u][w][bit] ^= bit_mask128((word >> bit) & 1) & d_u;
-                }
-            }
-        }
-
-        struct PairPadState {
-            holder: usize,
-            owner: usize,
-            planes: Vec<u128>,
-            send_sum: [[[u128; 2]; 1]; HALVING_ROUNDS],
-            recv_sum: [[[u128; 2]; 1]; HALVING_ROUNDS],
-            mask_t_rows: SecretBuffer<Vec<u128>>,
-            mask_q_rows: SecretBuffer<Vec<u128>>,
-        }
-
-        let (committee, session_id) = (self.committee, self.session_id);
-        let pair_outputs = run_pairs(
-            &mut self.pair_voles,
-            party_rngs,
-            &|pv, owner_rng, holder_rng| {
-                let (t_rows, q_rows) = pv.extend_authenticated_bits(
-                    committee,
-                    &session_id,
-                    &raw_b[pv.owner],
-                    owner_rng,
-                    holder_rng,
-                )?;
-
-                let prefix = make_crh_prefix(&session_id, pv.holder, pv.owner, chunk_ctr);
-                let mut planes = vec![0u128; HALVING_ROUNDS * RAW_CHUNK_BITS];
-                let mut send_sum = [[[0u128; 2]; 1]; HALVING_ROUNDS];
-                let mut recv_sum = [[[0u128; 2]; 1]; HALVING_ROUNDS];
-                let mut and_send = SecretBuffer(vec![0u64; RAW_CHUNK_WORDS]);
-                let mut and_recv = SecretBuffer(vec![0u64; RAW_CHUNK_WORDS]);
-
-                let mut o0 = [[0u64; 34]; 8];
-                let mut o1 = [[0u64; 34]; 8];
-                let mut or = [[0u64; 34]; 8];
-                let a_h = &raw_a[pv.holder];
-                let b_o = &raw_b[pv.owner];
-                let delta_h = pv.delta_holder;
-
-                for base in (0..RAW_CHUNK_BITS).step_by(8) {
-                    let idx: [u64; 8] = core::array::from_fn(|s| (base + s) as u64);
-                    let r0: [u128; 8] = core::array::from_fn(|s| q_rows[base + s]);
-                    let r1: [u128; 8] = core::array::from_fn(|s| q_rows[base + s] ^ delta_h);
-                    let rr: [u128; 8] = core::array::from_fn(|s| t_rows[base + s]);
-                    crh_2blocks_x8(&prefix, idx, &r0, backend, &mut o0);
-                    crh_2blocks_x8(&prefix, idx, &r1, backend, &mut o1);
-                    crh_2blocks_x8(&prefix, idx, &rr, backend, &mut or);
-                    for s in 0..8 {
-                        let k = base + s;
-                        let a_bit = word_bit(a_h, k);
-                        let b_bit = word_bit(b_o, k);
-                        let pad0 = o0[s][0] & 1;
-                        let corr = pad0 ^ (o1[s][0] & 1) ^ a_bit;
-                        and_send[k / 64] |= pad0 << (k % 64);
-                        and_recv[k / 64] |= ((or[s][0] & 1) ^ (b_bit & corr)) << (k % 64);
-                        for round in 0..HALVING_ROUNDS {
-                            let parity = (k >> round) & 1;
-                            let w = 1 + 2 * round;
-                            let h0 = (o0[s][w] as u128) | ((o0[s][w + 1] as u128) << 64);
-                            let h1 = (o1[s][w] as u128) | ((o1[s][w + 1] as u128) << 64);
-                            let hr = (or[s][w] as u128) | ((or[s][w + 1] as u128) << 64);
-                            planes[round * RAW_CHUNK_BITS + k] = h0 ^ h1;
-                            send_sum[round][0][parity] ^= h0;
-                            recv_sum[round][0][parity] ^= hr;
-                        }
-                    }
-                }
-                for buf in [&mut o0, &mut o1, &mut or] {
-                    qsag_asm::volatile_fill(buf, [0u64; 34]);
-                }
-                let state = PairPadState {
-                    holder: pv.holder,
-                    owner: pv.owner,
-                    planes,
-                    send_sum,
-                    recv_sum,
-                    mask_t_rows: SecretBuffer(t_rows[RAW_CHUNK_BITS..].to_vec()),
-                    mask_q_rows: SecretBuffer(q_rows[RAW_CHUNK_BITS..].to_vec()),
-                };
-                Ok((t_rows, q_rows, and_send, and_recv, state))
-            },
-        )?;
-        // Merge the pairs' contributions; the row and pad buffers wipe as they drop.
-        let mut pair_states = Vec::with_capacity(pair_outputs.len());
-        for (t_rows, q_rows, and_send, and_recv, state) in pair_outputs {
-            for k in 0..(64 * b_ext_words) {
-                mac_b_full[state.owner][k / 64][k % 64] ^= t_rows[k];
-                mac_b_full[state.holder][k / 64][k % 64] ^= q_rows[k];
-            }
-            for w in 0..RAW_CHUNK_WORDS {
-                raw_c[state.holder][w] ^= and_send[w];
-                raw_c[state.owner][w] ^= and_recv[w];
-            }
-            pair_states.push(state);
-        }
-
-        #[cfg(test)]
-        if self.inject_beaver_fault {
-            self.inject_beaver_fault = false;
-            raw_c[0][0] ^= 1;
-        }
-
-        // 3. Authenticate `raw_a` and `raw_c` (`2048` words total) in one batched pass.
-        let mut ac_words = SecretBuffer(vec![Vec::with_capacity(2 * RAW_CHUNK_WORDS); m]);
-        for u in 0..m {
-            ac_words[u].extend_from_slice(&raw_a[u]);
-            ac_words[u].extend_from_slice(&raw_c[u]);
-        }
-        let mac_ac = self.authenticate_words(&ac_words, party_rngs)?;
-        for u in 0..m {
-            wipe_u64s(&mut ac_words[u]);
-        }
-        let mut mac_a = SecretBuffer(vec![vec![[0u128; 64]; RAW_CHUNK_WORDS]; m]);
-        let mut mac_c = SecretBuffer(vec![vec![[0u128; 64]; RAW_CHUNK_WORDS]; m]);
-        let mut mac_b = SecretBuffer(vec![vec![[0u128; 64]; RAW_CHUNK_WORDS]; m]);
-        for u in 0..m {
-            mac_a[u].copy_from_slice(&mac_ac[u][..RAW_CHUNK_WORDS]);
-            mac_c[u].copy_from_slice(&mac_ac[u][RAW_CHUNK_WORDS..]);
-            mac_b[u].copy_from_slice(&mac_b_full[u][..RAW_CHUNK_WORDS]);
-        }
-
-        // 4. Active 16-round `GF(2^128)` recursive inner-product sacrifice (`2^16 -> 1`).
-        let ctr_bytes = chunk_ctr.to_be_bytes();
-        let sac_digest = h32(TAG_SAC_CHI, &[&self.session_id, &ctr_bytes]);
-        let chi_seed =
-            coin_toss_public_seed(&self.session_id, "qsa_sac_init", &sac_digest, party_rngs)?;
-        let mut chi_u64 = vec![0u64; 2 * RAW_CHUNK_BITS];
-        expand_u64_stream(TAG_SAC_CHI, &[&self.session_id, &chi_seed], &mut chi_u64);
-        let chis: Vec<u128> = chi_u64
-            .chunks_exact(2)
-            .map(|w| (w[0] as u128) | ((w[1] as u128) << 64))
+        let session = h32(
+            TAG_TRIPLE_REFILL,
+            &[&self.session_id, &chunk_ctr.to_be_bytes()],
+        );
+        let mut alpha: Vec<[Tower128; 2]> = (0..m)
+            .map(|u| [Tower128(self.deltas[u]), Tower128(self.factory_lane[u])])
             .collect();
-        wipe_u64s(&mut chi_u64);
-
-        let mut a_vec = SecretBuffer(vec![vec![0u128; RAW_CHUNK_BITS]; m]);
-        let mut b_vec = SecretBuffer(vec![vec![0u128; RAW_CHUNK_BITS]; m]);
-        let mut mac_a_vec = SecretBuffer(vec![vec![0u128; RAW_CHUNK_BITS]; m]);
-        let mut mac_b_vec = SecretBuffer(vec![vec![0u128; RAW_CHUNK_BITS]; m]);
-        let mut c_cur = SecretBuffer(vec![0u128; m]);
-        let mut mac_c_cur = SecretBuffer(vec![0u128; m]);
-
-        for u in 0..m {
-            for k in 0..RAW_CHUNK_BITS {
-                let chi_k = chis[k];
-                let a_bit = word_bit(&raw_a[u], k);
-                let b_bit = word_bit(&raw_b[u], k);
-                let c_bit = word_bit(&raw_c[u], k);
-                a_vec[u][k] = chi_k & bit_mask128(a_bit);
-                b_vec[u][k] = bit_mask128(b_bit) & 1; // 0 or 1 in GF(2^128)
-                mac_a_vec[u][k] = gf128_mul(chi_k, mac_a[u][k / 64][k % 64]);
-                mac_b_vec[u][k] = mac_b[u][k / 64][k % 64];
-                c_cur[u] ^= chi_k & bit_mask128(c_bit);
-            }
-            mac_c_cur[u] = qsag_asm::gf2_128_dot(&chis, mac_c[u].as_flattened());
-        }
-
-        let mut tens_b = vec![1u128];
-        for round in 0..HALVING_ROUNDS {
-            let group = 1usize << round;
-
-            // Compute cross-terms `h0 = <a_even, b_odd>` and `h1 = <a_odd, b_even>` via structured pads.
-            let mut h_shares = SecretBuffer(vec![vec![0u128; 2]; m]);
-            for u in 0..m {
-                let (a_even, a_odd) = split_even_odd(&a_vec[u]);
-                let (b_even, b_odd) = split_even_odd(&b_vec[u]);
-                h_shares[u][0] = qsag_asm::gf2_128_dot(&a_even, &b_odd);
-                h_shares[u][1] = qsag_asm::gf2_128_dot(&a_odd, &b_even);
-            }
-
-            for ps in &mut pair_states {
-                let plane_lo = round * RAW_CHUNK_BITS;
-                let plane = &mut ps.planes[plane_lo..plane_lo + RAW_CHUNK_BITS];
-                let mut recv_acc = [0u128; 2];
-                for (g, blk) in plane.chunks_mut(group).enumerate() {
-                    let partner_a = a_vec[ps.holder][g ^ 1];
-                    if round == 0 {
-                        blk[0] ^= partner_a;
-                    } else {
-                        qsag_asm::bitslice::gf2_128_scale_xor(blk, &tens_b, partner_a);
-                    }
-                    let first = g * group;
-                    let mut sum = 0u128;
-                    for (o, &corr) in blk.iter().enumerate() {
-                        sum ^= corr & bit_mask128(word_bit(&raw_b[ps.owner], first + o));
-                    }
-                    recv_acc[g & 1] ^= sum;
+        #[cfg(test)]
+        let inject = core::mem::take(&mut self.inject_beaver_fault);
+        #[cfg(not(test))]
+        let inject = false;
+        let staged = run_dealerless_pi_triple_f2_additive_with_fault(
+            session,
+            REFILL_WORDS,
+            &alpha,
+            &mut self.ot_mesh,
+            party_rngs,
+            |party, product_words| {
+                if inject && party == 0 {
+                    product_words[0] ^= 1;
                 }
-                wipe_u128s(plane);
-                // `g & 1 == 1` has `b` in odd group and `a` in even group (`h0`);
-                // `g & 1 == 0` has `b` in even group and `a` in odd group (`h1`).
-                h_shares[ps.holder][0] ^= ps.send_sum[round][0][1];
-                h_shares[ps.owner][0] ^= ps.recv_sum[round][0][1] ^ recv_acc[1];
-                h_shares[ps.holder][1] ^= ps.send_sum[round][0][0];
-                h_shares[ps.owner][1] ^= ps.recv_sum[round][0][0] ^ recv_acc[0];
-            }
-
-            let h_macs = self.authenticate_field_elements(&h_shares, party_rngs)?;
-            let rnd_be = (round as u64).to_be_bytes();
-            let rnd_digest = h32(TAG_SAC_CHI, &[&self.session_id, &ctr_bytes, &rnd_be]);
-            let r_coin_seed =
-                coin_toss_public_seed(&self.session_id, "qsa_sac_fold", &rnd_digest, party_rngs)?;
-            let mut r_words = [0u64; 2];
-            expand_u64_stream(TAG_SAC_CHI, &[&r_coin_seed], &mut r_words);
-            let mut r_chal = (r_words[0] as u128) | ((r_words[1] as u128) << 64);
-            if r_chal == 0 {
-                r_chal = 1;
-            }
-            let r_sq = gf128_mul(r_chal, r_chal);
-
-            for u in 0..m {
-                // `a` folds as `even ^ r * odd`, `b` as `r * even ^ odd`; MACs follow.
-                fold_pairs(&mut a_vec[u], r_chal, false);
-                fold_pairs(&mut b_vec[u], r_chal, true);
-                fold_pairs(&mut mac_a_vec[u], r_chal, false);
-                fold_pairs(&mut mac_b_vec[u], r_chal, true);
-                c_cur[u] =
-                    h_shares[u][0] ^ gf128_mul(r_chal, c_cur[u]) ^ gf128_mul(r_sq, h_shares[u][1]);
-                mac_c_cur[u] =
-                    h_macs[u][0] ^ gf128_mul(r_chal, mac_c_cur[u]) ^ gf128_mul(r_sq, h_macs[u][1]);
-            }
-
-            let prev = tens_b;
-            tens_b = vec![0u128; prev.len()];
-            qsag_asm::bitslice::gf2_128_scale_xor(&mut tens_b, &prev, r_chal);
-            tens_b.extend_from_slice(&prev);
+            },
+        );
+        for key in &mut alpha {
+            wipe_tower128(key);
         }
-
-        // 5. Base case `L = 1`: mask `(a_final, b_final, c_final)` with fresh authenticated
-        //    `(A_mask, B_mask, C_mask = A_mask * B_mask)` so opening leaks zero bits of `(a, b)`.
-        let mut a_mask = SecretBuffer(vec![0u128; m]);
-        let mut b_mask = SecretBuffer(vec![0u128; m]);
-        let mut b_final_words = SecretBuffer(vec![vec![0u64; 2]; m]);
-        for u in 0..m {
-            a_mask[u] = party_rngs[u].next_u128();
-            b_mask[u] = (raw_b[u][RAW_CHUNK_WORDS] as u128)
-                | ((raw_b[u][RAW_CHUNK_WORDS + 1] as u128) << 64);
-            b_final_words[u][0] = b_vec[u][0] as u64;
-            b_final_words[u][1] = (b_vec[u][0] >> 64) as u64;
-        }
-        for u in 0..m {
-            wipe_u64s(&mut raw_b[u][RAW_CHUNK_WORDS..]);
-            raw_b[u].truncate(RAW_CHUNK_WORDS);
-        }
-
-        // Cross-terms `c_mask = A_mask * B_mask` and `h0_base = a_final * B_mask` ride on `mask_t_rows / mask_q_rows`.
-        let mut base_terms = SecretBuffer(vec![vec![0u128; 4]; m]); // [A_mask, c_mask, h0_base, h1_base]
-        for u in 0..m {
-            base_terms[u][0] = a_mask[u];
-            base_terms[u][1] = gf128_mul(a_mask[u], b_mask[u]);
-            base_terms[u][2] = gf128_mul(a_vec[u][0], b_mask[u]);
-            base_terms[u][3] = gf128_mul(a_mask[u], b_vec[u][0]);
-        }
-        for ps in &mut pair_states {
-            let prefix = make_crh_prefix(
-                &self.session_id,
-                ps.holder,
-                ps.owner,
-                chunk_ctr ^ (1u64 << 63),
-            );
-            let (s_cm, r_cm) = cot_field_mul_128(
-                &prefix,
-                0,
-                &ps.mask_q_rows,
-                &ps.mask_t_rows,
-                self.deltas[ps.holder],
-                a_mask[ps.holder],
-                b_mask[ps.owner],
-                backend,
-            );
-            base_terms[ps.holder][1] ^= s_cm;
-            base_terms[ps.owner][1] ^= r_cm;
-
-            let (s_h0, r_h0) = cot_field_mul_128(
-                &prefix,
-                256,
-                &ps.mask_q_rows,
-                &ps.mask_t_rows,
-                self.deltas[ps.holder],
-                a_vec[ps.holder][0],
-                b_mask[ps.owner],
-                backend,
-            );
-            base_terms[ps.holder][2] ^= s_h0;
-            base_terms[ps.owner][2] ^= r_h0;
-            wipe_u128s(&mut ps.mask_t_rows);
-            wipe_u128s(&mut ps.mask_q_rows);
-        }
-
-        // Cross-term `h1_base = A_mask * b_final` via fresh 128-bit Subfield-VOLE on `b_final_words`.
-        for pv in &mut self.pair_voles {
-            let (owner_rng, holder_rng) = if pv.owner < pv.holder {
-                let (l, r) = party_rngs.split_at_mut(pv.holder);
-                (&mut l[pv.owner], &mut r[0])
-            } else {
-                let (l, r) = party_rngs.split_at_mut(pv.owner);
-                (&mut r[0], &mut l[pv.holder])
-            };
-            let (mut t_bf, mut q_bf) = pv.extend_authenticated_bits(
-                self.committee,
-                &self.session_id,
-                &b_final_words[pv.owner],
-                owner_rng,
-                holder_rng,
-            )?;
-            let prefix = make_crh_prefix(
-                &self.session_id,
-                pv.holder,
-                pv.owner,
-                chunk_ctr ^ (3u64 << 62),
-            );
-            let (s_h1, r_h1) = cot_field_mul_128(
-                &prefix,
-                512,
-                &q_bf,
-                &t_bf,
-                pv.delta_holder,
-                a_mask[pv.holder],
-                b_vec[pv.owner][0],
-                backend,
-            );
-            base_terms[pv.holder][3] ^= s_h1;
-            base_terms[pv.owner][3] ^= r_h1;
-            wipe_u128s(&mut t_bf);
-            wipe_u128s(&mut q_bf);
-        }
-
-        let base_macs = self.authenticate_field_elements(&base_terms, party_rngs)?;
-        let mut mac_b_mask = SecretBuffer(vec![0u128; m]);
-        for u in 0..m {
-            let mut acc = 0u128;
-            for b in 0..64 {
-                acc ^= gf128_mul(mac_b_full[u][RAW_CHUNK_WORDS][b], 1u128 << b);
-                acc ^= gf128_mul(mac_b_full[u][RAW_CHUNK_WORDS + 1][b], 1u128 << (64 + b));
-            }
-            mac_b_mask[u] = acc;
-        }
-
-        let base_digest = h32(TAG_SAC_CHI, &[&self.session_id, &ctr_bytes, b"base"]);
-        let base_coin_seed =
-            coin_toss_public_seed(&self.session_id, "qsa_sac_base", &base_digest, party_rngs)?;
-        let mut r_words = [0u64; 2];
-        expand_u64_stream(TAG_SAC_CHI, &[&base_coin_seed], &mut r_words);
-        let mut r_base = (r_words[0] as u128) | ((r_words[1] as u128) << 64);
-        if r_base == 0 {
-            r_base = 1;
-        }
-        let r_base_sq = gf128_mul(r_base, r_base);
-
-        // Fold `[a_final, A_mask]` and `[b_final, B_mask]` with `r_base`:
-        // `A* = a_final ^ r_base * A_mask`, `B* = r_base * b_final ^ B_mask`,
-        // `C* = h0_base ^ r_base * (c_final ^ r_base * C_mask) ^ r_base^2 * h1_base`.
-        // Wait: <(a_final, A_mask) -> a_final + r A_mask, (b_final, B_mask) -> r b_final + B_mask>:
-        // Product = r (a_final b_final + A_mask B_mask) + (a_final B_mask) + r^2 (A_mask b_final)
-        //         = h0_base ^ r * (c_final ^ c_mask) ^ r^2 * h1_base!
-        let mut a_star = 0u128;
-        let mut b_star = 0u128;
-        let mut c_zero_val = 0u128;
-        let mut opened_field_macs = vec![vec![0u128; 3]; m];
-        for u in 0..m {
-            let a_s_u = a_vec[u][0] ^ gf128_mul(r_base, base_terms[u][0]);
-            let b_s_u = gf128_mul(r_base, b_vec[u][0]) ^ b_mask[u];
-            a_star ^= a_s_u;
-            b_star ^= b_s_u;
-            opened_field_macs[u][0] = mac_a_vec[u][0] ^ gf128_mul(r_base, base_macs[u][0]);
-            opened_field_macs[u][1] = gf128_mul(r_base, mac_b_vec[u][0]) ^ mac_b_mask[u];
-        }
-        let prod_star = gf128_mul(a_star, b_star);
-        for u in 0..m {
-            let mut c_s_u = base_terms[u][2]
-                ^ gf128_mul(r_base, c_cur[u] ^ base_terms[u][1])
-                ^ gf128_mul(r_base_sq, base_terms[u][3]);
-            if u == 0 {
-                c_s_u ^= prod_star;
-            }
-            c_zero_val ^= c_s_u;
-            opened_field_macs[u][2] = base_macs[u][2]
-                ^ gf128_mul(r_base, mac_c_cur[u] ^ base_macs[u][1])
-                ^ gf128_mul(r_base_sq, base_macs[u][3])
-                ^ gf128_mul(prod_star, self.deltas[u]);
-        }
-
-        if black_box(c_zero_val) != 0 {
-            return Err(DealerlessStagingError::TripleSacrificeFailed {
-                committee: self.committee,
-            });
-        }
-        run_committed_spdz_mac_check_fields(
-            self.committee,
-            0xFFFF_0000 | (chunk_ctr as usize),
-            &self.session_id,
-            &self.deltas,
-            &[a_star, b_star, 0u128],
-            &opened_field_macs,
-            party_rngs,
-        )?;
-
-        // 6. Post-sacrifice public-coin Fisher–Yates word permutation + `2 -> 1` XOR combiner
-        //    (`(a_0, b_0, c_0)` + `(a_1, b_1, c_1)` -> `d = a_0 ^ a_1`, `a = a_0`, `b = b_0 ^ b_1`,
-        //    `c = c_0 ^ c_1 ^ (d & b_1)`), eliminating selective-failure OT choice leakage.
-        let perm_digest = h32(TAG_SAC_CHI, &[&self.session_id, &ctr_bytes, b"combine"]);
-        let perm_seed = coin_toss_public_seed(
-            &self.session_id,
-            "qsa_combine_perm",
-            &perm_digest,
-            party_rngs,
-        )?;
-        let mut perm_words = vec![0u64; RAW_CHUNK_WORDS];
-        expand_u64_stream(TAG_SAC_CHI, &[&perm_seed], &mut perm_words);
-        let mut word_perm: Vec<usize> = (0..RAW_CHUNK_WORDS).collect();
-        for i in (1..RAW_CHUNK_WORDS).rev() {
-            let j = (perm_words[i] as usize) % (i + 1);
-            word_perm.swap(i, j);
-        }
-        wipe_u64s(&mut perm_words);
-
-        let mut d_opened = vec![0u64; USABLE_CHUNK_WORDS];
-        let mut d_macs = vec![vec![[0u128; 64]; USABLE_CHUNK_WORDS]; m];
-        for k in 0..USABLE_CHUNK_WORDS {
-            let w0 = word_perm[2 * k];
-            let w1 = word_perm[2 * k + 1];
-            let mut d = 0u64;
-            for u in 0..m {
-                d ^= raw_a[u][w0] ^ raw_a[u][w1];
-                for bit in 0..64 {
-                    d_macs[u][k][bit] = mac_a[u][w0][bit] ^ mac_a[u][w1][bit];
+        let mut staged = staged.map_err(|err| match err {
+            PreprocessError::SacrificeResidualNonZero { .. } => {
+                DealerlessStagingError::TripleSacrificeFailed {
+                    committee: self.committee,
                 }
             }
-            d_opened[k] = d;
-        }
-        run_committed_spdz_mac_check_words(
-            self.committee,
-            0xFFFE_0000 | (chunk_ctr as usize),
-            &self.session_id,
-            &self.deltas,
-            &d_opened,
-            &d_macs,
-            party_rngs,
-        )?;
+            other => other.into(),
+        })?;
 
-        for u in 0..m {
-            self.buf_a[u].clear();
-            self.buf_b[u].clear();
-            self.buf_c[u].clear();
-            self.buf_mac_a[u].clear();
-            self.buf_mac_b[u].clear();
-            self.buf_mac_c[u].clear();
-            self.buf_a[u].reserve(USABLE_CHUNK_WORDS);
-            self.buf_b[u].reserve(USABLE_CHUNK_WORDS);
-            self.buf_c[u].reserve(USABLE_CHUNK_WORDS);
-            self.buf_mac_a[u].reserve(USABLE_CHUNK_WORDS);
-            self.buf_mac_b[u].reserve(USABLE_CHUNK_WORDS);
-            self.buf_mac_c[u].reserve(USABLE_CHUNK_WORDS);
-
-            for k in 0..USABLE_CHUNK_WORDS {
-                let w0 = word_perm[2 * k];
-                let w1 = word_perm[2 * k + 1];
-                let d = d_opened[k];
-                let a_out = raw_a[u][w0];
-                let b_out = raw_b[u][w0] ^ raw_b[u][w1];
-                let c_out = raw_c[u][w0] ^ raw_c[u][w1] ^ (d & raw_b[u][w1]);
-
-                let ma_out = mac_a[u][w0];
-                let mut mb_out = [0u128; 64];
-                let mut mc_out = [0u128; 64];
-                for bit in 0..64 {
-                    mb_out[bit] = mac_b[u][w0][bit] ^ mac_b[u][w1][bit];
-                    let d_mask = bit_mask128((d >> bit) & 1);
-                    mc_out[bit] =
-                        mac_c[u][w0][bit] ^ mac_c[u][w1][bit] ^ (d_mask & mac_b[u][w1][bit]);
-                }
-                self.buf_a[u].push(a_out);
-                self.buf_b[u].push(b_out);
-                self.buf_c[u].push(c_out);
-                self.buf_mac_a[u].push(ma_out);
-                self.buf_mac_b[u].push(mb_out);
-                self.buf_mac_c[u].push(mc_out);
+        let regroup = |macs: &[u128]| -> Vec<[u128; 64]> { macs.as_chunks::<64>().0.to_vec() };
+        for (u, shares) in staged.iter_mut().enumerate() {
+            for (buf, words) in [
+                (&mut self.buf_a[u], &mut shares.a),
+                (&mut self.buf_b[u], &mut shares.b),
+                (&mut self.buf_c[u], &mut shares.c),
+            ] {
+                wipe_u64s(buf);
+                *buf = core::mem::take(words);
             }
-            wipe_u64s(&mut raw_a[u]);
-            wipe_u64s(&mut raw_b[u]);
-            wipe_u64s(&mut raw_c[u]);
+            for (buf, macs) in [
+                (&mut self.buf_mac_a[u], &shares.a_mac),
+                (&mut self.buf_mac_b[u], &shares.b_mac),
+                (&mut self.buf_mac_c[u], &shares.c_mac),
+            ] {
+                for word in buf.iter_mut() {
+                    wipe_u128s(word);
+                }
+                *buf = regroup(&macs[0]);
+            }
         }
         self.cursor = 0;
         Ok(())
@@ -2119,8 +1431,8 @@ struct StagingSlice<'a> {
 }
 
 /// Shared authenticated MPC implementation. The caller chooses the destination;
-/// volatile minting writes directly to locked pages rather than a heap share table.
-/// Outputs are tentative until the endpoint MAC checks all succeed.
+/// retain intermediate shares in wiping buffers until every endpoint MAC check succeeds.
+/// Only then publish pages to the caller's sink.
 fn stage_single_committee_into(
     committee: usize,
     slice: StagingSlice<'_>,
@@ -2156,6 +1468,7 @@ fn stage_single_committee_into(
         }
     }
 
+    let mut pending = SecretBuffer(vec![vec![vec![[0u8; 32]; LEAF_SHARE_NODES]; num_leaves]; m]);
     let mut opened_ends: Vec<Vec<Node>> = vec![vec![[0u8; 32]; WOTS_CHAINS]; num_leaves];
 
     for (batch_idx, batch_coords) in coords.chunks(64).enumerate() {
@@ -2171,7 +1484,7 @@ fn stage_single_committee_into(
                 let global_chain = batch_idx * 64 + c_idx;
                 let epoch = global_chain / chains_per_leaf;
                 let chain = slice.chains.start + global_chain % chains_per_leaf;
-                sink(u, epoch, 3 * chain, &share)?;
+                pending[u][epoch][3 * chain] = share;
             }
             y0_planes[u] = pack_nodes_to_256_planes(&local_y0);
             for n_ref in local_y0.iter_mut() {
@@ -2235,7 +1548,7 @@ fn stage_single_committee_into(
                         let global_chain = batch_idx * 64 + c_idx;
                         let epoch = global_chain / chains_per_leaf;
                         let chain = slice.chains.start + global_chain % chains_per_leaf;
-                        sink(u, epoch, 3 * chain + next_step_slot, node_sh)?;
+                        pending[u][epoch][3 * chain + next_step_slot] = *node_sh;
                     }
                     for n_ref in &mut unpacked {
                         wipe_bytes32(n_ref);
@@ -2284,6 +1597,17 @@ fn stage_single_committee_into(
         }
     }
 
+    // This barrier covers ALL batches, not just the first endpoint that passed.
+    for (party, epochs) in pending.iter().enumerate() {
+        for (epoch, pages) in epochs.iter().enumerate() {
+            for chain in slice.chains.clone() {
+                for step in 0..WOTS_STEPS {
+                    let position = 3 * chain + step;
+                    sink(party, epoch, position, &pages[position])?;
+                }
+            }
+        }
+    }
     Ok(leaf_indices.iter().copied().zip(opened_ends).collect())
 }
 
@@ -2300,6 +1624,30 @@ pub(crate) fn stage_volatile_subset_into(
     session: Node,
     rngs: &mut [PartyPrivateRng],
     sink: &mut (impl FnMut(usize, usize, usize, &Node) -> Result<(), DealerlessStagingError> + Send),
+) -> Result<Vec<(u64, Vec<Node>)>, DealerlessStagingError> {
+    stage_volatile_subset_into_inner(
+        leaves,
+        pk_seed,
+        session,
+        rngs,
+        sink,
+        #[cfg(test)]
+        None,
+    )
+}
+
+#[cfg(all(
+    any(test, feature = "std"),
+    target_os = "linux",
+    target_pointer_width = "64"
+))]
+fn stage_volatile_subset_into_inner(
+    leaves: &[u64],
+    pk_seed: &Node,
+    session: Node,
+    rngs: &mut [PartyPrivateRng],
+    sink: &mut (impl FnMut(usize, usize, usize, &Node) -> Result<(), DealerlessStagingError> + Send),
+    #[cfg(test)] fault: Option<(usize, StagingFault)>,
 ) -> Result<Vec<(u64, Vec<Node>)>, DealerlessStagingError> {
     // Two independent 64-chain sessions: disjoint secret coordinates, independent
     // per-party private randomness, distinct public transcript domains. Both MAC
@@ -2321,11 +1669,18 @@ pub(crate) fn stage_volatile_subset_into(
             .collect();
         jobs.push((half, sid, private));
     }
-    let sink = std::sync::Mutex::new(sink);
+    // Both halves must pass before the external sink sees any intermediate share.
+    let pending = std::sync::Mutex::new(SecretBuffer(vec![
+        vec![
+            vec![[0u8; 32]; LEAF_SHARE_NODES];
+            leaves.len()
+        ];
+        rngs.len()
+    ]));
     let parts = std::thread::scope(|scope| {
         let mut handles = Vec::new();
         for (half, sid, mut private) in jobs {
-            let sink = &sink;
+            let pending = &pending;
             handles.push(scope.spawn(move || {
                 stage_single_committee_into(
                     0,
@@ -2337,14 +1692,16 @@ pub(crate) fn stage_volatile_subset_into(
                     sid,
                     &mut private,
                     &mut |party, epoch, position, share| {
-                        (sink
+                        pending
                             .lock()
-                            .map_err(|_| DealerlessStagingError::OutputRejected)?)(
-                            party, epoch, position, share,
-                        )
+                            .map_err(|_| DealerlessStagingError::OutputRejected)?[party][epoch]
+                            [position] = *share;
+                        Ok(())
                     },
                     #[cfg(test)]
-                    None,
+                    fault
+                        .filter(|&(target, _)| target == half)
+                        .map(|(_, fault)| fault),
                 )
             }));
         }
@@ -2364,6 +1721,16 @@ pub(crate) fn stage_volatile_subset_into(
     for (half, part) in parts.into_iter().enumerate() {
         for ((_, dest), (_, source)) in ends.iter_mut().zip(part) {
             dest[half * 64..(half + 1) * 64].copy_from_slice(&source[half * 64..(half + 1) * 64]);
+        }
+    }
+    let pending = pending
+        .into_inner()
+        .map_err(|_| DealerlessStagingError::OutputRejected)?;
+    for (party, epochs) in pending.iter().enumerate() {
+        for (epoch, pages) in epochs.iter().enumerate() {
+            for (position, share) in pages.iter().enumerate() {
+                sink(party, epoch, position, share)?;
+            }
         }
     }
     Ok(ends)
@@ -3830,7 +3197,11 @@ mod tests {
             for words in [1usize, 16, 17, 18, 34, 35, 300] {
                 for lanes in [1usize, 3, 8] {
                     let tails: Vec<Vec<u8>> = (0..lanes)
-                        .map(|l| (0..extra).map(|i| (i as u8).wrapping_mul(31) ^ l as u8).collect())
+                        .map(|l| {
+                            (0..extra)
+                                .map(|i| (i as u8).wrapping_mul(31) ^ l as u8)
+                                .collect()
+                        })
                         .collect();
                     let lane_ids: Vec<[u8; 8]> =
                         (0..lanes).map(|l| (l as u64).to_le_bytes()).collect();
@@ -3838,8 +3209,7 @@ mod tests {
                         .map(|l| stream_message(b"x8-test", &[&lane_ids[l], &tails[l]]))
                         .collect();
                     let mut got = vec![vec![0u64; words]; lanes];
-                    let mut outs: Vec<&mut [u64]> =
-                        got.iter_mut().map(Vec::as_mut_slice).collect();
+                    let mut outs: Vec<&mut [u64]> = got.iter_mut().map(Vec::as_mut_slice).collect();
                     expand_u64_streams_x8(&msgs, &mut outs, backend);
                     for l in 0..lanes {
                         let mut want = vec![0u64; words];
@@ -4183,12 +3553,20 @@ mod tests {
     #[test]
     fn dealerless_qsa_rejects_endpoint_corruption() {
         let mut rngs = make_party_rngs(2, 0x63);
-        let res = stage_single_committee_subtree_mpc(
+        let mut writes = 0;
+        let res = stage_single_committee_into(
             1,
-            &[0],
+            StagingSlice {
+                leaves: &[0],
+                chains: 0..1,
+            },
             &[0x31; 32],
             [0x03; 32],
             &mut rngs,
+            &mut |_, _, _, _| {
+                writes += 1;
+                Ok(())
+            },
             Some(StagingFault::CorruptQsAEndpointOpen {
                 committee: 1,
                 member_pos: 1,
@@ -4198,6 +3576,42 @@ mod tests {
             res,
             Err(DealerlessStagingError::MacCheckFailed { committee: 1, .. })
         ));
+        assert_eq!(
+            writes, 0,
+            "unauthenticated intermediate pages reached the sink"
+        );
+    }
+
+    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+    #[test]
+    fn volatile_subset_second_half_abort_publishes_no_pages() {
+        let mut rngs = make_party_rngs(2, 0x6f);
+        let mut writes = 0;
+        let result = stage_volatile_subset_into_inner(
+            &[0],
+            &[0x31; 32],
+            [0x51; 32],
+            &mut rngs,
+            &mut |_, _, _, _| {
+                writes += 1;
+                Ok(())
+            },
+            Some((
+                1,
+                StagingFault::CorruptQsAEndpointOpen {
+                    committee: 0,
+                    member_pos: 1,
+                },
+            )),
+        );
+        assert!(matches!(
+            result,
+            Err(DealerlessStagingError::MacCheckFailed { .. })
+        ));
+        assert_eq!(
+            writes, 0,
+            "a successful half escaped before the other half's MAC barrier"
+        );
     }
 
     #[test]

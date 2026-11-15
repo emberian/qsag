@@ -7,8 +7,8 @@
 //! a separate-host deployment still needs authenticated confidential transport.
 //!
 //! Root certification is generic over [`BaggyEngine`]: the 2-of-3 replicated engine
-//! or the `t`-of-`n` [`qsag_core::spdz_sweep::SpdzSweepEngine`], under `FORS+C`
-//! (version 1) or `PORS+FP` (version 2) parameters. The root certificate carries the
+//! or the `t`-of-`n` [`qsag_core::spdz_sweep::SpdzSweepEngine`], under canonical `PORS+FP`
+//! parameters. The root certificate carries the
 //! threshold of the engine that signed it; the coupon carries the all-of-subset rule
 //! of its own minting. Neither raises the other.
 
@@ -96,7 +96,7 @@ impl AuthenticatedWaistband {
         protection: &ProtectedMintProcess,
         engine: &mut E,
         message: &[u8],
-    ) -> Result<BaggySig, CouponError> {
+    ) -> Result<RootSignature, CouponError> {
         protection.check()?;
         let tag = self.tag.ok_or(CouponError::Authentication)?;
         if !self.binding.matches(&self.params, &self.parent) || !ct_eq_bytes32(&tag, &self.mac()?) {
@@ -242,7 +242,7 @@ impl PendingCouponBatch {
     }
 
     /// Certify through a fresh, MAC-authenticated RAM Waistband, without a WAL.
-    /// The certificate remains an ordinary BaggySig accepted by baggy_verify.
+    /// The certificate remains an ordinary RootSignature accepted by baggy_verify.
     pub fn certify_with_waistband<E: BaggyEngine>(
         self,
         protection: &ProtectedMintProcess,
@@ -271,7 +271,7 @@ impl PendingCouponBatch {
     pub fn install(
         self,
         params: &BaggyParams,
-        certificates: Vec<BaggySig>,
+        certificates: Vec<RootSignature>,
         pools: &mut [CouponPool],
     ) -> Result<Vec<CertifiedCoupon>, CouponError> {
         self.validate_pools(pools)?;
@@ -346,8 +346,8 @@ mod tests {
         let (keys, _) =
             qsag_core::keccak_mpc::run_dealerless_rss_dkg_2of3([39; 32], 32, &mut rngs).unwrap();
         let mut engine = qsag_core::rss256::Rss256Engine::new([40; 32], keys, rngs).unwrap();
-        // Version 2: the root certificate is a PORS+FP signature.
-        let params = BaggyParams::SHA3_128F_V2;
+        // The root certificate is a PORS+FP signature.
+        let params = BaggyParams::SHA3_128F;
         let (parent, binding) = qsag_core::baggy::baggy_keygen_mpc(
             &mut engine,
             &params,
@@ -398,7 +398,7 @@ mod tests {
         let cached_sig = waistband
             .sign(&protection, &mut engine, b"cached root certificate")
             .unwrap();
-        assert!(baggy_verify(
+        assert!(verify_root(
             &params,
             &parent,
             b"cached root certificate",

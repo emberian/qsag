@@ -314,7 +314,7 @@ fn rss_bench_with_journal<T: WireTransport + Send, J: PoisonJournal + Send>(
             let mut party =
                 IsolatedRss256Party::new(SESSION, keys, endpoint, make_journal(p)).expect("party");
             for share in &shares {
-                party.load_shares(share[p].clone());
+                party.load_shares(share[p].clone()).expect("load shares");
             }
             party
         })

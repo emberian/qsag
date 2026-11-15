@@ -55,6 +55,7 @@ use core::fmt;
 use qsag_core::belt_latch::MemoryWal;
 use qsag_core::belt_latch::{BeltLatch, BeltLatchError, BeltLatchRecord, DurableWal};
 use qsag_core::field::tower::{TowerGf256, lagrange_weights_zero_gf256};
+use qsag_core::wipe::{SecretBuffer, SecretBytes, SecretVec};
 
 use crate::hash::{SeedRng, h32, mac32, mac32_verify};
 
@@ -884,33 +885,10 @@ pub struct CommitteePermit {
     binding: Node,
 }
 
-struct SecretLeaves(Vec<Vec<Node>>);
-impl core::ops::Deref for SecretLeaves {
-    type Target = [Vec<Node>];
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-impl Drop for SecretLeaves {
-    fn drop(&mut self) {
-        for leaf in &mut self.0 {
-            wipe_nodes(leaf);
-        }
-    }
-}
-
-struct SecretMacKeys(Vec<Node>);
-impl core::ops::Deref for SecretMacKeys {
-    type Target = [Node];
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-impl Drop for SecretMacKeys {
-    fn drop(&mut self) {
-        wipe_nodes(&mut self.0);
-    }
-}
+/// Per-leaf share nodes of one custodian.
+type SecretLeaves = SecretVec<Vec<Node>>;
+/// One pairwise MAC key per custodian.
+type SecretMacKeys = SecretVec<Node>;
 
 struct CommitteeSlot<W: DurableWal> {
     latch: BeltLatch<W>,
@@ -949,7 +927,7 @@ impl<W: DurableWal> CommitteeCustodian<W> {
                 store.committee,
                 CommitteeSlot {
                     latch,
-                    leaves: SecretLeaves(core::mem::take(&mut store.leaves)),
+                    leaves: SecretBuffer(core::mem::take(&mut store.leaves)),
                 },
             );
         }
@@ -957,7 +935,7 @@ impl<W: DurableWal> CommitteeCustodian<W> {
             party: material.party,
             layout,
             tree,
-            mac_keys: SecretMacKeys(core::mem::take(&mut material.mac_keys)),
+            mac_keys: SecretBuffer(core::mem::take(&mut material.mac_keys)),
             slots,
             max_window: MAX_WINDOW,
         })
@@ -1005,7 +983,10 @@ impl<W: DurableWal> CommitteeCustodian<W> {
             })
     }
 
-    pub(crate) fn slot_leaves_mut(&mut self, committee: usize) -> Result<&mut [Vec<Node>], QuorumError> {
+    pub(crate) fn slot_leaves_mut(
+        &mut self,
+        committee: usize,
+    ) -> Result<&mut [Vec<Node>], QuorumError> {
         let party = self.party;
         self.slots
             .get_mut(&committee)
@@ -1019,7 +1000,7 @@ impl<W: DurableWal> CommitteeCustodian<W> {
                 "one MAC key per custodian required",
             ));
         }
-        self.mac_keys = SecretMacKeys(new_keys);
+        self.mac_keys = SecretBuffer(new_keys);
         Ok(())
     }
 
@@ -1552,13 +1533,7 @@ impl LatchCertificate {
     }
 }
 
-struct SecretWalKey(Node);
-
-impl Drop for SecretWalKey {
-    fn drop(&mut self) {
-        qsag_asm::volatile_fill(&mut self.0, 0);
-    }
-}
+type SecretWalKey = SecretBytes<32>;
 
 fn belt_guard_key_commit(pk: &QuorumPublicKey, party: usize) -> Node {
     h32(
@@ -1588,10 +1563,10 @@ fn build_verified_belt_guard(
     for (i, slot) in custodian_keys.iter_mut().take(cfg.n).enumerate() {
         *slot = mac_keys[i];
     }
-    let wal_key = h32(
+    let wal_key: SecretWalKey = SecretBuffer(h32(
         b"QSAG.QUORUM.BELT_WAL_KEY/v1",
         &[&mac_keys[party], &guard_key_commit],
-    );
+    ));
     let initial_next = match in_flight {
         Some(prev) => prev.epoch,
         None => next_epoch,
@@ -1606,16 +1581,13 @@ fn build_verified_belt_guard(
         max_window,
         guard_key_commit,
         custodian_keys,
-        wal_key,
+        *wal_key,
     );
     for slot in &mut custodian_keys {
         qsag_asm::volatile_fill(slot, 0);
     }
-    let mut guard = guard_res.map_err(|_| {
-        let mut z = wal_key;
-        qsag_asm::volatile_fill(&mut z, 0);
-        QuorumError::InvalidConfig("invalid verified belt quorum")
-    })?;
+    let mut guard =
+        guard_res.map_err(|_| QuorumError::InvalidConfig("invalid verified belt quorum"))?;
     if let Some(prev) = in_flight {
         let prev_binding = LeafRecord::from_latch(prev.epoch, prev).binding();
         let prev_receipt = belt_wal_receipt_digest(prev.epoch, &prev_binding);
@@ -1630,12 +1602,10 @@ fn build_verified_belt_guard(
             guard.propose_or_retry_epoch(prev.epoch, prev_binding, prev_receipt, prev_tag);
         guard = next_guard;
         if res.is_err() {
-            let mut z = wal_key;
-            qsag_asm::volatile_fill(&mut z, 0);
             return Err(QuorumError::Latch(BeltLatchError::WalPoisoned));
         }
     }
-    Ok((guard, SecretWalKey(wal_key)))
+    Ok((guard, wal_key))
 }
 
 /// One custodian of Mode QS-B: its Shamir shares, its latch, its persistent extracted
@@ -1665,7 +1635,7 @@ impl<W: DurableWal> ShamirCustodian<W> {
             return Err(QuorumError::InvalidConfig("one MAC key per custodian"));
         }
         let latch = BeltLatch::recover(wal, latch_capacity_log2(material.leaves.len() as u64))?;
-        let mac_keys = SecretMacKeys(core::mem::take(&mut material.mac_keys));
+        let mac_keys = SecretBuffer(core::mem::take(&mut material.mac_keys));
         let (verified_guard, wal_receipt_key) = build_verified_belt_guard(
             cfg,
             tree.public_key(),
@@ -1681,7 +1651,7 @@ impl<W: DurableWal> ShamirCustodian<W> {
             tree,
             mac_keys,
             latch,
-            leaves: SecretLeaves(core::mem::take(&mut material.leaves)),
+            leaves: SecretBuffer(core::mem::take(&mut material.leaves)),
             max_window: MAX_WINDOW,
             verified_guard: Some(verified_guard),
             wal_receipt_key,
@@ -1746,7 +1716,7 @@ impl<W: DurableWal> ShamirCustodian<W> {
             self.guard_poisoned = true;
             self.last_authorized_grant = None;
         }
-        self.mac_keys = SecretMacKeys(new_keys);
+        self.mac_keys = SecretBuffer(new_keys);
         self.verified_guard = Some(next_guard);
         self.wal_receipt_key = next_wal_key;
         Ok(())
@@ -2003,9 +1973,7 @@ impl<W: DurableWal> ShamirCustodian<W> {
         if let Err(err) = bind_res {
             let is_wal_io_or_equivocation = matches!(
                 err,
-                QuorumError::Latch(
-                    BeltLatchError::WalPoisoned | BeltLatchError::EpochAlreadyBound
-                )
+                QuorumError::Latch(BeltLatchError::WalPoisoned | BeltLatchError::EpochAlreadyBound)
             );
             if is_wal_io_or_equivocation {
                 let _ = self.step_persistent_guard_epoch(
