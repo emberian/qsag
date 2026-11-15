@@ -708,3 +708,761 @@ theorem succinct_merge_tree_knowledge_soundness_thm (arith : RowArithmetization)
   _root_.Qsag.Aggregation.succinct_merge_tree_knowledge_soundness_thm arith dom inst law
 
 open Aggregation in
+theorem qsag_aggregate_unforgeability_reduction_thm
+    (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (law : arith.Lawful dom inst)
+    (proof : SuccinctAggregateProof) (fs : List UInt8) (view : SuccinctExtractionView)
+    (i : Nat) (hPk : i < inst.committee.length) (hB : i < proof.agg.bitmap.length)
+    (sk_i : PqSecretKey)
+    (hKey_i : inst.committee[i]'hPk = derivePublicKey inst.suite inst.params sk_i)
+    (hActive_i : proof.agg.bitmap[i]'hB = true)
+    (queriedMsgs : List (List UInt8))
+    (qOracle : QueriedWotsOracle)
+    (revealedFors : List (UInt64 × Nat × Nat))
+    (hGeom : (inst.params.w = 4 ∧ inst.params.ell1 = 128) ∨
+      (inst.params.w = 16 ∧ inst.params.ell1 = 64))
+    (hFreshMsg : inst.message ∉ queriedMsgs)
+    (hAccept : verifySuccinctAggregate arith dom inst proof fs = true)
+    (hBound : StagesBound view.authPath dom.stages view.allTables proof.stages)
+    (hStatefulLeaf0Msg : ∀ sig : PqHashSig, inst.params.statefulJorts = true →
+      ∀ hRand hRoot hCtr hChains,
+        qOracle 0 (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
+          (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight) = some (hRand, hRoot, hCtr, hChains) →
+        ∃ mPrev ∈ queriedMsgs,
+          hRoot = thPreHash inst.suite sk_i.pkSeed
+            (derivePublicKey inst.suite inst.params sk_i).pkRoot mPrev)
+    (hStatelessLayer0Root : ∀ sig : PqHashSig, inst.params.statefulJorts = false →
+      ∀ hRand hRoot hCtr hChains,
+        qOracle 0 (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
+          (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight) = some (hRand, hRoot, hCtr, hChains) →
+        hRoot = computeForsPk inst.suite inst.params sk_i
+          (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
+          (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight))
+    (hUpperOracle : ∀ (l : Nat) (g : Nat), ReachableUpperHypertreePos inst.params l g →
+      let hRoot0 := computeXmssSubtreeRoot inst.suite inst.params sk_i
+        (UInt32.ofNat (l - 1)) (UInt64.ofNat g)
+      (∀ hRand hCtr hChains,
+        qOracle (UInt32.ofNat l) (UInt64.ofNat (g / 2 ^ inst.params.subtreeHeight))
+          (g % 2 ^ inst.params.subtreeHeight) = some (hRand, hRoot0, hCtr, hChains) →
+        let hmH := thHashMsg inst.suite hRand sk_i.pkSeed
+          (derivePublicKey inst.suite inst.params sk_i).pkRoot hRoot0
+          (UInt32.ofNat l) (UInt64.ofNat (g / 2 ^ inst.params.subtreeHeight))
+          (UInt32.ofNat (g % 2 ^ inst.params.subtreeHeight)) hCtr
+        let digH := extractBaseWDigits inst.params.w inst.params.ell1 hmH
+        checkTargetSum inst.params.w inst.params.ell1 inst.params.targetSum digH = true ∧
+        recoverWotsPkFromSig inst.suite inst.params sk_i.pkSeed (UInt32.ofNat l)
+          (UInt64.ofNat (g / 2 ^ inst.params.subtreeHeight))
+          (g % 2 ^ inst.params.subtreeHeight) digH hChains =
+        computeWotsPk inst.suite inst.params sk_i (UInt32.ofNat l)
+          (UInt64.ofNat (g / 2 ^ inst.params.subtreeHeight))
+          (g % 2 ^ inst.params.subtreeHeight)) ∧
+      (∀ hRand hR hCtr hChains,
+        qOracle (UInt32.ofNat l) (UInt64.ofNat (g / 2 ^ inst.params.subtreeHeight))
+          (g % 2 ^ inst.params.subtreeHeight) = some (hRand, hR, hCtr, hChains) → hR = hRoot0))
+    (hLayer0Valid : ∀ sig : PqHashSig, ∀ hRand hRoot0 hCtr hChains,
+      qOracle 0 (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
+        (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight) = some (hRand, hRoot0, hCtr, hChains) →
+      let hmH := thHashMsg inst.suite hRand sk_i.pkSeed
+        (derivePublicKey inst.suite inst.params sk_i).pkRoot hRoot0
+        0 (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
+        (UInt32.ofNat (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight)) hCtr
+      let digH := extractBaseWDigits inst.params.w inst.params.ell1 hmH
+      checkTargetSum inst.params.w inst.params.ell1 inst.params.targetSum digH = true ∧
+      recoverWotsPkFromSig inst.suite inst.params sk_i.pkSeed 0
+        (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
+        (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight) digH hChains =
+      computeWotsPk inst.suite inst.params sk_i 0
+        (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
+        (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight)) :
+    SuccinctUnforgeabilityProp arith dom inst sk_i revealedFors proof view :=
+  _root_.Qsag.Aggregation.qsag_aggregate_unforgeability_reduction_thm arith dom inst law proof fs view i hPk hB sk_i hKey_i hActive_i queriedMsgs qOracle revealedFors hGeom hFreshMsg hAccept hBound hStatefulLeaf0Msg hStatelessLayer0Root hUpperOracle hLayer0Valid
+
+open Aggregation in
+theorem qsag_aggregate_unforgeability_reduction_of_statelessLog_thm
+    (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (law : arith.Lawful dom inst)
+    (proof : SuccinctAggregateProof) (fs : List UInt8) (view : SuccinctExtractionView)
+    (i : Nat) (hPk : i < inst.committee.length) (hB : i < proof.agg.bitmap.length)
+    (sk_i : PqSecretKey)
+    (hKey_i : inst.committee[i]'hPk = derivePublicKey inst.suite inst.params sk_i)
+    (hActive_i : proof.agg.bitmap[i]'hB = true)
+    (queries : List PqSigningQuery)
+    (hGeom : (inst.params.w = 4 ∧ inst.params.ell1 = 128) ∨
+      (inst.params.w = 16 ∧ inst.params.ell1 = 64))
+    (hStateless : inst.params.statefulJorts = false)
+    (hLayers : inst.params.numLayers ≤ 2 ^ 32)
+    (hFreshMsg : inst.message ∉
+      (signingOracleLog inst.suite inst.params sk_i queries).map Prod.fst)
+    (hAccept : verifySuccinctAggregate arith dom inst proof fs = true)
+    (hBound : StagesBound view.authPath dom.stages view.allTables proof.stages) :
+    SuccinctUnforgeabilityProp arith dom inst sk_i
+      ((signingOracleLog inst.suite inst.params sk_i queries).flatMap fun e =>
+        (List.range inst.params.forsTrees).map fun j =>
+          (UInt64.ofNat (e.2.leafGlobalIdx / 2 ^ inst.params.subtreeHeight),
+           e.2.leafGlobalIdx % 2 ^ inst.params.subtreeHeight,
+           sigForsLeafIdx inst.suite inst.params
+             (derivePublicKey inst.suite inst.params sk_i) e.1 e.2 j))
+      proof view :=
+  _root_.Qsag.Aggregation.qsag_aggregate_unforgeability_reduction_of_statelessLog_thm arith dom inst law proof fs view i hPk hB sk_i hKey_i hActive_i queries hGeom hStateless hLayers hFreshMsg hAccept hBound
+
+open Aggregation in
+theorem qsag_aggregate_unforgeability_reduction_of_checkedStatefulLog_thm
+    (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (law : arith.Lawful dom inst)
+    (proof : SuccinctAggregateProof) (fs : List UInt8) (view : SuccinctExtractionView)
+    (i : Nat) (hPk : i < inst.committee.length) (hB : i < proof.agg.bitmap.length)
+    (sk_i : PqSecretKey)
+    (hKey_i : inst.committee[i]'hPk = derivePublicKey inst.suite inst.params sk_i)
+    (hActive_i : proof.agg.bitmap[i]'hB = true)
+    (queries : List CheckedStatefulQuery)
+    (hGeom : (inst.params.w = 4 ∧ inst.params.ell1 = 128) ∨
+      (inst.params.w = 16 ∧ inst.params.ell1 = 64))
+    (hValidParams : inst.params.checkedStatefulValid = true)
+    (hFreshMsg : inst.message ∉
+      ((execCheckedStatefulOracle inst.suite inst.params sk_i initCheckedStatefulLatch
+        queries).emittedLog.map fun e => e.2.1))
+    (hAccept : verifySuccinctAggregate arith dom inst proof fs = true)
+    (hBound : StagesBound view.authPath dom.stages view.allTables proof.stages) :
+    SuccinctUnforgeabilityProp arith dom inst sk_i [] proof view :=
+  _root_.Qsag.Aggregation.qsag_aggregate_unforgeability_reduction_of_checkedStatefulLog_thm arith dom inst law proof fs view i hPk hB sk_i hKey_i hActive_i queries hGeom hValidParams hFreshMsg hAccept hBound
+
+open Aggregation in
+theorem rsSbox7TraceArith_lawful (seed root : Goldilocks) (msg : List UInt8) :
+    (rsSbox7TraceArith seed root).Lawful rsSbox7WhirDomain (rsSbox7Inst seed root msg) :=
+  _root_.Qsag.Aggregation.rsSbox7TraceArith_lawful seed root msg
+
+open Aggregation in
+theorem honestSbox7WhirProof_accepts (seed x0 b1 : Goldilocks) (msg : List UInt8) :
+    let root := CommRingOps.add (pow7Goldilocks x0) seed
+    let bundle := buildHonestSbox7WhirBundle seed x0 b1 msg
+    verifySuccinctAggregate (rsSbox7TraceArith seed root) rsSbox7WhirDomain
+      (rsSbox7Inst seed root msg) bundle.1 bundle.2.1 = true ∧
+    StagesBound bundle.2.2.authPath rsSbox7WhirDomain.stages bundle.2.2.allTables bundle.1.stages :=
+  _root_.Qsag.Aggregation.honestSbox7WhirProof_accepts seed x0 b1 msg
+
+open Aggregation in
+theorem succinct_knowledge_soundness_hypotheses_satisfiable :
+    ∃ (arith : RowArithmetization) (dom : WhirDomain) (inst : AggPublicInstance)
+      (_law : arith.Lawful dom inst) (proof : SuccinctAggregateProof)
+      (fs : List UInt8) (view : SuccinctExtractionView),
+      verifySuccinctAggregate arith dom inst proof fs = true ∧
+      StagesBound view.authPath dom.stages view.allTables proof.stages ∧
+      verifyMergeTree arith dom inst 1 (.leaf proof fs) = true ∧
+      ViewTreeBound dom (.leaf proof fs) (.leaf view) ∧
+      checkAllActiveSigners inst.suite inst.params inst.message inst.committee
+        proof.agg.bitmap (arith.decodeSigs ((view.allTables.headD []).headD [])) = true :=
+  _root_.Qsag.Aggregation.succinct_knowledge_soundness_hypotheses_satisfiable
+
+open Aggregation in
+theorem tooth_corrupted_round0_symbol_rejected (table0 : List Aggregation.GoldilocksExt4)
+    (idx : Nat) (v' : Aggregation.GoldilocksExt4)
+    (hValid : isLinearBaseRs8 table0 = true)
+    (hIdx : idx < 8)
+    (hMut : v' ≠ table0.getD idx Aggregation.GoldilocksExt4.zero) :
+    isLinearBaseRs8 (table0.set idx v') = false :=
+  _root_.Qsag.Aggregation.tooth_corrupted_round0_symbol_rejected table0 idx v' hValid hIdx hMut
+
+open Aggregation in
+theorem succinct_degree9_round_rejected (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (proof : SuccinctAggregateProof) (fs : List UInt8)
+    (p : List Aggregation.GoldilocksExt4) (ps : List (List Aggregation.GoldilocksExt4))
+    (r : Aggregation.GoldilocksExt4) (rs : List Aggregation.GoldilocksExt4)
+    (hp : proof.agg.roundPolys = p :: ps) (hc : proof.agg.challenges = r :: rs)
+    (hDeg : 9 < p.length) :
+    verifySuccinctAggregate arith dom inst proof fs = false :=
+  _root_.Qsag.Aggregation.succinct_degree9_round_rejected arith dom inst proof fs p ps r rs hp hc hDeg
+
+open Aggregation in
+theorem succinct_duplicate_query_rejected (rowChalls finalWord : List Aggregation.GoldilocksExt4)
+    (prior : List UInt8) (sdom : WhirStageDomain) (sp : WhirStageProof)
+    (nextInfo : Option (WhirStageDomain × List UInt8))
+    (q q' : StageQueryOpening) (qs : List StageQueryOpening)
+    (hEq : sp.queries = q :: q' :: qs) (hDup : q.index = q'.index) :
+    verifyOneWhirStage rowChalls finalWord prior sdom sp nextInfo = false :=
+  _root_.Qsag.Aggregation.succinct_duplicate_query_rejected rowChalls finalWord prior sdom sp nextInfo q q' qs hEq hDup
+
+open Aggregation in
+theorem tooth_whir_wrong_ood_challenge_rejected (rowChalls finalWord : List Aggregation.GoldilocksExt4)
+    (prior : List UInt8) (sdom : WhirStageDomain) (sp : WhirStageProof)
+    (nextInfo : Option (WhirStageDomain × List UInt8))
+    (hBad : sp.oodChallenge ≠ deriveStageOodChallenge prior sp.stageRoot) :
+    verifyOneWhirStage rowChalls finalWord prior sdom sp nextInfo = false :=
+  _root_.Qsag.Aggregation.tooth_whir_wrong_ood_challenge_rejected rowChalls finalWord prior sdom sp nextInfo hBad
+
+open Aggregation in
+theorem tooth_whir_bad_pow_rejected (rowChalls finalWord : List Aggregation.GoldilocksExt4)
+    (prior : List UInt8) (sdom : WhirStageDomain) (sp : WhirStageProof)
+    (nextInfo : Option (WhirStageDomain × List UInt8))
+    (hBad : verifyWhirStagePow
+      (stagePowDigest (stagePowSeed prior sp (nextInfo.map Prod.snd) finalWord))
+      sp.powNonce sdom.powBits = false) :
+    verifyOneWhirStage rowChalls finalWord prior sdom sp nextInfo = false :=
+  _root_.Qsag.Aggregation.tooth_whir_bad_pow_rejected rowChalls finalWord prior sdom sp nextInfo hBad
+
+open Aggregation in
+theorem tooth_whir_wrong_params_rejected (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (proof : SuccinctAggregateProof) (fs : List UInt8)
+    (hNe : proof.agg.params ≠ inst.params) :
+    verifySuccinctAggregate arith dom inst proof fs = false :=
+  _root_.Qsag.Aggregation.tooth_whir_wrong_params_rejected arith dom inst proof fs hNe
+
+open Aggregation in
+theorem aggregate_message_substitution_rejected (arith : RowArithmetization) (dom : WhirDomain)
+    (inst1 inst2 : AggPublicInstance) (proof : SuccinctAggregateProof) (fs : List UInt8)
+    (hMsg : inst1.message ≠ inst2.message)
+    (hAcc1 : verifySuccinctAggregate arith dom inst1 proof fs = true) :
+    verifySuccinctAggregate arith dom inst2 proof fs = false :=
+  _root_.Qsag.Aggregation.aggregate_message_substitution_rejected arith dom inst1 inst2 proof fs hMsg hAcc1
+
+open Aggregation in
+theorem checkSbox7Trace_sound (seeds : List Goldilocks) (x root : Goldilocks)
+    (words : List (List Aggregation.GoldilocksExt4))
+    (h : checkSbox7Trace seeds x root words = true) :
+    words.length = seeds.length ∧ evalSbox7Rounds seeds x = root :=
+  _root_.Qsag.Aggregation.checkSbox7Trace_sound seeds x root words h
+
+open Aggregation in
+theorem checkSbox7Trace_complete (seeds : List Goldilocks) (x : Goldilocks) :
+    checkSbox7Trace seeds x (evalSbox7Rounds seeds x) (buildSbox7Trace seeds x) = true :=
+  _root_.Qsag.Aggregation.checkSbox7Trace_complete seeds x
+
+open Aggregation in
+theorem nineRoundSbox7Trace_sound (seeds : List Goldilocks) (x root : Goldilocks)
+    (words : List (List Aggregation.GoldilocksExt4))
+    (h : checkNineRoundSbox7Trace seeds x root words = true) :
+    seeds.length = 9 ∧ words.length = 9 ∧ evalSbox7Rounds seeds x = root :=
+  _root_.Qsag.Aggregation.nineRoundSbox7Trace_sound seeds x root words h
+
+open Aggregation in
+theorem nineRoundSbox7Trace_complete (seeds : List Goldilocks) (x : Goldilocks)
+    (hn : seeds.length = 9) :
+    checkNineRoundSbox7Trace seeds x (evalSbox7Rounds seeds x)
+      (buildSbox7Trace seeds x) = true :=
+  _root_.Qsag.Aggregation.nineRoundSbox7Trace_complete seeds x hn
+
+open Aggregation in
+theorem sbox7Trace_wrong_root_rejected (seeds : List Goldilocks) (x root : Goldilocks)
+    (words : List (List Aggregation.GoldilocksExt4)) (hroot : evalSbox7Rounds seeds x ≠ root) :
+    checkSbox7Trace seeds x root words = false :=
+  _root_.Qsag.Aggregation.sbox7Trace_wrong_root_rejected seeds x root words hroot
+
+open Aggregation in
+theorem sbox7Trace_head_signature (seed : Goldilocks) (seeds : List Goldilocks)
+    (x root : Goldilocks) (word : List Aggregation.GoldilocksExt4) (words : List (List Aggregation.GoldilocksExt4))
+    (msg : List UInt8) (h : checkSbox7Trace (seed :: seeds) x root (word :: words) = true) :
+    verifyPqHashSig sbox7FieldSuite sbox7Params
+      (mkSbox7Pk seed (sbox7TraceStates word).2) msg (mkSbox7Sig x) = true :=
+  _root_.Qsag.Aggregation.sbox7Trace_head_signature seed seeds x root word words msg h
+
+open Aggregation in
+theorem sbox7WhirChain_sound (msg : List UInt8) (x root : Goldilocks)
+    (rounds : List Sbox7WhirRound) (h : Sbox7WhirChainAccepted msg x root rounds) :
+    evalSbox7Rounds (rounds.map (·.seed)) x = root ∨
+      ∃ r ∈ rounds, Sbox7WhirRoundBreak r :=
+  _root_.Qsag.Aggregation.sbox7WhirChain_sound msg x root rounds h
+
+open Aggregation in
+theorem sbox7WhirChain_complete (msg : List UInt8) (seeds : List Goldilocks) (x : Goldilocks) :
+    Sbox7WhirChainAccepted msg x (evalSbox7Rounds seeds x) (buildSbox7WhirChain msg seeds x) :=
+  _root_.Qsag.Aggregation.sbox7WhirChain_complete msg seeds x
+
+open Aggregation in
+theorem buildSbox7WhirChain_seeds (msg : List UInt8) (seeds : List Goldilocks) (x : Goldilocks) :
+    (buildSbox7WhirChain msg seeds x).map (·.seed) = seeds :=
+  _root_.Qsag.Aggregation.buildSbox7WhirChain_seeds msg seeds x
+
+open Aggregation in
+theorem nineRoundSbox7Whir_sound (msg : List UInt8) (x root : Goldilocks)
+    (rounds : List Sbox7WhirRound) (hn : rounds.length = 9)
+    (h : Sbox7WhirChainAccepted msg x root rounds) :
+    (rounds.map (·.seed)).length = 9 ∧
+      (evalSbox7Rounds (rounds.map (·.seed)) x = root ∨
+        ∃ r ∈ rounds, Sbox7WhirRoundBreak r) :=
+  _root_.Qsag.Aggregation.nineRoundSbox7Whir_sound msg x root rounds hn h
+
+/-! ## Tier 6. Compiled-archive extraction, constant-time noninterference and machine-code refinement -/
+
+theorem parseArMember_subslice (rlib : Bytes) (m : ArMember)
+    (hm : m ∈ parseArArchive rlib) : ArPayloadOk rlib m :=
+  _root_.Qsag.parseArMember_subslice rlib m hm
+
+theorem extractAllRlibFuncs_provenance (rlib : Bytes) (slice : ElfFuncSlice)
+    (hMem : slice ∈ extractAllRlibFuncs rlib) :
+    ∃ m ∈ parseArArchive rlib,
+      m.payloadOffset + m.payloadSize ≤ rlib.len ∧
+      slice.symSize > 0 ∧
+      slice.symValue + slice.symSize ≤ slice.textSize ∧
+      slice.textFileOffset + slice.textSize ≤ m.payloadSize ∧
+      slice.code =
+        rlib.slice (m.payloadOffset + (slice.textFileOffset + slice.symValue)) slice.symSize :=
+  _root_.Qsag.extractAllRlibFuncs_provenance rlib slice hMem
+
+theorem x86_rlib_extracted_slices :
+    extractAllRlibFuncs x86RlibArchiveBytes = x86ExtractedSlices :=
+  _root_.Qsag.x86_rlib_extracted_slices
+
+theorem aarch64_rlib_extracted_slices :
+    extractAllRlibFuncs aarch64RlibArchiveBytes = aarch64ExtractedSlices :=
+  _root_.Qsag.aarch64_rlib_extracted_slices
+
+theorem x86_rlib_extraction_detects_code_flip :
+    (extractAllRlibFuncs
+        (Bytes.ofNat x86RlibArchiveLen (x86RlibArchiveNat ^^^ (1 <<< (8 * 400))))).map
+        ElfFuncSlice.code ≠
+      x86ExtractedSlices.map ElfFuncSlice.code :=
+  _root_.Qsag.x86_rlib_extraction_detects_code_flip
+
+theorem checkElfSliceWithCert_sound {slice : ElfFuncSlice} {c : FuncContract} {cert : InvCert}
+    (hCheck : checkElfSliceWithCert slice c cert = true) :
+    ElfSliceThreeWayNISafe slice c :=
+  _root_.Qsag.checkElfSliceWithCert_sound hCheck
+
+theorem mutant_secret_branch_rejected :
+    checkX86ThreeWayNI
+      [0x48, 0x89, 0xF8, 0x48, 0x29, 0xF0, 0x74, 0x01, 0x90, 0xC3]
+      (mkContract "mutant_secret_branch" [4]) = false :=
+  _root_.Qsag.mutant_secret_branch_rejected
+
+theorem mutant_secret_lut_rejected :
+    checkX86ThreeWayNI
+      [0x0F, 0xB6, 0x04, 0x37, 0xC3]
+      (mkContract "mutant_secret_lut" [4, 7]) = false :=
+  _root_.Qsag.mutant_secret_lut_rejected
+
+theorem mutant_variable_shift_rejected :
+    checkX86ThreeWayNI [0x48, 0xD3, 0xE0, 0xC3] (mkContract "mutant_shl_cl" [4]) = false ∧
+    checkArm64ThreeWayNI
+      [0x00, 0x20, 0xC1, 0x9A, 0xC0, 0x03, 0x5F, 0xD6]
+      (mkContract "mutant_lslv" []) = false :=
+  _root_.Qsag.mutant_variable_shift_rejected
+
+theorem rlib_x86_every_symbol_three_way_ni_sound :
+    (extractAllRlibFuncs x86RlibArchiveBytes).length = x86SymbolContracts.length ∧
+    ∀ i : Nat, (hs : i < (extractAllRlibFuncs x86RlibArchiveBytes).length) →
+      (hc : i < x86SymbolContracts.length) →
+      ((extractAllRlibFuncs x86RlibArchiveBytes)[i]'hs).name =
+        (x86SymbolContracts[i]'hc).symName ∧
+      ElfSliceThreeWayNISafe ((extractAllRlibFuncs x86RlibArchiveBytes)[i]'hs)
+        (x86SymbolContracts[i]'hc) :=
+  _root_.Qsag.rlib_x86_every_symbol_three_way_ni_sound
+
+theorem rlib_aarch64_every_symbol_three_way_ni_sound :
+    (extractAllRlibFuncs aarch64RlibArchiveBytes).length = aarch64SymbolContracts.length ∧
+    ∀ i : Nat, (hs : i < (extractAllRlibFuncs aarch64RlibArchiveBytes).length) →
+      (hc : i < aarch64SymbolContracts.length) →
+      ((extractAllRlibFuncs aarch64RlibArchiveBytes)[i]'hs).name =
+        (aarch64SymbolContracts[i]'hc).symName ∧
+      ElfSliceThreeWayNISafe ((extractAllRlibFuncs aarch64RlibArchiveBytes)[i]'hs)
+        (aarch64SymbolContracts[i]'hc) :=
+  _root_.Qsag.rlib_aarch64_every_symbol_three_way_ni_sound
+
+theorem genuine_certificate_rejects_unwiped_neon_mutant :
+    (match aarch64ExtractedSlices[3]? with
+     | none => true
+     | some slice =>
+       checkArm64WithInv (patchBytesAt slice.code 0x104 [0x1F, 0x20, 0x03, 0xD5])
+         (mkContract "qsag_asm_tower128_bdoz_mac_pmull" [0, 1, 2, 3]) aarch64InvCert03) = false :=
+  _root_.Qsag.genuine_certificate_rejects_unwiped_neon_mutant
+
+theorem certificate_not_transferable :
+    certSliceAt x86ExtractedSlices x86SymbolContracts (x86InvCerts.drop 1) 0 = false :=
+  _root_.Qsag.certificate_not_transferable
+
+theorem ct_eq_32_x86_64_mc_refines :
+    ∃ slice prog, findSliceByNameBytes x86ExtractedSlices ctEq32X86Name = some slice ∧
+      decodeX86Stream slice.code = some prog ∧
+      ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 20 ≤ fuel →
+        (runX86 prog fuel s).1.halted = true ∧
+        (runX86 prog fuel s).1.gpr.get 0 =
+          (if ∀ i : Nat, i < 32 →
+              s.mem (s.gpr.get 7 + UInt64.ofNat i) = s.mem (s.gpr.get 6 + UInt64.ofNat i)
+            then 1 else 0) ∧
+        (runX86 prog fuel s).1.mem = s.mem ∧
+        (runX86 prog fuel s).1.gpr.get 1 = 0 ∧ (runX86 prog fuel s).1.gpr.get 2 = 0 ∧
+        (runX86 prog fuel s).1.gpr.get 8 = 0 :=
+  _root_.Qsag.ct_eq_32_x86_64_mc_refines
+
+theorem ct_eq_32_aarch64_mc_refines :
+    ∃ slice prog, findSliceByNameBytes aarch64ExtractedSlices ctEq32ArmName = some slice ∧
+      decodeArm64Stream slice.code = some prog ∧
+      ∀ (s : Arm64State) (fuel : Nat), s.pc = 0 → s.halted = false → 22 ≤ fuel →
+        (runArm64 prog fuel s).1.halted = true ∧
+        (runArm64 prog fuel s).1.gpr.get 0 =
+          (if ∀ i : Nat, i < 32 →
+              s.mem (s.gpr.get 0 + UInt64.ofNat i) = s.mem (s.gpr.get 1 + UInt64.ofNat i)
+            then 1 else 0) ∧
+        (runArm64 prog fuel s).1.mem = s.mem ∧
+        (∀ r : Nat, 2 ≤ r → r ≤ 7 → (runArm64 prog fuel s).1.gpr.get r = 0) :=
+  _root_.Qsag.ct_eq_32_aarch64_mc_refines
+
+theorem ct_memzero_x86_64_mc_refines :
+    ∃ slice prog, findSliceByNameBytes x86ExtractedSlices ctMemzeroX86Name = some slice ∧
+      decodeX86Stream slice.code = some prog ∧
+      ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 0 < (s.gpr.get 6).toNat →
+        4 * (s.gpr.get 6).toNat + 4 ≤ fuel →
+        (runX86 prog fuel s).1.halted = true ∧
+        (∀ i : Nat, i < (s.gpr.get 6).toNat →
+          (runX86 prog fuel s).1.mem (s.gpr.get 7 + UInt64.ofNat i) = 0) ∧
+        (∀ a : UInt64, (∀ i : Nat, i < (s.gpr.get 6).toNat → a ≠ s.gpr.get 7 + UInt64.ofNat i) →
+          (runX86 prog fuel s).1.mem a = s.mem a) :=
+  _root_.Qsag.ct_memzero_x86_64_mc_refines
+
+theorem ct_memzero_aarch64_mc_refines :
+    ∃ slice prog, findSliceByNameBytes aarch64ExtractedSlices ctMemzeroArmName = some slice ∧
+      decodeArm64Stream slice.code = some prog ∧
+      ∀ (s : Arm64State) (fuel : Nat), s.pc = 0 → s.halted = false → 0 < (s.gpr.get 1).toNat →
+        3 * (s.gpr.get 1).toNat + 2 ≤ fuel →
+        (runArm64 prog fuel s).1.halted = true ∧
+        (∀ i : Nat, i < (s.gpr.get 1).toNat →
+          (runArm64 prog fuel s).1.mem (s.gpr.get 0 + UInt64.ofNat i) = 0) ∧
+        (∀ a : UInt64, (∀ i : Nat, i < (s.gpr.get 1).toNat → a ≠ s.gpr.get 0 + UInt64.ofNat i) →
+          (runArm64 prog fuel s).1.mem a = s.mem a) :=
+  _root_.Qsag.ct_memzero_aarch64_mc_refines
+
+theorem ct_eq_bytes_x86_64_mc_refines :
+    ∃ slice prog, findSliceByNameBytes x86ExtractedSlices ctEqBytesX86Name = some slice ∧
+      decodeX86Stream slice.code = some prog ∧
+      ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 0 < (s.gpr.get 2).toNat →
+        8 * (s.gpr.get 2).toNat + 7 ≤ fuel →
+        (runX86 prog fuel s).1.halted = true ∧
+        (runX86 prog fuel s).1.gpr.get 0 =
+          (if ∀ i : Nat, i < (s.gpr.get 2).toNat →
+              s.mem (s.gpr.get 7 + UInt64.ofNat i) = s.mem (s.gpr.get 6 + UInt64.ofNat i)
+            then 1 else 0) ∧
+        (runX86 prog fuel s).1.mem = s.mem ∧
+        (runX86 prog fuel s).1.gpr.get 8 = 0 ∧ (runX86 prog fuel s).1.gpr.get 9 = 0 :=
+  _root_.Qsag.ct_eq_bytes_x86_64_mc_refines
+
+theorem goldilocks_add_ct_x86_64_mc_refines :
+    ∃ slice prog, findSliceByNameBytes x86ExtractedSlices goldAddX86Name = some slice ∧
+      decodeX86Stream slice.code = some prog ∧
+      ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 17 ≤ fuel →
+        (runX86 prog fuel s).1.halted = true ∧
+        ((runX86 prog fuel s).1.gpr.get 0).toNat =
+          ((s.gpr.get 7).toNat + (s.gpr.get 6).toNat) % goldilocksPrime ∧
+        (runX86 prog fuel s).1.mem = s.mem ∧
+        (runX86 prog fuel s).1.gpr.get 1 = 0 ∧ (runX86 prog fuel s).1.gpr.get 8 = 0 ∧
+        (runX86 prog fuel s).1.gpr.get 9 = 0 ∧ (runX86 prog fuel s).1.gpr.get 10 = 0 :=
+  _root_.Qsag.goldilocks_add_ct_x86_64_mc_refines
+
+theorem goldilocks_sub_ct_x86_64_mc_refines :
+    ∃ slice prog, findSliceByNameBytes x86ExtractedSlices goldSubX86Name = some slice ∧
+      decodeX86Stream slice.code = some prog ∧
+      ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 23 ≤ fuel →
+        (runX86 prog fuel s).1.halted = true ∧
+        ((runX86 prog fuel s).1.gpr.get 0).toNat =
+          ((s.gpr.get 7).toNat + goldilocksPrime - (s.gpr.get 6).toNat % goldilocksPrime) %
+            goldilocksPrime ∧
+        (runX86 prog fuel s).1.mem = s.mem ∧
+        (runX86 prog fuel s).1.gpr.get 1 = 0 ∧ (runX86 prog fuel s).1.gpr.get 6 = 0 ∧
+        (runX86 prog fuel s).1.gpr.get 8 = 0 ∧ (runX86 prog fuel s).1.gpr.get 9 = 0 ∧
+        (runX86 prog fuel s).1.gpr.get 10 = 0 :=
+  _root_.Qsag.goldilocks_sub_ct_x86_64_mc_refines
+
+theorem goldilocks_mul_ct_x86_64_mc_refines :
+    ∃ slice prog, findSliceByNameBytes x86ExtractedSlices goldMulX86Name = some slice ∧
+      decodeX86Stream slice.code = some prog ∧
+      ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 25 ≤ fuel →
+        (runX86 prog fuel s).1.halted = true ∧
+        ((runX86 prog fuel s).1.gpr.get 0).toNat =
+          ((s.gpr.get 7).toNat * (s.gpr.get 6).toNat) % goldilocksPrime ∧
+        (runX86 prog fuel s).1.mem = s.mem ∧
+        (runX86 prog fuel s).1.gpr.get 1 = 0 ∧ (runX86 prog fuel s).1.gpr.get 2 = 0 ∧
+        (runX86 prog fuel s).1.gpr.get 8 = 0 ∧ (runX86 prog fuel s).1.gpr.get 9 = 0 :=
+  _root_.Qsag.goldilocks_mul_ct_x86_64_mc_refines
+
+theorem goldilocks_mul_ct_aarch64_mc_refines :
+    ∃ slice prog, findSliceByNameBytes aarch64ExtractedSlices goldMulArmName = some slice ∧
+      decodeArm64Stream slice.code = some prog ∧
+      ∀ (s : Arm64State) (fuel : Nat), s.pc = 0 → s.halted = false → 29 ≤ fuel →
+        (runArm64 prog fuel s).1.halted = true ∧
+        ((runArm64 prog fuel s).1.gpr.get 0).toNat =
+          ((s.gpr.get 0).toNat * (s.gpr.get 1).toNat) % goldilocksPrime ∧
+        (runArm64 prog fuel s).1.mem = s.mem ∧
+        (∀ r : Nat, 2 ≤ r → r ≤ 8 → (runArm64 prog fuel s).1.gpr.get r = 0) :=
+  _root_.Qsag.goldilocks_mul_ct_aarch64_mc_refines
+
+theorem ct_eq_32_x86_64_mutant_refuted :
+    ((findSliceByNameBytes x86ExtractedSlices ctEq32X86Name).bind
+        (fun sl => decodeX86Stream (patchBytesAt sl.code 52 [0x83, 0xF0, 0x00]))).any
+      (fun p => (runX86 p 20 (x86Init 0 64 0 0 0)).1.halted &&
+        (runX86 p 20 (x86Init 0 64 0 0 0)).1.gpr.get 0 == 0) = true ∧
+    (∀ i : Nat, i < 32 →
+      (x86Init 0 64 0 0 0).mem ((x86Init 0 64 0 0 0).gpr.get 7 + UInt64.ofNat i) =
+      (x86Init 0 64 0 0 0).mem ((x86Init 0 64 0 0 0).gpr.get 6 + UInt64.ofNat i)) :=
+  _root_.Qsag.ct_eq_32_x86_64_mutant_refuted
+
+theorem ct_eq_32_x86_64_secret_branch_rejected :
+    (findSliceByNameBytes x86ExtractedSlices ctEq32X86Name).map
+        (fun sl => (checkX86ThreeWayNI sl.code
+            (mkContract "qsag_asm_ct_eq_32_x86_64" [4, 7, 6] [] [1, 2, 8]),
+          checkX86ThreeWayNI (patchBytesAt sl.code 30 [0x74, 0x01, 0x90])
+            (mkContract "qsag_asm_ct_eq_32_x86_64" [4, 7, 6] [] [1, 2, 8])))
+      = some (true, false) :=
+  _root_.Qsag.ct_eq_32_x86_64_secret_branch_rejected
+
+theorem goldilocks_mul_ct_x86_64_mutant_refuted :
+    ((findSliceByNameBytes x86ExtractedSlices goldMulX86Name).bind
+        (fun sl => decodeX86Stream (patchBytesAt sl.code 11 [0x48, 0xC1, 0xE9, 0x1F]))).any
+      (fun p => (runX86 p 25 (x86Init 0xFFFFFFFFFFFFFFFF 0xFFFFFFFFFFFFFFFF 0 0 0)).1.halted &&
+        ((runX86 p 25 (x86Init 0xFFFFFFFFFFFFFFFF 0xFFFFFFFFFFFFFFFF 0 0 0)).1.gpr.get 0).toNat !=
+          (0xFFFFFFFFFFFFFFFF * 0xFFFFFFFFFFFFFFFF) % goldilocksPrime) = true :=
+  _root_.Qsag.goldilocks_mul_ct_x86_64_mutant_refuted
+
+theorem goldilocks_mul_ct_aarch64_secret_branch_rejected :
+    (findSliceByNameBytes aarch64ExtractedSlices goldMulArmName).map
+        (fun sl => (checkArm64ThreeWayNI sl.code (mkContract "qsag_asm_goldilocks_mul_ct_aarch64" []),
+          checkArm64ThreeWayNI (patchBytesAt sl.code 24 [0x42, 0x00, 0x00, 0x54])
+            (mkContract "qsag_asm_goldilocks_mul_ct_aarch64" [])))
+      = some (true, false) :=
+  _root_.Qsag.goldilocks_mul_ct_aarch64_secret_branch_rejected
+
+/-! ## Tier 7. Production hypertree verifier, UC threshold bridge, StepOp256 extraction, TOPRF & crash-durable WAL -/
+
+theorem production_stateless_forgery_break (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (queries : List ProdSigningQuery) (msgStar : List UInt8) (sigStar : PqHashSig)
+    (hw : params.w = 4 ∨ params.w = 16) (hStateless : params.statefulJorts = false)
+    (hFresh : ∀ e ∈ productionSigningLog suite params sk queries, e.1 ≠ msgStar)
+    (hAccept : verifyProductionPqHashSig suite params (derivePublicKey suite params sk) msgStar
+      sigStar = true) :
+    ProdForsItsrBreak suite params (derivePublicKey suite params sk)
+      (productionSigningLog suite params sk queries) msgStar sigStar ∨
+    ProdSmTcrBreak suite params sk (productionSigningLog suite params sk queries) ∨
+    ProdPreimageBreak suite params sk (productionSigningLog suite params sk queries) msgStar sigStar :=
+  _root_.Qsag.production_stateless_forgery_break suite params sk queries msgStar sigStar
+    hw hStateless hFresh hAccept
+
+theorem production_stateful_forgery_break (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (queries : List ProdSigningQuery) (msgStar : List UInt8) (sigStar : PqHashSig)
+    (hw : params.w = 4 ∨ params.w = 16) (hStateful : params.statefulJorts = true)
+    (hOneTime : ∀ q, q ∈ queries → ∀ q', q' ∈ queries → q.epoch = q'.epoch → q = q')
+    (hFresh : ∀ e ∈ productionSigningLog suite params sk queries, e.1 ≠ msgStar)
+    (hAccept : verifyProductionPqHashSig suite params (derivePublicKey suite params sk) msgStar
+      sigStar = true) :
+    ProdSmTcrBreak suite params sk (productionSigningLog suite params sk queries) ∨
+    ProdPreimageBreak suite params sk (productionSigningLog suite params sk queries) msgStar sigStar :=
+  _root_.Qsag.production_stateful_forgery_break suite params sk queries msgStar sigStar
+    hw hStateful hOneTime hFresh hAccept
+
+theorem production_forgery_break_of_signingLog (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (queries : List ProdSigningQuery) (msgStar : List UInt8) (sigStar : PqHashSig)
+    (hw : params.w = 4 ∨ params.w = 16)
+    (hOneTime : params.statefulJorts = true →
+      ∀ q, q ∈ queries → ∀ q', q' ∈ queries → q.epoch = q'.epoch → q = q')
+    (hFresh : ∀ e ∈ productionSigningLog suite params sk queries, e.1 ≠ msgStar)
+    (hAccept : verifyProductionPqHashSig suite params (derivePublicKey suite params sk) msgStar
+      sigStar = true) :
+    ProdForsItsrBreak suite params (derivePublicKey suite params sk)
+      (productionSigningLog suite params sk queries) msgStar sigStar ∨
+    ProdSmTcrBreak suite params sk (productionSigningLog suite params sk queries) ∨
+    ProdPreimageBreak suite params sk (productionSigningLog suite params sk queries) msgStar sigStar :=
+  _root_.Qsag.production_forgery_break_of_signingLog suite params sk queries msgStar sigStar
+    hw hOneTime hFresh hAccept
+
+theorem production_checked_stateless_euf_cma_break (suite : TweakableHashSuite)
+    (params : PqHashParams) (sk : PqSecretKey) (queries : List ProdSigningQuery)
+    (msgStar : List UInt8) (sigStar : PqHashSig) (hw : params.w = 4 ∨ params.w = 16)
+    (hFresh : ∀ e ∈ productionSigningLog suite params sk queries, e.1 ≠ msgStar)
+    (hAccept : verifyProductionStatelessChecked suite params (derivePublicKey suite params sk)
+      msgStar sigStar = true) :
+    ProdForsItsrBreak suite params (derivePublicKey suite params sk)
+      (productionSigningLog suite params sk queries) msgStar sigStar ∨
+    ProdSmTcrBreak suite params sk (productionSigningLog suite params sk queries) ∨
+    ProdPreimageBreak suite params sk (productionSigningLog suite params sk queries) msgStar sigStar :=
+  _root_.Qsag.production_checked_stateless_euf_cma_break suite params sk queries msgStar sigStar
+    hw hFresh hAccept
+
+theorem validProductionJortsBatch_item_forgery_break (params : PqHashParams)
+    (items : List JortsBatchItem) (hValid : ValidProductionJortsBatch params items = true)
+    (item : JortsBatchItem) (hItem : item ∈ items)
+    (sk : PqSecretKey) (queries : List ProdSigningQuery)
+    (hPk : item.validatorPk = derivePublicKey poseidon2Suite params sk)
+    (hw : params.w = 4 ∨ params.w = 16)
+    (hOneTime : ∀ q, q ∈ queries → ∀ q', q' ∈ queries → q.epoch = q'.epoch → q = q')
+    (hFresh : ∀ e ∈ productionSigningLog poseidon2Suite params sk queries, e.1 ≠ item.message) :
+    ProdSmTcrBreak poseidon2Suite params sk (productionSigningLog poseidon2Suite params sk queries) ∨
+    ProdPreimageBreak poseidon2Suite params sk (productionSigningLog poseidon2Suite params sk queries)
+      item.message item.signature :=
+  _root_.Qsag.validProductionJortsBatch_item_forgery_break params items hValid item hItem
+    sk queries hPk hw hOneTime hFresh
+
+theorem prodEufCmaWin_rejects_signed_message (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProdEufCmaOutcome) (sig : PqHashSig)
+    (hSigned : (o.msgStar, sig) ∈ productionSigningLog suite params o.sk o.queries) :
+    prodEufCmaWin suite params o = false :=
+  _root_.Qsag.prodEufCmaWin_rejects_signed_message suite params o sig hSigned
+
+theorem production_euf_cma_advantage_bound {Ω : Type} (suite : TweakableHashSuite)
+    (params : PqHashParams) (hw : params.w = 4 ∨ params.w = 16)
+    (coins : List Ω) (game : Ω → ProdEufCmaOutcome) (isItsr isTcr isPre : Ω → Bool)
+    (hOneTime : params.statefulJorts = true → ∀ ω, ∀ q, q ∈ (game ω).queries →
+      ∀ q', q' ∈ (game ω).queries → q.epoch = q'.epoch → q = q')
+    (hItsr : ∀ ω, ProdForsItsrBreak suite params (derivePublicKey suite params (game ω).sk)
+      (productionSigningLog suite params (game ω).sk (game ω).queries) (game ω).msgStar
+      (game ω).sigStar → isItsr ω = true)
+    (hTcr : ∀ ω, ProdSmTcrBreak suite params (game ω).sk
+      (productionSigningLog suite params (game ω).sk (game ω).queries) → isTcr ω = true)
+    (hPre : ∀ ω, ProdPreimageBreak suite params (game ω).sk
+      (productionSigningLog suite params (game ω).sk (game ω).queries) (game ω).msgStar
+      (game ω).sigStar → isPre ω = true) :
+    hitCount (fun ω => prodEufCmaWin suite params (game ω)) coins ≤
+      hitCount isItsr coins + hitCount isTcr coins + hitCount isPre coins :=
+  _root_.Qsag.production_euf_cma_advantage_bound suite params hw coins game isItsr isTcr isPre
+    hOneTime hItsr hTcr hPre
+
+theorem productionThresholdSignOracle_eq (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (sk : PqSecretKey) (hm : o.MatchesKey suite sk)
+    (grindLimit : Nat) (ser : Option PqHashSig → ByteArray) :
+    productionThresholdSignOracle suite params o sk.pkSeed grindLimit ser =
+      fun req => ser (evalProductionStatelessSign suite params sk req.msg req.optRand grindLimit) :=
+  _root_.Qsag.productionThresholdSignOracle_eq suite params o sk hm grindLimit ser
+
+theorem productionForgeryBreak_of_wins {AdvState : Type}
+    (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey) (grindLimit : Nat)
+    (hw : params.w = 4 ∨ params.w = 16) (hStateless : params.statefulJorts = false)
+    (forgeOut : ExecTranscript AdvState → List UInt8 × PqHashSig) (tr : ExecTranscript AdvState)
+    (hWin : productionForgeryWins suite params (derivePublicKey suite params sk) forgeOut tr = true) :
+    ProductionTranscriptBreak suite params sk grindLimit forgeOut tr :=
+  _root_.Qsag.productionForgeryBreak_of_wins suite params sk grindLimit hw hStateless forgeOut tr hWin
+
+theorem uc_production_threshold_forgery_transfer
+    {PK ShareT SessionTape R1St R2St R3St SimTape SimR1 SimR2 SimR3 AdvState : Type}
+    (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (o : ProductionPqHashMpcOracles) (hm : o.MatchesKey suite sk)
+    (grindLimit : Nat) (ser : Option PqHashSig → ByteArray)
+    (hw : params.w = 4 ∨ params.w = 16) (hStateless : params.statefulJorts = false)
+    (proto : InteractiveThresholdProtocol PK ShareT SessionTape R1St R2St R3St)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (A : UcRushingAdversary AdvState) (Q_s card : Nat)
+    (realTapes : Fin card → Nat → SessionTape) (simTapes : Fin card → Nat → SimTape)
+    (cl : RealClusterState PK ShareT) (icl : IdealClusterState PK) (advSt : AdvState)
+    (forgeOut : ExecTranscript AdvState → List UInt8 × PqHashSig) (eps : Nat × Nat)
+    (hUc : ratLe (rationalAcceptDiff card
+      (fun ω => (RealProtocolExec proto A Q_s (realTapes ω) cl advSt).2) card
+      (fun ω => (IdealFunctionalityExec
+        (productionThresholdSignOracle suite params o sk.pkSeed grindLimit ser)
+        sim A Q_s (simTapes ω) icl advSt).2)
+      (productionForgeryWins suite params (derivePublicKey suite params sk) forgeOut)) eps) :
+    let oracle := productionThresholdSignOracle suite params o sk.pkSeed grindLimit ser
+    let win := productionForgeryWins suite params (derivePublicKey suite params sk) forgeOut
+    let realView := fun ω => (RealProtocolExec proto A Q_s (realTapes ω) cl advSt).2
+    let idealView := fun ω => (IdealFunctionalityExec oracle sim A Q_s (simTapes ω) icl advSt).2
+    (oracle = fun req => ser (evalProductionStatelessSign suite params sk req.msg req.optRand grindLimit)) ∧
+    distAcceptCount card realView win * eps.2 ≤
+      distAcceptCount card idealView win * eps.2 + eps.1 * card ∧
+    (∀ ω : Fin card, win (idealView ω) = true →
+      ProductionTranscriptBreak suite params sk grindLimit forgeOut (idealView ω)) :=
+  _root_.Qsag.uc_production_threshold_forgery_transfer suite params sk o hm grindLimit ser
+    hw hStateless proto sim A Q_s card realTapes simTapes cl icl advSt forgeOut eps hUc
+
+theorem stepOp256TableOk_xmss_extract (slots : List StepOpSlot) (rows : List StepOpRow)
+    (k : Nat) (pub : AggValidatorPk × Digest5) (msg : List UInt8)
+    (hTable : stepOp256TableOk .xmssPoseidon2 slots rows = true)
+    (hSlot : slots[k]? = some (some pub))
+    (hProf : pub.1.profile = .xmssPoseidon2)
+    (hMu : pub.2 = computeMessageMu pub.1 msg) :
+    verifyAggNativeSig xmssPoseidon2Geom pub.1 msg
+      (stepXmssSig (stepOpSlotRow .xmssPoseidon2 rows k)) = true :=
+  _root_.Qsag.stepOp256TableOk_xmss_extract slots rows k pub msg hTable hSlot hProf hMu
+
+theorem stepOp256TableOk_corduroy_extract (slots : List StepOpSlot) (rows : List StepOpRow)
+    (k : Nat) (pub : AggValidatorPk × Digest5) (msg : List UInt8)
+    (hTable : stepOp256TableOk .corduroyPoseidon2 slots rows = true)
+    (hSlot : slots[k]? = some (some pub))
+    (hProf : pub.1.profile = .corduroyPoseidon2)
+    (hMu : pub.2 = computeMessageMu pub.1 msg) :
+    verifyAggNativeSig corduroyPoseidon2Geom pub.1 msg
+      (stepCordSig (stepOpSlotRow .corduroyPoseidon2 rows k)) = true :=
+  _root_.Qsag.stepOp256TableOk_corduroy_extract slots rows k pub msg hTable hSlot hProf hMu
+
+theorem stepXmssRows_roundTrip (pk : AggValidatorPk) (msg : List UInt8) (sig : AggNativeSignature)
+    (h : verifyAggNativeSig xmssPoseidon2Geom pk msg sig = true) :
+    verifyAggNativeSig xmssPoseidon2Geom pk msg
+      (stepXmssSig (stepOpSlotRow .xmssPoseidon2 (stepXmssRows pk (computeMessageMu pk msg) sig) 0)) = true :=
+  _root_.Qsag.stepXmssRows_roundTrip pk msg sig h
+
+theorem rss3_toprf_honest {F : Type} [LawfulCommRing F] [DecidableEq F] (shares : Fin 3 → F)
+    (responses : Fin 3 → Fin 3 → Option F)
+    (h : ∀ p c, p ≠ c → responses p c = some (shares c)) :
+    reconstructRss3Toprf responses = some (sum3 shares) :=
+  _root_.Qsag.rss3_toprf_honest shares responses h
+
+theorem rss3_toprf_single_byzantine_detected {F : Type} [LawfulCommRing F] [DecidableEq F]
+    (shares : Fin 3 → F) (liar : Fin 3) (responses : Fin 3 → Fin 3 → Option F)
+    (h : ∀ p c, p ≠ c → p ≠ liar → responses p c = some (shares c)) :
+    reconstructRss3Toprf responses = some (sum3 shares) ∨
+      reconstructRss3Toprf responses = none :=
+  _root_.Qsag.rss3_toprf_single_byzantine_detected shares liar responses h
+
+theorem rss3_two_server_reconstruct {F : Type} [LawfulCommRing F]
+    (a b : Fin 3) (hab : a ≠ b) (shares : Fin 3 → F) :
+    (fun c => if c = a then rss3ServerView b shares c else rss3ServerView a shares c) =
+      shares :=
+  _root_.Qsag.rss3_two_server_reconstruct a b hab shares
+
+theorem rss3_client_blind_perfect_privacy {F : Type} [LawfulCommRing F]
+    (p : Fin 3) (view : Fin 3 → F) (hview : view p = CommRingOps.zero) (x : F) :
+    ∃ c : Fin 3 → F, (sum3 c = x ∧ rss3ServerView p c = view) ∧
+      ∀ c' : Fin 3 → F, sum3 c' = x → rss3ServerView p c' = view → c' = c :=
+  _root_.Qsag.rss3_client_blind_perfect_privacy p view hview x
+
+theorem tooth_rss3_single_silent_server_aborts :
+    ∃ (shares : Fin 3 → Goldilocks) (liar : Fin 3)
+      (responses : Fin 3 → Fin 3 → Option Goldilocks),
+      (∀ p c, p ≠ c → p ≠ liar → responses p c = some (shares c)) ∧
+      reconstructRss3Toprf responses = none :=
+  _root_.Qsag.tooth_rss3_single_silent_server_aborts
+
+theorem toprf_2of5_byzantine_unique_decoding (key slope : Goldilocks)
+    (ys : Fin 5 → Option Goldilocks) (h : ToprfOneByzantine toprfPoint ys (key, slope)) :
+    (∀ l : Goldilocks × Goldilocks,
+      3 ≤ count5 (toprfAgree toprfPoint ys l) → l = (key, slope)) ∧
+    extractUniqueToprfEval Goldilocks.inv toprfPoint ys = some key ∧
+    lineAt (key, slope) CommRingOps.zero = key :=
+  _root_.Qsag.toprf_2of5_byzantine_unique_decoding key slope ys h
+
+theorem replicated_toprf_any_single_byzantine {F : Type} [LawfulCommRing F] [DecidableEq F]
+    (shares : Fin 5 → F) (liar : Fin 5) (responses : Fin 5 → Fin 5 → Option F)
+    (h : ∀ p c, p ≠ c → p ≠ liar → responses p c = some (shares c)) :
+    reconstructReplicatedToprf2of5 responses = some (sum5 shares) :=
+  _root_.Qsag.replicated_toprf_any_single_byzantine shares liar responses h
+
+theorem baggy_multiturn_durable_and_non_equivocating (identity : BaggyLedgerIdentity)
+    (ops : List BaggyReleaseOp) :
+    let final := baggyReleaseTrace (BaggyReleaseState.init identity) ops
+    (∀ r ∈ final.released,
+      lookupDurableDigits final.durable r.layer r.tree r.kp = some r.digits) ∧
+    (∀ r₁ ∈ final.released, ∀ r₂ ∈ final.released,
+      r₁.layer = r₂.layer → r₁.tree = r₂.tree → r₁.kp = r₂.kp → r₁.digits = r₂.digits) :=
+  _root_.Qsag.baggy_multiturn_durable_and_non_equivocating identity ops
+
+theorem rss256_recorded_trace_integrity (ops : List Rss256EngineOp) :
+    (rss256TraceHardened Rss256EngineState.init ops).1.Checked ∧
+    (∀ out ∈ (rss256TraceHardened Rss256EngineState.init ops).2,
+      ∃ w : Rss256InlineWave, ∃ a b : Tower128,
+        out = rss256GateOutput w.input w.gates ∧
+        (out = rss256GateIdeal w.input w.gates ∨ (Rss256Wave.inlineWave w).BadChallenge a b)) :=
+  _root_.Qsag.rss256_recorded_trace_integrity ops
+
+open RustDurability in
+theorem burnAppend_sync_welds_host_reserve (key identity keyId genesis : RustDurability.Bytes)
+    (s : BurnAppendState) (f : BurnJournalFile) (party epoch : Nat)
+    (hOpen : openBurnJournal (burnRecordTag key keyId genesis)
+      (burnGenesisTag key identity keyId genesis) f = some (s.bodies, s.lastTag))
+    (hPending : s.pending = some (burnRecord key keyId genesis s.lastTag party epoch))
+    (hVisible : s.visible = s.disk ++ burnRecord key keyId genesis s.lastTag party epoch)
+    (hFailed : s.failed = false)
+    (hFresh : burnRecordBody party epoch ∉ s.bodies) :
+    BurnHostStep (burnRecordTag key keyId genesis) (burnGenesisTag key identity keyId genesis)
+      (burnAppendHostOfFile s f)
+      (burnAppendHostOfFile (syncBurnAppend s true).1
+        (appendBurnRecord (burnRecordTag key keyId genesis) s.lastTag
+          (burnRecordBody party epoch) f)) ∧
+    BurnHostInv (burnRecordTag key keyId genesis) (burnGenesisTag key identity keyId genesis)
+      (burnAppendHostOfFile (syncBurnAppend s true).1
+        (appendBurnRecord (burnRecordTag key keyId genesis) s.lastTag
+          (burnRecordBody party epoch) f)) :=
+  _root_.Qsag.RustDurability.burnAppend_sync_welds_host_reserve key identity keyId genesis s f party epoch
+    hOpen hPending hVisible hFailed hFresh
+
+end Qsag.Apex
