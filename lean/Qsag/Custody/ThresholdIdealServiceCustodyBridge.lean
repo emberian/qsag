@@ -1,10 +1,10 @@
 module
-public import Qsag.ThresholdIdealService
-public import Qsag.SeparatedCustodyResourceHistory
-import all Qsag.ThresholdIdealService
-import all Qsag.SeparatedCustodyUcResource
-import all Qsag.SeparatedCustodyUcBridge
-import all Qsag.ThresholdApproval
+public import Qsag.Exec.ThresholdIdealService
+public import Qsag.Custody.SeparatedCustodyResourceHistory
+import all Qsag.Exec.ThresholdIdealService
+import all Qsag.Custody.SeparatedCustodyUcResource
+import all Qsag.Custody.SeparatedCustodyUcBridge
+import all Qsag.Protocol.Threshold.ThresholdApproval
 
 public section
 namespace Qsag.ThresholdIdealService
