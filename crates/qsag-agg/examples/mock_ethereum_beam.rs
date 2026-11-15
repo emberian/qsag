@@ -38,7 +38,7 @@
 //!      phases from an explicit model (`QSAG_BEAM_PROPOSAL_MS`, `QSAG_BEAM_GOSSIP_HOP_MS`,
 //!      `QSAG_BEAM_PROPOSER_MBPS`, `QSAG_BEAM_CLIENT_MBPS`).
 //!    - `QSAG_BEAM_SUBNETS=16,64,128` selects the subnet counts (`0` skips the section);
-//!      `QSAG_BEAM_JOINT_WORKERS=n` bounds the single-host joint prove's concurrency.
+//!      `QSAG_BEAM_JOINT_WORKERS=n` bounds CPU workers; `QSAG_PROVER_JOBS` (default1) bounds active batches.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -1168,13 +1168,14 @@ fn run_full_network_section(workers: usize, verify_iters: usize) {
             },
         );
         println!(
-            "    Compact   : {} B ({:.1} KiB) commitment, built in {:.1} ms; checked against evidence in {:.2} ms (evidence from a cold-registry verify: {:.1} ms)",
+            "    Compact   : {} B ({:.1} KiB) commitment, reuse-only build {:.1} ms; checked against evidence in {:.2} ms (fresh evidence with prepared registry: {:.1} ms)",
             r.compact_bytes,
             r.compact_bytes as f64 / 1024.0,
             r.compact_build_ms,
             r.compact_check_p50_ms,
             r.evidence_ms,
         );
+        println!("                fresh-evidence + build pipeline: {:.2} ms; cached evidence eliminates a second child verification.", r.evidence_ms + r.compact_build_ms);
         println!(
             "                commitment relation alone: {:.2} ms. It certifies the summary hash chain, not the child proofs or signatures.",
             r.commitment_only_p50_ms,

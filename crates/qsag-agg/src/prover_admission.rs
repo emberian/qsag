@@ -28,3 +28,30 @@ impl Drop for Permit {
         READY.notify_all();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn admission_bounds_live_witnesses_and_releases_on_unwind() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let live = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let (live, peak)=(&live, &peak);
+                scope.spawn(move || {
+                    let _permit=acquire();
+                    let n=live.fetch_add(1,Ordering::SeqCst)+1;
+                    peak.fetch_max(n,Ordering::SeqCst);
+                    for _ in 0..32 {std::thread::yield_now();}
+                    live.fetch_sub(1,Ordering::SeqCst);
+                });
+            }
+        });
+        assert!(peak.load(Ordering::SeqCst)<=prover_parallel_jobs());
+        let result=std::panic::catch_unwind(|| {let _permit=acquire();panic!("unwind");});
+        assert!(result.is_err());
+        let _next=acquire();
+    }
+}
