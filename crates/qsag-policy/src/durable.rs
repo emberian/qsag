@@ -748,6 +748,144 @@ mod tests {
     }
 
     #[test]
+    fn merge_containment_agrees_with_the_quadratic_definition() {
+        let id = |b: u8| [b; 32];
+        let cases: [(&[u8], &[u8], Option<u8>); 9] = [
+            (&[], &[], None),
+            (&[], &[1, 2], None),
+            (&[1, 3], &[1, 2, 3], None),
+            (&[1, 3], &[1, 2], None),
+            (&[4], &[], None),
+            (&[1, 2, 9], &[9], Some(2)),
+            (&[1, 2, 9], &[9], Some(1)),
+            (&[5, 6], &[4, 5, 6, 7], Some(0)),
+            (&[5, 8], &[4, 5, 6, 7], Some(5)),
+        ];
+        for (old, new, floor) in cases {
+            let old: Vec<_> = old.iter().map(|b| id(*b)).collect();
+            let new: Vec<_> = new.iter().map(|b| id(*b)).collect();
+            let floor = floor.map(id);
+            let quadratic = old
+                .iter()
+                .all(|v| new.contains(v) || floor.is_some_and(|f| *v <= f));
+            assert_eq!(retains_burns(&old, &new, floor), quadratic);
+        }
+    }
+
+    #[test]
+    fn newer_window_checkpoint_restores_over_live_floors_and_burns() {
+        let key = [0x42; 32];
+        let provision = || {
+            let mut guards = trusted_dealer_setup_for_testing([0x63; 32], &[1, 2]);
+            guards.remove(0).with_window_authority([7; 32], [8; 32]).unwrap()
+        };
+        let burn = |guard: &mut PolicySignerGuardShare, spend: u128, tag: u8| {
+            guard
+                .record_approved_intent(1000, spend, [tag; 32], [tag ^ 0x80; 32])
+                .unwrap();
+        };
+        // The live handle: window 0 with floors and burned identifiers above them.
+        let mut live = provision();
+        burn(&mut live, 10, 0x20);
+        burn(&mut live, 20, 0x30);
+        live.compact_monotone_replay_floor([0x10; 32], [0x90; 32])
+            .unwrap();
+        let same_window = live.export_durable_checkpoint(&key, 1);
+        // A replica that moved on to window 1, where nothing is floored or burned yet.
+        let mut ahead = provision();
+        ahead
+            .restore_from_durable_checkpoint(&same_window, &key, 1)
+            .unwrap();
+        ahead
+            .advance_velocity_window(&WindowAdvanceAuthorization::new(&[8; 32], &[7; 32], 0, 1))
+            .unwrap();
+        burn(&mut ahead, 5, 0x01);
+        let newer_window = ahead.export_durable_checkpoint(&key, 2);
+        assert_eq!(
+            live.restore_from_durable_checkpoint(&newer_window, &key, 2),
+            Ok(2)
+        );
+        assert_eq!(live.current_window_id(), 1);
+        assert_eq!(live.accumulated_window_spend(), 5);
+        assert!(live.is_nonce_burned(&[0x01; 32]));
+        assert!(!live.is_nonce_burned(&[0x20; 32]));
+        assert_eq!(live.min_nonce_watermark, None);
+
+        // Within one window, losing a burn or lowering a floor is still a rollback.
+        let mut live = provision();
+        burn(&mut live, 10, 0x20);
+        let before_burn = {
+            let mut earlier = provision();
+            earlier.record_approved_intent(1000, 10, [0x21; 32], [0xa1; 32]).unwrap();
+            earlier.export_durable_checkpoint(&key, 5)
+        };
+        assert_eq!(
+            live.restore_from_durable_checkpoint(&before_burn, &key, 0),
+            Err(PolicyGuardError::Rollback)
+        );
+        let unfloored = live.export_durable_checkpoint(&key, 6);
+        live.compact_monotone_replay_floor([0x10; 32], [0x10; 32])
+            .unwrap();
+        assert_eq!(
+            live.restore_from_durable_checkpoint(&unfloored, &key, 0),
+            Err(PolicyGuardError::Rollback)
+        );
+        assert!(live.is_nonce_burned(&[0x20; 32]));
+        assert_eq!(live.min_nonce_watermark, Some([0x10; 32]));
+    }
+
+    /// Bookkeeping only: a guard with `slots` pool entries and `peers` peer bitmaps.
+    #[cfg(feature = "std")]
+    fn wide_guard(slots: usize, peers: u16) -> PolicySignerGuardShare {
+        let mut guard = trusted_dealer_setup_for_testing([0x64; 32], &[1, 2]).remove(0);
+        guard.preproc_r.resize(slots, [0; 2]);
+        guard.consumed_peer_slots = (2..2 + peers)
+            .map(|peer| (peer, alloc::vec![0u64; slots.div_ceil(64)]))
+            .collect();
+        guard
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn max_capacity_many_peer_checkpoint_restores_within_its_derived_bound() {
+        // 700 peers at the maximum pool size: larger than any fixed per-capacity allowance.
+        let guard = wide_guard(MAX_POLICY_CAPACITY, 700);
+        let bound = guard.max_durable_checkpoint_len().unwrap();
+        let encoded = guard.export_durable_checkpoint(&[1; 32], 1).len();
+        assert!(encoded > MAX_POLICY_CAPACITY * 80 + 1024 * 1024);
+        assert_eq!(bound - encoded, 2 * MAX_POLICY_CAPACITY * 32);
+        let path = std::env::temp_dir().join(std::format!(
+            "policy-wide-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let disk = FsPolicyDurableLedger::create_new(&path, [8; 32], &guard).unwrap();
+        let generation = disk.generation();
+        drop(disk);
+        let mut restarted = wide_guard(MAX_POLICY_CAPACITY, 700);
+        let reopened =
+            FsPolicyDurableLedger::open_existing(&path, [8; 32], &mut restarted, generation);
+        // A guard committed to a smaller peer set refuses the same file by size alone.
+        let mut narrow = wide_guard(MAX_POLICY_CAPACITY, 1);
+        assert!(narrow.max_durable_checkpoint_len().unwrap() < encoded);
+        let refused = reopened.and_then(|disk| {
+            drop(disk);
+            FsPolicyDurableLedger::open_existing(&path, [8; 32], &mut narrow, generation)
+                .map(|_| ())
+        });
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(std::format!("{}.lock", path.display())).unwrap();
+        assert_eq!(
+            refused.unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert_eq!(restarted.consumed_peer_slots.len(), 700);
+    }
+
+    #[test]
     fn dynamic_slot_bitmap_restores_above_64_without_reopening_consumed_slots() {
         fn expanded() -> Vec<PolicySignerGuardShare> {
             let mut guards = trusted_dealer_setup_for_testing([0x61; 32], &[1, 2]);
