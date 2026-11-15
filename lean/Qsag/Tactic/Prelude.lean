@@ -458,3 +458,677 @@ theorem frameList_inj {a b : List UInt8} (h : frameList a = frameList b) : a = b
 
 end Qsag
 
+/-! ## 3. `MetaM` / `TacticM` / `CommandElabM` Automation (`LAW-M2`) -/
+
+namespace Qsag.Tactic.AssuranceKit
+
+open Lean Meta Elab Command Tactic
+
+/-- Share a checked proof without abstracting away the values of local `let`s.
+    The kernel still checks the auxiliary theorem and its application. -/
+elab "qsag_aux_lemma" " => " body:tacticSeq : tactic => withMainContext do
+  let goal ← getMainGoal
+  let remaining ← Tactic.run goal (evalTactic body)
+  unless remaining.isEmpty do
+    throwError "qsag_aux_lemma requires all goals to be closed"
+  let proof ← instantiateMVars (mkMVar goal)
+  let shared ← mkAuxTheorem (← goal.getType) proof (zetaDelta := true)
+  goal.assign shared
+
+/-- Strip outer `Expr.mdata` wrappers. -/
+private meta partial def stripMData (e : Expr) : Expr :=
+  match e with
+  | .mdata _ inner => stripMData inner
+  | _ => e
+
+/-- Strip outer `.lam`, `.letE`, and `.mdata` binders to inspect a proof's head combinator. -/
+private meta partial def stripBinders (e : Expr) : Expr :=
+  match stripMData e with
+  | .lam _ _ body _ => stripBinders body
+  | .letE _ _ val body _ => stripBinders (body.instantiate1 val)
+  | core => core
+
+/-- Walk every available body once, including types and constructor dependencies.
+Imported opaque bodies require Lean's exported kernel axiom summaries as well. -/
+private meta partial def auditDag (env : Environment) (todo : List Name)
+    (seen : Std.HashSet Name := {}) : CoreM Unit := do
+  match todo with
+  | [] => pure ()
+  | n :: rest =>
+    if seen.contains n then return ← auditDag env rest seen
+    let seen := seen.insert n
+    if [``sorryAx, ``Classical.choice, `Lean.ofReduceBool, `Lean.ofReduceNat,
+        `Lean.trustCompiler].contains n then
+      throwError "constructive audit: forbidden dependency {n}"
+    let some ci := env.checked.get.find? n | throwError "constructive audit: missing dependency {n}"
+    if let .axiomInfo _ := ci then
+      let axs ← Lean.collectAxioms n
+      for ax in axs do
+        unless ax == ``propext || ax == ``Quot.sound do
+          throwError "constructive audit: forbidden axiom {ax} via {n}"
+    let deps := ci.type.getUsedConstants.toList ++
+      (ci.value? (allowOpaque := true)).toList.flatMap (·.getUsedConstants.toList)
+    let deps := match ci with
+      | .inductInfo v => v.ctors ++ deps
+      | _ => deps
+    auditDag env (deps ++ rest) seen
+
+private meta def literal? (e : Expr) : MetaM (Option Expr) := do
+  let e ← whnf e
+  match e with
+  | .lit _ => return some e
+  | _ =>
+    if e.isConstOf ``Bool.true || e.isConstOf ``Bool.false || e.isConstOf ``Nat.zero then
+      return some e
+    return none
+
+/-- Deliberately syntactic diagnostics, not a decision procedure for satisfiability.
+Use the opened proof body, not its lambda binder types, to detect unused premises. -/
+private meta def auditPremises (ci : ConstantInfo) : MetaM Unit := do
+  let some value := ci.value? (allowOpaque := true)
+    | throwError "constructive audit: proof body unavailable; use import all"
+  forallTelescope ci.type fun xs _ => do
+    let body := (mkAppN value xs).headBeta
+    let mut eqs : Array (Expr × Expr) := #[]
+    for x in xs do
+      let ty ← inferType x
+      let t ← whnf ty
+      if [``False, ``Empty, ``PEmpty].any t.getAppFn.isConstOf then
+        throwError "constructive audit: empty premise {ty}"
+      if ← isProp ty then
+        unless body.containsFVar x.fvarId! do
+          throwError "constructive audit: unused Prop premise {ty}"
+      -- Not and Ne unfold to an arrow whose codomain is False.
+      if let .forallE _ dom cod _ := t then
+        if cod.isConstOf ``False then
+          if let some (_, a, b) := dom.eq? then
+            if ← withoutModifyingState (isDefEq a b) then
+              throwError "constructive audit: reflexive disequality premise {ty}"
+      if let some (_, a, b) := t.eq? then
+        for (target, lit) in #[(a, b), (b, a)] do
+          if let some v ← literal? lit then
+            if let some u ← literal? target then
+              unless ← withoutModifyingState (isDefEq u v) do
+                throwError "constructive audit: contradictory literal equality {ty}"
+            for (prev, pv) in eqs do
+              if !(← withoutModifyingState (isDefEq pv v)) &&
+                  (← withoutModifyingState (isDefEq prev target)) then
+                throwError "constructive audit: conflicting equalities for {target}"
+            eqs := eqs.push (target, v)
+
+/-- Strict constructive theorem audit, with structural premise diagnostics. -/
+meta def verifyConstructiveDecl (id : Ident) : CommandElabM (Name × ConstantInfo) := do
+  let n ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo id
+  let env ← getEnv
+  let some ci := env.find? n | throwErrorAt id "unknown theorem {n}"
+  unless ci matches .thmInfo _ do
+    throwErrorAt id "constructive audit: expected a theorem with visible body: {n}"
+  liftCoreM <| auditDag env [n]
+  let axs ← liftCoreM <| Lean.collectAxioms n
+  for ax in axs do
+    unless ax == ``propext || ax == ``Quot.sound do
+      throwErrorAt id "constructive audit: forbidden axiom {ax}"
+  liftTermElabM <| auditPremises ci
+  liftTermElabM <| forallTelescope ci.type fun _ conclusion => do
+    if (← whnf conclusion).isConstOf ``True then
+      throwError "constructive audit: trivial True conclusion"
+  if (stripBinders (ci.value! (allowOpaque := true))).getAppFn.isConstOf ``True.intro then
+    throwErrorAt id "constructive audit: trivial True conclusion"
+  return (n, ci)
+
+syntax "#verify_constructive " ident+ : command
+elab_rules : command
+  | `(command| #verify_constructive $[$ids:ident]*) => do
+    for id in ids do discard <| verifyConstructiveDecl id
+
+/-- Only domain operations/predicates count; carrier types and constructors do not.
+Inspect one definition layer so a named protocol wrapper can expose its checker. -/
+private meta def domainConstants (e : Expr) : MetaM (Array Name) := do
+  let env ← getEnv
+  let direct := e.getUsedConstants
+  let mut names := direct
+  for n in direct do
+    if (`Qsag).isPrefixOf n then
+      if let some ci := env.find? n then
+        if let .defnInfo d := ci then
+          names := names ++ d.value.getUsedConstants
+  names.filterM fun n => do
+    unless (`Qsag).isPrefixOf n do return false
+    let some ci := env.find? n | return false
+    match ci with
+    | .defnInfo _ => forallTelescope ci.type fun xs result =>
+        return (!xs.isEmpty && !result.isSort) || result == mkSort Level.zero
+    | .inductInfo _ => forallTelescope ci.type fun _ result =>
+        return result == mkSort Level.zero
+    | _ => return false
+
+private meta def requireOverlap (a b : Expr) : MetaM Unit := do
+  let da ← domainConstants a
+  let db ← domainConstants b
+  if (da.filter db.contains).isEmpty then
+    throwError "pair audit: no shared protocol/domain constants"
+
+private meta partial def meaningfulWitness (e : Expr) : MetaM Bool := do
+  if e.isConstOf ``True then return false
+  if let some (_, a, b) := e.eq? then
+    return !(← withoutModifyingState (isDefEq a b))
+  if e.getAppFn.isConstOf ``And then
+    if ← meaningfulWitness e.getAppArgs[0]! then return true
+    return ← meaningfulWitness e.getAppArgs[1]!
+  if e.getAppFn.isConstOf ``Or then
+    unless ← meaningfulWitness e.getAppArgs[0]! do return false
+    return ← meaningfulWitness e.getAppArgs[1]!
+  if e.getAppFn.isConstOf ``Exists then
+    let args := e.getAppArgs
+    return ← withLocalDeclD `_ args[0]! fun x => meaningfulWitness ((mkApp args[1]! x).headBeta)
+  return true
+
+private meta partial def refutationShape (e : Expr) : MetaM Bool := do
+  let e := stripMData e
+  if e.getAppFn.isConstOf ``Exists then return ← meaningfulWitness e
+  if e.getAppFn.isConstOf ``Not then
+    return !(← whnf e.getAppArgs[0]!).isConstOf ``False
+  if e.getAppFn.isConstOf ``Ne then
+    let args := e.getAppArgs
+    return !(← withoutModifyingState (isDefEq args[1]! args[2]!))
+  if let some (_, a, b) := e.eq? then
+    if ← withoutModifyingState (isDefEq a b) then return false
+    return #[a, b].any fun x =>
+      x.isConstOf ``Bool.false || x.getAppFn.isConstOf ``Except.error ||
+        x.getAppFn.isConstOf ``Option.none
+  if let .forallE _ dom body _ := e then
+    if body.isConstOf ``False then return true
+    return ← withLocalDeclD `_ dom fun x => refutationShape (body.instantiate1 x)
+  return false
+
+private meta def checkToothPair (secId toothId : Ident) : CommandElabM Unit := do
+  let (sn, s) ← verifyConstructiveDecl secId
+  let (tn, t) ← verifyConstructiveDecl toothId
+  if sn == tn || s.type == t.type then
+    throwError "pair audit: declarations and propositions must be distinct"
+  liftTermElabM do
+    requireOverlap s.type t.type
+    unless ← refutationShape t.type do
+      throwError "pair audit: tooth has no counterexample/refutation conclusion"
+
+syntax "#tooth_pair " ident &"vs" ident : command
+syntax "#tooth_pair " ident ident : command
+elab_rules : command
+  | `(command| #tooth_pair $s:ident vs $t:ident) => checkToothPair s t
+  | `(command| #tooth_pair $s:ident $t:ident) => checkToothPair s t
+
+/-- Reveal constructor witnesses without normalizing their cryptographic data. -/
+private meta def witnessHead (e : Expr) (fuel : Nat := 64) : MetaM Expr := do
+  let e ← whnf e
+  match fuel with
+  | 0 => return e
+  | fuel + 1 =>
+    if let .const n ls := e.getAppFn then
+      if let some ci := (← getEnv).find? n then
+        if let some value := ci.value? (allowOpaque := true) then
+          return ← witnessHead (mkAppN (value.instantiateLevelParams ci.levelParams ls) e.getAppArgs) fuel
+    return e
+
+/-- Preserve one common witness assignment across all premises. -/
+private meta partial def withWitnessFacts (e proof : Expr) (facts : Array Expr)
+    (k : Array Expr → MetaM Unit) : MetaM Unit := do
+  if e.getAppFn.isConstOf ``Exists then
+    let args := e.getAppArgs
+    let p ← witnessHead proof
+    if p.getAppFn.isConstOf ``Exists.intro then
+      let pa := p.getAppArgs
+      let v := pa[pa.size - 2]!
+      withWitnessFacts ((mkApp args[1]! v).headBeta) pa.back! (facts.push v) k
+    else
+      withLocalDeclD `_ args[0]! fun v =>
+        let ty := (mkApp args[1]! v).headBeta
+        withLocalDeclD `_ ty fun h => withWitnessFacts ty h (facts.push v) k
+  else if e.getAppFn.isConstOf ``Nonempty then
+    let carrier ← whnf e.getAppArgs[0]!
+    let useValue (v : Expr) : MetaM Unit := do
+      if carrier.getAppFn.isConstOf ``Subtype then
+        let val ← mkAppM ``Subtype.val #[v]
+        let prop ← mkAppM ``Subtype.property #[v]
+        k (facts ++ #[v, val, prop])
+      else k (facts.push v)
+    let p ← witnessHead proof
+    if p.getAppFn.isConstOf ``Nonempty.intro then useValue p.getAppArgs.back!
+    else withLocalDeclD `_ carrier useValue
+  else if e.getAppFn.isConstOf ``And then
+    withWitnessFacts e.getAppArgs[0]! (← mkAppM ``And.left #[proof]) facts fun facts => do
+      withWitnessFacts e.getAppArgs[1]! (← mkAppM ``And.right #[proof]) facts k
+  else k (facts.push (mkApp2 (mkConst ``id [Level.zero]) e proof))
+
+/-- Failed candidate unification must not constrain later witness candidates. -/
+private meta def matchWitnessType (a b : Expr) : MetaM Bool := do
+  -- Match the stated predicate before unfolding. Unfolding a different predicate
+  -- can both trigger enormous computations and assign unrelated index variables.
+  let a ← instantiateMVars a
+  let b ← instantiateMVars b
+  let ah := a.getAppFn
+  let bh := b.getAppFn
+  if ah.isConst && bh.isConst && ah.constName! != bh.constName! then return false
+  let saved ← saveState
+  if ← isDefEq a b then return true
+  saved.restore
+  return false
+
+/-- Construct data without choice, including ordinary records lacking an Inhabited instance.
+Fuel bounds constructor search; every successful term is subsequently type-checked and audited. -/
+private meta def constructWitnessValue (ty : Expr) (fuel : Nat := 16) : MetaM Expr := do
+  try return ← mkDefault ty catch _ => pure ()
+  if ← isProp ty then
+    let dec ← mkDecide ty
+    unless ← isDefEq dec (mkConst ``Bool.true) do throwError "unproved constructor field"
+    return ← mkDecideProof ty
+  match fuel with
+  | 0 => throwError "inhabitedness audit: constructor search exhausted"
+  | fuel + 1 =>
+    let ty ← whnf ty
+    if ty.isForall then
+      return ← forallTelescope ty fun xs result => do
+        mkLambdaFVars xs (← constructWitnessValue result fuel)
+    let .const name _ := ty.getAppFn | throwError "inhabitedness audit: no data constructor"
+    let .inductInfo info ← getConstInfo name | throwError "inhabitedness audit: no inductive carrier"
+    for ctor in info.ctors do
+      let saved ← saveState
+      try
+        let c ← mkConstWithFreshMVarLevels ctor
+        let (args, _, result) ← forallMetaTelescope (← inferType c)
+        unless ← isDefEq result ty do throwError "constructor result mismatch"
+        for arg in args do
+          let arg ← instantiateMVars arg
+          if arg.isMVar then
+            let value ← constructWitnessValue (← instantiateMVars (← inferType arg)) fuel
+            unless ← isDefEq arg value do throwError "constructor field mismatch"
+        return ← instantiateMVars (mkAppN c args)
+      catch _ => saved.restore
+    throwError "inhabitedness audit: cannot construct {ty}"
+
+private meta def checkInhabited (s w : ConstantInfo) : MetaM Unit := do
+  requireOverlap s.type w.type
+  -- A parameterized witness is callable only when every argument can be constructed.
+  let (wx, _, conclusion) ← forallMetaTelescope w.type
+  for x in wx do
+    let ty ← instantiateMVars (← inferType x)
+    if ← isProp ty then
+      throwError "inhabitedness audit: witness has undischarged Prop assumptions"
+    let value ← constructWitnessValue ty
+    unless ← isDefEq x value do
+      throwError "inhabitedness audit: cannot instantiate witness parameter"
+  for x in wx do
+    let value ← instantiateMVars x
+    if value.hasExprMVar then throwError "inhabitedness audit: unresolved witness parameter"
+    check value
+    auditDag (← getEnv) value.getUsedConstants.toList
+  let conclusion ← instantiateMVars conclusion
+  unless conclusion.getAppFn.isConstOf ``Exists || conclusion.getAppFn.isConstOf ``Nonempty do
+    throwError "inhabitedness audit: expected an existential reachable-state witness"
+  let proof ← instantiateMVars (mkAppN (w.value! (allowOpaque := true)) wx)
+  withWitnessFacts conclusion proof #[] fun facts => do
+    let (sx, _, sConclusion) ← forallMetaTelescope s.type
+    let mut matchedWitnessPremise := false
+    for x in sx do
+      let ty ← instantiateMVars (← inferType x)
+      if ← isProp ty then
+        let mut found := false
+        for fact in facts do
+          if ← matchWitnessType ty (← inferType fact) then
+            unless ← isDefEq x fact do
+              throwError "inhabitedness audit: inconsistent proof assignment"
+            found := true
+            matchedWitnessPremise := true
+            break
+        if !found then pure ()
+    -- A premise-free characterization `A ↔ B` is exercised when the witness establishes a side.
+    unless matchedWitnessPremise do
+      let c ← instantiateMVars sConclusion
+      if c.getAppFn.isConstOf ``Iff then
+        for side in c.getAppArgs do
+          for fact in facts do
+            unless matchedWitnessPremise do
+              if ← matchWitnessType side (← inferType fact) then
+                let f ← instantiateMVars fact
+                check f
+                auditDag (← getEnv) f.getUsedConstants.toList
+                matchedWitnessPremise := true
+    unless matchedWitnessPremise do
+      throwError "inhabitedness audit: no security premise supplied by the witness"
+    for x in sx do
+      let x ← instantiateMVars x
+      if x.isMVar && !(← isProp (← inferType x)) then
+        let ty ← instantiateMVars (← inferType x)
+        if let .some inst ← (try trySynthInstance ty catch _ => pure .none) then
+          if ← isDefEq x inst then continue
+        let mut found := false
+        -- Pass 1: directly bind any witness value of matching type not yet bound to an
+        -- earlier binder in `sx` (never silently replacing explicit list witnesses with
+        -- `List.replicate _ default`).
+        for fact in facts do
+          if ← matchWitnessType ty (← inferType fact) then
+            let alreadyBound ← sx.anyM fun b => do
+              let b ← instantiateMVars b
+              if b.isMVar then pure false
+              else if b == fact then pure true
+              else withNewMCtxDepth <| isDefEq b fact
+            if !alreadyBound then
+              if ← isDefEq x fact then
+                found := true
+                break
+        -- Pass 2: only for remaining auxiliary binders whose matching witness values were
+        -- already consumed by earlier binders, synthesize a dimension-matched default.
+        if !found then
+          for fact in facts do
+            if ← matchWitnessType ty (← inferType fact) then
+              let candidate ← try
+                if ty.getAppFn.isConstOf ``List then
+                  let d ← mkDefault ty.getAppArgs[0]!
+                  mkAppM ``List.replicate #[← mkAppM ``List.length #[fact], d]
+                else pure fact
+              catch _ => pure fact
+              if ← isDefEq x candidate then
+                found := true
+                break
+        if !found then pure ()
+    -- Infer dimensions from structured witness values before defaulting free data.
+    for x in sx do
+      let x ← instantiateMVars x
+      if x.isMVar && !(← isProp (← inferType x)) then
+        let value ← constructWitnessValue (← instantiateMVars (← inferType x))
+        unless ← isDefEq x value do
+          throwError "inhabitedness audit: cannot construct value binder"
+    for x in sx do
+      let x ← instantiateMVars x
+      if x.isMVar then
+        let ty ← instantiateMVars (← inferType x)
+        let proof ← try
+          let .some inst ← trySynthInstance ty | throwError "not an instance"
+          pure inst
+        catch _ =>
+          try
+            let (target, dec) ← try
+              pure (ty, ← mkDecide ty)
+            catch _ => do
+              let target ← withTransparency .all (whnf ty)
+              pure (target, ← mkDecide target)
+            unless ← isDefEq dec (mkConst ``Bool.true) do
+              throwError "decision is not true"
+            mkDecideProof target
+          catch err => throwError "inhabitedness audit: joint witness does not discharge {ty}\n{err.toMessageData}"
+        unless ← isDefEq x proof do
+          throwError "inhabitedness audit: inconsistent joint proof"
+    for x in sx do
+      let value ← instantiateMVars x
+      if value.hasExprMVar then
+        throwError "inhabitedness audit: incomplete joint witness"
+      check value
+      auditDag (← getEnv) value.getUsedConstants.toList
+
+syntax "#verify_inhabited " ident ident : command
+elab_rules : command
+  | `(command| #verify_inhabited $s:ident $w:ident) => do
+    let (_, sec) ← verifyConstructiveDecl s
+    let (_, wit) ← verifyConstructiveDecl w
+    -- Keep witness search bounded even in modules that disable proof heartbeat limits.
+    liftTermElabM <| withOptions (fun o => maxRecDepth.set (maxHeartbeats.set o 200000) (max 4096 (maxRecDepth.get o))) <|
+      checkInhabited sec wit
+
+/-! ### `by bv_xor_cancel` — Constructive XOR / Bitwise Canceller (`0 Classical.choice`) -/
+
+/-- Reify XOR structure with hash-consed atoms; other bitwise operations stay opaque. -/
+private meta partial def reifyXor (e zero : Expr)
+    (atoms : Array Expr) (indices : Std.HashMap Expr Nat) :
+    MetaM (Expr × Array Expr × Std.HashMap Expr Nat) := do
+  let e := stripMData e
+  let args := e.getAppArgs
+  if (e.getAppFn.isConstOf ``HXor.hXor && args.size == 6) ||
+      (e.getAppFn.isConstOf ``BitVec.xor && args.size == 3) then
+    let (l, atoms, indices) ← reifyXor args[args.size - 2]! zero atoms indices
+    let (r, atoms, indices) ← reifyXor args[args.size - 1]! zero atoms indices
+    return (mkApp2 (mkConst ``Qsag.XorTree.xor) l r, atoms, indices)
+  if ← withoutModifyingState (isDefEq e zero) then
+    return (mkConst ``Qsag.XorTree.zero, atoms, indices)
+  if let some i := indices[e]? then
+    return (mkApp (mkConst ``Qsag.XorTree.atom) (mkNatLit i), atoms, indices)
+  return (mkApp (mkConst ``Qsag.XorTree.atom) (mkNatLit atoms.size),
+    atoms.push e, indices.insert e atoms.size)
+
+/-- Balanced lookup keeps each reflected atom access logarithmic in the atom count. -/
+private meta partial def atomLookup (xs : Array Expr) (index : Expr)
+    (lo hi : Nat) : MetaM Expr := do
+  if hi ≤ lo + 1 then return xs[lo]!
+  let mid := (lo + hi) / 2
+  let l ← atomLookup xs index lo mid
+  let r ← atomLookup xs index mid hi
+  let cond ← mkAppM ``Nat.blt #[index, mkNatLit mid]
+  mkAppM ``cond #[cond, l, r]
+
+private meta def solveReflectedXor (goal : MVarId) : TacticM Bool := goal.withContext do
+  let some (ty, lhs, rhs) := (← instantiateMVars (← goal.getType)).eq? | return false
+  unless ty.getAppFn.isConstOf ``BitVec do return false
+  let width := ty.getAppArgs[0]!
+  let zero ← mkAppM ``BitVec.ofNat #[width, mkNatLit 0]
+  let (l, atoms, indices) ← reifyXor lhs zero #[] {}
+  let (r, atoms, _) ← reifyXor rhs zero atoms indices
+  let lookup ← withLocalDeclD `i (mkConst ``Nat) fun i => do
+    let body ← if atoms.isEmpty then pure zero else atomLookup atoms i 0 atoms.size
+    mkLambdaFVars #[i] body
+  let lt ← mkAppM ``Qsag.XorTree.flatten #[l, ← mkListLit (mkConst ``Nat) []]
+  let rt ← mkAppM ``Qsag.XorTree.flatten #[r, ← mkListLit (mkConst ``Nat) []]
+  let ln ← mkAppM ``Qsag.xorNorm #[lt]
+  let rn ← mkAppM ``Qsag.xorNorm #[rt]
+  unless ← withTransparency .all (isDefEq ln rn) do return false
+  let proof ← mkAppM ``Qsag.XorTree.norm_sound #[lookup, l, r, ← mkEqRefl ln]
+  unless ← withTransparency .all (isDefEq (← inferType proof) (← goal.getType)) do return false
+  goal.assign proof
+  return true
+
+/-- Collect distinct non-literal `Bool`-typed subexpressions inside a bit-level expression. -/
+private meta partial def collectBoolAtoms (e : Expr) (acc : Array Expr) : MetaM (Array Expr) := do
+  let e := stripMData e
+  if e.isConstOf ``Bool.true || e.isConstOf ``Bool.false then
+    return acc
+  let fn := stripMData e.getAppFn
+  let args := e.getAppArgs
+  if (fn.isConstOf ``HXor.hXor || fn.isConstOf ``HAnd.hAnd || fn.isConstOf ``HOr.hOr) &&
+      args.size == 6 then
+    let acc ← collectBoolAtoms args[4]! acc
+    return (← collectBoolAtoms args[5]! acc)
+  if (fn.isConstOf ``bne || fn.isConstOf ``BEq.beq) && args.size >= 2 then
+    let acc ← collectBoolAtoms args[args.size - 2]! acc
+    return (← collectBoolAtoms args[args.size - 1]! acc)
+  if (fn.isConstOf ``Bool.xor || fn.isConstOf ``Bool.and || fn.isConstOf ``Bool.or) && args.size == 2 then
+    let acc ← collectBoolAtoms args[0]! acc
+    return (← collectBoolAtoms args[1]! acc)
+  if fn.isConstOf ``Bool.not && args.size == 1 then
+    return (← collectBoolAtoms args[0]! acc)
+  let ty ← inferType e
+  if ← withoutModifyingState (isDefEq ty (mkConst ``Bool)) then
+    for prev in acc do
+      if ← withoutModifyingState (isDefEq prev e) then
+        return acc
+    return acc.push e
+  return acc
+
+/-- Split generalized `Bool` atoms constructively via `Bool.casesOn` and close leaves by `rfl`. -/
+private meta partial def splitBoolAtomsAndClose (atoms : List Expr) (goal : MVarId) :
+    TacticM (List MVarId) :=
+  goal.withContext do
+    if ← goal.isAssigned then return []
+    let closed ← withoutModifyingState do
+      try
+        let rem ← evalTacticAt (← `(tactic| rfl)) goal
+        pure rem.isEmpty
+      catch _ =>
+        pure false
+    if closed then
+      return (← evalTacticAt (← `(tactic| rfl)) goal)
+    match atoms with
+    | [] =>
+      evalTacticAt (← `(tactic| first | rfl | decide)) goal
+    | a :: rest =>
+      let a ← instantiateMVars a
+      let (fvars, goalGen) ← goal.generalize #[{ expr := a, xName? := some `_bAtom }]
+      goalGen.withContext do
+        let targetFVar? : Option FVarId :=
+          match fvars[0]? with
+          | some fid => some fid
+          | none => if a.isFVar then some a.fvarId! else none
+        let some fvarId := targetFVar? | return [goalGen]
+        let subgoals ← goalGen.cases fvarId
+        let mut unpaid : List MVarId := []
+        for sg in subgoals do
+          unpaid := unpaid ++ (← splitBoolAtomsAndClose rest sg.mvarId)
+        return unpaid
+
+/-- Solve a bit-reduced `Bool` equality goal by splitting its `Bool` atoms constructively. -/
+private meta def solveBitBoolEqGoal (goal : MVarId) : TacticM (List MVarId) :=
+  goal.withContext do
+    if ← goal.isAssigned then return []
+    let tgt ← instantiateMVars (← goal.getType)
+    let some (_, lhs, rhs) := tgt.eq? | return [goal]
+    let atoms ← collectBoolAtoms lhs #[]
+    let atoms ← collectBoolAtoms rhs atoms
+    splitBoolAtomsAndClose atoms.toList goal
+
+/-- Fast constructive algebraic XOR rewrite step over `BitVec`, `UInt64`, `UInt8`, and `Bool`. -/
+private meta def runAlgebraicXorSimp (goal : MVarId) : TacticM (List MVarId) := do
+  let stx ← `(tactic| (
+    try simp only [
+      Qsag.bv_xor_self, Qsag.bv_xor_zero, Qsag.bv_zero_xor,
+      Qsag.bv_xor_cancel_right, Qsag.bv_xor_cancel_left, Qsag.bv_xor_cancel_mid,
+      Qsag.bv_xor_cancel_outer,
+      Qsag.u64_xor_self, Qsag.u64_xor_zero, Qsag.u64_zero_xor,
+      Qsag.u64_xor_cancel_right, Qsag.u64_xor_cancel_left, Qsag.u64_xor_cancel_mid,
+      Qsag.u64_xor_cancel_outer,
+      Qsag.u8_xor_self, Qsag.u8_xor_zero, Qsag.u8_zero_xor,
+      Qsag.u8_xor_cancel_right, Qsag.u8_xor_cancel_left, Qsag.u8_xor_cancel_mid,
+      Qsag.u8_xor_cancel_outer,
+      Qsag.bool_xor_self, Qsag.bool_xor_false, Qsag.bool_false_xor,
+      Qsag.bool_xor_cancel_right, Qsag.bool_xor_cancel_left, Qsag.bool_xor_cancel_mid,
+      Qsag.bool_xor_cancel_outer,
+      Qsag.bool_bne_self, Qsag.bool_bne_false, Qsag.bool_false_bne,
+      Qsag.bool_bne_cancel_right, Qsag.bool_bne_cancel_left, Qsag.bool_bne_cancel_mid,
+      Qsag.bool_bne_cancel_outer
+    ]
+    try simp only [
+      Qsag.bv_xor_assoc, Qsag.bv_xor_self, Qsag.bv_xor_zero, Qsag.bv_zero_xor,
+      Qsag.bv_xor_cancel_right, Qsag.bv_xor_cancel_left, Qsag.bv_xor_cancel_mid,
+      Qsag.bv_xor_cancel_outer,
+      Qsag.u64_xor_assoc, Qsag.u64_xor_self, Qsag.u64_xor_zero, Qsag.u64_zero_xor,
+      Qsag.u64_xor_cancel_right, Qsag.u64_xor_cancel_left, Qsag.u64_xor_cancel_mid,
+      Qsag.u64_xor_cancel_outer,
+      Qsag.u8_xor_assoc, Qsag.u8_xor_self, Qsag.u8_xor_zero, Qsag.u8_zero_xor,
+      Qsag.u8_xor_cancel_right, Qsag.u8_xor_cancel_left, Qsag.u8_xor_cancel_mid,
+      Qsag.u8_xor_cancel_outer,
+      Qsag.bool_xor_assoc, Qsag.bool_xor_self, Qsag.bool_xor_false, Qsag.bool_false_xor,
+      Qsag.bool_xor_cancel_right, Qsag.bool_xor_cancel_left, Qsag.bool_xor_cancel_mid,
+      Qsag.bool_xor_cancel_outer,
+      Qsag.bool_bne_assoc, Qsag.bool_bne_self, Qsag.bool_bne_false, Qsag.bool_false_bne,
+      Qsag.bool_bne_cancel_right, Qsag.bool_bne_cancel_left, Qsag.bool_bne_cancel_mid,
+      Qsag.bool_bne_cancel_outer
+    ]
+    try rfl
+  ))
+  evalTacticAt stx goal
+
+/-- Bit-blast or congruence-peel a single remaining equality subgoal with bounded fuel. -/
+private meta def solveSingleXorGoalAux : Nat → MVarId → TacticM (List MVarId)
+  | 0, goal => runAlgebraicXorSimp goal
+  | fuel + 1, goal =>
+    goal.withContext do
+      if ← goal.isAssigned then return []
+      if ← solveReflectedXor goal then return []
+      let rem ← runAlgebraicXorSimp goal
+      if rem.isEmpty then return []
+      let mut out : List MVarId := []
+      for g in rem do
+        if !(← g.isAssigned) then
+          let gSub ← g.withContext do
+            let tgt ← instantiateMVars (← g.getType)
+            match tgt.eq? with
+            | none => return [g]
+            | some (eqTyRaw, _, _) =>
+              let eqTy := stripMData (← whnf eqTyRaw)
+              if eqTy.isConstOf ``UInt64 then
+                let stx ← `(tactic| (
+                  apply UInt64.eq_of_toBitVec_eq
+                  apply Qsag.bv_eq_of_getLsbD_eq
+                  intro _i _hi
+                  simp only [Qsag.u64_toBitVec_xor, Qsag.u64_toBitVec_zero,
+                    BitVec.getLsbD_xor, BitVec.getLsbD_and, BitVec.getLsbD_or,
+                    BitVec.getLsbD_zero, Qsag.Constructive.getLsbD_allOnes,
+                    Qsag.Constructive.getLsbD_not, _hi, decide_true, Bool.true_and]
+                ))
+                let gs ← evalTacticAt stx g
+                let mut gOut : List MVarId := []
+                for sg in gs do
+                  gOut := gOut ++ (← solveBitBoolEqGoal sg)
+                return gOut
+              else if eqTy.isConstOf ``UInt8 then
+                let stx ← `(tactic| (
+                  apply UInt8.eq_of_toBitVec_eq
+                  apply Qsag.bv_eq_of_getLsbD_eq
+                  intro _i _hi
+                  simp only [Qsag.u8_toBitVec_xor, Qsag.u8_toBitVec_zero,
+                    BitVec.getLsbD_xor, BitVec.getLsbD_and, BitVec.getLsbD_or,
+                    BitVec.getLsbD_zero, Qsag.Constructive.getLsbD_allOnes,
+                    Qsag.Constructive.getLsbD_not, _hi, decide_true, Bool.true_and]
+                ))
+                let gs ← evalTacticAt stx g
+                let mut gOut : List MVarId := []
+                for sg in gs do
+                  gOut := gOut ++ (← solveBitBoolEqGoal sg)
+                return gOut
+              else if (stripMData eqTy.getAppFn).isConstOf ``BitVec then
+                let stx ← `(tactic| (
+                  apply Qsag.bv_eq_of_getLsbD_eq
+                  intro _i _hi
+                  simp only [BitVec.getLsbD_xor, BitVec.getLsbD_and, BitVec.getLsbD_or,
+                    BitVec.getLsbD_zero, Qsag.Constructive.getLsbD_allOnes,
+                    Qsag.Constructive.getLsbD_not, _hi, decide_true, Bool.true_and]
+                ))
+                let gs ← evalTacticAt stx g
+                let mut gOut : List MVarId := []
+                for sg in gs do
+                  gOut := gOut ++ (← solveBitBoolEqGoal sg)
+                return gOut
+              else if eqTy.isConstOf ``Bool then
+                return (← solveBitBoolEqGoal g)
+              else
+                let gs ← evalTacticAt (← `(tactic| try congr 1)) g
+                if gs == [g] then
+                  return [g]
+                else
+                  let mut gOut : List MVarId := []
+                  for sg in gs do
+                    gOut := gOut ++ (← solveSingleXorGoalAux fuel sg)
+                  return gOut
+          out := out ++ gSub
+      return out
+
+/-- Reduce a single `BitVec w`, `UInt64`, `UInt8`, or `Bool` equality goal to bit-level `Bool`
+    atoms and discharge it with `0 Classical.choice` and `0 ofReduceBool`. -/
+private meta def solveSingleXorGoal (goal : MVarId) : TacticM (List MVarId) :=
+  solveSingleXorGoalAux 6 goal
+
+private meta def xorSyntaxDepth : Expr → Nat
+  | .app f a => 1 + max (xorSyntaxDepth f) (xorSyntaxDepth a)
+  | .lam _ t b _ | .forallE _ t b _ => 1 + max (xorSyntaxDepth t) (xorSyntaxDepth b)
+  | .letE _ t v b _ => 1 + max (xorSyntaxDepth t) (max (xorSyntaxDepth v) (xorSyntaxDepth b))
+  | .mdata _ e | .proj _ _ e => 1 + xorSyntaxDepth e
+  | _ => 1
+
+/-- `by bv_xor_cancel`: discharges XOR one-time-pad and bitwise cancellation equalities over
+    `BitVec w` (including polymorphic width `w : Nat`), `UInt64`, `UInt8`, and `Bool`
+    constructively (`0 Classical.choice`, `0 ofReduceBool`, `0 native_decide`). -/
+elab "bv_xor_cancel" : tactic => do
+  let goal ← getMainGoal
+  -- Left-associated source expressions need stack proportional to their syntax,
+  -- even though normalization work is O(k log k). Keep Lean's caller budget if larger.
+  let depth := 32 * xorSyntaxDepth (← goal.getType) + 1024
+  let rem ← withOptions (fun opts => maxRecDepth.set opts (max (maxRecDepth.get opts) depth)) <| solveSingleXorGoal goal
+  replaceMainGoal rem
+
+
+end Qsag.Tactic.AssuranceKit

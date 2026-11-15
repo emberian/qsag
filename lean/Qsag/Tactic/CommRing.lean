@@ -18,8 +18,8 @@ Everything else is an atom. For identities modulo hypotheses `pᵢ = 0`, prove
 `eq_of_sub_eq_zero`.
 -/
 
-public import Qsag.Math.Goldilocks
-public import Qsag.Tactic.AssuranceKit
+public import Qsag.Spec.Algebra
+public import Qsag.Tactic.Prelude
 public meta import Lean
 
 public section
@@ -499,49 +499,3 @@ elab "constructive_ring" : tactic => withMainContext do
 
 end Qsag.Tactic.ConstructiveRing
 
-/-! ## Self-tests -/
-
-namespace Qsag.CRing.Tests
-open CommRingOps
-
-theorem square_of_sum {R : Type} [LawfulCommRing R] (a b : R) :
-    mul (add a b) (add a b) = add (add (mul a a) (mul (add one one) (mul a b))) (mul b b) := by
-  constructive_ring
-
-theorem difference_of_cubes {R : Type} [LawfulCommRing R] (a b : R) :
-    (a - b) * (a ^ 2 + a * b + b ^ 2) = a ^ 3 - b ^ 3 := by
-  constructive_ring
-
-theorem numerals_and_negation {R : Type} [LawfulCommRing R] (x y : R) :
-    (2 * x - 3 * y) * (2 * x + 3 * y) = 4 * x ^ 2 + -(9 * y ^ 2) + 0 * x := by
-  constructive_ring
-
-/-- Euler's four-square identity: degree four in eight atoms. -/
-theorem four_square {R : Type} [LawfulCommRing R] (a b c d w x y z : R) :
-    (a ^ 2 + b ^ 2 + c ^ 2 + d ^ 2) * (w ^ 2 + x ^ 2 + y ^ 2 + z ^ 2) =
-      (a * w - b * x - c * y - d * z) ^ 2 + (a * x + b * w + c * z - d * y) ^ 2 +
-      (a * y - b * z + c * w + d * x) ^ 2 + (a * z + b * y - c * x + d * w) ^ 2 := by
-  constructive_ring
-
-/-- Identity modulo a hypothesis, through an explicit cofactor. -/
-theorem cofactor_example {R : Type} [LawfulCommRing R] (u x : R) (h : u ^ 2 - x = 0) :
-    u ^ 4 = x ^ 2 := by
-  have hid : u ^ 4 - x ^ 2 = (u ^ 2 + x) * (u ^ 2 - x) := by constructive_ring
-  rw [h] at hid
-  have hz : (u ^ 2 + x) * (0 : R) = zero := LawfulCommRing.mul_zero _
-  exact eq_of_sub_eq_zero (hid.trans hz)
-
-/-- The normalizer separates distinct polynomials: `(a + b)² - (a² + b²)` keeps the term
-    `2ab`. -/
-theorem tooth_normExpr_keeps_cross_term :
-    normExpr (.sub (.pow (.add (.var 0) (.var 1)) 2)
-      (.add (.pow (.var 0) 2) (.pow (.var 1) 2))) = [([0, 1], 2, 0)] := by
-  decide
-
-#verify_constructive eq_of_normSub_nil eq_of_sub_eq_zero denote_normExpr
-#verify_constructive square_of_sum difference_of_cubes numerals_and_negation four_square
-#verify_constructive cofactor_example tooth_normExpr_keeps_cross_term
-
-end Qsag.CRing.Tests
-
-end
