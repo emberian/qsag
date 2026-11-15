@@ -763,7 +763,8 @@ impl PolicySignerGuardShare {
             return Err(PolicyViolation::DuplicateIntentNonce);
         }
         if self.burned_intent_nonces.len() >= MAX_BURNED_INTENT_NONCES
-            || self.burned_sessions.len() >= MAX_BURNED_INTENT_NONCES {
+            || self.burned_sessions.len() >= MAX_BURNED_INTENT_NONCES
+        {
             return Err(PolicyViolation::ReplayWindowExhausted);
         }
         let effective_prior = self
@@ -822,7 +823,8 @@ impl PolicySignerGuardShare {
             return Err(PolicyViolation::DuplicateIntentNonce);
         }
         if self.burned_intent_nonces.len() >= MAX_BURNED_INTENT_NONCES
-            || self.burned_sessions.len() >= MAX_BURNED_INTENT_NONCES {
+            || self.burned_sessions.len() >= MAX_BURNED_INTENT_NONCES
+        {
             return Err(PolicyViolation::ReplayWindowExhausted);
         }
         let amount = projected_spend
@@ -1445,7 +1447,8 @@ impl SharedWindowSpendLedger {
             return Err(PolicyViolation::DuplicateIntentNonce);
         }
         if self.burned_intent_nonces.len() >= MAX_BURNED_INTENT_NONCES
-            || self.burned_sessions.len() >= MAX_BURNED_INTENT_NONCES {
+            || self.burned_sessions.len() >= MAX_BURNED_INTENT_NONCES
+        {
             return Err(PolicyViolation::ReplayWindowExhausted);
         }
         let effective_prior = self
@@ -1477,7 +1480,8 @@ impl SharedWindowSpendLedger {
             return Err(PolicyViolation::DuplicateIntentNonce);
         }
         if self.burned_intent_nonces.len() >= MAX_BURNED_INTENT_NONCES
-            || self.burned_sessions.len() >= MAX_BURNED_INTENT_NONCES {
+            || self.burned_sessions.len() >= MAX_BURNED_INTENT_NONCES
+        {
             return Err(PolicyViolation::ReplayWindowExhausted);
         }
         let generation = self
@@ -2041,6 +2045,27 @@ pub struct PolicyGuardDkgRound2 {
     peer_commits: Vec<PolicyGuardSeedCommitMsg>,
 }
 
+/// Wipe OT buffers on errors and transport panics as well as normal completion.
+struct SecretVec<T: Copy + Default + PartialEq>(Vec<T>);
+impl<T: Copy + Default + PartialEq> core::ops::Deref for SecretVec<T> {
+    type Target = Vec<T>;
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+impl<T: Copy + Default + PartialEq> core::ops::DerefMut for SecretVec<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
+}
+impl<T: Copy + Default + PartialEq> Drop for SecretVec<T> {
+    fn drop(&mut self) {
+        qsag_asm::volatile_fill(&mut self.0, T::default());
+        #[cfg(test)]
+        OT_WIPES.with(|events| {
+            if let Some(events) = &mut *events.borrow_mut() {
+                events.push((self.0.len(), self.0.iter().all(|v| *v == T::default())));
+            }
+        });
+    }
+}
+
 fn policy_seed_commit(o: &PolicyGuardSeedOpenMsg) -> [u8; 32] {
     cshake256_framed_32(
         b"QSAG.POLICY.DKG.SEED_COMMIT.V1",
@@ -2090,10 +2115,10 @@ impl PolicyGuardDkgRound1 {
             verified_velocity: None,
             velocity_generation: 0,
             local_salt_seed: local,
-            pairwise_zero_seeds: Vec::new(),
-            preproc_r: Vec::new(),
-            preproc_outgoing_macs: Vec::new(),
-            preproc_incoming_keys: Vec::new(),
+            pairwise_zero_seeds: Vec::with_capacity(ids.len() - 1),
+            preproc_r: Vec::with_capacity(BDOZ_PREPROC_SLOTS),
+            preproc_outgoing_macs: Vec::with_capacity(ids.len() - 1),
+            preproc_incoming_keys: Vec::with_capacity(ids.len() - 1),
             consumed_peer_slots: Vec::new(),
             next_slot: Cell::new(0),
             current_window_id: 0,
@@ -2113,7 +2138,7 @@ impl PolicyGuardDkgRound1 {
                 &[&guard.local_salt_seed, &(slot as u64).to_be_bytes()],
             )));
         }
-        let mut seeds = Vec::new();
+        let mut seeds = Vec::with_capacity(ids.len() - 1);
         let mut commits = Vec::new();
         for &peer in &ids {
             if peer == party_id {
@@ -2232,9 +2257,9 @@ pub fn finalize_distributed_policy_guard<O: PolicyAuthenticatedOt>(
             cshake256_framed_32(b"QSAG.POLICY.DKG.ZERO.V1", &[&domain, lo_seed, hi_seed]),
         ));
         g.consumed_peer_slots.push((o.sender, 0u64));
-        let mut alternatives = Vec::new();
-        let mut choices = Vec::new();
-        let mut keys = Vec::new();
+        let mut alternatives = SecretVec(Vec::with_capacity(BDOZ_PREPROC_SLOTS * 256));
+        let mut choices = SecretVec(Vec::with_capacity(BDOZ_PREPROC_SLOTS * 256));
+        let mut keys = SecretVec(Vec::with_capacity(BDOZ_PREPROC_SLOTS));
         for slot in 0..BDOZ_PREPROC_SLOTS {
             let mut slot_alpha = g.incoming_slot_alpha(o.sender, slot);
             let mut key = [0u128; 2];
@@ -2258,31 +2283,13 @@ pub fn finalize_distributed_policy_guard<O: PolicyAuthenticatedOt>(
             }
             ct_zeroize_u128s(&mut slot_alpha);
             keys.push(key);
+            ct_zeroize_u128s(&mut key);
         }
-        let response = ot.exchange(g.party_id, o.sender, domain, &alternatives, &choices);
-        for pair in &mut alternatives {
-            ct_zeroize_u128s(pair);
-        }
-        for choice in &mut choices {
-            qsag_asm::volatile_fill(core::slice::from_mut(choice), false);
-        }
-        let mut selected = match response {
-            Ok(values) => values,
-            Err(err) => {
-                for key in &mut keys {
-                    ct_zeroize_u128s(key);
-                }
-                return Err(err);
-            }
-        };
+        let mut selected = SecretVec(ot.exchange(g.party_id, o.sender, domain, &alternatives, &choices)?);
         if selected.len() != BDOZ_PREPROC_SLOTS * 256 {
-            ct_zeroize_u128s(&mut selected);
-            for key in &mut keys {
-                ct_zeroize_u128s(key);
-            }
             return Err(PolicyViolation::BarrierBdozMacFailed);
         }
-        let mut macs = Vec::new();
+        let mut macs = Vec::with_capacity(BDOZ_PREPROC_SLOTS);
         for chunk in selected.chunks_exact(256) {
             macs.push([
                 chunk[..128].iter().fold(0, |a, b| a ^ b),
@@ -2291,7 +2298,7 @@ pub fn finalize_distributed_policy_guard<O: PolicyAuthenticatedOt>(
         }
         ct_zeroize_u128s(&mut selected);
         g.preproc_outgoing_macs.push((o.sender, macs));
-        g.preproc_incoming_keys.push((o.sender, keys));
+        g.preproc_incoming_keys.push((o.sender, core::mem::take(&mut keys.0)));
     }
     Ok(state.first.guard)
 }
@@ -2397,11 +2404,13 @@ fn policy_pair_bytes(pair: &[u128; 2]) -> [u8; 32] {
     bytes
 }
 
-fn policy_pair(bytes: [u8; 32]) -> [u128; 2] {
-    [
+fn policy_pair(mut bytes: [u8; 32]) -> [u128; 2] {
+    let pair = [
         u128::from_le_bytes(core::array::from_fn(|i| bytes[i])),
         u128::from_le_bytes(core::array::from_fn(|i| bytes[16 + i])),
-    ]
+    ];
+    ct_zeroize_bytes(&mut bytes);
+    pair
 }
 
 fn delta_commitment(c: &PartyPolicyDeltaCommitMsg, salt: &[u8; 32], delta: &[u128; 2]) -> [u8; 32] {
@@ -3101,10 +3110,17 @@ mod tests {
         let mut guards = raw_test_guards([9; 32], &[1, 2]);
         let guard = &mut guards[0];
         assert!(guard.verified_velocity.is_none());
-        guard.record_approved_intent(50, 7, [1; 32], [2; 32]).unwrap();
-        guard.record_approved_intent(50, 30, [3; 32], [4; 32]).unwrap();
+        guard
+            .record_approved_intent(50, 7, [1; 32], [2; 32])
+            .unwrap();
+        guard
+            .record_approved_intent(50, 30, [3; 32], [4; 32])
+            .unwrap();
         let v = guard.verified_velocity.as_ref().unwrap();
-        assert_eq!((v.cap_units(), v.spent_units(), v.last_nonce()), (50, 30, 2));
+        assert_eq!(
+            (v.cap_units(), v.spent_units(), v.last_nonce()),
+            (50, 30, 2)
+        );
         // Over the pinned cap: refused, nothing recorded or burned.
         assert_eq!(
             guard.record_approved_intent(50, 51, [5; 32], [6; 32]),
@@ -3124,7 +3140,9 @@ mod tests {
             .unwrap();
         let v = guard.verified_velocity.as_ref().unwrap();
         assert_eq!((v.window_id(), v.spent_units(), v.last_nonce()), (1, 0, 2));
-        guard.record_approved_intent(50, 9, [7; 32], [8; 32]).unwrap();
+        guard
+            .record_approved_intent(50, 9, [7; 32], [8; 32])
+            .unwrap();
         // A freshly provisioned guard recovers the verified state from the checkpoint.
         let bytes = guard.export_durable_checkpoint(&[7; 32], 5);
         let mut fresh = raw_test_guards([9; 32], &[1, 2]);
@@ -3133,7 +3151,12 @@ mod tests {
             .unwrap();
         let v = fresh[0].verified_velocity.as_ref().unwrap();
         assert_eq!(
-            (v.window_id(), v.cap_units(), v.spent_units(), v.last_nonce()),
+            (
+                v.window_id(),
+                v.cap_units(),
+                v.spent_units(),
+                v.last_nonce()
+            ),
             (1, 50, 9, 3)
         );
         assert_eq!(
@@ -3158,20 +3181,33 @@ mod tests {
     fn bounded_replay_window_retains_random_nonces_until_authenticated_rotation() {
         let mut guards = raw_test_guards([9; 32], &[1, 2]);
         let guard = &mut guards[0];
-        let nonces: Vec<_> = (0u32..256).map(|i|
-            cshake256_framed_32(b"nonce test", &[&i.to_be_bytes()])).collect();
+        let nonces: Vec<_> = (0u32..256)
+            .map(|i| cshake256_framed_32(b"nonce test", &[&i.to_be_bytes()]))
+            .collect();
         for (i, nonce) in nonces.iter().enumerate() {
             assert!(!guard.is_nonce_burned(nonce));
-            guard.record_approved_intent(u128::MAX, i as u128, *nonce, *nonce).unwrap();
+            guard
+                .record_approved_intent(u128::MAX, i as u128, *nonce, *nonce)
+                .unwrap();
         }
-        for nonce in &nonces { assert!(guard.is_nonce_burned(nonce)); }
-        assert_eq!(guard.record_approved_intent(u128::MAX, 256, [0; 32], [0; 32]),
-            Err(PolicyViolation::ReplayWindowExhausted));
+        for nonce in &nonces {
+            assert!(guard.is_nonce_burned(nonce));
+        }
+        assert_eq!(
+            guard.record_approved_intent(u128::MAX, 256, [0; 32], [0; 32]),
+            Err(PolicyViolation::ReplayWindowExhausted)
+        );
         let checkpoint = guard.export_durable_checkpoint(&[7; 32], 256);
-        guard.restore_from_durable_checkpoint(&checkpoint, &[7; 32], 256).unwrap();
-        guard.advance_velocity_window(&WindowAdvanceAuthorization::new(&[43; 32], &[42; 32], 0, 1)).unwrap();
+        guard
+            .restore_from_durable_checkpoint(&checkpoint, &[7; 32], 256)
+            .unwrap();
+        guard
+            .advance_velocity_window(&WindowAdvanceAuthorization::new(&[43; 32], &[42; 32], 0, 1))
+            .unwrap();
         assert!(!guard.is_nonce_burned(&[0; 32]));
-        guard.record_approved_intent(u128::MAX, 1, [0; 32], [0; 32]).unwrap();
+        guard
+            .record_approved_intent(u128::MAX, 1, [0; 32], [0; 32])
+            .unwrap();
     }
 
     use alloc::format;
@@ -4602,5 +4638,32 @@ mod tests {
         )
         .unwrap();
         assert!(guards.iter().all(|g| g.next_slot.get() == 1));
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static OT_WIPES: std::cell::RefCell<Option<Vec<(usize, bool)>>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    struct FailOt;
+    impl PolicyAuthenticatedOt for FailOt {
+        fn exchange(&mut self, _: u16, _: u16, _: [u8; 32], _: &[[u128; 2]], _: &[bool]) -> Result<Vec<u128>, PolicyViolation> {
+            Err(PolicyViolation::BarrierBdozMacFailed)
+        }
+    }
+    #[test]
+    fn failed_ot_erases_all_partially_prepared_buffers() {
+        let (a, ac) = PolicyGuardDkgRound1::new(1, &[1, 2], [3; 32], [4; 32]).unwrap();
+        let (b, bc) = PolicyGuardDkgRound1::new(2, &[1, 2], [3; 32], [5; 32]).unwrap();
+        let (a, _) = a.round2_open_seeds(&bc).unwrap();
+        let (_, bo) = b.round2_open_seeds(&ac).unwrap();
+        OT_WIPES.with(|events| *events.borrow_mut() = Some(Vec::new()));
+        assert!(finalize_distributed_policy_guard(a, &bo, &mut FailOt).is_err());
+        let mut events = OT_WIPES.with(|events| events.borrow_mut().take().unwrap());
+        events.sort_unstable();
+        assert_eq!(events, alloc::vec![(BDOZ_PREPROC_SLOTS, true), (BDOZ_PREPROC_SLOTS * 256, true), (BDOZ_PREPROC_SLOTS * 256, true)]);
     }
 }

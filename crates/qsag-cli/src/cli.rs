@@ -65,6 +65,28 @@ pub struct Args {
     pub positional: Vec<String>,
 }
 
+fn wipe_text(text: &mut String) {
+    drop(ZeroizingBuf(std::mem::take(text).into_bytes()));
+}
+
+impl Drop for Args {
+    fn drop(&mut self) {
+        for value in self.options.values_mut().chain(&mut self.positional).chain(&mut self.flags) {
+            wipe_text(value);
+        }
+    }
+}
+
+/// Own command-line copies through parsing failures and command completion.
+pub(crate) struct SecretArgs(pub Vec<String>);
+impl Drop for SecretArgs {
+    fn drop(&mut self) {
+        for value in &mut self.0 {
+            wipe_text(value);
+        }
+    }
+}
+
 impl Args {
     /// `value_options` take one value; `flag_options` take none. Anything else is an error,
     /// as is repeating an option.
@@ -85,7 +107,7 @@ impl Args {
                 continue;
             };
             let (name, inline) = match name.split_once('=') {
-                Some((name, value)) => (name, Some(value.to_string())),
+                Some((name, value)) => (name, Some(value)),
                 None => (name, None),
             };
             if flag_options.contains(&name) {
@@ -96,16 +118,17 @@ impl Args {
                     args.flags.push(name.to_string());
                 }
             } else if value_options.contains(&name) {
+                if args.options.contains_key(name) {
+                    return Err(CliError::usage(format!("--{name} given more than once")));
+                }
                 let value = match inline {
-                    Some(value) => value,
+                    Some(value) => value.to_owned(),
                     None => iter
                         .next()
                         .cloned()
                         .ok_or_else(|| CliError::usage(format!("--{name} requires a value")))?,
                 };
-                if args.options.insert(name.to_string(), value).is_some() {
-                    return Err(CliError::usage(format!("--{name} given more than once")));
-                }
+                args.options.insert(name.to_string(), value);
             } else {
                 return Err(CliError::usage(format!(
                     "unknown option --{name} (try --help)"
@@ -367,6 +390,14 @@ pub fn private_dir(path: &str, create: bool) -> Result<(), CliError> {
 /// Create a new file and refuse to overwrite an existing one. Secret files are created with
 /// owner-only permissions.
 pub fn write_new(path: &str, contents: &[u8], secret: bool) -> Result<(), CliError> {
+    write_new_with(path, secret, |file| file.write_all(contents))
+}
+
+fn write_new_with(
+    path: &str,
+    secret: bool,
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> Result<(), CliError> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     set_nofollow_nonblocking(&mut options)?;
@@ -380,18 +411,32 @@ pub fn write_new(path: &str, contents: &[u8], secret: bool) -> Result<(), CliErr
     let mut file = options
         .open(path)
         .map_err(|e| CliError::io(format_args!("creating {path}"), e))?;
-    file.write_all(contents)
+    let result = write(&mut file)
         .and_then(|()| file.sync_all())
-        .map_err(|e| CliError::io(format_args!("writing {path}"), e))?;
-    sync_parent(path)
+        .map_err(|e| CliError::io(format_args!("writing {path}"), e))
+        .and_then(|()| sync_parent(path));
+    if result.is_err() {
+        // The containing directory must be trusted. Never remove a replaced entry.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if let (Ok(held), Ok(named)) = (file.metadata(), std::fs::symlink_metadata(path))
+                && named.is_file() && held.dev() == named.dev() && held.ino() == named.ino()
+            {
+                let _ = std::fs::remove_file(path);
+                let _ = sync_parent(path);
+            }
+        }
+    }
+    result
 }
 
 /// Durably replace an existing owner-only file: write a sibling temporary file, sync it,
 /// rename it over the original, then sync the directory.
 pub fn replace_secret(path: &str, contents: &[u8]) -> Result<(), CliError> {
     let tmp = format!("{path}.{}.tmp", crate::codec::to_hex(&os_random_32()?));
+    write_new(&tmp, contents, true)?;
     let result = (|| {
-        write_new(&tmp, contents, true)?;
         std::fs::rename(&tmp, path)
             .map_err(|e| CliError::io(format_args!("replacing {path}"), e))?;
         sync_parent(path)
@@ -418,6 +463,55 @@ pub fn os_random_32() -> Result<[u8; 32], CliError> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn failed_partial_write_removes_only_its_own_file() {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!("partial-file-{}", crate::codec::to_hex(&super::os_random_32().unwrap())));
+        let path = path.to_str().unwrap();
+        let result = super::write_new_with(path, true, |file| {
+            file.write_all(b"partial secret")?;
+            Err(std::io::Error::other("injected short write"))
+        });
+        assert!(result.is_err());
+        assert!(!std::path::Path::new(path).exists());
+        super::write_new(path, b"existing", true).unwrap();
+        assert!(super::write_new(path, b"new", true).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), b"existing");
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn malformed_and_duplicate_arguments_wipe_owned_copies() {
+        for items in [vec!["--seed", "private", "--seed=duplicate"], vec!["--seed", "private", "--bad=secret"]] {
+            let raw = SecretArgs(strings(&items));
+            WIPED_BUFFERS.with(|events| *events.borrow_mut() = Some(Vec::new()));
+            assert!(Args::parse(&raw.0, &["seed"], &[]).is_err());
+            drop(raw);
+            let events = WIPED_BUFFERS.with(|events| events.borrow_mut().take().unwrap());
+            assert_eq!(events.len(), 4); // Three original strings and one parsed value.
+            assert!(events.iter().all(|(_, wiped)| *wiped));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secret_file_creation_and_replacement_keep_owner_only_permissions() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let root = std::env::temp_dir().join(format!("private-file-{}", crate::codec::to_hex(&os_random_32().unwrap())));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("key");
+        let path = path.to_str().unwrap();
+        write_new(path, b"first", true).unwrap();
+        assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+        replace_secret(path, b"second").unwrap();
+        assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+        let link = root.join("link");
+        symlink(path, &link).unwrap();
+        assert!(write_new(link.to_str().unwrap(), b"overwrite", true).is_err());
+        assert!(read_bounded_file(link.to_str().unwrap(), 100).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), b"second");
+        std::fs::remove_dir_all(root).unwrap();
+    }
     use super::*;
 
     fn strings(items: &[&str]) -> Vec<String> {
