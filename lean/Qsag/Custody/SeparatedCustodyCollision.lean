@@ -1,15 +1,15 @@
 module
-public import Qsag.SeparatedCustodyHistory
-public import Qsag.ProdCollisionExtraction
-import all Qsag.SeparatedCustodyHistory
-import all Qsag.SeparatedCustodyPolicy
-import all Qsag.SeparatedCustodySpine
-import all Qsag.CompleteMediationBoundary
-import all Qsag.SeparatedCustodyCore
-import all Qsag.HypertreeEufCma
-import all Qsag.ProdCollisionExtraction
-import all Qsag.ProdCollisionLayers
-import all Qsag.ProdCollisionWitness
+public import Qsag.Custody.SeparatedCustodyHistory
+public import Qsag.Protocol.Signing.ProdCollisionExtraction
+import all Qsag.Custody.SeparatedCustodyHistory
+import all Qsag.Custody.SeparatedCustodyPolicy
+import all Qsag.Custody.SeparatedCustodySpine
+import all Qsag.Custody.CompleteMediationBoundary
+import all Qsag.Custody.SeparatedCustodyCore
+import all Qsag.Protocol.Signing.HypertreeEufCma
+import all Qsag.Protocol.Signing.ProdCollisionExtraction
+import all Qsag.Protocol.Signing.ProdCollisionLayers
+import all Qsag.Protocol.Signing.ProdCollisionWitness
 import Qsag.Tactic.AssuranceKit
 
 /-! Custody consumers of the returned production collision witness.

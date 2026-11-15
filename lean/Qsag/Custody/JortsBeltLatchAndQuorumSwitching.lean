@@ -5051,3 +5051,1691 @@ structure PreSteppedAdvView (R : Type) (L : Nat) where
   onlineOpenedPolys : Fin L → Option (List R)
 
 /-- Compute the adversary's view from `(corruptPts, digits, y, tape)`. -/
+def computePreSteppedAdvView {R : Type} [CommRingOps R] {d L : Nat}
+    (corruptPts : List R) (digits : Fin L → Fin 4)
+    (y : PreSteppedChainSecrets R L) (tape : PreSteppedShamirTape R d L) :
+    PreSteppedAdvView R L where
+  corruptTableShares i k :=
+    corruptPts.map (fun xc => RoundPoly.evalCoeffs (y i k :: (tape i k).1) xc)
+  onlineOpenedPolys i :=
+    if h : (digits i).val < 3 then
+      some (y i ⟨(digits i).val, h⟩ :: (tape i ⟨(digits i).val, h⟩).1)
+    else
+      none
+
+/-- Single-entry Shamir secret-shift bijection: shifts constant term `s₁ ↦ s₂` while keeping all
+    evaluations at `corruptPts` (`|corruptPts| ≤ d`) invariant (`0 Classical.choice`). -/
+def shamirSecretShiftEquiv {R : Type} [LawfulCommRing R]
+    (inv : R → R) (d : Nat) (corruptPts : List R)
+    (s₁ s₂ : R) (hCard : corruptPts.length + 1 ≤ d + 1) :
+    SimpleEquiv (ShamirPadPoly R d) (ShamirPadPoly R d) :=
+  let eqv₁ := shamirShare_rebalanceEquiv inv d corruptPts s₁ hCard
+  let eqv₂ := shamirShare_rebalanceEquiv inv d corruptPts s₂ hCard
+  { toFun := fun A => eqv₂.invFun (eqv₁.toFun A)
+    invFun := fun B => eqv₁.invFun (eqv₂.toFun B)
+    left_inv := fun A => by rw [eqv₂.right_inv, eqv₁.left_inv]
+    right_inv := fun B => by rw [eqv₁.right_inv, eqv₂.left_inv] }
+
+theorem shamirSecretShiftEquiv_preserves_corruptShares {R : Type} [LawfulCommRing R]
+    (inv : R → R) (hInv : ∀ x : R, x ≠ CommRingOps.zero → CommRingOps.mul x (inv x) = CommRingOps.one)
+    (d : Nat) (corruptPts : List R)
+    (s₁ s₂ : R) (hCard : corruptPts.length + 1 ≤ d + 1)
+    (hNonZero : ∀ c ∈ corruptPts, c ≠ CommRingOps.zero)
+    (A : ShamirPadPoly R d) :
+    let A' := (shamirSecretShiftEquiv inv d corruptPts s₁ s₂ hCard).toFun A
+    ∀ xc ∈ corruptPts,
+      RoundPoly.evalCoeffs (s₂ :: A'.1) xc = RoundPoly.evalCoeffs (s₁ :: A.1) xc := by
+  intro A' xc hxc
+  let zeroPad : ShamirPadPoly R (d + 1) :=
+    ⟨List.replicate (d + 1) CommRingOps.zero, List.length_replicate⟩
+  let eqv₁ := shamirShare_rebalanceEquiv inv d corruptPts s₁ hCard
+  let eqv₂ := shamirShare_rebalanceEquiv inv d corruptPts s₂ hCard
+  have h1 := (shamir_share_pad_rebalance inv hInv d corruptPts s₁ hCard hNonZero A zeroPad).1 xc hxc
+  have h2 := (shamir_share_pad_rebalance inv hInv d corruptPts s₂ hCard hNonZero A' zeroPad).1 xc hxc
+  have hMid : eqv₂.toFun A' = eqv₁.toFun A := eqv₂.right_inv (eqv₁.toFun A)
+  rw [← h1, ← h2, hMid]
+
+/-- Product `SimpleEquiv` across all `(chain i, step k)`: acts as the identity on the opened step
+    `k.val = (digits i).val` and shifts `y₁ i k ↦ y₂ i k` at every unopened step `k.val ≠ (digits i).val`
+    (including **every unopened earlier preimage position `k < d_i`**!). -/
+def preSteppedPrefixRebalanceEquiv {R : Type} [LawfulCommRing R]
+    (inv : R → R) (d L : Nat) (corruptPts : List R)
+    (digits : Fin L → Fin 4)
+    (y₁ y₂ : PreSteppedChainSecrets R L)
+    (hCard : corruptPts.length + 1 ≤ d + 1) :
+    SimpleEquiv (PreSteppedShamirTape R d L) (PreSteppedShamirTape R d L) where
+  toFun tape i k :=
+    if k.val = (digits i).val then
+      tape i k
+    else
+      (shamirSecretShiftEquiv inv d corruptPts (y₁ i k) (y₂ i k) hCard).toFun (tape i k)
+  invFun tape i k :=
+    if k.val = (digits i).val then
+      tape i k
+    else
+      (shamirSecretShiftEquiv inv d corruptPts (y₁ i k) (y₂ i k) hCard).invFun (tape i k)
+  left_inv tape := by
+    funext i k
+    by_cases hk : k.val = (digits i).val
+    · simp only [hk, ↓reduceIte]
+    · simp only [hk, ↓reduceIte,
+        (shamirSecretShiftEquiv inv d corruptPts (y₁ i k) (y₂ i k) hCard).left_inv]
+  right_inv tape := by
+    funext i k
+    by_cases hk : k.val = (digits i).val
+    · simp only [hk, ↓reduceIte]
+    · simp only [hk, ↓reduceIte,
+        (shamirSecretShiftEquiv inv d corruptPts (y₁ i k) (y₂ i k) hCard).right_inv]
+
+/-- **Crown Jewel 3A — Exact `(t - 1)`-Collusion Zero-Knowledge for Unopened Chain Prefixes
+    (`preStepped_shamir_unopened_prefix_zero_knowledge`)**:
+    For ANY finite commutative ring/field `R` (`Goldilocks`, `TowerElem k`, etc.), threshold
+    `t = d + 1`, corrupt set `corruptPts` of size `≤ t - 1` (`corruptPts.length + 1 ≤ d + 1`),
+    digit vector `digits : Fin L → Fin 4`, and ANY two chain secret tables `y₁, y₂` agreeing ONLY
+    on the opened step (`∀ i k, k.val = (digits i).val → y₁ i k = y₂ i k` — so all unopened
+    preimage positions `k < d_i`, such as `y_i^(0)` and `y_i^(1)` when opening `y_i^(2)`, are
+    completely unconstrained!):
+    1. `preSteppedPrefixRebalanceEquiv` maps `y₁`-tapes bijectively onto `y₂`-tapes with **exact
+       pointwise equality** of `computePreSteppedAdvView`;
+    2. Over ANY finite enumeration `SimpleEquiv (Fin Card) (PreSteppedShamirTape R d L)` and ANY
+       distinguisher `D : PreSteppedAdvView R L → Bool`, `finSum` counts are **identically equal**
+       (`0` bits leaked about `y_i^(0)` and `y_i^(1)`!). -/
+theorem preStepped_shamir_unopened_prefix_zero_knowledge {R : Type} [LawfulCommRing R]
+    (inv : R → R) (hInv : ∀ x : R, x ≠ CommRingOps.zero → CommRingOps.mul x (inv x) = CommRingOps.one)
+    (d L : Nat) (corruptPts : List R)
+    (hCard : corruptPts.length + 1 ≤ d + 1)
+    (hNonZero : ∀ c ∈ corruptPts, c ≠ CommRingOps.zero)
+    (digits : Fin L → Fin 4)
+    (y₁ y₂ : PreSteppedChainSecrets R L)
+    (hOpenedAgree : ∀ (i : Fin L) (k : Fin 3), k.val = (digits i).val → y₁ i k = y₂ i k) :
+    let bij := preSteppedPrefixRebalanceEquiv inv d L corruptPts digits y₁ y₂ hCard
+    (∀ tape : PreSteppedShamirTape R d L,
+      computePreSteppedAdvView corruptPts digits y₂ (bij.toFun tape) =
+        computePreSteppedAdvView corruptPts digits y₁ tape) ∧
+    (∀ (Card : Nat) (enum : SimpleEquiv (Fin Card) (PreSteppedShamirTape R d L))
+       (D : PreSteppedAdvView R L → Bool),
+      finSum Card (fun r => if D (computePreSteppedAdvView corruptPts digits y₁ (enum.toFun r)) then 1 else 0) =
+        finSum Card (fun r => if D (computePreSteppedAdvView corruptPts digits y₂ (enum.toFun r)) then 1 else 0)) := by
+  intro bij
+  have hViewEq : ∀ tape : PreSteppedShamirTape R d L,
+      computePreSteppedAdvView corruptPts digits y₂ (bij.toFun tape) =
+        computePreSteppedAdvView corruptPts digits y₁ tape := by
+    intro tape
+    unfold computePreSteppedAdvView
+    congr 1
+    · funext i k
+      dsimp only [bij, preSteppedPrefixRebalanceEquiv]
+      by_cases hk : k.val = (digits i).val
+      · simp only [hk, ↓reduceIte, hOpenedAgree i k hk]
+      · simp only [hk, ↓reduceIte]
+        exact List.map_congr_left
+          (shamirSecretShiftEquiv_preserves_corruptShares inv hInv d corruptPts (y₁ i k) (y₂ i k)
+            hCard hNonZero (tape i k))
+    · funext i
+      by_cases hd : (digits i).val < 3
+      · simp only [hd, ↓reduceDIte]
+        have hEqOpened := hOpenedAgree i ⟨(digits i).val, hd⟩ rfl
+        dsimp only [bij, preSteppedPrefixRebalanceEquiv]
+        simp only [↓reduceIte, hEqOpened]
+      · simp only [hd, ↓reduceDIte]
+  refine ⟨hViewEq, ?_⟩
+  intro Card enum D
+  let finBij : SimpleEquiv (Fin Card) (Fin Card) :=
+    { toFun := fun r => enum.invFun (bij.toFun (enum.toFun r))
+      invFun := fun r => enum.invFun (bij.invFun (enum.toFun r))
+      left_inv := fun r => by rw [enum.right_inv, bij.left_inv, enum.left_inv]
+      right_inv := fun r => by rw [enum.right_inv, bij.right_inv, enum.left_inv] }
+  have hPerm := finSum_comp_simpleEquiv Card finBij
+    (fun r => if D (computePreSteppedAdvView corruptPts digits y₂ (enum.toFun r)) then 1 else 0)
+  rw [← hPerm]
+  apply finSum_congr
+  intro r
+  dsimp only [finBij]
+  rw [enum.right_inv, hViewEq (enum.toFun r)]
+
+/-- **`#tooth` Reusing Polynomial Randomness Across Chain Steps Leaks Secret Key `y_i^(0)`
+    (`tooth_shared_poly_across_chain_steps_leaks_preimage`)**:
+    If the background table reuses the same random tail `A` for step `0` (`y₀ :: A`) and step `2`
+    (`y₂ :: A`) instead of independent polynomials, then opening `y₂ :: A` online allows a SINGLE
+    corrupt custodian at ANY point `xc` to recover the unopened chain secret `y₀` in 1 subtraction! -/
+theorem tooth_shared_poly_across_chain_steps_leaks_preimage
+    {R : Type} [LawfulCommRing R]
+    (y₀ _y₂ xc : R) (A : List R) :
+    let corruptShare₀ := RoundPoly.evalCoeffs (y₀ :: A) xc
+    let openedTailFromStep2 := A
+    CommRingOps.sub corruptShare₀ (CommRingOps.mul xc (RoundPoly.evalCoeffs openedTailFromStep2 xc)) = y₀ := by
+  intro corruptShare₀ openedTailFromStep2
+  change CommRingOps.sub (CommRingOps.add y₀ (CommRingOps.mul xc (RoundPoly.evalCoeffs A xc)))
+    (CommRingOps.mul xc (RoundPoly.evalCoeffs A xc)) = y₀
+  rw [LawfulCommRing.sub_eq_add_neg, LawfulCommRing.add_assoc,
+      LawfulCommRing.add_right_neg, LawfulCommRing.add_zero]
+
+/-! ### Crown Jewel 3B — MAC-Free Endpoint Self-Verification (`H^(3 - d_i)(reconstructed) = pk_i`) -/
+
+/-- **`#tooth` Unverified Lagrange Interpolation Blindly Accepts Corrupted Shares
+    (`tooth_unverified_lagrange_accepts_corrupted_share`)**:
+    Without checking the chain endpoint `H^(3 - d_i)(cand) = pk_i`, linear Lagrange reconstruction
+    `ringDot lambdas submitted` with non-zero weight `λ₀ ≠ 0` shifts the reconstructed output by
+    `λ₀ · δ ≠ 0` whenever corrupt party `0` adds `δ ≠ 0` to its share! -/
+theorem tooth_unverified_lagrange_accepts_corrupted_share
+    {R : Type} [LawfulCommRing R] [NoZeroDivisors R]
+    (lam₀ s₀ delta : R) (restLam restShares : List R)
+    (hLamNz : lam₀ ≠ CommRingOps.zero) (hDeltaNz : delta ≠ CommRingOps.zero) :
+    ringDot (lam₀ :: restLam) (CommRingOps.add s₀ delta :: restShares) ≠
+      ringDot (lam₀ :: restLam) (s₀ :: restShares) := by
+  simp only [ringDot, LawfulCommRing.left_distrib]
+  intro hEq
+  have hRearr :
+      CommRingOps.add (CommRingOps.add (CommRingOps.mul lam₀ s₀) (CommRingOps.mul lam₀ delta))
+        (ringDot restLam restShares) =
+      CommRingOps.add (CommRingOps.add (CommRingOps.mul lam₀ s₀) (ringDot restLam restShares))
+        (CommRingOps.mul lam₀ delta) := by
+    rw [LawfulCommRing.add_assoc,
+        LawfulCommRing.add_comm (CommRingOps.mul lam₀ delta) (ringDot restLam restShares),
+        ← LawfulCommRing.add_assoc]
+  rw [hRearr] at hEq
+  have hZeroMul : CommRingOps.mul lam₀ delta = CommRingOps.zero := by
+    apply LawfulCommRing.add_left_cancel
+      (a := CommRingOps.add (CommRingOps.mul lam₀ s₀) (ringDot restLam restShares))
+    rw [LawfulCommRing.add_zero]
+    exact hEq
+  rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero hZeroMul with h1 | h2
+  · exact hLamNz h1
+  · exact hDeltaNz h2
+
+/-- Online MAC-free Lagrange reconstruction + `H^(3 - d_i)` endpoint self-verification across `L` chains. -/
+def preSteppedReconstructAndSelfVerify {R : Type} [CommRingOps R] [DecidableEq R] {L : Nat}
+    (F : Nat → Nat → R → R) (pk : Fin L → R)
+    (lambdas : List R) (digits : Fin L → Fin 4)
+    (submitted : Fin L → List R) : Option (Fin L → R) :=
+  let cand : Fin L → R := fun i =>
+    if (digits i).val < 3 then
+      ringDot lambdas (submitted i)
+    else
+      pk i
+  if (List.finRange L).all (fun i =>
+      decide (wotsChainIter F i.val (digits i).val (3 - (digits i).val) (cand i) = pk i)) then
+    some cand
+  else
+    none
+
+private def extractChainMergeClaw {R : Type} [DecidableEq R]
+    (F : Nat → Nat → R → R) (chainIdx : Nat) :
+    (start rem : Nat) → (a b : R) →
+    start + rem = 3 →
+    a ≠ b →
+    wotsChainIter F chainIdx start rem a = wotsChainIter F chainIdx start rem b →
+    WotsChainCollisionWitness F 4
+  | _, 0, _, _, _, hNe, hEq => False.elim (hNe hEq)
+  | start, rem + 1, a, b, hBound, hNe, hEq =>
+    if hStepEq : F chainIdx start a = F chainIdx start b then
+      { chainIdx := chainIdx
+        stepPos := start
+        step_lt := by omega
+        nodeA := a
+        nodeB := b
+        nodes_ne := hNe
+        step_eq := hStepEq }
+    else
+      extractChainMergeClaw F chainIdx (start + 1) rem
+        (F chainIdx start a) (F chainIdx start b) (by omega) hStepEq hEq
+
+private def checkFinFnEq {R : Type} [DecidableEq R] :
+    {L : Nat} → (f g : Fin L → R) → PSum (f = g) { i : Fin L // f i ≠ g i }
+  | 0, _, _ => .inl (funext (fun i => Fin.elim0 i))
+  | L + 1, f, g =>
+    if h0 : f ⟨0, Nat.zero_lt_succ L⟩ = g ⟨0, Nat.zero_lt_succ L⟩ then
+      match checkFinFnEq (fun j : Fin L => f ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+                         (fun j : Fin L => g ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩) with
+      | .inl hTail =>
+        .inl (funext (fun i => by
+          cases i with
+          | mk val isLt =>
+            cases val with
+            | zero => exact h0
+            | succ k => exact congrFun hTail ⟨k, Nat.lt_of_succ_lt_succ isLt⟩))
+      | .inr ⟨j, hj⟩ => .inr ⟨⟨j.1 + 1, Nat.succ_lt_succ j.2⟩, hj⟩
+    else
+      .inr ⟨⟨0, Nat.zero_lt_succ L⟩, h0⟩
+
+/-- Constructive `PSum` extractor for MAC-free self-verification (`0 Classical.choice`):
+    Given any `cand` accepted by `preSteppedReconstructAndSelfVerify`, returns EITHER `.inl` proving
+    `cand = trueNodes` across all `L` chains, OR `.inr` exhibiting a concrete step collision/preimage
+    in `F` (`WotsChainCollisionWitness F 4`)! -/
+def extractPreSteppedSelfVerifyOutcome {R : Type} [LawfulCommRing R] [DecidableEq R] {L : Nat}
+    (F : Nat → Nat → R → R) (sk : Fin L → R)
+    (lambdas : List R) (digits : Fin L → Fin 4)
+    (submitted : Fin L → List R) (cand : Fin L → R)
+    (hAccepted :
+      preSteppedReconstructAndSelfVerify F (fun i => wotsChainIter F i.val 0 3 (sk i))
+        lambdas digits submitted = some cand) :
+    let trueNodes : Fin L → R := fun i => wotsChainIter F i.val 0 (digits i).val (sk i)
+    PSum (cand = trueNodes) (WotsChainCollisionWitness F 4) :=
+  let pk : Fin L → R := fun i => wotsChainIter F i.val 0 3 (sk i)
+  let trueNodes : Fin L → R := fun i => wotsChainIter F i.val 0 (digits i).val (sk i)
+  match checkFinFnEq cand trueNodes with
+  | .inl hEq => .inl hEq
+  | .inr ⟨i, hiNe⟩ =>
+    have hAllChecks :
+        ((List.finRange L).all (fun j =>
+          decide (wotsChainIter F j.val (digits j).val (3 - (digits j).val) (cand j) = pk j))) = true := by
+      unfold preSteppedReconstructAndSelfVerify at hAccepted
+      dsimp only at hAccepted
+      split at hAccepted
+      · rename_i hAll
+        injection hAccepted with hCand
+        rw [← hCand]
+        exact hAll
+      · cases hAccepted
+    have hCandEndsAtPk : wotsChainIter F i.val (digits i).val (3 - (digits i).val) (cand i) = pk i :=
+      of_decide_eq_true (List.all_eq_true.mp hAllChecks i (mem_finRange_self i))
+    have _hDiLe3 : (digits i).val ≤ 3 := by have := (digits i).isLt; omega
+    have hTrueEndsAtPk : wotsChainIter F i.val (digits i).val (3 - (digits i).val) (trueNodes i) = pk i := by
+      dsimp only [trueNodes, pk]
+      have hAdd : (digits i).val + (3 - (digits i).val) = 3 := by omega
+      have hComp := wotsChainIter_add F i.val 0 (digits i).val (3 - (digits i).val) (sk i)
+      simp only [Nat.zero_add, hAdd] at hComp
+      exact hComp.symm
+    .inr (extractChainMergeClaw F i.val (digits i).val (3 - (digits i).val)
+            (cand i) (trueNodes i) (by omega) hiNe (hCandEndsAtPk.trans hTrueEndsAtPk.symm))
+
+/-- **Crown Jewel 3B — MAC-Free Self-Verifying `(t, n)` Shamir `WOTS+C` Reconstruction
+    (`preStepped_shamir_mac_free_self_verification`)**:
+    1. **Honest Completeness (`0` MACs)**: When `t` parties at `pts` submit honest Shamir shares
+       from the pre-stepped table `(trueNodes i :: (tape i d_i).1)` with Vandermonde-at-zero
+       Lagrange weights `lambdas`, `preSteppedReconstructAndSelfVerify` deterministically outputs
+       `some trueNodes`!
+    2. **Adversarial Share-Corruption Soundness**: For ANY adversarially corrupted share vector
+       `submitted'`, `preSteppedReconstructAndSelfVerify` EITHER rejects (`none`), returns the exact
+       honest chain vector `some trueNodes`, OR constructively yields an explicit hash step
+       collision/preimage `WotsChainCollisionWitness F 4` (`stepPos < 3`, `nodeA ≠ nodeB`,
+       `F chainIdx stepPos nodeA = F chainIdx stepPos nodeB`)! -/
+theorem preStepped_shamir_mac_free_self_verification
+    {R : Type} [LawfulCommRing R] [DecidableEq R] {d L : Nat}
+    (F : Nat → Nat → R → R) (sk : Fin L → R)
+    (tape : PreSteppedShamirTape R d L)
+    (lambdas pts : List R)
+    (hZero : ringDot lambdas (pts.map (fun _ => CommRingOps.one)) = CommRingOps.one)
+    (hHigher : ∀ deg, 1 ≤ deg → deg < d + 1 →
+      ringDot lambdas (pts.map (fun x => ringPow x deg)) = CommRingOps.zero)
+    (digits : Fin L → Fin 4) :
+    let pk : Fin L → R := fun i => wotsChainIter F i.val 0 3 (sk i)
+    let trueNodes : Fin L → R := fun i => wotsChainIter F i.val 0 (digits i).val (sk i)
+    let honestSubmitted : Fin L → List R := fun i =>
+      if h : (digits i).val < 3 then
+        pts.map (fun x => RoundPoly.evalCoeffs (trueNodes i :: (tape i ⟨(digits i).val, h⟩).1) x)
+      else
+        []
+    -- (1) Honest completeness:
+    preSteppedReconstructAndSelfVerify F pk lambdas digits honestSubmitted = some trueNodes ∧
+    -- (2) MAC-free self-verification soundness against arbitrary share corruption:
+    (∀ (submitted' : Fin L → List R) (cand : Fin L → R),
+      preSteppedReconstructAndSelfVerify F pk lambdas digits submitted' = some cand →
+      cand = trueNodes ∨ Nonempty (WotsChainCollisionWitness F 4)) := by
+  intro pk trueNodes honestSubmitted
+  refine ⟨?_, ?_⟩
+  · -- Part 1: Honest completeness
+    have hCandEq :
+        (fun i : Fin L =>
+          if (digits i).val < 3 then ringDot lambdas (honestSubmitted i) else pk i) =
+        trueNodes := by
+      funext i
+      by_cases hd : (digits i).val < 3
+      · simp only [hd, ↓reduceIte, honestSubmitted, ↓reduceDIte]
+        have hLen : (trueNodes i :: (tape i ⟨(digits i).val, hd⟩).1).length ≤ d + 1 := by
+          simp [(tape i ⟨(digits i).val, hd⟩).2]
+        rw [lagrangeAtZero_evalCoeffs lambdas pts _ (d + 1) hLen hZero hHigher]
+        simp [LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
+      · have hdEq3 : (digits i).val = 3 := by have := (digits i).isLt; omega
+        simp only [hd, ↓reduceIte]
+        dsimp only [pk, trueNodes]
+        rw [hdEq3]
+    unfold preSteppedReconstructAndSelfVerify
+    dsimp only
+    have hEval : ∀ (c : Fin L → R), c = trueNodes →
+        (if (List.finRange L).all (fun i =>
+            decide (wotsChainIter F i.val (digits i).val (3 - (digits i).val) (c i) = pk i))
+         then some c else none) = some trueNodes := by
+      rintro c rfl
+      have hAllOk :
+          ((List.finRange L).all (fun i =>
+            decide (wotsChainIter F i.val (digits i).val (3 - (digits i).val) (trueNodes i) = pk i))) = true := by
+        apply List.all_eq_true.mpr
+        intro i _
+        apply decide_eq_true
+        dsimp only [trueNodes, pk]
+        have _hdLe3 : (digits i).val ≤ 3 := by have := (digits i).isLt; omega
+        have hAdd : (digits i).val + (3 - (digits i).val) = 3 := by omega
+        have hComp := wotsChainIter_add F i.val 0 (digits i).val (3 - (digits i).val) (sk i)
+        simp only [Nat.zero_add, hAdd] at hComp
+        exact hComp.symm
+      rw [hAllOk]
+      rfl
+    exact hEval _ hCandEq
+  · -- Part 2: Soundness via constructive extractor
+    intro submitted' cand hAcc
+    cases extractPreSteppedSelfVerifyOutcome F sk lambdas digits submitted' cand hAcc with
+    | inl hEq => exact .inl hEq
+    | inr w => exact .inr ⟨w⟩
+
+/-! ### Crown Jewel 3C — Full 128-Bit `TowerElem 7` (`GF(2^128)`) Shamir Sharing of 256-Bit `Digest256` Chains (`v = 128`, `S = 192`) -/
+
+/-- Split a 256-bit `Digest256` chain value into two 128-bit `TowerElem 7` (`GF(2^128)`) halves
+    (`quorum_jorts.rs:580-615`). -/
+def splitDigest256Tower128 (d : Digest256) : TowerElem 7 × TowerElem 7 :=
+  unpackTower 8 d
+
+/-- Reassemble two 128-bit `TowerElem 7` (`GF(2^128)`) halves into a 256-bit `Digest256`. -/
+def joinTower128Digest256 (p : TowerElem 7 × TowerElem 7) : Digest256 :=
+  packTower 8 p
+
+@[simp] theorem join_splitDigest256Tower128 (d : Digest256) :
+    joinTower128Digest256 (splitDigest256Tower128 d) = d :=
+  packTower_unpackTower 8 d
+
+@[simp] theorem split_joinTower128Digest256 (p : TowerElem 7 × TowerElem 7) :
+    splitDigest256Tower128 (joinTower128Digest256 p) = p :=
+  unpackTower_packTower 8 p
+
+theorem joinTower128Digest256_injective {p₁ p₂ : TowerElem 7 × TowerElem 7}
+    (h : joinTower128Digest256 p₁ = joinTower128Digest256 p₂) : p₁ = p₂ :=
+  packTower_injective 8 p₁ p₂ h
+
+/-- Top-level generator `towerX 7 ∈ GF(2^128)` lies **strictly outside** the 64-bit subfield
+    `embedTower 6 (GF(2^64))`, ruling out embedded-subfield cosplay. -/
+theorem towerX7_not_in_gf2_64 :
+    ∀ sub : TowerElem 6, towerX 7 ≠ embedTower 6 sub := by
+  intro sub hEq
+  have hSnd : towerOne 6 = towerZero 6 := congrArg Prod.snd hEq
+  exact towerOne_ne_zero 6 hSnd
+
+theorem towerOne_ne_towerX (k : Nat) : towerOne (k + 1) ≠ towerX (k + 1) := by
+  intro hEq
+  exact towerOne_ne_zero k (congrArg Prod.fst hEq)
+
+/-- Exact 2-point Lagrange weights at zero `[x₁ · (x₀ + x₁)⁻¹, x₀ · (x₀ + x₁)⁻¹]` over `TowerElem k`. -/
+def lagrange2WeightsTower (k : Nat) (x₀ x₁ : TowerElem k) : List (TowerElem k) :=
+  let denom := towerInv k (towerAdd k x₀ x₁)
+  [towerMul k x₁ denom, towerMul k x₀ denom]
+
+/-- Symbolic 2-point Lagrange interpolation theorem over `TowerElem k` (including `k = 7`, `GF(2^128)`):
+    reconstructs `c₀` for ANY distinct `x₀ ≠ x₁` and ANY degree-`≤ 1` Shamir polynomial `c₀ :: tail.1`
+    with zero WHNF unfolding of recursive norm inversion. -/
+theorem lagrange2WeightsTower_eval (k : Nat) {x₀ x₁ : TowerElem k} (hNe : x₀ ≠ x₁)
+    (c₀ : TowerElem k) (tail : ShamirPadPoly (TowerElem k) 1) :
+    ringDot (lagrange2WeightsTower k x₀ x₁)
+      ([x₀, x₁].map (fun x => RoundPoly.evalCoeffs (c₀ :: tail.1) x)) = c₀ := by
+  rcases tail with ⟨cs, hLen⟩
+  cases cs with
+  | nil => cases hLen
+  | cons c₁ rest =>
+    cases rest with
+    | cons _ _ => cases Nat.succ.inj hLen
+    | nil =>
+      have hSumNz : towerAdd k x₀ x₁ ≠ towerZero k := by
+        intro hZ
+        apply hNe
+        calc x₀ = towerAdd k x₀ (towerZero k) := (towerAdd_zero k x₀).symm
+          _ = towerAdd k x₀ (towerAdd k x₀ x₁) := by rw [hZ]
+          _ = x₁ := towerAdd_cancel k x₀ x₁
+      let denom := towerInv k (towerAdd k x₀ x₁)
+      have hInvOk : towerMul k (towerAdd k x₀ x₁) denom = towerOne k :=
+        towerMul_inv k (towerAdd k x₀ x₁) hSumNz
+      dsimp only [lagrange2WeightsTower, List.map, ringDot, RoundPoly.evalCoeffs, CommRingOps.add,
+        CommRingOps.mul, CommRingOps.zero]
+      simp only [towerMul_zero, towerAdd_zero]
+      rw [towerMul_add_distrib, towerMul_add_distrib]
+      have hSlopeCancel :
+          towerMul k (towerMul k x₁ denom) (towerMul k x₀ c₁) =
+          towerMul k (towerMul k x₀ denom) (towerMul k x₁ c₁) := by
+        calc towerMul k (towerMul k x₁ denom) (towerMul k x₀ c₁)
+            = towerMul k (towerMul k denom x₁) (towerMul k x₀ c₁) := by rw [towerMul_comm k x₁ denom]
+          _ = towerMul k denom (towerMul k x₁ (towerMul k x₀ c₁)) := towerMul_assoc k denom x₁ _
+          _ = towerMul k denom (towerMul k (towerMul k x₁ x₀) c₁) := by rw [← towerMul_assoc k x₁ x₀ c₁]
+          _ = towerMul k denom (towerMul k (towerMul k x₀ x₁) c₁) := by rw [towerMul_comm k x₁ x₀]
+          _ = towerMul k denom (towerMul k x₀ (towerMul k x₁ c₁)) := by rw [towerMul_assoc k x₀ x₁ c₁]
+          _ = towerMul k (towerMul k denom x₀) (towerMul k x₁ c₁) := (towerMul_assoc k denom x₀ _).symm
+          _ = towerMul k (towerMul k x₀ denom) (towerMul k x₁ c₁) := by rw [towerMul_comm k denom x₀]
+      have h4 : ∀ (a b c d : TowerElem k),
+          towerAdd k (towerAdd k a b) (towerAdd k c d) =
+          towerAdd k (towerAdd k a c) (towerAdd k b d) := fun a b c d => by
+        calc towerAdd k (towerAdd k a b) (towerAdd k c d)
+            = towerAdd k a (towerAdd k b (towerAdd k c d)) := towerAdd_assoc k a b _
+          _ = towerAdd k a (towerAdd k (towerAdd k b c) d) := by rw [← towerAdd_assoc k b c d]
+          _ = towerAdd k a (towerAdd k (towerAdd k c b) d) := by rw [towerAdd_comm k b c]
+          _ = towerAdd k a (towerAdd k c (towerAdd k b d)) := by rw [towerAdd_assoc k c b d]
+          _ = towerAdd k (towerAdd k a c) (towerAdd k b d) := (towerAdd_assoc k a c _).symm
+      rw [h4, hSlopeCancel, towerAdd_self_zero, towerAdd_zero]
+      calc towerAdd k (towerMul k (towerMul k x₁ denom) c₀) (towerMul k (towerMul k x₀ denom) c₀)
+          = towerMul k (towerAdd k (towerMul k x₁ denom) (towerMul k x₀ denom)) c₀ :=
+              (towerAdd_mul_distrib k _ _ c₀).symm
+        _ = towerMul k (towerMul k (towerAdd k x₁ x₀) denom) c₀ := by
+              rw [← towerAdd_mul_distrib k x₁ x₀ denom]
+        _ = towerMul k (towerMul k (towerAdd k x₀ x₁) denom) c₀ := by
+              rw [towerAdd_comm k x₁ x₀]
+        _ = towerMul k (towerOne k) c₀ := by rw [hInvOk]
+        _ = c₀ := towerOne_mul k c₀
+
+theorem lagrange2HeadWeight_ne_zero (k : Nat) {x₀ x₁ : TowerElem k}
+    (hNe : x₀ ≠ x₁) (hx₁Nz : x₁ ≠ towerZero k) :
+    towerMul k x₁ (towerInv k (towerAdd k x₀ x₁)) ≠ towerZero k := by
+  have hSumNz : towerAdd k x₀ x₁ ≠ towerZero k := by
+    intro hZ
+    apply hNe
+    calc x₀ = towerAdd k x₀ (towerZero k) := (towerAdd_zero k x₀).symm
+      _ = towerAdd k x₀ (towerAdd k x₀ x₁) := by rw [hZ]
+      _ = x₁ := towerAdd_cancel k x₀ x₁
+  have hDenomNz : towerInv k (towerAdd k x₀ x₁) ≠ towerZero k := by
+    intro hDz
+    have hInv := towerMul_inv k (towerAdd k x₀ x₁) hSumNz
+    rw [hDz, towerMul_zero] at hInv
+    exact towerOne_ne_zero k hInv.symm
+  intro hProdZ
+  rcases (towerMul_eq_zero_iff k x₁ _).mp hProdZ with h1 | h2
+  · exact hx₁Nz h1
+  · exact hDenomNz h2
+
+/-- Secret intermediate 256-bit `Digest256` chain positions `(y_i^(0), y_i^(1), y_i^(2))` across `L` chains. -/
+abbrev PreSteppedDigest256Secrets (L : Nat) := Fin L → Fin 3 → Digest256
+
+/-- Paired degree-`≤ d` `TowerElem 7` (`GF(2^128)`) Shamir polynomials per 256-bit `(chain i, step k)`. -/
+abbrev PreSteppedDigest256ShamirTape (d L : Nat) :=
+  Fin L → Fin 3 → ShamirPadPoly (TowerElem 7) d × ShamirPadPoly (TowerElem 7) d
+
+/-- Adversary `(t - 1)`-collusion view for 256-bit `Digest256` chains shared over `TowerElem 7` (`GF(2^128)`). -/
+structure PreSteppedDigest256AdvView (L : Nat) where
+  corruptTableShares : Fin L → Fin 3 → List (TowerElem 7) × List (TowerElem 7)
+  onlineOpenedPolys : Fin L → Option (List (TowerElem 7) × List (TowerElem 7))
+
+/-- Compute the `GF(2^128)²` `(t - 1)`-collusion adversary view from 256-bit chain secrets `y`. -/
+def computePreSteppedDigest256AdvView {d L : Nat}
+    (corruptPts : List (TowerElem 7)) (digits : Fin L → Fin 4)
+    (y : PreSteppedDigest256Secrets L) (tape : PreSteppedDigest256ShamirTape d L) :
+    PreSteppedDigest256AdvView L where
+  corruptTableShares i k :=
+    let (lo, hi) := splitDigest256Tower128 (y i k)
+    (corruptPts.map (fun xc => RoundPoly.evalCoeffs (lo :: (tape i k).1.1) xc),
+     corruptPts.map (fun xc => RoundPoly.evalCoeffs (hi :: (tape i k).2.1) xc))
+  onlineOpenedPolys i :=
+    if h : (digits i).val < 3 then
+      let k : Fin 3 := ⟨(digits i).val, h⟩
+      let (lo, hi) := splitDigest256Tower128 (y i k)
+      some (lo :: (tape i k).1.1, hi :: (tape i k).2.1)
+    else
+      none
+
+/-- Product `SimpleEquiv` shifting both `GF(2^128)` halves of every unopened 256-bit chain step (`0 Classical.choice`). -/
+def preSteppedDigest256RebalanceEquiv (d L : Nat)
+    (corruptPts : List (TowerElem 7)) (digits : Fin L → Fin 4)
+    (y₁ y₂ : PreSteppedDigest256Secrets L)
+    (hCard : corruptPts.length + 1 ≤ d + 1) :
+    SimpleEquiv (PreSteppedDigest256ShamirTape d L) (PreSteppedDigest256ShamirTape d L) where
+  toFun tape i k :=
+    if k.val = (digits i).val then
+      tape i k
+    else
+      let (lo₁, hi₁) := splitDigest256Tower128 (y₁ i k)
+      let (lo₂, hi₂) := splitDigest256Tower128 (y₂ i k)
+      ((shamirSecretShiftEquiv (towerInv 7) d corruptPts lo₁ lo₂ hCard).toFun (tape i k).1,
+       (shamirSecretShiftEquiv (towerInv 7) d corruptPts hi₁ hi₂ hCard).toFun (tape i k).2)
+  invFun tape i k :=
+    if k.val = (digits i).val then
+      tape i k
+    else
+      let (lo₁, hi₁) := splitDigest256Tower128 (y₁ i k)
+      let (lo₂, hi₂) := splitDigest256Tower128 (y₂ i k)
+      ((shamirSecretShiftEquiv (towerInv 7) d corruptPts lo₁ lo₂ hCard).invFun (tape i k).1,
+       (shamirSecretShiftEquiv (towerInv 7) d corruptPts hi₁ hi₂ hCard).invFun (tape i k).2)
+  left_inv tape := by
+    funext i k
+    by_cases hk : k.val = (digits i).val
+    · simp only [hk, ↓reduceIte]
+    · simp only [hk, ↓reduceIte]
+      rcases tape i k with ⟨tLo, tHi⟩
+      simp only [(shamirSecretShiftEquiv (towerInv 7) d corruptPts _ _ hCard).left_inv]
+  right_inv tape := by
+    funext i k
+    by_cases hk : k.val = (digits i).val
+    · simp only [hk, ↓reduceIte]
+    · simp only [hk, ↓reduceIte]
+      rcases tape i k with ⟨tLo, tHi⟩
+      simp only [(shamirSecretShiftEquiv (towerInv 7) d corruptPts _ _ hCard).right_inv]
+
+/-- **Full `TowerElem 7` (`GF(2^128)`) Zero-Knowledge for Unopened 256-Bit `Digest256` Chain Prefixes
+    (`preStepped_tower128_digest256_zero_knowledge`)**:
+    Over `TowerElem 7` (`GF(2^128)`) across `L` (e.g. `v = 128`) 256-bit `Digest256` chains, up to
+    `t - 1` corrupt evaluation points `corruptPts` learn **exact `0` bits** (`0` statistical distance
+    in `finSum`) about every unopened 256-bit preimage `y_i^(k)` (`k ≠ d_i`)! -/
+theorem preStepped_tower128_digest256_zero_knowledge
+    (d L : Nat) (corruptPts : List (TowerElem 7))
+    (hCard : corruptPts.length + 1 ≤ d + 1)
+    (hNonZero : ∀ c ∈ corruptPts, c ≠ towerZero 7)
+    (digits : Fin L → Fin 4)
+    (y₁ y₂ : PreSteppedDigest256Secrets L)
+    (hOpenedAgree : ∀ (i : Fin L) (k : Fin 3), k.val = (digits i).val → y₁ i k = y₂ i k) :
+    let bij := preSteppedDigest256RebalanceEquiv d L corruptPts digits y₁ y₂ hCard
+    (∀ tape : PreSteppedDigest256ShamirTape d L,
+      computePreSteppedDigest256AdvView corruptPts digits y₂ (bij.toFun tape) =
+        computePreSteppedDigest256AdvView corruptPts digits y₁ tape) ∧
+    (∀ (Card : Nat) (enum : SimpleEquiv (Fin Card) (PreSteppedDigest256ShamirTape d L))
+       (D : PreSteppedDigest256AdvView L → Bool),
+      finSum Card (fun r => if D (computePreSteppedDigest256AdvView corruptPts digits y₁ (enum.toFun r)) then 1 else 0) =
+        finSum Card (fun r => if D (computePreSteppedDigest256AdvView corruptPts digits y₂ (enum.toFun r)) then 1 else 0)) := by
+  intro bij
+  have hInv7 : ∀ x : TowerElem 7, x ≠ CommRingOps.zero →
+      CommRingOps.mul x (towerInv 7 x) = CommRingOps.one :=
+    fun x hx => towerMul_inv 7 x hx
+  have hViewEq : ∀ tape : PreSteppedDigest256ShamirTape d L,
+      computePreSteppedDigest256AdvView corruptPts digits y₂ (bij.toFun tape) =
+        computePreSteppedDigest256AdvView corruptPts digits y₁ tape := by
+    intro tape
+    unfold computePreSteppedDigest256AdvView
+    congr 1
+    · funext i k
+      dsimp only [bij, preSteppedDigest256RebalanceEquiv]
+      by_cases hk : k.val = (digits i).val
+      · simp only [hk, ↓reduceIte, hOpenedAgree i k hk]
+      · simp only [hk, ↓reduceIte]
+        apply Prod.ext
+        · exact List.map_congr_left
+            (shamirSecretShiftEquiv_preserves_corruptShares (towerInv 7) hInv7 d corruptPts
+              (splitDigest256Tower128 (y₁ i k)).1 (splitDigest256Tower128 (y₂ i k)).1
+              hCard hNonZero (tape i k).1)
+        · exact List.map_congr_left
+            (shamirSecretShiftEquiv_preserves_corruptShares (towerInv 7) hInv7 d corruptPts
+              (splitDigest256Tower128 (y₁ i k)).2 (splitDigest256Tower128 (y₂ i k)).2
+              hCard hNonZero (tape i k).2)
+    · funext i
+      by_cases hd : (digits i).val < 3
+      · simp only [hd, ↓reduceDIte]
+        have hEqOpened := hOpenedAgree i ⟨(digits i).val, hd⟩ rfl
+        dsimp only [bij, preSteppedDigest256RebalanceEquiv]
+        simp only [↓reduceIte, hEqOpened]
+      · simp only [hd, ↓reduceDIte]
+  refine ⟨hViewEq, ?_⟩
+  intro Card enum D
+  let finBij : SimpleEquiv (Fin Card) (Fin Card) :=
+    { toFun := fun r => enum.invFun (bij.toFun (enum.toFun r))
+      invFun := fun r => enum.invFun (bij.invFun (enum.toFun r))
+      left_inv := fun r => by rw [enum.right_inv, bij.left_inv, enum.left_inv]
+      right_inv := fun r => by rw [enum.right_inv, bij.right_inv, enum.left_inv] }
+  have hPerm := finSum_comp_simpleEquiv Card finBij
+    (fun r => if D (computePreSteppedDigest256AdvView corruptPts digits y₂ (enum.toFun r)) then 1 else 0)
+  rw [← hPerm]
+  apply finSum_congr
+  intro r
+  dsimp only [finBij]
+  rw [enum.right_inv, hViewEq (enum.toFun r)]
+
+/-- Online `GF(2^128)²` (`TowerElem 7`) Shamir shares submitted per 256-bit chain. -/
+abbrev SubmittedDigest256ShamirShares (L : Nat) :=
+  Fin L → List (TowerElem 7) × List (TowerElem 7)
+
+/-- Online MAC-free `TowerElem 7` (`GF(2^128)`) Lagrange reconstruction + 256-bit `Digest256`
+    endpoint self-verification (`wotsChainIter F i d_i (3 - d_i) (cand i) = pk i`) across `L` chains
+    (`quorum_jorts.rs:605-642`). -/
+def preSteppedDigest256ReconstructAndSelfVerify {L : Nat}
+    (F : Nat → Nat → Digest256 → Digest256) (pk : Fin L → Digest256)
+    (lambdas : List (TowerElem 7)) (digits : Fin L → Fin 4)
+    (submitted : SubmittedDigest256ShamirShares L) : Option (Fin L → Digest256) :=
+  let cand : Fin L → Digest256 := fun i =>
+    if (digits i).val < 3 then
+      joinTower128Digest256
+        (ringDot lambdas (submitted i).1, ringDot lambdas (submitted i).2)
+    else
+      pk i
+  if (List.finRange L).all (fun i =>
+      decide (wotsChainIter F i.val (digits i).val (3 - (digits i).val) (cand i) = pk i)) then
+    some cand
+  else
+    none
+
+/-- Constructive `PSum` extractor for 256-bit `Digest256` self-verification over `TowerElem 7` (`0 Classical.choice`). -/
+def extractPreSteppedDigest256Outcome {L : Nat}
+    (F : Nat → Nat → Digest256 → Digest256) (sk : Fin L → Digest256)
+    (lambdas : List (TowerElem 7)) (digits : Fin L → Fin 4)
+    (submitted : SubmittedDigest256ShamirShares L) (cand : Fin L → Digest256)
+    (hAccepted :
+      preSteppedDigest256ReconstructAndSelfVerify F (fun i => wotsChainIter F i.val 0 3 (sk i))
+        lambdas digits submitted = some cand) :
+    let trueNodes : Fin L → Digest256 := fun i => wotsChainIter F i.val 0 (digits i).val (sk i)
+    PSum (cand = trueNodes) (WotsChainCollisionWitness F 4) :=
+  let pk : Fin L → Digest256 := fun i => wotsChainIter F i.val 0 3 (sk i)
+  let trueNodes : Fin L → Digest256 := fun i => wotsChainIter F i.val 0 (digits i).val (sk i)
+  match checkFinFnEq cand trueNodes with
+  | .inl hEq => .inl hEq
+  | .inr ⟨i, hiNe⟩ =>
+    have hAllChecks :
+        ((List.finRange L).all (fun j =>
+          decide (wotsChainIter F j.val (digits j).val (3 - (digits j).val) (cand j) = pk j))) = true := by
+      unfold preSteppedDigest256ReconstructAndSelfVerify at hAccepted
+      dsimp only at hAccepted
+      split at hAccepted
+      · rename_i hAll
+        injection hAccepted with hCand
+        rw [← hCand]
+        exact hAll
+      · cases hAccepted
+    have hCandEndsAtPk : wotsChainIter F i.val (digits i).val (3 - (digits i).val) (cand i) = pk i :=
+      of_decide_eq_true (List.all_eq_true.mp hAllChecks i (mem_finRange_self i))
+    have _hDiLe3 : (digits i).val ≤ 3 := by have := (digits i).isLt; omega
+    have hTrueEndsAtPk : wotsChainIter F i.val (digits i).val (3 - (digits i).val) (trueNodes i) = pk i := by
+      dsimp only [trueNodes, pk]
+      have hAdd : (digits i).val + (3 - (digits i).val) = 3 := by omega
+      have hComp := wotsChainIter_add F i.val 0 (digits i).val (3 - (digits i).val) (sk i)
+      simp only [Nat.zero_add, hAdd] at hComp
+      exact hComp.symm
+    .inr (extractChainMergeClaw F i.val (digits i).val (3 - (digits i).val)
+            (cand i) (trueNodes i) (by omega) hiNe (hCandEndsAtPk.trans hTrueEndsAtPk.symm))
+
+/-- **Full `TowerElem 7` (`GF(2^128)`) MAC-Free Self-Verifying 256-Bit `Digest256` `WOTS+C` Theorem
+    (`preStepped_tower128_digest256_self_verification`)**:
+    Across `L` chains (specifically `v = 128`, `WOTS_TARGET_SUM = 192` in `QuorumJorts`):
+    1. **Honest Completeness**: Honest `TowerElem 7` (`GF(2^128)`) Shamir shares of
+       `splitDigest256Tower128 (trueNodes i)` reconstruct and pass 256-bit endpoint self-verification
+       (`= some trueNodes`) with `0` MACs!
+    2. **Adversarial Share-Corruption Soundness**: Any corrupted `GF(2^128)` share vector `submitted'`
+       is EITHER rejected (`none`), yields `some trueNodes`, OR constructively yields an explicit
+       256-bit hash step collision/preimage `WotsChainCollisionWitness F 4`! -/
+theorem preStepped_tower128_digest256_self_verification {d L : Nat}
+    (F : Nat → Nat → Digest256 → Digest256) (sk : Fin L → Digest256)
+    (tape : PreSteppedDigest256ShamirTape d L)
+    (lambdas pts : List (TowerElem 7))
+    (hLagrange : ∀ (c₀ : TowerElem 7) (tail : ShamirPadPoly (TowerElem 7) d),
+      ringDot lambdas (pts.map (fun x => RoundPoly.evalCoeffs (c₀ :: tail.1) x)) = c₀)
+    (digits : Fin L → Fin 4) :
+    let pk : Fin L → Digest256 := fun i => wotsChainIter F i.val 0 3 (sk i)
+    let trueNodes : Fin L → Digest256 := fun i => wotsChainIter F i.val 0 (digits i).val (sk i)
+    let honestSubmitted : SubmittedDigest256ShamirShares L := fun i =>
+      if h : (digits i).val < 3 then
+        let k : Fin 3 := ⟨(digits i).val, h⟩
+        let (lo, hi) := splitDigest256Tower128 (trueNodes i)
+        (pts.map (fun x => RoundPoly.evalCoeffs (lo :: (tape i k).1.1) x),
+         pts.map (fun x => RoundPoly.evalCoeffs (hi :: (tape i k).2.1) x))
+      else
+        ([], [])
+    preSteppedDigest256ReconstructAndSelfVerify F pk lambdas digits honestSubmitted = some trueNodes ∧
+    (∀ (submitted' : SubmittedDigest256ShamirShares L) (cand : Fin L → Digest256),
+      preSteppedDigest256ReconstructAndSelfVerify F pk lambdas digits submitted' = some cand →
+      cand = trueNodes ∨ Nonempty (WotsChainCollisionWitness F 4)) := by
+  intro pk trueNodes honestSubmitted
+  refine ⟨?_, ?_⟩
+  · have hCandEq :
+        (fun i : Fin L =>
+          if (digits i).val < 3 then
+            joinTower128Digest256
+              (ringDot lambdas (honestSubmitted i).1, ringDot lambdas (honestSubmitted i).2)
+          else pk i) = trueNodes := by
+      funext i
+      by_cases hd : (digits i).val < 3
+      · simp only [hd, ↓reduceIte, honestSubmitted, ↓reduceDIte]
+        rw [hLagrange _ (tape i ⟨(digits i).val, hd⟩).1,
+            hLagrange _ (tape i ⟨(digits i).val, hd⟩).2]
+        exact join_splitDigest256Tower128 (trueNodes i)
+      · have hdEq3 : (digits i).val = 3 := by have := (digits i).isLt; omega
+        simp only [hd, ↓reduceIte]
+        dsimp only [pk, trueNodes]
+        rw [hdEq3]
+    unfold preSteppedDigest256ReconstructAndSelfVerify
+    dsimp only
+    have hEval : ∀ (c : Fin L → Digest256), c = trueNodes →
+        (if (List.finRange L).all (fun i =>
+            decide (wotsChainIter F i.val (digits i).val (3 - (digits i).val) (c i) = pk i))
+         then some c else none) = some trueNodes := by
+      rintro c rfl
+      have hAllOk :
+          ((List.finRange L).all (fun i =>
+            decide (wotsChainIter F i.val (digits i).val (3 - (digits i).val) (trueNodes i) = pk i))) = true := by
+        apply List.all_eq_true.mpr
+        intro i _
+        apply decide_eq_true
+        dsimp only [trueNodes, pk]
+        have _hdLe3 : (digits i).val ≤ 3 := by have := (digits i).isLt; omega
+        have hAdd : (digits i).val + (3 - (digits i).val) = 3 := by omega
+        have hComp := wotsChainIter_add F i.val 0 (digits i).val (3 - (digits i).val) (sk i)
+        simp only [Nat.zero_add, hAdd] at hComp
+        exact hComp.symm
+      rw [hAllOk]
+      rfl
+    exact hEval _ hCandEq
+  · intro submitted' cand hAcc
+    cases extractPreSteppedDigest256Outcome F sk lambdas digits submitted' cand hAcc with
+    | inl hEq => exact .inl hEq
+    | inr w => exact .inr ⟨w⟩
+
+/-! ## §4. Explicit `inhabited_*` Non-Vacuity Witnesses & `SimulationSpine` Exports -/
+
+/-- Compositional `SimulationSpine` `PartyMachine` packaging `beltLatchBindStep`. -/
+def beltLatchPartyMachine : PartyMachine BeltLatchNodeState BeltLatchRecord BeltBindOutcome :=
+  PartyMachine.ofCustodyStep beltLatchBindStep
+
+/-- Inhabitedness witness 1 (`inhabited_beltLatch_quorum_network_3f_plus_1`):
+    Concrete `(t = 3, n = 7, f = 2, q = 5)` multi-turn network trace executing fresh binds,
+    Mode 3B leaf staging, pairwise-MAC echo broadcast across a 5-custodian quorum, a power-loss
+    crash + WAL recovery + Mode 3A idempotent replay, and certified quorum share release! -/
+theorem inhabited_beltLatch_quorum_network_3f_plus_1 :
+    let H : List UInt8 → Digest256 := fun _ => 0xAA#256
+    let MAC : Digest256 → List UInt8 → Digest256 := fun k _ => k
+    let macKeys : Fin 7 → Fin 7 → Digest256 := fun _ _ => 0x55#256
+    let Corrupt : CustodiansMask 7 := ⟨fun i => decide (i.val = 5 ∨ i.val = 6)⟩
+    let Q : CustodiansMask 7 := ⟨fun i => decide (i.val < 5)⟩
+    let rec₀ : BeltLatchRecord :=
+      { epoch := 0, msgDigest := 0x11#256, retrySalt := 0x22#256, targetSumDigits := [1, 2, 0, 3] }
+    let p0 : Fin 7 := ⟨0, by decide⟩
+    let p1 : Fin 7 := ⟨1, by decide⟩
+    let p2 : Fin 7 := ⟨2, by decide⟩
+    let p3 : Fin 7 := ⟨3, by decide⟩
+    let p4 : Fin 7 := ⟨4, by decide⟩
+    let trace : List (BeltNetworkTurn 7) :=
+      [ .stageMode3BLeaf p0 0,
+        .honestBind p0 rec₀, .honestBind p1 rec₀, .honestBind p2 rec₀,
+        .honestBind p3 rec₀, .honestBind p4 rec₀,
+        .crashAndRecoverNode p0,
+        .honestBind p0 rec₀,
+        .honestEmitEcho p0 p0, .honestEmitEcho p1 p0, .honestEmitEcho p2 p0,
+        .honestEmitEcho p3 p0, .honestEmitEcho p4 p0 ]
+    let netMid := runBeltNetworkTrace H MAC macKeys Corrupt 5 (BeltLatchNetworkState.init 7 20 4) trace
+    let netFinal := stepBeltNetwork H MAC macKeys Corrupt 5 netMid
+      (.authorizeQuorumRelease p0 Q rec₀ netMid.emittedHonestEchoes)
+    2 * 5 > 7 + 2 ∧
+    maskCard Corrupt = 2 ∧
+    maskCard Q = 5 ∧
+    (netFinal.nodes p0).stagedWindow = [] ∧
+    (Q, p0, rec₀) ∈ netFinal.certifiedReleases := by
+  decide
+
+/-- Inhabitedness witness 2 (`inhabited_committee_partitioned_jorts_2of3_and_3of5`):
+    Multi-turn `(2, 3)` (`3` subtrees, `1` corrupt/offline) and `(3, 5)` (`10` subtrees, `2`
+    corrupt/offline) executions over `List (QuorumJortsTurn 3)` and `List (QuorumJortsTurn 5)`
+    advancing durable `BeltLatch` subtree cursors across consecutive epochs (`epoch = 0, 1`),
+    emitting certified `ReleasedQuorumLeaf` signatures, and verifying `t`-of-`t` XOR reconstruction! -/
+theorem inhabited_committee_partitioned_jorts_2of3_and_3of5 :
+    let H : List UInt8 → Digest256 := fun _ => 0xAA#256
+    let MAC : Digest256 → List UInt8 → Digest256 := fun k _ => k
+    let macKeys3 : Fin 3 → Fin 3 → Digest256 := fun i j => BitVec.ofNat 256 (i.val + j.val + 1)
+    let macKeys5 : Fin 5 → Fin 5 → Digest256 := fun i j => BitVec.ofNat 256 (i.val + j.val + 1)
+    let C3 : CustodiansMask 3 := ⟨fun i => decide (i.val = 2)⟩
+    let Online3 : CustodiansMask 3 := ⟨fun i => decide (i.val < 2)⟩
+    let C5 : CustodiansMask 5 := ⟨fun i => decide (i.val = 3 ∨ i.val = 4)⟩
+    let Online5 : CustodiansMask 5 := ⟨fun i => decide (i.val < 3)⟩
+    let rec₀ : BeltLatchRecord :=
+      { epoch := 0, msgDigest := 0x1010#256, retrySalt := 0x01#256, targetSumDigits := [2, 1] }
+    let rec₁ : BeltLatchRecord :=
+      { epoch := 1, msgDigest := 0x2020#256, retrySalt := 0x02#256, targetSumDigits := [1, 2] }
+    let v3 : Fin 3 := ⟨0, by decide⟩
+    let v5 : Fin 5 := ⟨0, by decide⟩
+    let trace3 : List (QuorumJortsTurn 3) :=
+      buildCommitteeSignTrace H MAC macKeys3 0 Online3 v3 rec₀ ++
+      buildCommitteeSignTrace H MAC macKeys3 0 Online3 v3 rec₁
+    let trace5 : List (QuorumJortsTurn 5) :=
+      buildCommitteeSignTrace H MAC macKeys5 0 Online5 v5 rec₀ ++
+      buildCommitteeSignTrace H MAC macKeys5 0 Online5 v5 rec₁
+    let net3 := runQuorumJortsTrace H MAC macKeys3 C3 2 4 2 (QuorumJortsNetworkState.init 3 4 2) trace3
+    let net5 := runQuorumJortsTrace H MAC macKeys5 C5 3 4 3 (QuorumJortsNetworkState.init 5 4 2) trace5
+    let tape2 : Fin 1 → Digest256 := fun _ => 0xABCD#256
+    let tape3 : Fin 2 → Digest256 := fun j => if j.val = 0 then 0x1234#256 else 0x5678#256
+    (chooseMasks 3 2).length = 3 ∧
+    (chooseMasks 5 3).length = 10 ∧
+    2 ≤ maskCard (maskDiff Online3 C3) ∧
+    3 ≤ maskCard (maskDiff Online5 C5) ∧
+    net3.releasedLeaves.length = 2 ∧
+    net5.releasedLeaves.length = 2 ∧
+    (net3.slots v3 0).nextEpoch = 2 ∧
+    (net5.slots v5 0).nextEpoch = 2 ∧
+    xorFin256 2 (dealAdditiveShares 2 0xCAFE#256 tape2) = 0xCAFE#256 ∧
+    xorFin256 3 (dealAdditiveShares 3 0xBEEF#256 tape3) = 0xBEEF#256 := by
+  decide
+
+private theorem preSteppedDigest256_accepted_component {L : Nat}
+    (F : Nat → Nat → Digest256 → Digest256) (pk : Fin L → Digest256)
+    (lambdas : List (TowerElem 7)) (digits : Fin L → Fin 4)
+    (sub : SubmittedDigest256ShamirShares L) (cand : Fin L → Digest256)
+    (i : Fin L) (hd : (digits i).val < 3)
+    (accepted : preSteppedDigest256ReconstructAndSelfVerify F pk lambdas digits sub = some cand) :
+    cand i = joinTower128Digest256 (ringDot lambdas (sub i).1, ringDot lambdas (sub i).2) := by
+  unfold preSteppedDigest256ReconstructAndSelfVerify at accepted
+  dsimp only at accepted
+  split at accepted
+  next =>
+    have same := Option.some.inj accepted
+    rw [← same]
+    simp only [hd, ↓reduceIte]
+  next => cases accepted
+
+set_option maxHeartbeats 800000 in
+/-- Inhabitedness witness 3 (`inhabited_preStepped_shamir_wots_self_verify`):
+    Full 128-bit `TowerElem 7` (`GF(2^128)`) `(t = 2, n = 3)` pre-stepped Shamir `WOTS+C` table over
+    256-bit `Digest256` chains across `v = 128` base-4 chains (`WOTS_TARGET_SUM = 192`, evaluation
+    points `[towerOne 7, towerX 7]` with `towerX 7 ∉ GF(2^64)`):
+    1. Verifies `validWotsCsCodeword 128 4 192` across all `128` chains (`64 × 2 + 64 × 1 = 192`);
+    2. Proves honest `GF(2^128)` Shamir reconstruction + MAC-free endpoint self-verification on
+       **real `quorumChainStep shake256Digest256`** (`= some trueShake`);
+    3. Proves **`#tooth` corrupted-share rejection** when corrupt party `0` perturbs its `GF(2^128)`
+       share on chain `0` by `towerX 7`: both soundness on `quorumChainStep shake256Digest256`
+       (rejects `.isNone = true` or extracts a concrete `SHAKE256` chain collision) AND unconditional
+       `.isNone = true` rejection on 256-bit `Digest256` chains across `Fin 128`! -/
+theorem inhabited_preStepped_shamir_wots_self_verify :
+    let pts : List (TowerElem 7) := [towerOne 7, towerX 7]
+    let lambdas : List (TowerElem 7) := lagrange2WeightsTower 7 (towerOne 7) (towerX 7)
+    let digits : Fin 128 → Fin 4 := fun i => if i.val < 64 then ⟨2, by decide⟩ else ⟨1, by decide⟩
+    let digitsNat : List Nat := (List.finRange 128).map (fun i => (digits i).val)
+    let tape : PreSteppedDigest256ShamirTape 1 128 :=
+      fun _ _ => (⟨[towerX 7], rfl⟩, ⟨[towerOne 7], rfl⟩)
+    let masterSeed : Digest256 := 0x0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF#256
+    let pkSeed : Digest256 := quorumStagePkSeed shake256Digest256 masterSeed
+    let F_shake : Nat → Nat → Digest256 → Digest256 := quorumChainStep shake256Digest256 pkSeed 0
+    let skShake : Fin 128 → Digest256 :=
+      fun i => quorumStageChainSk shake256Digest256 masterSeed 0 (UInt32.ofNat i.val)
+    let pkShake : Fin 128 → Digest256 := fun i => wotsChainIter F_shake i.val 0 3 (skShake i)
+    let trueShake : Fin 128 → Digest256 := fun i => wotsChainIter F_shake i.val 0 (digits i).val (skShake i)
+    let honestSubShake : SubmittedDigest256ShamirShares 128 := fun i =>
+      if h : (digits i).val < 3 then
+        let k : Fin 3 := ⟨(digits i).val, h⟩
+        let (lo, hi) := splitDigest256Tower128 (trueShake i)
+        (pts.map (fun x => RoundPoly.evalCoeffs (lo :: (tape i k).1.1) x),
+         pts.map (fun x => RoundPoly.evalCoeffs (hi :: (tape i k).2.1) x))
+      else ([], [])
+    let corruptSubShake : SubmittedDigest256ShamirShares 128 := fun i =>
+      if i.val = 0 then
+        let (lo, hi) := splitDigest256Tower128 (trueShake i)
+        ([towerAdd 7 (RoundPoly.evalCoeffs (lo :: [towerX 7]) (towerOne 7)) (towerX 7),
+          RoundPoly.evalCoeffs (lo :: [towerX 7]) (towerX 7)],
+         pts.map (fun x => RoundPoly.evalCoeffs (hi :: [towerOne 7]) x))
+      else
+        honestSubShake i
+    let F_perm : Nat → Nat → Digest256 → Digest256 :=
+      fun chain step x => x ^^^ BitVec.ofNat 256 (0x9E3779B97F4A7C15 + chain * 257 + step)
+    let skPerm : Fin 128 → Digest256 := fun i => BitVec.ofNat 256 (0xCAFE0000 + i.val)
+    let pkPerm : Fin 128 → Digest256 := fun i => wotsChainIter F_perm i.val 0 3 (skPerm i)
+    let truePerm : Fin 128 → Digest256 := fun i => wotsChainIter F_perm i.val 0 (digits i).val (skPerm i)
+    let honestSubPerm : SubmittedDigest256ShamirShares 128 := fun i =>
+      if h : (digits i).val < 3 then
+        let k : Fin 3 := ⟨(digits i).val, h⟩
+        let (lo, hi) := splitDigest256Tower128 (truePerm i)
+        (pts.map (fun x => RoundPoly.evalCoeffs (lo :: (tape i k).1.1) x),
+         pts.map (fun x => RoundPoly.evalCoeffs (hi :: (tape i k).2.1) x))
+      else ([], [])
+    let corruptSubPerm : SubmittedDigest256ShamirShares 128 := fun i =>
+      if i.val = 0 then
+        let (lo, hi) := splitDigest256Tower128 (truePerm i)
+        ([towerAdd 7 (RoundPoly.evalCoeffs (lo :: [towerX 7]) (towerOne 7)) (towerX 7),
+          RoundPoly.evalCoeffs (lo :: [towerX 7]) (towerX 7)],
+         pts.map (fun x => RoundPoly.evalCoeffs (hi :: [towerOne 7]) x))
+      else
+        honestSubPerm i
+    (∀ sub : TowerElem 6, towerX 7 ≠ embedTower 6 sub) ∧
+    validWotsCsCodeword 128 4 192 digitsNat ∧
+    preSteppedDigest256ReconstructAndSelfVerify F_shake pkShake lambdas digits honestSubShake =
+      some trueShake ∧
+    ((preSteppedDigest256ReconstructAndSelfVerify F_shake pkShake lambdas digits corruptSubShake).isNone = true ∨
+      Nonempty (WotsChainCollisionWitness F_shake 4)) ∧
+    preSteppedDigest256ReconstructAndSelfVerify F_perm pkPerm lambdas digits honestSubPerm =
+      some truePerm ∧
+    (preSteppedDigest256ReconstructAndSelfVerify F_perm pkPerm lambdas digits corruptSubPerm).isNone = true := by
+  intro pts lambdas digits digitsNat tape masterSeed pkSeed F_shake skShake pkShake trueShake
+    honestSubShake corruptSubShake F_perm skPerm pkPerm truePerm honestSubPerm corruptSubPerm
+  have hPtsNe : towerOne 7 ≠ towerX 7 := towerOne_ne_towerX 6
+  have hX7Nz : towerX 7 ≠ towerZero 7 := by
+    intro hZ; exact towerOne_ne_zero 6 (congrArg Prod.snd hZ)
+  have hLag : ∀ (c₀ : TowerElem 7) (tail : ShamirPadPoly (TowerElem 7) 1),
+      ringDot lambdas (pts.map (fun x => RoundPoly.evalCoeffs (c₀ :: tail.1) x)) = c₀ :=
+    fun c₀ tail => lagrange2WeightsTower_eval 7 hPtsNe c₀ tail
+  have hLam0Nz : towerMul 7 (towerX 7) (towerInv 7 (towerAdd 7 (towerOne 7) (towerX 7))) ≠ towerZero 7 :=
+    lagrange2HeadWeight_ne_zero 7 hPtsNe hX7Nz
+  obtain ⟨hHonShake, hSndShake⟩ :=
+    preStepped_tower128_digest256_self_verification F_shake skShake tape lambdas pts hLag digits
+  obtain ⟨hHonPerm, _⟩ :=
+    preStepped_tower128_digest256_self_verification F_perm skPerm tape lambdas pts hLag digits
+  have hDigitsNatEq : digitsNat = List.replicate 64 2 ++ List.replicate 64 1 := by
+    have hFn : (fun i : Fin 128 => (digits i).val) = (fun i : Fin 128 => if i.val < 64 then 2 else 1) := by
+      funext i
+      dsimp only [digits]
+      by_cases h : i.val < 64 <;> simp [h]
+    dsimp only [digitsNat]
+    rw [hFn, map_finRange_threshold 128 64 2 1 (by omega)]
+  have hCodeword : validWotsCsCodeword 128 4 192 digitsNat := by
+    rw [hDigitsNatEq]
+    exact tooth_impossible_wots128_target_sum_385_vs_valid_192.2.2
+  have hShiftNe : ∀ (node : Digest256),
+      joinTower128Digest256
+        (ringDot lambdas
+          [towerAdd 7 (RoundPoly.evalCoeffs ((splitDigest256Tower128 node).1 :: [towerX 7]) (towerOne 7)) (towerX 7),
+           RoundPoly.evalCoeffs ((splitDigest256Tower128 node).1 :: [towerX 7]) (towerX 7)],
+         ringDot lambdas
+          (pts.map (fun x => RoundPoly.evalCoeffs ((splitDigest256Tower128 node).2 :: [towerOne 7]) x))) ≠ node := by
+    intro node hJoinEq
+    have hLoHon :
+        ringDot lambdas
+          [RoundPoly.evalCoeffs ((splitDigest256Tower128 node).1 :: [towerX 7]) (towerOne 7),
+           RoundPoly.evalCoeffs ((splitDigest256Tower128 node).1 :: [towerX 7]) (towerX 7)] =
+        (splitDigest256Tower128 node).1 :=
+      hLag (splitDigest256Tower128 node).1 ⟨[towerX 7], rfl⟩
+    have hLoShiftNe :
+        ringDot lambdas
+          [towerAdd 7 (RoundPoly.evalCoeffs ((splitDigest256Tower128 node).1 :: [towerX 7]) (towerOne 7)) (towerX 7),
+           RoundPoly.evalCoeffs ((splitDigest256Tower128 node).1 :: [towerX 7]) (towerX 7)] ≠
+        ringDot lambdas
+          [RoundPoly.evalCoeffs ((splitDigest256Tower128 node).1 :: [towerX 7]) (towerOne 7),
+           RoundPoly.evalCoeffs ((splitDigest256Tower128 node).1 :: [towerX 7]) (towerX 7)] :=
+      tooth_unverified_lagrange_accepts_corrupted_share
+        (towerMul 7 (towerX 7) (towerInv 7 (towerAdd 7 (towerOne 7) (towerX 7))))
+        (RoundPoly.evalCoeffs ((splitDigest256Tower128 node).1 :: [towerX 7]) (towerOne 7))
+        (towerX 7)
+        [towerMul 7 (towerOne 7) (towerInv 7 (towerAdd 7 (towerOne 7) (towerX 7)))]
+        [RoundPoly.evalCoeffs ((splitDigest256Tower128 node).1 :: [towerX 7]) (towerX 7)]
+        hLam0Nz hX7Nz
+    have hSplitEq := congrArg splitDigest256Tower128 hJoinEq
+    rw [split_joinTower128Digest256] at hSplitEq
+    exact hLoShiftNe ((congrArg Prod.fst hSplitEq).trans hLoHon.symm)
+  let i0 : Fin 128 := ⟨0, by decide⟩
+  have hCandOfSome : ∀ (F : Nat → Nat → Digest256 → Digest256) (pk : Fin 128 → Digest256)
+      (sub : SubmittedDigest256ShamirShares 128) (cand : Fin 128 → Digest256),
+      preSteppedDigest256ReconstructAndSelfVerify F pk lambdas digits sub = some cand →
+      cand i0 = joinTower128Digest256 (ringDot lambdas (sub i0).1, ringDot lambdas (sub i0).2) := by
+    intro F pk sub cand hSome
+    exact preSteppedDigest256_accepted_component F pk lambdas digits sub cand i0 (by decide) hSome
+  refine ⟨towerX7_not_in_gf2_64, hCodeword, hHonShake, ?_, hHonPerm, ?_⟩
+  · cases hRes : preSteppedDigest256ReconstructAndSelfVerify F_shake pkShake lambdas digits corruptSubShake with
+    | none => exact .inl rfl
+    | some cand =>
+      rcases hSndShake corruptSubShake cand hRes with rfl | hColl
+      · exfalso
+        have hC0 := hCandOfSome F_shake pkShake corruptSubShake trueShake hRes
+        dsimp only [corruptSubShake, i0] at hC0
+        exact hShiftNe (trueShake i0) hC0.symm
+      · exact .inr hColl
+  · cases hRes : preSteppedDigest256ReconstructAndSelfVerify F_perm pkPerm lambdas digits corruptSubPerm with
+    | none => rfl
+    | some cand =>
+      exfalso
+      cases extractPreSteppedDigest256Outcome F_perm skPerm lambdas digits corruptSubPerm cand hRes with
+      | inl hEq =>
+        subst hEq
+        have hC0 := hCandOfSome F_perm pkPerm corruptSubPerm truePerm hRes
+        dsimp only [corruptSubPerm, i0] at hC0
+        exact hShiftNe (truePerm i0) hC0.symm
+      | inr w =>
+        have hStepEq := w.step_eq
+        dsimp only [F_perm] at hStepEq
+        let mask := BitVec.ofNat 256 (0x9E3779B97F4A7C15 + w.chainIdx * 257 + w.stepPos)
+        have hXor := congrArg (fun z => z ^^^ mask) hStepEq
+        rw [BitVec.xor_assoc, BitVec.xor_self, BitVec.xor_zero,
+            BitVec.xor_assoc, BitVec.xor_self, BitVec.xor_zero] at hXor
+        exact w.nodes_ne hXor
+
+
+/-! ## Exact wire operations and permit-consuming signature execution
+
+The earlier `BeltNetworkTurn` and `QuorumJortsTurn` APIs are generalized algebraic
+certificate models, retained for downstream proof compatibility. In particular their
+threshold certificate is not Rust's exact peer-roster API. The operational API below
+checks Rust records and emits signatures, rather than interpreting those legacy
+certificate records as signatures. `qsBGlobalSign` is a scheduled-leaf algebraic evaluator;
+allocation is performed by `QsBGlobalAllocator.reserve`, not by that evaluator.
+-/
+
+/-- Rust pair-key cSHAKE input: u64 length framing, no domain bytes in the input. -/
+def beltPairKeyPreimage (context : List UInt8) (a b : Nat)
+    (secrets : List (List UInt8)) : List UInt8 :=
+  quorumFrameFields (context :: encodeNatBeBytes 8 (min a b) ::
+    encodeNatBeBytes 8 (max a b) :: secrets)
+
+def deriveBeltEchoMacKeyCshake256 (context : List UInt8) (a b : Nat)
+    (secrets : List (List UInt8)) : Digest256 :=
+  cshake256Digest256 beltEchoKeyTag.data.toList (beltPairKeyPreimage context a b secrets)
+
+/-- Fixed-width Rust echo input, including the commitment to the digits. -/
+def beltEchoPreimage (key : Digest256) (sender receiver : Nat)
+    (rec : BeltLatchRecord) (binding : Digest256) : List UInt8 :=
+  encodeDigest256 key ++ encodeNatBeBytes 8 sender ++ encodeNatBeBytes 8 receiver ++
+  encodeNatBeBytes 8 rec.epoch.toNat ++ encodeDigest256 rec.msgDigest ++
+  encodeDigest256 rec.retrySalt ++ encodeDigest256 binding
+
+/-- Domain-specific operations: the cSHAKE customization is separate from its input. -/
+structure BeltWireCrypto where
+  cshake : List UInt8 → List UInt8 → Digest256
+
+def BeltWireCrypto.recordBinding (ops : BeltWireCrypto) (rec : BeltLatchRecord) : Digest256 :=
+  ops.cshake beltLatchBindingTag.data.toList (encodeBeltLatchRecord rec)
+
+def BeltWireCrypto.echoTag (ops : BeltWireCrypto) (key : Digest256)
+    (sender receiver : Nat) (rec : BeltLatchRecord) : Digest256 :=
+  ops.cshake beltEchoMacTag.data.toList
+    (beltEchoPreimage key sender receiver rec (ops.recordBinding rec))
+
+def rustBeltWireCrypto : BeltWireCrypto := ⟨cshake256Digest256⟩
+
+theorem rustBeltWireCrypto_binding (rec : BeltLatchRecord) :
+    rustBeltWireCrypto.recordBinding rec = beltRecordBindingCshake256 rec := by
+  unfold rustBeltWireCrypto BeltWireCrypto.recordBinding beltRecordBindingCshake256
+  rfl
+
+theorem rustBeltWireCrypto_echo (key : Digest256) (s r : Nat) (rec : BeltLatchRecord) :
+    rustBeltWireCrypto.echoTag key s r rec =
+      cshake256Digest256 beltEchoMacTag.data.toList
+        (beltEchoPreimage key s r rec (beltRecordBindingCshake256 rec)) := by
+  unfold rustBeltWireCrypto BeltWireCrypto.echoTag BeltWireCrypto.recordBinding beltRecordBindingCshake256
+  rfl
+
+/-- Echo emission from a healthy persisted latch, parameterized by domain-specific operations. -/
+def emitBeltWireEcho {n : Nat} (ops : BeltWireCrypto) (key : Digest256)
+    (sender receiver : Fin n) (st : BeltLatchNodeState) : Option (AuthenticatedBeltEcho n) := do
+  if st.walPoisoned then none else
+    let r ← st.inFlight
+    pure
+      { sender := sender
+        receiver := receiver
+        record := r
+        binding := ops.recordBinding r
+        macTag := ops.echoTag key sender.val receiver.val r }
+
+def verifyBeltWireEcho {n : Nat} (ops : BeltWireCrypto) (key : Digest256)
+    (sender receiver : Fin n) (rec : BeltLatchRecord) (echo : AuthenticatedBeltEcho n) : Bool :=
+  decide (echo.sender = sender ∧ echo.receiver = receiver ∧ echo.record = rec ∧
+    echo.binding = ops.recordBinding rec ∧ echo.macTag = ops.echoTag key sender.val receiver.val rec)
+
+/-- Echo-emission refinement for the actual cSHAKE specialization. -/
+theorem emitBeltWireEcho_concrete {n : Nat} (key : Digest256)
+    (sender receiver : Fin n) (st : BeltLatchNodeState) (rec : BeltLatchRecord)
+    (healthy : st.walPoisoned = false) (bound : st.inFlight = some rec) :
+    emitBeltWireEcho rustBeltWireCrypto key sender receiver st =
+      some
+        { sender := sender
+          receiver := receiver
+          record := rec
+          binding := beltRecordBindingCshake256 rec
+          macTag := cshake256Digest256 beltEchoMacTag.data.toList
+            (beltEchoPreimage key sender.val receiver.val rec (beltRecordBindingCshake256 rec)) } := by
+  simp only [emitBeltWireEcho, healthy, Bool.false_eq_true, ↓reduceIte, bound]
+  rfl
+
+/-- Counter occupies the first four bytes of Rust's 32-byte salt; the rest are zero. -/
+def quorumCounterSalt (counter : UInt32) : Digest256 :=
+  BitVec.ofNat 256 (counter.toNat * 2 ^ 224)
+
+/-- Checked conversion rejects truncated counters, noncanonical salt, and wrapped leaves. -/
+def quorumLeafRecordFromLatch (subtreeHeight cIdx : Nat)
+    (rec : BeltLatchRecord) : Option QuorumLeafRecord :=
+  let leaf := committeeGlobalLeaf (2 ^ subtreeHeight) cIdx rec.epoch.toNat
+  let counter := UInt32.ofNat (rec.retrySalt.toNat / 2 ^ 224)
+  if rec.epoch.toNat < 2 ^ subtreeHeight ∧ leaf < 2 ^ 64 ∧
+      rec.retrySalt = quorumCounterSalt counter then
+    some
+      { leaf := UInt64.ofNat leaf
+        msgHash := rec.msgDigest
+        counter := counter
+        digits := rec.targetSumDigits }
+  else none
+
+/-- `hash.rs::mac32`: domain frame, then key frame, then message frames. -/
+def quorumWireMac (H : List UInt8 → Digest256) (key : Digest256)
+    (domain : ByteArray) (parts : List (List UInt8)) : Digest256 :=
+  H (quorumEncodeFramed domain (encodeDigest256 key :: parts))
+
+def quorumWireEchoMac (H : List UInt8 → Digest256) (key : Digest256)
+    (sender receiver cIdx : Nat) (epoch : UInt64) (binding : Digest256) : Digest256 :=
+  quorumWireMac H key quorumEchoMacTag
+    [encodeNatBeBytes 8 sender, encodeNatBeBytes 8 receiver, encodeNatBeBytes 8 cIdx,
+      encodeNatBeBytes 8 epoch.toNat, encodeDigest256 binding]
+
+/-- Exact leaf commitment, not the local latch commitment. -/
+def emitQuorumWireEcho {n : Nat} (H : List UInt8 → Digest256)
+    (key : Digest256) (subtreeHeight cIdx : Nat) (sender receiver : Fin n)
+    (st : BeltLatchNodeState) : Option (QuorumCommitteeEcho n) := do
+  if st.walPoisoned then none else
+    let r ← st.inFlight
+    let leafRec ← quorumLeafRecordFromLatch subtreeHeight cIdx r
+    let binding := quorumLeafRecordBinding H leafRec
+    pure
+      { fromParty := sender
+        toParty := receiver
+        committeeIdx := cIdx
+        epoch := r.epoch
+        binding := binding
+        mac := quorumWireEchoMac H key sender.val receiver.val cIdx r.epoch binding }
+
+/-- Rust counts every echo from the required peer before authenticating it, so a valid
+    echo plus an invalid duplicate still rejects. Extraneous non-peer entries are ignored,
+    exactly as Rust's per-peer filter does. Self authorization is the local latch check. -/
+def verifyQuorumWirePeers {n : Nat} (H : List UInt8 → Digest256)
+    (keys : Fin n → Fin n → Digest256) (Q : CustodiansMask n) (verifier : Fin n)
+    (cIdx : Nat) (epoch : UInt64) (rec : QuorumLeafRecord)
+    (echoes : List (QuorumCommitteeEcho n)) : Bool :=
+  (List.finRange n).all fun peer =>
+    if Q.mem peer && decide (peer ≠ verifier) then
+      match echoes.filter (fun e => decide (e.fromParty = peer)) with
+      | [e] => decide (e.toParty = verifier ∧ e.committeeIdx = cIdx ∧ e.epoch = epoch ∧
+          e.binding = quorumLeafRecordBinding H rec ∧
+          e.mac = quorumWireEchoMac H (keys peer verifier) peer.val verifier.val
+            cIdx epoch (quorumLeafRecordBinding H rec))
+      | _ => false
+    else true
+
+/-- An accepted required peer supplied the exact record MAC. If that authenticated echo
+    was not emitted in the honest transcript, it is a concrete fresh-tag witness. No
+    honest-log provenance hypothesis is silently inferred from a Boolean MAC check. -/
+theorem verifyQuorumWirePeers_provenance_or_forgery {n : Nat} (H : List UInt8 → Digest256)
+    (keys : Fin n → Fin n → Digest256) (Q : CustodiansMask n) (verifier peer : Fin n)
+    (cIdx : Nat) (epoch : UInt64) (rec : QuorumLeafRecord)
+    (echoes emitted : List (QuorumCommitteeEcho n))
+    (required : Q.mem peer = true) (other : peer ≠ verifier)
+    (accepted : verifyQuorumWirePeers H keys Q verifier cIdx epoch rec echoes = true) :
+    ∃ e ∈ echoes, e.fromParty = peer ∧ e.binding = quorumLeafRecordBinding H rec ∧
+      (e ∈ emitted ∨ (e ∉ emitted ∧
+        e.mac = quorumWireEchoMac H (keys peer verifier) peer.val verifier.val cIdx epoch
+          (quorumLeafRecordBinding H rec))) := by
+  unfold verifyQuorumWirePeers at accepted
+  have atPeer := List.all_eq_true.mp accepted peer (by simp)
+  simp only [required, decide_eq_true other, Bool.and_self, ↓reduceIte] at atPeer
+  cases filtered : echoes.filter (fun e => decide (e.fromParty = peer)) with
+  | nil => simp only [filtered, Bool.false_eq_true] at atPeer
+  | cons e tail =>
+    cases tail with
+    | cons x xs => simp only [filtered, Bool.false_eq_true] at atPeer
+    | nil =>
+      simp only [filtered, decide_eq_true_eq] at atPeer
+      have inFiltered : e ∈ echoes.filter (fun x => decide (x.fromParty = peer)) := by
+        rw [filtered]; exact List.Mem.head _
+      obtain ⟨inEchoes, fromPeer⟩ := List.mem_filter.mp inFiltered
+      refine ⟨e, inEchoes, of_decide_eq_true fromPeer, atPeer.2.2.2.1, ?_⟩
+      if sent : e ∈ emitted then exact .inl sent
+      else exact .inr ⟨sent, atPeer.2.2.2.2⟩
+
+/-- The checker obtains its record from the local latch; the requester cannot substitute
+    a record, counter or digits after collecting echoes. -/
+def checkQuorumWireRelease {n : Nat} (H : List UInt8 → Digest256)
+    (keys : Fin n → Fin n → Digest256) (t subtreeHeight : Nat)
+    (net : QuorumJortsNetworkState n) (Q : CustodiansMask n) (verifier : Fin n)
+    (echoes : List (QuorumCommitteeEcho n)) : Option QuorumLeafRecord := do
+  if t = 0 ∨ n < t ∨ 255 < n ∨ Q.mem verifier = false then none else
+    let cIdx ← committeeIndexOf t Q
+    let st := net.slots verifier cIdx
+    if st.walPoisoned || decide (16 < st.maxWindow) then none else
+      let r ← st.inFlight
+      let leafRec ← quorumLeafRecordFromLatch subtreeHeight cIdx r
+      if verifyQuorumWirePeers H keys Q verifier cIdx r.epoch leafRec echoes then
+        some leafRec
+      else none
+
+/-- Proof-carrying permit is tied to this actual network snapshot and exact checker. -/
+abbrev QuorumWirePermit {n : Nat} (H : List UInt8 → Digest256)
+    (keys : Fin n → Fin n → Digest256) (t h : Nat) (net : QuorumJortsNetworkState n)
+    (Q : CustodiansMask n) (v : Fin n) (echoes : List (QuorumCommitteeEcho n)) :=
+  { rec : QuorumLeafRecord // checkQuorumWireRelease H keys t h net Q v echoes = some rec }
+
+def issueQuorumWirePermit {n : Nat} (H : List UInt8 → Digest256)
+    (keys : Fin n → Fin n → Digest256) (t h : Nat) (net : QuorumJortsNetworkState n)
+    (Q : CustodiansMask n) (v : Fin n) (echoes : List (QuorumCommitteeEcho n)) :
+    Option (QuorumWirePermit H keys t h net Q v echoes) :=
+  match he : checkQuorumWireRelease H keys t h net Q v echoes with
+  | none => none
+  | some leafRec => some ⟨leafRec, he⟩
+
+/-- Signing inputs are checked against the exact message-bound record carried by the permit. -/
+def quorumRecordMatchesMessage (H : List UInt8 → Digest256) (pk : QuorumPublicKey)
+    (msg : List UInt8) (rec : QuorumLeafRecord) : Bool :=
+  let dig := quorumCounterDigest H rec.msgHash rec.counter
+  decide (rec.msgHash = quorumMessageHash H pk rec.leaf msg) &&
+  decide (rec.digits = (quorumDigitsFromDigest dig).map (fun d => UInt8.ofNat d.val)) &&
+  decide (((quorumDigitsFromDigest dig).map Fin.val).foldr (· + ·) 0 = 192) &&
+  decide (rec.counter.toNat < 2 ^ 16) &&
+  (List.range rec.counter.toNat).all (fun i =>
+    decide (((quorumDigitsFromDigest (quorumCounterDigest H rec.msgHash (UInt32.ofNat i))).map Fin.val).foldr (· + ·) 0 ≠ 192))
+
+/-- A durable reservation is retained even if opening or verification subsequently fails.
+    This is an atomic durable-store model; crash/recovery preserves these fields. -/
+structure QuorumSigningLedger where
+  reserved : List UInt64 := []
+  signatures : List QuorumJortsSig := []
+  deriving DecidableEq
+
+/-- Public openings contain independently shared, already stepped one-time nodes. No
+    polynomial evaluation of the reusable master seed is part of this output type. -/
+structure QuorumSteppedOpening where
+  leaf : UInt64
+  counter : UInt32
+  nodes : List Digest256
+  deriving DecidableEq
+
+/-- Operational signer consumes a permit through its durable ledger. All signing fields
+    come from the checked record, including the chain schedule; failures burn the leaf.
+    `masterSeed` and `pk` are fixed for the lifetime of this key's ledger. -/
+def signQuorumWirePermit {n : Nat} (H : List UInt8 → Digest256)
+    (keys : Fin n → Fin n → Digest256) (t h : Nat) (net : QuorumJortsNetworkState n)
+    (Q : CustodiansMask n) (v : Fin n) (echoes : List (QuorumCommitteeEcho n))
+    (permit : QuorumWirePermit H keys t h net Q v echoes)
+    (masterSeed : Digest256) (pk : QuorumPublicKey) (msg : List UInt8)
+    (authPath : List Digest256) (st : QuorumSigningLedger) :
+    QuorumSigningLedger × Option QuorumSteppedOpening :=
+  let leafRec := permit.val
+  if leafRec.leaf ∈ st.reserved then (st, none) else
+    let burned := { st with reserved := leafRec.leaf :: st.reserved }
+    if quorumRecordMatchesMessage H pk msg leafRec && decide (pk.pkSeed = quorumStagePkSeed H masterSeed) then
+      let digits := quorumDigitsFromDigest (quorumCounterDigest H leafRec.msgHash leafRec.counter)
+      let sig := quorumJortsReferenceSign H masterSeed leafRec.leaf leafRec.counter digits authPath
+      ({ burned with signatures := sig :: st.signatures },
+        some { leaf := sig.leaf, counter := sig.counter, nodes := sig.nodes })
+    else (burned, none)
+
+theorem signQuorumWirePermit_replay_rejected {n : Nat} (H : List UInt8 → Digest256)
+    (keys : Fin n → Fin n → Digest256) (t h : Nat) (net : QuorumJortsNetworkState n)
+    (Q : CustodiansMask n) (v : Fin n) (echoes : List (QuorumCommitteeEcho n))
+    (permit : QuorumWirePermit H keys t h net Q v echoes)
+    (seed : Digest256) (pk : QuorumPublicKey) (msg : List UInt8) (path : List Digest256)
+    (st : QuorumSigningLedger) (used : permit.val.leaf ∈ st.reserved) :
+    signQuorumWirePermit H keys t h net Q v echoes permit seed pk msg path st = (st, none) := by
+  unfold signQuorumWirePermit
+  simp only [used, ↓reduceIte]
+
+/-- Every attempted use is durably consumed, including a later failed message check. -/
+theorem signQuorumWirePermit_burns {n : Nat} (H : List UInt8 → Digest256)
+    (keys : Fin n → Fin n → Digest256) (t h : Nat) (net : QuorumJortsNetworkState n)
+    (Q : CustodiansMask n) (v : Fin n) (echoes : List (QuorumCommitteeEcho n))
+    (permit : QuorumWirePermit H keys t h net Q v echoes)
+    (seed : Digest256) (pk : QuorumPublicKey) (msg : List UInt8) (path : List Digest256)
+    (st : QuorumSigningLedger) :
+    permit.val.leaf ∈
+      (signQuorumWirePermit H keys t h net Q v echoes permit seed pk msg path st).1.reserved := by
+  unfold signQuorumWirePermit
+  dsimp only
+  split
+  next used => exact used
+  next fresh =>
+    split <;> exact List.Mem.head _
+
+/-- A produced opening is exactly the stepped chain vector for the authenticated record. -/
+theorem signQuorumWirePermit_output {n : Nat} (H : List UInt8 → Digest256)
+    (keys : Fin n → Fin n → Digest256) (t h : Nat) (net : QuorumJortsNetworkState n)
+    (Q : CustodiansMask n) (v : Fin n) (echoes : List (QuorumCommitteeEcho n))
+    (permit : QuorumWirePermit H keys t h net Q v echoes)
+    (seed : Digest256) (pk : QuorumPublicKey) (msg : List UInt8) (path : List Digest256)
+    (st : QuorumSigningLedger) (out : QuorumSteppedOpening)
+    (produced : (signQuorumWirePermit H keys t h net Q v echoes
+      permit seed pk msg path st).2 = some out) :
+    checkQuorumWireRelease H keys t h net Q v echoes = some permit.val ∧
+    out.leaf = permit.val.leaf ∧ out.counter = permit.val.counter ∧
+    out.nodes = (quorumJortsReferenceSign H seed permit.val.leaf permit.val.counter
+      (quorumDigitsFromDigest (quorumCounterDigest H permit.val.msgHash permit.val.counter)) path).nodes := by
+  refine ⟨permit.property, ?_⟩
+  unfold signQuorumWirePermit at produced
+  dsimp only at produced
+  split at produced
+  next used => cases produced
+  next fresh =>
+    split at produced
+    next accepted =>
+      cases Option.some.inj produced
+      exact ⟨rfl, rfl, rfl⟩
+    next rejected => cases produced
+
+/-- Reusing the same permit after any attempt produces no second opening. -/
+theorem signQuorumWirePermit_one_attempt {n : Nat} (H : List UInt8 → Digest256)
+    (keys : Fin n → Fin n → Digest256) (t h : Nat) (net : QuorumJortsNetworkState n)
+    (Q : CustodiansMask n) (v : Fin n) (echoes : List (QuorumCommitteeEcho n))
+    (permit : QuorumWirePermit H keys t h net Q v echoes)
+    (seed : Digest256) (pk : QuorumPublicKey) (msg : List UInt8) (path : List Digest256)
+    (st : QuorumSigningLedger) :
+    let next := (signQuorumWirePermit H keys t h net Q v echoes permit seed pk msg path st).1
+    (signQuorumWirePermit H keys t h net Q v echoes permit seed pk msg path next).2 = none := by
+  dsimp only
+  rw [signQuorumWirePermit_replay_rejected H keys t h net Q v echoes permit seed pk msg path _
+    (signQuorumWirePermit_burns H keys t h net Q v echoes permit seed pk msg path st)]
+
+/-- Safety is about actual signature outputs, not only released authorization records. -/
+def QuorumSigningLedger.Safe (st : QuorumSigningLedger) : Prop :=
+  (∀ sig ∈ st.signatures, sig.leaf ∈ st.reserved) ∧
+  (∀ a ∈ st.signatures, ∀ b ∈ st.signatures, a.leaf = b.leaf → a = b)
+
+private theorem signingLedger_burn_safe (st : QuorumSigningLedger) (leaf : UInt64)
+    (safe : st.Safe) : ({ st with reserved := leaf :: st.reserved } : QuorumSigningLedger).Safe := by
+  refine ⟨?_, safe.2⟩
+  intro sig hs
+  exact List.Mem.tail _ (safe.1 sig hs)
+
+private theorem signingLedger_cons_safe (st : QuorumSigningLedger) (sig : QuorumJortsSig)
+    (safe : st.Safe) (fresh : sig.leaf ∉ st.reserved) :
+    ({ reserved := sig.leaf :: st.reserved, signatures := sig :: st.signatures } :
+      QuorumSigningLedger).Safe := by
+  constructor
+  · intro a ha
+    dsimp only at ha
+    rcases List.mem_cons.mp ha with rfl | haTail
+    · exact List.Mem.head _
+    · exact List.Mem.tail _ (safe.1 a haTail)
+  · intro a ha b hb heq
+    dsimp only at ha hb
+    rcases List.mem_cons.mp ha with rfl | haTail
+    · rcases List.mem_cons.mp hb with rfl | hbTail
+      · rfl
+      · have used := safe.1 b hbTail
+        rw [← heq] at used
+        exact False.elim (fresh used)
+    · rcases List.mem_cons.mp hb with rfl | hbTail
+      · have used := safe.1 a haTail
+        rw [heq] at used
+        exact False.elim (fresh used)
+      · exact safe.2 a haTail b hbTail heq
+
+theorem signQuorumWirePermit_preserves_safety {n : Nat} (H : List UInt8 → Digest256)
+    (keys : Fin n → Fin n → Digest256) (t h : Nat) (net : QuorumJortsNetworkState n)
+    (Q : CustodiansMask n) (v : Fin n) (echoes : List (QuorumCommitteeEcho n))
+    (permit : QuorumWirePermit H keys t h net Q v echoes)
+    (seed : Digest256) (pk : QuorumPublicKey) (msg : List UInt8) (path : List Digest256)
+    (st : QuorumSigningLedger) (safe : st.Safe) :
+    (signQuorumWirePermit H keys t h net Q v echoes permit seed pk msg path st).1.Safe := by
+  unfold signQuorumWirePermit
+  dsimp only
+  split
+  next used => exact safe
+  next fresh =>
+    split
+    next accepted => exact signingLedger_cons_safe st _ safe fresh
+    next rejected => exact signingLedger_burn_safe st _ safe
+
+/-- Exact wire execution retains the existing durable latch transition system but routes
+    observable echoes and signature openings through the checked wire APIs. -/
+structure QuorumWireNetworkState (n : Nat) where
+  latches : QuorumJortsNetworkState n
+  echoes : List (QuorumCommitteeEcho n) := []
+  signing : QuorumSigningLedger := {}
+
+inductive QuorumWireTurn (n : Nat) where
+  | latch (turn : QuorumJortsTurn n)
+  | echo (sender receiver : Fin n) (committee : CustodiansMask n)
+  | sign (verifier : Fin n) (committee : CustodiansMask n)
+      (msg : List UInt8) (path : List Digest256) (echoes : List (QuorumCommitteeEcho n))
+
+/-- Key identity, public parameters and corrupt set are fixed across the entire trace. -/
+def stepQuorumWireNetwork {n : Nat} (H : List UInt8 → Digest256)
+    (keys : Fin n → Fin n → Digest256) (Corrupt : CustodiansMask n)
+    (seed : Digest256) (pk : QuorumPublicKey) (t height : Nat)
+    (st : QuorumWireNetworkState n) (turn : QuorumWireTurn n) : QuorumWireNetworkState n :=
+  match turn with
+  | .latch action =>
+    { st with
+      latches := stepQuorumJorts H (fun k bs => quorumWireMac H k quorumEchoMacTag [bs])
+        keys Corrupt t height t st.latches action }
+  | .echo sender receiver Q =>
+    if Corrupt.mem sender || !Q.mem sender then st else
+      match committeeIndexOf t Q with
+      | none => st
+      | some idx =>
+        match emitQuorumWireEcho H (keys sender receiver) height idx sender receiver
+            (st.latches.slots sender idx) with
+        | none => st
+        | some echo => { st with echoes := echo :: st.echoes }
+  | .sign verifier Q msg path echoes =>
+    if Corrupt.mem verifier then st else
+      match issueQuorumWirePermit H keys t height st.latches Q verifier echoes with
+      | none => st
+      | some permit =>
+        { st with
+          signing := (signQuorumWirePermit H keys t height st.latches Q verifier
+            echoes permit seed pk msg path st.signing).1 }
+
+def runQuorumWireTrace {n : Nat} (H : List UInt8 → Digest256)
+    (keys : Fin n → Fin n → Digest256) (Corrupt : CustodiansMask n)
+    (seed : Digest256) (pk : QuorumPublicKey) (t height : Nat)
+    (st : QuorumWireNetworkState n) : List (QuorumWireTurn n) → QuorumWireNetworkState n
+  | [] => st
+  | turn :: rest => runQuorumWireTrace H keys Corrupt seed pk t height
+      (stepQuorumWireNetwork H keys Corrupt seed pk t height st turn) rest
+
+theorem stepQuorumWireNetwork_preserves_safety {n : Nat} (H : List UInt8 → Digest256)
+    (keys : Fin n → Fin n → Digest256) (Corrupt : CustodiansMask n)
+    (seed : Digest256) (pk : QuorumPublicKey) (t height : Nat)
+    (st : QuorumWireNetworkState n) (turn : QuorumWireTurn n) (safe : st.signing.Safe) :
+    (stepQuorumWireNetwork H keys Corrupt seed pk t height st turn).signing.Safe := by
+  cases turn with
+  | latch action => exact safe
+  | echo sender receiver Q =>
+    unfold stepQuorumWireNetwork
+    dsimp only
+    by_cases hDenied : (Corrupt.mem sender || !Q.mem sender) = true
+    · simp only [hDenied, ↓reduceIte]; exact safe
+    · simp only [Bool.not_eq_true] at hDenied
+      simp only [hDenied, Bool.false_eq_true, ↓reduceIte]
+      cases committeeIndexOf t Q with
+      | none => dsimp only; exact safe
+      | some idx =>
+        dsimp only
+        cases emitQuorumWireEcho H (keys sender receiver) height idx sender receiver
+            (st.latches.slots sender idx) <;> dsimp only <;> exact safe
+  | sign verifier Q msg path echoes =>
+    unfold stepQuorumWireNetwork
+    dsimp only
+    by_cases hCorrupt : Corrupt.mem verifier = true
+    · simp only [hCorrupt, ↓reduceIte]; exact safe
+    · simp only [Bool.not_eq_true] at hCorrupt
+      simp only [hCorrupt, Bool.false_eq_true, ↓reduceIte]
+      cases issueQuorumWirePermit H keys t height st.latches Q verifier echoes with
+      | none => dsimp only; exact safe
+      | some permit =>
+        dsimp only
+        exact signQuorumWirePermit_preserves_safety H keys t height st.latches Q verifier
+          echoes permit seed pk msg path st.signing safe
+
+/-- End-to-end trace theorem: for every exact wire trace, two actual signature outputs
+    at the same leaf are identical. The ledger is shared for this key and survives crashes;
+    distributed replication of that ledger is a separate implementation obligation. -/
+theorem runQuorumWireTrace_signature_safety {n : Nat} (H : List UInt8 → Digest256)
+    (keys : Fin n → Fin n → Digest256) (Corrupt : CustodiansMask n)
+    (seed : Digest256) (pk : QuorumPublicKey) (t height : Nat)
+    (st : QuorumWireNetworkState n) (trace : List (QuorumWireTurn n))
+    (safe : st.signing.Safe) :
+    (runQuorumWireTrace H keys Corrupt seed pk t height st trace).signing.Safe := by
+  induction trace generalizing st with
+  | nil => exact safe
+  | cons turn rest ih =>
+    exact ih _ (stepQuorumWireNetwork_preserves_safety H keys Corrupt seed pk t height st turn safe)
+
+theorem emptyQuorumSigningLedger_safe : ({} : QuorumSigningLedger).Safe := by
+  constructor <;> intro _ h <;> cases h
+
+/-- Single durable allocator shared by all QS-B responding committees. Natural-number
+    cursor arithmetic cannot wrap; conversion occurs only after the range check. -/
+structure QsBGlobalAllocator where
+  nextLeaf : Nat := 0
+  deriving DecidableEq
+
+def QsBGlobalAllocator.reserve (height : Nat) (st : QsBGlobalAllocator) :
+    Option (UInt64 × QsBGlobalAllocator) :=
+  if st.nextLeaf < 2 ^ height ∧ st.nextLeaf < 2 ^ 64 then
+    some (UInt64.ofNat st.nextLeaf, ⟨st.nextLeaf + 1⟩)
+  else none
+
+theorem QsBGlobalAllocator.reserve_bounds {height : Nat} {st next : QsBGlobalAllocator}
+    {leaf : UInt64} (h : st.reserve height = some (leaf, next)) :
+    leaf.toNat = st.nextLeaf ∧ st.nextLeaf < 2 ^ height ∧
+      st.nextLeaf < 2 ^ 64 ∧ next.nextLeaf = st.nextLeaf + 1 := by
+  unfold QsBGlobalAllocator.reserve at h
+  split at h
+  next good =>
+    rcases Prod.mk.inj (Option.some.inj h) with ⟨rfl, rfl⟩
+    exact ⟨uint64_toNat_ofNat_of_lt good.2, good.1, good.2, rfl⟩
+  next bad => cases h
+
+/-- Consecutive reservations cannot collide even when different committees respond. -/
+theorem QsBGlobalAllocator.reserve_disjoint {height : Nat}
+    {s₀ s₁ s₂ : QsBGlobalAllocator} {l₁ l₂ : UInt64}
+    (h₁ : s₀.reserve height = some (l₁, s₁))
+    (h₂ : s₁.reserve height = some (l₂, s₂)) : l₁ ≠ l₂ := by
+  obtain ⟨he₁, _, _, hn₁⟩ := QsBGlobalAllocator.reserve_bounds h₁
+  obtain ⟨he₂, _, _, _⟩ := QsBGlobalAllocator.reserve_bounds h₂
+  intro same
+  have := congrArg UInt64.toNat same
+  omega
+
+/-- Global BFT enrollment, distinct from a QS-A threshold committee. -/
+structure QsBQuorumConfig where
+  n : Nat
+  t : Nat
+  f : Nat
+  q : Nat
+
+def QsBQuorumConfig.valid (c : QsBQuorumConfig) : Bool :=
+  decide (0 < c.n ∧ c.n ≤ 255 ∧ c.f < c.t ∧ c.t ≤ c.q ∧ c.q ≤ c.n ∧
+    2 * c.q > c.n + c.f ∧ c.n ≥ 3 * c.f + 1 ∧ c.q ≤ c.n - c.f)
+
+structure QsBWireAck where
+  sender : Nat
+  receiver : Nat
+  leaf : UInt64
+  binding : Digest256
+  mac : Digest256
+
+/-- ACK authentication binds the sequential global leaf, never a committee subtree index. -/
+def checkQsBWirePermit (H : List UInt8 → Digest256) (keys : Nat → Nat → Digest256)
+    (cfg : QsBQuorumConfig) (receiver : Nat) (nextLeaf : Nat)
+    (rec : QuorumLeafRecord) (acks : List QsBWireAck) : Bool :=
+  cfg.valid && decide (receiver < cfg.n ∧ rec.leaf.toNat = nextLeaf ∧
+    (acks.map (·.sender)).Nodup ∧ cfg.q ≤ acks.length) &&
+  acks.all (fun a => decide (a.sender < cfg.n ∧ a.receiver = receiver ∧ a.leaf = rec.leaf ∧
+    a.binding = quorumLeafRecordBinding H rec ∧
+    a.mac = quorumWireMac H (keys a.sender receiver) quorumAckMacTag
+      [encodeNatBeBytes 8 a.sender, encodeNatBeBytes 8 receiver,
+        encodeNatBeBytes 8 rec.leaf.toNat, encodeDigest256 a.binding]))
+
+abbrev QsBWirePermit (H : List UInt8 → Digest256) (keys : Nat → Nat → Digest256)
+    (cfg : QsBQuorumConfig) (receiver nextLeaf : Nat) (acks : List QsBWireAck) :=
+  { rec : QuorumLeafRecord // checkQsBWirePermit H keys cfg receiver nextLeaf rec acks = true }
+
+/-- QS-B consumes a global ACK permit and reserves the shared cursor before opening.
+A QS-A committee permit cannot be passed to this interface. -/
+def signQsBWirePermit (H : List UInt8 → Digest256) (keys : Nat → Nat → Digest256)
+    (cfg : QsBQuorumConfig) (receiver : Nat) (acks : List QsBWireAck)
+    (allocator : QsBGlobalAllocator)
+    (permit : QsBWirePermit H keys cfg receiver allocator.nextLeaf acks)
+    (seed : Digest256) (pk : QuorumPublicKey) (msg : List UInt8) (path : List Digest256)
+    (ledger : QuorumSigningLedger) :
+    QsBGlobalAllocator × QuorumSigningLedger × Option QuorumSteppedOpening :=
+  match allocator.reserve pk.height.toNat with
+  | none => (allocator, ledger, none)
+  | some (leaf, next) =>
+    let burned := { ledger with reserved := leaf :: ledger.reserved }
+    if leaf ∈ ledger.reserved then (next, burned, none) else
+    if quorumRecordMatchesMessage H pk msg permit.val &&
+        decide (pk.pkSeed = quorumStagePkSeed H seed) then
+      let sig := quorumJortsReferenceSign H seed leaf permit.val.counter
+        (quorumDigitsFromDigest (quorumCounterDigest H permit.val.msgHash permit.val.counter)) path
+      (next, { burned with signatures := sig :: ledger.signatures },
+        some { leaf := sig.leaf, counter := sig.counter, nodes := sig.nodes })
+    else (next, burned, none)
+
+theorem signQsBWirePermit_output_authorized (H : List UInt8 → Digest256)
+    (keys : Nat → Nat → Digest256) (cfg : QsBQuorumConfig) (receiver : Nat)
+    (acks : List QsBWireAck) (allocator : QsBGlobalAllocator)
+    (permit : QsBWirePermit H keys cfg receiver allocator.nextLeaf acks)
+    (seed : Digest256) (pk : QuorumPublicKey) (msg : List UInt8) (path : List Digest256)
+    (ledger : QuorumSigningLedger) (out : QuorumSteppedOpening)
+    (h : (signQsBWirePermit H keys cfg receiver acks allocator permit seed pk msg path ledger).2.2 = some out) :
+    out.leaf.toNat = allocator.nextLeaf ∧
+      checkQsBWirePermit H keys cfg receiver allocator.nextLeaf permit.val acks = true := by
+  unfold signQsBWirePermit at h
+  cases ha : allocator.reserve pk.height.toNat with
+  | none => simp [ha] at h
+  | some allocation =>
+    rcases allocation with ⟨leaf, next⟩
+    simp only [ha] at h
+    split at h
+    · cases h
+    · split at h
+      · cases Option.some.inj h
+        exact ⟨(QsBGlobalAllocator.reserve_bounds ha).1, permit.property⟩
+      · cases h
+
+/-- Allocated algebraic QS-B evaluator used for the quorum-independence theorem below.
+    The permit-consuming operational entry is `signQsBWirePermit`. The responding subset changes interpolation inputs only;
+    it cannot select a leaf or a partition. -/
+def qsBAllocateAndSign {d : Nat} (H : List UInt8 → Digest256) (seed : Digest256)
+    (height : Nat) (st : QsBGlobalAllocator) (counter : UInt32) (digits : List (Fin 4))
+    (path : List Digest256)
+    (tape : Fin digits.length → ShamirPadPoly (TowerElem 7) d × ShamirPadPoly (TowerElem 7) d)
+    (pts lambdas : List (TowerElem 7)) : QsBGlobalAllocator × Option QuorumJortsSig :=
+  match st.reserve height with
+  | none => (st, none)
+  | some (leaf, next) =>
+    (next, some (qsBGlobalSign H seed leaf counter digits path tape pts lambdas))
+
+/-- Actual QS-B signatures expose the allocated, representable global leaf. -/
+theorem qsBAllocateAndSign_allocated {d : Nat} (H : List UInt8 → Digest256) (seed : Digest256)
+    (height : Nat) (st next : QsBGlobalAllocator) (counter : UInt32) (digits : List (Fin 4))
+    (path : List Digest256)
+    (tape : Fin digits.length → ShamirPadPoly (TowerElem 7) d × ShamirPadPoly (TowerElem 7) d)
+    (pts lambdas : List (TowerElem 7)) (sig : QuorumJortsSig)
+    (h : qsBAllocateAndSign H seed height st counter digits path tape pts lambdas = (next, some sig)) :
+    sig.leaf.toNat = st.nextLeaf ∧ next.nextLeaf = st.nextLeaf + 1 ∧ st.nextLeaf < 2 ^ 64 := by
+  cases allocated : st.reserve height with
+  | none =>
+    simp only [qsBAllocateAndSign, allocated] at h
+    have impossible := congrArg Prod.snd h
+    cases impossible
+  | some result =>
+    rcases result with ⟨leaf, after⟩
+    simp only [qsBAllocateAndSign, allocated] at h
+    rcases Prod.mk.inj h with ⟨rfl, hS⟩
+    cases Option.some.inj hS
+    obtain ⟨hl, _, hFit, hn⟩ := QsBGlobalAllocator.reserve_bounds allocated
+    exact ⟨hl, hn, hFit⟩
+
+/-- Quorum switching cannot make consecutive signature outputs overlap. This statement
+    quantifies over distinct Shamir quorums and all their private polynomial tapes. -/
+theorem qsB_signature_quorum_switching_disjoint {d₁ d₂ : Nat}
+    (H : List UInt8 → Digest256) (seed : Digest256) (height : Nat)
+    (s₀ s₁ s₂ : QsBGlobalAllocator) (c₁ c₂ : UInt32) (ds₁ ds₂ : List (Fin 4))
+    (path₁ path₂ : List Digest256)
+    (tape₁ : Fin ds₁.length → ShamirPadPoly (TowerElem 7) d₁ × ShamirPadPoly (TowerElem 7) d₁)
+    (tape₂ : Fin ds₂.length → ShamirPadPoly (TowerElem 7) d₂ × ShamirPadPoly (TowerElem 7) d₂)
+    (pts₁ ws₁ pts₂ ws₂ : List (TowerElem 7)) (sig₁ sig₂ : QuorumJortsSig)
+    (h₁ : qsBAllocateAndSign H seed height s₀ c₁ ds₁ path₁ tape₁ pts₁ ws₁ = (s₁, some sig₁))
+    (h₂ : qsBAllocateAndSign H seed height s₁ c₂ ds₂ path₂ tape₂ pts₂ ws₂ = (s₂, some sig₂)) :
+    sig₁.leaf ≠ sig₂.leaf := by
+  obtain ⟨hl₁, hn₁, _⟩ := qsBAllocateAndSign_allocated H seed height s₀ s₁ c₁ ds₁ path₁ tape₁ pts₁ ws₁ sig₁ h₁
+  obtain ⟨hl₂, _, _⟩ := qsBAllocateAndSign_allocated H seed height s₁ s₂ c₂ ds₂ path₂ tape₂ pts₂ ws₂ sig₂ h₂
+  intro same
+  have := congrArg UInt64.toNat same
+  omega
+
+/-- Exported QS-A success carries the bounds checked by execution, not caller hypotheses. -/
+theorem qsAPartitionedSign_success_bounds {n : Nat}
+    (H : List UInt8 → Digest256) (seed : Digest256) (t height : Nat)
+    (Q : CustodiansMask n) (epoch : Nat) (counter : UInt32) (digits : List (Fin 4))
+    (path : List Digest256) (tape : QsAChainShareTape t digits.length) (sig : QuorumJortsSig)
+    (h : qsAPartitionedSign H seed t height Q epoch counter digits path tape = some sig) :
+    0 < t ∧ epoch < 2 ^ height ∧
+      ∃ idx, committeeIndexOf t Q = some idx ∧
+        committeeGlobalLeaf (2 ^ height) idx epoch < 2 ^ 64 ∧
+        sig.leaf.toNat = committeeGlobalLeaf (2 ^ height) idx epoch := by
+  unfold qsAPartitionedSign at h
+  split at h
+  next => cases h
+  next idx hi =>
+    split at h
+    next good =>
+      cases Option.some.inj h
+      exact ⟨good.1, good.2.1, idx, hi, good.2.2,
+        uint64_toNat_ofNat_of_lt good.2.2⟩
+    next bad => cases h
+
+
+/-- Empty enrollment reaches the ledger invariant before the first signing attempt. -/
+theorem inhabited_signing_ledger : ∃ st : QuorumSigningLedger, st.Safe :=
+  ⟨{}, emptyQuorumSigningLedger_safe⟩
+
+theorem tooth_used_quorum_permit_cannot_release {n : Nat} (H : List UInt8 → Digest256)
+    (keys : Fin n → Fin n → Digest256) (t h : Nat) (net : QuorumJortsNetworkState n)
+    (Q : CustodiansMask n) (v : Fin n) (echoes : List (QuorumCommitteeEcho n))
+    (permit : QuorumWirePermit H keys t h net Q v echoes)
+    (seed : Digest256) (pk : QuorumPublicKey) (msg : List UInt8) (path : List Digest256)
+    (st : QuorumSigningLedger) (used : permit.val.leaf ∈ st.reserved)
+    (out : QuorumSteppedOpening) :
+    (signQuorumWirePermit H keys t h net Q v echoes permit seed pk msg path st).2 ≠ some out := by
+  rw [signQuorumWirePermit_replay_rejected H keys t h net Q v echoes permit seed pk msg path st used]
+  intro bad
+  cases bad
+
+#verify_inhabited signingLedger_burn_safe inhabited_signing_ledger
+#tooth_pair runQuorumWireTrace_signature_safety vs tooth_used_quorum_permit_cannot_release
+
+end Qsag
+end

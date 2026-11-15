@@ -1,8 +1,8 @@
 module
-public import Qsag.SeparatedCustodyPolicy
-import all Qsag.SeparatedCustodyPolicy
-import all Qsag.CompleteMediationBoundary
-import all Qsag.SeparatedCustodyCore
+public import Qsag.Custody.SeparatedCustodyPolicy
+import all Qsag.Custody.SeparatedCustodyPolicy
+import all Qsag.Custody.CompleteMediationBoundary
+import all Qsag.Custody.SeparatedCustodyCore
 import Qsag.Tactic.AssuranceKit
 
 /-! A finer-grained executable release path for the separate-key approval

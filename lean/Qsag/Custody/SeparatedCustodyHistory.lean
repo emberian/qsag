@@ -1,10 +1,10 @@
 module
-public import Qsag.SeparatedCustodyPolicy
-import all Qsag.SeparatedCustodyPolicy
-import all Qsag.SeparatedCustodySpine
-import all Qsag.CompleteMediationBoundary
-import all Qsag.SeparatedCustodyCore
-import all Qsag.HypertreeEufCma
+public import Qsag.Custody.SeparatedCustodyPolicy
+import all Qsag.Custody.SeparatedCustodyPolicy
+import all Qsag.Custody.SeparatedCustodySpine
+import all Qsag.Custody.CompleteMediationBoundary
+import all Qsag.Custody.SeparatedCustodyCore
+import all Qsag.Protocol.Signing.HypertreeEufCma
 import Qsag.Tactic.AssuranceKit
 
 /-! One executed multi-party policy history and one shared acceptance ledger.

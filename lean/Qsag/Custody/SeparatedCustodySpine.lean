@@ -1,8 +1,8 @@
 module
-public import Qsag.CompleteMediationBoundary
-import all Qsag.CompleteMediationBoundary
-import all Qsag.SeparatedCustodyCore
-import all Qsag.HypertreeEufCma
+public import Qsag.Custody.CompleteMediationBoundary
+import all Qsag.Custody.CompleteMediationBoundary
+import all Qsag.Custody.SeparatedCustodyCore
+import all Qsag.Protocol.Signing.HypertreeEufCma
 import Qsag.Tactic.AssuranceKit
 
 /-! Composition entry point for independently keyed production custody approvals.

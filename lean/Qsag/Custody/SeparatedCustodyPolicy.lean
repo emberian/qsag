@@ -1,9 +1,9 @@
 module
-public import Qsag.SeparatedCustodySpine
-public import Qsag.CustodySuiteFull
-import all Qsag.SeparatedCustodyCore
-import all Qsag.CompleteMediationBoundary
-import all Qsag.CustodySuiteFull
+public import Qsag.Custody.SeparatedCustodySpine
+public import Qsag.Custody.CustodySuiteFull
+import all Qsag.Custody.SeparatedCustodyCore
+import all Qsag.Custody.CompleteMediationBoundary
+import all Qsag.Custody.CustodySuiteFull
 import Qsag.Tactic.AssuranceKit
 
 /-! Bridge from the operational production transaction-policy specification to

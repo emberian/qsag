@@ -1,7 +1,7 @@
 module
-public import Qsag.HypertreeEufCma
-import all Qsag.HypertreeEufCma
-public import Qsag.MaliciousSecurity
+public import Qsag.Protocol.Signing.HypertreeEufCma
+import all Qsag.Protocol.Signing.HypertreeEufCma
+public import Qsag.Protocol.Threshold.MaliciousSecurity
 import Qsag.Tactic.AssuranceKit
 
 /-! Spec-level custody approvals. This is NOT a threshold reconstruction of a signing key.
