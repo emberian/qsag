@@ -57,7 +57,9 @@ macro_rules! wipe_words {
         }
     )* };
 }
-wipe_words!(u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize);
+wipe_words!(
+    u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize
+);
 
 impl SecretWipe for bool {
     #[inline]
@@ -195,9 +197,26 @@ impl<T: Copy + SecretWipe> SecretBuffer<alloc::vec::Vec<T>> {
 
 impl<T: SecretWipe + Default> SecretBuffer<T> {
     /// Release the secret to the caller, who becomes responsible for erasing it.
+    ///
+    /// The value is moved out and the guard's own storage is then erased byte for
+    /// byte, so no placeholder is built, wiped and dropped in its place.
     #[inline]
-    pub fn into_inner(mut self) -> T {
-        core::mem::take(&mut self.0)
+    pub fn into_inner(self) -> T {
+        let mut slot = core::mem::MaybeUninit::new(self);
+        // SAFETY: `slot` holds an initialized guard whose only field is the secret.
+        // The secret is read out exactly once, and `slot` is never read or dropped
+        // as a guard again.
+        let secret = unsafe { core::ptr::read(&raw const (*slot.as_ptr()).0) };
+        // SAFETY: `slot` is `size_of::<Self>()` writable bytes, and any byte pattern
+        // is valid for `MaybeUninit<u8>`.
+        let raw = unsafe {
+            core::slice::from_raw_parts_mut(
+                slot.as_mut_ptr().cast::<core::mem::MaybeUninit<u8>>(),
+                core::mem::size_of::<Self>(),
+            )
+        };
+        volatile_fill(raw, core::mem::MaybeUninit::new(0u8));
+        secret
     }
 }
 
@@ -259,10 +278,7 @@ pub fn secret_vec_push<T: Copy + SecretWipe>(v: &mut alloc::vec::Vec<T>, item: T
 /// `Vec::extend_from_slice` through [`secret_vec_reserve`].
 #[cfg(feature = "alloc")]
 #[inline]
-pub fn secret_vec_extend_from_slice<T: Copy + SecretWipe>(
-    v: &mut alloc::vec::Vec<T>,
-    slice: &[T],
-) {
+pub fn secret_vec_extend_from_slice<T: Copy + SecretWipe>(v: &mut alloc::vec::Vec<T>, slice: &[T]) {
     secret_vec_reserve(v, slice.len());
     v.extend_from_slice(slice);
 }
@@ -518,6 +534,25 @@ mod tests {
         assert_eq!(std::format!("{key:?}"), "SecretBuffer([REDACTED])");
         let released: [u8; 32] = key.into_inner();
         assert_eq!(released, [0xa5; 32]);
+    }
+
+    #[test]
+    fn into_inner_releases_the_same_allocation_unerased() {
+        let mut v: SecretVec<u8> = SecretVec::with_capacity(64);
+        v.extend_wiping(&[0xa5; 48]);
+        let (base, capacity) = (v.as_ptr(), v.capacity());
+        let released: Vec<u8> = v.into_inner();
+        assert_eq!((released.as_ptr(), released.capacity()), (base, capacity));
+        assert_eq!(released, [0xa5; 48]);
+
+        let boxed = SecretBuffer(vec![7u16; 5].into_boxed_slice());
+        let base = boxed.as_ptr();
+        let released = boxed.into_inner();
+        assert_eq!(released.as_ptr(), base);
+        assert_eq!(*released, [7u16; 5]);
+
+        let nested = SecretBuffer((u64::MAX, [3u8; 5], Some(-1i16))).into_inner();
+        assert_eq!(nested, (u64::MAX, [3u8; 5], Some(-1i16)));
     }
 
     #[test]

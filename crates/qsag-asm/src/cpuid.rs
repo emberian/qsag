@@ -225,6 +225,10 @@ fn probe_capabilities_bits_slow() -> u32 {
 
 #[cold]
 fn probe_capabilities_slow() -> CpuCapabilities {
+    // Miri interprets portable Rust and cannot execute CPUID or hardware kernels.
+    #[cfg(miri)]
+    let raw = empty_caps();
+    #[cfg(not(miri))]
     let raw = {
         #[cfg(target_arch = "x86_64")]
         {
@@ -243,7 +247,7 @@ fn probe_capabilities_slow() -> CpuCapabilities {
     raw
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 fn probe_x86_64() -> CpuCapabilities {
     use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
 

@@ -1115,7 +1115,9 @@ mod x86_simd {
     }
 }
 
-#[cfg(test)]
+// Exhaustive multi-backend parity belongs to the native gate; Miri has a
+// bounded dispatch/buffer-boundary suite in lib.rs.
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
 
