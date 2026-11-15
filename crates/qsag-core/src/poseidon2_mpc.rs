@@ -57,8 +57,9 @@ use crate::preprocessing::{
 };
 use crate::sponge::keccak::cshake256_32;
 use crate::sponge::poseidon2::{
-    POSEIDON2_HALF_EXTERNAL_ROUNDS, POSEIDON2_INIT_STATE, POSEIDON2_INTERNAL_ROUNDS,
-    bytes_to_limbs56, poseidon2_const_at, poseidon2_pad,
+    POSEIDON2_CONST_IV, POSEIDON2_HALF_EXTERNAL_ROUNDS, POSEIDON2_INIT_STATE,
+    POSEIDON2_INTERNAL_ROUNDS, bytes_to_limbs56, poseidon2_const_at, poseidon2_hash32,
+    poseidon2_pad, poseidon2_perm12,
 };
 use crate::tsw_baggy::{
     AdrsKind, EpochLatchError, ForsTreeOpening, HashAdrs, LayerXmssSig, Poseidon2Suite,
@@ -210,6 +211,7 @@ pub struct Poseidon2SpdzAuthenticatedKeyShare {
     pub(crate) sk_prf_bytes: [Goldilocks; 32],
     pub(crate) sk_prf_macs: [GoldilocksExt2; 32],
     pub(crate) enrolled_profile: Option<(PqHashParams, PqPublicKey)>,
+    pub(crate) enrolled_hem_profile: Option<(HemJortsPublicKey, HemDigest4)>,
     pub(crate) enrolled_latch_authority: Option<EpochLatchAuthorityPublic>,
     pub poisoned: bool,
 }
@@ -253,6 +255,38 @@ impl Poseidon2SpdzAuthenticatedKeyShare {
                     && ct_eq_bytes32(&epk.pk_seed, &pk.pk_seed)
                     && ct_eq_bytes32(&epk.pk_root, &pk.pk_root)
                 {
+                    Ok(())
+                } else {
+                    Err(Poseidon2MpcError::KeyProfileMismatch)
+                }
+            }
+        }
+    }
+
+    /// Enrolled `Hem`-aggregatable `(HemJortsPublicKey, prf_check)` profile pinned to this share.
+    #[inline]
+    pub fn enrolled_hem_profile(&self) -> Option<&(HemJortsPublicKey, HemDigest4)> {
+        self.enrolled_hem_profile.as_ref()
+    }
+
+    /// Pin a `Hem`-aggregatable `(HemJortsPublicKey, prf_check)` profile to this key share once.
+    /// Re-enrolling the exact same `(pk, prf_check)` is idempotent; any mismatch returns
+    /// [`Poseidon2MpcError::KeyProfileMismatch`].
+    pub fn enroll_hem_key_profile(
+        &mut self,
+        pk: HemJortsPublicKey,
+        prf_check: HemDigest4,
+    ) -> Result<(), Poseidon2MpcError> {
+        if pk.pk_seed != hem_pk_seed_from_bytes32(&self.pk_seed) {
+            return Err(Poseidon2MpcError::PublicSeedMismatch);
+        }
+        match &self.enrolled_hem_profile {
+            None => {
+                self.enrolled_hem_profile = Some((pk, prf_check));
+                Ok(())
+            }
+            Some((epk, eprf)) => {
+                if *epk == pk && *eprf == prf_check {
                     Ok(())
                 } else {
                     Err(Poseidon2MpcError::KeyProfileMismatch)
@@ -495,6 +529,7 @@ pub fn authenticate_poseidon_dkg_shares_and_preprocess(
             sk_prf_bytes,
             sk_prf_macs,
             enrolled_profile: None,
+            enrolled_hem_profile: None,
             enrolled_latch_authority: None,
             poisoned: false,
         });
@@ -2535,6 +2570,1733 @@ impl core::fmt::Display for Poseidon2MpcError {
 
 impl core::error::Error for Poseidon2MpcError {}
 
+// ============================================================================
+// `Hem`-Compatible Native `[Goldilocks; 4]` `JortsPoseidon2` SPDZ MPC Engine
+// (`w = 4, chains = 128, target_sum = 192, height = 6`, `0` Intermediate A2B)
+// ============================================================================
+
+/// Wire profile tag for `Hem`-aggregatable `JortsPoseidon2` (`AggSigProfile::JortsPoseidon2 = 1`).
+pub const HEM_JORTS_PROFILE_BYTE: u8 = 1;
+/// Number of base-4 `WOTS+C` chains in `Hem` `JortsPoseidon2` (`128`).
+pub const HEM_WOTS_CHAINS: usize = 128;
+/// Winternitz base `w = 4` (`0..=3` steps per chain).
+pub const HEM_WOTS_BASE_W: usize = 4;
+/// Maximum step index per chain (`w - 1 = 3`).
+pub const HEM_WOTS_MAX_STEP: usize = HEM_WOTS_BASE_W - 1;
+/// Exact constant digit sum (`192 = 128 * 1.5`), fixing online & verifier step count to `192`.
+pub const HEM_WOTS_TARGET_SUM: usize = 192;
+/// Height of the `Hem` `JortsPoseidon2` XMSS tree (`2^6 = 64` leaves).
+pub const HEM_JORTS_XMSS_HEIGHT: usize = 6;
+/// Number of leaves in the `Hem` `JortsPoseidon2` XMSS tree (`64`).
+pub const HEM_JORTS_MAX_LEAVES: usize = 1usize << HEM_JORTS_XMSS_HEIGHT;
+/// Canonical serialized byte length of a `HemJortsPublicKey` (`65` bytes).
+pub const HEM_JORTS_PK_BYTES: usize = 1 + 32 + 32;
+/// Canonical serialized byte length of a `HemJortsSignature` (`4,328` bytes).
+pub const HEM_JORTS_SIG_BYTES: usize =
+    32 + 4 + 4 + HEM_WOTS_CHAINS * 32 + HEM_JORTS_XMSS_HEIGHT * 32;
+
+/// Domain tags matching `qsag_agg::sig` bit-for-bit.
+pub const HEM_DOMAIN_PRF_WOTS: u64 = 0x5153_4147_5750_5246; // "QSAGWPRF"
+pub const HEM_DOMAIN_WOTS_STEP: u64 = 0x5153_4147_5753_5450; // "QSAGWSTP"
+pub const HEM_DOMAIN_WOTS_PK: u64 = 0x5153_4147_5750_4B31; // "QSAGWPK1"
+pub const HEM_DOMAIN_MERKLE_NODE: u64 = 0x5153_4147_4D52_4B4C; // "QSAGMRKL"
+pub const HEM_DOMAIN_H_MSG_STATEFUL: u64 = 0x5153_4147_484D_5331; // "QSAGHMS1"
+pub const HEM_DOMAIN_PRF_MSG: u64 = 0x5153_4147_5052_464D; // "QSAGPRFM"
+
+/// Domain tags for deterministic 56-bit injective seed expansion and unassigned-leaf commitments.
+pub const HEM_DOMAIN_PK_SEED_EXPAND: u64 = 0x5153_4147_4850_4B53; // "QSAGHPKS"
+pub const HEM_DOMAIN_SK_SEED_EXPAND: u64 = 0x5153_4147_4853_4B53; // "QSAGHSKS"
+pub const HEM_DOMAIN_SK_PRF_EXPAND: u64 = 0x5153_4147_4853_4B50; // "QSAGHSKP"
+pub const HEM_DOMAIN_PRF_CHECK: u64 = 0x5153_4147_4850_4348; // "QSAGHPCH"
+pub const HEM_DOMAIN_UNASSIGNED_LEAF: u64 = 0x5153_4147_4855_4E41; // "QSAGHUNA"
+
+/// 4-limb algebraic `Goldilocks` digest (`32` canonical little-endian bytes).
+pub type HemDigest4 = [Goldilocks; 4];
+
+/// 5-limb 56-bit injective `Goldilocks` packing of a 32-byte digest (`0` mod-`p` collisions).
+pub type HemDigest5 = [Goldilocks; 5];
+
+/// Bijectively pack 32 raw bytes into 5 canonical `Goldilocks` limbs (`4 × 56` bits + `1 × 32` bits),
+/// matching `qsag_agg::sig::bytes32_to_limbs56` bit-for-bit.
+#[inline]
+pub fn hem_bytes32_to_limbs56(bytes: &[u8; 32]) -> HemDigest5 {
+    let mut out = [Goldilocks::ZERO; 5];
+    for i in 0..4 {
+        let mut v = 0u64;
+        for b in 0..7 {
+            v |= (bytes[7 * i + b] as u64) << (8 * b);
+        }
+        out[i] = Goldilocks::from_u64_reduced(v);
+    }
+    let last = u32::from_le_bytes([bytes[28], bytes[29], bytes[30], bytes[31]]) as u64;
+    out[4] = Goldilocks::from_u64_reduced(last);
+    out
+}
+
+/// Serialize a `HemDigest4` to 32 canonical little-endian bytes (`qsag_agg::sig::digest4_to_bytes`).
+#[inline]
+pub fn hem_digest4_to_bytes(d: &HemDigest4) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    for i in 0..4 {
+        out[8 * i..8 * (i + 1)].copy_from_slice(&d[i].to_le_bytes());
+    }
+    out
+}
+
+/// Decode a `HemDigest4` from 32 canonical little-endian bytes (`< p` per limb).
+#[inline]
+pub fn hem_digest4_from_bytes_canonical(bytes: &[u8; 32]) -> Option<HemDigest4> {
+    let mut out = [Goldilocks::ZERO; 4];
+    for i in 0..4 {
+        let mut limb = [0u8; 8];
+        limb.copy_from_slice(&bytes[8 * i..8 * (i + 1)]);
+        out[i] = Goldilocks::from_le_bytes_canonical(limb)?;
+    }
+    Some(out)
+}
+
+/// Deterministically derive a canonical `HemDigest4` `pk_seed` from a 32-byte DKG public seed.
+#[inline]
+pub fn hem_pk_seed_from_bytes32(pk_seed_bytes: &[u8; 32]) -> HemDigest4 {
+    let limbs5 = hem_bytes32_to_limbs56(pk_seed_bytes);
+    let mut st = [
+        limbs5[0],
+        limbs5[1],
+        limbs5[2],
+        limbs5[3],
+        limbs5[4],
+        Goldilocks::ZERO,
+        Goldilocks::ZERO,
+        Goldilocks::ZERO,
+        Goldilocks::from_u64_reduced(HEM_DOMAIN_PK_SEED_EXPAND),
+        Goldilocks::ZERO,
+        Goldilocks::ZERO,
+        Goldilocks::from_u64_reduced(POSEIDON2_CONST_IV),
+    ];
+    poseidon2_perm12(&mut st);
+    [
+        st[0] + limbs5[0],
+        st[1] + limbs5[1],
+        st[2] + limbs5[2],
+        st[3] + limbs5[3],
+    ]
+}
+
+/// Expand a 32-byte secret seed (`SK.seed` or `SK.prf`) in the clear via the exact same 5-limb
+/// 56-bit linear packing + feed-forward `poseidon2_perm12` evaluated inside SPDZ MPC.
+pub fn hem_expand_secret_bytes32_clear(
+    secret_bytes: &[u8; 32],
+    pk_seed: HemDigest4,
+    domain_tag: u64,
+) -> HemDigest4 {
+    let mut limbs5 = hem_bytes32_to_limbs56(secret_bytes);
+    let mut st = [
+        limbs5[0],
+        limbs5[1],
+        limbs5[2],
+        limbs5[3],
+        limbs5[4],
+        pk_seed[0],
+        pk_seed[1],
+        pk_seed[2],
+        pk_seed[3],
+        Goldilocks::from_u64_reduced(domain_tag),
+        Goldilocks::ZERO,
+        Goldilocks::from_u64_reduced(POSEIDON2_CONST_IV),
+    ];
+    poseidon2_perm12(&mut st);
+    let out = [
+        st[0] + limbs5[0],
+        st[1] + limbs5[1],
+        st[2] + limbs5[2],
+        st[3] + limbs5[3],
+    ];
+    wipe_goldilocks(&mut limbs5);
+    wipe_goldilocks(&mut st);
+    out
+}
+
+/// Canonical 65-byte `Hem`-compatible `JortsPoseidon2` validator public key
+/// (`0x01 || pk_seed_le32 || pk_root_le32`, byte-identical to `qsag_agg::ValidatorPublicKey`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct HemJortsPublicKey {
+    pub pk_seed: HemDigest4,
+    pub pk_root: HemDigest4,
+}
+
+impl HemJortsPublicKey {
+    /// Serialize to canonical 65-byte `ValidatorPublicKey` wire format.
+    pub fn to_bytes(&self) -> [u8; HEM_JORTS_PK_BYTES] {
+        let mut out = [0u8; HEM_JORTS_PK_BYTES];
+        out[0] = HEM_JORTS_PROFILE_BYTE;
+        out[1..33].copy_from_slice(&hem_digest4_to_bytes(&self.pk_seed));
+        out[33..65].copy_from_slice(&hem_digest4_to_bytes(&self.pk_root));
+        out
+    }
+
+    /// Parse from canonical 65-byte `ValidatorPublicKey` wire format.
+    pub fn from_bytes_canonical(bytes: &[u8; HEM_JORTS_PK_BYTES]) -> Option<Self> {
+        if bytes[0] != HEM_JORTS_PROFILE_BYTE {
+            return None;
+        }
+        let mut s = [0u8; 32];
+        let mut r = [0u8; 32];
+        s.copy_from_slice(&bytes[1..33]);
+        r.copy_from_slice(&bytes[33..65]);
+        Some(Self {
+            pk_seed: hem_digest4_from_bytes_canonical(&s)?,
+            pk_root: hem_digest4_from_bytes_canonical(&r)?,
+        })
+    }
+
+    /// Projection to [`PqPublicKey`] used by [`EpochLatchCertificate`] and [`crate::dkg::QuorumEpochLatchCluster`].
+    #[inline]
+    pub fn latch_pq_public_key(&self, dkg_pk_seed: [u8; 32]) -> PqPublicKey {
+        PqPublicKey {
+            pk_seed: dkg_pk_seed,
+            pk_root: hem_digest4_to_bytes(&self.pk_root),
+        }
+    }
+}
+
+/// Canonical 4,328-byte `Hem`-compatible `JortsPoseidon2` signature, byte-identical to
+/// `qsag_agg::ValidatorSignature` (`AggSigProfile::JortsPoseidon2`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HemJortsSignature {
+    pub r_rand: HemDigest4,
+    pub stateful_leaf_idx: u32,
+    pub tsw_ctr: u32,
+    pub wots_chains: Vec<HemDigest4>,
+    pub merkle_path: Vec<HemDigest4>,
+}
+
+impl HemJortsSignature {
+    /// Encode to canonical 4,328-byte `qsag_agg::ValidatorSignature` wire format.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(HEM_JORTS_SIG_BYTES);
+        out.extend_from_slice(&hem_digest4_to_bytes(&self.r_rand));
+        out.extend_from_slice(&self.stateful_leaf_idx.to_le_bytes());
+        out.extend_from_slice(&self.tsw_ctr.to_le_bytes());
+        for c in &self.wots_chains {
+            out.extend_from_slice(&hem_digest4_to_bytes(c));
+        }
+        for sib in &self.merkle_path {
+            out.extend_from_slice(&hem_digest4_to_bytes(sib));
+        }
+        out
+    }
+
+    /// Decode from canonical 4,328-byte `qsag_agg::ValidatorSignature` wire format.
+    pub fn from_bytes_canonical(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != HEM_JORTS_SIG_BYTES {
+            return None;
+        }
+        let mut pos = 0usize;
+        let read_d4 = |buf: &[u8], p: &mut usize| -> Option<HemDigest4> {
+            let slice: &[u8; 32] = buf.get(*p..*p + 32)?.try_into().ok()?;
+            *p += 32;
+            hem_digest4_from_bytes_canonical(slice)
+        };
+        let read_u32 = |buf: &[u8], p: &mut usize| -> Option<u32> {
+            let slice: &[u8; 4] = buf.get(*p..*p + 4)?.try_into().ok()?;
+            *p += 4;
+            Some(u32::from_le_bytes(*slice))
+        };
+
+        let r_rand = read_d4(bytes, &mut pos)?;
+        let stateful_leaf_idx = read_u32(bytes, &mut pos)?;
+        if (stateful_leaf_idx as usize) >= HEM_JORTS_MAX_LEAVES {
+            return None;
+        }
+        let tsw_ctr = read_u32(bytes, &mut pos)?;
+        let mut wots_chains = Vec::with_capacity(HEM_WOTS_CHAINS);
+        for _ in 0..HEM_WOTS_CHAINS {
+            wots_chains.push(read_d4(bytes, &mut pos)?);
+        }
+        let mut merkle_path = Vec::with_capacity(HEM_JORTS_XMSS_HEIGHT);
+        for _ in 0..HEM_JORTS_XMSS_HEIGHT {
+            merkle_path.push(read_d4(bytes, &mut pos)?);
+        }
+        if pos != bytes.len() {
+            return None;
+        }
+        Some(Self {
+            r_rand,
+            stateful_leaf_idx,
+            tsw_ctr,
+            wots_chains,
+            merkle_path,
+        })
+    }
+}
+
+/// Public cached height-6 XMSS leaf table and `SK.prf` check digest produced during distributed
+/// `HemJortsPoseidon2` key generation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HemJortsCachedTree {
+    pub dkg_pk_seed: [u8; 32],
+    pub pk: HemJortsPublicKey,
+    pub active_leaves: usize,
+    pub leaves: Vec<HemDigest4>,
+    pub prf_check: HemDigest4,
+}
+
+impl HemJortsCachedTree {
+    /// Verify public structural consistency: `active_leaves in 1..=64`, `leaves.len() == 64`,
+    /// `pk.pk_seed` matches `dkg_pk_seed`, any inactive leaves equal `hem_unassigned_leaf_digest`,
+    /// and the 64 leaves Merkle-hash to `pk.pk_root`.
+    pub fn verify_consistency(&self) -> bool {
+        if self.active_leaves == 0
+            || self.active_leaves > HEM_JORTS_MAX_LEAVES
+            || self.leaves.len() != HEM_JORTS_MAX_LEAVES
+        {
+            return false;
+        }
+        if self.pk.pk_seed != hem_pk_seed_from_bytes32(&self.dkg_pk_seed) {
+            return false;
+        }
+        for kp in self.active_leaves..HEM_JORTS_MAX_LEAVES {
+            if self.leaves[kp] != hem_unassigned_leaf_digest(self.pk.pk_seed, kp as u32) {
+                return false;
+            }
+        }
+        hem_merkle_root_from_leaves(self.pk.pk_seed, &self.leaves) == Some(self.pk.pk_root)
+    }
+}
+
+/// Algebraic 256-bit Jive/feed-forward compression `H_comp(in0, in1, tweak) -> HemDigest4`,
+/// matching `qsag_agg::sponge::poseidon2_compress12_ff` bit-for-bit.
+#[inline]
+pub fn hem_poseidon2_compress12_ff(
+    mut in0: HemDigest4,
+    in1: HemDigest4,
+    tweak: HemDigest4,
+) -> HemDigest4 {
+    let mut st = [
+        in0[0], in0[1], in0[2], in0[3], in1[0], in1[1], in1[2], in1[3], tweak[0], tweak[1],
+        tweak[2], tweak[3],
+    ];
+    poseidon2_perm12(&mut st);
+    let out = [
+        st[0] + in0[0],
+        st[1] + in0[1],
+        st[2] + in0[2],
+        st[3] + in0[3],
+    ];
+    wipe_goldilocks(&mut st);
+    wipe_goldilocks(&mut in0);
+    out
+}
+
+/// Bijective address packing for `WOTS+C` steps (`qsag_agg::sig::pack_wots_addr_limb`).
+#[inline]
+pub fn hem_pack_wots_addr_limb(
+    layer: u32,
+    kp_idx: u32,
+    chain_idx: u32,
+    step_idx: u32,
+) -> Goldilocks {
+    debug_assert!(layer < 64 && kp_idx < (1 << 20) && chain_idx < 256 && step_idx < 16);
+    let packed = ((layer as u64) << 44)
+        | ((kp_idx as u64) << 16)
+        | ((chain_idx as u64) << 4)
+        | (step_idx as u64);
+    Goldilocks::from_u64_reduced(packed)
+}
+
+/// Clear single-party `WOTS+C` chain base secret `y^(0)` (`qsag_agg::sig::ValidatorKeypair::wots_base_secret`).
+#[inline]
+pub fn hem_wots_base_secret_clear(
+    sk_seed: HemDigest4,
+    pk_seed: HemDigest4,
+    layer: u32,
+    tree_idx: u64,
+    kp_idx: u32,
+    chain_idx: u32,
+) -> HemDigest4 {
+    let tweak = [
+        Goldilocks::from_u64_reduced(HEM_DOMAIN_PRF_WOTS),
+        hem_pack_wots_addr_limb(layer, kp_idx, chain_idx, 0),
+        Goldilocks::from_u64_reduced(tree_idx & 0xFFFF_FFFF),
+        Goldilocks::from_u64_reduced(tree_idx >> 32),
+    ];
+    hem_poseidon2_compress12_ff(sk_seed, pk_seed, tweak)
+}
+
+/// Public `WOTS+C` step transition `y^(step + 1) = F(pk_seed, y^(step), adrs)`
+/// (`qsag_agg::sig::wots_step_hash_injective`).
+#[inline]
+pub fn hem_wots_step_hash_injective(
+    pk_seed: HemDigest4,
+    cur: HemDigest4,
+    layer: u32,
+    tree_idx: u64,
+    kp_idx: u32,
+    chain_idx: u32,
+    step_idx: u32,
+) -> HemDigest4 {
+    let tweak = [
+        Goldilocks::from_u64_reduced(HEM_DOMAIN_WOTS_STEP),
+        hem_pack_wots_addr_limb(layer, kp_idx, chain_idx, step_idx),
+        Goldilocks::from_u64_reduced(tree_idx & 0xFFFF_FFFF),
+        Goldilocks::from_u64_reduced(tree_idx >> 32),
+    ];
+    hem_poseidon2_compress12_ff(cur, pk_seed, tweak)
+}
+
+/// Compress all 128 `WOTS+C` chain endpoints (`y^(3)`) into a 4-limb `wots_pk` leaf digest,
+/// matching `qsag_agg::sig::compress_wots_endpoints_sponge` bit-for-bit.
+pub fn hem_compress_wots_endpoints_sponge(
+    pk_seed: HemDigest4,
+    layer: u32,
+    tree_idx: u64,
+    kp_idx: u32,
+    endpoints: &[HemDigest4; HEM_WOTS_CHAINS],
+) -> HemDigest4 {
+    let layer_kp = ((layer as u64) << 32) | (kp_idx as u64);
+    let mut st = [
+        pk_seed[0],
+        pk_seed[1],
+        pk_seed[2],
+        pk_seed[3],
+        Goldilocks::from_u64_reduced(layer_kp),
+        Goldilocks::from_u64_reduced(tree_idx & 0xFFFF_FFFF),
+        Goldilocks::from_u64_reduced(tree_idx >> 32),
+        Goldilocks::from_u64_reduced(HEM_WOTS_CHAINS as u64),
+        Goldilocks::from_u64_reduced(HEM_DOMAIN_WOTS_PK),
+        Goldilocks::ZERO,
+        Goldilocks::ZERO,
+        Goldilocks::from_u64_reduced(POSEIDON2_CONST_IV),
+    ];
+    poseidon2_perm12(&mut st);
+    for pair_idx in 0..(HEM_WOTS_CHAINS / 2) {
+        let e0 = endpoints[2 * pair_idx];
+        let e1 = endpoints[2 * pair_idx + 1];
+        for i in 0..4 {
+            st[i] += e0[i];
+            st[4 + i] += e1[i];
+        }
+        poseidon2_perm12(&mut st);
+    }
+    st[0] += Goldilocks::ONE;
+    poseidon2_perm12(&mut st);
+    [st[0], st[1], st[2], st[3]]
+}
+
+/// Domain-separated public digest for an unassigned leaf slot (`kp_idx >= active_leaves`),
+/// disjoint from `HEM_DOMAIN_WOTS_PK` so no valid `WOTS+C` endpoint vector can collide with it.
+#[inline]
+pub fn hem_unassigned_leaf_digest(pk_seed: HemDigest4, kp_idx: u32) -> HemDigest4 {
+    let tweak = [
+        Goldilocks::from_u64_reduced(HEM_DOMAIN_UNASSIGNED_LEAF),
+        Goldilocks::from_u64_reduced(kp_idx as u64),
+        Goldilocks::ZERO,
+        Goldilocks::from_u64_reduced(POSEIDON2_CONST_IV),
+    ];
+    hem_poseidon2_compress12_ff(pk_seed, pk_seed, tweak)
+}
+
+/// 2-block binary Merkle node sponge matching `qsag_agg::sig::merkle_node_hash` (`DOMAIN_MERKLE_NODE`).
+#[inline]
+pub fn hem_merkle_node_hash(
+    pk_seed: HemDigest4,
+    layer: u32,
+    tree_idx: u64,
+    level: u32,
+    node_idx: u32,
+    left: HemDigest4,
+    right: HemDigest4,
+) -> HemDigest4 {
+    debug_assert!(layer <= 0xFFFE && level <= 0xFFFF);
+    let meta0 = ((layer as u64) << 48) | ((level as u64) << 32) | (node_idx as u64);
+    let mut st = [
+        pk_seed[0],
+        pk_seed[1],
+        pk_seed[2],
+        pk_seed[3],
+        left[0],
+        left[1],
+        left[2],
+        left[3],
+        Goldilocks::from_u64_reduced(HEM_DOMAIN_MERKLE_NODE),
+        Goldilocks::from_u64_reduced(meta0),
+        Goldilocks::from_u64_reduced(tree_idx & 0xFFFF_FFFF),
+        Goldilocks::from_u64_reduced(tree_idx >> 32),
+    ];
+    poseidon2_perm12(&mut st);
+    for i in 0..4 {
+        st[i] += right[i];
+    }
+    st[4] += Goldilocks::ONE;
+    st[5] += Goldilocks::from_u64_reduced(POSEIDON2_CONST_IV);
+    poseidon2_perm12(&mut st);
+    [st[0], st[1], st[2], st[3]]
+}
+
+/// Compute the height-6 XMSS Merkle root from 64 leaf digests.
+pub fn hem_merkle_root_from_leaves(
+    pk_seed: HemDigest4,
+    leaves: &[HemDigest4],
+) -> Option<HemDigest4> {
+    if leaves.len() != HEM_JORTS_MAX_LEAVES {
+        return None;
+    }
+    let mut cur = leaves.to_vec();
+    for lvl in 0..HEM_JORTS_XMSS_HEIGHT {
+        let mut next = Vec::with_capacity(cur.len() / 2);
+        for p in 0..(cur.len() / 2) {
+            next.push(hem_merkle_node_hash(
+                pk_seed,
+                0,
+                0,
+                (lvl + 1) as u32,
+                p as u32,
+                cur[2 * p],
+                cur[2 * p + 1],
+            ));
+        }
+        cur = next;
+    }
+    Some(cur[0])
+}
+
+/// Extract the 6-sibling XMSS authentication path and Merkle root for `leaf_idx < 64`.
+pub fn hem_merkle_auth_path(
+    pk_seed: HemDigest4,
+    leaves: &[HemDigest4],
+    leaf_idx: usize,
+) -> Option<(Vec<HemDigest4>, HemDigest4)> {
+    if leaves.len() != HEM_JORTS_MAX_LEAVES || leaf_idx >= HEM_JORTS_MAX_LEAVES {
+        return None;
+    }
+    let mut path = Vec::with_capacity(HEM_JORTS_XMSS_HEIGHT);
+    let mut cur = leaves.to_vec();
+    let mut idx = leaf_idx;
+    for lvl in 0..HEM_JORTS_XMSS_HEIGHT {
+        path.push(cur[idx ^ 1]);
+        let mut next = Vec::with_capacity(cur.len() / 2);
+        for p in 0..(cur.len() / 2) {
+            next.push(hem_merkle_node_hash(
+                pk_seed,
+                0,
+                0,
+                (lvl + 1) as u32,
+                p as u32,
+                cur[2 * p],
+                cur[2 * p + 1],
+            ));
+        }
+        cur = next;
+        idx >>= 1;
+    }
+    Some((path, cur[0]))
+}
+
+/// Compute collision-free 5-limb 56-bit message representative `mu`, matching
+/// `qsag_agg::sig::compute_message_mu` bit-for-bit.
+#[inline]
+pub fn hem_compute_message_mu(pk: &HemJortsPublicKey, msg: &[u8]) -> ([u8; 32], HemDigest5) {
+    let pk_bytes = pk.to_bytes();
+    let framed = crate::sponge::keccak::encode_multi_frame(&[b"QSAG.MU/v2", &pk_bytes, msg]);
+    let h = poseidon2_hash32(&framed);
+    (h, hem_bytes32_to_limbs56(&h))
+}
+
+/// Clear single-party `r_rand` derivation matching `qsag_agg::sig::ValidatorKeypair::derive_deterministic_r_rand`.
+#[inline]
+pub fn hem_derive_r_rand_clear(
+    sk_prf: HemDigest4,
+    pk_seed: HemDigest4,
+    mu: HemDigest5,
+    epoch: u64,
+) -> HemDigest4 {
+    let mut st = [
+        sk_prf[0],
+        sk_prf[1],
+        sk_prf[2],
+        sk_prf[3],
+        pk_seed[0],
+        pk_seed[1],
+        pk_seed[2],
+        pk_seed[3],
+        Goldilocks::from_u64_reduced(HEM_DOMAIN_PRF_MSG),
+        Goldilocks::from_u64_reduced(epoch),
+        mu[4],
+        Goldilocks::from_u64_reduced(POSEIDON2_CONST_IV),
+    ];
+    poseidon2_perm12(&mut st);
+    for i in 0..4 {
+        st[i] += mu[i];
+    }
+    poseidon2_perm12(&mut st);
+    let out = [st[0], st[1], st[2], st[3]];
+    wipe_goldilocks(&mut st);
+    out
+}
+
+/// Public check digest committing to `sk_prf` (`poseidon2_compress12_ff(sk_prf, pk_seed, [HEM_DOMAIN_PRF_CHECK, 0, 0, IV])`).
+#[inline]
+pub fn hem_prf_check_digest_clear(sk_prf: HemDigest4, pk_seed: HemDigest4) -> HemDigest4 {
+    let tweak = [
+        Goldilocks::from_u64_reduced(HEM_DOMAIN_PRF_CHECK),
+        Goldilocks::ZERO,
+        Goldilocks::ZERO,
+        Goldilocks::from_u64_reduced(POSEIDON2_CONST_IV),
+    ];
+    hem_poseidon2_compress12_ff(sk_prf, pk_seed, tweak)
+}
+
+/// Stateful layer-0 randomized message hash `H_msg_stateful` (`qsag_agg::sig::compute_hmsg_stateful`).
+pub fn hem_compute_hmsg_stateful(
+    pk_seed: HemDigest4,
+    pk_root: HemDigest4,
+    r_rand: HemDigest4,
+    mu: HemDigest5,
+    kp_idx: u32,
+    tsw_ctr: u32,
+) -> HemDigest5 {
+    let kp_ctr = ((kp_idx as u64) << 32) | (tsw_ctr as u64);
+    let mut st = [
+        pk_seed[0],
+        pk_seed[1],
+        pk_seed[2],
+        pk_seed[3],
+        pk_root[0],
+        pk_root[1],
+        pk_root[2],
+        pk_root[3],
+        Goldilocks::from_u64_reduced(HEM_DOMAIN_H_MSG_STATEFUL),
+        Goldilocks::from_u64_reduced(kp_ctr),
+        mu[4],
+        Goldilocks::from_u64_reduced(POSEIDON2_CONST_IV),
+    ];
+    poseidon2_perm12(&mut st);
+    for i in 0..4 {
+        st[i] += r_rand[i];
+        st[4 + i] += mu[i];
+    }
+    poseidon2_perm12(&mut st);
+    st[0] += Goldilocks::ONE;
+    poseidon2_perm12(&mut st);
+    [st[0], st[1], st[2], st[3], st[4]]
+}
+
+/// Extract 128 base-4 digits (`256` bits) from `hmsg[0..5]` requiring `< 2^63` per limb
+/// (`qsag_agg::sig::extract_wots_digits_checked`).
+pub fn hem_extract_wots_digits_checked(hmsg: &HemDigest5) -> Option<[u8; HEM_WOTS_CHAINS]> {
+    for limb in hmsg {
+        if (limb.to_canonical_u64() >> 63) != 0 {
+            return None;
+        }
+    }
+    let mut digits = [0u8; HEM_WOTS_CHAINS];
+    for limb_idx in 0..4 {
+        let v = hmsg[limb_idx].to_canonical_u64();
+        for i in 0..31 {
+            digits[31 * limb_idx + i] = ((v >> (2 * i)) & 3) as u8;
+        }
+    }
+    let v4 = hmsg[4].to_canonical_u64();
+    for i in 0..4 {
+        digits[124 + i] = ((v4 >> (2 * i)) & 3) as u8;
+    }
+    Some(digits)
+}
+
+/// Deterministically grind `tsw_ctr` upward from `0` until `hem_extract_wots_digits_checked`
+/// succeeds and the 128 base-4 digits sum to `HEM_WOTS_TARGET_SUM = 192`.
+pub fn hem_grind_stateful_tsw_digits(
+    pk_seed: HemDigest4,
+    pk_root: HemDigest4,
+    r_rand: HemDigest4,
+    mu: HemDigest5,
+    kp_idx: u32,
+    max_grind: u32,
+) -> Option<(u32, [u8; HEM_WOTS_CHAINS])> {
+    let mut ctr = 0u32;
+    loop {
+        let hmsg = hem_compute_hmsg_stateful(pk_seed, pk_root, r_rand, mu, kp_idx, ctr);
+        if let Some(digits) = hem_extract_wots_digits_checked(&hmsg) {
+            let sum: usize = digits.iter().map(|&d| d as usize).sum();
+            if sum == HEM_WOTS_TARGET_SUM {
+                return Some((ctr, digits));
+            }
+        }
+        if ctr >= max_grind {
+            return None;
+        }
+        ctr = ctr.checked_add(1)?;
+    }
+}
+
+/// Standalone reference verifier matching `qsag_agg::verify_individual_signature`
+/// (`AggSigProfile::JortsPoseidon2`) bit-for-bit.
+pub fn verify_hem_jorts_signature(
+    pk: &HemJortsPublicKey,
+    msg: &[u8],
+    sig: &HemJortsSignature,
+) -> bool {
+    let kp_idx = sig.stateful_leaf_idx;
+    if (kp_idx as usize) >= HEM_JORTS_MAX_LEAVES
+        || sig.wots_chains.len() != HEM_WOTS_CHAINS
+        || sig.merkle_path.len() != HEM_JORTS_XMSS_HEIGHT
+    {
+        return false;
+    }
+    let (_, mu) = hem_compute_message_mu(pk, msg);
+    let hmsg =
+        hem_compute_hmsg_stateful(pk.pk_seed, pk.pk_root, sig.r_rand, mu, kp_idx, sig.tsw_ctr);
+    let Some(digits) = hem_extract_wots_digits_checked(&hmsg) else {
+        return false;
+    };
+    let sum: usize = digits.iter().map(|&d| d as usize).sum();
+    if sum != HEM_WOTS_TARGET_SUM {
+        return false;
+    }
+    let mut endpoints = [[Goldilocks::ZERO; 4]; HEM_WOTS_CHAINS];
+    for r in 0..HEM_WOTS_CHAINS {
+        let mut cur = sig.wots_chains[r];
+        for step in (digits[r] as u32)..(HEM_WOTS_MAX_STEP as u32) {
+            cur = hem_wots_step_hash_injective(pk.pk_seed, cur, 0, 0, kp_idx, r as u32, step);
+        }
+        endpoints[r] = cur;
+    }
+    let mut node = hem_compress_wots_endpoints_sponge(pk.pk_seed, 0, 0, kp_idx, &endpoints);
+    let mut idx = kp_idx;
+    for (lvl, &sib) in sig
+        .merkle_path
+        .iter()
+        .enumerate()
+        .take(HEM_JORTS_XMSS_HEIGHT)
+    {
+        let parent_idx = idx >> 1;
+        node = if (idx & 1) == 0 {
+            hem_merkle_node_hash(pk.pk_seed, 0, 0, (lvl + 1) as u32, parent_idx, node, sib)
+        } else {
+            hem_merkle_node_hash(pk.pk_seed, 0, 0, (lvl + 1) as u32, parent_idx, sib, node)
+        };
+        idx = parent_idx;
+    }
+    node == pk.pk_root
+}
+
+/// Exact preprocessing budget `(num_pow7, num_beaver, num_a2b)` for distributed `HemJortsPoseidon2`
+/// key generation with `active_leaves` active `WOTS+C` leaves (`0` Beaver triples, `0` A2B masks!).
+pub fn required_hem_jorts_keygen_preprocessing_budget(
+    active_leaves: usize,
+) -> Result<(usize, usize, usize), Poseidon2MpcError> {
+    if active_leaves == 0 || active_leaves > HEM_JORTS_MAX_LEAVES {
+        return Err(Poseidon2MpcError::InvalidParams);
+    }
+    let perms = 2 + 1 + active_leaves * HEM_WOTS_CHAINS * HEM_WOTS_BASE_W;
+    Ok((perms * POSEIDON2_SBOXES_PER_PERM, 0, 0))
+}
+
+/// Exact preprocessing budget `(num_pow7, 0, 0)` for `verify_reshared_hem_jorts_key_mpc`
+/// (`515` `poseidon2_perm12`s = `60,770` `pow7` tuples, `0` Beaver triples, `0` A2B masks).
+#[inline]
+pub const fn required_hem_jorts_reshare_verify_preprocessing_budget() -> (usize, usize, usize) {
+    let perms = 2 + 1 + HEM_WOTS_CHAINS * HEM_WOTS_BASE_W;
+    (perms * POSEIDON2_SBOXES_PER_PERM, 0, 0)
+}
+
+/// Exact constant preprocessing budget `(num_pow7, 0, 0)` for one `sign_hem_jorts_poseidon2_mpc_cached`
+/// or `retry_hem_jorts_poseidon2_mpc_cached` signature (`324` `poseidon2_perm12`s = `38,232` `pow7`
+/// tuples, `0` Beaver triples, `0` A2B masks — constant across all messages because `sum(digits) == 192`!).
+#[inline]
+pub const fn required_hem_jorts_sign_preprocessing_budget_cached() -> (usize, usize, usize) {
+    let perms = 2 + 2 + HEM_WOTS_CHAINS + HEM_WOTS_TARGET_SUM;
+    (perms * POSEIDON2_SBOXES_PER_PERM, 0, 0)
+}
+
+#[inline]
+fn pack_secret_bytes32_to_limbs56_auth(bytes32: &[AuthGlWire; 32]) -> [AuthGlWire; 5] {
+    let mut out = [AuthGlWire::ZERO; 5];
+    for i in 0..4 {
+        let mut acc = AuthGlWire::ZERO;
+        for b in 0..7 {
+            let weight = Goldilocks::from_u64_reduced(1u64 << (8 * b));
+            acc = acc.add(bytes32[7 * i + b].scale(weight));
+        }
+        out[i] = acc;
+    }
+    let mut acc4 = AuthGlWire::ZERO;
+    for b in 0..4 {
+        let weight = Goldilocks::from_u64_reduced(1u64 << (8 * b));
+        acc4 = acc4.add(bytes32[28 + b].scale(weight));
+    }
+    out[4] = acc4;
+    out
+}
+
+/// Expand `(sk_seed_bytes, sk_prf_bytes)` into `(sk_seed, sk_prf)` native `[AuthGlWire; 4]` shares
+/// across the quorum in 1 parallel `eval_spdz_poseidon2_perm12_batch` (`2` perms, `0` A2B!).
+fn expand_hem_secret_digests_mpc(
+    t: usize,
+    quorum_pts: &[Goldilocks],
+    pk_seed: HemDigest4,
+    key_shares: &[&mut Poseidon2SpdzAuthenticatedKeyShare],
+    vaults: &mut [&mut PreprocessedPoseidonPartyVault],
+    pending: &mut SpdzGoldilocksPendingChecks,
+) -> Result<(Vec<[AuthGlWire; 4]>, Vec<[AuthGlWire; 4]>), PreprocessError> {
+    let m = quorum_pts.len();
+    let mut states = SecretBuffer(vec![Vec::with_capacity(2); m]);
+    let mut seed_low4 = SecretBuffer(vec![[AuthGlWire::ZERO; 4]; m]);
+    let mut prf_low4 = SecretBuffer(vec![[AuthGlWire::ZERO; 4]; m]);
+
+    for p in 0..m {
+        let alpha_p = vaults[p].mac_alpha_share;
+        let sw = SecretBuffer(key_seed_wires(key_shares[p]));
+        let pw = SecretBuffer(key_prf_wires(key_shares[p]));
+        let ls = SecretBuffer(pack_secret_bytes32_to_limbs56_auth(&sw));
+        let lp = SecretBuffer(pack_secret_bytes32_to_limbs56_auth(&pw));
+        seed_low4[p] = [ls[0], ls[1], ls[2], ls[3]];
+        prf_low4[p] = [lp[0], lp[1], lp[2], lp[3]];
+
+        let pks: [AuthGlWire; 4] =
+            core::array::from_fn(|i| AuthGlWire::public_const(pk_seed[i], alpha_p));
+        let iv = AuthGlWire::public_const(
+            Goldilocks::from_u64_reduced(POSEIDON2_CONST_IV),
+            alpha_p,
+        );
+        let dom_s = AuthGlWire::public_const(
+            Goldilocks::from_u64_reduced(HEM_DOMAIN_SK_SEED_EXPAND),
+            alpha_p,
+        );
+        let dom_p = AuthGlWire::public_const(
+            Goldilocks::from_u64_reduced(HEM_DOMAIN_SK_PRF_EXPAND),
+            alpha_p,
+        );
+
+        states[p].push([
+            ls[0], ls[1], ls[2], ls[3], ls[4], pks[0], pks[1], pks[2], pks[3], dom_s,
+            AuthGlWire::ZERO, iv,
+        ]);
+        states[p].push([
+            lp[0], lp[1], lp[2], lp[3], lp[4], pks[0], pks[1], pks[2], pks[3], dom_p,
+            AuthGlWire::ZERO, iv,
+        ]);
+    }
+
+    eval_spdz_poseidon2_perm12_batch(t, quorum_pts, &mut states, vaults, pending)?;
+
+    let mut sk_seed_out = SecretBuffer(vec![[AuthGlWire::ZERO; 4]; m]);
+    let mut sk_prf_out = SecretBuffer(vec![[AuthGlWire::ZERO; 4]; m]);
+    for p in 0..m {
+        for i in 0..4 {
+            sk_seed_out[p][i] = states[p][0][i].add(seed_low4[p][i]);
+            sk_prf_out[p][i] = states[p][1][i].add(prf_low4[p][i]);
+        }
+    }
+    Ok((
+        core::mem::take(&mut sk_seed_out.0),
+        core::mem::take(&mut sk_prf_out.0),
+    ))
+}
+
+/// Evaluate a batch of native `[AuthGlWire; 4]` Jive/feed-forward compressions
+/// `poseidon2_compress12_ff(in0_secret, pk_seed_public, tweak_public)` in SPDZ (`0` A2B!).
+fn eval_spdz_hem_compress12_ff_batch(
+    t: usize,
+    quorum_pts: &[Goldilocks],
+    in0_per_party: &[Vec<[AuthGlWire; 4]>],
+    pk_seed: HemDigest4,
+    tweaks: &[HemDigest4],
+    vaults: &mut [&mut PreprocessedPoseidonPartyVault],
+    pending: &mut SpdzGoldilocksPendingChecks,
+) -> Result<Vec<Vec<[AuthGlWire; 4]>>, PreprocessError> {
+    let m = quorum_pts.len();
+    let batch = tweaks.len();
+    if batch == 0 {
+        return Ok(vec![Vec::new(); m]);
+    }
+    let mut states = SecretBuffer(vec![Vec::with_capacity(batch); m]);
+    for p in 0..m {
+        let alpha_p = vaults[p].mac_alpha_share;
+        let pks: [AuthGlWire; 4] =
+            core::array::from_fn(|i| AuthGlWire::public_const(pk_seed[i], alpha_p));
+        for (k, tw) in tweaks.iter().enumerate() {
+            let x = in0_per_party[p][k];
+            let tw_w: [AuthGlWire; 4] =
+                core::array::from_fn(|i| AuthGlWire::public_const(tw[i], alpha_p));
+            states[p].push([
+                x[0], x[1], x[2], x[3], pks[0], pks[1], pks[2], pks[3], tw_w[0], tw_w[1], tw_w[2],
+                tw_w[3],
+            ]);
+        }
+    }
+
+    eval_spdz_poseidon2_perm12_batch(t, quorum_pts, &mut states, vaults, pending)?;
+
+    let mut out = SecretBuffer(vec![Vec::with_capacity(batch); m]);
+    for p in 0..m {
+        for k in 0..batch {
+            let x = in0_per_party[p][k];
+            out[p].push([
+                states[p][k][0].add(x[0]),
+                states[p][k][1].add(x[1]),
+                states[p][k][2].add(x[2]),
+                states[p][k][3].add(x[3]),
+            ]);
+        }
+    }
+    Ok(core::mem::take(&mut out.0))
+}
+
+/// Strictly verify ALL queued intermediate SPDZ wires AND open a batch of cut-boundary native
+/// `HemDigest4` (`[Goldilocks; 4]`) digests via committed zero-masked `GoldilocksExt2` `MacCheck`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Two-stage cut barrier binds session, phase, quorum, cut digests, pending checks and party state"
+)]
+fn flush_verify_and_open_hem_digests4(
+    session_id: &[u8; 32],
+    phase: &'static str,
+    t: usize,
+    quorum_pts: &[Goldilocks],
+    cut_digests_per_party: &[Vec<[AuthGlWire; 4]>],
+    pending: &mut SpdzGoldilocksPendingChecks,
+    key_shares: &mut [&mut Poseidon2SpdzAuthenticatedKeyShare],
+    vaults: &mut [&mut PreprocessedPoseidonPartyVault],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<Vec<HemDigest4>, Poseidon2MpcError> {
+    let m = quorum_pts.len();
+    let num_digests = cut_digests_per_party[0].len();
+    let alpha = SecretBuffer(vaults.iter().map(|v| v.mac_alpha_share).collect::<Vec<_>>());
+
+    let intermediate = commit_and_open_spdz_goldilocks_batch_quorum(
+        session_id,
+        "hem_pre_cut_intermediate_mac",
+        t,
+        quorum_pts,
+        &pending.shares_per_party,
+        &pending.macs_per_party,
+        &alpha,
+        party_rngs,
+    );
+    pending.clear_and_wipe();
+    match intermediate {
+        Ok(mut values) => wipe_goldilocks(&mut values),
+        Err(e) => {
+            poison_all_on_abort(key_shares, vaults);
+            return Err(Poseidon2MpcError::Preprocess(e));
+        }
+    }
+
+    let total_wires = 4 * num_digests;
+    let mut all_sh = SecretBuffer(vec![Vec::with_capacity(total_wires); m]);
+    let mut all_mac = SecretBuffer(vec![Vec::with_capacity(total_wires); m]);
+    for p in 0..m {
+        for st in &cut_digests_per_party[p] {
+            for w in st {
+                all_sh[p].push(w.val);
+                all_mac[p].push(w.mac);
+            }
+        }
+    }
+
+    let opened_res = commit_and_open_spdz_goldilocks_batch_quorum(
+        session_id, phase, t, quorum_pts, &all_sh, &all_mac, &alpha, party_rngs,
+    );
+    drop(all_sh);
+    drop(all_mac);
+    drop(alpha);
+
+    let opened = SecretBuffer(match opened_res {
+        Ok(v) => v,
+        Err(e) => {
+            poison_all_on_abort(key_shares, vaults);
+            return Err(Poseidon2MpcError::Preprocess(e));
+        }
+    });
+
+    let mut out = Vec::with_capacity(num_digests);
+    for s in 0..num_digests {
+        out.push([
+            opened[4 * s],
+            opened[4 * s + 1],
+            opened[4 * s + 2],
+            opened[4 * s + 3],
+        ]);
+    }
+    Ok(out)
+}
+
+/// Evaluate a batch of `(kp_idx, chain_idx, steps)` targets in native `[Goldilocks; 4]` SPDZ
+/// (`0` intermediate A2B conversions!) starting from already-expanded `sk_seed_per_party`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Batched native WOTS+C chain evaluation takes quorum, seed shares, targets, vaults and pending checks"
+)]
+fn eval_hem_wots_chains_native_spdz(
+    t: usize,
+    quorum_pts: &[Goldilocks],
+    pk_seed: HemDigest4,
+    sk_seed_per_party: &[[AuthGlWire; 4]],
+    targets: &[(u32, u32, usize)],
+    vaults: &mut [&mut PreprocessedPoseidonPartyVault],
+    pending: &mut SpdzGoldilocksPendingChecks,
+) -> Result<Vec<Vec<[AuthGlWire; 4]>>, PreprocessError> {
+    let m = quorum_pts.len();
+    let count = targets.len();
+    if count == 0 {
+        return Ok(vec![Vec::new(); m]);
+    }
+
+    let mut base_in = SecretBuffer(vec![Vec::with_capacity(count); m]);
+    for p in 0..m {
+        for _ in 0..count {
+            base_in[p].push(sk_seed_per_party[p]);
+        }
+    }
+    let mut base_tweaks = Vec::with_capacity(count);
+    for &(kp_idx, chain_idx, _) in targets {
+        base_tweaks.push([
+            Goldilocks::from_u64_reduced(HEM_DOMAIN_PRF_WOTS),
+            hem_pack_wots_addr_limb(0, kp_idx, chain_idx, 0),
+            Goldilocks::ZERO,
+            Goldilocks::ZERO,
+        ]);
+    }
+    let mut cur_states = SecretBuffer(eval_spdz_hem_compress12_ff_batch(
+        t,
+        quorum_pts,
+        &base_in,
+        pk_seed,
+        &base_tweaks,
+        vaults,
+        pending,
+    )?);
+
+    let max_steps = targets.iter().map(|x| x.2).max().unwrap_or(0);
+    for step in 0..max_steps {
+        let active: Vec<usize> = (0..count).filter(|&i| step < targets[i].2).collect();
+        let mut active_in = SecretBuffer(vec![Vec::with_capacity(active.len()); m]);
+        for p in 0..m {
+            for &i in &active {
+                active_in[p].push(cur_states[p][i]);
+            }
+        }
+        let mut step_tweaks = Vec::with_capacity(active.len());
+        for &i in &active {
+            let (kp_idx, chain_idx, _) = targets[i];
+            step_tweaks.push([
+                Goldilocks::from_u64_reduced(HEM_DOMAIN_WOTS_STEP),
+                hem_pack_wots_addr_limb(0, kp_idx, chain_idx, step as u32),
+                Goldilocks::ZERO,
+                Goldilocks::ZERO,
+            ]);
+        }
+        let next_st = SecretBuffer(eval_spdz_hem_compress12_ff_batch(
+            t,
+            quorum_pts,
+            &active_in,
+            pk_seed,
+            &step_tweaks,
+            vaults,
+            pending,
+        )?);
+        for p in 0..m {
+            for (slot, &i) in active.iter().enumerate() {
+                cur_states[p][i] = next_st[p][slot];
+            }
+        }
+    }
+
+    Ok(core::mem::take(&mut cur_states.0))
+}
+
+/// Derive a [`HemJortsCachedTree`] in the clear from `(dkg_pk_seed, sk_seed_bytes, sk_prf_bytes)`
+/// for reference comparison in tests and local custody staging.
+pub fn derive_hem_jorts_cached_tree_clear(
+    dkg_pk_seed: [u8; 32],
+    sk_seed_bytes: &[u8; 32],
+    sk_prf_bytes: &[u8; 32],
+    active_leaves: usize,
+) -> Result<HemJortsCachedTree, Poseidon2MpcError> {
+    if active_leaves == 0 || active_leaves > HEM_JORTS_MAX_LEAVES {
+        return Err(Poseidon2MpcError::InvalidParams);
+    }
+    let pk_seed = hem_pk_seed_from_bytes32(&dkg_pk_seed);
+    let mut sk_seed =
+        hem_expand_secret_bytes32_clear(sk_seed_bytes, pk_seed, HEM_DOMAIN_SK_SEED_EXPAND);
+    let mut sk_prf =
+        hem_expand_secret_bytes32_clear(sk_prf_bytes, pk_seed, HEM_DOMAIN_SK_PRF_EXPAND);
+    let prf_check = hem_prf_check_digest_clear(sk_prf, pk_seed);
+
+    let mut leaves = Vec::with_capacity(HEM_JORTS_MAX_LEAVES);
+    for kp in 0..active_leaves {
+        let mut endpoints = [[Goldilocks::ZERO; 4]; HEM_WOTS_CHAINS];
+        for (r, ep) in endpoints.iter_mut().enumerate().take(HEM_WOTS_CHAINS) {
+            let mut cur = hem_wots_base_secret_clear(sk_seed, pk_seed, 0, 0, kp as u32, r as u32);
+            for step in 0..(HEM_WOTS_MAX_STEP as u32) {
+                cur = hem_wots_step_hash_injective(pk_seed, cur, 0, 0, kp as u32, r as u32, step);
+            }
+            *ep = cur;
+            wipe_goldilocks(&mut cur);
+        }
+        leaves.push(hem_compress_wots_endpoints_sponge(
+            pk_seed, 0, 0, kp as u32, &endpoints,
+        ));
+    }
+    for kp in active_leaves..HEM_JORTS_MAX_LEAVES {
+        leaves.push(hem_unassigned_leaf_digest(pk_seed, kp as u32));
+    }
+    wipe_goldilocks(&mut sk_seed);
+    wipe_goldilocks(&mut sk_prf);
+
+    let pk_root =
+        hem_merkle_root_from_leaves(pk_seed, &leaves).ok_or(Poseidon2MpcError::InvalidParams)?;
+    Ok(HemJortsCachedTree {
+        dkg_pk_seed,
+        pk: HemJortsPublicKey { pk_seed, pk_root },
+        active_leaves,
+        leaves,
+        prf_check,
+    })
+}
+
+/// Build the full 64-leaf `Hem`-aggregatable `JortsPoseidon2` public key & leaf cache via
+/// dishonest-majority SPDZ MPC (`0` secret reconstruction, `0` Beaver triples, `0` A2B!).
+pub fn build_distributed_hem_jorts_key_mpc(
+    session_id: [u8; 32],
+    t: usize,
+    key_shares: &mut [&mut Poseidon2SpdzAuthenticatedKeyShare],
+    vaults: &mut [&mut PreprocessedPoseidonPartyVault],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<HemJortsCachedTree, Poseidon2MpcError> {
+    build_distributed_hem_jorts_key_mpc_with_active_leaves(
+        session_id,
+        HEM_JORTS_MAX_LEAVES,
+        t,
+        key_shares,
+        vaults,
+        party_rngs,
+    )
+}
+
+/// Build a `Hem`-aggregatable `JortsPoseidon2` public key & height-6 leaf cache in SPDZ MPC with
+/// `active_leaves in 1..=64` active `WOTS+C` leaves and domain-separated unassigned leaves above it.
+pub fn build_distributed_hem_jorts_key_mpc_with_active_leaves(
+    session_id: [u8; 32],
+    active_leaves: usize,
+    t: usize,
+    key_shares: &mut [&mut Poseidon2SpdzAuthenticatedKeyShare],
+    vaults: &mut [&mut PreprocessedPoseidonPartyVault],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<HemJortsCachedTree, Poseidon2MpcError> {
+    if active_leaves == 0 || active_leaves > HEM_JORTS_MAX_LEAVES {
+        return Err(Poseidon2MpcError::InvalidParams);
+    }
+    let (dkg_pk_seed, quorum_pts) = validate_quorum_slices(t, key_shares, vaults, party_rngs)?;
+    let pk_seed = hem_pk_seed_from_bytes32(&dkg_pk_seed);
+    let m = quorum_pts.len();
+    let mut pending = SpdzGoldilocksPendingChecks::new(m);
+
+    let (sk_seed_p, sk_prf_p) = match expand_hem_secret_digests_mpc(
+        t,
+        &quorum_pts,
+        pk_seed,
+        key_shares,
+        vaults,
+        &mut pending,
+    ) {
+        Ok(pair) => (SecretBuffer(pair.0), SecretBuffer(pair.1)),
+        Err(e) => {
+            poison_all_on_abort(key_shares, vaults);
+            return Err(Poseidon2MpcError::Preprocess(e));
+        }
+    };
+
+    let prf_in: Vec<Vec<[AuthGlWire; 4]>> = (0..m).map(|p| vec![sk_prf_p[p]]).collect();
+    let prf_tweak = [[
+        Goldilocks::from_u64_reduced(HEM_DOMAIN_PRF_CHECK),
+        Goldilocks::ZERO,
+        Goldilocks::ZERO,
+        Goldilocks::from_u64_reduced(POSEIDON2_CONST_IV),
+    ]];
+    let prf_chk_p = SecretBuffer(
+        match eval_spdz_hem_compress12_ff_batch(
+            t,
+            &quorum_pts,
+            &prf_in,
+            pk_seed,
+            &prf_tweak,
+            vaults,
+            &mut pending,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                poison_all_on_abort(key_shares, vaults);
+                return Err(Poseidon2MpcError::Preprocess(e));
+            }
+        },
+    );
+
+    let mut targets = Vec::with_capacity(active_leaves * HEM_WOTS_CHAINS);
+    for kp in 0..active_leaves {
+        for r in 0..HEM_WOTS_CHAINS {
+            targets.push((kp as u32, r as u32, HEM_WOTS_MAX_STEP));
+        }
+    }
+    let mut cut_states = SecretBuffer(
+        match eval_hem_wots_chains_native_spdz(
+            t,
+            &quorum_pts,
+            pk_seed,
+            &sk_seed_p,
+            &targets,
+            vaults,
+            &mut pending,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                poison_all_on_abort(key_shares, vaults);
+                return Err(Poseidon2MpcError::Preprocess(e));
+            }
+        },
+    );
+    for p in 0..m {
+        secret_vec_push(&mut cut_states[p], prf_chk_p[p][0]);
+    }
+
+    let opened = flush_verify_and_open_hem_digests4(
+        &session_id,
+        "hem_keygen_endpoints_and_prf",
+        t,
+        &quorum_pts,
+        &cut_states,
+        &mut pending,
+        key_shares,
+        vaults,
+        party_rngs,
+    )?;
+
+    let prf_check = opened[active_leaves * HEM_WOTS_CHAINS];
+    let mut leaves = Vec::with_capacity(HEM_JORTS_MAX_LEAVES);
+    for kp in 0..active_leaves {
+        let base = kp * HEM_WOTS_CHAINS;
+        let endpoints: [HemDigest4; HEM_WOTS_CHAINS] =
+            core::array::from_fn(|r| opened[base + r]);
+        leaves.push(hem_compress_wots_endpoints_sponge(
+            pk_seed, 0, 0, kp as u32, &endpoints,
+        ));
+    }
+    for kp in active_leaves..HEM_JORTS_MAX_LEAVES {
+        leaves.push(hem_unassigned_leaf_digest(pk_seed, kp as u32));
+    }
+
+    let pk_root =
+        hem_merkle_root_from_leaves(pk_seed, &leaves).ok_or(Poseidon2MpcError::InvalidParams)?;
+    let pk = HemJortsPublicKey { pk_seed, pk_root };
+    for ks in key_shares.iter_mut() {
+        ks.enroll_hem_key_profile(pk, prf_check)?;
+    }
+
+    Ok(HemJortsCachedTree {
+        dkg_pk_seed,
+        pk,
+        active_leaves,
+        leaves,
+        prf_check,
+    })
+}
+
+/// Authenticate reshared `(t', n')` SPDZ key shares against an existing [`HemJortsCachedTree`]
+/// without reconstructing `SK.seed` or `SK.prf`: recomputes `leaf[0]` and `prf_check` in SPDZ MPC
+/// (`515` permutations = `60,770` `pow7` tuples), verifies both match `cache` (which is Merkle-bound
+/// to `cache.pk.pk_root`), and enrolls `(cache.pk, cache.prf_check)` on every share.
+pub fn verify_reshared_hem_jorts_key_mpc(
+    session_id: [u8; 32],
+    cache: &HemJortsCachedTree,
+    t: usize,
+    key_shares: &mut [&mut Poseidon2SpdzAuthenticatedKeyShare],
+    vaults: &mut [&mut PreprocessedPoseidonPartyVault],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<(), Poseidon2MpcError> {
+    if !cache.verify_consistency() {
+        return Err(Poseidon2MpcError::CachedSubtreeMismatch);
+    }
+    let (dkg_pk_seed, quorum_pts) = validate_quorum_slices(t, key_shares, vaults, party_rngs)?;
+    if !ct_eq_bytes32(&dkg_pk_seed, &cache.dkg_pk_seed) {
+        return Err(Poseidon2MpcError::PublicSeedMismatch);
+    }
+    let pk_seed = cache.pk.pk_seed;
+    let m = quorum_pts.len();
+    let mut pending = SpdzGoldilocksPendingChecks::new(m);
+
+    let (sk_seed_p, sk_prf_p) = match expand_hem_secret_digests_mpc(
+        t,
+        &quorum_pts,
+        pk_seed,
+        key_shares,
+        vaults,
+        &mut pending,
+    ) {
+        Ok(pair) => (SecretBuffer(pair.0), SecretBuffer(pair.1)),
+        Err(e) => {
+            poison_all_on_abort(key_shares, vaults);
+            return Err(Poseidon2MpcError::Preprocess(e));
+        }
+    };
+
+    let prf_in: Vec<Vec<[AuthGlWire; 4]>> = (0..m).map(|p| vec![sk_prf_p[p]]).collect();
+    let prf_tweak = [[
+        Goldilocks::from_u64_reduced(HEM_DOMAIN_PRF_CHECK),
+        Goldilocks::ZERO,
+        Goldilocks::ZERO,
+        Goldilocks::from_u64_reduced(POSEIDON2_CONST_IV),
+    ]];
+    let prf_chk_p = SecretBuffer(
+        match eval_spdz_hem_compress12_ff_batch(
+            t,
+            &quorum_pts,
+            &prf_in,
+            pk_seed,
+            &prf_tweak,
+            vaults,
+            &mut pending,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                poison_all_on_abort(key_shares, vaults);
+                return Err(Poseidon2MpcError::Preprocess(e));
+            }
+        },
+    );
+
+    let targets: Vec<(u32, u32, usize)> = (0..HEM_WOTS_CHAINS)
+        .map(|r| (0u32, r as u32, HEM_WOTS_MAX_STEP))
+        .collect();
+    let mut cut_states = SecretBuffer(
+        match eval_hem_wots_chains_native_spdz(
+            t,
+            &quorum_pts,
+            pk_seed,
+            &sk_seed_p,
+            &targets,
+            vaults,
+            &mut pending,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                poison_all_on_abort(key_shares, vaults);
+                return Err(Poseidon2MpcError::Preprocess(e));
+            }
+        },
+    );
+    for p in 0..m {
+        secret_vec_push(&mut cut_states[p], prf_chk_p[p][0]);
+    }
+
+    let opened = flush_verify_and_open_hem_digests4(
+        &session_id,
+        "hem_reshare_verify_cut",
+        t,
+        &quorum_pts,
+        &cut_states,
+        &mut pending,
+        key_shares,
+        vaults,
+        party_rngs,
+    )?;
+
+    let endpoints0: [HemDigest4; HEM_WOTS_CHAINS] = core::array::from_fn(|r| opened[r]);
+    let leaf0 = hem_compress_wots_endpoints_sponge(pk_seed, 0, 0, 0, &endpoints0);
+    let prf_check = opened[HEM_WOTS_CHAINS];
+    if leaf0 != cache.leaves[0] || prf_check != cache.prf_check {
+        poison_all_on_abort(key_shares, vaults);
+        return Err(Poseidon2MpcError::KeyProfileMismatch);
+    }
+
+    for ks in key_shares.iter_mut() {
+        ks.enroll_hem_key_profile(cache.pk, cache.prf_check)?;
+    }
+    Ok(())
+}
+
+fn validate_enrolled_hem_profile(
+    cache: &HemJortsCachedTree,
+    quorum_pk_seed: &[u8; 32],
+    key_shares: &[&mut Poseidon2SpdzAuthenticatedKeyShare],
+) -> Result<(), Poseidon2MpcError> {
+    if !ct_eq_bytes32(&cache.dkg_pk_seed, quorum_pk_seed) {
+        return Err(Poseidon2MpcError::PublicSeedMismatch);
+    }
+    for ks in key_shares {
+        match ks.enrolled_hem_profile {
+            None => return Err(Poseidon2MpcError::KeyNotEnrolled),
+            Some((epk, eprf)) => {
+                if epk != cache.pk || eprf != cache.prf_check {
+                    return Err(Poseidon2MpcError::KeyProfileMismatch);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Core MPC evaluation takes session, cache, quorum, epoch, message mu, grind bound and party state"
+)]
+fn sign_hem_jorts_poseidon2_mpc_core(
+    session_id: &[u8; 32],
+    cache: &HemJortsCachedTree,
+    t: usize,
+    quorum_pts: &[Goldilocks],
+    epoch: u64,
+    msg: &[u8],
+    mu_bytes: &[u8; 32],
+    mu: HemDigest5,
+    max_grind: u32,
+    key_shares: &mut [&mut Poseidon2SpdzAuthenticatedKeyShare],
+    vaults: &mut [&mut PreprocessedPoseidonPartyVault],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<HemJortsSignature, Poseidon2MpcError> {
+    let kp_usize = usize::try_from(epoch)
+        .map_err(|_| Poseidon2MpcError::EpochLatch(EpochLatchError::Exhausted))?;
+    if kp_usize >= cache.active_leaves {
+        return Err(Poseidon2MpcError::EpochLatch(EpochLatchError::Exhausted));
+    }
+    let kp_u32 = kp_usize as u32;
+    let m = quorum_pts.len();
+
+    let transcript = crate::sponge::keccak::encode_multi_frame(&[
+        session_id,
+        &epoch.to_le_bytes(),
+        mu_bytes,
+    ]);
+    for rng in party_rngs.iter_mut() {
+        rng.hedge_transcript(&transcript);
+    }
+
+    // Cut 1: expand `(sk_seed, sk_prf)` (2 perms) + derive `r_rand` (2 perms) and open `r_rand`
+    // behind the two-stage committed SPDZ `MacCheck` barrier.
+    let mut pending1 = SpdzGoldilocksPendingChecks::new(m);
+    let (sk_seed_p, sk_prf_p) = match expand_hem_secret_digests_mpc(
+        t,
+        quorum_pts,
+        cache.pk.pk_seed,
+        key_shares,
+        vaults,
+        &mut pending1,
+    ) {
+        Ok(pair) => (SecretBuffer(pair.0), SecretBuffer(pair.1)),
+        Err(e) => {
+            poison_all_on_abort(key_shares, vaults);
+            return Err(Poseidon2MpcError::Preprocess(e));
+        }
+    };
+
+    let mut r_states = SecretBuffer(vec![Vec::with_capacity(1); m]);
+    for p in 0..m {
+        let alpha_p = vaults[p].mac_alpha_share;
+        let c = |g: Goldilocks| AuthGlWire::public_const(g, alpha_p);
+        r_states[p].push([
+            sk_prf_p[p][0],
+            sk_prf_p[p][1],
+            sk_prf_p[p][2],
+            sk_prf_p[p][3],
+            c(cache.pk.pk_seed[0]),
+            c(cache.pk.pk_seed[1]),
+            c(cache.pk.pk_seed[2]),
+            c(cache.pk.pk_seed[3]),
+            c(Goldilocks::from_u64_reduced(HEM_DOMAIN_PRF_MSG)),
+            c(Goldilocks::from_u64_reduced(epoch)),
+            c(mu[4]),
+            c(Goldilocks::from_u64_reduced(POSEIDON2_CONST_IV)),
+        ]);
+    }
+    if let Err(e) =
+        eval_spdz_poseidon2_perm12_batch(t, quorum_pts, &mut r_states, vaults, &mut pending1)
+    {
+        poison_all_on_abort(key_shares, vaults);
+        return Err(Poseidon2MpcError::Preprocess(e));
+    }
+    for p in 0..m {
+        let alpha_p = vaults[p].mac_alpha_share;
+        for i in 0..4 {
+            r_states[p][0][i] = r_states[p][0][i].add(AuthGlWire::public_const(mu[i], alpha_p));
+        }
+    }
+    if let Err(e) =
+        eval_spdz_poseidon2_perm12_batch(t, quorum_pts, &mut r_states, vaults, &mut pending1)
+    {
+        poison_all_on_abort(key_shares, vaults);
+        return Err(Poseidon2MpcError::Preprocess(e));
+    }
+
+    let r_cut: Vec<Vec<[AuthGlWire; 4]>> = (0..m)
+        .map(|p| {
+            vec![[
+                r_states[p][0][0],
+                r_states[p][0][1],
+                r_states[p][0][2],
+                r_states[p][0][3],
+            ]]
+        })
+        .collect();
+    let opened_r = flush_verify_and_open_hem_digests4(
+        session_id,
+        "hem_sign_r_rand_cut",
+        t,
+        quorum_pts,
+        &r_cut,
+        &mut pending1,
+        key_shares,
+        vaults,
+        party_rngs,
+    )?;
+    let r_rand = opened_r[0];
+
+    let (tsw_ctr, digits) = hem_grind_stateful_tsw_digits(
+        cache.pk.pk_seed,
+        cache.pk.pk_root,
+        r_rand,
+        mu,
+        kp_u32,
+        max_grind,
+    )
+    .ok_or(Poseidon2MpcError::TswGrindExhausted)?;
+
+    // Cut 2: evaluate the 128 base secrets + 192 step transitions in native `[Goldilocks; 4]` SPDZ
+    // (`0` Beaver triples, `0` A2B!) and open `wots_chains[0..128]` behind `MacCheck`.
+    let mut pending2 = SpdzGoldilocksPendingChecks::new(m);
+    let targets: Vec<(u32, u32, usize)> = digits
+        .iter()
+        .enumerate()
+        .map(|(r, &d)| (kp_u32, r as u32, d as usize))
+        .collect();
+    let chain_states = SecretBuffer(
+        match eval_hem_wots_chains_native_spdz(
+            t,
+            quorum_pts,
+            cache.pk.pk_seed,
+            &sk_seed_p,
+            &targets,
+            vaults,
+            &mut pending2,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                poison_all_on_abort(key_shares, vaults);
+                return Err(Poseidon2MpcError::Preprocess(e));
+            }
+        },
+    );
+    let wots_chains = flush_verify_and_open_hem_digests4(
+        session_id,
+        "hem_sign_wots_chains_cut",
+        t,
+        quorum_pts,
+        &chain_states,
+        &mut pending2,
+        key_shares,
+        vaults,
+        party_rngs,
+    )?;
+
+    let (merkle_path, root_chk) = hem_merkle_auth_path(cache.pk.pk_seed, &cache.leaves, kp_usize)
+        .ok_or(Poseidon2MpcError::CachedSubtreeMismatch)?;
+    if root_chk != cache.pk.pk_root {
+        return Err(Poseidon2MpcError::CachedSubtreeMismatch);
+    }
+
+    let sig = HemJortsSignature {
+        r_rand,
+        stateful_leaf_idx: kp_u32,
+        tsw_ctr,
+        wots_chains,
+        merkle_path,
+    };
+    if !verify_hem_jorts_signature(&cache.pk, msg, &sig) {
+        return Err(Poseidon2MpcError::SignatureSelfCheckFailed);
+    }
+    Ok(sig)
+}
+
+/// Sign `msg` under stateful `Hem`-aggregatable `JortsPoseidon2` (`w=4, chains=128, sum=192, height=6`)
+/// in dishonest-majority $t$-of-$n$ Shamir SPDZ (`0` intermediate A2B, exact `4,328`-byte wire format):
+/// - Enforces committee-wide [`EpochLatchCertificate`] / [`StatefulEpochLatch`] reservation on
+///   `mu_bytes = hem_compute_message_mu(&cache.pk, msg).0` **strictly before** any MPC wire opens;
+/// - Evaluates `r_rand` and all 128 `WOTS+C` chains in native `[Goldilocks; 4]` SPDZ (`38,232` `pow7` tuples);
+/// - Self-checks [`verify_hem_jorts_signature`] before returning `(epoch, HemJortsSignature)`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Stateful MPC signing binds session, leaf cache, threshold, latch certificate, latches, message and party state"
+)]
+pub fn sign_hem_jorts_poseidon2_mpc_cached<L: StatefulEpochLatch>(
+    session_id: [u8; 32],
+    cache: &HemJortsCachedTree,
+    t: usize,
+    latch_cert: Option<&EpochLatchCertificate>,
+    latches: &mut [&mut L],
+    msg: &[u8],
+    max_grind: u32,
+    key_shares: &mut [&mut Poseidon2SpdzAuthenticatedKeyShare],
+    vaults: &mut [&mut PreprocessedPoseidonPartyVault],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<(u64, HemJortsSignature), Poseidon2MpcError> {
+    if !cache.verify_consistency() {
+        return Err(Poseidon2MpcError::CachedSubtreeMismatch);
+    }
+    if latches.len() != key_shares.len() {
+        return Err(Poseidon2MpcError::InvalidQuorum {
+            t,
+            n: latches.len(),
+        });
+    }
+    let (quorum_pk_seed, quorum_pts) = validate_quorum_slices(t, key_shares, vaults, party_rngs)?;
+    validate_enrolled_hem_profile(cache, &quorum_pk_seed, key_shares)?;
+
+    let committee_size = key_shares[0].committee_size;
+    let (mu_bytes, mu) = hem_compute_message_mu(&cache.pk, msg);
+    let latch_pk = cache.pk.latch_pq_public_key(cache.dkg_pk_seed);
+
+    let Some(first) = latches.first() else {
+        return Err(Poseidon2MpcError::InvalidQuorum { t, n: 0 });
+    };
+    let candidate_epoch = match latch_cert {
+        Some(cert) => cert.epoch(),
+        None => first.peek_next_epoch(),
+    };
+    if candidate_epoch >= cache.active_leaves as u64 {
+        let pinned_authority = resolve_enrolled_latch_authority(key_shares)?;
+        check_committee_latch_authorisation(
+            &latch_pk,
+            t,
+            committee_size,
+            latches.len(),
+            pinned_authority,
+            latch_cert,
+            candidate_epoch,
+            &mu_bytes,
+        )?;
+        return Err(Poseidon2MpcError::EpochLatch(EpochLatchError::Exhausted));
+    }
+
+    let latch_params = PqHashParams {
+        w: HEM_WOTS_BASE_W,
+        ell1: HEM_WOTS_CHAINS,
+        max_sigs_log2: HEM_JORTS_XMSS_HEIGHT as u32,
+        num_layers: 1,
+        subtree_height: HEM_JORTS_XMSS_HEIGHT,
+        fors_trees: 0,
+        fors_height: 0,
+        stateful: true,
+    };
+    let ep0 = {
+        let pinned_authority = resolve_enrolled_latch_authority(key_shares)?;
+        reserve_authorised_epoch(
+            &latch_params,
+            &latch_pk,
+            t,
+            committee_size,
+            pinned_authority,
+            latch_cert,
+            latches,
+            &mu_bytes,
+        )?
+    };
+    if ep0 >= cache.active_leaves as u64 {
+        return Err(Poseidon2MpcError::EpochLatch(EpochLatchError::Exhausted));
+    }
+
+    let sig = sign_hem_jorts_poseidon2_mpc_core(
+        &session_id,
+        cache,
+        t,
+        &quorum_pts,
+        ep0,
+        msg,
+        &mu_bytes,
+        mu,
+        max_grind,
+        key_shares,
+        vaults,
+        party_rngs,
+    )?;
+    Ok((ep0, sig))
+}
+
+/// Safe crash-recovery retry for `Hem`-aggregatable `JortsPoseidon2` (`[P0-04]`):
+/// verifies `latch.retry_latched_epoch(epoch, &mu_bytes)` across all participating latches without
+/// advancing any latch and reproduces the exact deterministic `HemJortsSignature`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Crash-recovery retry binds session, leaf cache, threshold, latch certificate, latches, epoch, message and party state"
+)]
+pub fn retry_hem_jorts_poseidon2_mpc_cached<L: StatefulEpochLatch>(
+    session_id: [u8; 32],
+    cache: &HemJortsCachedTree,
+    t: usize,
+    latch_cert: Option<&EpochLatchCertificate>,
+    latches: &mut [&mut L],
+    epoch: u64,
+    msg: &[u8],
+    max_grind: u32,
+    key_shares: &mut [&mut Poseidon2SpdzAuthenticatedKeyShare],
+    vaults: &mut [&mut PreprocessedPoseidonPartyVault],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<HemJortsSignature, Poseidon2MpcError> {
+    if !cache.verify_consistency() {
+        return Err(Poseidon2MpcError::CachedSubtreeMismatch);
+    }
+    if latches.len() != key_shares.len() {
+        return Err(Poseidon2MpcError::InvalidQuorum {
+            t,
+            n: latches.len(),
+        });
+    }
+    let (quorum_pk_seed, quorum_pts) = validate_quorum_slices(t, key_shares, vaults, party_rngs)?;
+    validate_enrolled_hem_profile(cache, &quorum_pk_seed, key_shares)?;
+
+    let committee_size = key_shares[0].committee_size;
+    let (mu_bytes, mu) = hem_compute_message_mu(&cache.pk, msg);
+    let latch_pk = cache.pk.latch_pq_public_key(cache.dkg_pk_seed);
+
+    {
+        let pinned_authority = resolve_enrolled_latch_authority(key_shares)?;
+        check_committee_latch_authorisation(
+            &latch_pk,
+            t,
+            committee_size,
+            latches.len(),
+            pinned_authority,
+            latch_cert,
+            epoch,
+            &mu_bytes,
+        )?;
+    }
+    if epoch >= cache.active_leaves as u64 {
+        return Err(Poseidon2MpcError::EpochLatch(EpochLatchError::Exhausted));
+    }
+    for l in latches.iter_mut() {
+        let ep = l.retry_latched_epoch(epoch, &mu_bytes)?;
+        if ep != epoch {
+            return Err(Poseidon2MpcError::EpochLatch(
+                EpochLatchError::EquivocationRefused,
+            ));
+        }
+    }
+
+    sign_hem_jorts_poseidon2_mpc_core(
+        &session_id,
+        cache,
+        t,
+        &quorum_pts,
+        epoch,
+        msg,
+        &mu_bytes,
+        mu,
+        max_grind,
+        key_shares,
+        vaults,
+        party_rngs,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -2559,6 +4321,7 @@ mod tests {
                 sk_prf_bytes: [Goldilocks::ZERO; 32],
                 sk_prf_macs: [GoldilocksExt2::ZERO; 32],
                 enrolled_profile: None,
+                enrolled_hem_profile: None,
                 enrolled_latch_authority: None,
                 poisoned: false,
             })
@@ -2701,6 +4464,7 @@ mod tests {
                 sk_prf_bytes: [Goldilocks::ZERO; 32],
                 sk_prf_macs: [GoldilocksExt2::ZERO; 32],
                 enrolled_profile: None,
+                enrolled_hem_profile: None,
                 enrolled_latch_authority: None,
                 poisoned: false,
             },
@@ -2715,6 +4479,7 @@ mod tests {
                 sk_prf_bytes: [Goldilocks::ZERO; 32],
                 sk_prf_macs: [GoldilocksExt2::ZERO; 32],
                 enrolled_profile: None,
+                enrolled_hem_profile: None,
                 enrolled_latch_authority: None,
                 poisoned: false,
             },
@@ -4363,5 +6128,210 @@ mod tests {
         assert_eq!((l0.next_epoch(), l1.next_epoch()), (0, 0));
         assert!(!ks_refs[0].poisoned && !ks_refs[1].poisoned);
         assert!(!v_refs[0].is_poisoned() && !v_refs[1].is_poisoned());
+    }
+
+    #[test]
+    fn test_hem_jorts_native_spdz_sign_and_reshare_zero_a2b() {
+        use crate::dkg::run_dealerless_reshare_seed32_goldilocks;
+
+        let t = 2usize;
+        let n = 3usize;
+        let active_leaves = 1usize;
+        let keygen_budget = required_hem_jorts_keygen_preprocessing_budget(active_leaves).unwrap();
+        let sign_budget = required_hem_jorts_sign_preprocessing_budget_cached();
+        assert_eq!(keygen_budget.1, 0);
+        assert_eq!(keygen_budget.2, 0);
+        assert_eq!(sign_budget, (38_232, 0, 0));
+
+        let pts: Vec<Goldilocks> = (1..=n as u64).map(Goldilocks::from_u64_reduced).collect();
+        let mut rngs = make_rngs(n, 0x91);
+        let mut mesh = OtMesh::establish_ideal_for_test([0x92; 32], &mut rngs);
+
+        let dkg_seed =
+            run_dealerless_dkg_seed32_goldilocks([0x93; 32], t, &pts, &mut mesh, &mut rngs)
+                .unwrap();
+        let dkg_prf =
+            run_dealerless_dkg_seed32_goldilocks([0x94; 32], t, &pts, &mut mesh, &mut rngs)
+                .unwrap();
+        let pk_seed = dkg_seed.1;
+
+        let total_budget = (keygen_budget.0 + 2 * sign_budget.0, 0, 0);
+        let (mut key_shares, mut vaults) = authenticate_poseidon_dkg_shares_and_preprocess(
+            [0x95; 32],
+            t,
+            &pts,
+            pk_seed,
+            &dkg_seed.0,
+            &dkg_prf.0,
+            total_budget.0,
+            total_budget.1,
+            total_budget.2,
+            &mut mesh,
+            &mut rngs,
+        )
+        .unwrap();
+
+        let ref_seed =
+            shamir_reconstruct_seed32_goldilocks(&dkg_seed.0[..t].iter().collect::<Vec<_>>())
+                .unwrap();
+        let ref_prf =
+            shamir_reconstruct_seed32_goldilocks(&dkg_prf.0[..t].iter().collect::<Vec<_>>())
+                .unwrap();
+        let clear_cache =
+            derive_hem_jorts_cached_tree_clear(pk_seed, &ref_seed, &ref_prf, active_leaves)
+                .unwrap();
+
+        let cache = {
+            let (ks0, ks_rest) = key_shares.split_at_mut(1);
+            let (ks1, _) = ks_rest.split_at_mut(1);
+            let (v0, v_rest) = vaults.split_at_mut(1);
+            let (v1, _) = v_rest.split_at_mut(1);
+            build_distributed_hem_jorts_key_mpc_with_active_leaves(
+                [0x96; 32],
+                active_leaves,
+                t,
+                &mut [&mut ks0[0], &mut ks1[0]],
+                &mut [&mut v0[0], &mut v1[0]],
+                &mut rngs[..t],
+            )
+            .unwrap()
+        };
+        assert_eq!(cache, clear_cache);
+        assert!(cache.verify_consistency());
+        key_shares[2]
+            .enroll_hem_key_profile(cache.pk, cache.prf_check)
+            .unwrap();
+
+        let mut cluster = QuorumEpochLatchCluster::establish(n, t, 0, &mut rngs).unwrap();
+        for ks in &mut key_shares {
+            ks.enroll_latch_authority(cluster.authority_public().clone())
+                .unwrap();
+        }
+        let latch_pk = cache.pk.latch_pq_public_key(cache.dkg_pk_seed);
+        let msg0 = b"hem native poseidon2 epoch 0";
+        let (mu0_bytes, _) = hem_compute_message_mu(&cache.pk, msg0);
+        let cert0 = cluster
+            .certify_epoch(
+                &[0, 1, 2],
+                &latch_pk,
+                HEM_JORTS_XMSS_HEIGHT as u32,
+                &mu0_bytes,
+            )
+            .unwrap();
+
+        let (ep0, sig0) = {
+            let (ks0, ks_rest) = key_shares.split_at_mut(1);
+            let (ks1, _) = ks_rest.split_at_mut(1);
+            let (v0, v_rest) = vaults.split_at_mut(1);
+            let (v1, _) = v_rest.split_at_mut(1);
+            let before = remaining_budget(v0.first().unwrap());
+            let mut l0 = MonotonicEpochLatch::new(0);
+            let mut l1 = MonotonicEpochLatch::new(0);
+            let out = sign_hem_jorts_poseidon2_mpc_cached(
+                [0x97; 32],
+                &cache,
+                t,
+                Some(&cert0),
+                &mut [&mut l0, &mut l1],
+                msg0,
+                100_000,
+                &mut [&mut ks0[0], &mut ks1[0]],
+                &mut [&mut v0[0], &mut v1[0]],
+                &mut rngs[..t],
+            )
+            .unwrap();
+            let after = remaining_budget(v0.first().unwrap());
+            assert_eq!(spent(before, after), sign_budget);
+
+            let retry_sig = retry_hem_jorts_poseidon2_mpc_cached(
+                [0x98; 32],
+                &cache,
+                t,
+                Some(&cert0),
+                &mut [&mut l0, &mut l1],
+                out.0,
+                msg0,
+                100_000,
+                &mut [&mut ks0[0], &mut ks1[0]],
+                &mut [&mut v0[0], &mut v1[0]],
+                &mut rngs[..t],
+            )
+            .unwrap();
+            assert_eq!(retry_sig, out.1);
+            out
+        };
+        assert_eq!(ep0, 0);
+        assert_eq!(sig0.to_bytes().len(), HEM_JORTS_SIG_BYTES);
+        assert!(verify_hem_jorts_signature(&cache.pk, msg0, &sig0));
+        assert_eq!(
+            HemJortsSignature::from_bytes_canonical(&sig0.to_bytes()).as_ref(),
+            Some(&sig0)
+        );
+
+        // Reshare (2, 3) -> (3, 4) and verify reshared shares in SPDZ MPC without reconstructing secrets!
+        let new_t = 3usize;
+        let new_n = 4usize;
+        let new_pts: Vec<Goldilocks> = (1..=new_n as u64).map(Goldilocks::from_u64_reduced).collect();
+        let mut old_seed = dkg_seed.0;
+        let mut old_prf = dkg_prf.0;
+        let mut old_rngs = make_rngs(t, 0xA1);
+        let mut new_rngs = make_rngs(new_n, 0xA2);
+        let mut new_mesh = OtMesh::establish_ideal_for_test([0xA3; 32], &mut new_rngs);
+
+        let reshared_seed = run_dealerless_reshare_seed32_goldilocks(
+            [0xA4; 32],
+            t,
+            &mut [&mut old_seed[0], &mut old_seed[1]],
+            new_t,
+            &new_pts,
+            &mut new_mesh,
+            &mut old_rngs,
+            &mut new_rngs,
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        let reshared_prf = run_dealerless_reshare_seed32_goldilocks(
+            [0xA5; 32],
+            t,
+            &mut [&mut old_prf[0], &mut old_prf[1]],
+            new_t,
+            &new_pts,
+            &mut new_mesh,
+            &mut old_rngs,
+            &mut new_rngs,
+            |_, _| Ok(()),
+        )
+        .unwrap();
+
+        let verify_budget = required_hem_jorts_reshare_verify_preprocessing_budget();
+        let (mut new_ks, mut new_vaults) = authenticate_poseidon_dkg_shares_and_preprocess(
+            [0xA6; 32],
+            new_t,
+            &new_pts,
+            pk_seed,
+            &reshared_seed,
+            &reshared_prf,
+            verify_budget.0,
+            0,
+            0,
+            &mut new_mesh,
+            &mut new_rngs,
+        )
+        .unwrap();
+        {
+            let mut ks_refs: Vec<&mut Poseidon2SpdzAuthenticatedKeyShare> =
+                new_ks[..new_t].iter_mut().collect();
+            let mut v_refs: Vec<&mut PreprocessedPoseidonPartyVault> =
+                new_vaults[..new_t].iter_mut().collect();
+            verify_reshared_hem_jorts_key_mpc(
+                [0xA7; 32],
+                &cache,
+                new_t,
+                &mut ks_refs,
+                &mut v_refs,
+                &mut new_rngs[..new_t],
+            )
+            .unwrap();
+        }
     }
 }
