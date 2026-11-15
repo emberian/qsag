@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.CodingTheory.Cwyz26AffineGap — assembling `[CWYZ26]` Lemma 4.1 onto `AffineMcaBound`
+# Qsag.Coding.Cwyz26AffineGap — assembling `[CWYZ26]` Lemma 4.1 onto `AffineMcaBound`
 
 `[CWYZ26]` Lemma 4.1 bounds the exceptional challenges by `|E| + |P| + |N|`: excluded,
 persistent and nonpersistent coefficient pairs. This file carries out the part of that
@@ -33,21 +33,21 @@ components whose projection to a plane curve is not injective; that is not prove
 The characteristic hypothesis replaces the paper's inseparable-factor bookkeeping (`eᵢ ≤ M`).
 -/
 
-public import Qsag.CodingTheory.AffineIncidenceBound
-public import Qsag.CodingTheory.TrivariateGsExplainer
-public import Qsag.CodingTheory.SlicedJetIncidence
-import all Qsag.CodingTheory.SlicedJetIncidence
-import all Qsag.CodingTheory.PersistentPairsBound
-import all Qsag.CodingTheory.PolyMv3
-import all Qsag.CodingTheory.SylvesterResultant
-import all Qsag.CodingTheory.DynamicGcdSplit
-import all Qsag.CodingTheory.HenselNumerators
-import all Qsag.CodingTheory.UniversalHenselLift
-import all Qsag.CodingTheory.SimpleRootStratification
-import all Qsag.CodingTheory.TrivariateGsExplainer
-import all Qsag.CodingTheory.AffineIncidenceBound
-import all Qsag.AffineProximityGaps
-import all Qsag.Goldilocks
+public import Qsag.Coding.AffineIncidenceBound
+public import Qsag.Coding.TrivariateGsExplainer
+public import Qsag.Coding.SlicedJetIncidence
+import all Qsag.Coding.SlicedJetIncidence
+import all Qsag.Coding.PersistentPairsBound
+import all Qsag.Coding.PolyMv3
+import all Qsag.Coding.SylvesterResultant
+import all Qsag.Coding.DynamicGcdSplit
+import all Qsag.Coding.HenselNumerators
+import all Qsag.Coding.UniversalHenselLift
+import all Qsag.Coding.SimpleRootStratification
+import all Qsag.Coding.TrivariateGsExplainer
+import all Qsag.Coding.AffineIncidenceBound
+import all Qsag.Coding.AffineProximityGaps
+import all Qsag.Math.Goldilocks
 
 public section
 namespace Qsag

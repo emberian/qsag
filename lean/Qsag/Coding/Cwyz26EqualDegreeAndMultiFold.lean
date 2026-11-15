@@ -2014,3 +2014,754 @@ theorem singleStep_bridge_four_challenge_fold_bound {F : Type} [LawfulField F] [
 
 /-- Closed-form bad-quadruple count for one 4-challenge `(φ, θ, α, β)` binary coset fold at
     `(n, d, A, B, m, Dy)` over pool size `q = S.length`. -/
+def slicedFourChallengeCount (n d A B m Dy q : Nat) : Nat :=
+  let badMca := Dy + slicedRest n (d + 1) (A + 1) B (m * (A + 1) - Dy) Dy q
+  let jbLo := JohnsonBound.johnsonBound n A d
+  let jbHi := JohnsonBound.johnsonBound n A (d + 1)
+  (q * q) * badMca + (3 * (jbLo * jbLo) + jbHi * jbHi) * (q ^ 3)
+
+/-- Closed-form `QuarticGoldilocks` specialization of `singleStep_bridge_four_challenge_fold_bound`. -/
+theorem sliced_singleStep_bridge_four_challenge_bound
+    (D_in D_out S kernel : List QuarticGoldilocks) (d A B m Dy m_K : Nat)
+    (curOracle : Nat → QuarticGoldilocks)
+    (curClaim w₀ w₁ w₂ c_F c_G : QuarticGoldilocks)
+    (hPair : IsAntipodalDomainPair D_in D_out)
+    (hS : S.Nodup) (hdA : d + 2 ≤ A)
+    (hKernLen : kernel.length = 2 * m_K)
+    (hParams : slicedParamsOk D_out.length (d + 1) (A + 1) B m Dy = true)
+    (hInvalidIn : ∀ Q : List QuarticGoldilocks,
+      polyWitnessValid D_in (2 * A) (2 * d + 1) curOracle kernel curClaim Q = false)
+    (L : List (Fin (quadPool S).length)) (hNd : L.Nodup)
+    (hFlip : ∀ ch ∈ L, ¬¬ ∃ P : List QuarticGoldilocks,
+      let q := (quadPool S).get ch
+      polyWitnessValid D_out (A + 1) (d + 1)
+        (hemVirtualFoldOracle q.2.1 q.2.2.1 q.2.2.2 D_in D_out curOracle)
+        (hemKernelFold q.1 kernel)
+        (hemBridgeFoldClaim curClaim w₀ w₁ w₂ c_F c_G q.1 q.2.1 q.2.2.1 q.2.2.2) P = true) :
+    L.length ≤ slicedFourChallengeCount D_out.length d A B m Dy S.length := by
+  have hBase := singleStep_bridge_four_challenge_fold_bound D_in D_out S kernel d A m_K
+    (Dy + slicedRest D_out.length (d + 1) (A + 1) B (m * (A + 1) - Dy) Dy S.length)
+    curOracle curClaim w₀ w₁ w₂ c_F c_G hPair hS hdA hKernLen
+    (slicedParamsOk_sound D_out.length (d + 1) (A + 1) B m Dy hParams D_out S hPair.nodup_out hS rfl)
+    hInvalidIn L hNd hFlip
+  obtain ⟨_, _, _, hBltA1, hDenB, _, _, _⟩ := of_decide_eq_true hParams
+  have hBLeA : B ≤ A := by omega
+  have hBBLeAA : B * B ≤ A * A := Nat.mul_le_mul hBLeA hBLeA
+  have hDenHi : D_out.length * (d + 1) < A * A :=
+    Nat.lt_of_lt_of_le (Nat.lt_of_le_of_lt (Nat.mul_le_mul_left D_out.length (by omega)) hDenB) hBBLeAA
+  have hDenLo : D_out.length * d < A * A :=
+    Nat.lt_of_le_of_lt (Nat.mul_le_mul_left D_out.length (by omega)) hDenHi
+  let fE := lookupDomOracle D_out (cosetEvenOracle curOracle)
+  let fO := lookupDomOracle D_out (cosetOddOracle D_in curOracle)
+  have hFLo := gsDecodeList_length_le_johnson D_out fE d A hPair.nodup_out (by omega) hDenLo
+  have hGLo := gsDecodeList_length_le_johnson D_out fO d A hPair.nodup_out (by omega) hDenLo
+  have hFHi := gsDecodeList_length_le_johnson D_out fE (d + 1) A hPair.nodup_out hdA hDenHi
+  have hGHi := gsDecodeList_length_le_johnson D_out fO (d + 1) A hPair.nodup_out hdA hDenHi
+  unfold slicedFourChallengeCount
+  dsimp only
+  have hComb :
+      (3 * ((gsDecodeList d A D_out fE).length * (gsDecodeList d A D_out fO).length) +
+       (gsDecodeList (d + 1) A D_out fE).length * (gsDecodeList (d + 1) A D_out fO).length) *
+        (S.length ^ 3) ≤
+      (3 * (JohnsonBound.johnsonBound D_out.length A d * JohnsonBound.johnsonBound D_out.length A d) +
+       JohnsonBound.johnsonBound D_out.length A (d + 1) *
+         JohnsonBound.johnsonBound D_out.length A (d + 1)) * (S.length ^ 3) :=
+    Nat.mul_le_mul_right _
+      (Nat.add_le_add (Nat.mul_le_mul_left 3 (Nat.mul_le_mul hFLo hGLo)) (Nat.mul_le_mul hFHi hGHi))
+  exact Nat.le_trans hBase (Nat.add_le_add_left hComb _)
+
+/-- Inductive `k`-step chain `[D_0, D_1, ..., D_k]` of antipodal coset domains (`|D_j| = 2^(k - j) |D_k|`). -/
+inductive IsAntipodalDomainChain {F : Type} [LawfulField F] : List (List F) → Prop
+  | single (D : List F) (hNd : D.Nodup) : IsAntipodalDomainChain [D]
+  | step (D_in D_out : List F) (rest : List (List F))
+      (hPair : IsAntipodalDomainPair D_in D_out)
+      (hRest : IsAntipodalDomainChain (D_out :: rest)) :
+      IsAntipodalDomainChain (D_in :: D_out :: rest)
+
+private theorem antipodalChain_pair_at {F : Type} [LawfulField F] :
+    ∀ (doms : List (List F)), IsAntipodalDomainChain doms →
+      ∀ (j : Nat), j + 1 < doms.length →
+        IsAntipodalDomainPair (doms.getD j []) (doms.getD (j + 1) [])
+  | [_], .single _ _, _, hj => by simp at hj
+  | D_in :: D_out :: rest, .step _ _ _ hPair _, 0, _ => hPair
+  | _ :: D_out :: rest, .step _ _ _ _ hRest, j + 1, hj => by
+    simp only [List.length_cons] at hj
+    exact antipodalChain_pair_at (D_out :: rest) hRest j (Nat.lt_of_succ_lt_succ hj)
+
+private theorem antipodalChain_len_at {F : Type} [LawfulField F] :
+    ∀ (doms : List (List F)), IsAntipodalDomainChain doms →
+      ∀ (j : Nat), j < doms.length →
+        (doms.getD j []).length = 2 ^ (doms.length - 1 - j) * (doms.getD (doms.length - 1) []).length
+  | [D], .single _ _, 0, _ => by simp
+  | [_], .single _ _, _ + 1, hj => by simp only [List.length_cons, List.length_nil] at hj; omega
+  | D_in :: D_out :: rest, .step _ _ _ hPair hRest, 0, _ => by
+    have ih := antipodalChain_len_at (D_out :: rest) hRest 0 (Nat.zero_lt_succ _)
+    simp only [List.length_cons, Nat.add_sub_cancel, Nat.sub_zero, List.getD, List.getElem?_cons_zero,
+      Option.getD_some] at ih ⊢
+    have hLast : (D_out :: rest)[rest.length]?.getD [] =
+        (D_in :: D_out :: rest)[rest.length + 1]?.getD [] := rfl
+    rw [hPair.len_eq, ih, hLast, ← Nat.mul_assoc, ← Nat.pow_succ']
+  | _ :: D_out :: rest, .step _ _ _ _ hRest, j + 1, hj => by
+    have ihLen := antipodalChain_len_at (D_out :: rest) hRest j (Nat.lt_of_succ_lt_succ hj)
+    simp only [List.length_cons, Nat.add_sub_cancel] at ihLen ⊢
+    have hSub : rest.length + 1 - (j + 1) = rest.length - j := by omega
+    rw [hSub]
+    exact ihLen
+
+/-- Prover message per intra-stage binary fold step: the 5 bridge wires `(w₀, w₁, w₂, c_F, c_G)`. -/
+structure IntraFoldBridgeMsg (F : Type) where
+  w₀ : F
+  w₁ : F
+  w₂ : F
+  c_F : F
+  c_G : F
+  deriving DecidableEq, Repr
+
+/-- Statement of an intra-stage `k`-fold subprotocol: initial oracle, kernel, and claim. -/
+structure IntraStageInstance (F : Type) where
+  initOracle : Nat → F
+  initKernel : List F
+  initClaim : F
+
+/-- Sequential state along an intra-stage `k`-fold chain. -/
+structure IntraStageState (F : Type) where
+  stepsDone : Nat
+  oracle : Nat → F
+  kernel : List F
+  claim : F
+
+/-- State liveness at `stepsDone ≤ k` (`r = k - stepsDone` binary folds remaining):
+    `kernel` has exact length `2^r * c_K + 2` and `oracle` has a valid witness of degree
+    `≤ 2^r * h_0 + 1` at coset agreement `≥ 2^r * (A_0 - 2) + 2` matching `claim`. -/
+def intraStageLive {F : Type} [CommRingOps F] [DecidableEq F]
+    (doms : List (List F)) (k h_0 A_0 c_K : Nat)
+    (_inst : IntraStageInstance F) (st : IntraStageState F) : Prop :=
+  st.stepsDone ≤ k ∧
+  st.kernel.length = 2 ^ (k - st.stepsDone) * c_K + 2 ∧
+  ∃ P : List F,
+    polyWitnessValid (doms.getD st.stepsDone [])
+      (2 ^ (k - st.stepsDone) * (A_0 - 2) + 2)
+      (2 ^ (k - st.stepsDone) * h_0 + 1)
+      st.oracle st.kernel st.claim P = true
+
+/-- Deterministic step transition at round `j < k` (`0 ≤ j < k`) over `quadPool S`. -/
+def intraStageRoundStep {F : Type} [LawfulField F]
+    (S : List F) (doms : List (List F)) (k c_K j : Nat)
+    (_inst : IntraStageInstance F) (st : IntraStageState F)
+    (msg : IntraFoldBridgeMsg F) (ch : Nat) : IntraStageState F :=
+  if hOk : st.stepsDone = j ∧ st.kernel.length = 2 ^ (k - j) * c_K + 2 ∧
+      ch < (quadPool S).length then
+    let q := (quadPool S).get ⟨ch, hOk.2.2⟩
+    let D_in := doms.getD j []
+    let D_out := doms.getD (j + 1) []
+    { stepsDone := j + 1
+      oracle := hemVirtualFoldOracle q.2.1 q.2.2.1 q.2.2.2 D_in D_out st.oracle
+      kernel := hemKernelFold q.1 st.kernel
+      claim := hemBridgeFoldClaim st.claim msg.w₀ msg.w₁ msg.w₂ msg.c_F msg.c_G
+        q.1 q.2.1 q.2.2.1 q.2.2.2 }
+  else
+    { stepsDone := k + 1, oracle := st.oracle, kernel := [], claim := CommRingOps.zero }
+
+/-- Intermediate persistence threshold `B_t` at `t` folds before stage exit (`t = 0` uses `B_0`,
+    `t ≥ 1` scales `B_0 - 2` by `2^t` plus `+ 3` so `B_t < A_t` and `n_t (d_t + 2) < B_t²`). -/
+def intraStepB (B_0 t : Nat) : Nat :=
+  if t = 0 then B_0 else 2 ^ t * (B_0 - 2) + 3
+
+/-- Constructive `SeqRoundSpec` for round `j < k` (`t = k - 1 - j` folds after round `j`) over
+    `QuarticGoldilocks`, discharging `flip_bound` via `sliced_singleStep_bridge_four_challenge_bound`. -/
+def intraStageRoundSpec
+    (S : List QuarticGoldilocks) (hS : S.Nodup) (hSPos : 0 < S.length)
+    (doms : List (List QuarticGoldilocks)) (hChain : IsAntipodalDomainChain doms)
+    (k n_0 h_0 A_0 B_0 m Dy c_K : Nat)
+    (hDomLen : doms.length = k + 1)
+    (hLastLen : (doms.getD k []).length = n_0)
+    (hdA0 : h_0 + 3 ≤ A_0)
+    (j : Nat) (hj : j < k)
+    (hParams : slicedParamsOk (2 ^ (k - 1 - j) * n_0)
+      (2 ^ (k - 1 - j) * h_0 + 1)
+      (2 ^ (k - 1 - j) * (A_0 - 2) + 2)
+      (intraStepB B_0 (k - 1 - j)) m Dy = true) :
+    SeqRoundSpec (IntraStageInstance QuarticGoldilocks)
+      (IntraStageState QuarticGoldilocks)
+      (IntraFoldBridgeMsg QuarticGoldilocks)
+      (intraStageLive doms k h_0 A_0 c_K) where
+  chalCard := (quadPool S).length
+  h_pos := by rw [quadPool_length]; exact Nat.pow_pos hSPos
+  bad := slicedFourChallengeCount
+    (2 ^ (k - 1 - j) * n_0)
+    (2 ^ (k - 1 - j) * h_0)
+    (2 ^ (k - 1 - j) * (A_0 - 2) + 1)
+    (intraStepB B_0 (k - 1 - j)) m Dy S.length
+  step := intraStageRoundStep S doms k c_K j
+  flip_bound := by
+    intro inst st msg hDoomed L hNd hL
+    let t := k - 1 - j
+    have hkt : k - j = t + 1 := by omega
+    have hktNext : k - (j + 1) = t := by omega
+    if hGuard : st.stepsDone = j ∧ st.kernel.length = 2 ^ (k - j) * c_K + 2 then
+      have hInvalidIn : ∀ Q : List QuarticGoldilocks,
+          polyWitnessValid (doms.getD j [])
+            (2 * (2 ^ t * (A_0 - 2) + 1))
+            (2 * (2 ^ t * h_0) + 1)
+            st.oracle st.kernel st.claim Q = false := by
+        intro Q
+        cases hVal : polyWitnessValid (doms.getD j [])
+            (2 * (2 ^ t * (A_0 - 2) + 1))
+            (2 * (2 ^ t * h_0) + 1)
+            st.oracle st.kernel st.claim Q
+        · rfl
+        · exfalso
+          apply hDoomed
+          refine ⟨by omega, ?_, Q, ?_⟩
+          · rw [hGuard.1]; exact hGuard.2
+          · rw [hGuard.1]
+            have eAg : 2 ^ (k - j) * (A_0 - 2) + 2 = 2 * (2 ^ t * (A_0 - 2) + 1) := by
+              rw [hkt, Nat.pow_succ', Nat.mul_assoc]; omega
+            have eDeg : 2 ^ (k - j) * h_0 + 1 = 2 * (2 ^ t * h_0) + 1 := by
+              rw [hkt, Nat.pow_succ', Nat.mul_assoc]
+            rw [eAg, eDeg]; exact hVal
+      have hPair : IsAntipodalDomainPair (doms.getD j []) (doms.getD (j + 1) []) :=
+        antipodalChain_pair_at doms hChain j (by omega)
+      have hOutLen : (doms.getD (j + 1) []).length = 2 ^ t * n_0 := by
+        have hAt := antipodalChain_len_at doms hChain (j + 1) (by omega)
+        have hSub1 : doms.length - 1 = k := by omega
+        have hSub2 : k - (j + 1) = t := hktNext
+        rw [hSub1, hSub2, hLastLen] at hAt
+        exact hAt
+      have hPowGe1 : 1 ≤ 2 ^ t := Nat.pow_pos (by decide)
+      have hdAt : 2 ^ t * h_0 + 2 ≤ 2 ^ t * (A_0 - 2) + 1 := by
+        have hDiff : h_0 + 1 ≤ A_0 - 2 := by omega
+        have hMul := Nat.mul_le_mul_left (2 ^ t) hDiff
+        rw [Nat.mul_add, Nat.mul_one] at hMul
+        omega
+      have hKernEven : st.kernel.length = 2 * (2 ^ t * c_K + 1) := by
+        rw [hGuard.2, hkt, Nat.pow_succ', Nat.mul_assoc]
+        omega
+      have hParamsOut : slicedParamsOk (doms.getD (j + 1) []).length
+          (2 ^ t * h_0 + 1)
+          ((2 ^ t * (A_0 - 2) + 1) + 1)
+          (intraStepB B_0 t) m Dy = true := by
+        rw [hOutLen]; exact hParams
+      change L.length ≤ slicedFourChallengeCount (2 ^ t * n_0) (2 ^ t * h_0)
+        (2 ^ t * (A_0 - 2) + 1) (intraStepB B_0 t) m Dy S.length
+      rw [← hOutLen]
+      refine sliced_singleStep_bridge_four_challenge_bound
+        (doms.getD j []) (doms.getD (j + 1) []) S st.kernel
+        (2 ^ t * h_0) (2 ^ t * (A_0 - 2) + 1) (intraStepB B_0 t) m Dy
+        (2 ^ t * c_K + 1) st.oracle st.claim
+        msg.w₀ msg.w₁ msg.w₂ msg.c_F msg.c_G
+        hPair hS hdAt hKernEven hParamsOut hInvalidIn L hNd ?_
+      intro ch hch hNoP
+      refine hL ch hch ?_
+      intro hLiveNext
+      unfold intraStageRoundStep at hLiveNext
+      have hOk : st.stepsDone = j ∧ st.kernel.length = 2 ^ (k - j) * c_K + 2 ∧
+          ch.1 < (quadPool S).length := ⟨hGuard.1, hGuard.2, ch.2⟩
+      rw [dite_true_eq hOk] at hLiveNext
+      rcases hLiveNext with ⟨_, _, P, hP⟩
+      dsimp only at hP
+      have eAg : 2 ^ (k - (j + 1)) * (A_0 - 2) + 2 = (2 ^ t * (A_0 - 2) + 1) + 1 := by
+        rw [hktNext]
+      have eDeg : 2 ^ (k - (j + 1)) * h_0 + 1 = (2 ^ t * h_0) + 1 := by
+        rw [hktNext]
+      rw [eAg, eDeg] at hP
+      exact hNoP ⟨P, hP⟩
+    else
+      cases L with
+      | nil => exact Nat.zero_le _
+      | cons ch _ =>
+        exfalso
+        refine hL ch (.head _) ?_
+        intro hLiveNext
+        unfold intraStageRoundStep at hLiveNext
+        have hNotOk : ¬ (st.stepsDone = j ∧ st.kernel.length = 2 ^ (k - j) * c_K + 2 ∧
+            ch.1 < (quadPool S).length) := fun h => hGuard ⟨h.1, h.2.1⟩
+        rw [dite_false_eq hNotOk] at hLiveNext
+        have hStepK1 : k + 1 ≤ k := hLiveNext.1
+        omega
+
+/-- Build the full `k`-round `List (SeqRoundSpec ...)` for an intra-stage `k`-fold schedule. -/
+def buildIntraStageSeqSpecs
+    (S : List QuarticGoldilocks) (hS : S.Nodup) (hSPos : 0 < S.length)
+    (doms : List (List QuarticGoldilocks)) (hChain : IsAntipodalDomainChain doms)
+    (k n_0 h_0 A_0 B_0 m Dy c_K : Nat)
+    (hDomLen : doms.length = k + 1)
+    (hLastLen : (doms.getD k []).length = n_0)
+    (hdA0 : h_0 + 3 ≤ A_0)
+    (hAllParams : ∀ j : Nat, j < k →
+      slicedParamsOk (2 ^ (k - 1 - j) * n_0)
+        (2 ^ (k - 1 - j) * h_0 + 1)
+        (2 ^ (k - 1 - j) * (A_0 - 2) + 2)
+        (intraStepB B_0 (k - 1 - j)) m Dy = true) :
+    List (SeqRoundSpec (IntraStageInstance QuarticGoldilocks)
+      (IntraStageState QuarticGoldilocks)
+      (IntraFoldBridgeMsg QuarticGoldilocks)
+      (intraStageLive doms k h_0 A_0 c_K)) :=
+  (List.range k).attach.map (fun ⟨j, hjMem⟩ =>
+    intraStageRoundSpec S hS hSPos doms hChain k n_0 h_0 A_0 B_0 m Dy c_K
+      hDomLen hLastLen hdA0 j (List.mem_range.mp hjMem)
+      (hAllParams j (List.mem_range.mp hjMem)))
+
+/-- **Inductive `k`-Step Intra-Stage `RbrStateFunction` Composition (`intraStage_kFold_rbr`)**:
+    Packages any `k`-step intra-stage binary folding schedule (`k ∈ 1..6`) over an antipodal
+    domain chain `doms` (`[D_0, ..., D_k]`) into a machine-checked `RbrStateFunction` whose
+    round-`j` (`0 ≤ j < k`) flip bound is `slicedFourChallengeCount` at intermediate step
+    `t = k - 1 - j`. -/
+def intraStage_kFold_rbr
+    (S : List QuarticGoldilocks) (hS : S.Nodup) (hSPos : 0 < S.length)
+    (doms : List (List QuarticGoldilocks)) (hChain : IsAntipodalDomainChain doms)
+    (k n_0 h_0 A_0 B_0 m Dy c_K : Nat)
+    (hDomLen : doms.length = k + 1)
+    (hLastLen : (doms.getD k []).length = n_0)
+    (hdA0 : h_0 + 3 ≤ A_0)
+    (hAllParams : ∀ j : Nat, j < k →
+      slicedParamsOk (2 ^ (k - 1 - j) * n_0)
+        (2 ^ (k - 1 - j) * h_0 + 1)
+        (2 ^ (k - 1 - j) * (A_0 - 2) + 2)
+        (intraStepB B_0 (k - 1 - j)) m Dy = true)
+    (finalWitness : IntraStageInstance QuarticGoldilocks →
+      List (IntraFoldBridgeMsg QuarticGoldilocks × Nat) → List QuarticGoldilocks) :
+    let specs := buildIntraStageSeqSpecs S hS hSPos doms hChain k n_0 h_0 A_0 B_0 m Dy c_K
+      hDomLen hLastLen hdA0 hAllParams
+    let initSt : IntraStageInstance QuarticGoldilocks → IntraStageState QuarticGoldilocks :=
+      fun inst => { stepsDone := 0, oracle := inst.initOracle, kernel := inst.initKernel, claim := inst.initClaim }
+    let inLang : IntraStageInstance QuarticGoldilocks → Prop :=
+      fun inst => intraStageLive doms k h_0 A_0 c_K inst (initSt inst)
+    let verify : IntraStageInstance QuarticGoldilocks →
+        List (IntraFoldBridgeMsg QuarticGoldilocks × Nat) → Bool :=
+      fun inst tr =>
+        let stEnd := runSeqSpecs specs inst (initSt inst) tr
+        decide (stEnd.stepsDone ≤ k ∧
+          stEnd.kernel.length = 2 ^ (k - stEnd.stepsDone) * c_K + 2) &&
+        polyWitnessValid (doms.getD stEnd.stepsDone [])
+          (2 ^ (k - stEnd.stepsDone) * (A_0 - 2) + 2)
+          (2 ^ (k - stEnd.stepsDone) * h_0 + 1)
+          stEnd.oracle stEnd.kernel stEnd.claim (finalWitness inst tr)
+    RbrStateFunction (seqSpecsIop specs inLang verify) := by
+  dsimp only
+  refine seqSpecsRbr _ _ _ _ (fun _ hNot hLive => hNot hLive) ?_
+  intro inst tr _ hVer
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at hVer
+  exact ⟨hVer.1.1, hVer.1.2, finalWitness inst tr, hVer.2⟩
+
+/-- **Adaptive State-Restoration Soundness for Intra-Stage `k`-Fold Schedules**:
+    For any false initial statement (`¬ intraStageLive doms k h_0 A_0 c_K inst ...`) and any
+    adaptive state-restoration tree `tree : SrScheduleTree iop sched` over the `k` intra-stage
+    binary fold steps, the acceptance probability is bounded by `srScheduleErrorSum` over
+    `intraStage_kFold_rbr`. -/
+theorem intraStage_kFold_state_restoration_soundness
+    (S : List QuarticGoldilocks) (hS : S.Nodup) (hSPos : 0 < S.length)
+    (doms : List (List QuarticGoldilocks)) (hChain : IsAntipodalDomainChain doms)
+    (k n_0 h_0 A_0 B_0 m Dy c_K : Nat)
+    (hDomLen : doms.length = k + 1)
+    (hLastLen : (doms.getD k []).length = n_0)
+    (hdA0 : h_0 + 3 ≤ A_0)
+    (hAllParams : ∀ j : Nat, j < k →
+      slicedParamsOk (2 ^ (k - 1 - j) * n_0)
+        (2 ^ (k - 1 - j) * h_0 + 1)
+        (2 ^ (k - 1 - j) * (A_0 - 2) + 2)
+        (intraStepB B_0 (k - 1 - j)) m Dy = true)
+    (finalWitness : IntraStageInstance QuarticGoldilocks →
+      List (IntraFoldBridgeMsg QuarticGoldilocks × Nat) → List QuarticGoldilocks)
+    (inst : IntraStageInstance QuarticGoldilocks)
+    (hNotLive : ¬ intraStageLive doms k h_0 A_0 c_K inst
+      { stepsDone := 0, oracle := inst.initOracle, kernel := inst.initKernel, claim := inst.initClaim })
+    (sched : List (Fin (buildIntraStageSeqSpecs S hS hSPos doms hChain k n_0 h_0 A_0 B_0 m Dy c_K
+      hDomLen hLastLen hdA0 hAllParams).length))
+    (tree : SrScheduleTree
+      (seqSpecsIop
+        (buildIntraStageSeqSpecs S hS hSPos doms hChain k n_0 h_0 A_0 B_0 m Dy c_K
+          hDomLen hLastLen hdA0 hAllParams)
+        (fun x => intraStageLive doms k h_0 A_0 c_K x
+          { stepsDone := 0, oracle := x.initOracle, kernel := x.initKernel, claim := x.initClaim })
+        (fun x tr =>
+          let specs := buildIntraStageSeqSpecs S hS hSPos doms hChain k n_0 h_0 A_0 B_0 m Dy c_K
+            hDomLen hLastLen hdA0 hAllParams
+          let stEnd := runSeqSpecs specs x
+            { stepsDone := 0, oracle := x.initOracle, kernel := x.initKernel, claim := x.initClaim } tr
+          decide (stEnd.stepsDone ≤ k ∧
+            stEnd.kernel.length = 2 ^ (k - stEnd.stepsDone) * c_K + 2) &&
+          polyWitnessValid (doms.getD stEnd.stepsDone [])
+            (2 ^ (k - stEnd.stepsDone) * (A_0 - 2) + 2)
+            (2 ^ (k - stEnd.stepsDone) * h_0 + 1)
+            stEnd.oracle stEnd.kernel stEnd.claim (finalWitness x tr)))
+      sched) :
+    let rbr := intraStage_kFold_rbr S hS hSPos doms hChain k n_0 h_0 A_0 B_0 m Dy c_K
+      hDomLen hLastLen hdA0 hAllParams finalWitness
+    RatBound.le (srTreeAcceptProb _ tree inst) (srScheduleErrorSum rbr sched) :=
+  rbr_implies_state_restoration_soundness
+    (intraStage_kFold_rbr S hS hSPos doms hChain k n_0 h_0 A_0 B_0 m Dy c_K
+      hDomLen hLastLen hdA0 hAllParams finalWitness)
+    inst hNotLive sched tree
+
+/-- Sum of `slicedFourChallengeCount` across all `g.stepVars` intra-stage binary folds (`t = 0 .. g.stepVars - 1`)
+    divided by `q ^ 4` (`q = goldilocksExt4Card`). -/
+def slicedMultiFoldStageBound (g : HemStageGeom) (r : Nat × Nat × Nat × Nat × Nat)
+    (w : Nat × Nat × Nat × Nat) : RatBound :=
+  let q := goldilocksExt4Card
+  let h_0 := g.d - 2
+  let A_0 := r.2.2.1
+  let B_0 := w.2.2.1
+  let m := r.2.2.2.1
+  let Dy := r.2.2.2.2
+  let totalNum := ((List.range g.stepVars).map (fun t =>
+    slicedFourChallengeCount (2 ^ t * g.n) (2 ^ t * h_0)
+      (2 ^ t * (A_0 - 2) + 1) (intraStepB B_0 t) m Dy q)).sum
+  ⟨totalNum, q ^ 4, Nat.pow_pos goldilocksExt4Card_pos⟩
+
+def slicedStageMultiFoldCovered (nv : Nat) (g : HemStageGeom) : Bool :=
+  if hemJohnsonQromStageExhaustive g = true then
+    (slicedStageRow nv g.stageIdx).isNone
+  else
+    match hemJohnsonQromTableRow nv g.stageIdx, slicedStageRow nv g.stageIdx with
+    | some r, some w =>
+      let h_0 := g.d - 2
+      let A_0 := r.2.2.1
+      let B_0 := w.2.2.1
+      let m := r.2.2.2.1
+      let Dy := r.2.2.2.2
+      decide (1 ≤ g.stepVars ∧ g.stepVars ≤ 6) &&
+      decide (1 ≤ h_0 ∧ h_0 + 3 ≤ A_0) &&
+      (List.range g.stepVars).all (fun t =>
+        slicedParamsOk (2 ^ t * g.n) (2 ^ t * h_0 + 1)
+          (2 ^ t * (A_0 - 2) + 2) (intraStepB B_0 t) m Dy) &&
+      decide (atLeastBits 175 (slicedMultiFoldStageBound g r w)) &&
+      decide (g.stepVars ≤ 4 → atLeastBits 186 (slicedMultiFoldStageBound g r w))
+    | _, _ => false
+
+/-- DFM round-scaling helper at 175-bit base floor: `(2 Q + 1)^2 ≤ 2^47` holds for all `Q + 1 ≤ 2^22`,
+    preserving `≥ 128` bits (`175 - 47 = 128`). -/
+theorem dfm175_budget_at_2pow22 (b : RatBound) (hb : atLeastBits 175 b)
+    (Q : Nat) (hQ : Q + 1 ≤ 2 ^ 22) : atLeastBits 128 (dfmRoundScale Q b) := by
+  have hScale : (2 * Q + 1) ^ 2 ≤ 2 ^ 47 := by
+    have hbase : 2 * Q + 1 ≤ 2 * 2 ^ 22 - 1 := by omega
+    exact Nat.le_trans (Nat.pow_le_pow_left hbase 2) (by decide)
+  change (2 * Q + 1) ^ 2 * b.num * 2 ^ 128 ≤ b.den
+  have h := Nat.mul_le_mul_right (b.num * 2 ^ 128) hScale
+  have he : 2 ^ 47 * (b.num * 2 ^ 128) = b.num * 2 ^ 175 := by
+    calc 2 ^ 47 * (b.num * 2 ^ 128) = b.num * (2 ^ 47 * 2 ^ 128) := Nat.mul_left_comm _ _ _
+         _ = b.num * 2 ^ 175 := by rw [show 2 ^ 47 * 2 ^ 128 = 2 ^ 175 from by decide]
+  rw [Nat.mul_assoc]
+  have hb' : 2 ^ 47 * (b.num * 2 ^ 128) ≤ b.den := by rw [he]; exact hb
+  exact Nat.le_trans h hb'
+
+/-- **Every non-exhaustive canonical `BciksJohnsonQrom128` stage (`nv = 2..24`) satisfies
+    `slicedParamsOk` at EVERY intermediate intra-stage binary fold step `t < g.stepVars`**,
+    achieving **`≥ 186` bits** on the summed `k`-fold error whenever `g.stepVars ≤ 4` and
+    **`≥ 175` bits** universally across all `g.stepVars ∈ {1..6}` (preserving `≥ 128` bits under
+    `dfmRoundScale Q` for `Q + 1 ≤ 2 ^ 22`, and `Q + 1 ≤ 2 ^ 27` when `g.stepVars ≤ 4`). -/
+theorem sliced_multifold_stage_supported_budget
+    (nv : Nat) (h2 : 2 ≤ nv) (h24 : nv ≤ 24)
+    (g : HemStageGeom) (hg : g ∈ hemStageGeoms nv)
+    (hne : hemJohnsonQromStageExhaustive g = false) :
+    ∃ (r : Nat × Nat × Nat × Nat × Nat) (w : Nat × Nat × Nat × Nat),
+      hemJohnsonQromTableRow nv g.stageIdx = some r ∧
+      slicedStageRow nv g.stageIdx = some w ∧
+      (1 ≤ g.stepVars ∧ g.stepVars ≤ 6) ∧
+      (1 ≤ g.d - 2 ∧ (g.d - 2) + 3 ≤ r.2.2.1) ∧
+      (∀ t : Nat, t < g.stepVars →
+        slicedParamsOk (2 ^ t * g.n) (2 ^ t * (g.d - 2) + 1)
+          (2 ^ t * (r.2.2.1 - 2) + 2) (intraStepB w.2.2.1 t) r.2.2.2.1 r.2.2.2.2 = true) ∧
+      atLeastBits 175 (slicedMultiFoldStageBound g r w) ∧
+      (g.stepVars ≤ 4 → atLeastBits 186 (slicedMultiFoldStageBound g r w)) ∧
+      (∀ Q : Nat, Q + 1 ≤ 2 ^ 22 →
+        atLeastBits 128 (dfmRoundScale Q (slicedMultiFoldStageBound g r w))) := by
+  have hAll : ((List.range 23).all fun i =>
+      (hemStageGeoms (i + 2)).all (slicedStageMultiFoldCovered (i + 2))) = true := by
+    decide +kernel
+  have h1 := List.all_eq_true.mp hAll (nv - 2) (List.mem_range.mpr (by omega))
+  have hEq : nv - 2 + 2 = nv := by omega
+  rw [hEq] at h1
+  have hc := List.all_eq_true.mp h1 g hg
+  unfold slicedStageMultiFoldCovered at hc
+  rw [hne] at hc
+  simp only [Bool.false_eq_true, ↓reduceIte] at hc
+  split at hc
+  · next r w hr hw =>
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hc
+    rcases hc with ⟨⟨⟨⟨hSv, hDegA⟩, hSteps⟩, hBits175⟩, hBits186⟩
+    exact ⟨r, w, hr, hw, hSv, hDegA,
+      fun t ht => List.all_eq_true.mp hSteps t (List.mem_range.mpr ht),
+      hBits175, hBits186,
+      fun Q hQ => dfm175_budget_at_2pow22 _ hBits175 Q hQ⟩
+  · exact absurd hc Bool.false_ne_true
+
+/-! ## §3. Multi-Sheet Space-Curve GCD Decomposition (`ShearedCurveGcd` Refinement) -/
+
+namespace SylElim
+section MultiSheetCurveGcd
+variable {E_fld : Type} [LawfulField E_fld] [DecidableEq E_fld]
+open CommRingOps RoundPoly UPoly Poly2
+
+local instance : NoZeroDivisors E_fld := LawfulField.toNoZeroDivisors E_fld
+
+/-- Affine space evaluation homomorphism `(E_fld[U][W])[Z] → E_fld` at `(u, w, z) ∈ E_fld³`. -/
+def evalSpaceHom (u w z : E_fld) : RingHom (UPoly (Poly2 E_fld)) E_fld :=
+  UPoly.eval₂Hom (UPoly.eval₂Hom (UPoly.evalHom u) w) z
+
+theorem evalSpaceHom_embedUZ (u w z : E_fld) (C₁ : Poly2 E_fld) :
+    (evalSpaceHom u w z).toFun (embedUZ.toFun C₁) = C₁.eval2 u z := by
+  show UPoly.eval₂ (UPoly.eval₂Hom (UPoly.evalHom u) w) z ((UPoly.mapHom UPoly.CHom).toFun C₁) =
+    UPoly.eval₂ (UPoly.evalHom u) z C₁
+  rw [UPoly.eval₂_mapHom]
+  show evalCoeffs (C₁.coeffs.map (((UPoly.eval₂Hom (UPoly.evalHom u) w).comp UPoly.CHom).toFun)) z =
+    evalCoeffs (C₁.coeffs.map (UPoly.evalHom u).toFun) z
+  congr 1
+  refine List.map_congr_left fun c _ => ?_
+  exact UPoly.eval₂_C (UPoly.evalHom u) w c
+
+theorem evalSpaceHom_CC (u w z : E_fld) (δ : UPoly E_fld) :
+    (evalSpaceHom u w z).toFun (C (C δ)) = δ.eval u := by
+  show UPoly.eval₂ (UPoly.eval₂Hom (UPoly.evalHom u) w) z (C (C δ)) = δ.eval u
+  rw [UPoly.eval₂_C]
+  show UPoly.eval₂ (UPoly.evalHom u) w (C δ) = δ.eval u
+  rw [UPoly.eval₂_C]
+  rfl
+
+theorem evalSpaceHom_eq_zero_of_map_modPoly2Hom_eq_zero
+    (E : Poly2 E_fld) (hPrim : IsPrimY E) (hDeg : 1 ≤ E.natDeg)
+    (D : UPoly (Poly2 E_fld))
+    (hMap0 : (UPoly.mapHom (modPoly2Hom E hPrim hDeg)).toFun D = zero)
+    (u w z : E_fld) (hEuw : E.eval2 u w = zero) :
+    (evalSpaceHom u w z).toFun D = zero := by
+  show evalCoeffs (D.coeffs.map (UPoly.eval₂Hom (UPoly.evalHom u) w).toFun) z = zero
+  apply UPoly.evalCoeffs_eq_zero_of_coeffAt
+  intro k
+  rw [RingHom.coeffAt_map]
+  have hk0 : (modPoly2Hom E hPrim hDeg).toFun (coeffAt D.coeffs k) = zero := by
+    rw [← coeffAt_mapHom, hMap0, coeffs_zero, coeffAt_nil]
+  obtain ⟨Q_k, hQk⟩ := (modPoly2Hom_eq_zero_iff E hPrim hDeg (coeffAt D.coeffs k)).mp hk0
+  rw [hQk, RingHom.map_mul]
+  show mul (E.eval2 u w) (Q_k.eval2 u w) = zero
+  rw [hEuw, LawfulCommRing.zero_mul]
+
+/-- Clear rational `U`-denominators from a single element of `ModMonic (monicFY E ...)`. -/
+theorem clear_modPoly2_elem (E : Poly2 E_fld) (hPrim : IsPrimY E) (hDeg : 1 ≤ E.natDeg)
+    (x : ModMonic (monicFY E hPrim hDeg)) :
+    ∃ (dx : UPoly E_fld) (X0 : Poly2 E_fld),
+      dx ≠ zero ∧ mul ((modPoly2Hom E hPrim hDeg).toFun (C dx)) x =
+        (modPoly2Hom E hPrim hDeg).toFun X0 := by
+  let M := monicFY E hPrim hDeg
+  obtain ⟨dx, X0, hdx, hX0⟩ := clear_uPoly_ratFunc x.rep
+  refine ⟨dx, X0, hdx, ?_⟩
+  have hxId : (ModMonic.modQuotHom M).toFun x.rep = x := by
+    apply ModMonic.ext; exact remM_of_lt M x.reduced
+  conv => lhs; rhs; rw [← hxId]
+  change mul ((ModMonic.modQuotHom M).toFun (liftFY.toFun (C dx)))
+      ((ModMonic.modQuotHom M).toFun x.rep) =
+    (ModMonic.modQuotHom M).toFun (liftFY.toFun X0)
+  rw [← RingHom.map_mul, mapHom_C, hX0]
+
+/-- Clear rational `U`-denominators simultaneously across all `Z`-coefficients of `P : UPoly R_E`. -/
+theorem clear_modPoly2_upoly (E : Poly2 E_fld) (hPrim : IsPrimY E) (hDeg : 1 ≤ E.natDeg)
+    (P : UPoly (ModMonic (monicFY E hPrim hDeg))) :
+    ∃ (dP : UPoly E_fld) (P0 : UPoly (Poly2 E_fld)),
+      dP ≠ zero ∧
+      mul (C ((modPoly2Hom E hPrim hDeg).toFun (C dP))) P =
+        (mapHom (modPoly2Hom E hPrim hDeg)).toFun P0 := by
+  let φ := modPoly2Hom E hPrim hDeg
+  have hList : ∀ l : List (ModMonic (monicFY E hPrim hDeg)),
+      ∃ (dL : UPoly E_fld) (L0 : UPoly (Poly2 E_fld)),
+        dL ≠ zero ∧ mul (C (φ.toFun (C dL))) (ofList l) = (mapHom φ).toFun L0 := by
+    intro l; induction l with
+    | nil =>
+      exact ⟨one, zero, NontrivialRing.one_ne_zero, by
+        show mul _ zero = (mapHom φ).toFun zero
+        rw [LawfulCommRing.mul_zero, RingHom.map_zero]⟩
+    | cons x xs ih =>
+      obtain ⟨dx, X0, hdx, hX0⟩ := clear_modPoly2_elem E hPrim hDeg x
+      obtain ⟨dxs, Ps, hdxs, hPs⟩ := ih
+      have hdNe : mul dx dxs ≠ zero := fun h0 => by
+        rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero h0 with h | h
+        · exact hdx h
+        · exact hdxs h
+      refine ⟨mul dx dxs, add (C (mul (C dxs) X0)) (mul X (mul (C (C dx)) Ps)), hdNe, ?_⟩
+      have hCdMul : C (φ.toFun (C (mul dx dxs))) =
+          (mul (C (φ.toFun (C dx))) (C (φ.toFun (C dxs))) : UPoly _) := by
+        rw [← CHom_apply (mul dx dxs), CHom.map_mul, φ.map_mul,
+            ← CHom_apply (φ.toFun _), ← CHom_apply (φ.toFun _), ← CHom.map_mul]
+        rfl
+      rw [ofList_cons, hCdMul, RingHom.map_add, mapHom_C, φ.map_mul,
+          RingHom.map_mul, mapHom_X, RingHom.map_mul, mapHom_C, ← hPs]
+      have hFirst : mul (mul (C (φ.toFun (C dx))) (C (φ.toFun (C dxs)))) (C x) =
+          C (mul (φ.toFun (C dxs)) (φ.toFun X0)) := by
+        rw [← CHom_apply (φ.toFun (C dx)), ← CHom_apply (φ.toFun (C dxs)), ← CHom_apply x,
+            ← CHom.map_mul, ← CHom.map_mul, CHom_apply]
+        congr 1
+        calc mul (mul (φ.toFun (C dx)) (φ.toFun (C dxs))) x
+            = mul (φ.toFun (C dxs)) (mul (φ.toFun (C dx)) x) := by constructive_ring
+          _ = mul (φ.toFun (C dxs)) (φ.toFun X0) := by rw [hX0]
+      rw [LawfulCommRing.left_distrib, hFirst]
+      congr 1
+      constructive_ring
+  obtain ⟨dP, P0, hdP, hP0⟩ := hList P.coeffs
+  rw [ofList_coeffs] at hP0
+  exact ⟨dP, P0, hdP, hP0⟩
+
+/-- **Three-Polynomial Space Bezout Finite `u`-Locus Eliminant**:
+    Whenever three space polynomials `(F₁, F₂, F₃)` satisfy a unit Bezout identity in `R_E[Z]`
+    over a `Y`-primitive curve `E(U, W) = 0`, clearing `U`-denominators produces a nonzero
+    univariate eliminant `δ_u ∈ E_fld[U]` (`δ_u ≠ 0`) vanishing at `u` for every affine common
+    space root `(u, w, z) ∈ E_fld³` of `(E, F₁, F₂, F₃)`. -/
+theorem bezout_space_finite_u_locus
+    (E : Poly2 E_fld) (hPrim : IsPrimY E) (hDeg : 1 ≤ E.natDeg)
+    (F₁ F₂ F₃ : UPoly (Poly2 E_fld))
+    (A_c B_c C_c : UPoly (ModMonic (monicFY E hPrim hDeg)))
+    (hBez : add (add (mul A_c ((mapHom (modPoly2Hom E hPrim hDeg)).toFun F₁))
+                     (mul B_c ((mapHom (modPoly2Hom E hPrim hDeg)).toFun F₂)))
+                (mul C_c ((mapHom (modPoly2Hom E hPrim hDeg)).toFun F₃)) = one) :
+    ∃ δ_u : UPoly E_fld,
+      δ_u ≠ zero ∧
+      ∀ u w z : E_fld,
+        E.eval2 u w = zero →
+        (evalSpaceHom u w z).toFun F₁ = zero →
+        (evalSpaceHom u w z).toFun F₂ = zero →
+        (evalSpaceHom u w z).toFun F₃ = zero →
+        δ_u.eval u = zero := by
+  let φ := modPoly2Hom E hPrim hDeg
+  obtain ⟨dA, A0, hdA, hA0⟩ := clear_modPoly2_upoly E hPrim hDeg A_c
+  obtain ⟨dB, B0, hdB, hB0⟩ := clear_modPoly2_upoly E hPrim hDeg B_c
+  obtain ⟨dC, C0, hdC, hC0⟩ := clear_modPoly2_upoly E hPrim hDeg C_c
+  let δ_u : UPoly E_fld := mul (mul dA dB) dC
+  have hδNe : δ_u ≠ zero := fun h0 => by
+    rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero h0 with hAB | hc0
+    · rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero hAB with ha0 | hb0
+      · exact hdA ha0
+      · exact hdB hb0
+    · exact hdC hc0
+  let cA := C (φ.toFun (C dA))
+  let cB := C (φ.toFun (C dB))
+  let cC := C (φ.toFun (C dC))
+  let LHS0 : UPoly (Poly2 E_fld) :=
+    add (add (mul (mul (C (C (mul dB dC))) A0) F₁)
+             (mul (mul (C (C (mul dA dC))) B0) F₂))
+        (mul (mul (C (C (mul dA dB))) C0) F₃)
+  have hMapC : ∀ x y : UPoly E_fld,
+      (mapHom φ).toFun (C (C (mul x y))) = mul (C (φ.toFun (C x))) (C (φ.toFun (C y))) := by
+    intro x y
+    rw [mapHom_C, ← CHom_apply (mul x y), CHom.map_mul, φ.map_mul,
+        ← CHom_apply (φ.toFun _), ← CHom_apply (φ.toFun _), ← CHom.map_mul]
+    rfl
+  have hMapδ : (mapHom φ).toFun (C (C δ_u)) = mul (mul cA cB) cC := by
+    dsimp only [δ_u, cA, cB, cC]
+    rw [hMapC (mul dA dB) dC, ← CHom_apply (mul dA dB), CHom.map_mul, φ.map_mul,
+        ← CHom_apply (φ.toFun (C dA)), ← CHom_apply (φ.toFun (C dB)), ← CHom.map_mul]
+    rfl
+  have hMapLHS : (mapHom φ).toFun LHS0 = mul (mul cA cB) cC := by
+    dsimp only [LHS0]
+    rw [RingHom.map_add, RingHom.map_add,
+        RingHom.map_mul, RingHom.map_mul, RingHom.map_mul,
+        RingHom.map_mul, RingHom.map_mul, RingHom.map_mul,
+        hMapC dB dC, hMapC dA dC, hMapC dA dB,
+        ← hA0, ← hB0, ← hC0]
+    dsimp only [cA, cB, cC]
+    calc add (add (mul (mul (mul cB cC) (mul cA A_c)) ((mapHom φ).toFun F₁))
+                  (mul (mul (mul cA cC) (mul cB B_c)) ((mapHom φ).toFun F₂)))
+             (mul (mul (mul cA cB) (mul cC C_c)) ((mapHom φ).toFun F₃))
+        = mul (mul (mul cA cB) cC)
+            (add (add (mul A_c ((mapHom φ).toFun F₁))
+                      (mul B_c ((mapHom φ).toFun F₂)))
+                 (mul C_c ((mapHom φ).toFun F₃))) := by constructive_ring
+      _ = mul (mul cA cB) cC := by rw [hBez, LawfulCommRing.mul_one]
+  have hDiff0 : (mapHom φ).toFun (sub LHS0 (C (C δ_u))) = zero := by
+    rw [RingHom.map_sub, hMapLHS, hMapδ, LawfulCommRing.sub_self]
+  refine ⟨δ_u, hδNe, fun u w z hEuw hF1 hF2 hF3 => ?_⟩
+  have hEvalDiff := evalSpaceHom_eq_zero_of_map_modPoly2Hom_eq_zero E hPrim hDeg
+    (sub LHS0 (C (C δ_u))) hDiff0 u w z hEuw
+  rw [RingHom.map_sub, evalSpaceHom_CC] at hEvalDiff
+  have hEvalLHS : (evalSpaceHom u w z).toFun LHS0 = zero := by
+    dsimp only [LHS0]
+    rw [RingHom.map_add, RingHom.map_add,
+        (evalSpaceHom u w z).map_mul _ F₁,
+        (evalSpaceHom u w z).map_mul _ F₂,
+        (evalSpaceHom u w z).map_mul _ F₃,
+        hF1, hF2, hF3,
+        LawfulCommRing.mul_zero, LawfulCommRing.mul_zero, LawfulCommRing.mul_zero,
+        LawfulCommRing.add_zero, LawfulCommRing.add_zero]
+  exact (LawfulCommRing.sub_eq_zero_iff.mp hEvalDiff).symm.trans hEvalLHS
+
+private theorem monic_deg_zero_eq_one {R : Type} [LawfulCommRing R] [DecidableEq R]
+    (G : UPoly R) (hdG0 : G.natDeg = 0) (hGmon : coeffAt G.coeffs G.natDeg = one) :
+    G = one := by
+  apply ext_coeffAt; intro k
+  cases k with
+  | zero =>
+    have h0 : coeffAt G.coeffs 0 = one := by rw [← hdG0]; exact hGmon
+    rw [h0, one_eq_C, coeffAt_C_zero]
+  | succ k =>
+    rw [one_eq_C, coeffAt_C_succ]
+    exact G.coeffAt_eq_zero_of_natDeg_lt (by omega)
+
+private theorem monic_deg_one_eq_X_sub_C {R : Type} [LawfulCommRing R] [DecidableEq R]
+    (G : UPoly R) (hdG1 : G.natDeg = 1) (hGmon : coeffAt G.coeffs G.natDeg = one) :
+    let ζ := neg (coeffAt G.coeffs 0)
+    G = sub X (C ζ) ∧ (sub X (C ζ)).eval ζ = zero := by
+  dsimp only
+  let ζ := neg (coeffAt G.coeffs 0)
+  refine ⟨?_, ?_⟩
+  · apply ext_coeffAt; intro k
+    have hSubEq : sub X (C ζ) = add X (C (coeffAt G.coeffs 0)) := by
+      dsimp only [ζ]
+      rw [LawfulCommRing.sub_eq_add_neg, ← CHom_apply, ← RingHom.map_neg CHom,
+          CHom_apply, LawfulCommRing.neg_neg]
+    rw [hSubEq, coeffAt_add]
+    cases k with
+    | zero =>
+      show coeffAt G.coeffs 0 = add (coeffAt (ofList [zero, one]).coeffs 0) (coeffAt (C _).coeffs 0)
+      rw [coeffAt_ofList, coeffAt_cons_zero, coeffAt_C_zero, LawfulCommRing.zero_add]
+    | succ k =>
+      cases k with
+      | zero =>
+        have h1 : coeffAt G.coeffs 1 = one := by rw [← hdG1]; exact hGmon
+        show coeffAt G.coeffs 1 = add (coeffAt (ofList [zero, one]).coeffs 1) (coeffAt (C _).coeffs 1)
+        rw [h1, coeffAt_ofList, coeffAt_cons_succ, coeffAt_cons_zero, coeffAt_C_succ,
+            LawfulCommRing.add_zero]
+      | succ k =>
+        rw [G.coeffAt_eq_zero_of_natDeg_lt (by omega), coeffAt_C_succ]
+        show zero = add (coeffAt (ofList [zero, one]).coeffs (k + 2)) zero
+        rw [coeffAt_ofList, coeffAt_cons_succ, coeffAt_cons_succ, coeffAt_nil,
+            LawfulCommRing.add_zero]
+  · show (evalHom ζ).toFun (sub X (C ζ)) = zero
+    rw [RingHom.map_sub, evalHom_apply, evalHom_apply, eval_X, eval_C, LawfulCommRing.sub_self]
+
+private theorem monic_eq_of_dvd_same_deg {R : Type} [LawfulCommRing R] [DecidableEq R]
+    [NontrivialRing R]
+    (G K Q : UPoly R) (d : Nat)
+    (hGdeg : G.natDeg ≤ d) (hGmon : coeffAt G.coeffs d = one)
+    (hKdeg : K.natDeg = d) (hKmon : coeffAt K.coeffs K.natDeg = one)
+    (hFac : G = mul K Q) :
+    G = K := by
+  have hGNe : G ≠ zero := fun e => by
+    rw [e, coeffs_zero, coeffAt_nil] at hGmon
+    exact NontrivialRing.one_ne_zero hGmon.symm
+  have hQNe : Q ≠ zero := fun e => hGNe (by rw [hFac, e, LawfulCommRing.mul_zero])
+  have hQdeg0 : Q.natDeg = 0 := by
+    apply Decidable.byContradiction; intro hPos
+    have hz := G.coeffAt_eq_zero_of_natDeg_lt (k := K.natDeg + Q.natDeg) (by omega)
+    rw [hFac, (coeffAt_mul_top K Q).2] at hz
+    unfold lead at hz
+    rw [hKmon, LawfulCommRing.one_mul] at hz
+    exact lead_ne_zero hQNe hz
+  have hQC : Q = C (coeffAt Q.coeffs 0) := by
+    apply ext_coeffAt; intro k
+    cases k with
+    | zero => rw [coeffAt_C_zero]
+    | succ k => rw [coeffAt_C_succ]; exact Q.coeffAt_eq_zero_of_natDeg_lt (by omega)
+  have hCoeff1 : coeffAt Q.coeffs 0 = one := by
+    have hTop := hGmon
+    rw [hFac, hQC, LawfulCommRing.mul_comm, coeffAt_C_mul, ← hKdeg, hKmon,
+        LawfulCommRing.mul_one] at hTop
+    exact hTop
+  rw [hFac, hQC, hCoeff1, ← one_eq_C, LawfulCommRing.mul_one]
+
+/-- **Unconditional Multi-Sheet Curve Leaf GCD Decomposition (`curve_leaf_gcd_decomp`)**:
+    Refines `ShearedCurveGcd.curve_leaf_root_decomp` by running `d5_xgcd_mod` unconditionally on
+    every leaf `Ej` (including when `Ej ∣ g₁`!). On EVERY leaf `Ej ∈ Es`:
+    - `Ej` divides `E` (`∃ Q_E, E = mul Ej Q_E`),
+    - `(C₁, P₀)` has an explicit monic `Z`-gcd `Gj : MonicPoly R_{Ej}` of sheet rank `1 ≤ Gj.deg ≤ h_C`
+      with Bezout cofactors and common factorizations,
+    - `ModMonic.modGen Gj : ModMonic Gj` is a universal common `Z`-root of `(C₁, P₀)` over the
+      `Gj.deg`-sheeted curve algebra `ModMonic Gj`,
+    - **Exact Multiplicity Dichotomy**: either `Gj.deg = 1` (single rational sheet `ζ ∈ R_{Ej}`),
+      or `2 ≤ Gj.deg` AND `Ej ∣ g₁` (multi-sheet space curve forces `sylResDeriv` to vanish modulo `Ej`),
+    - In particular, `CoprimeZ Ej g₁ → Gj.deg = 1`. -/

@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.CodingTheory.Cwyz26JohnsonCertificate — the non-excluded decomposition bound, discharged
+# Qsag.Coding.Cwyz26JohnsonCertificate — the non-excluded decomposition bound, discharged
 
 `HemWhirRbrSoundness.NonExcludedDecompBound` is the candidate-specific form of the residual
 count of `[CWYZ26]` Lemma 4.1: it counts non-excluded challenges whose accepted polynomial
@@ -18,22 +18,22 @@ with `¬ HasPolynomialExplanation` for the selected polynomial, which is the hyp
   `A₀ = 7`, where `affineFoldDecompBound_welch_berlekamp` does not apply.
 -/
 
-public import Qsag.HemFoldDecompositionBridge
-public import Qsag.CodingTheory.Cwyz26AffineGap
-public import Qsag.CodingTheory.GoldilocksCharacteristic
-import all Qsag.HemFoldDecompositionBridge
-import all Qsag.HemWhirRbrSoundness
-import all Qsag.CodingTheory.Cwyz26AffineGap
-import all Qsag.CodingTheory.SlicedJetIncidence
-import all Qsag.CodingTheory.PersistentPairsBound
-import all Qsag.CodingTheory.GoldilocksCharacteristic
-import all Qsag.CodingTheory.PolyMv3
-import all Qsag.CodingTheory.TrivariateGsExplainer
-import all Qsag.CodingTheory.SimpleRootStratification
-import all Qsag.CodingTheory.AffineIncidenceBound
-import all Qsag.ConcreteSecurityBudget
-import all Qsag.AffineProximityGaps
-import all Qsag.Goldilocks
+public import Qsag.Protocol.Aggregation.HemFoldDecompositionBridge
+public import Qsag.Coding.Cwyz26AffineGap
+public import Qsag.Coding.GoldilocksCharacteristic
+import all Qsag.Protocol.Aggregation.HemFoldDecompositionBridge
+import all Qsag.Protocol.Aggregation.HemWhirRbrSoundness
+import all Qsag.Coding.Cwyz26AffineGap
+import all Qsag.Coding.SlicedJetIncidence
+import all Qsag.Coding.PersistentPairsBound
+import all Qsag.Coding.GoldilocksCharacteristic
+import all Qsag.Coding.PolyMv3
+import all Qsag.Coding.TrivariateGsExplainer
+import all Qsag.Coding.SimpleRootStratification
+import all Qsag.Coding.AffineIncidenceBound
+import all Qsag.Oracle.ConcreteSecurityBudget
+import all Qsag.Coding.AffineProximityGaps
+import all Qsag.Math.Goldilocks
 
 public section
 namespace Qsag

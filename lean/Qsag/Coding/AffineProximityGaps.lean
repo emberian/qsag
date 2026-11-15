@@ -4593,3 +4593,1483 @@ private theorem gsUniHasse_bivariate_comm {F : Type} [LawfulField F] [DecidableE
         gsUniHasse_bivariate_comm r a b qs s, gsUniHasse_bivariate_comm r a b qs (s + 1)]
 
 /-- Slice a flat vector into consecutive blocks of prescribed widths. -/
+def gsSliceByWidths {α : Type} : List Nat → List α → List (List α)
+  | [], _ => []
+  | w :: ws, xs => xs.take w :: gsSliceByWidths ws (xs.drop w)
+
+/-- Assemble a flat `gsMonomials B d D` coefficient vector into a bivariate polynomial in `F[X][Y]`. -/
+def gsAssembleBivariate {F : Type} [LawfulField F] [DecidableEq F]
+    (B d D : Nat) (coeffs : List F) : List (GsUniPoly F) :=
+  (gsSliceByWidths ((List.range (D + 1)).map (fun j => B - j * d)) coeffs).map GsUniPoly.ofCoeffs
+
+private theorem gsSliceByWidths_length {α : Type} :
+    ∀ (ws : List Nat) (xs : List α), (gsSliceByWidths ws xs).length = ws.length
+  | [], _ => rfl
+  | _ :: ws, xs => congrArg Nat.succ (gsSliceByWidths_length ws (xs.drop _))
+
+private theorem gsSliceByWidths_getElem?_le {α : Type} :
+    ∀ (ws : List Nat) (xs : List α) (j : Nat) (sl : List α) (w : Nat),
+      (gsSliceByWidths ws xs)[j]? = some sl → ws[j]? = some w → sl.length ≤ w
+  | [], _, _, _, _, hsl, _ => by simp [gsSliceByWidths] at hsl
+  | w₀ :: _, xs, 0, sl, w, hsl, hw => by
+    simp only [gsSliceByWidths, List.getElem?_cons_zero, Option.some.injEq] at hsl hw
+    subst hsl; subst hw
+    exact List.length_take_le w₀ xs
+  | _ :: ws, xs, j + 1, sl, w, hsl, hw => by
+    simp only [gsSliceByWidths, List.getElem?_cons_succ] at hsl hw
+    exact gsSliceByWidths_getElem?_le ws (xs.drop _) j sl w hsl hw
+
+private theorem gsSliceByWidths_flatten {α : Type} :
+    ∀ (ws : List Nat) (xs : List α),
+      xs.length = ws.sum → (gsSliceByWidths ws xs).flatten = xs
+  | [], xs, h => List.eq_nil_of_length_eq_zero h ▸ rfl
+  | w :: ws, xs, h => by
+    simp only [List.sum_cons] at h
+    have ih := gsSliceByWidths_flatten ws (xs.drop w) (by rw [List.length_drop]; omega)
+    simp only [gsSliceByWidths, List.flatten_cons, ih, List.take_append_drop]
+
+theorem gsAssembleBivariate_length {F : Type} [LawfulField F] [DecidableEq F]
+    (B d D : Nat) (coeffs : List F) :
+    (gsAssembleBivariate B d D coeffs).length = D + 1 := by
+  simp [gsAssembleBivariate, gsSliceByWidths_length]
+
+theorem gsAssembleBivariate_weightedDegree {F : Type} [LawfulField F] [DecidableEq F]
+    (B d D : Nat) (coeffs : List F) :
+    GsWeightedDegree (gsAssembleBivariate B d D coeffs) d B := by
+  intro j c hj
+  unfold gsAssembleBivariate at hj
+  rw [List.getElem?_map] at hj
+  cases hsl : (gsSliceByWidths ((List.range (D + 1)).map (fun k => B - k * d)) coeffs)[j]? with
+  | none => rw [hsl] at hj; cases hj
+  | some sl =>
+    rw [hsl, Option.map_some, Option.some.injEq] at hj
+    subst hj
+    have hjLt : j < D + 1 := by
+      have hlen := lt_length_of_getElem?_eq_some hsl
+      rw [gsSliceByWidths_length, List.length_map, List.length_range] at hlen
+      exact hlen
+    have hw : ((List.range (D + 1)).map (fun k => B - k * d))[j]? = some (B - j * d) := by
+      rw [List.getElem?_map, List.getElem?_range hjLt]
+      rfl
+    exact Nat.le_trans (trimPoly_length_le sl) (gsSliceByWidths_getElem?_le _ coeffs j sl _ hsl hw)
+
+theorem gsAssembleBivariate_nonzero {F : Type} [LawfulField F] [DecidableEq F]
+    (B d D : Nat) (coeffs : List F)
+    (hLen : coeffs.length = gsMonomialCount B d D)
+    (hAny : coeffs.any (fun c => !(decide (c = CommRingOps.zero))) = true) :
+    ∃ c ∈ gsAssembleBivariate B d D coeffs, c ≠ CommRingOps.zero := by
+  let ws := (List.range (D + 1)).map (fun j => B - j * d)
+  have hflat : (gsSliceByWidths ws coeffs).flatten = coeffs :=
+    gsSliceByWidths_flatten ws coeffs hLen
+  rcases mem_of_any_true hAny with ⟨x, hxMem, hxPred⟩
+  have hxNe : x ≠ CommRingOps.zero := by
+    intro hx0; simp [hx0] at hxPred
+  rw [← hflat, List.mem_flatten] at hxMem
+  rcases hxMem with ⟨sl, hslMem, hxSl⟩
+  refine ⟨GsUniPoly.ofCoeffs sl, List.mem_map.mpr ⟨sl, hslMem, rfl⟩, ?_⟩
+  intro hzero
+  have htrim0 : trimPoly sl = [] := congrArg Subtype.val hzero
+  rcases List.getElem?_of_mem hxSl with ⟨idx, hidx⟩
+  have hc0 := (trimPoly_eq_nil_iff sl).mp htrim0 idx
+  have hget : coeffAt sl idx = x := by simp [coeffAt, List.getD, hidx]
+  exact hxNe (hget.symm.trans hc0)
+
+private theorem gsSlice_dotVec_eq_flatMap {F : Type} [LawfulCommRing F]
+    (B d r s : Nat) (a b : F) :
+    ∀ (js : List Nat) (xs : List F),
+      xs.length = (js.map (fun j => B - j * d)).sum →
+      dotVec (js.map (gsUniHasseBasis s b))
+          ((gsSliceByWidths (js.map (fun j => B - j * d)) xs).map (fun sl => gsUniHasse sl r a)) =
+        dotVec (js.flatMap (fun j =>
+          (List.range (B - j * d)).map (fun i => gsHasseMonomial (i, j) (r, s) (a, b)))) xs
+  | [], _, _ => rfl
+  | j :: js, xs, hLen => by
+    simp only [List.map_cons, List.sum_cons] at hLen
+    let w := B - j * d
+    have hTakeLen : (xs.take w).length = w := List.length_take_of_le (by omega)
+    have hDropLen : (xs.drop w).length = (js.map (fun k => B - k * d)).sum := by
+      rw [List.length_drop]; omega
+    have ih := gsSlice_dotVec_eq_flatMap B d r s a b js (xs.drop w) hDropLen
+    have hSplit : xs = xs.take w ++ xs.drop w := (List.take_append_drop w xs).symm
+    have hHead : CommRingOps.mul (gsUniHasseBasis s b j) (gsUniHasse (xs.take w) r a) =
+        dotVec ((List.range w).map (fun i => gsHasseMonomial (i, j) (r, s) (a, b))) (xs.take w) := by
+      rw [gsUniHasse_eq_dotVec (xs.take w) r a, hTakeLen, ← dotVec_scaleVec]
+      unfold scaleVec
+      rw [List.map_map]
+      refine congrArg (fun v => dotVec v (xs.take w)) (List.map_congr_left ?_)
+      intro i _
+      dsimp only [Function.comp]
+      unfold gsUniHasseBasis gsHasseMonomial
+      dsimp only
+      rw [gsNat_mul, LawfulCommRing.mul_comm (gsNat (gsChoose i r)) (gsNat (gsChoose j s)),
+          LawfulCommRing.mul_comm (gsPow a (i - r)) (gsPow b (j - s))]
+      exact gs_mul_mul_mul_comm (gsNat (gsChoose j s)) (gsPow b (j - s))
+        (gsNat (gsChoose i r)) (gsPow a (i - r))
+    simp only [List.map_cons, gsSliceByWidths, dotVec, List.flatMap_cons]
+    conv => rhs; rw [hSplit]
+    rw [dotVec_append_eq _ _ (xs.take w) (xs.drop w) (by rw [List.length_map, List.length_range, hTakeLen]),
+        hHead, ih]
+
+theorem gsAssembleBivariate_hasse_eq {F : Type} [LawfulField F] [DecidableEq F]
+    (B d D : Nat) (coeffs : List F) (r s : Nat) (a b : F)
+    (hLen : coeffs.length = gsMonomialCount B d D) :
+    let Q := gsAssembleBivariate B d D coeffs
+    gsUniHasse (gsUniHasse Q s (gsConst b)).val r a =
+      gsHasseEval B d D coeffs (r, s) (a, b) := by
+  dsimp only
+  rw [gsUniHasse_bivariate_comm]
+  have hmap : ((gsAssembleBivariate B d D coeffs).map (fun p => gsUniHasse p.val r a)) =
+      (gsSliceByWidths ((List.range (D + 1)).map (fun j => B - j * d)) coeffs).map
+        (fun sl => gsUniHasse sl r a) := by
+    unfold gsAssembleBivariate
+    rw [List.map_map]
+    apply List.map_congr_left
+    intro sl _
+    exact gsUniHasse_trimPoly sl r a
+  rw [hmap, gsUniHasse_eq_dotVec]
+  have hlenS : ((gsSliceByWidths ((List.range (D + 1)).map (fun j => B - j * d)) coeffs).map
+      (fun sl => gsUniHasse sl r a)).length = D + 1 := by
+    simp [gsSliceByWidths_length]
+  rw [hlenS]
+  unfold gsHasseEval gsMonomials
+  simp only [List.map_flatMap, List.map_map, Function.comp_def]
+  exact gsSlice_dotVec_eq_flatMap B d r s a b (List.range (D + 1)) coeffs hLen
+
+private def gsVarX {F : Type} [LawfulField F] [DecidableEq F] : GsUniPoly F :=
+  ⟨[CommRingOps.zero, CommRingOps.one], by simp [trimPoly, LawfulField.one_ne_zero]⟩
+
+private theorem gsConst_zero {F : Type} [LawfulField F] [DecidableEq F] :
+    (gsConst CommRingOps.zero : GsUniPoly F) = CommRingOps.zero := by
+  apply Subtype.ext
+  show trimPoly [CommRingOps.zero] = []
+  simp [trimPoly]
+
+private theorem gsVarX_sub_gsConst {F : Type} [LawfulField F] [DecidableEq F] (a : F) :
+    CommRingOps.sub gsVarX (gsConst a) = gsLinear a := by
+  apply Subtype.ext
+  apply eq_of_isTrimmed_coeffAt _ _ (CommRingOps.sub gsVarX (gsConst a)).property (gsLinear_trimmed a)
+  intro k
+  change coeffAt (pSub [CommRingOps.zero, CommRingOps.one] (trimPoly [a])) k =
+    coeffAt [CommRingOps.neg a, CommRingOps.one] k
+  rw [coeffAt_pSub, coeffAt_trimPoly]
+  cases k with
+  | zero =>
+    simp [coeffAt, LawfulCommRing.sub_eq_add_neg, LawfulCommRing.zero_add]
+  | succ k' =>
+    cases k' <;> simp [coeffAt, LawfulCommRing.sub_zero]
+
+private theorem evalCoeffs_map_gsConst_gsVarX {F : Type} [LawfulField F] [DecidableEq F] :
+    ∀ (cs : List F), evalCoeffs (cs.map gsConst) gsVarX = GsUniPoly.ofCoeffs cs
+  | [] => rfl
+  | c :: cs => by
+    show CommRingOps.add (gsConst c) (CommRingOps.mul gsVarX (evalCoeffs (cs.map gsConst) gsVarX)) =
+      GsUniPoly.ofCoeffs (c :: cs)
+    rw [evalCoeffs_map_gsConst_gsVarX cs]
+    apply Subtype.ext
+    apply eq_of_isTrimmed_coeffAt _ _
+      (CommRingOps.add (gsConst c) (CommRingOps.mul gsVarX (GsUniPoly.ofCoeffs cs))).property
+      (trimPoly_idem (c :: cs))
+    intro k
+    change coeffAt (pAdd (trimPoly [c]) (pMul [CommRingOps.zero, CommRingOps.one] (trimPoly cs))) k =
+      coeffAt (trimPoly (c :: cs)) k
+    rw [coeffAt_pAdd, coeffAt_trimPoly, pMul, coeffAt_trimPoly, coeffAt_trimPoly,
+        rawMul, coeffAt_addCoeffs, coeffAt_map_mul, LawfulCommRing.zero_mul,
+        LawfulCommRing.zero_add]
+    cases k with
+    | zero =>
+      rw [coeffAt_cons_zero, coeffAt_cons_zero, coeffAt_cons_zero, LawfulCommRing.add_zero]
+    | succ k' =>
+      rw [coeffAt_cons_succ, coeffAt_nil, LawfulCommRing.zero_add,
+          coeffAt_cons_succ, coeffAt_cons_succ,
+          rawMul, coeffAt_addCoeffs, coeffAt_map_mul, LawfulCommRing.one_mul, coeffAt_trimPoly]
+      cases k' with
+      | zero => rw [coeffAt_cons_zero, LawfulCommRing.add_zero]
+      | succ k'' => rw [coeffAt_cons_succ, rawMul, coeffAt_nil, LawfulCommRing.add_zero]
+
+private theorem gsConst_add {F : Type} [LawfulField F] [DecidableEq F] (x y : F) :
+    gsConst (CommRingOps.add x y) = CommRingOps.add (gsConst x) (gsConst y) := by
+  apply Subtype.ext
+  apply eq_of_isTrimmed_coeffAt _ _ (trimPoly_idem _) (CommRingOps.add (gsConst x) (gsConst y)).property
+  intro k
+  change coeffAt (trimPoly [CommRingOps.add x y]) k =
+    coeffAt (pAdd (trimPoly [x]) (trimPoly [y])) k
+  rw [coeffAt_pAdd, coeffAt_trimPoly, coeffAt_trimPoly, coeffAt_trimPoly]
+  cases k <;> simp [coeffAt, LawfulCommRing.add_zero]
+
+private theorem gsConst_mul {F : Type} [LawfulField F] [DecidableEq F] (x y : F) :
+    gsConst (CommRingOps.mul x y) = CommRingOps.mul (gsConst x) (gsConst y) := by
+  apply Subtype.ext
+  show trimPoly [CommRingOps.mul x y] = (CommRingOps.mul (gsConst x) (gsConst y)).val
+  rw [gsConst_mul_val]
+  unfold pScale
+  rw [trimPoly_eq_iff_coeffAt]
+  intro k
+  change coeffAt [CommRingOps.mul x y] k = coeffAt (List.map (CommRingOps.mul x) (trimPoly [y])) k
+  rw [coeffAt_map_mul, coeffAt_trimPoly]
+  cases k <;> simp [coeffAt, LawfulCommRing.mul_zero]
+
+private theorem evalCoeffs_map_gsConst {F : Type} [LawfulField F] [DecidableEq F] (a : F) :
+    ∀ (cs : List F), evalCoeffs (cs.map gsConst) (gsConst a) = gsConst (evalCoeffs cs a)
+  | [] => gsConst_zero.symm
+  | c :: cs => by
+    show CommRingOps.add (gsConst c) (CommRingOps.mul (gsConst a) (evalCoeffs (cs.map gsConst) (gsConst a))) =
+      gsConst (CommRingOps.add c (CommRingOps.mul a (evalCoeffs cs a)))
+    rw [evalCoeffs_map_gsConst a cs, ← gsConst_mul, ← gsConst_add]
+
+private theorem quotLinear_map_gsConst {F : Type} [LawfulField F] [DecidableEq F] (a : F) :
+    ∀ (cs : List F), quotLinear (cs.map gsConst) (gsConst a) = (quotLinear cs a).map gsConst
+  | [] => rfl
+  | [_] => rfl
+  | _ :: c₁ :: tl => by
+    show evalCoeffs ((c₁ :: tl).map gsConst) (gsConst a) ::
+        quotLinear ((c₁ :: tl).map gsConst) (gsConst a) =
+      gsConst (evalCoeffs (c₁ :: tl) a) :: (quotLinear (c₁ :: tl) a).map gsConst
+    rw [evalCoeffs_map_gsConst, quotLinear_map_gsConst a (c₁ :: tl)]
+
+private theorem gsTaylor_map_gsConst {F : Type} [LawfulField F] [DecidableEq F] (a : F) :
+    ∀ (n : Nat) (cs : List F),
+      gsTaylor n (cs.map gsConst) (gsConst a) = (gsTaylor n cs a).map gsConst
+  | 0, _ => rfl
+  | n + 1, cs => by
+    show evalCoeffs (cs.map gsConst) (gsConst a) ::
+        gsTaylor n (quotLinear (cs.map gsConst) (gsConst a)) (gsConst a) =
+      gsConst (evalCoeffs cs a) :: (gsTaylor n (quotLinear cs a) a).map gsConst
+    rw [evalCoeffs_map_gsConst, quotLinear_map_gsConst, gsTaylor_map_gsConst a n]
+
+private theorem coeffAt_map_gsConst {F : Type} [LawfulField F] [DecidableEq F] :
+    ∀ (cs : List F) (r : Nat), coeffAt (cs.map gsConst) r = gsConst (coeffAt cs r)
+  | [], _ => gsConst_zero.symm
+  | _ :: _, 0 => rfl
+  | _ :: cs, r + 1 => coeffAt_map_gsConst cs r
+
+/-- **Characteristic-Free Hasse-to-`GsMultiplicity` Bridge (`gsAssembleBivariate_multiplicity`)**:
+    Assembling ANY length-`gsMonomialCount B d D` vector whose formal binomial Hasse derivatives
+    `gsHasseEval B d D coeffs (r, s) (a, b)` vanish for all `r + s < m` produces a bivariate
+    polynomial `Q : List (GsUniPoly F)` satisfying `GsMultiplicity Q m a b`! -/
+theorem gsAssembleBivariate_multiplicity {F : Type} [LawfulField F] [DecidableEq F]
+    (B d D m : Nat) (coeffs : List F) (a b : F)
+    (hLen : coeffs.length = gsMonomialCount B d D)
+    (hVanish : ∀ r s, r + s < m → gsHasseEval B d D coeffs (r, s) (a, b) = CommRingOps.zero) :
+    GsMultiplicity (gsAssembleBivariate B d D coeffs) m a b := by
+  let Q := gsAssembleBivariate B d D coeffs
+  intro s hs
+  let g := coeffAt (gsTaylor Q.length Q (gsConst b)) s
+  have hgEq : g = gsUniHasse Q s (gsConst b) :=
+    coeffAt_gsTaylor_eq_gsUniHasse Q.length Q s (gsConst b) (Nat.le_refl _)
+  have hgSelf : g = evalCoeffs (g.val.map gsConst) gsVarX := by
+    rw [evalCoeffs_map_gsConst_gsVarX]
+    exact Subtype.ext g.property.symm
+  have hgShift : g = evalCoeffs ((gsTaylor g.val.length g.val a).map gsConst)
+      (CommRingOps.mul (gsLinear a) CommRingOps.one) := by
+    rw [LawfulCommRing.mul_one, ← gsVarX_sub_gsConst a, ← gsTaylor_map_gsConst]
+    exact hgSelf.trans (gsTaylor_eval (gsConst a) gsVarX g.val.length (g.val.map gsConst)
+      (by rw [List.length_map]; exact Nat.le_refl _))
+  have hLow : ∀ r : Nat, r < m - s →
+      ∃ h : GsUniPoly F, coeffAt ((gsTaylor g.val.length g.val a).map gsConst) r =
+        CommRingOps.mul (gsPow (gsLinear a) (m - s - r)) h := by
+    intro r hr
+    refine ⟨CommRingOps.zero, ?_⟩
+    rw [LawfulCommRing.mul_zero, coeffAt_map_gsConst,
+        coeffAt_gsTaylor_eq_gsUniHasse g.val.length g.val r a (Nat.le_refl _),
+        hgEq, gsAssembleBivariate_hasse_eq B d D coeffs r s a b hLen,
+        hVanish r s (by omega), gsConst_zero]
+  rcases gs_low_order_divisible (gsLinear a) CommRingOps.one
+      ((gsTaylor g.val.length g.val a).map gsConst) (m - s) hLow with ⟨k, hk⟩
+  exact ⟨k, hgShift.trans hk⟩
+
+/-- **Unconditional Guruswami–Sudan List-Decoding Theorem (`guruswami_sudan_unconditional_list_bound`)**:
+    Over ANY `[LawfulField F] [DecidableEq F]` (every characteristic, `0` classical choice, `0` candidate
+    hints, `0` interpolant inputs), whenever the Hasse dimension inequality
+    `domain.length * (m * (m + 1) / 2) < gsMonomialCount (m * A) d D` holds, EVERY duplicate-free list
+    `polys` of degree-`≤ d` polynomials agreeing with `word` on `≥ A` distinct points of `domain`
+    satisfies **`polys.length ≤ D`**! -/
+theorem guruswami_sudan_unconditional_list_bound {F : Type} [LawfulField F] [DecidableEq F]
+    (domain : List F) (word : F → F) (d A D m : Nat)
+    (hDim : domain.length * (m * (m + 1) / 2) < gsMonomialCount (m * A) d D)
+    (polys : List (GsUniPoly F)) (hDistinct : polys.Nodup)
+    (hClose : ∀ P ∈ polys, P.val.length ≤ d + 1 ∧
+      ∃ xs : List F, xs.Nodup ∧ A ≤ xs.length ∧
+        ∀ x ∈ xs, x ∈ domain ∧ evalCoeffs P.val x = word x) :
+    polys.length ≤ D := by
+  let points := domain.map (fun x => (x, word x))
+  have hPtsDim : points.length * (m * (m + 1) / 2) < gsMonomialCount (m * A) d D := by
+    simpa [points] using hDim
+  rcases guruswami_sudan_interpolation (m * A) d D m points hPtsDim with ⟨hLen, hAny, hVanish⟩
+  let coeffs := solveHomogeneous (gsMonomialCount (m * A) d D)
+    (gsInterpolationRows (m * A) d D m points)
+  let Q := gsAssembleBivariate (m * A) d D coeffs
+  have hQ : Q.length ≤ D + 1 := Nat.le_of_eq (gsAssembleBivariate_length (m * A) d D coeffs)
+  have hnz : ∃ c ∈ Q, c ≠ CommRingOps.zero :=
+    gsAssembleBivariate_nonzero (m * A) d D coeffs hLen hAny
+  have hW : GsWeightedDegree Q d (m * A) :=
+    gsAssembleBivariate_weightedDegree (m * A) d D coeffs
+  have hMult : ∀ x ∈ domain, GsMultiplicity Q m x (word x) := by
+    intro x hx
+    exact gsAssembleBivariate_multiplicity (m * A) d D m coeffs x (word x) hLen
+      (fun r s hrs => hVanish (x, word x) (List.mem_map.mpr ⟨x, hx, rfl⟩) r s hrs)
+  exact guruswami_sudan_agreement_list_bound domain word d A D m Q hQ hnz hW hMult
+    polys hDistinct hClose
+
+/-- Domain-filter form of `guruswami_sudan_unconditional_list_bound` for duplicate-free domains. -/
+theorem guruswami_sudan_filter_list_bound {F : Type} [LawfulField F] [DecidableEq F]
+    (domain : List F) (word : F → F) (d A D m : Nat)
+    (hDomNd : domain.Nodup)
+    (hDim : domain.length * (m * (m + 1) / 2) < gsMonomialCount (m * A) d D)
+    (polys : List (GsUniPoly F)) (hDistinct : polys.Nodup)
+    (hClose : ∀ P ∈ polys, P.val.length ≤ d + 1 ∧
+      A ≤ (domain.filter (fun x => decide (evalCoeffs P.val x = word x))).length) :
+    polys.length ≤ D := by
+  refine guruswami_sudan_unconditional_list_bound domain word d A D m hDim polys hDistinct ?_
+  intro P hP
+  rcases hClose P hP with ⟨hdeg, hAg⟩
+  refine ⟨hdeg, domain.filter (fun x => decide (evalCoeffs P.val x = word x)),
+    List.Pairwise.filter _ hDomNd, hAg, ?_⟩
+  intro x hx
+  rcases List.mem_filter.mp hx with ⟨hxDom, hxEq⟩
+  exact ⟨hxDom, of_decide_eq_true hxEq⟩
+
+
+/-! ## §5. Finite `Theorem 4.8 + Theorem 5.1` Witness Verifier Bound to the Deployed `Hem` WHIR Schedule -/
+
+/-- Explicit finite witness for `[CWYZ26]` Theorem 4.8 (finite MCA bound) + Theorem 5.1 (`Eq. 5.7`
+    equal-degree affine folding with linear evaluation claims across `sFolds` binary folds). -/
+structure WhirAffineWitness where
+  /-- Number of coset fibers of the stage oracle (`n = blowup * 2^rem`, the folded evaluation
+      domain the proximity gap is applied on; `rem` = variables left after the stage's folds). -/
+  n : Nat
+  /-- Folded univariate degree bound `d = n / blowup + 2` (carrying the `+2` overflow monomials). -/
+  d : Nat
+  /-- Number of binary affine folds `s_i` executed in this WHIR stage (= agreement loss). -/
+  sFolds : Nat
+  /-- Agreement threshold `A` (`|S_{θ,α,β}(P)| ≥ A`). -/
+  A : Nat
+  /-- Intermediate persistent-agreement threshold `B` (`n * (d + 1) < B^2`, `B < A`). -/
+  B : Nat
+  /-- Multiplicity parameter `m ≥ 1` in `[CWYZ26]` Lemma 4.2 / Theorem 4.8. -/
+  m : Nat
+  /-- Total `(Y, Z)`-degree bound `D ≥ 1` of the explainer polynomial `Q(X, Y, Z)`. -/
+  D : Nat
+  /-- Stage query count `q_i` (distinct fibers, sampled without replacement). -/
+  queries : Nat
+  /-- Pure query soundness target bits (`128` classical, `256` QROM Grover pre-square-root). -/
+  queryTargetBits : Nat
+  deriving Repr, DecidableEq
+
+/-- Primitive-recursive accumulator for the unknown count `∑_{j=0}^M (m A - D - d j) (D - j + 1)`
+    in `[CWYZ26]` Equation `(4.5)` (`0` `WellFounded.fix`). -/
+def interpUnknownsAux (mA_sub_D d D : Nat) : Nat → Nat
+  | 0 => mA_sub_D * (D + 1)
+  | j + 1 => interpUnknownsAux mA_sub_D d D j + (mA_sub_D - d * (j + 1)) * (D - (j + 1) + 1)
+
+/-- Primitive-recursive accumulator for the per-point equation count
+    `∑_{s=0}^K (m - s) (D - s + 1)` in `[CWYZ26]` Equation `(4.2)` / `(4.5)`. -/
+def interpEquationsAux (m D : Nat) : Nat → Nat
+  | 0 => m * (D + 1)
+  | s + 1 => interpEquationsAux m D s + (m - (s + 1)) * (D - (s + 1) + 1)
+
+/-- Exact ceiling `⌈a / b⌉` for `b > 0`. -/
+def natCeilDiv (a b : Nat) : Nat :=
+  (a + b - 1) / b
+
+/-- Exact falling factorial `a (a - 1) ⋯ (a - k + 1)`: `affineFallingFactorial A q / affineFallingFactorial n q`
+    is the exact probability that `q` DISTINCT uniformly sampled fibers (the `BTreeSet` sampling of
+    `pcs.rs::sample_stage_queries`) all land inside a fixed set of `A` out of `n` fibers. -/
+def affineFallingFactorial (a : Nat) : Nat → Nat
+  | 0 => 1
+  | k + 1 => (a - k) * affineFallingFactorial a k
+
+theorem affineFallingFactorial_pos (a : Nat) : ∀ k : Nat, k ≤ a → 0 < affineFallingFactorial a k
+  | 0, _ => Nat.zero_lt_one
+  | k + 1, h => by
+    show 0 < (a - k) * affineFallingFactorial a k
+    exact Nat.mul_pos (by omega) (affineFallingFactorial_pos a k (by omega))
+
+/-- Sampling without replacement never hits a fixed set more often than sampling with replacement:
+    `affineFallingFactorial a k * n^k ≤ a^k * affineFallingFactorial n k` whenever `a ≤ n`. -/
+theorem affineFallingFactorial_mul_pow_le (a n : Nat) (han : a ≤ n) :
+    ∀ k : Nat, affineFallingFactorial a k * n ^ k ≤ a ^ k * affineFallingFactorial n k
+  | 0 => Nat.le_refl _
+  | k + 1 => by
+    show (a - k) * affineFallingFactorial a k * n ^ (k + 1) ≤ a ^ (k + 1) * ((n - k) * affineFallingFactorial n k)
+    have ih := affineFallingFactorial_mul_pow_le a n han k
+    have hCross : (a - k) * n ≤ a * (n - k) := by
+      if hk : k ≤ a then
+        have e1 : (a - k) * n = a * n - k * n := Nat.sub_mul a k n
+        have e2 : a * (n - k) = a * n - a * k := Nat.mul_sub a n k
+        have h3 : a * k ≤ k * n := by
+          rw [Nat.mul_comm a k]; exact Nat.mul_le_mul_left k han
+        rw [e1, e2]
+        exact Nat.sub_le_sub_left h3 (a * n)
+      else
+        have h0 : a - k = 0 := by omega
+        rw [h0, Nat.zero_mul]
+        exact Nat.zero_le _
+    have hL : (a - k) * affineFallingFactorial a k * n ^ (k + 1) =
+        ((a - k) * n) * (affineFallingFactorial a k * n ^ k) := by
+      rw [Nat.pow_succ, Nat.mul_comm (n ^ k) n, Nat.mul_mul_mul_comm]
+    have hR : a ^ (k + 1) * ((n - k) * affineFallingFactorial n k) =
+        (a * (n - k)) * (a ^ k * affineFallingFactorial n k) := by
+      rw [Nat.pow_succ, Nat.mul_comm (a ^ k) a, Nat.mul_mul_mul_comm]
+    rw [hL, hR]
+    exact Nat.mul_le_mul hCross ih
+
+theorem affineFallingFactorial_mono {a b : Nat} (hab : a ≤ b) :
+    ∀ k : Nat, affineFallingFactorial a k ≤ affineFallingFactorial b k
+  | 0 => Nat.le_refl 1
+  | k + 1 => Nat.mul_le_mul (Nat.sub_le_sub_right hab k) (affineFallingFactorial_mono hab k)
+
+private theorem mul_affineFallingFactorial_pred (a : Nat) :
+    ∀ k : Nat, a * affineFallingFactorial (a - 1) k = affineFallingFactorial a (k + 1)
+  | 0 => by simp [affineFallingFactorial]
+  | k + 1 => by
+    have ih := mul_affineFallingFactorial_pred a k
+    show a * ((a - 1 - k) * affineFallingFactorial (a - 1) k) =
+      (a - (k + 1)) * affineFallingFactorial a (k + 1)
+    have hsub : a - 1 - k = a - (k + 1) := by omega
+    rw [hsub, ← Nat.mul_assoc, Nat.mul_comm a (a - (k + 1)), Nat.mul_assoc, ih]
+
+private theorem mem_of_mem_eraseFirst {α : Type} [DecidableEq α] {x z : α} :
+    ∀ {M : List α}, z ∈ eraseFirst x M → z ∈ M
+  | [], h => by cases h
+  | y :: ys, h => by
+    unfold eraseFirst at h
+    if hxy : x = y then
+      simp only [hxy, ↓reduceIte] at h
+      exact .tail _ h
+    else
+      simp only [hxy, ↓reduceIte] at h
+      cases h with
+      | head => exact .head _
+      | tail _ hm => exact .tail _ (mem_of_mem_eraseFirst hm)
+
+private theorem eraseFirst_nodup {α : Type} [DecidableEq α] (x : α) :
+    ∀ {M : List α}, M.Nodup → (eraseFirst x M).Nodup
+  | [], _ => .nil
+  | y :: ys, .cons hnot hnd => by
+    unfold eraseFirst
+    if hxy : x = y then
+      simp only [hxy, ↓reduceIte]
+      exact hnd
+    else
+      simp only [hxy, ↓reduceIte]
+      refine .cons ?_ (eraseFirst_nodup x hnd)
+      intro z hz heq
+      subst heq
+      exact hnot y (mem_of_mem_eraseFirst hz) rfl
+
+/-- Ordered `k`-tuples of pairwise-distinct elements drawn without replacement from `U`. -/
+def affineDistinctTuples {α : Type} [DecidableEq α] : Nat → List α → List (List α)
+  | 0, _ => [[]]
+  | k + 1, U => U.flatMap (fun x => (affineDistinctTuples k (eraseFirst x U)).map (x :: ·))
+
+private theorem flatMap_const_length {α β : Type} (c : Nat) (f : α → List β) :
+    ∀ (xs : List α), (∀ x ∈ xs, (f x).length = c) → (xs.flatMap f).length = xs.length * c
+  | [], _ => by simp
+  | x :: xs, h => by
+    simp only [List.flatMap_cons, List.length_append, List.length_cons]
+    rw [h x (.head _), flatMap_const_length c f xs (fun y hy => h y (.tail _ hy)),
+        Nat.add_mul, Nat.one_mul, Nat.add_comm]
+
+/-- For duplicate-free `U`, `affineDistinctTuples k U` has exact size `affineFallingFactorial U.length k`. -/
+theorem affineDistinctTuples_length {α : Type} [DecidableEq α] :
+    ∀ (k : Nat) {U : List α}, U.Nodup →
+      (affineDistinctTuples k U).length = affineFallingFactorial U.length k
+  | 0, _, _ => rfl
+  | k + 1, U, hU => by
+    unfold affineDistinctTuples
+    rw [flatMap_const_length (affineFallingFactorial (U.length - 1) k)]
+    · exact mul_affineFallingFactorial_pred U.length k
+    · intro x hx
+      rw [List.length_map, affineDistinctTuples_length k (eraseFirst_nodup x hU)]
+      have hlen := eraseFirst_length_of_mem hx
+      have heq : (eraseFirst x U).length = U.length - 1 := by omega
+      rw [heq]
+
+theorem mem_affineDistinctTuples_props {α : Type} [DecidableEq α] :
+    ∀ (k : Nat) {U : List α} {t : List α},
+      U.Nodup → t ∈ affineDistinctTuples k U →
+      t.length = k ∧ t.Nodup ∧ ∀ x ∈ t, x ∈ U
+  | 0, _, t, _, ht => by
+    simp only [affineDistinctTuples, List.mem_singleton] at ht
+    subst ht
+    exact ⟨rfl, .nil, fun _ h => by cases h⟩
+  | k + 1, U, t, hU, ht => by
+    unfold affineDistinctTuples at ht
+    rw [List.mem_flatMap] at ht
+    rcases ht with ⟨x, hxU, htMap⟩
+    rw [List.mem_map] at htMap
+    rcases htMap with ⟨ts, htsMem, rfl⟩
+    rcases mem_affineDistinctTuples_props k (eraseFirst_nodup x hU) htsMem with ⟨hlen, hnd, hsub⟩
+    refine ⟨congrArg Nat.succ hlen, .cons ?_ hnd, ?_⟩
+    · intro y hy heq
+      subst heq
+      have hyEr := hsub x hy
+      have hnotEr : ∀ {M : List α}, M.Nodup → x ∉ eraseFirst x M := by
+        intro M hM
+        induction M with
+        | nil => simp [eraseFirst]
+        | cons z zs ih =>
+          rcases hM with _ | ⟨hnotZ, hndZ⟩
+          unfold eraseFirst
+          if hxz : x = z then
+            simp only [hxz, ↓reduceIte]
+            subst hxz
+            exact fun hm => hnotZ x hm rfl
+          else
+            simp only [hxz, ↓reduceIte, List.mem_cons]
+            rintro (heq | hm)
+            · exact False.elim heq
+            · exact ih hndZ hm
+      exact hnotEr hU hyEr
+    · intro y hy
+      cases hy with
+      | head => exact hxU
+      | tail _ hm => exact mem_of_mem_eraseFirst (hsub y hm)
+
+theorem mem_affineDistinctTuples_of_subset {α : Type} [DecidableEq α] :
+    ∀ (k : Nat) {U t : List α},
+      t.length = k → t.Nodup → (∀ x ∈ t, x ∈ U) → t ∈ affineDistinctTuples k U
+  | 0, _, t, hlen, _, _ => by
+    have ht : t = [] := List.eq_nil_of_length_eq_zero hlen
+    subst ht
+    exact .head _
+  | k + 1, U, [], hlen, _, _ => by cases hlen
+  | k + 1, U, x :: ts, hlen, .cons hnot hnd, hsub => by
+    unfold affineDistinctTuples
+    rw [List.mem_flatMap]
+    refine ⟨x, hsub x (.head _), List.mem_map.mpr ⟨ts, ?_, rfl⟩⟩
+    refine mem_affineDistinctTuples_of_subset k (Nat.succ.inj hlen) hnd ?_
+    intro y hy
+    exact mem_eraseFirst_of_ne (fun heq => hnot y hy heq.symm) (hsub y (.tail _ hy))
+
+theorem affineDistinctTuples_nodup {α : Type} [DecidableEq α] :
+    ∀ (k : Nat) {U : List α}, U.Nodup → (affineDistinctTuples k U).Nodup
+  | 0, _, _ => .cons (by simp) .nil
+  | k + 1, U, hU => by
+    unfold affineDistinctTuples
+    apply List.pairwise_flatMap.mpr
+    refine ⟨?_, ?_⟩
+    · intro x _
+      apply List.pairwise_map.mpr
+      exact (affineDistinctTuples_nodup k (eraseFirst_nodup x hU)).imp
+        (fun hne heq => hne (List.cons.inj heq).2)
+    · refine hU.imp ?_
+      intro x y hxy t₁ ht₁ t₂ ht₂ heq
+      rcases List.mem_map.mp ht₁ with ⟨_, _, rfl⟩
+      rcases List.mem_map.mp ht₂ with ⟨_, _, rfl⟩
+      exact hxy (List.cons.inj heq).1
+
+/-- **Constructive Hypergeometric Distinct-Fiber Sampling Bound (`affineDistinctTuples_all_good_le`)**:
+    For ANY duplicate-free fiber domain `U` and ANY predicate `good : α → Bool` satisfied by at most
+    `B` elements of `U`, at most `affineFallingFactorial B k` out of all
+    `affineFallingFactorial U.length k` distinct `k`-tuples in `affineDistinctTuples k U` satisfy
+    `t.all good = true`! -/
+theorem affineDistinctTuples_all_good_le {α : Type} [DecidableEq α]
+    (k B : Nat) (U : List α) (good : α → Bool)
+    (hU : U.Nodup) (hGoodLe : (U.filter good).length ≤ B) :
+    ((affineDistinctTuples k U).filter (fun t => t.all good)).length ≤
+      affineFallingFactorial B k := by
+  let G := U.filter good
+  have hGNd : G.Nodup := List.Pairwise.filter _ hU
+  have hFiltNd : ((affineDistinctTuples k U).filter (fun t => t.all good)).Nodup :=
+    List.Pairwise.filter _ (affineDistinctTuples_nodup k hU)
+  have hSub : ∀ t ∈ (affineDistinctTuples k U).filter (fun t => t.all good),
+      t ∈ affineDistinctTuples k G := by
+    intro t ht
+    rcases List.mem_filter.mp ht with ⟨htMem, htGood⟩
+    rcases mem_affineDistinctTuples_props k hU htMem with ⟨hlen, hnd, hsubU⟩
+    exact mem_affineDistinctTuples_of_subset k hlen hnd
+      (fun x hx => List.mem_filter.mpr ⟨hsubU x hx, List.all_eq_true.mp htGood x hx⟩)
+  calc ((affineDistinctTuples k U).filter (fun t => t.all good)).length
+      ≤ (affineDistinctTuples k G).length := nodup_length_le_of_subset hFiltNd hSub
+    _ = affineFallingFactorial G.length k := affineDistinctTuples_length k hGNd
+    _ ≤ affineFallingFactorial B k := affineFallingFactorial_mono hGoodLe k
+
+
+/-- Conservative `1/q`-scaled numerator `s_i * (ℓ + 2 ℓ₀ + 1)` for `[CWYZ26]` Theorem 4.8 + Theorem 5.1
+    (`Eq. 5.7`, equal-degree affine folding **with linear claims** across `s_i` binary folds), valid
+    whenever `checkWhirAffineWitness w q = true` (`nonpersCeil ≤ q` and `n(n-1)/2 ≤ q`). This is the
+    quantity `loss * (list + 2 * list0 + 1)` of `affine_schedule.rs`. -/
+def whirAffineStageSimpleNum (w : WhirAffineWitness) : Nat :=
+  let ell := (w.n * (w.B - w.d - 1)) / (w.B * w.B - w.n * (w.d + 1))
+  let ell0 := (w.n * (w.A - 1 - w.d)) / ((w.A - 1) * (w.A - 1) - w.n * w.d)
+  w.sFolds * (ell + 2 * ell0 + 1)
+
+/-- Exact `q^2`-scaled numerator from `[CWYZ26]` Theorem 4.8 (`Eq. 4.13`) + Theorem 5.1 (`Eq. 5.7`)
+    across `w.sFolds` folds over a field of cardinality `q`. -/
+def whirAffineStageExactNumQ2 (w : WhirAffineWitness) (q : Nat) : Nat :=
+  let M := Nat.min w.D ((w.m * w.A - w.D - 1) / w.d)
+  let ell := (w.n * (w.B - w.d - 1)) / (w.B * w.B - w.n * (w.d + 1))
+  let ell0 := (w.n * (w.A - 1 - w.d)) / ((w.A - 1) * (w.A - 1) - w.n * w.d)
+  let maxQChoose := Nat.max q (w.n * (w.n - 1) / 2)
+  let nonpersCeil := w.D * w.D +
+    natCeilDiv (4 * w.d * w.d * M * M * w.D * w.D * w.D * w.n * w.n)
+               ((w.A - w.B) * (w.A - w.B))
+  w.sFolds * (ell * maxQChoose + 2 * ell0 * q + nonpersCeil)
+
+/-- Decidable verifier checking **every** side condition of `[CWYZ26]` Theorem 4.8 + Theorem 5.1
+    exactly as stated in the paper (`m, D ≥ 1`, `M = min {D, ⌊(mA - D - 1)/d⌋} ≥ 1`) and as
+    asserted by `affine_schedule.rs::finite_johnson_witnesses_cover_every_canonical_stage`, plus
+    the exact `s_i`-loss distinct-fiber query soundness:
+    1. `sFolds ≥ 1`, `n ≥ 2`, `d ≥ 1`, `d + 2 ≤ B < A`, `A + sFolds ≤ n`, `m ≥ 1`, `D ≥ 1`,
+    2. `D + 1 + d ≤ m * A` and `M ≥ 1` (every term `m * A - D - d * j ≥ 1`, `D - j + 1 ≥ 1`
+       for `j ≤ M`, so the truncated `Nat` sums equal the integer sums of Equation `(4.5)`),
+    3. Exact Equation `(4.5)` interpolation dimension inequality `unknowns > n * equations`,
+    4. Johnson denominator positivity `B^2 > n * (d + 1)` and `(A - 1)^2 > n * d`,
+    5. Field-size domination `n * (n - 1) / 2 ≤ q` and `nonpersCeil ≤ q`,
+    6. `queries ≤ n` and the EXACT hypergeometric bound
+       `affineFallingFactorial (A + sFolds) queries * 2^queryTargetBits < affineFallingFactorial n queries`
+       (implied by the upward-rounded dyadic check `query_error_below_2pow_minus256`; the
+       with-replacement bound `((A + s)/n)^q` is strictly weaker and REJECTS the deployed table). -/
+def checkWhirAffineWitness (w : WhirAffineWitness) (q : Nat) : Bool :=
+  let mA := w.m * w.A
+  let M := Nat.min w.D ((mA - w.D - 1) / w.d)
+  let K := Nat.min (w.m - 1) M
+  let unknowns := interpUnknownsAux (mA - w.D) w.d w.D M
+  let eqsPerPoint := interpEquationsAux w.m w.D K
+  let nonpersCeil := w.D * w.D +
+    natCeilDiv (4 * w.d * w.d * M * M * w.D * w.D * w.D * w.n * w.n)
+               ((w.A - w.B) * (w.A - w.B))
+  decide (
+    1 ≤ w.sFolds ∧
+    2 ≤ w.n ∧
+    1 ≤ w.d ∧
+    w.d + 2 ≤ w.B ∧
+    w.B < w.A ∧
+    w.A + w.sFolds ≤ w.n ∧
+    1 ≤ w.m ∧
+    1 ≤ w.D ∧
+    w.D + 1 + w.d ≤ mA ∧
+    1 ≤ M ∧
+    w.n * eqsPerPoint < unknowns ∧
+    w.n * (w.d + 1) < w.B * w.B ∧
+    w.n * w.d < (w.A - 1) * (w.A - 1) ∧
+    w.n * (w.n - 1) / 2 ≤ q ∧
+    nonpersCeil ≤ q ∧
+    w.queries ≤ w.n ∧
+    affineFallingFactorial (w.A + w.sFolds) w.queries * 2 ^ w.queryTargetBits <
+      affineFallingFactorial w.n w.queries
+  )
+
+/-- **Exact-to-Simple Bound Reduction (`whirAffineStageExactNumQ2_le_simple_mul_q`)**:
+    Whenever `checkWhirAffineWitness w q = true`, the exact `q^2`-scaled Theorem 4.8 + Theorem 5.1
+    numerator is bounded above by `whirAffineStageSimpleNum w * q`, certifying that
+    `whirAffineStageSimpleNum w / q` is a sound upper bound on `whirAffineStageExactNumQ2 w q / q^2`! -/
+theorem whirAffineStageExactNumQ2_le_simple_mul_q (w : WhirAffineWitness) (q : Nat)
+    (hok : checkWhirAffineWitness w q = true) :
+    whirAffineStageExactNumQ2 w q ≤ whirAffineStageSimpleNum w * q := by
+  unfold checkWhirAffineWitness at hok
+  have hProps := of_decide_eq_true hok
+  rcases hProps with ⟨_, _, _, _, _, _, _, _, _, _, _, _, _, hChooseQ, hNonpersQ, _, _⟩
+  unfold whirAffineStageExactNumQ2 whirAffineStageSimpleNum
+  dsimp only
+  have hMaxEq : Nat.max q (w.n * (w.n - 1) / 2) = q :=
+    Nat.max_eq_left hChooseQ
+  rw [hMaxEq, Nat.mul_assoc w.sFolds _ q]
+  apply Nat.mul_le_mul_left
+  rw [Nat.add_mul, Nat.add_mul, Nat.one_mul]
+  exact Nat.add_le_add_left hNonpersQ _
+
+/-! ### §5.1 Mirror of the Deployed Folding Geometry (`pcs.rs::stage_geometry`) -/
+
+/-- Mirror of `pcs.rs::stage_geometry`: `(log₂ blowup, step_vars)` of every WHIR stage. -/
+def hemStageGeometry (nv : Nat) : List (Nat × Nat) :=
+  if nv ≤ 6 then
+    let es := if nv ≤ 3 then 1 else 2
+    [(4, nv - es)]
+  else if nv ≤ 11 then
+    let es := if nv ≤ 8 then 3 else 4
+    let rem := nv - es
+    let s0 := (rem + 1) / 2
+    [(2, s0), (4, rem - s0)]
+  else if nv ≤ 16 then
+    let es := if nv ≤ 13 then 4 else if nv ≤ 15 then 5 else 6
+    let rem := nv - es
+    let s0 := Nat.min 4 (rem - 4)
+    let s1 := (rem - s0) / 2
+    [(2, s0), (4, s1), (6, rem - s0 - s1)]
+  else if nv ≤ 20 then [(2, 5), (4, 3), (6, 4)]
+  else if nv = 21 then [(2, 6), (4, 3), (6, 4)]
+  else if nv = 22 then [(2, 6), (4, 4), (6, 4)]
+  else [(2, 6), (4, 4), (6, 3), (8, 3)]
+
+/-- Mirror of the `early_stop_vars` field produced by `pcs.rs::stage_geometry`. -/
+def hemEarlyStopVars (nv : Nat) : Nat :=
+  if nv ≤ 3 then 1 else if nv ≤ 6 then 2 else if nv ≤ 8 then 3 else if nv ≤ 13 then 4
+  else if nv ≤ 15 then 5 else if nv ≤ 16 then 6 else if nv ≤ 20 then nv - 12
+  else if nv = 23 then 7 else 8
+
+/-- Mirror of `WhirSecurityRegime::minimum_queries` for the two unconditional Johnson regimes:
+    `BciksJohnsonQrom128` uses `⌈512 / log₂ B⌉ + 2`, `BciksJohnsonClassical128` uses
+    `⌈256 / log₂ B⌉ + 1`. -/
+def hemJohnsonMinQueries (isQrom : Bool) (logBlowup : Nat) : Nat :=
+  if isQrom then natCeilDiv 512 logBlowup + 2 else natCeilDiv 256 logBlowup + 1
+
+/-- Resolved per-stage geometry: `n = blowup * 2^rem` coset fibers and folded degree bound
+    `d = 2^rem + 2`, where `rem` counts the variables left AFTER this stage's `stepVars` folds
+    (exactly the `n`, `d` computed inside `affine_schedule.rs`). -/
+structure HemStageGeom where
+  stageIdx : Nat
+  logBlowup : Nat
+  stepVars : Nat
+  n : Nat
+  d : Nat
+  deriving Repr, DecidableEq
+
+def hemStageGeomsAux : Nat → Nat → List (Nat × Nat) → List HemStageGeom
+  | _, _, [] => []
+  | idx, rem, (lb, sv) :: rest =>
+    { stageIdx := idx, logBlowup := lb, stepVars := sv,
+      n := 2 ^ lb * 2 ^ (rem - sv), d := 2 ^ (rem - sv) + 2 } ::
+      hemStageGeomsAux (idx + 1) (rem - sv) rest
+
+def hemStageGeoms (nv : Nat) : List HemStageGeom :=
+  hemStageGeomsAux 0 nv (hemStageGeometry nv)
+
+/-- Mirror of `WhirSchedule::validate` on the canonical geometry: at most `4` stages, blowups in
+    `{4, 16, 64, 256}`, every stage folds `1..6` variables and strictly fewer than remain, and
+    `early_stop_vars + ∑ step_vars = num_vars` with `1 ≤ early_stop_vars ≤ 8`. -/
+def hemStageGeometryValid (nv : Nat) : Bool :=
+  let g := hemStageGeometry nv
+  decide (1 ≤ g.length ∧ g.length ≤ 4) &&
+  g.all (fun p => (p.1 == 2 || p.1 == 4 || p.1 == 6 || p.1 == 8) &&
+    decide (1 ≤ p.2 ∧ p.2 ≤ 6)) &&
+  decide (hemEarlyStopVars nv + (g.map (·.2)).sum = nv) &&
+  decide (1 ≤ hemEarlyStopVars nv ∧ hemEarlyStopVars nv ≤ 8)
+
+/-- Every supported `num_vars ∈ 2..=24` has a schedule accepted by the `validate` mirror, and
+    every stage's Johnson QROM query count fits the wire cap `NUM_PCS_QUERIES = 512`. -/
+theorem hemStageGeometry_valid_and_under_query_cap :
+    ∀ nv : Nat, 2 ≤ nv → nv ≤ 24 →
+      hemStageGeometryValid nv = true ∧
+      ∀ p ∈ hemStageGeometry nv, hemJohnsonMinQueries true p.1 ≤ 512 := by
+  have hAll : ((List.range 23).all fun i =>
+      hemStageGeometryValid (i + 2) &&
+      (hemStageGeometry (i + 2)).all (fun p => decide (hemJohnsonMinQueries true p.1 ≤ 512))) = true := by
+    decide +kernel
+  intro nv h2 h24
+  have h1 := List.all_eq_true.mp hAll (nv - 2) (List.mem_range.mpr (by omega))
+  have hEq : nv - 2 + 2 = nv := by omega
+  rw [hEq, Bool.and_eq_true] at h1
+  refine ⟨h1.1, fun p hp => ?_⟩
+  exact of_decide_eq_true (List.all_eq_true.mp h1.2 p hp)
+
+/-! ### §5.2 The Deployed Witness Table (`affine_schedule.rs::WITNESSES`, Verbatim) -/
+
+/-- VERBATIM copy of `crates/qsag-agg/src/pcs/affine_schedule.rs::WITNESSES`:
+    `(num_vars, stage, A, m, D)` with `B = A - 1`, for the canonical `BciksJohnsonQrom128`
+    schedule. Stages whose query count reaches the fiber count are exhaustively queried and carry
+    no row. -/
+def hemJohnsonQromWitnessTable : List (Nat × Nat × Nat × Nat × Nat) :=
+  [ (9, 1, 127, 1, 20),
+    (10, 0, 329, 1, 14),
+    (10, 1, 126, 1, 20),
+    (11, 0, 328, 1, 14),
+    (11, 1, 126, 1, 20),
+    (12, 0, 579, 4, 75),
+    (12, 1, 310, 4, 59),
+    (12, 2, 174, 8, 139),
+    (13, 0, 1091, 8, 143),
+    (13, 1, 570, 16, 351),
+    (13, 2, 173, 8, 135),
+    (14, 0, 2119, 32, 863),
+    (14, 1, 1092, 32, 860),
+    (14, 2, 308, 32, 706),
+    (15, 0, 4178, 64, 2079),
+    (15, 1, 1091, 32, 844),
+    (15, 2, 308, 32, 706),
+    (16, 0, 8296, 128, 5567),
+    (16, 1, 2137, 64, 2392),
+    (16, 2, 580, 64, 1921),
+    (17, 0, 8295, 128, 5503),
+    (17, 1, 2137, 64, 2392),
+    (17, 2, 307, 32, 691),
+    (18, 0, 16531, 128, 7295),
+    (18, 1, 4229, 64, 3418),
+    (18, 2, 579, 64, 1890),
+    (19, 0, 33003, 128, 10879),
+    (19, 1, 8413, 64, 5471),
+    (19, 2, 1124, 32, 1305),
+    (20, 0, 65948, 128, 18111),
+    (20, 1, 16782, 32, 3286),
+    (20, 2, 2215, 32, 2149),
+    (21, 0, 65947, 128, 18047),
+    (21, 1, 16782, 32, 3286),
+    (21, 2, 2215, 32, 2149),
+    (22, 0, 131836, 128, 32511),
+    (22, 1, 16781, 32, 3270),
+    (22, 2, 2215, 32, 2149),
+    (23, 0, 263614, 64, 14494),
+    (23, 1, 33518, 32, 5870),
+    (23, 2, 8759, 16, 2733),
+    (23, 3, 2254, 32, 2672),
+    (24, 0, 527170, 64, 27164),
+    (24, 1, 66992, 32, 11069),
+    (24, 2, 17484, 16, 5228),
+    (24, 3, 4482, 16, 2067) ]
+
+def hemJohnsonQromTableRow (nv stage : Nat) : Option (Nat × Nat × Nat × Nat × Nat) :=
+  hemJohnsonQromWitnessTable.find? (fun r => r.1 == nv && r.2.1 == stage)
+
+/-- Stage is exhaustively queried (`num_queries ≥ n`): every fiber is opened, no proximity
+    witness is needed (`if spec.num_queries as u128 >= n { continue; }`). -/
+def hemJohnsonQromStageExhaustive (g : HemStageGeom) : Bool :=
+  decide (g.n ≤ hemJohnsonMinQueries true g.logBlowup)
+
+/-- The deployed stage witness: geometry from `hemStageGeoms`, `(A, m, D)` from the table row,
+    `B = A - 1`, and the deployed QROM query count. -/
+def hemJohnsonQromStageWitness (nv : Nat) (g : HemStageGeom) : Option WhirAffineWitness :=
+  (hemJohnsonQromTableRow nv g.stageIdx).map (fun r =>
+    { n := g.n, d := g.d, sFolds := g.stepVars, A := r.2.2.1, B := r.2.2.1 - 1,
+      m := r.2.2.2.1, D := r.2.2.2.2,
+      queries := hemJohnsonMinQueries true g.logBlowup, queryTargetBits := 256 })
+
+/-- Per-stage coverage check mirroring one loop iteration of
+    `finite_johnson_witnesses_cover_every_canonical_stage`: an exhaustive stage must carry no
+    row; every other stage must carry a row passing `checkWhirAffineWitness` with
+    `loss * (list + 2 * list0 + 1) + 1 < 2000`. -/
+def hemJohnsonQromStageCovered (q nv : Nat) (g : HemStageGeom) : Bool :=
+  if hemJohnsonQromStageExhaustive g = true then
+    (hemJohnsonQromTableRow nv g.stageIdx).isNone
+  else
+    match hemJohnsonQromStageWitness nv g with
+    | none => false
+    | some w => checkWhirAffineWitness w q && decide (whirAffineStageSimpleNum w + 1 < 2000)
+
+/-- Number of non-exhaustive canonical stages across `num_vars ∈ 2..=24` (the Rust `seen`). -/
+def hemJohnsonQromSeenCount : Nat :=
+  ((List.range 23).map (fun i =>
+    ((hemStageGeoms (i + 2)).filter (fun g => !hemJohnsonQromStageExhaustive g)).length)).sum
+
+/-- **Deployed-Table Coverage Certificate (`hem_johnson_qrom_witnesses_cover_every_canonical_stage`)**:
+    Lean mirror of the Rust test `finite_johnson_witnesses_cover_every_canonical_stage`, decided
+    by the kernel over `GoldilocksExt4` (`q = p^4`) on the VERBATIM deployed table:
+    1. for every `num_vars ∈ 2..=24` and every stage of the canonical `BciksJohnsonQrom128`
+       schedule, the stage is either exhaustively queried or carries a table row satisfying every
+       `[CWYZ26]` Theorem 4.8 + Theorem 5.1 side condition, the exact distinct-fiber `< 2^-256`
+       query bound, and folding numerator `+ 1 < 2000`;
+    2. the number of non-exhaustive stages equals the table length (`seen == WITNESSES.len()`),
+       so the table has no dead rows. -/
+theorem hem_johnson_qrom_witnesses_cover_every_canonical_stage :
+    (∀ nv : Nat, 2 ≤ nv → nv ≤ 24 → ∀ g ∈ hemStageGeoms nv,
+      hemJohnsonQromStageCovered (goldilocksPrime ^ 4) nv g = true) ∧
+    hemJohnsonQromSeenCount = hemJohnsonQromWitnessTable.length := by
+  have hAll : ((List.range 23).all fun i =>
+      (hemStageGeoms (i + 2)).all
+        (hemJohnsonQromStageCovered (goldilocksPrime ^ 4) (i + 2))) = true := by
+    decide +kernel
+  refine ⟨?_, by decide +kernel⟩
+  intro nv h2 h24 g hg
+  have h1 := List.all_eq_true.mp hAll (nv - 2) (List.mem_range.mpr (by omega))
+  have hEq : nv - 2 + 2 = nv := by omega
+  rw [hEq] at h1
+  exact List.all_eq_true.mp h1 g hg
+
+/-- Stage witnesses for `Hem` WHIR at `num_vars = nv`.
+    * `isQrom = true` (`BciksJohnsonQrom128`): EXACTLY the deployed rows of
+      `hemJohnsonQromWitnessTable` on the deployed geometry, for every `nv`.
+    * `isQrom = false` (`BciksJohnsonClassical128`, `q = (129, 65, 44, 33)`): Lean-side witnesses
+      at `nv = 20` and `nv = 24` only. The Rust tree ships NO classical-regime table (the QROM rows
+      do not meet the `2^-128` target at half the queries), so these rows have no Rust twin. -/
+def whirAffineStageWitnesses (nv : Nat) (isQrom : Bool) : List WhirAffineWitness :=
+  if isQrom then
+    (hemStageGeoms nv).filterMap (fun g =>
+      if hemJohnsonQromStageExhaustive g = true then none else hemJohnsonQromStageWitness nv g)
+  else if nv = 20 then
+    [ { n := 131072, d := 32770, sFolds := 5, A := 65884, B := 65798,
+        m := 122, D := 12150, queries := 129, queryTargetBits := 128 },
+      { n := 65536,  d := 4098,  sFolds := 3, A := 16734, B := 16648,
+        m := 48,  D := 3072,  queries := 65, queryTargetBits := 128 },
+      { n := 16384,  d := 258,   sFolds := 4, A := 2177,  B := 2148,
+        m := 64,  D := 3072,  queries := 44, queryTargetBits := 128 } ]
+  else if nv = 24 then
+    [ { n := 1048576, d := 262146, sFolds := 6, A := 527106, B := 526403,
+        m := 64,  D := 11007, queries := 129, queryTargetBits := 128 },
+      { n := 262144,  d := 16386,  sFolds := 4, A := 66944,  B := 66594,
+        m := 24,  D := 3200,  queries := 65, queryTargetBits := 128 },
+      { n := 131072,  d := 2050,   sFolds := 3, A := 17446,  B := 17184,
+        m := 12,  D := 768,   queries := 44, queryTargetBits := 128 },
+      { n := 65536,   d := 258,    sFolds := 3, A := 4452,   B := 4369,
+        m := 16,  D := 1536,  queries := 33, queryTargetBits := 128 } ]
+  else []
+
+/-- Columns beyond this Y degree have zero dimension at weighted budget `m*A`. -/
+def gsDeployedYDegree (w : WhirAffineWitness) : Nat :=
+  min w.D ((w.m * w.A - 1) / w.d)
+
+/-- All 46 deployed rows satisfy the genuine bivariate Hasse-interpolation dimension
+    inequality, including the multiplicity-one rows. This is separate from the trivariate
+    affine-proximity explainer checked by `checkWhirAffineWitness`. -/
+theorem hem_gs_interpolation_dimensions :
+    ∀ nv : Nat, 2 ≤ nv → nv ≤ 24 → ∀ w ∈ whirAffineStageWitnesses nv true,
+      w.n * (w.m * (w.m + 1) / 2) <
+        gsMonomialCount (w.m * w.A) w.d (gsDeployedYDegree w) := by
+  have hAll : ((List.range 23).all (fun i =>
+      (whirAffineStageWitnesses (i + 2) true).all (fun w =>
+        decide (w.n * (w.m * (w.m + 1) / 2) <
+          gsMonomialCount (w.m * w.A) w.d (gsDeployedYDegree w))))) = true := by
+    decide +kernel
+  intro nv h2 h24 w hw
+  have h := List.all_eq_true.mp hAll (nv - 2) (List.mem_range.mpr (by omega))
+  have he : nv - 2 + 2 = nv := by omega
+  rw [he] at h
+  exact of_decide_eq_true (List.all_eq_true.mp h w hw)
+
+/-- Executable interpolation witnesses at every deployed row, over any decidable field and
+    any received word of the deployed length. No decoder or polynomial witness is an input. -/
+theorem hem_gs_constructive_interpolation {F : Type} [LawfulField F] [DecidableEq F]
+    (nv : Nat) (h2 : 2 ≤ nv) (h24 : nv ≤ 24)
+    (w : WhirAffineWitness) (hw : w ∈ whirAffineStageWitnesses nv true)
+    (points : List (F × F)) (hN : points.length = w.n) :
+    let B := w.m * w.A
+    let D := gsDeployedYDegree w
+    let coeffs := solveHomogeneous (gsMonomialCount B w.d D)
+      (gsInterpolationRows B w.d D w.m points)
+    coeffs.length = gsMonomialCount B w.d D ∧
+    coeffs.any (fun c => !(decide (c = CommRingOps.zero))) = true ∧
+    ∀ p ∈ points, ∀ r s, r + s < w.m → gsHasseEval B w.d D coeffs (r, s) p = CommRingOps.zero := by
+  apply guruswami_sudan_interpolation
+  rw [hN]
+  exact hem_gs_interpolation_dimensions nv h2 h24 w hw
+
+/-- All classical-regime stage witnesses (`nv = 20` and `nv = 24`) also satisfy the exact bivariate
+    Hasse-interpolation dimension inequality. -/
+theorem hem_gs_classical_interpolation_dimensions :
+    (∀ w ∈ whirAffineStageWitnesses 20 false,
+      w.n * (w.m * (w.m + 1) / 2) <
+        gsMonomialCount (w.m * w.A) w.d (gsDeployedYDegree w)) ∧
+    (∀ w ∈ whirAffineStageWitnesses 24 false,
+      w.n * (w.m * (w.m + 1) / 2) <
+        gsMonomialCount (w.m * w.A) w.d (gsDeployedYDegree w)) := by
+  constructor <;> decide +kernel
+
+/-- **Unconditional Guruswami–Sudan List Bound Across All 46 Deployed `BciksJohnsonQrom128` Rows
+    (`hem_gs_deployed_list_bound`)**:
+    For EVERY `nv ∈ 2..=24`, EVERY deployed stage witness `w ∈ whirAffineStageWitnesses nv true`,
+    ANY decidable field `F`, ANY duplicate-free domain `domain : List F` of length `w.n`, ANY
+    received word `word : F → F`, and ANY duplicate-free list `polys : List (GsUniPoly F)` of
+    degree-`≤ w.d` polynomials each agreeing with `word` on `≥ w.A` distinct points of `domain`,
+    **`polys.length ≤ gsDeployedYDegree w ∧ polys.length ≤ w.D`** (`0` interpolant or candidate-list
+    assumptions!). -/
+theorem hem_gs_deployed_list_bound {F : Type} [LawfulField F] [DecidableEq F]
+    (nv : Nat) (h2 : 2 ≤ nv) (h24 : nv ≤ 24)
+    (w : WhirAffineWitness) (hw : w ∈ whirAffineStageWitnesses nv true)
+    (domain : List F) (hDomNd : domain.Nodup) (hDomLen : domain.length = w.n)
+    (word : F → F)
+    (polys : List (GsUniPoly F)) (hDistinct : polys.Nodup)
+    (hClose : ∀ P ∈ polys, P.val.length ≤ w.d + 1 ∧
+      w.A ≤ (domain.filter (fun x => decide (evalCoeffs P.val x = word x))).length) :
+    polys.length ≤ gsDeployedYDegree w ∧ polys.length ≤ w.D := by
+  have hDim : domain.length * (w.m * (w.m + 1) / 2) <
+      gsMonomialCount (w.m * w.A) w.d (gsDeployedYDegree w) := by
+    rw [hDomLen]
+    exact hem_gs_interpolation_dimensions nv h2 h24 w hw
+  have hBound := guruswami_sudan_filter_list_bound domain word w.d w.A (gsDeployedYDegree w)
+    w.m hDomNd hDim polys hDistinct hClose
+  exact ⟨hBound, Nat.le_trans hBound (Nat.min_le_left _ _)⟩
+
+/-- Unconditional Guruswami–Sudan list bound for the `BciksJohnsonClassical128` witnesses at
+    `nv = 20` and `nv = 24`. -/
+theorem hem_gs_classical_list_bound {F : Type} [LawfulField F] [DecidableEq F]
+    (nv : Nat) (hnv : nv = 20 ∨ nv = 24)
+    (w : WhirAffineWitness) (hw : w ∈ whirAffineStageWitnesses nv false)
+    (domain : List F) (hDomNd : domain.Nodup) (hDomLen : domain.length = w.n)
+    (word : F → F)
+    (polys : List (GsUniPoly F)) (hDistinct : polys.Nodup)
+    (hClose : ∀ P ∈ polys, P.val.length ≤ w.d + 1 ∧
+      w.A ≤ (domain.filter (fun x => decide (evalCoeffs P.val x = word x))).length) :
+    polys.length ≤ gsDeployedYDegree w ∧ polys.length ≤ w.D := by
+  have hDim : domain.length * (w.m * (w.m + 1) / 2) <
+      gsMonomialCount (w.m * w.A) w.d (gsDeployedYDegree w) := by
+    rw [hDomLen]
+    rcases hnv with rfl | rfl
+    · exact hem_gs_classical_interpolation_dimensions.1 w hw
+    · exact hem_gs_classical_interpolation_dimensions.2 w hw
+  have hBound := guruswami_sudan_filter_list_bound domain word w.d w.A (gsDeployedYDegree w)
+    w.m hDomNd hDim polys hDistinct hClose
+  exact ⟨hBound, Nat.le_trans hBound (Nat.min_le_left _ _)⟩
+
+/-- **`#tooth` & Beyond-Sudan `m = 2` Inhabitedness Witness
+    (`tooth_guruswami_sudan_m2_beyond_sudan_and_sharp_threshold`)**:
+    Over `Goldilocks` on `domain = [0, 1, 2, 3, 4, 5]` (`n = 6, d = 2, D = 3`):
+    1. **Strictly beyond unique decoding AND beyond `m = 1` Sudan**: at `A = 4` (`2 * A = 8 ≤ n + d`),
+       `m = 1` Sudan fails for EVERY `D` (`gsMonomialCount 4 2 D ≤ 6`), two distinct degree-`≤ 2`
+       polynomials (`0` and `X(X - 1)`) simultaneously agree with a single received word on `4` points,
+       and `m = 2` `guruswami_sudan_unconditional_list_bound` proves `polys.length ≤ 3`;
+    2. **Sharp `#tooth` threshold sensitivity (`A = 4 → A = 3`)**: dropping the agreement threshold
+       by ONE to `A = 3` exhibits **4 > 3 = D** distinct canonical degree-`≤ 2` polynomials
+       (`0`, `-X + X^2`, `-3 + 3X`, `-28 + 18X - 2X^2`) all agreeing with `w = [0, 0, 0, 6, 12, 12]`
+       on `3` distinct points of `domain`! -/
+theorem tooth_guruswami_sudan_m2_beyond_sudan_and_sharp_threshold :
+    let g := Goldilocks.ofNat
+    let dom : List Goldilocks := [g 0, g 1, g 2, g 3, g 4, g 5]
+    -- Part 1: `m = 1` Sudan fails (`≤ 6` monomials for all `D`), `2` distinct close polys at `A = 4`, `m = 2` bounds `≤ 3`
+    (∀ D : Nat, gsMonomialCount 4 2 D ≤ 6) ∧
+    dom.length * (2 * (2 + 1) / 2) < gsMonomialCount (2 * 4) 2 3 ∧
+    (∃ (wordAtFour : Goldilocks → Goldilocks) (twoPolys : List (GsUniPoly Goldilocks)),
+      twoPolys.Nodup ∧ twoPolys.length = 2 ∧
+      (∀ P ∈ twoPolys, P.val.length ≤ 2 + 1 ∧
+        ∃ xs : List Goldilocks, xs.Nodup ∧ 4 ≤ xs.length ∧
+          ∀ x ∈ xs, x ∈ dom ∧ evalCoeffs P.val x = wordAtFour x) ∧
+      twoPolys.length ≤ 3) ∧
+    -- Part 2 (`#tooth`): at `A = 3` (`A - 1`), `4 > 3` distinct degree-`≤ 2` polys agree on `3` points!
+    (∃ (w3 : Goldilocks → Goldilocks) (fourPolys : List (GsUniPoly Goldilocks)),
+      fourPolys.Nodup ∧ 3 < fourPolys.length ∧
+      ∀ P ∈ fourPolys, P.val.length ≤ 2 + 1 ∧
+        ∃ xs : List Goldilocks, xs.Nodup ∧ 3 ≤ xs.length ∧
+          ∀ x ∈ xs, x ∈ dom ∧ evalCoeffs P.val x = w3 x) := by
+  dsimp only
+  let g := Goldilocks.ofNat
+  let dom : List Goldilocks := [g 0, g 1, g 2, g 3, g 4, g 5]
+  refine ⟨?_, by decide, ?_, ?_⟩
+  · intro D
+    have hZeroTail : ∀ (k start : Nat), 2 ≤ start →
+        ((List.range k).map (fun j => 4 - (start + j) * 2)).sum = 0 := by
+      intro k
+      induction k with
+      | zero => intro _ _; rfl
+      | succ k' ih =>
+        intro start hs
+        rw [gs_range_succ_map, List.map_cons, List.sum_cons, List.map_map]
+        have hhead : 4 - (start + 0) * 2 = 0 := by omega
+        have htail : (List.range k').map ((fun j => 4 - (start + j) * 2) ∘ (· + 1)) =
+            (List.range k').map (fun j => 4 - ((start + 1) + j) * 2) := by
+          apply List.map_congr_left
+          intro j _
+          dsimp only [Function.comp]
+          have heq : start + (j + 1) = (start + 1) + j := by omega
+          rw [heq]
+        rw [hhead, htail, ih (start + 1) (by omega)]
+    rcases D with _ | ⟨_ | D'⟩
+    · decide
+    · decide
+    · unfold gsMonomialCount
+      rw [gs_range_succ_map, List.map_cons, List.sum_cons, List.map_map,
+          gs_range_succ_map, List.map_cons, List.sum_cons, List.map_map]
+      have htail : (List.range (D' + 1)).map (((fun j => 4 - j * 2) ∘ (· + 1)) ∘ (· + 1)) =
+          (List.range (D' + 1)).map (fun j => 4 - (2 + j) * 2) := by
+        apply List.map_congr_left
+        intro j _
+        dsimp only [Function.comp]
+        have heq : j + 1 + 1 = 2 + j := by omega
+        rw [heq]
+      rw [htail, hZeroTail (D' + 1) 2 (Nat.le_refl 2)]
+      decide
+  · let wordAtFour : Goldilocks → Goldilocks := fun x =>
+      if x = g 4 then g 12 else if x = g 5 then g 20 else g 0
+    let p0 : GsUniPoly Goldilocks := GsUniPoly.ofCoeffs []
+    let p1 : GsUniPoly Goldilocks := GsUniPoly.ofCoeffs [g 0, CommRingOps.neg (g 1), g 1]
+    have hnd : ([p0, p1] : List (GsUniPoly Goldilocks)).Nodup := by decide
+    have hClose : ∀ P ∈ ([p0, p1] : List (GsUniPoly Goldilocks)),
+        P.val.length ≤ 2 + 1 ∧
+        ∃ xs : List Goldilocks, xs.Nodup ∧ 4 ≤ xs.length ∧
+          ∀ x ∈ xs, x ∈ dom ∧ evalCoeffs P.val x = wordAtFour x := by
+      intro P hP
+      simp only [List.mem_cons, List.not_mem_nil, or_false] at hP
+      rcases hP with rfl | rfl
+      · refine ⟨by decide, [g 0, g 1, g 2, g 3], by decide, by decide, ?_⟩
+        intro x hx; simp only [List.mem_cons, List.not_mem_nil, or_false] at hx
+        rcases hx with rfl | rfl | rfl | rfl <;> decide
+      · refine ⟨by decide, [g 0, g 1, g 4, g 5], by decide, by decide, ?_⟩
+        intro x hx; simp only [List.mem_cons, List.not_mem_nil, or_false] at hx
+        rcases hx with rfl | rfl | rfl | rfl <;> decide
+    exact ⟨wordAtFour, [p0, p1], hnd, rfl, hClose,
+      guruswami_sudan_unconditional_list_bound dom wordAtFour 2 4 3 2 (by decide)
+        [p0, p1] hnd hClose⟩
+  · let w3 : Goldilocks → Goldilocks := fun x =>
+      if x = g 3 then g 6 else if x = g 4 ∨ x = g 5 then g 12 else g 0
+    let q0 : GsUniPoly Goldilocks := GsUniPoly.ofCoeffs []
+    let q1 : GsUniPoly Goldilocks := GsUniPoly.ofCoeffs [g 0, CommRingOps.neg (g 1), g 1]
+    let q2 : GsUniPoly Goldilocks := GsUniPoly.ofCoeffs [CommRingOps.neg (g 3), g 3]
+    let q3 : GsUniPoly Goldilocks :=
+      GsUniPoly.ofCoeffs [CommRingOps.neg (g 28), g 18, CommRingOps.neg (g 2)]
+    refine ⟨w3, [q0, q1, q2, q3], by decide, by decide, ?_⟩
+    intro P hP
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hP
+    rcases hP with rfl | rfl | rfl | rfl
+    · refine ⟨by decide, [g 0, g 1, g 2], by decide, by decide, ?_⟩
+      intro x hx; simp only [List.mem_cons, List.not_mem_nil, or_false] at hx
+      rcases hx with rfl | rfl | rfl <;> decide
+    · refine ⟨by decide, [g 0, g 3, g 4], by decide, by decide, ?_⟩
+      intro x hx; simp only [List.mem_cons, List.not_mem_nil, or_false] at hx
+      rcases hx with rfl | rfl | rfl <;> decide
+    · refine ⟨by decide, [g 1, g 3, g 5], by decide, by decide, ?_⟩
+      intro x hx; simp only [List.mem_cons, List.not_mem_nil, or_false] at hx
+      rcases hx with rfl | rfl | rfl <;> decide
+    · refine ⟨by decide, [g 2, g 4, g 5], by decide, by decide, ?_⟩
+      intro x hx; simp only [List.mem_cons, List.not_mem_nil, or_false] at hx
+      rcases hx with rfl | rfl | rfl <;> decide
+
+
+/-- The `nv = 20` and `nv = 24` QROM witness lists ARE the deployed `(A, B = A - 1, m, D)` rows
+    on the deployed `(n, d, s_i, q_i)` geometry (`q = (258, 130, 88, 66)`). -/
+theorem whirAffineStageWitnesses_qrom_eq_deployed :
+    whirAffineStageWitnesses 20 true =
+      [ { n := 131072, d := 32770, sFolds := 5, A := 65948, B := 65947,
+          m := 128, D := 18111, queries := 258, queryTargetBits := 256 },
+        { n := 65536, d := 4098, sFolds := 3, A := 16782, B := 16781,
+          m := 32, D := 3286, queries := 130, queryTargetBits := 256 },
+        { n := 16384, d := 258, sFolds := 4, A := 2215, B := 2214,
+          m := 32, D := 2149, queries := 88, queryTargetBits := 256 } ] ∧
+    whirAffineStageWitnesses 24 true =
+      [ { n := 1048576, d := 262146, sFolds := 6, A := 527170, B := 527169,
+          m := 64, D := 27164, queries := 258, queryTargetBits := 256 },
+        { n := 262144, d := 16386, sFolds := 4, A := 66992, B := 66991,
+          m := 32, D := 11069, queries := 130, queryTargetBits := 256 },
+        { n := 131072, d := 2050, sFolds := 3, A := 17484, B := 17483,
+          m := 16, D := 5228, queries := 88, queryTargetBits := 256 },
+        { n := 65536, d := 258, sFolds := 3, A := 4482, B := 4481,
+          m := 16, D := 2067, queries := 66, queryTargetBits := 256 } ] := by
+  constructor <;> decide +kernel
+
+/-- **Kernel-Decided `Theorem 4.8 + Theorem 5.1` Soundness Certificate (`cwyz26_whir_nv20_and_nv24_all_stages_valid`)**:
+    Certifies by exact kernel arithmetic (`0` floating point, `0` trust) that ALL 14 stage
+    witnesses across `nv = 20` (`3` stages) and `nv = 24` (`4` stages) for both
+    `BciksJohnsonClassical128` (`q = (129, 65, 44, 33)`, Lean-side rows) and `BciksJohnsonQrom128`
+    (`q = (258, 130, 88, 66)`, the DEPLOYED rows) over `GoldilocksExt4` (`q = goldilocksPrime ^ 4`)
+    satisfy `checkWhirAffineWitness` AND have commit-folding numerator **`< 1900`**
+    (`> 245` bits of unconditional folding soundness per stage!). -/
+theorem cwyz26_whir_nv20_and_nv24_all_stages_valid :
+    let q := goldilocksPrime ^ 4
+    (∀ w ∈ whirAffineStageWitnesses 20 false,
+      checkWhirAffineWitness w q = true ∧ whirAffineStageSimpleNum w < 1900) ∧
+    (∀ w ∈ whirAffineStageWitnesses 20 true,
+      checkWhirAffineWitness w q = true ∧ whirAffineStageSimpleNum w < 1900) ∧
+    (∀ w ∈ whirAffineStageWitnesses 24 false,
+      checkWhirAffineWitness w q = true ∧ whirAffineStageSimpleNum w < 1900) ∧
+    (∀ w ∈ whirAffineStageWitnesses 24 true,
+      checkWhirAffineWitness w q = true ∧ whirAffineStageSimpleNum w < 1900) := by
+  decide +kernel
+
+/-- **`#tooth`: the checker is sensitive to the deployed table and to the sampling model.**
+    1. Raising the deployed `nv = 24` stage-0 agreement threshold by ONE (`A = 527171`) breaks the
+       exact `2^-256` distinct-fiber query bound;
+    2. the superseded Lean-only row (`A = 527106, B = 526403, m = 64, D = 11007`) at the deployed
+       `258` queries is NOT what Rust ships, and the deployed row fails the weaker
+       with-replacement bound `((A + s)/n)^q < 2^-256` that the previous checker demanded. -/
+theorem tooth_checkWhirAffineWitness_rejects_perturbed_rows :
+    checkWhirAffineWitness
+      { n := 1048576, d := 262146, sFolds := 6, A := 527171, B := 527170,
+        m := 64, D := 27164, queries := 258, queryTargetBits := 256 }
+      (goldilocksPrime ^ 4) = false ∧
+    ¬ ((527170 + 6) ^ 258 * 2 ^ 256 < 1048576 ^ 258) ∧
+    affineFallingFactorial (527170 + 6) 258 * 2 ^ 256 < affineFallingFactorial 1048576 258 := by
+  refine ⟨by decide +kernel, by decide +kernel, by decide +kernel⟩
+
+
+/-! ## §8. Constructive Candidate-List-Free Decoder (`gsDecodeList`, `0 Classical.choice`) -/
+
+/-- Constructive Newton polynomial interpolation over `[LawfulField F]` (`0` `Classical.choice`).
+    On any `Nodup` list `pts`, returns a canonical trimmed polynomial of length `≤ pts.length`
+    matching `word` at every `x ∈ pts`. -/
+def newtonInterp {F : Type} [LawfulField F] [DecidableEq F] (word : F → F) : List F → List F
+  | [] => []
+  | x₀ :: xs =>
+    let P₀ := newtonInterp word xs
+    let V := vanishingPoly xs
+    let c := CommRingOps.mul (CommRingOps.sub (word x₀) (RoundPoly.evalCoeffs P₀ x₀))
+      (LawfulField.inv (RoundPoly.evalCoeffs V x₀))
+    pAdd P₀ (pScale c V)
+
+theorem newtonInterp_trimmed {F : Type} [LawfulField F] [DecidableEq F] (word : F → F) :
+    ∀ (pts : List F), IsTrimmed (newtonInterp word pts)
+  | [] => rfl
+  | _ :: _ => trimPoly_idem _
+
+theorem newtonInterp_length_le {F : Type} [LawfulField F] [DecidableEq F] (word : F → F) :
+    ∀ (pts : List F), (newtonInterp word pts).length ≤ pts.length
+  | [] => Nat.le_refl 0
+  | _ :: xs => by
+    unfold newtonInterp
+    apply pAdd_length_le
+    · exact Nat.le_trans (newtonInterp_length_le word xs) (Nat.le_succ xs.length)
+    · unfold pScale
+      exact Nat.le_trans (trimPoly_length_le _)
+        (by rw [List.length_map, vanishingPoly_length, List.length_cons]; exact Nat.le_refl _)
+
+theorem evalCoeffs_newtonInterp {F : Type} [LawfulField F] [DecidableEq F] (word : F → F) :
+    ∀ {pts : List F}, pts.Nodup →
+      ∀ x ∈ pts, RoundPoly.evalCoeffs (newtonInterp word pts) x = word x
+  | [], _, _, hx => by cases hx
+  | x₀ :: xs, hnd, x, hx => by
+    rcases hnd with _ | ⟨hnot, hnd'⟩
+    unfold newtonInterp
+    rw [evalCoeffs_pAdd, evalCoeffs_pScale]
+    cases hx with
+    | head =>
+      have hVne : RoundPoly.evalCoeffs (vanishingPoly xs) x₀ ≠ CommRingOps.zero :=
+        eval_vanishingPoly_ne_zero_of_not_mem (fun hm => hnot x₀ hm rfl)
+      rw [LawfulCommRing.mul_assoc,
+          LawfulCommRing.mul_comm (LawfulField.inv (RoundPoly.evalCoeffs (vanishingPoly xs) x₀)) _,
+          LawfulField.mul_inv_cancel hVne,
+          LawfulCommRing.mul_one,
+          LawfulCommRing.add_sub_cancel_left]
+    | tail _ hm =>
+      rw [eval_vanishingPoly_eq_zero_of_mem hm, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+      exact evalCoeffs_newtonInterp word hnd' x hm
+
+/-- All order-preserving sublists of `xs` of exact length `k`. -/
+def sublistsOfLen {α : Type} : Nat → List α → List (List α)
+  | 0, _ => [[]]
+  | _ + 1, [] => []
+  | k + 1, x :: xs => (sublistsOfLen k xs).map (x :: ·) ++ sublistsOfLen (k + 1) xs
+
+private theorem take_filter_mem_sublistsOfLen {α : Type} (pred : α → Bool) :
+    ∀ (k : Nat) (xs : List α),
+      k ≤ (xs.filter pred).length →
+      (xs.filter pred).take k ∈ sublistsOfLen k xs
+  | 0, _, _ => by simp [sublistsOfLen]
+  | _ + 1, [], h => by simp at h
+  | k + 1, x :: xs, h => by
+    unfold sublistsOfLen
+    rw [List.mem_append]
+    cases hpx : pred x with
+    | false =>
+      simp only [List.filter, hpx] at h ⊢
+      exact .inr (take_filter_mem_sublistsOfLen pred (k + 1) xs h)
+    | true =>
+      simp only [List.filter, hpx, List.length_cons, List.take] at h ⊢
+      exact .inl (List.mem_map.mpr ⟨_, take_filter_mem_sublistsOfLen pred k xs (by omega), rfl⟩)
+
+private theorem length_take_eq {α : Type} :
+    ∀ (k : Nat) (xs : List α), k ≤ xs.length → (xs.take k).length = k
+  | 0, _, _ => rfl
+  | _ + 1, [], h => by simp at h
+  | k + 1, _ :: xs, h => by
+    simp only [List.length_cons] at h
+    simp only [List.take, List.length_cons, length_take_eq k xs (by omega)]
+
+private theorem mem_of_mem_take {α : Type} :
+    ∀ (k : Nat) {xs : List α} {z : α}, z ∈ xs.take k → z ∈ xs
+  | 0, _, _, h => by cases h
+  | _ + 1, [], _, h => by cases h
+  | k + 1, _ :: xs, _, h => by
+    simp only [List.take, List.mem_cons] at h
+    rcases h with rfl | hm
+    · exact .head _
+    · exact .tail _ (mem_of_mem_take k hm)
+
+private theorem nodup_take {α : Type} :
+    ∀ (k : Nat) {xs : List α}, xs.Nodup → (xs.take k).Nodup
+  | 0, _, _ => .nil
+  | _ + 1, [], _ => .nil
+  | k + 1, _ :: xs, hnd => by
+    rcases hnd with _ | ⟨hnot, hnd'⟩
+    simp only [List.take]
+    exact List.Pairwise.cons (fun z hz heq => hnot z (mem_of_mem_take k hz) heq) (nodup_take k hnd')
+
+/-- Constructive duplicate removal (`0` `Classical.choice`). -/
+def dedupEq {α : Type} [DecidableEq α] : List α → List α
+  | [] => []
+  | x :: xs =>
+    let rest := dedupEq xs
+    if x ∈ rest then rest else x :: rest
+
+theorem mem_dedupEq {α : Type} [DecidableEq α] (z : α) :
+    ∀ (xs : List α), z ∈ dedupEq xs ↔ z ∈ xs
+  | [] => Iff.rfl
+  | x :: xs => by
+    unfold dedupEq
+    dsimp only
+    if hmem : x ∈ dedupEq xs then
+      simp only [hmem, ↓reduceIte, List.mem_cons]
+      constructor
+      · intro hz; exact .inr ((mem_dedupEq z xs).mp hz)
+      · rintro (rfl | hz)
+        · exact hmem
+        · exact (mem_dedupEq z xs).mpr hz
+    else
+      simp only [hmem, ↓reduceIte, List.mem_cons]
+      exact or_congr Iff.rfl (mem_dedupEq z xs)
+
+theorem dedupEq_nodup {α : Type} [DecidableEq α] :
+    ∀ (xs : List α), (dedupEq xs).Nodup
+  | [] => .nil
+  | x :: xs => by
+    unfold dedupEq
+    dsimp only
+    if hmem : x ∈ dedupEq xs then
+      simp only [hmem, ↓reduceIte]
+      exact dedupEq_nodup xs
+    else
+      simp only [hmem, ↓reduceIte]
+      exact List.Pairwise.cons (fun z hz heq => hmem (heq ▸ hz)) (dedupEq_nodup xs)
+
+private theorem pSub_length_le {F : Type} [LawfulCommRing F] [DecidableEq F]
+    (a b : List F) (B : Nat) (ha : a.length ≤ B) (hb : b.length ≤ B) :
+    (pSub a b).length ≤ B := by
+  apply length_trimPoly_le_of_coeffAt_zero _ B
+  intro k hk
+  rw [coeffAt_subCoeffs, coeffAt_eq_zero_of_ge a k (by omega),
+      coeffAt_eq_zero_of_ge b k (by omega), LawfulCommRing.sub_self]
+
+/-- Any two distinct canonical degree-`≤ d` polynomials disagree on at least one point of any
+    `Nodup` set `U` of size `≥ d + 1` (`0` `Classical.choice`). -/
+theorem gsUniPoly_exists_diff_on_domain {F : Type} [LawfulField F] [DecidableEq F]
+    {P₁ P₂ : GsUniPoly F} {d : Nat} {U : List F}
+    (hNe : P₁ ≠ P₂) (hDeg₁ : P₁.val.length ≤ d + 1) (hDeg₂ : P₂.val.length ≤ d + 1)
+    (hU : U.Nodup) (hULen : d + 1 ≤ U.length) :
+    ∃ x₀ ∈ U, RoundPoly.evalCoeffs P₁.val x₀ ≠ RoundPoly.evalCoeffs P₂.val x₀ := by
+  have hSubNe : pSub P₁.val P₂.val ≠ [] := by
+    intro hNil
+    apply hNe
+    apply Subtype.ext
+    apply eq_of_isTrimmed_coeffAt P₁.val P₂.val P₁.property P₂.property
+    intro k
+    have hk : coeffAt (pSub P₁.val P₂.val) k = CommRingOps.zero := by
+      rw [hNil]; exact coeffAt_nil k
+    rw [coeffAt_pSub] at hk
+    exact LawfulCommRing.sub_eq_zero_iff.mp hk
+  have hSubLen : (pSub P₁.val P₂.val).length ≤ U.length :=
+    Nat.le_trans (pSub_length_le P₁.val P₂.val (d + 1) hDeg₁ hDeg₂) hULen
+  rcases exists_nonroot_of_trim_ne_nil (trimPoly_idem _) hSubNe hU hSubLen with ⟨x₀, hx₀U, hx₀Ne⟩
+  refine ⟨x₀, hx₀U, fun hEq => hx₀Ne ?_⟩
+  change RoundPoly.evalCoeffs (pSub P₁.val P₂.val) x₀ = CommRingOps.zero
+  rw [evalCoeffs_pSub, hEq, LawfulCommRing.sub_self]
+
+/-- **Constructive Candidate-List-Free RS Decoder (`gsDecodeList`, `0 Classical.choice`)**:
+    Over ANY `[LawfulField F] [DecidableEq F]` (without field finiteness or prover-supplied hints),
+    computes the exact duplicate-free list of ALL canonical degree-`≤ d` polynomials agreeing with
+    `word` on at least `A` points of `domain` (whenever `d + 1 ≤ A`). -/
+def gsDecodeList {F : Type} [LawfulField F] [DecidableEq F]
+    (d A : Nat) (domain : List F) (word : F → F) : List (GsUniPoly F) :=
+  dedupEq (
+    ((sublistsOfLen (d + 1) domain).map (fun pts => GsUniPoly.ofCoeffs (newtonInterp word pts))).filter
+      (fun P => decide (P.val.length ≤ d + 1 ∧
+        A ≤ (domain.filter (fun x => decide (RoundPoly.evalCoeffs P.val x = word x))).length)))
+
+theorem gsDecodeList_nodup {F : Type} [LawfulField F] [DecidableEq F]
+    (d A : Nat) (domain : List F) (word : F → F) :
+    (gsDecodeList d A domain word).Nodup :=
+  dedupEq_nodup _
+
+/-- Exact completeness & soundness of `gsDecodeList`: whenever `domain.Nodup` and `d + 1 ≤ A`,
+    a canonical polynomial `P : GsUniPoly F` belongs to `gsDecodeList d A domain word` **if and only if**
+    `P.val.length ≤ d + 1` and `P` agrees with `word` on at least `A` points of `domain`! -/
+theorem mem_gsDecodeList_iff {F : Type} [LawfulField F] [DecidableEq F]
+    {d A : Nat} {domain : List F} (word : F → F)
+    (hDom : domain.Nodup) (hdA : d + 1 ≤ A) (P : GsUniPoly F) :
+    P ∈ gsDecodeList d A domain word ↔
+      (P.val.length ≤ d + 1 ∧
+        A ≤ (domain.filter (fun x => decide (RoundPoly.evalCoeffs P.val x = word x))).length) := by
+  unfold gsDecodeList
+  rw [mem_dedupEq, List.mem_filter]
+  constructor
+  · rintro ⟨_, hdec⟩
+    exact of_decide_eq_true hdec
+  · rintro ⟨hDeg, hAgree⟩
+    refine ⟨?_, decide_eq_true ⟨hDeg, hAgree⟩⟩
+    let pred : F → Bool := fun x => decide (RoundPoly.evalCoeffs P.val x = word x)
+    let S := domain.filter pred
+    have hSLen : d + 1 ≤ S.length := Nat.le_trans hdA hAgree
+    let pts := S.take (d + 1)
+    have hPtsSub : pts ∈ sublistsOfLen (d + 1) domain :=
+      take_filter_mem_sublistsOfLen pred (d + 1) domain hSLen
+    have hPtsLen : pts.length = d + 1 := length_take_eq (d + 1) S hSLen
+    have hPtsNd : pts.Nodup := nodup_take (d + 1) (List.Pairwise.filter _ hDom)
+    let Q : GsUniPoly F := GsUniPoly.ofCoeffs (newtonInterp word pts)
+    have hQVal : Q.val = newtonInterp word pts := newtonInterp_trimmed word pts
+    have hQDeg : Q.val.length ≤ d + 1 := by
+      rw [hQVal, ← hPtsLen]
+      exact newtonInterp_length_le word pts
+    have hPQEq : Q = P := by
+      if hEq : Q = P then
+        exact hEq
+      else
+        rcases gsUniPoly_exists_diff_on_domain hEq hQDeg hDeg hPtsNd
+            (by rw [hPtsLen]; exact Nat.le_refl _) with
+          ⟨x₀, hx₀Pts, hx₀Diff⟩
+        have hx₀S : x₀ ∈ S := mem_of_mem_take (d + 1) hx₀Pts
+        have hx₀P : RoundPoly.evalCoeffs P.val x₀ = word x₀ :=
+          of_decide_eq_true (List.mem_filter.mp hx₀S).2
+        have hx₀Q : RoundPoly.evalCoeffs Q.val x₀ = word x₀ := by
+          rw [hQVal]
+          exact evalCoeffs_newtonInterp word hPtsNd x₀ hx₀Pts
+        exact False.elim (hx₀Diff (hx₀Q.trans hx₀P.symm))
+    exact List.mem_map.mpr ⟨pts, hPtsSub, hPQEq⟩
+
+/-- **Unconditional Guruswami–Sudan List Size Bound on `gsDecodeList`**:
+    For ANY received word `word : F → F` on a `Nodup` domain `domain` and ANY valid GS parameter
+    tuple `(d, A, D, m)` with `d + 1 ≤ A` and `domain.length * (m * (m + 1) / 2) < gsMonomialCount (m * A) d D`,
+    the complete decoded list `gsDecodeList d A domain word` has length **`≤ D`**! -/
+theorem gsDecodeList_length_le {F : Type} [LawfulField F] [DecidableEq F]
+    (domain : List F) (word : F → F) (d A D m : Nat)
+    (hDom : domain.Nodup)
+    (hdA : d + 1 ≤ A)
+    (hDim : domain.length * (m * (m + 1) / 2) < gsMonomialCount (m * A) d D) :
+    (gsDecodeList d A domain word).length ≤ D := by
+  refine guruswami_sudan_filter_list_bound domain word d A D m hDom hDim
+    (gsDecodeList d A domain word) (gsDecodeList_nodup d A domain word) ?_
+  intro P hP
+  exact (mem_gsDecodeList_iff word hDom hdA P).mp hP
+
+/-- The deployed Johnson agreement thresholds permit complete interpolation-based decoding. -/
+theorem hem_gs_deployed_degree_lt_agreement :
+    ∀ nv : Nat, 2 ≤ nv → nv ≤ 24 → ∀ w ∈ whirAffineStageWitnesses nv true,
+      w.d + 1 ≤ w.A := by
+  have hAll : ((List.range 23).all (fun i =>
+      (whirAffineStageWitnesses (i + 2) true).all (fun w => decide (w.d + 1 ≤ w.A)))) = true := by
+    decide +kernel
+  intro nv h2 h24 w hw
+  have h := List.all_eq_true.mp hAll (nv - 2) (List.mem_range.mpr (by omega))
+  have he : nv - 2 + 2 = nv := by omega
+  rw [he] at h
+  exact of_decide_eq_true (List.all_eq_true.mp h w hw)
+
+/-- Complete, bounded candidate enumeration at the deployed Johnson radius. Neither the
+    candidate list nor Hasse multiplicity is supplied by the prover. -/
+theorem hem_gs_deployed_decoder {F : Type} [LawfulField F] [DecidableEq F]
+    (nv : Nat) (h2 : 2 ≤ nv) (h24 : nv ≤ 24)
+    (w : WhirAffineWitness) (hw : w ∈ whirAffineStageWitnesses nv true)
+    (domain : List F) (hDom : domain.Nodup) (hLen : domain.length = w.n)
+    (word : F → F) :
+    (gsDecodeList w.d w.A domain word).length ≤ w.D ∧
+    ∀ P : GsUniPoly F, P ∈ gsDecodeList w.d w.A domain word ↔
+      P.val.length ≤ w.d + 1 ∧
+      w.A ≤ (domain.filter (fun x => decide (RoundPoly.evalCoeffs P.val x = word x))).length := by
+  have hdA := hem_gs_deployed_degree_lt_agreement nv h2 h24 w hw
+  refine ⟨?_, fun P => mem_gsDecodeList_iff word hDom hdA P⟩
+  exact Nat.le_trans
+    (gsDecodeList_length_le domain word w.d w.A (gsDeployedYDegree w) w.m hDom hdA
+      (by rw [hLen]; exact hem_gs_interpolation_dimensions nv h2 h24 w hw))
+    (Nat.min_le_left _ _)
+
+/-- Actual distinct-query counts at all four `nv = 24` deployed stages. The hypothesis
+    states the agreement bound on the committed oracle; the conclusion counts accepting
+    tuples, with no replacement and no floating-point approximation. This does not assert
+    the separate affine-fold proximity-gap theorem. -/
+theorem hemJohnson_deployed_query_count {α : Type} [DecidableEq α]
+    (w : WhirAffineWitness) (hw : w ∈ whirAffineStageWitnesses 24 true)
+    (U : List α) (good : α → Bool) (hU : U.Nodup) (hLen : U.length = w.n)
+    (hGood : (U.filter good).length ≤ w.A + w.sFolds) :
+    ((affineDistinctTuples w.queries U).filter (fun t => t.all good)).length * 2 ^ 256 <
+      (affineDistinctTuples w.queries U).length := by
+  have hCount := affineDistinctTuples_all_good_le w.queries (w.A + w.sFolds) U good hU hGood
+  have hRows : ∀ v ∈ whirAffineStageWitnesses 24 true,
+      affineFallingFactorial (v.A + v.sFolds) v.queries * 2 ^ 256 <
+        affineFallingFactorial v.n v.queries := by decide +kernel
+  rw [affineDistinctTuples_length _ hU, hLen]
+  exact Nat.lt_of_le_of_lt (Nat.mul_le_mul_right (2 ^ 256) hCount) (hRows w hw)
+
+theorem tooth_deployed_agreement_threshold_increased :
+    ∃ w : WhirAffineWitness, w.A = 527171 ∧ w.queries = 258 ∧
+      checkWhirAffineWitness w (goldilocksPrime ^ 4) = false := by
+  let w : WhirAffineWitness :=
+    { n := 1048576, d := 262146, sFolds := 6, A := 527171, B := 527170,
+      m := 64, D := 27164, queries := 258, queryTargetBits := 256 }
+  exact ⟨w, rfl, rfl, tooth_checkWhirAffineWitness_rejects_perturbed_rows.1⟩
+
+#tooth_pair cwyz26_whir_nv20_and_nv24_all_stages_valid vs tooth_deployed_agreement_threshold_increased
+theorem inhabited_deployed_gs_dimensions :
+    ∃ (nv : Nat) (w : WhirAffineWitness), nv = 24 ∧ 2 ≤ nv ∧ nv ≤ 24 ∧
+      w ∈ whirAffineStageWitnesses nv true ∧ w.n = 1048576 ∧ w.queries = 258 := by
+  let w : WhirAffineWitness :=
+    { n := 1048576, d := 262146, sFolds := 6, A := 527170, B := 527169,
+      m := 64, D := 27164, queries := 258, queryTargetBits := 256 }
+  refine ⟨24, w, rfl, by decide, by decide, ?_, rfl, rfl⟩
+  decide +kernel
+
+#verify_inhabited hem_gs_interpolation_dimensions inhabited_deployed_gs_dimensions
+
+
+end Qsag

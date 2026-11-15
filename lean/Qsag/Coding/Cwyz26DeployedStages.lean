@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.CodingTheory.Cwyz26DeployedStages — the proved residual count on the deployed stages
+# Qsag.Coding.Cwyz26DeployedStages — the proved residual count on the deployed stages
 
 Every non-exhaustive stage of the canonical `BciksJohnsonQrom128` schedule
 (`num_vars ∈ 2..=24`) is evaluated against the hypotheses of `nonExcludedDecompBound_sliced`,
@@ -29,16 +29,16 @@ same table and geometry mirrors and re-evaluates them. What it bounds is one bin
 of `[CWYZ26]` Theorem 5.1, the query phase and the Fiat–Shamir analysis are outside it.
 -/
 
-public import Qsag.CodingTheory.Cwyz26JohnsonCertificate
-import all Qsag.CodingTheory.Cwyz26JohnsonCertificate
-import all Qsag.CodingTheory.Cwyz26AffineGap
-import all Qsag.CodingTheory.GoldilocksCharacteristic
-import all Qsag.CodingTheory.TrivariateGsExplainer
-import all Qsag.CodingTheory.SylvesterResultant
-import all Qsag.HemWhirRbrSoundness
-import all Qsag.ConcreteSecurityBudget
-import all Qsag.AffineProximityGaps
-import all Qsag.Goldilocks
+public import Qsag.Coding.Cwyz26JohnsonCertificate
+import all Qsag.Coding.Cwyz26JohnsonCertificate
+import all Qsag.Coding.Cwyz26AffineGap
+import all Qsag.Coding.GoldilocksCharacteristic
+import all Qsag.Coding.TrivariateGsExplainer
+import all Qsag.Coding.SylvesterResultant
+import all Qsag.Protocol.Aggregation.HemWhirRbrSoundness
+import all Qsag.Oracle.ConcreteSecurityBudget
+import all Qsag.Coding.AffineProximityGaps
+import all Qsag.Math.Goldilocks
 
 public section
 namespace Qsag
