@@ -81,11 +81,11 @@ inductive Machine.ValidTrace {S In Out : Type} (M : Machine S In Out) :
       M.ValidTrace s rest s_final
 
 /-- Multi-turn reachability from an `Init`-satisfying starting state. -/
-def Machine.Reachable {S In Out : Type} (M : Machine S In Out) (s : S) : Prop :=
+@[expose] def Machine.Reachable {S In Out : Type} (M : Machine S In Out) (s : S) : Prop :=
   ∃ (s₀ : S) (tr : List (In × Out)), M.Init s₀ ∧ M.ValidTrace s₀ tr s
 
 /-- Observable trace inclusion predicate: `trace` is realizable from some valid initial state of `M`. -/
-def Machine.AdmitsTrace {S In Out : Type} (M : Machine S In Out) (trace : List (In × Out)) : Prop :=
+@[expose] def Machine.AdmitsTrace {S In Out : Type} (M : Machine S In Out) (trace : List (In × Out)) : Prop :=
   ∃ (s₀ s_final : S), M.Init s₀ ∧ M.ValidTrace s₀ trace s_final
 
 /-! ## 2. Constructive Forward Refinement (`Refines`, `C ⊑ A`) -/
