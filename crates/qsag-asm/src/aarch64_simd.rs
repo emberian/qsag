@@ -465,7 +465,10 @@ const _: () = {
         let b1 = (u1 & (v2 ^ 1)) ^ v1;
         let b0 = u1 & v2;
         let bsl = if u2 == 1 { b1 } else { b0 };
-        assert!(bsl == spec, "NEON vbslq/vbicq/veorq MPC chi identity mismatch");
+        assert!(
+            bsl == spec,
+            "NEON vbslq/vbicq/veorq MPC chi identity mismatch"
+        );
         mask += 1;
     }
 };
