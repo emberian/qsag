@@ -326,6 +326,7 @@
         "Qsag.lean_sha256": "1649d02be639ed022b8d8b9f3a5193ec014428009caf6fdb83c18570a264a3f6",
         "note": "The run used the shared rosters with the excluded modules removed and their files absent, so the audit disk-inventory check ran unmodified."
       },
+      "source_revision": "All 113 inputs are byte-identical to commit 8cec7a6.",
       "toolchain": "Lean 4.35.0 (eb6cafb7290e8bd5f2937522d8d804f58f02bafc)",
       "what_it_establishes": "Each listed module compiles from the listed bytes, including its #verify_constructive, #verify_inhabited and #tooth_pair commands, and every declaration it owns depends only on the allowed axioms. It does not review theorem statements and says nothing about the excluded modules."
     },
@@ -666,6 +667,7 @@
         "Qsag.UcGames"
       ],
       "result": "PASS",
+      "source_revision": "142 of 146 inputs are byte-identical to commit fea3d78; ConcreteSecurityBudget, HemWhirRbrSoundness, MultiRoundFsQrom and ParallelSeededSpnSecurity were edited between the run and that commit.",
       "toolchain": "Lean 4.35.0 (eb6cafb7290e8bd5f2937522d8d804f58f02bafc)",
       "warnings": [
         "Qsag/SignatureOutputAndCacheLaws.lean:253:25 and 397:104: unused simp argument (a --wfail build would fail on these)"

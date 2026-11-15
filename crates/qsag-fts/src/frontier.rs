@@ -1477,4 +1477,7 @@ mod rank_domain_tests {
 
 #[path = "frontier_batch.rs"]
 mod batch;
-pub use batch::{FrontierVerifyInput, verify_frontier_fts_batch, RotatedEpochVerifyInput, verify_rotated_epoch_votes_batch};
+pub use batch::{
+    FrontierVerifyInput, RotatedEpochVerifyInput, verify_frontier_fts_batch,
+    verify_rotated_epoch_votes_batch,
+};

@@ -34,6 +34,12 @@
 //!   verifies every leaf. What a `Branch` enforces is the statement-level structure: its children's
 //!   signer sets are disjoint, and the child holding the lowest signer index comes first, so
 //!   swapping two subtrees never yields a second valid encoding.
+//!
+//! Heavy proof batches are admitted before witness allocation. With `std`,
+//! `QSAG_PROVER_JOBS` defaults to one active batch process-wide; `QSAG_WORKERS`
+//! still controls arithmetic parallelism inside it. Increasing prover jobs trades memory
+//! for cross-batch concurrency. This bounds active witnesses, not each witness's byte size;
+//! `HemAggConfig::max_shards_per_batch` separately controls joint-batch width.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -245,7 +251,7 @@ pub(crate) fn try_acquire_worker_permit() -> Option<WorkerPermit> {
 
 /// Partition `items` across at most `parallel_workers()` chunks, running chunk 0 on the caller
 /// thread and spawning remaining chunks under `WorkerPermit` + non-panicking `Builder::spawn_scoped`.
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", test))]
 pub(crate) fn map_chunks_bounded<'a, T, R, F>(items: &'a [T], f: F) -> Vec<R>
 where
     T: Sync,

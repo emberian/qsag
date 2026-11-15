@@ -3280,6 +3280,18 @@ mod tests {
         let cfg = HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, [0x44; 32]);
         let agg = prove_hierarchical_hem(&policies, &witnesses, epoch, msg, 4, &cfg).unwrap();
         let regime = WhirSecurityRegime::BciksJohnsonQrom128;
+        let prepared_agg = prove_hierarchical_hem_prepared(&prepared, &witnesses, epoch, msg, 4, &cfg).unwrap();
+        assert!(verify_hierarchical_hem_prepared(&prepared, epoch, msg, 4, regime, &prepared_agg));
+        let evidence = verify_hierarchical_hem_evidence_prepared(&prepared, epoch, msg, 4, regime, &agg).unwrap();
+        let compact = compress_hierarchical_hem_evidence(&evidence, [97;32]).unwrap();
+        assert!(evidence.names_same_children(&compact));
+        assert!(verify_succinct_hierarchical_hem_prepared(&prepared, epoch, msg, 4, regime, &compact, &evidence));
+        assert!(!verify_succinct_hierarchical_hem_prepared(&prepared, epoch+1, msg, 4, regime, &compact, &evidence));
+        assert!(!verify_succinct_hierarchical_hem_prepared(&prepared, epoch, b"relabel", 4, regime, &compact, &evidence));
+        assert!(!verify_succinct_hierarchical_hem_prepared(&prepared, epoch, msg, 3, regime, &compact, &evidence));
+        let mut changed = compact.clone(); changed.shards[0].child_proof_digest[0] ^= 1;
+        assert!(!verify_succinct_hierarchical_hem_prepared(&prepared, epoch, msg, 4, regime, &changed, &evidence));
+
 
         assert!(verify_hierarchical_hem(
             &policies, epoch, msg, 4, regime, &agg
@@ -3318,4 +3330,56 @@ mod tests {
             &prepared, epoch, msg, 4, regime, &bad_root
         ));
     }
+    /// Narrow opt-in benchmark: two regional proofs, fresh evidence versus immutable reuse.
+    /// Run the already-built test binary under an enforced cgroup and /usr/bin/time -v.
+    #[test]
+    #[ignore]
+    #[cfg(feature = "std")]
+    fn pipeline_evidence_reuse_benchmark() {
+        use std::time::Instant;
+        let count=std::env::var("QSAG_PIPELINE_SIGNERS").ok().and_then(|x|x.parse::<usize>().ok()).unwrap_or(16);
+        assert!((2..=128).contains(&count));
+        let epoch=101; let msg=b"qsag-pipeline-real-shards";
+        let start=Instant::now();
+        let mut keys:Vec<Vec<_>>=(0..2).map(|region| (0..count).map(|i|
+            ValidatorKeypair::keygen_deterministic(AggSigProfile::JortsPoseidon2,&[region+121;32],i as u32)
+        ).collect()).collect();
+        let policies:Vec<_>=keys.iter().enumerate().map(|(i,keys)|ShardHemPolicy{
+            shard_id:i as u64,custodian_cluster:[i as u8;32],quorum_keys:keys.iter().map(|k|k.pk).collect(),minimum_quorums:count,
+        }).collect();
+        let registry=PreparedPolicyRegistry::new(policies.clone()).unwrap();
+        let bm=SignerBitmap::from_active_indices(count as u32,&(0..count).collect::<Vec<_>>()).unwrap();
+        let sigs:Vec<Vec<_>>=keys.iter_mut().zip(&policies).map(|(keys,p)| {
+            let framed=hierarchical_hem_message(&registry.policy_registry_root(),p,epoch,msg);
+            keys.iter_mut().map(|k|k.sign_stateful_for_unit_test(&framed,0).unwrap()).collect()
+        }).collect();
+        let witnesses:Vec<_>=sigs.iter().map(|s|ShardHemWitness{bitmap:&bm,signatures:s}).collect();
+        let setup_ms=start.elapsed().as_secs_f64()*1000.0;
+        let cfg=HemAggConfig::default_for(AggSigProfile::JortsPoseidon2,[84;32]);
+        let start=Instant::now();
+        let agg=prove_hierarchical_hem_prepared(&registry,&witnesses,epoch,msg,2*count,&cfg).unwrap();
+        let prove_ms=start.elapsed().as_secs_f64()*1000.0;
+        let wire=agg.to_bytes();
+        let agg=HierarchicalHemAggregate::from_bytes_canonical(&wire).unwrap();
+        let mut fresh=Vec::new();let mut reuse=Vec::new();let mut duplicate=Vec::new();let mut compact_bytes=0;
+        for sample in 0..4 {
+            let start=Instant::now();
+            let ev=verify_hierarchical_hem_evidence_prepared(&registry,epoch,msg,2*count,cfg.regime,&agg).unwrap();
+            let evidence_ms=start.elapsed().as_secs_f64()*1000.0;
+            let start=Instant::now();
+            let compact=compress_hierarchical_hem_evidence(&ev,[85;32]).unwrap();
+            let reuse_ms=start.elapsed().as_secs_f64()*1000.0;
+            compact_bytes=compact.to_bytes().len();
+            assert!(verify_succinct_hierarchical_hem_prepared(&registry,epoch,msg,2*count,cfg.regime,&compact,&ev));
+            let start=Instant::now();
+            let legacy=compress_verified_hierarchical_hem(&policies,epoch,msg,2*count,&agg,[85;32]).unwrap();
+            let duplicate_ms=evidence_ms+start.elapsed().as_secs_f64()*1000.0;
+            assert!(ev.names_same_children(&legacy));
+            if sample>0 {fresh.push(evidence_ms+reuse_ms);reuse.push(reuse_ms);duplicate.push(duplicate_ms);}
+        }
+        let median=|mut xs:Vec<f64>| {xs.sort_by(|a,b|a.partial_cmp(b).unwrap());xs[xs.len()/2]};
+        std::println!("pipeline signers={} regions=2 prover_jobs={} setup_ms={:.2} prove_ms={:.2} signers_per_s={:.2} hierarchy_bytes={} compact_bytes={} fresh_evidence_plus_build_p50_ms={:.3} reused_evidence_build_p50_ms={:.3} duplicate_verify_pipeline_p50_ms={:.3}",
+            2*count,crate::prover_parallel_jobs(),setup_ms,prove_ms,2000.0*count as f64/prove_ms,wire.len(),compact_bytes,median(fresh),median(reuse),median(duplicate));
+    }
+
 }
