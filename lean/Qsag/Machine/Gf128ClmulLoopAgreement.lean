@@ -23,8 +23,8 @@ carry-less dot-product accumulation under the explicit basis isomorphism `psiTow
 
 public import Qsag.Machine.McRefine
 import all Qsag.Machine.McRefine
-public import Qsag.Math.Tower128PolyBasisIso
-import all Qsag.Math.Tower128PolyBasisIso
+public import Qsag.Math.Gf2Pow128
+import all Qsag.Math.Gf2Pow128
 public import Qsag.Machine.SimdBinaryEquiv
 import all Qsag.Machine.SimdBinaryEquiv
 import all Qsag.Protocol.Migration.ActiveMigrationZeroTest
@@ -445,3 +445,24 @@ end
   Qsag.pmullFourProduct_reduce_eq_gf128FieldMul
   Qsag.polyToTower128_pclmulqdq_reduce
   Qsag.polyToTower128_vpclmul2LaneDot_reduce
+
+public section
+namespace Qsag.Math
+/-- Machine multiplication implementations agree with the canonical polynomial-basis field. -/
+theorem gf2Pow128_five_way_mul_agreement (a b : BitVec 128) :
+    let prod := (Gf2Pow128.mul ⟨a⟩ ⟨b⟩).bits
+    prod = Qsag.psiTower128ToPoly (Qsag.towerMul 7 (Qsag.polyToTower128 a) (Qsag.polyToTower128 b)) ∧
+    prod = Qsag.MigrationExecution.rustGf128Mul a b ∧
+    prod = Qsag.gf2_128_mul_bv a b ∧
+    prod = Qsag.SimdBinaryEquiv.fastRemainder (Qsag.pclmulqdqFourProduct256 a b) ∧
+    prod = Qsag.SimdBinaryEquiv.fastRemainder (Qsag.pmullFourProduct256 a b) := by
+  dsimp only
+  rw [Gf2Pow128.mul_bits]
+  have h := (Qsag.gf128FieldMul_eq_gf2_128_mul_bv a b).symm
+  refine ⟨?_, h.trans (Qsag.gf128FieldMul_eq_rustGf128Mul a b), rfl,
+    h.trans (Qsag.pclmulqdqFourProduct_reduce_eq_gf128FieldMul a b).symm,
+    h.trans (Qsag.pmullFourProduct_reduce_eq_gf128FieldMul a b).symm⟩
+  apply h.trans
+  rw [← Qsag.polyToTower128_gf128FieldMul a b, Qsag.psiTower128ToPoly_polyToTower128]
+end Qsag.Math
+end
