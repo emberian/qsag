@@ -33,7 +33,7 @@ distribution.
 public import Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
 public import Qsag.Tactic.AssuranceKit
 import all Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
-import all Qsag.Oracle.UcGames
+import all Qsag.Protocol.Aggregation.UcGames
 import all Qsag.Protocol.Credentials.AdvancedMpcAndCreds
 import all Qsag.Math.Goldilocks
 
@@ -115,9 +115,9 @@ def eta4SampleNibble (b : Fin 16) : Option Int :=
   if b.val < 9 then some (4 - Int.ofNat b.val) else none
 
 theorem eta4SampleNibble_bijective_on_range :
-    finSum 16 (fun b => if eta4SampleNibble b ≠ none then 1 else 0) = 9 ∧
+    qsum 16 (fun b => if eta4SampleNibble b ≠ none then 1 else 0) = 9 ∧
     ∀ target : Int, -4 ≤ target → target ≤ 4 →
-      finSum 16 (fun b => if eta4SampleNibble b = some target then 1 else 0) = 1 := by
+      qsum 16 (fun b => if eta4SampleNibble b = some target then 1 else 0) = 1 := by
   refine ⟨by decide, fun target hLo hHi => ?_⟩
   have hCases :
       target = -4 ∨ target = -3 ∨ target = -2 ∨ target = -1 ∨ target = 0 ∨
@@ -443,13 +443,13 @@ private theorem traceSim_cons
     thresholdMlDsaTraceSimulator sampleInBall A t1Scaled outsRest
       (bijRest.toFun (fun i => padFn ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)) := rfl
 
-private theorem finSum_sim_eq_of_equiv {α β V : Type} {M : Nat}
+private theorem qsum_sim_eq_of_equiv {α β V : Type} {M : Nat}
     (bij : SimpleEquiv α β) (realFn : α → V) (simFn : β → V)
     (hSim : ∀ x, simFn (bij.toFun x) = realFn x)
     (enumA : SimpleEquiv (Fin M) α) (enumB : SimpleEquiv (Fin M) β)
     (D : V → Bool) :
-    finSum M (fun m => (D (realFn (enumA.toFun m))).toNat) =
-    finSum M (fun m => (D (simFn (enumB.toFun m))).toNat) := by
+    qsum M (fun m => (D (realFn (enumA.toFun m))).toNat) =
+    qsum M (fun m => (D (simFn (enumB.toFun m))).toNat) := by
   let perm : Fin M → Fin M := fun m => enumB.invFun (bij.toFun (enumA.toFun m))
   let permInv : Fin M → Fin M := fun m => enumA.invFun (bij.invFun (enumB.toFun m))
   have hL : ∀ m, permInv (perm m) = m := fun m => by
@@ -459,8 +459,8 @@ private theorem finSum_sim_eq_of_equiv {α β V : Type} {M : Nat}
   have hCong : ∀ m : Fin M,
       (D (realFn (enumA.toFun m))).toNat = (D (simFn (enumB.toFun (perm m)))).toNat := by
     intro m; dsimp only [perm]; rw [enumB.right_inv, hSim]
-  rw [finSum_congr hCong]
-  exact finSum_perm_invariant perm permInv hL hR (fun m => (D (simFn (enumB.toFun m))).toNat)
+  rw [qsum_congr hCong]
+  exact qsum_perm_invariant perm permInv hL hR (fun m => (D (simFn (enumB.toFun m))).toNat)
 
 /-- **Abort-Transcript Zero-Knowledge Simulation Theorem (`threshold_mldsa_abort_transcript_zk`)**:
     Across any `R`-attempt signing trace where rejected attempts carry nonzero `failTag`, an
@@ -486,9 +486,9 @@ theorem threshold_mldsa_abort_transcript_zk
       (∀ {M : Nat} (enum : SimpleEquiv (Fin M) (Fin steps.length → SealedAttemptPads))
          (enumOut : SimpleEquiv (Fin M) (Fin outs.length → SealedAttemptPads))
          (D : List SealedSignAttemptView → Bool),
-        finSum M (fun m =>
+        qsum M (fun m =>
           (D (realSealedSignTrace chalHash sampleInBall A s1 s2 mu steps (enum.toFun m))).toNat) =
-        finSum M (fun m =>
+        qsum M (fun m =>
           (D (thresholdMlDsaTraceSimulator sampleInBall A t1Scaled outs (enumOut.toFun m))).toNat)) := by
   induction steps with
   | nil => exact ⟨rfl, SimpleEquiv.refl _, (fun _ => rfl), fun _ _ _ => rfl⟩
@@ -518,7 +518,7 @@ theorem threshold_mldsa_abort_transcript_zk
       consPadEquiv (sealedStepPadEquiv chalHash sampleInBall A s1 s2 stp.y mu
         stp.keccakTraceBits stp.failTag hHeadFail) bijRest,
       hPointwise,
-      fun enum enumOut D => finSum_sim_eq_of_equiv _ _ _ hPointwise enum enumOut D⟩
+      fun enum enumOut D => qsum_sim_eq_of_equiv _ _ _ hPointwise enum enumOut D⟩
 
 def maskCoordAt (gamma1 : Nat) (idx : Fin (2 * gamma1 - 1)) : Int :=
   (idx.val : Int) - ((gamma1 : Int) - 1)
@@ -533,7 +533,7 @@ theorem fips204_z_plateau_shift_invariant
     (gamma1 beta : Nat) (hLt : beta < gamma1) (cs1 zStar : Int)
     (hCs1 : -((beta : Int)) ≤ cs1 ∧ cs1 ≤ (beta : Int))
     (hOpen : inOpenNormBox (gamma1 - beta) zStar = true) :
-    finSum (2 * gamma1 - 1) (fun idx =>
+    qsum (2 * gamma1 - 1) (fun idx =>
       if maskCoordAt gamma1 idx + cs1 = zStar then 1 else 0) = 1 := by
   unfold inOpenNormBox at hOpen
   have hZ := of_decide_eq_true hOpen
@@ -565,15 +565,15 @@ theorem fips204_z_plateau_shift_invariant
           rw [hkCast]; dsimp only [xInt]; omega
         exact Int.ofNat.inj hCastEq
       rw [ite_false hNeZ]
-  rw [finSum_congr hiff]
-  exact finSum_eq_indicator (2 * gamma1 - 1) targetIdx
+  rw [qsum_congr hiff]
+  exact qsum_eq_indicator (2 * gamma1 - 1) targetIdx
 
 def unsealedEarlyW1AbortHit (cs1 : Int) (idx : Fin 9) : Bool :=
   let y := maskCoordAt 5 idx
   decide ((y + 4) / 2 = 3) && !inOpenNormBox 3 (y + cs1)
 
 def irwinHall2HitCount (cs1 zTarget : Int) : Nat :=
-  finSum 5 (fun i => finSum 5 (fun j =>
+  qsum 5 (fun i => qsum 5 (fun j =>
     if ((i.val : Int) - 2) + ((j.val : Int) - 2) + cs1 = zTarget then 1 else 0))
 
 /-- **`#tooth` (`tooth_unsealed_w1_or_irwin_hall_abort_leaks_secret`)**:
@@ -582,8 +582,8 @@ def irwinHall2HitCount (cs1 zTarget : Int) : Nat :=
     abort simulator `thresholdMlDsaTraceSimulator` opens `released = none` independent of `(s₁, s₂)`. -/
 theorem tooth_unsealed_w1_or_irwin_hall_abort_leaks_secret :
     ∃ pads : SealedAttemptPads,
-      finSum 9 (fun idx => (unsealedEarlyW1AbortHit 0 idx).toNat) ≠
-        finSum 9 (fun idx => (unsealedEarlyW1AbortHit 1 idx).toNat) ∧
+      qsum 9 (fun idx => (unsealedEarlyW1AbortHit 0 idx).toNat) ≠
+        qsum 9 (fun idx => (unsealedEarlyW1AbortHit 1 idx).toNat) ∧
       irwinHall2HitCount 0 0 ≠ irwinHall2HitCount 1 0 ∧
       (thresholdMlDsaTraceSimulator (fun _ => PolyTree.zero 8) idMat4 rssZeroVec4
         [none] (fun _ => pads)).map SealedSignAttemptView.released = [none] :=
@@ -814,7 +814,7 @@ theorem fips204_asymmetric_2gamma1_plateau_shift_invariant
     (gamma1 beta : Nat) (hLt : beta < gamma1) (cs1 zStar : Int)
     (hCs1 : -((beta : Int)) ≤ cs1 ∧ cs1 ≤ (beta : Int))
     (hOpen : inOpenNormBox (gamma1 - beta) zStar = true) :
-    finSum (2 * gamma1) (fun u =>
+    qsum (2 * gamma1) (fun u =>
       if fips204ExpandMaskCoord gamma1 u + cs1 = zStar then 1 else 0) = 1 := by
   unfold inOpenNormBox at hOpen
   have hZ := of_decide_eq_true hOpen
@@ -846,16 +846,16 @@ theorem fips204_asymmetric_2gamma1_plateau_shift_invariant
           rw [huCast]; dsimp only [uInt]; omega
         exact Int.ofNat.inj hCastEq
       rw [ite_false hNeZ]
-  rw [finSum_congr hiff]
-  exact finSum_eq_indicator (2 * gamma1) targetU
+  rw [qsum_congr hiff]
+  exact qsum_eq_indicator (2 * gamma1) targetU
 
-private theorem finSum_eq_zero_of_all_zero :
-    ∀ (n : Nat) (f : Fin n → Nat), (∀ i : Fin n, f i = 0) → finSum n f = 0
+private theorem qsum_eq_zero_of_all_zero :
+    ∀ (n : Nat) (f : Fin n → Nat), (∀ i : Fin n, f i = 0) → qsum n f = 0
   | 0, _, _ => rfl
   | n + 1, f, h => by
-    unfold finSum
+    unfold qsum
     rw [h ⟨0, Nat.zero_lt_succ n⟩,
-        finSum_eq_zero_of_all_zero n _ (fun i => h ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)]
+        qsum_eq_zero_of_all_zero n _ (fun i => h ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)]
 
 /-- **`#tooth` (`tooth_closed_box_le_breaks_asymmetric_2gamma1_plateau`)**:
     Relaxing FIPS 204's strict open-box check `|z| < γ₁ - β` to the closed bound `|z| ≤ γ₁ - β`
@@ -864,26 +864,26 @@ private theorem finSum_eq_zero_of_all_zero :
     which is absent from `[-γ₁ + 1, γ₁]` (`0` preimages), whereas `cs1 = 0` has `1` preimage. -/
 theorem tooth_closed_box_le_breaks_asymmetric_2gamma1_plateau
     (gamma1 beta : Nat) (hBetaPos : 0 < beta) (hLt : beta < gamma1) :
-    finSum (2 * gamma1) (fun u =>
+    qsum (2 * gamma1) (fun u =>
       if fips204ExpandMaskCoord gamma1 u + (beta : Int) = -((gamma1 - beta : Nat) : Int) then 1 else 0) ≠
-    finSum (2 * gamma1) (fun u =>
+    qsum (2 * gamma1) (fun u =>
       if fips204ExpandMaskCoord gamma1 u + 0 = -((gamma1 - beta : Nat) : Int) then 1 else 0) := by
   let zNeg : Int := -((gamma1 - beta : Nat) : Int)
-  change finSum (2 * gamma1) (fun u =>
+  change qsum (2 * gamma1) (fun u =>
       if fips204ExpandMaskCoord gamma1 u + (beta : Int) = zNeg then 1 else 0) ≠
-    finSum (2 * gamma1) (fun u =>
+    qsum (2 * gamma1) (fun u =>
       if fips204ExpandMaskCoord gamma1 u + 0 = zNeg then 1 else 0)
   have hSub : ((gamma1 - beta : Nat) : Int) = (gamma1 : Int) - (beta : Int) :=
     Int.ofNat_sub (Nat.le_of_lt hLt)
-  have hZeroHits : finSum (2 * gamma1) (fun u =>
+  have hZeroHits : qsum (2 * gamma1) (fun u =>
       if fips204ExpandMaskCoord gamma1 u + (beta : Int) = zNeg then 1 else 0) = 0 := by
-    apply finSum_eq_zero_of_all_zero
+    apply qsum_eq_zero_of_all_zero
     intro u; unfold fips204ExpandMaskCoord
     have hu := u.isLt
     have hNe : (gamma1 : Int) - (u.val : Int) + (beta : Int) ≠ zNeg := by
       dsimp only [zNeg]; rw [hSub]; omega
     exact ite_false hNe 1 0
-  have hOneHit : finSum (2 * gamma1) (fun u =>
+  have hOneHit : qsum (2 * gamma1) (fun u =>
       if fips204ExpandMaskCoord gamma1 u + 0 = zNeg then 1 else 0) = 1 := by
     let uNat : Nat := 2 * gamma1 - beta
     have huLt : uNat < 2 * gamma1 := by dsimp only [uNat]; omega
@@ -903,8 +903,8 @@ theorem tooth_closed_box_le_breaks_asymmetric_2gamma1_plateau
         have hNe : (gamma1 : Int) - (u.val : Int) + 0 ≠ zNeg := by
           dsimp only [zNeg]; rw [hSub]; intro hz; apply hValNe; dsimp only [uNat]; omega
         rw [ite_false hNe]
-    rw [finSum_congr hiff]
-    exact finSum_eq_indicator (2 * gamma1) targetU
+    rw [qsum_congr hiff]
+    exact qsum_eq_indicator (2 * gamma1) targetU
   rw [hZeroHits, hOneHit]
   decide
 
@@ -1468,7 +1468,7 @@ def infNormFlexVec {d : Nat} (v : PolyFlexVec d) : Nat :=
   finMax d (fun i => PolyTree.infNorm (v i))
 
 def hintWeightFlexVec {k : Nat} (h : Fin k → HintTree 8) : Nat :=
-  finSum k (fun i => HintTree.weight (h i))
+  qsum k (fun i => HintTree.weight (h i))
 
 structure ThresholdRectSignSig (k ell : Nat) where
   cTilde : List UInt8
@@ -1749,9 +1749,9 @@ theorem threshold_mldsa_rect_abort_transcript_zk {k ell : Nat} (R : MlDsaRoundin
       (∀ {M : Nat} (enum : SimpleEquiv (Fin M) (Fin steps.length → SealedRectAttemptPads k ell))
          (enumOut : SimpleEquiv (Fin M) (Fin outs.length → SealedRectAttemptPads k ell))
          (D : List (SealedRectSignAttemptView k ell) → Bool),
-        finSum M (fun m =>
+        qsum M (fun m =>
           (D (realSealedRectSignTrace R chalHash sampleInBall A s1 s2 mu steps (enum.toFun m))).toNat) =
-        finSum M (fun m =>
+        qsum M (fun m =>
           (D (thresholdMlDsaRectTraceSimulator R sampleInBall A t1Scaled outs (enumOut.toFun m))).toNat)) := by
   induction steps with
   | nil => exact ⟨rfl, SimpleEquiv.refl _, (fun _ => rfl), fun _ _ _ => rfl⟩
@@ -1781,7 +1781,7 @@ theorem threshold_mldsa_rect_abort_transcript_zk {k ell : Nat} (R : MlDsaRoundin
       consRectPadEquiv (sealedRectStepPadEquiv R chalHash sampleInBall A s1 stp.y s2 mu
         stp.keccakTraceBits stp.failTag hHeadFail) bijRest,
       hPointwise,
-      fun enum enumOut D => finSum_sim_eq_of_equiv _ _ _ hPointwise enum enumOut D⟩
+      fun enum enumOut D => qsum_sim_eq_of_equiv _ _ _ hPointwise enum enumOut D⟩
 
 /-- Concrete `ML-DSA-65` (`(k, ℓ) = (6, 5)`, `γ₁ = 2^19`, `γ₂ = 261888`) specialization. -/
 theorem threshold_mldsa65_abort_transcript_zk
@@ -1802,10 +1802,10 @@ theorem threshold_mldsa65_abort_transcript_zk
       (∀ {M : Nat} (enum : SimpleEquiv (Fin M) (Fin steps.length → SealedRectAttemptPads 6 5))
          (enumOut : SimpleEquiv (Fin M) (Fin outs.length → SealedRectAttemptPads 6 5))
          (D : List (SealedRectSignAttemptView 6 5) → Bool),
-        finSum M (fun m =>
+        qsum M (fun m =>
           (D (realSealedRectSignTrace mlDsa65RoundingScheme chalHash sampleInBall A s1 s2 mu steps
             (enum.toFun m))).toNat) =
-        finSum M (fun m =>
+        qsum M (fun m =>
           (D (thresholdMlDsaRectTraceSimulator mlDsa65RoundingScheme sampleInBall A t1Scaled outs
             (enumOut.toFun m))).toNat)) :=
   threshold_mldsa_rect_abort_transcript_zk mlDsa65RoundingScheme chalHash sampleInBall A s1 s2 mu steps hFail
@@ -1829,10 +1829,10 @@ theorem threshold_mldsa87_abort_transcript_zk
       (∀ {M : Nat} (enum : SimpleEquiv (Fin M) (Fin steps.length → SealedRectAttemptPads 8 7))
          (enumOut : SimpleEquiv (Fin M) (Fin outs.length → SealedRectAttemptPads 8 7))
          (D : List (SealedRectSignAttemptView 8 7) → Bool),
-        finSum M (fun m =>
+        qsum M (fun m =>
           (D (realSealedRectSignTrace mlDsa87RoundingScheme chalHash sampleInBall A s1 s2 mu steps
             (enum.toFun m))).toNat) =
-        finSum M (fun m =>
+        qsum M (fun m =>
           (D (thresholdMlDsaRectTraceSimulator mlDsa87RoundingScheme sampleInBall A t1Scaled outs
             (enumOut.toFun m))).toNat)) :=
   threshold_mldsa_rect_abort_transcript_zk mlDsa87RoundingScheme chalHash sampleInBall A s1 s2 mu steps hFail

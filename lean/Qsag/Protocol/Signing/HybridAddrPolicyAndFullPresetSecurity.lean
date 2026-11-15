@@ -11,7 +11,7 @@ and address version. Applications needing network-exclusive signatures must bind
 public import Qsag.Protocol.Signing.Fips205
 import all Qsag.Protocol.Signing.Fips205
 public import Qsag.Tactic.AssuranceKit
-import all Qsag.Oracle.UcGames
+import all Qsag.Protocol.Aggregation.UcGames
 public section
 namespace Qsag.HybridSecurity
 set_option autoImplicit false
@@ -195,22 +195,22 @@ theorem naive_rogue_rebinding : ∃ a b : Keys, a.pq = b.pq ∧ a.classical ≠ 
 
 /-- Weighted event masses; divide by the common positive total weight for advantages. -/
 def mass {N : Nat} (w : Fin N → Nat) (event : Fin N → Bool) : Nat :=
-  finSum N (fun i => if event i then w i else 0)
+  qsum N (fun i => if event i then w i else 0)
 
 theorem robust_min_bound {N : Nat} (w : Fin N → Nat) (win c p bad : Fin N → Bool)
     (extract : ∀ i, win i = true → (c i = true ∧ p i = true) ∨ bad i = true) :
     mass w win ≤ min (mass w c) (mass w p) + mass w bad := by
-  have hc := finSum_le_finSum (f := fun i => if win i then w i else 0)
+  have hc := qsum_le_qsum (f := fun i => if win i then w i else 0)
     (g := fun i => (if c i then w i else 0) + (if bad i then w i else 0)) (by
       intro i; cases hw : win i
       · simp only [Bool.false_eq_true, ↓reduceIte]; omega
       · rcases extract i hw with ⟨hc, _⟩ | hb <;> simp_all)
-  have hp := finSum_le_finSum (f := fun i => if win i then w i else 0)
+  have hp := qsum_le_qsum (f := fun i => if win i then w i else 0)
     (g := fun i => (if p i then w i else 0) + (if bad i then w i else 0)) (by
       intro i; cases hw : win i
       · simp only [Bool.false_eq_true, ↓reduceIte]; omega
       · rcases extract i hw with ⟨_, hp⟩ | hb <;> simp_all)
-  rw [finSum_add] at hc hp
+  rw [qsum_add] at hc hp
   change mass w win ≤ mass w c + mass w bad at hc
   change mass w win ≤ mass w p + mass w bad at hp
   omega
@@ -268,14 +268,14 @@ theorem hybrid_advantage_bound {N : Nat} (w : Fin N → Nat) (H : Hash) (vc vp :
 
 -- POLICY
 
-def cardinal {n : Nat} (q : Fin n → Bool) : Nat := finSum n (fun i => if q i then 1 else 0)
+def cardinal {n : Nat} (q : Fin n → Bool) : Nat := qsum n (fun i => if q i then 1 else 0)
 
 theorem honest_in_quorum {n t f : Nat} (q corrupt : Fin n → Bool)
     (hq : t ≤ cardinal q) (hf : cardinal corrupt ≤ f) (ht : f < t) :
     ∃ i, q i = true ∧ corrupt i = false := by
   by_cases h : ∃ i, q i = true ∧ corrupt i = false
   · exact h
-  · have le : cardinal q ≤ cardinal corrupt := finSum_le_finSum (by
+  · have le : cardinal q ≤ cardinal corrupt := qsum_le_qsum (by
       intro i; cases hq : q i <;> cases hc : corrupt i <;> simp_all)
     omega
 
@@ -284,10 +284,10 @@ theorem honest_quorum_intersection {n t f : Nat} (q r corrupt : Fin n → Bool)
     (overlap : n + f < 2 * t) : ∃ i, q i = true ∧ r i = true ∧ corrupt i = false := by
   by_cases h : ∃ i, q i = true ∧ r i = true ∧ corrupt i = false
   · exact h
-  · have le := finSum_le_finSum (f := fun i => (if q i then 1 else 0) + (if r i then 1 else 0))
+  · have le := qsum_le_qsum (f := fun i => (if q i then 1 else 0) + (if r i then 1 else 0))
       (g := fun i => 1 + (if corrupt i then 1 else 0)) (by
         intro i; cases hq : q i <;> cases hr : r i <;> cases hc : corrupt i <;> simp_all)
-    rw [finSum_add, finSum_add, finSum_const] at le
+    rw [qsum_add, qsum_add, qsum_const] at le
     change cardinal q + cardinal r ≤ n * 1 + cardinal corrupt at le
     omega
 
@@ -471,8 +471,8 @@ def rotatingQuorum (round party : Fin 3) : Bool := decide (round ≠ party)
 theorem pairwise_intersection_not_global_accounting :
     (∀ r : Fin 3, cardinal (rotatingQuorum r) = 2) ∧
     (∀ a b : Fin 3, ∃ j : Fin 3, rotatingQuorum a j = true ∧ rotatingQuorum b j = true) ∧
-    (∀ j : Fin 3, finSum 3 (fun r => if rotatingQuorum r j then 50 else 0) ≤ 100) ∧
-    100 < finSum 3 (fun _ => 50) := by
+    (∀ j : Fin 3, qsum 3 (fun r => if rotatingQuorum r j then 50 else 0) ≤ 100) ∧
+    100 < qsum 3 (fun _ => 50) := by
   unfold cardinal rotatingQuorum; decide
 
 -- PRESETS
@@ -669,22 +669,22 @@ theorem security_regime_separation (f : FrontierProfile) :
 
 /-- Equal sums plus coordinate domination force equality, constructively. -/
 theorem equal_sum_dominated {n : Nat} (a b : Fin n → Nat)
-    (hs : finSum n a = finSum n b) (dom : ∀ i, a i ≤ b i) : a = b := by
+    (hs : qsum n a = qsum n b) (dom : ∀ i, a i ≤ b i) : a = b := by
   induction n with
   | zero => funext i; exact Fin.elim0 i
   | succ n ih =>
-    have tail := finSum_le_finSum (fun i : Fin n => dom i.succ)
+    have tail := qsum_le_qsum (fun i : Fin n => dom i.succ)
     have h0 := dom 0
-    change a 0 + finSum n (fun i => a i.succ) = b 0 + finSum n (fun i => b i.succ) at hs
+    change a 0 + qsum n (fun i => a i.succ) = b 0 + qsum n (fun i => b i.succ) at hs
     have he : a 0 = b 0 := by omega
-    have ht : finSum n (fun i => a i.succ) = finSum n (fun i => b i.succ) := by omega
+    have ht : qsum n (fun i => a i.succ) = qsum n (fun i => b i.succ) := by omega
     have het := ih (fun i => a i.succ) (fun i => b i.succ) ht (fun i => dom i.succ)
     funext i; refine Fin.cases he (fun j => congrFun het j) i
 
 /-- Either orientation has a strict coordinate: a single revealed chain vector cannot
 advance to a distinct vector of the same sum. This alone is not a full FTS reduction. -/
 theorem one_use_incomparable {n : Nat} (a b : Fin n → Nat)
-    (hs : finSum n a = finSum n b) (hne : a ≠ b) : ∃ i, a i < b i := by
+    (hs : qsum n a = qsum n b) (hne : a ≠ b) : ∃ i, a i < b i := by
   by_cases h : ∃ i, a i < b i
   · exact h
   · have dom : ∀ i, b i ≤ a i := by
@@ -693,7 +693,7 @@ theorem one_use_incomparable {n : Nat} (a b : Fin n → Nat)
 
 def smallVector (a b : Nat) : Fin 2 → Nat := fun i => if i.val = 0 then a else b
 theorem two_uses_cover_third : ∃ a b c : Fin 2 → Nat,
-    finSum 2 a = 2 ∧ finSum 2 b = 2 ∧ finSum 2 c = 2 ∧ a ≠ c ∧ b ≠ c ∧
+    qsum 2 a = 2 ∧ qsum 2 b = 2 ∧ qsum 2 c = 2 ∧ a ≠ c ∧ b ≠ c ∧
     (∀ i, min (a i) (b i) ≤ c i) := by
   refine ⟨smallVector 0 2, smallVector 2 0, smallVector 1 1, rfl, rfl, rfl, ?_, ?_, ?_⟩
   · intro he; have h := congrFun he 0; contradiction
@@ -729,7 +729,7 @@ theorem ledger_inhabited : ∃ cap w s final is, LedgerTrace cap w s is final �
     Nat.zero_le _⟩
   exact .cons (by unfold LedgerStep exampleIntent projected; decide) (.nil _)
 
-theorem incomparable_inhabited : ∃ a b : Fin 2 → Nat, finSum 2 a = finSum 2 b ∧ a ≠ b := by
+theorem incomparable_inhabited : ∃ a b : Fin 2 → Nat, qsum 2 a = qsum 2 b ∧ a ≠ b := by
   refine ⟨smallVector 0 2, smallVector 2 0, rfl, ?_⟩
   intro h; have h0 := congrFun h 0; contradiction
 

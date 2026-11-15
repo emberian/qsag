@@ -21,9 +21,9 @@ LAW-M1: public statements with a bounded exposed interface (`<= 12` `@[expose]`)
 -/
 
 public import Qsag.Math.Goldilocks
-public import Qsag.Math.BinaryTower
+public import Qsag.Math.Gf2Pow128
 public import Qsag.Oracle.Poseidon2
-public import Qsag.Math.Constructive
+public import Qsag.Tactic.Prelude
 public import Qsag.Oracle.Keccak
 public import Qsag.Tactic.AssuranceKit
 

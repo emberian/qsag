@@ -30,9 +30,9 @@ explicit `sk`-free UC simulator:
 -/
 
 public import Qsag.Math.Goldilocks
-public import Qsag.Math.BinaryTower
+public import Qsag.Math.Gf2Pow128
 public import Qsag.Oracle.Poseidon2
-public import Qsag.Oracle.UcGames
+public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Protocol.Threshold.ThresholdApproval
 public import Qsag.Protocol.Threshold.MaliciousSecurity
 
@@ -983,15 +983,15 @@ theorem tsigForgery_keys_le (CK : Nat) (keyDec : Fin CK → Tower128 × Tower128
     ∀ (es : List (Nat × Tower128)) (s : Nat) (ops : List BdozPairOpening)
       (hon : Nat → Tower128 × Tower128 × Tower128),
       (∀ i, (hon (s + i)).1 = tsigShareAt es i) →
-      finSum CK (fun i =>
+      qsum CK (fun i =>
         if (tsigFindForgery (bdozKeyFromView (keyDec i) hon) s es ops).isSome then 1 else 0) ≤
         es.length
   | [], s, ops, hon, _ =>
-    Nat.le_of_eq ((finSum_congr (g := fun _ => 0) (fun _ => rfl)).trans
-      ((finSum_const CK 0).trans (Nat.mul_zero CK)))
+    Nat.le_of_eq ((qsum_congr (g := fun _ => 0) (fun _ => rfl)).trans
+      ((qsum_const CK 0).trans (Nat.mul_zero CK)))
   | e :: es, s, [], hon, _ =>
-    Nat.le_trans (Nat.le_of_eq ((finSum_congr (g := fun _ => 0) (fun _ => rfl)).trans
-      ((finSum_const CK 0).trans (Nat.mul_zero CK)))) (Nat.zero_le _)
+    Nat.le_trans (Nat.le_of_eq ((qsum_congr (g := fun _ => 0) (fun _ => rfl)).trans
+      ((qsum_const CK 0).trans (Nat.mul_zero CK)))) (Nat.zero_le _)
   | e :: es, s, op :: ops, hon, hHon => by
     have hStep : ∀ i : Fin CK,
         (if (tsigFindForgery (bdozKeyFromView (keyDec i) hon) s (e :: es) (op :: ops)).isSome
@@ -1003,7 +1003,7 @@ theorem tsigForgery_keys_le (CK : Nat) (keyDec : Fin CK → Tower128 × Tower128
       rw [tsigFindForgery_cons]
       cases (tsigOpAccepted (bdozKeyFromView (keyDec i) hon) s op && !(op.shareX == e.2)) <;> rfl
     have h0 : (hon s).1 = e.2 := hHon 0
-    have h1 := finSum_indicator_le_one_of_unique CK
+    have h1 := qsum_indicator_le_one_of_unique CK
       (fun i => tsigOpAccepted (bdozKeyFromView (keyDec i) hon) s op && !(op.shareX == e.2))
       (fun i j hi hj => by
         rcases Bool.and_eq_true_iff.mp hi with ⟨hAi, hNeB⟩
@@ -1024,9 +1024,9 @@ theorem tsigForgery_keys_le (CK : Nat) (keyDec : Fin CK → Tower128 × Tower128
       have h := hHon (i + 1)
       rw [show s + (i + 1) = s + 1 + i by omega] at h
       exact h)
-    exact Nat.le_trans (Nat.le_of_eq (finSum_congr hStep))
+    exact Nat.le_trans (Nat.le_of_eq (qsum_congr hStep))
       (Nat.le_trans
-        (finSum_indicator_or_le
+        (qsum_indicator_or_le
           (fun i => tsigOpAccepted (bdozKeyFromView (keyDec i) hon) s op && !(op.shareX == e.2))
           (fun i => (tsigFindForgery (bdozKeyFromView (keyDec i) hon) (s + 1) es ops).isSome))
         (Nat.le_trans (Nat.add_le_add h1 h2) (by simp only [List.length_cons]; omega)))
@@ -1370,19 +1370,19 @@ theorem ucSimulatorTsig_hop1_perfect {R PK SK Msg Sig : Type} [LawfulCommRing R]
     (sk : SK) (m : Msg)
     (Ct : Nat) (padEnum : SimpleEquiv (Fin Ct) (TsigPadTape R pp.d pp.k))
     (macKey : Tower128 × Tower128) (D : Option (TsigAdvView R pp.k) → Bool) :
-    finSum Ct (fun i =>
+    qsum Ct (fun i =>
       if D (some (tsigSessionView pp corruptVk corrupt honest (wireVals sk m) (outVal sk m)
         (padEnum.toFun i))) then 1 else 0) =
-    finSum Ct (fun i =>
+    qsum Ct (fun i =>
       if D (ucSimulatorTsig pp
         ⟨pk, m, corrupt, honest, corruptVk, corruptTags, .signed (S.sign sk m)⟩
         ⟨padEnum.toFun i, macKey⟩) then 1 else 0) := by
-  have hInvar := finSum_bijection_invariant padEnum
+  have hInvar := qsum_bijection_invariant padEnum
     (tsigTapeRebalance inv pp.d pp.k (corrupt.map Prod.snd) hCard (wireVals sk m))
     (fun τ => if D (ucSimulatorTsig pp
         ⟨pk, m, corrupt, honest, corruptVk, corruptTags, .signed (S.sign sk m)⟩
         ⟨τ, macKey⟩) then 1 else 0)
-  refine Eq.trans (finSum_congr (fun i => ?_)) hInvar
+  refine Eq.trans (qsum_congr (fun i => ?_)) hInvar
   have hView := (tsigSession_rebalance pp inv hInv corruptVk corrupt honest hCard hNonZero
     (wireVals sk m) (pp.encSig (S.sign sk m)) (padEnum.toFun i)).1
   have hView' :
@@ -2610,12 +2610,12 @@ theorem ucSimulatorTsig_hop1_perfect_tower128
     (a b : Tower128) (skPad aPad bPad cPad : ShamirPadPoly Tower128 1)
     (sk m : Tower128) (macKey : Tower128 × Tower128)
     (D : Option (TsigAdvView Tower128 tower128Params.k) → Bool) :
-    finSum tower128PadCard (fun i =>
+    qsum tower128PadCard (fun i =>
       if D (some (tsigSessionView tower128Params corruptVk tower128Corrupt tower128Honest
         (tower128SharedWireVals a b skPad aPad bPad cPad sk m)
         (tower128SharedOutVal a b skPad aPad bPad cPad sk m)
         (tower128PadEnum.toFun i))) then 1 else 0) =
-    finSum tower128PadCard (fun i =>
+    qsum tower128PadCard (fun i =>
       if D (ucSimulatorTsig tower128Params
         ⟨(), m, tower128Corrupt, tower128Honest, corruptVk, corruptTags,
           .signed (tower128BeaverSig.sign sk m)⟩

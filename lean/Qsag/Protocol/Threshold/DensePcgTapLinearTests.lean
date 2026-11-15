@@ -29,8 +29,8 @@ output is a random-oracle assumption. They bound fixed linear tests of one row (
 fixed set of rows (`m = 3·rows`), not every distinguisher, and they are not a hardness claim
 for dual-LPN decoding.
 -/
-public import Qsag.Protocol.Threshold.GaussianHvzkAndDualLpn
-import all Qsag.Protocol.Threshold.GaussianHvzkAndDualLpn
+public import Qsag.Math.Lattices
+import all Qsag.Math.Lattices
 public import Qsag.Tactic.AssuranceKit
 
 public section

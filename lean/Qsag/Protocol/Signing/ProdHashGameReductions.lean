@@ -7,7 +7,7 @@ import all Qsag.Protocol.Signing.ProdCollisionLayers
 import all Qsag.Protocol.Signing.ProdCollisionWitness
 import all Qsag.Protocol.Signing.HypertreeEufCma
 import all Qsag.Protocol.Signing.HashSigs
-import all Qsag.Oracle.UcGames
+import all Qsag.Protocol.Aggregation.UcGames
 import Qsag.Tactic.AssuranceKit
 
 /-!
@@ -3376,11 +3376,11 @@ theorem bestFinIdx_ge : ∀ (n : Nat) (hPos : 0 < n) (score : Fin n → Nat) (i 
       exact Nat.le_trans ih hLe
     · exact ih
 
-theorem finSum_le_mul_bestFinIdx (n : Nat) (hPos : 0 < n) (score : Fin n → Nat) :
-    finSum n score ≤ n * score (bestFinIdx n hPos score) := by
-  have hLe : finSum n score ≤ finSum n (fun _ => score (bestFinIdx n hPos score)) :=
-    finSum_le_finSum (bestFinIdx_ge n hPos score)
-  rw [finSum_const] at hLe
+theorem qsum_le_mul_bestFinIdx (n : Nat) (hPos : 0 < n) (score : Fin n → Nat) :
+    qsum n score ≤ n * score (bestFinIdx n hPos score) := by
+  have hLe : qsum n score ≤ qsum n (fun _ => score (bestFinIdx n hPos score)) :=
+    qsum_le_qsum (bestFinIdx_ge n hPos score)
+  rw [qsum_const] at hLe
   exact hLe
 
 private theorem hitCount_eq_zero_of_all_false {Ω : Type} (ev : Ω → Bool)
@@ -3392,20 +3392,20 @@ private theorem hitCount_eq_zero_of_all_false {Ω : Type} (ev : Ω → Bool)
 private theorem hitCount_covered_by_fin {Ω : Type} (n : Nat) (ev : Ω → Bool)
     (slotEv : Fin n → Ω → Bool)
     (hCov : ∀ ω, ev ω = true → ∃ k : Fin n, slotEv k ω = true) :
-    ∀ coins : List Ω, hitCount ev coins ≤ finSum n (fun k => hitCount (slotEv k) coins)
+    ∀ coins : List Ω, hitCount ev coins ≤ qsum n (fun k => hitCount (slotEv k) coins)
   | [] => by
-    have h0 : finSum n (fun k => hitCount (slotEv k) ([] : List Ω)) = finSum n (fun _ => 0) :=
-      finSum_congr (fun _ => rfl)
-    rw [h0, finSum_const]
+    have h0 : qsum n (fun k => hitCount (slotEv k) ([] : List Ω)) = qsum n (fun _ => 0) :=
+      qsum_congr (fun _ => rfl)
+    rw [h0, qsum_const]
     simp [hitCount]
   | ω :: rest => by
     have ih := hitCount_covered_by_fin n ev slotEv hCov rest
     have hSplit :
-        finSum n (fun k => hitCount (slotEv k) (ω :: rest)) =
-        finSum n (fun k => if slotEv k ω = true then 1 else 0) +
-        finSum n (fun k => hitCount (slotEv k) rest) := by
-      rw [← finSum_add]
-      apply finSum_congr
+        qsum n (fun k => hitCount (slotEv k) (ω :: rest)) =
+        qsum n (fun k => if slotEv k ω = true then 1 else 0) +
+        qsum n (fun k => hitCount (slotEv k) rest) := by
+      rw [← qsum_add]
+      apply qsum_congr
       intro k
       simp only [hitCount]
     rw [hSplit]
@@ -3416,9 +3416,9 @@ private theorem hitCount_covered_by_fin {Ω : Type} (n : Nat) (ev : Ω → Bool)
     · simp only [Bool.false_eq_true, ↓reduceIte, Nat.zero_add]
       omega
     · obtain ⟨k₀, hk₀⟩ := hCov ω hE
-      have hOne : 1 ≤ finSum n (fun k => if slotEv k ω = true then 1 else 0) := by
-        have hInd := finSum_eq_indicator n k₀
-        have hLe := finSum_le_finSum (n := n)
+      have hOne : 1 ≤ qsum n (fun k => if slotEv k ω = true then 1 else 0) := by
+        have hInd := qsum_eq_indicator n k₀
+        have hLe := qsum_le_qsum (n := n)
           (f := fun k => if k = k₀ then 1 else 0)
           (g := fun k => if slotEv k ω = true then 1 else 0)
           (fun k => by
@@ -3557,7 +3557,7 @@ theorem production_euf_cma_within_game_reduction_bound
       (fun k ω => smDtTcrWithinWin ω.udSuite params ω.sk (tcrExtractorAdv params k.val A))
       (fun ω hEv => prodTcrEvent_captured_by_slot ω.udSuite params hw ω.sk A hW hEv)
       coins
-    have hBest := finSum_le_mul_bestFinIdx (prodPathTargetCount params qs_max) hTcrPos
+    have hBest := qsum_le_mul_bestFinIdx (prodPathTargetCount params qs_max) hTcrPos
       (fun k => smDtTcrWithinWins coins params (tcrExtractorAdv params k.val A))
     unfold bestTcrExtractorAdv smDtTcrWithinWins at hBest ⊢
     exact Nat.le_trans hCov hBest
@@ -3571,7 +3571,7 @@ theorem production_euf_cma_within_game_reduction_bound
         (fun k ω => smDtPreWithinWin ω.udSuite params ω.sk (preExtractorAdv params k.val A))
         (fun ω hEv => prodPreEvent_captured_by_slot ω.udSuite params hw ω.sk A hEv)
         coins
-      have hBest := finSum_le_mul_bestFinIdx (prodPreCandidateCount params) hPrePos
+      have hBest := qsum_le_mul_bestFinIdx (prodPreCandidateCount params) hPrePos
         (fun k => smDtPreWithinWins coins params (preExtractorAdv params k.val A))
       unfold bestPreExtractorAdv smDtPreWithinWins at hBest ⊢
       simp only [hPrePos]

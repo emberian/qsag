@@ -24,7 +24,7 @@ public import Qsag.Math.Goldilocks
 public import Qsag.Oracle.Keccak
 import all Qsag.Oracle.Keccak
 public import Qsag.Oracle.Poseidon2
-public import Qsag.Oracle.UcGames
+public import Qsag.Protocol.Aggregation.UcGames
 
 import Qsag.Tactic.AssuranceKit
 

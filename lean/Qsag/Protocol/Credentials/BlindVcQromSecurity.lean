@@ -24,12 +24,12 @@ forgery event remain separate obligations. There is no global collision-freedom 
 -/
 
 public import Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
-public import Qsag.Oracle.MultiRoundFsQrom
+public import Qsag.Protocol.Aggregation.MultiRoundFsQrom
 public import Qsag.Tactic.AssuranceKit
 import all Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
-import all Qsag.Oracle.MultiRoundFsQrom
-import all Qsag.Oracle.ConcreteSecurityBudget
-import all Qsag.Oracle.UcGames
+import all Qsag.Protocol.Aggregation.MultiRoundFsQrom
+import all Qsag.Protocol.Aggregation.ConcreteSecurityBudget
+import all Qsag.Protocol.Aggregation.UcGames
 import all Qsag.Protocol.Credentials.AdvancedMpcAndCreds
 import all Qsag.Math.Goldilocks
 

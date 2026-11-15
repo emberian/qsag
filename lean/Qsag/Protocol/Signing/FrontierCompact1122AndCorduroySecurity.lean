@@ -30,19 +30,19 @@ axioms, purely constructive extractors):
      (`spdzGateStream_pin_count_le`).
 -/
 
-public import Qsag.Math.Constructive
+public import Qsag.Tactic.Prelude
 public import Qsag.Math.Goldilocks
 public import Qsag.Oracle.Poseidon2
 public import Qsag.Oracle.Keccak
-public import Qsag.Oracle.SpongeFramingAndDomainSep
-public import Qsag.Oracle.UcGames
+public import Qsag.Oracle.Sponge
+public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Protocol.Signing.HashSigs
 public import Qsag.Protocol.Signing.HypertreeEufCma
 public import Qsag.Protocol.Threshold.ThresholdMpc
 import all Qsag.Math.Goldilocks
 import all Qsag.Oracle.Poseidon2
 import all Qsag.Oracle.Keccak
-import all Qsag.Oracle.SpongeFramingAndDomainSep
+import all Qsag.Oracle.Sponge
 import all Qsag.Protocol.Signing.HashSigs
 import all Qsag.Protocol.Signing.HypertreeEufCma
 import all Qsag.Protocol.Threshold.ThresholdMpc
@@ -1904,7 +1904,7 @@ theorem corduroy_threshold_stateless_euf_cma
         pkSeed msg optRand maxGrind =
       evalProductionStatelessSign poseidon2Suite params ⟨skSeed, skPrf, pkSeed⟩ msg optRand maxGrind) ∧
     (∀ gates : List (Goldilocks × GoldilocksExt2),
-      finSum goldilocksExt2Card
+      qsum goldilocksExt2Card
         (fun idx => if anyGatePinsAlpha (enumGoldilocksExt2.toFun idx) gates then 1 else 0) ≤ gates.length) ∧
     -- (3) Combined stateless width-12 `poseidon2Suite` + SPDZ MAC EUF-CMA advantage union bound:
     (∀ {Ω : Type} (coins : List Ω) (game : Ω → ProdEufCmaOutcome)

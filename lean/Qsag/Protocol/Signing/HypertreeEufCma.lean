@@ -51,7 +51,7 @@ Security boundary.
 public import Qsag.Math.Goldilocks
 public import Qsag.Oracle.Keccak
 public import Qsag.Oracle.Poseidon2
-public import Qsag.Oracle.UcGames
+public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Protocol.Signing.HashSigs
 import all Qsag.Oracle.Keccak
 import all Qsag.Protocol.Signing.HashSigs

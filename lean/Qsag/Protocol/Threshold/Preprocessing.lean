@@ -32,13 +32,13 @@ backing `crates/qsag-core/src/preprocessing.rs` (`0` trusted dealers, `0` cleart
 -/
 
 public import Qsag.Math.Goldilocks
-public import Qsag.Math.BinaryTower
+public import Qsag.Math.Gf2Pow128
 public import Qsag.Oracle.Poseidon2
-public import Qsag.Oracle.UcGames
+public import Qsag.Protocol.Aggregation.UcGames
 import all Qsag.Math.Goldilocks
-import all Qsag.Math.BinaryTower
+import all Qsag.Math.Gf2Pow128
 import all Qsag.Oracle.Poseidon2
-import all Qsag.Oracle.UcGames
+import all Qsag.Protocol.Aggregation.UcGames
 import Qsag.Tactic.AssuranceKit
 
 public section
@@ -1334,15 +1334,15 @@ theorem foSurvivesBranchChecks_iff_zero :
     and, when it survives, has learned those `k` choice bits; this leakage is what the `128 × 384`
     extractor removes. -/
 theorem fo_cut_and_choose_selective_failure_bound (k : Nat) :
-    let surviveCount := finSum (2 ^ k) (fun c => if foSurvivesBranchChecks k c.1 then 1 else 0)
-    let caughtCount := finSum (2 ^ k) (fun c => if !foSurvivesBranchChecks k c.1 then 1 else 0)
+    let surviveCount := qsum (2 ^ k) (fun c => if foSurvivesBranchChecks k c.1 then 1 else 0)
+    let caughtCount := qsum (2 ^ k) (fun c => if !foSurvivesBranchChecks k c.1 then 1 else 0)
     surviveCount = 1 ∧
     caughtCount = 2 ^ k - 1 ∧
     ratLe (surviveCount, 2 ^ k) (1, 2 ^ k) := by
   intro surviveCount caughtCount
   have hPos : 0 < 2 ^ k := Nat.two_pow_pos k
-  have hSurvEq : surviveCount = finSum (2 ^ k) (fun c => if c = ⟨0, hPos⟩ then 1 else 0) := by
-    apply finSum_congr
+  have hSurvEq : surviveCount = qsum (2 ^ k) (fun c => if c = ⟨0, hPos⟩ then 1 else 0) := by
+    apply qsum_congr
     intro c
     have hIff := foSurvivesBranchChecks_iff_zero k c.1 c.2
     by_cases hc0 : c.1 = 0
@@ -1353,18 +1353,18 @@ theorem fo_cut_and_choose_selective_failure_bound (k : Nat) :
       cases hs : foSurvivesBranchChecks k c.1
       · simp [hcne]
       · exact False.elim (hc0 (hIff.mp hs))
-  have hSurv1 : surviveCount = 1 := hSurvEq.trans (finSum_eq_indicator (2 ^ k) ⟨0, hPos⟩)
+  have hSurv1 : surviveCount = 1 := hSurvEq.trans (qsum_eq_indicator (2 ^ k) ⟨0, hPos⟩)
   have hSumTotal : surviveCount + caughtCount = 2 ^ k := by
     dsimp only [surviveCount, caughtCount]
-    rw [← finSum_add]
-    have hConst1 : finSum (2 ^ k) (fun c : Fin (2 ^ k) =>
+    rw [← qsum_add]
+    have hConst1 : qsum (2 ^ k) (fun c : Fin (2 ^ k) =>
         (if foSurvivesBranchChecks k c.1 then 1 else 0) +
         (if !foSurvivesBranchChecks k c.1 then 1 else 0)) =
-        finSum (2 ^ k) (fun _ => 1) := by
-      apply finSum_congr
+        qsum (2 ^ k) (fun _ => 1) := by
+      apply qsum_congr
       intro c
       cases foSurvivesBranchChecks k c.1 <;> rfl
-    rw [hConst1, finSum_const]
+    rw [hConst1, qsum_const]
     omega
   refine ⟨hSurv1, by omega, ?_⟩
   unfold ratLe
@@ -1419,7 +1419,7 @@ theorem rlwe_fo_cut_and_choose_sound
     (branches : List RlweOtBranchSample)
     (hAllCorrupted : ∀ br ∈ branches, verifyRlweOtBranch br = false) :
     let k := branches.length
-    let surviveCount := finSum (2 ^ k) (fun c => if verifyRlweFoBatch branches c.1 then 1 else 0)
+    let surviveCount := qsum (2 ^ k) (fun c => if verifyRlweFoBatch branches c.1 then 1 else 0)
     (∀ br : RlweOtBranchSample, verifyRlweOtBranch br = true → rlweDecodeBit br.claimedCt = br.bit) ∧
     surviveCount = 1 ∧
     ratLe (surviveCount, 2 ^ k) (1, 2 ^ k) := by
@@ -1430,8 +1430,8 @@ theorem rlwe_fo_cut_and_choose_sound
     simp only [Bool.and_eq_true, decide_eq_true_eq] at hOk
     rw [hOk.2]
     exact rlwe1024_ot_decrypt_exact br.bit br.eSign br.eMag hOk.1
-  have hEqSurv : surviveCount = finSum (2 ^ k) (fun c => if foSurvivesBranchChecks k c.1 then 1 else 0) := by
-    apply finSum_congr
+  have hEqSurv : surviveCount = qsum (2 ^ k) (fun c => if foSurvivesBranchChecks k c.1 then 1 else 0) := by
+    apply qsum_congr
     intro c
     rw [verifyRlweFoBatch_corrupted_eq_survives branches c.1 hAllCorrupted]
   obtain ⟨hS1, _, hRat⟩ := fo_cut_and_choose_selective_failure_bound k
@@ -2417,10 +2417,10 @@ without an assumption on SHAKE. A vault pseudorandomness theorem must retain a
 computational hybrid; perfect uniformity is available only in the ideal game. -/
 theorem dense_seed_expansion_not_perfectly_uniform
     (expand : Fin (2 ^ 256) → Fin (2 ^ 384)) (output : Fin (2 ^ 384)) :
-    (finSum (2 ^ 256) (fun seed => if expand seed = output then 1 else 0)) * 2 ^ 384 ≠
+    (qsum (2 ^ 256) (fun seed => if expand seed = output then 1 else 0)) * 2 ^ 384 ≠
       2 ^ 256 := by
   intro he
-  let count := finSum (2 ^ 256) (fun seed => if expand seed = output then 1 else 0)
+  let count := qsum (2 ^ 256) (fun seed => if expand seed = output then 1 else 0)
   have hs : 2 ^ 256 < 2 ^ 384 := by decide +kernel
   have hp : 0 < 2 ^ 256 := Nat.two_pow_pos 256
   change count * 2 ^ 384 = 2 ^ 256 at he
