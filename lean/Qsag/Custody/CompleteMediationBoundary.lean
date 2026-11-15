@@ -1,6 +1,6 @@
 module
-public import Qsag.SeparatedCustodyCore
-import all Qsag.SeparatedCustodyCore
+public import Qsag.Custody.SeparatedCustodyCore
+import all Qsag.Custody.SeparatedCustodyCore
 import Qsag.Tactic.AssuranceKit
 
 /-! Atomic spec transitions for one custodian. Durable changes precede release.
