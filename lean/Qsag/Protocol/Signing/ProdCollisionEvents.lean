@@ -1,13 +1,13 @@
 module
-public import Qsag.ProdCollisionExtraction
-import all Qsag.ProdCollisionExtraction
-import all Qsag.ProdCollisionLayers
-import all Qsag.ProdCollisionWitness
-import all Qsag.HypertreeEufCma
+public import Qsag.Protocol.Signing.ProdCollisionExtraction
+import all Qsag.Protocol.Signing.ProdCollisionExtraction
+import all Qsag.Protocol.Signing.ProdCollisionLayers
+import all Qsag.Protocol.Signing.ProdCollisionWitness
+import all Qsag.Protocol.Signing.HypertreeEufCma
 import Qsag.Tactic.AssuranceKit
 
 /-!
-# Qsag.ProdCollisionEvents — winning events defined from the extractor output
+# Qsag.Protocol.Signing.ProdCollisionEvents — winning events defined from the extractor output
 
 `prodOutcomeBreak` runs `production_forgery_extract` on a game outcome. `prodTcrOutput` is the
 `(target, colliding input)` pair it returns, and `prodTcrEvent` is the executable check

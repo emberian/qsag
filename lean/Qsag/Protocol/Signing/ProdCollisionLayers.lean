@@ -1,12 +1,12 @@
 module
-public import Qsag.ProdCollisionWitness
-import all Qsag.ProdCollisionWitness
-import all Qsag.HypertreeEufCma
-import all Qsag.HashSigs
+public import Qsag.Protocol.Signing.ProdCollisionWitness
+import all Qsag.Protocol.Signing.ProdCollisionWitness
+import all Qsag.Protocol.Signing.HypertreeEufCma
+import all Qsag.Protocol.Signing.HashSigs
 import Qsag.Tactic.AssuranceKit
 
 /-!
-# Qsag.ProdCollisionLayers — hypertree part of the production extractor
+# Qsag.Protocol.Signing.ProdCollisionLayers — hypertree part of the production extractor
 
 `prodLayerExtract` and `prodHypertreeWalkExtract` are `prod_layer_divergence_break` and
 `prod_hypertree_walk_break` as functions. Every case split is on decidable data (log search,

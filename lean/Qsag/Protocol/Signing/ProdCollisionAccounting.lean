@@ -1,14 +1,14 @@
 module
-public import Qsag.ProdCollisionEvents
-import all Qsag.ProdCollisionEvents
-import all Qsag.ProdCollisionExtraction
-import all Qsag.ProdCollisionLayers
-import all Qsag.ProdCollisionWitness
-import all Qsag.HypertreeEufCma
+public import Qsag.Protocol.Signing.ProdCollisionEvents
+import all Qsag.Protocol.Signing.ProdCollisionEvents
+import all Qsag.Protocol.Signing.ProdCollisionExtraction
+import all Qsag.Protocol.Signing.ProdCollisionLayers
+import all Qsag.Protocol.Signing.ProdCollisionWitness
+import all Qsag.Protocol.Signing.HypertreeEufCma
 import Qsag.Tactic.AssuranceKit
 
 /-!
-# Qsag.ProdCollisionAccounting — the candidate targets of one forgery
+# Qsag.Protocol.Signing.ProdCollisionAccounting — the candidate targets of one forgery
 
 `ProdSmTcrBreak` ranges over every honest hash input of the key. A returned `ProdTcrWitness` is
 narrower: `ProdTargetIdx.OnPath` leaves no free index. `prodPathTargets` lists the candidates for
