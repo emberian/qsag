@@ -1,11 +1,11 @@
 module
 public import Qsag.Tactic.ConstructiveRing
-public import Qsag.ThresholdApproval
-public import Qsag.SuccinctAggregationIop
-import all Qsag.ThresholdApproval
-import all Qsag.SuccinctAggregationIop
-import all Qsag.Aggregation
-import all Qsag.UcGames
+public import Qsag.Protocol.Threshold.ThresholdApproval
+public import Qsag.Protocol.Aggregation.SuccinctAggregationIop
+import all Qsag.Protocol.Threshold.ThresholdApproval
+import all Qsag.Protocol.Aggregation.SuccinctAggregationIop
+import all Qsag.Protocol.Aggregation.Aggregation
+import all Qsag.Oracle.UcGames
 public section
 namespace Qsag.Composed
 set_option autoImplicit false

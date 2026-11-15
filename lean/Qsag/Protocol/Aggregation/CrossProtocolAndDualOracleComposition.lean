@@ -11,14 +11,14 @@ variable-length bytesToLimbs56 codec uses marked big-endian seven-byte chunks.
 Distinct cSHAKE customizations separate inputs, not outputs or entire protocols.
 FIPS-205 raw SHAKE roles and reused labels prevent an unconditional global partition.
 -/
-public import Qsag.Aggregation
-public import Qsag.Poseidon2
-public import Qsag.Fips205
-public import Qsag.SpongeFramingAndDomainSep
-import all Qsag.Aggregation
-import all Qsag.Poseidon2
-import all Qsag.Fips205
-import all Qsag.SpongeFramingAndDomainSep
+public import Qsag.Protocol.Aggregation.Aggregation
+public import Qsag.Oracle.Poseidon2
+public import Qsag.Protocol.Signing.Fips205
+public import Qsag.Oracle.SpongeFramingAndDomainSep
+import all Qsag.Protocol.Aggregation.Aggregation
+import all Qsag.Oracle.Poseidon2
+import all Qsag.Protocol.Signing.Fips205
+import all Qsag.Oracle.SpongeFramingAndDomainSep
 import Qsag.Tactic.AssuranceKit
 
 public section

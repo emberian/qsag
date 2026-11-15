@@ -8849,3 +8849,2940 @@ private theorem stepNodeHashF_fors (pkSeed : Lane4) (tree kpN j l par : Nat) (L 
   rw [hMeta]
 
 /-- What the 17 rows of FORS tree `j` starting at row `T` establish. -/
+structure StepForsTreeFacts (pub : AggValidatorPk × Digest5) (R : Nat → StepOpRow)
+    (kpN tree j : Nat) (odd : Bool) (T : Nat) : Prop where
+  idxLt : stepForsIdxN R T < 256
+  get : (stepRegsAt R T).rem.get (j / 6) =
+    ‹stepForsIdxN R T› +ₚ (stepAux R T 8 *ₚ ‹256›)
+  set : (stepRegsAt R (T + 17)).rem = (stepRegsAt R T).rem.set (j / 6) (stepAux R T 8)
+  root : merkleWalkRoot domainForsNode pub.1.pkSeed 0 tree (forsNodeAddr 8 kpN j) 1
+      (stepForsIdxN R T)
+      (poseidon2Compress12FF (stepAuxLane R T 0) pub.1.pkSeed
+        ⟨domainForsLeaf, ‹(kpN <<< 24) ||| ((j <<< 8) ||| stepForsIdxN R T)›,
+         ‹tree % 2 ^ 32›, ‹(tree / 2 ^ 32) % 2 ^ 32›⟩)
+      ((List.range 8).map (fun l => stepAuxLane R (T + 1 + 2 * l) 2)) =
+    (stepPermAt R (T + 16)).b0
+  kp : (stepRegsAt R (T + 17)).kp = (stepRegsAt R T).kp
+  treeLo : (stepRegsAt R (T + 17)).treeLo = (stepRegsAt R T).treeLo
+  treeHi : (stepRegsAt R (T + 17)).treeHi = (stepRegsAt R T).treeHi
+  main : (stepRegsAt R (T + 17)).main = (stepRegsAt R T).main
+  outE : odd = false → (stepRegsAt R (T + 17)).curRoot = (stepPermAt R (T + 16)).b0
+  outO : odd = true → (stepRegsAt R (T + 17)).work = (stepPermAt R (T + 16)).b0 ∧
+    (stepRegsAt R (T + 17)).curRoot = (stepRegsAt R T).curRoot
+
+/-- **FORS tree rows.** The 17 rows of one tree hash the opened leaf under the tree's leaf
+    address, walk its authentication path under the tree's node addresses, and consume one
+    byte of the packed indices. -/
+theorem stepForsTree_sem {pub : AggValidatorPk × Digest5} {R : Nat → StepOpRow}
+    {j kpN tree T : Nat} {odd : Bool}
+    (hRun : StepRunAt pub R (stepForsTreeOps j odd) T)
+    (hAddr : StepAddrOk (stepRegsAt R T) kpN tree) (hk : kpN < 16) (hj : j < 32) :
+    StepForsTreeFacts pub R kpN tree j odd T := by
+  have hLeaf : StepRowSem pub R (.forsLeafHash j (j / 6)) T := hRun.append_left.head
+  have hLvRun : StepRunAt pub R ((List.range 8).flatMap (fun lvl =>
+      [StepOp.forsMerkleBlockA j lvl, StepOp.forsMerkleBlockB lvl (lvl + 1 == 8) odd]))
+      (T + 1) := hRun.append_right
+  have hLv := StepRunAt.flatMap_range (L := 2) (fun _ => rfl) 8 hLvRun
+  have hArow : ∀ l < 8, StepRowSem pub R (.forsMerkleBlockA j l) (T + 1 + 2 * l) := by
+    intro l hl
+    have h := (hLv l hl).head
+    rw [Nat.mul_comm l 2] at h
+    exact h
+  have hBrow : ∀ l < 8,
+      StepRowSem pub R (.forsMerkleBlockB l (l + 1 == 8) odd) (T + 1 + 2 * l + 1) := by
+    intro l hl
+    have h := (hLv l hl).tail.head
+    rw [Nat.mul_comm l 2] at h
+    exact h
+  obtain ⟨hDig, hGet, hInL, hRL⟩ := stepSem_forsLeafHash (by omega : j / 6 < 6) hLeaf
+  have hRL' : stepRegsAt R (T + 1) = _ := hRL
+  have hIdxEq : stepForsIdxF R T = ‹stepForsIdxN R T› := stepWeightedSum_eq_ofNat _ _ _
+  have hIdxLt : stepForsIdxN R T < 256 := stepWeightedNat_lt 4 _ 4 hDig
+  have hLast : StepRowSem pub R (.forsMerkleBlockB 7 true odd) (T + 16) := hBrow 7 (by decide)
+  have hLastFacts : (R (T + 16)).stIn = stepMerkleBIn (stepRegsAt R (T + 16)) ∧
+      (stepRegsAt R (T + 16)).cursor = Goldilocks.zero := by
+    cases odd
+    · obtain ⟨a, b, _⟩ := stepSem_forsMerkleBlockB_even hLast
+      exact ⟨a, b⟩
+    · obtain ⟨a, b, _⟩ := stepSem_forsMerkleBlockB_odd hLast
+      exact ⟨a, b⟩
+  have hInner : ∀ l, l < 7 →
+      (R (T + 1 + 2 * l + 1)).stIn = stepMerkleBIn (stepRegsAt R (T + 1 + 2 * l + 1)) ∧
+      stepRegsAt R (T + 1 + 2 * l + 2) =
+        { stepRegsAt R (T + 1 + 2 * l + 1) with
+          work := (stepPermAt R (T + 1 + 2 * l + 1)).b0 } := by
+    intro l hl
+    have h := hBrow l (by omega)
+    rw [beq_false_of_ne (by omega : l + 1 ≠ 8)] at h
+    exact stepSem_forsMerkleBlockB_inner h
+  have kp1 : (stepRegsAt R (T + 1)).kp = (stepRegsAt R T).kp := by rw [hRL']
+  have lo1 : (stepRegsAt R (T + 1)).treeLo = (stepRegsAt R T).treeLo := by rw [hRL']
+  have hi1 : (stepRegsAt R (T + 1)).treeHi = (stepRegsAt R T).treeHi := by rw [hRL']
+  have main1 : (stepRegsAt R (T + 1)).main = (stepRegsAt R T).main := by rw [hRL']
+  have cur1 : (stepRegsAt R (T + 1)).curRoot = (stepRegsAt R T).curRoot := by rw [hRL']
+  have rem1 : (stepRegsAt R (T + 1)).rem = (stepRegsAt R T).rem.set (j / 6) (stepAux R T 8) := by
+    rw [hRL']
+  have hFr : ∀ l, l ≤ 7 →
+      StepFrameSWC (stepRegsAt R (T + 1 + 2 * l)) (stepRegsAt R (T + 1)) := by
+    intro l
+    induction l with
+    | zero => intro _; exact ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+    | succ l ih =>
+      intro hl
+      have iF := ih (by omega)
+      have hA := (stepMerkleARow_fors (hArow l (by omega))).next
+      have hB := (hInner l (by omega)).2
+      have e : T + 1 + 2 * (l + 1) = T + 1 + 2 * l + 2 := by omega
+      rw [e, hB, hA]
+      exact ⟨iF.curRoot, iF.kp, iF.treeLo, iF.treeHi, iF.rem, iF.main⟩
+  have hKpRow : ∀ l < 8, (stepRegsAt R (T + 1 + 2 * l)).kp = ‹kpN› :=
+    fun l hl => ((hFr l (by omega)).kp.trans kp1).trans hAddr.kp
+  have hA' : ∀ l < 8, StepMerkleARow pub R (T + 1 + 2 * l) domainForsNode
+      (‹(l + 1) * 2 ^ 32 + j * 2 ^ (7 - l)› +ₚ (‹kpN› *ₚ ‹2 ^ 16›)) := by
+    intro l hl
+    have h := stepMerkleARow_fors (hArow l hl)
+    rw [hKpRow l hl] at h
+    exact h
+  obtain ⟨_, hWalk, hFr16⟩ := stepMerkle_sem (layerV := 0) (treeV := tree)
+    (addr := forsNodeAddr 8 kpN j) (idx0 := stepForsIdxN R T) (t1 := T + 1) (h := 8) hA'
+    (fun l hl => by
+      by_cases h7 : l < 7
+      · exact (hInner l h7).1
+      · have e : l = 7 := by omega
+        subst e
+        exact hLastFacts.1)
+    (fun l hl => (hInner l (by omega)).2)
+    hLastFacts.2
+    (by rw [hRL']; exact hIdxEq)
+    (by omega) (by decide) (by decide)
+    (fun l hl _ L Rr => by
+      rw [lo1, hi1, hAddr.lo, hAddr.hi]
+      exact stepNodeHashF_fors pub.1.pkSeed tree kpN j l (stepForsIdxN R T / 2 ^ (l + 1)) L Rr
+        hk hj hl (Nat.lt_of_le_of_lt (Nat.div_le_self _ _) hIdxLt))
+  have hFr16' : StepFrameSWC (stepRegsAt R (T + 16)) (stepRegsAt R (T + 1)) := hFr16
+  have hLeafWork : (stepRegsAt R (T + 1)).work =
+      poseidon2Compress12FF (stepAuxLane R T 0) pub.1.pkSeed
+        ⟨domainForsLeaf, ‹(kpN <<< 24) ||| ((j <<< 8) ||| stepForsIdxN R T)›,
+         ‹tree % 2 ^ 32›, ‹(tree / 2 ^ 32) % 2 ^ 32›⟩ := by
+    have hTw : (‹kpN› *ₚ ‹2 ^ 24›) +ₚ (‹j * 2 ^ 8› +ₚ ‹stepForsIdxN R T›) =
+        ‹(kpN <<< 24) ||| ((j <<< 8) ||| stepForsIdxN R T)› := by
+      have h8 : stepForsIdxN R T < 2 ^ 8 := hIdxLt
+      have h1 : j <<< 8 ||| stepForsIdxN R T = j <<< 8 + stepForsIdxN R T :=
+        (Nat.shiftLeft_add_eq_or_of_lt h8 j).symm
+      have hb : j <<< 8 + stepForsIdxN R T < 2 ^ 24 := by
+        rw [Nat.shiftLeft_eq]
+        omega
+      have h2 : kpN <<< 24 ||| (j <<< 8 + stepForsIdxN R T) =
+          kpN <<< 24 + (j <<< 8 + stepForsIdxN R T) :=
+        (Nat.shiftLeft_add_eq_or_of_lt hb kpN).symm
+      rw [h1, h2, Nat.shiftLeft_eq, Nat.shiftLeft_eq, ← g_ofNat_mul, ← g_ofNat_add,
+        ← g_ofNat_add]
+    rw [hRL']
+    show lane4Add (stepPermAt R T).b0 (stepAuxLane R T 0) = _
+    unfold poseidon2Compress12FF stepPermAt
+    rw [hInL, hAddr.kp, hAddr.lo, hAddr.hi, hIdxEq, hTw]
+  rw [hLeafWork] at hWalk
+  rw [hIdxEq] at hGet
+  have hOut : (stepRegsAt R (T + 17)).rem = (stepRegsAt R (T + 16)).rem ∧
+      (stepRegsAt R (T + 17)).kp = (stepRegsAt R (T + 16)).kp ∧
+      (stepRegsAt R (T + 17)).treeLo = (stepRegsAt R (T + 16)).treeLo ∧
+      (stepRegsAt R (T + 17)).treeHi = (stepRegsAt R (T + 16)).treeHi ∧
+      (stepRegsAt R (T + 17)).main = (stepRegsAt R (T + 16)).main ∧
+      (odd = false → (stepRegsAt R (T + 17)).curRoot = (stepPermAt R (T + 16)).b0) ∧
+      (odd = true → (stepRegsAt R (T + 17)).work = (stepPermAt R (T + 16)).b0 ∧
+        (stepRegsAt R (T + 17)).curRoot = (stepRegsAt R (T + 16)).curRoot) := by
+    cases odd
+    · obtain ⟨_, _, hN⟩ := stepSem_forsMerkleBlockB_even hLast
+      have hN' : stepRegsAt R (T + 17) = _ := hN
+      rw [hN']
+      exact ⟨rfl, rfl, rfl, rfl, rfl, fun _ => rfl, fun h => Bool.noConfusion h⟩
+    · obtain ⟨_, _, hN⟩ := stepSem_forsMerkleBlockB_odd hLast
+      have hN' : stepRegsAt R (T + 17) = _ := hN
+      rw [hN']
+      exact ⟨rfl, rfl, rfl, rfl, rfl, fun h => Bool.noConfusion h, fun _ => ⟨rfl, rfl⟩⟩
+  obtain ⟨o1, o2, o3, o4, o5, o6, o7⟩ := hOut
+  exact
+    { idxLt := hIdxLt
+      get := hGet
+      set := o1.trans (hFr16'.rem.trans rem1)
+      root := hWalk
+      kp := o2.trans (hFr16'.kp.trans kp1)
+      treeLo := o3.trans (hFr16'.treeLo.trans lo1)
+      treeHi := o4.trans (hFr16'.treeHi.trans hi1)
+      main := o5.trans (hFr16'.main.trans main1)
+      outE := o6
+      outO := fun h => ⟨(o7 h).1, (o7 h).2.trans (hFr16'.curRoot.trans cur1)⟩ }
+
+/-- One FORS pair: two trees and the absorption of their roots. -/
+def stepForsPairOps (pair : Nat) : List StepOp :=
+  (List.range 2).flatMap (fun sub =>
+    [StepOp.forsLeafHash (2 * pair + sub) ((2 * pair + sub) / 6)] ++
+    (List.range 8).flatMap (fun lvl =>
+      [StepOp.forsMerkleBlockA (2 * pair + sub) lvl,
+       StepOp.forsMerkleBlockB lvl (lvl + 1 == 8) (sub == 1)])) ++
+  [StepOp.forsRootsPairAbsorb pair]
+
+/-- What the 35 rows of FORS pair `pair` starting at row `T` establish. -/
+structure StepForsPairFacts (pub : AggValidatorPk × Digest5) (R : Nat → StepOpRow)
+    (kpN tree pair T : Nat) : Prop where
+  E : StepForsTreeFacts pub R kpN tree (2 * pair) false T
+  O : StepForsTreeFacts pub R kpN tree (2 * pair + 1) true (T + 17)
+  rem : (stepRegsAt R (T + 35)).rem = (stepRegsAt R (T + 34)).rem
+  zero : (pair + 1 == 16) = true → ∀ s < 6, (stepRegsAt R (T + 34)).rem.get s = Goldilocks.zero
+  main : (stepRegsAt R (T + 35)).main =
+    poseidon2Perm12
+      ⟨lane4Add (stepRegsAt R T).main.b0 (stepPermAt R (T + 16)).b0,
+       lane4Add (stepRegsAt R T).main.b1 (stepPermAt R (T + 33)).b0,
+       (stepRegsAt R T).main.b2⟩
+  kp : (stepRegsAt R (T + 35)).kp = (stepRegsAt R T).kp
+  treeLo : (stepRegsAt R (T + 35)).treeLo = (stepRegsAt R T).treeLo
+  treeHi : (stepRegsAt R (T + 35)).treeHi = (stepRegsAt R T).treeHi
+
+theorem stepForsPair_sem {pub : AggValidatorPk × Digest5} {R : Nat → StepOpRow}
+    {pair kpN tree T : Nat}
+    (hRun : StepRunAt pub R (stepForsPairOps pair) T)
+    (hAddr : StepAddrOk (stepRegsAt R T) kpN tree) (hk : kpN < 16) (hp : pair < 16) :
+    StepForsPairFacts pub R kpN tree pair T := by
+  have hTrees : StepRunAt pub R ((List.range 2).flatMap (fun sub =>
+      [StepOp.forsLeafHash (2 * pair + sub) ((2 * pair + sub) / 6)] ++
+      (List.range 8).flatMap (fun lvl =>
+        [StepOp.forsMerkleBlockA (2 * pair + sub) lvl,
+         StepOp.forsMerkleBlockB lvl (lvl + 1 == 8) (sub == 1)]))) T := hRun.append_left
+  have hTree := StepRunAt.flatMap_range (L := 17) (fun _ => rfl) 2 hTrees
+  have hE : StepRunAt pub R (stepForsTreeOps (2 * pair) false) T := hTree 0 (by decide)
+  have hO : StepRunAt pub R (stepForsTreeOps (2 * pair + 1) true) (T + 17) :=
+    hTree 1 (by decide)
+  have hAbs : StepRowSem pub R (.forsRootsPairAbsorb pair) (T + 34) := hRun.get 34 _ rfl
+  have E := stepForsTree_sem hE hAddr hk (by omega)
+  have hAddr17 : StepAddrOk (stepRegsAt R (T + 17)) kpN tree :=
+    ⟨E.kp.trans hAddr.kp, E.treeLo.trans hAddr.lo, E.treeHi.trans hAddr.hi⟩
+  have O := stepForsTree_sem hO hAddr17 hk (by omega)
+  obtain ⟨hZ, hInA, hRA⟩ := stepSem_forsRootsPairAbsorb hAbs
+  have hRA' : stepRegsAt R (T + 35) = _ := hRA
+  have m34 : (stepRegsAt R (T + 34)).main = (stepRegsAt R T).main := O.main.trans E.main
+  have c34 : (stepRegsAt R (T + 34)).curRoot = (stepPermAt R (T + 16)).b0 :=
+    (O.outO rfl).2.trans (E.outE rfl)
+  have w34 : (stepRegsAt R (T + 34)).work = (stepPermAt R (T + 33)).b0 := (O.outO rfl).1
+  have k34 : (stepRegsAt R (T + 34)).kp = (stepRegsAt R T).kp := O.kp.trans E.kp
+  have lo34 : (stepRegsAt R (T + 34)).treeLo = (stepRegsAt R T).treeLo :=
+    O.treeLo.trans E.treeLo
+  have hi34 : (stepRegsAt R (T + 34)).treeHi = (stepRegsAt R T).treeHi :=
+    O.treeHi.trans E.treeHi
+  refine
+    { E := E, O := O, rem := by rw [hRA'], zero := hZ, main := ?_, kp := ?_, treeLo := ?_,
+      treeHi := ?_ }
+  · rw [hRA']
+    show poseidon2Perm12 (R (T + 34)).stIn = _
+    rw [hInA, m34, c34, w34]
+  · rw [hRA']; exact k34
+  · rw [hRA']; exact lo34
+  · rw [hRA']; exact hi34
+
+/-- Row of the `ForsLeafHash` of tree `j` when the `ForsRootsSpongeInit` row is `t0`. -/
+def stepForsRow (t0 j : Nat) : Nat := t0 + 1 + 35 * (j / 2) + 17 * (j % 2)
+
+/-- Root of FORS tree `j` as computed by its rows. -/
+def stepForsRoot (R : Nat → StepOpRow) (t0 j : Nat) : Lane4 :=
+  (stepPermAt R (stepForsRow t0 j + 16)).b0
+
+/-- A FORS opening whose authentication path walks to `rt` is accepted with root `rt`. -/
+theorem verifySingleForsOpening_intro (geom : AggSigGeometry) (pkSeed : Digest4)
+    (leaf j idx : Nat) (secret : Digest4) (path : List Digest4) (rt : Digest4)
+    (hIdx : idx < 2 ^ geom.forsHeight) (hLen : path.length = geom.forsHeight)
+    (hWalk : merkleWalkRoot domainForsNode pkSeed 0 (forsHyperTreeIdx geom leaf)
+      (forsTreeNodeAddr geom leaf j) 1 idx (forsLeafHash geom pkSeed secret leaf j idx) path =
+      rt) :
+    verifySingleForsOpening geom pkSeed leaf j idx ⟨secret, path⟩ = some rt := by
+  unfold verifySingleForsOpening
+  simp only [hIdx, hLen, decide_true, beq_self_eq_true, Bool.and_self, ↓reduceIte]
+  exact congrArg some hWalk
+
+/-- **FORS rows.** The 562 rows `ForsRootsSpongeInit .. ForsRootsFinalSqueeze` verify 32 FORS
+    openings read from the auxiliary columns, unpack exactly the packed indices, and leave in
+    `ST_CUR_ROOT` the sponge of the 32 recovered roots. -/
+theorem stepFors_sem {pub : AggValidatorPk × Digest5} {R : Nat → StepOpRow} {t0 leaf : Nat}
+    (hInit : StepRowSem pub R .forsRootsSpongeInit t0)
+    (hPairs : StepRunAt pub R ((List.range 16).flatMap stepForsPairOps) (t0 + 1))
+    (hSq : StepRowSem pub R .forsRootsFinalSqueeze (t0 + 561))
+    (hAddr : StepAddrOk (stepRegsAt R t0) (leaf % 16) (leaf / 16)) :
+    (∀ j < 32, stepForsIdxN R (stepForsRow t0 j) < 256) ∧
+    (∀ s a len : Nat, (∀ c < 32, c / 6 = s ↔ a ≤ c ∧ c < a + len) → s < 6 → a + len ≤ 32 →
+      256 ^ len < goldilocksPrime →
+      ((stepRegsAt R t0).rem.get s).val =
+        evalBaseDigits 256
+          ((List.range' a len).map (fun c => stepForsIdxN R (stepForsRow t0 c)))) ∧
+    (∀ j < 32, verifySingleForsOpening corduroyPoseidon2Geom pub.1.pkSeed leaf j
+        (stepForsIdxN R (stepForsRow t0 j)) (stepForsOpening R (stepForsRow t0 j)) =
+      some (stepForsRoot R t0 j)) ∧
+    (stepRegsAt R (t0 + 562)).curRoot =
+      compressForsRootsSponge corduroyPoseidon2Geom pub.1.pkSeed leaf
+        ((List.range 32).map (stepForsRoot R t0)) ∧
+    StepAddrOk (stepRegsAt R (t0 + 562)) (leaf % 16) (leaf / 16) := by
+  have hk : leaf % 16 < 16 := Nat.mod_lt _ (by decide)
+  have hPair : ∀ p < 16, StepRunAt pub R (stepForsPairOps p) (t0 + 1 + p * 35) :=
+    StepRunAt.flatMap_range (L := 35) (fun _ => rfl) 16 hPairs
+  obtain ⟨hInInit, hR1⟩ := stepSem_forsRootsSpongeInit hInit
+  have hFrame : ∀ p, p ≤ 16 →
+      (stepRegsAt R (t0 + 1 + p * 35)).kp = (stepRegsAt R t0).kp ∧
+      (stepRegsAt R (t0 + 1 + p * 35)).treeLo = (stepRegsAt R t0).treeLo ∧
+      (stepRegsAt R (t0 + 1 + p * 35)).treeHi = (stepRegsAt R t0).treeHi := by
+    intro p
+    induction p with
+    | zero =>
+      intro _
+      have h0 : stepRegsAt R (t0 + 1 + 0 * 35) = _ := hR1
+      rw [h0]
+      exact ⟨rfl, rfl, rfl⟩
+    | succ p ih =>
+      intro hp
+      obtain ⟨i1, i2, i3⟩ := ih (by omega)
+      have hA : StepAddrOk (stepRegsAt R (t0 + 1 + p * 35)) (leaf % 16) (leaf / 16) :=
+        ⟨i1.trans hAddr.kp, i2.trans hAddr.lo, i3.trans hAddr.hi⟩
+      have F := stepForsPair_sem (hPair p (by omega)) hA hk (by omega)
+      have e : t0 + 1 + (p + 1) * 35 = t0 + 1 + p * 35 + 35 := by omega
+      rw [e]
+      exact ⟨F.kp.trans i1, F.treeLo.trans i2, F.treeHi.trans i3⟩
+  have hF : ∀ p, p < 16 →
+      StepForsPairFacts pub R (leaf % 16) (leaf / 16) p (t0 + 1 + p * 35) := by
+    intro p hp
+    obtain ⟨i1, i2, i3⟩ := hFrame p (by omega)
+    exact stepForsPair_sem (hPair p hp)
+      ⟨i1.trans hAddr.kp, i2.trans hAddr.lo, i3.trans hAddr.hi⟩ hk hp
+  have rowE : ∀ p, stepForsRow t0 (2 * p) = t0 + 1 + p * 35 := by
+    intro p; unfold stepForsRow; omega
+  have rowO : ∀ p, stepForsRow t0 (2 * p + 1) = t0 + 1 + p * 35 + 17 := by
+    intro p; unfold stepForsRow; omega
+  have rowN : ∀ p, stepForsRow t0 (2 * p + 1 + 1) = t0 + 1 + p * 35 + 35 := by
+    intro p; unfold stepForsRow; omega
+  have rootE : ∀ p, stepForsRoot R t0 (2 * p) = (stepPermAt R (t0 + 1 + p * 35 + 16)).b0 := by
+    intro p; unfold stepForsRoot; rw [rowE]
+  have rootO : ∀ p, stepForsRoot R t0 (2 * p + 1) =
+      (stepPermAt R (t0 + 1 + p * 35 + 33)).b0 := by
+    intro p; unfold stepForsRoot; rw [rowO]
+  have hSplit : ∀ c, c < 32 → ∃ p, p < 16 ∧ (c = 2 * p ∨ c = 2 * p + 1) :=
+    fun c hc => ⟨c / 2, by omega, by omega⟩
+  have hd : ∀ c < 32, stepForsIdxN R (stepForsRow t0 c) < 256 := by
+    intro c hc
+    obtain ⟨p, hp, rfl | rfl⟩ := hSplit c hc
+    · rw [rowE]; exact (hF p hp).E.idxLt
+    · rw [rowO]; exact (hF p hp).O.idxLt
+  have hget : ∀ c < 32, ((stepRegsAt R (stepForsRow t0 c)).rem).get (c / 6) =
+      ‹stepForsIdxN R (stepForsRow t0 c)› +ₚ (stepAux R (stepForsRow t0 c) 8 *ₚ ‹256›) := by
+    intro c hc
+    obtain ⟨p, hp, rfl | rfl⟩ := hSplit c hc
+    · rw [rowE]; exact (hF p hp).E.get
+    · rw [rowO]; exact (hF p hp).O.get
+  have hset : ∀ c < 32, (stepRegsAt R (stepForsRow t0 (c + 1))).rem =
+      ((stepRegsAt R (stepForsRow t0 c)).rem).set (c / 6)
+        (stepAux R (stepForsRow t0 c) 8) := by
+    intro c hc
+    obtain ⟨p, hp, rfl | rfl⟩ := hSplit c hc
+    · rw [rowE, rowO]; exact (hF p hp).E.set
+    · rw [rowO, rowN]; exact (hF p hp).rem.trans (hF p hp).O.set
+  have hEnd : ∀ s < 6, ((stepRegsAt R (stepForsRow t0 32)).rem).get s = Goldilocks.zero := by
+    intro s hs
+    have e : stepForsRow t0 32 = t0 + 1 + 15 * 35 + 35 := by unfold stepForsRow; omega
+    rw [e, (hF 15 (by decide)).rem]
+    exact (hF 15 (by decide)).zero rfl s hs
+  have hG0 : (stepRegsAt R (stepForsRow t0 0)).rem = (stepRegsAt R t0).rem := by
+    have e : stepForsRow t0 0 = t0 + 1 := by unfold stepForsRow; omega
+    rw [e, hR1]
+  have hMain : ∀ p, p ≤ 16 → (stepRegsAt R (t0 + 1 + p * 35)).main =
+      absorbDigest4Pairs (stepPermAt R t0) ((List.range (2 * p)).map (stepForsRoot R t0)) := by
+    intro p
+    induction p with
+    | zero =>
+      intro _
+      have h0 : stepRegsAt R (t0 + 1 + 0 * 35) = _ := hR1
+      rw [h0]
+      rfl
+    | succ p ih =>
+      intro hp
+      have F := hF p (by omega)
+      have e : t0 + 1 + (p + 1) * 35 = t0 + 1 + p * 35 + 35 := by omega
+      have e2 : 2 * (p + 1) = 2 * p + 1 + 1 := by omega
+      rw [e, F.main, ih (by omega), e2, List.range_succ, List.range_succ, List.append_assoc,
+        List.map_append]
+      unfold absorbDigest4Pairs
+      have hEven : ((List.range (2 * p)).map (stepForsRoot R t0)).length % 2 = 0 := by
+        rw [List.length_map, List.length_range]
+        omega
+      have hApp := absorbPairsPoly_append_pair
+        (fun (s : Poseidon2State12) (e0 : Lane4) =>
+          poseidon2Perm12 ⟨lane4Add s.b0 e0, s.b1, s.b2⟩)
+        (fun (s : Poseidon2State12) (e0 e1 : Lane4) =>
+          poseidon2Perm12 ⟨lane4Add s.b0 e0, lane4Add s.b1 e1, s.b2⟩)
+        (stepPermAt R (t0 + 1 + p * 35 + 16)).b0 (stepPermAt R (t0 + 1 + p * 35 + 33)).b0
+        _ (stepPermAt R t0) hEven
+      simp only [List.cons_append, List.nil_append, List.map_cons, List.map_nil]
+      rw [rootE, rootO]
+      exact hApp.symm
+  obtain ⟨hInSq, hR562⟩ := stepSem_forsRootsFinalSqueeze hSq
+  have hR562' : stepRegsAt R (t0 + 562) = _ := hR562
+  obtain ⟨f1, f2, f3⟩ := hFrame 16 (Nat.le_refl _)
+  have e16 : t0 + 1 + 16 * 35 = t0 + 561 := by omega
+  rw [e16] at f1 f2 f3
+  have hM16 := hMain 16 (Nat.le_refl _)
+  rw [e16] at hM16
+  refine ⟨hd, ?_, ?_, ?_, ?_⟩
+  · intro s a len hRange hs haN hLen
+    have h := stepRemSlot_digits
+      (fun c => (stepRegsAt R (stepForsRow t0 c)).rem) 256 (by decide)
+      (fun c => stepForsIdxN R (stepForsRow t0 c))
+      (fun c => stepAux R (stepForsRow t0 c) 8) (fun c => c / 6) 32
+      hd hget hset (fun c hc => by show c / 6 < 6; omega) s a len hRange haN (hEnd s hs) hLen
+    rw [← hG0]
+    exact h
+  · intro j hj
+    obtain ⟨p, hp, rfl | rfl⟩ := hSplit j hj
+    · rw [rootE, rowE]
+      exact verifySingleForsOpening_intro corduroyPoseidon2Geom _ leaf (2 * p) _ _ _ _
+        (hF p hp).E.idxLt (by rw [List.length_map, List.length_range]; rfl) (hF p hp).E.root
+    · rw [rootO, rowO]
+      exact verifySingleForsOpening_intro corduroyPoseidon2Geom _ leaf (2 * p + 1) _ _ _ _
+        (hF p hp).O.idxLt (by rw [List.length_map, List.length_range]; rfl) (hF p hp).O.root
+  · have hInit' : (R t0).stIn =
+        ⟨pub.1.pkSeed,
+         ⟨‹leaf % 16›, ‹(leaf / 16) % 2 ^ 32›, ‹(leaf / 16 / 2 ^ 32) % 2 ^ 32›, ‹32›⟩,
+         ⟨domainForsRoots, Goldilocks.zero, Goldilocks.zero, poseidon2IvTag⟩⟩ := by
+      rw [hInInit, hAddr.kp, hAddr.lo, hAddr.hi]
+    rw [hR562']
+    show (stepPermAt R (t0 + 561)).b0 = _
+    unfold stepPermAt
+    rw [hInSq]
+    unfold stepSqueezeIn
+    rw [hM16]
+    unfold stepPermAt compressForsRootsSponge
+    rw [hInit']
+    rfl
+  · rw [hR562']
+    exact ⟨f1.trans hAddr.kp, f2.trans hAddr.lo, f3.trans hAddr.hi⟩
+
+/-! ### §3.17. Hypertree layers of the stateless profile -/
+
+/-- The 465 rows of one hypertree layer of the stateless profile. -/
+def stepCordLayerOps (layer : Nat) (isTop : Bool) : List StepOp :=
+  [StepOp.detTreeHmsgBlock0 layer, StepOp.detTreeHmsgBlock1 layer] ++
+    (List.range 5).map StepOp.hmsgDecompLimb ++ pushLayerWotsAndMerkle layer 4 isTop
+
+/-- The WOTS+C counter read from the 32 bits of a `DetTreeHmsgBlock1` row; `tL` is the row of
+    the layer's `DetTreeHmsgBlock0`. -/
+def stepCordCtr (R : Nat → StepOpRow) (tL : Nat) : Nat :=
+  stepWeightedNat (stepAux R (tL + 1)) (fun i => 2 ^ i) 32
+
+/-- The layer signature read from the rows of a layer starting at row `tL`. -/
+def stepCordLayerSig (R : Nat → StepOpRow) (tL : Nat) : WotsLayerSig :=
+  ⟨stepCordCtr R tL, stepLayerChains R (tL + 7), stepLayerPath R (tL + 457) 4⟩
+
+/-- **Stateless layer rows.** The 465 rows of a layer hash the child root in `ST_CUR_ROOT`
+    under the deterministic tree `H_msg`, verify one WOTS+C layer against it, and either pin
+    the walked root to the public key (top layer) or move it to `ST_CUR_ROOT` and shift the
+    tree index by the subtree height (inner layers). -/
+theorem stepCordLayer_sem {pub : AggValidatorPk × Digest5} {R : Nat → StepOpRow}
+    {layer tL kpN tree : Nat} {isTop : Bool}
+    (hRun : StepRunAt pub R (stepCordLayerOps layer isTop) tL)
+    (hAddr : StepAddrOk (stepRegsAt R tL) kpN tree) (hl : layer < 16) (hk : kpN < 16) :
+    verifyWotsLayer corduroyPoseidon2Geom pub.1 layer tree kpN
+        (computeHmsgDetTree pub.1 layer tree kpN (stepCordLayerSig R tL).tswCtr
+          (stepRegsAt R tL).curRoot)
+        (stepCordLayerSig R tL) =
+      some (stepPermAt R (tL + 464)).b0 ∧
+    (isTop = true → (stepPermAt R (tL + 464)).b0 = pub.1.pkRoot) ∧
+    (isTop = false → tree < 2 ^ 64 →
+      StepAddrOk (stepRegsAt R (tL + 465)) (tree % 16) (tree / 16) ∧
+      (stepRegsAt R (tL + 465)).curRoot = (stepPermAt R (tL + 464)).b0) := by
+  have b0 : StepRowSem pub R (.detTreeHmsgBlock0 layer) tL := hRun.get 0 _ rfl
+  have b1 : StepRowSem pub R (.detTreeHmsgBlock1 layer) (tL + 1) := hRun.get 1 _ rfl
+  have hDec : StepRunAt pub R ((List.range 5).map StepOp.hmsgDecompLimb) (tL + 2) :=
+    hRun.append_left.append_right
+  have hLayer : StepRunAt pub R (pushLayerWotsAndMerkle layer 4 isTop) (tL + 2 + 5) :=
+    hRun.append_right
+  have hLast : StepRowSem pub R (.xmssMerkleBlockB true isTop) (tL + 464) :=
+    hRun.get 464 _ rfl
+  obtain ⟨hIn0, hR1⟩ := stepSem_detTreeHmsgBlock0 b0
+  obtain ⟨hBits, hIn1, hR2⟩ := stepSem_detTreeHmsgBlock1 b1
+  have hR1' : stepRegsAt R (tL + 1) = _ := hR1
+  have hR2' : stepRegsAt R (tL + 2) = _ := hR2
+  have hCtr : stepCordCtr R tL < 2 ^ 32 := stepWeightedNat_bits_lt (stepAux R (tL + 1)) 32 hBits
+  have hRem0 : ∀ s < 6, (stepRegsAt R (tL + 2)).rem.get s = Goldilocks.zero := by
+    intro s hs
+    rw [hR2']
+    rcases s with _ | _ | _ | _ | _ | _ | s
+    · rfl
+    · rfl
+    · rfl
+    · rfl
+    · rfl
+    · rfl
+    · exact absurd hs (by omega)
+  have hAcc0 : (stepRegsAt R (tL + 2)).acc = Goldilocks.zero := by rw [hR2']
+  have hAddr2 : StepAddrOk (stepRegsAt R (tL + 2)) kpN tree := by
+    refine ⟨?_, ?_, ?_⟩
+    · rw [hR2', hR1']; exact hAddr.kp
+    · rw [hR2', hR1']; exact hAddr.lo
+    · rw [hR2', hR1']; exact hAddr.hi
+  have hHm : stepHmsgOf (stepRegsAt R (tL + 2)).main =
+      computeHmsgDetTree pub.1 layer tree kpN (stepCordCtr R tL) (stepRegsAt R tL).curRoot := by
+    have hM1 : (stepRegsAt R (tL + 1)).main = poseidon2Perm12 (R tL).stIn := by rw [hR1']; rfl
+    have hM2 : (stepRegsAt R (tL + 2)).main = poseidon2Perm12 (R (tL + 1)).stIn := by
+      rw [hR2']; rfl
+    have hC1 : (stepRegsAt R (tL + 1)).curRoot = (stepRegsAt R tL).curRoot := by rw [hR1']
+    have hLK : (‹layer * 2 ^ 32› : Goldilocks) +ₚ ‹kpN› =
+        ‹(layer % 2 ^ 32) * 2 ^ 32 + kpN % 2 ^ 32› := by
+      rw [← g_ofNat_add, Nat.mod_eq_of_lt (by omega : layer < 2 ^ 32),
+        Nat.mod_eq_of_lt (by omega : kpN < 2 ^ 32)]
+    have hCt : stepWeightedSum (stepAux R (tL + 1)) (fun i => 2 ^ i) 32 =
+        ‹stepCordCtr R tL % 2 ^ 32› := by
+      rw [stepWeightedSum_eq_ofNat, Nat.mod_eq_of_lt hCtr]
+      rfl
+    rw [hM2, hIn1, hM1, hC1, hIn0, hAddr.kp, hAddr.lo, hAddr.hi, hLK, hCt]
+    rfl
+  have hLastFacts : (R (tL + 464)).stIn = stepMerkleBIn (stepRegsAt R (tL + 464)) ∧
+      (stepRegsAt R (tL + 464)).cursor = Goldilocks.zero := by
+    cases isTop
+    · obtain ⟨a, b, _⟩ := stepSem_xmssMerkleBlockB_link hLast
+      exact ⟨a, b⟩
+    · obtain ⟨a, b, _⟩ := stepSem_xmssMerkleBlockB_top hLast
+      exact ⟨a, b⟩
+  obtain ⟨_, hV, _, hAddr464⟩ := stepLayer_verify (geom := corduroyPoseidon2Geom)
+    (layer := layer) (h := 4) (tD := tL + 2) (ctr := stepCordCtr R tL) hDec hLayer hRem0 hAcc0
+    hAddr2 hLastFacts.1 hLastFacts.2 (by omega) (by omega) (by decide) (by decide) rfl rfl rfl
+  have hAddr464' : StepAddrOk (stepRegsAt R (tL + 464)) kpN tree := hAddr464
+  rw [hHm] at hV
+  refine ⟨hV, ?_, ?_⟩
+  · intro hT
+    subst hT
+    exact (stepSem_xmssMerkleBlockB_top hLast).2.2
+  · intro hT hTree
+    subst hT
+    obtain ⟨_, _, hB4, hQa, hQ2, hQb, hLo, hHi, hRn⟩ := stepSem_xmssMerkleBlockB_link hLast
+    have hRn' : stepRegsAt R (tL + 465) = _ := hRn
+    have nb : stepWeightedNat (stepAux R (tL + 464)) (fun i => 2 ^ i) 4 < 2 ^ 4 :=
+      stepWeightedNat_bits_lt _ 4 hB4
+    have nA : stepWeightedNat (fun i => stepAux R (tL + 464) (4 + i)) (fun i => 4 ^ i) 14 <
+        4 ^ 14 := stepWeightedNat_lt 4 _ 14 hQa
+    have n2 : stepWeightedNat (fun i => stepAux R (tL + 464) (18 + i)) (fun i => 4 ^ i) 2 <
+        4 ^ 2 := stepWeightedNat_lt 4 _ 2 hQ2
+    have nB : stepWeightedNat (fun i => stepAux R (tL + 464) (20 + i)) (fun i => 4 ^ i) 14 <
+        4 ^ 14 := stepWeightedNat_lt 4 _ 14 hQb
+    rw [stepWeightedSum_eq_ofNat, stepWeightedSum_eq_ofNat, ← g_ofNat_mul, ← g_ofNat_add,
+      hAddr464'.lo] at hLo
+    rw [stepWeightedSum_eq_ofNat, stepWeightedSum_eq_ofNat, ← g_ofNat_mul, ← g_ofNat_add,
+      hAddr464'.hi] at hHi
+    have eLo := g_ofNat_inj (by rw [goldilocksPrime_eq]; omega)
+      (by rw [goldilocksPrime_eq]; omega) hLo
+    have eHi := g_ofNat_inj (by rw [goldilocksPrime_eq]; omega)
+      (by rw [goldilocksPrime_eq]; omega) hHi
+    refine ⟨⟨?_, ?_, ?_⟩, ?_⟩
+    · rw [hRn']
+      show stepWeightedSum (stepAux R (tL + 464)) (fun i => 2 ^ i) 4 = _
+      rw [stepWeightedSum_eq_ofNat]
+      exact congrArg Goldilocks.ofNat (by omega)
+    · rw [hRn']
+      show stepWeightedSum (fun i => stepAux R (tL + 464) (4 + i)) (fun i => 4 ^ i) 14 +ₚ
+        (stepWeightedSum (fun i => stepAux R (tL + 464) (18 + i)) (fun i => 4 ^ i) 2 *ₚ
+          ‹2 ^ 28›) = _
+      rw [stepWeightedSum_eq_ofNat, stepWeightedSum_eq_ofNat, ← g_ofNat_mul, ← g_ofNat_add]
+      exact congrArg Goldilocks.ofNat (by omega)
+    · rw [hRn']
+      show stepWeightedSum (fun i => stepAux R (tL + 464) (20 + i)) (fun i => 4 ^ i) 14 = _
+      rw [stepWeightedSum_eq_ofNat]
+      exact congrArg Goldilocks.ofNat (by omega)
+    · rw [hRn']
+
+/-! ### §3.18. Active `CorduroyPoseidon2` slot: an accepted table yields a native signature -/
+
+private theorem verifyForsPoly_map {OP D : Type} (step : Nat → Nat → OP → Option D)
+    (idx : Nat → Nat) (op : Nat → OP) (rt : Nat → D) :
+    ∀ (n t0 : Nat), (∀ i, t0 ≤ i → i < t0 + n → step i (idx i) (op i) = some (rt i)) →
+      verifyForsPoly step ((List.range' t0 n).map idx) ((List.range' t0 n).map op) t0 =
+        some ((List.range' t0 n).map rt)
+  | 0, _, _ => rfl
+  | n + 1, t0, h => by
+    have e : List.range' t0 (n + 1) = t0 :: List.range' (t0 + 1) n := rfl
+    have ih := verifyForsPoly_map step idx op rt n (t0 + 1)
+      (fun i h1 h2 => h i (by omega) (by omega))
+    rw [e, List.map_cons, List.map_cons, List.map_cons]
+    simp only [verifyForsPoly, h t0 (Nat.le_refl _) (by omega), ih]
+
+/-- Upper layers verify one after another when each layer verifies against the root of the
+    layer below and the remaining tree index is shifted by the subtree height. -/
+private theorem verifyUpperLayers_chain (geom : AggSigGeometry) (pk : AggValidatorPk)
+    (sigL : Nat → WotsLayerSig) (cur : Nat → Digest4) (rem : Nat → Nat) :
+    ∀ (n l0 : Nat),
+      (∀ l, l0 ≤ l → l < l0 + n →
+        verifyWotsLayer geom pk l (rem l / 2 ^ geom.subtreeHeight)
+            (rem l % 2 ^ geom.subtreeHeight)
+            (computeHmsgDetTree pk l (rem l / 2 ^ geom.subtreeHeight)
+              (rem l % 2 ^ geom.subtreeHeight) (sigL l).tswCtr (cur l)) (sigL l) =
+          some (cur (l + 1)) ∧
+        rem (l + 1) = rem l / 2 ^ geom.subtreeHeight) →
+      verifyUpperLayers geom pk l0 (rem l0) (cur l0) ((List.range' l0 n).map sigL) =
+        some (cur (l0 + n))
+  | 0, _, _ => rfl
+  | n + 1, l0, h => by
+    have e : List.range' l0 (n + 1) = l0 :: List.range' (l0 + 1) n := rfl
+    have hs := h l0 (Nat.le_refl _) (by omega)
+    have ih := verifyUpperLayers_chain geom pk sigL cur rem n (l0 + 1)
+      (fun l h1 h2 => h l (by omega) (by omega))
+    unfold verifyUpperLayers at ih ⊢
+    rw [e, List.map_cons]
+    simp only [verifyUpperPoly, hs.1]
+    rw [← hs.2, show l0 + (n + 1) = l0 + 1 + n by omega]
+    exact ih
+
+/-- A stateless signature is accepted once the XOF derive, the FORS openings, the bottom
+    layer and the upper layers each verify. -/
+theorem verifyAggNativeSig_stateless_intro (geom : AggSigGeometry) (pk : AggValidatorPk)
+    (msg : List UInt8) (rRand : Digest4) (fors : List AggForsTreeOpening)
+    (lsig0 : WotsLayerSig) (upper : List WotsLayerSig)
+    (leaf : Nat) (idxs : List Nat) (forsPk root0 : Digest4)
+    (hWf : geom.wellFormed = true) (hPk : pk.profile = geom.profile)
+    (hNL : (lsig0 :: upper).length = geom.numLayers) (hF : (geom.forsTrees == 0) = false)
+    (hXof : deriveStatelessLeafAndForsChecked geom pk rRand (computeMessageMu pk msg) =
+      some (leaf, idxs))
+    (hFors : verifyAndRecoverForsPk geom pk.pkSeed leaf idxs fors = some forsPk)
+    (hL0 : verifyWotsLayer geom pk 0 (leaf / 2 ^ geom.subtreeHeight)
+        (leaf % 2 ^ geom.subtreeHeight)
+        (computeHmsgDetTree pk 0 (leaf / 2 ^ geom.subtreeHeight)
+          (leaf % 2 ^ geom.subtreeHeight) lsig0.tswCtr forsPk) lsig0 = some root0)
+    (hUp : verifyUpperLayers geom pk 1 (leaf / 2 ^ geom.subtreeHeight) root0 upper =
+      some pk.pkRoot) :
+    verifyAggNativeSig geom pk msg ⟨geom.profile, rRand, 0, fors, lsig0 :: upper⟩ = true := by
+  have hCond : (!geom.wellFormed || pk.profile != geom.profile ||
+      geom.profile != geom.profile || ((lsig0 :: upper).length != geom.numLayers)) = false := by
+    rw [hWf, hPk, hNL]
+    simp
+  unfold verifyAggNativeSig
+  simp only [hCond, Bool.false_eq_true, ↓reduceIte, hF]
+  unfold verifyAggNativeSigStateless
+  exact evalStatelessFlow_ok _ _ _ _ _ leaf idxs forsPk root0 pk.pkRoot hXof hFors hL0 hUp
+    (beq_self_eq_true _)
+
+/-- Row of the `DetTreeHmsgBlock0` of hypertree layer `l` in a `CorduroyPoseidon2` block. -/
+def stepCordLayerRow (l : Nat) : Nat := 571 + l * 465
+
+/-- The native signature read from the auxiliary columns of a `CorduroyPoseidon2` signer
+    block: `rRand` from the `StatelessDeriveBlock1` row, the 32 FORS openings from the
+    `ForsLeafHash` and `ForsMerkleBlockA` rows, and per hypertree layer the counter bits of the
+    `DetTreeHmsgBlock1` row, the chain values of the `WotsChainStep0` rows and the
+    authentication path of the `XmssMerkleBlockA` rows. -/
+def stepCordSig (R : Nat → StepOpRow) : AggNativeSignature :=
+  { profile := .corduroyPoseidon2
+    rRand := stepAuxLane R 1 0
+    statefulLeafIdx := 0
+    forsOpenings := (List.range' 0 32).map (fun j => stepForsOpening R (stepForsRow 9 j))
+    layers := (List.range' 0 16).map (fun l => stepCordLayerSig R (stepCordLayerRow l)) }
+
+theorem stepCordLayerOps_length (layer : Nat) (isTop : Bool) :
+    (stepCordLayerOps layer isTop).length = 465 := by
+  unfold stepCordLayerOps
+  rw [List.length_append, pushLayerWotsAndMerkle_eq, List.length_append, List.length_append,
+    stepWotsOps_length]
+  rfl
+
+theorem stepForsPairOps_length (pair : Nat) : (stepForsPairOps pair).length = 35 := by
+  rfl
+
+/-- **Native-signature witness extraction, `CorduroyPoseidon2` profile.** If the 256-column
+    `StepOp` table is accepted and slot `k` is active with public inputs `(pk, mu)`, `mu` the
+    message representative of `msg` under `pk`, then the stateless signature read from the
+    auxiliary columns of the slot's rows is accepted by the native verifier. -/
+theorem stepOp256TableOk_corduroy_extract (slots : List StepOpSlot) (rows : List StepOpRow)
+    (k : Nat) (pub : AggValidatorPk × Digest5) (msg : List UInt8)
+    (hTable : stepOp256TableOk .corduroyPoseidon2 slots rows = true)
+    (hSlot : slots[k]? = some (some pub))
+    (hProf : pub.1.profile = .corduroyPoseidon2)
+    (hMu : pub.2 = computeMessageMu pub.1 msg) :
+    verifyAggNativeSig corduroyPoseidon2Geom pub.1 msg
+      (stepCordSig (stepOpSlotRow .corduroyPoseidon2 rows k)) = true := by
+  obtain ⟨R, hR⟩ : ∃ R, R = stepOpSlotRow .corduroyPoseidon2 rows k := ⟨_, rfl⟩
+  rw [← hR]
+  have hRun0 := stepOp256TableOk_slot_run .corduroyPoseidon2 slots rows k pub hTable hSlot
+  rw [← hR] at hRun0
+  have hRun : StepRunAt pub R
+      ((((stepDeriveOps ++ [StepOp.forsRootsSpongeInit]) ++
+          (List.range 16).flatMap stepForsPairOps) ++ [StepOp.forsRootsFinalSqueeze]) ++
+        (List.range 16).flatMap (fun layer => stepCordLayerOps layer (layer + 1 == 16))) 0 :=
+    hRun0
+  have hDerive : StepRunAt pub R stepDeriveOps 0 :=
+    hRun.append_left.append_left.append_left.append_left
+  have hI : StepRowSem pub R .forsRootsSpongeInit 9 :=
+    hRun.append_left.append_left.append_left.append_right.head
+  have hPairs : StepRunAt pub R ((List.range 16).flatMap stepForsPairOps) (9 + 1) :=
+    hRun.append_left.append_left.append_right
+  have hlenPre : ((stepDeriveOps ++ [StepOp.forsRootsSpongeInit]) ++
+      (List.range 16).flatMap stepForsPairOps).length = 570 := by
+    rw [List.length_append, flatMap_range_uniform_length _ 35 stepForsPairOps_length]
+    rfl
+  have hSq : StepRowSem pub R .forsRootsFinalSqueeze (9 + 561) := by
+    have h := hRun.append_left.append_right
+    rw [hlenPre] at h
+    exact h.head
+  have hLayers : StepRunAt pub R
+      ((List.range 16).flatMap (fun layer => stepCordLayerOps layer (layer + 1 == 16))) 571 := by
+    have h := hRun.append_right
+    rw [List.length_append, hlenPre] at h
+    exact h
+  have hL : ∀ l < 16, StepRunAt pub R (stepCordLayerOps l (l + 1 == 16)) (571 + l * 465) :=
+    StepRunAt.flatMap_range (L := 465) (fun l => stepCordLayerOps_length l _) 16 hLayers
+  obtain ⟨hLimbs, hPack, hAddr9⟩ := stepStatelessDerive_sem hDerive
+  obtain ⟨m, hm⟩ : ∃ m, m = stepXofState pub R := ⟨_, rfl⟩
+  obtain ⟨leaf, hleaf⟩ : ∃ leaf, leaf = stepXofLeaf m := ⟨_, rfl⟩
+  rw [← hm] at hLimbs hPack hAddr9
+  rw [← hleaf] at hAddr9
+  obtain ⟨hIdxLt, hSlots, hRoots, hCur571, hAddr571⟩ :=
+    stepFors_sem (t0 := 9) (leaf := leaf) hI hPairs hSq hAddr9
+  have hCur571' : (stepRegsAt R 571).curRoot = _ := hCur571
+  have hAddr571' : StepAddrOk (stepRegsAt R 571) (leaf % 16) (leaf / 16) := hAddr571
+  -- The indices the rows open are the indices the XOF derives.
+  have hIdxSlot : ∀ s a len : Nat, (∀ c < 32, c / 6 = s ↔ a ≤ c ∧ c < a + len) → s < 6 →
+      a + len ≤ 32 → len ≤ 6 → 6 * s = a → ∀ c, a ≤ c → c < a + len →
+      stepForsIdxN R (stepForsRow 9 c) = stepForsIdx m c := by
+    intro s a len hRange hs haN hLen6 hStart c hac hcl
+    have hLen : 256 ^ len < goldilocksPrime :=
+      Nat.lt_of_le_of_lt (Nat.pow_le_pow_right (by decide) hLen6) (by decide)
+    have h1 := hSlots s a len hRange hs haN hLen
+    have h2 := hPack s hs
+    rw [stepPackFoldG_slot 256 _ _ _ 32 s a len hRange haN hStart] at h2
+    have hLtB : evalBaseDigits 256 ((List.range' a len).map (stepForsIdx m)) < 256 ^ len := by
+      have h := evalBaseDigits_lt_pow 256 (by decide) ((List.range' a len).map (stepForsIdx m))
+        (fun d hd => by
+          obtain ⟨c', _, rfl⟩ := List.mem_map.mp hd
+          exact stepForsIdx_lt m c')
+      rw [List.length_map, List.length_range'] at h
+      exact h
+    rw [h2, Goldilocks.ofNat_val, Nat.mod_eq_of_lt (Nat.lt_trans hLtB hLen)] at h1
+    have hEq := evalBaseDigits_inj 256 (by decide)
+      (by rw [List.length_map, List.length_map])
+      (fun d hd => by
+        obtain ⟨c', _, rfl⟩ := List.mem_map.mp hd
+        exact stepForsIdx_lt m c')
+      (fun d hd => by
+        obtain ⟨c', hc', rfl⟩ := List.mem_map.mp hd
+        have hb := mem_range'_bounds _ _ _ hc'
+        exact hIdxLt c' (by omega))
+      h1
+    exact (List.map_inj_left.mp hEq c (mem_range'_of_bounds len a c hac hcl)).symm
+  have hIdx : ∀ j < 32, stepForsIdxN R (stepForsRow 9 j) = stepForsIdx m j := by
+    intro j hj
+    by_cases h5 : j / 6 < 5
+    · exact hIdxSlot (j / 6) (6 * (j / 6)) 6 (fun c hc => ⟨fun h => ⟨by omega, by omega⟩, fun h => by omega⟩) (by omega) (by omega)
+        (Nat.le_refl _) rfl j (by omega) (by omega)
+    · exact hIdxSlot (j / 6) (6 * (j / 6)) 2 (fun c hc => ⟨fun h => ⟨by omega, by omega⟩, fun h => by omega⟩) (by omega) (by omega)
+        (by decide) rfl j (by omega) (by omega)
+  -- The stateless XOF derive of the native verifier.
+  have hLeafLt : leaf < 2 ^ 64 := by rw [hleaf]; unfold stepXofLeaf; omega
+  have hXof : deriveStatelessLeafAndForsChecked corduroyPoseidon2Geom pub.1 (stepAuxLane R 1 0)
+      pub.2 = some (leaf, (List.range' 0 32).map (stepForsIdx m)) := by
+    have hAll : ([m.b0.x0, m.b0.x1, m.b0.x2, m.b0.x3, m.b1.x0, m.b1.x1, m.b1.x2].all
+        (fun l => decide (l.val < 2 ^ 63))) = true := by
+      simp only [List.all_cons, List.all_nil, Bool.and_true, Bool.and_eq_true,
+        decide_eq_true_eq]
+      exact ⟨hLimbs 0 (by decide), hLimbs 1 (by decide), hLimbs 2 (by decide),
+        hLimbs 3 (by decide), hLimbs 4 (by decide), hLimbs 5 (by decide),
+        hLimbs 6 (by decide)⟩
+    have hIdxL : (List.range 32).map (fun t =>
+        ((match t / 7 with
+          | 0 => m.b0.x0.val
+          | 1 => m.b0.x1.val
+          | 2 => m.b0.x2.val
+          | 3 => m.b0.x3.val
+          | _ => m.b1.x0.val) / (256 ^ (t % 7))) % 2 ^ 8) =
+        (List.range' 0 32).map (stepForsIdx m) := by
+      rw [← List.range_eq_range']
+      apply List.map_congr_left
+      intro t ht
+      have ht' := List.mem_range.mp ht
+      have h7 : t / 7 = 0 ∨ t / 7 = 1 ∨ t / 7 = 2 ∨ t / 7 = 3 ∨ t / 7 = 4 := by omega
+      unfold stepForsIdx
+      rcases h7 with h | h | h | h | h <;> rw [h] <;> rfl
+    have key : deriveStatelessLeafAndForsChecked corduroyPoseidon2Geom pub.1 (stepAuxLane R 1 0)
+        pub.2 =
+        (if ([m.b0.x0, m.b0.x1, m.b0.x2, m.b0.x3, m.b1.x0, m.b1.x1, m.b1.x2].all
+            (fun l => decide (l.val < 2 ^ 63))) = true then
+          some (stepXofLeaf m % 2 ^ 64, (List.range 32).map (fun t =>
+            ((match t / 7 with
+              | 0 => m.b0.x0.val
+              | 1 => m.b0.x1.val
+              | 2 => m.b0.x2.val
+              | 3 => m.b0.x3.val
+              | _ => m.b1.x0.val) / (256 ^ (t % 7))) % 2 ^ 8))
+        else none) := by
+      rw [hm]
+      rfl
+    rw [key, hIdxL, hAll, ← hleaf, Nat.mod_eq_of_lt hLeafLt]
+    rfl
+  -- The FORS public key.
+  have hFors : verifyAndRecoverForsPk corduroyPoseidon2Geom pub.1.pkSeed leaf
+      ((List.range' 0 32).map (stepForsIdx m))
+      ((List.range' 0 32).map (fun j => stepForsOpening R (stepForsRow 9 j))) =
+      some (stepRegsAt R 571).curRoot := by
+    have hAux : verifyForsTreesAux corduroyPoseidon2Geom pub.1.pkSeed leaf 0
+        ((List.range' 0 32).map (stepForsIdx m))
+        ((List.range' 0 32).map (fun j => stepForsOpening R (stepForsRow 9 j))) =
+        some ((List.range' 0 32).map (stepForsRoot R 9)) := by
+      unfold verifyForsTreesAux
+      exact verifyForsPoly_map _ _ _ _ 32 0 (fun i _ hi => by
+        have h := hRoots i (by omega)
+        rw [hIdx i (by omega)] at h
+        exact h)
+    unfold verifyAndRecoverForsPk
+    simp only [List.length_map, List.length_range', hAux]
+    rw [hCur571', List.range_eq_range']
+    rfl
+  -- The hypertree layers.
+  have hInv : ∀ l, l < 16 →
+      StepAddrOk (stepRegsAt R (571 + l * 465)) ((leaf / 16 ^ l) % 16) (leaf / 16 ^ (l + 1)) := by
+    intro l
+    induction l with
+    | zero =>
+      intro _
+      have e : 571 + 0 * 465 = 571 := by omega
+      rw [e, Nat.pow_zero, Nat.div_one, Nat.pow_one]
+      exact hAddr571'
+    | succ l ih =>
+      intro hl
+      have hA := ih (by omega)
+      have hRunL := hL l (by omega)
+      rw [beq_false_of_ne (by omega : l + 1 ≠ 16)] at hRunL
+      obtain ⟨_, _, hLink⟩ := stepCordLayer_sem hRunL hA (by omega)
+        (Nat.mod_lt _ (by decide))
+      obtain ⟨hA', _⟩ := hLink rfl
+        (Nat.lt_of_le_of_lt (Nat.div_le_self _ _) hLeafLt)
+      have e : 571 + (l + 1) * 465 = 571 + l * 465 + 465 := by omega
+      have e2 : leaf / 16 ^ (l + 1 + 1) = leaf / 16 ^ (l + 1) / 16 := by
+        rw [Nat.div_div_eq_div_mul, ← Nat.pow_succ]
+      rw [e, e2]
+      exact hA'
+  obtain ⟨cur, hcur⟩ : ∃ cur : Nat → Digest4, cur = fun l => match l with
+      | 0 => (stepRegsAt R 571).curRoot
+      | l + 1 => (stepPermAt R (571 + l * 465 + 464)).b0 := ⟨_, rfl⟩
+  have hCurRow : ∀ l, l < 16 → (stepRegsAt R (571 + l * 465)).curRoot = cur l := by
+    intro l hl
+    rcases l with _ | l
+    · rw [hcur]
+    · have hRunL := hL l (by omega)
+      rw [beq_false_of_ne (by omega : l + 1 ≠ 16)] at hRunL
+      obtain ⟨_, _, hLink⟩ := stepCordLayer_sem hRunL (hInv l (by omega)) (by omega)
+        (Nat.mod_lt _ (by decide))
+      obtain ⟨_, hC⟩ := hLink rfl
+        (Nat.lt_of_le_of_lt (Nat.div_le_self _ _) hLeafLt)
+      have e : 571 + (l + 1) * 465 = 571 + l * 465 + 465 := by omega
+      rw [e, hC, hcur]
+  have hLayerV : ∀ l, l < 16 →
+      verifyWotsLayer corduroyPoseidon2Geom pub.1 l
+          (leaf / 16 ^ l / 2 ^ corduroyPoseidon2Geom.subtreeHeight)
+          (leaf / 16 ^ l % 2 ^ corduroyPoseidon2Geom.subtreeHeight)
+          (computeHmsgDetTree pub.1 l (leaf / 16 ^ l / 2 ^ corduroyPoseidon2Geom.subtreeHeight)
+            (leaf / 16 ^ l % 2 ^ corduroyPoseidon2Geom.subtreeHeight)
+            (stepCordLayerSig R (stepCordLayerRow l)).tswCtr (cur l))
+          (stepCordLayerSig R (stepCordLayerRow l)) = some (cur (l + 1)) := by
+    intro l hl
+    obtain ⟨hV, _, _⟩ := stepCordLayer_sem (hL l hl) (hInv l hl) hl (Nat.mod_lt _ (by decide))
+    have e2 : leaf / 16 ^ l / 2 ^ corduroyPoseidon2Geom.subtreeHeight = leaf / 16 ^ (l + 1) := by
+      rw [Nat.div_div_eq_div_mul, Nat.pow_succ]
+      rfl
+    have e3 : leaf / 16 ^ l % 2 ^ corduroyPoseidon2Geom.subtreeHeight = leaf / 16 ^ l % 16 := rfl
+    rw [e2, e3, ← hCurRow l hl]
+    have e4 : cur (l + 1) = (stepPermAt R (571 + l * 465 + 464)).b0 := by rw [hcur]
+    rw [e4]
+    exact hV
+  have hTop : cur 16 = pub.1.pkRoot := by
+    obtain ⟨_, hT, _⟩ := stepCordLayer_sem (hL 15 (by decide)) (hInv 15 (by decide))
+      (by decide) (Nat.mod_lt _ (by decide))
+    rw [hcur]
+    exact hT rfl
+  have hUp := verifyUpperLayers_chain corduroyPoseidon2Geom pub.1
+    (fun l => stepCordLayerSig R (stepCordLayerRow l)) cur (fun l => leaf / 16 ^ l) 15 1
+    (fun l _ h2 => ⟨hLayerV l (by omega), by
+      show leaf / 16 ^ (l + 1) = leaf / 16 ^ l / 2 ^ corduroyPoseidon2Geom.subtreeHeight
+      rw [Nat.div_div_eq_div_mul, Nat.pow_succ]
+      rfl⟩)
+  have hL0 := hLayerV 0 (by decide)
+  rw [Nat.pow_zero, Nat.div_one] at hL0
+  have hUp' : verifyUpperLayers corduroyPoseidon2Geom pub.1 1
+      (leaf / 2 ^ corduroyPoseidon2Geom.subtreeHeight) (cur 1)
+      ((List.range' 1 15).map (fun l => stepCordLayerSig R (stepCordLayerRow l))) =
+      some pub.1.pkRoot := by
+    rw [← hTop]
+    exact hUp
+  have hCur0 : cur 0 = (stepRegsAt R 571).curRoot := by rw [hcur]
+  rw [hCur0] at hL0
+  rw [hMu] at hXof
+  exact verifyAggNativeSig_stateless_intro corduroyPoseidon2Geom pub.1 msg (stepAuxLane R 1 0)
+    _ (stepCordLayerSig R (stepCordLayerRow 0))
+    ((List.range' 1 15).map (fun l => stepCordLayerSig R (stepCordLayerRow l)))
+    leaf _ _ (cur 1) (by decide) hProf rfl rfl hXof hFors hL0 hUp'
+
+/-- Executable decision and witness extraction for an active stateless slot. The success
+    branch contains the native signature itself. -/
+def extractCorduroySlotOrReject (slots : List StepOpSlot) (rows : List StepOpRow)
+    (k : Nat) (pub : AggValidatorPk × Digest5) (msg : List UInt8)
+    (hSlot : slots[k]? = some (some pub))
+    (hProf : pub.1.profile = .corduroyPoseidon2)
+    (hMu : pub.2 = computeMessageMu pub.1 msg) :
+    PSum { sig : AggNativeSignature //
+        verifyAggNativeSig corduroyPoseidon2Geom pub.1 msg sig = true }
+      (stepOp256TableOk .corduroyPoseidon2 slots rows = false) :=
+  if h : stepOp256TableOk .corduroyPoseidon2 slots rows = true then
+    .inl ⟨stepCordSig (stepOpSlotRow .corduroyPoseidon2 rows k),
+      stepOp256TableOk_corduroy_extract slots rows k pub msg h hSlot hProf hMu⟩
+  else .inr (Bool.eq_false_iff.mpr h)
+
+/-- The rows of each hypertree layer inside a `CorduroyPoseidon2` signer block. -/
+private theorem stepCordRun_layer {pub : AggValidatorPk × Digest5} {R : Nat → StepOpRow}
+    (hRun0 : StepRunAt pub R (signerProgramBody .corduroyPoseidon2) 0) :
+    ∀ l < 16, StepRunAt pub R (stepCordLayerOps l (l + 1 == 16)) (571 + l * 465) := by
+  have hRun : StepRunAt pub R
+      ((((stepDeriveOps ++ [StepOp.forsRootsSpongeInit]) ++
+          (List.range 16).flatMap stepForsPairOps) ++ [StepOp.forsRootsFinalSqueeze]) ++
+        (List.range 16).flatMap (fun layer => stepCordLayerOps layer (layer + 1 == 16))) 0 :=
+    hRun0
+  have hlenPre : ((stepDeriveOps ++ [StepOp.forsRootsSpongeInit]) ++
+      (List.range 16).flatMap stepForsPairOps).length = 570 := by
+    rw [List.length_append, flatMap_range_uniform_length _ 35 stepForsPairOps_length]
+    rfl
+  have hLayers : StepRunAt pub R
+      ((List.range 16).flatMap (fun layer => stepCordLayerOps layer (layer + 1 == 16))) 571 := by
+    have h := hRun.append_right
+    rw [List.length_append, hlenPre] at h
+    exact h
+  exact StepRunAt.flatMap_range (L := 465) (fun l => stepCordLayerOps_length l _) 16 hLayers
+
+/-- A stateless block whose last Merkle row does not hash to the public-key root is rejected:
+    the extraction theorem's acceptance hypothesis is sensitive to the top-layer root. -/
+theorem tooth_stepOp256_corduroy_wrong_top_root_rejected (slots : List StepOpSlot)
+    (rows : List StepOpRow) (k : Nat) (pub : AggValidatorPk × Digest5)
+    (hSlot : slots[k]? = some (some pub))
+    (hWrong : (poseidon2Perm12 (stepOpSlotRow .corduroyPoseidon2 rows k 8010).stIn).b0 ≠
+      pub.1.pkRoot) :
+    stepOp256TableOk .corduroyPoseidon2 slots rows = false := by
+  apply Bool.eq_false_iff.mpr
+  intro hTable
+  have hRun0 := stepOp256TableOk_slot_run .corduroyPoseidon2 slots rows k pub hTable hSlot
+  have hTop : StepRowSem pub (stepOpSlotRow .corduroyPoseidon2 rows k)
+      (.xmssMerkleBlockB true true) 8010 :=
+    (stepCordRun_layer hRun0 15 (by decide)).get 464 _ rfl
+  exact hWrong (stepSem_xmssMerkleBlockB_top hTop).2.2
+
+#tooth_pair stepOp256TableOk_corduroy_extract vs tooth_stepOp256_corduroy_wrong_top_root_rejected
+
+/-- Read every stateless signature from its accepted machine block in committee order. -/
+def corduroyCommitteeSigs (stmt : AggArithPublicStmt) (rows : List StepOpRow) :
+    List AggNativeSignature :=
+  (List.range stmt.committeePks.length).map
+    (fun k => stepCordSig (stepOpSlotRow .corduroyPoseidon2 rows k))
+
+/-- Whole-committee soundness of the stateless machine extractor. -/
+theorem corduroyCommitteeSigs_valid (stmt : AggArithPublicStmt) (rows : List StepOpRow)
+    (hGeom : stmt.geom = corduroyPoseidon2Geom) (hWf : stmt.wellFormed = true)
+    (hTable : stepOp256TableOk .corduroyPoseidon2 (xmssCommitteeSlots stmt) rows = true) :
+    (corduroyCommitteeSigs stmt rows).length = stmt.committeePks.length ∧
+    ∀ (k : Nat) (hkP : k < stmt.committeePks.length)
+      (hkS : k < (corduroyCommitteeSigs stmt rows).length),
+      verifyAggNativeSig stmt.geom (stmt.committeePks[k]'hkP) stmt.msg
+        ((corduroyCommitteeSigs stmt rows)[k]'hkS) = true := by
+  refine ⟨by simp [corduroyCommitteeSigs], ?_⟩
+  intro k hkP hkS
+  have hpks : stmt.committeePks.all (·.profile == stmt.geom.profile) = true :=
+    (Bool.and_eq_true_iff.mp hWf).2
+  have hp : (stmt.committeePks[k]'hkP).profile = .corduroyPoseidon2 := by
+    have h := eq_of_beq (List.all_eq_true.mp hpks _ (List.getElem_mem hkP))
+    simpa only [hGeom, corduroyPoseidon2Geom] using h
+  have hs : (xmssCommitteeSlots stmt)[k]? =
+      some (some (stmt.committeePks[k]'hkP, computeMessageMu (stmt.committeePks[k]'hkP) stmt.msg)) := by
+    simp [xmssCommitteeSlots, List.getElem?_eq_getElem hkP]
+  simpa [corduroyCommitteeSigs, hGeom] using
+    stepOp256TableOk_corduroy_extract (xmssCommitteeSlots stmt) rows k
+      (stmt.committeePks[k]'hkP, computeMessageMu (stmt.committeePks[k]'hkP) stmt.msg)
+      stmt.msg hTable hs hp rfl
+
+/-- Construct the serialized trace from the machine-extracted stateless signatures. -/
+def corduroyMachineToExecutionTrace (stmt : AggArithPublicStmt) (rows : List StepOpRow) :
+    AggExecutionTrace := buildHonestAggExecutionTrace stmt (corduroyCommitteeSigs stmt rows)
+
+/-- **256-column to serialized-trace bridge, stateless profile.** An accepted 256-column table
+    over the committee's active slots yields an accepted serialized execution trace. -/
+theorem corduroyMachineToExecutionTrace_accepts (stmt : AggArithPublicStmt)
+    (rows : List StepOpRow)
+    (hGeom : stmt.geom = corduroyPoseidon2Geom) (hWf : stmt.wellFormed = true)
+    (hTable : stepOp256TableOk .corduroyPoseidon2 (xmssCommitteeSlots stmt) rows = true) :
+    traceSatisfiesAllConstraints stmt (corduroyMachineToExecutionTrace stmt rows) = true := by
+  obtain ⟨hLen, hAll⟩ := corduroyCommitteeSigs_valid stmt rows hGeom hWf hTable
+  exact buildHonestAggExecutionTrace_satisfies_constraints stmt _ hWf hLen hAll
+
+end HemStepOp256Machine
+
+/-! ## §4. Forward direction: a native `XmssPoseidon2` signature yields an accepted table -/
+
+section StepOpForward
+
+local infixl:65 " +ₚ " => Goldilocks.add
+local infixl:70 " *ₚ " => Goldilocks.mul
+local notation "‹" n "›" => Goldilocks.ofNat n
+
+/-- An instruction's free cells. The interpreter supplies all other columns. -/
+structure StepForwardCells where
+  input : Poseidon2State12
+  aux : Fin 38 → Goldilocks
+
+/-- Execute one instruction with honest permutation columns. -/
+def stepForwardRow (pub : AggValidatorPk × Digest5) (op : StepOp)
+    (prev : List Goldilocks) (cells : StepForwardCells) : StepOpRow :=
+  populateStepOpNext (stepOpKindAndC0 op).1 (Goldilocks.ofNat (stepOpKindAndC0 op).2) pub
+    (stepOpHonestPermutationRow cells.input prev [] (List.ofFn cells.aux))
+
+/-- Execute a list of instructions, passing the entire next state to the following row. -/
+def stepForwardRun (pub : AggValidatorPk × Digest5)
+    (supply : StepOp → List Goldilocks → StepForwardCells) :
+    List StepOp → List Goldilocks → List StepOpRow
+  | [], _ => []
+  | op :: ops, prev =>
+    let row := stepForwardRow pub op prev (supply op prev)
+    row :: stepForwardRun pub supply ops row.nextState
+
+theorem stepForwardRun_length (pub : AggValidatorPk × Digest5)
+    (supply : StepOp → List Goldilocks → StepForwardCells)
+    (ops : List StepOp) (prev : List Goldilocks) :
+    (stepForwardRun pub supply ops prev).length = ops.length := by
+  induction ops generalizing prev with
+  | nil => rfl
+  | cons op ops ih => simp only [stepForwardRun, List.length_cons, ih]
+
+theorem stepForwardRow_groupA (pub : AggValidatorPk × Digest5) (op : StepOp)
+    (prev : List Goldilocks) (cells : StepForwardCells) :
+    allZeroGoldilocks (stepOpPermTrace (stepForwardRow pub op prev cells)).2 = true :=
+  stepOpHonestPermutationRow_groupA cells.input prev _ _
+
+theorem stepForwardRow_perm (pub : AggValidatorPk × Digest5) (op : StepOp)
+    (prev : List Goldilocks) (cells : StepForwardCells) :
+    (stepOpPermTrace (stepForwardRow pub op prev cells)).1 = poseidon2Perm12 cells.input :=
+  stepOp256_groupA_exact _ (stepForwardRow_groupA pub op prev cells)
+
+theorem stepForwardRow_next_length (pub : AggValidatorPk × Digest5) (op : StepOp)
+    (prev : List Goldilocks) (cells : StepForwardCells) :
+    (stepForwardRow pub op prev cells).nextState.length = 44 := by
+  simp only [stepForwardRow, populateStepOpNext, List.length_map, List.length_range]
+
+theorem stepForwardRow_wellShaped (pub : AggValidatorPk × Digest5) (op : StepOp)
+    (prev : List Goldilocks) (cells : StepForwardCells) (hp : prev.length = 44) :
+    (stepForwardRow pub op prev cells).wellShaped = true :=
+  stepOpHonestPermutationRow_wellShaped cells.input prev _ _ hp
+    (stepForwardRow_next_length pub op prev cells) List.length_ofFn
+
+/-- All opcode converses share this transition constructor; only the guards remain. -/
+theorem stepForwardRow_constraints_iff (pub : AggValidatorPk × Digest5) (op : StepOp)
+    (prev : List Goldilocks) (cells : StepForwardCells)
+    (hv : (stepOpKindAndC0 op).1.validSlot = true) :
+    allZeroGoldilocks (stepOpConstraints (stepOpKindAndC0 op).1
+      (Goldilocks.ofNat (stepOpKindAndC0 op).2)
+      (stepOpRowInputs pub (stepForwardRow pub op prev cells))) = true ↔
+    allZeroGoldilocks (stepOpGuardResiduals (stepOpKindAndC0 op).1
+      (Goldilocks.ofNat (stepOpKindAndC0 op).2)
+      (stepOpRowInputs pub (stepOpHonestPermutationRow cells.input prev []
+        (List.ofFn cells.aux)))) = true :=
+  populateStepOpNext_constraints_iff _ _ _ _ hv
+
+theorem stepForwardRun_wellShaped (pub : AggValidatorPk × Digest5)
+    (supply : StepOp → List Goldilocks → StepForwardCells)
+    (ops : List StepOp) (prev : List Goldilocks) (hp : prev.length = 44) :
+    ∀ row ∈ stepForwardRun pub supply ops prev, row.wellShaped = true := by
+  induction ops generalizing prev with
+  | nil => simp [stepForwardRun]
+  | cons op ops ih =>
+    intro row hr
+    simp only [stepForwardRun, List.mem_cons] at hr
+    rcases hr with rfl | hr
+    · exact stepForwardRow_wellShaped _ _ _ _ hp
+    · exact ih _ (stepForwardRow_next_length ..) _ hr
+
+theorem stepForwardRun_groupA (pub : AggValidatorPk × Digest5)
+    (supply : StepOp → List Goldilocks → StepForwardCells)
+    (ops : List StepOp) (prev : List Goldilocks) :
+    ∀ row ∈ stepForwardRun pub supply ops prev,
+      allZeroGoldilocks (stepOpPermTrace row).2 = true := by
+  induction ops generalizing prev with
+  | nil => simp [stepForwardRun]
+  | cons op ops ih =>
+    intro row hr
+    simp only [stepForwardRun, List.mem_cons] at hr
+    rcases hr with rfl | hr
+    · exact stepForwardRow_groupA ..
+    · exact ih _ _ hr
+
+theorem stepForwardRun_first (pub : AggValidatorPk × Digest5)
+    (supply : StepOp → List Goldilocks → StepForwardCells)
+    (ops : List StepOp) (prev : List Goldilocks) (row : StepOpRow)
+    (h : (stepForwardRun pub supply ops prev)[0]? = some row) :
+    row.prevState = prev := by
+  cases ops with
+  | nil => simp [stepForwardRun] at h
+  | cons op ops =>
+    simp only [stepForwardRun, List.getElem?_cons_zero, Option.some.injEq] at h
+    subst row
+    rfl
+
+theorem stepForwardRun_shift (pub : AggValidatorPk × Digest5)
+    (supply : StepOp → List Goldilocks → StepForwardCells)
+    (ops : List StepOp) (prev : List Goldilocks) :
+    ∀ i r r', (stepForwardRun pub supply ops prev)[i]? = some r →
+      (stepForwardRun pub supply ops prev)[i + 1]? = some r' →
+      r.nextState = r'.prevState := by
+  induction ops generalizing prev with
+  | nil => simp [stepForwardRun]
+  | cons op ops ih =>
+    intro i r r' hr hr'
+    cases i with
+    | zero =>
+      simp only [stepForwardRun, List.getElem?_cons_zero, Option.some.injEq] at hr
+      subst r
+      exact (stepForwardRun_first _ _ _ _ _ hr').symm
+    | succ i =>
+      simp only [stepForwardRun, List.getElem?_cons_succ] at hr hr'
+      exact ih _ i r r' hr hr'
+
+/-- Recover the exact instruction and incoming state used to build a row. -/
+theorem stepForwardRun_at (pub : AggValidatorPk × Digest5)
+    (supply : StepOp → List Goldilocks → StepForwardCells)
+    (ops : List StepOp) (prev : List Goldilocks) :
+    ∀ (i : Nat) row, (stepForwardRun pub supply ops prev)[i]? = some row →
+      ∃ op state, ops[i]? = some op ∧
+        row = stepForwardRow pub op state (supply op state) := by
+  induction ops generalizing prev with
+  | nil => simp [stepForwardRun]
+  | cons op ops ih =>
+    intro i row hr
+    cases i with
+    | zero =>
+      simp only [stepForwardRun, List.getElem?_cons_zero, Option.some.injEq] at hr
+      exact ⟨op, prev, rfl, hr.symm⟩
+    | succ i =>
+      simp only [stepForwardRun, List.getElem?_cons_succ] at hr
+      exact ih _ i row hr
+
+
+/-- Zero register file used at every signer boundary. -/
+def stepForwardZero : List Goldilocks := List.replicate 44 Goldilocks.zero
+
+/-- Execute the padded program of a signer. -/
+def stepForwardBlock (profile : AggSigProfile) (pub : AggValidatorPk × Digest5)
+    (supply : StepOp → List Goldilocks → StepForwardCells) : List StepOpRow :=
+  stepForwardRun pub supply (buildSignerProgram profile) stepForwardZero
+
+theorem stepForwardBlock_length (profile : AggSigProfile) (pub : AggValidatorPk × Digest5)
+    (supply : StepOp → List Goldilocks → StepForwardCells) :
+    (stepForwardBlock profile pub supply).length = stepOpRowsPerSigner profile := by
+  rw [stepForwardBlock, stepForwardRun_length]
+  cases profile
+  · exact buildSignerProgram_length.2.2.1
+  · exact buildSignerProgram_length.2.2.2
+
+/-- Every signer program ends with an idle instruction, which clears all registers. -/
+theorem stepForwardProgram_last (profile : AggSigProfile) :
+    (buildSignerProgram profile).getD (stepOpRowsPerSigner profile - 1) .idle = .idle := by
+  cases profile <;> decide +kernel
+
+theorem stepForwardBlock_boundary (profile : AggSigProfile) (pub : AggValidatorPk × Digest5)
+    (supply : StepOp → List Goldilocks → StepForwardCells) (i : Nat) (row : StepOpRow)
+    (hr : (stepForwardBlock profile pub supply)[i]? = some row) :
+    allZeroGoldilocks (stepOpBoundaryResiduals (stepOpRowsPerSigner profile) i row) = true := by
+  apply (stepOpBoundaryResiduals_iff _ _ _).mpr
+  constructor
+  · intro j _ hi
+    subst i
+    have hp := stepForwardRun_first pub supply (buildSignerProgram profile) stepForwardZero row hr
+    rw [hp]
+    exact getD_replicate_zero 44 j
+  · intro j hj hi
+    obtain ⟨op, state, hop, rfl⟩ := stepForwardRun_at pub supply
+      (buildSignerProgram profile) stepForwardZero i row hr
+    have hi' : i = stepOpRowsPerSigner profile - 1 := by omega
+    have hop' : op = .idle := by
+      have h := stepForwardProgram_last profile
+      rw [← hi', List.getD_eq_getElem?_getD, hop] at h
+      exact h
+    subst op
+    change ((List.range 44).map (fun _ => Goldilocks.zero)).getD j Goldilocks.zero = _
+    simp [List.getD_eq_getElem?_getD, hj]
+
+/-- The complete interpreter satisfies the table checker exactly when its guards hold.
+    Shape, permutation witnesses, boundary resets, and shifts need no hypotheses. -/
+theorem stepForwardBlock_table_iff (profile : AggSigProfile) (pub : AggValidatorPk × Digest5)
+    (supply : StepOp → List Goldilocks → StepForwardCells) :
+    stepOp256TableOk profile [some pub] (stepForwardBlock profile pub supply) = true ↔
+    ∀ i row, (stepForwardBlock profile pub supply)[i]? = some row →
+      allZeroGoldilocks (stepOpGuardResiduals
+        (stepOpKindAndC0 ((buildSignerProgram profile).getD i .idle)).1
+        (Goldilocks.ofNat (stepOpKindAndC0 ((buildSignerProgram profile).getD i .idle)).2)
+        (stepOpRowInputs pub row)) = true := by
+  rw [stepOp256TableOk_iff_rows]
+  have hn := stepForwardBlock_length profile pub supply
+  have index : ∀ i row, (stepForwardBlock profile pub supply)[i]? = some row →
+      i / stepOpRowsPerSigner profile = 0 ∧ i % stepOpRowsPerSigner profile = i := by
+    intro i row hr
+    have hi := (List.getElem?_eq_some_iff.mp hr).1
+    rw [hn] at hi
+    exact ⟨Nat.div_eq_of_lt hi, Nat.mod_eq_of_lt hi⟩
+  constructor
+  · intro h i row hr
+    obtain ⟨hd, hm⟩ := index i row hr
+    have hz := h.2.2.2.1 i row hr
+    simp only [hd, hm, List.getD_cons_zero] at hz
+    exact ((stepOp256RowResiduals_active_iff profile pub i row).mp hz).2.2.2.1
+  · intro hg
+    refine ⟨by simp, by simpa using hn,
+      stepForwardRun_wellShaped pub supply _ _ (List.length_replicate ..), ?_, ?_⟩
+    · intro i row hr
+      obtain ⟨hd, hm⟩ := index i row hr
+      simp only [hd, hm, List.getD_cons_zero]
+      unfold stepOp256RowResiduals
+      rw [allZeroGoldilocks_append, allZeroGoldilocks_append, Bool.and_eq_true, Bool.and_eq_true]
+      refine ⟨⟨stepForwardRun_groupA pub supply _ _ row (List.mem_of_getElem? hr),
+        stepForwardBlock_boundary profile pub supply i row hr⟩, ?_⟩
+      obtain ⟨op, state, hop, he⟩ := stepForwardRun_at pub supply
+        (buildSignerProgram profile) stepForwardZero i row hr
+      have hopD : (buildSignerProgram profile).getD i .idle = op := by
+        rw [List.getD_eq_getElem?_getD, hop]; rfl
+      have hv := (buildSignerProgram_kind_mem_and_valid profile i).2
+      rw [hopD] at hv ⊢
+      apply (stepOpConstraints_iff_guard_and_next _ _ _ hv).mpr
+      refine ⟨by simpa only [hopD] using hg i row hr, ?_⟩
+      subst row
+      intro j hj
+      rw [stepForwardRow, populateStepOpNext_inputs, stepOpExpectedNext_congr_next]
+      simp [stepOpRowInputs, List.getD_eq_getElem?_getD, hj]
+    · intro i r r' hr hr' j _
+      rw [stepForwardRun_shift pub supply _ _ i r r' hr hr']
+
+/-- Read a four-limb auxiliary block, using zero for absent signature elements. -/
+def stepForwardLane (f : Nat → Goldilocks) (base : Nat) : Lane4 :=
+  ⟨f base, f (base + 1), f (base + 2), f (base + 3)⟩
+
+/-- Auxiliary cells for the XMSS program. Out-of-profile instructions receive zeros. -/
+def stepXmssAux (sig : AggNativeSignature) (op : StepOp)
+    (prev : List Goldilocks) (i : Nat) : Goldilocks :=
+  let ls := sig.layers.getD 0 ⟨0, [], []⟩
+  let s := fun j => prev.getD j Goldilocks.zero
+  match op with
+  | .statefulHmsgBlock0 =>
+    if i < 6 then Goldilocks.ofNat (sig.statefulLeafIdx / 2 ^ i % 2)
+    else if i < 38 then Goldilocks.ofNat (ls.tswCtr / 2 ^ (i - 6) % 2)
+    else Goldilocks.zero
+  | .statefulHmsgBlock1 => sig.rRand.toList.getD i Goldilocks.zero
+  | .hmsgDecompLimb l =>
+    if i < 31 then Goldilocks.ofNat ((s (stMainSponge + l)).val / 4 ^ i % 4)
+    else if i = 31 then Goldilocks.ofNat ((s (stMainSponge + l)).val / 2 ^ 62 % 2)
+    else Goldilocks.zero
+  | .wotsChainStep0 _ chain slot =>
+    let rem := (s (stRemPack + slot)).val
+    let digit := 3 - rem % 4
+    if i < 4 then (ls.wotsChains.getD chain lane4Zero).toList.getD i Goldilocks.zero
+    else if i < 7 then Goldilocks.ofNat (if i - 4 < digit then 1 else 0)
+    else if i = 7 then Goldilocks.ofNat (rem / 4)
+    else Goldilocks.zero
+  | .xmssMerkleBlockA _ lvl =>
+    if i = 0 then Goldilocks.ofNat ((s stCursorIdx).val % 2)
+    else if i = 1 then Goldilocks.ofNat ((s stCursorIdx).val / 2)
+    else if i < 6 then
+      (ls.merklePath.getD lvl lane4Zero).toList.getD (i - 2) Goldilocks.zero
+    else Goldilocks.zero
+  | _ => Goldilocks.zero
+
+/-- Permutation inputs for the XMSS program, expressed using the actual incoming registers. -/
+def stepXmssInput (pk : AggValidatorPk) (mu : Digest5) (op : StepOp)
+    (prev : List Goldilocks) (aux : Nat → Goldilocks) : Poseidon2State12 :=
+  let r := stepRegs (fun j => prev.getD j Goldilocks.zero)
+  let c0 := Goldilocks.ofNat (stepOpKindAndC0 op).2
+  match op with
+  | .statefulHmsgBlock0 =>
+    ⟨pk.pkSeed, pk.pkRoot, ⟨domainHMsgStateful,
+      stepWeightedSum aux (fun i => 2 ^ i) 6 *ₚ Goldilocks.ofNat (2 ^ 32) +ₚ
+        stepWeightedSum (fun i => aux (6 + i)) (fun i => 2 ^ i) 32,
+      mu.limb4, poseidon2IvTag⟩⟩
+  | .statefulHmsgBlock1 =>
+    ⟨lane4Add r.main.b0 (stepForwardLane aux 0),
+      lane4Add r.main.b1 ⟨mu.limb0, mu.limb1, mu.limb2, mu.limb3⟩, r.main.b2⟩
+  | .statefulHmsgSqueeze | .wotsTellFinalSqueeze => stepSqueezeIn r
+  | .wotsTellInit _ =>
+    ⟨pk.pkSeed, ⟨c0 +ₚ r.kp, r.treeLo, r.treeHi, Goldilocks.ofNat 128⟩,
+      ⟨domainWotsPk, Goldilocks.zero, Goldilocks.zero, poseidon2IvTag⟩⟩
+  | .wotsChainStep0 _ _ _ =>
+    ⟨stepForwardLane aux 0, pk.pkSeed,
+      ⟨domainWotsStep, c0 +ₚ r.kp *ₚ Goldilocks.ofNat (2 ^ 16), r.treeLo, r.treeHi⟩⟩
+  | .wotsChainStep1 _ _ | .wotsChainStep2 _ _ _ =>
+    ⟨r.work, pk.pkSeed,
+      ⟨domainWotsStep, c0 +ₚ r.kp *ₚ Goldilocks.ofNat (2 ^ 16), r.treeLo, r.treeHi⟩⟩
+  | .wotsTellPairAbsorb _ =>
+    ⟨lane4Add r.main.b0 r.sub.b0, lane4Add r.main.b1 r.work, r.main.b2⟩
+  | .xmssMerkleBlockA _ _ =>
+    ⟨pk.pkSeed, lane4MuxL (aux 0) r.work (stepForwardLane aux 2),
+      ⟨domainMerkleNode, c0 +ₚ aux 1, r.treeLo, r.treeHi⟩⟩
+  | .xmssMerkleBlockB _ _ => stepMerkleBIn r
+  | _ => state12Zero
+
+/-- Signature-driven free columns for a single XMSS instruction. -/
+def stepXmssCells (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (op : StepOp) (prev : List Goldilocks) : StepForwardCells :=
+  ⟨stepXmssInput pk mu op prev (stepXmssAux sig op prev),
+    fun i => stepXmssAux sig op prev i.val⟩
+
+/-- The explicit 512-row XMSS signer block, including honest padding permutations. -/
+def stepXmssRows (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature) : List StepOpRow :=
+  stepForwardBlock .xmssPoseidon2 (pk, mu) (stepXmssCells pk mu sig)
+
+theorem stepXmssRows_length (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature) :
+    (stepXmssRows pk mu sig).length = 512 :=
+  stepForwardBlock_length ..
+
+theorem stepXmssRows_wellShaped (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature) :
+    ∀ row ∈ stepXmssRows pk mu sig, row.wellShaped = true :=
+  stepForwardRun_wellShaped _ _ _ _ (List.length_replicate ..)
+
+theorem stepXmssRows_groupA (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature) :
+    ∀ row ∈ stepXmssRows pk mu sig, allZeroGoldilocks (stepOpPermTrace row).2 = true :=
+  stepForwardRun_groupA _ _ _ _
+
+theorem stepXmssRows_shift (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature) :
+    allZeroGoldilocks (stepOp256ShiftResiduals (stepXmssRows pk mu sig)) = true := by
+  apply (stepOp256ShiftResiduals_iff _).mpr
+  intro i r r' hr hr' j _
+  rw [stepForwardRun_shift (pk, mu) (stepXmssCells pk mu sig) _ _ i r r' hr hr']
+
+/-- The exact remaining obligation for native-to-machine completeness. -/
+def StepXmssGuards (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature) : Prop :=
+  ∀ (i : Nat) row, (stepXmssRows pk mu sig)[i]? = some row →
+    allZeroGoldilocks (stepOpGuardResiduals
+      (stepOpKindAndC0 ((buildSignerProgram .xmssPoseidon2).getD i .idle)).1
+      (Goldilocks.ofNat (stepOpKindAndC0 ((buildSignerProgram .xmssPoseidon2).getD i .idle)).2)
+      (stepOpRowInputs (pk, mu) row)) = true
+
+theorem stepXmssRows_table_iff (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature) :
+    stepOp256TableOk .xmssPoseidon2 [some (pk, mu)] (stepXmssRows pk mu sig) = true ↔
+      StepXmssGuards pk mu sig :=
+  stepForwardBlock_table_iff ..
+
+/-- Directly supplied cells of an XMSS instruction, before filling the next state. -/
+def stepXmssSeedRow (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (op : StepOp) (prev : List Goldilocks) : StepOpRow :=
+  stepOpHonestPermutationRow (stepXmssCells pk mu sig op prev).input prev []
+    (List.ofFn (stepXmssCells pk mu sig op prev).aux)
+
+/-- Opcodes whose guards impose no additional arithmetic or terminal checks. -/
+def StepXmssPlainOp : StepOp → Prop
+  | .idle | .statefulHmsgBlock1 | .statefulHmsgSqueeze | .wotsTellInit _
+  | .wotsChainStep1 _ _ | .wotsChainStep2 _ _ _ | .wotsTellFinalSqueeze
+  | .xmssMerkleBlockB false _ => True
+  | _ => False
+
+macro "step_forward_reduce" : tactic => `(tactic|
+  simp only [stepOpKindAndC0, stepOpGuardResiduals,
+    stepSpongeAbsorbInput, stepSqueezeInput, stepWotsStepInput, stepMerkleBlockBInput,
+    stepOpRowInputs, stepXmssSeedRow, stepOpHonestPermutationRow, stepXmssCells,
+    stepXmssInput, stepXmssAux, stepRegs, stepForwardLane, stepSqueezeIn, stepMerkleBIn,
+    stMainSponge, stWork, stSubSponge, stTreeLo, stTreeHi, stKpIdx,
+    List.range_succ, List.range_zero, List.map_append, List.map_cons, List.map_nil,
+    List.flatMap_append, List.flatMap_cons, List.flatMap_nil, List.nil_append,
+    List.append_nil, List.cons_append, List.getD_eq_getElem?_getD,
+    List.getElem?_cons_zero, List.getElem?_cons_succ, List.getElem?_nil,
+    List.getElem?_ofFn, Option.getD_some, Option.getD_none,
+    Poseidon2State12.toList, Lane4.toList, lane4Add, lane4MuxL,
+    Nat.reduceAdd, Nat.reduceSub, Nat.reduceLT, Nat.reduceBEq, Nat.reduceEqDiff,
+    ↓reduceIte, Bool.false_eq_true, Bool.not_false, Bool.true_eq,
+    g_sub_self, allZeroGoldilocks, List.all_cons, List.all_nil,
+    beq_self_eq_true, Bool.and_true, Bool.true_and, dite_true] )
+
+set_option linter.unusedSimpArgs false in
+set_option maxRecDepth 4096 in
+set_option maxHeartbeats 800000 in
+theorem stepXmss_plain_guards (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (op : StepOp) (prev : List Goldilocks) (hop : StepXmssPlainOp op) :
+    allZeroGoldilocks (stepOpGuardResiduals (stepOpKindAndC0 op).1
+      (Goldilocks.ofNat (stepOpKindAndC0 op).2)
+      (stepOpRowInputs (pk, mu) (stepXmssSeedRow pk mu sig op prev))) = true := by
+  cases op <;> simp only [StepXmssPlainOp] at hop
+  all_goals first | contradiction | skip
+  case' xmssMerkleBlockB a b => cases a <;> simp only [StepXmssPlainOp] at hop
+  all_goals first | contradiction | skip
+  all_goals step_forward_reduce
+
+/-- An inactive row still has honest Group A columns and zero boundary registers. -/
+def stepInactiveRow : StepOpRow :=
+  stepOpHonestPermutationRow state12Zero stepForwardZero stepForwardZero
+    (List.replicate 38 Goldilocks.zero)
+
+/-- Inactive signer blocks contain real permutation witnesses, not all-zero rows. -/
+def stepInactiveRows (profile : AggSigProfile) : List StepOpRow :=
+  List.replicate (stepOpRowsPerSigner profile) stepInactiveRow
+
+theorem stepInactiveRow_residuals (profile : AggSigProfile) (t : Nat) :
+    allZeroGoldilocks (stepOp256RowResiduals profile none t stepInactiveRow) = true := by
+  unfold stepOp256RowResiduals
+  rw [List.append_nil, allZeroGoldilocks_append, Bool.and_eq_true]
+  refine ⟨stepOpHonestPermutationRow_groupA .., ?_⟩
+  apply (stepOpBoundaryResiduals_iff _ _ _).mpr
+  exact ⟨fun j _ _ => getD_replicate_zero 44 j, fun j _ _ => getD_replicate_zero 44 j⟩
+
+/-- A nonempty committee consisting entirely of inactive slots is accepted. -/
+theorem stepInactiveCommittee_table (profile : AggSigProfile) (n : Nat) (hn : 0 < n) :
+    stepOp256TableOk profile (List.replicate n none)
+      (List.replicate (n * stepOpRowsPerSigner profile) stepInactiveRow) = true := by
+  apply (stepOp256TableOk_iff_rows _ _ _).mpr
+  refine ⟨by simpa using hn, by simp, ?_, ?_, ?_⟩
+  · intro row hr
+    have he := (List.mem_replicate.mp hr).2
+    subst row
+    exact stepOpHonestPermutationRow_wellShaped _ _ _ _
+      (List.length_replicate ..) (List.length_replicate ..) (List.length_replicate ..)
+  · intro i row hr
+    have he := (List.mem_replicate.mp (List.mem_of_getElem? hr)).2
+    subst row
+    have hs : (List.replicate n (none : StepOpSlot)).getD
+        (i / stepOpRowsPerSigner profile) none = none := by
+      simp only [List.getD_eq_getElem?_getD, List.getElem?_replicate]
+      split <;> rfl
+    rw [hs]
+    exact stepInactiveRow_residuals _ _
+  · intro i r r' hr hr' j _
+    have he := (List.mem_replicate.mp (List.mem_of_getElem? hr)).2
+    have he' := (List.mem_replicate.mp (List.mem_of_getElem? hr')).2
+    subst r
+    subst r'
+    rfl
+
+/-- Conditional round trip through the existing native extractor. -/
+theorem stepXmssRows_extract (pk : AggValidatorPk) (msg : List UInt8)
+    (sig : AggNativeSignature) (hp : pk.profile = .xmssPoseidon2)
+    (hg : StepXmssGuards pk (computeMessageMu pk msg) sig) :
+    verifyAggNativeSig xmssPoseidon2Geom pk msg
+      (stepXmssSig (stepOpSlotRow .xmssPoseidon2
+        (stepXmssRows pk (computeMessageMu pk msg) sig) 0)) = true :=
+  stepOp256TableOk_xmss_extract _ _ 0 (pk, computeMessageMu pk msg) msg
+    ((stepXmssRows_table_iff ..).mpr hg) rfl hp rfl
+
+theorem stepXmssSeedRow_aux (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (op : StepOp) (prev : List Goldilocks) (i : Nat) (hi : i < 38) :
+    (stepOpRowInputs (pk, mu) (stepXmssSeedRow pk mu sig op prev)).aux i =
+      stepXmssAux sig op prev i := by
+  change (List.ofFn (fun j : Fin 38 => stepXmssAux sig op prev j.val)).getD i Goldilocks.zero = _
+  simp only [List.getD_eq_getElem?_getD, List.getElem?_ofFn, dite_eq_left hi, Option.getD_some]
+
+/-- The decomposition cells satisfy the full limb gate whenever the native range check holds. -/
+theorem stepXmss_limb63 (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (prev : List Goldilocks) (l : Nat)
+    (h : (prev.getD (stMainSponge + l) Goldilocks.zero).val < 2 ^ 63) :
+    allZeroGoldilocks (stepLimb63Decomp
+      (stepOpRowInputs (pk, mu) (stepXmssSeedRow pk mu sig (.hmsgDecompLimb l) prev)) l) = true := by
+  apply (stepLimb63Decomp_allZero_iff _ _).mpr
+  refine ⟨h, ?_, ?_⟩
+  · intro i hi
+    rw [stepXmssSeedRow_aux _ _ _ _ _ _ (by omega)]
+    simp only [stepXmssAux, hi, ↓reduceIte]
+    rfl
+  · rw [stepXmssSeedRow_aux _ _ _ _ _ _ (by decide)]
+    change Goldilocks.ofNat ((prev.getD (stMainSponge + l) Goldilocks.zero).val / 2 ^ 62 % 2) =
+      Goldilocks.ofNat ((prev.getD (stMainSponge + l) Goldilocks.zero).val / 4 ^ 31)
+    have he : (4 : Nat) ^ 31 = 2 ^ 62 := by decide +kernel
+    rw [he, Nat.mod_eq_of_lt (by omega)]
+
+/-- Hmsg decomposition has only the range and final digit-sum obligations. -/
+theorem stepXmss_decomp_guards (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (prev : List Goldilocks) (l : Nat)
+    (h : (prev.getD (stMainSponge + l) Goldilocks.zero).val < 2 ^ 63)
+    (hs : l = 4 → stepHmsgDecompExpected
+      (stepOpRowInputs (pk, mu) (stepXmssSeedRow pk mu sig (.hmsgDecompLimb l) prev))
+        l stAccOrU1 = Goldilocks.ofNat 192) :
+    allZeroGoldilocks (stepOpGuardResiduals (.hmsgDecompLimb l) (Goldilocks.ofNat 0)
+      (stepOpRowInputs (pk, mu) (stepXmssSeedRow pk mu sig (.hmsgDecompLimb l) prev))) = true := by
+  unfold stepOpGuardResiduals
+  rw [allZeroGoldilocks_append, Bool.and_eq_true]
+  refine ⟨stepXmss_limb63 pk mu sig prev l h, ?_⟩
+  by_cases hl : l = 4
+  · simp only [ite_eq_left hl, hs hl, allZeroGoldilocks, List.all_cons, List.all_nil,
+      g_sub_self, beq_self_eq_true, Bool.and_self]
+  · simp [hl, allZeroGoldilocks]
+
+/-- Canonical quotient and remainder also reconstruct the original field element. -/
+theorem stepForward_div_mod (v : Goldilocks) (base : Nat) :
+    v = Goldilocks.ofNat (v.val % base) +ₚ
+      (Goldilocks.ofNat (v.val / base) *ₚ Goldilocks.ofNat base) := by
+  rw [← g_ofNat_mul, ← g_ofNat_add]
+  apply Goldilocks.ext
+  rw [Goldilocks.ofNat_val, Nat.mul_comm (v.val / base), Nat.mod_add_div,
+    Nat.mod_eq_of_lt v.isLt]
+
+/-- Three monotone skip bits encode the digit complementary to the remaining count. -/
+theorem stepForward_wots_flags (v : Goldilocks) :
+    let b := fun k => Goldilocks.ofNat (if k < 3 - v.val % 4 then 1 else 0)
+    allZeroGoldilocks [stepBoolCheck (b 0), stepBoolCheck (b 1), stepBoolCheck (b 2),
+      b 1 *ₚ Goldilocks.sub Goldilocks.one (b 0),
+      b 2 *ₚ Goldilocks.sub Goldilocks.one (b 1),
+      Goldilocks.sub v (Goldilocks.sub (Goldilocks.ofNat 3) ((b 0 +ₚ b 1) +ₚ b 2) +ₚ
+        (Goldilocks.ofNat (v.val / 4) *ₚ Goldilocks.ofNat 4))] = true := by
+  dsimp only
+  have hr := stepForward_div_mod v 4
+  have hm : v.val % 4 = 0 ∨ v.val % 4 = 1 ∨ v.val % 4 = 2 ∨ v.val % 4 = 3 := by omega
+  rcases hm with hm | hm | hm | hm
+  all_goals rw [hm] at hr ⊢
+  all_goals change allZeroGoldilocks [Goldilocks.zero, Goldilocks.zero, Goldilocks.zero,
+    Goldilocks.zero, Goldilocks.zero, Goldilocks.sub v _] = true
+  all_goals simp only [allZeroGoldilocks, List.all_cons, List.all_nil,
+    beq_self_eq_true, Bool.true_and, Bool.and_true, beq_iff_eq]
+  all_goals exact g_sub_eq_zero_iff.mpr hr
+
+/-- Cursor halving supplies both the direction bit and the parent index. -/
+theorem stepForward_merkle_cursor (v : Goldilocks) :
+    stepBoolCheck (Goldilocks.ofNat (v.val % 2)) = Goldilocks.zero ∧
+    v = (Goldilocks.ofNat (v.val % 2) +ₚ Goldilocks.ofNat (v.val / 2)) +ₚ
+      Goldilocks.ofNat (v.val / 2) := by
+  constructor
+  · have hm : v.val % 2 = 0 ∨ v.val % 2 = 1 := by omega
+    rcases hm with hm | hm <;> rw [hm] <;> rfl
+  · have hr := stepForward_div_mod v 2
+    rw [← g_ofNat_add, ← g_ofNat_add]
+    rw [← g_ofNat_mul, ← g_ofNat_add] at hr
+    rw [show v.val % 2 + v.val / 2 + v.val / 2 = v.val % 2 + v.val / 2 * 2 by omega]
+    exact hr
+
+set_option maxRecDepth 4096 in
+set_option maxHeartbeats 800000 in
+theorem stepXmss_chain0_guards (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (prev : List Goldilocks) (layer chain slot : Nat) :
+    allZeroGoldilocks (stepOpGuardResiduals (.wotsChainStep0 slot)
+      (Goldilocks.ofNat (layer * 2 ^ 44 + chain * 2 ^ 4))
+      (stepOpRowInputs (pk, mu)
+        (stepXmssSeedRow pk mu sig (.wotsChainStep0 layer chain slot) prev))) = true := by
+  simp only [stepOpGuardResiduals, allZeroGoldilocks_append, Bool.and_eq_true]
+  refine ⟨⟨?_, ?_⟩, ?_⟩
+  · exact stepForward_wots_flags (prev.getD (stRemPack + slot) Goldilocks.zero)
+  all_goals step_forward_reduce
+
+set_option maxRecDepth 4096 in
+set_option maxHeartbeats 800000 in
+theorem stepXmss_merkleA_guards (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (prev : List Goldilocks) (layer lvl : Nat) :
+    allZeroGoldilocks (stepOpGuardResiduals .xmssMerkleBlockA
+      (Goldilocks.ofNat (layer * 2 ^ 48 + (lvl + 1) * 2 ^ 32))
+      (stepOpRowInputs (pk, mu)
+        (stepXmssSeedRow pk mu sig (.xmssMerkleBlockA layer lvl) prev))) = true := by
+  simp only [stepOpGuardResiduals, stepMerkleBlockAGuards,
+    allZeroGoldilocks_append, Bool.and_eq_true]
+  refine ⟨⟨?_, ?_⟩, ?_⟩
+  · have h := stepForward_merkle_cursor (prev.getD stCursorIdx Goldilocks.zero)
+    change allZeroGoldilocks [stepBoolCheck (Goldilocks.ofNat (_ % 2)),
+      Goldilocks.sub (prev.getD stCursorIdx Goldilocks.zero)
+        ((Goldilocks.ofNat (_ % 2) +ₚ Goldilocks.ofNat (_ / 2)) +ₚ Goldilocks.ofNat (_ / 2))] = true
+    rw [h.1, ← h.2, g_sub_self]
+    rfl
+  all_goals step_forward_reduce
+
+theorem stepForward_bit (n : Nat) :
+    stepBoolCheck (Goldilocks.ofNat (n % 2)) = Goldilocks.zero := by
+  have h : n % 2 = 0 ∨ n % 2 = 1 := by omega
+  rcases h with h | h <;> rw [h] <;> rfl
+
+set_option maxRecDepth 4096 in
+set_option maxHeartbeats 800000 in
+theorem stepXmss_hmsg0_guards (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (prev : List Goldilocks) :
+    allZeroGoldilocks (stepOpGuardResiduals .statefulHmsgBlock0 (Goldilocks.ofNat 0)
+      (stepOpRowInputs (pk, mu) (stepXmssSeedRow pk mu sig .statefulHmsgBlock0 prev))) = true := by
+  step_forward_reduce
+  simp only [stepWeightedSum, List.range_succ, List.range_zero, List.foldl_append,
+    List.foldl_cons, List.foldl_nil, Nat.reduceAdd, Nat.reduceSub,
+    Nat.reduceLT, dite_true, Option.getD_some, stepXmssAux, ↓reduceIte,
+    stepForward_bit, beq_self_eq_true, Bool.and_true, g_sub_self]
+
+set_option maxRecDepth 4096 in
+set_option maxHeartbeats 800000 in
+theorem stepXmss_pair_guards (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (prev : List Goldilocks) (pair : Nat)
+    (h : pair + 1 = 64 → ∀ j < 5, prev.getD (stRemPack + j) Goldilocks.zero = Goldilocks.zero) :
+    allZeroGoldilocks (stepOpGuardResiduals (.wotsTellPairAbsorb (pair + 1 == 64))
+      (Goldilocks.ofNat 0)
+      (stepOpRowInputs (pk, mu) (stepXmssSeedRow pk mu sig (.wotsTellPairAbsorb pair) prev))) = true := by
+  simp only [stepOpGuardResiduals, allZeroGoldilocks_append, Bool.and_eq_true]
+  constructor
+  · by_cases hp : pair + 1 = 64
+    · simp only [hp, beq_self_eq_true, ↓reduceIte]
+      apply (allZero_map_iff _ _).mpr
+      exact h hp
+    · have hb : (pair + 1 == 64) = false := by exact beq_eq_false_iff_ne.mpr hp
+      rw [hb]
+      rfl
+  · step_forward_reduce
+
+set_option maxRecDepth 4096 in
+set_option maxHeartbeats 800000 in
+theorem stepXmss_merkleTop_guards (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (prev : List Goldilocks)
+    (hc : prev.getD stCursorIdx Goldilocks.zero = Goldilocks.zero)
+    (hr : ∀ i < 4,
+      (poseidon2Perm12 (stepXmssInput pk mu (.xmssMerkleBlockB true true) prev
+        (stepXmssAux sig (.xmssMerkleBlockB true true) prev))).toList.getD i Goldilocks.zero =
+        pk.pkRoot.toList.getD i Goldilocks.zero) :
+    allZeroGoldilocks (stepOpGuardResiduals (.xmssMerkleBlockB true true) (Goldilocks.ofNat 0)
+      (stepOpRowInputs (pk, mu) (stepXmssSeedRow pk mu sig (.xmssMerkleBlockB true true) prev))) = true := by
+  simp only [stepOpGuardResiduals, Bool.not_true, Bool.false_eq_true, ↓reduceIte,
+    allZeroGoldilocks_append, Bool.and_eq_true]
+  refine ⟨?_, ?_, ?_⟩
+  · step_forward_reduce
+  · change allZeroGoldilocks [prev.getD stCursorIdx Goldilocks.zero] = true
+    rw [hc]
+    rfl
+  · apply (allZero_map_iff _ _).mpr
+    intro i hi
+    apply g_sub_eq_zero_iff.mpr
+    have hp := stepOp256_groupA_exact
+      (stepXmssSeedRow pk mu sig (.xmssMerkleBlockB true true) prev)
+      (stepOpHonestPermutationRow_groupA ..)
+    change (stepOpPermTrace _).1.toList.getD i Goldilocks.zero = _
+    rw [hp]
+    exact hr i hi
+
+/-- The randomizer is retained exactly by construction, without an acceptance premise. -/
+theorem stepXmssRows_randomizer (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature) :
+    (stepXmssSig (stepOpSlotRow .xmssPoseidon2 (stepXmssRows pk mu sig) 0)).rRand = sig.rRand := by
+  rfl
+
+/-- Instruction classes used by the XMSS program. -/
+def stepXmssSupported : StepOp → Bool
+  | .idle | .statefulHmsgBlock0 | .statefulHmsgBlock1 | .statefulHmsgSqueeze
+  | .hmsgDecompLimb _ | .wotsTellInit _ | .wotsChainStep0 _ _ _
+  | .wotsChainStep1 _ _ | .wotsChainStep2 _ _ _ | .wotsTellPairAbsorb _
+  | .wotsTellFinalSqueeze | .xmssMerkleBlockA _ _
+  | .xmssMerkleBlockB false _ | .xmssMerkleBlockB true true => true
+  | _ => false
+
+theorem stepXmssProgram_supported :
+    (buildSignerProgram .xmssPoseidon2).all stepXmssSupported = true := by
+  decide +kernel
+
+/-- Arithmetic and terminal checks left after supplying the honest local cells. -/
+def StepXmssChecks (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (op : StepOp) (prev : List Goldilocks) : Prop :=
+  match op with
+  | .hmsgDecompLimb l =>
+    (prev.getD (stMainSponge + l) Goldilocks.zero).val < 2 ^ 63 ∧
+    (l = 4 → stepHmsgDecompExpected
+      (stepOpRowInputs (pk, mu) (stepXmssSeedRow pk mu sig op prev)) l stAccOrU1 =
+        Goldilocks.ofNat 192)
+  | .wotsTellPairAbsorb pair =>
+    pair + 1 = 64 → ∀ j < 5, prev.getD (stRemPack + j) Goldilocks.zero = Goldilocks.zero
+  | .xmssMerkleBlockB true true =>
+    prev.getD stCursorIdx Goldilocks.zero = Goldilocks.zero ∧
+    ∀ i < 4, (poseidon2Perm12 (stepXmssInput pk mu op prev (stepXmssAux sig op prev))).toList.getD
+      i Goldilocks.zero = pk.pkRoot.toList.getD i Goldilocks.zero
+  | _ => True
+
+set_option linter.unusedSimpArgs false in
+set_option maxRecDepth 4096 in
+set_option maxHeartbeats 800000 in
+theorem stepXmss_seed_guards_of_checks (pk : AggValidatorPk) (mu : Digest5)
+    (sig : AggNativeSignature) (op : StepOp) (prev : List Goldilocks)
+    (hs : stepXmssSupported op = true) (hc : StepXmssChecks pk mu sig op prev) :
+    allZeroGoldilocks (stepOpGuardResiduals (stepOpKindAndC0 op).1
+      (Goldilocks.ofNat (stepOpKindAndC0 op).2)
+      (stepOpRowInputs (pk, mu) (stepXmssSeedRow pk mu sig op prev))) = true := by
+  cases op <;> simp only [stepXmssSupported] at hs
+  all_goals try contradiction
+  case idle => exact stepXmss_plain_guards pk mu sig .idle prev True.intro
+  case statefulHmsgBlock0 => exact stepXmss_hmsg0_guards pk mu sig prev
+  case statefulHmsgBlock1 => exact stepXmss_plain_guards pk mu sig .statefulHmsgBlock1 prev True.intro
+  case statefulHmsgSqueeze => exact stepXmss_plain_guards pk mu sig .statefulHmsgSqueeze prev True.intro
+  case hmsgDecompLimb l => exact stepXmss_decomp_guards pk mu sig prev l hc.1 hc.2
+  case wotsTellInit l => exact stepXmss_plain_guards pk mu sig (.wotsTellInit l) prev True.intro
+  case wotsChainStep0 l c slot => exact stepXmss_chain0_guards pk mu sig prev l c slot
+  case wotsChainStep1 l c => exact stepXmss_plain_guards pk mu sig (.wotsChainStep1 l c) prev True.intro
+  case wotsChainStep2 l c odd => exact stepXmss_plain_guards pk mu sig (.wotsChainStep2 l c odd) prev True.intro
+  case wotsTellPairAbsorb pair => exact stepXmss_pair_guards pk mu sig prev pair hc
+  case wotsTellFinalSqueeze => exact stepXmss_plain_guards pk mu sig .wotsTellFinalSqueeze prev True.intro
+  case xmssMerkleBlockA l lvl => exact stepXmss_merkleA_guards pk mu sig prev l lvl
+  case xmssMerkleBlockB a b =>
+    cases a with
+    | false => exact stepXmss_plain_guards pk mu sig (.xmssMerkleBlockB false b) prev True.intro
+    | true =>
+      cases b with
+      | false => contradiction
+      | true => exact stepXmss_merkleTop_guards pk mu sig prev hc.1 hc.2
+
+
+/-- A full active table follows from the remaining execution-wide checks.
+    This statement uses the original checker, not a replacement acceptance predicate. -/
+theorem stepXmssRows_table_of_checks (pk : AggValidatorPk) (mu : Digest5)
+    (sig : AggNativeSignature)
+    (hc : ∀ (i : Nat) row, (stepXmssRows pk mu sig)[i]? = some row →
+      StepXmssChecks pk mu sig ((buildSignerProgram .xmssPoseidon2).getD i .idle) row.prevState) :
+    stepOp256TableOk .xmssPoseidon2 [some (pk, mu)] (stepXmssRows pk mu sig) = true := by
+  apply (stepXmssRows_table_iff pk mu sig).mpr
+  intro i row hr
+  obtain ⟨op, state, hop, he⟩ := stepForwardRun_at (pk, mu) (stepXmssCells pk mu sig)
+    (buildSignerProgram .xmssPoseidon2) stepForwardZero i row hr
+  have hs := List.all_eq_true.mp stepXmssProgram_supported op (List.mem_of_getElem? hop)
+  have hopD : (buildSignerProgram .xmssPoseidon2).getD i .idle = op := by
+    rw [List.getD_eq_getElem?_getD, hop]; rfl
+  have hchecks := hc i row hr
+  rw [hopD, he] at hchecks
+  have hg := stepXmss_seed_guards_of_checks pk mu sig op state hs hchecks
+  rw [hopD, he]
+  change allZeroGoldilocks (stepOpGuardResiduals _ _
+    (stepOpRowInputs (pk, mu) (populateStepOpNext _ _ _ (stepXmssSeedRow pk mu sig op state)))) = true
+  rw [populateStepOpNext_inputs, stepOpGuardResiduals_congr_next]
+  exact hg
+
+/-- The constructed XMSS trace, indexed within its signer block. -/
+def stepXmssR (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature) : Nat → StepOpRow :=
+  stepOpSlotRow .xmssPoseidon2 (stepXmssRows pk mu sig) 0
+
+theorem stepXmssR_at (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (t : Nat) (ht : t < 512) :
+    (stepXmssRows pk mu sig)[t]? = some (stepXmssR pk mu sig t) := by
+  have hlt : t < (stepXmssRows pk mu sig).length := by rw [stepXmssRows_length]; exact ht
+  simp only [stepXmssR, stepOpSlotRow, Nat.zero_mul, Nat.zero_add,
+    List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hlt, Option.getD_some]
+
+theorem stepXmssR_built (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (t : Nat) (ht : t < 512) :
+    stepXmssR pk mu sig t = stepForwardRow (pk, mu)
+      ((buildSignerProgram .xmssPoseidon2).getD t .idle)
+      (stepXmssR pk mu sig t).prevState
+      (stepXmssCells pk mu sig ((buildSignerProgram .xmssPoseidon2).getD t .idle)
+        (stepXmssR pk mu sig t).prevState) := by
+  obtain ⟨op, state, hop, he⟩ := stepForwardRun_at (pk, mu) (stepXmssCells pk mu sig)
+    (buildSignerProgram .xmssPoseidon2) stepForwardZero t _ (stepXmssR_at pk mu sig t ht)
+  rw [List.getD_eq_getElem?_getD, hop, Option.getD_some, he]
+  rfl
+
+theorem stepXmssR_sem (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (t : Nat) (op : StepOp) (ht : t + 1 < 512)
+    (hop : (buildSignerProgram .xmssPoseidon2).getD t .idle = op)
+    (hc : StepXmssChecks pk mu sig op (stepXmssR pk mu sig t).prevState) :
+    StepRowSem (pk, mu) (stepXmssR pk mu sig) op t := by
+  have hb := stepXmssR_built pk mu sig t (by omega)
+  rw [hop] at hb
+  have hgA := stepXmssRows_groupA pk mu sig _ (List.mem_of_getElem? (stepXmssR_at pk mu sig t (by omega)))
+  have hvalid := (buildSignerProgram_kind_mem_and_valid .xmssPoseidon2 t).2
+  rw [hop] at hvalid
+  have hsup : stepXmssSupported op = true := by
+    have hlen : t < (buildSignerProgram .xmssPoseidon2).length := by
+      rw [buildSignerProgram_length.2.2.1]; omega
+    have he : (buildSignerProgram .xmssPoseidon2)[t] = op := by
+      simpa only [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hlen, Option.getD_some] using hop
+    exact List.all_eq_true.mp stepXmssProgram_supported op (he ▸ List.getElem_mem hlen)
+  have hg := stepXmss_seed_guards_of_checks pk mu sig op _ hsup hc
+  have hcon : allZeroGoldilocks (stepOpConstraints (stepOpKindAndC0 op).1
+      (Goldilocks.ofNat (stepOpKindAndC0 op).2)
+      (stepOpRowInputs (pk, mu) (stepXmssR pk mu sig t))) = true := by
+    rw [hb]
+    exact (stepForwardRow_constraints_iff _ _ _ _ hvalid).mpr hg
+  have hparts := (stepOpConstraints_iff_guard_and_next _ _ _ hvalid).mp hcon
+  refine ⟨stepOp256_groupA_exact _ hgA, hparts.1, ?_⟩
+  intro j hj
+  have hshift := stepForwardRun_shift (pk, mu) (stepXmssCells pk mu sig)
+    (buildSignerProgram .xmssPoseidon2) stepForwardZero t _ _
+    (stepXmssR_at pk mu sig t (by omega)) (stepXmssR_at pk mu sig (t + 1) ht)
+  unfold stepPrev
+  rw [← hshift]
+  exact hparts.2 j hj
+
+/-- Native acceptance gives one bounded leaf and one layer verifying to the public root. -/
+theorem stepXmssNative_layer (pk : AggValidatorPk) (msg : List UInt8) (sig : AggNativeSignature)
+    (h : verifyAggNativeSig xmssPoseidon2Geom pk msg sig = true) :
+    ∃ ls : WotsLayerSig, sig.layers = [ls] ∧ sig.statefulLeafIdx < 64 ∧
+      verifyWotsLayer xmssPoseidon2Geom pk 0 0 sig.statefulLeafIdx
+        (computeHmsgStateful pk sig.rRand (computeMessageMu pk msg) sig.statefulLeafIdx ls.tswCtr)
+        ls = some pk.pkRoot := by
+  unfold verifyAggNativeSig at h
+  split at h
+  · contradiction
+  · rename_i hc
+    have hfalse := Bool.eq_false_iff.mpr hc
+    simp only [Bool.or_eq_false_iff, bne_eq_false_iff_eq] at hfalse
+    have hlen : sig.layers.length = 1 := hfalse.2
+    cases hl : sig.layers with
+    | nil => simp [hl] at hlen
+    | cons ls tail =>
+      have ht : tail = [] := by
+        have htail : tail.length = 0 := by
+          have hh := hlen
+          rw [hl, List.length_cons] at hh
+          omega
+        exact List.eq_nil_of_length_eq_zero htail
+      subst tail
+      simp only [hl] at h
+      change verifyAggNativeSigStateful xmssPoseidon2Geom pk (computeMessageMu pk msg) sig ls [] = true at h
+      unfold verifyAggNativeSigStateful at h
+      split at h
+      · contradiction
+      · rename_i hc'
+        have hf := Bool.eq_false_iff.mpr hc'
+        simp only [Bool.or_eq_false_iff] at hf
+        have hleaf : sig.statefulLeafIdx < 64 := by
+          have hh := hf.2
+          change (!decide (sig.statefulLeafIdx < 64)) = false at hh
+          by_cases hb : sig.statefulLeafIdx < 64
+          · exact hb
+          · simp [hb] at hh
+        have hd : sig.statefulLeafIdx / 64 = 0 := Nat.div_eq_of_lt hleaf
+        have hm : sig.statefulLeafIdx % 64 = sig.statefulLeafIdx := Nat.mod_eq_of_lt hleaf
+        change (match verifyWotsLayer xmssPoseidon2Geom pk 0 (sig.statefulLeafIdx / 64)
+          (sig.statefulLeafIdx % 64)
+          (computeHmsgStateful pk sig.rRand (computeMessageMu pk msg)
+            (sig.statefulLeafIdx % 64) ls.tswCtr) ls with
+          | none => false
+          | some root => root == pk.pkRoot) = true at h
+        rw [hd, hm] at h
+        split at h
+        · contradiction
+        · rename_i root hr
+          have he : root = pk.pkRoot := beq_iff_eq.mp h
+          exact ⟨ls, rfl, hleaf, he ▸ hr⟩
+
+
+/-- Reconstruction without invoking the classical modular-arithmetic lemmas. -/
+theorem stepForwardWeighted_digits (B w : Nat) (f : Nat → Goldilocks)
+    (hB : B ≤ goldilocksPrime) (hB0 : 0 < B) :
+    ∀ n, (∀ i < n, f i = Goldilocks.ofNat ((w / B ^ i) % B)) →
+      stepWeightedNat f (fun i => B ^ i) n + B ^ n * (w / B ^ n) = w
+  | 0, _ => by
+    rw [Nat.pow_zero, Nat.div_one, Nat.one_mul]
+    exact Nat.zero_add w
+  | n + 1, h => by
+    have ih := stepForwardWeighted_digits B w f hB hB0 n (fun i hi => h i (by omega))
+    have hd : (w / B ^ n) % B < goldilocksPrime :=
+      Nat.lt_of_lt_of_le (Nat.mod_lt _ hB0) hB
+    have hq := Nat.div_add_mod (w / B ^ n) B
+    have key : w / B ^ n % B * B ^ n + B ^ n * B * (w / B ^ n / B) = B ^ n * (w / B ^ n) := by
+      rw [Nat.mul_comm (w / B ^ n % B) (B ^ n), Nat.mul_assoc, ← Nat.mul_add, Nat.add_comm, hq]
+    rw [stepWeightedNat_succ, h n (by omega), Goldilocks.ofNat_val, Nat.mod_eq_of_lt hd,
+      Nat.pow_succ, ← Nat.div_div_eq_div_mul, Nat.add_assoc, key]
+    exact ih
+
+theorem stepForwardWeighted_bits (w n : Nat) (f : Nat → Goldilocks)
+    (hf : ∀ i < n, f i = Goldilocks.ofNat ((w / 2 ^ i) % 2)) :
+    stepWeightedSum f (fun i => 2 ^ i) n = Goldilocks.ofNat (w % 2 ^ n) := by
+  have he := stepForwardWeighted_digits 2 w f (by decide) (by decide) n hf
+  have hb : stepWeightedNat f (fun i => 2 ^ i) n < 2 ^ n :=
+    stepWeightedNat_bits_lt f n (fun i hi => by
+      rw [hf i hi]
+      have hm : w / 2 ^ i % 2 = 0 ∨ w / 2 ^ i % 2 = 1 := by omega
+      rcases hm with hm | hm
+      · exact Or.inl (by rw [hm]; rfl)
+      · exact Or.inr (by rw [hm]; rfl))
+  have hdiv := Nat.mod_add_div w (2 ^ n)
+  rw [stepWeightedSum_eq_ofNat]
+  congr 1
+  omega
+
+theorem stepXmssR_aux (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (t i : Nat) (ht : t < 512) (hi : i < 38) (op : StepOp)
+    (hop : (buildSignerProgram .xmssPoseidon2).getD t .idle = op) :
+    stepAux (stepXmssR pk mu sig) t i =
+      stepXmssAux sig op (stepXmssR pk mu sig t).prevState i := by
+  have he := congrArg (fun r : StepOpRow => r.aux.getD i Goldilocks.zero)
+    (stepXmssR_built pk mu sig t ht)
+  rw [hop] at he
+  exact he.trans (stepXmssSeedRow_aux pk mu sig op _ i hi)
+
+/-- The first three interpreter instructions compute precisely native stateful Hmsg. -/
+theorem stepXmssR_hmsg (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (ls : WotsLayerSig) (hlayers : sig.layers = [ls]) (hleaf : sig.statefulLeafIdx < 64) :
+    stepHmsgOf (stepRegsAt (stepXmssR pk mu sig) 3).main =
+      computeHmsgStateful pk sig.rRand mu sig.statefulLeafIdx ls.tswCtr ∧
+    (∀ s < 6, (stepRegsAt (stepXmssR pk mu sig) 3).rem.get s = Goldilocks.zero) ∧
+    (stepRegsAt (stepXmssR pk mu sig) 3).acc = Goldilocks.zero ∧
+    StepAddrOk (stepRegsAt (stepXmssR pk mu sig) 3) sig.statefulLeafIdx 0 := by
+  let R := stepXmssR pk mu sig
+  have h0 := stepXmssR_sem pk mu sig 0 .statefulHmsgBlock0 (by decide) rfl True.intro
+  have h1 := stepXmssR_sem pk mu sig 1 .statefulHmsgBlock1 (by decide) rfl True.intro
+  have h2 := stepXmssR_sem pk mu sig 2 .statefulHmsgSqueeze (by decide) rfl True.intro
+  obtain ⟨_, _, hin0, hr1⟩ := stepSem_statefulHmsgBlock0 h0
+  obtain ⟨hin1, hr2⟩ := stepSem_statefulHmsgBlock1 h1
+  obtain ⟨hin2, hr3⟩ := stepSem_statefulHmsgSqueeze h2
+  have hb6 : stepWeightedSum (stepAux R 0) (fun i => 2 ^ i) 6 = Goldilocks.ofNat sig.statefulLeafIdx := by
+    have hh := stepForwardWeighted_bits sig.statefulLeafIdx 6 (stepAux R 0) (fun i hi => by
+      rw [stepXmssR_aux pk mu sig 0 i (by decide) (by omega) .statefulHmsgBlock0 rfl]
+      simp only [stepXmssAux, hi, ↓reduceIte])
+    simpa only [Nat.mod_eq_of_lt hleaf] using hh
+  have hb32 : stepWeightedSum (fun i => stepAux R 0 (6 + i)) (fun i => 2 ^ i) 32 =
+      Goldilocks.ofNat (ls.tswCtr % 2 ^ 32) := by
+    apply stepForwardWeighted_bits
+    intro i hi
+    rw [stepXmssR_aux pk mu sig 0 (6 + i) (by decide) (by omega) .statefulHmsgBlock0 rfl]
+    simp only [stepXmssAux, hlayers, List.getD_cons_zero,
+      show ¬6 + i < 6 by omega, show 6 + i < 38 by omega, ↓reduceIte, Nat.add_sub_cancel_left]
+  have hin0' : (R 0).stIn = hmsgStatefulIn0 pk mu sig.statefulLeafIdx ls.tswCtr := by
+    rw [hin0, hb6, hb32]
+    unfold hmsgStatefulIn0
+    rw [Nat.mod_eq_of_lt (show sig.statefulLeafIdx < 2 ^ 32 by omega), g_ofNat_add, g_ofNat_mul]
+  have hrand : stepAuxLane R 1 0 = sig.rRand := by rfl
+  have main1 : (stepRegsAt R 1).main = poseidon2Perm12 (hmsgStatefulIn0 pk mu sig.statefulLeafIdx ls.tswCtr) := by
+    rw [hr1]
+    change poseidon2Perm12 (R 0).stIn = _
+    rw [hin0']
+  have hin1' : (R 1).stIn = hmsgStatefulIn1
+      (poseidon2Perm12 (hmsgStatefulIn0 pk mu sig.statefulLeafIdx ls.tswCtr)) sig.rRand mu := by
+    rw [hin1, main1, hrand]
+    rfl
+  have main2 : (stepRegsAt R 2).main = poseidon2Perm12 (R 1).stIn := by rw [hr2]; rfl
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · rw [hr3]
+    change stepHmsgOf (poseidon2Perm12 (R 2).stIn) = _
+    rw [hin2]
+    unfold stepSqueezeIn
+    rw [main2, hin1', computeHmsgStateful_eq_states]
+    rfl
+  · intro s hs
+    rw [hr3]
+    rcases s with _ | _ | _ | _ | _ | _ | s <;> first | rfl | omega
+  · rw [hr3]
+  · constructor
+    · rw [hr3, hr2, hr1]
+      exact hb6
+    · rw [hr3, hr2, hr1]
+      rfl
+    · rw [hr3, hr2, hr1]
+      rfl
+
+
+/-- The native layer checks the canonical digest digits and their target sum. -/
+theorem stepXmssNative_digits (pk : AggValidatorPk) (d : Digest5) (ls : WotsLayerSig)
+    (leaf : Nat) (h : verifyWotsLayer xmssPoseidon2Geom pk 0 0 leaf d ls = some pk.pkRoot) :
+    checkDigest5Limbs63 d = true ∧
+    listNatSum ((List.range' 0 128).map (stepDigit d)) = 192 ∧
+    ls.wotsChains.length = 128 ∧ ls.merklePath.length = 6 := by
+  unfold verifyWotsLayer at h
+  split at h
+  · rename_i hlen
+    simp only [Bool.and_eq_true, beq_iff_eq] at hlen
+    cases he : extractWotsDigitsChecked xmssPoseidon2Geom d with
+    | none => simp [he] at h
+    | some ds =>
+      simp only [he] at h
+      split at h
+      · rename_i hsum
+        have hchk : checkDigest5Limbs63 d = true := by
+          unfold extractWotsDigitsChecked at he
+          split at he
+          · assumption
+          · contradiction
+        have hd := stepDigits_extract xmssPoseidon2Geom d rfl hchk
+        rw [he] at hd
+        have hd' : ds = (List.range' 0 128).map (stepDigit d) := Option.some.inj hd
+        have hsum' : listNatSum ds = 192 := beq_iff_eq.mp hsum
+        exact ⟨hchk, hd' ▸ hsum', hlen.1, hlen.2⟩
+      · contradiction
+  · contradiction
+
+theorem stepXmssProgram_decomp (l : Nat) (hl : l < 5) :
+    (buildSignerProgram .xmssPoseidon2).getD (3 + l) .idle = .hmsgDecompLimb l := by
+  rcases l with _ | _ | _ | _ | _ | l <;> first | rfl | omega
+
+/-- A digest range check bounds each decomposition source register. -/
+theorem stepForward_digest_limb (prev : List Goldilocks) (l : Nat) (hl : l < 5)
+    (h : checkDigest5Limbs63 (stepHmsgOf (stepRegs (fun j => prev.getD j Goldilocks.zero)).main) = true) :
+    (prev.getD (stMainSponge + l) Goldilocks.zero).val < 2 ^ 63 := by
+  simp only [checkDigest5Limbs63, Bool.and_eq_true, decide_eq_true_eq] at h
+  rcases l with _ | _ | _ | _ | _ | l
+  · exact h.1.1.1.1
+  · exact h.1.1.1.2
+  · exact h.1.1.2
+  · exact h.1.2
+  · exact h.2
+  · omega
+
+/-- The computed accumulator adds exactly this limb's native digits, independently of guards. -/
+theorem stepXmss_decomp_acc_expected (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (prev : List Goldilocks) (l : Nat) (hl : l < 5) :
+    stepHmsgDecompExpected (stepOpRowInputs (pk, mu)
+      (stepXmssSeedRow pk mu sig (.hmsgDecompLimb l) prev)) l stAccOrU1 =
+    prev.getD stAccOrU1 Goldilocks.zero +ₚ Goldilocks.ofNat
+      (listNatSum ((List.range' (31 * l) (stepLimbDigits l)).map
+        (stepDigit (stepHmsgOf (stepRegs (fun j => prev.getD j Goldilocks.zero)).main)))) := by
+  let x := stepOpRowInputs (pk, mu) (stepXmssSeedRow pk mu sig (.hmsgDecompLimb l) prev)
+  let d := stepHmsgOf (stepRegs (fun j => prev.getD j Goldilocks.zero)).main
+  have hlimb : digest5Limb d l = prev.getD (stMainSponge + l) Goldilocks.zero := by
+    rcases l with _ | _ | _ | _ | _ | l <;> first | rfl | omega
+  have hn : stepLimbDigits l ≤ 31 := by unfold stepLimbDigits; split <;> omega
+  have hd : ∀ i ∈ List.range (stepLimbDigits l), x.aux i = Goldilocks.ofNat (stepDigit d (31 * l + i)) := by
+    intro i hi
+    have hi' := List.mem_range.mp hi
+    have hi31 : i < 31 := by omega
+    rw [stepXmssSeedRow_aux pk mu sig _ prev i (by omega)]
+    simp only [stepXmssAux, hi31, ↓reduceIte]
+    unfold stepDigit
+    rw [show (31 * l + i) / 31 = l by omega, show (31 * l + i) % 31 = i by omega, hlimb]
+  have he := stepPlainSum_field x (stepDigit d) l (List.range (stepLimbDigits l)) 0 hd
+  change x.prev stAccOrU1 +ₚ stepPlainSum x.aux (stepLimbDigits l) = _
+  unfold stepPlainSum
+  have hz : Goldilocks.ofNat 0 = Goldilocks.zero := rfl
+  rw [hz] at he
+  rw [he, Nat.zero_add, range'_eq_map, List.map_map]
+  rfl
+
+set_option maxHeartbeats 800000 in
+set_option maxRecDepth 4096 in
+/-- Native digit checks establish the full five-row decomposition segment. -/
+theorem stepXmssR_decomp (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (hchk : checkDigest5Limbs63 (stepHmsgOf (stepRegsAt (stepXmssR pk mu sig) 3).main) = true)
+    (hsum : listNatSum ((List.range' 0 128).map
+      (stepDigit (stepHmsgOf (stepRegsAt (stepXmssR pk mu sig) 3).main))) = 192)
+    (hacc : (stepRegsAt (stepXmssR pk mu sig) 3).acc = Goldilocks.zero) :
+    StepRunAt (pk, mu) (stepXmssR pk mu sig) ((List.range 5).map StepOp.hmsgDecompLimb) 3 := by
+  let R := stepXmssR pk mu sig
+  let d := stepHmsgOf (stepRegsAt R 3).main
+  have hp : ∀ l, l ≤ 4 →
+      (stepRegsAt R (3 + l)).main = (stepRegsAt R 3).main ∧
+      (stepRegsAt R (3 + l)).acc = Goldilocks.ofNat
+        (listNatSum ((List.range' 0 (31 * l)).map (stepDigit d))) ∧
+      ∀ j < l, StepRowSem (pk, mu) R (.hmsgDecompLimb j) (3 + j) := by
+    intro l
+    induction l with
+    | zero =>
+      intro _
+      exact ⟨rfl, hacc, fun j hj => False.elim (by omega)⟩
+    | succ l ih =>
+      intro hl
+      obtain ⟨hm, ha, hrun⟩ := ih (by omega)
+      have hlt : ((R (3 + l)).prevState.getD (stMainSponge + l) Goldilocks.zero).val < 2 ^ 63 := by
+        apply stepForward_digest_limb _ l (by omega)
+        change checkDigest5Limbs63 (stepHmsgOf (stepRegsAt R (3 + l)).main) = true
+        rw [hm]
+        exact hchk
+      have hsem := stepXmssR_sem pk mu sig (3 + l) (.hmsgDecompLimb l) (by omega)
+        (stepXmssProgram_decomp l (by omega)) ⟨hlt, fun he => False.elim (by omega)⟩
+      obtain ⟨_, _, hacc', _, hf⟩ := stepDecomp_row (by omega : l < 5) hsem
+        (fun s => ((stepRegsAt R (3 + l)).rem.get s).val)
+        (listNatSum ((List.range' 0 (31 * l)).map (stepDigit d)))
+        (fun s _ => (g_ofNat_self _).symm) ha
+      have hn : stepLimbDigits l = 31 := by simp [stepLimbDigits, show l < 4 by omega]
+      rw [hm, hn] at hacc'
+      refine ⟨?_, ?_, ?_⟩
+      · have he : 3 + (l + 1) = 3 + l + 1 := by omega
+        rw [he, hf]
+        exact hm
+      · have he : 3 + (l + 1) = 3 + l + 1 := by omega
+        rw [he, hacc']
+        apply congrArg Goldilocks.ofNat
+        rw [show 31 * (l + 1) = 31 * l + 31 by omega,
+          range'_split, Nat.zero_add, List.map_append, listNatSum_append]
+      · intro j hj
+        by_cases he : j = l
+        · subst j; exact hsem
+        · exact hrun j (by omega)
+  obtain ⟨hm4, ha4, hrun4⟩ := hp 4 (by decide)
+  have hlt4 : ((R 7).prevState.getD (stMainSponge + 4) Goldilocks.zero).val < 2 ^ 63 := by
+    apply stepForward_digest_limb _ 4 (by decide)
+    change checkDigest5Limbs63 (stepHmsgOf (stepRegsAt R 7).main) = true
+    rw [hm4]
+    exact hchk
+  have he4 : stepHmsgDecompExpected (stepOpRowInputs (pk, mu)
+      (stepXmssSeedRow pk mu sig (.hmsgDecompLimb 4) (R 7).prevState)) 4 stAccOrU1 = Goldilocks.ofNat 192 := by
+    rw [stepXmss_decomp_acc_expected pk mu sig _ 4 (by decide)]
+    change (stepRegsAt R 7).acc +ₚ Goldilocks.ofNat
+      (listNatSum ((List.range' 124 4).map (stepDigit (stepHmsgOf (stepRegsAt R 7).main)))) = _
+    rw [ha4, hm4, ← g_ofNat_add]
+    have he : List.range' 0 128 = List.range' 0 124 ++ List.range' 124 4 := by
+      exact range'_split 124 0 4
+    rw [he, List.map_append, listNatSum_append] at hsum
+    exact congrArg Goldilocks.ofNat hsum
+  have hsem4 := stepXmssR_sem pk mu sig 7 (.hmsgDecompLimb 4) (by decide) rfl ⟨hlt4, fun _ => he4⟩
+  intro i hi
+  have hi5 : i < 5 := by simpa only [List.length_map, List.length_range] using hi
+  simp only [List.getElem_map, List.getElem_range]
+  by_cases he : i = 4
+  · subst i; exact hsem4
+  · exact hrun4 i (by omega)
+
+
+/-- Natural-number model of the remaining-count registers after consuming `c` chains. -/
+def stepForwardRemNat (v : Nat → Nat) : Nat → Nat → Nat
+  | 0, s => v s
+  | c + 1, s => if s = wotsPackSlot c then stepForwardRemNat v c s / 4 else stepForwardRemNat v c s
+
+theorem stepForwardRemNat_le (v : Nat → Nat) (c s : Nat) : stepForwardRemNat v c s ≤ v s := by
+  induction c with
+  | zero => exact Nat.le_refl _
+  | succ c ih =>
+    unfold stepForwardRemNat
+    split
+    · exact Nat.le_trans (Nat.div_le_self _ _) ih
+    · exact ih
+
+set_option maxRecDepth 4096 in
+set_option maxHeartbeats 800000 in
+theorem stepForwardRemNat_end (v : Nat → Nat)
+    (hv : ∀ s < 5, v s < 4 ^ (if s < 3 then 26 else 25)) :
+    ∀ s < 5, stepForwardRemNat v 128 s = 0 := by
+  intro s hs
+  have hbound := hv s hs
+  rcases s with _ | _ | _ | _ | _ | s
+  all_goals first | omega | skip
+  all_goals simp only [stepForwardRemNat, wotsPackSlot, Nat.reduceLT, Nat.reduceEqDiff,
+    ↓reduceIte, Nat.div_div_eq_div_mul]
+  all_goals exact Nat.div_eq_of_lt hbound
+
+theorem stepForwardRegs_rem (prev : List Goldilocks) (s : Nat) (hs : s < 6) :
+    (stepRegs (fun j => prev.getD j Goldilocks.zero)).rem.get s =
+      prev.getD (stRemPack + s) Goldilocks.zero := by
+  rcases s with _ | _ | _ | _ | _ | _ | s <;> first | rfl | omega
+
+/-- Exact schedule of one seven-row WOTS pair. -/
+theorem stepXmssProgram_pairs : ∀ p < 64,
+    (buildSignerProgram .xmssPoseidon2).getD (9 + 7 * p) .idle =
+      .wotsChainStep0 0 (2 * p) (wotsPackSlot (2 * p)) ∧
+    (buildSignerProgram .xmssPoseidon2).getD (9 + 7 * p + 1) .idle = .wotsChainStep1 0 (2 * p) ∧
+    (buildSignerProgram .xmssPoseidon2).getD (9 + 7 * p + 2) .idle = .wotsChainStep2 0 (2 * p) false ∧
+    (buildSignerProgram .xmssPoseidon2).getD (9 + 7 * p + 3) .idle =
+      .wotsChainStep0 0 (2 * p + 1) (wotsPackSlot (2 * p + 1)) ∧
+    (buildSignerProgram .xmssPoseidon2).getD (9 + 7 * p + 4) .idle = .wotsChainStep1 0 (2 * p + 1) ∧
+    (buildSignerProgram .xmssPoseidon2).getD (9 + 7 * p + 5) .idle = .wotsChainStep2 0 (2 * p + 1) true ∧
+    (buildSignerProgram .xmssPoseidon2).getD (9 + 7 * p + 6) .idle = .wotsTellPairAbsorb p := by
+  decide +kernel
+
+/-- One constructed chain consumes precisely one base-4 quotient, without needing its digit invariant. -/
+theorem stepXmssR_chain_rem (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (t c : Nat) (odd : Bool) (ht : t + 3 < 512)
+    (h0 : (buildSignerProgram .xmssPoseidon2).getD t .idle = .wotsChainStep0 0 c (wotsPackSlot c))
+    (h1 : (buildSignerProgram .xmssPoseidon2).getD (t + 1) .idle = .wotsChainStep1 0 c)
+    (h2 : (buildSignerProgram .xmssPoseidon2).getD (t + 2) .idle = .wotsChainStep2 0 c odd) :
+    (stepRegsAt (stepXmssR pk mu sig) (t + 3)).rem =
+      (stepRegsAt (stepXmssR pk mu sig) t).rem.set (wotsPackSlot c)
+        (Goldilocks.ofNat (((stepRegsAt (stepXmssR pk mu sig) t).rem.get (wotsPackSlot c)).val / 4)) := by
+  let R := stepXmssR pk mu sig
+  have hs : wotsPackSlot c < 6 := Nat.lt_succ_of_lt (wotsPackSlot_lt_5 c)
+  have hsem0 := stepXmssR_sem pk mu sig t _ (by omega) h0 True.intro
+  have hsem1 := stepXmssR_sem pk mu sig (t + 1) _ (by omega) h1 True.intro
+  have hsem2 := stepXmssR_sem pk mu sig (t + 2) _ (by omega) h2 (by cases odd <;> exact True.intro)
+  have hr1 := (stepSem_wotsChainStep0 hs hsem0).2.2.2.2.2.2.2
+  have hr2 : stepRegsAt R (t + 2) = _ := (stepSem_wotsChainStep1 hsem1).2
+  have hr3 : (stepRegsAt R (t + 3)).rem = (stepRegsAt R (t + 2)).rem := by
+    cases odd
+    · have he : stepRegsAt R (t + 3) = _ := (stepSem_wotsChainStep2_even hsem2).2
+      rw [he]
+    · have he : stepRegsAt R (t + 3) = _ := (stepSem_wotsChainStep2_odd hsem2).2
+      rw [he]
+  rw [hr3, hr2, hr1]
+  have ha := stepXmssR_aux pk mu sig t 7 (by omega) (by decide) _ h0
+  change stepAux R t 7 = _ at ha
+  rw [ha]
+  change (stepRegsAt R t).rem.set (wotsPackSlot c)
+      (Goldilocks.ofNat (((R t).prevState.getD (stRemPack + wotsPackSlot c) Goldilocks.zero).val / 4)) = _
+  have hget : (stepRegsAt R t).rem.get (wotsPackSlot c) =
+      (R t).prevState.getD (stRemPack + wotsPackSlot c) Goldilocks.zero :=
+    stepForwardRegs_rem _ _ hs
+  rw [hget]
+
+/-- Updating a quotient register agrees with the natural-number consumption model. -/
+theorem stepForwardRemNat_step (v : Nat → Nat) (r : StepRem) (c : Nat)
+    (hr : ∀ s < 5, r.get s = Goldilocks.ofNat (stepForwardRemNat v c s))
+    (hv : ∀ s < 5, v s < goldilocksPrime) :
+    ∀ s < 5, (r.set (wotsPackSlot c) (Goldilocks.ofNat ((r.get (wotsPackSlot c)).val / 4))).get s =
+      Goldilocks.ofNat (stepForwardRemNat v (c + 1) s) := by
+  intro s hs
+  rw [StepRem.get_set _ _ _ _ (Nat.lt_succ_of_lt (wotsPackSlot_lt_5 c))]
+  unfold stepForwardRemNat
+  by_cases he : s = wotsPackSlot c
+  · rw [ite_eq_left he, ite_eq_left he, ← he, hr s hs, Goldilocks.ofNat_val,
+      Nat.mod_eq_of_lt (Nat.lt_of_le_of_lt (stepForwardRemNat_le v c s) (hv s hs))]
+  · rw [ite_eq_right he, ite_eq_right he]
+    exact hr s hs
+
+
+/-- Packed native remaining counts fit the five register capacities. -/
+theorem stepForward_pack_bounds (d : Digest5) (r : StepRem)
+    (hpack : ∀ s < 6, r.get s = Goldilocks.ofNat
+      (stepPackFold (stepDigit d) s (List.range' 0 128) 0)) :
+    ∀ s < 5, (r.get s).val < 4 ^ (if s < 3 then 26 else 25) := by
+  intro s hs
+  rcases s with _ | _ | _ | _ | _ | s
+  · have he := hpack 0 (by decide)
+    rw [stepPackFold_slot _ 0 0 26 (by decide +kernel) (by decide) rfl] at he
+    have hb := evalBaseDigits_lt_pow 4 (by decide)
+      ((List.range' 0 26).map (fun c => 3 - stepDigit d c)) (fun x hx => by
+        obtain ⟨c, _, rfl⟩ := List.mem_map.mp hx
+        omega)
+    rw [List.length_map, List.length_range'] at hb
+    rw [he, Goldilocks.ofNat_val, Nat.mod_eq_of_lt
+      (Nat.lt_trans hb (by decide : 4 ^ 26 < goldilocksPrime))]
+    exact hb
+  · have he := hpack 1 (by decide)
+    rw [stepPackFold_slot _ 1 26 26 (by decide +kernel) (by decide) rfl] at he
+    have hb := evalBaseDigits_lt_pow 4 (by decide)
+      ((List.range' 26 26).map (fun c => 3 - stepDigit d c)) (fun x hx => by
+        obtain ⟨c, _, rfl⟩ := List.mem_map.mp hx
+        omega)
+    rw [List.length_map, List.length_range'] at hb
+    rw [he, Goldilocks.ofNat_val, Nat.mod_eq_of_lt
+      (Nat.lt_trans hb (by decide : 4 ^ 26 < goldilocksPrime))]
+    exact hb
+  · have he := hpack 2 (by decide)
+    rw [stepPackFold_slot _ 2 52 26 (by decide +kernel) (by decide) rfl] at he
+    have hb := evalBaseDigits_lt_pow 4 (by decide)
+      ((List.range' 52 26).map (fun c => 3 - stepDigit d c)) (fun x hx => by
+        obtain ⟨c, _, rfl⟩ := List.mem_map.mp hx
+        omega)
+    rw [List.length_map, List.length_range'] at hb
+    rw [he, Goldilocks.ofNat_val, Nat.mod_eq_of_lt
+      (Nat.lt_trans hb (by decide : 4 ^ 26 < goldilocksPrime))]
+    exact hb
+  · have he := hpack 3 (by decide)
+    rw [stepPackFold_slot _ 3 78 25 (by decide +kernel) (by decide) rfl] at he
+    have hb := evalBaseDigits_lt_pow 4 (by decide)
+      ((List.range' 78 25).map (fun c => 3 - stepDigit d c)) (fun x hx => by
+        obtain ⟨c, _, rfl⟩ := List.mem_map.mp hx
+        omega)
+    rw [List.length_map, List.length_range'] at hb
+    rw [he, Goldilocks.ofNat_val, Nat.mod_eq_of_lt
+      (Nat.lt_trans hb (by decide : 4 ^ 25 < goldilocksPrime))]
+    exact hb
+  · have he := hpack 4 (by decide)
+    rw [stepPackFold_slot _ 4 103 25 (by decide +kernel) (by decide) rfl] at he
+    have hb := evalBaseDigits_lt_pow 4 (by decide)
+      ((List.range' 103 25).map (fun c => 3 - stepDigit d c)) (fun x hx => by
+        obtain ⟨c, _, rfl⟩ := List.mem_map.mp hx
+        omega)
+    rw [List.length_map, List.length_range'] at hb
+    rw [he, Goldilocks.ofNat_val, Nat.mod_eq_of_lt
+      (Nat.lt_trans hb (by decide : 4 ^ 25 < goldilocksPrime))]
+    exact hb
+  · omega
+
+/-- Glue verified instruction segments without assuming a valid table. -/
+theorem stepForwardRunAt_append (pub : AggValidatorPk × Digest5) (R : Nat → StepOpRow)
+    (a b : List StepOp) (t : Nat) (ha : StepRunAt pub R a t)
+    (hb : StepRunAt pub R b (t + a.length)) : StepRunAt pub R (a ++ b) t := by
+  intro i hi
+  by_cases hia : i < a.length
+  · rw [List.getElem_append_left hia]
+    exact ha i hia
+  · have hib : i - a.length < b.length := by rw [List.length_append] at hi; omega
+    rw [List.getElem_append_right (Nat.le_of_not_lt hia)]
+    have he := hb (i - a.length) hib
+    have ht : t + a.length + (i - a.length) = t + i := by omega
+    rw [ht] at he
+    exact he
+
+theorem stepForwardRunAt_pairs (pub : AggValidatorPk × Digest5) (R : Nat → StepOpRow)
+    (layer t n : Nat) (h : ∀ p < n, StepRunAt pub R (stepPairOps layer p) (t + 7 * p)) :
+    StepRunAt pub R ((List.range n).flatMap (stepPairOps layer)) t := by
+  induction n with
+  | zero => intro i hi; simp at hi
+  | succ n ih =>
+    rw [List.range_succ, List.flatMap_append, List.flatMap_cons, List.flatMap_nil, List.append_nil]
+    apply stepForwardRunAt_append
+    · exact ih (fun p hp => h p (by omega))
+    · have hl : ((List.range n).flatMap (stepPairOps layer)).length = 7 * n :=
+        by rw [flatMap_range_uniform_length _ 7 (fun _ => rfl)]; omega
+      rw [hl]
+      exact h n (by omega)
+
+theorem stepXmssR_pair_run (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (p : Nat) (hp : p < 64)
+    (hcheck : p + 1 = 64 → ∀ s < 5,
+      (stepXmssR pk mu sig (9 + 7 * p + 6)).prevState.getD (stRemPack + s) Goldilocks.zero =
+        Goldilocks.zero) :
+    StepRunAt (pk, mu) (stepXmssR pk mu sig) (stepPairOps 0 p) (9 + 7 * p) := by
+  obtain ⟨h0, h1, h2, h3, h4, h5, h6⟩ := stepXmssProgram_pairs p hp
+  intro i hi
+  change i < 7 at hi
+  rcases i with _ | _ | _ | _ | _ | _ | _ | i
+  · exact stepXmssR_sem pk mu sig _ _ (by omega) h0 True.intro
+  · exact stepXmssR_sem pk mu sig _ _ (by omega) h1 True.intro
+  · exact stepXmssR_sem pk mu sig _ _ (by omega) h2 True.intro
+  · exact stepXmssR_sem pk mu sig _ _ (by omega) h3 True.intro
+  · exact stepXmssR_sem pk mu sig _ _ (by omega) h4 True.intro
+  · exact stepXmssR_sem pk mu sig _ _ (by omega) h5 True.intro
+  · exact stepXmssR_sem pk mu sig _ _ (by omega) h6 hcheck
+  · exact False.elim (by omega)
+
+set_option maxHeartbeats 1000000 in
+set_option maxRecDepth 4096 in
+/-- The constructed WOTS segment exhausts the packed counts and satisfies every row guard. -/
+theorem stepXmssR_wots (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (hbound : ∀ s < 5, ((stepRegsAt (stepXmssR pk mu sig) 8).rem.get s).val <
+      4 ^ (if s < 3 then 26 else 25)) :
+    StepRunAt (pk, mu) (stepXmssR pk mu sig) (stepWotsOps 0) 8 := by
+  let R := stepXmssR pk mu sig
+  let v := fun s => ((stepRegsAt R 8).rem.get s).val
+  have hv : ∀ s < 5, v s < goldilocksPrime := fun s _ => ((stepRegsAt R 8).rem.get s).isLt
+  have hinit := stepXmssR_sem pk mu sig 8 (.wotsTellInit 0) (by decide) rfl True.intro
+  have hr9 := (stepSem_wotsTellInit hinit).2
+  have hpref : ∀ p, p ≤ 64 →
+      (∀ s < 5, (stepRegsAt R (9 + 7 * p)).rem.get s = Goldilocks.ofNat (stepForwardRemNat v (2 * p) s)) ∧
+      (∀ q < p, StepRunAt (pk, mu) R (stepPairOps 0 q) (9 + 7 * q)) := by
+    intro p
+    induction p with
+    | zero =>
+      intro _
+      constructor
+      · intro s _
+        change (stepRegsAt R 9).rem.get s = Goldilocks.ofNat (v s)
+        rw [hr9]
+        exact (g_ofNat_self _).symm
+      · intro q hq; exact False.elim (by omega)
+    | succ p ih =>
+      intro hp
+      obtain ⟨hm, hrun⟩ := ih (by omega)
+      obtain ⟨h0, h1, h2, h3, h4, h5, h6⟩ := stepXmssProgram_pairs p (by omega)
+      have he := stepXmssR_chain_rem pk mu sig (9 + 7 * p) (2 * p) false (by omega) h0 h1 h2
+      have ho := stepXmssR_chain_rem pk mu sig (9 + 7 * p + 3) (2 * p + 1) true (by omega) h3
+        (by simpa only [Nat.add_assoc, Nat.reduceAdd] using h4)
+        (by simpa only [Nat.add_assoc, Nat.reduceAdd] using h5)
+      have hm3 : ∀ s < 5, (stepRegsAt R (9 + 7 * p + 3)).rem.get s =
+          Goldilocks.ofNat (stepForwardRemNat v (2 * p + 1) s) := by
+        intro s hs
+        rw [he]
+        exact stepForwardRemNat_step v _ (2 * p) hm hv s hs
+      have hm6 : ∀ s < 5, (stepRegsAt R (9 + 7 * p + 6)).rem.get s =
+          Goldilocks.ofNat (stepForwardRemNat v (2 * p + 2) s) := by
+        intro s hs
+        have ho' : (stepRegsAt R (9 + 7 * p + 6)).rem = _ := ho
+        rw [ho']
+        exact stepForwardRemNat_step v _ (2 * p + 1) hm3 hv s hs
+      have hc : p + 1 = 64 → ∀ s < 5,
+          (R (9 + 7 * p + 6)).prevState.getD (stRemPack + s) Goldilocks.zero = Goldilocks.zero := by
+        intro hlast s hs
+        have hget : (stepRegsAt R (9 + 7 * p + 6)).rem.get s =
+            (R (9 + 7 * p + 6)).prevState.getD (stRemPack + s) Goldilocks.zero :=
+          stepForwardRegs_rem _ _ (by omega)
+        rw [← hget, hm6 s hs, show 2 * p + 2 = 128 by omega,
+          stepForwardRemNat_end v hbound s hs]
+        rfl
+      have hpair := stepXmssR_pair_run pk mu sig p (by omega) hc
+      have habs : StepRowSem (pk, mu) R (.wotsTellPairAbsorb p) (9 + 7 * p + 6) :=
+        hpair 6 (by change 6 < 7; decide)
+      have hnext : stepRegsAt R (9 + 7 * p + 7) = _ := (stepSem_wotsTellPairAbsorb habs).2.2
+      constructor
+      · intro s hs
+        rw [show 9 + 7 * (p + 1) = 9 + 7 * p + 7 by omega, hnext]
+        exact hm6 s hs
+      · intro q hq
+        by_cases heq : q = p
+        · subst q; exact hpair
+        · exact hrun q (by omega)
+  have hpairs := (hpref 64 (by decide)).2
+  have hsqueeze := stepXmssR_sem pk mu sig 457 .wotsTellFinalSqueeze (by decide) rfl True.intro
+  unfold stepWotsOps
+  apply stepForwardRunAt_append
+  · apply stepForwardRunAt_append
+    · intro i hi
+      have hi0 : i = 0 := by change i < 1 at hi; omega
+      subst i; exact hinit
+    · exact stepForwardRunAt_pairs (pk, mu) R 0 9 64 hpairs
+  · have hl : ([StepOp.wotsTellInit 0] ++ (List.range 64).flatMap (stepPairOps 0)).length = 449 := by
+      rw [List.length_append, flatMap_range_uniform_length _ 7 (fun _ => rfl)]
+      rfl
+    rw [hl]
+    intro i hi
+    have hi0 : i = 0 := by change i < 1 at hi; omega
+    subst i; exact hsqueeze
+
+
+set_option maxHeartbeats 1000000 in
+/-- Layer computation without assuming the final root-comparison guard. -/
+theorem stepLayer_verify_forward {pub : AggValidatorPk × Digest5} {R : Nat → StepOpRow}
+    {geom : AggSigGeometry} {layer h tD kpN tree ctr : Nat}
+    (hDec : StepRunAt pub R ((List.range 5).map StepOp.hmsgDecompLimb) tD)
+    (hWots : StepRunAt pub R (stepWotsOps layer) (tD + 5))
+    (hRem0 : ∀ s < 6, (stepRegsAt R tD).rem.get s = Goldilocks.zero)
+    (hAcc0 : (stepRegsAt R tD).acc = Goldilocks.zero)
+    (hAddr : StepAddrOk (stepRegsAt R tD) kpN tree)
+    (hA : ∀ l < h, StepRowSem pub R (.xmssMerkleBlockA layer l) (tD + 455 + 2 * l))
+    (hBin : ∀ l < h, (R (tD + 455 + 2 * l + 1)).stIn =
+      stepMerkleBIn (stepRegsAt R (tD + 455 + 2 * l + 1)))
+    (hBnext : ∀ l, l + 1 < h → stepRegsAt R (tD + 455 + 2 * l + 2) =
+      { stepRegsAt R (tD + 455 + 2 * l + 1) with
+        work := (stepPermAt R (tD + 455 + 2 * l + 1)).b0 })
+    (hLastCur : (stepRegsAt R (tD + 455 + 2 * (h - 1) + 1)).cursor = Goldilocks.zero)
+    (hl : layer < 64) (hk : kpN < 2 ^ 28) (hh : 0 < h) (hh28 : h ≤ 28)
+    (hw : geom.wotsChains = 128) (hts : geom.targetSum = 192) (hsh : geom.subtreeHeight = h) :
+    kpN < 2 ^ h ∧
+    verifyWotsLayer geom pub.1 layer tree kpN (stepHmsgOf (stepRegsAt R tD).main)
+        ⟨ctr, stepLayerChains R (tD + 5), stepLayerPath R (tD + 455) h⟩ =
+      some (stepPermAt R (tD + 455 + 2 * (h - 1) + 1)).b0 ∧
+    (stepRegsAt R (tD + 455 + 2 * (h - 1) + 1)).curRoot = (stepRegsAt R tD).curRoot ∧
+    StepAddrOk (stepRegsAt R (tD + 455 + 2 * (h - 1) + 1)) kpN tree := by
+  obtain ⟨hChk, hPack, hSum, _, hCR, hKp, hLo, hHi⟩ := stepDecomp_sem hDec hRem0 hAcc0
+  obtain ⟨hm, hhm⟩ : ∃ hm, hm = stepHmsgOf (stepRegsAt R tD).main := ⟨_, rfl⟩
+  rw [← hhm] at hChk hPack hSum ⊢
+  have hAddr5 : StepAddrOk (stepRegsAt R (tD + 5)) kpN tree :=
+    ⟨hKp.trans hAddr.kp, hLo.trans hAddr.lo, hHi.trans hAddr.hi⟩
+  have e450 : tD + 5 + 450 = tD + 455 := by omega
+  obtain ⟨hd, hSlots, hWork, hCur450R, hAddr450, hCursor⟩ :=
+    stepWots_sem hWots hAddr5 hl hk
+  rw [e450] at hWork hCur450R hAddr450 hCursor
+  have hDigEq : ∀ s a len : Nat, (∀ c < 128, wotsPackSlot c = s ↔ a ≤ c ∧ c < a + len) → s < 5 →
+      a + len ≤ 128 → 4 ^ len < goldilocksPrime → wotsPackSlotStart s = a →
+      ∀ c, a ≤ c → c < a + len →
+        stepChainDigit R (stepChainRow (tD + 5) c) = stepDigit hm c := by
+    intro s a len hRange hs haN hLen hStart c hac hcl
+    have h1 := hSlots s a len hRange hs haN hLen
+    have h2 := hPack s (by omega)
+    rw [stepPackFold_slot _ s a len hRange haN hStart] at h2
+    rw [h2] at h1
+    have hLtD : ∀ x ∈ (List.range' a len).map (fun c => 3 - stepDigit hm c), x < 4 := by
+      intro x hx
+      obtain ⟨c', _, rfl⟩ := List.mem_map.mp hx
+      show 3 - stepDigit hm c' < 4
+      omega
+    have hLtd : ∀ x ∈ (List.range' a len).map
+        (fun c => 3 - stepChainDigit R (stepChainRow (tD + 5) c)), x < 4 := by
+      intro x hx
+      obtain ⟨c', _, rfl⟩ := List.mem_map.mp hx
+      show 3 - stepChainDigit R (stepChainRow (tD + 5) c') < 4
+      omega
+    have hBound := evalBaseDigits_lt_pow 4 (by decide) _ hLtD
+    rw [List.length_map, List.length_range'] at hBound
+    rw [Goldilocks.ofNat_val, Nat.mod_eq_of_lt (Nat.lt_trans hBound hLen)] at h1
+    have hList := evalBaseDigits_inj 4 (by decide)
+      (by rw [List.length_map, List.length_map]) hLtD hLtd h1
+    have hc : 3 - stepDigit hm c = 3 - stepChainDigit R (stepChainRow (tD + 5) c) :=
+      (List.map_inj_left.mp hList) c (mem_range'_of_bounds len a c hac hcl)
+    have hd1 := hd c (by omega)
+    have hd2 := stepDigit_le hm c
+    omega
+  have hDigAll : ∀ c < 128, stepChainDigit R (stepChainRow (tD + 5) c) = stepDigit hm c := by
+    intro c hc
+    by_cases h0 : c < 26
+    · exact hDigEq 0 0 26 (by decide +kernel) (by decide) (by decide) (by decide) rfl c
+        (by omega) (by omega)
+    by_cases h1 : c < 52
+    · exact hDigEq 1 26 26 (by decide +kernel) (by decide) (by decide) (by decide) rfl c
+        (by omega) (by omega)
+    by_cases h2 : c < 78
+    · exact hDigEq 2 52 26 (by decide +kernel) (by decide) (by decide) (by decide) rfl c
+        (by omega) (by omega)
+    by_cases h3 : c < 103
+    · exact hDigEq 3 78 25 (by decide +kernel) (by decide) (by decide) (by decide) rfl c
+        (by omega) (by omega)
+    · exact hDigEq 4 103 25 (by decide +kernel) (by decide) (by decide) (by decide) rfl c
+        (by omega) (by omega)
+  have hEnd : stepLayerEndpoints pub R layer tree kpN (tD + 5) =
+      recoverAggWotsEndpoints pub.1.pkSeed layer tree kpN 0
+        ((List.range' 0 128).map (stepDigit hm)) (stepLayerChains R (tD + 5)) := by
+    unfold stepLayerEndpoints stepLayerChains
+    rw [List.range_eq_range', recoverAggWotsEndpoints_map]
+    apply List.map_congr_left
+    intro c hc
+    have hb := mem_range'_bounds _ _ _ hc
+    unfold stepChainEndpoint
+    rw [hDigAll c (by omega)]
+  obtain ⟨hKpLt, hWalk, hFr⟩ :=
+    stepMerkle_sem (tag := domainMerkleNode)
+      (M := fun l => ‹layer * 2 ^ 48 + (l + 1) * 2 ^ 32›) (layerV := layer) (treeV := tree)
+      (addr := xmssNodeAddr) (fun l hl' => stepMerkleARow_xmss (hA l hl')) hBin hBnext hLastCur
+      hCursor hk hh hh28 (fun l hl' _ L Rr => by
+        rw [hAddr450.lo, hAddr450.hi]
+        exact stepNodeHashF_xmss _ _ _ _ _ _ _ (by omega) (by omega)
+          (Nat.lt_of_le_of_lt (Nat.div_le_self _ _) (Nat.lt_trans hk (by decide))))
+  refine ⟨hKpLt, ?_, hFr.curRoot.trans (hCur450R.trans hCR),
+    ⟨hFr.kp.trans hAddr450.kp, hFr.treeLo.trans hAddr450.lo, hFr.treeHi.trans hAddr450.hi⟩⟩
+  have hLen1 : (stepLayerChains R (tD + 5)).length = 128 := by
+    unfold stepLayerChains
+    rw [List.length_map, List.length_range]
+  have hLen2 : (stepLayerPath R (tD + 455) h).length = h := by
+    unfold stepLayerPath
+    rw [List.length_map, List.length_range]
+  unfold verifyWotsLayer
+  simp only [hLen1, hLen2, hw, hsh, beq_self_eq_true, Bool.and_self, ↓reduceIte,
+    stepDigits_extract geom hm hw hChk, hSum, hts]
+  rw [← hEnd, ← hWork]
+  exact congrArg some hWalk
+
+
+theorem stepXmssProgram_chains : ∀ c < 128,
+    (buildSignerProgram .xmssPoseidon2).getD (stepChainRow 8 c) .idle =
+      .wotsChainStep0 0 c (wotsPackSlot c) := by decide +kernel
+
+theorem stepXmssProgram_merkle : ∀ l < 6,
+    (buildSignerProgram .xmssPoseidon2).getD (458 + 2 * l) .idle = .xmssMerkleBlockA 0 l ∧
+    (buildSignerProgram .xmssPoseidon2).getD (458 + 2 * l + 1) .idle =
+      .xmssMerkleBlockB (l + 1 == 6) (l + 1 == 6) := by decide +kernel
+
+theorem stepXmssR_chain_lane (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (ls : WotsLayerSig) (hlayers : sig.layers = [ls]) (c : Nat) (hc : c < 128) :
+    stepAuxLane (stepXmssR pk mu sig) (stepChainRow 8 c) 0 = ls.wotsChains.getD c lane4Zero := by
+  have ht : stepChainRow 8 c < 512 := by unfold stepChainRow; omega
+  have hop := stepXmssProgram_chains c hc
+  have ha : ∀ i < 4, stepAux (stepXmssR pk mu sig) (stepChainRow 8 c) i =
+      (ls.wotsChains.getD c lane4Zero).toList.getD i Goldilocks.zero := by
+    intro i hi
+    rw [stepXmssR_aux pk mu sig _ i ht (by omega) _ hop]
+    simp only [stepXmssAux, hlayers, List.getD_cons_zero, hi, ↓reduceIte]
+  exact Lane4.ext (ha 0 (by decide)) (ha 1 (by decide)) (ha 2 (by decide)) (ha 3 (by decide))
+
+theorem stepXmssR_path_lane (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (ls : WotsLayerSig) (hlayers : sig.layers = [ls]) (l : Nat) (hl : l < 6) :
+    stepAuxLane (stepXmssR pk mu sig) (458 + 2 * l) 2 = ls.merklePath.getD l lane4Zero := by
+  have ht : 458 + 2 * l < 512 := by omega
+  have hop := (stepXmssProgram_merkle l hl).1
+  have ha : ∀ i < 4, stepAux (stepXmssR pk mu sig) (458 + 2 * l) (2 + i) =
+      (ls.merklePath.getD l lane4Zero).toList.getD i Goldilocks.zero := by
+    intro i hi
+    rw [stepXmssR_aux pk mu sig _ (2 + i) ht (by omega) _ hop]
+    simp only [stepXmssAux, hlayers, List.getD_cons_zero,
+      show ¬2 + i = 0 by omega, show ¬2 + i = 1 by omega,
+      show 2 + i < 6 by omega, ↓reduceIte, Nat.add_sub_cancel_left]
+  exact Lane4.ext (ha 0 (by decide)) (ha 1 (by decide)) (ha 2 (by decide)) (ha 3 (by decide))
+
+theorem stepXmssR_chain_values (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (ls : WotsLayerSig) (hlayers : sig.layers = [ls]) (hlen : ls.wotsChains.length = 128) :
+    stepLayerChains (stepXmssR pk mu sig) 8 = ls.wotsChains := by
+  apply List.ext_getElem
+  · simp only [stepLayerChains, List.length_map, List.length_range, hlen]
+  · intro i hi hi'
+    have hi128 : i < 128 := by simpa only [stepLayerChains, List.length_map, List.length_range] using hi
+    simp only [stepLayerChains, List.getElem_map, List.getElem_range]
+    rw [stepXmssR_chain_lane pk mu sig ls hlayers i hi128,
+      List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hi', Option.getD_some]
+
+theorem stepXmssR_path_values (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (ls : WotsLayerSig) (hlayers : sig.layers = [ls]) (hlen : ls.merklePath.length = 6) :
+    stepLayerPath (stepXmssR pk mu sig) 458 6 = ls.merklePath := by
+  apply List.ext_getElem
+  · simp only [stepLayerPath, List.length_map, List.length_range, hlen]
+  · intro i hi hi'
+    have hi6 : i < 6 := by simpa only [stepLayerPath, List.length_map, List.length_range] using hi
+    simp only [stepLayerPath, List.getElem_map, List.getElem_range]
+    rw [stepXmssR_path_lane pk mu sig ls hlayers i hi6,
+      List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hi', Option.getD_some]
+
+
+/-- Every constructed Merkle A row already satisfies its guards. -/
+theorem stepXmssR_merkleA (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (l : Nat) (hl : l < 6) :
+    StepRowSem (pk, mu) (stepXmssR pk mu sig) (.xmssMerkleBlockA 0 l) (458 + 2 * l) :=
+  stepXmssR_sem pk mu sig _ _ (by omega) (stepXmssProgram_merkle l hl).1 True.intro
+
+theorem stepXmssR_merkleB (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (l : Nat) (hl : l < 5) :
+    StepRowSem (pk, mu) (stepXmssR pk mu sig) (.xmssMerkleBlockB false false) (458 + 2 * l + 1) := by
+  have hop := (stepXmssProgram_merkle l (by omega)).2
+  rw [show (l + 1 == 6) = false from beq_eq_false_iff_ne.mpr (by omega)] at hop
+  exact stepXmssR_sem pk mu sig _ _ (by omega) hop True.intro
+
+theorem stepXmssR_merkleBin (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (l : Nat) (hl : l < 6) :
+    (stepXmssR pk mu sig (458 + 2 * l + 1)).stIn =
+      stepMerkleBIn (stepRegsAt (stepXmssR pk mu sig) (458 + 2 * l + 1)) := by
+  have he := congrArg StepOpRow.stIn (stepXmssR_built pk mu sig (458 + 2 * l + 1) (by omega))
+  rw [(stepXmssProgram_merkle l hl).2] at he
+  exact he
+
+set_option maxHeartbeats 800000 in
+/-- Six constructed halvings end with zero cursor for every native XMSS leaf index. -/
+theorem stepXmssR_merkle_cursor (pk : AggValidatorPk) (mu : Digest5) (sig : AggNativeSignature)
+    (leaf : Nat) (hleaf : leaf < 64)
+    (hc : (stepRegsAt (stepXmssR pk mu sig) 458).cursor = Goldilocks.ofNat leaf) :
+    (stepRegsAt (stepXmssR pk mu sig) 469).cursor = Goldilocks.zero := by
+  let R := stepXmssR pk mu sig
+  have hleafP : leaf < goldilocksPrime := Nat.lt_trans hleaf (by decide)
+  have ha : ∀ l < 6, (stepRegsAt R (458 + 2 * l + 1)).cursor =
+      Goldilocks.ofNat ((stepRegsAt R (458 + 2 * l)).cursor.val / 2) := by
+    intro l hl
+    rw [(stepSem_xmssMerkleBlockA (stepXmssR_merkleA pk mu sig l hl)).2.2.2]
+    change stepAux R (458 + 2 * l) 1 = _
+    rw [stepXmssR_aux pk mu sig _ 1 (by omega) (by decide) _ (stepXmssProgram_merkle l hl).1]
+    rfl
+  have hbefore : ∀ l, l < 6 → (stepRegsAt R (458 + 2 * l)).cursor = Goldilocks.ofNat (leaf / 2 ^ l) := by
+    intro l
+    induction l with
+    | zero => intro _; simpa only [Nat.pow_zero, Nat.div_one] using hc
+    | succ l ih =>
+      intro hl
+      have hb : stepRegsAt R (458 + 2 * l + 2) = _ :=
+        (stepSem_xmssMerkleBlockB_inner (stepXmssR_merkleB pk mu sig l (by omega))).2
+      rw [show 458 + 2 * (l + 1) = 458 + 2 * l + 2 by omega, hb]
+      change (stepRegsAt R (458 + 2 * l + 1)).cursor = _
+      rw [ha l (by omega), ih (by omega), Goldilocks.ofNat_val,
+        Nat.mod_eq_of_lt (Nat.lt_of_le_of_lt (Nat.div_le_self leaf _) hleafP),
+        Nat.div_div_eq_div_mul, Nat.pow_succ]
+  have he := ha 5 (by decide)
+  rw [hbefore 5 (by decide), Goldilocks.ofNat_val,
+    Nat.mod_eq_of_lt (show leaf / 2 ^ 5 < goldilocksPrime by have := Nat.div_le_self leaf (2 ^ 5); omega)] at he
+  have hz : leaf / 2 ^ 5 / 2 = 0 := by omega
+  rw [hz] at he
+  exact he
+
+
+attribute [local irreducible] stepXmssR
+
+set_option maxHeartbeats 1000000 in
+set_option maxRecDepth 4096 in
+/-- Native acceptance establishes the entire non-padding XMSS execution. -/
+theorem stepXmssNative_body (pk : AggValidatorPk) (msg : List UInt8) (sig : AggNativeSignature)
+    (h : verifyAggNativeSig xmssPoseidon2Geom pk msg sig = true) :
+    StepRunAt (pk, computeMessageMu pk msg) (stepXmssR pk (computeMessageMu pk msg) sig)
+      (signerProgramBody .xmssPoseidon2) 0 := by
+  let mu := computeMessageMu pk msg
+  let R := stepXmssR pk mu sig
+  obtain ⟨ls, hlayers, hleaf, hV⟩ := stepXmssNative_layer pk msg sig h
+  obtain ⟨hchk, hsum, hchains, hpath⟩ := stepXmssNative_digits pk _ ls _ hV
+  obtain ⟨hhmsg, hrem0, hacc0, haddr0⟩ := stepXmssR_hmsg pk mu sig ls hlayers hleaf
+  rw [← hhmsg] at hchk hsum
+  have hdec := stepXmssR_decomp pk mu sig hchk hsum hacc0
+  obtain ⟨_, hpack, _, _, hroot8, hkp8, hlo8, hhi8⟩ := stepDecomp_sem hdec hrem0 hacc0
+  have hbound := stepForward_pack_bounds _ _ hpack
+  have hwots := stepXmssR_wots pk mu sig hbound
+  have haddr8 : StepAddrOk (stepRegsAt R 8) sig.statefulLeafIdx 0 :=
+    ⟨hkp8.trans haddr0.kp, hlo8.trans haddr0.lo, hhi8.trans haddr0.hi⟩
+  have hws := stepWots_sem hwots haddr8 (by decide) (by omega)
+  have hcur := stepXmssR_merkle_cursor pk mu sig sig.statefulLeafIdx hleaf hws.2.2.2.2.2
+  have hA := stepXmssR_merkleA pk mu sig
+  have hBin := stepXmssR_merkleBin pk mu sig
+  have hBnext : ∀ l, l + 1 < 6 → stepRegsAt R (458 + 2 * l + 2) =
+      { stepRegsAt R (458 + 2 * l + 1) with work := (stepPermAt R (458 + 2 * l + 1)).b0 } := by
+    intro l hl
+    exact (stepSem_xmssMerkleBlockB_inner (stepXmssR_merkleB pk mu sig l (by omega))).2
+  have hLayer := stepLayer_verify_forward (geom := xmssPoseidon2Geom) (ctr := ls.tswCtr)
+    (layer := 0) (h := 6) (tD := 3) (kpN := sig.statefulLeafIdx) (tree := 0)
+    hdec hwots hrem0 hacc0 haddr0 hA hBin hBnext hcur
+    (by decide) (by omega) (by decide) (by decide) rfl rfl rfl
+  have hLayerV := hLayer.2.1
+  rw [hhmsg, stepXmssR_chain_values pk mu sig ls hlayers hchains,
+    stepXmssR_path_values pk mu sig ls hlayers hpath] at hLayerV
+  have hV' : verifyWotsLayer xmssPoseidon2Geom pk 0 0 sig.statefulLeafIdx
+      (computeHmsgStateful pk sig.rRand mu sig.statefulLeafIdx ls.tswCtr) ls =
+        some (stepPermAt R 469).b0 := hLayerV
+  have hroot : (stepPermAt R 469).b0 = pk.pkRoot := Option.some.inj (hV'.symm.trans hV)
+  have hst : (R 469).stIn = stepXmssInput pk mu (.xmssMerkleBlockB true true)
+      (R 469).prevState (stepXmssAux sig (.xmssMerkleBlockB true true) (R 469).prevState) := by
+    have he := congrArg StepOpRow.stIn (stepXmssR_built pk mu sig 469 (by decide))
+    have hop : (buildSignerProgram .xmssPoseidon2).getD 469 .idle = .xmssMerkleBlockB true true := rfl
+    rw [hop] at he
+    exact he
+  have hroot' : (poseidon2Perm12 (stepXmssInput pk mu (.xmssMerkleBlockB true true)
+      (R 469).prevState (stepXmssAux sig (.xmssMerkleBlockB true true) (R 469).prevState))).b0 = pk.pkRoot := by
+    rw [← hst]
+    exact hroot
+  have htop : StepRowSem (pk, mu) R (.xmssMerkleBlockB true true) 469 := by
+    apply stepXmssR_sem pk mu sig 469 (.xmssMerkleBlockB true true) (by decide) rfl
+    refine ⟨hcur, ?_⟩
+    intro i hi
+    rcases i with _ | _ | _ | _ | i
+    · exact congrArg Lane4.x0 hroot'
+    · exact congrArg Lane4.x1 hroot'
+    · exact congrArg Lane4.x2 hroot'
+    · exact congrArg Lane4.x3 hroot'
+    · exact False.elim (by omega)
+  have hmerkle : StepRunAt (pk, mu) R (stepMerkleOps 0 6 true) 458 := by
+    intro i hi
+    change i < 12 at hi
+    rcases i with _ | _ | _ | _ | _ | _ | _ | _ | _ | _ | _ | _ | i
+    · exact hA 0 (by decide)
+    · exact stepXmssR_merkleB pk mu sig 0 (by decide)
+    · exact hA 1 (by decide)
+    · exact stepXmssR_merkleB pk mu sig 1 (by decide)
+    · exact hA 2 (by decide)
+    · exact stepXmssR_merkleB pk mu sig 2 (by decide)
+    · exact hA 3 (by decide)
+    · exact stepXmssR_merkleB pk mu sig 3 (by decide)
+    · exact hA 4 (by decide)
+    · exact stepXmssR_merkleB pk mu sig 4 (by decide)
+    · exact hA 5 (by decide)
+    · exact htop
+    · exact False.elim (by omega)
+  have hpush : StepRunAt (pk, mu) R (pushLayerWotsAndMerkle 0 6 true) 8 := by
+    rw [pushLayerWotsAndMerkle_eq]
+    apply stepForwardRunAt_append
+    · exact hwots
+    · rw [stepWotsOps_length]
+      exact hmerkle
+  unfold signerProgramBody
+  apply stepForwardRunAt_append
+  · apply stepForwardRunAt_append
+    · intro i hi
+      change i < 3 at hi
+      rcases i with _ | _ | _ | i
+      · exact stepXmssR_sem pk mu sig 0 _ (by decide) rfl True.intro
+      · exact stepXmssR_sem pk mu sig 1 _ (by decide) rfl True.intro
+      · exact stepXmssR_sem pk mu sig 2 _ (by decide) rfl True.intro
+      · exact False.elim (by omega)
+    · exact hdec
+  · exact hpush
+
+theorem stepXmssProgram_idle : ∀ t < 512, 470 ≤ t →
+    (buildSignerProgram .xmssPoseidon2).getD t .idle = .idle := by decide +kernel
+
+/-- Native XMSS acceptance constructs an accepted 512-row active signer table. -/
+theorem stepXmssRows_of_verify (pk : AggValidatorPk) (msg : List UInt8) (sig : AggNativeSignature)
+    (h : verifyAggNativeSig xmssPoseidon2Geom pk msg sig = true) :
+    stepOp256TableOk .xmssPoseidon2 [some (pk, computeMessageMu pk msg)]
+      (stepXmssRows pk (computeMessageMu pk msg) sig) = true := by
+  apply (stepXmssRows_table_iff pk (computeMessageMu pk msg) sig).mpr
+  intro i row hr
+  have hi : i < 512 := by
+    have hh := (List.getElem?_eq_some_iff.mp hr).1
+    rwa [stepXmssRows_length] at hh
+  have he : row = stepXmssR pk (computeMessageMu pk msg) sig i :=
+    Option.some.inj (hr.symm.trans (stepXmssR_at pk _ sig i hi))
+  subst row
+  by_cases hib : i < 470
+  · have hbody := stepXmssNative_body pk msg sig h
+    have hiBody : i < (signerProgramBody .xmssPoseidon2).length := by
+      rw [buildSignerProgram_length.1]; exact hib
+    have hs := hbody i hiBody
+    have hop : (buildSignerProgram .xmssPoseidon2).getD i .idle =
+        (signerProgramBody .xmssPoseidon2)[i] := by
+      unfold buildSignerProgram
+      rw [List.getD_eq_getElem?_getD, List.getElem?_append_left hiBody,
+        List.getElem?_eq_getElem hiBody, Option.getD_some]
+    rw [hop]
+    simpa only [Nat.zero_add] using hs.2.1
+  · rw [stepXmssProgram_idle i hi (by omega)]
+    rfl
+
+
+/-- An active committee entry carries its message and signature; `none` is inactive. -/
+abbrev StepXmssEntry := Option (AggValidatorPk × List UInt8 × AggNativeSignature)
+
+def stepXmssEntrySlot : StepXmssEntry → StepOpSlot
+  | none => none
+  | some (pk, msg, _) => some (pk, computeMessageMu pk msg)
+
+def stepXmssEntryRows : StepXmssEntry → List StepOpRow
+  | none => stepInactiveRows .xmssPoseidon2
+  | some (pk, msg, sig) => stepXmssRows pk (computeMessageMu pk msg) sig
+
+def StepXmssEntryValid : StepXmssEntry → Prop
+  | none => True
+  | some (pk, msg, sig) => verifyAggNativeSig xmssPoseidon2Geom pk msg sig = true
+
+def stepXmssCommitteeSlots (entries : List StepXmssEntry) : List StepOpSlot :=
+  entries.map stepXmssEntrySlot
+
+def stepXmssCommitteeRows (entries : List StepXmssEntry) : List StepOpRow :=
+  entries.flatMap stepXmssEntryRows
+
+theorem stepXmssEntry_length (entry : StepXmssEntry) : (stepXmssEntryRows entry).length = 512 := by
+  cases entry with
+  | none => exact List.length_replicate ..
+  | some p => exact stepXmssRows_length ..
+
+theorem stepXmssEntry_table (entry : StepXmssEntry) (h : StepXmssEntryValid entry) :
+    stepOp256TableOk .xmssPoseidon2 [stepXmssEntrySlot entry] (stepXmssEntryRows entry) = true := by
+  cases entry with
+  | none => exact stepInactiveCommittee_table .xmssPoseidon2 1 (by decide)
+  | some p => exact stepXmssRows_of_verify p.1 p.2.1 p.2.2 h
+
+theorem stepXmssCommittee_length (entries : List StepXmssEntry) :
+    (stepXmssCommitteeRows entries).length = entries.length * 512 := by
+  induction entries with
+  | nil => rfl
+  | cons e es ih =>
+    change (stepXmssEntryRows e ++ stepXmssCommitteeRows es).length = (es.length + 1) * 512
+    rw [List.length_append, stepXmssEntry_length, ih, Nat.add_mul]
+    omega
+
+/-- Indexing a concatenation of fixed-width signer blocks. -/
+theorem stepXmssCommittee_get (entries : List StepXmssEntry) (i : Nat)
+    (hi : i / 512 < entries.length) :
+    (stepXmssCommitteeRows entries)[i]? =
+      (stepXmssEntryRows (entries.getD (i / 512) none))[i % 512]? := by
+  induction entries generalizing i with
+  | nil => simp at hi
+  | cons e es ih =>
+    change (stepXmssEntryRows e ++ stepXmssCommitteeRows es)[i]? = _
+    by_cases hlt : i < 512
+    · rw [List.getElem?_append_left (by rw [stepXmssEntry_length]; exact hlt),
+        Nat.div_eq_of_lt hlt, Nat.mod_eq_of_lt hlt, List.getD_cons_zero]
+    · rw [List.getElem?_append_right (by rw [stepXmssEntry_length]; omega), stepXmssEntry_length]
+      have hk : (i - 512) / 512 < es.length := by simp only [List.length_cons] at hi; omega
+      rw [ih (i - 512) hk]
+      have hd : i / 512 = (i - 512) / 512 + 1 := by omega
+      have hm : i % 512 = (i - 512) % 512 := by omega
+      rw [hd, hm, List.getD_cons_succ]
+
+theorem stepXmssEntry_boundary (entry : StepXmssEntry) (hv : StepXmssEntryValid entry)
+    (j : Nat) (row : StepOpRow) (hr : (stepXmssEntryRows entry)[j]? = some row) :
+    (∀ s < 44, j % 512 = 0 → row.prevState.getD s Goldilocks.zero = Goldilocks.zero) ∧
+    (∀ s < 44, j % 512 + 1 = 512 → row.nextState.getD s Goldilocks.zero = Goldilocks.zero) := by
+  have hz := stepOp256TableOk_row_at .xmssPoseidon2 [stepXmssEntrySlot entry] _ j row
+    (stepXmssEntry_table entry hv) hr
+  simp only [stepOp256RowResiduals, allZeroGoldilocks_append, Bool.and_eq_true] at hz
+  exact (stepOpBoundaryResiduals_iff 512 (j % 512) row).mp hz.1.2
+
+/-- Native acceptance of each active entry constructs a table with arbitrary inactive slots. -/
+theorem stepXmssCommittee_of_verify (entries : List StepXmssEntry)
+    (hne : 0 < entries.length) (hv : ∀ entry ∈ entries, StepXmssEntryValid entry) :
+    stepOp256TableOk .xmssPoseidon2 (stepXmssCommitteeSlots entries)
+      (stepXmssCommitteeRows entries) = true := by
+  have hlen := stepXmssCommittee_length entries
+  have hm : ∀ k, k < entries.length → entries.getD k none ∈ entries := by
+    intro k hk
+    rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hk, Option.getD_some]
+    exact List.getElem_mem hk
+  have hloc : ∀ k, k < entries.length →
+      stepOp256TableOk .xmssPoseidon2 [stepXmssEntrySlot (entries.getD k none)]
+        (stepXmssEntryRows (entries.getD k none)) = true :=
+    fun k hk => stepXmssEntry_table _ (hv _ (hm k hk))
+  have hidx : ∀ i row, (stepXmssCommitteeRows entries)[i]? = some row → i / 512 < entries.length := by
+    intro i row hr
+    have hi := (List.getElem?_eq_some_iff.mp hr).1
+    rw [hlen] at hi
+    omega
+  apply (stepOp256TableOk_iff_rows _ _ _).mpr
+  refine ⟨by simpa only [stepXmssCommitteeSlots, List.length_map] using hne,
+    by simpa only [stepXmssCommitteeSlots, List.length_map, stepOpRowsPerSigner] using hlen, ?_, ?_, ?_⟩
+  · intro row hr
+    obtain ⟨entry, he, hr⟩ := List.mem_flatMap.mp hr
+    exact ((stepOp256TableOk_iff_rows _ _ _).mp (stepXmssEntry_table entry (hv entry he))).2.2.1 row hr
+  · intro i row hr
+    have hk := hidx i row hr
+    have hrow := hr
+    rw [stepXmssCommittee_get entries i hk] at hrow
+    have hz := stepOp256TableOk_row_at .xmssPoseidon2 _ _ (i % 512) row (hloc (i / 512) hk) hrow
+    have hj : i % 512 < 512 := Nat.mod_lt _ (by decide)
+    simp only [stepOpRowsPerSigner, Nat.div_eq_of_lt hj, Nat.mod_eq_of_lt hj, List.getD_cons_zero] at hz
+    have hs : (stepXmssCommitteeSlots entries).getD (i / 512) none =
+        stepXmssEntrySlot (entries.getD (i / 512) none) := by
+      simp only [stepXmssCommitteeSlots, List.getD_eq_getElem?_getD, List.getElem?_map,
+        List.getElem?_eq_getElem hk, Option.map_some, Option.getD_some]
+    change allZeroGoldilocks (stepOp256RowResiduals .xmssPoseidon2
+      ((stepXmssCommitteeSlots entries).getD (i / 512) none) (i % 512) row) = true
+    rw [hs]
+    exact hz
+  · intro i r r' hr hr' s hs
+    have hk := hidx i r hr
+    have hk' := hidx (i + 1) r' hr'
+    rw [stepXmssCommittee_get entries i hk] at hr
+    rw [stepXmssCommittee_get entries (i + 1) hk'] at hr'
+    by_cases hlast : i % 512 = 511
+    · have hz := stepXmssEntry_boundary _ (hv _ (hm (i / 512) hk)) (i % 512) r hr
+      have hz' := stepXmssEntry_boundary _ (hv _ (hm ((i + 1) / 512) hk')) ((i + 1) % 512) r' hr'
+      rw [hz.2 s hs (by omega), hz'.1 s hs (by omega)]
+    · have hd : (i + 1) / 512 = i / 512 := by omega
+      have hj : (i + 1) % 512 = i % 512 + 1 := by omega
+      rw [hd, hj] at hr'
+      exact ((stepOp256TableOk_iff_rows _ _ _).mp (hloc (i / 512) hk)).2.2.2.2
+        (i % 512) r r' hr hr' s hs
+
+
+/-- Associate signatures and messages with the public slot indices. -/
+def stepXmssSlotEntries (slots : List StepOpSlot) (msg : Nat → List UInt8)
+    (sig : Nat → AggNativeSignature) : List StepXmssEntry :=
+  (List.range slots.length).map fun i =>
+    (slots.getD i none).map fun pub => (pub.1, msg i, sig i)
+
+def stepXmssSlotsRows (slots : List StepOpSlot) (msg : Nat → List UInt8)
+    (sig : Nat → AggNativeSignature) : List StepOpRow :=
+  stepXmssCommitteeRows (stepXmssSlotEntries slots msg sig)
+
+/-- Direct public-slot interface, permitting active and inactive slots in any order. -/
+theorem stepXmssSlotsRows_of_verify (slots : List StepOpSlot) (msg : Nat → List UInt8)
+    (sig : Nat → AggNativeSignature) (hne : 0 < slots.length)
+    (h : ∀ i pub, slots[i]? = some (some pub) →
+      pub.2 = computeMessageMu pub.1 (msg i) ∧
+      verifyAggNativeSig xmssPoseidon2Geom pub.1 (msg i) (sig i) = true) :
+    stepOp256TableOk .xmssPoseidon2 slots (stepXmssSlotsRows slots msg sig) = true := by
+  have hs : stepXmssCommitteeSlots (stepXmssSlotEntries slots msg sig) = slots := by
+    apply List.ext_getElem
+    · simp only [stepXmssCommitteeSlots, stepXmssSlotEntries, List.length_map, List.length_range]
+    · intro i hi hi'
+      simp only [stepXmssCommitteeSlots, stepXmssSlotEntries, List.getElem_map, List.getElem_range]
+      have hd : slots.getD i none = slots[i] := by
+        rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hi', Option.getD_some]
+      rw [hd]
+      cases he : slots[i] with
+      | none => rfl
+      | some pub =>
+        have hh := h i pub (by rw [List.getElem?_eq_getElem hi', he])
+        change some (pub.1, computeMessageMu pub.1 (msg i)) = some pub
+        rw [← hh.1]
+  have hv : ∀ entry ∈ stepXmssSlotEntries slots msg sig, StepXmssEntryValid entry := by
+    intro entry he
+    obtain ⟨i, hi, rfl⟩ := List.mem_map.mp he
+    have hi' : i < slots.length := List.mem_range.mp hi
+    have hd : slots.getD i none = slots[i] := by
+      rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hi', Option.getD_some]
+    rw [hd]
+    cases he : slots[i] with
+    | none => exact True.intro
+    | some pub => exact (h i pub (by rw [List.getElem?_eq_getElem hi', he])).2
+  have ht := stepXmssCommittee_of_verify (stepXmssSlotEntries slots msg sig)
+    (by simpa only [stepXmssSlotEntries, List.length_map, List.length_range] using hne) hv
+  rw [hs] at ht
+  exact ht
+
+theorem stepXmssNative_profile (pk : AggValidatorPk) (msg : List UInt8) (sig : AggNativeSignature)
+    (h : verifyAggNativeSig xmssPoseidon2Geom pk msg sig = true) : pk.profile = .xmssPoseidon2 := by
+  unfold verifyAggNativeSig at h
+  split at h
+  · contradiction
+  · rename_i hc
+    have hf := Bool.eq_false_iff.mpr hc
+    simp only [Bool.or_eq_false_iff, bne_eq_false_iff_eq] at hf
+    exact hf.1.1.2
+
+/-- An accepted signature survives the complete native-to-table-to-native round trip. -/
+theorem stepXmssRows_roundTrip (pk : AggValidatorPk) (msg : List UInt8) (sig : AggNativeSignature)
+    (h : verifyAggNativeSig xmssPoseidon2Geom pk msg sig = true) :
+    verifyAggNativeSig xmssPoseidon2Geom pk msg
+      (stepXmssSig (stepOpSlotRow .xmssPoseidon2 (stepXmssRows pk (computeMessageMu pk msg) sig) 0)) = true :=
+  stepOp256TableOk_xmss_extract _ _ 0 (pk, computeMessageMu pk msg) msg
+    (stepXmssRows_of_verify pk msg sig h) rfl (stepXmssNative_profile pk msg sig h) rfl
+
+set_option maxRecDepth 4096 in
+/-- The remaining execution checks are consequences of the original guard equations. -/
+theorem stepXmss_checks_of_seed_guards (pk : AggValidatorPk) (mu : Digest5)
+    (sig : AggNativeSignature) (op : StepOp) (prev : List Goldilocks)
+    (hg : allZeroGoldilocks (stepOpGuardResiduals (stepOpKindAndC0 op).1
+      (Goldilocks.ofNat (stepOpKindAndC0 op).2)
+      (stepOpRowInputs (pk, mu) (stepXmssSeedRow pk mu sig op prev))) = true) :
+    StepXmssChecks pk mu sig op prev := by
+  cases op <;> try exact True.intro
+  case hmsgDecompLimb l =>
+    simp only [stepOpKindAndC0, stepOpGuardResiduals, allZeroGoldilocks_append,
+      Bool.and_eq_true] at hg
+    refine ⟨(stepLimb63Decomp_allZero_iff _ _).mp hg.1 |>.1, ?_⟩
+    intro hl
+    have hh := hg.2
+    simp only [hl, ↓reduceIte, allZeroGoldilocks, List.all_cons, List.all_nil,
+      Bool.and_true, beq_iff_eq, g_sub_eq_zero_iff] at hh
+    simpa only [hl] using hh
+  case wotsTellPairAbsorb pair =>
+    intro hp
+    simp only [stepOpKindAndC0, stepOpGuardResiduals, hp, beq_self_eq_true,
+      ↓reduceIte, allZeroGoldilocks_append, Bool.and_eq_true] at hg
+    exact (allZero_map_iff _ _).mp hg.1
+  case xmssMerkleBlockB a b =>
+    cases a <;> cases b <;> try exact True.intro
+    simp only [stepOpKindAndC0, stepOpGuardResiduals, Bool.not_true,
+      Bool.false_eq_true, ↓reduceIte, allZeroGoldilocks_append, Bool.and_eq_true] at hg
+    constructor
+    · have hh := hg.2.1
+      simp only [allZeroGoldilocks, List.all_cons, List.all_nil, Bool.and_true,
+        beq_iff_eq] at hh
+      exact hh
+    · intro i hi
+      have hh := g_sub_eq_zero_iff.mp ((allZero_map_iff _ _).mp hg.2.2 i hi)
+      have hp := stepOp256_groupA_exact
+        (stepXmssSeedRow pk mu sig (.xmssMerkleBlockB true true) prev)
+        (stepOpHonestPermutationRow_groupA ..)
+      change (stepOpPermTrace _).1.toList.getD i Goldilocks.zero = _ at hh
+      rw [hp] at hh
+      exact hh
+
+/-- Native acceptance discharges every arithmetic and terminal execution check. -/
+theorem stepXmssChecks_of_verify (pk : AggValidatorPk) (msg : List UInt8)
+    (sig : AggNativeSignature) (h : verifyAggNativeSig xmssPoseidon2Geom pk msg sig = true)
+    (i : Nat) (row : StepOpRow)
+    (hr : (stepXmssRows pk (computeMessageMu pk msg) sig)[i]? = some row) :
+    StepXmssChecks pk (computeMessageMu pk msg) sig
+      ((buildSignerProgram .xmssPoseidon2).getD i .idle) row.prevState := by
+  let mu := computeMessageMu pk msg
+  have hg := (stepXmssRows_table_iff pk mu sig).mp (stepXmssRows_of_verify pk msg sig h) i row hr
+  obtain ⟨op, state, hop, he⟩ := stepForwardRun_at (pk, mu) (stepXmssCells pk mu sig)
+    (buildSignerProgram .xmssPoseidon2) stepForwardZero i row hr
+  have hopD : (buildSignerProgram .xmssPoseidon2).getD i .idle = op := by
+    rw [List.getD_eq_getElem?_getD, hop]; rfl
+  rw [hopD, he] at hg ⊢
+  change allZeroGoldilocks (stepOpGuardResiduals _ _
+    (stepOpRowInputs (pk, mu) (populateStepOpNext _ _ _ (stepXmssSeedRow pk mu sig op state)))) = true at hg
+  rw [populateStepOpNext_inputs, stepOpGuardResiduals_congr_next] at hg
+  exact stepXmss_checks_of_seed_guards pk mu sig op state hg
+
+end StepOpForward
+
+end Qsag

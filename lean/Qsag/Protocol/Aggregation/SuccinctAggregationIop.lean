@@ -8904,3 +8904,2953 @@ private theorem stepOpEqClaimExt4_scale (ell : Nat) (tau : List GoldilocksExt4)
 
 /-- Fixed-order constraint columns. Selector-gated constraints occupy separate entries, so
     each entry retains its own `gamma` exponent even at rows where its selector is zero. -/
+def stepOpConstraintBatchExt4 (gamma : GoldilocksExt4)
+    (constraints : List (Nat → GoldilocksExt4)) (v : Nat) : GoldilocksExt4 :=
+  RoundPoly.evalCoeffs (constraints.map (fun C => C v)) gamma
+
+/-- Equality weighting commutes with fixed-order `gamma` batching at every `tau`. -/
+theorem stepOpEqClaimExt4_batch (ell : Nat) (tau : List GoldilocksExt4)
+    (gamma : GoldilocksExt4) :
+    ∀ constraints : List (Nat → GoldilocksExt4),
+      stepOpEqClaimExt4 ell tau (stepOpConstraintBatchExt4 gamma constraints) =
+        RoundPoly.evalCoeffs (constraints.map (stepOpEqClaimExt4 ell tau)) gamma
+  | [] => by
+    have hz : ∀ n, sumRangeExt4 (fun _ => (CommRingOps.zero : GoldilocksExt4)) n =
+        CommRingOps.zero := by
+      intro n
+      induction n with
+      | zero => rfl
+      | succ n ih => simp only [sumRangeExt4, ih, LawfulCommRing.add_zero]
+    simp only [stepOpEqClaimExt4, stepOpConstraintBatchExt4, List.map_nil,
+      RoundPoly.evalCoeffs, LawfulCommRing.mul_zero, hz]
+  | C :: cs => by
+    change stepOpEqClaimExt4 ell tau
+      (fun v => CommRingOps.add (C v)
+        (CommRingOps.mul gamma (stepOpConstraintBatchExt4 gamma cs v))) = _
+    rw [stepOpEqClaimExt4_add, stepOpEqClaimExt4_scale, stepOpEqClaimExt4_batch ell tau gamma cs]
+    rfl
+
+/-- At an arbitrary `tau`, one nonzero constraint claim gives at most `n-1` bad `gamma`
+    challenges, with one distinct power per constraint column. -/
+theorem stepOp256_gamma_roots_le (ell : Nat) (tau : List GoldilocksExt4)
+    (constraints : List (Nat → GoldilocksExt4))
+    (hn : ∃ C, C ∈ constraints ∧ stepOpEqClaimExt4 ell tau C ≠ CommRingOps.zero)
+    (S : List GoldilocksExt4) (hS : S.Nodup) :
+    (S.filter (fun gamma => decide
+      (stepOpEqClaimExt4 ell tau (stepOpConstraintBatchExt4 gamma constraints) =
+        CommRingOps.zero))).length ≤ constraints.length - 1 := by
+  simp only [stepOpEqClaimExt4_batch]
+  obtain ⟨C, hc, hn⟩ := hn
+  have h := ext4_batched_roots_le S hS (constraints.map (stepOpEqClaimExt4 ell tau))
+    ⟨stepOpEqClaimExt4 ell tau C, List.mem_map.mpr ⟨C, hc, rfl⟩, hn⟩
+  simpa only [List.length_map] using h
+
+/-- Once a `gamma` preserves a nonzero row residual, the actual batched claim has the
+    multilinear Schwartz–Zippel bound for independent, unrestricted `tau` coordinates. -/
+theorem stepOp256_random_tau_roots_le (ell u : Nat) (hu : u < 2 ^ ell)
+    (constraints : List (Nat → GoldilocksExt4)) (gamma : GoldilocksExt4)
+    (hn : stepOpConstraintBatchExt4 gamma constraints u ≠ CommRingOps.zero)
+    (S : List GoldilocksExt4) (hS : S.Nodup) :
+    ((challengeVectors S ell).filter (fun tau => decide
+      (stepOpEqClaimExt4 ell tau (stepOpConstraintBatchExt4 gamma constraints) =
+        CommRingOps.zero))).length ≤ ell * S.length ^ (ell - 1) :=
+  stepOpEqClaimExt4_random_tau_roots_le ell u hu _ hn S hS
+
+private theorem ext4MultiAffine_sub {F G : List GoldilocksExt4 → GoldilocksExt4}
+    (hf : Ext4MultiAffine F) (hg : Ext4MultiAffine G) :
+    Ext4MultiAffine (fun xs => CommRingOps.sub (F xs) (G xs)) := by
+  have h := ext4MultiAffine_add hf (ext4MultiAffine_scale
+    (CommRingOps.neg (CommRingOps.one : GoldilocksExt4)) hg)
+  simpa only [LawfulCommRing.neg_mul, LawfulCommRing.one_mul,
+    ← LawfulCommRing.sub_eq_add_neg] using h
+
+private theorem evalAllOnesExt4_slice :
+    ∀ (pre post rx : List GoldilocksExt4),
+      ∃ cs : List GoldilocksExt4, cs.length ≤ 2 ∧
+        ∀ r, RoundPoly.evalCoeffs cs r = evalAllOnesExt4 (pre ++ r :: post) rx
+  | [], _, [] => ⟨[], by decide, fun _ => rfl⟩
+  | [], post, x :: xs => by
+    refine ⟨[CommRingOps.zero, CommRingOps.mul x (evalAllOnesExt4 post xs)],
+      Nat.le_refl 2, ?_⟩
+    intro r
+    simp only [RoundPoly.evalCoeffs, LawfulCommRing.mul_zero, LawfulCommRing.add_zero,
+      LawfulCommRing.zero_add]
+    exact (LawfulCommRing.mul_assoc _ _ _).symm
+  | _ :: _, _, [] => ⟨[], by decide, fun _ => rfl⟩
+  | t :: ts, post, x :: xs => by
+    obtain ⟨cs, hc, he⟩ := evalAllOnesExt4_slice ts post xs
+    refine ⟨polyScaleCoeffs (CommRingOps.mul t x) cs, ?_, ?_⟩
+    · rw [polyScaleCoeffs_length]; exact hc
+    · intro r; rw [evalCoeffs_polyScaleCoeffs, he]; rfl
+
+private theorem evalShiftKernelExt4_slice :
+    ∀ (pre post rx : List GoldilocksExt4),
+      ∃ cs : List GoldilocksExt4, cs.length ≤ 2 ∧
+        ∀ r, RoundPoly.evalCoeffs cs r = evalShiftKernelExt4 (pre ++ r :: post) rx
+  | [], _, [] => ⟨[], by decide, fun _ => rfl⟩
+  | [], post, x :: xs => by
+    let a := CommRingOps.mul x (evalEqExt4 post xs)
+    let b := CommRingOps.mul (CommRingOps.sub GoldilocksExt4.one x)
+      (evalShiftKernelExt4 post xs)
+    refine ⟨affineColPoly a b, by simp [affineColPoly], ?_⟩
+    intro r
+    have hm : RoundPoly.evalCoeffs (affineColPoly a b) r =
+        CommRingOps.add (CommRingOps.mul (CommRingOps.sub GoldilocksExt4.one r) a)
+          (CommRingOps.mul r b) := by
+      simp only [affineColPoly, RoundPoly.evalCoeffs, LawfulCommRing.mul_zero,
+        LawfulCommRing.add_zero]
+      have ho : CommRingOps.mul GoldilocksExt4.one a = a := LawfulCommRing.one_mul a
+      rw [LawfulCommRing.mul_sub, LawfulCommRing.sub_mul, ho]
+      simp only [LawfulCommRing.sub_eq_add_neg]
+      rw [LawfulCommRing.add_assoc, LawfulCommRing.add_comm (CommRingOps.mul r b)]
+    rw [hm]
+    simp only [a, b, ← LawfulCommRing.mul_assoc]
+    rfl
+  | _ :: _, _, [] => ⟨[], by decide, fun _ => rfl⟩
+  | t :: ts, post, x :: xs => by
+    obtain ⟨cs, hc, he⟩ := evalEqExt4_slice ts post xs
+    obtain ⟨ds, hd, ed⟩ := evalShiftKernelExt4_slice ts post xs
+    let a := CommRingOps.mul (CommRingOps.sub GoldilocksExt4.one t) x
+    let b := CommRingOps.mul t (CommRingOps.sub GoldilocksExt4.one x)
+    refine ⟨polyAddCoeffs (polyScaleCoeffs a cs) (polyScaleCoeffs b ds), ?_, ?_⟩
+    · rw [polyAddCoeffs_length, polyScaleCoeffs_length, polyScaleCoeffs_length]
+      exact Nat.max_le.mpr ⟨hc, hd⟩
+    · intro r
+      rw [evalCoeffs_polyAddCoeffs, evalCoeffs_polyScaleCoeffs,
+        evalCoeffs_polyScaleCoeffs, he, ed]
+      rfl
+
+private theorem ext4MultiAffine_sum (F : Nat → List GoldilocksExt4 → GoldilocksExt4)
+    (h : ∀ v, Ext4MultiAffine (F v)) :
+    ∀ n, Ext4MultiAffine (fun xs => sumRangeExt4 (fun v => F v xs) n)
+  | 0 => fun _ _ => ⟨[], by decide, fun _ => rfl⟩
+  | n + 1 => ext4MultiAffine_add (ext4MultiAffine_sum F h n) (h n)
+
+/-- Both kernels in the actual inter-row claim are multilinear in `tau`. -/
+theorem stepOpShiftClaimExt4_multiaffine (ell : Nat) (N P : Nat → GoldilocksExt4) :
+    Ext4MultiAffine (fun tau => stepOpShiftClaimExt4 ell tau N P) := by
+  apply ext4MultiAffine_sub
+  · apply ext4MultiAffine_sum
+    intro v
+    have he : Ext4MultiAffine (fun tau => evalEqExt4 tau (hypercubePointExt4 ell v)) :=
+      fun pre post => evalEqExt4_slice pre post _
+    have ha : Ext4MultiAffine (fun tau => evalAllOnesExt4 tau (hypercubePointExt4 ell v)) :=
+      fun pre post => evalAllOnesExt4_slice pre post _
+    have h := ext4MultiAffine_scale (N v) (ext4MultiAffine_sub he ha)
+    simpa only [evalEqNotLastExt4, LawfulCommRing.mul_comm (N v)] using h
+  · apply ext4MultiAffine_sum
+    intro v
+    have hs : Ext4MultiAffine (fun tau => evalShiftKernelExt4 tau (hypercubePointExt4 ell v)) :=
+      fun pre post => evalShiftKernelExt4_slice pre post _
+    have h := ext4MultiAffine_scale (P v) hs
+    simpa only [LawfulCommRing.mul_comm (P v)] using h
+
+/-- A nonzero inter-row state mismatch has the same random-`tau` root bound as an intra-row
+    violation, for the deployed `E_not_last` and shift kernels themselves. -/
+theorem stepOpShiftClaimExt4_random_tau_roots_le (ell u : Nat) (hu : u + 1 < 2 ^ ell)
+    (N P : Nat → GoldilocksExt4)
+    (hn : CommRingOps.sub (N u) (P (u + 1)) ≠ CommRingOps.zero)
+    (S : List GoldilocksExt4) (hS : S.Nodup) :
+    ((challengeVectors S ell).filter
+      (fun tau => decide (stepOpShiftClaimExt4 ell tau N P = CommRingOps.zero))).length ≤
+        ell * S.length ^ (ell - 1) := by
+  have h := ext4_multiaffine_roots_le S hS (hypercubePointExt4 ell u)
+    (fun tau => stepOpShiftClaimExt4 ell tau N P) (stepOpShiftClaimExt4_multiaffine ell N P)
+    (fun hz => hn ((stepOpShiftClaimExt4_hypercube ell u hu N P).symm.trans hz))
+  simpa only [hypercubePointExt4_length] using h
+
+/-! #### `#tooth` rows -/
+
+private theorem getD_replicate_zero :
+    ∀ (n j : Nat),
+      (List.replicate n Goldilocks.zero).getD j Goldilocks.zero = Goldilocks.zero
+  | 0, _ => rfl
+  | _ + 1, 0 => rfl
+  | n + 1, j + 1 => getD_replicate_zero n j
+
+/-- A row whose `Poseidon2` columns are the honest trace of the all-zero input, with carried
+    state `prevState`, zero `NEXT_STATE` and auxiliary cells `aux` (unconstrained on `Idle` and
+    inactive rows, where `populate_inactive_signer_rows` places the blinding limbs). -/
+def stepOpIdleRow (prevState aux : List Goldilocks) : StepOpRow where
+  stIn        := state12Zero
+  initExtSbox := (honestPoseidon2PermWitness state12Zero).initExtSbox
+  intSbox     := (honestPoseidon2PermWitness state12Zero).intSbox
+  termExtSbox := (honestPoseidon2PermWitness state12Zero).termExtSbox
+  prevState   := prevState
+  nextState   := List.replicate 44 Goldilocks.zero
+  aux         := aux
+
+/-- The all-zero row: every one of the 256 cells is zero. -/
+def stepOpZeroRow : StepOpRow where
+  stIn        := state12Zero
+  initExtSbox := List.replicate 4 state12Zero
+  intSbox     := List.replicate 22 Goldilocks.zero
+  termExtSbox := List.replicate 4 state12Zero
+  prevState   := List.replicate 44 Goldilocks.zero
+  nextState   := List.replicate 44 Goldilocks.zero
+  aux         := List.replicate 38 Goldilocks.zero
+
+private theorem stepOpIdleRow_groupA (prevState aux : List Goldilocks) :
+    allZeroGoldilocks (stepOpPermTrace (stepOpIdleRow prevState aux)).2 = true := by
+  have hKey : poseidon2PermResiduals (honestPoseidon2PermWitness state12Zero) =
+      (stepOpPermTrace (stepOpIdleRow prevState aux)).2 ++
+        (state12Sub (stepOpPermTrace (stepOpIdleRow prevState aux)).1
+          (honestPoseidon2PermWitness state12Zero).output).toList := rfl
+  have hZ := (poseidon2PermResiduals_allZero_iff (honestPoseidon2PermWitness state12Zero)).mpr rfl
+  rw [hKey, allZeroGoldilocks_append, Bool.and_eq_true] at hZ
+  exact hZ.1
+
+private theorem allZero_zero_pairs :
+    allZeroGoldilocks
+      ((List.range 44).flatMap fun _ => [Goldilocks.zero, Goldilocks.zero]) = true := by
+  decide
+
+private theorem stepOpIdleRow_boundary (rowsPerSigner t : Nat) (prevState aux : List Goldilocks)
+    (hP : t = 0 → prevState = List.replicate 44 Goldilocks.zero) :
+    allZeroGoldilocks (stepOpBoundaryResiduals rowsPerSigner t (stepOpIdleRow prevState aux)) =
+      true := by
+  have hEq : stepOpBoundaryResiduals rowsPerSigner t (stepOpIdleRow prevState aux) =
+      (List.range 44).flatMap fun _ => [Goldilocks.zero, Goldilocks.zero] := by
+    unfold stepOpBoundaryResiduals stepOpIdleRow
+    congr 1
+    funext j
+    by_cases ht : t = 0
+    · simp only [ht, hP ht, ↓reduceIte, getD_replicate_zero, ite_self]
+    · simp only [ht, ↓reduceIte, getD_replicate_zero, ite_self]
+  rw [hEq]
+  exact allZero_zero_pairs
+
+private theorem allZero_zero_map :
+    allZeroGoldilocks ((List.range 44).map fun _ => Goldilocks.zero) = true := by
+  decide
+
+/-- An `Idle` row passes every intra-row gate of an active slot at any step scheduled as
+    `Idle`, whatever state it claims to have received (other than on the first row). -/
+theorem stepOpIdleRow_intra_ok (profile : AggSigProfile) (pub : AggValidatorPk × Digest5)
+    (t : Nat) (prevState aux : List Goldilocks)
+    (hOp : (buildSignerProgram profile).getD t StepOp.idle = StepOp.idle)
+    (hP : t = 0 → prevState = List.replicate 44 Goldilocks.zero) :
+    allZeroGoldilocks
+      (stepOp256RowResiduals profile (some pub) t (stepOpIdleRow prevState aux)) = true := by
+  unfold stepOp256RowResiduals
+  rw [allZeroGoldilocks_append, allZeroGoldilocks_append, Bool.and_eq_true, Bool.and_eq_true]
+  refine ⟨⟨stepOpIdleRow_groupA prevState aux, stepOpIdleRow_boundary _ t prevState aux hP⟩, ?_⟩
+  rw [hOp]
+  have hEq : stepOpConstraints (stepOpKindAndC0 StepOp.idle).1
+      (Goldilocks.ofNat (stepOpKindAndC0 StepOp.idle).2)
+      (stepOpRowInputs pub (stepOpIdleRow prevState aux)) =
+      (List.range 44).map fun _ => Goldilocks.zero := by
+    show (List.range 44).map
+      (fun j => (List.replicate 44 Goldilocks.zero).getD j Goldilocks.zero) = _
+    congr 1
+    funext j
+    exact getD_replicate_zero 44 j
+  have hZ := allZero_zero_map
+  rw [← hEq] at hZ
+  exact hZ
+
+/-- **`#tooth`: a state splice breaks the shift constraint.** Take any two rows `rA`, `rB` and
+    a state limb `j` on which `NEXT_STATE` of `rA` differs from `PREV_STATE` of `rB`.
+    1. The inter-row shift residuals between them do not vanish.
+    2. Over `GoldilocksExt4`: for column evaluations `N`, `P` whose values at rows `u`, `u + 1`
+       are the two limbs, the shift claim at the hypercube point `u` is non-zero.
+    3. Such a splice exists among rows that pass every intra-row gate on their own: for an
+       active `xmssPoseidon2` slot and any auxiliary cells, the `Idle` rows at steps `500` and
+       `501` with carried state `0` and `[1, 0, ..]` both satisfy all intra-row constraints. -/
+theorem tooth_stepOp256_state_splice_breaks_shift_constraint :
+    (∀ (rA rB : StepOpRow) (j : Nat), j < 44 →
+      rA.nextState.getD j Goldilocks.zero ≠ rB.prevState.getD j Goldilocks.zero →
+      allZeroGoldilocks (stepOpShiftResiduals rA rB) = false ∧
+      ∀ (ell u : Nat), u + 1 < 2 ^ ell → ∀ (N P : Nat → GoldilocksExt4),
+        N u = GoldilocksExt4.embedBase (rA.nextState.getD j Goldilocks.zero) →
+        P (u + 1) = GoldilocksExt4.embedBase (rB.prevState.getD j Goldilocks.zero) →
+        stepOpShiftClaimExt4 ell (hypercubePointExt4 ell u) N P ≠ CommRingOps.zero) ∧
+    (∀ (pub : AggValidatorPk × Digest5) (aux : List Goldilocks),
+      allZeroGoldilocks (stepOp256RowResiduals .xmssPoseidon2 (some pub) 500
+        (stepOpIdleRow (List.replicate 44 Goldilocks.zero) aux)) = true ∧
+      allZeroGoldilocks (stepOp256RowResiduals .xmssPoseidon2 (some pub) 501
+        (stepOpIdleRow (Goldilocks.one :: List.replicate 43 Goldilocks.zero) aux)) = true ∧
+      allZeroGoldilocks (stepOpShiftResiduals
+        (stepOpIdleRow (List.replicate 44 Goldilocks.zero) aux)
+        (stepOpIdleRow (Goldilocks.one :: List.replicate 43 Goldilocks.zero) aux)) = false) := by
+  have hSplice : ∀ (rA rB : StepOpRow) (j : Nat), j < 44 →
+      rA.nextState.getD j Goldilocks.zero ≠ rB.prevState.getD j Goldilocks.zero →
+      allZeroGoldilocks (stepOpShiftResiduals rA rB) = false := by
+    intro rA rB j hj hNe
+    apply Bool.eq_false_iff.mpr
+    intro hZ
+    exact hNe ((stepOp256_shift_iff rA rB).mp hZ j hj)
+  refine ⟨fun rA rB j hj hNe => ⟨hSplice rA rB j hj hNe, ?_⟩, fun pub aux => ⟨?_, ?_, ?_⟩⟩
+  · intro ell u hu N P hN hP hZero
+    rw [stepOpShiftClaimExt4_hypercube ell u hu N P, hN, hP,
+      ← GoldilocksExt4.embedBase_sub] at hZero
+    have h0 : Goldilocks.sub (rA.nextState.getD j Goldilocks.zero)
+        (rB.prevState.getD j Goldilocks.zero) = Goldilocks.zero :=
+      GoldilocksExt4.embedBase_injective hZero
+    exact hNe (LawfulCommRing.sub_eq_zero_iff.mp h0)
+  · exact stepOpIdleRow_intra_ok .xmssPoseidon2 pub 500 _ aux (by decide +kernel)
+      (fun h => absurd h (by decide))
+  · exact stepOpIdleRow_intra_ok .xmssPoseidon2 pub 501 _ aux (by decide +kernel)
+      (fun h => absurd h (by decide))
+  · exact hSplice _ _ 0 (by decide)
+      (fun h => (by decide : Goldilocks.zero ≠ Goldilocks.one) h)
+
+private theorem honestZeroPerm_sbox_lengths :
+    (honestPoseidon2PermWitness state12Zero).initExtSbox.length = 4 ∧
+    (honestPoseidon2PermWitness state12Zero).intSbox.length = 22 ∧
+    (honestPoseidon2PermWitness state12Zero).termExtSbox.length = 4 := by
+  decide +kernel
+
+/-- An `Idle` row with 44 carried limbs and 38 auxiliary cells has the 256-column shape. -/
+theorem stepOpIdleRow_wellShaped (prevState aux : List Goldilocks)
+    (hP : prevState.length = 44) (hA : aux.length = 38) :
+    (stepOpIdleRow prevState aux).wellShaped = true := by
+  obtain ⟨h1, h2, h3⟩ := honestZeroPerm_sbox_lengths
+  unfold StepOpRow.wellShaped stepOpIdleRow
+  simp only [h1, h2, h3, hP, hA, List.length_replicate, beq_self_eq_true, Bool.and_self]
+
+private theorem getD_replicate_none {α : Type} :
+    ∀ (k i : Nat), (List.replicate k (none : Option α)).getD i none = none
+  | 0, _ => rfl
+  | _ + 1, 0 => rfl
+  | k + 1, i + 1 => getD_replicate_none k i
+
+private theorem all_replicate_of {α : Type} (f : α → Bool) (a : α) (h : f a = true) :
+    ∀ (n : Nat), (List.replicate n a).all f = true
+  | 0 => rfl
+  | n + 1 => Bool.and_eq_true_iff.mpr ⟨h, all_replicate_of f a h n⟩
+
+private theorem stepOpInactive_intra (profile : AggSigProfile) (k : Nat) (aux : List Goldilocks) :
+    ∀ (n g : Nat),
+      allZeroGoldilocks (stepOp256IntraResidualsFrom profile (List.replicate k none) g
+        (List.replicate n (stepOpIdleRow (List.replicate 44 Goldilocks.zero) aux))) = true
+  | 0, _ => rfl
+  | n + 1, g => by
+    show allZeroGoldilocks
+      (stepOp256RowResiduals profile
+          ((List.replicate k none).getD (g / stepOpRowsPerSigner profile) none)
+          (g % stepOpRowsPerSigner profile)
+          (stepOpIdleRow (List.replicate 44 Goldilocks.zero) aux) ++
+        stepOp256IntraResidualsFrom profile (List.replicate k none) (g + 1)
+          (List.replicate n (stepOpIdleRow (List.replicate 44 Goldilocks.zero) aux))) = true
+    rw [allZeroGoldilocks_append, Bool.and_eq_true, getD_replicate_none]
+    refine ⟨?_, stepOpInactive_intra profile k aux n (g + 1)⟩
+    unfold stepOp256RowResiduals
+    rw [allZeroGoldilocks_append, allZeroGoldilocks_append, Bool.and_eq_true, Bool.and_eq_true]
+    exact ⟨⟨stepOpIdleRow_groupA _ aux, stepOpIdleRow_boundary _ _ _ aux (fun _ => rfl)⟩, rfl⟩
+
+private theorem stepOpInactive_shift (aux : List Goldilocks) :
+    ∀ (n : Nat),
+      allZeroGoldilocks (stepOp256ShiftResiduals
+        (List.replicate n (stepOpIdleRow (List.replicate 44 Goldilocks.zero) aux))) = true
+  | 0 => rfl
+  | 1 => rfl
+  | n + 2 => by
+    show allZeroGoldilocks
+      (stepOpShiftResiduals (stepOpIdleRow (List.replicate 44 Goldilocks.zero) aux)
+          (stepOpIdleRow (List.replicate 44 Goldilocks.zero) aux) ++
+        stepOp256ShiftResiduals
+          (List.replicate (n + 1) (stepOpIdleRow (List.replicate 44 Goldilocks.zero) aux))) = true
+    rw [allZeroGoldilocks_append, Bool.and_eq_true]
+    exact ⟨(stepOp256_shift_iff _ _).mpr (fun _ _ => rfl), stepOpInactive_shift aux (n + 1)⟩
+
+/-- **Completeness for inactive slots (`populate_inactive_signer_rows`).** A table of `k ≥ 1`
+    inactive slots filled with `Idle` rows (honest `Poseidon2` trace of the zero input, zero
+    carried state, arbitrary auxiliary cells) satisfies every intra-row and inter-row
+    constraint. In particular `stepOp256TableOk` is satisfiable. -/
+theorem stepOp256_inactive_table_complete (profile : AggSigProfile) (k : Nat) (hk : 0 < k)
+    (aux : List Goldilocks) (hA : aux.length = 38) :
+    stepOp256TableOk profile (List.replicate k none)
+      (List.replicate (k * stepOpRowsPerSigner profile)
+        (stepOpIdleRow (List.replicate 44 Goldilocks.zero) aux)) = true := by
+  unfold stepOp256TableOk
+  refine Bool.and_eq_true_iff.mpr ⟨Bool.and_eq_true_iff.mpr ⟨Bool.and_eq_true_iff.mpr
+    ⟨Bool.and_eq_true_iff.mpr ⟨?_, ?_⟩, ?_⟩, ?_⟩, ?_⟩
+  · exact decide_eq_true (by rw [List.length_replicate]; exact hk)
+  · exact decide_eq_true (by rw [List.length_replicate, List.length_replicate])
+  · exact all_replicate_of _ _
+      (stepOpIdleRow_wellShaped _ aux List.length_replicate hA) _
+  · exact stepOpInactive_intra profile k aux _ 0
+  · exact stepOpInactive_shift aux _
+
+private theorem stepOpZeroRow_groupA :
+    allZeroGoldilocks (stepOpPermTrace stepOpZeroRow).2 = false := by
+  decide +kernel
+
+/-- **`#tooth`: all-zero rows are rejected.** For every profile, every slot assignment and
+    every row count `n`, the table of `n` all-zero rows is rejected: with `n = 0` the row count
+    is wrong, and with `n > 0` the Group A S-box constraints of the first row fail, since
+    `(0 + rc)^7 ≠ 0`. -/
+theorem tooth_stepOp256_zero_rows_rejected (profile : AggSigProfile) (slots : List StepOpSlot)
+    (n : Nat) :
+    stepOp256TableOk profile slots (List.replicate n stepOpZeroRow) = false := by
+  apply Bool.eq_false_iff.mpr
+  intro h
+  unfold stepOp256TableOk at h
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at h
+  obtain ⟨⟨⟨⟨hPos, hLen⟩, _⟩, hIntra⟩, _⟩ := h
+  cases n with
+  | zero =>
+    rw [List.replicate_zero, List.length_nil] at hLen
+    cases profile <;> simp only [stepOpRowsPerSigner] at hLen <;> omega
+  | succ m =>
+    rw [List.replicate_succ] at hIntra
+    unfold stepOp256IntraResidualsFrom stepOp256RowResiduals at hIntra
+    rw [allZeroGoldilocks_append, allZeroGoldilocks_append, allZeroGoldilocks_append,
+      Bool.and_eq_true, Bool.and_eq_true, Bool.and_eq_true] at hIntra
+    rw [stepOpZeroRow_groupA] at hIntra
+    exact absurd hIntra.1.1.1 (by decide)
+
+end StepOpTable
+
+/-! ## §3. Steiner-Deduplicated Merkle-Canopy Multi-Proofs (`pcs.rs`, `CanopyMultiProof`) -/
+
+/-- Parent digest of the active node `(u, hu)` combined with an authentication sibling `s`
+    consumed from the proof (`pcs.rs:verify_canopy_multiproof`, the `else` arm):
+    `(u & 1) == 0` puts `hu` on the left, otherwise on the right; the node index fed to the hash is
+    the parent `u >> 1`. -/
+def canopyParentHash {D : Type} (nodeHash : Nat → D → D → D) (u : Nat) (hu s : D) : D :=
+  if u &&& 1 = 0 then nodeHash (u >>> 1) hu s else nodeHash (u >>> 1) s hu
+
+/-- One tree level of `verify_canopy_multiproof` (the inner `while k < active.len()` loop).
+    Walks the active list of heap-indexed `(node, digest)` pairs left to right. If the next active
+    entry is the sibling `u ^ 1`, the two are merged as `nodeHash (u >> 1) hu hv` (`k += 2`) and no
+    proof digest is consumed. Otherwise exactly one digest is consumed from the sibling list
+    (`k += 1`), and the walk fails (`none`) when the list is exhausted. Returns the next level's
+    active list together with the unconsumed siblings. -/
+def canopyLevelStep {D : Type} (nodeHash : Nat → D → D → D) :
+    List (Nat × D) → List D → Option (List (Nat × D) × List D)
+  | [], sibs => some ([], sibs)
+  | [(u, hu)], sibs =>
+    match sibs with
+    | [] => none
+    | s :: rest => some ([(u >>> 1, canopyParentHash nodeHash u hu s)], rest)
+  | (u, hu) :: (v, hv) :: tl, sibs =>
+    if v = u ^^^ 1 then
+      (canopyLevelStep nodeHash tl sibs).map
+        (fun r => ((u >>> 1, nodeHash (u >>> 1) hu hv) :: r.1, r.2))
+    else
+      match sibs with
+      | [] => none
+      | s :: rest =>
+        (canopyLevelStep nodeHash ((v, hv) :: tl) rest).map
+          (fun r => ((u >>> 1, canopyParentHash nodeHash u hu s) :: r.1, r.2))
+
+/-- `depth` iterations of `canopyLevelStep` (the outer `while cur_depth > 0` loop), threading
+    the sibling cursor as the list of unconsumed digests. -/
+def canopyLevels {D : Type} (nodeHash : Nat → D → D → D) :
+    Nat → List (Nat × D) → List D → Option (List (Nat × D) × List D)
+  | 0, active, sibs => some (active, sibs)
+  | depth + 1, active, sibs =>
+    match canopyLevelStep nodeHash active sibs with
+    | none => none
+    | some r => canopyLevels nodeHash depth r.1 r.2
+
+/-- Index pre-checks of `verify_canopy_multiproof`: the list is nonempty, strictly ascending on
+    every adjacent window, and its last index is `< n`. -/
+def canopyIndicesOk (n : Nat) : List Nat → Bool
+  | [] => false
+  | [i] => decide (i < n)
+  | i :: j :: tl => decide (i < j) && canopyIndicesOk n (j :: tl)
+
+/-- `pcs.rs:verify_canopy_multiproof`. Leaf `i` sits at heap index `2^logLeaves + i`; after
+    `logLeaves` levels the walk must have consumed every proof digest (`sib_cursor == len`), the
+    active list must be exactly `[(1, top)]`, and `rootHash logLeaves top` must equal the
+    commitment. `nodeHash` models `hash_merkle_internal(node_idx, left, right)` and `rootHash`
+    models `hash_tree_root(log_leaves, top)`. -/
+def verifyCanopyMultiproof {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (rootHash : Nat → D → D)
+    (logLeaves : Nat) (commitment : D) (leaves : List (Nat × D)) (proof : List D) : Bool :=
+  decide (logLeaves ≤ 28) &&
+  canopyIndicesOk (2 ^ logLeaves) (leaves.map Prod.fst) &&
+  match canopyLevels nodeHash logLeaves
+      (leaves.map (fun p => (2 ^ logLeaves + p.1, p.2))) proof with
+  | some ([(u, top)], []) => decide (u = 1) && decide (rootHash logLeaves top = commitment)
+  | _ => false
+
+/-- `verifyCanopyMultiproof` with the exact-consumption check (`sib_cursor == len`) removed:
+    unconsumed trailing digests are ignored. Defined only to show that the check is load-bearing
+    (`canopyToy_relaxed_accepts_extra_sibling`). -/
+def verifyCanopyMultiproofRelaxed {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (rootHash : Nat → D → D)
+    (logLeaves : Nat) (commitment : D) (leaves : List (Nat × D)) (proof : List D) : Bool :=
+  decide (logLeaves ≤ 28) &&
+  canopyIndicesOk (2 ^ logLeaves) (leaves.map Prod.fst) &&
+  match canopyLevels nodeHash logLeaves
+      (leaves.map (fun p => (2 ^ logLeaves + p.1, p.2))) proof with
+  | some ([(u, top)], _) => decide (u = 1) && decide (rootHash logLeaves top = commitment)
+  | _ => false
+
+/-- The level walk of `canopyLevelStep` on node indices alone: the next level's indices and the
+    number of sibling digests the level consumes. -/
+def steinerLevelStep : List Nat → List Nat × Nat
+  | [] => ([], 0)
+  | [u] => ([u >>> 1], 1)
+  | u :: v :: tl =>
+    if v = u ^^^ 1 then
+      ((u >>> 1) :: (steinerLevelStep tl).1, (steinerLevelStep tl).2)
+    else
+      ((u >>> 1) :: (steinerLevelStep (v :: tl)).1, (steinerLevelStep (v :: tl)).2 + 1)
+
+/-- Total number of sibling digests consumed over `depth` levels starting from `nodes`. -/
+def steinerCountLevels : Nat → List Nat → Nat
+  | 0, _ => 0
+  | depth + 1, nodes =>
+    (steinerLevelStep nodes).2 + steinerCountLevels depth (steinerLevelStep nodes).1
+
+/-- Number of authentication siblings in the Steiner-deduplicated multiproof for the leaf index
+    list `indices` in a tree with `2^logLeaves` leaves. A function of the indices only. -/
+def steinerSiblingCount (logLeaves : Nat) (indices : List Nat) : Nat :=
+  steinerCountLevels logLeaves (indices.map (fun i => 2 ^ logLeaves + i))
+
+private theorem canopyLevelStep_nil {D : Type} (nodeHash : Nat → D → D → D)
+    {s : List D} {b : List (Nat × D)} {t : List D}
+    (h : canopyLevelStep nodeHash [] s = some (b, t)) : b = [] ∧ t = s := by
+  simp only [canopyLevelStep] at h
+  obtain ⟨hb, ht⟩ := Prod.mk.inj (Option.some.inj h)
+  exact ⟨hb.symm, ht.symm⟩
+
+private theorem canopyLevelStep_single {D : Type} (nodeHash : Nat → D → D → D)
+    {u : Nat} {hu : D} {s : List D} {b : List (Nat × D)} {t : List D}
+    (h : canopyLevelStep nodeHash [(u, hu)] s = some (b, t)) :
+    ∃ c, s = c :: t ∧ b = [(u >>> 1, canopyParentHash nodeHash u hu c)] := by
+  simp only [canopyLevelStep] at h
+  match s, h with
+  | [], h => cases h
+  | c :: rest, h =>
+    obtain ⟨hb, ht⟩ := Prod.mk.inj (Option.some.inj h)
+    subst ht
+    exact ⟨c, rfl, hb.symm⟩
+
+private theorem canopyLevelStep_pair {D : Type} (nodeHash : Nat → D → D → D)
+    {u v : Nat} {hu hv : D} {tl : List (Nat × D)} {s : List D} {b : List (Nat × D)} {t : List D}
+    (hv' : v = u ^^^ 1)
+    (h : canopyLevelStep nodeHash ((u, hu) :: (v, hv) :: tl) s = some (b, t)) :
+    ∃ act, canopyLevelStep nodeHash tl s = some (act, t) ∧
+      b = (u >>> 1, nodeHash (u >>> 1) hu hv) :: act := by
+  have hc : (v = u ^^^ 1) = True := eq_true hv'
+  simp only [canopyLevelStep, hc, ↓reduceIte] at h
+  cases hs : canopyLevelStep nodeHash tl s with
+  | none => rw [hs] at h; cases h
+  | some r =>
+    obtain ⟨act, rest⟩ := r
+    rw [hs] at h
+    obtain ⟨hb, ht⟩ := Prod.mk.inj (Option.some.inj h)
+    subst ht
+    exact ⟨act, rfl, hb.symm⟩
+
+private theorem canopyLevelStep_solo {D : Type} (nodeHash : Nat → D → D → D)
+    {u v : Nat} {hu hv : D} {tl : List (Nat × D)} {s : List D} {b : List (Nat × D)} {t : List D}
+    (hv' : ¬ v = u ^^^ 1)
+    (h : canopyLevelStep nodeHash ((u, hu) :: (v, hv) :: tl) s = some (b, t)) :
+    ∃ c rest act, s = c :: rest ∧
+      canopyLevelStep nodeHash ((v, hv) :: tl) rest = some (act, t) ∧
+      b = (u >>> 1, canopyParentHash nodeHash u hu c) :: act := by
+  simp only [canopyLevelStep, hv', ↓reduceIte] at h
+  match s, h with
+  | [], h => cases h
+  | c :: rest, h =>
+    dsimp only at h
+    cases hs : canopyLevelStep nodeHash ((v, hv) :: tl) rest with
+    | none => rw [hs] at h; cases h
+    | some r =>
+      obtain ⟨act, rest'⟩ := r
+      rw [hs] at h
+      obtain ⟨hb, ht⟩ := Prod.mk.inj (Option.some.inj h)
+      subst ht
+      exact ⟨c, rest, act, rfl, hs, hb.symm⟩
+
+private theorem canopyLevels_succ {D : Type} (nodeHash : Nat → D → D → D)
+    {d : Nat} {a : List (Nat × D)} {s : List D} {b : List (Nat × D)} {t : List D}
+    (h : canopyLevels nodeHash (d + 1) a s = some (b, t)) :
+    ∃ m r, canopyLevelStep nodeHash a s = some (m, r) ∧ canopyLevels nodeHash d m r = some (b, t) := by
+  rw [canopyLevels] at h
+  cases hs : canopyLevelStep nodeHash a s with
+  | none => rw [hs] at h; cases h
+  | some p =>
+    obtain ⟨m, r⟩ := p
+    rw [hs] at h
+    exact ⟨m, r, rfl, h⟩
+
+/-- A successful level step maps the index list by `steinerLevelStep` and consumes exactly the
+    number of digests `steinerLevelStep` predicts. -/
+private theorem canopyLevelStep_shape {D : Type} (nodeHash : Nat → D → D → D) :
+    ∀ (n : Nat) (a : List (Nat × D)) (s : List D) (b : List (Nat × D)) (t : List D),
+      a.length < n →
+      canopyLevelStep nodeHash a s = some (b, t) →
+      b.map Prod.fst = (steinerLevelStep (a.map Prod.fst)).1 ∧
+      s.length = (steinerLevelStep (a.map Prod.fst)).2 + t.length := by
+  intro n
+  induction n with
+  | zero => intro a s b t hLen _; exact absurd hLen (Nat.not_lt_zero _)
+  | succ n ih =>
+    intro a s b t hLen h
+    match a, hLen, h with
+    | [], _, h =>
+      obtain ⟨hb, ht⟩ := canopyLevelStep_nil nodeHash h
+      subst hb; subst ht
+      exact ⟨rfl, (Nat.zero_add _).symm⟩
+    | [(u, hu)], _, h =>
+      obtain ⟨c, hs, hb⟩ := canopyLevelStep_single nodeHash h
+      subst hs; subst hb
+      exact ⟨rfl, Nat.add_comm _ _⟩
+    | (u, hu) :: (v, hv) :: tl, hLen, h =>
+      have hLen1 : ((v, hv) :: tl).length < n := Nat.lt_of_succ_lt_succ hLen
+      have hLen2 : tl.length < n := Nat.lt_of_succ_lt hLen1
+      by_cases hv' : v = u ^^^ 1
+      · obtain ⟨act, hr, hb⟩ := canopyLevelStep_pair nodeHash hv' h
+        obtain ⟨h1, h2⟩ := ih tl s act t hLen2 hr
+        subst hb
+        have hc : (v = u ^^^ 1) = True := eq_true hv'
+        simp only [List.map_cons, steinerLevelStep, hc, ↓reduceIte]
+        exact ⟨congrArg (List.cons (u >>> 1)) h1, h2⟩
+      · obtain ⟨c, rest, act, hs, hr, hb⟩ := canopyLevelStep_solo nodeHash hv' h
+        obtain ⟨h1, h2⟩ := ih ((v, hv) :: tl) rest act t hLen1 hr
+        subst hs; subst hb
+        simp only [List.map_cons] at h1 h2
+        simp only [List.map_cons, steinerLevelStep, hv', ↓reduceIte, List.length_cons]
+        refine ⟨congrArg (List.cons (u >>> 1)) h1, ?_⟩
+        rw [h2]
+        exact Nat.add_right_comm _ _ _
+
+private theorem canopyLevels_count {D : Type} (nodeHash : Nat → D → D → D) :
+    ∀ (d : Nat) (a : List (Nat × D)) (s : List D) (b : List (Nat × D)) (t : List D),
+      canopyLevels nodeHash d a s = some (b, t) →
+      s.length = steinerCountLevels d (a.map Prod.fst) + t.length
+  | 0, a, s, b, t, h => by
+    rw [canopyLevels] at h
+    obtain ⟨_, ht⟩ := Prod.mk.inj (Option.some.inj h)
+    subst ht
+    exact (Nat.zero_add _).symm
+  | d + 1, a, s, b, t, h => by
+    obtain ⟨m, r, hStep, hRest⟩ := canopyLevels_succ nodeHash h
+    obtain ⟨hm, hLen⟩ := canopyLevelStep_shape nodeHash _ a s m r (Nat.lt_succ_self _) hStep
+    have ih := canopyLevels_count nodeHash d m r b t hRest
+    rw [hm] at ih
+    rw [steinerCountLevels, hLen, ih]
+    exact (Nat.add_assoc _ _ _).symm
+
+private theorem canopy_map_fst {D : Type} (n : Nat) :
+    ∀ (leaves : List (Nat × D)),
+      (leaves.map (fun p => (n + p.1, p.2))).map Prod.fst =
+        (leaves.map Prod.fst).map (fun i => n + i)
+  | [] => rfl
+  | p :: tl => congrArg (List.cons (n + p.1)) (canopy_map_fst n tl)
+
+private theorem canopy_lift_inj {D : Type} (n : Nat) :
+    ∀ (l1 l2 : List (Nat × D)),
+      l1.map (fun p => (n + p.1, p.2)) = l2.map (fun p => (n + p.1, p.2)) → l1 = l2
+  | [], [], _ => rfl
+  | [], _ :: _, h => by cases h
+  | _ :: _, [], h => by cases h
+  | p :: t1, q :: t2, h => by
+    have h' : (n + p.1, p.2) :: t1.map (fun p => (n + p.1, p.2)) =
+        (n + q.1, q.2) :: t2.map (fun p => (n + p.1, p.2)) := h
+    obtain ⟨hh, ht⟩ := List.cons.inj h'
+    obtain ⟨h1, h2⟩ := Prod.mk.inj hh
+    rw [canopy_lift_inj n t1 t2 ht]
+    exact congrArg (fun x => x :: t2) (Prod.ext (Nat.add_left_cancel h1) h2)
+
+private theorem canopy_accept_unpack {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (rootHash : Nat → D → D)
+    (logLeaves : Nat) (commitment : D) (leaves : List (Nat × D)) (proof : List D)
+    (h : verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves proof = true) :
+    ∃ top, canopyLevels nodeHash logLeaves
+        (leaves.map (fun p => (2 ^ logLeaves + p.1, p.2))) proof = some ([(1, top)], []) ∧
+      rootHash logLeaves top = commitment := by
+  unfold verifyCanopyMultiproof at h
+  simp only [Bool.and_eq_true] at h
+  obtain ⟨_, hM⟩ := h
+  split at hM
+  next u top hEq =>
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hM
+    obtain ⟨hu, hR⟩ := hM
+    subst hu
+    exact ⟨top, hEq, hR⟩
+  next => cases hM
+
+/-- **Exact sibling consumption is determined by the index set alone.** Whatever the hash
+    functions, leaf digests and commitment, an accepted multiproof carries exactly
+    `steinerSiblingCount logLeaves indices` authentication siblings. -/
+theorem verifyCanopyMultiproof_exact_sibling_count {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (rootHash : Nat → D → D)
+    (logLeaves : Nat) (commitment : D) (leaves : List (Nat × D)) (proof : List D)
+    (hAcc : verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves proof = true) :
+    proof.length = steinerSiblingCount logLeaves (leaves.map Prod.fst) := by
+  obtain ⟨top, hL, _⟩ := canopy_accept_unpack nodeHash rootHash logLeaves commitment leaves proof hAcc
+  have hCount := canopyLevels_count nodeHash logLeaves _ proof _ _ hL
+  rw [canopy_map_fst] at hCount
+  exact hCount
+
+/-- Two proofs of different lengths for the same index list are never both accepted, for any
+    hash functions, commitments and leaf digests. -/
+theorem verifyCanopyMultiproof_length_mismatch_rejected {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (rootHash : Nat → D → D)
+    (logLeaves : Nat) (commitment commitment' : D)
+    (leaves leaves' : List (Nat × D)) (proof proof' : List D)
+    (hAcc : verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves proof = true)
+    (hIdx : leaves'.map Prod.fst = leaves.map Prod.fst)
+    (hLen : proof'.length ≠ proof.length) :
+    verifyCanopyMultiproof nodeHash rootHash logLeaves commitment' leaves' proof' = false := by
+  apply Bool.eq_false_iff.mpr
+  intro hAcc'
+  apply hLen
+  rw [verifyCanopyMultiproof_exact_sibling_count nodeHash rootHash logLeaves commitment' leaves' proof' hAcc',
+    verifyCanopyMultiproof_exact_sibling_count nodeHash rootHash logLeaves commitment leaves proof hAcc, hIdx]
+
+/-- **Extra-sibling tooth.** Appending one or more digests to an accepted proof yields a
+    rejected proof, for any hash functions. -/
+theorem verifyCanopyMultiproof_extra_sibling_rejected {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (rootHash : Nat → D → D)
+    (logLeaves : Nat) (commitment : D) (leaves : List (Nat × D)) (proof : List D)
+    (extra : D) (more : List D)
+    (hAcc : verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves proof = true) :
+    verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves
+      (proof ++ extra :: more) = false := by
+  refine verifyCanopyMultiproof_length_mismatch_rejected nodeHash rootHash logLeaves commitment
+    commitment leaves leaves proof _ hAcc rfl ?_
+  rw [List.length_append, List.length_cons]
+  exact Nat.ne_of_gt (Nat.lt_add_of_pos_right (Nat.succ_pos _))
+
+/-- **Missing-sibling tooth.** Dropping the last digest of an accepted nonempty proof yields a
+    rejected proof, for any hash functions. -/
+theorem verifyCanopyMultiproof_missing_sibling_rejected {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (rootHash : Nat → D → D)
+    (logLeaves : Nat) (commitment : D) (leaves : List (Nat × D)) (proof : List D)
+    (hNonempty : proof ≠ [])
+    (hAcc : verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves proof = true) :
+    verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves proof.dropLast = false := by
+  refine verifyCanopyMultiproof_length_mismatch_rejected nodeHash rootHash logLeaves commitment
+    commitment leaves leaves proof _ hAcc rfl ?_
+  rw [List.length_dropLast]
+  exact Nat.ne_of_lt (Nat.sub_lt (List.length_pos_iff.mpr hNonempty) Nat.one_pos)
+
+private theorem canopyNode_binding {D : Type} [DecidableEq D] (nodeHash : Nat → D → D → D)
+    {i : Nat} {l r l' r' : D} (h : nodeHash i l r = nodeHash i l' r') :
+    (∃ (i : Nat) (l r l' r' : D), (l, r) ≠ (l', r') ∧ nodeHash i l r = nodeHash i l' r') ∨
+    (l = l' ∧ r = r') := by
+  by_cases he : (l, r) = (l', r')
+  · exact Or.inr (Prod.mk.inj he)
+  · exact Or.inl ⟨i, l, r, l', r', he, h⟩
+
+private theorem canopyParentHash_binding {D : Type} [DecidableEq D] (nodeHash : Nat → D → D → D)
+    {u : Nat} {hu s hu' s' : D}
+    (h : canopyParentHash nodeHash u hu s = canopyParentHash nodeHash u hu' s') :
+    (∃ (i : Nat) (l r l' r' : D), (l, r) ≠ (l', r') ∧ nodeHash i l r = nodeHash i l' r') ∨
+    (hu = hu' ∧ s = s') := by
+  unfold canopyParentHash at h
+  by_cases hp : u &&& 1 = 0
+  · simp only [hp, ↓reduceIte] at h
+    exact canopyNode_binding nodeHash h
+  · simp only [hp, ↓reduceIte] at h
+    rcases canopyNode_binding nodeHash h with hc | ⟨e1, e2⟩
+    · exact Or.inl hc
+    · exact Or.inr ⟨e2, e1⟩
+
+/-- Per-level binding: two successful level steps over the same index list that produce the
+    same next level and the same unconsumed siblings either started from identical inputs or
+    exhibit a `nodeHash` collision. -/
+private theorem canopyLevelStep_binding {D : Type} [DecidableEq D] (nodeHash : Nat → D → D → D) :
+    ∀ (n : Nat) (a1 a2 : List (Nat × D)) (s1 s2 : List D) (b : List (Nat × D)) (t : List D),
+      a1.length < n →
+      a1.map Prod.fst = a2.map Prod.fst →
+      canopyLevelStep nodeHash a1 s1 = some (b, t) →
+      canopyLevelStep nodeHash a2 s2 = some (b, t) →
+      (∃ (i : Nat) (l r l' r' : D), (l, r) ≠ (l', r') ∧ nodeHash i l r = nodeHash i l' r') ∨
+      (a1 = a2 ∧ s1 = s2) := by
+  intro n
+  induction n with
+  | zero => intro a1 a2 s1 s2 b t hLen _ _ _; exact absurd hLen (Nat.not_lt_zero _)
+  | succ n ih =>
+    intro a1 a2 s1 s2 b t hLen hIdx h1 h2
+    match a1, a2, hLen, hIdx, h1, h2 with
+    | [], [], _, _, h1, h2 =>
+      obtain ⟨_, ht1⟩ := canopyLevelStep_nil nodeHash h1
+      obtain ⟨_, ht2⟩ := canopyLevelStep_nil nodeHash h2
+      exact Or.inr ⟨rfl, ht1.symm.trans ht2⟩
+    | [], _ :: _, _, hIdx, _, _ => cases hIdx
+    | _ :: _, [], _, hIdx, _, _ => cases hIdx
+    | [(u, hu)], [(u2, hu2)], _, hIdx, h1, h2 =>
+      have hu_eq : u = u2 := (List.cons.inj hIdx).1
+      subst hu_eq
+      obtain ⟨c1, hs1, hb1⟩ := canopyLevelStep_single nodeHash h1
+      obtain ⟨c2, hs2, hb2⟩ := canopyLevelStep_single nodeHash h2
+      have hH := (Prod.mk.inj (List.cons.inj (hb1.symm.trans hb2)).1).2
+      rcases canopyParentHash_binding nodeHash hH with hc | ⟨e1, e2⟩
+      · exact Or.inl hc
+      · subst e1; subst e2; subst hs1; subst hs2
+        exact Or.inr ⟨rfl, rfl⟩
+    | [_], _ :: _ :: _, _, hIdx, _, _ => cases (List.cons.inj hIdx).2
+    | _ :: _ :: _, [_], _, hIdx, _, _ => cases (List.cons.inj hIdx).2
+    | (u, hu) :: (v, hv) :: tl1, (u2, hu2) :: (v2, hv2) :: tl2, hLen, hIdx, h1, h2 =>
+      have hu_eq : u = u2 := (List.cons.inj hIdx).1
+      have hv_eq : v = v2 := (List.cons.inj (List.cons.inj hIdx).2).1
+      have hTl : tl1.map Prod.fst = tl2.map Prod.fst := (List.cons.inj (List.cons.inj hIdx).2).2
+      subst hu_eq; subst hv_eq
+      have hLen1 : ((v, hv) :: tl1).length < n := Nat.lt_of_succ_lt_succ hLen
+      have hLen2 : tl1.length < n := Nat.lt_of_succ_lt hLen1
+      by_cases hv' : v = u ^^^ 1
+      · obtain ⟨act1, hr1, hb1⟩ := canopyLevelStep_pair nodeHash hv' h1
+        obtain ⟨act2, hr2, hb2⟩ := canopyLevelStep_pair nodeHash hv' h2
+        obtain ⟨hHead, hAct⟩ := List.cons.inj (hb1.symm.trans hb2)
+        subst hAct
+        rcases canopyNode_binding nodeHash (Prod.mk.inj hHead).2 with hc | ⟨e1, e2⟩
+        · exact Or.inl hc
+        · rcases ih tl1 tl2 s1 s2 act1 t hLen2 hTl hr1 hr2 with hc | ⟨eT, eS⟩
+          · exact Or.inl hc
+          · subst e1; subst e2; subst eT; subst eS
+            exact Or.inr ⟨rfl, rfl⟩
+      · obtain ⟨c1, r1, act1, hs1, hr1, hb1⟩ := canopyLevelStep_solo nodeHash hv' h1
+        obtain ⟨c2, r2, act2, hs2, hr2, hb2⟩ := canopyLevelStep_solo nodeHash hv' h2
+        obtain ⟨hHead, hAct⟩ := List.cons.inj (hb1.symm.trans hb2)
+        subst hAct
+        rcases canopyParentHash_binding nodeHash (Prod.mk.inj hHead).2 with hc | ⟨e1, e2⟩
+        · exact Or.inl hc
+        · rcases ih ((v, hv) :: tl1) ((v, hv2) :: tl2) r1 r2 act1 t hLen1
+              (congrArg (List.cons v) hTl) hr1 hr2 with hc | ⟨eT, eS⟩
+          · exact Or.inl hc
+          · subst e1; subst e2; subst eS; subst hs1; subst hs2
+            exact Or.inr ⟨congrArg (List.cons (u, hu)) eT, rfl⟩
+
+/-- Binding of the whole level iteration: equal final state and equal starting index list force
+    equal starting digests and equal sibling lists, or a `nodeHash` collision. -/
+private theorem canopyLevels_binding {D : Type} [DecidableEq D] (nodeHash : Nat → D → D → D) :
+    ∀ (d : Nat) (a1 a2 : List (Nat × D)) (s1 s2 : List D) (b : List (Nat × D)) (t : List D),
+      a1.map Prod.fst = a2.map Prod.fst →
+      canopyLevels nodeHash d a1 s1 = some (b, t) →
+      canopyLevels nodeHash d a2 s2 = some (b, t) →
+      (∃ (i : Nat) (l r l' r' : D), (l, r) ≠ (l', r') ∧ nodeHash i l r = nodeHash i l' r') ∨
+      (a1 = a2 ∧ s1 = s2)
+  | 0, a1, a2, s1, s2, b, t, _, h1, h2 => by
+    rw [canopyLevels] at h1 h2
+    obtain ⟨ha, hs⟩ := Prod.mk.inj (Option.some.inj (h1.trans h2.symm))
+    exact Or.inr ⟨ha, hs⟩
+  | d + 1, a1, a2, s1, s2, b, t, hIdx, h1, h2 => by
+    obtain ⟨m1, r1, hStep1, hRest1⟩ := canopyLevels_succ nodeHash h1
+    obtain ⟨m2, r2, hStep2, hRest2⟩ := canopyLevels_succ nodeHash h2
+    have hm1 := (canopyLevelStep_shape nodeHash _ a1 s1 m1 r1 (Nat.lt_succ_self _) hStep1).1
+    have hm2 := (canopyLevelStep_shape nodeHash _ a2 s2 m2 r2 (Nat.lt_succ_self _) hStep2).1
+    rw [hIdx] at hm1
+    rcases canopyLevels_binding nodeHash d m1 m2 r1 r2 b t (hm1.trans hm2.symm) hRest1 hRest2
+      with hc | ⟨eM, eR⟩
+    · exact Or.inl hc
+    · subst eM; subst eR
+      exact canopyLevelStep_binding nodeHash _ a1 a2 s1 s2 m1 r1 (Nat.lt_succ_self _) hIdx
+        hStep1 hStep2
+
+/-- **Binding of the Steiner multiproof verifier (collision extraction).** If two distinct
+    openings `(leaves₁, proof₁) ≠ (leaves₂, proof₂)` of the same index list are both accepted
+    against the same commitment, then either `rootHash` collides on two distinct top nodes, or
+    `nodeHash` collides at one node index on two distinct `(left, right)` pairs. -/
+theorem verifyCanopyMultiproof_binding {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (rootHash : Nat → D → D)
+    (logLeaves : Nat) (commitment : D)
+    (leaves₁ leaves₂ : List (Nat × D)) (proof₁ proof₂ : List D)
+    (hIdx : leaves₁.map Prod.fst = leaves₂.map Prod.fst)
+    (hAcc₁ : verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves₁ proof₁ = true)
+    (hAcc₂ : verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves₂ proof₂ = true)
+    (hNe : (leaves₁, proof₁) ≠ (leaves₂, proof₂)) :
+    (∃ top₁ top₂ : D, top₁ ≠ top₂ ∧ rootHash logLeaves top₁ = rootHash logLeaves top₂) ∨
+    (∃ (i : Nat) (l r l' r' : D), (l, r) ≠ (l', r') ∧ nodeHash i l r = nodeHash i l' r') := by
+  obtain ⟨top1, hL1, hR1⟩ :=
+    canopy_accept_unpack nodeHash rootHash logLeaves commitment leaves₁ proof₁ hAcc₁
+  obtain ⟨top2, hL2, hR2⟩ :=
+    canopy_accept_unpack nodeHash rootHash logLeaves commitment leaves₂ proof₂ hAcc₂
+  by_cases hTop : top1 = top2
+  · subst hTop
+    have hIdx' : (leaves₁.map (fun p => (2 ^ logLeaves + p.1, p.2))).map Prod.fst =
+        (leaves₂.map (fun p => (2 ^ logLeaves + p.1, p.2))).map Prod.fst := by
+      rw [canopy_map_fst, canopy_map_fst, hIdx]
+    rcases canopyLevels_binding nodeHash logLeaves _ _ proof₁ proof₂ _ _ hIdx' hL1 hL2
+      with hc | ⟨eA, eP⟩
+    · exact Or.inr hc
+    · have eL := canopy_lift_inj (2 ^ logLeaves) leaves₁ leaves₂ eA
+      subst eL; subst eP
+      exact absurd rfl hNe
+  · exact Or.inl ⟨top1, top2, hTop, hR1.trans hR2.symm⟩
+
+/-- **Tampered Steiner multiproof.** Starting from an accepted opening, any change to a leaf
+    digest or to the sibling list (same index list, different data) is rejected, unless it
+    exhibits a `rootHash` or `nodeHash` collision. -/
+theorem verifyCanopyMultiproof_tamper_rejected_or_collision {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (rootHash : Nat → D → D)
+    (logLeaves : Nat) (commitment : D)
+    (leaves leaves' : List (Nat × D)) (proof proof' : List D)
+    (hAcc : verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves proof = true)
+    (hIdx : leaves'.map Prod.fst = leaves.map Prod.fst)
+    (hNe : (leaves', proof') ≠ (leaves, proof)) :
+    verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves' proof' = false ∨
+    (∃ top₁ top₂ : D, top₁ ≠ top₂ ∧ rootHash logLeaves top₁ = rootHash logLeaves top₂) ∨
+    (∃ (i : Nat) (l r l' r' : D), (l, r) ≠ (l', r') ∧ nodeHash i l r = nodeHash i l' r') := by
+  cases hV : verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves' proof' with
+  | false => exact Or.inl rfl
+  | true =>
+    exact Or.inr (verifyCanopyMultiproof_binding nodeHash rootHash logLeaves commitment
+      leaves' leaves proof' proof hIdx hV hAcc hNe)
+
+/-! ### Concrete instance: `logLeaves = 3`, opened leaves `{1, 2, 6}` -/
+
+/-- Cantor pairing on `Nat`, used as a toy digest combiner. -/
+def canopyToyPair (a b : Nat) : Nat := (a + b) * (a + b + 1) / 2 + b
+
+/-- Toy `hash_merkle_internal`: pairs the node index with the pair of children. -/
+def canopyToyNodeHash (i l r : Nat) : Nat := canopyToyPair i (canopyToyPair l r)
+
+/-- Toy `hash_tree_root`: pairs `logLeaves` with the top node. -/
+def canopyToyRootHash (logLeaves top : Nat) : Nat := canopyToyPair logLeaves top
+
+/-- Toy leaf digest of leaf `i`. -/
+def canopyToyLeaf (i : Nat) : Nat := 100 + i
+
+/-- Commitment of the full 8-leaf toy tree, computed node by node (not through the verifier). -/
+def canopyToyCommitment : Nat :=
+  canopyToyRootHash 3
+    (canopyToyNodeHash 1
+      (canopyToyNodeHash 2
+        (canopyToyNodeHash 4 (canopyToyLeaf 0) (canopyToyLeaf 1))
+        (canopyToyNodeHash 5 (canopyToyLeaf 2) (canopyToyLeaf 3)))
+      (canopyToyNodeHash 3
+        (canopyToyNodeHash 6 (canopyToyLeaf 4) (canopyToyLeaf 5))
+        (canopyToyNodeHash 7 (canopyToyLeaf 6) (canopyToyLeaf 7))))
+
+/-- Opened leaves `{1, 2, 6}` with their digests. -/
+def canopyToyLeaves : List (Nat × Nat) :=
+  [(1, canopyToyLeaf 1), (2, canopyToyLeaf 2), (6, canopyToyLeaf 6)]
+
+/-- Steiner multiproof for `{1, 2, 6}`: leaves `0`, `3`, `7` at the bottom level and internal
+    node `6` one level up; nodes `4, 5` and `2, 3` merge without consuming a digest. -/
+def canopyToyProof : List Nat :=
+  [canopyToyLeaf 0, canopyToyLeaf 3, canopyToyLeaf 7,
+   canopyToyNodeHash 6 (canopyToyLeaf 4) (canopyToyLeaf 5)]
+
+theorem canopyToy_honest_accepted :
+    verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+      canopyToyLeaves canopyToyProof = true := by decide
+
+theorem canopyToy_sibling_count :
+    steinerSiblingCount 3 [1, 2, 6] = 4 := by decide
+
+/-- A flipped sibling digest (leaf `7` replaced) is rejected. -/
+theorem canopyToy_flipped_sibling_rejected :
+    verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+      canopyToyLeaves
+      [canopyToyLeaf 0, canopyToyLeaf 3, canopyToyLeaf 7 + 1,
+       canopyToyNodeHash 6 (canopyToyLeaf 4) (canopyToyLeaf 5)] = false := by decide
+
+/-- A flipped leaf digest (leaf `2`) is rejected. -/
+theorem canopyToy_flipped_leaf_rejected :
+    verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+      [(1, canopyToyLeaf 1), (2, canopyToyLeaf 2 + 1), (6, canopyToyLeaf 6)]
+      canopyToyProof = false := by decide
+
+/-- The proof with its last sibling removed is rejected. -/
+theorem canopyToy_missing_sibling_rejected :
+    verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+      canopyToyLeaves canopyToyProof.dropLast = false := by decide
+
+/-- The proof with one trailing digest appended is rejected. -/
+theorem canopyToy_extra_sibling_rejected :
+    verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+      canopyToyLeaves (canopyToyProof ++ [999]) = false := by decide
+
+/-- A duplicated index is rejected. -/
+theorem canopyToy_duplicate_index_rejected :
+    verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+      [(1, canopyToyLeaf 1), (1, canopyToyLeaf 1), (2, canopyToyLeaf 2), (6, canopyToyLeaf 6)]
+      canopyToyProof = false := by decide
+
+/-- An unsorted index list is rejected. -/
+theorem canopyToy_unsorted_index_rejected :
+    verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+      [(2, canopyToyLeaf 2), (1, canopyToyLeaf 1), (6, canopyToyLeaf 6)]
+      canopyToyProof = false := by decide
+
+/-- An index `≥ 2^logLeaves` is rejected. -/
+theorem canopyToy_out_of_range_index_rejected :
+    verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+      [(1, canopyToyLeaf 1), (2, canopyToyLeaf 2), (8, canopyToyLeaf 6)]
+      canopyToyProof = false := by decide
+
+/-- **The exact-consumption check is load-bearing.** The relaxed verifier, which differs from
+    `verifyCanopyMultiproof` only by ignoring unconsumed digests, accepts the honest proof with a
+    trailing digest appended, while `verifyCanopyMultiproof` rejects the same input. -/
+theorem canopyToy_relaxed_accepts_extra_sibling :
+    verifyCanopyMultiproofRelaxed canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+      canopyToyLeaves (canopyToyProof ++ [999]) = true ∧
+    verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+      canopyToyLeaves (canopyToyProof ++ [999]) = false := by decide
+
+/-- Non-vacuity witness for §3: the honest toy opening is accepted, carries exactly
+    `steinerSiblingCount` siblings, and every other opening of the same indices against the same
+    commitment is rejected or exhibits a collision of the toy hashes. -/
+theorem inhabited_canopy_multiproof_binding :
+    verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+      canopyToyLeaves canopyToyProof = true ∧
+    canopyToyProof.length = steinerSiblingCount 3 (canopyToyLeaves.map Prod.fst) ∧
+    (∀ (leaves' : List (Nat × Nat)) (proof' : List Nat),
+      leaves'.map Prod.fst = canopyToyLeaves.map Prod.fst →
+      (leaves', proof') ≠ (canopyToyLeaves, canopyToyProof) →
+      verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+        leaves' proof' = false ∨
+      (∃ top₁ top₂ : Nat, top₁ ≠ top₂ ∧ canopyToyRootHash 3 top₁ = canopyToyRootHash 3 top₂) ∨
+      (∃ (i l r l' r' : Nat), (l, r) ≠ (l', r') ∧
+        canopyToyNodeHash i l r = canopyToyNodeHash i l' r')) :=
+  ⟨canopyToy_honest_accepted,
+   verifyCanopyMultiproof_exact_sibling_count canopyToyNodeHash canopyToyRootHash 3
+     canopyToyCommitment canopyToyLeaves canopyToyProof canopyToy_honest_accepted,
+   fun leaves' proof' hIdx hNe =>
+     verifyCanopyMultiproof_tamper_rejected_or_collision canopyToyNodeHash canopyToyRootHash 3
+       canopyToyCommitment canopyToyLeaves leaves' canopyToyProof proof'
+       canopyToy_honest_accepted hIdx hNe⟩
+
+/-! ## §4. `GoldilocksExt4` Encoding, Multi-Stage WHIR Rate Escalation, Row-Committed Witnesses, and Transcript-Extracted Collisions (`field.rs`, `pcs.rs`) -/
+
+/-! ### Canonical 32-byte little-endian encoding (`field.rs:to_le_bytes`, `from_le_bytes_canonical`) -/
+
+/-- Byte `(n / d) mod 256`; `d` ranges over `256^i`. -/
+def leByte (n d : Nat) : UInt8 := UInt8.ofNatLT (n / d % 256) (Nat.mod_lt _ (by decide))
+
+theorem leByte_toNat (n d : Nat) : (leByte n d).toNat = n / d % 256 := by rfl
+
+/-- Value of eight little-endian bytes. -/
+def le64Value (b0 b1 b2 b3 b4 b5 b6 b7 : UInt8) : Nat :=
+  b0.toNat + 256 * b1.toNat + 65536 * b2.toNat + 16777216 * b3.toNat +
+    4294967296 * b4.toNat + 1099511627776 * b5.toNat + 281474976710656 * b6.toNat +
+    72057594037927936 * b7.toNat
+
+private theorem le64_recompose (n : Nat) (h : n < 18446744073709551616) :
+    n / 1 % 256 + 256 * (n / 256 % 256) + 65536 * (n / 65536 % 256) +
+      16777216 * (n / 16777216 % 256) + 4294967296 * (n / 4294967296 % 256) +
+      1099511627776 * (n / 1099511627776 % 256) +
+      281474976710656 * (n / 281474976710656 % 256) +
+      72057594037927936 * (n / 72057594037927936 % 256) = n := by
+  omega
+
+private theorem le64_digit (v0 v1 v2 v3 v4 v5 v6 v7 : Nat)
+    (h0 : v0 < 256) (h1 : v1 < 256) (h2 : v2 < 256) (h3 : v3 < 256)
+    (h4 : v4 < 256) (h5 : v5 < 256) (h6 : v6 < 256) (h7 : v7 < 256)
+    (N : Nat)
+    (hN : N = v0 + 256 * v1 + 65536 * v2 + 16777216 * v3 + 4294967296 * v4 +
+      1099511627776 * v5 + 281474976710656 * v6 + 72057594037927936 * v7) :
+    N / 1 % 256 = v0 ∧ N / 256 % 256 = v1 ∧ N / 65536 % 256 = v2 ∧
+    N / 16777216 % 256 = v3 ∧ N / 4294967296 % 256 = v4 ∧
+    N / 1099511627776 % 256 = v5 ∧ N / 281474976710656 % 256 = v6 ∧
+    N / 72057594037927936 % 256 = v7 := by
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;> omega
+
+/-- `field.rs:Goldilocks::to_le_bytes`: eight little-endian bytes of the canonical value. -/
+def encodeGoldilocksLe8 (a : Goldilocks) : List UInt8 :=
+  [leByte a.val 1, leByte a.val 256, leByte a.val 65536, leByte a.val 16777216,
+   leByte a.val 4294967296, leByte a.val 1099511627776, leByte a.val 281474976710656,
+   leByte a.val 72057594037927936]
+
+/-- `field.rs:Goldilocks::from_le_bytes_canonical` on the first eight bytes: rejects a limb
+    `≥ p` and returns the unconsumed tail. -/
+def decodeGoldilocksLe8 : List UInt8 → Option (Goldilocks × List UInt8)
+  | b0 :: b1 :: b2 :: b3 :: b4 :: b5 :: b6 :: b7 :: rest =>
+    if h : le64Value b0 b1 b2 b3 b4 b5 b6 b7 < goldilocksPrime then
+      some (⟨le64Value b0 b1 b2 b3 b4 b5 b6 b7, h⟩, rest)
+    else none
+  | _ => none
+
+theorem decodeGoldilocksLe8_encode (a : Goldilocks) (rest : List UInt8) :
+    decodeGoldilocksLe8 (encodeGoldilocksLe8 a ++ rest) = some (a, rest) := by
+  have hv : le64Value (leByte a.val 1) (leByte a.val 256) (leByte a.val 65536)
+      (leByte a.val 16777216) (leByte a.val 4294967296) (leByte a.val 1099511627776)
+      (leByte a.val 281474976710656) (leByte a.val 72057594037927936) = a.val :=
+    le64_recompose a.val (Goldilocks.val_lt_two_pow_64 a)
+  have hlt : le64Value (leByte a.val 1) (leByte a.val 256) (leByte a.val 65536)
+      (leByte a.val 16777216) (leByte a.val 4294967296) (leByte a.val 1099511627776)
+      (leByte a.val 281474976710656) (leByte a.val 72057594037927936) < goldilocksPrime := by
+    rw [hv]; exact a.isLt
+  show decodeGoldilocksLe8
+      (leByte a.val 1 :: leByte a.val 256 :: leByte a.val 65536 :: leByte a.val 16777216 ::
+        leByte a.val 4294967296 :: leByte a.val 1099511627776 ::
+        leByte a.val 281474976710656 :: leByte a.val 72057594037927936 :: rest) = some (a, rest)
+  rw [decodeGoldilocksLe8, dite_eq_left hlt]
+  exact congrArg (fun g => some (g, rest)) (Goldilocks.ext hv)
+
+theorem decodeGoldilocksLe8_canonical :
+    ∀ (bs : List UInt8) (a : Goldilocks) (rest : List UInt8),
+      decodeGoldilocksLe8 bs = some (a, rest) → bs = encodeGoldilocksLe8 a ++ rest
+  | b0 :: b1 :: b2 :: b3 :: b4 :: b5 :: b6 :: b7 :: r, a, rest, h => by
+    rw [decodeGoldilocksLe8] at h
+    by_cases hlt : le64Value b0 b1 b2 b3 b4 b5 b6 b7 < goldilocksPrime
+    · rw [dite_eq_left hlt] at h
+      obtain ⟨ha, hr⟩ := Prod.mk.inj (Option.some.inj h)
+      obtain ⟨e0, e1, e2, e3, e4, e5, e6, e7⟩ :=
+        le64_digit b0.toNat b1.toNat b2.toNat b3.toNat b4.toNat b5.toNat b6.toNat b7.toNat
+          (UInt8.toNat_lt b0) (UInt8.toNat_lt b1) (UInt8.toNat_lt b2) (UInt8.toNat_lt b3)
+          (UInt8.toNat_lt b4) (UInt8.toNat_lt b5) (UInt8.toNat_lt b6) (UInt8.toNat_lt b7)
+          (le64Value b0 b1 b2 b3 b4 b5 b6 b7) rfl
+      rw [← ha, ← hr]
+      show b0 :: b1 :: b2 :: b3 :: b4 :: b5 :: b6 :: b7 :: r =
+        leByte (le64Value b0 b1 b2 b3 b4 b5 b6 b7) 1 ::
+        leByte (le64Value b0 b1 b2 b3 b4 b5 b6 b7) 256 ::
+        leByte (le64Value b0 b1 b2 b3 b4 b5 b6 b7) 65536 ::
+        leByte (le64Value b0 b1 b2 b3 b4 b5 b6 b7) 16777216 ::
+        leByte (le64Value b0 b1 b2 b3 b4 b5 b6 b7) 4294967296 ::
+        leByte (le64Value b0 b1 b2 b3 b4 b5 b6 b7) 1099511627776 ::
+        leByte (le64Value b0 b1 b2 b3 b4 b5 b6 b7) 281474976710656 ::
+        leByte (le64Value b0 b1 b2 b3 b4 b5 b6 b7) 72057594037927936 :: r
+      rw [UInt8.toNat_inj.mp ((leByte_toNat _ 1).trans e0),
+        UInt8.toNat_inj.mp ((leByte_toNat _ 256).trans e1),
+        UInt8.toNat_inj.mp ((leByte_toNat _ 65536).trans e2),
+        UInt8.toNat_inj.mp ((leByte_toNat _ 16777216).trans e3),
+        UInt8.toNat_inj.mp ((leByte_toNat _ 4294967296).trans e4),
+        UInt8.toNat_inj.mp ((leByte_toNat _ 1099511627776).trans e5),
+        UInt8.toNat_inj.mp ((leByte_toNat _ 281474976710656).trans e6),
+        UInt8.toNat_inj.mp ((leByte_toNat _ 72057594037927936).trans e7)]
+    · rw [dite_eq_right hlt] at h; cases h
+  | [], _, _, h => by cases h
+  | [_], _, _, h => by cases h
+  | [_, _], _, _, h => by cases h
+  | [_, _, _], _, _, h => by cases h
+  | [_, _, _, _], _, _, h => by cases h
+  | [_, _, _, _, _], _, _, h => by cases h
+  | [_, _, _, _, _, _], _, _, h => by cases h
+  | [_, _, _, _, _, _, _], _, _, h => by cases h
+
+/-- `field.rs:GoldilocksExt4::to_le_bytes`: the four limbs `[c0.c0, c0.c1, c1.c0, c1.c1]`, eight
+    little-endian bytes each. -/
+def encodeExt4Bytes32 (x : GoldilocksExt4) : List UInt8 :=
+  encodeGoldilocksLe8 x.c0.c0 ++ (encodeGoldilocksLe8 x.c0.c1 ++
+    (encodeGoldilocksLe8 x.c1.c0 ++ (encodeGoldilocksLe8 x.c1.c1 ++ [])))
+
+/-- `field.rs:GoldilocksExt4::from_le_bytes_canonical`: accepts exactly 32 bytes whose four
+    limbs are all `< p`. -/
+def decodeExt4Bytes32 (bs : List UInt8) : Option GoldilocksExt4 :=
+  match decodeGoldilocksLe8 bs with
+  | none => none
+  | some (l0, r0) =>
+    match decodeGoldilocksLe8 r0 with
+    | none => none
+    | some (l1, r1) =>
+      match decodeGoldilocksLe8 r1 with
+      | none => none
+      | some (l2, r2) =>
+        match decodeGoldilocksLe8 r2 with
+        | some (l3, []) => some (GoldilocksExt4.ofLimbs l0 l1 l2 l3)
+        | _ => none
+
+theorem encodeExt4Bytes32_length (x : GoldilocksExt4) : (encodeExt4Bytes32 x).length = 32 := by
+  rfl
+
+/-- **Canonical 32-byte roundtrip.** -/
+theorem decodeExt4Bytes32_encode (x : GoldilocksExt4) :
+    decodeExt4Bytes32 (encodeExt4Bytes32 x) = some x := by
+  obtain ⟨⟨a0, a1⟩, ⟨a2, a3⟩⟩ := x
+  simp only [decodeExt4Bytes32, encodeExt4Bytes32, decodeGoldilocksLe8_encode,
+    GoldilocksExt4.ofLimbs]
+
+/-- **Non-malleability.** Every accepted byte string is the canonical encoding of the decoded
+    element; in particular a string with a limb `≥ p`, or of length other than 32, is rejected. -/
+theorem decodeExt4Bytes32_canonical (bs : List UInt8) (x : GoldilocksExt4)
+    (h : decodeExt4Bytes32 bs = some x) : encodeExt4Bytes32 x = bs := by
+  unfold decodeExt4Bytes32 at h
+  cases h0 : decodeGoldilocksLe8 bs with
+  | none => rw [h0] at h; cases h
+  | some p0 =>
+    obtain ⟨l0, r0⟩ := p0
+    rw [h0] at h
+    dsimp only at h
+    cases h1 : decodeGoldilocksLe8 r0 with
+    | none => rw [h1] at h; cases h
+    | some p1 =>
+      obtain ⟨l1, r1⟩ := p1
+      rw [h1] at h
+      dsimp only at h
+      cases h2 : decodeGoldilocksLe8 r1 with
+      | none => rw [h2] at h; cases h
+      | some p2 =>
+        obtain ⟨l2, r2⟩ := p2
+        rw [h2] at h
+        dsimp only at h
+        cases h3 : decodeGoldilocksLe8 r2 with
+        | none => rw [h3] at h; cases h
+        | some p3 =>
+          obtain ⟨l3, r3⟩ := p3
+          rw [h3] at h
+          cases r3 with
+          | cons _ _ => cases h
+          | nil =>
+            have hx : GoldilocksExt4.ofLimbs l0 l1 l2 l3 = x := Option.some.inj h
+            rw [← hx, decodeGoldilocksLe8_canonical bs l0 r0 h0,
+              decodeGoldilocksLe8_canonical r0 l1 r1 h1,
+              decodeGoldilocksLe8_canonical r1 l2 r2 h2,
+              decodeGoldilocksLe8_canonical r2 l3 [] h3]
+            rfl
+
+/-- Two byte strings that decode to the same element are equal. -/
+theorem decodeExt4Bytes32_injective (bs bs' : List UInt8) (x : GoldilocksExt4)
+    (h : decodeExt4Bytes32 bs = some x) (h' : decodeExt4Bytes32 bs' = some x) : bs = bs' :=
+  (decodeExt4Bytes32_canonical bs x h).symm.trans (decodeExt4Bytes32_canonical bs' x h')
+
+/-- A limb equal to `p` (non-canonical encoding of `0`) is rejected. -/
+theorem decodeExt4Bytes32_rejects_noncanonical_limb :
+    decodeExt4Bytes32
+      ([1, 0, 0, 0, 255, 255, 255, 255] ++ List.replicate 24 (0 : UInt8)) = none ∧
+    decodeExt4Bytes32 (List.replicate 32 (0 : UInt8)) = some GoldilocksExt4.zero := by
+  decide
+
+/-! ### Deployed multi-stage WHIR schedule and extension-field error denominators (`pcs.rs`) -/
+
+/-- `pcs.rs:WhirStageSpec`. -/
+structure WhirStageSpec where
+  /-- Reed-Solomon blowup `1 / ρ_i` of the stage oracle. -/
+  blowup : Nat
+  /-- Multilinear variables folded during the stage. -/
+  stepVars : Nat
+  /-- Coset fibers opened from the stage oracle. -/
+  numQueries : Nat
+  deriving DecidableEq, Repr
+
+/-- `pcs.rs:WhirSecurityRegime`: unconditional `[BCIKS20]` Johnson-radius query-accounting
+    regimes (`sqrt ρ + η` per query, with wire tags `2` and `4`; retired capacity wire tags
+    `0, 1, 3` are rejected on deserialization). -/
+inductive WhirSecurityRegime where
+  | bciksJohnsonClassical128
+  | bciksJohnsonQrom128
+  deriving DecidableEq, Repr
+
+def WhirSecurityRegime.defaultRegime : WhirSecurityRegime := .bciksJohnsonQrom128
+
+def WhirSecurityRegime.tagByte : WhirSecurityRegime → UInt8
+  | .bciksJohnsonClassical128 => 2
+  | .bciksJohnsonQrom128 => 4
+
+def WhirSecurityRegime.decodeTag? : UInt8 → Option WhirSecurityRegime
+  | 2 => some .bciksJohnsonClassical128
+  | 4 => some .bciksJohnsonQrom128
+  | _ => none
+
+theorem WhirSecurityRegime.decodeTag?_tagByte (r : WhirSecurityRegime) :
+    WhirSecurityRegime.decodeTag? r.tagByte = some r := by
+  cases r <;> rfl
+
+/-- `#tooth`: retired capacity-proximity wire tags `0`, `1`, and `3` are rejected (`none`) by
+    `WhirSecurityRegime.decodeTag?`, matching `WhirSecurityRegime::from_u8` in `pcs.rs`. -/
+theorem tooth_iop_whirSecurityRegime_decodeTag_rejects_retired :
+    WhirSecurityRegime.decodeTag? 0 = none ∧
+    WhirSecurityRegime.decodeTag? 1 = none ∧
+    WhirSecurityRegime.decodeTag? 3 = none := by
+  decide
+
+/-- `pcs.rs:WhirSchedule`. -/
+structure WhirSchedule where
+  regime : WhirSecurityRegime
+  earlyStopVars : Nat
+  stages : List WhirStageSpec
+  deriving DecidableEq, Repr
+
+/-- `pcs.rs:PCS_POW_BITS`: per-stage transcript proof-of-work difficulty. -/
+def whirPowBits : Nat := 16
+
+/-- `pcs.rs:stage_geometry`, defined for `2 ≤ numVars ≤ 24`: blowups, folded variables and
+    early-stop count of every stage, carrying baseline counts `56 / 30 / 21 / 18` (`68` for a
+    single stage) that `WhirSecurityRegime.schedule` overrides. -/
+def whirLegacyStageGeometry (numVars : Nat) : WhirSchedule :=
+  if numVars ≤ 6 then
+    let es := if numVars ≤ 3 then 1 else 2
+    ⟨.bciksJohnsonQrom128, es, [⟨16, numVars - es, 68⟩]⟩
+  else if numVars ≤ 11 then
+    let es := if numVars ≤ 8 then 3 else 4
+    let rem := numVars - es
+    let s0 := (rem + 1) / 2
+    ⟨.bciksJohnsonQrom128, es, [⟨4, s0, 56⟩, ⟨16, rem - s0, 30⟩]⟩
+  else if numVars ≤ 16 then
+    let es := if numVars ≤ 13 then 4 else if numVars ≤ 15 then 5 else 6
+    let rem := numVars - es
+    let s0 := min 4 (rem - 4)
+    let s1 := (rem - s0) / 2
+    ⟨.bciksJohnsonQrom128, es, [⟨4, s0, 56⟩, ⟨16, s1, 30⟩, ⟨64, rem - s0 - s1, 21⟩]⟩
+  else if numVars ≤ 20 then
+    ⟨.bciksJohnsonQrom128, numVars - 12, [⟨4, 5, 56⟩, ⟨16, 3, 30⟩, ⟨64, 4, 21⟩]⟩
+  else if numVars = 21 then
+    ⟨.bciksJohnsonQrom128, 8, [⟨4, 6, 56⟩, ⟨16, 3, 30⟩, ⟨64, 4, 21⟩]⟩
+  else if numVars = 22 then
+    ⟨.bciksJohnsonQrom128, 8, [⟨4, 6, 56⟩, ⟨16, 4, 30⟩, ⟨64, 4, 21⟩]⟩
+  else if numVars = 23 then
+    ⟨.bciksJohnsonQrom128, 7, [⟨4, 6, 56⟩, ⟨16, 4, 30⟩, ⟨64, 3, 21⟩, ⟨256, 3, 18⟩]⟩
+  else
+    ⟨.bciksJohnsonQrom128, 8, [⟨4, 6, 56⟩, ⟨16, 4, 30⟩, ⟨64, 3, 21⟩, ⟨256, 3, 18⟩]⟩
+
+/-- `log2` of a supported blowup (`blowup.trailing_zeros()` on `4 | 16 | 64 | 256`). -/
+def whirLogBlowup : Nat → Nat
+  | 4 => 2
+  | 16 => 4
+  | 64 => 6
+  | 256 => 8
+  | _ => 0
+
+/-- Query-exponent target of an unconditional Johnson regime in bits of `blowup ^ numQueries`:
+    `256` (`bciksJohnsonClassical128`) or `512` (`bciksJohnsonQrom128`), since agreement `sqrt ρ`
+    per query needs twice the exponent. -/
+def WhirSecurityRegime.queryExponentBits : WhirSecurityRegime → Nat
+  | .bciksJohnsonClassical128 => 256
+  | .bciksJohnsonQrom128 => 512
+
+/-- Per-stage query count of `pcs.rs:WhirSecurityRegime::minimum_queries`:
+    `ceil(bits / log2 blowup)`, plus one classical or two QROM Johnson slack queries. -/
+def WhirSecurityRegime.numQueries (r : WhirSecurityRegime) (blowup : Nat) : Nat :=
+  let q := (r.queryExponentBits + whirLogBlowup blowup - 1) / whirLogBlowup blowup
+  match r with
+  | .bciksJohnsonClassical128 => q + 1
+  | .bciksJohnsonQrom128 => q + 2
+
+/-- `pcs.rs:WhirSecurityRegime::schedule`: the stage geometry with the regime's query counts. -/
+def WhirSecurityRegime.schedule (r : WhirSecurityRegime) (numVars : Nat) : WhirSchedule :=
+  ⟨r, (whirLegacyStageGeometry numVars).earlyStopVars,
+    (whirLegacyStageGeometry numVars).stages.map
+      (fun st => ⟨st.blowup, st.stepVars, r.numQueries st.blowup⟩)⟩
+
+/-- `pcs.rs:whir_stage_schedule`: the default (`bciksJohnsonQrom128`) schedule. -/
+def whirStageSchedule (numVars : Nat) : WhirSchedule :=
+  WhirSecurityRegime.bciksJohnsonQrom128.schedule numVars
+
+/-- Denominator `blowup ^ numQueries` of the stage query error `ρ_i ^ q_i`: the error of `q_i`
+    fiber queries when a cheating oracle agrees with the code on a `ρ_i` fraction. That
+    agreement bound is an input of this accounting; no proximity-gap statement is proved here. -/
+def WhirStageSpec.queryErrorDenominator (st : WhirStageSpec) : Nat := st.blowup ^ st.numQueries
+
+/-- Query error denominator times the classical grinding cost `2 ^ whirPowBits` of the stage
+    proof of work. A quantum search over nonces pays only about `2 ^ (whirPowBits / 2)`. -/
+def WhirStageSpec.fiatShamirDenominator (st : WhirStageSpec) : Nat :=
+  2 ^ whirPowBits * st.queryErrorDenominator
+
+/-- Consecutive blowups escalate by a factor of exactly `4`. -/
+def whirBlowupsEscalate : List Nat → Bool
+  | a :: b :: tl => (b == 4 * a) && whirBlowupsEscalate (b :: tl)
+  | _ => true
+
+/-- Production maximum number of sampled fibers per stage. -/
+def whirMaxQueryCap : Nat := 512
+
+/-- Structural and accounting checks on `r.schedule numVars` (the conditions of
+    `pcs.rs:WhirSchedule::validate` together with the regime's query-exponent target). -/
+def whirScheduleWellFormed (r : WhirSecurityRegime) (numVars : Nat) : Bool :=
+  let s := r.schedule numVars
+  decide (s.earlyStopVars + s.stages.foldl (fun acc st => acc + st.stepVars) 0 = numVars) &&
+  decide (1 ≤ s.earlyStopVars) && decide (s.earlyStopVars ≤ 8) &&
+  decide (1 ≤ s.stages.length) && decide (s.stages.length ≤ 4) &&
+  whirBlowupsEscalate (s.stages.map (·.blowup)) &&
+  s.stages.all (fun st =>
+    decide (1 ≤ st.stepVars) && decide (st.stepVars ≤ 6) && decide (st.numQueries ≤ whirMaxQueryCap) &&
+    decide (2 ^ r.queryExponentBits ≤ st.queryErrorDenominator))
+
+/-- For every regime and every supported variable count the schedule consumes exactly `numVars`
+    variables, has `1..4` stages of `1..6` folded variables, stops with `1..8` variables,
+    escalates the rate by `4` per stage, opens at most `512` fibers per stage, and every stage
+    reaches the regime's query-exponent target `ρ_i^{-q_i} ≥ 2^bits`. -/
+theorem whirSchedule_wellFormed (r : WhirSecurityRegime) (numVars : Nat)
+    (h2 : 2 ≤ numVars) (h24 : numVars ≤ 24) : whirScheduleWellFormed r numVars = true := by
+  have hAll : ∀ (r : WhirSecurityRegime) (k : Nat), k < 25 → 2 ≤ k →
+      whirScheduleWellFormed r k = true := by
+    intro r
+    cases r <;> decide +kernel
+  exact hAll r numVars (Nat.lt_succ_of_le h24) h2
+
+/-- Query counts of `bciksJohnsonClassical128` at the supported blowups `4, 16, 64, 256`. -/
+theorem whir_regime_query_counts :
+    [4, 16, 64, 256].map WhirSecurityRegime.bciksJohnsonClassical128.numQueries = [129, 65, 44, 33] := by
+  decide
+
+/-- Query counts of default `bciksJohnsonQrom128` at `4, 16, 64, 256`, including `+2` Johnson slack. -/
+theorem whir_qrom_regime_query_counts :
+    [4, 16, 64, 256].map WhirSecurityRegime.bciksJohnsonQrom128.numQueries = [258, 130, 88, 66] := by
+  decide
+
+/-- Deployed Johnson-QROM geometry at 24 variables. -/
+theorem whir_johnson_qrom_schedule_deployed :
+    WhirSecurityRegime.bciksJohnsonQrom128.schedule 24 =
+      ⟨.bciksJohnsonQrom128, 8,
+        [⟨4, 6, 258⟩, ⟨16, 4, 130⟩, ⟨64, 3, 88⟩, ⟨256, 3, 66⟩]⟩ := by decide
+
+/-- Exact bijection from the IOP `WhirSecurityRegime` to `Qsag.WhirBudgetRegime`. -/
+def WhirSecurityRegime.toBudgetRegime : WhirSecurityRegime → Qsag.WhirBudgetRegime
+  | .bciksJohnsonClassical128 => .bciksJohnsonClassical128
+  | .bciksJohnsonQrom128 => .bciksJohnsonQrom128
+
+/-- The IOP and concrete security budget use the same stage geometry and query counts in
+    every profile, including the deployed Johnson-QROM `(258,130,88,66)` schedule. -/
+theorem whir_iop_budget_schedule_agreement (r : WhirSecurityRegime) :
+    ((r.schedule 24).stages.map (fun st => (st.blowup, st.stepVars, st.numQueries))) =
+      ((Qsag.whirSchedule4Stage r.toBudgetRegime).map
+        (fun st => (st.sqrtBlowup ^ 2, st.stepVars, st.numQueries))) := by
+  cases r <;> decide +kernel
+
+/-- The default (`bciksJohnsonQrom128`) schedule at `numVars = 20` (the `K = 8` shard):
+    `ρ = 1/4 → 1/16 → 1/64`, `q = (258, 130, 88)`, eight variables sent in the clear. -/
+theorem whirStageSchedule_deployed :
+    whirStageSchedule 20 =
+      ⟨.bciksJohnsonQrom128, 8, [⟨4, 5, 258⟩, ⟨16, 3, 130⟩, ⟨64, 4, 88⟩]⟩ := by decide
+
+/-- Query error denominators `B_i^{q_i}` of the default schedule at `numVars = 20`:
+    `2^516, 2^520, 2^528` (`(√B_i)^{q_i} = 2^258, 2^260, 2^264 > 2^256`), with no PoW credit. -/
+theorem whirStageSchedule_deployed_denominators :
+    (whirStageSchedule 20).stages.map (·.queryErrorDenominator) =
+      [2 ^ 516, 2 ^ 520, 2 ^ 528] := by decide +kernel
+
+/-- The baseline geometry template at `numVars = 20`: `ρ = 1/4 → 1/16 → 1/64` with
+    `q = (56, 30, 21)`. -/
+theorem whirLegacyStageGeometry_k8 :
+    whirLegacyStageGeometry 20 =
+      ⟨.bciksJohnsonQrom128, 8, [⟨4, 5, 56⟩, ⟨16, 3, 30⟩, ⟨64, 4, 21⟩]⟩ := by decide
+
+/-- Stage denominators of the `q = (56, 30, 21)` geometry: query errors `2^-112, 2^-120, 2^-126`;
+    `2^-128, 2^-136, 2^-142` with the full 16-bit classical grinding credit; and
+    `2^-120, 2^-128, 2^-134` with the 8-bit credit left by a quantum nonce search. -/
+theorem whir_legacy_k8_stage_denominators :
+    (whirLegacyStageGeometry 20).stages.map (·.queryErrorDenominator) =
+      [2 ^ 112, 2 ^ 120, 2 ^ 126] ∧
+    (whirLegacyStageGeometry 20).stages.map (·.fiatShamirDenominator) =
+      [2 ^ 128, 2 ^ 136, 2 ^ 142] ∧
+    (whirLegacyStageGeometry 20).stages.map (fun st => 2 ^ (whirPowBits / 2) * st.queryErrorDenominator) =
+      [2 ^ 120, 2 ^ 128, 2 ^ 134] := by decide
+
+/-- Union bound over the three stages of the `q = (56, 30, 21)` geometry with 16-bit grinding:
+    `1/D_0 + 1/D_1 + 1/D_2 ≤ 2^-127` for the Fiat-Shamir denominators `D_i`. -/
+theorem whir_legacy_k8_stage_union_bound :
+    2 ^ 127 * (2 ^ 136 * 2 ^ 142 + 2 ^ 128 * 2 ^ 142 + 2 ^ 128 * 2 ^ 136) ≤
+      2 ^ 128 * 2 ^ 136 * 2 ^ 142 := by decide
+
+/-- Union bound over the three stages of the default schedule at `numVars = 20`, without any
+    proof-of-work credit: `1/2^516 + 1/2^520 + 1/2^528 ≤ 2^-514`. -/
+theorem whirStageSchedule_deployed_union_bound :
+    2 ^ 514 * (2 ^ 520 * 2 ^ 528 + 2 ^ 516 * 2 ^ 528 + 2 ^ 516 * 2 ^ 520) ≤
+      2 ^ 516 * 2 ^ 520 * 2 ^ 528 := by decide +kernel
+
+/-- Every stage of every supported schedule of regime `r` has
+    `ρ_i^{-q_i} ≥ 2 ^ r.queryExponentBits`. -/
+theorem whirSchedule_stage_query_ge (r : WhirSecurityRegime) (numVars : Nat) (h2 : 2 ≤ numVars)
+    (h24 : numVars ≤ 24) (st : WhirStageSpec) (hSt : st ∈ (r.schedule numVars).stages) :
+    2 ^ r.queryExponentBits ≤ st.queryErrorDenominator := by
+  have hWf := whirSchedule_wellFormed r numVars h2 h24
+  unfold whirScheduleWellFormed at hWf
+  simp only [Bool.and_eq_true] at hWf
+  have hSt' := List.all_eq_true.mp hWf.2 st hSt
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at hSt'
+  exact hSt'.2
+
+/-- Every stage of the default (`bciksJohnsonQrom128`) schedule has `ρ_i^{-q_i} ≥ 2^512`
+    (`(√ρ_i)^{-q_i} ≥ 2^256`) before any grinding credit. -/
+theorem whirStageSchedule_stage_query_ge (numVars : Nat) (h2 : 2 ≤ numVars)
+    (h24 : numVars ≤ 24) (st : WhirStageSpec) (hSt : st ∈ (whirStageSchedule numVars).stages) :
+    2 ^ 512 ≤ st.queryErrorDenominator :=
+  whirSchedule_stage_query_ge .bciksJohnsonQrom128 numVars h2 h24 st hSt
+
+/-- `|GoldilocksExt4| = p^4 > 2^255`. -/
+theorem goldilocksExt4_card_gt_two_pow_255 : 2 ^ 255 < goldilocksPrime ^ 4 := by decide
+
+theorem goldilocksExt4_card_lt_two_pow_256 : goldilocksPrime ^ 4 < 2 ^ 256 := by decide
+
+theorem goldilocksExt4_card_eq_ext2_card_sq :
+    goldilocksPrime ^ 4 = goldilocksPrime ^ 2 * goldilocksPrime ^ 2 := by decide
+
+/-- **Error denominators over `GoldilocksExt4`.** An event count (error numerator) `n ≤ 2^b`
+    against a uniform challenge in a set of `p^4` elements has error `n / p^4 < 2^-(255 - b)`. -/
+theorem ext4_error_denominator_bound (n b : Nat) (hb : b ≤ 255) (hn : n ≤ 2 ^ b) :
+    n * 2 ^ (255 - b) < goldilocksPrime ^ 4 := by
+  have h1 : n * 2 ^ (255 - b) ≤ 2 ^ b * 2 ^ (255 - b) := Nat.mul_le_mul_right _ hn
+  have h2 : 2 ^ b * 2 ^ (255 - b) = 2 ^ 255 := by
+    rw [← Nat.pow_add, Nat.add_sub_of_le hb]
+  rw [h2] at h1
+  exact Nat.lt_of_le_of_lt h1 goldilocksExt4_card_gt_two_pow_255
+
+/-- **The `GoldilocksExt2` cliff.** Over a challenge set of `p^2 < 2^128` elements, every error
+    numerator `n ≥ 2^28` leaves fewer than `100` bits: `n / p^2 > 2^-100`. -/
+theorem ext2_error_denominator_cliff (n : Nat) (hn : 2 ^ 28 ≤ n) :
+    goldilocksPrime ^ 2 < n * 2 ^ 100 := by
+  have h1 : goldilocksPrime ^ 2 < 2 ^ 28 * 2 ^ 100 := by decide
+  exact Nat.lt_of_lt_of_le h1 (Nat.mul_le_mul_right _ hn)
+
+/-- Sumcheck Schwartz-Zippel accounting: `rounds` rounds of degree-`d` round polynomials with
+    `rounds * d ≤ 2^8` have total error `rounds * d / p^4 < 2^-247`. -/
+theorem ext4_sumcheck_schwartz_zippel_denominator (rounds d : Nat) (h : rounds * d ≤ 2 ^ 8) :
+    rounds * d * 2 ^ 247 < goldilocksPrime ^ 4 :=
+  ext4_error_denominator_bound (rounds * d) 8 (by decide) h
+
+/-- The degree-`8` row sumcheck (`ROW_SUMCHECK_DEGREE = 8`) with at most `32` rounds. -/
+theorem ext4_row_sumcheck_denominator (rounds : Nat) (h : rounds ≤ 32) :
+    rounds * 8 * 2 ^ 247 < goldilocksPrime ^ 4 :=
+  ext4_sumcheck_schwartz_zippel_denominator rounds 8 (Nat.mul_le_mul_right 8 h)
+
+/-- Out-of-domain and folding accounting for a numerator of the shape `|D|^2 * c` with
+    `|D| = 2^logDomain ≤ 2^26` and a proximity-parameter factor `c ≤ 2^33` (an assumption on
+    the parameters, not derived here): the error is below `2^-170` over `GoldilocksExt4`. -/
+theorem ext4_folding_denominator (logDomain c : Nat) (hD : logDomain ≤ 26) (hc : c ≤ 2 ^ 33) :
+    2 ^ (2 * logDomain) * c * 2 ^ 170 < goldilocksPrime ^ 4 := by
+  have h1 : 2 ^ (2 * logDomain) ≤ 2 ^ 52 :=
+    Nat.pow_le_pow_right (by decide) (Nat.mul_le_mul_left 2 hD)
+  have h2 : 2 ^ (2 * logDomain) * c ≤ 2 ^ 85 :=
+    Nat.le_trans (Nat.mul_le_mul h1 hc) (by decide)
+  exact ext4_error_denominator_bound (2 ^ (2 * logDomain) * c) 85 (by decide) h2
+
+/-- The same numerator at `|D| = 2^26`, `c = 2^33` leaves fewer than `44` bits over
+    `GoldilocksExt2`. -/
+theorem ext2_folding_denominator_cliff :
+    goldilocksPrime ^ 2 < 2 ^ (2 * 26) * 2 ^ 33 * 2 ^ 44 := by decide
+
+/-- **Schwartz-Zippel root bound over `GoldilocksExt4`.** A non-zero polynomial of formal degree
+    `≤ d` has at most `d` roots in any duplicate-free list of challenges. Together with
+    `ext4_error_denominator_bound` this is the `d / p^4` per-round sumcheck error. -/
+theorem ext4_roundPoly_roots_le (d : Nat) (cs S : List GoldilocksExt4)
+    (hS : S.Nodup) (hLen : cs.length ≤ d + 1)
+    (hNe : ∃ x₀ : GoldilocksExt4, RoundPoly.evalCoeffs cs x₀ ≠ CommRingOps.zero) :
+    (S.filter (fun r => decide (RoundPoly.evalCoeffs cs r = CommRingOps.zero))).length ≤ d :=
+  RoundPoly.roots_nodup_length_le d cs S hS hLen hNe
+
+/-- Inhabitedness witness for the schedule and the extension-field accounting. -/
+theorem inhabited_whir_ext4_accounting :
+    whirScheduleWellFormed .bciksJohnsonQrom128 20 = true ∧
+    (whirStageSchedule 20).stages.length = 3 ∧
+    2 ^ 255 < goldilocksPrime ^ 4 ∧
+    8 * 32 * 2 ^ 247 < goldilocksPrime ^ 4 ∧
+    goldilocksPrime ^ 2 < 2 ^ 28 * 2 ^ 100 ∧
+    (CommRingOps.mul GoldilocksExt4.vBasis (GoldilocksExt4.inv GoldilocksExt4.vBasis) =
+      (CommRingOps.one : GoldilocksExt4)) :=
+  ⟨whirSchedule_wellFormed .bciksJohnsonQrom128 20 (by decide) (by decide), by decide,
+   goldilocksExt4_card_gt_two_pow_255, by decide, by decide,
+   GoldilocksExt4.mul_inv_cancel (by decide)⟩
+
+/-! ### Row-committed witness cells: canonical codec, extraction, and binding -/
+
+/-- A canonical prefix codec into trace cells: `dec` parses a value off the front of a cell
+    list and returns the unconsumed tail; `enc_dec` says every accepted cell list is the
+    canonical encoding followed by that tail. -/
+structure CellCodec (α : Type) where
+  enc : α → List Goldilocks
+  dec : List Goldilocks → Option (α × List Goldilocks)
+  dec_enc : ∀ (a : α) (rest : List Goldilocks), dec (enc a ++ rest) = some (a, rest)
+  enc_dec : ∀ (cs : List Goldilocks) (a : α) (rest : List Goldilocks),
+    dec cs = some (a, rest) → cs = enc a ++ rest
+
+def cellMapDec {α β : Type} (da : List Goldilocks → Option (α × List Goldilocks))
+    (f : α → β) (cs : List Goldilocks) : Option (β × List Goldilocks) :=
+  match da cs with
+  | none => none
+  | some (a, r) => some (f a, r)
+
+private theorem cellMapDec_some {α β : Type}
+    {da : List Goldilocks → Option (α × List Goldilocks)} {f : α → β}
+    {cs : List Goldilocks} {b : β} {rest : List Goldilocks}
+    (h : cellMapDec da f cs = some (b, rest)) : ∃ a, da cs = some (a, rest) ∧ f a = b := by
+  unfold cellMapDec at h
+  cases h1 : da cs with
+  | none => rw [h1] at h; cases h
+  | some x =>
+    obtain ⟨a, r⟩ := x
+    rw [h1] at h
+    obtain ⟨hb, hr⟩ := Prod.mk.inj (Option.some.inj h)
+    subst hr
+    exact ⟨a, rfl, hb⟩
+
+private theorem cellMapDec_eq {α β : Type}
+    {da : List Goldilocks → Option (α × List Goldilocks)} {f : α → β}
+    {cs : List Goldilocks} {a : α} {rest : List Goldilocks}
+    (h : da cs = some (a, rest)) : cellMapDec da f cs = some (f a, rest) := by
+  simp only [cellMapDec, h]
+
+def cellBind2 {α β γ : Type}
+    (da : List Goldilocks → Option (α × List Goldilocks))
+    (db : List Goldilocks → Option (β × List Goldilocks))
+    (k : α → β → γ) (cs : List Goldilocks) : Option (γ × List Goldilocks) :=
+  match da cs with
+  | none => none
+  | some (a, r1) =>
+    match db r1 with
+    | none => none
+    | some (b, r2) => some (k a b, r2)
+
+private theorem cellBind2_some {α β γ : Type}
+    {da : List Goldilocks → Option (α × List Goldilocks)}
+    {db : List Goldilocks → Option (β × List Goldilocks)}
+    {k : α → β → γ} {cs : List Goldilocks} {c : γ} {rest : List Goldilocks}
+    (h : cellBind2 da db k cs = some (c, rest)) :
+    ∃ a b r1, da cs = some (a, r1) ∧ db r1 = some (b, rest) ∧ k a b = c := by
+  unfold cellBind2 at h
+  cases h1 : da cs with
+  | none => rw [h1] at h; cases h
+  | some x =>
+    obtain ⟨a, r1⟩ := x
+    rw [h1] at h
+    dsimp only at h
+    cases h2 : db r1 with
+    | none => rw [h2] at h; cases h
+    | some y =>
+      obtain ⟨b, r2⟩ := y
+      rw [h2] at h
+      obtain ⟨hc, hr⟩ := Prod.mk.inj (Option.some.inj h)
+      subst hr
+      exact ⟨a, b, r1, rfl, h2, hc⟩
+
+private theorem cellBind2_eq {α β γ : Type}
+    {da : List Goldilocks → Option (α × List Goldilocks)}
+    {db : List Goldilocks → Option (β × List Goldilocks)}
+    {k : α → β → γ} {cs : List Goldilocks} {a : α} {b : β} {r1 rest : List Goldilocks}
+    (h1 : da cs = some (a, r1)) (h2 : db r1 = some (b, rest)) :
+    cellBind2 da db k cs = some (k a b, rest) := by
+  simp only [cellBind2, h1, h2]
+
+/-- One field element in one cell. -/
+def cellFld : CellCodec Goldilocks where
+  enc := fun a => [a]
+  dec := fun cs =>
+    match cs with
+    | [] => none
+    | c :: rest => some (c, rest)
+  dec_enc := fun _ _ => rfl
+  enc_dec := fun cs a rest h => by
+    match cs, h with
+    | [], h => cases h
+    | c :: tl, h =>
+      obtain ⟨h1, h2⟩ := Prod.mk.inj (Option.some.inj h)
+      rw [← h1, ← h2]
+      rfl
+
+/-- The empty encoding of `Unit`. -/
+def cellUnit : CellCodec Unit where
+  enc := fun _ => []
+  dec := fun cs => some ((), cs)
+  dec_enc := fun _ _ => rfl
+  enc_dec := fun _ _ _ h => (Prod.mk.inj (Option.some.inj h)).2
+
+/-- Concatenation of two codecs. -/
+def cellSeq {α β : Type} (ca : CellCodec α) (cb : CellCodec β) : CellCodec (α × β) where
+  enc := fun p => ca.enc p.1 ++ cb.enc p.2
+  dec := cellBind2 ca.dec cb.dec Prod.mk
+  dec_enc := fun p rest => by
+    obtain ⟨a, b⟩ := p
+    have e : (ca.enc a ++ cb.enc b) ++ rest = ca.enc a ++ (cb.enc b ++ rest) :=
+      List.append_assoc _ _ _
+    show cellBind2 ca.dec cb.dec Prod.mk ((ca.enc a ++ cb.enc b) ++ rest) = some ((a, b), rest)
+    rw [e]
+    exact cellBind2_eq (ca.dec_enc a _) (cb.dec_enc b rest)
+  enc_dec := fun cs p rest h => by
+    obtain ⟨a, b, r1, h1, h2, hk⟩ := cellBind2_some h
+    rw [← hk, ca.enc_dec cs a r1 h1, cb.enc_dec r1 b rest h2]
+    exact (List.append_assoc _ _ _).symm
+
+/-- Transport of a codec along a bijection. -/
+def cellIso {α β : Type} (c : CellCodec α) (f : α → β) (g : β → α)
+    (hfg : ∀ b, f (g b) = b) (hgf : ∀ a, g (f a) = a) : CellCodec β where
+  enc := fun b => c.enc (g b)
+  dec := cellMapDec c.dec f
+  dec_enc := fun b rest => by
+    have h := cellMapDec_eq (f := f) (c.dec_enc (g b) rest)
+    rw [hfg] at h
+    exact h
+  enc_dec := fun cs b rest h => by
+    obtain ⟨a, h1, hf⟩ := cellMapDec_some h
+    have e := c.enc_dec cs a rest h1
+    rw [← hf]
+    show cs = c.enc (g (f a)) ++ rest
+    rw [hgf]
+    exact e
+
+def cellSumEnc {α β : Type} (ea : α → List Goldilocks) (eb : β → List Goldilocks) :
+    Sum α β → List Goldilocks
+  | .inl a => Goldilocks.zero :: ea a
+  | .inr b => Goldilocks.one :: eb b
+
+def cellSumDec {α β : Type} (da : List Goldilocks → Option (α × List Goldilocks))
+    (db : List Goldilocks → Option (β × List Goldilocks)) :
+    List Goldilocks → Option (Sum α β × List Goldilocks)
+  | [] => none
+  | m :: cs =>
+    if m = Goldilocks.zero then cellMapDec da Sum.inl cs
+    else if m = Goldilocks.one then cellMapDec db Sum.inr cs
+    else none
+
+private theorem goldilocks_one_ne_zero : ¬ (Goldilocks.one = Goldilocks.zero) := by decide
+
+/-- Tagged union: selector cell `0` or `1` followed by the payload; any other selector is
+    rejected. -/
+def cellSum {α β : Type} (ca : CellCodec α) (cb : CellCodec β) : CellCodec (Sum α β) where
+  enc := cellSumEnc ca.enc cb.enc
+  dec := cellSumDec ca.dec cb.dec
+  dec_enc := fun s rest => by
+    match s with
+    | .inl a =>
+      show cellSumDec ca.dec cb.dec (Goldilocks.zero :: (ca.enc a ++ rest)) = some (Sum.inl a, rest)
+      rw [cellSumDec, ite_eq_left rfl]
+      exact cellMapDec_eq (ca.dec_enc a rest)
+    | .inr b =>
+      show cellSumDec ca.dec cb.dec (Goldilocks.one :: (cb.enc b ++ rest)) = some (Sum.inr b, rest)
+      rw [cellSumDec, ite_eq_right goldilocks_one_ne_zero, ite_eq_left rfl]
+      exact cellMapDec_eq (cb.dec_enc b rest)
+  enc_dec := fun cs s rest h => by
+    match cs, h with
+    | [], h => cases h
+    | m :: tl, h =>
+      rw [cellSumDec] at h
+      by_cases hm0 : m = Goldilocks.zero
+      · rw [ite_eq_left hm0] at h
+        obtain ⟨a, h1, hf⟩ := cellMapDec_some h
+        rw [← hf, hm0, ca.enc_dec tl a rest h1]
+        rfl
+      · rw [ite_eq_right hm0] at h
+        by_cases hm1 : m = Goldilocks.one
+        · rw [ite_eq_left hm1] at h
+          obtain ⟨b, h1, hf⟩ := cellMapDec_some h
+          rw [← hf, hm1, cb.enc_dec tl b rest h1]
+          rfl
+        · rw [ite_eq_right hm1] at h; cases h
+
+def cellListEnc {α : Type} (enc : α → List Goldilocks) : List α → List Goldilocks
+  | [] => [Goldilocks.zero]
+  | x :: xs => Goldilocks.one :: (enc x ++ cellListEnc enc xs)
+
+def cellListDec {α : Type} (dec : List Goldilocks → Option (α × List Goldilocks)) :
+    Nat → List Goldilocks → Option (List α × List Goldilocks)
+  | 0, _ => none
+  | _ + 1, [] => none
+  | fuel + 1, m :: cs =>
+    if m = Goldilocks.zero then some ([], cs)
+    else if m = Goldilocks.one then cellBind2 dec (cellListDec dec fuel) List.cons cs
+    else none
+
+private theorem cellListEnc_length_gt {α : Type} (enc : α → List Goldilocks) :
+    ∀ (xs : List α), xs.length < (cellListEnc enc xs).length
+  | [] => Nat.zero_lt_succ _
+  | x :: xs => by
+    have ih := cellListEnc_length_gt enc xs
+    show xs.length + 1 < (enc x ++ cellListEnc enc xs).length + 1
+    rw [List.length_append]
+    exact Nat.succ_lt_succ (Nat.lt_of_lt_of_le ih (Nat.le_add_left _ _))
+
+private theorem cellListDec_enc {α : Type} (c : CellCodec α) :
+    ∀ (xs : List α) (fuel : Nat) (rest : List Goldilocks), xs.length < fuel →
+      cellListDec c.dec fuel (cellListEnc c.enc xs ++ rest) = some (xs, rest)
+  | _, 0, _, h => absurd h (Nat.not_lt_zero _)
+  | [], f + 1, rest, _ => by
+    show cellListDec c.dec (f + 1) (Goldilocks.zero :: rest) = some ([], rest)
+    rw [cellListDec, ite_eq_left rfl]
+  | x :: xs, f + 1, rest, h => by
+    have ih := cellListDec_enc c xs f rest (Nat.lt_of_succ_lt_succ h)
+    have hb := cellBind2_eq (k := List.cons) (c.dec_enc x (cellListEnc c.enc xs ++ rest)) ih
+    have e : (c.enc x ++ cellListEnc c.enc xs) ++ rest =
+        c.enc x ++ (cellListEnc c.enc xs ++ rest) := List.append_assoc _ _ _
+    show cellListDec c.dec (f + 1)
+      (Goldilocks.one :: ((c.enc x ++ cellListEnc c.enc xs) ++ rest)) = some (x :: xs, rest)
+    rw [e, cellListDec, ite_eq_right goldilocks_one_ne_zero, ite_eq_left rfl]
+    exact hb
+
+private theorem cellListDec_canonical {α : Type} (c : CellCodec α) :
+    ∀ (fuel : Nat) (cs : List Goldilocks) (xs : List α) (rest : List Goldilocks),
+      cellListDec c.dec fuel cs = some (xs, rest) → cs = cellListEnc c.enc xs ++ rest
+  | 0, _, _, _, h => by rw [cellListDec] at h; cases h
+  | _ + 1, [], _, _, h => by rw [cellListDec] at h; cases h
+  | fuel + 1, m :: tl, xs, rest, h => by
+    rw [cellListDec] at h
+    by_cases hm0 : m = Goldilocks.zero
+    · rw [ite_eq_left hm0] at h
+      obtain ⟨hx, hr⟩ := Prod.mk.inj (Option.some.inj h)
+      rw [← hx, ← hr, hm0]
+      rfl
+    · rw [ite_eq_right hm0] at h
+      by_cases hm1 : m = Goldilocks.one
+      · rw [ite_eq_left hm1] at h
+        obtain ⟨x, ys, r1, h1, h2, hk⟩ := cellBind2_some h
+        rw [← hk, hm1, c.enc_dec tl x r1 h1, cellListDec_canonical c fuel r1 ys rest h2]
+        exact (congrArg (List.cons Goldilocks.one) (List.append_assoc _ _ _)).symm
+      · rw [ite_eq_right hm1] at h; cases h
+
+/-- Continuation-marked list: each element is preceded by a cell `1`, and the list ends with a
+    cell `0`. -/
+def cellListOf {α : Type} (c : CellCodec α) : CellCodec (List α) where
+  enc := cellListEnc c.enc
+  dec := fun cs => cellListDec c.dec cs.length cs
+  dec_enc := fun xs rest =>
+    cellListDec_enc c xs _ rest
+      (Nat.lt_of_lt_of_le (cellListEnc_length_gt c.enc xs)
+        (by rw [List.length_append]; exact Nat.le_add_right _ _))
+  enc_dec := fun cs xs rest h => cellListDec_canonical c cs.length cs xs rest h
+
+/-- Radix of the natural-number cell encoding: `p - 1`. -/
+def cellNatRadix : Nat := goldilocksPrime - 1
+
+/-- The cell value `p - 1`, used as the carry marker of `cellNatEnc`. -/
+def goldilocksTop : Goldilocks := ⟨goldilocksPrime - 1, by decide⟩
+
+def cellNatEncAux : Nat → Goldilocks → List Goldilocks
+  | 0, r => [r]
+  | q + 1, r => goldilocksTop :: cellNatEncAux q r
+
+/-- `n = q * (p - 1) + r` is encoded as `q` carry cells `p - 1` followed by the cell `r`. -/
+def cellNatEnc (n : Nat) : List Goldilocks :=
+  cellNatEncAux (n / cellNatRadix) (Goldilocks.ofNat (n % cellNatRadix))
+
+def cellNatDec : List Goldilocks → Option (Nat × List Goldilocks)
+  | [] => none
+  | c :: cs =>
+    if c = goldilocksTop then
+      match cellNatDec cs with
+      | none => none
+      | some (n, r) => some (n + cellNatRadix, r)
+    else some (c.val, cs)
+
+private theorem goldilocks_val_lt_radix_of_ne_top {c : Goldilocks} (h : c ≠ goldilocksTop) :
+    c.val < cellNatRadix := by
+  have hne : c.val ≠ cellNatRadix := fun e => h (Goldilocks.ext e)
+  have hM : cellNatRadix + 1 = goldilocksPrime := by decide
+  have hlt : c.val < cellNatRadix + 1 := by rw [hM]; exact c.isLt
+  exact Nat.lt_of_le_of_ne (Nat.le_of_lt_succ hlt) hne
+
+private theorem cellNatDec_encAux (r : Goldilocks) (hr : r ≠ goldilocksTop) :
+    ∀ (q : Nat) (rest : List Goldilocks),
+      cellNatDec (cellNatEncAux q r ++ rest) = some (q * cellNatRadix + r.val, rest)
+  | 0, rest => by
+    show cellNatDec (r :: rest) = some (0 * cellNatRadix + r.val, rest)
+    rw [cellNatDec, ite_eq_right hr, Nat.zero_mul, Nat.zero_add]
+  | q + 1, rest => by
+    have ih := cellNatDec_encAux r hr q rest
+    show cellNatDec (goldilocksTop :: (cellNatEncAux q r ++ rest)) =
+      some ((q + 1) * cellNatRadix + r.val, rest)
+    rw [cellNatDec, ite_eq_left rfl, ih]
+    exact congrArg (fun n => some (n, rest))
+      (show q * cellNatRadix + r.val + cellNatRadix = (q + 1) * cellNatRadix + r.val by
+        rw [Nat.add_mul, Nat.one_mul]; exact Nat.add_right_comm _ _ _)
+
+private theorem cellNatDec_enc (n : Nat) (rest : List Goldilocks) :
+    cellNatDec (cellNatEnc n ++ rest) = some (n, rest) := by
+  have hpos : 0 < cellNatRadix := by decide
+  have hmod : n % cellNatRadix < cellNatRadix := Nat.mod_lt n hpos
+  have hRp : cellNatRadix < goldilocksPrime := by decide
+  have hval : (Goldilocks.ofNat (n % cellNatRadix)).val = n % cellNatRadix :=
+    Nat.mod_eq_of_lt (Nat.lt_trans hmod hRp)
+  have hne : Goldilocks.ofNat (n % cellNatRadix) ≠ goldilocksTop := by
+    intro e
+    have e' : (Goldilocks.ofNat (n % cellNatRadix)).val = cellNatRadix :=
+      congrArg Goldilocks.val e
+    rw [hval] at e'
+    rw [e'] at hmod
+    exact Nat.lt_irrefl _ hmod
+  have h := cellNatDec_encAux _ hne (n / cellNatRadix) rest
+  rw [hval, Nat.div_add_mod'] at h
+  exact h
+
+private theorem cellNatDec_canonical :
+    ∀ (cs : List Goldilocks) (n : Nat) (rest : List Goldilocks),
+      cellNatDec cs = some (n, rest) → cs = cellNatEnc n ++ rest
+  | [], _, _, h => by rw [cellNatDec] at h; cases h
+  | c :: tl, n, rest, h => by
+    have hpos : 0 < cellNatRadix := by decide
+    rw [cellNatDec] at h
+    by_cases hc : c = goldilocksTop
+    · rw [ite_eq_left hc] at h
+      cases hd : cellNatDec tl with
+      | none => rw [hd] at h; cases h
+      | some p =>
+        obtain ⟨n', r⟩ := p
+        rw [hd] at h
+        obtain ⟨hn, hr⟩ := Prod.mk.inj (Option.some.inj h)
+        rw [hc, cellNatDec_canonical tl n' r hd, ← hn, ← hr]
+        show goldilocksTop ::
+            (cellNatEncAux (n' / cellNatRadix) (Goldilocks.ofNat (n' % cellNatRadix)) ++ r) =
+          cellNatEncAux ((n' + cellNatRadix) / cellNatRadix)
+            (Goldilocks.ofNat ((n' + cellNatRadix) % cellNatRadix)) ++ r
+        rw [Nat.add_div_right n' hpos, Nat.add_mod_right]
+        rfl
+    · rw [ite_eq_right hc] at h
+      obtain ⟨hn, hr⟩ := Prod.mk.inj (Option.some.inj h)
+      have hlt := goldilocks_val_lt_radix_of_ne_top hc
+      have hc' : Goldilocks.ofNat c.val = c := Goldilocks.ext (Nat.mod_eq_of_lt c.isLt)
+      rw [← hn, ← hr]
+      show c :: tl =
+        cellNatEncAux (c.val / cellNatRadix) (Goldilocks.ofNat (c.val % cellNatRadix)) ++ tl
+      rw [Nat.div_eq_of_lt hlt, Nat.mod_eq_of_lt hlt, hc']
+      rfl
+
+/-- Unbounded natural numbers in radix `p - 1` with unary carry cells. -/
+def cellNat : CellCodec Nat where
+  enc := cellNatEnc
+  dec := cellNatDec
+  dec_enc := cellNatDec_enc
+  enc_dec := cellNatDec_canonical
+
+def cellCodecLane4 : CellCodec Lane4 :=
+  cellIso (cellSeq cellFld (cellSeq cellFld (cellSeq cellFld cellFld)))
+    (fun t => ⟨t.1, t.2.1, t.2.2.1, t.2.2.2⟩)
+    (fun l => (l.x0, l.x1, l.x2, l.x3))
+    (fun _ => rfl) (fun _ => rfl)
+
+def cellCodecDigest5 : CellCodec Digest5 :=
+  cellIso (cellSeq cellFld (cellSeq cellFld (cellSeq cellFld (cellSeq cellFld cellFld))))
+    (fun t => ⟨t.1, t.2.1, t.2.2.1, t.2.2.2.1, t.2.2.2.2⟩)
+    (fun d => (d.limb0, d.limb1, d.limb2, d.limb3, d.limb4))
+    (fun _ => rfl) (fun _ => rfl)
+
+def cellCodecState12 : CellCodec Poseidon2State12 :=
+  cellIso (cellSeq cellCodecLane4 (cellSeq cellCodecLane4 cellCodecLane4))
+    (fun t => ⟨t.1, t.2.1, t.2.2⟩)
+    (fun s => (s.b0, s.b1, s.b2))
+    (fun _ => rfl) (fun _ => rfl)
+
+def cellCodecPerm : CellCodec Poseidon2PermWitness :=
+  cellIso
+    (cellSeq cellCodecState12 (cellSeq (cellListOf cellCodecState12)
+      (cellSeq (cellListOf cellFld) (cellSeq (cellListOf cellCodecState12) cellCodecState12))))
+    (fun t => ⟨t.1, t.2.1, t.2.2.1, t.2.2.2.1, t.2.2.2.2⟩)
+    (fun w => (w.input, w.initExtSbox, w.intSbox, w.termExtSbox, w.output))
+    (fun _ => rfl) (fun _ => rfl)
+
+def cellCodecLimb63 : CellCodec Limb63DecompWitness :=
+  cellIso (cellSeq cellFld (cellSeq (cellListOf cellFld) cellFld))
+    (fun t => ⟨t.1, t.2.1, t.2.2⟩)
+    (fun w => (w.limbVal, w.digits, w.topBit))
+    (fun _ => rfl) (fun _ => rfl)
+
+def cellCodecHmsg5Decomp : CellCodec Hmsg5DecompWitness :=
+  cellIso
+    (cellSeq cellCodecLimb63 (cellSeq cellCodecLimb63 (cellSeq cellCodecLimb63
+      (cellSeq cellCodecLimb63 cellCodecLimb63))))
+    (fun t => ⟨t.1, t.2.1, t.2.2.1, t.2.2.2.1, t.2.2.2.2⟩)
+    (fun w => (w.l0, w.l1, w.l2, w.l3, w.l4))
+    (fun _ => rfl) (fun _ => rfl)
+
+def cellCodecUnaryChain : CellCodec UnaryWotsChainWitness :=
+  cellIso
+    (cellSeq cellFld (cellSeq cellFld (cellSeq cellFld (cellSeq cellCodecLane4
+      (cellSeq cellCodecLane4 (cellSeq cellCodecLane4 (cellSeq cellCodecLane4
+        (cellSeq cellCodecPerm (cellSeq cellCodecPerm cellCodecPerm)))))))))
+    (fun t => ⟨t.1, t.2.1, t.2.2.1, t.2.2.2.1, t.2.2.2.2.1, t.2.2.2.2.2.1, t.2.2.2.2.2.2.1,
+      t.2.2.2.2.2.2.2.1, t.2.2.2.2.2.2.2.2.1, t.2.2.2.2.2.2.2.2.2⟩)
+    (fun w => (w.act0, w.act1, w.act2, w.sigVal, w.s1, w.s2, w.endVal, w.perm0, w.perm1, w.perm2))
+    (fun _ => rfl) (fun _ => rfl)
+
+def cellCodecMerkleLevel : CellCodec MerkleLevelWitness :=
+  cellIso
+    (cellSeq cellFld (cellSeq cellCodecLane4 (cellSeq cellCodecLane4 (cellSeq cellCodecLane4
+      (cellSeq cellCodecLane4 (cellSeq cellCodecPerm cellCodecPerm))))))
+    (fun t => ⟨t.1, t.2.1, t.2.2.1, t.2.2.2.1, t.2.2.2.2.1, t.2.2.2.2.2.1, t.2.2.2.2.2.2⟩)
+    (fun w => (w.dirBit, w.sibling, w.leftChild, w.rightChild, w.parent, w.perm0, w.perm1))
+    (fun _ => rfl) (fun _ => rfl)
+
+def cellCodecSponge : CellCodec SpongeAbsorbWitness :=
+  cellIso
+    (cellSeq cellCodecPerm (cellSeq (cellListOf cellCodecPerm)
+      (cellSeq cellCodecPerm cellCodecLane4)))
+    (fun t => ⟨t.1, t.2.1, t.2.2.1, t.2.2.2⟩)
+    (fun w => (w.initPerm, w.pairPerms, w.finalPerm, w.outDigest))
+    (fun _ => rfl) (fun _ => rfl)
+
+def cellCodecHmsgStateful : CellCodec HmsgStatefulTraceWitness :=
+  cellIso
+    (cellSeq cellCodecPerm (cellSeq cellCodecPerm (cellSeq cellCodecPerm cellCodecDigest5)))
+    (fun t => ⟨t.1, t.2.1, t.2.2.1, t.2.2.2⟩)
+    (fun w => (w.perm0, w.perm1, w.perm2, w.outMsg))
+    (fun _ => rfl) (fun _ => rfl)
+
+def cellCodecHmsgDetTree : CellCodec HmsgDetTreeTraceWitness :=
+  cellIso (cellSeq cellCodecPerm (cellSeq cellCodecPerm cellCodecDigest5))
+    (fun t => ⟨t.1, t.2.1, t.2.2⟩)
+    (fun w => (w.perm0, w.perm1, w.outMsg))
+    (fun _ => rfl) (fun _ => rfl)
+
+def cellCodecWotsLayer : CellCodec WotsLayerTraceWitness :=
+  cellIso
+    (cellSeq cellNat (cellSeq cellCodecHmsg5Decomp (cellSeq (cellListOf cellCodecUnaryChain)
+      (cellSeq cellCodecSponge (cellSeq (cellListOf cellCodecMerkleLevel) cellCodecLane4)))))
+    (fun t => ⟨t.1, t.2.1, t.2.2.1, t.2.2.2.1, t.2.2.2.2.1, t.2.2.2.2.2⟩)
+    (fun w => (w.tswCtr, w.decomp, w.chains, w.pkSponge, w.merkle, w.rootOut))
+    (fun _ => rfl) (fun _ => rfl)
+
+def cellCodecUpperNode : CellCodec UpperLayerTraceNode :=
+  cellIso (cellSeq cellCodecHmsgDetTree cellCodecWotsLayer)
+    (fun t => ⟨t.1, t.2⟩)
+    (fun w => (w.detHmsg, w.wotsStep))
+    (fun _ => rfl) (fun _ => rfl)
+
+def cellCodecForsOpening : CellCodec ForsOpeningTraceWitness :=
+  cellIso
+    (cellSeq cellCodecLane4 (cellSeq cellCodecPerm
+      (cellSeq (cellListOf cellCodecMerkleLevel) cellCodecLane4)))
+    (fun t => ⟨t.1, t.2.1, t.2.2.1, t.2.2.2⟩)
+    (fun w => (w.secretVal, w.leafPerm, w.merkle, w.treeRoot))
+    (fun _ => rfl) (fun _ => rfl)
+
+def cellCodecForsAndRecover : CellCodec ForsAndRecoverTraceWitness :=
+  cellIso (cellSeq (cellListOf cellCodecForsOpening) (cellSeq cellCodecSponge cellCodecLane4))
+    (fun t => ⟨t.1, t.2.1, t.2.2⟩)
+    (fun w => (w.openings, w.rootsSponge, w.forsPkOut))
+    (fun _ => rfl) (fun _ => rfl)
+
+def cellCodecXof : CellCodec StatelessXofTraceWitness :=
+  cellIso
+    (cellSeq cellCodecPerm (cellSeq cellCodecPerm (cellSeq cellCodecLimb63
+      (cellSeq cellCodecLimb63 (cellSeq cellCodecLimb63 (cellSeq cellCodecLimb63
+        (cellSeq cellCodecLimb63 (cellSeq cellCodecLimb63 cellCodecLimb63))))))))
+    (fun t => ⟨t.1, t.2.1, t.2.2.1, t.2.2.2.1, t.2.2.2.2.1, t.2.2.2.2.2.1, t.2.2.2.2.2.2.1,
+      t.2.2.2.2.2.2.2.1, t.2.2.2.2.2.2.2.2⟩)
+    (fun w => (w.perm0, w.perm1, w.lim0, w.lim1, w.lim2, w.lim3, w.lim4, w.lim5, w.lim6))
+    (fun _ => rfl) (fun _ => rfl)
+
+def cellCodecProfile : CellCodec AggSigProfile :=
+  cellIso (cellSum cellUnit cellUnit)
+    (fun s => match s with
+      | .inl _ => AggSigProfile.xmssPoseidon2
+      | .inr _ => AggSigProfile.corduroyPoseidon2)
+    (fun p => match p with
+      | .xmssPoseidon2 => Sum.inl ()
+      | .corduroyPoseidon2 => Sum.inr ())
+    (fun p => by cases p <;> rfl)
+    (fun s => by cases s <;> rfl)
+
+def cellCodecModeTrace : CellCodec AggSignerModeTrace :=
+  cellIso
+    (cellSum (cellSeq cellNat cellCodecHmsgStateful)
+      (cellSeq cellCodecXof (cellSeq cellCodecForsAndRecover cellCodecHmsgDetTree)))
+    (fun s => match s with
+      | .inl t => AggSignerModeTrace.stateful t.1 t.2
+      | .inr t => AggSignerModeTrace.stateless t.1 t.2.1 t.2.2)
+    (fun m => match m with
+      | .stateful i h => Sum.inl (i, h)
+      | .stateless x f h => Sum.inr (x, f, h))
+    (fun m => by cases m <;> rfl)
+    (fun s => by cases s <;> rfl)
+
+/-- Canonical cell stream of one signer's witness block: profile selector, `rRand`, the
+    stateful / stateless mode trace, the bottom WOTS layer, and the upper hypertree layers. -/
+def aggSignerWitnessCodec : CellCodec AggSignerTraceWitness :=
+  cellIso
+    (cellSeq cellCodecProfile (cellSeq cellCodecLane4 (cellSeq cellCodecModeTrace
+      (cellSeq cellCodecWotsLayer (cellListOf cellCodecUpperNode)))))
+    (fun t => ⟨t.1, t.2.1, t.2.2.1, t.2.2.2.1, t.2.2.2.2⟩)
+    (fun w => (w.profile, w.rRand, w.modeTrace, w.layer0, w.upperNodes))
+    (fun _ => rfl) (fun _ => rfl)
+
+/-- Witness block committed in a row: the cells from column `14` on (columns `0..13` are the
+    boundary columns of `expectedBoundaryCols`) must be exactly one canonical witness encoding,
+    with no trailing cell. -/
+def decodeRowWitness (row : List Goldilocks) : Option AggSignerTraceWitness :=
+  match aggSignerWitnessCodec.dec (row.drop 14) with
+  | some (w, []) => some w
+  | _ => none
+
+/-- A row decodes to `w` exactly when its cells from column `14` on are the encoding of `w`. -/
+theorem decodeRowWitness_eq_some_iff (row : List Goldilocks) (w : AggSignerTraceWitness) :
+    decodeRowWitness row = some w ↔ row.drop 14 = aggSignerWitnessCodec.enc w := by
+  constructor
+  · intro h
+    unfold decodeRowWitness at h
+    cases hd : aggSignerWitnessCodec.dec (row.drop 14) with
+    | none => rw [hd] at h; cases h
+    | some p =>
+      obtain ⟨w', r⟩ := p
+      rw [hd] at h
+      cases r with
+      | cons _ _ => cases h
+      | nil =>
+        have hw : w' = w := Option.some.inj h
+        have e := aggSignerWitnessCodec.enc_dec _ _ _ hd
+        rw [List.append_nil, hw] at e
+        exact e
+  · intro h
+    have hd := aggSignerWitnessCodec.dec_enc w []
+    rw [List.append_nil, ← h] at hd
+    simp only [decodeRowWitness, hd]
+
+/-- **Deterministic row projection.** Decodes the witness block of each of the first `K` rows;
+    fails if a row is missing or does not carry a canonical witness encoding. -/
+def extractSignerWitnessesFromRows :
+    Nat → List (List Goldilocks) → Option (List AggSignerTraceWitness)
+  | 0, _ => some []
+  | _ + 1, [] => none
+  | k + 1, row :: rows =>
+    match decodeRowWitness row with
+    | none => none
+    | some w =>
+      match extractSignerWitnessesFromRows k rows with
+      | none => none
+      | some ws => some (w :: ws)
+
+/-- Row gate of one active row, a function of the committed row alone: the boundary columns
+    `0..13` equal `expectedBoundaryCols`, the remaining cells decode to a witness block, and
+    every transition residual of that block vanishes. -/
+def committedRowOk (geom : AggSigGeometry) (msg : List UInt8) (pk : AggValidatorPk)
+    (row : List Goldilocks) : Bool :=
+  decide (row.take 14 = expectedBoundaryCols pk msg) &&
+  match decodeRowWitness row with
+  | none => false
+  | some w => allZeroGoldilocks (signerTraceResiduals geom pk msg w)
+
+def committedActiveRowsOk (geom : AggSigGeometry) (msg : List UInt8) :
+    List AggValidatorPk → List (List Goldilocks) → Bool
+  | [], padRows => allZeroGoldilocks (padRows.flatMap id)
+  | _ :: _, [] => false
+  | pk :: pks, row :: rows =>
+    committedRowOk geom msg pk row && committedActiveRowsOk geom msg pks rows
+
+/-- All row-gate and boundary constraints as a predicate on the committed `rows` only: no
+    witness is supplied beside the rows. -/
+def committedRowsSatisfyAllConstraints (stmt : AggArithPublicStmt)
+    (rows : List (List Goldilocks)) : Bool :=
+  stmt.wellFormed && decide (rows.length = 2 ^ stmt.logRows) &&
+  committedActiveRowsOk stmt.geom stmt.msg stmt.committeePks rows
+
+private theorem committedRowOk_unpack {geom : AggSigGeometry} {msg : List UInt8}
+    {pk : AggValidatorPk} {row : List Goldilocks}
+    (h : committedRowOk geom msg pk row = true) :
+    row.take 14 = expectedBoundaryCols pk msg ∧
+    ∃ w, decodeRowWitness row = some w ∧
+      allZeroGoldilocks (signerTraceResiduals geom pk msg w) = true := by
+  unfold committedRowOk at h
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at h
+  obtain ⟨hT, hM⟩ := h
+  refine ⟨hT, ?_⟩
+  cases hd : decodeRowWitness row with
+  | none => rw [hd] at hM; cases hM
+  | some w => rw [hd] at hM; exact ⟨w, rfl, hM⟩
+
+private theorem committedRowOk_intro {geom : AggSigGeometry} {msg : List UInt8}
+    {pk : AggValidatorPk} {row : List Goldilocks} {w : AggSignerTraceWitness}
+    (hT : row.take 14 = expectedBoundaryCols pk msg)
+    (hd : decodeRowWitness row = some w)
+    (hZ : allZeroGoldilocks (signerTraceResiduals geom pk msg w) = true) :
+    committedRowOk geom msg pk row = true := by
+  unfold committedRowOk
+  rw [hd, decide_eq_true hT]
+  exact hZ
+
+private theorem committedRow_boundary_gates_vanish {pk : AggValidatorPk} {msg : List UInt8}
+    {row : List Goldilocks} (hT : row.take 14 = expectedBoundaryCols pk msg) :
+    allZeroGoldilocks (evalRowGateList (boundaryRowGates pk msg) row) = true := by
+  have h := boundaryGatesFrom_exact 0 (expectedBoundaryCols pk msg) [] (row.drop 14) rfl
+  have hRow : [] ++ expectedBoundaryCols pk msg ++ row.drop 14 = row := by
+    rw [List.nil_append, ← hT]
+    exact List.take_append_drop 14 row
+  rw [hRow] at h
+  exact h
+
+private theorem extractSignerWitnesses_succ_cons {k : Nat} {row : List Goldilocks}
+    {rows : List (List Goldilocks)} {ws : List AggSignerTraceWitness}
+    (h : extractSignerWitnessesFromRows (k + 1) (row :: rows) = some ws) :
+    ∃ w wt, decodeRowWitness row = some w ∧
+      extractSignerWitnessesFromRows k rows = some wt ∧ ws = w :: wt := by
+  rw [extractSignerWitnessesFromRows] at h
+  cases hd : decodeRowWitness row with
+  | none => rw [hd] at h; cases h
+  | some w =>
+    rw [hd] at h
+    dsimp only at h
+    cases hE : extractSignerWitnessesFromRows k rows with
+    | none => rw [hE] at h; cases h
+    | some wt =>
+      rw [hE] at h
+      exact ⟨w, wt, rfl, rfl, (Option.some.inj h).symm⟩
+
+private theorem committedActiveRowsOk_extract (geom : AggSigGeometry) (msg : List UInt8) :
+    ∀ (pks : List AggValidatorPk) (rows : List (List Goldilocks)),
+      committedActiveRowsOk geom msg pks rows = true →
+      ∃ ws, extractSignerWitnessesFromRows pks.length rows = some ws ∧
+        ws.length = pks.length ∧
+        ∀ (k : Nat) (hk : k < pks.length) (hkW : k < ws.length),
+          (rows.getD k []).take 14 = expectedBoundaryCols (pks[k]'hk) msg ∧
+          decodeRowWitness (rows.getD k []) = some (ws[k]'hkW) ∧
+          allZeroGoldilocks (signerTraceResiduals geom (pks[k]'hk) msg (ws[k]'hkW)) = true
+  | [], _, _ => ⟨[], rfl, rfl, fun _ hk _ => absurd hk (Nat.not_lt_zero _)⟩
+  | _ :: _, [], h => by rw [committedActiveRowsOk] at h; cases h
+  | pk :: pks, row :: rows, h => by
+    rw [committedActiveRowsOk, Bool.and_eq_true] at h
+    obtain ⟨hRow, hRest⟩ := h
+    obtain ⟨hT, w, hd, hZ⟩ := committedRowOk_unpack hRow
+    obtain ⟨ws, hE, hLen, hA⟩ := committedActiveRowsOk_extract geom msg pks rows hRest
+    refine ⟨w :: ws, ?_, congrArg Nat.succ hLen, ?_⟩
+    · show extractSignerWitnessesFromRows (pks.length + 1) (row :: rows) = some (w :: ws)
+      simp only [extractSignerWitnessesFromRows, hd, hE]
+    · intro k hk hkW
+      cases k with
+      | zero => exact ⟨hT, hd, hZ⟩
+      | succ k' => exact hA k' (Nat.lt_of_succ_lt_succ hk) (Nat.lt_of_succ_lt_succ hkW)
+
+private theorem committedActiveRowsOk_at (geom : AggSigGeometry) (msg : List UInt8) :
+    ∀ (pks : List AggValidatorPk) (rows : List (List Goldilocks)) (k : Nat)
+      (hk : k < pks.length),
+      committedActiveRowsOk geom msg pks rows = true →
+      committedRowOk geom msg (pks[k]'hk) (rows.getD k []) = true
+  | [], _, _, hk, _ => absurd hk (Nat.not_lt_zero _)
+  | _ :: _, [], _, _, h => by rw [committedActiveRowsOk] at h; cases h
+  | _ :: _, _ :: _, 0, _, h => by
+    rw [committedActiveRowsOk, Bool.and_eq_true] at h
+    exact h.1
+  | _ :: pks, _ :: rows, k + 1, hk, h => by
+    rw [committedActiveRowsOk, Bool.and_eq_true] at h
+    exact committedActiveRowsOk_at geom msg pks rows k (Nat.lt_of_succ_lt_succ hk) h.2
+
+private theorem extractSignerWitnesses_unique :
+    ∀ (K : Nat) (rows : List (List Goldilocks)) (ws ws' : List AggSignerTraceWitness),
+      extractSignerWitnessesFromRows K rows = some ws →
+      ws'.length = K →
+      (∀ (k : Nat) (hk : k < ws'.length),
+        (rows.getD k []).drop 14 = aggSignerWitnessCodec.enc (ws'[k]'hk)) →
+      ws' = ws
+  | 0, _, _, _, hE, hLen, _ => by
+    rw [extractSignerWitnessesFromRows] at hE
+    rw [List.eq_nil_of_length_eq_zero hLen]
+    exact Option.some.inj hE
+  | _ + 1, [], _, _, hE, _, _ => by rw [extractSignerWitnessesFromRows] at hE; cases hE
+  | _ + 1, _ :: _, _, [], _, hLen, _ => by cases hLen
+  | K + 1, row :: rows, ws, w' :: ws', hE, hLen, hCells => by
+    obtain ⟨w, wt, hd, hEt, hws⟩ := extractSignerWitnesses_succ_cons hE
+    have hd' : decodeRowWitness row = some w' :=
+      (decodeRowWitness_eq_some_iff row w').mpr (hCells 0 (Nat.zero_lt_succ _))
+    have hw : w' = w := Option.some.inj (hd'.symm.trans hd)
+    have ih := extractSignerWitnesses_unique K rows wt ws' hEt (Nat.succ.inj hLen)
+      (fun k hk => hCells (k + 1) (Nat.succ_lt_succ hk))
+    rw [hws, hw, ih]
+
+/-- **Committed rows determine valid witnesses (`committed_rows_extract_valid_witnesses`).**
+    If the committed `rows` alone satisfy every row-gate and boundary constraint, then the row
+    projection `extractSignerWitnessesFromRows` returns `K` witness blocks; on row `k` the
+    boundary gates vanish, the transition residuals of the extracted block vanish, and the block
+    yields a signature accepted by `verifyAggNativeSig` for committee key `k`; and any other
+    list of `K` witness blocks whose encodings occupy the witness cells of the same rows is
+    equal to the extracted one. -/
+theorem committed_rows_extract_valid_witnesses (stmt : AggArithPublicStmt)
+    (rows : List (List Goldilocks))
+    (hSat : committedRowsSatisfyAllConstraints stmt rows = true) :
+    ∃ ws : List AggSignerTraceWitness,
+      extractSignerWitnessesFromRows stmt.committeePks.length rows = some ws ∧
+      ws.length = stmt.committeePks.length ∧
+      (∀ (k : Nat) (hkP : k < stmt.committeePks.length) (hkW : k < ws.length),
+        allZeroGoldilocks (evalRowGateList (boundaryRowGates (stmt.committeePks[k]'hkP) stmt.msg)
+          (rows.getD k [])) = true ∧
+        allZeroGoldilocks
+          (signerTraceResiduals stmt.geom (stmt.committeePks[k]'hkP) stmt.msg (ws[k]'hkW)) = true ∧
+        verifyAggNativeSig stmt.geom (stmt.committeePks[k]'hkP) stmt.msg
+          (extractSignerWitnessSig (ws[k]'hkW)) = true) ∧
+      (∀ ws' : List AggSignerTraceWitness,
+        ws'.length = stmt.committeePks.length →
+        (∀ (k : Nat) (hk : k < ws'.length),
+          (rows.getD k []).drop 14 = aggSignerWitnessCodec.enc (ws'[k]'hk)) →
+        ws' = ws) := by
+  unfold committedRowsSatisfyAllConstraints at hSat
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at hSat
+  obtain ⟨⟨_, _⟩, hAct⟩ := hSat
+  obtain ⟨ws, hE, hWsLen, hBody⟩ :=
+    committedActiveRowsOk_extract stmt.geom stmt.msg stmt.committeePks rows hAct
+  refine ⟨ws, hE, hWsLen, ?_, ?_⟩
+  · intro k hkP hkW
+    obtain ⟨hT, _, hZ⟩ := hBody k hkP hkW
+    exact ⟨committedRow_boundary_gates_vanish hT, hZ,
+      signerTraceResiduals_sound stmt.geom (stmt.committeePks[k]'hkP) stmt.msg _ hZ⟩
+  · intro ws' hLen' hCells
+    exact extractSignerWitnesses_unique _ rows ws ws' hE hLen' hCells
+
+private theorem committedRowsSatisfy_row_at (stmt : AggArithPublicStmt)
+    (rows : List (List Goldilocks)) (k : Nat) (hk : k < stmt.committeePks.length)
+    (hSat : committedRowsSatisfyAllConstraints stmt rows = true) :
+    committedRowOk stmt.geom stmt.msg (stmt.committeePks[k]'hk) (rows.getD k []) = true := by
+  unfold committedRowsSatisfyAllConstraints at hSat
+  simp only [Bool.and_eq_true] at hSat
+  exact committedActiveRowsOk_at stmt.geom stmt.msg stmt.committeePks rows k hk hSat.2
+
+/-- **`#tooth`: a tampered committed row breaks a gate or the binding.** Start from committed
+    rows that satisfy every constraint and change any cell of an active row `k`. Then either the
+    tampered rows are rejected, or row `k` now decodes to a different witness block (which the
+    row gates then check in place of the original one). No change to an active row leaves both
+    acceptance and the bound witness intact. -/
+theorem tooth_tampered_committed_row_breaks_gate_or_binding (stmt : AggArithPublicStmt)
+    (rows rows' : List (List Goldilocks)) (k : Nat) (hk : k < stmt.committeePks.length)
+    (hSat : committedRowsSatisfyAllConstraints stmt rows = true)
+    (hTamper : rows'.getD k [] ≠ rows.getD k []) :
+    committedRowsSatisfyAllConstraints stmt rows' = false ∨
+    decodeRowWitness (rows'.getD k []) ≠ decodeRowWitness (rows.getD k []) := by
+  cases hV : committedRowsSatisfyAllConstraints stmt rows' with
+  | false => exact Or.inl rfl
+  | true =>
+    refine Or.inr (fun hEq => hTamper ?_)
+    obtain ⟨hT, w, hd, _⟩ := committedRowOk_unpack (committedRowsSatisfy_row_at stmt rows k hk hSat)
+    obtain ⟨hT', w', hd', _⟩ :=
+      committedRowOk_unpack (committedRowsSatisfy_row_at stmt rows' k hk hV)
+    have hw : w' = w := Option.some.inj ((hd'.symm.trans hEq).trans hd)
+    have hD := (decodeRowWitness_eq_some_iff _ w).mp hd
+    have hD' := (decodeRowWitness_eq_some_iff _ w').mp hd'
+    rw [hw] at hD'
+    rw [← List.take_append_drop 14 (rows'.getD k []), ← List.take_append_drop 14 (rows.getD k []),
+      hT, hT', hD, hD']
+
+private theorem expectedBoundaryCols_length (pk : AggValidatorPk) (msg : List UInt8) :
+    (expectedBoundaryCols pk msg).length = 14 := by
+  unfold expectedBoundaryCols
+  rfl
+
+private theorem committedRowOk_honest (geom : AggSigGeometry) (msg : List UInt8)
+    (pk : AggValidatorPk) (w : AggSignerTraceWitness)
+    (hZ : allZeroGoldilocks (signerTraceResiduals geom pk msg w) = true) :
+    committedRowOk geom msg pk (expectedBoundaryCols pk msg ++ aggSignerWitnessCodec.enc w) =
+      true := by
+  have hLen := expectedBoundaryCols_length pk msg
+  exact committedRowOk_intro (List.take_left' hLen)
+    ((decodeRowWitness_eq_some_iff _ w).mpr (List.drop_left' hLen)) hZ
+
+/-- Honest committed rows: row `k` is the 14 boundary columns of validator `k` followed by the
+    canonical cell stream of its honest witness block; padding rows are zero. -/
+def buildCommittedRows (stmt : AggArithPublicStmt) (sigs : List AggNativeSignature) :
+    List (List Goldilocks) :=
+  (stmt.committeePks.zip sigs).map (fun (pk, sig) =>
+    expectedBoundaryCols pk stmt.msg ++
+      aggSignerWitnessCodec.enc (buildHonestSignerTraceWitness stmt.geom pk stmt.msg sig)) ++
+  List.replicate (2 ^ stmt.logRows - stmt.committeePks.length)
+    (List.replicate 14 Goldilocks.zero)
+
+private theorem committedActiveRowsOk_honest (geom : AggSigGeometry) (msg : List UInt8) :
+    ∀ (pks : List AggValidatorPk) (sigs : List AggNativeSignature)
+      (padRows : List (List Goldilocks)),
+      pks.length = sigs.length →
+      allZeroGoldilocks (padRows.flatMap id) = true →
+      (∀ (k : Nat) (hkP : k < pks.length) (hkS : k < sigs.length),
+        verifyAggNativeSig geom (pks[k]'hkP) msg (sigs[k]'hkS) = true) →
+      committedActiveRowsOk geom msg pks
+        ((pks.zip sigs).map (fun (pk, sig) =>
+          expectedBoundaryCols pk msg ++
+            aggSignerWitnessCodec.enc (buildHonestSignerTraceWitness geom pk msg sig)) ++
+          padRows) = true
+  | [], [], _, _, hPad, _ => hPad
+  | _ :: _, [], _, hLen, _, _ => by cases hLen
+  | [], _ :: _, _, hLen, _, _ => by cases hLen
+  | pk :: pks, sig :: sigs, padRows, hLen, hPad, hAll => by
+    have hVer0 : verifyAggNativeSig geom pk msg sig = true :=
+      hAll 0 (Nat.zero_lt_succ _) (Nat.zero_lt_succ _)
+    have hSigZ := (signerTraceResiduals_complete geom pk msg sig hVer0).2
+    have ih := committedActiveRowsOk_honest geom msg pks sigs padRows (Nat.succ.inj hLen) hPad
+      (fun k hkP hkS => hAll (k + 1) (Nat.succ_lt_succ hkP) (Nat.succ_lt_succ hkS))
+    have hRow := committedRowOk_honest geom msg pk
+      (buildHonestSignerTraceWitness geom pk msg sig) hSigZ
+    simp only [List.zip_cons_cons, List.map_cons, List.cons_append, committedActiveRowsOk,
+      Bool.and_eq_true]
+    exact ⟨hRow, ih⟩
+
+/-- **Completeness of the row-committed layout.** For valid signatures of all `K` committee
+    keys, the honest committed rows satisfy every row-only constraint. -/
+theorem buildCommittedRows_satisfy_constraints
+    (stmt : AggArithPublicStmt) (sigs : List AggNativeSignature)
+    (hWf : stmt.wellFormed = true)
+    (hLen : sigs.length = stmt.committeePks.length)
+    (hAll : ∀ (k : Nat) (hkP : k < stmt.committeePks.length) (hkS : k < sigs.length),
+      verifyAggNativeSig stmt.geom (stmt.committeePks[k]'hkP) stmt.msg (sigs[k]'hkS) = true) :
+    committedRowsSatisfyAllConstraints stmt (buildCommittedRows stmt sigs) = true := by
+  have hKLePow : stmt.committeePks.length ≤ 2 ^ stmt.logRows := by
+    unfold AggArithPublicStmt.wellFormed at hWf
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hWf
+    exact hWf.1.2
+  have hRowsLen : (buildCommittedRows stmt sigs).length = 2 ^ stmt.logRows := by
+    unfold buildCommittedRows
+    rw [List.length_append, List.length_map, List.length_zip, List.length_replicate, hLen,
+      Nat.min_self]
+    exact Nat.add_sub_of_le hKLePow
+  have hAct := committedActiveRowsOk_honest stmt.geom stmt.msg stmt.committeePks sigs
+    (List.replicate (2 ^ stmt.logRows - stmt.committeePks.length)
+      (List.replicate 14 Goldilocks.zero))
+    hLen.symm (allZero_flatMap_replicate_zeros _ 14) hAll
+  unfold committedRowsSatisfyAllConstraints
+  rw [hWf, decide_eq_true hRowsLen]
+  exact hAct
+
+/-- Inhabitedness witness for the row-committed layout: for the audit key and any valid signing
+    counters, the honest committed rows satisfy the row-only constraints, so the hypotheses of
+    `committed_rows_extract_valid_witnesses` and of the `#tooth` are jointly satisfiable. -/
+theorem inhabited_committed_row_extraction :
+    let pk0 := deriveAggPublicKey xmssPoseidon2Geom auditSkSeed auditPkSeed
+    let stmt : AggArithPublicStmt :=
+      { geom := xmssPoseidon2Geom, msg := auditMsg, committeePks := [pk0], logRows := 1 }
+    stmt.wellFormed = true ∧
+    (∀ (ctrs : ValidSigningCtrs xmssPoseidon2Geom auditSkSeed pk0 auditMsg auditRRand 0),
+      let sig0 := signAggNative xmssPoseidon2Geom auditSkSeed pk0 auditMsg auditRRand 0
+                    ctrs.layer0Ctr ctrs.upperCtrs
+      committedRowsSatisfyAllConstraints stmt (buildCommittedRows stmt [sig0]) = true) := by
+  intro pk0 stmt
+  have hGeomWf : xmssPoseidon2Geom.wellFormed = true := deployedAggGeometries_wellFormed.1
+  have hPkProf : (pk0.profile == xmssPoseidon2Geom.profile) = true := rfl
+  have hStmtWf : stmt.wellFormed = true := by
+    unfold AggArithPublicStmt.wellFormed
+    dsimp only [stmt]
+    simp [hGeomWf, hPkProf]
+  refine ⟨hStmtWf, fun ctrs => ?_⟩
+  intro sig0
+  have hVer0 := aggNativeSig_completeness xmssPoseidon2Geom auditSkSeed auditPkSeed
+    auditMsg auditRRand 0 hGeomWf ctrs
+  refine buildCommittedRows_satisfy_constraints stmt [sig0] hStmtWf rfl ?_
+  intro k hkP _
+  have hk0 : k = 0 := by simp [stmt] at hkP; omega
+  subst hk0
+  exact hVer0
+
+/-! ### Execution trace: committed rows only -/
+
+/-- Execution trace on `{0, 1}^logRows`: the committed rows and nothing else. Every witness
+    block the constraints speak about is read out of `rows`. -/
+structure AggExecutionTrace where
+  rows : List (List Goldilocks)
+  deriving DecidableEq, Repr
+
+/-- The per-validator witness blocks of a trace, as a function of its committed rows. -/
+def AggExecutionTrace.signerWitnesses (stmt : AggArithPublicStmt) (tr : AggExecutionTrace) :
+    Option (List AggSignerTraceWitness) :=
+  extractSignerWitnessesFromRows stmt.committeePks.length tr.rows
+
+/-- Every row-gate and boundary constraint of the trace: `stmt.wellFormed`, exactly
+    `2^stmt.logRows` rows, on each active row `k < K` the 14 boundary columns pinned to
+    `(profileFieldTag, pkSeed, pkRoot, mu)` and the transition residuals of the witness block
+    decoded from that row, and all-zero padding rows. -/
+def traceSatisfiesAllConstraints (stmt : AggArithPublicStmt) (tr : AggExecutionTrace) : Bool :=
+  committedRowsSatisfyAllConstraints stmt tr.rows
+
+/-- The canonical honest execution trace of `K` valid `AggNativeSignature`s. -/
+def buildHonestAggExecutionTrace (stmt : AggArithPublicStmt)
+    (sigs : List AggNativeSignature) : AggExecutionTrace :=
+  { rows := buildCommittedRows stmt sigs }
+
+/-- All-zero execution trace (`2^logRows` zero rows of `numCols` cells). -/
+def zeroAggExecutionTrace (logRows numCols : Nat) : AggExecutionTrace :=
+  { rows := List.replicate (2 ^ logRows) (List.replicate numCols Goldilocks.zero) }
+
+/-- **Per-validator signature extractor.** From a trace satisfying every constraint, reads the
+    witness block out of row `k` and returns the signature it encodes, accepted by
+    `verifyAggNativeSig` for committee key `k`. -/
+def extractValidCommitteeSigsFromTrace (stmt : AggArithPublicStmt) (tr : AggExecutionTrace)
+    (hSat : traceSatisfiesAllConstraints stmt tr = true) :
+    ∀ (k : Nat) (hk : k < stmt.committeePks.length),
+      { sig : AggNativeSignature //
+        verifyAggNativeSig stmt.geom (stmt.committeePks[k]'hk) stmt.msg sig = true } :=
+  fun k hk =>
+    match hd : decodeRowWitness (tr.rows.getD k []) with
+    | some w => ⟨extractSignerWitnessSig w, by
+        obtain ⟨_, w', hd', hZ⟩ :=
+          committedRowOk_unpack (committedRowsSatisfy_row_at stmt tr.rows k hk hSat)
+        have hw : w' = w := Option.some.inj (hd'.symm.trans hd)
+        rw [← hw]
+        exact signerTraceResiduals_sound stmt.geom (stmt.committeePks[k]'hk) stmt.msg w' hZ⟩
+    | none => False.elim (by
+        obtain ⟨_, w', hd', _⟩ :=
+          committedRowOk_unpack (committedRowsSatisfy_row_at stmt tr.rows k hk hSat)
+        rw [hd] at hd'
+        cases hd')
+
+/-- **Honest execution trace completeness.** Whenever all `K` committee validators have valid
+    `AggNativeSignature`s on `stmt.msg`, the honest trace satisfies every constraint. -/
+theorem buildHonestAggExecutionTrace_satisfies_constraints
+    (stmt : AggArithPublicStmt) (sigs : List AggNativeSignature)
+    (hWf : stmt.wellFormed = true)
+    (hLen : sigs.length = stmt.committeePks.length)
+    (hAll : ∀ (k : Nat) (hkP : k < stmt.committeePks.length) (hkS : k < sigs.length),
+      verifyAggNativeSig stmt.geom (stmt.committeePks[k]'hkP) stmt.msg (sigs[k]'hkS) = true) :
+    traceSatisfiesAllConstraints stmt (buildHonestAggExecutionTrace stmt sigs) = true :=
+  buildCommittedRows_satisfy_constraints stmt sigs hWf hLen hAll
+
+/-- **Row-constraint exactness (`trace_satisfies_constraints_iff_all_k_sigs_valid`).**
+    1. Every trace whose constraints vanish has `2^logRows` rows, and its rows decode to `K`
+       witness blocks whose boundary gates vanish and which encode signatures accepted by
+       `verifyAggNativeSig` for `(stmt.msg, stmt.committeePks[k])`.
+    2. A constraint-satisfying trace exists if and only if all `K` committee keys have valid
+       `AggNativeSignature`s on `stmt.msg`. -/
+theorem trace_satisfies_constraints_iff_all_k_sigs_valid
+    (stmt : AggArithPublicStmt) (hWf : stmt.wellFormed = true) :
+    (∀ (tr : AggExecutionTrace),
+      traceSatisfiesAllConstraints stmt tr = true →
+      tr.rows.length = 2 ^ stmt.logRows ∧
+      ∃ ws : List AggSignerTraceWitness,
+        tr.signerWitnesses stmt = some ws ∧
+        ws.length = stmt.committeePks.length ∧
+        (∀ (k : Nat) (hkP : k < stmt.committeePks.length) (hkW : k < ws.length),
+          allZeroGoldilocks (evalRowGateList (boundaryRowGates (stmt.committeePks[k]'hkP) stmt.msg)
+            (tr.rows.getD k [])) = true ∧
+          verifyAggNativeSig stmt.geom (stmt.committeePks[k]'hkP) stmt.msg
+            (extractSignerWitnessSig (ws[k]'hkW)) = true)) ∧
+    (Nonempty { tr : AggExecutionTrace // traceSatisfiesAllConstraints stmt tr = true } ↔
+     Nonempty { sigs : List AggNativeSignature //
+       sigs.length = stmt.committeePks.length ∧
+       ∀ (k : Nat) (hkP : k < stmt.committeePks.length) (hkS : k < sigs.length),
+         verifyAggNativeSig stmt.geom (stmt.committeePks[k]'hkP) stmt.msg (sigs[k]'hkS) = true }) := by
+  have hSound : ∀ (tr : AggExecutionTrace),
+      traceSatisfiesAllConstraints stmt tr = true →
+      tr.rows.length = 2 ^ stmt.logRows ∧
+      ∃ ws : List AggSignerTraceWitness,
+        tr.signerWitnesses stmt = some ws ∧
+        ws.length = stmt.committeePks.length ∧
+        (∀ (k : Nat) (hkP : k < stmt.committeePks.length) (hkW : k < ws.length),
+          allZeroGoldilocks (evalRowGateList (boundaryRowGates (stmt.committeePks[k]'hkP) stmt.msg)
+            (tr.rows.getD k [])) = true ∧
+          verifyAggNativeSig stmt.geom (stmt.committeePks[k]'hkP) stmt.msg
+            (extractSignerWitnessSig (ws[k]'hkW)) = true) := by
+    intro tr hSat
+    have hLen : tr.rows.length = 2 ^ stmt.logRows := by
+      have h := hSat
+      unfold traceSatisfiesAllConstraints committedRowsSatisfyAllConstraints at h
+      simp only [Bool.and_eq_true, decide_eq_true_eq] at h
+      exact h.1.2
+    obtain ⟨ws, hE, hWsLen, hPer, _⟩ := committed_rows_extract_valid_witnesses stmt tr.rows hSat
+    exact ⟨hLen, ws, hE, hWsLen, fun k hkP hkW => ⟨(hPer k hkP hkW).1, (hPer k hkP hkW).2.2⟩⟩
+  refine ⟨hSound, ?_⟩
+  constructor
+  · rintro ⟨⟨tr, hSat⟩⟩
+    obtain ⟨_, ws, _, hWLen, hPerK⟩ := hSound tr hSat
+    let sigs := ws.map extractSignerWitnessSig
+    refine ⟨⟨sigs, by simp [sigs, hWLen], fun k hkP hkS => ?_⟩⟩
+    have hkW : k < ws.length := by simp [sigs] at hkS; exact hkS
+    have hEqSig : sigs[k]'hkS = extractSignerWitnessSig (ws[k]'hkW) := by
+      simp [sigs]
+    rw [hEqSig]
+    exact (hPerK k hkP hkW).2
+  · rintro ⟨⟨sigs, hLen, hAll⟩⟩
+    exact ⟨⟨buildHonestAggExecutionTrace stmt sigs,
+      buildHonestAggExecutionTrace_satisfies_constraints stmt sigs hWf hLen hAll⟩⟩
+
+/-- **`#tooth`: the all-zero trace is rejected (`tooth_zero_trace_rejected_for_any_pk`).** For
+    every well-formed statement, with no assumption on `pkSeed`, `pkRoot`, `msg` or `numCols`,
+    the all-zero rows fail: boundary gate `(row = 0, col = 0)` pins
+    `profileFieldTag pk0.profile ∈ {1, 2} ≠ 0`. -/
+theorem tooth_zero_trace_rejected_for_any_pk
+    (stmt : AggArithPublicStmt) (numCols : Nat)
+    (hWf : stmt.wellFormed = true) :
+    traceSatisfiesAllConstraints stmt (zeroAggExecutionTrace stmt.logRows numCols) = false := by
+  apply Bool.eq_false_iff.mpr
+  intro hSat
+  have hNonEmpty : stmt.committeePks ≠ [] := by
+    unfold AggArithPublicStmt.wellFormed at hWf
+    simp only [Bool.and_eq_true, Bool.not_eq_true', List.isEmpty_eq_false_iff] at hWf
+    exact hWf.1.1.1.2
+  have hk : 0 < stmt.committeePks.length := by
+    cases hPks : stmt.committeePks with
+    | nil => exact absurd hPks hNonEmpty
+    | cons _ _ => exact Nat.zero_lt_succ _
+  obtain ⟨hT, _⟩ := committedRowOk_unpack
+    (committedRowsSatisfy_row_at stmt (zeroAggExecutionTrace stmt.logRows numCols).rows 0 hk hSat)
+  have hB := committedRow_boundary_gates_vanish hT
+  have hRowEq : (zeroAggExecutionTrace stmt.logRows numCols).rows.getD 0 [] =
+      List.replicate numCols Goldilocks.zero := by
+    dsimp only [zeroAggExecutionTrace]
+    cases hPow : 2 ^ stmt.logRows with
+    | zero => exact absurd hPow (Nat.ne_of_gt (Nat.two_pow_pos _))
+    | succ m => rfl
+  rw [hRowEq] at hB
+  unfold boundaryRowGates expectedBoundaryCols at hB
+  simp only [List.singleton_append] at hB
+  have hCol0 := boundaryGatesFrom_zero_at_col0 (profileFieldTag _) _ _ hB
+  rw [getD_zero_replicate_zero] at hCol0
+  exact profileFieldTag_ne_zero _ hCol0.symm
+
+/-- Inhabitedness witness for the row constraints: the audit statement is well formed, its
+    all-zero trace is rejected, and the honest trace of any valid signing counters is accepted. -/
+theorem inhabited_agg_arithmetization_pipeline :
+    let pk0 := deriveAggPublicKey xmssPoseidon2Geom auditSkSeed auditPkSeed
+    let stmt : AggArithPublicStmt :=
+      { geom := xmssPoseidon2Geom, msg := auditMsg, committeePks := [pk0], logRows := 1 }
+    stmt.wellFormed = true ∧
+    traceSatisfiesAllConstraints stmt (zeroAggExecutionTrace 1 14) = false ∧
+    (∀ (ctrs : ValidSigningCtrs xmssPoseidon2Geom auditSkSeed pk0 auditMsg auditRRand 0),
+      let sig0 := signAggNative xmssPoseidon2Geom auditSkSeed pk0 auditMsg auditRRand 0
+                    ctrs.layer0Ctr ctrs.upperCtrs
+      traceSatisfiesAllConstraints stmt (buildHonestAggExecutionTrace stmt [sig0]) = true) := by
+  intro pk0 stmt
+  obtain ⟨hStmtWf, hHon⟩ := inhabited_committed_row_extraction
+  exact ⟨hStmtWf, tooth_zero_trace_rejected_for_any_pk stmt 14 hStmtWf, hHon⟩
+
+/-! ### Constructive collision extraction from two `CanopyMultiProof` transcripts -/
+
+/-- An explicit `nodeHash` collision: one node index, two distinct `(left, right)` pairs, equal
+    digests. -/
+structure CanopyNodeCollision {D : Type} (nodeHash : Nat → D → D → D) where
+  idx : Nat
+  l : D
+  r : D
+  l' : D
+  r' : D
+  ne : (l, r) ≠ (l', r')
+  eq : nodeHash idx l r = nodeHash idx l' r'
+
+/-- An explicit `rootHash` collision on two distinct top nodes. -/
+structure CanopyRootCollision {D : Type} (rootHash : Nat → D → D) (logLeaves : Nat) where
+  top₁ : D
+  top₂ : D
+  ne : top₁ ≠ top₂
+  eq : rootHash logLeaves top₁ = rootHash logLeaves top₂
+
+private def canopyNodeExtract {D : Type} [DecidableEq D] (nodeHash : Nat → D → D → D)
+    {i : Nat} {l r l' r' : D} (h : nodeHash i l r = nodeHash i l' r') :
+    PSum (CanopyNodeCollision nodeHash) (l = l' ∧ r = r') :=
+  if he : (l, r) = (l', r') then .inr (Prod.mk.inj he) else .inl ⟨i, l, r, l', r', he, h⟩
+
+private def canopyParentExtract {D : Type} [DecidableEq D] (nodeHash : Nat → D → D → D)
+    {u : Nat} {hu s hu' s' : D}
+    (h : canopyParentHash nodeHash u hu s = canopyParentHash nodeHash u hu' s') :
+    PSum (CanopyNodeCollision nodeHash) (hu = hu' ∧ s = s') :=
+  if hp : u &&& 1 = 0 then
+    canopyNodeExtract nodeHash (i := u >>> 1) (l := hu) (r := s) (l' := hu') (r' := s')
+      (by unfold canopyParentHash at h; simp only [hp, ↓reduceIte] at h; exact h)
+  else
+    match canopyNodeExtract nodeHash (i := u >>> 1) (l := s) (r := hu) (l' := s') (r' := hu')
+        (by unfold canopyParentHash at h; simp only [hp, ↓reduceIte] at h; exact h) with
+    | .inl c => .inl c
+    | .inr e => .inr ⟨e.2, e.1⟩
+
+/-- One level of the lockstep walk over two transcripts: either both level inputs agree, or the
+    first differing position is returned as a `nodeHash` collision. -/
+private def canopyLevelStepExtract {D : Type} [DecidableEq D] (nodeHash : Nat → D → D → D) :
+    (n : Nat) → (a1 a2 : List (Nat × D)) → (s1 s2 : List D) → (b : List (Nat × D)) →
+      (t : List D) → a1.length < n → a1.map Prod.fst = a2.map Prod.fst →
+      canopyLevelStep nodeHash a1 s1 = some (b, t) →
+      canopyLevelStep nodeHash a2 s2 = some (b, t) →
+      PSum (CanopyNodeCollision nodeHash) (a1 = a2 ∧ s1 = s2)
+  | 0, _, _, _, _, _, _, hLen, _, _, _ => absurd hLen (Nat.not_lt_zero _)
+  | _ + 1, [], [], _, _, _, _, _, _, h1, h2 =>
+    .inr ⟨rfl, (canopyLevelStep_nil nodeHash h1).2.symm.trans (canopyLevelStep_nil nodeHash h2).2⟩
+  | _ + 1, [], _ :: _, _, _, _, _, _, hIdx, _, _ => by cases hIdx
+  | _ + 1, _ :: _, [], _, _, _, _, _, hIdx, _, _ => by cases hIdx
+  | _ + 1, [_], _ :: _ :: _, _, _, _, _, _, hIdx, _, _ => by cases (List.cons.inj hIdx).2
+  | _ + 1, _ :: _ :: _, [_], _, _, _, _, _, hIdx, _, _ => by cases (List.cons.inj hIdx).2
+  | _ + 1, [(u, hu)], [(u2, hu2)], s1, s2, b, t, _, hIdx, h1, h2 => by
+    have hu_eq : u = u2 := (List.cons.inj hIdx).1
+    subst hu_eq
+    match s1, s2, h1, h2 with
+    | [], _, h1, _ => exact False.elim (by cases h1)
+    | _ :: _, [], _, h2 => exact False.elim (by cases h2)
+    | c1 :: r1, c2 :: r2, h1, h2 =>
+      have f1 : r1 = t ∧ b = [(u >>> 1, canopyParentHash nodeHash u hu c1)] := by
+        obtain ⟨c, hs, hb⟩ := canopyLevelStep_single nodeHash h1
+        obtain ⟨hc, hr⟩ := List.cons.inj hs
+        rw [hc]
+        exact ⟨hr, hb⟩
+      have f2 : r2 = t ∧ b = [(u >>> 1, canopyParentHash nodeHash u hu2 c2)] := by
+        obtain ⟨c, hs, hb⟩ := canopyLevelStep_single nodeHash h2
+        obtain ⟨hc, hr⟩ := List.cons.inj hs
+        rw [hc]
+        exact ⟨hr, hb⟩
+      have hH : canopyParentHash nodeHash u hu c1 = canopyParentHash nodeHash u hu2 c2 :=
+        (Prod.mk.inj (List.cons.inj (f1.2.symm.trans f2.2)).1).2
+      match canopyParentExtract nodeHash hH with
+      | .inl c => exact .inl c
+      | .inr e => exact .inr ⟨by rw [e.1], by rw [e.2, f1.1, f2.1]⟩
+  | n + 1, (u, hu) :: (v, hv) :: tl1, (u2, hu2) :: (v2, hv2) :: tl2, s1, s2, b, t,
+      hLen, hIdx, h1, h2 => by
+    have hu_eq : u = u2 := (List.cons.inj hIdx).1
+    have hv_eq : v = v2 := (List.cons.inj (List.cons.inj hIdx).2).1
+    have hTl : tl1.map Prod.fst = tl2.map Prod.fst := (List.cons.inj (List.cons.inj hIdx).2).2
+    subst hu_eq; subst hv_eq
+    have hLen1 : ((v, hv) :: tl1).length < n := Nat.lt_of_succ_lt_succ hLen
+    have hLen2 : tl1.length < n := Nat.lt_of_succ_lt hLen1
+    refine if hv' : v = u ^^^ 1 then ?_ else ?_
+    · have f1 : canopyLevelStep nodeHash tl1 s1 = some (b.tail, t) ∧
+          b = (u >>> 1, nodeHash (u >>> 1) hu hv) :: b.tail := by
+        obtain ⟨act, hr, hb⟩ := canopyLevelStep_pair nodeHash hv' h1
+        rw [hb]
+        exact ⟨hr, rfl⟩
+      have f2 : canopyLevelStep nodeHash tl2 s2 = some (b.tail, t) ∧
+          b = (u >>> 1, nodeHash (u >>> 1) hu2 hv2) :: b.tail := by
+        obtain ⟨act, hr, hb⟩ := canopyLevelStep_pair nodeHash hv' h2
+        rw [hb]
+        exact ⟨hr, rfl⟩
+      have hHead : nodeHash (u >>> 1) hu hv = nodeHash (u >>> 1) hu2 hv2 :=
+        (Prod.mk.inj (List.cons.inj (f1.2.symm.trans f2.2)).1).2
+      match canopyNodeExtract nodeHash hHead with
+      | .inl c => exact .inl c
+      | .inr e =>
+        match canopyLevelStepExtract nodeHash n tl1 tl2 s1 s2 b.tail t hLen2 hTl f1.1 f2.1 with
+        | .inl c => exact .inl c
+        | .inr e' => exact .inr ⟨by rw [e.1, e.2, e'.1], e'.2⟩
+    · match s1, s2, h1, h2 with
+      | [], _, h1, _ =>
+        exact False.elim (by
+          obtain ⟨_, _, _, hs, _, _⟩ := canopyLevelStep_solo nodeHash hv' h1
+          cases hs)
+      | _ :: _, [], _, h2 =>
+        exact False.elim (by
+          obtain ⟨_, _, _, hs, _, _⟩ := canopyLevelStep_solo nodeHash hv' h2
+          cases hs)
+      | c1 :: r1, c2 :: r2, h1, h2 =>
+        have f1 : canopyLevelStep nodeHash ((v, hv) :: tl1) r1 = some (b.tail, t) ∧
+            b = (u >>> 1, canopyParentHash nodeHash u hu c1) :: b.tail := by
+          obtain ⟨c, rest, act, hs, hr, hb⟩ := canopyLevelStep_solo nodeHash hv' h1
+          obtain ⟨hc, hrest⟩ := List.cons.inj hs
+          rw [hb, hc, hrest]
+          exact ⟨hr, rfl⟩
+        have f2 : canopyLevelStep nodeHash ((v, hv2) :: tl2) r2 = some (b.tail, t) ∧
+            b = (u >>> 1, canopyParentHash nodeHash u hu2 c2) :: b.tail := by
+          obtain ⟨c, rest, act, hs, hr, hb⟩ := canopyLevelStep_solo nodeHash hv' h2
+          obtain ⟨hc, hrest⟩ := List.cons.inj hs
+          rw [hb, hc, hrest]
+          exact ⟨hr, rfl⟩
+        have hHead : canopyParentHash nodeHash u hu c1 = canopyParentHash nodeHash u hu2 c2 :=
+          (Prod.mk.inj (List.cons.inj (f1.2.symm.trans f2.2)).1).2
+        match canopyParentExtract nodeHash hHead with
+        | .inl c => exact .inl c
+        | .inr e =>
+          match canopyLevelStepExtract nodeHash n ((v, hv) :: tl1) ((v, hv2) :: tl2) r1 r2
+              b.tail t hLen1 (congrArg (List.cons v) hTl) f1.1 f2.1 with
+          | .inl c => exact .inl c
+          | .inr e' => exact .inr ⟨by rw [e.1, e'.1], by rw [e.2, e'.2]⟩
+
+/-- The lockstep walk over all `d` levels, from the common final state back to the leaves. -/
+private def canopyLevelsExtract {D : Type} [DecidableEq D] (nodeHash : Nat → D → D → D) :
+    (d : Nat) → (a1 a2 : List (Nat × D)) → (s1 s2 : List D) → (b : List (Nat × D)) →
+      (t : List D) → a1.map Prod.fst = a2.map Prod.fst →
+      canopyLevels nodeHash d a1 s1 = some (b, t) →
+      canopyLevels nodeHash d a2 s2 = some (b, t) →
+      PSum (CanopyNodeCollision nodeHash) (a1 = a2 ∧ s1 = s2)
+  | 0, _, _, _, _, _, _, _, h1, h2 => .inr (by
+      rw [canopyLevels] at h1 h2
+      exact Prod.mk.inj (Option.some.inj (h1.trans h2.symm)))
+  | d + 1, a1, a2, s1, s2, b, t, hIdx, h1, h2 => by
+    match hs1 : canopyLevelStep nodeHash a1 s1, hs2 : canopyLevelStep nodeHash a2 s2 with
+    | none, _ =>
+      exact False.elim (by
+        obtain ⟨_, _, hStep, _⟩ := canopyLevels_succ nodeHash h1
+        rw [hs1] at hStep
+        cases hStep)
+    | some _, none =>
+      exact False.elim (by
+        obtain ⟨_, _, hStep, _⟩ := canopyLevels_succ nodeHash h2
+        rw [hs2] at hStep
+        cases hStep)
+    | some (m1, r1), some (m2, r2) =>
+      have hRest1 : canopyLevels nodeHash d m1 r1 = some (b, t) := by
+        obtain ⟨m, r, hStep, hRest⟩ := canopyLevels_succ nodeHash h1
+        rw [hs1] at hStep
+        obtain ⟨hm, hr⟩ := Prod.mk.inj (Option.some.inj hStep)
+        rw [hm, hr]
+        exact hRest
+      have hRest2 : canopyLevels nodeHash d m2 r2 = some (b, t) := by
+        obtain ⟨m, r, hStep, hRest⟩ := canopyLevels_succ nodeHash h2
+        rw [hs2] at hStep
+        obtain ⟨hm, hr⟩ := Prod.mk.inj (Option.some.inj hStep)
+        rw [hm, hr]
+        exact hRest
+      have hm1 := (canopyLevelStep_shape nodeHash _ a1 s1 m1 r1 (Nat.lt_succ_self _) hs1).1
+      have hm2 := (canopyLevelStep_shape nodeHash _ a2 s2 m2 r2 (Nat.lt_succ_self _) hs2).1
+      rw [hIdx] at hm1
+      match canopyLevelsExtract nodeHash d m1 m2 r1 r2 b t (hm1.trans hm2.symm) hRest1 hRest2 with
+      | .inl c => exact .inl c
+      | .inr e =>
+        have hs2' : canopyLevelStep nodeHash a2 s2 = some (m1, r1) := by
+          rw [hs2, e.1, e.2]
+        exact canopyLevelStepExtract nodeHash _ a1 a2 s1 s2 m1 r1 (Nat.lt_succ_self _) hIdx
+          hs1 hs2'
+
+private def canopyTopOf {D : Type} (r : Option (List (Nat × D) × List D)) : Option D :=
+  match r with
+  | some ([(_, top)], []) => some top
+  | _ => none
+
+/-- **Constructive collision extractor over `CanopyMultiProof` transcripts.** Given two accepted
+    openings of one index set against one commitment that differ in a leaf digest or a sibling,
+    the function walks both transcripts level by level and returns an explicit collision: of
+    `rootHash` on the two top nodes, or of `nodeHash` at the first node where the two
+    transcripts hash different children to the same parent. The result is data in `Type`, built
+    with `DecidableEq D` only. -/
+def extractCanopyCollision {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (rootHash : Nat → D → D)
+    (logLeaves : Nat) (commitment : D)
+    (leaves₁ leaves₂ : List (Nat × D)) (proof₁ proof₂ : List D)
+    (hIdx : leaves₁.map Prod.fst = leaves₂.map Prod.fst)
+    (hAcc₁ : verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves₁ proof₁ = true)
+    (hAcc₂ : verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves₂ proof₂ = true)
+    (hNe : (leaves₁, proof₁) ≠ (leaves₂, proof₂)) :
+    PSum (CanopyRootCollision rootHash logLeaves) (CanopyNodeCollision nodeHash) := by
+  match hT1 : canopyTopOf (canopyLevels nodeHash logLeaves
+        (leaves₁.map (fun p => (2 ^ logLeaves + p.1, p.2))) proof₁),
+      hT2 : canopyTopOf (canopyLevels nodeHash logLeaves
+        (leaves₂.map (fun p => (2 ^ logLeaves + p.1, p.2))) proof₂) with
+  | none, _ =>
+    exact False.elim (by
+      obtain ⟨top, hL, _⟩ :=
+        canopy_accept_unpack nodeHash rootHash logLeaves commitment leaves₁ proof₁ hAcc₁
+      rw [hL] at hT1
+      cases hT1)
+  | some _, none =>
+    exact False.elim (by
+      obtain ⟨top, hL, _⟩ :=
+        canopy_accept_unpack nodeHash rootHash logLeaves commitment leaves₂ proof₂ hAcc₂
+      rw [hL] at hT2
+      cases hT2)
+  | some top1, some top2 =>
+    have hL1 : canopyLevels nodeHash logLeaves
+          (leaves₁.map (fun p => (2 ^ logLeaves + p.1, p.2))) proof₁ = some ([(1, top1)], []) ∧
+        rootHash logLeaves top1 = commitment := by
+      obtain ⟨top, hL, hR⟩ :=
+        canopy_accept_unpack nodeHash rootHash logLeaves commitment leaves₁ proof₁ hAcc₁
+      rw [hL] at hT1
+      have hEq : some top = some top1 := hT1
+      rw [← Option.some.inj hEq]
+      exact ⟨hL, hR⟩
+    have hL2 : canopyLevels nodeHash logLeaves
+          (leaves₂.map (fun p => (2 ^ logLeaves + p.1, p.2))) proof₂ = some ([(1, top2)], []) ∧
+        rootHash logLeaves top2 = commitment := by
+      obtain ⟨top, hL, hR⟩ :=
+        canopy_accept_unpack nodeHash rootHash logLeaves commitment leaves₂ proof₂ hAcc₂
+      rw [hL] at hT2
+      have hEq : some top = some top2 := hT2
+      rw [← Option.some.inj hEq]
+      exact ⟨hL, hR⟩
+    refine if hTop : top1 = top2 then ?_ else .inl ⟨top1, top2, hTop, hL1.2.trans hL2.2.symm⟩
+    have hL2' : canopyLevels nodeHash logLeaves
+        (leaves₂.map (fun p => (2 ^ logLeaves + p.1, p.2))) proof₂ = some ([(1, top1)], []) := by
+      rw [hTop]; exact hL2.1
+    have hIdx' : (leaves₁.map (fun p => (2 ^ logLeaves + p.1, p.2))).map Prod.fst =
+        (leaves₂.map (fun p => (2 ^ logLeaves + p.1, p.2))).map Prod.fst := by
+      rw [canopy_map_fst, canopy_map_fst, hIdx]
+    match canopyLevelsExtract nodeHash logLeaves _ _ proof₁ proof₂ _ _ hIdx' hL1.1 hL2' with
+    | .inl c => exact .inr c
+    | .inr e =>
+      exact False.elim (hNe (by
+        rw [canopy_lift_inj (2 ^ logLeaves) leaves₁ leaves₂ e.1, e.2]))
+
+/-- A 32-byte digest. -/
+abbrev CanopyDigest32 : Type := { b : ByteArray // b.data.toList.length = 32 }
+
+/-- An explicit collision of a byte-string hash `H`: two distinct inputs with equal outputs,
+    as data (a subtype of pairs), not as an existence statement. -/
+@[expose] def ExtractedHashCollision (H : ByteArray → ByteArray) : Type :=
+  { p : ByteArray × ByteArray // p.1 ≠ p.2 ∧ H p.1 = H p.2 }
+
+/-- `pcs.rs:hash_merkle_internal` input frame: `0x00 || node_idx (4 bytes LE) || left || right`. -/
+def canopyNodeFrame (nodeIdx : Nat) (l r : CanopyDigest32) : ByteArray :=
+  ⟨⟨(0 : UInt8) ::
+    ([leByte nodeIdx 1, leByte nodeIdx 256, leByte nodeIdx 65536, leByte nodeIdx 16777216] ++
+      (l.1.data.toList ++ r.1.data.toList))⟩⟩
+
+/-- `pcs.rs:hash_tree_root` input frame: `0x01 || log_leaves || top`. -/
+def canopyRootFrame (logLeaves : Nat) (top : CanopyDigest32) : ByteArray :=
+  ⟨⟨(1 : UInt8) :: leByte logLeaves 1 :: top.1.data.toList⟩⟩
+
+/-- Node hash induced by `H` on `canopyNodeFrame`, for `H` with 32-byte output. -/
+def canopyNodeHashOf (H : ByteArray → ByteArray) (hOut : ∀ x, (H x).data.toList.length = 32)
+    (nodeIdx : Nat) (l r : CanopyDigest32) : CanopyDigest32 :=
+  ⟨H (canopyNodeFrame nodeIdx l r), hOut _⟩
+
+/-- Root hash induced by `H` on `canopyRootFrame`. -/
+def canopyRootHashOf (H : ByteArray → ByteArray) (hOut : ∀ x, (H x).data.toList.length = 32)
+    (logLeaves : Nat) (top : CanopyDigest32) : CanopyDigest32 :=
+  ⟨H (canopyRootFrame logLeaves top), hOut _⟩
+
+private theorem byteArray_eq_of_toList_eq {a b : ByteArray}
+    (h : a.data.toList = b.data.toList) : a = b := by
+  obtain ⟨⟨la⟩⟩ := a
+  obtain ⟨⟨lb⟩⟩ := b
+  have h' : la = lb := h
+  rw [h']
+
+private theorem canopyNodeFrame_inj {i : Nat} {l r l' r' : CanopyDigest32}
+    (h : canopyNodeFrame i l r = canopyNodeFrame i l' r') : l = l' ∧ r = r' := by
+  have h1 : (0 : UInt8) ::
+      ([leByte i 1, leByte i 256, leByte i 65536, leByte i 16777216] ++
+        (l.1.data.toList ++ r.1.data.toList)) =
+      (0 : UInt8) ::
+      ([leByte i 1, leByte i 256, leByte i 65536, leByte i 16777216] ++
+        (l'.1.data.toList ++ r'.1.data.toList)) :=
+    congrArg (fun b : ByteArray => b.data.toList) h
+  have h2 := List.append_cancel_left (List.cons.inj h1).2
+  obtain ⟨e1, e2⟩ := List.append_inj h2 (l.2.trans l'.2.symm)
+  exact ⟨Subtype.ext (byteArray_eq_of_toList_eq e1), Subtype.ext (byteArray_eq_of_toList_eq e2)⟩
+
+private theorem canopyRootFrame_inj {k : Nat} {top top' : CanopyDigest32}
+    (h : canopyRootFrame k top = canopyRootFrame k top') : top = top' := by
+  have h1 : (1 : UInt8) :: leByte k 1 :: top.1.data.toList =
+      (1 : UInt8) :: leByte k 1 :: top'.1.data.toList :=
+    congrArg (fun b : ByteArray => b.data.toList) h
+  exact Subtype.ext (byteArray_eq_of_toList_eq (List.cons.inj (List.cons.inj h1).2).2)
+
+/-- **Transcript-extracted hash collision.** For a byte-string hash `H` with 32-byte output, two
+    accepted `CanopyMultiProof` openings of one index set against one commitment that differ in
+    a leaf digest or a sibling yield an explicit pair of distinct frames with equal `H` digests,
+    computed from the two transcripts by `extractCanopyCollision`. -/
+def extractHashCollisionFromCanopyTranscripts (H : ByteArray → ByteArray)
+    (hOut : ∀ x, (H x).data.toList.length = 32)
+    (logLeaves : Nat) (commitment : CanopyDigest32)
+    (leaves₁ leaves₂ : List (Nat × CanopyDigest32)) (proof₁ proof₂ : List CanopyDigest32)
+    (hIdx : leaves₁.map Prod.fst = leaves₂.map Prod.fst)
+    (hAcc₁ : verifyCanopyMultiproof (canopyNodeHashOf H hOut) (canopyRootHashOf H hOut)
+      logLeaves commitment leaves₁ proof₁ = true)
+    (hAcc₂ : verifyCanopyMultiproof (canopyNodeHashOf H hOut) (canopyRootHashOf H hOut)
+      logLeaves commitment leaves₂ proof₂ = true)
+    (hNe : (leaves₁, proof₁) ≠ (leaves₂, proof₂)) : ExtractedHashCollision H :=
+  match extractCanopyCollision (canopyNodeHashOf H hOut) (canopyRootHashOf H hOut) logLeaves
+      commitment leaves₁ leaves₂ proof₁ proof₂ hIdx hAcc₁ hAcc₂ hNe with
+  | .inl c =>
+    ⟨(canopyRootFrame logLeaves c.top₁, canopyRootFrame logLeaves c.top₂),
+      fun h => c.ne (canopyRootFrame_inj h), congrArg Subtype.val c.eq⟩
+  | .inr c =>
+    ⟨(canopyNodeFrame c.idx c.l c.r, canopyNodeFrame c.idx c.l' c.r'),
+      fun h => c.ne (by
+        obtain ⟨e1, e2⟩ := canopyNodeFrame_inj h
+        rw [e1, e2]),
+      congrArg Subtype.val c.eq⟩
+
+/-- Two distinct leaf assignments accepted against one `CanopyMultiProof` commitment yield an
+    explicit `H` collision. -/
+def extractHashCollisionFromDistinctLeaves (H : ByteArray → ByteArray)
+    (hOut : ∀ x, (H x).data.toList.length = 32)
+    (logLeaves : Nat) (commitment : CanopyDigest32)
+    (leaves₁ leaves₂ : List (Nat × CanopyDigest32)) (proof₁ proof₂ : List CanopyDigest32)
+    (hIdx : leaves₁.map Prod.fst = leaves₂.map Prod.fst)
+    (hAcc₁ : verifyCanopyMultiproof (canopyNodeHashOf H hOut) (canopyRootHashOf H hOut)
+      logLeaves commitment leaves₁ proof₁ = true)
+    (hAcc₂ : verifyCanopyMultiproof (canopyNodeHashOf H hOut) (canopyRootHashOf H hOut)
+      logLeaves commitment leaves₂ proof₂ = true)
+    (hNe : leaves₁ ≠ leaves₂) : ExtractedHashCollision H :=
+  extractHashCollisionFromCanopyTranscripts H hOut logLeaves commitment leaves₁ leaves₂
+    proof₁ proof₂ hIdx hAcc₁ hAcc₂ (fun h => hNe (Prod.mk.inj h).1)
+
+/-- A concrete `ByteArray → ByteArray` digest with 32-byte output: the first 32 bytes of the
+    input, zero-padded. It is not collision resistant (it ignores every byte past the 32nd),
+    which is what makes the hypotheses of the extractor satisfiable. -/
+def canopyPrefixHash (x : ByteArray) : ByteArray :=
+  ⟨⟨(x.data.toList ++ List.replicate 32 (0 : UInt8)).take 32⟩⟩
+
+theorem canopyPrefixHash_length (x : ByteArray) :
+    (canopyPrefixHash x).data.toList.length = 32 := by
+  show ((x.data.toList ++ List.replicate 32 (0 : UInt8)).take 32).length = 32
+  rw [List.length_take, List.length_append, List.length_replicate]
+  omega
+
+/-- The 32-byte digest whose bytes all equal `b`. -/
+def canopyConstDigest (b : UInt8) : CanopyDigest32 :=
+  ⟨⟨⟨List.replicate 32 b⟩⟩, List.length_replicate⟩
+
+/-- Commitment of the two-leaf tree with leaf `0` equal to `canopyConstDigest 5` under
+    `canopyPrefixHash`; the node frame keeps only 27 bytes of the left child, so the commitment
+    does not depend on the right child. -/
+def canopyAuditCommitment : CanopyDigest32 :=
+  canopyRootHashOf canopyPrefixHash canopyPrefixHash_length 1
+    (canopyNodeHashOf canopyPrefixHash canopyPrefixHash_length 1
+      (canopyConstDigest 5) (canopyConstDigest 7))
+
+/-- Inhabitedness witness for the transcript extractor over a `ByteArray → ByteArray` 32-byte
+    digest: under `canopyPrefixHash`, two `CanopyMultiProof` openings of leaf `0` with different
+    siblings are both accepted against `canopyAuditCommitment`, so the hypotheses of
+    `extractHashCollisionFromCanopyTranscripts` are jointly satisfiable, and the extractor
+    returns an explicit pair of distinct byte strings with equal digests. -/
+theorem inhabited_canopy_collision_extractor :
+    verifyCanopyMultiproof (canopyNodeHashOf canopyPrefixHash canopyPrefixHash_length)
+        (canopyRootHashOf canopyPrefixHash canopyPrefixHash_length) 1 canopyAuditCommitment
+        [(0, canopyConstDigest 5)] [canopyConstDigest 7] = true ∧
+    verifyCanopyMultiproof (canopyNodeHashOf canopyPrefixHash canopyPrefixHash_length)
+        (canopyRootHashOf canopyPrefixHash canopyPrefixHash_length) 1 canopyAuditCommitment
+        [(0, canopyConstDigest 5)] [canopyConstDigest 8] = true ∧
+    Nonempty (ExtractedHashCollision canopyPrefixHash) :=
+  ⟨by decide, by decide,
+    ⟨extractHashCollisionFromCanopyTranscripts canopyPrefixHash canopyPrefixHash_length 1
+      canopyAuditCommitment [(0, canopyConstDigest 5)] [(0, canopyConstDigest 5)]
+      [canopyConstDigest 7] [canopyConstDigest 8] rfl (by decide) (by decide) (by decide)⟩⟩
+
+theorem tooth_canopy_sibling_mutation :
+    ∃ proof : List Nat, proof ≠ canopyToyProof ∧
+      verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+        canopyToyLeaves proof = false :=
+  ⟨[canopyToyLeaf 0, canopyToyLeaf 3, canopyToyLeaf 7 + 1,
+    canopyToyNodeHash 6 (canopyToyLeaf 4) (canopyToyLeaf 5)],
+    by decide, canopyToy_flipped_sibling_rejected⟩
+
+#tooth_pair canopyToy_honest_accepted vs tooth_canopy_sibling_mutation
+theorem inhabited_canopy_nonempty_opening :
+    ∃ (leaves : List (Nat × Nat)) (proof : List Nat),
+      leaves = canopyToyLeaves ∧ proof = canopyToyProof ∧
+      verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+        leaves proof = true :=
+  ⟨canopyToyLeaves, canopyToyProof, rfl, rfl, canopyToy_honest_accepted⟩
+
+#verify_inhabited verifyCanopyMultiproof_exact_sibling_count inhabited_canopy_nonempty_opening
+
+
+end Qsag
+end
