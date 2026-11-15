@@ -64,6 +64,7 @@ public import Qsag.Protocol.Signing.HypertreeEufCma
 public import Qsag.Tactic.AssuranceKit
 
 public import Qsag.Math.QuarticExt4
+import all Qsag.Math.QuarticExt4
 
 public section
 namespace Qsag
@@ -261,7 +262,7 @@ theorem prechallenge_fold_forgery_attack
 
 namespace Aggregation
 
-/-- Quartic extension $\mathbb{F}_{p^4} = \mathbb{F}_{p^2}[v] / (v^2 - u)$ where
+/-! Quartic extension $\mathbb{F}_{p^4} = \mathbb{F}_{p^2}[v] / (v^2 - u)$ where
     $u = \texttt{GoldilocksExt2.uBasis}$ ($u^2 = 7$), matching `GoldilocksExt4` in
     `crates/qsag-agg/src/field.rs` (`|\mathbb{F}_{p^4}| = p^4 > 2^{255}`). -/
 /-- Quartic challenge field multiplicative inverse law (`z ≠ 0 → z * z⁻¹ = 1`). -/

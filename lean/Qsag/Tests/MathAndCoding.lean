@@ -175,6 +175,7 @@ theorem tooth_carmichael_561_passes_fermat_but_fails_pratt :
   dsimp only at hPrime; rcases hPrime.2 3 ⟨187, by decide⟩ with h1 | h561 <;> omega
 
 #tooth_pair Qsag.checkPrattStep_sound vs Qsag.tooth_carmichael_561_passes_fermat_but_fails_pratt
+#verify_constructive Qsag.tooth_carmichael_561_passes_fermat_but_fails_pratt
 
 
 def bls381Torsion3Point : SwPoint := some (0, 2)
@@ -187,6 +188,7 @@ theorem tooth_bls381_torsion3_onCurve_but_off_subgroup :
   ⟨bls381Torsion3Point, by decide +kernel, by decide +kernel, by decide +kernel⟩
 
 #tooth_pair Qsag.bls381G1_onCurve_and_prime_subgroup_order vs Qsag.tooth_bls381_torsion3_onCurve_but_off_subgroup
+#verify_constructive Qsag.tooth_bls381_torsion3_onCurve_but_off_subgroup
 
 
 namespace Poly3.Tests
