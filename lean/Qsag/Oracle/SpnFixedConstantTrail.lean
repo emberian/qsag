@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.SpnFixedConstantTrail — the deployed shape: fixed public constants, random input
+# Qsag.Oracle.SpnFixedConstantTrail — the deployed shape: fixed public constants, random input
 
 `Qsag.SpnRoundConstantExperiment` draws the round constants after the pair is committed.
 Deployment is the other way round: the constants are public and fixed, and only the input
@@ -24,10 +24,10 @@ No statement here bounds a differential (all trails summed) under fixed constant
 the open cryptanalytic question for the public permutation and is not derivable from the
 root count, the branch number or the active-box count.
 -/
-public import Qsag.SpnRoundConstantExperiment
-import all Qsag.SpnRoundConstantExperiment
-import all Qsag.HashTrailSampling
-import all Qsag.ParallelSeededSpnSecurity
+public import Qsag.Oracle.SpnRoundConstantExperiment
+import all Qsag.Oracle.SpnRoundConstantExperiment
+import all Qsag.Oracle.HashTrailSampling
+import all Qsag.Oracle.ParallelSeededSpnSecurity
 
 public section
 namespace Qsag

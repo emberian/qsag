@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.SpnWalshHull — linear trails are signed Fourier terms, the hull is their sum
+# Qsag.Oracle.SpnWalshHull — linear trails are signed Fourier terms, the hull is their sum
 
 Differential trail products are probabilities only in an explicit experiment
 (`Qsag.SpnRoundConstantExperiment`). Linear trail products are different objects: they are
@@ -33,10 +33,10 @@ Not proved: any bound on the Walsh coefficients of `x^7` over `Tower128` (the We
 `6·2^64` is a theorem of algebraic geometry, not derived here), hence no numeric bound on any
 trail contribution or on the hull of the 48-round permutation.
 -/
-public import Qsag.SpnFixedConstantTrail
-import all Qsag.SpnFixedConstantTrail
-import all Qsag.SpnRoundConstantExperiment
-import all Qsag.ParallelSeededSpnSecurity
+public import Qsag.Oracle.SpnFixedConstantTrail
+import all Qsag.Oracle.SpnFixedConstantTrail
+import all Qsag.Oracle.SpnRoundConstantExperiment
+import all Qsag.Oracle.ParallelSeededSpnSecurity
 
 public section
 namespace Qsag

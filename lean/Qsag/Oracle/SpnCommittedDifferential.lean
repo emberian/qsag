@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.SpnCommittedDifferential — differentials and Davies–Meyer in the committed experiment
+# Qsag.Oracle.SpnCommittedDifferential — differentials and Davies–Meyer in the committed experiment
 
 Continues `Qsag.SpnRoundConstantExperiment` (same roles: the pair `s ≠ s'` is committed, then
 the round-constant pairs are drawn uniformly and independently from `keys`).
@@ -15,10 +15,10 @@ the round-constant pairs are drawn uniformly and independently from `keys`).
 
 Not proved: any statement for inputs chosen after the public constants are known.
 -/
-public import Qsag.SpnRoundConstantExperiment
-import all Qsag.SpnRoundConstantExperiment
-import all Qsag.HashTrailSampling
-import all Qsag.ParallelSeededSpnSecurity
+public import Qsag.Oracle.SpnRoundConstantExperiment
+import all Qsag.Oracle.SpnRoundConstantExperiment
+import all Qsag.Oracle.HashTrailSampling
+import all Qsag.Oracle.ParallelSeededSpnSecurity
 
 public section
 namespace Qsag

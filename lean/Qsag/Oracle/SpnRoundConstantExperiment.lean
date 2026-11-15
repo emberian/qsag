@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.SpnRoundConstantExperiment — who is random in the 48-round x^7 SPN experiments
+# Qsag.Oracle.SpnRoundConstantExperiment — who is random in the 48-round x^7 SPN experiments
 
 `ParallelSeededSpnSecurity` proves component facts (x^7 root count, branch number, active-box
 count) and `HashTrailSampling` shows that the product of root fractions is a probability only
@@ -36,9 +36,9 @@ Not proved here: independence of the cSHAKE-derived constants (a random-oracle i
 any bound for an adversary who picks inputs after seeing the constants (collision, preimage
 or one-wayness of the fixed public permutation), and the polynomial-basis representation.
 -/
-public import Qsag.HashTrailSampling
-import all Qsag.HashTrailSampling
-import all Qsag.ParallelSeededSpnSecurity
+public import Qsag.Oracle.HashTrailSampling
+import all Qsag.Oracle.HashTrailSampling
+import all Qsag.Oracle.ParallelSeededSpnSecurity
 
 public section
 namespace Qsag
