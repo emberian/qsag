@@ -92,7 +92,8 @@ theorem idealSignMachine_step_preserves_inv {PK Sig : Type}
   dsimp only at hStep
   by_cases hDup : (st.statefulEpochs && decide (req.epoch ∈ st.usedEpochs)) = true
   · simp only [hDup, ↓reduceIte] at hStep
-  · simp only [hDup, ↓reduceIte] at hStep
+    cases hStep
+  · simp only [hDup] at hStep
     cases hOr : oracleSign req with
     | none =>
       rw [hOr] at hStep

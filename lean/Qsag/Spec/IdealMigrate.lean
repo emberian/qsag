@@ -62,7 +62,7 @@ structure IdealMigrateState where
 
 /-- Core invariant of `IdealMigrateState`: no duplicate nullifiers (`spentNullifiers.Nodup`),
     `spentNullifiers` equals `(settledClaims.map MigrationClaim.nullifier)`, and `totalMigrated ≤ poolCap`. -/
-def IdealMigrateState.Inv (poolCap₀ : Nat) (st : IdealMigrateState) : Prop :=
+@[expose] def IdealMigrateState.Inv (poolCap₀ : Nat) (st : IdealMigrateState) : Prop :=
   st.poolCap = poolCap₀ ∧
   st.totalMigrated ≤ poolCap₀ ∧
   st.spentNullifiers = st.settledClaims.map MigrationClaim.nullifier ∧
@@ -100,6 +100,7 @@ theorem idealMigrateMachine_step_preserves_inv {poolCap₀ : Nat}
     refine ⟨⟨hCapEq, hCapEq ▸ hCapOk, congrArg (claim.nullifier :: ·) hMapEq,
       .cons (fun x hx hEq => hNotMem (hEq ▸ hx)) hNd⟩, hWvTrue, hOut.symm⟩
   · simp only [hGate, ↓reduceIte] at hStep
+    cases hStep
 
 theorem idealMigrateMachine_trace_preserves_inv {poolCap₀ : Nat} :
     ∀ {s₀ s_final : IdealMigrateState} {tr : List ((MigrationClaim × Bool) × MigrationClaim)},

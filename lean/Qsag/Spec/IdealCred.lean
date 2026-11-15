@@ -98,6 +98,9 @@ theorem idealCredMachine_presentation_sound {Attr : Type} [DecidableEq Attr]
       decide (witnessAttrs ∈ st.mintedCredentials) &&
       CredentialMatchesAttributes stmt witnessAttrs)
   · simp only [hCond, Bool.false_eq_true, ↓reduceIte] at hStep
+    injection hStep with hPair
+    injection hPair with _ hVer
+    cases hVer
   · simp only [hCond, ↓reduceIte] at hStep
     injection hStep with hPair
     injection hPair with hSt _
