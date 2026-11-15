@@ -54,5 +54,9 @@ mod directory_anchor;
 #[cfg(feature = "std")]
 pub use directory_anchor::FsDirectoryMonotoneAnchor;
 
-#[cfg(all(any(test, feature = "std"), target_os = "linux", target_pointer_width = "64"))]
+#[cfg(all(
+    any(test, feature = "std"),
+    target_os = "linux",
+    target_pointer_width = "64"
+))]
 pub mod volatile_coupon;
