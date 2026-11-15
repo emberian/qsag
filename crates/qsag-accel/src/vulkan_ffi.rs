@@ -5114,7 +5114,10 @@ impl RawVulkanEngine {
                             1,
                             &copy,
                         );
-                        check_vk("vkEndCommandBuffer", (self.fns.end_command_buffer)(cbs[slot]))?;
+                        check_vk(
+                            "vkEndCommandBuffer",
+                            (self.fns.end_command_buffer)(cbs[slot]),
+                        )?;
                         check_vk(
                             "vkResetFences",
                             (self.fns.reset_fences)(self.device, 1, &fences[slot]),

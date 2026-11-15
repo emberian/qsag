@@ -5,13 +5,21 @@
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
+use qsag_asm::portable::{
+    goldilocks_add_ct_portable, goldilocks_canonicalize_ct, goldilocks_mul_ct_portable,
+    goldilocks_reduce128_ct_portable, goldilocks_sub_ct_portable,
+};
+
 use crate::AccelError;
 use crate::ct::{ct_eq_u64, ct_select_u64};
 
+// The scalar field lives in `qsag_asm::portable`; this module names it for the kernels here
+// and adds inversion, exponentiation, the quadratic extension, and the transforms.
+
 /// Canonical Goldilocks prime $p = 2^{64} - 2^{32} + 1$.
-pub const GOLDILOCKS_PRIME: u64 = 0xFFFF_FFFF_0000_0001;
+pub const GOLDILOCKS_PRIME: u64 = qsag_asm::GOLDILOCKS_PRIME;
 /// Reduction constant $\epsilon = 2^{32} - 1 = 2^{64} - p$.
-pub const GOLDILOCKS_EPSILON: u64 = 0xFFFF_FFFF;
+pub const GOLDILOCKS_EPSILON: u64 = qsag_asm::GOLDILOCKS_EPSILON;
 /// Multiplicative generator $g = 7$ of $\mathbb{F}_p^\times$ and non-residue for $\mathbb{F}_{p^2}$.
 pub const GOLDILOCKS_GENERATOR: u64 = 7;
 /// Primitive $2^{32}$-th root of unity $\omega_{2^{32}} = 7^{2^{32} - 1} \bmod p$.
@@ -28,29 +36,19 @@ pub const fn gl_is_canonical(raw: u64) -> bool {
 /// Branchless canonicalization of any `u64` into $[0, p - 1]$.
 #[inline]
 pub const fn gl_reduce_u64(x: u64) -> u64 {
-    let (diff, borrow) = x.overflowing_sub(GOLDILOCKS_PRIME);
-    ct_select_u64(borrow, x, diff)
+    goldilocks_canonicalize_ct(x)
 }
 
-/// Branchless modular addition of canonical inputs `a, b < p`.
+/// Branchless modular addition, canonical for every `u64` input pair.
 #[inline]
 pub const fn gl_add(a: u64, b: u64) -> u64 {
-    let a_c = gl_reduce_u64(a);
-    let b_c = gl_reduce_u64(b);
-    let rem_p = GOLDILOCKS_PRIME - b_c;
-    let (diff, borrow) = a_c.overflowing_sub(rem_p);
-    let plain_sum = a_c.wrapping_add(b_c);
-    ct_select_u64(borrow, plain_sum, diff)
+    goldilocks_add_ct_portable(a, b)
 }
 
-/// Branchless modular subtraction of canonical inputs `a, b < p`.
+/// Branchless modular subtraction, canonical for every `u64` input pair.
 #[inline]
 pub const fn gl_sub(a: u64, b: u64) -> u64 {
-    let a_c = gl_reduce_u64(a);
-    let b_c = gl_reduce_u64(b);
-    let (diff, borrow) = a_c.overflowing_sub(b_c);
-    let adj = (borrow as u64).wrapping_neg() & GOLDILOCKS_PRIME;
-    diff.wrapping_add(adj)
+    goldilocks_sub_ct_portable(a, b)
 }
 
 /// Branchless negation `0 - a mod p`.
@@ -62,22 +60,13 @@ pub const fn gl_neg(a: u64) -> u64 {
 /// Branchless 128-to-64 Goldilocks reduction for arbitrary `u128`.
 #[inline]
 pub const fn gl_reduce128(x: u128) -> u64 {
-    let lo = x as u64;
-    let hi = (x >> 64) as u64;
-    let hi_lo = hi & GOLDILOCKS_EPSILON;
-    let hi_hi = hi >> 32;
-    // `hi_lo <= 2^32 - 1` implies `(hi_lo << 32) - hi_lo <= (2^32 - 1)^2 < p`.
-    let mid = (hi_lo << 32).wrapping_sub(hi_lo);
-    let lo_c = gl_reduce_u64(lo);
-    gl_sub(gl_add(lo_c, mid), hi_hi)
+    goldilocks_reduce128_ct_portable(x)
 }
 
-/// Branchless modular multiplication `a * b mod p`.
+/// Branchless modular multiplication `a * b mod p`, canonical for every `u64` input pair.
 #[inline]
 pub const fn gl_mul(a: u64, b: u64) -> u64 {
-    let a_c = gl_reduce_u64(a);
-    let b_c = gl_reduce_u64(b);
-    gl_reduce128((a_c as u128) * (b_c as u128))
+    goldilocks_mul_ct_portable(a, b)
 }
 
 /// Branchless squaring `a^2 mod p`.
@@ -306,7 +295,7 @@ pub const fn goldilocks_primitive_root(log2_n: u32) -> Result<u64, AccelError> {
 
 /// Validate that `len` is a nonzero power of two no larger than $2^{32}$ and return `log2(len)`.
 #[inline]
-const fn ntt_log2_len(what: &'static str, len: usize) -> Result<u32, AccelError> {
+pub(crate) const fn ntt_log2_len(what: &'static str, len: usize) -> Result<u32, AccelError> {
     if !len.is_power_of_two() {
         return Err(AccelError::NotPowerOfTwo { what, len });
     }
@@ -460,34 +449,26 @@ fn ntt_stage<T: NttValue>(
         let workers = crate::cpu_workers(buf.len(), 32_768);
         if workers > 1 {
             let blocks = buf.len() / len;
-            std::thread::scope(|scope| {
-                if blocks >= workers {
-                    // Group early-stage blocks to amortize thread startup.
-                    for group in buf.chunks_mut(blocks.div_ceil(workers) * len) {
-                        let run = &run;
-                        scope.spawn(move || {
-                            for block in group.chunks_mut(len) {
-                                let (lo, hi) = block.split_at_mut(half);
-                                run(lo, hi, 0);
-                            }
-                        });
-                    }
-                } else {
-                    // Split within butterflies too: the final stage has only one block.
-                    let chunk_len = half.div_ceil(workers / blocks);
-                    for block in buf.chunks_mut(len) {
+            if blocks >= workers {
+                // Group early-stage blocks to amortize thread startup.
+                let groups = buf.chunks_mut(blocks.div_ceil(workers) * len);
+                crate::cpu_drain(workers, groups, |group| {
+                    for block in group.chunks_mut(len) {
                         let (lo, hi) = block.split_at_mut(half);
-                        for (i, (lo, hi)) in lo
-                            .chunks_mut(chunk_len)
-                            .zip(hi.chunks_mut(chunk_len))
-                            .enumerate()
-                        {
-                            let run = &run;
-                            scope.spawn(move || run(lo, hi, i * chunk_len));
-                        }
+                        run(lo, hi, 0);
                     }
-                }
-            });
+                });
+            } else {
+                // Split within butterflies too: the final stage has only one block.
+                let chunk_len = half.div_ceil(workers / blocks);
+                let pieces = buf.chunks_mut(len).flat_map(|block| {
+                    let (lo, hi) = block.split_at_mut(half);
+                    lo.chunks_mut(chunk_len)
+                        .zip(hi.chunks_mut(chunk_len))
+                        .enumerate()
+                });
+                crate::cpu_drain(workers, pieces, |(i, (lo, hi))| run(lo, hi, i * chunk_len));
+            }
             return;
         }
     }
@@ -597,6 +578,34 @@ fn ntt_alloc_free<T: NttValue>(buf: &mut [T], inverse: bool) -> Result<(), Accel
     Ok(())
 }
 
+/// Shape contract of a coset LDE job, shared by every backend: power-of-two domain and blowup,
+/// a codeword domain inside the two-adic subgroup, and `out_len == domain_len * blowup`.
+pub(crate) fn coset_lde_shape(
+    domain_len: usize,
+    blowup: usize,
+    out_len: usize,
+) -> Result<(), AccelError> {
+    ntt_log2_len("LDE evaluation domain", domain_len)?;
+    if !blowup.is_power_of_two() {
+        return Err(AccelError::NotPowerOfTwo {
+            what: "LDE blowup",
+            len: blowup,
+        });
+    }
+    let codeword_len = domain_len
+        .checked_mul(blowup)
+        .ok_or(AccelError::LengthOverflow)?;
+    ntt_log2_len("LDE codeword domain", codeword_len)?;
+    if out_len != codeword_len {
+        return Err(AccelError::LengthMismatch {
+            what: "LDE output",
+            expected: codeword_len,
+            actual: out_len,
+        });
+    }
+    Ok(())
+}
+
 /// Scratch-free (zero-allocation without `std`) shifted-coset Reed-Solomon Low-Degree Extension (LDE) over $\mathbb{F}_{p^2}$:
 /// Given `evals` of length $N = 2^k$ representing polynomial $P(X) \in \mathbb{F}_{p^2}[X]_{< N}$
 /// evaluated on $\{1, \omega_N, \dots, \omega_N^{N-1}\}$, computes `out` of length $M = N \cdot \text{blowup}$
@@ -608,22 +617,7 @@ pub fn coset_lde_ext2_cpu(
     out: &mut [[u64; 2]],
 ) -> Result<(), AccelError> {
     let n = evals.len();
-    ntt_log2_len("LDE evaluation domain", n)?;
-    if !blowup.is_power_of_two() {
-        return Err(AccelError::NotPowerOfTwo {
-            what: "LDE blowup",
-            len: blowup,
-        });
-    }
-    let m = n.checked_mul(blowup).ok_or(AccelError::LengthOverflow)?;
-    ntt_log2_len("LDE codeword domain", m)?;
-    if out.len() != m {
-        return Err(AccelError::LengthMismatch {
-            what: "LDE output",
-            expected: m,
-            actual: out.len(),
-        });
-    }
+    coset_lde_shape(n, blowup, out.len())?;
 
     for (i, ev) in evals.iter().enumerate() {
         out[i] = [gl_reduce_u64(ev[0]), gl_reduce_u64(ev[1])];
@@ -645,6 +639,6 @@ pub fn coset_lde_ext2_cpu(
         }
     });
 
-    // 3. Forward NTT of length M = N * blowup across all of `out[0..m]`.
+    // 3. Forward NTT of length M = N * blowup across all of `out`.
     ntt_alloc_free(out, false)
 }

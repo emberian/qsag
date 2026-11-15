@@ -1,8 +1,9 @@
 //! 100% constant-time, branchless, LUT-free arithmetic in $\mathbb{F}_{2^{128}}$ for 2-lane BDOZ
 //! MAC dot products (`bdoz_gf2_128_batch_dot`) and Wiedemann binary tower $\mathcal{T}_7$.
 
+use qsag_asm::portable;
+
 use crate::AccelError;
-use crate::ct::ct_select_u128;
 
 /// Irreducible pentanomial $x^{128} + x^7 + x^2 + x + 1$ (`0x87` low reduction polynomial).
 pub const GF2_128_POLY_LO: u128 = 0x87;
@@ -10,19 +11,8 @@ pub const GF2_128_POLY_LO: u128 = 0x87;
 /// Constant-time branchless multiplication in $\mathbb{F}_2[x]/(x^{128} + x^7 + x^2 + x + 1)$
 /// usable in `const` evaluation contexts (`0` lookup tables, `0` secret-dependent branches).
 #[inline]
-pub const fn gf2_128_mul_const(mut a: u128, mut b: u128) -> u128 {
-    let mut acc = 0u128;
-    let mut step = 0u32;
-    while step < 128 {
-        let b_lsb = (b & 1) == 1;
-        acc = ct_select_u128(b_lsb, acc ^ a, acc);
-        let a_msb = (a >> 127) == 1;
-        let shifted = a << 1;
-        a = ct_select_u128(a_msb, shifted ^ GF2_128_POLY_LO, shifted);
-        b >>= 1;
-        step += 1;
-    }
-    acc
+pub const fn gf2_128_mul_const(a: u128, b: u128) -> u128 {
+    portable::poly128_mul_const(a, b)
 }
 
 /// Constant-time multiplication in $\mathbb{F}_2[x]/(x^{128} + x^7 + x^2 + x + 1)$.
@@ -73,44 +63,23 @@ pub const fn gf2_128_inv_or_zero(a: u128) -> u128 {
     gf2_128_sq(x127) // a^{2^128 - 2}
 }
 
-/// Wiedemann binary tower $\mathcal{T}_k$ ($0 \le k \le 7$) constant-time multiplication,
-/// matching `lean/Qsag/BinaryTower.lean` with zero data-dependent branches.
-#[inline]
-const fn tower_scale_x_bits(k: u32, a: u128) -> u128 {
-    if k == 0 {
-        a & 1
-    } else {
-        let half = 1u32 << (k - 1);
-        let mask = if half == 128 {
-            u128::MAX
-        } else {
-            (1u128 << half) - 1
-        };
-        let lo = a & mask;
-        let hi = (a >> half) & mask;
-        let scaled_hi = tower_scale_x_bits(k - 1, hi);
-        hi | ((lo ^ scaled_hi) << half)
-    }
-}
-
-/// Constant-time Wiedemann tower multiplication at level `k` (`0 <= k <= 7`).
+/// Constant-time Wiedemann binary tower $\mathcal{T}_k$ multiplication at level `k`, matching
+/// `lean/Qsag/BinaryTower.lean`. Operands are read modulo $2^{2^k}$.
+///
+/// # Panics
+/// Panics if `k > 7`: the tower stops at $\mathcal{T}_7 = \mathbb{F}_{2^{128}}$.
 #[inline]
 pub const fn tower_mul_bits(k: u32, a: u128, b: u128) -> u128 {
-    if k == 0 {
-        (a & 1) & (b & 1)
-    } else {
-        let half = 1u32 << (k - 1);
-        let mask = (1u128 << half) - 1;
-        let a_lo = a & mask;
-        let a_hi = (a >> half) & mask;
-        let b_lo = b & mask;
-        let b_hi = (b >> half) & mask;
-        let p = tower_mul_bits(k - 1, a_lo, b_lo);
-        let q = tower_mul_bits(k - 1, a_hi, b_hi);
-        let r = tower_mul_bits(k - 1, a_lo ^ a_hi, b_lo ^ b_hi);
-        let lo = p ^ q;
-        let hi = r ^ p ^ q ^ tower_scale_x_bits(k - 1, q);
-        lo | (hi << half)
+    match k {
+        0 => a & b & 1,
+        1 => portable::tower_mul_t1(a as u8 & 0x3, b as u8 & 0x3) as u128,
+        2 => portable::tower_mul_t2(a as u8 & 0xF, b as u8 & 0xF) as u128,
+        3 => portable::wiedemann_mul_t3_u8(a as u8, b as u8) as u128,
+        4 => portable::tower_mul_t4(a as u16, b as u16) as u128,
+        5 => portable::tower_mul_t5(a as u32, b as u32) as u128,
+        6 => portable::tower_mul_t6(a as u64, b as u64) as u128,
+        7 => portable::wiedemann_mul_t7_u128(a, b),
+        _ => panic!("Wiedemann tower level above 7"),
     }
 }
 
@@ -130,20 +99,24 @@ pub fn bdoz_gf2_128_batch_dot_cpu(
     }
     #[cfg(feature = "std")]
     {
-        let workers = crate::cpu_workers(shares.len(), 16_384);
+        // SIMD already handles small batches cheaply; amortize thread startup over 128K
+        // pairs per worker (parallelize only at 256K+ pairs).
+        let workers = crate::cpu_workers(shares.len(), 131_072);
         if workers > 1 {
             let chunk_len = shares.len().div_ceil(workers);
-            return Ok(std::thread::scope(|scope| {
-                let handles: std::vec::Vec<_> = shares
-                    .chunks(chunk_len)
-                    .zip(weights.chunks(chunk_len))
-                    .map(|(s, w)| scope.spawn(move || bdoz_dot_chunk(s, w)))
-                    .collect();
-                handles.into_iter().fold((0, 0), |acc, handle| {
-                    let partial = handle.join().expect("BDOZ worker panicked");
-                    (acc.0 ^ partial.0, acc.1 ^ partial.1)
-                })
-            }));
+            let acc = std::sync::Mutex::new((0u128, 0u128));
+            let chunks = shares.chunks(chunk_len).zip(weights.chunks(chunk_len));
+            crate::cpu_drain(workers, chunks, |(s, w)| {
+                let partial = bdoz_dot_chunk(s, w);
+                let mut acc = acc
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                acc.0 ^= partial.0;
+                acc.1 ^= partial.1;
+            });
+            return Ok(acc
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner));
         }
     }
     Ok(bdoz_dot_chunk(shares, weights))
@@ -202,6 +175,43 @@ impl From<PolyGf2_128> for WiedemannTower128 {
 #[cfg(test)]
 mod basis_tests {
     use super::*;
+
+    #[test]
+    fn every_tower_level_is_the_subfield_of_the_top_level() {
+        // Exhaustive through T_2, then the generators and their sums at each higher level.
+        for k in 0..=2u32 {
+            let size = 1u128 << (1 << k);
+            for a in 0..size {
+                for b in 0..size {
+                    assert_eq!(tower_mul_bits(k, a, b), tower_mul_bits(7, a, b), "T_{k}");
+                    // Operands are read modulo the level's width.
+                    assert_eq!(
+                        tower_mul_bits(k, a | size, b | (size << 3)),
+                        tower_mul_bits(k, a, b)
+                    );
+                }
+            }
+        }
+        for k in 3..=6u32 {
+            let width = 1u32 << k;
+            let mask = (1u128 << width) - 1;
+            let mut x = 0x9e37_79b9_7f4a_7c15_f39c_c060_5ced_c835u128;
+            for i in 0..width {
+                for j in 0..width {
+                    x = x
+                        .wrapping_mul(0x2360_ed05_1fc6_5da4_4385_df64_9fcc_f645)
+                        .wrapping_add(1);
+                    for (a, b) in [(1u128 << i, 1u128 << j), (x & mask, (x >> 64 ^ x) & mask)] {
+                        assert_eq!(tower_mul_bits(k, a, b), tower_mul_bits(7, a, b), "T_{k}");
+                        assert_eq!(
+                            tower_mul_bits(k, a | !mask, b | !mask),
+                            tower_mul_bits(k, a, b)
+                        );
+                    }
+                }
+            }
+        }
+    }
     #[test]
     fn basis_roundtrip_and_product() {
         for i in 0..128 {

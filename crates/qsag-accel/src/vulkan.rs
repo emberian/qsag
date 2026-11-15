@@ -25,16 +25,17 @@
 #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::goldilocks::{GOLDILOCKS_TWO_ADICITY, check_goldilocks_twiddles};
+use crate::goldilocks::{check_goldilocks_twiddles, coset_lde_shape, ntt_log2_len};
 use crate::keccak::{cshake256_framed_32, finalize_cshake256, init_cshake256};
+use crate::poseidon2::merkle_layer_shape;
 use crate::spirv_kernels::{
     canonical_prover_spirv_pin, canonical_prover_spirv_pins, canonical_spirv_pin,
-    canonical_spirv_pins, prover_spirv_kernel_bytes, spirv_kernel_bytes,
+    canonical_spirv_pins,
 };
 use crate::{
     AccelError, AcceleratorBackend, BackendAttestationKey, BatchJobDescriptor, CertifiedKernelPin,
     CertifiedProverKernelPin, ExecutionReceipt, KernelSlot, KernelTargetArch, ProverKernelSlot,
-    merkle_layer_input_digest, merkle_layer_output_digest,
+    hash_counted_u64s, hash_u64_rows, merkle_layer_input_digest, merkle_layer_output_digest,
 };
 
 #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
@@ -418,18 +419,6 @@ fn gpu_or_explicit_cpu_fallback<S: ?Sized>(
     }
 }
 
-#[inline]
-const fn check_ntt_log2(what: &'static str, len: usize) -> Result<u32, AccelError> {
-    if !len.is_power_of_two() {
-        return Err(AccelError::NotPowerOfTwo { what, len });
-    }
-    let log2_len = len.trailing_zeros();
-    if log2_len > GOLDILOCKS_TWO_ADICITY {
-        return Err(AccelError::DomainTooLarge { log2_len });
-    }
-    Ok(log2_len)
-}
-
 impl VulkanSpirvBackend {
     /// Discover a discrete Vulkan GPU with `shaderInt64`, compile all 6 embedded SPIR-V compute
     /// pipelines, and allocate persistent host-cached staging + `DEVICE_LOCAL` VRAM buffers.
@@ -566,15 +555,11 @@ impl VulkanSpirvBackend {
         canonical_spirv_pins()
     }
 
-    /// Independently measure all 6 embedded SPIR-V binaries for `CertifiedBackend::try_new_measured`.
+    /// Pins of the 6 embedded SPIR-V binaries the engine loads, for
+    /// `CertifiedBackend::try_new_measured`. The modules are compiled in, so these equal
+    /// [`Self::canonical_pins`].
     pub fn measure_embedded_spirv_pins() -> [CertifiedKernelPin; KernelSlot::COUNT] {
-        KernelSlot::ALL.map(|slot| {
-            CertifiedKernelPin::from_kernel_artifact(
-                slot,
-                KernelTargetArch::SpirV15,
-                spirv_kernel_bytes(slot),
-            )
-        })
+        canonical_spirv_pins()
     }
 
     /// Canonical `KernelTargetArch::SpirV15` pin for a VRAM-resident [`ProverKernelSlot`].
@@ -587,16 +572,11 @@ impl VulkanSpirvBackend {
         canonical_prover_spirv_pins()
     }
 
-    /// Independently measure all 4 embedded VRAM-resident prover SPIR-V binaries.
+    /// Pins of the 4 embedded VRAM-resident prover SPIR-V binaries the engine loads; these equal
+    /// [`Self::canonical_prover_pins`].
     pub fn measure_embedded_prover_spirv_pins()
     -> [CertifiedProverKernelPin; ProverKernelSlot::COUNT] {
-        ProverKernelSlot::ALL.map(|slot| {
-            CertifiedProverKernelPin::from_kernel_artifact(
-                slot,
-                KernelTargetArch::SpirV15,
-                prover_spirv_kernel_bytes(slot),
-            )
-        })
+        canonical_prover_spirv_pins()
     }
 
     /// Certified pin for a bound VRAM-resident [`ProverKernelSlot`].
@@ -708,7 +688,7 @@ impl VulkanSpirvBackend {
         pk_seed: &[u64; 4],
         base_layer: u32,
     ) -> Result<[u64; 4], VulkanError> {
-        check_ntt_log2("Merkle tree leaves", leaves.len())?;
+        ntt_log2_len("Merkle tree leaves", leaves.len())?;
         // Level `l` is tweaked with `base_layer + l`; a wrapped tweak would alias another layer.
         if base_layer
             .checked_add(leaves.len().trailing_zeros())
@@ -1511,7 +1491,7 @@ impl VulkanSpirvBackend {
         buf: &mut [u64],
         inverse: bool,
     ) -> Result<(), AccelError> {
-        check_ntt_log2("NTT input", buf.len())?;
+        ntt_log2_len("NTT input", buf.len())?;
         #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
         {
             secret_slot_gate(self.secret_slots_audited, KernelSlot::GoldilocksNtt)?;
@@ -1671,23 +1651,7 @@ impl AcceleratorBackend for VulkanSpirvBackend {
         shift: u64,
         out: &mut [[u64; 2]],
     ) -> Result<(), AccelError> {
-        let n = evals.len();
-        check_ntt_log2("LDE evaluation domain", n)?;
-        if !blowup.is_power_of_two() {
-            return Err(AccelError::NotPowerOfTwo {
-                what: "LDE blowup",
-                len: blowup,
-            });
-        }
-        let m = n.checked_mul(blowup).ok_or(AccelError::LengthOverflow)?;
-        check_ntt_log2("LDE codeword domain", m)?;
-        if out.len() != m {
-            return Err(AccelError::LengthMismatch {
-                what: "LDE output",
-                expected: m,
-                actual: out.len(),
-            });
-        }
+        coset_lde_shape(evals.len(), blowup, out.len())?;
         #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
         {
             secret_slot_gate(self.secret_slots_audited, KernelSlot::CosetLdeExt2)?;
@@ -1713,27 +1677,7 @@ impl AcceleratorBackend for VulkanSpirvBackend {
         start_parent_idx: u64,
         out_parents: &mut [[u64; 4]],
     ) -> Result<(), AccelError> {
-        let expected_children = out_parents
-            .len()
-            .checked_mul(2)
-            .ok_or(AccelError::LengthOverflow)?;
-        if children.len() != expected_children {
-            return Err(AccelError::LengthMismatch {
-                what: "Merkle layer children",
-                expected: expected_children,
-                actual: children.len(),
-            });
-        }
-        let max_parent_idx = if out_parents.is_empty() {
-            start_parent_idx
-        } else {
-            start_parent_idx
-                .checked_add((out_parents.len() - 1) as u64)
-                .ok_or(AccelError::LengthOverflow)?
-        };
-        if max_parent_idx > u32::MAX as u64 {
-            return Err(AccelError::LengthOverflow);
-        }
+        merkle_layer_shape(children.len(), out_parents.len(), start_parent_idx)?;
         #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
         {
             secret_slot_gate(self.secret_slots_audited, KernelSlot::MerkleLayerPoseidon2)?;
@@ -1793,20 +1737,6 @@ impl AcceleratorBackend for VulkanSpirvBackend {
 // Keyed `ExecutionReceipt` Helpers Across All 6 Certified `KernelSlot`s
 // ============================================================================
 
-fn hash_u64_rows<const W: usize>(cust: &[u8], rows: &[[u64; W]]) -> [u8; 32] {
-    let mut sp = init_cshake256(b"", cust);
-    sp.absorb(&(rows.len() as u64).to_le_bytes());
-    for row in rows {
-        for &limb in row {
-            sp.absorb(&limb.to_le_bytes());
-        }
-    }
-    finalize_cshake256(&mut sp, true);
-    let mut out = [0u8; 32];
-    sp.squeeze(&mut out);
-    out
-}
-
 /// Versioned input digest for authenticated Goldilocks NTT receipts, binding **both** `buf` and
 /// `twiddles` (`QSAG.ACCEL.NTT_IN.V2 || len(buf) || buf || len(twiddles) || twiddles`).
 pub fn goldilocks_ntt_input_digest(buf: &[u64], twiddles: &[u64]) -> [u8; 32] {
@@ -1827,15 +1757,7 @@ pub fn goldilocks_ntt_input_digest(buf: &[u64], twiddles: &[u64]) -> [u8; 32] {
 
 /// Output digest for authenticated Goldilocks NTT receipts (`QSAG.ACCEL.NTT_OUT.V1 || len || buf`).
 pub fn goldilocks_ntt_output_digest(buf: &[u64]) -> [u8; 32] {
-    let mut sp = init_cshake256(b"", b"QSAG.ACCEL.NTT_OUT.V1");
-    sp.absorb(&(buf.len() as u64).to_le_bytes());
-    for &w in buf {
-        sp.absorb(&w.to_le_bytes());
-    }
-    finalize_cshake256(&mut sp, true);
-    let mut out = [0u8; 32];
-    sp.squeeze(&mut out);
-    out
+    hash_counted_u64s(b"QSAG.ACCEL.NTT_OUT.V1", buf.len(), buf)
 }
 
 fn hash_bdoz_inputs(shares: &[(u128, u128)], weights: &[(u128, u128)]) -> [u8; 32] {
@@ -2044,6 +1966,7 @@ pub fn bdoz_gf2_128_batch_dot_with_receipt<B: AcceleratorBackend>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spirv_kernels::spirv_kernel_bytes;
     use crate::{CpuReferenceBackend, KernelRegistryError, VerifiedKernelDigestRegistry};
 
     #[test]

@@ -6,8 +6,8 @@ use qsag_accel::goldilocks::{
     goldilocks_primitive_root,
 };
 use qsag_accel::{
-    CpuReferenceBackend, KernelSlot, KernelTargetArch, VerifiedKernelDigestRegistry, VulkanError,
-    VulkanSpirvBackend,
+    CpuReferenceBackend, KernelSlot, KernelTargetArch, ProverKernelSlot,
+    VerifiedKernelDigestRegistry, VulkanError, VulkanSpirvBackend,
 };
 
 fn data(n: usize) -> Vec<u64> {
@@ -58,7 +58,7 @@ fn serial_ntt(a: &mut [u64], inverse: bool) {
 
 #[test]
 fn ntt_serial_oracle_across_worker_and_lane_boundaries() {
-    for log_n in [0, 1, 2, 3, 8, 15, 16, 17] {
+    for log_n in [0, 1, 2, 3, 8, 15, 16, 17, 20] {
         let n = 1 << log_n;
         let input = data(n);
         let root = goldilocks_primitive_root(log_n).unwrap();
@@ -106,9 +106,11 @@ fn fused_ext2_lde_matches_separate_scalar_coordinates() {
 
 #[test]
 fn bdoz_parallel_and_simd_tails_match_bitwise_oracle() {
-    let raw = data(32771 * 8);
+    let raw = data(262147 * 8);
     let pairs: Vec<_> = raw
-        .as_chunks::<4>().0.iter()
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|x| {
             (
                 u128::from(x[0]) | (u128::from(x[1]) << 64),
@@ -116,8 +118,8 @@ fn bdoz_parallel_and_simd_tails_match_bitwise_oracle() {
             )
         })
         .collect();
-    let (shares, weights) = pairs.split_at(32771);
-    for n in [0, 1, 255, 256, 257, 16383, 32768, 32771] {
+    let (shares, weights) = pairs.split_at(262147);
+    for n in [0, 1, 255, 256, 257, 131071, 262144, 262147] {
         let expected = shares[..n]
             .iter()
             .zip(&weights[..n])
@@ -163,6 +165,70 @@ fn canonical_registry_pins_actual_compiled_modules_without_requiring_a_device() 
     }
 }
 
+// SHA-256 pins of the ten embedded modules, computed outside Rust from the word tables (domain
+// label, slot and architecture bytes, little-endian length, module bytes). Regenerating a shader
+// changes its line here, so a pin change is reviewable without reading the SPIR-V diff.
+#[test]
+fn canonical_spirv_pin_digests_are_frozen() {
+    fn hex(digest: [u8; 32]) -> String {
+        digest.iter().map(|b| format!("{b:02x}")).collect()
+    }
+    let kernels = [
+        (
+            KernelSlot::BatchKeccakF1600,
+            "6cbc26801f4122a4bf2c962d93f5543666db83c9024309ad413f91cdf5a84ce6",
+        ),
+        (
+            KernelSlot::BatchPoseidon2Perm12,
+            "38e2637c04432bcbe92df4b5b1dbe71a8d34e8754f7e0d0a2168f4ef65221c68",
+        ),
+        (
+            KernelSlot::GoldilocksNtt,
+            "9e98cc9840271daaccd678d32f1125edc381c83c7aace90d71b3a17f16ea908a",
+        ),
+        (
+            KernelSlot::CosetLdeExt2,
+            "bc42c559f07ff189beb41ebde1a6155367db174e5350401f90a5f73e47929efb",
+        ),
+        (
+            KernelSlot::MerkleLayerPoseidon2,
+            "b2d360c3b4fd4fe38bee3a3886001e89f987f1f1dcae5bb162e59d49e0901d92",
+        ),
+        (
+            KernelSlot::BdozGf2128BatchDot,
+            "3c8f480f2970dbbd83e25af4936ba675739bb4b6e4075a138ed4ab6d636d0c43",
+        ),
+    ];
+    assert_eq!(kernels.map(|(slot, _)| slot), KernelSlot::ALL);
+    for (slot, expected) in kernels {
+        let pin = VulkanSpirvBackend::canonical_pin(slot);
+        assert_eq!(hex(pin.sha256_digest), expected, "{slot:?}");
+    }
+    let prover = [
+        (
+            ProverKernelSlot::WhirLdeCommitment,
+            "25fd8ffe3b4b4b7327aac2e620c3b039b3fba5dad760e7ef17fa470bf8ab5d94",
+        ),
+        (
+            ProverKernelSlot::WhirFoldSumcheck,
+            "8ce8d4f2eef6b6dfcf3a40dbfe45b369d09d647c2f0658a5c623cd9e59ab7188",
+        ),
+        (
+            ProverKernelSlot::AirRowGroupA,
+            "67a5dd6aad52e4835f4cc1a417825c1fcab987dafb7a1dbe540757d8cd201fa7",
+        ),
+        (
+            ProverKernelSlot::AirRowGroupB,
+            "5f2d1d2380b416ba3c40f68e0bc49842b867b9e42a5b2bc364df5ce82c5ddf60",
+        ),
+    ];
+    assert_eq!(prover.map(|(slot, _)| slot), ProverKernelSlot::ALL);
+    for (slot, expected) in prover {
+        let pin = VulkanSpirvBackend::canonical_prover_pin(slot);
+        assert_eq!(hex(pin.sha256_digest), expected, "{slot:?}");
+    }
+}
+
 #[test]
 #[should_panic(expected = "at least two profiles")]
 fn canonical_registry_cannot_silently_drop_gpu_pins() {
@@ -185,5 +251,44 @@ fn ntt_throughput_against_scalar_recurrence() {
     goldilocks_ntt_alloc_free(black_box(&mut actual), false).unwrap();
     let optimized = start.elapsed();
     assert_eq!(actual, reference);
-    eprintln!("NTT n={n} std={} scalar={serial:?} optimized={optimized:?}", cfg!(feature = "std"));
+    eprintln!(
+        "NTT n={n} std={} scalar={serial:?} optimized={optimized:?}",
+        cfg!(feature = "std")
+    );
+}
+
+#[test]
+#[ignore = "manual performance comparison on the build host"]
+fn bdoz_throughput_against_serial_simd_batches() {
+    use std::{hint::black_box, time::Instant};
+    for n in [32768, 131072, 262144, 1048576] {
+        let raw = data(n * 4);
+        let shares: Vec<_> = raw
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|x| {
+                (
+                    u128::from(x[0]) | (u128::from(x[1]) << 64),
+                    u128::from(x[2]) | (u128::from(x[3]) << 64),
+                )
+            })
+            .collect();
+        let weights = &shares;
+        let start = Instant::now();
+        let expected =
+            shares
+                .chunks(16384)
+                .zip(weights.chunks(16384))
+                .fold((0, 0), |acc, (s, w)| {
+                    let part = bdoz_gf2_128_batch_dot_cpu(black_box(s), black_box(w)).unwrap();
+                    (acc.0 ^ part.0, acc.1 ^ part.1)
+                });
+        let serial = start.elapsed();
+        let start = Instant::now();
+        let actual = bdoz_gf2_128_batch_dot_cpu(black_box(&shares), black_box(weights)).unwrap();
+        let parallel = start.elapsed();
+        assert_eq!(actual, expected);
+        eprintln!("BDOZ n={n} serial SIMD={serial:?} parallel={parallel:?}");
+    }
 }
