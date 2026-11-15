@@ -13,14 +13,17 @@ the quartic-extension field isomorphism (`Math/QuarticExt4`), and SIMT GPU const
 execution (`SpirvSimtGpuEquiv`).
 
 Section 6 connects the ideal knowledge-soundness contract `Spec.AggregateExtractorSound` to the
-quorum layer: for the native aggregate-signature verifier `verifyAggNativeSig` and an enrolled
-custody roster, an accepted aggregate outside the soundness-error event gives, for every active
-validator, a validated collision of the commitment hash (`Spec.ValidBreak`), a signature that
-verifies without quorum participation, or quorum participation. The contract itself is a
-hypothesis of that theorem: no instance for the deployed `HEM`/`WHIR` verifier is constructed
-in this module.
+quorum layer of `ComposedQsAgAndMergeSecurity`. For an aggregate verifier over native signatures
+that satisfies the contract with error `ε` and an extractor of a class `ℰ`, against every oracle
+prover the probability of an accepted aggregate over the custody roster that names an active
+validator for which there is neither a collision of the oracle among the prover's queries
+(`Spec.TranscriptBreak`), nor a verifying signature in the extractor's output for that validator,
+nor quorum participation, is at most `ε`. Runs whose extractor output is a verifying signature
+of a non-participating validator are not bounded here: that is single-signature unforgeability.
+The contract for the deployed verifier is a hypothesis; no instance is constructed.
 -/
 
+public import Qsag.Protocol.Aggregation.FieldTransport
 public import Qsag.Spec.Primitives
 public import Qsag.Spec.Parameters
 public import Qsag.Spec.Assumptions
@@ -332,65 +335,178 @@ theorem hemGoldilocksExt4Profile_basePrime_eq_goldilocksPrime :
     Qsag.Spec.hemGoldilocksExt4Profile.basePrime = Qsag.goldilocksPrime := by
   rfl
 
-/-- **Accepted aggregate ⟹ validated break, quorum forgery, or quorum participation.**
-    Let `C` be a knowledge-soundness contract (`Spec.AggregateExtractorSound`) for an aggregate
-    verifier `verifyAgg` over individual signatures checked by `verifyAggNativeSig geom`, with
-    commitment hash `H`. On a coin `ω` whose statement lists the enrolled custody keys, where
-    `verifyAgg` accepts and the soundness-error event of `C` does not occur, every active
-    validator `v` satisfies one of:
-    1. the break finder of `C` returned a collision of `H` (`Spec.ValidBreak`),
-    2. some native signature verifies under `v`'s key on the statement's message although the
-       quorum of `v` did not participate (the content of `Composed.QuorumForgery`),
-    3. the quorum of `v` participated.
-
-    Open obligation: `C` for the deployed verifier. Its fields are the extractor, the break
-    finder, the soundness-error event and the bound `εSound` on that event. -/
+/-- **Accepted aggregate, per validator (one run).** For an aggregate verifier `verifyAgg`
+    over individual signatures checked by `verifyAggNativeSig geom`, an oracle `H` and a prover
+    with query budget `q`: on a run whose statement lists the enrolled custody keys, where
+    `verifyAgg` accepts and the prover does not win the knowledge-soundness game
+    (`Spec.aggregateFailure … = false`), every active validator `v` satisfies one of:
+    1. two different recorded queries of the prover collide under `H` (`Spec.TranscriptBreak`),
+    2. the extractor's output for `v` on this run is a native signature that verifies under
+       `v`'s key on the statement's message although the quorum of `v` did not participate,
+    3. the quorum of `v` participated. -/
 theorem aggregate_extractor_sound_quorum_reduction
-    {Proof View : Type} {nVal n : Nat}
+    {Proof : Type} {nVal : Nat}
     (geom : Qsag.AggSigGeometry) (custody : Fin nVal → Qsag.Composed.Custody)
-    (H : Qsag.Spec.Bytes → Qsag.Spec.Bytes)
-    (verifyAgg : Qsag.Spec.AggregateStatement Qsag.AggValidatorPk nVal → Proof → Bool)
-    (run : Fin n → Qsag.Spec.AggregateRun Qsag.AggValidatorPk Proof View nVal)
-    (C : Qsag.Spec.AggregateExtractorSound (Qsag.verifyAggNativeSig geom) H verifyAgg run)
-    (ω : Fin n)
-    (hRoster : ∀ v : Fin nVal, (run ω).stmt.roster v = (custody v).state.pk)
-    (hAcc : verifyAgg (run ω).stmt (run ω).proof = true) (hGood : C.bad ω = false)
-    (v : Fin nVal) (hActive : (run ω).stmt.bitmap.getLsbD v.val = true) :
+    (verifyAgg : (Qsag.Spec.Bytes → Qsag.Spec.Bytes) →
+      Qsag.Spec.AggregateStatement Qsag.AggValidatorPk nVal → Proof → Bool)
+    (extract : List (Qsag.Spec.Bytes × Qsag.Spec.Bytes) →
+      Qsag.Spec.AggregateStatement Qsag.AggValidatorPk nVal → Proof →
+      Fin nVal → Option Qsag.AggNativeSignature)
+    (H : Qsag.Spec.Bytes → Qsag.Spec.Bytes) (q : Nat)
+    (prover : Qsag.Spec.Code Qsag.Spec.byteOracleIface
+      (Qsag.Spec.AggregateStatement Qsag.AggValidatorPk nVal × Proof))
+    (hRoster : ∀ v : Fin nVal,
+      (Qsag.Spec.aggregateRun H q prover).1.1.roster v = (custody v).state.pk)
+    (hAcc : verifyAgg H (Qsag.Spec.aggregateRun H q prover).1.1
+      (Qsag.Spec.aggregateRun H q prover).1.2 = true)
+    (hLose : Qsag.Spec.aggregateFailure (Qsag.verifyAggNativeSig geom) verifyAgg extract H
+      (Qsag.Spec.aggregateRun H q prover) = false)
+    (v : Fin nVal)
+    (hActive : (Qsag.Spec.aggregateRun H q prover).1.1.bitmap.getLsbD v.val = true) :
     (∃ b : Qsag.Spec.AggregateBreak,
-      C.findBreak (run ω).view = some b ∧ Qsag.Spec.ValidBreak H b) ∨
+      Qsag.Spec.TranscriptBreak H (Qsag.Spec.aggregateRun H q prover).2 b) ∨
     (∃ sig : Qsag.AggNativeSignature,
-      Qsag.verifyAggNativeSig geom (custody v).state.pk (run ω).stmt.message sig = true ∧
-      Qsag.Composed.quorumParticipated (custody v) (run ω).stmt.message = false) ∨
-    Qsag.Composed.quorumParticipated (custody v) (run ω).stmt.message = true := by
-  have h := C.accepted_signer_trichotomy
-    (fun u => Qsag.Composed.quorumParticipated (custody u) (run ω).stmt.message)
-    ω hAcc hGood v hActive
-  rcases h with hB | ⟨sig, hSig, hNo⟩ | hYes
+      extract (Qsag.Spec.aggregateRun H q prover).2 (Qsag.Spec.aggregateRun H q prover).1.1
+        (Qsag.Spec.aggregateRun H q prover).1.2 v = some sig ∧
+      Qsag.verifyAggNativeSig geom (custody v).state.pk
+        (Qsag.Spec.aggregateRun H q prover).1.1.message sig = true ∧
+      Qsag.Composed.quorumParticipated (custody v)
+        (Qsag.Spec.aggregateRun H q prover).1.1.message = false) ∨
+    Qsag.Composed.quorumParticipated (custody v)
+      (Qsag.Spec.aggregateRun H q prover).1.1.message = true := by
+  have h := (Qsag.Spec.aggregateFailure_false_outcome (Qsag.verifyAggNativeSig geom) verifyAgg
+    extract H q prover hLose hAcc).signer_trichotomy
+    (fun u => Qsag.Composed.quorumParticipated (custody u)
+      (Qsag.Spec.aggregateRun H q prover).1.1.message) v hActive
+  rcases h with hB | ⟨sig, hEx, hSig, hNo⟩ | hYes
   · exact .inl hB
-  · refine .inr (.inl ⟨sig, ?_, hNo⟩)
+  · refine .inr (.inl ⟨sig, hEx, ?_, hNo⟩)
     rw [← hRoster v]
     exact hSig
   · exact .inr (.inr hYes)
 
-/-- With an injective commitment hash the first alternative is empty: an accepted aggregate
-    outside the soundness-error event extracts a valid individual signature for every active
-    validator. -/
+/-- **Quorum soundness bound.** Let `verifyAgg` with extractor `extract` of the class `ℰ`
+    satisfy `Spec.AggregateExtractorSound` for the oracle family `oracle`, query budget `q` and
+    error `ε`. For every prover on the adversary coordinate of a coin split, any event
+    contained in
+
+    * the statement lists the enrolled custody keys and `verifyAgg` accepts, and
+    * some active validator `v` has no transcript collision, its quorum did not participate,
+      and the extractor's output for `v` on the run is not a signature verifying under its key
+
+    has probability at most `ε`. The event concerns the signature the extractor produced from
+    the run, so it is not emptied by the existence of verifying signatures.
+
+    This is not unforgeability of the aggregate: a run whose extractor output is a verifying
+    signature of a non-participating validator is outside the event, and bounding such runs is
+    single-signature unforgeability, which is not used here. The statement has content for a
+    class `ℰ` such as `Spec.StraightLineExtractor`; with the unrestricted class the contract
+    can hold for a verifier that checks nothing
+    (`Spec.acceptAll_alwaysValid_unrestricted_extractorSound`).
+
+    Open obligation: the contract `C` for the deployed verifier, i.e. an extractor of the class
+    reading only the prover's oracle transcript, the statement and the proof, and the bound
+    `ε`. -/
+theorem aggregate_extractor_sound_quorum_bound
+    {Proof : Type} {nVal nC n nA : Nat}
+    (geom : Qsag.AggSigGeometry) (custody : Fin nVal → Qsag.Composed.Custody)
+    (verifyAgg : (Qsag.Spec.Bytes → Qsag.Spec.Bytes) →
+      Qsag.Spec.AggregateStatement Qsag.AggValidatorPk nVal → Proof → Bool)
+    (extract : List (Qsag.Spec.Bytes × Qsag.Spec.Bytes) →
+      Qsag.Spec.AggregateStatement Qsag.AggValidatorPk nVal → Proof →
+      Fin nVal → Option Qsag.AggNativeSignature)
+    (oracle : Fin nC → Qsag.Spec.Bytes → Qsag.Spec.Bytes) (q : Nat) (ε : Qsag.Spec.RatBound)
+    {ℰ : (List (Qsag.Spec.Bytes × Qsag.Spec.Bytes) →
+      Qsag.Spec.AggregateStatement Qsag.AggValidatorPk nVal → Proof →
+      Fin nVal → Option Qsag.AggNativeSignature) → Prop}
+    (C : Qsag.Spec.AggregateExtractorSound ℰ (Qsag.verifyAggNativeSig geom) verifyAgg extract
+      oracle q ε)
+    (hPos : 0 < n) (π : Qsag.Spec.CoinSplit n nC nA)
+    (prover : Fin nA → Qsag.Spec.Code Qsag.Spec.byteOracleIface
+      (Qsag.Spec.AggregateStatement Qsag.AggValidatorPk nVal × Proof))
+    (fail : Fin n → Bool)
+    (hFail : ∀ ω : Fin n, fail ω = true →
+      (∀ v : Fin nVal,
+        (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.1.roster v =
+          (custody v).state.pk) ∧
+      verifyAgg (oracle (π.chal ω))
+        (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.1
+        (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.2 = true ∧
+      ∃ v : Fin nVal,
+        (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q
+          (prover (π.advc ω))).1.1.bitmap.getLsbD v.val = true ∧
+        ¬ ((∃ b : Qsag.Spec.AggregateBreak,
+            Qsag.Spec.TranscriptBreak (oracle (π.chal ω))
+              (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).2 b) ∨
+          (∃ sig : Qsag.AggNativeSignature,
+            extract (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).2
+              (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.1
+              (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.2 v =
+                some sig ∧
+            Qsag.verifyAggNativeSig geom (custody v).state.pk
+              (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q
+                (prover (π.advc ω))).1.1.message sig = true ∧
+            Qsag.Composed.quorumParticipated (custody v)
+              (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q
+                (prover (π.advc ω))).1.1.message = false) ∨
+          Qsag.Composed.quorumParticipated (custody v)
+            (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q
+              (prover (π.advc ω))).1.1.message = true)) :
+    Qsag.Spec.GameBound (Qsag.Spec.FinGame.mk hPos fail).winProb ε :=
+  C.failure_bound hPos π prover fail (fun ω hF => by
+    obtain ⟨hRoster, hAcc, v, hActive, hNone⟩ := hFail ω hF
+    refine ⟨hAcc, fun hOut => hNone ?_⟩
+    rcases hOut.signer_trichotomy
+      (fun u => Qsag.Composed.quorumParticipated (custody u)
+        (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.1.message)
+      v hActive with hB | ⟨sig, hEx, hSig, hNo⟩ | hYes
+    · exact .inl hB
+    · refine .inr (.inl ⟨sig, hEx, ?_, hNo⟩)
+      rw [← hRoster v]
+      exact hSig
+    · exact .inr (.inr hYes))
+
+/-- **Extraction bound for an injective oracle.** If every oracle of the family is injective,
+    no transcript collision exists, and the contract bounds the probability that the verifier
+    accepts while the extracted witness map is not a valid individual signature for every
+    active validator. -/
 theorem aggregate_extractor_sound_valid_witness_of_injective
-    {Proof View : Type} {nVal n : Nat}
+    {Proof : Type} {nVal nC n nA : Nat}
     (geom : Qsag.AggSigGeometry)
-    (H : Qsag.Spec.Bytes → Qsag.Spec.Bytes)
-    (verifyAgg : Qsag.Spec.AggregateStatement Qsag.AggValidatorPk nVal → Proof → Bool)
-    (run : Fin n → Qsag.Spec.AggregateRun Qsag.AggValidatorPk Proof View nVal)
-    (C : Qsag.Spec.AggregateExtractorSound (Qsag.verifyAggNativeSig geom) H verifyAgg run)
-    (hInj : ∀ a b : Qsag.Spec.Bytes, H a = H b → a = b) (ω : Fin n)
-    (hAcc : verifyAgg (run ω).stmt (run ω).proof = true) (hGood : C.bad ω = false) :
-    Qsag.Spec.ValidAggregateWitness (Qsag.verifyAggNativeSig geom) (run ω).stmt
-      (C.extract (run ω).view) :=
-  C.accepted_extracts_of_injective hInj ω hAcc hGood
+    (verifyAgg : (Qsag.Spec.Bytes → Qsag.Spec.Bytes) →
+      Qsag.Spec.AggregateStatement Qsag.AggValidatorPk nVal → Proof → Bool)
+    (extract : List (Qsag.Spec.Bytes × Qsag.Spec.Bytes) →
+      Qsag.Spec.AggregateStatement Qsag.AggValidatorPk nVal → Proof →
+      Fin nVal → Option Qsag.AggNativeSignature)
+    (oracle : Fin nC → Qsag.Spec.Bytes → Qsag.Spec.Bytes) (q : Nat) (ε : Qsag.Spec.RatBound)
+    {ℰ : (List (Qsag.Spec.Bytes × Qsag.Spec.Bytes) →
+      Qsag.Spec.AggregateStatement Qsag.AggValidatorPk nVal → Proof →
+      Fin nVal → Option Qsag.AggNativeSignature) → Prop}
+    (C : Qsag.Spec.AggregateExtractorSound ℰ (Qsag.verifyAggNativeSig geom) verifyAgg extract
+      oracle q ε)
+    (hInj : ∀ (c : Fin nC) (a b : Qsag.Spec.Bytes), oracle c a = oracle c b → a = b)
+    (hPos : 0 < n) (π : Qsag.Spec.CoinSplit n nC nA)
+    (prover : Fin nA → Qsag.Spec.Code Qsag.Spec.byteOracleIface
+      (Qsag.Spec.AggregateStatement Qsag.AggValidatorPk nVal × Proof))
+    (fail : Fin n → Bool)
+    (hFail : ∀ ω : Fin n, fail ω = true →
+      verifyAgg (oracle (π.chal ω))
+        (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.1
+        (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.2 = true ∧
+      ¬ Qsag.Spec.ValidAggregateWitness (Qsag.verifyAggNativeSig geom)
+        (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.1
+        (extract (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).2
+          (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.1
+          (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.2)) :
+    Qsag.Spec.GameBound (Qsag.Spec.FinGame.mk hPos fail).winProb ε :=
+  C.failure_bound hPos π prover fail (fun ω hF =>
+    ⟨(hFail ω hF).1, fun hOut =>
+      (hFail ω hF).2 (hOut.witness_of_injective (hInj (π.chal ω)))⟩)
 
 #verify_constructive
   Qsag.Top.hemGoldilocksExt4Profile_basePrime_eq_goldilocksPrime
   Qsag.Top.aggregate_extractor_sound_quorum_reduction
+  Qsag.Top.aggregate_extractor_sound_quorum_bound
   Qsag.Top.aggregate_extractor_sound_valid_witness_of_injective
   Qsag.Top.aggExt4_cwyz26_fold_and_point_reduction
   Qsag.Top.deployed_hem_stage_budget_and_aggExt4_transport
