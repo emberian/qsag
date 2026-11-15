@@ -1,4 +1,5 @@
 module
+public import Qsag.Machine.Gf128ClmulLoopAgreement
 /-
 # Qsag.Top.Migration — End-to-End Composed Post-Quantum Ownership Migration Security
 
@@ -20,7 +21,7 @@ public import Qsag.Spec.GameBound
 public import Qsag.Spec.Assumptions
 public import Qsag.Spec.IdealMigrate
 public import Qsag.Math.Gf2Pow128
-public import Qsag.Protocol.Migration.PrattPrimalityCert
+public import Qsag.Math.Primality
 public import Qsag.Protocol.Migration.PallasAndBlsMigration
 public import Qsag.Protocol.Migration.ActiveMigrationZeroTest
 public import Qsag.Protocol.Migration.HdToprfAndMigrationSecurity

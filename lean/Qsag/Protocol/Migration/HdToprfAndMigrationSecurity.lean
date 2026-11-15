@@ -53,9 +53,9 @@ production parameters and proved without choice axioms.
      `Q^2 (2/3)^438 < 1` for `Q <= 2^128`; neither is a Fiat-Shamir or QROM extraction theorem.
 -/
 
-public import Qsag.Math.Constructive
+public import Qsag.Tactic.Prelude
 public import Qsag.Math.Goldilocks
-public import Qsag.Oracle.UcGames
+public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Custody.CustodySuiteFull
 public import Qsag.Tactic.AssuranceKit
 public import Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
@@ -1764,9 +1764,9 @@ def inventoryTableMask {I : Type} (known : I → BitVec 256) :
 theorem inventory_ideal_table_uniform {I : Type} {C : Nat}
     (enum : SimpleEquiv (Fin C) (I → BitVec 256)) (known : I → BitVec 256)
     (test : (I → BitVec 256) → Nat) :
-    finSum C (fun r => test ((inventoryTableMask known).toFun (enum.toFun r))) =
-      finSum C (fun r => test (enum.toFun r)) :=
-  finSum_bijection_invariant enum (inventoryTableMask known) test
+    qsum C (fun r => test ((inventoryTableMask known).toFun (enum.toFun r))) =
+      qsum C (fun r => test (enum.toFun r)) :=
+  qsum_bijection_invariant enum (inventoryTableMask known) test
 
 /-- Every prescribed child table has exactly one hidden table, including an arbitrary
 assignment outside the enrolled batch. There is no additive master in this path. -/
@@ -1780,7 +1780,7 @@ theorem inventory_batch_fiber_unique {I : Type} (known desired : I → BitVec 25
     rw [← he, (inventoryTableMask known).left_inv]
 
 def hdGameHits {X : Type} {N : Nat} (sample : Fin N → X) (test : X → Bool) : Nat :=
-  finSum N (fun r => (test (sample r)).toNat)
+  qsum N (fun r => (test (sample r)).toNat)
 
 def hdGameGap (a b : Nat) : Nat := (a - b) + (b - a)
 
@@ -1948,9 +1948,9 @@ theorem inventory_unenrolled_coin_transport {I : Type} [DecidableEq I]
 theorem inventory_unenrolled_joint_distribution {I : Type} [DecidableEq I] {C : Nat}
     (enum : SimpleEquiv (Fin C) (I → BitVec 256)) (j : I) (delta : BitVec 256)
     (test : (I → BitVec 256) → Nat) :
-    finSum C (fun r => test ((inventoryTableMask
+    qsum C (fun r => test ((inventoryTableMask
       (fun i => if i = j then delta else 0)).toFun (enum.toFun r))) =
-      finSum C (fun r => test (enum.toFun r)) :=
+      qsum C (fun r => test (enum.toFun r)) :=
   inventory_ideal_table_uniform enum _ test
 
 theorem hd_game_gap_triangle (a b c : Nat) :
@@ -1981,9 +1981,9 @@ def hdPublicOffsetEquiv (known : HdModuleHalf) : SimpleEquiv HdModuleHalf HdModu
 theorem hd_uniform_public_offset_endpoint {C : Nat}
     (enum : SimpleEquiv (Fin C) HdModuleHalf) (known : HdModuleHalf)
     (test : HdModuleHalf → Nat) :
-    finSum C (fun r => test (hdModuleAdd known (enum.toFun r))) =
-      finSum C (fun r => test (enum.toFun r)) :=
-  finSum_bijection_invariant enum (hdPublicOffsetEquiv known) test
+    qsum C (fun r => test (hdModuleAdd known (enum.toFun r))) =
+      qsum C (fun r => test (enum.toFun r)) :=
+  qsum_bijection_invariant enum (hdPublicOffsetEquiv known) test
 
 /-- A batch adversary's real target-translation advantage is at most the sum of
 two PRF advantages. The middle ideal games are equal by the explicit coin bijection;
