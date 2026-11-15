@@ -250,7 +250,7 @@ private theorem grindTswCounterAux_eq_firstValidCounterAux
     by_cases hCheck : checkTargetSum w ell1 target
       (extractBaseWDigits w ell1 (thHashMsg suite rRand pkSeed pkRoot mu layerIdx treeIdx kpIdx cur)) = true
     · simp only [hCheck, ↓reduceIte, Option.map_some]
-    · simp only [hCheck, ↓reduceIte]
+    · simp only [hCheck]
       exact grindTswCounterAux_eq_firstValidCounterAux suite w ell1 target
         rRand pkSeed pkRoot mu layerIdx treeIdx kpIdx fuel (cur + 1)
 
@@ -394,7 +394,7 @@ theorem verifyPqHashSig_evalSingleLayerAtCounter
       · have hNe1 : params.numLayers ≠ 1 := of_decide_eq_false hL1
         simp [hWf, hSt, hNe1] at hEval
       · have hEq1 : params.numLayers = 1 := of_decide_eq_true hL1
-        simp only [hWf, hSt, hEq1, ne_eq, not_true_eq_false, Bool.not_true, Bool.or_self, decide_false, Bool.or_false, ↓reduceIte] at hEval
+        simp only [hWf, hSt, hEq1, ne_eq, not_true_eq_false, Bool.not_true, Bool.or_self, decide_false] at hEval
         let pk := derivePublicKey suite params sk
         let mu := thPreHash suite pk.pkSeed pk.pkRoot msg
         let hmsg := thHashMsg suite rRand pk.pkSeed pk.pkRoot mu 0 0 0 chosenCtr
@@ -429,7 +429,7 @@ theorem verifyPqHashSig_evalSingleLayerAtCounter
             (computeWotsPk suite params sk 0 0) params.subtreeHeight 0 0 (Nat.two_pow_pos _)
           simp only [Nat.zero_mul, Nat.zero_add] at hWalk
           rw [hWalk]
-          simp only [verifyHypertreeLayers, derivePublicKey, hEq1, Nat.sub_self, decide_true]
+          simp only [hEq1, Nat.sub_self]
           simp only [computeXmssSubtreeRoot, show UInt32.ofNat 0 = (0 : UInt32) from rfl, decide_true]
 
 /-- Domain-sensitive 32-byte `TweakableHashSuite` exhibiting LSB steering when non-first-hit counters are allowed. -/
@@ -461,7 +461,7 @@ private theorem signatureToyDigestValid (b : UInt8)
     checkTargetSum 4 128 192 (extractBaseWDigits 4 128
       ((b :: List.replicate 31 0x1B) ++ (b :: List.replicate 31 0x1B))) = true := by
   rcases hb with rfl | rfl | rfl | rfl | rfl <;>
-    simp [extractBaseWDigits, checkTargetSum, sumDigits, List.range_succ, Nat.mod_lt] <;> decide
+    simp [extractBaseWDigits, checkTargetSum, sumDigits, List.range_succ] <;> decide
 
 private theorem signatureToyDigestValidExpanded (b : UInt8)
     (hb : b = 0x1B ∨ b = 0x4B ∨ b = 0x0F ∨ b = 0xF0 ∨ b = 0x5A) :
@@ -543,16 +543,16 @@ theorem tooth_non_first_hit_lsb_bias_positive_tvd :
         verifyPqHashSig lsbBiasSuite wotsSingleLayerParams
           (derivePublicKey lsbBiasSuite wotsSingleLayerParams ⟨[], [], []⟩) []
           ((maliciousSkipLsbZeroSampler c).getD ⟨[], 0, 0, [], []⟩) = true := by
-      simp only [maliciousSkipLsbZeroSampler, honestReferenceLsbSampler, coinTwoRand,
+      simp only [maliciousSkipLsbZeroSampler, coinTwoRand,
         evalSingleLayerAtCounter, ↓lsbBiasSuitePublicKey,
         firstValidCounter, firstValidCounterAux, sigChainLsb]
 
       simp [wotsSingleLayerParams, thHashMsg, thPreHash, thCall, thPreimage, encodeMultiFrame, encodeByteFields,
         encodeListField, leb128, leb128Aux, be, byteArray_toList_eq,
-        String.utf8EncodeChar, derivePublicKey, computeXmssSubtreeRoot, computeMerkleNode,
+        computeMerkleNode,
         computeWotsPk, computeWotsEndpoints, wotsChainSteps, wotsSecretBase, thSecretPrf,
-        thTweakTl, ↓lsbBiasSuiteNodeH, thNodeH, thChainF, PqHashParams.wellFormed, PqHashParams.targetSum,
-        canonicalTargetSum, signatureToyDigestValidExpanded, signatureFirstDigit, sigChainLsb, signatureOddByte,
+        thTweakTl, thNodeH, thChainF, PqHashParams.wellFormed, PqHashParams.targetSum,
+        canonicalTargetSum, signatureToyDigestValidExpanded, signatureFirstDigit, signatureOddByte,
         verifyPqHashSig, verifyHypertreeLayers, recoverWotsPkFromSig, recoverWotsEndpoints,
         walkMerkleAuthPath, buildMerkleAuthPath, encodeAdrs, AdrsKind.toCode,
         tagPrf, tagThF, tagThH, tagThTl, tagHMsg, tagHPre, zeroAdrs, lsbBiasSuite, lsbBiasRawHash] <;> decide
@@ -563,26 +563,24 @@ theorem tooth_non_first_hit_lsb_bias_positive_tvd :
 
     simp [wotsSingleLayerParams, thHashMsg, thPreHash, thCall, thPreimage, encodeMultiFrame, encodeByteFields,
         encodeListField, leb128, leb128Aux, be, byteArray_toList_eq,
-        String.utf8EncodeChar, derivePublicKey, computeXmssSubtreeRoot, computeMerkleNode,
+        computeMerkleNode,
         computeWotsPk, computeWotsEndpoints, wotsChainSteps, wotsSecretBase, thSecretPrf,
-        thTweakTl, ↓lsbBiasSuiteNodeH, thNodeH, thChainF, PqHashParams.wellFormed, PqHashParams.targetSum,
+        thTweakTl, thChainF, PqHashParams.wellFormed, PqHashParams.targetSum,
         canonicalTargetSum, signatureToyDigestValidExpanded, signatureFirstDigit, sigChainLsb, signatureOddByte,
-        verifyPqHashSig, verifyHypertreeLayers, recoverWotsPkFromSig, recoverWotsEndpoints,
-        walkMerkleAuthPath, buildMerkleAuthPath, encodeAdrs, AdrsKind.toCode,
-        tagPrf, tagThF, tagThH, tagThTl, tagHMsg, tagHPre, zeroAdrs, lsbBiasSuite, lsbBiasRawHash] <;> decide
+        buildMerkleAuthPath, encodeAdrs, AdrsKind.toCode,
+        tagPrf, tagThF, tagThTl, tagHMsg, tagHPre, zeroAdrs, lsbBiasSuite, lsbBiasRawHash] <;> decide
   · simp only [statisticalDistance, coinMass, natAbsDiff, finSum, maliciousSkipLsbZeroSampler,
       honestReferenceLsbSampler, coinTwoRand, evalSingleLayerAtCounter, ↓lsbBiasSuitePublicKey,
       firstValidCounter, firstValidCounterAux, sigChainLsb]
 
     simp [wotsSingleLayerParams, thHashMsg, thPreHash, thCall, thPreimage, encodeMultiFrame, encodeByteFields,
         encodeListField, leb128, leb128Aux, be, byteArray_toList_eq,
-        String.utf8EncodeChar, derivePublicKey, computeXmssSubtreeRoot, computeMerkleNode,
+        computeMerkleNode,
         computeWotsPk, computeWotsEndpoints, wotsChainSteps, wotsSecretBase, thSecretPrf,
-        thTweakTl, ↓lsbBiasSuiteNodeH, thNodeH, thChainF, PqHashParams.wellFormed, PqHashParams.targetSum,
+        thTweakTl, thChainF, PqHashParams.wellFormed, PqHashParams.targetSum,
         canonicalTargetSum, signatureToyDigestValidExpanded, signatureFirstDigit, sigChainLsb, signatureOddByte,
-        verifyPqHashSig, verifyHypertreeLayers, recoverWotsPkFromSig, recoverWotsEndpoints,
-        walkMerkleAuthPath, buildMerkleAuthPath, encodeAdrs, AdrsKind.toCode,
-        tagPrf, tagThF, tagThH, tagThTl, tagHMsg, tagHPre, zeroAdrs, lsbBiasSuite, lsbBiasRawHash] <;> decide
+        buildMerkleAuthPath, encodeAdrs, AdrsKind.toCode,
+        tagPrf, tagThF, tagThTl, tagHMsg, tagHPre, zeroAdrs, lsbBiasSuite, lsbBiasRawHash] <;> decide
 
 /-- Exhausted counter budget `#tooth` refutation (`tooth_exhausted_grinder_aborts_none`). -/
 theorem tooth_exhausted_grinder_aborts_none :
@@ -843,7 +841,7 @@ private theorem waistbandSignHypertreeLayers_eq_signHypertreeLayers
               (UInt64.ofNat (globalIdx / 2 ^ params.subtreeHeight)) =
             computeXmssSubtreeRoot suite params sk (UInt32.ofNat ((layerIdx + 1) - 1))
               (UInt64.ofNat (globalIdx / 2 ^ params.subtreeHeight)) :=
-          fun _ => ⟨rfl, by simp [Nat.add_sub_cancel]⟩
+          fun _ => ⟨rfl, by simp⟩
         have ih := waistbandSignHypertreeLayers_eq_signHypertreeLayers suite params sk pkRoot maxGrind topL
           rem (layerIdx + 1) (globalIdx / 2 ^ params.subtreeHeight) []
           (computeXmssSubtreeRoot suite params sk (UInt32.ofNat layerIdx)
@@ -1255,13 +1253,13 @@ theorem tooth_caching_bottom_layer_breaks_wots_one_time :
 
     simp [wotsSingleLayerParams, thHashMsg, thPreHash, thCall, thPreimage, encodeMultiFrame, encodeByteFields,
         encodeListField, leb128, leb128Aux, be, byteArray_toList_eq,
-        String.utf8EncodeChar, derivePublicKey, computeXmssSubtreeRoot, computeMerkleNode,
+        computeMerkleNode,
         computeWotsPk, computeWotsEndpoints, wotsChainSteps, wotsSecretBase, thSecretPrf,
-        thTweakTl, ↓bottomReuseSuiteNodeH, thNodeH, thChainF, PqHashParams.wellFormed, PqHashParams.targetSum,
-        canonicalTargetSum, signatureToyDigestValidExpanded, signatureFirstDigit, sigChainLsb, signatureOddByte,
+        thTweakTl, thNodeH, thChainF, PqHashParams.wellFormed, PqHashParams.targetSum,
+        canonicalTargetSum, signatureToyDigestValidExpanded,
         verifyPqHashSig, verifyHypertreeLayers, recoverWotsPkFromSig, recoverWotsEndpoints,
         walkMerkleAuthPath, buildMerkleAuthPath, encodeAdrs, AdrsKind.toCode,
-        tagPrf, tagThF, tagThH, tagThTl, tagHMsg, tagHPre, zeroAdrs, lsbBiasRawHash,
+        tagPrf, tagThF, tagThH, tagThTl, tagHMsg, tagHPre, zeroAdrs,
         bottomReuseSuite, bottomReuseRawHash, reuseDigest1, reuseDigest2, reuseDigest3] <;> decide
 
 #verify_constructive firstValidCounter_some_iff

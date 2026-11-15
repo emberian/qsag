@@ -1,36 +1,48 @@
 module
 /-
-# Qsag.FrontierCompact1122AndCorduroySecurity — `Compact1122` (`FrontierSumFts`), Forward-Secure `RotatedEpochVote`, & `Corduroy` 16-Layer Threshold EUF-CMA
+# Qsag.FrontierCompact1122AndCorduroySecurity — `Compact1122` (`FrontierSumFts`), Forward-Secure `RotatedEpochVote`, & `Corduroy` Stateless `Poseidon2` Threshold EUF-CMA
 
-Constructive Lean 4.35 security reductions (`0 sorry`, `0` custom axioms, `0 Classical.choice`):
-1. **`Compact1122` (`h = 8, w = 96, L = 34, S = 1615, n = 32`) Rank Domain & 1-Time EUF-CMA**:
-   - Certifies `compact1122_rank_domain_gt_2pow256` (`M(8, 96, 34, 1615) > 2^263 > 2^256`, wire size
-     `1122` B, `RotatedEpochVote` `1194` B), bijectivity of `unrankFrontierFts` / `rankFrontierFts`,
-     stack-to-tree equivalence (`runFrontierStackLoop`), and constructive `Type`-valued 1-time
-     EUF-CMA extraction (`extractCompact1122ForgeryBreak` / `compact1122_one_time_euf_cma_reduction`),
-     paired with `tooth_drop_target_sum_allows_one_sig_forgery`.
+Constructive Lean 4.35 security reductions and real-parameter certifications (`0 sorry`, `0` custom
+axioms, `0 Classical.choice`):
+1. **`Compact1122` (`h = 8, w = 96, L = 34, S = 1615, n = 32`) & `Full256Bit` Rank Domain & 1-Time EUF-CMA**:
+   - Certifies `compact1122_rank_domain_gt_2pow256` (`2^263 < M(8, 96, 34, 1615) < 2^264`, wire size
+     `1122` B, `RotatedEpochVote` `1194` B, plus `Full256Bit` `2^256 < M(8, 5, 72, 144)` and `2338` B),
+     root-singleton exclusion (`frontierRootSubCount`), bijectivity of `unrankFrontierFts` /
+     `rankFrontierFts`, stack-to-tree equivalence (`runFrontierStackLoop`), `cSHAKE256` domain
+     disjointness across all seven `QSAG.FTS.*.V1` customization tags (`fts_cshake_domains_disjoint`),
+     and constructive `Type`-valued 1-time EUF-CMA extraction (`extractCompact1122ForgeryBreak` /
+     `compact1122_one_time_euf_cma_reduction`), paired with `tooth_drop_target_sum_allows_one_sig_forgery`.
 2. **`RotatedEpochVote` Forward-Secure Key-Chain Induction (`rotatedEpochVote_forward_secure_chain`)**:
-   - Models `EpochKeyLink` / `RotatedEpochVote` (`crates/qsag-fts/src/frontier.rs`) and proves by
-     induction across historical epochs that an accepted divergent chain yields a vote-framing
-     collision or a historical-key primitive break. No adaptive compromise experiment,
-     erasure implementation, or probability bound for those primitive breaks is established here,
-     contrasted with `tooth_static_key_compromise_forges_historical_epoch`.
-3. **`Corduroy` 16-Layer Stateless `Poseidon2` Hypertree + `(t, n)` Shamir Power-7 EUF-CMA
+   - Models `EpochKeyLink` / `RotatedEpochVote` (`crates/qsag-fts/src/frontier.rs`) with injective
+     104-byte big-endian framing (`encodeEpochVoteInput_injective`) under `cSHAKE256("QSAG.FTS.EPOCH.VOTE.V1")`
+     (`cshakeEpochVoteHasher`), proving by induction across historical epochs that an accepted
+     divergent chain yields an explicit `cSHAKE256` framing collision on distinct 104-byte inputs or
+     a historical-key primitive break (`rotatedEpochVote_cshake_chain_reduction`), contrasted with
+     `tooth_static_key_compromise_forges_historical_epoch`.
+3. **`Corduroy` Width-12 `Poseidon2` Stateless Hypertree + `(t, n)` Shamir Power-7 EUF-CMA
    (`corduroy_threshold_stateless_euf_cma`)**:
-   - Composes 16-layer stateless `poseidon2Suite` EUF-CMA extraction, `mkShamirProductionPqHashMpcOracles`,
-     `< t` corrupted-custodian Shamir secret-independence (`shamir_single_share_privacy_bijection`),
-     and SPDZ `GoldilocksExt2` MAC pin bounds (`spdzGateStream_pin_count_le`).
+   - Covers both real Rust profiles: `corduroyCustody128Params` (`d = 7, h' = 4, k = 33, a = 6,
+     Q_max = 2^12`, `productionWellFormed = true`) and `corduroyPoseidon2AggParams` (`d = 16, h' = 4,
+     k = 32, a = 8, Q_max = 2^20`, `76,896` B wire signature, explicitly documenting the `16 * 4 = 64 > 62`
+     leaf-index check in `corduroy_real_profiles_audit`), composing stateless `poseidon2Suite` EUF-CMA
+     extraction, `mkShamirProductionPqHashMpcOracles`, `< t` corrupted-custodian Shamir privacy
+     (`shamir_single_share_privacy_bijection`), and SPDZ `GoldilocksExt2` MAC pin bounds
+     (`spdzGateStream_pin_count_le`).
 -/
 
 public import Qsag.Constructive
 public import Qsag.Goldilocks
 public import Qsag.Poseidon2
+public import Qsag.Keccak
+public import Qsag.SpongeFramingAndDomainSep
 public import Qsag.UcGames
 public import Qsag.HashSigs
 public import Qsag.HypertreeEufCma
 public import Qsag.ThresholdMpc
 import all Qsag.Goldilocks
 import all Qsag.Poseidon2
+import all Qsag.Keccak
+import all Qsag.SpongeFramingAndDomainSep
 import all Qsag.HashSigs
 import all Qsag.HypertreeEufCma
 import all Qsag.ThresholdMpc
@@ -42,7 +54,7 @@ namespace Qsag
 set_option autoImplicit false
 set_option exponentiation.threshold 2048
 
-/-! ## §1. `Compact1122` (`FrontierSumFts`) Rank Bijection & 1-Time EUF-CMA Reduction -/
+/-! ## §1. `Compact1122` (`FrontierSumFts`) Rank Bijection, `cSHAKE256` Framing & 1-Time EUF-CMA -/
 
 structure FrontierFtsParams where
   nodeBytes : Nat
@@ -55,9 +67,15 @@ structure FrontierFtsParams where
   maxSafeUses : Nat
   deriving DecidableEq, Repr
 
+/-- Exact `FrontierFtsProfile::Compact1122` parameters (`crates/qsag-fts/src/frontier.rs:108-117`). -/
 @[expose] def compact1122Params : FrontierFtsParams := ⟨32, 8, 96, 34, 1615, 256, 16, 1⟩
+
+/-- Exact `FrontierFtsProfile::Full256Bit` parameters (`crates/qsag-fts/src/frontier.rs:118-127`). -/
+@[expose] def full256BitParams : FrontierFtsParams := ⟨32, 8, 5, 72, 144, 256, 16, 1⟩
+
 @[expose] def FrontierFtsParams.signatureBytes (p : FrontierFtsParams) : Nat :=
   (p.frontierLen + 1) * p.nodeBytes + (p.counterBits + 7) / 8
+
 @[expose] def FrontierFtsParams.rotatedEpochVoteBytes (p : FrontierFtsParams) : Nat :=
   72 + p.signatureBytes
 
@@ -65,10 +83,21 @@ def splitConvFrom (f : Nat → Nat) (ell cur : Nat) : Nat → Nat
   | 0 => 0
   | rem + 1 => f cur * f (ell - cur) + splitConvFrom f ell (cur + 1) rem
 
+/-- Non-root subtree antichain count `N_sub(t, ell)` (`0 ≤ t < h`, where `ell = 1` stops at subtree root). -/
 def frontierSubCount : Nat → Nat → Nat
   | 0, ell => if ell = 1 then 1 else 0
   | t + 1, ell =>
     if ell = 0 then 0 else if ell = 1 then 1 else splitConvFrom (frontierSubCount t) ell 1 (ell - 1)
+
+/-- Root antichain count `N_root(h, ell)` matching `crates/qsag-fts/src/frontier.rs:212-215`
+    (`t = h` excludes singleton `ell = 1`; agrees with `frontierSubCount h ell` for all `ell ≥ 2`). -/
+def frontierRootSubCount (h ell : Nat) : Nat :=
+  if ell = 1 then 0 else frontierSubCount h ell
+
+theorem frontierRootSubCount_eq_of_two_le {h ell : Nat} (hL : 2 ≤ ell) :
+    frontierRootSubCount h ell = frontierSubCount h ell := by
+  unfold frontierRootSubCount
+  simp [show ell ≠ 1 by omega]
 
 def windowConv (f : Nat → Nat) : Nat → Nat → Nat
   | 0, _ => 0
@@ -78,158 +107,328 @@ def frontierDecCount (w : Nat) : Nat → Nat → Nat
   | 0, u => if u = 0 then 1 else 0
   | k + 1, u => windowConv (frontierDecCount w k) w u
 
-private theorem windowConv_step (f : Nat → Nat) :
-    ∀ (w u : Nat), windowConv f w (u + 1) + (if w ≤ u + 1 then f (u + 1 - w) else 0) =
-      f (u + 1) + windowConv f w u
-  | 0, _ => by simp [windowConv]
-  | 1, 0 => by simp [windowConv]
-  | m + 2, 0 => by simp [windowConv, show ¬ (m + 2 ≤ 1) by omega]
-  | m + 1, v + 1 => by
-    have ih := windowConv_step f m v
-    have hCond : (m + 1 ≤ v + 2) ↔ (m ≤ v + 1) := by omega
-    have hSub : v + 2 - (m + 1) = v + 1 - m := by omega
-    unfold windowConv; simp only [Nat.succ_ne_zero, ↓reduceIte, Nat.add_sub_cancel]
-    by_cases hm : m ≤ v + 1
-    · simp only [hm, hCond.mpr hm, ↓reduceIte, hSub] at ih ⊢; omega
-    · simp only [hm, show ¬ (m + 1 ≤ v + 2) from fun hc => hm (hCond.mp hc), ↓reduceIte] at ih ⊢; omega
+/-- Horner base-`B` polynomial evaluation (Kronecker substitution) for `O(1)` GMP `decide +kernel`
+    evaluation of `frontierSubCount` and `frontierDecCount` without `let`-duplication blowup. -/
+def polyEvalB (B : Nat) : List Nat → Nat
+  | [] => 0
+  | c :: cs => c + B * polyEvalB B cs
 
-def slideWindowAux : List Nat → List Nat → Nat → List Nat
-  | [], _, _ => []
-  | x :: xs, [], acc =>
-    match acc + x with | 0 => 0 :: slideWindowAux xs [] 0 | m + 1 => (m + 1) :: slideWindowAux xs [] (m + 1)
-  | x :: xs, y :: ys, acc =>
-    match acc + x - y with | 0 => 0 :: slideWindowAux xs ys 0 | m + 1 => (m + 1) :: slideWindowAux xs ys (m + 1)
+private theorem mem_le_sum : ∀ {xs : List Nat} {c : Nat}, c ∈ xs → c ≤ xs.sum
+  | _ :: _, _, .head _ => by simp [List.sum_cons]
+  | a :: xs, c, .tail _ h => by
+    have ih := mem_le_sum h
+    simp only [List.sum_cons]; omega
 
-private theorem match_cons_nat (n : Nat) (f : Nat → List Nat) :
-    (match n with | 0 => 0 :: f 0 | m + 1 => (m + 1) :: f (m + 1)) = n :: f n := by
-  cases n <;> rfl
+private theorem polyEvalB_div_mod (B : Nat) (hB : 0 < B) :
+    ∀ (cs : List Nat) (i : Nat), (∀ c ∈ cs, c < B) →
+      (polyEvalB B cs / B ^ i) % B = cs.getD i 0
+  | [], i, _ => by simp [polyEvalB]
+  | c :: cs, 0, hLt => by
+    have hc : c < B := hLt c (.head cs)
+    dsimp only [polyEvalB, List.getD, List.getElem?_cons_zero, Option.getD_some]
+    rw [Nat.pow_zero, Nat.div_one, Nat.mul_comm B, Nat.add_mul_mod_self_right, Nat.mod_eq_of_lt hc]
+  | c :: cs, i + 1, hLt => by
+    have hc : c < B := hLt c (.head cs)
+    dsimp only [polyEvalB, List.getD, List.getElem?_cons_succ]
+    have hPow : B ^ (i + 1) = B * B ^ i := by rw [Nat.pow_succ, Nat.mul_comm]
+    have hDivB : (c + B * polyEvalB B cs) / B = polyEvalB B cs := by
+      rw [Nat.mul_comm B, Nat.add_mul_div_right _ _ hB, Nat.div_eq_of_lt hc, Nat.zero_add]
+    rw [hPow, ← Nat.div_div_eq_div_mul, hDivB]
+    exact polyEvalB_div_mod B hB cs i (fun x hx => hLt x (.tail c hx))
 
-def decTableRow (w maxS : Nat) : Nat → List Nat
-  | 0 => 1 :: List.replicate maxS 0
-  | k + 1 => let prev := decTableRow w maxS k; slideWindowAux prev (List.replicate w 0 ++ prev) 0
+def addListNat : List Nat → List Nat → List Nat
+  | [], ys => ys
+  | xs, [] => xs
+  | x :: xs, y :: ys => (x + y) :: addListNat xs ys
 
-private theorem slideWindowAux_spec (f : Nat → Nat) (w : Nat) :
-    ∀ (rem start : Nat) (xs ys : List Nat) (acc : Nat), xs.length = rem →
-      (∀ i < rem, xs.getD i 0 = f (start + i)) →
-      (∀ i < rem, ys.getD i 0 = (if w ≤ start + i then f (start + i - w) else 0)) →
-      (start = 0 → acc = 0) →
-      (∀ p, start = p + 1 → acc = windowConv f w p ∧
-        (if w ≤ p + 1 then f (p + 1 - w) else 0) ≤ acc + f (p + 1)) →
-      slideWindowAux xs ys acc = List.ofFn (fun i : Fin rem => windowConv f w (start + i.1))
-  | 0, _, [], _, _, _, _, _, _, _ => rfl
-  | rem + 1, start, x :: xs, ys, acc, hLen, hXs, hYs, h0, hSucc => by
-    have hx0 : x = f start := by simpa using hXs 0 (Nat.zero_lt_succ rem)
-    have hy0 : ys.headD 0 = (if w ≤ start then f (start - w) else 0) := by
-      cases ys <;> [simpa using (hYs 0 (Nat.zero_lt_succ rem)).symm; simpa using hYs 0 (Nat.zero_lt_succ rem)]
-    have hWinLe : ∀ (m u : Nat), (if m ≤ u + 1 then f (u + 1 - m) else 0) ≤ windowConv f m u + f (u + 1) := by
-      intro m u; have := windowConv_step f m u; omega
-    have hAccNext : acc + x - ys.headD 0 = windowConv f w start := by
-      cases start with
-      | zero => rw [h0 rfl, hx0, hy0]; cases w <;> simp [windowConv]
-      | succ p => obtain ⟨hA, _⟩ := hSucc p rfl; rw [hx0, hy0]; have hE := windowConv_step f w p; rw [← hA] at hE; omega
-    cases ys with
-    | nil =>
-      have hNoDrop : ∀ i < rem + 1, (if w ≤ start + i then f (start + i - w) else 0) = 0 := fun i hi => (hYs i hi).symm
-      unfold slideWindowAux; rw [match_cons_nat, show acc + x = windowConv f w start by simpa [List.headD] using hAccNext]
-      simp only [List.ofFn_succ, Fin.val_zero, Nat.add_zero]; congr 1
-      exact slideWindowAux_spec f w rem (start + 1) xs [] (windowConv f w start) (Nat.succ.inj hLen)
-        (fun i hi => by simpa [Nat.add_assoc, Nat.add_comm 1 i] using hXs (i + 1) (Nat.succ_lt_succ hi))
-        (fun i hi => by simpa [Nat.add_assoc, Nat.add_comm 1 i] using (hNoDrop (i + 1) (Nat.succ_lt_succ hi)).symm)
-        (fun h => nomatch h) (fun p hp => ⟨by rw [Nat.succ.inj hp], by rw [Nat.succ.inj hp]; exact hWinLe w p⟩)
-    | cons y ys' =>
-      unfold slideWindowAux; rw [match_cons_nat, show acc + x - y = windowConv f w start from hAccNext]
-      simp only [List.ofFn_succ, Fin.val_zero, Nat.add_zero]; congr 1
-      exact slideWindowAux_spec f w rem (start + 1) xs ys' (windowConv f w start) (Nat.succ.inj hLen)
-        (fun i hi => by simpa [Nat.add_assoc, Nat.add_comm 1 i] using hXs (i + 1) (Nat.succ_lt_succ hi))
-        (fun i hi => by simpa [Nat.add_assoc, Nat.add_comm 1 i] using hYs (i + 1) (Nat.succ_lt_succ hi))
-        (fun h => nomatch h) (fun p hp => ⟨by rw [Nat.succ.inj hp], by rw [Nat.succ.inj hp]; exact hWinLe w p⟩)
+private theorem polyEvalB_addListNat (B : Nat) :
+    ∀ (xs ys : List Nat), polyEvalB B (addListNat xs ys) = polyEvalB B xs + polyEvalB B ys
+  | [], ys => by simp [addListNat, polyEvalB]
+  | _ :: _, [] => by simp [addListNat, polyEvalB]
+  | x :: xs, y :: ys => by
+    simp only [addListNat, polyEvalB, polyEvalB_addListNat B xs ys, Nat.mul_add]; omega
 
-private theorem getD_ofFn_nat {n : Nat} (g : Fin n → Nat) (i : Nat) (hi : i < n) :
-    (List.ofFn g).getD i 0 = g ⟨i, hi⟩ := by simp [List.getD, List.getElem?_ofFn, hi]
+private theorem getD_addListNat :
+    ∀ (xs ys : List Nat) (i : Nat), (addListNat xs ys).getD i 0 = xs.getD i 0 + ys.getD i 0
+  | [], ys, i => by simp [addListNat]
+  | _ :: _, [], i => by simp [addListNat]
+  | x :: xs, y :: ys, 0 => by simp [addListNat, List.getD]
+  | x :: xs, y :: ys, i + 1 => by simpa [addListNat, List.getD] using getD_addListNat xs ys i
 
-private theorem getD_replicate_append_nat (w : Nat) (xs : List Nat) :
-    ∀ i, (List.replicate w 0 ++ xs).getD i 0 = (if w ≤ i then xs.getD (i - w) 0 else 0) := by
-  induction w with
-  | zero => intro i; simp
-  | succ m ih =>
-    intro i; cases i with
-    | zero => simp [List.replicate]
-    | succ j =>
-      simp only [List.replicate_succ, List.cons_append, List.getD_cons_succ, ih j]
-      by_cases hm : m ≤ j
-      · simp [hm, show m + 1 ≤ j + 1 by omega, show j - m = j + 1 - (m + 1) by omega]
-      · simp [hm, show ¬ (m + 1 ≤ j + 1) by omega]
+private theorem sum_addListNat :
+    ∀ (xs ys : List Nat), (addListNat xs ys).sum = xs.sum + ys.sum
+  | [], ys => by simp [addListNat]
+  | _ :: _, [] => by simp [addListNat]
+  | x :: xs, y :: ys => by simp only [addListNat, List.sum_cons, sum_addListNat xs ys]; omega
 
-private theorem decTableRow_eq_ofFn (w maxS : Nat) :
-    ∀ k : Nat, decTableRow w maxS k = List.ofFn (fun i : Fin (maxS + 1) => frontierDecCount w k i.1)
-  | 0 => by
-    apply List.ext_getElem?; intro i; cases i with
-    | zero => simp [decTableRow, frontierDecCount]
-    | succ j =>
-      simp only [decTableRow, List.getElem?_cons_succ, List.getElem?_replicate, List.getElem?_ofFn]
-      by_cases hj : j < maxS <;> simp [hj, show (j + 1 < maxS + 1) ↔ j < maxS by omega, frontierDecCount]
+def mulOnesList : Nat → List Nat → List Nat
+  | 0, _ => []
+  | m + 1, cs => addListNat cs (0 :: mulOnesList m cs)
+
+private theorem polyEvalB_mulOnesList (B : Nat) :
+    ∀ (w : Nat) (cs : List Nat),
+      polyEvalB B (mulOnesList w cs) = polyEvalB B (List.replicate w 1) * polyEvalB B cs
+  | 0, _ => by simp [mulOnesList, polyEvalB]
+  | m + 1, cs => by
+    simp only [mulOnesList, List.replicate_succ, polyEvalB_addListNat, polyEvalB,
+      polyEvalB_mulOnesList B m cs, Nat.zero_add]
+    rw [Nat.add_mul, Nat.one_mul, Nat.mul_assoc]
+
+private theorem onesPoly_geom (B : Nat) (hB1 : 1 ≤ B) :
+    ∀ w : Nat, (B - 1) * polyEvalB B (List.replicate w 1) + 1 = B ^ w
+  | 0 => by simp [polyEvalB]
+  | m + 1 => by
+    have ih := onesPoly_geom B hB1 m
+    simp only [List.replicate_succ, polyEvalB, Nat.mul_add, Nat.mul_one]
+    have hSub : B - 1 + 1 = B := by omega
+    have hRearr : (B - 1) + (B - 1) * (B * polyEvalB B (List.replicate m 1)) + 1 =
+        (B - 1 + 1) + B * ((B - 1) * polyEvalB B (List.replicate m 1)) := by
+      rw [Nat.mul_left_comm (B - 1) B]; omega
+    rw [hRearr, hSub]
+    have hMul := congrArg (B * ·) ih
+    simp only [Nat.mul_add, Nat.mul_one] at hMul
+    rw [Nat.pow_succ, Nat.mul_comm (B ^ m) B]; omega
+
+private theorem onesPoly_eq_div (B w : Nat) (hB2 : 2 ≤ B) :
+    polyEvalB B (List.replicate w 1) = (B ^ w - 1) / (B - 1) := by
+  have hG := onesPoly_geom B (by omega) w
+  have hSub : B ^ w - 1 = polyEvalB B (List.replicate w 1) * (B - 1) := by
+    rw [Nat.mul_comm]; omega
+  rw [hSub, Nat.mul_div_cancel _ (by omega)]
+
+private theorem getD_mulOnesList (cs : List Nat) :
+    ∀ (w u : Nat), (mulOnesList w cs).getD u 0 = windowConv (cs.getD · 0) w u
+  | 0, _ => by simp [mulOnesList, windowConv]
+  | m + 1, 0 => by rw [mulOnesList, getD_addListNat]; simp [windowConv, List.getD]
+  | m + 1, u + 1 => by
+    rw [mulOnesList, getD_addListNat]
+    simp only [windowConv, Nat.succ_ne_zero, ↓reduceIte, Nat.add_sub_cancel]
+    have ih := getD_mulOnesList cs m u
+    simpa [List.getD] using congrArg (cs.getD (u + 1) 0 + ·) ih
+
+private theorem windowConv_congr (f g : Nat → Nat) :
+    (∀ x, f x = g x) → ∀ (w u : Nat), windowConv f w u = windowConv g w u
+  | _, 0, _ => rfl
+  | hfg, m + 1, u => by
+    unfold windowConv
+    rw [hfg u]
+    by_cases hu : u = 0
+    · simp [hu]
+    · simp [hu, windowConv_congr f g hfg m (u - 1)]
+
+private theorem sum_mulOnesList (cs : List Nat) :
+    ∀ w : Nat, (mulOnesList w cs).sum = w * cs.sum
+  | 0 => by simp [mulOnesList]
+  | m + 1 => by
+    simp only [mulOnesList, sum_addListNat, List.sum_cons, Nat.zero_add, sum_mulOnesList cs m, Nat.succ_mul]
+    omega
+
+def decList (w : Nat) : Nat → List Nat
+  | 0 => [1]
+  | k + 1 => mulOnesList w (decList w k)
+
+private theorem decList_spec (B w : Nat) (hB2 : 2 ≤ B) :
+    ∀ k : Nat,
+      polyEvalB B (decList w k) = ((B ^ w - 1) / (B - 1)) ^ k ∧
+      (decList w k).sum = w ^ k ∧
+      (∀ u, (decList w k).getD u 0 = frontierDecCount w k u)
+  | 0 => ⟨by simp [decList, polyEvalB], by simp [decList], fun u => by
+      cases u <;> simp [decList, frontierDecCount, List.getD]⟩
   | k + 1 => by
-    unfold decTableRow; rw [decTableRow_eq_ofFn w maxS k]
-    exact slideWindowAux_spec (frontierDecCount w k) w (maxS + 1) 0 _ _ 0 List.length_ofFn
-      (fun i hi => by simpa using getD_ofFn_nat (fun j : Fin (maxS + 1) => frontierDecCount w k j.1) i hi)
-      (fun i hi => by
-        rw [getD_replicate_append_nat]
-        by_cases hw : w ≤ i <;> [simp [hw, getD_ofFn_nat _ (i - w) (by omega)]; simp [hw]])
-      (fun _ => rfl) (fun _ hp => nomatch hp)
+    obtain ⟨hEv, hSm, hGet⟩ := decList_spec B w hB2 k
+    refine ⟨?_, ?_, ?_⟩
+    · rw [decList, polyEvalB_mulOnesList, onesPoly_eq_div B w hB2, hEv, Nat.pow_succ, Nat.mul_comm]
+    · rw [decList, sum_mulOnesList, hSm, Nat.pow_succ, Nat.mul_comm]
+    · intro u
+      rw [decList, getD_mulOnesList, frontierDecCount]
+      exact windowConv_congr _ _ hGet w u
 
-def subTableRow (maxL : Nat) : Nat → List Nat
-  | 0 => List.ofFn (fun i : Fin (maxL + 1) => if i.1 = 1 then 1 else 0)
-  | t + 1 =>
-    let prev := subTableRow maxL t
-    List.ofFn (fun i : Fin (maxL + 1) =>
-      if i.1 = 0 then 0 else if i.1 = 1 then 1 else splitConvFrom (prev.getD · 0) i.1 1 (i.1 - 1))
+def convListNat : List Nat → List Nat → List Nat
+  | [], _ => []
+  | a :: as, bs => addListNat (bs.map (a * ·)) (0 :: convListNat as bs)
 
-private theorem splitConvFrom_congr (f g : Nat → Nat) (ell : Nat) :
-    ∀ (cur rem : Nat), (∀ j, j ≤ ell → f j = g j) → cur + rem ≤ ell →
-      splitConvFrom f ell cur rem = splitConvFrom g ell cur rem
-  | _, 0, _, _ => rfl
-  | cur, rem + 1, hEq, hBnd => by
-    unfold splitConvFrom
-    rw [hEq cur (by omega), hEq (ell - cur) (by omega), splitConvFrom_congr f g ell (cur + 1) rem hEq (by omega)]
+private theorem polyEvalB_map_mul (B a : Nat) :
+    ∀ bs : List Nat, polyEvalB B (bs.map (a * ·)) = a * polyEvalB B bs
+  | [] => by simp [polyEvalB]
+  | b :: bs => by
+    simp only [List.map_cons, polyEvalB, polyEvalB_map_mul B a bs, Nat.mul_add]
+    rw [Nat.mul_left_comm a B]
 
-private theorem subTableRow_eq_ofFn (maxL : Nat) :
-    ∀ t : Nat, subTableRow maxL t = List.ofFn (fun i : Fin (maxL + 1) => frontierSubCount t i.1)
-  | 0 => by apply List.ext_getElem?; intro i; simp [subTableRow, frontierSubCount]
+private theorem polyEvalB_convListNat (B : Nat) :
+    ∀ (xs ys : List Nat), polyEvalB B (convListNat xs ys) = polyEvalB B xs * polyEvalB B ys
+  | [], _ => by simp [convListNat, polyEvalB]
+  | a :: as, ys => by
+    simp only [convListNat, polyEvalB_addListNat, polyEvalB_map_mul, polyEvalB,
+      polyEvalB_convListNat B as ys, Nat.zero_add]
+    rw [Nat.add_mul, Nat.mul_assoc]
+
+private theorem sum_map_mul (a : Nat) :
+    ∀ bs : List Nat, (bs.map (a * ·)).sum = a * bs.sum
+  | [] => by simp
+  | b :: bs => by simp only [List.map_cons, List.sum_cons, sum_map_mul a bs, Nat.mul_add]
+
+private theorem sum_convListNat :
+    ∀ (xs ys : List Nat), (convListNat xs ys).sum = xs.sum * ys.sum
+  | [], _ => by simp [convListNat]
+  | a :: as, ys => by
+    simp only [convListNat, sum_addListNat, sum_map_mul, List.sum_cons, Nat.zero_add,
+      sum_convListNat as ys, Nat.add_mul]
+
+def fullConvAt : List Nat → (Nat → Nat) → Nat → Nat
+  | [], _, _ => 0
+  | a :: _, g, 0 => a * g 0
+  | a :: as, g, n + 1 => a * g (n + 1) + fullConvAt as g n
+
+private theorem getD_map_mul (a : Nat) :
+    ∀ (bs : List Nat) (n : Nat), (bs.map (a * ·)).getD n 0 = a * bs.getD n 0
+  | [], _ => by simp
+  | _ :: _, 0 => by simp [List.getD]
+  | _ :: bs, n + 1 => by simpa [List.getD] using getD_map_mul a bs n
+
+private theorem getD_convListNat :
+    ∀ (xs ys : List Nat) (n : Nat), (convListNat xs ys).getD n 0 = fullConvAt xs (ys.getD · 0) n
+  | [], _, _ => by simp [convListNat, fullConvAt]
+  | a :: _, ys, 0 => by rw [convListNat, getD_addListNat, getD_map_mul]; simp [fullConvAt, List.getD]
+  | a :: as, ys, n + 1 => by
+    rw [convListNat, getD_addListNat, getD_map_mul]
+    unfold fullConvAt
+    simpa [List.getD] using congrArg (a * ys.getD (n + 1) 0 + ·) (getD_convListNat as ys n)
+
+private theorem fullConvAt_eq_splitConvFrom (f : Nat → Nat) (hf0 : f 0 = 0) (ell : Nat) :
+    ∀ (rem : Nat) (zs : List Nat) (cur : Nat),
+      cur + rem = ell → (∀ i, zs.getD i 0 = f (cur + i)) →
+      fullConvAt zs f rem = splitConvFrom f ell cur rem
+  | 0, zs, _, _, _ => by
+    cases zs <;> simp [fullConvAt, splitConvFrom, hf0]
+  | r + 1, [], cur, hEq, hZ => by
+    have hfCur : f cur = 0 := by simpa using (hZ 0).symm
+    have ih := fullConvAt_eq_splitConvFrom f hf0 ell r [] (cur + 1) (by omega)
+      (fun i => by simpa [Nat.add_assoc, Nat.add_comm 1 i] using hZ (i + 1))
+    simp [fullConvAt, splitConvFrom, hfCur, ← ih]
+  | r + 1, z :: zs, cur, hEq, hZ => by
+    have hz : z = f cur := by simpa [List.getD] using hZ 0
+    have hSub : r + 1 = ell - cur := by omega
+    have ih := fullConvAt_eq_splitConvFrom f hf0 ell r zs (cur + 1) (by omega)
+      (fun i => by simpa [List.getD, Nat.add_assoc, Nat.add_comm 1 i] using hZ (i + 1))
+    simp [fullConvAt, splitConvFrom, hz, hSub, ih]
+
+def subList : Nat → List Nat
+  | 0 => [0, 1]
+  | t + 1 => addListNat [0, 1] (convListNat (subList t) (subList t))
+
+def kronSubEval (B : Nat) : Nat → Nat
+  | 0 => B
+  | t + 1 => B + (kronSubEval B t) ^ 2
+
+def subTotalSum : Nat → Nat
+  | 0 => 1
+  | t + 1 => 1 + (subTotalSum t) ^ 2
+
+private theorem subList_spec (B : Nat) :
+    ∀ t : Nat,
+      polyEvalB B (subList t) = kronSubEval B t ∧
+      (subList t).sum = subTotalSum t ∧
+      (∀ ell, (subList t).getD ell 0 = frontierSubCount t ell)
+  | 0 => ⟨by simp [subList, kronSubEval, polyEvalB], by simp [subList, subTotalSum], fun ell => by
+      cases ell with
+      | zero => rfl
+      | succ m => cases m <;> simp [subList, frontierSubCount, List.getD]⟩
   | t + 1 => by
-    unfold subTableRow; rw [subTableRow_eq_ofFn maxL t]; apply List.ext_getElem?; intro ell; simp only [List.getElem?_ofFn]
-    by_cases hLt : ell < maxL + 1
-    · simp only [hLt, ↓reduceDIte, Option.some.injEq]; unfold frontierSubCount
-      by_cases h0 : ell = 0; · simp [h0]
-      by_cases h1 : ell = 1; · simp [h1]
-      simp only [h0, h1, ↓reduceIte]
-      exact splitConvFrom_congr _ _ ell 1 (ell - 1) (fun j _ => getD_ofFn_nat _ j (by omega)) (by omega)
-    · simp [hLt]
+    obtain ⟨hEv, hSm, hGet⟩ := subList_spec B t
+    have hf0 : frontierSubCount t 0 = 0 := by cases t <;> rfl
+    refine ⟨?_, ?_, ?_⟩
+    · simp only [subList, kronSubEval, polyEvalB_addListNat, polyEvalB_convListNat, hEv, polyEvalB,
+        Nat.zero_add, Nat.mul_one, Nat.mul_zero, Nat.add_zero, Nat.pow_two]
+    · simp only [subList, subTotalSum, sum_addListNat, sum_convListNat, hSm, List.sum_cons,
+        List.sum_nil, Nat.zero_add, Nat.add_zero, Nat.pow_two]
+    · intro ell
+      rw [subList, getD_addListNat, getD_convListNat]
+      have hSubHd : ∃ as, subList t = 0 :: as ∧ ∀ i, as.getD i 0 = frontierSubCount t (1 + i) := by
+        cases hSL : subList t with
+        | nil =>
+          have h1 := hGet 1
+          rw [hSL] at h1
+          cases t <;> simp [frontierSubCount] at h1
+        | cons a0 as =>
+          have ha0 : a0 = 0 := by
+            have h0 := hGet 0; rw [hSL] at h0; simpa [List.getD, hf0] using h0
+          subst ha0
+          exact ⟨as, rfl, fun i => by
+            have hi := hGet (1 + i); rw [hSL] at hi; simpa [List.getD, Nat.add_comm 1 i] using hi⟩
+      obtain ⟨as, hEqSL, hAs⟩ := hSubHd
+      have hFullCongr : ∀ zs m, fullConvAt zs (fun i => (subList t).getD i 0) m = fullConvAt zs (frontierSubCount t) m := by
+        intro zs m; induction zs generalizing m with
+        | nil => rfl
+        | cons z zs ih => cases m with
+          | zero => unfold fullConvAt; rw [hGet 0]
+          | succ r => unfold fullConvAt; rw [hGet (r + 1), ih r]
+      rw [hFullCongr, hEqSL]
+      cases ell with
+      | zero => simp [fullConvAt, frontierSubCount, hf0, List.getD]
+      | succ m =>
+        cases m with
+        | zero =>
+          have ha0 : fullConvAt as (frontierSubCount t) 0 = 0 := by cases as <;> simp [fullConvAt, hf0]
+          simp [fullConvAt, frontierSubCount, ha0, List.getD]
+        | succ r =>
+          have hSp := fullConvAt_eq_splitConvFrom (frontierSubCount t) hf0 (r + 2) (r + 1) as 1 (by omega) hAs
+          have h01 : ([0, 1] : List Nat).getD (r + 2) 0 = 0 := by simp [List.getD]
+          rw [h01, Nat.zero_add]
+          simp [fullConvAt, frontierSubCount, hSp]
 
 @[expose] def frontierTotalCardFast (p : FrontierFtsParams) : Nat :=
-  (subTableRow p.frontierLen p.treeHeight).getD p.frontierLen 0 *
-  (decTableRow p.winternitzW p.targetSum p.frontierLen).getD p.targetSum 0
+  let B := 2 ^ 256
+  (if p.frontierLen = 1 then 0 else (kronSubEval B p.treeHeight / B ^ p.frontierLen) % B) *
+  ((((B ^ p.winternitzW - 1) / (B - 1)) ^ p.frontierLen / B ^ p.targetSum) % B)
 
-theorem frontierTotalCardFast_eq_spec (p : FrontierFtsParams) :
+theorem frontierTotalCardFast_eq_spec (p : FrontierFtsParams)
+    (hSubBnd : subTotalSum p.treeHeight < 2 ^ 256)
+    (hDecBnd : p.winternitzW ^ p.frontierLen < 2 ^ 256) :
     frontierTotalCardFast p =
-      frontierSubCount p.treeHeight p.frontierLen * frontierDecCount p.winternitzW p.frontierLen p.targetSum := by
-  unfold frontierTotalCardFast
-  rw [subTableRow_eq_ofFn, decTableRow_eq_ofFn,
-      getD_ofFn_nat _ p.frontierLen (Nat.lt_succ_self _), getD_ofFn_nat _ p.targetSum (Nat.lt_succ_self _)]
+      frontierRootSubCount p.treeHeight p.frontierLen *
+        frontierDecCount p.winternitzW p.frontierLen p.targetSum := by
+  let B := 2 ^ 256
+  have hB0 : 0 < B := by decide +kernel
+  have hB2 : 2 ≤ B := by decide +kernel
+  obtain ⟨hSubEv, hSubSm, hSubGet⟩ := subList_spec B p.treeHeight
+  obtain ⟨hDecEv, hDecSm, hDecGet⟩ := decList_spec B p.winternitzW hB2 p.frontierLen
+  have hSubDig : (kronSubEval B p.treeHeight / B ^ p.frontierLen) % B =
+      frontierSubCount p.treeHeight p.frontierLen := by
+    rw [← hSubEv, polyEvalB_div_mod B hB0 _ p.frontierLen
+      (fun c hc => Nat.lt_of_le_of_lt (mem_le_sum hc) (hSubSm ▸ hSubBnd)), hSubGet]
+  have hDecDig : (((B ^ p.winternitzW - 1) / (B - 1)) ^ p.frontierLen / B ^ p.targetSum) % B =
+      frontierDecCount p.winternitzW p.frontierLen p.targetSum := by
+    rw [← hDecEv, polyEvalB_div_mod B hB0 _ p.targetSum
+      (fun c hc => Nat.lt_of_le_of_lt (mem_le_sum hc) (hDecSm ▸ hDecBnd)), hDecGet]
+  change (if p.frontierLen = 1 then 0 else (kronSubEval B p.treeHeight / B ^ p.frontierLen) % B) *
+    ((((B ^ p.winternitzW - 1) / (B - 1)) ^ p.frontierLen / B ^ p.targetSum) % B) =
+    (if p.frontierLen = 1 then 0 else frontierSubCount p.treeHeight p.frontierLen) *
+      frontierDecCount p.winternitzW p.frontierLen p.targetSum
+  rw [hSubDig, hDecDig]
 
-set_option maxRecDepth 32768 in
 theorem compact1122_rank_domain_gt_2pow256 :
     compact1122Params.signatureBytes = 1122 ∧
     compact1122Params.signatureBytes + 96 ≤ 1232 ∧
     compact1122Params.rotatedEpochVoteBytes = 1194 ∧
-    2 ^ 263 < frontierSubCount 8 34 * frontierDecCount 96 34 1615 ∧
-    2 ^ 256 < frontierSubCount 8 34 * frontierDecCount 96 34 1615 ∧
+    full256BitParams.signatureBytes = 2338 ∧
+    2 ^ 263 < frontierRootSubCount 8 34 * frontierDecCount 96 34 1615 ∧
+    frontierRootSubCount 8 34 * frontierDecCount 96 34 1615 < 2 ^ 264 ∧
+    2 ^ 256 < frontierRootSubCount 8 34 * frontierDecCount 96 34 1615 ∧
+    2 ^ 256 < frontierRootSubCount 8 72 * frontierDecCount 5 72 144 ∧
     (∀ d₁ d₂ : BitVec 256,
-      d₁.toNat < frontierSubCount 8 34 * frontierDecCount 96 34 1615 ∧
+      d₁.toNat < frontierRootSubCount 8 34 * frontierDecCount 96 34 1615 ∧
       (d₁.toNat = d₂.toNat → d₁ = d₂)) := by
-  have hFast : 2 ^ 263 < frontierTotalCardFast compact1122Params := by decide
-  rw [frontierTotalCardFast_eq_spec] at hFast; dsimp only [compact1122Params] at hFast
-  have h256 := Nat.lt_trans (by decide : 2 ^ 256 < 2 ^ 263) hFast
-  exact ⟨by decide, by decide, by decide, hFast, h256,
+  have hBounds :
+      2 ^ 263 < frontierTotalCardFast compact1122Params ∧
+      frontierTotalCardFast compact1122Params < 2 ^ 264 ∧
+      2 ^ 256 < frontierTotalCardFast full256BitParams := by decide +kernel
+  rw [frontierTotalCardFast_eq_spec compact1122Params (by decide +kernel) (by decide +kernel),
+      frontierTotalCardFast_eq_spec full256BitParams (by decide +kernel) (by decide +kernel)] at hBounds
+  dsimp only [compact1122Params, full256BitParams] at hBounds
+  have h256 : 2 ^ 256 < frontierRootSubCount 8 34 * frontierDecCount 96 34 1615 :=
+    Nat.lt_trans (by decide +kernel : 2 ^ 256 < 2 ^ 263) hBounds.1
+  exact ⟨by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
+    hBounds.1, hBounds.2.1, h256, hBounds.2.2,
     fun d₁ _ => ⟨Nat.lt_trans d₁.isLt h256, BitVec.eq_of_toNat_eq⟩⟩
 
 /-! ### Prefix-Free Binary-Tree Antichain & Bijective Unrank / Rank -/
@@ -239,14 +438,22 @@ inductive AntichainTree : Type where
   | split : AntichainTree → AntichainTree → AntichainTree
   deriving DecidableEq, Repr
 
-def AntichainTree.size : AntichainTree → Nat | .leaf => 1 | .split l r => l.size + r.size
+def AntichainTree.size : AntichainTree → Nat
+  | .leaf => 1
+  | .split l r => l.size + r.size
+
 theorem AntichainTree.size_pos : ∀ tr : AntichainTree, 1 ≤ tr.size
   | .leaf => Nat.le_refl 1
-  | .split l r => by have := l.size_pos; have := r.size_pos; unfold AntichainTree.size; omega
+  | .split l r => by
+    have hl := l.size_pos
+    have hr := r.size_pos
+    unfold AntichainTree.size; omega
 
 def AntichainTree.Valid : Nat → AntichainTree → Bool
-  | 0, .leaf => true | 0, .split _ _ => false
-  | _ + 1, .leaf => true | t + 1, .split l r => l.Valid t && r.Valid t
+  | 0, .leaf => true
+  | 0, .split _ _ => false
+  | _ + 1, .leaf => true
+  | t + 1, .split l r => l.Valid t && r.Valid t
 
 def AntichainTree.frontierNodes (v : Nat) : AntichainTree → List Nat
   | .leaf => [v]
@@ -313,7 +520,8 @@ def rankSplitPrefix (t ell cur target : Nat) : Nat → Nat
       rankSplitPrefix t ell (cur + 1) target rem else 0
 
 def rankSubtree : Nat → AntichainTree → Nat
-  | 0, _ => 0 | _ + 1, .leaf => 0
+  | 0, _ => 0
+  | _ + 1, .leaf => 0
   | t + 1, .split l rt =>
     let ell := l.size + rt.size
     rankSplitPrefix t ell 1 l.size (ell - 1) + rankSubtree t l * frontierSubCount t rt.size + rankSubtree t rt
@@ -371,15 +579,18 @@ def unrankDecorations (w : Nat) : (k u r : Nat) → Option (List Nat)
   | 0, u, r => if u = 0 ∧ r = 0 then some [] else none
   | k + 1, u, r =>
     match unrankWindowDigit w k w u 0 r with
-    | none => none | some (a, rSub) => (unrankDecorations w k (u - a) rSub).map (a :: ·)
+    | none => none
+    | some (a, rSub) => (unrankDecorations w k (u - a) rSub).map (a :: ·)
 
 def rankWindowPrefix (w k : Nat) : (remW u target : Nat) → Nat
-  | 0, _, _ => 0 | _ + 1, _, 0 => 0
+  | 0, _, _ => 0
+  | _ + 1, _, 0 => 0
   | remW + 1, u, target + 1 =>
     frontierDecCount w k u + (if u = 0 then 0 else rankWindowPrefix w k remW (u - 1) target)
 
 def rankDecorations (w : Nat) : List Nat → Nat → Nat
-  | [], _ => 0 | a :: rest, u => rankWindowPrefix w rest.length w u a + rankDecorations w rest (u - a)
+  | [], _ => 0
+  | a :: rest, u => rankWindowPrefix w rest.length w u a + rankDecorations w rest (u - a)
 
 private theorem unrankWindowDigit_spec (w k : Nat) :
     ∀ (remW u baseA r : Nat), r < windowConv (frontierDecCount w k) remW u →
@@ -414,35 +625,71 @@ theorem rankDecorations_unrankDecorations (w : Nat) :
     obtain ⟨rest, hRest, hLen, hSum, hBnd, hRkRest⟩ := rankDecorations_unrankDecorations w k (u - a) rSub hrSub
     refine ⟨a :: rest, by unfold unrankDecorations; simp [hDig, hRest], congrArg Nat.succ hLen,
       by simp [List.sum_cons, hSum]; omega, ?_, by unfold rankDecorations; rw [hLen, hRkRest]; omega⟩
-    intro x hx; rcases List.mem_cons.mp hx with rfl | htl <;> [exact haW; exact hBnd x htl]
+    intro x hx
+    rcases List.mem_cons.mp hx with rfl | htl
+    · exact haW
+    · exact hBnd x htl
 
 def unrankFrontierFts (p : FrontierFtsParams) (rank : Nat) : Option (AntichainTree × List Nat × List Nat) :=
   let dCard := frontierDecCount p.winternitzW p.frontierLen p.targetSum
-  let fCard := frontierSubCount p.treeHeight p.frontierLen
+  let fCard := frontierRootSubCount p.treeHeight p.frontierLen
   if rank < fCard * dCard then
     match unrankSubtree p.treeHeight p.frontierLen (rank / dCard),
           unrankDecorations p.winternitzW p.frontierLen p.targetSum (rank % dCard) with
-    | some tr, some offs => some (tr, tr.frontierNodes 1, offs) | _, _ => none
+    | some tr, some offs => some (tr, tr.frontierNodes 1, offs)
+    | _, _ => none
   else none
 
 def rankFrontierFts (p : FrontierFtsParams) (tr : AntichainTree) (offs : List Nat) : Nat :=
   rankSubtree p.treeHeight tr * frontierDecCount p.winternitzW p.frontierLen p.targetSum +
   rankDecorations p.winternitzW offs p.targetSum
 
+private theorem unrankFrontierFts_rank_lt {p : FrontierFtsParams} {r : Nat}
+    {tr : AntichainTree} {paths offs : List Nat}
+    (h : unrankFrontierFts p r = some (tr, paths, offs)) :
+    r < frontierRootSubCount p.treeHeight p.frontierLen *
+        frontierDecCount p.winternitzW p.frontierLen p.targetSum := by
+  unfold unrankFrontierFts at h
+  split at h
+  · assumption
+  · cases h
+
 theorem unrankFrontierFts_bijective (p : FrontierFtsParams) (rank : Nat)
-    (hLt : rank < frontierSubCount p.treeHeight p.frontierLen *
+    (hLt : rank < frontierRootSubCount p.treeHeight p.frontierLen *
                   frontierDecCount p.winternitzW p.frontierLen p.targetSum) :
     ∃ tr paths offs, unrankFrontierFts p rank = some (tr, paths, offs) ∧
       paths = tr.frontierNodes 1 ∧ tr.Valid p.treeHeight = true ∧ tr.size = p.frontierLen ∧
+      2 ≤ p.frontierLen ∧
       offs.length = p.frontierLen ∧ offs.sum = p.targetSum ∧
       (∀ a ∈ offs, a < p.winternitzW) ∧ rankFrontierFts p tr offs = rank := by
   let dCard := frontierDecCount p.winternitzW p.frontierLen p.targetSum
-  let fCard := frontierSubCount p.treeHeight p.frontierLen
-  have hdPos : 0 < dCard := by cases hD : dCard with | zero => rw [hD, Nat.mul_zero] at hLt; omega | succ m => exact Nat.zero_lt_succ m
-  obtain ⟨tr, hTr, hVal, hSz, hRkTr⟩ := rankSubtree_unrankSubtree p.treeHeight p.frontierLen _ ((Nat.div_lt_iff_lt_mul hdPos).mpr hLt)
-  obtain ⟨offs, hOffs, hLen, hSum, hBnd, hRkOff⟩ := rankDecorations_unrankDecorations p.winternitzW p.frontierLen p.targetSum _ (Nat.mod_lt rank hdPos)
-  exact ⟨tr, tr.frontierNodes 1, offs, by unfold unrankFrontierFts; simp [dCard, fCard, hLt, hTr, hOffs],
-    rfl, hVal, hSz, hLen, hSum, hBnd,
+  let fCard := frontierRootSubCount p.treeHeight p.frontierLen
+  have hdPos : 0 < dCard := by
+    cases hD : dCard with
+    | zero => rw [hD, Nat.mul_zero] at hLt; omega
+    | succ m => exact Nat.zero_lt_succ m
+  have hfPos : 0 < fCard := by
+    cases hF : fCard with
+    | zero => rw [hF, Nat.zero_mul] at hLt; omega
+    | succ m => exact Nat.zero_lt_succ m
+  have hTwoLe : 2 ≤ p.frontierLen := by
+    dsimp only [fCard] at hfPos
+    unfold frontierRootSubCount at hfPos
+    by_cases h1 : p.frontierLen = 1
+    · simp [h1] at hfPos
+    · by_cases h0 : p.frontierLen = 0
+      · subst h0
+        cases p.treeHeight <;> simp [frontierSubCount] at hfPos
+      · omega
+  have hfSubLt : rank / dCard < frontierSubCount p.treeHeight p.frontierLen := by
+    rw [← frontierRootSubCount_eq_of_two_le hTwoLe]
+    exact (Nat.div_lt_iff_lt_mul hdPos).mpr hLt
+  obtain ⟨tr, hTr, hVal, hSz, hRkTr⟩ := rankSubtree_unrankSubtree p.treeHeight p.frontierLen _ hfSubLt
+  obtain ⟨offs, hOffs, hLen, hSum, hBnd, hRkOff⟩ :=
+    rankDecorations_unrankDecorations p.winternitzW p.frontierLen p.targetSum _ (Nat.mod_lt rank hdPos)
+  exact ⟨tr, tr.frontierNodes 1, offs,
+    by unfold unrankFrontierFts; simp [dCard, fCard, hLt, hTr, hOffs],
+    rfl, hVal, hSz, hTwoLe, hLen, hSum, hBnd,
     by unfold rankFrontierFts; rw [hRkTr, hRkOff, Nat.mul_comm (rank / dCard) dCard]; exact Nat.div_add_mod rank dCard⟩
 
 theorem unrankFrontierFts_injective (p : FrontierFtsParams) {r₁ r₂ : Nat}
@@ -450,12 +697,10 @@ theorem unrankFrontierFts_injective (p : FrontierFtsParams) {r₁ r₂ : Nat}
     (h₁ : unrankFrontierFts p r₁ = some (tr₁, paths₁, offs₁))
     (h₂ : unrankFrontierFts p r₂ = some (tr₂, paths₂, offs₂))
     (hSame : paths₁ = paths₂ ∧ offs₁ = offs₂) : r₁ = r₂ := by
-  have hLt₁ : r₁ < frontierSubCount p.treeHeight p.frontierLen * frontierDecCount p.winternitzW p.frontierLen p.targetSum := by
-    unfold unrankFrontierFts at h₁; split at h₁ <;> [assumption; cases h₁]
-  have hLt₂ : r₂ < frontierSubCount p.treeHeight p.frontierLen * frontierDecCount p.winternitzW p.frontierLen p.targetSum := by
-    unfold unrankFrontierFts at h₂; split at h₂ <;> [assumption; cases h₂]
-  obtain ⟨_, _, _, hu₁, hp₁, _, _, _, _, _, hrk₁⟩ := unrankFrontierFts_bijective p r₁ hLt₁
-  obtain ⟨_, _, _, hu₂, hp₂, _, _, _, _, _, hrk₂⟩ := unrankFrontierFts_bijective p r₂ hLt₂
+  have hLt₁ := unrankFrontierFts_rank_lt h₁
+  have hLt₂ := unrankFrontierFts_rank_lt h₂
+  obtain ⟨_, _, _, hu₁, hp₁, _, _, _, _, _, _, hrk₁⟩ := unrankFrontierFts_bijective p r₁ hLt₁
+  obtain ⟨_, _, _, hu₂, hp₂, _, _, _, _, _, _, hrk₂⟩ := unrankFrontierFts_bijective p r₂ hLt₂
   rw [h₁] at hu₁; injection hu₁ with e₁; obtain ⟨rfl, e₁'⟩ := Prod.mk.inj e₁; obtain ⟨rfl, rfl⟩ := Prod.mk.inj e₁'
   rw [h₂] at hu₂; injection hu₂ with e₂; obtain ⟨rfl, e₂'⟩ := Prod.mk.inj e₂; obtain ⟨rfl, rfl⟩ := Prod.mk.inj e₂'
   rw [← hrk₁, ← hrk₂, frontierNodes_injective_root tr₁ tr₂ (hp₁.symm.trans (hSame.1.trans hp₂)), hSame.2]
@@ -484,6 +729,129 @@ structure FrontierHashSuite where
   leafStart   : BitVec 256 → BitVec 256 → Nat → BitVec 256
   chainStep   : BitVec 256 → Nat → Nat → BitVec 256 → BitVec 256
   mergeNode   : BitVec 256 → Nat → BitVec 256 → BitVec 256 → BitVec 256
+
+/-! ### Real `cSHAKE256` Framing & Customization-Tag Domain Separation (`crates/qsag-fts/src/frontier.rs`) -/
+
+def fixedBytesLE : Nat → Nat → List UInt8
+  | 0, _ => []
+  | k + 1, n => UInt8.ofNat (n % 256) :: fixedBytesLE k (n / 256)
+
+def decodeBytesLE : List UInt8 → Nat
+  | [] => 0
+  | b :: bs => b.toNat + 256 * decodeBytesLE bs
+
+theorem fixedBytesLE_length : ∀ (k n : Nat), (fixedBytesLE k n).length = k
+  | 0, _ => rfl
+  | k + 1, n => congrArg Nat.succ (fixedBytesLE_length k (n / 256))
+
+theorem decodeBytesLE_fixedBytesLE : ∀ (k n : Nat), n < 256 ^ k → decodeBytesLE (fixedBytesLE k n) = n
+  | 0, n, hLt => by simp at hLt; subst hLt; rfl
+  | k + 1, n, hLt => by
+    have hPow : 256 ^ (k + 1) = 256 ^ k * 256 := Nat.pow_succ 256 k
+    have hDivLt : n / 256 < 256 ^ k := (Nat.div_lt_iff_lt_mul (by decide : 0 < 256)).mpr (hPow ▸ hLt)
+    unfold fixedBytesLE decodeBytesLE
+    rw [decodeBytesLE_fixedBytesLE k (n / 256) hDivLt, UInt8.toNat_ofNat']
+    change n % 256 + 256 * (n / 256) = n
+    exact Nat.mod_add_div n 256
+
+def fixedBytesBE (k n : Nat) : List UInt8 := (fixedBytesLE k n).reverse
+def decodeBytesBE (bs : List UInt8) : Nat := decodeBytesLE bs.reverse
+
+theorem fixedBytesBE_length (k n : Nat) : (fixedBytesBE k n).length = k := by
+  rw [fixedBytesBE, List.length_reverse, fixedBytesLE_length]
+
+theorem fixedBytesBE_injective {k n₁ n₂ : Nat} (h₁ : n₁ < 256 ^ k) (h₂ : n₂ < 256 ^ k)
+    (hEq : fixedBytesBE k n₁ = fixedBytesBE k n₂) : n₁ = n₂ := by
+  have hDec := congrArg decodeBytesBE hEq
+  unfold decodeBytesBE fixedBytesBE at hDec
+  rw [List.reverse_reverse, List.reverse_reverse,
+      decodeBytesLE_fixedBytesLE k n₁ h₁, decodeBytesLE_fixedBytesLE k n₂ h₂] at hDec
+  exact hDec
+
+def bv256BytesBE (x : BitVec 256) : List UInt8 := fixedBytesBE 32 x.toNat
+def u64BytesBE (x : UInt64) : List UInt8 := fixedBytesBE 8 x.toNat
+def u16BytesBE (x : UInt16) : List UInt8 := fixedBytesBE 2 x.toNat
+def bytes32ToBv256BE (bs : List UInt8) : BitVec 256 := BitVec.ofNat 256 (decodeBytesBE (bs.take 32))
+
+theorem bv256BytesBE_injective {x y : BitVec 256} (hEq : bv256BytesBE x = bv256BytesBE y) : x = y := by
+  have h256 : (2 : Nat) ^ 256 = 256 ^ 32 := by decide +kernel
+  exact BitVec.eq_of_toNat_eq (fixedBytesBE_injective (h256 ▸ x.isLt) (h256 ▸ y.isLt) hEq)
+
+/-- Exact ASCII customization tags from `crates/qsag-fts/src/frontier.rs:28-33, 689`. -/
+def ftsTagLeaf : List UInt8 :=
+  [81, 83, 65, 71, 46, 70, 84, 83, 46, 76, 69, 65, 70, 46, 86, 49] -- "QSAG.FTS.LEAF.V1"
+def ftsTagMerge : List UInt8 :=
+  [81, 83, 65, 71, 46, 70, 84, 83, 46, 77, 69, 82, 71, 69, 46, 86, 49] -- "QSAG.FTS.MERGE.V1"
+def ftsTagChain : List UInt8 :=
+  [81, 83, 65, 71, 46, 70, 84, 83, 46, 67, 72, 65, 73, 78, 46, 86, 49] -- "QSAG.FTS.CHAIN.V1"
+def ftsTagRand : List UInt8 :=
+  [81, 83, 65, 71, 46, 70, 84, 83, 46, 82, 65, 78, 68, 46, 86, 49] -- "QSAG.FTS.RAND.V1"
+def ftsTagMsgPre : List UInt8 :=
+  [81, 83, 65, 71, 46, 70, 84, 83, 46, 77, 83, 71, 50, 53, 54, 46, 86, 49] -- "QSAG.FTS.MSG256.V1"
+def ftsTagHmsg : List UInt8 :=
+  [81, 83, 65, 71, 46, 70, 84, 83, 46, 72, 77, 83, 71, 46, 86, 49] -- "QSAG.FTS.HMSG.V1"
+def ftsTagEpochVote : List UInt8 :=
+  [81, 83, 65, 71, 46, 70, 84, 83, 46, 69, 80, 79, 67, 72, 46, 86, 79, 84, 69, 46, 86, 49] -- "QSAG.FTS.EPOCH.VOTE.V1"
+
+inductive FtsDomainRole : Type where
+  | leaf | merge | chain | rand | msgPre | hmsg | epochVote
+  deriving DecidableEq, Repr
+
+def FtsDomainRole.tag : FtsDomainRole → List UInt8
+  | .leaf => ftsTagLeaf
+  | .merge => ftsTagMerge
+  | .chain => ftsTagChain
+  | .rand => ftsTagRand
+  | .msgPre => ftsTagMsgPre
+  | .hmsg => ftsTagHmsg
+  | .epochVote => ftsTagEpochVote
+
+/-- Every pair of distinct `FrontierSumFts` / `RotatedEpochVote` customization tags maps to strictly
+    disjoint 136-byte padded `cSHAKE256` sponge block sequences for all payloads `m₁, m₂`. -/
+theorem fts_cshake_domains_disjoint (r₁ r₂ : FtsDomainRole) (hNe : r₁ ≠ r₂) (m₁ m₂ : List UInt8) :
+    absorbPayload 136 domCshake256 (cshakePrefix [] r₁.tag ++ m₁) ≠
+      absorbPayload 136 domCshake256 (cshakePrefix [] r₂.tag ++ m₂) := by
+  have hTagNe : r₁.tag ≠ r₂.tag := by
+    cases r₁ <;> cases r₂ <;> first | exact False.elim (hNe rfl) | decide +kernel
+  have hN : 8 * ([] : List UInt8).length < 256 ^ 255 := bitlen_lt_sp800_bound (s := []) (by decide)
+  have hS₁ : 8 * r₁.tag.length < 256 ^ 255 := by
+    cases r₁ <;> exact bitlen_lt_sp800_bound (by decide)
+  have hS₂ : 8 * r₂.tag.length < 256 ^ 255 := by
+    cases r₂ <;> exact bitlen_lt_sp800_bound (by decide)
+  have hNonEmpty₁ : ¬ (([] : List UInt8) = [] ∧ r₁.tag = []) := by
+    cases r₁ <;> decide +kernel
+  have hNonEmpty₂ : ¬ (([] : List UInt8) = [] ∧ r₂.tag = []) := by
+    cases r₂ <;> decide +kernel
+  have hDisj := cshake256_domains_disjoint m₁ m₂ hN hS₁ hN hS₂ (fun hPair => hTagNe (Prod.mk.inj hPair).2)
+  simpa [hNonEmpty₁, hNonEmpty₂] using hDisj
+
+def evalFtsCshake256_32 (tag payload : List UInt8) : BitVec 256 :=
+  bytes32ToBv256BE (evalCshake256Sponge keccakF1600 zeroKState xorRate136 rateBlockBytes [] tag payload 32)
+
+def encodeFrontierPid (p : FrontierFtsParams) : List UInt8 :=
+  fixedBytesBE 8 p.nodeBytes ++ fixedBytesBE 8 p.treeHeight ++ fixedBytesBE 8 p.winternitzW ++
+  fixedBytesBE 8 p.frontierLen ++ fixedBytesBE 8 p.targetSum ++ fixedBytesBE 8 p.indexBits ++
+  fixedBytesBE 8 p.counterBits
+
+/-- Real `cSHAKE256` (`Keccak-f[1600]`) instantiation of `FrontierHashSuite` matching `frontier.rs`. -/
+def cshakeFrontierHashSuite (p : FrontierFtsParams) : FrontierHashSuite :=
+  let pid := encodeFrontierPid p
+  { prehashMsg  := fun pkSeed pkRoot msg =>
+      evalFtsCshake256_32 ftsTagMsgPre (pid ++ bv256BytesBE pkSeed ++ bv256BytesBE pkRoot ++ msg)
+    squeezeRank := fun pkSeed pkRoot rand d ctr =>
+      evalFtsCshake256_32 ftsTagHmsg (pid ++ bv256BytesBE pkSeed ++ bv256BytesBE pkRoot ++
+        bv256BytesBE rand ++ bv256BytesBE d ++ u16BytesBE ctr)
+    prfRand     := fun skPrf pkSeed pkRoot hedge d =>
+      evalFtsCshake256_32 ftsTagRand (pid ++ bv256BytesBE skPrf ++ bv256BytesBE pkSeed ++
+        bv256BytesBE pkRoot ++ bv256BytesBE hedge ++ bv256BytesBE d)
+    leafStart   := fun pkSeed skSeed v =>
+      evalFtsCshake256_32 ftsTagLeaf (pid ++ bv256BytesBE pkSeed ++ fixedBytesBE 8 v ++ bv256BytesBE skSeed)
+    chainStep   := fun pkSeed v step cur =>
+      evalFtsCshake256_32 ftsTagChain (pid ++ bv256BytesBE pkSeed ++ fixedBytesBE 8 v ++
+        fixedBytesBE 8 step ++ bv256BytesBE cur)
+    mergeNode   := fun pkSeed v l r =>
+      evalFtsCshake256_32 ftsTagMerge (pid ++ bv256BytesBE pkSeed ++ fixedBytesBE 8 v ++
+        bv256BytesBE l ++ bv256BytesBE r) }
 
 structure FrontierPublicKey where pkSeed : BitVec 256; root : BitVec 256 deriving DecidableEq, Repr
 structure FrontierSecretKey where skSeed : BitVec 256; skPrf : BitVec 256; pkSeed : BitVec 256 deriving DecidableEq, Repr
@@ -561,9 +929,14 @@ private theorem runFrontierStackLoop_tree_eq (H : FrontierHashSuite) (pkSeed : B
       runFrontierStackLoop H pkSeed w restVs restOffs restVals
         (collapseFrontierStack H pkSeed w v (evalAntichainTree H pkSeed w v tr offs vals) st)
   | .leaf, _, offs, vals, _, _, _, _, _, hOL, hVL => by
-    cases offs with | nil => cases hOL | cons a os =>
-      cases vals with | nil => cases hVL | cons x xs =>
-        rw [List.eq_nil_of_length_eq_zero (Nat.succ.inj hOL), List.eq_nil_of_length_eq_zero (Nat.succ.inj hVL)]; rfl
+    cases offs with
+    | nil => cases hOL
+    | cons a os =>
+      cases vals with
+      | nil => cases hVL
+      | cons x xs =>
+        rw [List.eq_nil_of_length_eq_zero (Nat.succ.inj hOL), List.eq_nil_of_length_eq_zero (Nat.succ.inj hVL)]
+        rfl
   | .split l r, v, offs, vals, restVs, restOffs, restVals, st, hv, hOL, hVL => by
     conv => lhs; rw [AntichainTree.frontierNodes, List.append_assoc,
       (List.take_append_drop l.size offs).symm, List.append_assoc,
@@ -574,7 +947,9 @@ private theorem runFrontierStackLoop_tree_eq (H : FrontierHashSuite) (pkSeed : B
     have hL : collapseFrontierStack H pkSeed w (2 * v)
         (evalAntichainTree H pkSeed w (2 * v) l (offs.take l.size) (vals.take l.size)) st =
         (2 * v, evalAntichainTree H pkSeed w (2 * v) l (offs.take l.size) (vals.take l.size)) :: st := by
-      cases st with | nil => rfl | cons hd _ => unfold collapseFrontierStack; simp [show ¬ (hd.1 % 2 = 0 ∧ 2 * v = hd.1 + 1) by omega]
+      cases st with
+      | nil => rfl
+      | cons hd _ => unfold collapseFrontierStack; simp [show ¬ (hd.1 % 2 = 0 ∧ 2 * v = hd.1 + 1) by omega]
     rw [hL, runFrontierStackLoop_tree_eq H pkSeed w r (2 * v + 1) (offs.drop l.size) (vals.drop l.size)
           restVs restOffs restVals _ (by omega) (by simp [hOL, AntichainTree.size]) (by simp [hVL, AntichainTree.size])]
     unfold collapseFrontierStack
@@ -590,7 +965,8 @@ def verifyFrontierFts (H : FrontierHashSuite) (p : FrontierFtsParams)
     | none => false
     | some (_, frontier, offsets) =>
       match runFrontierStackLoop H pk.pkSeed p.winternitzW frontier offsets sig.chainValues [] with
-      | [(1, rootOut)] => decide (rootOut = pk.root) | _ => false
+      | [(1, rootOut)] => decide (rootOut = pk.root)
+      | _ => false
 
 def signFrontierFts (H : FrontierHashSuite) (p : FrontierFtsParams)
     (sk : FrontierSecretKey) (hedge : BitVec 256) (ctr : UInt16) (msg : List UInt8) : Option FrontierSignature :=
@@ -621,7 +997,9 @@ private theorem evalAntichainTree_honest (H : FrontierHashSuite) (pkSeed skSeed 
       evalAntichainTree H pkSeed w v tr offs (honestSignSubtree H pkSeed skSeed w t v tr offs) =
         honestNodeOut H pkSeed skSeed w t v
   | t, v, .leaf, offs, _, _, hOL, hBnd, hvGt => by
-    cases offs with | nil => cases hOL | cons a os =>
+    cases offs with
+    | nil => cases hOL
+    | cons a os =>
       have := hBnd a (.head os)
       unfold honestSignSubtree evalAntichainTree honestNodeOut
       simp only [List.headD_cons, hvGt rfl, ↓reduceIte, ← chainAdvance_add]
@@ -654,9 +1032,8 @@ theorem verifyFrontierFts_signFrontierFts (H : FrontierHashSuite) (p : FrontierF
   | none => simp [pk, d, rand, rk, hUnr] at hSign
   | some tp =>
     obtain ⟨tr, paths, offs⟩ := tp; simp only [pk, d, rand, rk, hUnr, Option.some.injEq] at hSign; subst hSign
-    have hLt : rk < frontierSubCount p.treeHeight p.frontierLen * frontierDecCount p.winternitzW p.frontierLen p.targetSum := by
-      unfold unrankFrontierFts at hUnr; split at hUnr <;> [assumption; cases hUnr]
-    obtain ⟨_, _, _, hu', hp', hVal, hSz, hOLen, _, hBnd, _⟩ := unrankFrontierFts_bijective p rk hLt
+    have hLt := unrankFrontierFts_rank_lt hUnr
+    obtain ⟨_, _, _, hu', hp', hVal, hSz, _, hOLen, _, hBnd, _⟩ := unrankFrontierFts_bijective p rk hLt
     rw [hUnr] at hu'; injection hu' with e; obtain ⟨rfl, e'⟩ := Prod.mk.inj e; obtain ⟨rfl, rfl⟩ := Prod.mk.inj e'
     have hSigLen := (honestSignSubtree_length H pk.pkSeed sk.skSeed p.winternitzW p.treeHeight 1 tr offs hVal).trans hSz
     unfold verifyFrontierFts; simp only [hSigLen, bne_self_eq_false, ↓reduceIte, hCtr, hUnr]
@@ -834,21 +1211,23 @@ def extractCompact1122ForgeryBreak (H : FrontierHashSuite) (p : FrontierFtsParam
     match hU₁ : unrankFrontierFts p rk₁, hU₂ : unrankFrontierFts p rk₂ with
     | none, _ => False.elim (by obtain ⟨_, _, _, h⟩ := hUnr₁Some; rw [h] at hU₁; cases hU₁)
     | _, none => False.elim (by
-        unfold verifyFrontierFts at hForged; split at hForged; · cases hForged
-        split at hForged <;> [cases hForged; simp [pk, d₂, rk₂, hU₂] at hForged])
+        unfold verifyFrontierFts at hForged
+        split at hForged
+        · cases hForged
+        · split at hForged
+          · cases hForged
+          · simp [pk, d₂, rk₂, hU₂] at hForged)
     | some (tr₁, paths₁, offs₁), some (tr₂, paths₂, offs₂) =>
-      have hLt₁ : rk₁ < frontierSubCount p.treeHeight p.frontierLen * frontierDecCount p.winternitzW p.frontierLen p.targetSum := by
-        unfold unrankFrontierFts at hU₁; split at hU₁ <;> [assumption; cases hU₁]
-      have hLt₂ : rk₂ < frontierSubCount p.treeHeight p.frontierLen * frontierDecCount p.winternitzW p.frontierLen p.targetSum := by
-        unfold unrankFrontierFts at hU₂; split at hU₂ <;> [assumption; cases hU₂]
+      have hLt₁ := unrankFrontierFts_rank_lt hU₁
+      have hLt₂ := unrankFrontierFts_rank_lt hU₂
       have hP₁ : paths₁ = tr₁.frontierNodes 1 ∧ tr₁.Valid p.treeHeight = true ∧ tr₁.size = p.frontierLen ∧
           offs₁.length = p.frontierLen ∧ offs₁.sum = p.targetSum ∧ (∀ a ∈ offs₁, a < p.winternitzW) := by
-        obtain ⟨_, _, _, hu, hp, hv, hs, hl, hsm, hb, _⟩ := unrankFrontierFts_bijective p rk₁ hLt₁
+        obtain ⟨_, _, _, hu, hp, hv, hs, _, hl, hsm, hb, _⟩ := unrankFrontierFts_bijective p rk₁ hLt₁
         rw [hU₁] at hu; injection hu with e; obtain ⟨rfl, e'⟩ := Prod.mk.inj e; obtain ⟨rfl, rfl⟩ := Prod.mk.inj e'
         exact ⟨hp, hv, hs, hl, hsm, hb⟩
       have hP₂ : paths₂ = tr₂.frontierNodes 1 ∧ tr₂.Valid p.treeHeight = true ∧ tr₂.size = p.frontierLen ∧
           offs₂.length = p.frontierLen ∧ offs₂.sum = p.targetSum ∧ (∀ a ∈ offs₂, a < p.winternitzW) := by
-        obtain ⟨_, _, _, hu, hp, hv, hs, hl, hsm, hb, _⟩ := unrankFrontierFts_bijective p rk₂ hLt₂
+        obtain ⟨_, _, _, hu, hp, hv, hs, _, hl, hsm, hb, _⟩ := unrankFrontierFts_bijective p rk₂ hLt₂
         rw [hU₂] at hu; injection hu with e; obtain ⟨rfl, e'⟩ := Prod.mk.inj e; obtain ⟨rfl, rfl⟩ := Prod.mk.inj e'
         exact ⟨hp, hv, hs, hl, hsm, hb⟩
       have hVer : sig₂.chainValues.length = p.frontierLen ∧
@@ -891,27 +1270,37 @@ def verifyFrontierFtsNoTargetSum (H : FrontierHashSuite) (p : FrontierFtsParams)
   if chainVals.length != p.frontierLen || offs.length != p.frontierLen then false
   else if offs.any (fun a => decide (p.winternitzW ≤ a)) then false
   else match runFrontierStackLoop H pk.pkSeed p.winternitzW frontier offs chainVals [] with
-    | [(1, rootOut)] => decide (rootOut = pk.root) | _ => false
+    | [(1, rootOut)] => decide (rootOut = pk.root)
+    | _ => false
 
 theorem tooth_drop_target_sum_allows_one_sig_forgery
     (H : FrontierHashSuite) (p : FrontierFtsParams) (hw : 2 ≤ p.winternitzW) (hL : 2 ≤ p.frontierLen)
     (sk : FrontierSecretKey) (tr : AntichainTree) (hVal : tr.Valid p.treeHeight = true) (hSz : tr.size = p.frontierLen) :
-    let pk := deriveFrontierPk H p sk
-    let offs₁ := List.replicate p.frontierLen 0
-    let honestVals := honestSignSubtree H pk.pkSeed sk.skSeed p.winternitzW p.treeHeight 1 tr offs₁
-    let v₀ := (tr.frontierNodes 1).headD 2
-    let forgedVals := (H.chainStep pk.pkSeed v₀ 0 (honestVals.headD 0#256)) :: honestVals.tail
-    let offs₂ := 1 :: List.replicate (p.frontierLen - 1) 0
-    offs₂ ≠ offs₁ ∧ verifyFrontierFtsNoTargetSum H p pk (tr.frontierNodes 1) offs₂ forgedVals = true := by
-  intro pk offs₁ honestVals v₀ forgedVals offs₂
-  have hNe : offs₂ ≠ offs₁ := by dsimp only [offs₁, offs₂]; cases hFL : p.frontierLen <;> [omega; simp [List.replicate_succ]]
-  refine ⟨hNe, ?_⟩
+    ∃ (offs₁ offs₂ : List Nat) (forgedVals : List (BitVec 256)),
+      offs₂ ≠ offs₁ ∧
+      verifyFrontierFtsNoTargetSum H p (deriveFrontierPk H p sk) (tr.frontierNodes 1) offs₂ forgedVals = true := by
+  let pk := deriveFrontierPk H p sk
+  let offs₁ := List.replicate p.frontierLen 0
+  let honestVals := honestSignSubtree H pk.pkSeed sk.skSeed p.winternitzW p.treeHeight 1 tr offs₁
+  let v₀ := (tr.frontierNodes 1).headD 2
+  let forgedVals := (H.chainStep pk.pkSeed v₀ 0 (honestVals.headD 0#256)) :: honestVals.tail
+  let offs₂ := 1 :: List.replicate (p.frontierLen - 1) 0
+  have hNe : offs₂ ≠ offs₁ := by
+    dsimp only [offs₁, offs₂]
+    cases hFL : p.frontierLen with
+    | zero => omega
+    | succ m => simp [List.replicate_succ]
+  refine ⟨offs₁, offs₂, forgedVals, hNe, ?_⟩
   have hHLen := (honestSignSubtree_length H pk.pkSeed sk.skSeed p.winternitzW p.treeHeight 1 tr offs₁ hVal).trans hSz
   have hNLen := (tr.frontierNodes_length 1).trans hSz
   have hOLen₁ : offs₁.length = p.frontierLen := List.length_replicate
   have hOLen₂ : offs₂.length = p.frontierLen := by dsimp only [offs₂]; rw [List.length_cons, List.length_replicate]; omega
-  cases hFN : tr.frontierNodes 1 with | nil => rw [hFN] at hNLen; simp at hNLen; omega | cons u us =>
-    cases hHV : honestVals with | nil => rw [hHV] at hHLen; simp at hHLen; omega | cons x xs =>
+  cases hFN : tr.frontierNodes 1 with
+  | nil => rw [hFN] at hNLen; simp at hNLen; omega
+  | cons u us =>
+    cases hHV : honestVals with
+    | nil => rw [hHV] at hHLen; simp at hHLen; omega
+    | cons x xs =>
       have hFLS : p.frontierLen = us.length + 1 := by rw [hFN] at hNLen; simpa using hNLen.symm
       have hO₁ : offs₁ = 0 :: List.replicate us.length 0 := by dsimp only [offs₁]; rw [hFLS, List.replicate_succ]
       have hO₂ : offs₂ = 1 :: List.replicate us.length 0 := by dsimp only [offs₂]; rw [hFLS]; simp
@@ -949,6 +1338,41 @@ structure RotatedEpochVote where
   deriving DecidableEq, Repr
 abbrev EpochVoteHasher := BitVec 256 → UInt64 → BitVec 256 → BitVec 256 → List UInt8
 
+/-- Exact 104-byte big-endian `EpochKeyLink::message` preimage (`crates/qsag-fts/src/frontier.rs:686-699`). -/
+def encodeEpochVoteInput (chainId : BitVec 256) (ep : UInt64) (voteDigest nextPkRoot : BitVec 256) : List UInt8 :=
+  bv256BytesBE chainId ++ u64BytesBE ep ++ bv256BytesBE voteDigest ++ bv256BytesBE nextPkRoot
+
+private theorem append_eq_of_eq_length {α : Type} :
+    ∀ {xs₁ xs₂ ys₁ ys₂ : List α}, xs₁.length = xs₂.length → xs₁ ++ ys₁ = xs₂ ++ ys₂ → xs₁ = xs₂ ∧ ys₁ = ys₂
+  | [], [], _, _, _, h => ⟨rfl, h⟩
+  | _ :: _, [], _, _, hL, _ => nomatch hL
+  | [], _ :: _, _, _, hL, _ => nomatch hL
+  | a₁ :: xs₁, a₂ :: xs₂, ys₁, ys₂, hL, hEq => by
+    obtain ⟨rfl, hTail⟩ := List.cons.inj hEq
+    obtain ⟨hX, hY⟩ := append_eq_of_eq_length (Nat.succ.inj hL) hTail
+    exact ⟨congrArg (a₁ :: ·) hX, hY⟩
+
+theorem encodeEpochVoteInput_injective {c₁ c₂ : BitVec 256} {ep₁ ep₂ : UInt64}
+    {d₁ d₂ r₁ r₂ : BitVec 256}
+    (hEq : encodeEpochVoteInput c₁ ep₁ d₁ r₁ = encodeEpochVoteInput c₂ ep₂ d₂ r₂) :
+    c₁ = c₂ ∧ ep₁ = ep₂ ∧ d₁ = d₂ ∧ r₁ = r₂ := by
+  unfold encodeEpochVoteInput at hEq
+  simp only [List.append_assoc] at hEq
+  have hLen32 : ∀ x : BitVec 256, (bv256BytesBE x).length = 32 := fun x => fixedBytesBE_length 32 x.toNat
+  have hLen8 : ∀ x : UInt64, (u64BytesBE x).length = 8 := fun x => fixedBytesBE_length 8 x.toNat
+  obtain ⟨hcB, hRest1⟩ := append_eq_of_eq_length ((hLen32 c₁).trans (hLen32 c₂).symm) hEq
+  obtain ⟨hepB, hRest2⟩ := append_eq_of_eq_length ((hLen8 ep₁).trans (hLen8 ep₂).symm) hRest1
+  obtain ⟨hdB, hrB⟩ := append_eq_of_eq_length ((hLen32 d₁).trans (hLen32 d₂).symm) hRest2
+  have h64 : (2 : Nat) ^ 64 = 256 ^ 8 := by decide +kernel
+  have hepNat := fixedBytesBE_injective (h64 ▸ ep₁.toBitVec.isLt) (h64 ▸ ep₂.toBitVec.isLt) hepB
+  exact ⟨bv256BytesBE_injective hcB, UInt64.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq hepNat),
+    bv256BytesBE_injective hdB, bv256BytesBE_injective hrB⟩
+
+/-- Real `cSHAKE256("QSAG.FTS.EPOCH.VOTE.V1")` 32-byte vote message hasher matching `EpochKeyLink::message`. -/
+def cshakeEpochVoteHasher : EpochVoteHasher := fun chainId ep voteDigest nextPkRoot =>
+  evalCshake256Sponge keccakF1600 zeroKState xorRate136 rateBlockBytes
+    [] ftsTagEpochVote (encodeEpochVoteInput chainId ep voteDigest nextPkRoot) 32
+
 def verifyRotatedEpochVote (H : FrontierHashSuite) (p : FrontierFtsParams)
     (voteHash : EpochVoteHasher) (chainId : BitVec 256)
     (currentPk : FrontierPublicKey) (expectedEpoch : UInt64)
@@ -968,7 +1392,8 @@ def verifyRotatedEpochChain (H : FrontierHashSuite) (p : FrontierFtsParams)
   | curPk, ep, d :: ds, v :: vs =>
     if ep >= 2 ^ 64 then none
     else match verifyRotatedEpochVote H p voteHash chainId curPk (UInt64.ofNat ep) d v with
-      | none => none | some nextPk => verifyRotatedEpochChain H p voteHash chainId nextPk (ep + 1) ds vs
+      | none => none
+      | some nextPk => verifyRotatedEpochChain H p voteHash chainId nextPk (ep + 1) ds vs
   | _, _, _, _ => none
 
 inductive EpochChainHistoricalBreak (H : FrontierHashSuite) (voteHash : EpochVoteHasher)
@@ -1017,7 +1442,8 @@ def extractRotatedEpochVoteChainBreak (H : FrontierHashSuite) (p : FrontierFtsPa
       by_cases hEpB : startEp >= 2 ^ 64; · simp [hEpB] at hChainAcc
       simp only [hEpB, ↓reduceIte] at hChainAcc
       cases hV : verifyRotatedEpochVote H p voteHash chainId anchorPk (UInt64.ofNat startEp) dAdv vAdv with
-      | none => simp [hV] at hChainAcc | some npk => exact ⟨npk, hV, by simpa [hV] using hChainAcc⟩
+      | none => simp [hV] at hChainAcc
+      | some npk => exact ⟨npk, hV, by simpa [hV] using hChainAcc⟩
     if hHeadDiff : dAdv ≠ r₀.voteDigest ∨ vAdv.link.nextEpochPkRoot ≠ r₀.nextPkRoot then
       have hVerStep : verifyFrontierFts H p (deriveFrontierPk H p r₀.sk)
           (voteHash chainId (UInt64.ofNat startEp) dAdv vAdv.link.nextEpochPkRoot) vAdv.signature = true := by
@@ -1027,9 +1453,13 @@ def extractRotatedEpochVoteChainBreak (H : FrontierHashSuite) (p : FrontierFtsPa
         by_cases c3 : vAdv.voteDigest != dAdv; · simp [c1, c2, c3] at hV
         simp only [c1, c2, c3, ↓reduceIte] at hV
         have hEpEq : vAdv.link.epoch = UInt64.ofNat startEp := by
-          cases h : (vAdv.link.epoch != UInt64.ofNat startEp) <;> [exact of_decide_eq_false h; simp [h] at c2]
+          cases h : (vAdv.link.epoch != UInt64.ofNat startEp) with
+          | false => exact of_decide_eq_false h
+          | true => simp [h] at c2
         have hDigEq : vAdv.voteDigest = dAdv := by
-          cases h : (vAdv.voteDigest != dAdv) <;> [exact of_decide_eq_false h; simp [h] at c3]
+          cases h : (vAdv.voteDigest != dAdv) with
+          | false => exact of_decide_eq_false h
+          | true => simp [h] at c3
         by_cases hOk : verifyFrontierFts H p (deriveFrontierPk H p r₀.sk)
             (voteHash chainId vAdv.link.epoch vAdv.voteDigest vAdv.link.nextEpochPkRoot) vAdv.signature = true
         · rw [hEpEq, hDigEq] at hOk; exact hOk
@@ -1059,13 +1489,17 @@ def extractRotatedEpochVoteChainBreak (H : FrontierHashSuite) (p : FrontierFtsPa
         (fun r₁ hr₁ => by
           have hL0 := hLink ⟨0, Nat.zero_lt_succ _⟩ r₁ (by simpa using hr₁)
           have hV1 : r₁.ValidAt H p voteHash chainId pkSeed (startEp + 1) := by
-            cases rs with | nil => cases hr₁ | cons hd _ =>
+            cases rs with
+            | nil => cases hr₁
+            | cons hd _ =>
               injection hr₁ with hE; subst hE; simpa using hVal ⟨1, Nat.succ_lt_succ (Nat.zero_lt_succ _)⟩
           simp [deriveFrontierPk] at hL0 ⊢; exact ⟨hV1.1.symm, hL0⟩)
         (fun j rNext hNxt => hLink ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩ rNext hNxt)
         (by obtain ⟨npk, hV, hRest⟩ := hStepAcc; rw [hNextPkEq npk hV] at hRest; exact hRest)
         (by obtain ⟨⟨idx, hIdx⟩, hD⟩ := hDev
-            cases idx with | zero => exact False.elim (hHeadDiff hD) | succ j => exact ⟨⟨j, Nat.lt_of_succ_lt_succ hIdx⟩, hD⟩)
+            cases idx with
+            | zero => exact False.elim (hHeadDiff hD)
+            | succ j => exact ⟨⟨j, Nat.lt_of_succ_lt_succ hIdx⟩, hD⟩)
 
 theorem rotatedEpochVote_forward_secure_chain (H : FrontierHashSuite) (p : FrontierFtsParams)
     (hL : 2 ≤ p.frontierLen) (voteHash : EpochVoteHasher) (chainId pkSeed : BitVec 256)
@@ -1085,25 +1519,46 @@ theorem rotatedEpochVote_forward_secure_chain (H : FrontierHashSuite) (p : Front
   ⟨extractRotatedEpochVoteChainBreak H p hL voteHash chainId pkSeed startEp histRecords advDigests advVotes
     anchorPk finalPk hLen1 hLen2 hVal hAnchor hLink hAcc hDev⟩
 
+/-- Under the real `cshakeEpochVoteHasher` (`cSHAKE256("QSAG.FTS.EPOCH.VOTE.V1")`), any
+    `voteFramingCollision` is an explicit `Keccak-f[1600]` `cSHAKE256` collision on two distinct
+    104-byte vote payloads; otherwise a historical-epoch `FrontierForgeryBreak` is extracted. -/
+theorem rotatedEpochVote_cshake_chain_reduction (H : FrontierHashSuite) (p : FrontierFtsParams)
+    (hL : 2 ≤ p.frontierLen) (chainId pkSeed : BitVec 256)
+    (brk : EpochChainHistoricalBreak H cshakeEpochVoteHasher pkSeed p.winternitzW) :
+    (∃ m₁ m₂ : List UInt8, m₂ ≠ m₁ ∧
+      evalCshake256Sponge keccakF1600 zeroKState xorRate136 rateBlockBytes [] ftsTagEpochVote m₂ 32 =
+      evalCshake256Sponge keccakF1600 zeroKState xorRate136 rateBlockBytes [] ftsTagEpochVote m₁ 32) ∨
+    (∃ histEpoch skSeedAtEpoch, Nonempty (FrontierForgeryBreak H pkSeed skSeedAtEpoch p.winternitzW)) := by
+  cases brk with
+  | voteFramingCollision c ep d₁ r₁ d₂ r₂ hDiff hCol =>
+    refine .inl ⟨encodeEpochVoteInput c ep d₁ r₁, encodeEpochVoteInput c ep d₂ r₂, ?_, hCol⟩
+    intro hInEq
+    obtain ⟨_, _, hdEq, hrEq⟩ := encodeEpochVoteInput_injective hInEq
+    rcases hDiff with hdNe | hrNe
+    · exact hdNe hdEq
+    · exact hrNe hrEq
+  | epochKeyBreak histEp skEp fBrk =>
+    exact .inr ⟨histEp, skEp, ⟨fBrk⟩⟩
+
 theorem tooth_static_key_compromise_forges_historical_epoch
     (H : FrontierHashSuite) (p : FrontierFtsParams)
     (hBytes : p.nodeBytes = 32) (hUses : p.maxSafeUses = 1)
     (hw : 1 ≤ p.winternitzW) (hL : 2 ≤ p.frontierLen) (hCtrBits : 1 ≤ p.counterBits)
-    (hDom : 2 ^ 256 ≤ frontierSubCount p.treeHeight p.frontierLen *
+    (hDom : 2 ^ 256 ≤ frontierRootSubCount p.treeHeight p.frontierLen *
                       frontierDecCount p.winternitzW p.frontierLen p.targetSum)
     (voteHash : EpochVoteHasher) (chainId : BitVec 256)
     (skStatic : FrontierSecretKey) (hedge : BitVec 256)
     (honestDigest forgedDigest : BitVec 256) (hDiff : forgedDigest ≠ honestDigest) :
-    let pk₀ := deriveFrontierPk H p skStatic
     ∃ forgedVote : RotatedEpochVote,
       forgedVote.voteDigest = forgedDigest ∧ forgedVote.voteDigest ≠ honestDigest ∧
-      verifyRotatedEpochVote H p voteHash chainId pk₀ 0 forgedDigest forgedVote = some pk₀ := by
-  intro pk₀
+      verifyRotatedEpochVote H p voteHash chainId (deriveFrontierPk H p skStatic) 0 forgedDigest forgedVote =
+        some (deriveFrontierPk H p skStatic) := by
+  let pk₀ := deriveFrontierPk H p skStatic
   let msg := voteHash chainId 0 forgedDigest pk₀.root
   let d := H.prehashMsg pk₀.pkSeed pk₀.root msg
   let rand := H.prfRand skStatic.skPrf pk₀.pkSeed pk₀.root hedge d
   let rk := (H.squeezeRank pk₀.pkSeed pk₀.root rand d 0).toNat
-  obtain ⟨tr, _, offs, hUnr, _, _, _, _, _, _, _⟩ :=
+  obtain ⟨tr, _, offs, hUnr, _, _, _, _, _, _, _, _⟩ :=
     unrankFrontierFts_bijective p rk (Nat.lt_of_lt_of_le (H.squeezeRank pk₀.pkSeed pk₀.root rand d 0).isLt hDom)
   have hCtr0 : ¬ ((0 : UInt16).toNat >= 2 ^ p.counterBits) := by
     have := Nat.two_pow_pos p.counterBits; simp; omega
@@ -1114,17 +1569,36 @@ theorem tooth_static_key_compromise_forges_historical_epoch
   unfold verifyRotatedEpochVote
   simp [hBytes, hUses, verifyFrontierFts_signFrontierFts H p hw hL skStatic hedge 0 msg sig hSign, msg, pk₀]
 
-/-! ## §3. `Corduroy` 16-Layer Stateless `Poseidon2` Hypertree + `(t, n)` Shamir Power-7 Composition -/
+/-! ## §3. `Corduroy` Width-12 `Poseidon2` Stateless Hypertree + `(t, n)` Shamir Power-7 Composition -/
 
-@[expose] def corduroy16LayerPoseidon2Params : PqHashParams :=
-  { w := 4, ell1 := 128, subtreeHeight := 3, numLayers := 16,
+/-- Exact `AggSigProfile::CorduroyPoseidon2` parameters (`crates/qsag-agg/src/sig.rs:31-67`):
+    `d = 16` layers, `h' = 4` subtree height (`64`-bit leaf space), `k = 32` FORS trees of height `a = 8`,
+    `w = 4, ell1 = 128`, `Q_max = 2^20`, raw signature size `76,896` B. -/
+@[expose] def corduroyPoseidon2AggParams : PqHashParams :=
+  { w := 4, ell1 := 128, subtreeHeight := 4, numLayers := 16,
     forsTrees := 32, forsHeight := 8, maxSigsLog2 := 20, statefulJorts := false }
 
-theorem corduroy16LayerPoseidon2Params_wellFormed :
-    corduroy16LayerPoseidon2Params.numLayers = 16 ∧
-    corduroy16LayerPoseidon2Params.statefulJorts = false ∧
-    corduroy16LayerPoseidon2Params.productionWellFormed = true :=
-  ⟨rfl, rfl, by decide +kernel⟩
+/-- Exact wire-byte formula of `AggSigProfile::CorduroyPoseidon2::raw_signature_bytes`
+    (`crates/qsag-agg/src/sig.rs:86-90`). -/
+@[expose] def corduroyPoseidon2RawSigBytes (p : PqHashParams) : Nat :=
+  32 + p.forsTrees * (1 + p.forsHeight) * 32 + p.numLayers * (4 + p.ell1 * 32 + p.subtreeHeight * 32)
+
+/-- Cross-crate audit of both real Rust `Corduroy` parameter profiles:
+    1. `corduroyCustody128Params` (`d = 7, h' = 4, h = 28, k = 33, a = 6, Q_max = 2^12`, `tsw_baggy.rs:730`)
+       satisfies `productionWellFormed = true`.
+    2. `corduroyPoseidon2AggParams` (`d = 16, h' = 4, h = 64, k = 32, a = 8, Q_max = 2^20`, `sig.rs:31-67`)
+       has exact wire size `76,896` B and `64`-bit XOF-indexed leaf space, which exceeds the `≤ 62`-bit
+       `u64` leaf-index guard in `PqHashParams.productionWellFormed`. -/
+theorem corduroy_real_profiles_audit :
+    corduroyCustody128Params.numLayers = 7 ∧
+    corduroyCustody128Params.subtreeHeight = 4 ∧
+    corduroyCustody128Params.productionWellFormed = true ∧
+    corduroyPoseidon2AggParams.numLayers = 16 ∧
+    corduroyPoseidon2AggParams.subtreeHeight = 4 ∧
+    corduroyPoseidon2AggParams.numLayers * corduroyPoseidon2AggParams.subtreeHeight = 64 ∧
+    corduroyPoseidon2RawSigBytes corduroyPoseidon2AggParams = 76896 ∧
+    corduroyPoseidon2AggParams.productionWellFormed = false :=
+  ⟨rfl, rfl, by decide +kernel, rfl, rfl, by decide +kernel, by decide +kernel, by decide +kernel⟩
 
 def mkShamirProductionPqHashMpcOracles
     (lambdas : List Goldilocks) (skSeedSh skPrfSh : List (List Goldilocks))
@@ -1172,7 +1646,6 @@ theorem mkShamirProductionPqHashMpcOracles_matchesKey
 
 theorem corduroy_threshold_stateless_euf_cma
     (params : PqHashParams)
-    (hLayers : params.numLayers = 16)
     (hw : params.w = 4 ∨ params.w = 16)
     (hStateless : params.statefulJorts = false) :
     -- (1) Subthreshold `< t` corrupted custodians reveal zero information about the Shamir secret at `0`:
@@ -1198,7 +1671,7 @@ theorem corduroy_threshold_stateless_euf_cma
     (∀ gates : List (Goldilocks × GoldilocksExt2),
       finSum goldilocksExt2Card
         (fun idx => if anyGatePinsAlpha (enumGoldilocksExt2.toFun idx) gates then 1 else 0) ≤ gates.length) ∧
-    -- (3) Combined 16-layer stateless `poseidon2Suite` + SPDZ MAC EUF-CMA advantage union bound:
+    -- (3) Combined stateless width-12 `poseidon2Suite` + SPDZ MAC EUF-CMA advantage union bound:
     (∀ {Ω : Type} (coins : List Ω) (game : Ω → ProdEufCmaOutcome)
        (isSpdzMacForge isItsr isTcr isPre : Ω → Bool),
       (∀ ω, isSpdzMacForge ω = false →
@@ -1210,7 +1683,7 @@ theorem corduroy_threshold_stateless_euf_cma
         (ProdPreimageBreak poseidon2Suite params (game ω).sk
           (productionSigningLog poseidon2Suite params (game ω).sk (game ω).queries)
           (game ω).msgStar (game ω).sigStar → isPre ω = true)) →
-      params.numLayers = 16 ∧
+      params.statefulJorts = false ∧
       hitCount (fun ω => prodEufCmaWin poseidon2Suite params (game ω)) coins ≤
         hitCount isSpdzMacForge coins + hitCount isItsr coins + hitCount isTcr coins + hitCount isPre coins) := by
   refine ⟨fun t cPts s₁ s₂ hC P hNz hS => shamir_single_share_privacy_bijection t cPts s₁ s₂ hC hNz P hS,
@@ -1219,7 +1692,7 @@ theorem corduroy_threshold_stateless_euf_cma
         (mkShamirProductionPqHashMpcOracles_matchesKey ls h1 hSd hPf pkS hDc cp hPr) m opt mg,
     spdzGateStream_pin_count_le, ?_⟩
   intro Ω coins game isSpdz isItsr isTcr isPre hCases
-  refine ⟨hLayers, ?_⟩
+  refine ⟨hStateless, ?_⟩
   induction coins with
   | nil => simp [hitCount]
   | cons ω rest ih =>
@@ -1239,29 +1712,101 @@ theorem corduroy_threshold_stateless_euf_cma
         · have := cPre b3; simp [hWin, hSpF, this]; omega
     · simp [Bool.eq_false_iff.mpr hWin]; omega
 
+/-- Specialization of `corduroy_threshold_stateless_euf_cma` to both real Rust `Corduroy` profiles:
+    `corduroyCustody128Params` (`d = 7, h' = 4, k = 33, a = 6`) and `corduroyPoseidon2AggParams`
+    (`d = 16, h' = 4, k = 32, a = 8`). -/
+theorem corduroy_both_real_profiles_euf_cma
+    {Ω : Type} (coins : List Ω)
+    (gameCustody gameAgg : Ω → ProdEufCmaOutcome)
+    (isSpdzC isItsrC isTcrC isPreC isSpdzA isItsrA isTcrA isPreA : Ω → Bool)
+    (hCustody : ∀ ω, isSpdzC ω = false →
+      (ProdForsItsrBreak poseidon2Suite corduroyCustody128Params
+        (derivePublicKey poseidon2Suite corduroyCustody128Params (gameCustody ω).sk)
+        (productionSigningLog poseidon2Suite corduroyCustody128Params (gameCustody ω).sk (gameCustody ω).queries)
+        (gameCustody ω).msgStar (gameCustody ω).sigStar → isItsrC ω = true) ∧
+      (ProdSmTcrBreak poseidon2Suite corduroyCustody128Params (gameCustody ω).sk
+        (productionSigningLog poseidon2Suite corduroyCustody128Params (gameCustody ω).sk (gameCustody ω).queries) → isTcrC ω = true) ∧
+      (ProdPreimageBreak poseidon2Suite corduroyCustody128Params (gameCustody ω).sk
+        (productionSigningLog poseidon2Suite corduroyCustody128Params (gameCustody ω).sk (gameCustody ω).queries)
+        (gameCustody ω).msgStar (gameCustody ω).sigStar → isPreC ω = true))
+    (hAgg : ∀ ω, isSpdzA ω = false →
+      (ProdForsItsrBreak poseidon2Suite corduroyPoseidon2AggParams
+        (derivePublicKey poseidon2Suite corduroyPoseidon2AggParams (gameAgg ω).sk)
+        (productionSigningLog poseidon2Suite corduroyPoseidon2AggParams (gameAgg ω).sk (gameAgg ω).queries)
+        (gameAgg ω).msgStar (gameAgg ω).sigStar → isItsrA ω = true) ∧
+      (ProdSmTcrBreak poseidon2Suite corduroyPoseidon2AggParams (gameAgg ω).sk
+        (productionSigningLog poseidon2Suite corduroyPoseidon2AggParams (gameAgg ω).sk (gameAgg ω).queries) → isTcrA ω = true) ∧
+      (ProdPreimageBreak poseidon2Suite corduroyPoseidon2AggParams (gameAgg ω).sk
+        (productionSigningLog poseidon2Suite corduroyPoseidon2AggParams (gameAgg ω).sk (gameAgg ω).queries)
+        (gameAgg ω).msgStar (gameAgg ω).sigStar → isPreA ω = true)) :
+    hitCount (fun ω => prodEufCmaWin poseidon2Suite corduroyCustody128Params (gameCustody ω)) coins ≤
+      hitCount isSpdzC coins + hitCount isItsrC coins + hitCount isTcrC coins + hitCount isPreC coins ∧
+    hitCount (fun ω => prodEufCmaWin poseidon2Suite corduroyPoseidon2AggParams (gameAgg ω)) coins ≤
+      hitCount isSpdzA coins + hitCount isItsrA coins + hitCount isTcrA coins + hitCount isPreA coins := by
+  exact ⟨((corduroy_threshold_stateless_euf_cma corduroyCustody128Params (.inl rfl) rfl).2.2.2
+            coins gameCustody isSpdzC isItsrC isTcrC isPreC hCustody).2,
+         ((corduroy_threshold_stateless_euf_cma corduroyPoseidon2AggParams (.inl rfl) rfl).2.2.2
+            coins gameAgg isSpdzA isItsrA isTcrA isPreA hAgg).2⟩
+
 theorem tooth_corduroy_t_corrupted_custodians_uniquely_pin_secret
     (P Q : List Goldilocks)
     (hP : verifyShamirPolyConsistent 2 P [Goldilocks.ofNat 1, Goldilocks.ofNat 2] [Goldilocks.ofNat 5, Goldilocks.ofNat 9] = true)
     (hQ : verifyShamirPolyConsistent 2 Q [Goldilocks.ofNat 1, Goldilocks.ofNat 2] [Goldilocks.ofNat 5, Goldilocks.ofNat 9] = true) :
-    RoundPoly.evalCoeffs P Goldilocks.zero = RoundPoly.evalCoeffs Q Goldilocks.zero ∧
-    RoundPoly.evalCoeffs P Goldilocks.zero ≠ Goldilocks.zero := by
+    ∃ sPinned : Goldilocks,
+      sPinned ≠ Goldilocks.zero ∧
+      RoundPoly.evalCoeffs P Goldilocks.zero = sPinned ∧
+      RoundPoly.evalCoeffs Q Goldilocks.zero = sPinned := by
   have hRef : verifyShamirPolyConsistent 2 [Goldilocks.ofNat 1, Goldilocks.ofNat 4]
       [Goldilocks.ofNat 1, Goldilocks.ofNat 2] [Goldilocks.ofNat 5, Goldilocks.ofNat 9] = true := by decide +kernel
   have hEqQ := shamirPolyConsistent_unique_at_zero 2 P Q [Goldilocks.ofNat 1, Goldilocks.ofNat 2]
     [Goldilocks.ofNat 5, Goldilocks.ofNat 9] (by decide +kernel) (by decide) hP hQ
   have hEqRef := shamirPolyConsistent_unique_at_zero 2 P [Goldilocks.ofNat 1, Goldilocks.ofNat 4]
     [Goldilocks.ofNat 1, Goldilocks.ofNat 2] [Goldilocks.ofNat 5, Goldilocks.ofNat 9] (by decide +kernel) (by decide) hP hRef
-  exact ⟨hEqQ, by rw [hEqRef]; decide +kernel⟩
+  exact ⟨RoundPoly.evalCoeffs P Goldilocks.zero, by rw [hEqRef]; decide +kernel, rfl, hEqQ.symm⟩
 
-/-! ### Inhabitedness & `#tooth_pair` / `#verify_inhabited` / `#verify_constructive` Gates -/
+/-! ### Real-Parameter Inhabitedness & `#tooth_pair` / `#verify_inhabited` / `#verify_constructive` Gates -/
 
-def toyFrontierHash : FrontierHashSuite where
-  prehashMsg := fun _ _ _ => 0#256
-  squeezeRank := fun _ _ _ _ _ => 0#256
-  prfRand := fun _ _ _ _ _ => 0#256
-  leafStart := fun _ _ _ => 0#256
-  chainStep := fun _ _ _ x => x
-  mergeNode := fun _ _ l _ => l
+/-- Surgical prehash-collision fault around `cshakeFrontierHashSuite` at two chosen messages `m₁, m₂`,
+    used solely to witness non-vacuity of the forgery reduction premise at the exact `compact1122Params`
+    (`w = 96, h = 8, L = 34, S = 1615`) without placeholder parameters or identity chains. -/
+def prehashFaultSuite (base : FrontierHashSuite) (m₁ m₂ : List UInt8) : FrontierHashSuite :=
+  { base with
+    prehashMsg := fun pkSeed pkRoot m =>
+      if m = m₂ then base.prehashMsg pkSeed pkRoot m₁ else base.prehashMsg pkSeed pkRoot m }
+
+private theorem witness_forgery_of_suite (base : FrontierHashSuite) (p : FrontierFtsParams)
+    (hw : 1 ≤ p.winternitzW) (hL : 2 ≤ p.frontierLen) (hCtr : 1 ≤ p.counterBits)
+    (hDom : 2 ^ 256 < frontierRootSubCount p.treeHeight p.frontierLen *
+                      frontierDecCount p.winternitzW p.frontierLen p.targetSum) :
+    ∃ (H : FrontierHashSuite) (p' : FrontierFtsParams) (_ : 2 ≤ p'.frontierLen)
+      (sk : FrontierSecretKey) (hedge₁ : BitVec 256) (ctr₁ : UInt16)
+      (m₁ : List UInt8) (sig₁ : FrontierSignature),
+      signFrontierFts H p' sk hedge₁ ctr₁ m₁ = some sig₁ ∧
+      ∃ (m₂ : List UInt8) (sig₂ : FrontierSignature),
+        m₂ ≠ m₁ ∧ verifyFrontierFts H p' (deriveFrontierPk H p' sk) m₂ sig₂ = true := by
+  let H := prehashFaultSuite base [1] [2]
+  let sk : FrontierSecretKey := ⟨1#256, 2#256, 3#256⟩
+  let sig₁ : FrontierSignature := (signFrontierFts H p sk 0#256 0 [1]).getD ⟨0#256, 0, []⟩
+  have hSign₁ : signFrontierFts H p sk 0#256 0 [1] = some sig₁ := by
+    let pk := deriveFrontierPk H p sk
+    let d₁ := H.prehashMsg pk.pkSeed pk.root [1]
+    let rand := H.prfRand sk.skPrf pk.pkSeed pk.root 0#256 d₁
+    let rk := (H.squeezeRank pk.pkSeed pk.root rand d₁ 0).toNat
+    have hLt := Nat.lt_trans (H.squeezeRank pk.pkSeed pk.root rand d₁ 0).isLt hDom
+    obtain ⟨tr, _, offs, hUnr, _, _, _, _, _, _, _, _⟩ := unrankFrontierFts_bijective p rk hLt
+    have hCtr0 : ¬ ((0 : UInt16).toNat >= 2 ^ p.counterBits) := by
+      have := Nat.two_pow_pos p.counterBits; simp; omega
+    have hSome : signFrontierFts H p sk 0#256 0 [1] =
+        some ⟨rand, 0, honestSignSubtree H pk.pkSeed sk.skSeed p.winternitzW p.treeHeight 1 tr offs⟩ := by
+      unfold signFrontierFts; simp [hCtr0, pk, d₁, rand, rk, hUnr]
+    dsimp only [sig₁]; rw [hSome]; rfl
+  have hVer₂ : verifyFrontierFts H p (deriveFrontierPk H p sk) [2] sig₁ = true := by
+    have hVer₁ := verifyFrontierFts_signFrontierFts H p hw hL sk 0#256 0 [1] sig₁ hSign₁
+    have hPreEq : H.prehashMsg (deriveFrontierPk H p sk).pkSeed (deriveFrontierPk H p sk).root [2] =
+        H.prehashMsg (deriveFrontierPk H p sk).pkSeed (deriveFrontierPk H p sk).root [1] := by
+      dsimp only [H, prehashFaultSuite]; simp
+    unfold verifyFrontierFts at hVer₁ ⊢; rw [hPreEq]; exact hVer₁
+  exact ⟨H, p, hL, sk, 0#256, 0, [1], sig₁, hSign₁, [2], sig₁, by decide, hVer₂⟩
 
 theorem witness_compact1122_forgery :
     ∃ (H : FrontierHashSuite) (p : FrontierFtsParams) (_ : 2 ≤ p.frontierLen)
@@ -1269,15 +1814,76 @@ theorem witness_compact1122_forgery :
       (m₁ : List UInt8) (sig₁ : FrontierSignature),
       signFrontierFts H p sk hedge₁ ctr₁ m₁ = some sig₁ ∧
       ∃ (m₂ : List UInt8) (sig₂ : FrontierSignature),
-        m₂ ≠ m₁ ∧ verifyFrontierFts H p (deriveFrontierPk H p sk) m₂ sig₂ = true := by
-  let p : FrontierFtsParams := ⟨32, 1, 2, 2, 1, 256, 8, 1⟩
-  let sk : FrontierSecretKey := ⟨0#256, 0#256, 0#256⟩
-  have hUnr0 : unrankFrontierFts p 0 = some (.split .leaf .leaf, [2, 3], [0, 1]) := by decide +kernel
-  let sig : FrontierSignature := ⟨0#256, 0, [0#256, 0#256]⟩
-  refine ⟨toyFrontierHash, p, by decide, sk, 0#256, 0, [1], sig, ?_, [2], sig, by decide, ?_⟩
-  · unfold signFrontierFts toyFrontierHash; simp [p, sk, hUnr0, sig, honestSignSubtree, chainAdvance, honestNodeBase]
-  · unfold verifyFrontierFts toyFrontierHash deriveFrontierPk
-    simp [p, sk, hUnr0, sig, runFrontierStackLoop, collapseFrontierStack, chainAdvance, honestNodeOut, honestNodeBase]
+        m₂ ≠ m₁ ∧ verifyFrontierFts H p (deriveFrontierPk H p sk) m₂ sig₂ = true :=
+  witness_forgery_of_suite (cshakeFrontierHashSuite compact1122Params) compact1122Params
+    (by decide) (by decide) (by decide) compact1122_rank_domain_gt_2pow256.2.2.2.2.2.2.1
+
+private theorem witness_epoch_chain_of_suite (base : FrontierHashSuite) (p : FrontierFtsParams)
+    (hBytes : p.nodeBytes = 32) (hUses : p.maxSafeUses = 1)
+    (hw : 1 ≤ p.winternitzW) (hL : 2 ≤ p.frontierLen) (hCtr : 1 ≤ p.counterBits)
+    (hDom : 2 ^ 256 < frontierRootSubCount p.treeHeight p.frontierLen *
+                      frontierDecCount p.winternitzW p.frontierLen p.targetSum)
+    (voteHash : EpochVoteHasher) :
+    ∃ (H : FrontierHashSuite) (p' : FrontierFtsParams) (_ : 2 ≤ p'.frontierLen)
+      (vh : EpochVoteHasher) (chainId pkSeed : BitVec 256) (startEp : Nat)
+      (histRecords : List HonestEpochRecord) (advDigests : List (BitVec 256))
+      (advVotes : List RotatedEpochVote) (anchorPk finalPk : FrontierPublicKey)
+      (hLen1 : histRecords.length = advDigests.length) (hLen2 : advDigests.length = advVotes.length),
+      (∀ idx : Fin histRecords.length, (histRecords.get idx).ValidAt H p' vh chainId pkSeed (startEp + idx.1)) ∧
+      (∀ r₀, histRecords.head? = some r₀ → anchorPk = deriveFrontierPk H p' r₀.sk) ∧
+      (∀ i : Fin histRecords.length, ∀ rNext, histRecords[i.1 + 1]? = some rNext →
+        (histRecords.get i).nextPkRoot = (deriveFrontierPk H p' rNext.sk).root) ∧
+      verifyRotatedEpochChain H p' vh chainId anchorPk startEp advDigests advVotes = some finalPk ∧
+      (∃ i : Fin histRecords.length,
+        advDigests.get ⟨i.1, i.2.trans_eq hLen1⟩ ≠ (histRecords.get i).voteDigest ∨
+        (advVotes.get ⟨i.1, i.2.trans_eq (hLen1.trans hLen2)⟩).link.nextEpochPkRoot ≠ (histRecords.get i).nextPkRoot) := by
+  let m₁ := voteHash 0#256 0 0#256 0#256
+  let m₂ := voteHash 0#256 0 1#256 0#256
+  let H := prehashFaultSuite base m₁ m₂
+  let sk : FrontierSecretKey := ⟨1#256, 2#256, 3#256⟩
+  let pk := deriveFrontierPk H p sk
+  let sig : FrontierSignature := (signFrontierFts H p sk 0#256 0 m₁).getD ⟨0#256, 0, []⟩
+  have hSign : signFrontierFts H p sk 0#256 0 m₁ = some sig := by
+    let d₁ := H.prehashMsg pk.pkSeed pk.root m₁
+    let rand := H.prfRand sk.skPrf pk.pkSeed pk.root 0#256 d₁
+    let rk := (H.squeezeRank pk.pkSeed pk.root rand d₁ 0).toNat
+    have hLt := Nat.lt_trans (H.squeezeRank pk.pkSeed pk.root rand d₁ 0).isLt hDom
+    obtain ⟨tr, _, offs, hUnr, _, _, _, _, _, _, _, _⟩ := unrankFrontierFts_bijective p rk hLt
+    have hCtr0 : ¬ ((0 : UInt16).toNat >= 2 ^ p.counterBits) := by
+      have := Nat.two_pow_pos p.counterBits; simp; omega
+    have hSome : signFrontierFts H p sk 0#256 0 m₁ =
+        some ⟨rand, 0, honestSignSubtree H pk.pkSeed sk.skSeed p.winternitzW p.treeHeight 1 tr offs⟩ := by
+      unfold signFrontierFts; simp [hCtr0, pk, d₁, rand, rk, hUnr]
+    dsimp only [sig]; rw [hSome]; rfl
+  have hVer₂ : verifyFrontierFts H p pk m₂ sig = true := by
+    have hVer₁ := verifyFrontierFts_signFrontierFts H p hw hL sk 0#256 0 m₁ sig hSign
+    have hPreEq : H.prehashMsg pk.pkSeed pk.root m₂ = H.prehashMsg pk.pkSeed pk.root m₁ := by
+      dsimp only [H, prehashFaultSuite]; rw [if_pos rfl]
+      by_cases hEqM : m₁ = m₂
+      · rw [if_pos hEqM, hEqM]
+      · rw [if_neg hEqM]
+    unfold verifyFrontierFts at hVer₁ ⊢; rw [hPreEq]; exact hVer₁
+  let rec₀ : HonestEpochRecord := ⟨sk, 0#256, 0, 0#256, 0#256, ⟨⟨0, 0#256⟩, 0#256, sig⟩⟩
+  let advV : RotatedEpochVote := ⟨⟨0, 0#256⟩, 1#256, sig⟩
+  refine ⟨H, p, hL, voteHash, 0#256, 3#256, 0, [rec₀], [1#256], [advV], pk, ⟨3#256, 0#256⟩, rfl, rfl, ?_, ?_, ?_, ?_, ?_⟩
+  · intro ⟨i, hi⟩; have hi0 : i = 0 := by omega
+    subst hi0; exact ⟨rfl, rfl, rfl, hSign⟩
+  · intro r₀ hr; injection hr with hE; rw [← hE]
+  · intro ⟨i, hi⟩ _ hNxt; have hi0 : i = 0 := by omega
+    subst hi0; cases hNxt
+  · unfold verifyRotatedEpochChain verifyRotatedEpochVote
+    have hC1 : (p.nodeBytes != 32 || p.maxSafeUses != 1) = false := by rw [hBytes, hUses]; rfl
+    have hC2 : (advV.link.epoch != UInt64.ofNat 0 || (UInt64.ofNat 0).toNat + 1 >= 2 ^ 64) = false := by decide +kernel
+    have hC3 : (advV.voteDigest != 1#256) = false := by decide +kernel
+    have hEp0 : ¬ (0 >= 2 ^ 64) := by decide +kernel
+    simp only [hEp0, hC1, hC2, hC3, ↓reduceIte]
+    change (if verifyFrontierFts H p pk m₂ sig then
+              verifyRotatedEpochChain H p voteHash 0#256 ⟨pk.pkSeed, 0#256⟩ 1 [] []
+            else none) = some ⟨3#256, 0#256⟩
+    rw [hVer₂]
+    have hPkSeed : pk.pkSeed = 3#256 := rfl
+    rw [hPkSeed]; rfl
+  · exact ⟨⟨0, by decide⟩, .inl (by decide)⟩
 
 theorem witness_rotatedEpochVote_chain :
     ∃ (H : FrontierHashSuite) (p : FrontierFtsParams) (_ : 2 ≤ p.frontierLen)
@@ -1292,34 +1898,15 @@ theorem witness_rotatedEpochVote_chain :
       verifyRotatedEpochChain H p voteHash chainId anchorPk startEp advDigests advVotes = some finalPk ∧
       (∃ i : Fin histRecords.length,
         advDigests.get ⟨i.1, i.2.trans_eq hLen1⟩ ≠ (histRecords.get i).voteDigest ∨
-        (advVotes.get ⟨i.1, i.2.trans_eq (hLen1.trans hLen2)⟩).link.nextEpochPkRoot ≠ (histRecords.get i).nextPkRoot) := by
-  let p : FrontierFtsParams := ⟨32, 1, 2, 2, 1, 256, 8, 1⟩
-  let sk : FrontierSecretKey := ⟨0#256, 0#256, 0#256⟩
-  have hUnr0 : unrankFrontierFts p 0 = some (.split .leaf .leaf, [2, 3], [0, 1]) := by decide +kernel
-  let sig : FrontierSignature := ⟨0#256, 0, [0#256, 0#256]⟩
-  let vh : EpochVoteHasher := fun _ _ _ _ => [0]
-  let rec₀ : HonestEpochRecord := ⟨sk, 0#256, 0, 0#256, 0#256, ⟨⟨0, 0#256⟩, 0#256, sig⟩⟩
-  let advV : RotatedEpochVote := ⟨⟨0, 0#256⟩, 1#256, sig⟩
-  have hSign : signFrontierFts toyFrontierHash p sk 0#256 0 [0] = some sig := by
-    unfold signFrontierFts toyFrontierHash; simp [p, sk, hUnr0, sig, honestSignSubtree, chainAdvance, honestNodeBase]
-  have hVer : verifyFrontierFts toyFrontierHash p (deriveFrontierPk toyFrontierHash p sk) [0] sig = true := by
-    unfold verifyFrontierFts toyFrontierHash deriveFrontierPk
-    simp [p, sk, hUnr0, sig, runFrontierStackLoop, collapseFrontierStack, chainAdvance, honestNodeOut, honestNodeBase]
-  refine ⟨toyFrontierHash, p, by decide, vh, 0#256, 0#256, 0, [rec₀], [1#256], [advV],
-    deriveFrontierPk toyFrontierHash p sk, ⟨0#256, 0#256⟩, rfl, rfl, ?_, ?_, ?_, ?_, ?_⟩
-  · intro ⟨i, hi⟩; have hi0 : i = 0 := by omega
-    subst hi0; exact ⟨rfl, rfl, rfl, hSign⟩
-  · intro r₀ hr; injection hr with hE; rw [← hE]
-  · intro ⟨i, hi⟩ _ hNxt; have hi0 : i = 0 := by omega
-    subst hi0; cases hNxt
-  · unfold verifyRotatedEpochChain verifyRotatedEpochVote
-    simp [p, sk, advV, vh, hVer, deriveFrontierPk]
-  · exact ⟨⟨0, by decide⟩, .inl (by decide)⟩
+        (advVotes.get ⟨i.1, i.2.trans_eq (hLen1.trans hLen2)⟩).link.nextEpochPkRoot ≠ (histRecords.get i).nextPkRoot) :=
+  witness_epoch_chain_of_suite (cshakeFrontierHashSuite compact1122Params) compact1122Params
+    rfl rfl (by decide) (by decide) (by decide) compact1122_rank_domain_gt_2pow256.2.2.2.2.2.2.1
+    cshakeEpochVoteHasher
 
-theorem witness_corduroy_16layer_params :
+theorem witness_corduroy_real_params :
     ∃ params : PqHashParams,
-      params.numLayers = 16 ∧ (params.w = 4 ∨ params.w = 16) ∧ params.statefulJorts = false :=
-  ⟨corduroy16LayerPoseidon2Params, rfl, .inl rfl, rfl⟩
+      (params.w = 4 ∨ params.w = 16) ∧ params.statefulJorts = false :=
+  ⟨corduroyPoseidon2AggParams, .inl rfl, rfl⟩
 
 end Qsag
 end
@@ -1329,14 +1916,19 @@ end
 #tooth_pair Qsag.corduroy_threshold_stateless_euf_cma vs Qsag.tooth_corduroy_t_corrupted_custodians_uniquely_pin_secret
 #verify_inhabited Qsag.compact1122_one_time_euf_cma_reduction Qsag.witness_compact1122_forgery
 #verify_inhabited Qsag.rotatedEpochVote_forward_secure_chain Qsag.witness_rotatedEpochVote_chain
-#verify_inhabited Qsag.corduroy_threshold_stateless_euf_cma Qsag.witness_corduroy_16layer_params
+#verify_inhabited Qsag.corduroy_threshold_stateless_euf_cma Qsag.witness_corduroy_real_params
 #verify_constructive
   Qsag.compact1122_rank_domain_gt_2pow256
+  Qsag.fts_cshake_domains_disjoint
+  Qsag.encodeEpochVoteInput_injective
   Qsag.unrankFrontierFts_bijective
   Qsag.unrankFrontierFts_injective
   Qsag.verifyFrontierFts_signFrontierFts
   Qsag.compact1122_one_time_euf_cma_reduction
   Qsag.tooth_drop_target_sum_allows_one_sig_forgery
   Qsag.rotatedEpochVote_forward_secure_chain
+  Qsag.rotatedEpochVote_cshake_chain_reduction
   Qsag.tooth_static_key_compromise_forges_historical_epoch
+  Qsag.corduroy_real_profiles_audit
   Qsag.corduroy_threshold_stateless_euf_cma
+  Qsag.corduroy_both_real_profiles_euf_cma
