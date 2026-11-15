@@ -41,8 +41,12 @@ dependencies = [
  "qsag-addr",
  "qsag-agg",
  "qsag-core",
+ "qsag-cred",
  "qsag-fts",
+ "qsag-hd",
+ "qsag-migrate",
  "qsag-policy",
+ "qsag-quorum",
 ]
 
 [[package]]

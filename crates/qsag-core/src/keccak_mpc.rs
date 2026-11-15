@@ -1873,8 +1873,12 @@ fn eval_rss_keccak_f1600_batch64_record(
                 }
             }
         }
-        // Chi: out[x] = b[x] ^ b[x+2] ^ (b[x+1] & b[x+2]); party p's product share is
-        // a_p & (b_p ^ b_q) ^ a_q & b_p ^ mask, with a = b[x+1], b = b[x+2].
+        // Chi: (~b[x+1]) & b[x+2] == b[x+2] ^ (b[x+1] & b[x+2]), so out[x] = b[x] ^ b[x+2] ^ (b[x+1] & b[x+2]).
+        // Every party evaluates the uncomplemented product of a = b[x+1] and b = b[x+2]
+        // (`a_p & (b_p ^ b_q) ^ a_q & b_p ^ mask`) and XORs `b_p = b[p][x+2]` locally, matching
+        // `RssParticipantKeccak.lean` (`productGate` on uncomplemented operands; note `ThresholdMpc.lean`
+        // instead complements share 0 of `b[x+1]` before the AND gate, which reconstructs identically
+        // while differing on raw per-share gate transcripts under the same mask stream).
         for p in 0..3 {
             let q = (p + 1) % 3;
             for lane in 0..25 {
