@@ -562,3 +562,552 @@ theorem checkPrattStep_sound {known : List Nat} {c : PrattCert}
     rwa [powModFuel_eq_pow_mod 384 c.g ((c.n - 1) / qe.1) c.n hDivLt] at hNe
 
 /-- Soundness of the executable `checkPrattDAG` verifier across any certificate chain. -/
+theorem checkPrattDAG_sound :
+    ∀ (certs : List PrattCert) (known : List Nat),
+      (∀ p ∈ known, IsPrimeNat p) →
+      checkPrattDAG known certs = true →
+      ∀ c ∈ certs, IsPrimeNat c.n
+  | [], _, _, _, _, hc => nomatch hc
+  | c :: rest, known, hKnown, hOk, target, hMem => by
+    unfold checkPrattDAG at hOk
+    rw [Bool.and_eq_true] at hOk
+    have hcPrime : IsPrimeNat c.n := checkPrattStep_sound hKnown hOk.1
+    cases hMem with
+    | head => exact hcPrime
+    | tail _ hTail =>
+      apply checkPrattDAG_sound rest (c.n :: known) _ hOk.2 target hTail
+      intro p hp
+      cases hp with
+      | head => exact hcPrime
+      | tail _ hIn => exact hKnown p hIn
+
+/-- **`#tooth` Carmichael `561` Passes Fermat Test Yet Fails `checkPrattStep`**:
+    `561 = 3 * 11 * 17` satisfies `2^560 ≡ 1 (mod 561)`, showing Fermat testing without prime-factor
+    order witnesses is unsound; `checkPrattStep` deterministically rejects `561`. -/
+theorem tooth_carmichael_561_passes_fermat_but_fails_pratt :
+    powModFuel 384 2 560 561 = 1 ∧
+    checkPrattStep [2, 3, 5, 7] ⟨561, 2, [(2, 4), (5, 1), (7, 1)]⟩ = false ∧
+    ¬ IsPrimeNat 561 := by
+  refine ⟨by decide, by decide, ?_⟩
+  intro hPrime
+  rcases hPrime.2 3 ⟨187, by decide⟩ with h1 | h561 <;> omega
+
+#tooth_pair Qsag.checkPrattStep_sound vs Qsag.tooth_carmichael_561_passes_fermat_but_fails_pratt
+
+/-- Complete 139-node Lucas–Pratt certificate DAG covering `p_pallas`, `q_pallas`, `r_bls381`, and `p_bls381`. -/
+def prattCerts : List PrattCert :=
+  [ ⟨19, 2, [(2, 1), (3, 2)]⟩, ⟨7, 3, [(2, 1), (3, 1)]⟩, ⟨13, 2, [(2, 2), (3, 1)]⟩,
+    ⟨5, 2, [(2, 2)]⟩, ⟨53, 2, [(2, 2), (13, 1)]⟩, ⟨79, 3, [(2, 1), (3, 1), (13, 1)]⟩,
+    ⟨43, 3, [(2, 1), (3, 1), (7, 1)]⟩, ⟨19267, 3, [(2, 1), (3, 1), (13, 2), (19, 1)]⟩,
+    ⟨17, 3, [(2, 4)]⟩, ⟨71, 7, [(2, 1), (5, 1), (7, 1)]⟩, ⟨173, 2, [(2, 2), (43, 1)]⟩,
+    ⟨2557, 2, [(2, 2), (3, 2), (71, 1)]⟩, ⟨757, 2, [(2, 2), (3, 3), (7, 1)]⟩,
+    ⟨73, 5, [(2, 3), (3, 2)]⟩, ⟨29, 2, [(2, 2), (7, 1)]⟩, ⟨97, 5, [(2, 5), (3, 1)]⟩,
+    ⟨449, 3, [(2, 6), (7, 1)]⟩, ⟨31, 3, [(2, 1), (3, 1), (5, 1)]⟩,
+    ⟨127, 3, [(2, 1), (3, 2), (7, 1)]⟩, ⟨41, 6, [(2, 3), (5, 1)]⟩,
+    ⟨68477, 2, [(2, 2), (17, 1), (19, 1), (53, 1)]⟩,
+    ⟨6091, 7, [(2, 1), (3, 1), (5, 1), (7, 1), (29, 1)]⟩, ⟨191, 19, [(2, 1), (5, 1), (19, 1)]⟩,
+    ⟨233, 3, [(2, 3), (29, 1)]⟩, ⟨281, 3, [(2, 3), (5, 1), (7, 1)]⟩, ⟨113, 3, [(2, 4), (7, 1)]⟩,
+    ⟨137, 3, [(2, 3), (17, 1)]⟩, ⟨409, 21, [(2, 3), (3, 1), (17, 1)]⟩,
+    ⟨151, 6, [(2, 1), (3, 1), (5, 2)]⟩, ⟨8101, 6, [(2, 2), (3, 4), (5, 2)]⟩,
+    ⟨6229, 2, [(2, 2), (3, 2), (173, 1)]⟩, ⟨1327, 3, [(2, 1), (3, 1), (13, 1), (17, 1)]⟩,
+    ⟨241, 7, [(2, 4), (3, 1), (5, 1)]⟩, ⟨181, 2, [(2, 2), (3, 2), (5, 1)]⟩,
+    ⟨11, 2, [(2, 1), (5, 1)]⟩, ⟨10177, 7, [(2, 6), (3, 1), (53, 1)]⟩,
+    ⟨2508409, 11, [(2, 3), (3, 4), (7, 2), (79, 1)]⟩, ⟨23, 5, [(2, 1), (11, 1)]⟩,
+    ⟨47, 5, [(2, 1), (23, 1)]⟩, ⟨89, 3, [(2, 3), (11, 1)]⟩,
+    ⟨2531, 2, [(2, 1), (5, 1), (11, 1), (23, 1)]⟩, ⟨115603, 2, [(2, 1), (3, 1), (19267, 1)]⟩,
+    ⟨61, 2, [(2, 2), (3, 1), (5, 1)]⟩, ⟨1381, 2, [(2, 2), (3, 1), (5, 1), (23, 1)]⟩,
+    ⟨294793, 10, [(2, 3), (3, 1), (71, 1), (173, 1)]⟩,
+    ⟨47737, 5, [(2, 3), (3, 3), (13, 1), (17, 1)]⟩, ⟨1607, 5, [(2, 1), (11, 1), (73, 1)]⟩,
+    ⟨18329, 3, [(2, 3), (29, 1), (79, 1)]⟩, ⟨609743, 5, [(2, 1), (7, 1), (97, 1), (449, 1)]⟩,
+    ⟨829, 2, [(2, 2), (3, 2), (23, 1)]⟩, ⟨59, 2, [(2, 1), (29, 1)]⟩,
+    ⟨1973, 2, [(2, 2), (17, 1), (29, 1)]⟩, ⟨509, 2, [(2, 2), (127, 1)]⟩,
+    ⟨413527, 3, [(2, 1), (3, 1), (41, 3)]⟩, ⟨958679, 7, [(2, 1), (7, 1), (68477, 1)]⟩,
+    ⟨827, 2, [(2, 1), (7, 1), (59, 1)]⟩, ⟨5701177, 7, [(2, 3), (3, 2), (13, 1), (6091, 1)]⟩,
+    ⟨31649, 3, [(2, 5), (23, 1), (43, 1)]⟩, ⟨523, 2, [(2, 1), (3, 2), (29, 1)]⟩,
+    ⟨941, 2, [(2, 2), (5, 1), (47, 1)]⟩, ⟨1686913, 10, [(2, 7), (3, 1), (23, 1), (191, 1)]⟩,
+    ⟨467, 2, [(2, 1), (233, 1)]⟩, ⟨3373, 5, [(2, 2), (3, 1), (281, 1)]⟩,
+    ⟨25741, 6, [(2, 2), (3, 2), (5, 1), (11, 1), (13, 1)]⟩, ⟨179, 2, [(2, 1), (89, 1)]⟩,
+    ⟨3037, 2, [(2, 2), (3, 1), (11, 1), (23, 1)]⟩, ⟨2741, 2, [(2, 2), (5, 1), (137, 1)]⟩,
+    ⟨51376543, 3, [(2, 1), (3, 1), (7, 1), (151, 1), (8101, 1)]⟩, ⟨24917, 2, [(2, 2), (6229, 1)]⟩,
+    ⟨67, 2, [(2, 1), (3, 1), (11, 1)]⟩, ⟨977, 3, [(2, 4), (61, 1)]⟩,
+    ⟨1151, 17, [(2, 1), (5, 2), (23, 1)]⟩, ⟨421987, 2, [(2, 1), (3, 1), (53, 1), (1327, 1)]⟩,
+    ⟨125803, 3, [(2, 1), (3, 2), (29, 1), (241, 1)]⟩, ⟨947, 2, [(2, 1), (11, 1), (43, 1)]⟩,
+    ⟨1453, 2, [(2, 2), (3, 1), (11, 2)]⟩, ⟨1087, 3, [(2, 1), (3, 1), (181, 1)]⟩,
+    ⟨463, 3, [(2, 1), (3, 1), (7, 1), (11, 1)]⟩, ⟨1709, 3, [(2, 2), (7, 1), (61, 1)]⟩,
+    ⟨24859, 2, [(2, 1), (3, 2), (1381, 1)]⟩, ⟨859267, 2, [(2, 1), (3, 2), (47737, 1)]⟩,
+    ⟨906349, 2, [(2, 2), (3, 1), (47, 1), (1607, 1)]⟩,
+    ⟨2529403, 2, [(2, 1), (3, 1), (23, 1), (18329, 1)]⟩,
+    ⟨52437899, 2, [(2, 1), (43, 1), (609743, 1)]⟩, ⟨14923, 2, [(2, 1), (3, 2), (829, 1)]⟩,
+    ⟨4229279, 13, [(2, 1), (827, 1), (2557, 1)]⟩,
+    ⟨399082391, 7, [(2, 1), (5, 1), (7, 1), (5701177, 1)]⟩, ⟨20921, 3, [(2, 3), (5, 1), (523, 1)]⟩,
+    ⟨475709467, 2, [(2, 1), (3, 1), (47, 1), (1686913, 1)]⟩,
+    ⟨772231, 6, [(2, 1), (3, 1), (5, 1), (25741, 1)]⟩, ⟨359, 7, [(2, 1), (179, 1)]⟩,
+    ⟨12149, 2, [(2, 2), (3037, 1)]⟩, ⟨16447, 3, [(2, 1), (3, 1), (2741, 1)]⟩,
+    ⟨43670061551, 7, [(2, 1), (5, 2), (17, 1), (51376543, 1)]⟩,
+    ⟨149503, 3, [(2, 1), (3, 1), (24917, 1)]⟩, ⟨269, 2, [(2, 2), (67, 1)]⟩,
+    ⟨6942563, 2, [(2, 1), (11, 1), (17, 1), (19, 1), (977, 1)]⟩,
+    ⟨110573, 3, [(2, 2), (7, 1), (11, 1), (359, 1)]⟩, ⟨755057, 3, [(2, 4), (41, 1), (1151, 1)]⟩,
+    ⟨13090036741, 10, [(2, 2), (3, 1), (5, 1), (11, 1), (47, 1), (421987, 1)]⟩,
+    ⟨2012849, 3, [(2, 4), (125803, 1)]⟩, ⟨7577, 3, [(2, 3), (947, 1)]⟩,
+    ⟨43591, 11, [(2, 1), (3, 1), (5, 1), (1453, 1)]⟩, ⟨4349, 2, [(2, 2), (1087, 1)]⟩,
+    ⟨125527, 5, [(2, 1), (3, 1), (20921, 1)]⟩,
+    ⟨325086459374267, 2, [(2, 1), (509, 1), (413527, 1), (772231, 1)]⟩,
+    ⟨4129989133, 5, [(2, 2), (3, 1), (359, 1), (958679, 1)]⟩,
+    ⟨5239247429827, 2, [(2, 1), (3, 2), (757, 1), (12149, 1), (31649, 1)]⟩,
+    ⟨897019, 2, [(2, 1), (3, 1), (149503, 1)]⟩, ⟨3767, 5, [(2, 1), (7, 1), (269, 1)]⟩,
+    ⟨41655379, 2, [(2, 1), (3, 1), (6942563, 1)]⟩, ⟨2653753, 5, [(2, 3), (3, 1), (110573, 1)]⟩,
+    ⟨3819663927398918131021, 6, [(2, 2), (3, 2), (5, 1), (19, 1), (113, 1), (755057, 1), (13090036741, 1)]⟩,
+    ⟨4025699, 2, [(2, 1), (2012849, 1)]⟩, ⟨927093389, 3, [(2, 2), (13, 1), (409, 1), (43591, 1)]⟩,
+    ⟨582767, 5, [(2, 1), (67, 1), (4349, 1)]⟩,
+    ⟨10427374428728808478656897599072717, 2, [(2, 2), (294793, 1), (4229279, 1), (399082391, 1), (5239247429827, 1)]⟩,
+    ⟨417677162933, 2, [(2, 2), (59, 1), (1973, 1), (897019, 1)]⟩,
+    ⟨1197907, 3, [(2, 1), (3, 1), (53, 1), (3767, 1)]⟩,
+    ⟨22160661629, 3, [(2, 2), (7, 1), (19, 1), (41655379, 1)]⟩,
+    ⟨63690073, 7, [(2, 3), (3, 1), (2653753, 1)]⟩,
+    ⟨1125266252156850182658904441386709967, 5, [(2, 1), (3373, 1), (43670061551, 1), (3819663927398918131021, 1)]⟩,
+    ⟨80513981, 2, [(2, 2), (5, 1), (4025699, 1)]⟩,
+    ⟨64881703735777, 5, [(2, 5), (3, 7), (927093389, 1)]⟩,
+    ⟨9272813673901, 2, [(2, 2), (3, 1), (5, 2), (7, 1), (7577, 1), (582767, 1)]⟩,
+    ⟨539204044132271846773, 5, [(2, 2), (3, 5), (89, 1), (14923, 1), (417677162933, 1)]⟩,
+    ⟨8999194758858563409123804352480028797519453, 2, [(2, 2), (3, 4), (11, 1), (2531, 1), (115603, 1), (1197907, 1), (22160661629, 1), (325086459374267, 1)]⟩,
+    ⟨254760293, 2, [(2, 2), (63690073, 1)]⟩,
+    ⟨5247740253619, 2, [(2, 1), (3, 3), (17, 1), (71, 1), (80513981, 1)]⟩,
+    ⟨92691255082156974996979, 3, [(2, 1), (3, 1), (31, 1), (467, 1), (16447, 1), (64881703735777, 1)]⟩,
+    ⟨1928745244171409, 3, [(2, 4), (13, 1), (9272813673901, 1)]⟩,
+    ⟨28948022309329048855892746252171976963363056481941560715954676764349967630337, 5, [(2, 32), (3, 1), (463, 1), (539204044132271846773, 1), (8999194758858563409123804352480028797519453, 1)]⟩,
+    ⟨52435875175126190479447740508185965837690552500527637822603658699938581184513, 7, [(2, 32), (3, 1), (11, 1), (19, 1), (10177, 1), (125527, 1), (859267, 1), (906349, 2), (2508409, 1), (2529403, 1), (52437899, 1), (254760293, 2)]⟩,
+    ⟨1690502597179744445941507, 2, [(2, 1), (3, 1), (13, 1), (4129989133, 1), (5247740253619, 1)]⟩,
+    ⟨15778400344354997994418419698270088123916926905054652752758194827714659, 2, [(2, 1), (3, 1), (53, 1), (475709467, 1), (92691255082156974996979, 1), (1125266252156850182658904441386709967, 1)]⟩,
+    ⟨7259797099061183477, 2, [(2, 2), (941, 1), (1928745244171409, 1)]⟩,
+    ⟨28948022309329048855892746252171976963363056481941647379679742748393362948097, 5, [(2, 32), (3, 2), (1709, 1), (24859, 1), (1690502597179744445941507, 1), (10427374428728808478656897599072717, 1)]⟩,
+    ⟨2584487767265781317813, 2, [(2, 2), (89, 1), (7259797099061183477, 1)]⟩,
+    ⟨4002409555221667393417789825735904156556882819939007885332058136124031650490837864442687629129015664037894272559787, 2, [(2, 1), (3, 2), (11, 1), (23, 1), (47, 1), (10177, 1), (859267, 1), (52437899, 1), (2584487767265781317813, 1), (15778400344354997994418419698270088123916926905054652752758194827714659, 1)]⟩ ]
+
+private theorem isPrimeNat_two : IsPrimeNat 2 :=
+  ⟨by decide, fun d hd => by
+    have hpos := Nat.pos_of_dvd_of_pos hd (by decide)
+    have hle := Nat.le_of_dvd (by decide) hd
+    omega⟩
+
+private theorem isPrimeNat_three : IsPrimeNat 3 :=
+  ⟨by decide, fun d hd => by
+    have hpos := Nat.pos_of_dvd_of_pos hd (by decide)
+    have hle := Nat.le_of_dvd (by decide) hd
+    if hd2 : d = 2 then subst hd2; obtain ⟨k, hk⟩ := hd; omega else omega⟩
+
+private theorem prattCerts_valid : checkPrattDAG [2, 3] prattCerts = true := by
+  decide +kernel
+
+private def certifiedPrimeValues : List Nat := prattCerts.map PrattCert.n
+
+private theorem mem_certifiedPrimeValues_prime {p : Nat} (hMem : p ∈ certifiedPrimeValues) :
+    IsPrimeNat p := by
+  obtain ⟨c, hcMem, rfl⟩ := List.mem_map.1 hMem
+  apply checkPrattDAG_sound prattCerts [2, 3] _ prattCerts_valid c hcMem
+  intro q hq
+  rcases hq with rfl | hqTail
+  · exact isPrimeNat_two
+  · rcases hqTail with rfl | hNil
+    · exact isPrimeNat_three
+    · nomatch hNil
+
+theorem p_pallas_isPrime : IsPrimeNat p_pallas :=
+  mem_certifiedPrimeValues_prime (by decide)
+
+theorem q_pallas_isPrime : IsPrimeNat q_pallas :=
+  mem_certifiedPrimeValues_prime (by decide)
+
+theorem r_bls381_isPrime : IsPrimeNat r_bls381 :=
+  mem_certifiedPrimeValues_prime (by decide)
+
+theorem p_bls381_isPrime : IsPrimeNat p_bls381 :=
+  mem_certifiedPrimeValues_prime (by decide)
+
+/-- Kernel-certified primality of all four curve moduli (`p_pallas`, `q_pallas`, `p_bls381`, `r_bls381`). -/
+theorem pallas_and_bls381_moduli_prime :
+    Weierstrass.IsPrime p_pallas ∧
+    Weierstrass.IsPrime q_pallas ∧
+    Weierstrass.IsPrime p_bls381 ∧
+    Weierstrass.IsPrime r_bls381 :=
+  ⟨p_pallas_isPrime, q_pallas_isPrime, p_bls381_isPrime, r_bls381_isPrime⟩
+
+/-! ## 3. Complete Projective RCB Addition, Curve Membership & Prime Subgroup Order (`[q]G = O`, `[r]G_1 = O`) -/
+
+/-- Homogeneous projective coordinates `(X : Y : Z)` with `O = (0 : 1 : 0)`. -/
+structure ProjPoint where
+  x : Nat
+  y : Nat
+  z : Nat
+  deriving DecidableEq, Repr
+
+private def strictNatP (n : Nat) (k : Nat → ProjPoint) : ProjPoint :=
+  match n with
+  | 0 => k 0
+  | m + 1 => k (m + 1)
+
+private def mkStrictPoint (x y z : Nat) : ProjPoint :=
+  strictNatP x fun vx =>
+    strictNatP y fun vy =>
+      strictNatP z fun vz => ⟨vx, vy, vz⟩
+
+def toProj : Weierstrass.Point → ProjPoint
+  | none => ⟨0, 1, 0⟩
+  | some (x, y) => ⟨x, y, 1⟩
+
+def isProjIdentity (p : Nat) (P : ProjPoint) : Bool :=
+  (P.x % p == 0) && (P.y % p != 0) && (P.z % p == 0)
+
+def projEqAffine (p : Nat) (P : ProjPoint) : Weierstrass.Point → Bool
+  | none => isProjIdentity p P
+  | some (ax, ay) =>
+    (P.z % p != 0) && ((P.x % p) == (ax * P.z) % p) && ((P.y % p) == (ay * P.z) % p)
+
+/-- Eagerly reduced Renes–Costello–Batina (2016) Algorithm 7 complete addition for `a = 0`, `b3 = 3 * b`. -/
+def rcbAdd (p b3 : Nat) (P Q : ProjPoint) : ProjPoint :=
+  let addM := fun u v => (u + v) % p
+  let subM := fun u v => (u + p - (v % p)) % p
+  let mulM := fun u v => (u * v) % p
+  strictNat (mulM P.x Q.x) fun t0 =>
+  strictNat (mulM P.y Q.y) fun t1 =>
+  strictNat (mulM P.z Q.z) fun zz =>
+  strictNat (subM (mulM (addM P.x P.y) (addM Q.x Q.y)) (addM t0 t1)) fun t3 =>
+  strictNat (subM (mulM (addM P.y P.z) (addM Q.y Q.z)) (addM t1 zz)) fun t4 =>
+  strictNat (subM (mulM (addM P.x P.z) (addM Q.x Q.z)) (addM t0 zz)) fun y30 =>
+  strictNat ((3 * t0) % p) fun t03 =>
+  strictNat (mulM b3 zz) fun t2 =>
+  strictNat (addM t1 t2) fun z30 =>
+  strictNat (subM t1 t2) fun t1s =>
+  strictNat (mulM b3 y30) fun cross =>
+  mkStrictPoint
+    (subM (mulM t3 t1s) (mulM t4 cross))
+    (addM (mulM t1s z30) (mulM cross t03))
+    (addM (mulM z30 t4) (mulM t03 t3))
+
+def rcbSmulFuel (p b3 : Nat) (base : ProjPoint) : Nat → Nat → ProjPoint
+  | 0, _ => ⟨0, 1, 0⟩
+  | fuel + 1, k =>
+    if k = 0 then ⟨0, 1, 0⟩
+    else
+      let half := rcbSmulFuel p b3 base fuel (k / 2)
+      let dbl := rcbAdd p b3 half half
+      if k % 2 = 1 then rcbAdd p b3 dbl base else dbl
+
+def rcbSmul (p b3 : Nat) (base : ProjPoint) (k : Nat) : ProjPoint :=
+  rcbSmulFuel p b3 base 256 k
+
+/-- Kernel-checked curve membership and prime subgroup order `[q_pallas] SpendAuthG = O` for Zcash Orchard `Pallas`. -/
+theorem orchardSpendAuthG_onCurve_and_prime_subgroup_order :
+    pallasCurve.OnCurve orchardSpendAuthG ∧
+    pallasCurve.OnCurve pastaPallasG ∧
+    isProjIdentity p_pallas (rcbSmul p_pallas 15 (toProj orchardSpendAuthG) q_pallas) = true ∧
+    isProjIdentity p_pallas (rcbSmul p_pallas 15 (toProj pastaPallasG) q_pallas) = true ∧
+    projEqAffine p_pallas
+      (rcbSmul p_pallas 15 (toProj orchardSpendAuthG) (q_pallas - 1))
+      (pallasCurve.neg orchardSpendAuthG) = true := by
+  refine ⟨by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel⟩
+
+/-- Kernel-checked curve membership and prime subgroup order `[r_bls381] G_1 = O` for Ethereum Beacon `BLS12-381`. -/
+theorem bls381G1_onCurve_and_prime_subgroup_order :
+    bls381Curve.OnCurve bls381G1 ∧
+    isProjIdentity p_bls381 (rcbSmul p_bls381 12 (toProj bls381G1) r_bls381) = true ∧
+    projEqAffine p_bls381
+      (rcbSmul p_bls381 12 (toProj bls381G1) (r_bls381 - 1))
+      (bls381Curve.neg bls381G1) = true := by
+  refine ⟨by decide +kernel, by decide +kernel, by decide +kernel⟩
+
+/-- `BLS12-381` cofactor 3-torsion point `(0, 2)` satisfying `2^2 = 0^3 + 4`. -/
+def bls381Torsion3Point : Weierstrass.Point := some (0, 2)
+
+/-- **`#tooth` `BLS12-381` Cofactor 3-Torsion Point `(0, 2)` Lies on Curve Yet Off `G_1`**:
+    omitting the `[r]P = O` subgroup guard (`is_in_g1_subgroup` in `bls12_381.rs`) accepts `(0, 2)`
+    of order `3`, which fails `[r_bls381](0, 2) = O`. -/
+theorem tooth_bls381_torsion3_onCurve_but_off_subgroup :
+    bls381Curve.OnCurve bls381Torsion3Point ∧
+    isProjIdentity p_bls381 (rcbSmul p_bls381 12 (toProj bls381Torsion3Point) 3) = true ∧
+    isProjIdentity p_bls381 (rcbSmul p_bls381 12 (toProj bls381Torsion3Point) r_bls381) = false := by
+  refine ⟨by decide +kernel, by decide +kernel, by decide +kernel⟩
+
+#tooth_pair Qsag.bls381G1_onCurve_and_prime_subgroup_order vs
+  Qsag.tooth_bls381_torsion3_onCurve_but_off_subgroup
+
+/-- Soundness of the in-circuit projective-to-affine ZKBoo constraint (`Z * zInv = 1`, `X = ax * Z`, `Y = ay * Z`). -/
+theorem projEqAffine_zk_constraint_sound {p ax ay : Nat} {P : ProjPoint} {zInv : Nat}
+    (hp : 2 ≤ p) (hAx : ax < p) (hAy : ay < p)
+    (hZInv : (P.z * zInv) % p = 1)
+    (hX : P.x % p = (ax * P.z) % p)
+    (hY : P.y % p = (ay * P.z) % p) :
+    P.z % p ≠ 0 ∧ (P.x * zInv) % p = ax ∧ (P.y * zInv) % p = ay := by
+  have hZNe : P.z % p ≠ 0 := by
+    intro hz0
+    have : (P.z * zInv) % p = 0 := by rw [Nat.mul_mod, hz0, Nat.zero_mul, Nat.zero_mod]
+    omega
+  have hCalcX : (P.x * zInv) % p = ax := by
+    calc (P.x * zInv) % p
+        = ((P.x % p) * (zInv % p)) % p := (Nat.mul_mod P.x zInv p).symm
+      _ = (((ax * P.z) % p) * (zInv % p)) % p := by rw [hX]
+      _ = ((ax * P.z) * zInv) % p := Nat.mul_mod (ax * P.z) zInv p
+      _ = (ax * (P.z * zInv)) % p := by rw [Nat.mul_assoc]
+      _ = ((ax % p) * ((P.z * zInv) % p)) % p := Nat.mul_mod ax (P.z * zInv) p
+      _ = ((ax % p) * 1) % p := by rw [hZInv]
+      _ = ax := by rw [Nat.mul_one, Nat.mod_mod, Nat.mod_eq_of_lt hAx]
+  have hCalcY : (P.y * zInv) % p = ay := by
+    calc (P.y * zInv) % p
+        = ((P.y % p) * (zInv % p)) % p := (Nat.mul_mod P.y zInv p).symm
+      _ = (((ay * P.z) % p) * (zInv % p)) % p := by rw [hY]
+      _ = ((ay * P.z) * zInv) % p := Nat.mul_mod (ay * P.z) zInv p
+      _ = (ay * (P.z * zInv)) % p := by rw [Nat.mul_assoc]
+      _ = ((ay % p) * ((P.z * zInv) % p)) % p := Nat.mul_mod ay (P.z * zInv) p
+      _ = ((ay % p) * 1) % p := by rw [hZInv]
+      _ = ay := by rw [Nat.mul_one, Nat.mod_mod, Nat.mod_eq_of_lt hAy]
+  exact ⟨hZNe, hCalcX, hCalcY⟩
+
+/-! ## 4. 3-Party ZKBoo 2-of-3 Knowledge Extraction & RedPallas Rerandomized `rk` Unlinkability -/
+
+/-- Reconstruct a modular witness scalar from 3 additive party shares `(s0 + s1 + s2) % ord`. -/
+def zkbooReconstructScalar (ord s0 s1 s2 : Nat) : Nat :=
+  (s0 + s1 + s2) % ord
+
+/-- Opened pair `(s_e, s_{(e+1)%3})` for ZKBoo challenge `e ∈ Fin 3`. -/
+def zkbooOpenedPair (shares : Fin 3 → Nat) (e : Fin 3) : Nat × Nat :=
+  (shares e, shares ⟨(e.val + 1) % 3, Nat.mod_lt _ (by decide)⟩)
+
+/-- Constructive 2-challenge ZKBoo share extractor recovering all 3 party shares `(s0, s1, s2)`
+    from any two distinct challenge openings `(e1, p1)` and `(e2, p2)`. -/
+def extractThreeShares (e1 e2 : Fin 3) (p1 p2 : Nat × Nat) : Nat × Nat × Nat :=
+  match e1.val, e2.val with
+  | 0, 1 => (p1.1, p1.2, p2.2)
+  | 0, 2 => (p1.1, p1.2, p2.1)
+  | 1, 0 => (p2.1, p1.1, p1.2)
+  | 1, 2 => (p2.2, p1.1, p1.2)
+  | 2, 0 => (p1.2, p2.2, p1.1)
+  | 2, 1 => (p1.2, p2.1, p1.1)
+  | _, _ => (0, 0, 0)
+
+theorem extractThreeShares_complete (shares : Fin 3 → Nat) (e1 e2 : Fin 3) (hNe : e1 ≠ e2) :
+    extractThreeShares e1 e2 (zkbooOpenedPair shares e1) (zkbooOpenedPair shares e2) =
+      (shares 0, shares 1, shares 2) := by
+  rcases e1 with ⟨v1, hv1⟩
+  rcases e2 with ⟨v2, hv2⟩
+  have hNeVal : v1 ≠ v2 := fun h => hNe (Fin.ext h)
+  match v1, hv1, v2, hv2 with
+  | 0, _, 0, _ => exact False.elim (hNeVal rfl)
+  | 0, _, 1, _ => rfl
+  | 0, _, 2, _ => rfl
+  | 1, _, 0, _ => rfl
+  | 1, _, 1, _ => exact False.elim (hNeVal rfl)
+  | 1, _, 2, _ => rfl
+  | 2, _, 0, _ => rfl
+  | 2, _, 1, _ => rfl
+  | 2, _, 2, _ => exact False.elim (hNeVal rfl)
+
+/-- Validity of a committed 3-party ZKBoo discrete-log witness over a prime-order subgroup `(C, G, ord)`. -/
+def ZkBooDlogCommitted (C : Weierstrass.Curve) (G pk : Weierstrass.Point) (ord : Nat)
+    (shares : Fin 3 → Nat) : Prop :=
+  let sk := zkbooReconstructScalar ord (shares 0) (shares 1) (shares 2)
+  0 < sk ∧ sk < ord ∧ C.smul sk G = pk
+
+/-- **ZKBoo 2-of-3 Special-Soundness Knowledge Extraction (`zkboo_two_challenge_extraction_sound`)**:
+    for any prime-order subgroup `(C, G, ord)` (instantiating both Orchard `(pallasCurve, orchardSpendAuthG, q_pallas)`
+    and Beacon `(bls381Curve, bls381G1, r_bls381)`), two distinct challenge openings `e1 ≠ e2` against
+    committed party views uniquely extract `sk ∈ [1, ord)` with `[sk]G = pk`. -/
+theorem zkboo_two_challenge_extraction_sound {C : Weierstrass.Curve} {G pk : Weierstrass.Point}
+    {ord : Nat} (grp : Weierstrass.Curve.PrimeOrderGroup C G ord)
+    (shares : Fin 3 → Nat) (e1 e2 : Fin 3) (hNe : e1 ≠ e2)
+    (hValid : ZkBooDlogCommitted C G pk ord shares) :
+    let (s0, s1, s2) :=
+      extractThreeShares e1 e2 (zkbooOpenedPair shares e1) (zkbooOpenedPair shares e2)
+    let sk := zkbooReconstructScalar ord s0 s1 s2
+    0 < sk ∧ sk < ord ∧ C.smul sk G = pk ∧
+      (∀ sk' : Nat, 0 < sk' → sk' < ord → C.smul sk' G = pk → sk' = sk) := by
+  rw [extractThreeShares_complete shares e1 e2 hNe]
+  dsimp only [ZkBooDlogCommitted] at hValid ⊢
+  obtain ⟨hPos, hLt, hSmul⟩ := hValid
+  refine ⟨hPos, hLt, hSmul, fun sk' _ hLt' hSmul' => ?_⟩
+  exact grp.smul_injective hLt' hLt (hSmul'.trans hSmul.symm)
+
+/-- **`#tooth` Single ZKBoo Challenge Information-Theoretically Hides `sk`**:
+    opening only ONE pair `(s0, s1)` leaves `s2` unconstrained, so for ANY two distinct candidate
+    scalars `skA ≠ skB < ord`, distinct hidden shares `s2A ≠ s2B` yield `skA` and `skB` from the
+    exact same opened view `(s0, s1)`. -/
+theorem tooth_zkboo_single_challenge_information_theoretically_hides_witness
+    {ord s0 s1 skA skB : Nat} (hA : skA < ord) (hB : skB < ord) (hNe : skA ≠ skB) :
+    ∃ s2A s2B : Nat,
+      s2A < ord ∧ s2B < ord ∧ s2A ≠ s2B ∧
+      zkbooReconstructScalar ord s0 s1 s2A = skA ∧
+      zkbooReconstructScalar ord s0 s1 s2B = skB := by
+  have hOrdPos : 0 < ord := by omega
+  let sum01 := (s0 + s1) % ord
+  have hSumLt : sum01 < ord := Nat.mod_lt _ hOrdPos
+  let s2A := (skA + ord - sum01) % ord
+  let s2B := (skB + ord - sum01) % ord
+  have hRecA : zkbooReconstructScalar ord s0 s1 s2A = skA := by
+    unfold zkbooReconstructScalar
+    have h1 : (s0 + s1 + s2A) % ord = (sum01 + s2A) % ord := by
+      rw [Nat.add_mod (s0 + s1) s2A, Nat.add_mod sum01 s2A, Nat.mod_mod]
+    rw [h1, Nat.add_mod sum01 s2A, Nat.mod_mod, ← Nat.add_mod]
+    have h2 : sum01 + (skA + ord - sum01) = ord + skA := by omega
+    rw [h2, Nat.add_mod_left, Nat.mod_eq_of_lt hA]
+  have hRecB : zkbooReconstructScalar ord s0 s1 s2B = skB := by
+    unfold zkbooReconstructScalar
+    have h1 : (s0 + s1 + s2B) % ord = (sum01 + s2B) % ord := by
+      rw [Nat.add_mod (s0 + s1) s2B, Nat.add_mod sum01 s2B, Nat.mod_mod]
+    rw [h1, Nat.add_mod sum01 s2B, Nat.mod_mod, ← Nat.add_mod]
+    have h2 : sum01 + (skB + ord - sum01) = ord + skB := by omega
+    rw [h2, Nat.add_mod_left, Nat.mod_eq_of_lt hB]
+  have hS2Ne : s2A ≠ s2B := fun hEq => by
+    rw [hEq, hRecB] at hRecA
+    exact hNe hRecA.symm
+  exact ⟨s2A, s2B, Nat.mod_lt _ hOrdPos, Nat.mod_lt _ hOrdPos, hS2Ne, hRecA, hRecB⟩
+
+#tooth_pair Qsag.zkboo_two_challenge_extraction_sound vs
+  Qsag.tooth_zkboo_single_challenge_information_theoretically_hides_witness
+
+/-- Zcash Orchard RedPallas effective action scalar `(ask + alpha) % ord` (`add_mod_q_bits` in `pallas.rs`). -/
+@[expose] def redpallasEffectiveScalar (ord ask alpha : Nat) : Nat :=
+  (ask + alpha) % ord
+
+/-- Unique RedPallas rerandomizer `alpha` mapping spend-authorizing scalar `ask` to public action scalar `rsk`. -/
+@[expose] def redpallasSolveAlpha (ord rsk ask : Nat) : Nat :=
+  (rsk + ord - (ask % ord)) % ord
+
+/-- Modular subgroup homomorphism `[((ask + alpha) % ord)]G = [ask]G + [alpha]G` over any `PrimeOrderGroup`. -/
+theorem primeOrderGroup_smul_add_mod {C : Weierstrass.Curve} {G : Weierstrass.Point} {ord : Nat}
+    (grp : Weierstrass.Curve.PrimeOrderGroup C G ord)
+    {ask alpha : Nat} (hAsk : ask < ord) (hAlpha : alpha < ord) :
+    C.smul (redpallasEffectiveScalar ord ask alpha) G =
+      C.add (C.smul ask G) (C.smul alpha G) := by
+  unfold redpallasEffectiveScalar
+  rw [← grp.smul_add]
+  if hLt : ask + alpha < ord then
+    rw [Nat.mod_eq_of_lt hLt]
+  else
+    have hSubLt : ask + alpha - ord < ord := by omega
+    have hMod : (ask + alpha) % ord = ask + alpha - ord := by
+      rw [Nat.mod_eq_sub_mod (by omega), Nat.mod_eq_of_lt hSubLt]
+    have hSplit : ask + alpha = ord + (ask + alpha - ord) := by omega
+    rw [hMod, hSplit, grp.smul_add, grp.order, Weierstrass.Curve.add]
+
+/-- **Zcash Orchard RedPallas Rerandomized Extraction & Effective-Scalar Binding (`orchard_redpallas_rerandomized_extraction_sound`)**:
+    two distinct ZKBoo challenge openings extract both `ask` and `alpha` such that
+    `rk = [ask]G + [alpha]G = [(ask + alpha) % q_pallas]G`, and any two valid witness pairs for `rk`
+    are bound to the identical effective action scalar `rsk` (hence identical migration nullifier). -/
+theorem orchard_redpallas_rerandomized_extraction_sound
+    {C : Weierstrass.Curve} {G rk : Weierstrass.Point}
+    (grp : Weierstrass.Curve.PrimeOrderGroup C G q_pallas)
+    (askShares alphaShares : Fin 3 → Nat) (e1 e2 : Fin 3) (hNe : e1 ≠ e2)
+    (hAskRange : 0 < zkbooReconstructScalar q_pallas (askShares 0) (askShares 1) (askShares 2) ∧
+                 zkbooReconstructScalar q_pallas (askShares 0) (askShares 1) (askShares 2) < q_pallas)
+    (hAlphaRange : zkbooReconstructScalar q_pallas (alphaShares 0) (alphaShares 1) (alphaShares 2) < q_pallas)
+    (hRskPos : 0 < redpallasEffectiveScalar q_pallas
+      (zkbooReconstructScalar q_pallas (askShares 0) (askShares 1) (askShares 2))
+      (zkbooReconstructScalar q_pallas (alphaShares 0) (alphaShares 1) (alphaShares 2)))
+    (hCurve : C.smul (redpallasEffectiveScalar q_pallas
+      (zkbooReconstructScalar q_pallas (askShares 0) (askShares 1) (askShares 2))
+      (zkbooReconstructScalar q_pallas (alphaShares 0) (alphaShares 1) (alphaShares 2))) G = rk) :
+    let (a0, a1, a2) :=
+      extractThreeShares e1 e2 (zkbooOpenedPair askShares e1) (zkbooOpenedPair askShares e2)
+    let (r0, r1, r2) :=
+      extractThreeShares e1 e2 (zkbooOpenedPair alphaShares e1) (zkbooOpenedPair alphaShares e2)
+    let ask := zkbooReconstructScalar q_pallas a0 a1 a2
+    let alpha := zkbooReconstructScalar q_pallas r0 r1 r2
+    let rsk := redpallasEffectiveScalar q_pallas ask alpha
+    0 < ask ∧ ask < q_pallas ∧ alpha < q_pallas ∧ 0 < rsk ∧ rsk < q_pallas ∧
+    C.add (C.smul ask G) (C.smul alpha G) = rk ∧
+    (∀ ask' alpha' : Nat, ask' < q_pallas → alpha' < q_pallas →
+      0 < redpallasEffectiveScalar q_pallas ask' alpha' →
+      C.add (C.smul ask' G) (C.smul alpha' G) = rk →
+      redpallasEffectiveScalar q_pallas ask' alpha' = rsk) := by
+  rw [extractThreeShares_complete askShares e1 e2 hNe,
+      extractThreeShares_complete alphaShares e1 e2 hNe]
+  dsimp only
+  set ask := zkbooReconstructScalar q_pallas (askShares 0) (askShares 1) (askShares 2)
+  set alpha := zkbooReconstructScalar q_pallas (alphaShares 0) (alphaShares 1) (alphaShares 2)
+  have hQPos : 0 < q_pallas := by unfold q_pallas; decide
+  have hRskLt : redpallasEffectiveScalar q_pallas ask alpha < q_pallas :=
+    Nat.mod_lt _ hQPos
+  have hHom := primeOrderGroup_smul_add_mod grp hAskRange.2 hAlphaRange
+  refine ⟨hAskRange.1, hAskRange.2, hAlphaRange, hRskPos, hRskLt, hHom.symm.trans hCurve, ?_⟩
+  intro ask' alpha' hAsk' hAlpha' _ hRk'
+  have hHom' := primeOrderGroup_smul_add_mod grp hAsk' hAlpha'
+  have hSmulEq : C.smul (redpallasEffectiveScalar q_pallas ask' alpha') G =
+      C.smul (redpallasEffectiveScalar q_pallas ask alpha) G :=
+    (hHom'.trans hRk').trans hCurve.symm
+  exact grp.smul_injective (Nat.mod_lt _ hQPos) hRskLt hSmulEq
+
+/-- **Zcash Orchard RedPallas Perfect Unlinkability (`orchard_redpallas_rk_perfect_unlinkability`)**:
+    for EVERY canonical public action scalar `rsk ∈ [0, ord)` and EVERY candidate spend-authorizing
+    scalar `ask ∈ [0, ord)`, there is a UNIQUE rerandomizer `alpha = redpallasSolveAlpha ord rsk ask < ord`
+    satisfying `redpallasEffectiveScalar ord ask alpha = rsk`. Consequently, every `ask` induces the
+    exact same uniform distribution over `rk = [rsk] SpendAuthG`. -/
+theorem orchard_redpallas_rk_perfect_unlinkability {ord rsk ask : Nat}
+    (hRsk : rsk < ord) (hAsk : ask < ord) :
+    let alpha := redpallasSolveAlpha ord rsk ask
+    alpha < ord ∧
+    redpallasEffectiveScalar ord ask alpha = rsk ∧
+    (∀ alpha' : Nat, alpha' < ord → redpallasEffectiveScalar ord ask alpha' = rsk → alpha' = alpha) := by
+  have hOrdPos : 0 < ord := by omega
+  dsimp only
+  set alpha := redpallasSolveAlpha ord rsk ask
+  have hAlphaLt : alpha < ord := Nat.mod_lt _ hOrdPos
+  have hAskMod : ask % ord = ask := Nat.mod_eq_of_lt hAsk
+  have hHit : redpallasEffectiveScalar ord ask alpha = rsk := by
+    unfold redpallasEffectiveScalar alpha redpallasSolveAlpha
+    rw [hAskMod, Nat.add_mod ask _, Nat.mod_eq_of_lt hAsk, Nat.mod_mod, ← Nat.add_mod]
+    have hEq : ask + (rsk + ord - ask) = ord + rsk := by omega
+    rw [hEq, Nat.add_mod_left, Nat.mod_eq_of_lt hRsk]
+  refine ⟨hAlphaLt, hHit, fun alpha' hAlpha' hEq' => ?_⟩
+  unfold redpallasEffectiveScalar at hEq'
+  unfold alpha redpallasSolveAlpha
+  rw [hAskMod, ← hEq']
+  if hSumLt : ask + alpha' < ord then
+    rw [Nat.mod_eq_of_lt hSumLt]
+    have hSub : ask + alpha' + ord - ask = ord + alpha' := by omega
+    rw [hSub, Nat.add_mod_left, Nat.mod_eq_of_lt hAlpha']
+  else
+    have hModSub : (ask + alpha') % ord = ask + alpha' - ord := by
+      rw [Nat.mod_eq_sub_mod (by omega), Nat.mod_eq_of_lt (by omega)]
+    rw [hModSub]
+    have hSub : ask + alpha' - ord + ord - ask = alpha' := by omega
+    rw [hSub, Nat.mod_eq_of_lt hAlpha']
+
+/-- **`#tooth` Unrandomized `alpha = 0` Collapses RedPallas Unlinkability**:
+    omitting rerandomization (`alpha = 0`) forces `redpallasEffectiveScalar q_pallas ask 0 = ask`,
+    deterministically separating distinct spending keys `ask1 ≠ ask2` and linking actions to `ak`. -/
+theorem tooth_redpallas_zero_alpha_links_ak :
+    ∃ ask1 ask2 : Nat,
+      0 < ask1 ∧ ask1 < q_pallas ∧ 0 < ask2 ∧ ask2 < q_pallas ∧ ask1 ≠ ask2 ∧
+      redpallasEffectiveScalar q_pallas ask1 0 ≠ redpallasEffectiveScalar q_pallas ask2 0 ∧
+      redpallasSolveAlpha q_pallas ask1 ask2 ≠ 0 := by
+  refine ⟨1, 2, by decide, by unfold q_pallas; decide, by decide, by unfold q_pallas; decide,
+    by decide, ?_, ?_⟩ <;> unfold redpallasEffectiveScalar redpallasSolveAlpha q_pallas <;> decide
+
+#tooth_pair Qsag.orchard_redpallas_rk_perfect_unlinkability vs
+  Qsag.tooth_redpallas_zero_alpha_links_ak
+
+/-! ## 5. Constructive Axiom Audit (`#verify_constructive`) -/
+
+#verify_constructive
+  Qsag.pallas_and_bls381_limbs_and_bit_bounds
+  Qsag.powModFuel_eq_pow_mod
+  Qsag.isPrime_of_lucas_pratt
+  Qsag.checkPrattStep_sound
+  Qsag.checkPrattDAG_sound
+  Qsag.tooth_carmichael_561_passes_fermat_but_fails_pratt
+  Qsag.p_pallas_isPrime
+  Qsag.q_pallas_isPrime
+  Qsag.r_bls381_isPrime
+  Qsag.p_bls381_isPrime
+  Qsag.pallas_and_bls381_moduli_prime
+  Qsag.orchardSpendAuthG_onCurve_and_prime_subgroup_order
+  Qsag.bls381G1_onCurve_and_prime_subgroup_order
+  Qsag.tooth_bls381_torsion3_onCurve_but_off_subgroup
+  Qsag.projEqAffine_zk_constraint_sound
+  Qsag.extractThreeShares_complete
+  Qsag.zkboo_two_challenge_extraction_sound
+  Qsag.tooth_zkboo_single_challenge_information_theoretically_hides_witness
+  Qsag.primeOrderGroup_smul_add_mod
+  Qsag.orchard_redpallas_rerandomized_extraction_sound
+  Qsag.orchard_redpallas_rk_perfect_unlinkability
+  Qsag.tooth_redpallas_zero_alpha_links_ak
+
+end Qsag

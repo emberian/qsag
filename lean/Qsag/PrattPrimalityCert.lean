@@ -67,18 +67,13 @@ private def posRange : Nat → List Nat
   | n + 1 => (n + 1) :: posRange n
 
 private theorem mem_posRange_iff (x : Nat) : ∀ (n : Nat), x ∈ posRange n ↔ 1 ≤ x ∧ x ≤ n
-  | 0 => by
-    constructor
-    · intro h; cases h
-    · rintro ⟨hLo, hHi⟩; omega
+  | 0 => Iff.intro (fun h => by cases h) (fun ⟨_, _⟩ => by omega)
   | n + 1 => by
     simp only [posRange, List.mem_cons, mem_posRange_iff x n]
-    constructor
-    · rintro (rfl | ⟨hLo, hHi⟩)
-      · exact ⟨Nat.succ_pos n, Nat.le_refl _⟩
-      · exact ⟨hLo, Nat.le_trans hHi (Nat.le_succ n)⟩
-    · rintro ⟨hLo, hHi⟩
-      if hEq : x = n + 1 then exact .inl hEq else exact .inr ⟨hLo, by omega⟩
+    refine ⟨?_, fun ⟨hLo, hHi⟩ => if hEq : x = n + 1 then .inl hEq else .inr ⟨hLo, by omega⟩⟩
+    rintro (rfl | ⟨hLo, hHi⟩)
+    · exact ⟨Nat.succ_pos n, Nat.le_refl _⟩
+    · exact ⟨hLo, Nat.le_trans hHi (Nat.le_succ n)⟩
 
 private theorem posRange_nodup : ∀ (n : Nat), (posRange n).Nodup
   | 0 => .nil
@@ -104,35 +99,24 @@ private theorem mem_of_mem_eraseFirst {v z : Nat} :
       | tail _ ht => exact .tail _ (mem_of_mem_eraseFirst ht)
 
 private theorem eraseFirst_spec {v : Nat} :
-    ∀ {ys : List Nat},
-      ys.Nodup → v ∈ ys →
-      listProd ys = v * listProd (eraseFirst v ys) ∧
-      (eraseFirst v ys).length + 1 = ys.length ∧
-      (eraseFirst v ys).Nodup ∧
-      (∀ z : Nat, z ≠ v → z ∈ ys → z ∈ eraseFirst v ys)
+    ∀ {ys : List Nat}, ys.Nodup → v ∈ ys →
+      listProd ys = v * listProd (eraseFirst v ys) ∧ (eraseFirst v ys).length + 1 = ys.length ∧
+      (eraseFirst v ys).Nodup ∧ (∀ z : Nat, z ≠ v → z ∈ ys → z ∈ eraseFirst v ys)
   | [], _, hmem => by cases hmem
   | y :: ys, .cons hrel hnd, hmem => by
     dsimp only [eraseFirst]
     if hy : y = v then
-      subst hy
-      simp only [↓reduceIte, listProd, List.length_cons]
+      subst hy; simp only [↓reduceIte, listProd, List.length_cons]
       refine ⟨trivial, trivial, hnd, fun z hzne hzmem => ?_⟩
-      cases hzmem with
-      | head => exact False.elim (hzne rfl)
-      | tail _ htail => exact htail
+      cases hzmem with | head => exact False.elim (hzne rfl) | tail _ htail => exact htail
     else
       simp only [hy, ↓reduceIte, listProd, List.length_cons]
       have hvTail : v ∈ ys := by
-        cases hmem with
-        | head => exact False.elim (hy rfl)
-        | tail _ ht => exact ht
+        cases hmem with | head => exact False.elim (hy rfl) | tail _ ht => exact ht
       obtain ⟨hprod, hlen, hnd', hsub⟩ := eraseFirst_spec hnd hvTail
-      refine ⟨?_, by omega, .cons (fun b hb heq => hrel b (mem_of_mem_eraseFirst hb) heq) hnd', ?_⟩
-      · rw [hprod, ← Nat.mul_assoc, Nat.mul_comm y v, Nat.mul_assoc]
-      · intro z hzne hzmem
-        cases hzmem with
-        | head => exact .head _
-        | tail _ ht => exact .tail _ (hsub z hzne ht)
+      refine ⟨by rw [hprod, ← Nat.mul_assoc, Nat.mul_comm y v, Nat.mul_assoc], by omega,
+        .cons (fun b hb heq => hrel b (mem_of_mem_eraseFirst hb) heq) hnd', fun z hzne hzmem => ?_⟩
+      cases hzmem with | head => exact .head _ | tail _ ht => exact .tail _ (hsub z hzne ht)
 
 private theorem listProd_eq_of_nodup_subset :
     ∀ {xs ys : List Nat},
@@ -167,32 +151,21 @@ private theorem listProd_map_mul_mod (a q : Nat) :
 
 private theorem not_dvd_listProd_posRange {q : Nat} (hq : IsPrime q) :
     ∀ {n : Nat}, n < q → ¬ (q ∣ listProd (posRange n))
-  | 0, _, hdvd => by
-    dsimp only [posRange, listProd] at hdvd
-    have hle := Nat.le_of_dvd (by decide) hdvd
-    have hq2 := hq.1
-    omega
+  | 0, _, hdvd => by dsimp only [posRange, listProd] at hdvd; have := Nat.le_of_dvd (by decide) hdvd; have := hq.1; omega
   | n + 1, hlt, hdvd => by
     simp only [posRange, listProd] at hdvd
-    have hnot1 : ¬ (q ∣ (n + 1)) := fun h1 => by
-      have := Nat.le_of_dvd (by omega) h1
-      omega
-    exact not_dvd_listProd_posRange hq (by omega) (dvd_mul_not_left hq hdvd hnot1)
+    exact not_dvd_listProd_posRange hq (by omega)
+      (dvd_mul_not_left hq hdvd (fun h1 => by have := Nat.le_of_dvd (by omega) h1; omega))
 
 private theorem sub_dvd_of_mod_eq {x y q : Nat} (hle : y ≤ x) (hmod : x % q = y % q) :
     q ∣ (x - y) := by
-  have hx : q * (x / q) + x % q = x := Nat.div_add_mod x q
-  have hy : q * (y / q) + y % q = y := Nat.div_add_mod y q
-  have hdivLe : y / q ≤ x / q := Nat.div_le_div_right hle
-  refine ⟨x / q - y / q, ?_⟩
-  rw [Nat.mul_sub]
-  omega
+  have hx := Nat.div_add_mod x q; have hy := Nat.div_add_mod y q
+  have hdivLe := Nat.div_le_div_right (c := q) hle
+  refine ⟨x / q - y / q, ?_⟩; rw [Nat.mul_sub]; omega
 
 private theorem one_le_pow_of_pos {a : Nat} (ha : 1 ≤ a) : ∀ k : Nat, 1 ≤ a ^ k
   | 0 => Nat.le_refl 1
-  | k + 1 => by
-    rw [Nat.pow_succ]
-    exact Nat.le_trans (one_le_pow_of_pos ha k) (Nat.le_mul_of_pos_right _ ha)
+  | k + 1 => Nat.pow_succ a k ▸ Nat.le_trans (one_le_pow_of_pos ha k) (Nat.le_mul_of_pos_right _ ha)
 
 /-- Fermat's Little Theorem: `a ^ (q - 1) ≡ 1 (mod q)` for prime `q` and `¬ (q ∣ a)`. -/
 theorem IsPrime.pow_sub_one_mod {q a : Nat} (hq : IsPrime q) (hna : ¬ (q ∣ a)) :
@@ -203,44 +176,27 @@ theorem IsPrime.pow_sub_one_mod {q a : Nat} (hq : IsPrime q) (hna : ¬ (q ∣ a)
     intro x hx
     obtain ⟨i, hi, rfl⟩ := List.mem_map.1 hx
     obtain ⟨hi1, hi2⟩ := (mem_posRange_iff i (q - 1)).1 hi
-    have hni : ¬ (q ∣ i) := fun hd => by
-      have := Nat.le_of_dvd (by omega) hd; have := hq.1; omega
-    have hnai : ¬ (q ∣ a * i) := fun hd =>
-      hni (dvd_mul_not_left hq (Nat.mul_comm a i ▸ hd) hna)
-    have hmodPos : 0 < (a * i) % q := by
-      if hz : (a * i) % q = 0 then
-        exact False.elim (hnai (Nat.dvd_of_mod_eq_zero hz))
-      else omega
+    have hni : ¬ (q ∣ i) := fun hd => by have := Nat.le_of_dvd (by omega) hd; have := hq.1; omega
+    have hnai : ¬ (q ∣ a * i) := fun hd => hni (dvd_mul_not_left hq (Nat.mul_comm a i ▸ hd) hna)
+    have hmodPos : 0 < (a * i) % q :=
+      if hz : (a * i) % q = 0 then False.elim (hnai (Nat.dvd_of_mod_eq_zero hz)) else by omega
     have hmodLt : (a * i) % q < q := Nat.mod_lt _ (by have := hq.1; omega)
-    dsimp only [f]
-    exact (mem_posRange_iff _ (q - 1)).2 ⟨hmodPos, by omega⟩
-  have hInjOn : ∀ i j : Nat, i ∈ L → j ∈ L → f i = f j → i = j := by
-    intro i j hi hj hij
-    dsimp only [f] at hij
-    obtain ⟨hi1, hi2⟩ := (mem_posRange_iff i (q - 1)).1 hi
-    obtain ⟨hj1, hj2⟩ := (mem_posRange_iff j (q - 1)).1 hj
+    dsimp only [f]; exact (mem_posRange_iff _ (q - 1)).2 ⟨hmodPos, by omega⟩
+  have hInjLe : ∀ u v : Nat, u ≤ v → v ≤ q - 1 → (a * u) % q = (a * v) % q → u = v := by
+    intro u v huv hv hij
+    have hdvd : q ∣ a * (v - u) :=
+      (Nat.mul_sub a v u) ▸ sub_dvd_of_mod_eq (Nat.mul_le_mul_left a huv) hij.symm
+    have hdvdDiff : q ∣ (v - u) := dvd_mul_not_left hq hdvd hna
     have hq2 := hq.1
-    if hijLe : i ≤ j then
-      have hdvd : q ∣ a * (j - i) := by
-        have hmul : a * j - a * i = a * (j - i) := (Nat.mul_sub a j i).symm
-        rw [← hmul]
-        exact sub_dvd_of_mod_eq (Nat.mul_le_mul_left a hijLe) hij.symm
-      have hdvdDiff : q ∣ (j - i) := dvd_mul_not_left hq hdvd hna
-      if hdiff0 : j - i = 0 then omega
-      else have := Nat.le_of_dvd (by omega) hdvdDiff; omega
-    else
-      have hjiLe : j ≤ i := by omega
-      have hdvd : q ∣ a * (i - j) := by
-        have hmul : a * i - a * j = a * (i - j) := (Nat.mul_sub a i j).symm
-        rw [← hmul]
-        exact sub_dvd_of_mod_eq (Nat.mul_le_mul_left a hjiLe) hij
-      have hdvdDiff : q ∣ (i - j) := dvd_mul_not_left hq hdvd hna
-      if hdiff0 : i - j = 0 then omega
-      else have := Nat.le_of_dvd (by omega) hdvdDiff; omega
+    if hdiff0 : v - u = 0 then omega else have := Nat.le_of_dvd (by omega) hdvdDiff; omega
+  have hInjOn : ∀ i j : Nat, i ∈ L → j ∈ L → f i = f j → i = j := by
+    intro i j hi hj hij; dsimp only [f] at hij
+    obtain ⟨_, hi2⟩ := (mem_posRange_iff i (q - 1)).1 hi
+    obtain ⟨_, hj2⟩ := (mem_posRange_iff j (q - 1)).1 hj
+    exact if hijLe : i ≤ j then hInjLe i j hijLe hj2 hij else (hInjLe j i (by omega) hi2 hij.symm).symm
   have hNodupMap : (L.map f).Nodup := by
     have hsubNd : ∀ {xs : List Nat}, xs.Nodup → (∀ z ∈ xs, z ∈ L) → (xs.map f).Nodup := by
-      intro xs hnd hxs
-      induction hnd with
+      intro xs hnd hxs; induction hnd with
       | nil => exact .nil
       | @cons x rest hrel _ ih =>
         refine .cons (fun b hb heq => ?_) (ih (fun z hz => hxs z (.tail _ hz)))
@@ -251,18 +207,14 @@ theorem IsPrime.pow_sub_one_mod {q a : Nat} (hq : IsPrime q) (hna : ¬ (q ∣ a)
     listProd_eq_of_nodup_subset hNodupMap (posRange_nodup (q - 1)) (by simp) hMem
   have hModEq : (a ^ (q - 1) * listProd L) % q = (listProd L) % q := by
     rw [← listProd_map_mul_mod a q (q - 1), hProdEq]
-  have haPos : 1 ≤ a := by
-    if ha0 : a = 0 then subst ha0; exact False.elim (hna (Nat.dvd_zero q)) else omega
+  have haPos : 1 ≤ a := if ha0 : a = 0 then by subst ha0; exact False.elim (hna (Nat.dvd_zero q)) else by omega
   have hpowPos : 1 ≤ a ^ (q - 1) := one_le_pow_of_pos haPos (q - 1)
   have hdvdMul : q ∣ (a ^ (q - 1) - 1) * listProd L := by
     have hsub : a ^ (q - 1) * listProd L - listProd L = (a ^ (q - 1) - 1) * listProd L := by
       rw [Nat.sub_mul, Nat.one_mul]
-    rw [← hsub]
-    exact sub_dvd_of_mod_eq (Nat.le_mul_of_pos_left _ hpowPos) hModEq
+    exact hsub ▸ sub_dvd_of_mod_eq (Nat.le_mul_of_pos_left _ hpowPos) hModEq
   have hnotF : ¬ (q ∣ listProd L) := not_dvd_listProd_posRange hq (by have := hq.1; omega)
-  have hdvdPow : q ∣ (a ^ (q - 1) - 1) :=
-    dvd_mul_not_left hq (Nat.mul_comm (a ^ (q - 1) - 1) (listProd L) ▸ hdvdMul) hnotF
-  obtain ⟨k, hk⟩ := hdvdPow
+  obtain ⟨k, hk⟩ := dvd_mul_not_left hq (Nat.mul_comm (a ^ (q - 1) - 1) (listProd L) ▸ hdvdMul) hnotF
   have hEq : a ^ (q - 1) = q * k + 1 := by omega
   rw [hEq, Nat.mul_add_mod, Nat.mod_eq_of_lt hq.1]
 
@@ -422,8 +374,7 @@ private theorem minDiv_prime_and_sq {n : Nat} (hn : 2 ≤ n) :
     Weierstrass.IsPrime (minDiv n) ∧ minDiv n ∣ n ∧
     (minDiv n = n ∨ minDiv n * minDiv n ≤ n) := by
   unfold minDiv
-  have hnot : ¬ n < 2 := by omega
-  simp only [hnot, ↓reduceIte]
+  simp only [show ¬ n < 2 by omega, ↓reduceIte]
   obtain ⟨hp2, hpdvd, hpmin⟩ :=
     minDivAux_spec n n 2 hn (by decide) (by omega) (by intros; omega)
   have hple : minDivAux n 2 n ≤ n := Nat.le_of_dvd (by omega) hpdvd
@@ -432,27 +383,17 @@ private theorem minDiv_prime_and_sq {n : Nat} (hn : 2 ≤ n) :
     if hd1 : d = 1 then exact .inl hd1
     else if hdp : d = minDivAux n 2 n then exact .inr hdp
     else
-      have hdpos : 0 < d := Nat.pos_of_dvd_of_pos hd (by omega)
-      have hdle : d ≤ minDivAux n 2 n := Nat.le_of_dvd (by omega) hd
+      have hdpos := Nat.pos_of_dvd_of_pos hd (by omega); have hdle := Nat.le_of_dvd (by omega) hd
       exact False.elim (hpmin d (by omega) (by omega) (Nat.dvd_trans hd hpdvd))
   refine ⟨hPrime, hpdvd, ?_⟩
-  if hEq : minDivAux n 2 n = n then
-    exact .inl hEq
+  if hEq : minDivAux n 2 n = n then exact .inl hEq
   else
-    right
     obtain ⟨k, hk⟩ := hpdvd
-    have hk2 : 2 ≤ k := by
-      if hk01 : k ≤ 1 then
-        rcases Nat.le_one_iff_eq_zero_or_eq_one.1 hk01 with rfl | rfl <;> omega
-      else omega
-    have hkDvd : k ∣ n := ⟨minDivAux n 2 n, by rw [Nat.mul_comm]; exact hk⟩
-    have hpk : minDivAux n 2 n ≤ k := by
-      if hlt : k < minDivAux n 2 n then
-        exact False.elim (hpmin k hk2 hlt hkDvd)
-      else omega
-    calc minDivAux n 2 n * minDivAux n 2 n
-        ≤ minDivAux n 2 n * k := Nat.mul_le_mul_left _ hpk
-      _ = n := hk.symm
+    have hk2 : 2 ≤ k := if hk01 : k ≤ 1 then by
+      rcases Nat.le_one_iff_eq_zero_or_eq_one.1 hk01 with rfl | rfl <;> omega else by omega
+    have hpk : minDivAux n 2 n ≤ k := if hlt : k < minDivAux n 2 n then
+      False.elim (hpmin k hk2 hlt ⟨minDivAux n 2 n, Nat.mul_comm _ _ ▸ hk⟩) else by omega
+    have hmul := Nat.mul_le_mul_left (minDivAux n 2 n) hpk; exact .inr (by omega)
 
 private theorem pow_mod_eq_one_of_mod_eq_one {p x : Nat} (hp : 2 ≤ p) (hx : x % p = 1) :
     ∀ k : Nat, (x ^ k) % p = 1
@@ -546,26 +487,19 @@ private theorem prime_pow_dvd_of_not_dvd_pred {q m : Nat} (hq : Weierstrass.IsPr
 private theorem not_prime_dvd_pow_of_ne {q p : Nat}
     (hq : Weierstrass.IsPrime q) (hp : Weierstrass.IsPrime p) (hne : q ≠ p) :
     ∀ e : Nat, ¬ (q ∣ p ^ e)
-  | 0 => fun hd => by
-    have hle : q ≤ 1 := Nat.le_of_dvd (by decide) hd
-    have hq2 := hq.1
-    omega
+  | 0 => fun hd => by simp only [Nat.pow_zero] at hd; have := Nat.le_of_dvd (by decide) hd; have := hq.1; omega
   | e + 1 => fun hd => by
     rw [Nat.pow_succ] at hd
     rcases hq.dvd_mul hd with h1 | hqp
     · exact not_prime_dvd_pow_of_ne hq hp hne e h1
     · rcases hp.2 q hqp with hq1 | hqq
-      · have hq2 := hq.1; omega
+      · have := hq.1; omega
       · exact hne hqq
 
 private theorem not_prime_dvd_factorsProd {q : Nat} (hq : Weierstrass.IsPrime q) :
     ∀ (fs : List (Nat × Nat)),
       (∀ p ∈ fs, Weierstrass.IsPrime p.1 ∧ q ≠ p.1) → ¬ (q ∣ factorsProd fs)
-  | [], _ => fun hd => by
-    dsimp only [factorsProd] at hd
-    have hle : q ≤ 1 := Nat.le_of_dvd (by decide) hd
-    have hq2 := hq.1
-    omega
+  | [], _ => fun hd => by dsimp only [factorsProd] at hd; have := Nat.le_of_dvd (by decide) hd; have := hq.1; omega
   | (p, e) :: rest, hall => fun hd => by
     dsimp only [factorsProd] at hd
     obtain ⟨hpPrime, hne⟩ := hall (p, e) (.head _)
@@ -575,39 +509,25 @@ private theorem not_prime_dvd_factorsProd {q : Nat} (hq : Weierstrass.IsPrime q)
 
 private theorem prime_pow_pos {q : Nat} (hq : Weierstrass.IsPrime q) : ∀ e : Nat, 0 < q ^ e
   | 0 => Nat.one_pos
-  | e + 1 => by
-    rw [Nat.pow_succ]
-    have hqPos : 0 < q := by have := hq.1; omega
-    exact Nat.mul_pos (prime_pow_pos hq e) hqPos
+  | e + 1 => Nat.pow_succ q e ▸ Nat.mul_pos (prime_pow_pos hq e) (by have := hq.1; omega)
 
 private theorem prime_pow_mul_dvd {q B d : Nat}
     (hq : Weierstrass.IsPrime q) (hnotB : ¬ (q ∣ B)) :
     ∀ (e : Nat), q ^ e ∣ d → B ∣ d → (q ^ e * B) ∣ d
   | 0, _, hB => by simp only [Nat.pow_zero, Nat.one_mul]; exact hB
   | e + 1, hqe1, hB => by
-    have hqe : q ^ e ∣ d := by
-      rw [Nat.pow_succ] at hqe1
-      exact Nat.dvd_trans ⟨q, rfl⟩ hqe1
+    have hqe : q ^ e ∣ d := Nat.dvd_trans ⟨q, rfl⟩ (Nat.pow_succ q e ▸ hqe1)
     obtain ⟨k, hk⟩ := prime_pow_mul_dvd hq hnotB e hqe hB
     obtain ⟨m, hm⟩ := hqe1
-    have hPos : 0 < q ^ e := prime_pow_pos hq e
-    have hEq : B * k = q * m := by
-      apply Nat.eq_of_mul_eq_mul_left hPos
-      calc q ^ e * (B * k)
-          = q ^ e * B * k := (Nat.mul_assoc _ _ _).symm
-        _ = d := hk.symm
-        _ = q ^ (e + 1) * m := hm
-        _ = q ^ e * (q * m) := by rw [Nat.pow_succ, Nat.mul_assoc]
-    rcases hq.dvd_mul ⟨m, hEq⟩ with hqB | hqk
+    have hEq : B * k = q * m := Nat.eq_of_mul_eq_mul_left (prime_pow_pos hq e) (by
+      calc q ^ e * (B * k) = q ^ e * B * k := (Nat.mul_assoc _ _ _).symm
+        _ = q ^ e * (q * m) := by rw [← hk, hm, Nat.pow_succ, Nat.mul_assoc])
+    rcases hq.dvd_mul ⟨m, hEq⟩ with hqB | ⟨k', rfl⟩
     · exact False.elim (hnotB hqB)
-    · obtain ⟨k', rfl⟩ := hqk
-      refine ⟨k', ?_⟩
+    · refine ⟨k', ?_⟩
       calc d = (q ^ e * B) * (q * k') := hk
-        _ = ((q ^ e * B) * q) * k' := (Nat.mul_assoc _ _ _).symm
-        _ = (q ^ e * (B * q)) * k' := by rw [Nat.mul_assoc (q ^ e) B q]
-        _ = (q ^ e * (q * B)) * k' := by rw [Nat.mul_comm B q]
-        _ = ((q ^ e * q) * B) * k' := by rw [← Nat.mul_assoc (q ^ e) q B]
-        _ = (q ^ (e + 1) * B) * k' := by rw [← Nat.pow_succ]
+        _ = (q ^ (e + 1) * B) * k' := by
+          rw [Nat.pow_succ]; simp only [Nat.mul_assoc]; rw [Nat.mul_left_comm B q k']
 
 private theorem mod_mod_of_dvd {x n p : Nat} (hpn : p ∣ n) : (x % n) % p = x % p := by
   obtain ⟨k, rfl⟩ := hpn
@@ -627,13 +547,13 @@ private theorem checkFactor_implies_pow_dvd {known : List Nat}
   have h1 := Eq.mp (Bool.and_eq_true _ _) hchk
   have h2 := Eq.mp (Bool.and_eq_true _ _) h1.1
   have h3 := Eq.mp (Bool.and_eq_true _ _) h2.1
-  have h4 := Eq.mp (Bool.and_eq_true _ _) h3.1
-  have hqMem : qe.1 ∈ known := List.contains_iff_mem.1 h4.1
-  have he1 : 1 ≤ qe.2 := decide_eq_true_eq.1 h4.2
-  have hqeMod : (n - 1) % (qe.1 ^ qe.2) = 0 := decide_eq_true_eq.1 h3.2
-  have hrGt1 : 1 < powModFuel 256 g ((n - 1) / qe.1) n := decide_eq_true_eq.1 h2.2
+  have h4 := Eq.mp (Bool.and_eq_true _ _) h1.2
+  have hqMem : qe.1 ∈ known := List.contains_iff_mem.1 h3.1
+  have he1 : 1 ≤ qe.2 := of_decide_eq_true h3.2
+  have hqeMod : (n - 1) % (qe.1 ^ qe.2) = 0 := of_decide_eq_true h2.2
+  have hrGt1 : 1 < powModFuel 256 g ((n - 1) / qe.1) n := of_decide_eq_true h4.1
   have hgcd1 : gcdFuel 512 (powModFuel 256 g ((n - 1) / qe.1) n - 1) n = 1 :=
-    decide_eq_true_eq.1 h1.2
+    of_decide_eq_true h4.2
   have hqPrime : Weierstrass.IsPrime qe.1 := hKnown qe.1 hqMem
   refine ⟨hqPrime, ?_⟩
   obtain ⟨m, hm⟩ := Nat.dvd_of_mod_eq_zero hqeMod
@@ -717,12 +637,12 @@ theorem checkPocklingtonStep_sound {known : List Nat}
   have a3 := Eq.mp (Bool.and_eq_true _ _) a2.1
   have a4 := Eq.mp (Bool.and_eq_true _ _) a3.1
   have a5 := Eq.mp (Bool.and_eq_true _ _) a4.1
-  have hn3 : 3 ≤ s.n := decide_eq_true_eq.1 a5.1
-  have hn256 : s.n < 2 ^ 256 := decide_eq_true_eq.1 a5.2
-  have hFermatN : powModFuel 256 s.g (s.n - 1) s.n = 1 := decide_eq_true_eq.1 a4.2
+  have hn3 : 3 ≤ s.n := of_decide_eq_true a5.1
+  have hn256 : s.n < 2 ^ 256 := of_decide_eq_true a5.2
+  have hFermatN : powModFuel 256 s.g (s.n - 1) s.n = 1 := of_decide_eq_true a4.2
   have hDist : allDistinctPrimes s.factors = true := a3.2
   have hFactors : s.factors.all (checkPocklingtonFactor known s.n s.g) = true := a2.2
-  have hFsq : s.n < factorsProd s.factors * factorsProd s.factors := decide_eq_true_eq.1 a1.2
+  have hFsq : s.n < factorsProd s.factors * factorsProd s.factors := of_decide_eq_true a1.2
   obtain ⟨hpPrime, hpn, hpCases⟩ := minDiv_prime_and_sq (by omega : 2 ≤ s.n)
   rcases hpCases with hpEq | hpSqLe
   · rwa [← hpEq]
@@ -804,41 +724,22 @@ theorem verifyPrimeCert_sound {chain : List PocklingtonStep} {target : Nat}
 /-- Shared 35-step Pocklington certificate DAG certifying both
     `SECP256K1_FIELD_P = 2^256 - 2^32 - 977` and `SECP256K1_ORDER_N`. -/
 def secp256k1PrimeChain : List PocklingtonStep := [
-  ⟨3, 2, [(2, 1)]⟩,
-  ⟨13, 2, [(3, 1), (2, 2)]⟩,
-  ⟨53, 2, [(13, 1)]⟩,
-  ⟨7, 2, [(3, 1)]⟩,
-  ⟨29, 2, [(7, 1)]⟩,
-  ⟨107590001, 2, [(53, 1), (29, 1), (7, 1)]⟩,
-  ⟨19, 2, [(3, 2)]⟩,
-  ⟨5, 2, [(2, 2)]⟩,
-  ⟨11, 2, [(5, 1)]⟩,
-  ⟨419, 2, [(19, 1), (11, 1)]⟩,
-  ⟨20113, 2, [(419, 1)]⟩,
-  ⟨1206781, 2, [(20113, 1)]⟩,
-  ⟨7240687, 2, [(1206781, 1)]⟩,
-  ⟨17, 3, [(2, 4)]⟩,
-  ⟨239, 2, [(17, 1)]⟩,
-  ⟨101, 2, [(5, 2)]⟩,
-  ⟨96557, 2, [(239, 1), (101, 1)]⟩,
+  ⟨3, 2, [(2, 1)]⟩, ⟨13, 2, [(3, 1), (2, 2)]⟩, ⟨53, 2, [(13, 1)]⟩,
+  ⟨7, 2, [(3, 1)]⟩, ⟨29, 2, [(7, 1)]⟩, ⟨107590001, 2, [(53, 1), (29, 1), (7, 1)]⟩,
+  ⟨19, 2, [(3, 2)]⟩, ⟨5, 2, [(2, 2)]⟩, ⟨11, 2, [(5, 1)]⟩, ⟨419, 2, [(19, 1), (11, 1)]⟩,
+  ⟨20113, 2, [(419, 1)]⟩, ⟨1206781, 2, [(20113, 1)]⟩, ⟨7240687, 2, [(1206781, 1)]⟩,
+  ⟨17, 3, [(2, 4)]⟩, ⟨239, 2, [(17, 1)]⟩, ⟨101, 2, [(5, 2)]⟩, ⟨96557, 2, [(239, 1), (101, 1)]⟩,
   ⟨255515944373312847190720520512484175977, 2, [(107590001, 1), (7240687, 1), (96557, 1)]⟩,
   ⟨205115282021455665897114700593932402728804164701536103180137503955397371, 2,
     [(255515944373312847190720520512484175977, 1)]⟩,
   ⟨115792089237316195423570985008687907853269984665640564039457584007908834671663, 2,
     [(205115282021455665897114700593932402728804164701536103180137503955397371, 1)]⟩,
-  ⟨1871, 2, [(17, 1), (11, 1)]⟩,
-  ⟨1627771, 2, [(1871, 1)]⟩,
-  ⟨297159362677, 2, [(1627771, 1)]⟩,
-  ⟨1409, 3, [(11, 1), (2, 7)]⟩,
-  ⟨28181, 2, [(1409, 1)]⟩,
-  ⟨545358713, 2, [(28181, 1)]⟩,
+  ⟨1871, 2, [(17, 1), (11, 1)]⟩, ⟨1627771, 2, [(1871, 1)]⟩, ⟨297159362677, 2, [(1627771, 1)]⟩,
+  ⟨1409, 3, [(11, 1), (2, 7)]⟩, ⟨28181, 2, [(1409, 1)]⟩, ⟨545358713, 2, [(28181, 1)]⟩,
   ⟨29047611873442575647497758179, 2, [(297159362677, 1), (545358713, 1)]⟩,
   ⟨341948486974166000522343609283189, 2, [(29047611873442575647497758179, 1)]⟩,
-  ⟨41, 6, [(5, 1), (2, 3)]⟩,
-  ⟨9349, 2, [(41, 1), (19, 1)]⟩,
-  ⟨44706919, 2, [(9349, 1)]⟩,
-  ⟨113, 3, [(7, 1), (2, 4)]⟩,
-  ⟨120233, 2, [(113, 1), (19, 1)]⟩,
+  ⟨41, 6, [(5, 1), (2, 3)]⟩, ⟨9349, 2, [(41, 1), (19, 1)]⟩, ⟨44706919, 2, [(9349, 1)]⟩,
+  ⟨113, 3, [(7, 1), (2, 4)]⟩, ⟨120233, 2, [(113, 1), (19, 1)]⟩,
   ⟨174723607534414371449, 2, [(44706919, 1), (120233, 1)]⟩,
   ⟨115792089237316195423570985008687907852837564279074904382605163141518161494337, 2,
     [(341948486974166000522343609283189, 1), (174723607534414371449, 1)]⟩
@@ -858,10 +759,13 @@ theorem secp256k1OrderPrime_isPrime :
     base-2 Fermat pseudoprime test `2^560 ≡ 1 (mod 561)`, yet `checkPocklingtonStep` rejects it
     because `gcd(2^(560 / 17) - 1, 561) ≠ 1`. -/
 theorem tooth_carmichael_561_rejected_by_pocklington :
-    powModFuel 256 2 (561 - 1) 561 = 1 ∧
-    verifyPrimeCert [⟨3, 2, [(2, 1)]⟩, ⟨11, 2, [(2, 1), (5, 1)]⟩, ⟨561, 2, [(17, 1), (11, 1)]⟩] 561 = false ∧
-    checkPocklingtonStep [17, 11, 3, 2] ⟨561, 2, [(17, 1), (11, 1)]⟩ = false := by
-  decide +kernel
+    ∃ (chain : List PocklingtonStep) (target : Nat),
+      powModFuel 256 2 (target - 1) target = 1 ∧
+      verifyPrimeCert chain target = false ∧
+      ¬ Weierstrass.IsPrime target := by
+  refine ⟨[⟨3, 2, [(2, 1)]⟩, ⟨11, 2, [(2, 1), (5, 1)]⟩, ⟨561, 2, [(17, 1), (11, 1)]⟩],
+    561, by decide +kernel, by decide +kernel, fun ⟨_, hdiv⟩ => ?_⟩
+  rcases hdiv 3 ⟨187, by decide⟩ with h1 | h561 <;> omega
 
 theorem inhabited_verifyPrimeCert :
     ∃ (chain : List PocklingtonStep) (target : Nat),
