@@ -229,3 +229,16 @@ pub fn info_text() -> String {
     ));
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn frontier_names_and_legacy_alias_match_wire_sizes() {
+        let compact = Scheme::by_name("fts-compact-1122").unwrap();
+        let full = Scheme::by_name("fts-frontier-2338").unwrap();
+        assert_eq!(Scheme::by_name("fts-frontier-1058").unwrap(), full);
+        assert_eq!(compact.info().field_u64("signature_bytes").unwrap(), 1122);
+        assert_eq!(full.info().field_u64("signature_bytes").unwrap(), 2338);
+    }
+}
