@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.CodingTheory.PolyMv3 — constructive trivariate polynomials `F[X][Y][Z]`
+# Qsag.Coding.PolyMv3 — constructive trivariate polynomials `F[X][Y][Z]`
 
 `UPoly R` is the ring of trimmed coefficient lists over a lawful commutative ring with
 decidable equality; it is again such a ring, so `Poly3 F := UPoly (UPoly (UPoly F))` is
@@ -10,8 +10,8 @@ specialization `Q(X, α + βX, P(X))` with its degree bound, and the Taylor shif
 derivatives (multiplicativity of the shift is the Leibniz rule).
 -/
 
-public import Qsag.AffineProximityGaps
-import all Qsag.AffineProximityGaps
+public import Qsag.Coding.AffineProximityGaps
+import all Qsag.Coding.AffineProximityGaps
 public import Qsag.Tactic.ConstructiveRing
 
 public section

@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.CodingTheory.GoldilocksCharacteristic — small naturals are invertible
+# Qsag.Coding.GoldilocksCharacteristic — small naturals are invertible
 
 `Poly3.simple_root_of_hasse`, and with it `nonExcluded_pairs_card_le` and
 `cwyz26_affineMcaBound_sliced`, assume that `1, …, deg_Z Q` are nonzero in the field. Here
@@ -8,13 +8,13 @@ that is proved for `Goldilocks` and for `QuarticGoldilocks`, for every `k` below
 Goldilocks prime; an injective ring homomorphism transports it to any other extension.
 -/
 
-public import Qsag.ConcreteSecurityBudget
-public import Qsag.CodingTheory.SimpleRootStratification
-import all Qsag.ConcreteSecurityBudget
-import all Qsag.CodingTheory.SimpleRootStratification
-import all Qsag.CodingTheory.PolyMv3
-import all Qsag.AffineProximityGaps
-import all Qsag.Goldilocks
+public import Qsag.Oracle.ConcreteSecurityBudget
+public import Qsag.Coding.SimpleRootStratification
+import all Qsag.Oracle.ConcreteSecurityBudget
+import all Qsag.Coding.SimpleRootStratification
+import all Qsag.Coding.PolyMv3
+import all Qsag.Coding.AffineProximityGaps
+import all Qsag.Math.Goldilocks
 
 public section
 namespace Qsag

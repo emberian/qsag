@@ -1,16 +1,16 @@
 module
 /-
-# Qsag.CodingTheory.MatrixDet — Constructive Determinants over Commutative Rings
+# Qsag.Coding.MatrixDet — Constructive Determinants over Commutative Rings
 
 Constructive `k × k` determinant theory over any `[LawfulCommRing R]` (`0 Classical.choice`):
 `Mat.rangeSum`, `Mat.det`, `Mat.map_det`, `Mat.degFn_det_weighted_le`, `Mat.det_col0_unit`,
 `Mat.det_lower_tri_const`, `Mat.det_lower_tri_one`, `Mat.det_idMat`, and `Mat.det_matMul`.
 -/
 
-public import Qsag.CodingTheory.PolyMv3
-import all Qsag.CodingTheory.PolyMv3
-import all Qsag.AffineProximityGaps
-import all Qsag.Goldilocks
+public import Qsag.Coding.PolyMv3
+import all Qsag.Coding.PolyMv3
+import all Qsag.Coding.AffineProximityGaps
+import all Qsag.Math.Goldilocks
 
 public section
 namespace Qsag

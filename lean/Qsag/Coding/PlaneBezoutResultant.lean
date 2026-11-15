@@ -7,16 +7,16 @@ in the vertical variable is bounded by counting projected resultant roots and th
 in each fiber. This gives a cubic degree bound, avoiding a separating shear or an infinite
 base field. Repeated first coordinates are permitted; primitivity is essential.
 -/
-public import Qsag.CodingTheory.BivariateGauss
-public import Qsag.CodingTheory.SylvesterElimination
-public import Qsag.CodingTheory.JohnsonSetSystem
-public import Qsag.CodingTheory.AffineIncidenceBound
-import all Qsag.CodingTheory.BivariateGauss
-import all Qsag.CodingTheory.SylvesterElimination
-import all Qsag.CodingTheory.SylvesterResultant
-import all Qsag.CodingTheory.DynamicGcdSplit
-import all Qsag.CodingTheory.AffineIncidenceBound
-import all Qsag.Goldilocks
+public import Qsag.Coding.BivariateGauss
+public import Qsag.Coding.SylvesterElimination
+public import Qsag.Coding.JohnsonSetSystem
+public import Qsag.Coding.AffineIncidenceBound
+import all Qsag.Coding.BivariateGauss
+import all Qsag.Coding.SylvesterElimination
+import all Qsag.Coding.SylvesterResultant
+import all Qsag.Coding.DynamicGcdSplit
+import all Qsag.Coding.AffineIncidenceBound
+import all Qsag.Math.Goldilocks
 
 public section
 namespace Qsag

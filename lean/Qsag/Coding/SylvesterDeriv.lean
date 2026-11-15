@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.CodingTheory.SylvesterDeriv — Dual Numbers & Formal Resultant Derivative Identity
+# Qsag.Coding.SylvesterDeriv — Dual Numbers & Formal Resultant Derivative Identity
 
 Constructive dual numbers `Dual R` (`R[ε]/(ε²)`) and directional resultant derivative `sylResDeriv`:
 * `sylResDeriv_of_factor`: if `C1 = (X - C ζ) * Q` and `P0.eval ζ = 0`, then
@@ -10,12 +10,12 @@ Constructive dual numbers `Dual R` (`R[ε]/(ε²)`) and directional resultant de
 * `degFn_sylResDeriv_le`: weighted `DegFn` bound `w (sylResDeriv m N C1 P0 B) ≤ h_A * h_B`.
 -/
 
-public import Qsag.CodingTheory.SylvesterElimination
-import all Qsag.CodingTheory.PolyMv3
-import all Qsag.CodingTheory.MatrixDet
-import all Qsag.CodingTheory.SylvesterElimination
-import all Qsag.AffineProximityGaps
-import all Qsag.Goldilocks
+public import Qsag.Coding.SylvesterElimination
+import all Qsag.Coding.PolyMv3
+import all Qsag.Coding.MatrixDet
+import all Qsag.Coding.SylvesterElimination
+import all Qsag.Coding.AffineProximityGaps
+import all Qsag.Math.Goldilocks
 
 public section
 namespace Qsag

@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.CodingTheory.ModMonicAlgebra — Monic Quotient Algebras & Double-Root Derivative Vanishing
+# Qsag.Coding.ModMonicAlgebra — Monic Quotient Algebras & Double-Root Derivative Vanishing
 
 Constructive quotient ring `ModMonic M` (`R[W]/(M(W))` for monic `M` of degree `≥ 1`,
 `0 Classical.choice`):
@@ -12,15 +12,15 @@ Constructive quotient ring `ModMonic M` (`R[W]/(M(W))` for monic `M` of degree `
   `R ↪ R[T₁]/(G) ↪ R₁[T₂]/(G₁)`).
 -/
 
-public import Qsag.CodingTheory.SylvesterDeriv
-import all Qsag.CodingTheory.UniversalHenselLift
-import all Qsag.CodingTheory.PolyMv3
-import all Qsag.CodingTheory.DynamicGcdSplit
-import all Qsag.CodingTheory.MatrixDet
-import all Qsag.CodingTheory.SylvesterElimination
-import all Qsag.CodingTheory.SylvesterDeriv
-import all Qsag.AffineProximityGaps
-import all Qsag.Goldilocks
+public import Qsag.Coding.SylvesterDeriv
+import all Qsag.Coding.UniversalHenselLift
+import all Qsag.Coding.PolyMv3
+import all Qsag.Coding.DynamicGcdSplit
+import all Qsag.Coding.MatrixDet
+import all Qsag.Coding.SylvesterElimination
+import all Qsag.Coding.SylvesterDeriv
+import all Qsag.Coding.AffineProximityGaps
+import all Qsag.Math.Goldilocks
 
 public section
 namespace Qsag

@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.CodingTheory.SylvesterElimination — Constructive Sylvester Determinant & Linear-Factor Identity
+# Qsag.Coding.SylvesterElimination — Constructive Sylvester Determinant & Linear-Factor Identity
 
 Constructive Sylvester matrix determinant `sylRes m N A B` over any `[LawfulCommRing R] [DecidableEq R]`
 (`0 Classical.choice`, `0` subresultant sequences):
@@ -10,13 +10,13 @@ Constructive Sylvester matrix determinant `sylRes m N A B` over any `[LawfulComm
 * `degFn_sylRes_le`: weighted `DegFn` bound `w (sylRes m N A B) ≤ m * h_B + N * h_A - m * N ≤ h_A * h_B`.
 -/
 
-public import Qsag.CodingTheory.DynamicGcdSplit
-public import Qsag.CodingTheory.MatrixDet
-import all Qsag.CodingTheory.PolyMv3
-import all Qsag.CodingTheory.DynamicGcdSplit
-import all Qsag.CodingTheory.MatrixDet
-import all Qsag.AffineProximityGaps
-import all Qsag.Goldilocks
+public import Qsag.Coding.DynamicGcdSplit
+public import Qsag.Coding.MatrixDet
+import all Qsag.Coding.PolyMv3
+import all Qsag.Coding.DynamicGcdSplit
+import all Qsag.Coding.MatrixDet
+import all Qsag.Coding.AffineProximityGaps
+import all Qsag.Math.Goldilocks
 
 public section
 namespace Qsag

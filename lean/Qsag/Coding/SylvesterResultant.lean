@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.CodingTheory.SylvesterResultant — constructive elimination of `Z` with a degree bound
+# Qsag.Coding.SylvesterResultant — constructive elimination of `Z` with a degree bound
 
 For `A, B ∈ K[Y][Z]` over a field, `eliminant A B = (u, v, r)` satisfies the Bézout
 identity `u·A + v·B = r ∈ K[Y]` with `deg r ≤ deg_{Y,Z} A · deg_{Y,Z} B`, and `r ≠ 0` exactly
@@ -14,10 +14,10 @@ coefficient of `u·A + v·B`. There is exactly one more unknown than equations w
 the Sylvester determinant; equality with that determinant is not claimed here.
 -/
 
-public import Qsag.CodingTheory.PolyMv3
-import all Qsag.CodingTheory.PolyMv3
-public import Qsag.AffineProximityGaps
-import all Qsag.AffineProximityGaps
+public import Qsag.Coding.PolyMv3
+import all Qsag.Coding.PolyMv3
+public import Qsag.Coding.AffineProximityGaps
+import all Qsag.Coding.AffineProximityGaps
 
 public section
 namespace Qsag
