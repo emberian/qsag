@@ -446,6 +446,50 @@ pub fn index_unique_program_ops(
     (unique, step_to_uid, step_c0)
 }
 
+/// Compact `(kind_id, kind_arg)` encoding of a [`ConstraintKind`] matching `air_row_group_b.comp`.
+#[cfg(feature = "vulkan")]
+#[inline]
+pub(crate) fn encode_constraint_kind(kind: ConstraintKind) -> (u32, u32) {
+    match kind {
+        ConstraintKind::Idle => (0, 0),
+        ConstraintKind::StatefulHmsgBlock0 => (1, 0),
+        ConstraintKind::StatefulHmsgBlock1 => (2, 0),
+        ConstraintKind::StatefulHmsgSqueeze => (3, 0),
+        ConstraintKind::StatelessDeriveBlock0 => (4, 0),
+        ConstraintKind::StatelessDeriveBlock1 => (5, 0),
+        ConstraintKind::StatelessDecompLimb { limb_idx } => (6, u32::from(limb_idx)),
+        ConstraintKind::ForsRootsSpongeInit => (7, 0),
+        ConstraintKind::ForsLeafHash { pack_slot } => (8, u32::from(pack_slot)),
+        ConstraintKind::ForsMerkleBlockA => (9, 0),
+        ConstraintKind::ForsMerkleBlockB {
+            is_tree_last,
+            is_odd_tree,
+        } => (
+            10,
+            u32::from(is_tree_last) | (u32::from(is_odd_tree) << 1),
+        ),
+        ConstraintKind::ForsRootsPairAbsorb { is_last_pair } => (11, u32::from(is_last_pair)),
+        ConstraintKind::ForsRootsFinalSqueeze => (12, 0),
+        ConstraintKind::DetTreeHmsgBlock0 => (13, 0),
+        ConstraintKind::DetTreeHmsgBlock1 => (14, 0),
+        ConstraintKind::HmsgDecompLimb { limb_idx } => (15, u32::from(limb_idx)),
+        ConstraintKind::WotsTellInit => (16, 0),
+        ConstraintKind::WotsChainStep0 { pack_slot } => (17, u32::from(pack_slot)),
+        ConstraintKind::WotsChainStep1 => (18, 0),
+        ConstraintKind::WotsChainStep2 { is_odd } => (19, u32::from(is_odd)),
+        ConstraintKind::WotsTellPairAbsorb { is_last_pair } => (20, u32::from(is_last_pair)),
+        ConstraintKind::WotsTellFinalSqueeze => (21, 0),
+        ConstraintKind::XmssMerkleBlockA => (22, 0),
+        ConstraintKind::XmssMerkleBlockB {
+            is_layer_last,
+            is_top_final,
+        } => (
+            23,
+            u32::from(is_layer_last) | (u32::from(is_top_final) << 1),
+        ),
+    }
+}
+
 // ============================================================================
 // 1. Prover Witness Generation
 // ============================================================================

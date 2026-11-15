@@ -742,6 +742,18 @@ pub fn verify_individual_signature(
         return false;
     }
     let (_, mu) = compute_message_mu(pk, msg);
+    verify_individual_signature_with_mu(pk, mu, sig)
+}
+
+/// Verify a single `ValidatorSignature` against a precomputed `mu = H_msg_mu(pk, msg)`.
+pub(crate) fn verify_individual_signature_with_mu(
+    pk: &ValidatorPublicKey,
+    mu: Digest5,
+    sig: &ValidatorSignature,
+) -> bool {
+    if pk.profile != sig.profile {
+        return false;
+    }
 
     match pk.profile {
         AggSigProfile::JortsPoseidon2 => {

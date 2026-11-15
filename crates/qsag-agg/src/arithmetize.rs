@@ -41,7 +41,7 @@ use crate::pcs::{
 };
 use crate::sig::{
     AggSigProfile, Digest5, SignerBitmap, SigningMode, ValidatorPublicKey, ValidatorSignature,
-    compute_message_mu, validate_unique_active_committee, verify_individual_signature,
+    compute_message_mu, validate_unique_active_committee, verify_individual_signature_with_mu,
 };
 use crate::sponge::{
     FiatShamirTranscript, InstanceBound, cshake256_32, encode_multi_frame, shake256_into,
@@ -615,19 +615,76 @@ fn resolve_batch_statement(
     let active_indices = bitmap.active_indices();
     let shape = batch_shape(profile, shard_signer_counts, active_indices.len())?;
     let signing_mode_digest = compute_signing_mode_digest(pks, &active_indices, mode)?;
+    let resolve_one = |pos: usize, val_idx: usize| -> ShardSigner {
+        let pk = pks[val_idx];
+        let msg: &[u8] = match mode {
+            SigningMode::SharedMessage(m) => m,
+            SigningMode::PerSignerMessages(ms) => ms[pos],
+        };
+        let (_, mu) = compute_message_mu(&pk, msg);
+        ShardSigner { pk, mu }
+    };
+
+    #[cfg(feature = "std")]
+    let signers = if active_indices.len() >= 4 && crate::parallel_workers() > 1 {
+        let workers = crate::available_worker_budget().min(active_indices.len());
+        if workers > 1 {
+            let chunk = active_indices.len().div_ceil(workers);
+            let dummy = ShardSigner {
+                pk: pks[active_indices[0]],
+                mu: [Goldilocks::ZERO; 5],
+            };
+            let mut out = vec![dummy; active_indices.len()];
+            let resolve_ref = &resolve_one;
+            let idx_ref = active_indices.as_slice();
+            std::thread::scope(|scope| {
+                let first_len = chunk.min(out.len());
+                let (head_out, mut rest_out) = out.split_at_mut(first_len);
+                let mut offset = first_len;
+                let mut handles = Vec::with_capacity(workers.saturating_sub(1));
+                while !rest_out.is_empty() {
+                    let take = chunk.min(rest_out.len());
+                    let (sub_out, next_out) = rest_out.split_at_mut(take);
+                    let base = offset;
+                    offset += take;
+                    rest_out = next_out;
+                    handles.push(crate::spawn_bounded(scope, move || {
+                        for (local, slot) in sub_out.iter_mut().enumerate() {
+                            let pos = base + local;
+                            *slot = resolve_ref(pos, idx_ref[pos]);
+                        }
+                    }));
+                }
+                for (pos, slot) in head_out.iter_mut().enumerate() {
+                    *slot = resolve_ref(pos, idx_ref[pos]);
+                }
+                for h in handles {
+                    crate::join_worker(h);
+                }
+            });
+            out
+        } else {
+            active_indices
+                .iter()
+                .enumerate()
+                .map(|(pos, &val_idx)| resolve_one(pos, val_idx))
+                .collect()
+        }
+    } else {
+        active_indices
+            .iter()
+            .enumerate()
+            .map(|(pos, &val_idx)| resolve_one(pos, val_idx))
+            .collect()
+    };
+
+    #[cfg(not(feature = "std"))]
     let signers = active_indices
         .iter()
         .enumerate()
-        .map(|(pos, &val_idx)| {
-            let pk = pks[val_idx];
-            let msg: &[u8] = match mode {
-                SigningMode::SharedMessage(m) => m,
-                SigningMode::PerSignerMessages(ms) => ms[pos],
-            };
-            let (_, mu) = compute_message_mu(&pk, msg);
-            ShardSigner { pk, mu }
-        })
+        .map(|(pos, &val_idx)| resolve_one(pos, val_idx))
         .collect();
+
     Some(BatchStatement {
         shape,
         signers,
@@ -663,20 +720,38 @@ fn build_shard_witness(
     };
 
     #[cfg(feature = "std")]
-    if num_signer_slots >= 2 {
-        let w_threads = crate::parallel_pow2_workers(num_signer_slots);
-        let chunk_slots = num_signer_slots / w_threads;
-        let fill_ref = &fill_slot;
-        std::thread::scope(|scope| {
-            for (t_idx, sub_rows) in rows.chunks_mut(chunk_slots * r_rows).enumerate() {
-                crate::spawn_bounded(scope, move || {
-                    for (off, slot_rows) in sub_rows.chunks_mut(r_rows).enumerate() {
-                        fill_ref(t_idx * chunk_slots + off, slot_rows);
-                    }
-                });
-            }
-        });
-        return rows.into_flattened();
+    if num_signer_slots >= 4 && crate::parallel_workers() > 1 {
+        let workers = crate::available_worker_budget().min(num_signer_slots);
+        if workers > 1 {
+            let chunk_slots = num_signer_slots.div_ceil(workers);
+            let fill_ref = &fill_slot;
+            std::thread::scope(|scope| {
+                let first_slots = chunk_slots.min(num_signer_slots);
+                let (head_rows, mut rest_rows) = rows.split_at_mut(first_slots * r_rows);
+                let mut base_slot = first_slots;
+                let mut handles = Vec::with_capacity(workers.saturating_sub(1));
+                while !rest_rows.is_empty() {
+                    let rem_slots = rest_rows.len() / r_rows;
+                    let take_slots = chunk_slots.min(rem_slots);
+                    let (sub_rows, next_rows) = rest_rows.split_at_mut(take_slots * r_rows);
+                    let start_slot = base_slot;
+                    base_slot += take_slots;
+                    rest_rows = next_rows;
+                    handles.push(crate::spawn_bounded(scope, move || {
+                        for (off, slot_rows) in sub_rows.chunks_mut(r_rows).enumerate() {
+                            fill_ref(start_slot + off, slot_rows);
+                        }
+                    }));
+                }
+                for (off, slot_rows) in head_rows.chunks_mut(r_rows).enumerate() {
+                    fill_ref(off, slot_rows);
+                }
+                for h in handles {
+                    crate::join_worker(h);
+                }
+            });
+            return rows.into_flattened();
+        }
     }
     for (s, slot_rows) in rows.chunks_mut(r_rows).enumerate() {
         fill_slot(s, slot_rows);
@@ -1462,14 +1537,64 @@ pub fn prove_shard_batch_with_config(
     if sigs.len() != signers.len() {
         return None;
     }
-    for (pos, signer) in signers.iter().enumerate() {
-        let msg: &[u8] = match mode {
-            SigningMode::SharedMessage(m) => m,
-            SigningMode::PerSignerMessages(ms) => ms[pos],
-        };
-        if !verify_individual_signature(&signer.pk, msg, &sigs[pos]) {
-            return None;
+    #[cfg(feature = "std")]
+    let all_sigs_valid = if signers.len() >= 4 && crate::parallel_workers() > 1 {
+        let workers = crate::available_worker_budget().min(signers.len());
+        if workers > 1 {
+            let chunk = signers.len().div_ceil(workers);
+            let ok = core::sync::atomic::AtomicBool::new(true);
+            let ok_ref = &ok;
+            std::thread::scope(|scope| {
+                let slices: Vec<_> = signers.chunks(chunk).zip(sigs.chunks(chunk)).collect();
+                let tails: Vec<_> = slices[1..]
+                    .iter()
+                    .map(|&(sub_signers, sub_sigs)| {
+                        crate::spawn_bounded(scope, move || {
+                            for (signer, sig) in sub_signers.iter().zip(sub_sigs.iter()) {
+                                if !ok_ref.load(core::sync::atomic::Ordering::Relaxed) {
+                                    return;
+                                }
+                                if !verify_individual_signature_with_mu(&signer.pk, signer.mu, sig)
+                                {
+                                    ok_ref.store(false, core::sync::atomic::Ordering::Relaxed);
+                                    return;
+                                }
+                            }
+                        })
+                    })
+                    .collect();
+                for (signer, sig) in slices[0].0.iter().zip(slices[0].1.iter()) {
+                    if !ok_ref.load(core::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    if !verify_individual_signature_with_mu(&signer.pk, signer.mu, sig) {
+                        ok_ref.store(false, core::sync::atomic::Ordering::Relaxed);
+                        break;
+                    }
+                }
+                for h in tails {
+                    crate::join_worker(h);
+                }
+            });
+            ok.load(core::sync::atomic::Ordering::Relaxed)
+        } else {
+            signers.iter().zip(sigs.iter()).all(|(signer, sig)| {
+                verify_individual_signature_with_mu(&signer.pk, signer.mu, sig)
+            })
         }
+    } else {
+        signers
+            .iter()
+            .zip(sigs.iter())
+            .all(|(signer, sig)| verify_individual_signature_with_mu(&signer.pk, signer.mu, sig))
+    };
+    #[cfg(not(feature = "std"))]
+    let all_sigs_valid = signers
+        .iter()
+        .zip(sigs.iter())
+        .all(|(signer, sig)| verify_individual_signature_with_mu(&signer.pk, signer.mu, sig));
+    if !all_sigs_valid {
+        return None;
     }
 
     // 1. Build every shard's witness table and commit them under ONE Merkle-Canopy tree.
@@ -1496,13 +1621,21 @@ pub fn prove_shard_batch_with_config(
         )
     };
     #[cfg(feature = "std")]
-    let witnesses: Vec<Vec<Goldilocks>> = std::thread::scope(|scope| {
-        let build_ref = &build_witness;
-        let handles: Vec<_> = (0..shard_ranges.len())
-            .map(|shard_idx| crate::spawn_bounded(scope, move || build_ref(shard_idx)))
-            .collect();
-        handles.into_iter().map(crate::join_worker).collect()
-    });
+    let witnesses: Vec<Vec<Goldilocks>> = if shard_ranges.len() > 1 && crate::parallel_workers() > 1
+    {
+        std::thread::scope(|scope| {
+            let build_ref = &build_witness;
+            let tails: Vec<_> = (1..shard_ranges.len())
+                .map(|shard_idx| crate::spawn_bounded(scope, move || build_ref(shard_idx)))
+                .collect();
+            let mut out = Vec::with_capacity(shard_ranges.len());
+            out.push(build_ref(0));
+            out.extend(tails.into_iter().map(crate::join_worker));
+            out
+        })
+    } else {
+        (0..shard_ranges.len()).map(build_witness).collect()
+    };
     #[cfg(not(feature = "std"))]
     let witnesses: Vec<Vec<Goldilocks>> = (0..shard_ranges.len()).map(build_witness).collect();
     let pcs_salt_seed = cshake256_32(b"QSAG.LEAF.PCS_SALT/v4", blinding_seed);

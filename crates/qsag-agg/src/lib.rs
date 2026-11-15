@@ -124,10 +124,14 @@ fn join_worker<T>(handle: ScopedWorker<'_, T>) -> T {
     }
 }
 
-/// Cached worker budget (`1..=64`), optionally restricted with `QSAG_WORKERS`.
+/// Dynamic worker-limit override (`0` = unrestricted up to `base_parallel_workers()`).
+#[cfg(feature = "std")]
+static WORKER_LIMIT_OVERRIDE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 #[cfg(feature = "std")]
 #[inline]
-pub(crate) fn parallel_workers() -> usize {
+fn base_parallel_workers() -> usize {
     static WORKERS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *WORKERS.get_or_init(|| {
         let available = std::thread::available_parallelism()
@@ -142,11 +146,45 @@ pub(crate) fn parallel_workers() -> usize {
     })
 }
 
+/// Cached worker budget (`1..=64`), optionally restricted by `QSAG_WORKERS` or [`with_worker_limit`].
+#[cfg(feature = "std")]
+#[inline]
+pub(crate) fn parallel_workers() -> usize {
+    let base = base_parallel_workers();
+    let cap = WORKER_LIMIT_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
+    if cap == 0 { base } else { base.min(cap) }
+}
+
+/// Execute `f` with `qsag-agg` worker concurrency clamped to `max_workers.max(1)` (for example
+/// `max_workers = 1` for deterministic single-core latency measurement alongside multi-core runs).
+#[cfg(feature = "std")]
+pub fn with_worker_limit<R>(max_workers: usize, f: impl FnOnce() -> R) -> R {
+    struct ResetGuard(usize);
+    impl Drop for ResetGuard {
+        fn drop(&mut self) {
+            WORKER_LIMIT_OVERRIDE.store(self.0, std::sync::atomic::Ordering::Release);
+        }
+    }
+    let clamped = max_workers.clamp(1, 64);
+    let prev = WORKER_LIMIT_OVERRIDE.swap(clamped, std::sync::atomic::Ordering::AcqRel);
+    let _guard = ResetGuard(prev);
+    f()
+}
+
 /// Global counter of active extra OS threads spawned across recursive/nested `qsag-agg` scopes,
 /// strictly bounded by `parallel_workers().saturating_sub(1)`.
 #[cfg(feature = "std")]
 static ACTIVE_EXTRA_WORKERS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+
+/// Best-effort count of currently unreserved worker slots (including the calling thread).
+#[cfg(feature = "std")]
+#[inline]
+pub(crate) fn available_worker_budget() -> usize {
+    let cap = parallel_workers();
+    let busy = ACTIVE_EXTRA_WORKERS.load(std::sync::atomic::Ordering::Relaxed);
+    cap.saturating_sub(busy).max(1)
+}
 
 #[cfg(feature = "std")]
 pub(crate) struct WorkerPermit(());
@@ -739,6 +777,17 @@ pub fn aggregate_signatures_with_config(
     sigs: &[ValidatorSignature],
     cfg: &HemAggConfig,
 ) -> Result<HemAggregatedProof, HemAggError> {
+    aggregate_signatures_with_committee_root(pks, None, bitmap, mode, sigs, cfg)
+}
+
+pub(crate) fn aggregate_signatures_with_committee_root(
+    pks: &[ValidatorPublicKey],
+    precomputed_committee_root: Option<[u8; 32]>,
+    bitmap: &SignerBitmap,
+    mode: &SigningMode<'_>,
+    sigs: &[ValidatorSignature],
+    cfg: &HemAggConfig,
+) -> Result<HemAggregatedProof, HemAggError> {
     let active = bitmap.active_indices();
     if active.is_empty() {
         return Err(HemAggError::EmptySigners);
@@ -767,7 +816,7 @@ pub fn aggregate_signatures_with_config(
         return Err(HemAggError::DuplicateValidatorOrProfileMismatch);
     }
 
-    let committee_root = compute_committee_root(pks);
+    let committee_root = precomputed_committee_root.unwrap_or_else(|| compute_committee_root(pks));
     let num_validators = bitmap.num_validators();
 
     let slots_for = |signers: usize| signers.next_power_of_two().max(2);
@@ -966,6 +1015,16 @@ pub fn verify_aggregate_with_regime(
     proof: &HemAggregatedProof,
     expected_regime: WhirSecurityRegime,
 ) -> bool {
+    verify_aggregate_with_committee_root(pks, None, mode, proof, expected_regime)
+}
+
+pub(crate) fn verify_aggregate_with_committee_root(
+    pks: &[ValidatorPublicKey],
+    precomputed_committee_root: Option<[u8; 32]>,
+    mode: &SigningMode<'_>,
+    proof: &HemAggregatedProof,
+    expected_regime: WhirSecurityRegime,
+) -> bool {
     let _phase = crate::profile::span("verify_aggregate");
     if proof.root.homogeneous_regime(MAX_MERGE_TREE_DEPTH) != Some(expected_regime) {
         return false;
@@ -976,7 +1035,7 @@ pub fn verify_aggregate_with_regime(
     if !validate_unique_active_committee(pks, proof.bitmap(), proof.profile) {
         return false;
     }
-    let committee_root = compute_committee_root(pks);
+    let committee_root = precomputed_committee_root.unwrap_or_else(|| compute_committee_root(pks));
     if proof.committee_root != committee_root {
         return false;
     }
@@ -1538,92 +1597,128 @@ mod tests {
         }
         let bitmap = SignerBitmap::from_active_indices(2, &[0, 1]).unwrap();
         let mode = SigningMode::SharedMessage(msg);
-        for regime in [
-            WhirSecurityRegime::Habr24Qrom128,
-            WhirSecurityRegime::BciksJohnsonQrom128,
-        ] {
-            let mut cfg = HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, make_seed(710));
-            cfg.regime = regime;
-            let start = std::time::Instant::now();
-            let proof =
-                HemAggregator::aggregate_with_config(&pks, &bitmap, &mode, &sigs, &cfg).unwrap();
-            let prove = start.elapsed();
-            let wire = proof.to_bytes();
-            assert_eq!(
-                HemAggregatedProof::from_bytes_canonical(&wire).unwrap(),
-                proof
-            );
-            let start = std::time::Instant::now();
-            assert!(HemAggregator::verify_with_regime(
-                &pks, &mode, &proof, regime
-            ));
-            std::eprintln!(
-                "aggregate {regime:?}: K=2, bytes={}, prove={prove:?}, verify={:?}",
-                wire.len(),
-                start.elapsed()
-            );
-            assert_eq!(
-                HemAggregator::verify(&pks, &mode, &proof),
-                regime == WhirSecurityRegime::default()
-            );
-            assert_eq!(
-                verify_aggregate(&pks, &mode, &proof),
-                regime == WhirSecurityRegime::default()
-            );
-            let wrong = if regime == WhirSecurityRegime::Habr24Qrom128 {
-                WhirSecurityRegime::BciksJohnsonQrom128
-            } else {
-                WhirSecurityRegime::Habr24Qrom128
-            };
-            assert!(!verify_aggregate_with_regime(&pks, &mode, &proof, wrong));
-            let mut unframed = leaf_of(&proof);
-            unframed
-                .pcs_opening
-                .common_point_evals
-                .push(GoldilocksExt4::ONE);
-            let unframed = with_leaf(&proof, unframed);
-            assert!(!verify_aggregate_with_regime(
-                &pks, &mode, &unframed, regime
-            ));
-            assert!(std::panic::catch_unwind(|| unframed.to_bytes()).is_err());
+        let regime = WhirSecurityRegime::BciksJohnsonQrom128;
+        let wrong = WhirSecurityRegime::BciksJohnsonClassical128;
+        let mut cfg = HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, make_seed(710));
+        cfg.regime = regime;
+        let start = std::time::Instant::now();
+        let proof =
+            HemAggregator::aggregate_with_config(&pks, &bitmap, &mode, &sigs, &cfg).unwrap();
+        let prove = start.elapsed();
+        let wire = proof.to_bytes();
+        assert_eq!(
+            HemAggregatedProof::from_bytes_canonical(&wire).unwrap(),
+            proof
+        );
+        let start = std::time::Instant::now();
+        assert!(HemAggregator::verify_with_regime(
+            &pks, &mode, &proof, regime
+        ));
+        std::eprintln!(
+            "aggregate {regime:?}: K=2, bytes={}, prove={prove:?}, verify={:?}",
+            wire.len(),
+            start.elapsed()
+        );
+        assert!(HemAggregator::verify(&pks, &mode, &proof));
+        assert!(verify_aggregate(&pks, &mode, &proof));
+        assert!(!verify_aggregate_with_regime(&pks, &mode, &proof, wrong));
 
-            let mut bad = leaf_of(&proof);
-            bad.schedule.stages[0].num_queries = 1;
-            assert!(!HemAggregator::verify(&pks, &mode, &with_leaf(&proof, bad)));
-
-            // The leaf verifier itself enforces the QROM-128 floor and exact regime parity.
-            let leaf = leaf_of(&proof);
-            let committee_root = compute_committee_root(&pks);
-            let profile = AggSigProfile::JortsPoseidon2;
+        // Mutating the serialized schedule's regime tag to retired capacity tags (`0`, `1`, `3`),
+        // classical-only Johnson (`2`), or unknown (`5`) must fail closed during canonical decode.
+        let leaf = leaf_of(&proof);
+        let regime_offset =
+            41 + 1 + leaf.bitmap.to_bytes().len() + 1 + 4 * leaf.shard_signer_counts.len();
+        assert_eq!(wire[regime_offset], regime as u8);
+        for bad_tag in [0u8, 1, 2, 3, 5] {
+            let mut mutated = wire.clone();
+            mutated[regime_offset] = bad_tag;
             assert_eq!(
-                verify_shard_batch(&pks, &committee_root, profile, &mode, &leaf),
-                regime == WhirSecurityRegime::default()
+                HemAggregatedProof::from_bytes_canonical(&mutated),
+                Err(HemAggError::MalformedWireBytes)
             );
-            assert!(verify_shard_batch_with_regime(
-                &pks,
-                &committee_root,
-                profile,
-                &mode,
-                &leaf,
-                regime
-            ));
-            assert!(!verify_shard_batch_with_regime(
-                &pks,
-                &committee_root,
-                profile,
-                &mode,
-                &leaf,
-                wrong
-            ));
-            // A structurally valid schedule that is not the regime's canonical one (one extra
-            // Stage-0 query) is refused before any transcript work.
-            let num_vars =
-                leaf.pcs_opening.opening.fold_sumcheck_polys.len() + leaf.schedule.early_stop_vars;
-            assert!(leaf.schedule.validate(num_vars) && leaf.schedule.is_canonical(num_vars));
-            let mut padded = leaf.schedule.clone();
-            padded.stages[0].num_queries += 1;
-            assert!(!padded.validate(num_vars) && !padded.is_canonical(num_vars));
         }
+
+        // Both prover (`aggregate_with_config`) and verifier/wire-decoder must refuse
+        // classical-only Johnson (`BciksJohnsonClassical128`, fails QROM-128 floor).
+        let mut classical_cfg = cfg.clone();
+        classical_cfg.regime = wrong;
+        assert!(
+            HemAggregator::aggregate_with_config(&pks, &bitmap, &mode, &sigs, &classical_cfg)
+                .is_err()
+        );
+        let mut classical_leaf = leaf_of(&proof);
+        classical_leaf.schedule = wrong.schedule(
+            classical_leaf.pcs_opening.opening.fold_sumcheck_polys.len()
+                + classical_leaf.schedule.early_stop_vars,
+        );
+        let classical_proof = with_leaf(&proof, classical_leaf);
+        assert!(!HemAggregator::verify(&pks, &mode, &classical_proof));
+        assert!(!verify_aggregate_with_regime(
+            &pks,
+            &mode,
+            &classical_proof,
+            wrong
+        ));
+        assert!(!verify_aggregate_with_regime(
+            &pks,
+            &mode,
+            &classical_proof,
+            regime
+        ));
+        assert_eq!(
+            HemAggregatedProof::from_bytes_canonical(&classical_proof.to_bytes()),
+            Err(HemAggError::MalformedWireBytes)
+        );
+
+        let mut unframed = leaf_of(&proof);
+        unframed
+            .pcs_opening
+            .common_point_evals
+            .push(GoldilocksExt4::ONE);
+        let unframed = with_leaf(&proof, unframed);
+        assert!(!verify_aggregate_with_regime(
+            &pks, &mode, &unframed, regime
+        ));
+        assert!(std::panic::catch_unwind(|| unframed.to_bytes()).is_err());
+
+        let mut bad = leaf_of(&proof);
+        bad.schedule.stages[0].num_queries = 1;
+        assert!(!HemAggregator::verify(&pks, &mode, &with_leaf(&proof, bad)));
+
+        // The leaf verifier itself enforces the QROM-128 floor and exact regime parity.
+        let committee_root = compute_committee_root(&pks);
+        let profile = AggSigProfile::JortsPoseidon2;
+        assert!(verify_shard_batch(
+            &pks,
+            &committee_root,
+            profile,
+            &mode,
+            &leaf
+        ));
+        assert!(verify_shard_batch_with_regime(
+            &pks,
+            &committee_root,
+            profile,
+            &mode,
+            &leaf,
+            regime
+        ));
+        assert!(!verify_shard_batch_with_regime(
+            &pks,
+            &committee_root,
+            profile,
+            &mode,
+            &leaf,
+            wrong
+        ));
+        // A structurally valid schedule that is not the regime's canonical one (one extra
+        // Stage-0 query) is refused before any transcript work.
+        let num_vars =
+            leaf.pcs_opening.opening.fold_sumcheck_polys.len() + leaf.schedule.early_stop_vars;
+        assert!(leaf.schedule.validate(num_vars) && leaf.schedule.is_canonical(num_vars));
+        let mut padded = leaf.schedule.clone();
+        padded.stages[0].num_queries += 1;
+        assert!(!padded.validate(num_vars) && !padded.is_canonical(num_vars));
     }
 
     #[test]
@@ -1636,9 +1731,9 @@ mod tests {
             .iter_mut()
             .map(|k| k.sign_stateful_for_unit_test(msg, 0).unwrap())
             .collect();
-        let make = |index, regime| {
+        let make = |index| {
             let mut cfg = HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, make_seed(712));
-            cfg.regime = regime;
+            cfg.regime = WhirSecurityRegime::BciksJohnsonQrom128;
             HemAggregator::aggregate_with_config(
                 &pks,
                 &SignerBitmap::from_active_indices(2, &[index]).unwrap(),
@@ -1648,10 +1743,12 @@ mod tests {
             )
             .unwrap()
         };
-        let a = make(0, WhirSecurityRegime::Habr24Qrom128);
+        let mut a_leaf = leaf_of(&make(0));
+        a_leaf.schedule.regime = WhirSecurityRegime::BciksJohnsonClassical128;
+        let a = with_leaf(&make(0), a_leaf);
         {
             let regime = WhirSecurityRegime::BciksJohnsonQrom128;
-            let b = make(1, regime);
+            let b = make(1);
             assert_eq!(
                 HemAggregator::merge(&pks, &mode, &a, &b),
                 Err(HemAggError::RegimeMismatch)
@@ -1677,27 +1774,19 @@ mod tests {
                 &pks,
                 &mode,
                 &mixed,
-                WhirSecurityRegime::Habr24Qrom128
+                WhirSecurityRegime::BciksJohnsonClassical128
             ));
             assert_eq!(
                 HemAggregatedProof::from_bytes_canonical(&mixed.to_bytes()),
                 Err(HemAggError::MalformedWireBytes)
             );
         }
-        for regime in [
-            WhirSecurityRegime::Habr24Qrom128,
-            WhirSecurityRegime::BciksJohnsonQrom128,
-        ] {
-            let merged =
-                HemAggregator::merge_owned(&pks, &mode, make(0, regime), make(1, regime)).unwrap();
-            assert!(HemAggregator::verify_with_regime(
-                &pks, &mode, &merged, regime
-            ));
-            assert_eq!(
-                HemAggregator::verify(&pks, &mode, &merged),
-                regime == WhirSecurityRegime::default()
-            );
-        }
+        let regime = WhirSecurityRegime::BciksJohnsonQrom128;
+        let merged = HemAggregator::merge_owned(&pks, &mode, make(0), make(1)).unwrap();
+        assert!(HemAggregator::verify_with_regime(
+            &pks, &mode, &merged, regime
+        ));
+        assert!(HemAggregator::verify(&pks, &mode, &merged));
     }
 
     #[test]
@@ -2535,27 +2624,22 @@ mod tests {
         ] {
             let (pks, sigs) = bench_keys_and_sigs(profile, 8, msg);
             let bm = SignerBitmap::from_active_indices(8, &[0, 1, 2, 3, 4, 5, 6, 7]).unwrap();
-            for regime in [
-                WhirSecurityRegime::Habr24Qrom128,
-                WhirSecurityRegime::BciksJohnsonQrom128,
-            ] {
-                let mut cfg = AggConfig::default_for(profile, make_seed(909));
-                cfg.regime = regime;
-                let start = std::time::Instant::now();
-                let proof =
-                    aggregate_signatures_with_config(&pks, &bm, &mode, &sigs, &cfg).unwrap();
-                let prove_ms = start.elapsed().as_secs_f64() * 1000.0;
-                let wire = proof.to_bytes();
-                let verify_ms = median_verify_ms(&pks, &mode, &proof);
-                assert_eq!(
-                    QsagAggregateProof::from_bytes_canonical(&wire).unwrap(),
-                    proof
-                );
-                std::println!(
-                    "AFFINE {profile:?} {regime:?} K=8 bytes={} prove_ms={prove_ms:.3} verify_median3_ms={verify_ms:.3}",
-                    wire.len()
-                );
-            }
+            let regime = WhirSecurityRegime::BciksJohnsonQrom128;
+            let mut cfg = AggConfig::default_for(profile, make_seed(909));
+            cfg.regime = regime;
+            let start = std::time::Instant::now();
+            let proof = aggregate_signatures_with_config(&pks, &bm, &mode, &sigs, &cfg).unwrap();
+            let prove_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let wire = proof.to_bytes();
+            let verify_ms = median_verify_ms(&pks, &mode, &proof);
+            assert_eq!(
+                QsagAggregateProof::from_bytes_canonical(&wire).unwrap(),
+                proof
+            );
+            std::println!(
+                "AFFINE {profile:?} {regime:?} K=8 bytes={} prove_ms={prove_ms:.3} verify_median3_ms={verify_ms:.3}",
+                wire.len()
+            );
         }
     }
 
