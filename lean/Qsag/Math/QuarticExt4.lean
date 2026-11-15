@@ -1,43 +1,7 @@
 module
-<<<<<<< lean/Qsag/Math/QuarticExt4.lean
-/-
-# Qsag.Math.QuarticExt4 — Canonical Quartic Goldilocks Field Isomorphisms and Transport
-
-Unifies the four quartic Goldilocks field representations across the codebase:
-1. `Qsag.QuarticGoldilocks` (`ConcreteSecurityBudget`, used by `Coding/*` and `Hem*`),
-2. `Qsag.GoldilocksExt4` (`SuccinctAggregationIop`, limb & Karatsuba model),
-3. `Qsag.Aggregation.GoldilocksExt4` (`Aggregation`, 32-byte codec & verifier model), and
-4. `Qsag.GoldilocksField.GoldilocksExt4` + `Ext4Poly` (`GoldilocksPrimalityAndExt4Field`,
-   primality-certified tower and direct polynomial basis `𝔽_p[v]/(v^4 - 7)`).
-
-Provides:
-- Generic constructive `RingIso R S` and `FieldIso F G` (`≃+*`) with `refl`, `symm`, `trans`,
-  and automatic inverse preservation (`RingIso.toFieldIso`),
-- `LawfulField` instances for `Qsag.GoldilocksExt4`, `Qsag.Aggregation.GoldilocksExt4`, and
-  `Qsag.GoldilocksField.GoldilocksExt4`,
-- Explicit `FieldIso` bijections connecting all four `Ext4` types,
-- Canonical 32-byte `Spec.FixedCodec` instances for `Aggregation.GoldilocksExt4` and
-  `QuarticGoldilocks`, and
-- Generic polynomial evaluation, `Nodup` domain, root-count, and Welch–Berlekamp proximity-gap
-  transport theorems across `FieldIso`.
--/
-
-public import Qsag.Spec.Primitives
-public import Qsag.Oracle.ConcreteSecurityBudget
-public import Qsag.Protocol.Aggregation.SuccinctAggregationIop
-public import Qsag.Protocol.Aggregation.Aggregation
-public import Qsag.Math.GoldilocksPrimalityAndExt4Field
-public import Qsag.Coding.AffineProximityGaps
-import all Qsag.Oracle.ConcreteSecurityBudget
-import all Qsag.Protocol.Aggregation.SuccinctAggregationIop
-import all Qsag.Protocol.Aggregation.Aggregation
-import all Qsag.Math.GoldilocksPrimalityAndExt4Field
-import Qsag.Tactic.AssuranceKit
-=======
 public import Qsag.Math.Goldilocks
 public import Qsag.Spec.Encoding
 public import Qsag.Tactic.Prelude
->>>>>>> /Users/ember/.gemini/antigravity-cli/brain/b2b581fc-3b3a-42dc-9fb9-a018aa1a91d8/scratch/optimistic/arch-layer1/lean/Qsag/Math/QuarticExt4.lean
 
 public section
 namespace Qsag
