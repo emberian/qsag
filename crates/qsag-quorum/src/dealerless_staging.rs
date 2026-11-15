@@ -2057,3 +2057,962 @@ fn stage_single_committee_subtree_mpc(
 /// stages its assigned subtree in strict isolation via authenticated binary `Keccak-f[1600]` MPC
 /// without ever reconstructing `y^(0), y^(1), y^(2)`, opens **only** `y^(3)`, and cross-verifies
 /// the global Merkle root `pk_root`.
+pub fn stage_committee_partitioned_dealerless_mpc(
+    t: usize,
+    n: usize,
+    height: u8,
+    session_id: [u8; 32],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<StagedCommitteeKeys, DealerlessStagingError> {
+    stage_committee_partitioned_inner(
+        t,
+        n,
+        height,
+        session_id,
+        party_rngs,
+        #[cfg(test)]
+        None,
+    )
+}
+
+fn stage_committee_partitioned_inner(
+    t: usize,
+    n: usize,
+    height: u8,
+    session_id: [u8; 32],
+    party_rngs: &mut [PartyPrivateRng],
+    #[cfg(test)] fault: Option<StagingFault>,
+) -> Result<StagedCommitteeKeys, DealerlessStagingError> {
+    if party_rngs.len() != n {
+        return Err(DealerlessStagingError::PartyCountMismatch {
+            expected: n,
+            got: party_rngs.len(),
+        });
+    }
+    let layout = CommitteeLayout::new(t, n, height)?;
+    check_staging_budget(height, t)?;
+
+    let pk_seed = coin_toss_pk_seed(
+        &session_id,
+        party_rngs,
+        #[cfg(test)]
+        fault,
+    )?;
+    let mac_keys = establish_dealerless_pairwise_mac_keys(&session_id, party_rngs)?;
+
+    // Fork strictly isolated per-committee RNGs exclusively from the `t` committee members' RNGs.
+    struct CommitteeJob {
+        committee: usize,
+        members: Vec<usize>,
+        leaf_indices: Vec<u64>,
+        committee_sid: [u8; 32],
+        member_rngs: Vec<PartyPrivateRng>,
+        result: Option<Result<(Vec<CommitteeShareStore>, Vec<(u64, Vec<Node>)>), DealerlessStagingError>>,
+    }
+
+    let mut jobs = Vec::with_capacity(layout.committees().len());
+    for (committee, members) in layout.committees().iter().enumerate() {
+        let c_be = (committee as u64).to_be_bytes();
+        let committee_sid = h32(b"QSAG.QUORUM.QSA.COMMITTEE.SID/v1", &[&session_id, &pk_seed, &c_be]);
+        let leaf_indices: Vec<u64> = (0..layout.leaves_per_committee())
+            .map(|epoch| layout.leaf_of(committee, epoch))
+            .collect();
+        let member_rngs: Vec<PartyPrivateRng> = members
+            .iter()
+            .map(|&member| {
+                let mut sub_seed = party_rngs[member].next_bytes32();
+                let rng = PartyPrivateRng::from_seed(sub_seed, &committee_sid);
+                wipe_bytes32(&mut sub_seed);
+                rng
+            })
+            .collect();
+        jobs.push(CommitteeJob {
+            committee,
+            members: members.clone(),
+            leaf_indices,
+            committee_sid,
+            member_rngs,
+            result: None,
+        });
+    }
+
+    #[cfg(any(test, feature = "std"))]
+    std::thread::scope(|scope| {
+        for job in &mut jobs {
+            let pk_seed_ref = &pk_seed;
+            #[cfg(test)]
+            let fault_copy = fault;
+            scope.spawn(move || {
+                job.result = Some(stage_single_committee_subtree_mpc(
+                    job.committee,
+                    &job.leaf_indices,
+                    pk_seed_ref,
+                    job.committee_sid,
+                    &mut job.member_rngs,
+                    #[cfg(test)]
+                    fault_copy,
+                ));
+            });
+        }
+    });
+
+    #[cfg(not(any(test, feature = "std")))]
+    for job in &mut jobs {
+        job.result = Some(stage_single_committee_subtree_mpc(
+            job.committee,
+            &job.leaf_indices,
+            &pk_seed,
+            job.committee_sid,
+            &mut job.member_rngs,
+            #[cfg(test)]
+            fault,
+        ));
+    }
+
+    let mut stores_by_party: Vec<Vec<CommitteeShareStore>> = (0..n).map(|_| Vec::new()).collect();
+    let mut chain_ends = BTreeMap::new();
+    for job in jobs {
+        let (stores, ends) = job
+            .result
+            .ok_or(DealerlessStagingError::Quorum(QuorumError::InvalidConfig(
+                "missing committee MPC result",
+            )))??;
+        for (store, member) in stores.into_iter().zip(job.members) {
+            stores_by_party[member].push(store);
+        }
+        for (leaf, leaf_ends) in ends {
+            chain_ends.insert(leaf, leaf_ends);
+        }
+    }
+
+    // Every custodian independently builds `QuorumTree` from the opened `y^(3)` endpoints and
+    // cross-verifies agreement on `pk_root`.
+    let per_party_trees: Vec<QuorumTree> = (0..n)
+        .map(|_| QuorumTree::build(pk_seed, height, chain_ends.clone()))
+        .collect();
+    verify_global_tree_agreement(&session_id, &per_party_trees)?;
+    let tree = Arc::new(
+        per_party_trees
+            .into_iter()
+            .next()
+            .ok_or(DealerlessStagingError::Quorum(QuorumError::InvalidConfig(
+                "empty party set",
+            )))?,
+    );
+
+    let parties = stores_by_party
+        .into_iter()
+        .zip(mac_keys)
+        .enumerate()
+        .map(|(party, (stores, p_mac_keys))| {
+            CommitteePartyMaterial::from_parts(party, p_mac_keys, stores)
+        })
+        .collect();
+
+    Ok(StagedCommitteeKeys {
+        layout,
+        tree,
+        parties,
+    })
+}
+
+// =============================================================================================
+// 4. Mode `QS-B`: Dealerless `(t, n)` BFT-Shamir Staging (`n >= 3f + 1`)
+// =============================================================================================
+
+#[inline]
+fn bs_xor_assign(dst: &mut BitslicedGf256x64, src: &BitslicedGf256x64) {
+    for (d, s) in dst.iter_mut().zip(src.iter()) {
+        *d ^= *s;
+    }
+}
+
+#[inline]
+fn bs_xor(a: &BitslicedGf256x64, b: &BitslicedGf256x64) -> BitslicedGf256x64 {
+    let mut out = *a;
+    bs_xor_assign(&mut out, b);
+    out
+}
+
+/// Share a 64-lane `BitslicedGf256x64` secret under a random polynomial of degree `deg` (`< n`),
+/// returning `[party = 0..n]` evaluations at `shamir_point(party)`.
+fn share_bs_gf256_degree(
+    secret: &BitslicedGf256x64,
+    deg: usize,
+    powers: &[Vec<TowerGf256>],
+    rng: &mut PartyPrivateRng,
+) -> Vec<BitslicedGf256x64> {
+    let n = powers.len();
+    let mut coeffs = SecretBuffer(vec![[0u64; 8]; deg]);
+    for c in coeffs.iter_mut() {
+        for plane in c.iter_mut() {
+            *plane = rng.next_u64();
+        }
+    }
+    let mut shares = vec![*secret; n];
+    for (p, p_pows) in powers.iter().enumerate() {
+        for k in 0..deg {
+            let term = p_pows[k].scale_planes(&coeffs[k]);
+            bs_xor_assign(&mut shares[p], &term);
+        }
+    }
+    for c in coeffs.iter_mut() {
+        wipe_u64s(c);
+    }
+    shares
+}
+
+/// Reconstruct `P(0)` from `n` evaluations `shares[0..n]` at `shamir_point(0..n)` AND verify
+/// that all `n` shares lie on a single polynomial of degree `<= max_deg`.
+///
+/// With `n >= 3f + 1` and `max_deg <= 2f`, Reed-Solomon minimum distance is `n - 2f >= f + 1`,
+/// so any `<= f` corrupted evaluations strictly fail the consistency check!
+fn reconstruct_and_verify_bs_degree(
+    shares: &[BitslicedGf256x64],
+    max_deg: usize,
+    eval_pts: &[TowerGf256],
+    lagrange_zero_base: &[TowerGf256],
+    extrap_weights: &[Vec<TowerGf256>],
+) -> Option<BitslicedGf256x64> {
+    let base_len = max_deg + 1;
+    let n = eval_pts.len();
+    if shares.len() != n || base_len > n {
+        return None;
+    }
+
+    // Verify `shares[base_len .. n]` match unique extrapolation from `shares[0 .. base_len]`.
+    for (extra_idx, weights) in extrap_weights.iter().enumerate() {
+        let target_p = base_len + extra_idx;
+        let mut expected = [0u64; 8];
+        for (i, &w) in weights.iter().enumerate() {
+            let term = w.scale_planes(&shares[i]);
+            bs_xor_assign(&mut expected, &term);
+        }
+        let mut diff = 0u64;
+        for b in 0..8 {
+            diff |= expected[b] ^ shares[target_p][b];
+        }
+        if black_box(diff) != 0 {
+            return None;
+        }
+    }
+
+    let mut at_zero = [0u64; 8];
+    for (i, &w) in lagrange_zero_base.iter().enumerate() {
+        let term = w.scale_planes(&shares[i]);
+        bs_xor_assign(&mut at_zero, &term);
+    }
+    Some(at_zero)
+}
+
+/// Precomputed Lagrange weights for `base = 0 .. max_deg + 1` to `0` and to `max_deg + 1 .. n`.
+fn precompute_rs_check_weights(
+    eval_pts: &[TowerGf256],
+    max_deg: usize,
+) -> Option<(Vec<TowerGf256>, Vec<Vec<TowerGf256>>)> {
+    let base_len = max_deg + 1;
+    let n = eval_pts.len();
+    if base_len > n {
+        return None;
+    }
+    let base_pts = &eval_pts[..base_len];
+    let zero_weights = lagrange_weights_zero_gf256(base_pts)?;
+    let mut extrap = Vec::with_capacity(n - base_len);
+    for &target_x in &eval_pts[base_len..] {
+        let mut w_row = Vec::with_capacity(base_len);
+        for (i, &xi) in base_pts.iter().enumerate() {
+            let mut num = TowerGf256::ONE;
+            let mut den = TowerGf256::ONE;
+            for (j, &xj) in base_pts.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                num = num.mul(target_x.add(xj));
+                den = den.mul(xi.add(xj));
+            }
+            w_row.push(num.mul(den.inv()?));
+        }
+        extrap.push(w_row);
+    }
+    Some((zero_weights, extrap))
+}
+
+/// HVZK dealerless zero-constant degree-`(t - 1)` `TowerGf256` byte-mask ceremony across all `n`
+/// custodians (`Z(0) = 0`, `deg(Z) <= t - 1`, verified with `2^{-128}` soundness).
+fn run_verified_zero_constant_shamir_masks(
+    cfg: &QuorumConfig,
+    num_bytes: usize,
+    phase: &'static str,
+    session_id: &[u8; 32],
+    party_rngs: &mut [PartyPrivateRng],
+    #[cfg(test)] fault: Option<StagingFault>,
+) -> Result<SecretBuffer<Vec<Vec<u8>>>, DealerlessStagingError> {
+    let n = cfg.n;
+    let t = cfg.t;
+    let eval_pts: Vec<TowerGf256> = (0..n).map(shamir_point).collect();
+
+    // `powers[p][k]` = `x_p^{k + 1}` for `k = 0 .. t - 1` (`deg = 1 .. t - 1`).
+    let powers: Vec<Vec<u8>> = (0..n)
+        .map(|p| {
+            let x = eval_pts[p];
+            let mut acc = TowerGf256::ONE;
+            (1..t)
+                .map(|_| {
+                    acc = acc.mul(x);
+                    acc.0
+                })
+                .collect()
+        })
+        .collect();
+
+    // `dealt_shares[dealer][party][byte_idx]`, `mask_polys[dealer][rep][coeff_idx 0..t]`,
+    // `dealt_masks[dealer][party][rep]`, `dealer_coeffs[dealer][byte_idx * (t - 1) + k]`.
+    let mut dealt_shares = SecretBuffer(vec![vec![vec![0u8; num_bytes]; n]; n]);
+    let mut dealer_coeffs = SecretBuffer(vec![vec![0u8; num_bytes * (t - 1)]; n]);
+    let mut dealer_c0 = SecretBuffer(vec![vec![0u8; num_bytes]; n]);
+    let mut mask_coeffs = SecretBuffer(vec![vec![vec![0u8; t]; GF256_CHECK_REPS]; n]);
+    let mut dealt_masks = SecretBuffer(vec![vec![[0u8; GF256_CHECK_REPS]; n]; n]);
+    let mut commits = Vec::with_capacity(n);
+
+    for d in 0..n {
+        party_rngs[d].fill_bytes(&mut dealer_coeffs[d]);
+        for rep in 0..GF256_CHECK_REPS {
+            mask_coeffs[d][rep][0] = 0; // Zero constant term!
+            party_rngs[d].fill_bytes(&mut mask_coeffs[d][rep][1..t]);
+        }
+
+        #[cfg(test)]
+        if let Some(StagingFault::CorruptQsBRefreshNonZeroConstant { dealer }) = fault
+            && dealer == d
+            && num_bytes > 0
+        {
+            dealer_c0[d][0] = 0x5A;
+        }
+
+        for p in 0..n {
+            for b in 0..num_bytes {
+                let mut acc = dealer_c0[d][b];
+                for (k, &pow) in powers[p].iter().enumerate() {
+                    acc ^= gf256_mul_ct(pow, dealer_coeffs[d][b * (t - 1) + k]);
+                }
+                dealt_shares[d][p][b] = acc;
+            }
+            for rep in 0..GF256_CHECK_REPS {
+                let poly: Vec<TowerGf256> =
+                    mask_coeffs[d][rep].iter().map(|&c| TowerGf256(c)).collect();
+                dealt_masks[d][p][rep] = eval_poly_gf256(&poly, eval_pts[p]).0;
+            }
+        }
+
+        #[cfg(test)]
+        if let Some(StagingFault::CorruptQsBRefreshHighDegree {
+            dealer,
+            target_party,
+        }) = fault
+            && dealer == d
+            && target_party < n
+            && num_bytes > 0
+        {
+            dealt_shares[d][target_party][0] ^= 0x33;
+        }
+
+        // Commit to every recipient's share digest before drawing the HVZK challenge.
+        let mut xof = Cshake256Xof::new_shake256();
+        xof.absorb(session_id);
+        xof.absorb(phase.as_bytes());
+        xof.absorb(&(d as u64).to_be_bytes());
+        for p in 0..n {
+            let p_dig = h32(
+                TAG_SHAMIR_COMMIT,
+                &[session_id, &dealt_shares[d][p], &dealt_masks[d][p]],
+            );
+            xof.absorb(&p_dig);
+        }
+        let mut d_com = [0u8; 32];
+        xof.squeeze(&mut d_com);
+        commits.push(d_com);
+    }
+
+    let commit_digest = h32(TAG_SHAMIR_COMMIT, &[session_id, phase.as_bytes(), commits.as_flattened()]);
+    let chal_seed = coin_toss_public_seed(session_id, phase, &commit_digest, party_rngs)?;
+    let mut gamma = vec![0u8; GF256_CHECK_REPS * num_bytes];
+    expand(
+        b"QSAG.QUORUM.SHAMIR.HVZK.GAMMA/v1",
+        &[session_id, &chal_seed],
+        &mut gamma,
+    );
+
+    // Each dealer `d` opens the `16` linear-combination polynomials `P_{d, rep}(X)` of degree `< t`,
+    // and every custodian `p` verifies `P_{d, rep}(0) == 0` AND `P_{d, rep}(x_p) == share_comb`.
+    for d in 0..n {
+        for rep in 0..GF256_CHECK_REPS {
+            let g_row = &gamma[rep * num_bytes..(rep + 1) * num_bytes];
+            let mut poly_coeffs = vec![TowerGf256(mask_coeffs[d][rep][0]); t];
+            for k in 1..t {
+                poly_coeffs[k] = TowerGf256(mask_coeffs[d][rep][k]);
+            }
+            for (b, &g_b) in g_row.iter().enumerate() {
+                if g_b == 0 {
+                    continue;
+                }
+                poly_coeffs[0].0 ^= gf256_mul_ct(g_b, dealer_c0[d][b]);
+                for k in 1..t {
+                    poly_coeffs[k].0 ^= gf256_mul_ct(g_b, dealer_coeffs[d][b * (t - 1) + (k - 1)]);
+                }
+            }
+
+            if black_box(poly_coeffs[0].0) != 0 {
+                for v in &mut dealer_coeffs[d] {
+                    *v = 0;
+                }
+                return Err(DealerlessStagingError::ZeroConstantCheckFailed { dealer: d });
+            }
+
+            for p in 0..n {
+                let mut share_comb = dealt_masks[d][p][rep];
+                for (b, &g_b) in g_row.iter().enumerate() {
+                    if g_b != 0 {
+                        share_comb ^= gf256_mul_ct(g_b, dealt_shares[d][p][b]);
+                    }
+                }
+                let eval = eval_poly_gf256(&poly_coeffs, eval_pts[p]).0;
+                if black_box(eval ^ share_comb) != 0 {
+                    return Err(DealerlessStagingError::ShamirDegreeCheckFailed {
+                        phase,
+                        dealer: d,
+                    });
+                }
+            }
+            wipe_gf256(&mut poly_coeffs);
+        }
+        wipe_bytes(&mut dealer_coeffs[d]);
+        wipe_bytes(&mut dealer_c0[d]);
+        for rep in 0..GF256_CHECK_REPS {
+            wipe_bytes(&mut mask_coeffs[d][rep]);
+        }
+    }
+
+    let mut combined = SecretBuffer(vec![vec![0u8; num_bytes]; n]);
+    for p in 0..n {
+        for d in 0..n {
+            for b in 0..num_bytes {
+                combined[p][b] ^= dealt_shares[d][p][b];
+            }
+            wipe_bytes(&mut dealt_shares[d][p]);
+            wipe_bytes(&mut dealt_masks[d][p]);
+        }
+    }
+    Ok(combined)
+}
+
+/// Dealerless distributed MPC staging for Mode `QS-B` ([`BftShamirJorts`]).
+///
+/// Custodians jointly coin-toss `pk_seed` and pairwise channel MAC keys, run dealerless `(t, n)`
+/// chain-start DKG and 64-way bitsliced `Keccak-f[1600]` MPC without ever reconstructing `sk_seed`
+/// or `(y^(0), y^(1), y^(2))` on any host, re-share `(y^(0), y^(1), y^(2))` into independent
+/// bytewise degree-`(t - 1)` `TowerGf256` polynomials, open **only** `y^(3)`, and cross-verify `pk_root`.
+pub fn stage_bft_shamir_dealerless_mpc(
+    cfg: QuorumConfig,
+    height: u8,
+    session_id: [u8; 32],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<StagedShamirKeys, DealerlessStagingError> {
+    stage_bft_shamir_inner(
+        cfg,
+        height,
+        session_id,
+        party_rngs,
+        #[cfg(test)]
+        None,
+    )
+}
+
+fn stage_bft_shamir_inner(
+    cfg: QuorumConfig,
+    height: u8,
+    session_id: [u8; 32],
+    party_rngs: &mut [PartyPrivateRng],
+    #[cfg(test)] fault: Option<StagingFault>,
+) -> Result<StagedShamirKeys, DealerlessStagingError> {
+    let n = cfg.n;
+    let f = cfg.f;
+    if party_rngs.len() != n {
+        return Err(DealerlessStagingError::PartyCountMismatch {
+            expected: n,
+            got: party_rngs.len(),
+        });
+    }
+    if height == 0 || height > 10 {
+        return Err(DealerlessStagingError::Quorum(QuorumError::InvalidConfig(
+            "need 1 <= height <= 10",
+        )));
+    }
+    check_staging_budget(height, n)?;
+
+    let pk_seed = coin_toss_pk_seed(
+        &session_id,
+        party_rngs,
+        #[cfg(test)]
+        fault,
+    )?;
+    let mac_keys = establish_dealerless_pairwise_mac_keys(&session_id, party_rngs)?;
+
+    let eval_pts: Vec<TowerGf256> = (0..n).map(shamir_point).collect();
+    let powers_2f: Vec<Vec<TowerGf256>> = (0..n)
+        .map(|p| {
+            let x = eval_pts[p];
+            let mut acc = TowerGf256::ONE;
+            (0..(2 * f))
+                .map(|_| {
+                    acc = acc.mul(x);
+                    acc
+                })
+                .collect()
+        })
+        .collect();
+    let powers_f: Vec<Vec<TowerGf256>> = powers_2f.iter().map(|v| v[..f].to_vec()).collect();
+
+    let (zero_w_f, extrap_w_f) = precompute_rs_check_weights(&eval_pts, f).ok_or(
+        DealerlessStagingError::Quorum(QuorumError::InvalidConfig(
+            "Reed-Solomon degree-f check weights unavailable",
+        )),
+    )?;
+    let (zero_w_2f, extrap_w_2f) = precompute_rs_check_weights(&eval_pts, 2 * f).ok_or(
+        DealerlessStagingError::Quorum(QuorumError::InvalidConfig(
+            "Reed-Solomon degree-2f check weights unavailable",
+        )),
+    )?;
+
+    let num_leaves = 1usize << height;
+    let total_chains = num_leaves * WOTS_CHAINS;
+    let mut coords = Vec::with_capacity(total_chains);
+    for leaf in 0..(num_leaves as u64) {
+        for chain in 0..(WOTS_CHAINS as u32) {
+            coords.push((leaf, chain));
+        }
+    }
+
+    // Temporary degree-`f` bytewise share store before upgrading to independent degree-`(t - 1)`.
+    let mut party_leaves_deg_f: SecretBuffer<Vec<Vec<Vec<Node>>>> = SecretBuffer(
+        (0..n)
+            .map(|_| vec![vec![[0u8; 32]; LEAF_SHARE_NODES]; num_leaves])
+            .collect(),
+    );
+    let mut chain_ends: BTreeMap<u64, Vec<Node>> = BTreeMap::new();
+    for leaf in 0..(num_leaves as u64) {
+        chain_ends.insert(leaf, vec![[0u8; 32]; WOTS_CHAINS]);
+    }
+
+    for (batch_idx, batch_coords) in coords.chunks(64).enumerate() {
+        let count = batch_coords.len();
+
+        // 1. Dealerless degree-`f` DKG of `256` chain-start bit-planes `y^(0)`:
+        //    Each custodian `d` contributes a Boolean bit-plane `y_d^(0)` (`0` or `1` in `GF(2^8)`),
+        //    checked for both `deg <= f` AND `y_d^2 + y_d == 0` (`Booleanity`) before `y^(3)` opens!
+        let mut dkg_contribs: SecretBuffer<Vec<Vec<BitslicedGf256x64>>> =
+            SecretBuffer(vec![vec![[0u64; 8]; n]; n * 256]);
+        let mut cur_planes_sh: SecretBuffer<Vec<Vec<BitslicedGf256x64>>> =
+            SecretBuffer(vec![vec![[0u64; 8]; 256]; n]);
+
+        for b in 0..256 {
+            for d in 0..n {
+                let mut bit_secret = [0u64; 8];
+                bit_secret[0] = party_rngs[d].next_u64();
+                if count < 64 {
+                    bit_secret[0] &= (1u64 << count) - 1;
+                }
+                #[cfg(test)]
+                if let Some(StagingFault::CorruptQsBNonBooleanInput { dealer }) = fault
+                    && dealer == d
+                    && batch_idx == 0
+                    && b == 0
+                {
+                    bs_gf256_insert_lane(&mut bit_secret, 0, TowerGf256(0x42));
+                }
+
+                let shares = share_bs_gf256_degree(&bit_secret, f, &powers_f, &mut party_rngs[d]);
+                wipe_u64s(&mut bit_secret);
+                for p in 0..n {
+                    bs_xor_assign(&mut cur_planes_sh[p][b], &shares[p]);
+                    dkg_contribs[b * n + d][p] = shares[p];
+                }
+            }
+        }
+
+        // Record degree-`f` bytewise shares of `y^(0)`:
+        // Note: each bit `b` of a byte `B = b / 8` is shared over `GF(2^8)`; packing 8 bit-shares
+        // via `sum_{bit=0..7} share(bit_b) * X_byte_basis(2^bit)` gives an exact degree-`f` `GF(2^8)`
+        // share of the byte `sum_{bit=0..7} bit_b * 2^bit` because `2^bit` (`1 << bit`) is a public
+        // `TowerGf256` constant (`TowerGf256(1 << bit)`) and `GF(2^8)` addition is bitwise XOR!
+        record_deg_f_byte_shares(
+            &cur_planes_sh,
+            batch_idx,
+            count,
+            0,
+            &mut party_leaves_deg_f,
+        );
+
+        // Collect all `(lhs_deg_f, rhs_deg_f, out_deg_f)` quadratic relations across all 3 steps:
+        //   - For `y_d` Booleanity: `y_d * y_d + y_d == 0` (`lhs = y_d, rhs = y_d, out = y_d`)
+        //   - For `Chi` AND gate: `(~u) * v + c == 0` (`lhs = ~u, rhs = v, out = c`)
+        let total_rels = n * 256 + WOTS_STEPS * 24 * STATE_BITS;
+        let mut rel_lhs: SecretBuffer<Vec<Vec<BitslicedGf256x64>>> =
+            SecretBuffer(vec![Vec::with_capacity(total_rels); n]);
+        let mut rel_rhs: SecretBuffer<Vec<Vec<BitslicedGf256x64>>> =
+            SecretBuffer(vec![Vec::with_capacity(total_rels); n]);
+        let mut rel_out: SecretBuffer<Vec<Vec<BitslicedGf256x64>>> =
+            SecretBuffer(vec![Vec::with_capacity(total_rels); n]);
+
+        for rel in dkg_contribs.iter() {
+            for p in 0..n {
+                rel_lhs[p].push(rel[p]);
+                rel_rhs[p].push(rel[p]);
+                rel_out[p].push(rel[p]);
+            }
+        }
+
+        // 2. Evaluate `step = 0, 1, 2` of `SHAKE256` (`Keccak-f[1600]`) in 64-way bitsliced Shamir.
+        for step in 0..(WOTS_STEPS as u32) {
+            let pub_planes = build_chain_step_public_planes(&pk_seed, batch_coords, step);
+            let mut states_sh = SecretBuffer(vec![vec![[0u64; 8]; STATE_BITS]; n]);
+
+            for p in 0..n {
+                // Constant polynomial `P(X) = c` evaluates to `c` (`plane 0`) at EVERY `x_p`!
+                for idx in 0..STATE_BITS {
+                    states_sh[p][idx][0] ^= pub_planes[idx];
+                }
+                for b in 0..256 {
+                    let dst = CHAIN_INPUT_BIT_OFFSET + b;
+                    bs_xor_assign(&mut states_sh[p][dst], &cur_planes_sh[p][b]);
+                }
+            }
+
+            let mut b_sh = SecretBuffer(vec![vec![[0u64; 8]; STATE_BITS]; n]);
+            let mut col_sh = vec![[0u64; 8]; 320];
+            let mut d_theta_sh = vec![[0u64; 8]; 320];
+
+            for (rnd_idx, &rc) in KECCAK_ROUND_CONSTANTS.iter().enumerate() {
+                // Linear layer (`Theta + Rho + Pi`).
+                for p in 0..n {
+                    for x in 0..5 {
+                        for z in 0..64 {
+                            let mut cs = [0u64; 8];
+                            for y in 0..5 {
+                                bs_xor_assign(&mut cs, &states_sh[p][(x + 5 * y) * 64 + z]);
+                            }
+                            col_sh[x * 64 + z] = cs;
+                        }
+                    }
+                    for x in 0..5 {
+                        for z in 0..64 {
+                            let prev = ((x + 4) % 5) * 64 + z;
+                            let next = ((x + 1) % 5) * 64 + ((z + 63) & 63);
+                            d_theta_sh[x * 64 + z] = bs_xor(&col_sh[prev], &col_sh[next]);
+                        }
+                    }
+                    for (source, &rot) in KECCAK_ROTATION_OFFSETS.iter().enumerate() {
+                        let x = source % 5;
+                        let y = source / 5;
+                        let target = y + 5 * ((2 * x + 3 * y) % 5);
+                        let rot = rot as usize;
+                        for z in 0..64 {
+                            let src_z = (z + 64 - rot) & 63;
+                            b_sh[p][target * 64 + z] =
+                                bs_xor(&states_sh[p][source * 64 + src_z], &d_theta_sh[x * 64 + src_z]);
+                        }
+                    }
+                }
+
+                // Dealerless random double-sharings `([r]_f, [r]_{2f})` summed across all `n` custodians.
+                let mut r_f = SecretBuffer(vec![vec![[0u64; 8]; STATE_BITS]; n]);
+                let mut r_2f = SecretBuffer(vec![vec![[0u64; 8]; STATE_BITS]; n]);
+                for idx in 0..STATE_BITS {
+                    for d in 0..n {
+                        let mut sec = [0u64; 8];
+                        for pl in &mut sec {
+                            *pl = party_rngs[d].next_u64();
+                        }
+                        let sh_f = share_bs_gf256_degree(&sec, f, &powers_f, &mut party_rngs[d]);
+                        let sh_2f =
+                            share_bs_gf256_degree(&sec, 2 * f, &powers_2f, &mut party_rngs[d]);
+                        wipe_u64s(&mut sec);
+                        for p in 0..n {
+                            bs_xor_assign(&mut r_f[p][idx], &sh_f[p]);
+                            bs_xor_assign(&mut r_2f[p][idx], &sh_2f[p]);
+                        }
+                    }
+                }
+
+                for idx in 0..STATE_BITS {
+                    let lane = idx / 64;
+                    let z = idx % 64;
+                    let row = 5 * (lane / 5);
+                    let u_idx = (row + (lane + 1) % 5) * 64 + z;
+                    let v_idx = (row + (lane + 2) % 5) * 64 + z;
+
+                    let mut masked_2f = vec![[0u64; 8]; n];
+                    let mut not_u_all = vec![[0u64; 8]; n];
+                    for p in 0..n {
+                        let mut not_u = b_sh[p][u_idx];
+                        not_u[0] ^= u64::MAX; // Constant `1` in `GF(2^8)` at every point `x_p`!
+                        not_u_all[p] = not_u;
+                        let prod = bs_gf256_mul_planes_ct(&not_u, &b_sh[p][v_idx]);
+                        masked_2f[p] = bs_xor(&prod, &r_2f[p][idx]);
+                    }
+
+                    let opened_masked = reconstruct_and_verify_bs_degree(
+                        &masked_2f,
+                        2 * f,
+                        &eval_pts,
+                        &zero_w_2f,
+                        &extrap_w_2f,
+                    )
+                    .ok_or(DealerlessStagingError::MultiplicationCheckFailed {
+                        check_idx: rnd_idx * STATE_BITS + idx,
+                    })?;
+
+                    for p in 0..n {
+                        #[allow(unused_mut)]
+                        let mut and_f = bs_xor(&opened_masked, &r_f[p][idx]);
+                        #[cfg(test)]
+                        if let Some(StagingFault::CorruptQsBGateProduct { party }) = fault
+                            && party == p
+                            && batch_idx == 0
+                            && step == 0
+                            && rnd_idx == 0
+                            && idx == 0
+                        {
+                            and_f[0] ^= 1;
+                        }
+                        rel_lhs[p].push(not_u_all[p]);
+                        rel_rhs[p].push(b_sh[p][v_idx]);
+                        rel_out[p].push(and_f);
+
+                        let mut out = bs_xor(&b_sh[p][idx], &and_f);
+                        if idx < 64 && ((rc >> idx) & 1) == 1 {
+                            out[0] ^= u64::MAX;
+                        }
+                        states_sh[p][idx] = out;
+                    }
+                }
+            }
+
+            for p in 0..n {
+                cur_planes_sh[p].copy_from_slice(&states_sh[p][..256]);
+            }
+            if (step as usize) + 1 < WOTS_STEPS {
+                record_deg_f_byte_shares(
+                    &cur_planes_sh,
+                    batch_idx,
+                    count,
+                    (step as usize) + 1,
+                    &mut party_leaves_deg_f,
+                );
+            }
+        }
+
+        // 3. Active 16-instance Reed-Solomon verification (`< 2^{-128}` soundness) BEFORE opening `y^(3)`!
+        //    Verifies BOTH:
+        //      (a) Every relation wire `(lhs, rhs, out)` has degree `<= f`
+        //      (b) Every quadratic relation `lhs(0) * rhs(0) + out(0) == 0` holds (`deg <= 2f` & `P(0) == 0`)
+        let num_rels = rel_lhs[0].len();
+        let batch_be = (batch_idx as u64).to_be_bytes();
+        let chal_digest = h32(b"QSAG.QUORUM.QSB.BATCH.CHAL/v1", &[&session_id, &pk_seed, &batch_be]);
+        let chal_seed =
+            coin_toss_public_seed(&session_id, "qsb_gate_verify", &chal_digest, party_rngs)?;
+        let mut weights = vec![0u8; GF256_CHECK_REPS * 3 * num_rels];
+        expand(
+            b"QSAG.QUORUM.QSB.GATE.WEIGHTS/v1",
+            &[&session_id, &chal_seed],
+            &mut weights,
+        );
+
+        for rep in 0..GF256_CHECK_REPS {
+            // Fresh dealerless degree-`f` mask `M_f(X)` and zero-constant degree-`2f` mask `Z_{2f}(X)`.
+            let mut mask_f = SecretBuffer(vec![[0u64; 8]; n]);
+            let mut z_2f = SecretBuffer(vec![[0u64; 8]; n]);
+            for d in 0..n {
+                let mut m_sec = [0u64; 8];
+                for pl in &mut m_sec {
+                    *pl = party_rngs[d].next_u64();
+                }
+                let mf_sh = share_bs_gf256_degree(&m_sec, f, &powers_f, &mut party_rngs[d]);
+                wipe_u64s(&mut m_sec);
+                let z_sh = share_bs_gf256_degree(&[0u64; 8], 2 * f, &powers_2f, &mut party_rngs[d]);
+                for p in 0..n {
+                    bs_xor_assign(&mut mask_f[p], &mf_sh[p]);
+                    bs_xor_assign(&mut z_2f[p], &z_sh[p]);
+                }
+            }
+
+            let w_base = rep * 3 * num_rels;
+            let mut deg_f_open = vec![[0u64; 8]; n];
+            let mut quad_open = vec![[0u64; 8]; n];
+            for p in 0..n {
+                let mut lin_acc = mask_f[p];
+                let mut quad_acc = z_2f[p];
+                for r in 0..num_rels {
+                    let wl = TowerGf256(weights[w_base + 3 * r]);
+                    let wr = TowerGf256(weights[w_base + 3 * r + 1]);
+                    let wo = TowerGf256(weights[w_base + 3 * r + 2]);
+                    wl.scale_xor_into(&mut lin_acc, &rel_lhs[p][r]);
+                    wr.scale_xor_into(&mut lin_acc, &rel_rhs[p][r]);
+                    wo.scale_xor_into(&mut lin_acc, &rel_out[p][r]);
+
+                    if wo.0 != 0 {
+                        let prod = bs_gf256_mul_planes_ct(&rel_lhs[p][r], &rel_rhs[p][r]);
+                        let err_2f = bs_xor(&prod, &rel_out[p][r]);
+                        wo.scale_xor_into(&mut quad_acc, &err_2f);
+                    }
+                }
+                deg_f_open[p] = lin_acc;
+                quad_open[p] = quad_acc;
+            }
+
+            if reconstruct_and_verify_bs_degree(&deg_f_open, f, &eval_pts, &zero_w_f, &extrap_w_f)
+                .is_none()
+            {
+                return Err(DealerlessStagingError::MultiplicationCheckFailed { check_idx: rep });
+            }
+            let quad_zero = reconstruct_and_verify_bs_degree(
+                &quad_open,
+                2 * f,
+                &eval_pts,
+                &zero_w_2f,
+                &extrap_w_2f,
+            )
+            .ok_or(DealerlessStagingError::MultiplicationCheckFailed { check_idx: rep })?;
+            let mut nz = 0u64;
+            for pl in &quad_zero {
+                nz |= *pl;
+            }
+            if black_box(nz) != 0 {
+                return Err(DealerlessStagingError::MultiplicationCheckFailed { check_idx: rep });
+            }
+        }
+
+        // 4. Open ONLY `y^(3)` with Reed-Solomon degree-`<= f` verification!
+        #[cfg(test)]
+        if let Some(StagingFault::CorruptQsBEndpointOpen { party }) = fault
+            && party < n
+            && batch_idx == 0
+        {
+            cur_planes_sh[party][0][0] ^= 1;
+        }
+
+        let mut y3_planes = [0u64; 256];
+        for b in 0..256 {
+            let bit_shares: Vec<BitslicedGf256x64> =
+                (0..n).map(|p| cur_planes_sh[p][b]).collect();
+            let rec = reconstruct_and_verify_bs_degree(
+                &bit_shares,
+                f,
+                &eval_pts,
+                &zero_w_f,
+                &extrap_w_f,
+            )
+            .ok_or(DealerlessStagingError::EndpointOpeningDegreeMismatch { batch: batch_idx })?;
+            // Every valid `y^(3)` bit reconstructs in `{0, 1}` (`planes[1..8] == 0`).
+            let mut non_bool = 0u64;
+            for pl in &rec[1..] {
+                non_bool |= *pl;
+            }
+            if black_box(non_bool) != 0 {
+                return Err(DealerlessStagingError::EndpointOpeningDegreeMismatch {
+                    batch: batch_idx,
+                });
+            }
+            y3_planes[b] = rec[0];
+        }
+
+        let batch_ends = unpack_256_planes_to_nodes(&y3_planes, count);
+        for (c_idx, end_node) in batch_ends.into_iter().enumerate() {
+            let (leaf, chain) = batch_coords[c_idx];
+            if let Some(leaf_vec) = chain_ends.get_mut(&leaf) {
+                leaf_vec[chain as usize] = end_node;
+            }
+        }
+    }
+
+    // 5. Upgrade & re-randomize `(y^(0), y^(1), y^(2))` from degree `f` to independent bytewise
+    //    degree-`(t - 1)` `TowerGf256` Shamir polynomials via HVZK-verified zero-constant masks,
+    //    wiping the temporary degree-`f` shares in place!
+    let total_secret_bytes = num_leaves * LEAF_SHARE_NODES * 32;
+    let zero_masks = run_verified_zero_constant_shamir_masks(
+        &cfg,
+        total_secret_bytes,
+        "qsb_stage_degree_upgrade",
+        &session_id,
+        party_rngs,
+        #[cfg(test)]
+        None,
+    )?;
+
+    let mut parties = Vec::with_capacity(n);
+    for (p, p_mac_keys) in mac_keys.into_iter().enumerate() {
+        let mut final_leaves = vec![vec![[0u8; 32]; LEAF_SHARE_NODES]; num_leaves];
+        for (b_idx, (dst, src)) in final_leaves
+            .as_flattened_mut()
+            .as_flattened_mut()
+            .iter_mut()
+            .zip(party_leaves_deg_f[p].as_flattened().as_flattened().iter())
+            .enumerate()
+        {
+            *dst = *src ^ zero_masks[p][b_idx];
+        }
+        for leaf_nodes in &mut party_leaves_deg_f[p] {
+            for node in leaf_nodes {
+                wipe_bytes32(node);
+            }
+        }
+        parties.push(ShamirPartyMaterial::from_parts(p, p_mac_keys, final_leaves));
+    }
+
+    let per_party_trees: Vec<QuorumTree> = (0..n)
+        .map(|_| QuorumTree::build(pk_seed, height, chain_ends.clone()))
+        .collect();
+    verify_global_tree_agreement(&session_id, &per_party_trees)?;
+    let tree = Arc::new(
+        per_party_trees
+            .into_iter()
+            .next()
+            .ok_or(DealerlessStagingError::Quorum(QuorumError::InvalidConfig(
+                "empty party set",
+            )))?,
+    );
+
+    Ok(StagedShamirKeys { cfg, tree, parties })
+}
+
+/// Convert 256 bit-plane degree-`f` shares (`0` or `1` at `X = 0`) into bytewise `TowerGf256`
+/// degree-`f` shares by linear packing `byte_share = sum_{bit=0..7} TowerGf256(1 << bit) * bit_share`.
+///
+/// Soundness of packing: in Wiedemann `TowerGf256`, field addition IS bitwise `u8` XOR, so for any
+/// bits `b_0..b_7 in {0, 1}`, `bigoplus_{k=0..7} (1 << k) * b_k = sum_{k=0..7} b_k * 2^k`!
+fn record_deg_f_byte_shares(
+    planes_sh: &[Vec<BitslicedGf256x64>],
+    batch_idx: usize,
+    count: usize,
+    step_slot: usize,
+    dst_leaves: &mut [Vec<Vec<Node>>],
+) {
+    let n = planes_sh.len();
+    for p in 0..n {
+        for byte_idx in 0..32 {
+            let mut byte_plane = [0u64; 8];
+            for bit in 0..8 {
+                let basis = TowerGf256(1u8 << bit);
+                basis.scale_xor_into(&mut byte_plane, &planes_sh[p][8 * byte_idx + bit]);
+            }
+            for lane in 0..count {
+                let global_chain = batch_idx * 64 + lane;
+                let leaf = global_chain / WOTS_CHAINS;
+                let chain = global_chain % WOTS_CHAINS;
+                dst_leaves[p][leaf][3 * chain + step_slot][byte_idx] =
+                    bs_gf256_extract_lane(&byte_plane, lane).0;
+            }
+            wipe_u64s(&mut byte_plane);
+        }
+    }
+}
+
