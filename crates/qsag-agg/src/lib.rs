@@ -116,7 +116,7 @@ where
     };
     let job = std::sync::Arc::new(std::sync::Mutex::new(Some(f)));
     let worker_job = std::sync::Arc::clone(&job);
-    match std::thread::Builder::new().spawn_scoped(scope, move || {
+    match std::thread::Builder::new().stack_size(1024 * 1024).spawn_scoped(scope, move || {
         let _permit = permit;
         let f = worker_job
             .lock()
@@ -747,7 +747,7 @@ impl AggStatement<'_> {
                 if let Some(permit) = try_acquire_worker_permit() {
                     let right_ref = right.as_ref();
                     let branched = std::thread::scope(|scope| {
-                        match std::thread::Builder::new().spawn_scoped(scope, move || {
+                        match std::thread::Builder::new().stack_size(1024 * 1024).spawn_scoped(scope, move || {
                             let _permit = permit;
                             self.verify_node(right_ref, rem_depth - 1)
                         }) {

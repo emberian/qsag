@@ -1733,11 +1733,26 @@ fn prove_shard_rows_gpu(
     let gamma = transcript.squeeze_ext4(b"LEAF_GAMMA");
     let sched = build_gamma_schedule_ext4(unique_ops, gamma);
 
-    let (eq_tau_tbl, eq_not_last_tbl, shift_tau_tbl) = build_shift_tables_ext4(&tau);
+    let eq_tau_tbl = build_eq_table_ext4(&tau);
     let mut shift_tables_3m = Vec::with_capacity(3 * total_rows);
-    shift_tables_3m.extend(eq_tau_tbl.into_iter().map(crate::pcs::ext4_to_arr));
-    shift_tables_3m.extend(eq_not_last_tbl.into_iter().map(crate::pcs::ext4_to_arr));
-    shift_tables_3m.extend(shift_tau_tbl.into_iter().map(crate::pcs::ext4_to_arr));
+    shift_tables_3m.extend(eq_tau_tbl.iter().copied().map(crate::pcs::ext4_to_arr));
+    if total_rows > 0 {
+        shift_tables_3m.extend(
+            eq_tau_tbl[..total_rows - 1]
+                .iter()
+                .copied()
+                .map(crate::pcs::ext4_to_arr),
+        );
+        shift_tables_3m.push([0u64; 4]);
+        shift_tables_3m.push([0u64; 4]);
+        shift_tables_3m.extend(
+            eq_tau_tbl[..total_rows - 1]
+                .iter()
+                .copied()
+                .map(crate::pcs::ext4_to_arr),
+        );
+    }
+    drop(eq_tau_tbl);
 
     let op_gamma_total: usize = sched.op_gammas.iter().map(Vec::len).sum();
     let mut static_gammas_ext4 = Vec::with_capacity(250 + op_gamma_total);
@@ -1766,6 +1781,16 @@ fn prove_shard_rows_gpu(
                 .map(crate::pcs::ext4_to_arr),
         );
         op_meta.push((kind_id, kind_arg, g_base));
+    }
+    let id_sorted_u64_off = (static_gammas_ext4.len() * 4) as u32;
+    let id_half_r = r_rows / 2;
+    for base_idx in (0..id_half_r).step_by(4) {
+        static_gammas_ext4.push([
+            base_idx as u64,
+            (base_idx + 1).min(id_half_r.saturating_sub(1)) as u64,
+            (base_idx + 2).min(id_half_r.saturating_sub(1)) as u64,
+            (base_idx + 3).min(id_half_r.saturating_sub(1)) as u64,
+        ]);
     }
     let dyn_ext4_off = static_gammas_ext4.len() as u32;
 
@@ -1907,18 +1932,20 @@ fn prove_shard_rows_gpu(
         }
         cur_off += op_ent.len() as u32;
 
-        let sorted_u64_off = cur_off * 4;
-        if folding_signer {
+        let sorted_u64_off = if folding_signer {
+            let off = cur_off * 4;
+            let stride = cur_r as u64;
             for &loc in &steps_by_uid {
-                for s0 in 0..half_s {
-                    dyn_words.push((s0 * cur_r + loc) as u64);
+                let mut idx = loc as u64;
+                for _ in 0..half_s {
+                    dyn_words.push(idx);
+                    idx += stride;
                 }
             }
+            off
         } else {
-            for idx in 0..half {
-                dyn_words.push(idx as u64);
-            }
-        }
+            id_sorted_u64_off
+        };
 
         let col_src = if is_round0 {
             cols_base_word_offset
