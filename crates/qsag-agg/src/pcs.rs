@@ -43,12 +43,10 @@ use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 
-#[cfg(test)]
-use crate::field::eval_univariate_ext4_at_base;
 use crate::field::{
     Goldilocks, GoldilocksExt4, build_eq_table_ext4, encode_rs_coset_ext4,
-    encode_rs_coset_goldilocks, eq_poly_ext4, eval_univariate_ext4, fold_first_var_in_place_ext4,
-    pow2_point_ext4,
+    encode_rs_coset_goldilocks, eq_poly_ext4, eval_univariate_ext4, eval_univariate_ext4_at_base,
+    fold_first_var_in_place_ext4, pow2_point_ext4,
 };
 use crate::sponge::{
     CANOPY_MIDSTATE, FiatShamirTranscript, InstanceBound, POW_MIDSTATE,
@@ -1017,24 +1015,35 @@ fn queried_round0_hash_x4(
     vals: &[Goldilocks],
     per_query: usize,
 ) -> [[u8; 32]; 4] {
+    if num_polys == 1 {
+        let used = 22 + 8 * per_query;
+        let mut bufs = [[0u8; 22 + 8 * MAX_FIBER_ARITY]; 4];
+        for (lane, buf) in bufs.iter_mut().enumerate() {
+            buf[0] = TAG_ROUND0_SINGLE;
+            buf[1] = per_query as u8;
+            buf[2..6].copy_from_slice(&(indices[lane] as u32).to_le_bytes());
+            buf[6..22].copy_from_slice(&salts[lane]);
+            for (dst, v) in buf[22..used]
+                .chunks_exact_mut(8)
+                .zip(&vals[lane * per_query..(lane + 1) * per_query])
+            {
+                dst.copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        return cshake256_from_midstate_32_x4(
+            &CANOPY_MIDSTATE,
+            bufs.each_ref().map(|b| &b[..used]),
+        );
+    }
     let mut bufs = [[0u8; 23 + 8 * MAX_ROUND0_LEAF_VALS]; 4];
-    let header = if num_polys == 1 { 22 } else { 23 };
+    let header = 23;
     let used = header + 8 * per_query;
     for (lane, buf) in bufs.iter_mut().enumerate() {
-        buf[0] = if num_polys == 1 {
-            TAG_ROUND0_SINGLE
-        } else {
-            TAG_ROUND0_BATCH
-        };
+        buf[0] = TAG_ROUND0_BATCH;
         buf[1] = (per_query / num_polys) as u8;
-        let offset = if num_polys == 1 {
-            2
-        } else {
-            buf[2] = num_polys as u8;
-            3
-        };
-        buf[offset..offset + 4].copy_from_slice(&(indices[lane] as u32).to_le_bytes());
-        buf[offset + 4..header].copy_from_slice(&salts[lane]);
+        buf[2] = num_polys as u8;
+        buf[3..7].copy_from_slice(&(indices[lane] as u32).to_le_bytes());
+        buf[7..header].copy_from_slice(&salts[lane]);
         for (dst, v) in buf[header..used]
             .chunks_exact_mut(8)
             .zip(&vals[lane * per_query..(lane + 1) * per_query])
@@ -1263,6 +1272,8 @@ pub struct HemWhirProverState {
     pub codewords_0: Vec<Vec<Goldilocks>>,
     pub salt_seed: [u8; 32],
     pub tree_0: MerkleCanopyTree,
+    #[cfg(feature = "vulkan")]
+    pub(crate) gpu_session: Option<crate::acceleration::GpuWhirSession>,
 }
 
 impl HemWhirProverState {
@@ -1278,7 +1289,7 @@ impl HemWhirProverState {
 
     #[inline]
     fn num_groups_0(&self) -> usize {
-        self.codewords_0[0].len() / self.group_arity_0
+        ((1usize << self.num_vars) * self.schedule.stages[0].blowup) / self.group_arity_0
     }
 }
 
@@ -1770,20 +1781,15 @@ struct FiberLastDuet {
 }
 
 impl FiberLastDuet {
-    /// Last fold step, computed by the extracted `cwyz_duet_fold`.
+    /// Last fold step, matching `qsag_whir_verified::cwyz_duet_fold` over `GoldilocksExt4`.
     #[inline]
     fn fold(&self, inv_two: Goldilocks) -> GoldilocksExt4 {
         let [theta, alpha, beta] = self.chal;
-        from_verified_ext4(qsag_whir_verified::cwyz_duet_fold(
-            to_verified_ext4(self.v0),
-            to_verified_ext4(self.v1),
-            self.inv_two_x.to_canonical_u64(),
-            inv_two.to_canonical_u64(),
-            self.x_sq.to_canonical_u64(),
-            to_verified_ext4(theta),
-            to_verified_ext4(alpha),
-            to_verified_ext4(beta),
-        ))
+        let even = (self.v0 + self.v1).mul_base(inv_two);
+        let odd = (self.v0 - self.v1).mul_base(self.inv_two_x);
+        let mixed = even + theta * odd;
+        let gamma = alpha + beta.mul_base(self.x_sq);
+        odd + gamma * mixed
     }
 
     /// Extracted acceptance gate: the last fold step lands exactly on `claimed`.
@@ -1820,8 +1826,8 @@ impl FiberLastDuet {
 }
 
 /// Fold a coset fiber `vals` of size $A = 2^s \in \{2, 4, 8, 16, 32, 64\}$ at points
-/// $x_k = y_0 \cdot \zeta_A^k$ across all but the last of `chals[0..s]`. Every duet is folded
-/// by the extracted `qsag_whir_verified::cwyz_duet_fold`.
+/// $x_k = y_0 \cdot \zeta_A^k$ across all but the last of `chals[0..s]`, leaving the final duet
+/// for [`FiberLastDuet::accepts`] (`qsag_whir_verified::verify_cwyz_duet_fold_step`).
 #[inline]
 fn fold_coset_group_to_last_duet(
     vals: &[GoldilocksExt4],
@@ -1847,22 +1853,18 @@ fn fold_coset_group_to_last_duet(
         Goldilocks::two_adic_generator(6),
     ];
     let mut zeta = ZETAS[step];
-    let inv_two_u64 = inv_two.to_canonical_u64();
     for &[theta, alpha, beta] in &chals[..step - 1] {
         let half = cur_len / 2;
         let mut inv_two_xk = inv_two * inv_y0;
         let mut xk = y0;
         for k in 0..half {
-            buf[k] = from_verified_ext4(qsag_whir_verified::cwyz_duet_fold(
-                to_verified_ext4(buf[k]),
-                to_verified_ext4(buf[k + half]),
-                inv_two_xk.to_canonical_u64(),
-                inv_two_u64,
-                xk.square().to_canonical_u64(),
-                to_verified_ext4(theta),
-                to_verified_ext4(alpha),
-                to_verified_ext4(beta),
-            ));
+            let v0 = buf[k];
+            let v1 = buf[k + half];
+            let even = (v0 + v1).mul_base(inv_two);
+            let odd = (v0 - v1).mul_base(inv_two_xk);
+            let mixed = even + theta * odd;
+            let gamma = alpha + beta.mul_base(xk.square());
+            buf[k] = odd + gamma * mixed;
             xk *= zeta;
             inv_two_xk *= inv_zeta;
         }
@@ -2234,6 +2236,15 @@ pub fn whir_commit_batch_owned_with_schedule(
     salt_seed: &[u8; 32],
     schedule: &WhirSchedule,
 ) -> (CanopyCommitment, HemWhirProverState) {
+    whir_commit_batch_owned_with_schedule_and_extra_vram(polys, salt_seed, schedule, 0)
+}
+
+pub(crate) fn whir_commit_batch_owned_with_schedule_and_extra_vram(
+    polys: Vec<Vec<Goldilocks>>,
+    salt_seed: &[u8; 32],
+    schedule: &WhirSchedule,
+    extra_witness_words: usize,
+) -> (CanopyCommitment, HemWhirProverState) {
     let _phase = crate::profile::span("whir_commit_batch_owned_with_schedule");
     assert!(!polys.is_empty() && polys.len() <= MAX_BATCH_POLYS);
     let table_len = polys[0].len();
@@ -2247,9 +2258,107 @@ pub fn whir_commit_batch_owned_with_schedule(
     let st0 = schedule.stages[0];
     let group_arity_0 = 1usize << st0.step_vars;
 
+    #[cfg(feature = "vulkan")]
+    if table_len >= 4_096
+        && let Some(session) = crate::acceleration::try_acquire_whir_session()
+    {
+        let poly_words: Vec<Vec<u64>> = if polys.len() > 1 && crate::parallel_workers() > 1 {
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = polys
+                    .iter()
+                    .map(|p| {
+                        crate::spawn_bounded(scope, move || {
+                            p.iter().map(|v| v.to_canonical_u64()).collect::<Vec<u64>>()
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(crate::join_worker).collect()
+            })
+        } else {
+            polys
+                .iter()
+                .map(|p| p.iter().map(|v| v.to_canonical_u64()).collect())
+                .collect()
+        };
+        let word_slices: Vec<&[u64]> = poly_words.iter().map(Vec::as_slice).collect();
+        let (max_stage_dom, max_stage_grps) = max_intermediate_stage_dims(num_vars, &schedule);
+        let domain_len = table_len * st0.blowup;
+        let num_groups = domain_len / group_arity_0;
+
+        match session.raw().prover_whir_commit_round0(
+            &word_slices,
+            salt_seed,
+            num_vars,
+            st0.blowup,
+            group_arity_0,
+            max_stage_dom,
+            max_stage_grps,
+            extra_witness_words,
+        ) {
+            Ok(top_node)
+                if session.certify_stage(
+                    qsag_accel::ProverKernelSlot::WhirLdeCommitment,
+                    b"WHIR.COMMIT.ROUND0/v1",
+                    polys.len() * domain_len,
+                    &top_node,
+                ) =>
+            {
+                let log_leaves = num_groups.trailing_zeros() as usize;
+                let root = hash_tree_root(log_leaves as u8, &top_node);
+                let tree_0 = MerkleCanopyTree {
+                    log_leaves,
+                    is_compact: false,
+                    nodes: vec![[0u8; 32], top_node],
+                    root,
+                };
+                let comm = tree_0.commitment();
+                return (
+                    comm,
+                    HemWhirProverState {
+                        num_vars,
+                        schedule,
+                        group_arity_0,
+                        hypercube_evals: polys,
+                        codewords_0: Vec::new(),
+                        salt_seed: *salt_seed,
+                        tree_0,
+                        gpu_session: Some(session),
+                    },
+                );
+            }
+            Ok(_) => session.record_fallback("whir_commit_round0", "V5 stage receipt invalid"),
+            Err(err) => session.record_fallback("whir_commit_round0", err),
+        }
+    }
+    #[cfg(not(feature = "vulkan"))]
+    let _ = extra_witness_words;
+
+    let (codewords_0, tree_0) = build_cpu_round0(&polys, salt_seed, st0.blowup, group_arity_0);
+    let comm = tree_0.commitment();
+    (
+        comm,
+        HemWhirProverState {
+            num_vars,
+            schedule,
+            group_arity_0,
+            hypercube_evals: polys,
+            codewords_0,
+            salt_seed: *salt_seed,
+            tree_0,
+            #[cfg(feature = "vulkan")]
+            gpu_session: None,
+        },
+    )
+}
+
+fn build_cpu_round0(
+    polys: &[Vec<Goldilocks>],
+    salt_seed: &[u8; 32],
+    blowup: usize,
+    group_arity_0: usize,
+) -> (Vec<Vec<Goldilocks>>, MerkleCanopyTree) {
     #[cfg(feature = "std")]
     let codewords_0: Vec<Vec<Goldilocks>> = if polys.len() > 1 && crate::parallel_workers() > 1 {
-        let blowup = st0.blowup;
         std::thread::scope(|scope| {
             let handles: Vec<_> = polys
                 .iter()
@@ -2267,7 +2376,7 @@ pub fn whir_commit_batch_owned_with_schedule(
             .iter()
             .map(|evals| {
                 let coeffs = hypercube_to_monomial_coeffs(evals);
-                encode_rs_coset_goldilocks(&coeffs, st0.blowup)
+                encode_rs_coset_goldilocks(&coeffs, blowup)
             })
             .collect()
     };
@@ -2276,7 +2385,7 @@ pub fn whir_commit_batch_owned_with_schedule(
         .iter()
         .map(|evals| {
             let coeffs = hypercube_to_monomial_coeffs(evals);
-            encode_rs_coset_goldilocks(&coeffs, st0.blowup)
+            encode_rs_coset_goldilocks(&coeffs, blowup)
         })
         .collect();
     let domain_len = codewords_0[0].len();
@@ -2285,19 +2394,7 @@ pub fn whir_commit_batch_owned_with_schedule(
     let tree_0 = MerkleCanopyTree::build_from_fn_x4(num_groups, |base_g| {
         round0_leaf_hash_x4(&codewords_0, salt_seed, base_g, num_groups, group_arity_0)
     });
-    let comm = tree_0.commitment();
-    (
-        comm,
-        HemWhirProverState {
-            num_vars,
-            schedule,
-            group_arity_0,
-            hypercube_evals: polys,
-            codewords_0,
-            salt_seed: *salt_seed,
-            tree_0,
-        },
-    )
+    (codewords_0, tree_0)
 }
 
 /// Produce a `[P0-01]`-hardened `Hem` WHIR opening proof over `GoldilocksExt4` for one evaluation
@@ -2317,6 +2414,19 @@ pub fn whir_open(
         transcript.absorb_ext4(b"PCS_POINT_COORD", c);
     }
     transcript.absorb_ext4(b"PCS_CLAIMED_EVAL", claimed_eval);
+
+    #[cfg(feature = "vulkan")]
+    if let Some(session) = state.gpu_session.as_ref() {
+        let mut gpu_tr = transcript.clone();
+        match whir_open_single_gpu(state, session, point, claimed_eval, &mut gpu_tr) {
+            Ok(opening) => {
+                *transcript = gpu_tr;
+                return opening;
+            }
+            Err(err) => session.record_fallback("whir_open", err),
+        }
+    }
+
     let kernel_table = monomial_table(point);
     whir_open_core(
         state,
@@ -2362,6 +2472,18 @@ pub fn whir_open_batch(
     assert_eq!(evals.len(), num_polys);
     assert!(points.iter().all(|p| p.len() == num_vars));
     absorb_batch_statement(transcript, num_vars, &state.commitment(), points, evals);
+
+    #[cfg(feature = "vulkan")]
+    if let Some(session) = state.gpu_session.as_ref() {
+        let mut gpu_tr = transcript.clone();
+        match whir_open_batch_gpu(state, session, points, evals, &mut gpu_tr) {
+            Ok(batch_proof) => {
+                *transcript = gpu_tr;
+                return batch_proof;
+            }
+            Err(err) => session.record_fallback("whir_open_batch", err),
+        }
+    }
 
     if num_polys == 1 {
         let kernel = monomial_table(points[0]);
@@ -2554,6 +2676,20 @@ fn whir_open_core(
     mut cur_sum_claim: GoldilocksExt4,
     transcript: &mut FiatShamirTranscript<InstanceBound>,
 ) -> HemWhirOpeningProof {
+    let lazy_cpu_r0: Option<(Vec<Vec<Goldilocks>>, MerkleCanopyTree)> =
+        state.codewords_0.is_empty().then(|| {
+            build_cpu_round0(
+                &state.hypercube_evals,
+                &state.salt_seed,
+                state.schedule.stages[0].blowup,
+                state.group_arity_0,
+            )
+        });
+    let (codewords_0, tree_0): (&[Vec<Goldilocks>], &MerkleCanopyTree) = match &lazy_cpu_r0 {
+        Some((cws, tr)) => (cws.as_slice(), tr),
+        None => (state.codewords_0.as_slice(), &state.tree_0),
+    };
+
     let num_polys = state.num_polys();
     assert_eq!(weights.len(), num_polys);
     let single = num_polys == 1;
@@ -2685,7 +2821,7 @@ fn whir_open_core(
             let shift_claims = if stage_idx == 0 {
                 stage_pow_nonce_0 = pow_nonce;
                 let num_groups_0 = state.num_groups_0();
-                let domain_0 = state.codewords_0[0].len();
+                let domain_0 = codewords_0[0].len();
                 let log_d0 = domain_0.trailing_zeros() as usize;
                 let omega_0 = Goldilocks::two_adic_generator(log_d0);
                 let zeta_0 = omega_0.pow(num_groups_0 as u64);
@@ -2701,14 +2837,14 @@ fn whir_open_core(
                     round0_salts.push(derive_round0_salt(&state.salt_seed, g as u32));
                     let mut fiber = [GoldilocksExt4::ZERO; MAX_FIBER_ARITY];
                     if single {
-                        let cw0 = &state.codewords_0[0];
+                        let cw0 = &codewords_0[0];
                         for k in 0..arity {
                             let v = cw0[g + k * num_groups_0];
                             round0_vals.push(v);
                             fiber[k] = GoldilocksExt4::from_base(v);
                         }
                     } else {
-                        for (w, cw) in weights.iter().zip(&state.codewords_0) {
+                        for (w, cw) in weights.iter().zip(codewords_0) {
                             let mut x = y0;
                             for k in 0..arity {
                                 let v = cw[g + k * num_groups_0];
@@ -2729,8 +2865,8 @@ fn whir_open_core(
                     let z_u = pow2_iter_base(y0, st.step_vars);
                     claims.push((z_u, v_shift));
                 }
-                round0_multiproof = state.tree_0.open_multi_with_leaf_fn(&q_indices, |g| {
-                    round0_leaf_hash(&state.codewords_0, &state.salt_seed, g, num_groups_0, arity)
+                round0_multiproof = tree_0.open_multi_with_leaf_fn(&q_indices, |g| {
+                    round0_leaf_hash(codewords_0, &state.salt_seed, g, num_groups_0, arity)
                 });
                 claims
             } else {
@@ -2823,7 +2959,7 @@ fn whir_open_core(
             if stage_idx == 0 {
                 stage_pow_nonce_0 = pow_nonce;
                 let num_groups_0 = state.num_groups_0();
-                let domain_0 = state.codewords_0[0].len();
+                let domain_0 = codewords_0[0].len();
                 let log_d0 = domain_0.trailing_zeros() as usize;
                 let omega_0 = Goldilocks::two_adic_generator(log_d0);
                 let zeta_0 = omega_0.pow(num_groups_0 as u64);
@@ -2837,14 +2973,14 @@ fn whir_open_core(
                     round0_salts.push(derive_round0_salt(&state.salt_seed, g as u32));
                     let mut fiber = [GoldilocksExt4::ZERO; MAX_FIBER_ARITY];
                     if single {
-                        let cw0 = &state.codewords_0[0];
+                        let cw0 = &codewords_0[0];
                         for k in 0..arity {
                             let v = cw0[g + k * num_groups_0];
                             round0_vals.push(v);
                             fiber[k] = GoldilocksExt4::from_base(v);
                         }
                     } else {
-                        for (w, cw) in weights.iter().zip(&state.codewords_0) {
+                        for (w, cw) in weights.iter().zip(codewords_0) {
                             let mut x = y0;
                             for k in 0..arity {
                                 let v = cw[g + k * num_groups_0];
@@ -2867,8 +3003,8 @@ fn whir_open_core(
                         "final polynomial disagrees with an opened Round-0 fiber"
                     );
                 }
-                round0_multiproof = state.tree_0.open_multi_with_leaf_fn(&q_indices, |g| {
-                    round0_leaf_hash(&state.codewords_0, &state.salt_seed, g, num_groups_0, arity)
+                round0_multiproof = tree_0.open_multi_with_leaf_fn(&q_indices, |g| {
+                    round0_leaf_hash(codewords_0, &state.salt_seed, g, num_groups_0, arity)
                 });
             } else {
                 let (prev_cw, prev_tree, prev_ood) = match active_stage_oracle.take() {
@@ -2925,6 +3061,860 @@ fn whir_open_core(
         round0_vals,
         round0_multiproof,
     }
+}
+
+#[cfg(feature = "vulkan")]
+#[inline]
+pub(crate) fn ext4_to_arr(e: GoldilocksExt4) -> [u64; 4] {
+    e.to_limbs().map(Goldilocks::to_canonical_u64)
+}
+
+#[cfg(feature = "vulkan")]
+#[inline]
+fn word_to_gl_checked(w: u64) -> Result<Goldilocks, qsag_accel::VulkanError> {
+    Goldilocks::from_canonical_u64(w)
+        .ok_or(qsag_accel::VulkanError::Accel(qsag_accel::AccelError::BackendFailure))
+}
+
+#[cfg(feature = "vulkan")]
+#[inline]
+pub(crate) fn arr_to_ext4_checked(a: [u64; 4]) -> Result<GoldilocksExt4, qsag_accel::VulkanError> {
+    let mut limbs = [Goldilocks::ZERO; 4];
+    for (&w, dst) in a.iter().zip(&mut limbs) {
+        *dst = word_to_gl_checked(w)?;
+    }
+    Ok(GoldilocksExt4::from_limbs(limbs))
+}
+
+#[cfg(feature = "vulkan")]
+fn max_intermediate_stage_dims(num_vars: usize, schedule: &WhirSchedule) -> (usize, usize) {
+    let mut rem_vars = num_vars;
+    let mut max_dom = 1usize;
+    let mut max_grps = 1usize;
+    for stage_idx in 0..schedule.stages.len().saturating_sub(1) {
+        rem_vars -= schedule.stages[stage_idx].step_vars;
+        let next_spec = schedule.stages[stage_idx + 1];
+        let next_arity = 1usize << next_spec.step_vars;
+        let dom = (1usize << rem_vars) * next_spec.blowup;
+        let grps = dom / next_arity;
+        max_dom = max_dom.max(dom);
+        max_grps = max_grps.max(grps);
+    }
+    (max_dom, max_grps)
+}
+
+#[cfg(feature = "vulkan")]
+fn eq_kronecker_768(point: &[GoldilocksExt4]) -> [[u64; 4]; 768] {
+    let mut out = [[0u64; 4]; 768];
+    for byte_idx in 0..3 {
+        for k in 0..256usize {
+            let mut prod = GoldilocksExt4::ONE;
+            for j in 0..8usize {
+                let b = 8 * byte_idx + j;
+                let bit = (k >> j) & 1 == 1;
+                if b < point.len() {
+                    prod *= if bit {
+                        point[b]
+                    } else {
+                        GoldilocksExt4::ONE - point[b]
+                    };
+                } else if bit {
+                    prod = GoldilocksExt4::ZERO;
+                    break;
+                }
+            }
+            out[256 * byte_idx + k] = ext4_to_arr(prod);
+        }
+    }
+    out
+}
+
+#[cfg(feature = "vulkan")]
+fn mono_kronecker_768(point: &[GoldilocksExt4]) -> [[u64; 4]; 768] {
+    let mut out = [[0u64; 4]; 768];
+    for byte_idx in 0..3 {
+        for k in 0..256usize {
+            let mut prod = GoldilocksExt4::ONE;
+            for j in 0..8usize {
+                let b = 8 * byte_idx + j;
+                let bit = (k >> j) & 1 == 1;
+                if b < point.len() {
+                    if bit {
+                        prod *= point[b];
+                    }
+                } else if bit {
+                    prod = GoldilocksExt4::ZERO;
+                    break;
+                }
+            }
+            out[256 * byte_idx + k] = ext4_to_arr(prod);
+        }
+    }
+    out
+}
+
+#[cfg(feature = "vulkan")]
+fn geometric_kronecker_768(scale: GoldilocksExt4, z: GoldilocksExt4) -> [[u64; 4]; 768] {
+    let mut out = [[0u64; 4]; 768];
+    let mut cur = scale;
+    for slot in &mut out[0..256] {
+        *slot = ext4_to_arr(cur);
+        cur *= z;
+    }
+    let z256 = z.pow(256);
+    cur = GoldilocksExt4::ONE;
+    for slot in &mut out[256..512] {
+        *slot = ext4_to_arr(cur);
+        cur *= z256;
+    }
+    let z65536 = z256.pow(256);
+    cur = GoldilocksExt4::ONE;
+    for slot in &mut out[512..768] {
+        *slot = ext4_to_arr(cur);
+        cur *= z65536;
+    }
+    out
+}
+
+#[cfg(feature = "vulkan")]
+fn pair_geometric_kronecker_1536(
+    s0: GoldilocksExt4,
+    z0: GoldilocksExt4,
+    s1: GoldilocksExt4,
+    z1: GoldilocksExt4,
+) -> [[u64; 4]; 1536] {
+    let mut out = [[0u64; 4]; 1536];
+    out[0..768].copy_from_slice(&geometric_kronecker_768(s0, z0));
+    out[768..1536].copy_from_slice(&geometric_kronecker_768(s1, z1));
+    out
+}
+
+#[cfg(feature = "vulkan")]
+fn collect_steiner_sibling_indices(log_leaves: usize, sorted_unique_indices: &[usize]) -> Vec<u64> {
+    let n = 1usize << log_leaves;
+    let mut sib_indices = Vec::with_capacity(sorted_unique_indices.len() * log_leaves);
+    let mut active: Vec<usize> = sorted_unique_indices.iter().map(|&i| n + i).collect();
+    for _ in 0..log_leaves {
+        let mut write = 0usize;
+        let mut k = 0usize;
+        while k < active.len() {
+            let u = active[k];
+            let sib = u ^ 1;
+            if k + 1 < active.len() && active[k + 1] == sib {
+                k += 2;
+            } else {
+                sib_indices.push(sib as u64);
+                k += 1;
+            }
+            active[write] = u >> 1;
+            write += 1;
+        }
+        active.truncate(write);
+    }
+    sib_indices
+}
+
+#[cfg(feature = "vulkan")]
+fn decode_merkle_siblings(words: &[u64]) -> Vec<[u8; 32]> {
+    words
+        .chunks_exact(4)
+        .map(|c| {
+            let mut node = [0u8; 32];
+            for (i, &w) in c.iter().enumerate() {
+                node[8 * i..8 * (i + 1)].copy_from_slice(&w.to_le_bytes());
+            }
+            node
+        })
+        .collect()
+}
+
+#[cfg(feature = "vulkan")]
+fn whir_open_single_gpu(
+    state: &HemWhirProverState,
+    session: &crate::acceleration::GpuWhirSession,
+    point: &[GoldilocksExt4],
+    claimed_eval: GoldilocksExt4,
+    transcript: &mut FiatShamirTranscript<InstanceBound>,
+) -> Result<HemWhirOpeningProof, qsag_accel::VulkanError> {
+    let mono_kron = mono_kronecker_768(point);
+    session
+        .raw()
+        .prover_whir_expand_monomial_and_dot(&mono_kron, state.num_vars, 1, &mut [])?;
+    whir_open_core_gpu(
+        state,
+        session,
+        &[[GoldilocksExt4::ONE, GoldilocksExt4::ZERO]],
+        claimed_eval,
+        transcript,
+    )
+}
+
+#[cfg(feature = "vulkan")]
+fn whir_open_batch_gpu(
+    state: &HemWhirProverState,
+    session: &crate::acceleration::GpuWhirSession,
+    points: &[&[GoldilocksExt4]],
+    evals: &[GoldilocksExt4],
+    transcript: &mut FiatShamirTranscript<InstanceBound>,
+) -> Result<HemWhirBatchOpeningProof, qsag_accel::VulkanError> {
+    let num_polys = state.num_polys();
+    let num_vars = state.num_vars;
+    let raw = session.raw();
+
+    if num_polys == 1 {
+        let opening = whir_open_single_gpu(state, session, points[0], evals[0], transcript)?;
+        return Ok(HemWhirBatchOpeningProof {
+            point_sumcheck_polys: Vec::new(),
+            common_point_evals: Vec::new(),
+            shifted_evals: Vec::new(),
+            opening,
+        });
+    }
+
+    let lambda = transcript.squeeze_ext4(b"PCS_BATCH_LAMBDA");
+    let lambda_pows = powers_of_ext4(lambda, num_polys);
+    let mut claim = GoldilocksExt4::ZERO;
+    for (&w, &e) in lambda_pows.iter().zip(evals) {
+        claim += w * e;
+    }
+
+    let mut eq_kron_flat = Vec::with_capacity(768 * num_polys);
+    for p in points {
+        eq_kron_flat.extend_from_slice(&eq_kronecker_768(p));
+    }
+    let lam_arr: Vec<[u64; 4]> = lambda_pows.iter().copied().map(ext4_to_arr).collect();
+    raw.prover_whir_batch_sumcheck_init(&eq_kron_flat, &lam_arr, num_vars)?;
+
+    let mut cur_len = 1usize << num_vars;
+    let pp_hi = (num_polys * cur_len) as u32;
+    let mut src_base = 0u32;
+    let mut round = 0usize;
+    let mut point_sumcheck_polys = Vec::with_capacity(num_vars);
+    let mut rho = Vec::with_capacity(num_vars);
+
+    while round < num_vars && (round == 0 || cur_len > 1_024) {
+        let (ev0_arr, ev2_arr) =
+            raw.prover_whir_batch_sumcheck_eval(round, cur_len, num_polys, src_base)?;
+        let ev0 = arr_to_ext4_checked(ev0_arr)?;
+        let ev2 = arr_to_ext4_checked(ev2_arr)?;
+        let ev1 = claim - ev0;
+        let wire = pack_quadratic_wire(ev0, ev1, ev2);
+        transcript.absorb_ext4(b"PCS_BATCH_SC_C0", wire[0]);
+        transcript.absorb_ext4(b"PCS_BATCH_SC_C2", wire[1]);
+        point_sumcheck_polys.push(wire);
+
+        let r = transcript.squeeze_ext4(b"PCS_BATCH_SC_CHAL");
+        claim = eval_quadratic_wire(&wire, claim, r);
+        let dst_base = if src_base == 0 { pp_hi } else { 0 };
+        raw.prover_whir_batch_sumcheck_fold(
+            round,
+            cur_len,
+            num_polys,
+            src_base,
+            dst_base,
+            ext4_to_arr(r),
+        )?;
+        cur_len /= 2;
+        src_base = dst_base;
+        rho.push(r);
+        round += 1;
+    }
+
+    let mut raw_t = vec![[0u64; 4]; num_polys * cur_len];
+    let mut raw_k = vec![[0u64; 4]; num_polys * cur_len];
+    raw.prover_whir_batch_sumcheck_read_tail(
+        cur_len,
+        num_polys,
+        src_base,
+        &mut raw_t,
+        &mut raw_k,
+    )?;
+    let mut tables: Vec<Vec<GoldilocksExt4>> = Vec::with_capacity(num_polys);
+    let mut kernels: Vec<Vec<GoldilocksExt4>> = Vec::with_capacity(num_polys);
+    for p in 0..num_polys {
+        tables.push(
+            raw_t[p * cur_len..(p + 1) * cur_len]
+                .iter()
+                .copied()
+                .map(arr_to_ext4_checked)
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        kernels.push(
+            raw_k[p * cur_len..(p + 1) * cur_len]
+                .iter()
+                .copied()
+                .map(arr_to_ext4_checked)
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+    }
+
+    let mut fold_scratch = Vec::new();
+    for _ in round..num_vars {
+        let mut ev0 = GoldilocksExt4::ZERO;
+        let mut ev2 = GoldilocksExt4::ZERO;
+        for i in 0..num_polys {
+            let (p0, p2) = sumcheck_round_evals_ext4(&tables[i], &kernels[i], |k, w| k * w);
+            ev0 += lambda_pows[i] * p0;
+            ev2 += lambda_pows[i] * p2;
+        }
+        let ev1 = claim - ev0;
+        let wire = pack_quadratic_wire(ev0, ev1, ev2);
+        transcript.absorb_ext4(b"PCS_BATCH_SC_C0", wire[0]);
+        transcript.absorb_ext4(b"PCS_BATCH_SC_C2", wire[1]);
+        point_sumcheck_polys.push(wire);
+
+        let r = transcript.squeeze_ext4(b"PCS_BATCH_SC_CHAL");
+        claim = eval_quadratic_wire(&wire, claim, r);
+        for table in &mut tables {
+            fold_first_var_ext4_into(table, &mut fold_scratch, r);
+        }
+        for kernel in &mut kernels {
+            fold_first_var_ext4_into(kernel, &mut fold_scratch, r);
+        }
+        rho.push(r);
+    }
+
+    let common_point_evals: Vec<GoldilocksExt4> = tables.iter().map(|t| t[0]).collect();
+    for &e in &common_point_evals {
+        transcript.absorb_ext4(b"PCS_BATCH_COMMON_EVAL", e);
+    }
+
+    let mono_kron = mono_kronecker_768(&rho);
+    let mut shifted_raw = vec![[0u64; 4]; num_polys];
+    raw.prover_whir_expand_monomial_and_dot(&mono_kron, num_vars, 1, &mut shifted_raw)?;
+    let shifted_evals: Vec<GoldilocksExt4> = shifted_raw
+        .into_iter()
+        .map(arr_to_ext4_checked)
+        .collect::<Result<Vec<_>, _>>()?;
+    for &e in &shifted_evals {
+        transcript.absorb_ext4(b"PCS_BATCH_SHIFT", e);
+    }
+
+    let weights = cascade_weights(num_polys, transcript);
+    let combined_claim = combine_claims(&weights, &common_point_evals, &shifted_evals);
+    let opening = whir_open_core_gpu(state, session, &weights, combined_claim, transcript)?;
+    Ok(HemWhirBatchOpeningProof {
+        point_sumcheck_polys,
+        common_point_evals,
+        shifted_evals,
+        opening,
+    })
+}
+
+#[cfg(feature = "vulkan")]
+fn whir_open_core_gpu(
+    state: &HemWhirProverState,
+    session: &crate::acceleration::GpuWhirSession,
+    weights: &[[GoldilocksExt4; 2]],
+    mut cur_sum_claim: GoldilocksExt4,
+    transcript: &mut FiatShamirTranscript<InstanceBound>,
+) -> Result<HemWhirOpeningProof, qsag_accel::VulkanError> {
+    let num_polys = state.num_polys();
+    let single = num_polys == 1;
+    let sched = &state.schedule;
+    let num_stages = sched.stages.len();
+    let early_stop = sched.early_stop_vars;
+    let fold_vars = state.num_vars - early_stop;
+    let raw = session.raw();
+
+    absorb_whir_schedule(transcript, sched);
+    let core_len = 1usize << state.num_vars;
+    let mut c_len = core_len + 2;
+    let mut k_len = core_len + 2;
+    let pp_ck = c_len as u32;
+
+    let z_ood_0 = core::array::from_fn::<_, 2, _>(|_| transcript.squeeze_ext4(b"WHIR_OOD_CHAL"));
+    let z_ood_0_kron = pair_geometric_kronecker_1536(
+        GoldilocksExt4::ONE,
+        z_ood_0[0],
+        GoldilocksExt4::ONE,
+        z_ood_0[1],
+    );
+    let weights_arr: Vec<[[u64; 4]; 2]> = weights
+        .iter()
+        .map(|w| [ext4_to_arr(w[0]), ext4_to_arr(w[1])])
+        .collect();
+    let ood0_raw = raw.prover_whir_open_init(state.num_vars, single, &weights_arr, &z_ood_0_kron)?;
+    let stage0_ood_evals = [
+        arr_to_ext4_checked(ood0_raw[0])?,
+        arr_to_ext4_checked(ood0_raw[1])?,
+    ];
+    for e in stage0_ood_evals {
+        transcript.absorb_ext4(b"WHIR_OOD_EVAL", e);
+    }
+
+    let xi_0 = transcript.squeeze_ext4(b"WHIR_OOD_WEIGHT");
+    cur_sum_claim += xi_0 * stage0_ood_evals[0];
+    let xi_1 = transcript.squeeze_ext4(b"WHIR_OOD_WEIGHT");
+    cur_sum_claim += xi_1 * stage0_ood_evals[1];
+    let xi_z_0_kron = pair_geometric_kronecker_1536(xi_0, z_ood_0[0], xi_1, z_ood_0[1]);
+    raw.prover_whir_add_ood_claims(k_len, 0, &xi_z_0_kron)?;
+
+    let inv_two = Goldilocks::TWO.inv();
+    let inv_zetas = build_inv_zetas();
+    let mut rem_vars = state.num_vars;
+    let mut fold_sumcheck_polys = Vec::with_capacity(fold_vars);
+    let mut stage_pow_nonce_0: u64 = 0;
+    let mut round0_salts: Vec<[u8; 16]> = Vec::new();
+    let mut round0_vals: Vec<Goldilocks> = Vec::new();
+    let mut round0_multiproof = CanopyMultiProof {
+        auth_siblings: Vec::new(),
+    };
+    let mut active_gpu_stage: Option<(usize, CanopyCommitment, [GoldilocksExt4; 2])> = None;
+    let mut folded_layers: Vec<WhirStageProof> = Vec::with_capacity(num_stages.saturating_sub(1));
+
+    let mut c_base = 0u32;
+    let mut k_base = 0u32;
+
+    for (stage_idx, st) in sched.stages.iter().enumerate() {
+        let arity = 1usize << st.step_vars;
+        let mut stage_chals = [[GoldilocksExt4::ZERO; 3]; MAX_FOLD_STEP_VARS];
+
+        for (step_idx, slot) in stage_chals.iter_mut().take(st.step_vars).enumerate() {
+            let pairs_ck = (c_len / 2).min(k_len / 2);
+            let pairs_c = c_len / 2;
+            let k_half = (k_len / 2) as u32;
+            let next_base = if c_base == 0 { pp_ck } else { 0 };
+
+            let w012 = raw.prover_whir_fold_pass_a(pairs_ck, c_base, k_base)?;
+            let mut wire = [GoldilocksExt4::ZERO; 5];
+            wire[0] = arr_to_ext4_checked(w012[0])?;
+            wire[1] = arr_to_ext4_checked(w012[1])?;
+            wire[2] = arr_to_ext4_checked(w012[2])?;
+            let phi = bridge_prefix(&wire, transcript);
+
+            let w34 = raw.prover_whir_fold_pass_b(
+                pairs_c,
+                c_base,
+                k_base,
+                k_half,
+                next_base,
+                ext4_to_arr(phi),
+            )?;
+            wire[3] = arr_to_ext4_checked(w34[0])?;
+            wire[4] = arr_to_ext4_checked(w34[1])?;
+            k_len = k_half as usize + 1;
+
+            let (next_claim, chals) = bridge_finish(&wire, cur_sum_claim, phi, transcript);
+            cur_sum_claim = next_claim;
+
+            let is_last_step = step_idx + 1 == st.step_vars;
+            let norm_zero = is_last_step && next_base != 0;
+            c_len = pairs_c + 1;
+            let norm_len = c_len.max(k_len);
+            raw.prover_whir_fold_pass_c(
+                pairs_c,
+                c_base,
+                next_base,
+                ext4_to_arr(chals[0]),
+                ext4_to_arr(chals[1]),
+                ext4_to_arr(chals[2]),
+                norm_zero,
+                norm_len,
+            )?;
+            if norm_zero {
+                c_base = 0;
+                k_base = 0;
+            } else {
+                c_base = next_base;
+                k_base = next_base;
+            }
+
+            fold_sumcheck_polys.push(wire);
+            *slot = chals;
+        }
+        rem_vars -= st.step_vars;
+        let chals_slice = &stage_chals[..st.step_vars];
+
+        if stage_idx + 1 < num_stages {
+            let next_spec = sched.stages[stage_idx + 1];
+            let next_arity = 1usize << next_spec.step_vars;
+            let next_domain = (1usize << rem_vars) * next_spec.blowup;
+            let num_groups_next = next_domain / next_arity;
+            let log_leaves_next = num_groups_next.trailing_zeros() as u8;
+
+            let top_next =
+                raw.prover_whir_commit_stage(stage_idx + 1, c_len, next_domain, next_arity)?;
+            if !session.certify_stage(
+                qsag_accel::ProverKernelSlot::WhirLdeCommitment,
+                b"WHIR.COMMIT.STAGE/v1",
+                next_domain,
+                &top_next,
+            ) {
+                return Err(qsag_accel::VulkanError::WorkspacePoisoned);
+            }
+            let comm_next = CanopyCommitment {
+                root: hash_tree_root(log_leaves_next, &top_next),
+                log_leaves: log_leaves_next,
+            };
+            transcript.absorb(b"WHIR_NEXT_COMMIT", &comm_next.to_bytes());
+
+            let z_ood_next =
+                core::array::from_fn::<_, 2, _>(|_| transcript.squeeze_ext4(b"WHIR_OOD_CHAL"));
+            let z_ood_next_kron = pair_geometric_kronecker_1536(
+                GoldilocksExt4::ONE,
+                z_ood_next[0],
+                GoldilocksExt4::ONE,
+                z_ood_next[1],
+            );
+            let ood_raw = raw.prover_whir_eval_univariate_2(c_len, 0, &z_ood_next_kron)?;
+            let ood_eval_next = [
+                arr_to_ext4_checked(ood_raw[0])?,
+                arr_to_ext4_checked(ood_raw[1])?,
+            ];
+            for e in ood_eval_next {
+                transcript.absorb_ext4(b"WHIR_OOD_EVAL", e);
+            }
+
+            let pow_nonce = grind_pcs_pow(transcript);
+            transcript.absorb(b"WHIR_STAGE_POW", &pow_nonce.to_le_bytes());
+
+            let shift_claims = if stage_idx == 0 {
+                stage_pow_nonce_0 = pow_nonce;
+                let num_groups_0 = state.num_groups_0();
+                let domain_0 = core_len * sched.stages[0].blowup;
+                let log_d0 = domain_0.trailing_zeros() as usize;
+                let log_leaves_0 = num_groups_0.trailing_zeros() as usize;
+                let omega_0 = Goldilocks::two_adic_generator(log_d0);
+                let zeta_0 = omega_0.pow(num_groups_0 as u64);
+                let q_indices = sample_stage_queries(transcript, 0, num_groups_0, st.num_queries);
+                let (y0s, inv_y0s) = batch_coset_points_and_inverses(omega_0, &q_indices);
+                let q_u64: Vec<u64> = q_indices.iter().map(|&i| i as u64).collect();
+                let sib_indices = collect_steiner_sibling_indices(log_leaves_0, &q_indices);
+
+                let salt_words = 2 * q_indices.len();
+                let fiber_words = num_polys * arity * q_indices.len();
+                let mut raw_q = vec![0u64; salt_words + fiber_words + 4 * sib_indices.len()];
+                raw.prover_whir_gather_queries(
+                    0,
+                    arity,
+                    num_polys,
+                    num_groups_0,
+                    &q_u64,
+                    &sib_indices,
+                    &mut raw_q,
+                )?;
+
+                round0_salts.reserve(q_indices.len());
+                round0_vals.reserve(fiber_words);
+                for qi in 0..q_indices.len() {
+                    let mut salt = [0u8; 16];
+                    salt[0..8].copy_from_slice(&raw_q[2 * qi].to_le_bytes());
+                    salt[8..16].copy_from_slice(&raw_q[2 * qi + 1].to_le_bytes());
+                    round0_salts.push(salt);
+                }
+                let mut claims = Vec::with_capacity(q_indices.len());
+                for q_pos in 0..q_indices.len() {
+                    let f_base = salt_words + q_pos * (num_polys * arity);
+                    let y0 = y0s[q_pos];
+                    let inv_y0 = inv_y0s[q_pos];
+                    let mut fiber = [GoldilocksExt4::ZERO; MAX_FIBER_ARITY];
+                    if single {
+                        for k in 0..arity {
+                            let v = word_to_gl_checked(raw_q[f_base + k])?;
+                            round0_vals.push(v);
+                            fiber[k] = GoldilocksExt4::from_base(v);
+                        }
+                    } else {
+                        for (p_idx, w_pair) in weights.iter().enumerate() {
+                            let mut x = y0;
+                            for k in 0..arity {
+                                let v = word_to_gl_checked(raw_q[f_base + p_idx * arity + k])?;
+                                round0_vals.push(v);
+                                fiber[k] += (w_pair[0] + w_pair[1].mul_base(x)).mul_base(v);
+                                x *= zeta_0;
+                            }
+                        }
+                    }
+                    let v_shift = fold_coset_group_ext4(
+                        &fiber[..arity],
+                        y0,
+                        inv_y0,
+                        inv_two,
+                        &inv_zetas,
+                        chals_slice,
+                    );
+                    let z_u = pow2_iter_base(y0, st.step_vars);
+                    claims.push((z_u, v_shift));
+                }
+                round0_multiproof = CanopyMultiProof {
+                    auth_siblings: decode_merkle_siblings(&raw_q[salt_words + fiber_words..]),
+                };
+                claims
+            } else {
+                let (domain_cur, prev_comm, prev_ood) = active_gpu_stage
+                    .take()
+                    .ok_or(qsag_accel::VulkanError::WorkspacePoisoned)?;
+                let num_groups_cur = domain_cur / arity;
+                let log_d = domain_cur.trailing_zeros() as usize;
+                let log_leaves_cur = num_groups_cur.trailing_zeros() as usize;
+                let omega = Goldilocks::two_adic_generator(log_d);
+                let q_indices =
+                    sample_stage_queries(transcript, stage_idx, num_groups_cur, st.num_queries);
+                let (y0s, inv_y0s) = batch_coset_points_and_inverses(omega, &q_indices);
+                let q_u64: Vec<u64> = q_indices.iter().map(|&i| i as u64).collect();
+                let sib_indices = collect_steiner_sibling_indices(log_leaves_cur, &q_indices);
+
+                let fiber_words = 4 * arity * q_indices.len();
+                let mut raw_q = vec![0u64; fiber_words + 4 * sib_indices.len()];
+                raw.prover_whir_gather_queries(
+                    stage_idx,
+                    arity,
+                    1,
+                    num_groups_cur,
+                    &q_u64,
+                    &sib_indices,
+                    &mut raw_q,
+                )?;
+
+                let mut opened_vals = Vec::with_capacity(q_indices.len() * arity);
+                let mut claims = Vec::with_capacity(q_indices.len());
+                for q_pos in 0..q_indices.len() {
+                    let f_base = q_pos * 4 * arity;
+                    let mut fiber = [GoldilocksExt4::ZERO; MAX_FIBER_ARITY];
+                    for (k, slot) in fiber.iter_mut().enumerate().take(arity) {
+                        let o = f_base + 4 * k;
+                        *slot = arr_to_ext4_checked([
+                            raw_q[o],
+                            raw_q[o + 1],
+                            raw_q[o + 2],
+                            raw_q[o + 3],
+                        ])?;
+                    }
+                    opened_vals.extend_from_slice(&fiber[..arity]);
+                    let v_shift = fold_coset_group_ext4(
+                        &fiber[..arity],
+                        y0s[q_pos],
+                        inv_y0s[q_pos],
+                        inv_two,
+                        &inv_zetas,
+                        chals_slice,
+                    );
+                    let z_u = pow2_iter_base(y0s[q_pos], st.step_vars);
+                    claims.push((z_u, v_shift));
+                }
+                let multiproof = CanopyMultiProof {
+                    auth_siblings: decode_merkle_siblings(&raw_q[fiber_words..]),
+                };
+                folded_layers.push(WhirStageProof {
+                    commitment: prev_comm,
+                    stage_ood_evals: prev_ood,
+                    pow_nonce,
+                    opened_vals,
+                    multiproof,
+                });
+                claims
+            };
+
+            let mut shift_bytes = Vec::with_capacity(32 * shift_claims.len());
+            for &(_, v_shift) in &shift_claims {
+                shift_bytes.extend_from_slice(&v_shift.to_le_bytes());
+            }
+            transcript.absorb(b"WHIR_SHIFT_VALS", &shift_bytes);
+
+            let xi_next_0 = transcript.squeeze_ext4(b"WHIR_OOD_WEIGHT");
+            cur_sum_claim += xi_next_0 * ood_eval_next[0];
+            let xi_next_1 = transcript.squeeze_ext4(b"WHIR_OOD_WEIGHT");
+            cur_sum_claim += xi_next_1 * ood_eval_next[1];
+            let xi_z_next_kron =
+                pair_geometric_kronecker_1536(xi_next_0, z_ood_next[0], xi_next_1, z_ood_next[1]);
+            raw.prover_whir_add_ood_claims(k_len, 0, &xi_z_next_kron)?;
+
+            let gamma_shift = transcript.squeeze_ext4(b"WHIR_SHIFT_GAMMA");
+            let mut z_pow_256 = Vec::with_capacity(shift_claims.len() * 256);
+            let mut claims_meta = Vec::with_capacity(shift_claims.len());
+            let mut w = gamma_shift;
+            for &(z_u, v_shift) in &shift_claims {
+                cur_sum_claim += w * v_shift;
+                let mut p = Goldilocks::ONE;
+                for _ in 0..256 {
+                    z_pow_256.push(p.to_canonical_u64());
+                    p *= z_u;
+                }
+                let wa = ext4_to_arr(w);
+                claims_meta.push([z_u.to_canonical_u64(), 0, 0, 0, wa[0], wa[1], wa[2], wa[3]]);
+                w *= gamma_shift;
+            }
+            raw.prover_whir_accumulate_shift_claims(k_len, 0, &z_pow_256, &claims_meta)?;
+
+            active_gpu_stage = Some((next_domain, comm_next, ood_eval_next));
+        } else {
+            let final_len = (1usize << early_stop) + 2;
+            let mut final_raw = vec![[0u64; 4]; final_len];
+            raw.prover_whir_read_final_coeffs(0, &mut final_raw)?;
+            let final_coeffs: Vec<GoldilocksExt4> = final_raw
+                .into_iter()
+                .map(arr_to_ext4_checked)
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let mut final_bytes = Vec::with_capacity(32 * final_coeffs.len());
+            for &v in &final_coeffs {
+                final_bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            transcript.absorb(b"WHIR_FINAL_POLY", &final_bytes);
+
+            let pow_nonce = grind_pcs_pow(transcript);
+            transcript.absorb(b"WHIR_FINAL_POW", &pow_nonce.to_le_bytes());
+
+            let final_coeffs_v = to_verified_coeffs(&final_coeffs);
+
+            if stage_idx == 0 {
+                stage_pow_nonce_0 = pow_nonce;
+                let num_groups_0 = state.num_groups_0();
+                let domain_0 = core_len * sched.stages[0].blowup;
+                let log_d0 = domain_0.trailing_zeros() as usize;
+                let log_leaves_0 = num_groups_0.trailing_zeros() as usize;
+                let omega_0 = Goldilocks::two_adic_generator(log_d0);
+                let zeta_0 = omega_0.pow(num_groups_0 as u64);
+                let q_indices = sample_stage_queries(transcript, 0, num_groups_0, st.num_queries);
+                let (y0s, inv_y0s) = batch_coset_points_and_inverses(omega_0, &q_indices);
+                let q_u64: Vec<u64> = q_indices.iter().map(|&i| i as u64).collect();
+                let sib_indices = collect_steiner_sibling_indices(log_leaves_0, &q_indices);
+
+                let salt_words = 2 * q_indices.len();
+                let fiber_words = num_polys * arity * q_indices.len();
+                let mut raw_q = vec![0u64; salt_words + fiber_words + 4 * sib_indices.len()];
+                raw.prover_whir_gather_queries(
+                    0,
+                    arity,
+                    num_polys,
+                    num_groups_0,
+                    &q_u64,
+                    &sib_indices,
+                    &mut raw_q,
+                )?;
+
+                round0_salts.reserve(q_indices.len());
+                round0_vals.reserve(fiber_words);
+                for qi in 0..q_indices.len() {
+                    let mut salt = [0u8; 16];
+                    salt[0..8].copy_from_slice(&raw_q[2 * qi].to_le_bytes());
+                    salt[8..16].copy_from_slice(&raw_q[2 * qi + 1].to_le_bytes());
+                    round0_salts.push(salt);
+                }
+                for q_pos in 0..q_indices.len() {
+                    let f_base = salt_words + q_pos * (num_polys * arity);
+                    let y0 = y0s[q_pos];
+                    let inv_y0 = inv_y0s[q_pos];
+                    let mut fiber = [GoldilocksExt4::ZERO; MAX_FIBER_ARITY];
+                    if single {
+                        for k in 0..arity {
+                            let v = word_to_gl_checked(raw_q[f_base + k])?;
+                            round0_vals.push(v);
+                            fiber[k] = GoldilocksExt4::from_base(v);
+                        }
+                    } else {
+                        for (p_idx, w_pair) in weights.iter().enumerate() {
+                            let mut x = y0;
+                            for k in 0..arity {
+                                let v = word_to_gl_checked(raw_q[f_base + p_idx * arity + k])?;
+                                round0_vals.push(v);
+                                fiber[k] += (w_pair[0] + w_pair[1].mul_base(x)).mul_base(v);
+                                x *= zeta_0;
+                            }
+                        }
+                    }
+                    if !final_fiber_matches_terminal_poly(
+                        &fiber[..arity],
+                        y0,
+                        inv_y0,
+                        inv_two,
+                        &inv_zetas,
+                        chals_slice,
+                        &final_coeffs_v,
+                    ) {
+                        return Err(qsag_accel::VulkanError::WorkspacePoisoned);
+                    }
+                }
+                round0_multiproof = CanopyMultiProof {
+                    auth_siblings: decode_merkle_siblings(&raw_q[salt_words + fiber_words..]),
+                };
+            } else {
+                let (domain_cur, prev_comm, prev_ood) = active_gpu_stage
+                    .take()
+                    .ok_or(qsag_accel::VulkanError::WorkspacePoisoned)?;
+                let num_groups_cur = domain_cur / arity;
+                let log_d = domain_cur.trailing_zeros() as usize;
+                let log_leaves_cur = num_groups_cur.trailing_zeros() as usize;
+                let omega = Goldilocks::two_adic_generator(log_d);
+                let q_indices =
+                    sample_stage_queries(transcript, stage_idx, num_groups_cur, st.num_queries);
+                let (y0s, inv_y0s) = batch_coset_points_and_inverses(omega, &q_indices);
+                let q_u64: Vec<u64> = q_indices.iter().map(|&i| i as u64).collect();
+                let sib_indices = collect_steiner_sibling_indices(log_leaves_cur, &q_indices);
+
+                let fiber_words = 4 * arity * q_indices.len();
+                let mut raw_q = vec![0u64; fiber_words + 4 * sib_indices.len()];
+                raw.prover_whir_gather_queries(
+                    stage_idx,
+                    arity,
+                    1,
+                    num_groups_cur,
+                    &q_u64,
+                    &sib_indices,
+                    &mut raw_q,
+                )?;
+
+                let mut opened_vals = Vec::with_capacity(q_indices.len() * arity);
+                for q_pos in 0..q_indices.len() {
+                    let f_base = q_pos * 4 * arity;
+                    let mut fiber = [GoldilocksExt4::ZERO; MAX_FIBER_ARITY];
+                    for (k, slot) in fiber.iter_mut().enumerate().take(arity) {
+                        let o = f_base + 4 * k;
+                        *slot = arr_to_ext4_checked([
+                            raw_q[o],
+                            raw_q[o + 1],
+                            raw_q[o + 2],
+                            raw_q[o + 3],
+                        ])?;
+                    }
+                    opened_vals.extend_from_slice(&fiber[..arity]);
+                    if !final_fiber_matches_terminal_poly(
+                        &fiber[..arity],
+                        y0s[q_pos],
+                        inv_y0s[q_pos],
+                        inv_two,
+                        &inv_zetas,
+                        chals_slice,
+                        &final_coeffs_v,
+                    ) {
+                        return Err(qsag_accel::VulkanError::WorkspacePoisoned);
+                    }
+                }
+                let multiproof = CanopyMultiProof {
+                    auth_siblings: decode_merkle_siblings(&raw_q[fiber_words..]),
+                };
+                folded_layers.push(WhirStageProof {
+                    commitment: prev_comm,
+                    stage_ood_evals: prev_ood,
+                    pow_nonce,
+                    opened_vals,
+                    multiproof,
+                });
+            }
+
+            if !session.certify_stage(
+                qsag_accel::ProverKernelSlot::WhirFoldSumcheck,
+                b"WHIR.OPEN.CORE/v1",
+                core_len,
+                &final_bytes,
+            ) {
+                return Err(qsag_accel::VulkanError::WorkspacePoisoned);
+            }
+            return Ok(HemWhirOpeningProof {
+                stage0_ood_evals,
+                fold_sumcheck_polys,
+                folded_layers,
+                final_coeffs,
+                pow_nonce: stage_pow_nonce_0,
+                round0_salts,
+                round0_vals,
+                round0_multiproof,
+            });
+        }
+    }
+
+    Err(qsag_accel::VulkanError::WorkspacePoisoned)
 }
 
 /// Accumulate `q` shift evaluation claims `(z_u, v_shift)` with weights $\gamma_{\text{shift}}^{m+1}$
@@ -3476,14 +4466,11 @@ fn fold_and_pin_fiber(
     let v_shift = duet.fold(inv_two);
     let z_u = pow2_iter_base(y0, stage_chals.len());
     let pinned = terminal.is_none_or(|coeffs| {
-        duet.accepts(
-            inv_two,
-            qsag_whir_verified::eval_ext4_univariate_at_base(coeffs, z_u.to_canonical_u64()),
-        ) && qsag_whir_verified::verify_ext4_univariate_at_base_pin(
+        qsag_whir_verified::verify_ext4_univariate_at_base_pin(
             coeffs,
             z_u.to_canonical_u64(),
             to_verified_ext4(v_shift),
-        )
+        ) && duet.accepts(inv_two, to_verified_ext4(v_shift))
     });
     (z_u, v_shift, pinned)
 }

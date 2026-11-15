@@ -24,6 +24,7 @@ import all Qsag.ElfInvCerts
 import all Qsag.ElfParse
 import all Qsag.FaultAndSpeculativeSafety
 import all Qsag.Fips205
+import all Qsag.GaussianHvzkAndDualLpn
 import all Qsag.Goldilocks
 import all Qsag.HashSigs
 import all Qsag.HdToprfAndMigrationSecurity
@@ -137,6 +138,7 @@ run_cmd do
     `Qsag.ElfParse,
     `Qsag.FaultAndSpeculativeSafety,
     `Qsag.Fips205,
+    `Qsag.GaussianHvzkAndDualLpn,
     `Qsag.Goldilocks,
     `Qsag.HashSigs,
     `Qsag.HdToprfAndMigrationSecurity,

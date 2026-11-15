@@ -401,14 +401,17 @@ impl KernelClaim {
     }
 }
 
-/// Claims contracted per pool work item in [`terminal_sum`].
+/// Claims contracted per pool work item in [`terminal_sum`] when very large claim sets arise.
 #[cfg(feature = "std")]
-const TERMINAL_CLAIM_CHUNK: usize = 16;
+const TERMINAL_CLAIM_CHUNK: usize = 128;
 
 pub(super) fn terminal_sum(phis: &[E], early: usize, claims: &[KernelClaim], c: &[E]) -> E {
     let _phase = crate::profile::span("verify_terminal_sum");
     #[cfg(feature = "std")]
-    if claims.len() >= 4 * TERMINAL_CLAIM_CHUNK {
+    if claims.len() >= 16 * TERMINAL_CLAIM_CHUNK
+        && crate::active_scoped_workers() == 0
+        && crate::parallel_workers() > 1
+    {
         // The contraction is linear in the claims, so chunks are summed independently.
         let phis: alloc::sync::Arc<[E]> = phis.into();
         let claims: alloc::sync::Arc<[KernelClaim]> = claims.into();
@@ -425,79 +428,126 @@ pub(super) fn terminal_sum(phis: &[E], early: usize, claims: &[KernelClaim], c: 
     terminal_sum_serial(phis, early, claims, c)
 }
 
-/// `sum_i c[i] * k[i]` for the deferred kernel `k` of `claims`, one claim at a time.
-///
-/// A claim's kernel restricted to the `2^early` core coefficients is
-/// `scale * prod_{bit in i} tail[bit]`, so its contribution is `scale` times the multilinear
-/// monomial evaluation of `c` at `tail`, computed by halving folds from the top variable.
+#[inline]
+fn flush_horner_batch_4(c_core: &[E], batch: &[(E, Goldilocks); 4]) -> E {
+    let (s0, z0) = batch[0];
+    let (s1, z1) = batch[1];
+    let (s2, z2) = batch[2];
+    let (s3, z3) = batch[3];
+    let mut a0 = E::ZERO;
+    let mut a1 = E::ZERO;
+    let mut a2 = E::ZERO;
+    let mut a3 = E::ZERO;
+    for &coeff in c_core.iter().rev() {
+        a0 = a0.mul_base(z0) + coeff;
+        a1 = a1.mul_base(z1) + coeff;
+        a2 = a2.mul_base(z2) + coeff;
+        a3 = a3.mul_base(z3) + coeff;
+    }
+    s0 * a0 + s1 * a1 + s2 * a2 + s3 * a3
+}
+
+/// `sum_i c[i] * k[i]` for the deferred kernel `k` of `claims`, batching geometric base-field
+/// shift claims 4-at-a-time via ILP Horner over `c[..2^early]` with zero per-call heap traffic.
 fn terminal_sum_serial(phis: &[E], early: usize, claims: &[KernelClaim], c: &[E]) -> E {
     let n = 1usize << early;
     assert!(c.len() == n + 2);
+    let c_core = &c[..n];
     let half_n = n / 2;
-    let mut buf = vec![E::ZERO; half_n.max(1)];
+    let mut stack_buf = [E::ZERO; 128];
+    let mut heap_buf: Vec<E> = if half_n > stack_buf.len() {
+        vec![E::ZERO; half_n]
+    } else {
+        Vec::new()
+    };
+    let mut horner_batch = [(E::ZERO, Goldilocks::ZERO); 4];
+    let mut horner_len = 0usize;
     let mut total = E::ZERO;
+
     for claim in claims {
         let prefix = phis.len() - claim.offset;
         assert!(claim.point.len() == prefix + early);
         let (head, tail) = claim.point.split_at(prefix);
         let mut scale = claim.weight;
-        // Shift queries lie in the base field. Preserve that representation through
-        // contraction rather than paying for general quartic multiplication by zero limbs.
         let base_point = claim
             .point
             .iter()
             .all(|r| r.c0.c1 == Goldilocks::ZERO && r.c1 == crate::field::GoldilocksExt2::ZERO);
-        let core = if base_point {
-            for (&r, &phi) in head.iter().zip(&phis[claim.offset..]) {
-                scale *= E::ONE + phi.mul_base(r.c0.c0);
-            }
-            if early == 0 {
-                c[0]
-            } else {
-                let top = tail[early - 1].c0.c0;
-                for (i, slot) in buf[..half_n].iter_mut().enumerate() {
-                    *slot = c[i] + c[i + half_n].mul_base(top);
-                }
-                let mut width = half_n;
-                for r in tail[..early - 1].iter().rev() {
-                    width /= 2;
-                    let r = r.c0.c0;
-                    let (lo, hi) = buf[..2 * width].split_at_mut(width);
-                    for (l, &h) in lo.iter_mut().zip(hi.iter()) {
-                        *l += h.mul_base(r);
-                    }
-                }
-                buf[0]
-            }
-        } else {
-            for (&r, &phi) in head.iter().zip(&phis[claim.offset..]) {
-                scale *= E::ONE + phi * r;
-            }
-            if early == 0 {
-                c[0]
-            } else {
-                let top = tail[early - 1];
-                for (i, slot) in buf[..half_n].iter_mut().enumerate() {
-                    *slot = c[i] + c[i + half_n] * top;
-                }
-                let mut width = half_n;
-                for &r in tail[..early - 1].iter().rev() {
-                    width /= 2;
-                    let (lo, hi) = buf[..2 * width].split_at_mut(width);
-                    for (l, &h) in lo.iter_mut().zip(hi.iter()) {
-                        *l += h * r;
-                    }
-                }
-                buf[0]
-            }
-        };
-        total += scale * core;
+
         if prefix == 0 {
             total += claim.weight * (claim.overflow[0] * c[n] + claim.overflow[1] * c[n + 1]);
         } else {
             total +=
                 claim.weight * (claim.overflow[0] + phis[claim.offset] * claim.overflow[1]) * c[n];
         }
+
+        if base_point {
+            for (&r, &phi) in head.iter().zip(&phis[claim.offset..]) {
+                scale *= E::ONE + phi.mul_base(r.c0.c0);
+            }
+            if early == 0 {
+                total += scale * c[0];
+                continue;
+            }
+            if tail.windows(2).all(|w| w[0].c0.c0.square() == w[1].c0.c0) {
+                horner_batch[horner_len] = (scale, tail[0].c0.c0);
+                horner_len += 1;
+                if horner_len == 4 {
+                    total += flush_horner_batch_4(c_core, &horner_batch);
+                    horner_len = 0;
+                }
+                continue;
+            }
+            let buf: &mut [E] = if half_n <= stack_buf.len() {
+                &mut stack_buf[..half_n]
+            } else {
+                &mut heap_buf[..half_n]
+            };
+            let top = tail[early - 1].c0.c0;
+            for (i, slot) in buf.iter_mut().enumerate() {
+                *slot = c[i] + c[i + half_n].mul_base(top);
+            }
+            let mut width = half_n;
+            for r in tail[..early - 1].iter().rev() {
+                width /= 2;
+                let r = r.c0.c0;
+                let (lo, hi) = buf[..2 * width].split_at_mut(width);
+                for (l, &h) in lo.iter_mut().zip(hi.iter()) {
+                    *l += h.mul_base(r);
+                }
+            }
+            total += scale * buf[0];
+        } else {
+            for (&r, &phi) in head.iter().zip(&phis[claim.offset..]) {
+                scale *= E::ONE + phi * r;
+            }
+            if early == 0 {
+                total += scale * c[0];
+                continue;
+            }
+            let buf: &mut [E] = if half_n <= stack_buf.len() {
+                &mut stack_buf[..half_n]
+            } else {
+                &mut heap_buf[..half_n]
+            };
+            let top = tail[early - 1];
+            for (i, slot) in buf.iter_mut().enumerate() {
+                *slot = c[i] + c[i + half_n] * top;
+            }
+            let mut width = half_n;
+            for &r in tail[..early - 1].iter().rev() {
+                width /= 2;
+                let (lo, hi) = buf[..2 * width].split_at_mut(width);
+                for (l, &h) in lo.iter_mut().zip(hi.iter()) {
+                    *l += h * r;
+                }
+            }
+            total += scale * buf[0];
+        }
+    }
+
+    for &(scale, z) in &horner_batch[..horner_len] {
+        total += scale * eval_univariate_ext4_at_base(c_core, z);
     }
     total
 }

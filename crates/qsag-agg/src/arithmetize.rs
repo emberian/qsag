@@ -36,7 +36,7 @@ use crate::field::{
 };
 use crate::pcs::{
     CanopyCommitment, HemWhirBatchOpeningProof, MAX_BATCH_POLYS, MAX_PCS_NUM_VARS, WhirSchedule,
-    WhirSecurityRegime, whir_commit_batch_owned_with_schedule, whir_open_batch,
+    WhirSecurityRegime, whir_commit_batch_owned_with_schedule_and_extra_vram, whir_open_batch,
     whir_verify_batch_with_schedule,
 };
 use crate::sig::{
@@ -625,60 +625,6 @@ fn resolve_batch_statement(
         ShardSigner { pk, mu }
     };
 
-    #[cfg(feature = "std")]
-    let signers = if active_indices.len() >= 4 && crate::parallel_workers() > 1 {
-        let workers = crate::available_worker_budget().min(active_indices.len());
-        if workers > 1 {
-            let chunk = active_indices.len().div_ceil(workers);
-            let dummy = ShardSigner {
-                pk: pks[active_indices[0]],
-                mu: [Goldilocks::ZERO; 5],
-            };
-            let mut out = vec![dummy; active_indices.len()];
-            let resolve_ref = &resolve_one;
-            let idx_ref = active_indices.as_slice();
-            std::thread::scope(|scope| {
-                let first_len = chunk.min(out.len());
-                let (head_out, mut rest_out) = out.split_at_mut(first_len);
-                let mut offset = first_len;
-                let mut handles = Vec::with_capacity(workers.saturating_sub(1));
-                while !rest_out.is_empty() {
-                    let take = chunk.min(rest_out.len());
-                    let (sub_out, next_out) = rest_out.split_at_mut(take);
-                    let base = offset;
-                    offset += take;
-                    rest_out = next_out;
-                    handles.push(crate::spawn_bounded(scope, move || {
-                        for (local, slot) in sub_out.iter_mut().enumerate() {
-                            let pos = base + local;
-                            *slot = resolve_ref(pos, idx_ref[pos]);
-                        }
-                    }));
-                }
-                for (pos, slot) in head_out.iter_mut().enumerate() {
-                    *slot = resolve_ref(pos, idx_ref[pos]);
-                }
-                for h in handles {
-                    crate::join_worker(h);
-                }
-            });
-            out
-        } else {
-            active_indices
-                .iter()
-                .enumerate()
-                .map(|(pos, &val_idx)| resolve_one(pos, val_idx))
-                .collect()
-        }
-    } else {
-        active_indices
-            .iter()
-            .enumerate()
-            .map(|(pos, &val_idx)| resolve_one(pos, val_idx))
-            .collect()
-    };
-
-    #[cfg(not(feature = "std"))]
     let signers = active_indices
         .iter()
         .enumerate()
@@ -1639,8 +1585,13 @@ pub fn prove_shard_batch_with_config(
     #[cfg(not(feature = "std"))]
     let witnesses: Vec<Vec<Goldilocks>> = (0..shard_ranges.len()).map(build_witness).collect();
     let pcs_salt_seed = cshake256_32(b"QSAG.LEAF.PCS_SALT/v4", blinding_seed);
-    let (witness_comm, pcs_state) =
-        whir_commit_batch_owned_with_schedule(witnesses, &pcs_salt_seed, &schedule);
+    let shard_total_rows = circuit.num_signer_slots * circuit.rows_per_signer();
+    let (witness_comm, pcs_state) = whir_commit_batch_owned_with_schedule_and_extra_vram(
+        witnesses,
+        &pcs_salt_seed,
+        &schedule,
+        shard_total_rows * NUM_TRACE_COLS,
+    );
 
     // 2. One transcript for the whole batch: the statement and the joint commitment are bound
     //    before any shard's challenges, and every shard's messages before the batched opening.
@@ -1659,6 +1610,17 @@ pub fn prove_shard_batch_with_config(
     let mut claims = Vec::with_capacity(shard_ranges.len());
     for (shard_idx, range) in shard_ranges.iter().enumerate() {
         transcript.absorb(b"BATCH_SHARD_INDEX", &(shard_idx as u32).to_le_bytes());
+        #[cfg(feature = "vulkan")]
+        let (shard, point, v_star) = prove_shard_rows_with_gpu(
+            &mut transcript,
+            &circuit,
+            &signers[range.clone()],
+            &pcs_state.hypercube_evals[shard_idx],
+            pcs_state.gpu_session.as_ref(),
+            shard_idx,
+            shard_ranges.len(),
+        );
+        #[cfg(not(feature = "vulkan"))]
         let (shard, point, v_star) = prove_shard_rows(
             &mut transcript,
             &circuit,
@@ -1682,6 +1644,433 @@ pub fn prove_shard_batch_with_config(
         shards,
         pcs_opening,
     })
+}
+
+#[cfg(feature = "vulkan")]
+fn prove_shard_rows_with_gpu(
+    transcript: &mut FiatShamirTranscript<InstanceBound>,
+    circuit: &ShardCircuit,
+    signers: &[ShardSigner],
+    flat: &[Goldilocks],
+    gpu_session: Option<&crate::acceleration::GpuWhirSession>,
+    shard_idx: usize,
+    num_shards: usize,
+) -> (ShardRowProof, Vec<GoldilocksExt4>, GoldilocksExt4) {
+    if let Some(session) = gpu_session {
+        let mut gpu_tr = transcript.clone();
+        match prove_shard_rows_gpu(
+            &mut gpu_tr,
+            circuit,
+            signers,
+            session,
+            shard_idx,
+            num_shards,
+        ) {
+            Ok(out) => {
+                *transcript = gpu_tr;
+                return out;
+            }
+            Err(err) => session.record_fallback("prove_shard_rows", err),
+        }
+    }
+    prove_shard_rows(transcript, circuit, signers, flat)
+}
+
+#[cfg(feature = "vulkan")]
+fn push_ext4_words(dst: &mut Vec<u64>, e: GoldilocksExt4) {
+    dst.extend_from_slice(&crate::pcs::ext4_to_arr(e));
+}
+
+#[cfg(feature = "vulkan")]
+fn prove_shard_rows_gpu(
+    transcript: &mut FiatShamirTranscript<InstanceBound>,
+    circuit: &ShardCircuit,
+    signers: &[ShardSigner],
+    session: &crate::acceleration::GpuWhirSession,
+    shard_idx: usize,
+    num_shards: usize,
+) -> Result<(ShardRowProof, Vec<GoldilocksExt4>, GoldilocksExt4), qsag_accel::VulkanError> {
+    let _phase = crate::profile::span("prove_shard_rows_gpu");
+    let unique_ops = &circuit.unique_ops;
+    let step_to_uid = &circuit.step_to_uid;
+    let r_rows = circuit.rows_per_signer();
+    let num_signer_slots = circuit.num_signer_slots;
+    let total_rows = num_signer_slots * r_rows;
+    let log_rows = circuit.log_rows();
+    let log_s = num_signer_slots.trailing_zeros() as usize;
+    let raw = session.raw();
+
+    let tau = transcript.squeeze_ext4_vec(b"LEAF_TAU", log_rows);
+    let gamma = transcript.squeeze_ext4(b"LEAF_GAMMA");
+    let sched = build_gamma_schedule_ext4(unique_ops, gamma);
+
+    let (eq_tau_tbl, eq_not_last_tbl, shift_tau_tbl) = build_shift_tables_ext4(&tau);
+    let mut shift_tables_3m = Vec::with_capacity(3 * total_rows);
+    shift_tables_3m.extend(eq_tau_tbl.into_iter().map(crate::pcs::ext4_to_arr));
+    shift_tables_3m.extend(eq_not_last_tbl.into_iter().map(crate::pcs::ext4_to_arr));
+    shift_tables_3m.extend(shift_tau_tbl.into_iter().map(crate::pcs::ext4_to_arr));
+
+    let op_gamma_total: usize = sched.op_gammas.iter().map(Vec::len).sum();
+    let mut static_gammas_ext4 = Vec::with_capacity(250 + op_gamma_total);
+    static_gammas_ext4.extend(
+        sched
+            .group_a_gammas
+            .iter()
+            .copied()
+            .map(crate::pcs::ext4_to_arr),
+    );
+    static_gammas_ext4.extend(
+        sched
+            .shift_gammas
+            .iter()
+            .copied()
+            .map(crate::pcs::ext4_to_arr),
+    );
+    let mut op_meta = Vec::with_capacity(unique_ops.len());
+    for (uid, &kind) in unique_ops.iter().enumerate() {
+        let (kind_id, kind_arg) = crate::trace::encode_constraint_kind(kind);
+        let g_base = static_gammas_ext4.len() as u64;
+        static_gammas_ext4.extend(
+            sched.op_gammas[uid]
+                .iter()
+                .copied()
+                .map(crate::pcs::ext4_to_arr),
+        );
+        op_meta.push((kind_id, kind_arg, g_base));
+    }
+    let dyn_ext4_off = static_gammas_ext4.len() as u32;
+
+    let witness_word_offset = (shard_idx * total_rows * NUM_TRACE_COLS) as u32;
+    let cols_base_word_offset = (num_shards * total_rows * NUM_TRACE_COLS) as u32;
+    raw.prover_air_init_shard(
+        witness_word_offset,
+        cols_base_word_offset,
+        total_rows,
+        &shift_tables_3m,
+        &static_gammas_ext4,
+    )?;
+
+    let mut active_tbl = vec![GoldilocksExt4::ZERO; num_signer_slots];
+    let mut pk_seed_tbl = vec![[GoldilocksExt4::ZERO; 4]; num_signer_slots];
+    let mut pk_root_tbl = vec![[GoldilocksExt4::ZERO; 4]; num_signer_slots];
+    let mut mu_tbl = vec![[GoldilocksExt4::ZERO; 5]; num_signer_slots];
+    for (s, signer) in signers.iter().enumerate() {
+        active_tbl[s] = GoldilocksExt4::ONE;
+        pk_seed_tbl[s] = signer.pk.pk_seed.map(GoldilocksExt4::from_base);
+        pk_root_tbl[s] = signer.pk.pk_root.map(GoldilocksExt4::from_base);
+        mu_tbl[s] = signer.mu.map(GoldilocksExt4::from_base);
+    }
+
+    let mut is_first_tbl = vec![GoldilocksExt4::ZERO; r_rows];
+    let mut is_last_tbl = vec![GoldilocksExt4::ZERO; r_rows];
+    is_first_tbl[0] = GoldilocksExt4::ONE;
+    is_last_tbl[r_rows - 1] = GoldilocksExt4::ONE;
+    let mut step_c0_tbl: Vec<GoldilocksExt4> = circuit
+        .step_c0_base
+        .iter()
+        .map(|&c| GoldilocksExt4::from_base(c))
+        .collect();
+    let mut op_sparse_tbl: Vec<Vec<(usize, GoldilocksExt4)>> = (0..r_rows)
+        .map(|t| vec![(step_to_uid[t], GoldilocksExt4::ONE)])
+        .collect();
+
+    // Group local steps by `uid` once so Wave32 workgroups execute identical opcodes with 0 branch divergence.
+    let mut uid_buckets: Vec<Vec<usize>> = vec![Vec::new(); unique_ops.len()];
+    for (loc, &uid) in step_to_uid.iter().enumerate() {
+        uid_buckets[uid].push(loc);
+    }
+    let steps_by_uid: Vec<usize> = uid_buckets.into_iter().flatten().collect();
+
+    let col_pp_hi = (NUM_TRACE_COLS * (total_rows / 2)) as u32;
+    let sh_pp_hi = (3 * total_rows) as u32;
+    let mut col_ext4_cur = 0u32;
+    let mut sh_cur = 0u32;
+
+    let mut row_sumcheck_polys = Vec::with_capacity(log_rows);
+    let mut challenges_msb_to_lsb = Vec::with_capacity(log_rows);
+    let mut cur_sum_claim = GoldilocksExt4::ZERO;
+    let mut cur_m = total_rows;
+    let mut cur_s = num_signer_slots;
+    let mut cur_r = r_rows;
+
+    let mut dyn_words: Vec<u64> = Vec::with_capacity(total_rows / 2 + r_rows * 24);
+    let mut op_hdr: Vec<[u64; 4]> = Vec::with_capacity(r_rows);
+    let mut op_ent: Vec<[u64; 4]> = Vec::with_capacity(r_rows * 6);
+    let mut op_pairs: Vec<(usize, GoldilocksExt4, GoldilocksExt4)> = Vec::new();
+
+    for round in 0..log_rows {
+        let half = cur_m / 2;
+        let folding_signer = round < log_s;
+        let half_s = if folding_signer { cur_s / 2 } else { 1 };
+        let half_r = if folding_signer { cur_r } else { cur_r / 2 };
+        let is_round0 = round == 0;
+
+        dyn_words.clear();
+        op_hdr.clear();
+        op_ent.clear();
+        let mut cur_off = dyn_ext4_off;
+
+        let signers_off = cur_off;
+        for s in 0..cur_s {
+            push_ext4_words(&mut dyn_words, active_tbl[s]);
+            for &v in &pk_seed_tbl[s] {
+                push_ext4_words(&mut dyn_words, v);
+            }
+            for &v in &pk_root_tbl[s] {
+                push_ext4_words(&mut dyn_words, v);
+            }
+            for &v in &mu_tbl[s] {
+                push_ext4_words(&mut dyn_words, v);
+            }
+        }
+        cur_off += (cur_s * 14) as u32;
+
+        let steps_off = cur_off;
+        for loc in 0..cur_r {
+            push_ext4_words(&mut dyn_words, is_first_tbl[loc]);
+            push_ext4_words(&mut dyn_words, is_last_tbl[loc]);
+            push_ext4_words(&mut dyn_words, step_c0_tbl[loc]);
+        }
+        cur_off += (cur_r * 3) as u32;
+
+        if folding_signer {
+            for list in op_sparse_tbl.iter().take(cur_r) {
+                let e_start = (op_ent.len() / 3) as u64;
+                op_hdr.push([e_start, list.len() as u64, 0, 0]);
+                for &(uid, v0) in list {
+                    let (kind_id, kind_arg, g_base) = op_meta[uid];
+                    op_ent.push([kind_id as u64, kind_arg as u64, g_base, 0]);
+                    op_ent.push(crate::pcs::ext4_to_arr(v0));
+                    op_ent.push([0u64; 4]);
+                }
+            }
+        } else {
+            for idx in 0..half_r {
+                union_sparse_op_pairs(
+                    &op_sparse_tbl[idx],
+                    &op_sparse_tbl[idx + half_r],
+                    &mut op_pairs,
+                );
+                let e_start = (op_ent.len() / 3) as u64;
+                op_hdr.push([e_start, op_pairs.len() as u64, 0, 0]);
+                for &(uid, v0, dv) in &op_pairs {
+                    let (kind_id, kind_arg, g_base) = op_meta[uid];
+                    op_ent.push([kind_id as u64, kind_arg as u64, g_base, 0]);
+                    op_ent.push(crate::pcs::ext4_to_arr(v0));
+                    op_ent.push(crate::pcs::ext4_to_arr(dv));
+                }
+            }
+        }
+
+        let op_hdr_off = cur_off;
+        for h in &op_hdr {
+            dyn_words.extend_from_slice(h);
+        }
+        cur_off += op_hdr.len() as u32;
+
+        let op_ent_off = cur_off;
+        for e in &op_ent {
+            dyn_words.extend_from_slice(e);
+        }
+        cur_off += op_ent.len() as u32;
+
+        let sorted_u64_off = cur_off * 4;
+        if folding_signer {
+            for &loc in &steps_by_uid {
+                for s0 in 0..half_s {
+                    dyn_words.push((s0 * cur_r + loc) as u64);
+                }
+            }
+        } else {
+            for idx in 0..half {
+                dyn_words.push(idx as u64);
+            }
+        }
+
+        let col_src = if is_round0 {
+            cols_base_word_offset
+        } else {
+            col_ext4_cur
+        };
+        let col_dst = if is_round0 {
+            0
+        } else if col_ext4_cur == 0 {
+            col_pp_hi
+        } else {
+            0
+        };
+        let sh_dst = if sh_cur == 0 { sh_pp_hi } else { 0 };
+
+        let raw8 = raw.prover_air_eval_round(
+            is_round0,
+            cur_m,
+            cur_r,
+            cur_s,
+            folding_signer,
+            col_src,
+            sh_cur,
+            dyn_ext4_off,
+            &dyn_words,
+            signers_off,
+            steps_off,
+            op_hdr_off,
+            op_ent_off,
+            sorted_u64_off,
+        )?;
+
+        let mut sum_evals = [GoldilocksExt4::ZERO; ROW_SUMCHECK_COEFFS];
+        sum_evals[0] = crate::pcs::arr_to_ext4_checked(raw8[0])?;
+        for k_slot in 1..8 {
+            sum_evals[k_slot + 1] = crate::pcs::arr_to_ext4_checked(raw8[k_slot])?;
+        }
+        sum_evals[1] = cur_sum_claim - sum_evals[0];
+
+        let poly_coeffs = interpolate_deg8_from_evals_ext4(&sum_evals);
+        let wire_poly = pack_deg8_wire(&poly_coeffs);
+        let mut sc_bytes = [0u8; ROW_SUMCHECK_WIRE_COEFFS * 32];
+        for (i, c) in wire_poly.iter().enumerate() {
+            sc_bytes[32 * i..32 * (i + 1)].copy_from_slice(&c.to_le_bytes());
+        }
+        transcript.absorb(b"LEAF_SC_POLY", &sc_bytes);
+        let chal = transcript.squeeze_ext4(b"LEAF_SC_CHAL");
+        cur_sum_claim = eval_univariate_ext4(&poly_coeffs, chal);
+        row_sumcheck_polys.push(wire_poly);
+        challenges_msb_to_lsb.push(chal);
+
+        raw.prover_air_fold_round(
+            is_round0,
+            cur_m,
+            col_src,
+            col_dst,
+            sh_cur,
+            sh_dst,
+            crate::pcs::ext4_to_arr(chal),
+        )?;
+        col_ext4_cur = col_dst;
+        sh_cur = sh_dst;
+
+        if folding_signer {
+            for s in 0..half_s {
+                let a0 = active_tbl[s];
+                let a1 = active_tbl[s + half_s];
+                active_tbl[s] = a0 + chal * (a1 - a0);
+                let p_hi = pk_seed_tbl[s + half_s];
+                for (dst, &p1) in pk_seed_tbl[s].iter_mut().zip(p_hi.iter()) {
+                    let p0 = *dst;
+                    *dst = p0 + chal * (p1 - p0);
+                }
+                let r_hi = pk_root_tbl[s + half_s];
+                for (dst, &r1) in pk_root_tbl[s].iter_mut().zip(r_hi.iter()) {
+                    let r0 = *dst;
+                    *dst = r0 + chal * (r1 - r0);
+                }
+                let m_hi = mu_tbl[s + half_s];
+                for (dst, &m1) in mu_tbl[s].iter_mut().zip(m_hi.iter()) {
+                    let m0 = *dst;
+                    *dst = m0 + chal * (m1 - m0);
+                }
+            }
+            active_tbl.truncate(half_s);
+            pk_seed_tbl.truncate(half_s);
+            pk_root_tbl.truncate(half_s);
+            mu_tbl.truncate(half_s);
+            cur_s = half_s;
+        } else {
+            let mut next_ops = Vec::with_capacity(half_r);
+            for idx in 0..half_r {
+                let f0 = is_first_tbl[idx];
+                let f1 = is_first_tbl[idx + half_r];
+                is_first_tbl[idx] = f0 + chal * (f1 - f0);
+                let l0 = is_last_tbl[idx];
+                let l1 = is_last_tbl[idx + half_r];
+                is_last_tbl[idx] = l0 + chal * (l1 - l0);
+                let sc0 = step_c0_tbl[idx];
+                let sc1 = step_c0_tbl[idx + half_r];
+                step_c0_tbl[idx] = sc0 + chal * (sc1 - sc0);
+                next_ops.push(merge_sparse_op_lists(
+                    &op_sparse_tbl[idx],
+                    &op_sparse_tbl[idx + half_r],
+                    chal,
+                ));
+            }
+            is_first_tbl.truncate(half_r);
+            is_last_tbl.truncate(half_r);
+            step_c0_tbl.truncate(half_r);
+            op_sparse_tbl = next_ops;
+            cur_r = half_r;
+        }
+        cur_m = half;
+    }
+
+    let mut raw_cols = [[0u64; 4]; NUM_TRACE_COLS];
+    raw.prover_air_read_folded_cols(col_ext4_cur, &mut raw_cols)?;
+    let mut col_evals_arr = [GoldilocksExt4::ZERO; NUM_TRACE_COLS];
+    for (dst, raw_c) in col_evals_arr.iter_mut().zip(raw_cols) {
+        *dst = crate::pcs::arr_to_ext4_checked(raw_c)?;
+    }
+
+    // Prover-side algebraic self-check before committing transcript or V5 receipt:
+    let mut rx = challenges_msb_to_lsb;
+    rx.reverse();
+    let eq_tau_rx = eq_poly_ext4(&tau, &rx);
+    let eq_nl_rx = eval_eq_not_last_ext4(&tau, &rx);
+    let shift_rx = eval_shift_kernel_ext4(&tau, &rx);
+    let mut gated_op_sels = vec![GoldilocksExt4::ZERO; unique_ops.len()];
+    for &(uid, v) in &op_sparse_tbl[0] {
+        gated_op_sels[uid] = active_tbl[0] * v;
+    }
+    let expected_terminal = eval_batched_row_constraints_ext4(
+        unique_ops,
+        &col_evals_arr,
+        &RowPublicEvalExt4 {
+            active_signer: active_tbl[0],
+            pk_seed: pk_seed_tbl[0],
+            pk_root: pk_root_tbl[0],
+            mu: mu_tbl[0],
+            gated_op_sels: &gated_op_sels,
+            step_c0: step_c0_tbl[0],
+            is_row_first: is_first_tbl[0],
+            is_row_last: is_last_tbl[0],
+            eq_tau: eq_tau_rx,
+            eq_not_last: eq_nl_rx,
+            shift_tau: shift_rx,
+        },
+        gamma,
+    );
+    if cur_sum_claim != expected_terminal {
+        return Err(qsag_accel::VulkanError::WorkspacePoisoned);
+    }
+
+    let col_evals = col_evals_arr.to_vec();
+    let mut col_eval_bytes = Vec::with_capacity(col_evals.len() * 32);
+    for v in &col_evals {
+        col_eval_bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    if !session.certify_stage(
+        qsag_accel::ProverKernelSlot::AirRowGroupB,
+        b"AIR.SHARD.ROWS/v1",
+        total_rows,
+        &col_eval_bytes,
+    ) {
+        return Err(qsag_accel::VulkanError::WorkspacePoisoned);
+    }
+    transcript.absorb(b"LEAF_COL_EVALS", &col_eval_bytes);
+
+    let mut point = Vec::with_capacity(LOG_TRACE_COLS + log_rows);
+    for _ in 0..LOG_TRACE_COLS {
+        point.push(transcript.squeeze_ext4(b"LEAF_RZ"));
+    }
+    let v_star = mle_eval_ext4(&col_evals, &point);
+    point.extend_from_slice(&rx);
+
+    Ok((
+        ShardRowProof {
+            row_sumcheck_polys,
+            col_evals,
+        },
+        point,
+        v_star,
+    ))
 }
 
 /// Replay one shard's `GoldilocksExt4` row sumcheck and enforce its terminal evaluation check
@@ -1852,8 +2241,9 @@ pub fn verify_shard_batch_with_regime(
 
     let schedule = &proof.schedule;
     let num_vars = LOG_TRACE_COLS + circuit.log_rows();
+    let expected_schedule = expected_regime.schedule(num_vars);
     if !expected_regime.meets_qrom_128_floor()
-        || schedule.regime != expected_regime
+        || *schedule != expected_schedule
         || !schedule.validate(num_vars)
         || !schedule.is_canonical(num_vars)
     {

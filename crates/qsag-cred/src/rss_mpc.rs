@@ -520,6 +520,18 @@ impl BinSh {
                 .collect(),
         }
     }
+
+    /// Replicates bit 0 of each shared word across all set bits of `mask`
+    /// (`GF(2)`-linear since `(a_0 ^ a_1) * mask == (a_0 * mask) ^ (a_1 * mask)` for `a_i in {0, 1}`).
+    pub fn broadcast_bit0(&self, mask: u64) -> Self {
+        Self {
+            c: self
+                .c
+                .iter()
+                .map(|a| a.iter().map(|&x| (x & 1).wrapping_mul(mask)).collect())
+                .collect(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

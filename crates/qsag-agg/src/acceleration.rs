@@ -88,7 +88,7 @@ impl Drop for GpuWhirSession {
 
 pub(crate) fn try_acquire_whir_session() -> Option<GpuWhirSession> {
     let d = device()?;
-    if d.backend.inner().try_acquire_prover_session() {
+    if d.backend.inner().try_acquire_prover_session().is_ok() {
         Some(GpuWhirSession { device: d })
     } else {
         None

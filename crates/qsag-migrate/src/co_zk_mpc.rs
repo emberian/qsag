@@ -5,7 +5,7 @@
 //! honest majority), assuming confidential authenticated pairwise channels and
 //! independently sampled private custodian entropy. Every Boolean `AND` gate and
 //! prime-field multiplication is batch-verified with coin-flipped challenges
-//! (per flush: `< 2^-127.99` Boolean soundness over `GF(2^128)`, `< 2^-249`
+//! (per flush: `< 2^-244` Boolean soundness over `GF(2^128)`, `< 2^-249`
 //! over the curve fields `GF(p)` and `< 2^-186` over Goldilocks `GF(p^3)`)
 //! before any wire opening, masked A2B/B2A conversion difference, view
 //! commitment, public output, or challenged ZKBoo party view is reconstructed.
@@ -1888,11 +1888,7 @@ mod tests {
         fn acquire(batches: usize) -> Self {
             let (active, ready) = &HEAVY_CEREMONIES;
             let mut count = active.lock().unwrap_or_else(|e| e.into_inner());
-            let limit = if std::thread::available_parallelism().is_ok_and(|n| n.get() >= 24) {
-                16
-            } else {
-                7
-            };
+            let limit = outer_mpc::tests::parallel_batches();
             while *count + batches > limit {
                 count = ready.wait(count).unwrap_or_else(|e| e.into_inner());
             }

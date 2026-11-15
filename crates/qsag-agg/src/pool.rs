@@ -32,12 +32,13 @@ struct Pool {
 fn pool() -> Option<&'static Arc<Pool>> {
     static POOL: OnceLock<Option<Arc<Pool>>> = OnceLock::new();
     POOL.get_or_init(|| {
+        let base_workers = crate::base_parallel_workers();
         let workers = std::env::var("QSAG_VERIFY_WORKERS")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .filter(|&workers| workers > 0)
-            .unwrap_or_else(crate::parallel_workers)
-            .min(crate::parallel_workers());
+            .unwrap_or(base_workers)
+            .min(base_workers);
         let want = workers.saturating_sub(1);
         if want == 0 {
             return None;
@@ -138,16 +139,32 @@ where
     T: Send + 'static,
     F: Fn(usize) -> T + Send + Sync + 'static,
 {
-    let chunk = chunk.max(1);
-    let num_chunks = count.div_ceil(chunk);
     let max_workers = crate::parallel_workers();
-    if num_chunks <= 1 || max_workers <= 1 {
+    if count == 0 || max_workers <= 1 {
+        return (0..count).map(f).collect();
+    }
+    let outer_lanes = crate::active_scoped_workers().saturating_add(1);
+    let max_lanes_per_call = if outer_lanes > 1 { 4 } else { 8 };
+    let target_workers = (max_workers / outer_lanes).clamp(1, max_lanes_per_call);
+    if target_workers <= 1 {
+        return (0..count).map(f).collect();
+    }
+    let min_items = if outer_lanes > 1 { 16 } else { 8 };
+    let chunk = chunk
+        .max(1)
+        .max(count.div_ceil(target_workers))
+        .max(min_items);
+    let num_chunks = count.div_ceil(chunk);
+    if num_chunks <= 1 {
         return (0..count).map(f).collect();
     }
     let Some(pool) = pool() else {
         return (0..count).map(f).collect();
     };
-    let active_pool_threads = pool.threads.min(max_workers.saturating_sub(1));
+    let active_pool_threads = pool
+        .threads
+        .min(target_workers.saturating_sub(1))
+        .min(max_workers.saturating_sub(1));
     if active_pool_threads == 0 {
         return (0..count).map(f).collect();
     }

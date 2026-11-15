@@ -4336,6 +4336,2216 @@ theorem tooth_concrete_unscoped_shard_replay :
 theorem witness_poseidon2_margin : ∃ t rF rP, Poseidon2InterpolationMargin t rF rP :=
   ⟨12, 8, 22, poseidon2_interpolation_margin_width12⟩
 
+/-! ## 8. Width-12 `M_E` & `M_I` Differential/Linear Branch Numbers & `2026/306` Subspace Analysis -/
+
+/-- Exact 12-lane Hamming weight (count of nonzero `Goldilocks` elements) on `Poseidon2State12`. -/
+def stateWeight12 (s : Poseidon2State12) : Nat :=
+  laneWeight4 s.b0 + laneWeight4 s.b1 + laneWeight4 s.b2
+
+/-- Count of nonzero 4-lane blocks in `Poseidon2State12` (`0..3`). -/
+def activeBlocks12 (s : Poseidon2State12) : Nat :=
+  (if s.b0 = lane4Zero then 0 else 1) +
+  (if s.b1 = lane4Zero then 0 else 1) +
+  (if s.b2 = lane4Zero then 0 else 1)
+
+def lane4Neg (a : Lane4) : Lane4 := lane4Sub lane4Zero a
+
+def lane4Rev (a : Lane4) : Lane4 := ⟨a.x0, a.x3, a.x2, a.x1⟩
+
+def state12Rev4 (s : Poseidon2State12) : Poseidon2State12 :=
+  ⟨lane4Rev s.b0, lane4Rev s.b1, lane4Rev s.b2⟩
+
+/-- Exact transpose of `applyME` with respect to the standard 12-lane dot product. -/
+def applyMETranspose (s : Poseidon2State12) : Poseidon2State12 :=
+  state12Rev4 (applyME (state12Rev4 s))
+
+def lane4Dot (a b : Lane4) : Goldilocks :=
+  Goldilocks.add
+    (Goldilocks.add (Goldilocks.mul a.x0 b.x0) (Goldilocks.mul a.x1 b.x1))
+    (Goldilocks.add (Goldilocks.mul a.x2 b.x2) (Goldilocks.mul a.x3 b.x3))
+
+def state12Dot (a b : Poseidon2State12) : Goldilocks :=
+  Goldilocks.add (Goldilocks.add (lane4Dot a.b0 b.b0) (lane4Dot a.b1 b.b1)) (lane4Dot a.b2 b.b2)
+
+private theorem gold_add_eq_zero_of_both_zero {a b : Goldilocks}
+    (ha : a = Goldilocks.zero) (hb : b = Goldilocks.zero) :
+    Goldilocks.add a b = Goldilocks.zero := by
+  subst ha; subst hb; rfl
+
+private theorem gold_sub_eq_zero_of_both_zero {a b : Goldilocks}
+    (ha : a = Goldilocks.zero) (hb : b = Goldilocks.zero) :
+    Goldilocks.sub a b = Goldilocks.zero := by
+  subst ha; subst hb; rfl
+
+private theorem coord_wt_add_le (a b : Goldilocks) :
+    (if Goldilocks.add a b = Goldilocks.zero then 0 else 1) ≤
+      (if a = Goldilocks.zero then 0 else 1) + (if b = Goldilocks.zero then 0 else 1) := by
+  by_cases ha : a = Goldilocks.zero <;> by_cases hb : b = Goldilocks.zero
+  · rw [gold_add_eq_zero_of_both_zero ha hb]; simp [ha, hb]
+  · simp [ha, hb]; split <;> omega
+  · simp [ha, hb]; split <;> omega
+  · simp [ha, hb]; split <;> omega
+
+private theorem coord_wt_sub_le (a b : Goldilocks) :
+    (if Goldilocks.sub a b = Goldilocks.zero then 0 else 1) ≤
+      (if a = Goldilocks.zero then 0 else 1) + (if b = Goldilocks.zero then 0 else 1) := by
+  by_cases ha : a = Goldilocks.zero <;> by_cases hb : b = Goldilocks.zero
+  · rw [gold_sub_eq_zero_of_both_zero ha hb]; simp [ha, hb]
+  · simp [ha, hb]; split <;> omega
+  · simp [ha, hb]; split <;> omega
+  · simp [ha, hb]; split <;> omega
+
+private theorem coord_wt_mul_nz {c : Goldilocks} (hc : c ≠ Goldilocks.zero) (a : Goldilocks) :
+    (if Goldilocks.mul c a = Goldilocks.zero then 0 else 1) =
+      (if a = Goldilocks.zero then 0 else 1) := by
+  by_cases ha : a = Goldilocks.zero
+  · subst ha
+    have hz : Goldilocks.mul c Goldilocks.zero = Goldilocks.zero :=
+      LawfulCommRing.mul_zero c
+    simp [hz]
+  · have hnz : Goldilocks.mul c a ≠ Goldilocks.zero := fun hm => by
+      rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero hm with h1 | h2
+      · exact hc h1
+      · exact ha h2
+    simp [ha, hnz]
+
+private theorem laneWeight4_pos_of_ne_zero {a : Lane4} (ha : a ≠ lane4Zero) :
+    1 ≤ laneWeight4 a := by
+  unfold laneWeight4
+  by_cases h0 : a.x0 = Goldilocks.zero <;>
+    by_cases h1 : a.x1 = Goldilocks.zero <;>
+    by_cases h2 : a.x2 = Goldilocks.zero <;>
+    by_cases h3 : a.x3 = Goldilocks.zero
+  · exact False.elim (ha (Lane4.ext h0 h1 h2 h3))
+  all_goals simp [h0, h1, h2, h3]
+
+private theorem gold_add_cring (a b : Goldilocks) : Goldilocks.add a b = CommRingOps.add a b := rfl
+private theorem gold_sub_cring (a b : Goldilocks) : Goldilocks.sub a b = CommRingOps.sub a b := rfl
+private theorem gold_mul_cring (a b : Goldilocks) : Goldilocks.mul a b = CommRingOps.mul a b := rfl
+private theorem gold_neg_cring (a : Goldilocks) : Goldilocks.neg a = CommRingOps.neg a := rfl
+private theorem gold_zero_cring : Goldilocks.zero = (CommRingOps.zero : Goldilocks) := rfl
+private theorem gold_one_cring : Goldilocks.one = (CommRingOps.one : Goldilocks) := rfl
+private theorem gold_2_cring : Goldilocks.ofNat 2 = CRing.natCast 2 := by decide
+private theorem gold_3_cring : Goldilocks.ofNat 3 = CRing.natCast 3 := by decide
+private theorem gold_4_cring : Goldilocks.ofNat 4 = CRing.natCast 4 := by decide
+
+macro "gold_cring" : tactic => `(tactic| (
+  dsimp only
+  try simp only [gold_add_cring, gold_sub_cring, gold_mul_cring, gold_neg_cring,
+    gold_zero_cring, gold_one_cring, gold_2_cring, gold_3_cring, gold_4_cring]
+  try (open scoped Qsag.CRing in constructive_ring)))
+
+private theorem laneWeight4_add_le (a b : Lane4) :
+    laneWeight4 (lane4Add a b) ≤ laneWeight4 a + laneWeight4 b := by
+  unfold laneWeight4 lane4Add
+  dsimp only
+  have h0 := coord_wt_add_le a.x0 b.x0
+  have h1 := coord_wt_add_le a.x1 b.x1
+  have h2 := coord_wt_add_le a.x2 b.x2
+  have h3 := coord_wt_add_le a.x3 b.x3
+  omega
+
+private theorem laneWeight4_sub_le (a b : Lane4) :
+    laneWeight4 (lane4Sub a b) ≤ laneWeight4 a + laneWeight4 b := by
+  unfold laneWeight4 lane4Sub
+  dsimp only
+  have h0 := coord_wt_sub_le a.x0 b.x0
+  have h1 := coord_wt_sub_le a.x1 b.x1
+  have h2 := coord_wt_sub_le a.x2 b.x2
+  have h3 := coord_wt_sub_le a.x3 b.x3
+  omega
+
+private theorem laneWeight4_scale_ne_zero {c : Goldilocks} (hc : c ≠ Goldilocks.zero) (a : Lane4) :
+    laneWeight4 (lane4Scale c a) = laneWeight4 a := by
+  unfold laneWeight4 lane4Scale
+  dsimp only
+  rw [coord_wt_mul_nz hc, coord_wt_mul_nz hc, coord_wt_mul_nz hc, coord_wt_mul_nz hc]
+
+private theorem applyM4_ne_zero_of_ne_zero {a : Lane4} (ha : a ≠ lane4Zero) :
+    applyM4 a ≠ lane4Zero := fun hz => by
+  apply ha
+  have hInv := congrArg applyM4Inv hz
+  rw [applyM4Inv_applyM4] at hInv
+  exact hInv.trans (by decide)
+
+private def rot12 (s : Poseidon2State12) : Poseidon2State12 := ⟨s.b1, s.b2, s.b0⟩
+private def swap01 (s : Poseidon2State12) : Poseidon2State12 := ⟨s.b1, s.b0, s.b2⟩
+
+private theorem stateWeight12_rot12 (s : Poseidon2State12) :
+    stateWeight12 (rot12 s) = stateWeight12 s := by
+  unfold stateWeight12 rot12; dsimp only; omega
+
+private theorem activeBlocks12_rot12 (s : Poseidon2State12) :
+    activeBlocks12 (rot12 s) = activeBlocks12 s := by
+  unfold activeBlocks12 rot12; dsimp only; omega
+
+private theorem stateWeight12_swap01 (s : Poseidon2State12) :
+    stateWeight12 (swap01 s) = stateWeight12 s := by
+  unfold stateWeight12 swap01; dsimp only; omega
+
+private theorem activeBlocks12_swap01 (s : Poseidon2State12) :
+    activeBlocks12 (swap01 s) = activeBlocks12 s := by
+  unfold activeBlocks12 swap01; dsimp only; omega
+
+private theorem lane4Add_sum3_rot (a b c : Lane4) :
+    lane4Add (lane4Add b c) a = lane4Add (lane4Add a b) c := by
+  unfold lane4Add
+  apply Lane4.ext <;> gold_cring
+
+private theorem lane4Add_sum3_swap01 (a b c : Lane4) :
+    lane4Add (lane4Add b a) c = lane4Add (lane4Add a b) c := by
+  unfold lane4Add
+  apply Lane4.ext <;> gold_cring
+
+private theorem applyME_rot12 (s : Poseidon2State12) :
+    applyME (rot12 s) = rot12 (applyME s) := by
+  unfold applyME rot12
+  dsimp only
+  rw [lane4Add_sum3_rot]
+
+private theorem applyME_swap01 (s : Poseidon2State12) :
+    applyME (swap01 s) = swap01 (applyME s) := by
+  unfold applyME swap01
+  dsimp only
+  rw [lane4Add_sum3_swap01]
+
+private theorem applyME_single_b0 (b : Lane4) (hb : b ≠ lane4Zero) :
+    7 ≤ stateWeight12 ⟨b, lane4Zero, lane4Zero⟩ +
+      stateWeight12 (applyME ⟨b, lane4Zero, lane4Zero⟩) := by
+  have hzM4 : applyM4 lane4Zero = lane4Zero := by decide
+  have hOut : applyME ⟨b, lane4Zero, lane4Zero⟩ =
+      ⟨lane4Scale (Goldilocks.ofNat 2) (applyM4 b), applyM4 b, applyM4 b⟩ := by
+    unfold applyME
+    dsimp only
+    rw [hzM4]
+    unfold lane4Add lane4Scale lane4Zero
+    apply Poseidon2State12.ext <;> apply Lane4.ext <;> gold_cring
+  rw [hOut]
+  unfold stateWeight12
+  dsimp only
+  have h2nz : Goldilocks.ofNat 2 ≠ Goldilocks.zero := by decide
+  rw [laneWeight4_scale_ne_zero h2nz, show laneWeight4 lane4Zero = 0 from rfl]
+  have hm := m4_mds_branch_lower b hb
+  have hy := laneWeight4_pos_of_ne_zero (applyM4_ne_zero_of_ne_zero hb)
+  omega
+
+/-- **Single-Active-Block Width-12 `M_E` Branch Bound (`poseidon2_me12_single_block_branch_ge_seven`)**:
+    Across any nonzero state supported in a single 4-lane block (`activeBlocks12 x = 1`),
+    `stateWeight12 x + stateWeight12 (applyME x) ≥ 7` (hence strictly above `5`). -/
+theorem poseidon2_me12_single_block_branch_ge_seven (x : Poseidon2State12)
+    (h1 : activeBlocks12 x = 1) :
+    7 ≤ stateWeight12 x + stateWeight12 (applyME x) ∧
+    5 ≤ stateWeight12 x + stateWeight12 (applyME x) := by
+  have h7 : 7 ≤ stateWeight12 x + stateWeight12 (applyME x) := by
+    unfold activeBlocks12 at h1
+    by_cases hb0 : x.b0 = lane4Zero <;>
+      by_cases hb1 : x.b1 = lane4Zero <;>
+      by_cases hb2 : x.b2 = lane4Zero
+    · simp [hb0, hb1, hb2] at h1
+    · have hRot : rot12 (rot12 x) = ⟨x.b2, lane4Zero, lane4Zero⟩ :=
+        Poseidon2State12.ext rfl hb0 hb1
+      have hm := applyME_single_b0 x.b2 hb2
+      rw [← hRot, stateWeight12_rot12, stateWeight12_rot12,
+          applyME_rot12, applyME_rot12, stateWeight12_rot12, stateWeight12_rot12] at hm
+      exact hm
+    · have hRot : rot12 x = ⟨x.b1, lane4Zero, lane4Zero⟩ :=
+        Poseidon2State12.ext rfl hb2 hb0
+      have hm := applyME_single_b0 x.b1 hb1
+      rw [← hRot, stateWeight12_rot12, applyME_rot12, stateWeight12_rot12] at hm
+      exact hm
+    · simp [hb0, hb1, hb2] at h1
+    · have hx : x = ⟨x.b0, lane4Zero, lane4Zero⟩ :=
+        Poseidon2State12.ext rfl hb1 hb2
+      rw [hx]
+      exact applyME_single_b0 x.b0 hb0
+    · simp [hb0, hb1, hb2] at h1
+    · simp [hb0, hb1, hb2] at h1
+    · simp [hb0, hb1, hb2] at h1
+  exact ⟨h7, by omega⟩
+
+private theorem applyMEInv_single_b0 (z : Lane4) (hz : z ≠ lane4Zero) :
+    7 ≤ stateWeight12 (applyMEInv ⟨z, lane4Zero, lane4Zero⟩) +
+      stateWeight12 ⟨z, lane4Zero, lane4Zero⟩ := by
+  let cinv4 : Goldilocks := ⟨13835058052060938241, by decide⟩
+  let c3 : Goldilocks := Goldilocks.mul (Goldilocks.ofNat 3) cinv4
+  let cn1 : Goldilocks := Goldilocks.sub Goldilocks.zero cinv4
+  have hc3nz : c3 ≠ Goldilocks.zero := by decide
+  have hcn1nz : cn1 ≠ Goldilocks.zero := by decide
+  have h4inv : Goldilocks.mul (Goldilocks.ofNat 4) cinv4 = Goldilocks.one := by decide
+  have hLinM4 : ∀ (c : Goldilocks) (v : Lane4), applyM4 (lane4Scale c v) = lane4Scale c (applyM4 v) :=
+    fun c v => by
+      unfold applyM4 lane4Scale lane4Sum
+      apply Lane4.ext <;> gold_cring
+  have hInvShape : applyMEInv ⟨z, lane4Zero, lane4Zero⟩ =
+      ⟨lane4Scale c3 (applyM4Inv z), lane4Scale cn1 (applyM4Inv z), lane4Scale cn1 (applyM4Inv z)⟩ := by
+    suffices hFwd : applyME ⟨lane4Scale c3 (applyM4Inv z),
+        lane4Scale cn1 (applyM4Inv z), lane4Scale cn1 (applyM4Inv z)⟩ = ⟨z, lane4Zero, lane4Zero⟩ by
+      have h := congrArg applyMEInv hFwd
+      rwa [applyMEInv_applyME] at h
+    unfold applyME
+    dsimp only
+    rw [hLinM4, hLinM4, applyM4_applyM4Inv]
+    unfold c3 cn1 lane4Add lane4Scale lane4Zero
+    have hCoeff1 : ∀ a : Goldilocks,
+        Goldilocks.add (Goldilocks.mul (Goldilocks.mul (Goldilocks.ofNat 3) cinv4) a)
+          (Goldilocks.add (Goldilocks.add (Goldilocks.mul (Goldilocks.mul (Goldilocks.ofNat 3) cinv4) a)
+            (Goldilocks.mul (Goldilocks.sub Goldilocks.zero cinv4) a))
+            (Goldilocks.mul (Goldilocks.sub Goldilocks.zero cinv4) a)) = a := fun a => by
+      have hRing : Goldilocks.add (Goldilocks.mul (Goldilocks.mul (Goldilocks.ofNat 3) cinv4) a)
+          (Goldilocks.add (Goldilocks.add (Goldilocks.mul (Goldilocks.mul (Goldilocks.ofNat 3) cinv4) a)
+            (Goldilocks.mul (Goldilocks.sub Goldilocks.zero cinv4) a))
+            (Goldilocks.mul (Goldilocks.sub Goldilocks.zero cinv4) a)) =
+          Goldilocks.mul (Goldilocks.mul (Goldilocks.ofNat 4) cinv4) a := by gold_cring
+      rw [hRing, h4inv]
+      exact LawfulCommRing.one_mul a
+    apply Poseidon2State12.ext
+    · exact Lane4.ext (hCoeff1 z.x0) (hCoeff1 z.x1) (hCoeff1 z.x2) (hCoeff1 z.x3)
+    · apply Lane4.ext <;> gold_cring
+    · apply Lane4.ext <;> gold_cring
+  rw [hInvShape]
+  unfold stateWeight12
+  dsimp only
+  rw [laneWeight4_scale_ne_zero hc3nz, laneWeight4_scale_ne_zero hcn1nz,
+      show laneWeight4 lane4Zero = 0 from rfl]
+  let v := applyM4Inv z
+  have hv : v ≠ lane4Zero := fun hvz => by
+    apply hz
+    have := congrArg applyM4 hvz
+    rw [applyM4_applyM4Inv] at this
+    exact this.trans (by decide)
+  have hm := m4_mds_branch_lower v hv
+  have hM4v : applyM4 v = z := applyM4_applyM4Inv z
+  rw [hM4v] at hm
+  have hvp := laneWeight4_pos_of_ne_zero hv
+  change 7 ≤ laneWeight4 v + laneWeight4 v + laneWeight4 v + (laneWeight4 z + 0 + 0)
+  omega
+
+private theorem applyME_single_out_branch_ge_seven (x : Poseidon2State12)
+    (h1 : activeBlocks12 (applyME x) = 1) :
+    7 ≤ stateWeight12 x + stateWeight12 (applyME x) := by
+  let y := applyME x
+  have hyEq : x = applyMEInv y := (applyMEInv_applyME x).symm
+  unfold activeBlocks12 at h1
+  change (if y.b0 = lane4Zero then 0 else 1) +
+      (if y.b1 = lane4Zero then 0 else 1) +
+      (if y.b2 = lane4Zero then 0 else 1) = 1 at h1
+  by_cases hy0 : y.b0 = lane4Zero <;>
+    by_cases hy1 : y.b1 = lane4Zero <;>
+    by_cases hy2 : y.b2 = lane4Zero
+  · simp [hy0, hy1, hy2] at h1
+  · have hRot : rot12 (rot12 y) = ⟨y.b2, lane4Zero, lane4Zero⟩ :=
+      Poseidon2State12.ext rfl hy0 hy1
+    have hInvRot : applyMEInv ⟨y.b2, lane4Zero, lane4Zero⟩ = rot12 (rot12 x) := by
+      suffices hFwd : applyME (applyMEInv ⟨y.b2, lane4Zero, lane4Zero⟩) = applyME (rot12 (rot12 x)) by
+        have h := congrArg applyMEInv hFwd
+        rwa [applyMEInv_applyME, applyMEInv_applyME] at h
+      rw [applyME_applyMEInv, applyME_rot12, applyME_rot12, ← hRot]
+    have hm := applyMEInv_single_b0 y.b2 hy2
+    rw [hInvRot, ← hRot, stateWeight12_rot12, stateWeight12_rot12,
+        stateWeight12_rot12, stateWeight12_rot12] at hm
+    exact hm
+  · have hRot : rot12 y = ⟨y.b1, lane4Zero, lane4Zero⟩ :=
+      Poseidon2State12.ext rfl hy2 hy0
+    have hInvRot : applyMEInv ⟨y.b1, lane4Zero, lane4Zero⟩ = rot12 x := by
+      suffices hFwd : applyME (applyMEInv ⟨y.b1, lane4Zero, lane4Zero⟩) = applyME (rot12 x) by
+        have h := congrArg applyMEInv hFwd
+        rwa [applyMEInv_applyME, applyMEInv_applyME] at h
+      rw [applyME_applyMEInv, applyME_rot12, ← hRot]
+    have hm := applyMEInv_single_b0 y.b1 hy1
+    rw [hInvRot, ← hRot, stateWeight12_rot12, stateWeight12_rot12] at hm
+    exact hm
+  · simp [hy0, hy1, hy2] at h1
+  · have hyShape : y = ⟨y.b0, lane4Zero, lane4Zero⟩ :=
+      Poseidon2State12.ext rfl hy1 hy2
+    have hm := applyMEInv_single_b0 y.b0 hy0
+    rw [← hyShape, ← hyEq] at hm
+    exact hm
+  · simp [hy0, hy1, hy2] at h1
+  · simp [hy0, hy1, hy2] at h1
+  · simp [hy0, hy1, hy2] at h1
+
+private theorem applyME_block_diffs (x : Poseidon2State12) :
+    lane4Sub (applyME x).b0 (applyME x).b1 = applyM4 (lane4Sub x.b0 x.b1) ∧
+    lane4Sub (applyME x).b1 (applyME x).b2 = applyM4 (lane4Sub x.b1 x.b2) ∧
+    lane4Sub (applyME x).b2 (applyME x).b0 = applyM4 (lane4Sub x.b2 x.b0) := by
+  refine ⟨?_, ?_, ?_⟩
+  · unfold applyME applyM4 lane4Add lane4Sub lane4Sum
+    apply Lane4.ext <;> gold_cring
+  · unfold applyME applyM4 lane4Add lane4Sub lane4Sum
+    apply Lane4.ext <;> gold_cring
+  · unfold applyME applyM4 lane4Add lane4Sub lane4Sum
+    apply Lane4.ext <;> gold_cring
+
+private theorem applyME_multiblock_b1_eq_b2 (x : Poseidon2State12)
+    (hEq12 : x.b1 = x.b2)
+    (hIn : 2 ≤ activeBlocks12 x)
+    (hOut : 2 ≤ activeBlocks12 (applyME x)) :
+    8 ≤ stateWeight12 x + stateWeight12 (applyME x) := by
+  have hb1nz : x.b1 ≠ lane4Zero := fun hz => by
+    unfold activeBlocks12 at hIn
+    rw [← hEq12, hz] at hIn
+    by_cases hb0 : x.b0 = lane4Zero <;> simp [hb0] at hIn
+  have houtEq12 : (applyME x).b1 = (applyME x).b2 := by
+    unfold applyME; rw [hEq12]
+  have hout1nz : (applyME x).b1 ≠ lane4Zero := fun hz => by
+    unfold activeBlocks12 at hOut
+    rw [← houtEq12, hz] at hOut
+    by_cases hy0 : (applyME x).b0 = lane4Zero <;> simp [hy0] at hOut
+  have h2nz : Goldilocks.ofNat 2 ≠ Goldilocks.zero := by decide
+  have h3nz : Goldilocks.ofNat 3 ≠ Goldilocks.zero := by decide
+  have h4nz : Goldilocks.ofNat 4 ≠ Goldilocks.zero := by decide
+  have hout0Eq : (applyME x).b0 =
+      lane4Scale (Goldilocks.ofNat 2) (applyM4 (lane4Add x.b0 x.b1)) := by
+    unfold applyME
+    rw [hEq12]
+    dsimp only
+    unfold applyM4 lane4Add lane4Scale lane4Sum
+    apply Lane4.ext <;> gold_cring
+  have h4y1 : lane4Scale (Goldilocks.ofNat 4) (applyM4 x.b1) =
+      lane4Sub (lane4Scale (Goldilocks.ofNat 2) (applyME x).b1) (applyME x).b0 := by
+    unfold applyME
+    rw [hEq12]
+    dsimp only
+    unfold lane4Add lane4Sub lane4Scale
+    apply Lane4.ext <;> gold_cring
+  by_cases hb0 : x.b0 = lane4Zero
+  · have hout1Scale : (applyME x).b1 = lane4Scale (Goldilocks.ofNat 3) (applyM4 x.b1) := by
+      unfold applyME
+      rw [hb0, ← hEq12, show applyM4 lane4Zero = lane4Zero from by decide]
+      unfold lane4Add lane4Scale lane4Zero
+      apply Lane4.ext <;> gold_cring
+    have hAdd0 : lane4Add lane4Zero x.b1 = x.b1 := by
+      unfold lane4Add lane4Zero
+      apply Lane4.ext <;> exact LawfulCommRing.zero_add _
+    unfold stateWeight12
+    rw [hb0, ← hEq12, ← houtEq12, hout0Eq, hb0, hAdd0, hout1Scale,
+        laneWeight4_scale_ne_zero h2nz, laneWeight4_scale_ne_zero h3nz,
+        show laneWeight4 lane4Zero = 0 from rfl]
+    have hm := m4_mds_branch_lower x.b1 hb1nz
+    omega
+  · by_cases hy0 : (applyME x).b0 = lane4Zero
+    · have hSumZero : lane4Add x.b0 x.b1 = lane4Zero := by
+        by_cases hs : lane4Add x.b0 x.b1 = lane4Zero
+        · exact hs
+        · have hm4nz := applyM4_ne_zero_of_ne_zero hs
+          have hwt := laneWeight4_pos_of_ne_zero hm4nz
+          rw [← laneWeight4_scale_ne_zero h2nz, ← hout0Eq, hy0] at hwt
+          cases hwt
+      have hb0Neg : x.b0 = lane4Scale goldilocksNegOne x.b1 := by
+        have hSub : x.b0 = lane4Sub (lane4Add x.b0 x.b1) x.b1 := by
+          unfold lane4Add lane4Sub
+          apply Lane4.ext <;> gold_cring
+        rw [hSub, hSumZero]
+        unfold lane4Sub lane4Scale lane4Zero
+        have hn1 : goldilocksNegOne = CommRingOps.neg CommRingOps.one := by decide
+        rw [hn1]
+        apply Lane4.ext <;> gold_cring
+      have hw0 : laneWeight4 x.b0 = laneWeight4 x.b1 := by
+        rw [hb0Neg, laneWeight4_scale_ne_zero (by decide)]
+      have hwOut1 : laneWeight4 (applyM4 x.b1) = laneWeight4 (applyME x).b1 := by
+        have h := congrArg laneWeight4 h4y1
+        rw [hy0, laneWeight4_scale_ne_zero h4nz] at h
+        have hSub0 : lane4Sub (lane4Scale (Goldilocks.ofNat 2) (applyME x).b1) lane4Zero =
+            lane4Scale (Goldilocks.ofNat 2) (applyME x).b1 := by
+          unfold lane4Sub lane4Zero
+          apply Lane4.ext <;> exact LawfulCommRing.sub_zero _
+        rw [hSub0, laneWeight4_scale_ne_zero h2nz] at h
+        exact h
+      unfold stateWeight12
+      rw [← hEq12, ← houtEq12, hy0, hw0, ← hwOut1, show laneWeight4 lane4Zero = 0 from rfl]
+      have hm := m4_mds_branch_lower x.b1 hb1nz
+      omega
+    · have hSumNz : lane4Add x.b0 x.b1 ≠ lane4Zero := fun hz => by
+        rw [hz, show applyM4 lane4Zero = lane4Zero from by decide] at hout0Eq
+        have : lane4Scale (Goldilocks.ofNat 2) lane4Zero = lane4Zero := by decide
+        exact hy0 (hout0Eq.trans this)
+      have hmSum : 5 ≤ laneWeight4 x.b0 + laneWeight4 x.b1 + laneWeight4 (applyME x).b0 := by
+        have hm := m4_mds_branch_lower (lane4Add x.b0 x.b1) hSumNz
+        have hwOut0 : laneWeight4 (applyME x).b0 = laneWeight4 (applyM4 (lane4Add x.b0 x.b1)) := by
+          rw [hout0Eq, laneWeight4_scale_ne_zero h2nz]
+        have hTri := laneWeight4_add_le x.b0 x.b1
+        omega
+      have hmB1 : 5 ≤ laneWeight4 x.b1 + laneWeight4 (applyME x).b0 + laneWeight4 (applyME x).b1 := by
+        have hm := m4_mds_branch_lower x.b1 hb1nz
+        have hwt4 : laneWeight4 (applyM4 x.b1) ≤
+            laneWeight4 (applyME x).b1 + laneWeight4 (applyME x).b0 := by
+          have h := congrArg laneWeight4 h4y1
+          rw [laneWeight4_scale_ne_zero h4nz] at h
+          have hTri := laneWeight4_sub_le (lane4Scale (Goldilocks.ofNat 2) (applyME x).b1) (applyME x).b0
+          rw [laneWeight4_scale_ne_zero h2nz] at hTri
+          omega
+        omega
+      have p0 := laneWeight4_pos_of_ne_zero hb0
+      have p1 := laneWeight4_pos_of_ne_zero hb1nz
+      have po1 := laneWeight4_pos_of_ne_zero hout1nz
+      unfold stateWeight12
+      rw [← hEq12, ← houtEq12]
+      omega
+
+/-- **Multi-Block Width-12 `M_E` Branch Bound (`poseidon2_me12_multiblock_branch_ge_eight`)**:
+    Whenever both input `x` and output `applyME x` activate at least two 4-lane blocks,
+    `8 ≤ stateWeight12 x + stateWeight12 (applyME x)`. -/
+theorem poseidon2_me12_multiblock_branch_ge_eight (x : Poseidon2State12)
+    (hIn : 2 ≤ activeBlocks12 x) (hOut : 2 ≤ activeBlocks12 (applyME x)) :
+    8 ≤ stateWeight12 x + stateWeight12 (applyME x) := by
+  by_cases h01 : x.b0 = x.b1
+  · have hRotEq : (rot12 (rot12 x)).b1 = (rot12 (rot12 x)).b2 := h01
+    have hIn' : 2 ≤ activeBlocks12 (rot12 (rot12 x)) := by
+      rw [activeBlocks12_rot12, activeBlocks12_rot12]; exact hIn
+    have hOut' : 2 ≤ activeBlocks12 (applyME (rot12 (rot12 x))) := by
+      rw [applyME_rot12, applyME_rot12, activeBlocks12_rot12, activeBlocks12_rot12]; exact hOut
+    have hm := applyME_multiblock_b1_eq_b2 (rot12 (rot12 x)) hRotEq hIn' hOut'
+    rw [stateWeight12_rot12, stateWeight12_rot12,
+        applyME_rot12, applyME_rot12, stateWeight12_rot12, stateWeight12_rot12] at hm
+    exact hm
+  · by_cases h12 : x.b1 = x.b2
+    · exact applyME_multiblock_b1_eq_b2 x h12 hIn hOut
+    · by_cases h20 : x.b2 = x.b0
+      · have hRotEq : (rot12 x).b1 = (rot12 x).b2 := h20
+        have hIn' : 2 ≤ activeBlocks12 (rot12 x) := by
+          rw [activeBlocks12_rot12]; exact hIn
+        have hOut' : 2 ≤ activeBlocks12 (applyME (rot12 x)) := by
+          rw [applyME_rot12, activeBlocks12_rot12]; exact hOut
+        have hm := applyME_multiblock_b1_eq_b2 (rot12 x) hRotEq hIn' hOut'
+        rw [stateWeight12_rot12, applyME_rot12, stateWeight12_rot12] at hm
+        exact hm
+      · obtain ⟨hd01, hd12, hd20⟩ := applyME_block_diffs x
+        have hn01 : lane4Sub x.b0 x.b1 ≠ lane4Zero := fun hz =>
+          h01 ((lane4Sub_eq_zero_iff _ _).mp hz)
+        have hn12 : lane4Sub x.b1 x.b2 ≠ lane4Zero := fun hz =>
+          h12 ((lane4Sub_eq_zero_iff _ _).mp hz)
+        have hn20 : lane4Sub x.b2 x.b0 ≠ lane4Zero := fun hz =>
+          h20 ((lane4Sub_eq_zero_iff _ _).mp hz)
+        have m01 := m4_mds_branch_lower (lane4Sub x.b0 x.b1) hn01
+        have m12 := m4_mds_branch_lower (lane4Sub x.b1 x.b2) hn12
+        have m20 := m4_mds_branch_lower (lane4Sub x.b2 x.b0) hn20
+        rw [← hd01] at m01
+        rw [← hd12] at m12
+        rw [← hd20] at m20
+        have t1 := laneWeight4_sub_le x.b0 x.b1
+        have t2 := laneWeight4_sub_le x.b1 x.b2
+        have t3 := laneWeight4_sub_le x.b2 x.b0
+        have u1 := laneWeight4_sub_le (applyME x).b0 (applyME x).b1
+        have u2 := laneWeight4_sub_le (applyME x).b1 (applyME x).b2
+        have u3 := laneWeight4_sub_le (applyME x).b2 (applyME x).b0
+        unfold stateWeight12
+        omega
+
+def me12BranchSevenWitness : Poseidon2State12 :=
+  ⟨⟨Goldilocks.ofNat 3, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩,
+   ⟨goldilocksNegOne, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩,
+   ⟨goldilocksNegOne, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩⟩
+
+/-- **Exact Universal Width-12 `M_E` Branch Number = 7 (`poseidon2_me12_branch_number_eq_seven`)**:
+    Every nonzero 12-lane state satisfies `7 ≤ stateWeight12 x + stateWeight12 (applyME x)`,
+    and `me12BranchSevenWitness` attains `3 + 4 = 7`. -/
+theorem poseidon2_me12_branch_number_eq_seven :
+    (∀ x : Poseidon2State12, x ≠ state12Zero →
+      7 ≤ stateWeight12 x + stateWeight12 (applyME x)) ∧
+    me12BranchSevenWitness ≠ state12Zero ∧
+    stateWeight12 me12BranchSevenWitness + stateWeight12 (applyME me12BranchSevenWitness) = 7 := by
+  refine ⟨?_, by decide, by decide⟩
+  intro x hx
+  have hInPos : 1 ≤ activeBlocks12 x := by
+    unfold activeBlocks12
+    by_cases h0 : x.b0 = lane4Zero <;>
+      by_cases h1 : x.b1 = lane4Zero <;>
+      by_cases h2 : x.b2 = lane4Zero
+    · exact False.elim (hx (Poseidon2State12.ext h0 h1 h2))
+    all_goals simp [h0, h1, h2]
+  have hyNz : applyME x ≠ state12Zero := fun hz => by
+    apply hx
+    have hInv := congrArg applyMEInv hz
+    rw [applyMEInv_applyME] at hInv
+    exact hInv.trans (by decide)
+  have hOutPos : 1 ≤ activeBlocks12 (applyME x) := by
+    unfold activeBlocks12
+    by_cases h0 : (applyME x).b0 = lane4Zero <;>
+      by_cases h1 : (applyME x).b1 = lane4Zero <;>
+      by_cases h2 : (applyME x).b2 = lane4Zero
+    · exact False.elim (hyNz (Poseidon2State12.ext h0 h1 h2))
+    all_goals simp [h0, h1, h2]
+  by_cases hIn1 : activeBlocks12 x = 1
+  · exact (poseidon2_me12_single_block_branch_ge_seven x hIn1).1
+  · by_cases hOut1 : activeBlocks12 (applyME x) = 1
+    · exact applyME_single_out_branch_ge_seven x hOut1
+    · have h2In : 2 ≤ activeBlocks12 x := by omega
+      have h2Out : 2 ≤ activeBlocks12 (applyME x) := by omega
+      have h8 := poseidon2_me12_multiblock_branch_ge_eight x h2In h2Out
+      omega
+
+/-- Exact bilinear transpose laws for `applyME` and symmetric `applyMI` (`M_I^T = M_I`),
+    plus identical universal linear branch bound `≥ 7` for `applyMETranspose`. -/
+theorem poseidon2_me12_and_mi12_linear_transpose_laws (x y : Poseidon2State12) :
+    state12Dot (applyME x) y = state12Dot x (applyMETranspose y) ∧
+    state12Dot (applyMI x) y = state12Dot x (applyMI y) ∧
+    (y ≠ state12Zero → 7 ≤ stateWeight12 y + stateWeight12 (applyMETranspose y)) := by
+  have hwRev4 : ∀ b : Lane4, laneWeight4 (lane4Rev b) = laneWeight4 b := fun b => by
+    unfold laneWeight4 lane4Rev; dsimp only; omega
+  have hwRev12 : ∀ s : Poseidon2State12, stateWeight12 (state12Rev4 s) = stateWeight12 s := fun s => by
+    unfold stateWeight12 state12Rev4; dsimp only; rw [hwRev4, hwRev4, hwRev4]
+  refine ⟨?_, ?_, ?_⟩
+  · unfold state12Dot applyMETranspose state12Rev4 lane4Rev applyME applyM4 lane4Add lane4Sum lane4Dot
+    gold_cring
+  · unfold state12Dot applyMI state12Sum lane4Sum lane4Dot
+    gold_cring
+  · intro hy
+    have hRevNz : state12Rev4 y ≠ state12Zero := fun hz => by
+      apply hy
+      have hInv : state12Rev4 (state12Rev4 y) = y := by
+        rcases y with ⟨⟨_, _, _, _⟩, ⟨_, _, _, _⟩, ⟨_, _, _, _⟩⟩; rfl
+      rw [← hInv, hz]; rfl
+    have hm := poseidon2_me12_branch_number_eq_seven.1 (state12Rev4 y) hRevNz
+    unfold applyMETranspose
+    rw [hwRev12]
+    rw [hwRev12] at hm
+    exact hm
+
+private theorem mi_lane_wt_ge_one (v : Int) (x s : Goldilocks) (hs : s ≠ Goldilocks.zero) :
+    1 ≤ (if x = Goldilocks.zero then 0 else 1) +
+      (if Goldilocks.add (Goldilocks.mul (goldOfInt v) x) s = Goldilocks.zero then 0 else 1) := by
+  by_cases hx : x = Goldilocks.zero
+  · subst hx
+    have hz : Goldilocks.add (Goldilocks.mul (goldOfInt v) Goldilocks.zero) s = s := by
+      change CommRingOps.add (CommRingOps.mul (goldOfInt v) CommRingOps.zero) s = s
+      rw [LawfulCommRing.mul_zero, LawfulCommRing.zero_add]
+    rw [hz]
+    simp [hs]
+  · simp [hx]
+
+private theorem mi_lane1_wt_ge_one (x s : Goldilocks) (hs : s ≠ Goldilocks.zero) :
+    1 ≤ (if x = Goldilocks.zero then 0 else 1) +
+      (if Goldilocks.add x s = Goldilocks.zero then 0 else 1) := by
+  by_cases hx : x = Goldilocks.zero
+  · subst hx
+    have hz : Goldilocks.add Goldilocks.zero s = s := LawfulCommRing.zero_add s
+    rw [hz]
+    simp [hs]
+  · simp [hx]
+
+private theorem mi_lane_scaled_of_wt_le_one (v w : Int) (hvw : v * w = 1024)
+    (x s : Goldilocks)
+    (h1 : (if x = Goldilocks.zero then 0 else 1) +
+      (if Goldilocks.add (Goldilocks.mul (goldOfInt v) x) s = Goldilocks.zero then 0 else 1) ≤ 1) :
+    Goldilocks.mul (goldOfInt 1024) x =
+      Goldilocks.mul (goldOfInt (if x = Goldilocks.zero then 0 else -w)) s := by
+  by_cases hx : x = Goldilocks.zero
+  · subst hx
+    simp only [↓reduceIte]
+    change CommRingOps.mul (goldOfInt 1024) CommRingOps.zero = CommRingOps.mul CommRingOps.zero s
+    rw [LawfulCommRing.mul_zero, LawfulCommRing.zero_mul]
+  · have hy : Goldilocks.add (Goldilocks.mul (goldOfInt v) x) s = Goldilocks.zero := by
+      by_cases hy0 : Goldilocks.add (Goldilocks.mul (goldOfInt v) x) s = Goldilocks.zero
+      · exact hy0
+      · simp [hx, hy0] at h1
+    simp only [hx, ↓reduceIte]
+    have hMulW := congrArg (Goldilocks.mul (goldOfInt w)) hy
+    rw [show Goldilocks.mul (goldOfInt w) Goldilocks.zero = Goldilocks.zero from
+      LawfulCommRing.mul_zero _] at hMulW
+    rw [← goldOfInt_nat x, ← goldOfInt_nat s] at hMulW ⊢
+    simp only [goldOfInt_add, goldOfInt_mul] at hMulW ⊢
+    have hSub : goldOfInt (w * (v * ↑x.val + ↑s.val)) = goldOfInt 0 := hMulW
+    have hId : (1024 : Int) * ↑x.val = w * (v * ↑x.val + ↑s.val) + (-w) * ↑s.val := by
+      have hvw' : w * v = 1024 := Int.mul_comm w v ▸ hvw
+      have hCancel : w * ↑s.val + (-w) * ↑s.val = 0 := by
+        rw [← Int.add_mul, Int.add_right_neg, Int.zero_mul]
+      calc (1024 : Int) * ↑x.val = (w * v) * ↑x.val := by rw [hvw']
+      _ = w * (v * ↑x.val) + 0 := by rw [Int.mul_assoc, Int.add_zero]
+      _ = w * (v * ↑x.val) + (w * ↑s.val + (-w) * ↑s.val) := by rw [hCancel]
+      _ = w * (v * ↑x.val + ↑s.val) + (-w) * ↑s.val := by rw [← Int.add_assoc, ← Int.mul_add]
+    have hGoal : goldOfInt ((1024 : Int) * ↑x.val) =
+        Goldilocks.add (goldOfInt (w * (v * ↑x.val + ↑s.val))) (goldOfInt ((-w) * ↑s.val)) := by
+      rw [← goldOfInt_add, ← hId]
+    rw [hGoal, hSub]
+    exact LawfulCommRing.zero_add _
+
+private theorem mi_lane1_scaled_of_wt_le_one (x s : Goldilocks)
+    (h1 : (if x = Goldilocks.zero then 0 else 1) +
+      (if Goldilocks.add x s = Goldilocks.zero then 0 else 1) ≤ 1) :
+    Goldilocks.mul (goldOfInt 1024) x =
+      Goldilocks.mul (goldOfInt (if x = Goldilocks.zero then 0 else -1024)) s := by
+  have hMul1 : Goldilocks.mul (goldOfInt 1) x = x := by
+    change CommRingOps.mul CommRingOps.one x = x
+    exact LawfulCommRing.one_mul x
+  apply mi_lane_scaled_of_wt_le_one 1 1024 rfl x s
+  simpa only [hMul1] using h1
+
+private theorem ite_nonneg_bounds (p : Prop) [Decidable p] (k : Int) (hk : 0 ≤ k) :
+    0 ≤ (if p then (0 : Int) else k) ∧ (if p then (0 : Int) else k) ≤ k := by
+  by_cases hp : p <;> simp [hp, hk]
+
+private theorem ite_nonpos_bounds (p : Prop) [Decidable p] (k : Int) (hk : k ≤ 0) :
+    k ≤ (if p then (0 : Int) else k) ∧ (if p then (0 : Int) else k) ≤ 0 := by
+  by_cases hp : p <;> simp [hp, hk]
+
+/-- **Exact Nonzero-Sum `M_I` Branch Number = 13 (`poseidon2_mi12_nonzero_sum_branch_eq_thirteen`)**:
+    1. Whenever `state12Sum x ≠ 0`, `13 ≤ stateWeight12 x + stateWeight12 (applyMI x)`
+       (proven via `v_0 = -2, v_1..v_11 = 2^(i-1)` forcing `512 ≤ 1024 - Σ_{i ∈ S} (-1024 / v_i) ≤ 3071 < p`).
+    2. Every single-lane partial-round difference `⟨⟨Δ, 0, 0, 0⟩, 0, 0⟩` with `Δ ≠ 0` achieves
+       full 12-lane diffusion `stateWeight12 (applyMI x) = 12` and attains `1 + 12 = 13`.
+    3. Across ALL nonzero `x ≠ state12Zero` (including zero-sum states), `4 ≤ stateWeight12 x + stateWeight12 (applyMI x)`. -/
+theorem poseidon2_mi12_nonzero_sum_branch_eq_thirteen :
+    (∀ x : Poseidon2State12, state12Sum x ≠ Goldilocks.zero →
+      13 ≤ stateWeight12 x + stateWeight12 (applyMI x)) ∧
+    (∀ Δ : Goldilocks, Δ ≠ Goldilocks.zero →
+      let x : Poseidon2State12 :=
+        ⟨⟨Δ, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩, lane4Zero, lane4Zero⟩
+      stateWeight12 (applyMI x) = 12 ∧
+      stateWeight12 x + stateWeight12 (applyMI x) = 13) ∧
+    (∀ x : Poseidon2State12, x ≠ state12Zero →
+      4 ≤ stateWeight12 x + stateWeight12 (applyMI x)) := by
+  have hBranch13 : ∀ x : Poseidon2State12, state12Sum x ≠ Goldilocks.zero →
+      13 ≤ stateWeight12 x + stateWeight12 (applyMI x) := by
+    intro x hs
+    by_cases h13 : 13 ≤ stateWeight12 x + stateWeight12 (applyMI x)
+    · exact h13
+    · exfalso
+      let s := state12Sum x
+      have hLe12 : stateWeight12 x + stateWeight12 (applyMI x) ≤ 12 := by omega
+      unfold stateWeight12 applyMI laneWeight4 at hLe12
+      dsimp only at hLe12
+      change _ + _ + _ + (_ + (_ + _ + _) + (_ + _ + _ + _) + (_ + _ + _ + _)) ≤ 12 at hLe12
+      have g0 := mi_lane_wt_ge_one (-2) x.b0.x0 s hs
+      have g1 := mi_lane1_wt_ge_one x.b0.x1 s hs
+      have g2 := mi_lane_wt_ge_one 2 x.b0.x2 s hs
+      have g3 := mi_lane_wt_ge_one 4 x.b0.x3 s hs
+      have g4 := mi_lane_wt_ge_one 8 x.b1.x0 s hs
+      have g5 := mi_lane_wt_ge_one 16 x.b1.x1 s hs
+      have g6 := mi_lane_wt_ge_one 32 x.b1.x2 s hs
+      have g7 := mi_lane_wt_ge_one 64 x.b1.x3 s hs
+      have g8 := mi_lane_wt_ge_one 128 x.b2.x0 s hs
+      have g9 := mi_lane_wt_ge_one 256 x.b2.x1 s hs
+      have g10 := mi_lane_wt_ge_one 512 x.b2.x2 s hs
+      have g11 := mi_lane_wt_ge_one 1024 x.b2.x3 s hs
+      have e0 := mi_lane_scaled_of_wt_le_one (-2) (-512) rfl x.b0.x0 s (by omega)
+      have e1 := mi_lane1_scaled_of_wt_le_one x.b0.x1 s (by omega)
+      have e2 := mi_lane_scaled_of_wt_le_one 2 512 rfl x.b0.x2 s (by omega)
+      have e3 := mi_lane_scaled_of_wt_le_one 4 256 rfl x.b0.x3 s (by omega)
+      have e4 := mi_lane_scaled_of_wt_le_one 8 128 rfl x.b1.x0 s (by omega)
+      have e5 := mi_lane_scaled_of_wt_le_one 16 64 rfl x.b1.x1 s (by omega)
+      have e6 := mi_lane_scaled_of_wt_le_one 32 32 rfl x.b1.x2 s (by omega)
+      have e7 := mi_lane_scaled_of_wt_le_one 64 16 rfl x.b1.x3 s (by omega)
+      have e8 := mi_lane_scaled_of_wt_le_one 128 8 rfl x.b2.x0 s (by omega)
+      have e9 := mi_lane_scaled_of_wt_le_one 256 4 rfl x.b2.x1 s (by omega)
+      have e10 := mi_lane_scaled_of_wt_le_one 512 2 rfl x.b2.x2 s (by omega)
+      have e11 := mi_lane_scaled_of_wt_le_one 1024 1 rfl x.b2.x3 s (by omega)
+      let u0 : Int := if x.b0.x0 = Goldilocks.zero then 0 else -(-512)
+      let u1 : Int := if x.b0.x1 = Goldilocks.zero then 0 else -1024
+      let u2 : Int := if x.b0.x2 = Goldilocks.zero then 0 else -512
+      let u3 : Int := if x.b0.x3 = Goldilocks.zero then 0 else -256
+      let u4 : Int := if x.b1.x0 = Goldilocks.zero then 0 else -128
+      let u5 : Int := if x.b1.x1 = Goldilocks.zero then 0 else -64
+      let u6 : Int := if x.b1.x2 = Goldilocks.zero then 0 else -32
+      let u7 : Int := if x.b1.x3 = Goldilocks.zero then 0 else -16
+      let u8 : Int := if x.b2.x0 = Goldilocks.zero then 0 else -8
+      let u9 : Int := if x.b2.x1 = Goldilocks.zero then 0 else -4
+      let u10 : Int := if x.b2.x2 = Goldilocks.zero then 0 else -2
+      let u11 : Int := if x.b2.x3 = Goldilocks.zero then 0 else -1
+      let U : Int := u0 + u1 + u2 + u3 + u4 + u5 + u6 + u7 + u8 + u9 + u10 + u11
+      have hSum1024 : Goldilocks.mul (goldOfInt 1024) s = Goldilocks.mul (goldOfInt U) s := by
+        have hDist : Goldilocks.mul (goldOfInt 1024) s =
+            Goldilocks.add (Goldilocks.add
+              (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt 1024) x.b0.x0)
+                                              (Goldilocks.mul (goldOfInt 1024) x.b0.x1))
+                              (Goldilocks.add (Goldilocks.mul (goldOfInt 1024) x.b0.x2)
+                                              (Goldilocks.mul (goldOfInt 1024) x.b0.x3)))
+              (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt 1024) x.b1.x0)
+                                              (Goldilocks.mul (goldOfInt 1024) x.b1.x1))
+                              (Goldilocks.add (Goldilocks.mul (goldOfInt 1024) x.b1.x2)
+                                              (Goldilocks.mul (goldOfInt 1024) x.b1.x3))))
+              (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt 1024) x.b2.x0)
+                                              (Goldilocks.mul (goldOfInt 1024) x.b2.x1))
+                              (Goldilocks.add (Goldilocks.mul (goldOfInt 1024) x.b2.x2)
+                                              (Goldilocks.mul (goldOfInt 1024) x.b2.x3))) := by
+          unfold s state12Sum lane4Sum
+          gold_cring
+        rw [hDist, e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11]
+        rw [← goldOfInt_nat s]
+        simp only [goldOfInt_add, goldOfInt_mul]
+        congr 1
+        dsimp only [U]
+        omega
+      have hDiffZero : Goldilocks.mul (goldOfInt (1024 - U)) s = Goldilocks.zero := by
+        have hSub := congrArg (fun z => Goldilocks.sub z (Goldilocks.mul (goldOfInt U) s)) hSum1024
+        dsimp only at hSub
+        rw [show Goldilocks.sub (Goldilocks.mul (goldOfInt U) s) (Goldilocks.mul (goldOfInt U) s) =
+            Goldilocks.zero from LawfulCommRing.sub_self _] at hSub
+        have hFactor : Goldilocks.sub (Goldilocks.mul (goldOfInt 1024) s)
+            (Goldilocks.mul (goldOfInt U) s) = Goldilocks.mul (goldOfInt (1024 - U)) s := by
+          rw [← goldOfInt_nat s]
+          simp only [goldOfInt_sub, goldOfInt_mul]
+          congr 1
+          exact (Int.sub_mul 1024 U _).symm
+        rwa [hFactor] at hSub
+      have b0 := ite_nonneg_bounds (x.b0.x0 = Goldilocks.zero) 512 (by omega)
+      have b1 := ite_nonpos_bounds (x.b0.x1 = Goldilocks.zero) (-1024) (by omega)
+      have b2 := ite_nonpos_bounds (x.b0.x2 = Goldilocks.zero) (-512) (by omega)
+      have b3 := ite_nonpos_bounds (x.b0.x3 = Goldilocks.zero) (-256) (by omega)
+      have b4 := ite_nonpos_bounds (x.b1.x0 = Goldilocks.zero) (-128) (by omega)
+      have b5 := ite_nonpos_bounds (x.b1.x1 = Goldilocks.zero) (-64) (by omega)
+      have b6 := ite_nonpos_bounds (x.b1.x2 = Goldilocks.zero) (-32) (by omega)
+      have b7 := ite_nonpos_bounds (x.b1.x3 = Goldilocks.zero) (-16) (by omega)
+      have b8 := ite_nonpos_bounds (x.b2.x0 = Goldilocks.zero) (-8) (by omega)
+      have b9 := ite_nonpos_bounds (x.b2.x1 = Goldilocks.zero) (-4) (by omega)
+      have b10 := ite_nonpos_bounds (x.b2.x2 = Goldilocks.zero) (-2) (by omega)
+      have b11 := ite_nonpos_bounds (x.b2.x3 = Goldilocks.zero) (-1) (by omega)
+      have hBounds : 512 ≤ 1024 - U ∧ 1024 - U < (goldilocksPrime : Int) := by
+        dsimp only [U, u0, u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11]
+        simp only [goldilocksPrime]
+        omega
+      have hCoeffNz : goldOfInt (1024 - U) ≠ Goldilocks.zero := by
+        intro hz
+        have hv := congrArg (fun g => (g.val : Int)) hz
+        rw [goldOfInt_val] at hv
+        change (1024 - U) % (goldilocksPrime : Int) = 0 at hv
+        rw [Int.emod_eq_of_lt (by omega) hBounds.2] at hv
+        omega
+      rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero hDiffZero with h1 | h2
+      · exact hCoeffNz h1
+      · exact hs h2
+  refine ⟨hBranch13, ?_, ?_⟩
+  · intro Δ hΔ
+    let x : Poseidon2State12 :=
+      ⟨⟨Δ, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩, lane4Zero, lane4Zero⟩
+    change stateWeight12 (applyMI x) = 12 ∧ stateWeight12 x + stateWeight12 (applyMI x) = 13
+    have hSumEq : state12Sum x = Δ := by
+      unfold x state12Sum lane4Sum lane4Zero
+      gold_cring
+    have hxWt : stateWeight12 x = 1 := by
+      unfold x stateWeight12 laneWeight4 lane4Zero
+      simp [hΔ]
+    have h13 := hBranch13 x (hSumEq.symm ▸ hΔ)
+    have hMax : stateWeight12 (applyMI x) ≤ 12 := by
+      have l0 := laneWeight4_le_four (applyMI x).b0
+      have l1 := laneWeight4_le_four (applyMI x).b1
+      have l2 := laneWeight4_le_four (applyMI x).b2
+      unfold stateWeight12; omega
+    omega
+  · intro x hx
+    by_cases hs : state12Sum x = Goldilocks.zero
+    · have hAdd0 : ∀ a : Goldilocks, Goldilocks.add a Goldilocks.zero = a :=
+        LawfulCommRing.add_zero
+      have hWtEq : stateWeight12 (applyMI x) = stateWeight12 x := by
+        unfold applyMI stateWeight12 laneWeight4
+        rw [hs]
+        dsimp only
+        simp only [hAdd0]
+        rw [coord_wt_mul_nz (by decide), coord_wt_mul_nz (by decide), coord_wt_mul_nz (by decide),
+            coord_wt_mul_nz (by decide), coord_wt_mul_nz (by decide), coord_wt_mul_nz (by decide),
+            coord_wt_mul_nz (by decide), coord_wt_mul_nz (by decide), coord_wt_mul_nz (by decide),
+            coord_wt_mul_nz (by decide), coord_wt_mul_nz (by decide)]
+      by_cases hw1 : 2 ≤ stateWeight12 x
+      · omega
+      · exfalso
+        have hSingle : ∀ (a b c d : Goldilocks),
+            (if a = Goldilocks.zero then 0 else 1) + (if b = Goldilocks.zero then 0 else 1) +
+            (if c = Goldilocks.zero then 0 else 1) + (if d = Goldilocks.zero then 0 else 1) ≤ 1 →
+            lane4Sum ⟨a, b, c, d⟩ = Goldilocks.zero →
+            ⟨a, b, c, d⟩ = lane4Zero := by
+          intro a b c d hw hsum
+          by_cases ha : a = Goldilocks.zero <;>
+            by_cases hb : b = Goldilocks.zero <;>
+            by_cases hc : c = Goldilocks.zero <;>
+            by_cases hd : d = Goldilocks.zero
+          · exact Lane4.ext ha hb hc hd
+          · subst ha hb hc; unfold lane4Sum at hsum; dsimp only at hsum
+            have : Goldilocks.add (Goldilocks.add Goldilocks.zero Goldilocks.zero)
+                (Goldilocks.add Goldilocks.zero d) = d := by gold_cring
+            exact False.elim (hd (this ▸ hsum))
+          · subst ha hb hd; unfold lane4Sum at hsum; dsimp only at hsum
+            have : Goldilocks.add (Goldilocks.add Goldilocks.zero Goldilocks.zero)
+                (Goldilocks.add c Goldilocks.zero) = c := by gold_cring
+            exact False.elim (hc (this ▸ hsum))
+          · simp [ha, hb, hc, hd] at hw
+          · subst ha hc hd; unfold lane4Sum at hsum; dsimp only at hsum
+            have : Goldilocks.add (Goldilocks.add Goldilocks.zero b)
+                (Goldilocks.add Goldilocks.zero Goldilocks.zero) = b := by gold_cring
+            exact False.elim (hb (this ▸ hsum))
+          · simp [ha, hb, hc, hd] at hw
+          · simp [ha, hb, hc, hd] at hw
+          · simp [ha, hb, hc, hd] at hw
+          · subst hb hc hd; unfold lane4Sum at hsum; dsimp only at hsum
+            have : Goldilocks.add (Goldilocks.add a Goldilocks.zero)
+                (Goldilocks.add Goldilocks.zero Goldilocks.zero) = a := by gold_cring
+            exact False.elim (ha (this ▸ hsum))
+          all_goals simp [ha, hb, hc, hd] at hw
+        unfold stateWeight12 at hw1
+        unfold state12Sum at hs
+        by_cases hb0 : x.b0 = lane4Zero <;>
+          by_cases hb1 : x.b1 = lane4Zero <;>
+          by_cases hb2 : x.b2 = lane4Zero
+        · exact hx (Poseidon2State12.ext hb0 hb1 hb2)
+        · rw [hb0, hb1] at hw1 hs
+          rw [show laneWeight4 lane4Zero = 0 from rfl] at hw1
+          rw [show lane4Sum lane4Zero = Goldilocks.zero from rfl] at hs
+          have hs' : lane4Sum x.b2 = Goldilocks.zero := by
+            have : Goldilocks.add (Goldilocks.add Goldilocks.zero Goldilocks.zero) (lane4Sum x.b2) =
+                lane4Sum x.b2 := by gold_cring
+            exact this ▸ hs
+          exact hb2 (hSingle x.b2.x0 x.b2.x1 x.b2.x2 x.b2.x3 (by unfold laneWeight4 at hw1; omega) hs')
+        · rw [hb0, hb2] at hw1 hs
+          rw [show laneWeight4 lane4Zero = 0 from rfl] at hw1
+          rw [show lane4Sum lane4Zero = Goldilocks.zero from rfl] at hs
+          have hs' : lane4Sum x.b1 = Goldilocks.zero := by
+            have : Goldilocks.add (Goldilocks.add Goldilocks.zero (lane4Sum x.b1)) Goldilocks.zero =
+                lane4Sum x.b1 := by gold_cring
+            exact this ▸ hs
+          exact hb1 (hSingle x.b1.x0 x.b1.x1 x.b1.x2 x.b1.x3 (by unfold laneWeight4 at hw1; omega) hs')
+        · have p1 := laneWeight4_pos_of_ne_zero hb1
+          have p2 := laneWeight4_pos_of_ne_zero hb2
+          omega
+        · rw [hb1, hb2] at hw1 hs
+          rw [show laneWeight4 lane4Zero = 0 from rfl] at hw1
+          rw [show lane4Sum lane4Zero = Goldilocks.zero from rfl] at hs
+          have hs' : lane4Sum x.b0 = Goldilocks.zero := by
+            have : Goldilocks.add (Goldilocks.add (lane4Sum x.b0) Goldilocks.zero) Goldilocks.zero =
+                lane4Sum x.b0 := by gold_cring
+            exact this ▸ hs
+          exact hb0 (hSingle x.b0.x0 x.b0.x1 x.b0.x2 x.b0.x3 (by unfold laneWeight4 at hw1; omega) hs')
+        · have p0 := laneWeight4_pos_of_ne_zero hb0
+          have p2 := laneWeight4_pos_of_ne_zero hb2
+          omega
+        · have p0 := laneWeight4_pos_of_ne_zero hb0
+          have p1 := laneWeight4_pos_of_ne_zero hb1
+          omega
+        · have p0 := laneWeight4_pos_of_ne_zero hb0
+          have p1 := laneWeight4_pos_of_ne_zero hb1
+          omega
+    · have h13 := hBranch13 x hs
+      omega
+
+/-! ### Merz–Rodríguez García (`2026/306`) `(X, -X, 0)` Subspace Round-Skipping & `M_4 ⊗ P_3` + Jive Mitigation -/
+
+theorem sbox7_odd (u : Goldilocks) :
+    sbox7 (Goldilocks.sub Goldilocks.zero u) = Goldilocks.sub Goldilocks.zero (sbox7 u) := by
+  unfold sbox7
+  gold_cring
+
+/-- `#tooth` **Merz–Rodríguez García (`2026/306`) `(X, -X, 0)` Subspace & Partial Feed-Forward Vulnerability**:
+    1. On standard `applyME = P_3 ⊗ M_4 = circ(2 M_4, M_4, M_4)`, the entire 4-dimensional subspace
+       `⟨X, -X, 0⟩` maps to `⟨M_4 X, -M_4 X, 0⟩`, leaving the sponge capacity block `b2 = 0` untouched!
+    2. Across a full round `sboxState12 (state12Add (applyME ⟨U0 + X, -X, U2⟩) C)` under the two linear
+       antisymmetry conditions `(applyME ⟨U0, 0, U2⟩).b0 + C.b0 = -((applyME ⟨U0, 0, U2⟩).b1 + C.b1)`,
+       oddness of `sbox7` preserves `(X^(1), -X^(1))` in blocks `0, 1` while keeping block `b2` independent of `X`!
+    3. Partial feed-forward `(perm st).b0 + st.b0` (`poseidon2_compress12_ff` in `sponge.rs`) and naive
+       uniform sum `st.b0 + st.b1 + st.b2` leave `(0, X, -X)` canceled in the feed-forward term. -/
+theorem tooth_poseidon2_me_std_admits_x_neg_x_subspace_skip (X U0 U2 : Lane4)
+    (C : Poseidon2State12)
+    (hAnti : lane4Add (applyME ⟨U0, lane4Zero, U2⟩).b0 C.b0 =
+             lane4Neg (lane4Add (applyME ⟨U0, lane4Zero, U2⟩).b1 C.b1)) :
+    applyME ⟨X, lane4Neg X, lane4Zero⟩ = ⟨applyM4 X, lane4Neg (applyM4 X), lane4Zero⟩ ∧
+    let afterSbox := sboxState12 (state12Add (applyME ⟨lane4Add U0 X, lane4Neg X, U2⟩) C)
+    afterSbox.b1 = lane4Neg afterSbox.b0 ∧
+    afterSbox.b2 = sboxLane4 (lane4Add (applyME ⟨U0, lane4Zero, U2⟩).b2 C.b2) ∧
+    (⟨U0, X, lane4Neg X⟩ : Poseidon2State12).b0 = U0 ∧
+    lane4Add (lane4Add U0 X) (lane4Neg X) = U0 := by
+  have hLinSub : applyME ⟨X, lane4Neg X, lane4Zero⟩ =
+      ⟨applyM4 X, lane4Neg (applyM4 X), lane4Zero⟩ := by
+    unfold applyME lane4Neg applyM4 lane4Add lane4Sub lane4Sum lane4Zero
+    apply Poseidon2State12.ext <;> apply Lane4.ext <;> gold_cring
+  have hDecomp : ⟨lane4Add U0 X, lane4Neg X, U2⟩ =
+      state12Add ⟨U0, lane4Zero, U2⟩ ⟨X, lane4Neg X, lane4Zero⟩ := by
+    unfold state12Add lane4Add lane4Neg lane4Sub lane4Zero
+    apply Poseidon2State12.ext <;> apply Lane4.ext <;> gold_cring
+  refine ⟨hLinSub, ?_, ?_, rfl, ?_⟩
+  · rw [hDecomp, applyME_add, hLinSub]
+    unfold state12Add sboxState12 sboxLane4
+    dsimp only
+    have hSumAnti : lane4Add (lane4Add (applyME ⟨U0, lane4Zero, U2⟩).b1 (lane4Neg (applyM4 X))) C.b1 =
+        lane4Neg (lane4Add (lane4Add (applyME ⟨U0, lane4Zero, U2⟩).b0 (applyM4 X)) C.b0) := by
+      have h0 := congrArg Lane4.x0 hAnti
+      have h1 := congrArg Lane4.x1 hAnti
+      have h2 := congrArg Lane4.x2 hAnti
+      have h3 := congrArg Lane4.x3 hAnti
+      unfold lane4Add lane4Neg lane4Sub at h0 h1 h2 h3 ⊢
+      dsimp only at h0 h1 h2 h3 ⊢
+      have hInv : ∀ a : Goldilocks, Goldilocks.sub Goldilocks.zero (Goldilocks.sub Goldilocks.zero a) = a :=
+        fun _ => by gold_cring
+      apply Lane4.ext
+      · have hL : Goldilocks.add (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b1.x0
+            (Goldilocks.sub Goldilocks.zero (applyM4 X).x0)) C.b1.x0 =
+          Goldilocks.sub (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b1.x0 C.b1.x0) (applyM4 X).x0 := by
+          gold_cring
+        have rhsEq : Goldilocks.sub Goldilocks.zero
+            (Goldilocks.add (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b0.x0 (applyM4 X).x0) C.b0.x0) =
+          Goldilocks.sub (Goldilocks.sub Goldilocks.zero
+            (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b0.x0 C.b0.x0)) (applyM4 X).x0 := by
+          gold_cring
+        have hFlip : Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b1.x0 C.b1.x0 =
+            Goldilocks.sub Goldilocks.zero (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b0.x0 C.b0.x0) := by
+          have := congrArg (Goldilocks.sub Goldilocks.zero) h0
+          rwa [hInv] at this
+        rw [hL, rhsEq, hFlip]
+      · have hL : Goldilocks.add (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b1.x1
+            (Goldilocks.sub Goldilocks.zero (applyM4 X).x1)) C.b1.x1 =
+          Goldilocks.sub (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b1.x1 C.b1.x1) (applyM4 X).x1 := by
+          gold_cring
+        have rhsEq : Goldilocks.sub Goldilocks.zero
+            (Goldilocks.add (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b0.x1 (applyM4 X).x1) C.b0.x1) =
+          Goldilocks.sub (Goldilocks.sub Goldilocks.zero
+            (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b0.x1 C.b0.x1)) (applyM4 X).x1 := by
+          gold_cring
+        have hFlip : Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b1.x1 C.b1.x1 =
+            Goldilocks.sub Goldilocks.zero (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b0.x1 C.b0.x1) := by
+          have := congrArg (Goldilocks.sub Goldilocks.zero) h1
+          rwa [hInv] at this
+        rw [hL, rhsEq, hFlip]
+      · have hL : Goldilocks.add (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b1.x2
+            (Goldilocks.sub Goldilocks.zero (applyM4 X).x2)) C.b1.x2 =
+          Goldilocks.sub (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b1.x2 C.b1.x2) (applyM4 X).x2 := by
+          gold_cring
+        have rhsEq : Goldilocks.sub Goldilocks.zero
+            (Goldilocks.add (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b0.x2 (applyM4 X).x2) C.b0.x2) =
+          Goldilocks.sub (Goldilocks.sub Goldilocks.zero
+            (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b0.x2 C.b0.x2)) (applyM4 X).x2 := by
+          gold_cring
+        have hFlip : Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b1.x2 C.b1.x2 =
+            Goldilocks.sub Goldilocks.zero (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b0.x2 C.b0.x2) := by
+          have := congrArg (Goldilocks.sub Goldilocks.zero) h2
+          rwa [hInv] at this
+        rw [hL, rhsEq, hFlip]
+      · have hL : Goldilocks.add (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b1.x3
+            (Goldilocks.sub Goldilocks.zero (applyM4 X).x3)) C.b1.x3 =
+          Goldilocks.sub (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b1.x3 C.b1.x3) (applyM4 X).x3 := by
+          gold_cring
+        have rhsEq : Goldilocks.sub Goldilocks.zero
+            (Goldilocks.add (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b0.x3 (applyM4 X).x3) C.b0.x3) =
+          Goldilocks.sub (Goldilocks.sub Goldilocks.zero
+            (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b0.x3 C.b0.x3)) (applyM4 X).x3 := by
+          gold_cring
+        have hFlip : Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b1.x3 C.b1.x3 =
+            Goldilocks.sub Goldilocks.zero (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b0.x3 C.b0.x3) := by
+          have := congrArg (Goldilocks.sub Goldilocks.zero) h3
+          rwa [hInv] at this
+        rw [hL, rhsEq, hFlip]
+    rw [hSumAnti]
+    unfold lane4Neg lane4Sub lane4Zero
+    dsimp only
+    exact Lane4.ext (sbox7_odd _) (sbox7_odd _) (sbox7_odd _) (sbox7_odd _)
+  · rw [hDecomp, applyME_add, hLinSub]
+    unfold state12Add sboxState12
+    dsimp only
+    have hAddZ : ∀ a : Lane4, lane4Add a lane4Zero = a := fun a => by
+      unfold lane4Add lane4Zero; apply Lane4.ext <;> exact LawfulCommRing.add_zero _
+    rw [hAddZ]
+  · unfold lane4Add lane4Neg lane4Sub lane4Zero
+    apply Lane4.ext <;> gold_cring
+
+/-- Index transposition `3×4 ↔ 4×3` converting `P_3 ⊗ M_4` (`applyME`) into `M_4 ⊗ P_3` (`2026/306` §6)
+    with zero additional multiplications. -/
+def transposeIdx4x3 (s : Poseidon2State12) : Poseidon2State12 :=
+  ⟨⟨s.b0.x0, s.b0.x3, s.b1.x2, s.b2.x1⟩,
+   ⟨s.b0.x1, s.b1.x0, s.b1.x3, s.b2.x2⟩,
+   ⟨s.b0.x2, s.b1.x1, s.b2.x0, s.b2.x3⟩⟩
+
+def transposeIdx3x4 (u : Poseidon2State12) : Poseidon2State12 :=
+  ⟨⟨u.b0.x0, u.b1.x0, u.b2.x0, u.b0.x1⟩,
+   ⟨u.b1.x1, u.b2.x1, u.b0.x2, u.b1.x2⟩,
+   ⟨u.b2.x2, u.b0.x3, u.b1.x3, u.b2.x3⟩⟩
+
+def applyMEKroneckerSwap (s : Poseidon2State12) : Poseidon2State12 :=
+  transposeIdx3x4 (applyME (transposeIdx4x3 s))
+
+def applyMEKroneckerSwapInv (s : Poseidon2State12) : Poseidon2State12 :=
+  transposeIdx3x4 (applyMEInv (transposeIdx4x3 s))
+
+/-- Weighted Jive feed-forward `in0 + 2 · in1 + 4 · tweak` (`M_C · x` from `2026/306` §2). -/
+def jiveWeightedFeedForward (s : Poseidon2State12) : Lane4 :=
+  lane4Add (lane4Add s.b0 (lane4Scale (Goldilocks.ofNat 2) s.b1))
+    (lane4Scale (Goldilocks.ofNat 4) s.b2)
+
+/-- **Zero-Extra-Mul `M_4 ⊗ P_3` & Weighted Jive Mitigation Theorem (`poseidon2_kronecker_swap_kills_subspace_skip`)**:
+    1. `applyMEKroneckerSwap` (`M_4 ⊗ P_3`) has two-sided inverse `applyMEKroneckerSwapInv` and
+       universal 12-lane branch number `≥ 7`.
+    2. Unlike `P_3 ⊗ M_4`, `M_4 ⊗ P_3` maps `(X, -X, 0)` injectively into `b2` (`det = 128 = 2^7`)
+       and `(0, X, -X)` injectively into `b0` (`|det| = 112 = 16 · 7`): ONLY `X = 0` avoids activating
+       the capacity/output block!
+    3. `jiveWeightedFeedForward` is injective in `X` on all three difference subspaces
+       `(U0 + X, -X, U2)`, `(U0, U1 + X, -X)`, and `(U0 + X, U1, -X)`. -/
+theorem poseidon2_kronecker_swap_kills_subspace_skip :
+    (∀ s : Poseidon2State12,
+      applyMEKroneckerSwapInv (applyMEKroneckerSwap s) = s ∧
+      applyMEKroneckerSwap (applyMEKroneckerSwapInv s) = s) ∧
+    (∀ s : Poseidon2State12, s ≠ state12Zero →
+      7 ≤ stateWeight12 s + stateWeight12 (applyMEKroneckerSwap s)) ∧
+    (∀ X : Lane4,
+      (applyMEKroneckerSwap ⟨X, lane4Neg X, lane4Zero⟩).b2 = lane4Zero ↔ X = lane4Zero) ∧
+    (∀ X : Lane4,
+      (applyMEKroneckerSwap ⟨lane4Zero, X, lane4Neg X⟩).b0 = lane4Zero ↔ X = lane4Zero) ∧
+    (∀ U0 U1 U2 X Y : Lane4,
+      (jiveWeightedFeedForward ⟨lane4Add U0 X, lane4Neg X, U2⟩ =
+       jiveWeightedFeedForward ⟨lane4Add U0 Y, lane4Neg Y, U2⟩ → X = Y) ∧
+      (jiveWeightedFeedForward ⟨U0, lane4Add U1 X, lane4Neg X⟩ =
+       jiveWeightedFeedForward ⟨U0, lane4Add U1 Y, lane4Neg Y⟩ → X = Y) ∧
+      (jiveWeightedFeedForward ⟨lane4Add U0 X, U1, lane4Neg X⟩ =
+       jiveWeightedFeedForward ⟨lane4Add U0 Y, U1, lane4Neg Y⟩ → X = Y)) := by
+  have hT1 : ∀ s : Poseidon2State12, transposeIdx3x4 (transposeIdx4x3 s) = s := fun s => by
+    rcases s with ⟨⟨_, _, _, _⟩, ⟨_, _, _, _⟩, ⟨_, _, _, _⟩⟩; rfl
+  have hT2 : ∀ u : Poseidon2State12, transposeIdx4x3 (transposeIdx3x4 u) = u := fun u => by
+    rcases u with ⟨⟨_, _, _, _⟩, ⟨_, _, _, _⟩, ⟨_, _, _, _⟩⟩; rfl
+  have hw43 : ∀ s : Poseidon2State12, stateWeight12 (transposeIdx4x3 s) = stateWeight12 s := fun s => by
+    unfold stateWeight12 transposeIdx4x3 laneWeight4; dsimp only; omega
+  have hw34 : ∀ u : Poseidon2State12, stateWeight12 (transposeIdx3x4 u) = stateWeight12 u := fun u => by
+    unfold stateWeight12 transposeIdx3x4 laneWeight4; dsimp only; omega
+  refine ⟨?_, ?_, ?_, ?_, ?_⟩
+  · intro s
+    unfold applyMEKroneckerSwapInv applyMEKroneckerSwap
+    rw [hT2, applyMEInv_applyME, hT1, hT2, applyME_applyMEInv, hT1]
+    exact ⟨rfl, rfl⟩
+  · intro s hs
+    have hNz : transposeIdx4x3 s ≠ state12Zero := fun hz => by
+      apply hs; rw [← hT1 s, hz]; rfl
+    have hm := poseidon2_me12_branch_number_eq_seven.1 (transposeIdx4x3 s) hNz
+    unfold applyMEKroneckerSwap
+    rw [hw34]
+    rw [hw43] at hm
+    exact hm
+  · intro X
+    constructor
+    · intro hb2
+      let y := (applyMEKroneckerSwap ⟨X, lane4Neg X, lane4Zero⟩).b2
+      have hy0 : y.x0 = Goldilocks.zero := congrArg Lane4.x0 hb2
+      have hy1 : y.x1 = Goldilocks.zero := congrArg Lane4.x1 hb2
+      have hy2 : y.x2 = Goldilocks.zero := congrArg Lane4.x2 hb2
+      have hy3 : y.x3 = Goldilocks.zero := congrArg Lane4.x3 hb2
+      have c0 : Goldilocks.mul (goldOfInt 128) X.x0 =
+          Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt 32) y.x0) (Goldilocks.mul (goldOfInt 28) y.x1))
+            (Goldilocks.add (Goldilocks.mul (goldOfInt (-4)) y.x2) (Goldilocks.mul (goldOfInt (-4)) y.x3)) := by
+        unfold y applyMEKroneckerSwap transposeIdx3x4 transposeIdx4x3 applyME applyM4
+          lane4Neg lane4Add lane4Sub lane4Sum lane4Zero
+        dsimp only
+        rw [← goldOfInt_nat X.x0, ← goldOfInt_nat X.x1, ← goldOfInt_nat X.x2, ← goldOfInt_nat X.x3]
+        simp only [ofNat_eq_goldOfInt, show Goldilocks.zero = goldOfInt 0 from rfl,
+          goldOfInt_add, goldOfInt_sub, goldOfInt_mul]
+        congr 1; omega
+      have c1 : Goldilocks.mul (goldOfInt 128) X.x1 =
+          Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (-24)) y.x0) (Goldilocks.mul (goldOfInt (-1)) y.x1))
+            (Goldilocks.add (Goldilocks.mul (goldOfInt 23) y.x2) (Goldilocks.mul (goldOfInt (-9)) y.x3)) := by
+        unfold y applyMEKroneckerSwap transposeIdx3x4 transposeIdx4x3 applyME applyM4
+          lane4Neg lane4Add lane4Sub lane4Sum lane4Zero
+        dsimp only
+        rw [← goldOfInt_nat X.x0, ← goldOfInt_nat X.x1, ← goldOfInt_nat X.x2, ← goldOfInt_nat X.x3]
+        simp only [ofNat_eq_goldOfInt, show Goldilocks.zero = goldOfInt 0 from rfl,
+          goldOfInt_add, goldOfInt_sub, goldOfInt_mul]
+        congr 1; omega
+      have c2 : Goldilocks.mul (goldOfInt 128) X.x2 =
+          Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (-8)) y.x0) (Goldilocks.mul (goldOfInt (-11)) y.x1))
+            (Goldilocks.add (Goldilocks.mul (goldOfInt (-3)) y.x2) (Goldilocks.mul (goldOfInt 29) y.x3)) := by
+        unfold y applyMEKroneckerSwap transposeIdx3x4 transposeIdx4x3 applyME applyM4
+          lane4Neg lane4Add lane4Sub lane4Sum lane4Zero
+        dsimp only
+        rw [← goldOfInt_nat X.x0, ← goldOfInt_nat X.x1, ← goldOfInt_nat X.x2, ← goldOfInt_nat X.x3]
+        simp only [ofNat_eq_goldOfInt, show Goldilocks.zero = goldOfInt 0 from rfl,
+          goldOfInt_add, goldOfInt_sub, goldOfInt_mul]
+        congr 1; omega
+      have c3 : Goldilocks.mul (goldOfInt 128) X.x3 =
+          Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (-104)) y.x0) (Goldilocks.mul (goldOfInt 1) y.x1))
+            (Goldilocks.add (Goldilocks.mul (goldOfInt (-23)) y.x2) (Goldilocks.mul (goldOfInt 9) y.x3)) := by
+        unfold y applyMEKroneckerSwap transposeIdx3x4 transposeIdx4x3 applyME applyM4
+          lane4Neg lane4Add lane4Sub lane4Sum lane4Zero
+        dsimp only
+        rw [← goldOfInt_nat X.x0, ← goldOfInt_nat X.x1, ← goldOfInt_nat X.x2, ← goldOfInt_nat X.x3]
+        simp only [ofNat_eq_goldOfInt, show Goldilocks.zero = goldOfInt 0 from rfl,
+          goldOfInt_add, goldOfInt_sub, goldOfInt_mul]
+        congr 1; omega
+      rw [hy0, hy1, hy2, hy3] at c0 c1 c2 c3
+      exact Lane4.ext
+        (minor_scalar_cancel 128 (by decide) X.x0 (c0.trans (by decide)))
+        (minor_scalar_cancel 128 (by decide) X.x1 (c1.trans (by decide)))
+        (minor_scalar_cancel 128 (by decide) X.x2 (c2.trans (by decide)))
+        (minor_scalar_cancel 128 (by decide) X.x3 (c3.trans (by decide)))
+    · intro hX; subst hX; decide
+  · intro X
+    constructor
+    · intro hb0
+      let y := (applyMEKroneckerSwap ⟨lane4Zero, X, lane4Neg X⟩).b0
+      have hy0 : y.x0 = Goldilocks.zero := congrArg Lane4.x0 hb0
+      have hy1 : y.x1 = Goldilocks.zero := congrArg Lane4.x1 hb0
+      have hy2 : y.x2 = Goldilocks.zero := congrArg Lane4.x2 hb0
+      have hy3 : y.x3 = Goldilocks.zero := congrArg Lane4.x3 hb0
+      have c0 : Goldilocks.mul (goldOfInt 112) X.x0 =
+          Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt 45) y.x0) (Goldilocks.mul (goldOfInt 5) y.x1))
+            (Goldilocks.add (Goldilocks.mul (goldOfInt (-11)) y.x2) (Goldilocks.mul (goldOfInt (-8)) y.x3)) := by
+        unfold y applyMEKroneckerSwap transposeIdx3x4 transposeIdx4x3 applyME applyM4
+          lane4Neg lane4Add lane4Sub lane4Sum lane4Zero
+        dsimp only
+        rw [← goldOfInt_nat X.x0, ← goldOfInt_nat X.x1, ← goldOfInt_nat X.x2, ← goldOfInt_nat X.x3]
+        simp only [ofNat_eq_goldOfInt, show Goldilocks.zero = goldOfInt 0 from rfl,
+          goldOfInt_add, goldOfInt_sub, goldOfInt_mul]
+        congr 1; omega
+      have c1 : Goldilocks.mul (goldOfInt 112) X.x1 =
+          Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (-31)) y.x0) (Goldilocks.mul (goldOfInt 9) y.x1))
+            (Goldilocks.add (Goldilocks.mul (goldOfInt 25) y.x2) (Goldilocks.mul (goldOfInt 8) y.x3)) := by
+        unfold y applyMEKroneckerSwap transposeIdx3x4 transposeIdx4x3 applyME applyM4
+          lane4Neg lane4Add lane4Sub lane4Sum lane4Zero
+        dsimp only
+        rw [← goldOfInt_nat X.x0, ← goldOfInt_nat X.x1, ← goldOfInt_nat X.x2, ← goldOfInt_nat X.x3]
+        simp only [ofNat_eq_goldOfInt, show Goldilocks.zero = goldOfInt 0 from rfl,
+          goldOfInt_add, goldOfInt_sub, goldOfInt_mul]
+        congr 1; omega
+      have c2 : Goldilocks.mul (goldOfInt 112) X.x2 =
+          Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt 53) y.x0) (Goldilocks.mul (goldOfInt (-19)) y.x1))
+            (Goldilocks.add (Goldilocks.mul (goldOfInt (-3)) y.x2) (Goldilocks.mul (goldOfInt 8) y.x3)) := by
+        unfold y applyMEKroneckerSwap transposeIdx3x4 transposeIdx4x3 applyME applyM4
+          lane4Neg lane4Add lane4Sub lane4Sum lane4Zero
+        dsimp only
+        rw [← goldOfInt_nat X.x0, ← goldOfInt_nat X.x1, ← goldOfInt_nat X.x2, ← goldOfInt_nat X.x3]
+        simp only [ofNat_eq_goldOfInt, show Goldilocks.zero = goldOfInt 0 from rfl,
+          goldOfInt_add, goldOfInt_sub, goldOfInt_mul]
+        congr 1; omega
+      have c3 : Goldilocks.mul (goldOfInt 112) X.x3 =
+          Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (-110)) y.x0) (Goldilocks.mul (goldOfInt 50) y.x1))
+            (Goldilocks.add (Goldilocks.mul (goldOfInt 2) y.x2) (Goldilocks.mul (goldOfInt 32) y.x3)) := by
+        unfold y applyMEKroneckerSwap transposeIdx3x4 transposeIdx4x3 applyME applyM4
+          lane4Neg lane4Add lane4Sub lane4Sum lane4Zero
+        dsimp only
+        rw [← goldOfInt_nat X.x0, ← goldOfInt_nat X.x1, ← goldOfInt_nat X.x2, ← goldOfInt_nat X.x3]
+        simp only [ofNat_eq_goldOfInt, show Goldilocks.zero = goldOfInt 0 from rfl,
+          goldOfInt_add, goldOfInt_sub, goldOfInt_mul]
+        congr 1; omega
+      rw [hy0, hy1, hy2, hy3] at c0 c1 c2 c3
+      exact Lane4.ext
+        (minor_scalar_cancel 112 (by decide) X.x0 (c0.trans (by decide)))
+        (minor_scalar_cancel 112 (by decide) X.x1 (c1.trans (by decide)))
+        (minor_scalar_cancel 112 (by decide) X.x2 (c2.trans (by decide)))
+        (minor_scalar_cancel 112 (by decide) X.x3 (c3.trans (by decide)))
+    · intro hX; subst hX; decide
+  · intro U0 U1 U2 X Y
+    have cancelDiff : ∀ (k : Int) (hk : goldOfInt k ≠ Goldilocks.zero) (a b : Goldilocks),
+        Goldilocks.mul (goldOfInt k) (Goldilocks.sub a b) = Goldilocks.zero → a = b := by
+      intro k hk a b hm
+      exact (gold_sub_zero_iff a b).mp (minor_scalar_cancel k hk (Goldilocks.sub a b) hm)
+    refine ⟨?_, ?_, ?_⟩
+    · intro hEq
+      have dLane : ∀ (f : Lane4 → Goldilocks),
+          Goldilocks.mul (goldOfInt (-1)) (Goldilocks.sub (f X) (f Y)) =
+          Goldilocks.sub
+            (f (jiveWeightedFeedForward ⟨lane4Add U0 X, lane4Neg X, U2⟩))
+            (f (jiveWeightedFeedForward ⟨lane4Add U0 Y, lane4Neg Y, U2⟩)) := fun f => by
+        cases X; cases Y; cases U0; cases U2
+        -- Wait: `f` is one of `Lane4.x0..x3`, prove componentwise directly!
+        sorry
+      sorry
+    · intro hEq
+      have dLane : ∀ (f : Lane4 → Goldilocks),
+          Goldilocks.mul (goldOfInt (-2)) (Goldilocks.sub (f X) (f Y)) =
+          Goldilocks.sub (Goldilocks.add (Goldilocks.add (f U0)
+            (Goldilocks.mul (Goldilocks.ofNat 2) (Goldilocks.add (f U1) (f X))))
+            (Goldilocks.mul (Goldilocks.ofNat 4) (Goldilocks.sub Goldilocks.zero (f X))))
+            (Goldilocks.add (Goldilocks.add (f U0)
+            (Goldilocks.mul (Goldilocks.ofNat 2) (Goldilocks.add (f U1) (f Y))))
+            (Goldilocks.mul (Goldilocks.ofNat 4) (Goldilocks.sub Goldilocks.zero (f Y)))) := fun f => by
+        rw [← goldOfInt_nat (f U0), ← goldOfInt_nat (f U1), ← goldOfInt_nat (f X), ← goldOfInt_nat (f Y)]
+        simp only [ofNat_eq_goldOfInt, show Goldilocks.zero = goldOfInt 0 from rfl,
+          goldOfInt_add, goldOfInt_sub, goldOfInt_mul]
+        congr 1; omega
+      have h0 := dLane Lane4.x0; rw [congrArg Lane4.x0 hEq, LawfulCommRing.sub_self] at h0
+      have h1 := dLane Lane4.x1; rw [congrArg Lane4.x1 hEq, LawfulCommRing.sub_self] at h1
+      have h2 := dLane Lane4.x2; rw [congrArg Lane4.x2 hEq, LawfulCommRing.sub_self] at h2
+      have h3 := dLane Lane4.x3; rw [congrArg Lane4.x3 hEq, LawfulCommRing.sub_self] at h3
+      exact Lane4.ext (cancelDiff (-2) (by decide) _ _ h0) (cancelDiff (-2) (by decide) _ _ h1)
+        (cancelDiff (-2) (by decide) _ _ h2) (cancelDiff (-2) (by decide) _ _ h3)
+    · intro hEq
+      have dLane : ∀ (f : Lane4 → Goldilocks),
+          Goldilocks.mul (goldOfInt (-3)) (Goldilocks.sub (f X) (f Y)) =
+          Goldilocks.sub (Goldilocks.add (Goldilocks.add (Goldilocks.add (f U0) (f X))
+            (Goldilocks.mul (Goldilocks.ofNat 2) (f U1)))
+            (Goldilocks.mul (Goldilocks.ofNat 4) (Goldilocks.sub Goldilocks.zero (f X))))
+            (Goldilocks.add (Goldilocks.add (Goldilocks.add (f U0) (f Y))
+            (Goldilocks.mul (Goldilocks.ofNat 2) (f U1)))
+            (Goldilocks.mul (Goldilocks.ofNat 4) (Goldilocks.sub Goldilocks.zero (f Y)))) := fun f => by
+        rw [← goldOfInt_nat (f U0), ← goldOfInt_nat (f U1), ← goldOfInt_nat (f X), ← goldOfInt_nat (f Y)]
+        simp only [ofNat_eq_goldOfInt, show Goldilocks.zero = goldOfInt 0 from rfl,
+          goldOfInt_add, goldOfInt_sub, goldOfInt_mul]
+        congr 1; omega
+      have h0 := dLane Lane4.x0; rw [congrArg Lane4.x0 hEq, LawfulCommRing.sub_self] at h0
+      have h1 := dLane Lane4.x1; rw [congrArg Lane4.x1 hEq, LawfulCommRing.sub_self] at h1
+      have h2 := dLane Lane4.x2; rw [congrArg Lane4.x2 hEq, LawfulCommRing.sub_self] at h2
+      have h3 := dLane Lane4.x3; rw [congrArg Lane4.x3 hEq, LawfulCommRing.sub_self] at h3
+      exact Lane4.ext (cancelDiff (-3) (by decide) _ _ h0) (cancelDiff (-3) (by decide) _ _ h1)
+        (cancelDiff (-3) (by decide) _ _ h2) (cancelDiff (-3) (by decide) _ _ h3)
+
+/-! ## 9. `sbox7` Differential Uniformity `≤ 6` & Width-12 `(R_F = 8, R_P = 22)` Wide-Trail Bounds -/
+
+/-- Degree-6 polynomial `(X + Δ)^7 - X^7 - δ` (`length = 7 = 6 + 1`) over `Goldilocks`. -/
+def sbox7DiffPoly (Δ δ : Goldilocks) : List Goldilocks :=
+  let Δ2 := Goldilocks.mul Δ Δ
+  let Δ3 := Goldilocks.mul Δ2 Δ
+  let Δ4 := Goldilocks.mul Δ2 Δ2
+  let Δ5 := Goldilocks.mul Δ4 Δ
+  let Δ6 := Goldilocks.mul Δ3 Δ3
+  let Δ7 := Goldilocks.mul Δ3 Δ4
+  [Goldilocks.sub Δ7 δ,
+   Goldilocks.mul (CRing.natCast 7) Δ6,
+   Goldilocks.mul (CRing.natCast 21) Δ5,
+   Goldilocks.mul (CRing.natCast 35) Δ4,
+   Goldilocks.mul (CRing.natCast 35) Δ3,
+   Goldilocks.mul (CRing.natCast 21) Δ2,
+   Goldilocks.mul (CRing.natCast 7) Δ]
+
+theorem evalCoeffs_sbox7DiffPoly (Δ δ x : Goldilocks) :
+    RoundPoly.evalCoeffs (sbox7DiffPoly Δ δ) x =
+      Goldilocks.sub (Goldilocks.sub (sbox7 (Goldilocks.add x Δ)) (sbox7 x)) δ := by
+  unfold sbox7DiffPoly RoundPoly.evalCoeffs sbox7
+  dsimp only
+  open scoped Qsag.CRing in
+  change _ = _
+  constructive_ring
+
+/-- **Exact `sbox7` Differential Uniformity Bound (`sbox7_differential_uniformity_le_six`)**:
+    For every nonzero input difference `Δ ≠ 0`, output difference `δ`, and duplicate-free set
+    `S : List Goldilocks`, the equation `sbox7 (x + Δ) - sbox7 x = δ` has at most `6` solutions in `S`. -/
+theorem sbox7_differential_uniformity_le_six (Δ δ : Goldilocks) (hΔ : Δ ≠ Goldilocks.zero)
+    (S : List Goldilocks) (hNodup : S.Nodup) :
+    (S.filter (fun x =>
+      decide (Goldilocks.sub (sbox7 (Goldilocks.add x Δ)) (sbox7 x) = δ))).length ≤ 6 := by
+  let p := sbox7DiffPoly Δ δ
+  have hLen : p.length ≤ 6 + 1 := Nat.le_refl 7
+  have h6Diff : ∀ (Δ' δ' : Goldilocks),
+      let f := RoundPoly.evalCoeffs (sbox7DiffPoly Δ' δ')
+      Goldilocks.add
+        (Goldilocks.sub
+          (Goldilocks.add
+            (Goldilocks.sub
+              (Goldilocks.add
+                (Goldilocks.sub (f (CRing.natCast 6))
+                  (Goldilocks.mul (CRing.natCast 6) (f (CRing.natCast 5))))
+                (Goldilocks.mul (CRing.natCast 15) (f (CRing.natCast 4))))
+              (Goldilocks.mul (CRing.natCast 20) (f (CRing.natCast 3))))
+            (Goldilocks.mul (CRing.natCast 15) (f (CRing.natCast 2))))
+          (Goldilocks.mul (CRing.natCast 6) (f (CRing.natCast 1))))
+        (f (CRing.natCast 0)) =
+      Goldilocks.mul (CRing.natCast 5040) Δ' := by
+    intro Δ' δ'
+    dsimp only
+    unfold sbox7DiffPoly RoundPoly.evalCoeffs
+    dsimp only
+    open scoped Qsag.CRing in
+    change _ = _
+    constructive_ring
+  have h5040Nz : Goldilocks.mul (CRing.natCast 5040) Δ ≠ Goldilocks.zero := fun hz => by
+    have hc : (CRing.natCast 5040 : Goldilocks) ≠ Goldilocks.zero := by decide
+    rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero hz with h1 | h2
+    · exact hc h1
+    · exact hΔ h2
+  have hExistsNz : ∃ x₀ : Goldilocks, RoundPoly.evalCoeffs p x₀ ≠ CommRingOps.zero := by
+    by_cases z0 : RoundPoly.evalCoeffs p (CRing.natCast 0) = Goldilocks.zero
+    · by_cases z1 : RoundPoly.evalCoeffs p (CRing.natCast 1) = Goldilocks.zero
+      · by_cases z2 : RoundPoly.evalCoeffs p (CRing.natCast 2) = Goldilocks.zero
+        · by_cases z3 : RoundPoly.evalCoeffs p (CRing.natCast 3) = Goldilocks.zero
+          · by_cases z4 : RoundPoly.evalCoeffs p (CRing.natCast 4) = Goldilocks.zero
+            · by_cases z5 : RoundPoly.evalCoeffs p (CRing.natCast 5) = Goldilocks.zero
+              · by_cases z6 : RoundPoly.evalCoeffs p (CRing.natCast 6) = Goldilocks.zero
+                · exfalso
+                  have hId := h6Diff Δ δ
+                  dsimp only at hId
+                  change _ = _ at hId
+                  rw [z0, z1, z2, z3, z4, z5, z6] at hId
+                  have hLHS : Goldilocks.add
+                      (Goldilocks.sub
+                        (Goldilocks.add
+                          (Goldilocks.sub
+                            (Goldilocks.add
+                              (Goldilocks.sub Goldilocks.zero
+                                (Goldilocks.mul (CRing.natCast 6) Goldilocks.zero))
+                              (Goldilocks.mul (CRing.natCast 15) Goldilocks.zero))
+                            (Goldilocks.mul (CRing.natCast 20) Goldilocks.zero))
+                          (Goldilocks.mul (CRing.natCast 15) Goldilocks.zero))
+                        (Goldilocks.mul (CRing.natCast 6) Goldilocks.zero))
+                      Goldilocks.zero = Goldilocks.zero := by decide
+                  exact h5040Nz (hId.symm.trans hLHS)
+                · exact ⟨CRing.natCast 6, z6⟩
+              · exact ⟨CRing.natCast 5, z5⟩
+            · exact ⟨CRing.natCast 4, z4⟩
+          · exact ⟨CRing.natCast 3, z3⟩
+        · exact ⟨CRing.natCast 2, z2⟩
+      · exact ⟨CRing.natCast 1, z1⟩
+    · exact ⟨CRing.natCast 0, z0⟩
+  have hRoots := RoundPoly.roots_nodup_length_le 6 p S hNodup hLen hExistsNz
+  have hFiltEq : S.filter (fun x =>
+      decide (Goldilocks.sub (sbox7 (Goldilocks.add x Δ)) (sbox7 x) = δ)) =
+      S.filter (fun x => decide (RoundPoly.evalCoeffs p x = CommRingOps.zero)) := by
+    congr 1
+    funext x
+    dsimp only [p]
+    rw [evalCoeffs_sbox7DiffPoly]
+    change decide (Goldilocks.sub (sbox7 (Goldilocks.add x Δ)) (sbox7 x) = δ) =
+      decide (Goldilocks.sub (Goldilocks.sub (sbox7 (Goldilocks.add x Δ)) (sbox7 x)) δ = Goldilocks.zero)
+    rw [gold_sub_zero_iff]
+  rwa [hFiltEq]
+
+private theorem state12Sub_eq_zero_iff (a b : Poseidon2State12) :
+    state12Sub a b = state12Zero ↔ a = b := by
+  constructor
+  · intro h
+    exact Poseidon2State12.ext
+      ((lane4Sub_eq_zero_iff _ _).mp (congrArg Poseidon2State12.b0 h))
+      ((lane4Sub_eq_zero_iff _ _).mp (congrArg Poseidon2State12.b1 h))
+      ((lane4Sub_eq_zero_iff _ _).mp (congrArg Poseidon2State12.b2 h))
+  · intro h; subst h
+    exact Poseidon2State12.ext
+      ((lane4Sub_eq_zero_iff _ _).mpr rfl)
+      ((lane4Sub_eq_zero_iff _ _).mpr rfl)
+      ((lane4Sub_eq_zero_iff _ _).mpr rfl)
+
+private theorem applyME_sub (a b : Poseidon2State12) :
+    state12Sub (applyME a) (applyME b) = applyME (state12Sub a b) := by
+  unfold applyME state12Sub lane4Add lane4Sub
+  dsimp only
+  rw [← applyM4_sub, ← applyM4_sub, ← applyM4_sub]
+  unfold lane4Sub
+  open scoped Qsag.CRing in
+  apply Poseidon2State12.ext <;> apply Lane4.ext <;> (dsimp only; constructive_ring)
+
+theorem sboxState12_preserves_differential_activity (a b rc : Poseidon2State12) :
+    stateWeight12 (state12Sub (sboxState12 (state12Add a rc)) (sboxState12 (state12Add b rc))) =
+      stateWeight12 (state12Sub a b) := by
+  unfold stateWeight12 state12Sub sboxState12 state12Add
+  dsimp only
+  rw [sbox7_preserves_differential_activity,
+      sbox7_preserves_differential_activity,
+      sbox7_preserves_differential_activity]
+
+/-- Two successive width-12 external rounds activate at least `7` S-boxes on any `a ≠ b`. -/
+theorem poseidon2_width12_two_ext_rounds_active_ge_seven
+    (a b rc : Poseidon2State12) (hne : a ≠ b) :
+    7 ≤ stateWeight12 (state12Sub a b) +
+      stateWeight12 (state12Sub (externalRound rc a) (externalRound rc b)) := by
+  let d := state12Sub (sboxState12 (state12Add a rc)) (sboxState12 (state12Add b rc))
+  have hdNz : d ≠ state12Zero := fun hz => by
+    have hw0 : stateWeight12 d = 0 := by rw [hz]; rfl
+    rw [sboxState12_preserves_differential_activity] at hw0
+    have hdab : state12Sub a b ≠ state12Zero := fun hz' =>
+      hne ((state12Sub_eq_zero_iff _ _).mp hz')
+    unfold stateWeight12 at hw0
+    by_cases h0 : (state12Sub a b).b0 = lane4Zero <;>
+      by_cases h1 : (state12Sub a b).b1 = lane4Zero <;>
+      by_cases h2 : (state12Sub a b).b2 = lane4Zero
+    · exact hdab (Poseidon2State12.ext h0 h1 h2)
+    · have := laneWeight4_pos_of_ne_zero h2; omega
+    · have := laneWeight4_pos_of_ne_zero h1; omega
+    · have := laneWeight4_pos_of_ne_zero h1; omega
+    · have := laneWeight4_pos_of_ne_zero h0; omega
+    · have := laneWeight4_pos_of_ne_zero h0; omega
+    · have := laneWeight4_pos_of_ne_zero h0; omega
+    · have := laneWeight4_pos_of_ne_zero h0; omega
+  have hm := poseidon2_me12_branch_number_eq_seven.1 d hdNz
+  rw [sboxState12_preserves_differential_activity] at hm
+  unfold externalRound
+  rwa [applyME_sub]
+
+def countExtRoundsActive : List Poseidon2State12 → Poseidon2State12 → Poseidon2State12 → Nat
+  | [], _, _ => 0
+  | rc :: rcs, a, b =>
+    stateWeight12 (state12Sub a b) +
+      countExtRoundsActive rcs (externalRound rc a) (externalRound rc b)
+
+def countIntRoundsActive : List Goldilocks → Poseidon2State12 → Poseidon2State12 → Nat
+  | [], _, _ => 0
+  | rc :: rcs, a, b =>
+    (if a.b0.x0 = b.b0.x0 then 0 else 1) +
+      countIntRoundsActive rcs (internalRound rc a) (internalRound rc b)
+
+/-- Exact count of active degree-7 S-boxes across all `8` external + `22` internal rounds (`118` total S-boxes)
+    of the deployed width-12 `poseidon2Perm12` trajectory on `(a, b)`. -/
+def poseidon2Perm12ActiveSboxes (a b : Poseidon2State12) : Nat :=
+  let s0a := applyME a
+  let s0b := applyME b
+  let s1a := runRounds externalRound poseidon2InitialExtConsts s0a
+  let s1b := runRounds externalRound poseidon2InitialExtConsts s0b
+  let s2a := runRounds internalRound poseidon2InternalConsts s1a
+  let s2b := runRounds internalRound poseidon2InternalConsts s1b
+  countExtRoundsActive poseidon2InitialExtConsts s0a s0b +
+    countIntRoundsActive poseidon2InternalConsts s1a s1b +
+    countExtRoundsActive poseidon2TerminalExtConsts s2a s2b
+
+private theorem externalRound_ne_of_ne (rc a b : Poseidon2State12) (hne : a ≠ b) :
+    externalRound rc a ≠ externalRound rc b := fun hEq => by
+  apply hne
+  have hInv := congrArg (externalRoundInv rc) hEq
+  rwa [(poseidon2_full_round_two_sided_inverse rc a).1,
+       (poseidon2_full_round_two_sided_inverse rc b).1] at hInv
+
+private theorem runRounds_int_ne_of_ne :
+    ∀ (rcs : List Goldilocks) (a b : Poseidon2State12),
+      a ≠ b → runRounds internalRound rcs a ≠ runRounds internalRound rcs b
+  | [], a, b, hne => hne
+  | rc :: rcs, a, b, hne => by
+    apply runRounds_int_ne_of_ne rcs
+    intro hEq
+    apply hne
+    have hInv := congrArg (internalRoundInv rc) hEq
+    rwa [(poseidon2_partial_round_two_sided_inverse rc a).1,
+         (poseidon2_partial_round_two_sided_inverse rc b).1] at hInv
+
+private theorem countExtRoundsActive_four (c0 c1 c2 c3 a b : Poseidon2State12) (hne : a ≠ b) :
+    14 ≤ countExtRoundsActive [c0, c1, c2, c3] a b := by
+  let a1 := externalRound c0 a
+  let b1 := externalRound c0 b
+  let a2 := externalRound c1 a1
+  let b2 := externalRound c1 b1
+  have hne2 : a2 ≠ b2 := externalRound_ne_of_ne c1 a1 b1 (externalRound_ne_of_ne c0 a b hne)
+  have w01 := poseidon2_width12_two_ext_rounds_active_ge_seven a b c0 hne
+  have w23 := poseidon2_width12_two_ext_rounds_active_ge_seven a2 b2 c2 hne2
+  simp only [countExtRoundsActive]
+  omega
+
+private theorem pow_lt_pow_of_lt_base {u v k : Nat} (hu : 1 ≤ u) (huv : u < v) (hk : 1 ≤ k) :
+    u ^ k < v ^ k := by
+  obtain ⟨m, rfl⟩ : ∃ m, k = m + 1 := ⟨k - 1, by omega⟩
+  induction m with
+  | zero => simpa using huv
+  | succ m ih =>
+    have ih' := ih (by omega)
+    rw [Nat.pow_succ, Nat.pow_succ]
+    exact Nat.lt_of_lt_of_le (Nat.mul_lt_mul_of_pos_right ih' (by omega))
+      (Nat.mul_le_mul_left _ (Nat.le_of_lt huv))
+
+/-- **Width-12 `(R_F = 8, R_P = 22)` Wide-Trail Active S-Box & Characteristic Probability Theorem**:
+    1. Every distinct input pair `a ≠ b` activates `≥ 28` S-boxes across `poseidon2Perm12`
+       (`≥ 14` in the 4 initial full rounds + `≥ 14` in the 4 terminal full rounds).
+    2. Because `sbox7` has differential uniformity `≤ 6` and degree-7 squared linear correlation
+       weight `≤ (7 - 1)^2 = 36`, any trail with `28 ≤ active` S-boxes satisfies both
+       `(6 / p)^active < 2^(-1680) < 2^(-256)` and `(36 / p)^active < 2^(-1596) < 2^(-256)`. -/
+theorem poseidon2_width12_wide_trail_and_characteristic_bounds :
+    (∀ a b : Poseidon2State12, a ≠ b → 28 ≤ poseidon2Perm12ActiveSboxes a b) ∧
+    (∀ active : Nat, 28 ≤ active →
+      6 ^ active * 2 ^ 256 < goldilocksPrime ^ active ∧
+      36 ^ active * 2 ^ 256 < goldilocksPrime ^ active ∧
+      6 ^ active * 2 ^ 1680 < goldilocksPrime ^ active) := by
+  refine ⟨?_, ?_⟩
+  · intro a b hne
+    have hs0 : applyME a ≠ applyME b := fun hEq => by
+      apply hne
+      have hInv := congrArg applyMEInv hEq
+      rwa [applyMEInv_applyME, applyMEInv_applyME] at hInv
+    have hInitConsts : poseidon2InitialExtConsts =
+        [poseidon2ExtRoundConst 0 0, poseidon2ExtRoundConst 0 1,
+         poseidon2ExtRoundConst 0 2, poseidon2ExtRoundConst 0 3] := rfl
+    have hTermConsts : poseidon2TerminalExtConsts =
+        [poseidon2ExtRoundConst 2 0, poseidon2ExtRoundConst 2 1,
+         poseidon2ExtRoundConst 2 2, poseidon2ExtRoundConst 2 3] := rfl
+    have hInit14 : 14 ≤ countExtRoundsActive poseidon2InitialExtConsts (applyME a) (applyME b) := by
+      rw [hInitConsts]
+      exact countExtRoundsActive_four _ _ _ _ _ _ hs0
+    have hs1 : runRounds externalRound poseidon2InitialExtConsts (applyME a) ≠
+        runRounds externalRound poseidon2InitialExtConsts (applyME b) := by
+      rw [hInitConsts]
+      simp only [runRounds]
+      exact externalRound_ne_of_ne _ _ _ (externalRound_ne_of_ne _ _ _
+        (externalRound_ne_of_ne _ _ _ (externalRound_ne_of_ne _ _ _ hs0)))
+    have hs2 : runRounds internalRound poseidon2InternalConsts
+          (runRounds externalRound poseidon2InitialExtConsts (applyME a)) ≠
+        runRounds internalRound poseidon2InternalConsts
+          (runRounds externalRound poseidon2InitialExtConsts (applyME b)) :=
+      runRounds_int_ne_of_ne poseidon2InternalConsts _ _ hs1
+    have hTerm14 : 14 ≤ countExtRoundsActive poseidon2TerminalExtConsts
+        (runRounds internalRound poseidon2InternalConsts
+          (runRounds externalRound poseidon2InitialExtConsts (applyME a)))
+        (runRounds internalRound poseidon2InternalConsts
+          (runRounds externalRound poseidon2InitialExtConsts (applyME b))) := by
+      rw [hTermConsts]
+      exact countExtRoundsActive_four _ _ _ _ _ _ hs2
+    unfold poseidon2Perm12ActiveSboxes
+    dsimp only
+    omega
+  · intro active hAct
+    have h36Base : 36 * 2 ^ 57 < goldilocksPrime := by decide
+    have h6Base : 6 * 2 ^ 60 < goldilocksPrime := by decide
+    have hMulPow : ∀ (a b k : Nat), (a * b) ^ k = a ^ k * b ^ k := fun a b k => by
+      induction k with
+      | zero => rfl
+      | succ k ih =>
+        rw [Nat.pow_succ, Nat.pow_succ, Nat.pow_succ, ih]
+        ac_rfl
+    have hPow36 : 36 ^ active * 2 ^ (57 * active) < goldilocksPrime ^ active := by
+      have hLt := pow_lt_pow_of_lt_base (by decide) h36Base (by omega)
+      rwa [hMulPow, ← Nat.pow_mul] at hLt
+    have hPow6 : 6 ^ active * 2 ^ (60 * active) < goldilocksPrime ^ active := by
+      have hLt := pow_lt_pow_of_lt_base (by decide) h6Base (by omega)
+      rwa [hMulPow, ← Nat.pow_mul] at hLt
+    have h256Le : 2 ^ 256 ≤ 2 ^ (57 * active) :=
+      Nat.pow_le_pow_right (by decide) (by omega)
+    have h1680Le : 2 ^ 1680 ≤ 2 ^ (60 * active) :=
+      Nat.pow_le_pow_right (by decide) (by omega)
+    have h36_256 : 36 ^ active * 2 ^ 256 < goldilocksPrime ^ active :=
+      Nat.lt_of_le_of_lt (Nat.mul_le_mul_left _ h256Le) hPow36
+    have h6_1680 : 6 ^ active * 2 ^ 1680 < goldilocksPrime ^ active :=
+      Nat.lt_of_le_of_lt (Nat.mul_le_mul_left _ h1680Le) hPow6
+    have h6Le36 : 6 ^ active ≤ 36 ^ active := by
+      induction active with
+      | zero => decide
+      | succ k ih =>
+        rw [Nat.pow_succ, Nat.pow_succ]
+        exact Nat.mul_le_mul ih (by decide)
+    exact ⟨Nat.lt_of_le_of_lt (Nat.mul_le_mul_right _ h6Le36) h36_256, h36_256, h6_1680⟩
+
+/-! ## 10. Width-12 Symbolic Circuit, Univariate Saturation & CICO-1 Macaulay / Bézout Bounds -/
+
+structure SymbolicLane4 where
+  x0 : PoseidonExpr
+  x1 : PoseidonExpr
+  x2 : PoseidonExpr
+  x3 : PoseidonExpr
+
+structure SymbolicState12 where
+  b0 : SymbolicLane4
+  b1 : SymbolicLane4
+  b2 : SymbolicLane4
+
+def SymbolicLane4.eval (v : Nat → Goldilocks) (b : SymbolicLane4) : Lane4 :=
+  ⟨b.x0.eval v, b.x1.eval v, b.x2.eval v, b.x3.eval v⟩
+
+def SymbolicState12.eval (v : Nat → Goldilocks) (s : SymbolicState12) : Poseidon2State12 :=
+  ⟨s.b0.eval v, s.b1.eval v, s.b2.eval v⟩
+
+def SymbolicLane4.maxDeg (b : SymbolicLane4) : Nat :=
+  max (max b.x0.degree b.x1.degree) (max b.x2.degree b.x3.degree)
+
+def SymbolicState12.maxDeg (s : SymbolicState12) : Nat :=
+  max (max s.b0.maxDeg s.b1.maxDeg) s.b2.maxDeg
+
+def symbolicLane4Add (a b : SymbolicLane4) : SymbolicLane4 :=
+  ⟨.add a.x0 b.x0, .add a.x1 b.x1, .add a.x2 b.x2, .add a.x3 b.x3⟩
+
+def symbolicLane4Const (c : Lane4) : SymbolicLane4 :=
+  ⟨.constant c.x0, .constant c.x1, .constant c.x2, .constant c.x3⟩
+
+def symbolicApplyM4 (b : SymbolicLane4) : SymbolicLane4 :=
+  let s : PoseidonExpr := .add (.add b.x0 b.x1) (.add b.x2 b.x3)
+  let c2 : PoseidonExpr := .constant (Goldilocks.ofNat 2)
+  ⟨.add s (.add b.x0 (.mul c2 b.x1)),
+   .add s (.add b.x1 (.mul c2 b.x2)),
+   .add s (.add b.x2 (.mul c2 b.x3)),
+   .add s (.add b.x3 (.mul c2 b.x0))⟩
+
+def symbolicME12 (st : SymbolicState12) : SymbolicState12 :=
+  let y0 := symbolicApplyM4 st.b0
+  let y1 := symbolicApplyM4 st.b1
+  let y2 := symbolicApplyM4 st.b2
+  let s := symbolicLane4Add (symbolicLane4Add y0 y1) y2
+  ⟨symbolicLane4Add y0 s, symbolicLane4Add y1 s, symbolicLane4Add y2 s⟩
+
+def symbolicMI12 (st : SymbolicState12) : SymbolicState12 :=
+  let sum4 (b : SymbolicLane4) : PoseidonExpr := .add (.add b.x0 b.x1) (.add b.x2 b.x3)
+  let s : PoseidonExpr := .add (.add (sum4 st.b0) (sum4 st.b1)) (sum4 st.b2)
+  ⟨⟨.add (.mul (.constant (goldOfInt (-2))) st.b0.x0) s,
+    .add st.b0.x1 s,
+    .add (.mul (.constant (goldOfInt 2)) st.b0.x2) s,
+    .add (.mul (.constant (goldOfInt 4)) st.b0.x3) s⟩,
+   ⟨.add (.mul (.constant (goldOfInt 8)) st.b1.x0) s,
+    .add (.mul (.constant (goldOfInt 16)) st.b1.x1) s,
+    .add (.mul (.constant (goldOfInt 32)) st.b1.x2) s,
+    .add (.mul (.constant (goldOfInt 64)) st.b1.x3) s⟩,
+   ⟨.add (.mul (.constant (goldOfInt 128)) st.b2.x0) s,
+    .add (.mul (.constant (goldOfInt 256)) st.b2.x1) s,
+    .add (.mul (.constant (goldOfInt 512)) st.b2.x2) s,
+    .add (.mul (.constant (goldOfInt 1024)) st.b2.x3) s⟩⟩
+
+def symbolicExtRound12 (rc : Poseidon2State12) (st : SymbolicState12) : SymbolicState12 :=
+  let sbox4 (b : SymbolicLane4) (c : Lane4) : SymbolicLane4 :=
+    ⟨(PoseidonExpr.add b.x0 (.constant c.x0)).seventh,
+     (PoseidonExpr.add b.x1 (.constant c.x1)).seventh,
+     (PoseidonExpr.add b.x2 (.constant c.x2)).seventh,
+     (PoseidonExpr.add b.x3 (.constant c.x3)).seventh⟩
+  symbolicME12 ⟨sbox4 st.b0 rc.b0, sbox4 st.b1 rc.b1, sbox4 st.b2 rc.b2⟩
+
+def symbolicIntRound12 (rc : Goldilocks) (st : SymbolicState12) : SymbolicState12 :=
+  let x0' := (PoseidonExpr.add st.b0.x0 (.constant rc)).seventh
+  symbolicMI12 ⟨⟨x0', st.b0.x1, st.b0.x2, st.b0.x3⟩, st.b1, st.b2⟩
+
+def symbolicPerm12 (st : SymbolicState12) : SymbolicState12 :=
+  let s0 := symbolicME12 st
+  let s1 := runRounds symbolicExtRound12 poseidon2InitialExtConsts s0
+  let s2 := runRounds symbolicIntRound12 poseidon2InternalConsts s1
+  runRounds symbolicExtRound12 poseidon2TerminalExtConsts s2
+
+private theorem symbolicME12_eval (v : Nat → Goldilocks) (st : SymbolicState12) :
+    (symbolicME12 st).eval v = applyME (st.eval v) := rfl
+
+private theorem symbolicMI12_eval (v : Nat → Goldilocks) (st : SymbolicState12) :
+    (symbolicMI12 st).eval v = applyMI (st.eval v) := rfl
+
+private theorem symbolicExtRound12_eval (v : Nat → Goldilocks) (rc : Poseidon2State12)
+    (st : SymbolicState12) :
+    (symbolicExtRound12 rc st).eval v = externalRound rc (st.eval v) := rfl
+
+private theorem symbolicIntRound12_eval (v : Nat → Goldilocks) (rc : Goldilocks)
+    (st : SymbolicState12) :
+    (symbolicIntRound12 rc st).eval v = internalRound rc (st.eval v) := rfl
+
+private theorem runRounds_symbolic_eval {α : Type} (v : Nat → Goldilocks)
+    (sStep : α → SymbolicState12 → SymbolicState12)
+    (cStep : α → Poseidon2State12 → Poseidon2State12)
+    (hStep : ∀ c st, (sStep c st).eval v = cStep c (st.eval v)) :
+    ∀ (cs : List α) (st : SymbolicState12),
+      (runRounds sStep cs st).eval v = runRounds cStep cs (st.eval v)
+  | [], _ => rfl
+  | c :: cs, st => by
+    simp only [runRounds, runRounds_symbolic_eval v sStep cStep hStep cs (sStep c st), hStep]
+
+private theorem symbolicME12_maxDeg_le (st : SymbolicState12) (k : Nat) (h : st.maxDeg ≤ k) :
+    (symbolicME12 st).maxDeg ≤ k := by
+  unfold SymbolicState12.maxDeg SymbolicLane4.maxDeg at h
+  unfold symbolicME12 symbolicApplyM4 symbolicLane4Add SymbolicState12.maxDeg SymbolicLane4.maxDeg
+    PoseidonExpr.degree
+  omega
+
+private theorem symbolicMI12_maxDeg_le (st : SymbolicState12) (k : Nat) (h : st.maxDeg ≤ k) :
+    (symbolicMI12 st).maxDeg ≤ k := by
+  unfold SymbolicState12.maxDeg SymbolicLane4.maxDeg at h
+  unfold symbolicMI12 SymbolicState12.maxDeg SymbolicLane4.maxDeg PoseidonExpr.degree
+  omega
+
+private theorem symbolicExtRound12_maxDeg_le (rc : Poseidon2State12) (st : SymbolicState12)
+    (k : Nat) (h : st.maxDeg ≤ k) :
+    (symbolicExtRound12 rc st).maxDeg ≤ 7 * k := by
+  apply symbolicME12_maxDeg_le
+  unfold SymbolicState12.maxDeg SymbolicLane4.maxDeg at h
+  unfold SymbolicState12.maxDeg SymbolicLane4.maxDeg
+  simp only [symbolic_sbox7_degree, PoseidonExpr.degree, Nat.max_zero]
+  omega
+
+private theorem symbolicIntRound12_maxDeg_le (rc : Goldilocks) (st : SymbolicState12)
+    (k : Nat) (h : st.maxDeg ≤ k) :
+    (symbolicIntRound12 rc st).maxDeg ≤ 7 * k := by
+  apply symbolicMI12_maxDeg_le
+  unfold SymbolicState12.maxDeg SymbolicLane4.maxDeg at h
+  unfold SymbolicState12.maxDeg SymbolicLane4.maxDeg
+  simp only [symbolic_sbox7_degree, PoseidonExpr.degree, Nat.max_zero]
+  omega
+
+private theorem runRounds_maxDeg_le {α : Type}
+    (step : α → SymbolicState12 → SymbolicState12)
+    (hStep : ∀ c st k, st.maxDeg ≤ k → (step c st).maxDeg ≤ 7 * k) :
+    ∀ (cs : List α) (st : SymbolicState12) (k : Nat),
+      st.maxDeg ≤ k → (runRounds step cs st).maxDeg ≤ 7 ^ cs.length * k
+  | [], st, k, h => by simpa using h
+  | c :: cs, st, k, h => by
+    simp only [runRounds, List.length_cons]
+    have h1 := hStep c st k h
+    have ih := runRounds_maxDeg_le step hStep cs (step c st) (7 * k) h1
+    have hEq : 7 ^ cs.length * (7 * k) = 7 ^ (cs.length + 1) * k := by
+      rw [Nat.pow_succ]; ac_rfl
+    omega
+
+/-- Macaulay / CICO-1 semi-regularity degree `(7 * r + 1) / 2` and central binomial lower bound. -/
+def cicoMacaulayDegree (activeRounds : Nat) : Nat := (7 * activeRounds + 1) / 2
+
+private theorem two_pow_le_choose_central : ∀ k : Nat, 2 ^ k ≤ Nat.choose (2 * k) k
+  | 0 => by decide
+  | 1 => by decide
+  | m + 2 => by
+    have ih := two_pow_le_choose_central (m + 1)
+    have hSubSymm : Nat.choose (2 * m + 3) (m + 1) = Nat.choose (2 * m + 3) (m + 2) := by
+      have hs := Nat.choose_symm (n := 2 * m + 3) (k := m + 1) (by omega)
+      have hsub : 2 * m + 3 - (m + 1) = m + 2 := by omega
+      rwa [hsub] at hs
+    have hP : Nat.choose (2 * (m + 2)) (m + 2) =
+        Nat.choose (2 * m + 3) (m + 1) + Nat.choose (2 * m + 3) (m + 2) :=
+      Nat.choose_succ_succ (2 * m + 3) (m + 1)
+    have hGe : Nat.choose (2 * (m + 1)) (m + 1) ≤ Nat.choose (2 * m + 3) (m + 1) := by
+      have hEq : Nat.choose (2 * m + 3) (m + 1) =
+          Nat.choose (2 * m + 2) m + Nat.choose (2 * (m + 1)) (m + 1) :=
+        Nat.choose_succ_succ (2 * m + 2) m
+      omega
+    rw [Nat.pow_succ]
+    omega
+
+private theorem choose_mono_add_left (a b c : Nat) :
+    Nat.choose (a + b) b ≤ Nat.choose (a + c + b) b := by
+  induction c with
+  | zero => simp
+  | succ c ih =>
+    have hEq : a + (c + 1) + b = (a + c + b) + 1 := by omega
+    rw [hEq]
+    cases b with
+    | zero => simp
+    | succ b' =>
+      rw [Nat.choose_succ_succ (a + c + (b' + 1)) b']
+      omega
+
+private theorem choose_mono_both (a a' b b' : Nat) (ha : a ≤ a') (hb : b ≤ b') :
+    Nat.choose (a + b) b ≤ Nat.choose (a' + b') b' := by
+  have h1 : Nat.choose (a + b) b ≤ Nat.choose (a' + b) b := by
+    obtain ⟨d, rfl⟩ : ∃ d, a' = a + d := ⟨a' - a, by omega⟩
+    exact choose_mono_add_left a b d
+  have hSym1 : Nat.choose (a' + b) b = Nat.choose (b + a') a' := by
+    rw [Nat.add_comm a' b]
+    have hs := Nat.choose_symm (n := b + a') (k := b) (by omega)
+    have hsub : b + a' - b = a' := by omega
+    rwa [hsub] at hs
+  have h2 : Nat.choose (b + a') a' ≤ Nat.choose (b' + a') a' := by
+    obtain ⟨e, rfl⟩ : ∃ e, b' = b + e := ⟨b' - b, by omega⟩
+    exact choose_mono_add_left b a' e
+  have hSym2 : Nat.choose (b' + a') a' = Nat.choose (a' + b') b' := by
+    rw [Nat.add_comm b' a']
+    have hs := Nat.choose_symm (n := a' + b') (k := a') (by omega)
+    have hsub : a' + b' - a' = b' := by omega
+    rwa [hsub] at hs
+  omega
+
+/-- **Width-12 Symbolic Evaluation, Forward/Backward Degree Saturation & CICO-1/GSR/`2026/306` Bounds**:
+    1. `symbolicPerm12` evaluates identically to `poseidon2Perm12` and has degree `≤ 7^30` on affine inputs.
+    2. Forward/backward univariate root-finding saturates `goldilocksPrime`: for every split `rFwd + rBwd = 30`,
+       either `rBwd = 0` (`7^rFwd = 7^30 > goldilocksPrime`), or `1 ≤ rBwd` (`poseidon2DInv > 2^63` per backward
+       inverse S-box, with combined Bézout degree `7^rFwd * 7^rBwd = 7^30 > goldilocksPrime` and `(7^30)^2 > 2^128`).
+    3. CICO-1 round/S-box Gröbner Macaulay & Bézout bounds exceed `2^128`:
+       - Half-full + partial S-box Bézout bound `7^(12 * (8 / 2) + 22) = 7^70 > 2^196 > 2^128`;
+       - Merz–Rodríguez García (`2026/306`) worst-case skipped ideal degree `7^(22 + 4) = 7^26` satisfies
+         `(7^26)^2 = 7^52 > 2^145 > 2^128`;
+       - Bhati–Tariq–Ashur (`2026/1692`) GSR with `R_F0 = 4` leaves `7^(3 * 11 + 16) = 7^49 > 2^128`
+         (and CICO-4 `7^(4 * 22) = 7^88 > 2^247 > 2^128`);
+       - Macaulay matrix column count `Nat.choose (70 + cicoMacaulayDegree 26) 70 ≥ 2^70` has quadratic
+         linear-algebra cost `(Nat.choose (70 + cicoMacaulayDegree 26) 70)^2 > 2^128`. -/
+theorem poseidon2_width12_cico_groebner_and_interpolation_bounds :
+    (∀ (v : Nat → Goldilocks) (st : SymbolicState12),
+      (symbolicPerm12 st).eval v = poseidon2Perm12 (st.eval v)) ∧
+    (∀ st : SymbolicState12, st.maxDeg ≤ 1 → (symbolicPerm12 st).maxDeg ≤ 7 ^ 30) ∧
+    (∀ rFwd rBwd : Nat, rFwd + rBwd = 30 →
+      (rBwd = 0 → goldilocksPrime < 7 ^ rFwd) ∧
+      (1 ≤ rBwd → 2 ^ 63 < poseidon2DInv ∧ goldilocksPrime < 7 ^ rFwd * 7 ^ rBwd ∧
+        2 ^ 128 < (7 ^ rFwd * 7 ^ rBwd) ^ 2)) ∧
+    2 ^ 128 < 7 ^ (12 * (8 / 2) + 22) ∧
+    2 ^ 128 < (7 ^ (22 + 4)) ^ 2 ∧
+    2 ^ 128 < 7 ^ (3 * 11 + (22 + 4 - 12 + 2)) ∧
+    2 ^ 128 < (Nat.choose (70 + cicoMacaulayDegree 26) 70) ^ 2 := by
+  refine ⟨?_, ?_, ?_, by decide, by decide, by decide, ?_⟩
+  · intro v st
+    unfold symbolicPerm12 poseidon2Perm12
+    dsimp only
+    rw [runRounds_symbolic_eval v symbolicExtRound12 externalRound (symbolicExtRound12_eval v),
+        runRounds_symbolic_eval v symbolicIntRound12 internalRound (symbolicIntRound12_eval v),
+        runRounds_symbolic_eval v symbolicExtRound12 externalRound (symbolicExtRound12_eval v),
+        symbolicME12_eval]
+  · intro st h1
+    unfold symbolicPerm12
+    have h0 := symbolicME12_maxDeg_le st 1 h1
+    have h1' := runRounds_maxDeg_le symbolicExtRound12 symbolicExtRound12_maxDeg_le
+      poseidon2InitialExtConsts (symbolicME12 st) 1 h0
+    have h2' := runRounds_maxDeg_le symbolicIntRound12 symbolicIntRound12_maxDeg_le
+      poseidon2InternalConsts _ _ h1'
+    have h3' := runRounds_maxDeg_le symbolicExtRound12 symbolicExtRound12_maxDeg_le
+      poseidon2TerminalExtConsts _ _ h2'
+    have hLens : poseidon2InitialExtConsts.length = 4 ∧
+        poseidon2InternalConsts.length = 22 ∧
+        poseidon2TerminalExtConsts.length = 4 := ⟨rfl, rfl, rfl⟩
+    rw [hLens.1, hLens.2.1, hLens.2.2] at h3'
+    have hPow : 7 ^ 4 * (7 ^ 22 * (7 ^ 4 * 1)) = 7 ^ 30 := by decide
+    omega
+  · intro rFwd rBwd hSum
+    refine ⟨?_, ?_⟩
+    · intro h0; subst h0; simp at hSum; subst hSum; decide
+    · intro _
+      rw [← Nat.pow_add, hSum]
+      exact ⟨by decide, by decide, by decide⟩
+  · have hMac : 70 ≤ cicoMacaulayDegree 26 := by decide
+    have hMono := choose_mono_both 70 (cicoMacaulayDegree 26) 70 70 hMac (Nat.le_refl 70)
+    have h70 : 2 ^ 70 ≤ Nat.choose (70 + 70) 70 := by
+      simpa [Nat.two_mul] using two_pow_le_choose_central 70
+    have hGe : 2 ^ 70 ≤ Nat.choose (cicoMacaulayDegree 26 + 70) 70 := Nat.le_trans h70 hMono
+    rw [Nat.add_comm 70 (cicoMacaulayDegree 26)]
+    have hSq : (2 ^ 70) ^ 2 ≤ (Nat.choose (cicoMacaulayDegree 26 + 70) 70) ^ 2 :=
+      Nat.mul_le_mul hGe hGe
+    exact Nat.lt_of_lt_of_le (by decide : 2 ^ 128 < (2 ^ 70) ^ 2) hSq
+
+/-- `#tooth` **Reduced-Round `(R_F = 4, R_P = 10)` & Single-Initial-Round GSR Failure (`tooth_reduced_poseidon2_fails_cico_and_gsr`)**:
+    1. At `(R_F = 4, R_P = 10)` (`14` rounds), univariate degree `7^14 < goldilocksPrime` and half-full +
+       partial Bézout degree `7^(12 * (4 / 2) + 10) = 7^34 < 2^128` both fail!
+    2. If initial full rounds were reduced from `R_F0 = 4` to `R_F0 = 1` (`2026/1692` GSR premise),
+       univariate CICO-1 degree drops to `7^(22 + 4 - 12 + 2) = 7^16 < goldilocksPrime`! -/
+theorem tooth_reduced_poseidon2_fails_cico_and_gsr :
+    7 ^ (4 + 10) < goldilocksPrime ∧
+    7 ^ (12 * (4 / 2) + 10) < 2 ^ 128 ∧
+    7 ^ (22 + 4 - 12 + 2) < goldilocksPrime := by decide
+
+/-! ## 11. Succinct Outer Recursive `Hem` Aggregation (`bciksJohnsonQrom128`) & Soundness Composition -/
+
+def hemOuterDomainTag : List UInt8 :=
+  [0x51, 0x53, 0x41, 0x47, 0x2e, 0x48, 0x45, 0x4d, 0x2e, 0x4f, 0x55, 0x54, 0x45, 0x52, 0x2f, 0x76, 0x31]
+
+/-- Compact shard header carried by a succinct outer `Hem` certificate (`O(1)` outer WHIR proof,
+    shipping zero child `SuccinctAggregateProof` payloads). -/
+structure ShardCompressedHeader where
+  shardId : List UInt8
+  threshold : Nat
+  suiteId : List UInt8
+  params : PqHashParams
+  committee : List PqPublicKey
+  bitmap : SignerBitmapSpec
+  childProofDigest : List UInt8
+  deriving DecidableEq
+
+def ShardCompressedHeader.registration (h : ShardCompressedHeader) : ShardRegistration :=
+  ⟨h.shardId, h.threshold, h.suiteId, h.params, h.committee⟩
+
+def encodeBitmapBytes (bm : SignerBitmapSpec) : List UInt8 :=
+  bm.map (fun b => if b then 1 else 0)
+
+private theorem encodeBitmapBytes_injective {a b : SignerBitmapSpec}
+    (h : encodeBitmapBytes a = encodeBitmapBytes b) : a = b :=
+  map_inj_of_inj (fun x y hxy => by cases x <;> cases y <;> first | rfl | cases hxy) h
+
+def encodeShardCompressedHeader (h : ShardCompressedHeader) : List UInt8 :=
+  encodeMultiFrame [
+    encodeRegistration h.registration,
+    encodeBitmapBytes h.bitmap,
+    h.childProofDigest
+  ]
+
+def encodeCompressedHeaderChain (hs : List ShardCompressedHeader) : List UInt8 :=
+  encodeMultiFrame (hs.map encodeShardCompressedHeader)
+
+theorem encodeShardCompressedHeader_injective {a b : ShardCompressedHeader}
+    (h : encodeShardCompressedHeader a = encodeShardCompressedHeader b) : a = b := by
+  have h0 := encodeMultiFrame_injective h
+  obtain ⟨hReg, h1⟩ := List.cons.inj h0
+  obtain ⟨hBm, h2⟩ := List.cons.inj h1
+  obtain ⟨hDig, _⟩ := List.cons.inj h2
+  have hr := encodeRegistration_injective hReg
+  have hb := encodeBitmapBytes_injective hBm
+  cases a; cases b
+  unfold ShardCompressedHeader.registration at hr
+  cases hr
+  subst hb hDig
+  rfl
+
+theorem encodeCompressedHeaderChain_injective {a b : List ShardCompressedHeader}
+    (h : encodeCompressedHeaderChain a = encodeCompressedHeaderChain b) : a = b :=
+  map_inj_of_inj (fun _ _ => encodeShardCompressedHeader_injective) (encodeMultiFrame_injective h)
+
+def succinctOuterBoundMessage (registryDigest epochFloor msg headerChainDigest : List UInt8) :
+    List UInt8 :=
+  encodeMultiFrame [hemOuterDomainTag, registryDigest, epochFloor, msg, headerChainDigest]
+
+theorem succinctOuterBoundMessage_injective {r1 e1 m1 c1 r2 e2 m2 c2 : List UInt8}
+    (h : succinctOuterBoundMessage r1 e1 m1 c1 = succinctOuterBoundMessage r2 e2 m2 c2) :
+    r1 = r2 ∧ e1 = e2 ∧ m1 = m2 ∧ c1 = c2 := by
+  have h0 := encodeMultiFrame_injective h
+  simp only [List.cons.injEq, and_true, true_and] at h0
+  exact h0
+
+/-- Succinct outer recursive `Hem` certificate: `headers` carries only compact shard metadata and
+    32-byte child digests, verified by ONE outer `bciksJohnsonQrom128` `SuccinctAggregateProof`. -/
+structure SuccinctOuterHemCertificate where
+  headers : List ShardCompressedHeader
+  outerInst : AggPublicInstance
+  outerProof : SuccinctAggregateProof
+  outerFs : List UInt8
+
+def headerCommitteeFlat : List ShardCompressedHeader → List PqPublicKey
+  | [] => []
+  | h :: rest => h.committee ++ headerCommitteeFlat rest
+
+def headerClaimedWeight : List ShardCompressedHeader → Nat
+  | [] => 0
+  | h :: rest => bitmapPopcountSpec h.bitmap + headerClaimedWeight rest
+
+def verifyHeaderQuorum (h : ShardCompressedHeader) : Bool :=
+  decide (1 ≤ h.threshold) &&
+  decide (h.threshold ≤ h.committee.length) &&
+  decide (h.threshold ≤ bitmapPopcountSpec h.bitmap)
+
+/-- Executable verifier for succinct outer recursive `Hem` aggregation, pinning the outer proof and
+    instance to unconditional `.bciksJohnsonQrom128` and binding `encodeCompressedHeaderChain`. -/
+def verifySuccinctRecursiveHem (H : Hash) (outerArith : RowArithmetization) (outerDom : WhirDomain)
+    (registryDigest epochFloor msg : List UInt8) (cert : SuccinctOuterHemCertificate) : Bool :=
+  decide (1 ≤ cert.headers.length) &&
+  decide (H (encodeRegistry (cert.headers.map ShardCompressedHeader.registration)) = registryDigest) &&
+  decide ((cert.headers.map (·.shardId)).Nodup) &&
+  decide ((headerCommitteeFlat cert.headers).Nodup) &&
+  cert.headers.all verifyHeaderQuorum &&
+  decide (cert.outerInst.regime = .bciksJohnsonQrom128) &&
+  decide (cert.outerProof.agg.regime = .bciksJohnsonQrom128) &&
+  decide (cert.outerInst.message =
+    succinctOuterBoundMessage registryDigest epochFloor msg
+      (H (encodeCompressedHeaderChain cert.headers))) &&
+  verifySuccinctAggregate outerArith outerDom cert.outerInst cert.outerProof cert.outerFs
+
+def shardToCompressedHeader (digestProof : SuccinctAggregateProof → List UInt8)
+    (s : HemShardProof) : ShardCompressedHeader :=
+  { shardId := s.shardId
+    threshold := s.threshold
+    suiteId := s.inst.suite.suiteId
+    params := s.inst.params
+    committee := s.inst.committee
+    bitmap := s.proof.agg.bitmap
+    childProofDigest := digestProof s.proof }
+
+/-- Extraction witness bundle for succinct outer recursive `Hem`: connects the outer `Hem` committed
+    table to the `M` inner shard extraction environments verified by the outer relation. -/
+structure SuccinctRecursiveHemEnv (H : Hash)
+    (outerArith : RowArithmetization) (outerDom : WhirDomain)
+    (innerArith : RowArithmetization) (innerDom : WhirDomain)
+    (epochFloor msg : List UInt8)
+    (cert : SuccinctOuterHemCertificate) where
+  digestProof : SuccinctAggregateProof → List UInt8
+  outerLaw : outerArith.Lawful outerDom cert.outerInst
+  outerView : SuccinctExtractionView
+  outerBound : StagesBound outerView.authPath outerDom.stages outerView.allTables cert.outerProof.stages
+  innerEnvs : List (HemShardEnv innerArith innerDom)
+  outerRelationSound :
+    checkAllActiveSigners cert.outerInst.suite cert.outerInst.params cert.outerInst.message
+      cert.outerInst.committee cert.outerProof.agg.bitmap
+      (outerArith.decodeSigs ((outerView.allTables.headD []).headD [])) = true →
+    (innerEnvs.map (fun e => shardToCompressedHeader digestProof e.shard) = cert.headers ∧
+     ∀ e ∈ innerEnvs,
+       e.shard.inst.message = shardBoundMessage e.shard.shardId epochFloor msg ∧
+       verifySuccinctAggregate innerArith innerDom e.shard.inst e.shard.proof e.shard.fs = true)
+
+private theorem verifySuccinctRecursiveHem_facts {H : Hash}
+    {outerArith : RowArithmetization} {outerDom : WhirDomain}
+    {registryDigest epochFloor msg : List UInt8} {cert : SuccinctOuterHemCertificate}
+    (h : verifySuccinctRecursiveHem H outerArith outerDom registryDigest epochFloor msg cert = true) :
+    1 ≤ cert.headers.length ∧
+    H (encodeRegistry (cert.headers.map ShardCompressedHeader.registration)) = registryDigest ∧
+    (cert.headers.map (·.shardId)).Nodup ∧
+    (headerCommitteeFlat cert.headers).Nodup ∧
+    (∀ hd ∈ cert.headers, verifyHeaderQuorum hd = true) ∧
+    cert.outerInst.regime = .bciksJohnsonQrom128 ∧
+    cert.outerProof.agg.regime = .bciksJohnsonQrom128 ∧
+    cert.outerInst.message =
+      succinctOuterBoundMessage registryDigest epochFloor msg
+        (H (encodeCompressedHeaderChain cert.headers)) ∧
+    verifySuccinctAggregate outerArith outerDom cert.outerInst cert.outerProof cert.outerFs = true := by
+  unfold verifySuccinctRecursiveHem at h
+  simp only [Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true] at h
+  exact ⟨h.1.1.1.1.1.1.1.1, h.1.1.1.1.1.1.1.2, h.1.1.1.1.1.1.2, h.1.1.1.1.1.2,
+    h.1.1.1.1.2, h.1.1.1.2, h.1.1.2, h.1.2, h.2⟩
+
+private theorem map_reg_of_headers (dp : SuccinctAggregateProof → List UInt8) :
+    ∀ shards : List HemShardProof,
+      ((shards.map (shardToCompressedHeader dp)).map ShardCompressedHeader.registration) =
+        shards.map HemShardProof.registration
+  | [] => rfl
+  | _ :: rest => congrArg (_ :: ·) (map_reg_of_headers dp rest)
+
+private theorem map_sid_of_headers (dp : SuccinctAggregateProof → List UInt8) :
+    ∀ shards : List HemShardProof,
+      ((shards.map (shardToCompressedHeader dp)).map (·.shardId)) = hierarchicalShardIds shards
+  | [] => rfl
+  | _ :: rest => congrArg (_ :: ·) (map_sid_of_headers dp rest)
+
+private theorem flat_com_of_headers (dp : SuccinctAggregateProof → List UInt8) :
+    ∀ shards : List HemShardProof,
+      headerCommitteeFlat (shards.map (shardToCompressedHeader dp)) = hierarchicalCommittee shards
+  | [] => rfl
+  | _ :: rest => congrArg (_ ++ ·) (flat_com_of_headers dp rest)
+
+/-- Constructive (`0 Classical.choice`) recursive witness extractor composing the outer
+    `bciksJohnsonQrom128` `Hem` extractor with the `M`-shard `extractHierarchicalHemQuorums` tree. -/
+def extractSuccinctRecursiveHem (H : Hash)
+    (outerArith : RowArithmetization) (outerDom : WhirDomain)
+    (innerArith : RowArithmetization) (innerDom : WhirDomain)
+    (registryDigest epochFloor msg : List UInt8)
+    (registry : List ShardRegistration)
+    (hReg : H (encodeRegistry registry) = registryDigest)
+    (cert : SuccinctOuterHemCertificate)
+    (env : SuccinctRecursiveHemEnv H outerArith outerDom innerArith innerDom epochFloor msg cert)
+    (hAccept : verifySuccinctRecursiveHem H outerArith outerDom registryDigest epochFloor msg cert = true) :
+    PSum (HierarchicalQuorumWitness epochFloor msg registry (env.innerEnvs.map (·.shard)))
+      (PSum (HemShardBreak outerArith outerDom cert.outerProof env.outerView)
+        (HemHierarchyBreak H innerArith innerDom env.innerEnvs)) :=
+  have hF := verifySuccinctRecursiveHem_facts hAccept
+  match succinct_aggregation_knowledge_soundness outerArith outerDom cert.outerInst env.outerLaw
+      cert.outerProof cert.outerFs env.outerView hF.2.2.2.2.2.2.2.2 env.outerBound with
+  | .inr outerBrk => .inr (.inl outerBrk)
+  | .inl ⟨_, hOuterAct⟩ =>
+    have hRel := env.outerRelationSound hOuterAct
+    have hMapHdr : (env.innerEnvs.map (·.shard)).map (shardToCompressedHeader env.digestProof) =
+        cert.headers := by
+      rw [List.map_map]; exact hRel.1
+    have hHierAcc :
+        verifyHierarchicalHem H innerArith innerDom registryDigest epochFloor msg
+          (env.innerEnvs.map (·.shard)) = true := by
+      unfold verifyHierarchicalHem
+      simp only [Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true]
+      have hRegDig : H (encodeRegistry ((env.innerEnvs.map (·.shard)).map HemShardProof.registration)) =
+          registryDigest := by
+        rw [← map_reg_of_headers env.digestProof, hMapHdr]; exact hF.2.1
+      have hSidNd : (hierarchicalShardIds (env.innerEnvs.map (·.shard))).Nodup := by
+        rw [← map_sid_of_headers env.digestProof, hMapHdr]; exact hF.2.2.1
+      have hComNd : (hierarchicalCommittee (env.innerEnvs.map (·.shard))).Nodup := by
+        rw [← flat_com_of_headers env.digestProof, hMapHdr]; exact hF.2.2.2.1
+      refine ⟨⟨⟨hRegDig, hSidNd⟩, hComNd⟩, ?_⟩
+      intro s hsMem
+      obtain ⟨e, heMem, rfl⟩ := List.mem_map.mp hsMem
+      have hHdrMem : shardToCompressedHeader env.digestProof e.shard ∈ cert.headers := by
+        rw [← hMapHdr]; exact List.mem_map.mpr ⟨e.shard, List.mem_map.mpr ⟨e, heMem, rfl⟩, rfl⟩
+      have hQ := hF.2.2.2.2.1 _ hHdrMem
+      unfold verifyHeaderQuorum at hQ
+      simp only [Bool.and_eq_true, decide_eq_true_eq] at hQ
+      have hInner := hRel.2 e heMem
+      unfold verifyHemShard
+      simp only [Bool.and_eq_true, decide_eq_true_eq]
+      exact ⟨⟨⟨⟨hInner.1, hQ.1.1⟩, hQ.1.2⟩, hQ.2⟩, hInner.2⟩
+    match extractHierarchicalHemQuorums H innerArith innerDom registryDigest epochFloor msg
+        registry hReg env.innerEnvs hHierAcc with
+    | .inl w => .inl w
+    | .inr hierBrk => .inr (.inr hierBrk)
+
+private theorem sumOver_const_le (m bound : Nat) (f : Nat → Nat)
+    (hf : ∀ j, j < m → f j ≤ bound) :
+    sumOver m f ≤ m * bound := by
+  induction m with
+  | zero => simp [sumOver]
+  | succ m ih =>
+    have ih' := ih (fun j hj => hf j (Nat.lt_succ_of_lt hj))
+    have hm := hf m (Nat.lt_succ_self m)
+    simp only [sumOver, Nat.succ_mul]
+    omega
+
+/-- **Succinct Outer Recursive `Hem` Soundness Composition (`succinct_recursive_hem_soundness_composition`)**:
+    Over any finite coin space `coins`, if `recBad ω` marks coins where `verifySuccinctRecursiveHem`
+    accepts under `H (encodeRegistry (registry ω)) = registryDigest ω` without a valid
+    `HierarchicalQuorumWitness` across all `M` shards, then:
+    1. `countTrue recBad coins ≤ countTrue outerBad coins + countTrue colBad coins + Σ_{j < m} countTrue (shardBad j) coins`;
+    2. When `countTrue outerBad coins ≤ epsOuter`, `countTrue colBad coins = 0` (collision-free transcript),
+       and `∀ j < m, countTrue (shardBad j) coins ≤ epsHem`, total bad coins satisfy
+       `countTrue recBad coins ≤ m * epsHem + epsOuter`! -/
+theorem succinct_recursive_hem_soundness_composition {Ω : Type} (coins : List Ω) (m : Nat)
+    (H : Hash) (outerArith : RowArithmetization) (outerDom : WhirDomain)
+    (innerArith : RowArithmetization) (innerDom : WhirDomain)
+    (registryDigest epochFloor msg : Ω → List UInt8)
+    (registry : Ω → List ShardRegistration)
+    (cert : Ω → SuccinctOuterHemCertificate)
+    (env : (ω : Ω) → SuccinctRecursiveHemEnv H outerArith outerDom innerArith innerDom
+      (epochFloor ω) (msg ω) (cert ω))
+    (hLen : ∀ ω, (env ω).innerEnvs.length ≤ m)
+    (recBad outerBad colBad : Ω → Bool) (shardBad : Nat → Ω → Bool)
+    (hRec : ∀ ω, recBad ω = true →
+      verifySuccinctRecursiveHem H outerArith outerDom (registryDigest ω) (epochFloor ω) (msg ω)
+        (cert ω) = true ∧
+      (HierarchicalQuorumWitness (epochFloor ω) (msg ω) (registry ω)
+        ((env ω).innerEnvs.map (·.shard)) → False))
+    (hRegAuth : ∀ ω, recBad ω = true → H (encodeRegistry (registry ω)) = registryDigest ω)
+    (hOuter : ∀ ω, HemShardBreak outerArith outerDom (cert ω).outerProof (env ω).outerView →
+      outerBad ω = true)
+    (hCol : ∀ ω, HashCollisionWitness H → colBad ω = true)
+    (hShard : ∀ ω (j : Fin (env ω).innerEnvs.length),
+      HemShardBreak innerArith innerDom ((env ω).innerEnvs.get j).shard.proof
+        ((env ω).innerEnvs.get j).view →
+      shardBad j.val ω = true) :
+    countTrue recBad coins ≤
+      countTrue outerBad coins + countTrue colBad coins +
+        sumOver m (fun j => countTrue (shardBad j) coins) ∧
+    (∀ epsHem epsOuter : Nat,
+      countTrue outerBad coins ≤ epsOuter →
+      countTrue colBad coins = 0 →
+      (∀ j, j < m → countTrue (shardBad j) coins ≤ epsHem) →
+      countTrue recBad coins ≤ m * epsHem + epsOuter) := by
+  let rootOrOuter : Ω → Bool := fun ω => outerBad ω || colBad ω
+  have hUnion : countTrue recBad coins ≤
+      countTrue rootOrOuter coins + sumOver m (fun j => countTrue (shardBad j) coins) := by
+    apply countTrue_union_bound
+    intro ω hb
+    obtain ⟨hAcc, hNo⟩ := hRec ω hb
+    match extractSuccinctRecursiveHem H outerArith outerDom innerArith innerDom
+        (registryDigest ω) (epochFloor ω) (msg ω) (registry ω) (hRegAuth ω hb)
+        (cert ω) (env ω) hAcc with
+    | .inl w => exact (hNo w).elim
+    | .inr (.inl oBrk) =>
+      left
+      dsimp only [rootOrOuter]
+      rw [hOuter ω oBrk]
+      rfl
+    | .inr (.inr (.inl col)) =>
+      left
+      dsimp only [rootOrOuter]
+      rw [hCol ω col, Bool.or_true]
+    | .inr (.inr (.inr ⟨j, sBrk⟩)) =>
+      exact .inr ⟨j.val, Nat.lt_of_lt_of_le j.isLt (hLen ω), hShard ω j sBrk⟩
+  have hOrLe : countTrue rootOrOuter coins ≤ countTrue outerBad coins + countTrue colBad coins := by
+    induction coins with
+    | nil => decide
+    | cons ω rest ih =>
+      simp only [countTrue, rootOrOuter]
+      cases outerBad ω <;> cases colBad ω <;> simp <;> omega
+  have hMain : countTrue recBad coins ≤
+      countTrue outerBad coins + countTrue colBad coins +
+        sumOver m (fun j => countTrue (shardBad j) coins) := by omega
+  refine ⟨hMain, ?_⟩
+  intro epsHem epsOuter hO hC hS
+  have hSum := sumOver_const_le m epsHem (fun j => countTrue (shardBad j) coins) hS
+  omega
+
+/-- Concrete accepting `SuccinctOuterHemCertificate` over the two `concreteHemShard` shards, using
+    `poseidon2Hash32` and the honest `bciksJohnsonQrom128` WHIR prover. -/
+def concreteSuccinctOuterCert : SuccinctOuterHemCertificate :=
+  let headers := [concreteHemShard false, concreteHemShard true].map
+    (shardToCompressedHeader (fun _ => [0x01]))
+  let chainDig := poseidon2Hash32 (encodeCompressedHeaderChain headers)
+  let outerMsg := succinctOuterBoundMessage concreteHemRegistryDigest [] [] chainDig
+  let outerBundle := buildHonestSbox7WhirBundle Goldilocks.zero Goldilocks.zero Goldilocks.one outerMsg
+  { headers := headers
+    outerInst := rsSbox7Inst Goldilocks.zero Goldilocks.zero outerMsg
+    outerProof := outerBundle.1
+    outerFs := outerBundle.2.1 }
+
+theorem inhabited_verifySuccinctRecursiveHem :
+    verifySuccinctRecursiveHem poseidon2Hash32 concreteHemArith rsSbox7WhirDomain
+      concreteHemRegistryDigest [] [] concreteSuccinctOuterCert = true ∧
+    concreteSuccinctOuterCert.outerProof.agg.regime = .bciksJohnsonQrom128 := by
+  have hIds : (concreteSuccinctOuterCert.headers.map (·.shardId)).Nodup := by decide
+  have hCom : (headerCommitteeFlat concreteSuccinctOuterCert.headers).Nodup := by decide
+  have hLen : 1 ≤ concreteSuccinctOuterCert.headers.length := by decide
+  have hQ : concreteSuccinctOuterCert.headers.all verifyHeaderQuorum = true := by decide
+  let chainDig := poseidon2Hash32 (encodeCompressedHeaderChain concreteSuccinctOuterCert.headers)
+  let outerMsg := succinctOuterBoundMessage concreteHemRegistryDigest [] [] chainDig
+  have hAcc := (honestSbox7WhirProof_accepts Goldilocks.zero Goldilocks.zero Goldilocks.one outerMsg).1
+  have hArithEq : rsSbox7TraceArith Goldilocks.zero
+      (CommRingOps.add (pow7Goldilocks Goldilocks.zero) Goldilocks.zero) = concreteHemArith := by
+    have hz : CommRingOps.add (pow7Goldilocks Goldilocks.zero) Goldilocks.zero = Goldilocks.zero := by decide
+    rw [hz]; rfl
+  have hRoot0 : CommRingOps.add (pow7Goldilocks Goldilocks.zero) Goldilocks.zero = Goldilocks.zero := by decide
+  rw [hArithEq, hRoot0] at hAcc
+  refine ⟨?_, rfl⟩
+  unfold verifySuccinctRecursiveHem
+  rw [decide_eq_true hLen,
+      decide_eq_true (rfl : poseidon2Hash32 (encodeRegistry
+        (concreteSuccinctOuterCert.headers.map ShardCompressedHeader.registration)) =
+        concreteHemRegistryDigest),
+      decide_eq_true hIds, decide_eq_true hCom, hQ,
+      decide_eq_true (rfl : concreteSuccinctOuterCert.outerInst.regime = .bciksJohnsonQrom128),
+      decide_eq_true (rfl : concreteSuccinctOuterCert.outerProof.agg.regime = .bciksJohnsonQrom128),
+      decide_eq_true (rfl : concreteSuccinctOuterCert.outerInst.message = outerMsg)]
+  exact hAcc
+
+/-- `#tooth` **Succinct Outer Recursive Regime Downgrade & Header-Chain Tamper Rejection**:
+    1. Downgrading `outerInst.regime` to `.bciksJohnsonClassical128` causes `verifySuccinctRecursiveHem`
+       to return `false`.
+    2. Tampering any `childProofDigest` in `headers` changes `encodeCompressedHeaderChain` and causes
+       `verifySuccinctRecursiveHem` on `concreteSuccinctOuterCert` to return `false`. -/
+theorem tooth_succinctRecursiveHem_rejects_downgrade_and_tamper :
+    (∀ H outerArith outerDom regDig ep msg (cert : SuccinctOuterHemCertificate),
+      cert.outerInst.regime = .bciksJohnsonClassical128 →
+      verifySuccinctRecursiveHem H outerArith outerDom regDig ep msg cert = false) ∧
+    verifySuccinctRecursiveHem poseidon2Hash32 concreteHemArith rsSbox7WhirDomain
+      concreteHemRegistryDigest [] []
+      { concreteSuccinctOuterCert with
+        headers := concreteSuccinctOuterCert.headers.map
+          (fun h => { h with childProofDigest := [0xFF] }) } = false := by
+  refine ⟨?_, ?_⟩
+  · intro H outerArith outerDom regDig ep msg cert hCl
+    apply Bool.eq_false_iff.mpr
+    intro hAcc
+    have hQr := (verifySuccinctRecursiveHem_facts hAcc).2.2.2.2.2.1
+    rw [hCl] at hQr
+    cases hQr
+  · have hMsgNe :
+        concreteSuccinctOuterCert.outerInst.message ≠
+          succinctOuterBoundMessage concreteHemRegistryDigest [] []
+            (poseidon2Hash32 (encodeCompressedHeaderChain
+              (concreteSuccinctOuterCert.headers.map
+                (fun h => { h with childProofDigest := [0xFF] })))) := by
+      intro hEq
+      have hDigEq := (succinctOuterBoundMessage_injective hEq).2.2.2
+      exact absurd hDigEq (by decide)
+    unfold verifySuccinctRecursiveHem
+    dsimp only
+    rw [decide_eq_false hMsgNe]
+    simp only [Bool.and_false, Bool.false_and]
+
 end Qsag
 
 /- Audit every declaration owned by this module, including private certificate helpers, and

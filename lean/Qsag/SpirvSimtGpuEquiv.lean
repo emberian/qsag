@@ -450,7 +450,7 @@ inductive SpirvGlobalDecl where
   | const32 (tyId resId val : UInt32)
   | const64 (tyId resId : UInt32) (val : UInt64)
   | constComposite (tyId resId : UInt32) (partIds : List UInt32)
-  | variable (tyId resId : UInt32) (sc : SpirvStorageClass)
+  | variable (tyId resId : UInt32) (sc : SpirvStorageClass) (initId : Option UInt32 := none)
   deriving DecidableEq, Repr
 
 /-- The type/constant/global-variable section interleaves all three kinds of declaration. -/
@@ -461,19 +461,25 @@ inductive SpirvTyGlobal where
 
 /-- Function-body instructions with exact Khronos `SPIR-V 1.5/1.6` opcodes. -/
 inductive SpirvInst where
-  | opVariable (tyId resId : UInt32) (sc : SpirvStorageClass)
+  | opExtInst (tyId resId setId instNum : UInt32) (argIds : List UInt32)
+  | opVariable (tyId resId : UInt32) (sc : SpirvStorageClass) (initId : Option UInt32 := none)
   | opFunctionCall (tyId resId fnId : UInt32) (argIds : List UInt32)
   | opLoad (tyId resId ptrId : UInt32)
   | opStore (ptrId valId : UInt32)
   | opAccessChain (tyId resId baseId : UInt32) (indices : List UInt32)
+  | opVectorShuffle (tyId resId vec1Id vec2Id : UInt32) (components : List UInt32)
   | opCompositeConstruct (tyId resId : UInt32) (partIds : List UInt32)
   | opCompositeExtract (tyId resId compId fieldIdx : UInt32)
   | opUConvert (tyId resId valId : UInt32)
   | opIAdd (tyId resId aId bId : UInt32)
   | opISub (tyId resId aId bId : UInt32)
   | opIMul (tyId resId aId bId : UInt32)
+  | opUDiv (tyId resId aId bId : UInt32)
   | opUMod (tyId resId aId bId : UInt32)
   | opUMulExtended (tyId resId aId bId : UInt32)
+  | opLogicalOr (tyId resId aId bId : UInt32)
+  | opLogicalAnd (tyId resId aId bId : UInt32)
+  | opLogicalNot (tyId resId aId : UInt32)
   | opSelect (tyId resId condId trueId falseId : UInt32)
   | opIEqual (tyId resId aId bId : UInt32)
   | opINotEqual (tyId resId aId bId : UInt32)
@@ -484,17 +490,20 @@ inductive SpirvInst where
   | opULessThanEqual (tyId resId aId bId : UInt32)
   | opShiftRightLogical (tyId resId baseId shiftId : UInt32)
   | opShiftLeftLogical (tyId resId baseId shiftId : UInt32)
-  | opBitwiseXor (tyId resId aId bId : UInt32)
   | opBitwiseOr (tyId resId aId bId : UInt32)
+  | opBitwiseXor (tyId resId aId bId : UInt32)
   | opBitwiseAnd (tyId resId aId bId : UInt32)
   | opNot (tyId resId aId : UInt32)
   | opBitReverse (tyId resId aId : UInt32)
-  | opControlBarrier (execScope memScope : SpirvScope) (semanticsMask : UInt32)
+  | opControlBarrier (execScope memScope semanticsMask : UInt32)
+  | opMemoryBarrier (memScope semanticsMask : UInt32)
+  | opPhi (tyId resId : UInt32) (incoming : List UInt32)
   | opLoopMerge (mergeLabelId contLabelId loopCtrl : UInt32)
   | opSelectionMerge (mergeLabelId selectionCtrl : UInt32)
   | opLabel (labelId : UInt32)
   | opBranch (targetLabelId : UInt32)
   | opBranchConditional (condId trueLabelId falseLabelId : UInt32)
+  | opSwitch (selectorId defaultLabelId : UInt32) (targets : List UInt32)
   | opReturn
   | opReturnValue (valId : UInt32)
   deriving DecidableEq, Repr
@@ -854,7 +863,8 @@ def encodeGlobalRaw : SpirvGlobalDecl → RawSpirvInst
   | .const32 ty res val => ⟨43, [ty, res, val]⟩
   | .const64 ty res val => ⟨43, [ty, res, u64Lo32 val, u64Hi32 val]⟩
   | .constComposite ty res parts => ⟨44, ty :: res :: parts⟩
-  | .variable ty res sc => ⟨59, [ty, res, sc.toWord]⟩
+  | .variable ty res sc init =>
+    ⟨59, match init with | none => [ty, res, sc.toWord] | some i => [ty, res, sc.toWord, i]⟩
 
 def isGlobalOpcode (op : Nat) : Bool :=
   op == 41 || op == 42 || op == 43 || op == 44 || op == 59
@@ -868,7 +878,11 @@ def decodeGlobalRaw (r : RawSpirvInst) : Except SpirvDecodeError SpirvGlobalDecl
   | 44, ty :: res :: parts => .ok (.constComposite ty res parts)
   | 59, [ty, res, scWord] =>
     match SpirvStorageClass.ofWord? scWord with
-    | some sc => .ok (.variable ty res sc)
+    | some sc => .ok (.variable ty res sc none)
+    | none => .error (.malformedSection "bad OpVariable storage class")
+  | 59, [ty, res, scWord, init] =>
+    match SpirvStorageClass.ofWord? scWord with
+    | some sc => .ok (.variable ty res sc (some init))
     | none => .error (.malformedSection "bad OpVariable storage class")
   | _, _ => .error (.malformedSection "malformed global/constant declaration")
 
@@ -877,8 +891,8 @@ theorem decodeGlobalRaw_encode (g : SpirvGlobalDecl) :
   cases g with
   | const64 ty res val =>
     simp [encodeGlobalRaw, decodeGlobalRaw, u64OfLoHi32_lo_hi]
-  | «variable» ty res sc =>
-    simp [encodeGlobalRaw, decodeGlobalRaw, SpirvStorageClass.ofWord?_toWord]
+  | «variable» ty res sc init =>
+    cases init <;> simp [encodeGlobalRaw, decodeGlobalRaw, SpirvStorageClass.ofWord?_toWord]
   | _ => simp [encodeGlobalRaw, decodeGlobalRaw]
 
 def encodeTyGlobalRaw : SpirvTyGlobal → RawSpirvInst
@@ -908,19 +922,26 @@ theorem decodeTyGlobalRaw_encode (x : SpirvTyGlobal) :
     simp [encodeTyGlobalRaw, decodeTyGlobalRaw, hop, decodeGlobalRaw_encode]
 
 def encodeInstRaw : SpirvInst → RawSpirvInst
-  | .opVariable ty res sc => ⟨59, [ty, res, sc.toWord]⟩
+  | .opExtInst ty res setId instNum args => ⟨12, ty :: res :: setId :: instNum :: args⟩
+  | .opVariable ty res sc init =>
+    ⟨59, match init with | none => [ty, res, sc.toWord] | some i => [ty, res, sc.toWord, i]⟩
   | .opFunctionCall ty res fn args => ⟨57, ty :: res :: fn :: args⟩
   | .opLoad ty res ptr => ⟨61, [ty, res, ptr]⟩
   | .opStore ptr val => ⟨62, [ptr, val]⟩
   | .opAccessChain ty res base indices => ⟨65, ty :: res :: base :: indices⟩
+  | .opVectorShuffle ty res v1 v2 comps => ⟨79, ty :: res :: v1 :: v2 :: comps⟩
   | .opCompositeConstruct ty res parts => ⟨80, ty :: res :: parts⟩
   | .opCompositeExtract ty res comp idx => ⟨81, [ty, res, comp, idx]⟩
   | .opUConvert ty res val => ⟨113, [ty, res, val]⟩
   | .opIAdd ty res a b => ⟨128, [ty, res, a, b]⟩
   | .opISub ty res a b => ⟨130, [ty, res, a, b]⟩
   | .opIMul ty res a b => ⟨132, [ty, res, a, b]⟩
+  | .opUDiv ty res a b => ⟨134, [ty, res, a, b]⟩
   | .opUMod ty res a b => ⟨137, [ty, res, a, b]⟩
   | .opUMulExtended ty res a b => ⟨151, [ty, res, a, b]⟩
+  | .opLogicalOr ty res a b => ⟨166, [ty, res, a, b]⟩
+  | .opLogicalAnd ty res a b => ⟨167, [ty, res, a, b]⟩
+  | .opLogicalNot ty res a => ⟨168, [ty, res, a]⟩
   | .opSelect ty res cond t f => ⟨169, [ty, res, cond, t, f]⟩
   | .opIEqual ty res a b => ⟨170, [ty, res, a, b]⟩
   | .opINotEqual ty res a b => ⟨171, [ty, res, a, b]⟩
@@ -931,46 +952,60 @@ def encodeInstRaw : SpirvInst → RawSpirvInst
   | .opULessThanEqual ty res a b => ⟨178, [ty, res, a, b]⟩
   | .opShiftRightLogical ty res base sh => ⟨194, [ty, res, base, sh]⟩
   | .opShiftLeftLogical ty res base sh => ⟨196, [ty, res, base, sh]⟩
-  | .opBitwiseXor ty res a b => ⟨198, [ty, res, a, b]⟩
   | .opBitwiseOr ty res a b => ⟨197, [ty, res, a, b]⟩
+  | .opBitwiseXor ty res a b => ⟨198, [ty, res, a, b]⟩
   | .opBitwiseAnd ty res a b => ⟨199, [ty, res, a, b]⟩
   | .opNot ty res a => ⟨200, [ty, res, a]⟩
   | .opBitReverse ty res a => ⟨204, [ty, res, a]⟩
-  | .opControlBarrier execS memS sem => ⟨224, [execS.toWord, memS.toWord, sem]⟩
+  | .opControlBarrier execS memS sem => ⟨224, [execS, memS, sem]⟩
+  | .opMemoryBarrier memS sem => ⟨225, [memS, sem]⟩
+  | .opPhi ty res incoming => ⟨245, ty :: res :: incoming⟩
   | .opLoopMerge mergeL contL ctrl => ⟨246, [mergeL, contL, ctrl]⟩
   | .opSelectionMerge mergeL ctrl => ⟨247, [mergeL, ctrl]⟩
   | .opLabel lbl => ⟨248, [lbl]⟩
   | .opBranch tgt => ⟨249, [tgt]⟩
   | .opBranchConditional cond tL fL => ⟨250, [cond, tL, fL]⟩
+  | .opSwitch sel defL tgts => ⟨251, sel :: defL :: tgts⟩
   | .opReturn => ⟨253, []⟩
   | .opReturnValue v => ⟨254, [v]⟩
 
 def isBodyOpcode (op : Nat) : Bool :=
-  op == 57 || op == 59 || op == 61 || op == 62 || op == 65 || op == 80 || op == 81 ||
-  op == 113 || op == 128 || op == 130 || op == 132 || op == 137 || op == 151 || op == 169 ||
-  op == 170 || op == 171 || op == 172 || op == 174 || op == 175 || op == 176 || op == 178 ||
-  op == 194 || op == 196 || op == 197 || op == 198 || op == 199 || op == 200 || op == 204 ||
-  op == 224 || op == 246 || op == 247 || op == 248 || op == 249 || op == 250 || op == 253 ||
-  op == 254
+  op == 12 || op == 57 || op == 59 || op == 61 || op == 62 || op == 65 || op == 79 ||
+  op == 80 || op == 81 || op == 113 || op == 128 || op == 130 || op == 132 || op == 134 ||
+  op == 137 || op == 151 || op == 166 || op == 167 || op == 168 || op == 169 || op == 170 ||
+  op == 171 || op == 172 || op == 174 || op == 175 || op == 176 || op == 178 || op == 194 ||
+  op == 196 || op == 197 || op == 198 || op == 199 || op == 200 || op == 204 || op == 224 ||
+  op == 225 || op == 245 || op == 246 || op == 247 || op == 248 || op == 249 || op == 250 ||
+  op == 251 || op == 253 || op == 254
 
 def decodeInstRaw (r : RawSpirvInst) : Except SpirvDecodeError SpirvInst :=
   match r.opcode, r.operands with
+  | 12, ty :: res :: setId :: instNum :: args => .ok (.opExtInst ty res setId instNum args)
   | 59, [ty, res, scWord] =>
     match SpirvStorageClass.ofWord? scWord with
-    | some sc => .ok (.opVariable ty res sc)
+    | some sc => .ok (.opVariable ty res sc none)
+    | none => .error (.malformedSection "bad function OpVariable storage class")
+  | 59, [ty, res, scWord, init] =>
+    match SpirvStorageClass.ofWord? scWord with
+    | some sc => .ok (.opVariable ty res sc (some init))
     | none => .error (.malformedSection "bad function OpVariable storage class")
   | 57, ty :: res :: fn :: args => .ok (.opFunctionCall ty res fn args)
   | 61, [ty, res, ptr] => .ok (.opLoad ty res ptr)
   | 62, [ptr, val] => .ok (.opStore ptr val)
   | 65, ty :: res :: base :: indices => .ok (.opAccessChain ty res base indices)
+  | 79, ty :: res :: v1 :: v2 :: comps => .ok (.opVectorShuffle ty res v1 v2 comps)
   | 80, ty :: res :: parts => .ok (.opCompositeConstruct ty res parts)
   | 81, [ty, res, comp, idx] => .ok (.opCompositeExtract ty res comp idx)
   | 113, [ty, res, val] => .ok (.opUConvert ty res val)
   | 128, [ty, res, a, b] => .ok (.opIAdd ty res a b)
   | 130, [ty, res, a, b] => .ok (.opISub ty res a b)
   | 132, [ty, res, a, b] => .ok (.opIMul ty res a b)
+  | 134, [ty, res, a, b] => .ok (.opUDiv ty res a b)
   | 137, [ty, res, a, b] => .ok (.opUMod ty res a b)
   | 151, [ty, res, a, b] => .ok (.opUMulExtended ty res a b)
+  | 166, [ty, res, a, b] => .ok (.opLogicalOr ty res a b)
+  | 167, [ty, res, a, b] => .ok (.opLogicalAnd ty res a b)
+  | 168, [ty, res, a] => .ok (.opLogicalNot ty res a)
   | 169, [ty, res, cond, t, f] => .ok (.opSelect ty res cond t f)
   | 170, [ty, res, a, b] => .ok (.opIEqual ty res a b)
   | 171, [ty, res, a, b] => .ok (.opINotEqual ty res a b)
@@ -981,20 +1016,20 @@ def decodeInstRaw (r : RawSpirvInst) : Except SpirvDecodeError SpirvInst :=
   | 178, [ty, res, a, b] => .ok (.opULessThanEqual ty res a b)
   | 194, [ty, res, base, sh] => .ok (.opShiftRightLogical ty res base sh)
   | 196, [ty, res, base, sh] => .ok (.opShiftLeftLogical ty res base sh)
-  | 198, [ty, res, a, b] => .ok (.opBitwiseXor ty res a b)
   | 197, [ty, res, a, b] => .ok (.opBitwiseOr ty res a b)
+  | 198, [ty, res, a, b] => .ok (.opBitwiseXor ty res a b)
   | 199, [ty, res, a, b] => .ok (.opBitwiseAnd ty res a b)
   | 200, [ty, res, a] => .ok (.opNot ty res a)
   | 204, [ty, res, a] => .ok (.opBitReverse ty res a)
-  | 224, [es, ms, sem] =>
-    match SpirvScope.ofWord? es, SpirvScope.ofWord? ms with
-    | some eScope, some mScope => .ok (.opControlBarrier eScope mScope sem)
-    | _, _ => .error (.malformedSection "bad OpControlBarrier scope")
+  | 224, [es, ms, sem] => .ok (.opControlBarrier es ms sem)
+  | 225, [ms, sem] => .ok (.opMemoryBarrier ms sem)
+  | 245, ty :: res :: incoming => .ok (.opPhi ty res incoming)
   | 246, [mL, cL, ctrl] => .ok (.opLoopMerge mL cL ctrl)
   | 247, [mL, ctrl] => .ok (.opSelectionMerge mL ctrl)
   | 248, [lbl] => .ok (.opLabel lbl)
   | 249, [tgt] => .ok (.opBranch tgt)
   | 250, [cond, tL, fL] => .ok (.opBranchConditional cond tL fL)
+  | 251, sel :: defL :: tgts => .ok (.opSwitch sel defL tgts)
   | 253, [] => .ok .opReturn
   | 254, [v] => .ok (.opReturnValue v)
   | _, _ => .error (.malformedSection "unknown body instruction")
@@ -1002,52 +1037,9 @@ def decodeInstRaw (r : RawSpirvInst) : Except SpirvDecodeError SpirvInst :=
 theorem decodeInstRaw_encode (i : SpirvInst) :
     decodeInstRaw (encodeInstRaw i) = .ok i := by
   cases i with
-  | opVariable ty res sc =>
-    change (match SpirvStorageClass.ofWord? sc.toWord with
-      | some c => .ok (.opVariable ty res c)
-      | none => .error (.malformedSection "bad function OpVariable storage class")) =
-      (Except.ok (.opVariable ty res sc) : Except SpirvDecodeError SpirvInst)
-    rw [SpirvStorageClass.ofWord?_toWord]
-  | opFunctionCall _ _ _ _ => rfl
-  | opLoad _ _ _ => rfl
-  | opStore _ _ => rfl
-  | opAccessChain _ _ _ _ => rfl
-  | opCompositeConstruct _ _ _ => rfl
-  | opCompositeExtract _ _ _ _ => rfl
-  | opUConvert _ _ _ => rfl
-  | opIAdd _ _ _ _ => rfl
-  | opISub _ _ _ _ => rfl
-  | opIMul _ _ _ _ => rfl
-  | opUMod _ _ _ _ => rfl
-  | opUMulExtended _ _ _ _ => rfl
-  | opSelect _ _ _ _ _ => rfl
-  | opIEqual _ _ _ _ => rfl
-  | opINotEqual _ _ _ _ => rfl
-  | opUGreaterThan _ _ _ _ => rfl
-  | opUGreaterThanEqual _ _ _ _ => rfl
-  | opSGreaterThanEqual _ _ _ _ => rfl
-  | opULessThan _ _ _ _ => rfl
-  | opULessThanEqual _ _ _ _ => rfl
-  | opShiftRightLogical _ _ _ _ => rfl
-  | opShiftLeftLogical _ _ _ _ => rfl
-  | opBitwiseXor _ _ _ _ => rfl
-  | opBitwiseOr _ _ _ _ => rfl
-  | opBitwiseAnd _ _ _ _ => rfl
-  | opNot _ _ _ => rfl
-  | opBitReverse _ _ _ => rfl
-  | opControlBarrier es ms sem =>
-    change (match SpirvScope.ofWord? es.toWord, SpirvScope.ofWord? ms.toWord with
-      | some e, some m => .ok (.opControlBarrier e m sem)
-      | _, _ => .error (.malformedSection "bad OpControlBarrier scope")) =
-      (Except.ok (.opControlBarrier es ms sem) : Except SpirvDecodeError SpirvInst)
-    rw [SpirvScope.ofWord?_toWord, SpirvScope.ofWord?_toWord]
-  | opLoopMerge _ _ _ => rfl
-  | opSelectionMerge _ _ => rfl
-  | opLabel _ => rfl
-  | opBranch _ => rfl
-  | opBranchConditional _ _ _ => rfl
-  | opReturn => rfl
-  | opReturnValue _ => rfl
+  | opVariable ty res sc init =>
+    cases init <;> simp [encodeInstRaw, decodeInstRaw, SpirvStorageClass.ofWord?_toWord]
+  | _ => rfl
 
 def encodeParamRaw (p : UInt32 × UInt32) : RawSpirvInst := ⟨55, [p.1, p.2]⟩
 
@@ -1541,6 +1533,18 @@ inductive SimtExecError where
   | barrierDivergence
   deriving DecidableEq, Repr
 
+/-- Resolve a SPIR-V 32-bit constant `<id>` from `SpirvModuleEnv` (or treat `w` as an inline word
+    when `env.initConst w.toNat = .vUndef`). -/
+def resolveSpirvU32Const (env : SpirvModuleEnv) (w : UInt32) : UInt32 :=
+  match env.initConst w.toNat with
+  | .vU32 c => c
+  | _ => w
+
+def isWorkgroupAcqRelBarrier (env : SpirvModuleEnv) (es ms sem : UInt32) : Bool :=
+  resolveSpirvU32Const env es == SpirvScope.workgroup.toWord &&
+  resolveSpirvU32Const env ms == SpirvScope.workgroup.toWord &&
+  resolveSpirvU32Const env sem == spirvSemWorkgroupAcqRel
+
 /-- Pure per-lane ALU + `OpAccessChain` + `OpLoad` evaluation (excluding `OpStore` / `OpControlBarrier`). -/
 def evalLanePureInst (env : SpirvModuleEnv) (mem : GpuMemState) (regs : Nat → SpirvVal)
     (inst : SpirvInst) : Except SimtExecError (Nat × SpirvVal) :=
@@ -1602,6 +1606,16 @@ def evalLanePureInst (env : SpirvModuleEnv) (mem : GpuMemState) (regs : Nat → 
     | .vU32 a, .vU32 b => .ok (resId.toNat, .vU32 (a * b))
     | .vU64 a, .vU64 b => .ok (resId.toNat, .vU64 (a * b))
     | _, _ => .error .typeMismatch
+  | .opUDiv _ resId aId bId =>
+    match regs aId.toNat, regs bId.toNat with
+    | .vU32 a, .vU32 b => .ok (resId.toNat, .vU32 (if b == 0 then 0 else a / b))
+    | .vU64 a, .vU64 b => .ok (resId.toNat, .vU64 (if b == 0 then 0 else a / b))
+    | _, _ => .error .typeMismatch
+  | .opUMod _ resId aId bId =>
+    match regs aId.toNat, regs bId.toNat with
+    | .vU32 a, .vU32 b => .ok (resId.toNat, .vU32 (if b == 0 then 0 else a % b))
+    | .vU64 a, .vU64 b => .ok (resId.toNat, .vU64 (if b == 0 then 0 else a % b))
+    | _, _ => .error .typeMismatch
   | .opUMulExtended _ resId aId bId =>
     match regs aId.toNat, regs bId.toNat with
     | .vU32 a, .vU32 b =>
@@ -1611,6 +1625,18 @@ def evalLanePureInst (env : SpirvModuleEnv) (mem : GpuMemState) (regs : Nat → 
       let prod := a.toNat * b.toNat
       .ok (resId.toNat, .vPair64 (UInt64.ofNat (prod % (2 ^ 64))) (UInt64.ofNat (prod / (2 ^ 64))))
     | _, _ => .error .typeMismatch
+  | .opLogicalOr _ resId aId bId =>
+    match regs aId.toNat, regs bId.toNat with
+    | .vBool a, .vBool b => .ok (resId.toNat, .vBool (a || b))
+    | _, _ => .error .typeMismatch
+  | .opLogicalAnd _ resId aId bId =>
+    match regs aId.toNat, regs bId.toNat with
+    | .vBool a, .vBool b => .ok (resId.toNat, .vBool (a && b))
+    | _, _ => .error .typeMismatch
+  | .opLogicalNot _ resId aId =>
+    match regs aId.toNat with
+    | .vBool a => .ok (resId.toNat, .vBool (!a))
+    | _ => .error .typeMismatch
   | .opSelect _ resId condId tId fId =>
     match regs condId.toNat, regs tId.toNat, regs fId.toNat with
     | .vBool c, .vU32 t, .vU32 f => .ok (resId.toNat, .vU32 (if c then t else f))
@@ -1621,6 +1647,16 @@ def evalLanePureInst (env : SpirvModuleEnv) (mem : GpuMemState) (regs : Nat → 
     | .vU32 a, .vU32 b => .ok (resId.toNat, .vBool (a == b))
     | .vU64 a, .vU64 b => .ok (resId.toNat, .vBool (a == b))
     | _, _ => .error .typeMismatch
+  | .opINotEqual _ resId aId bId =>
+    match regs aId.toNat, regs bId.toNat with
+    | .vU32 a, .vU32 b => .ok (resId.toNat, .vBool (a != b))
+    | .vU64 a, .vU64 b => .ok (resId.toNat, .vBool (a != b))
+    | _, _ => .error .typeMismatch
+  | .opUGreaterThan _ resId aId bId =>
+    match regs aId.toNat, regs bId.toNat with
+    | .vU32 a, .vU32 b => .ok (resId.toNat, .vBool (decide (b.toNat < a.toNat)))
+    | .vU64 a, .vU64 b => .ok (resId.toNat, .vBool (decide (b.toNat < a.toNat)))
+    | _, _ => .error .typeMismatch
   | .opUGreaterThanEqual _ resId aId bId =>
     match regs aId.toNat, regs bId.toNat with
     | .vU32 a, .vU32 b => .ok (resId.toNat, .vBool (decide (b.toNat ≤ a.toNat)))
@@ -1630,6 +1666,11 @@ def evalLanePureInst (env : SpirvModuleEnv) (mem : GpuMemState) (regs : Nat → 
     match regs aId.toNat, regs bId.toNat with
     | .vU32 a, .vU32 b => .ok (resId.toNat, .vBool (decide (a.toNat < b.toNat)))
     | .vU64 a, .vU64 b => .ok (resId.toNat, .vBool (decide (a.toNat < b.toNat)))
+    | _, _ => .error .typeMismatch
+  | .opULessThanEqual _ resId aId bId =>
+    match regs aId.toNat, regs bId.toNat with
+    | .vU32 a, .vU32 b => .ok (resId.toNat, .vBool (decide (a.toNat ≤ b.toNat)))
+    | .vU64 a, .vU64 b => .ok (resId.toNat, .vBool (decide (a.toNat ≤ b.toNat)))
     | _, _ => .error .typeMismatch
   | .opShiftRightLogical _ resId baseId shId =>
     match regs baseId.toNat, regs shId.toNat with
@@ -1643,21 +1684,26 @@ def evalLanePureInst (env : SpirvModuleEnv) (mem : GpuMemState) (regs : Nat → 
     | .vU64 a, .vU64 sh =>
       .ok (resId.toNat, .vU64 (UInt64.ofNat ((a.toNat * 2 ^ (sh.toNat % 64)) % (2 ^ 64))))
     | _, _ => .error .typeMismatch
-  | .opBitwiseXor _ resId aId bId =>
-    match regs aId.toNat, regs bId.toNat with
-    | .vU32 a, .vU32 b => .ok (resId.toNat, .vU32 (a ^^^ b))
-    | .vU64 a, .vU64 b => .ok (resId.toNat, .vU64 (a ^^^ b))
-    | _, _ => .error .typeMismatch
   | .opBitwiseOr _ resId aId bId =>
     match regs aId.toNat, regs bId.toNat with
     | .vU32 a, .vU32 b => .ok (resId.toNat, .vU32 (a ||| b))
     | .vU64 a, .vU64 b => .ok (resId.toNat, .vU64 (a ||| b))
+    | _, _ => .error .typeMismatch
+  | .opBitwiseXor _ resId aId bId =>
+    match regs aId.toNat, regs bId.toNat with
+    | .vU32 a, .vU32 b => .ok (resId.toNat, .vU32 (a ^^^ b))
+    | .vU64 a, .vU64 b => .ok (resId.toNat, .vU64 (a ^^^ b))
     | _, _ => .error .typeMismatch
   | .opBitwiseAnd _ resId aId bId =>
     match regs aId.toNat, regs bId.toNat with
     | .vU32 a, .vU32 b => .ok (resId.toNat, .vU32 (a &&& b))
     | .vU64 a, .vU64 b => .ok (resId.toNat, .vU64 (a &&& b))
     | _, _ => .error .typeMismatch
+  | .opNot _ resId aId =>
+    match regs aId.toNat with
+    | .vU32 a => .ok (resId.toNat, .vU32 (~~~a))
+    | .vU64 a => .ok (resId.toNat, .vU64 (~~~a))
+    | _ => .error .typeMismatch
   | _ => .error .typeMismatch
 
 /-- Apply a single lane's `OpStore` to `GpuMemState` with `64 KiB` LDS bounds enforcement. -/
@@ -1742,12 +1788,11 @@ def stepWave32One (env : SpirvModuleEnv) (prog : List SpirvInst) (wSt : Wave32St
   else
     match prog[wSt.pc]? with
     | none => .ok (wSt, mem)
-    | some (.opControlBarrier .workgroup .workgroup sem) =>
-      if sem == spirvSemWorkgroupAcqRel then
+    | some (.opControlBarrier es ms sem) =>
+      if isWorkgroupAcqRelBarrier env es ms sem then
         .ok ({ wSt with atBarrier := true }, mem)
       else
         .error .typeMismatch
-    | some (.opControlBarrier _ _ _) => .error .typeMismatch
     | some (.opStore ptrId valId) =>
       match execWaveStoreLanes wSt.execMask wSt.laneRegs ptrId valId wave32Lanes mem with
       | .error e => .error e
@@ -1823,7 +1868,7 @@ def runOneBarrierEpoch (env : SpirvModuleEnv) (cfg : WorkgroupConfig) (epoch : L
     (hasTrailingBarrier : Bool) (sched : List Nat) (st : WorkgroupExecState) :
     Except SimtExecError WorkgroupExecState :=
   let prog := if hasTrailingBarrier then
-      epoch ++ [.opControlBarrier .workgroup .workgroup spirvSemWorkgroupAcqRel]
+      epoch ++ [.opControlBarrier SpirvScope.workgroup.toWord SpirvScope.workgroup.toWord spirvSemWorkgroupAcqRel]
     else
       epoch
   let resetWaves : WorkgroupExecState :=
@@ -2772,15 +2817,22 @@ def checkInstSimtCt (pol : SimtCtPolicy) : SpirvInst → Bool
     pol.regSec ptrId.toNat == .pub
   | .opCompositeExtract _ resId compId _ =>
     (pol.regSec resId.toNat == .sec) || (pol.regSec compId.toNat == .pub)
-  | .opUConvert _ resId valId =>
+  | .opUConvert _ resId valId
+  | .opNot _ resId valId
+  | .opLogicalNot _ resId valId =>
     (pol.regSec resId.toNat == .sec) || (pol.regSec valId.toNat == .pub)
   | .opIAdd _ resId aId bId
   | .opISub _ resId aId bId
   | .opIMul _ resId aId bId
   | .opUMulExtended _ resId aId bId
+  | .opLogicalOr _ resId aId bId
+  | .opLogicalAnd _ resId aId bId
   | .opIEqual _ resId aId bId
+  | .opINotEqual _ resId aId bId
+  | .opUGreaterThan _ resId aId bId
   | .opUGreaterThanEqual _ resId aId bId
   | .opULessThan _ resId aId bId
+  | .opULessThanEqual _ resId aId bId
   | .opShiftRightLogical _ resId aId bId
   | .opShiftLeftLogical _ resId aId bId
   | .opBitwiseXor _ resId aId bId
@@ -2791,7 +2843,10 @@ def checkInstSimtCt (pol : SimtCtPolicy) : SpirvInst → Bool
   | .opSelect _ resId cId tId fId =>
     (pol.regSec resId.toNat == .sec) ||
     ((pol.regSec cId.toNat == .pub) && (pol.regSec tId.toNat == .pub) && (pol.regSec fId.toNat == .pub))
-  | .opControlBarrier .workgroup .workgroup sem => sem == spirvSemWorkgroupAcqRel
+  | .opControlBarrier es ms sem =>
+    (es == SpirvScope.workgroup.toWord) &&
+    (ms == SpirvScope.workgroup.toWord) &&
+    (sem == spirvSemWorkgroupAcqRel)
   | .opLabel _ => true
   | _ => false
 
@@ -2829,6 +2884,7 @@ def checkInstSimtCtStrict (env : SpirvModuleEnv) (pol : SimtCtPolicy) (inst : Sp
        decide (sc1 = sc2 ∧ b1 = b2 ∧ w1 = w2 ∧ sc1 = sc3 ∧ b1 = b3 ∧ w1 = w3)
      | _, _, _ => false)
   | .opAccessChain _ _ _ _ => false
+  | .opControlBarrier es ms sem => isWorkgroupAcqRelBarrier env es ms sem
   | other => checkInstSimtCt pol other
 
 def checkProgSimtCt (env : SpirvModuleEnv) (pol : SimtCtPolicy) (prog : List SpirvInst) : Bool :=
@@ -2993,17 +3049,16 @@ private theorem evalLanePureInst_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolic
         env.ptrInfo d₁ = some (sc, b, w))
     | _, _ => False := by
   cases inst with
-  | opVariable _ _ _
-  | opFunctionCall _ _ _ _ | opCompositeConstruct _ _ _ | opUMod _ _ _ _
-  | opINotEqual _ _ _ _ | opUGreaterThan _ _ _ _ | opSGreaterThanEqual _ _ _ _
-  | opULessThanEqual _ _ _ _ | opNot _ _ _ | opBitReverse _ _ _
-  | opReturn | opReturnValue _ =>
+  | opExtInst _ _ _ _ _ | opVariable _ _ _ _
+  | opFunctionCall _ _ _ _ | opVectorShuffle _ _ _ _ _ | opCompositeConstruct _ _ _
+  | opUDiv _ _ _ _ | opUMod _ _ _ _ | opSGreaterThanEqual _ _ _ _ | opBitReverse _ _ _
+  | opMemoryBarrier _ _ | opPhi _ _ _
+  | opLoopMerge _ _ _ | opSelectionMerge _ _ | opBranch _ | opBranchConditional _ _ _
+  | opSwitch _ _ _ | opReturn | opReturnValue _ =>
     simp [checkInstSimtCtStrict, checkInstSimtCt] at hCt
   | opStore p v => exact False.elim (hNotStore p v rfl)
   | opControlBarrier es ms sem => exact False.elim (hNotBarrier es ms sem rfl)
   | opLabel l => exact False.elim (hNotLabel l rfl)
-  | opLoopMerge _ _ _ | opSelectionMerge _ _ | opBranch _ | opBranchConditional _ _ _ =>
-    simp [checkInstSimtCtStrict, checkInstSimtCt] at hCt
   | opAccessChain tyId resId baseId indices =>
     cases indices with
     | nil => simp [checkInstSimtCtStrict] at hCt
@@ -3231,6 +3286,14 @@ private theorem evalLanePureInst_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolic
     exact evalBinU32U64_lowEq resId aId bId _ _
       (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h)
       (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h) hRegs hCt
+  | opINotEqual _ resId aId bId =>
+    exact evalBinU32U64_lowEq resId aId bId _ _
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h)
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h) hRegs hCt
+  | opUGreaterThan _ resId aId bId =>
+    exact evalBinU32U64_lowEq resId aId bId _ _
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h)
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h) hRegs hCt
   | opUGreaterThanEqual _ resId aId bId =>
     exact evalBinU32U64_lowEq resId aId bId _ _
       (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h)
@@ -3239,6 +3302,77 @@ private theorem evalLanePureInst_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolic
     exact evalBinU32U64_lowEq resId aId bId _ _
       (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h)
       (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h) hRegs hCt
+  | opULessThanEqual _ resId aId bId =>
+    exact evalBinU32U64_lowEq resId aId bId _ _
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h)
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h) hRegs hCt
+  | opLogicalOr _ resId aId bId =>
+    dsimp only [checkInstSimtCtStrict, checkInstSimtCt] at hCt
+    have hShA := hRegs.1 aId.toNat
+    have hShB := hRegs.1 bId.toNat
+    dsimp only [evalLanePureInst]
+    cases ha1 : r₁ aId.toNat <;> cases ha2 : r₂ aId.toNat <;>
+      (rw [ha1, ha2] at hShA; try cases hShA) <;>
+    cases hb1 : r₁ bId.toNat <;> cases hb2 : r₂ bId.toNat <;>
+      (rw [hb1, hb2] at hShB; try cases hShB) <;>
+    dsimp only
+    · refine ⟨rfl, trivial, fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
+      rw [hPub] at hCt; simp only [Bool.or_eq_true, Bool.and_eq_true, beq_iff_eq] at hCt
+      rcases hCt with hBad | ⟨ha, hb⟩
+      · cases hBad
+      · have ea := hRegs.2.1 _ ha; rw [ha1, ha2] at ea; cases ea
+        have eb := hRegs.2.1 _ hb; rw [hb1, hb2] at eb; cases eb
+        rfl
+    all_goals rfl
+  | opLogicalAnd _ resId aId bId =>
+    dsimp only [checkInstSimtCtStrict, checkInstSimtCt] at hCt
+    have hShA := hRegs.1 aId.toNat
+    have hShB := hRegs.1 bId.toNat
+    dsimp only [evalLanePureInst]
+    cases ha1 : r₁ aId.toNat <;> cases ha2 : r₂ aId.toNat <;>
+      (rw [ha1, ha2] at hShA; try cases hShA) <;>
+    cases hb1 : r₁ bId.toNat <;> cases hb2 : r₂ bId.toNat <;>
+      (rw [hb1, hb2] at hShB; try cases hShB) <;>
+    dsimp only
+    · refine ⟨rfl, trivial, fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
+      rw [hPub] at hCt; simp only [Bool.or_eq_true, Bool.and_eq_true, beq_iff_eq] at hCt
+      rcases hCt with hBad | ⟨ha, hb⟩
+      · cases hBad
+      · have ea := hRegs.2.1 _ ha; rw [ha1, ha2] at ea; cases ea
+        have eb := hRegs.2.1 _ hb; rw [hb1, hb2] at eb; cases eb
+        rfl
+    all_goals rfl
+  | opLogicalNot _ resId aId =>
+    dsimp only [checkInstSimtCtStrict, checkInstSimtCt] at hCt
+    have hShA := hRegs.1 aId.toNat
+    dsimp only [evalLanePureInst]
+    cases ha1 : r₁ aId.toNat <;> cases ha2 : r₂ aId.toNat <;>
+      (rw [ha1, ha2] at hShA; try cases hShA) <;>
+    dsimp only
+    · refine ⟨rfl, trivial, fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
+      rw [hPub] at hCt; simp only [Bool.or_eq_true, beq_iff_eq] at hCt
+      rcases hCt with hBad | ha
+      · cases hBad
+      · have ea := hRegs.2.1 _ ha; rw [ha1, ha2] at ea; cases ea; rfl
+    all_goals rfl
+  | opNot _ resId aId =>
+    dsimp only [checkInstSimtCtStrict, checkInstSimtCt] at hCt
+    have hShA := hRegs.1 aId.toNat
+    dsimp only [evalLanePureInst]
+    cases ha1 : r₁ aId.toNat <;> cases ha2 : r₂ aId.toNat <;>
+      (rw [ha1, ha2] at hShA; try cases hShA) <;>
+    dsimp only
+    · refine ⟨rfl, trivial, fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
+      rw [hPub] at hCt; simp only [Bool.or_eq_true, beq_iff_eq] at hCt
+      rcases hCt with hBad | ha
+      · cases hBad
+      · have ea := hRegs.2.1 _ ha; rw [ha1, ha2] at ea; cases ea; rfl
+    · refine ⟨rfl, trivial, fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
+      rw [hPub] at hCt; simp only [Bool.or_eq_true, beq_iff_eq] at hCt
+      rcases hCt with hBad | ha
+      · cases hBad
+      · have ea := hRegs.2.1 _ ha; rw [ha1, ha2] at ea; cases ea; rfl
+    all_goals rfl
   | opShiftRightLogical _ resId aId bId =>
     exact evalBinU32U64_lowEq resId aId bId _ _
       (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h)
@@ -3520,24 +3654,19 @@ private theorem stepWave32One_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolicy}
         unfold checkProgSimtCt at hProgCt
         exact List.all_eq_true.mp hProgCt inst hInstMem
       cases inst with
-      | opVariable _ _ _
-      | opFunctionCall _ _ _ _ | opCompositeConstruct _ _ _ | opUMod _ _ _ _
-      | opINotEqual _ _ _ _ | opUGreaterThan _ _ _ _ | opSGreaterThanEqual _ _ _ _
-      | opULessThanEqual _ _ _ _ | opNot _ _ _ | opBitReverse _ _ _
-      | opReturn | opReturnValue _ =>
+      | opExtInst _ _ _ _ _ | opVariable _ _ _ _
+      | opFunctionCall _ _ _ _ | opVectorShuffle _ _ _ _ _ | opCompositeConstruct _ _ _
+      | opUDiv _ _ _ _ | opUMod _ _ _ _ | opSGreaterThanEqual _ _ _ _ | opBitReverse _ _ _
+      | opMemoryBarrier _ _ | opPhi _ _ _
+      | opLoopMerge _ _ _ | opSelectionMerge _ _ | opBranch _ | opBranchConditional _ _ _
+      | opSwitch _ _ _ | opReturn | opReturnValue _ =>
         simp [checkInstSimtCtStrict, checkInstSimtCt] at hInstCt
       | opControlBarrier es ms sem =>
-        cases es with
-        | workgroup =>
-          cases ms with
-          | workgroup =>
-            dsimp only
-            by_cases hSem : (sem == spirvSemWorkgroupAcqRel) = true
-            · simp only [hSem, ↓reduceIte]
-              exact ⟨⟨rfl, rfl, hMask, hLanes⟩, hMem⟩
-            · simp only [hSem, Bool.false_eq_true, ↓reduceIte]
-          | _ => rfl
-        | _ => cases ms <;> rfl
+        dsimp only
+        by_cases hBarOk : isWorkgroupAcqRelBarrier env es ms sem = true
+        · simp only [hBarOk, ↓reduceIte]
+          exact ⟨⟨rfl, rfl, hMask, hLanes⟩, hMem⟩
+        · simp only [hBarOk, Bool.false_eq_true, ↓reduceIte]
       | opStore ptrId valId =>
         dsimp only
         rw [hMask]
@@ -3559,10 +3688,12 @@ private theorem stepWave32One_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolicy}
         exact ⟨⟨rfl, rfl, hMask, hLanes⟩, hMem⟩
       | opLoad _ _ _ | opAccessChain _ _ _ _ | opCompositeExtract _ _ _ _ | opUConvert _ _ _
       | opIAdd _ _ _ _ | opISub _ _ _ _ | opIMul _ _ _ _ | opUMulExtended _ _ _ _
-      | opSelect _ _ _ _ _ | opIEqual _ _ _ _ | opUGreaterThanEqual _ _ _ _
-      | opULessThan _ _ _ _ | opShiftRightLogical _ _ _ _ | opShiftLeftLogical _ _ _ _
-      | opBitwiseXor _ _ _ _ | opBitwiseOr _ _ _ _ | opBitwiseAnd _ _ _ _
-      | opLoopMerge _ _ _ | opSelectionMerge _ _ | opBranch _ | opBranchConditional _ _ _ =>
+      | opLogicalOr _ _ _ _ | opLogicalAnd _ _ _ _ | opLogicalNot _ _ _
+      | opSelect _ _ _ _ _ | opIEqual _ _ _ _ | opINotEqual _ _ _ _
+      | opUGreaterThan _ _ _ _ | opUGreaterThanEqual _ _ _ _
+      | opULessThan _ _ _ _ | opULessThanEqual _ _ _ _
+      | opShiftRightLogical _ _ _ _ | opShiftLeftLogical _ _ _ _
+      | opBitwiseXor _ _ _ _ | opBitwiseOr _ _ _ _ | opBitwiseAnd _ _ _ _ | opNot _ _ _ =>
         dsimp only
         rw [hMask]
         have hPure := evalWavePureLanes_lowEq w₂.execMask hMem hLanes hInstCt
@@ -3668,17 +3799,11 @@ theorem simt_ct_zero_exec_divergence (env : SpirvModuleEnv) (prog : List SpirvIn
               simp only [hb, Bool.false_eq_true, ↓reduceIte, hGet] at hStep
               cases inst with
               | opControlBarrier es ms sem =>
-                cases es with
-                | workgroup =>
-                  cases ms with
-                  | workgroup =>
-                    dsimp only at hStep
-                    by_cases hSem : (sem == spirvSemWorkgroupAcqRel) = true
-                    · simp only [hSem, ↓reduceIte] at hStep
-                      injection hStep with hPair; injection hPair with hWEq _; rw [← hWEq, hMask]
-                    · simp only [hSem, Bool.false_eq_true, ↓reduceIte] at hStep; cases hStep
-                  | _ => cases hStep
-                | _ => cases ms <;> cases hStep
+                dsimp only at hStep
+                by_cases hBarOk : isWorkgroupAcqRelBarrier env es ms sem = true
+                · simp only [hBarOk, ↓reduceIte] at hStep
+                  injection hStep with hPair; injection hPair with hWEq _; rw [← hWEq, hMask]
+                · simp only [hBarOk, Bool.false_eq_true, ↓reduceIte] at hStep; cases hStep
               | opStore ptrId valId =>
                 dsimp only at hStep
                 cases hE : execWaveStoreLanes wSt.execMask wSt.laneRegs ptrId valId wave32Lanes mem with
@@ -3797,14 +3922,33 @@ theorem production_butterfly_lds_bank_conflict_free_bounded (stage wave side : N
 
 #verify_inhabited production_butterfly_lds_bank_conflict_free_bounded production_butterfly_address_inhabited
 
-/-- Normative opcode regressions, independent of encoder/decoder roundtripping. -/
+/-- Normative Khronos SPIR-V 1.5/1.6 opcode regressions (`OpBitwiseOr = 197`,
+    `OpBitwiseXor = 198`, `OpBitwiseAnd = 199`, `OpIEqual = 170`, `OpUGreaterThanEqual = 174`,
+    `OpULessThan = 176`), independent of encoder/decoder roundtripping. -/
 theorem spirv_normative_bitwise_and_comparison_decode :
     decodeInstRaw ⟨197, [1, 2, 3, 4]⟩ = .ok (.opBitwiseOr 1 2 3 4) ∧
     decodeInstRaw ⟨198, [1, 2, 3, 4]⟩ = .ok (.opBitwiseXor 1 2 3 4) ∧
+    decodeInstRaw ⟨199, [1, 2, 3, 4]⟩ = .ok (.opBitwiseAnd 1 2 3 4) ∧
     decodeInstRaw ⟨170, [1, 2, 3, 4]⟩ = .ok (.opIEqual 1 2 3 4) ∧
     decodeInstRaw ⟨174, [1, 2, 3, 4]⟩ = .ok (.opUGreaterThanEqual 1 2 3 4) ∧
     decodeInstRaw ⟨176, [1, 2, 3, 4]⟩ = .ok (.opULessThan 1 2 3 4) := by
-  exact ⟨rfl, rfl, rfl, rfl, rfl⟩
+  exact ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+/-- `#tooth` Swapping Khronos SPIR-V `OpBitwiseOr = 197` and `OpBitwiseXor = 198` is rejected
+    both at binary instruction decode AND under per-lane VALU evaluation (`1 ||| 3 = 3 ≠ 2 = 1 ^^^ 3`). -/
+theorem tooth_swapped_spirv_or_xor_corrupts_word_and_alu :
+    let sampleRegs : Nat → SpirvVal := fun r =>
+      if r == 3 then .vU32 1 else if r == 4 then .vU32 3 else .vUndef
+    let sampleMem : GpuMemState := { lds := fun _ => 0, ssbo := fun _ _ => 0, pushConsts := fun _ => 0 }
+    decodeInstRaw ⟨197, [1, 2, 3, 4]⟩ ≠ .ok (.opBitwiseXor 1 2 3 4) ∧
+    decodeInstRaw ⟨198, [1, 2, 3, 4]⟩ ≠ .ok (.opBitwiseOr 1 2 3 4) ∧
+    evalLanePureInst twoWaveReductionEnv sampleMem sampleRegs (.opBitwiseOr 8 2 3 4) = .ok (2, .vU32 3) ∧
+    evalLanePureInst twoWaveReductionEnv sampleMem sampleRegs (.opBitwiseXor 8 2 3 4) = .ok (2, .vU32 2) ∧
+    evalLanePureInst twoWaveReductionEnv sampleMem sampleRegs (.opBitwiseOr 8 2 3 4) ≠
+      evalLanePureInst twoWaveReductionEnv sampleMem sampleRegs (.opBitwiseXor 8 2 3 4) := by
+  refine ⟨by decide, by decide, rfl, rfl, by decide⟩
+
+#tooth_pair spirv_normative_bitwise_and_comparison_decode vs tooth_swapped_spirv_or_xor_corrupts_word_and_alu
 
 end Qsag
 end

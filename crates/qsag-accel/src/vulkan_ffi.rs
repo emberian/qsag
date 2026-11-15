@@ -4906,7 +4906,7 @@ impl RawVulkanEngine {
         }
 
         const CHUNK_WORDS: usize = 4 * 1024 * 1024; // 32 MiB staging slices
-        let staging_cap_words = total_poly_words.min(CHUNK_WORDS).max(4);
+        let staging_cap_words = total_poly_words.clamp(4, CHUNK_WORDS);
         let mut subs = 0u64;
 
         unsafe {

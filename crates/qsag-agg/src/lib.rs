@@ -131,7 +131,7 @@ static WORKER_LIMIT_OVERRIDE: std::sync::atomic::AtomicUsize =
 
 #[cfg(feature = "std")]
 #[inline]
-fn base_parallel_workers() -> usize {
+pub(crate) fn base_parallel_workers() -> usize {
     static WORKERS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *WORKERS.get_or_init(|| {
         let available = std::thread::available_parallelism()
@@ -177,12 +177,19 @@ pub fn with_worker_limit<R>(max_workers: usize, f: impl FnOnce() -> R) -> R {
 static ACTIVE_EXTRA_WORKERS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+/// Count of currently active extra OS worker threads spawned in outer `qsag-agg` scopes.
+#[cfg(feature = "std")]
+#[inline]
+pub(crate) fn active_scoped_workers() -> usize {
+    ACTIVE_EXTRA_WORKERS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Best-effort count of currently unreserved worker slots (including the calling thread).
 #[cfg(feature = "std")]
 #[inline]
 pub(crate) fn available_worker_budget() -> usize {
     let cap = parallel_workers();
-    let busy = ACTIVE_EXTRA_WORKERS.load(std::sync::atomic::Ordering::Relaxed);
+    let busy = active_scoped_workers();
     cap.saturating_sub(busy).max(1)
 }
 
@@ -535,13 +542,18 @@ impl HemAggregatedProof {
         self.root.num_shard_batches()
     }
 
-    /// Serialize to canonical self-delimiting wire bytes (`AGG_WIRE_MAGIC` header).
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::new();
+    /// Append canonical self-delimiting wire bytes (`AGG_WIRE_MAGIC` header) to `out`.
+    pub(crate) fn push_wire_bytes(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(AGG_WIRE_MAGIC);
         out.push(self.profile as u8);
         out.extend_from_slice(&self.committee_root);
-        self.root.push_bytes(&mut out);
+        self.root.push_bytes(out);
+    }
+
+    /// Serialize to canonical self-delimiting wire bytes (`AGG_WIRE_MAGIC` header).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(65_536);
+        self.push_wire_bytes(&mut out);
         out
     }
 
@@ -1911,7 +1923,49 @@ mod tests {
             }));
         }
 
-        // 6. Truncated transcripts across every wire section must cleanly return `MalformedWireBytes`
+        // 6. Prover-supplied schedule mutations (`[AGG-03]`): `verify_shard_batch` and
+        //    `verify_shard_batch_with_regime` must pin `proof.schedule == expected_regime.schedule(num_vars)`.
+        assert!(crate::arithmetize::verify_shard_batch(
+            &pks,
+            &proof.committee_root,
+            proof.profile,
+            &mode,
+            &leaf,
+        ));
+        assert!(rejects(&|l| {
+            l.schedule.stages[0].num_queries -= 1;
+        }));
+        assert!(rejects(&|l| {
+            l.schedule.early_stop_vars += 1;
+        }));
+        let mut weakened = leaf.clone();
+        weakened.schedule.stages[0].num_queries -= 1;
+        assert!(!crate::arithmetize::verify_shard_batch(
+            &pks,
+            &proof.committee_root,
+            proof.profile,
+            &mode,
+            &weakened,
+        ));
+        let mut classical_sched = leaf.clone();
+        classical_sched.schedule.regime = WhirSecurityRegime::BciksJohnsonClassical128;
+        assert!(!crate::arithmetize::verify_shard_batch(
+            &pks,
+            &proof.committee_root,
+            proof.profile,
+            &mode,
+            &classical_sched,
+        ));
+        assert!(!crate::arithmetize::verify_shard_batch_with_regime(
+            &pks,
+            &proof.committee_root,
+            proof.profile,
+            &mode,
+            &classical_sched,
+            WhirSecurityRegime::BciksJohnsonClassical128,
+        ));
+
+        // 7. Truncated transcripts across every wire section must cleanly return `MalformedWireBytes`
         //    with zero panics:
         for cut in [
             0usize,
