@@ -111,6 +111,7 @@ dependencies = [
 name = "qsag-quorum"
 version = "0.1.0"
 dependencies = [
+ "qsag-agg",
  "qsag-asm",
  "qsag-core",
  "qsag-verified",

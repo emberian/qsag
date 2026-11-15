@@ -1457,12 +1457,18 @@ mod authenticated_tests {
             };
             let raw = alice.seal(1, 7, b"abc").unwrap();
             for len in 0..raw.len() {
-                assert!(bob.open(0, 7, &raw[..len]).is_err(), "prefix {len} enc={encrypted}");
+                assert!(
+                    bob.open(0, 7, &raw[..len]).is_err(),
+                    "prefix {len} enc={encrypted}"
+                );
             }
             for extra in 1..=33 {
                 let mut longer = raw.clone();
                 longer.resize(raw.len() + extra, 0);
-                assert!(bob.open(0, 7, &longer).is_err(), "extended {extra} enc={encrypted}");
+                assert!(
+                    bob.open(0, 7, &longer).is_err(),
+                    "extended {extra} enc={encrypted}"
+                );
             }
             assert_eq!(bob.sequencer.recv_seq[0], 0);
             assert_eq!(bob.open(0, 7, &raw).unwrap(), b"abc");
@@ -1490,7 +1496,10 @@ mod authenticated_tests {
         for lie in [0u32, 1, 3, 5, u32::MAX, MAX_FRAME_PAYLOAD as u32 + 1] {
             let mut inner = frame.to_vec();
             inner[52..56].copy_from_slice(&lie.to_be_bytes());
-            assert_eq!(bob.open(0, 7, &remac(&inner)), Err(TransportError::Malformed));
+            assert_eq!(
+                bob.open(0, 7, &remac(&inner)),
+                Err(TransportError::Malformed)
+            );
         }
         let header = decode_frame(frame).unwrap().0;
         let empty_body = encode_frame(&header, &[]).unwrap();
