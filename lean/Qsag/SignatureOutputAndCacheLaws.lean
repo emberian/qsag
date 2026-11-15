@@ -23,12 +23,17 @@ Self-contained Lean 4.35 cryptanalytic output-distribution and cache-soundness f
    WOTS+C signatures over static child XMSS roots `computeXmssSubtreeRoot(layer - 1, childTreeIdx)`
    under `sk.skSeed`, while layer `0` always signs freshly. Proves adaptive $Q$-query view
    identity (`statisticalDistance = 0`) and exact `0` EUF-CMA advantage loss, paired with a
-   constructive polynomial-time third-message WOTS+C forgery (`w = 4, chains = 128, targetSum = 192`)
-   whenever a buggy cache reuses a bottom-layer leaf across two distinct messages.
+   constructive chain-splicing theorem under coordinatewise digit coverage and an explicit
+   third-message forgery for a deliberately weak suite (`w = 4, chains = 128, targetSum = 192`)
+   after two signatures reuse one bottom-layer leaf. This is a concrete reuse counterexample,
+   not a claim that every pair of distinct messages permits a third-message forgery.
 -/
 
 public import Qsag.HashSigs
 public import Qsag.HypertreeEufCma
+import all Init.Data.String.Defs
+import all Qsag.UcGames
+import all Qsag.Keccak
 import all Qsag.HashSigs
 import all Qsag.HypertreeEufCma
 import Qsag.Tactic.AssuranceKit
@@ -37,6 +42,96 @@ public section
 namespace Qsag
 
 set_option autoImplicit false
+set_option maxRecDepth 8192
+set_option maxHeartbeats 1000000
+
+-- Use the direct decision procedure; the generic order-derived law in this
+-- toolchain carries an avoidable classical proof dependency.
+local instance signatureUInt8LawfulBEq : LawfulBEq UInt8 where
+  eq_of_beq {a b} h := by
+    change decide (a = b) = true at h
+    exact of_decide_eq_true h
+  rfl {a} := by
+    change decide (a = a) = true
+    exact of_decide_eq_self_eq_true a
+
+local instance signatureUInt8LawfulEqOrd : Std.LawfulEqOrd UInt8 where
+  compare_self {a} := by
+    change compareOfLessAndEq a a = .eq
+    unfold compareOfLessAndEq
+    have h : ¬ a < a := by change ¬ a.toNat < a.toNat; omega
+    simp only [h, ite_false, ite_true]
+  eq_of_compare {a b} h := by
+    change compareOfLessAndEq a b = .eq at h
+    unfold compareOfLessAndEq at h
+    split at h
+    · contradiction
+    · split at h
+      · assumption
+      · contradiction
+
+local instance signatureUInt8LawfulOrderOrd : Std.LawfulOrderOrd UInt8 where
+  isLE_compare a b := by
+    change (compareOfLessAndEq a b).isLE ↔ a.toNat ≤ b.toNat
+    unfold compareOfLessAndEq
+    split
+    · rename_i h
+      change a.toNat < b.toNat at h
+      simp only [Ordering.isLE, true_iff]
+      omega
+    · rename_i h
+      change ¬ a.toNat < b.toNat at h
+      split
+      · rename_i heq
+        subst b
+        simp only [Ordering.isLE, true_iff]
+        omega
+      · rename_i hne
+        have hne' : a.toNat ≠ b.toNat := fun heq => hne (UInt8.toNat_inj.mp heq)
+        simp only [Ordering.isLE, Bool.false_eq_true, false_iff]
+        omega
+  isGE_compare a b := by
+    change (compareOfLessAndEq a b).isGE ↔ b.toNat ≤ a.toNat
+    unfold compareOfLessAndEq
+    split
+    · rename_i h
+      change a.toNat < b.toNat at h
+      simp only [Ordering.isGE, Bool.false_eq_true, false_iff]
+      omega
+    · rename_i h
+      change ¬ a.toNat < b.toNat at h
+      split
+      · rename_i heq
+        subst b
+        simp only [Ordering.isGE, true_iff]
+        omega
+      · simp only [Ordering.isGE, true_iff]
+        omega
+
+-- Literal encoding certificates avoid any UTF-8 decoding or choice principle.
+private theorem signaturePrfMsgBytes :
+    "QSAG.PQ.PRFMSG/v1".toByteArray.data.toList = [81, 83, 65, 71, 46, 80, 81, 46, 80, 82, 70, 77, 83, 71, 47, 118, 49] := by rfl
+
+private theorem signatureHMsgBytes :
+    "QSAG.PQ.HMSG/v1".toByteArray.data.toList = [81, 83, 65, 71, 46, 80, 81, 46, 72, 77, 83, 71, 47, 118, 49] := by rfl
+
+private theorem signaturePrfBytes :
+    "QSAG.PQ.PRF/v1".toByteArray.data.toList = [81, 83, 65, 71, 46, 80, 81, 46, 80, 82, 70, 47, 118, 49] := by rfl
+
+private theorem signatureThFBytes :
+    "QSAG.PQ.TH_F/v1".toByteArray.data.toList = [81, 83, 65, 71, 46, 80, 81, 46, 84, 72, 95, 70, 47, 118, 49] := by rfl
+
+private theorem signatureThHBytes :
+    "QSAG.PQ.TH_H/v1".toByteArray.data.toList = [81, 83, 65, 71, 46, 80, 81, 46, 84, 72, 95, 72, 47, 118, 49] := by rfl
+
+private theorem signatureThTlBytes :
+    "QSAG.PQ.TH_TL/v1".toByteArray.data.toList = [81, 83, 65, 71, 46, 80, 81, 46, 84, 72, 95, 84, 76, 47, 118, 49] := by rfl
+
+private theorem signatureHPreBytes :
+    "QSAG.PQ.PRE/v1".toByteArray.data.toList = [81, 83, 65, 71, 46, 80, 81, 46, 80, 82, 69, 47, 118, 49] := by rfl
+
+attribute [local simp] signaturePrfMsgBytes signatureHMsgBytes signaturePrfBytes
+  signatureThFBytes signatureThHBytes signatureThTlBytes signatureHPreBytes
 
 /-! ## 1. First-Success Counter Grinding, Tail-Abort & Statistical Coupling (`w=4, ell1=128, target=192`) -/
 
@@ -87,51 +182,38 @@ theorem firstValidCounter_some_iff (check : Nat → Bool) (maxTrials ctr : Nat) 
       ctr < maxTrials ∧ check ctr = true ∧ ∀ j, j < ctr → check j = false := by
   unfold firstValidCounter
   rw [firstValidCounterAux_some_iff]
-  simp only [Nat.zero_le, Nat.zero_add, true_and]
+  simp only [Nat.zero_le, Nat.zero_add, true_and, true_implies]
 
 /-- **Tail-Abort Exhaustion Characterization (`firstValidCounter_none_iff`)**:
     `firstValidCounter check maxTrials = none` iff every counter `< maxTrials` fails `check`. -/
 theorem firstValidCounter_none_iff (check : Nat → Bool) (maxTrials : Nat) :
     firstValidCounter check maxTrials = none ↔ ∀ ctr, ctr < maxTrials → check ctr = false := by
-  constructor
-  · intro hNone ctr hLt
-    cases hChk : check ctr
-    · rfl
-    · have hFind : ∀ k, k ≤ maxTrials → (∃ m < k, check m = true) ∨ (∀ m < k, check m = false) := by
-        intro k _
-        induction k with
-        | zero => exact .inr (fun _ hm => False.elim (Nat.not_lt_zero _ hm))
-        | succ k ih =>
-          rcases ih (by omega) with ⟨m, hmLt, hmChk⟩ | hAllFalse
-          · exact .inl ⟨m, Nat.lt_succ_of_lt hmLt, hmChk⟩
-          · cases hk : check k
-            · exact .inr (fun m hmLt => if hmEq : m = k then hmEq ▸ hk else hAllFalse m (by omega))
-            · exact .inl ⟨k, Nat.lt_succ_self k, hk⟩
-      have hMinEx : ∃ m < ctr + 1, check m = true ∧ ∀ j < m, check j = false := by
-        suffices ∀ bound, ctr < bound → ∃ m < bound, check m = true ∧ ∀ j < m, check j = false from
-          this (ctr + 1) (Nat.lt_succ_self ctr)
-        intro bound hBound
-        induction bound generalizing ctr with
-        | zero => exact False.elim (Nat.not_lt_zero _ hBound)
-        | succ b ih =>
-          rcases hFind b (by omega) with ⟨m, hmLt, hmChk⟩ | hAllFalse
-          · obtain ⟨m0, hm0Lt, hm0Chk, hm0Min⟩ := ih m hmChk hmLt
-            exact ⟨m0, Nat.lt_succ_of_lt hm0Lt, hm0Chk, hm0Min⟩
-          · have hEq : ctr = b := by
-              if hltB : ctr < b then
-                have hf := hAllFalse ctr hltB; rw [hChk] at hf; cases hf
-              else omega
-            subst hEq
-            exact ⟨ctr, Nat.lt_succ_self ctr, hChk, hAllFalse⟩
-      obtain ⟨m, hmLt, hmChk, hmMin⟩ := hMinEx
-      have hSome := (firstValidCounter_some_iff check maxTrials m).mpr ⟨by omega, hmChk, hmMin⟩
-      rw [hNone] at hSome; cases hSome
-  · intro hAll
-    cases hRes : firstValidCounter check maxTrials with
-    | none => rfl
-    | some ctr =>
-      obtain ⟨hLt, hChk, _⟩ := (firstValidCounter_some_iff check maxTrials ctr).mp hRes
-      rw [hAll ctr hLt] at hChk; cases hChk
+  have hAux : ∀ fuel cur, firstValidCounterAux check cur fuel = none ↔
+      ∀ j, cur ≤ j → j < cur + fuel → check j = false := by
+    intro fuel
+    induction fuel with
+    | zero =>
+      intro cur
+      simp only [firstValidCounterAux, true_iff, Nat.add_zero]
+      intro j hlo hhi
+      omega
+    | succ fuel ih =>
+      intro cur
+      cases h : check cur
+      · simp only [firstValidCounterAux, h, Bool.false_eq_true, ↓reduceIte, ih]
+        constructor
+        · intro hAll j hlo hhi
+          by_cases hj : j = cur
+          · simpa [hj] using h
+          · exact hAll j (by omega) (by omega)
+        · intro hAll j hlo hhi
+          exact hAll j (by omega) (by omega)
+      · simp only [firstValidCounterAux, h, ↓reduceIte, reduceCtorEq, false_iff]
+        intro hAll
+        have := hAll cur (by omega) (by omega)
+        rw [h] at this
+        cases this
+  simpa [firstValidCounter] using hAux maxTrials 0
 
 theorem firstValidCounter_congr {check₁ check₂ : Nat → Bool} {maxTrials : Nat}
     (hAgree : ∀ ctr, ctr < maxTrials → check₁ ctr = check₂ ctr) :
@@ -165,12 +247,12 @@ private theorem grindTswCounterAux_eq_firstValidCounterAux
   | 0, _ => rfl
   | fuel + 1, cur => by
     simp only [grindTswCounterAux, firstValidCounterAux]
-    cases checkTargetSum w ell1 target
-      (extractBaseWDigits w ell1 (thHashMsg suite rRand pkSeed pkRoot mu layerIdx treeIdx kpIdx cur))
-    · simp only [Bool.false_eq_true, ↓reduceIte]
+    by_cases hCheck : checkTargetSum w ell1 target
+      (extractBaseWDigits w ell1 (thHashMsg suite rRand pkSeed pkRoot mu layerIdx treeIdx kpIdx cur)) = true
+    · simp only [hCheck, ↓reduceIte, Option.map_some]
+    · simp only [hCheck, ↓reduceIte]
       exact grindTswCounterAux_eq_firstValidCounterAux suite w ell1 target
         rRand pkSeed pkRoot mu layerIdx treeIdx kpIdx fuel (cur + 1)
-    · rfl
 
 /-- **Exact Refinement (`grindTswCounter_4_128_192_eq_firstValidCounter`)**:
     Production `HashSigs.grindTswCounterAux` at `(w = 4, ell1 = 128, target = 192)` is bit-for-bit
@@ -260,6 +342,7 @@ theorem threshold_standalone_grinding_coupling {C : Nat} {Sig : Type} [Decidable
     | none => rfl
     | some τ =>
       obtain ⟨hLt, hChk, _⟩ := (firstValidCounter_some_iff _ maxTrials τ).mp hF
+      dsimp only
       rw [(hAgree c τ hLt).2 hChk]
   refine ⟨hStop, hOut, statisticalDistance_eq_zero_of_pointwise_eq C support hOut, ?_⟩
   have hSumEq :
@@ -311,7 +394,7 @@ theorem verifyPqHashSig_evalSingleLayerAtCounter
       · have hNe1 : params.numLayers ≠ 1 := of_decide_eq_false hL1
         simp [hWf, hSt, hNe1] at hEval
       · have hEq1 : params.numLayers = 1 := of_decide_eq_true hL1
-        simp only [hWf, hSt, hEq1, ne_eq, not_true_eq_false, Bool.not_true, Bool.or_self, ↓reduceIte] at hEval
+        simp only [hWf, hSt, hEq1, ne_eq, not_true_eq_false, Bool.not_true, Bool.or_self, decide_false, Bool.or_false, ↓reduceIte] at hEval
         let pk := derivePublicKey suite params sk
         let mu := thPreHash suite pk.pkSeed pk.pkRoot msg
         let hmsg := thHashMsg suite rRand pk.pkSeed pk.pkRoot mu 0 0 0 chosenCtr
@@ -325,37 +408,36 @@ theorem verifyPqHashSig_evalSingleLayerAtCounter
           have hZeroLt : 0 < 2 ^ (params.numLayers * params.subtreeHeight) := Nat.two_pow_pos _
           unfold verifyPqHashSig
           simp only [hWf, Bool.not_true, Bool.false_eq_true, ↓reduceIte, List.length_singleton,
-            hEq1, ne_eq, not_true_eq_false, hZeroLt, decide_true, hSt, List.isEmpty_nil]
+            hEq1, ne_eq, not_true_eq_false, Nat.two_pow_pos, decide_false, Bool.or_false, decide_true, hSt, List.isEmpty_nil]
           simp only [verifyHypertreeLayers, Nat.zero_mod, Nat.zero_div]
           change (let hm := hmsg; _) = true
           dsimp only
           have hChainsLen : ((List.range params.ell1).map fun r =>
               wotsChainSteps suite sk.pkSeed 0 0 0 r 0 (digits.getD r 0)
                 (wotsSecretBase suite sk 0 0 0 r)).length = params.ell1 := by simp
-          rw [show checkTargetSum params.w params.ell1 params.targetSum digits = true from hChk]
-          simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte, hChainsLen, ne_eq, not_true_eq_false]
+          dsimp only [digits, hmsg, mu, pk] at hChk
+          simp only [show UInt32.ofNat 0 = (0 : UInt32) from rfl,
+            show UInt64.ofNat 0 = (0 : UInt64) from rfl]
+          rw [hChk]
+          simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte, List.length_map, List.length_range, ne_eq, not_true_eq_false]
           have hWots := recoverWotsPkFromSig_eq_computeWotsPk suite params sk 0 0 0 digits hChk
           dsimp only at hWots
-          change (match walkMerkleAuthPath suite pk.pkSeed 0 0 .tree params.subtreeHeight 0 0
-                    (recoverWotsPkFromSig suite params sk.pkSeed 0 0 0 digits _) _ with
-                  | none => false | some r => _) = true
+          dsimp only [digits, hmsg, mu, pk] at hWots
+          simp only [derivePublicKey] at hWots ⊢
           rw [hWots]
           have hWalk := walkMerkleAuthPath_buildMerkleAuthPath suite sk.pkSeed 0 0 .tree
             (computeWotsPk suite params sk 0 0) params.subtreeHeight 0 0 (Nat.two_pow_pos _)
           simp only [Nat.zero_mul, Nat.zero_add] at hWalk
-          change (match walkMerkleAuthPath suite sk.pkSeed 0 0 .tree params.subtreeHeight 0 0
-                    (computeWotsPk suite params sk 0 0) _ with
-                  | none => false | some r => _) = true
           rw [hWalk]
           simp only [verifyHypertreeLayers, derivePublicKey, hEq1, Nat.sub_self, decide_true]
-          rfl
+          simp only [computeXmssSubtreeRoot, show UInt32.ofNat 0 = (0 : UInt32) from rfl, decide_true]
 
 /-- Domain-sensitive 32-byte `TweakableHashSuite` exhibiting LSB steering when non-first-hit counters are allowed. -/
 def lsbBiasRawHash (pre : List UInt8) : List UInt8 :=
-  if pre.getD 3 0 == 14 then
+  if pre.getD 1 0 == 14 then
     -- `tagPrf` (`wotsSecretBase`): chain base byte 0 is `0x00` (`lsb = false`)
     0x00 :: List.replicate 31 0x1B
-  else if pre.getD 12 0 == 72 && pre.getLastD 0 == 0 && !(pre.contains 0xFE) then
+  else if pre.getD 10 0 == 72 && pre.getLastD 0 == 0 && !(pre.contains 0xFE) then
     -- `tagHMsg` on coin `0` (`rRand = [0x00]`) at `ctr = 0`: byte 0 is `0x1B` (`digits[0] = 0`, sum = 192)
     0x1B :: List.replicate 31 0x1B
   else
@@ -368,7 +450,43 @@ def lsbBiasSuite : TweakableHashSuite where
   rawHash := lsbBiasRawHash
   rawHash_len := fun pre => by
     unfold lsbBiasRawHash
-    split <;> [simp; (split <;> simp)]
+    split <;> (try split) <;> (try split) <;> simp
+
+private theorem signatureFirstDigit (bytes : List UInt8) :
+    (extractBaseWDigits 4 128 bytes)[0]? = some ((bytes.getD 0 0).toNat / 64 % 4) := by
+  simp [extractBaseWDigits]
+
+private theorem signatureToyDigestValid (b : UInt8)
+    (hb : b = 0x1B ∨ b = 0x4B ∨ b = 0x0F ∨ b = 0xF0 ∨ b = 0x5A) :
+    checkTargetSum 4 128 192 (extractBaseWDigits 4 128
+      ((b :: List.replicate 31 0x1B) ++ (b :: List.replicate 31 0x1B))) = true := by
+  rcases hb with rfl | rfl | rfl | rfl | rfl <;>
+    simp [extractBaseWDigits, checkTargetSum, sumDigits, List.range_succ, Nat.mod_lt] <;> decide
+
+private theorem signatureToyDigestValidExpanded (b : UInt8)
+    (hb : b = 0x1B ∨ b = 0x4B ∨ b = 0x0F ∨ b = 0xF0 ∨ b = 0x5A) :
+    checkTargetSum 4 128 192 (extractBaseWDigits 4 128
+      [b, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B,
+       b, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B]) = true := by
+  simpa only [List.replicate_succ, List.replicate_zero, List.cons_append, List.nil_append]
+    using signatureToyDigestValid b hb
+
+private theorem signatureOddByte : ((0x4B : UInt8) &&& 1) = 1 := by
+  apply UInt8.toNat_inj.mp
+  rw [UInt8.toNat_and]
+  decide
+
+private theorem lsbBiasSuiteNodeH (seed x y : List UInt8) (adrs : HashAdrs) :
+    thNodeH lsbBiasSuite seed adrs x y = 0x4B :: List.replicate 31 0x1B := by
+  simp [thNodeH, thCall, thPreimage, lsbBiasSuite, lsbBiasRawHash,
+    encodeMultiFrame, encodeByteFields, encodeListField, tagThH, byteArray_toList_eq,
+    leb128, leb128Aux]
+
+private theorem lsbBiasSuitePublicKey (sk : PqSecretKey) :
+    derivePublicKey lsbBiasSuite wotsSingleLayerParams sk =
+      ⟨sk.pkSeed, 0x4B :: List.replicate 31 0x1B⟩ := by
+  simp only [derivePublicKey, computeXmssSubtreeRoot, wotsSingleLayerParams, computeMerkleNode]
+  rw [lsbBiasSuiteNodeH]
 
 def coinTwoRand (c : Fin 2) : List UInt8 :=
   if c.val == 0 then [0x00] else [0xFE]
@@ -417,220 +535,54 @@ theorem tooth_non_first_hit_lsb_bias_positive_tvd :
       0 < statisticalDistance 2 [false, true]
         (fun c => (honestReferenceLsbSampler c).elim false sigChainLsb)
         (fun c => (maliciousSkipLsbZeroSampler c).elim false sigChainLsb) := by
-  let sk0 : PqSecretKey := ⟨[], [], []⟩
-  let pk0 := derivePublicKey lsbBiasSuite wotsSingleLayerParams sk0
-  let mu0 := thPreHash lsbBiasSuite pk0.pkSeed pk0.pkRoot []
-  have hHmsg00 : thHashMsg lsbBiasSuite [0x00] pk0.pkSeed pk0.pkRoot mu0 0 0 0 0 =
-      (0x1B :: List.replicate 31 0x1B) ++ (0x1B :: List.replicate 31 0x1B) := by
-    have hSub : ∀ k : UInt32,
-        thCall lsbBiasSuite tagHMsg [] ⟨0, 0, .wotsHash, 0, k, 0⟩ [[0x00], pk0.pkRoot, mu0, be 4 0] =
-        0x1B :: List.replicate 31 0x1B := by
-      intro k
-      have hNotMem : (0xFE : UInt8) ∉ pk0.pkRoot ∧ (0xFE : UInt8) ∉ mu0 := by
-        refine ⟨?_, ?_⟩ <;> {
-          have h4B : ∀ x, x ∈ (0x4B :: List.replicate 31 0x1B : List UInt8) → x ≠ 0xFE := by decide
-          intro hMem; exact h4B _ hMem rfl
-        }
-      unfold thCall lsbBiasSuite lsbBiasRawHash thPreimage
-      have hd3 : (encodeMultiFrame ([tagHMsg, [], encodeAdrs ⟨0, 0, .wotsHash, 0, k, 0⟩] ++
-          [[0x00], pk0.pkRoot, mu0, be 4 0])).getD 3 0 = 15 := by rfl
-      have hd12 : (encodeMultiFrame ([tagHMsg, [], encodeAdrs ⟨0, 0, .wotsHash, 0, k, 0⟩] ++
-          [[0x00], pk0.pkRoot, mu0, be 4 0])).getD 12 0 = 72 := by rfl
-      have hLast : (encodeMultiFrame ([tagHMsg, [], encodeAdrs ⟨0, 0, .wotsHash, 0, k, 0⟩] ++
-          [[0x00], pk0.pkRoot, mu0, be 4 0])).getLastD 0 = 0 := by
-        simp [encodeMultiFrame, frameList, be, List.getLastD_append]
-      have hNoFE : (encodeMultiFrame ([tagHMsg, [], encodeAdrs ⟨0, 0, .wotsHash, 0, k, 0⟩] ++
-          [[0x00], pk0.pkRoot, mu0, be 4 0])).contains 0xFE = false := by
-        have hLenRoot : pk0.pkRoot.length = 32 := thCall_length _ _ _ _ _
-        have hLenMu : mu0.length = 32 := thCall_length _ _ _ _ _
-        apply List.contains_eq_false_iff.mpr
-        simp only [encodeMultiFrame, List.cons_append, List.nil_append, frameList,
-          List.mem_append, not_or, hLenRoot, hLenMu]
-        refine ⟨⟨?_, ?_⟩, ⟨?_, ?_⟩, ⟨?_, ?_⟩, ⟨?_, ?_⟩, ⟨?_, hNotMem.1⟩, ⟨?_, hNotMem.2⟩, ⟨?_, ?_⟩⟩
-        all_goals first | decide | (simp [encodeAdrs, be]; decide)
-      rw [hd3, hd12, hLast, hNoFE]; rfl
-    unfold thHashMsg; dsimp only [pk0]; rw [hSub 0, hSub 1]
-  have hHmsg01 : (thHashMsg lsbBiasSuite [0x00] pk0.pkSeed pk0.pkRoot mu0 0 0 0 1).take 32 =
-      0x4B :: List.replicate 31 0x1B := by
-    have hB0 : thCall lsbBiasSuite tagHMsg [] ⟨0, 0, .wotsHash, 0, 0, 1⟩ [[0x00], pk0.pkRoot, mu0, be 4 1] =
-        0x4B :: List.replicate 31 0x1B := by
-      unfold thCall lsbBiasSuite lsbBiasRawHash thPreimage
-      have hd3 : (encodeMultiFrame ([tagHMsg, [], encodeAdrs ⟨0, 0, .wotsHash, 0, 0, 1⟩] ++
-          [[0x00], pk0.pkRoot, mu0, be 4 1])).getD 3 0 = 15 := by rfl
-      have hLast : (encodeMultiFrame ([tagHMsg, [], encodeAdrs ⟨0, 0, .wotsHash, 0, 0, 1⟩] ++
-          [[0x00], pk0.pkRoot, mu0, be 4 1])).getLastD 0 = 1 := by
-        simp [encodeMultiFrame, frameList, be, List.getLastD_append]
-      rw [hd3, hLast]; simp
-    unfold thHashMsg; dsimp only [pk0]; rw [hB0, List.take_left' (by simp)]
-  have hHmsg10 : (thHashMsg lsbBiasSuite [0xFE] pk0.pkSeed pk0.pkRoot mu0 0 0 0 0).take 32 =
-      0x4B :: List.replicate 31 0x1B := by
-    have hB0 : thCall lsbBiasSuite tagHMsg [] ⟨0, 0, .wotsHash, 0, 0, 0⟩ [[0xFE], pk0.pkRoot, mu0, be 4 0] =
-        0x4B :: List.replicate 31 0x1B := by
-      unfold thCall lsbBiasSuite lsbBiasRawHash thPreimage
-      have hd3 : (encodeMultiFrame ([tagHMsg, [], encodeAdrs ⟨0, 0, .wotsHash, 0, 0, 0⟩] ++
-          [[0xFE], pk0.pkRoot, mu0, be 4 0])).getD 3 0 = 15 := by rfl
-      have hCont : (encodeMultiFrame ([tagHMsg, [], encodeAdrs ⟨0, 0, .wotsHash, 0, 0, 0⟩] ++
-          [[0xFE], pk0.pkRoot, mu0, be 4 0])).contains 0xFE = true := by
-        apply List.contains_iff_mem.mpr
-        simp [encodeMultiFrame, frameList]
-      rw [hd3, hCont]; simp
-    unfold thHashMsg; dsimp only [pk0]; rw [hB0, List.take_left' (by simp)]
-  have hTakeDigits : ∀ xs : List UInt8, 32 ≤ xs.length →
-      extractBaseWDigits 4 128 xs = extractBaseWDigits 4 128 (xs.take 32) := by
-    intro xs hLen
-    unfold extractBaseWDigits
-    apply List.map_congr_left
-    intro idx hMem
-    have hIdxLt : idx < 128 := List.mem_range.mp hMem
-    have hByteLt : idx / 4 < 32 := Nat.div_lt_of_lt_mul hIdxLt
-    simp only [show ¬(4 < 2) from by decide, ↓reduceIte]
-    have hGet : xs.getD (idx / 4) 0 = (xs.take 32).getD (idx / 4) 0 := by
-      rw [List.getD_eq_getElem?_getD, List.getD_eq_getElem?_getD,
-          List.getElem?_take_of_lt hByteLt]
-    rw [hGet]
-  have hDig1B : checkTargetSum 4 128 192 (extractBaseWDigits 4 128 (0x1B :: List.replicate 31 0x1B)) = true ∧
-      (extractBaseWDigits 4 128 (0x1B :: List.replicate 31 0x1B)).getD 0 0 = 0 := by decide
-  have hDig4B : checkTargetSum 4 128 192 (extractBaseWDigits 4 128 (0x4B :: List.replicate 31 0x1B)) = true ∧
-      (extractBaseWDigits 4 128 (0x4B :: List.replicate 31 0x1B)).getD 0 0 = 1 := by decide
-  have hChk00 : checkTargetSum 4 128 192 (extractBaseWDigits 4 128
-      (thHashMsg lsbBiasSuite [0x00] pk0.pkSeed pk0.pkRoot mu0 0 0 0 0)) = true ∧
-      (extractBaseWDigits 4 128 (thHashMsg lsbBiasSuite [0x00] pk0.pkSeed pk0.pkRoot mu0 0 0 0 0)).getD 0 0 = 0 := by
-    rw [hTakeDigits _ (by rw [thHashMsg_length]; decide), hHmsg00,
-        List.take_left' (by simp)]; exact hDig1B
-  have hChk01 : checkTargetSum 4 128 192 (extractBaseWDigits 4 128
-      (thHashMsg lsbBiasSuite [0x00] pk0.pkSeed pk0.pkRoot mu0 0 0 0 1)) = true ∧
-      (extractBaseWDigits 4 128 (thHashMsg lsbBiasSuite [0x00] pk0.pkSeed pk0.pkRoot mu0 0 0 0 1)).getD 0 0 = 1 := by
-    rw [hTakeDigits _ (by rw [thHashMsg_length]; decide), hHmsg01]; exact hDig4B
-  have hChk10 : checkTargetSum 4 128 192 (extractBaseWDigits 4 128
-      (thHashMsg lsbBiasSuite [0xFE] pk0.pkSeed pk0.pkRoot mu0 0 0 0 0)) = true ∧
-      (extractBaseWDigits 4 128 (thHashMsg lsbBiasSuite [0xFE] pk0.pkSeed pk0.pkRoot mu0 0 0 0 0)).getD 0 0 = 1 := by
-    rw [hTakeDigits _ (by rw [thHashMsg_length]; decide), hHmsg10]; exact hDig4B
-  have hPrfBase : wotsSecretBase lsbBiasSuite sk0 0 0 0 0 = 0x00 :: List.replicate 31 0x1B := by
-    unfold wotsSecretBase thSecretPrf thCall lsbBiasSuite lsbBiasRawHash thPreimage
-    have hd3 : (encodeMultiFrame ([tagPrf, [], encodeAdrs ⟨0, 0, .wotsPrf, 0, 0, 0⟩] ++ [[]])).getD 3 0 = 14 := rfl
-    rw [hd3]; rfl
-  have hStep1 : wotsChainSteps lsbBiasSuite [] 0 0 0 0 0 1 (wotsSecretBase lsbBiasSuite sk0 0 0 0 0) =
-      0x4B :: List.replicate 31 0x1B := by
-    simp only [wotsChainSteps]
-    unfold thChainF thCall lsbBiasSuite lsbBiasRawHash thPreimage
-    have hd3 : (encodeMultiFrame ([tagThF, [], encodeAdrs ⟨0, 0, .wotsHash, 0, 0, 0⟩] ++
-        [wotsSecretBase lsbBiasSuite sk0 0 0 0 0])).getD 3 0 = 15 := rfl
-    have hd12 : (encodeMultiFrame ([tagThF, [], encodeAdrs ⟨0, 0, .wotsHash, 0, 0, 0⟩] ++
-        [wotsSecretBase lsbBiasSuite sk0 0 0 0 0])).getD 12 0 = 84 := rfl
-    rw [hd3, hd12]; rfl
-  have hWfP : wotsSingleLayerParams.wellFormed = true ∧
-      wotsSingleLayerParams.statefulJorts = true ∧
-      wotsSingleLayerParams.numLayers = 1 ∧
-      wotsSingleLayerParams.targetSum = 192 := by decide
-  have hHon0 : ∃ s0, honestReferenceLsbSampler ⟨0, by decide⟩ = some s0 ∧ sigChainLsb s0 = false := by
-    unfold honestReferenceLsbSampler coinTwoRand
-    simp only [beq_self_eq_true, ↓reduceIte]
-    change (match firstValidCounter (fun ctr => checkTargetSum 4 128 192 (extractBaseWDigits 4 128
-              (thHashMsg lsbBiasSuite [0x00] pk0.pkSeed pk0.pkRoot mu0 0 0 0 ctr))) 4 with
-            | none => none | some ctr0 => _) = _
-    have hF0 : firstValidCounter (fun ctr => checkTargetSum 4 128 192 (extractBaseWDigits 4 128
-        (thHashMsg lsbBiasSuite [0x00] pk0.pkSeed pk0.pkRoot mu0 0 0 0 ctr))) 4 = some 0 := by
-      unfold firstValidCounter firstValidCounterAux; rw [hChk00.1]; rfl
-    rw [hF0]; unfold evalSingleLayerAtCounter
-    simp only [hWfP.1, hWfP.2.1, hWfP.2.2.1, hWfP.2.2.2, Bool.not_true, ne_eq, not_true_eq_false, Bool.or_self, ↓reduceIte]
-    change (if !(checkTargetSum 4 128 192 (extractBaseWDigits 4 128
-              (thHashMsg lsbBiasSuite [0x00] pk0.pkSeed pk0.pkRoot mu0 0 0 0 0))) then none else _) = _
-    rw [hChk00.1]; simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
-    refine ⟨_, rfl, ?_⟩
-    unfold sigChainLsb wotsSingleLayerParams
-    simp only [List.getD_cons_zero]
-    rw [list_getD_map_range 128 _ [] (by decide : 0 < 128)]
-    change ((wotsChainSteps lsbBiasSuite [] 0 0 0 0 0
-      ((extractBaseWDigits 4 128 (thHashMsg lsbBiasSuite [0x00] pk0.pkSeed pk0.pkRoot mu0 0 0 0 0)).getD 0 0)
-      (wotsSecretBase lsbBiasSuite sk0 0 0 0 0)).getD 0 0 &&& 1 == 1) = false
-    rw [hChk00.2, wotsChainSteps_zero, hPrfBase]; decide
-  have hMal0 : ∃ s0', maliciousSkipLsbZeroSampler ⟨0, by decide⟩ = some s0' ∧
-      sigChainLsb s0' = true ∧ verifyPqHashSig lsbBiasSuite wotsSingleLayerParams pk0 [] s0' = true := by
-    unfold maliciousSkipLsbZeroSampler coinTwoRand
-    simp only [beq_self_eq_true, ↓reduceIte]
-    have hF0 : firstValidCounter (fun ctr => checkTargetSum 4 128 192 (extractBaseWDigits 4 128
-        (thHashMsg lsbBiasSuite [0x00] pk0.pkSeed pk0.pkRoot mu0 0 0 0 ctr))) 4 = some 0 := by
-      unfold firstValidCounter firstValidCounterAux; rw [hChk00.1]; rfl
-    change (match firstValidCounter (fun ctr => checkTargetSum 4 128 192 (extractBaseWDigits 4 128
-              (thHashMsg lsbBiasSuite [0x00] pk0.pkSeed pk0.pkRoot mu0 0 0 0 ctr))) 4 with
-            | none => none | some ctr0 => _) = _
-    rw [hF0]
-    obtain ⟨s0, hs0Eq, hs0Lsb⟩ := hHon0
-    have hs0Eval : evalSingleLayerAtCounter lsbBiasSuite wotsSingleLayerParams sk0 [] [0x00] 0 = some s0 := by
-      unfold honestReferenceLsbSampler coinTwoRand at hs0Eq
-      simp only [beq_self_eq_true, ↓reduceIte] at hs0Eq
-      change (match firstValidCounter (fun ctr => checkTargetSum 4 128 192 (extractBaseWDigits 4 128
-                (thHashMsg lsbBiasSuite [0x00] pk0.pkSeed pk0.pkRoot mu0 0 0 0 ctr))) 4 with
-              | none => none | some ctr0 => _) = some s0 at hs0Eq
-      rw [hF0] at hs0Eq; exact hs0Eq
-    rw [hs0Eval, hs0Lsb]; simp only [Bool.false_eq_true, ↓reduceIte, Nat.zero_add]
-    have hEv1 : ∃ s1, evalSingleLayerAtCounter lsbBiasSuite wotsSingleLayerParams sk0 [] [0x00] 1 = some s1 ∧
-        sigChainLsb s1 = true := by
-      unfold evalSingleLayerAtCounter
-      simp only [hWfP.1, hWfP.2.1, hWfP.2.2.1, hWfP.2.2.2, Bool.not_true, ne_eq, not_true_eq_false, Bool.or_self, ↓reduceIte]
-      change (if !(checkTargetSum 4 128 192 (extractBaseWDigits 4 128
-                (thHashMsg lsbBiasSuite [0x00] pk0.pkSeed pk0.pkRoot mu0 0 0 0 1))) then none else _) = _
-      rw [hChk01.1]; simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
-      refine ⟨_, rfl, ?_⟩
-      unfold sigChainLsb wotsSingleLayerParams
-      simp only [List.getD_cons_zero]
-      rw [list_getD_map_range 128 _ [] (by decide : 0 < 128)]
-      change ((wotsChainSteps lsbBiasSuite [] 0 0 0 0 0
-        ((extractBaseWDigits 4 128 (thHashMsg lsbBiasSuite [0x00] pk0.pkSeed pk0.pkRoot mu0 0 0 0 1)).getD 0 0)
-        (wotsSecretBase lsbBiasSuite sk0 0 0 0 0)).getD 0 0 &&& 1 == 1) = true
-      rw [hChk01.2, hStep1]; decide
-    obtain ⟨s1, hs1Eq, hs1Lsb⟩ := hEv1
-    exact ⟨s1, hs1Eq, hs1Lsb, verifyPqHashSig_evalSingleLayerAtCounter _ _ _ _ _ 1 s1 hs1Eq⟩
-  have hBoth1 : ∃ s1, honestReferenceLsbSampler ⟨1, by decide⟩ = some s1 ∧
-      maliciousSkipLsbZeroSampler ⟨1, by decide⟩ = some s1 ∧
-      sigChainLsb s1 = true ∧ verifyPqHashSig lsbBiasSuite wotsSingleLayerParams pk0 [] s1 = true := by
-    have hF1 : firstValidCounter (fun ctr => checkTargetSum 4 128 192 (extractBaseWDigits 4 128
-        (thHashMsg lsbBiasSuite [0xFE] pk0.pkSeed pk0.pkRoot mu0 0 0 0 ctr))) 4 = some 0 := by
-      unfold firstValidCounter firstValidCounterAux; rw [hChk10.1]; rfl
-    have hEv : ∃ s1, evalSingleLayerAtCounter lsbBiasSuite wotsSingleLayerParams sk0 [] [0xFE] 0 = some s1 ∧
-        sigChainLsb s1 = true := by
-      unfold evalSingleLayerAtCounter
-      simp only [hWfP.1, hWfP.2.1, hWfP.2.2.1, hWfP.2.2.2, Bool.not_true, ne_eq, not_true_eq_false, Bool.or_self, ↓reduceIte]
-      change (if !(checkTargetSum 4 128 192 (extractBaseWDigits 4 128
-                (thHashMsg lsbBiasSuite [0xFE] pk0.pkSeed pk0.pkRoot mu0 0 0 0 0))) then none else _) = _
-      rw [hChk10.1]; simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
-      refine ⟨_, rfl, ?_⟩
-      unfold sigChainLsb wotsSingleLayerParams
-      simp only [List.getD_cons_zero]
-      rw [list_getD_map_range 128 _ [] (by decide : 0 < 128)]
-      change ((wotsChainSteps lsbBiasSuite [] 0 0 0 0 0
-        ((extractBaseWDigits 4 128 (thHashMsg lsbBiasSuite [0xFE] pk0.pkSeed pk0.pkRoot mu0 0 0 0 0)).getD 0 0)
-        (wotsSecretBase lsbBiasSuite sk0 0 0 0 0)).getD 0 0 &&& 1 == 1) = true
-      rw [hChk10.2, hStep1]; decide
-    obtain ⟨s1, hs1Eq, hs1Lsb⟩ := hEv
-    have hH : honestReferenceLsbSampler ⟨1, by decide⟩ = some s1 := by
-      unfold honestReferenceLsbSampler coinTwoRand
-      change (match firstValidCounter (fun ctr => checkTargetSum 4 128 192 (extractBaseWDigits 4 128
-                (thHashMsg lsbBiasSuite [0xFE] pk0.pkSeed pk0.pkRoot mu0 0 0 0 ctr))) 4 with
-              | none => none | some ctr0 => _) = some s1
-      rw [hF1]; exact hs1Eq
-    have hM : maliciousSkipLsbZeroSampler ⟨1, by decide⟩ = some s1 := by
-      unfold maliciousSkipLsbZeroSampler coinTwoRand
-      change (match firstValidCounter (fun ctr => checkTargetSum 4 128 192 (extractBaseWDigits 4 128
-                (thHashMsg lsbBiasSuite [0xFE] pk0.pkSeed pk0.pkRoot mu0 0 0 0 ctr))) 4 with
-              | none => none | some ctr0 => _) = some s1
-      rw [hF1, hs1Eq, hs1Lsb]; rfl
-    exact ⟨s1, hH, hM, hs1Lsb, verifyPqHashSig_evalSingleLayerAtCounter _ _ _ _ _ 0 s1 hs1Eq⟩
-  obtain ⟨s0, hs0H, hs0Lsb⟩ := hHon0
-  obtain ⟨s0', hs0M, hs0'Lsb, hs0'Ver⟩ := hMal0
-  obtain ⟨s1, hs1H, hs1M, hs1Lsb, hs1Ver⟩ := hBoth1
-  have hDist : statisticalDistance 2 [false, true]
-      (fun c => (honestReferenceLsbSampler c).elim false sigChainLsb)
-      (fun c => (maliciousSkipLsbZeroSampler c).elim false sigChainLsb) = 2 := by
-    simp only [statisticalDistance, List.foldr, coinMass, finSum,
-      hs0H, hs0M, hs1H, hs1M, Option.elim, hs0Lsb, hs0'Lsb, hs1Lsb, natAbsDiff]
-    decide
-  refine ⟨pk0, rfl, ?_, hDist, by rw [hDist]; decide⟩
-  intro ⟨cv, cLt⟩
-  match cv with
-  | 0 => exact ⟨s0', hs0M, hs0'Ver⟩
-  | 1 => exact ⟨s1, hs1M, hs1Ver⟩
-  | n + 2 => omega
+  refine ⟨derivePublicKey lsbBiasSuite wotsSingleLayerParams ⟨[], [], []⟩, rfl, ?_, ?_, ?_⟩
+  · intro c
+    refine ⟨(maliciousSkipLsbZeroSampler c).getD ⟨[], 0, 0, [], []⟩, ?_⟩
+    have h : ∀ c : Fin 2,
+        maliciousSkipLsbZeroSampler c = some ((maliciousSkipLsbZeroSampler c).getD ⟨[], 0, 0, [], []⟩) ∧
+        verifyPqHashSig lsbBiasSuite wotsSingleLayerParams
+          (derivePublicKey lsbBiasSuite wotsSingleLayerParams ⟨[], [], []⟩) []
+          ((maliciousSkipLsbZeroSampler c).getD ⟨[], 0, 0, [], []⟩) = true := by
+      simp only [maliciousSkipLsbZeroSampler, honestReferenceLsbSampler, coinTwoRand,
+        evalSingleLayerAtCounter, ↓lsbBiasSuitePublicKey,
+        firstValidCounter, firstValidCounterAux, sigChainLsb]
+
+      simp [wotsSingleLayerParams, thHashMsg, thPreHash, thCall, thPreimage, encodeMultiFrame, encodeByteFields,
+        encodeListField, leb128, leb128Aux, be, byteArray_toList_eq,
+        String.utf8EncodeChar, derivePublicKey, computeXmssSubtreeRoot, computeMerkleNode,
+        computeWotsPk, computeWotsEndpoints, wotsChainSteps, wotsSecretBase, thSecretPrf,
+        thTweakTl, ↓lsbBiasSuiteNodeH, thNodeH, thChainF, PqHashParams.wellFormed, PqHashParams.targetSum,
+        canonicalTargetSum, signatureToyDigestValidExpanded, signatureFirstDigit, sigChainLsb, signatureOddByte,
+        verifyPqHashSig, verifyHypertreeLayers, recoverWotsPkFromSig, recoverWotsEndpoints,
+        walkMerkleAuthPath, buildMerkleAuthPath, encodeAdrs, AdrsKind.toCode,
+        tagPrf, tagThF, tagThH, tagThTl, tagHMsg, tagHPre, zeroAdrs, lsbBiasSuite, lsbBiasRawHash] <;> decide
+    exact h c
+  · simp only [statisticalDistance, coinMass, natAbsDiff, finSum, maliciousSkipLsbZeroSampler,
+      honestReferenceLsbSampler, coinTwoRand, evalSingleLayerAtCounter, ↓lsbBiasSuitePublicKey,
+      firstValidCounter, firstValidCounterAux, sigChainLsb]
+
+    simp [wotsSingleLayerParams, thHashMsg, thPreHash, thCall, thPreimage, encodeMultiFrame, encodeByteFields,
+        encodeListField, leb128, leb128Aux, be, byteArray_toList_eq,
+        String.utf8EncodeChar, derivePublicKey, computeXmssSubtreeRoot, computeMerkleNode,
+        computeWotsPk, computeWotsEndpoints, wotsChainSteps, wotsSecretBase, thSecretPrf,
+        thTweakTl, ↓lsbBiasSuiteNodeH, thNodeH, thChainF, PqHashParams.wellFormed, PqHashParams.targetSum,
+        canonicalTargetSum, signatureToyDigestValidExpanded, signatureFirstDigit, sigChainLsb, signatureOddByte,
+        verifyPqHashSig, verifyHypertreeLayers, recoverWotsPkFromSig, recoverWotsEndpoints,
+        walkMerkleAuthPath, buildMerkleAuthPath, encodeAdrs, AdrsKind.toCode,
+        tagPrf, tagThF, tagThH, tagThTl, tagHMsg, tagHPre, zeroAdrs, lsbBiasSuite, lsbBiasRawHash] <;> decide
+  · simp only [statisticalDistance, coinMass, natAbsDiff, finSum, maliciousSkipLsbZeroSampler,
+      honestReferenceLsbSampler, coinTwoRand, evalSingleLayerAtCounter, ↓lsbBiasSuitePublicKey,
+      firstValidCounter, firstValidCounterAux, sigChainLsb]
+
+    simp [wotsSingleLayerParams, thHashMsg, thPreHash, thCall, thPreimage, encodeMultiFrame, encodeByteFields,
+        encodeListField, leb128, leb128Aux, be, byteArray_toList_eq,
+        String.utf8EncodeChar, derivePublicKey, computeXmssSubtreeRoot, computeMerkleNode,
+        computeWotsPk, computeWotsEndpoints, wotsChainSteps, wotsSecretBase, thSecretPrf,
+        thTweakTl, ↓lsbBiasSuiteNodeH, thNodeH, thChainF, PqHashParams.wellFormed, PqHashParams.targetSum,
+        canonicalTargetSum, signatureToyDigestValidExpanded, signatureFirstDigit, sigChainLsb, signatureOddByte,
+        verifyPqHashSig, verifyHypertreeLayers, recoverWotsPkFromSig, recoverWotsEndpoints,
+        walkMerkleAuthPath, buildMerkleAuthPath, encodeAdrs, AdrsKind.toCode,
+        tagPrf, tagThF, tagThH, tagThTl, tagHMsg, tagHPre, zeroAdrs, lsbBiasSuite, lsbBiasRawHash] <;> decide
 
 /-- Exhausted counter budget `#tooth` refutation (`tooth_exhausted_grinder_aborts_none`). -/
 theorem tooth_exhausted_grinder_aborts_none :
@@ -798,6 +750,7 @@ private theorem waistbandSignHypertreeLayers_eq_signHypertreeLayers
             (UInt32.ofNat layerIdx) (UInt64.ofNat (globalIdx / 2 ^ params.subtreeHeight)) := by
         intro entry hComp
         unfold computeStaticInternalLayerSig at hComp
+        dsimp only at hComp
         cases hG : grindTswCounterAux suite params.w params.ell1 params.targetSum [] sk.pkSeed pkRoot
             (computeXmssSubtreeRoot suite params sk (UInt32.ofNat (layerIdx - 1)) (UInt64.ofNat globalIdx))
             (UInt32.ofNat layerIdx) (UInt64.ofNat (globalIdx / 2 ^ params.subtreeHeight))
@@ -821,6 +774,7 @@ private theorem waistbandSignHypertreeLayers_eq_signHypertreeLayers
         refine ⟨ih.1, ?_⟩
         rw [ih.2, hParent]
         unfold computeStaticInternalLayerSig at hComp
+        dsimp only at hComp
         cases hG : grindTswCounterAux suite params.w params.ell1 params.targetSum [] sk.pkSeed pkRoot
             (computeXmssSubtreeRoot suite params sk (UInt32.ofNat (layerIdx - 1)) (UInt64.ofNat globalIdx))
             (UInt32.ofNat layerIdx) (UInt64.ofNat (globalIdx / 2 ^ params.subtreeHeight))
@@ -839,6 +793,7 @@ private theorem waistbandSignHypertreeLayers_eq_signHypertreeLayers
         | none =>
           refine ⟨hSound, ?_⟩
           unfold computeStaticInternalLayerSig at hComp
+          dsimp only at hComp
           cases hG : grindTswCounterAux suite params.w params.ell1 params.targetSum [] sk.pkSeed pkRoot
               (computeXmssSubtreeRoot suite params sk (UInt32.ofNat (layerIdx - 1)) (UInt64.ofNat globalIdx))
               (UInt32.ofNat layerIdx) (UInt64.ofNat (globalIdx / 2 ^ params.subtreeHeight))
@@ -860,6 +815,7 @@ private theorem waistbandSignHypertreeLayers_eq_signHypertreeLayers
           refine ⟨ih.1, ?_⟩
           rw [ih.2, hParent]
           unfold computeStaticInternalLayerSig at hComp
+          dsimp only at hComp
           cases hG : grindTswCounterAux suite params.w params.ell1 params.targetSum [] sk.pkSeed pkRoot
               (computeXmssSubtreeRoot suite params sk (UInt32.ofNat (layerIdx - 1)) (UInt64.ofNat globalIdx))
               (UInt32.ofNat layerIdx) (UInt64.ofNat (globalIdx / 2 ^ params.subtreeHeight))
@@ -1054,6 +1010,7 @@ theorem waistband_topL_cache_view_eq_stateless {C : Nat} {Out : Type} [Decidable
                evalOracleComp refOracle (next (refOracle q)) ∧
              (q, (wbStep cache q).2) :: statefulOracleTranscript (wbStep cache q).1 wbStep (next (wbStep cache q).2) =
                (q, refOracle q) :: statelessOracleTranscript refOracle (next (refOracle q))
+      change (wbStep cache q).2 = refOracle q at hEqOut
       rw [hEqOut]
       obtain ⟨ihOut, ihTr⟩ := ih (refOracle q) (wbStep cache q).1 hSound'
       exact ⟨ihOut, congrArg ((q, refOracle q) :: ·) ihTr⟩
@@ -1090,7 +1047,12 @@ theorem waistbandSigningLog_eq_signingOracleLog
     change (match (evalWaistbandSignStep suite params sk q.message q.randomness q.leaf maxGrind topL cache).2 with
             | none => waistbandSigningLog suite params sk maxGrind topL _ qs
             | some sig => (q.message, sig) :: waistbandSigningLog suite params sk maxGrind topL _ qs) = _
-    rw [hOut, waistbandSigningLog_eq_signingOracleLog suite params sk maxGrind topL qs _ hSound']
+    change (evalWaistbandSignStep suite params sk q.message q.randomness q.leaf maxGrind topL cache).2 =
+      evalSingleSign suite params sk q.message q.randomness q.leaf maxGrind at hOut
+    have hRest := waistbandSigningLog_eq_signingOracleLog suite params sk maxGrind topL qs _ hSound'
+    change waistbandSigningLog suite params sk maxGrind topL
+      (evalWaistbandSignStep suite params sk q.message q.randomness q.leaf maxGrind topL cache).1 qs = _ at hRest
+    rw [hOut, hRest]
     cases evalSingleSign suite params sk q.message q.randomness q.leaf maxGrind <;> rfl
 
 /-- EUF-CMA winning event against the stateful `Waistband` top-$L$ cached signing oracle. -/
@@ -1153,7 +1115,7 @@ theorem waistband_topL_cache_preserves_euf_cma {Ω : Type}
       wotsChainSteps suite pkSeed layer tree kp r v2 (v3 - v2) (sig₂.getD r [])
 
 /-- **Universal Suite-Polymorphic Two-Time WOTS+C Forgery Theorem (`forgeWotsFromTwoSigs_recovers_pk`)**:
-    Over **ANY** `suite : TweakableHashSuite` (even an ideal ROM with `0` collisions!), whenever two
+    For any `suite : TweakableHashSuite`, without a collision assumption, whenever two
     layer-`(layer, tree, kp)` WOTS+C signatures `sig₁, sig₂` cover a third `TSW`-valid digit vector `d₃`
     coordinatewise (`min(d₁[r], d₂[r]) ≤ d₃[r]`), `forgeWotsFromTwoSigs` recovers the exact `computeWotsPk`! -/
 theorem forgeWotsFromTwoSigs_recovers_pk
@@ -1225,10 +1187,10 @@ def reuseDigest2 : List UInt8 := 0xF0 :: List.replicate 31 0x1B
 def reuseDigest3 : List UInt8 := 0x5A :: List.replicate 31 0x1B
 
 def bottomReuseRawHash (pre : List UInt8) : List UInt8 :=
-  if pre.getD 12 0 == 80 && pre.getD 13 0 == 82 && pre.getD 14 0 == 69 then
+  if pre.getD 10 0 == 80 && pre.getD 11 0 == 82 && pre.getD 12 0 == 69 then
     -- `tagHPre` (`"QSAG.PQ.PRE/v1"`): preserve last message byte in byte 0
     pre.getLastD 0 :: List.replicate 31 0x1B
-  else if pre.getD 12 0 == 72 then
+  else if pre.getD 10 0 == 72 then
     -- `tagHMsg`: map `mu[0] ∈ {1, 2, 3}` to `reuseDigest1`, `reuseDigest2`, `reuseDigest3`
     if pre.contains 0xE1 then reuseDigest1
     else if pre.contains 0xE2 then reuseDigest2
@@ -1243,13 +1205,25 @@ def bottomReuseSuite : TweakableHashSuite where
     unfold bottomReuseRawHash reuseDigest1 reuseDigest2 reuseDigest3
     split
     · simp
-    · split <;> [simp; (split <;> simp)]
+    · split <;> (try split) <;> (try split) <;> simp
+
+private theorem bottomReuseSuiteNodeH (seed x y : List UInt8) (adrs : HashAdrs) :
+    thNodeH bottomReuseSuite seed adrs x y = 0x1B :: List.replicate 31 0x1B := by
+  simp [thNodeH, thCall, thPreimage, bottomReuseSuite, bottomReuseRawHash,
+    encodeMultiFrame, encodeByteFields, encodeListField, tagThH, byteArray_toList_eq,
+    leb128, leb128Aux]
+
+private theorem bottomReuseSuitePublicKey (sk : PqSecretKey) :
+    derivePublicKey bottomReuseSuite wotsSingleLayerParams sk =
+      ⟨sk.pkSeed, 0x1B :: List.replicate 31 0x1B⟩ := by
+  simp only [derivePublicKey, computeXmssSubtreeRoot, wotsSingleLayerParams, computeMerkleNode]
+  rw [bottomReuseSuiteNodeH]
 
 /-- **`#tooth` Bottom-Layer Leaf-Reuse WOTS+C Forgery (`tooth_caching_bottom_layer_breaks_wots_one_time`)**:
-    Violating `topL < params.numLayers` by reusing a bottom-layer (`layer = 0`) WOTS+C leaf across
+    Concrete weak-suite counterexample to allowing bottom-layer (`layer = 0`) WOTS+C leaf reuse:
     two distinct messages `m₁ = [0xE1] ≠ [0xE2] = m₂` exposes two `TSW`-valid (`w = 4, ell1 = 128,
-    targetSum = 192`) chain vectors `sig₁, sig₂` from which the secret-key-free polynomial-time
-    extractor `forgeWotsFromTwoSigs` constructs a **valid `PqHashSig` accepted by `verifyPqHashSig`
+    targetSum = 192`) chain vectors `sig₁, sig₂` from which the public chain-splicing
+    function `forgeWotsFromTwoSigs` constructs a **valid `PqHashSig` accepted by `verifyPqHashSig`
     (`= true`) on an unqueried third message `m₃ = [0xE3] ∉ [m₁, m₂]`**! -/
 theorem tooth_caching_bottom_layer_breaks_wots_one_time :
     ∃ (m₁ m₂ m₃ : List UInt8) (pk : PqPublicKey) (sig₁ sig₂ forgedSig₃ : PqHashSig),
@@ -1261,165 +1235,45 @@ theorem tooth_caching_bottom_layer_breaks_wots_one_time :
       verifyPqHashSig bottomReuseSuite wotsSingleLayerParams pk m₁ sig₁ = true ∧
       verifyPqHashSig bottomReuseSuite wotsSingleLayerParams pk m₂ sig₂ = true ∧
       verifyPqHashSig bottomReuseSuite wotsSingleLayerParams pk m₃ forgedSig₃ = true := by
-  let sk0 : PqSecretKey := ⟨[], [], []⟩
-  let pk0 := derivePublicKey bottomReuseSuite wotsSingleLayerParams sk0
-  have hMu : ∀ b : UInt8,
-      thPreHash bottomReuseSuite pk0.pkSeed pk0.pkRoot [b] = b :: List.replicate 31 0x1B := by
-    intro b
-    unfold thPreHash thCall bottomReuseSuite bottomReuseRawHash thPreimage
-    have hd12 : (encodeMultiFrame ([tagHPre, [], encodeAdrs zeroAdrs] ++ [pk0.pkRoot, [b]])).getD 12 0 = 80 := rfl
-    have hd13 : (encodeMultiFrame ([tagHPre, [], encodeAdrs zeroAdrs] ++ [pk0.pkRoot, [b]])).getD 13 0 = 82 := rfl
-    have hd14 : (encodeMultiFrame ([tagHPre, [], encodeAdrs zeroAdrs] ++ [pk0.pkRoot, [b]])).getD 14 0 = 69 := rfl
-    have hLast : (encodeMultiFrame ([tagHPre, [], encodeAdrs zeroAdrs] ++ [pk0.pkRoot, [b]])).getLastD 0 = b := by
-      simp [encodeMultiFrame, frameList, List.getLastD_append]
-    rw [hd12, hd13, hd14, hLast]; rfl
-  have hRootNoE : ∀ x : UInt8, x ∈ pk0.pkRoot → x ≠ 0xE1 ∧ x ≠ 0xE2 := by
-    have h1B : ∀ x, x ∈ (0x1B :: List.replicate 31 0x1B : List UInt8) → x ≠ 0xE1 ∧ x ≠ 0xE2 := by decide
-    have hRootEq : pk0.pkRoot = 0x1B :: List.replicate 31 0x1B := by
-      dsimp only [pk0, derivePublicKey, wotsSingleLayerParams]
-      unfold computeXmssSubtreeRoot computeMerkleNode thNodeH thCall bottomReuseSuite bottomReuseRawHash thPreimage
-      rfl
-    rw [hRootEq]; exact h1B
-  have hTake32 : ∀ xs : List UInt8, 32 ≤ xs.length →
-      extractBaseWDigits 4 128 xs = extractBaseWDigits 4 128 (xs.take 32) := by
-    intro xs _; unfold extractBaseWDigits; apply List.map_congr_left
-    intro idx hMem
-    have hByteLt : idx / 4 < 32 := Nat.div_lt_of_lt_mul (List.mem_range.mp hMem)
-    simp only [show ¬(4 < 2) from by decide, ↓reduceIte]
-    rw [List.getD_eq_getElem?_getD, List.getD_eq_getElem?_getD, List.getElem?_take_of_lt hByteLt]
-  have hHm1 : (thHashMsg bottomReuseSuite [] pk0.pkSeed pk0.pkRoot
-      (thPreHash bottomReuseSuite pk0.pkSeed pk0.pkRoot [0xE1]) 0 0 0 0).take 32 = reuseDigest1 := by
-    rw [hMu 0xE1]
-    have hB0 : thCall bottomReuseSuite tagHMsg [] ⟨0, 0, .wotsHash, 0, 0, 0⟩
-        [[], pk0.pkRoot, 0xE1 :: List.replicate 31 0x1B, be 4 0] = reuseDigest1 := by
-      unfold thCall bottomReuseSuite bottomReuseRawHash thPreimage
-      have hd12 : (encodeMultiFrame ([tagHMsg, [], encodeAdrs ⟨0, 0, .wotsHash, 0, 0, 0⟩] ++
-          [[], pk0.pkRoot, 0xE1 :: List.replicate 31 0x1B, be 4 0])).getD 12 0 = 72 := rfl
-      have hC1 : (encodeMultiFrame ([tagHMsg, [], encodeAdrs ⟨0, 0, .wotsHash, 0, 0, 0⟩] ++
-          [[], pk0.pkRoot, 0xE1 :: List.replicate 31 0x1B, be 4 0])).contains 0xE1 = true := by
-        apply List.contains_iff_mem.mpr; simp [encodeMultiFrame, frameList]
-      rw [hd12, hC1]; rfl
-    unfold thHashMsg; dsimp only [pk0]; rw [hB0, List.take_left' (by simp [reuseDigest1])]
-  have hHm2 : (thHashMsg bottomReuseSuite [] pk0.pkSeed pk0.pkRoot
-      (thPreHash bottomReuseSuite pk0.pkSeed pk0.pkRoot [0xE2]) 0 0 0 0).take 32 = reuseDigest2 := by
-    rw [hMu 0xE2]
-    have hB0 : thCall bottomReuseSuite tagHMsg [] ⟨0, 0, .wotsHash, 0, 0, 0⟩
-        [[], pk0.pkRoot, 0xE2 :: List.replicate 31 0x1B, be 4 0] = reuseDigest2 := by
-      unfold thCall bottomReuseSuite bottomReuseRawHash thPreimage
-      have hd12 : (encodeMultiFrame ([tagHMsg, [], encodeAdrs ⟨0, 0, .wotsHash, 0, 0, 0⟩] ++
-          [[], pk0.pkRoot, 0xE2 :: List.replicate 31 0x1B, be 4 0])).getD 12 0 = 72 := rfl
-      have hNo1 : (encodeMultiFrame ([tagHMsg, [], encodeAdrs ⟨0, 0, .wotsHash, 0, 0, 0⟩] ++
-          [[], pk0.pkRoot, 0xE2 :: List.replicate 31 0x1B, be 4 0])).contains 0xE1 = false := by
-        have hLenRoot : pk0.pkRoot.length = 32 := thCall_length _ _ _ _ _
-        apply List.contains_eq_false_iff.mpr
-        simp only [encodeMultiFrame, List.cons_append, List.nil_append, frameList, List.mem_append, not_or, hLenRoot]
-        refine ⟨⟨by decide, by decide⟩, ⟨by decide, by decide⟩, ⟨by decide, by simp [encodeAdrs, be]; decide⟩,
-          ⟨by decide, by decide⟩, ⟨by decide, fun hm => (hRootNoE _ hm).1 rfl⟩, ⟨by decide, by decide⟩, ⟨by decide, by decide⟩⟩
-      have hC2 : (encodeMultiFrame ([tagHMsg, [], encodeAdrs ⟨0, 0, .wotsHash, 0, 0, 0⟩] ++
-          [[], pk0.pkRoot, 0xE2 :: List.replicate 31 0x1B, be 4 0])).contains 0xE2 = true := by
-        apply List.contains_iff_mem.mpr; simp [encodeMultiFrame, frameList]
-      rw [hd12, hNo1, hC2]; rfl
-    unfold thHashMsg; dsimp only [pk0]; rw [hB0, List.take_left' (by simp [reuseDigest2])]
-  have hHm3 : (thHashMsg bottomReuseSuite [] pk0.pkSeed pk0.pkRoot
-      (thPreHash bottomReuseSuite pk0.pkSeed pk0.pkRoot [0xE3]) 0 0 0 0).take 32 = reuseDigest3 := by
-    rw [hMu 0xE3]
-    have hB0 : thCall bottomReuseSuite tagHMsg [] ⟨0, 0, .wotsHash, 0, 0, 0⟩
-        [[], pk0.pkRoot, 0xE3 :: List.replicate 31 0x1B, be 4 0] = reuseDigest3 := by
-      unfold thCall bottomReuseSuite bottomReuseRawHash thPreimage
-      have hd12 : (encodeMultiFrame ([tagHMsg, [], encodeAdrs ⟨0, 0, .wotsHash, 0, 0, 0⟩] ++
-          [[], pk0.pkRoot, 0xE3 :: List.replicate 31 0x1B, be 4 0])).getD 12 0 = 72 := rfl
-      have hNo1 : (encodeMultiFrame ([tagHMsg, [], encodeAdrs ⟨0, 0, .wotsHash, 0, 0, 0⟩] ++
-          [[], pk0.pkRoot, 0xE3 :: List.replicate 31 0x1B, be 4 0])).contains 0xE1 = false := by
-        have hLenRoot : pk0.pkRoot.length = 32 := thCall_length _ _ _ _ _
-        apply List.contains_eq_false_iff.mpr
-        simp only [encodeMultiFrame, List.cons_append, List.nil_append, frameList, List.mem_append, not_or, hLenRoot]
-        refine ⟨⟨by decide, by decide⟩, ⟨by decide, by decide⟩, ⟨by decide, by simp [encodeAdrs, be]; decide⟩,
-          ⟨by decide, by decide⟩, ⟨by decide, fun hm => (hRootNoE _ hm).1 rfl⟩, ⟨by decide, by decide⟩, ⟨by decide, by decide⟩⟩
-      have hNo2 : (encodeMultiFrame ([tagHMsg, [], encodeAdrs ⟨0, 0, .wotsHash, 0, 0, 0⟩] ++
-          [[], pk0.pkRoot, 0xE3 :: List.replicate 31 0x1B, be 4 0])).contains 0xE2 = false := by
-        have hLenRoot : pk0.pkRoot.length = 32 := thCall_length _ _ _ _ _
-        apply List.contains_eq_false_iff.mpr
-        simp only [encodeMultiFrame, List.cons_append, List.nil_append, frameList, List.mem_append, not_or, hLenRoot]
-        refine ⟨⟨by decide, by decide⟩, ⟨by decide, by decide⟩, ⟨by decide, by simp [encodeAdrs, be]; decide⟩,
-          ⟨by decide, by decide⟩, ⟨by decide, fun hm => (hRootNoE _ hm).2 rfl⟩, ⟨by decide, by decide⟩, ⟨by decide, by decide⟩⟩
-      rw [hd12, hNo1, hNo2]; rfl
-    unfold thHashMsg; dsimp only [pk0]; rw [hB0, List.take_left' (by simp [reuseDigest3])]
-  let d1 := extractBaseWDigits 4 128 reuseDigest1
-  let d2 := extractBaseWDigits 4 128 reuseDigest2
-  let d3 := extractBaseWDigits 4 128 reuseDigest3
-  have hDValid : checkTargetSum 4 128 192 d1 = true ∧
-      checkTargetSum 4 128 192 d2 = true ∧
-      checkTargetSum 4 128 192 d3 = true := by decide
-  have hDCover : ∀ r, r < 128 → d1.getD r 0 ≤ d3.getD r 0 ∨ d2.getD r 0 ≤ d3.getD r 0 := by
-    have hAll : (List.range 128).all (fun r => decide (d1.getD r 0 ≤ d3.getD r 0 ∨ d2.getD r 0 ≤ d3.getD r 0)) = true := by
-      decide
-    intro r hr
-    exact of_decide_eq_true ((List.all_eq_true.mp hAll) r (List.mem_range.mpr hr))
-  have hDigEq1 : extractBaseWDigits 4 128 (thHashMsg bottomReuseSuite [] pk0.pkSeed pk0.pkRoot
-      (thPreHash bottomReuseSuite pk0.pkSeed pk0.pkRoot [0xE1]) 0 0 0 0) = d1 := by
-    rw [hTake32 _ (by rw [thHashMsg_length]; decide), hHm1]
-  have hDigEq2 : extractBaseWDigits 4 128 (thHashMsg bottomReuseSuite [] pk0.pkSeed pk0.pkRoot
-      (thPreHash bottomReuseSuite pk0.pkSeed pk0.pkRoot [0xE2]) 0 0 0 0) = d2 := by
-    rw [hTake32 _ (by rw [thHashMsg_length]; decide), hHm2]
-  have hDigEq3 : extractBaseWDigits 4 128 (thHashMsg bottomReuseSuite [] pk0.pkSeed pk0.pkRoot
-      (thPreHash bottomReuseSuite pk0.pkSeed pk0.pkRoot [0xE3]) 0 0 0 0) = d3 := by
-    rw [hTake32 _ (by rw [thHashMsg_length]; decide), hHm3]
-  have hWfP : wotsSingleLayerParams.wellFormed = true ∧
-      wotsSingleLayerParams.statefulJorts = true ∧
-      wotsSingleLayerParams.numLayers = 1 ∧
-      wotsSingleLayerParams.targetSum = 192 := by decide
-  let chains1 := (List.range 128).map fun r =>
-    wotsChainSteps bottomReuseSuite [] 0 0 0 r 0 (d1.getD r 0) (wotsSecretBase bottomReuseSuite sk0 0 0 0 r)
-  let chains2 := (List.range 128).map fun r =>
-    wotsChainSteps bottomReuseSuite [] 0 0 0 r 0 (d2.getD r 0) (wotsSecretBase bottomReuseSuite sk0 0 0 0 r)
-  let path0 := buildMerkleAuthPath bottomReuseSuite [] 0 0 .tree (computeWotsPk bottomReuseSuite wotsSingleLayerParams sk0 0 0) 1 0 0
-  let sig1 : PqHashSig := ⟨[], 0, 0, [], [⟨0, chains1, path0⟩]⟩
-  let sig2 : PqHashSig := ⟨[], 0, 0, [], [⟨0, chains2, path0⟩]⟩
-  -- Forged signature uses ONLY public `pk0.pkSeed`, `d1, d2, d3`, `chains1, chains2`, and `path0` from `sig1`!
-  let forgedChains3 := forgeWotsFromTwoSigs bottomReuseSuite pk0.pkSeed 0 0 0 128 d1 d2 d3 chains1 chains2
-  let forgedSig3 : PqHashSig := ⟨[], 0, 0, [], [⟨0, forgedChains3, path0⟩]⟩
-  have hEv1 : evalSingleLayerAtCounter bottomReuseSuite wotsSingleLayerParams sk0 [0xE1] [] 0 = some sig1 := by
-    unfold evalSingleLayerAtCounter
-    simp only [hWfP.1, hWfP.2.1, hWfP.2.2.1, hWfP.2.2.2, Bool.not_true, ne_eq, not_true_eq_false, Bool.or_self, ↓reduceIte]
-    change (if !(checkTargetSum 4 128 192 (extractBaseWDigits 4 128
-              (thHashMsg bottomReuseSuite [] pk0.pkSeed pk0.pkRoot
-                (thPreHash bottomReuseSuite pk0.pkSeed pk0.pkRoot [0xE1]) 0 0 0 0))) then none else _) = _
-    rw [hDigEq1, hDValid.1]; rfl
-  have hEv2 : evalSingleLayerAtCounter bottomReuseSuite wotsSingleLayerParams sk0 [0xE2] [] 0 = some sig2 := by
-    unfold evalSingleLayerAtCounter
-    simp only [hWfP.1, hWfP.2.1, hWfP.2.2.1, hWfP.2.2.2, Bool.not_true, ne_eq, not_true_eq_false, Bool.or_self, ↓reduceIte]
-    change (if !(checkTargetSum 4 128 192 (extractBaseWDigits 4 128
-              (thHashMsg bottomReuseSuite [] pk0.pkSeed pk0.pkRoot
-                (thPreHash bottomReuseSuite pk0.pkSeed pk0.pkRoot [0xE2]) 0 0 0 0))) then none else _) = _
-    rw [hDigEq2, hDValid.2.1]; rfl
-  have hVer3 : verifyPqHashSig bottomReuseSuite wotsSingleLayerParams pk0 [0xE3] forgedSig3 = true := by
-    unfold verifyPqHashSig
-    simp only [hWfP.1, Bool.not_true, Bool.false_eq_true, ↓reduceIte, List.length_singleton,
-      hWfP.2.2.1, ne_eq, not_true_eq_false, show 0 < 2 ^ (1 * 1) from by decide, decide_true,
-      hWfP.2.1, List.isEmpty_nil]
-    simp only [verifyHypertreeLayers, Nat.zero_mod, Nat.zero_div]
-    change (let hm := thHashMsg bottomReuseSuite [] pk0.pkSeed pk0.pkRoot
-      (thPreHash bottomReuseSuite pk0.pkSeed pk0.pkRoot [0xE3]) 0 0 0 0; _) = true
-    dsimp only
-    rw [hDigEq3, hDValid.2.2]
-    have hLen : forgedChains3.length = 128 := by
-      simp [forgedChains3, forgeWotsFromTwoSigs]
-    simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte, hLen, ne_eq, not_true_eq_false]
-    have hRecover := forgeWotsFromTwoSigs_recovers_pk bottomReuseSuite wotsSingleLayerParams
-      sk0 0 0 0 d1 d2 d3 hDValid.2.2 hDCover
-    change (match walkMerkleAuthPath bottomReuseSuite [] 0 0 .tree 1 0 0
-        (recoverWotsPkFromSig bottomReuseSuite wotsSingleLayerParams [] 0 0 0 d3 forgedChains3)
-        path0 with | none => false | some r => _) = true
-    rw [hRecover]
-    have hWalk := walkMerkleAuthPath_buildMerkleAuthPath bottomReuseSuite [] 0 0 .tree
-      (computeWotsPk bottomReuseSuite wotsSingleLayerParams sk0 0 0) 1 0 0 (by decide)
-    simp only [Nat.zero_mul, Nat.zero_add] at hWalk
-    rw [hWalk]
-    simp only [verifyHypertreeLayers, derivePublicKey, hWfP.2.2.1, Nat.sub_self, decide_true]
-    rfl
-  exact ⟨[0xE1], [0xE2], [0xE3], pk0, sig1, sig2, forgedSig3,
-    rfl, rfl, rfl, by decide, by decide, rfl, hEv1, hEv2,
-    verifyPqHashSig_evalSingleLayerAtCounter _ _ _ _ _ _ _ hEv1,
-    verifyPqHashSig_evalSingleLayerAtCounter _ _ _ _ _ _ _ hEv2, hVer3⟩
+  let sk : PqSecretKey := ⟨[], [], []⟩
+  let pk := derivePublicKey bottomReuseSuite wotsSingleLayerParams sk
+  let sig1 := (evalSingleLayerAtCounter bottomReuseSuite wotsSingleLayerParams sk [0xE1] [] 0).getD
+    ⟨[], 0, 0, [], []⟩
+  let sig2 := (evalSingleLayerAtCounter bottomReuseSuite wotsSingleLayerParams sk [0xE2] [] 0).getD
+    ⟨[], 0, 0, [], []⟩
+  let chains := forgeWotsFromTwoSigs bottomReuseSuite pk.pkSeed 0 0 0 128
+    (extractBaseWDigits 4 128 reuseDigest1) (extractBaseWDigits 4 128 reuseDigest2)
+    (extractBaseWDigits 4 128 reuseDigest3)
+    (sig1.layerSigs.getD 0 ⟨0, [], []⟩).wotsChains
+    (sig2.layerSigs.getD 0 ⟨0, [], []⟩).wotsChains
+  let forged : PqHashSig := { sig1 with layerSigs :=
+    [{ sig1.layerSigs.getD 0 ⟨0, [], []⟩ with wotsChains := chains }] }
+  refine ⟨[0xE1], [0xE2], [0xE3], pk, sig1, sig2, forged,
+    rfl, rfl, rfl, by decide, by decide, rfl, ?_, ?_, ?_, ?_, ?_⟩ <;>
+    simp only [forged, chains, sig1, sig2, pk, sk, evalSingleLayerAtCounter, ↓bottomReuseSuitePublicKey,
+      reuseDigest1, reuseDigest2, reuseDigest3, forgeWotsFromTwoSigs] <;>
+
+    simp [wotsSingleLayerParams, thHashMsg, thPreHash, thCall, thPreimage, encodeMultiFrame, encodeByteFields,
+        encodeListField, leb128, leb128Aux, be, byteArray_toList_eq,
+        String.utf8EncodeChar, derivePublicKey, computeXmssSubtreeRoot, computeMerkleNode,
+        computeWotsPk, computeWotsEndpoints, wotsChainSteps, wotsSecretBase, thSecretPrf,
+        thTweakTl, ↓bottomReuseSuiteNodeH, thNodeH, thChainF, PqHashParams.wellFormed, PqHashParams.targetSum,
+        canonicalTargetSum, signatureToyDigestValidExpanded, signatureFirstDigit, sigChainLsb, signatureOddByte,
+        verifyPqHashSig, verifyHypertreeLayers, recoverWotsPkFromSig, recoverWotsEndpoints,
+        walkMerkleAuthPath, buildMerkleAuthPath, encodeAdrs, AdrsKind.toCode,
+        tagPrf, tagThF, tagThH, tagThTl, tagHMsg, tagHPre, zeroAdrs, lsbBiasRawHash,
+        bottomReuseSuite, bottomReuseRawHash, reuseDigest1, reuseDigest2, reuseDigest3] <;> decide
+
+#verify_constructive firstValidCounter_some_iff
+#verify_constructive firstValidCounter_none_iff
+#verify_constructive grindTswCounter_4_128_192_eq_firstValidCounter
+#verify_constructive threshold_standalone_grinding_coupling
+#verify_constructive tooth_non_first_hit_lsb_bias_positive_tvd
+#verify_constructive tooth_exhausted_grinder_aborts_none
+#verify_constructive waistband_topL_cache_view_eq_stateless
+#verify_constructive waistband_topL_cache_preserves_euf_cma
+#verify_constructive forgeWotsFromTwoSigs_recovers_pk
+#verify_constructive tooth_caching_bottom_layer_breaks_wots_one_time
+
 end Qsag
 end

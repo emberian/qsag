@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.ParallelSeededSpnSecurity — Mechanized Cryptanalysis of the 48-Round $x^7$ Davies–Meyer SPN
+# Qsag.ParallelSeededSpnSecurity — Algebraic Components of the 48-Round $x^7$ Davies–Meyer SPN
 
 Constructive (`0` classical choice axioms, `0` external math libraries, `0` unproved goals)
 Lean 4.35 security analysis of the `ParallelSeededFts` 2-lane $\mathbb{F}_{2^{128}}^2$
@@ -16,14 +16,17 @@ Lean 4.35 security analysis of the `ParallelSeededFts` 2-lane $\mathbb{F}_{2^{12
 3. **§3. Wiedemann Frobenius Periodicity & Bijectivity of $x \mapsto x^7$ on `Tower128`**:
    proves $a^{2^{2^k}} = a$ across all levels $k$ of the Wiedemann tower and constructs the
    two-sided inverse $z \mapsto z^{(8^{43} - 1)/7}$ on $\mathcal{T}_7 = \mathbb{F}_{2^{128}}$.
-4. **§4. Concrete MDS Mixing Branch Number $= 3$ & 48-Round Active S-Box Trail Security**:
+4. **§4. Concrete MDS Mixing Branch Number $= 3$ & 48-Round Active S-Box Counts**:
    certifies $\Psi(\text{gf128MdsATower}) = \text{GF128\_MDS\_A}$ and
    $\Psi(\text{gf128MdsBTower}) = \text{GF128\_MDS\_B}$, proves branch number `3` when
    $A \ne 0, B \ne 0, A \cdot B \ne 1$, and proves $\ge 3$ active S-boxes per 2 rounds
-   ($\ge 72 \ge 48$ across 48 rounds), giving $(6 / 2^{128})^{48} \ll 2^{-256}$.
-5. **§5. Algebraic Degree Growth, 43-Round Higher-Order / Interpolation Margin & `#tooth` Guards**:
-   binary Hamming weight `3` of `7`, degree saturation $3^5 = 243 > 128 \ge 127$ in `5` rounds
-   (`43` full margin rounds), univariate degree $7^{48} > 2^{134}$, round-constant asymmetry,
+   ($\ge 72 \ge 48$ across 48 rounds). Powers of `6 / 2^128` are arithmetic only;
+   their interpretation as trail probabilities requires a separate fresh-randomness experiment.
+5. **§5. Nominal Degree Schedule Arithmetic & `#tooth` Guards**:
+   binary Hamming weight `3` of `7`, the nominal schedule `min 127 (3^r)` reaches `127` at `5`
+   (`43` rounds remain), and the expression $7^{48} > 2^{134}$. These are not actual algebraic
+   degree or attack-complexity lower bounds. The two-lane permutation has 256 input bits, so
+   `127` is not a proved global Boolean-degree cap. Also proves round-constant asymmetry,
    and `#tooth` mutation witnesses.
 -/
 
@@ -411,7 +414,7 @@ theorem towerSbox7_diff_zero_iff (x delta : Tower128) :
   have h3 := congrArg (towerAdd 7 x) (pow7_tower128_bijective.1 _ _ hEq)
   simpa only [towerAdd_cancel, towerAdd_self_zero] using h3
 
-/-! ## §4. Concrete MDS Linear Layer Branch Number $= 3$ & 48-Round Active S-Box Trail Security -/
+/-! ## §4. Concrete MDS Linear Layer Branch Number $= 3$ & 48-Round Active S-Box Counts -/
 
 @[expose] def spnRounds : Nat := 48
 def gf128MdsAPolyBits : BitVec 128 := 0x9E3779B97F4A7C15F39CC0605CEDC835#128
@@ -677,8 +680,11 @@ theorem spn48_active_sboxes_ge_72 (mds : ValidSpnMdsPair 7)
   have h := (spnIterRounds_even_active_bound mds rcs 24 s s' hNe).2
   exact ⟨h, Nat.le_trans (by decide : 48 ≤ 72) h⟩
 
-/-- **Concrete 2-Round (`3` S-boxes) & 48-Round (`48` / `72` S-boxes) Differential Trail Security**:
-    $(6 / 2^{128})^3 < 2^{-376}$ and $(6 / 2^{128})^{48} < 2^{-6000} \ll 2^{-256}$. -/
+/-- Arithmetic powers of the one-S-box root fraction. No independence or conditional
+    uniformity follows from an active-box count. In particular, a nonempty trail event under
+    a fixed public 256-bit permutation has probability at least `2^-256`; these smaller
+    products cannot bound all such events. See `HashTrailSampling` for an explicit fresh-input
+    product experiment and the deterministic-trace obstruction. Historical theorem name retained. -/
 theorem spn48_differential_trail_security_bounds :
     strictlyMoreThanBits 376 (sbox7MaxDiffProb128.pow 3) ∧
     strictlyMoreThanBits 256 (sbox7MaxDiffProb128.pow 48) ∧
@@ -699,7 +705,7 @@ theorem spn48_differential_trail_security_bounds :
     hStrictFrom257 _ (atLeastBits_antitone_bits (by decide : 257 ≤ 125 * 48) (hBits 48)),
     hStrictFrom257 _ (atLeastBits_antitone_bits (by decide : 257 ≤ 125 * 72) (hBits 72))⟩
 
-/-! ## §5. Algebraic Degree Growth, 43-Round Higher-Order / Interpolation Margin & `#tooth` Guards -/
+/-! ## §5. Nominal Degree Schedule Arithmetic & `#tooth` Guards -/
 
 private def binaryPopcountAux : Nat → Nat → Nat
   | 0, _ => 0
@@ -708,10 +714,12 @@ private def binaryPopcountAux : Nat → Nat → Nat
 
 def binaryPopcount (n : Nat) : Nat := binaryPopcountAux n n
 
+/-- A nominal schedule, not the degree of an interpreted SPN polynomial. -/
 @[expose] def spnMultivariateDegreeSchedule (r : Nat) : Nat := Nat.min 127 (3 ^ r)
 def spnUnivariateDegree (r : Nat) : Nat := 7 ^ r
 
-/-- **Algebraic Degree Saturation in 5 Rounds & 43-Round Security Margin (`spn48_algebraic_degree_margin`)**. -/
+/-- Nominal schedule and exponent arithmetic. No actual-degree or security-margin theorem
+    follows without proving noncancellation and a connection to an attack model. -/
 theorem spn48_algebraic_degree_margin :
     binaryPopcount 7 = 3 ∧ 3 ^ 5 = 243 ∧ 128 < 3 ^ 5 ∧
     spnMultivariateDegreeSchedule 5 = 127 ∧ spnRounds - 5 = 43 ∧

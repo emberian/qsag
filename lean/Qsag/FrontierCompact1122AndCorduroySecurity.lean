@@ -11,8 +11,9 @@ Constructive Lean 4.35 security reductions (`0 sorry`, `0` custom axioms, `0 Cla
      paired with `tooth_drop_target_sum_allows_one_sig_forgery`.
 2. **`RotatedEpochVote` Forward-Secure Key-Chain Induction (`rotatedEpochVote_forward_secure_chain`)**:
    - Models `EpochKeyLink` / `RotatedEpochVote` (`crates/qsag-fts/src/frontier.rs`) and proves by
-     induction across historical epochs both unforgeable chain continuity from `pk_0` and strict
-     forward secrecy when secret seeds at `eStar > 0` are compromised after zeroizing `0 .. eStar - 1`,
+     induction across historical epochs that an accepted divergent chain yields a vote-framing
+     collision or a historical-key primitive break. No adaptive compromise experiment,
+     erasure implementation, or probability bound for those primitive breaks is established here,
      contrasted with `tooth_static_key_compromise_forges_historical_epoch`.
 3. **`Corduroy` 16-Layer Stateless `Poseidon2` Hypertree + `(t, n)` Shamir Power-7 EUF-CMA
    (`corduroy_threshold_stateless_euf_cma`)**:
