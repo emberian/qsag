@@ -92,7 +92,7 @@ public import Qsag.Tactic.AssuranceKit
 
 import all Qsag.Tactic.Prelude
 import all Qsag.Exec.SimulationSpine
-import all Qsag.Math.Algebra
+import all Qsag.Math.Counting
 import all Qsag.Math.Goldilocks
 import all Qsag.Math.Gf2Pow128
 import all Qsag.Protocol.Aggregation.UcGames

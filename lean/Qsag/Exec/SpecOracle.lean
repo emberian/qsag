@@ -5,6 +5,7 @@ public import Qsag.Protocol.Signing.HashSigs
 import all Qsag.Protocol.Signing.HashSigs
 public import Qsag.Custody.JortsBeltLatchAndQuorumSwitching
 public import Qsag.Protocol.Aggregation.Poseidon2AlgebraicAndRecursiveHem
+import all Qsag.Math.Primality
 import all Qsag.Oracle.Poseidon2
 import all Qsag.Protocol.Aggregation.Poseidon2AlgebraicAndRecursiveHem
 import Qsag.Tactic.AssuranceKit

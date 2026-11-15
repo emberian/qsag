@@ -2979,8 +2979,9 @@ theorem tooth_unverified_lagrange_corrupt_share_forges_node :
         (ringDot lambdas [s₀, RoundPoly.evalCoeffs [towerOne 7, towerZero 7] x₁]) = towerZero 7 := by
       rw [hEq, hHon]
       exact towerAdd_self_zero 7 (towerOne 7)
-    dsimp only [lambdas, lagrange2WeightsTower, ringDot, s₁_corrupt, CommRingOps.add,
-      CommRingOps.mul, CommRingOps.zero] at hSub
+    dsimp only [lambdas, lagrange2WeightsTower, s₁_corrupt] at hSub
+    simp only [ringDot_eq, dotVec_cons, dotVec_nil_left] at hSub
+    dsimp only [CommRingOps.add, CommRingOps.mul, CommRingOps.zero] at hSub
     simp only [towerAdd_zero] at hSub
     rw [towerMul_add_distrib] at hSub
     have hCancel : ∀ (a b c : TowerElem 7),

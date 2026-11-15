@@ -482,12 +482,6 @@ def evalScalarSpn48Evidence (roundKeys : Fin 49 → Tower128) (input : Tower128)
   let pre := loop 48 input
   towerAdd 7 pre (roundKeys ⟨48, by decide⟩)
 
-private theorem towerSq_add (a b : Tower128) :
-    towerMul 7 (towerAdd 7 a b) (towerAdd 7 a b) =
-      towerAdd 7 (towerMul 7 a a) (towerMul 7 b b) := by
-  rw [towerMul_add_distrib, towerAdd_mul_distrib, towerAdd_mul_distrib, towerMul_comm 7 b a]
-  simp only [towerAdd_assoc, towerAdd_cancel]
-
 /-- Degree-6 differential polynomial coefficients `[Δ^7, Δ^6, Δ^5, Δ^4, Δ^3, Δ^2, Δ]` over `GF(2^128)`. -/
 def spnDeg6DiffCoeffs (delta : Tower128) : List Tower128 :=
   let d2 := towerMul 7 delta delta
@@ -505,7 +499,7 @@ private theorem towerPow7_xor_diff_eq_evalCoeffs (x delta : Tower128) :
   dsimp only
   simp only [RoundPoly.evalCoeffs_cons, RoundPoly.evalCoeffs_nil]
   dsimp only [CommRingOps.add, CommRingOps.mul, CommRingOps.zero, towerCommRingOps]
-  rw [towerSq_add x delta, towerSq_add (towerMul 7 x x) (towerMul 7 delta delta)]
+  rw [towerSq_add 7 x delta, towerSq_add 7 (towerMul 7 x x) (towerMul 7 delta delta)]
   simp only [towerMul_zero, towerAdd_zero, towerMul_add_distrib, towerAdd_mul_distrib]
   simp only [towerMul_comm 7, towerMul_left_comm_of_assoc 7 (towerMul_assoc 7)]
   simp only [towerAdd_assoc, towerAdd_comm 7, towerAdd_left_comm, towerAdd_cancel]
