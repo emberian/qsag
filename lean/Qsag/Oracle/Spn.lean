@@ -1085,3 +1085,1081 @@ theorem freshInputAssignments_length {α : Type} (inputs : List α) (n : Nat) :
 
 /-- All successful assignments in an experiment with one fresh input per active gate.
     Each gate specifies its nonzero input difference and desired output difference. -/
+def freshSboxAssignments (inputs : List Tower128) :
+    List (Tower128 × Tower128) → List (List Tower128)
+  | [] => [[]]
+  | (delta, outDiff) :: gates =>
+    prefixAssignments
+      (inputs.filter fun x => decide
+        (towerAdd 7 (towerSbox7 7 (towerAdd 7 x delta)) (towerSbox7 7 x) = outDiff))
+      (freshSboxAssignments inputs gates)
+
+/-- Component root bounds give an actual cardinality bound for the fresh-input experiment.
+    Its uniform Cartesian sample space has `inputs.length ^ gates.length` elements, so the
+    success fraction is at most `6^gates.length / inputs.length^gates.length` when nonempty.
+    No corresponding independence assertion is made for the deployed fixed SPN. -/
+theorem freshSboxAssignments_length_le (inputs : List Tower128) (hNd : inputs.Nodup)
+    (gates : List (Tower128 × Tower128))
+    (hNonzero : ∀ gate ∈ gates, gate.1 ≠ towerZero 7) :
+    (freshSboxAssignments inputs gates).length ≤ 6 ^ gates.length := by
+  induction gates with
+  | nil => simp [freshSboxAssignments]
+  | cons gate gates ih =>
+    rcases gate with ⟨delta, outDiff⟩
+    rw [freshSboxAssignments, prefixAssignments_length]
+    have hRoot := towerSbox7_differential_uniformity_le_six 7 delta outDiff
+      (hNonzero (delta, outDiff) (by simp)) inputs hNd
+    have hTail := ih (fun gate hg => hNonzero gate (List.mem_cons_of_mem _ hg))
+    simpa [Nat.pow_succ, Nat.mul_comm] using Nat.mul_le_mul hRoot hTail
+
+/-- Reusing one input at two identical tests does not square its acceptance fraction.
+    This small exact experiment has each marginal `1/2`, but joint probability `1/2 > 1/4`. -/
+theorem repeated_test_does_not_multiply :
+    ([false, true].filter id).length = 1 ∧
+    ([false, true].filter fun b => b && b).length = 1 ∧
+    1 * 2 < 1 * 4 := by decide
+
+/-- A realized trace on a finite uniform input space has at least one accepting input. -/
+theorem realized_trace_has_positive_count {α β : Type} [DecidableEq β]
+    (coins : List α) (trace : α → β) (x : α) (hx : x ∈ coins) :
+    0 < (coins.filter fun y => decide (trace y = trace x)).length := by
+  have hm : x ∈ coins.filter (fun y => decide (trace y = trace x)) := by
+    simp only [List.mem_filter, decide_eq_true_eq]
+    exact ⟨hx, trivial⟩
+  cases he : coins.filter (fun y => decide (trace y = trace x)) with
+  | nil => rw [he] at hm; cases hm
+  | cons a rest => simp
+
+/-- No bound strictly below one atom can bound every realized deterministic trace.
+    The inequality `num * coins.length < den` says `num/den < 1/coins.length`.
+    The rejected inequality is the cross-multiplied claim that this trace has probability
+    at most `num/den`. This applies to any actual fixed-round SPN/Poseidon trace function. -/
+theorem realized_trace_refutes_subatom_bound {α β : Type} [DecidableEq β]
+    (coins : List α) (trace : α → β) (x : α) (hx : x ∈ coins)
+    (num den : Nat) (hSmall : num * coins.length < den) :
+    ¬ (coins.filter fun y => decide (trace y = trace x)).length * den ≤ num * coins.length := by
+  have hPositive := realized_trace_has_positive_count coins trace x hx
+  have hFloor : den ≤ (coins.filter fun y => decide (trace y = trace x)).length * den := by
+    simpa using Nat.mul_le_mul_right den hPositive
+  omega
+
+/-- Differential trajectory of the actual 48-round tower SPN with fixed constants. -/
+def fixedSpnDifferenceTrace (mdsA mdsB : Tower128) (rcs : Nat → Tower128 × Tower128)
+    (delta input : Tower128 × Tower128) : List (Tower128 × Tower128) :=
+  (List.range 49).map fun r =>
+    let a := spnIterRounds128 mdsA mdsB rcs r input
+    let b := spnIterRounds128 mdsA mdsB rcs r
+      (towerAdd 7 input.1 delta.1, towerAdd 7 input.2 delta.2)
+    (towerAdd 7 a.1 b.1, towerAdd 7 a.2 b.2)
+
+/-- Concrete obstruction to interpreting the arithmetic product as a fixed-SPN trail bound.
+    On a uniform sample list of size `2^256`, every realized differential trajectory has mass
+    at least `2^-256`, strictly greater than `(6/2^128)^48`. This does not challenge the valid
+    active-box theorem or the separate fresh-input experiment above. -/
+theorem fixedSpnDifferenceTrace_not_bounded_by_component_product
+    (mdsA mdsB : Tower128) (rcs : Nat → Tower128 × Tower128)
+    (delta input : Tower128 × Tower128) (coins : List (Tower128 × Tower128))
+    (hSize : coins.length = 2 ^ 256) (hInput : input ∈ coins) :
+    ¬ (coins.filter fun x => decide
+      (fixedSpnDifferenceTrace mdsA mdsB rcs delta x =
+        fixedSpnDifferenceTrace mdsA mdsB rcs delta input)).length * (2 ^ 128) ^ 48 ≤
+      6 ^ 48 * coins.length := by
+  apply realized_trace_refutes_subatom_bound coins
+    (fixedSpnDifferenceTrace mdsA mdsB rcs delta) input hInput
+  rw [hSize]
+  decide
+
+
+end Qsag
+end
+
+
+section
+namespace Qsag
+set_option autoImplicit false
+
+/-! ## §1. Finite sums over explicit sample lists -/
+
+/-- Sum of a `Nat`-valued function over a list. -/
+def rcSum {α : Type} (f : α → Nat) : List α → Nat
+  | [] => 0
+  | x :: xs => f x + rcSum f xs
+
+theorem rcSum_le_of_le {α : Type} (f g : α → Nat) (l : List α)
+    (h : ∀ x ∈ l, f x ≤ g x) : rcSum f l ≤ rcSum g l := by
+  induction l with
+  | nil => exact Nat.le_refl 0
+  | cons x xs ih =>
+    exact Nat.add_le_add (h x List.mem_cons_self)
+      (ih fun y hy => h y (List.mem_cons_of_mem _ hy))
+
+theorem rcSum_const {α : Type} (c : Nat) (l : List α) :
+    rcSum (fun _ => c) l = l.length * c := by
+  induction l with
+  | nil => exact (Nat.zero_mul c).symm
+  | cons x xs ih =>
+    show c + rcSum (fun _ => c) xs = (xs.length + 1) * c
+    rw [ih, Nat.succ_mul, Nat.add_comm]
+
+theorem rcSum_le_const {α : Type} (f : α → Nat) (c : Nat) (l : List α)
+    (h : ∀ x ∈ l, f x ≤ c) : rcSum f l ≤ l.length * c := by
+  rw [← rcSum_const c l]
+  exact rcSum_le_of_le f _ l h
+
+theorem rcSum_ite {α : Type} (p : α → Bool) (c : Nat) (l : List α) :
+    rcSum (fun x => if p x then c else 0) l = (l.filter p).length * c := by
+  induction l with
+  | nil => exact (Nat.zero_mul c).symm
+  | cons x xs ih =>
+    show (if p x then c else 0) + rcSum (fun x => if p x then c else 0) xs = _
+    rw [ih]
+    cases hp : p x
+    · rw [List.filter_cons_of_neg (by rw [hp]; exact Bool.false_ne_true)]
+      exact Nat.zero_add _
+    · rw [List.filter_cons_of_pos hp, List.length_cons, Nat.succ_mul, Nat.add_comm]
+      rfl
+
+/-- Counting inside a Cartesian prefix: sum over the head of the count over the tails. -/
+theorem filter_prefixAssignments_length {α : Type} (p : List α → Bool)
+    (choices : List α) (tails : List (List α)) :
+    ((prefixAssignments choices tails).filter p).length =
+      rcSum (fun x => (tails.filter fun t => p (x :: t)).length) choices := by
+  induction choices with
+  | nil => rfl
+  | cons x xs ih =>
+    have hSplit : prefixAssignments (x :: xs) tails =
+        tails.map (x :: ·) ++ prefixAssignments xs tails := by
+      simp only [prefixAssignments, List.flatMap_cons]
+    rw [hSplit, List.filter_append, List.length_append, ih, List.filter_map, List.length_map]
+    rfl
+
+theorem mem_freshInputAssignments_length {α : Type} (inputs : List α) :
+    ∀ (n : Nat) (l : List α), l ∈ freshInputAssignments inputs n → l.length = n
+  | 0, l, h => by
+    have hl : l = [] := by simpa [freshInputAssignments] using h
+    rw [hl]; rfl
+  | n + 1, l, h => by
+    simp only [freshInputAssignments, prefixAssignments, List.mem_flatMap, List.mem_map] at h
+    obtain ⟨x, _, t, ht, rfl⟩ := h
+    rw [List.length_cons, mem_freshInputAssignments_length inputs n t ht]
+
+/-- All ordered pairs of lane constants: the sample list for one round. -/
+def rcPairs {α : Type} (keys : List α) : List (α × α) :=
+  keys.flatMap fun a => keys.map fun b => (a, b)
+
+theorem filter_pairList_length {α : Type} (p : α × α → Bool) (l1 l2 : List α) :
+    ((l1.flatMap fun a => l2.map fun b => (a, b)).filter p).length =
+      rcSum (fun a => (l2.filter fun b => p (a, b)).length) l1 := by
+  induction l1 with
+  | nil => rfl
+  | cons x xs ih =>
+    rw [List.flatMap_cons, List.filter_append, List.length_append, ih, List.filter_map,
+      List.length_map]
+    rfl
+
+theorem filter_rcPairs_length {α : Type} (p : α × α → Bool) (keys : List α) :
+    ((rcPairs keys).filter p).length =
+      rcSum (fun a => (keys.filter fun b => p (a, b)).length) keys :=
+  filter_pairList_length p keys keys
+
+theorem pairList_length {α : Type} (l1 l2 : List α) :
+    (l1.flatMap fun a => l2.map fun b => (a, b)).length = l1.length * l2.length := by
+  induction l1 with
+  | nil => exact (Nat.zero_mul _).symm
+  | cons x xs ih =>
+    rw [List.flatMap_cons, List.length_append, ih, List.length_map, List.length_cons,
+      Nat.succ_mul, Nat.add_comm]
+
+theorem rcPairs_length {α : Type} (keys : List α) :
+    (rcPairs keys).length = keys.length * keys.length := pairList_length keys keys
+
+theorem filter_length_eq_zero {α : Type} (p : α → Bool) :
+    ∀ l : List α, (∀ x ∈ l, ¬ p x = true) → (l.filter p).length = 0
+  | [], _ => rfl
+  | x :: xs, h => by
+    rw [List.filter_cons_of_neg (h x List.mem_cons_self)]
+    exact filter_length_eq_zero p xs fun y hy => h y (List.mem_cons_of_mem _ hy)
+
+theorem filter_singleton_length {α : Type} (p : α → Bool) (a : α) :
+    ([a].filter p).length = if p a = true then 1 else 0 := by
+  by_cases h : p a = true
+  · rw [ite_eq_left h, List.filter_cons_of_pos h]; rfl
+  · rw [ite_eq_right h, List.filter_cons_of_neg h]; rfl
+
+theorem rcNodup_map_of_injective {α β : Type} (f : α → β)
+    (hInj : ∀ a b, f a = f b → a = b) :
+    ∀ l : List α, l.Nodup → (l.map f).Nodup
+  | [], _ => List.nodup_nil
+  | x :: xs, h => by
+    have hx := List.nodup_cons.mp h
+    rw [List.map_cons]
+    refine List.nodup_cons.mpr ⟨fun hm => ?_, rcNodup_map_of_injective f hInj xs hx.2⟩
+    obtain ⟨y, hy, hfy⟩ := List.mem_map.mp hm
+    have hEq := hInj _ _ hfy
+    rw [hEq] at hy
+    exact hx.1 hy
+
+/-! ## §2. One lane and one round -/
+
+theorem tadd_eq_zero_iff (a b : Tower128) : towerAdd 7 a b = towerZero 7 ↔ a = b := by
+  refine ⟨fun h => ?_, fun h => by rw [h, towerAdd_self_zero]⟩
+  have h2 := congrArg (fun z => towerAdd 7 z b) h
+  simpa only [towerZero_add, towerAdd_assoc, towerAdd_self_zero, towerAdd_zero] using h2
+
+theorem tadd_shift (t t' k : Tower128) :
+    towerAdd 7 (towerAdd 7 t' k) (towerAdd 7 t t') = towerAdd 7 t k := by
+  rw [towerAdd_comm 7 t t', towerAdd_comm 7 t' k, towerAdd_assoc, ← towerAdd_assoc 7 t' t' t,
+    towerAdd_self_zero, towerZero_add, towerAdd_comm]
+
+theorem tadd_swap (a b c d : Tower128) :
+    towerAdd 7 (towerAdd 7 a b) (towerAdd 7 c d) =
+      towerAdd 7 (towerAdd 7 a c) (towerAdd 7 b d) := by
+  rw [towerAdd_assoc, towerAdd_left_comm 7 b c d, ← towerAdd_assoc]
+
+/-- `a ⊕ b = c ⊕ d` exactly when `a ⊕ c = b ⊕ d`. -/
+theorem tadd_cross_iff (a b c d : Tower128) :
+    towerAdd 7 a b = towerAdd 7 c d ↔ towerAdd 7 a c = towerAdd 7 b d := by
+  rw [← tadd_eq_zero_iff (towerAdd 7 a b), ← tadd_eq_zero_iff (towerAdd 7 a c), tadd_swap]
+
+/-- Output difference of one x^7 gate whose two inputs `t`, `t'` receive the same constant. -/
+def sboxLaneDiff (k t t' : Tower128) : Tower128 :=
+  towerAdd 7 (towerSbox7 7 (towerAdd 7 t k)) (towerSbox7 7 (towerAdd 7 t' k))
+
+theorem sboxLaneDiff_eq_zero_iff (k t t' : Tower128) :
+    sboxLaneDiff k t t' = towerZero 7 ↔ t = t' := by
+  rw [sboxLaneDiff, ← tadd_shift t t' k, towerSbox7_diff_zero_iff, tadd_eq_zero_iff]
+
+/-- Number of lane constants producing gate output difference `γ`. -/
+def laneCount (keys : List Tower128) (t t' γ : Tower128) : Nat :=
+  (keys.filter fun k => decide (sboxLaneDiff k t t' = γ)).length
+
+/-- `6` for an active lane, the whole constant list for an inactive one. -/
+def laneBound (N : Nat) (δ : Tower128) : Nat := if δ = towerZero 7 then N else 6
+
+theorem laneCount_le_length (keys : List Tower128) (t t' γ : Tower128) :
+    laneCount keys t t' γ ≤ keys.length := List.length_filter_le _ _
+
+/-- The root bound applied to the lane constant: `k ↦ t' ⊕ k` is injective, so the gate
+    inputs form a duplicate-free list and `towerSbox7_differential_uniformity_le_six` applies. -/
+theorem laneCount_le_laneBound (keys : List Tower128) (hNd : keys.Nodup) (t t' γ : Tower128) :
+    laneCount keys t t' γ ≤ laneBound keys.length (towerAdd 7 t t') := by
+  unfold laneBound
+  by_cases h : towerAdd 7 t t' = towerZero 7
+  · rw [ite_eq_left h]; exact laneCount_le_length keys t t' γ
+  · rw [ite_eq_right h]
+    have hMapNd : (keys.map (towerAdd 7 t')).Nodup :=
+      rcNodup_map_of_injective _ (fun a b hab => by
+        have h2 := congrArg (towerAdd 7 t') hab
+        simpa only [towerAdd_cancel] using h2) keys hNd
+    have hU := towerSbox7_differential_uniformity_le_six 7 (towerAdd 7 t t') γ h
+      (keys.map (towerAdd 7 t')) hMapNd
+    rw [List.filter_map, List.length_map] at hU
+    refine Nat.le_trans (Nat.le_of_eq ?_) hU
+    unfold laneCount
+    apply congrArg List.length
+    apply List.filter_congr
+    intro k _
+    exact decide_eq_decide.mpr (by simp only [sboxLaneDiff, tadd_shift])
+
+theorem laneCount_eq_zero_of_ne (keys : List Tower128) (t t' γ : Tower128)
+    (h : ∀ k, sboxLaneDiff k t t' ≠ γ) : laneCount keys t t' γ = 0 := by
+  exact filter_length_eq_zero _ keys fun k _ hk => h k (of_decide_eq_true hk)
+
+/-- An inactive lane never produces a zero-to-nonzero or nonzero-to-zero transition, so a
+    lane is bounded by six whenever its target or its input difference is nonzero. -/
+theorem laneCount_le_six (keys : List Tower128) (hNd : keys.Nodup) (t t' γ : Tower128)
+    (h : γ ≠ towerZero 7 ∨ t ≠ t') : laneCount keys t t' γ ≤ 6 := by
+  by_cases hT : t = t'
+  · have hγ : γ ≠ towerZero 7 := h.elim id (fun hne => absurd hT hne)
+    rw [laneCount_eq_zero_of_ne keys t t' γ (fun k hk =>
+      hγ (hk ▸ (sboxLaneDiff_eq_zero_iff k t t').mpr hT))]
+    exact Nat.zero_le 6
+  · have hB := laneCount_le_laneBound keys hNd t t' γ
+    unfold laneBound at hB
+    rwa [ite_eq_right (fun h0 => hT ((tadd_eq_zero_iff t t').mp h0))] at hB
+
+theorem laneCount_zero_target (keys : List Tower128) (t t' : Tower128) (hT : t ≠ t') :
+    laneCount keys t t' (towerZero 7) = 0 :=
+  laneCount_eq_zero_of_ne keys t t' _ fun k hk => hT ((sboxLaneDiff_eq_zero_iff k t t').mp hk)
+
+/-- Lanewise xor of two states. -/
+def pairXor (a b : Tower128 × Tower128) : Tower128 × Tower128 :=
+  (towerAdd 7 a.1 b.1, towerAdd 7 a.2 b.2)
+
+theorem pairXor_ne_zero {s s' : Tower128 × Tower128} (h : s ≠ s') :
+    pairXor s s' ≠ (towerZero 7, towerZero 7) := fun h0 =>
+  h (Prod.ext ((tadd_eq_zero_iff _ _).mp (congrArg Prod.fst h0))
+    ((tadd_eq_zero_iff _ _).mp (congrArg Prod.snd h0)))
+
+/-- Difference of the two states after the constant addition and the x^7 layer. -/
+def sboxPairDiff (rc s s' : Tower128 × Tower128) : Tower128 × Tower128 :=
+  (sboxLaneDiff rc.1 s.1 s'.1, sboxLaneDiff rc.2 s.2 s'.2)
+
+theorem spnLinearMix_xor (mdsA mdsB : Tower128) (a b : Tower128 × Tower128) :
+    pairXor (spnLinearMix 7 mdsA mdsB a) (spnLinearMix 7 mdsA mdsB b) =
+      spnLinearMix 7 mdsA mdsB (pairXor a b) := by
+  unfold spnLinearMix pairXor
+  apply Prod.ext <;> simp only [towerMul_add_distrib, towerAdd_assoc, towerAdd_left_comm]
+
+/-- The state difference after one actual round is the linear layer applied to the S-box
+    output difference. The round constant enters only through `sboxPairDiff`. -/
+theorem spnRound128_diff (mdsA mdsB : Tower128) (rc s s' : Tower128 × Tower128) :
+    pairXor (spnRound128 mdsA mdsB rc s) (spnRound128 mdsA mdsB rc s') =
+      spnLinearMix 7 mdsA mdsB (sboxPairDiff rc s s') := by
+  unfold spnRound128
+  rw [spnLinearMix_xor]
+  rfl
+
+theorem spnLinearMix_injective (mds : ValidSpnMdsPair 7) (a b : Tower128 × Tower128)
+    (h : spnLinearMix 7 mds.mdsA mds.mdsB a = spnLinearMix 7 mds.mdsA mds.mdsB b) : a = b := by
+  if hab : a = b then exact hab else
+    have hNe := (spnLinearMix_branch_number_three mds (pairXor a b) (pairXor_ne_zero hab)).1
+    rw [← spnLinearMix_xor, h] at hNe
+    exact absurd (by unfold pairXor; rw [towerAdd_self_zero, towerAdd_self_zero]) hNe
+
+theorem spnRound128_ne (mds : ValidSpnMdsPair 7) (rc s s' : Tower128 × Tower128)
+    (h : s ≠ s') : spnRound128 mds.mdsA mds.mdsB rc s ≠ spnRound128 mds.mdsA mds.mdsB rc s' := by
+  intro hEq
+  have hD := spnRound128_diff mds.mdsA mds.mdsB rc s s'
+  rw [hEq] at hD
+  have hZero : spnLinearMix 7 mds.mdsA mds.mdsB (sboxPairDiff rc s s') =
+      spnLinearMix 7 mds.mdsA mds.mdsB (towerZero 7, towerZero 7) := by
+    rw [← hD]; unfold pairXor spnLinearMix
+    simp only [towerAdd_self_zero, towerMul_zero]
+  have hS := spnLinearMix_injective mds _ _ hZero
+  exact h (Prod.ext ((sboxLaneDiff_eq_zero_iff _ _ _).mp (congrArg Prod.fst hS))
+    ((sboxLaneDiff_eq_zero_iff _ _ _).mp (congrArg Prod.snd hS)))
+
+/-- One round, exact: the constants producing S-box output difference `γ` form a rectangle,
+    because the two lane constants are separate coordinates of the sample. -/
+theorem sboxPairDiff_count (keys : List Tower128) (s s' γ : Tower128 × Tower128) :
+    ((rcPairs keys).filter fun rc => decide (sboxPairDiff rc s s' = γ)).length =
+      laneCount keys s.1 s'.1 γ.1 * laneCount keys s.2 s'.2 γ.2 := by
+  rcases γ with ⟨g1, g2⟩
+  rw [filter_rcPairs_length]
+  have hTerm : (fun a => (keys.filter fun b =>
+      decide (sboxPairDiff (a, b) s s' = (g1, g2))).length) =
+      fun a => if decide (sboxLaneDiff a s.1 s'.1 = g1) then laneCount keys s.2 s'.2 g2 else 0 := by
+    funext a
+    by_cases ha : sboxLaneDiff a s.1 s'.1 = g1
+    · rw [ite_eq_left (decide_eq_true ha)]
+      unfold laneCount
+      apply congrArg List.length
+      apply List.filter_congr
+      intro b _
+      simp only [sboxPairDiff, Prod.mk.injEq, ha, true_and]
+    · rw [ite_eq_right (fun hd => ha (of_decide_eq_true hd))]
+      exact filter_length_eq_zero _ keys fun b _ hb =>
+        ha (congrArg Prod.fst (of_decide_eq_true hb))
+  rw [hTerm, rcSum_ite]
+  rfl
+
+/-! ## §3. Committed trails: the product over rounds, and the adaptive control -/
+
+/-- S-box output differences of the two trajectories, round by round, for the constant list
+    `ks` (head = first round). -/
+def spnSboxTrail (mdsA mdsB : Tower128) :
+    List (Tower128 × Tower128) → Tower128 × Tower128 → Tower128 × Tower128 →
+      List (Tower128 × Tower128)
+  | [], _, _ => []
+  | rc :: rest, s, s' =>
+    sboxPairDiff rc s s' ::
+      spnSboxTrail mdsA mdsB rest (spnRound128 mdsA mdsB rc s) (spnRound128 mdsA mdsB rc s')
+
+/-- Number of constant lists, out of `(N·N)^trail.length`, under which the committed pair
+    `s`, `s'` follows the committed trail. -/
+def spnTrailCount (keys : List Tower128) (mdsA mdsB : Tower128)
+    (s s' : Tower128 × Tower128) (trail : List (Tower128 × Tower128)) : Nat :=
+  ((freshInputAssignments (rcPairs keys) trail.length).filter fun ks =>
+    decide (spnSboxTrail mdsA mdsB ks s s' = trail)).length
+
+/-- Product of lane bounds along a trail: the input difference of each round is the linear
+    layer applied to the previous S-box output difference. -/
+def spnTrailBound (N : Nat) (mdsA mdsB : Tower128) :
+    Tower128 × Tower128 → List (Tower128 × Tower128) → Nat
+  | _, [] => 1
+  | δ, γ :: rest =>
+    laneBound N δ.1 * laneBound N δ.2 * spnTrailBound N mdsA mdsB (spnLinearMix 7 mdsA mdsB γ) rest
+
+/-- **Markov product for the actual round function.** For every committed pair and trail, the
+    number of independent uniform constant lists that realize the trail is at most the product
+    of the per-lane root bounds. Proof: the first round's constants are a separate coordinate
+    of the sample, and the bound for the remaining rounds is uniform in the reached states. -/
+theorem spnTrailCount_le (keys : List Tower128) (hNd : keys.Nodup) (mdsA mdsB : Tower128) :
+    ∀ (trail : List (Tower128 × Tower128)) (s s' : Tower128 × Tower128),
+      spnTrailCount keys mdsA mdsB s s' trail ≤
+        spnTrailBound keys.length mdsA mdsB (pairXor s s') trail
+  | [], s, s' => List.length_filter_le _ [[]]
+  | γ :: rest, s, s' => by
+    unfold spnTrailCount
+    rw [List.length_cons, freshInputAssignments, filter_prefixAssignments_length]
+    have hTerm : ∀ rc ∈ rcPairs keys,
+        ((freshInputAssignments (rcPairs keys) rest.length).filter fun t =>
+          decide (spnSboxTrail mdsA mdsB (rc :: t) s s' = γ :: rest)).length ≤
+        if decide (sboxPairDiff rc s s' = γ) then
+          spnTrailBound keys.length mdsA mdsB (spnLinearMix 7 mdsA mdsB γ) rest else 0 := by
+      intro rc _
+      by_cases h : sboxPairDiff rc s s' = γ
+      · rw [ite_eq_left (decide_eq_true h)]
+        have ih := spnTrailCount_le keys hNd mdsA mdsB rest
+          (spnRound128 mdsA mdsB rc s) (spnRound128 mdsA mdsB rc s')
+        rw [spnRound128_diff, h] at ih
+        refine Nat.le_trans (Nat.le_of_eq ?_) ih
+        unfold spnTrailCount
+        apply congrArg List.length
+        apply List.filter_congr
+        intro t _
+        simp only [spnSboxTrail, h, List.cons.injEq, true_and]
+      · rw [ite_eq_right (fun hd => h (of_decide_eq_true hd))]
+        exact Nat.le_of_eq (filter_length_eq_zero _ _ fun t _ ht =>
+          h (List.head_eq_of_cons_eq (of_decide_eq_true ht)))
+    refine Nat.le_trans (rcSum_le_of_le _ _ _ hTerm) ?_
+    rw [rcSum_ite, sboxPairDiff_count]
+    exact Nat.mul_le_mul
+      (Nat.mul_le_mul (laneCount_le_laneBound keys hNd s.1 s'.1 γ.1)
+        (laneCount_le_laneBound keys hNd s.2 s'.2 γ.2)) (Nat.le_refl _)
+
+/-- Round-constant schedule read from a list (zero past its end). -/
+def rcSchedule : List (Tower128 × Tower128) → Nat → Tower128 × Tower128
+  | [], _ => (towerZero 7, towerZero 7)
+  | rc :: _, 0 => rc
+  | _ :: rest, i + 1 => rcSchedule rest i
+
+theorem spnIterRounds128_succ_head (mdsA mdsB : Tower128) (rcs : Nat → Tower128 × Tower128) :
+    ∀ (r : Nat) (st : Tower128 × Tower128),
+      spnIterRounds128 mdsA mdsB rcs (r + 1) st =
+        spnIterRounds128 mdsA mdsB (fun i => rcs (i + 1)) r (spnRound128 mdsA mdsB (rcs 0) st)
+  | 0, _ => rfl
+  | r + 1, st => by
+    show spnRound128 mdsA mdsB (rcs (r + 1)) (spnIterRounds128 mdsA mdsB rcs (r + 1) st) =
+      spnRound128 mdsA mdsB (rcs (r + 1))
+        (spnIterRounds128 mdsA mdsB (fun i => rcs (i + 1)) r (spnRound128 mdsA mdsB (rcs 0) st))
+    rw [spnIterRounds128_succ_head mdsA mdsB rcs r st]
+
+/-- The permutation with the constant list applied head first. -/
+def spnRunList (mdsA mdsB : Tower128) :
+    List (Tower128 × Tower128) → Tower128 × Tower128 → Tower128 × Tower128
+  | [], st => st
+  | rc :: rest, st => spnRunList mdsA mdsB rest (spnRound128 mdsA mdsB rc st)
+
+/-- `spnRunList` is the actual `spnIterRounds128` under the list's schedule. -/
+theorem spnRunList_eq_iter (mdsA mdsB : Tower128) :
+    ∀ (ks : List (Tower128 × Tower128)) (st : Tower128 × Tower128),
+      spnRunList mdsA mdsB ks st = spnIterRounds128 mdsA mdsB (rcSchedule ks) ks.length st
+  | [], _ => rfl
+  | rc :: rest, st => by
+    rw [List.length_cons, spnIterRounds128_succ_head]
+    exact spnRunList_eq_iter mdsA mdsB rest (spnRound128 mdsA mdsB rc st)
+
+theorem spnTrailActiveSboxes_succ_head (mdsA mdsB : Tower128)
+    (rcs : Nat → Tower128 × Tower128) :
+    ∀ (r : Nat) (s s' : Tower128 × Tower128),
+      spnTrailActiveSboxes mdsA mdsB rcs (r + 1) s s' =
+        laneActiveWeight 7 (pairXor s s') +
+          spnTrailActiveSboxes mdsA mdsB (fun i => rcs (i + 1)) r
+            (spnRound128 mdsA mdsB (rcs 0) s) (spnRound128 mdsA mdsB (rcs 0) s')
+  | 0, s, s' => (Nat.zero_add _).trans (Nat.add_zero _).symm
+  | r + 1, s, s' => by
+    have ih := spnTrailActiveSboxes_succ_head mdsA mdsB rcs r s s'
+    show spnTrailActiveSboxes mdsA mdsB rcs (r + 1) s s' +
+        laneActiveWeight 7 (pairXor (spnIterRounds128 mdsA mdsB rcs (r + 1) s)
+          (spnIterRounds128 mdsA mdsB rcs (r + 1) s')) =
+      laneActiveWeight 7 (pairXor s s') +
+        (spnTrailActiveSboxes mdsA mdsB (fun i => rcs (i + 1)) r
+            (spnRound128 mdsA mdsB (rcs 0) s) (spnRound128 mdsA mdsB (rcs 0) s') +
+          laneActiveWeight 7 (pairXor
+            (spnIterRounds128 mdsA mdsB (fun i => rcs (i + 1)) r (spnRound128 mdsA mdsB (rcs 0) s))
+            (spnIterRounds128 mdsA mdsB (fun i => rcs (i + 1)) r
+              (spnRound128 mdsA mdsB (rcs 0) s'))))
+    rw [ih, spnIterRounds128_succ_head, spnIterRounds128_succ_head, Nat.add_assoc]
+
+/-- Active S-boxes of the two trajectories, counted head first. -/
+def spnListActive (mdsA mdsB : Tower128) :
+    List (Tower128 × Tower128) → Tower128 × Tower128 → Tower128 × Tower128 → Nat
+  | [], _, _ => 0
+  | rc :: rest, s, s' =>
+    laneActiveWeight 7 (pairXor s s') +
+      spnListActive mdsA mdsB rest (spnRound128 mdsA mdsB rc s) (spnRound128 mdsA mdsB rc s')
+
+/-- `spnListActive` is the existing `spnTrailActiveSboxes` under the list's schedule. -/
+theorem spnListActive_eq (mdsA mdsB : Tower128) :
+    ∀ (ks : List (Tower128 × Tower128)) (s s' : Tower128 × Tower128),
+      spnListActive mdsA mdsB ks s s' =
+        spnTrailActiveSboxes mdsA mdsB (rcSchedule ks) ks.length s s'
+  | [], _, _ => rfl
+  | rc :: rest, s, s' => by
+    rw [List.length_cons, spnTrailActiveSboxes_succ_head]
+    show _ + spnListActive mdsA mdsB rest _ _ =
+      _ + spnTrailActiveSboxes mdsA mdsB (rcSchedule rest) rest.length _ _
+    rw [spnListActive_eq mdsA mdsB rest]
+    rfl
+
+theorem laneBound_weight (N : Nat) (δ : Tower128 × Tower128) :
+    laneBound N δ.1 * laneBound N δ.2 * N ^ laneActiveWeight 7 δ =
+      6 ^ laneActiveWeight 7 δ * (N * N) := by
+  unfold laneBound laneActiveWeight
+  by_cases h1 : δ.1 = towerZero 7 <;> by_cases h2 : δ.2 = towerZero 7
+  · rw [ite_eq_left h1, ite_eq_left h2, ite_eq_left h1, ite_eq_left h2]
+    show N * N * 1 = 1 * (N * N)
+    rw [Nat.mul_one, Nat.one_mul]
+  · rw [ite_eq_left h1, ite_eq_right h2, ite_eq_left h1, ite_eq_right h2]
+    show N * 6 * (1 * N) = 1 * 6 * (N * N)
+    rw [Nat.one_mul, Nat.one_mul, Nat.mul_comm N 6, Nat.mul_assoc]
+  · rw [ite_eq_right h1, ite_eq_left h2, ite_eq_right h1, ite_eq_left h2]
+    show 6 * N * (1 * N) = 1 * 6 * (N * N)
+    rw [Nat.one_mul, Nat.one_mul, Nat.mul_assoc]
+  · rw [ite_eq_right h1, ite_eq_right h2, ite_eq_right h1, ite_eq_right h2]
+    show 6 * 6 * (1 * N * N) = 1 * 6 * 6 * (N * N)
+    rw [Nat.one_mul, Nat.one_mul]
+
+theorem trailBound_step_arith (lb tb N w a n : Nat)
+    (hw : lb * N ^ w = 6 ^ w * (N * N)) (ih : tb * N ^ a = 6 ^ a * (N * N) ^ n) :
+    lb * tb * N ^ (w + a) = 6 ^ (w + a) * (N * N) ^ (n + 1) := by
+  rw [Nat.pow_add N, Nat.pow_add 6, Nat.mul_mul_mul_comm, hw, ih, Nat.pow_succ,
+    Nat.mul_mul_mul_comm, Nat.mul_comm (N * N) ((N * N) ^ n)]
+
+/-- On a realized trail the bound is exactly `6^a · N^(2n - a)` for the existing active count. -/
+theorem spnTrailBound_realized (N : Nat) (mdsA mdsB : Tower128) :
+    ∀ (ks : List (Tower128 × Tower128)) (s s' : Tower128 × Tower128),
+      spnTrailBound N mdsA mdsB (pairXor s s') (spnSboxTrail mdsA mdsB ks s s') *
+          N ^ spnListActive mdsA mdsB ks s s' =
+        6 ^ spnListActive mdsA mdsB ks s s' * (N * N) ^ ks.length
+  | [], _, _ => rfl
+  | rc :: rest, s, s' => by
+    have ih := spnTrailBound_realized N mdsA mdsB rest
+      (spnRound128 mdsA mdsB rc s) (spnRound128 mdsA mdsB rc s')
+    rw [spnRound128_diff] at ih
+    exact trailBound_step_arith _ _ N _ _ _ (laneBound_weight N (pairXor s s')) ih
+
+theorem committed_trail_arith (c tb N a M : Nat) (hc : c ≤ tb)
+    (hR : tb * N ^ a = 6 ^ a * M) (ha : 72 ≤ a) (h6 : 6 ≤ N) :
+    c * N ^ 72 ≤ 6 ^ 72 * M := by
+  obtain ⟨e, rfl⟩ := Nat.exists_eq_add_of_le ha
+  have hNpos : 0 < N ^ e := Nat.pow_pos (Nat.lt_of_lt_of_le (by decide) h6)
+  apply Nat.le_of_mul_le_mul_right _ hNpos
+  calc c * N ^ 72 * N ^ e ≤ tb * N ^ 72 * N ^ e :=
+        Nat.mul_le_mul_right _ (Nat.mul_le_mul_right _ hc)
+    _ = tb * N ^ (72 + e) := by rw [Nat.mul_assoc, ← Nat.pow_add]
+    _ = 6 ^ (72 + e) * M := hR
+    _ = 6 ^ 72 * M * 6 ^ e := by rw [Nat.pow_add, Nat.mul_right_comm]
+    _ ≤ 6 ^ 72 * M * N ^ e := Nat.mul_le_mul_left _ (Nat.pow_le_pow_left h6 e)
+
+/-- **48 rounds, committed trail.** With the deployed-shape mixing layer, any committed pair
+    `s ≠ s'` and committed 48-round trail are realized by at most a `(6/N)^72` fraction of
+    the `(N·N)^48` constant lists. This consumes `spn48_active_sboxes_ge_72`: a realized trail
+    has at least 72 active lanes, and each active lane costs a factor `6/N`. -/
+theorem spn48_committed_trail_count_le (mds : ValidSpnMdsPair 7) (keys : List Tower128)
+    (hNd : keys.Nodup) (hSix : 6 ≤ keys.length) (s s' : Tower128 × Tower128) (hNe : s ≠ s')
+    (trail : List (Tower128 × Tower128)) (hLen : trail.length = spnRounds) :
+    spnTrailCount keys mds.mdsA mds.mdsB s s' trail * keys.length ^ 72 ≤
+      6 ^ 72 * (keys.length * keys.length) ^ 48 := by
+  cases hF : (freshInputAssignments (rcPairs keys) trail.length).filter fun ks =>
+      decide (spnSboxTrail mds.mdsA mds.mdsB ks s s' = trail) with
+  | nil =>
+    unfold spnTrailCount
+    rw [hF]
+    exact (Nat.zero_mul _).symm ▸ Nat.zero_le _
+  | cons ks more =>
+    have hMem : ks ∈ (freshInputAssignments (rcPairs keys) trail.length).filter fun ks =>
+        decide (spnSboxTrail mds.mdsA mds.mdsB ks s s' = trail) := by
+      rw [hF]; exact List.mem_cons_self
+    obtain ⟨hIn, hDec⟩ := List.mem_filter.mp hMem
+    have hEq : spnSboxTrail mds.mdsA mds.mdsB ks s s' = trail := of_decide_eq_true hDec
+    have hLenKs : ks.length = spnRounds :=
+      (mem_freshInputAssignments_length _ _ _ hIn).trans hLen
+    have hAct : 72 ≤ spnListActive mds.mdsA mds.mdsB ks s s' := by
+      rw [spnListActive_eq, hLenKs]
+      exact (spn48_active_sboxes_ge_72 mds (rcSchedule ks) s s' hNe).1
+    have hR := spnTrailBound_realized keys.length mds.mdsA mds.mdsB ks s s'
+    rw [hEq, hLenKs] at hR
+    exact committed_trail_arith _ _ _ _ _
+      (spnTrailCount_le keys hNd mds.mdsA mds.mdsB trail s s') hR hAct hSix
+
+/-- The committed-trail probability, as a `RatBound` over the `2^128`-element lane constant
+    list, is at most `sbox7MaxDiffProb128.pow 72`. This is the event that the arithmetic in
+    `spn48_differential_trail_security_bounds` was missing; its third conjunct now applies. -/
+theorem spn48_committed_trail_atLeast_256_bits (mds : ValidSpnMdsPair 7)
+    (keys : List Tower128) (hNd : keys.Nodup) (hN : keys.length = 2 ^ 128)
+    (s s' : Tower128 × Tower128) (hNe : s ≠ s')
+    (trail : List (Tower128 × Tower128)) (hLen : trail.length = spnRounds) :
+    let prob : RatBound := ⟨spnTrailCount keys mds.mdsA mds.mdsB s s' trail,
+      (2 ^ 128 * 2 ^ 128) ^ 48, Nat.pow_pos (Nat.mul_pos (Nat.two_pow_pos 128) (Nat.two_pow_pos 128))⟩
+    RatBound.le prob (sbox7MaxDiffProb128.pow 72) ∧ atLeastBits 256 prob := by
+  have hLe : RatBound.le
+      (⟨spnTrailCount keys mds.mdsA mds.mdsB s s' trail, (2 ^ 128 * 2 ^ 128) ^ 48,
+        Nat.pow_pos (Nat.mul_pos (Nat.two_pow_pos 128) (Nat.two_pow_pos 128))⟩ : RatBound)
+      (sbox7MaxDiffProb128.pow 72) := by
+    have h := spn48_committed_trail_count_le mds keys hNd
+      (by rw [hN]; exact Nat.le_of_lt_succ (by decide)) s s' hNe trail hLen
+    rw [hN] at h
+    exact h
+  exact ⟨hLe, atLeastBits_of_le hLe
+    (atLeastBits_of_strictlyMoreThanBits spn48_differential_trail_security_bounds.2.2)⟩
+
+/-- **Adaptive control.** A trail selected after the constants are published (here: the trail
+    the committed pair actually follows) is realized by every constant list. The committed
+    bound therefore says nothing about an attacker who reads the public constants first. -/
+theorem spn_adaptive_trail_always_realized (keys : List Tower128) (mdsA mdsB : Tower128)
+    (s s' : Tower128 × Tower128) (n : Nat) :
+    ((freshInputAssignments (rcPairs keys) n).filter fun ks =>
+      decide (spnSboxTrail mdsA mdsB ks s s' =
+        (fun seen => spnSboxTrail mdsA mdsB seen s s') ks)).length =
+      (keys.length * keys.length) ^ n := by
+  have hAll : ((freshInputAssignments (rcPairs keys) n).filter fun ks =>
+      decide (spnSboxTrail mdsA mdsB ks s s' =
+        (fun seen => spnSboxTrail mdsA mdsB seen s s') ks)) =
+      freshInputAssignments (rcPairs keys) n :=
+    List.filter_eq_self.mpr fun ks _ => decide_eq_true rfl
+  rw [hAll, freshInputAssignments_length, rcPairs_length]
+
+/-- The adaptive count violates the committed 48-round bound for every list of more than six
+    lane constants. -/
+theorem spn48_adaptive_trail_exceeds_committed_bound (N : Nat) (hN : 6 < N) :
+    ¬ (N * N) ^ 48 * N ^ 72 ≤ 6 ^ 72 * (N * N) ^ 48 := by
+  intro h
+  rw [Nat.mul_comm (6 ^ 72)] at h
+  have hPos : 0 < (N * N) ^ 48 :=
+    Nat.pow_pos (Nat.mul_pos (Nat.lt_trans (by decide) hN) (Nat.lt_trans (by decide) hN))
+  exact Nat.lt_irrefl _ (Nat.lt_of_lt_of_le
+    (Nat.pow_lt_pow_left hN (by decide)) (Nat.le_of_mul_le_mul_left h hPos))
+
+
+end Qsag
+end
+
+
+section
+namespace Qsag
+set_option autoImplicit false
+
+/-! ## §1. Counting a duplicate-free list of pairs inside a rectangle -/
+
+theorem rcFilter_length_le_of_imp {α : Type} (p q : α → Bool) :
+    ∀ l : List α, (∀ x ∈ l, p x = true → q x = true) →
+      (l.filter p).length ≤ (l.filter q).length
+  | [], _ => Nat.le_refl 0
+  | x :: xs, h => by
+    have ih := rcFilter_length_le_of_imp p q xs fun y hy => h y (List.mem_cons_of_mem _ hy)
+    by_cases hp : p x = true
+    · rw [List.filter_cons_of_pos hp, List.filter_cons_of_pos (h x List.mem_cons_self hp)]
+      exact Nat.succ_le_succ ih
+    · rw [List.filter_cons_of_neg hp]
+      by_cases hq : q x = true
+      · rw [List.filter_cons_of_pos hq]; exact Nat.le_succ_of_le ih
+      · rw [List.filter_cons_of_neg hq]; exact ih
+
+theorem rcFilter_split_length {α : Type} (p r : α → Bool) :
+    ∀ l : List α, (l.filter p).length =
+      (l.filter fun x => p x && r x).length + (l.filter fun x => p x && !r x).length
+  | [] => rfl
+  | x :: xs => by
+    have ih := rcFilter_split_length p r xs
+    by_cases hp : p x = true
+    · by_cases hr : r x = true
+      · have h1 : (p x && r x) = true := by rw [hp, hr]; rfl
+        have h2 : ¬ (p x && !r x) = true := by rw [hp, hr]; exact Bool.false_ne_true
+        rw [List.filter_cons_of_pos hp, List.filter_cons_of_pos (p := fun x => p x && r x) h1,
+          List.filter_cons_of_neg (p := fun x => p x && !r x) h2,
+          List.length_cons, List.length_cons, ih, Nat.add_right_comm]
+      · have hr' : r x = false := Bool.eq_false_iff.mpr hr
+        have h1 : ¬ (p x && r x) = true := by rw [hp, hr']; exact Bool.false_ne_true
+        have h2 : (p x && !r x) = true := by rw [hp, hr']; rfl
+        rw [List.filter_cons_of_pos hp, List.filter_cons_of_neg (p := fun x => p x && r x) h1,
+          List.filter_cons_of_pos (p := fun x => p x && !r x) h2,
+          List.length_cons, List.length_cons, ih, Nat.add_assoc]
+    · have hp' : p x = false := Bool.eq_false_iff.mpr hp
+      have h1 : ¬ (p x && r x) = true := by rw [hp']; exact Bool.false_ne_true
+      have h2 : ¬ (p x && !r x) = true := by rw [hp']; exact Bool.false_ne_true
+      rw [List.filter_cons_of_neg hp, List.filter_cons_of_neg (p := fun x => p x && r x) h1,
+        List.filter_cons_of_neg (p := fun x => p x && !r x) h2, ih]
+
+theorem nodup_map_snd_of_fst_eq {α : Type} (a : α) :
+    ∀ L : List (α × α), L.Nodup → (∀ x ∈ L, x.1 = a) → (L.map Prod.snd).Nodup
+  | [], _, _ => List.nodup_nil
+  | x :: xs, hNd, hFst => by
+    have hx := List.nodup_cons.mp hNd
+    rw [List.map_cons]
+    refine List.nodup_cons.mpr ⟨fun hm => ?_,
+      nodup_map_snd_of_fst_eq a xs hx.2 fun y hy => hFst y (List.mem_cons_of_mem _ hy)⟩
+    obtain ⟨y, hy, hySnd⟩ := List.mem_map.mp hm
+    have hyEq : y = x := Prod.ext
+      ((hFst y (List.mem_cons_of_mem _ hy)).trans (hFst x List.mem_cons_self).symm) hySnd
+    rw [hyEq] at hy
+    exact hx.1 hy
+
+/-- If the first coordinates satisfying `p` take at most `m` distinct values and the second
+    coordinates satisfying `q` at most `n`, a duplicate-free list of pairs has at most `m·n`
+    members in the rectangle `p × q`. No enumeration of the coordinate type is needed. -/
+theorem rect_count_le {α : Type} [DecidableEq α] (q : α → Bool) (n : Nat)
+    (hq : ∀ S : List α, S.Nodup → (S.filter q).length ≤ n) :
+    ∀ (m : Nat) (p : α → Bool), (∀ S : List α, S.Nodup → (S.filter p).length ≤ m) →
+      ∀ l : List (α × α), l.Nodup → (l.filter fun x => p x.1 && q x.2).length ≤ m * n
+  | 0, p, hp, l, _ => by
+    rw [filter_length_eq_zero _ l]
+    · exact Nat.zero_le _
+    · intro x _ hx
+      have hp1 : p x.1 = true := (Bool.and_eq_true_iff.mp hx).1
+      have hB := hp [x.1] (List.nodup_cons.mpr ⟨List.not_mem_nil, List.nodup_nil⟩)
+      rw [List.filter_cons_of_pos hp1] at hB
+      exact Nat.not_succ_le_zero _ hB
+  | m + 1, p, hp, l, hNd => by
+    cases hF : l.filter (fun x => p x.1 && q x.2) with
+    | nil => exact Nat.zero_le _
+    | cons x0 more =>
+      have hx0 : x0 ∈ l.filter (fun x => p x.1 && q x.2) := by rw [hF]; exact List.mem_cons_self
+      have hpx0 : p x0.1 = true := (Bool.and_eq_true_iff.mp (List.mem_filter.mp hx0).2).1
+      rw [← hF, rcFilter_split_length _ (fun x => decide (x.1 = x0.1)) l]
+      have h1 : (l.filter fun x => (p x.1 && q x.2) && decide (x.1 = x0.1)).length ≤ n := by
+        have hT : ((l.filter fun x => decide (x.1 = x0.1)).map Prod.snd).Nodup :=
+          nodup_map_snd_of_fst_eq x0.1 _ (List.Pairwise.filter _ hNd)
+            fun x hx => of_decide_eq_true (List.mem_filter.mp hx).2
+        have hB := hq _ hT
+        rw [List.filter_map, List.length_map, List.filter_filter] at hB
+        refine Nat.le_trans (rcFilter_length_le_of_imp _ _ l fun x _ hx => ?_) hB
+        have h3 := Bool.and_eq_true_iff.mp hx
+        exact Bool.and_eq_true_iff.mpr ⟨(Bool.and_eq_true_iff.mp h3.1).2, h3.2⟩
+      have h2 : (l.filter fun x => (p x.1 && q x.2) && !decide (x.1 = x0.1)).length ≤ m * n := by
+        refine Nat.le_trans (Nat.le_of_eq ?_)
+          (rect_count_le q n hq m (fun a => p a && !decide (a = x0.1)) ?_ l hNd)
+        · apply congrArg List.length
+          apply List.filter_congr
+          intro x _
+          show ((p x.1 && q x.2) && !decide (x.1 = x0.1)) =
+            ((p x.1 && !decide (x.1 = x0.1)) && q x.2)
+          cases p x.1 <;> cases q x.2 <;> cases decide (x.1 = x0.1) <;> rfl
+        · intro S hS
+          have hNd' : (x0.1 :: S.filter fun a => p a && !decide (a = x0.1)).Nodup :=
+            List.nodup_cons.mpr ⟨fun hm => by
+              have hb := (Bool.and_eq_true_iff.mp (List.mem_filter.mp hm).2).2
+              rw [decide_eq_true rfl] at hb
+              exact Bool.false_ne_true hb, List.Pairwise.filter _ hS⟩
+          have hB := hp _ hNd'
+          have hSelf : (S.filter fun a => p a && !decide (a = x0.1)).filter p =
+              S.filter fun a => p a && !decide (a = x0.1) :=
+            List.filter_eq_self.mpr fun a ha =>
+              (Bool.and_eq_true_iff.mp (List.mem_filter.mp ha).2).1
+          rw [List.filter_cons_of_pos hpx0, List.length_cons, hSelf] at hB
+          exact Nat.le_of_succ_le_succ hB
+      exact Nat.le_trans (Nat.add_le_add h1 h2)
+        (Nat.le_of_eq (by rw [Nat.succ_mul, Nat.add_comm]))
+
+/-! ## §2. Lane roots as a function of the input, and one fully active round -/
+
+theorem sboxLaneDiff_input_symm (k a δ : Tower128) :
+    sboxLaneDiff k a (towerAdd 7 a δ) = sboxLaneDiff a k (towerAdd 7 k δ) := by
+  unfold sboxLaneDiff
+  rw [towerAdd_comm 7 a k, towerAdd_assoc 7 a δ k, towerAdd_comm 7 (towerAdd 7 k δ) a,
+    towerAdd_comm 7 δ k]
+
+/-- For a fixed lane constant and nonzero difference, at most six lane inputs give a
+    prescribed x^7 output difference. Same root bound, with the input as the unknown. -/
+theorem laneRoots_le_six (k δ γ : Tower128) (hδ : δ ≠ towerZero 7) (S : List Tower128)
+    (hS : S.Nodup) :
+    (S.filter fun a => decide (sboxLaneDiff k a (towerAdd 7 a δ) = γ)).length ≤ 6 := by
+  have h := laneCount_le_laneBound S hS k (towerAdd 7 k δ) γ
+  unfold laneBound at h
+  rw [towerAdd_cancel, ite_eq_right hδ] at h
+  refine Nat.le_trans (Nat.le_of_eq ?_) h
+  unfold laneCount
+  apply congrArg List.length
+  apply List.filter_congr
+  intro a _
+  rw [sboxLaneDiff_input_symm]
+
+/-- A fully active S-box layer with fixed constant: at most `36` states of any
+    duplicate-free list produce a prescribed output difference. -/
+theorem active_layer_states_le_36 (rc δ γ : Tower128 × Tower128)
+    (h1 : δ.1 ≠ towerZero 7) (h2 : δ.2 ≠ towerZero 7) (l : List (Tower128 × Tower128))
+    (hNd : l.Nodup) :
+    (l.filter fun u => decide (sboxPairDiff rc u (pairXor u δ) = γ)).length ≤ 36 := by
+  have hR := rect_count_le
+    (fun b => decide (sboxLaneDiff rc.2 b (towerAdd 7 b δ.2) = γ.2)) 6
+    (fun S hS => laneRoots_le_six rc.2 δ.2 γ.2 h2 S hS) 6
+    (fun a => decide (sboxLaneDiff rc.1 a (towerAdd 7 a δ.1) = γ.1))
+    (fun S hS => laneRoots_le_six rc.1 δ.1 γ.1 h1 S hS) l hNd
+  refine Nat.le_trans (rcFilter_length_le_of_imp _ _ l fun u _ hu => ?_) hR
+  have hEq : sboxPairDiff rc u (pairXor u δ) = γ := of_decide_eq_true hu
+  exact Bool.and_eq_true_iff.mpr
+    ⟨decide_eq_true (congrArg Prod.fst hEq), decide_eq_true (congrArg Prod.snd hEq)⟩
+
+theorem laneActiveWeight_le_one_left (st : Tower128 × Tower128) (h : st.1 = towerZero 7) :
+    laneActiveWeight 7 st ≤ 1 := by
+  unfold laneActiveWeight
+  rw [ite_eq_left h]
+  by_cases h2 : st.2 = towerZero 7
+  · rw [ite_eq_left h2]; decide
+  · rw [ite_eq_right h2]; decide
+
+theorem laneActiveWeight_le_one_right (st : Tower128 × Tower128) (h : st.2 = towerZero 7) :
+    laneActiveWeight 7 st ≤ 1 := by
+  unfold laneActiveWeight
+  rw [ite_eq_left h]
+  by_cases h1 : st.1 = towerZero 7
+  · rw [ite_eq_left h1]; decide
+  · rw [ite_eq_right h1]; decide
+
+theorem pairXor_eq_right {a b c : Tower128 × Tower128} (h : pairXor a b = c) :
+    b = pairXor a c := by
+  rw [← h]
+  unfold pairXor
+  exact Prod.ext (towerAdd_cancel 7 a.1 b.1).symm (towerAdd_cancel 7 a.2 b.2).symm
+
+/-! ## §3. Fixed constants: at most 36 inputs follow any trail of two or more rounds -/
+
+/-- **Fixed public constants.** For every constant list `rc1 :: rc2 :: rest` (any values:
+    cSHAKE output, zero, adversarial), every nonzero input difference `δ`, every S-box trail
+    and every duplicate-free input list, at most `36` inputs `x` make the pair
+    `(x, x ⊕ δ)` follow the trail. -/
+theorem spn_fixed_constants_trail_count_le (mds : ValidSpnMdsPair 7)
+    (rc1 rc2 : Tower128 × Tower128) (rest : List (Tower128 × Tower128))
+    (δ : Tower128 × Tower128) (hδ : δ ≠ (towerZero 7, towerZero 7))
+    (trail : List (Tower128 × Tower128)) (inputs : List (Tower128 × Tower128))
+    (hNd : inputs.Nodup) :
+    (inputs.filter fun x => decide
+      (spnSboxTrail mds.mdsA mds.mdsB (rc1 :: rc2 :: rest) x (pairXor x δ) = trail)).length ≤ 36 := by
+  cases hF : inputs.filter (fun x => decide
+      (spnSboxTrail mds.mdsA mds.mdsB (rc1 :: rc2 :: rest) x (pairXor x δ) = trail)) with
+  | nil => exact Nat.zero_le _
+  | cons x0 more =>
+    rw [← hF]
+    have hx0 : x0 ∈ inputs.filter (fun x => decide
+        (spnSboxTrail mds.mdsA mds.mdsB (rc1 :: rc2 :: rest) x (pairXor x δ) = trail)) := by
+      rw [hF]; exact List.mem_cons_self
+    have hT0 : spnSboxTrail mds.mdsA mds.mdsB (rc1 :: rc2 :: rest) x0 (pairXor x0 δ) = trail :=
+      of_decide_eq_true (List.mem_filter.mp hx0).2
+    -- the trail's first two entries, read off the realizing input
+    obtain ⟨g1, g2, tl, hTrail⟩ : ∃ g1 g2 tl, trail = g1 :: g2 :: tl := ⟨_, _, _, hT0.symm⟩
+    subst hTrail
+    have hHead : ∀ x, spnSboxTrail mds.mdsA mds.mdsB (rc1 :: rc2 :: rest) x (pairXor x δ) =
+        g1 :: g2 :: tl →
+        sboxPairDiff rc1 x (pairXor x δ) = g1 ∧
+        sboxPairDiff rc2 (spnRound128 mds.mdsA mds.mdsB rc1 x)
+          (pairXor (spnRound128 mds.mdsA mds.mdsB rc1 x) (spnLinearMix 7 mds.mdsA mds.mdsB g1)) =
+          g2 := by
+      intro x hx
+      have hA : sboxPairDiff rc1 x (pairXor x δ) = g1 := List.head_eq_of_cons_eq hx
+      have hB : sboxPairDiff rc2 (spnRound128 mds.mdsA mds.mdsB rc1 x)
+          (spnRound128 mds.mdsA mds.mdsB rc1 (pairXor x δ)) = g2 :=
+        List.head_eq_of_cons_eq (List.tail_eq_of_cons_eq hx)
+      have hD := spnRound128_diff mds.mdsA mds.mdsB rc1 x (pairXor x δ)
+      rw [hA] at hD
+      rw [pairXor_eq_right hD] at hB
+      exact ⟨hA, hB⟩
+    have hg1 : g1.1 = towerZero 7 ↔ δ.1 = towerZero 7 := by
+      rw [← (hHead x0 hT0).1]
+      show sboxLaneDiff rc1.1 x0.1 (towerAdd 7 x0.1 δ.1) = towerZero 7 ↔ _
+      rw [sboxLaneDiff_eq_zero_iff]
+      constructor
+      · intro h
+        have h2 := congrArg (towerAdd 7 x0.1) h
+        rw [towerAdd_self_zero, towerAdd_cancel] at h2
+        exact h2.symm
+      · intro h; rw [h, towerAdd_zero]
+    have hg2 : g1.2 = towerZero 7 ↔ δ.2 = towerZero 7 := by
+      rw [← (hHead x0 hT0).1]
+      show sboxLaneDiff rc1.2 x0.2 (towerAdd 7 x0.2 δ.2) = towerZero 7 ↔ _
+      rw [sboxLaneDiff_eq_zero_iff]
+      constructor
+      · intro h
+        have h2 := congrArg (towerAdd 7 x0.2) h
+        rw [towerAdd_self_zero, towerAdd_cancel] at h2
+        exact h2.symm
+      · intro h; rw [h, towerAdd_zero]
+    by_cases hA : δ.1 ≠ towerZero 7 ∧ δ.2 ≠ towerZero 7
+    · -- first round fully active
+      refine Nat.le_trans (rcFilter_length_le_of_imp _ _ inputs fun x _ hx => ?_)
+        (active_layer_states_le_36 rc1 δ g1 hA.1 hA.2 inputs hNd)
+      exact decide_eq_true (hHead x (of_decide_eq_true hx)).1
+    · -- otherwise the branch number forces the second round to be fully active
+      have hg1Ne : g1 ≠ (towerZero 7, towerZero 7) := fun h0 =>
+        hδ (Prod.ext (hg1.mp (congrArg Prod.fst h0)) (hg2.mp (congrArg Prod.snd h0)))
+      have hBr := (spnLinearMix_branch_number_three mds g1 hg1Ne).2
+      have hW1 : laneActiveWeight 7 g1 ≤ 1 := by
+        by_cases h1 : δ.1 = towerZero 7
+        · exact laneActiveWeight_le_one_left g1 (hg1.mpr h1)
+        · by_cases h2 : δ.2 = towerZero 7
+          · exact laneActiveWeight_le_one_right g1 (hg2.mpr h2)
+          · exact absurd ⟨h1, h2⟩ hA
+      have hM1 : (spnLinearMix 7 mds.mdsA mds.mdsB g1).1 ≠ towerZero 7 := fun h0 => by
+        have hW := laneActiveWeight_le_one_left _ h0
+        omega
+      have hM2 : (spnLinearMix 7 mds.mdsA mds.mdsB g1).2 ≠ towerZero 7 := fun h0 => by
+        have hW := laneActiveWeight_le_one_right _ h0
+        omega
+      have hInj : ∀ a b : Tower128 × Tower128,
+          spnRound128 mds.mdsA mds.mdsB rc1 a = spnRound128 mds.mdsA mds.mdsB rc1 b → a = b :=
+        fun a b hab => if h : a = b then h else absurd hab (spnRound128_ne mds rc1 a b h)
+      have hB := active_layer_states_le_36 rc2 (spnLinearMix 7 mds.mdsA mds.mdsB g1) g2 hM1 hM2
+        (inputs.map (spnRound128 mds.mdsA mds.mdsB rc1))
+        (rcNodup_map_of_injective _ hInj inputs hNd)
+      rw [List.filter_map, List.length_map] at hB
+      refine Nat.le_trans (rcFilter_length_le_of_imp _ _ inputs fun x _ hx => ?_) hB
+      exact decide_eq_true (hHead x (of_decide_eq_true hx)).2
+
+/-- On a `2^256`-element input list the fixed-constant trail probability is at most
+    `36 / 2^256 < 2^-250`. Together with the `2^-256` atom floor this locates it; the
+    `(6/2^128)^72` product is not a bound for this experiment. -/
+theorem spn_fixed_constants_trail_atLeast_250_bits (mds : ValidSpnMdsPair 7)
+    (rc1 rc2 : Tower128 × Tower128) (rest : List (Tower128 × Tower128))
+    (δ : Tower128 × Tower128) (hδ : δ ≠ (towerZero 7, towerZero 7))
+    (trail : List (Tower128 × Tower128)) (inputs : List (Tower128 × Tower128))
+    (hNd : inputs.Nodup) :
+    atLeastBits 250 ⟨(inputs.filter fun x => decide
+      (spnSboxTrail mds.mdsA mds.mdsB (rc1 :: rc2 :: rest) x (pairXor x δ) = trail)).length,
+      2 ^ 256, Nat.two_pow_pos 256⟩ :=
+  Nat.le_trans (Nat.mul_le_mul_right _
+    (spn_fixed_constants_trail_count_le mds rc1 rc2 rest δ hδ trail inputs hNd))
+    (show 36 * 2 ^ 250 ≤ 2 ^ 256 by decide)
+
+/-! ## §4. The sample lists exist -/
+
+theorem pairList_nodup {α : Type} (l2 : List α) (h2 : l2.Nodup) :
+    ∀ l1 : List α, l1.Nodup → (l1.flatMap fun a => l2.map fun b => (a, b)).Nodup
+  | [], _ => List.nodup_nil
+  | x :: xs, h1 => by
+    have hx := List.nodup_cons.mp h1
+    rw [List.flatMap_cons]
+    refine List.nodup_append.mpr
+      ⟨rcNodup_map_of_injective _ (fun a b hab => congrArg Prod.snd hab) l2 h2,
+        pairList_nodup l2 h2 xs hx.2, fun u hu v hv huv => ?_⟩
+    obtain ⟨b, _, hb⟩ := List.mem_map.mp hu
+    obtain ⟨a, ha, hav⟩ := List.mem_flatMap.mp hv
+    obtain ⟨c, _, hc⟩ := List.mem_map.mp hav
+    have hEq : x = a := by
+      have h3 := congrArg Prod.fst huv
+      rw [← hb, ← hc] at h3
+      exact h3
+    rw [← hEq] at ha
+    exact hx.1 ha
+
+theorem rcPairs_nodup {α : Type} (keys : List α) (h : keys.Nodup) : (rcPairs keys).Nodup :=
+  pairList_nodup keys h keys h
+
+/-- Every element of the level-`k` Wiedemann tower, once. -/
+def towerAll : (k : Nat) → List (TowerElem k)
+  | 0 => [false, true]
+  | k + 1 => rcPairs (towerAll k)
+
+theorem towerAll_length : ∀ k : Nat, (towerAll k).length = 2 ^ 2 ^ k
+  | 0 => rfl
+  | k + 1 => by
+    show (rcPairs (towerAll k)).length = _
+    rw [rcPairs_length, towerAll_length k, ← Nat.pow_add, Nat.pow_succ 2 k, Nat.mul_two]
+
+theorem towerAll_nodup : ∀ k : Nat, (towerAll k).Nodup
+  | 0 => by decide
+  | k + 1 => rcPairs_nodup _ (towerAll_nodup k)
+
+theorem towerAll_complete : ∀ (k : Nat) (x : TowerElem k), x ∈ towerAll k
+  | 0, false => List.mem_cons_self
+  | 0, true => List.mem_cons_of_mem _ List.mem_cons_self
+  | k + 1, x =>
+    List.mem_flatMap.mpr ⟨x.1, towerAll_complete k x.1,
+      List.mem_map.mpr ⟨x.2, towerAll_complete k x.2, rfl⟩⟩
+
+theorem mem_rcPairs {α : Type} (keys : List α) (x : α × α) (h1 : x.1 ∈ keys)
+    (h2 : x.2 ∈ keys) : x ∈ rcPairs keys :=
+  List.mem_flatMap.mpr ⟨x.1, h1, List.mem_map.mpr ⟨x.2, h2, rfl⟩⟩
+
+theorem towerAll_length_128 : (towerAll 7).length = 2 ^ 128 := towerAll_length 7
+
+theorem towerAll_pairs_length_256 : (rcPairs (towerAll 7)).length = 2 ^ 256 := by
+  rw [rcPairs_length, towerAll_length_128]
+
+/-- The lane-constant list of `2^128` elements and the input list of `2^256` states assumed
+    by the experiment theorems exist, are duplicate-free and contain every element. -/
+theorem spn_experiment_sample_lists_inhabited :
+    (towerAll 7).Nodup ∧ (towerAll 7).length = 2 ^ 128 ∧ (∀ x : Tower128, x ∈ towerAll 7) ∧
+    (rcPairs (towerAll 7)).Nodup ∧ (rcPairs (towerAll 7)).length = 2 ^ 256 :=
+  ⟨towerAll_nodup 7, towerAll_length_128, towerAll_complete 7,
+    rcPairs_nodup _ (towerAll_nodup 7), towerAll_pairs_length_256⟩
+
+/-- Regime 1 on the full lists, deployed mixing constants: a committed 48-round trail under
+    uniformly drawn constants has probability below `2^-256`. -/
+theorem spn48_full_list_committed_trail_bits
+    (s s' : Tower128 × Tower128) (hNe : s ≠ s') (trail : List (Tower128 × Tower128))
+    (hLen : trail.length = spnRounds) :
+    atLeastBits 256 ⟨spnTrailCount (towerAll 7) parallelSeededMdsPair.mdsA
+        parallelSeededMdsPair.mdsB s s' trail, (2 ^ 128 * 2 ^ 128) ^ 48,
+      Nat.pow_pos (Nat.mul_pos (Nat.two_pow_pos 128) (Nat.two_pow_pos 128))⟩ :=
+  (spn48_committed_trail_atLeast_256_bits parallelSeededMdsPair (towerAll 7) (towerAll_nodup 7)
+    towerAll_length_128 s s' hNe trail hLen).2
+
+/-- Regime 2 on the full input list, deployed mixing constants, any fixed round constants:
+    at most 36 of the `2^256` inputs follow a given trail. -/
+theorem spn48_full_list_fixed_constants_trail_count
+    (δ : Tower128 × Tower128) (hδ : δ ≠ (towerZero 7, towerZero 7))
+    (trail : List (Tower128 × Tower128))
+    (rc1 rc2 : Tower128 × Tower128) (rest : List (Tower128 × Tower128)) :
+    ((rcPairs (towerAll 7)).filter fun x => decide
+      (spnSboxTrail parallelSeededMdsPair.mdsA parallelSeededMdsPair.mdsB (rc1 :: rc2 :: rest)
+        x (pairXor x δ) = trail)).length ≤ 36 :=
+  spn_fixed_constants_trail_count_le parallelSeededMdsPair rc1 rc2 rest δ hδ trail _
+    (rcPairs_nodup _ (towerAll_nodup 7))
+
+/-- Regime 2, both ends, on the full input list: the trail realized by any input `x0` under
+    any fixed constants is followed by at least one and at most 36 of the `2^256` inputs.
+    (`realized_trace_has_positive_count` is the atom floor of `HashTrailSampling`; the general
+    refutation `fixedSpnDifferenceTrace_not_bounded_by_component_product` has its two list
+    hypotheses discharged by `spn_experiment_sample_lists_inhabited` and `mem_rcPairs`. The
+    count is kept out of `Nat` arithmetic with large literals on purpose: the kernel would try
+    to evaluate the enumeration.) -/
+theorem spn48_full_list_fixed_constants_trail_sandwich
+    (δ : Tower128 × Tower128) (hδ : δ ≠ (towerZero 7, towerZero 7))
+    (rc1 rc2 : Tower128 × Tower128) (rest : List (Tower128 × Tower128))
+    (x0 : Tower128 × Tower128) :
+    0 < ((rcPairs (towerAll 7)).filter fun x => decide
+      (spnSboxTrail parallelSeededMdsPair.mdsA parallelSeededMdsPair.mdsB (rc1 :: rc2 :: rest)
+          x (pairXor x δ) =
+        spnSboxTrail parallelSeededMdsPair.mdsA parallelSeededMdsPair.mdsB (rc1 :: rc2 :: rest)
+          x0 (pairXor x0 δ))).length ∧
+    ((rcPairs (towerAll 7)).filter fun x => decide
+      (spnSboxTrail parallelSeededMdsPair.mdsA parallelSeededMdsPair.mdsB (rc1 :: rc2 :: rest)
+          x (pairXor x δ) =
+        spnSboxTrail parallelSeededMdsPair.mdsA parallelSeededMdsPair.mdsB (rc1 :: rc2 :: rest)
+          x0 (pairXor x0 δ))).length ≤ 36 :=
+  ⟨realized_trace_has_positive_count (rcPairs (towerAll 7))
+      (fun x => spnSboxTrail parallelSeededMdsPair.mdsA parallelSeededMdsPair.mdsB
+        (rc1 :: rc2 :: rest) x (pairXor x δ)) x0
+      (mem_rcPairs _ x0 (towerAll_complete 7 x0.1) (towerAll_complete 7 x0.2)),
+    spn48_full_list_fixed_constants_trail_count δ hδ _ rc1 rc2 rest⟩
+
+
+end Qsag
+end
+
+
+section
+namespace Qsag
+set_option autoImplicit false
+
+/-! ## §1. Committed differentials: all trails summed -/
+
+/-- Explicit inverse of the mixing layer `(u, v) ↦ (u + A v, v + B u)`. -/
+def spnMixInv (mdsA mdsB : Tower128) (β : Tower128 × Tower128) : Tower128 × Tower128 :=
+  let c := towerInv 7 (towerAdd 7 (towerOne 7) (towerMul 7 mdsA mdsB))
+  (towerMul 7 c (towerAdd 7 β.1 (towerMul 7 mdsA β.2)),
+   towerMul 7 c (towerAdd 7 β.2 (towerMul 7 mdsB β.1)))
+
+private theorem mix_alg1 (A B x y : Tower128) :
+    towerAdd 7 (towerAdd 7 x (towerMul 7 A y)) (towerMul 7 A (towerAdd 7 y (towerMul 7 B x))) =
+      towerMul 7 (towerAdd 7 (towerOne 7) (towerMul 7 A B)) x := by
+  rw [towerMul_add_distrib, ← towerMul_assoc, towerAdd_assoc,
+    ← towerAdd_assoc 7 (towerMul 7 A y) (towerMul 7 A y), towerAdd_self_zero, towerZero_add,
+    towerAdd_mul_distrib, towerOne_mul]
+
+private theorem mix_alg2 (A B x y : Tower128) :
+    towerAdd 7 (towerAdd 7 y (towerMul 7 B x)) (towerMul 7 B (towerAdd 7 x (towerMul 7 A y))) =
+      towerMul 7 (towerAdd 7 (towerOne 7) (towerMul 7 A B)) y := by
+  rw [towerMul_add_distrib, ← towerMul_assoc, towerAdd_assoc,
+    ← towerAdd_assoc 7 (towerMul 7 B x) (towerMul 7 B x), towerAdd_self_zero, towerZero_add,
+    towerAdd_mul_distrib, towerOne_mul, towerMul_comm 7 B A]
+
+private theorem mix_det_inv (mds : ValidSpnMdsPair 7) (x : Tower128) :
+    towerMul 7 (towerInv 7 (towerAdd 7 (towerOne 7) (towerMul 7 mds.mdsA mds.mdsB)))
+      (towerMul 7 (towerAdd 7 (towerOne 7) (towerMul 7 mds.mdsA mds.mdsB)) x) = x := by
+  have hD : towerAdd 7 (towerOne 7) (towerMul 7 mds.mdsA mds.mdsB) ≠ towerZero 7 := fun h =>
+    mds.hAB_ne_one ((tadd_eq_zero_iff _ _).mp h).symm
+  rw [← towerMul_assoc, towerMul_comm 7 (towerInv 7 _), towerMul_inv 7 _ hD, towerOne_mul]
+
+/-- The mixing layer hits `β` exactly at `spnMixInv β`. -/
