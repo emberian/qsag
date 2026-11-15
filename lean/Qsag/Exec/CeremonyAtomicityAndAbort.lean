@@ -3619,3 +3619,1818 @@ def roLookup {X T : Type} [DecidableEq X] : List (X × T) → X → Option T
 /-- Run an oracle algorithm against the lazily sampled oracle: a logged point is answered from
     the log, a new point consumes the next tape cell and is logged. Returns the output, the final
     log, and the number of tape cells consumed. -/
+def runRo {X T Out : Type} [DecidableEq X] (tape : Nat → T) :
+    RoTree X T Out → List (X × T) → Nat → Out × List (X × T) × Nat
+  | .done o, log, n => (o, log, n)
+  | .ask x k, log, n =>
+    match roLookup log x with
+    | some a => runRo tape (k a) log n
+    | none => runRo tape (k (tape n)) ((x, tape n) :: log) (n + 1)
+
+/-- The points queried during `runRo`, in order (repeats included). -/
+def askedRo {X T Out : Type} [DecidableEq X] (tape : Nat → T) :
+    RoTree X T Out → List (X × T) → Nat → List X
+  | .done _, _, _ => []
+  | .ask x k, log, n =>
+    match roLookup log x with
+    | some a => x :: askedRo tape (k a) log n
+    | none => x :: askedRo tape (k (tape n)) ((x, tape n) :: log) (n + 1)
+
+theorem askedRo_length_le {X T Out : Type} [DecidableEq X] (tape : Nat → T)
+    (t : RoTree X T Out) :
+    ∀ (q : Nat) (log : List (X × T)) (n : Nat),
+      t.DepthLe q → (askedRo tape t log n).length ≤ q := by
+  induction t with
+  | done o => intro q log n _; exact Nat.zero_le q
+  | ask x k ih =>
+    intro q log n hD
+    cases q with
+    | zero => exact False.elim hD
+    | succ q =>
+      have hD' : ∀ a, (k a).DepthLe q := hD
+      unfold askedRo
+      cases hL : roLookup log x with
+      | some a => exact Nat.succ_le_succ (ih a q log n (hD' a))
+      | none => exact Nat.succ_le_succ (ih (tape n) q _ _ (hD' (tape n)))
+
+/-- A point that is neither logged nor queried stays unlogged. -/
+theorem runRo_lookup_none {X T Out : Type} [DecidableEq X] (tape : Nat → T) (p : X)
+    (t : RoTree X T Out) :
+    ∀ (log : List (X × T)) (n : Nat),
+      roLookup log p = none → p ∉ askedRo tape t log n →
+      roLookup (runRo tape t log n).2.1 p = none := by
+  induction t with
+  | done o => intro log n hNone _; exact hNone
+  | ask x k ih =>
+    intro log n hNone hNot
+    unfold askedRo at hNot
+    unfold runRo
+    cases hL : roLookup log x with
+    | some a =>
+      rw [hL] at hNot
+      exact ih a log n hNone (fun h => hNot (List.mem_cons_of_mem _ h))
+    | none =>
+      rw [hL] at hNot
+      have hpx : p ≠ x := fun h => hNot (h ▸ List.mem_cons_self)
+      have hNone' : roLookup ((x, tape n) :: log) p = none := by
+        simp only [roLookup, hpx, ↓reduceIte]
+        exact hNone
+      exact ih (tape n) _ _ hNone' (fun h => hNot (List.mem_cons_of_mem _ h))
+
+/-- **Identical-until-queried**: two logs that agree away from `p` give the same run as long as
+    the run never asks `p`. -/
+theorem runRo_agree_off {X T Out : Type} [DecidableEq X] (tape : Nat → T) (p : X)
+    (t : RoTree X T Out) :
+    ∀ (log log' : List (X × T)) (n : Nat),
+      (∀ x, x ≠ p → roLookup log' x = roLookup log x) →
+      p ∉ askedRo tape t log n →
+      (runRo tape t log' n).1 = (runRo tape t log n).1 := by
+  induction t with
+  | done o => intro log log' n _ _; rfl
+  | ask x k ih =>
+    intro log log' n hAgree hNot
+    unfold askedRo at hNot
+    have hxp : x ≠ p := by
+      intro h
+      apply hNot
+      cases hL : roLookup log x <;> exact h ▸ List.mem_cons_self
+    have hLk := hAgree x hxp
+    unfold runRo
+    rw [hLk]
+    cases hL : roLookup log x with
+    | some a =>
+      rw [hL] at hNot
+      exact ih a log log' n hAgree (fun h => hNot (List.mem_cons_of_mem _ h))
+    | none =>
+      rw [hL] at hNot
+      have hAgree' : ∀ y, y ≠ p →
+          roLookup ((x, tape n) :: log') y = roLookup ((x, tape n) :: log) y := by
+        intro y hy
+        simp only [roLookup]
+        split
+        · rfl
+        · exact hAgree y hy
+      exact ih (tape n) _ _ (n + 1) hAgree' (fun h => hNot (List.mem_cons_of_mem _ h))
+
+/-- Cut-the-Hash with a random-oracle commitment. `commitPoint y mac blind` is the oracle input
+    `domain ‖ y ‖ mac ‖ blind`; `blindOf` reads the blind back out of an oracle input. -/
+structure CutTheHashRomSpec (SK Msg Rand CorruptIn X : Type) (Q w bw : Nat) where
+  wireRingSecret : SK → Msg → Rand → Fin Q
+  wireXorSecret : SK → Msg → Rand → CorruptIn → BitVec w
+  yShareHonest : SK → Msg → Rand → CorruptIn → BitVec w
+  macShareHonest : SK → Msg → Rand → CorruptIn → BitVec w
+  commitPoint : BitVec w → BitVec w → BitVec bw → X
+  blindOf : X → BitVec bw
+
+/-- The blind is length-framed inside the hashed input, so it can be read back. A commitment
+    whose input drops the blind fails this and is exactly the `#tooth` below. -/
+def CutTheHashRomSpec.BlindFramed {SK Msg Rand CorruptIn X : Type} {Q w bw : Nat}
+    (spec : CutTheHashRomSpec SK Msg Rand CorruptIn X Q w bw) : Prop :=
+  ∀ y mac b, spec.blindOf (spec.commitPoint y mac b) = b
+
+/-- A rushing corrupt party with oracle access in every move. `St1`, `St2` are its private
+    states carried between moves; `Out` is whatever it finally outputs (its abort decision
+    together with any function of its whole view). -/
+structure RushingRoAdversary (CorruptIn X T St1 St2 Out : Type) (Q w : Nat) where
+  reactToRingOpen : Fin Q → RoTree X T (CorruptIn × St1)
+  reactToAllOpens : St1 → BitVec w → RoTree X T (CorruptIn × St2)
+  decideAbort : St2 → T → RoTree X T Out
+
+/-- Per-move oracle query budgets; `q_RO = q1 + q2 + q3`. -/
+def RushingRoAdversary.QueryBound {CorruptIn X T St1 St2 Out : Type} {Q w : Nat}
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w) (q1 q2 q3 : Nat) : Prop :=
+  (∀ d, (adv.reactToRingOpen d).DepthLe q1) ∧
+  (∀ s x, (adv.reactToAllOpens s x).DepthLe q2) ∧
+  (∀ s t, (adv.decideAbort s t).DepthLe q3)
+
+/-- The first two adversary moves, given the two opened masked differences. -/
+def romPhaseAB {CorruptIn X T St1 St2 Out : Type} {Q w : Nat} [DecidableEq X]
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w) (tape : Nat → T)
+    (d1 : Fin Q) (d2 : BitVec w) : (CorruptIn × St2) × List (X × T) × Nat :=
+  runRo tape
+    (adv.reactToAllOpens (runRo tape (adv.reactToRingOpen d1) [] 0).1.2 d2)
+    (runRo tape (adv.reactToRingOpen d1) [] 0).2.1
+    (runRo tape (adv.reactToRingOpen d1) [] 0).2.2
+
+/-- **Secret-free simulation**: the adversary is handed uniform masked differences and a FRESH
+    tag; the oracle is never programmed. No secret key, message or randomizer enters. -/
+def romIdealRun {CorruptIn X T St1 St2 Out : Type} {Q w : Nat} [DecidableEq X]
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w) (tape : Nat → T)
+    (d1 : Fin Q) (d2 : BitVec w) (tag : T) : Out :=
+  (runRo tape (adv.decideAbort (romPhaseAB adv tape d1 d2).1.2 tag)
+    (romPhaseAB adv tape d1 d2).2.1 (romPhaseAB adv tape d1 d2).2.2).1
+
+/-- Every oracle point the simulated adversary queries, over all three moves. -/
+def romIdealAsked {CorruptIn X T St1 St2 Out : Type} {Q w : Nat} [DecidableEq X]
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w) (tape : Nat → T)
+    (d1 : Fin Q) (d2 : BitVec w) (tag : T) : List X :=
+  askedRo tape (adv.reactToRingOpen d1) [] 0 ++
+    (askedRo tape
+        (adv.reactToAllOpens (runRo tape (adv.reactToRingOpen d1) [] 0).1.2 d2)
+        (runRo tape (adv.reactToRingOpen d1) [] 0).2.1
+        (runRo tape (adv.reactToRingOpen d1) [] 0).2.2 ++
+     askedRo tape (adv.decideAbort (romPhaseAB adv tape d1 d2).1.2 tag)
+        (romPhaseAB adv tape d1 d2).2.1 (romPhaseAB adv tape d1 d2).2.2)
+
+theorem romIdealAsked_length_le {CorruptIn X T St1 St2 Out : Type} {Q w : Nat} [DecidableEq X]
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w) (tape : Nat → T)
+    {q1 q2 q3 : Nat} (hQry : adv.QueryBound q1 q2 q3) (d1 : Fin Q) (d2 : BitVec w) (tag : T) :
+    (romIdealAsked adv tape d1 d2 tag).length ≤ q1 + q2 + q3 := by
+  unfold romIdealAsked
+  rw [List.length_append, List.length_append]
+  have h1 := askedRo_length_le tape (adv.reactToRingOpen d1) q1 [] 0 (hQry.1 d1)
+  have h2 := askedRo_length_le tape
+    (adv.reactToAllOpens (runRo tape (adv.reactToRingOpen d1) [] 0).1.2 d2) q2
+    (runRo tape (adv.reactToRingOpen d1) [] 0).2.1
+    (runRo tape (adv.reactToRingOpen d1) [] 0).2.2 (hQry.2.1 _ _)
+  have h3 := askedRo_length_le tape (adv.decideAbort (romPhaseAB adv tape d1 d2).1.2 tag) q3
+    (romPhaseAB adv tape d1 d2).2.1 (romPhaseAB adv tape d1 d2).2.2 (hQry.2.2 _ _)
+  omega
+
+/-- The masked ring difference the adversary sees. -/
+def romViewRing {SK Msg Rand CorruptIn X : Type} {Q w bw : Nat}
+    (spec : CutTheHashRomSpec SK Msg Rand CorruptIn X Q w bw)
+    (sk : SK) (msg : Msg) (R : Rand) (hQ : 0 < Q) (mr : Fin Q) : Fin Q :=
+  subModFinQ Q hQ (spec.wireRingSecret sk msg R) mr
+
+/-- The boolean wire secret, which depends on the adversary's rushing reaction to the ring
+    opening (and through it on the oracle). -/
+def romXorPad {SK Msg Rand CorruptIn X T St1 St2 Out : Type} {Q w bw : Nat} [DecidableEq X]
+    (spec : CutTheHashRomSpec SK Msg Rand CorruptIn X Q w bw)
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w)
+    (sk : SK) (msg : Msg) (R : Rand) (hQ : 0 < Q) (tape : Nat → T) (mr : Fin Q) : BitVec w :=
+  spec.wireXorSecret sk msg R
+    (runRo tape (adv.reactToRingOpen (romViewRing spec sk msg R hQ mr)) [] 0).1.1
+
+/-- The masked boolean difference the adversary sees. -/
+def romViewXor {SK Msg Rand CorruptIn X T St1 St2 Out : Type} {Q w bw : Nat} [DecidableEq X]
+    (spec : CutTheHashRomSpec SK Msg Rand CorruptIn X Q w bw)
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w)
+    (sk : SK) (msg : Msg) (R : Rand) (hQ : 0 < Q) (tape : Nat → T) (mr : Fin Q)
+    (mx : BitVec w) : BitVec w :=
+  romXorPad spec adv sk msg R hQ tape mr ^^^ mx
+
+/-- The oracle input of the honest commitment in the real execution. -/
+def romCommitPoint {SK Msg Rand CorruptIn X T St1 St2 Out : Type} {Q w bw : Nat} [DecidableEq X]
+    (spec : CutTheHashRomSpec SK Msg Rand CorruptIn X Q w bw)
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w)
+    (sk : SK) (msg : Msg) (R : Rand) (hQ : 0 < Q) (tape : Nat → T) (mr : Fin Q)
+    (mx : BitVec w) (b : BitVec bw) : X :=
+  spec.commitPoint
+    (spec.yShareHonest sk msg R
+      (romPhaseAB adv tape (romViewRing spec sk msg R hQ mr)
+        (romViewXor spec adv sk msg R hQ tape mr mx)).1.1)
+    (spec.macShareHonest sk msg R
+      (romPhaseAB adv tape (romViewRing spec sk msg R hQ mr)
+        (romViewXor spec adv sk msg R hQ tape mr mx)).1.1)
+    b
+
+/-- **Real execution** against the lazily sampled oracle. The commitment tag is the oracle's
+    value at `commitPoint`: the logged answer if the adversary already queried that point, the
+    fresh `tagFresh` otherwise; the point is then logged, so later queries return the tag. -/
+def romRealRun {SK Msg Rand CorruptIn X T St1 St2 Out : Type} {Q w bw : Nat} [DecidableEq X]
+    (spec : CutTheHashRomSpec SK Msg Rand CorruptIn X Q w bw)
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w)
+    (sk : SK) (msg : Msg) (R : Rand) (hQ : 0 < Q) (tape : Nat → T) (mr : Fin Q)
+    (mx : BitVec w) (b : BitVec bw) (tagFresh : T) : Out :=
+  (runRo tape
+    (adv.decideAbort
+      (romPhaseAB adv tape (romViewRing spec sk msg R hQ mr)
+        (romViewXor spec adv sk msg R hQ tape mr mx)).1.2
+      ((roLookup
+        (romPhaseAB adv tape (romViewRing spec sk msg R hQ mr)
+          (romViewXor spec adv sk msg R hQ tape mr mx)).2.1
+        (romCommitPoint spec adv sk msg R hQ tape mr mx b)).getD tagFresh))
+    ((romCommitPoint spec adv sk msg R hQ tape mr mx b,
+      (roLookup
+        (romPhaseAB adv tape (romViewRing spec sk msg R hQ mr)
+          (romViewXor spec adv sk msg R hQ tape mr mx)).2.1
+        (romCommitPoint spec adv sk msg R hQ tape mr mx b)).getD tagFresh) ::
+      (romPhaseAB adv tape (romViewRing spec sk msg R hQ mr)
+        (romViewXor spec adv sk msg R hQ tape mr mx)).2.1)
+    (romPhaseAB adv tape (romViewRing spec sk msg R hQ mr)
+      (romViewXor spec adv sk msg R hQ tape mr mx)).2.2).1
+
+/-- **Real = simulation unless the blind is queried**: if no oracle query of the simulated run
+    carries the blind `b`, the real execution's output equals the secret-free simulation's. -/
+theorem romReal_eq_ideal_of_blind_unqueried
+    {SK Msg Rand CorruptIn X T St1 St2 Out : Type} {Q w bw : Nat} [DecidableEq X]
+    (spec : CutTheHashRomSpec SK Msg Rand CorruptIn X Q w bw) (hFramed : spec.BlindFramed)
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w)
+    (sk : SK) (msg : Msg) (R : Rand) (hQ : 0 < Q) (tape : Nat → T) (mr : Fin Q)
+    (mx : BitVec w) (b : BitVec bw) (tagFresh : T)
+    (hFresh : b ∉ (romIdealAsked adv tape (romViewRing spec sk msg R hQ mr)
+        (romViewXor spec adv sk msg R hQ tape mr mx) tagFresh).map spec.blindOf) :
+    romRealRun spec adv sk msg R hQ tape mr mx b tagFresh =
+      romIdealRun adv tape (romViewRing spec sk msg R hQ mr)
+        (romViewXor spec adv sk msg R hQ tape mr mx) tagFresh := by
+  have hPt : romCommitPoint spec adv sk msg R hQ tape mr mx b ∉
+      romIdealAsked adv tape (romViewRing spec sk msg R hQ mr)
+        (romViewXor spec adv sk msg R hQ tape mr mx) tagFresh :=
+    fun hMem => hFresh (List.mem_map.mpr ⟨_, hMem, hFramed _ _ _⟩)
+  unfold romIdealAsked at hPt
+  have hPt1 := fun h => hPt (List.mem_append_left _ h)
+  have hPt2 := fun h => hPt (List.mem_append_right _ (List.mem_append_left _ h))
+  have hPt3 := fun h => hPt (List.mem_append_right _ (List.mem_append_right _ h))
+  have hL1 := runRo_lookup_none tape (romCommitPoint spec adv sk msg R hQ tape mr mx b)
+    (adv.reactToRingOpen (romViewRing spec sk msg R hQ mr)) [] 0 rfl hPt1
+  have hL2 : roLookup
+      (romPhaseAB adv tape (romViewRing spec sk msg R hQ mr)
+        (romViewXor spec adv sk msg R hQ tape mr mx)).2.1
+      (romCommitPoint spec adv sk msg R hQ tape mr mx b) = none :=
+    runRo_lookup_none tape _ _ _ _ hL1 hPt2
+  unfold romRealRun romIdealRun
+  rw [hL2]
+  refine runRo_agree_off tape (romCommitPoint spec adv sk msg R hQ tape mr mx b) _ _ _ _ ?_ hPt3
+  intro x hx
+  simp only [roLookup, hx, ↓reduceIte]
+
+private theorem natAbsDiff_finSum_le_const {n : Nat} (f g : Fin n → Nat) (c : Nat)
+    (h : ∀ i, natAbsDiff (f i) (g i) ≤ c) :
+    natAbsDiff (finSum n f) (finSum n g) ≤ n * c :=
+  Nat.le_trans (natAbsDiff_finSum_le f g)
+    (Nat.le_trans (finSum_le_finSum h) (Nat.le_of_eq (finSum_const n c)))
+
+private theorem natAbsDiff_comm (a b : Nat) : natAbsDiff a b = natAbsDiff b a := by
+  unfold natAbsDiff
+  split <;> split <;> omega
+
+/-- **Blind-guessing bound, one mask assignment**: for fixed Beaver masks, fresh tag and tape,
+    at most `q1 + q2 + q3` of the `2^bw` blinds make the real output differ from the simulation,
+    for every distinguishing predicate `D` on the adversary's output. -/
+theorem romCommit_blind_count_bound
+    {SK Msg Rand CorruptIn X T St1 St2 Out : Type} {Q w bw : Nat} [DecidableEq X]
+    (spec : CutTheHashRomSpec SK Msg Rand CorruptIn X Q w bw) (hFramed : spec.BlindFramed)
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w)
+    {q1 q2 q3 : Nat} (hQry : adv.QueryBound q1 q2 q3)
+    (sk : SK) (msg : Msg) (R : Rand) (hQ : 0 < Q) (tape : Nat → T) (D : Out → Bool)
+    (tagFresh : T) (mr : Fin Q) (mx : BitVec w) :
+    natAbsDiff
+      (finSum (2 ^ bw) (fun bi =>
+        if D (romRealRun spec adv sk msg R hQ tape mr mx ((enumBitVec bw).toFun bi) tagFresh)
+        then 1 else 0))
+      (2 ^ bw *
+        (if D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr)
+            (romViewXor spec adv sk msg R hQ tape mr mx) tagFresh) then 1 else 0)) ≤
+      q1 + q2 + q3 := by
+  have hConst : 2 ^ bw *
+      (if D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr)
+          (romViewXor spec adv sk msg R hQ tape mr mx) tagFresh) then 1 else 0) =
+      finSum (2 ^ bw) (fun _ =>
+        if D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr)
+          (romViewXor spec adv sk msg R hQ tape mr mx) tagFresh) then 1 else 0) :=
+    (finSum_const _ _).symm
+  rw [hConst]
+  have hDiff := finSum_indicator_diff_le
+    (fun bi : Fin (2 ^ bw) =>
+      D (romRealRun spec adv sk msg R hQ tape mr mx ((enumBitVec bw).toFun bi) tagFresh))
+    (fun _ => D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr)
+      (romViewXor spec adv sk msg R hQ tape mr mx) tagFresh))
+    (fun bi => decide (bi ∈
+      ((romIdealAsked adv tape (romViewRing spec sk msg R hQ mr)
+        (romViewXor spec adv sk msg R hQ tape mr mx) tagFresh).map spec.blindOf).map
+        (enumBitVec bw).invFun))
+    (by
+      intro bi hBad
+      have hNot := of_decide_eq_false hBad
+      exact congrArg D (romReal_eq_ideal_of_blind_unqueried spec hFramed adv sk msg R hQ tape
+        mr mx _ tagFresh
+        (fun hMem => hNot (List.mem_map.mpr ⟨_, hMem, (enumBitVec bw).left_inv bi⟩))))
+  refine Nat.le_trans hDiff ?_
+  have hCount := finSum_mem_list_le (2 ^ bw)
+    (((romIdealAsked adv tape (romViewRing spec sk msg R hQ mr)
+      (romViewXor spec adv sk msg R hQ tape mr mx) tagFresh).map spec.blindOf).map
+      (enumBitVec bw).invFun)
+  rw [List.length_map, List.length_map] at hCount
+  refine Nat.le_trans (Nat.le_trans (Nat.le_of_eq (finSum_congr (fun bi => ?_))) hCount)
+    (romIdealAsked_length_le adv tape hQry _ _ _)
+  simp only [decide_eq_true_eq]
+
+/-- Number of honest mask assignments `(ring mask, boolean mask, 2^bw-blind)` on which the real
+    adversary output satisfies `D`. -/
+def romRealCount {SK Msg Rand CorruptIn X T St1 St2 Out : Type} {Q w bw : Nat} [DecidableEq X]
+    (spec : CutTheHashRomSpec SK Msg Rand CorruptIn X Q w bw)
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w)
+    (sk : SK) (msg : Msg) (R : Rand) (hQ : 0 < Q) (tape : Nat → T) (D : Out → Bool)
+    (tagFresh : T) : Nat :=
+  finSum Q (fun mr => finSum (2 ^ w) (fun xi => finSum (2 ^ bw) (fun bi =>
+    if D (romRealRun spec adv sk msg R hQ tape mr ((enumBitVec w).toFun xi)
+      ((enumBitVec bw).toFun bi) tagFresh) then 1 else 0)))
+
+/-- Number of uniform view prefixes `(d1, d2)` on which the secret-free simulation satisfies
+    `D`. -/
+def romIdealCount {CorruptIn X T St1 St2 Out : Type} {Q w : Nat} [DecidableEq X]
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w) (tape : Nat → T) (D : Out → Bool)
+    (tagFresh : T) : Nat :=
+  finSum Q (fun d1 => finSum (2 ^ w) (fun xi =>
+    if D (romIdealRun adv tape d1 ((enumBitVec w).toFun xi) tagFresh) then 1 else 0))
+
+/-- **Random-Oracle Commitment Hiding With Rushing Selective Abort
+    (`cutTheHash_rom_commit_hiding_sd_bound`)**: for every secret, every rushing adversary making
+    at most `q1 + q2 + q3` oracle queries over its three moves, every distinguishing predicate `D`
+    on its output (in particular its abort decision), every fresh tag and every oracle tape,
+
+      `| #real(D) - 2^bw · #sim(D) |  ≤  Q · 2^w · (q1 + q2 + q3)`.
+
+    The real sample space has `Q · 2^w · 2^bw` points and the simulation `Q · 2^w`, so dividing
+    by `Q · 2^w · 2^bw` reads `|Pr_real[D] - Pr_sim[D]| ≤ (q1 + q2 + q3) / 2^bw`: the adversary's
+    pre-`OPEN` view and abort decision are within statistical distance `q_RO / 2^bw` of a
+    simulation that reads no secret. The bound holds pointwise in the tag and tape, hence for the
+    uniform ones. -/
+theorem cutTheHash_rom_commit_hiding_sd_bound
+    {SK Msg Rand CorruptIn X T St1 St2 Out : Type} {Q w bw : Nat} [DecidableEq X]
+    (spec : CutTheHashRomSpec SK Msg Rand CorruptIn X Q w bw) (hFramed : spec.BlindFramed)
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w)
+    {q1 q2 q3 : Nat} (hQry : adv.QueryBound q1 q2 q3)
+    (sk : SK) (msg : Msg) (R : Rand) (hQ : 0 < Q) (tape : Nat → T) (D : Out → Bool)
+    (tagFresh : T) :
+    natAbsDiff (romRealCount spec adv sk msg R hQ tape D tagFresh)
+      (2 ^ bw * romIdealCount adv tape D tagFresh) ≤ Q * (2 ^ w * (q1 + q2 + q3)) := by
+  have hStep : natAbsDiff
+      (finSum Q (fun mr => finSum (2 ^ w) (fun xi => finSum (2 ^ bw) (fun bi =>
+        if D (romRealRun spec adv sk msg R hQ tape mr ((enumBitVec w).toFun xi)
+          ((enumBitVec bw).toFun bi) tagFresh) then 1 else 0))))
+      (finSum Q (fun mr => finSum (2 ^ w) (fun xi => 2 ^ bw *
+        (if D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr)
+          (romViewXor spec adv sk msg R hQ tape mr ((enumBitVec w).toFun xi)) tagFresh)
+         then 1 else 0)))) ≤ Q * (2 ^ w * (q1 + q2 + q3)) :=
+    natAbsDiff_finSum_le_const _ _ _ (fun mr =>
+      natAbsDiff_finSum_le_const _ _ _ (fun xi =>
+        romCommit_blind_count_bound spec hFramed adv hQry sk msg R hQ tape D tagFresh mr
+          ((enumBitVec w).toFun xi)))
+  have hInner : ∀ mr : Fin Q,
+      finSum (2 ^ w) (fun xi => 2 ^ bw *
+        (if D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr)
+          (romViewXor spec adv sk msg R hQ tape mr ((enumBitVec w).toFun xi)) tagFresh)
+         then 1 else 0)) =
+      2 ^ bw * finSum (2 ^ w) (fun xi =>
+        if D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr) ((enumBitVec w).toFun xi)
+          tagFresh) then 1 else 0) := by
+    intro mr
+    rw [finSum_mul_left]
+    exact congrArg (fun s => 2 ^ bw * s)
+      (finSum_bijection_invariant (enumBitVec w)
+        (maskBijectionBitVec w (romXorPad spec adv sk msg R hQ tape mr))
+        (fun d2 => if D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr) d2 tagFresh)
+          then 1 else 0))
+  have hOuter : finSum Q (fun mr => finSum (2 ^ w) (fun xi =>
+        if D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr) ((enumBitVec w).toFun xi)
+          tagFresh) then 1 else 0)) = romIdealCount adv tape D tagFresh :=
+    finSum_perm_invariant
+      (fun mr => subModFinQ Q hQ (spec.wireRingSecret sk msg R) mr)
+      (fun d => subModFinQ Q hQ (spec.wireRingSecret sk msg R) d)
+      (fun i => subModFinQ_involutive Q hQ _ i) (fun j => subModFinQ_involutive Q hQ _ j)
+      (fun d1 => finSum (2 ^ w) (fun xi =>
+        if D (romIdealRun adv tape d1 ((enumBitVec w).toFun xi) tagFresh) then 1 else 0))
+  have hMid : finSum Q (fun mr => finSum (2 ^ w) (fun xi => 2 ^ bw *
+        (if D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr)
+          (romViewXor spec adv sk msg R hQ tape mr ((enumBitVec w).toFun xi)) tagFresh)
+         then 1 else 0))) = 2 ^ bw * romIdealCount adv tape D tagFresh := by
+    rw [finSum_congr hInner, finSum_mul_left, hOuter]
+  rw [← hMid]
+  exact hStep
+
+/-- **Secret independence up to `2 · q_RO / 2^bw`**: the real adversary-output counts under any
+    two secrets, messages and randomizers differ by at most twice the hiding bound. -/
+theorem cutTheHash_rom_view_secret_independent
+    {SK Msg Rand CorruptIn X T St1 St2 Out : Type} {Q w bw : Nat} [DecidableEq X]
+    (spec : CutTheHashRomSpec SK Msg Rand CorruptIn X Q w bw) (hFramed : spec.BlindFramed)
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w)
+    {q1 q2 q3 : Nat} (hQry : adv.QueryBound q1 q2 q3)
+    (sk sk' : SK) (msg msg' : Msg) (R R' : Rand) (hQ : 0 < Q) (tape : Nat → T) (D : Out → Bool)
+    (tagFresh : T) :
+    natAbsDiff (romRealCount spec adv sk msg R hQ tape D tagFresh)
+      (romRealCount spec adv sk' msg' R' hQ tape D tagFresh) ≤
+      2 * (Q * (2 ^ w * (q1 + q2 + q3))) := by
+  have h1 := cutTheHash_rom_commit_hiding_sd_bound spec hFramed adv hQry sk msg R hQ tape D
+    tagFresh
+  have h2 := cutTheHash_rom_commit_hiding_sd_bound spec hFramed adv hQry sk' msg' R' hQ tape D
+    tagFresh
+  rw [natAbsDiff_comm] at h2
+  have hTri := natAbsDiff_triangle (romRealCount spec adv sk msg R hQ tape D tagFresh)
+    (2 ^ bw * romIdealCount adv tape D tagFresh)
+    (romRealCount spec adv sk' msg' R' hQ tape D tagFresh)
+  omega
+
+/-- The deployed width: a 256-bit blind gives `q_RO / 2^256`. -/
+theorem cutTheHash_rom_commit_hiding_sd_bound_256
+    {SK Msg Rand CorruptIn X T St1 St2 Out : Type} {Q w : Nat} [DecidableEq X]
+    (spec : CutTheHashRomSpec SK Msg Rand CorruptIn X Q w 256) (hFramed : spec.BlindFramed)
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w)
+    {q1 q2 q3 : Nat} (hQry : adv.QueryBound q1 q2 q3)
+    (sk : SK) (msg : Msg) (R : Rand) (hQ : 0 < Q) (tape : Nat → T) (D : Out → Bool)
+    (tagFresh : T) :
+    natAbsDiff (romRealCount spec adv sk msg R hQ tape D tagFresh)
+      (2 ^ 256 * romIdealCount adv tape D tagFresh) ≤ Q * (2 ^ w * (q1 + q2 + q3)) :=
+  cutTheHash_rom_commit_hiding_sd_bound spec hFramed adv hQry sk msg R hQ tape D tagFresh
+
+/-! ## §3. Threshold ML-DSA-44 Rejection Independence: `z` Box, `LowBits` Margin & `HighBits` -/
+
+/-- Cardinality `2 * gamma1 - 1` of the integer mask interval `[-gamma1 + 1, gamma1 - 1]`. -/
+def mldsaMaskIntervalCard (gamma1 : Nat) : Nat := 2 * gamma1 - 1
+
+/-- Cardinality `2 * (gamma1 - beta) - 1` of the safe output box
+    `[-gamma1 + beta + 1, gamma1 - beta - 1]`. -/
+def mldsaSafeBoxCard (gamma1 beta : Nat) : Nat := 2 * (gamma1 - beta) - 1
+
+/-- Mask interval membership `y ∈ [-gamma1 + 1, gamma1 - 1]` (`‖y‖_∞ < gamma1`). -/
+abbrev inMldsaMaskInterval (gamma1 : Nat) (y : Int) : Prop :=
+  (-(gamma1 : Int) + 1 ≤ y) ∧ (y ≤ (gamma1 : Int) - 1)
+
+/-- Secret shift bound `‖c_s1‖_∞ ≤ beta` (`-beta ≤ c_s1 ≤ beta`). -/
+abbrev inMldsaSecretBound (beta : Nat) (c_s1 : Int) : Prop :=
+  (-(beta : Int) ≤ c_s1) ∧ (c_s1 ≤ (beta : Int))
+
+/-- Safe rejection output box `z ∈ [-gamma1 + beta + 1, gamma1 - beta - 1]` (`‖z‖_∞ < gamma1 - beta`). -/
+abbrev inMldsaSafeBox (gamma1 beta : Nat) (z : Int) : Prop :=
+  (-(gamma1 : Int) + (beta : Int) + 1 ≤ z) ∧ (z ≤ (gamma1 : Int) - (beta : Int) - 1)
+
+theorem inMldsaSecretBound_iff_natAbs_le (beta : Nat) (c_s1 : Int) :
+    inMldsaSecretBound beta c_s1 ↔ c_s1.natAbs ≤ beta := by
+  unfold inMldsaSecretBound
+  exact ⟨fun h => by omega, fun h => ⟨by omega, by omega⟩⟩
+
+theorem inMldsaSafeBox_iff_natAbs_lt {gamma1 beta : Nat} (_hLt : beta < gamma1) (z : Int) :
+    inMldsaSafeBox gamma1 beta z ↔ z.natAbs < gamma1 - beta := by
+  unfold inMldsaSafeBox
+  exact ⟨fun h => by omega, fun h => ⟨by omega, by omega⟩⟩
+
+/-- Constructive decoding of `Fin (2 * gamma1 - 1)` onto `[-gamma1 + 1, gamma1 - 1]`. -/
+def decodeMldsaMask (gamma1 : Nat) (i : Fin (mldsaMaskIntervalCard gamma1)) : Int :=
+  (i.val : Int) - ((gamma1 : Int) - 1)
+
+/-- Constructive encoding of `y ∈ [-gamma1 + 1, gamma1 - 1]` into `Fin (2 * gamma1 - 1)`. -/
+def encodeMldsaMask {gamma1 : Nat} (_hPos : 0 < gamma1) (y : Int)
+    (hy : inMldsaMaskInterval gamma1 y) : Fin (mldsaMaskIntervalCard gamma1) :=
+  ⟨(y + ((gamma1 : Int) - 1)).toNat, by
+    unfold inMldsaMaskInterval at hy
+    unfold mldsaMaskIntervalCard
+    omega⟩
+
+theorem decode_encodeMldsaMask {gamma1 : Nat} (hPos : 0 < gamma1) (y : Int)
+    (hy : inMldsaMaskInterval gamma1 y) :
+    decodeMldsaMask gamma1 (encodeMldsaMask hPos y hy) = y := by
+  unfold decodeMldsaMask encodeMldsaMask inMldsaMaskInterval at *
+  dsimp only
+  omega
+
+theorem encode_decodeMldsaMask {gamma1 : Nat} (hPos : 0 < gamma1)
+    (i : Fin (mldsaMaskIntervalCard gamma1)) :
+    inMldsaMaskInterval gamma1 (decodeMldsaMask gamma1 i) ∧
+    encodeMldsaMask hPos (decodeMldsaMask gamma1 i)
+      ⟨by unfold decodeMldsaMask mldsaMaskIntervalCard at *; omega,
+       by unfold decodeMldsaMask mldsaMaskIntervalCard at *; omega⟩ = i := by
+  refine ⟨⟨by unfold decodeMldsaMask mldsaMaskIntervalCard at *; omega,
+           by unfold decodeMldsaMask mldsaMaskIntervalCard at *; omega⟩, ?_⟩
+  apply Fin.ext
+  unfold encodeMldsaMask decodeMldsaMask mldsaMaskIntervalCard at *
+  dsimp only
+  omega
+
+/-- Constructive decoding of `Fin (2 * (gamma1 - beta) - 1)` onto `[-gamma1 + beta + 1, gamma1 - beta - 1]`. -/
+def decodeMldsaSafeBox (gamma1 beta : Nat) (j : Fin (mldsaSafeBoxCard gamma1 beta)) : Int :=
+  (j.val : Int) - ((gamma1 : Int) - (beta : Int) - 1)
+
+/-- Constructive encoding of `z ∈ [-gamma1 + beta + 1, gamma1 - beta - 1]` into `Fin (2 * (gamma1 - beta) - 1)`. -/
+def encodeMldsaSafeBox {gamma1 beta : Nat} (_hLt : beta < gamma1) (z : Int)
+    (hz : inMldsaSafeBox gamma1 beta z) : Fin (mldsaSafeBoxCard gamma1 beta) :=
+  ⟨(z + ((gamma1 : Int) - (beta : Int) - 1)).toNat, by
+    unfold inMldsaSafeBox at hz
+    unfold mldsaSafeBoxCard
+    omega⟩
+
+theorem decode_encodeMldsaSafeBox {gamma1 beta : Nat} (hLt : beta < gamma1) (z : Int)
+    (hz : inMldsaSafeBox gamma1 beta z) :
+    decodeMldsaSafeBox gamma1 beta (encodeMldsaSafeBox hLt z hz) = z := by
+  unfold decodeMldsaSafeBox encodeMldsaSafeBox inMldsaSafeBox at *
+  dsimp only
+  omega
+
+theorem encode_decodeMldsaSafeBox {gamma1 beta : Nat} (hLt : beta < gamma1)
+    (j : Fin (mldsaSafeBoxCard gamma1 beta)) :
+    inMldsaSafeBox gamma1 beta (decodeMldsaSafeBox gamma1 beta j) ∧
+    encodeMldsaSafeBox hLt (decodeMldsaSafeBox gamma1 beta j)
+      ⟨by unfold decodeMldsaSafeBox mldsaSafeBoxCard at *; omega,
+       by unfold decodeMldsaSafeBox mldsaSafeBoxCard at *; omega⟩ = j := by
+  refine ⟨⟨by unfold decodeMldsaSafeBox mldsaSafeBoxCard at *; omega,
+           by unfold decodeMldsaSafeBox mldsaSafeBoxCard at *; omega⟩, ?_⟩
+  apply Fin.ext
+  unfold encodeMldsaSafeBox decodeMldsaSafeBox mldsaSafeBoxCard at *
+  dsimp only
+  omega
+
+/-- Key shift-containment lemma: for every `z` in `[-gamma1 + beta + 1, gamma1 - beta - 1]` and
+    every `c_s1` with `|c_s1| ≤ beta`, the unique preimage `y = z - c_s1` lies inside
+    `[-gamma1 + 1, gamma1 - 1]`. -/
+theorem safeBox_sub_secret_in_maskInterval {gamma1 beta : Nat} {c_s1 z : Int}
+    (hSecret : inMldsaSecretBound beta c_s1)
+    (hSafe : inMldsaSafeBox gamma1 beta z) :
+    inMldsaMaskInterval gamma1 (z - c_s1) := by
+  unfold inMldsaSecretBound inMldsaSafeBox inMldsaMaskInterval at *
+  exact ⟨by omega, by omega⟩
+
+/-- Constructive `0 Classical.choice` integer equality check (`Int.decEq`, avoiding `Int.instBEq`
+    which goes through `Std.LinearOrderPackage.ofLE`). -/
+def intEqBool (x y : Int) : Bool := decide (x = y)
+
+private theorem intEqBool_true (x : Int) : intEqBool x x = true :=
+  decide_eq_true rfl
+
+private theorem intEqBool_false {x y : Int} (h : x ≠ y) : intEqBool x y = false :=
+  decide_eq_false h
+
+/-- Executable Boolean checker for `inMldsaSafeBox` (`0 Classical.choice`). -/
+def inMldsaSafeBoxBool (gamma1 beta : Nat) (z : Int) : Bool :=
+  decide (-(gamma1 : Int) + (beta : Int) + 1 ≤ z) &&
+  decide (z ≤ (gamma1 : Int) - (beta : Int) - 1)
+
+theorem inMldsaSafeBoxBool_eq_true_iff (gamma1 beta : Nat) (z : Int) :
+    inMldsaSafeBoxBool gamma1 beta z = true ↔ inMldsaSafeBox gamma1 beta z := by
+  unfold inMldsaSafeBoxBool inMldsaSafeBox
+  rw [Bool.and_eq_true, decide_eq_true_iff, decide_eq_true_iff]
+
+theorem inMldsaSafeBoxBool_eq_false_iff (gamma1 beta : Nat) (z : Int) :
+    inMldsaSafeBoxBool gamma1 beta z = false ↔ ¬ inMldsaSafeBox gamma1 beta z := by
+  cases h : inMldsaSafeBoxBool gamma1 beta z
+  · exact ⟨fun _ hSafe => Bool.noConfusion (h.symm.trans ((inMldsaSafeBoxBool_eq_true_iff gamma1 beta z).mpr hSafe)),
+           fun _ => rfl⟩
+  · exact ⟨fun hF => Bool.noConfusion hF,
+           fun hNot => False.elim (hNot ((inMldsaSafeBoxBool_eq_true_iff gamma1 beta z).mp h))⟩
+
+/-- Surviving mask preimage multiplicity for `zTarget` when `y` ranges uniformly over
+    `[-gamma1 + 1, gamma1 - 1]` and outputs `z = y + c_s1` conditioned on `z ∈ SafeBox`. -/
+def mldsaSurvivingPreimageCount (gamma1 beta : Nat) (c_s1 zTarget : Int) : Nat :=
+  finSum (mldsaMaskIntervalCard gamma1) (fun i =>
+    let z := decodeMldsaMask gamma1 i + c_s1
+    if inMldsaSafeBoxBool gamma1 beta z && intEqBool z zTarget then 1 else 0)
+
+/-- Total number of masks `y ∈ [-gamma1 + 1, gamma1 - 1]` surviving `y + c_s1 ∈ SafeBox`. -/
+def mldsaTotalSurvivingMasks (gamma1 beta : Nat) (c_s1 : Int) : Nat :=
+  finSum (mldsaMaskIntervalCard gamma1) (fun i =>
+    if inMldsaSafeBoxBool gamma1 beta (decodeMldsaMask gamma1 i + c_s1) then 1 else 0)
+
+/-- Explicit `SimpleEquiv` bijection between the safe output box `Fin (2*(gamma1 - beta) - 1)`
+    and the subtype of surviving masks `y ∈ [-gamma1 + 1, gamma1 - 1]` for any `c_s1` with
+    `‖c_s1‖_∞ ≤ beta`. -/
+def mldsaSurvivingMaskEquiv {gamma1 beta : Nat} (hLt : beta < gamma1)
+    (c_s1 : Int) (hSecret : inMldsaSecretBound beta c_s1) :
+    SimpleEquiv (Fin (mldsaSafeBoxCard gamma1 beta))
+      { i : Fin (mldsaMaskIntervalCard gamma1) //
+        inMldsaSafeBox gamma1 beta (decodeMldsaMask gamma1 i + c_s1) } where
+  toFun j :=
+    let z := decodeMldsaSafeBox gamma1 beta j
+    let hz := (encode_decodeMldsaSafeBox hLt j).1
+    let hy := safeBox_sub_secret_in_maskInterval hSecret hz
+    let i := encodeMldsaMask (by omega) (z - c_s1) hy
+    ⟨i, by
+      have hDec := decode_encodeMldsaMask (by omega) (z - c_s1) hy
+      have hAdd : decodeMldsaMask gamma1 i + c_s1 = z := by
+        change decodeMldsaMask gamma1 (encodeMldsaMask _ (z - c_s1) hy) + c_s1 = z
+        rw [hDec]; omega
+      rwa [hAdd]⟩
+  invFun sub := encodeMldsaSafeBox hLt (decodeMldsaMask gamma1 sub.1 + c_s1) sub.2
+  left_inv j := by
+    apply Fin.ext
+    dsimp only [encodeMldsaSafeBox]
+    let z := decodeMldsaSafeBox gamma1 beta j
+    let hz := (encode_decodeMldsaSafeBox hLt j).1
+    let hy := safeBox_sub_secret_in_maskInterval hSecret hz
+    have hDec := decode_encodeMldsaMask (by omega) (z - c_s1) hy
+    have hAdd : decodeMldsaMask gamma1 (encodeMldsaMask (by omega) (z - c_s1) hy) + c_s1 = z := by
+      rw [hDec]; omega
+    rw [hAdd]
+    exact congrArg Fin.val (encode_decodeMldsaSafeBox hLt j).2
+  right_inv sub := by
+    rcases sub with ⟨i, hi⟩
+    apply Subtype.ext
+    apply Fin.ext
+    dsimp only [encodeMldsaMask]
+    have hDecSafe := decode_encodeMldsaSafeBox hLt (decodeMldsaMask gamma1 i + c_s1) hi
+    have hSubEq : decodeMldsaSafeBox gamma1 beta (encodeMldsaSafeBox hLt (decodeMldsaMask gamma1 i + c_s1) hi) - c_s1 =
+        decodeMldsaMask gamma1 i := by
+      rw [hDecSafe]; omega
+    rw [hSubEq]
+    exact congrArg Fin.val (encode_decodeMldsaMask (by omega) i).2
+
+/-- **Threshold ML-DSA Bounded-Attempt Rejection Independence
+    (`mldsa_rejection_valid_output_uniform_in_box`)**:
+    Over finite integer interval `[-gamma1 + 1, gamma1 - 1]`, for ANY secret `c_s1` satisfying
+    `‖c_s1‖_∞ ≤ beta` (`inMldsaSecretBound beta c_s1`, with `beta < gamma1`):
+    1. Every point `zTarget` inside the safe box `[-gamma1 + beta + 1, gamma1 - beta - 1]` has
+       **exact preimage multiplicity `1`** (`mldsaSurvivingPreimageCount gamma1 beta c_s1 zTarget = 1`).
+    2. Every point `zTarget` outside `[-gamma1 + beta + 1, gamma1 - beta - 1]` has
+       **exact preimage multiplicity `0`**.
+    3. Total surviving mask count is identically `2 * (gamma1 - beta) - 1` (`mldsaSafeBoxCard gamma1 beta`),
+       completely independent of `c_s1`.
+    4. For ANY second valid secret `c_s1'` (`inMldsaSecretBound beta c_s1'`), the surviving output
+       counts coincide pointwise at EVERY integer `z : Int` (`SD = 0`, zero secret leakage!). -/
+theorem mldsa_rejection_valid_output_uniform_in_box
+    {gamma1 beta : Nat} (hLt : beta < gamma1)
+    (c_s1 : Int) (hSecret : inMldsaSecretBound beta c_s1) :
+    (∀ zTarget : Int,
+      inMldsaSafeBox gamma1 beta zTarget →
+      mldsaSurvivingPreimageCount gamma1 beta c_s1 zTarget = 1) ∧
+    (∀ zOutside : Int,
+      ¬ inMldsaSafeBox gamma1 beta zOutside →
+      mldsaSurvivingPreimageCount gamma1 beta c_s1 zOutside = 0) ∧
+    mldsaTotalSurvivingMasks gamma1 beta c_s1 = mldsaSafeBoxCard gamma1 beta ∧
+    (∀ c_s1' : Int, inMldsaSecretBound beta c_s1' →
+      ∀ z : Int,
+        mldsaSurvivingPreimageCount gamma1 beta c_s1 z =
+          mldsaSurvivingPreimageCount gamma1 beta c_s1' z) := by
+  have hGammaPos : 0 < gamma1 := by omega
+  have hInsideGen : ∀ (cs : Int), inMldsaSecretBound beta cs → ∀ zTarget : Int,
+      inMldsaSafeBox gamma1 beta zTarget →
+      mldsaSurvivingPreimageCount gamma1 beta cs zTarget = 1 := by
+    intro cs hSecCs zTarget hzSafe
+    unfold mldsaSurvivingPreimageCount
+    have hyStar := safeBox_sub_secret_in_maskInterval hSecCs hzSafe
+    let iStar := encodeMldsaMask hGammaPos (zTarget - cs) hyStar
+    have hDecStar := decode_encodeMldsaMask hGammaPos (zTarget - cs) hyStar
+    have hCong :
+        finSum (mldsaMaskIntervalCard gamma1) (fun i =>
+          if inMldsaSafeBoxBool gamma1 beta (decodeMldsaMask gamma1 i + cs) &&
+              intEqBool (decodeMldsaMask gamma1 i + cs) zTarget then 1 else 0) =
+        finSum (mldsaMaskIntervalCard gamma1) (fun i => if i = iStar then 1 else 0) := by
+      apply finSum_congr
+      intro i
+      by_cases hEq : i = iStar
+      · subst hEq
+        have hSum : decodeMldsaMask gamma1 iStar + cs = zTarget := by
+          change decodeMldsaMask gamma1 (encodeMldsaMask hGammaPos (zTarget - cs) hyStar) + cs = zTarget
+          rw [hDecStar]; omega
+        have hSafeB : inMldsaSafeBoxBool gamma1 beta zTarget = true :=
+          (inMldsaSafeBoxBool_eq_true_iff gamma1 beta zTarget).mpr hzSafe
+        have hBeq : intEqBool zTarget zTarget = true := intEqBool_true zTarget
+        rw [hSum, hSafeB, hBeq]
+        simp only [Bool.and_self, ↓reduceIte]
+      · have hNeSum : decodeMldsaMask gamma1 i + cs ≠ zTarget := by
+          intro hSumEq
+          apply hEq
+          have hYEq : decodeMldsaMask gamma1 i = zTarget - cs := by omega
+          have hEncI := (encode_decodeMldsaMask hGammaPos i).2
+          apply Fin.ext
+          have hValEq : (encodeMldsaMask hGammaPos (decodeMldsaMask gamma1 i)
+              (encode_decodeMldsaMask hGammaPos i).1).val = iStar.val := by
+            simp only [iStar, encodeMldsaMask, hYEq]
+          exact (congrArg Fin.val hEncI).symm.trans hValEq
+        have hBeqF : intEqBool (decodeMldsaMask gamma1 i + cs) zTarget = false := intEqBool_false hNeSum
+        rw [hBeqF, Bool.and_false]
+        simp only [hEq, ↓reduceIte]
+        rfl
+    rw [hCong, finSum_eq_indicator]
+  have hOutsideGen : ∀ (cs : Int) (zOutside : Int),
+      ¬ inMldsaSafeBox gamma1 beta zOutside →
+      mldsaSurvivingPreimageCount gamma1 beta cs zOutside = 0 := by
+    intro cs zOutside hzNot
+    unfold mldsaSurvivingPreimageCount
+    have hCong :
+        finSum (mldsaMaskIntervalCard gamma1) (fun i =>
+          if inMldsaSafeBoxBool gamma1 beta (decodeMldsaMask gamma1 i + cs) &&
+              intEqBool (decodeMldsaMask gamma1 i + cs) zOutside then 1 else 0) =
+        finSum (mldsaMaskIntervalCard gamma1) (fun _ => 0) := by
+      apply finSum_congr
+      intro i
+      match Int.decEq (decodeMldsaMask gamma1 i + cs) zOutside with
+      | isTrue hEqZ =>
+        have hSafeF : inMldsaSafeBoxBool gamma1 beta zOutside = false :=
+          (inMldsaSafeBoxBool_eq_false_iff gamma1 beta zOutside).mpr hzNot
+        rw [hEqZ, hSafeF, Bool.false_and]
+        rfl
+      | isFalse hNeZ =>
+        have hBeqF : intEqBool (decodeMldsaMask gamma1 i + cs) zOutside = false := intEqBool_false hNeZ
+        rw [hBeqF, Bool.and_false]
+        rfl
+    rw [hCong, finSum_const, Nat.mul_zero]
+  have hInside := hInsideGen c_s1 hSecret
+  have hOutside := hOutsideGen c_s1
+  have hTotal : mldsaTotalSurvivingMasks gamma1 beta c_s1 = mldsaSafeBoxCard gamma1 beta := by
+    unfold mldsaTotalSurvivingMasks
+    have hExpand :
+        finSum (mldsaMaskIntervalCard gamma1) (fun i =>
+          if inMldsaSafeBoxBool gamma1 beta (decodeMldsaMask gamma1 i + c_s1) then 1 else 0) =
+        finSum (mldsaMaskIntervalCard gamma1) (fun i =>
+          finSum (mldsaSafeBoxCard gamma1 beta) (fun j =>
+            if inMldsaSafeBoxBool gamma1 beta (decodeMldsaMask gamma1 i + c_s1) &&
+                intEqBool (decodeMldsaMask gamma1 i + c_s1) (decodeMldsaSafeBox gamma1 beta j) then 1 else 0)) := by
+      apply finSum_congr
+      intro i
+      let z := decodeMldsaMask gamma1 i + c_s1
+      change (if inMldsaSafeBoxBool gamma1 beta z then 1 else 0) =
+        finSum (mldsaSafeBoxCard gamma1 beta) (fun j =>
+          if inMldsaSafeBoxBool gamma1 beta z && intEqBool z (decodeMldsaSafeBox gamma1 beta j) then 1 else 0)
+      cases hSafeB : inMldsaSafeBoxBool gamma1 beta z
+      · have hZero :
+            finSum (mldsaSafeBoxCard gamma1 beta) (fun j =>
+              if false && intEqBool z (decodeMldsaSafeBox gamma1 beta j) then 1 else 0) =
+            finSum (mldsaSafeBoxCard gamma1 beta) (fun _ => 0) :=
+          finSum_congr (fun _ => rfl)
+        rw [hZero, finSum_const, Nat.mul_zero]
+        rfl
+      · have hz : inMldsaSafeBox gamma1 beta z :=
+          (inMldsaSafeBoxBool_eq_true_iff gamma1 beta z).mp hSafeB
+        let jStar := encodeMldsaSafeBox hLt z hz
+        have hDecJ := decode_encodeMldsaSafeBox hLt z hz
+        have hInner :
+            finSum (mldsaSafeBoxCard gamma1 beta) (fun j =>
+              if true && intEqBool z (decodeMldsaSafeBox gamma1 beta j) then 1 else 0) =
+            finSum (mldsaSafeBoxCard gamma1 beta) (fun j => if j = jStar then 1 else 0) := by
+          apply finSum_congr
+          intro j
+          by_cases hj : j = jStar
+          · subst hj
+            have hBeq : intEqBool z (decodeMldsaSafeBox gamma1 beta jStar) = true := by
+              change intEqBool z (decodeMldsaSafeBox gamma1 beta (encodeMldsaSafeBox hLt z hz)) = true
+              rw [hDecJ]
+              exact intEqBool_true z
+            rw [hBeq]
+            simp only [Bool.true_and, ↓reduceIte]
+          · have hNeZ : z ≠ decodeMldsaSafeBox gamma1 beta j := by
+              intro hZEq
+              apply hj
+              have hEncJ := (encode_decodeMldsaSafeBox hLt j).2
+              apply Fin.ext
+              have hVal : jStar.val = (encodeMldsaSafeBox hLt (decodeMldsaSafeBox gamma1 beta j)
+                  (encode_decodeMldsaSafeBox hLt j).1).val := by
+                simp only [jStar, encodeMldsaSafeBox, hZEq]
+              exact (congrArg Fin.val hEncJ).symm.trans hVal.symm
+            have hBeqF : intEqBool z (decodeMldsaSafeBox gamma1 beta j) = false := intEqBool_false hNeZ
+            rw [hBeqF]
+            simp only [Bool.true_and, hj, ↓reduceIte]
+            rfl
+        rw [hInner, finSum_eq_indicator]
+        rfl
+    rw [hExpand, finSum_comm]
+    have hInnerOne :
+        finSum (mldsaSafeBoxCard gamma1 beta) (fun j =>
+          finSum (mldsaMaskIntervalCard gamma1) (fun i =>
+            if inMldsaSafeBoxBool gamma1 beta (decodeMldsaMask gamma1 i + c_s1) &&
+                intEqBool (decodeMldsaMask gamma1 i + c_s1) (decodeMldsaSafeBox gamma1 beta j) then 1 else 0)) =
+        finSum (mldsaSafeBoxCard gamma1 beta) (fun _ => 1) := by
+      apply finSum_congr
+      intro j
+      exact hInside (decodeMldsaSafeBox gamma1 beta j) (encode_decodeMldsaSafeBox hLt j).1
+    rw [hInnerOne, finSum_const, Nat.mul_one]
+  refine ⟨hInside, hOutside, hTotal, ?_⟩
+  intro c_s1' hSecret' z
+  cases hSafeB : inMldsaSafeBoxBool gamma1 beta z
+  · have hzNot : ¬ inMldsaSafeBox gamma1 beta z :=
+      (inMldsaSafeBoxBool_eq_false_iff gamma1 beta z).mp hSafeB
+    rw [hOutside z hzNot, hOutsideGen c_s1' z hzNot]
+  · have hzIn : inMldsaSafeBox gamma1 beta z :=
+      (inMldsaSafeBoxBool_eq_true_iff gamma1 beta z).mp hSafeB
+    rw [hInside z hzIn, hInsideGen c_s1' hSecret' z hzIn]
+
+/-- Deployed FIPS 204 `ML-DSA-44` (`γ₁ = 131072, β = 78`) rejection uniformity specialization. -/
+theorem mldsa44_rejection_valid_output_uniform_in_box
+    (c_s1 : Int) (hSecret : inMldsaSecretBound mldsa44Beta c_s1) :
+    (∀ zTarget : Int,
+      inMldsaSafeBox mldsa44Gamma1 mldsa44Beta zTarget →
+      mldsaSurvivingPreimageCount mldsa44Gamma1 mldsa44Beta c_s1 zTarget = 1) ∧
+    (∀ zOutside : Int,
+      ¬ inMldsaSafeBox mldsa44Gamma1 mldsa44Beta zOutside →
+      mldsaSurvivingPreimageCount mldsa44Gamma1 mldsa44Beta c_s1 zOutside = 0) ∧
+    mldsaTotalSurvivingMasks mldsa44Gamma1 mldsa44Beta c_s1 = 261987 := by
+  have hLt : mldsa44Beta < mldsa44Gamma1 := by decide
+  obtain ⟨hIn, hOut, hTot, _⟩ := mldsa_rejection_valid_output_uniform_in_box hLt c_s1 hSecret
+  refine ⟨hIn, hOut, ?_⟩
+  rw [hTot]
+  rfl
+
+/-- Coordinatewise `∞`-norm polynomial/vector bijection lifting `mldsaSurvivingMaskEquiv` to
+    `dim`-coefficient ML-DSA vectors `Fin dim → Int`. -/
+def mldsaVecSurvivingMaskEquiv {dim gamma1 beta : Nat} (hLt : beta < gamma1)
+    (c_s1_vec : Fin dim → Int) (hSecretVec : ∀ k : Fin dim, inMldsaSecretBound beta (c_s1_vec k)) :
+    SimpleEquiv (Fin dim → Fin (mldsaSafeBoxCard gamma1 beta))
+      { yVec : Fin dim → Fin (mldsaMaskIntervalCard gamma1) //
+        ∀ k : Fin dim, inMldsaSafeBox gamma1 beta (decodeMldsaMask gamma1 (yVec k) + c_s1_vec k) } where
+  toFun jVec :=
+    ⟨fun k => ((mldsaSurvivingMaskEquiv hLt (c_s1_vec k) (hSecretVec k)).toFun (jVec k)).1,
+     fun k => ((mldsaSurvivingMaskEquiv hLt (c_s1_vec k) (hSecretVec k)).toFun (jVec k)).2⟩
+  invFun subVec :=
+    fun k => (mldsaSurvivingMaskEquiv hLt (c_s1_vec k) (hSecretVec k)).invFun ⟨subVec.1 k, subVec.2 k⟩
+  left_inv jVec := by
+    funext k
+    exact (mldsaSurvivingMaskEquiv hLt (c_s1_vec k) (hSecretVec k)).left_inv (jVec k)
+  right_inv subVec := by
+    rcases subVec with ⟨yVec, hSafe⟩
+    apply Subtype.ext
+    funext k
+    exact congrArg Subtype.val
+      ((mldsaSurvivingMaskEquiv hLt (c_s1_vec k) (hSecretVec k)).right_inv ⟨yVec k, hSafe k⟩)
+
+/-! ### Unclipped ML-DSA Output `#tooth` Secret-Leakage Witness -/
+
+/-- Unclipped preimage multiplicity when a broken signer omits the `< gamma1 - beta` rejection
+    check and outputs `z = y + c_s1` directly. -/
+def mldsaUnclippedPreimageCount (gamma1 : Nat) (c_s1 zTarget : Int) : Nat :=
+  finSum (mldsaMaskIntervalCard gamma1) (fun i =>
+    if intEqBool (decodeMldsaMask gamma1 i + c_s1) zTarget then 1 else 0)
+
+/-- Deployed `ML-DSA-44` (`gamma1 = 131072, beta = 78`) boundary leakage equality without the
+    `< gamma1 - beta` rejection filter: `z = 131072` occurs with multiplicity `1` under valid
+    secret `c_s1 = 1` and multiplicity `0` under valid secret `c_s1' = 0`. -/
+theorem tooth_mldsa44_unclipped_boundary_counts :
+    inMldsaSecretBound mldsa44Beta 1 ∧
+    inMldsaSecretBound mldsa44Beta 0 ∧
+    mldsaUnclippedPreimageCount mldsa44Gamma1 1 (mldsa44Gamma1 : Int) = 1 ∧
+    mldsaUnclippedPreimageCount mldsa44Gamma1 0 (mldsa44Gamma1 : Int) = 0 ∧
+    mldsaUnclippedPreimageCount mldsa44Gamma1 1 (mldsa44Gamma1 : Int) ≠
+      mldsaUnclippedPreimageCount mldsa44Gamma1 0 (mldsa44Gamma1 : Int) := by
+  have hPos : 0 < mldsa44Gamma1 := by decide
+  have hB1 : inMldsaSecretBound mldsa44Beta 1 := by decide
+  have hB0 : inMldsaSecretBound mldsa44Beta 0 := by decide
+  have hOne : mldsaUnclippedPreimageCount mldsa44Gamma1 1 (mldsa44Gamma1 : Int) = 1 := by
+    unfold mldsaUnclippedPreimageCount
+    have hyMax : inMldsaMaskInterval mldsa44Gamma1 ((mldsa44Gamma1 : Int) - 1) := by decide
+    let iMax := encodeMldsaMask hPos ((mldsa44Gamma1 : Int) - 1) hyMax
+    have hDecMax := decode_encodeMldsaMask hPos ((mldsa44Gamma1 : Int) - 1) hyMax
+    have hCong :
+        finSum (mldsaMaskIntervalCard mldsa44Gamma1) (fun i =>
+          if intEqBool (decodeMldsaMask mldsa44Gamma1 i + 1) (mldsa44Gamma1 : Int) then 1 else 0) =
+        finSum (mldsaMaskIntervalCard mldsa44Gamma1) (fun i => if i = iMax then 1 else 0) := by
+      apply finSum_congr
+      intro i
+      by_cases hEq : i = iMax
+      · subst hEq
+        have hVal : decodeMldsaMask mldsa44Gamma1 iMax + 1 = (mldsa44Gamma1 : Int) := by
+          change decodeMldsaMask mldsa44Gamma1 (encodeMldsaMask hPos ((mldsa44Gamma1 : Int) - 1) hyMax) + 1 = _
+          rw [hDecMax]; omega
+        have hBeq : intEqBool (mldsa44Gamma1 : Int) (mldsa44Gamma1 : Int) = true := intEqBool_true _
+        rw [hVal, hBeq]
+        simp only [↓reduceIte]
+      · have hNe : decodeMldsaMask mldsa44Gamma1 i + 1 ≠ (mldsa44Gamma1 : Int) := by
+          intro hSum
+          apply hEq
+          have hY : decodeMldsaMask mldsa44Gamma1 i = (mldsa44Gamma1 : Int) - 1 := by omega
+          have hEncI := (encode_decodeMldsaMask hPos i).2
+          apply Fin.ext
+          have hV : (encodeMldsaMask hPos (decodeMldsaMask mldsa44Gamma1 i)
+              (encode_decodeMldsaMask hPos i).1).val = iMax.val := by
+            simp only [iMax, encodeMldsaMask, hY]
+          exact (congrArg Fin.val hEncI).symm.trans hV
+        have hBeqF : intEqBool (decodeMldsaMask mldsa44Gamma1 i + 1) (mldsa44Gamma1 : Int) = false :=
+          intEqBool_false hNe
+        rw [hBeqF]
+        simp only [hEq, ↓reduceIte]
+        rfl
+    rw [hCong, finSum_eq_indicator]
+  have hZero : mldsaUnclippedPreimageCount mldsa44Gamma1 0 (mldsa44Gamma1 : Int) = 0 := by
+    unfold mldsaUnclippedPreimageCount
+    have hCong :
+        finSum (mldsaMaskIntervalCard mldsa44Gamma1) (fun i =>
+          if intEqBool (decodeMldsaMask mldsa44Gamma1 i + 0) (mldsa44Gamma1 : Int) then 1 else 0) =
+        finSum (mldsaMaskIntervalCard mldsa44Gamma1) (fun _ => 0) := by
+      apply finSum_congr
+      intro i
+      have hiBound := (encode_decodeMldsaMask hPos i).1
+      have hNe : decodeMldsaMask mldsa44Gamma1 i + 0 ≠ (mldsa44Gamma1 : Int) := by
+        unfold inMldsaMaskInterval at hiBound
+        omega
+      have hBeqF : intEqBool (decodeMldsaMask mldsa44Gamma1 i + 0) (mldsa44Gamma1 : Int) = false :=
+        intEqBool_false hNe
+      rw [hBeqF]
+      rfl
+    rw [hCong, finSum_const, Nat.mul_zero]
+  refine ⟨hB1, hB0, hOne, hZero, ?_⟩
+  rw [hOne, hZero]
+  decide
+
+/-- **`#tooth` Witness (`tooth_mldsa_unclipped_z_leaks_secret_shift`)**:
+    Omitting the `‖z‖_∞ < gamma1 - beta` rejection filter leaks `c_s1` immediately at the boundary
+    `z = gamma1` (instantiated at deployed `ML-DSA-44` parameters `gamma1 = 131072, beta = 78`):
+    valid secrets `c_s1, c_s1'` satisfying `‖c_s1‖_∞ ≤ beta` yield strictly unequal preimage
+    multiplicities at `z`! -/
+theorem tooth_mldsa_unclipped_z_leaks_secret_shift :
+    ∃ (gamma1 beta : Nat) (c_s1 c_s1' z : Int),
+      gamma1 = mldsa44Gamma1 ∧
+      beta = mldsa44Beta ∧
+      beta < gamma1 ∧
+      inMldsaSecretBound beta c_s1 ∧
+      inMldsaSecretBound beta c_s1' ∧
+      mldsaUnclippedPreimageCount gamma1 c_s1 z ≠
+        mldsaUnclippedPreimageCount gamma1 c_s1' z := by
+  obtain ⟨hB1, hB0, _, _, hNe⟩ := tooth_mldsa44_unclipped_boundary_counts
+  exact ⟨mldsa44Gamma1, mldsa44Beta, 1, 0, (mldsa44Gamma1 : Int), rfl, rfl, by decide, hB1, hB0, hNe⟩
+
+/-- Reachable inhabitedness witness for `mldsa_rejection_valid_output_uniform_in_box` at deployed
+    `ML-DSA-44` parameters (`c_s1 = -78`, extreme boundary secret shift!). -/
+theorem witness_mldsa44_secret_bound_inhabited :
+    ∃ (c_s1 : Int),
+      inMldsaSecretBound mldsa44Beta c_s1 ∧
+      inMldsaSafeBox mldsa44Gamma1 mldsa44Beta 0 ∧ mldsa44Beta < mldsa44Gamma1 :=
+  ⟨-78, by decide, by decide, by decide⟩
+
+
+/-! ### FIPS 204 Joint `(z, r₀)` Rejection: `HighBits` Invariance & `(w₁, z)` Transcript Simulation
+
+The `z`-box theorem above covers only the first of the two secret-dependent rejection checks of
+FIPS 204 `ML-DSA.Sign`. The signer ALSO rejects unless `‖LowBits(w - c·s₂)‖_∞ < γ₂ - β`, and the
+published commitment is `w₁ = HighBits(w)` with `w = A·y`. This subsection models both checks and
+the commitment at the deployed `ML-DSA-44` parameters
+(`q = 8380417`, `γ₂ = (q - 1)/88 = 95232`, `α = 2γ₂ = 190464`, `β = 78`, `γ₂ - β = 95154`).
+
+Vectors are coefficient vectors over `ℤ` read modulo `q`. A public matrix `A` over `R_q` acting on
+polynomial vectors, and multiplication by the challenge `c`, are both `ℤ_q`-linear on coefficient
+vectors, so the scheme is the special case `m = 256·ℓ`, `kk = 256·k` of the integer-matrix model
+below, with the challenge already folded into `cs₁ = c·s₁`, `cs₂ = c·s₂` and `ct = c·t`. -/
+
+/-- Centered remainder `x mod± α` in `(-γ₂, γ₂]` for `α = 190464`, `γ₂ = 95232`. -/
+def mldsa44CenteredRem (x : Int) : Int :=
+  if x % 190464 > 95232 then x % 190464 - 190464 else x % 190464
+
+/-- FIPS 204 Algorithm 37 `HighBits` at `ML-DSA-44` (first component of Algorithm 36 `Decompose`,
+    including the corner `r⁺ - r₀ = q - 1 ↦ r₁ = 0`), on `r mod q`. Mirrors `decompose_ct`. -/
+def mldsa44HighBits (r : Int) : Int :=
+  if r % 8380417 - mldsa44CenteredRem (r % 8380417) = 8380416 then 0
+  else (r % 8380417 - mldsa44CenteredRem (r % 8380417)) / 190464
+
+/-- FIPS 204 Algorithm 38 `LowBits` at `ML-DSA-44` (second component of `Decompose`, including
+    the corner `r₀ ↦ r₀ - 1`), on `r mod q`. -/
+def mldsa44LowBits (r : Int) : Int :=
+  if r % 8380417 - mldsa44CenteredRem (r % 8380417) = 8380416 then
+    mldsa44CenteredRem (r % 8380417) - 1
+  else mldsa44CenteredRem (r % 8380417)
+
+/-- The second rejection check with its `β` margin: `|r₀| < γ₂ - β = 95154`. -/
+abbrev mldsa44LowBitsOk (r0 : Int) : Prop := -95154 < r0 ∧ r0 < 95154
+
+/-- The same check WITHOUT the `β` margin: `|r₀| < γ₂ = 95232`. -/
+abbrev mldsa44LowBitsOkNoMargin (r0 : Int) : Prop := -95232 < r0 ∧ r0 < 95232
+
+theorem mldsa44HighBits_congr {r r' : Int} (h : r % 8380417 = r' % 8380417) :
+    mldsa44HighBits r = mldsa44HighBits r' := by
+  simp only [mldsa44HighBits, h]
+
+theorem mldsa44LowBits_congr {r r' : Int} (h : r % 8380417 = r' % 8380417) :
+    mldsa44LowBits r = mldsa44LowBits r' := by
+  simp only [mldsa44LowBits, h]
+
+/-- **`HighBits` Invariance Under a `β`-Bounded Shift (`mldsa44_highBits_shift_invariant`)**:
+    if `‖LowBits(r)‖ < γ₂ - β` and `|s| ≤ β`, then `HighBits(r + s) = HighBits(r)`. The `β` margin
+    keeps `r + s` on the same side of every `HighBits` carry boundary, including the wrap of
+    `r + s` around `q` at the `r₁ = 0` corner. -/
+theorem mldsa44_highBits_shift_invariant (r s : Int)
+    (hs : -78 ≤ s ∧ s ≤ 78) (hLow : mldsa44LowBitsOk (mldsa44LowBits r)) :
+    mldsa44HighBits (r + s) = mldsa44HighBits r := by
+  unfold mldsa44LowBitsOk mldsa44LowBits mldsa44CenteredRem at hLow
+  unfold mldsa44HighBits mldsa44CenteredRem
+  have hx : 0 ≤ r % 8380417 ∧ r % 8380417 < 8380417 := ⟨by omega, by omega⟩
+  have hx' : 0 ≤ (r + s) % 8380417 ∧ (r + s) % 8380417 < 8380417 := ⟨by omega, by omega⟩
+  have hWrap : (r + s) % 8380417 = r % 8380417 + s ∨
+      (r + s) % 8380417 = r % 8380417 + s - 8380417 ∨
+      (r + s) % 8380417 = r % 8380417 + s + 8380417 := by omega
+  generalize (r + s) % 8380417 = x' at hx' hWrap ⊢
+  generalize r % 8380417 = x at hx hWrap hLow ⊢
+  by_cases c1 : x % 190464 > 95232
+  · by_cases c3 : x' % 190464 > 95232
+    · simp only [c1, c3, ↓reduceIte] at hLow ⊢
+      split at hLow <;> split <;> omega
+    · simp only [c1, c3, ↓reduceIte] at hLow ⊢
+      split at hLow <;> split <;> omega
+  · by_cases c3 : x' % 190464 > 95232
+    · simp only [c1, c3, ↓reduceIte] at hLow ⊢
+      split at hLow <;> split <;> omega
+    · simp only [c1, c3, ↓reduceIte] at hLow ⊢
+      split at hLow <;> split <;> omega
+
+/-- **Deployed Range Test Refines The Spec (`mldsa44_low_range_test_iff`)**:
+    the threshold signer never materialises `LowBits`. It tests the hidden value
+    `(w - c·s₂ - w₁·α) + (γ₂ - β - 1) mod q` for membership in `[0, 2(γ₂ - β) - 1)`
+    (`rejection_verdict` / `masked_range_test`). For every candidate `w₁ ∈ [0, 44)` that test holds
+    exactly when `HighBits(w - c·s₂) = w₁` AND `‖LowBits(w - c·s₂)‖ < γ₂ - β`. -/
+theorem mldsa44_low_range_test_iff (r w1 : Int) (hw1 : 0 ≤ w1 ∧ w1 < 44) :
+    ((r - w1 * 190464 + 95153) % 8380417 < 190307) ↔
+    (mldsa44HighBits r = w1 ∧ mldsa44LowBitsOk (mldsa44LowBits r)) := by
+  unfold mldsa44LowBitsOk mldsa44HighBits mldsa44LowBits mldsa44CenteredRem
+  have hx : 0 ≤ r % 8380417 ∧ r % 8380417 < 8380417 := ⟨by omega, by omega⟩
+  have ht : 0 ≤ (r - w1 * 190464 + 95153) % 8380417 ∧
+      (r - w1 * 190464 + 95153) % 8380417 < 8380417 := ⟨by omega, by omega⟩
+  have hWrap : (r - w1 * 190464 + 95153) % 8380417 = r % 8380417 - w1 * 190464 + 95153 ∨
+      (r - w1 * 190464 + 95153) % 8380417 = r % 8380417 - w1 * 190464 + 95153 + 8380417 ∨
+      (r - w1 * 190464 + 95153) % 8380417 = r % 8380417 - w1 * 190464 + 95153 - 8380417 := by
+    omega
+  generalize (r - w1 * 190464 + 95153) % 8380417 = t at ht hWrap ⊢
+  generalize r % 8380417 = x at hx hWrap ⊢
+  by_cases c1 : x % 190464 > 95232
+  · simp only [c1, ↓reduceIte]
+    split
+    · constructor
+      · intro h; refine ⟨?_, ?_, ?_⟩ <;> omega
+      · intro h; omega
+    · constructor
+      · intro h; refine ⟨?_, ?_, ?_⟩ <;> omega
+      · intro h; omega
+  · simp only [c1, ↓reduceIte]
+    split
+    · constructor
+      · intro h; refine ⟨?_, ?_, ?_⟩ <;> omega
+      · intro h; omega
+    · constructor
+      · intro h; refine ⟨?_, ?_, ?_⟩ <;> omega
+      · intro h; omega
+
+/-- Integer dot product `Σ_j a_j · u_j`. -/
+def intDot : (n : Nat) → (Fin n → Int) → (Fin n → Int) → Int
+  | 0, _, _ => 0
+  | n + 1, a, u =>
+    a ⟨0, Nat.zero_lt_succ n⟩ * u ⟨0, Nat.zero_lt_succ n⟩ +
+      intDot n (fun j => a ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+        (fun j => u ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+
+theorem intDot_add : ∀ (n : Nat) (a u v : Fin n → Int),
+    intDot n a (fun j => u j + v j) = intDot n a u + intDot n a v
+  | 0, _, _, _ => by simp [intDot]
+  | n + 1, a, u, v => by
+    have ih := intDot_add n (fun j => a ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+      (fun j => u ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩) (fun j => v ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+    simp only [intDot]
+    rw [ih, Int.mul_add]
+    omega
+
+/-- Public data of one signing attempt for a fixed challenge `c`: the matrix `A` (as a
+    `ℤ_q`-linear map on coefficient vectors) and `ct = c·t`. -/
+structure MldsaPublicInstance (m kk : Nat) where
+  A : Fin kk → Fin m → Int
+  ct : Fin kk → Int
+
+/-- Secret data of the attempt: `cs₁ = c·s₁` and `cs₂ = c·s₂`. -/
+structure MldsaSecretShift (m kk : Nat) where
+  cs1 : Fin m → Int
+  cs2 : Fin kk → Int
+
+/-- The public-key relation `t = A·s₁ + s₂ (mod q)` multiplied by the challenge, together with
+    the FIPS 204 bounds `‖c·s₁‖_∞ ≤ β` and `‖c·s₂‖_∞ ≤ β`. -/
+def MldsaKeyRelation {m kk : Nat} (pub : MldsaPublicInstance m kk) (sec : MldsaSecretShift m kk) :
+    Prop :=
+  (∀ j, inMldsaSecretBound mldsa44Beta (sec.cs1 j)) ∧
+  (∀ i, inMldsaSecretBound mldsa44Beta (sec.cs2 i)) ∧
+  (∀ i, pub.ct i % 8380417 = (intDot m (pub.A i) sec.cs1 + sec.cs2 i) % 8380417)
+
+/-- Real signer response `z = y + c·s₁`. -/
+def mldsaRealZ {m kk : Nat} (sec : MldsaSecretShift m kk) (y : Fin m → Int) : Fin m → Int :=
+  fun j => y j + sec.cs1 j
+
+/-- Real signer commitment `w₁ = HighBits(A·y)`: computed from the secret mask alone. -/
+def mldsa44RealW1 {m kk : Nat} (pub : MldsaPublicInstance m kk) (y : Fin m → Int) : Fin kk → Int :=
+  fun i => mldsa44HighBits (intDot m (pub.A i) y)
+
+/-- Both secret-dependent rejection checks of the real signer:
+    `‖z‖_∞ < γ₁ - β` and `‖LowBits(A·y - c·s₂)‖_∞ < γ₂ - β`. -/
+def mldsa44RealAccept {m kk : Nat} (pub : MldsaPublicInstance m kk) (sec : MldsaSecretShift m kk)
+    (y : Fin m → Int) : Prop :=
+  (∀ j, inMldsaSafeBox mldsa44Gamma1 mldsa44Beta (y j + sec.cs1 j)) ∧
+  (∀ i, mldsa44LowBitsOk (mldsa44LowBits (intDot m (pub.A i) y - sec.cs2 i)))
+
+/-- Simulator commitment `w₁ = HighBits(A·z - c·t)`: a function of PUBLIC `(A, c·t, z)` only. -/
+def mldsa44SimW1 {m kk : Nat} (pub : MldsaPublicInstance m kk) (z : Fin m → Int) : Fin kk → Int :=
+  fun i => mldsa44HighBits (intDot m (pub.A i) z - pub.ct i)
+
+/-- Simulator acceptance: `z` in the safe box and `‖LowBits(A·z - c·t)‖_∞ < γ₂ - β`, again a
+    function of PUBLIC `(A, c·t, z)` only. -/
+def mldsa44SimAccept {m kk : Nat} (pub : MldsaPublicInstance m kk) (z : Fin m → Int) : Prop :=
+  (∀ j, inMldsaSafeBox mldsa44Gamma1 mldsa44Beta (z j)) ∧
+  (∀ i, mldsa44LowBitsOk (mldsa44LowBits (intDot m (pub.A i) z - pub.ct i)))
+
+/-- `A·y - c·s₂ ≡ A·z - c·t (mod q)` for `z = y + c·s₁`: the hidden value whose low bits are
+    tested is computable from the public transcript. -/
+theorem mldsa_commit_shift_congr {m kk : Nat} (pub : MldsaPublicInstance m kk)
+    (sec : MldsaSecretShift m kk) (hKey : MldsaKeyRelation pub sec) (y : Fin m → Int) (i : Fin kk) :
+    (intDot m (pub.A i) (mldsaRealZ sec y) - pub.ct i) % 8380417 =
+      (intDot m (pub.A i) y - sec.cs2 i) % 8380417 := by
+  have hK := hKey.2.2 i
+  unfold mldsaRealZ
+  rw [intDot_add]
+  omega
+
+/-- **FIPS 204 Joint `(w₁, z)` Transcript Simulation (`mldsa44_joint_transcript_simulation`)**:
+    for every public instance, every secret satisfying the key relation, and every mask `y`:
+    1. the real signer's JOINT accept bit (both rejection checks) equals the simulator's accept
+       bit computed from public `(A, c·t, z)`;
+    2. on acceptance the real commitment `w₁ = HighBits(A·y)` equals the publicly computable
+       `HighBits(A·z - c·t)` in every coefficient;
+    3. every simulator-accepted `z` has its unique preimage mask `y = z - c·s₁` inside the mask
+       interval.
+    Hence the accepted `(w₁, z)` transcript is a function of public data and the uniform `z`
+    alone: `(s₁, s₂)` enter neither its support nor its values. -/
+theorem mldsa44_joint_transcript_simulation {m kk : Nat} (pub : MldsaPublicInstance m kk)
+    (sec : MldsaSecretShift m kk) (hKey : MldsaKeyRelation pub sec) :
+    (∀ y : Fin m → Int,
+      (mldsa44RealAccept pub sec y ↔ mldsa44SimAccept pub (mldsaRealZ sec y)) ∧
+      (mldsa44RealAccept pub sec y →
+        ∀ i, mldsa44RealW1 pub y i = mldsa44SimW1 pub (mldsaRealZ sec y) i)) ∧
+    (∀ z : Fin m → Int, mldsa44SimAccept pub z →
+      ∀ j, inMldsaMaskInterval mldsa44Gamma1 (z j - sec.cs1 j)) := by
+  have hLowEq : ∀ (y : Fin m → Int) (i : Fin kk),
+      mldsa44LowBits (intDot m (pub.A i) (mldsaRealZ sec y) - pub.ct i) =
+        mldsa44LowBits (intDot m (pub.A i) y - sec.cs2 i) :=
+    fun y i => mldsa44LowBits_congr (mldsa_commit_shift_congr pub sec hKey y i)
+  refine ⟨fun y => ⟨⟨?_, ?_⟩, ?_⟩, ?_⟩
+  · intro hReal
+    refine ⟨hReal.1, fun i => ?_⟩
+    rw [hLowEq y i]
+    exact hReal.2 i
+  · intro hSim
+    refine ⟨hSim.1, fun i => ?_⟩
+    rw [← hLowEq y i]
+    exact hSim.2 i
+  · intro hReal i
+    have hs : -78 ≤ sec.cs2 i ∧ sec.cs2 i ≤ 78 := by
+      have h := hKey.2.1 i
+      unfold inMldsaSecretBound mldsa44Beta at h
+      exact ⟨by omega, by omega⟩
+    have hInv := mldsa44_highBits_shift_invariant
+      (intDot m (pub.A i) y - sec.cs2 i) (sec.cs2 i) hs (hReal.2 i)
+    have hSum : intDot m (pub.A i) y - sec.cs2 i + sec.cs2 i = intDot m (pub.A i) y := by omega
+    rw [hSum] at hInv
+    unfold mldsa44RealW1 mldsa44SimW1
+    rw [hInv]
+    exact (mldsa44HighBits_congr (mldsa_commit_shift_congr pub sec hKey y i)).symm
+  · intro z hSim j
+    exact safeBox_sub_secret_in_maskInterval (hKey.1 j) (hSim.1 j)
+
+/-- **Joint Transcript Bijection (`mldsa44JointTranscriptEquiv`)**: `y ↦ z = y + c·s₁` is an
+    explicit bijection from the masks the REAL signer accepts (both checks) onto the responses the
+    public SIMULATOR accepts. -/
+def mldsa44JointTranscriptEquiv {m kk : Nat} (pub : MldsaPublicInstance m kk)
+    (sec : MldsaSecretShift m kk) (hKey : MldsaKeyRelation pub sec) :
+    SimpleEquiv
+      { y : Fin m → Int //
+        (∀ j, inMldsaMaskInterval mldsa44Gamma1 (y j)) ∧ mldsa44RealAccept pub sec y }
+      { z : Fin m → Int // mldsa44SimAccept pub z } where
+  toFun y :=
+    ⟨mldsaRealZ sec y.1, ((mldsa44_joint_transcript_simulation pub sec hKey).1 y.1).1.mp y.2.2⟩
+  invFun z :=
+    ⟨fun j => z.1 j - sec.cs1 j,
+     (mldsa44_joint_transcript_simulation pub sec hKey).2 z.1 z.2,
+     ((mldsa44_joint_transcript_simulation pub sec hKey).1 (fun j => z.1 j - sec.cs1 j)).1.mpr (by
+       have hEq : mldsaRealZ sec (fun j => z.1 j - sec.cs1 j) = z.1 := by
+         funext j
+         simp only [mldsaRealZ]
+         omega
+       rw [hEq]
+       exact z.2)⟩
+  left_inv y := by
+    apply Subtype.ext
+    funext j
+    show y.1 j + sec.cs1 j - sec.cs1 j = y.1 j
+    omega
+  right_inv z := by
+    apply Subtype.ext
+    funext j
+    show z.1 j - sec.cs1 j + sec.cs1 j = z.1 j
+    omega
+
+/-- The bijection carries the whole real transcript `(w₁, z)` to the simulated one. -/
+theorem mldsa44JointTranscriptEquiv_preserves_transcript {m kk : Nat}
+    (pub : MldsaPublicInstance m kk) (sec : MldsaSecretShift m kk)
+    (hKey : MldsaKeyRelation pub sec)
+    (y : { y : Fin m → Int //
+      (∀ j, inMldsaMaskInterval mldsa44Gamma1 (y j)) ∧ mldsa44RealAccept pub sec y }) :
+    ((mldsa44JointTranscriptEquiv pub sec hKey).toFun y).1 = mldsaRealZ sec y.1 ∧
+    (∀ i, mldsa44SimW1 pub ((mldsa44JointTranscriptEquiv pub sec hKey).toFun y).1 i =
+      mldsa44RealW1 pub y.1 i) :=
+  ⟨rfl, fun i => (((mldsa44_joint_transcript_simulation pub sec hKey).1 y.1).2 y.2.2 i).symm⟩
+
+/-- **Secret Independence Of The Accepted Joint Transcript
+    (`mldsa44_joint_transcript_secret_independent`)**: two secrets consistent with the SAME public
+    data produce the same accepted transcripts. Every mask `y` accepted under `sec` is matched by
+    the mask `y' = y + c·s₁ - c·s₁'` accepted under `sec'`, with identical `z` and identical `w₁`. -/
+theorem mldsa44_joint_transcript_secret_independent {m kk : Nat}
+    (pub : MldsaPublicInstance m kk) (sec sec' : MldsaSecretShift m kk)
+    (hKey : MldsaKeyRelation pub sec) (hKey' : MldsaKeyRelation pub sec')
+    (y : Fin m → Int) (hAcc : mldsa44RealAccept pub sec y) :
+    (∀ j, inMldsaMaskInterval mldsa44Gamma1 (y j + sec.cs1 j - sec'.cs1 j)) ∧
+    mldsa44RealAccept pub sec' (fun j => y j + sec.cs1 j - sec'.cs1 j) ∧
+    mldsaRealZ sec' (fun j => y j + sec.cs1 j - sec'.cs1 j) = mldsaRealZ sec y ∧
+    (∀ i, mldsa44RealW1 pub (fun j => y j + sec.cs1 j - sec'.cs1 j) i = mldsa44RealW1 pub y i) := by
+  obtain ⟨hFwd, _⟩ := mldsa44_joint_transcript_simulation pub sec hKey
+  obtain ⟨hFwd', hBack'⟩ := mldsa44_joint_transcript_simulation pub sec' hKey'
+  have hZ : mldsaRealZ sec' (fun j => y j + sec.cs1 j - sec'.cs1 j) = mldsaRealZ sec y := by
+    funext j
+    simp only [mldsaRealZ]
+    omega
+  have hSim : mldsa44SimAccept pub (mldsaRealZ sec y) := (hFwd y).1.mp hAcc
+  have hAcc' : mldsa44RealAccept pub sec' (fun j => y j + sec.cs1 j - sec'.cs1 j) :=
+    (hFwd' _).1.mpr (by rw [hZ]; exact hSim)
+  refine ⟨fun j => hBack' (mldsaRealZ sec y) hSim j, hAcc', hZ, fun i => ?_⟩
+  rw [(hFwd' _).2 hAcc' i, hZ, (hFwd y).2 hAcc i]
+
+/-! ### `γ₂ - β` Margin `#tooth`: A Bare `γ₂` Bound Leaks `s₂` Through `HighBits` -/
+
+/-- Broken joint acceptance that keeps the `z` check but tests the low bits against `γ₂` instead
+    of `γ₂ - β`. -/
+def mldsa44RealAcceptNoMargin {m kk : Nat} (pub : MldsaPublicInstance m kk)
+    (sec : MldsaSecretShift m kk) (y : Fin m → Int) : Prop :=
+  (∀ j, inMldsaSafeBox mldsa44Gamma1 mldsa44Beta (y j + sec.cs1 j)) ∧
+  (∀ i, mldsa44LowBitsOkNoMargin (mldsa44LowBits (intDot m (pub.A i) y - sec.cs2 i)))
+
+private def toothMldsaPub : MldsaPublicInstance 1 1 where
+  A := fun _ _ => 1
+  ct := fun _ => 78
+
+private def toothMldsaSecA : MldsaSecretShift 1 1 where
+  cs1 := fun _ => 0
+  cs2 := fun _ => 78
+
+private def toothMldsaSecB : MldsaSecretShift 1 1 where
+  cs1 := fun _ => 78
+  cs2 := fun _ => 0
+
+private theorem toothMldsa_keyA : MldsaKeyRelation toothMldsaPub toothMldsaSecA :=
+  ⟨fun _ => (by decide : inMldsaSecretBound mldsa44Beta 0),
+   fun _ => (by decide : inMldsaSecretBound mldsa44Beta 78),
+   fun _ => (by decide :
+     (78 : Int) % 8380417 = (intDot 1 (fun _ => 1) (fun _ => 0) + 78) % 8380417)⟩
+
+private theorem toothMldsa_keyB : MldsaKeyRelation toothMldsaPub toothMldsaSecB :=
+  ⟨fun _ => (by decide : inMldsaSecretBound mldsa44Beta 78),
+   fun _ => (by decide : inMldsaSecretBound mldsa44Beta 0),
+   fun _ => (by decide :
+     (78 : Int) % 8380417 = (intDot 1 (fun _ => 1) (fun _ => 78) + 0) % 8380417)⟩
+
+private theorem toothMldsa_acceptA :
+    mldsa44RealAcceptNoMargin toothMldsaPub toothMldsaSecA (fun _ => 95309) :=
+  ⟨fun _ => (by decide : inMldsaSafeBox mldsa44Gamma1 mldsa44Beta (95309 + 0)),
+   fun _ => (by decide : mldsa44LowBitsOkNoMargin
+     (mldsa44LowBits (intDot 1 (fun _ => 1) (fun _ => 95309) - 78)))⟩
+
+private theorem toothMldsa_acceptB :
+    mldsa44RealAcceptNoMargin toothMldsaPub toothMldsaSecB (fun _ => 95231) :=
+  ⟨fun _ => (by decide : inMldsaSafeBox mldsa44Gamma1 mldsa44Beta (95231 + 78)),
+   fun _ => (by decide : mldsa44LowBitsOkNoMargin
+     (mldsa44LowBits (intDot 1 (fun _ => 1) (fun _ => 95231) - 0)))⟩
+
+/-- **`#tooth` Witness (`tooth_mldsa44_low_bits_margin_omitted_leaks_s2`)**:
+    with `A = (1)` and `c·t = 78`, the secrets `(c·s₁, c·s₂) = (0, 78)` and `(78, 0)` share the
+    public key data. For the public response `z = 95309` both pass the `z` check and the
+    margin-free low-bits check (`LowBits(A·z - c·t) = 95231 < γ₂`), yet the published commitment
+    is `HighBits(A·y) = 1` under the first secret and `0` under the second: `r₀ = 95231` sits
+    within `β` of the carry boundary, so adding `c·s₂ = 78` flips `HighBits`. The transcript
+    `(w₁, z)` then distinguishes the two secrets, and `w₁` is no longer a function of public data. -/
+theorem tooth_mldsa44_low_bits_margin_omitted_leaks_s2 :
+    ∃ (pub : MldsaPublicInstance 1 1) (sec sec' : MldsaSecretShift 1 1) (y y' : Fin 1 → Int),
+      MldsaKeyRelation pub sec ∧ MldsaKeyRelation pub sec' ∧
+      (∀ j, inMldsaMaskInterval mldsa44Gamma1 (y j)) ∧
+      (∀ j, inMldsaMaskInterval mldsa44Gamma1 (y' j)) ∧
+      mldsa44RealAcceptNoMargin pub sec y ∧ mldsa44RealAcceptNoMargin pub sec' y' ∧
+      (∀ j, mldsaRealZ sec y j = mldsaRealZ sec' y' j) ∧
+      mldsa44RealW1 pub y ⟨0, Nat.zero_lt_succ 0⟩ ≠ mldsa44RealW1 pub y' ⟨0, Nat.zero_lt_succ 0⟩ :=
+  ⟨toothMldsaPub, toothMldsaSecA, toothMldsaSecB, (fun _ => 95309), (fun _ => 95231),
+    toothMldsa_keyA, toothMldsa_keyB,
+    (fun _ => (by decide : inMldsaMaskInterval mldsa44Gamma1 95309)),
+    (fun _ => (by decide : inMldsaMaskInterval mldsa44Gamma1 95231)),
+    toothMldsa_acceptA, toothMldsa_acceptB,
+    (fun _ => (by decide : (95309 : Int) + 0 = 95231 + 78)), by decide⟩
+
+/-- Reachable inhabitedness witness for the joint theorem: a real accepted attempt whose hidden
+    value `A·y - c·s₂ = -73` lies in the `r₁ = 0` wrap-around corner of `Decompose`. -/
+theorem witness_mldsa44_joint_accept_inhabited :
+    ∃ (pub : MldsaPublicInstance 1 1) (sec : MldsaSecretShift 1 1) (y : Fin 1 → Int),
+      MldsaKeyRelation pub sec ∧
+      (∀ j, inMldsaMaskInterval mldsa44Gamma1 (y j)) ∧
+      mldsa44RealAccept pub sec y :=
+  ⟨toothMldsaPub, toothMldsaSecA, (fun _ => 5), toothMldsa_keyA,
+    (fun _ => (by decide : inMldsaMaskInterval mldsa44Gamma1 5)),
+    ⟨fun _ => (by decide : inMldsaSafeBox mldsa44Gamma1 mldsa44Beta (5 + 0)),
+     fun _ => (by decide : mldsa44LowBitsOk
+       (mldsa44LowBits (intDot 1 (fun _ => 1) (fun _ => 5) - 78)))⟩⟩
+
+
+/-! ## §3b. The Cyclotomic Ring `ℤ_q[X]/(X^n + 1)`, Challenge Ball, Rejected Attempts & ROM Reprogramming
+
+§3 takes `c·s₁`, `c·s₂`, `c·t` as given integer vectors. This section derives them: polynomial
+multiplication in `ℤ[X]/(X^n + 1)` (coefficients reduced mod `q = 8380417` only where FIPS 204
+compares them), the bound `‖c·s‖∞ ≤ ‖c‖₁ · ‖s‖∞` (so `τ = 39`, `η = 2` give `β = 78`), the key
+relation `A·(y + c·s₁) - c·t ≡ A·y - c·s₂` from `t ≡ A·s₁ + s₂`, the transcript of a REJECTED
+attempt (which publishes `w₁`), and the random-oracle reprogramming bound for `c = H(μ, w₁)`. -/
+
+theorem intDot_congr {n : Nat} (a : Fin n → Int) {u v : Fin n → Int} (h : ∀ j, u j = v j) :
+    intDot n a u = intDot n a v :=
+  congrArg (intDot n a) (funext h)
+
+theorem intDot_zero : ∀ (n : Nat) (a : Fin n → Int), intDot n a (fun _ => 0) = 0
+  | 0, _ => rfl
+  | n + 1, a => by
+    have ih := intDot_zero n (fun j => a ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+    simp only [intDot]
+    rw [ih, Int.mul_zero, Int.add_zero]
+
+theorem intDot_mul_const : ∀ (n : Nat) (a : Fin n → Int) (x : Int) (u : Fin n → Int),
+    intDot n a (fun j => x * u j) = x * intDot n a u
+  | 0, _, _, _ => by simp [intDot]
+  | n + 1, a, x, u => by
+    have ih := intDot_mul_const n (fun j => a ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩) x
+      (fun j => u ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+    simp only [intDot]
+    rw [ih, Int.mul_add, Int.mul_left_comm]
+
+theorem intDot_neg (n : Nat) (a u : Fin n → Int) :
+    intDot n a (fun j => - u j) = - intDot n a u := by
+  have hc : intDot n a (fun j => - u j) = intDot n a (fun j => -1 * u j) :=
+    intDot_congr a (fun j => (Int.neg_one_mul (u j)).symm)
+  rw [hc, intDot_mul_const, Int.neg_one_mul]
+
+theorem intDot_sub (n : Nat) (a u v : Fin n → Int) :
+    intDot n a (fun j => u j - v j) = intDot n a u - intDot n a v := by
+  have hc : intDot n a (fun j => u j - v j) = intDot n a (fun j => u j + - v j) :=
+    intDot_congr a (fun j => Int.sub_eq_add_neg)
+  rw [hc, intDot_add n a u (fun j => - v j), intDot_neg, ← Int.sub_eq_add_neg]
+
+/-- Exchange of two finite integer sums. -/
+theorem intDot_swap : ∀ (n m : Nat) (a : Fin n → Int) (c : Fin m → Int)
+    (F : Fin m → Fin n → Int),
+    intDot n a (fun j => intDot m c (fun i => F i j)) =
+      intDot m c (fun i => intDot n a (fun j => F i j))
+  | 0, m, _, c, _ => by
+    simp only [intDot]
+    exact (intDot_zero m c).symm
+  | n + 1, m, a, c, F => by
+    have ih := intDot_swap n m (fun j => a ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩) c
+      (fun i j => F i ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+    have h1 := intDot_add m c
+      (fun i => a ⟨0, Nat.zero_lt_succ n⟩ * F i ⟨0, Nat.zero_lt_succ n⟩)
+      (fun i => intDot n (fun j => a ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+        (fun j => F i ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩))
+    have h2 := intDot_mul_const m c (a ⟨0, Nat.zero_lt_succ n⟩)
+      (fun i => F i ⟨0, Nat.zero_lt_succ n⟩)
+    simp only [intDot]
+    rw [h1, h2, ih]
+
+/-- `‖a‖₁`. -/
+def l1Norm (n : Nat) (a : Fin n → Int) : Nat := finSum n (fun j => (a j).natAbs)
+
+theorem intDot_natAbs_le : ∀ (n : Nat) (a u : Fin n → Int) (B : Nat),
+    (∀ j, (u j).natAbs ≤ B) → (intDot n a u).natAbs ≤ l1Norm n a * B
+  | 0, _, _, _, _ => by simp [intDot]
+  | n + 1, a, u, B, h => by
+    have ih := intDot_natAbs_le n (fun j => a ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+      (fun j => u ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩) B (fun j => h _)
+    have h0 := h ⟨0, Nat.zero_lt_succ n⟩
+    have hL : l1Norm (n + 1) a = (a ⟨0, Nat.zero_lt_succ n⟩).natAbs +
+        l1Norm n (fun j => a ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩) := rfl
+    rw [hL, Nat.add_mul]
+    simp only [intDot]
+    refine Nat.le_trans (Int.natAbs_add_le _ _) (Nat.add_le_add ?_ ih)
+    rw [Int.natAbs_mul]
+    exact Nat.mul_le_mul_left _ h0
+
+theorem intDot_dvd : ∀ (n : Nat) (a u : Fin n → Int) (q : Int),
+    (∀ j, q ∣ u j) → q ∣ intDot n a u
+  | 0, _, _, q, _ => by simp [intDot]
+  | n + 1, a, u, q, h => by
+    simp only [intDot]
+    exact Int.dvd_add (Int.dvd_trans (h _) (Int.dvd_mul_left _ _))
+      (intDot_dvd n _ _ q (fun j => h _))
+
+theorem emod_eq_of_dvd_sub {a b q : Int} (h : q ∣ a - b) : a % q = b % q := by
+  obtain ⟨m, hm⟩ := h
+  have hab : a = b + q * m := by omega
+  rw [hab]
+  exact Int.add_mul_emod_self_left b q m
+
+/-! ### Multiplication in `ℤ[X]/(X^n + 1)` -/
+
+/-- Multiplication by `X` in `ℤ[X]/(X^n + 1)`: the negacyclic shift (`X · X^(n-1) = -1`). -/
+def negShift {n : Nat} (s : Fin n → Int) : Fin n → Int :=
+  fun k =>
+    if k.val = 0 then - s ⟨n - 1, by have := k.isLt; omega⟩
+    else s ⟨k.val - 1, by have := k.isLt; omega⟩
+
+/-- Multiplication by `X^i`. -/
+def shiftPow {n : Nat} : Nat → (Fin n → Int) → Fin n → Int
+  | 0, s => s
+  | i + 1, s => negShift (shiftPow i s)
+
+/-- The product `c · s = Σ_i c_i · (X^i · s)` in `ℤ[X]/(X^n + 1)`. -/
+def polyMul {n : Nat} (c s : Fin n → Int) : Fin n → Int :=
+  fun k => intDot n c (fun i => shiftPow i.val s k)
+
+/-- The constant polynomial `1`. -/
+def polyOne {n : Nat} : Fin n → Int := fun k => if k.val = 0 then 1 else 0
+
+theorem negShift_add {n : Nat} (u v : Fin n → Int) :
+    negShift (fun k => u k + v k) = fun k => negShift u k + negShift v k := by
+  funext k
+  by_cases h : k.val = 0
+  · simp only [negShift, h, ↓reduceIte]; omega
+  · simp only [negShift, h, ↓reduceIte]
+
+theorem negShift_smul {n : Nat} (x : Int) (u : Fin n → Int) :
+    negShift (fun k => x * u k) = fun k => x * negShift u k := by
+  funext k
+  by_cases h : k.val = 0
+  · simp only [negShift, h, ↓reduceIte, Int.mul_neg]
+  · simp only [negShift, h, ↓reduceIte]
+
+theorem negShift_zero {n : Nat} : negShift (fun _ : Fin n => (0 : Int)) = fun _ => 0 := by
+  funext k
+  by_cases h : k.val = 0
+  · simp only [negShift, h, ↓reduceIte, Int.neg_zero]
+  · simp only [negShift, h, ↓reduceIte]
+
+theorem shiftPow_add {n : Nat} (i : Nat) (u v : Fin n → Int) :
+    shiftPow i (fun k => u k + v k) = fun k => shiftPow i u k + shiftPow i v k := by
+  induction i with
+  | zero => rfl
+  | succ i ih =>
+    show negShift (shiftPow i (fun k => u k + v k)) =
+      fun k => negShift (shiftPow i u) k + negShift (shiftPow i v) k
+    rw [ih, negShift_add]
+
+theorem shiftPow_smul {n : Nat} (i : Nat) (x : Int) (u : Fin n → Int) :
+    shiftPow i (fun k => x * u k) = fun k => x * shiftPow i u k := by
+  induction i with
+  | zero => rfl
+  | succ i ih =>
+    show negShift (shiftPow i (fun k => x * u k)) = fun k => x * negShift (shiftPow i u) k
+    rw [ih, negShift_smul]
+
+theorem shiftPow_zero {n : Nat} (i : Nat) :
+    shiftPow i (fun _ : Fin n => (0 : Int)) = fun _ => 0 := by
+  induction i with
+  | zero => rfl
+  | succ i ih =>
+    show negShift (shiftPow i (fun _ : Fin n => (0 : Int))) = fun _ => 0
+    rw [ih, negShift_zero]
+
+theorem shiftPow_negShift {n : Nat} (i : Nat) (s : Fin n → Int) :
+    shiftPow i (negShift s) = negShift (shiftPow i s) := by
+  induction i with
+  | zero => rfl
+  | succ i ih =>
+    show negShift (shiftPow i (negShift s)) = negShift (negShift (shiftPow i s))
+    rw [ih]
+
+theorem shiftPow_comm {n : Nat} (i j : Nat) (s : Fin n → Int) :
+    shiftPow i (shiftPow j s) = shiftPow j (shiftPow i s) := by
+  induction i with
+  | zero => rfl
+  | succ i ih =>
+    show negShift (shiftPow i (shiftPow j s)) = shiftPow j (negShift (shiftPow i s))
+    rw [ih, shiftPow_negShift]
+
+theorem negShift_polyMul {n : Nat} (c s : Fin n → Int) :
+    negShift (polyMul c s) = polyMul c (negShift s) := by
+  funext k
+  have hR : polyMul c (negShift s) k = intDot n c (fun i => negShift (shiftPow i.val s) k) :=
+    intDot_congr c (fun i => congrFun (shiftPow_negShift i.val s) k)
+  rw [hR]
+  by_cases h : k.val = 0
+  · simp only [negShift, h, ↓reduceIte, polyMul]
+    exact (intDot_neg n c _).symm
+  · simp only [negShift, h, ↓reduceIte, polyMul]
+
+theorem shiftPow_polyMul {n : Nat} (j : Nat) (c s : Fin n → Int) :
+    shiftPow j (polyMul c s) = polyMul c (shiftPow j s) := by
+  induction j with
+  | zero => rfl
+  | succ j ih =>
+    show negShift (shiftPow j (polyMul c s)) = polyMul c (negShift (shiftPow j s))
+    rw [ih, negShift_polyMul]
+
+theorem polyMul_add_right {n : Nat} (c u v : Fin n → Int) :
+    polyMul c (fun k => u k + v k) = fun k => polyMul c u k + polyMul c v k := by
+  funext k
+  exact (intDot_congr c (fun i => congrFun (shiftPow_add i.val u v) k)).trans
+    (intDot_add n c _ _)
+
+theorem polyMul_smul_right {n : Nat} (c : Fin n → Int) (x : Int) (u : Fin n → Int) :
+    polyMul c (fun k => x * u k) = fun k => x * polyMul c u k := by
+  funext k
+  exact (intDot_congr c (fun i => congrFun (shiftPow_smul i.val x u) k)).trans
+    (intDot_mul_const n c x _)
+
+theorem polyMul_zero_right {n : Nat} (c : Fin n → Int) :
+    polyMul c (fun _ => 0) = fun _ => 0 := by
+  funext k
+  exact (intDot_congr c (fun i => congrFun (shiftPow_zero i.val) k)).trans (intDot_zero n c)
+
+/-- `c · (Σ_j a_j · F_j) = Σ_j a_j · (c · F_j)`. -/
+theorem polyMul_intDot_right {n : Nat} (c : Fin n → Int) : ∀ (m : Nat) (a : Fin m → Int)
+    (F : Fin m → Fin n → Int),
+    polyMul c (fun k => intDot m a (fun j => F j k)) =
+      fun k => intDot m a (fun j => polyMul c (F j) k)
+  | 0, _, _ => polyMul_zero_right c
+  | m + 1, a, F => by
+    have ih := polyMul_intDot_right c m (fun j => a ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+      (fun j => F ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+    have h1 := polyMul_add_right c
+      (fun k => a ⟨0, Nat.zero_lt_succ m⟩ * F ⟨0, Nat.zero_lt_succ m⟩ k)
+      (fun k => intDot m (fun j => a ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+        (fun j => F ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩ k))
+    have h2 := polyMul_smul_right c (a ⟨0, Nat.zero_lt_succ m⟩) (F ⟨0, Nat.zero_lt_succ m⟩)
+    simp only [intDot]
+    rw [h1, h2, ih]
+
+/-- **Multiplications commute as operators**: `a · (c · s) = c · (a · s)`. -/
+theorem polyMul_comm_action {n : Nat} (a c s : Fin n → Int) :
+    polyMul a (polyMul c s) = polyMul c (polyMul a s) := by
+  funext k
+  have hL : polyMul a (polyMul c s) k =
+      intDot n a (fun j => intDot n c (fun i => shiftPow i.val (shiftPow j.val s) k)) :=
+    intDot_congr a (fun j => congrFun (shiftPow_polyMul j.val c s) k)
+  have hR : polyMul c (polyMul a s) k =
+      intDot n c (fun i => intDot n a (fun j => shiftPow i.val (shiftPow j.val s) k)) :=
+    intDot_congr c (fun i =>
+      (congrFun (shiftPow_polyMul i.val a s) k).trans
+        (intDot_congr a (fun j => congrFun (shiftPow_comm j.val i.val s) k)))
+  rw [hL, hR]
+  exact intDot_swap n n a c (fun i j => shiftPow i.val (shiftPow j.val s) k)
+
+theorem intDot_delta : ∀ (n : Nat) (c : Fin n → Int) (k : Fin n),
+    intDot n c (fun i => if k.val = i.val then 1 else 0) = c k
+  | 0, _, k => Fin.elim0 k
+  | n + 1, c, ⟨0, hk⟩ => by
+    have hz : intDot n (fun j => c ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+        (fun j => if (0 : Nat) = j.1 + 1 then (1 : Int) else 0) = 0 :=
+      (intDot_congr _ (fun j => ite_eq_right (Nat.succ_ne_zero j.1).symm)).trans (intDot_zero n _)
+    show c ⟨0, Nat.zero_lt_succ n⟩ * (if (0 : Nat) = 0 then 1 else 0) +
+      intDot n (fun j => c ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+        (fun j => if (0 : Nat) = j.1 + 1 then (1 : Int) else 0) = c ⟨0, hk⟩
+    rw [hz, ite_eq_left rfl, Int.mul_one, Int.add_zero]
+  | n + 1, c, ⟨k + 1, hk⟩ => by
+    have ih : intDot n (fun j => c ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+        (fun j => if k = j.1 then (1 : Int) else 0) = c ⟨k + 1, hk⟩ :=
+      intDot_delta n (fun j => c ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩) ⟨k, Nat.lt_of_succ_lt_succ hk⟩
+    have hc : intDot n (fun j => c ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+        (fun j => if k + 1 = j.1 + 1 then (1 : Int) else 0) =
+        intDot n (fun j => c ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+        (fun j => if k = j.1 then (1 : Int) else 0) :=
+      intDot_congr _ (fun j => by
+        by_cases h : k = j.1
+        · rw [ite_eq_left h, ite_eq_left (congrArg (· + 1) h)]
+        · rw [ite_eq_right h, ite_eq_right (fun e => h (Nat.succ.inj e))])
+    show c ⟨0, Nat.zero_lt_succ n⟩ * (if k + 1 = 0 then 1 else 0) +
+      intDot n (fun j => c ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+        (fun j => if k + 1 = j.1 + 1 then (1 : Int) else 0) = c ⟨k + 1, hk⟩
+    rw [hc, ih, ite_eq_right (Nat.succ_ne_zero k), Int.mul_zero, Int.zero_add]
+
+theorem shiftPow_one_apply {n : Nat} : ∀ (i : Nat), i < n → ∀ k : Fin n,
+    shiftPow i (polyOne : Fin n → Int) k = if k.val = i then 1 else 0
+  | 0, _, _ => rfl
+  | i + 1, hi, k => by
+    have ih := shiftPow_one_apply i (Nat.lt_of_succ_lt hi)
+    show negShift (shiftPow i polyOne) k = _
+    by_cases hk : k.val = 0
+    · simp only [negShift, hk, ↓reduceIte]
+      rw [ih]
+      have h1 : ¬ (n - 1 = i) := by omega
+      have h2 : ¬ (0 = i + 1) := by omega
+      simp only [h1, h2, ↓reduceIte, Int.neg_zero]
+    · simp only [negShift, hk, ↓reduceIte]
+      rw [ih]
+      by_cases h : k.val = i + 1
+      · have h2 : k.val - 1 = i := by omega
+        simp only [h2, ↓reduceIte]
+        rw [ite_eq_left h]
+      · have h2 : ¬ (k.val - 1 = i) := by omega
+        simp only [h2, h, ↓reduceIte]
+
+/-- `c · 1 = c`. -/
+theorem polyMul_one {n : Nat} (c : Fin n → Int) : polyMul c polyOne = c := by
+  funext k
+  exact (intDot_congr c (fun i => shiftPow_one_apply i.val i.isLt k)).trans (intDot_delta n c k)
+
+/-- The ring is commutative. -/
+theorem polyMul_comm {n : Nat} (a c : Fin n → Int) : polyMul a c = polyMul c a := by
+  have h := polyMul_comm_action a c polyOne
+  rw [polyMul_one, polyMul_one] at h
+  exact h
+
+/-- The ring is associative. -/
+theorem polyMul_assoc {n : Nat} (a b c : Fin n → Int) :
+    polyMul (polyMul a b) c = polyMul a (polyMul b c) := by
+  rw [polyMul_comm (polyMul a b) c, polyMul_comm_action c a b, polyMul_comm c b]
+
+/-- Coefficientwise bound `‖s‖∞ ≤ B`. -/
+def PolyBound {n : Nat} (B : Nat) (s : Fin n → Int) : Prop := ∀ k, (s k).natAbs ≤ B
+
+theorem negShift_bound {n : Nat} {B : Nat} {s : Fin n → Int} (h : PolyBound B s) :
+    PolyBound B (negShift s) := by
+  intro k
+  by_cases hk : k.val = 0
+  · simp only [negShift, hk, ↓reduceIte, Int.natAbs_neg]
+    exact h _
+  · simp only [negShift, hk, ↓reduceIte]
+    exact h _
+
+theorem shiftPow_bound {n : Nat} {B : Nat} {s : Fin n → Int} (h : PolyBound B s) :
+    ∀ i, PolyBound B (shiftPow i s)
+  | 0 => h
+  | i + 1 => negShift_bound (shiftPow_bound h i)
+
+/-- **`‖c · s‖∞ ≤ ‖c‖₁ · ‖s‖∞`** in `ℤ[X]/(X^n + 1)`. -/
+theorem polyMul_bound {n : Nat} {B : Nat} (c : Fin n → Int) {s : Fin n → Int}
+    (h : PolyBound B s) : PolyBound (l1Norm n c * B) (polyMul c s) :=
+  fun k => intDot_natAbs_le n c _ B (fun i => shiftPow_bound h i.val k)
+
+/-- The FIPS 204 challenge set `B_τ`: coefficients in `{-1, 0, 1}`, exactly `τ` of them non-zero
+    (equivalently `‖c‖∞ ≤ 1` and `‖c‖₁ = τ`). This is the range of `SampleInBall`. -/
+def InChallengeBall {n : Nat} (τ : Nat) (c : Fin n → Int) : Prop :=
+  (∀ i, c i = -1 ∨ c i = 0 ∨ c i = 1) ∧ l1Norm n c = τ
+
+/-- **`β = τ · η` is a theorem (`mldsa44_challenge_times_secret_le_beta`)**: for a challenge in
+    `B_39` and a secret polynomial with `‖s‖∞ ≤ η = 2`, every coefficient of `c · s` in
+    `ℤ[X]/(X^256 + 1)` has absolute value at most `78`. -/
+theorem mldsa44_challenge_times_secret_le_beta {c s : Fin 256 → Int}
+    (hc : InChallengeBall 39 c) (hs : PolyBound 2 s) : PolyBound 78 (polyMul c s) := by
+  intro k
+  have h := polyMul_bound c hs k
+  rw [hc.2] at h
+  exact h
+
+theorem negShift_sub_dvd {n : Nat} {q : Int} {u v : Fin n → Int}
+    (h : ∀ k, q ∣ u k - v k) : ∀ k, q ∣ negShift u k - negShift v k := by
+  intro k
+  by_cases hk : k.val = 0
+  · simp only [negShift, hk, ↓reduceIte]
+    have h0 := h ⟨n - 1, by have := k.isLt; omega⟩
+    rw [show - u ⟨n - 1, by have := k.isLt; omega⟩ - - v ⟨n - 1, by have := k.isLt; omega⟩ =
+      -(u ⟨n - 1, by have := k.isLt; omega⟩ - v ⟨n - 1, by have := k.isLt; omega⟩) by omega]
+    exact Int.dvd_neg.mpr h0
+  · simp only [negShift, hk, ↓reduceIte]
+    exact h _
+
+theorem shiftPow_sub_dvd {n : Nat} {q : Int} {u v : Fin n → Int}
+    (h : ∀ k, q ∣ u k - v k) : ∀ i k, q ∣ shiftPow i u k - shiftPow i v k
+  | 0 => h
+  | i + 1 => negShift_sub_dvd (shiftPow_sub_dvd h i)
+
+/-- Multiplication respects coefficientwise congruence mod `q`: `polyMul` descends to
+    `ℤ_q[X]/(X^n + 1)`. -/
+theorem polyMul_sub_dvd {n : Nat} (c u v : Fin n → Int) (q : Int)
+    (h : ∀ k, q ∣ u k - v k) : ∀ k, q ∣ polyMul c u k - polyMul c v k := by
+  intro k
+  have hEq : polyMul c u k - polyMul c v k =
+      intDot n c (fun i => shiftPow i.val u k - shiftPow i.val v k) :=
+    (intDot_sub n c _ _).symm
+  rw [hEq]
+  exact intDot_dvd n c _ q (fun i => shiftPow_sub_dvd h i.val k)
+
+/-- `A · y` for a `k × l` matrix of ring elements. -/
+def ringMatVec {k l n : Nat} (A : Fin k → Fin l → Fin n → Int) (y : Fin l → Fin n → Int) :
+    Fin k → Fin n → Int :=
+  fun r m => intDot l (fun _ => 1) (fun j => polyMul (A r j) (y j) m)
+
+theorem ringMatVec_add {k l n : Nat} (A : Fin k → Fin l → Fin n → Int)
+    (u v : Fin l → Fin n → Int) (r : Fin k) (m : Fin n) :
+    ringMatVec A (fun j i => u j i + v j i) r m = ringMatVec A u r m + ringMatVec A v r m :=
+  (intDot_congr _ (fun j => congrFun (polyMul_add_right (A r j) (u j) (v j)) m)).trans
+    (intDot_add l _ _ _)
+
+/-- `A · (c · s) = c · (A · s)`: the challenge commutes with the public matrix. -/
+theorem ringMatVec_challenge_comm {k l n : Nat} (A : Fin k → Fin l → Fin n → Int)
+    (c : Fin n → Int) (s : Fin l → Fin n → Int) (r : Fin k) :
+    ringMatVec A (fun j => polyMul c (s j)) r = polyMul c (ringMatVec A s r) := by
+  funext m
+  have hR := congrFun (polyMul_intDot_right c l (fun _ => 1)
+    (fun j => polyMul (A r j) (s j))) m
+  have hL : ringMatVec A (fun j => polyMul c (s j)) r m =
+      intDot l (fun _ => 1) (fun j => polyMul c (polyMul (A r j) (s j)) m) :=
+    intDot_congr _ (fun j => congrFun (polyMul_comm_action (A r j) c (s j)) m)
+  exact hL.trans hR.symm
+
+/-! ### Both Rejection Checks Over an Arbitrary `ℤ`-Linear Commitment Map -/
+
+/-- Public data of one signing attempt: a `ℤ`-linear commitment map `W` (for ML-DSA, `y ↦ A·y`
+    in the ring) and `ct = c·t`. `J` indexes mask coefficients, `I` commitment coefficients. -/
+structure LinCommitInstance (J I : Type) where
+  W : (J → Int) → I → Int
+  W_add : ∀ (u v : J → Int) (i : I), W (fun j => u j + v j) i = W u i + W v i
+  ct : I → Int
+
+/-- Secret-dependent shifts `c·s₁`, `c·s₂`. -/
+structure LinSecretShift (J I : Type) where
+  cs1 : J → Int
+  cs2 : I → Int
+
+def LinKeyRelation {J I : Type} (pub : LinCommitInstance J I) (sec : LinSecretShift J I) : Prop :=
+  (∀ j, inMldsaSecretBound mldsa44Beta (sec.cs1 j)) ∧
+  (∀ i, inMldsaSecretBound mldsa44Beta (sec.cs2 i)) ∧
+  (∀ i, pub.ct i % 8380417 = (pub.W sec.cs1 i + sec.cs2 i) % 8380417)
+
+def linRealZ {J I : Type} (sec : LinSecretShift J I) (y : J → Int) : J → Int :=
+  fun j => y j + sec.cs1 j
+
+def linRealW1 {J I : Type} (pub : LinCommitInstance J I) (y : J → Int) : I → Int :=
+  fun i => mldsa44HighBits (pub.W y i)
+
+def linRealAccept {J I : Type} (pub : LinCommitInstance J I) (sec : LinSecretShift J I)
+    (y : J → Int) : Prop :=
+  (∀ j, inMldsaSafeBox mldsa44Gamma1 mldsa44Beta (y j + sec.cs1 j)) ∧
+  (∀ i, mldsa44LowBitsOk (mldsa44LowBits (pub.W y i - sec.cs2 i)))
+
+def linSimW1 {J I : Type} (pub : LinCommitInstance J I) (z : J → Int) : I → Int :=
+  fun i => mldsa44HighBits (pub.W z i - pub.ct i)
+
+def linSimAccept {J I : Type} (pub : LinCommitInstance J I) (z : J → Int) : Prop :=
+  (∀ j, inMldsaSafeBox mldsa44Gamma1 mldsa44Beta (z j)) ∧
+  (∀ i, mldsa44LowBitsOk (mldsa44LowBits (pub.W z i - pub.ct i)))
+
+theorem lin_commit_shift_congr {J I : Type} (pub : LinCommitInstance J I)
+    (sec : LinSecretShift J I) (hKey : LinKeyRelation pub sec) (y : J → Int) (i : I) :
+    (pub.W (linRealZ sec y) i - pub.ct i) % 8380417 = (pub.W y i - sec.cs2 i) % 8380417 := by
+  have hK := hKey.2.2 i
+  unfold linRealZ
+  rw [pub.W_add]
+  omega
+
+/-- Joint `(w₁, z)` simulation over any linear commitment map (the statement of
+    `mldsa44_joint_transcript_simulation`, with `A·y` no longer required to be a flat matrix). -/
+theorem lin_joint_transcript_simulation {J I : Type} (pub : LinCommitInstance J I)
+    (sec : LinSecretShift J I) (hKey : LinKeyRelation pub sec) :
+    (∀ y : J → Int,
+      (linRealAccept pub sec y ↔ linSimAccept pub (linRealZ sec y)) ∧
+      (linRealAccept pub sec y → ∀ i, linRealW1 pub y i = linSimW1 pub (linRealZ sec y) i)) ∧
+    (∀ z : J → Int, linSimAccept pub z →
+      ∀ j, inMldsaMaskInterval mldsa44Gamma1 (z j - sec.cs1 j)) := by
+  have hLowEq : ∀ (y : J → Int) (i : I),
+      mldsa44LowBits (pub.W (linRealZ sec y) i - pub.ct i) =
+        mldsa44LowBits (pub.W y i - sec.cs2 i) :=
+    fun y i => mldsa44LowBits_congr (lin_commit_shift_congr pub sec hKey y i)
+  refine ⟨fun y => ⟨⟨?_, ?_⟩, ?_⟩, ?_⟩
+  · intro hReal
+    refine ⟨hReal.1, fun i => ?_⟩
+    rw [hLowEq y i]
+    exact hReal.2 i
+  · intro hSim
+    refine ⟨hSim.1, fun i => ?_⟩
+    rw [← hLowEq y i]
+    exact hSim.2 i
+  · intro hReal i
+    have hs : -78 ≤ sec.cs2 i ∧ sec.cs2 i ≤ 78 := by
+      have h := hKey.2.1 i
+      unfold inMldsaSecretBound mldsa44Beta at h
+      exact ⟨by omega, by omega⟩
+    have hInv := mldsa44_highBits_shift_invariant (pub.W y i - sec.cs2 i) (sec.cs2 i) hs
+      (hReal.2 i)
+    have hSum : pub.W y i - sec.cs2 i + sec.cs2 i = pub.W y i := by omega
+    rw [hSum] at hInv
+    unfold linRealW1 linSimW1
+    rw [hInv]
+    exact (mldsa44HighBits_congr (lin_commit_shift_congr pub sec hKey y i)).symm
+  · intro z hSim j
+    exact safeBox_sub_secret_in_maskInterval (hKey.1 j) (hSim.1 j)
+
+/-- Two secrets consistent with the same public data: an accepted mask of one maps to an accepted
+    mask of the other with the same `(w₁, z)`. -/
+theorem lin_joint_transcript_secret_independent {J I : Type} (pub : LinCommitInstance J I)
+    (sec sec' : LinSecretShift J I) (hKey : LinKeyRelation pub sec)
+    (hKey' : LinKeyRelation pub sec') (y : J → Int) (hAcc : linRealAccept pub sec y) :
+    (∀ j, inMldsaMaskInterval mldsa44Gamma1 (y j + sec.cs1 j - sec'.cs1 j)) ∧
+    linRealAccept pub sec' (fun j => y j + sec.cs1 j - sec'.cs1 j) ∧
+    linRealZ sec' (fun j => y j + sec.cs1 j - sec'.cs1 j) = linRealZ sec y ∧
+    (∀ i, linRealW1 pub (fun j => y j + sec.cs1 j - sec'.cs1 j) i = linRealW1 pub y i) := by
+  obtain ⟨hFwd, _⟩ := lin_joint_transcript_simulation pub sec hKey
+  obtain ⟨hFwd', hBack'⟩ := lin_joint_transcript_simulation pub sec' hKey'
+  have hZ : linRealZ sec' (fun j => y j + sec.cs1 j - sec'.cs1 j) = linRealZ sec y := by
+    funext j
+    simp only [linRealZ]
+    omega
+  have hSim : linSimAccept pub (linRealZ sec y) := (hFwd y).1.mp hAcc
+  have hAcc' : linRealAccept pub sec' (fun j => y j + sec.cs1 j - sec'.cs1 j) :=
+    (hFwd' _).1.mpr (by rw [hZ]; exact hSim)
+  refine ⟨fun j => hBack' (linRealZ sec y) hSim j, hAcc', hZ, fun i => ?_⟩
+  rw [(hFwd' _).2 hAcc' i, hZ, (hFwd y).2 hAcc i]
+
