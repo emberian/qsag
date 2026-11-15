@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.Rss256TwoPassProductProof — 2-Pass Masked Cross-Product & Barrier Soundness
+# Qsag.Protocol.Threshold.Rss256TwoPassProductProof — 2-Pass Masked Cross-Product & Barrier Soundness
 
 Constructive (`0 Classical.choice`, `0 sorry`) mechanization of `tau`-masked cross-product opening
 (`finalMaskedCrossCheck_complete`, `finalMaskedOpen_privacy_equiv`,
@@ -11,12 +11,12 @@ Constructive (`0 Classical.choice`, `0 sorry`) mechanization of `tau`-masked cro
 `crates/qsag-core/src/rss256.rs:45-81, 2441-2636` (`< 2^-217` at `B = 614,400, R = 6`).
 -/
 
-public import Qsag.Rss256TernaryRound
+public import Qsag.Protocol.Threshold.Rss256TernaryRound
 
-import all Qsag.BinaryTower
-import all Qsag.UcGames
-import all Qsag.MaliciousSecurity
-import all Qsag.Rss256TernaryRound
+import all Qsag.Math.BinaryTower
+import all Qsag.Oracle.UcGames
+import all Qsag.Protocol.Threshold.MaliciousSecurity
+import all Qsag.Protocol.Threshold.Rss256TernaryRound
 
 import Qsag.Tactic.AssuranceKit
 

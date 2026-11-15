@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.Rss256TernaryRound — `PassWeights` Batching & `b`-Bit Ternary Frobenius-Basis Round
+# Qsag.Protocol.Threshold.Rss256TernaryRound — `PassWeights` Batching & `b`-Bit Ternary Frobenius-Basis Round
 
 Constructive (`0 Classical.choice`, `0 sorry`) mechanization of the core algebraic components of
 `product_proof` in `crates/qsag-core/src/rss256.rs` (`lines 45-81, 868-976, 2412-2574`):
@@ -21,15 +21,15 @@ Constructive (`0 Classical.choice`, `0 sorry`) mechanization of the core algebra
    `≤ 8` per folding round).
 -/
 
-public import Qsag.Constructive
-public import Qsag.Goldilocks
-public import Qsag.BinaryTower
-public import Qsag.UcGames
-public import Qsag.MaliciousSecurity
+public import Qsag.Math.Constructive
+public import Qsag.Math.Goldilocks
+public import Qsag.Math.BinaryTower
+public import Qsag.Oracle.UcGames
+public import Qsag.Protocol.Threshold.MaliciousSecurity
 
-import all Qsag.BinaryTower
-import all Qsag.UcGames
-import all Qsag.MaliciousSecurity
+import all Qsag.Math.BinaryTower
+import all Qsag.Oracle.UcGames
+import all Qsag.Protocol.Threshold.MaliciousSecurity
 
 import Qsag.Tactic.AssuranceKit
 

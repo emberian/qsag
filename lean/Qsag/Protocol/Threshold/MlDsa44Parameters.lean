@@ -1,5 +1,5 @@
 module
-public import Qsag.Constructive
+public import Qsag.Math.Constructive
 
 public section
 namespace Qsag
