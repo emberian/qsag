@@ -5363,3 +5363,1705 @@ namespace Qsag
 
 set_option autoImplicit false
 
+/-! ## Address layout and records -/
+
+/-- How Merkle compression inputs `(lvl, node, left, right)` occupy oracle addresses.
+    Addresses that are not compression inputs decode to `none`. -/
+structure MerkleAddressLayout (cardX w : Nat) where
+  encode : Nat → Nat → BitVec w → BitVec w → Fin cardX
+  decode : Fin cardX → Option (Nat × Nat × BitVec w × BitVec w)
+  levels : Nat
+  nodes : Nat
+  decode_sound : ∀ x l n u v, decode x = some (l, n, u, v) → encode l n u v = x
+  decode_encode : ∀ l n u v, l < levels → n < nodes →
+    decode (encode l n u v) = some (l, n, u, v)
+
+/-- The tweaked compression function read through the layout. -/
+def MerkleAddressLayout.hash {cardX w : Nat} (L : MerkleAddressLayout cardX w)
+    (H : Fin cardX → BitVec w) : Nat → Nat → BitVec w → BitVec w → BitVec w :=
+  fun l n u v => H (L.encode l n u v)
+
+/-- The classical record of one measured query, if its address is a compression input. -/
+def merkleRecordOf {cardX w : Nat} (L : MerkleAddressLayout cardX w)
+    (H : Fin cardX → BitVec w) (x : Fin cardX) : Option (RecordedMerkleQuery (BitVec w)) :=
+  match L.decode x with
+  | none => none
+  | some (l, n, u, v) => some ⟨l, n, u, v, H x⟩
+
+/-- Records of a measured query log. -/
+def merkleRecords {cardX w : Nat} (L : MerkleAddressLayout cardX w)
+    (H : Fin cardX → BitVec w) (xs : List (Fin cardX)) :
+    List (RecordedMerkleQuery (BitVec w)) :=
+  xs.filterMap (merkleRecordOf L H)
+
+theorem merkleRecordOf_some {cardX w : Nat} (L : MerkleAddressLayout cardX w)
+    (H : Fin cardX → BitVec w) (x : Fin cardX) (q : RecordedMerkleQuery (BitVec w))
+    (h : merkleRecordOf L H x = some q) :
+    L.decode x = some (q.lvl, q.node, q.left, q.right) ∧ q.out = H x := by
+  unfold merkleRecordOf at h
+  cases hd : L.decode x with
+  | none => rw [hd] at h; cases h
+  | some τ =>
+    obtain ⟨l, n, u, v⟩ := τ
+    rw [hd] at h
+    have h' : some (⟨l, n, u, v, H x⟩ : RecordedMerkleQuery (BitVec w)) = some q := h
+    cases h'
+    exact ⟨rfl, rfl⟩
+
+/-- The records satisfy the classical classifier's consistency premise. It is derived from
+    the measured log and the layout, not assumed. -/
+theorem merkleRecords_consistent {cardX w : Nat} (L : MerkleAddressLayout cardX w)
+    (H : Fin cardX → BitVec w) (xs : List (Fin cardX)) :
+    ∀ q ∈ merkleRecords L H xs, merkleQueryConsistent (L.hash H) q := by
+  intro q hq
+  obtain ⟨x, _, hx⟩ := List.mem_filterMap.mp hq
+  obtain ⟨hDec, hOut⟩ := merkleRecordOf_some L H x q hx
+  show H (L.encode q.lvl q.node q.left q.right) = q.out
+  rw [L.decode_sound x _ _ _ _ hDec, hOut]
+
+private theorem listHasElem_false_cons {α : Type} [DecidableEq α] {x y : α} {ys : List α}
+    (h : listHasElem x (y :: ys) = false) : y ≠ x ∧ listHasElem x ys = false := by
+  refine ⟨fun he => Bool.noConfusion (h.symm.trans
+    ((listHasElem_eq_true_iff x (y :: ys)).mpr (he ▸ .head ys))), ?_⟩
+  cases hc : listHasElem x ys
+  · rfl
+  · exact Bool.noConfusion (h.symm.trans ((listHasElem_eq_true_iff x (y :: ys)).mpr
+      (.tail y ((listHasElem_eq_true_iff x ys).mp hc))))
+
+private theorem not_mem_of_listHasElem_false {α : Type} [DecidableEq α] {x : α} {ys : List α}
+    (h : listHasElem x ys = false) : x ∉ ys :=
+  fun hm => Bool.noConfusion (h.symm.trans ((listHasElem_eq_true_iff x ys).mpr hm))
+
+/-- Records do not change when the oracle is reprogrammed at an unmeasured address. -/
+theorem merkleRecords_reprogram_of_fresh {cardX w : Nat} (L : MerkleAddressLayout cardX w)
+    (H : Fin cardX → BitVec w) (a : Fin cardX) (ch : BitVec w) :
+    ∀ (xs : List (Fin cardX)), listHasElem a xs = false →
+      merkleRecords L (reprogramOracle H a ch) xs = merkleRecords L H xs
+  | [], _ => rfl
+  | y :: ys, h => by
+    obtain ⟨hya, hTail⟩ := listHasElem_false_cons h
+    have hRec : merkleRecordOf L (reprogramOracle H a ch) y = merkleRecordOf L H y := by
+      unfold merkleRecordOf
+      rw [reprogramOracle_of_ne H a ch y hya]
+    have ih := merkleRecords_reprogram_of_fresh L H a ch ys hTail
+    unfold merkleRecords at ih ⊢
+    rw [List.filterMap_cons, List.filterMap_cons, hRec, ih]
+
+/-! ## The verifier's evaluation addresses -/
+
+/-- Oracle addresses evaluated by `merkleRootFromPath` through the layout, leaf side first. -/
+def merklePathPoints {cardX w : Nat} (L : MerkleAddressLayout cardX w)
+    (H : Fin cardX → BitVec w) : Nat → Nat → BitVec w → List (BitVec w) → List (Fin cardX)
+  | _, _, _, [] => []
+  | lvl, idx, cur, sib :: rest =>
+    L.encode lvl (idx / 2) (if idx % 2 = 0 then cur else sib) (if idx % 2 = 0 then sib else cur) ::
+      merklePathPoints L H (lvl + 1) (idx / 2)
+        (H (L.encode lvl (idx / 2) (if idx % 2 = 0 then cur else sib)
+          (if idx % 2 = 0 then sib else cur))) rest
+
+theorem merklePathPoints_length {cardX w : Nat} (L : MerkleAddressLayout cardX w)
+    (H : Fin cardX → BitVec w) : ∀ (path : List (BitVec w)) (lvl idx : Nat) (cur : BitVec w),
+    (merklePathPoints L H lvl idx cur path).length = path.length
+  | [], _, _, _ => rfl
+  | _ :: rest, lvl, idx, _ =>
+    congrArg Nat.succ (merklePathPoints_length L H rest (lvl + 1) (idx / 2) _)
+
+/-- The root recomputation reads the oracle exactly along `merklePathPoints`. -/
+theorem merkleRootFromPath_step {cardX w : Nat} (L : MerkleAddressLayout cardX w)
+    (H : Fin cardX → BitVec w) (lvl idx : Nat) (cur sib : BitVec w) (rest : List (BitVec w)) :
+    merkleRootFromPath (L.hash H) lvl idx cur (sib :: rest) =
+      merkleRootFromPath (L.hash H) (lvl + 1) (idx / 2)
+        (H (L.encode lvl (idx / 2) (if idx % 2 = 0 then cur else sib)
+          (if idx % 2 = 0 then sib else cur))) rest := by
+  show merkleRootFromPath (L.hash H) (lvl + 1) (idx / 2)
+    (if idx % 2 = 0 then L.hash H lvl (idx / 2) cur sib else L.hash H lvl (idx / 2) sib cur)
+    rest = _
+  by_cases hp : idx % 2 = 0
+  · simp only [hp, ↓reduceIte, MerkleAddressLayout.hash]
+  · simp only [hp, ↓reduceIte, MerkleAddressLayout.hash]
+
+/-- Inside the tweak range, every evaluation address decodes to a level at or above the
+    starting level. -/
+theorem merklePathPoints_level {cardX w : Nat} (L : MerkleAddressLayout cardX w)
+    (H : Fin cardX → BitVec w) : ∀ (path : List (BitVec w)) (lvl idx : Nat) (cur : BitVec w)
+    (a : Fin cardX), lvl + path.length ≤ L.levels → idx < L.nodes →
+    a ∈ merklePathPoints L H lvl idx cur path →
+    ∃ τ, L.decode a = some τ ∧ lvl ≤ τ.1
+  | [], _, _, _, _, _, _, ha => nomatch ha
+  | sib :: rest, lvl, idx, cur, a, hLvl, hIdx, ha => by
+    have hLen : (sib :: rest).length = rest.length + 1 := rfl
+    have hl : lvl < L.levels := by omega
+    have hn : idx / 2 < L.nodes := Nat.lt_of_le_of_lt (Nat.div_le_self idx 2) hIdx
+    rcases List.mem_cons.mp ha with rfl | hTail
+    · exact ⟨_, L.decode_encode lvl (idx / 2) _ _ hl hn, Nat.le_refl lvl⟩
+    · obtain ⟨τ, hτ, hle⟩ := merklePathPoints_level L H rest (lvl + 1) (idx / 2) _ a
+        (by omega) hn hTail
+      exact ⟨τ, hτ, Nat.le_of_succ_le hle⟩
+
+/-- Inside the tweak range, the `k`-th evaluation address is not changed by reprogramming
+    the oracle at that address: it is computed from answers at strictly lower levels. -/
+theorem merklePathPoints_reprogram {cardX w : Nat} (L : MerkleAddressLayout cardX w)
+    (H : Fin cardX → BitVec w) (ch : BitVec w) :
+    ∀ (path : List (BitVec w)) (lvl idx : Nat) (cur : BitVec w) (k : Nat) (a : Fin cardX),
+    lvl + path.length ≤ L.levels → idx < L.nodes →
+    (merklePathPoints L H lvl idx cur path)[k]? = some a →
+    (merklePathPoints L (reprogramOracle H a ch) lvl idx cur path)[k]? = some a
+  | [], _, _, _, _, _, _, _, h => nomatch h
+  | _ :: _, _, _, _, 0, _, _, _, h => h
+  | sib :: rest, lvl, idx, cur, k + 1, a, hLvl, hIdx, h => by
+    have hLen : (sib :: rest).length = rest.length + 1 := rfl
+    have hl : lvl < L.levels := by omega
+    have hn : idx / 2 < L.nodes := Nat.lt_of_le_of_lt (Nat.div_le_self idx 2) hIdx
+    have hTail : (merklePathPoints L H (lvl + 1) (idx / 2)
+        (H (L.encode lvl (idx / 2) (if idx % 2 = 0 then cur else sib)
+          (if idx % 2 = 0 then sib else cur))) rest)[k]? = some a := h
+    have hMem := List.mem_of_getElem? hTail
+    obtain ⟨τ, hτ, hle⟩ := merklePathPoints_level L H rest (lvl + 1) (idx / 2) _ a
+      (by omega) hn hMem
+    have hNe : L.encode lvl (idx / 2) (if idx % 2 = 0 then cur else sib)
+        (if idx % 2 = 0 then sib else cur) ≠ a := by
+      intro he
+      have hd := L.decode_encode lvl (idx / 2) (if idx % 2 = 0 then cur else sib)
+        (if idx % 2 = 0 then sib else cur) hl hn
+      rw [he, hτ] at hd
+      have hEq : τ.1 = lvl := congrArg Prod.fst (Option.some.inj hd)
+      omega
+    show (merklePathPoints L (reprogramOracle H a ch) (lvl + 1) (idx / 2)
+        (reprogramOracle H a ch (L.encode lvl (idx / 2) (if idx % 2 = 0 then cur else sib)
+          (if idx % 2 = 0 then sib else cur))) rest)[k]? = some a
+    rw [reprogramOracle_of_ne H a ch _ hNe]
+    exact merklePathPoints_reprogram L H ch rest (lvl + 1) (idx / 2) _ k a (by omega) hn hTail
+
+/-! ## Deterministic classification of an accepted opening -/
+
+/-- Targets fixed by the measured log: the root, the children named in recorded inputs,
+    and the recorded answers. -/
+def merkleMeasuredTargets {cardX w : Nat} (L : MerkleAddressLayout cardX w)
+    (H : Fin cardX → BitVec w) (xs : List (Fin cardX)) (rt : BitVec w) : List (BitVec w) :=
+  rt :: (merkleChildTargets (merkleRecords L H xs) ++ xs.map H)
+
+theorem merkleMeasuredTargets_length {cardX w : Nat} (L : MerkleAddressLayout cardX w)
+    (H : Fin cardX → BitVec w) (xs : List (Fin cardX)) (rt : BitVec w) :
+    (merkleMeasuredTargets L H xs rt).length ≤ 3 * xs.length + 1 := by
+  have hRec : (merkleRecords L H xs).length ≤ xs.length := List.length_filterMap_le _ _
+  simp only [merkleMeasuredTargets, List.length_cons, List.length_append,
+    merkleChildTargets_length, List.length_map]
+  omega
+
+/-- An opening that verifies against the oracle either equals the opening extracted from
+    the measured records, or the verifier evaluated an unmeasured address whose answer lies
+    in the log-determined target list, or two distinct measured addresses share an answer.
+    This uses only the layout laws; the records come from the log itself. -/
+theorem merkle_measured_opening_classification {cardX w : Nat}
+    (L : MerkleAddressLayout cardX w) (H : Fin cardX → BitVec w) (xs : List (Fin cardX))
+    (rt : BitVec w) :
+    ∀ (path : List (BitVec w)) (lvl idx : Nat) (cur : BitVec w),
+    lvl + path.length ≤ L.levels → idx < L.nodes →
+    merkleRootFromPath (L.hash H) lvl idx cur path = rt →
+    extractOnlineMerkleOpening rt (merkleRecords L H xs) lvl path.length idx =
+        some (cur, path) ∨
+    (∃ a ∈ merklePathPoints L H lvl idx cur path, listHasElem a xs = false ∧
+      listHasElem (H a) (merkleMeasuredTargets L H xs rt) = true) ∨
+    freshCollision H xs = true
+  | [], lvl, idx, cur, _, _, hRoot => by
+    have hEq : cur = rt := hRoot
+    subst hEq
+    exact Or.inl rfl
+  | sib :: rest, lvl, idx, cur, hLvl, hIdx, hRoot => by
+    have hLen : (sib :: rest).length = rest.length + 1 := rfl
+    have hl : lvl < L.levels := by omega
+    have hn : idx / 2 < L.nodes := Nat.lt_of_le_of_lt (Nat.div_le_self idx 2) hIdx
+    let lCh := if idx % 2 = 0 then cur else sib
+    let rCh := if idx % 2 = 0 then sib else cur
+    let a := L.encode lvl (idx / 2) lCh rCh
+    let parent := H a
+    have hRoot' : merkleRootFromPath (L.hash H) (lvl + 1) (idx / 2) parent rest = rt :=
+      (merkleRootFromPath_step L H lvl idx cur sib rest).symm.trans hRoot
+    have hDecA : L.decode a = some (lvl, idx / 2, lCh, rCh) :=
+      L.decode_encode lvl (idx / 2) lCh rCh hl hn
+    have hParentTarget : extractOnlineMerkleOpening rt (merkleRecords L H xs) (lvl + 1)
+        rest.length (idx / 2) = some (parent, rest) →
+        listHasElem parent (merkleMeasuredTargets L H xs rt) = true := by
+      intro hExtUp
+      refine (listHasElem_eq_true_iff _ _).mpr ?_
+      cases rest with
+      | nil =>
+        have hPar : parent = rt := by
+          simp only [List.length_nil, extractOnlineMerkleOpening, Option.some.injEq,
+            Prod.mk.injEq] at hExtUp
+          exact hExtUp.1.symm
+        rw [hPar]
+        exact .head _
+      | cons s tl =>
+        exact .tail _ (List.mem_append.mpr (Or.inl
+          (extractOnlineMerkleOpening_succ_child rt (merkleRecords L H xs) (lvl + 1)
+            tl.length (idx / 2) parent _ hExtUp)))
+    rcases merkle_measured_opening_classification L H xs rt rest (lvl + 1) (idx / 2) parent
+        (by omega) hn hRoot' with hExtUp | ⟨a', ha', hFresh, hHit⟩ | hColl
+    · let pred := fun q : RecordedMerkleQuery (BitVec w) =>
+        decide (q.lvl = lvl) && decide (q.node = idx / 2) && decide (q.out = parent)
+      cases hFind : findFirst pred (merkleRecords L H xs) with
+      | none =>
+        -- the verifier's address was never measured, and its answer is a logged target
+        have hFreshA : listHasElem a xs = false := by
+          cases hc : listHasElem a xs
+          · rfl
+          · have haMem : a ∈ xs := (listHasElem_eq_true_iff a xs).mp hc
+            have hRec : merkleRecordOf L H a = some ⟨lvl, idx / 2, lCh, rCh, parent⟩ := by
+              unfold merkleRecordOf
+              rw [hDecA]
+            have hMemRec : (⟨lvl, idx / 2, lCh, rCh, parent⟩ : RecordedMerkleQuery (BitVec w)) ∈
+                merkleRecords L H xs := List.mem_filterMap.mpr ⟨a, haMem, hRec⟩
+            have hFalse := findFirst_none_spec pred hFind _ hMemRec
+            simp only [pred, decide_true, Bool.and_self, Bool.true_eq_false] at hFalse
+        exact Or.inr (Or.inl ⟨a, .head _, hFreshA, hParentTarget hExtUp⟩)
+      | some q =>
+        obtain ⟨hqMem, hqPred⟩ := findFirst_some_spec pred hFind
+        simp only [pred, Bool.and_eq_true, decide_eq_true_eq] at hqPred
+        obtain ⟨⟨hqLvl, hqNode⟩, hqOut⟩ := hqPred
+        obtain ⟨x, hxMem, hxRec⟩ := List.mem_filterMap.mp hqMem
+        obtain ⟨hDecX, hOutX⟩ := merkleRecordOf_some L H x q hxRec
+        have hAns : H x = H a := hOutX.symm.trans hqOut
+        by_cases hxa : x = a
+        · -- the recorded query is the verifier's own evaluation: the opening is extracted
+          rw [hxa, hDecA] at hDecX
+          have hTup := Option.some.inj hDecX
+          have hqL : q.left = lCh := (congrArg (fun τ => τ.2.2.1) hTup).symm
+          have hqR : q.right = rCh := (congrArg (fun τ => τ.2.2.2) hTup).symm
+          refine Or.inl ?_
+          show extractOnlineMerkleOpening rt (merkleRecords L H xs) lvl (rest.length + 1) idx =
+            some (cur, sib :: rest)
+          unfold extractOnlineMerkleOpening
+          rw [hExtUp]
+          dsimp only
+          rw [hFind]
+          dsimp only
+          by_cases hp : idx % 2 = 0
+          · dsimp only [lCh, rCh] at hqL hqR
+            simp only [hp, ↓reduceIte] at hqL hqR ⊢
+            rw [hqL, hqR]
+          · dsimp only [lCh, rCh] at hqL hqR
+            simp only [hp, ↓reduceIte] at hqL hqR ⊢
+            rw [hqL, hqR]
+        · cases hc : listHasElem a xs with
+          | true =>
+            exact Or.inr (Or.inr (freshCollision_of_distinct_equal H xs x a hxMem
+              ((listHasElem_eq_true_iff a xs).mp hc) hxa hAns))
+          | false =>
+            refine Or.inr (Or.inl ⟨a, .head _, hc, (listHasElem_eq_true_iff _ _).mpr ?_⟩)
+            refine .tail _ (List.mem_append.mpr (Or.inr ?_))
+            show H a ∈ xs.map H
+            rw [← hAns]
+            exact List.mem_map_of_mem hxMem
+    · exact Or.inr (Or.inl ⟨a', .tail _ ha', hFresh, hHit⟩)
+    · exact Or.inr (Or.inr hColl)
+
+/-! ## The extraction-failure bound -/
+
+/-- Opening read from the final measured output register. -/
+structure MerkleOpeningReadout (w : Nat) where
+  rt : BitVec w
+  idx : Nat
+  leaf : BitVec w
+  path : List (BitVec w)
+
+/-- The opening has the verifier's shape: path length at most `d`, index in range. -/
+def merkleOpeningShape {cardX w : Nat} (L : MerkleAddressLayout cardX w) (d : Nat)
+    (op : MerkleOpeningReadout w) : Bool :=
+  decide (op.path.length ≤ d) && decide (op.idx < L.nodes)
+
+/-- Extraction failure: the output opening has the verifier's shape and recomputes its
+    root under the oracle, yet is not the opening extracted from the measured records. -/
+def measuredMerkleFailure {cardX w : Nat} (L : MerkleAddressLayout cardX w) (lvl d : Nat)
+    (opening : Fin cardX → MerkleOpeningReadout w)
+    (H : Fin cardX → BitVec w) (xs : List (Fin cardX)) (o : Fin cardX) : Bool :=
+  merkleOpeningShape L d (opening o) &&
+  decide (merkleRootFromPath (L.hash H) lvl (opening o).idx (opening o).leaf (opening o).path =
+    (opening o).rt) &&
+  !decide (extractOnlineMerkleOpening (opening o).rt (merkleRecords L H xs) lvl
+    (opening o).path.length (opening o).idx = some ((opening o).leaf, (opening o).path))
+
+/-- The `k`-th verifier evaluation address of the output opening (the output address itself
+    when the opening is misshapen or shorter than `k + 1`). -/
+def merkleFailurePoint {cardX w : Nat} (L : MerkleAddressLayout cardX w) (lvl d k : Nat)
+    (opening : Fin cardX → MerkleOpeningReadout w)
+    (H : Fin cardX → BitVec w) (o : Fin cardX) : Fin cardX :=
+  if merkleOpeningShape L d (opening o) = true then
+    ((merklePathPoints L H lvl (opening o).idx (opening o).leaf (opening o).path)[k]?).getD o
+  else o
+
+/-- Targets for the `k`-th evaluation address (empty for a misshapen opening). -/
+def merkleFailureTargets {cardX w : Nat} (L : MerkleAddressLayout cardX w) (d : Nat)
+    (opening : Fin cardX → MerkleOpeningReadout w)
+    (H : Fin cardX → BitVec w) (xs : List (Fin cardX)) (o : Fin cardX) : List (BitVec w) :=
+  if merkleOpeningShape L d (opening o) = true then
+    merkleMeasuredTargets L H xs (opening o).rt
+  else []
+
+theorem merkleFailurePoint_local {cardX w : Nat} (L : MerkleAddressLayout cardX w)
+    (lvl d k : Nat) (hLvl : lvl + d ≤ L.levels)
+    (opening : Fin cardX → MerkleOpeningReadout w)
+    (H : Fin cardX → BitVec w) (o : Fin cardX) (ch : BitVec w) :
+    merkleFailurePoint L lvl d k opening
+      (reprogramOracle H (merkleFailurePoint L lvl d k opening H o) ch) o =
+      merkleFailurePoint L lvl d k opening H o := by
+  unfold merkleFailurePoint
+  cases hShape : merkleOpeningShape L d (opening o) with
+  | false => rfl
+  | true =>
+    simp only [↓reduceIte]
+    simp only [merkleOpeningShape, Bool.and_eq_true, decide_eq_true_eq] at hShape
+    have hRange : lvl + (opening o).path.length ≤ L.levels := by omega
+    cases hk : (merklePathPoints L H lvl (opening o).idx (opening o).leaf (opening o).path)[k]? with
+    | none =>
+      have hLe := List.getElem?_eq_none_iff.mp hk
+      rw [merklePathPoints_length] at hLe
+      have hk' : (merklePathPoints L (reprogramOracle H o ch) lvl (opening o).idx
+          (opening o).leaf (opening o).path)[k]? = none :=
+        List.getElem?_eq_none_iff.mpr (by rw [merklePathPoints_length]; exact hLe)
+      simp only [Option.getD_none, hk']
+    | some a =>
+      simp only [Option.getD_some]
+      rw [merklePathPoints_reprogram L H ch _ lvl _ _ k a hRange hShape.2 hk]
+      rfl
+
+private theorem le_qsum_term {n : Nat} (f : Fin n → Nat) (k : Fin n) : f k ≤ qsum n f := by
+  rw [← qsum_ite_eq n k (f k)]
+  refine qsum_le_qsum (fun i => ?_)
+  by_cases h : i = k
+  · rw [ite_eq_left h, h]
+    exact Nat.le_refl _
+  · rw [ite_eq_right h]
+    exact Nat.zero_le _
+
+/-- Failure implies a fresh-address hit at one of the first `d` evaluation addresses, or a
+    collision among measured answers. -/
+theorem measuredMerkleFailure_cover {cardX w : Nat} (L : MerkleAddressLayout cardX w)
+    (lvl d : Nat) (hLvl : lvl + d ≤ L.levels)
+    (opening : Fin cardX → MerkleOpeningReadout w)
+    (H : Fin cardX → BitVec w) (xs : List (Fin cardX)) (o : Fin cardX)
+    (hFail : measuredMerkleFailure L lvl d opening H xs o = true) :
+    (∃ k : Fin d,
+      (!listHasElem (merkleFailurePoint L lvl d k.1 opening H o) xs &&
+        listHasElem (H (merkleFailurePoint L lvl d k.1 opening H o))
+          (merkleFailureTargets L d opening H xs o)) = true) ∨
+    freshCollision H xs = true := by
+  simp only [measuredMerkleFailure, Bool.and_eq_true, decide_eq_true_eq, Bool.not_eq_true',
+    decide_eq_false_iff_not] at hFail
+  obtain ⟨⟨hShape, hRoot⟩, hNot⟩ := hFail
+  have hShape' := hShape
+  simp only [merkleOpeningShape, Bool.and_eq_true, decide_eq_true_eq] at hShape'
+  have hRange : lvl + (opening o).path.length ≤ L.levels := by omega
+  rcases merkle_measured_opening_classification L H xs (opening o).rt (opening o).path lvl
+      (opening o).idx (opening o).leaf hRange hShape'.2 hRoot with hExt | ⟨a, ha, hFresh, hHit⟩ | hC
+  · exact absurd hExt hNot
+  · obtain ⟨k, hk⟩ := List.mem_iff_getElem?.mp ha
+    have hkLt : k < d := by
+      have h1 := (List.getElem?_eq_some_iff.mp hk).1
+      rw [merklePathPoints_length] at h1
+      omega
+    refine Or.inl ⟨⟨k, hkLt⟩, ?_⟩
+    have hPt : merkleFailurePoint L lvl d k opening H o = a := by
+      unfold merkleFailurePoint
+      rw [ite_eq_left hShape, hk]
+      rfl
+    have hTg : merkleFailureTargets L d opening H xs o =
+        merkleMeasuredTargets L H xs (opening o).rt := by
+      unfold merkleFailureTargets
+      rw [ite_eq_left hShape]
+    show (!listHasElem (merkleFailurePoint L lvl d k opening H o) xs &&
+      listHasElem (H (merkleFailurePoint L lvl d k opening H o))
+        (merkleFailureTargets L d opening H xs o)) = true
+    rw [hPt, hTg, hFresh, hHit]
+    rfl
+  · exact Or.inr hC
+
+/-- **Merkle extraction-failure bound for the measured-query experiment.** For every
+    `Q`-query adversary, layout and output readout, with the oracle uniform: the mass of
+    outputs whose opening (path length at most `d`) verifies but is not the opening
+    extracted from the measured query log is at most
+    `(d * (3 * Q + 1) + triangleSum Q) / 2^w` of the total mass. In `RatBound.le` form this
+    is `⟨failure mass, total⟩ ≤ ⟨d * (3 * Q + 1) + triangleSum Q, 2^w⟩`. -/
+theorem measured_merkle_extraction_failure_bound {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q) (L : MerkleAddressLayout cardX w)
+    (lvl d : Nat) (hLvl : lvl + d ≤ L.levels)
+    (opening : Fin cardX → MerkleOpeningReadout w) :
+    2 ^ w * uniformOracleSum w cardX (fun H => sumLogs cardX Q (fun xs =>
+        QVec.queryMassOn (measuredMerkleFailure L lvl d opening H xs)
+          (measuredStateAt A H Q (Nat.le_refl Q) xs))) ≤
+      (d * (3 * Q + 1) + triangleSum Q) *
+        ((2 ^ w) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init)) := by
+  let Tot := (2 ^ w) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init)
+  let ψ : (Fin cardX → BitVec w) → List (Fin cardX) → QVec cardX w cardAnc := fun H xs =>
+    measuredStateAt A H Q (Nat.le_refl Q) xs
+  let ev : Fin d → (Fin cardX → BitVec w) → List (Fin cardX) → Fin cardX → Bool :=
+    fun k H xs o =>
+      !listHasElem (merkleFailurePoint L lvl d k.1 opening H o) xs &&
+        listHasElem (H (merkleFailurePoint L lvl d k.1 opening H o))
+          (merkleFailureTargets L d opening H xs o)
+  -- per-level fresh-address bound
+  have hLevel : ∀ k : Fin d,
+      2 ^ w * uniformOracleSum w cardX (fun H => sumLogs cardX Q (fun xs =>
+        QVec.queryMassOn (ev k H xs) (ψ H xs))) ≤ (3 * Q + 1) * Tot := by
+    intro k
+    refine measured_fresh_target_hit_bound A
+      (fun H _ o => merkleFailurePoint L lvl d k.1 opening H o)
+      (fun H xs o => merkleFailureTargets L d opening H xs o) (3 * Q + 1)
+      (fun H _ o ch => merkleFailurePoint_local L lvl d k.1 hLvl opening H o ch) ?_ ?_
+    · intro H xs o ch hFresh
+      unfold merkleFailureTargets
+      cases merkleOpeningShape L d (opening o)
+      · rfl
+      · simp only [↓reduceIte, merkleMeasuredTargets]
+        rw [merkleRecords_reprogram_of_fresh L H _ ch xs hFresh,
+          map_reprogram_of_fresh H _ ch xs hFresh]
+    · intro H xs o hLen
+      unfold merkleFailureTargets
+      cases merkleOpeningShape L d (opening o)
+      · exact Nat.zero_le _
+      · simp only [↓reduceIte]
+        rw [← hLen]
+        exact merkleMeasuredTargets_length L H xs _
+  -- pointwise cover of the failure mass
+  have hCover : ∀ H xs,
+      QVec.queryMassOn (measuredMerkleFailure L lvl d opening H xs) (ψ H xs) ≤
+        qsum d (fun k => QVec.queryMassOn (ev k H xs) (ψ H xs)) +
+        (if freshCollision H xs = true then QVec.stateNormSq (ψ H xs) else 0) := by
+    intro H xs
+    have hColl : (if freshCollision H xs = true then QVec.stateNormSq (ψ H xs) else 0) =
+        qsum cardX (fun o => if freshCollision H xs = true then
+          QVec.queryWeight (ψ H xs) o else 0) := by
+      cases freshCollision H xs
+      · simp only [Bool.false_eq_true, ↓reduceIte, qsum_const, Nat.mul_zero]
+      · rfl
+    have hSwap : qsum d (fun k => QVec.queryMassOn (ev k H xs) (ψ H xs)) =
+        qsum cardX (fun o => qsum d (fun k =>
+          if ev k H xs o = true then QVec.queryWeight (ψ H xs) o else 0)) :=
+      qsum_comm d cardX (fun k o => if ev k H xs o = true then QVec.queryWeight (ψ H xs) o else 0)
+    rw [hColl, hSwap, ← qsum_add]
+    refine qsum_le_qsum (fun o => ?_)
+    cases hF : measuredMerkleFailure L lvl d opening H xs o with
+    | false =>
+      simp only [Bool.false_eq_true, ↓reduceIte]
+      exact Nat.zero_le _
+    | true =>
+      simp only [↓reduceIte]
+      rcases measuredMerkleFailure_cover L lvl d hLvl opening H xs o hF with ⟨k, hk⟩ | hC
+      · have hTerm := le_qsum_term
+          (fun k => if ev k H xs o = true then QVec.queryWeight (ψ H xs) o else 0) k
+        have hk' : ev k H xs o = true := hk
+        simp only [hk', ↓reduceIte] at hTerm
+        exact Nat.le_trans hTerm (Nat.le_add_right _ _)
+      · rw [hC]
+        exact Nat.le_add_left _ _
+  have hSum : uniformOracleSum w cardX (fun H => sumLogs cardX Q (fun xs =>
+        QVec.queryMassOn (measuredMerkleFailure L lvl d opening H xs) (ψ H xs))) ≤
+      qsum d (fun k => uniformOracleSum w cardX (fun H => sumLogs cardX Q (fun xs =>
+        QVec.queryMassOn (ev k H xs) (ψ H xs)))) +
+      uniformOracleSum w cardX (fun H => sumLogs cardX Q (fun xs =>
+        if freshCollision H xs = true then QVec.stateNormSq (ψ H xs) else 0)) := by
+    rw [← uniformOracleSum_qsum w cardX d (fun H k => sumLogs cardX Q (fun xs =>
+        QVec.queryMassOn (ev k H xs) (ψ H xs))), ← uniformOracleSum_add]
+    refine uniformOracleSum_le w cardX _ _ (fun H => ?_)
+    rw [← sumLogs_qsum cardX Q d (fun xs k => QVec.queryMassOn (ev k H xs) (ψ H xs)),
+      ← sumLogs_add]
+    exact sumLogs_le_of_length cardX Q _ _ (fun xs _ => hCover H xs)
+  have hLevels : 2 ^ w * qsum d (fun k => uniformOracleSum w cardX (fun H =>
+        sumLogs cardX Q (fun xs => QVec.queryMassOn (ev k H xs) (ψ H xs)))) ≤
+      d * ((3 * Q + 1) * Tot) := by
+    rw [← qsum_mul_left, ← qsum_const d ((3 * Q + 1) * Tot)]
+    exact qsum_le_qsum hLevel
+  have hCollision := measured_record_collision_bound A Q (Nat.le_refl Q)
+  have hAll := Nat.le_trans (Nat.mul_le_mul_left (2 ^ w) hSum)
+    (by rw [Nat.mul_add]; exact Nat.add_le_add hLevels hCollision)
+  refine Nat.le_trans hAll (Nat.le_of_eq ?_)
+  show d * ((3 * Q + 1) * Tot) + triangleSum Q * Tot = (d * (3 * Q + 1) + triangleSum Q) * Tot
+  rw [Nat.add_mul (d * (3 * Q + 1)) (triangleSum Q) Tot, Nat.mul_assoc d (3 * Q + 1) Tot]
+
+/-! ## Size of the bound at deployment-scale parameters -/
+
+theorem triangleSum_le_sq : ∀ t : Nat, triangleSum t ≤ t * t
+  | 0 => Nat.le_refl 0
+  | t + 1 => by
+    have ih := triangleSum_le_sq t
+    show triangleSum t + t ≤ (t + 1) * (t + 1)
+    rw [Nat.add_mul, Nat.mul_add, Nat.one_mul, Nat.mul_one]
+    omega
+
+/-- With 256-bit answers, up to `2^60` measured queries and paths of length up to 64, the
+    failure fraction is below `2^-128`. -/
+theorem measured_merkle_bound_below_128_bits (Q d : Nat) (hQ : Q ≤ 2 ^ 60) (hd : d ≤ 64) :
+    (d * (3 * Q + 1) + triangleSum Q) * 2 ^ 128 < 2 ^ 256 := by
+  have h1 : d * (3 * Q + 1) ≤ 64 * (3 * 2 ^ 60 + 1) :=
+    Nat.mul_le_mul hd (Nat.add_le_add_right (Nat.mul_le_mul_left 3 hQ) 1)
+  have h2 : triangleSum Q ≤ 2 ^ 60 * 2 ^ 60 :=
+    Nat.le_trans (triangleSum_le_sq Q) (Nat.mul_le_mul hQ hQ)
+  have h3 : (d * (3 * Q + 1) + triangleSum Q) * 2 ^ 128 ≤
+      (64 * (3 * 2 ^ 60 + 1) + 2 ^ 60 * 2 ^ 60) * 2 ^ 128 :=
+    Nat.mul_le_mul_right _ (Nat.add_le_add h1 h2)
+  exact Nat.lt_of_le_of_lt h3 (by decide)
+
+
+end Qsag
+
+
+namespace Qsag
+
+set_option autoImplicit false
+
+/-- The state before query `t` is supported on the single query address `addr H t`. -/
+def ClassicalQueryAddresses {cardX w cardAnc q : Nat} (A : QuantumAdv cardX w cardAnc q)
+    (addr : (Fin cardX → BitVec w) → Nat → Fin cardX) : Prop :=
+  ∀ (H : Fin cardX → BitVec w) (t : Nat) (ht : t < q) (x : Fin cardX) (y : Fin (2 ^ w))
+    (a : Fin cardAnc), x ≠ addr H t → advStateAt A H t (Nat.le_of_lt ht) x y a = GaussInt.zero
+
+/-- The address log of the first `t` queries, most recent first. -/
+def classicalQueryLog {cardX w : Nat} (addr : (Fin cardX → BitVec w) → Nat → Fin cardX)
+    (H : Fin cardX → BitVec w) : Nat → List (Fin cardX)
+  | 0 => []
+  | t + 1 => addr H t :: classicalQueryLog addr H t
+
+theorem classicalQueryLog_length {cardX w : Nat}
+    (addr : (Fin cardX → BitVec w) → Nat → Fin cardX) (H : Fin cardX → BitVec w) :
+    ∀ t, (classicalQueryLog addr H t).length = t
+  | 0 => rfl
+  | t + 1 => congrArg Nat.succ (classicalQueryLog_length addr H t)
+
+theorem ScaledUnitary.apply_zero {cardX w cardAnc : Nat} (U : ScaledUnitary cardX w cardAnc) :
+    U.apply (QVec.zero cardX w cardAnc) = QVec.zero cardX w cardAnc := by
+  have hz : (QVec.zero cardX w cardAnc).sub (QVec.zero cardX w cardAnc) =
+      QVec.zero cardX w cardAnc := rfl
+  have h := U.map_sub (QVec.zero cardX w cardAnc) (QVec.zero cardX w cardAnc)
+  rw [hz] at h
+  rw [h]
+  funext x y a
+  exact GaussInt.ext (Int.sub_self _) (Int.sub_self _)
+
+theorem queryMassOn_zero {cardX w cardAnc : Nat} (S : Fin cardX → Bool) :
+    QVec.queryMassOn S (QVec.zero cardX w cardAnc) = 0 := by
+  have hw : ∀ x, QVec.queryWeight (QVec.zero cardX w cardAnc) x = 0 := by
+    intro x
+    show qsum (2 ^ w) (fun _ => qsum cardAnc (fun _ => 0)) = 0
+    simp only [qsum_const, Nat.mul_zero]
+  have h0 : ∀ x, (if S x = true then QVec.queryWeight (QVec.zero cardX w cardAnc) x else 0) = 0 :=
+    fun x => by rw [hw x]; exact ite_self 0
+  show qsum cardX (fun x => if S x = true then
+    QVec.queryWeight (QVec.zero cardX w cardAnc) x else 0) = 0
+  rw [qsum_congr h0, qsum_const, Nat.mul_zero]
+
+/-- Only the branch of the adversary's own address log is nonzero, and it is the coherent
+    state. -/
+theorem measuredStateAt_classical {cardX w cardAnc q : Nat} (A : QuantumAdv cardX w cardAnc q)
+    (addr : (Fin cardX → BitVec w) → Nat → Fin cardX) (hC : ClassicalQueryAddresses A addr)
+    (H : Fin cardX → BitVec w) :
+    ∀ (t : Nat) (ht : t ≤ q) (xs : List (Fin cardX)), xs.length = t →
+      measuredStateAt A H t ht xs =
+        if xs = classicalQueryLog addr H t then advStateAt A H t ht
+        else QVec.zero cardX w cardAnc
+  | 0, _, [], _ => (ite_eq_left rfl).symm
+  | 0, _, _ :: _, h => absurd h (Nat.succ_ne_zero _)
+  | _ + 1, _, [], h => absurd h.symm (Nat.succ_ne_zero _)
+  | t + 1, ht, x :: xs, h => by
+    have hLen : xs.length = t := Nat.succ.inj h
+    have ih := measuredStateAt_classical A addr hC H t (Nat.le_of_succ_le ht) xs hLen
+    show (A.steps ⟨t, ht⟩).apply (measuredOracleQueryBranch H
+        (measuredStateAt A H t (Nat.le_of_succ_le ht) xs) x) =
+      if x :: xs = addr H t :: classicalQueryLog addr H t then
+        (A.steps ⟨t, ht⟩).apply (oracleXor H (advStateAt A H t (Nat.le_of_succ_le ht)))
+      else QVec.zero cardX w cardAnc
+    rw [ih]
+    by_cases hxs : xs = classicalQueryLog addr H t
+    · rw [ite_eq_left hxs]
+      by_cases hx : x = addr H t
+      · rw [ite_eq_left (by rw [hx, hxs])]
+        refine congrArg (A.steps ⟨t, ht⟩).apply ?_
+        funext x' y a
+        show (if x' = x then oracleXor H (advStateAt A H t (Nat.le_of_succ_le ht)) x' y a
+          else GaussInt.zero) = oracleXor H (advStateAt A H t (Nat.le_of_succ_le ht)) x' y a
+        by_cases hx' : x' = x
+        · rw [ite_eq_left hx']
+        · rw [ite_eq_right hx']
+          exact (hC H t ht x' _ a (fun he => hx' (he.trans hx.symm))).symm
+      · rw [ite_eq_right (fun he => hx (List.cons.inj he).1)]
+        have hz : measuredOracleQueryBranch H (advStateAt A H t (Nat.le_of_succ_le ht)) x =
+            QVec.zero cardX w cardAnc := by
+          funext x' y a
+          show (if x' = x then oracleXor H (advStateAt A H t (Nat.le_of_succ_le ht)) x' y a
+            else GaussInt.zero) = GaussInt.zero
+          by_cases hx' : x' = x
+          · rw [ite_eq_left hx']
+            exact hC H t ht x' _ a (fun he => hx (hx'.symm.trans he))
+          · rw [ite_eq_right hx']
+        rw [hz, ScaledUnitary.apply_zero]
+    · rw [ite_eq_right hxs, ite_eq_right (fun he => hxs (List.cons.inj he).2)]
+      have hz : measuredOracleQueryBranch H (QVec.zero cardX w cardAnc) x =
+          QVec.zero cardX w cardAnc := by
+        funext x' y a
+        show (if x' = x then GaussInt.zero else GaussInt.zero) = GaussInt.zero
+        exact ite_self _
+      rw [hz, ScaledUnitary.apply_zero]
+
+/-- A log sum whose summand vanishes off one log is the summand at that log. -/
+theorem sumLogs_single (cardX : Nat) : ∀ (t : Nat) (l : List (Fin cardX)), l.length = t →
+    ∀ (f : List (Fin cardX) → Nat), (∀ xs, xs.length = t → xs ≠ l → f xs = 0) →
+      sumLogs cardX t f = f l
+  | 0, [], _, _, _ => rfl
+  | 0, _ :: _, h, _, _ => absurd h (Nat.succ_ne_zero _)
+  | _ + 1, [], h, _, _ => absurd h.symm (Nat.succ_ne_zero _)
+  | t + 1, a :: l, h, f, hf => by
+    have hInner : ∀ x, sumLogs cardX t (fun xs => f (x :: xs)) =
+        if x = a then f (a :: l) else 0 := by
+      intro x
+      by_cases hx : x = a
+      · rw [ite_eq_left hx, hx]
+        exact sumLogs_single cardX t l (Nat.succ.inj h) (fun xs => f (a :: xs))
+          (fun xs hLen hne => hf _ (congrArg Nat.succ hLen) (fun he => hne (List.cons.inj he).2))
+      · rw [ite_eq_right hx]
+        have hz : ∀ xs, xs.length = t → f (x :: xs) = 0 :=
+          fun xs hLen => hf _ (congrArg Nat.succ hLen) (fun he => hx (List.cons.inj he).1)
+        have hLe : sumLogs cardX t (fun xs => f (x :: xs)) ≤ sumLogs cardX t (fun _ => 0 * 0) :=
+          sumLogs_le_of_length cardX t _ _ (fun xs hLen => Nat.le_of_eq (hz xs hLen))
+        have hZero : sumLogs cardX t (fun _ => 0 * 0) = 0 :=
+          (sumLogs_mul cardX t 0 (fun _ => 0)).trans (Nat.zero_mul _)
+        exact Nat.le_antisymm (hZero ▸ hLe) (Nat.zero_le _)
+    show qsum cardX (fun x => sumLogs cardX t (fun xs => f (x :: xs))) = f (a :: l)
+    rw [qsum_congr hInner, qsum_ite_eq]
+
+/-- **Transfer.** For a classical-address adversary, any log-indexed payoff that vanishes on
+    the zero state has the same value in the measured experiment and in the coherent run
+    with the adversary's own address log. -/
+theorem classical_query_measured_eq {cardX w cardAnc q : Nat} (A : QuantumAdv cardX w cardAnc q)
+    (addr : (Fin cardX → BitVec w) → Nat → Fin cardX) (hC : ClassicalQueryAddresses A addr)
+    (H : Fin cardX → BitVec w) (F : List (Fin cardX) → QVec cardX w cardAnc → Nat)
+    (hF : ∀ xs, F xs (QVec.zero cardX w cardAnc) = 0) :
+    sumLogs cardX q (fun xs => F xs (measuredStateAt A H q (Nat.le_refl q) xs)) =
+      F (classicalQueryLog addr H q) (runQuantumAdv A H) := by
+  have hAt := measuredStateAt_classical A addr hC H q (Nat.le_refl q)
+  rw [sumLogs_single cardX q (classicalQueryLog addr H q) (classicalQueryLog_length addr H q)
+    (fun xs => F xs (measuredStateAt A H q (Nat.le_refl q) xs))
+    (fun xs hLen hne => by rw [hAt xs hLen, ite_eq_right hne]; exact hF xs)]
+  rw [hAt _ (classicalQueryLog_length addr H q), ite_eq_left rfl]
+  rfl
+
+/-- **Merkle extraction-failure bound for classical-address adversaries, on the coherent
+    run.** The extractor reads the adversary's own address log and the oracle answers at
+    those addresses; the failure mass of `runQuantumAdv` is at most
+    `(d * (3 * Q + 1) + triangleSum Q) / 2^w` of the total. -/
+theorem classical_query_merkle_extraction_failure_bound {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (addr : (Fin cardX → BitVec w) → Nat → Fin cardX) (hC : ClassicalQueryAddresses A addr)
+    (L : MerkleAddressLayout cardX w) (lvl d : Nat) (hLvl : lvl + d ≤ L.levels)
+    (opening : Fin cardX → MerkleOpeningReadout w) :
+    2 ^ w * uniformOracleSum w cardX (fun H =>
+        QVec.queryMassOn (measuredMerkleFailure L lvl d opening H (classicalQueryLog addr H Q))
+          (runQuantumAdv A H)) ≤
+      (d * (3 * Q + 1) + triangleSum Q) *
+        ((2 ^ w) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init)) := by
+  have hEq : uniformOracleSum w cardX (fun H =>
+        QVec.queryMassOn (measuredMerkleFailure L lvl d opening H (classicalQueryLog addr H Q))
+          (runQuantumAdv A H)) =
+      uniformOracleSum w cardX (fun H => sumLogs cardX Q (fun xs =>
+        QVec.queryMassOn (measuredMerkleFailure L lvl d opening H xs)
+          (measuredStateAt A H Q (Nat.le_refl Q) xs))) :=
+    uniformOracleSum_congr w cardX _ _ (fun H =>
+      (classical_query_measured_eq A addr hC H
+        (fun xs ψ => QVec.queryMassOn (measuredMerkleFailure L lvl d opening H xs) ψ)
+        (fun _ => queryMassOn_zero _)).symm)
+  rw [hEq]
+  exact measured_merkle_extraction_failure_bound A L lvl d hLvl opening
+
+
+end Qsag
+
+
+namespace Qsag
+set_option autoImplicit false
+
+/-- Unnormalized event mass, including the measured query log and uniform oracle. -/
+def measuredEventMass {cardX w cardAnc Q : Nat} (A : QuantumAdv cardX w cardAnc Q)
+    (event : (Fin cardX → BitVec w) → List (Fin cardX) → Fin cardX → Bool) : Nat :=
+  uniformOracleSum w cardX (fun H => sumLogs cardX Q (fun xs =>
+    QVec.queryMassOn (event H xs) (measuredStateAt A H Q (Nat.le_refl Q) xs)))
+
+def quantumExperimentTotal {cardX w cardAnc Q : Nat} (A : QuantumAdv cardX w cardAnc Q) : Nat :=
+  (2 ^ w) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init)
+
+theorem queryMassOn_union_le {cardX w cardAnc : Nat}
+    (p r : Fin cardX → Bool) (ψ : QVec cardX w cardAnc) :
+    QVec.queryMassOn (fun x => p x || r x) ψ ≤
+      QVec.queryMassOn p ψ + QVec.queryMassOn r ψ := by
+  unfold QVec.queryMassOn
+  rw [← qsum_add]
+  apply qsum_le_qsum
+  intro x
+  cases hp : p x <;> cases hr : r x <;> simp [hp, hr]
+
+theorem measuredEventMass_union_le {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (p r : (Fin cardX → BitVec w) → List (Fin cardX) → Fin cardX → Bool) :
+    measuredEventMass A (fun H xs x => p H xs x || r H xs x) ≤
+      measuredEventMass A p + measuredEventMass A r := by
+  unfold measuredEventMass
+  rw [← uniformOracleSum_add]
+  apply uniformOracleSum_le
+  intro H
+  rw [← sumLogs_add]
+  exact sumLogs_le_of_length cardX Q _ _ (fun xs _ => queryMassOn_union_le _ _ _)
+
+theorem measuredEventMass_mono {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (p r : (Fin cardX → BitVec w) → List (Fin cardX) → Fin cardX → Bool)
+    (h : ∀ H xs x, p H xs x = true → r H xs x = true) :
+    measuredEventMass A p ≤ measuredEventMass A r := by
+  apply uniformOracleSum_le
+  intro H
+  apply sumLogs_le_of_length
+  intro xs _
+  apply qsum_le_qsum
+  intro x
+  change (if p H xs x = true then _ else 0) ≤ (if r H xs x = true then _ else 0)
+  cases hp : p H xs x with
+  | false => simp only [Bool.false_eq_true, ↓reduceIte]; exact Nat.zero_le _
+  | true => simp [h H xs x hp]
+
+structure MerkleOpeningSlot (cardX w : Nat) where
+  level : Nat
+  depth : Nat
+  readout : Fin cardX → MerkleOpeningReadout w
+
+def batchMerkleFailure {cardX w : Nat} (L : MerkleAddressLayout cardX w)
+    (slots : List (MerkleOpeningSlot cardX w))
+    (H : Fin cardX → BitVec w) (xs : List (Fin cardX)) (x : Fin cardX) : Bool :=
+  slots.any (fun s => measuredMerkleFailure L s.level s.depth s.readout H xs x)
+
+/-- This conservative budget counts the shared collision term once per opening. -/
+def batchMerkleCost {cardX w : Nat} (Q : Nat) (slots : List (MerkleOpeningSlot cardX w)) : Nat :=
+  (slots.map (fun s => s.depth * (3 * Q + 1) + triangleSum Q)).sum
+
+/-- No locality or extraction-failure cover premise is required. -/
+theorem measured_batch_merkle_extraction_failure_bound {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q) (L : MerkleAddressLayout cardX w)
+    (slots : List (MerkleOpeningSlot cardX w))
+    (hLevels : ∀ s ∈ slots, s.level + s.depth ≤ L.levels) :
+    2 ^ w * measuredEventMass A (batchMerkleFailure L slots) ≤
+      batchMerkleCost Q slots * quantumExperimentTotal A := by
+  induction slots with
+  | nil =>
+    unfold measuredEventMass
+    change 2 ^ w * uniformOracleSum w cardX (fun H => sumLogs cardX Q (fun xs =>
+      QVec.queryMassOn (fun _ => false) (measuredStateAt A H Q (Nat.le_refl Q) xs))) ≤ _
+    have hz : ∀ H : Fin cardX → BitVec w,
+        sumLogs cardX Q (fun xs => QVec.queryMassOn (fun _ => false)
+          (measuredStateAt A H Q (Nat.le_refl Q) xs)) = 0 := by
+      intro H
+      have hp : ∀ xs, QVec.queryMassOn (fun _ => false)
+          (measuredStateAt A H Q (Nat.le_refl Q) xs) = 0 := by
+        intro xs; simp [QVec.queryMassOn, qsum_const]
+      rw [show (fun xs => QVec.queryMassOn (fun _ => false)
+        (measuredStateAt A H Q (Nat.le_refl Q) xs)) = fun _ => 0 * 0 from funext hp]
+      rw [sumLogs_mul, Nat.zero_mul]
+    rw [uniformOracleSum_congr w cardX _ _ hz, uniformOracleSum_const]
+    simp
+  | cons s rest ih =>
+    have hOne := measured_merkle_extraction_failure_bound A L s.level s.depth
+      (hLevels s (.head rest)) s.readout
+    have hRest := ih (fun t ht => hLevels t (.tail s ht))
+    have hUnion := measuredEventMass_union_le A
+      (measuredMerkleFailure L s.level s.depth s.readout) (batchMerkleFailure L rest)
+    have h := Nat.le_trans (Nat.mul_le_mul_left (2 ^ w) hUnion)
+      (by rw [Nat.mul_add]; exact Nat.add_le_add hOne hRest)
+    change 2 ^ w * measuredEventMass A (fun H xs x =>
+      measuredMerkleFailure L s.level s.depth s.readout H xs x || batchMerkleFailure L rest H xs x) ≤ _
+    simpa only [batchMerkleFailure, List.any_cons, batchMerkleCost, List.map_cons,
+      List.sum_cons, Nat.add_mul, quantumExperimentTotal, measuredEventMass] using h
+
+/-- General event transfer; no identification is made for superposition queries. -/
+theorem measuredEventMass_classical {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (addr : (Fin cardX → BitVec w) → Nat → Fin cardX) (hC : ClassicalQueryAddresses A addr)
+    (event : (Fin cardX → BitVec w) → List (Fin cardX) → Fin cardX → Bool) :
+    measuredEventMass A event = uniformOracleSum w cardX (fun H =>
+      QVec.queryMassOn (event H (classicalQueryLog addr H Q)) (runQuantumAdv A H)) := by
+  apply uniformOracleSum_congr
+  intro H
+  exact classical_query_measured_eq A addr hC H
+    (fun xs ψ => QVec.queryMassOn (event H xs) ψ) (fun _ => queryMassOn_zero _)
+
+/-- The batch bound transferred to the coherent run only for classical-address queries. -/
+theorem classical_query_batch_merkle_extraction_failure_bound {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (addr : (Fin cardX → BitVec w) → Nat → Fin cardX) (hC : ClassicalQueryAddresses A addr)
+    (L : MerkleAddressLayout cardX w) (slots : List (MerkleOpeningSlot cardX w))
+    (hLevels : ∀ s ∈ slots, s.level + s.depth ≤ L.levels) :
+    2 ^ w * uniformOracleSum w cardX (fun H =>
+      QVec.queryMassOn (batchMerkleFailure L slots H (classicalQueryLog addr H Q))
+        (runQuantumAdv A H)) ≤ batchMerkleCost Q slots * quantumExperimentTotal A := by
+  rw [← measuredEventMass_classical A addr hC (batchMerkleFailure L slots)]
+  exact measured_batch_merkle_extraction_failure_bound A L slots hLevels
+
+end Qsag
+
+
+namespace Qsag
+set_option autoImplicit false
+
+/-- One bit for each of n oracle addresses. -/
+@[reducible, expose] def OracleBitTable : Nat → Type
+  | 0 => Unit
+  | n + 1 => Bool × OracleBitTable n
+
+def oracleTableSum : (n : Nat) → (OracleBitTable n → Nat) → Nat
+  | 0, f => f ()
+  | n + 1, f => oracleTableSum n (fun h => f (false, h)) +
+    oracleTableSum n (fun h => f (true, h))
+
+theorem oracleTableSum_congr : ∀ n (f g : OracleBitTable n → Nat),
+    (∀ h, f h = g h) → oracleTableSum n f = oracleTableSum n g
+  | 0, _, _, h => h ()
+  | n + 1, _, _, h => by
+    simp only [oracleTableSum]
+    rw [oracleTableSum_congr n _ _ (fun x => h (false, x)),
+      oracleTableSum_congr n _ _ (fun x => h (true, x))]
+
+theorem oracleTableSum_add : ∀ n (f g : OracleBitTable n → Nat),
+    oracleTableSum n (fun h => f h + g h) = oracleTableSum n f + oracleTableSum n g
+  | 0, _, _ => rfl
+  | n + 1, _, _ => by
+    simp only [oracleTableSum, oracleTableSum_add]; omega
+
+theorem oracleTableSum_mul : ∀ n (c : Nat) (f : OracleBitTable n → Nat),
+    oracleTableSum n (fun h => c * f h) = c * oracleTableSum n f
+  | 0, _, _ => rfl
+  | n + 1, _, _ => by simp only [oracleTableSum, oracleTableSum_mul, Nat.mul_add]
+
+/-- Multiplication by 2^k, implemented additively for the existing linearity interface. -/
+def gaussDoublePow : Nat → GaussInt → GaussInt
+  | 0, z => z
+  | k + 1, z => (gaussDoublePow k z).add (gaussDoublePow k z)
+
+def oracleWalsh : (n : Nat) → (OracleBitTable n → GaussInt) → OracleBitTable n → GaussInt
+  | 0, f, _ => f ()
+  | n + 1, f, (b, d) =>
+    let u := oracleWalsh n (fun h => f (false, h)) d
+    let v := oracleWalsh n (fun h => f (true, h)) d
+    if b then u.sub v else u.add v
+
+theorem oracleWalsh_congr : ∀ n (f g : OracleBitTable n → GaussInt),
+    (∀ h, f h = g h) → oracleWalsh n f = oracleWalsh n g := by
+  intro n f g h
+  exact congrArg (oracleWalsh n) (funext h)
+
+theorem oracleWalsh_add : ∀ n (f g : OracleBitTable n → GaussInt) (d : OracleBitTable n),
+    oracleWalsh n (fun h => (f h).add (g h)) d =
+      (oracleWalsh n f d).add (oracleWalsh n g d)
+  | 0, _, _, _ => rfl
+  | n + 1, f, g, (b, d) => by
+    simp only [oracleWalsh, oracleWalsh_add]
+    cases b <;> apply GaussInt.ext <;> simp [GaussInt.add, GaussInt.sub] <;> omega
+
+theorem oracleWalsh_sub : ∀ n (f g : OracleBitTable n → GaussInt) (d : OracleBitTable n),
+    oracleWalsh n (fun h => (f h).sub (g h)) d =
+      (oracleWalsh n f d).sub (oracleWalsh n g d)
+  | 0, _, _, _ => rfl
+  | n + 1, f, g, (b, d) => by
+    simp only [oracleWalsh, oracleWalsh_sub]
+    cases b <;> apply GaussInt.ext <;> simp [GaussInt.add, GaussInt.sub] <;> omega
+
+theorem oracleWalsh_doublePow (n k : Nat) (f : OracleBitTable n → GaussInt) (d : OracleBitTable n) :
+    oracleWalsh n (fun h => gaussDoublePow k (f h)) d = gaussDoublePow k (oracleWalsh n f d) := by
+  induction k with
+  | zero => rfl
+  | succ k ih => simp only [gaussDoublePow, oracleWalsh_add, ih]
+
+/-- Exact inverse up to the known integer normalization. -/
+theorem oracleWalsh_square : ∀ n (f : OracleBitTable n → GaussInt) (d : OracleBitTable n),
+    oracleWalsh n (oracleWalsh n f) d = gaussDoublePow n (f d)
+  | 0, _, () => rfl
+  | n + 1, f, (b, d) => by
+    change (if b then
+      (oracleWalsh n (fun h => (oracleWalsh n (fun z => f (false, z)) h).add
+        (oracleWalsh n (fun z => f (true, z)) h)) d).sub
+      (oracleWalsh n (fun h => (oracleWalsh n (fun z => f (false, z)) h).sub
+        (oracleWalsh n (fun z => f (true, z)) h)) d)
+      else (oracleWalsh n (fun h => (oracleWalsh n (fun z => f (false, z)) h).add
+        (oracleWalsh n (fun z => f (true, z)) h)) d).add
+      (oracleWalsh n (fun h => (oracleWalsh n (fun z => f (false, z)) h).sub
+        (oracleWalsh n (fun z => f (true, z)) h)) d)) = _
+    rw [oracleWalsh_add, oracleWalsh_sub, oracleWalsh_square, oracleWalsh_square]
+    cases b <;> apply GaussInt.ext <;> simp [gaussDoublePow, GaussInt.add, GaussInt.sub] <;> omega
+
+/-- Scaled isometry on the entire oracle register, for arbitrary coherent amplitudes. -/
+theorem oracleWalsh_norm : ∀ n (f : OracleBitTable n → GaussInt),
+    oracleTableSum n (fun d => GaussInt.normSq (oracleWalsh n f d)) =
+      2 ^ n * oracleTableSum n (fun h => GaussInt.normSq (f h))
+  | 0, _ => by simp [oracleTableSum, oracleWalsh]
+  | n + 1, f => by
+    change oracleTableSum n (fun d => GaussInt.normSq
+      ((oracleWalsh n (fun h => f (false, h)) d).add (oracleWalsh n (fun h => f (true, h)) d))) +
+      oracleTableSum n (fun d => GaussInt.normSq
+      ((oracleWalsh n (fun h => f (false, h)) d).sub (oracleWalsh n (fun h => f (true, h)) d))) = _
+    rw [← oracleTableSum_add]
+    rw [oracleTableSum_congr n _ _ (fun d => (Nat.add_comm _ _).trans (GaussInt.normSq_parallelogram _ _))]
+    rw [oracleTableSum_add, oracleTableSum_mul, oracleTableSum_mul,
+      oracleWalsh_norm, oracleWalsh_norm]
+    simp only [oracleTableSum, Nat.pow_succ, Nat.mul_add, Nat.mul_assoc, Nat.mul_comm]
+
+theorem gaussDoublePow_norm (k : Nat) (z : GaussInt) :
+    GaussInt.normSq (gaussDoublePow k z) = 4 ^ k * GaussInt.normSq z := by
+  induction k with
+  | zero => simp [gaussDoublePow]
+  | succ k ih =>
+    have h := GaussInt.normSq_parallelogram (gaussDoublePow k z) (gaussDoublePow k z)
+    have hz : (gaussDoublePow k z).sub (gaussDoublePow k z) = GaussInt.zero := by
+      apply GaussInt.ext <;> simp [GaussInt.sub, GaussInt.zero]
+    rw [hz, GaussInt.normSq_zero, Nat.zero_add, ih] at h
+    change GaussInt.normSq ((gaussDoublePow k z).add (gaussDoublePow k z)) = _
+    rw [h, Nat.pow_succ]
+    simp only [Nat.mul_assoc, Nat.mul_comm]
+    omega
+
+end Qsag
+
+
+namespace Qsag
+set_option autoImplicit false
+
+def tableBitOracle : (n : Nat) → OracleBitTable n → Fin n → BitVec 1
+  | 0, _, x => Fin.elim0 x
+  | n + 1, (b, h), x => Fin.cases (if b then 1#1 else 0#1) (tableBitOracle n h) x
+
+/-- This table enumeration is precisely the existing uniform random-function experiment. -/
+theorem oracleTableSum_eq_uniform : ∀ n (f : (Fin n → BitVec 1) → Nat),
+    oracleTableSum n (fun h => f (tableBitOracle n h)) = uniformOracleSum 1 n f
+  | 0, _ => rfl
+  | n + 1, f => by
+    change oracleTableSum n (fun h => f (Fin.cases 0#1 (tableBitOracle n h))) +
+      oracleTableSum n (fun h => f (Fin.cases 1#1 (tableBitOracle n h))) = _
+    rw [oracleTableSum_eq_uniform n (fun H => f (Fin.cases 0#1 H)),
+      oracleTableSum_eq_uniform n (fun H => f (Fin.cases 1#1 H))]
+    simp only [uniformOracleSum, qsum_zero, qsum_succ]
+    rfl
+
+/-- Finite sum exchange between the oracle register and a computational register. -/
+theorem oracleTableSum_qsum (n k : Nat) (f : OracleBitTable n → Fin k → Nat) :
+    oracleTableSum n (fun h => qsum k (f h)) = qsum k (fun i => oracleTableSum n (fun h => f h i)) := by
+  induction n with
+  | zero => rfl
+  | succ n ih => simp only [oracleTableSum, ih, qsum_add]
+
+theorem ScaledUnitary.map_add {cardX w cardAnc : Nat} (U : ScaledUnitary cardX w cardAnc)
+    (ψ φ : QVec cardX w cardAnc) : U.apply (ψ.add φ) = (U.apply ψ).add (U.apply φ) := by
+  have he : (ψ.add φ).sub φ = ψ := by
+    funext x y a
+    apply GaussInt.ext <;> simp [QVec.add, QVec.sub, GaussInt.add, GaussInt.sub]
+  have h := U.map_sub (ψ.add φ) φ
+  rw [he] at h
+  funext x y a
+  have hp := congrArg (fun v => v x y a) h
+  have hr := congrArg GaussInt.re hp
+  have hi := congrArg GaussInt.im hp
+  apply GaussInt.ext <;> simp only [QVec.add, QVec.sub, GaussInt.add, GaussInt.sub] at * <;> omega
+
+def qvecDoublePow {cardX w cardAnc : Nat} (k : Nat) (ψ : QVec cardX w cardAnc) : QVec cardX w cardAnc :=
+  fun x y a => gaussDoublePow k (ψ x y a)
+
+theorem ScaledUnitary.map_doublePow {cardX w cardAnc : Nat} (U : ScaledUnitary cardX w cardAnc)
+    (k : Nat) (ψ : QVec cardX w cardAnc) : U.apply (qvecDoublePow k ψ) = qvecDoublePow k (U.apply ψ) := by
+  induction k with
+  | zero => rfl
+  | succ k ih =>
+    change U.apply ((qvecDoublePow k ψ).add (qvecDoublePow k ψ)) =
+      (qvecDoublePow k (U.apply ψ)).add (qvecDoublePow k (U.apply ψ))
+    rw [U.map_add, ih]
+
+theorem gaussDoublePow_add (k l : Nat) (z : GaussInt) :
+    gaussDoublePow k (gaussDoublePow l z) = gaussDoublePow (k + l) z := by
+  induction k with
+  | zero => simp only [gaussDoublePow, Nat.zero_add]
+  | succ k ih => simp only [gaussDoublePow, ih, Nat.succ_add]
+
+abbrev CoherentBitState (n cardAnc : Nat) := OracleBitTable n → QVec n 1 cardAnc
+
+def fourierOracleState {n cardAnc : Nat} (ψ : CoherentBitState n cardAnc) : CoherentBitState n cardAnc :=
+  fun d x y a => oracleWalsh n (fun h => ψ h x y a) d
+
+def doubleOracleState {n cardAnc : Nat} (k : Nat) (ψ : CoherentBitState n cardAnc) : CoherentBitState n cardAnc :=
+  fun h => qvecDoublePow k (ψ h)
+
+theorem fourierOracleState_square {n cardAnc : Nat} (ψ : CoherentBitState n cardAnc) :
+    fourierOracleState (fourierOracleState ψ) = doubleOracleState n ψ := by
+  funext h x y a
+  exact oracleWalsh_square n _ h
+
+theorem fourierOracleState_double {n cardAnc : Nat} (k : Nat) (ψ : CoherentBitState n cardAnc) :
+    fourierOracleState (doubleOracleState k ψ) = doubleOracleState k (fourierOracleState ψ) := by
+  funext h x y a
+  exact oracleWalsh_doublePow n k _ h
+
+theorem doubleOracleState_add {n cardAnc : Nat} (k l : Nat) (ψ : CoherentBitState n cardAnc) :
+    doubleOracleState k (doubleOracleState l ψ) = doubleOracleState (k + l) ψ := by
+  funext h x y a
+  exact gaussDoublePow_add k l _
+
+/-- Scaled isometry on the joint oracle and adversary state. -/
+theorem fourierOracleState_norm {n cardAnc : Nat} (ψ : CoherentBitState n cardAnc) :
+    oracleTableSum n (fun d => QVec.stateNormSq (fourierOracleState ψ d)) =
+      2 ^ n * oracleTableSum n (fun h => QVec.stateNormSq (ψ h)) := by
+  unfold QVec.stateNormSq QVec.queryWeight fourierOracleState
+  simp only [oracleTableSum_qsum, oracleWalsh_norm, qsum_mul_left]
+
+/-- One ordinary coherent query to the table, followed by the oracle-independent local gate. -/
+def coherentOracleStep {n cardAnc : Nat} (U : ScaledUnitary n 1 cardAnc)
+    (ψ : CoherentBitState n cardAnc) : CoherentBitState n cardAnc :=
+  fun h => U.apply (oracleXor (tableBitOracle n h) (ψ h))
+
+/-- Operational conjugated step. Both transforms are known gates; exactly one oracle query
+    occurs. Unnormalized Walsh multiplies amplitude by 2^n per completed step. -/
+def fourierOracleStep {n cardAnc : Nat} (U : ScaledUnitary n 1 cardAnc)
+    (ψ : CoherentBitState n cardAnc) : CoherentBitState n cardAnc :=
+  fourierOracleState (coherentOracleStep U (fourierOracleState ψ))
+
+theorem coherentOracleStep_double {n cardAnc : Nat} (U : ScaledUnitary n 1 cardAnc)
+    (k : Nat) (ψ : CoherentBitState n cardAnc) :
+    coherentOracleStep U (doubleOracleState k ψ) = doubleOracleState k (coherentOracleStep U ψ) := by
+  funext h
+  exact U.map_doublePow k (oracleXor (tableBitOracle n h) (ψ h))
+
+/-- Independently stepped runtime, starting with the Fourier encoding of the uniform table. -/
+def fourierAdvStateAt {n cardAnc Q : Nat} (A : QuantumAdv n 1 cardAnc Q) :
+    (t : Nat) → t ≤ Q → CoherentBitState n cardAnc
+  | 0, _ => fourierOracleState (fun _ => A.init)
+  | t + 1, ht => fourierOracleStep (A.steps ⟨t, ht⟩)
+      (fourierAdvStateAt A t (Nat.le_of_succ_le ht))
+
+/-- Exact state equivalence for arbitrary superposition-query adversaries. No classical
+    address restriction and no event cover occurs in this theorem. -/
+theorem fourierAdvStateAt_eq {n cardAnc Q : Nat} (A : QuantumAdv n 1 cardAnc Q) :
+    ∀ t (ht : t ≤ Q), fourierAdvStateAt A t ht =
+      doubleOracleState (n * t) (fourierOracleState (fun h => advStateAt A (tableBitOracle n h) t ht))
+  | 0, _ => rfl
+  | t + 1, ht => by
+    simp only [fourierAdvStateAt, fourierOracleStep, fourierAdvStateAt_eq,
+      fourierOracleState_double, fourierOracleState_square, doubleOracleState_add,
+      coherentOracleStep_double, Nat.mul_succ]
+    rfl
+
+/-- Decoding the final Fourier register recovers the actual coherent execution, including
+    all oracle/output correlations; the normalization is known and oracle-independent. -/
+theorem fourierAdvStateAt_decode {n cardAnc Q : Nat} (A : QuantumAdv n 1 cardAnc Q) :
+    fourierOracleState (fourierAdvStateAt A Q (Nat.le_refl Q)) =
+      doubleOracleState (n * Q + n) (fun h => runQuantumAdv A (tableBitOracle n h)) := by
+  rw [fourierAdvStateAt_eq, fourierOracleState_double, fourierOracleState_square, doubleOracleState_add]
+  rfl
+
+/-- Observable event after decoding the oracle register. It may depend on both H and the
+    final output x (e.g. root verification). No query-address measurement is inserted. -/
+def coherentTableEventMass {n cardAnc : Nat}
+    (event : (Fin n → BitVec 1) → Fin n → Bool) (ψ : CoherentBitState n cardAnc) : Nat :=
+  oracleTableSum n (fun h => QVec.queryMassOn (event (tableBitOracle n h)) (ψ h))
+
+theorem queryMassOn_doublePow {n w cardAnc : Nat} (k : Nat) (E : Fin n → Bool)
+    (ψ : QVec n w cardAnc) : QVec.queryMassOn E (qvecDoublePow k ψ) = 4 ^ k * QVec.queryMassOn E ψ := by
+  unfold QVec.queryMassOn QVec.queryWeight qvecDoublePow
+  simp only [gaussDoublePow_norm, qsum_mul_left]
+  rw [← qsum_mul_left]
+  apply qsum_congr
+  intro x
+  cases E x <;> simp
+
+/-- Exact unnormalized observable equivalence for every event, with explicit scale. -/
+theorem fourierAdv_event_eq {n cardAnc Q : Nat} (A : QuantumAdv n 1 cardAnc Q)
+    (event : (Fin n → BitVec 1) → Fin n → Bool) :
+    coherentTableEventMass event (fourierOracleState (fourierAdvStateAt A Q (Nat.le_refl Q))) =
+      4 ^ (n * Q + n) * uniformOracleSum 1 n
+        (fun H => QVec.queryMassOn (event H) (runQuantumAdv A H)) := by
+  rw [fourierAdvStateAt_decode]
+  unfold coherentTableEventMass doubleOracleState
+  simp only [queryMassOn_doublePow]
+  rw [oracleTableSum_mul, oracleTableSum_eq_uniform n
+    (fun H => QVec.queryMassOn (event H) (runQuantumAdv A H))]
+
+end Qsag
+
+
+namespace Qsag
+set_option autoImplicit false
+
+@[reducible] def tableBit : (n : Nat) → OracleBitTable n → Fin n → Bool
+  | 0, _, x => Fin.elim0 x
+  | _ + 1, (b, _), ⟨0, _⟩ => b
+  | n + 1, (_, h), ⟨i + 1, hi⟩ => tableBit n h ⟨i, Nat.lt_of_succ_lt_succ hi⟩
+
+@[reducible] def toggleTableBit : (n : Nat) → OracleBitTable n → Fin n → OracleBitTable n
+  | 0, _, x => Fin.elim0 x
+  | _ + 1, (b, d), ⟨0, _⟩ => (!b, d)
+  | n + 1, (b, d), ⟨i + 1, hi⟩ => (b, toggleTableBit n d ⟨i, Nat.lt_of_succ_lt_succ hi⟩)
+
+@[reducible] def tableWeight : (n : Nat) → OracleBitTable n → Nat
+  | 0, _ => 0
+  | n + 1, (b, d) => (if b then 1 else 0) + tableWeight n d
+
+/-- A single queried coordinate can change the Fourier database size by at most one. -/
+theorem tableWeight_toggle_le : ∀ n (d : OracleBitTable n) (x : Fin n),
+    tableWeight n d ≤ tableWeight n (toggleTableBit n d x) + 1
+  | 0, _, x => Fin.elim0 x
+  | n + 1, (b, d), x => by
+    refine Fin.cases ?_ (fun j => ?_) x
+    · change (if b then 1 else 0) + tableWeight n d ≤
+        (if !b then 1 else 0) + tableWeight n d + 1
+      cases b <;> simp <;> omega
+    · have ih := tableWeight_toggle_le n d j
+      change (if b then 1 else 0) + tableWeight n d ≤
+        (if b then 1 else 0) + tableWeight n (toggleTableBit n d j) + 1
+      omega
+
+theorem oracleWalsh_neg : ∀ n (f : OracleBitTable n → GaussInt) (d : OracleBitTable n),
+    oracleWalsh n (fun h => (f h).neg) d = (oracleWalsh n f d).neg
+  | 0, _, _ => rfl
+  | n + 1, f, (b, d) => by
+    simp only [oracleWalsh, oracleWalsh_neg]
+    cases b <;> apply GaussInt.ext <;> simp [GaussInt.neg, GaussInt.add, GaussInt.sub] <;> omega
+
+/-- Operational Fourier query law for phase kickback, valid at superposed input addresses.
+    Multiplication by (-1)^H(x) toggles database coordinate x coherently. -/
+theorem oracleWalsh_phase_query : ∀ n (f : OracleBitTable n → GaussInt)
+    (d : OracleBitTable n) (x : Fin n),
+    oracleWalsh n (fun h => if tableBit n h x then (f h).neg else f h) d =
+      oracleWalsh n f (toggleTableBit n d x)
+  | 0, _, _, x => Fin.elim0 x
+  | n + 1, f, (b, d), x => by
+    refine Fin.cases ?_ (fun j => ?_) x
+    · change (if b then
+        (oracleWalsh n (fun h => f (false, h)) d).sub
+          (oracleWalsh n (fun h => (f (true, h)).neg) d)
+        else (oracleWalsh n (fun h => f (false, h)) d).add
+          (oracleWalsh n (fun h => (f (true, h)).neg) d)) =
+        (if !b then (oracleWalsh n (fun h => f (false, h)) d).sub
+          (oracleWalsh n (fun h => f (true, h)) d)
+        else (oracleWalsh n (fun h => f (false, h)) d).add
+          (oracleWalsh n (fun h => f (true, h)) d))
+      rw [oracleWalsh_neg]
+      cases b <;> apply GaussInt.ext <;> simp [GaussInt.neg, GaussInt.add, GaussInt.sub] <;> omega
+    · change (if b then
+        (oracleWalsh n (fun h => if tableBit n h j then (f (false, h)).neg else f (false, h)) d).sub
+          (oracleWalsh n (fun h => if tableBit n h j then (f (true, h)).neg else f (true, h)) d)
+        else (oracleWalsh n (fun h => if tableBit n h j then (f (false, h)).neg else f (false, h)) d).add
+          (oracleWalsh n (fun h => if tableBit n h j then (f (true, h)).neg else f (true, h)) d)) =
+        (if b then (oracleWalsh n (fun h => f (false, h)) (toggleTableBit n d j)).sub
+          (oracleWalsh n (fun h => f (true, h)) (toggleTableBit n d j))
+        else (oracleWalsh n (fun h => f (false, h)) (toggleTableBit n d j)).add
+          (oracleWalsh n (fun h => f (true, h)) (toggleTableBit n d j)))
+      rw [oracleWalsh_phase_query n (fun h => f (false, h)) d j,
+        oracleWalsh_phase_query n (fun h => f (true, h)) d j]
+
+theorem oracleWalsh_const : ∀ n (z : GaussInt) (d : OracleBitTable n),
+    oracleWalsh n (fun _ => z) d = if tableWeight n d = 0 then gaussDoublePow n z else GaussInt.zero
+  | 0, _, _ => rfl
+  | n + 1, z, (b, d) => by
+    simp only [oracleWalsh, oracleWalsh_const, tableWeight]
+    by_cases hd : tableWeight n d = 0
+    · rw [ite_eq_left hd]
+      cases b <;> apply GaussInt.ext <;>
+        simp [hd, gaussDoublePow, GaussInt.add, GaussInt.sub, GaussInt.zero]
+    · rw [ite_eq_right hd]
+      have hn : 0 < tableWeight n d := Nat.pos_of_ne_zero hd
+      cases b <;> apply GaussInt.ext <;>
+        simp [hd, GaussInt.add, GaussInt.sub, GaussInt.zero]
+
+/-- Uniform oracle purification starts at the empty Fourier label, without measuring H. -/
+theorem fourier_initial_empty {n cardAnc Q : Nat} (A : QuantumAdv n 1 cardAnc Q)
+    (d : OracleBitTable n) (h : tableWeight n d ≠ 0) :
+    fourierAdvStateAt A 0 (Nat.zero_le Q) d = QVec.zero n 1 cardAnc := by
+  funext x y a
+  exact (oracleWalsh_const n (A.init x y a) d).trans (ite_eq_right h)
+
+/-- The finite bit-table decoder agrees pointwise with its Boolean coordinate. -/
+theorem tableBitOracle_eq : ∀ n (h : OracleBitTable n) (x : Fin n),
+    tableBitOracle n h x = if tableBit n h x then 1#1 else 0#1
+  | 0, _, x => Fin.elim0 x
+  | n + 1, (b, h), x => by
+    refine Fin.cases ?_ (fun j => ?_) x
+    · rfl
+    · exact tableBitOracle_eq n h j
+
+/-- Multiplexer law: the computational-response query is a coherent sum of an unchanged
+    database label and a one-coordinate toggle, with exact factor two normalization. -/
+theorem oracleWalsh_mux (n : Nat) (f g : OracleBitTable n → GaussInt)
+    (d : OracleBitTable n) (x : Fin n) :
+    gaussDoublePow 1 (oracleWalsh n (fun h => if tableBit n h x then g h else f h) d) =
+      ((oracleWalsh n f d).add (oracleWalsh n g d)).add
+        ((oracleWalsh n f (toggleTableBit n d x)).sub (oracleWalsh n g (toggleTableBit n d x))) := by
+  rw [← oracleWalsh_doublePow]
+  have hp : ∀ h, gaussDoublePow 1 (if tableBit n h x then g h else f h) =
+      ((f h).add (g h)).add (if tableBit n h x then ((f h).sub (g h)).neg else (f h).sub (g h)) := by
+    intro h
+    cases tableBit n h x <;> apply GaussInt.ext <;>
+      simp [gaussDoublePow, GaussInt.add, GaussInt.sub, GaussInt.neg] <;> omega
+  rw [oracleWalsh_congr n _ _ hp, oracleWalsh_add, oracleWalsh_add,
+    oracleWalsh_phase_query, oracleWalsh_sub]
+
+/-- Fourier transform commutes with every existing adversary local gate: no operation
+    on the oracle register is smuggled into the adversary interface. -/
+theorem oracleWalsh_local {cardX w cardAnc : Nat} (U : ScaledUnitary cardX w cardAnc) :
+    ∀ k (ψ : OracleBitTable k → QVec cardX w cardAnc) (d : OracleBitTable k),
+    U.apply (fun x y a => oracleWalsh k (fun h => ψ h x y a) d) =
+      fun x y a => oracleWalsh k (fun h => U.apply (ψ h) x y a) d
+  | 0, _, () => rfl
+  | k + 1, ψ, (b, d) => by
+    cases b
+    · change U.apply (QVec.add (fun x y a => oracleWalsh k (fun h => ψ (false, h) x y a) d)
+        (fun x y a => oracleWalsh k (fun h => ψ (true, h) x y a) d)) = _
+      rw [U.map_add, oracleWalsh_local, oracleWalsh_local]
+      rfl
+    · change U.apply (QVec.sub (fun x y a => oracleWalsh k (fun h => ψ (false, h) x y a) d)
+        (fun x y a => oracleWalsh k (fun h => ψ (true, h) x y a) d)) = _
+      rw [U.map_sub, oracleWalsh_local, oracleWalsh_local]
+      rfl
+
+/-- A full XOR-response query can only use the old label and a one-coordinate toggle. -/
+theorem fourier_query_zero_of_neighbors {n cardAnc : Nat} (ψ : CoherentBitState n cardAnc)
+    (d : OracleBitTable n)
+    (hd : fourierOracleState ψ d = QVec.zero n 1 cardAnc)
+    (ht : ∀ x, fourierOracleState ψ (toggleTableBit n d x) = QVec.zero n 1 cardAnc) :
+    fourierOracleState (fun h => oracleXor (tableBitOracle n h) (ψ h)) d = QVec.zero n 1 cardAnc := by
+  funext x y a
+  have hq : (fun h => oracleXor (tableBitOracle n h) (ψ h) x y a) =
+      (fun h => if tableBit n h x then ψ h x (xorFin y 1#1) a else ψ h x y a) := by
+    funext h
+    unfold oracleXor
+    rw [tableBitOracle_eq]
+    cases tableBit n h x
+    · have hz : xorFin y 0#1 = y := by revert y; decide
+      simp only [Bool.false_eq_true, ↓reduceIte, hz]
+    · rfl
+  have hm := oracleWalsh_mux n (fun h => ψ h x y a) (fun h => ψ h x (xorFin y 1#1) a) d x
+  have hd0 := congrArg (fun v => v x y a) hd
+  have hd1 := congrArg (fun v => v x (xorFin y 1#1) a) hd
+  have ht0 := congrArg (fun v => v x y a) (ht x)
+  have ht1 := congrArg (fun v => v x (xorFin y 1#1) a) (ht x)
+  change oracleWalsh n (fun h => ψ h x y a) d = GaussInt.zero at hd0
+  change oracleWalsh n (fun h => ψ h x (xorFin y 1#1) a) d = GaussInt.zero at hd1
+  change oracleWalsh n (fun h => ψ h x y a) (toggleTableBit n d x) = GaussInt.zero at ht0
+  change oracleWalsh n (fun h => ψ h x (xorFin y 1#1) a) (toggleTableBit n d x) = GaussInt.zero at ht1
+  rw [hd0, hd1, ht0, ht1] at hm
+  change oracleWalsh n (fun h => oracleXor (tableBitOracle n h) (ψ h) x y a) d = GaussInt.zero
+  rw [hq]
+  have hr := congrArg GaussInt.re hm
+  have hi := congrArg GaussInt.im hm
+  apply GaussInt.ext <;> simp only [gaussDoublePow, GaussInt.add, GaussInt.sub, GaussInt.zero] at * <;> omega
+
+/-- Genuine coherent sparsity invariant: after t queries the Fourier truth-table register
+    has zero amplitude on labels with more than t nonzero coordinates. This is not a list
+    of queried addresses or a table of measured oracle answers. -/
+theorem fourier_coherent_support {n cardAnc Q : Nat} (A : QuantumAdv n 1 cardAnc Q) :
+    ∀ t (ht : t ≤ Q) (d : OracleBitTable n), t < tableWeight n d →
+      fourierOracleState (fun h => advStateAt A (tableBitOracle n h) t ht) d = QVec.zero n 1 cardAnc
+  | 0, _, d, hd => by
+    funext x y a
+    exact (oracleWalsh_const n (A.init x y a) d).trans (ite_eq_right (by omega))
+  | t + 1, ht, d, hd => by
+    let ψ := fun h => advStateAt A (tableBitOracle n h) t (Nat.le_of_succ_le ht)
+    have hD : fourierOracleState ψ d = QVec.zero n 1 cardAnc :=
+      fourier_coherent_support A t (Nat.le_of_succ_le ht) d (by omega)
+    have hT : ∀ x, fourierOracleState ψ (toggleTableBit n d x) = QVec.zero n 1 cardAnc := by
+      intro x
+      have hw := tableWeight_toggle_le n d x
+      exact fourier_coherent_support A t (Nat.le_of_succ_le ht) _ (by omega)
+    have hz := fourier_query_zero_of_neighbors ψ d hD hT
+    have hl := oracleWalsh_local (A.steps ⟨t, ht⟩) n
+      (fun h => oracleXor (tableBitOracle n h) (ψ h)) d
+    change (fun x y a => oracleWalsh n
+      (fun h => (A.steps ⟨t, ht⟩).apply (oracleXor (tableBitOracle n h) (ψ h)) x y a) d) = _
+    rw [← hl]
+    change (A.steps ⟨t, ht⟩).apply (fourierOracleState
+      (fun h => oracleXor (tableBitOracle n h) (ψ h)) d) = _
+    rw [hz, ScaledUnitary.apply_zero]
+
+/-- The independently executed Fourier runtime obeys the same Q-entry support cap. -/
+theorem fourier_runtime_support {n cardAnc Q : Nat} (A : QuantumAdv n 1 cardAnc Q)
+    (t : Nat) (ht : t ≤ Q) (d : OracleBitTable n) (hd : t < tableWeight n d) :
+    fourierAdvStateAt A t ht d = QVec.zero n 1 cardAnc := by
+  rw [fourierAdvStateAt_eq]
+  have hz := fourier_coherent_support A t ht d hd
+  change qvecDoublePow (n * t) (fourierOracleState
+    (fun h => advStateAt A (tableBitOracle n h) t ht) d) = _
+  rw [hz]
+  funext x y a
+  change gaussDoublePow (n * t) GaussInt.zero = GaussInt.zero
+  generalize n * t = k
+  induction k with
+  | zero => rfl
+  | succ k ih => simp only [gaussDoublePow, ih]; rfl
+
+/-- Terminal measurement of the Fourier label never reports more than Q nonzero entries.
+    Reading such a label is not reading the original oracle answers. -/
+theorem fourier_database_overflow_mass_zero {n cardAnc Q : Nat} (A : QuantumAdv n 1 cardAnc Q) :
+    oracleTableSum n (fun d => if Q < tableWeight n d then
+      QVec.stateNormSq (fourierAdvStateAt A Q (Nat.le_refl Q) d) else 0) = 0 := by
+  have h : ∀ d : OracleBitTable n, (if Q < tableWeight n d then
+      QVec.stateNormSq (fourierAdvStateAt A Q (Nat.le_refl Q) d) else 0) = 0 := by
+    intro d
+    by_cases hd : Q < tableWeight n d
+    · rw [ite_eq_left hd, fourier_runtime_support A Q (Nat.le_refl Q) d hd]
+      simp [QVec.stateNormSq, QVec.queryWeight, QVec.zero, GaussInt.normSq_zero, qsum_const]
+    · exact ite_eq_right hd
+  rw [oracleTableSum_congr n _ _ h]
+  have hz : ∀ k, oracleTableSum k (fun _ => 0) = 0 := by
+    intro k
+    induction k with
+    | zero => rfl
+    | succ k ih => simp only [oracleTableSum, ih, Nat.zero_add]
+  exact hz n
+
+def tableSame : (n : Nat) → OracleBitTable n → OracleBitTable n → Bool
+  | 0, _, _ => true
+  | n + 1, (a, d), (b, e) => (a == b) && tableSame n d e
+
+/-- Actual projective measurement branch on the Fourier database. -/
+def projectFourierLabel {n cardAnc : Nat} (d : OracleBitTable n)
+    (ψ : CoherentBitState n cardAnc) : CoherentBitState n cardAnc :=
+  fun e x y a => if tableSame n d e then ψ e x y a else GaussInt.zero
+
+theorem oracleTableSum_zero : ∀ n, oracleTableSum n (fun _ => 0) = 0
+  | 0 => rfl
+  | n + 1 => by simp only [oracleTableSum, oracleTableSum_zero, Nat.zero_add]
+
+/-- A complete computational-basis label projector picks exactly one summand. -/
+theorem oracleTableSum_single : ∀ n (d : OracleBitTable n) (f : OracleBitTable n → Nat),
+    oracleTableSum n (fun e => if tableSame n d e then f e else 0) = f d
+  | 0, (), _ => rfl
+  | n + 1, (b, d), f => by
+    cases b <;> simp only [oracleTableSum, tableSame, Bool.false_beq, Bool.true_beq,
+      Bool.false_and, Bool.true_and, Bool.not_false, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+    · rw [oracleTableSum_single, oracleTableSum_zero, Nat.add_zero]
+    · rw [oracleTableSum_zero, oracleTableSum_single, Nat.zero_add]
+
+/-- Mass of one explicit Fourier-label measurement branch. -/
+theorem projectFourierLabel_norm {n cardAnc : Nat} (d : OracleBitTable n)
+    (ψ : CoherentBitState n cardAnc) :
+    oracleTableSum n (fun e => QVec.stateNormSq (projectFourierLabel d ψ e)) = QVec.stateNormSq (ψ d) := by
+  have h : ∀ e : OracleBitTable n, QVec.stateNormSq (projectFourierLabel d ψ e) =
+      if tableSame n d e then QVec.stateNormSq (ψ e) else 0 := by
+    intro e
+    cases he : tableSame n d e
+    · simp only [projectFourierLabel, he, Bool.false_eq_true, ↓reduceIte,
+        QVec.stateNormSq, QVec.queryWeight, GaussInt.normSq_zero, qsum_const, Nat.mul_zero]
+    · have hp : projectFourierLabel d ψ e = ψ e := by
+        funext x y a
+        exact ite_eq_left he
+      rw [hp]
+      rfl
+  rw [oracleTableSum_congr n _ _ h, oracleTableSum_single]
+
+/-- Measuring the database preserves total probability, even though the correlations
+    tested by an oracle-dependent verifier can change after decoding. -/
+theorem fourier_label_measurement_total {n cardAnc : Nat} (ψ : CoherentBitState n cardAnc) :
+    oracleTableSum n (fun d => oracleTableSum n (fun e =>
+      QVec.stateNormSq (fourierOracleState (projectFourierLabel d ψ) e))) =
+      oracleTableSum n (fun e => QVec.stateNormSq (fourierOracleState ψ e)) := by
+  simp only [fourierOracleState_norm, projectFourierLabel_norm, oracleTableSum_mul]
+
+end Qsag
+
+namespace Qsag.PreprocessingGame
+set_option autoImplicit false
+
+/-- A classical adaptive online algorithm with an upper bound on queries on every branch.
+There is no restriction on the size of its code or its local workspace. -/
+inductive Program (X Y Out : Type) : Nat → Type where
+  | done {q : Nat} : Out → Program X Y Out q
+  | query {q : Nat} : X → (Y → Program X Y Out q) → Program X Y Out (q + 1)
+
+def Program.run {X Y Out : Type} {q : Nat} (H : X → Y) :
+    Program X Y Out q → Out × Nat
+  | .done out => (out, 0)
+  | .query x next => let result := (next (H x)).run H; (result.1, result.2 + 1)
+
+theorem Program.queries_le {X Y Out : Type} {q : Nat} (H : X → Y)
+    (A : Program X Y Out q) : (A.run H).2 ≤ q := by
+  induction A with
+  | done out => exact Nat.zero_le _
+  | query x next ih => exact Nat.succ_le_succ (ih (H x))
+
+/-- Unbounded offline computation with oracle-dependent classical advice. Challenge
+randomness is unavailable to preprocessing; oracle dependence is deliberately allowed. -/
+structure ClassicalAdvice (n w k bits q : Nat) (Out : Type) where
+  preprocess : (Fin n → BitVec w) → BitVec bits
+  online : BitVec bits → Fin k → Program (Fin n) (BitVec w) Out q
+
+def ClassicalAdvice.run {n w k bits q : Nat} {Out : Type}
+    (A : ClassicalAdvice n w k bits q Out) (H : Fin n → BitVec w) (salt : Fin k) : Out × Nat :=
+  (A.online (A.preprocess H) salt).run H
+
+theorem ClassicalAdvice.online_queries_le {n w k bits q : Nat} {Out : Type}
+    (A : ClassicalAdvice n w k bits q Out) (H : Fin n → BitVec w) (salt : Fin k) :
+    (A.run H salt).2 ≤ q := Program.queries_le H _
+
+/-- Counts oracle/challenge pairs. The denominator for positive k is `(2^w)^n * k`.
+The win predicate can include verification calls; those calls are NOT in the online count. -/
+def adviceWinCount {n w k bits q : Nat} {Out : Type}
+    (A : ClassicalAdvice n w k bits q Out)
+    (win : (Fin n → BitVec w) → Fin k → Out → Bool) : Nat :=
+  uniformOracleSum w n fun H => qsum k fun salt =>
+    if win H salt (A.run H salt).1 then 1 else 0
+
+def fixedAdviceWinCount {n w k bits q : Nat} {Out : Type}
+    (online : BitVec bits → Fin k → Program (Fin n) (BitVec w) Out q)
+    (win : (Fin n → BitVec w) → Fin k → Out → Bool) (advice : BitVec bits) : Nat :=
+  uniformOracleSum w n fun H => qsum k fun salt =>
+    if win H salt ((online advice salt).run H).1 then 1 else 0
+
+/-- A selected term is at most the sum, constructively and without a finite-set library. -/
+theorem selected_le_sum {m : Nat} (a : Fin m) (f : Fin m → Nat) : f a ≤ qsum m f := by
+  rw [← qsum_ite_eq m a (f a)]
+  exact qsum_le_qsum fun i => by
+    by_cases h : i = a
+    · subst i; simp
+    · simp [h]
+
+/-- Exact reduction to the sum of fixed-advice experiments. No hardness premise, no
+oracle-independent assumption on preprocessing, and no assumption of successful extraction. -/
+theorem adviceWinCount_le_sum_fixed {n w k bits q : Nat} {Out : Type}
+    (A : ClassicalAdvice n w k bits q Out)
+    (win : (Fin n → BitVec w) → Fin k → Out → Bool) :
+    adviceWinCount A win ≤ qsum (2 ^ bits) fun a =>
+      fixedAdviceWinCount A.online win (BitVec.ofFin a) := by
+  unfold adviceWinCount fixedAdviceWinCount
+  rw [← uniformOracleSum_qsum]
+  apply uniformOracleSum_le
+  intro H
+  rw [qsum_comm]
+  apply qsum_le_qsum
+  intro salt
+  have h := selected_le_sum (A.preprocess H).toFin (fun a =>
+    if win H salt ((A.online (BitVec.ofFin a) salt).run H).1 then 1 else 0)
+  exact h
+
+/-- If each oracle-independent fixed-advice experiment has count at most B, the
+oracle-dependent experiment has count at most `2^bits * B`. This deliberately loose
+classical advice union bound does not claim the literature's stronger QAI estimates. -/
+theorem adviceWinCount_le_capacity_mul {n w k bits q : Nat} {Out : Type}
+    (A : ClassicalAdvice n w k bits q Out)
+    (win : (Fin n → BitVec w) → Fin k → Out → Bool) (B : Nat)
+    (hB : ∀ a, fixedAdviceWinCount A.online win a ≤ B) :
+    adviceWinCount A win ≤ 2 ^ bits * B := by
+  apply Nat.le_trans (adviceWinCount_le_sum_fixed A win)
+  have h := qsum_le_qsum (fun a : Fin (2 ^ bits) => hB (BitVec.ofFin a))
+  simpa only [qsum_const] using h
+
+/-- The actual output pair must be distinct and collide; existence of some other pair
+is irrelevant to this verifier. -/
+def collisionWin {n w : Nat} (H : Fin n → BitVec w) (pair : Fin n × Fin n) : Bool :=
+  decide (pair.1 ≠ pair.2 ∧ H pair.1 = H pair.2)
+
+/-! ## A fresh-salt table attack with a sharp table-entry bound
+
+This strategy is a special case, not a bound on arbitrary S-bit advice. An entry
+contains one salt and one candidate. After seeing the fresh uniform salt, the online
+algorithm returns the first matching candidate or fails. It does not inspect H.
+Table capacity is number of entries, and is not mislabeled as number of advice bits.
+-/
+
+def lookup {k : Nat} {Out : Type} (salt : Fin k) : List (Fin k × Out) → Option Out
+  | [] => none
+  | (s, out) :: rest => if salt = s then some out else lookup salt rest
+
+/-- The stored-table online algorithm explicitly has budget zero. -/
+def tableOnline {k : Nat} {Out X Y : Type} (table : List (Fin k × Out)) (salt : Fin k) :
+    Program X Y (Option Out) 0 := .done (lookup salt table)
+
+theorem tableOnline_run {k : Nat} {Out X Y : Type} (H : X → Y)
+    (table : List (Fin k × Out)) (salt : Fin k) :
+    (tableOnline table salt).run H = (lookup salt table, 0) := by
+  unfold tableOnline Program.run
+  rfl
+
+def tableWin {k : Nat} {Out : Type} (check : Fin k → Out → Bool)
+    (table : List (Fin k × Out)) (salt : Fin k) : Nat :=
+  match lookup salt table with
+  | none => 0
+  | some out => if check salt out then 1 else 0
+
+theorem tableWin_cons_le {k : Nat} {Out : Type} (check : Fin k → Out → Bool)
+    (s : Fin k) (out : Out) (rest : List (Fin k × Out)) (salt : Fin k) :
+    tableWin check ((s, out) :: rest) salt ≤
+      (if salt = s then 1 else 0) + tableWin check rest salt := by
+  by_cases h : salt = s
+  · simp only [tableWin, lookup, h, ↓reduceIte]
+    split <;> omega
+  · simp [tableWin, lookup, h]
+
+/-- For every fixed oracle-dependent table, at most its length of the fresh salts win.
+No independence of table contents from the oracle is required. -/
+theorem freshSalt_table_bound {k : Nat} {Out : Type} (check : Fin k → Out → Bool)
+    (table : List (Fin k × Out)) : qsum k (tableWin check table) ≤ table.length := by
+  induction table with
+  | nil =>
+    change qsum k (fun _ => 0) ≤ 0
+    rw [qsum_const, Nat.mul_zero]
+    exact Nat.le_refl 0
+  | cons entry rest ih =>
+    have h := qsum_le_qsum (tableWin_cons_le check entry.1 entry.2 rest)
+    rw [qsum_add, qsum_ite_eq] at h
+    exact Nat.le_trans h (by simp only [List.length_cons]; omega)
+
+/-- Averaging the pointwise salt bound over the actual uniform oracle enumeration.
+For positive k this is probability ≤ entries/k, even with unbounded preprocessing. -/
+theorem freshSalt_preprocessed_table_bound {n w k : Nat} {Out : Type}
+    (preprocess : (Fin n → BitVec w) → List (Fin k × Out))
+    (check : (Fin n → BitVec w) → Fin k → Out → Bool) (entries : Nat)
+    (capacity : ∀ H, (preprocess H).length ≤ entries) :
+    uniformOracleSum w n (fun H => qsum k (tableWin (check H) (preprocess H))) ≤
+      (2 ^ w) ^ n * entries := by
+  rw [← uniformOracleSum_const w n entries]
+  exact uniformOracleSum_le w n _ _ fun H =>
+    Nat.le_trans (freshSalt_table_bound (check H) (preprocess H)) (capacity H)
+
+
+end Qsag.PreprocessingGame
+
+
+namespace Qsag
+set_option autoImplicit false
+set_option exponentiation.threshold 512
+
+def publicSpnPack (x : PublicSpnState) : BitVec 256 := x.2 ++ x.1
+
+def publicSpnUnpack (x : BitVec 256) : PublicSpnState :=
+  (x.extractLsb' 0 128, x.extractLsb' 128 128)
+
+theorem publicSpnUnpack_pack (x : PublicSpnState) :
+    publicSpnUnpack (publicSpnPack x) = x := by
+  simp only [publicSpnUnpack, publicSpnPack, BitVec.extractLsb'_append_eq_right,
+    BitVec.extractLsb'_append_eq_left]
+
+theorem publicSpnPack_unpack (x : BitVec 256) :
+    publicSpnPack (publicSpnUnpack x) = x := by
+  exact BitVec.extractLsb'_append_extractLsb'
+
+def publicSpnQueryCode (direction : PublicPermutationDirection) (x : PublicSpnState) :
+    Fin (2 ^ 257) :=
+  ((match direction with | .forward => 0#1 | .inverse => 1#1) ++ publicSpnPack x).toFin
+
+def publicSpnQueryDecode (code : Fin (2 ^ 257)) : PublicPermutationDirection × PublicSpnState :=
+  let word := BitVec.ofFin code
+  (if word.extractLsb' 256 1 = 0#1 then .forward else .inverse,
+    publicSpnUnpack (word.extractLsb' 0 256))
+
+theorem publicSpnQueryDecode_code (direction : PublicPermutationDirection) (x : PublicSpnState) :
+    publicSpnQueryDecode (publicSpnQueryCode direction x) = (direction, x) := by
+  have h : (1#1 : BitVec 1) ≠ 0#1 := by decide
+  cases direction <;>
+    simp only [publicSpnQueryDecode, publicSpnQueryCode, BitVec.ofFin_toFin,
+      BitVec.extractLsb'_append_eq_left, BitVec.extractLsb'_append_eq_right,
+      publicSpnUnpack_pack, h, ↓reduceIte]
+
+/-- Both operations exposed as one bitstring oracle table. -/
+def publicSpnOracleTable (p : PublicPermutation PublicSpnState)
+    (code : Fin (2 ^ 257)) : BitVec 256 :=
+  let query := publicSpnQueryDecode code
+  publicSpnPack (publicPermutationQuery p query.1 query.2)
+
+theorem publicSpnOracleTable_code (p : PublicPermutation PublicSpnState)
+    (direction : PublicPermutationDirection) (x : PublicSpnState) :
+    publicSpnOracleTable p (publicSpnQueryCode direction x) =
+      publicSpnPack (publicPermutationQuery p direction x) := by
+  unfold publicSpnOracleTable
+  rw [publicSpnQueryDecode_code]
+
+/-- Coherent XOR query, including a coherent direction register. -/
+def publicSpnCoherentQuery {anc : Nat} (p : PublicPermutation PublicSpnState)
+    (state : QVec (2 ^ 257) 256 anc) : QVec (2 ^ 257) 256 anc :=
+  oracleXor (publicSpnOracleTable p) state
+
+theorem publicSpnCoherentQuery_involutive {anc : Nat} (p : PublicPermutation PublicSpnState)
+    (state : QVec (2 ^ 257) 256 anc) :
+    publicSpnCoherentQuery p (publicSpnCoherentQuery p state) = state :=
+  oracleXor_involutive (publicSpnOracleTable p) state
+
+theorem publicSpnCoherentQuery_isometry {anc : Nat} (p : PublicPermutation PublicSpnState)
+    (state : QVec (2 ^ 257) 256 anc) :
+    QVec.stateNormSq (publicSpnCoherentQuery p state) = QVec.stateNormSq state :=
+  oracleXor_isometry (publicSpnOracleTable p) state
+
+/-- The target is given before the online run. This family is fixed before sampling p;
+there is no extra oracle-correlated advice parameter. `q` counts forward/inverse
+primitive calls together; a superposition of directions costs one call. -/
+abbrev PublicSpnPreimageAdversary (anc q : Nat) :=
+  PublicSpnState → QuantumAdv (2 ^ 257) 256 anc q
+
+/-- Fresh-image challenge: sample x, compute target=P(x) XOR x, then run the adversary
+on target with BOTH primitive directions. One sampler forward call is additional to q.
+The final target register is measured as the proposed preimage; the input and ancilla
+registers are ignored. The verifier makes one further forward call. -/
+def publicSpnPreimageFinalState {anc q : Nat} (p : PublicPermutation PublicSpnState)
+    (adversary : PublicSpnPreimageAdversary anc q) (challenge : PublicSpnState) :
+    QVec (2 ^ 257) 256 anc :=
+  runQuantumAdv (adversary (publicSpnFeedForward p challenge)) (publicSpnOracleTable p)
+
+/-- Unnormalized Born mass of the actual feed-forward preimage relation. -/
+def publicSpnPreimageMass {anc q : Nat} (p : PublicPermutation PublicSpnState)
+    (adversary : PublicSpnPreimageAdversary anc q) (challenge : PublicSpnState) : Nat :=
+  let state := publicSpnPreimageFinalState p adversary challenge
+  qsum (2 ^ 257) (fun input => qsum (2 ^ 256) (fun output => qsum anc (fun auxiliary =>
+    if publicSpnFeedForward p (publicSpnUnpack (BitVec.ofFin output)) =
+        publicSpnFeedForward p challenge
+    then GaussInt.normSq (state input output auxiliary) else 0)))
+
+def publicSpnPreimageProbability {anc q : Nat} (p : PublicPermutation PublicSpnState)
+    (adversary : PublicSpnPreimageAdversary anc q) (challenge : PublicSpnState) : RatBound where
+  num := publicSpnPreimageMass p adversary challenge
+  den := QVec.stateNormSq (publicSpnPreimageFinalState p adversary challenge)
+  h_pos := runQuantumAdv_normSq_pos _ _
+
+/-- Uniform fresh 256-bit input challenge, sampled after the public primitive.
+Normalization is performed per challenge before averaging, since target-dependent
+scaled circuits may have different squared norms. -/
+def publicSpnFreshPreimageProbability {anc q : Nat} (p : PublicPermutation PublicSpnState)
+    (adversary : PublicSpnPreimageAdversary anc q) : RatBound :=
+  RatBound.mul (RatBound.invPow2 256) (RatBound.sumList (List.ofFn
+    (fun challenge : Fin (2 ^ 256) => publicSpnPreimageProbability p adversary
+      (publicSpnUnpack (BitVec.ofFin challenge)))))
+
+/-- Exact experiment for a finite primitive ensemble: select an entry uniformly,
+then a fresh uniform input, then run the fixed adversary family. The same adversary
+is used for every primitive. Repeated entries carry repeated probability weight.
+This does NOT assert the supplied ensemble is uniform over all permutations; such
+an ideal sampler and its uniformity certificate remain separate work. -/
+def publicSpnEnsemblePreimageProbability {anc q : Nat}
+    (primitives : List (PublicPermutation PublicSpnState)) (nonempty : 0 < primitives.length)
+    (adversary : PublicSpnPreimageAdversary anc q) : RatBound :=
+  RatBound.mul ⟨1, primitives.length, nonempty⟩
+    (RatBound.sumList (primitives.map (fun p => publicSpnFreshPreimageProbability p adversary)))
+
+/-- The game probability is normalized even when the adversary uses scaled unitaries. -/
+theorem publicSpnPreimageMass_le_norm {anc q : Nat} (p : PublicPermutation PublicSpnState)
+    (adversary : PublicSpnPreimageAdversary anc q) (challenge : PublicSpnState) :
+    publicSpnPreimageMass p adversary challenge ≤
+      QVec.stateNormSq (publicSpnPreimageFinalState p adversary challenge) := by
+  unfold publicSpnPreimageMass QVec.stateNormSq QVec.queryWeight
+  apply qsum_le_qsum
+  intro input
+  apply qsum_le_qsum
+  intro output
+  apply qsum_le_qsum
+  intro auxiliary
+  split
+  · exact Nat.le_refl _
+  · exact Nat.zero_le _
+
+theorem publicSpnPreimageProbability_le_one {anc q : Nat} (p : PublicPermutation PublicSpnState)
+    (adversary : PublicSpnPreimageAdversary anc q) (challenge : PublicSpnState) :
+    RatBound.le (publicSpnPreimageProbability p adversary challenge) RatBound.one := by
+  simpa only [RatBound.le, publicSpnPreimageProbability, RatBound.one_num, RatBound.one_den,
+    Nat.mul_one, Nat.one_mul] using publicSpnPreimageMass_le_norm p adversary challenge
+
+/-- Concrete single-address experiment. Public address parameters are given to the
+adversary before its online run; the function family and code may depend on them.
+This does not model extra queries to OTHER chain addresses or a full signature game. -/
+def publicChainPreimageProbability {anc q : Nat}
+    (hash32 : List UInt8 → List (List UInt8) → List UInt8) (address : PublicChainAddress)
+    (adversary : PublicChainAddress → PublicSpnPreimageAdversary anc q) : RatBound :=
+  publicSpnFreshPreimageProbability (publicChainPermutation hash32 address) (adversary address)
+
+end Qsag
