@@ -8,10 +8,11 @@ description = "Threshold PQ Verifiable Credentials, 2-Round Lattice VOPRF, Unlin
 
 [dependencies]
 qsag-verified = { path = "../../aeneas/qsag-verified", default-features = false }
+qsag-core = { path = "../qsag-core", default-features = false }
 qsag-asm = { path = "../qsag-asm", default-features = false }
 qsag-accel = { path = "../qsag-accel", default-features = false, features = ["alloc"] }
 qsag-addr = { path = "../qsag-addr" }
 qsag-policy = { path = "../qsag-policy" }
 
 [features]
-std = ["qsag-asm/std"]
+std = ["qsag-asm/std", "qsag-core/std"]

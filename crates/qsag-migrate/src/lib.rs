@@ -5,14 +5,17 @@
 //! (`(2/3)^438 < 2^-256` classical soundness error; generic Grover search over the
 //! challenge space costs `> 2^128` oracle iterations).
 //!
-//! The RSS path of the distributed outer prover (`co_zk_mpc`) enforces active 1-of-3 malicious
-//! multiplication verification (per-flush `< 2^-186` prime-field and `< 2^-244`
-//! Boolean `AND` soundness with two-round transcript-bound coin-flipping) and pre-open circuit
-//! output-zero verification (`all_outputs_zero`) over confidential authenticated
-//! pairwise channels, providing non-identifiable abort against one actively
+//! The distributed outer prover (`co_zk_mpc`) runs on one of two actively secure
+//! engines. Three custodians use replicated 2-of-3 sharing (`outer_mpc`): active
+//! 1-of-3 malicious multiplication verification (per-flush `< 2^-186` prime-field and
+//! `< 2^-244` Boolean `AND` soundness with two-round transcript-bound coin-flipping)
+//! and pre-open circuit output-zero verification (`all_outputs_zero`) over confidential
+//! authenticated pairwise channels, with non-identifiable abort against one actively
 //! corrupted physical custodian (`2`-of-`3` collusion reconstructs the witness).
-//! General `(t,n)` Shamir and n-of-n additive custody use the distinct,
-//! semi-honest trusted-preprocessing backend in `threshold_mpc`.
+//! General `(t,n)` Shamir and n-of-n additive custody use MAC-authenticated additive
+//! sharing (`threshold_mpc`): every opened value passes a commit-then-open batch MAC
+//! check (`< 2^-126` per check) against any strict subset of the quorum, on
+//! witness-independent preprocessing (`threshold_prep`).
 //! See `SECURITY.md` for exact security bounds and assumptions.
 //!
 extern crate alloc;
@@ -42,12 +45,14 @@ pub use pallas::{
 };
 mod boolean_hash;
 mod circuit;
+mod limbs;
 pub mod co_zk_mpc;
 mod ownership;
 pub use co_zk_mpc::CoZkCustodianShare;
 mod batch_hash;
 mod outer_mpc;
 pub mod threshold_mpc;
+pub mod threshold_prep;
 mod parallel;
 mod secret;
 mod tape_sponge;

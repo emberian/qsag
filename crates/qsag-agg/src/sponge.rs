@@ -15,65 +15,25 @@ use crate::field::{Goldilocks, GoldilocksExt4, GoldilocksOps as _};
 
 /// Push canonical unsigned LEB128 integer `n` into `out`.
 #[inline]
-pub fn push_leb128(out: &mut Vec<u8>, mut n: usize) {
-    loop {
-        if n < 128 {
-            out.push(n as u8);
-            break;
-        } else {
-            out.push(0x80 | ((n & 0x7F) as u8));
-            n >>= 7;
-        }
-    }
+pub fn push_leb128(out: &mut Vec<u8>, n: usize) {
+    out.extend_from_slice(&qsag_core::sponge::leb128(n));
 }
 
 /// Self-delimiting multi-field byte frame `leb128(fields.len()) || leb128(|f_0|) || f_0 || ...`,
 /// matching `Qsag.encodeMultiFrame` (`encodeMultiFrame_injective`).
-pub fn encode_multi_frame(fields: &[&[u8]]) -> Vec<u8> {
-    let total_payload: usize = fields.iter().map(|f| f.len() + 2).sum();
-    let mut out = Vec::with_capacity(4 + total_payload);
-    push_leb128(&mut out, fields.len());
-    for f in fields {
-        push_leb128(&mut out, f.len());
-        out.extend_from_slice(f);
-    }
-    out
-}
+pub use qsag_core::sponge::encode_multi_frame;
 
 // ============================================================================
 // 2. Full 24-Round `Keccak-f[1600]`, `SHAKE256`, and `cSHAKE256`
 // ============================================================================
 
-const KECCAK_RC: [u64; 24] = [
-    0x0000_0000_0000_0001,
-    0x0000_0000_0000_8082,
-    0x8000_0000_0000_808A,
-    0x8000_0000_8000_8000,
-    0x0000_0000_0000_808B,
-    0x0000_0000_8000_0001,
-    0x8000_0000_8000_8081,
-    0x8000_0000_0000_8009,
-    0x0000_0000_0000_008A,
-    0x0000_0000_0000_0088,
-    0x0000_0000_8000_8009,
-    0x0000_0000_8000_000A,
-    0x0000_0000_8000_808B,
-    0x8000_0000_0000_008B,
-    0x8000_0000_0000_8089,
-    0x8000_0000_0000_8003,
-    0x8000_0000_0000_8002,
-    0x8000_0000_0000_0080,
-    0x0000_0000_0000_800A,
-    0x8000_0000_8000_000A,
-    0x8000_0000_8000_8081,
-    0x8000_0000_0000_8080,
-    0x0000_0000_8000_0001,
-    0x8000_0000_8000_8008,
-];
+use qsag_core::sponge::KECCAK_ROUND_CONSTANTS as KECCAK_RC;
 
 const SHAKE256_RATE: usize = 136;
 
 /// Full 24-round `Keccak-f[1600]` permutation (usable in both `const` evaluation and runtime).
+/// This is the unrolled kernel behind the Merkle and transcript hashing of the prover;
+/// `qsag_core::sponge::keccak_f1600` is the specification it is tested against.
 #[inline(always)]
 pub const fn keccak_f1600(state: &mut [u64; 25]) {
     let mut s0 = state[0];
@@ -232,58 +192,9 @@ pub const fn keccak_f1600(state: &mut [u64; 25]) {
     state[24] = s24;
 }
 
-/// Precompute the post-prefix 1600-bit sponge state for NIST SP 800-185
-/// `cSHAKE256("", input, L, customization)` at compile time (`1 <= customization.len() <= 128`),
-/// eliminating the redundant static-prefix `keccak_f1600` call across millions of Merkle/transcript
-/// hashes while remaining 100% bit-for-bit identical to [`cshake256_into`].
-pub const fn cshake256_static_midstate(customization: &[u8]) -> [u64; 25] {
-    assert!(
-        !customization.is_empty() && customization.len() <= 128,
-        "cshake256_static_midstate requires 1..=128 byte customization"
-    );
-    let mut pad_blk = [0u8; SHAKE256_RATE];
-    // `left_encode(136)` = `[1, 136]`, `encode_string("")` = `[1, 0]`
-    pad_blk[0] = 1;
-    pad_blk[1] = SHAKE256_RATE as u8;
-    pad_blk[2] = 1;
-    pad_blk[3] = 0;
-    let bit_len = (customization.len() as u64) * 8;
-    let mut p = 4usize;
-    if bit_len < 256 {
-        pad_blk[p] = 1;
-        pad_blk[p + 1] = bit_len as u8;
-        p += 2;
-    } else {
-        pad_blk[p] = 2;
-        pad_blk[p + 1] = (bit_len >> 8) as u8;
-        pad_blk[p + 2] = (bit_len & 0xFF) as u8;
-        p += 3;
-    }
-    let mut idx = 0usize;
-    while idx < customization.len() {
-        pad_blk[p + idx] = customization[idx];
-        idx += 1;
-    }
-
-    let mut state = [0u64; 25];
-    let mut lane = 0usize;
-    while lane < 17 {
-        let base = 8 * lane;
-        state[lane] = u64::from_le_bytes([
-            pad_blk[base],
-            pad_blk[base + 1],
-            pad_blk[base + 2],
-            pad_blk[base + 3],
-            pad_blk[base + 4],
-            pad_blk[base + 5],
-            pad_blk[base + 6],
-            pad_blk[base + 7],
-        ]);
-        lane += 1;
-    }
-    keccak_f1600(&mut state);
-    state
-}
+/// Post-prefix sponge state of `cSHAKE256("", input, L, customization)` for a customization
+/// of `1..=128` bytes, evaluated at compile time; bit-identical to [`cshake256_into`].
+pub use qsag_core::sponge::keccak::cshake256_static_midstate;
 
 /// Canonical `cSHAKE256` customization string for `Hem` Merkle-Canopy leaves, nodes, and salts.
 pub const CANOPY_CUSTOM: &[u8] = b"QSAG.PCS.CANOPY/v2";
@@ -586,37 +497,6 @@ fn xor_slice_136(state: &mut [u64; 25], block: &[u8]) {
     }
 }
 
-fn sp800_185_left_encode(mut val: u64) -> Vec<u8> {
-    if val == 0 {
-        return vec![1u8, 0u8];
-    }
-    let mut rev = Vec::with_capacity(8);
-    while val > 0 {
-        rev.push((val & 0xFF) as u8);
-        val >>= 8;
-    }
-    rev.reverse();
-    let mut out = Vec::with_capacity(1 + rev.len());
-    out.push(rev.len() as u8);
-    out.extend_from_slice(&rev);
-    out
-}
-
-fn sp800_185_encode_string(s: &[u8]) -> Vec<u8> {
-    let bit_len = (s.len() as u64) * 8;
-    let mut out = sp800_185_left_encode(bit_len);
-    out.extend_from_slice(s);
-    out
-}
-
-fn sp800_185_bytepad(data: &[u8], width: usize) -> Vec<u8> {
-    let mut out = sp800_185_left_encode(width as u64);
-    out.extend_from_slice(data);
-    let pad = (width - (out.len() % width)) % width;
-    out.resize(out.len() + pad, 0u8);
-    out
-}
-
 /// NIST FIPS 202 `SHAKE256(input, 8 * out.len())`.
 #[inline]
 pub fn shake256_into(input: &[u8], out: &mut [u8]) {
@@ -651,9 +531,7 @@ pub fn cshake256_into(customization: &[u8], input: &[u8], out: &mut [u8]) {
         pad_blk[p..p + customization.len()].copy_from_slice(customization);
         absorb_and_squeeze_keccak(&pad_blk, input, 0x04, out);
     } else {
-        let mut s = sp800_185_encode_string(&[]);
-        s.extend_from_slice(&sp800_185_encode_string(customization));
-        let prefix = sp800_185_bytepad(&s, SHAKE256_RATE);
+        let prefix = qsag_core::sponge::cshake256_customization_prefix(customization);
         absorb_and_squeeze_keccak(&prefix, input, 0x04, out);
     }
 }
@@ -670,26 +548,15 @@ pub fn cshake256_32(customization: &[u8], input: &[u8]) -> [u8; 32] {
 // 3. Width-12 `Poseidon2` over `Goldilocks` and `GoldilocksExt2`
 // ============================================================================
 
-/// Domain IV `"POS2_GL1"` (`0x504F_5332_5F47_4C31`), matching `Qsag.poseidon2ConstIV`.
-pub const POSEIDON2_CONST_IV: u64 = 0x504F_5332_5F47_4C31;
+pub use qsag_core::sponge::{POSEIDON2_CONST_IV, poseidon2_rc_bijection, poseidon2_sbox7};
+use qsag_core::sponge::poseidon2_const_at as poseidon2_const_compute;
+
 pub const POSEIDON2_HALF_EXT_ROUNDS: usize = 4;
 pub const POSEIDON2_INT_ROUNDS: usize = 22;
-
-#[inline]
-pub const fn poseidon2_rc_bijection(x: u64) -> u64 {
-    let z0 = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    let z1 = (z0 ^ (z0 >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    let z2 = (z1 ^ (z1 >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z2 ^ (z2 >> 31)
-}
-
-#[inline]
-const fn poseidon2_const_compute(tag: u64, round: u64, lane: u64) -> Goldilocks {
-    let w = poseidon2_rc_bijection(
-        poseidon2_rc_bijection(poseidon2_rc_bijection(POSEIDON2_CONST_IV ^ tag) ^ round) ^ lane,
-    );
-    Goldilocks::from_u64_reduced(w)
-}
+const _: () = assert!(
+    POSEIDON2_HALF_EXT_ROUNDS as u64 == qsag_core::sponge::POSEIDON2_HALF_EXTERNAL_ROUNDS
+        && POSEIDON2_INT_ROUNDS as u64 == qsag_core::sponge::POSEIDON2_INTERNAL_ROUNDS
+);
 
 const POSEIDON2_RC_EXT0: [[Goldilocks; 12]; POSEIDON2_HALF_EXT_ROUNDS] = {
     let mut tbl = [[Goldilocks::ZERO; 12]; POSEIDON2_HALF_EXT_ROUNDS];
@@ -743,14 +610,6 @@ pub const fn poseidon2_const_at(tag: u64, round: u64, lane: u64) -> Goldilocks {
         }
         _ => poseidon2_const_compute(tag, round, lane),
     }
-}
-
-#[inline(always)]
-pub const fn poseidon2_sbox7(x: Goldilocks) -> Goldilocks {
-    let x2 = x.const_mul(x);
-    let x3 = x2.const_mul(x);
-    let x4 = x2.const_mul(x2);
-    x3.const_mul(x4)
 }
 
 /// Unrolled 4-lane butterfly for `M_4 = circ(2, 3, 1, 1)` over `Goldilocks` (`9` adds, `0` muls).
@@ -1921,6 +1780,68 @@ mod internal_matrix_tests {
         }
     }
 
+    /// The raw-word sponge against the lane-by-lane definition, for every payload length that
+    /// changes the block layout (empty, partial first block, exact blocks, partial tail).
+    #[test]
+    fn limb_sponge_matches_layered_definition() {
+        let top = crate::field::GOLDILOCKS_PRIME - 1;
+        let cap: [Goldilocks; 4] =
+            core::array::from_fn(|i| Goldilocks::from_u64_reduced(top - 3 * i as u64));
+        for len in 0..=41usize {
+            let limbs: Vec<Goldilocks> = (0..len)
+                .map(|i| {
+                    let x = (i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                    Goldilocks::from_u64_reduced(if i % 5 == 0 { top } else { x })
+                })
+                .collect();
+            for domain in [0u64, P2_DOMAIN_CANOPY_LEAF_R0, u64::MAX] {
+                let mut st = [Goldilocks::ZERO; 12];
+                st[8..].copy_from_slice(&cap);
+                let stream: Vec<Goldilocks> = [
+                    Goldilocks::from_u64_reduced(domain),
+                    Goldilocks::from_u64_reduced(len as u64),
+                ]
+                .into_iter()
+                .chain(limbs.iter().copied())
+                .collect();
+                for block in stream.chunks(8) {
+                    for (lane, &v) in st.iter_mut().zip(block) {
+                        *lane += v;
+                    }
+                    poseidon2_perm12_layered(&mut st);
+                }
+                assert_eq!(
+                    poseidon2_sponge_hash_limbs(domain, cap, &limbs),
+                    [st[0], st[1], st[2], st[3]],
+                    "len {len}, domain {domain:#x}"
+                );
+            }
+        }
+    }
+
+    /// The compression against `perm.b0 + in0 + 2 in1 + 4 tweak` computed lane by lane.
+    #[test]
+    fn compression_matches_layered_definition() {
+        let top = crate::field::GOLDILOCKS_PRIME - 1;
+        for seed in [0u64, 1, top, 0x0123_4567_89AB_CDEF] {
+            let st: [Goldilocks; 12] = core::array::from_fn(|i| {
+                Goldilocks::from_u64_reduced(seed.wrapping_sub(i as u64).wrapping_mul(i as u64 | 1))
+            });
+            let mut perm = st;
+            poseidon2_perm12_layered(&mut perm);
+            let four = Goldilocks::from_u64_reduced(4);
+            let expected: [Goldilocks; 4] = core::array::from_fn(|i| {
+                perm[i] + st[i] + st[4 + i].const_mul(Goldilocks::TWO) + st[8 + i].const_mul(four)
+            });
+            let got = poseidon2_compress12_ff(
+                st[..4].try_into().unwrap(),
+                st[4..8].try_into().unwrap(),
+                st[8..].try_into().unwrap(),
+            );
+            assert_eq!(got, expected);
+        }
+    }
+
     /// Lanes at the top of the canonical range and long iteration chains exercise every
     /// carry and borrow path of the raw-word kernel.
     #[test]
@@ -1963,6 +1884,22 @@ mod internal_matrix_tests {
         let (core_ns, c) = time(&|st| qsag_core::sponge::poseidon2_perm12(st));
         assert_eq!(a, c);
         std::println!("PERM12 agg_ns={agg_ns:.1} core_ns={core_ns:.1}");
+    }
+
+    #[test]
+    fn keccak_kernel_matches_the_qsag_core_permutation() {
+        let mut state: [u64; 25] =
+            core::array::from_fn(|i| 0x9E37_79B9_7F4A_7C15u64.wrapping_mul(i as u64 + 1));
+        for _ in 0..16 {
+            let mut spec = state;
+            keccak_f1600(&mut state);
+            qsag_core::sponge::keccak_f1600(&mut spec);
+            assert_eq!(state, spec);
+        }
+        assert_eq!(
+            cshake256_32(&[b'x'; 200], b"long customization"),
+            qsag_core::sponge::cshake256_32(&[b'x'; 200], b"long customization")
+        );
     }
 
     #[test]

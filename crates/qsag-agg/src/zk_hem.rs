@@ -17,13 +17,19 @@
 //! * [`eval_all`], [`interp`]: `q` blinding coefficients against `q` opened points
 //!   (`evalAll`, `interp`, `blindingEvalBij`).
 //!
-//! This module is the algebra of the masks and their verifier checks. It does not commit
-//! the mask polynomial or the companion word and does not run WHIR on the blended word; a
-//! caller that sends `g_sum` or `sigma` without first committing `g` and `C` gets no
-//! soundness (see the `uncommitted_*` tests).
+//! This module is the algebra of the masks and their verifier checks; a caller that sends
+//! `g_sum` or `sigma` without first committing `g` and `C` gets no soundness (see the
+//! `uncommitted_*` tests). [`protocol`] is the committed protocol built from it: masks and
+//! companions are committed with the witness and WHIR runs on the blended word only.
+//! [`relation`] is the constraint system it proves.
 
 use alloc::vec;
 use alloc::vec::Vec;
+
+pub mod blind_vc;
+pub mod multisig;
+pub mod protocol;
+pub mod relation;
 
 use crate::field::{
     Goldilocks, GoldilocksExt2, GoldilocksExt2Ops as _, GoldilocksExt4, GoldilocksOps as _,

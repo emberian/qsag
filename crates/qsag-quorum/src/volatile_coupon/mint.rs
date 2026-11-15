@@ -346,7 +346,8 @@ mod tests {
         let (keys, _) =
             qsag_core::keccak_mpc::run_dealerless_rss_dkg_2of3([39; 32], 32, &mut rngs).unwrap();
         let mut engine = qsag_core::rss256::Rss256Engine::new([40; 32], keys, rngs).unwrap();
-        let params = BaggyParams::SHA3_128F;
+        // Version 2: the root certificate is a PORS+FP signature.
+        let params = BaggyParams::SHA3_128F_V2;
         let (parent, binding) = qsag_core::baggy::baggy_keygen_mpc(
             &mut engine,
             &params,

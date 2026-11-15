@@ -1159,7 +1159,9 @@ pub fn ct_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
     #[cfg(target_arch = "aarch64")]
     {
         let _dit_guard = cpuid::ensure_aarch64_dit_enabled();
-        unsafe { aarch64_asm::qsag_asm_ct_eq_32_aarch64(a.as_ptr(), b.as_ptr()) == 1 }
+        // The kernel returns exactly 0 or 1. Take the low bit: `== 1` compiles to
+        // `cmp; cset`, a flag-driven selection on the secret-derived verdict.
+        unsafe { aarch64_asm::qsag_asm_ct_eq_32_aarch64(a.as_ptr(), b.as_ptr()) & 1 != 0 }
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {

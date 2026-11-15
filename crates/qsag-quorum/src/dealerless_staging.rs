@@ -670,6 +670,58 @@ impl Drop for PairwiseSubfieldVole {
 
 type AuthBitRowsPair = (SecretBuffer<Vec<u128>>, SecretBuffer<Vec<u128>>);
 
+/// Run `job` once for every pairwise VOLE instance and return the results in instance
+/// order. Each instance gets RNGs split off the private streams of its owner and its
+/// holder, so the instances share no state; where threads exist they run concurrently.
+/// The pairwise correlated-OT extensions and their hashing are the bulk of triple
+/// generation, and a committee of `m` members has `m (m - 1)` of them.
+fn run_pairs<T: Send>(
+    pair_voles: &mut [PairwiseSubfieldVole],
+    party_rngs: &mut [PartyPrivateRng],
+    job: &(
+         impl Fn(
+        &mut PairwiseSubfieldVole,
+        &mut PartyPrivateRng,
+        &mut PartyPrivateRng,
+    ) -> Result<T, DealerlessStagingError>
+         + Sync
+     ),
+) -> Result<Vec<T>, DealerlessStagingError> {
+    let mut split = |party: usize| {
+        let mut seed = party_rngs[party].next_bytes32();
+        let rng = PartyPrivateRng::from_seed(seed, b"QSAG.STAGING.PAIR.RNG/v1");
+        wipe_bytes32(&mut seed);
+        rng
+    };
+    let mut work: Vec<(&mut PairwiseSubfieldVole, PartyPrivateRng, PartyPrivateRng)> = pair_voles
+        .iter_mut()
+        .map(|pv| {
+            let (owner, holder) = (split(pv.owner), split(pv.holder));
+            (pv, owner, holder)
+        })
+        .collect();
+    #[cfg(any(test, feature = "std"))]
+    if work.len() > 1 {
+        return std::thread::scope(|scope| {
+            let handles: Vec<_> = work
+                .iter_mut()
+                .map(|(pv, owner, holder)| scope.spawn(move || job(pv, owner, holder)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                })
+                .collect()
+        });
+    }
+    work.iter_mut()
+        .map(|(pv, owner, holder)| job(pv, owner, holder))
+        .collect()
+}
+
 impl PairwiseSubfieldVole {
     /// Authenticate `payload_words` `u64` words owned by `self.owner` under `self.holder`'s
     /// 128-bit `delta_holder` key via KOS15 correlated OT extension (`+256` sacrificial bits).
@@ -1200,27 +1252,26 @@ impl CommitteeBeaverReservoir {
             }
         }
 
-        for pv in &mut self.pair_voles {
-            let (owner_rng, holder_rng) = if pv.owner < pv.holder {
-                let (l, r) = party_rngs.split_at_mut(pv.holder);
-                (&mut l[pv.owner], &mut r[0])
-            } else {
-                let (l, r) = party_rngs.split_at_mut(pv.owner);
-                (&mut r[0], &mut l[pv.holder])
-            };
-            let (mut t_rows, mut q_rows) = pv.extend_authenticated_bits(
-                self.committee,
-                &self.session_id,
-                &words_per_party[pv.owner],
-                owner_rng,
-                holder_rng,
-            )?;
+        let (committee, session_id) = (self.committee, self.session_id);
+        let rows = run_pairs(
+            &mut self.pair_voles,
+            party_rngs,
+            &|pv, owner_rng, holder_rng| {
+                let (t_rows, q_rows) = pv.extend_authenticated_bits(
+                    committee,
+                    &session_id,
+                    &words_per_party[pv.owner],
+                    owner_rng,
+                    holder_rng,
+                )?;
+                Ok((pv.owner, pv.holder, t_rows, q_rows))
+            },
+        )?;
+        for (owner, holder, t_rows, q_rows) in rows {
             for k in 0..nbits {
-                macs[pv.owner][k / 64][k % 64] ^= t_rows[k];
-                macs[pv.holder][k / 64][k % 64] ^= q_rows[k];
+                macs[owner][k / 64][k % 64] ^= t_rows[k];
+                macs[holder][k / 64][k % 64] ^= q_rows[k];
             }
-            wipe_u128s(&mut t_rows);
-            wipe_u128s(&mut q_rows);
         }
         Ok(macs)
     }
@@ -1305,93 +1356,88 @@ impl CommitteeBeaverReservoir {
             mask_q_rows: SecretBuffer<Vec<u128>>,
         }
 
-        let mut pair_states = Vec::with_capacity(self.pair_voles.len());
-        for pv in &mut self.pair_voles {
-            let (owner_rng, holder_rng) = if pv.owner < pv.holder {
-                let (l, r) = party_rngs.split_at_mut(pv.holder);
-                (&mut l[pv.owner], &mut r[0])
-            } else {
-                let (l, r) = party_rngs.split_at_mut(pv.owner);
-                (&mut r[0], &mut l[pv.holder])
-            };
-            let (mut t_rows, mut q_rows) = pv.extend_authenticated_bits(
-                self.committee,
-                &self.session_id,
-                &raw_b[pv.owner],
-                owner_rng,
-                holder_rng,
-            )?;
-            for k in 0..(64 * b_ext_words) {
-                mac_b_full[pv.owner][k / 64][k % 64] ^= t_rows[k];
-                mac_b_full[pv.holder][k / 64][k % 64] ^= q_rows[k];
-            }
+        let (committee, session_id) = (self.committee, self.session_id);
+        let pair_outputs = run_pairs(
+            &mut self.pair_voles,
+            party_rngs,
+            &|pv, owner_rng, holder_rng| {
+                let (t_rows, q_rows) = pv.extend_authenticated_bits(
+                    committee,
+                    &session_id,
+                    &raw_b[pv.owner],
+                    owner_rng,
+                    holder_rng,
+                )?;
 
-            let prefix = make_crh_prefix(&self.session_id, pv.holder, pv.owner, chunk_ctr);
-            let mut planes = vec![0u128; HALVING_ROUNDS * RAW_CHUNK_BITS];
-            let mut send_sum = [[[0u128; 2]; 1]; HALVING_ROUNDS];
-            let mut recv_sum = [[[0u128; 2]; 1]; HALVING_ROUNDS];
-            let mut and_send = SecretBuffer(vec![0u64; RAW_CHUNK_WORDS]);
-            let mut and_recv = SecretBuffer(vec![0u64; RAW_CHUNK_WORDS]);
+                let prefix = make_crh_prefix(&session_id, pv.holder, pv.owner, chunk_ctr);
+                let mut planes = vec![0u128; HALVING_ROUNDS * RAW_CHUNK_BITS];
+                let mut send_sum = [[[0u128; 2]; 1]; HALVING_ROUNDS];
+                let mut recv_sum = [[[0u128; 2]; 1]; HALVING_ROUNDS];
+                let mut and_send = SecretBuffer(vec![0u64; RAW_CHUNK_WORDS]);
+                let mut and_recv = SecretBuffer(vec![0u64; RAW_CHUNK_WORDS]);
 
-            let mut o0 = [[0u64; 34]; 8];
-            let mut o1 = [[0u64; 34]; 8];
-            let mut or = [[0u64; 34]; 8];
-            let a_h = &raw_a[pv.holder];
-            let b_o = &raw_b[pv.owner];
-            let delta_h = pv.delta_holder;
+                let mut o0 = [[0u64; 34]; 8];
+                let mut o1 = [[0u64; 34]; 8];
+                let mut or = [[0u64; 34]; 8];
+                let a_h = &raw_a[pv.holder];
+                let b_o = &raw_b[pv.owner];
+                let delta_h = pv.delta_holder;
 
-            for base in (0..RAW_CHUNK_BITS).step_by(8) {
-                let idx: [u64; 8] = core::array::from_fn(|s| (base + s) as u64);
-                let r0: [u128; 8] = core::array::from_fn(|s| q_rows[base + s]);
-                let r1: [u128; 8] = core::array::from_fn(|s| q_rows[base + s] ^ delta_h);
-                let rr: [u128; 8] = core::array::from_fn(|s| t_rows[base + s]);
-                crh_2blocks_x8(&prefix, idx, &r0, backend, &mut o0);
-                crh_2blocks_x8(&prefix, idx, &r1, backend, &mut o1);
-                crh_2blocks_x8(&prefix, idx, &rr, backend, &mut or);
-                for s in 0..8 {
-                    let k = base + s;
-                    let a_bit = word_bit(a_h, k);
-                    let b_bit = word_bit(b_o, k);
-                    let pad0 = o0[s][0] & 1;
-                    let corr = pad0 ^ (o1[s][0] & 1) ^ a_bit;
-                    and_send[k / 64] |= pad0 << (k % 64);
-                    and_recv[k / 64] |= ((or[s][0] & 1) ^ (b_bit & corr)) << (k % 64);
-                    for round in 0..HALVING_ROUNDS {
-                        let parity = (k >> round) & 1;
-                        let w = 1 + 2 * round;
-                        let h0 = (o0[s][w] as u128) | ((o0[s][w + 1] as u128) << 64);
-                        let h1 = (o1[s][w] as u128) | ((o1[s][w + 1] as u128) << 64);
-                        let hr = (or[s][w] as u128) | ((or[s][w + 1] as u128) << 64);
-                        planes[round * RAW_CHUNK_BITS + k] = h0 ^ h1;
-                        send_sum[round][0][parity] ^= h0;
-                        recv_sum[round][0][parity] ^= hr;
+                for base in (0..RAW_CHUNK_BITS).step_by(8) {
+                    let idx: [u64; 8] = core::array::from_fn(|s| (base + s) as u64);
+                    let r0: [u128; 8] = core::array::from_fn(|s| q_rows[base + s]);
+                    let r1: [u128; 8] = core::array::from_fn(|s| q_rows[base + s] ^ delta_h);
+                    let rr: [u128; 8] = core::array::from_fn(|s| t_rows[base + s]);
+                    crh_2blocks_x8(&prefix, idx, &r0, backend, &mut o0);
+                    crh_2blocks_x8(&prefix, idx, &r1, backend, &mut o1);
+                    crh_2blocks_x8(&prefix, idx, &rr, backend, &mut or);
+                    for s in 0..8 {
+                        let k = base + s;
+                        let a_bit = word_bit(a_h, k);
+                        let b_bit = word_bit(b_o, k);
+                        let pad0 = o0[s][0] & 1;
+                        let corr = pad0 ^ (o1[s][0] & 1) ^ a_bit;
+                        and_send[k / 64] |= pad0 << (k % 64);
+                        and_recv[k / 64] |= ((or[s][0] & 1) ^ (b_bit & corr)) << (k % 64);
+                        for round in 0..HALVING_ROUNDS {
+                            let parity = (k >> round) & 1;
+                            let w = 1 + 2 * round;
+                            let h0 = (o0[s][w] as u128) | ((o0[s][w + 1] as u128) << 64);
+                            let h1 = (o1[s][w] as u128) | ((o1[s][w + 1] as u128) << 64);
+                            let hr = (or[s][w] as u128) | ((or[s][w + 1] as u128) << 64);
+                            planes[round * RAW_CHUNK_BITS + k] = h0 ^ h1;
+                            send_sum[round][0][parity] ^= h0;
+                            recv_sum[round][0][parity] ^= hr;
+                        }
                     }
                 }
-            }
-            for buf in [&mut o0, &mut o1, &mut or] {
-                qsag_asm::volatile_fill(buf, [0u64; 34]);
+                for buf in [&mut o0, &mut o1, &mut or] {
+                    qsag_asm::volatile_fill(buf, [0u64; 34]);
+                }
+                let state = PairPadState {
+                    holder: pv.holder,
+                    owner: pv.owner,
+                    planes,
+                    send_sum,
+                    recv_sum,
+                    mask_t_rows: SecretBuffer(t_rows[RAW_CHUNK_BITS..].to_vec()),
+                    mask_q_rows: SecretBuffer(q_rows[RAW_CHUNK_BITS..].to_vec()),
+                };
+                Ok((t_rows, q_rows, and_send, and_recv, state))
+            },
+        )?;
+        // Merge the pairs' contributions; the row and pad buffers wipe as they drop.
+        let mut pair_states = Vec::with_capacity(pair_outputs.len());
+        for (t_rows, q_rows, and_send, and_recv, state) in pair_outputs {
+            for k in 0..(64 * b_ext_words) {
+                mac_b_full[state.owner][k / 64][k % 64] ^= t_rows[k];
+                mac_b_full[state.holder][k / 64][k % 64] ^= q_rows[k];
             }
             for w in 0..RAW_CHUNK_WORDS {
-                raw_c[pv.holder][w] ^= and_send[w];
-                raw_c[pv.owner][w] ^= and_recv[w];
+                raw_c[state.holder][w] ^= and_send[w];
+                raw_c[state.owner][w] ^= and_recv[w];
             }
-            wipe_u64s(&mut and_send);
-            wipe_u64s(&mut and_recv);
-
-            let mask_t = SecretBuffer(t_rows[RAW_CHUNK_BITS..].to_vec());
-            let mask_q = SecretBuffer(q_rows[RAW_CHUNK_BITS..].to_vec());
-            wipe_u128s(&mut t_rows);
-            wipe_u128s(&mut q_rows);
-
-            pair_states.push(PairPadState {
-                holder: pv.holder,
-                owner: pv.owner,
-                planes,
-                send_sum,
-                recv_sum,
-                mask_t_rows: mask_t,
-                mask_q_rows: mask_q,
-            });
+            pair_states.push(state);
         }
 
         #[cfg(test)]

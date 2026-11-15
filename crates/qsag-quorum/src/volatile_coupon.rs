@@ -947,13 +947,15 @@ mod tests {
     // Test-only trusted dealer, using the real production Baggy profile and chain
     // functions. There is no fake certificate verifier or reduced cryptographic bound.
     fn fixture(t: usize, n: usize) -> (CertifiedCoupon, Vec<CouponPool>) {
+        fixture_with(&BaggyParams::SHA3_128F, t, n)
+    }
+    fn fixture_with(params: &BaggyParams, t: usize, n: usize) -> (CertifiedCoupon, Vec<CouponPool>) {
         let sk = PqSecretKey {
             sk_seed: [0x19; 32],
             sk_prf: [0x42; 32],
             pk_seed: [0x83; 32],
         };
-        let params = BaggyParams::SHA3_128F;
-        let parent = baggy_reference_keygen(&params, &sk).unwrap();
+        let parent = baggy_reference_keygen(params, &sk).unwrap();
         let mut d = CouponDescriptor {
             parent,
             threshold: t,
@@ -990,8 +992,8 @@ mod tests {
             d.chain_ends.push(node);
         }
         let certificate =
-            baggy_reference_sign(&params, &sk, &parent, &d.certificate_message().unwrap()).unwrap();
-        let certified = CertifiedCoupon::verify(&parent, &params, d.clone(), certificate).unwrap();
+            baggy_reference_sign(params, &sk, &parent, &d.certificate_message().unwrap()).unwrap();
+        let certified = CertifiedCoupon::verify(&parent, params, d.clone(), certificate).unwrap();
         let pools = d
             .members
             .iter()
@@ -1045,6 +1047,75 @@ mod tests {
             assert!(bundle.proof(leaves).is_err());
         }
         assert!(HopBundle::new(&[]).is_err());
+    }
+
+    #[test]
+    fn baggy_v2_sig_round_trips_on_the_wire_and_binds_every_field() {
+        let params = BaggyParams::SHA3_128F_V2;
+        let (coupon, mut pools) = fixture_with(&params, 3, 5);
+        let parent = coupon.descriptor.parent;
+        let req = request(&coupon, b"stateless online signature");
+        let openings: Vec<_> = pools.iter_mut().map(|p| p.open(&req).unwrap()).collect();
+        let sig: BaggyV2Sig = combine(&coupon, &req, &openings).unwrap();
+        // The root certificate is a PORS+FP signature within the pruning bound.
+        let opening = sig.coupon.certificate.pors.as_ref().unwrap();
+        assert!(sig.coupon.certificate.fors.is_empty());
+        assert_eq!(opening.secrets.len(), 28);
+        assert!(opening.auth.len() <= 128);
+        assert!(baggy_v2_verify(&parent, &params, &req.message, &sig));
+
+        let raw = sig.to_wire_bytes().unwrap();
+        // Descriptor (64 + 4 t + 4096), length-prefixed certificate, counter, 128 nodes.
+        let overhead = 2 + 2 + 4 * 3 + 32 + 8 + 8 + 4096 + 4 + 4 + 4096;
+        assert!(raw.len() <= overhead + params.sig_bytes_checked().unwrap());
+        let back = BaggyV2Sig::from_wire_bytes(&parent, &params, &raw).unwrap();
+        assert_eq!(back.to_wire_bytes().unwrap(), raw);
+        assert!(baggy_v2_verify(&parent, &params, &req.message, &back));
+        assert!(!baggy_v2_verify(&parent, &params, b"another message", &back));
+
+        // Version-1 parameters, another root key, a short or long input: refused.
+        assert!(BaggyV2Sig::from_wire_bytes(&parent, &BaggyParams::SHA3_128F, &raw).is_err());
+        let other = BaggyPublicKey {
+            pk_root: [9; 32],
+            ..parent
+        };
+        assert!(BaggyV2Sig::from_wire_bytes(&other, &params, &raw).is_err());
+        assert!(BaggyV2Sig::from_wire_bytes(&parent, &params, &raw[..raw.len() - 1]).is_err());
+        let mut long = raw.clone();
+        long.push(0);
+        assert!(BaggyV2Sig::from_wire_bytes(&parent, &params, &long).is_err());
+
+        // One flipped bit in each field: the envelope does not decode, or does not verify.
+        let certificate_at = 2 + 2 + 12 + 32 + 8 + 8 + 4096 + 4;
+        for offset in [
+            1,                    // threshold
+            3,                    // parties
+            7,                    // a member
+            20,                   // coupon pk_seed
+            55,                   // leaf
+            63,                   // expiry
+            100,                  // a chain end
+            certificate_at - 1,   // certificate length
+            certificate_at + 5,   // certificate randomiser
+            certificate_at + 40,  // a PORS+FP secret
+            raw.len() - 4096 - 1, // counter
+            raw.len() - 1,        // an opened chain node
+        ] {
+            let mut bad = raw.clone();
+            bad[offset] ^= 1;
+            if let Ok(decoded) = BaggyV2Sig::from_wire_bytes(&parent, &params, &bad) {
+                assert!(
+                    !baggy_v2_verify(&parent, &params, &req.message, &decoded),
+                    "offset {offset}"
+                );
+            }
+        }
+        // The fields ahead of the certificate are all covered by it: those never decode.
+        for offset in [1, 3, 7, 20, 55, 63, 100] {
+            let mut bad = raw.clone();
+            bad[offset] ^= 1;
+            assert!(BaggyV2Sig::from_wire_bytes(&parent, &params, &bad).is_err());
+        }
     }
 
     #[test]

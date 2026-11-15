@@ -2,7 +2,8 @@
 //! $p = 2^{256} - 2^{32} - 977$) field & Renes-Costello-Batina complete projective curve arithmetic
 //! Source-level selection uses masks; generated-code timing has not been assessed.
 
-use qsag_accel::ct::{ct_eq_u64, ct_lt_u64, ct_select_u64, ct_zeroize_u64s};
+use crate::limbs;
+use qsag_accel::ct::{ct_eq_u64, ct_zeroize_u64s};
 
 /// `secp256k1` prime $p = 2^{256} - 2^{32} - 977$ in little-endian 64-bit limbs.
 pub const SECP_P: [u64; 4] = [
@@ -48,57 +49,26 @@ impl Fp256 {
     pub const B3: Self = Self([21, 0, 0, 0]); // 3 * b = 21 for y^2 = x^3 + 7
 
     pub fn from_be_bytes(bytes: &[u8; 32]) -> Self {
-        let mut limbs = [0u64; 4];
-        for (i, slot) in limbs.iter_mut().enumerate() {
-            let off = (3 - i) * 8;
-            *slot = u64::from_be_bytes(bytes[off..off + 8].try_into().unwrap());
-        }
-        Self(limbs).normalize()
+        Self(limbs::from_be_bytes(bytes)).normalize()
     }
 
     pub fn to_be_bytes(self) -> [u8; 32] {
-        let c = self.normalize();
-        let mut out = [0u8; 32];
-        for (i, &limb) in c.0.iter().enumerate() {
-            let off = (3 - i) * 8;
-            out[off..off + 8].copy_from_slice(&limb.to_be_bytes());
-        }
-        out
-    }
-
-    #[inline]
-    fn sub_raw(a: [u64; 4], b: [u64; 4]) -> ([u64; 4], bool) {
-        let mut out = [0u64; 4];
-        let mut br = 0u64;
-        for (i, slot) in out.iter_mut().enumerate() {
-            let (d1, b1) = a[i].overflowing_sub(b[i]);
-            let (d2, b2) = d1.overflowing_sub(br);
-            *slot = d2;
-            br = (b1 as u64) | (b2 as u64);
-        }
-        (out, br != 0)
+        limbs::to_be_bytes(self.normalize().0)
     }
 
     #[inline]
     pub fn ct_select(choice: bool, t: Self, f: Self) -> Self {
-        Self([
-            ct_select_u64(choice, t.0[0], f.0[0]),
-            ct_select_u64(choice, t.0[1], f.0[1]),
-            ct_select_u64(choice, t.0[2], f.0[2]),
-            ct_select_u64(choice, t.0[3], f.0[3]),
-        ])
+        Self(limbs::ct_select(choice, t.0, f.0))
     }
 
     #[inline]
     pub fn normalize(self) -> Self {
-        let (diff, borrow) = Self::sub_raw(self.0, SECP_P);
-        Self::ct_select(!borrow, Self(diff), self)
+        Self(limbs::reduce_once(self.0, false, SECP_P))
     }
 
     #[inline]
     pub fn is_zero(self) -> bool {
-        let c = self.normalize();
-        ct_eq_u64(c.0[0] | c.0[1] | c.0[2] | c.0[3], 0)
+        limbs::is_zero(self.normalize().0)
     }
 
     #[inline]
@@ -108,15 +78,9 @@ impl Fp256 {
 
     #[inline]
     pub fn add_mod(self, rhs: Self) -> Self {
-        let mut sum = [0u64; 4];
-        let mut carry = 0u128;
-        for (i, slot) in sum.iter_mut().enumerate() {
-            let s = (self.0[i] as u128) + (rhs.0[i] as u128) + carry;
-            *slot = s as u64;
-            carry = s >> 64;
-        }
+        let (mut sum, carry) = limbs::adc(self.0, rhs.0);
         // Fold `carry * 2^256 == carry * SECP_C`
-        let mut c2 = carry * (SECP_C as u128);
+        let mut c2 = (carry as u128) * (SECP_C as u128);
         for item in &mut sum {
             let s = (*item as u128) + (c2 & 0xFFFF_FFFF_FFFF_FFFF);
             *item = s as u64;
@@ -133,9 +97,7 @@ impl Fp256 {
 
     #[inline]
     pub fn neg_mod(self) -> Self {
-        let c = self.normalize();
-        let (diff, _) = Self::sub_raw(SECP_P, c.0);
-        Self::ct_select(c.is_zero(), Self::ZERO, Self(diff))
+        Self(limbs::neg_mod(self.normalize().0, SECP_P))
     }
 
     #[inline]
@@ -389,19 +351,10 @@ impl SecpPoint {
 
 /// Check `0 <= scalar_be < SECP_N`, including the valid zero derivation offset.
 pub fn secp_scalar_is_canonical(scalar_be: &[u8; 32]) -> bool {
-    let mut limbs = [0u64; 4];
-    for (i, slot) in limbs.iter_mut().enumerate() {
-        let off = (3 - i) * 8;
-        *slot = u64::from_be_bytes(scalar_be[off..off + 8].try_into().unwrap());
-    }
-    let mut br = 0u64;
-    for (&limb, &order) in limbs.iter().zip(&SECP_N) {
-        let (d1, b1) = limb.overflowing_sub(order);
-        let (_, b2) = d1.overflowing_sub(br);
-        br = (b1 as u64) | (b2 as u64);
-    }
-    ct_zeroize_u64s(&mut limbs);
-    br != 0
+    let mut scalar: [u64; 4] = limbs::from_be_bytes(scalar_be);
+    let canonical = limbs::lt(scalar, SECP_N);
+    ct_zeroize_u64s(&mut scalar);
+    canonical
 }
 
 /// Validate a private scalar, excluding zero.
@@ -412,46 +365,13 @@ pub fn secp_scalar_is_valid_nonzero(scalar_be: &[u8; 32]) -> bool {
 
 /// Constant-time modular addition `(a + b) mod SECP_N` on 32-byte big-endian scalars.
 pub fn secp_scalar_add_mod_n(a_be: &[u8; 32], b_be: &[u8; 32]) -> [u8; 32] {
-    let mut a = [0u64; 4];
-    let mut b = [0u64; 4];
-    for (i, slot) in a.iter_mut().enumerate() {
-        let off = (3 - i) * 8;
-        *slot = u64::from_be_bytes(a_be[off..off + 8].try_into().unwrap());
-        b[i] = u64::from_be_bytes(b_be[off..off + 8].try_into().unwrap());
-    }
-    let reduce_once = |v: [u64; 4], carry: u64| -> [u64; 4] {
-        let mut diff = [0u64; 4];
-        let mut br = 0u64;
-        for (i, slot) in diff.iter_mut().enumerate() {
-            let (d1, b1) = v[i].overflowing_sub(SECP_N[i]);
-            let (d2, b2) = d1.overflowing_sub(br);
-            *slot = d2;
-            br = (b1 as u64) | (b2 as u64);
-        }
-        let ge_n = (carry != 0) | (br == 0);
-        [
-            ct_select_u64(ge_n, diff[0], v[0]),
-            ct_select_u64(ge_n, diff[1], v[1]),
-            ct_select_u64(ge_n, diff[2], v[2]),
-            ct_select_u64(ge_n, diff[3], v[3]),
-        ]
-    };
-
-    let mut a_red = reduce_once(a, 0);
-    let mut b_red = reduce_once(b, 0);
-    let mut sum = [0u64; 4];
-    let mut c = 0u128;
-    for (i, slot) in sum.iter_mut().enumerate() {
-        let s = (a_red[i] as u128) + (b_red[i] as u128) + c;
-        *slot = s as u64;
-        c = s >> 64;
-    }
-    let mut res = reduce_once(sum, c as u64);
-    let mut out = [0u8; 32];
-    for (i, &limb) in res.iter().enumerate() {
-        let off = (3 - i) * 8;
-        out[off..off + 8].copy_from_slice(&limb.to_be_bytes());
-    }
+    let mut a: [u64; 4] = limbs::from_be_bytes(a_be);
+    let mut b: [u64; 4] = limbs::from_be_bytes(b_be);
+    let mut a_red = limbs::reduce_once(a, false, SECP_N);
+    let mut b_red = limbs::reduce_once(b, false, SECP_N);
+    let (mut sum, carry) = limbs::adc(a_red, b_red);
+    let mut res = limbs::reduce_once(sum, carry, SECP_N);
+    let out = limbs::to_be_bytes(res);
     ct_zeroize_u64s(&mut a);
     ct_zeroize_u64s(&mut b);
     ct_zeroize_u64s(&mut sum);
@@ -463,29 +383,13 @@ pub fn secp_scalar_add_mod_n(a_be: &[u8; 32], b_be: &[u8; 32]) -> [u8; 32] {
 
 /// Negate scalar `s` modulo `SECP_N` (`SECP_N - s`).
 pub fn secp_scalar_neg_mod_n(s_be: &[u8; 32]) -> [u8; 32] {
-    let mut s = [0u64; 4];
-    for (i, slot) in s.iter_mut().enumerate() {
-        let off = (3 - i) * 8;
-        *slot = u64::from_be_bytes(s_be[off..off + 8].try_into().unwrap());
-    }
-    let mut diff = [0u64; 4];
-    let mut br = 0u64;
-    for (i, slot) in diff.iter_mut().enumerate() {
-        let (d1, b1) = SECP_N[i].overflowing_sub(s[i]);
-        let (d2, b2) = d1.overflowing_sub(br);
-        *slot = d2;
-        br = (b1 as u64) | (b2 as u64);
-    }
-    let is_z = ct_eq_u64(s[0] | s[1] | s[2] | s[3], 0);
-    let mut out = [0u8; 32];
-    for (i, &d_limb) in diff.iter().enumerate() {
-        let v = ct_select_u64(is_z, 0, d_limb);
-        let off = (3 - i) * 8;
-        out[off..off + 8].copy_from_slice(&v.to_be_bytes());
-    }
+    let mut s: [u64; 4] = limbs::from_be_bytes(s_be);
+    let (mut diff, _) = limbs::sbb(SECP_N, s);
+    let mut neg = limbs::ct_select(limbs::is_zero(s), [0u64; 4], diff);
+    let out = limbs::to_be_bytes(neg);
     ct_zeroize_u64s(&mut s);
     ct_zeroize_u64s(&mut diff);
-    let _ = ct_lt_u64;
+    ct_zeroize_u64s(&mut neg);
     out
 }
 

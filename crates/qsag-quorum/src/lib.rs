@@ -60,3 +60,9 @@ pub use directory_anchor::FsDirectoryMonotoneAnchor;
     target_pointer_width = "64"
 ))]
 pub mod volatile_coupon;
+#[cfg(all(
+    any(test, feature = "std"),
+    target_os = "linux",
+    target_pointer_width = "64"
+))]
+pub use volatile_coupon::{BaggyV2Sig, baggy_v2_verify};

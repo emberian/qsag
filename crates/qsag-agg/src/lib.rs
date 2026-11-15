@@ -2884,12 +2884,16 @@ mod tests {
             "SCALE regime={regime:?} N={n} shard_signers={shard} shards={} batches={} \
              proof_bytes={} bytes_per_validator={:.1} keygen_sign_s={keygen_s:.1} \
              prove_s={prove_s:.2} verify_ms_all_workers={verify_all_ms:.2} \
-             verify_ms_1_worker={verify_one_ms:.2} workers={}",
+             verify_ms_1_worker={verify_one_ms:.2} workers={} proof_digest={}",
             proof.num_leaf_shards(),
             proof.num_shard_batches(),
             wire.len(),
             wire.len() as f64 / n as f64,
-            parallel_workers()
+            parallel_workers(),
+            crate::sponge::cshake256_32(b"QSAG.BENCH.PROOF", &wire)
+                .iter()
+                .map(|b| alloc::format!("{b:02x}"))
+                .collect::<alloc::string::String>()
         );
     }
 

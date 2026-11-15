@@ -1,6 +1,6 @@
 //! Canonical subgroup scalars. Encodings in this module are little endian.
-use crate::secp256k1_ct::SECP_N;
-use qsag_accel::ct::{ct_select_u64, ct_zeroize_bytes, ct_zeroize_u64s};
+use crate::{limbs, secp256k1_ct::SECP_N};
+use qsag_accel::ct::{ct_zeroize_bytes, ct_zeroize_u64s};
 
 /// Domain separator for canonical spending-key migration nullifiers (version 1).
 pub const NULLIFIER_DOMAIN: u64 = 0x4d49_475f_4e55_4c31;
@@ -58,9 +58,9 @@ impl SpendingScalar {
         };
         candidate.bytes.copy_from_slice(&bytes);
         ct_zeroize_bytes(&mut bytes);
-        let mut limbs = decode(&candidate.bytes);
-        let valid = less(limbs, group.order()) & (limbs.iter().fold(0, |a, &b| a | b) != 0);
-        ct_zeroize_u64s(&mut limbs);
+        let mut value = decode(&candidate.bytes);
+        let valid = limbs::lt(value, group.order()) & !limbs::is_zero(value);
+        ct_zeroize_u64s(&mut value);
         if valid {
             Some(candidate)
         } else {
@@ -110,49 +110,21 @@ impl SpendingScalar {
     }
 }
 
+#[inline]
 pub(crate) fn decode(bytes: &[u8; 32]) -> [u64; 4] {
-    core::array::from_fn(|i| u64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap()))
+    limbs::from_le_bytes(bytes)
 }
-pub(crate) fn encode(limbs: [u64; 4]) -> [u8; 32] {
-    let mut out = [0; 32];
-    for (chunk, limb) in out.chunks_exact_mut(8).zip(limbs) {
-        chunk.copy_from_slice(&limb.to_le_bytes());
-    }
-    out
+#[inline]
+pub(crate) fn encode(value: [u64; 4]) -> [u8; 32] {
+    limbs::to_le_bytes(value)
 }
-fn subtract(a: [u64; 4], b: [u64; 4]) -> ([u64; 4], bool) {
-    let mut borrow = false;
-    let out = core::array::from_fn(|i| {
-        let (x, b0) = a[i].overflowing_sub(b[i]);
-        let (x, b1) = x.overflowing_sub(u64::from(borrow));
-        borrow = b0 | b1;
-        x
-    });
-    (out, borrow)
-}
-pub(crate) fn less(a: [u64; 4], b: [u64; 4]) -> bool {
-    subtract(a, b).1
-}
+#[inline]
 pub(crate) fn add(a: [u64; 4], b: [u64; 4], modulus: [u64; 4]) -> [u64; 4] {
-    let mut carry = 0u128;
-    let sum = core::array::from_fn(|i| {
-        carry += a[i] as u128 + b[i] as u128;
-        let limb = carry as u64;
-        carry >>= 64;
-        limb
-    });
-    let (diff, borrow) = subtract(sum, modulus);
-    core::array::from_fn(|i| ct_select_u64((carry != 0) | !borrow, diff[i], sum[i]))
+    limbs::add_mod(a, b, modulus)
 }
+#[inline]
 pub(crate) fn sub(a: [u64; 4], b: [u64; 4], modulus: [u64; 4]) -> [u64; 4] {
-    let (diff, borrow) = subtract(a, b);
-    let mut carry = 0u128;
-    core::array::from_fn(|i| {
-        carry += diff[i] as u128 + ct_select_u64(borrow, modulus[i], 0) as u128;
-        let limb = carry as u64;
-        carry >>= 64;
-        limb
-    })
+    limbs::sub_mod(a, b, modulus)
 }
 pub(crate) fn reduce(bytes: &[u8; 32], modulus: [u64; 4]) -> [u64; 4] {
     let mut out = [0; 4];

@@ -605,13 +605,16 @@ mod tests {
         assert_eq!(log2_milli_floor(3), 1584);
         assert_eq!(log2_milli_floor(1000), 9965);
 
-        // log2 C(2048, 28) = 210.2; minus log2 C(56, 28) = 52.7, C(84, 28) = 73.9,
-        // C(112, 28) = 87.9 for two, three and four signatures on one tree.
+        // Exact values are 210.2, 157.5, 136.3 and 122.2 bits for one to four signatures
+        // on one tree; the function rounds every term down and stays below them.
         let p = PorsFpParams::SHA3_128F;
         let bits: Vec<u32> = (1..=4)
             .map(|g| p.forgery_bits_milli(g).unwrap() / 1000)
             .collect();
-        assert_eq!(bits, vec![210, 157, 136, 122]);
+        assert_eq!(bits, vec![209, 156, 136, 122]);
+        assert!(bits.iter().zip([210.2, 157.5, 136.3, 122.2]).all(|(lo, exact)| {
+            f64::from(*lo) <= exact && exact - f64::from(*lo) < 2.0
+        }));
         assert_eq!(p.forgery_bits_milli(0), None);
         // Once every leaf is public nothing is left.
         assert_eq!(p.forgery_bits_milli(u32::MAX), Some(0));

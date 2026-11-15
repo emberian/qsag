@@ -351,45 +351,14 @@ pub fn read_text(path: &str) -> Result<ZeroizingText, CliError> {
 }
 
 pub fn sync_parent(path: &str) -> Result<(), CliError> {
-    let parent = Path::new(path)
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    std::fs::File::open(parent)
-        .and_then(|dir| dir.sync_all())
+    crate::persist::sync_parent_dir(Path::new(path))
         .map_err(|e| CliError::io("syncing parent directory", e))
 }
 
-/// A directory holding custody state: owner-only, never a symlink. With `create`, missing
-/// components are made with mode 0700. A directory that already exists is accepted only if
-/// no other user can enter it; its permissions are never changed here.
+/// A directory holding custody state: owner-only, never a symlink. See
+/// [`crate::persist::private_dir`].
 pub fn private_dir(path: &str, create: bool) -> Result<(), CliError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-        if create {
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(path)
-                .map_err(|e| CliError::io(format_args!("creating {path}"), e))?;
-        }
-        let meta = std::fs::symlink_metadata(path)
-            .map_err(|e| CliError::io(format_args!("inspecting {path}"), e))?;
-        if !meta.is_dir() || meta.permissions().mode() & 0o077 != 0 {
-            return Err(CliError::state(format!(
-                "{path} must be a directory only its owner can access (mode 0700), not a symlink"
-            )));
-        }
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = create;
-        Err(CliError::state(format!(
-            "{path}: owner-only directories require Unix permissions"
-        )))
-    }
+    crate::persist::private_dir(path, create).map(|_| ())
 }
 
 /// Create a new file and refuse to overwrite an existing one. Secret files are created with
@@ -403,55 +372,17 @@ fn write_new_with(
     secret: bool,
     write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
 ) -> Result<(), CliError> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    set_nofollow_nonblocking(&mut options)?;
-    #[cfg(unix)]
-    if secret {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    #[cfg(not(unix))]
-    let _ = secret;
-    let mut file = options
-        .open(path)
-        .map_err(|e| CliError::io(format_args!("creating {path}"), e))?;
-    let result = write(&mut file)
-        .and_then(|()| file.sync_all())
+    crate::persist::create_new(Path::new(path), secret)
+        .map_err(|e| CliError::io(format_args!("creating {path}"), e))?
+        .commit(write)
         .map_err(|e| CliError::io(format_args!("writing {path}"), e))
-        .and_then(|()| sync_parent(path));
-    if result.is_err() {
-        // The containing directory must be trusted. Never remove a replaced entry.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if let (Ok(held), Ok(named)) = (file.metadata(), std::fs::symlink_metadata(path))
-                && named.is_file()
-                && held.dev() == named.dev()
-                && held.ino() == named.ino()
-            {
-                let _ = std::fs::remove_file(path);
-                let _ = sync_parent(path);
-            }
-        }
-    }
-    result
 }
 
 /// Durably replace an existing owner-only file: write a sibling temporary file, sync it,
 /// rename it over the original, then sync the directory.
 pub fn replace_secret(path: &str, contents: &[u8]) -> Result<(), CliError> {
-    let tmp = format!("{path}.{}.tmp", crate::codec::to_hex(&os_random_32()?));
-    write_new(&tmp, contents, true)?;
-    let result = (|| {
-        std::fs::rename(&tmp, path)
-            .map_err(|e| CliError::io(format_args!("replacing {path}"), e))?;
-        sync_parent(path)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
+    crate::persist::replace(Path::new(path), contents, || Ok(()))
+        .map_err(|e| CliError::io(format_args!("replacing {path}"), e))
 }
 
 /// 32 bytes from the operating system's entropy device.
