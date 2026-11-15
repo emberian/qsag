@@ -32,9 +32,11 @@ pub const CSHAKE256_RATE_BYTES: usize = 136;
 
 /// Nonlinear bit operations in one `Keccak-f[1600]`: one `Chi` output bit per state bit per round.
 ///
-/// A bit-decomposed arithmetization without lookups commits at least this many cells per
-/// permutation (auxiliary `Theta` and input columns excluded), which makes it a floor for that
-/// arithmetization family rather than a measured AIR width.
+/// An arithmetization that materializes every round's `Chi` output as a separate committed
+/// bit uses at least this many cells per permutation (`Theta` and input columns excluded).
+/// This is a floor for that explicit representation, not for all lookup-free circuits:
+/// eliminating intermediate wires, increasing degree, packing bits, or chunking proofs
+/// changes the tradeoff. It is not a measured AIR width or an impossibility result.
 pub const KECCAK_F1600_CHI_BITS: usize = 24 * 1600;
 
 /// Merkle-authentication hash work of one or more WHIR openings.
@@ -66,7 +68,7 @@ impl MerkleHashCensus {
             .checked_add(self.root_permutations)
     }
 
-    /// Floor on committed cells for a bit-decomposed, lookup-free `Keccak-f[1600]` relation
+    /// Floor on committed cells when every `Chi` output bit is separately materialized,
     /// covering the counted permutations: [`KECCAK_F1600_CHI_BITS`] per permutation.
     pub fn bitwise_keccak_cells(&self) -> Option<u128> {
         (self.keccak_permutations()? as u128).checked_mul(KECCAK_F1600_CHI_BITS as u128)
