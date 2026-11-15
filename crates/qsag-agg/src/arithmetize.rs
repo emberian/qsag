@@ -1824,9 +1824,13 @@ fn prove_shard_rows_gpu(
     let mut op_ent: Vec<[u64; 4]> = Vec::with_capacity(r_rows * 6);
     let mut op_pairs: Vec<(usize, GoldilocksExt4, GoldilocksExt4)> = Vec::new();
 
+    let mut gpu_rounds_done = 0usize;
     for round in 0..log_rows {
         let half = cur_m / 2;
         let folding_signer = round < log_s;
+        if round >= 1 && !folding_signer && cur_m <= 1_024 {
+            break;
+        }
         let half_s = if folding_signer { cur_s / 2 } else { 1 };
         let half_r = if folding_signer { cur_r } else { cur_r / 2 };
         let is_round0 = round == 0;
@@ -2026,13 +2030,289 @@ fn prove_shard_rows_gpu(
             cur_r = half_r;
         }
         cur_m = half;
+        gpu_rounds_done = round + 1;
     }
 
-    let mut raw_cols = [[0u64; 4]; NUM_TRACE_COLS];
-    raw.prover_air_read_folded_cols(col_ext4_cur, &mut raw_cols)?;
     let mut col_evals_arr = [GoldilocksExt4::ZERO; NUM_TRACE_COLS];
-    for (dst, raw_c) in col_evals_arr.iter_mut().zip(raw_cols) {
-        *dst = crate::pcs::arr_to_ext4_checked(raw_c)?;
+    if gpu_rounds_done == log_rows {
+        let mut raw_cols = [[0u64; 4]; NUM_TRACE_COLS];
+        raw.prover_air_read_folded_cols(col_ext4_cur, &mut raw_cols)?;
+        for (dst, raw_c) in col_evals_arr.iter_mut().zip(raw_cols) {
+            *dst = crate::pcs::arr_to_ext4_checked(raw_c)?;
+        }
+    } else {
+        debug_assert_eq!(cur_s, 1);
+        debug_assert_eq!(cur_m, cur_r);
+        let mut raw_cols = vec![[0u64; 4]; NUM_TRACE_COLS * cur_m];
+        let mut raw_shifts = vec![[0u64; 4]; 3 * cur_m];
+        raw.prover_air_read_tail(col_ext4_cur, sh_cur, &mut raw_cols, &mut raw_shifts)?;
+
+        let mut cols_ext4 = vec![[GoldilocksExt4::ZERO; NUM_TRACE_COLS]; cur_m];
+        for c in 0..NUM_TRACE_COLS {
+            let c_base = c * cur_m;
+            for (row_idx, row_dst) in cols_ext4.iter_mut().enumerate() {
+                row_dst[c] = crate::pcs::arr_to_ext4_checked(raw_cols[c_base + row_idx])?;
+            }
+        }
+        let mut eq_tau_tbl = Vec::with_capacity(cur_m);
+        let mut eq_not_last_tbl = Vec::with_capacity(cur_m);
+        let mut shift_tau_tbl = Vec::with_capacity(cur_m);
+        for &w in &raw_shifts[0..cur_m] {
+            eq_tau_tbl.push(crate::pcs::arr_to_ext4_checked(w)?);
+        }
+        for &w in &raw_shifts[cur_m..2 * cur_m] {
+            eq_not_last_tbl.push(crate::pcs::arr_to_ext4_checked(w)?);
+        }
+        for &w in &raw_shifts[2 * cur_m..3 * cur_m] {
+            shift_tau_tbl.push(crate::pcs::arr_to_ext4_checked(w)?);
+        }
+
+        let act0 = active_tbl[0];
+        let pks0 = pk_seed_tbl[0];
+        let pkr0 = pk_root_tbl[0];
+        let mu0 = mu_tbl[0];
+
+        for _ in gpu_rounds_done..log_rows {
+            let half = cur_m / 2;
+            let half_r = cur_r / 2;
+            let eval_range = |start_idx: usize,
+                              end_idx: usize|
+             -> [GoldilocksExt4; ROW_SUMCHECK_COEFFS] {
+                let mut local_sums = [GoldilocksExt4::ZERO; ROW_SUMCHECK_COEFFS];
+                let mut eval_cols = [GoldilocksExt4::ZERO; NUM_TRACE_COLS];
+                let mut dc = [GoldilocksExt4::ZERO; NUM_TRACE_COLS];
+                let mut op_pairs_loc = Vec::new();
+                let mut op_eval_buf = Vec::new();
+
+                for idx in start_idx..end_idx {
+                    let idx_hi = idx + half;
+                    let eq0 = eq_tau_tbl[idx];
+                    let eq1 = eq_tau_tbl[idx_hi];
+                    let d_eq = eq1 - eq0;
+                    let nl0 = eq_not_last_tbl[idx];
+                    let nl1 = eq_not_last_tbl[idx_hi];
+                    let d_nl = nl1 - nl0;
+                    let sh0 = shift_tau_tbl[idx];
+                    let sh1 = shift_tau_tbl[idx_hi];
+                    let d_sh = sh1 - sh0;
+
+                    let rf0 = is_first_tbl[idx];
+                    let d_rf = is_first_tbl[idx + half_r] - rf0;
+                    let rl0 = is_last_tbl[idx];
+                    let d_rl = is_last_tbl[idx + half_r] - rl0;
+                    let sc0 = step_c0_tbl[idx];
+                    let d_sc0 = step_c0_tbl[idx + half_r] - sc0;
+
+                    let c0 = &cols_ext4[idx];
+                    let c1 = &cols_ext4[idx_hi];
+                    eval_cols.copy_from_slice(c0);
+                    for c in 0..NUM_TRACE_COLS {
+                        dc[c] = c1[c] - c0[c];
+                    }
+                    let (a0, b0) = dot_shift_state_ext4(&sched, c0);
+                    let (a1, b1) = dot_shift_state_ext4(&sched, c1);
+                    let da = a1 - a0;
+                    let db = b1 - b0;
+
+                    union_sparse_op_pairs(
+                        &op_sparse_tbl[idx],
+                        &op_sparse_tbl[idx + half_r],
+                        &mut op_pairs_loc,
+                    );
+                    op_eval_buf.clear();
+                    for &(uid, v0, _) in &op_pairs_loc {
+                        op_eval_buf.push((uid, v0));
+                    }
+                    local_sums[0] += eval_eq_part_sparse_ext4(
+                        unique_ops,
+                        &sched,
+                        &eval_cols,
+                        &SparseRowPublicEvalExt4 {
+                            active_signer: act0,
+                            pk_seed: &pks0,
+                            pk_root: &pkr0,
+                            mu: &mu0,
+                            raw_active_ops: &op_eval_buf,
+                            step_c0: sc0,
+                            is_row_first: rf0,
+                            is_row_last: rl0,
+                            eq_tau: eq0,
+                            eq_not_last: nl0,
+                            shift_tau: sh0,
+                        },
+                    ) + (nl0 * a0 - sh0 * b0);
+
+                    for c in 0..NUM_TRACE_COLS {
+                        eval_cols[c] += dc[c] + dc[c];
+                    }
+                    for (slot, &(_, v0, dv)) in op_eval_buf.iter_mut().zip(op_pairs_loc.iter()) {
+                        slot.1 = v0 + dv + dv;
+                    }
+                    let mut cur_sc0 = sc0 + d_sc0 + d_sc0;
+                    let mut cur_rf = rf0 + d_rf + d_rf;
+                    let mut cur_rl = rl0 + d_rl + d_rl;
+                    let mut cur_eq = eq1 + d_eq;
+                    let mut cur_nl = nl1 + d_nl;
+                    let mut cur_sh = sh1 + d_sh;
+                    let mut cur_a = a1 + da;
+                    let mut cur_b = b1 + db;
+
+                    for (k, sum) in local_sums
+                        .iter_mut()
+                        .enumerate()
+                        .take(ROW_SUMCHECK_COEFFS)
+                        .skip(2)
+                    {
+                        *sum += eval_eq_part_sparse_ext4(
+                            unique_ops,
+                            &sched,
+                            &eval_cols,
+                            &SparseRowPublicEvalExt4 {
+                                active_signer: act0,
+                                pk_seed: &pks0,
+                                pk_root: &pkr0,
+                                mu: &mu0,
+                                raw_active_ops: &op_eval_buf,
+                                step_c0: cur_sc0,
+                                is_row_first: cur_rf,
+                                is_row_last: cur_rl,
+                                eq_tau: cur_eq,
+                                eq_not_last: cur_nl,
+                                shift_tau: cur_sh,
+                            },
+                        ) + (cur_nl * cur_a - cur_sh * cur_b);
+                        if k + 1 < ROW_SUMCHECK_COEFFS {
+                            for c in 0..NUM_TRACE_COLS {
+                                eval_cols[c] += dc[c];
+                            }
+                            for (slot, &(_, _, dv)) in
+                                op_eval_buf.iter_mut().zip(op_pairs_loc.iter())
+                            {
+                                slot.1 += dv;
+                            }
+                            cur_sc0 += d_sc0;
+                            cur_rf += d_rf;
+                            cur_rl += d_rl;
+                            cur_eq += d_eq;
+                            cur_nl += d_nl;
+                            cur_sh += d_sh;
+                            cur_a += da;
+                            cur_b += db;
+                        }
+                    }
+                }
+                local_sums
+            };
+
+            let mut sum_evals = if half >= 16 && crate::parallel_workers() > 1 {
+                let sc_threads = crate::parallel_workers().min(half);
+                let chunk = half / sc_threads;
+                let eval_ref = &eval_range;
+                let partials: Vec<[GoldilocksExt4; ROW_SUMCHECK_COEFFS]> =
+                    std::thread::scope(|scope| {
+                        let mut handles = Vec::with_capacity(sc_threads);
+                        for t_idx in 0..sc_threads {
+                            let s_idx = t_idx * chunk;
+                            let e_idx = if t_idx + 1 == sc_threads {
+                                half
+                            } else {
+                                (t_idx + 1) * chunk
+                            };
+                            handles
+                                .push(crate::spawn_bounded(scope, move || eval_ref(s_idx, e_idx)));
+                        }
+                        handles.into_iter().map(crate::join_worker).collect()
+                    });
+                let mut tot = [GoldilocksExt4::ZERO; ROW_SUMCHECK_COEFFS];
+                for part in partials {
+                    for (dst, &val) in tot.iter_mut().zip(part.iter()) {
+                        *dst += val;
+                    }
+                }
+                tot
+            } else {
+                eval_range(0, half)
+            };
+            sum_evals[1] = cur_sum_claim - sum_evals[0];
+
+            let poly_coeffs = interpolate_deg8_from_evals_ext4(&sum_evals);
+            let wire_poly = pack_deg8_wire(&poly_coeffs);
+            let mut sc_bytes = [0u8; ROW_SUMCHECK_WIRE_COEFFS * 32];
+            for (i, c) in wire_poly.iter().enumerate() {
+                sc_bytes[32 * i..32 * (i + 1)].copy_from_slice(&c.to_le_bytes());
+            }
+            transcript.absorb(b"LEAF_SC_POLY", &sc_bytes);
+            let chal = transcript.squeeze_ext4(b"LEAF_SC_CHAL");
+            cur_sum_claim = eval_univariate_ext4(&poly_coeffs, chal);
+            row_sumcheck_polys.push(wire_poly);
+            challenges_msb_to_lsb.push(chal);
+
+            let (lo_half, hi_half) = cols_ext4.split_at_mut(half);
+            if half >= 64 && crate::parallel_workers() > 1 {
+                let fold_threads = crate::parallel_pow2_workers(half);
+                let chunk = half / fold_threads;
+                std::thread::scope(|scope| {
+                    for (lo_sub, hi_sub) in
+                        lo_half.chunks_mut(chunk).zip(hi_half[..half].chunks(chunk))
+                    {
+                        crate::spawn_bounded(scope, move || {
+                            for (lo, hi) in lo_sub.iter_mut().zip(hi_sub.iter()) {
+                                for c in 0..NUM_TRACE_COLS {
+                                    lo[c] += chal * (hi[c] - lo[c]);
+                                }
+                            }
+                        });
+                    }
+                });
+            } else {
+                for (lo, hi) in lo_half.iter_mut().zip(hi_half[..half].iter()) {
+                    for c in 0..NUM_TRACE_COLS {
+                        lo[c] += chal * (hi[c] - lo[c]);
+                    }
+                }
+            }
+            cols_ext4.truncate(half);
+
+            for idx in 0..half {
+                let e0 = eq_tau_tbl[idx];
+                let e1 = eq_tau_tbl[idx + half];
+                eq_tau_tbl[idx] = e0 + chal * (e1 - e0);
+                let n0 = eq_not_last_tbl[idx];
+                let n1 = eq_not_last_tbl[idx + half];
+                eq_not_last_tbl[idx] = n0 + chal * (n1 - n0);
+                let s0 = shift_tau_tbl[idx];
+                let s1 = shift_tau_tbl[idx + half];
+                shift_tau_tbl[idx] = s0 + chal * (s1 - s0);
+            }
+            eq_tau_tbl.truncate(half);
+            eq_not_last_tbl.truncate(half);
+            shift_tau_tbl.truncate(half);
+
+            let mut next_ops = Vec::with_capacity(half_r);
+            for idx in 0..half_r {
+                let f0 = is_first_tbl[idx];
+                let f1 = is_first_tbl[idx + half_r];
+                is_first_tbl[idx] = f0 + chal * (f1 - f0);
+                let l0 = is_last_tbl[idx];
+                let l1 = is_last_tbl[idx + half_r];
+                is_last_tbl[idx] = l0 + chal * (l1 - l0);
+                let sc0 = step_c0_tbl[idx];
+                let sc1 = step_c0_tbl[idx + half_r];
+                step_c0_tbl[idx] = sc0 + chal * (sc1 - sc0);
+                next_ops.push(merge_sparse_op_lists(
+                    &op_sparse_tbl[idx],
+                    &op_sparse_tbl[idx + half_r],
+                    chal,
+                ));
+            }
+            is_first_tbl.truncate(half_r);
+            is_last_tbl.truncate(half_r);
+            step_c0_tbl.truncate(half_r);
+            op_sparse_tbl = next_ops;
+            cur_r = half_r;
+            cur_m = half;
+        }
+        col_evals_arr = cols_ext4[0];
     }
 
     // Prover-side algebraic self-check before committing transcript or V5 receipt:

@@ -464,10 +464,7 @@ pub(crate) fn encode_constraint_kind(kind: ConstraintKind) -> (u32, u32) {
         ConstraintKind::ForsMerkleBlockB {
             is_tree_last,
             is_odd_tree,
-        } => (
-            10,
-            u32::from(is_tree_last) | (u32::from(is_odd_tree) << 1),
-        ),
+        } => (10, u32::from(is_tree_last) | (u32::from(is_odd_tree) << 1)),
         ConstraintKind::ForsRootsPairAbsorb { is_last_pair } => (11, u32::from(is_last_pair)),
         ConstraintKind::ForsRootsFinalSqueeze => (12, 0),
         ConstraintKind::DetTreeHmsgBlock0 => (13, 0),

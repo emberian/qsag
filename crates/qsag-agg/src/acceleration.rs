@@ -14,6 +14,8 @@ struct Device {
     registry: VerifiedKernelDigestRegistry<4>,
     prover_pins: [CertifiedProverKernelPin; ProverKernelSlot::COUNT],
     key: BackendAttestationKey,
+    session_owner: std::sync::Mutex<Option<std::thread::ThreadId>>,
+    session_cv: std::sync::Condvar,
     receipts: core::sync::atomic::AtomicU64,
     fallbacks: core::sync::atomic::AtomicU64,
 }
@@ -33,9 +35,7 @@ fn device() -> Option<&'static Device> {
                 let prover_pins = VulkanSpirvBackend::measure_embedded_prover_spirv_pins();
                 for slot in ProverKernelSlot::ALL {
                     if raw.prover_kernel_pin(slot) != prover_pins[slot as usize] {
-                        return Err(alloc::format!(
-                            "prover kernel pin mismatch on {slot:?}"
-                        ));
+                        return Err(alloc::format!("prover kernel pin mismatch on {slot:?}"));
                     }
                 }
                 let mut registry = VerifiedKernelDigestRegistry::with_cpu_reference_pins();
@@ -59,6 +59,8 @@ fn device() -> Option<&'static Device> {
                     registry,
                     prover_pins,
                     key,
+                    session_owner: std::sync::Mutex::new(None),
+                    session_cv: std::sync::Condvar::new(),
                     receipts: core::sync::atomic::AtomicU64::new(0),
                     fallbacks: core::sync::atomic::AtomicU64::new(0),
                 })
@@ -83,12 +85,25 @@ pub(crate) struct GpuWhirSession {
 impl Drop for GpuWhirSession {
     fn drop(&mut self) {
         self.device.backend.inner().release_prover_session();
+        if let Ok(mut owner) = self.device.session_owner.lock() {
+            *owner = None;
+            self.device.session_cv.notify_one();
+        }
     }
 }
 
 pub(crate) fn try_acquire_whir_session() -> Option<GpuWhirSession> {
     let d = device()?;
+    let cur_tid = std::thread::current().id();
+    let mut owner = d.session_owner.lock().ok()?;
+    if *owner == Some(cur_tid) {
+        return None;
+    }
+    while owner.is_some() {
+        owner = d.session_cv.wait(owner).ok()?;
+    }
     if d.backend.inner().try_acquire_prover_session().is_ok() {
+        *owner = Some(cur_tid);
         Some(GpuWhirSession { device: d })
     } else {
         None
@@ -156,9 +171,12 @@ impl GpuWhirSession {
             output_digest,
             self.device.backend.hardware_audit_digest(),
         );
-        let valid = receipt
-            .as_ref()
-            .is_ok_and(|r| self.device.registry.verify_keyed_receipt(r, &self.device.key).is_ok());
+        let valid = receipt.as_ref().is_ok_and(|r| {
+            self.device
+                .registry
+                .verify_keyed_receipt(r, &self.device.key)
+                .is_ok()
+        });
         if valid {
             self.device
                 .receipts
@@ -277,8 +295,13 @@ fn digest_words(words: &[u64]) -> [u8; 32] {
                 buf.fill(0);
                 let start = (lane * WORDS).min(batch.len());
                 let end = (start + WORDS).min(batch.len());
-                for (dst, word) in buf.chunks_exact_mut(8).zip(&batch[start..end]) {
-                    dst.copy_from_slice(&word.to_le_bytes());
+                for (dst, word) in buf
+                    .as_chunks_mut::<8>()
+                    .0
+                    .iter_mut()
+                    .zip(&batch[start..end])
+                {
+                    *dst = word.to_le_bytes();
                 }
             }
             let digests =
