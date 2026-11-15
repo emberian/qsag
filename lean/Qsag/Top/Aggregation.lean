@@ -3,7 +3,7 @@ module
 # Qsag.Top.Aggregation — End-to-End Composed Succinct Aggregation Soundness and Extraction
 
 Top-level composition module (zero `import all`) connecting the coding-theoretic proximity-gap
-proofs (`CodingTheory/Cwyz26JohnsonCertificate`, `CodingTheory/Cwyz26DeployedStages`), the
+proofs (`Coding/Cwyz26JohnsonCertificate`, `Coding/Cwyz26DeployedStages`), the
 round-by-round `HEM`/`WHIR` verifier and point-reduction bridges (`HemVerifierAcceptance`,
 `HemPointReductionSoundness`, `HemFoldDecompositionBridge`, `HemSlicedFoldBudget`), the classical
 and coherent Fourier QROM Merkle-opening extractors (`QromBatchMerkleExtraction`,
@@ -18,24 +18,24 @@ public import Qsag.Spec.Parameters
 public import Qsag.Spec.Assumptions
 public import Qsag.Spec.IdealAggregate
 public import Qsag.Math.QuarticExt4
-public import Qsag.CodingTheory.Cwyz26JohnsonCertificate
-public import Qsag.CodingTheory.Cwyz26DeployedStages
-public import Qsag.CodingTheory.Cwyz26EqualDegreeAndMultiFold
-public import Qsag.CorduroyAndHemAirCompleteness
-public import Qsag.Poseidon2AlgebraicAndRecursiveHem
-public import Qsag.CrossProtocolAndDualOracleComposition
-public import Qsag.HemVerifierAcceptance
-public import Qsag.HemPointReductionSoundness
-public import Qsag.HemFoldDecompositionBridge
-public import Qsag.HemExtractedOpeningBridge
-public import Qsag.QromBatchMerkleExtraction
-public import Qsag.QromCoherentMerkleBridge
-public import Qsag.QromFourierSupport
-public import Qsag.QromSaltedMerkleStateRestoration
-public import Qsag.ComposedQsAgAndMergeSecurity
-public import Qsag.CompositionInstances
-public import Qsag.HemSlicedFoldBudget
-public import Qsag.SpirvSimtGpuEquiv
+public import Qsag.Coding.Cwyz26JohnsonCertificate
+public import Qsag.Coding.Cwyz26DeployedStages
+public import Qsag.Coding.Cwyz26EqualDegreeAndMultiFold
+public import Qsag.Protocol.Aggregation.CorduroyAndHemAirCompleteness
+public import Qsag.Protocol.Aggregation.Poseidon2AlgebraicAndRecursiveHem
+public import Qsag.Protocol.Aggregation.CrossProtocolAndDualOracleComposition
+public import Qsag.Protocol.Aggregation.HemVerifierAcceptance
+public import Qsag.Protocol.Aggregation.HemPointReductionSoundness
+public import Qsag.Protocol.Aggregation.HemFoldDecompositionBridge
+public import Qsag.Protocol.Aggregation.HemExtractedOpeningBridge
+public import Qsag.Oracle.QromBatchMerkleExtraction
+public import Qsag.Protocol.Aggregation.QromCoherentMerkleBridge
+public import Qsag.Oracle.QromFourierSupport
+public import Qsag.Protocol.Aggregation.QromSaltedMerkleStateRestoration
+public import Qsag.Protocol.Aggregation.ComposedQsAgAndMergeSecurity
+public import Qsag.Protocol.Aggregation.CompositionInstances
+public import Qsag.Protocol.Aggregation.HemSlicedFoldBudget
+public import Qsag.Machine.SpirvSimtGpuEquiv
 import Qsag.Tactic.AssuranceKit
 
 public section

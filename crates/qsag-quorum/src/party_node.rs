@@ -1614,6 +1614,14 @@ mod tests {
         fn recv_frame(&mut self, from: usize, tag: u32) -> Result<Vec<u8>, TransportError> {
             self.inner.recv_frame(from, tag)
         }
+
+        fn recv_authenticated_envelope(
+            &mut self,
+            from: usize,
+            tag: u32,
+        ) -> Result<Vec<u8>, TransportError> {
+            self.inner.recv_authenticated_envelope(from, tag)
+        }
     }
 
     fn honest(endpoint: InMemoryEndpoint) -> TamperTransport {

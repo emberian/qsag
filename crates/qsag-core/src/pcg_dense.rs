@@ -3946,7 +3946,9 @@ mod tests {
                 assert!(DensePcgPartySeed::from_wire_bytes(&oversized).is_err());
                 let decoded = DensePcgPartySeed::from_wire_bytes(&bytes)
                     .expect("3-party wire seed round-trip");
-                decoded.expand_local(&mut burns).expect("3-party local expand")
+                decoded
+                    .expand_local(&mut burns)
+                    .expect("3-party local expand")
             })
             .collect();
 

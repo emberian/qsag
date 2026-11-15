@@ -14,16 +14,24 @@ use qsag_core::preprocessing::{PartyPrivateRng, try_establish_rlwe_ot_ext_channe
 use qsag_fts::ot::{AuthenticatedOtWire, CommittedCorrelatedOt, CommittedOtMessage};
 use qsag_fts::{
     LeafBurnPersistence, ParallelSeededDkgConfig, ParallelSeededDkgOutput,
-    ParallelSeededGilboaProducts, ParallelSeededDkgRound1State, ParallelSeededDkgSharePackage,
-    ParallelSeededError, ParallelSeededMerkleLayers, ParallelSeededParams,
-    ParallelSeededPublicKey, ParallelSeededSignRequest,
-    ParallelSeededSignResult, ParallelSeededSignSession, ParallelSeededSignature,
-    assemble_parallel_seeded_public_key, finalize_parallel_seeded_dkg_party,
+    ParallelSeededDkgRound1State, ParallelSeededDkgSharePackage, ParallelSeededError,
+    ParallelSeededGilboaProducts, ParallelSeededMerkleLayers, ParallelSeededParams,
+    ParallelSeededPublicKey, ParallelSeededSignRequest, ParallelSeededSignResult,
+    ParallelSeededSignSession, ParallelSeededSignature, assemble_parallel_seeded_public_key,
+    finalize_parallel_seeded_dkg_party,
 };
 use qsag_policy::{
     PolicyGuardDkgRound1, PolicySignerGuardShare, PolicyViolation,
     finalize_distributed_policy_guard,
 };
+
+fn fresh_entropy() -> Result<[u8; 32], ParallelSeededError> {
+    let mut rng = PartyPrivateRng::from_os_rng(b"QSAG.CLI.CEREMONY.ENTROPY.V1")
+        .map_err(|_| ParallelSeededError::BdozMacCheckFailed)?;
+    let mut entropy = [0; 32];
+    rng.fill_bytes(&mut entropy);
+    Ok(entropy)
+}
 
 /// Channels are allocated by the coordinator and moved exclusively to their endpoints.
 /// Only public OT protocol messages and encrypted alternatives cross these channels.
@@ -33,17 +41,27 @@ struct LocalOtWire {
 }
 
 impl AuthenticatedOtWire for LocalOtWire {
-    fn send(&mut self, peer: u16, context: [u8; 32], message: CommittedOtMessage)
-        -> Result<(), ParallelSeededError>
-    {
-        self.tx.get(&peer).ok_or(ParallelSeededError::InvalidThresholdParameters)?
-            .send((context, message)).map_err(|_| ParallelSeededError::BdozMacCheckFailed)
+    fn send(
+        &mut self,
+        peer: u16,
+        context: [u8; 32],
+        message: CommittedOtMessage,
+    ) -> Result<(), ParallelSeededError> {
+        self.tx
+            .get(&peer)
+            .ok_or(ParallelSeededError::InvalidThresholdParameters)?
+            .send((context, message))
+            .map_err(|_| ParallelSeededError::BdozMacCheckFailed)
     }
 
-    fn receive(&mut self, peer: u16, context: [u8; 32])
-        -> Result<CommittedOtMessage, ParallelSeededError>
-    {
-        let (actual, message) = self.rx.get(&peer)
+    fn receive(
+        &mut self,
+        peer: u16,
+        context: [u8; 32],
+    ) -> Result<CommittedOtMessage, ParallelSeededError> {
+        let (actual, message) = self
+            .rx
+            .get(&peer)
             .ok_or(ParallelSeededError::InvalidThresholdParameters)?
             .recv_timeout(std::time::Duration::from_secs(120))
             .map_err(|_| ParallelSeededError::BdozMacCheckFailed)?;
@@ -56,28 +74,40 @@ impl AuthenticatedOtWire for LocalOtWire {
 
 /// Bootstrap real, direction-specific base OT using independently sampled local entropy.
 /// The session binds the roster; party handles never receive another party's RNG or pads.
-fn ot_endpoints(parties: &[u16], session: [u8; 32])
-    -> Result<Vec<CommittedCorrelatedOt<LocalOtWire>>, ParallelSeededError>
-{
+fn ot_endpoints(
+    parties: &[u16],
+    session: [u8; 32],
+) -> Result<Vec<CommittedCorrelatedOt<LocalOtWire>>, ParallelSeededError> {
     if parties.len() < 2 || parties.windows(2).any(|w| w[0] >= w[1]) {
         return Err(ParallelSeededError::InvalidThresholdParameters);
     }
-    let mut wires: Vec<_> = parties.iter().map(|_| LocalOtWire {
-        tx: BTreeMap::new(), rx: BTreeMap::new(),
-    }).collect();
+    let mut wires: Vec<_> = parties
+        .iter()
+        .map(|_| LocalOtWire {
+            tx: BTreeMap::new(),
+            rx: BTreeMap::new(),
+        })
+        .collect();
     let n = parties.len();
     let mut senders: Vec<Vec<_>> = (0..n).map(|_| (0..n).map(|_| None).collect()).collect();
     let mut receivers: Vec<Vec<_>> = (0..n).map(|_| (0..n).map(|_| None).collect()).collect();
     for (i, &sender) in parties.iter().enumerate() {
         for (j, &receiver) in parties.iter().enumerate() {
-            if i == j { continue; }
+            if i == j {
+                continue;
+            }
             let mut srng = PartyPrivateRng::from_os_rng(b"QSAG.CLI.OT.SENDER.V1")
                 .map_err(|_| ParallelSeededError::BdozMacCheckFailed)?;
             let mut rrng = PartyPrivateRng::from_os_rng(b"QSAG.CLI.OT.RECEIVER.V1")
                 .map_err(|_| ParallelSeededError::BdozMacCheckFailed)?;
-            let (s, r) = try_establish_rlwe_ot_ext_channel(session, usize::from(sender),
-                usize::from(receiver), &mut srng, &mut rrng)
-                .map_err(|_| ParallelSeededError::BdozMacCheckFailed)?;
+            let (s, r) = try_establish_rlwe_ot_ext_channel(
+                session,
+                usize::from(sender),
+                usize::from(receiver),
+                &mut srng,
+                &mut rrng,
+            )
+            .map_err(|_| ParallelSeededError::BdozMacCheckFailed)?;
             senders[i][j] = Some(s);
             receivers[j][i] = Some(r);
             let (tx, rx) = mpsc::channel();
@@ -89,13 +119,23 @@ fn ot_endpoints(parties: &[u16], session: [u8; 32])
     for (i, wire) in wires.into_iter().enumerate() {
         let mut peers = Vec::with_capacity(n - 1);
         for (j, &peer) in parties.iter().enumerate() {
-            if i == j { continue; }
-            peers.push((peer,
-                senders[i][j].take().ok_or(ParallelSeededError::InvalidThresholdParameters)?,
-                receivers[i][j].take().ok_or(ParallelSeededError::InvalidThresholdParameters)?));
+            if i == j {
+                continue;
+            }
+            peers.push((
+                peer,
+                senders[i][j]
+                    .take()
+                    .ok_or(ParallelSeededError::InvalidThresholdParameters)?,
+                receivers[i][j]
+                    .take()
+                    .ok_or(ParallelSeededError::InvalidThresholdParameters)?,
+            ));
         }
-        let entropy = crate::cli::os_random_32().map_err(|_| ParallelSeededError::BdozMacCheckFailed)?;
-        result.push(CommittedCorrelatedOt::new(parties[i], peers, entropy, wire)?);
+        let entropy = fresh_entropy().map_err(|_| ParallelSeededError::BdozMacCheckFailed)?;
+        result.push(CommittedCorrelatedOt::new(
+            parties[i], peers, entropy, wire,
+        )?);
     }
     Ok(result)
 }
@@ -107,11 +147,17 @@ pub fn provision_distributed_policy_guards(
     ceremony_seed: [u8; 32],
     parties: &[u16],
 ) -> Result<Vec<PolicySignerGuardShare>, PolicyViolation> {
-    provision_distributed_policy_guards_with_capacity(ceremony_seed, parties, qsag_policy::BDOZ_PREPROC_SLOTS)
+    provision_distributed_policy_guards_with_capacity(
+        ceremony_seed,
+        parties,
+        qsag_policy::BDOZ_PREPROC_SLOTS,
+    )
 }
 
 pub fn provision_distributed_policy_guards_with_capacity(
-    mut ceremony_seed: [u8; 32], parties: &[u16], slots: usize,
+    mut ceremony_seed: [u8; 32],
+    parties: &[u16],
+    slots: usize,
 ) -> Result<Vec<PolicySignerGuardShare>, PolicyViolation> {
     let setup_id = cshake256_framed_32(b"QSAG.CLI.POLICY.DKG.SETUP.V1", &[&ceremony_seed]);
     let mut entropies = Vec::with_capacity(parties.len());
@@ -126,7 +172,8 @@ pub fn provision_distributed_policy_guards_with_capacity(
     let mut round1_states = Vec::with_capacity(parties.len());
     let mut commits = Vec::new();
     for (&id, entropy) in parties.iter().zip(entropies) {
-        let (st, msgs) = PolicyGuardDkgRound1::new_with_capacity(id, parties, setup_id, entropy, slots)?;
+        let (st, msgs) =
+            PolicyGuardDkgRound1::new_with_capacity(id, parties, setup_id, entropy, slots)?;
         round1_states.push((id, st));
         commits.extend(msgs);
     }
@@ -145,8 +192,8 @@ pub fn provision_distributed_policy_guards_with_capacity(
     }
 
     let n = parties.len();
-    let endpoints = ot_endpoints(parties, setup_id)
-        .map_err(|_| PolicyViolation::BarrierBdozMacFailed)?;
+    let endpoints =
+        ot_endpoints(parties, setup_id).map_err(|_| PolicyViolation::BarrierBdozMacFailed)?;
 
     let opens_ref = &opens;
     thread::scope(|scope| {
@@ -190,9 +237,12 @@ impl DealerlessThresholdFtsSetup {
     /// Compute the deterministic authenticated power-tuple budget required for `params`:
     /// `2^h` leaf preparations plus `2^h` epoch signatures. The underlying single-tree
     /// protocol still materializes these tuples; callers must budget memory accordingly.
-    pub fn required_power_count(params: &ParallelSeededParams) -> Result<usize, ParallelSeededError> {
+    pub fn required_power_count(
+        params: &ParallelSeededParams,
+    ) -> Result<usize, ParallelSeededError> {
         params.validate()?;
-        let leaves = 1usize.checked_shl(params.tree_height as u32)
+        let leaves = 1usize
+            .checked_shl(params.tree_height as u32)
             .ok_or(ParallelSeededError::InvalidThresholdParameters)?;
         let per_leaf = 2 * 48 * params.num_chains * params.winternitz_w;
         let per_sign = 2 * 48 * (1 + params.num_chains + params.target_sum);
@@ -271,13 +321,15 @@ impl DealerlessThresholdFtsSetup {
             }
         }
 
-        let backends = ot_endpoints(&roster, dkg_session)?.into_iter()
+        let backends = ot_endpoints(&roster, dkg_session)?
+            .into_iter()
             .zip(&roster)
             .map(|(ot, &id)| {
-                let entropy = crate::cli::os_random_32()
-                    .map_err(|_| ParallelSeededError::BdozMacCheckFailed)?;
+                let entropy =
+                    fresh_entropy().map_err(|_| ParallelSeededError::BdozMacCheckFailed)?;
                 Ok(ParallelSeededGilboaProducts::new(id, entropy, ot))
-            }).collect::<Result<Vec<_>, ParallelSeededError>>()?;
+            })
+            .collect::<Result<Vec<_>, ParallelSeededError>>()?;
 
         let openings_ref = &openings;
         let mut pending = thread::scope(|scope| -> Result<Vec<_>, ParallelSeededError> {
@@ -369,11 +421,8 @@ impl DealerlessThresholdFtsSetup {
             if cached_pk.pk_seed_bytes != pk_seed_bytes || cached_layers.is_empty() {
                 return Err(ParallelSeededError::InvalidAuthenticationPath);
             }
-            let (rebuilt_pk, rebuilt_layers) = assemble_parallel_seeded_public_key(
-                params,
-                pk_seed_bytes,
-                &cached_layers[0],
-            )?;
+            let (rebuilt_pk, rebuilt_layers) =
+                assemble_parallel_seeded_public_key(params, pk_seed_bytes, &cached_layers[0])?;
             if rebuilt_pk != cached_pk || rebuilt_layers != cached_layers {
                 return Err(ParallelSeededError::InvalidAuthenticationPath);
             }
@@ -444,7 +493,11 @@ impl DealerlessThresholdFtsSetup {
 
         let mut sessions = Vec::with_capacity(self.outputs.len());
         for out in &mut self.outputs {
-            sessions.push(ParallelSeededSignSession::begin(out.share_mut(), &req, persistence)?);
+            sessions.push(ParallelSeededSignSession::begin(
+                out.share_mut(),
+                &req,
+                persistence,
+            )?);
         }
         match drive_sign_sessions(&mut sessions)? {
             ParallelSeededSignResult::Signature(sig) => Ok(sig),
@@ -473,4 +526,65 @@ fn drive_sign_sessions(
         }
     }
     Err(ParallelSeededError::GrindingExhausted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use qsag_fts::ParallelSeededDkgProducts;
+    use qsag_policy::PolicyAuthenticatedOt;
+
+    #[test]
+    fn production_ot_policy_exchange_and_gilboa_product() {
+        let endpoints = ot_endpoints(&[0, 1], [41; 32]).unwrap();
+        let outputs = thread::scope(|scope| {
+            let jobs: Vec<_> = endpoints
+                .into_iter()
+                .enumerate()
+                .map(|(id, mut ot)| {
+                    scope.spawn(move || {
+                        let alternatives: Vec<_> = (0..65u128)
+                            .map(|i| [1000 * id as u128 + i, 1000 * id as u128 + i + 100])
+                            .collect();
+                        let choices: Vec<_> = (0..65).map(|i| i % 2 != 0).collect();
+                        let selected = ot
+                            .exchange(
+                                id as u16,
+                                (1 - id) as u16,
+                                [42; 32],
+                                &alternatives,
+                                &choices,
+                            )
+                            .unwrap();
+                        for (i, value) in selected.iter().enumerate() {
+                            assert_eq!(
+                                *value,
+                                1000 * (1 - id) as u128
+                                    + i as u128
+                                    + if choices[i] { 100 } else { 0 }
+                            );
+                        }
+                        let mut products = ParallelSeededGilboaProducts::new(
+                            id as u16,
+                            fresh_entropy().unwrap(),
+                            ot,
+                        );
+                        let operands: Vec<_> = (0..35u128).map(|i| i + 7 + id as u128).collect();
+                        let result = products.product_shares([43; 32], 0, 1, &operands).unwrap();
+                        assert!(products.product_shares([43; 32], 0, 1, &operands).is_err());
+                        result
+                    })
+                })
+                .collect();
+            jobs.into_iter()
+                .map(|j| j.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        for (i, (left, right)) in outputs[0].iter().zip(&outputs[1]).enumerate() {
+            assert_eq!(
+                left ^ right,
+                qsag_accel::gf2_128::gf2_128_mul(i as u128 + 7, i as u128 + 8)
+            );
+        }
+    }
 }

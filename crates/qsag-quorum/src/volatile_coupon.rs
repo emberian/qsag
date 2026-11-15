@@ -19,16 +19,26 @@
 //! initiator can still exhaust its authorized pool; network loss burns a coupon.
 //! Fixed minting subsets require *every* member, irrespective of the parent t-of-n
 //! configuration. Changing subsets requires minting a different coupon.
+//!
+//! Integration status: the local cache MAC authenticates a coupon descriptor. It
+//! does not replace `qsag_core::baggy::WaistbandCache` or its `FirstSignedLedger`.
+//! Full disk-stateless Baggy v2 still requires a concrete PORS+FP certificate
+//! backend, authenticated root-cache derivation, and a dealerless mint whose
+//! secret intermediates and outputs remain protected from persistence. The tests
+//! use a trusted dealer only to construct independent all-of-S input shares; that
+//! helper is not an implementation of the missing production mint. The indexed
+//! Merkle bundle below authenticates hop keys; it is not Compact1122 signing.
 
-use std::collections::BTreeMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::quorum_jorts::{WOTS_CHAINS, WOTS_STEPS, chain_walk, digits_at};
 use qsag_core::baggy::{BaggyParams, BaggyPublicKey, BaggySig, baggy_verify};
 use qsag_core::sponge::keccak::Cshake256Xof;
 use qsag_core::wipe::{ct_eq_bytes32, wipe_bytes};
-use crate::quorum_jorts::{chain_walk, digits_at, WOTS_CHAINS, WOTS_STEPS};
+use std::collections::BTreeMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 type Node = [u8; 32];
-const SHARE_BYTES: usize = WOTS_CHAINS * WOTS_STEPS * 32;
+/// Locked bytes required for one all-of-S share table.
+pub const SHARE_BYTES: usize = WOTS_CHAINS * WOTS_STEPS * 32;
 const OPENING_BYTES: usize = WOTS_CHAINS * 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,12 +68,18 @@ impl std::error::Error for CouponError {}
 mod memory {
     use super::CouponError;
     use std::ffi::{c_int, c_long, c_void};
-    use std::ptr::NonNull;
     use std::io::Read;
+    use std::ptr::NonNull;
 
     unsafe extern "C" {
-        fn mmap(addr: *mut c_void, len: usize, prot: c_int, flags: c_int,
-            fd: c_int, offset: i64) -> *mut c_void;
+        fn mmap(
+            addr: *mut c_void,
+            len: usize,
+            prot: c_int,
+            flags: c_int,
+            fd: c_int,
+            offset: i64,
+        ) -> *mut c_void;
         fn mlock(addr: *const c_void, len: usize) -> c_int;
         fn madvise(addr: *mut c_void, len: usize, advice: c_int) -> c_int;
         fn munmap(addr: *mut c_void, len: usize) -> c_int;
@@ -92,61 +108,92 @@ mod memory {
             }
             // Linux _SC_PAGESIZE. Fail before mapping on an unsupported OS result.
             let page = unsafe { sysconf(30) };
-            if page <= 0 { return Err(CouponError::MemoryProtection); }
+            if page <= 0 {
+                return Err(CouponError::MemoryProtection);
+            }
             let page = page as usize;
-            let mapped = len.checked_add(page - 1)
-                .map(|n| n / page * page).ok_or(CouponError::InvalidParameters)?;
-            if mapped > isize::MAX as usize { return Err(CouponError::InvalidParameters); }
+            let mapped = len
+                .checked_add(page - 1)
+                .map(|n| n / page * page)
+                .ok_or(CouponError::InvalidParameters)?;
+            if mapped > isize::MAX as usize {
+                return Err(CouponError::InvalidParameters);
+            }
             // SAFETY: anonymous private mapping, no file descriptor or shared alias.
             let raw = unsafe { mmap(std::ptr::null_mut(), mapped, 3, 0x22, -1, 0) };
-            if raw as isize == -1 { return Err(CouponError::MemoryProtection); }
+            if raw as isize == -1 {
+                return Err(CouponError::MemoryProtection);
+            }
             let Some(ptr) = NonNull::new(raw.cast::<u8>()) else {
                 // Even a mapping at address zero must be released, never dereferenced.
-                unsafe { munmap(raw, mapped); }
+                unsafe {
+                    munmap(raw, mapped);
+                }
                 return Err(CouponError::MemoryProtection);
             };
             // No secret enters the mapping until all three protections succeed.
             let protected = unsafe {
-                mlock(raw, mapped) == 0 && madvise(raw, mapped, 16) == 0
+                mlock(raw, mapped) == 0
+                    && madvise(raw, mapped, 16) == 0
                     && madvise(raw, mapped, 18) == 0 // DONTDUMP, WIPEONFORK
             };
             if !protected {
-                unsafe { munmap(raw, mapped); }
+                unsafe {
+                    munmap(raw, mapped);
+                }
                 return Err(CouponError::MemoryProtection);
             }
-            Ok(Self { ptr, len, mapped, pid: std::process::id() })
+            Ok(Self {
+                ptr,
+                len,
+                mapped,
+                pid: std::process::id(),
+            })
         }
         pub fn random(len: usize) -> Result<Self, CouponError> {
             let mut out = Self::new(len)?;
             // Read-only OS randomness; bytes are written straight into locked pages.
-            std::fs::File::open("/dev/urandom").and_then(|mut f|
-                f.read_exact(out.as_mut_slice().map_err(std::io::Error::other)?))
+            std::fs::File::open("/dev/urandom")
+                .and_then(|mut f| f.read_exact(out.as_mut_slice().map_err(std::io::Error::other)?))
                 .map_err(|_| CouponError::Entropy)?;
             Ok(out)
         }
-        pub fn len(&self) -> usize { self.len }
-        pub fn is_empty(&self) -> bool { self.len == 0 }
+        pub fn len(&self) -> usize {
+            self.len
+        }
+        pub fn is_empty(&self) -> bool {
+            self.len == 0
+        }
         pub fn as_slice(&self) -> Result<&[u8], CouponError> {
-            if self.pid != std::process::id() { return Err(CouponError::Forked); }
+            if self.pid != std::process::id() {
+                return Err(CouponError::Forked);
+            }
             // SAFETY: live mapping, initialized by mmap, within its requested length.
             Ok(unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) })
         }
         /// MPC producers write their final local shares directly into these pages.
         /// They must also protect and erase their own intermediate state.
         pub fn as_mut_slice(&mut self) -> Result<&mut [u8], CouponError> {
-            if self.pid != std::process::id() { return Err(CouponError::Forked); }
+            if self.pid != std::process::id() {
+                return Err(CouponError::Forked);
+            }
             // SAFETY: exclusive owner borrow and no other exposed mutable alias.
             Ok(unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) })
         }
         #[cfg(test)]
-        pub(super) fn simulate_fork(&mut self) { self.pid = self.pid.wrapping_add(1); }
+        pub(super) fn simulate_fork(&mut self) {
+            self.pid = self.pid.wrapping_add(1);
+        }
     }
     impl Drop for LockedBytes {
         fn drop(&mut self) {
             // SAFETY: this owner retains the complete mapping until munmap. Wipe its
             // padding too. munmap releases the mlock without an unlocked secret window.
             unsafe {
-                qsag_asm::ct_memzero(std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.mapped));
+                qsag_asm::ct_memzero(std::slice::from_raw_parts_mut(
+                    self.ptr.as_ptr(),
+                    self.mapped,
+                ));
                 munmap(self.ptr.as_ptr().cast(), self.mapped);
             }
         }
@@ -160,7 +207,9 @@ fn framed(xof: &mut Cshake256Xof, value: &[u8]) {
 }
 fn hash(domain: &[u8], parts: &[&[u8]]) -> Node {
     let mut xof = Cshake256Xof::new(domain);
-    for part in parts { framed(&mut xof, part); }
+    for part in parts {
+        framed(&mut xof, part);
+    }
     let mut out = [0; 32];
     xof.squeeze(&mut out);
     out
@@ -172,16 +221,22 @@ fn hash(domain: &[u8], parts: &[&[u8]]) -> Node {
 #[derive(Debug)]
 pub struct InitiatorKey(LockedBytes);
 impl InitiatorKey {
-    pub fn generate() -> Result<Self, CouponError> { Self::from_locked(LockedBytes::random(32)?) }
+    pub fn generate() -> Result<Self, CouponError> {
+        Self::from_locked(LockedBytes::random(32)?)
+    }
     pub fn from_locked(bytes: LockedBytes) -> Result<Self, CouponError> {
-        if bytes.len() != 32 { return Err(CouponError::InvalidParameters); }
+        if bytes.len() != 32 {
+            return Err(CouponError::InvalidParameters);
+        }
         bytes.as_slice()?;
         Ok(Self(bytes))
     }
     fn mac(&self, domain: &[u8], parts: &[&[u8]]) -> Result<Node, CouponError> {
         let mut xof = Cshake256Xof::new(domain);
         framed(&mut xof, self.0.as_slice()?);
-        for part in parts { framed(&mut xof, part); }
+        for part in parts {
+            framed(&mut xof, part);
+        }
         let mut out = [0; 32];
         xof.squeeze(&mut out);
         Ok(out)
@@ -203,12 +258,18 @@ pub struct CouponDescriptor {
 }
 impl CouponDescriptor {
     pub fn validate(&self) -> Result<(), CouponError> {
-        if self.threshold < 2 || self.threshold > self.parties
+        if self.threshold < 2
+            || self.threshold > self.parties
             || self.members.len() != self.threshold
             || self.members.windows(2).any(|w| w[0] >= w[1])
-            || self.members.iter().any(|&p| u64::from(p) >= self.parties as u64)
+            || self
+                .members
+                .iter()
+                .any(|&p| u64::from(p) >= self.parties as u64)
             || self.chain_ends.len() != WOTS_CHAINS
-        { return Err(CouponError::InvalidParameters); }
+        {
+            return Err(CouponError::InvalidParameters);
+        }
         Ok(())
     }
     /// Injectively framed, domain-separated statement to certify during minting.
@@ -221,15 +282,22 @@ impl CouponDescriptor {
         out.extend_from_slice(&self.parent.pk_root);
         out.extend_from_slice(&(self.threshold as u64).to_be_bytes());
         out.extend_from_slice(&(self.parties as u64).to_be_bytes());
-        for p in &self.members { out.extend_from_slice(&p.to_be_bytes()); }
+        for p in &self.members {
+            out.extend_from_slice(&p.to_be_bytes());
+        }
         out.extend_from_slice(&self.pk_seed);
         out.extend_from_slice(&self.leaf.to_be_bytes());
         out.extend_from_slice(&self.expires_at.to_be_bytes());
-        for tip in &self.chain_ends { out.extend_from_slice(tip); }
+        for tip in &self.chain_ends {
+            out.extend_from_slice(tip);
+        }
         Ok(out)
     }
     pub fn id(&self) -> Result<Node, CouponError> {
-        Ok(hash(b"QSAG.VOLATILE.COUPON_ID/v1", &[&self.certificate_message()?]))
+        Ok(hash(
+            b"QSAG.VOLATILE.COUPON_ID/v1",
+            &[&self.certificate_message()?],
+        ))
     }
 }
 
@@ -240,15 +308,30 @@ pub struct CertifiedCoupon {
     certificate: BaggySig,
 }
 impl CertifiedCoupon {
-    pub fn verify(parent: &BaggyPublicKey, params: &BaggyParams,
-        descriptor: CouponDescriptor, certificate: BaggySig) -> Result<Self, CouponError>
-    {
-        if &descriptor.parent != parent || !baggy_verify(params, parent,
-            &descriptor.certificate_message()?, &certificate)
-        { return Err(CouponError::Certificate); }
-        Ok(Self { descriptor, certificate })
+    pub fn verify(
+        parent: &BaggyPublicKey,
+        params: &BaggyParams,
+        descriptor: CouponDescriptor,
+        certificate: BaggySig,
+    ) -> Result<Self, CouponError> {
+        if &descriptor.parent != parent
+            || !baggy_verify(
+                params,
+                parent,
+                &descriptor.certificate_message()?,
+                &certificate,
+            )
+        {
+            return Err(CouponError::Certificate);
+        }
+        Ok(Self {
+            descriptor,
+            certificate,
+        })
     }
-    pub fn descriptor(&self) -> &CouponDescriptor { &self.descriptor }
+    pub fn descriptor(&self) -> &CouponDescriptor {
+        &self.descriptor
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -259,10 +342,18 @@ pub struct SignRequest {
     pub initiator_mac: Node,
 }
 impl SignRequest {
-    pub fn authorize(key: &InitiatorKey, coupon: &CouponDescriptor,
-        message: Vec<u8>, counter: u32) -> Result<Self, CouponError>
-    {
-        let mut req = Self { coupon_id: coupon.id()?, message, counter, initiator_mac: [0; 32] };
+    pub fn authorize(
+        key: &InitiatorKey,
+        coupon: &CouponDescriptor,
+        message: Vec<u8>,
+        counter: u32,
+    ) -> Result<Self, CouponError> {
+        let mut req = Self {
+            coupon_id: coupon.id()?,
+            message,
+            counter,
+            initiator_mac: [0; 32],
+        };
         req.digits()?;
         req.initiator_mac = key.mac(b"QSAG.VOLATILE.REQUEST/v1", &[&req.commitment()])?;
         Ok(req)
@@ -271,15 +362,25 @@ impl SignRequest {
         hash(b"QSAG.VOLATILE.MESSAGE/v1", &[coupon_id, message])
     }
     fn commitment(&self) -> Node {
-        hash(b"QSAG.VOLATILE.COMMIT/v1", &[&self.coupon_id, &self.message, &self.counter.to_be_bytes()])
+        hash(
+            b"QSAG.VOLATILE.COMMIT/v1",
+            &[&self.coupon_id, &self.message, &self.counter.to_be_bytes()],
+        )
     }
     fn digits(&self) -> Result<Vec<u8>, CouponError> {
-        digits_at(&Self::message_hash(&self.coupon_id, &self.message), self.counter)
-            .ok_or(CouponError::InvalidCodeword)
+        digits_at(
+            &Self::message_hash(&self.coupon_id, &self.message),
+            self.counter,
+        )
+        .ok_or(CouponError::InvalidCodeword)
     }
 }
 
-struct Slot { coupon: CertifiedCoupon, material: Option<LockedBytes>, waistband_mac: Node }
+struct Slot {
+    coupon: CertifiedCoupon,
+    material: Option<LockedBytes>,
+    waistband_mac: Node,
+}
 /// One custodian's online pool. `&mut self` serializes take-and-wipe; use a Mutex when
 /// multiple request handlers share a pool. Spent IDs stay recorded until pool drop.
 pub struct CouponPool {
@@ -290,42 +391,87 @@ pub struct CouponPool {
     slots: BTreeMap<Node, Slot>,
 }
 impl CouponPool {
-    pub fn new(party: u32, parent: BaggyPublicKey, initiator: InitiatorKey) -> Result<Self, CouponError> {
-        Ok(Self { party, parent, initiator, cache_key: InitiatorKey::generate()?, slots: BTreeMap::new() })
+    pub fn new(
+        party: u32,
+        parent: BaggyPublicKey,
+        initiator: InitiatorKey,
+    ) -> Result<Self, CouponError> {
+        Ok(Self {
+            party,
+            parent,
+            initiator,
+            cache_key: InitiatorKey::generate()?,
+            slots: BTreeMap::new(),
+        })
     }
     /// Install exactly 128*3*32 bytes, chain-major, steps 0/1/2. The MPC producer
     /// must independently mask every chain state across ALL descriptor members.
     /// A long-term Shamir share or a seed that can recreate spent nodes is invalid.
-    pub fn install(&mut self, coupon: CertifiedCoupon, material: LockedBytes) -> Result<(), CouponError> {
+    pub fn install(
+        &mut self,
+        coupon: CertifiedCoupon,
+        material: LockedBytes,
+    ) -> Result<(), CouponError> {
         let d = &coupon.descriptor;
         d.validate()?;
-        if d.parent != self.parent || !d.members.contains(&self.party) || material.len() != SHARE_BYTES {
+        if d.parent != self.parent
+            || !d.members.contains(&self.party)
+            || material.len() != SHARE_BYTES
+        {
             return Err(CouponError::InvalidParameters);
         }
         material.as_slice()?;
-        if now()? > d.expires_at { return Err(CouponError::Expired); }
+        if now()? > d.expires_at {
+            return Err(CouponError::Expired);
+        }
         let id = d.id()?;
-        if self.slots.contains_key(&id) { return Err(CouponError::AlreadyInstalled); }
-        let waistband_mac = self.cache_key.mac(b"QSAG.VOLATILE.WAISTBAND/v1", &[&d.certificate_message()?])?;
-        self.slots.insert(id, Slot { coupon, material: Some(material), waistband_mac });
+        if self.slots.contains_key(&id) {
+            return Err(CouponError::AlreadyInstalled);
+        }
+        let waistband_mac = self
+            .cache_key
+            .mac(b"QSAG.VOLATILE.WAISTBAND/v1", &[&d.certificate_message()?])?;
+        self.slots.insert(
+            id,
+            Slot {
+                coupon,
+                material: Some(material),
+                waistband_mac,
+            },
+        );
         Ok(())
     }
     pub fn open(&mut self, req: &SignRequest) -> Result<CouponOpening, CouponError> {
         // Check request authorization before any coupon lookup, allocation, or mutation.
         let binding = req.commitment();
-        let mut expected = self.initiator.mac(b"QSAG.VOLATILE.REQUEST/v1", &[&binding])?;
+        let mut expected = self
+            .initiator
+            .mac(b"QSAG.VOLATILE.REQUEST/v1", &[&binding])?;
         let valid = ct_eq_bytes32(&expected, &req.initiator_mac);
         wipe_bytes(&mut expected);
-        if !valid { return Err(CouponError::Authentication); }
-        let slot = self.slots.get_mut(&req.coupon_id).ok_or(CouponError::MissingOrSpent)?;
+        if !valid {
+            return Err(CouponError::Authentication);
+        }
+        let slot = self
+            .slots
+            .get_mut(&req.coupon_id)
+            .ok_or(CouponError::MissingOrSpent)?;
         let d = &slot.coupon.descriptor;
-        if now()? > d.expires_at { return Err(CouponError::Expired); }
-        let mut expected_cache = self.cache_key.mac(b"QSAG.VOLATILE.WAISTBAND/v1", &[&d.certificate_message()?])?;
+        if now()? > d.expires_at {
+            return Err(CouponError::Expired);
+        }
+        let mut expected_cache = self
+            .cache_key
+            .mac(b"QSAG.VOLATILE.WAISTBAND/v1", &[&d.certificate_message()?])?;
         let cache_ok = ct_eq_bytes32(&expected_cache, &slot.waistband_mac);
         wipe_bytes(&mut expected_cache);
-        if !cache_ok || d.id()? != req.coupon_id { return Err(CouponError::Authentication); }
+        if !cache_ok || d.id()? != req.coupon_id {
+            return Err(CouponError::Authentication);
+        }
         let digits = req.digits()?;
-        if slot.material.is_none() { return Err(CouponError::MissingOrSpent); }
+        if slot.material.is_none() {
+            return Err(CouponError::MissingOrSpent);
+        }
         // Allocate the response before consuming: memory-pressure failures cannot burn.
         let mut selected = LockedBytes::new(OPENING_BYTES)?;
         let material = slot.material.take().ok_or(CouponError::MissingOrSpent)?;
@@ -339,33 +485,86 @@ impl CouponPool {
             // Step 3 is public. All members send zero and the combiner uses the tip.
         }
         drop(material); // volatile wipe of ALL unselected states before any response escapes
-        Ok(CouponOpening { party: self.party, coupon_id: req.coupon_id, binding, selected })
+        Ok(CouponOpening {
+            party: self.party,
+            coupon_id: req.coupon_id,
+            binding,
+            selected,
+        })
     }
 }
 fn now() -> Result<u64, CouponError> {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).map_err(|_| CouponError::Clock)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .map_err(|_| CouponError::Clock)
 }
 
 /// A local response remains locked until combination or transport takes it. Its
 /// selected bytes are deliberately absent from Debug and serialization derives.
 #[derive(Debug)]
-pub struct CouponOpening { party: u32, coupon_id: Node, binding: Node, selected: LockedBytes }
+pub struct CouponOpening {
+    party: u32,
+    coupon_id: Node,
+    binding: Node,
+    selected: LockedBytes,
+}
 impl CouponOpening {
-    pub fn party(&self) -> u32 { self.party }
+    /// Reconstruct a response received over an authenticated confidential channel.
+    /// Parsing must fill `selected` directly in locked storage. `combine` still
+    /// checks the fixed sender set, request binding and cryptographic chain ends.
+    pub fn from_received(
+        party: u32,
+        coupon_id: Node,
+        binding: Node,
+        selected: LockedBytes,
+    ) -> Result<Self, CouponError> {
+        if selected.len() != OPENING_BYTES {
+            return Err(CouponError::InvalidOpenings);
+        }
+        selected.as_slice()?;
+        Ok(Self {
+            party,
+            coupon_id,
+            binding,
+            selected,
+        })
+    }
+    pub fn party(&self) -> u32 {
+        self.party
+    }
+    pub fn coupon_id(&self) -> &Node {
+        &self.coupon_id
+    }
+    pub fn request_binding(&self) -> &Node {
+        &self.binding
+    }
     /// Send only over an authenticated confidential transport; discard after send.
-    pub fn selected_bytes(&self) -> Result<&[u8], CouponError> { self.selected.as_slice() }
+    pub fn selected_bytes(&self) -> Result<&[u8], CouponError> {
+        self.selected.as_slice()
+    }
 }
 
 #[derive(Clone)]
-pub struct CouponSignature { pub coupon: CertifiedCoupon, pub counter: u32, pub nodes: Vec<Node> }
+pub struct CouponSignature {
+    pub coupon: CertifiedCoupon,
+    pub counter: u32,
+    pub nodes: Vec<Node>,
+}
 /// All responses must bind the same request and contain each fixed member once.
 /// The final forward-chain check detects arbitrary corrupt response shares.
-pub fn combine(coupon: &CertifiedCoupon, req: &SignRequest, openings: &[CouponOpening])
-    -> Result<CouponSignature, CouponError>
-{
+pub fn combine(
+    coupon: &CertifiedCoupon,
+    req: &SignRequest,
+    openings: &[CouponOpening],
+) -> Result<CouponSignature, CouponError> {
     let d = &coupon.descriptor;
-    if now()? > d.expires_at { return Err(CouponError::Expired); }
-    if d.id()? != req.coupon_id || openings.len() != d.members.len() { return Err(CouponError::InvalidOpenings); }
+    if now()? > d.expires_at {
+        return Err(CouponError::Expired);
+    }
+    if d.id()? != req.coupon_id || openings.len() != d.members.len() {
+        return Err(CouponError::InvalidOpenings);
+    }
     let binding = req.commitment();
     let digits = req.digits()?;
     let mut nodes = vec![[0; 32]; WOTS_CHAINS];
@@ -375,36 +574,215 @@ pub fn combine(coupon: &CertifiedCoupon, req: &SignRequest, openings: &[CouponOp
         if matches.next().is_some() || o.coupon_id != req.coupon_id || o.binding != binding {
             return Err(CouponError::InvalidOpenings);
         }
-        for (dst, src) in nodes.as_flattened_mut().iter_mut().zip(o.selected.as_slice()?) { *dst ^= src; }
+        for (dst, src) in nodes
+            .as_flattened_mut()
+            .iter_mut()
+            .zip(o.selected.as_slice()?)
+        {
+            *dst ^= src;
+        }
     }
     for (chain, (&step, node)) in digits.iter().zip(&mut nodes).enumerate() {
-        if usize::from(step) == WOTS_STEPS { *node = d.chain_ends[chain]; }
-        let tip = chain_walk(&d.pk_seed, d.leaf, chain, usize::from(step), WOTS_STEPS, node);
-        if !ct_eq_bytes32(&tip, &d.chain_ends[chain]) { return Err(CouponError::InvalidOpenings); }
+        if usize::from(step) == WOTS_STEPS {
+            *node = d.chain_ends[chain];
+        }
+        let tip = chain_walk(
+            &d.pk_seed,
+            d.leaf,
+            chain,
+            usize::from(step),
+            WOTS_STEPS,
+            node,
+        );
+        if !ct_eq_bytes32(&tip, &d.chain_ends[chain]) {
+            return Err(CouponError::InvalidOpenings);
+        }
     }
-    Ok(CouponSignature { coupon: coupon.clone(), counter: req.counter, nodes })
+    Ok(CouponSignature {
+        coupon: coupon.clone(),
+        counter: req.counter,
+        nodes,
+    })
 }
 
 /// Concrete verification pins the parent key, checks its certificate, expiry, the
 /// codeword sum and every one-time chain. It never trusts an enrollment token alone.
-pub fn verify(parent: &BaggyPublicKey, params: &BaggyParams, message: &[u8], sig: &CouponSignature) -> bool {
+pub fn verify(
+    parent: &BaggyPublicKey,
+    params: &BaggyParams,
+    message: &[u8],
+    sig: &CouponSignature,
+) -> bool {
     let d = &sig.coupon.descriptor;
-    let Ok(certificate_message) = d.certificate_message() else { return false; };
-    let Ok(id) = d.id() else { return false; };
-    let Ok(time) = now() else { return false; };
-    if d.parent != *parent || time > d.expires_at || sig.nodes.len() != WOTS_CHAINS
-        || !baggy_verify(params, parent, &certificate_message, &sig.coupon.certificate) { return false; }
-    let Some(digits) = digits_at(&SignRequest::message_hash(&id, message), sig.counter) else { return false; };
-    digits.iter().zip(&sig.nodes).enumerate().all(|(chain, (&step, node))|
-        ct_eq_bytes32(&chain_walk(&d.pk_seed, d.leaf, chain, usize::from(step), WOTS_STEPS, node), &d.chain_ends[chain]))
+    let Ok(certificate_message) = d.certificate_message() else {
+        return false;
+    };
+    let Ok(id) = d.id() else {
+        return false;
+    };
+    let Ok(time) = now() else {
+        return false;
+    };
+    if d.parent != *parent
+        || time > d.expires_at
+        || sig.nodes.len() != WOTS_CHAINS
+        || !baggy_verify(
+            params,
+            parent,
+            &certificate_message,
+            &sig.coupon.certificate,
+        )
+    {
+        return false;
+    }
+    let Some(digits) = digits_at(&SignRequest::message_hash(&id, message), sig.counter) else {
+        return false;
+    };
+    digits
+        .iter()
+        .zip(&sig.nodes)
+        .enumerate()
+        .all(|(chain, (&step, node))| {
+            ct_eq_bytes32(
+                &chain_walk(
+                    &d.pk_seed,
+                    d.leaf,
+                    chain,
+                    usize::from(step),
+                    WOTS_STEPS,
+                    node,
+                ),
+                &d.chain_ends[chain],
+            )
+        })
+}
+
+/// A certified bundle identity. The certificate must bind both fields; the verifier
+/// receives this trusted identity, never a caller-selected replacement leaf count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HopBundleRoot {
+    pub leaves: usize,
+    pub root: Node,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexedHopProof {
+    pub index: usize,
+    pub siblings: Vec<Node>,
+}
+
+/// Public indexed Merkle bundle of independent ONE-TIME hop verification keys.
+/// A branching capability spends a different leaf for each child. Reusing a leaf
+/// for two children is not made safe by Merkle authentication.
+pub struct HopBundle {
+    identity: HopBundleRoot,
+    levels: Vec<Vec<Node>>,
+}
+
+fn hop_leaf(index: usize, pk: &Node) -> Node {
+    hash(
+        b"QSAG.CAPABILITY.INDEXED_LEAF/v1",
+        &[&(index as u64).to_be_bytes(), pk],
+    )
+}
+fn hop_node(left: &Node, right: &Node) -> Node {
+    hash(b"QSAG.CAPABILITY.MERKLE_NODE/v1", &[left, right])
+}
+impl HopBundle {
+    /// Pads to the next power of two with domain-separated non-signing leaves.
+    /// Every authentication path has exactly ceil(log2(public_keys.len())) nodes.
+    pub fn new(public_keys: &[Node]) -> Result<Self, CouponError> {
+        let capacity = public_keys
+            .len()
+            .checked_next_power_of_two()
+            .ok_or(CouponError::InvalidParameters)?;
+        if public_keys.is_empty() {
+            return Err(CouponError::InvalidParameters);
+        }
+        let mut bottom = Vec::new();
+        bottom
+            .try_reserve_exact(capacity)
+            .map_err(|_| CouponError::InvalidParameters)?;
+        for index in 0..capacity {
+            bottom.push(if let Some(pk) = public_keys.get(index) {
+                hop_leaf(index, pk)
+            } else {
+                hash(
+                    b"QSAG.CAPABILITY.PADDING/v1",
+                    &[&(index as u64).to_be_bytes()],
+                )
+            });
+        }
+        let mut levels = vec![bottom];
+        let mut width = capacity;
+        while width > 1 {
+            let previous = &levels[levels.len() - 1];
+            let mut next = Vec::new();
+            next.try_reserve_exact(width / 2)
+                .map_err(|_| CouponError::InvalidParameters)?;
+            for pair in previous.chunks_exact(2) {
+                next.push(hop_node(&pair[0], &pair[1]));
+            }
+            levels.push(next);
+            width /= 2;
+        }
+        let root = levels[levels.len() - 1][0];
+        Ok(Self {
+            identity: HopBundleRoot {
+                leaves: public_keys.len(),
+                root,
+            },
+            levels,
+        })
+    }
+    pub fn identity(&self) -> HopBundleRoot {
+        self.identity
+    }
+    pub fn proof(&self, index: usize) -> Result<IndexedHopProof, CouponError> {
+        if index >= self.identity.leaves {
+            return Err(CouponError::InvalidParameters);
+        }
+        let mut at = index;
+        let mut siblings = Vec::with_capacity(self.levels.len() - 1);
+        for level in &self.levels[..self.levels.len() - 1] {
+            siblings.push(level[at ^ 1]);
+            at /= 2;
+        }
+        Ok(IndexedHopProof { index, siblings })
+    }
+}
+/// Replacing the key at a fixed valid index while preserving this root produces
+/// the collision event in `indexed_bundle_key_binding`. Message unforgeability
+/// additionally requires the actual hop OTS verifier and one-time use at that index.
+pub fn verify_hop_membership(identity: HopBundleRoot, key: &Node, proof: &IndexedHopProof) -> bool {
+    let Some(capacity) = identity.leaves.checked_next_power_of_two() else {
+        return false;
+    };
+    if identity.leaves == 0
+        || proof.index >= identity.leaves
+        || proof.siblings.len() != capacity.trailing_zeros() as usize
+    {
+        return false;
+    }
+    let mut node = hop_leaf(proof.index, key);
+    let mut at = proof.index;
+    for sibling in &proof.siblings {
+        node = if at & 1 == 0 {
+            hop_node(&node, sibling)
+        } else {
+            hop_node(sibling, &node)
+        };
+        at >>= 1;
+    }
+    ct_eq_bytes32(&node, &identity.root)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::quorum_jorts::{chain_step, grind};
     use qsag_core::baggy::{baggy_reference_keygen, baggy_reference_sign};
     use qsag_core::tsw_baggy::PqSecretKey;
-    use crate::quorum_jorts::{chain_step, grind};
 
     fn key() -> InitiatorKey {
         let mut bytes = LockedBytes::new(32).unwrap();
@@ -415,15 +793,26 @@ mod tests {
     // Test-only trusted dealer, using the real production Baggy profile and chain
     // functions. There is no fake certificate verifier or reduced cryptographic bound.
     fn fixture(t: usize, n: usize) -> (CertifiedCoupon, Vec<CouponPool>) {
-        let sk = PqSecretKey { sk_seed: [0x19; 32], sk_prf: [0x42; 32], pk_seed: [0x83; 32] };
+        let sk = PqSecretKey {
+            sk_seed: [0x19; 32],
+            sk_prf: [0x42; 32],
+            pk_seed: [0x83; 32],
+        };
         let params = BaggyParams::SHA3_128F;
         let parent = baggy_reference_keygen(&params, &sk).unwrap();
         let mut d = CouponDescriptor {
-            parent, threshold: t, parties: n,
+            parent,
+            threshold: t,
+            parties: n,
             members: (n - t..n).map(|p| p as u32).collect(),
-            pk_seed: [0x65; 32], leaf: 0, chain_ends: vec![], expires_at: now().unwrap() + 600,
+            pk_seed: [0x65; 32],
+            leaf: 0,
+            chain_ends: vec![],
+            expires_at: now().unwrap() + 600,
         };
-        let mut material: Vec<_> = (0..t).map(|_| LockedBytes::random(SHARE_BYTES).unwrap()).collect();
+        let mut material: Vec<_> = (0..t)
+            .map(|_| LockedBytes::random(SHARE_BYTES).unwrap())
+            .collect();
         let seeds = LockedBytes::random(WOTS_CHAINS * 32).unwrap();
         for chain in 0..WOTS_CHAINS {
             let mut node = [0; 32];
@@ -432,27 +821,76 @@ mod tests {
                 let offset = (WOTS_STEPS * chain + step) * 32;
                 let mut last_share = node;
                 for share in &material[..t - 1] {
-                    for (x, &mask) in last_share.iter_mut().zip(&share.as_slice().unwrap()[offset..offset + 32]) { *x ^= mask; }
+                    for (x, &mask) in last_share
+                        .iter_mut()
+                        .zip(&share.as_slice().unwrap()[offset..offset + 32])
+                    {
+                        *x ^= mask;
+                    }
                 }
-                material[t - 1].as_mut_slice().unwrap()[offset..offset + 32].copy_from_slice(&last_share);
+                material[t - 1].as_mut_slice().unwrap()[offset..offset + 32]
+                    .copy_from_slice(&last_share);
                 wipe_bytes(&mut last_share);
                 node = chain_step(&d.pk_seed, d.leaf, chain as u32, step as u32, &node);
             }
             d.chain_ends.push(node);
         }
-        let certificate = baggy_reference_sign(&params, &sk, &parent, &d.certificate_message().unwrap()).unwrap();
+        let certificate =
+            baggy_reference_sign(&params, &sk, &parent, &d.certificate_message().unwrap()).unwrap();
         let certified = CertifiedCoupon::verify(&parent, &params, d.clone(), certificate).unwrap();
-        let pools = d.members.iter().zip(material).map(|(&p, m)| {
-            let mut pool = CouponPool::new(p, parent, key()).unwrap();
-            pool.install(certified.clone(), m).unwrap();
-            pool
-        }).collect();
+        let pools = d
+            .members
+            .iter()
+            .zip(material)
+            .map(|(&p, m)| {
+                let mut pool = CouponPool::new(p, parent, key()).unwrap();
+                pool.install(certified.clone(), m).unwrap();
+                pool
+            })
+            .collect();
         (certified, pools)
     }
     fn request(coupon: &CertifiedCoupon, message: &[u8]) -> SignRequest {
         let d = coupon.descriptor();
-        let ctr = grind(&SignRequest::message_hash(&d.id().unwrap(), message)).unwrap().0;
+        let ctr = grind(&SignRequest::message_hash(&d.id().unwrap(), message))
+            .unwrap()
+            .0;
         SignRequest::authorize(&key(), d, message.to_vec(), ctr).unwrap()
+    }
+
+    #[test]
+    fn indexed_hop_bundles_bind_index_key_depth_and_padding() {
+        for leaves in [1usize, 3, 16, 65] {
+            let keys: Vec<_> = (0..leaves)
+                .map(|i| hash(b"test-public-hop-key", &[&(i as u64).to_be_bytes()]))
+                .collect();
+            let bundle = HopBundle::new(&keys).unwrap();
+            for (i, key) in keys.iter().enumerate() {
+                let proof = bundle.proof(i).unwrap();
+                assert_eq!(
+                    proof.siblings.len(),
+                    leaves.next_power_of_two().trailing_zeros() as usize
+                );
+                assert!(verify_hop_membership(bundle.identity(), key, &proof));
+                let mut wrong_key = *key;
+                wrong_key[0] ^= 1;
+                assert!(!verify_hop_membership(
+                    bundle.identity(),
+                    &wrong_key,
+                    &proof
+                ));
+                let mut wrong_index = proof.clone();
+                wrong_index.index = (i + 1) % leaves;
+                if leaves > 1 {
+                    assert!(!verify_hop_membership(bundle.identity(), key, &wrong_index));
+                }
+                let mut wrong_depth = proof.clone();
+                wrong_depth.siblings.push([0; 32]);
+                assert!(!verify_hop_membership(bundle.identity(), key, &wrong_depth));
+            }
+            assert!(bundle.proof(leaves).is_err());
+        }
+        assert!(HopBundle::new(&[]).is_err());
     }
 
     #[test]
@@ -462,15 +900,70 @@ mod tests {
             let req = request(&coupon, b"authorized transaction");
             let openings: Vec<_> = pools.iter_mut().map(|p| p.open(&req).unwrap()).collect();
             let sig = combine(&coupon, &req, &openings).unwrap();
-            assert!(verify(&coupon.descriptor.parent, &BaggyParams::SHA3_128F, &req.message, &sig));
-            assert!(!verify(&coupon.descriptor.parent, &BaggyParams::SHA3_128F, b"changed", &sig));
-            assert!(matches!(combine(&coupon, &req, &openings[..t - 1]), Err(CouponError::InvalidOpenings)));
+            assert!(verify(
+                &coupon.descriptor.parent,
+                &BaggyParams::SHA3_128F,
+                &req.message,
+                &sig
+            ));
+            assert!(!verify(
+                &coupon.descriptor.parent,
+                &BaggyParams::SHA3_128F,
+                b"changed",
+                &sig
+            ));
+            assert!(matches!(
+                combine(&coupon, &req, &openings[..t - 1]),
+                Err(CouponError::InvalidOpenings)
+            ));
             for pool in &mut pools {
                 assert!(matches!(pool.open(&req), Err(CouponError::MissingOrSpent)));
                 assert!(pool.slots.values().all(|s| s.material.is_none()));
-                assert_eq!(pool.install(coupon.clone(), LockedBytes::new(SHARE_BYTES).unwrap()), Err(CouponError::AlreadyInstalled));
+                assert_eq!(
+                    pool.install(coupon.clone(), LockedBytes::new(SHARE_BYTES).unwrap()),
+                    Err(CouponError::AlreadyInstalled)
+                );
             }
         }
+    }
+
+    #[test]
+    fn volatile_coupon_certificate_binds_every_public_parameter() {
+        let (coupon, _) = fixture(2, 3);
+        let parent = coupon.descriptor.parent;
+        for field in 0..8 {
+            let mut d = coupon.descriptor.clone();
+            match field {
+                0 => d.parent.pk_root[0] ^= 1,
+                1 => d.parties += 1,
+                2 => d.members[0] = 0,
+                3 => d.pk_seed[0] ^= 1,
+                4 => d.leaf += 1,
+                5 => d.expires_at += 1,
+                6 => d.chain_ends[0][0] ^= 1,
+                _ => d.threshold += 1,
+            }
+            assert!(
+                CertifiedCoupon::verify(
+                    &parent,
+                    &BaggyParams::SHA3_128F,
+                    d,
+                    coupon.certificate.clone()
+                )
+                .is_err()
+            );
+        }
+        let mut certificate = coupon.certificate.clone();
+        certificate.r[0] ^= 1;
+        assert!(
+            CertifiedCoupon::verify(
+                &parent,
+                &BaggyParams::SHA3_128F,
+                coupon.descriptor.clone(),
+                certificate
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -480,21 +973,48 @@ mod tests {
         for field in 0..4 {
             let mut bad = req.clone();
             match field {
-                0 => bad.message.push(0), 1 => bad.coupon_id[0] ^= 1,
-                2 => bad.counter ^= 1, _ => bad.initiator_mac[0] ^= 1,
+                0 => bad.message.push(0),
+                1 => bad.coupon_id[0] ^= 1,
+                2 => bad.counter ^= 1,
+                _ => bad.initiator_mac[0] ^= 1,
             }
-            assert!(matches!(pools[0].open(&bad), Err(CouponError::Authentication)));
+            assert!(matches!(
+                pools[0].open(&bad),
+                Err(CouponError::Authentication)
+            ));
             assert!(pools[0].slots[&req.coupon_id].material.is_some());
         }
         let mut bad_codeword = req.clone();
-        while bad_codeword.digits().is_ok() { bad_codeword.counter += 1; }
-        bad_codeword.initiator_mac = key().mac(b"QSAG.VOLATILE.REQUEST/v1", &[&bad_codeword.commitment()]).unwrap();
-        assert!(matches!(pools[0].open(&bad_codeword), Err(CouponError::InvalidCodeword)));
+        while bad_codeword.digits().is_ok() {
+            bad_codeword.counter += 1;
+        }
+        bad_codeword.initiator_mac = key()
+            .mac(b"QSAG.VOLATILE.REQUEST/v1", &[&bad_codeword.commitment()])
+            .unwrap();
+        assert!(matches!(
+            pools[0].open(&bad_codeword),
+            Err(CouponError::InvalidCodeword)
+        ));
         assert!(pools[0].slots[&req.coupon_id].material.is_some());
-        pools[0].slots.get_mut(&req.coupon_id).unwrap().coupon.descriptor.chain_ends[0][0] ^= 1;
-        assert!(matches!(pools[0].open(&req), Err(CouponError::Authentication)));
+        pools[0]
+            .slots
+            .get_mut(&req.coupon_id)
+            .unwrap()
+            .coupon
+            .descriptor
+            .chain_ends[0][0] ^= 1;
+        assert!(matches!(
+            pools[0].open(&req),
+            Err(CouponError::Authentication)
+        ));
         assert!(pools[0].slots[&req.coupon_id].material.is_some());
-        pools[0].slots.get_mut(&req.coupon_id).unwrap().coupon.descriptor.chain_ends[0][0] ^= 1;
+        pools[0]
+            .slots
+            .get_mut(&req.coupon_id)
+            .unwrap()
+            .coupon
+            .descriptor
+            .chain_ends[0][0] ^= 1;
         assert!(pools[0].open(&req).is_ok());
     }
 
@@ -503,16 +1023,37 @@ mod tests {
         let (coupon, mut pools) = fixture(3, 5);
         let a = request(&coupon, b"branch A");
         let b = request(&coupon, b"branch B");
-        let mixed = vec![pools[0].open(&a).unwrap(), pools[1].open(&b).unwrap(), pools[2].open(&a).unwrap()];
-        assert!(matches!(combine(&coupon, &a, &mixed), Err(CouponError::InvalidOpenings)));
-        assert!(matches!(combine(&coupon, &b, &mixed), Err(CouponError::InvalidOpenings)));
-        assert!(matches!(pools[1].open(&a), Err(CouponError::MissingOrSpent)));
+        let mixed = vec![
+            pools[0].open(&a).unwrap(),
+            pools[1].open(&b).unwrap(),
+            pools[2].open(&a).unwrap(),
+        ];
+        assert!(matches!(
+            combine(&coupon, &a, &mixed),
+            Err(CouponError::InvalidOpenings)
+        ));
+        assert!(matches!(
+            combine(&coupon, &b, &mixed),
+            Err(CouponError::InvalidOpenings)
+        ));
+        assert!(matches!(
+            pools[1].open(&a),
+            Err(CouponError::MissingOrSpent)
+        ));
         let (coupon, mut pools) = fixture(2, 3);
         let req = request(&coupon, b"corrupt partial");
         let mut openings: Vec<_> = pools.iter_mut().map(|p| p.open(&req).unwrap()).collect();
-        let chain = req.digits().unwrap().iter().position(|&d| usize::from(d) < WOTS_STEPS).unwrap();
+        let chain = req
+            .digits()
+            .unwrap()
+            .iter()
+            .position(|&d| usize::from(d) < WOTS_STEPS)
+            .unwrap();
         openings[0].selected.as_mut_slice().unwrap()[chain * 32] ^= 1;
-        assert!(matches!(combine(&coupon, &req, &openings), Err(CouponError::InvalidOpenings)));
+        assert!(matches!(
+            combine(&coupon, &req, &openings),
+            Err(CouponError::InvalidOpenings)
+        ));
     }
 
     #[test]
@@ -521,13 +1062,26 @@ mod tests {
         let req = request(&coupon, b"concurrent");
         let pool = std::sync::Mutex::new(pools.remove(0));
         let successes = std::thread::scope(|scope| {
-            let handles: Vec<_> = (0..8).map(|_| scope.spawn(|| pool.lock().unwrap().open(&req).is_ok())).collect();
-            handles.into_iter().map(|h| usize::from(h.join().unwrap())).sum::<usize>()
+            let handles: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| pool.lock().unwrap().open(&req).is_ok()))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| usize::from(h.join().unwrap()))
+                .sum::<usize>()
         });
         assert_eq!(successes, 1);
         drop(pool);
-        let mut restarted = CouponPool::new(coupon.descriptor.members[0], coupon.descriptor.parent, key()).unwrap();
-        assert!(matches!(restarted.open(&req), Err(CouponError::MissingOrSpent)));
+        let mut restarted = CouponPool::new(
+            coupon.descriptor.members[0],
+            coupon.descriptor.parent,
+            key(),
+        )
+        .unwrap();
+        assert!(matches!(
+            restarted.open(&req),
+            Err(CouponError::MissingOrSpent)
+        ));
     }
 
     #[test]
@@ -542,15 +1096,22 @@ mod tests {
         for line in smaps.lines() {
             if let Some(range) = line.split_whitespace().next() {
                 if let Some((a, b)) = range.split_once('-') {
-                    if let (Ok(a), Ok(b)) = (usize::from_str_radix(a, 16), usize::from_str_radix(b, 16)) {
+                    if let (Ok(a), Ok(b)) =
+                        (usize::from_str_radix(a, 16), usize::from_str_radix(b, 16))
+                    {
                         in_mapping = a <= addr && addr < b;
                     }
                 }
             }
-            if in_mapping && line.starts_with("VmFlags:") { flags = Some(line); break; }
+            if in_mapping && line.starts_with("VmFlags:") {
+                flags = Some(line);
+                break;
+            }
         }
         let flags = flags.unwrap();
-        for flag in ["lo", "dd", "wf"] { assert!(flags.split_whitespace().any(|f| f == flag), "{flags}"); }
+        for flag in ["lo", "dd", "wf"] {
+            assert!(flags.split_whitespace().any(|f| f == flag), "{flags}");
+        }
         secret.simulate_fork();
         assert!(matches!(secret.as_slice(), Err(CouponError::Forked)));
         assert!(matches!(secret.as_mut_slice(), Err(CouponError::Forked)));

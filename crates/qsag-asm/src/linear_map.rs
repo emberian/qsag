@@ -1,5 +1,6 @@
 //! Tableless byte-block linear maps. Matrices are indexed only by public byte
 //! positions; GFNI computes the eight parities without secret-indexed tables.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::portable::{POLY_TO_T7_BASIS, T7_TO_POLY_BASIS};
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -72,7 +73,11 @@ pub(crate) fn map(x: u128, inverse: bool) -> u128 {
         if caps.pclmulqdq && caps.bmi2 {
             // SAFETY: checked carryless multiplication and PEXT support.
             return unsafe {
-                if inverse { pclmul_map::<true>(x) } else { pclmul_map::<false>(x) }
+                if inverse {
+                    pclmul_map::<true>(x)
+                } else {
+                    pclmul_map::<false>(x)
+                }
             };
         }
     }
@@ -224,7 +229,11 @@ unsafe fn gfni128(x: u128, matrices: &[[u64; 16]; 16]) -> u128 {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "pclmulqdq,bmi2")]
 unsafe fn pclmul_map<const INVERSE: bool>(x: u128) -> u128 {
-    let matrices = if INVERSE { &CONV_INVERSE } else { &CONV_FORWARD };
+    let matrices = if INVERSE {
+        &CONV_INVERSE
+    } else {
+        &CONV_FORWARD
+    };
     use core::arch::x86_64::*;
     let mut output = [0u8; 16];
     for (byte, matrix) in x.to_le_bytes().iter().zip(matrices) {

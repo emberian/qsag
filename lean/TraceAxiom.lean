@@ -1,16 +1,16 @@
 module
 /- Diagnostic dependency prefixes. A prefix may stop at an imported declaration
 whose axiom summary is available but whose proof body is not exposed. -/
-import all Qsag.Goldilocks
-import all Qsag.BinaryTower
-import all Qsag.UcGames
-import all Qsag.Keccak
-import all Qsag.ThresholdMpc
-import all Qsag.Preprocessing
-import all Qsag.ConstantTimeIsa
-import all Qsag.ElfBinaryVerify
-import all Qsag.Poseidon2
-import all Qsag.AdvancedMpcAndCreds
+import all Qsag.Math.Goldilocks
+import all Qsag.Math.BinaryTower
+import all Qsag.Oracle.UcGames
+import all Qsag.Oracle.Keccak
+import all Qsag.Protocol.Threshold.ThresholdMpc
+import all Qsag.Protocol.Threshold.Preprocessing
+import all Qsag.Machine.ConstantTimeIsa
+import all Qsag.Machine.ElfBinaryVerify
+import all Qsag.Oracle.Poseidon2
+import all Qsag.Protocol.Credentials.AdvancedMpcAndCreds
 import Lean
 
 open Lean

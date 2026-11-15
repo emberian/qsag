@@ -3,7 +3,7 @@ module
 # Qsag.Math.QuarticExt4 — Canonical Quartic Goldilocks Field Isomorphisms and Transport
 
 Unifies the four quartic Goldilocks field representations across the codebase:
-1. `Qsag.QuarticGoldilocks` (`ConcreteSecurityBudget`, used by `CodingTheory/*` and `Hem*`),
+1. `Qsag.QuarticGoldilocks` (`ConcreteSecurityBudget`, used by `Coding/*` and `Hem*`),
 2. `Qsag.GoldilocksExt4` (`SuccinctAggregationIop`, limb & Karatsuba model),
 3. `Qsag.Aggregation.GoldilocksExt4` (`Aggregation`, 32-byte codec & verifier model), and
 4. `Qsag.GoldilocksField.GoldilocksExt4` + `Ext4Poly` (`GoldilocksPrimalityAndExt4Field`,
@@ -22,15 +22,15 @@ Provides:
 -/
 
 public import Qsag.Spec.Primitives
-public import Qsag.ConcreteSecurityBudget
-public import Qsag.SuccinctAggregationIop
-public import Qsag.Aggregation
-public import Qsag.GoldilocksPrimalityAndExt4Field
-public import Qsag.AffineProximityGaps
-import all Qsag.ConcreteSecurityBudget
-import all Qsag.SuccinctAggregationIop
-import all Qsag.Aggregation
-import all Qsag.GoldilocksPrimalityAndExt4Field
+public import Qsag.Oracle.ConcreteSecurityBudget
+public import Qsag.Protocol.Aggregation.SuccinctAggregationIop
+public import Qsag.Protocol.Aggregation.Aggregation
+public import Qsag.Math.GoldilocksPrimalityAndExt4Field
+public import Qsag.Coding.AffineProximityGaps
+import all Qsag.Oracle.ConcreteSecurityBudget
+import all Qsag.Protocol.Aggregation.SuccinctAggregationIop
+import all Qsag.Protocol.Aggregation.Aggregation
+import all Qsag.Math.GoldilocksPrimalityAndExt4Field
 import Qsag.Tactic.AssuranceKit
 
 public section

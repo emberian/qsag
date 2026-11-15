@@ -38,6 +38,22 @@ set_option autoImplicit false
 /- XOR vector space: addition is coordinatewise XOR. -/
 def vxor {I : Type} (a b : I → Bool) : I → Bool := fun i => a i ^^ b i
 
+/- The unknown all-of-S additive share is a one-time pad. Translation by the
+known corrupt shares is its own inverse, so it permutes uniform bit vectors.
+Independent masking of every staged chain state is a required minting invariant. -/
+theorem unseen_additive_share_translation_involutive {I : Type} (known missing : I → Bool) :
+    vxor known (vxor known missing) = missing := by
+  funext i
+  simp only [vxor]
+  cases known i <;> cases missing i <;> rfl
+
+theorem unseen_additive_share_translation_injective {I : Type}
+    (known a b : I → Bool) (h : vxor known a = vxor known b) : a = b := by
+  have hh := congrArg (vxor known) h
+  rw [unseen_additive_share_translation_involutive,
+    unseen_additive_share_translation_involutive] at hh
+  exact hh
+
 def ColSpan {I J : Type} (O : (I → Bool) → (J → Bool)) (s : J → Bool) : Prop :=
   ∃ o, O o = s
 
@@ -72,6 +88,51 @@ def Reachable (d target : List Nat) : Prop :=
 
  theorem min_exposure (a b target : Nat) (ha : a ≤ target ∨ b ≤ target) :
     min a b ≤ target := by omega
+
+theorem min_exposure_iff (a b target : Nat) :
+    min a b ≤ target ↔ a ≤ target ∨ b ≤ target := by
+  constructor
+  · intro h
+    cases Decidable.em (a ≤ target) with
+    | inl ha => exact Or.inl ha
+    | inr ha => exact Or.inr (by omega)
+  · exact min_exposure a b target
+
+/- The equal-sum restriction is load-bearing for a one-time chain key. Moving
+only forward cannot produce a different valid codeword with the same sum.
+A different message with the same codeword remains a separate digest-collision
+event; this theorem does not assume that hashing messages is injective. -/
+def digitSum : List Nat → Nat
+  | [] => 0
+  | x :: xs => x + digitSum xs
+
+inductive ForwardSteps : List Nat → List Nat → Prop where
+  | nil : ForwardSteps [] []
+  | cons {a b : Nat} {as bs : List Nat} :
+      a ≤ b → ForwardSteps as bs → ForwardSteps (a :: as) (b :: bs)
+
+theorem forward_steps_sum_monotone (a b : List Nat)
+    (h : ForwardSteps a b) : digitSum a ≤ digitSum b := by
+  induction h with
+  | nil => exact Nat.le_refl _
+  | cons hab _ ih => simp only [digitSum]; omega
+
+theorem equal_sum_forward_codeword_unique (a b : List Nat)
+    (h : ForwardSteps a b) (hs : digitSum a = digitSum b) : a = b := by
+  induction h with
+  | nil => rfl
+  | @cons a b as bs hab htail ih =>
+    have hm := forward_steps_sum_monotone as bs htail
+    simp only [digitSum] at hs
+    have heq : a = b := by omega
+    have hsum : digitSum as = digitSum bs := by omega
+    rw [heq, ih hsum]
+
+theorem distinct_equal_sum_codeword_not_forward_reachable (a b : List Nat)
+    (hs : digitSum a = digitSum b) (hne : a ≠ b) :
+    ¬ ForwardSteps a b := by
+  intro h
+  exact hne (equal_sum_forward_codeword_unique a b h hs)
 
 /- Equal-sum, base-four codewords: collusion opens a third codeword neither branch opens.
 The witness describes codeword exposure; finding a message for it still costs grinding. -/

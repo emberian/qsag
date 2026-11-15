@@ -372,9 +372,9 @@ mod tests {
                 let step = 95u64.to_be_bytes();
                 let fourth = if merge { &value[..n] } else { &step };
                 let (mut state, bytes) = frame(merge, &pid, &seed, 511, fourth, &value[..n]);
-                for block in bytes.chunks_exact(136) {
-                    for (word, src) in state[..17].iter_mut().zip(block.chunks_exact(8)) {
-                        *word ^= u64::from_le_bytes(src.try_into().unwrap());
+                for block in bytes.as_chunks::<136>().0 {
+                    for (word, src) in state[..17].iter_mut().zip(block.as_chunks::<8>().0.iter()) {
+                        *word ^= u64::from_le_bytes(*src);
                     }
                     qsag_core::sponge::keccak::keccak_f1600_batch(core::slice::from_mut(
                         &mut state,
@@ -553,8 +553,8 @@ mod tests {
             })
             .collect();
         assert!(scalar[0].is_ok());
-        for i in 2..8 {
-            assert!(scalar[i].is_err());
+        for result in scalar.iter().take(8).skip(2) {
+            assert!(result.is_err());
         }
         assert_eq!(verify_rotated_epoch_votes_batch(&inputs), scalar);
     }

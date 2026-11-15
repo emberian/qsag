@@ -1,21 +1,19 @@
-//! Canonical authenticated V5 ledger codec. This is a snapshot, not a storage
+//! Canonical authenticated V6 ledger codec. This is a snapshot, not a storage
 //! transaction: callers must atomically persist it and fence its generation in
 //! trusted monotonic storage before releasing a signature. A MAC alone cannot
 //! detect rollback of both the checkpoint and its external generation fence.
 //!
-//! All integers are big endian. The MAC covers, in order: the 29-byte domain
-//! `QSAG.POLICY.DURABLE_LEDGER.V6`, key ID (32), enrolled party (u16), generation
-//! (u64), window (u64), spend (u128), next local slot (u16), poisoned and
-//! authenticated-initiator flags (one canonical 0/1 byte each), then nonce and
-//! session windows (each: u16 count, zero u16 cursor, count * 32 bytes), then
-//! two reserved zero watermark fields (flag + 32 bytes each), then peer slots
-//! (u16 count, strictly ascending (u16 party, u64 mask) pairs), then the verified
-//! velocity state: request nonce (u64), pinned-cap flag and cap (u128, zero when
-//! unpinned). A 32-byte keyed cSHAKE256 framed tag follows. On restore the extracted
-//! velocity guard is rebuilt from window, cap, nonce and spend through its own
-//! transition, so a snapshot whose spend exceeds its cap is refused. Trailing bytes and noncanonical encodings fail.
+//! Integers are big endian. The authenticated body binds the key identity,
+//! enrolled party, monotonic generation, window, spend, configured replay
+//! capacity, local slot cursor, flags, replay sets, reserved watermarks, peer
+//! slot bitmaps, and verified velocity state. Replay counts and slot cursors
+//! use u32; each peer bitmap has a u32 word count followed by u64 words. Peers
+//! are strictly ascending and unused bitmap bits must be zero. A 32-byte keyed
+//! cSHAKE256 framed tag follows. Trailing bytes and noncanonical encodings fail.
+//! Restore rebuilds the velocity guard and rejects spend above its pinned cap.
 //! Key identity identifies the original secret provisioning, not just party ID.
 //! Restore requires the same provisioned secrets; secrets are never serialized.
+//! Earlier codec versions are rejected rather than reinterpreted.
 
 use super::*;
 
@@ -60,10 +58,11 @@ impl Reader<'_> {
             return Err(PolicyGuardError::InvalidCheckpoint);
         }
         let mut values = Vec::with_capacity(count);
-        for _ in 0..count { values.push(self.take()?); }
+        for _ in 0..count {
+            values.push(self.take()?);
+        }
         Ok((values, cursor))
     }
-
 }
 
 impl PolicySignerGuardShare {
@@ -110,7 +109,9 @@ impl PolicySignerGuardShare {
         for (peer, words) in peers {
             out.extend_from_slice(&peer.to_be_bytes());
             out.extend_from_slice(&(words.len() as u32).to_be_bytes());
-            for word in words { out.extend_from_slice(&word.to_be_bytes()); }
+            for word in words {
+                out.extend_from_slice(&word.to_be_bytes());
+            }
         }
         out.extend_from_slice(&self.velocity_generation.to_be_bytes());
         let pinned_cap = self.verified_velocity.as_ref().map(|g| g.cap_units());
@@ -202,7 +203,9 @@ impl PolicySignerGuardShare {
                 return Err(PolicyGuardError::InvalidCheckpoint);
             }
             let mut words = Vec::with_capacity(word_count);
-            for _ in 0..word_count { words.push(u64::from_be_bytes(r.take()?)); }
+            for _ in 0..word_count {
+                words.push(u64::from_be_bytes(r.take()?));
+            }
             let tail = self.preproc_r.len() % 64;
             if tail != 0 && words.last().is_some_and(|w| *w >> tail != 0) {
                 return Err(PolicyGuardError::InvalidCheckpoint);
@@ -256,10 +259,13 @@ impl PolicySignerGuardShare {
             || next < self.next_slot.get()
             || (self.poisoned && !poisoned)
             || (self.require_authenticated_initiator && !authenticated)
-            || self
-                .consumed_peer_slots
-                .iter()
-                .any(|(p, mask)| !peers.iter().any(|(q, new)| p == q && new.len() == mask.len() && new.iter().zip(mask).all(|(n, m)| n & m == *m)))
+            || self.consumed_peer_slots.iter().any(|(p, mask)| {
+                !peers.iter().any(|(q, new)| {
+                    p == q
+                        && new.len() == mask.len()
+                        && new.iter().zip(mask).all(|(n, m)| n & m == *m)
+                })
+            })
         {
             return Err(PolicyGuardError::Rollback);
         }
@@ -283,7 +289,9 @@ impl PolicySignerGuardShare {
         for (peer, words) in &peers {
             for (index, word) in words.iter().enumerate() {
                 for bit in 0..64 {
-                    if word & (1u64 << bit) != 0 { self.retire_peer_slot(*peer, index * 64 + bit); }
+                    if word & (1u64 << bit) != 0 {
+                        self.retire_peer_slot(*peer, index * 64 + bit);
+                    }
                 }
             }
         }
@@ -372,7 +380,7 @@ impl FsPolicyDurableLedger {
         let key = qsag_accel::ct::RedactedSecret::new(derived);
         let generation = guard
             .restore_from_durable_checkpoint(
-                &record.read_bounded((MAX_POLICY_CAPACITY as u64) * 80 + 1024 * 1024)?,
+                &record.read_bounded(MAX_POLICY_CAPACITY * 80 + 1024 * 1024)?,
                 key.expose(),
                 min_generation,
             )
@@ -791,9 +799,15 @@ mod tests {
             for guard in &mut guards {
                 // This test exercises checkpoint bookkeeping, never cryptographic preprocessing.
                 guard.preproc_r.resize(130, [0; 2]);
-                for (_, words) in &mut guard.consumed_peer_slots { words.resize(3, 0); }
-                for (_, macs) in &mut guard.preproc_outgoing_macs { macs.resize(130, [0; 2]); }
-                for (_, keys) in &mut guard.preproc_incoming_keys { keys.resize(130, [0; 2]); }
+                for (_, words) in &mut guard.consumed_peer_slots {
+                    words.resize(3, 0);
+                }
+                for (_, macs) in &mut guard.preproc_outgoing_macs {
+                    macs.resize(130, [0; 2]);
+                }
+                for (_, keys) in &mut guard.preproc_incoming_keys {
+                    keys.resize(130, [0; 2]);
+                }
             }
             guards
         }
@@ -804,12 +818,17 @@ mod tests {
         guards[0].retire_peer_slot(2, 129);
         let snapshot = guards[0].export_durable_checkpoint(&key, 2);
         let mut fresh = expanded();
-        fresh[0].restore_from_durable_checkpoint(&snapshot, &key, 2).unwrap();
+        fresh[0]
+            .restore_from_durable_checkpoint(&snapshot, &key, 2)
+            .unwrap();
         assert!(fresh[0].is_peer_slot_consumed(2, 65));
         assert!(fresh[0].is_peer_slot_consumed(2, 129));
         assert!(!fresh[0].is_peer_slot_consumed(2, 64));
         assert_eq!(fresh[0].export_durable_checkpoint(&key, 2), snapshot);
-        assert_eq!(fresh[0].restore_from_durable_checkpoint(&before, &key, 0), Err(PolicyGuardError::Rollback));
+        assert_eq!(
+            fresh[0].restore_from_durable_checkpoint(&before, &key, 0),
+            Err(PolicyGuardError::Rollback)
+        );
     }
 
     #[test]

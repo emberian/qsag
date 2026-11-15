@@ -21,13 +21,13 @@ public import Qsag.Spec.Refines
 public import Qsag.Spec.GameBound
 public import Qsag.Spec.Assumptions
 public import Qsag.Spec.IdealCred
-public import Qsag.LatticePreprocessingFull
-public import Qsag.RlweExtractionBoundary
-public import Qsag.GaussianHvzkAndDualLpn
-public import Qsag.DensePcgProductionTaps
-public import Qsag.ThresholdMlDsaSecurity
-public import Qsag.ThresholdMlDsaAndToprf
-public import Qsag.BlindVcCollisionFinder
+public import Qsag.Protocol.Threshold.LatticePreprocessingFull
+public import Qsag.Protocol.Threshold.RlweExtractionBoundary
+public import Qsag.Protocol.Threshold.GaussianHvzkAndDualLpn
+public import Qsag.Protocol.Threshold.DensePcgProductionTaps
+public import Qsag.Protocol.Threshold.ThresholdMlDsaSecurity
+public import Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
+public import Qsag.Protocol.Credentials.BlindVcCollisionFinder
 import Qsag.Tactic.AssuranceKit
 
 public section

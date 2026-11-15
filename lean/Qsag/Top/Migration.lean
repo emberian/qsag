@@ -20,10 +20,10 @@ public import Qsag.Spec.GameBound
 public import Qsag.Spec.Assumptions
 public import Qsag.Spec.IdealMigrate
 public import Qsag.Math.Gf2Pow128
-public import Qsag.PrattPrimalityCert
-public import Qsag.PallasAndBlsMigration
-public import Qsag.ActiveMigrationZeroTest
-public import Qsag.HdToprfAndMigrationSecurity
+public import Qsag.Protocol.Migration.PrattPrimalityCert
+public import Qsag.Protocol.Migration.PallasAndBlsMigration
+public import Qsag.Protocol.Migration.ActiveMigrationZeroTest
+public import Qsag.Protocol.Migration.HdToprfAndMigrationSecurity
 import Qsag.Tactic.AssuranceKit
 
 public section

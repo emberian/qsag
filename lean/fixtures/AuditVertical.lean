@@ -1,15 +1,15 @@
 module
 public import Lean
-import all Qsag.CompiledRlibFixtures
-import all Qsag.ElfFixtureSlices
-import all Qsag.ElfInvCerts
-import all Qsag.ElfParse
-import all Qsag.McRefine
-import all Qsag.ElfBinaryVerify
-import all Qsag.ElfFixtureVerify
-import all Qsag.ElfFunctionalEquiv
-import all Qsag.SydTvTranslationValidation
-import all Qsag.IsaCosim
+import all Qsag.Machine.CompiledRlibFixtures
+import all Qsag.Machine.ElfFixtureSlices
+import all Qsag.Machine.ElfInvCerts
+import all Qsag.Machine.ElfParse
+import all Qsag.Machine.McRefine
+import all Qsag.Machine.ElfBinaryVerify
+import all Qsag.Machine.ElfFixtureVerify
+import all Qsag.Machine.ElfFunctionalEquiv
+import all Qsag.Machine.SydTvTranslationValidation
+import all Qsag.Machine.IsaCosim
 open Lean Elab Command
 elab "#auditVertical" : command => do
   let env := (← getEnv).setExporting false

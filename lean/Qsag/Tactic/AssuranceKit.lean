@@ -28,9 +28,9 @@ Reusable Lean 4.35 tactic and command-elaboration infrastructure for QSAG (`LAW-
    `SimpleEquiv.prodCongr`) and `bv_xor_cancel` with `0 Classical.choice`.
 -/
 
-public import Qsag.Constructive
-public import Qsag.SimulationSpine
-public import Qsag.UcGames
+public import Qsag.Math.Constructive
+public import Qsag.Exec.SimulationSpine
+public import Qsag.Oracle.UcGames
 public meta import Lean
 
 public section

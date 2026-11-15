@@ -455,9 +455,15 @@ fn backend_for_capabilities(caps: CpuCapabilities) -> SimdBackend {
 fn arm_acceleration_does_not_require_optional_dit() {
     let mut caps = decode_caps(CAP_A64_NEON | CAP_A64_SHA3 | CAP_A64_PMULL);
     assert!(!caps.aarch64_dit);
-    assert_eq!(backend_for_capabilities(caps), SimdBackend::Aarch64NeonSha3Pmull);
+    assert_eq!(
+        backend_for_capabilities(caps),
+        SimdBackend::Aarch64NeonSha3Pmull
+    );
     caps.aarch64_dit = true;
-    assert_eq!(backend_for_capabilities(caps), SimdBackend::Aarch64NeonSha3Pmull);
+    assert_eq!(
+        backend_for_capabilities(caps),
+        SimdBackend::Aarch64NeonSha3Pmull
+    );
     caps.aarch64_pmull = false;
     assert_eq!(backend_for_capabilities(caps), SimdBackend::Portable);
 }

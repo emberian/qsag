@@ -158,8 +158,11 @@ pub struct Structure {
 
 impl Structure {
     pub fn new(parties: usize, threshold: usize) -> Result<Self, MpcError> {
-        if threshold < 2 || parties > MAX_MPC_PARTIES || threshold > parties
-            || threshold > parties.div_ceil(2) {
+        if threshold < 2
+            || parties > MAX_MPC_PARTIES
+            || threshold > parties
+            || threshold > parties.div_ceil(2)
+        {
             return Err(MpcError::UnsupportedStructure { parties, threshold });
         }
         let size = parties - threshold + 1;
@@ -167,21 +170,30 @@ impl Structure {
         // bound before allocating or narrowing, instead of scanning all 2^n masks.
         let mut count = 1usize;
         for i in 1..threshold {
-            count = count.checked_mul(parties + 1 - i)
-                .ok_or(MpcError::UnsupportedStructure { parties, threshold })? / i;
+            count = count
+                .checked_mul(parties + 1 - i)
+                .ok_or(MpcError::UnsupportedStructure { parties, threshold })?
+                / i;
             if count > u32::MAX as usize {
                 return Err(MpcError::UnsupportedStructure { parties, threshold });
             }
         }
         let mut subsets = Vec::new();
-        subsets.try_reserve_exact(count)
+        subsets
+            .try_reserve_exact(count)
             .map_err(|_| MpcError::UnsupportedStructure { parties, threshold })?;
         let mut next: Vec<usize> = (0..size).collect();
         loop {
             subsets.push(next.clone());
-            let Some(i) = (0..size).find(|&i| next[i] + 1 < next.get(i + 1).copied().unwrap_or(parties)) else { break; };
+            let Some(i) =
+                (0..size).find(|&i| next[i] + 1 < next.get(i + 1).copied().unwrap_or(parties))
+            else {
+                break;
+            };
             next[i] += 1;
-            for (j, entry) in next[..i].iter_mut().enumerate() { *entry = j; }
+            for (j, entry) in next[..i].iter_mut().enumerate() {
+                *entry = j;
+            }
         }
         Ok(Self {
             parties,
@@ -899,8 +911,11 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
             .map(|&sa| {
                 (0..comps.len())
                     .filter(|&j| {
-                        st.subsets[sa].iter().copied()
-                            .find(|&p| st.holds(comps[j], p)) == Some(me)
+                        st.subsets[sa]
+                            .iter()
+                            .copied()
+                            .find(|&p| st.holds(comps[j], p))
+                            == Some(me)
                     })
                     .collect()
             })
@@ -1403,10 +1418,8 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
             let mut private = SecretBuffer(private);
             let mut broadcast = Vec::with_capacity(32 * self.comps.len());
             for (i, &s) in self.comps.iter().enumerate() {
-                broadcast.extend_from_slice(&cshake256_framed_32(
-                    b"QSAG.RSS.OPEN.BIN.V1",
-                    &[&mine[i]],
-                ));
+                broadcast
+                    .extend_from_slice(&cshake256_framed_32(b"QSAG.RSS.OPEN.BIN.V1", &[&mine[i]]));
                 if self.st.lowest_holder(s) == self.me {
                     for (j, slot) in private.iter_mut().enumerate() {
                         if !self.st.holds(s, j) {
@@ -2619,11 +2632,7 @@ pub(crate) mod test_support {
             42,
             0x8787_8787,
         ];
-        let poly = |t: u128| {
-            coeffs
-                .iter()
-                .fold(0u128, |acc, &c| gf128_mul(acc, t) ^ c)
-        };
+        let poly = |t: u128| coeffs.iter().fold(0u128, |acc, &c| gf128_mul(acc, t) ^ c);
         let values: Vec<u128> = (0..8).map(|d| poly(d as u128)).collect();
         for (offset, row) in tables.extra.iter().enumerate() {
             let got = eval_groups_gf128(&values, row, 1);

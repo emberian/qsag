@@ -669,8 +669,7 @@ fn assert_fips_key(shares: &[ThresholdMlDsaSignerShare]) {
     );
     // The public key is the standard key of this secret, and the standard
     // signer with this secret verifies under it.
-    let (standard_pk, standard_sk) =
-        signing_key_from_secret_for_test(pack.level, pack.rho, s1, s2);
+    let (standard_pk, standard_sk) = signing_key_from_secret_for_test(pack.level, pack.rho, s1, s2);
     assert_eq!(standard_pk, pack.pk_bytes);
     let signature = ml_dsa_sign_deterministic(&standard_sk, b"standard signer", b"").unwrap();
     assert!(ml_dsa_verify(
@@ -851,7 +850,11 @@ fn unsupported_configurations_and_quorums_are_rejected() {
             num_parties: 3
         }
     );
-    assert!(config(MlDsaLevel::MlDsa87, 2, &[1, 2, 3, 4, 5, 6]).validate().is_ok());
+    assert!(
+        config(MlDsaLevel::MlDsa87, 2, &[1, 2, 3, 4, 5, 6])
+            .validate()
+            .is_ok()
+    );
     assert_eq!(
         attempt(config(MlDsaLevel::MlDsa44, 2, &[1, 2, 2]), &mut net),
         ThresholdMlDsaError::DuplicateOrUnknownParty { party_id: 2 }
@@ -1594,12 +1597,13 @@ fn mldsa65_and_mldsa87_pq128_threshold_keygen_signing_and_negative_forgery() {
 
 #[test]
 fn parametric_holder_sets_preserve_order_and_exceed_word_width() {
-    for n in 3..=9 {
+    for n in 3usize..=9 {
         for t in 2..=n.div_ceil(2) {
             let st = Structure::new(n, t).unwrap();
             let old: Vec<_> = (1u32..1u32 << n)
                 .filter(|m| m.count_ones() as usize == n - t + 1)
-                .map(|m| (0..n).filter(|p| (m >> p) & 1 == 1).collect::<Vec<_>>()).collect();
+                .map(|m| (0..n).filter(|p| (m >> p) & 1 == 1).collect::<Vec<_>>())
+                .collect();
             assert_eq!(st.subsets, old);
         }
     }
@@ -1616,10 +1620,21 @@ fn parametric_two_of_six_keygen_and_nonprefix_session_sign() {
     let mut shares = dkg(&[1, 2, 3, 4, 5, 6], 2, 0x91);
     assert_fips_key(&shares);
     let pk = shares[0].verification_pack().pk_bytes.clone();
-    let (results, _) = sign(&mut shares, &[2, 4, 6], 0x92,
-        b"dynamic six-custodian holder sets", Vec::new(), None);
+    let (results, _) = sign(
+        &mut shares,
+        &[2, 4, 6],
+        0x92,
+        b"dynamic six-custodian holder sets",
+        Vec::new(),
+        None,
+    );
     let outputs: Vec<_> = results.into_iter().map(Result::unwrap).collect();
     assert!(outputs.iter().all(|o| o.signature == outputs[0].signature));
-    assert!(ml_dsa_verify(MlDsaLevel::MlDsa44, &pk,
-        b"dynamic six-custodian holder sets", b"ctx", &outputs[0].signature));
+    assert!(ml_dsa_verify(
+        MlDsaLevel::MlDsa44,
+        &pk,
+        b"dynamic six-custodian holder sets",
+        b"ctx",
+        &outputs[0].signature
+    ));
 }

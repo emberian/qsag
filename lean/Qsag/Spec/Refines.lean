@@ -13,9 +13,9 @@ Universal state-machine refinement framework (`seL4` / `CompCert` style) support
 -/
 
 public import Qsag.Spec.Primitives
-public import Qsag.SimulationSpine
-public import Qsag.InteractiveServiceContext
-public import Qsag.InteractiveSecurityContract
+public import Qsag.Exec.SimulationSpine
+public import Qsag.Exec.InteractiveServiceContext
+public import Qsag.Exec.InteractiveSecurityContract
 import Qsag.Tactic.AssuranceKit
 
 public section

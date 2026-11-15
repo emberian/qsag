@@ -13,11 +13,11 @@ in existing subsystem proofs:
 3. `Qsag.ExactRat` (`GaussianHvzkAndDualLpn`).
 -/
 
-public import Qsag.Digest256
-public import Qsag.UcGames
-public import Qsag.ConcreteSecurityBudget
-public import Qsag.GaussianHvzkAndDualLpn
-public import Qsag.SimulationSpine
+public import Qsag.Math.Digest256
+public import Qsag.Oracle.UcGames
+public import Qsag.Oracle.ConcreteSecurityBudget
+public import Qsag.Protocol.Threshold.GaussianHvzkAndDualLpn
+public import Qsag.Exec.SimulationSpine
 import Qsag.Tactic.AssuranceKit
 
 public section

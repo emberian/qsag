@@ -18,7 +18,7 @@ Everything else is an atom. For identities modulo hypotheses `pᵢ = 0`, prove
 `eq_of_sub_eq_zero`.
 -/
 
-public import Qsag.Goldilocks
+public import Qsag.Math.Goldilocks
 public import Qsag.Tactic.AssuranceKit
 public meta import Lean
 

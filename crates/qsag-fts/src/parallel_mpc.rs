@@ -526,9 +526,7 @@ fn round_constants(c0: u128, c1: u128) -> [(u128, u128); SPN_ROUNDS] {
         ],
         &mut stream,
     );
-    core::array::from_fn(|round| {
-        bytes32_to_lanes(stream[round * 32..(round + 1) * 32].try_into().unwrap())
-    })
+    core::array::from_fn(|round| bytes32_to_lanes(&stream.as_chunks::<32>().0[round]))
 }
 
 fn algebraic_step_plain(input: (u128, u128), c0: u128, c1: u128) -> (u128, u128) {
