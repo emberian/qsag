@@ -6,14 +6,11 @@ For bit-output ideal hashes the actual authenticated checker has identical event
 in the decoded Fourier runtime and the original coherent experiment, up to the explicit
 normalization. This is NOT the measured-log extraction bound: no address log is manufactured.
 -/
-public import Qsag.Oracle.QromFourierSupport
+public import Qsag.Oracle.Qrom
 public import Qsag.Protocol.Aggregation.HemExtractedOpeningBridge
-import all Qsag.Oracle.QromFourierSupport
-import all Qsag.Oracle.QromCoherentOracleRegister
-import all Qsag.Oracle.QromFourierTable
+import all Qsag.Oracle.Qrom
 import all Qsag.Protocol.Aggregation.HemExtractedOpeningBridge
-import all Qsag.Oracle.QromBatchMerkleExtraction
-import all Qsag.Oracle.MultiRoundFsQrom
+import all Qsag.Protocol.Aggregation.MultiRoundFsQrom
 
 public section
 namespace Qsag

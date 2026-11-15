@@ -1,11 +1,11 @@
 module
-public import Qsag.Tactic.ConstructiveRing
+public import Qsag.Tactic.CommRing
 public import Qsag.Protocol.Threshold.ThresholdApproval
 public import Qsag.Protocol.Aggregation.SuccinctAggregationIop
 import all Qsag.Protocol.Threshold.ThresholdApproval
 import all Qsag.Protocol.Aggregation.SuccinctAggregationIop
 import all Qsag.Protocol.Aggregation.Aggregation
-import all Qsag.Oracle.UcGames
+import all Qsag.Protocol.Aggregation.UcGames
 public section
 namespace Qsag.Composed
 set_option autoImplicit false
@@ -16,12 +16,12 @@ The privacy theorem concerns independent, private epoch polynomials and erased p
 not public commitments, network packets, or deterministic publicly seeded dealer randomness. -/
 open Aggregation
 def weight {n : Nat} (b : BitVec n) : Nat :=
-  finSum n fun i => if b.getLsbD i.val then 1 else 0
+  qsum n fun i => if b.getLsbD i.val then 1 else 0
 theorem weight_union {n : Nat} (a b : BitVec n) (h : a &&& b = 0#n) :
     weight (a ||| b) = weight a + weight b := by
   unfold weight
-  rw [← finSum_add]
-  apply finSum_congr
+  rw [← qsum_add]
+  apply qsum_congr
   intro i
   have hz := congrArg (fun x : BitVec n => x.getLsbD i.val) h
   simp only [BitVec.getLsbD_and, BitVec.getLsbD_zero] at hz
@@ -180,13 +180,13 @@ theorem composed_advantage_bound {tapes validators : Nat}
     (B : BitVec validators)
     (cover : ∀ ω, total ω = true → outer ω = true ∨
       ∃ v : Fin validators, B.getLsbD v.val = true ∧ quorum ω v = true) :
-    (finSum tapes fun ω => if total ω then 1 else 0) ≤
-    (finSum tapes fun ω => if outer ω then 1 else 0) +
-    finSum validators (fun v => if B.getLsbD v.val then
-      finSum tapes (fun ω => if quorum ω v then 1 else 0) else 0) := by
+    (qsum tapes fun ω => if total ω then 1 else 0) ≤
+    (qsum tapes fun ω => if outer ω then 1 else 0) +
+    qsum validators (fun v => if B.getLsbD v.val then
+      qsum tapes (fun ω => if quorum ω v then 1 else 0) else 0) := by
   have point : ∀ ω, (if total ω then 1 else 0) ≤
       (if outer ω then 1 else 0) +
-      finSum validators (fun v => if B.getLsbD v.val && quorum ω v then 1 else 0) := by
+      qsum validators (fun v => if B.getLsbD v.val && quorum ω v then 1 else 0) := by
     intro ω
     cases ht : total ω with
     | false => simp
@@ -198,16 +198,16 @@ theorem composed_advantage_bound {tapes validators : Nat}
           intro i; by_cases hi : i = v
           · subst i; simp [hv, hq]
           · simp [hi]
-        have this := finSum_le_finSum terms
-        rw [finSum_eq_indicator] at this
+        have this := qsum_le_qsum terms
+        rw [qsum_eq_indicator] at this
         simp only [↓reduceIte]; omega
-  have h := finSum_le_finSum point
-  rw [finSum_add, finSum_comm] at h
-  have eq : (finSum validators fun v => finSum tapes
+  have h := qsum_le_qsum point
+  rw [qsum_add, qsum_comm] at h
+  have eq : (qsum validators fun v => qsum tapes
       (fun ω => if B.getLsbD v.val && quorum ω v then 1 else 0)) =
-      finSum validators (fun v => if B.getLsbD v.val then
-        finSum tapes (fun ω => if quorum ω v then 1 else 0) else 0) := by
-    apply finSum_congr; intro v; cases B.getLsbD v.val <;> simp [finSum_const]
+      qsum validators (fun v => if B.getLsbD v.val then
+        qsum tapes (fun ω => if quorum ω v then 1 else 0) else 0) := by
+    apply qsum_congr; intro v; cases B.getLsbD v.val <;> simp [qsum_const]
   rwa [eq] at h
 private theorem listLengthInduction {α : Type} (P : List α → Prop)
     (step : ∀ l, (∀ m, m.length < l.length → P m) → P l) (l : List α) : P l := by
@@ -554,10 +554,10 @@ theorem quorum_advantage_from_extraction {n tapes : Nat} (geom : AggSigGeometry)
         quorumParticipated (custody v) ((shards ω).header.mode.message v.val) = false)
     (detect : ∀ ω v, QuorumForgery geom (custody v)
       ((shards ω).header.mode.message v.val) → forgery ω v = true) :
-    (finSum tapes fun ω => if attack ω then 1 else 0) ≤
-    (finSum tapes fun ω => if outer (shards ω) then 1 else 0) +
-    finSum n (fun v => if B.getLsbD v.val then
-      finSum tapes (fun ω => if forgery ω v then 1 else 0) else 0) := by
+    (qsum tapes fun ω => if attack ω then 1 else 0) ≤
+    (qsum tapes fun ω => if outer (shards ω) then 1 else 0) +
+    qsum n (fun v => if B.getLsbD v.val then
+      qsum tapes (fun ω => if forgery ω v then 1 else 0) else 0) := by
   apply composed_advantage_bound
   intro ω hw
   obtain ⟨ha, v, hb, hv, hq⟩ := game ω hw
@@ -572,25 +572,25 @@ def treeBad {n : Nat} (bad : Shard n → Bool) : MergeTree n → Bool
   | .branch l r _ => treeBad bad l || treeBad bad r
 theorem tree_union_bound {n tapes : Nat} (bad : Fin tapes → Shard n → Bool)
     (tree : MergeTree n) :
-    (finSum tapes fun ω => if treeBad (bad ω) tree then 1 else 0) ≤
-      (tree.leaves.map fun s => finSum tapes fun ω => if bad ω s then 1 else 0).sum := by
+    (qsum tapes fun ω => if treeBad (bad ω) tree then 1 else 0) ≤
+      (tree.leaves.map fun s => qsum tapes fun ω => if bad ω s then 1 else 0).sum := by
   induction tree with
   | leaf s =>
-    change (finSum tapes fun ω => if bad ω s then 1 else 0) ≤ _
+    change (qsum tapes fun ω => if bad ω s then 1 else 0) ≤ _
     simp only [MergeTree.leaves, List.map_cons, List.map_nil, List.sum_cons, List.sum_nil, Nat.add_zero]
     exact Nat.le_refl _
   | branch l r b il ir =>
-    have h := finSum_indicator_or_le (fun ω => treeBad (bad ω) l)
+    have h := qsum_indicator_or_le (fun ω => treeBad (bad ω) l)
       (fun ω => treeBad (bad ω) r)
-    change (finSum tapes fun ω => if treeBad (bad ω) l || treeBad (bad ω) r then 1 else 0) ≤ _
+    change (qsum tapes fun ω => if treeBad (bad ω) l || treeBad (bad ω) r then 1 else 0) ≤ _
     simp only [MergeTree.leaves, List.map_append, List.sum_append]
     omega
 theorem additive_shard_bound {n tapes : Nat} (bad : Fin tapes → Shard n → Bool)
     (root : Header) (verify : Shard n → Bool) (tree : MergeTree n)
     (_accepted : checkTree root verify 16 tree = true) :
     tree.leaves.length ≤ 65536 ∧
-    (finSum tapes fun ω => if treeBad (bad ω) tree then 1 else 0) ≤
-      (tree.leaves.map fun s => finSum tapes fun ω => if bad ω s then 1 else 0).sum :=
+    (qsum tapes fun ω => if treeBad (bad ω) tree then 1 else 0) ≤
+      (tree.leaves.map fun s => qsum tapes fun ω => if bad ω s then 1 else 0).sum :=
   ⟨depth_sixteen root verify tree _accepted, tree_union_bound bad tree⟩
 /-- An accepted root bit selects an accepted leaf under exactly the root statement.
 Use this witness in the quorum reduction and sum its bad events with the preceding bound. -/
@@ -666,7 +666,7 @@ theorem tooth_full_corrupt : ∃ q : Custody,
 /-- Removing the outer term from a union bound loses attacks that only break extraction. -/
 theorem tooth_omit_outer : ∃ total outer : Fin 1 → Bool,
     (∀ ω, total ω = true → outer ω = true) ∧
-    (finSum 1 fun ω => if total ω then 1 else 0) > 0 :=
+    (qsum 1 fun ω => if total ω then 1 else 0) > 0 :=
   ⟨fun _ => true, fun _ => true, fun _ _ => rfl, by decide⟩
 local instance : DecidableEq (TowerElem 1) := towerDecidableEq 1
 local instance : DecidableEq (Bool × Bool) := towerDecidableEq 1
@@ -719,7 +719,7 @@ theorem inhabited_union : ∃ total outer : Fin 2 → Bool,
     ∃ quorum : Fin 2 → Fin 2 → Bool, ∃ B : BitVec 2,
     (∀ ω, total ω = true → outer ω = true ∨
       ∃ v : Fin 2, B.getLsbD v.val = true ∧ quorum ω v = true) ∧
-    (finSum 2 fun ω => if total ω then 1 else 0) = 2 := by
+    (qsum 2 fun ω => if total ω then 1 else 0) = 2 := by
   refine ⟨(fun _ => true), (fun ω => decide (ω.val = 0)),
     (fun ω v => decide (ω.val = 1 ∧ v.val = 1)), 3#2, ?_, ?_⟩ <;> decide
 theorem inhabited_composed_game : ∃ (geom : AggSigGeometry) (custody : Fin 2 → Custody)
@@ -750,7 +750,7 @@ theorem inhabited_reconstruction : ∃ domain : List (TowerElem 1),
     (unfold Matches; decide)
 theorem inhabited_shard_bound : ∃ root verify tree, ∃ bad : Fin 2 → Shard 2 → Bool,
     checkTree root verify 16 tree = true ∧
-    (finSum 2 fun ω => if treeBad (bad ω) tree then 1 else 0) = 2 :=
+    (qsum 2 fun ω => if treeBad (bad ω) tree then 1 else 0) = 2 :=
   ⟨exampleHeader, exampleVerifier, exampleTree, (fun _ _ => true), by decide, by decide⟩
 #verify_constructive weight_union binary_merge_sound depth_sixteen honest_threshold
 #verify_constructive quorum_aggregation_reduction composed_advantage_bound quorum_advantage_from_extraction

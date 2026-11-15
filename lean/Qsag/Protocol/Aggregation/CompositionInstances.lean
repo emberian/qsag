@@ -28,19 +28,18 @@ import all Qsag.Protocol.Aggregation.ComposedQsAgAndMergeSecurity
 import all Qsag.Protocol.Aggregation.CrossProtocolAndDualOracleComposition
 import all Qsag.Protocol.Signing.HybridAddrPolicyAndFullPresetSecurity
 import all Qsag.Protocol.Aggregation.HemExtractedOpeningBridge
-import all Qsag.Oracle.QromBatchMerkleExtraction
-import all Qsag.Oracle.QromMeasuredMerkleExtraction
-import all Qsag.Oracle.MultiRoundFsQrom
+import all Qsag.Oracle.Qrom
+import all Qsag.Protocol.Aggregation.MultiRoundFsQrom
 import all Qsag.Protocol.Aggregation.SuccinctAggregationIop
 import all Qsag.Protocol.Threshold.ThresholdApproval
 import all Qsag.Protocol.Aggregation.Aggregation
-import all Qsag.Oracle.SpongeFramingAndDomainSep
+import all Qsag.Oracle.Sponge
 import all Qsag.Oracle.Poseidon2
 import all Qsag.Math.Goldilocks
-import all Qsag.Math.BinaryTower
+import all Qsag.Math.Gf2Pow128
 import all Qsag.Oracle.Keccak
 import all Qsag.Protocol.Signing.Fips205
-import all Qsag.Oracle.UcGames
+import all Qsag.Protocol.Aggregation.UcGames
 import Qsag.Tactic.AssuranceKit
 
 public section
@@ -442,10 +441,10 @@ theorem forgery_regime_instance : ∃ (geom : AggSigGeometry) (custody : Fin 2 �
 
 /-- The three masses of that instance: attack `1`, outer `0`, forgery `1`. -/
 theorem forgery_regime_masses :
-    (finSum 1 fun _ : Fin 1 => if true then 1 else 0) = 1 ∧
-    (finSum 1 fun _ : Fin 1 => if false then 1 else 0) = 0 ∧
-    finSum 2 (fun v : Fin 2 => if (2#2 : BitVec 2).getLsbD v.val then
-      finSum 1 (fun _ : Fin 1 => if decide (v.val = 1) then 1 else 0) else 0) = 1 := by
+    (qsum 1 fun _ : Fin 1 => if true then 1 else 0) = 1 ∧
+    (qsum 1 fun _ : Fin 1 => if false then 1 else 0) = 0 ∧
+    qsum 2 (fun v : Fin 2 => if (2#2 : BitVec 2).getLsbD v.val then
+      qsum 1 (fun _ : Fin 1 => if decide (v.val = 1) then 1 else 0) else 0) = 1 := by
   decide +kernel
 end Composed
 

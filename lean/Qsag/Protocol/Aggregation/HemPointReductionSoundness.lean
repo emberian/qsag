@@ -11,10 +11,10 @@ The polynomial root argument is integrated from the earlier HemStateFunctionRbr 
 It is a local algebraic result; neither adaptive composition nor a Rust refinement theorem
 is claimed here. The separate implementation refinement lives in the WHIR leaf project.
 -/
-public import Qsag.Oracle.MultiRoundFsQrom
-public import Qsag.Tactic.ConstructiveRing
+public import Qsag.Protocol.Aggregation.MultiRoundFsQrom
+public import Qsag.Tactic.CommRing
 public import Qsag.Tactic.AssuranceKit
-import all Qsag.Oracle.MultiRoundFsQrom
+import all Qsag.Protocol.Aggregation.MultiRoundFsQrom
 
 public section
 namespace Qsag

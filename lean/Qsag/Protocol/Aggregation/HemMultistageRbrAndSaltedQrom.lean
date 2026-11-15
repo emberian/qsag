@@ -40,18 +40,16 @@ Constructive Lean 4.35 theorems closing three structural gaps across `HemSlicedF
 
 public import Qsag.Protocol.Aggregation.HemSlicedFoldBudget
 public import Qsag.Protocol.Aggregation.HemExtractedOpeningBridge
-public import Qsag.Protocol.Aggregation.HemFoldDecompositionBridge
+public import Qsag.Coding.Cwyz26
 import all Qsag.Protocol.Aggregation.HemSlicedFoldBudget
 import all Qsag.Protocol.Aggregation.HemExtractedOpeningBridge
-import all Qsag.Protocol.Aggregation.HemFoldDecompositionBridge
+import all Qsag.Coding.Cwyz26
 import all Qsag.Protocol.Aggregation.HemVerifierAcceptance
 import all Qsag.Protocol.Aggregation.HemWhirRbrSoundness
-import all Qsag.Oracle.MultiRoundFsQrom
-import all Qsag.Oracle.ConcreteSecurityBudget
-import all Qsag.Coding.AffineProximityGaps
-import all Qsag.Coding.TrivariateGsExplainer
-import all Qsag.Coding.Cwyz26DeployedStages
-public import Qsag.Tactic.ConstructiveRing
+import all Qsag.Protocol.Aggregation.MultiRoundFsQrom
+import all Qsag.Protocol.Aggregation.ConcreteSecurityBudget
+import all Qsag.Coding.GuruswamiSudan
+public import Qsag.Tactic.CommRing
 public import Qsag.Tactic.AssuranceKit
 
 public section
