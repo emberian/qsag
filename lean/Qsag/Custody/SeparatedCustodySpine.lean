@@ -72,6 +72,38 @@ def acceptQuorum (cfg : SigningConfig) (pks : Nat → PqPublicKey)
     (certs.map Certificate.party).Nodup ∧ ∀ c ∈ certs, c.party < numParties) &&
   certs.all (verifyCertificate cfg pks r)
 
+/-- `acceptQuorum` accepts exactly a fresh session together with a positive threshold met by
+duplicate-free, in-range certificates that each carry the submitted intent and a verifying
+signature under the signer's own key. -/
+theorem acceptQuorum_spec (cfg : SigningConfig) (pks : Nat → PqPublicKey) (n t : Nat)
+    (used : List Nat) (r : Intent) (cs : List Certificate) :
+    acceptQuorum cfg pks n t used r cs = true ↔
+      r.session ∉ used ∧ 0 < t ∧ t ≤ cs.length ∧ (cs.map Certificate.party).Nodup ∧
+      (∀ c ∈ cs, c.party < n) ∧
+      ∀ c ∈ cs, c.intent = r ∧ verify cfg (pks c.party) c.party r c.signature = true := by
+  constructor
+  · intro h
+    obtain ⟨hg, ha⟩ := Bool.and_eq_true_iff.mp h
+    obtain ⟨hf, hs⟩ := Bool.and_eq_true_iff.mp hg
+    have shape := of_decide_eq_true hs
+    refine ⟨of_decide_eq_true hf, shape.1, shape.2.1, shape.2.2.1, shape.2.2.2, ?_⟩
+    intro c hm
+    have hv := Bool.and_eq_true_iff.mp (List.all_eq_true.mp ha c hm)
+    have he : c.intent = r := of_decide_eq_true hv.1
+    refine ⟨he, ?_⟩
+    rw [← he]
+    exact hv.2
+  · rintro ⟨hf, h0, hl, hn, hp, hv⟩
+    unfold acceptQuorum
+    refine Bool.and_eq_true_iff.mpr ⟨Bool.and_eq_true_iff.mpr
+      ⟨decide_eq_true hf, decide_eq_true ⟨h0, hl, hn, hp⟩⟩, List.all_eq_true.mpr ?_⟩
+    intro c hm
+    obtain ⟨he, hs⟩ := hv c hm
+    unfold verifyCertificate
+    refine Bool.and_eq_true_iff.mpr ⟨decide_eq_true he, ?_⟩
+    rw [he]
+    exact hs
+
 structure Coordinator where
   consumedSessions : List Nat := []
   spent : Nat := 0
@@ -105,6 +137,33 @@ theorem submit_accepted (cfg : SigningConfig) (pks : Nat → PqPublicKey)
     next hb => exact ⟨ha, hb, by simp only [ha, hb, ↓reduceIte]⟩
     next => cases h
   next => cases h
+
+/-- A rejected submission leaves the coordinator state unchanged. -/
+theorem submit_rejected (cfg : SigningConfig) (pks : Nat → PqPublicKey)
+    (n t : Nat) (st : Coordinator) (r : Intent) (cs : List Certificate)
+    (h : (submit cfg pks n t st r cs).2 = false) :
+    (submit cfg pks n t st r cs).1 = st := by
+  unfold submit at h ⊢
+  split
+  next ha =>
+    split
+    next hb => simp only [ha, hb, ↓reduceIte] at h; cases h
+    next => rfl
+  next => rfl
+
+/-- `submit` accepts exactly when the quorum check passes and the spend fits the remaining
+capacity. -/
+theorem submit_accepted_iff (cfg : SigningConfig) (pks : Nat → PqPublicKey)
+    (n t : Nat) (st : Coordinator) (r : Intent) (cs : List Certificate) :
+    (submit cfg pks n t st r cs).2 = true ↔
+      acceptQuorum cfg pks n t st.consumedSessions r cs = true ∧
+      st.spent + r.spend ≤ st.capacity := by
+  constructor
+  · intro h
+    exact ⟨(submit_accepted cfg pks n t st r cs h).1, (submit_accepted cfg pks n t st r cs h).2.1⟩
+  · rintro ⟨ha, hb⟩
+    unfold submit
+    simp only [ha, hb, ↓reduceIte]
 
 theorem submit_budget (cfg : SigningConfig) (pks : Nat → PqPublicKey)
     (n t : Nat) (st : Coordinator) (r : Intent) (cs : List Certificate)
@@ -246,6 +305,10 @@ end Qsag.Custody
 end
 set_option maxRecDepth 4096
 #verify_constructive Qsag.Custody.quorum_has_honest
+#verify_constructive Qsag.Custody.acceptQuorum_spec
+#verify_constructive Qsag.Custody.submit_accepted
+#verify_constructive Qsag.Custody.submit_accepted_iff
+#verify_constructive Qsag.Custody.submit_rejected
 #verify_constructive Qsag.Custody.accepted_quorum_approval_or_hash_break
 #verify_constructive Qsag.Custody.accepted_fresh_certificate_wins
 #verify_constructive Qsag.Custody.quorum_replay_rejected
