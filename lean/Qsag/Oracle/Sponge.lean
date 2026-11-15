@@ -1,27 +1,39 @@
 module
 /-
-# Qsag.SpongeFramingAndDomainSep — Multi-Block Sponge Padding, SP 800-185 Framing & Midstate Laws
+# Qsag.Oracle.Sponge — Multi-Block Sponge Padding, SP 800-185 Framing & Midstate Laws
 
-Self-contained Lean 4.35 cryptographic sponge and domain-separation foundation over `Qsag.Keccak`
-(`0 sorry`, `0 Classical.choice`, `0 native_decide`, `0 bv_decide`, `0 grind`):
-1. **Multi-Block Rate-$r$ Sponge Specification & Cross-Domain Padding Injectivity
+Byte-level sponge padding and framing over `Qsag.Oracle.Keccak`.
+
+**Scope.** Every separation result in this file is a statement about ENCODINGS: complete padded
+block sequences (`absorbPayload`, a `List` of rate-`r` blocks) and byte strings
+(`pad10star1`, `cshakePrefix N S ++ m`). The theorems say these encodings are injective in the
+message and unequal across domain bytes or `(N, S)` pairs. They do not say that the permutation
+queries made while absorbing two such sequences are disjoint (two unequal block sequences may
+share a prefix of blocks, hence of intermediate states), and they prove no sponge or
+ideal-permutation indifferentiability statement. Any security claim of the form "distinct
+domains behave as independent random oracles" needs that reduction, which is a separate
+obligation and is not proved in this module.
+
+1. **Multi-block rate-`r` sponge specification and padded-encoding injectivity
    (`pad10star1_joint_injective`, `pad10star1_injective`, `absorbPayload_cross_domain_disjoint`)**:
-   Exact byte-level rate-$r$ (`r = 136` for `SHAKE256` / `cSHAKE256` / `TurboSHAKE256` / `SHA3-256`,
-   `r = 64` for 8-limb `Poseidon2` byte rate) multi-block XOR absorption, `pad10*1` padding, and
-   arbitrary-length multi-block squeezing over any permutation `π`, proved bit-exact against
-   `Keccak.shake256Xof` (`evalSponge_keccak_eq_shake256Xof`). Proves both single-domain message
-   injectivity and cross-domain sponge-block disjointness (`0x1F`, `0x04`, `0x06` never collide).
-2. **NIST SP 800-185 Self-Delimiting Prefix Injectivity (`leftEncode_prefix_inj`,
+   byte-level rate-`r` (`r = 136` for `SHAKE256` / `cSHAKE256` / `TurboSHAKE256` / `SHA3-256`,
+   `r = 64` for the 8-limb `Poseidon2` byte rate) multi-block XOR absorption, `pad10*1` padding,
+   and arbitrary-length multi-block squeezing over any function `π` on states, proved equal to
+   `Keccak.shake256Xof` at the Keccak permutation (`evalSponge_keccak_eq_shake256Xof`). The padded
+   block sequence determines the message within one domain byte, and padded block sequences under
+   distinct valid domain bytes (`0x1F`, `0x04`, `0x06`) are unequal.
+2. **NIST SP 800-185 self-delimiting prefix injectivity (`leftEncode_prefix_inj`,
    `encodeString_prefix_inj`, `cshakePrefix_prefix_free`, `cshakePrefix_injective`)**:
-   Proves `bytepad(encodeString(N) || encodeString(S), 136)` is prefix-free across arbitrary
-   message suffixes (`cshakePrefix N₁ S₁ ++ m₁ = cshakePrefix N₂ S₂ ++ m₂ → N₁ = N₂ ∧ S₁ = S₂ ∧ m₁ = m₂`),
-   placing all `QSAG.*` customization tags in pairwise disjoint permutation input domains.
-3. **Precomputed-Midstate Equivalence (`cshake_precomputed_midstate_eq`,
+   `cshakePrefix N₁ S₁ ++ m₁ = cshakePrefix N₂ S₂ ++ m₂ → N₁ = N₂ ∧ S₁ = S₂ ∧ m₁ = m₂`, where
+   `cshakePrefix N S = bytepad(encodeString(N) || encodeString(S), 136)`. Consequently the
+   padded block sequences of distinct `(N, S)` pairs, the `QSAG.*` customization tags included,
+   are unequal as sequences (`cshake256_domains_disjoint`, `qsag_tags_sponge_domains_disjoint`).
+3. **Precomputed-midstate equivalence (`cshake_precomputed_midstate_eq`,
    `keccak_cshake256_precomputed_midstate_eq`)**:
-   Certifies that whenever `encodeString(N) ++ encodeString(S)` fits in a single `136`-byte
-   `bytepad` block (`≤ 134` payload bytes, satisfied by every `QSAG.*` tag), absorbing `m` from
-   `midstate := π (xorBlock zeroState (cshakePrefix N S))` produces bit-for-bit identical output
-   for all `m` and all `outLen` as full from-scratch `cSHAKE256`.
+   whenever `encodeString(N) ++ encodeString(S)` fits in a single `136`-byte `bytepad` block
+   (`≤ 134` payload bytes, satisfied by every `QSAG.*` tag), absorbing `m` from
+   `midstate := π (xorBlock zeroState (cshakePrefix N S))` gives the same output for all `m` and
+   all `outLen` as from-scratch `cSHAKE256`.
 -/
 
 public import Qsag.Oracle.Keccak
@@ -187,8 +199,11 @@ theorem pad10star1_injective {r : Nat} {domByte : UInt8} {m₁ m₂ : List UInt8
     rw [← (absorbPayload_flatten hr domByte m₁).1, ← (absorbPayload_flatten hr domByte m₂).1, hBlocks]
   exact (pad10star1_joint_injective hr hDom hDom hFlat).2
 
-/-- **Cross-Domain Sponge Block Separation (`absorbPayload_cross_domain_disjoint`)**:
-    Distinct valid domain bytes (`d₁ ≠ d₂`) NEVER collide on `absorbPayload` for ANY `m₁, m₂`. -/
+/-- **Cross-domain inequality of padded block sequences (`absorbPayload_cross_domain_disjoint`)**:
+    for distinct valid domain bytes `d₁ ≠ d₂` and any messages `m₁, m₂`, the complete padded
+    block sequences `absorbPayload r d₁ m₁` and `absorbPayload r d₂ m₂` are unequal. This is
+    inequality of the two encodings as whole sequences; they may share leading blocks, and nothing
+    is claimed about the permutation queries made while absorbing them. -/
 theorem absorbPayload_cross_domain_disjoint {r : Nat} {d₁ d₂ : UInt8} (m₁ m₂ : List UInt8)
     (hr : 0 < r) (hNe : d₁ ≠ d₂) (hd₁ : ValidDomByte d₁) (hd₂ : ValidDomByte d₂) :
     absorbPayload r d₁ m₁ ≠ absorbPayload r d₂ m₂ := by
@@ -197,7 +212,8 @@ theorem absorbPayload_cross_domain_disjoint {r : Nat} {d₁ d₂ : UInt8} (m₁ 
     rw [← (absorbPayload_flatten hr d₁ m₁).1, ← (absorbPayload_flatten hr d₂ m₂).1, hEq]
   exact hNe (pad10star1_joint_injective hr hd₁ hd₂ hFlat).1
 
-/-- Explicit cross-domain separation across `SHAKE256` (`0x1F`), `cSHAKE256` (`0x04`), and `SHA3-256` (`0x06`). -/
+/-- The padded block sequences of `SHAKE256` (`0x1F`), `cSHAKE256` (`0x04`), and `SHA3-256` (`0x06`)
+    inputs are pairwise unequal (as complete sequences). -/
 theorem fips202_shake_cshake_sha3_domains_disjoint (m₁ m₂ : List UInt8) :
     absorbPayload 136 domShake256 m₁ ≠ absorbPayload 136 domCshake256 m₂ ∧
     absorbPayload 136 domShake256 m₁ ≠ absorbPayload 136 domSha3_256 m₂ ∧
@@ -319,9 +335,10 @@ theorem evalSponge_keccak_eq_shake256Xof (msg : List UInt8) (outLen : Nat) :
 theorem cshakePrefix_empty_name_eq (S : List UInt8) :
     cshakePrefix [] S = customizationPrefix S := by rw [customizationPrefix_eq]; rfl
 
-/-- **Prefix-Free `cshakePrefix` Theorem (`cshakePrefix_prefix_free`)**:
-    Even across arbitrary message suffixes `m₁, m₂`, `cshakePrefix N₁ S₁ ++ m₁ = cshakePrefix N₂ S₂ ++ m₂`
-    forces `N₁ = N₂ ∧ S₁ = S₂ ∧ m₁ = m₂`! -/
+/-- **Unique parsing of `cshakePrefix N S ++ m` (`cshakePrefix_prefix_free`)**:
+    an equality of byte strings `cshakePrefix N₁ S₁ ++ m₁ = cshakePrefix N₂ S₂ ++ m₂` forces
+    `N₁ = N₂ ∧ S₁ = S₂ ∧ m₁ = m₂`. A statement about the byte encoding fed to the sponge, not
+    about its permutation queries. -/
 theorem cshakePrefix_prefix_free {N₁ S₁ N₂ S₂ m₁ m₂ : List UInt8}
     (hN₁ : 8 * N₁.length < 256 ^ 255) (hS₁ : 8 * S₁.length < 256 ^ 255)
     (hN₂ : 8 * N₂.length < 256 ^ 255) (hS₂ : 8 * S₂.length < 256 ^ 255)
@@ -342,7 +359,8 @@ theorem cshakePrefix_prefix_free {N₁ S₁ N₂ S₂ m₁ m₂ : List UInt8}
   subst hNEq hSEq
   exact ⟨rfl, rfl, List.append_cancel_left hEq⟩
 
-/-- **`cshakePrefix_injective`**: distinct `(N, S)` pairs produce strictly distinct `bytepad` prefixes. -/
+/-- **`cshakePrefix_injective`**: `(N, S) ↦ cshakePrefix N S` is injective on byte strings
+    (distinct `(N, S)` pairs give distinct `bytepad` prefixes). -/
 theorem cshakePrefix_injective {N₁ S₁ N₂ S₂ : List UInt8}
     (hN₁ : 8 * N₁.length < 256 ^ 255) (hS₁ : 8 * S₁.length < 256 ^ 255)
     (hN₂ : 8 * N₂.length < 256 ^ 255) (hS₂ : 8 * S₂.length < 256 ^ 255)
@@ -351,9 +369,12 @@ theorem cshakePrefix_injective {N₁ S₁ N₂ S₂ : List UInt8}
   have h := cshakePrefix_prefix_free (m₁ := []) (m₂ := []) hN₁ hS₁ hN₂ hS₂ (by simpa using hEq)
   exact ⟨h.1, h.2.1⟩
 
-/-- **Universal `cSHAKE256` Input-Domain Disjointness (`cshake256_domains_disjoint`)**:
-    For ANY distinct `(N₁, S₁) ≠ (N₂, S₂)` (including when one pair is `([], [])`), their
-    padded 136-byte sponge block sequences NEVER collide for ANY messages `m₁, m₂`! -/
+/-- **Inequality of `cSHAKE256` padded encodings (`cshake256_domains_disjoint`)**:
+    for distinct `(N₁, S₁) ≠ (N₂, S₂)` (including when one pair is `([], [])`) and any messages
+    `m₁, m₂`, the complete padded 136-byte block sequences are unequal. As with
+    `absorbPayload_cross_domain_disjoint`, this is inequality of whole encodings; the sequences can
+    agree on a prefix of blocks, and no disjointness of permutation queries or
+    indifferentiability bound is claimed. -/
 theorem cshake256_domains_disjoint {N₁ S₁ N₂ S₂ : List UInt8} (m₁ m₂ : List UInt8)
     (hN₁ : 8 * N₁.length < 256 ^ 255) (hS₁ : 8 * S₁.length < 256 ^ 255)
     (hN₂ : 8 * N₂.length < 256 ^ 255) (hS₂ : 8 * S₂.length < 256 ^ 255)
