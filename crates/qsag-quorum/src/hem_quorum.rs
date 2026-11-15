@@ -27,9 +27,9 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use qsag_core::dkg::{
-    DkgError, EpochLatchCertificate, ShamirPoseidonSeedShare, epoch_latch_binding,
-    run_dealerless_dkg_seed32_goldilocks, run_dealerless_refresh_seed32_goldilocks,
-    run_dealerless_reshare_seed32_goldilocks,
+    DkgError, EpochLatchAuthorityPublic, EpochLatchCertificate, EpochLatchError,
+    ShamirPoseidonSeedShare, epoch_latch_binding, run_dealerless_dkg_seed32_goldilocks,
+    run_dealerless_refresh_seed32_goldilocks, run_dealerless_reshare_seed32_goldilocks,
 };
 use qsag_core::field::goldilocks::{Goldilocks, GoldilocksExt2, lagrange_weights_zero_goldilocks};
 use qsag_core::poseidon2_mpc::{
@@ -632,10 +632,12 @@ impl HemCommitteePartitionedQuorum {
 
         let mut pair_matrix = vec![vec![[0u8; 32]; n]; n];
         for i in 0..n {
-            for j in (i + 1)..n {
+            let (upper, lower) = pair_matrix.split_at_mut(i + 1);
+            let row_i = &mut upper[i];
+            for (offset, row_j) in lower.iter_mut().enumerate() {
                 let k = rng.next_bytes32();
-                pair_matrix[i][j] = k;
-                pair_matrix[j][i] = k;
+                row_i[i + 1 + offset] = k;
+                row_j[i] = k;
             }
         }
 
@@ -2289,6 +2291,7 @@ pub struct HemSpdzSeedQuorum {
     high_water_leaf: u64,
     cache: HemJortsCachedTree,
     latch_cluster: HemEpochLatchCluster,
+    durable_latch_authority: Option<EpochLatchAuthorityPublic>,
     sk_seed_shares: Vec<ShamirPoseidonSeedShare>,
     sk_prf_shares: Vec<ShamirPoseidonSeedShare>,
 }
@@ -2426,6 +2429,7 @@ impl HemSpdzSeedQuorum {
             high_water_leaf: 0,
             cache,
             latch_cluster,
+            durable_latch_authority: None,
             sk_seed_shares,
             sk_prf_shares,
         })
@@ -2445,6 +2449,47 @@ impl HemSpdzSeedQuorum {
     #[inline]
     pub fn high_water_leaf(&self) -> u64 {
         self.high_water_leaf
+    }
+
+    /// Return the enrolled durable [`EpochLatchAuthorityPublic`], if any.
+    #[inline]
+    pub fn enrolled_durable_latch_authority(&self) -> Option<&EpochLatchAuthorityPublic> {
+        self.durable_latch_authority.as_ref()
+    }
+
+    /// Pin a committee [`EpochLatchAuthorityPublic`] (from a durable `QuorumEpochLatchCluster`)
+    /// so `t`-of-`n` (`t < n`) SPDZ signing can verify [`EpochLatchCertificate`]s.
+    /// Re-enrolling the exact same authority is idempotent; enrolling a different authority or
+    /// mismatched committee size fails closed with `CertificateCommitteeMismatch`.
+    pub fn enroll_durable_latch_authority(
+        &mut self,
+        authority: EpochLatchAuthorityPublic,
+    ) -> Result<(), HemQuorumError> {
+        if authority.committee_size() != self.n {
+            return Err(Poseidon2MpcError::LatchCertificateRejected(
+                EpochLatchError::CertificateCommitteeMismatch,
+            )
+            .into());
+        }
+        match &self.durable_latch_authority {
+            None => {
+                self.durable_latch_authority = Some(authority);
+                Ok(())
+            }
+            Some(existing) if *existing == authority => Ok(()),
+            Some(_) => Err(Poseidon2MpcError::LatchCertificateRejected(
+                EpochLatchError::CertificateCommitteeMismatch,
+            )
+            .into()),
+        }
+    }
+
+    /// Compute the exact 32-byte [`epoch_latch_binding`] required when certifying `(epoch, msg)`
+    /// through an external [`qsag_core::dkg::QuorumEpochLatchCluster`].
+    pub fn epoch_latch_binding(&self, epoch: u64, msg: &[u8]) -> [u8; 32] {
+        let (mu_bytes, _) = hem_compute_message_mu(&self.cache.pk, msg);
+        let latch_pk = self.cache.pk.latch_pq_public_key(self.cache.dkg_pk_seed);
+        epoch_latch_binding(&latch_pk.pk_seed, &latch_pk.pk_root, epoch, &mu_bytes)
     }
 
     /// Proactive bit-level refresh (`run_dealerless_refresh_seed32_goldilocks`) preserving `pk`.
@@ -2660,11 +2705,13 @@ impl HemSpdzSeedQuorum {
         let new_cluster =
             HemEpochLatchCluster::establish(new_n, new_t, self.high_water_leaf, &mut new_rngs)?;
 
-        // Commit. The replaced old shares wipe themselves on drop.
+        // Commit. The replaced old shares wipe themselves on drop; the new committee must
+        // explicitly enroll its own durable latch authority before using `durable_cert`.
         self.quorum_epoch += 1;
         self.t = new_t;
         self.n = new_n;
         self.latch_cluster = new_cluster;
+        self.durable_latch_authority = None;
         self.sk_seed_shares = new_seed_shares;
         self.sk_prf_shares = new_prf_shares;
         Ok(())
@@ -2795,6 +2842,9 @@ impl HemSpdzSeedQuorum {
         }
         for ks in &mut key_shares {
             ks.enroll_hem_key_profile(self.cache.pk, self.cache.prf_check)?;
+            if let Some(authority) = &self.durable_latch_authority {
+                ks.enroll_latch_authority(authority.clone())?;
+            }
         }
 
         let (mu_bytes, _) = hem_compute_message_mu(&self.cache.pk, msg);
@@ -3707,5 +3757,88 @@ mod tests {
             &proof,
             WhirSecurityRegime::BciksJohnsonQrom128,
         ));
+    }
+
+    #[test]
+    fn test_hem_spdz_seed_quorum_durable_latch_certificate_subset_sign() {
+        use qsag_core::dkg::{FsWalEpochLatch, QuorumEpochLatchCluster};
+
+        let mut spdz = HemSpdzSeedQuorum::keygen_dealerless_online_fixture(
+            [0xA1; 32],
+            2,
+            3,
+            4,
+            &mut test_party_rngs(120, 3),
+        )
+        .unwrap();
+        let agg_pk = ValidatorPublicKey::from_bytes_canonical(&spdz.public_key().to_bytes()).unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "qsag-hem-spdz-durable-cert-{}-{}",
+            std::process::id(),
+            0xA1B2_u32
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mac_keys: Vec<[u8; 32]> = (0..3)
+            .map(|i| [0x41 + i as u8; 32])
+            .collect();
+        let latches: Vec<FsWalEpochLatch> = (0..3)
+            .map(|i| {
+                FsWalEpochLatch::create_new_for_fresh_key(
+                    dir.join(format!("custodian-{i}.wal")),
+                    mac_keys[i],
+                )
+                .unwrap()
+            })
+            .collect();
+        let mut durable_cluster =
+            QuorumEpochLatchCluster::from_durable_latches(1, latches, mac_keys).unwrap();
+
+        let msg0 = b"spdz 2-of-3 subset sign with enrolled durable certificate";
+        let binding0 = spdz.epoch_latch_binding(0, msg0);
+        let cert0 = durable_cluster.certify_epoch(&[0, 2], 0, binding0).unwrap();
+
+        // Before enrollment, `Some(&cert0)` fails closed without spending leaf 0.
+        assert!(
+            spdz.sign_quorum_online_fixture(
+                [0xA2; 32],
+                &[0, 2],
+                &[0, 2],
+                Some(&cert0),
+                msg0,
+                &mut test_party_rngs(130, 3),
+            )
+            .is_err()
+        );
+        assert_eq!(spdz.high_water_leaf(), 0);
+
+        // Enroll the committee authority once (idempotent on same authority, rejects another).
+        spdz.enroll_durable_latch_authority(durable_cluster.authority())
+            .unwrap();
+        spdz.enroll_durable_latch_authority(durable_cluster.authority())
+            .unwrap();
+
+        let (ep0, sig0) = spdz
+            .sign_quorum_online_fixture(
+                [0xA3; 32],
+                &[0, 2],
+                &[0, 2],
+                Some(&cert0),
+                msg0,
+                &mut test_party_rngs(140, 3),
+            )
+            .unwrap();
+        assert_eq!(ep0, 0);
+        assert_eq!(spdz.high_water_leaf(), 1);
+        let agg_sig0 = ValidatorSignature::from_bytes_canonical(
+            AggSigProfile::JortsPoseidon2,
+            &sig0.to_bytes(),
+        )
+        .unwrap();
+        assert!(verify_individual_signature(&agg_pk, msg0, &agg_sig0));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

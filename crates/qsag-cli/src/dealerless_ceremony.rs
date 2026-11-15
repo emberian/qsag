@@ -10,7 +10,7 @@ use std::thread;
 
 use qsag_accel::ct::{ct_zeroize_bytes, ct_zeroize_u128s};
 use qsag_accel::gf2_128::gf2_128_mul;
-use qsag_accel::keccak::{cshake256_framed_32, cshake256_framed_xof};
+use qsag_accel::keccak::{cshake256_framed_32, finalize_cshake256, init_cshake256};
 use qsag_fts::{
     LeafBurnPersistence, ParallelSeededDkgConfig, ParallelSeededDkgOutput,
     ParallelSeededDkgProducts, ParallelSeededDkgRound1State, ParallelSeededDkgSharePackage,
@@ -306,40 +306,55 @@ impl ParallelSeededDkgProducts for PairwiseBeaverProductChannel {
         // Derive correlated Beaver triples `(a_i, b_i, c_i = a_i * b_i)` isolated to `(sender, receiver, context)`
         // so only one-time-masked `x_i ^ a_i` and `y_i ^ b_i` ever cross the party channel, followed by the
         // 5-round BDOZ consistency check in `ParallelSeededDkgUnverifiedOutput::activate`.
-        let mut raw = vec![0u8; count * 48];
-        cshake256_framed_xof(
-            b"QSAG.CLI.DKG.BEAVER.CORR.V1",
-            &[
-                &self.pad_secret,
-                &context,
-                &sender.to_be_bytes(),
-                &receiver.to_be_bytes(),
-                &(count as u64).to_be_bytes(),
-            ],
-            &mut raw,
-        );
+        // Stream `cSHAKE256` in L1-resident chunks matching `cshake256_framed_xof` bit-for-bit.
+        let sender_be = sender.to_be_bytes();
+        let receiver_be = receiver.to_be_bytes();
+        let count_be = (count as u64).to_be_bytes();
+        let frames: [&[u8]; 5] = [
+            &self.pad_secret,
+            &context,
+            &sender_be,
+            &receiver_be,
+            &count_be,
+        ];
+        let mut sp = init_cshake256(b"", b"QSAG.CLI.DKG.BEAVER.CORR.V1");
+        sp.absorb(&(frames.len() as u64).to_le_bytes());
+        for frame in &frames {
+            sp.absorb(&(frame.len() as u64).to_le_bytes());
+            sp.absorb(frame);
+        }
+        finalize_cshake256(&mut sp, true);
 
+        const TRIPLE_CHUNK: usize = 256;
+        let mut chunk_buf = [0u8; TRIPLE_CHUNK * 48];
         let mut my_mask = ZeroizeU128s(Vec::with_capacity(count));
         let mut my_pad = ZeroizeU128s(Vec::with_capacity(count));
-        for chunk in raw.chunks_exact(48) {
-            let mut a_bytes = [0u8; 16];
-            let mut b_bytes = [0u8; 16];
-            let mut r_bytes = [0u8; 16];
-            a_bytes.copy_from_slice(&chunk[..16]);
-            b_bytes.copy_from_slice(&chunk[16..32]);
-            r_bytes.copy_from_slice(&chunk[32..48]);
-            let a = u128::from_le_bytes(a_bytes);
-            let b = u128::from_le_bytes(b_bytes);
-            let r = u128::from_le_bytes(r_bytes);
-            if self.party_id == sender {
-                my_mask.0.push(a);
-                my_pad.0.push(r);
-            } else {
-                my_mask.0.push(b);
-                my_pad.0.push(gf2_128_mul(a, b) ^ r);
+        let mut remaining = count;
+        while remaining > 0 {
+            let take = remaining.min(TRIPLE_CHUNK);
+            let slice = &mut chunk_buf[..take * 48];
+            sp.squeeze(slice);
+            for chunk in slice.chunks_exact(48) {
+                let mut a_bytes = [0u8; 16];
+                let mut b_bytes = [0u8; 16];
+                let mut r_bytes = [0u8; 16];
+                a_bytes.copy_from_slice(&chunk[..16]);
+                b_bytes.copy_from_slice(&chunk[16..32]);
+                r_bytes.copy_from_slice(&chunk[32..48]);
+                let a = u128::from_le_bytes(a_bytes);
+                let b = u128::from_le_bytes(b_bytes);
+                let r = u128::from_le_bytes(r_bytes);
+                if self.party_id == sender {
+                    my_mask.0.push(a);
+                    my_pad.0.push(r);
+                } else {
+                    my_mask.0.push(b);
+                    my_pad.0.push(gf2_128_mul(a, b) ^ r);
+                }
             }
+            remaining -= take;
         }
-        ct_zeroize_bytes(&mut raw);
+        ct_zeroize_bytes(&mut chunk_buf);
 
         let peer = if self.party_id == sender {
             receiver
@@ -528,22 +543,56 @@ impl DealerlessThresholdFtsSetup {
         for p in &mut pending {
             coins.push(p.reveal_check_coin(&check_commits)?);
         }
-        let mut masked = Vec::with_capacity(parties);
-        for p in &mut pending {
-            masked.push(p.masked_shares(&coins)?);
-        }
-        let mut tag_commits = Vec::with_capacity(parties);
-        for p in &mut pending {
-            tag_commits.push(p.tag_commitment(&masked)?);
-        }
+        let coins_ref = &coins;
+        let masked = thread::scope(|scope| -> Result<Vec<_>, ParallelSeededError> {
+            let handles: Vec<_> = pending
+                .iter_mut()
+                .map(|p| scope.spawn(move || p.masked_shares(coins_ref)))
+                .collect();
+            let mut res = Vec::with_capacity(parties);
+            for h in handles {
+                res.push(
+                    h.join()
+                        .map_err(|_| ParallelSeededError::BdozMacCheckFailed)??,
+                );
+            }
+            Ok(res)
+        })?;
+        let masked_ref = &masked;
+        let tag_commits = thread::scope(|scope| -> Result<Vec<_>, ParallelSeededError> {
+            let handles: Vec<_> = pending
+                .iter_mut()
+                .map(|p| scope.spawn(move || p.tag_commitment(masked_ref)))
+                .collect();
+            let mut res = Vec::with_capacity(parties);
+            for h in handles {
+                res.push(
+                    h.join()
+                        .map_err(|_| ParallelSeededError::BdozMacCheckFailed)??,
+                );
+            }
+            Ok(res)
+        })?;
         let mut tags = Vec::with_capacity(parties);
         for p in &mut pending {
             tags.push(p.open_tags(&tag_commits)?);
         }
-        let mut outputs: Vec<ParallelSeededDkgOutput> = Vec::with_capacity(parties);
-        for p in pending {
-            outputs.push(p.activate(&tags)?);
-        }
+        let tags_ref = &tags;
+        let mut outputs: Vec<ParallelSeededDkgOutput> =
+            thread::scope(|scope| -> Result<Vec<_>, ParallelSeededError> {
+                let handles: Vec<_> = pending
+                    .into_iter()
+                    .map(|p| scope.spawn(move || p.activate(tags_ref)))
+                    .collect();
+                let mut res = Vec::with_capacity(parties);
+                for h in handles {
+                    res.push(
+                        h.join()
+                            .map_err(|_| ParallelSeededError::BdozMacCheckFailed)??,
+                    );
+                }
+                Ok(res)
+            })?;
 
         let pk_seed_bytes = outputs[0].pk_seed_bytes;
         // This driver never consumes the DKG's output Beaver triples: drop (and so wipe) them

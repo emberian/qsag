@@ -84,7 +84,6 @@ const TAG_MSG: &[u8] = b"QSAG.QUORUM.MSG/v1";
 const TAG_DIGEST: &[u8] = b"QSAG.QUORUM.DIGEST/v1";
 const TAG_BINDING: &[u8] = b"QSAG.QUORUM.BINDING/v1";
 const TAG_ECHO_MAC: &[u8] = b"QSAG.QUORUM.ECHO.MAC/v1";
-const TAG_ACK_MAC: &[u8] = b"QSAG.QUORUM.ACK.MAC/v1";
 pub(crate) const TAG_PAIR_KEY: &[u8] = b"QSAG.QUORUM.PAIR.KEY/v1";
 const TAG_STAGE_SK: &[u8] = b"QSAG.QUORUM.STAGE.SK/v1";
 pub(crate) const TAG_STAGE_PK_SEED: &[u8] = b"QSAG.QUORUM.STAGE.PKSEED/v1";
@@ -649,8 +648,10 @@ pub struct CommitteeLayout {
     leaves_per_committee: u64,
 }
 
-/// Maximum party count accepted by quorum configurations.
+/// Maximum party count accepted by committee-partitioned quorum configurations.
 pub const MAX_QUORUM_PARTIES: usize = 255;
+/// Maximum custodian count mediated by `VerifiedBeltQuorumGuard` in Mode QS-B (`n <= 64`).
+pub const MAX_SHAMIR_QUORUM_PARTIES: usize = 64;
 /// Maximum enumerated committees; use `BftShamirJorts` for larger configurations.
 pub const MAX_COMMITTEES: usize = 1024;
 const MAX_STAGED_SHARE_BYTES: usize = 256 * 1024 * 1024;
@@ -1339,20 +1340,21 @@ impl QuorumConfig {
     }
 
     /// The tightest configuration for threshold `t`: `f = t - 1` corrupted custodians among
-    /// `n = 3t - 2`.
+    /// `n = 3t - 2` (`n <= MAX_SHAMIR_QUORUM_PARTIES`).
     pub fn tight(t: usize) -> Result<Self, QuorumError> {
-        if t == 0 || t > MAX_QUORUM_PARTIES {
-            return Err(QuorumError::InvalidConfig("need 1 <= t and 1 <= n <= 255"));
+        if t == 0 || t > MAX_SHAMIR_QUORUM_PARTIES || 3 * t - 2 > MAX_SHAMIR_QUORUM_PARTIES {
+            return Err(QuorumError::InvalidConfig("need 1 <= t and 1 <= n <= 64"));
         }
         Self::new(t, 3 * t - 2, t - 1)
     }
 
-    /// A configuration with an explicit quorum. Rejected unless `2q > n + f` (any two quorums
+    /// A configuration with an explicit quorum. Rejected unless `n <= 64` (the
+    /// `VerifiedBeltQuorumGuard` mediation bound), `2q > n + f` (any two quorums
     /// share an honest custodian), `q <= n - f` (the honest custodians alone form a quorum),
     /// `f < t` (the corrupted custodians cannot reconstruct) and `t <= n - f`.
     pub fn with_quorum(t: usize, n: usize, f: usize, q: usize) -> Result<Self, QuorumError> {
-        if n == 0 || n > MAX_QUORUM_PARTIES || t == 0 || t > n || f >= n || q > n {
-            return Err(QuorumError::InvalidConfig("need 1 <= t and 1 <= n <= 255"));
+        if n == 0 || n > MAX_SHAMIR_QUORUM_PARTIES || t == 0 || t > n || f >= n || q > n {
+            return Err(QuorumError::InvalidConfig("need 1 <= t and 1 <= n <= 64"));
         }
         // Production uses global BFT liveness, not the safety-only committee mode.
         if !qsag_verified::validate_belt_quorum_config(n as u32, t as u32, f as u32, q as u32, true)
@@ -1550,15 +1552,94 @@ impl LatchCertificate {
     }
 }
 
-fn ack_mac_parts(from: usize, to: usize, leaf: u64) -> [[u8; 8]; 3] {
-    [
-        (from as u64).to_be_bytes(),
-        (to as u64).to_be_bytes(),
-        leaf.to_be_bytes(),
-    ]
+struct SecretWalKey(Node);
+
+impl Drop for SecretWalKey {
+    fn drop(&mut self) {
+        qsag_asm::volatile_fill(&mut self.0, 0);
+    }
 }
 
-/// One custodian of Mode QS-B: its Shamir shares, its latch and its MAC keys.
+fn belt_guard_key_commit(pk: &QuorumPublicKey, party: usize) -> Node {
+    h32(
+        b"QSAG.QUORUM.BELT_GUARD/v1",
+        &[&pk.pk_seed, &pk.root, &(party as u64).to_be_bytes()],
+    )
+}
+
+fn belt_wal_receipt_digest(epoch: u64, binding: &Node) -> Node {
+    h32(
+        b"QSAG.QUORUM.WAL_RECEIPT/v1",
+        &[&epoch.to_be_bytes(), binding],
+    )
+}
+
+fn build_verified_belt_guard(
+    cfg: QuorumConfig,
+    pk: &QuorumPublicKey,
+    party: usize,
+    mac_keys: &[Node],
+    max_window: u64,
+    next_epoch: u64,
+    in_flight: Option<&BeltLatchRecord>,
+) -> Result<(qsag_verified::VerifiedBeltQuorumGuard, SecretWalKey), QuorumError> {
+    let guard_key_commit = belt_guard_key_commit(pk, party);
+    let mut custodian_keys = [[0u8; 32]; 64];
+    for (i, slot) in custodian_keys.iter_mut().take(cfg.n).enumerate() {
+        *slot = mac_keys[i];
+    }
+    let wal_key = h32(
+        b"QSAG.QUORUM.BELT_WAL_KEY/v1",
+        &[&mac_keys[party], &guard_key_commit],
+    );
+    let initial_next = match in_flight {
+        Some(prev) => prev.epoch,
+        None => next_epoch,
+    };
+    let guard_res = qsag_verified::VerifiedBeltQuorumGuard::new_validated(
+        cfg.n as u32,
+        cfg.t as u32,
+        cfg.f as u32,
+        cfg.q as u32,
+        true,
+        initial_next,
+        max_window,
+        guard_key_commit,
+        custodian_keys,
+        wal_key,
+    );
+    for slot in &mut custodian_keys {
+        qsag_asm::volatile_fill(slot, 0);
+    }
+    let mut guard = guard_res.map_err(|_| {
+        let mut z = wal_key;
+        qsag_asm::volatile_fill(&mut z, 0);
+        QuorumError::InvalidConfig("invalid verified belt quorum")
+    })?;
+    if let Some(prev) = in_flight {
+        let prev_binding = LeafRecord::from_latch(prev.epoch, prev).binding();
+        let prev_receipt = belt_wal_receipt_digest(prev.epoch, &prev_binding);
+        let prev_tag = qsag_verified::wal_receipt_tag(
+            &wal_key,
+            &guard_key_commit,
+            prev.epoch,
+            &prev_binding,
+            &prev_receipt,
+        );
+        let (next_guard, res) =
+            guard.propose_or_retry_epoch(prev.epoch, prev_binding, prev_receipt, prev_tag);
+        guard = next_guard;
+        if res.is_err() {
+            let mut z = wal_key;
+            qsag_asm::volatile_fill(&mut z, 0);
+            return Err(QuorumError::Latch(BeltLatchError::WalPoisoned));
+        }
+    }
+    Ok((guard, SecretWalKey(wal_key)))
+}
+
+/// One custodian of Mode QS-B: its Shamir shares, its latch, its persistent extracted
+/// `VerifiedBeltQuorumGuard`, and its pairwise MAC keys.
 pub struct ShamirCustodian<W: DurableWal> {
     party: usize,
     cfg: QuorumConfig,
@@ -1567,6 +1648,9 @@ pub struct ShamirCustodian<W: DurableWal> {
     latch: BeltLatch<W>,
     leaves: SecretLeaves,
     max_window: u64,
+    verified_guard: Option<qsag_verified::VerifiedBeltQuorumGuard>,
+    wal_receipt_key: SecretWalKey,
+    last_authorized_grant: Option<qsag_verified::BeltAuthorizationGrant>,
     guard_poisoned: bool,
 }
 
@@ -1581,14 +1665,27 @@ impl<W: DurableWal> ShamirCustodian<W> {
             return Err(QuorumError::InvalidConfig("one MAC key per custodian"));
         }
         let latch = BeltLatch::recover(wal, latch_capacity_log2(material.leaves.len() as u64))?;
+        let mac_keys = SecretMacKeys(core::mem::take(&mut material.mac_keys));
+        let (verified_guard, wal_receipt_key) = build_verified_belt_guard(
+            cfg,
+            tree.public_key(),
+            material.party,
+            &mac_keys,
+            MAX_WINDOW,
+            latch.next_epoch(),
+            latch.in_flight(),
+        )?;
         Ok(Self {
             party: material.party,
             cfg,
             tree,
-            mac_keys: SecretMacKeys(core::mem::take(&mut material.mac_keys)),
+            mac_keys,
             latch,
             leaves: SecretLeaves(core::mem::take(&mut material.leaves)),
             max_window: MAX_WINDOW,
+            verified_guard: Some(verified_guard),
+            wal_receipt_key,
+            last_authorized_grant: None,
             guard_poisoned: false,
         })
     }
@@ -1622,13 +1719,36 @@ impl<W: DurableWal> ShamirCustodian<W> {
         &mut self.leaves.0
     }
 
+    fn is_guard_poisoned(&self) -> bool {
+        self.guard_poisoned || self.verified_guard.as_ref().is_none_or(|g| g.is_poisoned())
+    }
+
     pub(crate) fn replace_mac_keys(&mut self, new_keys: Vec<Node>) -> Result<(), QuorumError> {
         if new_keys.len() != self.cfg.n {
             return Err(QuorumError::InvalidConfig(
                 "one MAC key per custodian required",
             ));
         }
+        let was_poisoned = self.is_guard_poisoned();
+        let (mut next_guard, next_wal_key) = build_verified_belt_guard(
+            self.cfg,
+            self.tree.public_key(),
+            self.party,
+            &new_keys,
+            self.max_window,
+            self.latch.next_epoch(),
+            self.latch.in_flight(),
+        )?;
+        if was_poisoned {
+            let (poisoned_guard, _) =
+                next_guard.propose_or_retry_epoch(0, [0u8; 32], [0u8; 32], [0u8; 32]);
+            next_guard = poisoned_guard;
+            self.guard_poisoned = true;
+            self.last_authorized_grant = None;
+        }
         self.mac_keys = SecretMacKeys(new_keys);
+        self.verified_guard = Some(next_guard);
+        self.wal_receipt_key = next_wal_key;
         Ok(())
     }
 
@@ -1659,21 +1779,79 @@ impl<W: DurableWal> ShamirCustodian<W> {
         Ok(())
     }
 
-    /// Bind the record of `msg` at `leaf` durably and acknowledge it to every custodian.
+    fn step_persistent_guard_epoch(
+        &mut self,
+        leaf: u64,
+        binding: Node,
+        bind_ok: bool,
+    ) -> Result<(), QuorumError> {
+        let Some(guard) = self.verified_guard.take() else {
+            self.guard_poisoned = true;
+            self.last_authorized_grant = None;
+            return Err(QuorumError::Latch(BeltLatchError::WalPoisoned));
+        };
+        let guard_commit = guard.guard_key_commit();
+        let receipt_digest = belt_wal_receipt_digest(leaf, &binding);
+        let receipt_tag = if bind_ok {
+            qsag_verified::wal_receipt_tag(
+                &self.wal_receipt_key.0,
+                &guard_commit,
+                leaf,
+                &binding,
+                &receipt_digest,
+            )
+        } else {
+            [0u8; 32]
+        };
+        if let Some(prev_grant) = &self.last_authorized_grant
+            && (prev_grant.authorized_epoch != leaf
+                || !qsag_verified::ct_eq_bytes32(&prev_grant.msg_tag, &binding))
+        {
+            self.last_authorized_grant = None;
+        }
+        let (next_guard, prop_res) =
+            guard.propose_or_retry_epoch(leaf, binding, receipt_digest, receipt_tag);
+        let poisoned = next_guard.is_poisoned();
+        self.verified_guard = Some(next_guard);
+        if poisoned {
+            self.guard_poisoned = true;
+            self.last_authorized_grant = None;
+        }
+        match prop_res {
+            Ok(()) => Ok(()),
+            Err(qsag_verified::BeltAuthError::InvalidWalReceipt) => {
+                Err(QuorumError::Latch(BeltLatchError::WalPoisoned))
+            }
+            Err(_) => Err(QuorumError::Latch(BeltLatchError::EpochAlreadyBound)),
+        }
+    }
+
+    /// Bind the record of `msg` at `leaf` durably and acknowledge it to every custodian
+    /// using `qsag_verified::custodian_ack_tag` directly on the wire.
     pub fn ack(&mut self, leaf: u64, msg: &[u8]) -> Result<(LeafRecord, LatchAck), QuorumError> {
-        if self.guard_poisoned {
+        if self.is_guard_poisoned() {
             return Err(QuorumError::Latch(BeltLatchError::WalPoisoned));
         }
         let record = self.derive(leaf, msg)?;
-        self.bind(&record)?;
         let binding = record.binding();
+        if let Err(err) = self.bind(&record) {
+            if matches!(err, QuorumError::Latch(BeltLatchError::WalPoisoned)) {
+                let _ = self.step_persistent_guard_epoch(record.leaf, binding, false);
+                self.guard_poisoned = true;
+            }
+            return Err(err);
+        }
+        self.step_persistent_guard_epoch(record.leaf, binding, true)?;
+        let pk = self.tree.public_key();
         let macs = (0..self.cfg.n)
             .map(|to| {
-                let parts = ack_mac_parts(self.party, to, leaf);
-                mac32(
+                let recipient_guard_commit = belt_guard_key_commit(pk, to);
+                qsag_verified::custodian_ack_tag(
                     &self.mac_keys[to],
-                    TAG_ACK_MAC,
-                    &[&parts[0], &parts[1], &parts[2], &binding],
+                    &recipient_guard_commit,
+                    leaf,
+                    &binding,
+                    self.party as u8,
                 )
             })
             .collect();
@@ -1690,8 +1868,8 @@ impl<W: DurableWal> ShamirCustodian<W> {
     /// the certificate's leaf and binding, a valid MAC for this custodian) and require a
     /// quorum of them.
     pub fn verify_certificate(&self, cert: &LatchCertificate) -> Result<usize, QuorumError> {
-        let valid_signers = self.verified_certificate_signers(cert);
-        let valid = valid_signers.len();
+        let valid_acks = self.verified_certificate_acks(cert);
+        let valid = valid_acks.len();
         // The second condition restates the configuration invariant at the point of use.
         if valid < self.cfg.q || 2 * valid <= self.cfg.n + self.cfg.f {
             return Err(QuorumError::CertificateTooSmall {
@@ -1702,9 +1880,10 @@ impl<W: DurableWal> ShamirCustodian<W> {
         Ok(valid)
     }
 
-    fn verified_certificate_signers(&self, cert: &LatchCertificate) -> Vec<usize> {
+    fn verified_certificate_acks(&self, cert: &LatchCertificate) -> Vec<(u8, [u8; 32])> {
+        let my_guard_commit = belt_guard_key_commit(self.tree.public_key(), self.party);
         let mut seen = vec![false; self.cfg.n];
-        let mut signers = Vec::new();
+        let mut acks = Vec::new();
         for ack in &cert.acks {
             if ack.from >= self.cfg.n
                 || seen[ack.from]
@@ -1714,160 +1893,103 @@ impl<W: DurableWal> ShamirCustodian<W> {
             {
                 continue;
             }
-            let parts = ack_mac_parts(ack.from, self.party, ack.leaf);
-            if mac32_verify(
+            let expected = qsag_verified::custodian_ack_tag(
                 &self.mac_keys[ack.from],
-                TAG_ACK_MAC,
-                &[&parts[0], &parts[1], &parts[2], &ack.binding],
-                &ack.macs[self.party],
-            ) {
+                &my_guard_commit,
+                ack.leaf,
+                &ack.binding,
+                ack.from as u8,
+            );
+            if qsag_verified::ct_eq_bytes32(&expected, &ack.macs[self.party]) {
                 seen[ack.from] = true;
-                signers.push(ack.from);
+                acks.push((ack.from as u8, ack.macs[self.party]));
             }
         }
-        signers
+        acks
     }
 
-    /// Gate QS-B share release through `qsag_verified::VerifiedBeltQuorumGuard` (`n <= 64`),
-    /// enforcing BFT quorum-switching bounds (`2 * q > n + f`, `q <= n - f`), WAL receipt
-    /// authentication, distinct custodian acknowledgments, and sticky poison latching.
+    /// Gate QS-B share release through the persistent `qsag_verified::VerifiedBeltQuorumGuard`
+    /// (`n <= 64`), feeding untrusted wire `LatchAck` tags directly into `record_custodian_ack`
+    /// without caller-side tag re-synthesis and latching sticky poison on equivocation or WAL fault.
     fn authorize_via_verified_belt_guard(
         &mut self,
         record: &LeafRecord,
-        prior_next_epoch: u64,
-        prior_in_flight: Option<&BeltLatchRecord>,
-        bind_ok: bool,
-        valid_signers: &[usize],
-    ) -> Result<qsag_verified::BeltAuthorizationGrant, QuorumError> {
-        let pk = self.tree.public_key();
-        let guard_key_commit = h32(
-            b"QSAG.QUORUM.BELT_GUARD/v1",
-            &[&pk.pk_seed, &pk.root, &(self.party as u64).to_be_bytes()],
-        );
-        let mut custodian_keys = [[0u8; 32]; 64];
-        for (i, slot) in custodian_keys.iter_mut().take(self.cfg.n).enumerate() {
-            *slot = self.mac_keys[i];
-        }
-        let mut wal_key = h32(
-            b"QSAG.QUORUM.BELT_WAL_KEY/v1",
-            &[&self.mac_keys[self.party], &guard_key_commit],
-        );
-        let initial_next = match prior_in_flight {
-            Some(prev) if prev.epoch == record.leaf => prev.epoch,
-            _ => prior_next_epoch,
-        };
-        let guard_res = qsag_verified::VerifiedBeltQuorumGuard::new_validated(
-            self.cfg.n as u32,
-            self.cfg.t as u32,
-            self.cfg.f as u32,
-            self.cfg.q as u32,
-            true,
-            initial_next,
-            self.max_window,
-            guard_key_commit,
-            custodian_keys,
-            wal_key,
-        );
-        for slot in &mut custodian_keys {
-            qsag_asm::volatile_fill(slot, 0);
-        }
-        let mut guard =
-            guard_res.map_err(|_| QuorumError::InvalidConfig("invalid verified belt quorum"))?;
-
-        if let Some(prev) = prior_in_flight
-            && prev.epoch == record.leaf
-        {
-            let prev_binding = LeafRecord::from_latch(prev.epoch, prev).binding();
-            let prev_receipt = h32(
-                b"QSAG.QUORUM.WAL_RECEIPT/v1",
-                &[&prev.epoch.to_be_bytes(), &prev_binding],
-            );
-            let prev_tag = qsag_verified::wal_receipt_tag(
-                &wal_key,
-                &guard_key_commit,
-                prev.epoch,
-                &prev_binding,
-                &prev_receipt,
-            );
-            let (next_guard, res) =
-                guard.propose_or_retry_epoch(prev.epoch, prev_binding, prev_receipt, prev_tag);
-            guard = next_guard;
-            if res.is_err() {
-                qsag_asm::volatile_fill(&mut wal_key, 0);
-                self.guard_poisoned |= guard.is_poisoned();
-                return Err(QuorumError::Latch(BeltLatchError::WalPoisoned));
-            }
-        }
-
+        wire_acks: &[(u8, [u8; 32])],
+    ) -> Result<(), QuorumError> {
         let binding = record.binding();
-        let receipt_digest = h32(
-            b"QSAG.QUORUM.WAL_RECEIPT/v1",
-            &[&record.leaf.to_be_bytes(), &binding],
-        );
-        let receipt_tag = if bind_ok {
-            qsag_verified::wal_receipt_tag(
-                &wal_key,
-                &guard_key_commit,
-                record.leaf,
-                &binding,
-                &receipt_digest,
-            )
-        } else {
-            [0u8; 32]
+        self.step_persistent_guard_epoch(record.leaf, binding, true)?;
+
+        let Some(mut guard) = self.verified_guard.take() else {
+            self.guard_poisoned = true;
+            self.last_authorized_grant = None;
+            return Err(QuorumError::Latch(BeltLatchError::WalPoisoned));
         };
-        qsag_asm::volatile_fill(&mut wal_key, 0);
 
-        let (mut guard, prop_res) =
-            guard.propose_or_retry_epoch(record.leaf, binding, receipt_digest, receipt_tag);
-        if prop_res.is_err() {
-            if matches!(
-                prop_res,
-                Err(qsag_verified::BeltAuthError::InvalidWalReceipt)
-            ) && !bind_ok
-            {
-                // Keep non-fatal window rejections unpoisoned; WAL I/O failure is handled by BeltLatch.
-                return Err(QuorumError::Latch(BeltLatchError::WalPoisoned));
-            }
-            self.guard_poisoned |= guard.is_poisoned();
-            return Err(QuorumError::Latch(BeltLatchError::EpochAlreadyBound));
-        }
-
-        for &from in valid_signers {
-            let ack_tag = qsag_verified::custodian_ack_tag(
-                &self.mac_keys[from],
-                &guard_key_commit,
-                record.leaf,
-                &binding,
-                from as u8,
-            );
+        for &(custodian_id, wire_tag) in wire_acks {
             let (next_guard, ack_res) =
-                guard.record_custodian_ack(record.leaf, binding, from as u8, ack_tag);
+                guard.record_custodian_ack(record.leaf, binding, custodian_id, wire_tag);
             guard = next_guard;
             if ack_res.is_err() {
-                self.guard_poisoned |= guard.is_poisoned();
+                let poisoned = guard.is_poisoned();
+                self.verified_guard = Some(guard);
+                if poisoned {
+                    self.guard_poisoned = true;
+                    self.last_authorized_grant = None;
+                }
                 return Err(QuorumError::CertificateBindingMismatch);
             }
         }
 
-        let (guard, auth_res) = guard.authorize_shares(record.leaf, binding);
-        self.guard_poisoned |= guard.is_poisoned();
-        auth_res.map_err(|_| QuorumError::CertificateTooSmall {
-            valid: valid_signers.len(),
+        if matches!(
+            guard.phase(),
+            qsag_verified::pants_and_quorum_guards::BeltQuorumPhase::SharesAuthorized
+        ) {
+            self.verified_guard = Some(guard);
+            let Some(grant) = self.last_authorized_grant.as_ref() else {
+                self.guard_poisoned = true;
+                return Err(QuorumError::CertificateBindingMismatch);
+            };
+            if grant.authorized_epoch != record.leaf
+                || !qsag_verified::ct_eq_bytes32(&grant.msg_tag, &binding)
+                || (grant.certified_acks as usize) < self.cfg.q
+            {
+                return Err(QuorumError::CertificateBindingMismatch);
+            }
+            return Ok(());
+        }
+
+        let (next_guard, auth_res) = guard.authorize_shares(record.leaf, binding);
+        let poisoned = next_guard.is_poisoned();
+        self.verified_guard = Some(next_guard);
+        if poisoned {
+            self.guard_poisoned = true;
+            self.last_authorized_grant = None;
+        }
+        let grant = auth_res.map_err(|_| QuorumError::CertificateTooSmall {
+            valid: wire_acks.len(),
             required: self.cfg.q,
-        })
+        })?;
+        if grant.authorized_epoch != record.leaf
+            || !qsag_verified::ct_eq_bytes32(&grant.msg_tag, &binding)
+            || (grant.certified_acks as usize) < self.cfg.q
+        {
+            return Err(QuorumError::CertificateBindingMismatch);
+        }
+        self.last_authorized_grant = Some(grant);
+        Ok(())
     }
 
     /// Open this custodian's Shamir shares of the nodes that the record of `msg` at `leaf`
     /// reveals. Requires a valid certificate for exactly that record, and binds the record
-    /// in the local latch first, so a custodian that already bound the leaf to another
-    /// record refuses.
+    /// in the local latch and persistent `VerifiedBeltQuorumGuard` first, so a custodian
+    /// that already bound the leaf to another record refuses and permanently poisons.
     pub fn open(
         &mut self,
         leaf: u64,
         msg: &[u8],
         cert: &LatchCertificate,
     ) -> Result<ShareOpening, QuorumError> {
-        if self.guard_poisoned {
+        if self.is_guard_poisoned() {
             return Err(QuorumError::Latch(BeltLatchError::WalPoisoned));
         }
         let record = self.derive(leaf, msg)?;
@@ -1876,46 +1998,27 @@ impl<W: DurableWal> ShamirCustodian<W> {
             return Err(QuorumError::CertificateBindingMismatch);
         }
         self.verify_certificate(cert)?;
-        let valid_signers = self.verified_certificate_signers(cert);
-        let prior_next = self.latch.next_epoch();
-        let prior_in_flight = self.latch.in_flight().cloned();
+        let wire_acks = self.verified_certificate_acks(cert);
         let bind_res = self.bind(&record);
-        if self.cfg.n <= 64 {
-            if let Err(err) = bind_res {
-                let is_wal_io_or_equivocation = matches!(
-                    err,
-                    QuorumError::Latch(
-                        BeltLatchError::WalPoisoned | BeltLatchError::EpochAlreadyBound
-                    )
+        if let Err(err) = bind_res {
+            let is_wal_io_or_equivocation = matches!(
+                err,
+                QuorumError::Latch(
+                    BeltLatchError::WalPoisoned | BeltLatchError::EpochAlreadyBound
+                )
+            );
+            if is_wal_io_or_equivocation {
+                let _ = self.step_persistent_guard_epoch(
+                    record.leaf,
+                    binding,
+                    !matches!(err, QuorumError::Latch(BeltLatchError::WalPoisoned)),
                 );
-                let _ = self.authorize_via_verified_belt_guard(
-                    &record,
-                    prior_next,
-                    prior_in_flight.as_ref(),
-                    false,
-                    &valid_signers,
-                );
-                if is_wal_io_or_equivocation {
-                    self.guard_poisoned = true;
-                }
-                return Err(err);
+                self.guard_poisoned = true;
+                self.last_authorized_grant = None;
             }
-            let grant = self.authorize_via_verified_belt_guard(
-                &record,
-                prior_next,
-                prior_in_flight.as_ref(),
-                true,
-                &valid_signers,
-            )?;
-            if grant.authorized_epoch != leaf
-                || !qsag_verified::ct_eq_bytes32(&grant.msg_tag, &binding)
-                || (grant.certified_acks as usize) < self.cfg.q
-            {
-                return Err(QuorumError::CertificateBindingMismatch);
-            }
-        } else {
-            bind_res?;
+            return Err(err);
         }
+        self.authorize_via_verified_belt_guard(&record, &wire_acks)?;
         Ok(select_shares(
             self.party,
             &record,
@@ -2737,6 +2840,15 @@ mod tests {
         ));
         assert!(matches!(
             QuorumConfig::new(6, 7, 2),
+            Err(QuorumError::InvalidConfig(_))
+        ));
+        assert!(QuorumConfig::tight(22).is_ok()); // n = 64
+        assert!(matches!(
+            QuorumConfig::tight(23),
+            Err(QuorumError::InvalidConfig(_))
+        ));
+        assert!(matches!(
+            QuorumConfig::with_quorum(22, 65, 21, 44),
             Err(QuorumError::InvalidConfig(_))
         ));
     }
