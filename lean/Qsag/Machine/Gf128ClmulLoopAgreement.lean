@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.Gf128ClmulLoopAgreement — Symbolic Field-Loop Agreement and SIMD Carry-Less Multiply Bridge
+# Qsag.Machine.Gf128ClmulLoopAgreement — Symbolic Field-Loop Agreement and SIMD Carry-Less Multiply Bridge
 
 Three representations of multiplication in `GF(2^128)` appear across specifications,
 Rust share/SPN arithmetic, and SIMD assembly kernels:
@@ -21,13 +21,13 @@ carry-less dot-product accumulation under the explicit basis isomorphism `psiTow
 `polyToTower128`.
 -/
 
-public import Qsag.McRefine
-import all Qsag.McRefine
-public import Qsag.Tower128PolyBasisIso
-import all Qsag.Tower128PolyBasisIso
-public import Qsag.SimdBinaryEquiv
-import all Qsag.SimdBinaryEquiv
-import all Qsag.ActiveMigrationZeroTest
+public import Qsag.Machine.McRefine
+import all Qsag.Machine.McRefine
+public import Qsag.Math.Tower128PolyBasisIso
+import all Qsag.Math.Tower128PolyBasisIso
+public import Qsag.Machine.SimdBinaryEquiv
+import all Qsag.Machine.SimdBinaryEquiv
+import all Qsag.Protocol.Migration.ActiveMigrationZeroTest
 
 public section
 namespace Qsag

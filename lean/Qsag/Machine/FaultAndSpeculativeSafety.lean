@@ -2070,3 +2070,1055 @@ theorem verifyBeforeReleaseAll_consistent (suite : TweakableHashSuite) (params :
   adrsCacheConsistent_implies_cacheConsistent
     (verifyBeforeReleaseAll_adrsConsistent suite params pk cache entries turn h)
 
+theorem verifyBeforeReleaseAll_validCoords (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (cache entries : List LayerRelease) (turn : FaultedSignTurn)
+    (h : verifyBeforeReleaseAll suite params pk cache turn = some entries) :
+    ∀ e ∈ entries, e.key.ValidCoords = true := by
+  unfold verifyBeforeReleaseAll at h
+  simp only [Option.bind_eq_bind] at h
+  split at h
+  · cases h
+  · next hGateNeg =>
+    have hGate : AdrsGateValid params turn.candidate.leafGlobalIdx = true := by
+      cases hx : AdrsGateValid params turn.candidate.leafGlobalIdx <;> simp_all
+    split at h
+    · cases h
+    · next hvNeg =>
+      have hv : verifyPqHashSig suite params pk turn.msg turn.candidate = true := by
+        cases hx : verifyPqHashSig suite params pk turn.msg turn.candidate <;> simp_all
+      obtain ⟨_, _, _, _, hlen⟩ := verifyPqHashSig_layers suite params pk _ _ hv
+      simp only [Option.bind_eq_some_iff] at h
+      obtain ⟨⟨rand, root⟩, _, es, he, h⟩ := h
+      split at h
+      · cases h
+        simp only [AdrsGateValid, Bool.and_eq_true, decide_eq_true_eq] at hGate
+        rcases hGate with ⟨⟨⟨_, hSub⟩, hNum⟩, hTree⟩
+        have hAll := verifiedLayerMessages_validCoords suite params pk turn.candidate.layerSigs
+          0 turn.candidate.leafGlobalIdx rand root es hSub (by omega) hTree he
+        intro e hMem
+        exact hAll e (List.mem_of_mem_drop hMem)
+      · cases h
+
+theorem guardedSignTraceAll_adrsConsistent (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (turns : List FaultedSignTurn) :
+    ∀ cache, AdrsCacheConsistent cache →
+      AdrsCacheConsistent (guardedSignTraceAll suite params pk cache turns) := by
+  induction turns with
+  | nil => intro cache h; exact h
+  | cons turn rest ih =>
+    intro cache hc
+    simp only [guardedSignTraceAll]
+    split
+    · exact ih cache hc
+    · next entries he =>
+      exact ih _ (verifyBeforeReleaseAll_adrsConsistent suite params pk _ _ turn he)
+
+theorem guardedSignTraceAll_consistent (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (turns : List FaultedSignTurn) :
+    ∀ cache, AdrsCacheConsistent cache →
+      CacheConsistent (guardedSignTraceAll suite params pk cache turns) :=
+  fun cache hc =>
+    adrsCacheConsistent_implies_cacheConsistent
+      (guardedSignTraceAll_adrsConsistent suite params pk turns cache hc)
+
+theorem guardedSignTraceAll_validCoords (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (turns : List FaultedSignTurn) :
+    ∀ cache, (∀ e ∈ cache, e.key.ValidCoords = true) →
+      ∀ e ∈ guardedSignTraceAll suite params pk cache turns, e.key.ValidCoords = true := by
+  induction turns with
+  | nil => intro cache h; exact h
+  | cons turn rest ih =>
+    intro cache hc
+    simp only [guardedSignTraceAll]
+    split
+    · exact ih cache hc
+    · next entries he =>
+      apply ih
+      intro e hm
+      rcases List.mem_append.mp hm with hOld | hNew
+      · exact hc e hOld
+      · exact verifyBeforeReleaseAll_validCoords suite params pk cache entries turn he e hNew
+
+/-- Arbitrary depth, including seven and twenty-two layers: at every encoded `HashAdrs` the
+    released root AND grinding counter are unique over the entire fault-adversarial trace. -/
+theorem all_depth_released_adrs_message_unique (suite : TweakableHashSuite)
+    (params : PqHashParams) (pk : PqPublicKey) (turns : List FaultedSignTurn)
+    (a b : LayerRelease)
+    (ha : a ∈ guardedSignTraceAll suite params pk [] turns)
+    (hb : b ∈ guardedSignTraceAll suite params pk [] turns)
+    (hk : a.key.toEncodedAdrs = b.key.toEncodedAdrs) :
+    a.key = b.key ∧ a.signed = b.signed := by
+  have hVa := guardedSignTraceAll_validCoords suite params pk turns [] (by simp) a ha
+  have hVb := guardedSignTraceAll_validCoords suite params pk turns [] (by simp) b hb
+  exact ⟨(otsPosition_toEncodedAdrs_injective hVa hVb).mp hk,
+    guardedSignTraceAll_adrsConsistent suite params pk turns [] (by simp [AdrsCacheConsistent]) a ha b hb hk⟩
+
+theorem all_depth_released_message_unique (suite : TweakableHashSuite)
+    (params : PqHashParams) (pk : PqPublicKey) (turns : List FaultedSignTurn)
+    (a b : LayerRelease)
+    (ha : a ∈ guardedSignTraceAll suite params pk [] turns)
+    (hb : b ∈ guardedSignTraceAll suite params pk [] turns)
+    (hk : a.key = b.key) : a.signed = b.signed :=
+  (all_depth_released_adrs_message_unique suite params pk turns a b ha hb
+    (congrArg OtsPosition.toEncodedAdrs hk)).2
+
+/-- An empty cache accepts every verified candidate with valid coordinates and a consistent
+    upper-layer view; there is no two-layer shape test. -/
+theorem gate_releases_accepted_arbitrary_depth (suite : TweakableHashSuite)
+    (params : PqHashParams) (pk : PqPublicKey) (turn : FaultedSignTurn)
+    (rand root : List UInt8) (entries : List LayerRelease)
+    (hGate : AdrsGateValid params turn.candidate.leafGlobalIdx = true)
+    (hv : verifyPqHashSig suite params pk turn.msg turn.candidate = true)
+    (hs : hypertreeStart suite params pk turn.msg turn.candidate = some (rand, root))
+    (he : verifiedLayerMessages suite params pk 0 turn.candidate.leafGlobalIdx rand root
+      turn.candidate.layerSigs = some entries)
+    (hc : AdrsCacheConsistent (entries.drop 1)) :
+    verifyBeforeReleaseAll suite params pk [] turn = some (entries.drop 1) := by
+  simpa [verifyBeforeReleaseAll, hGate, hv, hs, he] using hc
+
+/-- Distinct layer indices imply `Nat`-key consistency without any cryptographic assumption. -/
+theorem cacheConsistent_of_distinct_layers (es : List LayerRelease)
+    (h : (es.map (fun e => e.key.layer)).Nodup) : CacheConsistent es := by
+  induction es with
+  | nil => simp [CacheConsistent]
+  | cons e es ih =>
+    obtain ⟨hne, ht⟩ := List.nodup_cons.mp h
+    intro a ha b hb hk
+    rcases List.mem_cons.mp ha with rfl | hA
+    · rcases List.mem_cons.mp hb with rfl | hB
+      · rfl
+      · exact False.elim (hne (List.mem_map.mpr ⟨b, hB, (congrArg OtsPosition.layer hk).symm⟩))
+    · rcases List.mem_cons.mp hb with rfl | hB
+      · exact False.elim (hne (List.mem_map.mpr ⟨a, hA, congrArg OtsPosition.layer hk⟩))
+      · exact ih ht a hA b hB hk
+
+/-- Distinct range-valid entries imply encoded-`HashAdrs` consistency. -/
+theorem adrsCacheConsistent_of_distinct_valid_layers (es : List LayerRelease)
+    (hVal : ∀ e ∈ es, e.key.ValidCoords = true)
+    (h : (es.map (fun e => e.key.layer)).Nodup) : AdrsCacheConsistent es := by
+  have hNat := cacheConsistent_of_distinct_layers es h
+  intro a ha b hb hEnc
+  exact hNat a ha b hb ((otsPosition_toEncodedAdrs_injective (hVal a ha) (hVal b hb)).mp hEnc)
+
+/-- Constructive range facts used by the cache coverage audit. -/
+theorem layer_range_lower (n start : Nat) : ∀ x ∈ List.range' start n, start ≤ x := by
+  induction n generalizing start with
+  | zero => simp
+  | succ n ih =>
+    intro x hx
+    rw [List.range'_succ] at hx
+    rcases List.mem_cons.mp hx with rfl | ht
+    · exact Nat.le_refl _
+    · have := ih (start + 1) x ht; omega
+
+theorem layer_range_nodup (n start : Nat) : (List.range' start n).Nodup := by
+  induction n generalizing start with
+  | zero => exact List.nodup_nil
+  | succ n ih =>
+    rw [List.range'_succ, List.nodup_cons]
+    refine ⟨?_, ih (start + 1)⟩
+    intro h
+    have := layer_range_lower n (start + 1) start h
+    omega
+
+theorem layer_range_member (n start x : Nat) (hlo : start ≤ x) (hhi : x < start + n) :
+    x ∈ List.range' start n := by
+  induction n generalizing start with
+  | zero => omega
+  | succ n ih =>
+    rw [List.range'_succ]
+    by_cases hx : x = start
+    · exact List.mem_cons.mpr (Or.inl hx)
+    · exact List.mem_cons.mpr (Or.inr (ih (start + 1) (by omega) (by omega)))
+
+theorem adrsGateValid_of_verifyPqHashSig (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (msg : List UInt8) (sig : PqHashSig)
+    (hSubPos : 0 < params.subtreeHeight)
+    (hv : verifyPqHashSig suite params pk msg sig = true) :
+    AdrsGateValid params sig.leafGlobalIdx = true := by
+  unfold verifyPqHashSig at hv
+  have hWf : params.wellFormed = true := by
+    cases hx : params.wellFormed <;> simp_all
+  have hLeaf : sig.leafGlobalIdx < 2 ^ (params.numLayers * params.subtreeHeight) := by
+    split at hv
+    · cases hv
+    · split at hv
+      · cases hv
+      · next hNeg =>
+        have hDec : decide (sig.leafGlobalIdx < 2 ^ (params.numLayers * params.subtreeHeight)) = true := by
+          cases hx : decide (sig.leafGlobalIdx < 2 ^ (params.numLayers * params.subtreeHeight)) <;> simp_all
+        exact of_decide_eq_true hDec
+  unfold PqHashParams.wellFormed at hWf
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at hWf
+  have hSubLe30 : params.subtreeHeight ≤ 30 := hWf.1.1.1.1.2
+  have hProdLe62 : params.numLayers * params.subtreeHeight ≤ 62 := hWf.1.2
+  have hNumLe62 : params.numLayers ≤ 62 := by
+    have h1 : params.numLayers * 1 ≤ params.numLayers * params.subtreeHeight :=
+      Nat.mul_le_mul_left _ hSubPos
+    omega
+  have hPowLe : 2 ^ (params.numLayers * params.subtreeHeight) ≤ 2 ^ 62 :=
+    Nat.pow_le_pow_right (by decide) hProdLe62
+  have hDivLe : sig.leafGlobalIdx / 2 ^ params.subtreeHeight ≤ sig.leafGlobalIdx :=
+    Nat.div_le_self _ _
+  have h62Lt64 : (2 : Nat) ^ 62 < 2 ^ 64 := by decide
+  simp only [AdrsGateValid, Bool.and_eq_true, decide_eq_true_eq]
+  exact ⟨⟨⟨hSubPos, by omega⟩, by omega⟩, by omega⟩
+
+/-- Non-vacuity and coverage: for every depth d with positive subtree height, a verified signature
+    is released from the empty cache with exactly the upper layer indices 1 through d-1. -/
+theorem all_depth_gate_complete (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (turn : FaultedSignTurn)
+    (hSubPos : 0 < params.subtreeHeight)
+    (hv : verifyPqHashSig suite params pk turn.msg turn.candidate = true) :
+    ∃ es, verifyBeforeReleaseAll suite params pk [] turn = some es ∧
+      es.map (fun e => e.key.layer) = List.range' 1 (params.numLayers - 1) := by
+  have hGate := adrsGateValid_of_verifyPqHashSig suite params pk turn.msg turn.candidate hSubPos hv
+  obtain ⟨rand, root, hs, ht, hlen⟩ := verifyPqHashSig_layers suite params pk _ _ hv
+  obtain ⟨es, he, hl⟩ := verifiedLayerMessages_complete suite params pk _ _ _ _ _ _ ht
+  have hd : (es.drop 1).map (fun e => e.key.layer) =
+      List.range' 1 (params.numLayers - 1) := by
+    rw [List.map_drop, hl, hlen, List.drop_range']
+  have hGateFacts : params.subtreeHeight ≤ 31 ∧ params.numLayers ≤ 2 ^ 32 ∧
+      turn.candidate.leafGlobalIdx / 2 ^ params.subtreeHeight < 2 ^ 64 := by
+    simp only [AdrsGateValid, Bool.and_eq_true, decide_eq_true_eq] at hGate
+    exact ⟨hGate.1.1.2, hGate.1.2, hGate.2⟩
+  have hValAll := verifiedLayerMessages_validCoords suite params pk turn.candidate.layerSigs
+    0 turn.candidate.leafGlobalIdx rand root es hGateFacts.1
+    (by omega) hGateFacts.2.2 he
+  refine ⟨es.drop 1, gate_releases_accepted_arbitrary_depth suite params pk turn rand root es
+    hGate hv hs he (adrsCacheConsistent_of_distinct_valid_layers _
+      (fun e hm => hValAll e (List.mem_of_mem_drop hm)) ?_), hd⟩
+  rw [hd]
+  exact layer_range_nodup _ _
+
+/-! ## 6. Fuel-bounded backward branches
+
+Absolute targets can point backward, to the loop exit, or beyond the code. Both architectural
+and transient execution have explicit fuel. Transient branches follow the predictor, including
+an early exit or extra iterations after the architectural exit; rollback restores the state.
+-/
+
+inductive PcInstr where
+  | op (i : ConstantTimeIsa.X86Instr)
+  | branch (c : BranchCond) (target : Nat)
+  | jump (target : Nat)
+  | lfence
+  | ret
+  deriving DecidableEq, Repr
+
+abbrev PcCode := List PcInstr
+
+def pcTransient (code : PcCode) (pred : PredictorOracle) :
+    Nat → Nat → List Bool → ConstantTimeIsa.X86State → List LeakageEvent
+  | 0, _, _, _ => []
+  | fuel + 1, pc, hist, st =>
+    match code[pc]? with
+    | none => []
+    | some (.op i) => (execX86Instr i pc st).2 ::
+        pcTransient code pred fuel (pc + 1) hist (execX86Instr i pc st).1
+    | some (.branch _ target) =>
+        branchEvent pc (pred pc hist) :: pcTransient code pred fuel
+          (if pred pc hist then target else pc + 1) (pred pc hist :: hist) st
+    | some (.jump target) => branchEvent pc true :: pcTransient code pred fuel target hist st
+    | some .lfence => []
+    | some .ret => [retEvent pc st]
+
+def pcSpecRun (code : PcCode) (pred : PredictorOracle) (W : Nat) :
+    Nat → Nat → List Bool → ConstantTimeIsa.X86State → List SpecObs
+  | 0, _, _, _ => []
+  | fuel + 1, pc, hist, st =>
+    match code[pc]? with
+    | none => []
+    | some (.op i) => .arch (execX86Instr i pc st).2 ::
+        pcSpecRun code pred W fuel (pc + 1) hist (execX86Instr i pc st).1
+    | some (.branch c target) =>
+        .arch (branchEvent pc (c.eval st)) ::
+          ((if pred pc hist = c.eval st then [] else
+            pcTransient code pred W (if pred pc hist then target else pc + 1)
+              (pred pc hist :: hist) st).map .transient ++
+            pcSpecRun code pred W fuel (if c.eval st then target else pc + 1)
+              (c.eval st :: hist) st)
+    | some (.jump target) => .arch (branchEvent pc true) :: pcSpecRun code pred W fuel target hist st
+    | some .lfence => pcSpecRun code pred W fuel (pc + 1) hist st
+    | some .ret => [.arch (retEvent pc st)]
+
+/-- Relational invariant on *all* reachable paths, including the paths after wrong predictions.
+    Public addresses are required even on extra iterations; architectural loop safety alone
+    would not justify a speculative theorem. -/
+structure PcPublicInvariant (code : PcCode) (R : ConstantTimeIsa.X86State → ConstantTimeIsa.X86State → Prop) : Prop where
+  op : ∀ pc i, code[pc]? = some (.op i) → ∀ a b, R a b →
+    (execX86Instr i pc a).2 = (execX86Instr i pc b).2 ∧
+      R (execX86Instr i pc a).1 (execX86Instr i pc b).1
+  branch : ∀ (pc : Nat) (c : BranchCond) (target : Nat), code[pc]? = some (PcInstr.branch c target) →
+    ∀ a b, R a b → c.eval a = c.eval b
+  ret : ∀ a b, R a b → a.ymmUpperDirty = b.ymmUpperDirty
+
+theorem pcTransient_public_ni (code : PcCode) (R : ConstantTimeIsa.X86State → ConstantTimeIsa.X86State → Prop)
+    (inv : PcPublicInvariant code R) (pred : PredictorOracle) (fuel : Nat) :
+    ∀ pc hist a b, R a b →
+      pcTransient code pred fuel pc hist a = pcTransient code pred fuel pc hist b := by
+  induction fuel with
+  | zero => intros; rfl
+  | succ fuel ih =>
+    intro pc hist a b hab
+    cases hi : code[pc]? with
+    | none => simp [pcTransient, hi]
+    | some ins =>
+      cases ins with
+      | op i =>
+        obtain ⟨he, hr⟩ := inv.op pc i hi a b hab
+        simp only [pcTransient, hi, he]
+        rw [ih _ _ _ _ hr]
+      | branch c target => simp only [pcTransient, hi]; rw [ih _ _ _ _ hab]
+      | jump target => simp only [pcTransient, hi]; rw [ih _ _ _ _ hab]
+      | lfence => simp [pcTransient, hi]
+      | ret => simp [pcTransient, hi, retEvent, inv.ret a b hab]
+
+/-- Fuel-bounded speculative non-interference, with no restriction on forward/backward targets,
+    fuel, predictor, or transient window length. -/
+theorem public_loop_fuel_bounded_speculative_ni (code : PcCode)
+    (R : ConstantTimeIsa.X86State → ConstantTimeIsa.X86State → Prop) (inv : PcPublicInvariant code R)
+    (pred : PredictorOracle) (W fuel : Nat) :
+    ∀ pc hist a b, R a b →
+      pcSpecRun code pred W fuel pc hist a = pcSpecRun code pred W fuel pc hist b := by
+  induction fuel with
+  | zero => intros; rfl
+  | succ fuel ih =>
+    intro pc hist a b hab
+    cases hi : code[pc]? with
+    | none => simp [pcSpecRun, hi]
+    | some ins =>
+      cases ins with
+      | op i =>
+        obtain ⟨he, hr⟩ := inv.op pc i hi a b hab
+        simp only [pcSpecRun, hi, he]
+        rw [ih _ _ _ _ hr]
+      | branch c target =>
+        have hc := inv.branch pc c target hi a b hab
+        simp only [pcSpecRun, hi, hc]
+        rw [ih _ _ _ _ hab]
+        split <;> simp only [pcTransient_public_ni code R inv pred W _ _ a b hab]
+      | jump target => simp only [pcSpecRun, hi]; rw [ih _ _ _ _ hab]
+      | lfence => simp only [pcSpecRun, hi]; exact ih _ _ _ _ hab
+      | ret => simp [pcSpecRun, hi, retEvent, inv.ret a b hab]
+
+
+attribute [-instance] UInt8.instLawfulEqOrd UInt64.instLawfulEqOrd BitVec.instLawfulEqOrd
+
+/-! ### Counter grinding: the same root can have two valid incomparable codewords -/
+
+/-- Small executable hash family for the counter tooth. Its last input byte distinguishes
+    counter zero from counter one. This is a model witness, not a cryptographic hash claim. -/
+def counterToothSuite : TweakableHashSuite where
+  suiteId := []
+  rawHash := fun msg => (if msg.getLastD 0 = 0 then 128 else 64) :: List.replicate 31 0
+  rawHash_len := by intro msg; simp
+
+def counterToothParams : PqHashParams := { zeroToyParams with w := 2, ell1 := 2, subtreeHeight := 0 }
+
+def counterCodeword (suite : TweakableHashSuite) (params : PqHashParams)
+    (pkSeed pkRoot root : List UInt8) (layer g ctr : Nat) : List Nat :=
+  extractBaseWDigits params.w params.ell1
+    (thHashMsg suite [] pkSeed pkRoot root (UInt32.ofNat layer)
+      (UInt64.ofNat (g / 2 ^ params.subtreeHeight))
+      (UInt32.ofNat (g % 2 ^ params.subtreeHeight)) ctr)
+
+def counterToothOpening (ctr : Nat) : LayerXmssSig :=
+  let digits := counterCodeword counterToothSuite counterToothParams [] [] [] 1 0 ctr
+  { tswCtr := ctr
+    wotsChains := (List.range 2).map fun r =>
+      wotsChainSteps counterToothSuite [] 1 0 0 r 0 (digits.getD r 0)
+        (wotsSecretBase counterToothSuite ⟨[], [], []⟩ 1 0 0 r)
+    authPath := [] }
+
+/-- A root-only cache accepts an opening when the recomputed root matches the cache and the
+    actual layer verifier accepts. It deliberately does not compare the grinding counter. -/
+def rootOnlyCacheRelease (suite : TweakableHashSuite) (params : PqHashParams)
+    (pkSeed pkRoot : List UInt8) (layer g : Nat) (cached root top : List UInt8)
+    (sig : LayerXmssSig) : Bool :=
+  decide (cached = root ∧
+    verifyHypertreeLayers suite params pkSeed pkRoot [] layer g root [sig] = some top)
+
+theorem counterToothOpening_accepts (ctr : Nat)
+    (hv : checkTargetSum 2 2 1
+      (counterCodeword counterToothSuite counterToothParams [] [] [] 1 0 ctr) = true) :
+    rootOnlyCacheRelease counterToothSuite counterToothParams [] [] 1 0 [] []
+      (computeWotsPk counterToothSuite counterToothParams ⟨[], [], []⟩ 1 0 0)
+      (counterToothOpening ctr) = true := by
+  have hp := congrArg
+    (thTweakTl counterToothSuite [] ⟨1, 0, .wotsPk, 0, 0, 0⟩)
+    (honest_wots_chains_open_real_endpoints counterToothSuite counterToothParams
+      ⟨[], [], []⟩ 1 0 0 (counterCodeword counterToothSuite counterToothParams [] [] [] 1 0 ctr) hv)
+  unfold rootOnlyCacheRelease
+  apply decide_eq_true
+  refine ⟨rfl, ?_⟩
+  rw [verifyHypertreeLayers_cons]
+  change (if !checkTargetSum 2 2 1
+      (counterCodeword counterToothSuite counterToothParams [] [] [] 1 0 ctr) then none else
+      if (counterToothOpening ctr).wotsChains.length ≠ 2 then none else _) = _
+  rw [hv]
+  simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+  have hl : (counterToothOpening ctr).wotsChains.length = 2 := by
+    simp [counterToothOpening]
+  simp only [hl, ne_eq, not_true_eq_false, ↓reduceIte]
+  change (match walkMerkleAuthPath counterToothSuite [] 1 0 .tree 0 0 0
+      (recoverWotsPkFromSig counterToothSuite counterToothParams [] 1 0 0
+        (counterCodeword counterToothSuite counterToothParams [] [] [] 1 0 ctr)
+        (counterToothOpening ctr).wotsChains) [] with
+    | none => none
+    | some next => some next) = _
+  change recoverWotsPkFromSig counterToothSuite counterToothParams [] 1 0 0
+      (counterCodeword counterToothSuite counterToothParams [] [] [] 1 0 ctr)
+      (counterToothOpening ctr).wotsChains = _ at hp
+  rw [hp]
+  rfl
+
+/- Explicit #tooth: two accepted openings on exactly the same root, at exactly the same key,
+    with counters 0 and 1 and distinct valid target-sum codewords. A root-only cache releases
+    both. The full cache rejects the second message. -/
+set_option maxRecDepth 65536 in
+set_option maxHeartbeats 2000000 in
+ theorem tooth_root_only_cache_leaks_second_wotsc_counter_codeword :
+    let top := computeWotsPk counterToothSuite counterToothParams ⟨[], [], []⟩ 1 0 0
+    rootOnlyCacheRelease counterToothSuite counterToothParams [] [] 1 0 [] [] top
+      (counterToothOpening 0) = true ∧
+    rootOnlyCacheRelease counterToothSuite counterToothParams [] [] 1 0 [] [] top
+      (counterToothOpening 1) = true ∧
+    (counterToothOpening 0).tswCtr ≠ (counterToothOpening 1).tswCtr ∧
+    counterCodeword counterToothSuite counterToothParams [] [] [] 1 0 0 ≠
+      counterCodeword counterToothSuite counterToothParams [] [] [] 1 0 1 ∧
+    checkTargetSum 2 2 1 (counterCodeword counterToothSuite counterToothParams [] [] [] 1 0 0) = true ∧
+    checkTargetSum 2 2 1 (counterCodeword counterToothSuite counterToothParams [] [] [] 1 0 1) = true ∧
+    (OtsMessage.mk [] 0) ≠ ⟨[], 1⟩ := by
+  refine ⟨counterToothOpening_accepts 0 (by decide +kernel),
+    counterToothOpening_accepts 1 (by decide +kernel), ?_⟩
+  decide +kernel
+
+/-! ### Speculation on the byte-decoded compiled kernels
+
+This uses the binary decoder's state, byte PCs and instruction semantics directly. In particular
+there is no hand transcription into the smaller instruction model above.
+-/
+
+inductive BinarySpecObs where
+  | arch (obs : StepObs)
+  | transient (obs : StepObs)
+  deriving DecidableEq, Repr
+
+def binaryTransient (prog : List (DecodedInstr Qsag.X86Instr)) (pred : PredictorOracle) :
+    Nat → List Bool → Qsag.X86State → List StepObs
+  | 0, _, _ => []
+  | fuel + 1, hist, st =>
+    if st.halted then [] else
+    match findInstrAtPc st.pc prog with
+    | none => []
+    | some d =>
+      match d.instr with
+      | .jcc _ target =>
+        (stepX86 d st).2 :: binaryTransient prog pred fuel (pred st.pc hist :: hist)
+          { st with pc := if pred st.pc hist then target.toNat else st.pc + d.byteLen }
+      | _ => (stepX86 d st).2 :: binaryTransient prog pred fuel hist (stepX86 d st).1
+
+def binarySpecRun (prog : List (DecodedInstr Qsag.X86Instr)) (pred : PredictorOracle)
+    (W : Nat) : Nat → List Bool → Qsag.X86State → List BinarySpecObs
+  | 0, _, _ => []
+  | fuel + 1, hist, st =>
+    if st.halted then [] else
+    match findInstrAtPc st.pc prog with
+    | none => []
+    | some d =>
+      match d.instr with
+      | .jcc cc target =>
+        .arch (stepX86 d st).2 ::
+          ((if pred st.pc hist = evalX86Cond cc st then [] else
+            binaryTransient prog pred W (pred st.pc hist :: hist)
+              { st with pc := if pred st.pc hist then target.toNat else st.pc + d.byteLen }).map
+                .transient ++
+          binarySpecRun prog pred W fuel (evalX86Cond cc st :: hist) (stepX86 d st).1)
+      | _ => .arch (stepX86 d st).2 :: binarySpecRun prog pred W fuel hist (stepX86 d st).1
+
+/-- Relational proof obligation for decoded programs with arbitrary forward and backward
+    conditional branches. The invariant includes PC and halt agreement, every instruction's
+    public observation, equality of every branch condition, and preservation of `R` across
+    predicted branch targets (including mispredicted wrong-path execution). -/
+structure BinaryPublicInvariant (prog : List (DecodedInstr Qsag.X86Instr))
+    (R : Qsag.X86State → Qsag.X86State → Prop) : Prop where
+  pc : ∀ a b, R a b → a.pc = b.pc
+  halted : ∀ a b, R a b → a.halted = b.halted
+  step : ∀ d a b, findInstrAtPc a.pc prog = some d → R a b →
+    (stepX86 d a).2 = (stepX86 d b).2 ∧ R (stepX86 d a).1 (stepX86 d b).1
+  branch : ∀ d cc target a b, findInstrAtPc a.pc prog = some d →
+    d.instr = .jcc cc target → R a b →
+    evalX86Cond cc a = evalX86Cond cc b ∧
+    ∀ nextPc, (nextPc = target.toNat ∨ nextPc = a.pc + d.byteLen) →
+      R { a with pc := nextPc } { b with pc := nextPc }
+
+theorem binaryTransient_public_ni (prog : List (DecodedInstr Qsag.X86Instr))
+    (R : Qsag.X86State → Qsag.X86State → Prop) (inv : BinaryPublicInvariant prog R)
+    (pred : PredictorOracle) (fuel : Nat) :
+    ∀ hist a b, R a b → binaryTransient prog pred fuel hist a =
+      binaryTransient prog pred fuel hist b := by
+  induction fuel with
+  | zero => intros; rfl
+  | succ fuel ih =>
+    intro hist a b hab
+    have hHalt := inv.halted a b hab
+    have hPc := inv.pc a b hab
+    unfold binaryTransient
+    rw [← hHalt, ← hPc]
+    if hH : a.halted = true then
+      rw [ite_eq_left hH, ite_eq_left hH]
+    else
+      rw [ite_eq_right hH, ite_eq_right hH]
+      cases hd : findInstrAtPc a.pc prog with
+      | none => rfl
+      | some d =>
+        obtain ⟨hObs, hNext⟩ := inv.step d a b hd hab
+        rcases d with ⟨offset, byteLen, instr⟩
+        cases instr with
+        | jcc cc target =>
+          dsimp only
+          have hSpec := (inv.branch { offset := offset, byteLen := byteLen, instr := .jcc cc target }
+            cc target a b hd rfl hab).2
+            (if pred a.pc hist then target.toNat else a.pc + byteLen)
+            (by cases pred a.pc hist <;> simp)
+          rw [hObs, ih (pred a.pc hist :: hist) _ _ hSpec, hHalt]
+        | _ =>
+          dsimp only
+          rw [hObs, ih hist _ _ hNext]
+
+/-- Decoded-byte speculative NI for loops, not only straight-line code. Wrong-path execution
+    uses the predicted branch PC on the pre-branch state and the architectural path uses the
+    stepped state, exactly as in `binarySpecRun`; both are covered by `BinaryPublicInvariant`. -/
+theorem binary_loop_fuel_bounded_speculative_ni (prog : List (DecodedInstr Qsag.X86Instr))
+    (R : Qsag.X86State → Qsag.X86State → Prop) (inv : BinaryPublicInvariant prog R)
+    (pred : PredictorOracle) (W fuel : Nat) :
+    ∀ hist a b, R a b → binarySpecRun prog pred W fuel hist a =
+      binarySpecRun prog pred W fuel hist b := by
+  induction fuel with
+  | zero => intros; rfl
+  | succ fuel ih =>
+    intro hist a b hab
+    have hHalt := inv.halted a b hab
+    have hPc := inv.pc a b hab
+    unfold binarySpecRun
+    rw [← hHalt, ← hPc]
+    if hH : a.halted = true then
+      rw [ite_eq_left hH, ite_eq_left hH]
+    else
+      rw [ite_eq_right hH, ite_eq_right hH]
+      cases hd : findInstrAtPc a.pc prog with
+      | none => rfl
+      | some d =>
+        obtain ⟨hObs, hNext⟩ := inv.step d a b hd hab
+        rcases d with ⟨offset, byteLen, instr⟩
+        cases instr with
+        | jcc cc target =>
+          obtain ⟨hCond, hSpec⟩ :=
+            inv.branch { offset := offset, byteLen := byteLen, instr := .jcc cc target }
+              cc target a b hd rfl hab
+          dsimp only
+          have hBr := hSpec (if pred a.pc hist then target.toNat else a.pc + byteLen)
+            (by cases pred a.pc hist <;> simp)
+          rw [hObs, ← hCond, ih (evalX86Cond cc a :: hist) _ _ hNext,
+            binaryTransient_public_ni prog R inv pred W (pred a.pc hist :: hist) _ _ hBr, hHalt]
+        | _ =>
+          dsimp only
+          rw [hObs, ih hist _ _ hNext]
+
+/-- Lower a public-trip loop with a reserved counter register. The zero-trip entry check and
+    the back-edge are both predictor-visible. `after` remains executable on a predicted exit.
+    Trips below 2^64 have the expected counter representation. -/
+def compilePubLoop (trips : Nat) (body : List ConstantTimeIsa.X86Instr) (after : PcCode) : PcCode :=
+  [.op (.movImm64 .rcx (BitVec.ofNat 64 trips)), .branch (.nz .rcx) 3,
+    .jump (body.length + 5)] ++
+    body.map .op ++ [.op (.addImm64 .rcx (-1)), .branch (.nz .rcx) 3] ++ after
+
+/-- A `pubLoop` lowering inherits fuel-bounded speculative NI from an invariant which holds on
+    both the loop and its continuation, not merely the architecturally executed iterations. -/
+theorem pubLoop_speculative_ni (trips : Nat) (body : List ConstantTimeIsa.X86Instr)
+    (after : PcCode) (R : ConstantTimeIsa.X86State → ConstantTimeIsa.X86State → Prop)
+    (inv : PcPublicInvariant (compilePubLoop trips body after) R)
+    (a b : ConstantTimeIsa.X86State) (h : R a b) (pred : PredictorOracle) (W fuel : Nat) :
+    pcSpecRun (compilePubLoop trips body after) pred W fuel 0 [] a =
+      pcSpecRun (compilePubLoop trips body after) pred W fuel 0 [] b :=
+  public_loop_fuel_bounded_speculative_ni _ R inv pred W fuel 0 [] a b h
+
+/-- Named loop-kernel families covered by the relational model. These are semantic program
+    schemas; compiled-symbol claims still require a decoded fixture and its own invariant. -/
+inductive NamedCtKernel where
+  | ct_select_u64
+  | sbox_bitslice
+  | gf2_128_mul_acc
+  deriving DecidableEq, Repr
+
+def namedCtKernelBody : NamedCtKernel → List ConstantTimeIsa.X86Instr
+  | .ct_select_u64 => [.cmovnz64 .rax .rsi]
+  | .sbox_bitslice => [.vgf2p8affineqb0 .ymm0 .ymm0 .ymm14]
+  | .gf2_128_mul_acc => [.vpclmulqdq .ymm0 .ymm1 .ymm2 0x00#8]
+
+def namedCtKernelLoop (kernel : NamedCtKernel) (trips : Nat) : PcCode :=
+  compilePubLoop trips (namedCtKernelBody kernel) [.ret]
+
+theorem namedCtKernelLoop_spectre_v1_immunity (kernel : NamedCtKernel) (trips : Nat)
+    (R : ConstantTimeIsa.X86State → ConstantTimeIsa.X86State → Prop)
+    (inv : PcPublicInvariant (namedCtKernelLoop kernel trips) R)
+    (a b : ConstantTimeIsa.X86State) (h : R a b) (pred : PredictorOracle) (W fuel : Nat) :
+    pcSpecRun (namedCtKernelLoop kernel trips) pred W fuel 0 [] a =
+      pcSpecRun (namedCtKernelLoop kernel trips) pred W fuel 0 [] b :=
+  pubLoop_speculative_ni trips (namedCtKernelBody kernel) [.ret] R inv a b h pred W fuel
+
+/-- Every named schema has an actual predictor-visible back-edge at its final branch. -/
+theorem namedCtKernelLoop_has_back_edge (kernel : NamedCtKernel) (trips : Nat) :
+    (namedCtKernelLoop kernel trips)[(namedCtKernelBody kernel).length + 4]? =
+      some (.branch (.nz .rcx) 3) := by
+  cases kernel <;> simp [namedCtKernelLoop, compilePubLoop, namedCtKernelBody]
+
+def binaryNoConditionalBranches (prog : List (DecodedInstr Qsag.X86Instr)) : Bool :=
+  prog.all fun d => match d.instr with | .jcc _ _ => false | _ => true
+
+theorem binary_branchfree_speculation_is_architectural
+    (prog : List (DecodedInstr Qsag.X86Instr))
+    (hn : binaryNoConditionalBranches prog = true) (pred : PredictorOracle) (W fuel : Nat) :
+    ∀ hist st, binarySpecRun prog pred W fuel hist st = (runX86 prog fuel st).2.map .arch := by
+  induction fuel with
+  | zero => intros; rfl
+  | succ fuel ih =>
+    intro hist st
+    simp only [binarySpecRun, runX86]
+    split
+    · rfl
+    · cases hd : findInstrAtPc st.pc prog with
+      | none => rfl
+      | some d =>
+        have hm : d ∈ prog := by
+          have aux : ∀ (xs : List (DecodedInstr Qsag.X86Instr)),
+              findInstrAtPc st.pc xs = some d → d ∈ xs := by
+            intro xs
+            induction xs with
+            | nil => simp [findInstrAtPc]
+            | cons x xs ih =>
+              intro hx
+              simp only [findInstrAtPc] at hx
+              split at hx
+              · cases hx; exact List.mem_cons_self
+              · exact List.mem_cons_of_mem _ (ih hx)
+          exact aux prog hd
+        have hb := List.all_eq_true.mp hn d hm
+        cases hi : d.instr <;> simp_all only [Bool.false_eq_true, List.map_cons]
+        all_goals exact congrArg (BinarySpecObs.arch (stepX86 d st).2 :: ·) (ih hist (stepX86 d st).1)
+
+/-- Checked byte decoding plus checked binary CT imply Spectre-v1 NI for every window and fuel
+    on branch-free compiled symbols. -/
+theorem decoded_kernel_speculative_ni (bytes : List UInt8) (contract : FuncContract)
+    (prog : List (DecodedInstr Qsag.X86Instr))
+    (hd : decodeX86Stream bytes = some prog)
+    (hn : binaryNoConditionalBranches prog = true)
+    (hc : checkX86ThreeWayNI bytes contract = true)
+    (a b : Qsag.X86State) (hi : X86ContractInit contract a b)
+    (pred : PredictorOracle) (W fuel : Nat) :
+    binarySpecRun prog pred W fuel [] a = binarySpecRun prog pred W fuel [] b := by
+  obtain ⟨decoded, he, htr, _⟩ := checkX86ThreeWayNI_sound hc hi fuel
+  rw [hd] at he
+  cases he
+  rw [binary_branchfree_speculation_is_architectural prog hn pred W fuel,
+    binary_branchfree_speculation_is_architectural prog hn pred W fuel, htr]
+
+/-- The fixture index is checked against the symbol name below; absent symbols are not
+    represented by an empty default stream in any theorem. -/
+def fixtureSpecBytes (i : Nat) : List UInt8 :=
+  ((currentX86ExtractedSlices[i]?).map (·.code)).getD []
+
+def fixtureSpecContract (i : Nat) : FuncContract :=
+  (currentX86SymbolContracts[i]?).getD (mkContract "missing" [] [] [])
+
+def fixtureSpecProgram (i : Nat) : List (DecodedInstr Qsag.X86Instr) :=
+  (decodeX86Stream (fixtureSpecBytes i)).getD []
+
+set_option maxRecDepth 65536 in
+set_option maxHeartbeats 8000000 in
+ theorem ct_eq_32_rlib_speculation_certificate :
+    (currentX86ExtractedSlices[13]?).map (·.name) = some "qsag_asm_ct_eq_32_x86_64" ∧
+    decodeX86Stream (fixtureSpecBytes 13) = some (fixtureSpecProgram 13) ∧
+    binaryNoConditionalBranches (fixtureSpecProgram 13) = true ∧
+    checkX86ThreeWayNI (fixtureSpecBytes 13) (fixtureSpecContract 13) = true := by
+  decide +kernel
+
+set_option maxRecDepth 65536 in
+set_option maxHeartbeats 8000000 in
+ theorem goldilocks_mul_rlib_speculation_certificate :
+    (currentX86ExtractedSlices[8]?).map (·.name) = some "qsag_asm_goldilocks_mul_ct_x86_64" ∧
+    decodeX86Stream (fixtureSpecBytes 8) = some (fixtureSpecProgram 8) ∧
+    binaryNoConditionalBranches (fixtureSpecProgram 8) = true ∧
+    checkX86ThreeWayNI (fixtureSpecBytes 8) (fixtureSpecContract 8) = true := by
+  decide +kernel
+
+theorem ct_eq_32_rlib_spectre_v1_immunity (a b : Qsag.X86State)
+    (hi : X86ContractInit (fixtureSpecContract 13) a b) (pred : PredictorOracle) (W fuel : Nat) :
+    binarySpecRun (fixtureSpecProgram 13) pred W fuel [] a =
+      binarySpecRun (fixtureSpecProgram 13) pred W fuel [] b :=
+  decoded_kernel_speculative_ni _ _ _ ct_eq_32_rlib_speculation_certificate.2.1
+    ct_eq_32_rlib_speculation_certificate.2.2.1 ct_eq_32_rlib_speculation_certificate.2.2.2
+    a b hi pred W fuel
+
+theorem goldilocks_mul_rlib_spectre_v1_immunity (a b : Qsag.X86State)
+    (hi : X86ContractInit (fixtureSpecContract 8) a b) (pred : PredictorOracle) (W fuel : Nat) :
+    binarySpecRun (fixtureSpecProgram 8) pred W fuel [] a =
+      binarySpecRun (fixtureSpecProgram 8) pred W fuel [] b :=
+  decoded_kernel_speculative_ni _ _ _ goldilocks_mul_rlib_speculation_certificate.2.1
+    goldilocks_mul_rlib_speculation_certificate.2.2.1 goldilocks_mul_rlib_speculation_certificate.2.2.2
+    a b hi pred W fuel
+
+
+/-- Only the pointer, loop counter and return hygiene are public. All memory and the loaded
+    data register can differ. Thus extra speculative loads do not require in-bounds contents
+    to be public: their addresses are public and their data never become an address. -/
+def PublicPointerEq (a b : ConstantTimeIsa.X86State) : Prop :=
+  a.gpr .rdi = b.gpr .rdi ∧ a.gpr .rcx = b.gpr .rcx ∧ a.ymmUpperDirty = b.ymmUpperDirty
+
+def publicPointerLoop (trips : Nat) : PcCode :=
+  compilePubLoop trips [.load64 .rax .rdi 0, .addImm64 .rdi 8]
+    [.op (.load64 .rax .rdi 0), .ret]
+
+theorem publicPointerLoop_invariant (trips : Nat) :
+    PcPublicInvariant (publicPointerLoop trips) PublicPointerEq := by
+  constructor
+  · intro pc i hi a b hab
+    rcases hab with ⟨hp, hc, hd⟩
+    rcases pc with _ | pc <;> simp [publicPointerLoop, compilePubLoop] at hi
+    · cases hi
+      simp [execX86Instr, ConstantTimeIsa.X86State.setGpr, PublicPointerEq, hp, hd]
+    · rcases pc with _ | pc <;> simp at hi
+      rcases pc with _ | pc <;> simp at hi
+      rcases pc with _ | pc <;> simp at hi
+      · cases hi
+        simp [execX86Instr, ConstantTimeIsa.X86State.setGpr, PublicPointerEq, hp, hc, hd]
+      · rcases pc with _ | pc <;> simp at hi
+        · cases hi
+          simp [execX86Instr, ConstantTimeIsa.X86State.setGpr, PublicPointerEq, hp, hc, hd]
+        · rcases pc with _ | pc <;> simp at hi
+          · cases hi
+            simp [execX86Instr, ConstantTimeIsa.X86State.setGpr, PublicPointerEq, hp, hc, hd]
+          · rcases pc with _ | pc <;> simp at hi
+            rcases pc with _ | pc <;> simp at hi
+            · cases hi
+              simp [execX86Instr, ConstantTimeIsa.X86State.setGpr, PublicPointerEq, hp, hc, hd]
+            · rcases pc with _ | pc <;> simp at hi
+  · intro pc c target hi a b hab
+    rcases pc with _ | pc <;> simp [publicPointerLoop, compilePubLoop] at hi
+    rcases pc with _ | pc <;> simp at hi
+    · obtain ⟨rfl, rfl⟩ := hi
+      simp [BranchCond.eval, hab.2.1]
+    · rcases pc with _ | pc <;> simp at hi
+      rcases pc with _ | pc <;> simp at hi
+      rcases pc with _ | pc <;> simp at hi
+      rcases pc with _ | pc <;> simp at hi
+      rcases pc with _ | pc <;> simp at hi
+      · obtain ⟨rfl, rfl⟩ := hi
+        simp [BranchCond.eval, hab.2.1]
+      · rcases pc with _ | pc <;> simp at hi
+        rcases pc with _ | pc <;> simp at hi
+  · intro a b h; exact h.2.2
+
+theorem public_pointer_pubLoop_spectre_v1_immunity (trips : Nat)
+    (a b : ConstantTimeIsa.X86State) (h : PublicPointerEq a b)
+    (pred : PredictorOracle) (W fuel : Nat) :
+    pcSpecRun (publicPointerLoop trips) pred W fuel 0 [] a =
+      pcSpecRun (publicPointerLoop trips) pred W fuel 0 [] b :=
+  public_loop_fuel_bounded_speculative_ni _ _ (publicPointerLoop_invariant trips)
+    pred W fuel 0 [] a b h
+
+
+/-- Every requested upper index occurs in an accepted empty-cache release, for all d >= 2. -/
+theorem all_depth_gate_covers_every_upper_layer (suite : TweakableHashSuite)
+    (params : PqHashParams) (pk : PqPublicKey) (turn : FaultedSignTurn)
+    (hSubPos : 0 < params.subtreeHeight)
+    (hv : verifyPqHashSig suite params pk turn.msg turn.candidate = true)
+    (l : Nat) (hl : 1 ≤ l) (hd : l < params.numLayers) :
+    ∃ es, verifyBeforeReleaseAll suite params pk [] turn = some es ∧
+      ∃ e ∈ es, e.key.layer = l := by
+  obtain ⟨es, he, hm⟩ := all_depth_gate_complete suite params pk turn hSubPos hv
+  refine ⟨es, he, ?_⟩
+  have hmem : l ∈ es.map (fun e => e.key.layer) := by
+    rw [hm]
+    apply layer_range_member <;> omega
+  exact List.mem_map.mp hmem
+
+/-- The counter tooth's second opening is rejected by the full `(root,counter)` cache. -/
+theorem full_cache_rejects_counter_tooth :
+    ¬ CacheConsistent
+      [⟨⟨1, 0, 0⟩, ⟨[], 0⟩, counterToothOpening 0⟩,
+       ⟨⟨1, 0, 0⟩, ⟨[], 1⟩, counterToothOpening 1⟩] := by
+  intro h
+  have he := h ⟨⟨1, 0, 0⟩, ⟨[], 0⟩, counterToothOpening 0⟩ (by simp)
+    ⟨⟨1, 0, 0⟩, ⟨[], 1⟩, counterToothOpening 1⟩ (by simp) rfl
+  have hc := congrArg OtsMessage.tswCtr he
+  cases hc
+
+/-- Reusable connection to the ISA taint checker. A stable taint state suffices for loops whose
+    operations preserve it; branch registers/flags and return hygiene are public in the low
+    equivalence relation. More precise invariants can use `PcPublicInvariant` directly. -/
+theorem pcPublicInvariant_of_checker (code : PcCode) (memPol : BitVec 64 → SecLabel)
+    (secHeap : Bool) (hPol : secHeap = true → ∀ a, memPol a = .sec)
+    (τ : X86TaintState)
+    (hOp : ∀ (pc : Nat) (i : ConstantTimeIsa.X86Instr), code[pc]? = some (PcInstr.op i) → checkX86Instr secHeap τ i = some τ)
+    (hBranch : ∀ (pc : Nat) (c : BranchCond) (target : Nat), code[pc]? = some (PcInstr.branch c target) →
+      match c with | .nz r => τ.gpr r = .pub | .below | .aboveEq => τ.cf = .pub) :
+    PcPublicInvariant code (X86LowEq memPol τ) := by
+  constructor
+  · intro pc i hi a b h
+    exact checkX86Instr_sound memPol secHeap hPol τ τ i pc (hOp pc i hi) a b h
+  · intro pc c target hi a b h
+    have hb := hBranch pc c target hi
+    cases c with
+    | nz r => simp only [BranchCond.eval, h.1 r hb]
+    | below => exact h.2.2.1 hb
+    | aboveEq => simp only [BranchCond.eval, h.2.2.1 hb]
+  · intro a b h; exact h.2.2.2.2.2.2.2.2.1
+
+/-- Executable non-vacuity at both requested depths, with an inexpensive toy hash suite. -/
+def deepToyParams (d : Nat) : PqHashParams :=
+  { zeroToyParams with numLayers := d, statefulJorts := true }
+
+def deepToyTurn (d : Nat) : FaultedSignTurn :=
+  { msg := []
+    candidate := ⟨[], 0, 0, [], List.replicate d ⟨0, [List.replicate 32 0], [List.replicate 32 0]⟩⟩ }
+
+set_option maxRecDepth 65536 in
+set_option maxHeartbeats 2000000 in
+ theorem seven_and_twenty_two_layer_release_inhabited :
+    (verifyBeforeReleaseAll zeroToySuite (deepToyParams 7) ⟨[], List.replicate 32 0⟩ []
+      (deepToyTurn 7)).map (fun es => es.map (fun e => e.key.layer)) = some (List.range' 1 6) ∧
+    (verifyBeforeReleaseAll zeroToySuite (deepToyParams 22) ⟨[], List.replicate 32 0⟩ []
+      (deepToyTurn 22)).map (fun es => es.map (fun e => e.key.layer)) = some (List.range' 1 21) := by
+  decide +kernel
+
+/-- Hypertree-level input, after the enclosing signature scheme has authenticated its initial
+    digest/FORS root. This API does not impose the full `HashSigs` format's total-height cap. -/
+structure HypertreeGateTurn where
+  globalIdx : Nat
+  rand : List UInt8
+  root : List UInt8
+  sigs : List LayerXmssSig
+
+/-- Layer-level gate for any d-layer hypertree. Enforces `AdrsGateValid` per-coordinate bounds
+    (admitting height-66 `22 × 3` trees without `UInt32`/`UInt64` address aliasing), layer count,
+    verified top root, and encoded-`HashAdrs` cache consistency before committing. -/
+def verifyHypertreeBeforeRelease (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (cache : List LayerRelease) (turn : HypertreeGateTurn) :
+    Option (List LayerRelease) := do
+  if !AdrsGateValid params turn.globalIdx then none
+  else if turn.sigs.length ≠ params.numLayers then none else do
+    if verifyHypertreeLayers suite params pk.pkSeed pk.pkRoot turn.rand 0 turn.globalIdx
+        turn.root turn.sigs ≠ some pk.pkRoot then none else do
+      let es ← verifiedLayerMessages suite params pk 0 turn.globalIdx turn.rand turn.root turn.sigs
+      if AdrsCacheConsistent (cache ++ es.drop 1) then some (es.drop 1) else none
+
+theorem verifyHypertreeBeforeRelease_adrsConsistent (suite : TweakableHashSuite)
+    (params : PqHashParams) (pk : PqPublicKey) (cache es : List LayerRelease)
+    (turn : HypertreeGateTurn)
+    (h : verifyHypertreeBeforeRelease suite params pk cache turn = some es) :
+    AdrsCacheConsistent (cache ++ es) := by
+  unfold verifyHypertreeBeforeRelease at h
+  split at h
+  · cases h
+  · split at h
+    · cases h
+    · split at h
+      · cases h
+      · simp only [Option.bind_eq_bind, Option.bind_eq_some_iff] at h
+        obtain ⟨entries, _, h⟩ := h
+        split at h
+        · next hc => cases h; exact hc
+        · cases h
+
+theorem verifyHypertreeBeforeRelease_consistent (suite : TweakableHashSuite)
+    (params : PqHashParams) (pk : PqPublicKey) (cache es : List LayerRelease)
+    (turn : HypertreeGateTurn)
+    (h : verifyHypertreeBeforeRelease suite params pk cache turn = some es) :
+    CacheConsistent (cache ++ es) :=
+  adrsCacheConsistent_implies_cacheConsistent
+    (verifyHypertreeBeforeRelease_adrsConsistent suite params pk cache es turn h)
+
+theorem verifyHypertreeBeforeRelease_validCoords (suite : TweakableHashSuite)
+    (params : PqHashParams) (pk : PqPublicKey) (cache es : List LayerRelease)
+    (turn : HypertreeGateTurn)
+    (h : verifyHypertreeBeforeRelease suite params pk cache turn = some es) :
+    ∀ e ∈ es, e.key.ValidCoords = true := by
+  unfold verifyHypertreeBeforeRelease at h
+  split at h
+  · cases h
+  · next hGateNeg =>
+    have hGate : AdrsGateValid params turn.globalIdx = true := by
+      cases hx : AdrsGateValid params turn.globalIdx
+      · exact False.elim (hGateNeg (by simp only [hx, Bool.not_false]))
+      · rfl
+    split at h
+    · cases h
+    · next hn =>
+      have hlen : turn.sigs.length = params.numLayers := Decidable.of_not_not hn
+      clear hn
+      split at h
+      · cases h
+      · simp only [Option.bind_eq_bind, Option.bind_eq_some_iff] at h
+        obtain ⟨entries, he, h⟩ := h
+        split at h
+        · cases h
+          simp only [AdrsGateValid, Bool.and_eq_true, decide_eq_true_eq] at hGate
+          rcases hGate with ⟨⟨⟨_, hSub⟩, hNum⟩, hTree⟩
+          have hAll := verifiedLayerMessages_validCoords suite params pk turn.sigs
+            0 turn.globalIdx turn.rand turn.root entries hSub (by omega) hTree he
+          intro e hm
+          exact hAll e (List.mem_of_mem_drop hm)
+        · cases h
+
+def guardedHypertreeTrace (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) : List LayerRelease → List HypertreeGateTurn → List LayerRelease
+  | cache, [] => cache
+  | cache, turn :: rest =>
+    match verifyHypertreeBeforeRelease suite params pk cache turn with
+    | none => guardedHypertreeTrace suite params pk cache rest
+    | some es => guardedHypertreeTrace suite params pk (cache ++ es) rest
+
+theorem guardedHypertreeTrace_adrsConsistent (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (turns : List HypertreeGateTurn) :
+    ∀ cache, AdrsCacheConsistent cache →
+      AdrsCacheConsistent (guardedHypertreeTrace suite params pk cache turns) := by
+  induction turns with
+  | nil => intro cache h; exact h
+  | cons turn rest ih =>
+    intro cache hc
+    simp only [guardedHypertreeTrace]
+    split
+    · exact ih cache hc
+    · next es he =>
+      exact ih _ (verifyHypertreeBeforeRelease_adrsConsistent suite params pk _ _ turn he)
+
+theorem guardedHypertreeTrace_consistent (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (turns : List HypertreeGateTurn) :
+    ∀ cache, AdrsCacheConsistent cache →
+      CacheConsistent (guardedHypertreeTrace suite params pk cache turns) :=
+  fun cache hc =>
+    adrsCacheConsistent_implies_cacheConsistent
+      (guardedHypertreeTrace_adrsConsistent suite params pk turns cache hc)
+
+theorem guardedHypertreeTrace_validCoords (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (turns : List HypertreeGateTurn) :
+    ∀ cache, (∀ e ∈ cache, e.key.ValidCoords = true) →
+      ∀ e ∈ guardedHypertreeTrace suite params pk cache turns, e.key.ValidCoords = true := by
+  induction turns with
+  | nil => intro cache h; exact h
+  | cons turn rest ih =>
+    intro cache hc
+    simp only [guardedHypertreeTrace]
+    split
+    · exact ih cache hc
+    · next es he =>
+      apply ih
+      intro e hm
+      rcases List.mem_append.mp hm with hOld | hNew
+      · exact hc e hOld
+      · exact verifyHypertreeBeforeRelease_validCoords suite params pk cache es turn he e hNew
+
+/-- Any depth and total height: the layer-level verifier/cache gate excludes a second WOTS+C
+    message at every encoded 32-byte `HashAdrs` throughout an arbitrary adversarial trace. -/
+theorem arbitrary_hypertree_gate_prevents_adrs_wots_reuse (suite : TweakableHashSuite)
+    (params : PqHashParams) (pk : PqPublicKey) (turns : List HypertreeGateTurn)
+    (a b : LayerRelease)
+    (ha : a ∈ guardedHypertreeTrace suite params pk [] turns)
+    (hb : b ∈ guardedHypertreeTrace suite params pk [] turns)
+    (hk : a.key.toEncodedAdrs = b.key.toEncodedAdrs) :
+    a.key = b.key ∧ a.signed = b.signed := by
+  have hVa := guardedHypertreeTrace_validCoords suite params pk turns [] (by simp) a ha
+  have hVb := guardedHypertreeTrace_validCoords suite params pk turns [] (by simp) b hb
+  exact ⟨(otsPosition_toEncodedAdrs_injective hVa hVb).mp hk,
+    guardedHypertreeTrace_adrsConsistent suite params pk turns [] (by simp [AdrsCacheConsistent]) a ha b hb hk⟩
+
+theorem arbitrary_hypertree_gate_prevents_fault_wots_reuse (suite : TweakableHashSuite)
+    (params : PqHashParams) (pk : PqPublicKey) (turns : List HypertreeGateTurn)
+    (a b : LayerRelease)
+    (ha : a ∈ guardedHypertreeTrace suite params pk [] turns)
+    (hb : b ∈ guardedHypertreeTrace suite params pk [] turns)
+    (hk : a.key = b.key) : a.signed = b.signed :=
+  (arbitrary_hypertree_gate_prevents_adrs_wots_reuse suite params pk turns a b ha hb
+    (congrArg OtsPosition.toEncodedAdrs hk)).2
+
+/-- Complete coverage under coordinate bounds (no 62-bit total-height premise): each upper layer
+    1,...,d-1 is cached. -/
+theorem hypertree_gate_complete (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (turn : HypertreeGateTurn)
+    (hGate : AdrsGateValid params turn.globalIdx = true)
+    (hlen : turn.sigs.length = params.numLayers)
+    (hv : verifyHypertreeLayers suite params pk.pkSeed pk.pkRoot turn.rand 0 turn.globalIdx
+      turn.root turn.sigs = some pk.pkRoot) :
+    ∃ es, verifyHypertreeBeforeRelease suite params pk [] turn = some es ∧
+      es.map (fun e => e.key.layer) = List.range' 1 (params.numLayers - 1) := by
+  obtain ⟨es, he, hl⟩ := verifiedLayerMessages_complete suite params pk _ _ _ _ _ _ hv
+  have hd : (es.drop 1).map (fun e => e.key.layer) =
+      List.range' 1 (params.numLayers - 1) := by
+    rw [List.map_drop, hl, hlen, List.drop_range']
+  have hGateFacts : params.subtreeHeight ≤ 31 ∧ params.numLayers ≤ 2 ^ 32 ∧
+      turn.globalIdx / 2 ^ params.subtreeHeight < 2 ^ 64 := by
+    simp only [AdrsGateValid, Bool.and_eq_true, decide_eq_true_eq] at hGate
+    exact ⟨hGate.1.1.2, hGate.1.2, hGate.2⟩
+  have hValAll := verifiedLayerMessages_validCoords suite params pk turn.sigs
+    0 turn.globalIdx turn.rand turn.root es hGateFacts.1 (by omega) hGateFacts.2.2 he
+  have hc := adrsCacheConsistent_of_distinct_valid_layers (es.drop 1)
+    (fun e hm => hValAll e (List.mem_of_mem_drop hm))
+    (by rw [hd]; exact layer_range_nodup _ _)
+  refine ⟨es.drop 1, ?_, hd⟩
+  simpa [verifyHypertreeBeforeRelease, hGate, hlen, hv, he] using hc
+
+/-- **`#tooth` Witness (`tooth_adrs_gate_rejects_aliasing_inputs`)**:
+    `verifyHypertreeBeforeRelease` rejects `subtreeHeight = 0` and rejects oversized `globalIdx = 2^67`
+    at `22 × 3`, while admitting the entire height-66 leaf domain (`globalIdx = 2^66 - 1`). -/
+theorem tooth_adrs_gate_rejects_aliasing_inputs :
+    verifyHypertreeBeforeRelease zeroToySuite { deepToyParams 2 with subtreeHeight := 0 }
+      ⟨[], List.replicate 32 0⟩ [] ⟨2 ^ 64, [], [], []⟩ = none ∧
+    verifyHypertreeBeforeRelease zeroToySuite { deepToyParams 22 with subtreeHeight := 3 }
+      ⟨[], List.replicate 32 0⟩ [] ⟨2 ^ 67, [], [], []⟩ = none ∧
+    AdrsGateValid { deepToyParams 22 with subtreeHeight := 3 } (2 ^ 66 - 1) = true := by
+  exact ⟨by decide, by decide, by decide⟩
+
+/- The 22-layer, height-3 shape (66 total levels) is not rejected by the layer gate. This is
+    an executable model witness for the shape, not an identification of WOTS+C with FIPS WOTS+. -/
+set_option maxRecDepth 65536 in
+set_option maxHeartbeats 4000000 in
+ theorem twenty_two_height_three_layer_gate_inhabited :
+    (verifyHypertreeBeforeRelease zeroToySuite
+      { deepToyParams 22 with subtreeHeight := 3 } ⟨[], List.replicate 32 0⟩ []
+      ⟨0, [], [], List.replicate 22
+        ⟨0, [List.replicate 32 0], List.replicate 3 (List.replicate 32 0)⟩⟩).map
+        (fun es => es.map (fun e => e.key.layer)) = some (List.range' 1 21) := by
+  decide +kernel
+
+/-- The next upper key consumes the tree index of the current key as its global index. -/
+def nextOtsPosition (params : PqHashParams) (key : OtsPosition) : OtsPosition :=
+  ⟨key.layer + 1, key.treeIdx / 2 ^ params.subtreeHeight, key.treeIdx % 2 ^ params.subtreeHeight⟩
+
+def openingGlobalIdx (params : PqHashParams) (key : OtsPosition) : Nat :=
+  key.treeIdx * 2 ^ params.subtreeHeight + key.leafIdx
+
+/-- The opening is anchored to the next cached root, or to the public root at the top layer.
+    Only input roots/counters are cached; this proposition does not add a cached output root. -/
+def OpeningBound (suite : TweakableHashSuite) (params : PqHashParams) (pk : PqPublicKey)
+    (journal : List LayerRelease) (e : LayerRelease) : Prop :=
+  e.signed.tswCtr = e.opening.tswCtr ∧
+  ∃ top, verifyHypertreeLayers suite params pk.pkSeed pk.pkRoot [] e.key.layer
+    (openingGlobalIdx params e.key) e.signed.root [e.opening] = some top ∧
+    (if e.key.layer + 1 = params.numLayers then top = pk.pkRoot
+     else ∃ next ∈ journal, next.key = nextOtsPosition params e.key ∧ top = next.signed.root)
+
+theorem openingBound_mono (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (xs ys : List LayerRelease) (e : LayerRelease)
+    (hsub : ∀ x ∈ xs, x ∈ ys) (h : OpeningBound suite params pk xs e) :
+    OpeningBound suite params pk ys e := by
+  obtain ⟨hc, top, hv, ht⟩ := h
+  refine ⟨hc, top, hv, ?_⟩
+  by_cases hl : e.key.layer + 1 = params.numLayers
+  · simpa only [hl, ↓reduceIte] using ht
+  · simp only [hl, ↓reduceIte] at ht ⊢
+    obtain ⟨n, hn, hk, hr⟩ := ht
+    exact ⟨n, hsub n hn, hk, hr⟩
+
+/-- Successful upper-layer traversals give each opening its next-root anchor. -/

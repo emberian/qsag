@@ -2961,3 +2961,165 @@ private theorem transpose_suffix_0 :
   refine ⟨by decide, ?_⟩
   exact transpose_suffix_24
 
+theorem compiled_transpose_decodes :
+    accepted transpose64x256_avx2_code transpose64x256_avx2_offsets = true := by
+  unfold accepted
+  exact Bool.and_eq_true_iff.mpr ⟨by decide, transpose_suffix_0⟩
+-- END TRANSPOSE CERTIFICATES
+
+/-- Taint is transferred to scalar masks, never silently declassified. This
+straight-line checker diagnoses the mask/test/branch counterexample; the kernel
+CT subset above excludes vector-to-scalar transfers entirely. -/
+structure Taint where
+  scalar : Nat → Bool
+  vector : Nat → Bool
+  flags : Bool
+
+def taintStep (t : Taint) : Instr → Option Taint
+  | .vector v =>
+    if v.op == .mask then
+      some {t with scalar := fun r => if r == v.dst then t.vector v.rhs else t.scalar r}
+    else some {t with vector := fun r => if r == v.dst then true else t.vector r}
+  | .test a b => some {t with flags := t.scalar a || t.scalar b}
+  | .jumpZero _ | .branch _ => if t.flags then none else some t
+  | .immediate r _ | .clear r =>
+    some {t with scalar := fun i => if i == r then false else t.scalar i}
+  | .add r _ | .decrement r => some {t with flags := t.scalar r}
+  | .ret => some t
+
+def taintCheck (b : ByteCode) : Nat → Nat → Taint → Bool
+  | 0, _, _ => true
+  | n+1, pc, t => match decode b pc with
+    | none => false
+    | some d => match taintStep t d.instr with
+      | none => false
+      | some t' => taintCheck b n (pc+d.size) t'
+
+def secretVectors : Taint := ⟨fun _ => false, fun _ => true, false⟩
+
+/-- #tooth: VPMOVMSKB EAX,YMM0; TEST EAX,EAX; JZ +0.
+The first two decoded steps succeed, propagating secrecy; the branch fails. -/
+theorem tooth_secret_vpmovmskb_branch_leaks_lane_sign_bits :
+    let bytes : ByteCode := ⟨8, #[#[0xc5, 0xfd, 0xd7, 0xc0, 0x85, 0xc0, 0x74, 0]]⟩
+    taintCheck bytes 2 0 secretVectors = true ∧
+    taintCheck bytes 3 0 secretVectors = false := by decide
+
+/-- A single secret lane sign bit changes the scalar zero-test outcome. -/
+theorem mask_sign_bit_changes_zero_test :
+    pmovmskb 0#256 true = 0#32 ∧ pmovmskb (1#256 <<< 7) true = 1#32 := by decide
+
+/-- Byte-decoded AArch64 vector instructions used by the PMULL kernel.
+No instruction-name oracle participates in these masks. DIT is an explicit
+execution precondition for carryless multiplication. -/
+inductive ArmVectorOp where
+  | xor | and | pmull | pmull2 | ext | fromGpr
+  deriving DecidableEq, Repr
+
+structure ArmVectorInstr where
+  op : ArmVectorOp
+  dst : Nat
+  left : Nat
+  right : Nat
+  imm : Nat := 0
+  deriving DecidableEq, Repr
+
+def decodeArmVectorWord (word : Nat) : Option ArmVectorInstr :=
+  let dst := word % 32
+  let left := word / 32 % 32
+  let right := word / 65536 % 32
+  if word &&& 0xffe0fc00 == 0x6e201c00 then some ⟨.xor, dst, left, right, 0⟩
+  else if word &&& 0xffe0fc00 == 0x4e201c00 then some ⟨.and, dst, left, right, 0⟩
+  else if word &&& 0xffe0fc00 == 0x0ee0e000 then some ⟨.pmull, dst, left, right, 0⟩
+  else if word &&& 0xffe0fc00 == 0x4ee0e000 then some ⟨.pmull2, dst, left, right, 0⟩
+  else if word &&& 0xffe08400 == 0x6e000000 then
+    some ⟨.ext, dst, left, right, word / 2048 % 16⟩
+  else if word &&& 0xfffffc00 == 0x9e670000 && left != 31 then
+    some ⟨.fromGpr, dst, left, 0, 0⟩
+  else none
+
+def decodeArmVector (code : ByteCode) (pc : Nat) : Option ArmVectorInstr :=
+  if pc % 4 == 0 && pc + 4 ≤ code.size &&
+      (List.range 4).all (fun i => (code.get? (pc+i)).isSome) then
+    decodeArmVectorWord (readLE code pc 4)
+  else none
+
+def evalArmVector (i : ArmVectorInstr) (gpr : Nat → BitVec 64)
+    (vector : Nat → XmmReg) : XmmReg :=
+  match i.op with
+  | .xor => eor (vector i.left) (vector i.right)
+  | .and => vector i.left &&& vector i.right
+  | .pmull => pmull (vector i.left) (vector i.right)
+  | .pmull2 => pmull2 (vector i.left) (vector i.right)
+  | .ext => ext (vector i.left) (vector i.right) ⟨i.imm % 16, Nat.mod_lt _ (by decide)⟩
+  | .fromGpr => (gpr i.left).setWidth 128
+
+/-- The returned operand trace is empty only under the caller's DIT precondition
+for PMULL; otherwise its input values are exposed to the timing observer. -/
+def armVectorOperands (dit : Bool) (i : ArmVectorInstr)
+    (vector : Nat → XmmReg) : List XmmReg :=
+  if (i.op == .pmull || i.op == .pmull2) && !dit then
+    [vector i.left, vector i.right] else []
+
+theorem armVector_dit_ct (i : ArmVectorInstr) (a b : Nat → XmmReg) :
+    armVectorOperands true i a = armVectorOperands true i b := by
+  simp [armVectorOperands]
+
+/-- These words are read from the production PMULL blob, including both halves
+of the Karatsuba multiplication and the operand-crossing EXT instruction. -/
+theorem compiled_pmull_vector_decode :
+    decodeArmVector gf2_128_mul_acc_pmull_code 24 = some ⟨.pmull, 6, 4, 5, 0⟩ ∧
+    decodeArmVector gf2_128_mul_acc_pmull_code 28 = some ⟨.pmull2, 7, 4, 5, 0⟩ ∧
+    decodeArmVector gf2_128_mul_acc_pmull_code 32 = some ⟨.ext, 16, 4, 4, 8⟩ ∧
+    decodeArmVector gf2_128_mul_acc_pmull_code 40 = some ⟨.xor, 16, 16, 4, 0⟩ := by decide
+
+/-- Functional semantics of an actual decoded production PMULL step. -/
+theorem compiled_pmull_low_product (gpr : Nat → BitVec 64) (v : Nat → XmmReg) :
+    (decodeArmVector gf2_128_mul_acc_pmull_code 24).map (fun i => evalArmVector i gpr v) =
+      some (clmul64 ((v 4).setWidth 64) ((v 5).setWidth 64)) := by
+  rw [compiled_pmull_vector_decode.1]
+  rfl
+
+theorem compiled_pmull_high_product (gpr : Nat → BitVec 64) (v : Nat → XmmReg) :
+    (decodeArmVector gf2_128_mul_acc_pmull_code 28).map (fun i => evalArmVector i gpr v) =
+      some (clmul64 (((v 4) >>> 64).setWidth 64) (((v 5) >>> 64).setWidth 64)) := by
+  rw [compiled_pmull_vector_decode.2.1]
+  rfl
+
+/-- A whole-symbol CT/functional PMULL theorem still requires connecting scalar
+loop control and byte memory to these vector steps. The vector decoder alone
+is not a whole-kernel certificate. -/
+theorem tooth_pmull_missing_dit_leaks :
+    armVectorOperands false ⟨.pmull, 6, 4, 5, 0⟩ (fun _ => 0) ≠
+      armVectorOperands false ⟨.pmull, 6, 4, 5, 0⟩ (fun _ => 1) := by decide
+
+/-- A checked instruction boundary supplies an actual decoded CT instruction. -/
+theorem checkAt_decodes (b : ByteCode) (all : List Nat) (pc next : Nat)
+    (h : checkAt b all pc next = true) :
+    ∃ d, decode b pc = some d ∧ ctInstr d.instr = true := by
+  cases hd : decode b pc with
+  | none => simp [checkAt, hd] at h
+  | some d =>
+    refine ⟨d, rfl, ?_⟩
+    simp only [checkAt, hd, Bool.and_eq_true] at h
+    exact h.1.1.1
+
+theorem pclmul_boundary_inhabited :
+    ∃ b : ByteCode, ∃ offsets : List Nat, ∃ pc next : Nat,
+      checkAt b offsets pc next = true :=
+  ⟨gf2_128_mul_acc_pclmul_code, gf2_128_mul_acc_pclmul_offsets, 0, 4, by decide⟩
+
+theorem tooth_f3_pclmul_rejected :
+    decodeVector ⟨6, #[#[0xf3, 0x0f, 0x3a, 0x44, 0xc0, 0]]⟩ 0 = none := by decide
+
+theorem narrow_mask_ignores_upper_lane :
+    evalVec .mask 0 (1#256 <<< 135) 0 false = 0 ∧
+    evalVec .mask 0 (1#256 <<< 135) 0 true = (1#256 <<< 16) := by decide
+
+theorem tooth_f3_pclmul_decode_counterexample :
+    ∃ b : ByteCode, decode b 0 = none ∧ b.get? 0 = some 0xf3 := by
+  exact ⟨⟨6, #[#[0xf3, 0x0f, 0x3a, 0x44, 0xc0, 0]]⟩, by decide⟩
+
+#tooth_pair checkAt_decodes vs tooth_f3_pclmul_decode_counterexample
+#verify_inhabited checkAt_decodes pclmul_boundary_inhabited
+
+end Qsag.SimdBinaryEquiv
