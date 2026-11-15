@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.DensePcgTapLinearTests — linear tests of the deployed three-tap dense-PCG rows
+# Qsag.Protocol.Threshold.DensePcgTapLinearTests — linear tests of the deployed three-tap dense-PCG rows
 
 `pcg_dense.rs` builds each output row of `H_lpn` from three masked SHAKE taps per GGM tree into
 that tree's own prefix accumulator, and the receiver's choice bit is the XOR over the 64 trees
@@ -29,8 +29,8 @@ output is a random-oracle assumption. They bound fixed linear tests of one row (
 fixed set of rows (`m = 3·rows`), not every distinguisher, and they are not a hardness claim
 for dual-LPN decoding.
 -/
-public import Qsag.GaussianHvzkAndDualLpn
-import all Qsag.GaussianHvzkAndDualLpn
+public import Qsag.Protocol.Threshold.GaussianHvzkAndDualLpn
+import all Qsag.Protocol.Threshold.GaussianHvzkAndDualLpn
 public import Qsag.Tactic.AssuranceKit
 
 public section

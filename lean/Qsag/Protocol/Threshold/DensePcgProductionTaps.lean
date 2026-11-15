@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.DensePcgProductionTaps — row 0 of a production tap matrix from the Keccak specification
+# Qsag.Protocol.Threshold.DensePcgProductionTaps — row 0 of a production tap matrix from the Keccak specification
 
 `lpnTap` is `BatchedTapGenerator` of `pcg_dense.rs`: one SHAKE-256 block per counter over the
 62-byte input `"QSAG.DPCG.LPNTAP" ‖ session ‖ sender ‖ receiver ‖ tree ‖ depth ‖ counter`, read as
@@ -8,10 +8,10 @@ module
 evaluates it with the kernel for the 64 trees of row 0 (session `00..1f`, sender 0, receiver 1,
 depth 15) and obtains the tap list used by `prodRow0_bias_bracket`.
 -/
-public import Qsag.Keccak
-import all Qsag.Keccak
-public import Qsag.DensePcgTapLinearTests
-import all Qsag.DensePcgTapLinearTests
+public import Qsag.Oracle.Keccak
+import all Qsag.Oracle.Keccak
+public import Qsag.Protocol.Threshold.DensePcgTapLinearTests
+import all Qsag.Protocol.Threshold.DensePcgTapLinearTests
 
 public section
 namespace Qsag

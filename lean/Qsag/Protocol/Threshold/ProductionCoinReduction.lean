@@ -1,7 +1,7 @@
 module
-public import Qsag.RssSlhFullSecurity
-import all Qsag.UcGames
-import all Qsag.RssSlhFullSecurity
+public import Qsag.Protocol.Threshold.RssSlhFullSecurity
+import all Qsag.Oracle.UcGames
+import all Qsag.Protocol.Threshold.RssSlhFullSecurity
 
 /-! Executable primitive reduction for the production preprocessing coin *helper*.
 This models the two loops in `run_commit_and_open_coin_with_hook`, including its
