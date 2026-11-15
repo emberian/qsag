@@ -8118,7 +8118,7 @@ private theorem foldFramesHash_length_lt {H : List UInt8 → List UInt8}
 /-- Constructive collision reduction (`0 Classical.choice`) for `foldFramesHash`:
     whenever `∀ m, (H m).length < 256 ^ 8` and leaf frames satisfy `< 256 ^ 8`, any `xs ≠ ys`
     colliding under `foldFramesHash H tag` exhibit an explicit `H`-collision `m₁ ≠ m₂ ∧ H m₁ = H m₂`. -/
-theorem foldFramesHash_collision_of_ne
+def foldFramesHashCollision
     {H : List UInt8 → List UInt8} {tag : List UInt8}
     (hHLen : ∀ m, (H m).length < 256 ^ 8)
     {xs ys : List (List UInt8)}
@@ -8126,13 +8126,11 @@ theorem foldFramesHash_collision_of_ne
     (hyB : ∀ g ∈ ys, g.length < 256 ^ 8)
     (hNe : xs ≠ ys)
     (hEq : foldFramesHash H tag xs = foldFramesHash H tag ys) :
-    ∃ m₁ m₂ : List UInt8, m₁ ≠ m₂ ∧ H m₁ = H m₂ := by
+    Σ m₁ : List UInt8, {m₂ : List UInt8 // m₁ ≠ m₂ ∧ H m₁ = H m₂} := by
   have h1Lt : ([0x01] : List UInt8).length < 256 ^ 8 := by simp only [List.length]; decide
-  induction xs generalizing ys with
-  | nil =>
-    cases ys with
-    | nil => exact False.elim (hNe rfl)
-    | cons y ys =>
+  match xs, ys with
+  | [], [] => exact False.elim (hNe rfl)
+  | [], y :: ys =>
       simp only [foldFramesHash] at hEq
       refine ⟨cshake256FramedPreimage tag [],
               cshake256FramedPreimage tag [[0x01], y, foldFramesHash H tag ys], ?_, hEq⟩
@@ -8148,9 +8146,7 @@ theorem foldFramesHash_collision_of_ne
       have hFr := cshake256FramedPreimage_frames_injective (by simp) (by simp)
         (by intro _ hf; cases hf) hR hPre
       cases hFr
-  | cons x xs ih =>
-    cases ys with
-    | nil =>
+  | x :: xs, [] =>
       simp only [foldFramesHash] at hEq
       refine ⟨cshake256FramedPreimage tag [[0x01], x, foldFramesHash H tag xs],
               cshake256FramedPreimage tag [], ?_, hEq⟩
@@ -8166,7 +8162,7 @@ theorem foldFramesHash_collision_of_ne
       have hFr := cshake256FramedPreimage_frames_injective (by simp) (by simp)
         hL (by intro _ hg; cases hg) hPre
       cases hFr
-    | cons y ys =>
+  | x :: xs, y :: ys =>
       simp only [foldFramesHash] at hEq
       let d₁ := foldFramesHash H tag xs
       let d₂ := foldFramesHash H tag ys
@@ -8189,7 +8185,7 @@ theorem foldFramesHash_collision_of_ne
       if hSub : d₁ = d₂ then
         if hx : x = y then
           have hTailNe : xs ≠ ys := fun h => hNe (by rw [hx, h])
-          exact ih (fun f hf => hxB f (.tail x hf)) (fun g hg => hyB g (.tail y hg)) hTailNe hSub
+          exact foldFramesHashCollision hHLen (fun f hf => hxB f (.tail x hf)) (fun g hg => hyB g (.tail y hg)) hTailNe hSub
         else
           refine ⟨cshake256FramedPreimage tag [[0x01], x, d₁],
                   cshake256FramedPreimage tag [[0x01], y, d₂], ?_, hEq⟩
@@ -8207,6 +8203,19 @@ theorem foldFramesHash_collision_of_ne
         injection h1 with _ h2
         injection h2 with hdEq _
         exact hSub hdEq
+termination_by xs.length
+
+theorem foldFramesHash_collision_of_ne
+    {H : List UInt8 → List UInt8} {tag : List UInt8}
+    (hHLen : ∀ m, (H m).length < 256 ^ 8)
+    {xs ys : List (List UInt8)}
+    (hxB : ∀ f ∈ xs, f.length < 256 ^ 8)
+    (hyB : ∀ g ∈ ys, g.length < 256 ^ 8)
+    (hNe : xs ≠ ys)
+    (hEq : foldFramesHash H tag xs = foldFramesHash H tag ys) :
+    ∃ m₁ m₂ : List UInt8, m₁ ≠ m₂ ∧ H m₁ = H m₂ := by
+  obtain ⟨m₁, m₂, h⟩ := foldFramesHashCollision hHLen hxB hyB hNe hEq
+  exact ⟨m₁, m₂, h⟩
 
 /-- Prefix-free structural frame serializer combinators (`∀ f, f.length ≤ 48 < 256 ^ 8`). -/
 private def serListFrames {α : Type} (serElem : α → List (List UInt8)) : List α → List (List UInt8)
@@ -8577,7 +8586,7 @@ def vcCommitPartyView (H : List UInt8 → List UInt8) (presNonce : Vec UInt8 32)
 /-- Constructive commitment binding (`0 Classical.choice`): any `(v₁, fo₁) ≠ (v₂, fo₂)` colliding
     on `vcCommitPartyView` constructively exhibit an explicit `H`-collision under either
     `"QSAG.COMMIT.V1"` or `"QSAG.VC.VIEW_COM.V1"`. -/
-theorem vcCommitPartyView_binding
+def vcCommitPartyViewCollision
     {H : List UInt8 → List UInt8}
     (hHLen : ∀ m, (H m).length < 256 ^ 8)
     {presNonce : Vec UInt8 32} {repIdx : Nat} {partyIdx : Fin 3}
@@ -8585,7 +8594,7 @@ theorem vcCommitPartyView_binding
     (hNe : (v₁, fo₁) ≠ (v₂, fo₂))
     (hComEq : vcCommitPartyView H presNonce repIdx partyIdx v₁ fo₁ =
               vcCommitPartyView H presNonce repIdx partyIdx v₂ fo₂) :
-    ∃ m₁ m₂ : List UInt8, m₁ ≠ m₂ ∧ H m₁ = H m₂ := by
+    Σ m₁ : List UInt8, {m₂ : List UInt8 // m₁ ≠ m₂ ∧ H m₁ = H m₂} := by
   let d₁ := vcViewDigest H v₁ fo₁
   let d₂ := vcViewDigest H v₂ fo₂
   let pre₁ := vcCommitPartyViewPreimage presNonce repIdx partyIdx d₁ v₁.commitSalt
@@ -8617,11 +8626,23 @@ theorem vcCommitPartyView_binding
       intro hSerEq
       obtain ⟨hv, hfo⟩ := serPartyViewDigestFrames_injective hSaltEq hSerEq
       exact hNe (by rw [hv, hfo])
-    exact foldFramesHash_collision_of_ne hHLen
+    exact foldFramesHashCollision hHLen
       (serPartyViewDigestFrames_len v₁ fo₁)
       (serPartyViewDigestFrames_len v₂ fo₂) hFramesNe hdEq
   else
     exact ⟨pre₁, pre₂, hPreEq, hComEq⟩
+
+theorem vcCommitPartyView_binding
+    {H : List UInt8 → List UInt8}
+    (hHLen : ∀ m, (H m).length < 256 ^ 8)
+    {presNonce : Vec UInt8 32} {repIdx : Nat} {partyIdx : Fin 3}
+    {v₁ v₂ : PartyVcRepView} {fo₁ fo₂ : VcPartyFinalOut}
+    (hNe : (v₁, fo₁) ≠ (v₂, fo₂))
+    (hComEq : vcCommitPartyView H presNonce repIdx partyIdx v₁ fo₁ =
+              vcCommitPartyView H presNonce repIdx partyIdx v₂ fo₂) :
+    ∃ m₁ m₂ : List UInt8, m₁ ≠ m₂ ∧ H m₁ = H m₂ := by
+  obtain ⟨m₁, m₂, h⟩ := vcCommitPartyViewCollision hHLen hNe hComEq
+  exact ⟨m₁, m₂, h⟩
 
 /-- Reconstruct Round-1 `(com_0, com_1, com_2)` from an opened repetition (`blind_vc.rs:2388-2406`). -/
 def reconstructRepCommits (H : List UInt8 → List UInt8) (presNonce : Vec UInt8 32)
