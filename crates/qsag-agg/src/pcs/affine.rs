@@ -608,6 +608,7 @@ mod tests {
                     .collect();
                 let folded = fold_coset_group_ext4(
                     &fiber,
+                    x,
                     x.inv(),
                     Goldilocks::TWO.inv(),
                     &build_inv_zetas(),

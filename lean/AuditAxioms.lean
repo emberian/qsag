@@ -40,6 +40,7 @@ import all Qsag.MirSpecBridge
 import all Qsag.MirSpecBridgeCore
 import all Qsag.MirSpecBridgeWitnesses
 import all Qsag.MultiRoundFsQrom
+import all Qsag.ParallelSeededSpnSecurity
 import all Qsag.Poseidon2
 import all Qsag.Poseidon2AlgebraicAndRecursiveHem
 import all Qsag.PosixCrashWal
@@ -150,6 +151,7 @@ run_cmd do
     `Qsag.McRefine,
     `Qsag.MirSpecBridge,
     `Qsag.MultiRoundFsQrom,
+    `Qsag.ParallelSeededSpnSecurity,
     `Qsag.Poseidon2,
     `Qsag.Poseidon2AlgebraicAndRecursiveHem,
     `Qsag.PosixCrashWal,

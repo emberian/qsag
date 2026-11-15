@@ -24,7 +24,6 @@ pub enum SimdBackend {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CpuCapabilities {
     pub avx2: bool,
-    pub avx512: bool,
     pub bmi1: bool,
     pub bmi2: bool,
     pub adx: bool,
@@ -32,7 +31,6 @@ pub struct CpuCapabilities {
     pub gfni: bool,
     pub vpclmulqdq: bool,
     pub vaes: bool,
-    pub sha_ni: bool,
     /// `CPUID.(EAX=7, ECX=0):EDX[29]` — indicates `IA32_ARCH_CAPABILITIES` MSR (`0x10A`) exists
     /// (ring-0 readable via `RDMSR`; does NOT by itself prove bit 12 `DOITM` is set).
     pub x86_arch_capabilities_msr: bool,
@@ -41,10 +39,12 @@ pub struct CpuCapabilities {
     /// require ring-0 `RDMSR`/`WRMSR` privileges (never inferred from `CPUID.7.0:EDX[29]` alone).
     pub x86_doit_enumerated: bool,
     pub aarch64_neon: bool,
-    pub aarch64_sha2: bool,
     pub aarch64_sha3: bool,
     pub aarch64_pmull: bool,
     pub aarch64_dit: bool,
+    pub avx512: bool,
+    pub sha_ni: bool,
+    pub aarch64_sha2: bool,
 }
 
 /// Hardware Data-Independent Timing (`Intel DOIT` / `ARMv8.4-DIT`) status report.
@@ -101,29 +101,28 @@ static CACHED_BACKEND: AtomicU8 = AtomicU8::new(0);
 static CACHED_CAPS: AtomicU32 = AtomicU32::new(0);
 
 const CAP_INITIALIZED: u32 = 1 << 31;
-const CAP_AVX2: u32 = 1 << 0;
+pub(crate) const CAP_AVX2: u32 = 1 << 0;
 const CAP_BMI1: u32 = 1 << 1;
 const CAP_BMI2: u32 = 1 << 2;
 const CAP_ADX: u32 = 1 << 3;
-const CAP_PCLMULQDQ: u32 = 1 << 4;
-const CAP_GFNI: u32 = 1 << 5;
-const CAP_VPCLMULQDQ: u32 = 1 << 6;
+pub(crate) const CAP_PCLMULQDQ: u32 = 1 << 4;
+pub(crate) const CAP_GFNI: u32 = 1 << 5;
+pub(crate) const CAP_VPCLMULQDQ: u32 = 1 << 6;
 const CAP_VAES: u32 = 1 << 7;
 const CAP_X86_DOIT: u32 = 1 << 8;
-const CAP_A64_NEON: u32 = 1 << 9;
+pub(crate) const CAP_A64_NEON: u32 = 1 << 9;
 const CAP_A64_SHA3: u32 = 1 << 10;
 const CAP_A64_PMULL: u32 = 1 << 11;
 const CAP_A64_DIT: u32 = 1 << 12;
 const CAP_X86_ARCH_CAP_MSR: u32 = 1 << 13;
-const CAP_AVX512: u32 = 1 << 14;
-const CAP_SHA_NI: u32 = 1 << 15;
-const CAP_A64_SHA2: u32 = 1 << 16;
+pub(crate) const CAP_AVX512: u32 = 1 << 14;
+pub(crate) const CAP_SHA_NI: u32 = 1 << 15;
+pub(crate) const CAP_A64_SHA2: u32 = 1 << 16;
 
-#[inline(always)]
+#[inline]
 fn decode_caps(bits: u32) -> CpuCapabilities {
     CpuCapabilities {
         avx2: (bits & CAP_AVX2) != 0,
-        avx512: (bits & CAP_AVX512) != 0,
         bmi1: (bits & CAP_BMI1) != 0,
         bmi2: (bits & CAP_BMI2) != 0,
         adx: (bits & CAP_ADX) != 0,
@@ -131,14 +130,15 @@ fn decode_caps(bits: u32) -> CpuCapabilities {
         gfni: (bits & CAP_GFNI) != 0,
         vpclmulqdq: (bits & CAP_VPCLMULQDQ) != 0,
         vaes: (bits & CAP_VAES) != 0,
-        sha_ni: (bits & CAP_SHA_NI) != 0,
         x86_arch_capabilities_msr: (bits & CAP_X86_ARCH_CAP_MSR) != 0,
         x86_doit_enumerated: (bits & CAP_X86_DOIT) != 0,
         aarch64_neon: (bits & CAP_A64_NEON) != 0,
-        aarch64_sha2: (bits & CAP_A64_SHA2) != 0,
         aarch64_sha3: (bits & CAP_A64_SHA3) != 0,
         aarch64_pmull: (bits & CAP_A64_PMULL) != 0,
         aarch64_dit: (bits & CAP_A64_DIT) != 0,
+        avx512: (bits & CAP_AVX512) != 0,
+        sha_ni: (bits & CAP_SHA_NI) != 0,
+        aarch64_sha2: (bits & CAP_A64_SHA2) != 0,
     }
 }
 
@@ -146,7 +146,6 @@ fn decode_caps(bits: u32) -> CpuCapabilities {
 fn encode_caps(c: CpuCapabilities) -> u32 {
     CAP_INITIALIZED
         | if c.avx2 { CAP_AVX2 } else { 0 }
-        | if c.avx512 { CAP_AVX512 } else { 0 }
         | if c.bmi1 { CAP_BMI1 } else { 0 }
         | if c.bmi2 { CAP_BMI2 } else { 0 }
         | if c.adx { CAP_ADX } else { 0 }
@@ -154,7 +153,6 @@ fn encode_caps(c: CpuCapabilities) -> u32 {
         | if c.gfni { CAP_GFNI } else { 0 }
         | if c.vpclmulqdq { CAP_VPCLMULQDQ } else { 0 }
         | if c.vaes { CAP_VAES } else { 0 }
-        | if c.sha_ni { CAP_SHA_NI } else { 0 }
         | if c.x86_arch_capabilities_msr {
             CAP_X86_ARCH_CAP_MSR
         } else {
@@ -166,16 +164,17 @@ fn encode_caps(c: CpuCapabilities) -> u32 {
             0
         }
         | if c.aarch64_neon { CAP_A64_NEON } else { 0 }
-        | if c.aarch64_sha2 { CAP_A64_SHA2 } else { 0 }
         | if c.aarch64_sha3 { CAP_A64_SHA3 } else { 0 }
         | if c.aarch64_pmull { CAP_A64_PMULL } else { 0 }
         | if c.aarch64_dit { CAP_A64_DIT } else { 0 }
+        | if c.avx512 { CAP_AVX512 } else { 0 }
+        | if c.sha_ni { CAP_SHA_NI } else { 0 }
+        | if c.aarch64_sha2 { CAP_A64_SHA2 } else { 0 }
 }
 
 const fn empty_caps() -> CpuCapabilities {
     CpuCapabilities {
         avx2: false,
-        avx512: false,
         bmi1: false,
         bmi2: false,
         adx: false,
@@ -183,26 +182,42 @@ const fn empty_caps() -> CpuCapabilities {
         gfni: false,
         vpclmulqdq: false,
         vaes: false,
-        sha_ni: false,
         x86_arch_capabilities_msr: false,
         x86_doit_enumerated: false,
         aarch64_neon: false,
-        aarch64_sha2: false,
         aarch64_sha3: false,
         aarch64_pmull: false,
         aarch64_dit: false,
+        avx512: false,
+        sha_ni: false,
+        aarch64_sha2: false,
     }
 }
 
 /// Probe detailed hardware capabilities once and serve subsequent queries from a single relaxed
 /// `AtomicU32` load (`0` repeated `cpuid` serialization / KVM VM-exits).
-#[inline(always)]
+#[inline]
 pub fn probe_capabilities() -> CpuCapabilities {
     let fast = CACHED_CAPS.load(Ordering::Relaxed);
     if (fast & CAP_INITIALIZED) != 0 {
         return decode_caps(fast);
     }
     probe_capabilities_slow()
+}
+
+/// Fast internal register-only capability bitmask query (`0` stack `sret` materialization).
+#[inline]
+pub(crate) fn probe_capabilities_bits() -> u32 {
+    let fast = CACHED_CAPS.load(Ordering::Relaxed);
+    if (fast & CAP_INITIALIZED) != 0 {
+        return fast;
+    }
+    probe_capabilities_bits_slow()
+}
+
+#[cold]
+fn probe_capabilities_bits_slow() -> u32 {
+    encode_caps(probe_capabilities_slow())
 }
 
 #[cold]

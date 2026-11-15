@@ -3596,6 +3596,228 @@ theorem tryExtractShortMonomialOr13Witness_complete {nu q : Nat} [NeZero q]
   simp only [ht0Bool, ht1Bool, hAcc, hAcc', hcEqFalse, ↓reduceDIte]
   exact ⟨_, rfl⟩
 
+/-! ### 3.0b 24-Challenge `PQ128` Signed-Monomial RLWE OR-Sigma Profile ($R = 24$, $264$ Classical / $132$ Grover Bits)
+
+While $R = 13$ parallel repetitions over the $2 \cdot 2^{10} = 2048$-element signed-monomial set
+yield $(2^{11})^{13} = 2^{143}$ joint challenges ($71.5$ Grover bits, below the $128$-bit quantum
+threshold), setting $R = 24$ (`rlweOrSigmaPq128Reps`) yields $(2^{11})^{24} = 2^{264} = (2^{132})^2$
+joint challenges ($264$ classical bits / $132$ Grover bits $\ge 128$ quantum bits) while preserving
+the exact same wraparound-free $\ell_\infty \le 2 B_z = 6140 < 6144 = \lfloor 12289 / 2 \rfloor$
+short isometric witness extraction! -/
+
+/-- `PQ128` parallel repetition count `R = 24` (`24 * 11 = 264` classical challenge bits,
+    `132` Grover bits `≥ 128` quantum bits). -/
+def rlweOrSigmaPq128Reps : Nat := 24
+
+/-- Exact cardinality `(2 * 2^nu)^R` of the `R`-parallel signed-monomial joint challenge space. -/
+def rlweOrSigmaChallengeCard (nu R : Nat) : Nat := (2 * 2 ^ nu) ^ R
+
+set_option exponentiation.threshold 512 in
+/-- At `nu = 10` (`N = 1024`), `R = 24` gives `2^264 = (2^132)^2 ≥ (2^128)^2` challenge vectors
+    (`132` Grover bits), whereas `R = 13` gives `2^143 < (2^72)^2` (`< 72` Grover bits). -/
+theorem rlwe_or_sigma_24_pq128_vs_13_grover_ceiling :
+    rlweOrSigmaChallengeCard 10 rlweOrSigmaPq128Reps = 2 ^ 264 ∧
+    (2 ^ 132) ^ 2 = rlweOrSigmaChallengeCard 10 rlweOrSigmaPq128Reps ∧
+    (2 ^ 128) ^ 2 ≤ rlweOrSigmaChallengeCard 10 rlweOrSigmaPq128Reps ∧
+    rlweOrSigmaChallengeCard 10 13 = 2 ^ 143 ∧
+    rlweOrSigmaChallengeCard 10 13 < (2 ^ 72) ^ 2 := by
+  have h24 : rlweOrSigmaChallengeCard 10 rlweOrSigmaPq128Reps = 2 ^ (11 * 24) := by
+    unfold rlweOrSigmaChallengeCard rlweOrSigmaPq128Reps
+    have hBase : 2 * 2 ^ 10 = 2 ^ 11 := by decide
+    rw [hBase, ← Nat.pow_mul]
+  have h132 : (2 ^ 132) ^ 2 = 2 ^ (132 * 2) := (Nat.pow_mul 2 132 2).symm
+  have h128 : (2 ^ 128) ^ 2 = 2 ^ (128 * 2) := (Nat.pow_mul 2 128 2).symm
+  refine ⟨h24, ?_, ?_, by decide, by decide⟩
+  · rw [h132, h24]
+  · rw [h128, h24]; exact Nat.pow_le_pow_right (by decide : 0 < 2) (by decide : 128 * 2 ≤ 11 * 24)
+
+/-- **24-Parallel Cofactor RLWE OR-Sigma Witness Extractor (`extract_rlwe_or_sigma_24_witness`)**:
+    Extracts `(s2, e2)` satisfying `A * s2 + e2 ≡ 2 * u_b (mod q)` with `‖s2‖_∞, ‖e2‖_∞ ≤ 2 * 2^nu * B_z`
+    from any valid 24-challenge fork. -/
+def extract_rlwe_or_sigma_24_witness {nu q : Nat} [NeZero q]
+    (stmt : RlweOrSigmaStatement nu q)
+    (c c' : Fin 24 → SignedMonomialChal nu)
+    (tr tr' : RlweOrSigmaTranscript 24 nu q)
+    (ht0 : tr.t0 = tr'.t0) (ht1 : tr.t1 = tr'.t1)
+    (hcNe : c ≠ c')
+    (hAcc : verifyRlweOrSigma 24 nu q stmt c tr = true)
+    (hAcc' : verifyRlweOrSigma 24 nu q stmt c' tr' = true) :
+    ExtractedRlweOrSigmaWitness 24 nu q stmt :=
+  extractRlweOrSigmaWitnessGen 24 nu q stmt c c' tr tr' ht0 ht1 hcNe hAcc hAcc'
+
+/-- Total choice-free `PSum` computational cofactor extractor for the 24-parallel `PQ128` profile. -/
+def tryExtractRlweOrSigma24Witness {nu q : Nat} [NeZero q]
+    (stmt : RlweOrSigmaStatement nu q)
+    (c c' : Fin 24 → SignedMonomialChal nu)
+    (tr tr' : RlweOrSigmaTranscript 24 nu q) :
+    PSum (ExtractedRlweOrSigmaWitness 24 nu q stmt) RlweOrSigmaExtractRefusal :=
+  if ht0 : cycAllFin 24 (fun i => cycZqEq (tr.t0 i) (tr'.t0 i)) = true then
+    if ht1 : cycAllFin 24 (fun i => cycZqEq (tr.t1 i) (tr'.t1 i)) = true then
+      if hAcc : verifyRlweOrSigma 24 nu q stmt c tr = true then
+        if hAcc' : verifyRlweOrSigma 24 nu q stmt c' tr' = true then
+          if hcEq : cycAllFin 24 (fun i => decide (c i = c' i)) = true then
+            PSum.inr .identicalJointChallenges
+          else
+            have ht0Eq : tr.t0 = tr'.t0 := by
+              funext i; exact (cycZqEq_iff _ _).mp ((cycAllFin_eq_true_iff _).mp ht0 i)
+            have ht1Eq : tr.t1 = tr'.t1 := by
+              funext i; exact (cycZqEq_iff _ _).mp ((cycAllFin_eq_true_iff _).mp ht1 i)
+            have hcNe : c ≠ c' := by
+              intro hEq; apply hcEq
+              rw [cycAllFin_eq_true_iff]; intro i; subst hEq; exact decide_eq_true rfl
+            PSum.inl (extract_rlwe_or_sigma_24_witness stmt c c' tr tr' ht0Eq ht1Eq hcNe hAcc hAcc')
+        else
+          PSum.inr .secondTranscriptInvalid
+      else
+        PSum.inr .firstTranscriptInvalid
+    else
+      PSum.inr .commitmentMismatchT1
+  else
+    PSum.inr .commitmentMismatchT0
+
+theorem tryExtractRlweOrSigma24Witness_complete {nu q : Nat} [NeZero q]
+    (stmt : RlweOrSigmaStatement nu q)
+    (c c' : Fin 24 → SignedMonomialChal nu)
+    (tr tr' : RlweOrSigmaTranscript 24 nu q)
+    (ht0 : tr.t0 = tr'.t0) (ht1 : tr.t1 = tr'.t1)
+    (hcNe : c ≠ c')
+    (hAcc : verifyRlweOrSigma 24 nu q stmt c tr = true)
+    (hAcc' : verifyRlweOrSigma 24 nu q stmt c' tr' = true) :
+    ∃ w, tryExtractRlweOrSigma24Witness stmt c c' tr tr' = PSum.inl w := by
+  have ht0Bool : cycAllFin 24 (fun i => cycZqEq (tr.t0 i) (tr'.t0 i)) = true := by
+    rw [cycAllFin_eq_true_iff]; intro i; rw [ht0]; exact (cycZqEq_iff _ _).mpr rfl
+  have ht1Bool : cycAllFin 24 (fun i => cycZqEq (tr.t1 i) (tr'.t1 i)) = true := by
+    rw [cycAllFin_eq_true_iff]; intro i; rw [ht1]; exact (cycZqEq_iff _ _).mpr rfl
+  have hcEqFalse : ¬(cycAllFin 24 (fun i => decide (c i = c' i)) = true) := by
+    intro hAll; apply hcNe; funext i
+    exact of_decide_eq_true ((cycAllFin_eq_true_iff _).mp hAll i)
+  unfold tryExtractRlweOrSigma24Witness
+  simp only [ht0Bool, ht1Bool, hAcc, hAcc', hcEqFalse, ↓reduceDIte]
+  exact ⟨_, rfl⟩
+
+/-- **24-Parallel `PQ128` Short Isometric RLWE OR-Sigma Witness Extractor
+    (`extract_rlwe_or_sigma_24_short_witness`)**:
+    Extracts `(sIso, eIso, rRel)` with strictly wraparound-free $\ell_\infty$ norm
+    `‖sIso‖_∞, ‖eIso‖_∞ ≤ 2 * B_z` (`6140 < 6144 = ⌊12289 / 2⌋`), `‖rRel‖_1 ≤ 2`,
+    `rRel ∈ R_q^×`, and `A * sIso + eIso = rRel * u_b` over the 264-bit / 132-Grover-bit
+    24-repetition signed-monomial challenge space! -/
+def extract_rlwe_or_sigma_24_short_witness {nu q : Nat} [NeZero q]
+    (stmt : RlweOrSigmaStatement nu q)
+    (c c' : Fin 24 → SignedMonomialChal nu)
+    (tr tr' : RlweOrSigmaTranscript 24 nu q)
+    (ht0 : tr.t0 = tr'.t0) (ht1 : tr.t1 = tr'.t1)
+    (hcNe : c ≠ c')
+    (hAcc : verifyRlweOrSigma 24 nu q stmt c tr = true)
+    (hAcc' : verifyRlweOrSigma 24 nu q stmt c' tr' = true) :
+    ShortMonomialRelaxedRlweWitness 24 nu q stmt :=
+  extractRlweOrSigmaShortWitnessGen 24 nu q stmt c c' tr tr' ht0 ht1 hcNe hAcc hAcc'
+
+/-- Production $N = 1024, q = 12289$ 24-challenge `PQ128` short extraction soundness
+    (`‖sIso‖_∞, ‖eIso‖_∞ ≤ 6140 < 6144`, zero wraparound, invertible `rRel`). -/
+theorem extract_rlwe_or_sigma_24_short_witness_1024_sound
+    (stmt : RlweOrSigmaStatement 10 12289)
+    (c c' : Fin 24 → SignedMonomialChal 10)
+    (tr tr' : RlweOrSigmaTranscript 24 10 12289)
+    (hBz : stmt.Bz ≤ rlweProductionBz)
+    (hFork : ValidRlweOrSigmaFork 24 10 12289 stmt c c' tr tr') :
+    let w := extract_rlwe_or_sigma_24_short_witness stmt c c' tr tr'
+      hFork.t0_eq hFork.t1_eq hFork.chal_ne hFork.acc1 hFork.acc2
+    cycIntInfNorm w.sIso ≤ 6140 ∧
+    cycIntInfNorm w.eIso ≤ 6140 ∧
+    6140 < 12289 / 2 ∧
+    cycIntL1Norm w.rRel ≤ 2 ∧
+    cycZqMul (cycIntToZq 12289 w.rRel) w.rRelInvZq = cycZqOne ∧
+    cycZqCentered (cycIntToZq 12289 w.sIso) = w.sIso ∧
+    cycZqCentered (cycIntToZq 12289 w.eIso) = w.eIso ∧
+    cycZqAdd (cycZqMul stmt.A (cycIntToZq 12289 w.sIso)) (cycIntToZq 12289 w.eIso) =
+      cycZqMul (cycIntToZq 12289 w.rRel) (stmt.branchU w.branch) := by
+  intro w
+  have hNoWrap := short_monomial_witness_zero_wraparound_production hBz w
+  have hInv := (short_monomial_witness_rRel_invertible (by decide) (by decide) w).1
+  exact ⟨hNoWrap.1, hNoWrap.2.1, hNoWrap.2.2.1, w.rRel_l1_le, hInv,
+         hNoWrap.2.2.2.1, hNoWrap.2.2.2.2, w.short_relaxed_rlwe_mod_q⟩
+
+/-- **24-Challenge `PQ128` Secret Recovery or Short Ring-SIS Break
+    (`extract_rlwe_or_sigma_24_recovers_secret_or_breaks_short_sis`)**:
+    Any valid 24-challenge fork at `N = 1024, q = 12289` either recovers the planted short RLWE
+    secret `(sTrue, eTrue)` on the active branch via `rRelInvZq`, OR yields a non-zero short
+    homogeneous Ring-SIS vector `(sSis, eSis)` (`‖sSis‖_∞, ‖eSis‖_∞ ≤ 2 * B_z + 2 * B_sec`)! -/
+theorem extract_rlwe_or_sigma_24_recovers_secret_or_breaks_short_sis
+    (stmt : RlweOrSigmaStatement 10 12289)
+    (c c' : Fin 24 → SignedMonomialChal 10)
+    (tr tr' : RlweOrSigmaTranscript 24 10 12289)
+    (hFork : ValidRlweOrSigmaFork 24 10 12289 stmt c c' tr tr')
+    (Bsec : Nat) (sTrue eTrue : CycPolyInt 10)
+    (hBsecLt : Bsec < 12289 / 2)
+    (hSisLtQ : 2 * stmt.Bz + 2 * Bsec < 12289)
+    (hKey : ShortRlweKeyRelation stmt.A
+      (stmt.branchU (extract_rlwe_or_sigma_24_short_witness stmt c c' tr tr'
+        hFork.t0_eq hFork.t1_eq hFork.chal_ne hFork.acc1 hFork.acc2).branch)
+      Bsec sTrue eTrue) :
+    let w := extract_rlwe_or_sigma_24_short_witness stmt c c' tr tr'
+      hFork.t0_eq hFork.t1_eq hFork.chal_ne hFork.acc1 hFork.acc2
+    let sSis := cycIntSub w.sIso (cycIntMul w.rRel sTrue)
+    let eSis := cycIntSub w.eIso (cycIntMul w.rRel eTrue)
+    (cycZqCentered (cycZqMul w.rRelInvZq (cycIntToZq 12289 w.sIso)) = sTrue ∧
+     cycZqCentered (cycZqMul w.rRelInvZq (cycIntToZq 12289 w.eIso)) = eTrue) ∨
+    ((cycIntToZq 12289 sSis ≠ cycZqZero ∨ cycIntToZq 12289 eSis ≠ cycZqZero) ∧
+     cycIntInfNorm sSis ≤ 2 * stmt.Bz + 2 * Bsec ∧
+     cycIntInfNorm eSis ≤ 2 * stmt.Bz + 2 * Bsec ∧
+     cycZqAdd (cycZqMul stmt.A (cycIntToZq 12289 sSis)) (cycIntToZq 12289 eSis) = cycZqZero) :=
+  short_monomial_witness_recovers_secret_or_breaks_short_sis (by decide) (by decide)
+    (extract_rlwe_or_sigma_24_short_witness stmt c c' tr tr'
+      hFork.t0_eq hFork.t1_eq hFork.chal_ne hFork.acc1 hFork.acc2)
+    Bsec sTrue eTrue hBsecLt hSisLtQ hKey
+
+/-- Total choice-free `PSum`-valued computational short witness extractor for the 24-challenge
+    `PQ128` profile (`‖sIso‖_∞ ≤ 2 * B_z`). -/
+def tryExtractShortMonomialOr24Witness {nu q : Nat} [NeZero q]
+    (stmt : RlweOrSigmaStatement nu q)
+    (c c' : Fin 24 → SignedMonomialChal nu)
+    (tr tr' : RlweOrSigmaTranscript 24 nu q) :
+    PSum (ShortMonomialRelaxedRlweWitness 24 nu q stmt) RlweOrSigmaExtractRefusal :=
+  if ht0 : cycAllFin 24 (fun i => cycZqEq (tr.t0 i) (tr'.t0 i)) = true then
+    if ht1 : cycAllFin 24 (fun i => cycZqEq (tr.t1 i) (tr'.t1 i)) = true then
+      if hAcc : verifyRlweOrSigma 24 nu q stmt c tr = true then
+        if hAcc' : verifyRlweOrSigma 24 nu q stmt c' tr' = true then
+          if hcEq : cycAllFin 24 (fun i => decide (c i = c' i)) = true then
+            PSum.inr .identicalJointChallenges
+          else
+            have ht0Eq : tr.t0 = tr'.t0 := by
+              funext i; exact (cycZqEq_iff _ _).mp ((cycAllFin_eq_true_iff _).mp ht0 i)
+            have ht1Eq : tr.t1 = tr'.t1 := by
+              funext i; exact (cycZqEq_iff _ _).mp ((cycAllFin_eq_true_iff _).mp ht1 i)
+            have hcNe : c ≠ c' := by
+              intro hEq; apply hcEq
+              rw [cycAllFin_eq_true_iff]; intro i; subst hEq; exact decide_eq_true rfl
+            PSum.inl (extract_rlwe_or_sigma_24_short_witness stmt c c' tr tr' ht0Eq ht1Eq hcNe hAcc hAcc')
+        else
+          PSum.inr .secondTranscriptInvalid
+      else
+        PSum.inr .firstTranscriptInvalid
+    else
+      PSum.inr .commitmentMismatchT1
+  else
+    PSum.inr .commitmentMismatchT0
+
+theorem tryExtractShortMonomialOr24Witness_complete {nu q : Nat} [NeZero q]
+    (stmt : RlweOrSigmaStatement nu q)
+    (c c' : Fin 24 → SignedMonomialChal nu)
+    (tr tr' : RlweOrSigmaTranscript 24 nu q)
+    (hFork : ValidRlweOrSigmaFork 24 nu q stmt c c' tr tr') :
+    ∃ w, tryExtractShortMonomialOr24Witness stmt c c' tr tr' = PSum.inl w := by
+  obtain ⟨ht0, ht1, hcNe, hAcc, hAcc'⟩ := hFork
+  have ht0Bool : cycAllFin 24 (fun i => cycZqEq (tr.t0 i) (tr'.t0 i)) = true := by
+    rw [cycAllFin_eq_true_iff]; intro i; rw [ht0]; exact (cycZqEq_iff _ _).mpr rfl
+  have ht1Bool : cycAllFin 24 (fun i => cycZqEq (tr.t1 i) (tr'.t1 i)) = true := by
+    rw [cycAllFin_eq_true_iff]; intro i; rw [ht1]; exact (cycZqEq_iff _ _).mpr rfl
+  have hcEqFalse : ¬(cycAllFin 24 (fun i => decide (c i = c' i)) = true) := by
+    intro hAll; apply hcNe; funext i
+    exact of_decide_eq_true ((cycAllFin_eq_true_iff _).mp hAll i)
+  unfold tryExtractShortMonomialOr24Witness
+  simp only [ht0Bool, ht1Bool, hAcc, hAcc', hcEqFalse, ↓reduceDIte]
+  exact ⟨_, rfl⟩
+
 /-- Coefficient vector `ζ^(N - 1 - i)` of $(X^N - \zeta^N) / (X - \zeta)$. When $\zeta^N \equiv -1 \pmod q$
     it spans the kernel of evaluation-at-$\zeta$'s complementary factor: $X \cdot h \equiv \zeta \cdot h$ in $R_q$. -/
 def cycRootCofactor (N : Nat) (zeta : Int) : NegacyclicPolyInt N :=
@@ -4330,22 +4552,131 @@ theorem witness_valid_rlwe_or_sigma_fork_inhabited :
   exact ⟨sampleRlweOrSigmaStmt1024, _, _, _, _,
     ⟨h.2.1, h.2.2.1, h.1, h.2.2.2.1, h.2.2.2.2.1⟩⟩
 
+/-- **Inhabitedness Witness 3 (`inhabited_rlwe_or_sigma_24_valid_transcripts_1024`)**:
+    Proves inhabitedness of valid $N = 1024, q = 12289, R = 24, B_z = 3070$ forked `PQ128` OR-Sigma
+    transcripts `(trA, trB)` with non-zero CRS `A = 1 + X`, non-zero secret `(s, e) = (1, X)`,
+    identical commitments, and distinct 24-challenge vectors `chA ≠ chB`, where
+    `tryExtractShortMonomialOr24Witness` succeeds with `.inl w` and `‖w.sIso‖_∞, ‖w.eIso‖_∞ ≤ 6140`! -/
+theorem inhabited_rlwe_or_sigma_24_valid_transcripts_1024 :
+    let chA : Fin 24 → SignedMonomialChal 10 := fun _ => ⟨false, ⟨0, by decide⟩⟩
+    let chB : Fin 24 → SignedMonomialChal 10 := fun i =>
+      if i.val = 23 then ⟨false, ⟨1, by decide⟩⟩ else ⟨false, ⟨0, by decide⟩⟩
+    let ys : Fin 24 → CycPolyInt 10 := fun _ => sampleCyc1024MaskY
+    let ye : Fin 24 → CycPolyInt 10 := fun _ => sampleCyc1024MaskY
+    let cFake : Fin 24 → SignedMonomialChal 10 := fun _ => ⟨true, ⟨3, by decide⟩⟩
+    let trA := buildHonestRlweOrSigmaTranscript 24 10 12289 sampleRlweOrSigmaStmt1024 false
+      sampleCyc1024SecretS sampleCyc1024SecretE ys ye cFake ys ye chA
+    let trB := buildHonestRlweOrSigmaTranscript 24 10 12289 sampleRlweOrSigmaStmt1024 false
+      sampleCyc1024SecretS sampleCyc1024SecretE ys ye cFake ys ye chB
+    chA ≠ chB ∧
+    trA.t0 = trB.t0 ∧ trA.t1 = trB.t1 ∧
+    verifyRlweOrSigma 24 10 12289 sampleRlweOrSigmaStmt1024 chA trA = true ∧
+    verifyRlweOrSigma 24 10 12289 sampleRlweOrSigmaStmt1024 chB trB = true ∧
+    (∃ w, tryExtractShortMonomialOr24Witness sampleRlweOrSigmaStmt1024 chA chB trA trB = PSum.inl w ∧
+          cycIntInfNorm w.sIso ≤ 6140 ∧
+          cycIntInfNorm w.eIso ≤ 6140) := by
+  intro chA chB ys ye cFake trA trB
+  have hChNe : chA ≠ chB := by
+    intro hEq
+    have h23 := congrFun hEq ⟨23, by decide⟩
+    dsimp only [chA, chB] at h23
+    revert h23; decide
+  have hSame := buildHonestRlweOrSigmaTranscript_same_commitments 24 10 12289
+    sampleRlweOrSigmaStmt1024 false sampleCyc1024SecretS sampleCyc1024SecretE ys ye cFake ys ye chA chB
+  have hNormS : cycIntInfNorm sampleCyc1024SecretS ≤ 1 := by
+    rw [cycIntInfNorm_le_iff]; intro k
+    unfold sampleCyc1024SecretS signedMonomial negacyclicSignedMonomial signBitToInt
+    split <;> decide
+  have hNormE : cycIntInfNorm sampleCyc1024SecretE ≤ 1 := by
+    rw [cycIntInfNorm_le_iff]; intro k
+    unfold sampleCyc1024SecretE signedMonomial negacyclicSignedMonomial signBitToInt
+    split <;> decide
+  have hNormY : cycIntInfNorm sampleCyc1024MaskY ≤ 1 := by
+    rw [cycIntInfNorm_le_iff]; intro k
+    unfold sampleCyc1024MaskY signedMonomial negacyclicSignedMonomial signBitToInt
+    split <;> decide
+  have hSafeS : ∀ i : Fin 24, cycIntInfNorm (ys i) + cycIntInfNorm sampleCyc1024SecretS ≤ sampleRlweOrSigmaStmt1024.Bz := by
+    intro _; dsimp [ys, sampleRlweOrSigmaStmt1024, rlweProductionBz]; omega
+  have hSafeE : ∀ i : Fin 24, cycIntInfNorm (ye i) + cycIntInfNorm sampleCyc1024SecretE ≤ sampleRlweOrSigmaStmt1024.Bz := by
+    intro _; dsimp [ye, sampleRlweOrSigmaStmt1024, rlweProductionBz]; omega
+  have hFakeY : ∀ i : Fin 24, cycIntInfNorm (ys i) ≤ sampleRlweOrSigmaStmt1024.Bz := by
+    intro _; dsimp [ys, sampleRlweOrSigmaStmt1024, rlweProductionBz]; omega
+  have hAccA := buildHonestRlweOrSigmaTranscript_accepts sampleRlweOrSigmaStmt1024 false
+    sampleCyc1024SecretS sampleCyc1024SecretE ys ye cFake ys ye chA rfl hSafeS hSafeE hFakeY hFakeY
+  have hAccB := buildHonestRlweOrSigmaTranscript_accepts sampleRlweOrSigmaStmt1024 false
+    sampleCyc1024SecretS sampleCyc1024SecretE ys ye cFake ys ye chB rfl hSafeS hSafeE hFakeY hFakeY
+  have hFork : ValidRlweOrSigmaFork 24 10 12289 sampleRlweOrSigmaStmt1024 chA chB trA trB :=
+    ⟨hSame.1, hSame.2, hChNe, hAccA, hAccB⟩
+  obtain ⟨w, hw⟩ := tryExtractShortMonomialOr24Witness_complete sampleRlweOrSigmaStmt1024
+    chA chB trA trB hFork
+  have hBz : sampleRlweOrSigmaStmt1024.Bz = 3070 := rfl
+  have hsLe : cycIntInfNorm w.sIso ≤ 6140 := by
+    have h := w.sIso_infNorm_le; rw [hBz] at h; exact h
+  have heLe : cycIntInfNorm w.eIso ≤ 6140 := by
+    have h := w.eIso_infNorm_le; rw [hBz] at h; exact h
+  exact ⟨hChNe, hSame.1, hSame.2, hAccA, hAccB, ⟨w, hw, hsLe, heLe⟩⟩
+
+theorem witness_valid_rlwe_or_sigma_24_fork_inhabited :
+    ∃ (stmt : RlweOrSigmaStatement 10 12289)
+      (c c' : Fin 24 → SignedMonomialChal 10)
+      (tr tr' : RlweOrSigmaTranscript 24 10 12289),
+      ValidRlweOrSigmaFork 24 10 12289 stmt c c' tr tr' := by
+  have h := inhabited_rlwe_or_sigma_24_valid_transcripts_1024
+  exact ⟨sampleRlweOrSigmaStmt1024, _, _, _, _,
+    ⟨h.2.1, h.2.2.1, h.1, h.2.2.2.1, h.2.2.2.2.1⟩⟩
+
+/-- `#tooth`: 13 repetitions (`2^143`) fall strictly below the `(2^128)^2` Grover threshold,
+    requiring the 24-repetition (`2^264`) profile for `PQ128` quantum soundness. -/
+theorem tooth_rlwe_or_sigma_13_challenge_space_below_pq128_grover :
+    ¬ ((2 ^ 128) ^ 2 ≤ rlweOrSigmaChallengeCard 10 13) := by
+  decide
+
+/-- `#tooth`: identical 24-challenge vectors are refused by `tryExtractShortMonomialOr24Witness`. -/
+theorem tooth_short_24_extractor_refuses_identical_challenges
+    {nu q : Nat} [NeZero q]
+    (stmt : RlweOrSigmaStatement nu q)
+    (c : Fin 24 → SignedMonomialChal nu)
+    (tr tr' : RlweOrSigmaTranscript 24 nu q)
+    (w : ShortMonomialRelaxedRlweWitness 24 nu q stmt) :
+    tryExtractShortMonomialOr24Witness stmt c c tr tr' ≠ PSum.inl w := by
+  have hcEq : cycAllFin 24 (fun _ => true) = true := by decide
+  unfold tryExtractShortMonomialOr24Witness
+  simp only [decide_true, hcEq, ↓reduceDIte]
+  split
+  · split
+    · split
+      · split
+        · intro h; cases h
+        · intro h; cases h
+      · intro h; cases h
+    · intro h; cases h
+  · intro h; cases h
+
 #tooth_pair Qsag.signedMonomial_challenge_set_pairwise_invertible vs Qsag.tooth_even_modulus_no_inverse_1024
 #tooth_pair Qsag.signedMonomial_1024_challenge_set_2048_pairwise_invertible vs Qsag.tooth_two_term_no_inverse_12289
 #tooth_pair Qsag.extract_rlwe_or_sigma_13_short_witness_1024_sound vs Qsag.tooth_short_monomial_witness_refutes_zero_secret_at_12289
+#tooth_pair Qsag.extract_rlwe_or_sigma_24_short_witness_1024_sound vs Qsag.tooth_short_monomial_witness_refutes_zero_secret_at_12289
+#tooth_pair Qsag.rlwe_or_sigma_24_pq128_vs_13_grover_ceiling vs Qsag.tooth_rlwe_or_sigma_13_challenge_space_below_pq128_grover
 #tooth_pair Qsag.short_monomial_witness_recovers_secret_or_breaks_short_sis vs Qsag.tooth_cofactor_relation_admits_zero_secret_at_12289
 #tooth_pair Qsag.tryExtractShortMonomialOr13Witness_complete vs Qsag.tooth_short_extractor_refuses_identical_challenges
+#tooth_pair Qsag.tryExtractShortMonomialOr24Witness_complete vs Qsag.tooth_short_24_extractor_refuses_identical_challenges
 
 #verify_inhabited Qsag.short_monomial_witness_recovers_secret_or_breaks_short_sis Qsag.witness_short_rlwe_key_relation_positive_dimension
 #verify_inhabited Qsag.extract_rlwe_or_sigma_13_short_witness_1024_sound Qsag.witness_valid_rlwe_or_sigma_fork_inhabited
 #verify_inhabited Qsag.tryExtractShortMonomialOr13Witness_complete Qsag.witness_valid_rlwe_or_sigma_fork_inhabited
+#verify_inhabited Qsag.extract_rlwe_or_sigma_24_short_witness_1024_sound Qsag.witness_valid_rlwe_or_sigma_24_fork_inhabited
+#verify_inhabited Qsag.tryExtractShortMonomialOr24Witness_complete Qsag.witness_valid_rlwe_or_sigma_24_fork_inhabited
 
 #verify_constructive Qsag.cycIntInfNorm_mul_negacyclicSignedMonomial_eq
 #verify_constructive Qsag.SignedMonomialChal.ofBitVec_xor
 #verify_constructive Qsag.signedMonomial_challenge_set_pairwise_invertible
 #verify_constructive Qsag.extract_rlwe_or_sigma_13_short_witness_1024_sound
+#verify_constructive Qsag.extract_rlwe_or_sigma_24_short_witness_1024_sound
+#verify_constructive Qsag.extract_rlwe_or_sigma_24_recovers_secret_or_breaks_short_sis
+#verify_constructive Qsag.rlwe_or_sigma_24_pq128_vs_13_grover_ceiling
 #verify_constructive Qsag.short_monomial_witness_recovers_secret_or_breaks_short_sis
 #verify_constructive Qsag.tryExtractShortMonomialOr13Witness_complete
+#verify_constructive Qsag.tryExtractShortMonomialOr24Witness_complete
 #verify_constructive Qsag.tooth_cofactor_relation_admits_zero_secret_at_12289
 #verify_constructive Qsag.tooth_short_monomial_witness_refutes_zero_secret_at_12289
 

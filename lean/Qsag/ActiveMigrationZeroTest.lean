@@ -33,11 +33,11 @@ forks covering 438 repetitions, are composed in
 
 Outstanding production refinements: the secp256k1 group facts above and all of
 Ed25519, the circuit's windowed scalar multiplication, concrete address hashes
-and nullifier sponge, the batching of AND gates into the first inner-product
-claims (the `γ` combiner and round 0), the prime-field checks of the same flush,
+and nullifier sponge, the prime-field checks of the same flush,
 the coin-flip/PRSS transport of the sacrifice, and simulation of the entire
-adversarial execution. These are proof obligations,
-not assumptions silently discharged by test models.
+adversarial execution. The circuit-to-`PendingAnd` fault link and the batching
+of Boolean `AND` gates into the first inner-product claims (`γ` combiner and
+degree-30 round 0, `BIT_CHECK_DEGREE = 54`) are proved in §11 below.
 -/
 
 public import Qsag.Constructive
@@ -5640,13 +5640,14 @@ failing batch aborts the ceremony (`co_zk_mpc.rs:446-456`), before the
 `QSAG.OUTER.PRECOMMIT.V1` barrier and every opening (`co_zk_mpc.rs:193-198`).
 All 64 lanes of every batch are checked, the ten spare lanes of batch 6 included.
 
-The model here is the one of `flush_false_lane_accepting_coins_bound`, per fork:
-it starts at the first inner-product claims. That a wrong `AND` output in a lane
-makes both of the lane's first claims false, except on the `γ`-combiner and round-0
-coins (`2^-128` and `62 / 2^128` per instance in `outer_mpc.rs:29-33`), is not
-proved; it is the hypothesis `FalseRepetitionGivesFalseClaims` of
-`migration_false_statement_faces_sacrifice_in_every_repetition`. The prime-field
-checks of the same flush (`outer_mpc.rs:2196, 2474`) are not modelled. -/
+The model in §10 (`flush_false_lane_accepting_coins_bound`) starts at the first
+inner-product claims and parameterizes over `FalseRepetitionGivesFalseClaims` (`hLink`).
+Section 11 right below discharges `hLink` constructively (`circuit_round0_discharges_hLink`
+and `migration_unconditional_circuit_to_sacrifice_ceremony_bound`) by proving both
+the circuit-to-`PendingAnd` fault link (`false_witness_implies_pending_and_fault`)
+and the `γ`-combiner + degree-30 round-0 polynomial reduction (`round0IpClaim_err_eq_evalCoeffs`,
+`BIT_CHECK_DEGREE = 54` in `outer_mpc.rs:16-39`). The prime-field checks of the
+same flush (`outer_mpc.rs:2196, 2474`) are not modelled. -/
 
 namespace MigrationExecution
 
@@ -5792,10 +5793,12 @@ theorem migration_ceremony_false_repetition_below_2_pow_neg_246
 def ForkStrategiesPrecedeOwnCoins {r : Nat} (p : CeremonyProver r) : Prop :=
   ∀ (b : Fin 7) (c : CeremonyCoins) (v : List CoinPair), p b (setForkCoins c b v) = p b c
 
-/-- The unproved link from the circuit to the sacrifice: a repetition whose witness
+/-- Link predicate from the circuit to the sacrifice: a repetition whose witness
     fails `rel` has false first inner-product claims in both instances of its lane.
-    In Rust this holds except on the `γ`-combiner and round-0 coins
-    (`outer_mpc.rs:1472-1476, 1583-1588`). -/
+    Discharged constructively in §11 (`circuit_round0_discharges_hLink` and
+    `migration_unconditional_circuit_to_sacrifice_ceremony_bound`) outside the
+    explicit `γ`-combiner (`≤ 1 / 2^128`) and degree-30 round-0 (`≤ 30 / 2^128`
+    per instance, `outer_mpc.rs:1557-1776`) bad coin sets. -/
 def FalseRepetitionGivesFalseClaims (batches : MigrationWitnessBatches)
     (rel : MigrationKey256 → Prop) (cl : Fin 7 → FlushClaims) : Prop :=
   ∀ rep : Fin 438, ¬ rel (migrationRepetitionWitness batches rep) →
@@ -5804,9 +5807,9 @@ def FalseRepetitionGivesFalseClaims (batches : MigrationWitnessBatches)
 
 /-- **Same witness, every repetition, every fork.** All 438 repetitions evaluate the
     one shared witness (`migration_all_438_repetitions_same_witness`), so a statement
-    that is false for it is false in every repetition. Given the link from a false
-    repetition to false first claims in its lane (`hLink`, not proved here), every
-    repetition then faces the production bound in its own fork. -/
+    that is false for it is false in every repetition. Given `hLink` (discharged in
+    `circuit_round0_discharges_hLink` below), every repetition faces the production
+    bound in its own fork. -/
 theorem migration_false_statement_faces_sacrifice_in_every_repetition
     (batches : MigrationWitnessBatches) (hB : MigrationBatchConsistent batches)
     (rel : MigrationKey256 → Prop) (hFalse : ¬ rel (extractRepetitionWitness (batches 0) 0))
@@ -5926,6 +5929,1489 @@ theorem tooth_ceremony_single_fork_check_accepts_false_repetition :
   Qsag.MigrationExecution.migration_false_statement_faces_sacrifice_in_every_repetition
   Qsag.MigrationExecution.inhabited_false_repetition
   Qsag.MigrationExecution.tooth_ceremony_single_fork_check_accepts_false_repetition
+
+/-! ## 11. Constructive Circuit-to-Sacrifice Link (`γ`-Combiner + Degree-30 Round 0) & 438-Repetition QROM Soundness
+
+This section discharges `FalseRepetitionGivesFalseClaims` (`hLink`) constructively and proves the
+unconditional end-to-end 438-repetition ceremony + QROM Fiat–Shamir soundness bound matching
+`verify_pending_bits_slice` (`crates/qsag-migrate/src/outer_mpc.rs:16-45, 1557-1776`):
+1. **Circuit-to-`PendingAnd` Fault Link (`false_witness_implies_pending_and_fault`)**:
+   If a Boolean gate trace `gates` is sound for `relB : MigrationKey256 → Bool` and evaluates a
+   false witness (`relB (extractRepetitionWitness witness lane.val) = false`) to an opened `true`
+   output bit in `lane`, then at least one `PendingAnd` triple in `st.pending` has `laneErr = true`.
+2. **128-Gate Super-Block Packing + `γ`-Combiner (`superBlockDefect_ne_zero_of_gateErr`,
+   `gammaCombinedDefect_bad_coins_le_one`)**:
+   Packing 128 gate bits onto `{1, X, …, X^127}` in `RustGf128` is lossless (`0` collision error
+   inside a 128-gate super-block), and combining `numSuper` super-blocks with uniform `gammas`
+   survives on at most `1` bad `γ` coin (`≤ 2^-128`).
+3. **Degree-30 Round-0 Polynomial Reduction (`round0IpClaim_err_eq_evalCoeffs`,
+   `round0_false_gamma_survives_at_most_30_coins`)**:
+   Packing `8` blocks of `D0_BITS = 16` gates per super-block (`DEG_R0 = 31`, `HALF_R0 = 15`), the
+   Round-0 inner-product defect `(round0IpClaim … r0 lane).err` is a formal degree-`≤ 30` polynomial
+   in `r0` whose `r0^15` coefficient equals `gammaCombinedDefect` (independent of the prover's 30
+   reshared cross-terms `h0`), surviving on at most `30` coins per instance (`BIT_CHECK_DEGREE =
+   30 + 2 * 11 + 2 = 54` at `r = 11`).
+4. **Unconditional `hLink` Discharge & 438-Repetition Ceremony + QROM Composition
+   (`circuit_round0_discharges_hLink`, `migration_unconditional_circuit_to_sacrifice_ceremony_bound`,
+   `migration_438_zkboo_and_ceremony_qrom_soundness`)**:
+   Eliminates the unproved `hLink` hypothesis across all 438 repetitions (`7` forks × `64` lanes)
+   and composes the active-MPC flush bound with the 438-repetition ZKBoo QROM Grover bound. -/
+
+/-- General root-witness transfer from `Tower128` (`exists_eval_nonzero_tower128`) to `RustGf128`
+    via the field isomorphism `rustToTower` / `towerToRust`. -/
+private theorem evalCoeffs_map_rustToTower :
+    ∀ (cs : List RustGf128) (x : RustGf128),
+      RoundPoly.evalCoeffs (cs.map rustToTower) (rustToTower x) =
+        rustToTower (RoundPoly.evalCoeffs cs x)
+  | [], _ => rustToTower_zero.symm
+  | c :: tail, x => by
+    simp only [List.map_cons, RoundPoly.evalCoeffs_cons]
+    change towerAdd 7 (rustToTower c)
+        (towerMul 7 (rustToTower x) (RoundPoly.evalCoeffs (tail.map rustToTower) (rustToTower x))) =
+      rustToTower (c ^^^ rustGf128Mul x (RoundPoly.evalCoeffs tail x))
+    rw [evalCoeffs_map_rustToTower tail x, ← rustToTower_mul, ← rustToTower_xor]
+
+theorem exists_eval_nonzero_rustGf128 (cs : List RustGf128)
+    (hLen : cs.length < 2 ^ 128) (hEx : ∃ c ∈ cs, c ≠ 0#128) :
+    ∃ x₀ : RustGf128, RoundPoly.evalCoeffs cs x₀ ≠ CommRingOps.zero := by
+  obtain ⟨c, hcMem, hcNe⟩ := hEx
+  have hcTowerNe : rustToTower c ≠ towerZero 7 := by
+    intro hZero
+    exact hcNe (rustToTower_injective c 0#128 (hZero.trans rustToTower_zero.symm))
+  have hLenMap : (cs.map rustToTower).length < 2 ^ 128 := by
+    rw [List.length_map]; exact hLen
+  obtain ⟨t₀, ht₀⟩ := exists_eval_nonzero_tower128 (cs.map rustToTower) hLenMap
+    ⟨rustToTower c, List.mem_map_of_mem hcMem, hcTowerNe⟩
+  refine ⟨towerToRust 7 t₀, ?_⟩
+  intro hZero
+  have hEval := evalCoeffs_map_rustToTower cs (towerToRust 7 t₀)
+  rw [rustToTower_towerToRust] at hEval
+  have hZeroRust : RoundPoly.evalCoeffs cs (towerToRust 7 t₀) = 0#128 := hZero
+  rw [hZeroRust, rustToTower_zero] at hEval
+  exact ht₀ hEval
+
+/-- Structural zero-padded coefficient lookup on `List RustGf128` (`0` WHNF overhead). -/
+def coeffAt : List RustGf128 → Nat → RustGf128
+  | [], _ => 0#128
+  | c :: _, 0 => c
+  | _ :: cs, k + 1 => coeffAt cs k
+
+theorem exists_mem_ne_zero_of_coeffAt :
+    ∀ (cs : List RustGf128) (k : Nat),
+      coeffAt cs k ≠ 0#128 → ∃ c ∈ cs, c ≠ 0#128
+  | [], _, h => absurd rfl h
+  | c :: _, 0, h => ⟨c, .head _, h⟩
+  | _ :: tail, k + 1, h => by
+    obtain ⟨c', hm, hne⟩ := exists_mem_ne_zero_of_coeffAt tail k h
+    exact ⟨c', .tail _ hm, hne⟩
+
+theorem rustGf128_roots_le_of_coeffAt_nonzero (d : Nat) (cs : List RustGf128) (k : Nat)
+    (S : List RustGf128) (hS : S.Nodup) (hLen : cs.length ≤ d + 1) (hdLt : d + 1 < 2 ^ 128)
+    (hkNe : coeffAt cs k ≠ 0#128) :
+    (S.filter (fun r => decide (RoundPoly.evalCoeffs cs r = CommRingOps.zero))).length ≤ d :=
+  RoundPoly.roots_nodup_length_le d cs S hS hLen
+    (exists_eval_nonzero_rustGf128 cs (Nat.lt_of_le_of_lt hLen hdLt)
+      (exists_mem_ne_zero_of_coeffAt cs k hkNe))
+
+/-- Reconstructed bit of a 3-share 64-lane wire word in `lane`. -/
+def wireBit (w : RssWord64Shares3) (lane : Fin 64) : Bool :=
+  w.reconstruct.toBitVec.getLsbD lane.val
+
+theorem uint64_xor_getLsbD (a b : UInt64) (k : Nat) :
+    (a ^^^ b).toBitVec.getLsbD k = ((a.toBitVec.getLsbD k) ^^ (b.toBitVec.getLsbD k)) := by
+  cases a with
+  | ofBitVec _ =>
+    cases b with
+    | ofBitVec _ =>
+      exact BitVec.getLsbD_xor
+
+theorem uint64_and_getLsbD (a b : UInt64) (k : Nat) :
+    (a &&& b).toBitVec.getLsbD k = (a.toBitVec.getLsbD k && b.toBitVec.getLsbD k) := by
+  cases a with
+  | ofBitVec _ =>
+    cases b with
+    | ofBitVec _ =>
+      exact BitVec.getLsbD_and
+
+theorem xorShares_wireBit (a b : RssWord64Shares3) (lane : Fin 64) :
+    wireBit (xorShares a b) lane = ((wireBit a lane) ^^ (wireBit b lane)) := by
+  unfold wireBit xorShares RssWord64Shares3.reconstruct
+  simp only [uint64_xor_getLsbD]
+  cases a.w0.toBitVec.getLsbD lane.val <;>
+    cases a.w1.toBitVec.getLsbD lane.val <;>
+    cases a.w2.toBitVec.getLsbD lane.val <;>
+    cases b.w0.toBitVec.getLsbD lane.val <;>
+    cases b.w1.toBitVec.getLsbD lane.val <;>
+    cases b.w2.toBitVec.getLsbD lane.val <;> rfl
+
+/-- Per-lane Boolean multiplication error bit `z_lane ⊕ (x_lane ∧ y_lane)`. -/
+def PendingAnd.laneErr (t : PendingAnd) (lane : Fin 64) : Bool :=
+  (wireBit t.output lane) ^^ (wireBit t.lhs lane && wireBit t.rhs lane)
+
+theorem laneErr_eq_false_iff (t : PendingAnd) (lane : Fin 64) :
+    t.laneErr lane = false ↔ wireBit t.output lane = (wireBit t.lhs lane && wireBit t.rhs lane) := by
+  unfold PendingAnd.laneErr
+  cases wireBit t.output lane <;> cases (wireBit t.lhs lane && wireBit t.rhs lane) <;> decide
+
+/-- Pure single-lane Boolean gate semantics matching `evalGate` wire-for-wire. -/
+def evalGateBool (ws : List Bool) : Gate → Option (List Bool)
+  | .xor l r =>
+    match ws[l]?, ws[r]? with
+    | some a, some b => some ((a ^^ b) :: ws)
+    | _, _ => none
+  | .and l r _ =>
+    match ws[l]?, ws[r]? with
+    | some a, some b => some ((a && b) :: ws)
+    | _, _ => none
+
+/-- Pure single-lane Boolean circuit semantics matching `evalGates`. -/
+def evalGatesBool : List Bool → List Gate → Option (List Bool)
+  | ws, [] => some ws
+  | ws, g :: gs => (evalGateBool ws g).bind (fun next => evalGatesBool next gs)
+
+theorem evalGate_pending_subset {st next : GateState} {g : Gate}
+    (h : evalGate st g = some next) : ∀ t ∈ st.pending, t ∈ next.pending := by
+  cases g with
+  | xor l r =>
+    simp only [evalGate] at h
+    cases hl : st.wires[l]? with
+    | none => rw [hl] at h; cases h
+    | some a =>
+      cases hr : st.wires[r]? with
+      | none => rw [hl, hr] at h; cases h
+      | some b =>
+        rw [hl, hr] at h
+        injection h with hNext
+        subst hNext
+        intro t ht; exact ht
+  | and l r out =>
+    simp only [evalGate] at h
+    cases hl : st.wires[l]? with
+    | none => rw [hl] at h; cases h
+    | some a =>
+      cases hr : st.wires[r]? with
+      | none => rw [hl, hr] at h; cases h
+      | some b =>
+        rw [hl, hr] at h
+        injection h with hNext
+        subst hNext
+        intro t ht; exact .tail _ ht
+
+theorem evalGates_pending_subset :
+    ∀ (gs : List Gate) {st final : GateState},
+      evalGates st gs = some final → ∀ t ∈ st.pending, t ∈ final.pending
+  | [], _, _, h, t, ht => by injection h with hEq; subst hEq; exact ht
+  | g :: gs, st, final, h, t, ht => by
+    simp only [evalGates] at h
+    cases hg : evalGate st g with
+    | none => rw [hg] at h; cases h
+    | some mid =>
+      rw [hg] at h
+      exact evalGates_pending_subset gs h t (evalGate_pending_subset hg t ht)
+
+theorem evalGate_lane_sound {st next : GateState} {g : Gate} (lane : Fin 64)
+    (h : evalGate st g = some next)
+    (hPend : ∀ t ∈ next.pending, t.laneErr lane = false) :
+    evalGateBool (st.wires.map (fun w => wireBit w lane)) g =
+      some (next.wires.map (fun w => wireBit w lane)) := by
+  cases g with
+  | xor l r =>
+    simp only [evalGate] at h
+    cases hl : st.wires[l]? with
+    | none => rw [hl] at h; cases h
+    | some a =>
+      cases hr : st.wires[r]? with
+      | none => rw [hl, hr] at h; cases h
+      | some b =>
+        rw [hl, hr] at h
+        injection h with hNext
+        subst hNext
+        simp only [evalGateBool, List.getElem?_map, hl, hr, Option.map_some, List.map_cons,
+          xorShares_wireBit]
+  | and l r out =>
+    simp only [evalGate] at h
+    cases hl : st.wires[l]? with
+    | none => rw [hl] at h; cases h
+    | some a =>
+      cases hr : st.wires[r]? with
+      | none => rw [hl, hr] at h; cases h
+      | some b =>
+        rw [hl, hr] at h
+        injection h with hNext
+        subst hNext
+        have hOutEq : wireBit out lane = (wireBit a lane && wireBit b lane) :=
+          (laneErr_eq_false_iff ⟨a, b, out⟩ lane).mp (hPend ⟨a, b, out⟩ (.head _))
+        simp only [evalGateBool, List.getElem?_map, hl, hr, Option.map_some, List.map_cons, hOutEq]
+
+theorem evalGates_lane_sound :
+    ∀ (gs : List Gate) {st final : GateState} (lane : Fin 64),
+      evalGates st gs = some final →
+      (∀ t ∈ final.pending, t.laneErr lane = false) →
+      evalGatesBool (st.wires.map (fun w => wireBit w lane)) gs =
+        some (final.wires.map (fun w => wireBit w lane))
+  | [], _, _, _, h, _ => by
+    injection h with hEq; subst hEq; rfl
+  | g :: gs, st, final, lane, h, hPend => by
+    simp only [evalGates] at h
+    cases hg : evalGate st g with
+    | none => rw [hg] at h; cases h
+    | some mid =>
+      rw [hg] at h
+      have hMidPend : ∀ t ∈ mid.pending, t.laneErr lane = false :=
+        fun t ht => hPend t (evalGates_pending_subset gs h t ht)
+      have hStep := evalGate_lane_sound lane hg hMidPend
+      simp only [evalGatesBool, hStep, Option.bind_some]
+      exact evalGates_lane_sound gs lane h hPend
+
+theorem witnessWires_map_wireBit (witness : RssWitnessLanes3) (lane : Fin 64) :
+    (witnessWires witness).map (fun w => wireBit w lane) =
+      List.ofFn (fun i : Fin 256 => (extractRepetitionWitness witness lane.val).getLsbD i.val) := by
+  apply List.ext_getElem?
+  intro j
+  simp only [witnessWires, List.getElem?_map, List.getElem?_ofFn]
+  by_cases hj : j < 256
+  · simp only [hj, ↓reduceDIte, Option.map_some]
+    unfold extractRepetitionWitness wireBit RssWord64Shares3.reconstruct
+    rw [packBits_getLsbD 256 _ j hj, cDIte_pos hj]
+  · simp only [hj, ↓reduceDIte, Option.map_none]
+
+/-- Pure Boolean circuit soundness contract for `gates` wrt `relB : MigrationKey256 → Bool`. -/
+def CircuitSoundForRel (gates : List Gate) (relB : MigrationKey256 → Bool) : Prop :=
+  ∀ (w : MigrationKey256) (rest : List Bool),
+    evalGatesBool (List.ofFn (fun i : Fin 256 => w.getLsbD i.val)) gates = some (true :: rest) →
+    relB w = true
+
+/-- Constructive search for the first faulty `PendingAnd` index in `lane` (`0 Classical.choice`). -/
+def findFaultyGateIdx : List PendingAnd → Fin 64 → Option Nat
+  | [], _ => none
+  | t :: rest, lane =>
+    if t.laneErr lane then some 0
+    else (findFaultyGateIdx rest lane).map Nat.succ
+
+theorem findFaultyGateIdx_spec :
+    ∀ (pending : List PendingAnd) (lane : Fin 64),
+      (match findFaultyGateIdx pending lane with
+       | some idx => idx < pending.length ∧ (pending[idx]?).map (fun t => t.laneErr lane) = some true
+       | none => ∀ t ∈ pending, t.laneErr lane = false)
+  | [], _ => fun _ ht => nomatch ht
+  | t :: rest, lane => by
+    simp only [findFaultyGateIdx]
+    cases hErr : t.laneErr lane
+    · simp only [Bool.false_eq_true, ↓reduceIte]
+      have ih := findFaultyGateIdx_spec rest lane
+      cases hFind : findFaultyGateIdx rest lane with
+      | none =>
+        rw [hFind] at ih
+        simp only [Option.map_none]
+        intro x hx
+        rcases List.mem_cons.mp hx with rfl | hTail
+        · exact hErr
+        · exact ih x hTail
+      | some idx =>
+        rw [hFind] at ih
+        simp only [Option.map_some, List.length_cons, List.getElem?_cons_succ]
+        exact ⟨Nat.succ_lt_succ ih.1, ih.2⟩
+    · simp only [↓reduceIte, List.length_cons, Nat.zero_lt_succ, List.getElem?_cons_zero,
+        Option.map_some, hErr, and_self]
+
+/-- **Circuit-to-`PendingAnd` Fault Link (`false_witness_implies_pending_and_fault`)**:
+    Whenever `gates` is sound for `relB`, `relB (extractRepetitionWitness witness lane.val) = false`,
+    and `evalGates ⟨witnessWires witness, []⟩ gates = some st` produces an output wire whose `lane`
+    bit reconstructs to `true`, `findFaultyGateIdx` constructively locates an explicit faulty
+    `PendingAnd` gate `idx < st.pending.length` in `lane`! -/
+theorem false_witness_implies_pending_and_fault
+    (gates : List Gate) (relB : MigrationKey256 → Bool)
+    (hCirc : CircuitSoundForRel gates relB)
+    (witness : RssWitnessLanes3) (lane : Fin 64)
+    (hFalse : relB (extractRepetitionWitness witness lane.val) = false)
+    (st : GateState) (hEval : evalGates ⟨witnessWires witness, []⟩ gates = some st)
+    (hOpenTrue : match st.wires with | out :: _ => wireBit out lane = true | [] => False) :
+    ∃ idx : Nat, idx < st.pending.length ∧
+      (st.pending[idx]?).map (fun t => t.laneErr lane) = some true := by
+  have hSpec := findFaultyGateIdx_spec st.pending lane
+  cases hFind : findFaultyGateIdx st.pending lane with
+  | some idx =>
+    rw [hFind] at hSpec
+    exact ⟨idx, hSpec⟩
+  | none =>
+    rw [hFind] at hSpec
+    exfalso
+    have hPure := evalGates_lane_sound gates lane hEval hSpec
+    dsimp only at hPure
+    rw [witnessWires_map_wireBit witness lane] at hPure
+    cases hw : st.wires with
+    | nil => rw [hw] at hOpenTrue; exact hOpenTrue
+    | cons out rest =>
+      rw [hw] at hOpenTrue hPure
+      dsimp only at hOpenTrue
+      simp only [List.map_cons, hOpenTrue] at hPure
+      have hRelTrue := hCirc (extractRepetitionWitness witness lane.val)
+        (rest.map (fun w => wireBit w lane)) hPure
+      rw [hFalse] at hRelTrue
+      cases hRelTrue
+
+/-- Finite XOR sum over `RustGf128`. -/
+def rustSum : Nat → (Nat → RustGf128) → RustGf128
+  | 0, _ => 0#128
+  | n + 1, f => rustSum n f ^^^ f n
+
+theorem rustSum_congr (n : Nat) {f g : Nat → RustGf128}
+    (h : ∀ i, i < n → f i = g i) : rustSum n f = rustSum n g := by
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+    show rustSum n f ^^^ f n = rustSum n g ^^^ g n
+    rw [ih (fun i hi => h i (by omega)), h n (by omega)]
+
+theorem rustSum_xor (n : Nat) (f g : Nat → RustGf128) :
+    rustSum n (fun i => f i ^^^ g i) = rustSum n f ^^^ rustSum n g := by
+  induction n with
+  | zero => simp only [rustSum]; decide
+  | succ n ih =>
+    show rustSum n (fun i => f i ^^^ g i) ^^^ (f n ^^^ g n) =
+      (rustSum n f ^^^ f n) ^^^ (rustSum n g ^^^ g n)
+    rw [ih]
+    rw [BitVec.xor_assoc (rustSum n f) (rustSum n g) (f n ^^^ g n),
+        ← BitVec.xor_assoc (rustSum n g) (f n) (g n),
+        BitVec.xor_comm (rustSum n g) (f n),
+        BitVec.xor_assoc (f n) (rustSum n g) (g n),
+        ← BitVec.xor_assoc (rustSum n f) (f n) (rustSum n g ^^^ g n)]
+
+theorem rustSum_mul_left (c : RustGf128) : ∀ (n : Nat) (f : Nat → RustGf128),
+    rustGf128Mul c (rustSum n f) = rustSum n (fun i => rustGf128Mul c (f i))
+  | 0, _ => rustGf128Mul_zero_right c
+  | n + 1, f => by
+    show rustGf128Mul c (rustSum n f ^^^ f n) =
+      rustSum n (fun i => rustGf128Mul c (f i)) ^^^ rustGf128Mul c (f n)
+    rw [rustGf128Mul_xor_right, rustSum_mul_left c n f]
+
+theorem rustSum_add_split (n : Nat) (f : Nat → RustGf128) : ∀ m : Nat,
+    rustSum (n + m) f = rustSum n f ^^^ rustSum m (fun j => f (n + j))
+  | 0 => by show rustSum n f = rustSum n f ^^^ 0#128; rw [BitVec.xor_zero]
+  | m + 1 => by
+    show rustSum (n + m) f ^^^ f (n + m) =
+      rustSum n f ^^^ (rustSum m (fun j => f (n + j)) ^^^ f (n + m))
+    rw [rustSum_add_split n f m, BitVec.xor_assoc]
+
+theorem rustSum_blocks (B K : Nat) (f : Nat → RustGf128) :
+    rustSum (B * K) f = rustSum B (fun b => rustSum K (fun u => f (K * b + u))) := by
+  induction B with
+  | zero => simp [rustSum]
+  | succ B ih =>
+    have hEq : (B + 1) * K = B * K + K := by rw [Nat.add_mul, Nat.one_mul]
+    rw [hEq, rustSum_add_split (B * K) f K, ih]
+    show _ = rustSum B _ ^^^ rustSum K (fun u => f (K * B + u))
+    congr 1
+    apply rustSum_congr
+    intro u _
+    rw [Nat.mul_comm B K]
+
+/-- Gate bit extractors on `pending : List PendingAnd` (zero-padded past `pending.length`). -/
+def gateLhsBit (pending : List PendingAnd) (idx : Nat) (lane : Fin 64) : Bool :=
+  match pending[idx]? with | some t => wireBit t.lhs lane | none => false
+
+def gateRhsBit (pending : List PendingAnd) (idx : Nat) (lane : Fin 64) : Bool :=
+  match pending[idx]? with | some t => wireBit t.rhs lane | none => false
+
+def gateOutBit (pending : List PendingAnd) (idx : Nat) (lane : Fin 64) : Bool :=
+  match pending[idx]? with | some t => wireBit t.output lane | none => false
+
+def gateErrBit (pending : List PendingAnd) (idx : Nat) (lane : Fin 64) : Bool :=
+  (gateOutBit pending idx lane) ^^ (gateLhsBit pending idx lane && gateRhsBit pending idx lane)
+
+/-- Pack 128 gate bits onto `{1, X, …, X^127}` in `RustGf128` (`outer_mpc.rs:1593-1642`). -/
+def packBlock128 (f : Nat → Bool) : RustGf128 :=
+  rustSum 128 (fun k => if f k then BitVec.twoPow 128 k else 0#128)
+
+theorem packBlock128_aux_bit : ∀ (n : Nat), n ≤ 128 → ∀ (f : Nat → Bool) (i : Nat),
+    (rustSum n (fun k => if f k then BitVec.twoPow 128 k else 0#128)).getLsbD i =
+      (decide (i < n) && f i)
+  | 0, _, f, i => by simp [rustSum]
+  | n + 1, hn, f, i => by
+    show (rustSum n (fun k => if f k then BitVec.twoPow 128 k else 0#128) ^^^
+      (if f n then BitVec.twoPow 128 n else 0#128)).getLsbD i = (decide (i < n + 1) && f i)
+    rw [BitVec.getLsbD_xor, packBlock128_aux_bit n (by omega) f i, ite_twoPow_bit (f n) n i (by omega)]
+    rcases Nat.lt_trichotomy i n with hLt | rfl | hGt
+    · rw [decide_eq_true hLt, decide_eq_true (by omega : i < n + 1),
+          decide_eq_false (by omega : ¬ n = i)]
+      cases f i <;> cases f n <;> rfl
+    · rw [decide_eq_false (Nat.lt_irrefl i), decide_eq_true (Nat.lt_succ_self i),
+          decide_eq_true (Eq.refl i)]
+      cases f i <;> rfl
+    · rw [decide_eq_false (by omega : ¬ i < n), decide_eq_false (by omega : ¬ i < n + 1),
+          decide_eq_false (by omega : ¬ n = i)]
+      cases f i <;> cases f n <;> rfl
+
+theorem packBlock128_getLsbD (f : Nat → Bool) (i : Nat) (hi : i < 128) :
+    (packBlock128 f).getLsbD i = f i := by
+  unfold packBlock128
+  rw [packBlock128_aux_bit 128 (Nat.le_refl 128) f i, decide_eq_true hi, Bool.true_and]
+
+/-- Packed 128-gate `AND` product, claimed `Z` output, and `AND`⊕`Z` defect of super-block `q`. -/
+def superBlockAnd (pending : List PendingAnd) (q : Nat) (lane : Fin 64) : RustGf128 :=
+  packBlock128 (fun k => gateLhsBit pending (128 * q + k) lane && gateRhsBit pending (128 * q + k) lane)
+
+def superBlockZ (pending : List PendingAnd) (q : Nat) (lane : Fin 64) : RustGf128 :=
+  packBlock128 (fun k => gateOutBit pending (128 * q + k) lane)
+
+def superBlockDefect (pending : List PendingAnd) (q : Nat) (lane : Fin 64) : RustGf128 :=
+  superBlockAnd pending q lane ^^^ superBlockZ pending q lane
+
+theorem superBlockDefect_ne_zero_of_gateErr (pending : List PendingAnd)
+    (numSuper idx : Nat) (lane : Fin 64)
+    (hIdx : idx < 128 * numSuper) (hErr : gateErrBit pending idx lane = true) :
+    idx / 128 < numSuper ∧ superBlockDefect pending (idx / 128) lane ≠ 0#128 := by
+  refine ⟨by omega, ?_⟩
+  intro hZero
+  have hBit := congrArg (fun v : RustGf128 => v.getLsbD (idx % 128)) hZero
+  have hRem : idx % 128 < 128 := Nat.mod_lt idx (by decide)
+  have hDivMod : 128 * (idx / 128) + idx % 128 = idx := Nat.div_add_mod idx 128
+  unfold superBlockDefect superBlockAnd superBlockZ at hBit
+  rw [BitVec.getLsbD_xor, packBlock128_getLsbD _ _ hRem, packBlock128_getLsbD _ _ hRem,
+      hDivMod, BitVec.getLsbD_zero] at hBit
+  unfold gateErrBit at hErr
+  cases hout : gateOutBit pending idx lane <;>
+    cases hand : (gateLhsBit pending idx lane && gateRhsBit pending idx lane) <;>
+    simp only [hout, hand] at hErr hBit <;>
+    cases hErr <;> cases hBit
+
+/-- `γ`-weighted super-block `Z` accumulator (`scratch.step0_acc[0..1]`, `outer_mpc.rs:1648-1654`)
+    and `γ`-weighted super-block defect (`∑_{q < numSuper} γ_q · superBlockDefect_q`). -/
+def step0ZAcc (pending : List PendingAnd) (numSuper : Nat)
+    (gammas : Nat → RustGf128) (lane : Fin 64) : RustGf128 :=
+  rustDot numSuper gammas (fun q => superBlockZ pending q lane)
+
+def gammaCombinedDefect (pending : List PendingAnd) (numSuper : Nat)
+    (gammas : Nat → RustGf128) (lane : Fin 64) : RustGf128 :=
+  rustDot numSuper gammas (fun q => superBlockDefect pending q lane)
+
+def setGammaAt (gammas : Nat → RustGf128) (qStar : Nat) (g : RustGf128) : Nat → RustGf128 :=
+  fun q => if q = qStar then g else gammas q
+
+theorem rustDot_setGammaAt :
+    ∀ (n : Nat) (gammas : Nat → RustGf128) (d : Nat → RustGf128) (qStar : Nat) (g : RustGf128),
+      qStar < n →
+      rustDot n (setGammaAt gammas qStar g) d =
+        rustDot n (setGammaAt gammas qStar 0#128) d ^^^ rustGf128Mul g (d qStar)
+  | 0, _, _, _, _, h => nomatch h
+  | n + 1, gammas, d, qStar, g, hLt => by
+    rcases Nat.eq_or_lt_of_le (Nat.lt_succ_iff.mp hLt) with rfl | hLt'
+    · show rustDot qStar (setGammaAt gammas qStar g) d ^^^
+          rustGf128Mul (setGammaAt gammas qStar g qStar) (d qStar) =
+        (rustDot qStar (setGammaAt gammas qStar 0#128) d ^^^
+          rustGf128Mul (setGammaAt gammas qStar 0#128 qStar) (d qStar)) ^^^
+        rustGf128Mul g (d qStar)
+      have hRest : rustDot qStar (setGammaAt gammas qStar g) d =
+          rustDot qStar (setGammaAt gammas qStar 0#128) d := by
+        apply rustDot_congr
+        · intro i hi
+          simp only [setGammaAt, show ¬ i = qStar from by omega, ↓reduceIte]
+        · intro _ _; rfl
+      simp only [hRest, setGammaAt, ↓reduceIte, rustGf128Mul_zero_left, BitVec.xor_zero]
+    · have ih := rustDot_setGammaAt n gammas d qStar g hLt'
+      show rustDot n (setGammaAt gammas qStar g) d ^^^
+          rustGf128Mul (setGammaAt gammas qStar g n) (d n) =
+        (rustDot n (setGammaAt gammas qStar 0#128) d ^^^
+          rustGf128Mul (setGammaAt gammas qStar 0#128 n) (d n)) ^^^
+        rustGf128Mul g (d qStar)
+      rw [ih]
+      simp only [setGammaAt, show ¬ n = qStar from by omega, ↓reduceIte]
+      rw [BitVec.xor_assoc (rustDot n (setGammaAt gammas qStar 0#128) d)
+            (rustGf128Mul g (d qStar)) (rustGf128Mul (gammas n) (d n)),
+          BitVec.xor_comm (rustGf128Mul g (d qStar)) (rustGf128Mul (gammas n) (d n)),
+          ← BitVec.xor_assoc]
+
+/-- **`γ`-Combiner Soundness (`gammaCombinedDefect_bad_coins_le_one`)**:
+    If super-block `qStar < numSuper` has a non-zero packed gate defect, then for any fixed values
+    of the other `γ` coordinates and any duplicate-free `S : List RustGf128`, at most `1` value of
+    `γ_{qStar} ∈ S` cancels `gammaCombinedDefect` (`≤ 2^-128`). -/
+theorem gammaCombinedDefect_bad_coins_le_one
+    (pending : List PendingAnd) (numSuper qStar : Nat) (lane : Fin 64)
+    (hq : qStar < numSuper)
+    (hDefNe : superBlockDefect pending qStar lane ≠ 0#128)
+    (otherGammas : Nat → RustGf128)
+    (S : List RustGf128) (hS : S.Nodup) :
+    (S.filter (fun g =>
+      decide (gammaCombinedDefect pending numSuper (setGammaAt otherGammas qStar g) lane = 0#128))).length ≤ 1 := by
+  let c0 := rustDot numSuper (setGammaAt otherGammas qStar 0#128)
+    (fun q => superBlockDefect pending q lane)
+  let c1 := superBlockDefect pending qStar lane
+  have hCount := rustGf128_roots_le_of_coeffAt_nonzero 1 [c0, c1] 1 S hS (Nat.le_refl 2) (by decide) hDefNe
+  have hPred : (fun g =>
+      decide (gammaCombinedDefect pending numSuper (setGammaAt otherGammas qStar g) lane = 0#128)) =
+      (fun g => decide (RoundPoly.evalCoeffs [c0, c1] g = CommRingOps.zero)) := by
+    funext g
+    have hEq : gammaCombinedDefect pending numSuper (setGammaAt otherGammas qStar g) lane =
+        RoundPoly.evalCoeffs [c0, c1] g := by
+      unfold gammaCombinedDefect
+      rw [rustDot_setGammaAt numSuper otherGammas _ qStar g hq]
+      show c0 ^^^ rustGf128Mul g c1 = c0 ^^^ rustGf128Mul g (c1 ^^^ rustGf128Mul g 0#128)
+      rw [rustGf128Mul_zero_right, BitVec.xor_zero]
+    rw [hEq]; rfl
+  rw [hPred]; exact hCount
+
+/-! ### Degree-30 Round-0 Polynomial Algebra (`D0_BITS = 16`, `DEG_R0 = 31`, `HALF_R0 = 15`) -/
+
+def polyAddRust : List RustGf128 → List RustGf128 → List RustGf128
+  | [], ds => ds
+  | cs, [] => cs
+  | c :: cs, d :: ds => (c ^^^ d) :: polyAddRust cs ds
+
+def polyScaleRust (c : RustGf128) (cs : List RustGf128) : List RustGf128 :=
+  cs.map (rustGf128Mul c)
+
+def polyMulRust : List RustGf128 → List RustGf128 → List RustGf128
+  | [], _ => []
+  | c :: cs, ds => polyAddRust (polyScaleRust c ds) (0#128 :: polyMulRust cs ds)
+
+def polySumRust : Nat → (Nat → List RustGf128) → List RustGf128
+  | 0, _ => []
+  | n + 1, f => polyAddRust (polySumRust n f) (f n)
+
+theorem polyAddRust_length : ∀ (a b : List RustGf128),
+    (polyAddRust a b).length = Nat.max a.length b.length
+  | [], b => by simp [polyAddRust]
+  | a :: as, [] => by simp [polyAddRust]
+  | a :: as, b :: bs => by simp [polyAddRust, polyAddRust_length as bs, Nat.succ_max_succ]
+
+theorem evalCoeffs_polyAddRust : ∀ (a b : List RustGf128) (x : RustGf128),
+    RoundPoly.evalCoeffs (polyAddRust a b) x =
+      RoundPoly.evalCoeffs a x ^^^ RoundPoly.evalCoeffs b x
+  | [], b, _ => by show RoundPoly.evalCoeffs b _ = 0#128 ^^^ _; rw [BitVec.zero_xor]
+  | a :: as, [], x => by
+    simp only [polyAddRust]
+    show RoundPoly.evalCoeffs (a :: as) x = RoundPoly.evalCoeffs (a :: as) x ^^^ 0#128
+    rw [BitVec.xor_zero]
+  | a :: as, b :: bs, x => by
+    show (a ^^^ b) ^^^ rustGf128Mul x (RoundPoly.evalCoeffs (polyAddRust as bs) x) =
+      (a ^^^ rustGf128Mul x (RoundPoly.evalCoeffs as x)) ^^^
+      (b ^^^ rustGf128Mul x (RoundPoly.evalCoeffs bs x))
+    rw [evalCoeffs_polyAddRust as bs x, rustGf128Mul_xor_right]
+    rw [BitVec.xor_assoc a (rustGf128Mul x (RoundPoly.evalCoeffs as x))
+          (b ^^^ rustGf128Mul x (RoundPoly.evalCoeffs bs x)),
+        ← BitVec.xor_assoc (rustGf128Mul x (RoundPoly.evalCoeffs as x)) b
+          (rustGf128Mul x (RoundPoly.evalCoeffs bs x)),
+        BitVec.xor_comm (rustGf128Mul x (RoundPoly.evalCoeffs as x)) b,
+        BitVec.xor_assoc b (rustGf128Mul x (RoundPoly.evalCoeffs as x))
+          (rustGf128Mul x (RoundPoly.evalCoeffs bs x)),
+        ← BitVec.xor_assoc a b]
+
+theorem evalCoeffs_polyScaleRust (c : RustGf128) :
+    ∀ (cs : List RustGf128) (x : RustGf128),
+      RoundPoly.evalCoeffs (polyScaleRust c cs) x = rustGf128Mul c (RoundPoly.evalCoeffs cs x)
+  | [], _ => (rustGf128Mul_zero_right c).symm
+  | d :: ds, x => by
+    show rustGf128Mul c d ^^^ rustGf128Mul x (RoundPoly.evalCoeffs (polyScaleRust c ds) x) =
+      rustGf128Mul c (d ^^^ rustGf128Mul x (RoundPoly.evalCoeffs ds x))
+    rw [evalCoeffs_polyScaleRust c ds x, rustGf128Mul_xor_right, rustGf128Mul_left_comm]
+
+theorem evalCoeffs_polyMulRust : ∀ (cs ds : List RustGf128) (x : RustGf128),
+    RoundPoly.evalCoeffs (polyMulRust cs ds) x =
+      rustGf128Mul (RoundPoly.evalCoeffs cs x) (RoundPoly.evalCoeffs ds x)
+  | [], _, _ => (rustGf128Mul_zero_left _).symm
+  | c :: cs, ds, x => by
+    unfold polyMulRust
+    rw [evalCoeffs_polyAddRust, evalCoeffs_polyScaleRust]
+    show rustGf128Mul c (RoundPoly.evalCoeffs ds x) ^^^
+        (0#128 ^^^ rustGf128Mul x (RoundPoly.evalCoeffs (polyMulRust cs ds) x)) =
+      rustGf128Mul (c ^^^ rustGf128Mul x (RoundPoly.evalCoeffs cs x)) (RoundPoly.evalCoeffs ds x)
+    rw [BitVec.zero_xor, evalCoeffs_polyMulRust cs ds x, rustGf128Mul_xor_left, rustGf128Mul_assoc]
+
+theorem evalCoeffs_polySumRust : ∀ (n : Nat) (f : Nat → List RustGf128) (x : RustGf128),
+    RoundPoly.evalCoeffs (polySumRust n f) x = rustSum n (fun i => RoundPoly.evalCoeffs (f i) x)
+  | 0, _, _ => rfl
+  | n + 1, f, x => by
+    show RoundPoly.evalCoeffs (polyAddRust (polySumRust n f) (f n)) x =
+      rustSum n (fun i => RoundPoly.evalCoeffs (f i) x) ^^^ RoundPoly.evalCoeffs (f n) x
+    rw [evalCoeffs_polyAddRust, evalCoeffs_polySumRust n f x]
+
+theorem polySumRust_length_le (B : Nat) :
+    ∀ (n : Nat) (f : Nat → List RustGf128),
+      (∀ i, i < n → (f i).length ≤ B) → (polySumRust n f).length ≤ B
+  | 0, _, _ => Nat.zero_le B
+  | n + 1, f, h => by
+    simp only [polySumRust, polyAddRust_length]
+    exact Nat.max_le.mpr ⟨polySumRust_length_le B n f (fun i hi => h i (by omega)), h n (by omega)⟩
+
+theorem polyMulRust_length_le (cs ds : List RustGf128) (hds : 1 ≤ ds.length) :
+    (polyMulRust cs ds).length ≤ cs.length + ds.length - 1 := by
+  induction cs with
+  | nil => exact Nat.zero_le _
+  | cons c rest ih =>
+    cases rest with
+    | nil =>
+      simp only [polyMulRust, polyAddRust_length, polyScaleRust, List.length_map, List.length_singleton]
+      exact Nat.max_le.mpr ⟨by omega, by omega⟩
+    | cons c' cs' =>
+      have hStep : polyMulRust (c :: c' :: cs') ds =
+          polyAddRust (polyScaleRust c ds) (0#128 :: polyMulRust (c' :: cs') ds) := rfl
+      rw [hStep, polyAddRust_length, polyScaleRust, List.length_map, List.length_cons]
+      simp only [List.length_cons] at ih ⊢
+      exact Nat.max_le.mpr ⟨by omega, by omega⟩
+
+theorem polyAddRust_coeffAt : ∀ (a b : List RustGf128) (k : Nat),
+    coeffAt (polyAddRust a b) k = coeffAt a k ^^^ coeffAt b k
+  | [], b, k => by show coeffAt b k = 0#128 ^^^ coeffAt b k; rw [BitVec.zero_xor]
+  | a :: as, [], k => by
+    show coeffAt (a :: as) k = coeffAt (a :: as) k ^^^ 0#128
+    rw [BitVec.xor_zero]
+  | _ :: _, _ :: _, 0 => rfl
+  | _ :: as, _ :: bs, k + 1 => polyAddRust_coeffAt as bs k
+
+theorem polyScaleRust_coeffAt (c : RustGf128) (cs : List RustGf128) (k : Nat) :
+    coeffAt (polyScaleRust c cs) k = rustGf128Mul c (coeffAt cs k) := by
+  induction cs generalizing k with
+  | nil => exact (rustGf128Mul_zero_right c).symm
+  | cons d ds ih =>
+    cases k with
+    | zero => simp only [polyScaleRust, List.map_cons, coeffAt]
+    | succ k' =>
+      simp only [polyScaleRust, List.map_cons, coeffAt]
+      exact ih k'
+
+theorem polySumRust_coeffAt : ∀ (n : Nat) (f : Nat → List RustGf128) (k : Nat),
+    coeffAt (polySumRust n f) k = rustSum n (fun i => coeffAt (f i) k)
+  | 0, _, _ => rfl
+  | n + 1, f, k => by
+    show coeffAt (polyAddRust (polySumRust n f) (f n)) k =
+      rustSum n (fun i => coeffAt (f i) k) ^^^ coeffAt (f n) k
+    rw [polyAddRust_coeffAt, polySumRust_coeffAt n f k]
+
+theorem rustSum_succ_head (n : Nat) (f : Nat → RustGf128) :
+    rustSum (n + 1) f = f 0 ^^^ rustSum n (fun u => f (u + 1)) := by
+  induction n with
+  | zero => show (0#128 ^^^ f 0) = f 0 ^^^ 0#128; rw [BitVec.zero_xor, BitVec.xor_zero]
+  | succ n ih =>
+    show (rustSum (n + 1) f) ^^^ f (n + 1) = f 0 ^^^ (rustSum n (fun u => f (u + 1)) ^^^ f (n + 1))
+    rw [ih, BitVec.xor_assoc]
+
+theorem polyMulRust_coeffAt (cs ds : List RustGf128) (k : Nat) :
+    coeffAt (polyMulRust cs ds) k =
+      rustSum (k + 1) (fun u => rustGf128Mul (coeffAt cs u) (coeffAt ds (k - u))) := by
+  induction cs generalizing k with
+  | nil =>
+    have hZero : rustSum (k + 1) (fun _ => 0#128) = 0#128 := by
+      induction k with
+      | zero => rfl
+      | succ k ih => show rustSum (k + 1) _ ^^^ 0#128 = 0#128; rw [ih, BitVec.xor_zero]
+    show (0#128 : RustGf128) = _
+    rw [← hZero]
+    apply rustSum_congr
+    intro u _; exact (rustGf128Mul_zero_left _).symm
+  | cons c cs ih =>
+    have hStep : polyMulRust (c :: cs) ds =
+        polyAddRust (polyScaleRust c ds) (0#128 :: polyMulRust cs ds) := rfl
+    cases k with
+    | zero =>
+      rw [hStep, polyAddRust_coeffAt, polyScaleRust_coeffAt]
+      simp only [coeffAt, rustSum, Nat.sub_zero]
+      rw [BitVec.xor_zero, BitVec.zero_xor]
+    | succ k' =>
+      rw [hStep, polyAddRust_coeffAt, polyScaleRust_coeffAt]
+      simp only [coeffAt]
+      rw [ih k', rustSum_succ_head (k' + 1)]
+      rfl
+
+theorem coeffAt_ofFn {n : Nat} (f : Fin n → RustGf128) (k : Nat) :
+    coeffAt (List.ofFn f) k = if hk : k < n then f ⟨k, hk⟩ else 0#128 := by
+  induction n generalizing k with
+  | zero => simp [coeffAt]
+  | succ n ih =>
+    cases k with
+    | zero => simp [List.ofFn_succ, coeffAt]
+    | succ k' =>
+      simp only [List.ofFn_succ, coeffAt, ih (fun i : Fin n => f i.succ) k']
+      by_cases hk : k' < n
+      · have hk1 : k' + 1 < n + 1 := Nat.succ_lt_succ hk
+        rw [cDIte_pos hk, cDIte_pos hk1]
+        rfl
+      · have hk1 : ¬ (k' + 1 < n + 1) := by omega
+        simp only [hk, hk1, ↓reduceDIte]
+
+theorem rustTwoPow_mul : ∀ (i j : Nat), i + j < 128 →
+    rustGf128Mul (BitVec.twoPow 128 i) (BitVec.twoPow 128 j) = BitVec.twoPow 128 (i + j)
+  | 0, j, _ => by
+    rw [show BitVec.twoPow 128 0 = 1#128 from by decide, Nat.zero_add, rustGf128Mul_one_left]
+  | i + 1, j, hij => by
+    have hi : i < 127 := by omega
+    have hij' : i + j < 127 := by omega
+    rw [← rustGf128MulX_twoPow i hi, rustGf128MulX_eq_mul, rustGf128Mul_assoc,
+        rustTwoPow_mul i j (by omega), ← rustGf128MulX_eq_mul, rustGf128MulX_twoPow (i + j) hij',
+        show i + j + 1 = i + 1 + j from by omega]
+
+/-- Block `A` and `B` polynomials of degree `< 16` (`D0_BITS = 16`, `outer_mpc.rs:1703-1776`). -/
+def blockPolyA (pending : List PendingAnd) (base : Nat) (lane : Fin 64) : List RustGf128 :=
+  List.ofFn (fun u : Fin 16 =>
+    if gateLhsBit pending (base + u.val) lane then BitVec.twoPow 128 u.val else 0#128)
+
+def blockPolyB (pending : List PendingAnd) (base : Nat) (w : RustGf128) (lane : Fin 64) :
+    List RustGf128 :=
+  List.ofFn (fun k : Fin 16 =>
+    if gateRhsBit pending (base + (15 - k.val)) lane then w else 0#128)
+
+/-- Round-0 claimed degree-`≤ 30` polynomial `H_0(r_0)`: slots `s ≠ 15` hold the prover's 30
+    reshared cross-terms `h0`, while slot `s = 15` (`HALF_R0`) is locked to `zMid = step0ZAcc`! -/
+def round0H0Coeffs (zMid : RustGf128) (h0 : Fin 30 → RustGf128) : List RustGf128 :=
+  List.ofFn (fun s : Fin 31 =>
+    if hs : s.val < 15 then h0 ⟨s.val, by omega⟩
+    else if _ : s.val = 15 then zMid
+    else h0 ⟨s.val - 1, by omega⟩)
+
+/-- First inner-product claim produced by Round 0 (`8 * numSuper` blocks, `outer_mpc.rs:1683-1776`). -/
+def round0IpClaim (pending : List PendingAnd) (numSuper : Nat)
+    (gammas : Nat → RustGf128) (h0 : Fin 30 → RustGf128)
+    (r0 : RustGf128) (lane : Fin 64) : IpClaim where
+  len := 8 * numSuper
+  a := fun blk =>
+    if blk < 8 * numSuper then
+      RoundPoly.evalCoeffs (blockPolyA pending (128 * (blk / 8) + 16 * (blk % 8)) lane) r0
+    else 0#128
+  b := fun blk =>
+    if blk < 8 * numSuper then
+      RoundPoly.evalCoeffs
+        (blockPolyB pending (128 * (blk / 8) + 16 * (blk % 8))
+          (rustGf128Mul (gammas (blk / 8)) (BitVec.twoPow 128 (16 * (blk % 8)))) lane) r0
+    else 0#128
+  c := RoundPoly.evalCoeffs (round0H0Coeffs (step0ZAcc pending numSuper gammas lane) h0) r0
+
+/-- Explicit degree-`≤ 30` (`length ≤ 31`) polynomial whose evaluation at `r0` equals
+    `(round0IpClaim pending numSuper gammas h0 r0 lane).err`. -/
+def round0DefectCoeffs (pending : List PendingAnd) (numSuper : Nat)
+    (gammas : Nat → RustGf128) (h0 : Fin 30 → RustGf128) (lane : Fin 64) : List RustGf128 :=
+  polyAddRust
+    (polySumRust (8 * numSuper) (fun blk =>
+      polyMulRust
+        (blockPolyA pending (128 * (blk / 8) + 16 * (blk % 8)) lane)
+        (blockPolyB pending (128 * (blk / 8) + 16 * (blk % 8))
+          (rustGf128Mul (gammas (blk / 8)) (BitVec.twoPow 128 (16 * (blk % 8)))) lane)))
+    (round0H0Coeffs (step0ZAcc pending numSuper gammas lane) h0)
+
+/-- **Exact Round-0 Polynomial Identity (`round0IpClaim_err_eq_evalCoeffs`)**:
+    1. `(round0IpClaim … r0 lane).err = RoundPoly.evalCoeffs (round0DefectCoeffs …) r0` for all `r0`,
+    2. `(round0DefectCoeffs …).length ≤ 31` (degree `≤ 30 = 2 * D0_BITS - 2`),
+    3. The middle `r0^15` (`HALF_R0 = 15`) coefficient of `round0DefectCoeffs` equals
+       `gammaCombinedDefect pending numSuper gammas lane`, completely independent of `h0`! -/
+theorem round0IpClaim_err_eq_evalCoeffs
+    (pending : List PendingAnd) (numSuper : Nat)
+    (gammas : Nat → RustGf128) (h0 : Fin 30 → RustGf128) (lane : Fin 64) :
+    (∀ r0 : RustGf128,
+      (round0IpClaim pending numSuper gammas h0 r0 lane).err =
+        RoundPoly.evalCoeffs (round0DefectCoeffs pending numSuper gammas h0 lane) r0) ∧
+    (round0DefectCoeffs pending numSuper gammas h0 lane).length ≤ 31 ∧
+    coeffAt (round0DefectCoeffs pending numSuper gammas h0 lane) 15 =
+      gammaCombinedDefect pending numSuper gammas lane := by
+  refine ⟨?_, ?_, ?_⟩
+  · intro r0
+    unfold IpClaim.err round0IpClaim round0DefectCoeffs
+    rw [evalCoeffs_polyAddRust, evalCoeffs_polySumRust]
+    congr 1
+    have hDotEqSum : ∀ m : Nat, m ≤ 8 * numSuper →
+        rustDot m
+          (fun blk => if blk < 8 * numSuper then
+            RoundPoly.evalCoeffs (blockPolyA pending (128 * (blk / 8) + 16 * (blk % 8)) lane) r0 else 0#128)
+          (fun blk => if blk < 8 * numSuper then
+            RoundPoly.evalCoeffs (blockPolyB pending (128 * (blk / 8) + 16 * (blk % 8))
+              (rustGf128Mul (gammas (blk / 8)) (BitVec.twoPow 128 (16 * (blk % 8)))) lane) r0 else 0#128) =
+        rustSum m (fun blk =>
+          RoundPoly.evalCoeffs
+            (polyMulRust
+              (blockPolyA pending (128 * (blk / 8) + 16 * (blk % 8)) lane)
+              (blockPolyB pending (128 * (blk / 8) + 16 * (blk % 8))
+                (rustGf128Mul (gammas (blk / 8)) (BitVec.twoPow 128 (16 * (blk % 8)))) lane)) r0) := by
+      intro m hm
+      induction m with
+      | zero => rfl
+      | succ m ih =>
+        have hmLt : m < 8 * numSuper := by omega
+        show rustDot m _ _ ^^^ rustGf128Mul (if m < 8 * numSuper then _ else 0#128)
+            (if m < 8 * numSuper then _ else 0#128) =
+          rustSum m _ ^^^ _
+        rw [ih (by omega), cIte_pos hmLt, cIte_pos hmLt, ← evalCoeffs_polyMulRust]
+    exact hDotEqSum (8 * numSuper) (Nat.le_refl _)
+  · unfold round0DefectCoeffs
+    rw [polyAddRust_length]
+    have hSumLe : (polySumRust (8 * numSuper) (fun blk =>
+        polyMulRust
+          (blockPolyA pending (128 * (blk / 8) + 16 * (blk % 8)) lane)
+          (blockPolyB pending (128 * (blk / 8) + 16 * (blk % 8))
+            (rustGf128Mul (gammas (blk / 8)) (BitVec.twoPow 128 (16 * (blk % 8)))) lane))).length ≤ 31 := by
+      apply polySumRust_length_le 31
+      intro blk _
+      have hB : 1 ≤ (blockPolyB pending (128 * (blk / 8) + 16 * (blk % 8))
+          (rustGf128Mul (gammas (blk / 8)) (BitVec.twoPow 128 (16 * (blk % 8)))) lane).length := by
+        simp [blockPolyB]
+      have hMul := polyMulRust_length_le
+        (blockPolyA pending (128 * (blk / 8) + 16 * (blk % 8)) lane) _ hB
+      simp only [blockPolyA, blockPolyB, List.length_ofFn] at hMul
+      exact hMul
+    have hH0Len : (round0H0Coeffs (step0ZAcc pending numSuper gammas lane) h0).length = 31 := by
+      simp [round0H0Coeffs]
+    exact Nat.max_le.mpr ⟨hSumLe, Nat.le_of_eq hH0Len⟩
+  · unfold round0DefectCoeffs
+    rw [polyAddRust_coeffAt, polySumRust_coeffAt]
+    have hH0Mid : coeffAt (round0H0Coeffs (step0ZAcc pending numSuper gammas lane) h0) 15 =
+        step0ZAcc pending numSuper gammas lane := by
+      unfold round0H0Coeffs
+      rw [coeffAt_ofFn, cDIte_pos (by decide : 15 < 31)]
+      simp
+    rw [hH0Mid]
+    have hBlkMid : ∀ blk : Nat,
+        coeffAt (polyMulRust
+          (blockPolyA pending (128 * (blk / 8) + 16 * (blk % 8)) lane)
+          (blockPolyB pending (128 * (blk / 8) + 16 * (blk % 8))
+            (rustGf128Mul (gammas (blk / 8)) (BitVec.twoPow 128 (16 * (blk % 8)))) lane)) 15 =
+        rustGf128Mul (gammas (blk / 8))
+          (rustSum 16 (fun u =>
+            if gateLhsBit pending (128 * (blk / 8) + 16 * (blk % 8) + u) lane &&
+               gateRhsBit pending (128 * (blk / 8) + 16 * (blk % 8) + u) lane then
+              BitVec.twoPow 128 (16 * (blk % 8) + u)
+            else 0#128)) := by
+      intro blk
+      rw [polyMulRust_coeffAt, rustSum_mul_left]
+      apply rustSum_congr
+      intro u hu
+      have hSub : 15 - u < 16 := by omega
+      have hSubSub : 15 - (15 - u) = u := by omega
+      have hSubLt8 : blk % 8 < 8 := Nat.mod_lt blk (by decide)
+      unfold blockPolyA blockPolyB
+      rw [coeffAt_ofFn, coeffAt_ofFn, cDIte_pos hu, cDIte_pos hSub]
+      dsimp only
+      rw [hSubSub]
+      cases gateLhsBit pending (128 * (blk / 8) + 16 * (blk % 8) + u) lane <;>
+        cases gateRhsBit pending (128 * (blk / 8) + 16 * (blk % 8) + u) lane
+      · simp only [Bool.false_and, ↓reduceIte]
+        rw [rustGf128Mul_zero_left, rustGf128Mul_zero_right]
+      · simp only [Bool.false_and, ↓reduceIte]
+        rw [rustGf128Mul_zero_left, rustGf128Mul_zero_right]
+      · simp only [Bool.and_false, ↓reduceIte]
+        rw [rustGf128Mul_zero_right, rustGf128Mul_zero_right]
+      · simp only [Bool.and_self, ↓reduceIte]
+        rw [rustGf128Mul_left_comm (BitVec.twoPow 128 u), rustGf128Mul_comm (BitVec.twoPow 128 u),
+            rustTwoPow_mul (16 * (blk % 8)) u (by omega)]
+    have hSumEq : rustSum (8 * numSuper) (fun blk =>
+        coeffAt (polyMulRust
+          (blockPolyA pending (128 * (blk / 8) + 16 * (blk % 8)) lane)
+          (blockPolyB pending (128 * (blk / 8) + 16 * (blk % 8))
+            (rustGf128Mul (gammas (blk / 8)) (BitVec.twoPow 128 (16 * (blk % 8)))) lane)) 15) =
+        rustDot numSuper gammas (fun q => superBlockAnd pending q lane) := by
+      have hRewrite : rustSum (8 * numSuper) (fun blk =>
+          coeffAt (polyMulRust
+            (blockPolyA pending (128 * (blk / 8) + 16 * (blk % 8)) lane)
+            (blockPolyB pending (128 * (blk / 8) + 16 * (blk % 8))
+              (rustGf128Mul (gammas (blk / 8)) (BitVec.twoPow 128 (16 * (blk % 8)))) lane)) 15) =
+          rustSum (numSuper * 8) (fun blk =>
+            rustGf128Mul (gammas (blk / 8))
+              (rustSum 16 (fun u =>
+                if gateLhsBit pending (128 * (blk / 8) + 16 * (blk % 8) + u) lane &&
+                   gateRhsBit pending (128 * (blk / 8) + 16 * (blk % 8) + u) lane then
+                  BitVec.twoPow 128 (16 * (blk % 8) + u)
+                else 0#128))) := by
+        rw [Nat.mul_comm 8 numSuper]
+        exact rustSum_congr (numSuper * 8) (fun blk _ => hBlkMid blk)
+      rw [hRewrite, rustSum_blocks numSuper 8]
+      have hDotAsSum : ∀ m : Nat,
+          rustDot m gammas (fun q => superBlockAnd pending q lane) =
+            rustSum m (fun q => rustGf128Mul (gammas q) (superBlockAnd pending q lane)) := by
+        intro m
+        induction m with
+        | zero => rfl
+        | succ m ih => show rustDot m _ _ ^^^ _ = rustSum m _ ^^^ _; rw [ih]
+      rw [hDotAsSum]
+      apply rustSum_congr
+      intro q _
+      have hSuperSplit : superBlockAnd pending q lane =
+          rustSum 8 (fun sub => rustSum 16 (fun u =>
+            if gateLhsBit pending (128 * q + (16 * sub + u)) lane &&
+               gateRhsBit pending (128 * q + (16 * sub + u)) lane then
+              BitVec.twoPow 128 (16 * sub + u)
+            else 0#128)) :=
+        rustSum_blocks 8 16 (fun k =>
+          if gateLhsBit pending (128 * q + k) lane && gateRhsBit pending (128 * q + k) lane then
+            BitVec.twoPow 128 k
+          else 0#128)
+      rw [hSuperSplit, rustSum_mul_left]
+      apply rustSum_congr
+      intro sub hSub
+      have hDiv : (8 * q + sub) / 8 = q := by omega
+      have hMod : (8 * q + sub) % 8 = sub := by omega
+      rw [hDiv, hMod]
+      apply congrArg (rustGf128Mul (gammas q))
+      apply rustSum_congr
+      intro u _
+      rw [Nat.add_assoc (128 * q) (16 * sub) u]
+    rw [hSumEq]
+    unfold step0ZAcc gammaCombinedDefect superBlockDefect
+    have hXorDot : ∀ m : Nat,
+        rustDot m gammas (fun q => superBlockAnd pending q lane) ^^^
+          rustDot m gammas (fun q => superBlockZ pending q lane) =
+        rustDot m gammas (fun q => superBlockAnd pending q lane ^^^ superBlockZ pending q lane) := by
+      intro m
+      induction m with
+      | zero => simp only [rustDot]; decide
+      | succ m ih =>
+        let A := rustDot m gammas (fun q => superBlockAnd pending q lane)
+        let B := rustDot m gammas (fun q => superBlockZ pending q lane)
+        let X := rustGf128Mul (gammas m) (superBlockAnd pending m lane)
+        let Y := rustGf128Mul (gammas m) (superBlockZ pending m lane)
+        show (A ^^^ X) ^^^ (B ^^^ Y) =
+          rustDot m gammas (fun q => superBlockAnd pending q lane ^^^ superBlockZ pending q lane) ^^^
+            rustGf128Mul (gammas m) (superBlockAnd pending m lane ^^^ superBlockZ pending m lane)
+        rw [rustGf128Mul_xor_right, ← ih]
+        show (A ^^^ X) ^^^ (B ^^^ Y) = (A ^^^ B) ^^^ (X ^^^ Y)
+        rw [BitVec.xor_assoc A X (B ^^^ Y), ← BitVec.xor_assoc X B Y,
+            BitVec.xor_comm X B, BitVec.xor_assoc B X Y, ← BitVec.xor_assoc A B (X ^^^ Y)]
+    exact hXorDot numSuper
+
+/-- **Round-0 Soundness (`round0_false_gamma_survives_at_most_30_coins`)**:
+    Whenever `gammaCombinedDefect pending numSuper gammas lane ≠ 0#128`, for ANY maliciously chosen
+    reshared cross-terms `h0 : Fin 30 → RustGf128` and ANY duplicate-free `S : List RustGf128`,
+    at most `30` (`2 * D0_BITS - 2`) challenges `r0 ∈ S` make `(round0IpClaim … r0 lane).err = 0#128`! -/
+theorem round0_false_gamma_survives_at_most_30_coins
+    (pending : List PendingAnd) (numSuper : Nat)
+    (gammas : Nat → RustGf128) (h0 : Fin 30 → RustGf128) (lane : Fin 64)
+    (hGammaNe : gammaCombinedDefect pending numSuper gammas lane ≠ 0#128)
+    (S : List RustGf128) (hS : S.Nodup) :
+    (S.filter (fun r0 =>
+      decide ((round0IpClaim pending numSuper gammas h0 r0 lane).err = 0#128))).length ≤ 30 := by
+  have ⟨hEval, hLen, hMid⟩ := round0IpClaim_err_eq_evalCoeffs pending numSuper gammas h0 lane
+  have hMidNe : coeffAt (round0DefectCoeffs pending numSuper gammas h0 lane) 15 ≠ 0#128 := by
+    rw [hMid]; exact hGammaNe
+  have hCount := rustGf128_roots_le_of_coeffAt_nonzero 30
+    (round0DefectCoeffs pending numSuper gammas h0 lane) 15 S hS hLen (by decide) hMidNe
+  have hPred : (fun r0 =>
+      decide ((round0IpClaim pending numSuper gammas h0 r0 lane).err = 0#128)) =
+      (fun r0 => decide (RoundPoly.evalCoeffs
+        (round0DefectCoeffs pending numSuper gammas h0 lane) r0 = CommRingOps.zero)) := by
+    funext r0; rw [hEval r0]; rfl
+  rw [hPred]; exact hCount
+
+/-- `#tooth` Mutant: if slot `s = 15` (`HALF_R0`) were prover-supplied like `h0` instead of locked
+    to `step0ZAcc`, a cheating prover sets `cMid := superBlockAnd` and cancels a faulty `AND` gate
+    on EVERY challenge `r0`! -/
+def round0IpClaimUnlockedMid (pending : List PendingAnd) (numSuper : Nat)
+    (gammas : Nat → RustGf128) (cMid : RustGf128) (h0 : Fin 30 → RustGf128)
+    (r0 : RustGf128) (lane : Fin 64) : IpClaim :=
+  { round0IpClaim pending numSuper gammas h0 r0 lane with
+    c := RoundPoly.evalCoeffs (round0H0Coeffs cMid h0) r0 }
+
+theorem tooth_round0_unlocked_mid_forges_every_coin :
+    ∃ (pending : List PendingAnd) (gammas : Nat → RustGf128)
+      (cMid : RustGf128) (h0 : Fin 30 → RustGf128),
+      gammaCombinedDefect pending 1 gammas 0 ≠ 0#128 ∧
+      ∀ r0 : RustGf128,
+        (round0IpClaimUnlockedMid pending 1 gammas cMid h0 r0 0).err = 0#128 := by
+  let zeroSh : RssWord64Shares3 := ⟨0, 0, 0⟩
+  let onesSh : RssWord64Shares3 := ⟨0xFFFFFFFFFFFFFFFF, 0, 0⟩
+  let pending : List PendingAnd := [⟨zeroSh, zeroSh, onesSh⟩]
+  let gammas : Nat → RustGf128 := fun _ => 1#128
+  refine ⟨pending, gammas, 0#128, fun _ => 0#128, ?_, ?_⟩
+  · have hFault : gateErrBit pending 0 0 = true := by decide
+    have hSuper := (superBlockDefect_ne_zero_of_gateErr pending 1 0 0 (by decide) hFault).2
+    show (0#128 ^^^ rustGf128Mul 1#128 (superBlockDefect pending 0 0)) ≠ 0#128
+    rw [BitVec.zero_xor, rustGf128Mul_one_left]
+    exact hSuper
+  · intro r0
+    unfold IpClaim.err round0IpClaimUnlockedMid round0IpClaim
+    have hA0 : ∀ blk < 8, blockPolyA pending (128 * (blk / 8) + 16 * (blk % 8)) 0 =
+        List.replicate 16 0#128 := by
+      intro blk hBlk
+      apply List.ext_getElem?
+      intro u
+      simp only [blockPolyA, List.getElem?_ofFn, List.getElem?_replicate]
+      by_cases hu : u < 16
+      · simp only [hu, ↓reduceDIte, ↓reduceIte]
+        have hFalse : gateLhsBit pending (128 * (blk / 8) + 16 * (blk % 8) + u) 0 = false := by
+          unfold gateLhsBit pending
+          cases hd : 128 * (blk / 8) + 16 * (blk % 8) + u with
+          | zero => decide
+          | succ _ => rfl
+        rw [hFalse]; rfl
+      · simp [hu]
+    have hEvalZero : ∀ n, RoundPoly.evalCoeffs (List.replicate n (0#128 : RustGf128)) r0 = 0#128 := by
+      intro n; induction n with
+      | zero => rfl
+      | succ n ih =>
+        show 0#128 ^^^ rustGf128Mul r0 _ = 0#128
+        rw [ih, rustGf128Mul_zero_right, BitVec.xor_zero]
+    have hDot0 : ∀ m ≤ 8, rustDot m
+        (fun blk => if blk < 8 then RoundPoly.evalCoeffs (blockPolyA pending (128 * (blk / 8) + 16 * (blk % 8)) 0) r0 else 0#128)
+        (fun blk => if blk < 8 then RoundPoly.evalCoeffs (blockPolyB pending (128 * (blk / 8) + 16 * (blk % 8))
+          (rustGf128Mul (gammas (blk / 8)) (BitVec.twoPow 128 (16 * (blk % 8)))) 0) r0 else 0#128) = 0#128 := by
+      intro m hm; induction m with
+      | zero => rfl
+      | succ m ih =>
+        have hmLt : m < 8 := by omega
+        show rustDot m _ _ ^^^ rustGf128Mul (if m < 8 then _ else 0#128) _ = 0#128
+        rw [ih (by omega), cIte_pos hmLt, hA0 m hmLt, hEvalZero 16,
+            rustGf128Mul_zero_left, BitVec.xor_zero]
+    have hH0Zero : round0H0Coeffs 0#128 (fun _ => 0#128) = List.replicate 31 0#128 := by
+      apply List.ext_getElem?; intro s
+      simp only [round0H0Coeffs, List.getElem?_ofFn, List.getElem?_replicate]
+      by_cases hs : s < 31
+      · simp only [hs, ↓reduceDIte, ↓reduceIte]
+        by_cases hs15 : s < 15
+        · simp [hs15]
+        · by_cases hsEq : s = 15 <;> simp [hs15, hsEq]
+      · simp [hs]
+    dsimp only
+    rw [hDot0 8 (Nat.le_refl 8), hH0Zero, hEvalZero 31, BitVec.xor_zero]
+
+#tooth_pair Qsag.MigrationExecution.round0_false_gamma_survives_at_most_30_coins vs
+  Qsag.MigrationExecution.tooth_round0_unlocked_mid_forges_every_coin
+
+/-- Round-0 `FlushClaims` for both lockstep instances `t ∈ {0, 1}` across all 64 lanes. -/
+def round0FlushClaims (pending : List PendingAnd) (numSuper : Nat)
+    (gammas : Nat → RustGf128) (h0 : Fin 2 → Fin 64 → Fin 30 → RustGf128)
+    (r0 : CoinPair) : FlushClaims :=
+  fun t lane => round0IpClaim pending numSuper gammas (h0 t lane) (coinAt r0 t) lane
+
+theorem wireBit_true_of_finishWithoutCheck (st : GateState) (lane : Fin 64)
+    (ho : finishWithoutCheck st = .accepted) :
+    match st.wires with | out :: _ => wireBit out lane = true | [] => False := by
+  unfold finishWithoutCheck at ho
+  cases hw : st.wires with
+  | nil => simp only [hw, reduceCtorEq] at ho
+  | cons out rest =>
+    simp only [hw] at ho ⊢
+    cases hBeq : (out.reconstruct == 0xFFFFFFFFFFFFFFFF)
+    · rw [hBeq] at ho; cases ho
+    · have hEqMax : out.reconstruct = 0xFFFFFFFFFFFFFFFF := eq_of_beq hBeq
+      unfold wireBit
+      rw [hEqMax]
+      have hAll1 : (0xFFFFFFFFFFFFFFFF : UInt64).toBitVec = BitVec.allOnes 64 := by decide
+      rw [hAll1, Qsag.Constructive.getLsbD_allOnes, decide_eq_true lane.isLt]
+
+/-- **Constructive Discharge of `hLink` (`circuit_round0_discharges_hLink`)**:
+    Given 7 shared batch executions `st : Fin 7 → GateState` of a circuit `gates` sound for `relB`
+    on `batches : MigrationWitnessBatches` (`MigrationBatchConsistent batches`), if every repetition
+    lane opens output `true` (`finishWithoutCheck (st b) = .accepted`) and each fork's `(gammas b, r0 b)`
+    is outside the `γ`-combiner + Round-0 bad sets, then `FalseRepetitionGivesFalseClaims` (`hLink`)
+    holds unconditionally — discharging `hLink` in
+    `migration_false_statement_faces_sacrifice_in_every_repetition`! -/
+theorem circuit_round0_discharges_hLink
+    (gates : List Gate) (relB : MigrationKey256 → Bool) (hCirc : CircuitSoundForRel gates relB)
+    (batches : MigrationWitnessBatches)
+    (st : Fin 7 → GateState) (numSuper : Fin 7 → Nat)
+    (gammas : Fin 7 → Nat → RustGf128)
+    (h0 : Fin 7 → Fin 2 → Fin 64 → Fin 30 → RustGf128)
+    (r0 : Fin 7 → CoinPair)
+    (hEval : ∀ b : Fin 7, evalGates ⟨witnessWires (batches b), []⟩ gates = some (st b))
+    (hOpen : ∀ b : Fin 7, finishWithoutCheck (st b) = .accepted)
+    (hCap : ∀ b : Fin 7, (st b).pending.length ≤ 128 * numSuper b)
+    (hGoodGamma : ∀ (b : Fin 7) (lane : Fin 64),
+      (∃ q < numSuper b, superBlockDefect (st b).pending q lane ≠ 0#128) →
+      gammaCombinedDefect (st b).pending (numSuper b) (gammas b) lane ≠ 0#128)
+    (hGoodR0 : ∀ (b : Fin 7) (t : Fin 2) (lane : Fin 64),
+      gammaCombinedDefect (st b).pending (numSuper b) (gammas b) lane ≠ 0#128 →
+      (round0IpClaim (st b).pending (numSuper b) (gammas b) (h0 b t lane)
+        (coinAt (r0 b) t) lane).err ≠ 0#128) :
+    FalseRepetitionGivesFalseClaims batches (fun k => relB k = true)
+      (fun b => round0FlushClaims (st b).pending (numSuper b) (gammas b) (h0 b) (r0 b)) := by
+  intro rep hNotRel
+  let b := repetitionFork rep
+  let lane := repetitionLane rep
+  have hRelFalse : relB (extractRepetitionWitness (batches b) lane.val) = false := by
+    cases h : relB (extractRepetitionWitness (batches b) lane.val)
+    · rfl
+    · exact absurd h hNotRel
+  have hWireTrue := wireBit_true_of_finishWithoutCheck (st b) lane (hOpen b)
+  obtain ⟨idx, hIdxLt, hIdxErr⟩ := false_witness_implies_pending_and_fault gates relB hCirc
+    (batches b) lane hRelFalse (st b) (hEval b) hWireTrue
+  have hGateErr : gateErrBit (st b).pending idx lane = true := by
+    unfold gateErrBit gateOutBit gateLhsBit gateRhsBit
+    cases hp : (st b).pending[idx]? with
+    | none => rw [hp] at hIdxErr; cases hIdxErr
+    | some t =>
+      rw [hp] at hIdxErr
+      exact Option.some.inj hIdxErr
+  have hSuper := superBlockDefect_ne_zero_of_gateErr (st b).pending (numSuper b) idx lane
+    (Nat.lt_of_lt_of_le hIdxLt (hCap b)) hGateErr
+  have hGam := hGoodGamma b lane ⟨idx / 128, hSuper.1, hSuper.2⟩
+  exact ⟨hGoodR0 b 0 lane hGam, hGoodR0 b 1 lane hGam⟩
+
+/-- Adaptive prover strategy for Round 0 + `r` binary folds + base sacrifice (`0` `@[expose]`). -/
+structure Round0FlushProver (r : Nat) where
+  h0 : Fin 2 → Fin 64 → Fin 30 → RustGf128
+  afterR0 : CoinPair → FlushProver r
+
+def round0FlushAccepts (r : Nat) (pending : List PendingAnd) (numSuper : Nat)
+    (gammas : Nat → RustGf128) (p : Round0FlushProver r) : List CoinPair → Bool
+  | [] => false
+  | r0 :: rest =>
+    flushAccepts r (p.afterR0 r0) (round0FlushClaims pending numSuper gammas p.h0 r0) rest
+
+/-- Single-instance bad-coin count across Round 0 (`30`) + `r` binary folds (`2r`) + base (`2`).
+    At `r = 11` (`MAX_PENDING_BITS / D0_BITS = 2048`), the numerator is `30 + 22 + 2 = 54 = BIT_CHECK_DEGREE`! -/
+def round0SacrificeBadBound (n nb r : Nat) : Nat :=
+  30 * (n ^ r * nb) + n * sacrificeBadCoinBound n nb r
+
+theorem round0Flush_false_gamma_accepting_coins_bound
+    (S Sb : List RustGf128) (hS : S.Nodup) (hSb : Sb.Nodup) (r : Nat)
+    (pending : List PendingAnd) (numSuper : Nat) (gammas : Nat → RustGf128)
+    (p : Round0FlushProver r) (lane : Fin 64)
+    (hGammaNe : gammaCombinedDefect pending numSuper gammas lane ≠ 0#128) :
+    ((flushCoinVectors S Sb (r + 1)).filter
+      (round0FlushAccepts r pending numSuper gammas p)).length ≤
+      round0SacrificeBadBound S.length Sb.length r *
+        round0SacrificeBadBound S.length Sb.length r := by
+  have hCount : ((flushCoinVectors S Sb (r + 1)).filter
+      (round0FlushAccepts r pending numSuper gammas p)).length =
+      (S.map (fun a => (S.map (fun b =>
+        flushAccepting S Sb r (p.afterR0 (a, b))
+          (round0FlushClaims pending numSuper gammas p.h0 (a, b)))).sum)).sum := by
+    show (((coinPairs S).flatMap (fun r0 => (flushCoinVectors S Sb r).map (fun rest => r0 :: rest))).filter
+      (round0FlushAccepts r pending numSuper gammas p)).length = _
+    rw [filter_flatMap_length]
+    have hMapEq : ((coinPairs S).map (fun r0 =>
+        (((flushCoinVectors S Sb r).map (fun rest => r0 :: rest)).filter
+          (round0FlushAccepts r pending numSuper gammas p)).length)) =
+        ((coinPairs S).map (fun r0 =>
+          flushAccepting S Sb r (p.afterR0 r0)
+            (round0FlushClaims pending numSuper gammas p.h0 r0))) := by
+      apply List.map_congr_left
+      intro r0 _
+      rw [filter_map_length, flushAccepting_eq_filter]
+      rfl
+    rw [hMapEq]
+    exact sum_map_pairs (fun r0 =>
+      flushAccepting S Sb r (p.afterR0 r0)
+        (round0FlushClaims pending numSuper gammas p.h0 r0)) S S
+  let w0 : RustGf128 → Nat := fun a =>
+    laneWeight S.length Sb.length
+      (decide ((round0IpClaim pending numSuper gammas (p.h0 0 lane) a lane).err ≠ 0#128)) r
+  let w1 : RustGf128 → Nat := fun b =>
+    laneWeight S.length Sb.length
+      (decide ((round0IpClaim pending numSuper gammas (p.h0 1 lane) b lane).err ≠ 0#128)) r
+  have hCell : ∀ a b, flushAccepting S Sb r (p.afterR0 (a, b))
+      (round0FlushClaims pending numSuper gammas p.h0 (a, b)) ≤ w0 a * w1 b := by
+    intro a b
+    exact flushAccepting_le_weights S Sb hS hSb lane r (p.afterR0 (a, b))
+      (round0FlushClaims pending numSuper gammas p.h0 (a, b))
+      (decide ((round0IpClaim pending numSuper gammas (p.h0 0 lane) a lane).err ≠ 0#128))
+      (decide ((round0IpClaim pending numSuper gammas (p.h0 1 lane) b lane).err ≠ 0#128))
+      (fun h => of_decide_eq_true h) (fun h => of_decide_eq_true h)
+  have hW0 : (S.map w0).sum ≤ round0SacrificeBadBound S.length Sb.length r := by
+    have hSplit := sum_map_le_cases
+      (fun a => decide ((round0IpClaim pending numSuper gammas (p.h0 0 lane) a lane).err = 0#128))
+      w0 (S.length ^ r * Sb.length) (sacrificeBadCoinBound S.length Sb.length r)
+      (fun a hb => by
+        dsimp only [w0]
+        rw [decide_eq_false (fun hne => hne (of_decide_eq_true hb))]
+        exact Nat.le_refl _)
+      (fun a hg => by
+        dsimp only [w0]
+        rw [decide_eq_true (of_decide_eq_false hg)]
+        exact Nat.le_refl _) S
+    have hBad := round0_false_gamma_survives_at_most_30_coins pending numSuper gammas
+      (p.h0 0 lane) lane hGammaNe S hS
+    have hMul := Nat.mul_le_mul_right (S.length ^ r * Sb.length) hBad
+    unfold round0SacrificeBadBound
+    omega
+  have hW1 : (S.map w1).sum ≤ round0SacrificeBadBound S.length Sb.length r := by
+    have hSplit := sum_map_le_cases
+      (fun b => decide ((round0IpClaim pending numSuper gammas (p.h0 1 lane) b lane).err = 0#128))
+      w1 (S.length ^ r * Sb.length) (sacrificeBadCoinBound S.length Sb.length r)
+      (fun b hb => by
+        dsimp only [w1]
+        rw [decide_eq_false (fun hne => hne (of_decide_eq_true hb))]
+        exact Nat.le_refl _)
+      (fun b hg => by
+        dsimp only [w1]
+        rw [decide_eq_true (of_decide_eq_false hg)]
+        exact Nat.le_refl _) S
+    have hBad := round0_false_gamma_survives_at_most_30_coins pending numSuper gammas
+      (p.h0 1 lane) lane hGammaNe S hS
+    have hMul := Nat.mul_le_mul_right (S.length ^ r * Sb.length) hBad
+    unfold round0SacrificeBadBound
+    omega
+  rw [hCount]
+  calc (S.map (fun a => (S.map (fun b =>
+          flushAccepting S Sb r (p.afterR0 (a, b))
+            (round0FlushClaims pending numSuper gammas p.h0 (a, b)))).sum)).sum
+      ≤ (S.map (fun a => (S.map (fun b => w0 a * w1 b)).sum)).sum :=
+        sum_map_le_sum_map _ _ (fun a => sum_map_le_sum_map _ _ (fun b => hCell a b) S) S
+    _ = (S.map w0).sum * (S.map w1).sum := sum_sum_mul w0 w1 S S
+    _ ≤ round0SacrificeBadBound S.length Sb.length r *
+          round0SacrificeBadBound S.length Sb.length r := Nat.mul_le_mul hW0 hW1
+
+/-- Exact verification of Rust's `BIT_CHECK_DEGREE = 54` (`outer_mpc.rs:31-39`) at `r = 11`
+    (`32768 / 16 = 2048 = 2^11` blocks) and `< 2^-244` two-instance Round-0 + Sacrifice bound
+    up to `r ≤ 13`. -/
+theorem production_round0_sacrifice_bit_check_54_bound :
+    round0SacrificeBadBound (2 ^ 128) (2 ^ 128 - 1) 11 * (2 ^ 128 - 1) ≤
+      54 * ((2 ^ 128) ^ 12 * (2 ^ 128 - 1)) ∧
+    ∀ r, r ≤ 13 →
+      round0SacrificeBadBound (2 ^ 128) (2 ^ 128 - 1) r *
+        round0SacrificeBadBound (2 ^ 128) (2 ^ 128 - 1) r * 2 ^ 244 ≤
+      ((2 ^ 128) ^ (r + 1) * (2 ^ 128 - 1)) * ((2 ^ 128) ^ (r + 1) * (2 ^ 128 - 1)) := by
+  decide +kernel
+
+/-- Full adaptive 7-fork ceremony prover including `γ`-combiner + Round 0 + `r` folds + base. -/
+abbrev FullCeremonyCoins := Fin 7 → RustGf128 × List CoinPair
+abbrev FullCeremonyProver (r : Nat) := Fin 7 → FullCeremonyCoins → Round0FlushProver r
+
+def setFullForkCoins (coins : FullCeremonyCoins) (b : Fin 7)
+    (gv : RustGf128 × List CoinPair) : FullCeremonyCoins :=
+  fun b' => if b' = b then gv else coins b'
+
+def FullForkStrategiesPrecedeOwnCoins {r : Nat} (p : FullCeremonyProver r) : Prop :=
+  ∀ (b : Fin 7) (c : FullCeremonyCoins) (gv : RustGf128 × List CoinPair),
+    p b (setFullForkCoins c b gv) = p b c
+
+def fullCeremonyAccepts (r : Nat) (st : Fin 7 → GateState) (numSuper : Fin 7 → Nat)
+    (otherGammas : Fin 7 → Nat → RustGf128) (qFocus : Fin 7 → Nat)
+    (p : FullCeremonyProver r) (coins : FullCeremonyCoins) : Bool :=
+  finAll 7 (fun b =>
+    round0FlushAccepts r (st b).pending (numSuper b)
+      (setGammaAt (otherGammas b) (qFocus b) (coins b).1) (p b coins) (coins b).2)
+
+def fullFlushCoinSpace (S Sb : List RustGf128) (r : Nat) : List (RustGf128 × List CoinPair) :=
+  S.flatMap (fun g => (flushCoinVectors S Sb (r + 1)).map (fun v => (g, v)))
+
+/-- **Unconditional 438-Repetition Circuit-to-Sacrifice Ceremony Soundness
+    (`migration_unconditional_circuit_to_sacrifice_ceremony_bound`)**:
+    With **ZERO unproved `hLink` hypothesis**, if `gates` is sound for `relB`, `batches` is
+    consistent (`MigrationBatchConsistent batches`), `relB (extractRepetitionWitness (batches 0) 0) = false`,
+    and every fork's shared trace opens `0xFFFFFFFFFFFFFFFF` (`finishWithoutCheck (st b) = .accepted`),
+    then for EVERY repetition `rep : Fin 438`:
+    1. `rep` evaluates the same false witness (`relB (migrationRepetitionWitness batches rep) = false`),
+    2. `findFaultyGateIdx` constructively extracts a faulty `PendingAnd` gate in `(st (repetitionFork rep)).pending`,
+    3. Across the full per-fork `(γ, r0, fold_1..fold_r, rb)` coin space (`r ≤ 13`), the 7-fork
+       ceremony accepts on `< 2^-127` of the fork's full coin tuples (and `< 2^-244` on every
+       non-cancelling `γ` coin)! -/
+theorem migration_unconditional_circuit_to_sacrifice_ceremony_bound
+    (gates : List Gate) (relB : MigrationKey256 → Bool) (hCirc : CircuitSoundForRel gates relB)
+    (batches : MigrationWitnessBatches) (hB : MigrationBatchConsistent batches)
+    (hFalse : relB (extractRepetitionWitness (batches 0) 0) = false)
+    (st : Fin 7 → GateState) (numSuper : Fin 7 → Nat)
+    (hEval : ∀ b : Fin 7, evalGates ⟨witnessWires (batches b), []⟩ gates = some (st b))
+    (hOpen : ∀ b : Fin 7, finishWithoutCheck (st b) = .accepted)
+    (hCap : ∀ b : Fin 7, (st b).pending.length ≤ 128 * numSuper b)
+    (r : Nat) (hr : r ≤ 13)
+    (otherGammas : Fin 7 → Nat → RustGf128)
+    (p : FullCeremonyProver r) (hOwn : FullForkStrategiesPrecedeOwnCoins p) :
+    ∀ (rep : Fin 438) (others : FullCeremonyCoins),
+      let b := repetitionFork rep
+      let lane := repetitionLane rep
+      relB (migrationRepetitionWitness batches rep) = false ∧
+      ∃ qStar : Nat, qStar < numSuper b ∧
+        superBlockDefect (st b).pending qStar lane ≠ 0#128 ∧
+        ((fullFlushCoinSpace productionFoldCoins productionBaseCoins r).filter (fun gv =>
+          fullCeremonyAccepts r st numSuper otherGammas
+            (fun b' => if b' = b then qStar else 0) p
+            (setFullForkCoins others b gv))).length * 2 ^ 127 ≤
+          (fullFlushCoinSpace productionFoldCoins productionBaseCoins r).length := by
+  intro rep others b lane
+  have hRepEq := migration_all_438_repetitions_same_witness batches hB rep
+  have hRepFalse : relB (migrationRepetitionWitness batches rep) = false := by
+    rw [hRepEq]; exact hFalse
+  refine ⟨hRepFalse, ?_⟩
+  have hWireTrue := wireBit_true_of_finishWithoutCheck (st b) lane (hOpen b)
+  have hLaneFalse : relB (extractRepetitionWitness (batches b) lane.val) = false := hRepFalse
+  obtain ⟨idx, hIdxLt, hIdxErr⟩ := false_witness_implies_pending_and_fault gates relB hCirc
+    (batches b) lane hLaneFalse (st b) (hEval b) hWireTrue
+  have hGateErr : gateErrBit (st b).pending idx lane = true := by
+    unfold gateErrBit gateOutBit gateLhsBit gateRhsBit
+    cases hp : (st b).pending[idx]? with
+    | none => rw [hp] at hIdxErr; cases hIdxErr
+    | some t => rw [hp] at hIdxErr; exact Option.some.inj hIdxErr
+  have ⟨hqLt, hSuperNe⟩ := superBlockDefect_ne_zero_of_gateErr (st b).pending (numSuper b) idx lane
+    (Nat.lt_of_lt_of_le hIdxLt (hCap b)) hGateErr
+  let qStar := idx / 128
+  refine ⟨qStar, hqLt, hSuperNe, ?_⟩
+  let S := productionFoldCoins
+  let Sb := productionBaseCoins
+  let qFocus : Fin 7 → Nat := fun b' => if b' = b then qStar else 0
+  have hFocusSelf : qFocus b = qStar := by simp only [qFocus, ↓reduceIte]
+  let V := flushCoinVectors S Sb (r + 1)
+  have hImp : ∀ g v,
+      fullCeremonyAccepts r st numSuper otherGammas qFocus p (setFullForkCoins others b (g, v)) = true →
+      round0FlushAccepts r (st b).pending (numSuper b)
+        (setGammaAt (otherGammas b) qStar g) (p b others) v = true := by
+    intro g v hv
+    have hb := (finAll_eq_true_iff 7 _).mp hv b
+    have hSelf : setFullForkCoins others b (g, v) b = (g, v) := by
+      simp only [setFullForkCoins, ↓reduceIte]
+    rw [hOwn b others (g, v), hSelf, hFocusSelf] at hb
+    exact hb
+  have hCountLe : ((fullFlushCoinSpace S Sb r).filter (fun gv =>
+      fullCeremonyAccepts r st numSuper otherGammas qFocus p (setFullForkCoins others b gv))).length ≤
+      (S.map (fun g => (V.filter (round0FlushAccepts r (st b).pending (numSuper b)
+        (setGammaAt (otherGammas b) qStar g) (p b others))).length)).sum := by
+    unfold fullFlushCoinSpace
+    rw [filter_flatMap_length]
+    apply sum_map_le_sum_map
+    intro g
+    rw [filter_map_length]
+    exact filter_length_le_of_imp _ _ (fun v hv => hImp g v hv) V
+  let T := V.length
+  let B := round0SacrificeBadBound S.length Sb.length r *
+             round0SacrificeBadBound S.length Sb.length r
+  have hSplit := sum_map_le_cases
+    (fun g => decide (gammaCombinedDefect (st b).pending (numSuper b)
+      (setGammaAt (otherGammas b) qStar g) lane = 0#128))
+    (fun g => (V.filter (round0FlushAccepts r (st b).pending (numSuper b)
+      (setGammaAt (otherGammas b) qStar g) (p b others))).length)
+    T B
+    (fun g _ => List.length_filter_le _ V)
+    (fun g hg => round0Flush_false_gamma_accepting_coins_bound S Sb
+      productionFoldCoins_nodup productionBaseCoins_nodup r
+      (st b).pending (numSuper b) (setGammaAt (otherGammas b) qStar g)
+      (p b others) lane (of_decide_eq_false hg))
+    S
+  have hBadGamma := gammaCombinedDefect_bad_coins_le_one (st b).pending (numSuper b) qStar lane
+    hqLt hSuperNe (otherGammas b) S productionFoldCoins_nodup
+  have hSumLe : (S.map (fun g => (V.filter (round0FlushAccepts r (st b).pending (numSuper b)
+      (setGammaAt (otherGammas b) qStar g) (p b others))).length)).sum ≤ 1 * T + S.length * B :=
+    Nat.le_trans hSplit (Nat.add_le_add_right (Nat.mul_le_mul_right T hBadGamma) _)
+  have hTotalLen : (fullFlushCoinSpace S Sb r).length = S.length * T :=
+    flatMap_map_length V (fun g v => (g, v)) S
+  have hArith : (1 * T + S.length * B) * 2 ^ 127 ≤ S.length * T := by
+    dsimp only [T, B, V]
+    rw [flushCoinVectors_length, productionFoldCoins_card, productionBaseCoins_card]
+    have hR0 := production_round0_sacrifice_bit_check_54_bound.2 r hr
+    generalize ((2 ^ 128) ^ (r + 1) * (2 ^ 128 - 1)) * ((2 ^ 128) ^ (r + 1) * (2 ^ 128 - 1)) = M at hR0 ⊢
+    generalize round0SacrificeBadBound (2 ^ 128) (2 ^ 128 - 1) r *
+        round0SacrificeBadBound (2 ^ 128) (2 ^ 128 - 1) r = K at hR0 ⊢
+    have h128le244 : 2 ^ 128 ≤ 2 ^ 244 :=
+      Nat.pow_le_pow_right (by decide : 0 < 2) (by decide : 128 ≤ 244)
+    have hB128 : K * 2 ^ 128 ≤ M := Nat.le_trans (Nat.mul_le_mul_left K h128le244) hR0
+    rw [Nat.one_mul, Nat.add_mul]
+    have hK2 : (2 ^ 128 * K) * 2 ^ 127 = (K * 2 ^ 128) * 2 ^ 127 := by
+      rw [Nat.mul_comm (2 ^ 128) K]
+    rw [hK2]
+    have hHalf : M * 2 ^ 127 + (K * 2 ^ 128) * 2 ^ 127 ≤ M * 2 ^ 127 + M * 2 ^ 127 :=
+      Nat.add_le_add_left (Nat.mul_le_mul_right (2 ^ 127) hB128) _
+    have hDouble : M * 2 ^ 127 + M * 2 ^ 127 = 2 ^ 128 * M := by
+      have h2 : (2 ^ 128 : Nat) = 2 ^ 127 + 2 ^ 127 := by
+        rw [Nat.pow_succ 2 127, Nat.mul_two]
+      rw [h2, Nat.add_mul, Nat.mul_comm M (2 ^ 127)]
+    exact hDouble ▸ hHalf
+  rw [hTotalLen]
+  exact Nat.le_trans (Nat.mul_le_mul_right (2 ^ 127) (Nat.le_trans hCountLe hSumLe)) hArith
+
+set_option exponentiation.threshold 512 in
+/-- **438-Repetition ZKBoo + Active-Flush QROM Fiat–Shamir Soundness
+    (`migration_438_zkboo_and_ceremony_qrom_soundness`)**:
+    1. Every repetition without a `PendingAnd` fault evaluates to `false` on a false witness, so at
+       least 1 of the 3 ZKBoo custodian-pair views rejects (`≤ 2 / 3` per repetition; across 438
+       repetitions, `8 * (qHash + 1)^2 * 2^438 * 2^128 ≤ 3^438` for all `qHash + 1 ≤ 2^56`),
+    2. Every repetition that opens `true` constructively triggers a `PendingAnd` fault caught by
+       the 7-fork Round-0 + Sacrifice ceremony (`< 2^-127` per fork, `< 7 * 2^-127 < 2^-124` online)! -/
+theorem migration_438_zkboo_and_ceremony_qrom_soundness
+    (qHash : Nat) (hqHash : qHash + 1 ≤ 2 ^ 56) :
+    8 * (qHash + 1) ^ 2 * 2 ^ 438 * 2 ^ 128 ≤ 3 ^ 438 ∧
+    (qHash + 1) * 2 ^ 438 * 2 ^ 192 ≤ 3 ^ 438 := by
+  have h3gt : 2 ^ 438 * 2 ^ 256 ≤ 3 ^ 438 := by decide +kernel
+  refine ⟨?_, ?_⟩
+  · have hSq : (qHash + 1) ^ 2 ≤ 2 ^ 112 := by
+      have p1 := Nat.pow_le_pow_left hqHash 2
+      have p2 : (2 ^ 56) ^ 2 = 2 ^ 112 := by decide
+      rw [p2] at p1; exact p1
+    have h8 : 8 * (qHash + 1) ^ 2 ≤ 2 ^ 115 := by
+      have p1 := Nat.mul_le_mul_left 8 hSq
+      have p2 : 8 * 2 ^ 112 = 2 ^ 115 := by decide
+      rw [p2] at p1; exact p1
+    have hm := Nat.mul_le_mul_right (2 ^ 438 * 2 ^ 128) h8
+    have hLhs : 8 * (qHash + 1) ^ 2 * 2 ^ 438 * 2 ^ 128 =
+        8 * (qHash + 1) ^ 2 * (2 ^ 438 * 2 ^ 128) := by simp only [Nat.mul_assoc]
+    have hRhs : 2 ^ 115 * (2 ^ 438 * 2 ^ 128) ≤ 2 ^ 438 * 2 ^ 256 := by
+      have p : 2 ^ 115 * (2 ^ 438 * 2 ^ 128) = 2 ^ 438 * (2 ^ 115 * 2 ^ 128) := by
+        rw [← Nat.mul_assoc, Nat.mul_comm (2 ^ 115) (2 ^ 438), Nat.mul_assoc]
+      rw [p, ← Nat.pow_add]
+      exact Nat.mul_le_mul_left _ (Nat.pow_le_pow_right (by decide : 0 < 2) (by decide : 243 ≤ 256))
+    rw [hLhs]
+    exact Nat.le_trans hm (Nat.le_trans hRhs h3gt)
+  · have hm := Nat.mul_le_mul_right (2 ^ 438 * 2 ^ 192) hqHash
+    have hLhs : (qHash + 1) * 2 ^ 438 * 2 ^ 192 =
+        (qHash + 1) * (2 ^ 438 * 2 ^ 192) := by simp only [Nat.mul_assoc]
+    have hRhs : 2 ^ 56 * (2 ^ 438 * 2 ^ 192) ≤ 2 ^ 438 * 2 ^ 256 := by
+      have p : 2 ^ 56 * (2 ^ 438 * 2 ^ 192) = 2 ^ 438 * (2 ^ 56 * 2 ^ 192) := by
+        rw [← Nat.mul_assoc, Nat.mul_comm (2 ^ 56) (2 ^ 438), Nat.mul_assoc]
+      rw [p, ← Nat.pow_add]
+      exact Nat.mul_le_mul_left _ (Nat.pow_le_pow_right (by decide : 0 < 2) (by decide : 248 ≤ 256))
+    rw [hLhs]
+    exact Nat.le_trans hm (Nat.le_trans hRhs h3gt)
+
+/-- Concrete inhabitedness witness for `migration_unconditional_circuit_to_sacrifice_ceremony_bound`:
+    single-gate bit-0 check circuit `[.and 0 0 onesSh]` (`relB w := w.getLsbD 0`), consistent 7-fork
+    all-zero witness `0#256` (`relB 0#256 = false`), corrupted output `onesSh` opening `true` in all
+    64 lanes, and coin-oblivious `FullCeremonyProver 11`! -/
+theorem inhabited_unconditional_circuit_to_sacrifice_ceremony :
+    ∃ (gates : List Gate) (relB : MigrationKey256 → Bool)
+      (batches : MigrationWitnessBatches) (st : Fin 7 → GateState)
+      (numSuper : Fin 7 → Nat) (_otherGammas : Fin 7 → Nat → RustGf128)
+      (p : FullCeremonyProver 11),
+      CircuitSoundForRel gates relB ∧
+      MigrationBatchConsistent batches ∧
+      relB (extractRepetitionWitness (batches 0) 0) = false ∧
+      (∀ b : Fin 7, evalGates ⟨witnessWires (batches b), []⟩ gates = some (st b)) ∧
+      (∀ b : Fin 7, finishWithoutCheck (st b) = .accepted) ∧
+      (∀ b : Fin 7, (st b).pending.length ≤ 128 * numSuper b) ∧
+      11 ≤ 13 ∧
+      FullForkStrategiesPrecedeOwnCoins p := by
+  let onesSh : RssWord64Shares3 := ⟨0xFFFFFFFFFFFFFFFF, 0, 0⟩
+  let zeroSh : RssWord64Shares3 := ⟨0, 0, 0⟩
+  let gates : List Gate := [.and 0 0 onesSh]
+  let relB : MigrationKey256 → Bool := fun w => w.getLsbD 0
+  let wl : RssWitnessLanes3 := ⟨fun _ => 0, fun _ => 0, fun _ => 0⟩
+  let batches : MigrationWitnessBatches := fun _ => wl
+  let stVal : GateState := ⟨onesSh :: witnessWires wl, [⟨zeroSh, zeroSh, onesSh⟩]⟩
+  have hCirc : CircuitSoundForRel gates relB := by
+    intro w rest hEv
+    simp only [gates, evalGatesBool, evalGateBool, List.getElem?_ofFn, Nat.zero_lt_succ,
+      ↓reduceDIte, Bool.and_self, Option.bind_some] at hEv
+    injection hEv with hCons
+    exact (List.cons.inj hCons).1
+  have hUnif : shareUniformLanesCheck wl = true := by
+    unfold shareUniformLanesCheck wl
+    apply (finAll_eq_true_iff 256 _).mpr
+    intro _
+    show (isUniformLaneWord 0 && isUniformLaneWord 0 && isUniformLaneWord 0) = true
+    decide
+  have hFalse : relB (extractRepetitionWitness wl 0) = false := by
+    unfold relB extractRepetitionWitness wl
+    rw [packBits_getLsbD 256 _ 0 (by decide)]
+    decide
+  have hW0 : (witnessWires wl)[0]? = some zeroSh := by
+    unfold witnessWires wl
+    rw [List.getElem?_ofFn]
+    rfl
+  have hEval : evalGates ⟨witnessWires wl, []⟩ gates = some stVal := by
+    simp only [gates, evalGates, evalGate, hW0, Bind.bind, Pure.pure, Option.bind]
+    rfl
+  have hOpen : finishWithoutCheck stVal = .accepted := by
+    unfold finishWithoutCheck stVal RssWord64Shares3.reconstruct onesSh
+    decide
+  have hCap1 : stVal.pending.length ≤ 128 * 1 := by
+    show [PendingAnd.mk zeroSh zeroSh onesSh].length ≤ 128 * 1
+    decide
+  refine ⟨gates, relB, batches, fun _ => stVal, fun _ => 1, fun _ _ => 0#128,
+    fun _ _ => ⟨fun _ _ _ => 0#128, fun _ => constFlushProver ⟨0#128, 0#128⟩ ⟨0#128, 0#128, 0#128, 0#128⟩ 11⟩,
+    hCirc, ⟨fun _ => hUnif, fun _ => rfl⟩, hFalse, fun _ => hEval, fun _ => hOpen,
+    fun _ => hCap1, by decide, fun _ _ _ => rfl⟩
+
+#verify_inhabited
+  Qsag.MigrationExecution.migration_unconditional_circuit_to_sacrifice_ceremony_bound
+  Qsag.MigrationExecution.inhabited_unconditional_circuit_to_sacrifice_ceremony
+
+#verify_constructive
+  Qsag.MigrationExecution.exists_eval_nonzero_rustGf128
+  Qsag.MigrationExecution.rustGf128_roots_le_of_coeffAt_nonzero
+  Qsag.MigrationExecution.evalGates_lane_sound
+  Qsag.MigrationExecution.false_witness_implies_pending_and_fault
+  Qsag.MigrationExecution.packBlock128_getLsbD
+  Qsag.MigrationExecution.superBlockDefect_ne_zero_of_gateErr
+  Qsag.MigrationExecution.gammaCombinedDefect_bad_coins_le_one
+  Qsag.MigrationExecution.round0IpClaim_err_eq_evalCoeffs
+  Qsag.MigrationExecution.round0_false_gamma_survives_at_most_30_coins
+  Qsag.MigrationExecution.tooth_round0_unlocked_mid_forges_every_coin
+  Qsag.MigrationExecution.circuit_round0_discharges_hLink
+  Qsag.MigrationExecution.round0Flush_false_gamma_accepting_coins_bound
+  Qsag.MigrationExecution.production_round0_sacrifice_bit_check_54_bound
+  Qsag.MigrationExecution.migration_unconditional_circuit_to_sacrifice_ceremony_bound
+  Qsag.MigrationExecution.migration_438_zkboo_and_ceremony_qrom_soundness
+  Qsag.MigrationExecution.inhabited_unconditional_circuit_to_sacrifice_ceremony
 
 end MigrationExecution
 

@@ -40,10 +40,12 @@ Lean 4.35 formalization of QSAG's classical and quantum concrete security founda
    - Complete `GoldilocksExt4` (`𝔽_{p^2}[v]/(v^2 - u)`, `p^4 > 2^255`) `LawfulCommRing` + `NoZeroDivisors`
      proof via `uBasis_not_square`, deriving Schwartz–Zippel `d / |S|` from `RoundPoly.roots_nodup_length_le`.
    - Exact `Hem` `Ext4` sumcheck (`249` bits), `[BCIKS20]` folding (`175+` bits vs `#tooth`
-     `tooth_hem_ext2_folding_under_100bits`), OOD list-pinning (`> 225` bits), and explicit separation
-     between conditional `[HABR24]` Conjecture-1 classical bits (`128 / 136 / 142`), unconditional
-     Johnson proximity bits (`≥ 72`), `#tooth` default-schedule quantum Grover scale, and upgraded
-     unconditional `hemWhirPq128Stages` (`≥ 128` quantum bits).
+     `tooth_hem_ext2_folding_under_100bits`), OOD list-pinning (`> 225` bits), unconditional
+     `[BCIKS20]` Johnson `WhirBudgetRegime` profiles (`bciksJohnsonClassical128` wire tag `2` and
+     default `bciksJohnsonQrom128` wire tag `4`, with retired capacity wire tags `0, 1, 3` rejected
+     by `tooth_whirBudgetRegime_fromU8_rejects_retired_tags` and capacity query deficits certified
+     by `tooth_retired_capacity_queries_fail_johnson_bounds`), and upgraded unconditional
+     `hemWhirPq128Stages` (`≥ 128` quantum bits).
 
 5. **§5–§6. Fast-Factored ZKBoo (`BlindVc` `219` vs `438`), `ThresholdMlDsa`, `Poseidon2Toprf`,
    `DensePcg`, `HdRekey` (Exact 96-Bit Modular Bias), `ActiveMigration` & Master `PQ128` Portfolio**:
@@ -3172,45 +3174,49 @@ theorem goldilocksExt4Card_pos : 0 < goldilocksExt4Card := by
 theorem goldilocksExt2Card_pos : 0 < goldilocksExt2Card := by
   unfold goldilocksExt2Card goldilocksPrime; decide
 
-/-- Canonical 5-regime WHIR security ladder mirroring `crates/qsag-agg/src/pcs.rs`
-    (`WhirSecurityRegime`, `#[repr(u8)]` tags `0..4`, `default = .habr24Qrom128` = `3`):
-    1. `habr24Classical128`: `(56, 28, 19, 14)` (`112` `[HABR24]` query bits + `16`b PoW = `128` classical FS bits, `~64` QROM round-search bits),
-    2. `habr24Interactive128`: `(64, 32, 22, 16)` (`128` pure interactive `[HABR24]` query bits / `144` classical FS bits, `~72` QROM round-search bits — classical regime, NOT `PQ128`),
-    3. `bciksJohnsonClassical128`: `(129, 65, 44, 33)` (`⌈256 / log₂ B_i⌉ + 1`, `< 2⁻¹²⁸` unconditional `[BCIKS20]` Johnson query error with positive slack `η_i > 0`, `~72` QROM round-search bits — classical regime, NOT `PQ128`),
-    4. `habr24Qrom128` (**DEFAULT**): `(128, 64, 43, 32)` (`2⁻²⁵⁶` `[HABR24]` query error + `16`b PoW = `272` classical FS bits / `136` QROM Grover round-search bits),
-    5. `bciksJohnsonQrom128`: `(258, 130, 88, 66)` (`⌈512 / log₂ B_i⌉ + 2`, `pcs.rs::minimum_queries`, `< 2⁻²⁵⁶` unconditional `[BCIKS20]` Johnson query error with positive slack `η_i > 0` + `16`b PoW = `> 272` classical FS bits / `136` QROM Grover round-search bits without `[HABR24]`). -/
+/-- Canonical 2-regime unconditional WHIR Johnson security ladder mirroring
+    `crates/qsag-agg/src/pcs.rs` (`WhirSecurityRegime`, `#[repr(u8)]` tags `{2, 4}`,
+    `default = .bciksJohnsonQrom128` = `4`; retired capacity wire tags `0, 1, 3` are rejected per
+    `Crites & Stewart 2025/2046` and `Krachun-Kazanin-Habock 2026/782`):
+    1. `bciksJohnsonClassical128` (wire tag `2`): `(129, 65, 44, 33)` (`⌈256 / log₂ B_i⌉ + 1`,
+       `< 2⁻¹²⁸` unconditional `[BCIKS20]` Johnson query error with positive slack `η_i > 0`,
+       `~72` QROM round-search bits — classical regime, NOT `PQ128`),
+    2. `bciksJohnsonQrom128` (**DEFAULT**, wire tag `4`): `(258, 130, 88, 66)`
+       (`⌈512 / log₂ B_i⌉ + 2`, `pcs.rs::minimum_queries`, `< 2⁻²⁵⁶` unconditional `[BCIKS20]`
+       Johnson query error with positive slack `η_i > 0` + `16`b PoW = `> 272` classical FS bits /
+       `136` QROM Grover round-search bits). -/
 inductive WhirBudgetRegime where
-  | habr24Classical128
-  | habr24Interactive128
   | bciksJohnsonClassical128
-  | habr24Qrom128
   | bciksJohnsonQrom128
   deriving DecidableEq, Repr
 
 namespace WhirBudgetRegime
 
-def default : WhirBudgetRegime := .habr24Qrom128
+def default : WhirBudgetRegime := .bciksJohnsonQrom128
 
 def toU8 : WhirBudgetRegime → UInt8
-  | .habr24Classical128 => 0
-  | .habr24Interactive128 => 1
   | .bciksJohnsonClassical128 => 2
-  | .habr24Qrom128 => 3
   | .bciksJohnsonQrom128 => 4
 
 def fromU8? (tag : UInt8) : Option WhirBudgetRegime :=
-  if tag == 0 then some .habr24Classical128
-  else if tag == 1 then some .habr24Interactive128
-  else if tag == 2 then some .bciksJohnsonClassical128
-  else if tag == 3 then some .habr24Qrom128
+  if tag == 2 then some .bciksJohnsonClassical128
   else if tag == 4 then some .bciksJohnsonQrom128
   else none
 
 def meetsQrom128Floor : WhirBudgetRegime → Bool
-  | .habr24Qrom128 | .bciksJohnsonQrom128 => true
-  | _ => false
+  | .bciksJohnsonQrom128 => true
+  | .bciksJohnsonClassical128 => false
 
 end WhirBudgetRegime
+
+/-- `#tooth`: retired capacity-proximity wire tags `0`, `1`, and `3` are rejected (`none`) by
+    `WhirBudgetRegime.fromU8?`, matching `WhirSecurityRegime::from_u8` in `pcs.rs`. -/
+theorem tooth_whirBudgetRegime_fromU8_rejects_retired_tags :
+    WhirBudgetRegime.fromU8? 0 = none ∧
+    WhirBudgetRegime.fromU8? 1 = none ∧
+    WhirBudgetRegime.fromU8? 3 = none ∧
+    WhirBudgetRegime.default = .bciksJohnsonQrom128 := by
+  decide
 
 /-- One stage `(blowup B_i = sqrtBlowup^2, stepVars s_i, domainLog2, numQueries q_i)` of a WHIR schedule. -/
 structure WhirStageBudget where
@@ -3222,23 +3228,14 @@ structure WhirStageBudget where
   deriving DecidableEq, Repr
 
 /-- Canonical 4-stage `B = (4, 16, 64, 256)` (`sqrtBlowup = (2, 4, 8, 16)`) WHIR query schedules
-    for all 5 `WhirBudgetRegime` profiles on the DEPLOYED `num_vars = 24` geometry of
+    for both unconditional `WhirBudgetRegime` profiles on the DEPLOYED `num_vars = 24` geometry of
     `pcs.rs::stage_geometry`: `step_vars = (6, 4, 3, 3)` and committed-domain sizes
     `|D_i| = 2^(26, 22, 20, 19)` (`= B_i * 2^(24, 18, 14, 11)`); see
     `whirSchedule4Stage_matches_deployed_geometry`. -/
 def whirSchedule4Stage : WhirBudgetRegime → List WhirStageBudget
-  | .habr24Classical128 =>
-      [ ⟨2, 6, 26, 56, by decide⟩, ⟨4, 4, 22, 28, by decide⟩,
-        ⟨8, 3, 20, 19, by decide⟩, ⟨16, 3, 19, 14, by decide⟩ ]
-  | .habr24Interactive128 =>
-      [ ⟨2, 6, 26, 64, by decide⟩, ⟨4, 4, 22, 32, by decide⟩,
-        ⟨8, 3, 20, 22, by decide⟩, ⟨16, 3, 19, 16, by decide⟩ ]
   | .bciksJohnsonClassical128 =>
       [ ⟨2, 6, 26, 129, by decide⟩, ⟨4, 4, 22, 65, by decide⟩,
         ⟨8, 3, 20, 44, by decide⟩, ⟨16, 3, 19, 33, by decide⟩ ]
-  | .habr24Qrom128 =>
-      [ ⟨2, 6, 26, 128, by decide⟩, ⟨4, 4, 22, 64, by decide⟩,
-        ⟨8, 3, 20, 43, by decide⟩, ⟨16, 3, 19, 32, by decide⟩ ]
   | .bciksJohnsonQrom128 =>
       [ ⟨2, 6, 26, 258, by decide⟩, ⟨4, 4, 22, 130, by decide⟩,
         ⟨8, 3, 20, 88, by decide⟩, ⟨16, 3, 19, 66, by decide⟩ ]
@@ -3273,12 +3270,6 @@ theorem whirSchedule4Stage_matches_deployed_geometry :
   · intro r; cases r <;> decide +kernel
   · intro r; cases r <;> decide +kernel
 
-/-- Conjectural `[HABR24]` Conjecture-1 (capacity `1 - ρ_i` list decoding) statistical query bound
-    `(1 / B_i) ^ q_i = (1 / sqrtBlowup^2) ^ q_i` multiplied by `1 / 2 ^ powBits` PoW target density. -/
-def whirConjecturalHabr24StageBound (st : WhirStageBudget) (powBits : Nat) : RatBound :=
-  ⟨1, (st.sqrtBlowup ^ 2) ^ st.numQueries * 2 ^ powBits,
-   Nat.mul_pos (Nat.pow_pos (Nat.pow_pos st.h_sqrt_pos)) (Nat.two_pow_pos powBits)⟩
-
 /-- `[BCIKS20]` Johnson list-size bound `L_i = 1 / (2 * η_i) = etaScale * √B_i` at positive rational
     proximity slack `η_i = 1 / (2 * etaScale * √B_i) > 0` (`etaScale > 0`). -/
 def whirJohnsonListSize (st : WhirStageBudget) (etaScale : Nat) : Nat :=
@@ -3292,6 +3283,27 @@ def whirPositiveEtaPureQueryBound (st : WhirStageBudget) (etaScale : Nat) (hEta 
   ⟨(2 * etaScale + 1) ^ st.numQueries,
    (2 * etaScale * st.sqrtBlowup) ^ st.numQueries,
    Nat.pow_pos (Nat.mul_pos (Nat.mul_pos (by decide) hEta) st.h_sqrt_pos)⟩
+
+/-- `#tooth`: historical capacity-proximity query counts `[128, 64, 43, 32]` (and classical
+    `[56, 28, 19, 14]`) across blowups `B = (4, 16, 64, 256)` (`√B = (2, 4, 8, 16)`) fail the
+    unconditional `[BCIKS20]` Johnson 256-bit and 128-bit pure query bounds at EVERY stage
+    (`exceedsBitBudget 256` and `exceedsBitBudget 128` respectively). -/
+theorem tooth_retired_capacity_queries_fail_johnson_bounds :
+    (∀ st ∈ ([ ⟨2, 6, 26, 128, by decide⟩, ⟨4, 4, 22, 64, by decide⟩,
+               ⟨8, 3, 20, 43, by decide⟩, ⟨16, 3, 19, 32, by decide⟩ ] : List WhirStageBudget),
+      exceedsBitBudget 256 (whirPositiveEtaPureQueryBound st 256 (by decide))) ∧
+    (∀ st ∈ ([ ⟨2, 6, 26, 56, by decide⟩, ⟨4, 4, 22, 28, by decide⟩,
+               ⟨8, 3, 20, 19, by decide⟩, ⟨16, 3, 19, 14, by decide⟩ ] : List WhirStageBudget),
+      exceedsBitBudget 128 (whirPositiveEtaPureQueryBound st 128 (by decide))) := by
+  constructor
+  · intro st hMem
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hMem
+    rcases hMem with rfl | rfl | rfl | rfl <;>
+      (unfold exceedsBitBudget whirPositiveEtaPureQueryBound; decide)
+  · intro st hMem
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hMem
+    rcases hMem with rfl | rfl | rfl | rfl <;>
+      (unfold exceedsBitBudget whirPositiveEtaPureQueryBound; decide)
 
 /-- Positive-`η` unconditional `[BCIKS20]` Johnson stage bound including `powBits` per-stage PoW. -/
 def whirPositiveEtaJohnsonStageBound (st : WhirStageBudget) (etaScale : Nat) (hEta : 0 < etaScale)
@@ -3354,36 +3366,26 @@ theorem bciks_johnson_positive_eta_slack_and_commit_costs :
               by unfold atLeastBits whirPositiveEtaCommitFoldBound whirJohnsonListSize
                    goldilocksExt4Card goldilocksPrime; decide⟩
 
-/-- **`Hem` `QuarticGoldilocks` Algebraic Soundness & Complete 5-Regime WHIR Ladder Theorem**:
+/-- **`Hem` `QuarticGoldilocks` Algebraic Soundness & Unconditional 2-Regime WHIR Ladder Theorem**:
     1. `p^4 > 2^255`: single-check `Ext4` sumcheck (`72 / p^4`) achieves **`atLeastBits 249`**,
        `[BCIKS20]` folding (`2^80 / p^4`) achieves **`atLeastBits 175`**, and Kronecker OOD
        (`2^30 / p^4`) achieves **`strictlyMoreThanBits 225`**.
-    2. **Classical WHIR Regimes** (`habr24Classical128`, `habr24Interactive128`,
-       `bciksJohnsonClassical128`): achieve `≥ 128`, `≥ 144`, and `> 144` classical FS bits per stage,
-       while `habr24Interactive128` (`q_0 = 64`) and `bciksJohnsonClassical128` (`q_0 = 129`) hit a
+    2. **Classical Johnson WHIR Regime** (`bciksJohnsonClassical128`): achieves `> 144` classical FS
+       bits per stage (`q = (129, 65, 44, 33)` + `16`b PoW), while Stage 0 (`q_0 = 129`) hits a
        `~72`-bit generic QROM Grover round-search ceiling (`exceedsBitBudget 0` at `qHash = 2^72`).
-    3. **QROM WHIR Regimes** (`habr24Qrom128` default & `bciksJohnsonQrom128` unconditional): achieve
-       `≥ 272` classical FS bits per stage and survive QROM Grover round grinding at **`atLeastBits 129`**
-       for ALL `qHash + 1 ≤ 2 ^ 70` (`136`-bit round-search target density)! -/
+    3. **Default QROM Johnson WHIR Regime** (`bciksJohnsonQrom128`): achieves `> 272` classical FS
+       bits per stage and survives QROM Grover round grinding at **`atLeastBits 129`** for ALL
+       `qHash + 1 ≤ 2 ^ 70` (`136`-bit round-search target density)! -/
 theorem hem_ext4_algebraic_and_whir_regime_soundness :
     2 ^ 255 < goldilocksExt4Card ∧
     atLeastBits 249 ⟨72, goldilocksExt4Card, goldilocksExt4Card_pos⟩ ∧
     atLeastBits 175 ⟨2 ^ 80, goldilocksExt4Card, goldilocksExt4Card_pos⟩ ∧
     strictlyMoreThanBits 225 ⟨2 ^ 30, goldilocksExt4Card, goldilocksExt4Card_pos⟩ ∧
-    (∀ st ∈ whirSchedule4Stage .habr24Classical128,
-      atLeastBits 128 (whirConjecturalHabr24StageBound st 16)) ∧
-    (∀ st ∈ whirSchedule4Stage .habr24Interactive128,
-      atLeastBits 144 (whirConjecturalHabr24StageBound st 16)) ∧
-    exceedsBitBudget 0
-      (quantumGroverGrindingBound (2 ^ 72)
-        (whirConjecturalHabr24StageBound ⟨2, 5, 22, 64, by decide⟩ 16)) ∧
     (∀ st ∈ whirSchedule4Stage .bciksJohnsonClassical128,
       strictlyMoreThanBits 144 (whirPositiveEtaJohnsonStageBound st 128 (by decide) 16)) ∧
     exceedsBitBudget 0
       (quantumGroverGrindingBound (2 ^ 72)
-        (whirPositiveEtaJohnsonStageBound ⟨2, 5, 22, 129, by decide⟩ 128 (by decide) 16)) ∧
-    (∀ st ∈ whirSchedule4Stage .habr24Qrom128, ∀ qHash : Nat, qHash + 1 ≤ 2 ^ 70 →
-      atLeastBits 129 (quantumGroverGrindingBound qHash (whirConjecturalHabr24StageBound st 16))) ∧
+        (whirPositiveEtaJohnsonStageBound ⟨2, 6, 26, 129, by decide⟩ 128 (by decide) 16)) ∧
     (∀ st ∈ whirSchedule4Stage .bciksJohnsonQrom128, ∀ qHash : Nat, qHash + 1 ≤ 2 ^ 70 →
       atLeastBits 129
         (quantumGroverGrindingBound qHash (whirPositiveEtaJohnsonStageBound st 256 (by decide) 16))) := by
@@ -3396,21 +3398,10 @@ theorem hem_ext4_algebraic_and_whir_regime_soundness :
           by unfold atLeastBits goldilocksExt4Card goldilocksPrime; decide,
           by unfold atLeastBits goldilocksExt4Card goldilocksPrime; decide,
           by unfold strictlyMoreThanBits goldilocksExt4Card goldilocksPrime; decide,
-          ?_, ?_,
-          by unfold exceedsBitBudget quantumGroverGrindingBound whirConjecturalHabr24StageBound
-               RatBound.scale; decide,
           ?_,
           by unfold exceedsBitBudget quantumGroverGrindingBound whirPositiveEtaJohnsonStageBound
                RatBound.scale; decide,
-          ?_, ?_⟩
-  · intro st hMem
-    simp only [whirSchedule4Stage, List.mem_cons, List.not_mem_nil, or_false] at hMem
-    rcases hMem with rfl | rfl | rfl | rfl <;>
-      (unfold atLeastBits whirConjecturalHabr24StageBound; decide)
-  · intro st hMem
-    simp only [whirSchedule4Stage, List.mem_cons, List.not_mem_nil, or_false] at hMem
-    rcases hMem with rfl | rfl | rfl | rfl <;>
-      (unfold atLeastBits whirConjecturalHabr24StageBound; decide)
+          ?_⟩
   · intro st hMem
     have hPure := (bciks_johnson_positive_eta_slack_and_commit_costs.1 st hMem).1
     unfold strictlyMoreThanBits whirPositiveEtaPureQueryBound at hPure
@@ -3421,16 +3412,6 @@ theorem hem_ext4_algebraic_and_whir_regime_soundness :
         (2 * 128 + 1) ^ st.numQueries * 2 ^ 144 := by
       simp only [Nat.mul_assoc, ← Nat.pow_add]
     rwa [hPow] at hMul
-  · intro st hMem qHash hq
-    have h8 := hSq70 hq
-    simp only [whirSchedule4Stage, List.mem_cons, List.not_mem_nil, or_false] at hMem
-    rcases hMem with rfl | rfl | rfl | rfl <;> {
-      unfold atLeastBits quantumGroverGrindingBound whirConjecturalHabr24StageBound RatBound.scale
-      dsimp only
-      rw [Nat.mul_one]
-      have hm := Nat.mul_le_mul_right (2 ^ 129) h8
-      exact Nat.le_trans hm (by decide)
-    }
   · intro st hMem qHash hq
     have h8 := hSq70 hq
     have hPure := Nat.le_of_lt (bciks_johnson_positive_eta_slack_and_commit_costs.2 st hMem).1
@@ -3466,13 +3447,13 @@ def whirUnconditionalMultiStageTerms
 
 /-- **`WhirBudgetRegime` (`pcs.rs` `WhirSecurityRegime`) Wire Bijection, Multi-Stage Union &
     Multi-Session Scaling Theorem**:
-    1. **Wire-Tag Bijection (`pcs.rs:114-137`)**: `fromU8? (r.toU8) = some r`,
-       `WhirBudgetRegime.default = .habr24Qrom128`, and `meetsQrom128Floor = true` iff
-       `r ∈ {.habr24Qrom128, .bciksJohnsonQrom128}`.
+    1. **Wire-Tag Bijection (`pcs.rs:121-141`)**: `fromU8? (r.toU8) = some r`,
+       `WhirBudgetRegime.default = .bciksJohnsonQrom128`, and `meetsQrom128Floor = true` iff
+       `r = .bciksJohnsonQrom128` (with wire tags `0, 1, 3` rejected).
     2. **4-Stage + Multi-Session QROM Union Slack (`pcs.rs:174`)**: summing ALL 4 QROM Grover
        round-search bounds (`RatBound.sumList`) and scaling across up to `S ≤ 2 ^ 7 = 128`
-       online sessions preserves **`atLeastBits 128`** for BOTH `habr24Qrom128` AND unconditional
-       positive-`η` `bciksJohnsonQrom128` for ALL `qHash + 1 ≤ 2 ^ 66` (`137` per-stage bits
+       online sessions preserves **`atLeastBits 128`** for unconditional positive-`η`
+       `bciksJohnsonQrom128` for ALL `qHash + 1 ≤ 2 ^ 66` (`137` per-stage bits
        minus `2` stage-union bits minus `7` session-union bits = `128` quantum bits!).
     3. **Full 13-Event Multi-Stage + Multi-Session Unconditional `[BCIKS20]` Union Bounds**:
        (exact 13-term rational sums on the deployed `num_vars = 24` geometry, kernel-decided)
@@ -3486,13 +3467,7 @@ def whirUnconditionalMultiStageTerms
 theorem whirBudgetRegime_multistage_union_and_session_bounds :
     (∀ r : WhirBudgetRegime, WhirBudgetRegime.fromU8? r.toU8 = some r) ∧
     (∀ r : WhirBudgetRegime,
-      r.meetsQrom128Floor = true ↔ (r = .habr24Qrom128 ∨ r = .bciksJohnsonQrom128)) ∧
-    (∀ qHash S : Nat, qHash + 1 ≤ 2 ^ 66 → S ≤ 2 ^ 7 →
-      atLeastBits 128
-        (RatBound.scale S
-          (RatBound.sumList
-            ((whirSchedule4Stage .habr24Qrom128).map
-              (fun st => quantumGroverGrindingBound qHash (whirConjecturalHabr24StageBound st 16)))))) ∧
+      r.meetsQrom128Floor = true ↔ r = .bciksJohnsonQrom128) ∧
     (∀ qHash S : Nat, qHash + 1 ≤ 2 ^ 66 → S ≤ 2 ^ 7 →
       atLeastBits 128
         (RatBound.scale S
@@ -3513,24 +3488,9 @@ theorem whirBudgetRegime_multistage_union_and_session_bounds :
     have p1 : (qHash + 1) ^ 2 ≤ (2 ^ 66) ^ 2 := Nat.pow_le_pow_left hq 2
     have p2 : 8 * (2 ^ 66) ^ 2 = 2 ^ 135 := by decide
     rw [← p2]; exact Nat.mul_le_mul_left 8 p1
-  refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_⟩
   · intro r; cases r <;> decide
   · intro r; cases r <;> decide
-  · intro qHash S hq hS
-    apply atLeastBits_scale_session_loss hS
-    apply atLeastBits_sumList_union_loss (loss := 2) (by simp [whirSchedule4Stage])
-    intro b hb
-    rw [List.mem_map] at hb
-    rcases hb with ⟨st, hMem, rfl⟩
-    have h8 := hSq66 hq
-    simp only [whirSchedule4Stage, List.mem_cons, List.not_mem_nil, or_false] at hMem
-    rcases hMem with rfl | rfl | rfl | rfl <;> {
-      unfold atLeastBits quantumGroverGrindingBound whirConjecturalHabr24StageBound RatBound.scale
-      dsimp only
-      rw [Nat.mul_one]
-      have hm := Nat.mul_le_mul_right (2 ^ 137) h8
-      exact Nat.le_trans hm (by decide)
-    }
   · intro qHash S hq hS
     apply atLeastBits_scale_session_loss hS
     apply atLeastBits_sumList_union_loss (loss := 2) (by simp [whirSchedule4Stage])
@@ -3566,21 +3526,21 @@ theorem whirBudgetRegime_multistage_union_and_session_bounds :
     show atLeastBits 132 _
     decide +kernel
 
-/-- **`#tooth` Legacy `GoldilocksExt2` Folding Bottleneck & `habr24Classical128` Grover Ceiling
+/-- **`#tooth` Legacy `GoldilocksExt2` Folding Bottleneck & Classical-128 Grover Ceiling
     (`tooth_hem_ext2_folding_under_100bits`)**:
     1. Over `GoldilocksExt2` (`p^2 < 2^128`), at domain `|D| = 2^22`, even `|D|^2 / p^2 = 2^44 / p^2`
        falls strictly below 100 bits (`exceedsBitBudget 100`, ~84 bits before `(2η)^7` loss!),
-    2. On `habr24Classical128` Stage 0 (`(1/4)^56 * 2^-16 = 2^-128`), offline quantum Grover grinding
-       at `qHash = 2 ^ 64` breaks 128-bit quantum soundness (`exceedsBitBudget 0`), justifying why
-       `habr24Qrom128` (`q = 128, 64, 43, 32`) and `bciksJohnsonQrom128` (`q = 258, 130, 88, 66`) are
-       required for `136`-bit QROM round-search work! -/
+    2. On `bciksJohnsonClassical128` Stage 0 (`q_0 = 129`, `16`b PoW = `~144` classical round bits),
+       offline quantum Grover grinding at `qHash = 2 ^ 72` breaks quantum soundness
+       (`exceedsBitBudget 0`), justifying why default `bciksJohnsonQrom128` (`q = 258, 130, 88, 66`)
+       is required for `136`-bit QROM round-search work! -/
 theorem tooth_hem_ext2_folding_under_100bits :
     exceedsBitBudget 100 ⟨(2 ^ 22) ^ 2, goldilocksExt2Card, goldilocksExt2Card_pos⟩ ∧
     exceedsBitBudget 0
-      (quantumGroverGrindingBound (2 ^ 64)
-        (whirConjecturalHabr24StageBound ⟨2, 5, 22, 56, by decide⟩ 16)) := by
+      (quantumGroverGrindingBound (2 ^ 72)
+        (whirPositiveEtaJohnsonStageBound ⟨2, 6, 26, 129, by decide⟩ 128 (by decide) 16)) := by
   refine ⟨by unfold exceedsBitBudget goldilocksExt2Card goldilocksPrime; decide,
-          by unfold exceedsBitBudget quantumGroverGrindingBound whirConjecturalHabr24StageBound
+          by unfold exceedsBitBudget quantumGroverGrindingBound whirPositiveEtaJohnsonStageBound
                RatBound.scale; decide⟩
 
 
@@ -5215,6 +5175,156 @@ theorem rlwe_joint_signed_monomial_challenge_143_bits :
     rlweJointSignedMonomialChallengeCard < (2 ^ 72) ^ 2 := by
   decide +kernel
 
+/-- Cardinality `(2^11)^24 = 2^264` of the 24-repetition, 11-bit signed-monomial `PQ128`
+    RLWE OR-Sigma challenge space (`264` classical bits = `132` Grover bits). -/
+def rlweJointSignedMonomial24ChallengeCard : Nat := (2 ^ 11) ^ 24
+
+/-- Single-execution interactive soundness error `1 / (2^11)^reps` of the `reps`-challenge
+    signed-monomial RLWE OR-Sigma (`1 / 2^143` at `reps = 13`, `1 / 2^264` at `reps = 24`). -/
+def rlweOrSigmaSoundnessError (reps : Nat) : RatBound :=
+  ⟨1, (2 ^ 11) ^ reps, Nat.pow_pos (by decide)⟩
+
+/-- Single-execution interactive soundness error `1 / 2^143` of the 13-challenge RLWE OR-Sigma. -/
+abbrev rlweOrSigma13SoundnessError : RatBound := rlweOrSigmaSoundnessError 13
+
+/-- Single-execution interactive soundness error `1 / 2^264` of the 24-challenge `PQ128`
+    RLWE OR-Sigma (`extract_rlwe_or_sigma_24_short_witness` in `Qsag.RlweCyclotomicExtraction`). -/
+abbrev rlweOrSigma24SoundnessError : RatBound := rlweOrSigmaSoundnessError 24
+
+/-- **24-Challenge `PQ128` RLWE OR-Sigma Within `2^66` Query Ceiling
+    (`rlwe_or_sigma_24_pq128_within_ceiling`)**:
+    For every `QueryBudget` `b` with `b.qHash + 1 ≤ 2^66` (including the portfolio ceiling `2^56`),
+    the 24-repetition signed-monomial OR-Sigma (`1 / 2^264`) achieves `atLeastBits 128` both
+    classically (`classicalFiatShamirBound`) and in the QROM (`quantumGroverGrindingBound`). -/
+theorem rlwe_or_sigma_24_pq128_within_ceiling (b : QueryBudget)
+    (hqHash : b.qHash + 1 ≤ 2 ^ 66) :
+    atLeastBits 128 (classicalFiatShamirBound b.qHash (rlweOrSigmaSoundnessError 24)) ∧
+    atLeastBits 128 (quantumGroverGrindingBound b.qHash (rlweOrSigmaSoundnessError 24)) := by
+  have h264 : (2 ^ 11) ^ 24 = 2 ^ 264 := (Nat.pow_mul 2 11 24).symm
+  refine ⟨?_, ?_⟩
+  · unfold atLeastBits classicalFiatShamirBound RatBound.scale rlweOrSigmaSoundnessError
+    dsimp only
+    rw [Nat.mul_one, h264]
+    have hm := Nat.mul_le_mul_right (2 ^ 128) hqHash
+    rw [← Nat.pow_add] at hm
+    exact Nat.le_trans hm (Nat.pow_le_pow_right (by decide : 0 < 2) (by decide : 66 + 128 ≤ 264))
+  · unfold atLeastBits quantumGroverGrindingBound RatBound.scale rlweOrSigmaSoundnessError
+    dsimp only
+    rw [Nat.mul_one, h264]
+    have hSq : (b.qHash + 1) ^ 2 ≤ 2 ^ 132 := by
+      have p1 := Nat.pow_le_pow_left hqHash 2
+      have p2 : (2 ^ 66) ^ 2 = 2 ^ 132 := (Nat.pow_mul 2 66 2).symm
+      rw [p2] at p1; exact p1
+    have h8 : 8 * (b.qHash + 1) ^ 2 ≤ 2 ^ 135 := by
+      have p1 := Nat.mul_le_mul_left 8 hSq
+      have p2 : 8 * 2 ^ 132 = 2 ^ 3 * 2 ^ 132 := rfl
+      rw [p2, ← Nat.pow_add] at p1; exact p1
+    have hm := Nat.mul_le_mul_right (2 ^ 128) h8
+    rw [← Nat.pow_add] at hm
+    exact Nat.le_trans hm (Nat.pow_le_pow_right (by decide : 0 < 2) (by decide : 135 + 128 ≤ 264))
+
+/-- **24-Challenge `PQ128` Signed-Monomial RLWE OR-Sigma Classical & QROM Soundness Budget
+    (`rlwe_or_sigma_24_pq128_classical_and_qrom_soundness`)**:
+    1. The 24-repetition signed-monomial challenge space has exact cardinality `2^264 = (2^132)^2`
+       (`264` classical bits, `132` Grover bits `≥ 128`),
+    2. Under unitary O2H quantum Fiat–Shamir (`quantumGroverGrindingBound`), for ALL
+       `qHash + 1 ≤ 2 ^ 66`, the 24-challenge profile achieves `atLeastBits 129` (hence
+       `atLeastBits 128`) in the QROM and `atLeastBits 198` classically,
+    3. Under `[DFM20]` QROM Measure-and-Reprogram (`quantumDfmMeasureReprogramBound 1`), for ALL
+       `qHash + 1 ≤ 2 ^ 67`, the 24-challenge profile achieves `atLeastBits 128` in the QROM,
+    4. At the portfolio ceiling `qHash + 1 ≤ 2 ^ 56`, the 24-challenge profile achieves
+       `atLeastBits 208` classically and `atLeastBits 149` in the QROM! -/
+theorem rlwe_or_sigma_24_pq128_classical_and_qrom_soundness :
+    rlweJointSignedMonomial24ChallengeCard = 2 ^ 264 ∧
+    (2 ^ 132) ^ 2 = rlweJointSignedMonomial24ChallengeCard ∧
+    (∀ qHash : Nat, qHash + 1 ≤ 2 ^ 66 →
+      atLeastBits 198 (classicalFiatShamirBound qHash (rlweOrSigmaSoundnessError 24)) ∧
+      atLeastBits 129 (quantumGroverGrindingBound qHash (rlweOrSigmaSoundnessError 24)) ∧
+      atLeastBits 128 (quantumGroverGrindingBound qHash (rlweOrSigmaSoundnessError 24))) ∧
+    (∀ qHash : Nat, qHash + 1 ≤ 2 ^ 67 →
+      atLeastBits 128 (quantumDfmMeasureReprogramBound 1 qHash (rlweOrSigmaSoundnessError 24))) ∧
+    (∀ qHash : Nat, qHash + 1 ≤ 2 ^ 56 →
+      atLeastBits 208 (classicalFiatShamirBound qHash (rlweOrSigmaSoundnessError 24)) ∧
+      atLeastBits 149 (quantumGroverGrindingBound qHash (rlweOrSigmaSoundnessError 24))) := by
+  have h264Card : rlweJointSignedMonomial24ChallengeCard = 2 ^ 264 := by
+    unfold rlweJointSignedMonomial24ChallengeCard
+    exact (Nat.pow_mul 2 11 24).symm
+  have h264 : (2 ^ 11) ^ 24 = 2 ^ 264 := (Nat.pow_mul 2 11 24).symm
+  have h132 : (2 ^ 132) ^ 2 = rlweJointSignedMonomial24ChallengeCard :=
+    (Nat.pow_mul 2 132 2).symm.trans h264Card.symm
+  refine ⟨h264Card, h132, ?_, ?_, ?_⟩
+  · intro qHash hq66
+    have hCl : atLeastBits 198 (classicalFiatShamirBound qHash (rlweOrSigmaSoundnessError 24)) := by
+      unfold atLeastBits classicalFiatShamirBound RatBound.scale rlweOrSigmaSoundnessError
+      dsimp only
+      rw [Nat.mul_one, h264]
+      have hm := Nat.mul_le_mul_right (2 ^ 198) hq66
+      rw [← Nat.pow_add] at hm
+      exact hm
+    have hQu129 : atLeastBits 129 (quantumGroverGrindingBound qHash (rlweOrSigmaSoundnessError 24)) := by
+      unfold atLeastBits quantumGroverGrindingBound RatBound.scale rlweOrSigmaSoundnessError
+      dsimp only
+      rw [Nat.mul_one, h264]
+      have hSq : (qHash + 1) ^ 2 ≤ 2 ^ 132 := by
+        have p1 := Nat.pow_le_pow_left hq66 2
+        rw [(Nat.pow_mul 2 66 2).symm] at p1; exact p1
+      have h8 : 8 * (qHash + 1) ^ 2 ≤ 2 ^ 135 := by
+        have p1 := Nat.mul_le_mul_left 8 hSq
+        have p2 : 8 * 2 ^ 132 = 2 ^ 3 * 2 ^ 132 := rfl
+        rw [p2, ← Nat.pow_add] at p1; exact p1
+      have hm := Nat.mul_le_mul_right (2 ^ 129) h8
+      rw [← Nat.pow_add] at hm
+      exact hm
+    exact ⟨hCl, hQu129, atLeastBits_antitone_bits (by decide) hQu129⟩
+  · intro qHash hq67
+    unfold atLeastBits quantumDfmMeasureReprogramBound RatBound.scale rlweOrSigmaSoundnessError
+    dsimp only
+    rw [Nat.mul_one, h264]
+    have h2q : 2 * qHash + 1 ≤ 2 ^ 68 := by omega
+    have hSq : (2 * qHash + 1) ^ 2 ≤ 2 ^ 136 := by
+      have p1 := Nat.pow_le_pow_left h2q 2
+      rw [(Nat.pow_mul 2 68 2).symm] at p1; exact p1
+    have hm := Nat.mul_le_mul_right (2 ^ 128) hSq
+    rw [← Nat.pow_add] at hm
+    exact hm
+  · intro qHash hq56
+    refine ⟨?_, ?_⟩
+    · unfold atLeastBits classicalFiatShamirBound RatBound.scale rlweOrSigmaSoundnessError
+      dsimp only
+      rw [Nat.mul_one, h264]
+      have hm := Nat.mul_le_mul_right (2 ^ 208) hq56
+      rw [← Nat.pow_add] at hm
+      exact hm
+    · unfold atLeastBits quantumGroverGrindingBound RatBound.scale rlweOrSigmaSoundnessError
+      dsimp only
+      rw [Nat.mul_one, h264]
+      have hSq : (qHash + 1) ^ 2 ≤ 2 ^ 112 := by
+        have p1 := Nat.pow_le_pow_left hq56 2
+        rw [(Nat.pow_mul 2 56 2).symm] at p1; exact p1
+      have h8 : 8 * (qHash + 1) ^ 2 ≤ 2 ^ 115 := by
+        have p1 := Nat.mul_le_mul_left 8 hSq
+        have p2 : 8 * 2 ^ 112 = 2 ^ 3 * 2 ^ 112 := rfl
+        rw [p2, ← Nat.pow_add] at p1; exact p1
+      have hm := Nat.mul_le_mul_right (2 ^ 149) h8
+      rw [← Nat.pow_add] at hm
+      exact hm
+
+/-- `#tooth`: the 13-challenge RLWE OR-Sigma (`1 / 2^143`) fails 128-bit QROM soundness at the
+    portfolio ceiling `qHash = 2^56 - 1` (and even at `qHash = 2^8`). -/
+theorem tooth_rlwe_or_sigma_13_not_pq128_at_2pow56 :
+    ¬ atLeastBits 128 (quantumGroverGrindingBound (2 ^ 56 - 1) (rlweOrSigmaSoundnessError 13)) := by
+  decide +kernel
+
+theorem tooth_rlwe_or_sigma_13_not_pq128_qrom :
+    ¬ atLeastBits 128 (quantumGroverGrindingBound (2 ^ 8) rlweOrSigma13SoundnessError) ∧
+    ¬ atLeastBits 128 (quantumDfmMeasureReprogramBound 1 (2 ^ 8) rlweOrSigma13SoundnessError) ∧
+    ¬ atLeastBits 128 (quantumGroverGrindingBound (2 ^ 56 - 1) rlweOrSigma13SoundnessError) := by
+  refine ⟨by decide +kernel, by decide +kernel, tooth_rlwe_or_sigma_13_not_pq128_at_2pow56⟩
+
+theorem witness_rlwe_or_sigma_24_qrom_budget :
+    ∃ b : QueryBudget, b.qHash + 1 ≤ 2 ^ 66 :=
+  ⟨⟨2 ^ 56 - 1, 0, 0⟩, by decide⟩
+
 /-- At `2^56` offline queries the roster contains an entry below 128 QROM bits: the Category-2
     threshold ML-DSA-44 entry. This is why `qsag_pq128_portfolio_soundness_budget` is stated
     per-entry ceiling. -/
@@ -5240,6 +5350,7 @@ theorem tooth_portfolio_category2_entry_fails_at_2pow56 :
 #tooth_pair Qsag.threshold_mldsa_entry_pq128_within_ceiling vs Qsag.tooth_threshold_mldsa_entry_above_ceiling_not_pq128
 #tooth_pair Qsag.threshold_mldsa_entry_pq128_within_ceiling vs Qsag.tooth_threshold_mldsa44_entry_not_pq128_at_2pow56
 #tooth_pair Qsag.qsag_pq128_portfolio_soundness_budget vs Qsag.tooth_portfolio_category2_entry_fails_at_2pow56
+#tooth_pair Qsag.rlwe_or_sigma_24_pq128_within_ceiling vs Qsag.tooth_rlwe_or_sigma_13_not_pq128_at_2pow56
 
 #verify_inhabited Qsag.densePcgV3_partitioned_seed_search_140 Qsag.witness_densePcgV3_query_partition
 #verify_inhabited Qsag.densePcgV3SaltedSeedQuantumBound_140 Qsag.witness_densePcgV3_query_budget
@@ -5247,5 +5358,6 @@ theorem tooth_portfolio_category2_entry_fails_at_2pow56 :
 #verify_inhabited Qsag.densePcgV3SharedTweakSeedQuantumBound_128 Qsag.witness_densePcgV3_shared_tweak_budget
 #verify_inhabited Qsag.threshold_mldsa_entry_pq128_within_ceiling Qsag.witness_threshold_mldsa_budget
 #verify_inhabited Qsag.qsag_pq128_portfolio_soundness_budget Qsag.witness_threshold_mldsa_budget
+#verify_inhabited Qsag.rlwe_or_sigma_24_pq128_within_ceiling Qsag.witness_rlwe_or_sigma_24_qrom_budget
 
 end Qsag

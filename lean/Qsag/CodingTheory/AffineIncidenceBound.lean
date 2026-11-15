@@ -24,8 +24,7 @@ bound it, because it fixes the challenge.
 -/
 
 public import Qsag.CodingTheory.SimpleRootStratification
-public import Qsag.MultiRoundFsQrom
-import all Qsag.MultiRoundFsQrom
+public import Qsag.AffineProximityGaps
 import all Qsag.CodingTheory.PolyMv3
 import all Qsag.CodingTheory.SylvesterResultant
 import all Qsag.CodingTheory.DynamicGcdSplit
@@ -42,7 +41,192 @@ set_option autoImplicit false
 
 open CommRingOps RoundPoly
 
-/-! ## List lemmas -/
+/-! ## List lemmas & Mutual Correlated Agreement Bound -/
+
+theorem list_getD_eq_get {α : Type} :
+    ∀ (xs : List α) (d : α) (idx : Fin xs.length), xs.getD idx.1 d = xs.get idx
+  | [], _, idx => absurd idx.2 (Nat.not_lt_zero _)
+  | _ :: _, _, ⟨0, _⟩ => rfl
+  | _ :: xs, d, ⟨i + 1, hi⟩ => list_getD_eq_get xs d ⟨i, Nat.lt_of_succ_lt_succ hi⟩
+
+theorem list_get_mem {α : Type} : ∀ (xs : List α) (k : Fin xs.length), xs.get k ∈ xs
+  | _ :: _, ⟨0, _⟩ => .head _
+  | _ :: xs, ⟨k + 1, hk⟩ => .tail _ (list_get_mem xs ⟨k, Nat.lt_of_succ_lt_succ hk⟩)
+
+theorem nodup_get_inj {α : Type} :
+    ∀ {S : List α} (_ : S.Nodup) {i j : Fin S.length}, S.get i = S.get j → i = j
+  | [], _, ⟨_, hi⟩, _, _ => absurd hi (Nat.not_lt_zero _)
+  | _ :: _, _, ⟨0, _⟩, ⟨0, _⟩, _ => rfl
+  | _ :: xs, hNodup, ⟨0, _⟩, ⟨j + 1, hj⟩, hEq =>
+    absurd hEq ((List.pairwise_cons.mp hNodup).1 _
+      (list_get_mem xs ⟨j, Nat.lt_of_succ_lt_succ hj⟩))
+  | _ :: xs, hNodup, ⟨i + 1, hi⟩, ⟨0, _⟩, hEq =>
+    absurd hEq.symm ((List.pairwise_cons.mp hNodup).1 _
+      (list_get_mem xs ⟨i, Nat.lt_of_succ_lt_succ hi⟩))
+  | _ :: xs, hNodup, ⟨i + 1, hi⟩, ⟨j + 1, hj⟩, hEq => by
+    have hSub := nodup_get_inj (List.pairwise_cons.mp hNodup).2
+      (i := ⟨i, Nat.lt_of_succ_lt_succ hi⟩) (j := ⟨j, Nat.lt_of_succ_lt_succ hj⟩) hEq
+    exact Fin.ext (by simpa using congrArg Fin.val hSub)
+
+theorem not_not_forall_mem {α : Type} (Q : α → Prop) :
+    ∀ l : List α, (∀ a ∈ l, ¬¬ Q a) → ¬¬ (∀ a ∈ l, Q a)
+  | [], _ => fun h => h (fun _ hm => nomatch hm)
+  | a :: l, h => fun hn =>
+    h a (.head l) (fun hQa =>
+      not_not_forall_mem Q l (fun a' ha' => h a' (.tail a ha')) (fun hRest =>
+        hn (fun a' ha' => by
+          rcases List.mem_cons.mp ha' with hEq | h1
+          · rw [hEq]; exact hQa
+          · exact hRest a' h1)))
+
+theorem list_finite_choice {α β : Type} [DecidableEq α] (Q : α → β → Prop) (dflt : β) :
+    ∀ l : List α, (∀ a ∈ l, ∃ b, Q a b) → ∃ f : α → β, ∀ a ∈ l, Q a (f a)
+  | [], _ => ⟨fun _ => dflt, fun _ hm => nomatch hm⟩
+  | a :: l, h => by
+    rcases h a (.head l) with ⟨b, hb⟩
+    rcases list_finite_choice Q dflt l (fun a' ha' => h a' (.tail a ha')) with ⟨f, hf⟩
+    refine ⟨fun a' => if a' = a then b else f a', ?_⟩
+    intro a' ha'
+    if hEq : a' = a then
+      rw [hEq]
+      simp only [↓reduceIte]
+      exact hb
+    else
+      simp only [hEq, ↓reduceIte]
+      rcases List.mem_cons.mp ha' with h1 | h1
+      · exact absurd h1 hEq
+      · exact hf a' h1
+
+private theorem length_filter_split_bool {α : Type} (p : α → Bool) :
+    ∀ l : List α, l.length = (l.filter p).length + (l.filter (fun x => !p x)).length
+  | [] => rfl
+  | a :: l => by
+    have ih := length_filter_split_bool p l
+    cases hp : p a <;>
+      simp only [List.filter_cons, hp, Bool.not_false, Bool.not_true, Bool.false_eq_true,
+        ↓reduceIte, List.length_cons] <;> omega
+
+private theorem length_filter_filter_le_bool {α : Type} (p q : α → Bool) :
+    ∀ l : List α, ((l.filter q).filter p).length ≤ (l.filter p).length
+  | [] => Nat.le_refl _
+  | a :: l => by
+    have ih := length_filter_filter_le_bool p q l
+    cases hq : q a <;> cases hp : p a <;>
+      simp only [List.filter_cons, hq, hp, Bool.false_eq_true, ↓reduceIte, List.length_cons] <;>
+      omega
+
+section McaDefs
+variable {F : Type} [LawfulField F] [DecidableEq F]
+
+/-- **Correlated agreement**: ONE polynomial pair `(F_poly, G_poly)` (`deg F_poly ≤ d`,
+    `deg G_poly ≤ d - 1`) simultaneously agrees with the received words `(f, g)` on at least `A`
+    coordinates of the evaluation domain `D`. -/
+@[expose] def HasCorrelatedAgreement (d A : Nat) (f g : F → F) (D : List F) : Prop :=
+  ∃ F_poly G_poly : List F,
+    F_poly.length ≤ d + 1 ∧
+    G_poly.length ≤ d ∧
+    A ≤ (D.filter (fun z =>
+      decide (RoundPoly.evalCoeffs F_poly z = f z) &&
+      decide (RoundPoly.evalCoeffs G_poly z = g z))).length
+
+/-- An `s = 1` affine witness for a fold that is `A`-close forces correlated agreement `≥ A - 1`:
+    the decomposition `P = F + (α + β X) G` loses at most one coordinate of the agreement set. -/
+theorem hasCorrelatedAgreement_of_affineWitnessS1
+    {d A : Nat} {f g : F → F} {D : List F} {α β : F} {P : List F}
+    (hW : HasAffineWitnessS1 d f g D α β P)
+    (hAgree : A ≤ (D.filter (fun z =>
+      decide (RoundPoly.evalCoeffs P z =
+        CommRingOps.add (f z)
+          (CommRingOps.mul (CommRingOps.add α (CommRingOps.mul β z)) (g z))))).length) :
+    HasCorrelatedAgreement d (A - 1) f g D := by
+  rcases hW with ⟨F_poly, G_poly, hF, hG, _, hLoss⟩
+  refine ⟨F_poly, G_poly, hF, hG, ?_⟩
+  have hSplit := length_filter_split_bool
+    (fun z => decide (RoundPoly.evalCoeffs F_poly z = f z) &&
+      decide (RoundPoly.evalCoeffs G_poly z = g z))
+    (D.filter (fun z =>
+      decide (RoundPoly.evalCoeffs P z =
+        CommRingOps.add (f z)
+          (CommRingOps.mul (CommRingOps.add α (CommRingOps.mul β z)) (g z)))))
+  have hLe := length_filter_filter_le_bool
+    (fun z => decide (RoundPoly.evalCoeffs F_poly z = f z) &&
+      decide (RoundPoly.evalCoeffs G_poly z = g z))
+    (fun z =>
+      decide (RoundPoly.evalCoeffs P z =
+        CommRingOps.add (f z)
+          (CommRingOps.mul (CommRingOps.add α (CommRingOps.mul β z)) (g z)))) D
+  apply Nat.sub_le_of_le_add
+  apply Nat.le_trans hAgree
+  rw [hSplit]
+  exact Nat.add_le_add hLe hLoss
+
+/-- Verifier predicate of the affine-fold proximity IOP: challenge index `c` selects
+    `(α, β) = (prodPool S)[c]`, and the prover's response `P` has degree `≤ d` and agrees with the
+    fold word `f + (α + β X) g` on at least `A` points of `D`. -/
+@[expose] def affineMcaAccepts (D S : List F) (d A : Nat) (x : (F → F) × (F → F)) (c : Nat)
+    (P : List F) : Bool :=
+  decide (c < (prodPool S).length) &&
+  decide (P.length ≤ d + 1) &&
+  decide (A ≤ (D.filter (fun z =>
+    decide (RoundPoly.evalCoeffs P z =
+      CommRingOps.add (x.1 z)
+        (CommRingOps.mul
+          (CommRingOps.add ((prodPool S).getD c (CommRingOps.zero, CommRingOps.zero)).1
+            (CommRingOps.mul ((prodPool S).getD c (CommRingOps.zero, CommRingOps.zero)).2 z))
+          (x.2 z))))).length)
+
+/-- **Mutual correlated agreement bound** for the affine fold of words on `D` with challenges
+    `(α, β) ∈ S × S`, degree bound `d` and agreement threshold `A`: for every pair of words
+    WITHOUT correlated agreement `≥ A - 1`, at most `bad` challenges admit a degree-`≤ d`
+    polynomial `A`-close to the fold word. -/
+@[expose] def AffineMcaBound (D S : List F) (d A bad : Nat) : Prop :=
+  ∀ x : (F → F) × (F → F), ¬ HasCorrelatedAgreement d (A - 1) x.1 x.2 D →
+    ∀ L : List (Fin (prodPool S).length), L.Nodup →
+      (∀ ch ∈ L, ¬¬ ∃ P : List F, affineMcaAccepts D S d A x ch.1 P = true) →
+      L.length ≤ bad
+
+/-- The bound is monotone in the number of exceptional challenges. -/
+theorem AffineMcaBound.mono {D S : List F} {d A bad bad' : Nat}
+    (h : AffineMcaBound D S d A bad) (hLe : bad ≤ bad') : AffineMcaBound D S d A bad' :=
+  fun x hFar L hNd hEx => Nat.le_trans (h x hFar L hNd hEx) hLe
+
+/-- **Welch–Berlekamp instance of the mutual correlated agreement bound**, proved from
+    `welch_berlekamp_affine_proximity_gap` in the regime `2 |D| + d + 1 < 3 A`. -/
+theorem affineMcaBound_welch_berlekamp (D S : List F) (d A : Nat)
+    (hD : D.Nodup) (hS : S.Nodup) (hAD : A ≤ D.length) (hWB : 2 * D.length + d + 1 < 3 * A) :
+    AffineMcaBound D S d A (Nat.max S.length (D.length * (D.length - 1) / 2)) := by
+  intro x hFar L hNd hEx
+  apply Decidable.byContradiction
+  intro hGt
+  refine not_not_forall_mem _ L hEx (fun hAll => hGt ?_)
+  have hPairs : ∀ p ∈ L.map (fun ch => (prodPool S).get ch), ∃ P : List F,
+      P.length ≤ d + 1 ∧
+      A ≤ (D.filter (fun z =>
+        decide (RoundPoly.evalCoeffs P z =
+          CommRingOps.add (x.1 z)
+            (CommRingOps.mul (CommRingOps.add p.1 (CommRingOps.mul p.2 z)) (x.2 z))))).length := by
+    intro p hp
+    rcases List.mem_map.mp hp with ⟨ch, hch, rfl⟩
+    rcases hAll ch hch with ⟨P, hP⟩
+    unfold affineMcaAccepts at hP
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hP
+    rw [list_getD_eq_get (prodPool S) _ ch] at hP
+    exact ⟨P, hP.1.2, hP.2⟩
+  rcases list_finite_choice _ ([] : List F) _ hPairs with ⟨P_of, hP_of⟩
+  have hBound := welch_berlekamp_affine_proximity_gap x.1 x.2 D S d A
+    (L.map (fun ch => (prodPool S).get ch)) P_of hD hS hAD hWB
+    (List.Pairwise.map _
+      (fun a b hab hEq => hab (nodup_get_inj (prodPool_nodup hS) hEq)) hNd)
+    (fun p hp => by
+      rcases List.mem_map.mp hp with ⟨ch, _, rfl⟩
+      exact list_get_mem (prodPool S) ch)
+    (fun p hp => (hP_of p hp).1)
+    (fun p hp => (hP_of p hp).2)
+    (fun p hp hW => hFar (hasCorrelatedAgreement_of_affineWitnessS1 hW (hP_of p hp).2))
+  rw [List.length_map] at hBound
+  exact hBound
+
+end McaDefs
 
 theorem exists_mem_ne_zero_of_coeffAt {R : Type} [CommRingOps R] : ∀ (l : List R) (k : Nat),
     coeffAt l k ≠ zero → ∃ c ∈ l, c ≠ zero

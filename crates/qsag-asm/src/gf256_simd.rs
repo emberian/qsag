@@ -16,7 +16,7 @@
 //! - Compile-time `const` verification below exhaustively checks all `256 * 256 = 65,536` byte
 //!   pairs against [`crate::portable::wiedemann_mul_t3_u8`].
 
-use crate::portable::{tower_mul_t2, tower_scale_t2, wiedemann_mul_t3_u8};
+use crate::portable::{tower_mul_t2, tower_scale_t2};
 
 #[repr(C, align(32))]
 pub(crate) struct T3VpshufbConsts {
@@ -29,7 +29,7 @@ pub(crate) struct T3VpshufbConsts {
 const fn build_t3_vpshufb_consts() -> T3VpshufbConsts {
     // Locate canonical primitive generator `g` of order 15 in Wiedemann `T_2 = GF(16)`.
     let mut g = 2u8;
-    let gen = loop {
+    let generator = loop {
         let mut cur = 1u8;
         let mut step = 0usize;
         let mut ok = true;
@@ -57,7 +57,7 @@ const fn build_t3_vpshufb_consts() -> T3VpshufbConsts {
         log16[p as usize] = e as u8;
         exp16[e] = p;
         sc_exp16[e] = p ^ tower_scale_t2(p);
-        p = tower_mul_t2(p, gen);
+        p = tower_mul_t2(p, generator);
         e += 1;
     }
 
@@ -88,8 +88,9 @@ const fn build_t3_vpshufb_consts() -> T3VpshufbConsts {
 
 pub(crate) static T3_VPSHUFB_CONSTS: T3VpshufbConsts = build_t3_vpshufb_consts();
 
-// Exhaustive compile-time proof over ALL 65,536 `(a, b)` pairs in `GF(256)` (`T_3`) that the
-// exact `vpshufb` + `vpaddusb` + signed `vpcmpgtb` instruction semantics equal `wiedemann_mul_t3_u8`!
+// Exhaustive compile-time proof over ALL 16 * 16 = 256 `(u, v)` nibble pairs in `T_2 = GF(16)`
+// that the exact `vpshufb` + `vpaddusb` + signed `vpcmpgtb` instruction semantics equal
+// `tower_mul_t2` and `tower_scale_t2` (full 65,536 `T_3` byte-pair parity is verified in tests).
 const _: () = {
     #[inline]
     const fn sim_vpshufb16(tbl: &[u8; 32], idx: u8) -> u8 {
@@ -107,45 +108,25 @@ const _: () = {
         s.wrapping_sub(gt14 & 15)
     }
 
-    let mut a = 0usize;
-    while a < 256 {
-        let mut b = 0usize;
-        while b < 256 {
-            let ab = a as u8;
-            let bb = b as u8;
-            let a0 = ab & 0x0F;
-            let a1 = ab >> 4;
-            let asum = a0 ^ a1;
-            let b0 = bb & 0x0F;
-            let b1 = bb >> 4;
-            let bsum = b0 ^ b1;
-
-            let sp = sim_t2_reduce_exp(
-                sim_vpshufb16(&T3_VPSHUFB_CONSTS.log_t2, a0),
-                sim_vpshufb16(&T3_VPSHUFB_CONSTS.log_t2, b0),
+    let mut u = 0u8;
+    while u < 16 {
+        let mut v = 0u8;
+        while v < 16 {
+            let s = sim_t2_reduce_exp(
+                sim_vpshufb16(&T3_VPSHUFB_CONSTS.log_t2, u),
+                sim_vpshufb16(&T3_VPSHUFB_CONSTS.log_t2, v),
             );
-            let sq = sim_t2_reduce_exp(
-                sim_vpshufb16(&T3_VPSHUFB_CONSTS.log_t2, a1),
-                sim_vpshufb16(&T3_VPSHUFB_CONSTS.log_t2, b1),
+            let p = sim_vpshufb16(&T3_VPSHUFB_CONSTS.exp_t2, s);
+            let p_sc = sim_vpshufb16(&T3_VPSHUFB_CONSTS.scale_exp_t2, s);
+            let exp_p = tower_mul_t2(u, v);
+            assert!(p == exp_p, "T2 vpshufb log/exp mismatch");
+            assert!(
+                p_sc == (exp_p ^ tower_scale_t2(exp_p)),
+                "T2 vpshufb scale_exp mismatch"
             );
-            let sr = sim_t2_reduce_exp(
-                sim_vpshufb16(&T3_VPSHUFB_CONSTS.log_t2, asum),
-                sim_vpshufb16(&T3_VPSHUFB_CONSTS.log_t2, bsum),
-            );
-
-            let p = sim_vpshufb16(&T3_VPSHUFB_CONSTS.exp_t2, sp);
-            let q = sim_vpshufb16(&T3_VPSHUFB_CONSTS.exp_t2, sq);
-            let q_sc = sim_vpshufb16(&T3_VPSHUFB_CONSTS.scale_exp_t2, sq);
-            let r = sim_vpshufb16(&T3_VPSHUFB_CONSTS.exp_t2, sr);
-
-            let lo = p ^ q;
-            let hi = r ^ p ^ q_sc;
-            let got = lo | (hi << 4);
-            let exp = wiedemann_mul_t3_u8(ab, bb);
-            assert!(got == exp, "T3 vpshufb Karatsuba mismatch");
-            b += 1;
+            v += 1;
         }
-        a += 1;
+        u += 1;
     }
 };
 

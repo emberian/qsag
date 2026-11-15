@@ -632,8 +632,10 @@ theorem bciksJohnson_schedules_eq_minimum_queries :
   _root_.Qsag.Aggregation.bciksJohnson_schedules_eq_minimum_queries
 
 theorem productionAggParams_queries_match_schedule :
+    productionAggParams.classicalJohnsonQueries =
+      (Aggregation.whirSchedule4Stage .bciksJohnsonClassical128).map (·.numQueries) ∧
     productionAggParams.defaultQromQueries =
-      (Aggregation.whirSchedule4Stage .habr24Qrom128).map (·.numQueries) ∧
+      (Aggregation.whirSchedule4Stage .bciksJohnsonQrom128).map (·.numQueries) ∧
     productionAggParams.johnsonQromQueries =
       (Aggregation.whirSchedule4Stage .bciksJohnsonQrom128).map (·.numQueries) ∧
     (∀ r : Aggregation.WhirSecurityRegime, ∀ s ∈ Aggregation.whirSchedule4Stage r,

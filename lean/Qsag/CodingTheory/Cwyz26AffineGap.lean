@@ -25,7 +25,6 @@ unconditional instance of `AffineMcaBound` remains `affineMcaBound_welch_berleka
 
 public import Qsag.CodingTheory.AffineIncidenceBound
 public import Qsag.CodingTheory.TrivariateGsExplainer
-import all Qsag.MultiRoundFsQrom
 import all Qsag.CodingTheory.PolyMv3
 import all Qsag.CodingTheory.SylvesterResultant
 import all Qsag.CodingTheory.DynamicGcdSplit

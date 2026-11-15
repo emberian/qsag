@@ -48,6 +48,20 @@ module
    witnesses (`1 → 0` and `2 → 1` on a two-key committee) and unconditional replay rejection. The
    example uses the field-based signature suite from `Aggregation`, not a claimed secure
    instantiation of that suite.
+8. **§8 Width-12 `M_E` & `M_I` differential and linear branch numbers.** Exact 12-lane differential
+   and transpose-linear branch bounds for `applyME` (single-block `≥ 7 ≥ 5`, multi-block `≥ 8`,
+   universal `= 7`) and `applyMI` (nonzero-sum `= 13` with full 12-lane diffusion on single-lane
+   inputs, universal `≥ 4`).
+9. **§9 `sbox7` differential uniformity `≤ 6` & width-12 `(R_F = 8, R_P = 22)` wide-trail bounds.**
+   Degree-6 root bound on `(x + Δ)^7 - x^7 = δ` (`Δ ≠ 0`), `≥ 28` active S-boxes across the
+   deployed 30-round `poseidon2Perm12`, and `< 2 ^ (-256)` differential and squared-linear
+   characteristic bounds.
+10. **§10 Width-12 symbolic circuit, univariate saturation & CICO-1 Macaulay/Bézout bounds.**
+    Full width-12 `PoseidonExpr` lifting of `poseidon2Perm12`, forward/backward degree saturation
+    past `goldilocksPrime`, and CICO-1 Bézout and Macaulay matrix dimension bounds `> 2 ^ 128`.
+11. **§11 Succinct outer recursive `Hem` aggregation & soundness composition.** Single outer
+    `bciksJohnsonQrom128` certificate over length-framed compressed shard headers with constructive
+    witness extraction and finite-coin error bound `M · ε_hem + ε_outer`.
 -/
 
 public import Qsag.Goldilocks
@@ -59,6 +73,7 @@ import all Qsag.Aggregation
 import Lean
 
 import Qsag.Tactic.AssuranceKit
+import Qsag.Tactic.ConstructiveRing
 
 public section
 namespace Qsag

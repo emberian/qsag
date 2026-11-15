@@ -140,12 +140,17 @@ where
 {
     let chunk = chunk.max(1);
     let num_chunks = count.div_ceil(chunk);
-    if num_chunks <= 1 {
+    let max_workers = crate::parallel_workers();
+    if num_chunks <= 1 || max_workers <= 1 {
         return (0..count).map(f).collect();
     }
     let Some(pool) = pool() else {
         return (0..count).map(f).collect();
     };
+    let active_pool_threads = pool.threads.min(max_workers.saturating_sub(1));
+    if active_pool_threads == 0 {
+        return (0..count).map(f).collect();
+    }
     let call = Arc::new(Call {
         f,
         count,
@@ -159,7 +164,7 @@ where
         }),
         finished: Condvar::new(),
     });
-    let tickets = (num_chunks - 1).min(pool.threads);
+    let tickets = (num_chunks - 1).min(active_pool_threads);
     {
         let mut queue = lock(&pool.queue);
         for _ in 0..tickets {

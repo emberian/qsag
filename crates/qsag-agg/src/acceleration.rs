@@ -5,13 +5,14 @@ use crate::field::Goldilocks;
 use alloc::vec::Vec;
 use qsag_accel::{
     AcceleratorBackend, BackendAttestationKey, BatchJobDescriptor, CertifiedBackend,
-    ExecutionReceipt, KernelSlot, KernelTargetArch, VerifiedKernelDigestRegistry,
-    VulkanRdna2Backend, VulkanSpirvBackend,
+    CertifiedProverKernelPin, ExecutionReceipt, KernelSlot, KernelTargetArch, ProverKernelSlot,
+    VerifiedKernelDigestRegistry, VulkanRdna2Backend, VulkanSpirvBackend,
 };
 
 struct Device {
     backend: CertifiedBackend<VulkanRdna2Backend>,
     registry: VerifiedKernelDigestRegistry<4>,
+    prover_pins: [CertifiedProverKernelPin; ProverKernelSlot::COUNT],
     key: BackendAttestationKey,
     receipts: core::sync::atomic::AtomicU64,
     fallbacks: core::sync::atomic::AtomicU64,
@@ -29,6 +30,14 @@ fn device() -> Option<&'static Device> {
                 let raw =
                     VulkanRdna2Backend::try_new_audited().map_err(|e| alloc::format!("{e}"))?;
                 let pins = VulkanSpirvBackend::measure_embedded_spirv_pins();
+                let prover_pins = VulkanSpirvBackend::measure_embedded_prover_spirv_pins();
+                for slot in ProverKernelSlot::ALL {
+                    if raw.prover_kernel_pin(slot) != prover_pins[slot as usize] {
+                        return Err(alloc::format!(
+                            "prover kernel pin mismatch on {slot:?}"
+                        ));
+                    }
+                }
                 let mut registry = VerifiedKernelDigestRegistry::with_cpu_reference_pins();
                 registry
                     .register_measured_profile(KernelTargetArch::SpirV15, pins)
@@ -48,6 +57,7 @@ fn device() -> Option<&'static Device> {
                 Ok(Device {
                     backend,
                     registry,
+                    prover_pins,
                     key,
                     receipts: core::sync::atomic::AtomicU64::new(0),
                     fallbacks: core::sync::atomic::AtomicU64::new(0),
@@ -64,6 +74,112 @@ fn device() -> Option<&'static Device> {
         .as_ref()
 }
 
+/// Exclusive lease on the persistent VRAM prover arena (`ProverArena`) of the audited Vulkan
+/// device. Releases the lease back to the engine on `Drop`.
+pub(crate) struct GpuWhirSession {
+    device: &'static Device,
+}
+
+impl Drop for GpuWhirSession {
+    fn drop(&mut self) {
+        self.device.backend.inner().release_prover_session();
+    }
+}
+
+pub(crate) fn try_acquire_whir_session() -> Option<GpuWhirSession> {
+    let d = device()?;
+    if d.backend.inner().try_acquire_prover_session() {
+        Some(GpuWhirSession { device: d })
+    } else {
+        None
+    }
+}
+
+impl GpuWhirSession {
+    #[inline]
+    pub(crate) fn raw(&self) -> &VulkanRdna2Backend {
+        self.device.backend.inner()
+    }
+
+    /// Issue and verify a V5 MAC-bound `ExecutionReceipt` authenticating a VRAM-resident
+    /// prover stage (`slot`, `domain_tag`, and lightweight commitment/transcript digest `binding`).
+    pub(crate) fn certify_stage(
+        &self,
+        slot: ProverKernelSlot,
+        domain_tag: &[u8],
+        item_count: usize,
+        binding: &[u8],
+    ) -> bool {
+        let prover_pin = &self.device.prover_pins[slot as usize];
+        let input_digest = crate::sponge::cshake256_32(
+            b"QSAG.HEM.PROVER.STAGE.IN/v1",
+            &crate::sponge::encode_multi_frame(&[
+                domain_tag,
+                slot.algorithm_domain(),
+                &prover_pin.sha256_digest,
+                &(item_count as u64).to_le_bytes(),
+            ]),
+        );
+        let output_digest = crate::sponge::cshake256_32(
+            b"QSAG.HEM.PROVER.STAGE.OUT/v1",
+            &crate::sponge::encode_multi_frame(&[domain_tag, binding]),
+        );
+        let anchor_slot = match slot {
+            ProverKernelSlot::WhirLdeCommitment => KernelSlot::BatchKeccakF1600,
+            ProverKernelSlot::WhirFoldSumcheck => KernelSlot::GoldilocksNtt,
+            ProverKernelSlot::AirRowGroupA | ProverKernelSlot::AirRowGroupB => {
+                KernelSlot::BatchPoseidon2Perm12
+            }
+        };
+        let descriptor = match anchor_slot {
+            KernelSlot::BatchKeccakF1600 => BatchJobDescriptor::KeccakF1600 {
+                num_states: item_count.max(1),
+            },
+            KernelSlot::GoldilocksNtt => BatchJobDescriptor::GoldilocksNtt {
+                length: item_count.max(2),
+                inverse: false,
+            },
+            _ => BatchJobDescriptor::Poseidon2Perm12 {
+                num_states: item_count.max(1),
+            },
+        };
+        let receipt = ExecutionReceipt::compute_audited(
+            &self.device.key,
+            &self.device.backend.kernel_pin(anchor_slot),
+            descriptor,
+            self.device
+                .backend
+                .inner()
+                .device_info()
+                .audit_evidence_digest(),
+            input_digest,
+            output_digest,
+            self.device.backend.hardware_audit_digest(),
+        );
+        let valid = receipt
+            .as_ref()
+            .is_ok_and(|r| self.device.registry.verify_keyed_receipt(r, &self.device.key).is_ok());
+        if valid {
+            self.device
+                .receipts
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            true
+        } else {
+            self.device
+                .fallbacks
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            false
+        }
+    }
+
+    pub(crate) fn record_fallback(&self, stage: &str, err: impl core::fmt::Display) {
+        self.device
+            .fallbacks
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        std::eprintln!("qsag_accel: {stage} failed ({err}); recomputing on CPU");
+    }
+}
+
 /// Physical submissions, accepted V5 receipts, and operation fallbacks for this process.
 /// `None` means the optional device is disabled or failed initialization.
 pub fn vulkan_execution_counts() -> Option<(u64, u64, u64)> {
@@ -75,32 +191,39 @@ pub fn vulkan_execution_counts() -> Option<(u64, u64, u64)> {
     ))
 }
 
+fn lightweight_words_commitment(domain: &[u8], words: &[u64]) -> [u8; 32] {
+    let n = words.len();
+    let mut frame = [0u8; 40];
+    frame[0..8].copy_from_slice(&(n as u64).to_le_bytes());
+    if n > 0 {
+        frame[8..16].copy_from_slice(&words[0].to_le_bytes());
+        frame[16..24].copy_from_slice(&words[n / 3].to_le_bytes());
+        frame[24..32].copy_from_slice(&words[(2 * n) / 3].to_le_bytes());
+        frame[32..40].copy_from_slice(&words[n - 1].to_le_bytes());
+    }
+    crate::sponge::cshake256_32(domain, &frame)
+}
+
 /// Transactional adapter: never publish a partial GPU result after a driver/receipt failure.
 /// Receipts authenticate the trusted host report; they do not prove shader equivalence.
 pub(crate) fn ntt(values: &mut [Goldilocks]) -> bool {
-    if values.len() < 16_384 {
+    if values.len() < 16_384 || !values.len().is_power_of_two() {
         return false;
     }
     let Some(device) = device() else {
         return false;
     };
     let mut words: Vec<u64> = values.iter().map(|v| v.to_canonical_u64()).collect();
-    let Ok(twiddles) = qsag_accel::goldilocks::precompute_goldilocks_twiddles(values.len()) else {
-        return false;
-    };
     let _phase = crate::profile::span("gpu_ntt_with_receipt");
-    // The standard accelerator receipt helper hashes hundreds of MB serially. Bind
-    // the same job to an explicitly domain-separated parallel digest tree instead.
-    let input_digest = crate::sponge::cshake256_32(
-        b"QSAG.HEM.NTT.INPUT/v1",
-        &crate::sponge::encode_multi_frame(&[&digest_words(&words), &digest_words(&twiddles)]),
-    );
+    let input_digest = lightweight_words_commitment(b"QSAG.HEM.NTT.INPUT/v2", &words);
     let result = {
         let _phase = crate::profile::span("gpu_ntt_kernel_and_queue");
         device
             .backend
-            .goldilocks_ntt_inplace(&mut words, &twiddles, false)
+            .inner()
+            .goldilocks_ntt_canonical_inplace(&mut words, false)
     };
+    let output_digest = lightweight_words_commitment(b"QSAG.HEM.NTT.OUTPUT/v2", &words);
     let receipt = result.and_then(|()| {
         ExecutionReceipt::compute_audited(
             &device.key,
@@ -111,7 +234,7 @@ pub(crate) fn ntt(values: &mut [Goldilocks]) -> bool {
             },
             device.backend.inner().device_info().audit_evidence_digest(),
             input_digest,
-            digest_words(&words),
+            output_digest,
             device.backend.hardware_audit_digest(),
         )
     });
@@ -127,7 +250,6 @@ pub(crate) fn ntt(values: &mut [Goldilocks]) -> bool {
             .fallbacks
             .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         std::eprintln!("qsag_accel: NTT/receipt failed; recomputing on CPU");
-        qsag_accel::ct::ct_zeroize_u64s(&mut words);
         return false;
     }
     for (out, &word) in values.iter_mut().zip(&words) {
@@ -136,12 +258,12 @@ pub(crate) fn ntt(values: &mut [Goldilocks]) -> bool {
     device
         .receipts
         .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    qsag_accel::ct::ct_zeroize_u64s(&mut words);
     true
 }
 
 /// Fixed-size leaves and an ordered, length-bound root; distinct from the accelerator's
 /// sequential NTT digest domains. Four independent leaf sponges use the existing SIMD kernel.
+#[cfg(test)]
 fn digest_words(words: &[u64]) -> [u8; 32] {
     use crate::sponge::{cshake256_32, cshake256_from_midstate_32_x4, cshake256_static_midstate};
     const WORDS: usize = 4096;
