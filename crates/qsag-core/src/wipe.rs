@@ -1,4 +1,23 @@
 //! Secret-memory wiping through the audited assembly crate's safe typed API.
+//!
+//! ### The zeroizing wrappers
+//! There is one set of them in the workspace. They are defined in `qsag_asm::wipe`, below
+//! every other crate, and this module is their path for every crate that depends on
+//! `qsag-core` (`no_std` + `alloc`): it re-exports them and implements [`SecretWipe`] for
+//! the field types defined here. A crate does not define its own wrapper; it implements
+//! [`SecretWipe`] for its own secret types and uses these:
+//!
+//! | item | use |
+//! |---|---|
+//! | [`SecretWipe`] | recursive volatile wipe of a value; implemented for integer words, arrays, tuples, `Option`, `Box`, `Vec` and the field types |
+//! | [`SecretBuffer`]`<T>` | owner that wipes `T` on return, on `?` and on unwinding |
+//! | [`SecretBytes`]`<N>` | `SecretBuffer<[u8; N]>`: keys, seeds and digests on the stack |
+//! | [`SecretVec`]`<T>` | `SecretBuffer<Vec<T>>`: heap secrets; grow with `push_wiping` / `extend_wiping` |
+//! | [`SecretScratch`]`<T>` | vector whose growth, truncation and consuming iteration all wipe |
+//! | [`secret_vec_reserve`], [`secret_vec_push`], [`secret_vec_extend_from_slice`] | wipe-aware growth of a plain `Vec` |
+//!
+//! `Vec` growth reached through `DerefMut` of a [`SecretVec`] can reallocate and free the
+//! old storage unwiped: size the vector up front or use the wiping methods.
 use crate::field::goldilocks::{Goldilocks, GoldilocksExt2};
 use crate::field::tower::{Tower128, TowerGf256};
 use core::hint::black_box;
@@ -143,15 +162,6 @@ pub fn ct_select_bytes32(choice: bool, if_true: &[u8; 32], if_false: &[u8; 32]) 
     out
 }
 
-// The zeroizing wrappers live in `qsag_asm::wipe`, below every workspace crate. This module
-// is their canonical path for crates that depend on `qsag-core`: it re-exports them and adds
-// the implementations for the field types defined here.
-//
-// * [`SecretWipe`]: recursive volatile wiping; implement it for a crate-local secret type.
-// * [`SecretBuffer`]: owner that wipes on return, on `?` and on unwinding.
-// * [`SecretBytes`]`<N>`: fixed-size alias, for keys, seeds and digests on the stack.
-// * [`SecretVec`]`<T>`: heap alias; grow it with `push_wiping` / `extend_wiping`.
-// * [`SecretScratch`]: vector whose growth, truncation and consuming iteration all wipe.
 pub use qsag_asm::wipe::{
     SecretBuffer, SecretBytes, SecretIntoIter, SecretScratch, SecretVec, SecretWipe,
     secret_vec_extend_from_slice, secret_vec_push, secret_vec_reserve, wipe,

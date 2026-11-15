@@ -98,8 +98,8 @@ use crate::sponge::keccak::{
 };
 use crate::tsw_baggy::{
     AdrsKind, Cshake256Suite, HashAdrs, PqSecretKey, extract_bit_window_checked,
-    fors_leaf_hash_from_secret, th_call, th_call_secret, th_chain_f, th_pre_hash, th_preimage,
-    th_secret_prf, th_tweak_tl, walk_merkle_auth_path,
+    fors_leaf_hash_from_secret, fors_pk_from_roots, th_call, th_call_secret, th_chain_f,
+    th_pre_hash, th_preimage, th_secret_prf, walk_merkle_auth_path,
 };
 use crate::wipe::SecretVec;
 use crate::wots_c::{
@@ -1094,7 +1094,7 @@ fn few_time_public(
                 auths.push(merkle_auth_path(&levels, *idx as usize));
             }
             Some((
-                fors_pk(pk_seed, tree, key_pair, &roots),
+                fors_pk_from_roots(Cshake256Suite, pk_seed, tree, key_pair, &roots),
                 FewTimeAuth::Fors(auths),
             ))
         }
@@ -1176,25 +1176,13 @@ fn few_time_node(
                     &opening.auth,
                 )?);
             }
-            Some(fors_pk(pk_seed, tree, key_pair, &roots))
+            Some(fors_pk_from_roots(Cshake256Suite, pk_seed, tree, key_pair, &roots))
         }
         (BaggyFewTime::PorsFp(pors), Some(opening)) if sig.fors.is_empty() => {
             pors_fp_root(&pors, pk_seed, tree, key_pair, idxs, opening)
         }
         _ => None,
     }
-}
-
-fn fors_pk(pk_seed: &[u8; 32], tree: u64, key_pair: u32, roots: &[[u8; 32]]) -> [u8; 32] {
-    let adrs = HashAdrs {
-        layer: 0,
-        tree,
-        kind: AdrsKind::ForsRoots,
-        key_pair,
-        chain_idx: 0,
-        hash_step: 0,
-    };
-    th_tweak_tl(Cshake256Suite, pk_seed, &adrs, roots)
 }
 
 fn layer_grinder(

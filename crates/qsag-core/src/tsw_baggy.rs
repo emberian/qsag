@@ -1569,6 +1569,26 @@ pub fn fors_secret_leaf<S: TweakableHashSuite>(
     th_secret_prf(suite, &sk.pk_seed, &sk.sk_seed, &adrs)
 }
 
+/// The FORS public key of hypertree leaf `(tree, key_pair)`: the compression of its tree
+/// roots. Signers, verifiers and the MPC engines all call this one function.
+pub fn fors_pk_from_roots<S: TweakableHashSuite>(
+    suite: S,
+    pk_seed: &[u8; 32],
+    tree: u64,
+    key_pair: u32,
+    roots: &[[u8; 32]],
+) -> [u8; 32] {
+    let adrs = HashAdrs {
+        layer: 0,
+        tree,
+        kind: AdrsKind::ForsRoots,
+        key_pair,
+        chain_idx: 0,
+        hash_step: 0,
+    };
+    th_tweak_tl(suite, pk_seed, &adrs, roots)
+}
+
 #[inline]
 pub fn fors_leaf_hash_from_secret<S: TweakableHashSuite>(
     suite: S,
@@ -1755,15 +1775,7 @@ pub(crate) fn sign_hypertree_core<S: TweakableHashSuite>(
                 auth_path: path_j,
             });
         }
-        let fors_pk_adrs = HashAdrs {
-            layer: 0,
-            tree: tree0,
-            kind: AdrsKind::ForsRoots,
-            key_pair: kp0,
-            chain_idx: 0,
-            hash_step: 0,
-        };
-        let fors_pk = th_tweak_tl(suite, &sk.pk_seed, &fors_pk_adrs, &roots);
+        let fors_pk = fors_pk_from_roots(suite, &sk.pk_seed, tree0, kp0, &roots);
         (openings, fors_pk)
     };
 
@@ -2179,15 +2191,7 @@ fn verify_pq_hash_sig_collect<S: TweakableHashSuite>(
             roots.push(root_j);
             j += 1;
         }
-        let fors_pk_adrs = HashAdrs {
-            layer: 0,
-            tree: tree0,
-            kind: AdrsKind::ForsRoots,
-            key_pair: kp0,
-            chain_idx: 0,
-            hash_step: 0,
-        };
-        th_tweak_tl(suite, &pk.pk_seed, &fors_pk_adrs, &roots)
+        fors_pk_from_roots(suite, &pk.pk_seed, tree0, kp0, &roots)
     };
 
     let mut cur_global = sig.leaf_global_idx;
