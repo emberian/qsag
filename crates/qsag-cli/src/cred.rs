@@ -41,6 +41,7 @@ Post-quantum threshold credential & standard-verifier FIPS 204 threshold ML-DSA 
   mldsa-verify  verify a standard FIPS 204 ML-DSA signature against the threshold public key
 ";
 
+const VOPRF_SHARE_FORMAT: &str = "qsag-cred-voprf-share-v1";
 const VOPRF_META_FORMAT: &str = "qsag-cred-voprf-meta-v1";
 const VOPRF_PUB_FORMAT: &str = "qsag-cred-voprf-public-v1";
 const VOPRF_EVAL_FORMAT: &str = "qsag-cred-voprf-eval-v1";
@@ -107,6 +108,7 @@ impl Drop for ToprfPhaseSlot {
 }
 
 struct SharedToprfHub {
+    aborted: AtomicBool,
     phases: Mutex<BTreeMap<([u8; 32], bool), ToprfPhaseSlot>>,
     cv: Condvar,
 }
@@ -114,12 +116,14 @@ struct SharedToprfHub {
 impl SharedToprfHub {
     fn new() -> Arc<Self> {
         Arc::new(Self {
+            aborted: AtomicBool::new(false),
             phases: Mutex::new(BTreeMap::new()),
             cv: Condvar::new(),
         })
     }
 
     fn abort_all(&self) {
+        self.aborted.store(true, Ordering::Release);
         if let Ok(mut map) = self.phases.lock() {
             for slot in map.values_mut() {
                 slot.aborted = true;
@@ -148,7 +152,10 @@ impl voprf::Transport for LocalToprfEndpoint {
             .map_err(|_| voprf::Error::Transport)?;
         {
             let slot = guard.entry(key).or_default();
-            if slot.aborted || slot.private[self.party].is_some() {
+            if self.hub.aborted.load(Ordering::Acquire)
+                || slot.aborted
+                || slot.private[self.party].is_some()
+            {
                 return Err(voprf::Error::Transport);
             }
             slot.private[self.party] = Some(outgoing);
@@ -159,7 +166,7 @@ impl voprf::Transport for LocalToprfEndpoint {
         }
         loop {
             let slot = guard.get(&key).ok_or(voprf::Error::Transport)?;
-            if slot.aborted {
+            if self.hub.aborted.load(Ordering::Acquire) || slot.aborted {
                 return Err(voprf::Error::Transport);
             }
             if slot.arrivals == TOPRF_SERVERS {
@@ -192,7 +199,10 @@ impl voprf::Transport for LocalToprfEndpoint {
             .map_err(|_| voprf::Error::Transport)?;
         {
             let slot = guard.entry(key).or_default();
-            if slot.aborted || slot.broadcast[self.party].is_some() {
+            if self.hub.aborted.load(Ordering::Acquire)
+                || slot.aborted
+                || slot.broadcast[self.party].is_some()
+            {
                 return Err(voprf::Error::Transport);
             }
             slot.broadcast[self.party] = Some(message);
@@ -203,7 +213,7 @@ impl voprf::Transport for LocalToprfEndpoint {
         }
         loop {
             let slot = guard.get(&key).ok_or(voprf::Error::Transport)?;
-            if slot.aborted {
+            if self.hub.aborted.load(Ordering::Acquire) || slot.aborted {
                 return Err(voprf::Error::Transport);
             }
             if slot.arrivals == TOPRF_SERVERS {
@@ -285,6 +295,13 @@ fn voprf_seed_path(vault_dir: &str, party: usize) -> String {
         .into_owned()
 }
 
+fn voprf_share_path(vault_dir: &str, party: usize) -> String {
+    Path::new(vault_dir)
+        .join(format!("voprf-party-{party}.share"))
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn voprf_counter_path(vault_dir: &str, party: usize) -> String {
     Path::new(vault_dir)
         .join(format!("voprf-counter-{party}.json"))
@@ -330,16 +347,36 @@ fn run_voprf_dkg_threads(
 fn voprf_keygen(raw: &[String]) -> Result<(), CliError> {
     let args = Args::parse(
         raw,
-        &["vault-dir", "public-out"],
-        &["deterministic", "json", "help"],
+        &[
+            "vault-dir",
+            "public-out",
+            "threshold",
+            "parties",
+            "passphrase-env",
+            "passphrase-file",
+        ],
+        &["deterministic", "allow-unencrypted", "json", "help"],
     )?;
     if args.flag("help") {
         println!(
-            "qsag cred voprf-keygen --vault-dir <dir> --public-out <path> [--deterministic] [--json]"
+            "qsag cred voprf-keygen --vault-dir <dir> --public-out <path> [--threshold 2 --parties 5] [--passphrase-env <name> | --passphrase-file <path> | --allow-unencrypted] [--deterministic] [--json]"
         );
         return Ok(());
     }
     args.no_positionals()?;
+    let threshold = args.get_u64("threshold")?.unwrap_or(2);
+    let parties = args.get_u64("parties")?.unwrap_or(TOPRF_SERVERS as u64);
+    if (threshold, parties) != (2, TOPRF_SERVERS as u64) {
+        return Err(CliError::usage(
+            "the current replicated TOPRF backend supports --threshold 2 --parties 5; arbitrary Shamir committees are not implemented",
+        ));
+    }
+    let passphrase = crate::envelope::passphrase(&args)?;
+    if passphrase.is_none() && !args.flag("allow-unencrypted") && !args.flag("deterministic") {
+        return Err(CliError::usage(
+            "TOPRF custody requires --passphrase-env or --passphrase-file (or explicit --allow-unencrypted)",
+        ));
+    }
     let vault_dir = args.require("vault-dir")?;
     let public_out = args.require("public-out")?;
     ensure_absent(&voprf_meta_path(vault_dir))?;
@@ -380,8 +417,29 @@ fn voprf_keygen(raw: &[String]) -> Result<(), CliError> {
         }
     }
 
-    for (party, ent) in entropies.iter().enumerate() {
-        write_new(&voprf_seed_path(vault_dir, party), &ent.0, true)?;
+    for (party, server) in servers.iter().enumerate() {
+        let payload = ZeroizingBuf(server.to_secret_bytes());
+        let mut bundle = Json::object(vec![
+            ("format", Json::str(VOPRF_SHARE_FORMAT)),
+            ("scheme", Json::str("voprf-poseidon2-2of5")),
+            ("party", Json::num(party)),
+            ("threshold", Json::num(2)),
+            ("parties", Json::num(TOPRF_SERVERS)),
+            ("session_id", Json::hex(&session)),
+            ("commitment", Json::hex(&commitment)),
+            ("secret_key", Json::hex(&payload)),
+        ]);
+        if let Some(pass) = &passphrase {
+            crate::envelope::seal(&mut bundle, pass)?;
+        }
+        let path = voprf_share_path(vault_dir, party);
+        let mut lock = crate::vault::Vault::acquire(&path, true)?;
+        let opened = crate::envelope::open(&bundle, passphrase.as_deref())?;
+        lock.set_key_material(&opened);
+        lock.bind(&mut bundle)?;
+        lock.seal(&mut bundle)?;
+        let encoded = ZeroizingBuf(bundle.to_pretty().into_bytes());
+        write_new(&path, &encoded, true)?;
         let counter_doc = Json::object(vec![
             ("format", Json::str(VOPRF_COUNTER_FORMAT)),
             ("party", Json::num(party)),
@@ -397,6 +455,7 @@ fn voprf_keygen(raw: &[String]) -> Result<(), CliError> {
 
     let meta = Json::object(vec![
         ("format", Json::str(VOPRF_META_FORMAT)),
+        ("share_format", Json::str(VOPRF_SHARE_FORMAT)),
         ("threshold", Json::num(2)),
         ("parties", Json::num(TOPRF_SERVERS)),
         ("session_id", Json::hex(&session)),
@@ -437,12 +496,22 @@ fn voprf_keygen(raw: &[String]) -> Result<(), CliError> {
 fn voprf_eval(raw: &[String]) -> Result<(), CliError> {
     let args = Args::parse(
         raw,
-        &["vault-dir", "public", "counter", "in", "message", "out"],
+        &[
+            "vault-dir",
+            "public",
+            "counter",
+            "in",
+            "message",
+            "out",
+            "signers",
+            "passphrase-env",
+            "passphrase-file",
+        ],
         &["deterministic", "json", "help"],
     )?;
     if args.flag("help") {
         println!(
-            "qsag cred voprf-eval --vault-dir <dir> --public <path> --counter <n> --in <path|-> --out <path> [--deterministic] [--json]"
+            "qsag cred voprf-eval --vault-dir <dir> --public <path> --counter <n> --in <path|-> --out <path> [--signers 0,1,2,3,4] [--passphrase-env <name> | --passphrase-file <path>] [--deterministic] [--json]"
         );
         return Ok(());
     }
@@ -456,6 +525,7 @@ fn voprf_eval(raw: &[String]) -> Result<(), CliError> {
     ensure_absent(out_path)?;
     private_dir(vault_dir, false)?;
 
+    let passphrase = crate::envelope::passphrase(&args)?;
     let input = read_input_arg(&args)?;
     let meta = load_json_checked(
         &voprf_meta_path(vault_dir),
@@ -473,23 +543,66 @@ fn voprf_eval(raw: &[String]) -> Result<(), CliError> {
         ));
     }
 
-    let mut entropies = [
-        Secret32([0; 32]),
-        Secret32([0; 32]),
-        Secret32([0; 32]),
-        Secret32([0; 32]),
-        Secret32([0; 32]),
-    ];
-    for (party, slot) in entropies.iter_mut().enumerate() {
-        let raw_seed = read_bounded_file(&voprf_seed_path(vault_dir, party), 64)?;
-        if raw_seed.0.len() != 32 {
-            return Err(CliError::input("corrupt TOPRF party seed length"));
-        }
-        slot.0.copy_from_slice(&raw_seed.0);
-    }
-
-    let servers = run_voprf_dkg_threads(session, &entropies)?;
     let pk = ToprfPublicKey::from_commitment(commitment);
+    let selected = parse_party_indices(args.get("signers"), TOPRF_SERVERS, TOPRF_SERVERS)?;
+    if selected != (0..TOPRF_SERVERS).collect::<Vec<_>>() {
+        return Err(CliError::state(
+            "the current replicated TOPRF circuit requires all five servers; exact-threshold evaluation is not implemented",
+        ));
+    }
+    let mut locks = Vec::new();
+    let servers = if let Some(format) = meta.get("share_format") {
+        if format.as_str() != Some(VOPRF_SHARE_FORMAT) {
+            return Err(CliError::input("unsupported TOPRF share format"));
+        }
+        let mut servers = Vec::with_capacity(TOPRF_SERVERS);
+        for party in selected {
+            let path = voprf_share_path(vault_dir, party);
+            let mut lock = crate::vault::Vault::acquire(&path, false)?;
+            let bundle = load_json_checked(&path, VOPRF_SHARE_FORMAT, MAX_KEY_FILE_BYTES)?;
+            let opened = crate::envelope::open(&bundle, passphrase.as_deref())?;
+            lock.set_key_material(&opened);
+            lock.authenticate(&bundle)?;
+            if bundle.field_u64("party")? != party as u64
+                || bundle.field_u64("threshold")? != 2
+                || bundle.field_u64("parties")? != TOPRF_SERVERS as u64
+                || bundle.field_hex("session_id")?.0.as_slice() != session
+                || bundle.field_hex("commitment")?.0.as_slice() != commitment
+            {
+                return Err(CliError::state("TOPRF share enrollment mismatch"));
+            }
+            servers.push(
+                voprf::Server::from_secret_bytes(opened.secret_key()?, &pk, party)
+                    .map_err(|e| CliError::input(format!("invalid TOPRF share: {e}")))?,
+            );
+            locks.push(lock);
+        }
+        servers
+    } else {
+        // Compatibility for seed-only vaults. New enrollment never writes seeds.
+        if passphrase.is_some() {
+            return Err(CliError::usage(
+                "legacy seed-only TOPRF vaults are unencrypted",
+            ));
+        }
+        let mut entropies: [Secret32; TOPRF_SERVERS] = core::array::from_fn(|_| Secret32([0; 32]));
+        for (party, slot) in entropies.iter_mut().enumerate() {
+            let path = voprf_seed_path(vault_dir, party);
+            locks.push(crate::vault::Vault::acquire(&path, false)?);
+            let raw_seed = read_bounded_file(&path, 64)?;
+            if raw_seed.len() != 32 {
+                return Err(CliError::input("corrupt TOPRF party seed length"));
+            }
+            slot.0.copy_from_slice(&raw_seed);
+        }
+        let servers = run_voprf_dkg_threads(session, &entropies)?;
+        if servers.iter().any(|srv| srv.public_key() != &pk) {
+            return Err(CliError::verify(
+                "legacy TOPRF shares do not match enrollment",
+            ));
+        }
+        servers
+    };
 
     let deterministic = args.flag("deterministic");
     let eval_session = if deterministic {
@@ -1498,6 +1611,22 @@ pub fn run(raw: &[String]) -> Result<(), CliError> {
 #[cfg(test)]
 mod local_share_tests {
     use super::*;
+
+    #[test]
+    fn toprf_abort_refuses_future_phases() {
+        let hub = SharedToprfHub::new();
+        hub.abort_all();
+        let mut endpoint = LocalToprfEndpoint { party: 0, hub };
+        assert!(
+            voprf::Transport::exchange(
+                &mut endpoint,
+                [0; 32],
+                core::array::from_fn(|_| Vec::new())
+            )
+            .is_err()
+        );
+        assert!(voprf::Transport::broadcast(&mut endpoint, [1; 32], Vec::new()).is_err());
+    }
 
     #[test]
     fn enrollment_abort_also_refuses_rounds_not_yet_created() {
