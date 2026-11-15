@@ -5813,47 +5813,58 @@ mod tests {
                 .unwrap();
             wipe_rss_states(&mut p, &mut s);
         }
-        let mut expected = RssCutBuffer::new();
-        for plan in &plans {
-            let (p, s) = serial
-                .eval_prf_batch64_secret_deferred(&pk_seed, &plan.prf)
-                .unwrap();
-            let mut p = SecretBuffer(p);
-            let mut s = SecretBuffer(s);
-            for (addresses, mask) in &plan.steps {
-                serial
-                    .eval_f_step_masked_batch64(&pk_seed, addresses, *mask, &mut p, &mut s)
+        // Repeat with the same pool: stale witnesses or lane counts must not leak into the next group.
+        for _ in 0..2 {
+            let mut expected = RssCutBuffer::new();
+            for plan in &plans {
+                let (p, s) = serial
+                    .eval_prf_batch64_secret_deferred(&pk_seed, &plan.prf)
                     .unwrap();
+                let mut p = SecretBuffer(p);
+                let mut s = SecretBuffer(s);
+                for (addresses, mask) in &plan.steps {
+                    serial
+                        .eval_f_step_masked_batch64(&pk_seed, addresses, *mask, &mut p, &mut s)
+                        .unwrap();
+                }
+                for party in 0..3 {
+                    expected.push_party_slices(party, &p[party][..128], &s[party][..128]);
+                }
             }
+            let mut actual = RssCutBuffer::new();
+            scheduled
+                .evaluate_chunks(&pk_seed, &plans, &mut actual)
+                .unwrap();
+            assert_eq!(expected.prim, actual.prim);
+            assert_eq!(expected.sec, actual.sec);
+            assert_eq!(serial.batch_ctr, scheduled.batch_ctr);
+            assert_eq!(serial.pending_dzk.a, scheduled.pending_dzk.a);
+            assert_eq!(serial.pending_dzk.b, scheduled.pending_dzk.b);
+            assert_eq!(serial.pending_dzk.c, scheduled.pending_dzk.c);
+            assert_eq!(serial.lane_permutations(), scheduled.lane_permutations());
+            let a = serial
+                .flush_verify_and_open_cut("test_chunk_parity", &expected)
+                .unwrap()
+                .0;
+            let b = scheduled
+                .flush_verify_and_open_cut("test_chunk_parity", &actual)
+                .unwrap()
+                .0;
+            assert_eq!(a, b);
             for party in 0..3 {
-                expected.push_party_slices(party, &p[party][..128], &s[party][..128]);
+                assert_eq!(
+                    serial.party_rngs[party].next_bytes32(),
+                    scheduled.party_rngs[party].next_bytes32()
+                );
             }
-        }
-        let mut actual = RssCutBuffer::new();
-        scheduled
-            .evaluate_chunks(&pk_seed, &plans, &mut actual)
-            .unwrap();
-        assert_eq!(expected.prim, actual.prim);
-        assert_eq!(expected.sec, actual.sec);
-        assert_eq!(serial.batch_ctr, scheduled.batch_ctr);
-        assert_eq!(serial.pending_dzk.a, scheduled.pending_dzk.a);
-        assert_eq!(serial.pending_dzk.b, scheduled.pending_dzk.b);
-        assert_eq!(serial.pending_dzk.c, scheduled.pending_dzk.c);
-        assert_eq!(serial.lane_permutations(), scheduled.lane_permutations());
-        let a = serial
-            .flush_verify_and_open_cut("test_chunk_parity", &expected)
-            .unwrap()
-            .0;
-        let b = scheduled
-            .flush_verify_and_open_cut("test_chunk_parity", &actual)
-            .unwrap()
-            .0;
-        assert_eq!(a, b);
-        for party in 0..3 {
-            assert_eq!(
-                serial.party_rngs[party].next_bytes32(),
-                scheduled.party_rngs[party].next_bytes32()
-            );
+            assert!(scheduled.chunk_scratch.iter().all(|scratch| {
+                scratch
+                    .a
+                    .iter()
+                    .chain(&scratch.b)
+                    .chain(&scratch.c)
+                    .all(Vec::is_empty)
+            }));
         }
     }
 

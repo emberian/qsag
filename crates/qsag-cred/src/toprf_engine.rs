@@ -287,7 +287,10 @@ impl<T: Transport> Engine<'_, T> {
                 // All 98 framed bytes and the 0x04 suffix fit one rate block.
                 state[0] ^= 2;
                 state[1] ^= 32;
-                for (word, bytes) in state[2..6].iter_mut().zip(self.seeds[subset(i, i)].chunks_exact(8)) {
+                for (word, bytes) in state[2..6]
+                    .iter_mut()
+                    .zip(self.seeds[subset(i, i)].chunks_exact(8))
+                {
                     *word ^= u64::from_le_bytes(core::array::from_fn(|b| bytes[b]));
                 }
                 state[6] ^= 42;

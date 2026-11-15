@@ -13,7 +13,7 @@ use qsag_asm::{
     gf2_128_mul_acc_batch_with_backend, transpose64x256_with_backend,
 };
 
-const MAX_PENDING_BITS: usize = 32_768;
+const MAX_PENDING_BITS: usize = 131_072;
 const D0_BITS: usize = 16;
 const SUPER_BLOCKS: usize = 128 / D0_BITS;
 const D0_CHUNKS: usize = D0_BITS / 16;
@@ -23,7 +23,7 @@ const QUAD_BLOCKS: usize = 4;
 const QUAD_BITS: usize = D0_BITS * QUAD_BLOCKS;
 const STEP0_PLANES: usize = 2 * D0_BITS;
 const STEP0_SLOTS: usize = STEP0_PLANES - 2;
-const STEP0_CHUNK: usize = 16;
+const STEP0_CHUNK: usize = 64;
 const NATIVE_STRIDE_PAD: usize = 4;
 const MAX_PENDING_FIELD_WORDS: usize = 1_024;
 /// Schwartz-Zippel numerator of one Boolean check instance per flush: the
@@ -36,7 +36,7 @@ const BIT_CHECK_DEGREE: usize =
 /// lane products, and 2 for the base sacrifice.
 const FIELD_CHECK_NUMERATOR: usize = 1 + 2 * (MAX_PENDING_FIELD_WORDS * 64).ilog2() as usize + 2;
 const _: () = assert!(
-    BIT_CHECK_DEGREE == 54
+    BIT_CHECK_DEGREE == 58
         && FIELD_CHECK_NUMERATOR == 35
         && (MAX_PENDING_BITS / D0_BITS).is_power_of_two()
         && (MAX_PENDING_FIELD_WORDS * 64).is_power_of_two()
@@ -388,6 +388,7 @@ const fn xor_plane256(a: BitPlane256, b: BitPlane256) -> BitPlane256 {
 /// no data-dependent indices). Table entries contain shares; every lookup index
 /// used by evaluation is derived exclusively from a public challenge.
 #[inline]
+#[cfg(test)]
 fn build_byte_tabs_bs256(words16: &[BitPlane256; 16], tabs: &mut [[BitPlane256; 256]; 2]) {
     for (byte, tab) in tabs.iter_mut().enumerate() {
         tab[0] = [0; 4];
@@ -403,6 +404,7 @@ fn build_byte_tabs_bs256(words16: &[BitPlane256; 16], tabs: &mut [[BitPlane256; 
 
 /// Evaluate a public `128 x 16` bit-matrix across four groups of 64 lanes.
 #[inline(always)]
+#[cfg(test)]
 fn eval_public_matrix_128x16_bs256(
     row_masks: &[u16; 128],
     tabs: &[[BitPlane256; 256]; 2],
@@ -417,6 +419,7 @@ fn eval_public_matrix_128x16_bs256(
 }
 
 #[inline(always)]
+#[cfg(test)]
 fn xor_public_matrix_128x16_bs256(
     row_masks: &[u16; 128],
     tabs: &[[BitPlane256; 256]; 2],
@@ -432,7 +435,6 @@ fn xor_public_matrix_128x16_bs256(
 }
 
 #[inline(always)]
-#[cfg(test)]
 fn build_nibble_tab256(p: &[BitPlane256], tab: &mut [BitPlane256; 16]) {
     let p0 = p[0];
     let p1 = p[1];
@@ -459,16 +461,66 @@ fn build_nibble_tab256(p: &[BitPlane256], tab: &mut [BitPlane256; 16]) {
 }
 
 #[inline(always)]
-#[cfg(test)]
 fn build_nibble_tabs4_bs256(words16: &[BitPlane256; 16], tabs4: &mut [[BitPlane256; 16]; 4]) {
     for (nib, tab) in tabs4.iter_mut().enumerate() {
         build_nibble_tab256(&words16[nib * 4..nib * 4 + 4], tab);
     }
 }
 
+/// Evaluate two public `128 x 16` bit-matrices across 256 lanes from one L1-hot `2 KiB`
+/// nibble table (`44` plane XORs to build vs `510` for `16 KiB` byte tables).
+#[inline(always)]
+fn eval_dual_public_matrix_128x16_nibble_bs256(
+    masks0: &[u16; 128],
+    masks1: &[u16; 128],
+    tabs4: &[[BitPlane256; 16]; 4],
+    out0: &mut Bs256,
+    out1: &mut Bs256,
+) {
+    for ((dst0, dst1), (&m0, &m1)) in out0
+        .iter_mut()
+        .zip(out1.iter_mut())
+        .zip(masks0.iter().zip(masks1.iter()))
+    {
+        let a0 = tabs4[0][(m0 & 0xf) as usize];
+        let a1 = tabs4[1][((m0 >> 4) & 0xf) as usize];
+        let a2 = tabs4[2][((m0 >> 8) & 0xf) as usize];
+        let a3 = tabs4[3][(m0 >> 12) as usize];
+        *dst0 = xor_plane256(xor_plane256(a0, a1), xor_plane256(a2, a3));
+        let b0 = tabs4[0][(m1 & 0xf) as usize];
+        let b1 = tabs4[1][((m1 >> 4) & 0xf) as usize];
+        let b2 = tabs4[2][((m1 >> 8) & 0xf) as usize];
+        let b3 = tabs4[3][(m1 >> 12) as usize];
+        *dst1 = xor_plane256(xor_plane256(b0, b1), xor_plane256(b2, b3));
+    }
+}
+
+/// Multiply a `GF(2^128)` element by `x^(16 * blocks)` for public `blocks` in `0..8`
+/// using strictly constant immediate shifts (`x^128 = x^7 + x^2 + x + 1`).
+#[inline(always)]
+fn poly128_mul_x_pow16(val: u128, blocks: usize) -> u128 {
+    macro_rules! shift_reduce {
+        ($s:literal) => {{
+            let lo = val << $s;
+            let hi = val >> (128 - $s);
+            lo ^ hi ^ (hi << 1) ^ (hi << 2) ^ (hi << 7)
+        }};
+    }
+    match blocks {
+        0 => val,
+        1 => shift_reduce!(16),
+        2 => shift_reduce!(32),
+        3 => shift_reduce!(48),
+        4 => shift_reduce!(64),
+        5 => shift_reduce!(80),
+        6 => shift_reduce!(96),
+        7 => shift_reduce!(112),
+        _ => unreachable!("public sub-block index < 8"),
+    }
+}
+
 /// Accumulate (`^=`) a public `128 x 16` bit-matrix across 256 lanes into `out`.
 #[inline(always)]
-#[cfg(test)]
 fn xor_public_matrix_128x16_nibble_bs256(
     row_masks: &[u16; 128],
     tabs4: &[[BitPlane256; 16]; 4],
@@ -526,6 +578,7 @@ fn xor_mul_bs256_by_public(
 /// Overflow degree is at most 111, so reduction by `x^7 + x^2 + x + 1`
 /// has degree at most 118 and needs only one pass.
 #[inline]
+#[cfg(test)]
 fn bs256_col_mul_x_pow16(bs: &mut Bs256, sub: usize, blocks: usize) {
     debug_assert!(blocks < 8);
     let shift = 16 * blocks;
@@ -704,6 +757,21 @@ fn resize_wiped(v: &mut Vec<u64>, len: usize) {
     v.resize(len, 0);
 }
 
+/// Grow `v` to at least `len` words, wiping any reallocated backing buffer without
+/// zeroing and shrinking the reusable high-water tail on smaller calls (`Engine`
+/// wipes the entire buffer in `release_verified_scratch` and `Drop`).
+#[inline]
+fn ensure_scratch_len(v: &mut Vec<u64>, len: usize) {
+    if len > v.len() {
+        if len > v.capacity() {
+            let cap = len.max(2 * v.capacity());
+            ct_zeroize_u64s(v);
+            *v = Vec::with_capacity(cap);
+        }
+        v.resize(len, 0);
+    }
+}
+
 /// `Vec::reserve` that wipes the old allocation when it has to move.
 #[inline]
 fn reserve_wiped(v: &mut Vec<u64>, additional: usize) {
@@ -738,9 +806,11 @@ struct BitCheckScratch {
     native_a: [[SecretVec<u128>; 2]; 2],
     native_b: [[SecretVec<u128>; 2]; 2],
     b_sum: SecretVec<u128>,
+    #[cfg(test)]
     tabs8: Box<[[BitPlane256; 256]; 2]>,
     tabs4: Box<[[BitPlane256; 16]; 4]>,
     quad_tmp: Box<[Gf128Lanes; 4]>,
+    #[cfg(test)]
     bs256_buf: Box<Bs256>,
     h_fold: Box<[Gf128Lanes; 4]>,
     c_claim: [RepGf128Lanes; 2],
@@ -765,9 +835,11 @@ impl BitCheckScratch {
             native_a: core::array::from_fn(|_| core::array::from_fn(|_| SecretVec::new())),
             native_b: core::array::from_fn(|_| core::array::from_fn(|_| SecretVec::new())),
             b_sum: SecretVec::new(),
+            #[cfg(test)]
             tabs8: Box::new([[[0u64; 4]; 256]; 2]),
             tabs4: Box::new([[[0u64; 4]; 16]; 4]),
             quad_tmp: Box::new([z_lanes; 4]),
+            #[cfg(test)]
             bs256_buf: Box::new([[0u64; 4]; 128]),
             h_fold: Box::new([z_lanes; 4]),
             c_claim: [[z_lanes; 2]; 2],
@@ -841,6 +913,7 @@ impl BitCheckScratch {
                 ct_zeroize_u64s(entry);
             }
         }
+        #[cfg(test)]
         for tab in self.tabs8.iter_mut() {
             for entry in tab.iter_mut() {
                 ct_zeroize_u64s(entry);
@@ -849,6 +922,7 @@ impl BitCheckScratch {
         for lanes in self.quad_tmp.iter_mut() {
             zeroize_gf128_slice(lanes);
         }
+        #[cfg(test)]
         for row in self.bs256_buf.iter_mut() {
             ct_zeroize_u64s(row);
         }
@@ -1477,10 +1551,10 @@ impl<T: Transport> Engine<T> {
         locals: &[Gf128Lanes],
     ) -> Result<Vec<RepGf128Lanes>, Error> {
         let total_u64 = locals.len() * 128;
-        resize_wiped(&mut self.scratch_r, total_u64);
-        resize_wiped(&mut self.scratch_s, total_u64);
-        self.pads[0].squeeze_u64s(&mut self.scratch_r);
-        self.pads[1].squeeze_u64s(&mut self.scratch_s);
+        ensure_scratch_len(&mut self.scratch_r, total_u64);
+        ensure_scratch_len(&mut self.scratch_s, total_u64);
+        self.pads[0].squeeze_u64s(&mut self.scratch_r[..total_u64]);
+        self.pads[1].squeeze_u64s(&mut self.scratch_s[..total_u64]);
         let mut own = Vec::with_capacity(total_u64);
         for (item_idx, local) in locals.iter().enumerate() {
             let base = item_idx * 128;
@@ -1490,7 +1564,7 @@ impl<T: Transport> Engine<T> {
                 own.push(w1 ^ self.scratch_r[off + 1] ^ self.scratch_s[off + 1]);
             }
         }
-        let (mut mine, mut next) = self.raw_share_owned(own)?;
+        let (mine, next) = self.raw_share_owned(own)?;
         let mut out = Vec::with_capacity(locals.len());
         for idx in 0..locals.len() {
             let base = idx * 128;
@@ -1500,8 +1574,6 @@ impl<T: Transport> Engine<T> {
                 core::array::from_fn(|lane| [next[base + 2 * lane], next[base + 2 * lane + 1]]);
             out.push([a, b]);
         }
-        ct_zeroize_u64s(&mut mine);
-        ct_zeroize_u64s(&mut next);
         Ok(out)
     }
 
@@ -1517,11 +1589,11 @@ impl<T: Transport> Engine<T> {
         [s0, s1]
     }
 
-    /// Batch-verify up to `MAX_PENDING_BITS` (`32,768`) 64-lane Boolean `AND` triples over
+    /// Batch-verify up to `MAX_PENDING_BITS` (`131,072`) 64-lane Boolean `AND` triples over
     /// `GF(2^128) = GF(2)[x]/(x^128 + x^7 + x^2 + x + 1)` via two independent uniform
     /// `GF(2^128)` super-block combiners + two independent lockstep Arity-2 BBCGGI19
     /// inner-product instances + randomized base-case sacrifice. Per-flush false acceptance is
-    /// `< ((1 + BIT_CHECK_DEGREE) / (2^128 - 1))^2 = (55 / (2^128 - 1))^2 < 2^-244`.
+    /// `< ((1 + BIT_CHECK_DEGREE) / (2^128 - 1))^2 = (59 / (2^128 - 1))^2 < 2^-244`.
     fn verify_pending_bits_slice(&mut self, triples_raw: &[u64]) -> Result<(), Error> {
         debug_assert_eq!(triples_raw.len() % 6, 0);
         let n = triples_raw.len() / 6;
@@ -1737,48 +1809,51 @@ impl<T: Transport> Engine<T> {
                 }
             }
             let sp = &mut *scratch;
+            let quad_in_super = QUAD_BLOCKS * (q_quad.rem_euclid(QUADS_PER_SUPER));
             for side in 0..2 {
                 for (chunk, rows) in x_rows[side].iter().enumerate() {
-                    build_byte_tabs_bs256(rows, &mut sp.tabs8);
-                    for (t, masks) in masks_a.iter().enumerate() {
-                        if chunk == 0 {
-                            eval_public_matrix_128x16_bs256(
+                    build_nibble_tabs4_bs256(rows, &mut sp.tabs4);
+                    if chunk == 0 {
+                        let [qa0, qa1] = &mut *sp.quad_bs_a;
+                        eval_dual_public_matrix_128x16_nibble_bs256(
+                            &masks_a[0][0],
+                            &masks_a[1][0],
+                            &sp.tabs4,
+                            &mut qa0[side],
+                            &mut qa1[side],
+                        );
+                    } else {
+                        for (t, masks) in masks_a.iter().enumerate() {
+                            xor_public_matrix_128x16_nibble_bs256(
                                 &masks[chunk],
-                                &sp.tabs8,
-                                &mut sp.quad_bs_a[t][side],
-                            );
-                        } else {
-                            xor_public_matrix_128x16_bs256(
-                                &masks[chunk],
-                                &sp.tabs8,
+                                &sp.tabs4,
                                 &mut sp.quad_bs_a[t][side],
                             );
                         }
                     }
                 }
                 for (chunk, rows) in y_rows[side].iter().enumerate() {
-                    build_byte_tabs_bs256(rows, &mut sp.tabs8);
-                    for (t, masks) in masks_b.iter().enumerate() {
-                        if chunk == 0 {
-                            eval_public_matrix_128x16_bs256(
+                    build_nibble_tabs4_bs256(rows, &mut sp.tabs4);
+                    if chunk == 0 {
+                        let [qb0, qb1] = &mut *sp.quad_bs_b;
+                        eval_dual_public_matrix_128x16_nibble_bs256(
+                            &masks_b[0][0],
+                            &masks_b[1][0],
+                            &sp.tabs4,
+                            &mut qb0[side],
+                            &mut qb1[side],
+                        );
+                    } else {
+                        for (t, masks) in masks_b.iter().enumerate() {
+                            xor_public_matrix_128x16_nibble_bs256(
                                 &masks[chunk],
-                                &sp.tabs8,
-                                &mut sp.quad_bs_b[t][side],
-                            );
-                        } else {
-                            xor_public_matrix_128x16_bs256(
-                                &masks[chunk],
-                                &sp.tabs8,
+                                &sp.tabs4,
                                 &mut sp.quad_bs_b[t][side],
                             );
                         }
                     }
                 }
                 for t in 0..2 {
-                    for sub in 0..b_count {
-                        let block = QUAD_BLOCKS * (q_quad.rem_euclid(QUADS_PER_SUPER)) + sub;
-                        bs256_col_mul_x_pow16(&mut sp.quad_bs_b[t][side], sub, D0_CHUNKS * block);
-                    }
                     transpose_bs256_to_quad_lanes(
                         &sp.quad_bs_a[t][side],
                         &mut sp.quad_tmp,
@@ -1802,10 +1877,22 @@ impl<T: Transport> Engine<T> {
                     let dst_b = &mut b_native[t][side];
                     for lane in 0..64 {
                         let dst = &mut dst_b[lane * row_stride + 4 * q_quad..][..4];
-                        dst[0] = gf128_to_u128(sp.quad_tmp[0][lane]);
-                        dst[1] = gf128_to_u128(sp.quad_tmp[1][lane]);
-                        dst[2] = gf128_to_u128(sp.quad_tmp[2][lane]);
-                        dst[3] = gf128_to_u128(sp.quad_tmp[3][lane]);
+                        dst[0] = poly128_mul_x_pow16(
+                            gf128_to_u128(sp.quad_tmp[0][lane]),
+                            if 0 < b_count { D0_CHUNKS * quad_in_super } else { 0 },
+                        );
+                        dst[1] = poly128_mul_x_pow16(
+                            gf128_to_u128(sp.quad_tmp[1][lane]),
+                            if 1 < b_count { D0_CHUNKS * (quad_in_super + 1) } else { 0 },
+                        );
+                        dst[2] = poly128_mul_x_pow16(
+                            gf128_to_u128(sp.quad_tmp[2][lane]),
+                            if 2 < b_count { D0_CHUNKS * (quad_in_super + 2) } else { 0 },
+                        );
+                        dst[3] = poly128_mul_x_pow16(
+                            gf128_to_u128(sp.quad_tmp[3][lane]),
+                            if 3 < b_count { D0_CHUNKS * (quad_in_super + 3) } else { 0 },
+                        );
                     }
                 }
             }
@@ -2722,19 +2809,25 @@ impl<T: Transport> Engine<T> {
     }
 
     fn and_into(&mut self, pairs: &[(Bit, Bit)], out: &mut Word) -> Result<(), Error> {
-        out.clear();
         if self.poisoned {
+            out.clear();
             return Err(Error::MultiplicationCheck);
         }
-        if pairs.is_empty() {
+        let k = pairs.len();
+        if k == 0 {
+            out.clear();
             return Ok(());
         }
-        resize_wiped(&mut self.scratch_r, pairs.len());
-        resize_wiped(&mut self.scratch_s, pairs.len());
-        self.pads[0].squeeze_u64s(&mut self.scratch_r);
-        self.pads[1].squeeze_u64s(&mut self.scratch_s);
-        let mut own = Vec::with_capacity(pairs.len());
-        for ((&(a, b), &r), &s) in pairs.iter().zip(&self.scratch_r).zip(&self.scratch_s) {
+        ensure_scratch_len(&mut self.scratch_r, k);
+        ensure_scratch_len(&mut self.scratch_s, k);
+        self.pads[0].squeeze_u64s(&mut self.scratch_r[..k]);
+        self.pads[1].squeeze_u64s(&mut self.scratch_s[..k]);
+        let mut own = Vec::with_capacity(k);
+        for ((&(a, b), &r), &s) in pairs
+            .iter()
+            .zip(&self.scratch_r[..k])
+            .zip(&self.scratch_s[..k])
+        {
             own.push((a.0[0] & (b.0[0] ^ b.0[1])) ^ (a.0[1] & b.0[0]) ^ r ^ s);
         }
         #[cfg(test)]
@@ -2752,14 +2845,30 @@ impl<T: Transport> Engine<T> {
                 *call_countdown -= 1;
             }
         }
-        let (mut mine, mut next) = self.raw_share_owned(own)?;
-        out.extend(mine.iter().zip(&next).map(|(&a, &b)| Bit([a, b])));
-        ct_zeroize_u64s(&mut mine);
-        ct_zeroize_u64s(&mut next);
-        reserve_wiped(&mut self.pending_bits_raw, pairs.len() * 6);
-        for (&(a, b), &z) in pairs.iter().zip(out.iter()) {
-            self.pending_bits_raw
-                .extend_from_slice(&[a.0[0], a.0[1], b.0[0], b.0[1], z.0[0], z.0[1]]);
+        let (mine, next) = match self.raw_share_owned(own) {
+            Ok(shares) => shares,
+            Err(err) => {
+                out.clear();
+                return Err(err);
+            }
+        };
+        out.resize(k, Bit::default());
+        for (dst, (&a, &b)) in out.iter_mut().zip(mine.iter().zip(&next)) {
+            *dst = Bit([a, b]);
+        }
+        let old_raw = self.pending_bits_raw.len();
+        reserve_wiped(&mut self.pending_bits_raw, k * 6);
+        self.pending_bits_raw.resize(old_raw + k * 6, 0);
+        for (dst, (&(a, b), &z)) in self.pending_bits_raw[old_raw..]
+            .chunks_exact_mut(6)
+            .zip(pairs.iter().zip(out.iter()))
+        {
+            dst[0] = a.0[0];
+            dst[1] = a.0[1];
+            dst[2] = b.0[0];
+            dst[3] = b.0[1];
+            dst[4] = z.0[0];
+            dst[5] = z.0[1];
         }
         if self.pending_bits_raw.len() >= MAX_PENDING_BITS * 6 {
             self.flush_bit_chunks(true)?;
@@ -2917,19 +3026,21 @@ impl<T: Transport> Engine<T> {
         let n = a_words[0].len();
         let mut sums: Vec<Word> = (0..k).map(|_| Word::with_capacity(n)).collect();
         let mut carries: Word = vec![self.constant(carry_mask); k].into();
+        let zero = self.constant(0);
         let mut pairs = SecretVec::with_capacity(k);
+        pairs.resize(k, (zero, zero));
         let mut prods = Word::with_capacity(k);
         for bit in 0..n {
-            pairs.clear();
-            for ((a, b), (&c, sum_w)) in a_words
-                .iter()
-                .zip(b_words)
-                .zip(carries.iter().zip(&mut sums))
-            {
+            for (pair_slot, ((a, b), (&c, sum_w))) in pairs.iter_mut().zip(
+                a_words
+                    .iter()
+                    .zip(b_words)
+                    .zip(carries.iter().zip(&mut sums)),
+            ) {
                 let ai = a[bit];
                 let bi = b[bit];
                 sum_w.push(ai ^ bi ^ c);
-                pairs.push((ai ^ c, bi ^ c));
+                *pair_slot = (ai ^ c, bi ^ c);
             }
             self.and_into(&pairs, &mut prods)?;
             for (c, &p) in carries.iter_mut().zip(&prods) {
@@ -2954,14 +3065,17 @@ impl<T: Transport> Engine<T> {
         let k_bits = self.number(k_val, width);
         let mut sums: Vec<Word> = (0..k).map(|_| Word::with_capacity(width)).collect();
         let mut carries: Word = vec![self.constant(carry_mask); k].into();
+        let zero = self.constant(0);
         let mut pairs = SecretVec::with_capacity(k);
+        pairs.resize(k, (zero, zero));
         let mut prods = Word::with_capacity(k);
         for (bit, &kb) in k_bits.iter().enumerate() {
-            pairs.clear();
-            for (a, (&c, sum_w)) in a_words.iter().zip(carries.iter().zip(&mut sums)) {
+            for (pair_slot, (a, (&c, sum_w))) in
+                pairs.iter_mut().zip(a_words.iter().zip(carries.iter().zip(&mut sums)))
+            {
                 let ai = a[bit];
                 sum_w.push(ai ^ kb ^ c);
-                pairs.push((ai ^ c, kb ^ c));
+                *pair_slot = (ai ^ c, kb ^ c);
             }
             self.and_into(&pairs, &mut prods)?;
             for (c, &p) in carries.iter_mut().zip(&prods) {
@@ -3203,15 +3317,16 @@ impl<T: Transport> Engine<T> {
         ];
         let ones = self.constant(u64::MAX);
         let zero = self.constant(0);
-        let mut pairs = SecretVec::with_capacity(states.len() * 1600);
-        let mut prods = Word::with_capacity(states.len() * 1600);
+        let total_pairs = states.len() * 1600;
+        let mut pairs = SecretVec::with_capacity(total_pairs);
+        pairs.resize(total_pairs, (zero, zero));
+        let mut prods = Word::with_capacity(total_pairs);
         let mut c_buf = Secret([zero; 320]);
         let mut t_buf = Secret([zero; 64]);
         let mut next_buf = Secret([zero; 64]);
 
         for rc in KECCAK_RC {
-            pairs.clear();
-            for state in states.iter_mut() {
+            for (state, state_pairs) in states.iter_mut().zip(pairs.chunks_exact_mut(1600)) {
                 for (i, c_slot) in c_buf.iter_mut().enumerate() {
                     let col = i / 64;
                     let z = i % 64;
@@ -3238,14 +3353,14 @@ impl<T: Transport> Engine<T> {
                     }
                     t_buf.copy_from_slice(&next_buf[..]);
                 }
-                for i in 0..1600 {
+                for (i, slot) in state_pairs.iter_mut().enumerate() {
                     let row = (i / 320) * 320;
                     let x = (i / 64) % 5;
                     let z = i % 64;
-                    pairs.push((
+                    *slot = (
                         state[row + ((x + 1) % 5) * 64 + z] ^ ones,
                         state[row + ((x + 2) % 5) * 64 + z],
-                    ));
+                    );
                 }
             }
             self.and_into(&pairs, &mut prods)?;
@@ -3802,25 +3917,26 @@ impl<T: Transport> Engine<T> {
         if words.is_empty() {
             return Ok(Vec::new());
         }
-        let mut all_out = Vec::with_capacity(words.len());
-        for chunk in words.chunks(CONVERT_CHUNK_WORDS) {
-            let mut r_list: Vec<FieldWord> = (0..chunk.len()).map(|_| self.frandom(d)).collect();
-            let deltas: Vec<FieldWord> = chunk
-                .iter()
-                .zip(&r_list)
-                .map(|(v, r)| self.fsub(v, r, d))
-                .collect();
-            let opened_list = self.fopen_many(&deltas, d)?;
-            for (r_fw, opened) in r_list.iter_mut().zip(&opened_list) {
-                for (pair, &val) in r_fw.iter_mut().zip(opened) {
-                    for (j, part) in pair.iter_mut().enumerate() {
-                        if (self.party + j) % 3 == 0 {
-                            *part = d.add(*part, val);
-                        }
+        let mut r_list: Vec<FieldWord> = (0..words.len()).map(|_| self.frandom(d)).collect();
+        let deltas: Vec<FieldWord> = words
+            .iter()
+            .zip(&r_list)
+            .map(|(v, r)| self.fsub(v, r, d))
+            .collect();
+        let opened_list = self.fopen_many(&deltas, d)?;
+        drop(deltas);
+        for (r_fw, opened) in r_list.iter_mut().zip(&opened_list) {
+            for (pair, &val) in r_fw.iter_mut().zip(opened) {
+                for (j, part) in pair.iter_mut().enumerate() {
+                    if (self.party + j) % 3 == 0 {
+                        *part = d.add(*part, val);
                     }
                 }
             }
-            all_out.extend(self.component_bits_many(&r_list, d)?);
+        }
+        let mut all_out = Vec::with_capacity(words.len());
+        for r_chunk in r_list.chunks(CONVERT_CHUNK_WORDS) {
+            all_out.extend(self.component_bits_many(r_chunk, d)?);
         }
         Ok(all_out)
     }
@@ -3993,7 +4109,9 @@ pub(crate) mod tests {
         }
     }
     pub(crate) fn parallel_batches() -> usize {
-        if std::thread::available_parallelism().is_ok_and(|n| n.get() >= 21) {
+        if std::thread::available_parallelism().is_ok_and(|n| n.get() >= 24) {
+            4
+        } else if std::thread::available_parallelism().is_ok_and(|n| n.get() >= 21) {
             7
         } else {
             4

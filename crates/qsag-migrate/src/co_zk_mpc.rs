@@ -1888,7 +1888,11 @@ mod tests {
         fn acquire(batches: usize) -> Self {
             let (active, ready) = &HEAVY_CEREMONIES;
             let mut count = active.lock().unwrap_or_else(|e| e.into_inner());
-            let limit = outer_mpc::tests::parallel_batches();
+            let limit = if std::thread::available_parallelism().is_ok_and(|n| n.get() >= 24) {
+                8
+            } else {
+                outer_mpc::tests::parallel_batches()
+            };
             while *count + batches > limit {
                 count = ready.wait(count).unwrap_or_else(|e| e.into_inner());
             }
