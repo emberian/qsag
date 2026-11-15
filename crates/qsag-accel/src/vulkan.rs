@@ -1,5 +1,5 @@
 //! Certified zero-dependency Vulkan / SPIR-V discrete GPU backend (`VulkanSpirvBackend`,
-//! aliased as `VulkanRdna2Backend`) implementing [`AcceleratorBackend`] (`KernelTargetArch::SpirV15`).
+//! aliased as `VulkanSpirvBackend`) implementing [`AcceleratorBackend`] (`KernelTargetArch::SpirV15`).
 //!
 //! On 64-bit Linux with `feature = "std"`, `VulkanSpirvBackend::try_new()` dynamically loads
 //! `libvulkan.so.1`, selects a discrete GPU (`VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU`) supporting
@@ -143,6 +143,44 @@ impl From<AccelError> for VulkanError {
     }
 }
 
+/// Ext4 index in the AIR static table where the per-opcode gamma blocks start: Group A reads
+/// 206 constraint gammas and 44 shift gammas at `0..250`.
+pub const AIR_OP_GAMMA_BASE_EXT4: u64 = 250;
+
+/// Largest number of gamma weights one opcode consumes ([`air_op_term_count`]).
+pub const AIR_MAX_OP_TERMS: u64 = 94;
+
+/// Number of gamma weights `air_row_group_b.comp` reads for one opcode entry (`emit_term`
+/// advances the gamma index once per constraint), or `None` for an opcode or argument the
+/// shader does not define. `kind_id` and `kind_arg` are the encoding of
+/// `qsag_agg::trace::encode_constraint_kind`; the counts equal that crate's per-kind constraint
+/// counts, which its tests pin against this table.
+pub const fn air_op_term_count(kind_id: u64, kind_arg: u64) -> Option<u64> {
+    Some(match (kind_id, kind_arg) {
+        (0, 0) => 44,
+        (1, 0) => 94,
+        (2..=5 | 7 | 12 | 13 | 16 | 18 | 21, 0) => 56,
+        (6, 0..=6) => 77,
+        (8, 0..=5) => 61,
+        (9 | 22, 0) => 58,
+        (10, 0 | 2) => 56,
+        (10, 1 | 3) => 57,
+        (11, 0) => 56,
+        (11, 1) => 62,
+        (14, 0) => 88,
+        (15, 0..=3) => 77,
+        (15, 4) => 78,
+        (17, 0..=4) => 62,
+        (19, 0 | 1) => 56,
+        (20, 0) => 56,
+        (20, 1) => 61,
+        (23, 0 | 2) => 56,
+        (23, 1) => 93,
+        (23, 3) => 61,
+        _ => return None,
+    })
+}
+
 /// Driver-reported executable statistics. `None` means unavailable, never zero.
 /// Zero scratch is a compiler report, not a proof of hardware constant-time execution.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -152,9 +190,36 @@ pub struct PipelineTelemetry {
     pub vgprs: Option<u64>,
     pub sgprs: Option<u64>,
     pub lds_bytes: Option<u64>,
-    /// RADV reports these for its LLVM backend; ACO spills surface as `scratch_bytes`.
+    /// Spilled registers. RADV reports both counters for every pipeline (observed as zero for
+    /// all ten kernels on the RX 6750 XT); a driver that omits them fails [`Self::audit`].
     pub spilled_vgprs: Option<u64>,
     pub spilled_sgprs: Option<u64>,
+}
+
+impl PipelineTelemetry {
+    /// The pipeline gate every kernel passes before the engine exists: the driver must
+    /// report zero private scratch memory and zero spilled registers. A statistic the driver
+    /// did not report (`None`) is a failure, never an implicit zero, so a driver without
+    /// `VK_KHR_pipeline_executable_properties` (every field `None`) cannot pass.
+    pub fn audit(&self) -> Result<(), VulkanError> {
+        if self.scratch_bytes.is_none()
+            || self.spilled_vgprs.is_none()
+            || self.spilled_sgprs.is_none()
+        {
+            return Err(VulkanError::PipelineAuditFailed(
+                "scratch or spill statistic not reported",
+            ));
+        }
+        if self.scratch_bytes != Some(0) {
+            return Err(VulkanError::PipelineAuditFailed(
+                "nonzero private scratch memory",
+            ));
+        }
+        if self.spilled_vgprs != Some(0) || self.spilled_sgprs != Some(0) {
+            return Err(VulkanError::PipelineAuditFailed("spilled registers"));
+        }
+        Ok(())
+    }
 }
 
 /// Hardware identity and compute limits reported by `vkGetPhysicalDeviceProperties`.
@@ -200,8 +265,8 @@ impl VulkanDeviceInfo {
 
     /// The evidence a secret-bearing kernel slot requires: the driver was made to compile every
     /// pipeline at subgroup size 32 and reported, for each one, subgroup size 32, zero scratch
-    /// bytes and no spilled registers. A statistic the driver did not report counts as missing
-    /// evidence, except the two spill counters, which only some compilers emit.
+    /// bytes and no spilled registers ([`PipelineTelemetry::audit`]). A statistic the driver did
+    /// not report counts as missing evidence.
     ///
     /// These are compiler reports, not a constant-time or physical side-channel proof.
     pub fn secret_slot_audit(&self) -> Result<(), VulkanError> {
@@ -216,16 +281,7 @@ impl VulkanDeviceInfo {
                     "a pipeline did not report subgroup size 32",
                 ));
             }
-            if stats.scratch_bytes != Some(0) {
-                return Err(VulkanError::PipelineAuditFailed(
-                    "a pipeline did not report zero scratch bytes",
-                ));
-            }
-            if stats.spilled_vgprs != Some(0) || stats.spilled_sgprs != Some(0) {
-                return Err(VulkanError::PipelineAuditFailed(
-                    "a pipeline reported spilled registers",
-                ));
-            }
+            stats.audit()?;
         }
         Ok(())
     }
@@ -349,9 +405,6 @@ pub struct VulkanSpirvBackend {
     #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
     _uninhabited: core::convert::Infallible,
 }
-
-/// Type alias highlighting RDNA2 Wave32/Wave64 discrete GPU acceleration via Vulkan SPIR-V.
-pub type VulkanRdna2Backend = VulkanSpirvBackend;
 
 impl core::fmt::Debug for VulkanSpirvBackend {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -1971,6 +2024,69 @@ pub fn bdoz_gf2_128_batch_dot_with_receipt<B: AcceleratorBackend>(
 }
 
 #[cfg(test)]
+mod air_op_term_tests {
+    use super::{AIR_MAX_OP_TERMS, air_op_term_count};
+
+    #[test]
+    fn the_stated_maximum_is_attained_and_unknown_opcodes_have_no_count() {
+        let mut max = 0;
+        let mut defined = 0;
+        for kind_id in 0..32 {
+            for kind_arg in 0..16 {
+                if let Some(count) = air_op_term_count(kind_id, kind_arg) {
+                    max = max.max(count);
+                    defined += 1;
+                }
+            }
+        }
+        assert_eq!(max, AIR_MAX_OP_TERMS);
+        // 24 opcodes; limb, pack-slot and flag arguments give 52 encodings in all.
+        assert_eq!(defined, 52);
+        for (kind_id, kind_arg) in [(24, 0), (6, 7), (8, 6), (10, 4), (15, 5), (17, 5), (0, 1)] {
+            assert_eq!(air_op_term_count(kind_id, kind_arg), None);
+        }
+    }
+}
+
+#[cfg(test)]
+mod telemetry_audit_tests {
+    use super::{PipelineTelemetry, VulkanError};
+
+    const CLEAN: PipelineTelemetry = PipelineTelemetry {
+        subgroup_size: Some(32),
+        scratch_bytes: Some(0),
+        vgprs: None,
+        sgprs: None,
+        lds_bytes: None,
+        spilled_vgprs: Some(0),
+        spilled_sgprs: Some(0),
+    };
+
+    #[test]
+    fn missing_or_nonzero_scratch_and_spill_statistics_fail_closed() {
+        assert_eq!(CLEAN.audit(), Ok(()));
+        // A driver without the executable-statistics extension reports nothing at all.
+        let cases: [fn(&mut PipelineTelemetry); 7] = [
+            |t| *t = PipelineTelemetry::default(),
+            |t| t.scratch_bytes = None,
+            |t| t.spilled_vgprs = None,
+            |t| t.spilled_sgprs = None,
+            |t| t.scratch_bytes = Some(8),
+            |t| t.spilled_vgprs = Some(1),
+            |t| t.spilled_sgprs = Some(1),
+        ];
+        for change in cases {
+            let mut tel = CLEAN;
+            change(&mut tel);
+            assert!(
+                matches!(tel.audit(), Err(VulkanError::PipelineAuditFailed(_))),
+                "{tel:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::spirv_kernels::spirv_kernel_bytes;
@@ -2545,7 +2661,7 @@ mod tests {
     #[test]
     fn non_linux_std_try_new_returns_unsupported_platform() {
         assert!(matches!(
-            VulkanRdna2Backend::try_new(),
+            VulkanSpirvBackend::try_new(),
             Err(VulkanError::UnsupportedPlatform)
         ));
     }

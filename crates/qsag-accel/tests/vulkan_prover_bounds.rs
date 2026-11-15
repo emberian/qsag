@@ -516,7 +516,8 @@ fn out_of_range_prover_calls_fail_cleanly_and_leave_the_backend_correct() {
     }
     // Table contents the shader would index with: a row index past the round, an opcode list
     // past its table, an unknown opcode, a column-selecting argument past the trace, and a
-    // gamma base past the buffer.
+    // gamma block that starts inside the Group A gammas, ends past the static table, or lies
+    // past the buffer.
     let hdr_word = ((dynamic.op_hdr_off - IDLE_DYN_EXT4_OFF) * 4) as usize;
     let ent_word = ((dynamic.op_ent_off - IDLE_DYN_EXT4_OFF) * 4) as usize;
     for (word, value) in [
@@ -527,6 +528,8 @@ fn out_of_range_prover_calls_fail_cleanly_and_leave_the_backend_correct() {
         (ent_word, 24),
         (ent_word, u64::MAX),
         (ent_word + 1, 1),
+        (ent_word + 2, IDLE_GAMMA_BASE - 1),
+        (ent_word + 2, IDLE_GAMMA_BASE + 3),
         (ent_word + 2, u64::from(u32::MAX)),
         (ent_word + 2, 1 << 40),
     ] {

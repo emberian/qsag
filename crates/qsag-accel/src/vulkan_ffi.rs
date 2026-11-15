@@ -1042,26 +1042,8 @@ enum EngineExecState {
     DeviceLostQuarantined,
 }
 
-/// Upper bound on the gamma weights one opcode consumes in `air_row_group_b.comp`
-/// (`emit_term` advances the gamma index once per constraint; the largest opcode emits
-/// fewer than 130).
-const AIR_MAX_OP_TERMS: u64 = 256;
 /// Upper bound on the selector entries of one row's opcode list.
 const AIR_MAX_OPS_PER_ROW: u64 = 4096;
-
-/// Largest `kind_arg` the shader accepts for `kind_id` (`trace::encode_constraint_kind`):
-/// limb and pack-slot indices select trace columns, the rest are flag bits.
-fn air_kind_arg_max(kind_id: u64) -> Option<u64> {
-    Some(match kind_id {
-        6 => 6,
-        8 => 5,
-        10 | 23 => 3,
-        15 | 17 => 4,
-        11 | 19 | 20 => 1,
-        0..=23 => 0,
-        _ => return None,
-    })
-}
 
 /// Host view of `vram_aux_in` during an AIR round: the static tables uploaded by
 /// `exec_prover_air_init_shard` followed (without overlap) by this round's dynamic words.
@@ -1089,7 +1071,6 @@ impl AirTables<'_> {
 
     /// Everything `air_row_group_b.comp` reaches through uploaded indices: the sorted row
     /// list, each reachable row's opcode header, and each opcode entry it names.
-    #[allow(clippy::too_many_arguments)]
     fn validate_op_tables(
         &self,
         half_m: u64,
@@ -1098,8 +1079,8 @@ impl AirTables<'_> {
         sorted_u64_off: u64,
         op_hdr_off: u64,
         op_ent_off: u64,
-        gamma_limit_ext4: u64,
     ) -> Result<(), VulkanError> {
+        let static_gamma_end_ext4 = to_u64(self.static_words.len()) / 4;
         let mut seen = std::vec![false; usize::try_from(key_count).map_err(|_| length_overflow())?];
         for tid in 0..half_m {
             let idx = self.word(cadd(sorted_u64_off, tid)?)?;
@@ -1130,14 +1111,22 @@ impl AirTables<'_> {
                 let gamma_base = self.word(cadd(ent, 2)?)?;
                 // The entry's two selector values end eleven words after its first.
                 self.word(cadd(ent, 11)?)?;
-                match air_kind_arg_max(kind_id) {
-                    Some(max) if kind_arg <= max => {}
-                    _ => return Err(out_of_range("AIR opcode kind or argument", 23, kind_id)),
-                }
-                if cadd(gamma_base, AIR_MAX_OP_TERMS)? > gamma_limit_ext4 {
+                // An opcode reads exactly `terms` consecutive gammas starting at `gamma_base`.
+                // They must lie in the static table `exec_prover_air_init_shard` uploaded,
+                // after the Group A gammas. This keeps every read inside the session's
+                // buffer and off the per-round tables. The host does not know where the
+                // caller's opcode blocks end inside the static table, so a base that names
+                // another opcode's block, or the row list behind them, is not detected here:
+                // it yields a proof the verifier rejects, never an out-of-buffer read.
+                let Some(terms) = crate::vulkan::air_op_term_count(kind_id, kind_arg) else {
+                    return Err(out_of_range("AIR opcode kind or argument", 23, kind_id));
+                };
+                if gamma_base < crate::vulkan::AIR_OP_GAMMA_BASE_EXT4
+                    || cadd(gamma_base, terms)? > static_gamma_end_ext4
+                {
                     return Err(out_of_range(
-                        "AIR opcode gamma base",
-                        gamma_limit_ext4,
+                        "AIR opcode gamma block (outside the static gamma table)",
+                        static_gamma_end_ext4,
                         gamma_base,
                     ));
                 }
@@ -2469,15 +2458,7 @@ impl RawVulkanEngine {
             });
         }
         self.telemetry[slot as usize] = tel;
-        if tel.scratch_bytes != Some(0) {
-            return Err(VulkanError::PipelineAuditFailed(
-                "nonzero private scratch memory",
-            ));
-        }
-        if tel.spilled_vgprs != Some(0) || tel.spilled_sgprs != Some(0) {
-            return Err(VulkanError::PipelineAuditFailed("spilled registers"));
-        }
-        Ok(())
+        tel.audit()
     }
 
     unsafe fn collect_prover_telemetry(
@@ -2494,15 +2475,7 @@ impl RawVulkanEngine {
             });
         }
         self.prover_telemetry[slot as usize] = tel;
-        if tel.scratch_bytes != Some(0) {
-            return Err(VulkanError::PipelineAuditFailed(
-                "nonzero private scratch memory",
-            ));
-        }
-        if tel.spilled_vgprs != Some(0) || tel.spilled_sgprs != Some(0) {
-            return Err(VulkanError::PipelineAuditFailed("spilled registers"));
-        }
-        Ok(())
+        tel.audit()
     }
 
     unsafe fn create_dsl(&self, num_bindings: u32) -> Result<VkDescriptorSetLayout, VulkanError> {
@@ -3557,6 +3530,32 @@ impl RawVulkanEngine {
         Ok(())
     }
 
+    /// Extent of one kernel buffer of `count` elements of `elem_bytes` each: the element
+    /// count as the `u32` the shader indexes with, and the byte length the copies and scrubs
+    /// use. Both are derived here from the slice length the job was handed, after the
+    /// `maxStorageBufferRange` check, so no later cast can truncate.
+    fn kernel_extent(&self, count: usize, elem_bytes: u64) -> Result<(u32, u64), VulkanError> {
+        self.check_storage_bytes(
+            count,
+            usize::try_from(elem_bytes).map_err(|_| length_overflow())?,
+        )?;
+        Ok((to_u32(count)?, cmul(to_u64(count), elem_bytes)?))
+    }
+
+    /// The buffers a kernel job binds must hold the extents its shader indexes.
+    fn kernel_buffers_fit(&self, need_a: u64, need_b: u64, need_c: u64) -> Result<(), VulkanError> {
+        for (what, buf, need) in [
+            ("vram_a (kernel job)", &self.vram_a, need_a),
+            ("vram_b (kernel job)", &self.vram_b, need_b),
+            ("vram_c (kernel job)", &self.vram_c, need_c),
+        ] {
+            if need > 0 && (buf.buffer == 0 || need > buf.capacity) {
+                return Err(out_of_range(what, buf.capacity, need));
+            }
+        }
+        Ok(())
+    }
+
     unsafe fn exec_inplace_states<const LANES: usize>(
         &mut self,
         slot: KernelSlot,
@@ -3565,28 +3564,19 @@ impl RawVulkanEngine {
         unsafe {
             self.ensure_ready()?;
         }
-        let num_states = states.len();
-        self.check_storage_bytes(num_states, LANES * 8)?;
+        let (num_states, byte_len) =
+            self.kernel_extent(states.len(), cmul(to_u64(LANES), WORD_BYTES)?)?;
         if num_states == 0 {
             return Ok(());
         }
-        let total_words =
-            num_states
-                .checked_mul(LANES)
-                .ok_or(VulkanError::BufferExceedsMaxStorageRange {
-                    requested: u64::MAX,
-                    limit: self.max_storage_range,
-                })?;
-        let byte_len = (total_words as u64).checked_mul(8).ok_or(
-            VulkanError::BufferExceedsMaxStorageRange {
-                requested: u64::MAX,
-                limit: self.max_storage_range,
-            },
-        )?;
+        // `byte_len` fits the storage range, so the word count fits `usize`.
+        let total_words = states.len() * LANES;
+        let total_wg = to_u32(u64::from(num_states).div_ceil(64))?;
 
         unsafe {
             self.reserve_job_staging(byte_len)?;
             self.ensure_vram_buffers(byte_len, 0, 0)?;
+            self.kernel_buffers_fit(byte_len, 0, 0)?;
 
             let flat_in = core::slice::from_raw_parts(states.as_ptr().cast::<u64>(), total_words);
             self.write_staging_u64s(0, flat_in);
@@ -3624,12 +3614,11 @@ impl RawVulkanEngine {
                 null(),
             );
 
-            let total_wg = (num_states as u64).div_ceil(64) as u32;
             let mut wg_done = 0u32;
             while wg_done < total_wg {
                 let wg_chunk = (total_wg - wg_done).min(self.max_wg_x);
                 let pc = BatchStatesPushConsts {
-                    num_states: num_states as u32,
+                    num_states,
                     base_state: wg_done * 64,
                     _pad0: 0,
                     _pad1: 0,
@@ -3735,13 +3724,13 @@ impl RawVulkanEngine {
         if !n.is_power_of_two() || (n > 1 && twiddles.len() != n / 2) {
             return Err(VulkanError::Accel(crate::AccelError::LengthOverflow));
         }
-        self.check_storage_bytes(n, 8)?;
+        let (n32, byte_len) = self.kernel_extent(n, WORD_BYTES)?;
         let log2_n = n.trailing_zeros();
-        let byte_len = (n as u64) * 8;
 
         unsafe {
             self.reserve_job_staging(byte_len)?;
             self.ensure_vram_buffers(byte_len, 0, 0)?;
+            self.kernel_buffers_fit(byte_len, 0, 0)?;
             self.write_staging_u64s(0, buf);
 
             self.begin_cmd()?;
@@ -3778,13 +3767,13 @@ impl RawVulkanEngine {
             );
 
             // Stage 0: in-place canonical reduction + bit-reversal permutation (`mode = 0`).
-            let wg_full = (n as u64).div_ceil(256) as u32;
+            let wg_full = n32.div_ceil(256);
             self.dispatch_ntt_mode(
                 kp.pipeline_layout,
                 wg_full,
                 NttPushConsts {
                     w_step: 0,
-                    n: n as u32,
+                    n: n32,
                     log2_n,
                     stage: 0,
                     mode: 0,
@@ -3820,13 +3809,13 @@ impl RawVulkanEngine {
                         VK_ACCESS_SHADER_WRITE_BIT,
                         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
                     );
-                    let wg_blocks = (n >> 9) as u32;
+                    let wg_blocks = n32 >> 9;
                     self.dispatch_ntt_mode(
                         kp.pipeline_layout,
                         wg_blocks,
                         NttPushConsts {
                             w_step: stage_root(9),
-                            n: n as u32,
+                            n: n32,
                             log2_n,
                             stage: 9,
                             mode: 1,
@@ -3839,7 +3828,7 @@ impl RawVulkanEngine {
                     1u32
                 };
 
-                let wg_half = ((n >> 1) as u64).div_ceil(256) as u32;
+                let wg_half = (n32 >> 1).div_ceil(256);
                 for s in start_stage..=log2_n {
                     self.cmd_barrier(
                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -3852,7 +3841,7 @@ impl RawVulkanEngine {
                         wg_half,
                         NttPushConsts {
                             w_step: stage_root(s),
-                            n: n as u32,
+                            n: n32,
                             log2_n,
                             stage: s,
                             mode: 2,
@@ -3874,7 +3863,7 @@ impl RawVulkanEngine {
                         wg_full,
                         NttPushConsts {
                             w_step: gl_inv_or_zero(n as u64),
-                            n: n as u32,
+                            n: n32,
                             log2_n,
                             stage: 0,
                             mode: 3,
@@ -3935,8 +3924,7 @@ impl RawVulkanEngine {
             }));
         }
         let log2_n = n.trailing_zeros();
-        self.check_storage_bytes(n, 8)?;
-        let byte_len = (n as u64) * 8;
+        let (n32, byte_len) = self.kernel_extent(n, WORD_BYTES)?;
         let stage_root = |s: u32| -> Result<u64, VulkanError> {
             let r = goldilocks_primitive_root(s).map_err(VulkanError::Accel)?;
             Ok(if inverse { gl_inv_or_zero(r) } else { r })
@@ -3945,6 +3933,7 @@ impl RawVulkanEngine {
         unsafe {
             self.reserve_job_staging(byte_len)?;
             self.ensure_vram_buffers(byte_len, 0, 0)?;
+            self.kernel_buffers_fit(byte_len, 0, 0)?;
             self.write_staging_u64s(0, buf);
 
             self.begin_cmd()?;
@@ -3980,13 +3969,13 @@ impl RawVulkanEngine {
                 null(),
             );
 
-            let wg_full = (n as u64).div_ceil(256) as u32;
+            let wg_full = n32.div_ceil(256);
             self.dispatch_ntt_mode(
                 kp.pipeline_layout,
                 wg_full,
                 NttPushConsts {
                     w_step: 0,
-                    n: n as u32,
+                    n: n32,
                     log2_n,
                     stage: 0,
                     mode: 0,
@@ -4006,10 +3995,10 @@ impl RawVulkanEngine {
                     );
                     self.dispatch_ntt_mode(
                         kp.pipeline_layout,
-                        (n >> 9) as u32,
+                        n32 >> 9,
                         NttPushConsts {
                             w_step: w9,
-                            n: n as u32,
+                            n: n32,
                             log2_n,
                             stage: 9,
                             mode: 1,
@@ -4022,7 +4011,7 @@ impl RawVulkanEngine {
                     1u32
                 };
 
-                let wg_half = ((n >> 1) as u64).div_ceil(256) as u32;
+                let wg_half = (n32 >> 1).div_ceil(256);
                 for s in start_stage..=log2_n {
                     let ws = stage_root(s)?;
                     self.cmd_barrier(
@@ -4036,7 +4025,7 @@ impl RawVulkanEngine {
                         wg_half,
                         NttPushConsts {
                             w_step: ws,
-                            n: n as u32,
+                            n: n32,
                             log2_n,
                             stage: s,
                             mode: 2,
@@ -4058,7 +4047,7 @@ impl RawVulkanEngine {
                         wg_full,
                         NttPushConsts {
                             w_step: gl_inv_or_zero(n as u64),
-                            n: n as u32,
+                            n: n32,
                             log2_n,
                             stage: 0,
                             mode: 3,
@@ -4123,11 +4112,11 @@ impl RawVulkanEngine {
     unsafe fn record_ext2_ntt_stages(
         &self,
         pl: VkPipelineLayout,
-        len: usize,
+        len: u32,
         inverse: bool,
     ) -> Result<(), VulkanError> {
         let log2_len = len.trailing_zeros();
-        let wg_full = (len as u64).div_ceil(256) as u32;
+        let wg_full = len.div_ceil(256);
         unsafe {
             self.dispatch_lde_mode(
                 pl,
@@ -4135,7 +4124,7 @@ impl RawVulkanEngine {
                 CosetLdePushConsts {
                     w_step: 0,
                     shift_c: 0,
-                    len: len as u32,
+                    len,
                     aux_n: 0,
                     log2_len,
                     stage: 0,
@@ -4160,11 +4149,11 @@ impl RawVulkanEngine {
                 );
                 self.dispatch_lde_mode(
                     pl,
-                    (len >> 9) as u32,
+                    len >> 9,
                     CosetLdePushConsts {
                         w_step: w9,
                         shift_c: 0,
-                        len: len as u32,
+                        len,
                         aux_n: 0,
                         log2_len,
                         stage: 9,
@@ -4178,7 +4167,7 @@ impl RawVulkanEngine {
             1u32
         };
 
-        let wg_half = ((len >> 1) as u64).div_ceil(256) as u32;
+        let wg_half = (len >> 1).div_ceil(256);
         for s in start_stage..=log2_len {
             let root = goldilocks_primitive_root(s).map_err(VulkanError::Accel)?;
             let w_step = if inverse { gl_inv_or_zero(root) } else { root };
@@ -4195,7 +4184,7 @@ impl RawVulkanEngine {
                     CosetLdePushConsts {
                         w_step,
                         shift_c: 0,
-                        len: len as u32,
+                        len,
                         aux_n: 0,
                         log2_len,
                         stage: s,
@@ -4235,13 +4224,13 @@ impl RawVulkanEngine {
         if !n.is_power_of_two() || !blowup.is_power_of_two() || out.len() != m {
             return Err(VulkanError::Accel(crate::AccelError::LengthOverflow));
         }
-        self.check_storage_bytes(m, 16)?;
-        let in_bytes = (n as u64) * 16;
-        let out_bytes = (m as u64) * 16;
+        let (m32, out_bytes) = self.kernel_extent(m, 2 * WORD_BYTES)?;
+        let (n32, in_bytes) = self.kernel_extent(n, 2 * WORD_BYTES)?;
 
         unsafe {
             self.reserve_job_staging(out_bytes)?;
             self.ensure_vram_buffers(out_bytes, 0, 0)?;
+            self.kernel_buffers_fit(out_bytes, 0, 0)?;
 
             let flat_in = core::slice::from_raw_parts(evals.as_ptr().cast::<u64>(), n * 2);
             self.write_staging_u64s(0, flat_in);
@@ -4280,7 +4269,7 @@ impl RawVulkanEngine {
             );
 
             // 1. Inverse NTT of length `n` on both coordinates in VRAM.
-            self.record_ext2_ntt_stages(kp.pipeline_layout, n, true)?;
+            self.record_ext2_ntt_stages(kp.pipeline_layout, n32, true)?;
 
             // 2. Multiply `[0..n)` by `inv_n * shift^j` and zero-pad `[n..m)` in VRAM.
             self.cmd_barrier(
@@ -4289,15 +4278,15 @@ impl RawVulkanEngine {
                 VK_ACCESS_SHADER_WRITE_BIT,
                 VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
             );
-            let wg_m = (m as u64).div_ceil(256) as u32;
+            let wg_m = m32.div_ceil(256);
             self.dispatch_lde_mode(
                 kp.pipeline_layout,
                 wg_m,
                 CosetLdePushConsts {
                     w_step: gl_inv_or_zero(n as u64),
                     shift_c: gl_reduce_u64(shift),
-                    len: m as u32,
-                    aux_n: n as u32,
+                    len: m32,
+                    aux_n: n32,
                     log2_len: m.trailing_zeros(),
                     stage: 0,
                     mode: 3,
@@ -4312,7 +4301,7 @@ impl RawVulkanEngine {
                 VK_ACCESS_SHADER_WRITE_BIT,
                 VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
             );
-            self.record_ext2_ntt_stages(kp.pipeline_layout, m, false)?;
+            self.record_ext2_ntt_stages(kp.pipeline_layout, m32, false)?;
 
             let copy_out = VkBufferCopy {
                 src_offset: 0,
@@ -4354,7 +4343,7 @@ impl RawVulkanEngine {
         pk_seed: &[u64; 4],
         layer: u32,
         start_parent_idx: u64,
-        num_parents: usize,
+        num_parents: u32,
     ) {
         unsafe {
             (self.fns.cmd_bind_descriptor_sets)(
@@ -4368,7 +4357,7 @@ impl RawVulkanEngine {
                 null(),
             );
         }
-        let total_wg = (num_parents as u64).div_ceil(64) as u32;
+        let total_wg = num_parents.div_ceil(64);
         let mut wg_done = 0u32;
         while wg_done < total_wg {
             let chunk = (total_wg - wg_done).min(self.max_wg_x);
@@ -4378,7 +4367,7 @@ impl RawVulkanEngine {
                 s2: pk_seed[2],
                 s3: pk_seed[3],
                 start_parent_idx,
-                num_parents: num_parents as u64,
+                num_parents: u64::from(num_parents),
                 in_offset_u64: 0,
                 out_offset_u64: 0,
                 layer,
@@ -4427,7 +4416,8 @@ impl RawVulkanEngine {
         if num_parents.checked_mul(2) != Some(children.len()) {
             return Err(crate::AccelError::LengthOverflow.into());
         }
-        self.check_storage_bytes(children.len(), 32)?;
+        let (_, in_bytes) = self.kernel_extent(children.len(), 4 * WORD_BYTES)?;
+        let (parents32, out_bytes) = self.kernel_extent(num_parents, 4 * WORD_BYTES)?;
         let max_parent_idx = if num_parents == 0 {
             start_parent_idx
         } else {
@@ -4441,12 +4431,11 @@ impl RawVulkanEngine {
         if num_parents == 0 {
             return Ok(());
         }
-        let in_bytes = (children.len() as u64) * 32;
-        let out_bytes = (num_parents as u64) * 32;
 
         unsafe {
             self.reserve_job_staging(in_bytes)?;
             self.ensure_vram_buffers(in_bytes, out_bytes, 0)?;
+            self.kernel_buffers_fit(in_bytes, out_bytes, 0)?;
 
             let flat_in =
                 core::slice::from_raw_parts(children.as_ptr().cast::<u64>(), children.len() * 4);
@@ -4480,7 +4469,7 @@ impl RawVulkanEngine {
                 pk_seed,
                 layer,
                 start_parent_idx,
-                num_parents,
+                parents32,
             );
 
             let copy_out = VkBufferCopy {
@@ -4544,7 +4533,7 @@ impl RawVulkanEngine {
         if !num_leaves.is_power_of_two() {
             return Err(crate::AccelError::LengthOverflow.into());
         }
-        self.check_storage_bytes(num_leaves, 32)?;
+        let (leaves32, leaf_bytes) = self.kernel_extent(num_leaves, 4 * WORD_BYTES)?;
         if num_leaves == 1 {
             return Ok([
                 gl_reduce_u64(leaves[0][0]),
@@ -4554,12 +4543,17 @@ impl RawVulkanEngine {
             ]);
         }
         let height = num_leaves.trailing_zeros();
-        let leaf_bytes = (num_leaves as u64) * 32;
+        // Level `lvl` is tweaked with `base_layer + lvl`: a wrapped sum would hash the top of
+        // the tree under another layer's domain.
+        if base_layer.checked_add(height - 1).is_none() {
+            return Err(length_overflow());
+        }
         let half_bytes = leaf_bytes / 2;
 
         unsafe {
             self.reserve_job_staging(leaf_bytes)?;
             self.ensure_vram_buffers(leaf_bytes, half_bytes, 0)?;
+            self.kernel_buffers_fit(leaf_bytes, half_bytes, 0)?;
 
             let flat_in =
                 core::slice::from_raw_parts(leaves.as_ptr().cast::<u64>(), num_leaves * 4);
@@ -4602,7 +4596,7 @@ impl RawVulkanEngine {
                 } else {
                     self.ds_2buf_ba
                 };
-                let cur_parents = num_leaves >> (lvl + 1);
+                let cur_parents = leaves32 >> (lvl + 1);
                 self.dispatch_merkle_layer_cmd(
                     kp.pipeline_layout,
                     ds,
@@ -4668,30 +4662,20 @@ impl RawVulkanEngine {
         if weights.len() != n {
             return Err(crate::AccelError::LengthOverflow.into());
         }
-        self.check_storage_bytes(n, 32)?;
+        let (n32, vec_bytes) = self.kernel_extent(n, 4 * WORD_BYTES)?;
         if n == 0 {
             return Ok((0, 0));
         }
-        let vec_bytes =
-            (n as u64)
-                .checked_mul(32)
-                .ok_or(VulkanError::BufferExceedsMaxStorageRange {
-                    requested: u64::MAX,
-                    limit: self.max_storage_range,
-                })?;
-        let staging_bytes =
-            vec_bytes
-                .checked_mul(2)
-                .ok_or(VulkanError::BufferExceedsMaxStorageRange {
-                    requested: u64::MAX,
-                    limit: self.max_storage_range,
-                })?;
-        let num_groups = n.div_ceil(256).min(1024).min(self.max_wg_x as usize) as u32;
-        let partials_bytes = (num_groups as u64) * 32;
+        let staging_bytes = cmul(vec_bytes, 2)?;
+        // Mode 0 strides each of `num_groups * 256` invocations over the whole input and
+        // writes one partial per group; mode 1 folds at most 1024 partials in one group.
+        let num_groups = n32.div_ceil(256).min(1024).min(self.max_wg_x);
+        let partials_bytes = cmul(u64::from(num_groups), 4 * WORD_BYTES)?;
 
         unsafe {
             self.reserve_job_staging(staging_bytes)?;
             self.ensure_vram_buffers(vec_bytes, vec_bytes, partials_bytes)?;
+            self.kernel_buffers_fit(vec_bytes, vec_bytes, partials_bytes)?;
 
             // Pack `(s0, s1)` and `(w0, w1)` deterministically as `[lo64, hi64, lo64, hi64]`.
             // Mapped allocation need not be initialized: raw writes avoid constructing
@@ -4759,7 +4743,7 @@ impl RawVulkanEngine {
             );
 
             let pc0 = BdozDotPushConsts {
-                num_elements: n as u32,
+                num_elements: n32,
                 num_groups,
                 mode: 0,
                 _pad: 0,
@@ -4782,7 +4766,7 @@ impl RawVulkanEngine {
                     VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
                 );
                 let pc1 = BdozDotPushConsts {
-                    num_elements: n as u32,
+                    num_elements: n32,
                     num_groups,
                     mode: 1,
                     _pad: 0,
@@ -8427,7 +8411,6 @@ impl RawVulkanEngine {
                 cmul(cmul(8 * 12, hm)?, EXT4_BYTES)?,
             )?;
             {
-                let gamma_limit_ext4 = engine.prover.vram_aux_in.used / EXT4_BYTES;
                 let air = engine.prover.air.as_ref().ok_or_else(length_overflow)?;
                 AirTables {
                     static_words: &air.static_words,
@@ -8441,7 +8424,6 @@ impl RawVulkanEngine {
                     u64::from(sorted_u64_off),
                     u64::from(op_hdr_off),
                     u64::from(op_ent_off),
-                    gamma_limit_ext4,
                 )?;
             }
 
@@ -9451,6 +9433,117 @@ mod tests {
         assert!(engine.prover.vram_partials.capacity >= grow_to);
         unsafe {
             engine.refresh_prover_descriptor_sets().expect("refresh");
+        }
+    }
+
+    /// Every non-prover kernel job derives its extents from the slices it was handed and
+    /// refuses, before touching the device, what the storage range or the layer tweak cannot
+    /// hold. The storage limit is lowered here so the refusals need no large allocation.
+    #[test]
+    fn kernel_jobs_rederive_their_ranges_and_refuse_before_dispatch() {
+        let Some(mut engine) = live_engine() else {
+            return;
+        };
+        let real_limit = engine.max_storage_range;
+        let seed = [1u64, 2, 3, 4];
+        let leaves: std::vec::Vec<[u64; 4]> = (0..4u64).map(|i| [i, i + 1, i + 2, i + 3]).collect();
+
+        // 96 bytes: one Poseidon2 state fits, two do not; twelve words fit, sixteen do not.
+        engine.max_storage_range = 96;
+        let submissions = engine.mutation_counters.get();
+        let too_big = |res: Result<(), VulkanError>| {
+            assert!(
+                matches!(res, Err(VulkanError::BufferExceedsMaxStorageRange { .. })),
+                "{res:?}"
+            );
+        };
+        too_big(engine.exec_batch_keccak(&mut [[0u64; 25]; 1]));
+        too_big(engine.exec_batch_poseidon2(&mut [[0u64; 12]; 2]));
+        too_big(engine.exec_goldilocks_ntt_canonical(&mut [0u64; 16], false));
+        too_big(engine.exec_goldilocks_ntt(&mut [0u64; 16], &[1u64; 8], false));
+        too_big(engine.exec_coset_lde_ext2(&[[0u64; 2]; 4], 2, 7, &mut [[0u64; 2]; 8]));
+        too_big(engine.exec_merkle_layer(&leaves, &seed, 0, 0, &mut [[0u64; 4]; 2]));
+        too_big(engine.exec_merkle_full_tree(&leaves, &seed, 0).map(|_| ()));
+        too_big(
+            engine
+                .exec_bdoz_gf2_128_dot(&[(1, 2); 4], &[(3, 4); 4])
+                .map(|_| ()),
+        );
+        assert_eq!(
+            engine.mutation_counters.get(),
+            submissions,
+            "a refused job allocated or rebound a buffer"
+        );
+        assert_eq!(engine.exec_state, EngineExecState::Ready);
+        engine.max_storage_range = real_limit;
+
+        // Shapes the shaders assume.
+        let shape = |res: Result<(), VulkanError>| {
+            assert!(matches!(res, Err(VulkanError::Accel(_))), "{res:?}");
+        };
+        shape(engine.exec_goldilocks_ntt_canonical(&mut [], false));
+        shape(engine.exec_goldilocks_ntt_canonical(&mut [0u64; 12], false));
+        shape(engine.exec_goldilocks_ntt(&mut [0u64; 8], &[1u64; 3], false));
+        shape(engine.exec_coset_lde_ext2(&[[0u64; 2]; 3], 2, 7, &mut [[0u64; 2]; 6]));
+        shape(engine.exec_coset_lde_ext2(&[[0u64; 2]; 4], 2, 7, &mut [[0u64; 2]; 4]));
+        shape(engine.exec_merkle_layer(&leaves, &seed, 0, 0, &mut [[0u64; 4]; 1]));
+        shape(engine.exec_merkle_layer(
+            &leaves,
+            &seed,
+            0,
+            u64::from(u32::MAX),
+            &mut [[0u64; 4]; 2],
+        ));
+        shape(
+            engine
+                .exec_merkle_full_tree(&leaves[..3], &seed, 0)
+                .map(|_| ()),
+        );
+        shape(engine.exec_merkle_full_tree(&[], &seed, 0).map(|_| ()));
+        shape(
+            engine
+                .exec_bdoz_gf2_128_dot(&[(1, 2); 4], &[(3, 4); 3])
+                .map(|_| ()),
+        );
+
+        // A four-leaf tree uses layers `base` and `base + 1`: the last base that fits is
+        // `u32::MAX - 1`, and it must agree with the CPU reference layer by layer.
+        shape(
+            engine
+                .exec_merkle_full_tree(&leaves, &seed, u32::MAX)
+                .map(|_| ()),
+        );
+        let base = u32::MAX - 1;
+        let mut mid = [[0u64; 4]; 2];
+        let mut root = [[0u64; 4]; 1];
+        crate::poseidon2::merkle_layer_poseidon2_at_cpu(&leaves, &seed, base, 0, &mut mid)
+            .expect("cpu layer 0");
+        crate::poseidon2::merkle_layer_poseidon2_at_cpu(&mid, &seed, base + 1, 0, &mut root)
+            .expect("cpu layer 1");
+        assert_eq!(
+            engine
+                .exec_merkle_full_tree(&leaves, &seed, base)
+                .expect("gpu tree"),
+            root[0]
+        );
+        assert_eq!(engine.exec_state, EngineExecState::Ready);
+    }
+
+    /// What the driver reports for each pipeline on this device, and that it passes the gate
+    /// the engine applied at construction.
+    #[test]
+    fn live_driver_reports_scratch_and_spill_statistics_for_every_pipeline() {
+        let Ok((_engine, info)) = RawVulkanEngine::try_new() else {
+            assert!(
+                std::env::var_os("QSAG_REQUIRE_GPU_AUDIT").is_none(),
+                "QSAG_REQUIRE_GPU_AUDIT is set but no Vulkan GPU is available"
+            );
+            return;
+        };
+        for tel in info.pipelines.iter().chain(info.prover_pipelines.iter()) {
+            std::eprintln!("PIPELINE_TELEMETRY {tel:?}");
+            assert_eq!(tel.audit(), Ok(()));
+            assert_eq!(tel.subgroup_size, Some(32));
         }
     }
 

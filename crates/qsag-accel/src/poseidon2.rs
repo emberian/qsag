@@ -124,6 +124,28 @@ pub fn poseidon2_perm12(st: &mut [u64; 12]) {
     }
 }
 
+/// Canonical rate-6, capacity-6 field sponge used by zk-Hem and BlindVC.
+/// Starts at zero and appends a single field `1`, including an extra block at
+/// exact rate boundaries. This is distinct from the domain-tagged rate-8 profile
+/// [`Poseidon2Sponge`]; their digests are intentionally not interchangeable.
+pub fn sponge12_rate6(message: &[u64]) -> [u64; 12] {
+    let mut state = [0u64; 12];
+    for chunk in message.chunks(6) {
+        for (lane, &value) in state.iter_mut().zip(chunk) {
+            *lane = gl_add(*lane, gl_reduce_u64(value));
+        }
+        if chunk.len() < 6 {
+            state[chunk.len()] = gl_add(state[chunk.len()], 1);
+        }
+        poseidon2_perm12(&mut state);
+    }
+    if message.len().is_multiple_of(6) {
+        state[0] = gl_add(state[0], 1);
+        poseidon2_perm12(&mut state);
+    }
+    state
+}
+
 /// Stack-allocated zeroizing Width-12 `Poseidon2` sponge (`rate = 8`, `capacity = 4` = 256 bits)
 /// with `10*1` multi-rate padding and **zero heap `Vec` allocation**.
 #[derive(Clone)]
@@ -222,19 +244,6 @@ pub fn poseidon2_hash_framed_limbs4(domain_tag: u64, frames: &[&[u8]]) -> [u64; 
     sp.finalize_digest4()
 }
 
-/// Batch Poseidon2 Merkle tree compression layer binding **all 4 limbs `pk_seed[0..4]`**, `layer`,
-/// and `start_parent_idx = 0` with feed-forward!
-///
-/// `children` has length `2 * m` and `out_parents` has length `m`.
-pub fn merkle_layer_poseidon2_cpu(
-    children: &[[u64; 4]],
-    pk_seed: &[u64; 4],
-    layer: u32,
-    out_parents: &mut [[u64; 4]],
-) -> Result<(), AccelError> {
-    merkle_layer_poseidon2_at_cpu(children, pk_seed, layer, 0, out_parents)
-}
-
 /// Shape contract of a Merkle layer job, shared by every backend: two children per parent and
 /// every global parent index `start_parent_idx + i` inside `0..=u32::MAX`.
 pub(crate) fn merkle_layer_shape(
@@ -269,6 +278,29 @@ pub(crate) fn merkle_layer_shape(
 /// Supported parent indices lie in `0..=u32::MAX` (`<= 2^32 - 1`), over which
 /// `0x4C52_5F4E_4F44_4531 + idx < GOLDILOCKS_PRIME` is strictly injective without `u64` or modular
 /// wrap; larger indices return [`AccelError::LengthOverflow`].
+///
+/// # Scope of the position separation
+///
+/// The capacity lanes are the sums `pk_seed + (domain(layer), layer, node(idx), IV)`, and the
+/// weighted output reads those same sums. The node function therefore depends on the key and
+/// the position only through them:
+///
+/// * **One key.** For a fixed `pk_seed` the map `(layer, idx) -> capacity` is injective over
+///   `layer, idx <= u32::MAX`. Two positions of one tree never share a function.
+/// * **Several keys.** The separation is per key, not per `(key, position)` pair. The keys
+///   `pk_seed` and `pk_seed + (0, 0, d, 0)` have the same function at positions `idx` and
+///   `idx - d` of one layer, and a layer shift is absorbed the same way by limbs 0 and 1. A
+///   party that derives its seed from another key's seed can so reproduce single nodes of
+///   that key at shifted positions, for equal children. It cannot reproduce an authentication
+///   path up to a root: the shift would have to be the same at every layer while both indices
+///   halve, which forces `d = 0`. Two uniform seeds are related this way with probability about
+///   `2^-192` per offset.
+///
+/// A security argument that needs distinct functions for distinct `(key, position)` pairs
+/// across adversarially chosen keys does not get them from this layer. The construction is
+/// shared bit for bit with `merkle_layer_poseidon2.comp`, `qsag_core::poseidon2_mpc` and the
+/// trees already derived from it, so it is pinned here by
+/// `merkle_position_separation_is_per_key`.
 pub fn merkle_layer_poseidon2_at_cpu(
     children: &[[u64; 4]],
     pk_seed: &[u64; 4],
@@ -340,6 +372,41 @@ pub fn merkle_layer_poseidon2_at_cpu(
         ct_zeroize_u64s(&mut st);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod merkle_tweak_tests {
+    use super::*;
+
+    fn node(pk_seed: [u64; 4], layer: u32, idx: u64) -> [u64; 4] {
+        let children = [[11, 12, 13, 14], [21, 22, 23, 24]];
+        let mut out = [[0u64; 4]];
+        merkle_layer_poseidon2_at_cpu(&children, &pk_seed, layer, idx, &mut out).unwrap();
+        out[0]
+    }
+
+    #[test]
+    fn merkle_position_separation_is_per_key() {
+        let seed = [0x1111, 0x2222, 0x3333, 0x4444];
+        // One key: every position of a grid, including the index bounds, is its own function.
+        let mut seen = std::vec::Vec::new();
+        for layer in [0, 1, 2, 31, u32::MAX] {
+            for idx in [0, 1, 2, 3, 1 << 20, u64::from(u32::MAX)] {
+                let digest = node(seed, layer, idx);
+                assert!(!seen.contains(&digest), "layer {layer}, index {idx}");
+                seen.push(digest);
+            }
+        }
+        // Across keys the tweak is additive: a seed shifted in limb 2 meets the original
+        // key at the position shifted back, and limbs 0 and 1 absorb a layer shift.
+        let shifted = [seed[0], seed[1], seed[2] + 5, seed[3]];
+        assert_eq!(node(shifted, 3, 7), node(seed, 3, 12));
+        assert_ne!(node(shifted, 3, 7), node(seed, 3, 7));
+        let relayered = [seed[0] + (1 << 32), seed[1] + 1, seed[2], seed[3]];
+        assert_eq!(node(relayered, 3, 7), node(seed, 4, 7));
+        // No single shift survives two layers of one path: parent indices halve.
+        assert_ne!(node(shifted, 4, 3), node(seed, 4, 6));
+    }
 }
 
 #[cfg(test)]

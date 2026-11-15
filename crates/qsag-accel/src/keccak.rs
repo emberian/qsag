@@ -372,9 +372,9 @@ impl InterleavedTranscript {
         self.squeeze_bytes(label, &mut raw);
         let mut half = [0u8; 24];
         half.copy_from_slice(&raw[..24]);
-        let c0 = reduce_192_zero_bias(&half);
+        let c0 = reduce_192_mod_p(&half);
         half.copy_from_slice(&raw[24..]);
-        let c1 = reduce_192_zero_bias(&half);
+        let c1 = reduce_192_mod_p(&half);
         ct_zeroize_bytes(&mut half);
         ct_zeroize_bytes(&mut raw);
         [c0, c1]
@@ -386,12 +386,12 @@ impl InterleavedTranscript {
 }
 
 /// Wide reduction of a 24-byte draw modulo Goldilocks p.
-/// The historical function name is retained for compatibility; bias is nonzero.
+/// Bias is nonzero and negligible.
 /// Exact TV distance from uniform is (p-1)/(p * 2^192), strictly below 2^-192.
 /// Since $2^{96} \equiv -1 \pmod p$, $2^{192} \equiv 1 \pmod p$, so $p \mid (2^{192} - 1)$!
 /// Note: only the single point `2^192 - 1` makes `[0, 2^192)` have residue `0` once extra (`2^{-192}`).
 #[inline]
-pub fn reduce_192_zero_bias(bytes24: &[u8; 24]) -> u64 {
+pub fn reduce_192_mod_p(bytes24: &[u8; 24]) -> u64 {
     use crate::goldilocks::{gl_reduce128, gl_sub};
     let mut lo16 = [0u8; 16];
     let mut hi8 = [0u8; 8];

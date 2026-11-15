@@ -10,6 +10,8 @@ description = "Zero-dependency no_std certified hardware/GPU accelerator trait, 
 default = ["alloc"]
 alloc = []
 std = ["alloc", "qsag-asm/std"]
+# Select the live Linux Vulkan loader rather than the no_std unavailable stub.
+vulkan = ["std"]
 
 [dependencies]
 # Strictly zero external crates.io dependencies.

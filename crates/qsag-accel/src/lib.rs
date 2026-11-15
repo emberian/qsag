@@ -1,7 +1,7 @@
 #![no_std]
 //! Zero-dependency `#![no_std]` certified hardware & GPU accelerator trait (`AcceleratorBackend`),
 //! constant-time CPU reference backend (`CpuReferenceBackend`), certified RDNA2 / SPIR-V Vulkan
-//! discrete GPU backend (`VulkanSpirvBackend` / `VulkanRdna2Backend`), transcript-bound reports,
+//! discrete GPU backend (`VulkanSpirvBackend`), transcript-bound reports,
 //! and verified kernel digest registry (`VerifiedKernelDigestRegistry`).
 
 #![cfg_attr(
@@ -31,8 +31,8 @@ pub mod vulkan;
 mod vulkan_ffi;
 
 pub use vulkan::{
-    BatchExecution, CpuFallbackEvent, PipelineTelemetry, VulkanDeviceInfo, VulkanError,
-    VulkanRdna2Backend, VulkanSpirvBackend,
+    AIR_MAX_OP_TERMS, AIR_OP_GAMMA_BASE_EXT4, BatchExecution, CpuFallbackEvent, PipelineTelemetry,
+    VulkanDeviceInfo, VulkanError, VulkanSpirvBackend, air_op_term_count,
 };
 
 use ct::{RedactedSecret, ct_eq_bytes_mask, ct_eq_mask_u64};
@@ -223,6 +223,8 @@ impl KernelSlot {
     pub const fn algorithm_domain(self) -> &'static [u8] {
         match self {
             Self::BatchKeccakF1600 => b"QSAG.ACCEL.ALG.KECCAK_F1600.V1",
+            // V1 versions the attestation framing, not the permutation. The hardened
+            // canonical Poseidon2-12 is bound by the test vectors; Lean pins this label.
             Self::BatchPoseidon2Perm12 => b"QSAG.ACCEL.ALG.POSEIDON2_PERM12.V1",
             Self::GoldilocksNtt => b"QSAG.ACCEL.ALG.GOLDILOCKS_NTT.V1",
             Self::CosetLdeExt2 => b"QSAG.ACCEL.ALG.COSET_LDE_EXT2.V1",
@@ -739,6 +741,7 @@ impl CpuReferenceBackend {
     pub fn canonical_pin(slot: KernelSlot) -> CertifiedKernelPin {
         let tag: &[u8] = match slot {
             KernelSlot::BatchKeccakF1600 => b"QSAG.CPU_REF.KECCAK_F1600.V1",
+            // Framing version; canonical Poseidon2-12 profile, also registered in Lean.
             KernelSlot::BatchPoseidon2Perm12 => b"QSAG.CPU_REF.POSEIDON2_PERM12.V1",
             KernelSlot::GoldilocksNtt => b"QSAG.CPU_REF.GOLDILOCKS_NTT.V1",
             KernelSlot::CosetLdeExt2 => b"QSAG.CPU_REF.COSET_LDE_EXT2.V1",
