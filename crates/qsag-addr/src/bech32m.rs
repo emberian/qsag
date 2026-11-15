@@ -180,29 +180,24 @@ pub fn convert_bits(
     Ok(ret)
 }
 
-/// Encode `(hrp, data5)` strictly with `Bech32m` (`0x2bc830a3`), enforcing BIP-350 `<= 90` total length.
-pub fn bech32m_encode_5bit(hrp: &str, data5: &[u8]) -> Result<String, AddrError> {
-    if hrp.is_empty() || hrp.len() > 83 {
+/// The lowercase form of a human-readable part of at most `max_len` printable US-ASCII
+/// characters, rejecting empty, oversize, non-printable and mixed-case input.
+pub(crate) fn lowercase_hrp(hrp: &str, max_len: usize) -> Result<String, AddrError> {
+    if hrp.is_empty() || hrp.len() > max_len {
         return Err(AddrError::EmptyOrInvalidHrp);
     }
-    let mut has_lower = false;
-    let mut has_upper = false;
-    let mut hrp_lower = Vec::with_capacity(hrp.len());
-    for b in hrp.bytes() {
-        if !(33..=126).contains(&b) {
-            return Err(AddrError::EmptyOrInvalidHrp);
-        }
-        if b.is_ascii_lowercase() {
-            has_lower = true;
-        }
-        if b.is_ascii_uppercase() {
-            has_upper = true;
-        }
-        hrp_lower.push(b.to_ascii_lowercase());
+    if hrp.bytes().any(|b| !(33..=126).contains(&b)) {
+        return Err(AddrError::EmptyOrInvalidHrp);
     }
-    if has_lower && has_upper {
+    if hrp.bytes().any(|b| b.is_ascii_lowercase()) && hrp.bytes().any(|b| b.is_ascii_uppercase()) {
         return Err(AddrError::MixedCase);
     }
+    Ok(hrp.to_ascii_lowercase())
+}
+
+/// Encode `(hrp, data5)` strictly with `Bech32m` (`0x2bc830a3`), enforcing BIP-350 `<= 90` total length.
+pub fn bech32m_encode_5bit(hrp: &str, data5: &[u8]) -> Result<String, AddrError> {
+    let hrp_lower = lowercase_hrp(hrp, 83)?.into_bytes();
 
     if data5.len() > 90 - hrp_lower.len() - 7 {
         return Err(AddrError::StringTooLongOrTooShort);

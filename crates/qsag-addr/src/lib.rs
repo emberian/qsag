@@ -308,25 +308,9 @@ fn validate_commitment(version: AddressVersion, commitment: &[u8; 32]) -> Result
     Ok(())
 }
 
+/// Address HRPs are capped at 16 characters so every address stays within BIP-350's 90.
 fn normalize_hrp(hrp: &str) -> Result<String, AddrError> {
-    if hrp.is_empty() || hrp.len() > 16 {
-        return Err(AddrError::EmptyOrInvalidHrp);
-    }
-    let mut lower = false;
-    let mut upper = false;
-    let mut out = String::with_capacity(hrp.len());
-    for b in hrp.bytes() {
-        if !(33..=126).contains(&b) {
-            return Err(AddrError::EmptyOrInvalidHrp);
-        }
-        lower |= b.is_ascii_lowercase();
-        upper |= b.is_ascii_uppercase();
-        out.push(b.to_ascii_lowercase() as char);
-    }
-    if lower && upper {
-        return Err(AddrError::MixedCase);
-    }
-    Ok(out)
+    bech32m::lowercase_hrp(hrp, 16)
 }
 
 // ============================================================================
