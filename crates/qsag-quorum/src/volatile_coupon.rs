@@ -3,7 +3,8 @@
 //! Uses the existing 256-bit, 128-chain WOTS+C primitive. [`mint`] runs the
 //! dealerless binary-SPDZ chain sweep directly into locked slots and independently
 //! rerandomizes each retained state. Its Baggy adapter certifies descriptors under
-//! the existing FORS+C root, with an authenticated RAM-only Waistband option.
+//! a `FORS+C` (version 1) or `PORS+FP` (version 2) root on any
+//! [`qsag_core::baggy::BaggyEngine`], with an authenticated RAM-only Waistband option.
 //! [`compact_hop`] supplies real Compact1122 indexed one-time capability bundles.
 //!
 //! Linux private anonymous mappings are locked, excluded from core dumps, wiped on
@@ -22,11 +23,16 @@
 //! Fixed minting subsets require *every* member, irrespective of the parent t-of-n
 //! configuration. Changing subsets requires minting a different coupon.
 //!
-//! Integration boundary: certificates are ordinary BaggySig values, but the online
-//! output is a certificate-plus-coupon envelope verified by this module, not a raw
-//! BaggySig over the online message. The root MPC engine is still 2-of-3 RSS and
-//! FORS+C. Arbitrary-threshold stateless root MPC and PORS+FP remain unimplemented;
-//! arbitrary fixed coupon subsets do not imply either property for the root.
+//! The online signature is [`BaggyV2Sig`]: the coupon's public descriptor, the root's
+//! [`BaggySig`] on it, and the coupon's WOTS+C opening on the message. It has a
+//! canonical wire form ([`BaggyV2Sig::to_wire_bytes`]) and is checked by
+//! [`baggy_v2_verify`] against the root public key alone, with no state. Producing one
+//! online touches no disk. It is not a bare [`BaggySig`] over the message: a verifier
+//! of bare root signatures does not accept it, and it expires with its coupon.
+//!
+//! Thresholds: the root certificate has the threshold of the engine that signed it
+//! (2-of-3 replicated, or `t`-of-`n` on [`qsag_core::spdz_sweep::SpdzSweepEngine`]);
+//! a coupon needs every member of its fixed subset. Neither implies the other.
 
 use crate::quorum_jorts::{WOTS_CHAINS, WOTS_STEPS, chain_walk, digits_at};
 use qsag_core::baggy::{BaggyParams, BaggyPublicKey, BaggySig, baggy_verify};
@@ -589,11 +595,115 @@ impl CouponOpening {
     }
 }
 
+/// The stateless online signature: a certified coupon and its one-time opening on the
+/// message. See the module documentation.
 #[derive(Clone)]
-pub struct CouponSignature {
+pub struct BaggyV2Sig {
     pub coupon: CertifiedCoupon,
     pub counter: u32,
     pub nodes: Vec<Node>,
+}
+/// Earlier name of [`BaggyV2Sig`].
+pub type CouponSignature = BaggyV2Sig;
+
+impl BaggyV2Sig {
+    /// `be16(threshold) || be16(parties) || members (be32 each) || pk_seed || be64(leaf)
+    /// || be64(expires_at) || chain ends || be32(len) || root certificate || be32(counter)
+    /// || nodes`. The parent key is not encoded: the verifier supplies the one it trusts.
+    pub fn to_wire_bytes(&self) -> Result<Vec<u8>, CouponError> {
+        let d = &self.coupon.descriptor;
+        d.validate()?;
+        let (Ok(threshold), Ok(parties)) = (u16::try_from(d.threshold), u16::try_from(d.parties))
+        else {
+            return Err(CouponError::InvalidParameters);
+        };
+        if self.nodes.len() != WOTS_CHAINS {
+            return Err(CouponError::InvalidOpenings);
+        }
+        let certificate = self.coupon.certificate.to_wire_bytes();
+        let mut out = Vec::new();
+        out.extend_from_slice(&threshold.to_be_bytes());
+        out.extend_from_slice(&parties.to_be_bytes());
+        for member in &d.members {
+            out.extend_from_slice(&member.to_be_bytes());
+        }
+        out.extend_from_slice(&d.pk_seed);
+        out.extend_from_slice(&d.leaf.to_be_bytes());
+        out.extend_from_slice(&d.expires_at.to_be_bytes());
+        out.extend_from_slice(d.chain_ends.as_flattened());
+        out.extend_from_slice(&(certificate.len() as u32).to_be_bytes());
+        out.extend_from_slice(&certificate);
+        out.extend_from_slice(&self.counter.to_be_bytes());
+        out.extend_from_slice(self.nodes.as_flattened());
+        Ok(out)
+    }
+
+    /// Inverse of [`Self::to_wire_bytes`] for the root key `parent` under `params`. The
+    /// whole input must be used, and the root certificate is verified here: a value of
+    /// this type always carries a certificate that `parent` signed. The message is checked
+    /// by [`baggy_v2_verify`].
+    pub fn from_wire_bytes(
+        parent: &BaggyPublicKey,
+        params: &BaggyParams,
+        raw: &[u8],
+    ) -> Result<Self, CouponError> {
+        fn take<'a>(rest: &mut &'a [u8], n: usize) -> Result<&'a [u8], CouponError> {
+            let (head, tail) = rest
+                .split_at_checked(n)
+                .ok_or(CouponError::InvalidParameters)?;
+            *rest = tail;
+            Ok(head)
+        }
+        fn be<const N: usize>(bytes: &[u8]) -> Result<[u8; N], CouponError> {
+            bytes.try_into().map_err(|_| CouponError::InvalidParameters)
+        }
+        let mut rest = raw;
+        let nodes = |bytes: &[u8]| bytes.as_chunks::<32>().0.to_vec();
+        let threshold = usize::from(u16::from_be_bytes(be(take(&mut rest, 2)?)?));
+        let parties = usize::from(u16::from_be_bytes(be(take(&mut rest, 2)?)?));
+        let mut members = Vec::with_capacity(threshold);
+        for _ in 0..threshold {
+            members.push(u32::from_be_bytes(be(take(&mut rest, 4)?)?));
+        }
+        let pk_seed = be(take(&mut rest, 32)?)?;
+        let leaf = u64::from_be_bytes(be(take(&mut rest, 8)?)?);
+        let expires_at = u64::from_be_bytes(be(take(&mut rest, 8)?)?);
+        let chain_ends = nodes(take(&mut rest, 32 * WOTS_CHAINS)?);
+        let certificate_len = u32::from_be_bytes(be(take(&mut rest, 4)?)?) as usize;
+        let certificate = BaggySig::from_wire_bytes(params, take(&mut rest, certificate_len)?)
+            .ok_or(CouponError::Certificate)?;
+        let counter = u32::from_be_bytes(be(take(&mut rest, 4)?)?);
+        let opened = nodes(take(&mut rest, 32 * WOTS_CHAINS)?);
+        if !rest.is_empty() {
+            return Err(CouponError::InvalidParameters);
+        }
+        let descriptor = CouponDescriptor {
+            parent: *parent,
+            threshold,
+            parties,
+            members,
+            pk_seed,
+            leaf,
+            chain_ends,
+            expires_at,
+        };
+        Ok(Self {
+            coupon: CertifiedCoupon::verify(parent, params, descriptor, certificate)?,
+            counter,
+            nodes: opened,
+        })
+    }
+}
+
+/// Verify a [`BaggyV2Sig`] on `message` under the root key `parent`: the root certificate,
+/// the coupon's expiry, the codeword and every one-time chain. Stateless.
+pub fn baggy_v2_verify(
+    parent: &BaggyPublicKey,
+    params: &BaggyParams,
+    message: &[u8],
+    sig: &BaggyV2Sig,
+) -> bool {
+    verify(parent, params, message, sig)
 }
 /// All responses must bind the same request and contain each fixed member once.
 /// The final forward-chain check detects arbitrary corrupt response shares.

@@ -6,15 +6,18 @@
 //! The in-process orchestrator has the same trust boundary as `dealerless_staging`:
 //! a separate-host deployment still needs authenticated confidential transport.
 //!
-//! Root certification below uses the existing 2-of-3 RSS Baggy engine and its
-//! FORS+C wire format. Coupon subsets may have arbitrary 2 <= t <= n; this does
-//! not turn the root engine into an arbitrary-threshold PORS+FP implementation.
+//! Root certification is generic over [`BaggyEngine`]: the 2-of-3 replicated engine
+//! or the `t`-of-`n` [`qsag_core::spdz_sweep::SpdzSweepEngine`], under `FORS+C`
+//! (version 1) or `PORS+FP` (version 2) parameters. The root certificate carries the
+//! threshold of the engine that signed it; the coupon carries the all-of-subset rule
+//! of its own minting. Neither raises the other.
 
 use super::*;
 use crate::dealerless_staging::stage_volatile_subset_into;
-use qsag_core::baggy::{BaggyKeyBinding, MemoryFirstSigned, WaistbandCache, baggy_sign_mpc};
+use qsag_core::baggy::{
+    BaggyEngine, BaggyKeyBinding, MemoryFirstSigned, WaistbandCache, baggy_sign_mpc,
+};
 use qsag_core::preprocessing::PartyPrivateRng;
-use qsag_core::rss256::Rss256Engine;
 
 /// Public mint policy. Only these members participate; no enumeration of n-choose-t.
 pub struct MintPlan {
@@ -32,7 +35,7 @@ pub struct PendingCouponBatch {
     material: Vec<Vec<LockedBytes>>,
 }
 
-/// Process-local authenticated Waistband for the existing Baggy root signer.
+/// Process-local authenticated Waistband for the Baggy root signer (any [`BaggyEngine`]).
 /// It starts empty; it cannot import caller-supplied entries or first-signed records.
 /// On restart BOTH the cache and its MAC key disappear, so the engine recomputes
 /// roots from the long-term key. No disk state is required by this wrapper.
@@ -88,10 +91,10 @@ impl AuthenticatedWaistband {
         )
     }
 
-    pub fn sign(
+    pub fn sign<E: BaggyEngine>(
         &mut self,
         protection: &ProtectedMintProcess,
-        engine: &mut Rss256Engine,
+        engine: &mut E,
         message: &[u8],
     ) -> Result<BaggySig, CouponError> {
         protection.check()?;
@@ -240,10 +243,10 @@ impl PendingCouponBatch {
 
     /// Certify through a fresh, MAC-authenticated RAM Waistband, without a WAL.
     /// The certificate remains an ordinary BaggySig accepted by baggy_verify.
-    pub fn certify_with_waistband(
+    pub fn certify_with_waistband<E: BaggyEngine>(
         self,
         protection: &ProtectedMintProcess,
-        engine: &mut Rss256Engine,
+        engine: &mut E,
         waistband: &mut AuthenticatedWaistband,
         pools: &mut [CouponPool],
     ) -> Result<Vec<CertifiedCoupon>, CouponError> {
@@ -342,7 +345,7 @@ mod tests {
         });
         let (keys, _) =
             qsag_core::keccak_mpc::run_dealerless_rss_dkg_2of3([39; 32], 32, &mut rngs).unwrap();
-        let mut engine = Rss256Engine::new([40; 32], keys, rngs).unwrap();
+        let mut engine = qsag_core::rss256::Rss256Engine::new([40; 32], keys, rngs).unwrap();
         let params = BaggyParams::SHA3_128F;
         let (parent, binding) = qsag_core::baggy::baggy_keygen_mpc(
             &mut engine,
