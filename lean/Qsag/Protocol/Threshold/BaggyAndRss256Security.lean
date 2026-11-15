@@ -3848,3 +3848,1308 @@ theorem inhabited_wotsC256_incomparability_and_signing :
     wotsC256_sign_verify_complete suite 0x11#256 0x22#256 adrs 0x44#256 0 sig hSign⟩
 
 /-- Non-vacuity witness for Section 2 (`Rss256Engine` 1-corrupt privacy + 2-challenge `BGIN19` soundness + sticky poison). -/
+theorem inhabited_rss256_privacy_soundness_and_poison :
+    ∃ (x y : RssPlane256Share) (w : Bgin19Deg2Witness) (waveCoeffs : List Tower128)
+      (ops : List Rss256BarrierOp),
+      x.reconstruct ≠ 0#256 ∧
+      y.reconstruct ≠ 0#256 ∧
+      w.Valid ∧
+      waveCoeffs.length ≤ 2 * 2 ∧
+      (∃ c ∈ waveCoeffs, c ≠ towerZero 7) ∧
+      ratLe (finSum ((2 ^ 128) * (2 ^ 128))
+        (fun ω => if postWaveTwoChallengeAccepts waveCoeffs ω then 1 else 0), (2 ^ 128) ^ 2)
+        ((2 * 2) ^ 2, (2 ^ 128) ^ 2) ∧
+      (rss256BarrierTrace rss256BarrierStep Rss256BarrierState.init ops).2 = [0xABCD#256] ∧
+      (rss256BarrierTrace rss256BarrierStep Rss256BarrierState.init ops).1.poisoned = true := by
+  let x : RssPlane256Share := { s0 := 1#256, s1 := 2#256, s2 := 4#256 }
+  let y : RssPlane256Share := { s0 := 3#256, s1 := 5#256, s2 := 0#256 }
+  let oneSh : RssTower128Share := { s0 := towerOne 7, s1 := towerZero 7, s2 := towerZero 7 }
+  let zeroSh : RssTower128Share := { s0 := towerZero 7, s1 := towerZero 7, s2 := towerZero 7 }
+  let w : Bgin19Deg2Witness :=
+    { x0 := oneSh, y0 := oneSh, dx := oneSh, dy := oneSh, c1 := zeroSh, c2 := oneSh }
+  have hValid : w.Valid := by
+    constructor <;> simp [w, oneSh, zeroSh, RssTower128Share.reconstruct]
+  let waveCoeffs : List Tower128 := [towerOne 7, towerX 7]
+  have hDeg : waveCoeffs.length ≤ 2 * 2 := by decide
+  have hNz : ∃ c ∈ waveCoeffs, c ≠ towerZero 7 := ⟨towerOne 7, .head _, towerOne_ne_zero 7⟩
+  let ops : List Rss256BarrierOp :=
+    [.permuteInline true 0xABCD#256, .check, .openPlanes,
+     .permuteInline false 0xFFFF#256, .check, .check, .openPlanes]
+  exact ⟨x, y, w, waveCoeffs, ops, by decide, by decide, hValid, hDeg, hNz,
+    (rss256_post_wave_two_challenge_bgin19_soundness 2 waveCoeffs hDeg hNz).2, rfl, rfl⟩
+
+/-- Minimal hash oracle for the existence witness. The security statements remain
+    parameterized by the hash suite; inhabitedness must not evaluate a hash implementation. -/
+def inhabitedBaggySuite : BaggySuite256 :=
+  { toothBaggySuite 0#256 with
+    wots :=
+      { prf := fun _ _ _ _ => 0#256
+        thF := fun _ _ _ _ node => node
+        thTl := fun _ _ _ => 0#256
+        thDigest := fun _ _ _ _ => packDigits256 dToothGoodFn }
+    thNodeH := fun _ _ _ _ _ _ _ => 0#256 }
+
+/- Keep witness evaluation behind small equations. In particular, never ask `dsimp`
+   to normalize signing while its valid-digest match is still unreduced. -/
+private theorem inhabitedBaggy_pos (seed : BitVec 256) (adrs : WotsLeafAdrs)
+    (c : Fin 128) (n : Nat) :
+    wotsC256PosFrom0 inhabitedBaggySuite.wots seed adrs c 0#256 n = 0#256 := by
+  cases n with
+  | zero => rfl
+  | succ n => cases n with
+    | zero => rfl
+    | succ n => cases n <;> rfl
+
+private def inhabitedLayerSig : BaggyLayerSig256 :=
+  { ctr := 0, chains := fun _ => 0#256, auth := [0#256] }
+
+private theorem inhabitedBaggy_sign (seed secret msg : BitVec 256) (adrs : WotsLeafAdrs) :
+    wotsC256Sign inhabitedBaggySuite.wots seed secret adrs msg 0 =
+      some (fun _ : Fin 128 => 0#256) := by
+  unfold wotsC256Sign
+  change (match wotsC256DecodeValidDigest (packDigits256 dToothGoodFn) with
+    | none => none
+    | some d => some (fun c => wotsC256PosFrom0 inhabitedBaggySuite.wots seed adrs c
+        0#256 (d.digits c).val)) = some (fun _ : Fin 128 => 0#256)
+  have hDec : wotsC256DecodeValidDigest (packDigits256 dToothGoodFn) = some dToothGood :=
+    wotsC256DecodeValidDigest_pack dToothGood
+  rw [hDec]
+  simp only [inhabitedBaggy_pos]
+
+private theorem inhabitedBaggy_recover (seed node : BitVec 256) (layer : Nat) :
+    baggyLayerRecoverRoot inhabitedBaggySuite toothBaggyParams seed layer 0 0 node
+      inhabitedLayerSig = some (0#256) := by
+  change (match wotsC256DecodeValidDigest (packDigits256 dToothGoodFn) with
+    | none => none | some _ => some (0#256)) = some (0#256)
+  have hDec : wotsC256DecodeValidDigest (packDigits256 dToothGoodFn) = some dToothGood :=
+    wotsC256DecodeValidDigest_pack dToothGood
+  rw [hDec]
+
+private theorem inhabitedBaggy_fresh (sk : BaggySecretKey256) (layer : Nat) (node : BitVec 256) :
+    baggySignLayerFresh inhabitedBaggySuite toothBaggyParams sk layer 0 0 node =
+      some (inhabitedLayerSig, 0#256,
+        if 1 ≤ layer then some { layer := layer, tree := 0, kp := 0, signedNode := node, digits := dToothGood } else none) := by
+  change ((match wotsC256DecodeValidDigest (packDigits256 dToothGoodFn),
+      wotsC256Sign inhabitedBaggySuite.wots sk.pkSeed sk.skSeed (baggyLeafAdrs layer 0 0) node 0 with
+    | some d, some chains => some ({ ctr := 0, chains := chains, auth := [0#256] }, 0#256,
+        if 1 ≤ layer then some { layer := layer, tree := 0, kp := 0, signedNode := node, digits := d } else none)
+    | _, _ => none) : Option (BaggyLayerSig256 × BitVec 256 × Option StaticWotsOpeningRecord)) = _
+  have hDec : wotsC256DecodeValidDigest (packDigits256 dToothGoodFn) = some dToothGood :=
+    wotsC256DecodeValidDigest_pack dToothGood
+  rw [hDec, inhabitedBaggy_sign]
+  rfl
+
+private def inhabitedKey : BaggySecretKey256 :=
+  { pkSeed := 0#256, skSeed := 0#256, skPrf := 0#256 }
+
+private def inhabitedPk : BaggyPublicKey256 :=
+  baggyKeygen256 inhabitedBaggySuite toothBaggyParams inhabitedKey
+
+private def inhabitedCache : VerifiedWaistbandCache :=
+  { pinnedPkSeed := inhabitedPk.pkSeed
+    pinnedPkRoot := inhabitedPk.pkRoot
+    pinnedParamsDigest := inhabitedBaggySuite.paramsDigest toothBaggyParams
+    expectedSubtreeRoot := fun _ t => if t == 0 then some 0#256 else none
+    cachedSig := fun l t k => if l == 2 && t == 0 && k == 0 then some inhabitedLayerSig else none }
+
+private def inhabitedRecord : StaticWotsOpeningRecord :=
+  { layer := 1, tree := 0, kp := 0, signedNode := 0#256, digits := dToothGood }
+
+private def inhabitedGuard : DurableStaticWotsGuard := [(1, 0, 0, dToothGood)]
+
+private def inhabitedSignature (msg : BitVec 256) : BaggySig256 :=
+  { r := 0#256 ^^^ msg, msgCtr := 0, forsSig := 0#256 ^^^ msg
+    layers := [inhabitedLayerSig, inhabitedLayerSig, inhabitedLayerSig] }
+
+private theorem inhabited_path (l : Nat) : toothBaggyParams.pathAt 0 l = (0, 0) := by
+  simp [BaggyTreeParams.pathAt]
+
+private theorem inhabited_cache0 (node : BitVec 256) :
+    verifyWaistbandCanopy inhabitedBaggySuite toothBaggyParams inhabitedPk inhabitedCache 0 0 0 node = none := rfl
+
+private theorem inhabited_cache1 (node : BitVec 256) :
+    verifyWaistbandCanopy inhabitedBaggySuite toothBaggyParams inhabitedPk inhabitedCache 1 0 0 node = none := rfl
+
+private theorem inhabited_cache2 :
+    verifyWaistbandCanopy inhabitedBaggySuite toothBaggyParams inhabitedPk inhabitedCache 2 0 0 0#256 =
+      some (inhabitedLayerSig, 0#256) := by
+  change (if baggyLayerRecoverRoot inhabitedBaggySuite toothBaggyParams 0#256 2 0 0 0#256
+      inhabitedLayerSig != some 0#256 then none else some (inhabitedLayerSig, 0#256)) = _
+  rw [inhabitedBaggy_recover]
+  rfl
+
+private theorem inhabited_cachedSig0 : (inhabitedCache.cachedSig 0 0 0).isSome = false := rfl
+
+private theorem inhabited_cachedSig1 : (inhabitedCache.cachedSig 1 0 0).isSome = false := rfl
+
+private theorem inhabited_layers (node : BitVec 256) :
+    baggySignLayersVerifiedCacheAux inhabitedBaggySuite toothBaggyParams inhabitedKey inhabitedPk
+      inhabitedCache 0 0 3 node =
+      some ([inhabitedLayerSig, inhabitedLayerSig, inhabitedLayerSig], 0#256, [inhabitedRecord]) := by
+  simp only [baggySignLayersVerifiedCacheAux, Nat.reduceAdd, inhabited_path, inhabited_cache0,
+    inhabited_cache1, inhabited_cache2, inhabited_cachedSig0, inhabited_cachedSig1,
+    inhabitedBaggy_fresh]
+  rfl
+
+private theorem inhabited_verify (msg : BitVec 256) :
+    baggyVerify inhabitedBaggySuite toothBaggyParams inhabitedPk msg (inhabitedSignature msg) = true := by
+  change (match baggyWalkLayersVerify inhabitedBaggySuite toothBaggyParams 0#256 0 0
+      (0#256 ^^^ msg) [inhabitedLayerSig, inhabitedLayerSig, inhabitedLayerSig] with
+    | none => false | some root => root == 0#256) = true
+  simp only [baggyWalkLayersVerify, inhabited_path, inhabitedBaggy_recover]
+  rfl
+
+private theorem inhabited_enforce_again :
+    enforceDurableStaticOpenings inhabitedGuard [inhabitedRecord] = some inhabitedGuard := by
+  change (if dToothGood == dToothGood then some inhabitedGuard else none) = some inhabitedGuard
+  have h : (dToothGood == dToothGood) = true := decide_eq_true rfl
+  rw [ite_pos h]
+
+private theorem inhabited_sign_session (g g' : DurableStaticWotsGuard) (msg : BitVec 256)
+    (hGuard : enforceDurableStaticOpenings g [inhabitedRecord] = some g') :
+    baggySignVerifiedWaistband inhabitedBaggySuite toothBaggyParams inhabitedKey inhabitedPk
+      inhabitedCache g msg 0 = some (inhabitedSignature msg, g', [inhabitedRecord]) := by
+  change (match baggySignLayersVerifiedCacheAux inhabitedBaggySuite toothBaggyParams
+      inhabitedKey inhabitedPk inhabitedCache 0 0 3 (0#256 ^^^ msg) with
+    | none => none
+    | some (layers, root, recs) =>
+      if root != 0#256 then none else
+      match enforceDurableStaticOpenings g recs with
+      | none => none
+      | some guard =>
+        let sig : BaggySig256 := { r := 0#256 ^^^ msg, msgCtr := 0, forsSig := 0#256 ^^^ msg, layers := layers }
+        if baggyVerify inhabitedBaggySuite toothBaggyParams inhabitedPk msg sig then
+          some (sig, guard, recs) else none) = _
+  rw [inhabited_layers]
+  change (match enforceDurableStaticOpenings g [inhabitedRecord] with
+    | none => none
+    | some guard => if baggyVerify inhabitedBaggySuite toothBaggyParams inhabitedPk msg
+        (inhabitedSignature msg) then some (inhabitedSignature msg, guard, [inhabitedRecord]) else none) = _
+  rw [hGuard]
+  simp only [inhabited_verify, ↓reduceIte]
+
+/-- Non-vacuity witness for Section 3 (`VerifiedWaistbandCache` passing `verifyWaistbandCanopy` + multi-session signing). -/
+theorem inhabited_waistband_verified_multi_session :
+    ∃ (suite : BaggySuite256) (p : BaggyTreeParams) (sk : BaggySecretKey256)
+      (cache : VerifiedWaistbandCache) (msg1 msg2 : BitVec 256),
+      p.WellFormed ∧
+      WaistbandMatchesKey suite p sk cache ∧
+      (verifyWaistbandCanopy suite p (baggyKeygen256 suite p sk) cache 2 0 0
+        (baggyTrueSubtreeRoot suite p sk 1 0)).isSome = true ∧
+      ((baggyRunMultiSessionVerified suite p sk (baggyKeygen256 suite p sk) []
+        [(cache, msg1, 0), (cache, msg2, 0)]).2.1.length = 2) := by
+  refine ⟨inhabitedBaggySuite, toothBaggyParams, inhabitedKey, inhabitedCache, 1#256, 2#256,
+    ⟨by decide, by decide, by decide⟩, ?_, ?_, ?_⟩
+  · intro l t v h
+    change (if t == 0 then some 0#256 else none) = some v at h
+    split at h
+    · have hv := Option.some.inj h
+      exact hv.symm
+    · cases h
+  · change (verifyWaistbandCanopy inhabitedBaggySuite toothBaggyParams inhabitedPk
+      inhabitedCache 2 0 0 0#256).isSome = true
+    rw [inhabited_cache2]
+    rfl
+  · have hFirst := inhabited_sign_session [] inhabitedGuard 1#256 rfl
+    have hSecond := inhabited_sign_session inhabitedGuard inhabitedGuard 2#256 inhabited_enforce_again
+    change (baggyRunMultiSessionVerified inhabitedBaggySuite toothBaggyParams inhabitedKey inhabitedPk []
+      [(inhabitedCache, 1#256, 0), (inhabitedCache, 2#256, 0)]).2.1.length = 2
+    simp only [baggyRunMultiSessionVerified, hFirst, hSecond]
+    rfl
+
+/- Build-time audit: every public theorem and executable reduction in this module must
+    exist and depend only on kernel extensionality/quotient axioms. -/
+open Lean Elab Command in
+run_cmd do
+  let env ← getEnv
+  let names : Array Name := #[
+    `Qsag.wotsC256W,
+    `Qsag.wotsC256Steps,
+    `Qsag.wotsC256Chains,
+    `Qsag.wotsC256ZeroDigits,
+    `Qsag.wotsC256TargetSum,
+    `Qsag.wotsCDibitIndex,
+    `Qsag.wotsCDibitIndex_involutive,
+    `Qsag.wotsC256DigitOfDigest,
+    `Qsag.packDigitsAux,
+    `Qsag.packDigits256,
+    `Qsag.packDigits256_extract,
+    `Qsag.wotsC256DigitOfDigest_injective,
+    `Qsag.wotsCDibits128,
+    `Qsag.wotsCDibits128_injective,
+    `Qsag.wotsCDibits128_byte_shift,
+    `Qsag.wotsCDibits128_msb_sanity,
+    `Qsag.WotsC256Digits.ext,
+    `Qsag.finFuncEqAux,
+    `Qsag.wotsC256DigitSum,
+    `Qsag.wotsC256DigitSum_eq,
+    `Qsag.wotsC256DecodeValidDigest,
+    `Qsag.wotsC256DecodeValidDigest_some_digits,
+    `Qsag.wotsC256DecodeValidDigest_of_sum_ne,
+    `Qsag.wotsC256DecodeValidDigest_pack,
+    `Qsag.findStrictDropAux,
+    `Qsag.extractStrictDropIdx,
+    `Qsag.wotsC256_strict_incomparability,
+    `Qsag.wotsC256PosFrom0,
+    `Qsag.wotsC256AdvanceTo,
+    `Qsag.wotsC256CompleteTo3,
+    `Qsag.wotsC256PkLeaf,
+    `Qsag.wotsC256Sign,
+    `Qsag.wotsC256Verify,
+    `Qsag.wotsC256_sign_verify_complete,
+    `Qsag.wotsC256_one_use_euf_cma_extract,
+    `Qsag.wotsC256_one_use_euf_cma_sound,
+    `Qsag.wotsC256VerifyUnconstrained,
+    `Qsag.forgeStepOneChain,
+    `Qsag.tooth_wotsc_without_target_sum_forges,
+    `Qsag.RssPlane256Share.reconstruct,
+    `Qsag.rss256CrossTerms,
+    `Qsag.rss256AndWireCorrected,
+    `Qsag.rss256AndWireNaiveOffByOne,
+    `Qsag.rss256_and_gate_reconstructs,
+    `Qsag.RssTower128Share.reconstruct,
+    `Qsag.bgin19CrossProdShare,
+    `Qsag.Bgin19Deg2Witness.Valid,
+    `Qsag.bgin19UnmaskedCoeffShares,
+    `Qsag.packTower128Pair,
+    `Qsag.unpackTower128Pair,
+    `Qsag.rss256RealCorruptView,
+    `Qsag.rss256SimDummyInputs,
+    `Qsag.rss256SimCorruptView,
+    `Qsag.rss256_and_bgin19_privacy_equiv,
+    `Qsag.rss256_one_corrupt_perfect_view_privacy,
+    `Qsag.p0CancelNaivePads,
+    `Qsag.tooth_off_by_one_prg_map_leaks_and_wire,
+    `Qsag.Rss256RecordedGate.error,
+    `Qsag.RssPlane256Share.partyViews,
+    `Qsag.rss256_replicated_share_binding,
+    `Qsag.rss256_honest_recorded_gate_error,
+    `Qsag.rss256WeightedErrors,
+    `Qsag.rss256PivotCheck,
+    `Qsag.rss256PivotCheck_eq,
+    `Qsag.rss256_independent_gate_weight_soundness,
+    `Qsag.rss256GateErrors,
+    `Qsag.rss256Pass1Check,
+    `Qsag.rss256_polynomial_gate_weight_soundness,
+    `Qsag.rss256_recorded_fault_nonzero,
+    `Qsag.rss256_recorded_gate_polynomial_soundness,
+    `Qsag.rss256Pass1At,
+    `Qsag.rss256_folding_round_soundness,
+    `Qsag.tooth_rss256_reused_gate_weights,
+    `Qsag.postWaveTwoChallengeAccepts,
+    `Qsag.rss256_post_wave_two_challenge_bgin19_soundness,
+    `Qsag.preWaveKernelFaultPair,
+    `Qsag.preWaveTwoChallengeKernelFault,
+    `Qsag.tooth_pre_wave_challenge_kernel_bypass,
+    `Qsag.Rss256BarrierState.init,
+    `Qsag.rss256BarrierStep,
+    `Qsag.rss256BarrierMachine,
+    `Qsag.rss256StepBuggy,
+    `Qsag.rss256BarrierTrace,
+    `Qsag.rss256RecordedWaveOp,
+    `Qsag.rss256_recorded_wave_rejection_poison,
+    `Qsag.Rss256SafeInvariant,
+    `Qsag.rss256_sticky_poison_terminal_absorption,
+    `Qsag.tooth_non_sticky_check_clear_unlocks_unverified_open,
+    `Qsag.BaggyTreeParams.WellFormed,
+    `Qsag.BaggyTreeParams.coversLayer,
+    `Qsag.BaggyTreeParams.pathAt,
+    `Qsag.baggyChildTreeIdx,
+    `Qsag.baggyChildTreeIdx_pathAt,
+    `Qsag.BaggySuite256.WellGrinded,
+    `Qsag.baggyMerkleRoot,
+    `Qsag.baggyMerkleAuthPath,
+    `Qsag.baggyWalkMerkleRootFirst,
+    `Qsag.extractBaggyMerkleCollision,
+    `Qsag.baggyLeafAdrs,
+    `Qsag.baggySubtreeLeaves,
+    `Qsag.baggyTrueSubtreeRoot,
+    `Qsag.baggyKeygen256,
+    `Qsag.baggyLayerRecoverRoot,
+    `Qsag.baggyWalkLayersVerify,
+    `Qsag.baggyVerify,
+    `Qsag.baggyCanonicalStaticChildRoot,
+    `Qsag.baggyCanonicalStaticDigits,
+    `Qsag.baggySignLayerFresh,
+    `Qsag.baggySignLayersUncachedAux,
+    `Qsag.baggySignUncached,
+    `Qsag.verifyCanopyChainToTop,
+    `Qsag.verifyWaistbandCanopy,
+    `Qsag.lookupDurableDigits,
+    `Qsag.enforceDurableStaticOpenings,
+    `Qsag.baggySignLayersVerifiedCacheAux,
+    `Qsag.baggySignVerifiedWaistband,
+    `Qsag.baggyRunMultiSessionVerified,
+    `Qsag.WaistbandMatchesKey,
+    `Qsag.waistband_verified_multi_session_single_codeword,
+    `Qsag.extractStaticLayerBreakFromTransition,
+    `Qsag.walkUpperLayersBoundedExtract,
+    `Qsag.baggy_verified_waistband_upper_extract,
+    `Qsag.baggy_verified_waistband_upper_reduction,
+    `Qsag.baggySignLayersUnhardenedAux,
+    `Qsag.baggySignUnhardened,
+    `Qsag.dToothBadFn,
+    `Qsag.dToothGoodFn,
+    `Qsag.dToothRogueFn,
+    `Qsag.dToothBad,
+    `Qsag.dToothGood,
+    `Qsag.dToothRogue,
+    `Qsag.toothBaggyParams,
+    `Qsag.toothRogueRoot,
+    `Qsag.toothBaggySuite,
+    `Qsag.forgeRogueRootFromTwoTopOpenings,
+    `Qsag.tooth_corrupted_intermediate_waistband_opens_second_ancestor_codeword,
+    `Qsag.inhabited_wotsC256_incomparability_and_signing,
+    `Qsag.inhabited_rss256_privacy_soundness_and_poison,
+    `Qsag.inhabitedBaggySuite,
+    `Qsag.inhabited_waistband_verified_multi_session]
+  for name in names do
+    if (env.find? name).isNone then
+      throwError "Missing audited declaration {name}"
+    let dependencies ← Lean.collectAxioms name
+    let forbidden := dependencies.filter fun ax => ax != ``propext && ax != ``Quot.sound
+    unless forbidden.isEmpty do
+      throwError "Forbidden axioms in {name}: {forbidden}"
+  logInfo m!"Baggy/RSS constructive audit: {names.size} declarations passed"
+
+/-! ## Recorded RSS checks and degree-two product rounds
+
+Recorded gate checks and fixed-polynomial root bounds. The checks reject zero
+challenges; sampling assumptions are stated separately from deterministic acceptance.
+-/
+
+/-- Two 128-bit blocks per plane. Packing preserves all bits (unlike treating
+individual erroneous bits as independent product-proof coefficients). -/
+def rss256PackedGateErrors (gates : List Rss256RecordedGate) : List Tower128 :=
+  gates.flatMap (fun g => let p := unpackTower128Pair g.error; [p.1, p.2])
+
+/-- The final masked-product check has three coefficients and degree at most two. -/
+def rss256ProductResidual (a0 a1 b0 b1 c0 c1 c2 : Tower128) : List Tower128 :=
+  [towerAdd 7 (towerMul 7 a0 b0) c0,
+   towerAdd 7 (towerAdd 7 (towerMul 7 a0 b1) (towerMul 7 a1 b0)) c1,
+   towerAdd 7 (towerMul 7 a1 b1) c2]
+
+/-- Root count for the actual quadratic product-minus-claim coefficients, rather
+than a degree parameter attached to a list of bit errors. The polynomial is fixed
+before the challenge; the candidate domain contains more than two distinct points. -/
+theorem rss256_product_degree_two_roots
+    (a0 a1 b0 b1 c0 c1 c2 : Tower128) (domain : List Tower128)
+    (hNodup : domain.Nodup) (hDomain : 2 < domain.length)
+    (hFalse : ∃ c ∈ rss256ProductResidual a0 a1 b0 b1 c0 c1 c2, c ≠ towerZero 7) :
+    (domain.filter (fun tau => decide
+      (RoundPoly.evalCoeffs (rss256ProductResidual a0 a1 b0 b1 c0 c1 c2) tau = towerZero 7))).length ≤ 2 := by
+  have hLen : (rss256ProductResidual a0 a1 b0 b1 c0 c1 c2).length ≤ 2 + 1 := by
+    simp [rss256ProductResidual]
+  exact RoundPoly.roots_nodup_length_le 2 _ domain hNodup hLen
+    (exists_eval_nonzero_of_coeff_nonzero 2 _ domain hNodup hLen hDomain hFalse)
+
+/-- Binding between the coefficient list and the final masked-product equation. -/
+theorem rss256_product_residual_evaluation
+    (a0 a1 b0 b1 c0 c1 c2 tau : Tower128) :
+    RoundPoly.evalCoeffs (rss256ProductResidual a0 a1 b0 b1 c0 c1 c2) tau =
+      towerAdd 7
+        (towerMul 7 (towerAdd 7 a0 (towerMul 7 tau a1))
+          (towerAdd 7 b0 (towerMul 7 tau b1)))
+        (RoundPoly.evalCoeffs [c0, c1, c2] tau) := by
+  simp only [rss256ProductResidual, RoundPoly.evalCoeffs]
+  change towerAdd 7 (towerAdd 7 (towerMul 7 a0 b0) c0)
+    (towerMul 7 tau (towerAdd 7
+      (towerAdd 7 (towerAdd 7 (towerMul 7 a0 b1) (towerMul 7 a1 b0)) c1)
+      (towerMul 7 tau (towerAdd 7 (towerAdd 7 (towerMul 7 a1 b1) c2)
+        (towerMul 7 tau (towerZero 7)))))) =
+    towerAdd 7
+      (towerMul 7 (towerAdd 7 a0 (towerMul 7 tau a1))
+        (towerAdd 7 b0 (towerMul 7 tau b1)))
+      (towerAdd 7 c0
+        (towerMul 7 tau (towerAdd 7 c1
+          (towerMul 7 tau (towerAdd 7 c2 (towerMul 7 tau (towerZero 7)))))))
+  simp only [towerMul_zero, towerAdd_zero, towerMul_add_distrib, towerAdd_mul_distrib]
+  simp only [towerMul_comm, towerMul_left_comm_of_assoc 7 (towerMul_assoc 7),
+    towerAdd_assoc, towerAdd_comm, towerAdd_left_comm]
+
+/-- Check each recorded gate's left operand is the preceding gate's output.
+The output is read from those same recorded shares, never a separate output plane. -/
+def rss256GateLinks : Plane256 → List Rss256RecordedGate → Bool
+  | _, [] => true
+  | input, g :: gs => (g.x.reconstruct == input) && rss256GateLinks g.z.reconstruct gs
+
+def rss256GateOutput : Plane256 → List Rss256RecordedGate → Plane256
+  | input, [] => input
+  | _, g :: gs => rss256GateOutput g.z.reconstruct gs
+
+def rss256GateIdeal : Plane256 → List Rss256RecordedGate → Plane256
+  | input, [] => input
+  | input, g :: gs => rss256GateIdeal (input &&& g.y.reconstruct) gs
+
+structure Rss256InlineWave where
+  input : Plane256
+  gates : List Rss256RecordedGate
+
+/-- Bank-mode holder copies are compared by Horner at two fresh challenges. -/
+structure Rss256BankWave where
+  firstHolder : List Tower128
+  secondHolder : List Tower128
+
+inductive Rss256Wave where
+  | inlineWave (wave : Rss256InlineWave)
+  | bankWave (wave : Rss256BankWave)
+
+def Rss256Wave.check (w : Rss256Wave) (chi1 chi2 : Tower128) : Bool :=
+  (chi1 != towerZero 7) && (chi2 != towerZero 7) &&
+  (match w with
+  | .inlineWave w =>
+    rss256GateLinks w.input w.gates &&
+      (batchDeviationPoly (rss256PackedGateErrors w.gates) chi1 == towerZero 7) &&
+      (batchDeviationPoly (rss256PackedGateErrors w.gates) chi2 == towerZero 7)
+  | .bankWave w =>
+    decide (w.firstHolder.length = w.secondHolder.length) &&
+      (ghashPoly chi1 w.firstHolder == ghashPoly chi1 w.secondHolder) &&
+      (ghashPoly chi2 w.firstHolder == ghashPoly chi2 w.secondHolder))
+
+theorem rss256_zero_challenge_rejected (w : Rss256Wave) (a : Tower128) :
+    w.check (towerZero 7) a = false ∧ w.check a (towerZero 7) = false := by
+  cases w <;> simp [Rss256Wave.check]
+
+/-- Two independent samples from a fixed finite coin set have at most L² root
+pairs for a nonzero frozen error polynomial. This is a cardinality bound, not a
+case split on an integrity failure. -/
+theorem rss256_two_coin_root_bound (errors coins : List Tower128) (L : Nat)
+    (hn : coins.Nodup) (hl : errors.length ≤ L) (hd : L + 1 ≤ coins.length)
+    (he : ∃ d ∈ errors, d ≠ towerZero 7) :
+    (coins.filter (fun r => decide (batchDeviationPoly errors r = towerZero 7))).length *
+      (coins.filter (fun r => decide (batchDeviationPoly errors r = towerZero 7))).length ≤ L * L := by
+  have h := (bdoz_2lane_mac_soundness L errors coins hn hl hd he).1
+  exact Nat.mul_le_mul h h
+
+private theorem rss256_packed_zero_gate (g : Rss256RecordedGate)
+    (h0 : (unpackTower128Pair g.error).1 = towerZero 7)
+    (h1 : (unpackTower128Pair g.error).2 = towerZero 7) :
+    g.z.reconstruct = g.x.reconstruct &&& g.y.reconstruct := by
+  have hp := congrArg (packTower 8) (show unpackTower 8 g.error = towerZero 8 from Prod.ext h0 h1)
+  simp only [packTower_unpackTower, packTower_zero] at hp
+  exact BitVec.xor_eq_zero_iff.mp hp
+
+private theorem rss256_zero_errors_integrity (input : Plane256) (gates : List Rss256RecordedGate)
+    (hl : rss256GateLinks input gates = true)
+    (hz : ∀ e ∈ rss256PackedGateErrors gates, e = towerZero 7) :
+    rss256GateOutput input gates = rss256GateIdeal input gates := by
+  induction gates generalizing input with
+  | nil => rfl
+  | cons g gs ih =>
+    obtain ⟨hx, ht⟩ := Bool.and_eq_true_iff.mp hl
+    have h0 := hz (unpackTower128Pair g.error).1 (by simp [rss256PackedGateErrors])
+    have h1 := hz (unpackTower128Pair g.error).2 (by simp [rss256PackedGateErrors])
+    have hg := rss256_packed_zero_gate g h0 h1
+    have tail := ih g.z.reconstruct ht (fun e he => hz e (by
+      simp only [rss256PackedGateErrors, List.flatMap_cons, List.mem_append] at he ⊢
+      exact Or.inr he))
+    simp only [rss256GateOutput, rss256GateIdeal]
+    rw [tail, hg, eq_of_beq hx]
+
+private theorem rss256_nonzero_of_all_false (xs : List Tower128)
+    (h : xs.all (fun e => e == towerZero 7) = false) :
+    ∃ e ∈ xs, e ≠ towerZero 7 := by
+  induction xs with
+  | nil => cases h
+  | cons x xs ih =>
+    if hx : x = towerZero 7 then
+      have ht : xs.all (fun e => e == towerZero 7) = false := by
+        simpa only [List.all_cons, hx, beq_self_eq_true, Bool.true_and] using h
+      obtain ⟨e, he, hn⟩ := ih ht
+      exact ⟨e, List.mem_cons_of_mem x he, hn⟩
+    else exact ⟨x, List.mem_cons_self, hx⟩
+
+theorem rss256_fault_has_nonzero_errors (w : Rss256InlineWave)
+    (hl : rss256GateLinks w.input w.gates = true)
+    (hf : rss256GateOutput w.input w.gates ≠ rss256GateIdeal w.input w.gates) :
+    ∃ e ∈ rss256PackedGateErrors w.gates, e ≠ towerZero 7 := by
+  cases ha : (rss256PackedGateErrors w.gates).all (fun e => e == towerZero 7) with
+  | true =>
+    exact False.elim (hf (rss256_zero_errors_integrity w.input w.gates hl
+      (fun e he => eq_of_beq (List.all_eq_true.mp ha e he))))
+  | false =>
+    exact rss256_nonzero_of_all_false _ ha
+
+/-- Semantic output corruption forces a nonzero polynomial; for two independent
+uniform points in any listed coin set, accepting pairs are bounded by degree². -/
+theorem rss256_inline_integrity_root_bound (w : Rss256InlineWave) (coins : List Tower128)
+    (hl : rss256GateLinks w.input w.gates = true)
+    (hf : rss256GateOutput w.input w.gates ≠ rss256GateIdeal w.input w.gates)
+    (hn : coins.Nodup) (hd : (rss256PackedGateErrors w.gates).length + 1 ≤ coins.length) :
+    (coins.filter (fun r => decide (batchDeviationPoly (rss256PackedGateErrors w.gates) r = towerZero 7))).length ^ 2 ≤
+      (rss256PackedGateErrors w.gates).length ^ 2 := by
+  simpa only [Nat.pow_two] using rss256_two_coin_root_bound (rss256PackedGateErrors w.gates)
+    coins _ hn (Nat.le_refl _) hd (rss256_fault_has_nonzero_errors w hl hf)
+
+/-- **Inline Wave Semantic Fault → 2-Pass `product_proof` Barrier Soundness
+    (`rss256_inline_wave_two_pass_product_proof_sound`)**:
+    Any `w : Rss256InlineWave` with valid gate links (`rss256GateLinks w.input w.gates = true`)
+    and corrupted semantic output (`rss256GateOutput w.input w.gates ≠ rss256GateIdeal w.input w.gates`)
+    has a nonzero packed gate-error block (`rss256_fault_has_nonzero_errors`), so across both passes
+    (`ROUND1` + `ROUND2`) of `product_proof`, ANY adaptive `Rss256ProductProof.TwoPassProver foldBits`
+    accepts on at most `((B + 16 + 8 * foldBits.length) * |S|^(TENSOR_BITS + foldBits.sum + 1))^2`
+    out of `(|S|^(TENSOR_BITS + foldBits.sum + 2))^2` coin pairs! -/
+theorem rss256_inline_wave_two_pass_product_proof_sound
+    (w : Rss256InlineWave) (B : Nat) (foldBits : List Nat)
+    (batch : Rss256ProductProof.RecordedPassBatch foldBits)
+    (prover : Rss256ProductProof.TwoPassProver foldBits)
+    (S : List Tower128)
+    (hl : rss256GateLinks w.input w.gates = true)
+    (hf : rss256GateOutput w.input w.gates ≠ rss256GateIdeal w.input w.gates)
+    (hBatch : batch.gateErrorBlocks = rss256PackedGateErrors w.gates)
+    (hS : S.Nodup) (hBPos : 1 ≤ B) (hBLen : batch.gateErrorBlocks.length ≤ B)
+    (hDom : B ≤ S.length) (hArity : ∀ b ∈ foldBits, b ≤ Rss256ProductProof.FOLD_BITS) :
+    ((Rss256ProductProof.twoPassCoinSpace S foldBits).filter
+      (Rss256ProductProof.twoPassAccepts foldBits batch prover)).length ≤
+      ((B + 16 + 8 * foldBits.length) *
+        S.length ^ (Rss256ProductProof.TENSOR_BITS + foldBits.sum + 1)) ^ 2 := by
+  have hFault : ∃ e ∈ batch.gateErrorBlocks, e ≠ towerZero 7 := by
+    rw [hBatch]
+    exact rss256_fault_has_nonzero_errors w hl hf
+  exact Rss256ProductProof.rss256_two_pass_product_proof_sound
+    B foldBits batch prover S hS hBPos hBLen hDom hArity hFault
+
+/-- Semantic fault is independent of verifier acceptance. In particular zero
+challenges do not turn a false gate into a semantically clean gate. -/
+def Rss256Wave.Fault : Rss256Wave → Prop
+  | .inlineWave w => rss256GateOutput w.input w.gates ≠ rss256GateIdeal w.input w.gates
+  | .bankWave w => w.firstHolder ≠ w.secondHolder
+
+def Rss256Wave.BadChallenge (w : Rss256Wave) (chi1 chi2 : Tower128) : Prop :=
+  w.Fault ∧ w.check chi1 chi2 = true
+
+def rss256WaveBytes : Rss256Wave → List UInt8
+  | .inlineWave w =>
+    encodeMultiFrame ([0] :: be 32 w.input.toNat :: w.gates.map (fun g =>
+      encodeMultiFrame ([g.x.s0, g.x.s1, g.x.s2, g.y.s0, g.y.s1, g.y.s2,
+        g.z.s0, g.z.s1, g.z.s2].map (fun x => be 32 x.toNat))))
+  | .bankWave w => encodeMultiFrame [[1],
+      encodeMultiFrame (w.firstHolder.map (fun x => be 16 (packTower 7 x).toNat)),
+      encodeMultiFrame (w.secondHolder.map (fun x => be 16 (packTower 7 x).toNat))]
+
+def rss256Transcript (waves : List Rss256Wave) : List UInt8 :=
+  cshake256Bytes "QSAG-WAVE-TRANSCRIPT-v1".toUTF8.data.toList
+    (encodeMultiFrame (waves.map rss256WaveBytes))
+
+def rss256CoinCommit (transcript : List UInt8) (seed : Tower128) : List UInt8 :=
+  cshake256Bytes "QSAG-WAVE-CHECK-COIN-v1".toUTF8.data.toList
+    (encodeMultiFrame [transcript, be 16 (packTower 7 seed).toNat])
+
+/-- The two lanes are domain-separated XOF outputs of the frozen transcript and
+revealed contributions. Zero is rejected by the wave checker. -/
+def rss256DerivedCoin (waves : List Rss256Wave) (a b : Tower128) (lane : Nat) : Tower128 :=
+  let seed := cshake256Bytes "QSAG-WAVE-CHECK-v1".toUTF8.data.toList
+    (encodeMultiFrame [rss256Transcript waves, be 16 (packTower 7 a).toNat,
+      be 16 (packTower 7 b).toNat])
+  let bytes := cshake256Bytes "QSAG-WAVE-HORNER-v1".toUTF8.data.toList
+    (encodeMultiFrame [seed, be 8 lane])
+  unpackTower 7 (BitVec.ofNat 128 (bytes.take 16 |>.foldl (fun n x => n * 256 + x.toNat) 0))
+
+structure Rss256EngineState where
+  pending : List Rss256Wave
+  accepted : List (Rss256Wave × Tower128 × Tower128)
+  poisoned : Bool
+  coinCommits : Option (List UInt8 × List UInt8) := none
+
+def Rss256EngineState.init : Rss256EngineState := ⟨[], [], false, none⟩
+
+inductive Rss256EngineOp where
+  | permuteInline (wave : Rss256InlineWave)
+  | permuteBank (wave : Rss256BankWave)
+  | commitCoins (commit1 commit2 : List UInt8)
+  | check (seed1 seed2 : Tower128)
+  | openPlanes
+
+/-- Recorded-transcript barrier. Checks compute Horner equations internally;
+there is no validity flag and no independent caller-selected output plane.
+Both revealed coin shares and both derived Horner evaluation points must be nonzero. -/
+def rss256StepHardened (st : Rss256EngineState) (op : Rss256EngineOp) :
+    StepOutcome Rss256EngineState (List Plane256) Rss256EngineErr :=
+  if st.poisoned then .err st .enginePoisoned
+  else match op with
+  | .permuteInline w => .ok { st with pending := st.pending ++ [.inlineWave w], coinCommits := none } []
+  | .permuteBank w => .ok { st with pending := st.pending ++ [.bankWave w], coinCommits := none } []
+  | .commitCoins c1 c2 => .ok { st with coinCommits := some (c1, c2) } []
+  | .check a b =>
+    let x := rss256DerivedCoin st.pending a b 0
+    let y := rss256DerivedCoin st.pending a b 1
+    if a != towerZero 7 && b != towerZero 7 &&
+        x != towerZero 7 && y != towerZero 7 &&
+        st.coinCommits == some (rss256CoinCommit (rss256Transcript st.pending) a,
+        rss256CoinCommit (rss256Transcript st.pending) b) &&
+        st.pending.all (fun w => w.check x y) then
+      .ok { st with pending := [], coinCommits := none, accepted := st.accepted ++ st.pending.map (fun w => (w,x,y)) } []
+    else .err { st with poisoned := true, pending := [], accepted := [] } .multiplicationCheckFailed
+  | .openPlanes =>
+    if st.pending.isEmpty then
+      .ok st (st.accepted.filterMap (fun entry => match entry.1 with
+        | .inlineWave w => some (rss256GateOutput w.input w.gates)
+        | .bankWave _ => none))
+    else .err st .openBeforeCheck
+
+/-- The operational step itself rejects a zero reveal, including when no wave is pending. -/
+theorem rss256_step_zero_coin_rejected (st : Rss256EngineState) (a : Tower128)
+    (hp : st.poisoned = false) :
+    rss256StepHardened st (.check (towerZero 7) a) =
+      .err { st with poisoned := true, pending := [], accepted := [] } .multiplicationCheckFailed ∧
+    rss256StepHardened st (.check a (towerZero 7)) =
+      .err { st with poisoned := true, pending := [], accepted := [] } .multiplicationCheckFailed := by
+  simp [rss256StepHardened, hp]
+
+/-- The operational step also rejects a zero derived Horner point on either lane, even when `pending = []`. -/
+theorem rss256_step_zero_derived_coin_rejected (st : Rss256EngineState) (a b : Tower128)
+    (hp : st.poisoned = false)
+    (hz : rss256DerivedCoin st.pending a b 0 = towerZero 7 ∨
+          rss256DerivedCoin st.pending a b 1 = towerZero 7) :
+    rss256StepHardened st (.check a b) =
+      .err { st with poisoned := true, pending := [], accepted := [] } .multiplicationCheckFailed := by
+  rcases hz with h0 | h1
+  · simp [rss256StepHardened, hp, h0]
+  · simp [rss256StepHardened, hp, h1]
+
+/-- API misuse is recoverable; a cryptographic barrier failure is not. -/
+theorem rss256_premature_open_preserves_state (st : Rss256EngineState)
+    (hp : st.poisoned = false) (hu : st.pending.isEmpty = false) :
+    rss256StepHardened st .openPlanes = .err st .openBeforeCheck := by
+  simp [rss256StepHardened, hp, hu]
+
+theorem rss256_failed_horner_poisons (st : Rss256EngineState) (a b : Tower128)
+    (hp : st.poisoned = false) (hf : st.pending.all (fun w => w.check
+      (rss256DerivedCoin st.pending a b 0) (rss256DerivedCoin st.pending a b 1)) = false) :
+    rss256StepHardened st (.check a b) =
+      .err { st with poisoned := true, pending := [], accepted := [] } .multiplicationCheckFailed := by
+  simp [rss256StepHardened, hp, hf]
+
+/-- Output integrity is explicitly conditional on absence of the checker bad
+ event, rather than on a syntactic taint bit. -/
+theorem rss256_checked_inline_integrity (w : Rss256InlineWave) (a b : Tower128)
+    (ha : (Rss256Wave.inlineWave w).check a b = true)
+    (hn : ¬ (Rss256Wave.inlineWave w).BadChallenge a b) :
+    rss256GateOutput w.input w.gates = rss256GateIdeal w.input w.gates := by
+  by_cases he : rss256GateOutput w.input w.gates = rss256GateIdeal w.input w.gates
+  · exact he
+  · exact False.elim (hn ⟨he, ha⟩)
+
+/-- The packed-block batching bound is conditional on a fixed nonzero error
+polynomial. It does not claim a tensor/folding transcript refinement. -/
+theorem rss256_packed_batch_roots (gates : List Rss256RecordedGate)
+    (hn : ∃ e ∈ rss256PackedGateErrors gates, e ≠ towerZero 7) :
+    ratLe (finSum (2^128) (fun r =>
+      if batchDeviationPoly (rss256PackedGateErrors gates)
+        (unpackTower 7 (BitVec.ofFin r)) == towerZero 7 then 1 else 0), 2^128)
+      ((rss256PackedGateErrors gates).length, 2^128) :=
+  rss256_polynomial_gate_weight_soundness _ _ (Nat.le_refl _) hn
+
+/-! ## Crash-visible reservation and release
+
+The pure signature functions above are specifications. This state machine makes
+reservation write, durable sync, opening and recovery different transitions. Its
+durable storage contract is an acknowledged atomic record-batch sync; it does not
+assert a POSIX implementation theorem. Failures never roll back acknowledged
+records. The identity indexes the whole ledger, including recovery.
+-/
+structure BaggyLedgerIdentity where
+  pkSeed : BitVec 256
+  pkRoot : BitVec 256
+  paramsDigest : BitVec 256
+  deriving DecidableEq
+
+inductive BaggyRootProvenance where
+  | computed
+  | cachedSignature
+  | cachedLeaves
+  deriving DecidableEq
+
+structure BaggyPlannedOpening where
+  record : StaticWotsOpeningRecord
+  provenance : BaggyRootProvenance
+
+/-- Cached roots may only use an already durably anchored codeword. -/
+def admitBaggyPlannedOpening (guard : DurableStaticWotsGuard)
+    (plan : BaggyPlannedOpening) : Bool :=
+  let r := plan.record
+  match lookupDurableDigits guard r.layer r.tree r.kp with
+  | some d => d == r.digits
+  | none => match plan.provenance with
+    | .computed => true
+    | .cachedSignature | .cachedLeaves => false
+
+inductive BaggyReleasePhase where
+  | idle | planned | written | synced | opened | aborted
+  deriving DecidableEq
+
+structure BaggyReleaseState (identity : BaggyLedgerIdentity) where
+  durable : DurableStaticWotsGuard
+  staged : DurableStaticWotsGuard
+  plan : List BaggyPlannedOpening
+  phase : BaggyReleasePhase
+  /-- Public ghost history of releases; crash does not erase prior observations. -/
+  released : List StaticWotsOpeningRecord
+
+def BaggyReleaseState.init (identity : BaggyLedgerIdentity) : BaggyReleaseState identity :=
+  ⟨[], [], [], .idle, []⟩
+
+inductive BaggyReleaseOp where
+  | plan (openings : List BaggyPlannedOpening)
+  | write
+  | syncAck
+  | release
+  | storageFailure
+  | verificationFailure
+  | crash
+
+/-- `syncAck` is the storage contract's durable-commit event. No earlier state
+can emit an opening, and no failure event removes a committed reservation. -/
+def baggyReleaseStep {identity : BaggyLedgerIdentity}
+    (st : BaggyReleaseState identity) (op : BaggyReleaseOp) : BaggyReleaseState identity :=
+  match op with
+  | .crash => { st with staged := [], plan := [], phase := .idle }
+  | .storageFailure | .verificationFailure =>
+    { st with staged := [], plan := [], phase := .aborted }
+  | .plan ps =>
+    if (st.phase == .idle || st.phase == .opened) && ps.all (admitBaggyPlannedOpening st.durable) then
+      { st with plan := ps, phase := .planned }
+    else { st with phase := .aborted }
+  | .write =>
+    if st.phase == .planned then
+      match enforceDurableStaticOpenings st.durable (st.plan.map (·.record)) with
+      | some staged => { st with staged := staged, phase := .written }
+      | none => { st with phase := .aborted }
+    else { st with phase := .aborted }
+  | .syncAck =>
+    if st.phase == .written then { st with durable := st.staged, phase := .synced }
+    else { st with phase := .aborted }
+  | .release =>
+    if st.phase == .synced && st.plan.all (fun p =>
+        lookupDurableDigits st.durable p.record.layer p.record.tree p.record.kp == some p.record.digits) then
+      { st with released := st.released ++ st.plan.map (·.record), phase := .opened }
+    else { st with phase := .aborted }
+
+def baggyReleaseTrace {identity : BaggyLedgerIdentity} :
+    BaggyReleaseState identity → List BaggyReleaseOp → BaggyReleaseState identity
+  | st, [] => st
+  | st, op :: ops => baggyReleaseTrace (baggyReleaseStep st op) ops
+
+theorem baggy_crash_preserves_reservations {identity : BaggyLedgerIdentity}
+    (st : BaggyReleaseState identity) :
+    (baggyReleaseStep st .crash).durable = st.durable ∧
+    (baggyReleaseStep st .crash).released = st.released := ⟨rfl, rfl⟩
+
+theorem baggy_failed_verification_preserves_reservations {identity : BaggyLedgerIdentity}
+    (st : BaggyReleaseState identity) :
+    (baggyReleaseStep st .verificationFailure).durable = st.durable := by
+  unfold baggyReleaseStep
+  rfl
+
+theorem baggy_release_requires_sync {identity : BaggyLedgerIdentity}
+    (st : BaggyReleaseState identity) (h : st.phase ≠ .synced) :
+    (baggyReleaseStep st .release).released = st.released := by
+  have hb : (st.phase == .synced) = false := beq_false_of_ne h
+  simp [baggyReleaseStep, hb]
+
+/-- Every newly emitted opening is checked against an acknowledged durable entry.
+The theorem concerns the released record, not a discarded tentative reservation. -/
+theorem baggy_release_has_durable_codeword {identity : BaggyLedgerIdentity}
+    (st : BaggyReleaseState identity) (r : StaticWotsOpeningRecord)
+    (hNew : r ∈ (baggyReleaseStep st .release).released) (hOld : r ∉ st.released) :
+    lookupDurableDigits st.durable r.layer r.tree r.kp = some r.digits := by
+  unfold baggyReleaseStep at hNew
+  dsimp only at hNew
+  split at hNew
+  next hGuard =>
+    have hAll := (Bool.and_eq_true_iff.mp hGuard).2
+    rcases List.mem_append.mp hNew with ho | hn
+    · exact False.elim (hOld ho)
+    · obtain ⟨p, hp, he⟩ := List.mem_map.mp hn
+      have hv := List.all_eq_true.mp hAll p hp
+      subst r
+      exact eq_of_beq hv
+  next => exact False.elim (hOld hNew)
+
+/-- `#tooth`: a crash between write and sync loses the tentative record and
+cannot release; a crash after sync retains the codeword but still requires replanning. -/
+theorem tooth_baggy_crash_between_write_and_sync (identity : BaggyLedgerIdentity)
+    (g : DurableStaticWotsGuard) (ps : List BaggyPlannedOpening) :
+    let st : BaggyReleaseState identity := ⟨[], g, ps, .written, []⟩
+    (baggyReleaseTrace st [.crash, .release]).released = [] ∧
+    (baggyReleaseTrace st [.syncAck, .crash]).durable = g := by
+  exact ⟨rfl, rfl⟩
+
+/-- Secret chain generation consumes a durable reservation. The record's digits
+must also match the actual hash grind, preventing an arbitrary signedNode from
+borrowing a reservation for another codeword. -/
+def baggyOpenReservedChains (suite : BaggySuite256) (p : BaggyTreeParams) (sk : BaggySecretKey256)
+    (identity : BaggyLedgerIdentity) (st : BaggyReleaseState identity)
+    (r : StaticWotsOpeningRecord) : Option (Fin 128 → BitVec 256) :=
+  let adrs := baggyLeafAdrs r.layer r.tree r.kp
+  let ctr := suite.grindCounter sk.pkSeed adrs r.signedNode
+  if decide (identity.pkSeed = sk.pkSeed ∧
+      identity.pkRoot = (baggyKeygen256 suite p sk).pkRoot ∧
+      identity.paramsDigest = suite.paramsDigest p ∧
+      r ∈ st.plan.map (·.record) ∧ r.layer < p.numLayers ∧ r.kp < 2 ^ p.subtreeHeight) &&
+      (st.phase == .synced) &&
+      (lookupDurableDigits st.durable r.layer r.tree r.kp == some r.digits) &&
+      (wotsC256DecodeValidDigest (suite.wots.thDigest sk.pkSeed adrs r.signedNode ctr) == some r.digits) then
+    wotsC256Sign suite.wots sk.pkSeed sk.skSeed adrs r.signedNode ctr
+  else none
+
+/-! ## Cache modes and authenticated cache records -/
+inductive BaggyLayerCachePlan (p : BaggyTreeParams) where
+  | fresh
+  | signature (childRoot layerRoot : BitVec 256) (sig : BaggyLayerSig256)
+  | leaves (root : BitVec 256) (values : Fin (2 ^ p.subtreeHeight) → BitVec 256)
+
+/-- Invalid cache material rejects. A miss is represented only by `fresh`.
+Cached leaf sets are committed by the same Merkle root computation as fresh sets. -/
+def authenticateBaggyLayerPlan (suite : BaggySuite256) (p : BaggyTreeParams)
+    (pkSeed : BitVec 256) (layer tree kp : Nat) (plan : BaggyLayerCachePlan p) :
+    Option (Option (BitVec 256) × BaggyRootProvenance) :=
+  match plan with
+  | .fresh => some (none, .computed)
+  | .signature child root sig =>
+    if baggyLayerRecoverRoot suite p pkSeed layer tree kp child sig == some root then
+      some (some root, .cachedSignature)
+    else none
+  | .leaves root values =>
+    if baggyMerkleRoot suite pkSeed layer tree p.subtreeHeight 0 values == root then
+      some (some root, .cachedLeaves)
+    else none
+
+/-- Cache authority signs the full identity/address/root tuple. This structured
+message is deliberately not an ambiguous concatenation of variable-width fields. -/
+structure BaggyCacheMessage where
+  identity : BaggyLedgerIdentity
+  layer : Nat
+  tree : Nat
+  root : BitVec 256
+  deriving DecidableEq
+
+structure BaggyAuthenticatedCacheEntry where
+  message : BaggyCacheMessage
+  tag : BitVec 256
+
+/-- The key is captured by the enrolled MAC function, never supplied by a cache entry. -/
+def verifyBaggyCacheMac (mac : BaggyCacheMessage → BitVec 256)
+    (identity : BaggyLedgerIdentity) (e : BaggyAuthenticatedCacheEntry) : Bool :=
+  decide (e.message.identity = identity) && (e.tag == mac e.message)
+
+def BaggyCacheMacForgery (mac : BaggyCacheMessage → BitVec 256)
+    (history : List BaggyCacheMessage) (e : BaggyAuthenticatedCacheEntry) : Prop :=
+  e.tag = mac e.message ∧ e.message ∉ history
+
+/-- Successful entry verification yields an enrolled genuine root or the actual
+accepted, unsigned cache entry as a MAC-game forgery. The authenticity premise is
+on the authority's signing history, not on adversarial cache contents. -/
+theorem baggy_cache_authentic_or_forgery
+    (mac : BaggyCacheMessage → BitVec 256) (identity : BaggyLedgerIdentity)
+    (history : List BaggyCacheMessage) (genuine : Nat → Nat → BitVec 256)
+    (hHistory : ∀ m ∈ history, m.identity = identity → m.root = genuine m.layer m.tree)
+    (e : BaggyAuthenticatedCacheEntry) (h : verifyBaggyCacheMac mac identity e = true) :
+    e.message.root = genuine e.message.layer e.message.tree ∨ BaggyCacheMacForgery mac history e := by
+  obtain ⟨hi, ht⟩ := Bool.and_eq_true_iff.mp h
+  by_cases hm : e.message ∈ history
+  · exact .inl (hHistory e.message hm (of_decide_eq_true hi))
+  · exact .inr ⟨eq_of_beq ht, hm⟩
+
+/-- Accepted transcripts retain the exact coins with which they were checked. -/
+def Rss256EngineState.Checked (st : Rss256EngineState) : Prop :=
+  ∀ e ∈ st.accepted, e.1.check e.2.1 e.2.2 = true
+
+theorem rss256_recorded_step_preserves_checked (st : Rss256EngineState)
+    (op : Rss256EngineOp) (h : st.Checked) :
+    match rss256StepHardened st op with
+    | .ok next _ => next.Checked
+    | .err next _ => next.Checked := by
+  unfold rss256StepHardened
+  cases hp : st.poisoned
+  · simp only [Bool.false_eq_true, ↓reduceIte]
+    cases op with
+    | permuteInline w => exact h
+    | permuteBank w => exact h
+    | commitCoins c1 c2 => exact h
+    | openPlanes =>
+      dsimp only
+      cases hEmp : st.pending.isEmpty
+      · rw [ite_neg (by decide)]; exact h
+      · rw [ite_pos rfl]; exact h
+    | check a b =>
+      dsimp only
+      cases good : (a != towerZero 7 && b != towerZero 7 &&
+          rss256DerivedCoin st.pending a b 0 != towerZero 7 &&
+          rss256DerivedCoin st.pending a b 1 != towerZero 7 &&
+          st.coinCommits == some (rss256CoinCommit (rss256Transcript st.pending) a,
+            rss256CoinCommit (rss256Transcript st.pending) b) &&
+          st.pending.all (fun w => w.check (rss256DerivedCoin st.pending a b 0)
+            (rss256DerivedCoin st.pending a b 1)))
+      · rw [ite_neg (by decide)]
+        intro e he; cases he
+      · rw [ite_pos rfl]
+        intro e he
+        rcases List.mem_append.mp he with ho | hn
+        · exact h e ho
+        · obtain ⟨w, hw, rfl⟩ := List.mem_map.mp hn
+          exact List.all_eq_true.mp (Bool.and_eq_true_iff.mp good).2 w hw
+  · simp only [↓reduceIte]
+    exact h
+
+/-- Every emitted plane comes from the very transcript whose equations passed.
+Its semantic output is correct or that transcript is a concrete bad-challenge
+witness. This conclusion never equates verifier acceptance with semantic validity. -/
+theorem rss256_recorded_release_integrity (st next : Rss256EngineState)
+    (outputs : List Plane256) (h : st.Checked)
+    (ho : rss256StepHardened st .openPlanes = .ok next outputs)
+    (out : Plane256) (hm : out ∈ outputs) :
+    ∃ w : Rss256InlineWave, ∃ a b : Tower128,
+      out = rss256GateOutput w.input w.gates ∧
+      (out = rss256GateIdeal w.input w.gates ∨ (Rss256Wave.inlineWave w).BadChallenge a b) := by
+  unfold rss256StepHardened at ho
+  dsimp only at ho
+  cases hp : st.poisoned
+  · rw [hp] at ho
+    simp only [Bool.false_eq_true, ↓reduceIte] at ho
+    cases hEmp : st.pending.isEmpty
+    · rw [hEmp] at ho
+      simp only [Bool.false_eq_true, ↓reduceIte] at ho
+      cases ho
+    · rw [hEmp] at ho
+      simp only [↓reduceIte] at ho
+      injection ho with _ hOutputs
+      rw [← hOutputs] at hm
+      obtain ⟨entry, he, hv⟩ := List.mem_filterMap.mp hm
+      rcases entry with ⟨wave, a, b⟩
+      cases wave with
+      | bankWave w => cases hv
+      | inlineWave w =>
+        have heq : rss256GateOutput w.input w.gates = out := Option.some.inj hv
+        refine ⟨w, a, b, heq.symm, ?_⟩
+        by_cases hi : out = rss256GateIdeal w.input w.gates
+        · exact .inl hi
+        · right
+          exact ⟨fun hc => hi (heq.symm.trans hc), h _ he⟩
+  · rw [hp] at ho
+    simp only [↓reduceIte] at ho
+    cases ho
+
+/-- Multi-step execution of `rss256StepHardened`, accumulating all released `Plane256` outputs. -/
+def rss256TraceHardened : Rss256EngineState → List Rss256EngineOp → Rss256EngineState × List Plane256
+  | st, [] => (st, [])
+  | st, op :: rest =>
+    match rss256StepHardened st op with
+    | .ok next outs =>
+      let (final, tail) := rss256TraceHardened next rest
+      (final, outs ++ tail)
+    | .err next _ => rss256TraceHardened next rest
+
+/-- Across any arbitrary multi-wave trace of `rss256StepHardened` from `Rss256EngineState.init`,
+    `Checked` is preserved, `poisoned = true` is terminally absorbing, and every emitted `Plane256`
+    either equals its ideal Keccak gate evaluation or witnesses a concrete `BadChallenge`. -/
+theorem rss256_recorded_trace_integrity (ops : List Rss256EngineOp) :
+    (rss256TraceHardened Rss256EngineState.init ops).1.Checked ∧
+    (∀ out ∈ (rss256TraceHardened Rss256EngineState.init ops).2,
+      ∃ w : Rss256InlineWave, ∃ a b : Tower128,
+        out = rss256GateOutput w.input w.gates ∧
+        (out = rss256GateIdeal w.input w.gates ∨ (Rss256Wave.inlineWave w).BadChallenge a b)) := by
+  suffices hGen : ∀ (st : Rss256EngineState) (ops : List Rss256EngineOp),
+      st.Checked →
+      (rss256TraceHardened st ops).1.Checked ∧
+      (∀ out ∈ (rss256TraceHardened st ops).2,
+        ∃ w : Rss256InlineWave, ∃ a b : Tower128,
+          out = rss256GateOutput w.input w.gates ∧
+          (out = rss256GateIdeal w.input w.gates ∨ (Rss256Wave.inlineWave w).BadChallenge a b)) by
+    exact hGen Rss256EngineState.init ops (fun _ he => by cases he)
+  intro st tr hChk
+  induction tr generalizing st with
+  | nil => exact ⟨hChk, fun _ hm => by cases hm⟩
+  | cons op rest ih =>
+    have hPres := rss256_recorded_step_preserves_checked st op hChk
+    cases hStep : rss256StepHardened st op with
+    | err next errVal =>
+      rw [hStep] at hPres
+      simp only [rss256TraceHardened, hStep]
+      exact ih next hPres
+    | ok next outs =>
+      rw [hStep] at hPres
+      simp only [rss256TraceHardened, hStep]
+      have hSub := ih next hPres
+      refine ⟨hSub.1, fun out hm => ?_⟩
+      rcases List.mem_append.mp hm with hHead | hTail
+      · cases op with
+        | permuteInline w =>
+          unfold rss256StepHardened at hStep
+          cases hp : st.poisoned <;> simp [hp] at hStep
+          rcases hStep with ⟨_, rfl⟩; cases hHead
+        | permuteBank w =>
+          unfold rss256StepHardened at hStep
+          cases hp : st.poisoned <;> simp [hp] at hStep
+          rcases hStep with ⟨_, rfl⟩; cases hHead
+        | commitCoins c1 c2 =>
+          unfold rss256StepHardened at hStep
+          cases hp : st.poisoned <;> simp [hp] at hStep
+          rcases hStep with ⟨_, rfl⟩; cases hHead
+        | check a b =>
+          unfold rss256StepHardened at hStep
+          cases hp : st.poisoned
+          · rw [hp] at hStep; simp only [Bool.false_eq_true, ↓reduceIte] at hStep
+            split at hStep
+            · injection hStep with _ hOut; subst hOut; cases hHead
+            · cases hStep
+          · rw [hp] at hStep; simp at hStep
+        | openPlanes =>
+          exact rss256_recorded_release_integrity st next outs hChk hStep out hHead
+      · exact hSub.2 out hTail
+
+/-- A present invalid signature cache entry cannot fall back to fresh signing. -/
+theorem baggy_invalid_cache_entry_rejects (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (pk : BaggyPublicKey256) (cache : VerifiedWaistbandCache)
+    (leaf layer remaining : Nat) (node : BitVec 256)
+    (hInvalid : verifyWaistbandCanopy suite p pk cache layer
+      (p.pathAt leaf layer).2 (p.pathAt leaf layer).1 node = none)
+    (hPresent : (cache.cachedSig layer (p.pathAt leaf layer).2 (p.pathAt leaf layer).1).isSome = true) :
+    baggySignLayersVerifiedCacheAux suite p sk pk cache leaf layer (remaining + 1) node = none := by
+  simp only [baggySignLayersVerifiedCacheAux, hInvalid, hPresent, ↓reduceIte]
+
+/-- Convert an authenticated cached child root into a planned ancestor opening.
+The provenance tag is produced here, and Rust's `must_exist` rule is checked
+against the durable guard. Authentication failure is never treated as a miss. -/
+def planBaggyCachedChild (mac : BaggyCacheMessage → BitVec 256)
+    (suite : BaggySuite256) (p : BaggyTreeParams)
+    (identity : BaggyLedgerIdentity) (guard : DurableStaticWotsGuard)
+    (entry : BaggyAuthenticatedCacheEntry) (childKp : Nat) (childPlan : BaggyLayerCachePlan p)
+    (r : StaticWotsOpeningRecord) : Option BaggyPlannedOpening :=
+  if verifyBaggyCacheMac mac identity entry && decide
+      (1 ≤ r.layer ∧ entry.message.layer = r.layer - 1 ∧
+        entry.message.tree = baggyChildTreeIdx p r.tree r.kp ∧
+        entry.message.root = r.signedNode) then
+    match authenticateBaggyLayerPlan suite p identity.pkSeed entry.message.layer
+        entry.message.tree childKp childPlan with
+    | some (some root, provenance) =>
+      let plan : BaggyPlannedOpening := ⟨r, provenance⟩
+      if root == entry.message.root && admitBaggyPlannedOpening guard plan then some plan else none
+    | _ => none
+  else none
+
+private theorem enforceDurableStaticOpenings_preserves_lookup
+    (g g' : DurableStaticWotsGuard) (recs : List StaticWotsOpeningRecord)
+    (l t k : Nat) (d : WotsC256Digits)
+    (hEq : enforceDurableStaticOpenings g recs = some g')
+    (hLook : lookupDurableDigits g l t k = some d) :
+    lookupDurableDigits g' l t k = some d := by
+  induction recs generalizing g with
+  | nil =>
+    injection hEq with h; subst h; exact hLook
+  | cons rec rest ih =>
+    unfold enforceDurableStaticOpenings at hEq
+    cases hRec : lookupDurableDigits g rec.layer rec.tree rec.kp with
+    | some prevDigits =>
+      rw [hRec] at hEq
+      dsimp only at hEq
+      cases hSameDigits : (prevDigits == rec.digits)
+      · rw [hSameDigits] at hEq; simp at hEq
+      · rw [hSameDigits] at hEq; simp only [↓reduceIte] at hEq
+        exact ih g hEq hLook
+    | none =>
+      rw [hRec] at hEq
+      dsimp only at hEq
+      have hLook' :
+          lookupDurableDigits ((rec.layer, rec.tree, rec.kp, rec.digits) :: g) l t k = some d := by
+        unfold lookupDurableDigits
+        cases hSame : (rec.layer == l && rec.tree == t && rec.kp == k)
+        · exact hLook
+        · rcases Bool.and_eq_true_iff.mp hSame with ⟨h12, hk⟩
+          rcases Bool.and_eq_true_iff.mp h12 with ⟨hl, ht⟩
+          rw [eq_of_beq hl, eq_of_beq ht, eq_of_beq hk, hLook] at hRec
+          cases hRec
+      exact ih _ hEq hLook'
+
+/-- Multi-session invariant of `baggyReleaseStep`: staged writes preserve all existing durable
+    entries, and every released static opening record is anchored in `st.durable`. -/
+def BaggyReleaseInv {identity : BaggyLedgerIdentity} (st : BaggyReleaseState identity) : Prop :=
+  (st.phase = .written →
+    ∀ l t k d, lookupDurableDigits st.durable l t k = some d →
+      lookupDurableDigits st.staged l t k = some d) ∧
+  (∀ r ∈ st.released, lookupDurableDigits st.durable r.layer r.tree r.kp = some r.digits)
+
+private theorem baggyReleaseStep_preserves_inv {identity : BaggyLedgerIdentity}
+    (st : BaggyReleaseState identity) (op : BaggyReleaseOp) (hInv : BaggyReleaseInv st) :
+    BaggyReleaseInv (baggyReleaseStep st op) ∧
+    (∀ l t k d, lookupDurableDigits st.durable l t k = some d →
+      lookupDurableDigits (baggyReleaseStep st op).durable l t k = some d) := by
+  unfold baggyReleaseStep
+  cases op with
+  | crash =>
+    exact ⟨⟨(fun h => by cases h), hInv.2⟩, fun _ _ _ _ h => h⟩
+  | storageFailure =>
+    exact ⟨⟨(fun h => by cases h), hInv.2⟩, fun _ _ _ _ h => h⟩
+  | verificationFailure =>
+    exact ⟨⟨(fun h => by cases h), hInv.2⟩, fun _ _ _ _ h => h⟩
+  | plan ps =>
+    dsimp only
+    split
+    · exact ⟨⟨(fun h => by cases h), hInv.2⟩, fun _ _ _ _ h => h⟩
+    · exact ⟨⟨(fun h => by cases h), hInv.2⟩, fun _ _ _ _ h => h⟩
+  | write =>
+    dsimp only
+    split
+    · cases hEnf : enforceDurableStaticOpenings st.durable (st.plan.map (·.record)) with
+      | none =>
+        exact ⟨⟨(fun h => by cases h), hInv.2⟩, fun _ _ _ _ h => h⟩
+      | some staged =>
+        refine ⟨⟨(fun _ l t k d hLook =>
+          enforceDurableStaticOpenings_preserves_lookup st.durable staged _ l t k d hEnf hLook),
+          hInv.2⟩, fun _ _ _ _ h => h⟩
+    · exact ⟨⟨(fun h => by cases h), hInv.2⟩, fun _ _ _ _ h => h⟩
+  | syncAck =>
+    dsimp only
+    cases hPh : (st.phase == .written)
+    · rw [ite_neg (by decide)]
+      exact ⟨⟨(fun h => by cases h), hInv.2⟩, fun _ _ _ _ h => h⟩
+    · rw [ite_pos rfl]
+      have hWr : st.phase = .written := eq_of_beq hPh
+      refine ⟨⟨(fun h => by cases h), fun r hr => hInv.1 hWr r.layer r.tree r.kp r.digits (hInv.2 r hr)⟩,
+        fun l t k d hLook => hInv.1 hWr l t k d hLook⟩
+  | release =>
+    dsimp only
+    split
+    next hGuard =>
+      have hAll := (Bool.and_eq_true_iff.mp hGuard).2
+      refine ⟨⟨(fun h => by cases h), fun r hr => ?_⟩, fun _ _ _ _ h => h⟩
+      rcases List.mem_append.mp hr with hOld | hNew
+      · exact hInv.2 r hOld
+      · obtain ⟨p, hp, rfl⟩ := List.mem_map.mp hNew
+        exact eq_of_beq (List.all_eq_true.mp hAll p hp)
+    next =>
+      exact ⟨⟨(fun h => by cases h), hInv.2⟩, fun _ _ _ _ h => h⟩
+
+/-- **Multi-Session `Baggy` Durable Anchoring & Cross-Session Static `WOTS+C` Non-Equivocation**:
+    Across ANY arbitrary multi-session sequence `ops : List BaggyReleaseOp` (interleaving
+    `.opened` session progression, `.crash`, `.storageFailure`, and `.verificationFailure`),
+    every released static opening is durably anchored in `durable`, and NO two released openings
+    at the same static `(layer, tree, kp)` address can ever carry distinct `WotsC256Digits`. -/
+theorem baggy_multiturn_durable_and_non_equivocating (identity : BaggyLedgerIdentity)
+    (ops : List BaggyReleaseOp) :
+    let final := baggyReleaseTrace (BaggyReleaseState.init identity) ops
+    (∀ r ∈ final.released,
+      lookupDurableDigits final.durable r.layer r.tree r.kp = some r.digits) ∧
+    (∀ r₁ ∈ final.released, ∀ r₂ ∈ final.released,
+      r₁.layer = r₂.layer → r₁.tree = r₂.tree → r₁.kp = r₂.kp → r₁.digits = r₂.digits) := by
+  have hInv : BaggyReleaseInv (baggyReleaseTrace (BaggyReleaseState.init identity) ops) := by
+    suffices hGen : ∀ (st : BaggyReleaseState identity) (tr : List BaggyReleaseOp),
+        BaggyReleaseInv st → BaggyReleaseInv (baggyReleaseTrace st tr) by
+      exact hGen (BaggyReleaseState.init identity) ops ⟨(fun h => by cases h), (fun _ hr => by cases hr)⟩
+    intro st tr h0
+    induction tr generalizing st with
+    | nil => exact h0
+    | cons op rest ih =>
+      exact ih (baggyReleaseStep st op) (baggyReleaseStep_preserves_inv st op h0).1
+  refine ⟨hInv.2, fun r₁ hr₁ r₂ hr₂ hl ht hk => ?_⟩
+  have h1 := hInv.2 r₁ hr₁
+  have h2 := hInv.2 r₂ hr₂
+  rw [hl, ht, hk] at h1
+  exact Option.some.inj (h1.symm.trans h2)
+
+/-- Any released static opening in a multi-session `Baggy` trace is durably anchored, and any
+    other released opening at the same `(layer, tree, kp)` carries the identical codeword. -/
+theorem baggy_released_opening_durable_and_unique (identity : BaggyLedgerIdentity)
+    (ops : List BaggyReleaseOp) (r : StaticWotsOpeningRecord)
+    (hr : r ∈ (baggyReleaseTrace (BaggyReleaseState.init identity) ops).released) :
+    lookupDurableDigits (baggyReleaseTrace (BaggyReleaseState.init identity) ops).durable
+      r.layer r.tree r.kp = some r.digits ∧
+    ∀ r₂ ∈ (baggyReleaseTrace (BaggyReleaseState.init identity) ops).released,
+      r.layer = r₂.layer → r.tree = r₂.tree → r.kp = r₂.kp → r.digits = r₂.digits :=
+  let h := baggy_multiturn_durable_and_non_equivocating identity ops
+  ⟨h.1 r hr, fun r₂ hr₂ hl ht hk => h.2 r hr r₂ hr₂ hl ht hk⟩
+
+/-- Concrete two-session `.opened`-progression witness: session 1 completes `.plan -> .write -> .syncAck -> .release`
+    into `.opened`, then session 2 advances directly from `.opened` to release a second distinct static opening! -/
+theorem witness_baggy_two_session_opened_progression :
+    ∃ (identity : BaggyLedgerIdentity) (ops : List BaggyReleaseOp) (r : StaticWotsOpeningRecord),
+      r ∈ (baggyReleaseTrace (BaggyReleaseState.init identity) ops).released ∧
+      (baggyReleaseTrace (BaggyReleaseState.init identity) ops).phase = .opened ∧
+      (baggyReleaseTrace (BaggyReleaseState.init identity) ops).released.length = 2 := by
+  let id0 : BaggyLedgerIdentity := ⟨0#256, 0#256, 0#256⟩
+  let d0 : WotsC256Digits :=
+    { digits := fun i => if i.val < 64 then ⟨3, by decide⟩ else ⟨0, by decide⟩
+      sum_eq := by decide }
+  let r1 : StaticWotsOpeningRecord := ⟨1, 0, 0, 1#256, d0⟩
+  let r2 : StaticWotsOpeningRecord := ⟨1, 0, 1, 2#256, d0⟩
+  let ops : List BaggyReleaseOp :=
+    [.plan [⟨r1, .computed⟩], .write, .syncAck, .release,
+     .plan [⟨r2, .computed⟩], .write, .syncAck, .release]
+  have hRun :
+      baggyReleaseTrace (BaggyReleaseState.init id0) ops =
+        { durable := [(1, 0, 1, d0), (1, 0, 0, d0)]
+          staged := [(1, 0, 1, d0), (1, 0, 0, d0)]
+          plan := [⟨r2, .computed⟩]
+          phase := .opened
+          released := [r1, r2] } := by
+    simp [id0, ops, r1, r2, BaggyReleaseState.init, baggyReleaseTrace, baggyReleaseStep,
+      admitBaggyPlannedOpening, enforceDurableStaticOpenings, lookupDurableDigits]
+  refine ⟨id0, ops, r1, ?_, ?_, ?_⟩
+  · rw [hRun]; exact List.mem_cons_self
+  · rw [hRun]
+  · rw [hRun]; rfl
+
+/-- `#tooth`: once session 1 releases `r1`, any second session attempting to release a conflicting
+    codeword `r2` (`r1.digits ≠ r2.digits`) at the same `(layer, tree, kp)` is rejected before
+    durability and never enters `released`. -/
+theorem tooth_baggy_conflicting_digits_not_released
+    (identity : BaggyLedgerIdentity) (r1 r2 : StaticWotsOpeningRecord)
+    (hl : r1.layer = r2.layer) (ht : r1.tree = r2.tree) (hk : r1.kp = r2.kp)
+    (hDiff : r1.digits ≠ r2.digits) :
+    r2 ∉ (baggyReleaseTrace (BaggyReleaseState.init identity)
+      [.plan [⟨r1, .computed⟩], .write, .syncAck, .release,
+       .plan [⟨r2, .computed⟩], .write, .syncAck, .release]).released := by
+  intro hr2
+  have hr1 : r1 ∈ (baggyReleaseTrace (BaggyReleaseState.init identity)
+      [.plan [⟨r1, .computed⟩], .write, .syncAck, .release,
+       .plan [⟨r2, .computed⟩], .write, .syncAck, .release]).released := by
+    have hDiffBeq : (r1.digits == r2.digits) = false := beq_eq_false_iff_ne.mpr hDiff
+    simp [BaggyReleaseState.init, baggyReleaseTrace, baggyReleaseStep,
+      admitBaggyPlannedOpening, enforceDurableStaticOpenings, lookupDurableDigits,
+      hl, ht, hk, hDiffBeq]
+  exact hDiff ((baggy_released_opening_durable_and_unique identity _ r1 hr1).2 r2 hr2 hl ht hk)
+
+run_cmd do
+  let env ← Lean.getEnv
+  let names : Array Lean.Name := #[
+    `Qsag.rss256_product_degree_two_roots,
+    `Qsag.rss256_product_residual_evaluation,
+    `Qsag.rss256_step_zero_derived_coin_rejected,
+    `Qsag.rss256_recorded_step_preserves_checked,
+    `Qsag.rss256_recorded_release_integrity,
+    `Qsag.rss256_recorded_trace_integrity,
+    `Qsag.baggy_release_has_durable_codeword,
+    `Qsag.baggy_multiturn_durable_and_non_equivocating,
+    `Qsag.baggy_released_opening_durable_and_unique,
+    `Qsag.witness_baggy_two_session_opened_progression,
+    `Qsag.tooth_baggy_crash_between_write_and_sync,
+    `Qsag.tooth_baggy_conflicting_digits_not_released,
+    `Qsag.baggy_cache_authentic_or_forgery,
+    `Qsag.baggy_invalid_cache_entry_rejects,
+    `Qsag.context_cut_fault_extract,
+    `Qsag.tooth_context_cut_epoch_replay,
+    `Qsag.signed_slashing_attribution,
+    `Qsag.evalGeneratedDkgFrobenius_sound,
+    `Qsag.rss256_inline_wave_two_pass_product_proof_sound]
+  for name in names do
+    if (env.find? name).isNone then
+      throwError "Missing Baggy/RSS256 declaration {name}"
+    let dependencies ← Lean.collectAxioms name
+    let forbidden := dependencies.filter fun ax => ax != ``propext && ax != ``Quot.sound
+    unless forbidden.isEmpty do
+      throwError "Forbidden axioms in {name}: {forbidden}"
+
+
+/-- The adaptive error is nonzero yet passes the challenge it was chosen after. -/
+theorem tooth_pre_wave_adaptive_error_exists (chi : Tower128) :
+    ∃ errors : List Tower128,
+      (∃ e ∈ errors, e ≠ towerZero 7) ∧ batchDeviationPoly errors chi = towerZero 7 :=
+  ⟨preWaveKernelFaultPair chi, tooth_pre_wave_challenge_kernel_bypass.1 chi⟩
+
+#verify_inhabited rss256_one_corrupt_perfect_view_privacy inhabited_rss256_privacy_soundness_and_poison
+#verify_inhabited baggy_released_opening_durable_and_unique witness_baggy_two_session_opened_progression
+#tooth_pair baggy_released_opening_durable_and_unique vs tooth_baggy_conflicting_digits_not_released
+#tooth_pair rss256_polynomial_gate_weight_soundness vs tooth_pre_wave_adaptive_error_exists
+
+end Qsag
+end
