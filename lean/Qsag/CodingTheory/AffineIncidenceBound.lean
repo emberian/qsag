@@ -5,6 +5,10 @@ module
 * `Poly3.roots_on_line_card_le`: on a non-excluded line `Y = α + βX`, an explainer `Q` has at
   most `deg_Z Q` roots `P` with `Q(X, α + βX, P(X)) = 0`. This is the univariate root count
   over the domain `F[X]`, and it bounds candidates *per challenge*.
+* `Poly3.jet_hyps`, `Poly3.jet_cover`: the covering half of `[CWYZ26]` Claim 4.9. A simple
+  root `P` of `R` on a line has the jet `(α + βT₀, β, P(T₀))` at the generic point of `F(T₀)`,
+  it satisfies the hypotheses of Lemma 3.11 to every order, and its Taylor coefficients at
+  `T₀` are the reconstruction coefficients `reconCoeff` over `s^(2d-1)`.
 * `affineMcaBound_ge_card`: **every** mutual correlated agreement bound for the affine fold
   has `bad ≥ |S|` (when `-1 ∉ D`, `1 ≤ d`, `d + 2 ≤ A ≤ |D|`). The words are `f = 0`,
   `g(z) = 1/(z + 1)`: on the diagonal challenges `(β, β)` the fold `β(1 + z)/(z + 1)` is the
@@ -96,6 +100,165 @@ theorem roots_on_line_card_le (Q : Poly3 F) (α β : F) (hnv : lineSpec Q α β 
       exact hroot P hP)
   exact Nat.le_trans h (natDeg_mapHom_le _ Q)
 
+end Poly3
+
+/-! ## The jet of a root at the generic point (`[CWYZ26]` Claim 4.9, covering part) -/
+
+namespace UPoly
+
+theorem mapHom_shift2 {R S : Type} [LawfulCommRing R] [DecidableEq R] [LawfulCommRing S]
+    [DecidableEq S] (φ : RingHom R S) (p : UPoly R) :
+    (mapHom (mapHom φ)).toFun ((shift2 (R := R)).toFun p) =
+      (shift2 (R := S)).toFun ((mapHom φ).toFun p) := by
+  refine hom_ext ((mapHom (mapHom φ)).comp shift2) (shift2.comp (mapHom φ)) (fun c => ?_) ?_ p
+  · show (mapHom (mapHom φ)).toFun (eval₂ (CHom.comp CHom) (add (C X) X) (C c)) =
+      eval₂ (CHom.comp CHom) (add (C X) X) ((mapHom φ).toFun (C c))
+    rw [eval₂_C, mapHom_C, eval₂_C]
+    show (mapHom (mapHom φ)).toFun (C (C c)) = C (C (φ.toFun c))
+    rw [mapHom_C, mapHom_C]
+  · show (mapHom (mapHom φ)).toFun (eval₂ (CHom.comp CHom) (add (C X) X) X) =
+      eval₂ (CHom.comp CHom) (add (C X) X) ((mapHom φ).toFun X)
+    rw [eval₂_X, mapHom_X, eval₂_X, RingHom.map_add, mapHom_C, mapHom_X, mapHom_X]
+
+/-- Hasse derivatives commute with base change of the coefficients. -/
+theorem mapHom_hasse {R S : Type} [LawfulCommRing R] [DecidableEq R] [LawfulCommRing S]
+    [DecidableEq S] (φ : RingHom R S) (k : Nat) (p : UPoly R) :
+    (mapHom φ).toFun (hasse k p) = hasse k ((mapHom φ).toFun p) := by
+  rw [hasse_eq_coeff, hasse_eq_coeff, ← mapHom_shift2, coeffAt_mapHom]
+
+end UPoly
+
+namespace Poly3
+section Generic
+variable {F : Type} [LawfulField F] [DecidableEq F]
+open UPoly
+
+/-- Scalars into `F(T₀)`. -/
+def scalK : RingHom F (RatFunc F) := (Frac.of (D := UPoly F)).comp CHom
+
+/-- The generic point `T₀ ∈ F(T₀)`. -/
+def genPt : RatFunc F := (Frac.of (D := UPoly F)).toFun X
+
+/-- Base change `F[X][Y][Z] → F(T₀)[X][Y][Z]`. -/
+def baseK : RingHom (Poly3 F) (Poly3 (RatFunc F)) := mapHom (mapHom (mapHom scalK))
+
+/-- The root series of `P` at the generic point: `P(T₀ + W) - P(T₀)`. -/
+def genSeries (P : UPoly F) : UPoly (RatFunc F) :=
+  sub ((taylorShift genPt).toFun ((mapHom scalK).toFun P)) (C ((Frac.of (D := UPoly F)).toFun P))
+
+/-- Evaluating a polynomial at the generic point is the embedding `F[X] → F(T₀)`. -/
+theorem eval_gen (c : UPoly F) :
+    ((mapHom (scalK (F := F))).toFun c).eval genPt = (Frac.of (D := UPoly F)).toFun c := by
+  show eval₂ (RingHom.id _) genPt ((mapHom scalK).toFun c) = _
+  rw [eval₂_mapHom]
+  have h := hom_eval₂ (Frac.of (D := UPoly F)) CHom X c
+  have e : eval₂ (CHom (R := F)) X c = c := evalCoeffs_C_X c
+  rw [e] at h
+  exact (eval₂_congr _ _ (fun _ => rfl) _ c).trans h.symm
+
+theorem eval₂_gen (y₀ : UPoly F) (q : UPoly (UPoly F)) :
+    eval₂ (evalHom genPt) ((Frac.of (D := UPoly F)).toFun y₀) ((mapHom (mapHom scalK)).toFun q) =
+      (Frac.of (D := UPoly F)).toFun (q.eval y₀) := by
+  rw [eval₂_mapHom]
+  show _ = (Frac.of (D := UPoly F)).toFun (eval₂ (RingHom.id _) y₀ q)
+  rw [hom_eval₂]
+  exact eval₂_congr _ _ (fun c => eval_gen c) _ q
+
+theorem eval3_gen (R : Poly3 F) (y₀ P : UPoly F) :
+    eval3 (baseK.toFun R) genPt ((Frac.of (D := UPoly F)).toFun y₀)
+      ((Frac.of (D := UPoly F)).toFun P) =
+      (Frac.of (D := UPoly F)).toFun (eval₂ (evalHom y₀) P R) := by
+  show eval₂ (eval₂Hom (evalHom genPt) ((Frac.of (D := UPoly F)).toFun y₀))
+    ((Frac.of (D := UPoly F)).toFun P) ((mapHom (mapHom (mapHom scalK))).toFun R) = _
+  rw [eval₂_mapHom, hom_eval₂]
+  exact eval₂_congr _ _ (fun q => eval₂_gen y₀ q) _ R
+
+theorem jet_gen (α β : F) (q : UPoly (UPoly F)) :
+    (jetHom genPt ((Frac.of (D := UPoly F)).toFun (line α β)) (scalK.toFun β)).toFun
+      ((mapHom (mapHom scalK)).toFun q) =
+      (taylorShift genPt).toFun ((mapHom scalK).toFun (q.eval (line α β))) := by
+  have e1 : line α β = add (C α) (mul X (C β)) := ofList_cons α [β]
+  have hL : (taylorShift genPt).toFun ((mapHom (scalK (F := F))).toFun (line α β)) =
+      add (C (scalK.toFun α)) (mul (add (C genPt) X) (C (scalK.toFun β))) := by
+    rw [e1, RingHom.map_add, RingHom.map_mul, mapHom_C, mapHom_C, mapHom_X, RingHom.map_add,
+      RingHom.map_mul, taylorShift_C, taylorShift_C, taylorShift_X]
+  have hR : (C ((Frac.of (D := UPoly F)).toFun (line α β)) : UPoly (RatFunc F)) =
+      add (C (scalK.toFun α)) (mul (C genPt) (C (scalK.toFun β))) := by
+    rw [e1, RingHom.map_add, RingHom.map_mul]
+    exact ((CHom (R := RatFunc F)).map_add _ _).trans
+      (congrArg (add _) ((CHom (R := RatFunc F)).map_mul _ _))
+  have hline : (taylorShift genPt).toFun ((mapHom (scalK (F := F))).toFun (line α β)) =
+      add (C ((Frac.of (D := UPoly F)).toFun (line α β))) (mul (C (scalK.toFun β)) X) := by
+    rw [hL, hR]; constructive_ring
+  show eval₂ (taylorShift genPt) _ ((mapHom (mapHom scalK)).toFun q) =
+    (taylorShift genPt).toFun ((mapHom scalK).toFun (eval₂ (RingHom.id _) (line α β) q))
+  rw [eval₂_mapHom, hom_eval₂, hom_eval₂, hline]
+  exact eval₂_congr _ _ (fun _ => rfl) _ q
+
+/-- The hypotheses of `henselNum_spec` hold for every simple root on a line, at the generic
+    point of `F(T₀)`: the jet is `(y, v, z) = (α + βT₀, β, P(T₀))` and the series is
+    `P(T₀ + W) - P(T₀)`, to every order. -/
+theorem jet_hyps (R : Poly3 F) (α β : F) (P : UPoly F) (hroot : evalAffineLine R α β P = zero)
+    (hsep : evalAffineLine (hasseZ 1 R) α β P ≠ zero) :
+    (genSeries P).eval zero = zero ∧
+    eval3 (baseK.toFun R) genPt ((Frac.of (D := UPoly F)).toFun (line α β))
+      ((Frac.of (D := UPoly F)).toFun P) = zero ∧
+    eval3 (hasseZ 1 (baseK.toFun R)) genPt ((Frac.of (D := UPoly F)).toFun (line α β))
+      ((Frac.of (D := UPoly F)).toFun P) =
+        (Frac.of (D := UPoly F)).toFun (evalAffineLine (hasseZ 1 R) α β P) ∧
+    (Frac.of (D := UPoly F)).toFun (evalAffineLine (hasseZ 1 R) α β P) ≠ zero ∧
+    eval₂ (jetHom genPt ((Frac.of (D := UPoly F)).toFun (line α β)) (scalK.toFun β))
+      (add (C ((Frac.of (D := UPoly F)).toFun P)) (genSeries P)) (baseK.toFun R) = zero := by
+  refine ⟨?_, ?_, ?_, ?_, ?_⟩
+  · show (evalHom zero).toFun (sub ((taylorShift genPt).toFun ((mapHom scalK).toFun P))
+      (C ((Frac.of (D := UPoly F)).toFun P))) = zero
+    rw [RingHom.map_sub, evalHom_apply, evalHom_apply, eval_taylorShift, LawfulCommRing.add_zero,
+      eval_gen, eval_C, LawfulCommRing.sub_self]
+  · rw [eval3_gen]
+    show (Frac.of (D := UPoly F)).toFun (evalAffineLine R α β P) = zero
+    rw [hroot, RingHom.map_zero]
+  · have e : hasseZ 1 (baseK.toFun R) = baseK.toFun (hasseZ 1 R) :=
+      (mapHom_hasse (mapHom (mapHom (scalK (F := F)))) 1 R).symm
+    rw [e, eval3_gen]; rfl
+  · exact fun e => hsep (Frac.of_injective (e.trans (Frac.of (D := UPoly F)).map_zero.symm))
+  · have hadd : add (C ((Frac.of (D := UPoly F)).toFun P)) (genSeries P) =
+        (taylorShift genPt).toFun ((mapHom scalK).toFun P) := by
+      show add _ (sub _ _) = _
+      constructive_ring
+    rw [hadd]
+    show eval₂ _ _ ((mapHom (mapHom (mapHom scalK))).toFun R) = zero
+    rw [eval₂_mapHom]
+    have h := hom_eval₂ ((taylorShift genPt).comp (mapHom (scalK (F := F))))
+      (evalHom (line α β)) P R
+    have h0 : eval₂ (evalHom (line α β)) P R = zero := hroot
+    rw [h0, RingHom.map_zero] at h
+    exact (eval₂_congr _ _ (fun q => jet_gen α β q) _ R).trans h.symm
+
+/-- **`[CWYZ26]` Claim 4.9, covering part.** Let `P` be a simple root of `R` on the line
+    `Y = α + βX`. At the jet `(y, v, z) = (α + βT₀, β, P(T₀)) ∈ F(T₀)³`, the cleared
+    reconstruction coefficients evaluate to `s^(2d-1)` times the Taylor coefficients of `P` at
+    `T₀`, for `j ≤ d`, where `s = ∂_Z R(T₀, y, z) ≠ 0`. So the triple `(α, β, P)` is the image
+    of its jet under a map with numerators of degree at most `2·d·h` (`deg_reconCoeff_le`) on
+    the surface `R(T₀, Y, Z) = 0`. -/
+theorem jet_cover (R : Poly3 F) (α β : F) (P : UPoly F) (d : Nat) (hd : 1 ≤ d)
+    (hroot : evalAffineLine R α β P = zero)
+    (hsep : evalAffineLine (hasseZ 1 R) α β P ≠ zero) (j : Nat) (hj : j ≤ d) :
+    (ptHom ((Frac.of (D := UPoly F)).toFun (line α β)) (scalK.toFun β)
+      ((Frac.of (D := UPoly F)).toFun P)).toFun (reconCoeff (baseK.toFun R) genPt d j) =
+      mul (CRing.npow ((Frac.of (D := UPoly F)).toFun (evalAffineLine (hasseZ 1 R) α β P))
+        (2 * d - 1))
+        (coeffAt ((taylorShift genPt).toFun ((mapHom scalK).toFun P)).coeffs j) := by
+  obtain ⟨h1, h2, h3, h4, h5⟩ := jet_hyps R α β P hroot hsep
+  have key := reconCoeff_spec (baseK.toFun R) genPt _ (scalK.toFun β) _ (genSeries P) d hd h1 h2
+    (by rw [h3]; exact h4) (fun k _ => by rw [h5, coeffs_zero, coeffAt_nil]) j hj
+  have hadd : add (C ((Frac.of (D := UPoly F)).toFun P)) (genSeries P) =
+      (taylorShift genPt).toFun ((mapHom scalK).toFun P) := by
+    show add _ (sub _ _) = _
+    constructive_ring
+  rw [h3, hadd] at key
+  exact key
+
+end Generic
 end Poly3
 
 /-! ## Every bound is at least the size of the challenge set -/
@@ -193,9 +356,9 @@ theorem poleWords_accept (D S : List F) (d A : Nat) (hneg : neg one ∉ D) (hAD 
 /-- **Necessity of the field-size term.** Any mutual correlated agreement bound for the
     affine fold on a domain avoiding `-1` has at least `|S|` exceptional challenges: the
     diagonal `(β, β)`, `β ∈ S`. -/
-theorem affineMcaBound_ge_card (D S : List F) (d A bad : Nat) (hD : D.Nodup) (hS : S.Nodup)
-    (hneg : neg one ∉ D) (hd : 1 ≤ d) (hA : d + 2 ≤ A) (hAD : A ≤ D.length)
-    (h : AffineMcaBound D S d A bad) : S.length ≤ bad := by
+theorem affineMcaBound_ge_card (D S : List F) (d A bad : Nat) (h : AffineMcaBound D S d A bad)
+    (hD : D.Nodup) (hS : S.Nodup) (hneg : neg one ∉ D) (hd : 1 ≤ d) (hA : d + 2 ≤ A)
+    (hAD : A ≤ D.length) : S.length ≤ bad := by
   if h0 : (prodPool S).length = 0 then
     rw [prodPool_length] at h0
     have : S.length = 0 := by
@@ -222,7 +385,7 @@ theorem affineMcaBound_ge_card (D S : List F) (d A bad : Nat) (hD : D.Nodup) (hS
 theorem affineMcaBound_without_field_term_fails (D S : List F) (d A Dg : Nat) (hD : D.Nodup)
     (hS : S.Nodup) (hneg : neg one ∉ D) (hd : 1 ≤ d) (hA : d + 2 ≤ A) (hAD : A ≤ D.length)
     (hbig : Dg ^ 2 + 2 * d * Dg < S.length) : ¬ AffineMcaBound D S d A (Dg ^ 2 + 2 * d * Dg) :=
-  fun h => Nat.not_le_of_lt hbig (affineMcaBound_ge_card D S d A _ hD hS hneg hd hA hAD h)
+  fun h => Nat.not_le_of_lt hbig (affineMcaBound_ge_card D S d A _ h hD hS hneg hd hA hAD)
 
 end LowerBound
 
@@ -240,10 +403,11 @@ def pool : List Goldilocks := [g 0, g 1]
     `2|D| + d + 1 < 3A` the Welch–Berlekamp bound `max(|S|, |D|(|D|-1)/2) = 3` is a valid
     bound, and it is indeed at least `|S| = 2`. -/
 theorem inhabited_affineMcaBound_ge_card :
-    ∃ (D S : List Goldilocks) (d A bad : Nat), D.Nodup ∧ S.Nodup ∧ neg one ∉ D ∧ 1 ≤ d ∧
-      d + 2 ≤ A ∧ A ≤ D.length ∧ AffineMcaBound D S d A bad :=
-  ⟨dom, pool, 1, 3, _, by decide, by decide, by decide, by decide, by decide, by decide,
-    affineMcaBound_welch_berlekamp dom pool 1 3 (by decide) (by decide) (by decide) (by decide)⟩
+    ∃ (D S : List Goldilocks) (d A bad : Nat), AffineMcaBound D S d A bad ∧ D.Nodup ∧
+      S.Nodup ∧ neg one ∉ D ∧ 1 ≤ d ∧ d + 2 ≤ A ∧ A ≤ D.length :=
+  ⟨dom, pool, 1, 3, _,
+    affineMcaBound_welch_berlekamp dom pool 1 3 (by decide) (by decide) (by decide) (by decide),
+    by decide, by decide, by decide, by decide, by decide, by decide⟩
 
 /-- The threshold hypothesis `d + 2 ≤ A` is needed: at `A = 1` every pair of words has
     correlated agreement `≥ 0`, so `bad = 0` is a valid bound although `|S| = 2`. -/
@@ -262,6 +426,7 @@ theorem field_independent_bound_fails_example :
 
 #verify_constructive affineMcaBound_ge_card affineMcaBound_without_field_term_fails
 #verify_constructive Poly3.roots_on_line_card_le poleWords_far poleWords_accept
+#verify_constructive Poly3.jet_cover Poly3.jet_hyps UPoly.mapHom_hasse
 #verify_constructive tooth_ge_card_needs_threshold field_independent_bound_fails_example
 #tooth_pair affineMcaBound_ge_card vs tooth_ge_card_needs_threshold
 #verify_inhabited affineMcaBound_ge_card inhabited_affineMcaBound_ge_card

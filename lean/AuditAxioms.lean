@@ -59,8 +59,12 @@ import all Qsag.UcGames
 import all Qsag.CodingTheory.PolyMv3
 import all Qsag.CodingTheory.SylvesterResultant
 import all Qsag.CodingTheory.DynamicGcdSplit
+import all Qsag.CodingTheory.HenselNumerators
 import all Qsag.CodingTheory.UniversalHenselLift
 import all Qsag.CodingTheory.TrivariateGsExplainer
+import all Qsag.CodingTheory.SimpleRootStratification
+import all Qsag.CodingTheory.AffineIncidenceBound
+import all Qsag.CodingTheory.Cwyz26AffineGap
 import all Qsag.Tactic.AssuranceKit
 import all Qsag.Tactic.ConstructiveRing
 import Lean
@@ -100,8 +104,12 @@ run_cmd do
     `Qsag.CodingTheory.PolyMv3,
     `Qsag.CodingTheory.SylvesterResultant,
     `Qsag.CodingTheory.DynamicGcdSplit,
+    `Qsag.CodingTheory.HenselNumerators,
     `Qsag.CodingTheory.UniversalHenselLift,
     `Qsag.CodingTheory.TrivariateGsExplainer,
+    `Qsag.CodingTheory.SimpleRootStratification,
+    `Qsag.CodingTheory.AffineIncidenceBound,
+    `Qsag.CodingTheory.Cwyz26AffineGap,
     `Qsag.ElfFunctionalEquiv,
     `Qsag.CorduroyAndHemAirCompleteness,
     `Qsag.ActiveMigrationZeroTest,
