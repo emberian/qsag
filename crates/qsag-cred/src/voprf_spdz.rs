@@ -167,10 +167,7 @@ impl SpdzPublic {
         Ok(Self {
             config,
             session: bytes[10..42].try_into().map_err(|_| Error::Encoding)?,
-            share_digests: bytes[42..]
-                .as_chunks::<32>()
-                .0
-                .to_vec(),
+            share_digests: bytes[42..].as_chunks::<32>().0.to_vec(),
         })
     }
 }
@@ -442,7 +439,13 @@ pub fn spdz_dkg(
         .collect())
 }
 
-fn grant_binding(key: &[u8; 32], session: &[u8; 32], counter: u64, items: usize, parties: &[usize]) -> [u8; 32] {
+fn grant_binding(
+    key: &[u8; 32],
+    session: &[u8; 32],
+    counter: u64,
+    items: usize,
+    parties: &[usize],
+) -> [u8; 32] {
     let quorum: Vec<u8> = parties.iter().map(|&p| p as u8).collect();
     hash(
         b"QSAG.TOPRF.SPDZ.GRANT.V1",
@@ -567,7 +570,8 @@ pub fn spdz_blind(
     }) {
         return Err(Error::Context);
     }
-    let weights = lagrange_weights_zero_goldilocks(&eval_points(&parties)).ok_or(Error::Encoding)?;
+    let weights =
+        lagrange_weights_zero_goldilocks(&eval_points(&parties)).ok_or(Error::Encoding)?;
     let mut masks = SecretBuffer(Vec::with_capacity(items * MASKS_PER_ITEM));
     for index in 0..items * MASKS_PER_ITEM {
         let mut opened = SecretBuffer([Goldilocks::ZERO; 3]);
@@ -749,7 +753,12 @@ impl Drop for SpdzSession {
 
 impl SpdzSession {
     fn alphas(&self) -> SecretBuffer<Vec<GoldilocksExt2>> {
-        SecretBuffer(self.vaults.iter().map(|vault| vault.mac_alpha_share).collect())
+        SecretBuffer(
+            self.vaults
+                .iter()
+                .map(|vault| vault.mac_alpha_share)
+                .collect(),
+        )
     }
 
     /// Open a batch of wires under the SPDZ MAC check.
@@ -794,6 +803,20 @@ impl SpdzSession {
         counter: u64,
         items: usize,
         entropy: &[[u8; 32]],
+    ) -> Result<(Self, Vec<SpdzGrant>), Error> {
+        let sboxes = SBOXES_PER_ITEM * items;
+        Self::begin_with_sboxes(quorum, stores, session, counter, items, entropy, sboxes)
+    }
+
+    /// [`Self::begin`] with an explicit S-box tuple budget.
+    fn begin_with_sboxes(
+        quorum: &mut [&mut SpdzServer],
+        stores: &mut [&mut dyn CounterStore],
+        session: [u8; 32],
+        counter: u64,
+        items: usize,
+        entropy: &[[u8; 32]],
+        sboxes: usize,
     ) -> Result<(Self, Vec<SpdzGrant>), Error> {
         let m = quorum.len();
         let Some(first) = quorum.first() else {
@@ -899,7 +922,7 @@ impl SpdzSession {
             sid,
             threshold,
             &this.points,
-            SBOXES_PER_ITEM * items,
+            sboxes,
             MASKS_PER_ITEM * items,
             0,
             &alpha_contribs,
@@ -936,7 +959,11 @@ impl SpdzSession {
 
     /// One layer of `x -> x^7` in a single opening round: open `y = x + r` for a
     /// fresh tuple and expand `(y - r)^7` on the authenticated powers of `r`.
-    fn sbox(&mut self, inputs: &[Vec<Wire>], pending: &mut Pending) -> Result<Vec<Vec<Wire>>, Error> {
+    fn sbox(
+        &mut self,
+        inputs: &[Vec<Wire>],
+        pending: &mut Pending,
+    ) -> Result<Vec<Vec<Wire>>, Error> {
         let m = inputs.len();
         let count = inputs[0].len();
         let alphas = self.alphas();
@@ -982,7 +1009,11 @@ impl SpdzSession {
                         mac: tuple.r_macs[k],
                     }
                     .scale(binomial[k] * powers[k]);
-                    acc = if k % 2 == 0 { acc.sub(term) } else { acc.add(term) };
+                    acc = if k % 2 == 0 {
+                        acc.sub(term)
+                    } else {
+                        acc.add(term)
+                    };
                 }
                 wires.push(acc);
             }
@@ -990,7 +1021,11 @@ impl SpdzSession {
         Ok(out.into_inner())
     }
 
-    fn permute(&mut self, states: &mut [Vec<[Wire; 12]>], pending: &mut Pending) -> Result<(), Error> {
+    fn permute(
+        &mut self,
+        states: &mut [Vec<[Wire; 12]>],
+        pending: &mut Pending,
+    ) -> Result<(), Error> {
         let alphas = self.alphas();
         for state in states.iter_mut().flatten() {
             linear(state, true);
@@ -1034,22 +1069,30 @@ impl SpdzSession {
         Ok(())
     }
 
-    /// Evaluate the client's request and return every server's reply. Nothing is
-    /// returned unless every opening of the session passed its MAC check.
-    pub fn evaluate(mut self, request: &SpdzRequest) -> Result<Vec<SpdzOutput>, Error> {
+    /// Whether `request` is the one this session's grants were issued for.
+    fn check_request(&self, request: &SpdzRequest) -> Result<(), Error> {
         let context = &request.context;
-        if !ct_eq_bytes(context.key(), &self.key_commitment)
-            || context.session() != &self.session
-            || context.counter() != self.counter
-            || context.items() != self.items
-            || request.differences.len() != self.items
-            || !ct_eq_bytes(
+        if ct_eq_bytes(context.key(), &self.key_commitment)
+            && context.session() == &self.session
+            && context.counter() == self.counter
+            && context.items() == self.items
+            && request.differences.len() == self.items
+            && ct_eq_bytes(
                 context.request(),
                 &request_digest(&self.binding, &request.differences),
             )
         {
-            return Err(Error::Context);
+            Ok(())
+        } else {
+            Err(Error::Context)
         }
+    }
+
+    /// Evaluate the client's request and return every server's reply. Nothing is
+    /// returned unless every opening of the session passed its MAC check.
+    pub fn evaluate(mut self, request: &SpdzRequest) -> Result<Vec<SpdzOutput>, Error> {
+        self.check_request(request)?;
+        let context = &request.context;
         let m = self.parties.len();
         let alphas = self.alphas();
         let mut differences = Vec::with_capacity(self.items);
@@ -1074,7 +1117,9 @@ impl SpdzSession {
                 .map(|party| {
                     (0..self.items)
                         .flat_map(|item| (0..LANES).map(move |lane| (item, lane)))
-                        .map(|(item, lane)| input(party, item, lane, 0).sub(input(party, item, lane, 1)))
+                        .map(|(item, lane)| {
+                            input(party, item, lane, 0).sub(input(party, item, lane, 1))
+                        })
                         .collect()
                 })
                 .collect(),
@@ -1120,7 +1165,10 @@ impl SpdzSession {
             (0..m)
                 .map(|party| {
                     (0..self.items)
-                        .flat_map(|item| (0..LANES).flat_map(move |lane| (0..2).map(move |copy| (item, lane, copy))))
+                        .flat_map(|item| {
+                            (0..LANES)
+                                .flat_map(move |lane| (0..2).map(move |copy| (item, lane, copy)))
+                        })
                         .map(|(item, lane, copy)| {
                             states[party][item][lane]
                                 .add(masks[party][mask_index(item, true, lane, copy)])
@@ -1196,8 +1244,10 @@ mod tests {
         tag: u8,
     ) -> Result<(SpdzSession, Vec<SpdzGrant>), Error> {
         let seeds = entropy(quorum.len(), tag);
-        let mut stores: Vec<&mut dyn CounterStore> =
-            stores.iter_mut().map(|s| s as &mut dyn CounterStore).collect();
+        let mut stores: Vec<&mut dyn CounterStore> = stores
+            .iter_mut()
+            .map(|s| s as &mut dyn CounterStore)
+            .collect();
         SpdzSession::begin(quorum, &mut stores, [9; 32], counter, items, &seeds)
     }
 
@@ -1301,7 +1351,10 @@ mod tests {
         let mut altered = outputs.clone();
         altered[2].masked[0][1][0] ^= 1;
         let (probe, _) = spdz_blind(&public, &inputs, [9; 32], 1, &grants).unwrap();
-        assert_eq!(probe.finalize(&altered).unwrap_err(), Error::InconsistentShares);
+        assert_eq!(
+            probe.finalize(&altered).unwrap_err(),
+            Error::InconsistentShares
+        );
         let (probe, _) = spdz_blind(&public, &inputs, [9; 32], 1, &grants).unwrap();
         assert_eq!(
             probe.finalize(&outputs[..2]).unwrap_err(),
@@ -1355,14 +1408,37 @@ mod tests {
         session.key[1][0].val += Goldilocks::ONE;
         assert_eq!(session.evaluate(&request).unwrap_err(), Error::MacCheck);
 
-        // A request whose masked input was altered in transit does not bind.
+        // The input checks precede the circuit, so a session without S-box tuples
+        // reaches them.
         let (session, grants) = {
             let (a, rest) = servers.split_at_mut(1);
             let mut quorum = [&mut a[0], &mut rest[1]];
-            begin(&mut quorum, &mut stores, 1, 1, 0x33).unwrap()
+            let seeds = entropy(2, 0x33);
+            let mut stores: Vec<&mut dyn CounterStore> = stores
+                .iter_mut()
+                .map(|s| s as &mut dyn CounterStore)
+                .collect();
+            SpdzSession::begin_with_sboxes(&mut quorum, &mut stores, [9; 32], 1, 1, &seeds, 0)
+                .unwrap()
         };
-        let (_, mut request) = spdz_blind(&public, &inputs, [9; 32], 1, &grants).unwrap();
-        request.differences[0][0][0] ^= 1;
-        assert_eq!(session.evaluate(&request).unwrap_err(), Error::Context);
+        let (_, honest) = spdz_blind(&public, &inputs, [9; 32], 1, &grants).unwrap();
+        // A request altered in transit is not the one the grants were issued for.
+        let mut altered = honest.clone();
+        altered.differences[0][0][0] ^= 1;
+        assert_eq!(session.check_request(&altered).unwrap_err(), Error::Context);
+        // A client that masks one limb two different ways is refused before any
+        // key-dependent gate.
+        altered.context = Context::new(
+            *honest.context.key(),
+            *honest.context.session(),
+            1,
+            1,
+            request_digest(&session.binding, &altered.differences),
+        );
+        session.check_request(&altered).unwrap();
+        assert_eq!(
+            session.evaluate(&altered).unwrap_err(),
+            Error::InconsistentShares
+        );
     }
 }

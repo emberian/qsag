@@ -79,7 +79,9 @@ pub enum Error {
     UnsupportedThreshold,
     Encoding,
     Transport,
-    BadDelivery { party: usize },
+    BadDelivery {
+        party: usize,
+    },
     InconsistentShares,
     Context,
     Counter,
