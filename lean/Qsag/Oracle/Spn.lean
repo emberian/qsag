@@ -2163,3 +2163,1089 @@ private theorem mix_det_inv (mds : ValidSpnMdsPair 7) (x : Tower128) :
   rw [← towerMul_assoc, towerMul_comm 7 (towerInv 7 _), towerMul_inv 7 _ hD, towerOne_mul]
 
 /-- The mixing layer hits `β` exactly at `spnMixInv β`. -/
+theorem spnLinearMix_eq_iff (mds : ValidSpnMdsPair 7) (σ β : Tower128 × Tower128) :
+    spnLinearMix 7 mds.mdsA mds.mdsB σ = β ↔ σ = spnMixInv mds.mdsA mds.mdsB β := by
+  constructor
+  · intro h
+    rcases σ with ⟨u, v⟩
+    subst h
+    apply Prod.ext
+    · show u = towerMul 7 (towerInv 7 (towerAdd 7 (towerOne 7) (towerMul 7 mds.mdsA mds.mdsB)))
+        (towerAdd 7 (towerAdd 7 u (towerMul 7 mds.mdsA v))
+          (towerMul 7 mds.mdsA (towerAdd 7 v (towerMul 7 mds.mdsB u))))
+      rw [mix_alg1, mix_det_inv]
+    · show v = towerMul 7 (towerInv 7 (towerAdd 7 (towerOne 7) (towerMul 7 mds.mdsA mds.mdsB)))
+        (towerAdd 7 (towerAdd 7 v (towerMul 7 mds.mdsB u))
+          (towerMul 7 mds.mdsB (towerAdd 7 u (towerMul 7 mds.mdsA v))))
+      rw [mix_alg2, mix_det_inv]
+  · intro h
+    rcases β with ⟨p, q⟩
+    subst h
+    apply Prod.ext
+    · show towerAdd 7
+          (towerMul 7 (towerInv 7 (towerAdd 7 (towerOne 7) (towerMul 7 mds.mdsA mds.mdsB)))
+            (towerAdd 7 p (towerMul 7 mds.mdsA q)))
+          (towerMul 7 mds.mdsA
+            (towerMul 7 (towerInv 7 (towerAdd 7 (towerOne 7) (towerMul 7 mds.mdsA mds.mdsB)))
+              (towerAdd 7 q (towerMul 7 mds.mdsB p)))) = p
+      rw [towerMul_left_comm_of_assoc 7 (towerMul_assoc 7) mds.mdsA, ← towerMul_add_distrib,
+        mix_alg1, mix_det_inv]
+    · show towerAdd 7
+          (towerMul 7 (towerInv 7 (towerAdd 7 (towerOne 7) (towerMul 7 mds.mdsA mds.mdsB)))
+            (towerAdd 7 q (towerMul 7 mds.mdsB p)))
+          (towerMul 7 mds.mdsB
+            (towerMul 7 (towerInv 7 (towerAdd 7 (towerOne 7) (towerMul 7 mds.mdsA mds.mdsB)))
+              (towerAdd 7 p (towerMul 7 mds.mdsA q)))) = q
+      rw [towerMul_left_comm_of_assoc 7 (towerMul_assoc 7) mds.mdsB, ← towerMul_add_distrib,
+        mix_alg2, mix_det_inv]
+
+/-- Number of constant lists of length `n` under which the committed pair ends with state
+    difference `β`. Every trail leading to `β` is counted: this is the differential. -/
+def spnFinalDiffCount (keys : List Tower128) (mdsA mdsB : Tower128) (n : Nat)
+    (s s' β : Tower128 × Tower128) : Nat :=
+  ((freshInputAssignments (rcPairs keys) n).filter fun ks =>
+    decide (pairXor (spnRunList mdsA mdsB ks s) (spnRunList mdsA mdsB ks s') = β)).length
+
+theorem spnFinalDiffCount_succ (keys : List Tower128) (mdsA mdsB : Tower128) (n : Nat)
+    (s s' β : Tower128 × Tower128) :
+    spnFinalDiffCount keys mdsA mdsB (n + 1) s s' β =
+      rcSum (fun rc => spnFinalDiffCount keys mdsA mdsB n
+        (spnRound128 mdsA mdsB rc s) (spnRound128 mdsA mdsB rc s') β) (rcPairs keys) := by
+  unfold spnFinalDiffCount
+  rw [freshInputAssignments, filter_prefixAssignments_length]
+  rfl
+
+/-- One round, exact: the differential count is a product of two lane counts at the unique
+    S-box output difference that the mixing layer sends to `β`. -/
+theorem spnFinalDiffCount_one (mds : ValidSpnMdsPair 7) (keys : List Tower128)
+    (t t' β : Tower128 × Tower128) :
+    spnFinalDiffCount keys mds.mdsA mds.mdsB 1 t t' β =
+      laneCount keys t.1 t'.1 (spnMixInv mds.mdsA mds.mdsB β).1 *
+        laneCount keys t.2 t'.2 (spnMixInv mds.mdsA mds.mdsB β).2 := by
+  rw [spnFinalDiffCount_succ, ← sboxPairDiff_count]
+  have hTerm : (fun rc => spnFinalDiffCount keys mds.mdsA mds.mdsB 0
+      (spnRound128 mds.mdsA mds.mdsB rc t) (spnRound128 mds.mdsA mds.mdsB rc t') β) =
+      fun rc => if decide (sboxPairDiff rc t t' = spnMixInv mds.mdsA mds.mdsB β) then 1 else 0 := by
+    funext rc
+    unfold spnFinalDiffCount
+    refine (filter_singleton_length _ []).trans ?_
+    show (if decide (pairXor (spnRound128 mds.mdsA mds.mdsB rc t)
+        (spnRound128 mds.mdsA mds.mdsB rc t') = β) = true then 1 else 0) = _
+    by_cases h : sboxPairDiff rc t t' = spnMixInv mds.mdsA mds.mdsB β
+    · have hβ : pairXor (spnRound128 mds.mdsA mds.mdsB rc t)
+          (spnRound128 mds.mdsA mds.mdsB rc t') = β := by
+        rw [spnRound128_diff]; exact (spnLinearMix_eq_iff mds _ _).mpr h
+      rw [ite_eq_left (decide_eq_true h), ite_eq_left (decide_eq_true hβ)]
+    · have hβ : ¬ pairXor (spnRound128 mds.mdsA mds.mdsB rc t)
+          (spnRound128 mds.mdsA mds.mdsB rc t') = β := fun hb =>
+        h ((spnLinearMix_eq_iff mds _ _).mp (by rw [← spnRound128_diff]; exact hb))
+      rw [ite_eq_right (fun hd => h (of_decide_eq_true hd)),
+        ite_eq_right (fun hd => hβ (of_decide_eq_true hd))]
+  rw [hTerm, rcSum_ite, Nat.mul_one]
+
+/-- For a committed pair `s ≠ s'` and a nonzero multiplier `c`, at most `6·N` first-round
+    constants make the second lane's S-box difference equal `c` times the first lane's. These
+    are the constants after which one lane of the next round is inactive. -/
+theorem lane_collapse_count_le (keys : List Tower128) (hNd : keys.Nodup)
+    (c : Tower128) (hc : c ≠ towerZero 7) (s s' : Tower128 × Tower128) (hNe : s ≠ s') :
+    ((rcPairs keys).filter fun rc => decide
+      (sboxLaneDiff rc.2 s.2 s'.2 = towerMul 7 c (sboxLaneDiff rc.1 s.1 s'.1))).length ≤
+      keys.length * 6 := by
+  rw [filter_rcPairs_length]
+  apply rcSum_le_const
+  intro a _
+  show laneCount keys s.2 s'.2 (towerMul 7 c (sboxLaneDiff a s.1 s'.1)) ≤ 6
+  apply laneCount_le_six keys hNd
+  by_cases h2 : s.2 = s'.2
+  · left
+    intro hZero
+    have h1 : s.1 = s'.1 := (sboxLaneDiff_eq_zero_iff a s.1 s'.1).mp
+      (((towerMul_eq_zero_iff 7 _ _).mp hZero).resolve_left hc)
+    exact hNe (Prod.ext h1 h2)
+  · exact Or.inr h2
+
+private theorem mix_snd_eq_iff (B x1 x2 y1 y2 : Tower128) :
+    towerAdd 7 x2 (towerMul 7 B x1) = towerAdd 7 y2 (towerMul 7 B y1) ↔
+      towerAdd 7 x2 y2 = towerMul 7 B (towerAdd 7 x1 y1) := by
+  rw [tadd_cross_iff, towerMul_add_distrib]
+
+/-- Second lanes agree after the round exactly on a `lane_collapse` event with `c = B`. -/
+theorem spnRound128_snd_eq_count_le (mds : ValidSpnMdsPair 7) (keys : List Tower128)
+    (hNd : keys.Nodup) (s s' : Tower128 × Tower128) (hNe : s ≠ s') :
+    ((rcPairs keys).filter fun rc => decide
+      ((spnRound128 mds.mdsA mds.mdsB rc s).2 = (spnRound128 mds.mdsA mds.mdsB rc s').2)).length ≤
+      keys.length * 6 := by
+  refine Nat.le_trans (Nat.le_of_eq ?_)
+    (lane_collapse_count_le keys hNd mds.mdsB mds.hB_ne_zero s s' hNe)
+  apply congrArg List.length
+  apply List.filter_congr
+  intro rc _
+  exact decide_eq_decide.mpr (mix_snd_eq_iff mds.mdsB _ _ _ _)
+
+/-- First lanes agree after the round exactly on a `lane_collapse` event with `c = A⁻¹`. -/
+theorem spnRound128_fst_eq_count_le (mds : ValidSpnMdsPair 7) (keys : List Tower128)
+    (hNd : keys.Nodup) (s s' : Tower128 × Tower128) (hNe : s ≠ s') :
+    ((rcPairs keys).filter fun rc => decide
+      ((spnRound128 mds.mdsA mds.mdsB rc s).1 = (spnRound128 mds.mdsA mds.mdsB rc s').1)).length ≤
+      keys.length * 6 := by
+  have hInv : towerMul 7 mds.mdsA (towerInv 7 mds.mdsA) = towerOne 7 :=
+    towerMul_inv 7 _ mds.hA_ne_zero
+  have hInvNe : towerInv 7 mds.mdsA ≠ towerZero 7 := fun h0 => by
+    rw [h0, towerMul_zero] at hInv
+    exact towerOne128_ne_zero hInv.symm
+  refine Nat.le_trans (Nat.le_of_eq ?_)
+    (lane_collapse_count_le keys hNd (towerInv 7 mds.mdsA) hInvNe s s' hNe)
+  apply congrArg List.length
+  apply List.filter_congr
+  intro rc _
+  apply decide_eq_decide.mpr
+  show towerAdd 7 _ (towerMul 7 mds.mdsA _) = towerAdd 7 _ (towerMul 7 mds.mdsA _) ↔ _
+  rw [tadd_cross_iff, ← towerMul_add_distrib]
+  constructor
+  · intro h
+    show sboxLaneDiff rc.2 s.2 s'.2 = _
+    have h2 := congrArg (towerMul 7 (towerInv 7 mds.mdsA)) h
+    rw [← towerMul_assoc, towerMul_comm 7 (towerInv 7 mds.mdsA) mds.mdsA, hInv,
+      towerOne_mul] at h2
+    exact h2.symm
+  · intro h
+    have h2 : sboxLaneDiff rc.2 s.2 s'.2 =
+        towerMul 7 (towerInv 7 mds.mdsA) (sboxLaneDiff rc.1 s.1 s'.1) := h
+    show sboxLaneDiff rc.1 s.1 s'.1 = towerMul 7 mds.mdsA (sboxLaneDiff rc.2 s.2 s'.2)
+    rw [h2, ← towerMul_assoc, hInv, towerOne_mul]
+
+/-- **Two rounds, committed differential.** For a committed pair `s ≠ s'` and any target
+    difference `β`, at most `36·N²` of the `N⁴` two-round constant lists produce `β`: the
+    probability of a differential, with every trail counted, is at most `(6/N)²`. The four
+    cases are the activity pattern of the last S-box layer's required output difference. -/
+theorem spn_two_round_differential_count_le (mds : ValidSpnMdsPair 7) (keys : List Tower128)
+    (hNd : keys.Nodup) (s s' : Tower128 × Tower128) (hNe : s ≠ s') (β : Tower128 × Tower128) :
+    spnFinalDiffCount keys mds.mdsA mds.mdsB 2 s s' β ≤ 36 * (keys.length * keys.length) := by
+  rw [spnFinalDiffCount_succ]
+  simp only [spnFinalDiffCount_one]
+  generalize spnMixInv mds.mdsA mds.mdsB β = ν
+  have hU : ∀ rc, spnRound128 mds.mdsA mds.mdsB rc s ≠ spnRound128 mds.mdsA mds.mdsB rc s' :=
+    fun rc => spnRound128_ne mds rc s s' hNe
+  by_cases h1 : ν.1 = towerZero 7 <;> by_cases h2 : ν.2 = towerZero 7
+  · refine Nat.le_trans (rcSum_le_const _ 0 _ fun rc _ => ?_) (by rw [Nat.mul_zero]; exact Nat.zero_le _)
+    rw [h1, h2]
+    by_cases hA : (spnRound128 mds.mdsA mds.mdsB rc s).1 = (spnRound128 mds.mdsA mds.mdsB rc s').1
+    · have hB : (spnRound128 mds.mdsA mds.mdsB rc s).2 ≠ (spnRound128 mds.mdsA mds.mdsB rc s').2 :=
+        fun hB => hU rc (Prod.ext hA hB)
+      rw [laneCount_zero_target keys _ _ hB, Nat.mul_zero]; exact Nat.le_refl 0
+    · rw [laneCount_zero_target keys _ _ hA, Nat.zero_mul]; exact Nat.le_refl 0
+  · have hTerm : ∀ rc ∈ rcPairs keys,
+        laneCount keys (spnRound128 mds.mdsA mds.mdsB rc s).1
+            (spnRound128 mds.mdsA mds.mdsB rc s').1 ν.1 *
+          laneCount keys (spnRound128 mds.mdsA mds.mdsB rc s).2
+            (spnRound128 mds.mdsA mds.mdsB rc s').2 ν.2 ≤
+        if decide ((spnRound128 mds.mdsA mds.mdsB rc s).1 =
+            (spnRound128 mds.mdsA mds.mdsB rc s').1) then keys.length * 6 else 0 := by
+      intro rc _
+      by_cases hA : (spnRound128 mds.mdsA mds.mdsB rc s).1 = (spnRound128 mds.mdsA mds.mdsB rc s').1
+      · rw [ite_eq_left (decide_eq_true hA)]
+        exact Nat.mul_le_mul (laneCount_le_length keys _ _ _)
+          (laneCount_le_six keys hNd _ _ _ (Or.inl h2))
+      · rw [ite_eq_right (fun hd => hA (of_decide_eq_true hd)), h1,
+          laneCount_zero_target keys _ _ hA, Nat.zero_mul]
+        exact Nat.le_refl 0
+    refine Nat.le_trans (rcSum_le_of_le _ _ _ hTerm) ?_
+    rw [rcSum_ite]
+    refine Nat.le_trans (Nat.mul_le_mul_right _ (spnRound128_fst_eq_count_le mds keys hNd s s' hNe)) ?_
+    rw [Nat.mul_mul_mul_comm, Nat.mul_comm]
+    exact Nat.le_refl _
+  · have hTerm : ∀ rc ∈ rcPairs keys,
+        laneCount keys (spnRound128 mds.mdsA mds.mdsB rc s).1
+            (spnRound128 mds.mdsA mds.mdsB rc s').1 ν.1 *
+          laneCount keys (spnRound128 mds.mdsA mds.mdsB rc s).2
+            (spnRound128 mds.mdsA mds.mdsB rc s').2 ν.2 ≤
+        if decide ((spnRound128 mds.mdsA mds.mdsB rc s).2 =
+            (spnRound128 mds.mdsA mds.mdsB rc s').2) then keys.length * 6 else 0 := by
+      intro rc _
+      by_cases hB : (spnRound128 mds.mdsA mds.mdsB rc s).2 = (spnRound128 mds.mdsA mds.mdsB rc s').2
+      · rw [ite_eq_left (decide_eq_true hB), Nat.mul_comm]
+        exact Nat.mul_le_mul (laneCount_le_length keys _ _ _)
+          (laneCount_le_six keys hNd _ _ _ (Or.inl h1))
+      · rw [ite_eq_right (fun hd => hB (of_decide_eq_true hd)), h2,
+          laneCount_zero_target keys _ _ hB, Nat.mul_zero]
+        exact Nat.le_refl 0
+    refine Nat.le_trans (rcSum_le_of_le _ _ _ hTerm) ?_
+    rw [rcSum_ite]
+    refine Nat.le_trans (Nat.mul_le_mul_right _ (spnRound128_snd_eq_count_le mds keys hNd s s' hNe)) ?_
+    rw [Nat.mul_mul_mul_comm, Nat.mul_comm]
+    exact Nat.le_refl _
+  · refine Nat.le_trans (rcSum_le_const _ (6 * 6) _ fun rc _ =>
+      Nat.mul_le_mul (laneCount_le_six keys hNd _ _ _ (Or.inl h1))
+        (laneCount_le_six keys hNd _ _ _ (Or.inl h2))) ?_
+    rw [rcPairs_length, Nat.mul_comm]
+    exact Nat.le_refl _
+
+/-- **Any number of rounds `≥ 2`, committed differential.** Earlier rounds only average the
+    two-round bound over the states they reach, which stay distinct. -/
+theorem spn_differential_count_le (mds : ValidSpnMdsPair 7) (keys : List Tower128)
+    (hNd : keys.Nodup) (β : Tower128 × Tower128) :
+    ∀ (n : Nat) (s s' : Tower128 × Tower128), s ≠ s' →
+      spnFinalDiffCount keys mds.mdsA mds.mdsB (n + 2) s s' β ≤
+        36 * (keys.length * keys.length) * (keys.length * keys.length) ^ n
+  | 0, s, s', hNe => by
+    rw [Nat.pow_zero, Nat.mul_one]
+    exact spn_two_round_differential_count_le mds keys hNd s s' hNe β
+  | n + 1, s, s', hNe => by
+    rw [spnFinalDiffCount_succ]
+    refine Nat.le_trans (rcSum_le_const _ _ _ fun rc _ =>
+      spn_differential_count_le mds keys hNd β n _ _ (spnRound128_ne mds rc s s' hNe)) ?_
+    rw [rcPairs_length, Nat.pow_succ, Nat.mul_left_comm, Nat.mul_comm (keys.length * keys.length),
+      Nat.mul_assoc]
+    exact Nat.le_refl _
+
+/-! ## §2. Davies–Meyer: the committed-pair collision game, and what invertibility gives -/
+
+/-- Number of 48-round constant lists under which the committed pair collides in the actual
+    `spnDaviesMeyer48` (permutation output xor input, as in Rust `algebraic_step_plain`). -/
+def spnDmCollisionCount (keys : List Tower128) (mdsA mdsB : Tower128)
+    (s s' : Tower128 × Tower128) : Nat :=
+  ((freshInputAssignments (rcPairs keys) spnRounds).filter fun ks =>
+    decide (spnDaviesMeyer48 mdsA mdsB (rcSchedule ks) s =
+      spnDaviesMeyer48 mdsA mdsB (rcSchedule ks) s')).length
+
+/-- **Committed-pair collision bound.** A Davies–Meyer collision of `s ≠ s'` is the
+    differential `s ⊕ s' → s ⊕ s'` of the permutation, so at most a `36/N²` fraction of the
+    constant lists make a committed pair collide. Scope: the pair is fixed before the
+    constants are drawn. Nothing is claimed about finding a colliding pair for given constants. -/
+theorem spn48_davies_meyer_committed_pair_collision_count_le (mds : ValidSpnMdsPair 7)
+    (keys : List Tower128) (hNd : keys.Nodup) (s s' : Tower128 × Tower128) (hNe : s ≠ s') :
+    spnDmCollisionCount keys mds.mdsA mds.mdsB s s' ≤
+      36 * (keys.length * keys.length) * (keys.length * keys.length) ^ 46 := by
+  refine Nat.le_trans (Nat.le_of_eq ?_)
+    (spn_differential_count_le mds keys hNd (pairXor s s') 46 s s' hNe)
+  unfold spnDmCollisionCount spnFinalDiffCount
+  apply congrArg List.length
+  apply List.filter_congr
+  intro ks hks
+  have hLen : ks.length = spnRounds := mem_freshInputAssignments_length _ _ _ hks
+  apply decide_eq_decide.mpr
+  unfold spnDaviesMeyer48
+  rw [← hLen, ← spnRunList_eq_iter, ← spnRunList_eq_iter]
+  show (towerAdd 7 _ s.1, towerAdd 7 _ s.2) = (towerAdd 7 _ s'.1, towerAdd 7 _ s'.2) ↔
+    (towerAdd 7 _ _, towerAdd 7 _ _) = (towerAdd 7 s.1 s'.1, towerAdd 7 s.2 s'.2)
+  rw [Prod.mk.injEq, Prod.mk.injEq, tadd_cross_iff, tadd_cross_iff _ s.2]
+
+/-- The committed-pair collision probability over `2^128` lane constants is below `2^-250`. -/
+theorem spn48_davies_meyer_committed_pair_collision_atLeast_250_bits
+    (mds : ValidSpnMdsPair 7) (keys : List Tower128) (hNd : keys.Nodup)
+    (hN : keys.length = 2 ^ 128) (s s' : Tower128 × Tower128) (hNe : s ≠ s') :
+    atLeastBits 250 ⟨spnDmCollisionCount keys mds.mdsA mds.mdsB s s',
+      (2 ^ 128 * 2 ^ 128) ^ 48,
+      Nat.pow_pos (Nat.mul_pos (Nat.two_pow_pos 128) (Nat.two_pow_pos 128))⟩ := by
+  have h := spn48_davies_meyer_committed_pair_collision_count_le mds keys hNd s s' hNe
+  rw [hN] at h
+  show spnDmCollisionCount keys mds.mdsA mds.mdsB s s' * 2 ^ 250 ≤ (2 ^ 128 * 2 ^ 128) ^ 48
+  refine Nat.le_trans (Nat.mul_le_mul_right _ h) ?_
+  rw [show (2 ^ 128 * 2 ^ 128 : Nat) ^ 48 = (2 ^ 128 * 2 ^ 128) ^ 46 * (2 ^ 128 * 2 ^ 128) ^ 2 from
+    Nat.pow_add _ 46 2, Nat.mul_right_comm]
+  rw [Nat.mul_comm (36 * (2 ^ 128 * 2 ^ 128) * 2 ^ 250)]
+  exact Nat.mul_le_mul_left _ (by decide)
+
+
+end Qsag
+end
+
+
+section
+namespace Qsag
+set_option autoImplicit false
+
+/-! ## §1. Integer sums over lists -/
+
+/-- The character value `(-1)^b`. -/
+def wsgn (b : Bool) : Int := if b then -1 else 1
+
+theorem wsgn_xor (a b : Bool) : wsgn (a ^^ b) = wsgn a * wsgn b := by
+  cases a <;> cases b <;> rfl
+
+theorem wsgn_mul_self (a : Bool) : wsgn a * wsgn a = 1 := by cases a <;> rfl
+
+/-- Sum of an integer-valued function over a list. -/
+def isum {α : Type} (f : α → Int) : List α → Int
+  | [] => 0
+  | x :: xs => f x + isum f xs
+
+theorem isum_congr {α : Type} (f g : α → Int) :
+    ∀ l : List α, (∀ x ∈ l, f x = g x) → isum f l = isum g l
+  | [], _ => rfl
+  | x :: xs, h => by
+    show f x + isum f xs = g x + isum g xs
+    rw [h x List.mem_cons_self, isum_congr f g xs fun y hy => h y (List.mem_cons_of_mem _ hy)]
+
+theorem isum_eq_zero {α : Type} (f : α → Int) :
+    ∀ l : List α, (∀ x ∈ l, f x = 0) → isum f l = 0
+  | [], _ => rfl
+  | x :: xs, h => by
+    show f x + isum f xs = 0
+    rw [h x List.mem_cons_self, isum_eq_zero f xs fun y hy => h y (List.mem_cons_of_mem _ hy)]
+    rfl
+
+theorem isum_add {α : Type} (f g : α → Int) :
+    ∀ l : List α, isum (fun x => f x + g x) l = isum f l + isum g l
+  | [] => rfl
+  | x :: xs => by
+    show f x + g x + isum (fun x => f x + g x) xs = f x + isum f xs + (g x + isum g xs)
+    rw [isum_add f g xs, Int.add_assoc, Int.add_assoc, Int.add_left_comm (g x)]
+
+theorem isum_mul_left {α : Type} (c : Int) (f : α → Int) :
+    ∀ l : List α, isum (fun x => c * f x) l = c * isum f l
+  | [] => (Int.mul_zero c).symm
+  | x :: xs => by
+    show c * f x + isum (fun x => c * f x) xs = c * (f x + isum f xs)
+    rw [isum_mul_left c f xs, Int.mul_add]
+
+theorem isum_mul_right {α : Type} (c : Int) (f : α → Int) :
+    ∀ l : List α, isum (fun x => f x * c) l = isum f l * c
+  | [] => (Int.zero_mul c).symm
+  | x :: xs => by
+    show f x * c + isum (fun x => f x * c) xs = (f x + isum f xs) * c
+    rw [isum_mul_right c f xs, Int.add_mul]
+
+theorem isum_swap {α β : Type} (F : α → β → Int) (l2 : List β) :
+    ∀ l1 : List α, isum (fun x => isum (fun y => F x y) l2) l1 =
+      isum (fun y => isum (fun x => F x y) l1) l2
+  | [] => (isum_eq_zero _ l2 fun _ _ => rfl).symm
+  | x :: xs => by
+    show isum (fun y => F x y) l2 + isum (fun x => isum (fun y => F x y) l2) xs = _
+    rw [isum_swap F l2 xs, ← isum_add]
+    rfl
+
+theorem isum_mul_isum {α β : Type} (A : α → Int) (B : β → Int) (l1 : List α) (l2 : List β) :
+    isum A l1 * isum B l2 = isum (fun x => isum (fun y => A y * B x) l1) l2 := by
+  rw [← isum_mul_left]
+  exact isum_congr _ _ l2 fun x _ => (isum_mul_right (B x) A l1).symm
+
+/-- A sum against the indicator of one listed point picks out that point's term. -/
+theorem isum_indicator {α : Type} [DecidableEq α] (F : α → Int) (c : α) :
+    ∀ l : List α, l.Nodup → c ∈ l → isum (fun y => if y = c then F y else 0) l = F c
+  | [], _, h => absurd h List.not_mem_nil
+  | y :: ys, hNd, hMem => by
+    have hy := List.nodup_cons.mp hNd
+    show (if y = c then F y else 0) + isum (fun y => if y = c then F y else 0) ys = F c
+    by_cases hc : y = c
+    · have hRest : isum (fun y => if y = c then F y else 0) ys = 0 :=
+        isum_eq_zero _ ys fun z hz => ite_eq_right fun (hzc : z = c) =>
+          hy.1 ((Eq.trans hzc hc.symm) ▸ hz)
+      rw [ite_eq_left hc, hRest, hc, Int.add_zero]
+    · have hIn : c ∈ ys := (List.mem_cons.mp hMem).resolve_left fun h => hc h.symm
+      rw [ite_eq_right hc, isum_indicator F c ys hy.2 hIn, Int.zero_add]
+
+theorem isum_const {α : Type} (c : Int) :
+    ∀ l : List α, isum (fun _ => c) l = (l.length : Int) * c
+  | [] => (Int.zero_mul c).symm
+  | x :: xs => by
+    show c + isum (fun _ => c) xs = ((xs.length + 1 : Nat) : Int) * c
+    rw [isum_const c xs, Int.natCast_succ, Int.add_mul, Int.one_mul, Int.add_comm]
+
+theorem isum_le {α : Type} (f g : α → Int) :
+    ∀ l : List α, (∀ x ∈ l, f x ≤ g x) → isum f l ≤ isum g l
+  | [], _ => Int.le_refl 0
+  | x :: xs, h =>
+    Int.add_le_add (h x List.mem_cons_self)
+      (isum_le f g xs fun y hy => h y (List.mem_cons_of_mem _ hy))
+
+theorem isum_append {α : Type} (f : α → Int) (l2 : List α) :
+    ∀ l1 : List α, isum f (l1 ++ l2) = isum f l1 + isum f l2
+  | [] => (Int.zero_add _).symm
+  | x :: xs => by
+    show f x + isum f (xs ++ l2) = f x + isum f xs + isum f l2
+    rw [isum_append f l2 xs, Int.add_assoc]
+
+theorem isum_map {α β : Type} (f : β → Int) (g : α → β) :
+    ∀ l : List α, isum f (l.map g) = isum (fun x => f (g x)) l
+  | [] => rfl
+  | x :: xs => by
+    show f (g x) + isum f (xs.map g) = f (g x) + isum (fun x => f (g x)) xs
+    rw [isum_map f g xs]
+
+theorem isum_pairList {α : Type} (F : α × α → Int) (l2 : List α) :
+    ∀ l1 : List α, isum F (l1.flatMap fun a => l2.map fun b => (a, b)) =
+      isum (fun a => isum (fun b => F (a, b)) l2) l1
+  | [] => rfl
+  | x :: xs => by
+    rw [List.flatMap_cons, isum_append, isum_map, isum_pairList F l2 xs]
+    rfl
+
+theorem int_mul_rearr (a s1 s2 b : Int) : (a * s1) * (s2 * b) = (a * b) * (s1 * s2) := by
+  rw [Int.mul_assoc, Int.mul_assoc a b, ← Int.mul_assoc s1 s2 b, Int.mul_comm (s1 * s2) b]
+
+theorem int_mul_rearr2 (a s1 b s2 : Int) : (a * s1) * (b * s2) = (a * b) * (s1 * s2) := by
+  rw [Int.mul_assoc, Int.mul_left_comm s1 b s2, ← Int.mul_assoc]
+
+/-! ## §2. Walsh coefficients, composition and the trail expansion -/
+
+/-- A finite set of masks/points with a symmetric bilinear `Bool` pairing whose characters
+    are orthogonal. `add` is the group law the pairing is linear in. -/
+structure WalshSpace (α : Type) [DecidableEq α] where
+  elems : List α
+  dot : α → α → Bool
+  add : α → α → α
+  nodup : elems.Nodup
+  complete : ∀ x : α, x ∈ elems
+  dot_symm : ∀ a b : α, dot a b = dot b a
+  dot_add : ∀ u a b : α, dot u (add a b) = (dot u a ^^ dot u b)
+  orth : ∀ y y' : α, isum (fun v => wsgn (dot v y) * wsgn (dot v y')) elems =
+    if y = y' then (elems.length : Int) else 0
+
+/-- Unnormalized Walsh coefficient `Σ_x (-1)^(u·f(x) + w·x)`; the correlation of the output
+    mask `u` with the input mask `w` is this divided by the number of points. -/
+def walsh {α : Type} [DecidableEq α] (W : WalshSpace α) (f : α → α) (u w : α) : Int :=
+  isum (fun x => wsgn (W.dot u (f x)) * wsgn (W.dot w x)) W.elems
+
+/-- **Composition.** Summing the products of coefficients over the intermediate mask gives
+    `N` times the coefficient of the composition. No probability is involved. -/
+theorem walsh_comp {α : Type} [DecidableEq α] (W : WalshSpace α) (f g : α → α) (u w : α) :
+    isum (fun v => walsh W g u v * walsh W f v w) W.elems =
+      (W.elems.length : Int) * walsh W (fun x => g (f x)) u w := by
+  have h1 : isum (fun v => walsh W g u v * walsh W f v w) W.elems =
+      isum (fun v => isum (fun x => isum (fun y =>
+        (wsgn (W.dot u (g y)) * wsgn (W.dot v y)) *
+          (wsgn (W.dot v (f x)) * wsgn (W.dot w x))) W.elems) W.elems) W.elems :=
+    isum_congr _ _ _ fun v _ => isum_mul_isum _ _ _ _
+  have h2 := isum_swap (fun v x => isum (fun y =>
+      (wsgn (W.dot u (g y)) * wsgn (W.dot v y)) *
+        (wsgn (W.dot v (f x)) * wsgn (W.dot w x))) W.elems) W.elems W.elems
+  have h3 : isum (fun x => isum (fun v => isum (fun y =>
+        (wsgn (W.dot u (g y)) * wsgn (W.dot v y)) *
+          (wsgn (W.dot v (f x)) * wsgn (W.dot w x))) W.elems) W.elems) W.elems =
+      isum (fun x => (wsgn (W.dot u (g (f x))) * wsgn (W.dot w x)) *
+        (W.elems.length : Int)) W.elems := by
+    apply isum_congr
+    intro x _
+    rw [isum_swap (fun v y => (wsgn (W.dot u (g y)) * wsgn (W.dot v y)) *
+      (wsgn (W.dot v (f x)) * wsgn (W.dot w x))) W.elems W.elems]
+    have hInner : isum (fun y => isum (fun v =>
+          (wsgn (W.dot u (g y)) * wsgn (W.dot v y)) *
+            (wsgn (W.dot v (f x)) * wsgn (W.dot w x))) W.elems) W.elems =
+        isum (fun y => if y = f x then
+          (wsgn (W.dot u (g y)) * wsgn (W.dot w x)) * (W.elems.length : Int) else 0) W.elems := by
+      apply isum_congr
+      intro y _
+      have hO := W.orth y (f x)
+      have hT : isum (fun v => (wsgn (W.dot u (g y)) * wsgn (W.dot v y)) *
+            (wsgn (W.dot v (f x)) * wsgn (W.dot w x))) W.elems =
+          (wsgn (W.dot u (g y)) * wsgn (W.dot w x)) *
+            isum (fun v => wsgn (W.dot v y) * wsgn (W.dot v (f x))) W.elems := by
+        rw [← isum_mul_left]
+        exact isum_congr _ _ _ fun v _ => int_mul_rearr _ _ _ _
+      rw [hT, hO]
+      by_cases hy : y = f x
+      · rw [ite_eq_left hy, ite_eq_left hy]
+      · rw [ite_eq_right hy, ite_eq_right hy, Int.mul_zero]
+    rw [hInner]
+    exact isum_indicator (fun y => (wsgn (W.dot u (g y)) * wsgn (W.dot w x)) *
+      (W.elems.length : Int)) (f x) W.elems W.nodup (W.complete (f x))
+  rw [h1, h2, h3, isum_mul_right, Int.mul_comm]
+  rfl
+
+/-- The identity map has coefficient `N` on the diagonal and `0` elsewhere. -/
+theorem walsh_id {α : Type} [DecidableEq α] (W : WalshSpace α) (u w : α) :
+    walsh W (fun x => x) u w = if u = w then (W.elems.length : Int) else 0 := by
+  rw [← W.orth u w]
+  exact isum_congr _ _ _ fun x _ => by rw [W.dot_symm u x, W.dot_symm w x]
+
+/-- Rounds applied in list order (head first). -/
+def composeRounds {α : Type} : List (α → α) → α → α
+  | [], x => x
+  | f :: fs, x => composeRounds fs (f x)
+
+/-- Sum over every sequence of intermediate masks (every linear trail) of the product of the
+    one-round coefficients along it. -/
+def walshTrailSum {α : Type} [DecidableEq α] (W : WalshSpace α) : List (α → α) → α → α → Int
+  | [], u, w => if u = w then (W.elems.length : Int) else 0
+  | f :: fs, u, w => isum (fun v => walshTrailSum W fs u v * walsh W f v w) W.elems
+
+/-- **Linear hull = signed sum of trail contributions**, exactly, for any list of rounds. -/
+theorem walshTrailSum_eq {α : Type} [DecidableEq α] (W : WalshSpace α) :
+    ∀ (fs : List (α → α)) (u w : α),
+      walshTrailSum W fs u w =
+        (W.elems.length : Int) ^ fs.length * walsh W (composeRounds fs) u w
+  | [], u, w => by
+    show (if u = w then (W.elems.length : Int) else 0) = _
+    rw [← walsh_id W u w, List.length_nil, Int.pow_zero, Int.one_mul]
+    rfl
+  | f :: fs, u, w => by
+    show isum (fun v => walshTrailSum W fs u v * walsh W f v w) W.elems = _
+    have hStep : isum (fun v => walshTrailSum W fs u v * walsh W f v w) W.elems =
+        (W.elems.length : Int) ^ fs.length *
+          isum (fun v => walsh W (composeRounds fs) u v * walsh W f v w) W.elems := by
+      rw [← isum_mul_left]
+      exact isum_congr _ _ _ fun v _ => by rw [walshTrailSum_eq W fs u v, Int.mul_assoc]
+    rw [hStep, walsh_comp, ← Int.mul_assoc, List.length_cons, Int.pow_succ]
+    rfl
+
+/-- Adding a constant after a map multiplies the coefficient by a sign. -/
+theorem walsh_output_translate {α : Type} [DecidableEq α] (W : WalshSpace α) (f : α → α)
+    (k u w : α) :
+    walsh W (fun x => W.add (f x) k) u w = wsgn (W.dot u k) * walsh W f u w := by
+  unfold walsh
+  rw [← isum_mul_left]
+  apply isum_congr
+  intro x _
+  rw [W.dot_add, wsgn_xor, Int.mul_comm (wsgn (W.dot u (f x))), Int.mul_assoc]
+
+/-- Adding a constant before a map multiplies the coefficient by a sign (of the input mask).
+    Derived from `walsh_comp` and orthogonality; no reindexing of the sum is used. -/
+theorem walsh_input_translate {α : Type} [DecidableEq α] (W : WalshSpace α) (f : α → α)
+    (k u w : α) :
+    walsh W (fun x => f (W.add x k)) u w = wsgn (W.dot w k) * walsh W f u w := by
+  have hPos : (W.elems.length : Int) ≠ 0 := by
+    cases hE : W.elems with
+    | nil => exact absurd (hE ▸ W.complete k) List.not_mem_nil
+    | cons x xs =>
+      have hp : (0 : Int) < ((x :: xs).length : Int) := Int.natCast_pos.mpr (Nat.succ_pos _)
+      exact fun h0 => Int.lt_irrefl 0 (h0 ▸ hp)
+  have hShift : ∀ v : α, walsh W (fun x => W.add x k) v w =
+      wsgn (W.dot v k) * (if v = w then (W.elems.length : Int) else 0) := by
+    intro v
+    have h := walsh_output_translate W (fun x => x) k v w
+    rw [walsh_id] at h
+    exact h
+  have hC := walsh_comp W (fun x => W.add x k) f u w
+  have hSum : isum (fun v => walsh W f u v * walsh W (fun x => W.add x k) v w) W.elems =
+      walsh W f u w * (wsgn (W.dot w k) * (W.elems.length : Int)) := by
+    have hI := isum_indicator (fun v => walsh W f u v * (wsgn (W.dot v k) * (W.elems.length : Int)))
+      w W.elems W.nodup (W.complete w)
+    rw [← hI]
+    apply isum_congr
+    intro v _
+    rw [hShift v]
+    by_cases hv : v = w
+    · rw [ite_eq_left hv, ite_eq_left hv]
+    · rw [ite_eq_right hv, ite_eq_right hv, Int.mul_zero, Int.mul_zero]
+  rw [hSum] at hC
+  apply Int.eq_of_mul_eq_mul_left hPos
+  rw [← hC, Int.mul_left_comm, Int.mul_comm (walsh W f u w)]
+  exact Int.mul_left_comm _ _ _
+
+/-! ## §3. Parseval and the floor for uniform bounds -/
+
+/-- **Parseval.** For every map and every output mask, the squared coefficients over all
+    input masks sum to `N²`. -/
+theorem walsh_parseval {α : Type} [DecidableEq α] (W : WalshSpace α) (f : α → α) (u : α) :
+    isum (fun w => walsh W f u w * walsh W f u w) W.elems =
+      (W.elems.length : Int) * (W.elems.length : Int) := by
+  have h1 : isum (fun w => walsh W f u w * walsh W f u w) W.elems =
+      isum (fun w => isum (fun x => isum (fun y =>
+        (wsgn (W.dot u (f y)) * wsgn (W.dot w y)) *
+          (wsgn (W.dot u (f x)) * wsgn (W.dot w x))) W.elems) W.elems) W.elems :=
+    isum_congr _ _ _ fun w _ => isum_mul_isum _ _ _ _
+  have h2 := isum_swap (fun w x => isum (fun y =>
+      (wsgn (W.dot u (f y)) * wsgn (W.dot w y)) *
+        (wsgn (W.dot u (f x)) * wsgn (W.dot w x))) W.elems) W.elems W.elems
+  have h3 : isum (fun x => isum (fun w => isum (fun y =>
+        (wsgn (W.dot u (f y)) * wsgn (W.dot w y)) *
+          (wsgn (W.dot u (f x)) * wsgn (W.dot w x))) W.elems) W.elems) W.elems =
+      isum (fun _ => (W.elems.length : Int)) W.elems := by
+    apply isum_congr
+    intro x _
+    rw [isum_swap (fun w y => (wsgn (W.dot u (f y)) * wsgn (W.dot w y)) *
+      (wsgn (W.dot u (f x)) * wsgn (W.dot w x))) W.elems W.elems]
+    have hInner : isum (fun y => isum (fun w =>
+          (wsgn (W.dot u (f y)) * wsgn (W.dot w y)) *
+            (wsgn (W.dot u (f x)) * wsgn (W.dot w x))) W.elems) W.elems =
+        isum (fun y => if y = x then
+          (wsgn (W.dot u (f y)) * wsgn (W.dot u (f x))) * (W.elems.length : Int) else 0) W.elems := by
+      apply isum_congr
+      intro y _
+      have hO := W.orth y x
+      have hT : isum (fun w => (wsgn (W.dot u (f y)) * wsgn (W.dot w y)) *
+            (wsgn (W.dot u (f x)) * wsgn (W.dot w x))) W.elems =
+          (wsgn (W.dot u (f y)) * wsgn (W.dot u (f x))) *
+            isum (fun w => wsgn (W.dot w y) * wsgn (W.dot w x)) W.elems := by
+        rw [← isum_mul_left]
+        exact isum_congr _ _ _ fun w _ => int_mul_rearr2 _ _ _ _
+      rw [hT, hO]
+      by_cases hy : y = x
+      · rw [ite_eq_left hy, ite_eq_left hy]
+      · rw [ite_eq_right hy, ite_eq_right hy, Int.mul_zero]
+    rw [hInner, isum_indicator (fun y => (wsgn (W.dot u (f y)) * wsgn (W.dot u (f x))) *
+      (W.elems.length : Int)) x W.elems W.nodup (W.complete x), wsgn_mul_self, Int.one_mul]
+  rw [h1, h2, h3, isum_const]
+
+/-- **Floor.** If `B` bounds the squared coefficient for every input mask, then `B ≥ N`:
+    some input mask has squared correlation at least `1/N` with any given output mask. -/
+theorem walsh_uniform_bound_ge_card {α : Type} [DecidableEq α] (W : WalshSpace α)
+    (f : α → α) (u : α) (B : Int)
+    (hB : ∀ w ∈ W.elems, walsh W f u w * walsh W f u w ≤ B) :
+    (W.elems.length : Int) ≤ B := by
+  have hPos : (0 : Int) < (W.elems.length : Int) := by
+    cases hE : W.elems with
+    | nil => exact absurd (hE ▸ W.complete u) List.not_mem_nil
+    | cons x xs => exact Int.natCast_pos.mpr (Nat.succ_pos _)
+  have hSum := isum_le _ (fun _ => B) W.elems hB
+  rw [walsh_parseval, isum_const] at hSum
+  exact Int.le_of_mul_le_mul_left hSum hPos
+
+/-! ## §4. The bit pairing on the Wiedemann tower and the actual round function -/
+
+/-- Coordinatewise inner product of tower elements (all `2^k` bit coordinates). -/
+def towerDot : (k : Nat) → TowerElem k → TowerElem k → Bool
+  | 0, a, b => a && b
+  | k + 1, a, b => towerDot k a.1 b.1 ^^ towerDot k a.2 b.2
+
+theorem towerDot_symm : ∀ (k : Nat) (a b : TowerElem k), towerDot k a b = towerDot k b a
+  | 0, a, b => Bool.and_comm a b
+  | k + 1, a, b => by
+    show (towerDot k a.1 b.1 ^^ towerDot k a.2 b.2) = (towerDot k b.1 a.1 ^^ towerDot k b.2 a.2)
+    rw [towerDot_symm k a.1 b.1, towerDot_symm k a.2 b.2]
+
+theorem bxor_swap (p q r s : Bool) : ((p ^^ q) ^^ (r ^^ s)) = ((p ^^ r) ^^ (q ^^ s)) := by
+  cases p <;> cases q <;> cases r <;> cases s <;> rfl
+
+theorem towerDot_add : ∀ (k : Nat) (u a b : TowerElem k),
+    towerDot k u (towerAdd k a b) = (towerDot k u a ^^ towerDot k u b)
+  | 0, u, a, b => by cases u <;> cases a <;> cases b <;> rfl
+  | k + 1, u, a, b => by
+    show (towerDot k u.1 (towerAdd k a.1 b.1) ^^ towerDot k u.2 (towerAdd k a.2 b.2)) =
+      ((towerDot k u.1 a.1 ^^ towerDot k u.2 a.2) ^^ (towerDot k u.1 b.1 ^^ towerDot k u.2 b.2))
+    rw [towerDot_add k u.1, towerDot_add k u.2, bxor_swap]
+
+theorem towerDot_orth : ∀ (k : Nat) (y y' : TowerElem k),
+    isum (fun v => wsgn (towerDot k v y) * wsgn (towerDot k v y')) (towerAll k) =
+      if y = y' then ((towerAll k).length : Int) else 0
+  | 0, y, y' => by cases y <;> cases y' <;> rfl
+  | k + 1, y, y' => by
+    show isum (fun v => wsgn (towerDot k v.1 y.1 ^^ towerDot k v.2 y.2) *
+        wsgn (towerDot k v.1 y'.1 ^^ towerDot k v.2 y'.2)) (rcPairs (towerAll k)) =
+      if y = y' then ((rcPairs (towerAll k)).length : Int) else 0
+    have hSplit : isum (fun v => wsgn (towerDot k v.1 y.1 ^^ towerDot k v.2 y.2) *
+        wsgn (towerDot k v.1 y'.1 ^^ towerDot k v.2 y'.2)) (rcPairs (towerAll k)) =
+        isum (fun a => wsgn (towerDot k a y.1) * wsgn (towerDot k a y'.1)) (towerAll k) *
+          isum (fun b => wsgn (towerDot k b y.2) * wsgn (towerDot k b y'.2)) (towerAll k) := by
+      unfold rcPairs
+      rw [isum_pairList, ← isum_mul_right]
+      apply isum_congr
+      intro a _
+      rw [← isum_mul_left]
+      apply isum_congr
+      intro b _
+      show wsgn (towerDot k a y.1 ^^ towerDot k b y.2) *
+        wsgn (towerDot k a y'.1 ^^ towerDot k b y'.2) = _
+      rw [wsgn_xor, wsgn_xor, int_mul_rearr2]
+    rw [hSplit, towerDot_orth k y.1 y'.1, towerDot_orth k y.2 y'.2, rcPairs_length,
+      Int.natCast_mul]
+    by_cases h : y = y'
+    · subst h
+      rw [ite_eq_left rfl, ite_eq_left rfl, ite_eq_left rfl]
+    · rw [ite_eq_right h]
+      by_cases h1 : y.1 = y'.1
+      · have h2 : ¬ y.2 = y'.2 := fun h2 => h (Prod.ext h1 h2)
+        rw [ite_eq_right h2, Int.mul_zero]
+      · rw [ite_eq_right h1, Int.zero_mul]
+
+/-- The tower with its bit pairing is a `WalshSpace` (level 7: one lane; level 8: the
+    256-bit two-lane state, since `TowerElem 8 = Tower128 × Tower128`). -/
+def towerWalsh (k : Nat) : WalshSpace (TowerElem k) where
+  elems := towerAll k
+  dot := towerDot k
+  add := towerAdd k
+  nodup := towerAll_nodup k
+  complete := towerAll_complete k
+  dot_symm := towerDot_symm k
+  dot_add := towerDot_add k
+  orth := towerDot_orth k
+
+/-- **Round constants change only signs.** The Walsh coefficient of the actual round with
+    constant `rc` is the coefficient of the constant-free round times `(-1)^(w·rc)`. Hence
+    every one-round coefficient, and every product of them along a trail, has a magnitude
+    that does not depend on the public constants; the constants decide how trails cancel. -/
+theorem spnRound128_walsh_constant_sign (mdsA mdsB : Tower128) (rc u w : TowerElem 8) :
+    walsh (towerWalsh 8) (spnRound128 mdsA mdsB rc) u w =
+      wsgn (towerDot 8 w rc) *
+        walsh (towerWalsh 8) (spnRound128 mdsA mdsB (towerZero 7, towerZero 7)) u w := by
+  refine Eq.trans ?_ (walsh_input_translate (towerWalsh 8)
+    (spnRound128 mdsA mdsB (towerZero 7, towerZero 7)) rc u w)
+  apply congrArg (fun f => walsh (towerWalsh 8) f u w)
+  funext x
+  show spnRound128 mdsA mdsB rc x =
+    spnRound128 mdsA mdsB (towerZero 7, towerZero 7) (towerAdd 7 x.1 rc.1, towerAdd 7 x.2 rc.2)
+  unfold spnRound128
+  rw [towerAdd_zero, towerAdd_zero]
+
+/-- The exact trail expansion for the actual rounds: for any constant list, the sum over all
+    intermediate 256-bit mask sequences of the products of one-round coefficients is
+    `N^rounds` times the coefficient of the composed permutation. -/
+theorem spn_walsh_hull_expansion (mdsA mdsB : Tower128) (ks : List (TowerElem 8))
+    (u w : TowerElem 8) :
+    walshTrailSum (towerWalsh 8) (ks.map fun rc => spnRound128 mdsA mdsB rc) u w =
+      ((towerWalsh 8).elems.length : Int) ^ ks.length *
+        walsh (towerWalsh 8)
+          (composeRounds (ks.map fun rc => spnRound128 mdsA mdsB rc)) u w := by
+  exact (walshTrailSum_eq (towerWalsh 8) _ u w).trans
+    (congrArg (fun n => ((towerWalsh 8).elems.length : Int) ^ n *
+      walsh (towerWalsh 8) (composeRounds (ks.map fun rc => spnRound128 mdsA mdsB rc)) u w)
+      (List.length_map _))
+
+/-- `composeRounds` over the mapped constant list is the permutation `spnRunList`. -/
+theorem composeRounds_spnRound128 (mdsA mdsB : Tower128) :
+    ∀ (ks : List (Tower128 × Tower128)) (x : Tower128 × Tower128),
+      composeRounds (ks.map fun rc => spnRound128 mdsA mdsB rc) x = spnRunList mdsA mdsB ks x
+  | [], _ => rfl
+  | rc :: rest, x => composeRounds_spnRound128 mdsA mdsB rest (spnRound128 mdsA mdsB rc x)
+
+/-- **Parseval floor on the 256-bit state.** For every map of the two-lane state (in
+    particular the 48-round permutation under any constants) and every output mask, a bound
+    valid for all input masks on the squared Walsh coefficient is at least `2^256`. -/
+theorem spn_state_walsh_uniform_bound_ge_2_256 (f : TowerElem 8 → TowerElem 8)
+    (u : TowerElem 8) (B : Int)
+    (hB : ∀ w : TowerElem 8, walsh (towerWalsh 8) f u w * walsh (towerWalsh 8) f u w ≤ B) :
+    ((2 ^ 2 ^ 8 : Nat) : Int) ≤ B := by
+  have h := walsh_uniform_bound_ge_card (towerWalsh 8) f u B fun w _ => hB w
+  rw [show (towerWalsh 8).elems.length = 2 ^ 2 ^ 8 from towerAll_length 8] at h
+  exact h
+
+/-- A product of 72 per-box squared-correlation bounds `36/2^128` is below the `2^-256`
+    Parseval floor of the 256-bit state. Such a product can bound one trail's contribution
+    (given a per-box Walsh bound), never the hull for all masks. -/
+theorem walsh_trail_product_below_parseval_floor : 36 ^ 72 * 2 ^ 256 < (2 ^ 128) ^ 72 := by
+  decide
+
+
+end Qsag
+end
+
+
+section
+namespace Qsag
+set_option autoImplicit false
+
+/-- Public reversible primitive. Both directions are exposed to the adversary. -/
+structure PublicPermutation (State : Type) where
+  forward : State → State
+  inverse : State → State
+  inverse_forward : ∀ x, inverse (forward x) = x
+  forward_inverse : ∀ x, forward (inverse x) = x
+
+private theorem mix_twice_lane (k : Nat) (a b x y : TowerElem k) :
+    towerAdd k (towerAdd k x (towerMul k a y))
+      (towerMul k a (towerAdd k y (towerMul k b x))) =
+    towerMul k (towerAdd k (towerOne k) (towerMul k a b)) x := by
+  rw [towerMul_add_distrib, ← towerAdd_assoc,
+    towerAdd_assoc k x, towerAdd_self_zero, towerAdd_zero,
+    towerAdd_mul_distrib, towerOne_mul, towerMul_assoc]
+
+private theorem det_ne_zero {k : Nat} (mds : ValidSpnMdsPair k) :
+    towerAdd k (towerOne k) (towerMul k mds.mdsA mds.mdsB) ≠ towerZero k := by
+  intro h
+  have he := congrArg (towerAdd k (towerOne k)) h
+  rw [towerAdd_cancel, towerAdd_zero] at he
+  exact mds.hAB_ne_one he
+
+/-- Inverse of the linear layer: apply M again, divide both lanes by 1+A*B. -/
+def publicSpnMixInverse {k : Nat} (mds : ValidSpnMdsPair k)
+    (st : TowerElem k × TowerElem k) : TowerElem k × TowerElem k :=
+  let d := towerInv k (towerAdd k (towerOne k) (towerMul k mds.mdsA mds.mdsB))
+  let z := spnLinearMix k mds.mdsA mds.mdsB st
+  (towerMul k d z.1, towerMul k d z.2)
+
+private theorem det_cancel {k : Nat} (mds : ValidSpnMdsPair k) (x : TowerElem k) :
+    towerMul k (towerInv k (towerAdd k (towerOne k) (towerMul k mds.mdsA mds.mdsB)))
+      (towerMul k (towerAdd k (towerOne k) (towerMul k mds.mdsA mds.mdsB)) x) = x := by
+  rw [← towerMul_assoc, towerMul_comm k (towerInv k _),
+    towerMul_inv k _ (det_ne_zero mds), towerOne_mul]
+
+theorem publicSpnMixInverse_left {k : Nat} (mds : ValidSpnMdsPair k)
+    (st : TowerElem k × TowerElem k) :
+    publicSpnMixInverse mds (spnLinearMix k mds.mdsA mds.mdsB st) = st := by
+  apply Prod.ext
+  · change towerMul k _ (towerAdd k (towerAdd k st.1 (towerMul k mds.mdsA st.2))
+      (towerMul k mds.mdsA (towerAdd k st.2 (towerMul k mds.mdsB st.1)))) = st.1
+    rw [mix_twice_lane, det_cancel]
+  · change towerMul k _ (towerAdd k (towerAdd k st.2 (towerMul k mds.mdsB st.1))
+      (towerMul k mds.mdsB (towerAdd k st.1 (towerMul k mds.mdsA st.2)))) = st.2
+    rw [mix_twice_lane, towerMul_comm k mds.mdsB mds.mdsA, det_cancel]
+
+theorem publicSpnMixInverse_right {k : Nat} (mds : ValidSpnMdsPair k)
+    (st : TowerElem k × TowerElem k) :
+    spnLinearMix k mds.mdsA mds.mdsB (publicSpnMixInverse mds st) = st := by
+  have h := publicSpnMixInverse_left mds st
+  have commute : spnLinearMix k mds.mdsA mds.mdsB (publicSpnMixInverse mds st) =
+      publicSpnMixInverse mds (spnLinearMix k mds.mdsA mds.mdsB st) := by
+    dsimp only [spnLinearMix, publicSpnMixInverse]
+    simp only [towerMul_add_distrib, towerAdd_mul_distrib, towerMul_assoc, towerMul_comm,
+      towerMul_left_comm_of_assoc k (towerMul_assoc k)]
+  exact commute.trans h
+
+/-- Undo mixing, undo x^7, then undo public round-constant XOR. -/
+def publicSpnRoundInverse (mds : ValidSpnMdsPair 7) (rc st : Tower128 × Tower128) :
+    Tower128 × Tower128 :=
+  let z := publicSpnMixInverse mds st
+  (towerAdd 7 (towerSbox7Inv128 z.1) rc.1, towerAdd 7 (towerSbox7Inv128 z.2) rc.2)
+
+theorem publicSpnRoundInverse_left (mds : ValidSpnMdsPair 7) (rc st : Tower128 × Tower128) :
+    publicSpnRoundInverse mds rc (spnRound128 mds.mdsA mds.mdsB rc st) = st := by
+  unfold spnRound128 publicSpnRoundInverse
+  rw [publicSpnMixInverse_left]
+  simp only [towerSbox7Inv128_left_inv, towerAdd_assoc, towerAdd_self_zero, towerAdd_zero]
+
+theorem publicSpnRoundInverse_right (mds : ValidSpnMdsPair 7) (rc st : Tower128 × Tower128) :
+    spnRound128 mds.mdsA mds.mdsB rc (publicSpnRoundInverse mds rc st) = st := by
+  unfold spnRound128 publicSpnRoundInverse
+  simp only [towerAdd_assoc, towerAdd_self_zero, towerAdd_zero, towerSbox7Inv128_right_inv]
+  exact publicSpnMixInverse_right mds st
+
+/-- Generic reverse traversal keeps the recursion independent of field representation. -/
+def publicReverseIter {State : Type} (inverseRound : Nat → State → State) : Nat → State → State
+  | 0, st => st
+  | n + 1, st => publicReverseIter inverseRound n (inverseRound n st)
+
+/-- Rounds are undone in descending order. -/
+def publicSpnIterInverse (mds : ValidSpnMdsPair 7) (rcs : Nat → Tower128 × Tower128) :=
+  publicReverseIter (fun n => publicSpnRoundInverse mds (rcs n))
+
+private theorem reverseIter_left {State : Type}
+    (f g : Nat → State → State) (trace : Nat → State → State)
+    (hzero : ∀ x, trace 0 x = x)
+    (hstep : ∀ n x, trace (n + 1) x = f n (trace n x))
+    (hleft : ∀ n x, g n (f n x) = x) (n : Nat) (x : State) :
+    publicReverseIter g n (trace n x) = x := by
+  induction n with
+  | zero => exact hzero x
+  | succ n ih =>
+    rw [hstep, publicReverseIter, hleft]
+    exact ih
+
+private theorem reverseIter_right {State : Type}
+    (f g : Nat → State → State) (trace : Nat → State → State)
+    (hzero : ∀ x, trace 0 x = x)
+    (hstep : ∀ n x, trace (n + 1) x = f n (trace n x))
+    (hright : ∀ n x, f n (g n x) = x) (n : Nat) (x : State) :
+    trace n (publicReverseIter g n x) = x := by
+  induction n generalizing x with
+  | zero => exact hzero x
+  | succ n ih => rw [publicReverseIter, hstep, ih, hright]
+
+theorem publicSpnIterInverse_left (mds : ValidSpnMdsPair 7) (rcs : Nat → Tower128 × Tower128)
+    (n : Nat) (st : Tower128 × Tower128) :
+    publicSpnIterInverse mds rcs n (spnIterRounds128 mds.mdsA mds.mdsB rcs n st) = st := by
+  unfold publicSpnIterInverse
+  exact reverseIter_left
+    (fun i => spnRound128 mds.mdsA mds.mdsB (rcs i))
+    (fun i => publicSpnRoundInverse mds (rcs i))
+    (spnIterRounds128 mds.mdsA mds.mdsB rcs)
+    (fun _ => rfl) (fun _ _ => rfl)
+    (fun i x => publicSpnRoundInverse_left mds (rcs i) x) n st
+
+theorem publicSpnIterInverse_right (mds : ValidSpnMdsPair 7) (rcs : Nat → Tower128 × Tower128)
+    (n : Nat) (st : Tower128 × Tower128) :
+    spnIterRounds128 mds.mdsA mds.mdsB rcs n (publicSpnIterInverse mds rcs n st) = st := by
+  unfold publicSpnIterInverse
+  exact reverseIter_right
+    (fun i => spnRound128 mds.mdsA mds.mdsB (rcs i))
+    (fun i => publicSpnRoundInverse mds (rcs i))
+    (spnIterRounds128 mds.mdsA mds.mdsB rcs)
+    (fun _ => rfl) (fun _ _ => rfl)
+    (fun i x => publicSpnRoundInverse_right mds (rcs i) x) n st
+
+/-- Concrete public inverse in Rust's polynomial basis; no secret input is required. -/
+def rustPublicSpnInverse (rcs : Nat → BitVec 128 × BitVec 128)
+    (st : BitVec 128 × BitVec 128) : BitVec 128 × BitVec 128 :=
+  psiTower128Pair (publicSpnIterInverse parallelSeededMdsPair
+    (fun i => polyToTower128Pair (rcs i)) spnRounds (polyToTower128Pair st))
+
+theorem rustPublicSpnInverse_left (rcs : Nat → BitVec 128 × BitVec 128)
+    (st : BitVec 128 × BitVec 128) :
+    rustPublicSpnInverse rcs (rustSpnIter rcs spnRounds st) = st := by
+  rw [rustSpnIter_eq_tower]
+  unfold rustPublicSpnInverse
+  rw [polyToTower128Pair_psiTower128Pair]
+  have h := publicSpnIterInverse_left parallelSeededMdsPair
+    (fun i => polyToTower128Pair (rcs i)) spnRounds (polyToTower128Pair st)
+  simp only [parallelSeededMdsPair] at h ⊢
+  rw [h, psiTower128Pair_polyToTower128Pair]
+
+theorem rustPublicSpnInverse_right (rcs : Nat → BitVec 128 × BitVec 128)
+    (st : BitVec 128 × BitVec 128) :
+    rustSpnIter rcs spnRounds (rustPublicSpnInverse rcs st) = st := by
+  rw [rustSpnIter_eq_tower]
+  unfold rustPublicSpnInverse
+  rw [polyToTower128Pair_psiTower128Pair]
+  have h := publicSpnIterInverse_right parallelSeededMdsPair
+    (fun i => polyToTower128Pair (rcs i)) spnRounds (polyToTower128Pair st)
+  simp only [parallelSeededMdsPair] at h ⊢
+  rw [h, psiTower128Pair_polyToTower128Pair]
+
+abbrev PublicSpnState := BitVec 128 × BitVec 128
+
+def rustPublicSpn (rcs : Nat → PublicSpnState) : PublicPermutation PublicSpnState where
+  forward := rustSpnIter rcs spnRounds
+  inverse := rustPublicSpnInverse rcs
+  inverse_forward := rustPublicSpnInverse_left rcs
+  forward_inverse := rustPublicSpnInverse_right rcs
+
+/-- Whole-state feed-forward, not a sponge and not a secret-key block cipher. -/
+def publicSpnFeedForward (p : PublicPermutation PublicSpnState) (x : PublicSpnState) :
+    PublicSpnState := ((p.forward x).1 ^^^ x.1, (p.forward x).2 ^^^ x.2)
+
+theorem rustAlgebraicStep_eq_publicFeedForward (rcs : Nat → PublicSpnState)
+    (x : PublicSpnState) :
+    rustAlgebraicStep rcs x = publicSpnFeedForward (rustPublicSpn rcs) x := by
+  simp only [rustAlgebraicStep, publicSpnFeedForward, rustPublicSpn]
+
+/-- Native Rust integer ranges, so no extra natural-number framing alias is admitted. -/
+structure PublicChainAddress where
+  pkSeed : List UInt8
+  pkSeed_length : pkSeed.length = 32
+  epoch : Fin (2 ^ 32)
+  chainIdx : Fin (2 ^ 16)
+  step : UInt8
+
+/-- The family is indexed by the DERIVED tweak. Different addresses need not produce
+independent permutations, nor even different tweaks. cSHAKE remains an explicit parameter. -/
+def publicChainPermutation
+    (hash32 : List UInt8 → List (List UInt8) → List UInt8)
+    (address : PublicChainAddress) : PublicPermutation PublicSpnState :=
+  rustPublicSpn (rustSpnRoundConstants hash32
+    (rustDeriveChainTweak hash32 address.pkSeed address.epoch.val address.chainIdx.val address.step))
+
+/-- Exact lane framing and full-output connection to the deployed chain transcription. -/
+theorem rustParallelChainStep_eq_publicFeedForward
+    (hash32 : List UInt8 → List (List UInt8) → List UInt8)
+    (address : PublicChainAddress) (cur : List UInt8) :
+    rustParallelChainStep hash32 address.pkSeed address.epoch.val address.chainIdx.val address.step cur =
+      rustLanesToBytes32 (publicSpnFeedForward (publicChainPermutation hash32 address)
+        (rustBytes32ToLanes cur)) := by
+  simp only [rustParallelChainStep, publicSpnFeedForward, publicChainPermutation, rustPublicSpn, rustAlgebraicStep]
+
+/-- Chain composition preserves the per-position public address. There is no implicit
+fixed-permutation iteration: each step may derive different round constants. -/
+def publicChainRun
+    (hash32 : List UInt8 → List (List UInt8) → List UInt8) :
+    List PublicChainAddress → PublicSpnState → PublicSpnState
+  | [], x => x
+  | address :: rest, x => publicChainRun hash32 rest
+      (publicSpnFeedForward (publicChainPermutation hash32 address) x)
+
+def rustPublicChainRun
+    (hash32 : List UInt8 → List (List UInt8) → List UInt8) :
+    List PublicChainAddress → List UInt8 → List UInt8
+  | [], bytes => bytes
+  | address :: rest, bytes => rustPublicChainRun hash32 rest
+      (rustParallelChainStep hash32 address.pkSeed address.epoch.val address.chainIdx.val address.step bytes)
+
+theorem publicChainRun_bytes
+    (hash32 : List UInt8 → List (List UInt8) → List UInt8)
+    (addresses : List PublicChainAddress) (x : PublicSpnState) :
+    rustPublicChainRun hash32 addresses (rustLanesToBytes32 x) =
+      rustLanesToBytes32 (publicChainRun hash32 addresses x) := by
+  induction addresses generalizing x with
+  | nil => rfl
+  | cons address rest ih =>
+    simp only [rustPublicChainRun, publicChainRun,
+      rustParallelChainStep_eq_publicFeedForward, rustBytes32ToLanes_lanesToBytes32, ih]
+
+/-- A public inverse query constructs a fixed point of this feed-forward mode. This is
+NOT a chosen-target preimage attack and does not give a fixed point shared by chain steps. -/
+theorem publicSpnFeedForward_fixedPoint (p : PublicPermutation PublicSpnState) :
+    publicSpnFeedForward p (p.inverse (0#128, 0#128)) = p.inverse (0#128, 0#128) := by
+  unfold publicSpnFeedForward
+  rw [p.forward_inverse]
+  simp only [BitVec.zero_xor]
+
+theorem publicChain_fixedPoint_bytes
+    (hash32 : List UInt8 → List (List UInt8) → List UInt8) (address : PublicChainAddress) :
+    let node := rustLanesToBytes32 ((publicChainPermutation hash32 address).inverse (0#128, 0#128))
+    rustParallelChainStep hash32 address.pkSeed address.epoch.val address.chainIdx.val address.step node = node := by
+  dsimp only
+  rw [rustParallelChainStep_eq_publicFeedForward, rustBytes32ToLanes_lanesToBytes32,
+    publicSpnFeedForward_fixedPoint]
+
+/-- Idealization requires sampling this type, with a stated distribution. A fixed member
+is merely a permutation, and carries no pseudorandomness claim. -/
+def identityPublicPermutation : PublicPermutation PublicSpnState where
+  forward := id
+  inverse := id
+  inverse_forward := fun _ => rfl
+  forward_inverse := fun _ => rfl
+
+/-- Nonvacuity guard: the permutation laws alone cannot imply collision resistance
+of the feed-forward construction. Distinct explicit 256-bit nodes collide. -/
+theorem publicPermutation_laws_allow_feedForward_collision :
+    (0#128, 0#128) ≠ (1#128, 0#128) ∧
+    publicSpnFeedForward identityPublicPermutation (0#128, 0#128) =
+      publicSpnFeedForward identityPublicPermutation (1#128, 0#128) := by
+  constructor
+  · intro h
+    have h0 := congrArg Prod.fst h
+    contradiction
+  · decide
+
+/-- Primitive access includes both public directions. This operational classical subgame
+is also available to quantum adversaries, but does not purport to define quantum states. -/
+inductive PublicPermutationDirection where
+  | forward | inverse
+  deriving DecidableEq
+
+def publicPermutationQuery {State : Type} (p : PublicPermutation State)
+    (direction : PublicPermutationDirection) (x : State) : State :=
+  match direction with
+  | .forward => p.forward x
+  | .inverse => p.inverse x
+
+/-- Adaptive terminating public-primitive programs. The continuation receives the actual
+answer, not an assumed classically observable log of a coherent quantum query. -/
+inductive PublicPermutationProgram (State Result : Type) where
+  | done : Result → PublicPermutationProgram State Result
+  | query : PublicPermutationDirection → State →
+      (State → PublicPermutationProgram State Result) → PublicPermutationProgram State Result
+
+/-- Result and separate forward/inverse query counts along the actual execution. -/
+def runPublicPermutationProgram {State Result : Type} (p : PublicPermutation State) :
+    PublicPermutationProgram State Result → Result × Nat × Nat
+  | .done result => (result, 0, 0)
+  | .query direction x next =>
+      let answer := runPublicPermutationProgram p (next (publicPermutationQuery p direction x))
+      match direction with
+      | .forward => (answer.1, answer.2.1 + 1, answer.2.2)
+      | .inverse => (answer.1, answer.2.1, answer.2.2 + 1)
+
+def publicFixedPointAttack : PublicPermutationProgram PublicSpnState PublicSpnState :=
+  .query .inverse (0#128, 0#128) (fun x => .done x)
+
+theorem publicFixedPointAttack_one_inverse (p : PublicPermutation PublicSpnState) :
+    runPublicPermutationProgram p publicFixedPointAttack = (p.inverse (0#128, 0#128), 0, 1) := by
+  simp only [runPublicPermutationProgram, publicFixedPointAttack, publicPermutationQuery]
+
+/-- Mode-specific fixed-point game, with primitive access charged in each direction.
+Mode evaluation for checking the winning relation is one additional forward call.
+This event holds for every permutation, hence for every distribution over permutations. -/
+def publicFeedForwardFixedPointGame (p : PublicPermutation PublicSpnState)
+    (attack : PublicPermutationProgram PublicSpnState PublicSpnState) : Prop :=
+  let result := runPublicPermutationProgram p attack
+  result.2.1 = 0 ∧ result.2.2 ≤ 1 ∧ publicSpnFeedForward p result.1 = result.1
+
+theorem publicFixedPointAttack_wins (p : PublicPermutation PublicSpnState) :
+    publicFeedForwardFixedPointGame p publicFixedPointAttack :=
+  ⟨rfl, Nat.le_refl 1, publicSpnFeedForward_fixedPoint p⟩
+
+/-- Separate fresh-image inversion event for the feed-forward mode. A fixed-point
+witness is not an automatic winner here: the target depends on challenge x. -/
+def publicFeedForwardPreimageGame (p : PublicPermutation PublicSpnState)
+    (attack : PublicSpnState → PublicPermutationProgram PublicSpnState PublicSpnState)
+    (challenge : PublicSpnState) (forwardBudget inverseBudget : Nat) : Prop :=
+  let target := publicSpnFeedForward p challenge
+  let result := runPublicPermutationProgram p (attack target)
+  result.2.1 ≤ forwardBudget ∧ result.2.2 ≤ inverseBudget ∧
+    publicSpnFeedForward p result.1 = target
+
+
+end Qsag
+end
+
+public section
+namespace Qsag
+theorem polyToTower128_mds_constants :
+    polyToTower128 gf128MdsAPolyBits = gf128MdsATower ∧
+    polyToTower128 gf128MdsBPolyBits = gf128MdsBTower := by
+  refine ⟨?_, ?_⟩
+  · rw [← gf128_mds_constants_certified.1, polyToTower128_psiTower128ToPoly]
+  · rw [← gf128_mds_constants_certified.2.1, polyToTower128_psiTower128ToPoly]
+
+end Qsag
+end

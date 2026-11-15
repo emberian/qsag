@@ -1837,3 +1837,1661 @@ private theorem lazyRoScaledHits_bound_aux {Dom Code : Type} [DecidableEq Dom] [
     queries (given `(mSigned, dSigned)` with `encode dSigned = target`), its exact lazy-RO probability
     of outputting `m' ≠ mSigned` with `encode (H m') = target` is bounded by
     `((q + 1) * fiberCard n encode target) / 2 ^ n`. -/
+theorem classical_lazy_ro_fiber_search_bound {Dom Code : Type} [DecidableEq Dom] [DecidableEq Code]
+    (n q : Nat) (encode : BitVec n → Code) (mSigned : Dom) (dSigned : BitVec n)
+    (prog : OracleComp Dom (BitVec n) Dom) (hQB : QueryBounded q prog) :
+    let target := encode dSigned
+    let lazyProb : RatBound :=
+      ⟨lazyRoScaledHits n encode target mSigned q [(mSigned, dSigned)] prog,
+       (2 ^ n) ^ (q + 1),
+       Nat.pow_pos (Nat.two_pow_pos n)⟩
+    RatBound.le lazyProb
+      ⟨(q + 1) * fiberCard n encode target, 2 ^ n, Nat.two_pow_pos n⟩ := by
+  dsimp only [RatBound.le]
+  have hClean : ∀ x d, lookupLazyRo [(mSigned, dSigned)] x = some d →
+      x ≠ mSigned → encode d ≠ encode dSigned := by
+    intro x d hLk hNe
+    simp only [lookupLazyRo] at hLk
+    split at hLk
+    · rename_i hx; exact False.elim (hNe hx)
+    · cases hLk
+  have hAux := lazyRoScaledHits_bound_aux n encode (encode dSigned) mSigned q
+    [(mSigned, dSigned)] prog hQB hClean
+  have hMul := Nat.mul_le_mul_right (2 ^ n) hAux
+  rw [Nat.mul_assoc ((q + 1) * fiberCard n encode (encode dSigned)) ((2 ^ n) ^ q) (2 ^ n),
+      ← Nat.pow_succ] at hMul
+  exact hMul
+
+/-! ### §2.6 Multi-Target `ADRS` Domain Separation, Quantum BHT Collisions & Fiat–Shamir Bounds -/
+
+/-- Exact QROM single-target (`M = 1`) vs `M`-target Zhandry/Grover preimage bound over `n` bits. -/
+def quantumZhandryMultiTargetBound (n M qHash : Nat) : RatBound :=
+  ⟨8 * M * (qHash + 1) ^ 2, 2 ^ n, Nat.two_pow_pos n⟩
+
+def quantumGroverSingleTargetBound (n qHash : Nat) : RatBound :=
+  quantumZhandryMultiTargetBound n 1 qHash
+
+/-- Pure Grover query-scale bound `qHash ^ 2 / 2 ^ n` (without constant reduction overhead). -/
+def groverPureSearchBound (n qHash : Nat) : RatBound :=
+  ⟨qHash ^ 2, 2 ^ n, Nat.two_pow_pos n⟩
+
+/-- Classical birthday collision bound `(qHash + 1) ^ 2 / 2 ^ n`. -/
+def classicalBirthdayCollisionBound (n qHash : Nat) : RatBound :=
+  ⟨(qHash + 1) ^ 2, 2 ^ n, Nat.two_pow_pos n⟩
+
+/-- Quantum Brassard–Høyer–Tapp (`BHT`) / Chailloux–Naya-Plasencia–Schrottenloher (`CNS`) QROM
+    unrestricted collision bound `8 * (qHash + 1) ^ 3 / 2 ^ n` (and pure cubic `qHash ^ 3 / 2 ^ n`). -/
+def quantumBhtCollisionBound (n qHash : Nat) : RatBound :=
+  ⟨8 * (qHash + 1) ^ 3, 2 ^ n, Nat.two_pow_pos n⟩
+
+def quantumBhtPureCubicBound (n qHash : Nat) : RatBound :=
+  ⟨qHash ^ 3, 2 ^ n, Nat.two_pow_pos n⟩
+
+/-- Classical Fiat–Shamir single-challenge grinding bound `(qHash + 1) * pErr`. -/
+def classicalFiatShamirBound (qHash : Nat) (pErr : RatBound) : RatBound :=
+  RatBound.scale (qHash + 1) pErr
+
+/-- Quantum Fiat–Shamir offline Grover grinding bound `8 * (qHash + 1) ^ 2 * pErr` (matching
+    `qrom_fiber_search_bound` on bad-challenge fibers!). -/
+def quantumGroverGrindingBound (qHash : Nat) (pErr : RatBound) : RatBound :=
+  RatBound.scale (8 * (qHash + 1) ^ 2) pErr
+
+/-- Don–Fehr–Majenz (`[DFM20]`) QROM Measure-and-Reprogram bound `(2 * qHash + 1) ^ (2 * mu) * pErr`
+    for a `(2 * mu + 1)`-move public-coin interactive argument with `mu` challenge rounds. -/
+def quantumDfmMeasureReprogramBound (mu qHash : Nat) (pErr : RatBound) : RatBound :=
+  RatBound.scale ((2 * qHash + 1) ^ (2 * mu)) pErr
+
+/-- **Unitary O2H Justification of Quantum Fiat–Shamir Grinding**:
+    Offline quantum grinding by ANY `qHash`-query unitary circuit `A` over an `n`-bit transcript
+    challenge space where bad challenges satisfy `acceptBad : BitVec n → Bool` (`pErr = K / 2^n`)
+    is bounded directly by `quantumGroverGrindingBound qHash pErr` via `qrom_fiber_search_bound`! -/
+theorem quantum_fs_grover_grinding_from_o2h {n w cardAnc qHash : Nat}
+    (A : QuantumAdv (2 ^ n) (w + 1) cardAnc qHash) (acceptBad : BitVec n → Bool) :
+    let normFinal := QVec.stateNormSq (runQuantumAdv A (blankFiberOracle n w))
+    let pErr : RatBound := ⟨fiberCard n acceptBad true, 2 ^ n, Nat.two_pow_pos n⟩
+    RatBound.le
+      ⟨qsum (2 ^ n) (fun m =>
+         QVec.measureNormSq
+           (fun x => decide (acceptBad (BitVec.ofFin x ^^^ BitVec.ofFin m) = true))
+           (runQuantumAdv A (shiftedFiberOracle n w acceptBad true (BitVec.ofFin m)))),
+       2 ^ n * normFinal,
+       Nat.mul_pos (Nat.two_pow_pos n) (runQuantumAdv_normSq_pos A (blankFiberOracle n w))⟩
+      (quantumGroverGrindingBound qHash pErr) :=
+  (qrom_fiber_search_bound A acceptBad true).2
+
+/-- **`ADRS` Domain-Separation Multi-Target Reduction (`M = 1`)**:
+    Binding distinct `(pkSeed, layer, tree, kind, keyPair, chainIdx, hashStep)` 32-byte `HashAdrs`
+    tweaks per one-time chain step isolates each target preimage (`M = 1`), whereas sharing an
+    untweaked oracle across `M ≥ 2` signatures incurs a strict `M`-fold multi-target loss. -/
+theorem adrs_tweak_reduces_multitarget_to_single_target (n qHash : Nat) :
+    quantumZhandryMultiTargetBound n 1 qHash = quantumGroverSingleTargetBound n qHash ∧
+    (∀ M : Nat, 2 ≤ M →
+      RatBound.lt (quantumGroverSingleTargetBound n qHash)
+                  (quantumZhandryMultiTargetBound n M qHash)) := by
+  refine ⟨rfl, ?_⟩
+  intro M hM
+  unfold RatBound.lt quantumGroverSingleTargetBound quantumZhandryMultiTargetBound
+  dsimp only
+  have hPosSq : 0 < (qHash + 1) ^ 2 := Nat.pow_pos (Nat.succ_pos qHash)
+  have hPosPow : 0 < 2 ^ n := Nat.two_pow_pos n
+  have hLt8 : 8 * 1 < 8 * M := by omega
+  have hLtNum : 8 * 1 * (qHash + 1) ^ 2 < 8 * M * (qHash + 1) ^ 2 :=
+    Nat.mul_lt_mul_of_pos_right hLt8 hPosSq
+  exact Nat.mul_lt_mul_of_pos_right hLtNum hPosPow
+
+/-- Parametric QROM bit-margin theorem: for `qHash + 1 ≤ 2 ^ k` and `2 * k + 3 + b ≤ n`,
+    `quantumGroverSingleTargetBound n qHash` achieves `atLeastBits b`. -/
+theorem qrom_single_target_parametric_bits {n k b qHash : Nat}
+    (hq : qHash + 1 ≤ 2 ^ k) (hWidth : 2 * k + 3 + b ≤ n) :
+    atLeastBits b (quantumGroverSingleTargetBound n qHash) := by
+  unfold atLeastBits quantumGroverSingleTargetBound quantumZhandryMultiTargetBound
+  dsimp only
+  have hSq : (qHash + 1) ^ 2 ≤ (2 ^ k) ^ 2 := Nat.pow_le_pow_left hq 2
+  rw [← Nat.pow_mul, Nat.mul_comm k 2] at hSq
+  have h8 : 8 * (qHash + 1) ^ 2 ≤ 2 ^ 3 * 2 ^ (2 * k) := Nat.mul_le_mul_left 8 hSq
+  rw [← Nat.pow_add, Nat.add_comm 3 (2 * k)] at h8
+  have hMulB := Nat.mul_le_mul_right (2 ^ b) h8
+  rw [← Nat.pow_add] at hMulB
+  exact Nat.le_trans hMulB (Nat.pow_le_pow_right (by decide) hWidth)
+
+/-! ## §3. Multi-Round Fiat–Shamir QROM Reduction via Measure-and-Reprogram & Online Merkle Extraction -/
+
+/-! ### §3.1 Unitary `(2 * Q + 1)`-Branch Amplitude Decomposition & `(2 * Q + 1)^2` RBR Step -/
+
+/-- Project `QVec` onto a single target query coordinate `xStar : Fin cardX`. -/
+def projSingle {cardX w cardAnc : Nat} (xStar : Fin cardX)
+    (ψ : QVec cardX w cardAnc) : QVec cardX w cardAnc :=
+  fun x y a => if x = xStar then ψ x y a else GaussInt.zero
+
+/-- Negate all Gaussian-integer amplitudes of a `QVec`. -/
+def negQVec {cardX w cardAnc : Nat} (ψ : QVec cardX w cardAnc) : QVec cardX w cardAnc :=
+  (QVec.zero cardX w cardAnc).sub ψ
+
+private theorem projSingle_normSq {cardX w cardAnc : Nat} (xStar : Fin cardX)
+    (ψ : QVec cardX w cardAnc) :
+    QVec.stateNormSq (projSingle xStar ψ) = QVec.queryWeight ψ xStar := by
+  unfold QVec.stateNormSq
+  have hPt :
+      qsum cardX (fun x => QVec.queryWeight (projSingle xStar ψ) x) =
+      qsum cardX (fun x => (if x = xStar then 1 else 0) * QVec.queryWeight ψ xStar) := by
+    apply qsum_congr; intro x
+    by_cases hx : x = xStar
+    · subst hx
+      simp only [↓reduceIte, Nat.one_mul, QVec.queryWeight, projSingle]
+    · simp only [hx, ↓reduceIte, Nat.zero_mul, QVec.queryWeight, projSingle]
+      have h0 : qsum (2 ^ w) (fun _ => qsum cardAnc (fun _ => GaussInt.normSq GaussInt.zero)) =
+          qsum (2 ^ w) (fun _ => 0) := by
+        apply qsum_congr; intro _
+        have ha : GaussInt.normSq GaussInt.zero = 0 := rfl
+        rw [qsum_congr (fun _ => ha), qsum_const, Nat.mul_zero]
+      rw [h0, qsum_const, Nat.mul_zero]
+  rw [hPt, qsum_mul_right, qsum_eq_indicator, Nat.one_mul]
+
+private theorem negQVec_normSq {cardX w cardAnc : Nat} (ψ : QVec cardX w cardAnc) :
+    QVec.stateNormSq (negQVec ψ) = QVec.stateNormSq ψ := by
+  have hIntAbs : ∀ z : Int, (0 - z).natAbs = z.natAbs := by
+    intro z; rw [Int.zero_sub, Int.natAbs_neg]
+  unfold QVec.stateNormSq QVec.queryWeight negQVec QVec.sub QVec.zero
+  apply qsum_congr; intro x
+  apply qsum_congr; intro y
+  apply qsum_congr; intro a
+  unfold GaussInt.normSq GaussInt.sub GaussInt.zero
+  dsimp only
+  rw [hIntAbs, hIntAbs]
+
+private theorem oracleXor_reprogram_diff_eq_projSingle {cardX w cardAnc : Nat}
+    (H : Fin cardX → BitVec w) (xStar : Fin cardX) (ch : BitVec w)
+    (ψ : QVec cardX w cardAnc) :
+    (oracleXor (reprogramOracle H xStar ch) ψ).sub (oracleXor H ψ) =
+      (oracleXor (reprogramOracle H xStar ch) (projSingle xStar ψ)).sub
+        (oracleXor H (projSingle xStar ψ)) := by
+  funext x y a
+  by_cases hx : x = xStar
+  · subst hx
+    simp only [QVec.sub, oracleXor, projSingle, ↓reduceIte]
+  · simp only [QVec.sub, oracleXor, projSingle, reprogramOracle, hx, ↓reduceIte]
+    unfold GaussInt.sub GaussInt.zero
+    ext <;> dsimp only <;> omega
+
+/-- Structural `2 * q + 1` counter matching `finGaussSum` & `qsum` front-peeling recursion. -/
+def twoMulPlusOne : Nat → Nat
+  | 0 => 1
+  | q + 1 => (twoMulPlusOne q + 1) + 1
+
+private theorem twoMulPlusOne_eq (q : Nat) : twoMulPlusOne q = 2 * q + 1 := by
+  induction q with
+  | zero => rfl
+  | succ m ih => simp only [twoMulPlusOne, ih]; omega
+
+/-- Interleaves `q` positive reprogramming branches, `q` negative pre-reprogramming branches, and
+    `1` base execution branch into `twoMulPlusOne q` (`= 2 * q + 1`) vectors. -/
+def interleaveDfmBranches {α : Type} :
+    (q : Nat) → (Fin q → α) → (Fin q → α) → α → Fin (twoMulPlusOne q) → α
+  | 0, _, _, base, _ => base
+  | q + 1, posB, _, _, ⟨0, _⟩ => posB ⟨0, Nat.zero_lt_succ q⟩
+  | q + 1, _, negB, _, ⟨1, _⟩ => negB ⟨0, Nat.zero_lt_succ q⟩
+  | q + 1, posB, negB, base, ⟨k + 2, hk⟩ =>
+    interleaveDfmBranches q
+      (fun t => posB ⟨t.1 + 1, Nat.succ_lt_succ t.2⟩)
+      (fun t => negB ⟨t.1 + 1, Nat.succ_lt_succ t.2⟩)
+      base
+      ⟨k, Nat.lt_of_succ_lt_succ (Nat.lt_of_succ_lt_succ hk)⟩
+
+private theorem finGaussSum_interleaveDfmBranches :
+    ∀ (q : Nat) (posB negB : Fin q → GaussInt) (base : GaussInt),
+      finGaussSum (twoMulPlusOne q) (interleaveDfmBranches q posB negB base) =
+        GaussInt.add (finGaussSum q (fun t => GaussInt.add (posB t) (negB t))) base
+  | 0, _, _, base => by
+    simp only [twoMulPlusOne, finGaussSum, interleaveDfmBranches, GaussInt.add, GaussInt.zero]
+    ext <;> dsimp only <;> omega
+  | q + 1, posB, negB, base => by
+    let posTail : Fin q → GaussInt := fun t => posB ⟨t.1 + 1, Nat.succ_lt_succ t.2⟩
+    let negTail : Fin q → GaussInt := fun t => negB ⟨t.1 + 1, Nat.succ_lt_succ t.2⟩
+    have ih := finGaussSum_interleaveDfmBranches q posTail negTail base
+    change GaussInt.add (posB ⟨0, Nat.zero_lt_succ q⟩)
+        (GaussInt.add (negB ⟨0, Nat.zero_lt_succ q⟩)
+          (finGaussSum (twoMulPlusOne q) (interleaveDfmBranches q posTail negTail base))) =
+      GaussInt.add
+        (GaussInt.add
+          (GaussInt.add (posB ⟨0, Nat.zero_lt_succ q⟩) (negB ⟨0, Nat.zero_lt_succ q⟩))
+          (finGaussSum q (fun t => GaussInt.add (posTail t) (negTail t))))
+        base
+    rw [ih]
+    unfold GaussInt.add
+    ext <;> dsimp only <;> omega
+
+private theorem qsum_interleaveDfmBranches {α : Type} (wt : α → Nat) :
+    ∀ (q : Nat) (posB negB : Fin q → α) (base : α),
+      qsum (twoMulPlusOne q) (fun k => wt (interleaveDfmBranches q posB negB base k)) =
+        qsum q (fun t => wt (posB t) + wt (negB t)) + wt base
+  | 0, _, _, base => by simp [twoMulPlusOne, qsum_zero, qsum_succ, interleaveDfmBranches]
+  | q + 1, posB, negB, base => by
+    let posTail : Fin q → α := fun t => posB ⟨t.1 + 1, Nat.succ_lt_succ t.2⟩
+    let negTail : Fin q → α := fun t => negB ⟨t.1 + 1, Nat.succ_lt_succ t.2⟩
+    have ih := qsum_interleaveDfmBranches wt q posTail negTail base
+    simp only [twoMulPlusOne, qsum_succ]
+    change wt (posB ⟨0, Nat.zero_lt_succ q⟩) +
+        (wt (negB ⟨0, Nat.zero_lt_succ q⟩) +
+          qsum (twoMulPlusOne q) (fun k => wt (interleaveDfmBranches q posTail negTail base k))) =
+      (wt (posB ⟨0, Nat.zero_lt_succ q⟩) + wt (negB ⟨0, Nat.zero_lt_succ q⟩) +
+        qsum q (fun t => wt (posTail t) + wt (negTail t))) + wt base
+    rw [ih]
+    omega
+
+private theorem interleaveDfmBranches_eval {cardX w cardAnc : Nat}
+    (x : Fin cardX) (y : Fin (2 ^ w)) (a : Fin cardAnc) :
+    ∀ (m : Nat) (pV nV : Fin m → QVec cardX w cardAnc) (bV : QVec cardX w cardAnc)
+      (k : Fin (twoMulPlusOne m)),
+      interleaveDfmBranches m pV nV bV k x y a =
+        interleaveDfmBranches m (fun t => pV t x y a) (fun t => nV t x y a) (bV x y a) k
+  | 0, _, _, _, _ => rfl
+  | _ + 1, _, _, _, ⟨0, _⟩ => rfl
+  | _ + 1, _, _, _, ⟨1, _⟩ => rfl
+  | m' + 1, pV, nV, bV, ⟨k' + 2, hk⟩ =>
+    interleaveDfmBranches_eval x y a m'
+      (fun t => pV ⟨t.1 + 1, Nat.succ_lt_succ t.2⟩)
+      (fun t => nV ⟨t.1 + 1, Nat.succ_lt_succ t.2⟩)
+      bV
+      ⟨k', Nat.lt_of_succ_lt_succ (Nat.lt_of_succ_lt_succ hk)⟩
+
+private theorem advStateAt_congr_idx {cardX w cardAnc q : Nat}
+    (A : QuantumAdv cardX w cardAnc q) (H : Fin cardX → BitVec w)
+    {k₁ k₂ : Nat} (hk₁ : k₁ ≤ q) (hk₂ : k₂ ≤ q) (hEq : k₁ = k₂) :
+    advStateAt A H k₁ hk₁ = advStateAt A H k₂ hk₂ := by
+  subst hEq
+  rfl
+
+private theorem telescope_hybridAdv_reprogram {cardX w cardAnc q : Nat}
+    (A : QuantumAdv cardX w cardAnc q)
+    (H : Fin cardX → BitVec w) (xStar : Fin cardX) (ch : BitVec w)
+    (x : Fin cardX) (y : Fin (2 ^ w)) (a : Fin cardAnc) :
+    let H_ch := reprogramOracle H xStar ch
+    let posB : Fin q → QVec cardX w cardAnc := fun t =>
+      applySuffixFrom A H_ch t.1 t.2
+        (oracleXor H_ch (projSingle xStar (advStateAt A H t.1 (Nat.le_of_lt t.2))))
+    let negB : Fin q → QVec cardX w cardAnc := fun t =>
+      negQVec (applySuffixFrom A H_ch t.1 t.2
+        (oracleXor H (projSingle xStar (advStateAt A H t.1 (Nat.le_of_lt t.2)))))
+    finGaussSum (twoMulPlusOne q)
+        (fun k => interleaveDfmBranches q posB negB (runQuantumAdv A H) k x y a) =
+      runQuantumAdv A H_ch x y a := by
+  dsimp only
+  let H_ch := reprogramOracle H xStar ch
+  let posVal : Fin q → GaussInt := fun t =>
+    applySuffixFrom A H_ch t.1 t.2
+      (oracleXor H_ch (projSingle xStar (advStateAt A H t.1 (Nat.le_of_lt t.2)))) x y a
+  let negVal : Fin q → GaussInt := fun t =>
+    negQVec (applySuffixFrom A H_ch t.1 t.2
+      (oracleXor H (projSingle xStar (advStateAt A H t.1 (Nat.le_of_lt t.2))))) x y a
+  have hInter :
+      finGaussSum (twoMulPlusOne q)
+        (fun k => interleaveDfmBranches q
+          (fun t => applySuffixFrom A H_ch t.1 t.2
+            (oracleXor H_ch (projSingle xStar (advStateAt A H t.1 (Nat.le_of_lt t.2)))))
+          (fun t => negQVec (applySuffixFrom A H_ch t.1 t.2
+            (oracleXor H (projSingle xStar (advStateAt A H t.1 (Nat.le_of_lt t.2))))))
+          (runQuantumAdv A H) k x y a) =
+      finGaussSum (twoMulPlusOne q)
+        (interleaveDfmBranches q posVal negVal (runQuantumAdv A H x y a)) :=
+    congrArg (finGaussSum (twoMulPlusOne q))
+      (funext (interleaveDfmBranches_eval x y a q _ _ _))
+  rw [hInter, finGaussSum_interleaveDfmBranches]
+  have hStepEq : ∀ t : Fin q,
+      GaussInt.add (posVal t) (negVal t) =
+        GaussInt.sub
+          (hybridAdv A H_ch H t.1 (Nat.le_of_lt t.2) x y a)
+          (hybridAdv A H_ch H (t.1 + 1) t.2 x y a) := by
+    intro t
+    have hSubVec :
+        (hybridAdv A H_ch H t.1 (Nat.le_of_lt t.2)).sub (hybridAdv A H_ch H (t.1 + 1) t.2) =
+          (applySuffixFrom A H_ch t.1 t.2
+            (oracleXor H_ch (projSingle xStar (advStateAt A H t.1 (Nat.le_of_lt t.2))))).sub
+          (applySuffixFrom A H_ch t.1 t.2
+            (oracleXor H (projSingle xStar (advStateAt A H t.1 (Nat.le_of_lt t.2))))) := by
+      have hRhs2 :
+          applySuffixFrom A H_ch t.1 t.2 (oracleXor H (advStateAt A H t.1 (Nat.le_of_lt t.2))) =
+            hybridAdv A H_ch H (t.1 + 1) t.2 := by
+        rw [applySuffixFrom.eq_def]
+        dsimp only
+        have hStep : (A.steps t).apply (oracleXor H (advStateAt A H t.1 (Nat.le_of_lt t.2))) =
+            advStateAt A H (t.1 + 1) t.2 := rfl
+        rw [hStep]
+        unfold hybridAdv
+        if hNext : t.1 + 1 < q then
+          simp only [hNext, ↓reduceDIte]
+        else
+          have hEqQ : t.1 + 1 = q := by omega
+          simp only [hNext, ↓reduceDIte]
+          exact advStateAt_congr_idx A H t.2 (Nat.le_refl q) hEqQ
+      have hLhs1 : hybridAdv A H_ch H t.1 (Nat.le_of_lt t.2) =
+          applySuffixFrom A H_ch t.1 t.2 (oracleXor H_ch (advStateAt A H t.1 (Nat.le_of_lt t.2))) := by
+        unfold hybridAdv
+        simp only [t.2, ↓reduceDIte]
+      rw [hLhs1, ← hRhs2, ← applySuffixFrom_sub,
+          oracleXor_reprogram_diff_eq_projSingle H xStar ch, applySuffixFrom_sub]
+    have hAtCoord := congrFun (congrFun (congrFun hSubVec x) y) a
+    dsimp only [posVal, negVal, negQVec, QVec.sub, QVec.zero] at hAtCoord ⊢
+    rw [hAtCoord]
+    unfold GaussInt.add GaussInt.sub GaussInt.zero
+    ext <;> dsimp only <;> omega
+  have hCongrG : ∀ {m : Nat} (f g : Fin m → GaussInt),
+      (∀ i, f i = g i) → finGaussSum m f = finGaussSum m g := by
+    intro m f g hfg
+    exact congrArg (finGaussSum m) (funext hfg)
+  rw [hCongrG _ _ hStepEq]
+  have hTele : ∀ (m : Nat) (seq : (k : Nat) → k ≤ m → GaussInt),
+      finGaussSum m (fun t => GaussInt.sub (seq t.1 (Nat.le_of_lt t.2)) (seq (t.1 + 1) t.2)) =
+        GaussInt.sub (seq 0 (Nat.zero_le m)) (seq m (Nat.le_refl m)) := by
+    intro m
+    induction m with
+    | zero => intro seq; simp [finGaussSum, GaussInt.sub, GaussInt.zero]
+    | succ m' ihm =>
+      intro seq
+      simp only [finGaussSum]
+      rw [ihm (fun k hk => seq (k + 1) (Nat.succ_le_succ hk))]
+      unfold GaussInt.add GaussInt.sub
+      ext <;> dsimp only <;> omega
+  rw [hTele q (fun k hk => hybridAdv A H_ch H k hk x y a)]
+  have hHyb0 : hybridAdv A H_ch H 0 (Nat.zero_le q) = runQuantumAdv A H_ch := by
+    have hSuffEq : ∀ (k : Nat) (hk : k ≤ q),
+        (if hlt : k < q then applySuffixFrom A H_ch k hlt (oracleXor H_ch (advStateAt A H_ch k hk))
+         else advStateAt A H_ch q (Nat.le_refl q)) = runQuantumAdv A H_ch := by
+      intro k hk
+      induction hRem : q - k generalizing k with
+      | zero =>
+        have hEqQ : k = q := by omega
+        subst hEqQ
+        simp [runQuantumAdv]
+      | succ rem ihRem =>
+        have hlt : k < q := by omega
+        simp only [hlt, ↓reduceDIte]
+        rw [applySuffixFrom.eq_def]
+        dsimp only
+        have hAdvNext : (A.steps ⟨k, hlt⟩).apply (oracleXor H_ch (advStateAt A H_ch k hk)) =
+            advStateAt A H_ch (k + 1) hlt := rfl
+        rw [hAdvNext]
+        if hNext : k + 1 < q then
+          simp only [hNext, ↓reduceDIte]
+          have ih' := ihRem (k + 1) (Nat.le_of_lt hNext) (by omega)
+          simp only [hNext, ↓reduceDIte] at ih'
+          exact ih'
+        else
+          have hEqQ : k + 1 = q := by omega
+          simp only [hNext, ↓reduceDIte, runQuantumAdv]
+          exact advStateAt_congr_idx A H_ch hlt (Nat.le_refl q) hEqQ
+    cases q with
+    | zero => rfl
+    | succ q' =>
+      have hPos : 0 < q' + 1 := Nat.zero_lt_succ q'
+      have h0 := hSuffEq 0 (Nat.zero_le (q' + 1))
+      simp only [hPos, ↓reduceDIte] at h0
+      unfold hybridAdv
+      simp only [hPos, ↓reduceDIte]
+      exact h0
+  have hHybQ : hybridAdv A H_ch H q (Nat.le_refl q) = runQuantumAdv A H := by
+    unfold hybridAdv runQuantumAdv
+    simp
+  rw [hHyb0, hHybQ]
+  dsimp only [H_ch]
+  unfold GaussInt.add GaussInt.sub
+  ext <;> dsimp only <;> omega
+
+/-- `ch`-independent squared-amplitude envelope of `A` reprogrammed at `xStar` under `H`, for an
+    arbitrary OUTPUT event `T` on the final query/output register. -/
+def dfmEventEnvelope {cardX w cardAnc q : Nat}
+    (A : QuantumAdv cardX w cardAnc q) (H : Fin cardX → BitVec w) (xStar : Fin cardX)
+    (T : Fin cardX → Bool) : Nat :=
+  qsum q (fun t =>
+    2 * (suffixScale A t.1 (Nat.le_of_lt t.2) *
+      QVec.queryWeight (advStateAt A H t.1 (Nat.le_of_lt t.2)) xStar)) +
+    QVec.queryMassOn T (runQuantumAdv A H)
+
+private theorem queryMassOn_reprogram_le_dfmEventEnvelope {cardX w cardAnc q : Nat}
+    (A : QuantumAdv cardX w cardAnc q) (H : Fin cardX → BitVec w)
+    (xStar : Fin cardX) (ch : BitVec w) (T : Fin cardX → Bool) :
+    QVec.queryMassOn T (runQuantumAdv A (reprogramOracle H xStar ch)) ≤
+      (2 * q + 1) * dfmEventEnvelope A H xStar T := by
+  let H_ch := reprogramOracle H xStar ch
+  let posB : Fin q → QVec cardX w cardAnc := fun t =>
+    applySuffixFrom A H_ch t.1 t.2
+      (oracleXor H_ch (projSingle xStar (advStateAt A H t.1 (Nat.le_of_lt t.2))))
+  let negB : Fin q → QVec cardX w cardAnc := fun t =>
+    negQVec (applySuffixFrom A H_ch t.1 t.2
+      (oracleXor H (projSingle xStar (advStateAt A H t.1 (Nat.le_of_lt t.2)))))
+  let V := interleaveDfmBranches q posB negB (runQuantumAdv A H)
+  have hPtCS : ∀ x : Fin cardX,
+      QVec.queryWeight (runQuantumAdv A H_ch) x ≤
+        twoMulPlusOne q * qsum (twoMulPlusOne q) (fun k => QVec.queryWeight (V k) x) := by
+    intro x
+    unfold QVec.queryWeight
+    have hStep1 :
+        qsum (2 ^ w) (fun y => qsum cardAnc (fun a =>
+          GaussInt.normSq (runQuantumAdv A H_ch x y a))) ≤
+        qsum (2 ^ w) (fun y => qsum cardAnc (fun a =>
+          twoMulPlusOne q * qsum (twoMulPlusOne q) (fun k => GaussInt.normSq (V k x y a)))) := by
+      apply qsum_le_qsum; intro y
+      apply qsum_le_qsum; intro a
+      rw [← telescope_hybridAdv_reprogram A H xStar ch x y a]
+      exact normSq_finGaussSum_le (twoMulPlusOne q) (fun k => V k x y a)
+    apply Nat.le_trans hStep1
+    have hSwap : ∀ y,
+        qsum cardAnc (fun a =>
+          twoMulPlusOne q * qsum (twoMulPlusOne q) (fun k => GaussInt.normSq (V k x y a))) =
+        twoMulPlusOne q * qsum (twoMulPlusOne q) (fun k =>
+          qsum cardAnc (fun a => GaussInt.normSq (V k x y a))) := by
+      intro y
+      rw [qsum_mul_left, qsum_comm]
+    rw [qsum_congr hSwap, qsum_mul_left, qsum_comm]
+    exact Nat.le_refl _
+  have hMass :
+      QVec.queryMassOn T (runQuantumAdv A H_ch) ≤
+        twoMulPlusOne q * qsum (twoMulPlusOne q) (fun k => QVec.queryMassOn T (V k)) := by
+    have hPt :
+        qsum cardX (fun x =>
+          if T x = true then QVec.queryWeight (runQuantumAdv A H_ch) x else 0) ≤
+        qsum cardX (fun x =>
+          twoMulPlusOne q * qsum (twoMulPlusOne q) (fun k =>
+            if T x = true then QVec.queryWeight (V k) x else 0)) := by
+      apply qsum_le_qsum; intro x
+      cases T x
+      · simp only [Bool.false_eq_true, ↓reduceIte, Nat.zero_le]
+      · simp only [↓reduceIte]
+        exact hPtCS x
+    rw [qsum_mul_left, qsum_comm] at hPt
+    exact hPt
+  rw [qsum_interleaveDfmBranches (fun φ => QVec.queryMassOn T φ), twoMulPlusOne_eq] at hMass
+  apply Nat.le_trans hMass
+  apply Nat.mul_le_mul_left (2 * q + 1)
+  unfold dfmEventEnvelope
+  apply Nat.add_le_add_right
+  apply qsum_le_qsum; intro t
+  have hPosNorm :
+      QVec.queryMassOn T (posB t) ≤
+        suffixScale A t.1 (Nat.le_of_lt t.2) *
+          QVec.queryWeight (advStateAt A H t.1 (Nat.le_of_lt t.2)) xStar := by
+    have h1 := QVec.queryMassOn_le_stateNormSq T (posB t)
+    dsimp only [posB] at h1
+    rw [applySuffixFrom_normSq, oracleXor_isometry, projSingle_normSq] at h1
+    exact h1
+  have hNegNorm :
+      QVec.queryMassOn T (negB t) ≤
+        suffixScale A t.1 (Nat.le_of_lt t.2) *
+          QVec.queryWeight (advStateAt A H t.1 (Nat.le_of_lt t.2)) xStar := by
+    have h1 := QVec.queryMassOn_le_stateNormSq T (negB t)
+    dsimp only [negB] at h1
+    rw [negQVec_normSq, applySuffixFrom_normSq, oracleXor_isometry, projSingle_normSq] at h1
+    exact h1
+  omega
+
+private theorem qsum_queryMassOn_fiber {cardX w cardAnc : Nat}
+    (proj : Fin cardX → Fin cardX) (ψ : QVec cardX w cardAnc) :
+    qsum cardX (fun xStar => QVec.queryMassOn (fun x => decide (xStar = proj x)) ψ) =
+      QVec.stateNormSq ψ := by
+  unfold QVec.queryMassOn QVec.stateNormSq
+  rw [qsum_comm]
+  apply qsum_congr; intro x
+  have h : qsum cardX (fun xs =>
+      if decide (xs = proj x) = true then QVec.queryWeight ψ x else 0) =
+      qsum cardX (fun xs => if xs = proj x then QVec.queryWeight ψ x else 0) := by
+    apply qsum_congr; intro xs
+    simp only [decide_eq_true_eq]
+  rw [h, qsum_ite_eq]
+
+private theorem queryMassOn_point_eq {cardX w cardAnc : Nat}
+    (ψ : QVec cardX w cardAnc) (xStar : Fin cardX) :
+    QVec.queryMassOn (fun x => decide (xStar = x)) ψ = QVec.queryWeight ψ xStar := by
+  unfold QVec.queryMassOn
+  have hEq : qsum cardX (fun x =>
+      if decide (xStar = x) = true then QVec.queryWeight ψ x else 0) =
+      qsum cardX (fun x => if x = xStar then QVec.queryWeight ψ xStar else 0) := by
+    apply qsum_congr; intro x
+    by_cases hx : x = xStar
+    · subst hx; simp
+    · have hx' : ¬ xStar = x := fun h => hx h.symm
+      simp [hx, hx']
+  rw [hEq, qsum_ite_eq]
+
+private theorem sum_dfmEventEnvelope_fiber_eq {cardX w cardAnc q : Nat}
+    (A : QuantumAdv cardX w cardAnc q) (H : Fin cardX → BitVec w)
+    (proj : Fin cardX → Fin cardX) :
+    qsum cardX (fun xStar =>
+      dfmEventEnvelope A H xStar (fun x => decide (xStar = proj x))) =
+      (2 * q + 1) * QVec.stateNormSq (runQuantumAdv A H) := by
+  unfold dfmEventEnvelope
+  rw [qsum_add, qsum_comm, qsum_queryMassOn_fiber]
+  have hEachT :
+      qsum q (fun t =>
+        qsum cardX (fun xStar =>
+          2 * (suffixScale A t.1 (Nat.le_of_lt t.2) *
+            QVec.queryWeight (advStateAt A H t.1 (Nat.le_of_lt t.2)) xStar))) =
+      qsum q (fun _ => 2 * QVec.stateNormSq (runQuantumAdv A H)) := by
+    apply qsum_congr; intro t
+    rw [qsum_mul_left 2, qsum_mul_left (suffixScale A t.1 (Nat.le_of_lt t.2))]
+    change 2 * (suffixScale A t.1 (Nat.le_of_lt t.2) *
+        QVec.stateNormSq (advStateAt A H t.1 (Nat.le_of_lt t.2))) = _
+    rw [advStateAt_normSq, ← Nat.mul_assoc (suffixScale A t.1 _),
+        Nat.mul_comm (suffixScale A t.1 _), prefix_mul_suffix_eq_total,
+        ← runQuantumAdv_normSq A H]
+  rw [hEachT, qsum_const]
+  rw [← Nat.mul_assoc q 2, Nat.mul_comm q 2, Nat.add_mul, Nat.one_mul]
+
+/-- **Projected Unitary Measure-and-Reprogram RBR Step
+    (`qrom_unitary_measure_reprogram_rbr_step_projected`)**:
+    For ANY `Q`-query unitary quantum adversary `A` (arbitrary scaled unitaries between
+    superposition oracle calls, i.e. fully adaptive), ANY background oracle `H`, and ANY
+    projection `proj` from the adversary's final OUTPUT register to the Fiat–Shamir query point
+    it must be consistent with (in a transcript-chained `k`-round protocol the output is the full
+    transcript and `proj` returns its round-`r` prefix), the total Born mass of outputs whose
+    projected point `xStar = proj x` is doomed and is reprogrammed to a flipping challenge is at
+    most **`(2 * Q + 1)^2 * badCard / 2^w`**. The fibers `{x | proj x = xStar}` are disjoint, so
+    the bound does NOT pay for the size of the output register. -/
+theorem qrom_unitary_measure_reprogram_rbr_step_projected
+    {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (H : Fin cardX → BitVec w)
+    (proj : Fin cardX → Fin cardX)
+    (isDoomed : Fin cardX → Bool)
+    (flipsToLive : Fin cardX → BitVec w → Bool)
+    (badCard : Nat)
+    (hRbr : ∀ x : Fin cardX, isDoomed x = true →
+      qsum (2 ^ w) (fun j => if flipsToLive x (BitVec.ofFin j) = true then 1 else 0) ≤ badCard) :
+    RatBound.le
+      ⟨qsum cardX (fun xStar =>
+         if isDoomed xStar = true then
+           qsum (2 ^ w) (fun j =>
+             if flipsToLive xStar (BitVec.ofFin j) = true then
+               QVec.queryMassOn (fun x => decide (xStar = proj x))
+                 (runQuantumAdv A (reprogramOracle H xStar (BitVec.ofFin j)))
+             else 0)
+         else 0),
+       2 ^ w * QVec.stateNormSq (runQuantumAdv A H),
+       Nat.mul_pos (Nat.two_pow_pos w) (runQuantumAdv_normSq_pos A H)⟩
+      ⟨(2 * Q + 1) ^ 2 * badCard, 2 ^ w, Nat.two_pow_pos w⟩ := by
+  dsimp only [RatBound.le]
+  let normFinal := QVec.stateNormSq (runQuantumAdv A H)
+  have hPerX :
+      qsum cardX (fun xStar =>
+        if isDoomed xStar = true then
+          qsum (2 ^ w) (fun j =>
+            if flipsToLive xStar (BitVec.ofFin j) = true then
+              QVec.queryMassOn (fun x => decide (xStar = proj x))
+                (runQuantumAdv A (reprogramOracle H xStar (BitVec.ofFin j)))
+            else 0)
+        else 0) ≤
+      qsum cardX (fun xStar =>
+        badCard * ((2 * Q + 1) *
+          dfmEventEnvelope A H xStar (fun x => decide (xStar = proj x)))) := by
+    apply qsum_le_qsum; intro xStar
+    cases hD : isDoomed xStar
+    · simp only [Bool.false_eq_true, ↓reduceIte, Nat.zero_le]
+    · simp only [↓reduceIte]
+      have hIn :
+          qsum (2 ^ w) (fun j =>
+            if flipsToLive xStar (BitVec.ofFin j) = true then
+              QVec.queryMassOn (fun x => decide (xStar = proj x))
+                (runQuantumAdv A (reprogramOracle H xStar (BitVec.ofFin j)))
+            else 0) ≤
+          qsum (2 ^ w) (fun j =>
+            (if flipsToLive xStar (BitVec.ofFin j) = true then 1 else 0) *
+              ((2 * Q + 1) *
+                dfmEventEnvelope A H xStar (fun x => decide (xStar = proj x)))) := by
+        apply qsum_le_qsum; intro j
+        cases flipsToLive xStar (BitVec.ofFin j)
+        · simp only [Bool.false_eq_true, ↓reduceIte, Nat.zero_mul, Nat.le_refl]
+        · simp only [↓reduceIte, Nat.one_mul]
+          exact queryMassOn_reprogram_le_dfmEventEnvelope A H xStar (BitVec.ofFin j) _
+      rw [qsum_mul_right] at hIn
+      exact Nat.le_trans hIn
+        (Nat.mul_le_mul_right _ (hRbr xStar hD))
+  rw [qsum_mul_left badCard, qsum_mul_left (2 * Q + 1),
+      sum_dfmEventEnvelope_fiber_eq] at hPerX
+  have hSqEq : badCard * ((2 * Q + 1) * ((2 * Q + 1) * normFinal)) =
+      (2 * Q + 1) ^ 2 * badCard * normFinal := by
+    rw [Nat.pow_two, ← Nat.mul_assoc (2 * Q + 1) (2 * Q + 1) normFinal,
+        Nat.mul_left_comm badCard ((2 * Q + 1) * (2 * Q + 1)) normFinal,
+        Nat.mul_assoc ((2 * Q + 1) * (2 * Q + 1)) badCard normFinal]
+  rw [hSqEq] at hPerX
+  have hMul2w := Nat.mul_le_mul_right (2 ^ w) hPerX
+  have hRhsEq : (2 * Q + 1) ^ 2 * badCard * normFinal * 2 ^ w =
+      (2 * Q + 1) ^ 2 * badCard * (2 ^ w * normFinal) := by
+    rw [Nat.mul_assoc ((2 * Q + 1) ^ 2 * badCard) normFinal (2 ^ w),
+        Nat.mul_comm normFinal (2 ^ w)]
+  rwa [hRhsEq] at hMul2w
+
+/-- **Unitary Measure-and-Reprogram Single-Round RBR Theorem
+    (`qrom_unitary_measure_reprogram_rbr_step`)**: the special case `proj = id` of
+    `qrom_unitary_measure_reprogram_rbr_step_projected` (the output register IS the reprogrammed
+    query point): the exact Born-rule RBR transition probability is bounded by
+    **`(2 * Q + 1)^2 * badCard / 2^w`**. -/
+theorem qrom_unitary_measure_reprogram_rbr_step
+    {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (H : Fin cardX → BitVec w)
+    (isDoomed : Fin cardX → Bool)
+    (flipsToLive : Fin cardX → BitVec w → Bool)
+    (badCard : Nat)
+    (hRbr : ∀ x : Fin cardX, isDoomed x = true →
+      qsum (2 ^ w) (fun j => if flipsToLive x (BitVec.ofFin j) = true then 1 else 0) ≤ badCard) :
+    let normFinal := QVec.stateNormSq (runQuantumAdv A H)
+    RatBound.le
+      ⟨qsum cardX (fun xStar =>
+         if isDoomed xStar = true then
+           qsum (2 ^ w) (fun j =>
+             if flipsToLive xStar (BitVec.ofFin j) = true then
+               QVec.queryWeight (runQuantumAdv A (reprogramOracle H xStar (BitVec.ofFin j))) xStar
+             else 0)
+         else 0),
+       2 ^ w * normFinal,
+       Nat.mul_pos (Nat.two_pow_pos w) (runQuantumAdv_normSq_pos A H)⟩
+      ⟨(2 * Q + 1) ^ 2 * badCard, 2 ^ w, Nat.two_pow_pos w⟩ := by
+  have h := qrom_unitary_measure_reprogram_rbr_step_projected A H id isDoomed flipsToLive
+    badCard hRbr
+  dsimp only [RatBound.le] at h ⊢
+  refine Nat.le_trans (Nat.mul_le_mul_right _ (Nat.le_of_eq ?_)) h
+  apply qsum_congr; intro xStar
+  cases isDoomed xStar
+  · rfl
+  · simp only [↓reduceIte]
+    apply qsum_congr; intro j
+    cases flipsToLive xStar (BitVec.ofFin j)
+    · rfl
+    · simp only [↓reduceIte]
+      exact (queryMassOn_point_eq _ xStar).symm
+
+/-- **Oracle-Dependent (Adaptive Across Rounds) Measure-and-Reprogram Step
+    (`qrom_adaptive_oracle_dependent_rbr_step`)**:
+    In a multi-round Fiat–Shamir transcript, whether the round-`r` point `xStar` is doomed, and
+    whether its challenge makes it live, depend on the ORACLE (through the challenges of earlier
+    rounds). Both predicates here take the oracle as an argument and are evaluated on the very
+    oracle `H[xStar ↦ ch]` the adversary ran against. The only structural requirement is
+    acyclicity (`hLocal`): doomedness of `xStar` does not read the oracle AT `xStar`. -/
+theorem qrom_adaptive_oracle_dependent_rbr_step
+    {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (H : Fin cardX → BitVec w)
+    (proj : Fin cardX → Fin cardX)
+    (isDoomedAt : (Fin cardX → BitVec w) → Fin cardX → Bool)
+    (isLiveAfter : (Fin cardX → BitVec w) → Fin cardX → Bool)
+    (badCard : Nat)
+    (hLocal : ∀ (x : Fin cardX) (ch : BitVec w),
+      isDoomedAt (reprogramOracle H x ch) x = isDoomedAt H x)
+    (hRbr : ∀ x : Fin cardX, isDoomedAt H x = true →
+      qsum (2 ^ w) (fun j =>
+        if isLiveAfter (reprogramOracle H x (BitVec.ofFin j)) x = true then 1 else 0) ≤ badCard) :
+    RatBound.le
+      ⟨qsum cardX (fun xStar =>
+         qsum (2 ^ w) (fun j =>
+           if (isDoomedAt (reprogramOracle H xStar (BitVec.ofFin j)) xStar &&
+               isLiveAfter (reprogramOracle H xStar (BitVec.ofFin j)) xStar) = true then
+             QVec.queryMassOn (fun x => decide (xStar = proj x))
+               (runQuantumAdv A (reprogramOracle H xStar (BitVec.ofFin j)))
+           else 0)),
+       2 ^ w * QVec.stateNormSq (runQuantumAdv A H),
+       Nat.mul_pos (Nat.two_pow_pos w) (runQuantumAdv_normSq_pos A H)⟩
+      ⟨(2 * Q + 1) ^ 2 * badCard, 2 ^ w, Nat.two_pow_pos w⟩ := by
+  have h := qrom_unitary_measure_reprogram_rbr_step_projected A H proj (isDoomedAt H)
+    (fun x ch => isLiveAfter (reprogramOracle H x ch) x) badCard hRbr
+  dsimp only [RatBound.le] at h ⊢
+  refine Nat.le_trans (Nat.mul_le_mul_right _ (Nat.le_of_eq ?_)) h
+  apply qsum_congr; intro xStar
+  simp only [hLocal]
+  cases isDoomedAt H xStar
+  · simp only [Bool.false_and, Bool.false_eq_true, ↓reduceIte, qsum_const, Nat.mul_zero]
+  · simp only [Bool.true_and, ↓reduceIte]
+
+/-- One Fiat–Shamir round of a transcript-chained multi-round protocol as seen by the QROM
+    reduction against the fixed background oracle `H`: the projection from the adversary's output
+    to this round's query point, the oracle-dependent doomed / live-after predicates, and the
+    round's bad-challenge count with its acyclicity and RBR flip-bound obligations. -/
+structure QromRbrRound (cardX w : Nat) (H : Fin cardX → BitVec w) where
+  proj : Fin cardX → Fin cardX
+  isDoomedAt : (Fin cardX → BitVec w) → Fin cardX → Bool
+  isLiveAfter : (Fin cardX → BitVec w) → Fin cardX → Bool
+  badCard : Nat
+  doomed_local : ∀ (x : Fin cardX) (ch : BitVec w),
+    isDoomedAt (reprogramOracle H x ch) x = isDoomedAt H x
+  flip_bound : ∀ x : Fin cardX, isDoomedAt H x = true →
+    qsum (2 ^ w) (fun j =>
+      if isLiveAfter (reprogramOracle H x (BitVec.ofFin j)) x = true then 1 else 0) ≤ badCard
+
+/-- **Inhabited, oracle-dependent `QromRbrRound`**: over `Fin 2 → BitVec 2`, the round whose
+    point is always doomed and becomes live exactly when the REPROGRAMMED oracle value at that
+    point is zero has `badCard = 1`, attained with equality at every point. -/
+def qromZeroChallengeRound (H : Fin 2 → BitVec 2) : QromRbrRound 2 2 H where
+  proj := id
+  isDoomedAt := fun _ _ => true
+  isLiveAfter := fun O x => decide ((O x).toNat = 0)
+  badCard := 1
+  doomed_local := fun _ _ => rfl
+  flip_bound := fun x _ => by
+    have hEq : ∀ j : Fin (2 ^ 2),
+        decide (((reprogramOracle H x (BitVec.ofFin j)) x).toNat = 0) = decide (j.1 = 0) := by
+      intro j
+      simp only [reprogramOracle, ↓reduceIte, BitVec.toNat_ofFin]
+    rw [qsum_congr (fun j => by rw [hEq j])]
+    simp [qsum_succ, qsum_zero]
+
+/-- Total reprogrammed Born mass of the doomed-to-live flip event of round `rd`. -/
+def qromRoundFlipMass {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q) (H : Fin cardX → BitVec w)
+    (rd : QromRbrRound cardX w H) : Nat :=
+  qsum cardX (fun xStar =>
+    qsum (2 ^ w) (fun j =>
+      if (rd.isDoomedAt (reprogramOracle H xStar (BitVec.ofFin j)) xStar &&
+          rd.isLiveAfter (reprogramOracle H xStar (BitVec.ofFin j)) xStar) = true then
+        QVec.queryMassOn (fun x => decide (xStar = rd.proj x))
+          (runQuantumAdv A (reprogramOracle H xStar (BitVec.ofFin j)))
+      else 0))
+
+/-- **`k`-Round QROM Measure-and-Reprogram Union Theorem
+    (`qrom_multiRound_measure_reprogram_union`)**:
+    For ANY `Q`-query unitary adversary and ANY list of Fiat–Shamir rounds, the summed
+    doomed-to-live flip mass over all rounds is at most
+    **`(2 * Q + 1)^2 * (∑_r badCard_r) / 2^w`**: each round pays `(2 * Q + 1)^2` once (no
+    `(2 * Q + 1)^{2k}` blow-up), derived from the unitary step theorem rather than assumed. -/
+theorem qrom_multiRound_measure_reprogram_union
+    {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (H : Fin cardX → BitVec w) :
+    ∀ (rounds : List (QromRbrRound cardX w H)),
+      RatBound.le
+        ⟨(rounds.map (qromRoundFlipMass A H)).sum,
+         2 ^ w * QVec.stateNormSq (runQuantumAdv A H),
+         Nat.mul_pos (Nat.two_pow_pos w) (runQuantumAdv_normSq_pos A H)⟩
+        ⟨(2 * Q + 1) ^ 2 * (rounds.map (fun rd => rd.badCard)).sum, 2 ^ w, Nat.two_pow_pos w⟩
+  | [] => by
+    show 0 * 2 ^ w ≤ _
+    rw [Nat.zero_mul]
+    exact Nat.zero_le _
+  | rd :: rest => by
+    have ih := qrom_multiRound_measure_reprogram_union A H rest
+    have h1 : qromRoundFlipMass A H rd * 2 ^ w ≤
+        (2 * Q + 1) ^ 2 * rd.badCard * (2 ^ w * QVec.stateNormSq (runQuantumAdv A H)) :=
+      qrom_adaptive_oracle_dependent_rbr_step A H rd.proj rd.isDoomedAt rd.isLiveAfter
+        rd.badCard rd.doomed_local rd.flip_bound
+    have ih' : (rest.map (qromRoundFlipMass A H)).sum * 2 ^ w ≤
+        (2 * Q + 1) ^ 2 * (rest.map (fun rd => rd.badCard)).sum *
+          (2 ^ w * QVec.stateNormSq (runQuantumAdv A H)) := ih
+    show (qromRoundFlipMass A H rd + (rest.map (qromRoundFlipMass A H)).sum) * 2 ^ w ≤
+      (2 * Q + 1) ^ 2 * (rd.badCard + (rest.map (fun rd => rd.badCard)).sum) *
+        (2 ^ w * QVec.stateNormSq (runQuantumAdv A H))
+    rw [Nat.add_mul, Nat.mul_add, Nat.add_mul]
+    exact Nat.add_le_add h1 ih'
+
+/-- Sum over every oracle `Fin n → BitVec w`, with each function occurring once.
+    The recursion is the constructive product enumeration of the finite output alphabet. -/
+def uniformOracleSum (w : Nat) : (n : Nat) → ((Fin n → BitVec w) → Nat) → Nat
+  | 0, f => f Fin.elim0
+  | n + 1, f => qsum (2 ^ w) (fun j =>
+      uniformOracleSum w n (fun H => f (Fin.cases (BitVec.ofFin j) H)))
+
+theorem uniformOracleSum_congr (w : Nat) : ∀ (n : Nat)
+    (f g : (Fin n → BitVec w) → Nat), (∀ H, f H = g H) →
+    uniformOracleSum w n f = uniformOracleSum w n g
+  | 0, _, _, h => h _
+  | n + 1, _, _, h => qsum_congr (fun _ => uniformOracleSum_congr w n _ _ (fun _ => h _))
+
+theorem uniformOracleSum_const (w : Nat) : ∀ (n c : Nat),
+    uniformOracleSum w n (fun _ => c) = (2 ^ w) ^ n * c
+  | 0, c => (Nat.one_mul c).symm
+  | n + 1, c => by
+    simp only [uniformOracleSum, uniformOracleSum_const w n c, qsum_const,
+      Nat.pow_succ, Nat.mul_comm, Nat.mul_left_comm]
+
+theorem uniformOracleSum_mul (w : Nat) : ∀ (n c : Nat)
+    (f : (Fin n → BitVec w) → Nat),
+    uniformOracleSum w n (fun H => c * f H) = c * uniformOracleSum w n f
+  | 0, _, _ => rfl
+  | n + 1, c, f => by
+    simp only [uniformOracleSum, uniformOracleSum_mul w n c, qsum_mul_left]
+
+theorem uniformOracleSum_le (w : Nat) : ∀ (n : Nat)
+    (f g : (Fin n → BitVec w) → Nat), (∀ H, f H ≤ g H) →
+    uniformOracleSum w n f ≤ uniformOracleSum w n g
+  | 0, _, _, h => h _
+  | n + 1, _, _, h => qsum_le_qsum (fun _ => uniformOracleSum_le w n _ _ (fun _ => h _))
+
+theorem uniformOracleSum_qsum (w : Nat) : ∀ (n k : Nat)
+    (f : (Fin n → BitVec w) → Fin k → Nat),
+    uniformOracleSum w n (fun H => qsum k (f H)) =
+      qsum k (fun j => uniformOracleSum w n (fun H => f H j))
+  | 0, _, _ => rfl
+  | n + 1, k, f => by
+    simp only [uniformOracleSum, uniformOracleSum_qsum w n k]
+    exact qsum_comm _ _ _
+
+/-- Replacing one coordinate of a uniformly random oracle by an independent uniform
+    challenge preserves its distribution. This identity applies to arbitrary oracle-dependent
+    payoffs, including the Born mass of an adaptive adversary. No independence of the payoff
+    from the reprogrammed coordinate is required. -/
+theorem uniformOracleSum_resample (w : Nat) : ∀ (n : Nat) (x : Fin n)
+    (f : (Fin n → BitVec w) → Nat),
+    uniformOracleSum w n (fun H => qsum (2 ^ w) (fun j =>
+      f (reprogramOracle H x (BitVec.ofFin j)))) =
+      2 ^ w * uniformOracleSum w n f
+  | 0, x, _ => Fin.elim0 x
+  | n + 1, x, f => by
+    refine Fin.cases ?_ (fun y => ?_) x
+    · have heq : ∀ (a b : BitVec w) (H : Fin n → BitVec w),
+          reprogramOracle (Fin.cases a H) 0 b = Fin.cases b H := by
+        intro a b H
+        funext z
+        refine Fin.cases ?_ (fun i => ?_) z
+        · simp [reprogramOracle]
+        · simp [reprogramOracle, Fin.succ_ne_zero]
+      simp only [uniformOracleSum, heq, uniformOracleSum_qsum]
+      rw [qsum_const]
+    · have heq : ∀ (a b : BitVec w) (H : Fin n → BitVec w),
+          reprogramOracle (Fin.cases a H) y.succ b =
+            Fin.cases a (reprogramOracle H y b) := by
+        intro a b H
+        funext z
+        refine Fin.cases ?_ (fun i => ?_) z
+        · simp [reprogramOracle, Ne.symm (Fin.succ_ne_zero y)]
+        · simp [reprogramOracle, Fin.succ_inj]
+      simp only [uniformOracleSum, heq]
+      rw [← qsum_mul_left]
+      apply qsum_congr
+      intro j
+      exact uniformOracleSum_resample w n y (fun H => f (Fin.cases (BitVec.ofFin j) H))
+
+/-- A round's ordinary (unreprogrammed) success mass, summed over the projected output point. -/
+def qromOrdinaryFlipMass {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q) (H : Fin cardX → BitVec w)
+    (proj : Fin cardX → Fin cardX)
+    (doomed live : (Fin cardX → BitVec w) → Fin cardX → Bool) : Nat :=
+  qsum cardX (fun x => if (doomed H x && live H x) = true then
+    QVec.queryMassOn (fun z => decide (x = proj z)) (runQuantumAdv A H) else 0)
+
+/-- Exact bridge from the per-oracle reprogrammed mass to uniformly averaged ordinary
+    adversary success mass. The factor `2^w` cancels the sampled-challenge denominator. -/
+theorem qrom_uniform_oracle_flip_mass {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (round : (H : Fin cardX → BitVec w) → QromRbrRound cardX w H)
+    (proj : Fin cardX → Fin cardX)
+    (doomed live : (Fin cardX → BitVec w) → Fin cardX → Bool)
+    (hp : ∀ H, (round H).proj = proj)
+    (hd : ∀ H, (round H).isDoomedAt = doomed)
+    (hl : ∀ H, (round H).isLiveAfter = live) :
+    uniformOracleSum w cardX (fun H => qromRoundFlipMass A H (round H)) =
+      2 ^ w * uniformOracleSum w cardX (fun H =>
+        qromOrdinaryFlipMass A H proj doomed live) := by
+  simp only [qromRoundFlipMass, hp, hd, hl, qromOrdinaryFlipMass]
+  rw [uniformOracleSum_qsum, uniformOracleSum_qsum, ← qsum_mul_left]
+  apply qsum_congr
+  intro x
+  exact uniformOracleSum_resample w cardX x (fun H =>
+    if (doomed H x && live H x) = true then
+      QVec.queryMassOn (fun z => decide (x = proj z)) (runQuantumAdv A H) else 0)
+
+/-- Averaged QROM round bound with a uniformly random oracle. The denominator is exactly
+    the number of oracles times the adversary's oracle-independent squared norm. -/
+theorem qrom_uniform_oracle_round_bound {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (round : (H : Fin cardX → BitVec w) → QromRbrRound cardX w H)
+    (proj : Fin cardX → Fin cardX)
+    (doomed live : (Fin cardX → BitVec w) → Fin cardX → Bool)
+    (bad : Nat)
+    (hp : ∀ H, (round H).proj = proj)
+    (hd : ∀ H, (round H).isDoomedAt = doomed)
+    (hl : ∀ H, (round H).isLiveAfter = live)
+    (hb : ∀ H, (round H).badCard = bad) :
+    let norm := prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init
+    RatBound.le
+      ⟨uniformOracleSum w cardX (fun H => qromOrdinaryFlipMass A H proj doomed live),
+        (2 ^ w) ^ cardX * norm,
+        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos w))
+          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      ⟨(2 * Q + 1) ^ 2 * bad, 2 ^ w, Nat.two_pow_pos w⟩ := by
+  have hpoint : ∀ H, qromRoundFlipMass A H (round H) ≤
+      (2 * Q + 1) ^ 2 * bad *
+        (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init) := by
+    intro H
+    have h := qrom_multiRound_measure_reprogram_union A H [round H]
+    change qromRoundFlipMass A H (round H) * 2 ^ w ≤
+      (2 * Q + 1) ^ 2 * (round H).badCard *
+        (2 ^ w * QVec.stateNormSq (runQuantumAdv A H)) at h
+    rw [hb, runQuantumAdv_normSq] at h
+    apply Nat.le_of_mul_le_mul_right (c := 2 ^ w) _ (Nat.two_pow_pos w)
+    simpa only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm] using h
+  have havg := uniformOracleSum_le w cardX _ _ hpoint
+  rw [qrom_uniform_oracle_flip_mass A round proj doomed live hp hd hl,
+    uniformOracleSum_const] at havg
+  dsimp only [RatBound.le]
+  simpa only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm] using havg
+
+/-- Uniform-oracle multi-round union bound. Each round may depend on the entire oracle;
+    only its projection and predicate definitions are fixed across background-oracle choices.
+    The adversary remains fully adaptive, and the reduction pays the quadratic loss once. -/
+theorem qrom_uniform_oracle_multiRound_union {cardX w cardAnc Q k : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (round : Fin k → (H : Fin cardX → BitVec w) → QromRbrRound cardX w H)
+    (proj : Fin k → Fin cardX → Fin cardX)
+    (doomed live : Fin k → (Fin cardX → BitVec w) → Fin cardX → Bool)
+    (bad : Fin k → Nat)
+    (hp : ∀ r H, (round r H).proj = proj r)
+    (hd : ∀ r H, (round r H).isDoomedAt = doomed r)
+    (hl : ∀ r H, (round r H).isLiveAfter = live r)
+    (hb : ∀ r H, (round r H).badCard = bad r) :
+    let norm := prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init
+    RatBound.le
+      ⟨uniformOracleSum w cardX (fun H => qsum k (fun r =>
+          qromOrdinaryFlipMass A H (proj r) (doomed r) (live r))),
+        (2 ^ w) ^ cardX * norm,
+        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos w))
+          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      ⟨(2 * Q + 1) ^ 2 * qsum k bad, 2 ^ w, Nat.two_pow_pos w⟩ := by
+  have h := qsum_le_qsum (fun r => qrom_uniform_oracle_round_bound A (round r)
+    (proj r) (doomed r) (live r) (bad r) (hp r) (hd r) (hl r) (hb r))
+  dsimp only [RatBound.le] at h ⊢
+  rw [uniformOracleSum_qsum]
+  simpa only [qsum_mul_right, qsum_mul_left] using h
+
+/-- Expected adversary success over a uniformly random oracle. A protocol supplies the
+    ordinary round-flip covering property; averaging and measure-and-reprogram then give the
+    same single quadratic loss as the per-oracle union theorem. -/
+theorem qrom_uniform_oracle_success_bound {cardX w cardAnc Q k : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (accept : (Fin cardX → BitVec w) → Fin cardX → Bool)
+    (round : Fin k → (H : Fin cardX → BitVec w) → QromRbrRound cardX w H)
+    (proj : Fin k → Fin cardX → Fin cardX)
+    (doomed live : Fin k → (Fin cardX → BitVec w) → Fin cardX → Bool)
+    (bad : Fin k → Nat)
+    (hp : ∀ r H, (round r H).proj = proj r)
+    (hd : ∀ r H, (round r H).isDoomedAt = doomed r)
+    (hl : ∀ r H, (round r H).isLiveAfter = live r)
+    (hb : ∀ r H, (round r H).badCard = bad r)
+    (hCover : ∀ H, QVec.queryMassOn (accept H) (runQuantumAdv A H) ≤
+      qsum k (fun r => qromOrdinaryFlipMass A H (proj r) (doomed r) (live r))) :
+    let norm := prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init
+    RatBound.le
+      ⟨uniformOracleSum w cardX (fun H => QVec.queryMassOn (accept H) (runQuantumAdv A H)),
+        (2 ^ w) ^ cardX * norm,
+        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos w))
+          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      ⟨(2 * Q + 1) ^ 2 * qsum k bad, 2 ^ w, Nat.two_pow_pos w⟩ := by
+  have h := qrom_uniform_oracle_multiRound_union A round proj doomed live bad hp hd hl hb
+  exact Nat.le_trans (Nat.mul_le_mul_right (2 ^ w)
+    (uniformOracleSum_le w cardX _ _ hCover)) h
+
+/-! ### §3.2 `k`-Round RBR Induction, Online Merkle Extraction & Concrete `Hem` v6 (`k = 5`) -/
+
+/-- Exact `(2 * Q + 1)^2` Measure-and-Reprogram scaling of an interactive RBR round bound `b`. -/
+@[expose] def dfmRoundScale (Q : Nat) (b : RatBound) : RatBound :=
+  RatBound.scale ((2 * Q + 1) ^ 2) b
+
+/-- Recompute a position-tweaked Merkle root from a node digest and its authentication path.
+    `H lvl node` compresses the two children of node `node` at level `lvl`; `idx` is the index
+    of the current node and its parity selects the child slot. -/
+def merkleRootFromPath {D : Type} (H : Nat → Nat → D → D → D) : Nat → Nat → D → List D → D
+  | _, _, cur, [] => cur
+  | lvl, idx, cur, sib :: rest =>
+    merkleRootFromPath H (lvl + 1) (idx / 2)
+      (if idx % 2 = 0 then H lvl (idx / 2) cur sib else H lvl (idx / 2) sib cur) rest
+
+/-- A collision of the tweaked compression function at ONE tree position: two different child
+    pairs with the same digest under the same `(lvl, node)` tweak. -/
+def MerkleTweakCollision {D : Type} (H : Nat → Nat → D → D → D) : Prop :=
+  ∃ (lvl node : Nat) (a b a' b' : D), (a ≠ a' ∨ b ≠ b') ∧ H lvl node a b = H lvl node a' b'
+
+/-- **Collision-or-unique-opening.** Two openings of the same position to the same root either
+    coincide (same leaf digest, same authentication path) or exhibit a same-position collision
+    of the tweaked compression function. This is the classical binding reduction behind the
+    collision term of `qromMerkleOnlineExtractBound`; it is a statement about fixed openings
+    and not the quantum online-extraction game. -/
+theorem merkle_collision_or_unique_opening {D : Type} [DecidableEq D]
+    (H : Nat → Nat → D → D → D) :
+    ∀ (path path' : List D) (lvl idx : Nat) (leaf leaf' : D),
+      path.length = path'.length →
+      merkleRootFromPath H lvl idx leaf path = merkleRootFromPath H lvl idx leaf' path' →
+      (leaf = leaf' ∧ path = path') ∨ MerkleTweakCollision H
+  | [], [], _, _, _, _, _, h => .inl ⟨h, rfl⟩
+  | [], _ :: _, _, _, _, _, hl, _ => absurd hl.symm (Nat.succ_ne_zero _)
+  | _ :: _, [], _, _, _, _, hl, _ => absurd hl (Nat.succ_ne_zero _)
+  | sib :: rest, sib' :: rest', lvl, idx, leaf, leaf', hl, h => by
+    have h' : merkleRootFromPath H (lvl + 1) (idx / 2)
+          (if idx % 2 = 0 then H lvl (idx / 2) leaf sib else H lvl (idx / 2) sib leaf) rest =
+        merkleRootFromPath H (lvl + 1) (idx / 2)
+          (if idx % 2 = 0 then H lvl (idx / 2) leaf' sib' else H lvl (idx / 2) sib' leaf')
+          rest' := h
+    cases merkle_collision_or_unique_opening H rest rest' (lvl + 1) (idx / 2) _ _
+        (Nat.succ.inj hl) h' with
+    | inr hc => exact .inr hc
+    | inl hp =>
+      obtain ⟨hpar, hrest⟩ := hp
+      if hEq : leaf = leaf' ∧ sib = sib' then
+        exact .inl ⟨hEq.1, by rw [hEq.2, hrest]⟩
+      else
+        if hpar0 : idx % 2 = 0 then
+          rw [ite_eq_left hpar0, ite_eq_left hpar0] at hpar
+          refine .inr ?_
+          unfold MerkleTweakCollision
+          exact ⟨lvl, idx / 2, leaf, sib, leaf', sib',
+            if hl1 : leaf = leaf' then .inr (fun hs => hEq ⟨hl1, hs⟩) else .inl hl1, hpar⟩
+        else
+          rw [ite_eq_right hpar0, ite_eq_right hpar0] at hpar
+          refine .inr ?_
+          unfold MerkleTweakCollision
+          exact ⟨lvl, idx / 2, sib, leaf, sib', leaf',
+            if hl1 : leaf = leaf' then .inl (fun hs => hEq ⟨hl1, hs⟩) else .inr hl1, hpar⟩
+
+/-- Commitment-extraction CHARGE per committed Merkle root over `secBits`-bit digests:
+    the single-target Grover term `8 (Q + 1)^2 / 2^secBits` plus the generic quantum collision
+    term `8 (Q + 1)^3 / 2^secBits` (`quantumBhtCollisionBound`). Position tweaks confine a
+    collision to one tree position (`merkle_collision_or_unique_opening`) but the adversary still
+    chooses both preimages, so the cubic term cannot be dropped. This is a budget term in the
+    shape of `[DFMS21]` / `[CMS19]`; the quantum online-extraction reduction for the deployed
+    tree is NOT mechanized here. At `secBits = 256` the cubic term limits `128`-bit budgets to
+    `Q + 1 ≤ 2^40`. -/
+@[expose] def qromMerkleOnlineExtractBound (numRoots secBits Q : Nat) : RatBound :=
+  RatBound.scale numRoots
+    (RatBound.add (quantumGroverSingleTargetBound secBits Q) (quantumBhtCollisionBound secBits Q))
+
+/-- Multi-round QROM Fiat–Shamir budget in the shape of `[DFMS19]` / `[CMS19]`:
+    1. `k` reprogrammed RBR challenge rounds, `∑_r (2 Q + 1)^2 * rbrBounds[r]`;
+    2. commitment extraction, `qromMerkleOnlineExtractBound`;
+    3. query rounds under Fiat–Shamir search, `∑_j 8 (Q + 1)^2 * queryBounds[j]`
+       (`quantumGroverGrindingBound`): the prover picks the grinding nonce before the queries are
+       derived, so query soundness is a search bound in the oracle budget. `queryBounds` are
+       PURE per-stage query errors; no proof-of-work density is credited on top of the search
+       factor. -/
+@[expose] def multiRoundFsQromCompilerBound
+    (Q numRoots secBits : Nat)
+    (rbrChallengeBounds : List RatBound)
+    (queryStageBounds : List RatBound) : RatBound :=
+  RatBound.add
+    (RatBound.sumList (rbrChallengeBounds.map (dfmRoundScale Q)))
+    (RatBound.add
+      (qromMerkleOnlineExtractBound numRoots secBits Q)
+      (RatBound.sumList (queryStageBounds.map (quantumGroverGrindingBound Q))))
+
+/-- **Constructive `k`-Round QROM RBR Induction Theorem (`rbr_multiRound_qrom_induction`)**:
+    Starting from a doomed initial state (`liveAt 0 ≤ 0`), if each round `idx` satisfies
+    `liveAt (idx + 1) ≤ liveAt idx + (2 * Q + 1)^2 * rbrBounds[idx]`, then after `k` rounds
+    `liveAt k ≤ ∑_{idx < k} (2 * Q + 1)^2 * rbrBounds[idx]`! -/
+theorem rbr_multiRound_qrom_induction
+    (Q : Nat) :
+    ∀ (rbrBounds : List RatBound) (liveAt : Nat → RatBound),
+      RatBound.le (liveAt 0) RatBound.zero →
+      (∀ (idx : Nat) (b : RatBound), rbrBounds[idx]? = some b →
+        RatBound.le (liveAt (idx + 1)) (RatBound.add (liveAt idx) (dfmRoundScale Q b))) →
+      RatBound.le (liveAt rbrBounds.length)
+        (RatBound.sumList (rbrBounds.map (dfmRoundScale Q)))
+  | [], liveAt, h0, _ => h0
+  | b :: rest, liveAt, h0, hStep => by
+    simp only [List.length_cons, List.map_cons, RatBound.sumList]
+    have hFirst : RatBound.le (liveAt 1) (RatBound.add (liveAt 0) (dfmRoundScale Q b)) :=
+      hStep 0 b rfl
+    have hFirstSimp : RatBound.le (liveAt 1) (dfmRoundScale Q b) := by
+      have hAdd0 := RatBound.add_le_add h0 (RatBound.le_refl (dfmRoundScale Q b))
+      have hZeroAdd : RatBound.le (RatBound.add RatBound.zero (dfmRoundScale Q b))
+          (dfmRoundScale Q b) := by
+        unfold RatBound.le RatBound.add RatBound.zero
+        dsimp only
+        rw [Nat.zero_mul, Nat.zero_add, Nat.mul_one, Nat.one_mul]
+        exact Nat.le_refl _
+      exact RatBound.le_trans hFirst (RatBound.le_trans hAdd0 hZeroAdd)
+    have hTail : ∀ (bs : List RatBound) (f : Nat → RatBound),
+        (∀ (idx : Nat) (item : RatBound), bs[idx]? = some item →
+          RatBound.le (f (idx + 1)) (RatBound.add (f idx) (dfmRoundScale Q item))) →
+        RatBound.le (f bs.length)
+          (RatBound.add (f 0) (RatBound.sumList (bs.map (dfmRoundScale Q)))) := by
+      intro bs
+      induction bs with
+      | nil =>
+        intro f _
+        unfold RatBound.le RatBound.add RatBound.sumList RatBound.zero
+        dsimp only [List.map, List.length_nil]
+        rw [Nat.zero_mul, Nat.add_zero, Nat.mul_one, Nat.mul_one]
+        exact Nat.le_refl _
+      | cons hd tl ih =>
+        intro f hf
+        have h1 := hf 0 hd rfl
+        have ihShift := ih (fun i => f (i + 1)) (fun idx item hGet => hf (idx + 1) item hGet)
+        simp only [List.length_cons, List.map_cons, RatBound.sumList]
+        have hStepAdd := RatBound.add_le_add h1
+          (RatBound.le_refl (RatBound.sumList (tl.map (dfmRoundScale Q))))
+        have hAssoc : RatBound.le
+            (RatBound.add (RatBound.add (f 0) (dfmRoundScale Q hd))
+              (RatBound.sumList (tl.map (dfmRoundScale Q))))
+            (RatBound.add (f 0)
+              (RatBound.add (dfmRoundScale Q hd)
+                (RatBound.sumList (tl.map (dfmRoundScale Q))))) := by
+          unfold RatBound.le RatBound.add
+          dsimp only
+          have hEq :
+              ((f 0).num * (dfmRoundScale Q hd).den + (dfmRoundScale Q hd).num * (f 0).den) *
+                (RatBound.sumList (tl.map (dfmRoundScale Q))).den +
+              (RatBound.sumList (tl.map (dfmRoundScale Q))).num *
+                ((f 0).den * (dfmRoundScale Q hd).den) =
+              (f 0).num * ((dfmRoundScale Q hd).den *
+                (RatBound.sumList (tl.map (dfmRoundScale Q))).den) +
+              ((dfmRoundScale Q hd).num * (RatBound.sumList (tl.map (dfmRoundScale Q))).den +
+                (RatBound.sumList (tl.map (dfmRoundScale Q))).num * (dfmRoundScale Q hd).den) *
+                (f 0).den := by
+            rw [Nat.add_mul, Nat.add_mul, Nat.mul_assoc, Nat.add_assoc]
+            congr 1
+            rw [Nat.mul_right_comm ((dfmRoundScale Q hd).num),
+                Nat.mul_comm (f 0).den (dfmRoundScale Q hd).den,
+                ← Nat.mul_assoc]
+          have hDenEq :
+              (f 0).den * (dfmRoundScale Q hd).den *
+                (RatBound.sumList (tl.map (dfmRoundScale Q))).den =
+              (f 0).den * ((dfmRoundScale Q hd).den *
+                (RatBound.sumList (tl.map (dfmRoundScale Q))).den) :=
+            Nat.mul_assoc _ _ _
+          rw [hEq, hDenEq]
+          exact Nat.le_refl _
+        exact RatBound.le_trans ihShift (RatBound.le_trans hStepAdd hAssoc)
+    have hRestBound := hTail rest (fun i => liveAt (i + 1)) (fun idx item hGet => hStep (idx + 1) item hGet)
+    exact RatBound.le_trans hRestBound
+      (RatBound.add_le_add hFirstSimp (RatBound.le_refl _))
+
+
+end Qsag
+
+namespace Qsag
+/-! ## §3. Steiner-Deduplicated Merkle-Canopy Multi-Proofs (`pcs.rs`, `CanopyMultiProof`) -/
+
+/-- Parent digest of the active node `(u, hu)` combined with an authentication sibling `s`
+    consumed from the proof (`pcs.rs:verify_canopy_multiproof`, the `else` arm):
+    `(u & 1) == 0` puts `hu` on the left, otherwise on the right; the node index fed to the hash is
+    the parent `u >> 1`. -/
+def canopyParentHash {D : Type} (nodeHash : Nat → D → D → D) (u : Nat) (hu s : D) : D :=
+  if u &&& 1 = 0 then nodeHash (u >>> 1) hu s else nodeHash (u >>> 1) s hu
+
+/-- One tree level of `verify_canopy_multiproof` (the inner `while k < active.len()` loop).
+    Walks the active list of heap-indexed `(node, digest)` pairs left to right. If the next active
+    entry is the sibling `u ^ 1`, the two are merged as `nodeHash (u >> 1) hu hv` (`k += 2`) and no
+    proof digest is consumed. Otherwise exactly one digest is consumed from the sibling list
+    (`k += 1`), and the walk fails (`none`) when the list is exhausted. Returns the next level's
+    active list together with the unconsumed siblings. -/
+def canopyLevelStep {D : Type} (nodeHash : Nat → D → D → D) :
+    List (Nat × D) → List D → Option (List (Nat × D) × List D)
+  | [], sibs => some ([], sibs)
+  | [(u, hu)], sibs =>
+    match sibs with
+    | [] => none
+    | s :: rest => some ([(u >>> 1, canopyParentHash nodeHash u hu s)], rest)
+  | (u, hu) :: (v, hv) :: tl, sibs =>
+    if v = u ^^^ 1 then
+      (canopyLevelStep nodeHash tl sibs).map
+        (fun r => ((u >>> 1, nodeHash (u >>> 1) hu hv) :: r.1, r.2))
+    else
+      match sibs with
+      | [] => none
+      | s :: rest =>
+        (canopyLevelStep nodeHash ((v, hv) :: tl) rest).map
+          (fun r => ((u >>> 1, canopyParentHash nodeHash u hu s) :: r.1, r.2))
+
+/-- `depth` iterations of `canopyLevelStep` (the outer `while cur_depth > 0` loop), threading
+    the sibling cursor as the list of unconsumed digests. -/
+def canopyLevels {D : Type} (nodeHash : Nat → D → D → D) :
+    Nat → List (Nat × D) → List D → Option (List (Nat × D) × List D)
+  | 0, active, sibs => some (active, sibs)
+  | depth + 1, active, sibs =>
+    match canopyLevelStep nodeHash active sibs with
+    | none => none
+    | some r => canopyLevels nodeHash depth r.1 r.2
+
+/-- Index pre-checks of `verify_canopy_multiproof`: the list is nonempty, strictly ascending on
+    every adjacent window, and its last index is `< n`. -/
+def canopyIndicesOk (n : Nat) : List Nat → Bool
+  | [] => false
+  | [i] => decide (i < n)
+  | i :: j :: tl => decide (i < j) && canopyIndicesOk n (j :: tl)
+
+/-- `pcs.rs:verify_canopy_multiproof`. Leaf `i` sits at heap index `2^logLeaves + i`; after
+    `logLeaves` levels the walk must have consumed every proof digest (`sib_cursor == len`), the
+    active list must be exactly `[(1, top)]`, and `rootHash logLeaves top` must equal the
+    commitment. `nodeHash` models `hash_merkle_internal(node_idx, left, right)` and `rootHash`
+    models `hash_tree_root(log_leaves, top)`. -/
+def verifyCanopyMultiproof {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (rootHash : Nat → D → D)
+    (logLeaves : Nat) (commitment : D) (leaves : List (Nat × D)) (proof : List D) : Bool :=
+  decide (logLeaves ≤ 28) &&
+  canopyIndicesOk (2 ^ logLeaves) (leaves.map Prod.fst) &&
+  match canopyLevels nodeHash logLeaves
+      (leaves.map (fun p => (2 ^ logLeaves + p.1, p.2))) proof with
+  | some ([(u, top)], []) => decide (u = 1) && decide (rootHash logLeaves top = commitment)
+  | _ => false
+
+/-- `verifyCanopyMultiproof` with the exact-consumption check (`sib_cursor == len`) removed:
+    unconsumed trailing digests are ignored. Defined only to show that the check is load-bearing
+    (`canopyToy_relaxed_accepts_extra_sibling`). -/
+def verifyCanopyMultiproofRelaxed {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (rootHash : Nat → D → D)
+    (logLeaves : Nat) (commitment : D) (leaves : List (Nat × D)) (proof : List D) : Bool :=
+  decide (logLeaves ≤ 28) &&
+  canopyIndicesOk (2 ^ logLeaves) (leaves.map Prod.fst) &&
+  match canopyLevels nodeHash logLeaves
+      (leaves.map (fun p => (2 ^ logLeaves + p.1, p.2))) proof with
+  | some ([(u, top)], _) => decide (u = 1) && decide (rootHash logLeaves top = commitment)
+  | _ => false
+
+/-- The level walk of `canopyLevelStep` on node indices alone: the next level's indices and the
+    number of sibling digests the level consumes. -/
+def steinerLevelStep : List Nat → List Nat × Nat
+  | [] => ([], 0)
+  | [u] => ([u >>> 1], 1)
+  | u :: v :: tl =>
+    if v = u ^^^ 1 then
+      ((u >>> 1) :: (steinerLevelStep tl).1, (steinerLevelStep tl).2)
+    else
+      ((u >>> 1) :: (steinerLevelStep (v :: tl)).1, (steinerLevelStep (v :: tl)).2 + 1)
+
+/-- Total number of sibling digests consumed over `depth` levels starting from `nodes`. -/
+def steinerCountLevels : Nat → List Nat → Nat
+  | 0, _ => 0
+  | depth + 1, nodes =>
+    (steinerLevelStep nodes).2 + steinerCountLevels depth (steinerLevelStep nodes).1
+
+/-- Number of authentication siblings in the Steiner-deduplicated multiproof for the leaf index
+    list `indices` in a tree with `2^logLeaves` leaves. A function of the indices only. -/
+def steinerSiblingCount (logLeaves : Nat) (indices : List Nat) : Nat :=
+  steinerCountLevels logLeaves (indices.map (fun i => 2 ^ logLeaves + i))
+
+private theorem canopyLevelStep_nil {D : Type} (nodeHash : Nat → D → D → D)
+    {s : List D} {b : List (Nat × D)} {t : List D}
+    (h : canopyLevelStep nodeHash [] s = some (b, t)) : b = [] ∧ t = s := by
+  simp only [canopyLevelStep] at h
+  obtain ⟨hb, ht⟩ := Prod.mk.inj (Option.some.inj h)
+  exact ⟨hb.symm, ht.symm⟩
+
+private theorem canopyLevelStep_single {D : Type} (nodeHash : Nat → D → D → D)
+    {u : Nat} {hu : D} {s : List D} {b : List (Nat × D)} {t : List D}
+    (h : canopyLevelStep nodeHash [(u, hu)] s = some (b, t)) :
+    ∃ c, s = c :: t ∧ b = [(u >>> 1, canopyParentHash nodeHash u hu c)] := by
+  simp only [canopyLevelStep] at h
+  match s, h with
+  | [], h => cases h
+  | c :: rest, h =>
+    obtain ⟨hb, ht⟩ := Prod.mk.inj (Option.some.inj h)
+    subst ht
+    exact ⟨c, rfl, hb.symm⟩
+
+private theorem canopyLevelStep_pair {D : Type} (nodeHash : Nat → D → D → D)
+    {u v : Nat} {hu hv : D} {tl : List (Nat × D)} {s : List D} {b : List (Nat × D)} {t : List D}
+    (hv' : v = u ^^^ 1)
+    (h : canopyLevelStep nodeHash ((u, hu) :: (v, hv) :: tl) s = some (b, t)) :
+    ∃ act, canopyLevelStep nodeHash tl s = some (act, t) ∧
+      b = (u >>> 1, nodeHash (u >>> 1) hu hv) :: act := by
+  have hc : (v = u ^^^ 1) = True := eq_true hv'
+  simp only [canopyLevelStep, hc, ↓reduceIte] at h
+  cases hs : canopyLevelStep nodeHash tl s with
+  | none => rw [hs] at h; cases h
+  | some r =>
+    obtain ⟨act, rest⟩ := r
+    rw [hs] at h
+    obtain ⟨hb, ht⟩ := Prod.mk.inj (Option.some.inj h)
+    subst ht
+    exact ⟨act, rfl, hb.symm⟩
+
+private theorem canopyLevelStep_solo {D : Type} (nodeHash : Nat → D → D → D)
+    {u v : Nat} {hu hv : D} {tl : List (Nat × D)} {s : List D} {b : List (Nat × D)} {t : List D}
+    (hv' : ¬ v = u ^^^ 1)
+    (h : canopyLevelStep nodeHash ((u, hu) :: (v, hv) :: tl) s = some (b, t)) :
+    ∃ c rest act, s = c :: rest ∧
+      canopyLevelStep nodeHash ((v, hv) :: tl) rest = some (act, t) ∧
+      b = (u >>> 1, canopyParentHash nodeHash u hu c) :: act := by
+  simp only [canopyLevelStep, hv', ↓reduceIte] at h
+  match s, h with
+  | [], h => cases h
+  | c :: rest, h =>
+    dsimp only at h
+    cases hs : canopyLevelStep nodeHash ((v, hv) :: tl) rest with
+    | none => rw [hs] at h; cases h
+    | some r =>
+      obtain ⟨act, rest'⟩ := r
+      rw [hs] at h
+      obtain ⟨hb, ht⟩ := Prod.mk.inj (Option.some.inj h)
+      subst ht
+      exact ⟨c, rest, act, rfl, hs, hb.symm⟩
+
+private theorem canopyLevels_succ {D : Type} (nodeHash : Nat → D → D → D)
+    {d : Nat} {a : List (Nat × D)} {s : List D} {b : List (Nat × D)} {t : List D}
+    (h : canopyLevels nodeHash (d + 1) a s = some (b, t)) :
+    ∃ m r, canopyLevelStep nodeHash a s = some (m, r) ∧ canopyLevels nodeHash d m r = some (b, t) := by
+  rw [canopyLevels] at h
+  cases hs : canopyLevelStep nodeHash a s with
+  | none => rw [hs] at h; cases h
+  | some p =>
+    obtain ⟨m, r⟩ := p
+    rw [hs] at h
+    exact ⟨m, r, rfl, h⟩
+
+/-- A successful level step maps the index list by `steinerLevelStep` and consumes exactly the
+    number of digests `steinerLevelStep` predicts. -/
+private theorem canopyLevelStep_shape {D : Type} (nodeHash : Nat → D → D → D) :
+    ∀ (n : Nat) (a : List (Nat × D)) (s : List D) (b : List (Nat × D)) (t : List D),
+      a.length < n →
+      canopyLevelStep nodeHash a s = some (b, t) →
+      b.map Prod.fst = (steinerLevelStep (a.map Prod.fst)).1 ∧
+      s.length = (steinerLevelStep (a.map Prod.fst)).2 + t.length := by
+  intro n
+  induction n with
+  | zero => intro a s b t hLen _; exact absurd hLen (Nat.not_lt_zero _)
+  | succ n ih =>
+    intro a s b t hLen h
+    match a, hLen, h with
+    | [], _, h =>
+      obtain ⟨hb, ht⟩ := canopyLevelStep_nil nodeHash h
+      subst hb; subst ht
+      exact ⟨rfl, (Nat.zero_add _).symm⟩
+    | [(u, hu)], _, h =>
+      obtain ⟨c, hs, hb⟩ := canopyLevelStep_single nodeHash h
+      subst hs; subst hb
+      exact ⟨rfl, Nat.add_comm _ _⟩
+    | (u, hu) :: (v, hv) :: tl, hLen, h =>
+      have hLen1 : ((v, hv) :: tl).length < n := Nat.lt_of_succ_lt_succ hLen
+      have hLen2 : tl.length < n := Nat.lt_of_succ_lt hLen1
+      by_cases hv' : v = u ^^^ 1
+      · obtain ⟨act, hr, hb⟩ := canopyLevelStep_pair nodeHash hv' h
+        obtain ⟨h1, h2⟩ := ih tl s act t hLen2 hr
+        subst hb
+        have hc : (v = u ^^^ 1) = True := eq_true hv'
+        simp only [List.map_cons, steinerLevelStep, hc, ↓reduceIte]
+        exact ⟨congrArg (List.cons (u >>> 1)) h1, h2⟩
+      · obtain ⟨c, rest, act, hs, hr, hb⟩ := canopyLevelStep_solo nodeHash hv' h
+        obtain ⟨h1, h2⟩ := ih ((v, hv) :: tl) rest act t hLen1 hr
+        subst hs; subst hb
+        simp only [List.map_cons] at h1 h2
+        simp only [List.map_cons, steinerLevelStep, hv', ↓reduceIte, List.length_cons]
+        refine ⟨congrArg (List.cons (u >>> 1)) h1, ?_⟩
+        rw [h2]
+        exact Nat.add_right_comm _ _ _
+
+private theorem canopyLevels_count {D : Type} (nodeHash : Nat → D → D → D) :
+    ∀ (d : Nat) (a : List (Nat × D)) (s : List D) (b : List (Nat × D)) (t : List D),
+      canopyLevels nodeHash d a s = some (b, t) →
+      s.length = steinerCountLevels d (a.map Prod.fst) + t.length
+  | 0, a, s, b, t, h => by
+    rw [canopyLevels] at h
+    obtain ⟨_, ht⟩ := Prod.mk.inj (Option.some.inj h)
+    subst ht
+    exact (Nat.zero_add _).symm
+  | d + 1, a, s, b, t, h => by
+    obtain ⟨m, r, hStep, hRest⟩ := canopyLevels_succ nodeHash h
+    obtain ⟨hm, hLen⟩ := canopyLevelStep_shape nodeHash _ a s m r (Nat.lt_succ_self _) hStep
+    have ih := canopyLevels_count nodeHash d m r b t hRest
+    rw [hm] at ih
+    rw [steinerCountLevels, hLen, ih]
+    exact (Nat.add_assoc _ _ _).symm
+
+private theorem canopy_map_fst {D : Type} (n : Nat) :
+    ∀ (leaves : List (Nat × D)),
+      (leaves.map (fun p => (n + p.1, p.2))).map Prod.fst =
+        (leaves.map Prod.fst).map (fun i => n + i)
+  | [] => rfl
+  | p :: tl => congrArg (List.cons (n + p.1)) (canopy_map_fst n tl)
+
+private theorem canopy_lift_inj {D : Type} (n : Nat) :
+    ∀ (l1 l2 : List (Nat × D)),
+      l1.map (fun p => (n + p.1, p.2)) = l2.map (fun p => (n + p.1, p.2)) → l1 = l2
+  | [], [], _ => rfl
+  | [], _ :: _, h => by cases h
+  | _ :: _, [], h => by cases h
+  | p :: t1, q :: t2, h => by
+    have h' : (n + p.1, p.2) :: t1.map (fun p => (n + p.1, p.2)) =
+        (n + q.1, q.2) :: t2.map (fun p => (n + p.1, p.2)) := h
+    obtain ⟨hh, ht⟩ := List.cons.inj h'
+    obtain ⟨h1, h2⟩ := Prod.mk.inj hh
+    rw [canopy_lift_inj n t1 t2 ht]
+    exact congrArg (fun x => x :: t2) (Prod.ext (Nat.add_left_cancel h1) h2)
+
+private theorem canopy_accept_unpack {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (rootHash : Nat → D → D)
+    (logLeaves : Nat) (commitment : D) (leaves : List (Nat × D)) (proof : List D)
+    (h : verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves proof = true) :
+    ∃ top, canopyLevels nodeHash logLeaves
+        (leaves.map (fun p => (2 ^ logLeaves + p.1, p.2))) proof = some ([(1, top)], []) ∧
+      rootHash logLeaves top = commitment := by
+  unfold verifyCanopyMultiproof at h
+  simp only [Bool.and_eq_true] at h
+  obtain ⟨_, hM⟩ := h
+  split at hM
+  next u top hEq =>
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hM
+    obtain ⟨hu, hR⟩ := hM
+    subst hu
+    exact ⟨top, hEq, hR⟩
+  next => cases hM
+
+/-- **Exact sibling consumption is determined by the index set alone.** Whatever the hash
+    functions, leaf digests and commitment, an accepted multiproof carries exactly
+    `steinerSiblingCount logLeaves indices` authentication siblings. -/
+theorem verifyCanopyMultiproof_exact_sibling_count {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (rootHash : Nat → D → D)
+    (logLeaves : Nat) (commitment : D) (leaves : List (Nat × D)) (proof : List D)
+    (hAcc : verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves proof = true) :
+    proof.length = steinerSiblingCount logLeaves (leaves.map Prod.fst) := by
+  obtain ⟨top, hL, _⟩ := canopy_accept_unpack nodeHash rootHash logLeaves commitment leaves proof hAcc
+  have hCount := canopyLevels_count nodeHash logLeaves _ proof _ _ hL
+  rw [canopy_map_fst] at hCount
+  exact hCount
+
+/-- Two proofs of different lengths for the same index list are never both accepted, for any
+    hash functions, commitments and leaf digests. -/
+theorem verifyCanopyMultiproof_length_mismatch_rejected {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (rootHash : Nat → D → D)
+    (logLeaves : Nat) (commitment commitment' : D)
+    (leaves leaves' : List (Nat × D)) (proof proof' : List D)
+    (hAcc : verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves proof = true)
+    (hIdx : leaves'.map Prod.fst = leaves.map Prod.fst)
+    (hLen : proof'.length ≠ proof.length) :
+    verifyCanopyMultiproof nodeHash rootHash logLeaves commitment' leaves' proof' = false := by
+  apply Bool.eq_false_iff.mpr
+  intro hAcc'
+  apply hLen
+  rw [verifyCanopyMultiproof_exact_sibling_count nodeHash rootHash logLeaves commitment' leaves' proof' hAcc',
+    verifyCanopyMultiproof_exact_sibling_count nodeHash rootHash logLeaves commitment leaves proof hAcc, hIdx]
+
+/-- **Extra-sibling tooth.** Appending one or more digests to an accepted proof yields a
+    rejected proof, for any hash functions. -/
+theorem verifyCanopyMultiproof_extra_sibling_rejected {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (rootHash : Nat → D → D)
+    (logLeaves : Nat) (commitment : D) (leaves : List (Nat × D)) (proof : List D)
+    (extra : D) (more : List D)
+    (hAcc : verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves proof = true) :
+    verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves
+      (proof ++ extra :: more) = false := by
+  refine verifyCanopyMultiproof_length_mismatch_rejected nodeHash rootHash logLeaves commitment
+    commitment leaves leaves proof _ hAcc rfl ?_
+  rw [List.length_append, List.length_cons]
+  exact Nat.ne_of_gt (Nat.lt_add_of_pos_right (Nat.succ_pos _))
+
+/-- **Missing-sibling tooth.** Dropping the last digest of an accepted nonempty proof yields a
+    rejected proof, for any hash functions. -/
+theorem verifyCanopyMultiproof_missing_sibling_rejected {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (rootHash : Nat → D → D)
+    (logLeaves : Nat) (commitment : D) (leaves : List (Nat × D)) (proof : List D)
+    (hNonempty : proof ≠ [])
+    (hAcc : verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves proof = true) :
+    verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves proof.dropLast = false := by
+  refine verifyCanopyMultiproof_length_mismatch_rejected nodeHash rootHash logLeaves commitment
+    commitment leaves leaves proof _ hAcc rfl ?_
+  rw [List.length_dropLast]
+  exact Nat.ne_of_lt (Nat.sub_lt (List.length_pos_iff.mpr hNonempty) Nat.one_pos)
+
+private theorem canopyNode_binding {D : Type} [DecidableEq D] (nodeHash : Nat → D → D → D)
+    {i : Nat} {l r l' r' : D} (h : nodeHash i l r = nodeHash i l' r') :
+    (∃ (i : Nat) (l r l' r' : D), (l, r) ≠ (l', r') ∧ nodeHash i l r = nodeHash i l' r') ∨
+    (l = l' ∧ r = r') := by
+  by_cases he : (l, r) = (l', r')
+  · exact Or.inr (Prod.mk.inj he)
+  · exact Or.inl ⟨i, l, r, l', r', he, h⟩
+
+private theorem canopyParentHash_binding {D : Type} [DecidableEq D] (nodeHash : Nat → D → D → D)
+    {u : Nat} {hu s hu' s' : D}
+    (h : canopyParentHash nodeHash u hu s = canopyParentHash nodeHash u hu' s') :
+    (∃ (i : Nat) (l r l' r' : D), (l, r) ≠ (l', r') ∧ nodeHash i l r = nodeHash i l' r') ∨
+    (hu = hu' ∧ s = s') := by
+  unfold canopyParentHash at h
+  by_cases hp : u &&& 1 = 0
+  · simp only [hp, ↓reduceIte] at h
+    exact canopyNode_binding nodeHash h
+  · simp only [hp, ↓reduceIte] at h
+    rcases canopyNode_binding nodeHash h with hc | ⟨e1, e2⟩
+    · exact Or.inl hc
+    · exact Or.inr ⟨e2, e1⟩
+
+/-- Per-level binding: two successful level steps over the same index list that produce the
+    same next level and the same unconsumed siblings either started from identical inputs or
+    exhibit a `nodeHash` collision. -/
+private theorem canopyLevelStep_binding {D : Type} [DecidableEq D] (nodeHash : Nat → D → D → D) :
+    ∀ (n : Nat) (a1 a2 : List (Nat × D)) (s1 s2 : List D) (b : List (Nat × D)) (t : List D),
+      a1.length < n →
+      a1.map Prod.fst = a2.map Prod.fst →
+      canopyLevelStep nodeHash a1 s1 = some (b, t) →
+      canopyLevelStep nodeHash a2 s2 = some (b, t) →
+      (∃ (i : Nat) (l r l' r' : D), (l, r) ≠ (l', r') ∧ nodeHash i l r = nodeHash i l' r') ∨
+      (a1 = a2 ∧ s1 = s2) := by
+  intro n
+  induction n with
+  | zero => intro a1 a2 s1 s2 b t hLen _ _ _; exact absurd hLen (Nat.not_lt_zero _)
+  | succ n ih =>
+    intro a1 a2 s1 s2 b t hLen hIdx h1 h2
+    match a1, a2, hLen, hIdx, h1, h2 with
+    | [], [], _, _, h1, h2 =>
+      obtain ⟨_, ht1⟩ := canopyLevelStep_nil nodeHash h1
+      obtain ⟨_, ht2⟩ := canopyLevelStep_nil nodeHash h2
+      exact Or.inr ⟨rfl, ht1.symm.trans ht2⟩
+    | [], _ :: _, _, hIdx, _, _ => cases hIdx
+    | _ :: _, [], _, hIdx, _, _ => cases hIdx
+    | [(u, hu)], [(u2, hu2)], _, hIdx, h1, h2 =>
+      have hu_eq : u = u2 := (List.cons.inj hIdx).1
+      subst hu_eq
+      obtain ⟨c1, hs1, hb1⟩ := canopyLevelStep_single nodeHash h1
+      obtain ⟨c2, hs2, hb2⟩ := canopyLevelStep_single nodeHash h2
+      have hH := (Prod.mk.inj (List.cons.inj (hb1.symm.trans hb2)).1).2
+      rcases canopyParentHash_binding nodeHash hH with hc | ⟨e1, e2⟩
+      · exact Or.inl hc
+      · subst e1; subst e2; subst hs1; subst hs2
+        exact Or.inr ⟨rfl, rfl⟩
+    | [_], _ :: _ :: _, _, hIdx, _, _ => cases (List.cons.inj hIdx).2
+    | _ :: _ :: _, [_], _, hIdx, _, _ => cases (List.cons.inj hIdx).2
+    | (u, hu) :: (v, hv) :: tl1, (u2, hu2) :: (v2, hv2) :: tl2, hLen, hIdx, h1, h2 =>
+      have hu_eq : u = u2 := (List.cons.inj hIdx).1
+      have hv_eq : v = v2 := (List.cons.inj (List.cons.inj hIdx).2).1
+      have hTl : tl1.map Prod.fst = tl2.map Prod.fst := (List.cons.inj (List.cons.inj hIdx).2).2
+      subst hu_eq; subst hv_eq
+      have hLen1 : ((v, hv) :: tl1).length < n := Nat.lt_of_succ_lt_succ hLen
+      have hLen2 : tl1.length < n := Nat.lt_of_succ_lt hLen1
+      by_cases hv' : v = u ^^^ 1
+      · obtain ⟨act1, hr1, hb1⟩ := canopyLevelStep_pair nodeHash hv' h1
+        obtain ⟨act2, hr2, hb2⟩ := canopyLevelStep_pair nodeHash hv' h2
+        obtain ⟨hHead, hAct⟩ := List.cons.inj (hb1.symm.trans hb2)
+        subst hAct
+        rcases canopyNode_binding nodeHash (Prod.mk.inj hHead).2 with hc | ⟨e1, e2⟩
+        · exact Or.inl hc
+        · rcases ih tl1 tl2 s1 s2 act1 t hLen2 hTl hr1 hr2 with hc | ⟨eT, eS⟩
+          · exact Or.inl hc
+          · subst e1; subst e2; subst eT; subst eS
+            exact Or.inr ⟨rfl, rfl⟩
+      · obtain ⟨c1, r1, act1, hs1, hr1, hb1⟩ := canopyLevelStep_solo nodeHash hv' h1
+        obtain ⟨c2, r2, act2, hs2, hr2, hb2⟩ := canopyLevelStep_solo nodeHash hv' h2
+        obtain ⟨hHead, hAct⟩ := List.cons.inj (hb1.symm.trans hb2)
+        subst hAct
+        rcases canopyParentHash_binding nodeHash (Prod.mk.inj hHead).2 with hc | ⟨e1, e2⟩
+        · exact Or.inl hc
+        · rcases ih ((v, hv) :: tl1) ((v, hv2) :: tl2) r1 r2 act1 t hLen1
+              (congrArg (List.cons v) hTl) hr1 hr2 with hc | ⟨eT, eS⟩
+          · exact Or.inl hc
+          · subst e1; subst e2; subst eS; subst hs1; subst hs2
+            exact Or.inr ⟨congrArg (List.cons (u, hu)) eT, rfl⟩
+
+/-- Binding of the whole level iteration: equal final state and equal starting index list force
+    equal starting digests and equal sibling lists, or a `nodeHash` collision. -/
+private theorem canopyLevels_binding {D : Type} [DecidableEq D] (nodeHash : Nat → D → D → D) :
+    ∀ (d : Nat) (a1 a2 : List (Nat × D)) (s1 s2 : List D) (b : List (Nat × D)) (t : List D),
+      a1.map Prod.fst = a2.map Prod.fst →
+      canopyLevels nodeHash d a1 s1 = some (b, t) →
+      canopyLevels nodeHash d a2 s2 = some (b, t) →
+      (∃ (i : Nat) (l r l' r' : D), (l, r) ≠ (l', r') ∧ nodeHash i l r = nodeHash i l' r') ∨
+      (a1 = a2 ∧ s1 = s2)
+  | 0, a1, a2, s1, s2, b, t, _, h1, h2 => by
+    rw [canopyLevels] at h1 h2
+    obtain ⟨ha, hs⟩ := Prod.mk.inj (Option.some.inj (h1.trans h2.symm))
+    exact Or.inr ⟨ha, hs⟩
+  | d + 1, a1, a2, s1, s2, b, t, hIdx, h1, h2 => by
+    obtain ⟨m1, r1, hStep1, hRest1⟩ := canopyLevels_succ nodeHash h1
+    obtain ⟨m2, r2, hStep2, hRest2⟩ := canopyLevels_succ nodeHash h2
+    have hm1 := (canopyLevelStep_shape nodeHash _ a1 s1 m1 r1 (Nat.lt_succ_self _) hStep1).1
+    have hm2 := (canopyLevelStep_shape nodeHash _ a2 s2 m2 r2 (Nat.lt_succ_self _) hStep2).1
+    rw [hIdx] at hm1
+    rcases canopyLevels_binding nodeHash d m1 m2 r1 r2 b t (hm1.trans hm2.symm) hRest1 hRest2
+      with hc | ⟨eM, eR⟩
+    · exact Or.inl hc
+    · subst eM; subst eR
+      exact canopyLevelStep_binding nodeHash _ a1 a2 s1 s2 m1 r1 (Nat.lt_succ_self _) hIdx
+        hStep1 hStep2
+
+/-- **Binding of the Steiner multiproof verifier (collision extraction).** If two distinct
+    openings `(leaves₁, proof₁) ≠ (leaves₂, proof₂)` of the same index list are both accepted
+    against the same commitment, then either `rootHash` collides on two distinct top nodes, or
+    `nodeHash` collides at one node index on two distinct `(left, right)` pairs. -/
+theorem verifyCanopyMultiproof_binding {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (rootHash : Nat → D → D)
+    (logLeaves : Nat) (commitment : D)
+    (leaves₁ leaves₂ : List (Nat × D)) (proof₁ proof₂ : List D)
+    (hIdx : leaves₁.map Prod.fst = leaves₂.map Prod.fst)
+    (hAcc₁ : verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves₁ proof₁ = true)
+    (hAcc₂ : verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves₂ proof₂ = true)
+    (hNe : (leaves₁, proof₁) ≠ (leaves₂, proof₂)) :
+    (∃ top₁ top₂ : D, top₁ ≠ top₂ ∧ rootHash logLeaves top₁ = rootHash logLeaves top₂) ∨
+    (∃ (i : Nat) (l r l' r' : D), (l, r) ≠ (l', r') ∧ nodeHash i l r = nodeHash i l' r') := by
+  obtain ⟨top1, hL1, hR1⟩ :=
+    canopy_accept_unpack nodeHash rootHash logLeaves commitment leaves₁ proof₁ hAcc₁
+  obtain ⟨top2, hL2, hR2⟩ :=
+    canopy_accept_unpack nodeHash rootHash logLeaves commitment leaves₂ proof₂ hAcc₂
+  by_cases hTop : top1 = top2
+  · subst hTop
+    have hIdx' : (leaves₁.map (fun p => (2 ^ logLeaves + p.1, p.2))).map Prod.fst =
+        (leaves₂.map (fun p => (2 ^ logLeaves + p.1, p.2))).map Prod.fst := by
+      rw [canopy_map_fst, canopy_map_fst, hIdx]
+    rcases canopyLevels_binding nodeHash logLeaves _ _ proof₁ proof₂ _ _ hIdx' hL1 hL2
+      with hc | ⟨eA, eP⟩
+    · exact Or.inr hc
+    · have eL := canopy_lift_inj (2 ^ logLeaves) leaves₁ leaves₂ eA
+      subst eL; subst eP
+      exact absurd rfl hNe
+  · exact Or.inl ⟨top1, top2, hTop, hR1.trans hR2.symm⟩
+
+/-- **Tampered Steiner multiproof.** Starting from an accepted opening, any change to a leaf
+    digest or to the sibling list (same index list, different data) is rejected, unless it
+    exhibits a `rootHash` or `nodeHash` collision. -/
+theorem verifyCanopyMultiproof_tamper_rejected_or_collision {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (rootHash : Nat → D → D)
+    (logLeaves : Nat) (commitment : D)
+    (leaves leaves' : List (Nat × D)) (proof proof' : List D)
+    (hAcc : verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves proof = true)
+    (hIdx : leaves'.map Prod.fst = leaves.map Prod.fst)
+    (hNe : (leaves', proof') ≠ (leaves, proof)) :
+    verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves' proof' = false ∨
+    (∃ top₁ top₂ : D, top₁ ≠ top₂ ∧ rootHash logLeaves top₁ = rootHash logLeaves top₂) ∨
+    (∃ (i : Nat) (l r l' r' : D), (l, r) ≠ (l', r') ∧ nodeHash i l r = nodeHash i l' r') := by
+  cases hV : verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves' proof' with
+  | false => exact Or.inl rfl
+  | true =>
+    exact Or.inr (verifyCanopyMultiproof_binding nodeHash rootHash logLeaves commitment
+      leaves' leaves proof' proof hIdx hV hAcc hNe)
+
+
+end Qsag
+
+
+namespace Qsag
+/-! ### Constructive collision extraction from two `CanopyMultiProof` transcripts -/
+
+/-- An explicit `nodeHash` collision: one node index, two distinct `(left, right)` pairs, equal
+    digests. -/
+structure CanopyNodeCollision {D : Type} (nodeHash : Nat → D → D → D) where
+  idx : Nat
+  l : D
+  r : D
+  l' : D
+  r' : D
+  ne : (l, r) ≠ (l', r')
+  eq : nodeHash idx l r = nodeHash idx l' r'
+
+/-- An explicit `rootHash` collision on two distinct top nodes. -/
