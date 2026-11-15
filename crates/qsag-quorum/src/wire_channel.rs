@@ -363,7 +363,8 @@ fn ratchet_wire_key(key: &mut [u8; 32], tag: &[u8; 32]) {
 /// Both modes derive independent directional keys `(party -> peer)` vs `(peer -> party)`
 /// and separate encryption and MAC subkeys. Encrypted links erase each chain key after
 /// advancing it with the authenticated ciphertext tag. Authentication failures do
-/// not advance receive state. Discard the link after an underlying transport error.
+/// not advance receive state. Receive timeouts and rejected packets leave the link usable;
+/// send failures and terminal receive errors require a new session.
 /// A session ID must be fresh whenever endpoints are recreated: counters cannot
 /// be reset under the same key/session pair. Headers, lengths, rounds, direction,
 /// sequence numbers and payloads are MAC-bound. Use [`ConfidentialWireChannel`] or
@@ -932,6 +933,7 @@ mod mesh {
                 .map(|(party, streams)| TcpEndpoint {
                     seq: FrameSequencer::new(session_id, party, parties),
                     streams,
+                    receiving: (0..parties).map(|_| PartialFrame::default()).collect(),
                     stats: stats.clone(),
                 })
                 .collect();
@@ -939,10 +941,44 @@ mod mesh {
         }
     }
 
+    // Retained across read deadlines. read_exact discards the number of bytes read
+    // before a timeout, which would turn the next payload bytes into a new header.
+    #[derive(Default)]
+    struct PartialFrame {
+        bytes: Vec<u8>,
+        filled: usize,
+    }
+
+    impl PartialFrame {
+        fn read(&mut self, stream: &mut TcpStream, peer: usize) -> Result<Vec<u8>, TransportError> {
+            if self.bytes.is_empty() {
+                self.bytes.resize(FRAME_HEADER_BYTES, 0);
+            }
+            loop {
+                while self.filled < self.bytes.len() {
+                    match stream.read(&mut self.bytes[self.filled..]) {
+                        Ok(0) => return Err(TransportError::Closed { peer }),
+                        Ok(n) => self.filled += n,
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(e) => return Err(io_error(peer, &e)),
+                    }
+                }
+                let (_, len) = decode_header(&self.bytes)?;
+                let total = FRAME_HEADER_BYTES + len;
+                if self.bytes.len() == total {
+                    self.filled = 0;
+                    return Ok(core::mem::take(&mut self.bytes));
+                }
+                self.bytes.resize(total, 0);
+            }
+        }
+    }
+
     /// One party's end of a [`TcpWireMesh`].
     pub struct TcpEndpoint {
         seq: FrameSequencer,
         streams: Vec<Option<TcpStream>>,
+        receiving: Vec<PartialFrame>,
         stats: Arc<MeshStats>,
     }
 
@@ -1008,15 +1044,19 @@ mod mesh {
                 .get_mut(from_party)
                 .and_then(Option::as_mut)
                 .ok_or(TransportError::UnknownPeer { peer: from_party })?;
-            let mut raw = std::vec![0u8; FRAME_HEADER_BYTES];
-            stream
-                .read_exact(&mut raw)
-                .map_err(|e| io_error(from_party, &e))?;
-            let (_, payload_len) = decode_header(&raw)?;
-            raw.resize(FRAME_HEADER_BYTES + payload_len, 0);
-            stream
-                .read_exact(&mut raw[FRAME_HEADER_BYTES..])
-                .map_err(|e| io_error(from_party, &e))?;
+            let raw = match self.receiving[from_party].read(stream, from_party) {
+                Ok(raw) => raw,
+                Err(err) => {
+                    // An invalid length/magic loses the TCP frame boundary. There is no
+                    // safe resynchronization marker in this codec, so close only this
+                    // malformed stream. A partial read deadline must retain all bytes.
+                    if err.is_fatal_link_error() || err == TransportError::Malformed {
+                        self.streams[from_party] = None;
+                        self.receiving[from_party] = PartialFrame::default();
+                    }
+                    return Err(err);
+                }
+            };
             self.seq.open(from_party, expected_round_tag, &raw)
         }
     }
@@ -1024,6 +1064,25 @@ mod mesh {
     mod tcp_safety_tests {
         use super::*;
         use crate::wire_channel::{FrameHeader, encode_frame};
+        #[test]
+        fn partial_header_and_payload_survive_multiple_deadlines() {
+            let (mut ep, _) = TcpWireMesh::with_timeout(Duration::from_millis(10))
+                .loopback(2, [9; 32]).unwrap();
+            let frame = ep[0].seq.seal(1, 7, b"partial payload").unwrap();
+            ep[0].streams[1].as_mut().unwrap().write_all(&frame[..11]).unwrap();
+            assert_eq!(ep[1].recv_frame(0, 7), Err(TransportError::Timeout { peer: 0 }));
+            assert_eq!(ep[1].receiving[0].filled, 11);
+            ep[0].streams[1].as_mut().unwrap()
+                .write_all(&frame[11..FRAME_HEADER_BYTES + 3]).unwrap();
+            assert_eq!(ep[1].recv_frame(0, 7), Err(TransportError::Timeout { peer: 0 }));
+            assert_eq!(ep[1].receiving[0].filled, FRAME_HEADER_BYTES + 3);
+            ep[0].streams[1].as_mut().unwrap()
+                .write_all(&frame[FRAME_HEADER_BYTES + 3..]).unwrap();
+            assert_eq!(ep[1].recv_frame(0, 7).unwrap(), b"partial payload");
+            ep[0].send_frame(1, 8, b"next frame").unwrap();
+            assert_eq!(ep[1].recv_frame(0, 8).unwrap(), b"next frame");
+        }
+
         #[test]
         fn deadlines_and_oversized_header() {
             let (mut endpoints, _) = TcpWireMesh::with_timeout(Duration::from_millis(25))
@@ -1270,6 +1329,27 @@ mod frame_cap_tests {
 #[cfg(test)]
 mod authenticated_tests {
     use super::*;
+
+    #[test]
+    fn rejected_packet_and_timeout_do_not_latch_confidential_link() {
+        let (mut endpoints, _) = InMemoryWireMesh::connect(2, [0x39; 32]);
+        let mut bob = endpoints.pop().unwrap();
+        bob.set_timeout(std::time::Duration::from_millis(10));
+        let alice = endpoints.pop().unwrap();
+        let mut alice = ConfidentialWireChannel::new(alice, [2; 32], vec![[3; 32]; 2]).unwrap();
+        let mut bob = ConfidentialWireChannel::new(bob, [2; 32], vec![[3; 32]; 2]).unwrap();
+        assert_eq!(bob.recv_frame(0, 7), Err(TransportError::Timeout { peer: 0 }));
+        let valid = alice.inner.seal(1, 7, b"retry authenticated packet").unwrap();
+        let mut invalid = valid.clone();
+        *invalid.last_mut().unwrap() ^= 1;
+        alice.inner.transport.send_frame(1, 7, &invalid).unwrap();
+        assert_eq!(bob.recv_frame(0, 7), Err(TransportError::AuthenticationFailed));
+        // Transport retransmission retains the authenticated packet's sequence/key.
+        alice.inner.transport.send_frame(1, 7, &valid).unwrap();
+        assert_eq!(bob.recv_frame(0, 7).unwrap(), b"retry authenticated packet");
+        alice.send_frame(1, 8, b"following ratchet step").unwrap();
+        assert_eq!(bob.recv_frame(0, 8).unwrap(), b"following ratchet step");
+    }
 
     #[test]
     fn encrypted_frames_hide_payload_and_reject_mode_and_key_confusion() {
