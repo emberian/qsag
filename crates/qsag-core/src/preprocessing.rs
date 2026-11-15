@@ -13100,6 +13100,7 @@ pub fn run_silent_pcg_keccak_vaults_with_alpha<T: crate::pcg_dense::SeedBurnTrac
 impl core::error::Error for PreprocessError {}
 
 #[cfg(test)]
+#[allow(clippy::needless_range_loop)]
 mod tests {
     use super::*;
     use crate::sponge::poseidon2::poseidon2_sbox7;
@@ -14285,9 +14286,14 @@ mod hardening_regressions {
                 z_s1: Box::new([[0i16; RLWE_N]; RLWE_ZKPOK_REPS]),
                 z_e1: Box::new([[0i16; RLWE_N]; RLWE_ZKPOK_REPS]),
             };
-            for rep in 0..RLWE_ZKPOK_REPS {
-                l2_forged.z_s0[rep] = mul_chal11_signed_ct(&s_bad, forged_chals[rep]);
-                l2_forged.z_e0[rep] = mul_chal11_signed_ct(&e_bad, forged_chals[rep]);
+            for ((zs0, ze0), &chal) in l2_forged
+                .z_s0
+                .iter_mut()
+                .zip(l2_forged.z_e0.iter_mut())
+                .zip(forged_chals.iter())
+            {
+                *zs0 = mul_chal11_signed_ct(&s_bad, chal);
+                *ze0 = mul_chal11_signed_ct(&e_bad, chal);
             }
             assert!(
                 !l2_forged.verify(
@@ -14530,10 +14536,9 @@ mod silent_pcg_vault_integration_tests {
     ) {
         let lambdas = lagrange_weights_zero_gf256(&eval_points[..t]).unwrap();
         let mut alpha_global = [Tower128::ZERO; 2];
-        for q in 0..t {
-            for lane in 0..2 {
-                alpha_global[lane] =
-                    alpha_global[lane].add(vaults[q].mac_alpha_lanes[lane].mul_gf256(lambdas[q]));
+        for (vault_q, &lambda_q) in vaults.iter().zip(lambdas.iter()).take(t) {
+            for (ag, &mac_alpha) in alpha_global.iter_mut().zip(vault_q.mac_alpha_lanes.iter()) {
+                *ag = ag.add(mac_alpha.mul_gf256(lambda_q));
             }
         }
         for v in vaults {
@@ -14561,18 +14566,18 @@ mod silent_pcg_vault_integration_tests {
                 let a_gf = bs_gf256_extract_lane(&a_open, bit);
                 let b_gf = bs_gf256_extract_lane(&b_open, bit);
                 let c_gf = bs_gf256_extract_lane(&c_open, bit);
-                for lane in 0..2 {
+                for (lane, &alpha_l) in alpha_global.iter().enumerate() {
                     let mut ma = Tower128::ZERO;
                     let mut mb = Tower128::ZERO;
                     let mut mc = Tower128::ZERO;
-                    for q in 0..t {
-                        ma = ma.add(vaults[q].triples[word_idx].a_mac[lane][bit].mul_gf256(lambdas[q]));
-                        mb = mb.add(vaults[q].triples[word_idx].b_mac[lane][bit].mul_gf256(lambdas[q]));
-                        mc = mc.add(vaults[q].triples[word_idx].c_mac[lane][bit].mul_gf256(lambdas[q]));
+                    for (vault_q, &lambda_q) in vaults.iter().zip(lambdas.iter()).take(t) {
+                        ma = ma.add(vault_q.triples[word_idx].a_mac[lane][bit].mul_gf256(lambda_q));
+                        mb = mb.add(vault_q.triples[word_idx].b_mac[lane][bit].mul_gf256(lambda_q));
+                        mc = mc.add(vault_q.triples[word_idx].c_mac[lane][bit].mul_gf256(lambda_q));
                     }
-                    assert_eq!(ma, alpha_global[lane].mul_gf256(a_gf));
-                    assert_eq!(mb, alpha_global[lane].mul_gf256(b_gf));
-                    assert_eq!(mc, alpha_global[lane].mul_gf256(c_gf));
+                    assert_eq!(ma, alpha_l.mul_gf256(a_gf));
+                    assert_eq!(mb, alpha_l.mul_gf256(b_gf));
+                    assert_eq!(mc, alpha_l.mul_gf256(c_gf));
                 }
             }
         }
