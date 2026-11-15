@@ -4,12 +4,15 @@ use qsag_accel::keccak::cshake256_framed_32;
 use qsag_agg::sig::digest4_to_bytes;
 use qsag_agg::{
     AggSigProfile, FsWalEpochSink, QsagAggregateProof, SignerBitmap, SigningMode, ValidatorKeypair,
-    ValidatorPublicKey, aggregate_signatures, compute_committee_root, merge_aggregates,
-    verify_aggregate, verify_individual_signature,
+    ValidatorPublicKey, ValidatorSignature, aggregate_signatures, compute_committee_root,
+    merge_aggregates, verify_aggregate, verify_individual_signature,
 };
 use qsag_core::ceremony_journal::{CeremonyContext, CeremonyReservation, FsCeremonyJournal};
 
-use crate::cli::{Args, CliError, Secret32, os_random_32, read_input, write_new};
+use crate::cli::{
+    Args, CliError, MAX_KEY_FILE_BYTES, MAX_SIG_PROOF_BYTES, Secret32, os_random_32,
+    read_bounded_file, read_input, write_new,
+};
 use crate::codec::{Json, from_hex_exact};
 use crate::keys::{PUBLIC_FORMAT, SECRET_FORMAT, derive, derive_secret, load_json, scheme_of};
 use crate::schemes::Scheme;
@@ -135,6 +138,69 @@ fn load_committee(path: &str) -> Result<Vec<ValidatorPublicKey>, CliError> {
     Ok(committee)
 }
 
+/// Load a validator roster from either a single `agg-jorts-poseidon2` committee file OR a
+/// comma-separated list of individual 65-byte validator / `hem-jorts-poseidon2` quorum public keys.
+pub fn load_public_validators(spec: &str) -> Result<Vec<ValidatorPublicKey>, CliError> {
+    let parts: Vec<&str> = spec
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if parts.is_empty() {
+        return Err(CliError::usage("--pubkeys / --public must not be empty"));
+    }
+    let mut out = Vec::with_capacity(parts.len());
+    for path in parts {
+        let raw = read_bounded_file(path, MAX_KEY_FILE_BYTES)?;
+        if raw.0.len() == 65 {
+            let pk = ValidatorPublicKey::from_bytes_canonical(&raw.0)
+                .ok_or_else(|| CliError::input(format!("{path}: non-canonical 65B public key")))?;
+            out.push(pk);
+            continue;
+        }
+        let text = std::str::from_utf8(&raw.0)
+            .map_err(|_| CliError::input(format!("{path} is not UTF-8")))?;
+        let json = Json::parse(text)?;
+        if let Some(vals) = json.get("validators").and_then(Json::as_array) {
+            out.extend(load_committee(path).or_else(|_| committee_from_json(vals))?);
+        } else if let Some(pk_hex) = json
+            .get("validator_public_key")
+            .or_else(|| json.get("public_key"))
+            .and_then(Json::as_str)
+        {
+            let bytes: [u8; 65] = from_hex_exact(pk_hex, "validator_public_key")?;
+            let pk = ValidatorPublicKey::from_bytes_canonical(&bytes).ok_or_else(|| {
+                CliError::input(format!("{path}: validator public key is not canonical"))
+            })?;
+            out.push(pk);
+        } else {
+            return Err(CliError::usage(format!(
+                "{path} is not a committee or JortsPoseidon2 validator/quorum public key file"
+            )));
+        }
+    }
+    if out.is_empty() {
+        return Err(CliError::usage("validator committee must not be empty"));
+    }
+    Ok(out)
+}
+
+/// Load a standalone `JortsPoseidon2` signature from raw canonical bytes or a JSON signature file
+/// (`qsag-quorum-signature-v1` / `qsag-signature-v1`).
+pub fn load_validator_signature(path: &str) -> Result<ValidatorSignature, CliError> {
+    let raw = read_bounded_file(path, MAX_SIG_PROOF_BYTES)?;
+    if raw.0.len() == AggSigProfile::JortsPoseidon2.raw_signature_bytes() {
+        return ValidatorSignature::from_bytes_canonical(AggSigProfile::JortsPoseidon2, &raw.0)
+            .ok_or_else(|| CliError::verify(format!("{path}: non-canonical JortsPoseidon2 sig")));
+    }
+    let text = std::str::from_utf8(&raw.0)
+        .map_err(|_| CliError::input(format!("{path} is not UTF-8")))?;
+    let json = Json::parse(text)?;
+    let sig_bytes = json.field_hex("signature")?;
+    ValidatorSignature::from_bytes_canonical(AggSigProfile::JortsPoseidon2, &sig_bytes)
+        .ok_or_else(|| CliError::verify(format!("{path}: non-canonical JortsPoseidon2 signature")))
+}
+
 fn load_proof(path: &str) -> Result<QsagAggregateProof, CliError> {
     let file = load_json(path, PROOF_FORMAT)?;
     QsagAggregateProof::from_bytes_canonical(&file.field_hex("proof")?)
@@ -166,15 +232,17 @@ fn proof_file(committee: &[ValidatorPublicKey], proof: &QsagAggregateProof) -> J
 }
 
 const AGGREGATE_HELP: &str = "\
+qsag aggregate --pubkeys <pk1,pk2,..|committee> --sigs <sig1,sig2,..> [--signers <i,j,..>] --message <file|-> --out <path>
+qsag aggregate --merge <proofA,proofB> --public <committee|pk1,pk2,..> --in <file|-> --out <path>
 qsag aggregate --secret <committee> --signers <i,j,..> --epoch <n> --wal-dir <dir> --in <file|-> --out <path>
-qsag aggregate --merge <proofA,proofB> --public <committee> --in <file|-> --out <path>
 
-First form: the listed validators of a committee key (from `qsag keygen --scheme
-agg-jorts-poseidon2`) each sign the message at the given one-time epoch, and the signatures
-are aggregated into one proof. Each validator's epoch is persisted to its write-ahead log in
---wal-dir (created by keygen) before it signs; an epoch never signs two different messages.
+First form (untrusted public aggregator — zero secret keys!): aggregate pre-existing
+JortsPoseidon2 signatures (from `qsag quorum sign --scheme hem-jorts-poseidon2` or
+individual validators) using ONLY public keys, signatures, and the message.
 
 Second form: merge two verified proofs over disjoint signer sets into one.
+
+Third form: committee-vault demo signing + aggregation backed by per-validator FsWalEpochSink.
 
   --deterministic     derive the proof blinding seed from the inputs instead of OS entropy
   --anchor-dir <dir>  verify and advance external monotone anchors before releasing proof
@@ -191,11 +259,14 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
         &[
             "secret",
             "public",
+            "pubkeys",
+            "sigs",
             "signers",
             "epoch",
             "wal-dir",
             "merge",
             "in",
+            "message",
             "out",
             "passphrase-env",
             "passphrase-file",
@@ -213,11 +284,24 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
     args.no_positionals()?;
     let anchor_cfg = crate::anchor::AnchorConfig::from_args(&args)?;
     let base_context = crate::anchor::parse_ceremony_context(&args, 0)?;
-    let message = read_input(args.require("in")?)?;
+    if args.get("in").is_some() && args.get("message").is_some() {
+        return Err(CliError::usage("pass either --message or --in, not both"));
+    }
+    if args.get("public").is_some() && args.get("pubkeys").is_some() {
+        return Err(CliError::usage("pass either --pubkeys or --public, not both"));
+    }
+    let msg_arg = args
+        .get("message")
+        .or_else(|| args.get("in"))
+        .ok_or_else(|| CliError::usage("missing required option --message (or --in)"))?;
+    let message = read_input(msg_arg)?;
     let out_path = args.require("out")?;
     let mode = SigningMode::SharedMessage(&message);
 
     let (committee, proof) = if let Some(pair) = args.get("merge") {
+        if args.get("secret").is_some() || args.get("sigs").is_some() {
+            return Err(CliError::usage("--merge cannot be combined with --secret or --sigs"));
+        }
         if anchor_cfg.is_some()
             || args.get("policy-id-hex").is_some()
             || args.get("spend-amount").is_some()
@@ -226,13 +310,128 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
                 "ceremony anchor and policy options do not apply to --merge",
             ));
         }
-        let committee = load_committee(args.require("public")?)?;
+        let pub_arg = args
+            .get("pubkeys")
+            .or_else(|| args.get("public"))
+            .ok_or_else(|| CliError::usage("missing required option --pubkeys (or --public)"))?;
+        let committee = load_public_validators(pub_arg)?;
         let (a, b) = pair
             .split_once(',')
             .ok_or_else(|| CliError::usage("--merge takes two comma-separated proof files"))?;
         let merged = merge_aggregates(&committee, &mode, &load_proof(a)?, &load_proof(b)?)
             .map_err(|e| CliError::verify(format!("merge refused: {e:?}")))?;
         (committee, merged)
+    } else if let Some(sigs_spec) = args.get("sigs") {
+        if args.get("secret").is_some()
+            || args.get("wal-dir").is_some()
+            || args.get("epoch").is_some()
+            || anchor_cfg.is_some()
+            || args.get("policy-id-hex").is_some()
+            || args.get("spend-amount").is_some()
+        {
+            return Err(CliError::usage(
+                "untrusted public aggregation (--sigs) uses only public inputs (--pubkeys, --sigs, --message) and never accepts --secret, --wal-dir, or ceremony flags",
+            ));
+        }
+        let pub_arg = args
+            .get("pubkeys")
+            .or_else(|| args.get("public"))
+            .ok_or_else(|| {
+                CliError::usage("public aggregation requires --pubkeys (or --public)")
+            })?;
+        let committee = load_public_validators(pub_arg)?;
+        let size = u32::try_from(committee.len())
+            .map_err(|_| CliError::usage("committee size exceeds u32::MAX"))?;
+
+        let sig_paths: Vec<&str> = sigs_spec
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if sig_paths.is_empty() {
+            return Err(CliError::usage("--sigs must list at least one signature file"));
+        }
+        let mut loaded_sigs = Vec::with_capacity(sig_paths.len());
+        for p in &sig_paths {
+            loaded_sigs.push(load_validator_signature(p)?);
+        }
+
+        let (signers, ordered_sigs) = if let Some(signers_spec) = args.get("signers") {
+            let mut indices = Vec::new();
+            for part in signers_spec.split(',') {
+                let idx: usize = part
+                    .trim()
+                    .parse()
+                    .map_err(|_| CliError::usage("--signers must be comma-separated indices"))?;
+                if idx >= committee.len() || indices.last().is_some_and(|&last| idx <= last) {
+                    return Err(CliError::usage(
+                        "--signers must be strictly ascending indices below the committee size",
+                    ));
+                }
+                indices.push(idx);
+            }
+            if indices.len() != loaded_sigs.len() {
+                return Err(CliError::usage(
+                    "--signers count must match --sigs count",
+                ));
+            }
+            for (&idx, sig) in indices.iter().zip(&loaded_sigs) {
+                if !verify_individual_signature(&committee[idx], &message, sig) {
+                    return Err(CliError::verify(format!(
+                        "signature for validator {idx} failed individual verification"
+                    )));
+                }
+            }
+            (indices, loaded_sigs)
+        } else {
+            let mut matched: Vec<(usize, ValidatorSignature)> =
+                Vec::with_capacity(loaded_sigs.len());
+            for (pos, sig) in loaded_sigs.into_iter().enumerate() {
+                let mut found = None;
+                for (idx, pk) in committee.iter().enumerate() {
+                    if matched.iter().any(|(used, _)| *used == idx) {
+                        continue;
+                    }
+                    if verify_individual_signature(pk, &message, &sig) {
+                        found = Some(idx);
+                        break;
+                    }
+                }
+                let idx = found.ok_or_else(|| {
+                    CliError::verify(format!(
+                        "signature {} ({}) does not verify against any remaining public key",
+                        pos, sig_paths[pos]
+                    ))
+                })?;
+                matched.push((idx, sig));
+            }
+            matched.sort_by_key(|(idx, _)| *idx);
+            let indices: Vec<usize> = matched.iter().map(|(i, _)| *i).collect();
+            let sigs: Vec<ValidatorSignature> = matched.into_iter().map(|(_, s)| s).collect();
+            (indices, sigs)
+        };
+
+        let bitmap = SignerBitmap::from_active_indices(size, &signers)
+            .ok_or_else(|| CliError::usage("invalid signer set"))?;
+        let committee_root = compute_committee_root(&committee);
+        let blinding = if args.flag("deterministic") {
+            let mut sig_digest_acc = [0u8; 32];
+            for s in &ordered_sigs {
+                sig_digest_acc = cshake256_framed_32(
+                    b"QSAG.CLI.PUBLIC_AGG.SIG_ACC.V1",
+                    &[&sig_digest_acc, &s.to_bytes()],
+                );
+            }
+            cshake256_framed_32(
+                b"QSAG.CLI.PUBLIC_AGG.BLINDING.V1",
+                &[&committee_root, &sig_digest_acc, &message],
+            )
+        } else {
+            os_random_32()?
+        };
+        let proof = aggregate_signatures(&committee, &bitmap, &mode, &ordered_sigs, blinding)
+            .map_err(|e| CliError::verify(format!("aggregation failed: {e:?}")))?;
+        (committee, proof)
     } else {
         let secret_path = args.require("secret")?;
         let mut vault = crate::vault::Vault::acquire(secret_path, false)?;
@@ -455,21 +654,40 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
 }
 
 const VERIFY_AGG_HELP: &str = "\
-qsag verify-agg --public <committee> --in <file|-> --proof <path> [--json]
+qsag verify-aggregate --pubkeys <pk1,pk2,..|committee> --message <file|-> --proof <path> [--json]
+qsag verify-agg       --public  <committee|pk1,pk2,..> --in      <file|-> --proof <path> [--json]
 
-Verify an aggregate proof against a committee and message. Exit code 0 means valid; exit code 2
+Verify an aggregate proof against public keys and a message. Exit code 0 means valid; exit code 2
 means invalid. The signer set is read from the proof and reported.
 ";
 
 pub fn verify_agg(raw: &[String]) -> Result<(), CliError> {
-    let args = Args::parse(raw, &["public", "in", "proof"], &["json", "help"])?;
+    let args = Args::parse(
+        raw,
+        &["public", "pubkeys", "in", "message", "proof"],
+        &["json", "help"],
+    )?;
     if args.flag("help") {
         print!("{VERIFY_AGG_HELP}");
         return Ok(());
     }
     args.no_positionals()?;
-    let committee = load_committee(args.require("public")?)?;
-    let message = read_input(args.require("in")?)?;
+    if args.get("public").is_some() && args.get("pubkeys").is_some() {
+        return Err(CliError::usage("pass either --pubkeys or --public, not both"));
+    }
+    if args.get("in").is_some() && args.get("message").is_some() {
+        return Err(CliError::usage("pass either --message or --in, not both"));
+    }
+    let pub_arg = args
+        .get("pubkeys")
+        .or_else(|| args.get("public"))
+        .ok_or_else(|| CliError::usage("missing required option --pubkeys (or --public)"))?;
+    let msg_arg = args
+        .get("message")
+        .or_else(|| args.get("in"))
+        .ok_or_else(|| CliError::usage("missing required option --message (or --in)"))?;
+    let committee = load_public_validators(pub_arg)?;
+    let message = read_input(msg_arg)?;
     let proof = load_proof(args.require("proof")?)?;
     let valid = verify_aggregate(&committee, &SigningMode::SharedMessage(&message), &proof);
     let signers = proof.bitmap().active_indices();

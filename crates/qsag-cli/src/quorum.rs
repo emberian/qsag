@@ -43,15 +43,19 @@ const SCHEME_NAME: &str = "jorts-2of3-sha3";
 const MAX_CLI_TREE_HEIGHT: u64 = 8;
 
 const QUORUM_HELP: &str = "\
-qsag quorum <keygen|sign|verify> [options]
+qsag quorum <keygen|sign|refresh|reshare|verify> [options]
 
-Dealerless 2-of-3 Jorts stateful threshold signing backed by per-party FsBeltWal
-and FsCeremonyJournal state (and optional --anchor-dir external monotone anchors).
+Threshold Jorts custody ceremonies:
+  - `--scheme jorts-2of3-sha3` (default): dealerless 2-of-3 RSS Jorts gated by FsBeltWal & FsCeremonyJournal.
+  - `--scheme hem-jorts-poseidon2`: dynamic (t, n) Shamir quorum producing canonical 65B/4328B
+    JortsPoseidon2 keys & signatures directly aggregatable by untrusted `qsag aggregate`!
 
 subcommands:
-  keygen   run a dealerless 2-of-3 RSS ceremony into --vault-dir and write --public-out
-  sign     latch, reserve CeremonyContext, and sign one epoch across the 3 party vaults
-  verify   verify a qsag quorum signature against --public and --in
+  keygen   enroll a quorum custody vault (--vault-dir) and write --public-out
+  sign     threshold-sign one monotone leaf epoch across the active quorum
+  refresh  proactively refresh (t, n) custodian shares (Π_refresh) in place
+  reshare  switch (t, n) -> (t', n') threshold & roster (Π_reshare) under the exact same public key
+  verify   verify a qsag quorum signature against --public and --in / --message
 ";
 
 const QUORUM_KEYGEN_HELP: &str = "\
@@ -316,7 +320,7 @@ pub fn run(raw: &[String]) -> Result<(), CliError> {
     let Some((sub, rest)) = raw.split_first() else {
         eprint!("{QUORUM_HELP}");
         return Err(CliError::usage(
-            "quorum expects a subcommand (keygen, sign, verify)",
+            "quorum expects a subcommand (keygen, sign, refresh, reshare, verify)",
         ));
     };
     match sub.as_str() {
@@ -326,6 +330,8 @@ pub fn run(raw: &[String]) -> Result<(), CliError> {
         }
         "keygen" => keygen(rest),
         "sign" => sign(rest),
+        "refresh" => crate::quorum_hem::refresh(rest),
+        "reshare" => crate::quorum_hem::reshare(rest),
         "verify" => verify(rest),
         other => Err(CliError::usage(format!(
             "unknown quorum subcommand '{other}' (try 'qsag quorum --help')"
@@ -337,6 +343,11 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
     let args = Args::parse(
         raw,
         &[
+            "scheme",
+            "threshold",
+            "parties",
+            "leaves",
+            "seed-file",
             "vault-dir",
             "public-out",
             "tree-height",
@@ -360,6 +371,26 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
         return Ok(());
     }
     args.no_positionals()?;
+    match args.get("scheme") {
+        Some(crate::quorum_hem::HEM_SCHEME_NAME) => return crate::quorum_hem::keygen(&args),
+        Some(SCHEME_NAME) | None => {
+            if args.get("threshold").is_some()
+                || args.get("parties").is_some()
+                || args.get("leaves").is_some()
+                || args.get("seed-file").is_some()
+            {
+                return Err(CliError::usage(
+                    "--threshold, --parties, --leaves, and --seed-file apply to --scheme hem-jorts-poseidon2",
+                ));
+            }
+        }
+        Some(other) => {
+            return Err(CliError::usage(format!(
+                "unknown quorum --scheme '{other}' (expected {SCHEME_NAME} or {})",
+                crate::quorum_hem::HEM_SCHEME_NAME
+            )));
+        }
+    }
     let policy_pin = crate::policy_ledger::key_pin_from_args(&args)?;
     let vault_dir = args.require("vault-dir")?;
     let public_out = args.require("public-out")?;
@@ -569,9 +600,13 @@ fn sign(raw: &[String]) -> Result<(), CliError> {
     let args = Args::parse(
         raw,
         &[
+            "scheme",
+            "signers",
+            "ackers",
             "vault-dir",
             "epoch",
             "in",
+            "message",
             "out",
             "anchor-dir",
             "policy-id-hex",
@@ -603,12 +638,37 @@ fn sign(raw: &[String]) -> Result<(), CliError> {
     }
     args.no_positionals()?;
     let vault_dir = args.require("vault-dir")?;
+    let use_hem = match args.get("scheme") {
+        Some(crate::quorum_hem::HEM_SCHEME_NAME) => true,
+        Some(SCHEME_NAME) => false,
+        Some(other) => {
+            return Err(CliError::usage(format!(
+                "unknown quorum --scheme '{other}'"
+            )));
+        }
+        None => crate::quorum_hem::is_hem_vault(vault_dir),
+    };
+    if use_hem {
+        return crate::quorum_hem::sign(&args);
+    }
+    if args.get("signers").is_some() || args.get("ackers").is_some() {
+        return Err(CliError::usage(
+            "--signers and --ackers apply to --scheme hem-jorts-poseidon2 vaults",
+        ));
+    }
+    if args.get("in").is_some() && args.get("message").is_some() {
+        return Err(CliError::usage("pass either --message or --in, not both"));
+    }
     let epoch = args
         .get_u64("epoch")?
         .ok_or_else(|| CliError::usage("missing required option --epoch"))?;
     let out_path = args.require("out")?;
     ensure_absent(out_path)?;
-    let message = read_input(args.require("in")?)?;
+    let msg_arg = args
+        .get("message")
+        .or_else(|| args.get("in"))
+        .ok_or_else(|| CliError::usage("missing required option --in"))?;
+    let message = read_input(msg_arg)?;
     let is_retry = args.flag("retry");
     let deterministic = args.flag("deterministic");
     let has_context_flags =
@@ -1045,22 +1105,37 @@ fn sign(raw: &[String]) -> Result<(), CliError> {
 }
 
 fn verify(raw: &[String]) -> Result<(), CliError> {
-    let args = Args::parse(raw, &["public", "in", "sig"], &["json", "help"])?;
+    let args = Args::parse(
+        raw,
+        &["public", "in", "message", "sig"],
+        &["json", "help"],
+    )?;
     if args.flag("help") {
         print!("{QUORUM_VERIFY_HELP}");
         return Ok(());
     }
     args.no_positionals()?;
+    if args.get("in").is_some() && args.get("message").is_some() {
+        return Err(CliError::usage("pass either --message or --in, not both"));
+    }
     let pub_path = args.require("public")?;
     let sig_path = args.require("sig")?;
-    let message = read_input(args.require("in")?)?;
+    let msg_arg = args
+        .get("message")
+        .or_else(|| args.get("in"))
+        .ok_or_else(|| CliError::usage("missing required option --in (or --message)"))?;
+    let message = read_input(msg_arg)?;
 
     let pub_text = read_text(pub_path)?;
     let pub_json = Json::parse(&pub_text)?;
-    if pub_json.field_str("format")? != PUBLIC_FORMAT
-        || pub_json.field_str("scheme")? != SCHEME_NAME
-    {
+    if pub_json.field_str("format")? != PUBLIC_FORMAT {
         return Err(CliError::input("unexpected quorum public key format"));
+    }
+    if pub_json.field_str("scheme")? == crate::quorum_hem::HEM_SCHEME_NAME {
+        return crate::quorum_hem::verify(&pub_json, &message, sig_path, args.flag("json"));
+    }
+    if pub_json.field_str("scheme")? != SCHEME_NAME {
+        return Err(CliError::input("unexpected quorum public key scheme"));
     }
     let height_u64 = pub_json.field_u64("tree_height")?;
     if !(1..=30).contains(&height_u64) {

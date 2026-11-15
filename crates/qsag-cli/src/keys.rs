@@ -12,8 +12,8 @@ use qsag_core::pcg_dense::{FsSeedBurnTracker, SeedBurnTracker};
 use qsag_fts::{
     FrontierDpTable, FrontierFtsError, FrontierFtsProfile, FrontierFtsPublicKey,
     FrontierFtsSignature, FrontierFtsSigningKey, FsWalFtsEpochLatch, ParallelSeededError,
-    ParallelSeededPublicKey, ParallelSeededSignature, ParallelSeededThresholdSetup,
-    verify_frontier_fts, verify_parallel_seeded_fts,
+    ParallelSeededMerkleLayers, ParallelSeededPublicKey, ParallelSeededSignature,
+    assemble_parallel_seeded_public_key, verify_frontier_fts, verify_parallel_seeded_fts,
 };
 
 use crate::cli::{
@@ -21,6 +21,7 @@ use crate::cli::{
     read_bounded_file, read_input, write_new,
 };
 use crate::codec::{Json, from_hex_exact};
+use crate::dealerless_ceremony::DealerlessThresholdFtsSetup;
 use crate::schemes::{Scheme, THRESHOLD_FTS_PARAMS};
 
 pub const SECRET_FORMAT: &str = "qsag-secret-key-v1";
@@ -71,15 +72,56 @@ fn threshold_setup(
     seed: &[u8; 32],
     parties: u64,
     params: qsag_fts::ParallelSeededParams,
-) -> Result<ParallelSeededThresholdSetup, CliError> {
-    ParallelSeededThresholdSetup::trusted_dealer_setup_for_testing(
+    cached_tree: Option<(ParallelSeededPublicKey, ParallelSeededMerkleLayers)>,
+) -> Result<DealerlessThresholdFtsSetup, CliError> {
+    DealerlessThresholdFtsSetup::run_ceremony(
         params,
         parties as usize,
-        derive(seed, b"threshold dealer entropy"),
-        derive(seed, b"threshold pk_seed"),
-        &CpuReferenceBackend,
+        derive(seed, b"threshold dkg ceremony"),
+        cached_tree,
     )
-    .map_err(|e| CliError::usage(format!("threshold setup failed: {e:?}")))
+    .map_err(|e| {
+        CliError::usage(format!(
+            "dealerless threshold setup failed ({e:?}; pass --fast-demo for 8-leaf batch DKG or use `qsag quorum --scheme hem-jorts-poseidon2`)"
+        ))
+    })
+}
+
+fn encode_merkle_leaf_hex(digest: &[u64; 4]) -> Json {
+    let mut out = [0u8; 32];
+    for (i, &w) in digest.iter().enumerate() {
+        out[i * 8..(i + 1) * 8].copy_from_slice(&w.to_le_bytes());
+    }
+    Json::hex(&out)
+}
+
+fn load_cached_threshold_tree(
+    secret: &Json,
+    params: qsag_fts::ParallelSeededParams,
+) -> Result<Option<(ParallelSeededPublicKey, ParallelSeededMerkleLayers)>, CliError> {
+    let Some(leaves_arr) = secret.get("merkle_leaves").and_then(Json::as_array) else {
+        return Ok(None);
+    };
+    let Some(pk_seed_str) = secret.get("pk_seed").and_then(Json::as_str) else {
+        return Ok(None);
+    };
+    let pk_seed_bytes: [u8; 32] = from_hex_exact(pk_seed_str, "pk_seed")?;
+    let mut leaves = Vec::with_capacity(leaves_arr.len());
+    for item in leaves_arr {
+        let s = item
+            .as_str()
+            .ok_or_else(|| CliError::input("corrupt merkle_leaves entry"))?;
+        let raw: [u8; 32] = from_hex_exact(s, "merkle_leaf")?;
+        let limbs = core::array::from_fn(|i| {
+            let mut b = [0u8; 8];
+            b.copy_from_slice(&raw[i * 8..(i + 1) * 8]);
+            u64::from_le_bytes(b)
+        });
+        leaves.push(limbs);
+    }
+    let (pk, layers) = assemble_parallel_seeded_public_key(params, pk_seed_bytes, &leaves)
+        .map_err(|e| CliError::input(format!("invalid cached threshold Merkle leaves: {e:?}")))?;
+    Ok(Some((pk, layers)))
 }
 
 fn threshold_params(file: &Json) -> Result<qsag_fts::ParallelSeededParams, CliError> {
@@ -565,11 +607,11 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
         Scheme::ThresholdFts => {
             secret.push((
                 "custody_model",
-                Json::str("trusted-dealer-demo; not distributed DKG"),
+                Json::str("local-seed-ceremony-demo; single-host shares"),
             ));
             public.push((
                 "custody_model",
-                Json::str("trusted-dealer-demo; not distributed DKG"),
+                Json::str("local-seed-ceremony-demo; single-host shares"),
             ));
             let parties = args.get_u64("parties")?.unwrap_or(3);
             if !(2..=16).contains(&parties) {
@@ -581,7 +623,13 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
             };
             secret.push(("tree_height", Json::num(params.tree_height)));
             public.push(("tree_height", Json::num(params.tree_height)));
-            let setup = threshold_setup(&seed, parties, params)?;
+            let setup = threshold_setup(&seed, parties, params, None)?;
+            secret.push(("pk_seed", Json::hex(&setup.pk.pk_seed_bytes)));
+            let leaves_json: Vec<Json> = setup.public_tree_layers[0]
+                .iter()
+                .map(encode_merkle_leaf_hex)
+                .collect();
+            secret.push(("merkle_leaves", Json::Array(leaves_json)));
             let burn_mac = derive_secret(&seed, b"burn journal mac");
             FsWalFtsEpochLatch::create(
                 burn_journal_path(secret_out),
@@ -1033,7 +1081,9 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
                     1u32 << params.tree_height
                 )));
             }
-            let mut setup = threshold_setup(&seed, secret.field_u64("parties")?, params)?;
+            let cached_tree = load_cached_threshold_tree(&secret, params)?;
+            let mut setup =
+                threshold_setup(&seed, secret.field_u64("parties")?, params, cached_tree)?;
             let burn_mac = derive_secret(&seed, b"burn journal mac");
             let mut journal = FsWalFtsEpochLatch::open(
                 burn_journal_path(secret_path),
@@ -1094,13 +1144,7 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
                 return Err(CliError::state(format!("epoch {epoch} was already spent")));
             }
             let sig = setup
-                .threshold_sign(
-                    epoch as u32,
-                    &message,
-                    session.0,
-                    &mut journal,
-                    &CpuReferenceBackend,
-                )
+                .threshold_sign(epoch as u32, &message, session.0, &mut journal)
                 .map_err(|e| match e {
                     ParallelSeededError::PersistenceFailed
                     | ParallelSeededError::EpochUseBudgetExhausted => {

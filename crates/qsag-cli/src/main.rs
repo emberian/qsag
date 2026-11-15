@@ -8,12 +8,17 @@ mod agg;
 mod anchor;
 mod cli;
 mod codec;
+mod cred;
+mod dealerless_ceremony;
 mod envelope;
+mod hd;
 mod kat;
 mod keys;
+mod migrate;
 mod policy;
 mod policy_ledger;
 mod quorum;
+mod quorum_hem;
 mod schemes;
 mod vault;
 
@@ -22,22 +27,25 @@ use std::process::ExitCode;
 use cli::{Args, CliError, exit};
 
 const HELP: &str = "\
-qsag - post-quantum hash-based signatures, threshold few-time signatures, and succinct aggregation
+qsag - post-quantum hash-based signatures, threshold quorum-switching, and succinct aggregation
 
 usage: qsag <command> [options]        (every command accepts --help)
 
 commands:
-  info          list schemes with their security level and key, signature, and proof sizes
-  keygen        generate a key pair (SLH-DSA, few-time, threshold few-time, or a committee)
-  sign          sign a message file
-  verify        verify a signature
-  addr          encode or decode addresses; derive a hybrid classical + post-quantum identity
-  quorum        run dealerless 2-of-3 Jorts threshold signing ceremonies
-  aggregate     aggregate committee signatures into one succinct proof, or merge two proofs
-  verify-agg    verify an aggregate proof
-  policy        persistent custody policy ledger: init, propose, approve, status;
-                without a subcommand, a stateless evaluation of fixed transfer scenarios
-  kat           run the built-in known-answer tests
+  info              list schemes with their security level and key, signature, and proof sizes
+  keygen            generate a key pair (SLH-DSA, few-time, threshold few-time, or a committee)
+  sign              sign a message file
+  verify            verify a signature
+  addr              encode or decode addresses; derive a hybrid classical + post-quantum identity
+  quorum            dealerless threshold signing & (t, n) -> (t', n') quorum-switching (sign/reshare/refresh)
+  aggregate         untrusted public signature aggregation (--pubkeys + --sigs + --message) or proof merge
+  verify-aggregate  verify an aggregate proof (alias: verify-agg)
+  cred              dealerless (2, 5) lattice TOPRF & threshold FIPS 204 ML-DSA ceremonies
+  hd                dealerless post-quantum HD inventory & 0-round watch-only child derivation
+  migrate           zero-knowledge classical-to-post-quantum ownership migration (438-rep ZKBoo)
+  policy            persistent custody policy ledger: init, propose, approve, status;
+                    without a subcommand, a stateless evaluation of fixed transfer scenarios
+  kat               run the built-in known-answer tests
 
 exit codes:
   0  success                     3  denied by policy
@@ -85,7 +93,10 @@ fn run(raw: &[String]) -> Result<(), CliError> {
         "addr" => addr::run(rest),
         "quorum" => quorum::run(rest),
         "aggregate" => agg::aggregate(rest),
-        "verify-agg" => agg::verify_agg(rest),
+        "verify-agg" | "verify-aggregate" => agg::verify_agg(rest),
+        "cred" => cred::run(rest),
+        "hd" => hd::run(rest),
+        "migrate" => migrate::run(rest),
         "policy" | "policy-demo" => policy::run(rest),
         "kat" => kat::run(rest),
         other => Err(CliError::usage(format!(
