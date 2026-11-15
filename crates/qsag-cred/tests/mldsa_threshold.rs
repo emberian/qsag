@@ -254,7 +254,11 @@ fn eighteen_custodians_hold_shamir_shares_and_any_five_sign() {
     let mut shares = shamir_ceremony(&config);
     let pack = shares[0].verification_pack().clone();
     assert_eq!(pack.party_ids, ids);
-    assert!(shares.iter().all(|s| s.is_shamir() && s.verification_pack() == &pack));
+    assert!(
+        shares
+            .iter()
+            .all(|s| s.is_shamir() && s.verification_pack() == &pack)
+    );
     assert_eq!(
         ThresholdVerificationPack::from_bytes(&pack.to_bytes()).unwrap(),
         pack
@@ -286,8 +290,7 @@ fn eighteen_custodians_hold_shamir_shares_and_any_five_sign() {
     // every honest custodian aborts with the same verdict.
     let at = shares.iter().position(|s| s.party_id() == 109).unwrap();
     let mut bytes = shares[at].to_shamir_bytes().unwrap();
-    let restored =
-        ThresholdMlDsaSignerShare::from_shamir_bytes(&bytes, pack.clone(), 109).unwrap();
+    let restored = ThresholdMlDsaSignerShare::from_shamir_bytes(&bytes, pack.clone(), 109).unwrap();
     assert_eq!(restored.to_shamir_bytes().unwrap(), bytes);
     bytes[18 + 3 * 700] ^= 1;
     shares[at] = ThresholdMlDsaSignerShare::from_shamir_bytes(&bytes, pack.clone(), 109).unwrap();

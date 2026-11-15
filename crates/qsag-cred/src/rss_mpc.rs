@@ -40,11 +40,11 @@
 //! on opened values, so all honest parties execute the same rounds.
 
 use crate::fips204_ntt::{MLDSA_Q, fq_add, fq_inv_or_zero, fq_mul, fq_sub};
-use qsag_core::wipe::{SecretBuffer, SecretWipe};
 use alloc::vec;
 use alloc::vec::Vec;
 use qsag_accel::ct::{ct_eq_bytes, ct_zeroize_bytes, ct_zeroize_u32s};
 use qsag_accel::keccak::{Shake256, cshake256_framed_32, finalize_cshake256, init_cshake256};
+use qsag_core::wipe::{SecretBuffer, SecretWipe};
 
 const Q64: u64 = MLDSA_Q as u64;
 

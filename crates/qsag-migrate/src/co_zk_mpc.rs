@@ -323,6 +323,10 @@ impl CoZkCustodianShare {
             seeds.push(heads);
         }
 
+        // Settle the root input rounds before any batch engine opens a value
+        // derived from the witness or the seeds.
+        e.verify_all_pending()?;
+
         // Phase 1: Evaluate all batches, compute shared view commitments, and run
         // mandatory active multiplication checks on EVERY batch BEFORE opening any
         // commitment, public circuit output, or ZKBoo view.

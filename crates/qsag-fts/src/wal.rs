@@ -718,8 +718,16 @@ mod tests {
         ] {
             assert!(bytes[start..end].iter().all(|&b| b == 0), "{start}..{end}");
         }
-        assert!(bytes[HWM_SLOT_A_OFFSET..HWM_SLOT_A_OFFSET + HWM_SLOT_LEN].iter().any(|&b| b != 0));
-        assert!(bytes[HWM_SLOT_B_OFFSET..HWM_SLOT_B_OFFSET + HWM_SLOT_LEN].iter().any(|&b| b != 0));
+        assert!(
+            bytes[HWM_SLOT_A_OFFSET..HWM_SLOT_A_OFFSET + HWM_SLOT_LEN]
+                .iter()
+                .any(|&b| b != 0)
+        );
+        assert!(
+            bytes[HWM_SLOT_B_OFFSET..HWM_SLOT_B_OFFSET + HWM_SLOT_LEN]
+                .iter()
+                .any(|&b| b != 0)
+        );
         fs::remove_file(&path).unwrap();
     }
 
@@ -745,7 +753,10 @@ mod tests {
                 repaired[HWM_SLOT_B_OFFSET..HWM_SLOT_B_OFFSET + HWM_SLOT_LEN],
                 committed[HWM_SLOT_B_OFFSET..HWM_SLOT_B_OFFSET + HWM_SLOT_LEN]
             );
-            assert_eq!(repaired[..HWM_SLOT_B_OFFSET], committed[..HWM_SLOT_B_OFFSET]);
+            assert_eq!(
+                repaired[..HWM_SLOT_B_OFFSET],
+                committed[..HWM_SLOT_B_OFFSET]
+            );
             assert_eq!(repaired[HEADER_LEN..], committed[HEADER_LEN..]);
             fs::write(&path, &committed).unwrap();
         }
@@ -784,7 +795,10 @@ mod tests {
             repaired[HWM_SLOT_A_OFFSET..HWM_SLOT_A_OFFSET + HWM_SLOT_LEN],
             committed[HWM_SLOT_A_OFFSET..HWM_SLOT_A_OFFSET + HWM_SLOT_LEN]
         );
-        assert_eq!(repaired[HWM_SLOT_B_OFFSET..], committed[HWM_SLOT_B_OFFSET..]);
+        assert_eq!(
+            repaired[HWM_SLOT_B_OFFSET..],
+            committed[HWM_SLOT_B_OFFSET..]
+        );
 
         // Crash in the middle of the first slot write of the second burn: the record is
         // synced, slot A is torn, slot B still holds the mark from before the burn. The

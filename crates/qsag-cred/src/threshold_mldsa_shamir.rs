@@ -41,8 +41,8 @@
 //! hold shares of a different key, and it learns nothing beyond its own shares.
 
 use crate::fips204_ntt::{
-    MLDSA_N, MlDsaLevel, Poly256, expand_a_ntt, fq_add, fq_mul, fq_sub, mat_vec_mul_ntt,
-    pk_encode, power2round,
+    MLDSA_N, MlDsaLevel, Poly256, expand_a_ntt, fq_add, fq_mul, fq_sub, mat_vec_mul_ntt, pk_encode,
+    power2round,
 };
 use crate::rss_mpc::{
     K_ZERO, Kx, MAX_MPC_PARTIES, MpcError, MpcTransport, Prss, RoundInbox, RoundInfo, RoundKind,
@@ -185,7 +185,8 @@ impl ThresholdMlDsaSignerShare {
     /// share. The bytes are secret: store them encrypted and authenticated.
     pub fn to_shamir_bytes(&self) -> Option<Vec<u8>> {
         let share = self.shamir.as_ref()?;
-        let mut out = Vec::with_capacity(18 + 3 * MLDSA_N * (share.s1_hat.len() + share.s2_hat.len()));
+        let mut out =
+            Vec::with_capacity(18 + 3 * MLDSA_N * (share.s1_hat.len() + share.s2_hat.len()));
         out.extend_from_slice(SHARE_MAGIC);
         out.extend_from_slice(&self.party_id.to_le_bytes());
         out.extend_from_slice(&self.next_epoch.to_le_bytes());
@@ -255,7 +256,9 @@ fn k_combine(weights: &[u32], values: &[Kx]) -> Kx {
     weights
         .iter()
         .zip(values)
-        .fold(K_ZERO, |acc, (&weight, value)| k_add(&acc, &k_scale(value, weight)))
+        .fold(K_ZERO, |acc, (&weight, value)| {
+            k_add(&acc, &k_scale(value, weight))
+        })
 }
 
 /// Runs one custodian's side of the expansion of the sampling committee's key into
@@ -307,7 +310,10 @@ pub fn threshold_mldsa_shamir_expand_party<T: MpcTransport>(
                     .subsets
                     .iter()
                     .map(|subset| &subset.holders)
-                    .eq(structure.subsets_of(me).iter().map(|&s| &structure.subsets[s])) => {}
+                    .eq(structure
+                        .subsets_of(me)
+                        .iter()
+                        .map(|&s| &structure.subsets[s])) => {}
         None if me >= members => {}
         _ => return Err(ThresholdMlDsaError::WrongKeyShareKind),
     }
@@ -345,7 +351,8 @@ pub fn threshold_mldsa_shamir_expand_party<T: MpcTransport>(
     let mut broadcast = commitment(me, &seed[..]).to_vec();
     let mut private = vec![Vec::new(); n];
     // dealt[subset][holder rank] is this custodian's share of that holder's dealing.
-    let mut dealt: SecretBuffer<Vec<Vec<Vec<u32>>>> = SecretBuffer(vec![vec![Vec::new(); t]; subsets]);
+    let mut dealt: SecretBuffer<Vec<Vec<Vec<u32>>>> =
+        SecretBuffer(vec![vec![Vec::new(); t]; subsets]);
     let mut record = Vec::new();
     if let Some(share) = &committee_share {
         record.extend_from_slice(&share.pack.rho);
@@ -358,7 +365,12 @@ pub fn threshold_mldsa_shamir_expand_party<T: MpcTransport>(
             secret.extend_from_slice(&flatten(&component.s2_hat));
             let key = SecretBuffer(cshake256_framed_32(
                 b"QSAG.TMLDSA.SHAMIR.DEAL.V1",
-                &[entropy, &context, &custody[..], &(subset as u32).to_le_bytes()],
+                &[
+                    entropy,
+                    &context,
+                    &custody[..],
+                    &(subset as u32).to_le_bytes(),
+                ],
             ));
             let mut stream = Prss::new(&key);
             let coefficients: SecretBuffer<Vec<Vec<u32>>> =
@@ -412,7 +424,8 @@ pub fn threshold_mldsa_shamir_expand_party<T: MpcTransport>(
         }
     }
     let t_len = params.k * MLDSA_N;
-    if published.len() != 32 + params.pk_bytes + 3 * t_len || (me < members && published != record) {
+    if published.len() != 32 + params.pk_bytes + 3 * t_len || (me < members && published != record)
+    {
         return Err(ThresholdMlDsaError::ShamirDealingInconsistent);
     }
     let pack_out = ThresholdVerificationPack {
@@ -530,7 +543,12 @@ pub fn threshold_mldsa_shamir_expand_party<T: MpcTransport>(
             &hash_all(b"QSAG.TMLDSA.SHAMIR.R3.V1", &context, &third.broadcast),
         ],
     );
-    let fourth = round(net, RoundKind::Confirm, vec![Vec::new(); n], confirmation.to_vec())?;
+    let fourth = round(
+        net,
+        RoundKind::Confirm,
+        vec![Vec::new(); n],
+        confirmation.to_vec(),
+    )?;
     if let Some(party) = fourth
         .broadcast
         .iter()

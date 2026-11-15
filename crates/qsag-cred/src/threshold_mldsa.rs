@@ -82,22 +82,22 @@
 //! holder has fresh entropy. The durable [`NonceBurnPersistence`] reservation
 //! is kept as a second line of defence.
 
+use crate::fips204_ntt::fq_inv_or_zero;
 use crate::fips204_ntt::{
     MLDSA_D, MLDSA_N, MLDSA_Q, MlDsaLevel, MlDsaParams, Poly256, compute_fips204_mu, expand_a_ntt,
     fq_add, fq_mul, fq_sub, high_bits_ct, mat_vec_mul_ntt, ml_dsa_verify, pk_encode, power2round,
     sample_in_ball, sig_encode, use_hint, w1_encode,
 };
-use crate::fips204_ntt::fq_inv_or_zero;
 use crate::rss_mpc::{
     BinSh, EXT_DEGREE, Engine, MpcError, MpcStats, MpcTransport, Sh, Structure, less_than_public,
     masked_range_test,
 };
-use qsag_core::wipe::SecretBuffer;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 use qsag_accel::ct::{ct_eq_bytes, ct_zeroize_bytes};
 use qsag_accel::keccak::{KECCAK_RC, Shake256, cshake256_framed_32};
+use qsag_core::wipe::SecretBuffer;
 use qsag_policy::AuthorizedSignReleaseToken;
 use qsag_verified::{MlDsaBarrierChecks, MlDsaReleaseGate};
 
