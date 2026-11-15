@@ -1,6 +1,6 @@
 # Unified convergence and release acceptance
 
-Integration date: 2026-11-14. Owner: convergence deputy.
+Integration date: 2026-11-14.
 
 This is the continuing acceptance tracker. A successful build is distinct from production refinement, cryptographic composition, artifact freshness, and performance acceptance. The release is not certified while the open entries below remain.
 

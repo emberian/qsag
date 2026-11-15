@@ -30,17 +30,17 @@ Each committed stage receives two independent OOD points. Both evaluations are a
 
 ## Accounting boundary
 
-The Johnson QROM schedule uses `ceil(512/log2(B)) + 2`, giving `(258,130,88,66)` for blowups `(4,16,64,256)`. The other schedules retain their query counts. Queries are sampled without replacement and become exhaustive when the target exceeds the number of fibers.
+The Johnson QROM schedule (`BciksJohnsonQrom128`) uses `ceil(512/log2(B)) + 2`, giving `(258,130,88,66)` for blowups `(4,16,64,256)`. Classical Johnson (`BciksJohnsonClassical128`) uses `ceil(256/log2(B)) + 1` and is restricted to raw PCS tests (rejected by QROM-128 aggregate validation). Retired capacity-proximity wire tags (`0`, `1`, `3`) fail closed on deserialization (`Crites & Stewart 2025/2046`, `Krachun-Kazanin-Habock 2026/782`). Queries are sampled without replacement and become exhaustive when the target exceeds the number of fibers.
 
 The finite-witness regression checks all 46 non-exhaustive canonical Johnson QROM stages across `nv = 2..24`: exact Theorem 4.8 interpolation inequalities, Johnson list bounds, query error below `2^-256` including the stage fold-coordinate loss, and stage affine-combiner error below `2000/p^4` (more than 245 bits). Its dyadic probability calculation rounds upward at every division; it uses no floating-point approximations. The other stages are queried exhaustively.
 
-These implementation and arithmetic tests do not constitute a complete Fiat–Shamir or QROM security proof. Cascade coordinate losses and protocol-wide union bounds must still be composed separately. The capacity-regime guarantee remains conjectural. Formal security-budget sources outside this crate are not modified by this upgrade.
+These implementation and arithmetic tests do not constitute a complete Fiat–Shamir or QROM security proof. Cascade coordinate losses and protocol-wide union bounds must still be composed separately. Formal security-budget sources outside this crate are not modified by this upgrade.
 
 ## Validation
 
 - `cargo clippy -p qsag-agg --all-targets -- -D warnings`: passed.
 - `cargo check -p qsag-agg --no-default-features`: passed.
-- `cargo test --release -p qsag-agg`: 36 passed, 6 ignored benchmarks.
+- `cargo test --release -p qsag-agg`: passed.
 - The adversarial tests cover all five fold scalars, both shifted claims, both overflow coefficients, both OOD samples at every stage, batch sizes through 16, both signature profiles, and homogeneous merge trees.
 - Repository terminology scan: zero findings.
 
@@ -52,7 +52,5 @@ Command: `cargo test --release -p qsag-agg bench_affine_regimes -- --ignored --n
 
 | Profile | Regime | Proof bytes | Prove ms | Verify median ms |
 |---|---|---:|---:|---:|
-| JortsPoseidon2 | Habr24Qrom128 | 161112 | 4302.059 | 13.554 |
 | JortsPoseidon2 | BciksJohnsonQrom128 | 291352 | 4897.351 | 26.692 |
-| CorduroyPoseidon2 | Habr24Qrom128 | 240014 | 49200.452 | 18.877 |
 | CorduroyPoseidon2 | BciksJohnsonQrom128 | 446254 | 48844.355 | 35.330 |
