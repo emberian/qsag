@@ -1,11 +1,11 @@
 module
-public import Qsag.HypertreeEufCma
-import all Qsag.HypertreeEufCma
-import all Qsag.HashSigs
+public import Qsag.Protocol.Signing.HypertreeEufCma
+import all Qsag.Protocol.Signing.HypertreeEufCma
+import all Qsag.Protocol.Signing.HashSigs
 import Qsag.Tactic.AssuranceKit
 
 /-!
-# Qsag.ProdCollisionWitness — returned collision witnesses for the production verifier
+# Qsag.Protocol.Signing.ProdCollisionWitness — returned collision witnesses for the production verifier
 
 `ProdSmTcrBreak` (in `HypertreeEufCma`) is an existential `Prop` over every honest hash input of
 the key, with unbounded tree and chain indices and no reference to the forged signature. This

@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.ProdAdaptiveTcrReduction — Seed-Withheld Adaptive `SM-DT-TCR` / `SM-DT-PRE` / `ITSR` Reduction
+# Qsag.Protocol.Signing.ProdAdaptiveTcrReduction — Seed-Withheld Adaptive `SM-DT-TCR` / `SM-DT-PRE` / `ITSR` Reduction
 
 Wraps the constructive `Type`-valued extractor `production_forgery_extract` (`ProdCollisionExtraction`),
 the extractor-defined events `prodTcrEvent` / `prodPreEvent` / `prodItsrEvent` (`ProdCollisionEvents`),
@@ -23,15 +23,15 @@ and the path-target budget `prodPathTargetCount` (`ProdCollisionAccounting`) ins
      any `0`-query seed-withheld guess hits a distinct colliding input on at most `1 / 8` keys.
 -/
 
-public import Qsag.ProdCollisionAccounting
-public import Qsag.UcGames
-import all Qsag.ProdCollisionAccounting
-import all Qsag.ProdCollisionEvents
-import all Qsag.ProdCollisionExtraction
-import all Qsag.ProdCollisionWitness
-import all Qsag.HypertreeEufCma
-import all Qsag.HashSigs
-import all Qsag.UcGames
+public import Qsag.Protocol.Signing.ProdCollisionAccounting
+public import Qsag.Oracle.UcGames
+import all Qsag.Protocol.Signing.ProdCollisionAccounting
+import all Qsag.Protocol.Signing.ProdCollisionEvents
+import all Qsag.Protocol.Signing.ProdCollisionExtraction
+import all Qsag.Protocol.Signing.ProdCollisionWitness
+import all Qsag.Protocol.Signing.HypertreeEufCma
+import all Qsag.Protocol.Signing.HashSigs
+import all Qsag.Oracle.UcGames
 public import Qsag.Tactic.AssuranceKit
 
 public section

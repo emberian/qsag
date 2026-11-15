@@ -5790,3 +5790,1953 @@ def toothStatefulParams : PqHashParams := ⟨4, 128, 1, 1, 0, 0, 1, true⟩
        `msgStar = [3] ∉ [[1], [2]]` with a third distinct codeword `digStar` (`rStar = [3]`) passing
        `verifyCheckedStateful = true`, with every forged chain value equal to `honestChainNode`
        (`0` hash collisions) and `CheckedStatefulWotsTswWitness ... → False` (`0` backward inversions)! -/
+theorem tooth_mutantUncheckedReuseSign_concrete_forgery :
+    let suite := toothDistinctSuite
+    let params := toothStatefulParams
+    let sk : PqSecretKey := ⟨[], [], []⟩
+    let pk := derivePublicKey suite params sk
+    -- Real checked stateful oracle signs epochs 0 and 1, then aborts on epoch 2 (`budgetExhausted 2 2`)
+    (execCheckedStatefulOracle suite params sk initCheckedStatefulLatch
+      [.signNext [1] 1, .signNext [9] 1, .signNext [2] 1]).abortError =
+      some (.budgetExhausted 2 2) ∧
+    -- Real checked stateful oracle also aborts on direct epoch-0 equivocation (`equivocationRefused 0`)
+    (execCheckedStatefulOracle suite params sk initCheckedStatefulLatch
+      [.signEpoch 0 [1] 1, .signEpoch 0 [2] 1]).abortError =
+      some (.equivocationRefused 0) ∧
+    -- Mutant signer succeeds on both `(reqEpoch = 0, [1])` and `(reqEpoch = 2, [2])` at leaf 0,
+    -- and public `forgeFromReusedLeafSigs` forges fresh `msgStar = [3]` with 0 collisions & 0 inversions:
+    ∃ st1 st2 sig₁ sig₂,
+      mutantUncheckedReuseSign suite params sk initCheckedStatefulLatch 0 [1] 1 = .ok (st1, 0, [1], sig₁) ∧
+      mutantUncheckedReuseSign suite params sk st1 2 [2] 1 = .ok (st2, 0, [2], sig₂) ∧
+      [3] ∉ ([[1], [2]] : List (List UInt8)) ∧
+      let sigStar := forgeFromReusedLeafSigs suite params pk [1] sig₁ [2] sig₂ [3] [3] 0
+      let digStar := extractBaseWDigits params.w params.ell1
+        (thHashMsg suite [3] pk.pkSeed pk.pkRoot (thPreHash suite pk.pkSeed pk.pkRoot [3]) 0 0 0 0)
+      verifyCheckedStateful suite params pk [3] sigStar = true ∧
+      (∀ r, r < params.ell1 →
+        (sigStar.layerSigs.getD 0 ⟨0, [], []⟩).wotsChains.getD r [] =
+          honestChainNode suite sk 0 0 0 r (digStar.getD r 0)) ∧
+      (CheckedStatefulWotsTswWitness suite params sk [(0, [1], sig₁), (0, [2], sig₂)] [3] sigStar → False) := by
+  intro suite params sk pk
+  refine ⟨?_, ?_, ?_⟩
+  · simp only [suite, params, sk, execCheckedStatefulOracle, execCheckedStatefulOracleAux,
+               checkedStatefulSignStep, checkedStatefulFreshEpochSign, evalSingleSign, thPrfMsg_tooth_eq]
+    decide +kernel
+  · simp only [suite, params, sk, execCheckedStatefulOracle, execCheckedStatefulOracleAux,
+               checkedStatefulSignStep, checkedStatefulFreshEpochSign, evalSingleSign, thPrfMsg_tooth_eq]
+    decide +kernel
+  · cases hM1 : mutantUncheckedReuseSign suite params sk
+        initCheckedStatefulLatch 0 [1] 1 with
+    | error e =>
+      exfalso
+      have hOk1 : (mutantUncheckedReuseSign suite params sk
+          initCheckedStatefulLatch 0 [1] 1).isOk = true := by
+        dsimp only [suite, params, sk]
+        unfold mutantUncheckedReuseSign evalSingleSign
+        simp only [thPrfMsg_tooth_eq]
+        decide +kernel
+      rw [hM1] at hOk1; cases hOk1
+    | ok q1 =>
+      rcases q1 with ⟨st1, leaf1, m1Out, sig₁⟩
+      cases hM2 : mutantUncheckedReuseSign suite params sk
+          st1 2 [2] 1 with
+      | error e =>
+        exfalso
+        have hOk2 : (match mutantUncheckedReuseSign suite params sk
+            initCheckedStatefulLatch 0 [1] 1 with
+          | .error _ => false
+          | .ok (s1, _, _, _) =>
+            (mutantUncheckedReuseSign suite params sk s1 2 [2] 1).isOk) = true := by
+          dsimp only [suite, params, sk]
+          unfold mutantUncheckedReuseSign evalSingleSign
+          simp only [thPrfMsg_tooth_eq]
+          decide +kernel
+        rw [hM1] at hOk2; dsimp only at hOk2; rw [hM2] at hOk2; cases hOk2
+      | ok q2 =>
+        rcases q2 with ⟨st2, leaf2, m2Out, sig₂⟩
+        have hTV : toothStatefulParams.checkedStatefulValid = true := by decide +kernel
+        have hL1AndIdx : leaf1 = 0 ∧ m1Out = [1] ∧ sig₁.leafGlobalIdx = 0 := by
+          have hM1' := hM1
+          dsimp only [suite, params, sk] at hM1'
+          unfold mutantUncheckedReuseSign at hM1'
+          rw [hTV] at hM1'
+          dsimp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hM1'
+          cases hE1 : evalSingleSign toothDistinctSuite toothStatefulParams ⟨[], [], []⟩ [1]
+              (buildStatefulDetOptDomain 0 []) (0 % 2 ^ toothStatefulParams.maxSigsLog2) 1 with
+          | none => rw [hE1] at hM1'; cases hM1'
+          | some s =>
+            rw [hE1] at hM1'
+            injection hM1' with hT
+            rcases Prod.mk.inj hT with ⟨_, hTb⟩
+            rcases Prod.mk.inj hTb with ⟨hLeaf, hTc⟩
+            rcases Prod.mk.inj hTc with ⟨hMsg, hS⟩
+            subst s
+            have hInv := (evalSingleSign_stateful_inv toothDistinctSuite toothStatefulParams ⟨[], [], []⟩ [1]
+              (buildStatefulDetOptDomain 0 []) (0 % 2 ^ toothStatefulParams.maxSigsLog2) 1 sig₁ rfl hE1).2.2.2.2.1
+            exact ⟨hLeaf.symm, hMsg.symm, hInv⟩
+        have hL2 : leaf2 = 0 ∧ m2Out = [2] := by
+          have hM2' := hM2
+          dsimp only [suite, params, sk] at hM2'
+          unfold mutantUncheckedReuseSign at hM2'
+          rw [hTV] at hM2'
+          dsimp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hM2'
+          cases hE2 : evalSingleSign toothDistinctSuite toothStatefulParams ⟨[], [], []⟩ [2]
+              (buildStatefulDetOptDomain 2 []) (2 % 2 ^ toothStatefulParams.maxSigsLog2) 1 with
+          | none => rw [hE2] at hM2'; cases hM2'
+          | some s =>
+            rw [hE2] at hM2'
+            injection hM2' with hT
+            rcases Prod.mk.inj hT with ⟨_, hTb⟩
+            rcases Prod.mk.inj hTb with ⟨hLeaf, hTc⟩
+            exact ⟨hLeaf.symm, (Prod.mk.inj hTc).1.symm⟩
+        rcases hL1AndIdx with ⟨rfl, rfl, hSig1Idx⟩
+        rcases hL2 with ⟨rfl, rfl⟩
+        have hTsw3 :
+            let pk0 := derivePublicKey suite params sk
+            let leaf := sig₁.leafGlobalIdx
+            let tree0 := UInt64.ofNat (leaf / 2 ^ params.subtreeHeight)
+            let kp0 := leaf % 2 ^ params.subtreeHeight
+            checkTargetSum params.w params.ell1 params.targetSum
+              (extractBaseWDigits params.w params.ell1
+                (thHashMsg suite [3] pk0.pkSeed pk0.pkRoot
+                  (thPreHash suite pk0.pkSeed pk0.pkRoot [3]) 0 tree0 (UInt32.ofNat kp0) 0)) = true := by
+          dsimp only [suite, params, sk]
+          rw [hSig1Idx]
+          decide +kernel
+        have hDom3 :
+            let pk0 := derivePublicKey suite params sk
+            let leaf := sig₁.leafGlobalIdx
+            let tree0 := UInt64.ofNat (leaf / 2 ^ params.subtreeHeight)
+            let kp0 := leaf % 2 ^ params.subtreeHeight
+            let dig₁ := extractBaseWDigits params.w params.ell1
+              (thHashMsg suite sig₁.rRand pk0.pkSeed pk0.pkRoot
+                (thPreHash suite pk0.pkSeed pk0.pkRoot [1]) 0 tree0 (UInt32.ofNat kp0)
+                (sig₁.layerSigs.getD 0 ⟨0, [], []⟩).tswCtr)
+            let dig₂ := extractBaseWDigits params.w params.ell1
+              (thHashMsg suite sig₂.rRand pk0.pkSeed pk0.pkRoot
+                (thPreHash suite pk0.pkSeed pk0.pkRoot [2]) 0 tree0 (UInt32.ofNat kp0)
+                (sig₂.layerSigs.getD 0 ⟨0, [], []⟩).tswCtr)
+            let digStar := extractBaseWDigits params.w params.ell1
+              (thHashMsg suite [3] pk0.pkSeed pk0.pkRoot
+                (thPreHash suite pk0.pkSeed pk0.pkRoot [3]) 0 tree0 (UInt32.ofNat kp0) 0)
+            ∀ r, r < params.ell1 →
+              dig₁.getD r 0 ≤ digStar.getD r 0 ∨ dig₂.getD r 0 ≤ digStar.getD r 0 := by
+          have hDecDom :
+              (match mutantUncheckedReuseSign suite params sk
+                       initCheckedStatefulLatch 0 [1] 1,
+                     mutantUncheckedReuseSign suite params sk
+                       st1 2 [2] 1 with
+               | .ok (_, _, _, s1), .ok (_, _, _, s2) =>
+                 let pk0 := derivePublicKey suite params sk
+                 let leaf := s1.leafGlobalIdx
+                 let tree0 := UInt64.ofNat (leaf / 2 ^ params.subtreeHeight)
+                 let kp0 := leaf % 2 ^ params.subtreeHeight
+                 let d1 := extractBaseWDigits params.w params.ell1
+                   (thHashMsg suite s1.rRand pk0.pkSeed pk0.pkRoot
+                     (thPreHash suite pk0.pkSeed pk0.pkRoot [1]) 0 tree0 (UInt32.ofNat kp0)
+                     (s1.layerSigs.getD 0 ⟨0, [], []⟩).tswCtr)
+                 let d2 := extractBaseWDigits params.w params.ell1
+                   (thHashMsg suite s2.rRand pk0.pkSeed pk0.pkRoot
+                     (thPreHash suite pk0.pkSeed pk0.pkRoot [2]) 0 tree0 (UInt32.ofNat kp0)
+                     (s2.layerSigs.getD 0 ⟨0, [], []⟩).tswCtr)
+                 let dS := extractBaseWDigits params.w params.ell1
+                   (thHashMsg suite [3] pk0.pkSeed pk0.pkRoot
+                     (thPreHash suite pk0.pkSeed pk0.pkRoot [3]) 0 tree0 (UInt32.ofNat kp0) 0)
+                 (List.range params.ell1).all (fun r => decide (d1.getD r 0 ≤ dS.getD r 0 ∨ d2.getD r 0 ≤ dS.getD r 0))
+               | _, _ => false) = true := by
+            have hClosed :
+                (match mutantUncheckedReuseSign suite params sk
+                         initCheckedStatefulLatch 0 [1] 1 with
+                 | .ok (s1State, _, _, s1) =>
+                   match mutantUncheckedReuseSign suite params sk
+                           s1State 2 [2] 1 with
+                   | .ok (_, _, _, s2) =>
+                     let pk0 := derivePublicKey suite params sk
+                     let leaf := s1.leafGlobalIdx
+                     let tree0 := UInt64.ofNat (leaf / 2 ^ params.subtreeHeight)
+                     let kp0 := leaf % 2 ^ params.subtreeHeight
+                     let d1 := extractBaseWDigits params.w params.ell1
+                       (thHashMsg suite s1.rRand pk0.pkSeed pk0.pkRoot
+                         (thPreHash suite pk0.pkSeed pk0.pkRoot [1]) 0 tree0 (UInt32.ofNat kp0)
+                         (s1.layerSigs.getD 0 ⟨0, [], []⟩).tswCtr)
+                     let d2 := extractBaseWDigits params.w params.ell1
+                       (thHashMsg suite s2.rRand pk0.pkSeed pk0.pkRoot
+                         (thPreHash suite pk0.pkSeed pk0.pkRoot [2]) 0 tree0 (UInt32.ofNat kp0)
+                         (s2.layerSigs.getD 0 ⟨0, [], []⟩).tswCtr)
+                     let dS := extractBaseWDigits params.w params.ell1
+                       (thHashMsg suite [3] pk0.pkSeed pk0.pkRoot
+                         (thPreHash suite pk0.pkSeed pk0.pkRoot [3]) 0 tree0 (UInt32.ofNat kp0) 0)
+                     (List.range params.ell1).all (fun r => decide (d1.getD r 0 ≤ dS.getD r 0 ∨ d2.getD r 0 ≤ dS.getD r 0))
+                   | .error _ => false
+                 | .error _ => false) = true := by
+              dsimp only [suite, params, sk]
+              unfold mutantUncheckedReuseSign evalSingleSign
+              simp only [thPrfMsg_tooth_eq]
+              decide +kernel
+            rw [hM1] at hClosed ⊢
+            dsimp only at hClosed ⊢
+            rw [hM2] at hClosed ⊢
+            exact hClosed
+          rw [hM1, hM2] at hDecDom
+          dsimp only at hDecDom ⊢
+          intro r hr
+          have hAll := List.all_eq_true.mp hDecDom r (List.mem_range.mpr hr)
+          exact of_decide_eq_true hAll
+        obtain ⟨hVerStar, hChainsStar, hNoWots⟩ :=
+          mutantUncheckedReuseSign_collision_free_forgery suite params sk
+            [3] [3] 0 hM1 hM2 (by decide) hTsw3 hDom3
+        refine ⟨st1, st2, sig₁, sig₂, ?_⟩
+        refine ⟨rfl, hM2, by decide, ?_⟩
+        intro sigStar digStar
+        have hPk : derivePublicKey suite params sk = pk := rfl
+        have hSigStar : forgeFromReusedLeafSigs suite params pk [1] sig₁ [2] sig₂ [3] [3] 0 = sigStar := rfl
+        have hDigStar :
+            extractBaseWDigits params.w params.ell1
+              (thHashMsg suite [3] pk.pkSeed pk.pkRoot (thPreHash suite pk.pkSeed pk.pkRoot [3]) 0 0 0 0) =
+              digStar := rfl
+        rw [hPk, hSigStar] at hVerStar
+        have hParams1 : params.numLayers = 1 := rfl
+        have hNoWots' := hNoWots hParams1
+        rw [hPk, hSigStar] at hNoWots'
+        refine ⟨hVerStar, ?_, hNoWots'⟩
+        intro r hr
+        have hC := hChainsStar r hr
+        have hZeroDiv : 0 / 2 ^ params.subtreeHeight = 0 := Nat.zero_div _
+        have hZeroMod : 0 % 2 ^ params.subtreeHeight = 0 := Nat.zero_mod _
+        have hU64 : UInt64.ofNat 0 = (0 : UInt64) := rfl
+        have hU32 : UInt32.ofNat 0 = (0 : UInt32) := rfl
+        rw [hPk, hSigStar, hSig1Idx, hZeroDiv, hZeroMod, hU64, hU32, hDigStar] at hC
+        exact hC
+
+/-- Concrete 2-layer (`d = 2`) stateful profile with budget `2 ^ 2 = 4` signatures (`maxSigsLog2 = 2`). -/
+def inhabitedStatefulParams : PqHashParams := ⟨4, 128, 1, 2, 0, 0, 2, true⟩
+
+/-- Multi-turn checked stateful query schedule exercising fresh `.signNext` across subtree
+    boundaries (`epoch = 0, 1`), crash-recovery `.retryEpoch 1`, and explicit `.signEpoch 2`. -/
+def inhabitedStatefulQueries : List CheckedStatefulQuery :=
+  [.signNext [10] 1, .signNext [20] 1, .retryEpoch 1 [20], .signEpoch 2 [30] 1]
+
+/-- Well-shaped 2-layer signature on leaf `0` accepted by `verifyCheckedStateful` under `crumbToySuite`. -/
+def inhabitedStatefulForgery : PqHashSig :=
+  { rRand := []
+    msgTswCtr := 0
+    leafGlobalIdx := 0
+    forsOpenings := []
+    layerSigs := [⟨0, List.replicate 128 [], [[]]⟩, ⟨0, List.replicate 128 [], [[]]⟩] }
+
+/-- **Inhabited Multi-Signature Constructive Extraction Witness (`inhabited_checked_stateful_multi_sign_extract`)**:
+    Directly executes `checked_stateful_hypertree_euf_cma_extract` on the 4-entry, 2-layer
+    multi-signature transcript produced by `inhabitedStatefulQueries` (`0 Classical.choice`). -/
+def inhabited_checked_stateful_multi_sign_extract :
+    let log := (execCheckedStatefulOracle crumbToySuite inhabitedStatefulParams ⟨[], [], []⟩
+                  initCheckedStatefulLatch inhabitedStatefulQueries).emittedLog
+    PSum (CheckedStatefulCollisionWitness crumbToySuite inhabitedStatefulParams ⟨[], [], []⟩ log)
+         (CheckedStatefulWotsTswWitness crumbToySuite inhabitedStatefulParams ⟨[], [], []⟩ log
+            [99] inhabitedStatefulForgery) :=
+  checked_stateful_hypertree_euf_cma_extract
+    crumbToySuite inhabitedStatefulParams ⟨[], [], []⟩
+    inhabitedStatefulQueries [99] inhabitedStatefulForgery
+    (.inl ⟨rfl, rfl⟩)
+    (by decide +kernel)
+    (by decide +kernel)
+
+/-- **Multi-Signature Inhabitedness Theorem (`inhabited_checked_stateful_multi_sign_log`)**:
+    Proves that all hypotheses of `checked_stateful_hypertree_euf_cma_extract` and
+    `checked_stateful_strict_euf_cma_extract` are jointly inhabited on a genuine 2-layer (`d = 2`),
+    multi-signature checked stateful execution:
+    1. `execCheckedStatefulStrict` succeeds (`abortError = none`) with `stFinal.nextEpoch = 3` and
+       `4` emitted log entries across epochs `[0, 1, 1, 2]` and messages `[[10], [20], [20], [30]]`;
+    2. Every emitted signature passes `verifyCheckedStateful = true`;
+    3. `msgStar = [99]` is fresh (`∉ log.map (·.2.1)`) and `inhabitedStatefulForgery` passes
+       `verifyCheckedStateful = true`; and
+    4. `checked_stateful_hypertree_euf_cma_extract` produces an inhabited transcript-indexed break witness! -/
+theorem inhabited_checked_stateful_multi_sign_log :
+    let suite := crumbToySuite
+    let params := inhabitedStatefulParams
+    let sk : PqSecretKey := ⟨[], [], []⟩
+    let pk := derivePublicKey suite params sk
+    let run := execCheckedStatefulOracle suite params sk initCheckedStatefulLatch inhabitedStatefulQueries
+    run.abortError = none ∧
+    (∃ stFinal, execCheckedStatefulStrict suite params sk initCheckedStatefulLatch inhabitedStatefulQueries =
+      .ok (stFinal, run.emittedLog) ∧ stFinal.nextEpoch = 3) ∧
+    run.emittedLog.length = 4 ∧
+    (run.emittedLog.map Prod.fst) = [0, 1, 1, 2] ∧
+    (run.emittedLog.map fun e => e.2.1) = [[10], [20], [20], [30]] ∧
+    (∀ e ∈ run.emittedLog, verifyCheckedStateful suite params pk e.2.1 e.2.2 = true) ∧
+    ([99] : List UInt8) ∉ (run.emittedLog.map fun e => e.2.1) ∧
+    verifyCheckedStateful suite params pk [99] inhabitedStatefulForgery = true ∧
+    (Nonempty (CheckedStatefulCollisionWitness suite params sk run.emittedLog) ∨
+     Nonempty (CheckedStatefulWotsTswWitness suite params sk run.emittedLog [99] inhabitedStatefulForgery)) := by
+  dsimp only
+  refine ⟨by decide +kernel, ?_, by decide +kernel, by decide +kernel, by decide +kernel, ?_,
+          by decide +kernel, by decide +kernel, ?_⟩
+  · cases hStr : execCheckedStatefulStrict crumbToySuite inhabitedStatefulParams ⟨[], [], []⟩
+        initCheckedStatefulLatch inhabitedStatefulQueries with
+    | error err =>
+      exfalso
+      have hOk : (execCheckedStatefulStrict crumbToySuite inhabitedStatefulParams ⟨[], [], []⟩
+          initCheckedStatefulLatch inhabitedStatefulQueries).isOk = true := by decide +kernel
+      rw [hStr] at hOk; cases hOk
+    | ok pair =>
+      rcases pair with ⟨stFinal, log⟩
+      have hOrcEq :=
+        ((execCheckedStatefulStrict_eq_oracle crumbToySuite inhabitedStatefulParams ⟨[], [], []⟩
+          inhabitedStatefulQueries initCheckedStatefulLatch).1 stFinal log).mp hStr
+      have hLogEq : log = (execCheckedStatefulOracle crumbToySuite inhabitedStatefulParams ⟨[], [], []⟩
+          initCheckedStatefulLatch inhabitedStatefulQueries).emittedLog :=
+        congrArg CheckedStatefulOracleRun.emittedLog hOrcEq.symm
+      have hNext : stFinal.nextEpoch = 3 := by
+        have hDec : (match execCheckedStatefulStrict crumbToySuite inhabitedStatefulParams ⟨[], [], []⟩
+                        initCheckedStatefulLatch inhabitedStatefulQueries with
+                     | .ok (s, _) => s.nextEpoch == 3
+                     | .error _ => false) = true := by decide +kernel
+        rw [hStr] at hDec
+        exact of_decide_eq_true (by simpa [beq_iff_eq] using hDec)
+      exact ⟨stFinal, by rw [← hLogEq], hNext⟩
+  · intro e he
+    exact checkedStatefulOracle_accepts crumbToySuite inhabitedStatefulParams ⟨[], [], []⟩
+      inhabitedStatefulQueries he
+  · cases inhabited_checked_stateful_multi_sign_extract with
+    | inl col => exact .inl ⟨col⟩
+    | inr wots => exact .inr ⟨wots⟩
+
+/-- The latch invariant has a concrete occupied state, not just an empty log. -/
+theorem witness_occupied_epoch_latch : ∃ st : EpochLatchState, st.WellFormed := by
+  refine ⟨⟨1, some (0, [], ⟨[], 0, 0, [], []⟩)⟩, ?_⟩
+  intro ep msg sig h
+  change some (0, [], (⟨[], 0, 0, [], []⟩ : PqHashSig)) = some (ep, msg, sig) at h
+  have he := congrArg (fun x => x.1) (Option.some.inj h)
+  change 0 = ep at he
+  change ep < 1
+  omega
+
+/-- The invariant and an actual successful replay share one assignment. -/
+theorem witness_occupied_epoch_latch_step :
+    ∃ (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+      (st : EpochLatchState) (sig : PqHashSig),
+      st.WellFormed ∧ epochLatchSign suite params sk [] 0 st 0 [] = some (st, sig) := by
+  refine ⟨crumbToySuite, inhabitedStatefulParams, ⟨[], [], []⟩,
+    ⟨1, some (0, [], ⟨[], 0, 0, [], []⟩)⟩, ⟨[], 0, 0, [], []⟩, ?_, ?_⟩
+  · intro ep msg sig h
+    have he := congrArg (fun x => x.1) (Option.some.inj h)
+    change 0 = ep at he
+    change ep < 1
+    omega
+  · exact stateful_jorts_crash_retry_idempotent _ _ _ _ _ _ _ _
+
+/-- Equivocation rejection with the occupied latch explicit in the theorem statement. -/
+theorem tooth_occupied_latch_rejects_equivocation
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (optRand : List UInt8) (maxGrind ep : Nat)
+    (msg msg' : List UInt8) (sig : PqHashSig) (hDiff : msg' ≠ msg) :
+    epochLatchSign suite params sk optRand maxGrind
+      ⟨ep + 1, some (ep, msg, sig)⟩ ep msg' = none :=
+  stateful_jorts_equivocation_rejected suite params sk optRand maxGrind ep msg msg' sig hDiff
+
+/-! ## 7. Production verifier `verifyProductionPqHashSig`: hypertree + FORS + WOTS+C reduction
+
+The statements below are about the production verifier of `Qsag.HashSigs` §6
+(`crates/qsag-core/src/tsw_baggy.rs::verify_pq_hash_sig`): `H_INTERNAL` digests on every layer except
+the stateful leaf layer (`H_MSG`), FORS leaf indices and the hypertree leaf taken from the `H_XOF`
+stream, `(j, u)`-addressed FORS leaves and key-pair-bound FORS Merkle nodes. One signing log covers
+both modes: stateless `Corduroy`/`Baggy` profiles and stateful `Jorts`.
+
+The shape follows the SPHINCS+ proof (Bernstein–Hülsing–Kölbl–Niederhagen–Rijneveld–Schwabe,
+CCS 2019, §9, with the tweakable-hash targets of Hülsing–Kudinov, ASIACRYPT 2022): an accepted
+signature on an unsigned message yields an interleaved target-subset-resilience break on the FORS
+index derivation, a target collision on an input fixed by the honest key and the log, or a preimage
+of an honest value that the log never disclosed. As in §5 these are witness classifications; they
+carry no running-time or multi-target accounting. -/
+
+/-- Input hashed by `productionLayerDigest`. -/
+def prodLayerPreimage (params : PqHashParams) (rRand pkSeed pkRoot cur : List UInt8)
+    (i : Nat) (T : UInt64) (KP : UInt32) (ctr : Nat) : List UInt8 :=
+  if params.statefulJorts && decide (i = 0) then
+    thPreimage tagHMsg pkSeed ⟨0, T, .wotsHash, KP, 0, UInt32.ofNat ctr⟩ [rRand, pkRoot, cur, be 4 ctr]
+  else
+    thPreimage tagHInternal pkSeed ⟨UInt32.ofNat i, T, .wotsHash, KP, 0, UInt32.ofNat ctr⟩
+      [pkRoot, cur, be 4 ctr]
+
+theorem productionLayerDigest_rawHash (suite : TweakableHashSuite) (params : PqHashParams)
+    (rRand pkSeed pkRoot cur : List UInt8) (i : Nat) (T : UInt64) (KP : UInt32) (ctr : Nat) :
+    productionLayerDigest suite params rRand pkSeed pkRoot cur i T KP ctr =
+      suite.rawHash (prodLayerPreimage params rRand pkSeed pkRoot cur i T KP ctr) := by
+  unfold productionLayerDigest prodLayerPreimage
+  by_cases hc : (params.statefulJorts && decide (i = 0)) = true
+  · simp only [hc, ↓reduceIte]; rfl
+  · simp only [hc]; rfl
+
+/-- The signed message is recoverable from the layer preimage. -/
+theorem prodLayerPreimage_cur_inj {params : PqHashParams} {r₁ r₂ pkSeed pkRoot c₁ c₂ : List UInt8}
+    {i : Nat} {T : UInt64} {KP : UInt32} {k₁ k₂ : Nat}
+    (h : prodLayerPreimage params r₁ pkSeed pkRoot c₁ i T KP k₁ =
+      prodLayerPreimage params r₂ pkSeed pkRoot c₂ i T KP k₂) : c₁ = c₂ := by
+  unfold prodLayerPreimage at h
+  by_cases hc : (params.statefulJorts && decide (i = 0)) = true
+  · simp only [hc, ↓reduceIte] at h
+    have hArgs := (thPreimage_injective h).2.2.2
+    simp only [List.cons.injEq] at hArgs
+    exact hArgs.2.2.1
+  · simp only [hc] at h
+    have hArgs := (thPreimage_injective h).2.2.2
+    simp only [List.cons.injEq] at hArgs
+    exact hArgs.2.1
+
+theorem productionLayerDigest_rRand_irrel (suite : TweakableHashSuite) (params : PqHashParams)
+    {i : Nat} (h : ¬ (params.statefulJorts = true ∧ i = 0)) (r₁ r₂ pkSeed pkRoot cur : List UInt8)
+    (T : UInt64) (KP : UInt32) (ctr : Nat) :
+    productionLayerDigest suite params r₁ pkSeed pkRoot cur i T KP ctr =
+      productionLayerDigest suite params r₂ pkSeed pkRoot cur i T KP ctr := by
+  unfold productionLayerDigest
+  have hc : (params.statefulJorts && decide (i = 0)) = false := by
+    cases hs : params.statefulJorts
+    · rfl
+    · have hi : i ≠ 0 := fun h0 => h ⟨hs, h0⟩
+      simp [hi]
+  simp only [hc, Bool.false_eq_true, ↓reduceIte]
+
+theorem extractBaseWDigitsChecked_some {w n : Nat} {b : List UInt8} {d : List Nat}
+    (h : extractBaseWDigitsChecked w n b = some d) : d = extractBaseWDigits w n b := by
+  unfold extractBaseWDigitsChecked at h
+  split at h
+  · exact (Option.some.inj h).symm
+  · cases h
+
+theorem PqHashParams.productionWellFormed_geom (p : PqHashParams)
+    (h : p.productionWellFormed = true) (hw : p.w = 4 ∨ p.w = 16) :
+    (p.w = 4 ∧ p.ell1 = 128) ∨ (p.w = 16 ∧ p.ell1 = 64) := by
+  rcases p.productionWellFormed_w_ell1 h with h2 | h4 | h16 | h256
+  · rcases hw with h' | h' <;> omega
+  · exact .inl h4
+  · exact .inr h16
+  · rcases hw with h' | h' <;> omega
+
+theorem PqHashParams.productionWellFormed_stateless_fors (p : PqHashParams)
+    (h : p.productionWellFormed = true) (hs : p.statefulJorts = false) :
+    0 < p.forsTrees ∧ 0 < p.forsHeight := by
+  rw [PqHashParams.productionWellFormed_eq] at h
+  simp only [hs, Bool.and_eq_true, decide_eq_true_eq, Bool.false_eq_true, ↓reduceIte] at h
+  exact h.2
+
+theorem PqHashParams.productionLeafIdxInRange_lt (p : PqHashParams) (L : Nat)
+    (h : p.productionLeafIdxInRange L = true) : L < 2 ^ (p.numLayers * p.subtreeHeight) := by
+  unfold PqHashParams.productionLeafIdxInRange at h
+  dsimp only at h
+  have hL := of_decide_eq_true h
+  split at hL
+  · rename_i hc
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hc
+    exact Nat.lt_of_lt_of_le hL (Nat.pow_le_pow_right (by decide) (Nat.le_of_lt hc.2))
+  · exact hL
+
+/-- For the two deployed radices the WOTS+C digits determine the whole 32-byte layer digest. -/
+theorem production_digits_inj (params : PqHashParams) (hw : params.w = 4 ∨ params.w = 16)
+    (hPwf : params.productionWellFormed = true) {a b : List UInt8}
+    (ha : a.length = 32) (hb : b.length = 32)
+    (hd : extractBaseWDigits params.w params.ell1 a = extractBaseWDigits params.w params.ell1 b) :
+    a = b := by
+  have hEll : params.ell1 = (8 / Nat.log2 params.w) * 32 := by
+    rcases params.productionWellFormed_geom hPwf hw with ⟨h1, h2⟩ | ⟨h1, h2⟩
+    · rw [h1, h2]; decide
+    · rw [h1, h2]; decide
+  rw [hEll] at hd
+  have hT := extractBaseWDigits_production_prefix_injective params.w 32 hw (by omega) (by omega) hd
+  rw [List.take_of_length_le (by omega), List.take_of_length_le (by omega)] at hT
+  exact hT
+
+/-- Unpacking of one accepted production hypertree layer. -/
+theorem verifyProductionHypertreeLayers_cons_inv (suite : TweakableHashSuite) (params : PqHashParams)
+    (pkSeed pkRoot rRand : List UInt8) (i G : Nat) (cur : List UInt8)
+    (lsig : LayerXmssSig) (rest : List LayerXmssSig) (top : List UInt8)
+    (h : verifyProductionHypertreeLayers suite params pkSeed pkRoot rRand i G cur (lsig :: rest) =
+      some top) :
+    lsig.tswCtr < 2 ^ 32 ∧
+    checkTargetSum params.w params.ell1 params.targetSum
+      (extractBaseWDigits params.w params.ell1
+        (productionLayerDigest suite params rRand pkSeed pkRoot cur i
+          (UInt64.ofNat (G / 2 ^ params.subtreeHeight))
+          (UInt32.ofNat (G % 2 ^ params.subtreeHeight)) lsig.tswCtr)) = true ∧
+    ∃ next,
+      walkMerkleAuthPath suite pkSeed (UInt32.ofNat i) (UInt64.ofNat (G / 2 ^ params.subtreeHeight))
+        .tree params.subtreeHeight 0 (G % 2 ^ params.subtreeHeight)
+        (recoverWotsPkFromSig suite params pkSeed (UInt32.ofNat i)
+          (UInt64.ofNat (G / 2 ^ params.subtreeHeight)) (G % 2 ^ params.subtreeHeight)
+          (extractBaseWDigits params.w params.ell1
+            (productionLayerDigest suite params rRand pkSeed pkRoot cur i
+              (UInt64.ofNat (G / 2 ^ params.subtreeHeight))
+              (UInt32.ofNat (G % 2 ^ params.subtreeHeight)) lsig.tswCtr))
+          lsig.wotsChains) lsig.authPath = some next ∧
+      verifyProductionHypertreeLayers suite params pkSeed pkRoot rRand (i + 1)
+        (G / 2 ^ params.subtreeHeight) next rest = some top := by
+  rw [verifyProductionHypertreeLayers_cons] at h
+  dsimp only at h
+  cases hC : decide (lsig.tswCtr < 2 ^ 32)
+  · simp [hC] at h
+  · simp only [hC, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at h
+    cases hE : extractBaseWDigitsChecked params.w params.ell1
+        (productionLayerDigest suite params rRand pkSeed pkRoot cur i
+          (UInt64.ofNat (G / 2 ^ params.subtreeHeight))
+          (UInt32.ofNat (G % 2 ^ params.subtreeHeight)) lsig.tswCtr) with
+    | none => rw [hE] at h; cases h
+    | some digits =>
+      rw [hE] at h
+      dsimp only at h
+      have hDg := extractBaseWDigitsChecked_some hE
+      subst hDg
+      cases hT : checkTargetSum params.w params.ell1 params.targetSum
+          (extractBaseWDigits params.w params.ell1
+            (productionLayerDigest suite params rRand pkSeed pkRoot cur i
+              (UInt64.ofNat (G / 2 ^ params.subtreeHeight))
+              (UInt32.ofNat (G % 2 ^ params.subtreeHeight)) lsig.tswCtr))
+      · simp [hT] at h
+      · simp only [hT, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at h
+        by_cases hL : lsig.wotsChains.length = params.ell1
+        · simp only [hL, ne_eq, not_true_eq_false, ↓reduceIte] at h
+          cases hW : walkMerkleAuthPathKp suite pkSeed (UInt32.ofNat i)
+              (UInt64.ofNat (G / 2 ^ params.subtreeHeight)) .tree 0 params.subtreeHeight 0
+              (G % 2 ^ params.subtreeHeight)
+              (recoverWotsPkFromSig suite params pkSeed (UInt32.ofNat i)
+                (UInt64.ofNat (G / 2 ^ params.subtreeHeight)) (G % 2 ^ params.subtreeHeight)
+                (extractBaseWDigits params.w params.ell1
+                  (productionLayerDigest suite params rRand pkSeed pkRoot cur i
+                    (UInt64.ofNat (G / 2 ^ params.subtreeHeight))
+                    (UInt32.ofNat (G % 2 ^ params.subtreeHeight)) lsig.tswCtr))
+                lsig.wotsChains) lsig.authPath with
+          | none => rw [hW] at h; cases h
+          | some next =>
+            rw [hW] at h
+            dsimp only at h
+            rw [walkMerkleAuthPathKp_zero_eq] at hW
+            exact ⟨of_decide_eq_true hC, rfl, next, hW, h⟩
+        · simp [hL] at h
+
+/-- Unpacking of an accepting stateless production verification: the leaf and the FORS indices are
+    the ones the `H_XOF` stream prescribes, and those indices are the ones the FORS recovery used. -/
+theorem verifyProductionPqHashSig_stateless_inv (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (msg : List UInt8) (sig : PqHashSig)
+    (hMode : params.statefulJorts = false)
+    (h : verifyProductionPqHashSig suite params pk msg sig = true) :
+    params.productionWellFormed = true ∧ sig.layerSigs.length = params.numLayers ∧
+    sig.msgTswCtr = 0 ∧
+    ∃ idxs forsPkF,
+      deriveProductionStatelessInputs suite params sig.rRand pk.pkSeed pk.pkRoot
+        (thPreHash suite pk.pkSeed pk.pkRoot msg) = some (sig.leafGlobalIdx, idxs) ∧
+      recoverProductionForsPk suite params pk.pkSeed
+        (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ params.subtreeHeight))
+        (sig.leafGlobalIdx % 2 ^ params.subtreeHeight) idxs sig.forsOpenings = some forsPkF ∧
+      verifyProductionHypertreeLayers suite params pk.pkSeed pk.pkRoot sig.rRand 0
+        sig.leafGlobalIdx forsPkF sig.layerSigs = some pk.pkRoot := by
+  rw [verifyProductionPqHashSig_eq] at h
+  cases hWf : params.productionWellFormed
+  · simp [hWf] at h
+  · cases hR : params.productionLeafIdxInRange sig.leafGlobalIdx
+    · simp [hWf, hR] at h
+    · by_cases hLen : sig.layerSigs.length = params.numLayers
+      · by_cases hCtr : sig.msgTswCtr = 0
+        · simp only [hWf, hR, hLen, hCtr, hMode, ne_eq, not_true_eq_false, decide_false,
+            Bool.not_true, Bool.or_self, Bool.false_eq_true, ↓reduceIte] at h
+          split at h
+          · cases h
+          · split at h
+            · cases h
+            · rename_i leaf idxs hD
+              split at h
+              · cases h
+              · rename_i hLeafN
+                have hLeaf : sig.leafGlobalIdx = leaf := Decidable.of_not_not hLeafN
+                split at h
+                · cases h
+                · rename_i forsPk hFors
+                  split at h
+                  · rename_i top hTop
+                    refine ⟨rfl, hLen, hCtr, idxs, forsPk, ?_, hFors, ?_⟩
+                    · rw [hD, hLeaf]
+                    · rw [hTop, of_decide_eq_true h]
+                  · cases h
+        · simp [hWf, hR, hCtr] at h
+      · simp [hWf, hR, hLen] at h
+
+/-- Unpacking of an accepting stateful production verification. -/
+theorem verifyProductionPqHashSig_stateful_inv (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (msg : List UInt8) (sig : PqHashSig)
+    (hMode : params.statefulJorts = true)
+    (h : verifyProductionPqHashSig suite params pk msg sig = true) :
+    params.productionWellFormed = true ∧ sig.layerSigs.length = params.numLayers ∧
+    sig.leafGlobalIdx < 2 ^ (params.numLayers * params.subtreeHeight) ∧
+    verifyProductionHypertreeLayers suite params pk.pkSeed pk.pkRoot sig.rRand 0
+      sig.leafGlobalIdx (thPreHash suite pk.pkSeed pk.pkRoot msg) sig.layerSigs = some pk.pkRoot := by
+  rw [verifyProductionPqHashSig_eq] at h
+  cases hWf : params.productionWellFormed
+  · simp [hWf] at h
+  · cases hR : params.productionLeafIdxInRange sig.leafGlobalIdx
+    · simp [hWf, hR] at h
+    · by_cases hLen : sig.layerSigs.length = params.numLayers
+      · by_cases hCtr : sig.msgTswCtr = 0
+        · simp only [hWf, hR, hLen, hCtr, hMode, ne_eq, not_true_eq_false, decide_false,
+            Bool.not_true, Bool.or_self, Bool.false_eq_true, ↓reduceIte] at h
+          split at h
+          · cases h
+          · split at h
+            · rename_i top hTop
+              exact ⟨rfl, hLen, params.productionLeafIdxInRange_lt _ hR,
+                by rw [hTop, of_decide_eq_true h]⟩
+            · cases h
+        · simp [hWf, hR, hCtr] at h
+      · simp [hWf, hR, hLen] at h
+
+/-! ### Honest side: the production signing log -/
+
+/-- One signing request. `epoch` is the one-time leaf of a stateful profile and is ignored by
+    stateless profiles, whose leaf comes from the `H_XOF` stream. -/
+structure ProdSigningQuery where
+  message : List UInt8
+  randomness : List UInt8
+  epoch : Nat
+  grindLimit : Nat
+
+def prodSignQuery (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (q : ProdSigningQuery) : Option PqHashSig :=
+  if params.statefulJorts then
+    evalProductionStatefulSign suite params sk q.message q.randomness q.epoch q.grindLimit
+  else evalProductionStatelessSign suite params sk q.message q.randomness q.grindLimit
+
+/-- Transcript of the production signer. Failed requests add no entry. -/
+def productionSigningLog (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey) :
+    List ProdSigningQuery → List (List UInt8 × PqHashSig)
+  | [] => []
+  | q :: qs =>
+    match prodSignQuery suite params sk q with
+    | none => productionSigningLog suite params sk qs
+    | some sig => (q.message, sig) :: productionSigningLog suite params sk qs
+
+theorem productionSigningLog_generated (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) :
+    ∀ (queries : List ProdSigningQuery) (e : List UInt8 × PqHashSig),
+      e ∈ productionSigningLog suite params sk queries →
+      ∃ q, q ∈ queries ∧ e.1 = q.message ∧ prodSignQuery suite params sk q = some e.2
+  | [], _, he => by cases he
+  | q :: qs, e, he => by
+    unfold productionSigningLog at he
+    cases hS : prodSignQuery suite params sk q with
+    | none =>
+      rw [hS] at he
+      obtain ⟨q', hq', h⟩ := productionSigningLog_generated suite params sk qs e he
+      exact ⟨q', List.mem_cons_of_mem _ hq', h⟩
+    | some sig =>
+      rw [hS] at he
+      rcases List.mem_cons.mp he with hEq | hT
+      · exact ⟨q, List.mem_cons_self, by rw [hEq], by rw [hEq]; exact hS⟩
+      · obtain ⟨q', hq', h⟩ := productionSigningLog_generated suite params sk qs e hT
+        exact ⟨q', List.mem_cons_of_mem _ hq', h⟩
+
+/-- Every logged signature is accepted by the production verifier. -/
+theorem productionSigningLog_accepts (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (queries : List ProdSigningQuery) (e : List UInt8 × PqHashSig)
+    (he : e ∈ productionSigningLog suite params sk queries) :
+    verifyProductionPqHashSig suite params (derivePublicKey suite params sk) e.1 e.2 = true := by
+  obtain ⟨q, _, hMsg, hs⟩ := productionSigningLog_generated suite params sk queries e he
+  unfold prodSignQuery at hs
+  rw [hMsg]
+  cases hSt : params.statefulJorts
+  · rw [hSt] at hs
+    simp only [Bool.false_eq_true, ↓reduceIte] at hs
+    exact verifyProductionPqHashSig_evalProductionStatelessSign suite params sk _ _ _ e.2 hs
+  · rw [hSt] at hs
+    simp only [↓reduceIte] at hs
+    exact verifyProductionPqHashSig_evalProductionStatefulSign suite params sk _ _ _ _ e.2 hs
+
+/-- The grinder the production signer runs at layer `i`. -/
+def prodGrind (suite : TweakableHashSuite) (params : PqHashParams)
+    (rRand pkSeed pkRoot M : List UInt8) (i : Nat) (T : UInt64) (KP : UInt32) (fuel : Nat) :
+    Option (Nat × List Nat × List UInt8) :=
+  if params.statefulJorts && decide (i = 0) then
+    grindTswLeafCounterAux suite params.w params.ell1 params.targetSum rRand pkSeed pkRoot M T KP 0 fuel
+  else
+    grindTswInternalCounterAux suite params.w params.ell1 params.targetSum pkSeed pkRoot M
+      (UInt32.ofNat i) T KP 0 fuel
+
+theorem prodGrind_sound {suite : TweakableHashSuite} {params : PqHashParams}
+    {rRand pkSeed pkRoot M : List UInt8} {i : Nat} {T : UInt64} {KP : UInt32} {fuel ctr : Nat}
+    {digits : List Nat} {hm : List UInt8}
+    (h : prodGrind suite params rRand pkSeed pkRoot M i T KP fuel = some (ctr, digits, hm)) :
+    ctr < 2 ^ 32 ∧
+    digits = extractBaseWDigits params.w params.ell1
+      (productionLayerDigest suite params rRand pkSeed pkRoot M i T KP ctr) ∧
+    checkTargetSum params.w params.ell1 params.targetSum digits = true := by
+  unfold prodGrind at h
+  unfold productionLayerDigest
+  by_cases hc : (params.statefulJorts && decide (i = 0)) = true
+  · simp only [hc, ↓reduceIte] at h ⊢
+    obtain ⟨h1, h2, h3, h4⟩ := grindTswLeafCounterAux_sound h
+    rw [h2] at h3
+    exact ⟨h1, extractBaseWDigitsChecked_some h3, h4⟩
+  · simp only [hc] at h ⊢
+    obtain ⟨h1, h2, h3, h4⟩ := grindTswInternalCounterAux_sound h
+    rw [h2] at h3
+    exact ⟨h1, extractBaseWDigitsChecked_some h3, h4⟩
+
+theorem grindTswLeafCounterAux_det {suite : TweakableHashSuite} {w ell1 target : Nat}
+    {rRand pkSeed pkRoot mu : List UInt8} {treeIdx : UInt64} {kpIdx : UInt32} :
+    ∀ (fuel fuel' curCtr : Nat) {a b : Nat × List Nat × List UInt8},
+      grindTswLeafCounterAux suite w ell1 target rRand pkSeed pkRoot mu treeIdx kpIdx curCtr fuel = some a →
+      grindTswLeafCounterAux suite w ell1 target rRand pkSeed pkRoot mu treeIdx kpIdx curCtr fuel' = some b →
+      a = b
+  | 0, _, _, _, _, h, _ => by cases h
+  | _ + 1, 0, _, _, _, _, h' => by cases h'
+  | fuel + 1, fuel' + 1, curCtr, a, b, h, h' => by
+    unfold grindTswLeafCounterAux at h h'
+    cases hLt : decide (curCtr < 2 ^ 32)
+    · simp [hLt] at h
+    · simp only [hLt, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at h h'
+      cases hExt : extractBaseWDigitsChecked w ell1
+          (thHashLeafMsg suite rRand pkSeed pkRoot mu treeIdx kpIdx curCtr) with
+      | none => rw [hExt] at h; cases h
+      | some dg =>
+        rw [hExt] at h h'
+        dsimp only at h h'
+        cases hChk : checkTargetSum w ell1 target dg
+        · rw [hChk] at h h'
+          simp only [Bool.false_eq_true, ↓reduceIte] at h h'
+          exact grindTswLeafCounterAux_det fuel fuel' (curCtr + 1) h h'
+        · rw [hChk] at h h'
+          simp only [↓reduceIte, Option.some.injEq] at h h'
+          exact h.symm.trans h'
+
+theorem grindTswInternalCounterAux_det {suite : TweakableHashSuite} {w ell1 target : Nat}
+    {pkSeed pkRoot nodeRoot : List UInt8} {layerIdx : UInt32} {treeIdx : UInt64} {kpIdx : UInt32} :
+    ∀ (fuel fuel' curCtr : Nat) {a b : Nat × List Nat × List UInt8},
+      grindTswInternalCounterAux suite w ell1 target pkSeed pkRoot nodeRoot layerIdx treeIdx kpIdx curCtr fuel = some a →
+      grindTswInternalCounterAux suite w ell1 target pkSeed pkRoot nodeRoot layerIdx treeIdx kpIdx curCtr fuel' = some b →
+      a = b
+  | 0, _, _, _, _, h, _ => by cases h
+  | _ + 1, 0, _, _, _, _, h' => by cases h'
+  | fuel + 1, fuel' + 1, curCtr, a, b, h, h' => by
+    unfold grindTswInternalCounterAux at h h'
+    cases hLt : decide (curCtr < 2 ^ 32)
+    · simp [hLt] at h
+    · simp only [hLt, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at h h'
+      cases hExt : extractBaseWDigitsChecked w ell1
+          (thHashInternalNode suite pkSeed pkRoot nodeRoot layerIdx treeIdx kpIdx curCtr) with
+      | none => rw [hExt] at h; cases h
+      | some dg =>
+        rw [hExt] at h h'
+        dsimp only at h h'
+        cases hChk : checkTargetSum w ell1 target dg
+        · rw [hChk] at h h'
+          simp only [Bool.false_eq_true, ↓reduceIte] at h h'
+          exact grindTswInternalCounterAux_det fuel fuel' (curCtr + 1) h h'
+        · rw [hChk] at h h'
+          simp only [↓reduceIte, Option.some.injEq] at h h'
+          exact h.symm.trans h'
+
+/-- The grinder's output does not depend on the grind budget. -/
+theorem prodGrind_det {suite : TweakableHashSuite} {params : PqHashParams}
+    {rRand pkSeed pkRoot M : List UInt8} {i : Nat} {T : UInt64} {KP : UInt32} {fuel fuel' : Nat}
+    {a b : Nat × List Nat × List UInt8}
+    (h : prodGrind suite params rRand pkSeed pkRoot M i T KP fuel = some a)
+    (h' : prodGrind suite params rRand pkSeed pkRoot M i T KP fuel' = some b) : a = b := by
+  unfold prodGrind at h h'
+  by_cases hc : (params.statefulJorts && decide (i = 0)) = true
+  · simp only [hc, ↓reduceIte] at h h'
+    exact grindTswLeafCounterAux_det fuel fuel' 0 h h'
+  · simp only [hc] at h h'
+    exact grindTswInternalCounterAux_det fuel fuel' 0 h h'
+
+theorem prodGrind_rRand_irrel (suite : TweakableHashSuite) (params : PqHashParams)
+    {i : Nat} (h : ¬ (params.statefulJorts = true ∧ i = 0)) (r₁ r₂ pkSeed pkRoot M : List UInt8)
+    (T : UInt64) (KP : UInt32) (fuel : Nat) :
+    prodGrind suite params r₁ pkSeed pkRoot M i T KP fuel =
+      prodGrind suite params r₂ pkSeed pkRoot M i T KP fuel := by
+  unfold prodGrind
+  have hc : (params.statefulJorts && decide (i = 0)) = false := by
+    cases hs : params.statefulJorts
+    · rfl
+    · have hi : i ≠ 0 := fun h0 => h ⟨hs, h0⟩
+      simp [hi]
+  simp only [hc, Bool.false_eq_true, ↓reduceIte]
+
+/-- Layer `j` of a successful `signProductionHypertreeLayers` run: its counter is the grinder's
+    output on the honest message of that layer and its chain values are the honest nodes at the
+    ground digits. -/
+theorem signProductionHypertreeLayers_layer (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (pkRoot rRand : List UInt8) (maxGrind : Nat) :
+    ∀ (rem i0 g0 : Nat) (cur : List UInt8) (sigs : List LayerXmssSig),
+      signProductionHypertreeLayers suite params sk pkRoot rRand maxGrind i0 g0 cur rem = some sigs →
+      ∀ j, j < rem →
+        ∃ digits hm,
+          prodGrind suite params rRand sk.pkSeed pkRoot
+            (if j = 0 then cur else computeXmssSubtreeRoot suite params sk (UInt32.ofNat (i0 + j - 1))
+              (UInt64.ofNat (g0 / 2 ^ (j * params.subtreeHeight))))
+            (i0 + j)
+            (UInt64.ofNat (g0 / 2 ^ (j * params.subtreeHeight) / 2 ^ params.subtreeHeight))
+            (UInt32.ofNat (g0 / 2 ^ (j * params.subtreeHeight) % 2 ^ params.subtreeHeight)) maxGrind =
+            some ((sigs.getD j ⟨0, [], []⟩).tswCtr, digits, hm) ∧
+          (sigs.getD j ⟨0, [], []⟩).wotsChains = (List.range params.ell1).map fun r =>
+            honestChainNode suite sk (UInt32.ofNat (i0 + j))
+              (UInt64.ofNat (g0 / 2 ^ (j * params.subtreeHeight) / 2 ^ params.subtreeHeight))
+              (g0 / 2 ^ (j * params.subtreeHeight) % 2 ^ params.subtreeHeight) r (digits.getD r 0)
+  | 0, _, _, _, _, _, j, hj => absurd hj (Nat.not_lt_zero j)
+  | rem + 1, i0, g0, cur, sigs, h, j, hj => by
+    rw [signProductionHypertreeLayers_succ] at h
+    dsimp only at h
+    split at h
+    · cases h
+    · rename_i ctr digits hm hG
+      split at h
+      · cases h
+      · rename_i restSigs hRest
+        simp only [Option.some.injEq] at h
+        subst h
+        cases j with
+        | zero =>
+          refine ⟨digits, hm, ?_, ?_⟩
+          · unfold prodGrind
+            simpa only [↓reduceIte, Nat.zero_mul, Nat.pow_zero, Nat.div_one, Nat.add_zero,
+              List.getD_cons_zero] using hG
+          · simp only [Nat.zero_mul, Nat.pow_zero, Nat.div_one, Nat.add_zero, List.getD_cons_zero]
+            rfl
+        | succ j =>
+          obtain ⟨dg, hm', hG', hC'⟩ := signProductionHypertreeLayers_layer suite params sk pkRoot
+            rRand maxGrind rem (i0 + 1) (g0 / 2 ^ params.subtreeHeight) _ restSigs hRest j
+            (Nat.lt_of_succ_lt_succ hj)
+          have hDiv : g0 / 2 ^ params.subtreeHeight / 2 ^ (j * params.subtreeHeight) =
+              g0 / 2 ^ ((j + 1) * params.subtreeHeight) := by
+            rw [Nat.div_div_eq_div_mul, ← Nat.pow_add,
+              show params.subtreeHeight + j * params.subtreeHeight = (j + 1) * params.subtreeHeight by
+                rw [Nat.succ_mul, Nat.add_comm]]
+          have hIdx : i0 + 1 + j = i0 + (j + 1) := by omega
+          have hRoot :
+              (if j = 0 then
+                computeXmssSubtreeRoot suite params sk (UInt32.ofNat i0)
+                  (UInt64.ofNat (g0 / 2 ^ params.subtreeHeight))
+               else computeXmssSubtreeRoot suite params sk (UInt32.ofNat (i0 + 1 + j - 1))
+                  (UInt64.ofNat (g0 / 2 ^ params.subtreeHeight / 2 ^ (j * params.subtreeHeight)))) =
+              computeXmssSubtreeRoot suite params sk (UInt32.ofNat (i0 + (j + 1) - 1))
+                (UInt64.ofNat (g0 / 2 ^ ((j + 1) * params.subtreeHeight))) := by
+            cases j with
+            | zero => simp only [↓reduceIte, Nat.zero_add, Nat.one_mul, Nat.add_sub_cancel]
+            | succ j' =>
+              rw [hDiv]
+              simp only [Nat.add_one_ne_zero, ↓reduceIte]
+              rw [show i0 + 1 + (j' + 1) - 1 = i0 + (j' + 1 + 1) - 1 by omega]
+          rw [hRoot] at hG'
+          rw [hDiv, hIdx] at hG' hC'
+          refine ⟨dg, hm', ?_, ?_⟩
+          · simpa only [Nat.add_one_ne_zero, ↓reduceIte, List.getD_cons_succ] using hG'
+          · simpa only [List.getD_cons_succ] using hC'
+
+theorem signProductionHypertreeCore_inv (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (pk : PqPublicKey) (msg mu rRand : List UInt8)
+    (leafGlobalIdx : Nat) (forsIdxs : Option (List Nat)) (maxGrind : Nat) (sig : PqHashSig)
+    (h : signProductionHypertreeCore suite params sk pk msg mu rRand leafGlobalIdx forsIdxs maxGrind =
+      some sig) :
+    sig.rRand = rRand ∧ sig.leafGlobalIdx = leafGlobalIdx ∧
+    ∃ cur, (params.statefulJorts = true → cur = mu) ∧
+      (params.statefulJorts = false → cur = computeProductionForsPk suite params sk
+        (UInt64.ofNat (leafGlobalIdx / 2 ^ params.subtreeHeight))
+        (leafGlobalIdx % 2 ^ params.subtreeHeight)) ∧
+      signProductionHypertreeLayers suite params sk pk.pkRoot rRand maxGrind 0 leafGlobalIdx cur
+        params.numLayers = some sig.layerSigs := by
+  unfold signProductionHypertreeCore at h
+  dsimp only at h
+  cases hSt : params.statefulJorts
+  · rw [hSt] at h
+    simp only [Bool.false_eq_true, ↓reduceIte] at h
+    cases forsIdxs with
+    | none => simp at h
+    | some idxs =>
+      dsimp only at h
+      split at h
+      · cases h
+      · rename_i layerSigs hLayers
+        split at h
+        · simp only [Option.some.injEq] at h
+          subst h
+          exact ⟨rfl, rfl, ⟨_, ⟨fun hh => absurd hh Bool.false_ne_true, fun _ => rfl, hLayers⟩⟩⟩
+        · cases h
+  · rw [hSt] at h
+    simp only [↓reduceIte] at h
+    split at h
+    · cases h
+    · rename_i layerSigs hLayers
+      split at h
+      · simp only [Option.some.injEq] at h
+        subst h
+        exact ⟨rfl, rfl, ⟨_, ⟨fun _ => rfl, fun hh => absurd hh.symm Bool.false_ne_true, hLayers⟩⟩⟩
+      · cases h
+
+theorem evalProductionStatelessSign_inv (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (msg optRand : List UInt8) (maxGrind : Nat) (sig : PqHashSig)
+    (h : evalProductionStatelessSign suite params sk msg optRand maxGrind = some sig) :
+    params.statefulJorts = false ∧ params.productionWellFormed = true ∧
+    sig.leafGlobalIdx < 2 ^ (params.numLayers * params.subtreeHeight) ∧
+    signProductionHypertreeLayers suite params sk (derivePublicKey suite params sk).pkRoot sig.rRand
+      maxGrind 0 sig.leafGlobalIdx
+      (computeProductionForsPk suite params sk
+        (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ params.subtreeHeight))
+        (sig.leafGlobalIdx % 2 ^ params.subtreeHeight))
+      params.numLayers = some sig.layerSigs := by
+  rw [evalProductionStatelessSign_eq] at h
+  cases hSt : params.statefulJorts
+  · cases hWf : params.productionWellFormed
+    · simp [hSt, hWf] at h
+    · simp only [hSt, hWf, Bool.not_true, Bool.or_self, Bool.false_eq_true, ↓reduceIte] at h
+      cases hD : deriveProductionStatelessInputs suite params
+          (thPrfMsg suite sk.skPrf optRand
+            (thPreHash suite (derivePublicKey suite params sk).pkSeed
+              (derivePublicKey suite params sk).pkRoot msg))
+          (derivePublicKey suite params sk).pkSeed (derivePublicKey suite params sk).pkRoot
+          (thPreHash suite (derivePublicKey suite params sk).pkSeed
+            (derivePublicKey suite params sk).pkRoot msg) with
+      | none => rw [hD] at h; cases h
+      | some pr =>
+        rcases pr with ⟨leaf, idxs⟩
+        rw [hD] at h
+        dsimp only at h
+        obtain ⟨hR, hL, cur, _, hCur, hLayers⟩ :=
+          signProductionHypertreeCore_inv suite params sk _ _ _ _ _ _ _ sig h
+        obtain ⟨_, _, hLt, _, _⟩ := deriveProductionStatelessInputs_bounds _ _ _ _ _ _ _ _ hD
+        refine ⟨rfl, rfl, by rw [hL]; exact hLt, ?_⟩
+        rw [hCur hSt] at hLayers
+        rw [hR, hL]
+        exact hLayers
+  · simp [hSt] at h
+
+theorem evalProductionStatefulSign_inv (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (msg optRand : List UInt8) (epoch maxGrind : Nat) (sig : PqHashSig)
+    (h : evalProductionStatefulSign suite params sk msg optRand epoch maxGrind = some sig) :
+    params.statefulJorts = true ∧ params.productionWellFormed = true ∧
+    sig.leafGlobalIdx = epoch ∧
+    sig.leafGlobalIdx < 2 ^ (params.numLayers * params.subtreeHeight) ∧
+    signProductionHypertreeLayers suite params sk (derivePublicKey suite params sk).pkRoot sig.rRand
+      maxGrind 0 sig.leafGlobalIdx
+      (thPreHash suite sk.pkSeed (derivePublicKey suite params sk).pkRoot msg)
+      params.numLayers = some sig.layerSigs := by
+  rw [evalProductionStatefulSign_eq] at h
+  cases hSt : params.statefulJorts
+  · simp [hSt] at h
+  · cases hWf : params.productionWellFormed
+    · simp [hSt, hWf] at h
+    · cases hR : params.productionLeafIdxInRange epoch
+      · simp [hSt, hWf, hR] at h
+      · simp only [hSt, hWf, hR, Bool.not_true, Bool.or_self, Bool.false_eq_true, ↓reduceIte] at h
+        obtain ⟨hRand, hL, cur, hCur, _, hLayers⟩ :=
+          signProductionHypertreeCore_inv suite params sk _ _ _ _ _ _ _ sig h
+        refine ⟨rfl, rfl, hL, by rw [hL]; exact params.productionLeafIdxInRange_lt _ hR, ?_⟩
+        rw [hCur hSt] at hLayers
+        rw [hRand, hL]
+        exact hLayers
+
+/-- Message signed by the honest WOTS key at layer `i` on the path of the logged signature `e`:
+    the pre-hash of the message (stateful) or the FORS public key (stateless) at layer `0`, the
+    subtree root below otherwise. -/
+def prodHonestLayerMsg (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (e : List UInt8 × PqHashSig) (i : Nat) : List UInt8 :=
+  if i = 0 then
+    if params.statefulJorts then
+      thPreHash suite sk.pkSeed (derivePublicKey suite params sk).pkRoot e.1
+    else
+      computeProductionForsPk suite params sk
+        (UInt64.ofNat (e.2.leafGlobalIdx / 2 ^ params.subtreeHeight))
+        (e.2.leafGlobalIdx % 2 ^ params.subtreeHeight)
+  else computeXmssSubtreeRoot suite params sk (UInt32.ofNat (i - 1))
+    (UInt64.ofNat (e.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight)))
+
+/-- Layer-`i` digest of a logged signature. -/
+def prodLogLayerDigest (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (e : List UInt8 × PqHashSig) (i : Nat) : List UInt8 :=
+  productionLayerDigest suite params e.2.rRand sk.pkSeed (derivePublicKey suite params sk).pkRoot
+    (prodHonestLayerMsg suite params sk e i) i
+    (UInt64.ofNat (e.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) / 2 ^ params.subtreeHeight))
+    (UInt32.ofNat (e.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight))
+    (e.2.layerSigs.getD i ⟨0, [], []⟩).tswCtr
+
+/-- Digits whose chain values a logged signature discloses at layer `i`. -/
+def prodLogLayerDigits (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (e : List UInt8 × PqHashSig) (i : Nat) : List Nat :=
+  extractBaseWDigits params.w params.ell1 (prodLogLayerDigest suite params sk e i)
+
+/-- What the production signing log guarantees about one entry. -/
+structure ProdLogEntryOk (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (e : List UInt8 × PqHashSig) : Prop where
+  leaf_lt : e.2.leafGlobalIdx < 2 ^ (params.numLayers * params.subtreeHeight)
+  layer : ∀ i, i < params.numLayers → ∃ fuel digits hm,
+    prodGrind suite params e.2.rRand sk.pkSeed (derivePublicKey suite params sk).pkRoot
+      (prodHonestLayerMsg suite params sk e i) i
+      (UInt64.ofNat (e.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) / 2 ^ params.subtreeHeight))
+      (UInt32.ofNat (e.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight))
+      fuel = some ((e.2.layerSigs.getD i ⟨0, [], []⟩).tswCtr, digits, hm) ∧
+    (e.2.layerSigs.getD i ⟨0, [], []⟩).wotsChains = (List.range params.ell1).map fun r =>
+      honestChainNode suite sk (UInt32.ofNat i)
+        (UInt64.ofNat (e.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) / 2 ^ params.subtreeHeight))
+        (e.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight) r
+        (digits.getD r 0)
+
+/-- Two logged signatures through the same hypertree position disclose the same digits there. -/
+def ProdLogConsistent (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (log : List (List UInt8 × PqHashSig)) : Prop :=
+  ∀ e, e ∈ log → ∀ e', e' ∈ log → ∀ i, i < params.numLayers →
+    e.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) =
+      e'.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) →
+    prodLogLayerDigits suite params sk e i = prodLogLayerDigits suite params sk e' i
+
+theorem prodLogLayerDigits_valid {suite : TweakableHashSuite} {params : PqHashParams}
+    {sk : PqSecretKey} {e : List UInt8 × PqHashSig} (hOk : ProdLogEntryOk suite params sk e)
+    (i : Nat) (hi : i < params.numLayers) :
+    checkTargetSum params.w params.ell1 params.targetSum (prodLogLayerDigits suite params sk e i) =
+      true := by
+  obtain ⟨fuel, dg, hm, hG, _⟩ := hOk.layer i hi
+  obtain ⟨_, hdEq, hChk⟩ := prodGrind_sound hG
+  unfold prodLogLayerDigits prodLogLayerDigest
+  rw [← hdEq]
+  exact hChk
+
+/-- The log discloses exactly the honest chain nodes at `prodLogLayerDigits`. -/
+theorem prodLogLayer_chains_revealed {suite : TweakableHashSuite} {params : PqHashParams}
+    {sk : PqSecretKey} {e : List UInt8 × PqHashSig} (hOk : ProdLogEntryOk suite params sk e)
+    (i : Nat) (hi : i < params.numLayers) (r : Nat) (hr : r < params.ell1) :
+    (e.2.layerSigs.getD i ⟨0, [], []⟩).wotsChains.getD r [] =
+      honestChainNode suite sk (UInt32.ofNat i)
+        (UInt64.ofNat (e.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) / 2 ^ params.subtreeHeight))
+        (e.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight) r
+        ((prodLogLayerDigits suite params sk e i).getD r 0) := by
+  obtain ⟨fuel, dg, hm, hG, hC⟩ := hOk.layer i hi
+  obtain ⟨_, hdEq, _⟩ := prodGrind_sound hG
+  rw [hC, list_getD_map_range params.ell1 _ [] hr]
+  unfold prodLogLayerDigits prodLogLayerDigest
+  rw [← hdEq]
+
+theorem productionSigningLog_entryOk (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (queries : List ProdSigningQuery) (e : List UInt8 × PqHashSig)
+    (he : e ∈ productionSigningLog suite params sk queries) :
+    ProdLogEntryOk suite params sk e := by
+  obtain ⟨q, _, hMsg, hs⟩ := productionSigningLog_generated suite params sk queries e he
+  unfold prodSignQuery at hs
+  cases hSt : params.statefulJorts
+  · rw [hSt] at hs
+    simp only [Bool.false_eq_true, ↓reduceIte] at hs
+    obtain ⟨_, _, hLt, hLs⟩ := evalProductionStatelessSign_inv suite params sk _ _ _ e.2 hs
+    refine ⟨hLt, ?_⟩
+    intro i hi
+    obtain ⟨dg, hm, hG, hC⟩ := signProductionHypertreeLayers_layer suite params sk _ _ q.grindLimit
+      params.numLayers 0 e.2.leafGlobalIdx _ e.2.layerSigs hLs i hi
+    simp only [Nat.zero_add] at hG hC
+    have hRootEq :
+        (if i = 0 then
+          computeProductionForsPk suite params sk
+            (UInt64.ofNat (e.2.leafGlobalIdx / 2 ^ params.subtreeHeight))
+            (e.2.leafGlobalIdx % 2 ^ params.subtreeHeight)
+         else computeXmssSubtreeRoot suite params sk (UInt32.ofNat (i - 1))
+            (UInt64.ofNat (e.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight)))) =
+        prodHonestLayerMsg suite params sk e i := by
+      unfold prodHonestLayerMsg
+      simp only [hSt, Bool.false_eq_true, ↓reduceIte]
+    rw [hRootEq] at hG
+    exact ⟨q.grindLimit, dg, hm, hG, hC⟩
+  · rw [hSt] at hs
+    simp only [↓reduceIte] at hs
+    obtain ⟨_, _, _, hLt, hLs⟩ := evalProductionStatefulSign_inv suite params sk _ _ _ _ e.2 hs
+    refine ⟨hLt, ?_⟩
+    intro i hi
+    obtain ⟨dg, hm, hG, hC⟩ := signProductionHypertreeLayers_layer suite params sk _ _ q.grindLimit
+      params.numLayers 0 e.2.leafGlobalIdx _ e.2.layerSigs hLs i hi
+    simp only [Nat.zero_add] at hG hC
+    have hRootEq :
+        (if i = 0 then
+          thPreHash suite sk.pkSeed (derivePublicKey suite params sk).pkRoot q.message
+         else computeXmssSubtreeRoot suite params sk (UInt32.ofNat (i - 1))
+            (UInt64.ofNat (e.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight)))) =
+        prodHonestLayerMsg suite params sk e i := by
+      unfold prodHonestLayerMsg
+      simp only [hSt, ↓reduceIte, hMsg]
+    rw [hRootEq] at hG
+    exact ⟨q.grindLimit, dg, hm, hG, hC⟩
+
+/-- Consistency of the production log. In a stateful profile it rests on the one-time-leaf
+    discipline: an epoch is requested by at most one query (identical retries are allowed). -/
+theorem productionSigningLog_consistent (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (queries : List ProdSigningQuery)
+    (hOneTime : params.statefulJorts = true →
+      ∀ q, q ∈ queries → ∀ q', q' ∈ queries → q.epoch = q'.epoch → q = q') :
+    ProdLogConsistent suite params sk (productionSigningLog suite params sk queries) := by
+  intro e he e' he' i hi hPos
+  have hOk := productionSigningLog_entryOk suite params sk queries e he
+  have hOk' := productionSigningLog_entryOk suite params sk queries e' he'
+  by_cases hTop : params.statefulJorts = true ∧ i = 0
+  · obtain ⟨q, hq, hMsg, hs⟩ := productionSigningLog_generated suite params sk queries e he
+    obtain ⟨q', hq', hMsg', hs'⟩ := productionSigningLog_generated suite params sk queries e' he'
+    have hLeaf : e.2.leafGlobalIdx = e'.2.leafGlobalIdx := by
+      rw [hTop.2] at hPos
+      simpa only [Nat.zero_mul, Nat.pow_zero, Nat.div_one] using hPos
+    unfold prodSignQuery at hs hs'
+    rw [hTop.1] at hs hs'
+    simp only [↓reduceIte] at hs hs'
+    have hE := (evalProductionStatefulSign_inv suite params sk _ _ _ _ e.2 hs).2.2.1
+    have hE' := (evalProductionStatefulSign_inv suite params sk _ _ _ _ e'.2 hs').2.2.1
+    have hqEq : q = q' := hOneTime hTop.1 q hq q' hq' (by rw [← hE, ← hE', hLeaf])
+    subst hqEq
+    have hSig : e.2 = e'.2 := Option.some.inj (hs.symm.trans hs')
+    have hEE : e = e' := Prod.ext (hMsg.trans hMsg'.symm) hSig
+    rw [hEE]
+  · obtain ⟨f, dg, hm, hG, _⟩ := hOk.layer i hi
+    obtain ⟨f', dg', hm', hG', _⟩ := hOk'.layer i hi
+    have hM : prodHonestLayerMsg suite params sk e i = prodHonestLayerMsg suite params sk e' i := by
+      unfold prodHonestLayerMsg
+      by_cases h0 : i = 0
+      · have hL : e.2.leafGlobalIdx = e'.2.leafGlobalIdx := by
+          rw [h0] at hPos
+          simpa only [Nat.zero_mul, Nat.pow_zero, Nat.div_one] using hPos
+        have hSt : params.statefulJorts = false := by
+          cases hb : params.statefulJorts
+          · rfl
+          · exact absurd ⟨hb, h0⟩ hTop
+        simp only [h0, hSt, ↓reduceIte, Bool.false_eq_true, hL]
+      · simp only [h0, ↓reduceIte, hPos]
+    rw [hM, hPos, prodGrind_rRand_irrel suite params hTop e.2.rRand e'.2.rRand] at hG
+    have hCtr := (Prod.mk.inj (prodGrind_det hG hG')).1
+    unfold prodLogLayerDigits prodLogLayerDigest
+    rw [hM, hPos, hCtr, productionLayerDigest_rRand_irrel suite params hTop e.2.rRand e'.2.rRand]
+
+/-! ### Break events against the production key and log -/
+
+/-- Hash inputs fixed by the honest key and the production signing log. -/
+inductive ProdHonestHashTarget (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (log : List (List UInt8 × PqHashSig)) : List UInt8 → Prop where
+  | xmssNode (layer : UInt32) (tree : UInt64) (h n : Nat) :
+      ProdHonestHashTarget suite params sk log
+        (thPreimage tagThH sk.pkSeed ⟨layer, tree, .tree, 0, UInt32.ofNat (h + 1), UInt32.ofNat n⟩
+          [computeMerkleNode suite sk.pkSeed layer tree .tree
+             (computeWotsPk suite params sk layer tree) h (2 * n),
+           computeMerkleNode suite sk.pkSeed layer tree .tree
+             (computeWotsPk suite params sk layer tree) h (2 * n + 1)])
+  | forsNode (tree : UInt64) (kp j h n b : Nat) :
+      ProdHonestHashTarget suite params sk log
+        (thPreimage tagThH sk.pkSeed
+          ⟨0, tree, .forsTree, UInt32.ofNat kp, UInt32.ofNat (h + 1), UInt32.ofNat n⟩
+          [computeMerkleNodeKp suite sk.pkSeed 0 tree .forsTree (UInt32.ofNat kp)
+             (forsIndexedLeafFn suite sk tree kp j) h (2 * n) (2 * b),
+           computeMerkleNodeKp suite sk.pkSeed 0 tree .forsTree (UInt32.ofNat kp)
+             (forsIndexedLeafFn suite sk tree kp j) h (2 * n + 1) (2 * b + 1)])
+  | wotsPk (layer : UInt32) (tree : UInt64) (kp : Nat) :
+      ProdHonestHashTarget suite params sk log
+        (thPreimage tagThTl sk.pkSeed ⟨layer, tree, .wotsPk, UInt32.ofNat kp, 0, 0⟩
+          ((List.range params.ell1).map fun r =>
+            honestChainNode suite sk layer tree kp r (params.w - 1)))
+  | forsRoots (tree : UInt64) (kp : Nat) :
+      ProdHonestHashTarget suite params sk log
+        (thPreimage tagThTl sk.pkSeed ⟨0, tree, .forsRoots, UInt32.ofNat kp, 0, 0⟩
+          ((List.range params.forsTrees).map fun j =>
+            computeMerkleNodeKp suite sk.pkSeed 0 tree .forsTree (UInt32.ofNat kp)
+              (forsIndexedLeafFn suite sk tree kp j) params.forsHeight j 0))
+  | chainStep (layer : UInt32) (tree : UInt64) (kp r step : Nat) :
+      ProdHonestHashTarget suite params sk log
+        (thPreimage tagThF sk.pkSeed
+          ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat step⟩
+          [honestChainNode suite sk layer tree kp r step])
+  | signedDigest (e : List UInt8 × PqHashSig) (he : e ∈ log) (i : Nat) (hi : i < params.numLayers) :
+      ProdHonestHashTarget suite params sk log
+        (prodLayerPreimage params e.2.rRand sk.pkSeed (derivePublicKey suite params sk).pkRoot
+          (prodHonestLayerMsg suite params sk e i) i
+          (UInt64.ofNat (e.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) / 2 ^ params.subtreeHeight))
+          (UInt32.ofNat (e.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight))
+          (e.2.layerSigs.getD i ⟨0, [], []⟩).tswCtr)
+  | preHash (e : List UInt8 × PqHashSig) (he : e ∈ log) :
+      ProdHonestHashTarget suite params sk log
+        (thPreimage tagHPre sk.pkSeed zeroAdrs [(derivePublicKey suite params sk).pkRoot, e.1])
+
+/-- **Target-collision existence (production).** A hash input different from an honest target
+    with the same raw hash value. This is a structural `Prop`, not the winning event of a
+    computational collision adversary: it does not record an algorithm output, a query budget,
+    or a finite target set. In particular it is independent of `sigStar`. To obtain a primitive
+    game reduction, return the specific collision produced along the verifier walk and bound
+    its construction and target selection; do not bound this unrestricted existence event by
+    a standard adversary-success assumption. -/
+inductive ProdSmTcrBreak (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (log : List (List UInt8 × PqHashSig)) : Prop where
+  | mk (target forged : List UInt8) (honest : ProdHonestHashTarget suite params sk log target)
+      (ne : forged ≠ target) (collides : suite.rawHash forged = suite.rawHash target)
+
+/-- FORS leaf indices that the `H_XOF` stream assigns to `(msg, sig)`. -/
+def prodSigForsIdxs (suite : TweakableHashSuite) (params : PqHashParams) (pk : PqPublicKey)
+    (msg : List UInt8) (sig : PqHashSig) : List Nat :=
+  match deriveProductionStatelessInputs suite params sig.rRand pk.pkSeed pk.pkRoot
+      (thPreHash suite pk.pkSeed pk.pkRoot msg) with
+  | some (_, idxs) => idxs
+  | none => []
+
+/-- FORS leaves `(hypertree leaf, FORS tree, leaf index)` opened by one signature. -/
+def prodSigForsLeaves (suite : TweakableHashSuite) (params : PqHashParams) (pk : PqPublicKey)
+    (msg : List UInt8) (sig : PqHashSig) : List (Nat × Nat × Nat) :=
+  (List.range params.forsTrees).map fun j =>
+    (sig.leafGlobalIdx, j, (prodSigForsIdxs suite params pk msg sig).getD j 0)
+
+/-- Every FORS leaf opened anywhere in the signing log. -/
+def prodLogForsLeaves (suite : TweakableHashSuite) (params : PqHashParams) (pk : PqPublicKey) :
+    List (List UInt8 × PqHashSig) → List (Nat × Nat × Nat)
+  | [] => []
+  | e :: rest => prodSigForsLeaves suite params pk e.1 e.2 ++ prodLogForsLeaves suite params pk rest
+
+/-- **FORS interleaved target-subset-resilience break (production index derivation).** The forged
+    message is absent from the log and every FORS leaf that the `H_XOF` stream of the forged
+    `(R, message)` selects, under the hypertree leaf it also selects, was opened by a logged
+    signature. -/
+structure ProdForsItsrBreak (suite : TweakableHashSuite) (params : PqHashParams) (pk : PqPublicKey)
+    (log : List (List UInt8 × PqHashSig)) (msgStar : List UInt8) (sigStar : PqHashSig) : Prop where
+  fresh : ∀ e ∈ log, e.1 ≠ msgStar
+  trees_pos : 0 < params.forsTrees
+  covered : ∀ a ∈ prodSigForsLeaves suite params pk msgStar sigStar,
+    a ∈ prodLogForsLeaves suite params pk log
+
+/-- **Preimage break carried by the forged signature (production).**
+    `fors`: the secret opened in FORS tree `j` hashes to the honest `(j, u)` leaf hash and no logged
+    signature opened that leaf.
+    `wots`: the chain value of layer `i`, chain `r` hashes at `step` to the honest node `step + 1`,
+    and every logged signature through the same hypertree position disclosed that chain only at a
+    strictly later step. Layer and position determine the WOTS key address, so no other log entry
+    touches these chain addresses. -/
+inductive ProdPreimageBreak (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (log : List (List UInt8 × PqHashSig)) (msgStar : List UInt8) (sigStar : PqHashSig) : Prop where
+  | fors (j : Nat) (hj : j < params.forsTrees)
+      (unrevealed :
+        (sigStar.leafGlobalIdx, j,
+          (prodSigForsIdxs suite params (derivePublicKey suite params sk) msgStar sigStar).getD j 0) ∉
+          prodLogForsLeaves suite params (derivePublicKey suite params sk) log)
+      (inverts :
+        forsIndexedLeafHash suite sk.pkSeed
+          (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ params.subtreeHeight))
+          (sigStar.leafGlobalIdx % 2 ^ params.subtreeHeight) j
+          ((prodSigForsIdxs suite params (derivePublicKey suite params sk) msgStar sigStar).getD j 0)
+          (sigStar.forsOpenings.getD j ⟨[], []⟩).secretVal =
+        forsIndexedLeafFn suite sk
+          (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ params.subtreeHeight))
+          (sigStar.leafGlobalIdx % 2 ^ params.subtreeHeight) j
+          ((prodSigForsIdxs suite params (derivePublicKey suite params sk) msgStar sigStar).getD j 0))
+  | wots (i : Nat) (hi : i < params.numLayers) (r : Nat) (hr : r < params.ell1)
+      (step : Nat) (hstep : step + 1 ≤ params.w - 1)
+      (inverts :
+        thChainF suite sk.pkSeed
+          ⟨UInt32.ofNat i,
+           UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) / 2 ^ params.subtreeHeight),
+           .wotsHash,
+           UInt32.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight),
+           UInt32.ofNat r, UInt32.ofNat step⟩
+          ((sigStar.layerSigs.getD i ⟨0, [], []⟩).wotsChains.getD r []) =
+        honestChainNode suite sk (UInt32.ofNat i)
+          (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) / 2 ^ params.subtreeHeight))
+          (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight) r (step + 1))
+      (unrevealed : ∀ e ∈ log,
+        e.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) =
+          sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) →
+        step < (prodLogLayerDigits suite params sk e i).getD r 0)
+
+/-- With nothing signed, no FORS leaf is covered. -/
+theorem prodForsItsrBreak_empty_log (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (msgStar : List UInt8) (sigStar : PqHashSig) :
+    ¬ ProdForsItsrBreak suite params pk [] msgStar sigStar := by
+  intro hB
+  have hMem : (sigStar.leafGlobalIdx, 0,
+      (prodSigForsIdxs suite params pk msgStar sigStar).getD 0 0) ∈
+      prodSigForsLeaves suite params pk msgStar sigStar :=
+    List.mem_map.mpr ⟨0, List.mem_range.mpr hB.trees_pos, rfl⟩
+  have hIn := hB.covered _ hMem
+  cases hIn
+
+/-! ### Forgery side -/
+
+/-- Key-pair-bound variant of `walkMerkle_meets_honest` for the production FORS trees. -/
+theorem walkMerkleKp_meets_honest (suite : TweakableHashSuite) (pkSeed : List UInt8)
+    (layer : UInt32) (tree : UInt64) (kind : AdrsKind) (kp : UInt32)
+    (leafFn : Nat → List UInt8) (P : Prop)
+    (hCol : ∀ (h n b : Nat) (forged : List UInt8),
+      forged ≠ thPreimage tagThH pkSeed ⟨layer, tree, kind, kp, UInt32.ofNat (h + 1), UInt32.ofNat n⟩
+        [computeMerkleNodeKp suite pkSeed layer tree kind kp leafFn h (2 * n) (2 * b),
+         computeMerkleNodeKp suite pkSeed layer tree kind kp leafFn h (2 * n + 1) (2 * b + 1)] →
+      suite.rawHash forged = suite.rawHash
+        (thPreimage tagThH pkSeed ⟨layer, tree, kind, kp, UInt32.ofNat (h + 1), UInt32.ofNat n⟩
+          [computeMerkleNodeKp suite pkSeed layer tree kind kp leafFn h (2 * n) (2 * b),
+           computeMerkleNodeKp suite pkSeed layer tree kind kp leafFn h (2 * n + 1) (2 * b + 1)]) → P) :
+    ∀ (h nodeIdx localBase localIdx : Nat) (leaf : List UInt8) (path : List (List UInt8)),
+      localIdx < 2 ^ h →
+      walkMerkleAuthPathKp suite pkSeed layer tree kind kp h nodeIdx localIdx leaf path =
+        some (computeMerkleNodeKp suite pkSeed layer tree kind kp leafFn h nodeIdx localBase) →
+      leaf = leafFn (localBase * 2 ^ h + localIdx) ∨ P
+  | 0, nodeIdx, localBase, localIdx, leaf, path, hLt, hW => by
+    cases path with
+    | nil =>
+      simp only [walkMerkleAuthPathKp, computeMerkleNodeKp, Option.some.injEq] at hW
+      have h0 : localIdx = 0 := by
+        rw [Nat.pow_zero] at hLt
+        omega
+      rw [h0, Nat.pow_zero, Nat.mul_one, Nat.add_zero]
+      exact .inl hW
+    | cons _ _ => simp [walkMerkleAuthPathKp] at hW
+  | h + 1, nodeIdx, localBase, localIdx, leaf, path, hLt, hW => by
+    cases path with
+    | nil => simp [walkMerkleAuthPathKp] at hW
+    | cons sib rest =>
+      have hMul : localBase * 2 ^ (h + 1) = (2 * localBase) * 2 ^ h := by
+        rw [Nat.pow_succ, ← Nat.mul_assoc, Nat.mul_comm (localBase * 2 ^ h) 2, Nat.mul_assoc]
+      by_cases hHalf : localIdx < 2 ^ h
+      · simp only [walkMerkleAuthPathKp, computeMerkleNodeKp, hHalf, ↓reduceIte] at hW
+        cases hSub : walkMerkleAuthPathKp suite pkSeed layer tree kind kp h (2 * nodeIdx) localIdx
+            leaf rest with
+        | none => rw [hSub] at hW; cases hW
+        | some sub =>
+          rw [hSub] at hW
+          simp only [Option.some.injEq] at hW
+          rcases thCall_eq_cases suite hW with ⟨_, _, _, hArgs⟩ | ⟨hNe, hHash⟩
+          · simp only [List.cons.injEq, and_true] at hArgs
+            rw [hArgs.1] at hSub
+            rcases walkMerkleKp_meets_honest suite pkSeed layer tree kind kp leafFn P hCol h
+              (2 * nodeIdx) (2 * localBase) localIdx leaf rest hHalf hSub with hLeaf | hP
+            · left; rw [hMul]; exact hLeaf
+            · exact .inr hP
+          · exact .inr (hCol h nodeIdx localBase _ hNe hHash)
+      · simp only [walkMerkleAuthPathKp, computeMerkleNodeKp, hHalf, ↓reduceIte] at hW
+        cases hSub : walkMerkleAuthPathKp suite pkSeed layer tree kind kp h (2 * nodeIdx + 1)
+            (localIdx - 2 ^ h) leaf rest with
+        | none => rw [hSub] at hW; cases hW
+        | some sub =>
+          rw [hSub] at hW
+          simp only [Option.some.injEq] at hW
+          have hSubLt : localIdx - 2 ^ h < 2 ^ h := by rw [Nat.pow_succ] at hLt; omega
+          have hIdxEq : localBase * 2 ^ (h + 1) + localIdx =
+              (2 * localBase + 1) * 2 ^ h + (localIdx - 2 ^ h) := by
+            rw [hMul, Nat.add_mul, Nat.one_mul, Nat.add_assoc, Nat.add_sub_of_le (Nat.le_of_not_lt hHalf)]
+          rcases thCall_eq_cases suite hW with ⟨_, _, _, hArgs⟩ | ⟨hNe, hHash⟩
+          · simp only [List.cons.injEq, and_true] at hArgs
+            rw [hArgs.2] at hSub
+            rcases walkMerkleKp_meets_honest suite pkSeed layer tree kind kp leafFn P hCol h
+              (2 * nodeIdx + 1) (2 * localBase + 1) (localIdx - 2 ^ h) leaf rest hSubLt hSub with
+              hLeaf | hP
+            · left; rw [hIdxEq]; exact hLeaf
+            · exact .inr hP
+          · exact .inr (hCol h nodeIdx localBase _ hNe hHash)
+
+/-- `wotsChain_meets_honest` with the collision event left abstract. -/
+theorem wotsChain_meets_honest_gen (suite : TweakableHashSuite) (sk : PqSecretKey)
+    (layer : UInt32) (tree : UInt64) (kp r : Nat) (P : Prop)
+    (hCol : ∀ (s : Nat) (forged : List UInt8),
+      forged ≠ thPreimage tagThF sk.pkSeed
+        ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩
+        [honestChainNode suite sk layer tree kp r s] →
+      suite.rawHash forged = suite.rawHash
+        (thPreimage tagThF sk.pkSeed
+          ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩
+          [honestChainNode suite sk layer tree kp r s]) → P) :
+    ∀ (k s : Nat) (x : List UInt8),
+      wotsChainSteps suite sk.pkSeed layer tree kp r s k x =
+        honestChainNode suite sk layer tree kp r (s + k) →
+      x = honestChainNode suite sk layer tree kp r s ∨ P
+  | 0, s, x, h => by
+    rw [wotsChainSteps_zero, Nat.add_zero] at h
+    exact .inl h
+  | k + 1, s, x, h => by
+    rw [wotsChainSteps_succ] at h
+    dsimp only at h
+    rw [show s + (k + 1) = (s + 1) + k by omega] at h
+    rcases wotsChain_meets_honest_gen suite sk layer tree kp r P hCol k (s + 1) _ h with hF | hB
+    · rw [← honestChainNode_succ, thChainF_eq, thChainF_eq] at hF
+      rcases thCall_eq_cases suite hF with ⟨_, _, _, hArgs⟩ | ⟨hNe, hHash⟩
+      · exact .inl (List.cons.inj hArgs).1
+      · exact .inr (hCol s _ hNe hHash)
+    · exact .inr hB
+
+/-- One production hypertree layer of an accepted forgery whose XMSS root is the honest one while its
+    signed message differs from every message the log signed at that position. -/
+theorem prod_layer_divergence_break (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (log : List (List UInt8 × PqHashSig)) (msgStar : List UInt8)
+    (sigStar : PqHashSig)
+    (hw : params.w = 4 ∨ params.w = 16) (hPwf : params.productionWellFormed = true)
+    (hLog : ∀ e ∈ log, ProdLogEntryOk suite params sk e)
+    (hCons : ProdLogConsistent suite params sk log)
+    (i : Nat) (hi : i < params.numLayers) (cur : List UInt8)
+    (G : Nat) (hG : G = sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight))
+    (T : UInt64) (hT : T = UInt64.ofNat (G / 2 ^ params.subtreeHeight))
+    (KP : Nat) (hKP : KP = G % 2 ^ params.subtreeHeight)
+    (ls : LayerXmssSig) (hLs : ls = sigStar.layerSigs.getD i ⟨0, [], []⟩)
+    (digF : List Nat)
+    (hDigF : digF = extractBaseWDigits params.w params.ell1
+      (productionLayerDigest suite params sigStar.rRand sk.pkSeed
+        (derivePublicKey suite params sk).pkRoot cur i T (UInt32.ofNat KP) ls.tswCtr))
+    (hDiff : ∀ e ∈ log, e.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) = G →
+      cur ≠ prodHonestLayerMsg suite params sk e i)
+    (hTsw : checkTargetSum params.w params.ell1 params.targetSum digF = true)
+    (hWalk : walkMerkleAuthPath suite sk.pkSeed (UInt32.ofNat i) T .tree params.subtreeHeight 0 KP
+        (recoverWotsPkFromSig suite params sk.pkSeed (UInt32.ofNat i) T KP digF ls.wotsChains)
+        ls.authPath =
+      some (computeXmssSubtreeRoot suite params sk (UInt32.ofNat i) T)) :
+    ProdSmTcrBreak suite params sk log ∨ ProdPreimageBreak suite params sk log msgStar sigStar := by
+  subst hG hT hKP hLs
+  have hGeom := params.productionWellFormed_geom hPwf hw
+  have hStrict : params.targetSum < (params.w - 1) * params.ell1 := by
+    rw [PqHashParams.targetSum_eq]
+    rcases hGeom with ⟨h1, h2⟩ | ⟨h1, h2⟩ <;> rw [h1, h2] <;> decide
+  have hKpLt : sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight <
+      2 ^ params.subtreeHeight := Nat.mod_lt _ (Nat.two_pow_pos _)
+  rw [computeXmssSubtreeRoot_eq] at hWalk
+  refine (walkMerkle_meets_honest suite sk.pkSeed (UInt32.ofNat i) _ .tree
+      (computeWotsPk suite params sk (UInt32.ofNat i) _) (ProdSmTcrBreak suite params sk log)
+      (fun h n forged hNe hHash =>
+        ProdSmTcrBreak.mk _ forged (.xmssNode (UInt32.ofNat i) _ h n) hNe hHash)
+      params.subtreeHeight 0 _ _ _ hKpLt hWalk).elim (fun hPk => ?_) (fun hB => .inl hB)
+  rw [Nat.zero_mul, Nat.zero_add, recoverWotsPkFromSig_eq, computeWotsPk_eq, thTweakTl_eq,
+    thTweakTl_eq] at hPk
+  refine (thCall_eq_cases suite hPk).elim (fun hAll => ?_)
+    (fun hc => .inl (ProdSmTcrBreak.mk _ _ (.wotsPk (UInt32.ofNat i) _ _) hc.1 hc.2))
+  obtain ⟨_, _, _, hEnds⟩ := hAll
+  rw [recoverWotsEndpoints_eq] at hEnds
+  obtain ⟨hLenF, hBoundF, hSumF⟩ := (checkTargetSum_iff _ _ _ _).mp hTsw
+  have hChain : ∀ r, r < params.ell1 →
+      (sigStar.layerSigs.getD i ⟨0, [], []⟩).wotsChains.getD r [] =
+        honestChainNode suite sk (UInt32.ofNat i)
+          (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) / 2 ^ params.subtreeHeight))
+          (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight) r
+          (digF.getD r 0) ∨
+      ProdSmTcrBreak suite params sk log := by
+    intro r hr
+    have hAt := congrArg (fun l => l.getD r []) hEnds
+    rw [list_getD_map_range params.ell1 _ [] hr, list_getD_map_range params.ell1 _ [] hr] at hAt
+    have hrLen : r < digF.length := by rw [hLenF]; exact hr
+    have hdLt : digF.getD r 0 < params.w := by
+      rw [list_getD_eq_getElem digF 0 hrLen]
+      exact hBoundF _ (List.getElem_mem hrLen)
+    have hSum : digF.getD r 0 + (params.w - 1 - digF.getD r 0) = params.w - 1 := by omega
+    exact wotsChain_meets_honest_gen suite sk (UInt32.ofNat i) _ _ r _
+      (fun s forged hNe hHash =>
+        ProdSmTcrBreak.mk _ forged (.chainStep (UInt32.ofNat i) _ _ r s) hNe hHash) _ _ _
+      (by rw [hSum, honestChainNode_eq]; exact hAt)
+  have hInv : ∀ r,
+      (sigStar.layerSigs.getD i ⟨0, [], []⟩).wotsChains.getD r [] =
+        honestChainNode suite sk (UInt32.ofNat i)
+          (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) / 2 ^ params.subtreeHeight))
+          (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight) r
+          (digF.getD r 0) →
+      thChainF suite sk.pkSeed
+        ⟨UInt32.ofNat i,
+         UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) / 2 ^ params.subtreeHeight),
+         .wotsHash,
+         UInt32.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight),
+         UInt32.ofNat r, UInt32.ofNat (digF.getD r 0)⟩
+        ((sigStar.layerSigs.getD i ⟨0, [], []⟩).wotsChains.getD r []) =
+      honestChainNode suite sk (UInt32.ofNat i)
+        (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) / 2 ^ params.subtreeHeight))
+        (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight) r
+        (digF.getD r 0 + 1) := by
+    intro r hVal
+    rw [hVal]
+    exact honestChainNode_succ suite sk (UInt32.ofNat i) _ _ r (digF.getD r 0)
+  rcases list_search
+      (fun e : List UInt8 × PqHashSig =>
+        e.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) =
+          sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight))
+      (fun e => Decidable.em _) log with ⟨e, he, hPos⟩ | hNoUse
+  · have hOk := hLog e he
+    have hValidH := prodLogLayerDigits_valid hOk i hi
+    by_cases hDigEq : digF = prodLogLayerDigits suite params sk e i
+    · left
+      rw [hDigF] at hDigEq
+      unfold prodLogLayerDigits at hDigEq
+      have hD := production_digits_inj params hw hPwf
+        (productionLayerDigest_length _ _ _ _ _ _ _ _ _ _)
+        (by unfold prodLogLayerDigest; exact productionLayerDigest_length _ _ _ _ _ _ _ _ _ _) hDigEq
+      unfold prodLogLayerDigest at hD
+      rw [productionLayerDigest_rawHash, productionLayerDigest_rawHash] at hD
+      by_cases hPre :
+          prodLayerPreimage params sigStar.rRand sk.pkSeed (derivePublicKey suite params sk).pkRoot cur i
+            (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) / 2 ^ params.subtreeHeight))
+            (UInt32.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight))
+            (sigStar.layerSigs.getD i ⟨0, [], []⟩).tswCtr =
+          prodLayerPreimage params e.2.rRand sk.pkSeed (derivePublicKey suite params sk).pkRoot
+            (prodHonestLayerMsg suite params sk e i) i
+            (UInt64.ofNat (e.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) / 2 ^ params.subtreeHeight))
+            (UInt32.ofNat (e.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight))
+            (e.2.layerSigs.getD i ⟨0, [], []⟩).tswCtr
+      · rw [hPos] at hPre
+        exact absurd (prodLayerPreimage_cur_inj hPre) (hDiff e he hPos)
+      · exact ProdSmTcrBreak.mk _ _ (.signedDigest e he i hi) hPre hD
+    · obtain ⟨r, hr2, hr1, hlt, hbw⟩ :=
+        (tsw_incomparable_no_chain_forgery hValidH hTsw (fun hEq => hDigEq hEq.symm)).2
+      have hr : r < params.ell1 := by rw [← hLenF]; exact hr2
+      refine (hChain r hr).elim (fun hVal => ?_) (fun hB => .inl hB)
+      right
+      have hF : digF.getD r 0 = digF[r] := list_getD_eq_getElem digF 0 hr2
+      have hH : (prodLogLayerDigits suite params sk e i).getD r 0 =
+          (prodLogLayerDigits suite params sk e i)[r] := list_getD_eq_getElem _ 0 hr1
+      refine ProdPreimageBreak.wots i hi r hr (digF.getD r 0) (by omega) (hInv r hVal) ?_
+      intro e' he' hPos'
+      rw [hCons e' he' e he i hi (hPos'.trans hPos.symm)]
+      omega
+  · cases hFind : findDigitLt (params.w - 1) digF with
+    | none =>
+      exfalso
+      have hAllGe := findDigitLt_none_all_ge (params.w - 1) digF hFind
+      have hGe := sumDigits_ge_mul_of_all_ge (params.w - 1) digF hAllGe
+      rw [hLenF, hSumF] at hGe
+      omega
+    | some r =>
+      obtain ⟨hrLen, hrVal⟩ := findDigitLt_sound (params.w - 1) hFind
+      have hr : r < params.ell1 := by rw [← hLenF]; exact hrLen
+      refine (hChain r hr).elim (fun hVal => ?_) (fun hB => .inl hB)
+      right
+      have hF : digF.getD r 0 = digF[r] := list_getD_eq_getElem digF 0 hrLen
+      refine ProdPreimageBreak.wots i hi r hr (digF.getD r 0) (by omega) (hInv r hVal) ?_
+      intro e' he' hPos'
+      exact absurd hPos' (hNoUse e' he')
+
+/-- Walk of the production hypertree layers of an accepted forgery from layer `i` upward: the
+    message signed at layer `i` is one the log signed at that position, or a break occurs. -/
+theorem prod_hypertree_walk_break (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (log : List (List UInt8 × PqHashSig)) (msgStar : List UInt8)
+    (sigStar : PqHashSig)
+    (hw : params.w = 4 ∨ params.w = 16) (hPwf : params.productionWellFormed = true)
+    (hLog : ∀ e ∈ log, ProdLogEntryOk suite params sk e)
+    (hCons : ProdLogConsistent suite params sk log) :
+    ∀ (sigs : List LayerXmssSig) (i : Nat) (cur : List UInt8),
+      sigs ≠ [] →
+      (∀ j, sigs.getD j ⟨0, [], []⟩ = sigStar.layerSigs.getD (i + j) ⟨0, [], []⟩) →
+      i + sigs.length = params.numLayers →
+      verifyProductionHypertreeLayers suite params sk.pkSeed (derivePublicKey suite params sk).pkRoot
+        sigStar.rRand i (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight)) cur sigs =
+        some (computeXmssSubtreeRoot suite params sk (UInt32.ofNat (params.numLayers - 1))
+          (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (params.numLayers * params.subtreeHeight)))) →
+      (∃ e, e ∈ log ∧
+        e.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) =
+          sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) ∧
+        cur = prodHonestLayerMsg suite params sk e i) ∨
+      ProdSmTcrBreak suite params sk log ∨ ProdPreimageBreak suite params sk log msgStar sigStar
+  | [], _, _, hNe, _, _, _ => absurd rfl hNe
+  | lsig :: rest, i, cur, _, hAlign, hLenEq, hVer => by
+    have hi : i < params.numLayers := by
+      rw [← hLenEq, List.length_cons]
+      omega
+    have hStep : sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) / 2 ^ params.subtreeHeight =
+        sigStar.leafGlobalIdx / 2 ^ ((i + 1) * params.subtreeHeight) := by
+      have h := div_pow_mul_pow_mul sigStar.leafGlobalIdx i 1 params.subtreeHeight
+      rw [Nat.one_mul] at h
+      exact h
+    obtain ⟨_, hTsw, next, hWalk, hRest⟩ :=
+      verifyProductionHypertreeLayers_cons_inv suite params _ _ _ _ _ _ _ _ _ hVer
+    have hNext : next = computeXmssSubtreeRoot suite params sk (UInt32.ofNat i)
+        (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) / 2 ^ params.subtreeHeight)) ∨
+        ProdSmTcrBreak suite params sk log ∨ ProdPreimageBreak suite params sk log msgStar sigStar := by
+      cases rest with
+      | nil =>
+        rw [verifyProductionHypertreeLayers_nil] at hRest
+        simp only [Option.some.injEq] at hRest
+        have hD : params.numLayers = i + 1 := by
+          rw [← hLenEq, List.length_cons, List.length_nil]
+        rw [hD, Nat.add_sub_cancel] at hRest
+        rw [hStep]
+        exact .inl hRest
+      | cons r0 rs =>
+        rw [hStep] at hRest
+        rcases prod_hypertree_walk_break suite params sk log msgStar sigStar hw hPwf hLog hCons
+            (r0 :: rs) (i + 1) next (List.cons_ne_nil r0 rs)
+            (fun j => by
+              have h := hAlign (j + 1)
+              rw [List.getD_cons_succ] at h
+              rw [h, show i + (j + 1) = i + 1 + j by omega])
+            (by rw [← hLenEq, List.length_cons, List.length_cons, List.length_cons]; omega)
+            hRest with ⟨e, _, hPos, hEq⟩ | hB
+        · left
+          rw [hEq]
+          unfold prodHonestLayerMsg
+          simp only [Nat.add_one_ne_zero, ↓reduceIte, Nat.add_sub_cancel]
+          rw [hPos, hStep]
+        · exact .inr hB
+    rcases hNext with hNext | hB
+    · rcases list_search
+          (fun e : List UInt8 × PqHashSig =>
+            e.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) =
+              sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) ∧
+            cur = prodHonestLayerMsg suite params sk e i)
+          (fun e => Decidable.em _) log with ⟨e, he, hP⟩ | hNone
+      · exact .inl ⟨e, he, hP⟩
+      · right
+        rw [hNext] at hWalk
+        have hLs : lsig = sigStar.layerSigs.getD i ⟨0, [], []⟩ := by
+          have h := hAlign 0
+          rw [List.getD_cons_zero, Nat.add_zero] at h
+          exact h
+        exact prod_layer_divergence_break suite params sk log msgStar sigStar hw hPwf hLog hCons
+          i hi cur _ rfl _ rfl _ rfl lsig hLs _ rfl
+          (fun e he hPos hEq => hNone e he ⟨hPos, hEq⟩) hTsw hWalk
+    · exact .inr hB
+
+/-- Production FORS trees of an accepted forgery whose roots are the honest roots: every opened
+    secret hashes to the honest `(j, u)` leaf hash, or a Merkle input collides with an honest one. -/
+theorem prod_forsRoots_meet_honest (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (log : List (List UInt8 × PqHashSig))
+    (tree0 : UInt64) (kp0 : Nat) (idxs : List Nat) (ops : List ForsTreeOpening)
+    (hIdxs : ∀ J, J < params.forsTrees → idxs.getD J 0 < 2 ^ params.forsHeight) :
+    ∀ (rem j : Nat) (rootsF : List (List UInt8)),
+      j + rem ≤ params.forsTrees →
+      recoverProductionForsTreeRoots suite params sk.pkSeed tree0 kp0 idxs ops j rem = some rootsF →
+      rootsF = (List.range rem).map (fun off =>
+        computeMerkleNodeKp suite sk.pkSeed 0 tree0 .forsTree (UInt32.ofNat kp0)
+          (forsIndexedLeafFn suite sk tree0 kp0 (j + off)) params.forsHeight (j + off) 0) →
+      (∀ off, off < rem →
+        forsIndexedLeafHash suite sk.pkSeed tree0 kp0 (j + off) (idxs.getD (j + off) 0)
+          (ops.getD (j + off) ⟨[], []⟩).secretVal =
+        forsIndexedLeafFn suite sk tree0 kp0 (j + off) (idxs.getD (j + off) 0)) ∨
+      ProdSmTcrBreak suite params sk log
+  | 0, _, _, _, _, _ => .inl (fun off h => absurd h (Nat.not_lt_zero off))
+  | rem + 1, j, rootsF, hB, hRec, hEq => by
+    rw [recoverProductionForsTreeRoots_succ] at hRec
+    dsimp only at hRec
+    split at hRec
+    · cases hRec
+    · rename_i rJ hWalk
+      split at hRec
+      · cases hRec
+      · rename_i rsF hRest
+        simp only [Option.some.injEq] at hRec
+        subst hRec
+        rw [list_range_succ_shift_local] at hEq
+        simp only [Nat.add_zero, List.cons.injEq] at hEq
+        obtain ⟨hrJ, hrs⟩ := hEq
+        have hrs' : rsF = (List.range rem).map (fun off =>
+            computeMerkleNodeKp suite sk.pkSeed 0 tree0 .forsTree (UInt32.ofNat kp0)
+              (forsIndexedLeafFn suite sk tree0 kp0 (j + 1 + off)) params.forsHeight (j + 1 + off) 0) := by
+          rw [hrs]
+          apply List.map_congr_left
+          intro off _
+          rw [show j + (off + 1) = j + 1 + off by omega]
+        rw [hrJ] at hWalk
+        rcases walkMerkleKp_meets_honest suite sk.pkSeed 0 tree0 .forsTree (UInt32.ofNat kp0)
+            (forsIndexedLeafFn suite sk tree0 kp0 j) (ProdSmTcrBreak suite params sk log)
+            (fun h n b forged hNe hHash =>
+              ProdSmTcrBreak.mk _ forged (.forsNode tree0 kp0 j h n b) hNe hHash)
+            params.forsHeight j 0 (idxs.getD j 0) _ _ (hIdxs j (by omega)) hWalk with hLeaf | hB'
+        · rcases prod_forsRoots_meet_honest suite params sk log tree0 kp0 idxs ops hIdxs rem (j + 1)
+              rsF (by omega) hRest hrs' with hAll | hB''
+          · left
+            intro off hoff
+            cases off with
+            | zero =>
+              rw [Nat.zero_mul, Nat.zero_add] at hLeaf
+              rw [Nat.add_zero]
+              exact hLeaf
+            | succ off' =>
+              have h := hAll off' (by omega)
+              rw [show j + 1 + off' = j + (off' + 1) by omega] at h
+              exact h
+          · exact .inr hB''
+        · exact .inr hB'
+
+/-- FORS part of an accepted production forgery whose FORS public key is the honest one. -/
+theorem prod_fors_break (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (log : List (List UInt8 × PqHashSig)) (msgStar : List UInt8) (sigStar : PqHashSig)
+    (hTrees : 0 < params.forsTrees) (hFresh : ∀ e ∈ log, e.1 ≠ msgStar)
+    (idxs : List Nat)
+    (hIdxsEq : idxs = prodSigForsIdxs suite params (derivePublicKey suite params sk) msgStar sigStar)
+    (hLenI : idxs.length = params.forsTrees) (hBnd : ∀ idx ∈ idxs, idx < 2 ^ params.forsHeight)
+    (hRec : recoverProductionForsPk suite params sk.pkSeed
+        (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ params.subtreeHeight))
+        (sigStar.leafGlobalIdx % 2 ^ params.subtreeHeight) idxs sigStar.forsOpenings =
+      some (computeProductionForsPk suite params sk
+        (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ params.subtreeHeight))
+        (sigStar.leafGlobalIdx % 2 ^ params.subtreeHeight))) :
+    ProdForsItsrBreak suite params (derivePublicKey suite params sk) log msgStar sigStar ∨
+    ProdSmTcrBreak suite params sk log ∨ ProdPreimageBreak suite params sk log msgStar sigStar := by
+  rw [recoverProductionForsPk_eq] at hRec
+  split at hRec
+  · cases hRec
+  · split at hRec
+    · cases hRec
+    · rename_i rootsF hRoots
+      simp only [Option.some.injEq] at hRec
+      rw [computeProductionForsPk_eq] at hRec
+      dsimp only at hRec
+      rw [thTweakTl_eq, thTweakTl_eq] at hRec
+      rcases thCall_eq_cases suite hRec with ⟨_, _, _, hArgs⟩ | ⟨hNe, hHash⟩
+      · have hIdxs : ∀ J, J < params.forsTrees → idxs.getD J 0 < 2 ^ params.forsHeight := by
+          intro J hJ
+          have hJLen : J < idxs.length := by rw [hLenI]; exact hJ
+          rw [list_getD_eq_getElem _ 0 hJLen]
+          exact hBnd _ (List.getElem_mem hJLen)
+        rcases prod_forsRoots_meet_honest suite params sk log _ _ idxs _ hIdxs params.forsTrees 0
+            rootsF (by omega) hRoots
+            (by
+              rw [hArgs]
+              apply List.map_congr_left
+              intro off _
+              rw [Nat.zero_add]) with hAll | hB
+        · rcases bounded_search
+              (fun j => (sigStar.leafGlobalIdx, j, idxs.getD j 0) ∉
+                prodLogForsLeaves suite params (derivePublicKey suite params sk) log)
+              (fun j => Decidable.em _) params.forsTrees with ⟨j, hj, hUn⟩ | hCov
+          · right; right
+            have h := hAll j hj
+            rw [Nat.zero_add] at h
+            rw [hIdxsEq] at hUn h
+            exact ProdPreimageBreak.fors j hj hUn h
+          · left
+            refine ⟨hFresh, hTrees, ?_⟩
+            intro a ha
+            unfold prodSigForsLeaves at ha
+            obtain ⟨j, hj, hEq⟩ := List.mem_map.mp ha
+            rw [← hEq, ← hIdxsEq]
+            exact Decidable.of_not_not (hCov j (List.mem_range.mp hj))
+        · exact .inr (.inl hB)
+      · exact .inr (.inl (ProdSmTcrBreak.mk _ _ (.forsRoots _ _) hNe hHash))
+
+/-! ### Break extraction from the production signing log -/
+
+/-- **Stateless production profiles.** An accepted production signature on a message absent from
+    the production signing log yields an ITSR break on the `H_XOF` index derivation, a target
+    collision, or a preimage break, each stated against the same key, log and forgery. The radix
+    restriction covers every deployed preset (`w = 4` and `w = 16`). -/
+theorem production_stateless_forgery_break (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (queries : List ProdSigningQuery) (msgStar : List UInt8) (sigStar : PqHashSig)
+    (hw : params.w = 4 ∨ params.w = 16) (hStateless : params.statefulJorts = false)
+    (hFresh : ∀ e ∈ productionSigningLog suite params sk queries, e.1 ≠ msgStar)
+    (hAccept : verifyProductionPqHashSig suite params (derivePublicKey suite params sk) msgStar
+      sigStar = true) :
+    ProdForsItsrBreak suite params (derivePublicKey suite params sk)
+      (productionSigningLog suite params sk queries) msgStar sigStar ∨
+    ProdSmTcrBreak suite params sk (productionSigningLog suite params sk queries) ∨
+    ProdPreimageBreak suite params sk (productionSigningLog suite params sk queries) msgStar sigStar := by
+  have hLog := fun e he => productionSigningLog_entryOk suite params sk queries e he
+  have hCons := productionSigningLog_consistent suite params sk queries
+    (fun hSt => by rw [hStateless] at hSt; cases hSt)
+  obtain ⟨hPwf, hLen, _, idxs, forsPkF, hD, hFors, hHt⟩ :=
+    verifyProductionPqHashSig_stateless_inv suite params _ msgStar sigStar hStateless hAccept
+  obtain ⟨_, _, hLt, hILen, hIBnd⟩ := deriveProductionStatelessInputs_bounds _ _ _ _ _ _ _ _ hD
+  obtain ⟨hDPos, _⟩ := params.productionWellFormed_facts hPwf
+  have hTrees := (params.productionWellFormed_stateless_fors hPwf hStateless).1
+  have h0 : sigStar.leafGlobalIdx / 2 ^ (0 * params.subtreeHeight) = sigStar.leafGlobalIdx := by
+    simp only [Nat.zero_mul, Nat.pow_zero, Nat.div_one]
+  have hTop : (derivePublicKey suite params sk).pkRoot =
+      computeXmssSubtreeRoot suite params sk (UInt32.ofNat (params.numLayers - 1))
+        (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (params.numLayers * params.subtreeHeight))) := by
+    rw [Nat.div_eq_of_lt hLt]
+    rfl
+  have hNe : sigStar.layerSigs ≠ [] := by
+    intro hnil
+    rw [hnil, List.length_nil] at hLen
+    omega
+  rcases prod_hypertree_walk_break suite params sk _ msgStar sigStar hw hPwf hLog hCons
+      sigStar.layerSigs 0 forsPkF hNe (fun j => by rw [Nat.zero_add])
+      (by rw [Nat.zero_add]; exact hLen) (by rw [h0, ← hTop]; exact hHt) with ⟨e, _, hPos, hEq⟩ | hB
+  · have hL : e.2.leafGlobalIdx = sigStar.leafGlobalIdx := by
+      simpa only [Nat.zero_mul, Nat.pow_zero, Nat.div_one] using hPos
+    have hForsEq : forsPkF = computeProductionForsPk suite params sk
+        (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ params.subtreeHeight))
+        (sigStar.leafGlobalIdx % 2 ^ params.subtreeHeight) := by
+      rw [hEq]
+      unfold prodHonestLayerMsg
+      simp only [hStateless, ↓reduceIte, Bool.false_eq_true, hL]
+    rw [hForsEq] at hFors
+    exact prod_fors_break suite params sk _ msgStar sigStar hTrees hFresh idxs
+      (by unfold prodSigForsIdxs; rw [hD]) hILen hIBnd hFors
+  · exact .inr hB
+
+/-- **Stateful production profiles (`Jorts`).** Under the one-time-leaf discipline (an epoch is
+    requested by at most one query; identical retries are allowed), an accepted production signature
+    on a message absent from the log yields a target collision (including a collision on the message
+    pre-hash) or a WOTS+C preimage break. -/
+theorem production_stateful_forgery_break (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (queries : List ProdSigningQuery) (msgStar : List UInt8) (sigStar : PqHashSig)
+    (hw : params.w = 4 ∨ params.w = 16) (hStateful : params.statefulJorts = true)
+    (hOneTime : ∀ q, q ∈ queries → ∀ q', q' ∈ queries → q.epoch = q'.epoch → q = q')
+    (hFresh : ∀ e ∈ productionSigningLog suite params sk queries, e.1 ≠ msgStar)
+    (hAccept : verifyProductionPqHashSig suite params (derivePublicKey suite params sk) msgStar
+      sigStar = true) :
+    ProdSmTcrBreak suite params sk (productionSigningLog suite params sk queries) ∨
+    ProdPreimageBreak suite params sk (productionSigningLog suite params sk queries) msgStar sigStar := by
+  have hLog := fun e he => productionSigningLog_entryOk suite params sk queries e he
+  have hCons := productionSigningLog_consistent suite params sk queries (fun _ => hOneTime)
+  obtain ⟨hPwf, hLen, hLt, hHt⟩ :=
+    verifyProductionPqHashSig_stateful_inv suite params _ msgStar sigStar hStateful hAccept
+  obtain ⟨hDPos, _⟩ := params.productionWellFormed_facts hPwf
+  have h0 : sigStar.leafGlobalIdx / 2 ^ (0 * params.subtreeHeight) = sigStar.leafGlobalIdx := by
+    simp only [Nat.zero_mul, Nat.pow_zero, Nat.div_one]
+  have hTop : (derivePublicKey suite params sk).pkRoot =
+      computeXmssSubtreeRoot suite params sk (UInt32.ofNat (params.numLayers - 1))
+        (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (params.numLayers * params.subtreeHeight))) := by
+    rw [Nat.div_eq_of_lt hLt]
+    rfl
+  have hNe : sigStar.layerSigs ≠ [] := by
+    intro hnil
+    rw [hnil, List.length_nil] at hLen
+    omega
+  rcases prod_hypertree_walk_break suite params sk _ msgStar sigStar hw hPwf hLog hCons
+      sigStar.layerSigs 0 _ hNe (fun j => by rw [Nat.zero_add])
+      (by rw [Nat.zero_add]; exact hLen) (by rw [h0, ← hTop]; exact hHt) with ⟨e, he, _, hEq⟩ | hB
+  · left
+    have hMu : thPreHash suite sk.pkSeed (derivePublicKey suite params sk).pkRoot msgStar =
+        thPreHash suite sk.pkSeed (derivePublicKey suite params sk).pkRoot e.1 := by
+      have h := hEq
+      unfold prodHonestLayerMsg at h
+      simp only [hStateful, ↓reduceIte] at h
+      exact h
+    rw [thPreHash_eq, thPreHash_eq] at hMu
+    rcases thCall_eq_cases suite hMu with ⟨_, _, _, hArgs⟩ | ⟨hNe', hHash⟩
+    · simp only [List.cons.injEq, and_true] at hArgs
+      exact absurd hArgs.2.symm (hFresh e he)
+    · exact ProdSmTcrBreak.mk _ _ (.preHash e he) hNe' hHash
+  · exact hB
+
+/-- **Break extraction for `verifyProductionPqHashSig`, both modes.** -/
+theorem production_forgery_break_of_signingLog (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (queries : List ProdSigningQuery) (msgStar : List UInt8) (sigStar : PqHashSig)
+    (hw : params.w = 4 ∨ params.w = 16)
+    (hOneTime : params.statefulJorts = true →
+      ∀ q, q ∈ queries → ∀ q', q' ∈ queries → q.epoch = q'.epoch → q = q')
+    (hFresh : ∀ e ∈ productionSigningLog suite params sk queries, e.1 ≠ msgStar)
+    (hAccept : verifyProductionPqHashSig suite params (derivePublicKey suite params sk) msgStar
+      sigStar = true) :
+    ProdForsItsrBreak suite params (derivePublicKey suite params sk)
+      (productionSigningLog suite params sk queries) msgStar sigStar ∨
+    ProdSmTcrBreak suite params sk (productionSigningLog suite params sk queries) ∨
+    ProdPreimageBreak suite params sk (productionSigningLog suite params sk queries) msgStar sigStar := by
+  cases hSt : params.statefulJorts
+  · exact production_stateless_forgery_break suite params sk queries msgStar sigStar hw hSt hFresh
+      hAccept
+  · exact .inr (production_stateful_forgery_break suite params sk queries msgStar sigStar hw hSt
+      (hOneTime hSt) hFresh hAccept)
+
+/-- **Production checked stateless boundary.** `verifyProductionStatelessChecked` is the production
+    counterpart of the compatibility shim `verifyStatelessChecked`: it accepts only stateless
+    profiles and runs the production verifier, which itself recomputes the `H_XOF` leaf and feeds
+    the derived FORS indices to the FORS recovery. -/
+theorem production_checked_stateless_euf_cma_break (suite : TweakableHashSuite)
+    (params : PqHashParams) (sk : PqSecretKey) (queries : List ProdSigningQuery)
+    (msgStar : List UInt8) (sigStar : PqHashSig) (hw : params.w = 4 ∨ params.w = 16)
+    (hFresh : ∀ e ∈ productionSigningLog suite params sk queries, e.1 ≠ msgStar)
+    (hAccept : verifyProductionStatelessChecked suite params (derivePublicKey suite params sk)
+      msgStar sigStar = true) :
+    ProdForsItsrBreak suite params (derivePublicKey suite params sk)
+      (productionSigningLog suite params sk queries) msgStar sigStar ∨
+    ProdSmTcrBreak suite params sk (productionSigningLog suite params sk queries) ∨
+    ProdPreimageBreak suite params sk (productionSigningLog suite params sk queries) msgStar sigStar := by
+  obtain ⟨hSt, hVer⟩ := verifyProductionStatelessChecked_sound suite params _ msgStar sigStar hAccept
+  exact production_stateless_forgery_break suite params sk queries msgStar sigStar hw hSt hFresh hVer
+
+/-- **`ValidProductionJortsBatch` soundness.** Every item of an accepted production batch whose
+    validator key is honest and whose message that validator never signed carries a target collision
+    or a WOTS+C preimage break against that validator's key and log. -/
+theorem validProductionJortsBatch_item_forgery_break (params : PqHashParams)
+    (items : List JortsBatchItem) (hValid : ValidProductionJortsBatch params items = true)
+    (item : JortsBatchItem) (hItem : item ∈ items)
+    (sk : PqSecretKey) (queries : List ProdSigningQuery)
+    (hPk : item.validatorPk = derivePublicKey poseidon2Suite params sk)
+    (hw : params.w = 4 ∨ params.w = 16)
+    (hOneTime : ∀ q, q ∈ queries → ∀ q', q' ∈ queries → q.epoch = q'.epoch → q = q')
+    (hFresh : ∀ e ∈ productionSigningLog poseidon2Suite params sk queries, e.1 ≠ item.message) :
+    ProdSmTcrBreak poseidon2Suite params sk (productionSigningLog poseidon2Suite params sk queries) ∨
+    ProdPreimageBreak poseidon2Suite params sk (productionSigningLog poseidon2Suite params sk queries)
+      item.message item.signature := by
+  obtain ⟨hSt, _, _, hAll⟩ := validProductionJortsBatch_sound hValid
+  have hAcc := hAll item hItem
+  rw [hPk] at hAcc
+  exact production_stateful_forgery_break poseidon2Suite params sk queries item.message
+    item.signature hw hSt hOneTime hFresh hAcc
+
+/-- Outcome of one production EUF-CMA experiment. -/
+structure ProdEufCmaOutcome where
+  sk : PqSecretKey
+  queries : List ProdSigningQuery
+  msgStar : List UInt8
+  sigStar : PqHashSig
+
+/-- Production EUF-CMA winning condition. -/
+def prodEufCmaWin (suite : TweakableHashSuite) (params : PqHashParams) (o : ProdEufCmaOutcome) :
+    Bool :=
+  verifyProductionPqHashSig suite params (derivePublicKey suite params o.sk) o.msgStar o.sigStar &&
+  decide (o.msgStar ∉ (productionSigningLog suite params o.sk o.queries).map Prod.fst)
+
+/-- Replaying a logged message is not a win. -/
+theorem prodEufCmaWin_rejects_signed_message (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProdEufCmaOutcome) (sig : PqHashSig)
+    (hSigned : (o.msgStar, sig) ∈ productionSigningLog suite params o.sk o.queries) :
+    prodEufCmaWin suite params o = false := by
+  have hMem : o.msgStar ∈ (productionSigningLog suite params o.sk o.queries).map Prod.fst :=
+    List.mem_map.mpr ⟨(o.msgStar, sig), hSigned, rfl⟩
+  unfold prodEufCmaWin
+  rw [decide_eq_false (fun hn => hn hMem), Bool.and_false]
+
+/-- **Production EUF-CMA union bound over explicit outcome counts**, in the format of
+    `hypertree_euf_cma_advantage_bound`: the number of winning coins is at most the sum of the ITSR,
+    target-collision and preimage event counts. In a stateful profile the experiment must respect
+    the one-time-leaf discipline on every coin. The supplied Boolean events cover structural
+    witnesses; this theorem does not itself construct resource-bounded primitive-game
+    adversaries or establish probabilities for those events. The unrestricted `ProdSmTcrBreak`
+    predicate in particular must not be identified with such an adversary's output event. -/
+theorem production_euf_cma_advantage_bound {Ω : Type} (suite : TweakableHashSuite)
+    (params : PqHashParams) (hw : params.w = 4 ∨ params.w = 16)
+    (coins : List Ω) (game : Ω → ProdEufCmaOutcome) (isItsr isTcr isPre : Ω → Bool)
+    (hOneTime : params.statefulJorts = true → ∀ ω, ∀ q, q ∈ (game ω).queries →
+      ∀ q', q' ∈ (game ω).queries → q.epoch = q'.epoch → q = q')
+    (hItsr : ∀ ω, ProdForsItsrBreak suite params (derivePublicKey suite params (game ω).sk)
+      (productionSigningLog suite params (game ω).sk (game ω).queries) (game ω).msgStar
+      (game ω).sigStar → isItsr ω = true)
+    (hTcr : ∀ ω, ProdSmTcrBreak suite params (game ω).sk
+      (productionSigningLog suite params (game ω).sk (game ω).queries) → isTcr ω = true)
+    (hPre : ∀ ω, ProdPreimageBreak suite params (game ω).sk
+      (productionSigningLog suite params (game ω).sk (game ω).queries) (game ω).msgStar
+      (game ω).sigStar → isPre ω = true) :
+    hitCount (fun ω => prodEufCmaWin suite params (game ω)) coins ≤
+      hitCount isItsr coins + hitCount isTcr coins + hitCount isPre coins := by
+  apply hitCount_union_bound
+  intro ω hWin
+  unfold prodEufCmaWin at hWin
+  rw [Bool.and_eq_true] at hWin
+  obtain ⟨hVer, hNotIn⟩ := hWin
+  have hFresh : ∀ e ∈ productionSigningLog suite params (game ω).sk (game ω).queries,
+      e.1 ≠ (game ω).msgStar := by
+    intro e he hEq
+    exact of_decide_eq_true hNotIn (List.mem_map.mpr ⟨e, he, hEq⟩)
+  rcases production_forgery_break_of_signingLog suite params (game ω).sk (game ω).queries
+      (game ω).msgStar (game ω).sigStar hw (fun hSt => hOneTime hSt ω) hFresh hVer with h1 | h2 | h3
+  · exact .inl (hItsr ω h1)
+  · exact .inr (.inl (hTcr ω h2))
+  · exact .inr (.inr (hPre ω h3))
+
+/-! ### Satisfiability and mutation witnesses for the production reduction -/
+
+/-- One stateful layer of height one, `w = 4`, `ℓ₁ = 128`; accepted by `productionWellFormed`. -/
+def prodToyStatefulParams : PqHashParams := ⟨4, 128, 1, 1, 0, 0, 1, true⟩
+
+def prodToyForgery : PqHashSig :=
+  { rRand := [], msgTswCtr := 0, leafGlobalIdx := 0, forsOpenings := [],
+    layerSigs := [⟨0, List.replicate 128 [], [[]]⟩] }
+
+theorem prodToyForgery_accepted :
+    verifyProductionPqHashSig crumbToySuite prodToyStatefulParams
+      (derivePublicKey crumbToySuite prodToyStatefulParams ⟨[], [], []⟩) [] prodToyForgery = true := by
+  decide +kernel
+
+/-- The premises of `production_stateful_forgery_break` hold jointly on a concrete instance: the
+    constant suite accepts a well-shaped production signature with nothing signed. -/
+theorem witness_production_stateful_forgery :
+    ∃ sigStar : PqHashSig,
+      (prodToyStatefulParams.w = 4 ∨ prodToyStatefulParams.w = 16) ∧
+      prodToyStatefulParams.statefulJorts = true ∧
+      (∀ q, q ∈ ([] : List ProdSigningQuery) → ∀ q', q' ∈ ([] : List ProdSigningQuery) →
+        q.epoch = q'.epoch → q = q') ∧
+      (∀ e ∈ productionSigningLog crumbToySuite prodToyStatefulParams ⟨[], [], []⟩ [],
+        e.1 ≠ ([] : List UInt8)) ∧
+      verifyProductionPqHashSig crumbToySuite prodToyStatefulParams
+        (derivePublicKey crumbToySuite prodToyStatefulParams ⟨[], [], []⟩) [] sigStar = true :=
+  ⟨prodToyForgery, .inl rfl, rfl, (fun _ h => by cases h), (fun _ h => by cases h),
+    prodToyForgery_accepted⟩
+
+/-- On that instance the reduction returns a break of the constant hash. -/
+theorem production_forgery_break_inhabited :
+    ProdSmTcrBreak crumbToySuite prodToyStatefulParams ⟨[], [], []⟩ [] ∨
+    ProdPreimageBreak crumbToySuite prodToyStatefulParams ⟨[], [], []⟩ [] [] prodToyForgery :=
+  production_stateful_forgery_break crumbToySuite prodToyStatefulParams ⟨[], [], []⟩ [] []
+    prodToyForgery (.inl rfl) rfl (fun _ h => by cases h) (fun _ h => by cases h)
+    prodToyForgery_accepted
+
+end Qsag
+end
+
+#tooth_pair Qsag.stateful_jorts_crash_retry_idempotent vs Qsag.tooth_occupied_latch_rejects_equivocation
+#verify_inhabited Qsag.epochLatchSign_preserves_wellFormed Qsag.witness_occupied_epoch_latch_step
+#tooth_pair Qsag.production_forgery_break_of_signingLog vs Qsag.prodForsItsrBreak_empty_log
+#tooth_pair Qsag.production_euf_cma_advantage_bound vs Qsag.prodEufCmaWin_rejects_signed_message
+#verify_inhabited Qsag.production_stateful_forgery_break Qsag.witness_production_stateful_forgery

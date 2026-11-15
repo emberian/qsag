@@ -1,13 +1,13 @@
 module
-public import Qsag.ProdCollisionLayers
-import all Qsag.ProdCollisionLayers
-import all Qsag.ProdCollisionWitness
-import all Qsag.HypertreeEufCma
-import all Qsag.HashSigs
+public import Qsag.Protocol.Signing.ProdCollisionLayers
+import all Qsag.Protocol.Signing.ProdCollisionLayers
+import all Qsag.Protocol.Signing.ProdCollisionWitness
+import all Qsag.Protocol.Signing.HypertreeEufCma
+import all Qsag.Protocol.Signing.HashSigs
 import Qsag.Tactic.AssuranceKit
 
 /-!
-# Qsag.ProdCollisionExtraction — the production forgery reduction as a function
+# Qsag.Protocol.Signing.ProdCollisionExtraction — the production forgery reduction as a function
 
 `production_forgery_extract` maps an accepted production signature on an unsigned message to a
 `ProdBreakWitness`: the FORS index-coverage event, a returned `ProdTcrWitness`, or the preimage
