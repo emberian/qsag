@@ -48,8 +48,8 @@ use qsag_accel::keccak::{Shake256, cshake256_framed_32, finalize_cshake256, init
 
 const Q64: u64 = MLDSA_Q as u64;
 
-/// Largest supported session size.
-pub const MAX_MPC_PARTIES: usize = 5;
+/// Maximum distinct u16 custodian identities; holder sets have no machine-word cap.
+pub const MAX_MPC_PARTIES: usize = u16::MAX as usize + 1;
 /// Degree of the verification extension field `F_q[X] / (X^6 - 7)`.
 pub const EXT_DEGREE: usize = 6;
 /// `7` is neither a square nor a cube modulo `q`, and `6 | q - 1`, so
@@ -150,19 +150,39 @@ pub struct MpcStats {
 pub struct Structure {
     pub parties: usize,
     pub threshold: usize,
-    /// Holder bitmasks, ascending; each has `parties - threshold + 1` bits.
-    pub subsets: Vec<u32>,
+    /// Sorted holder-index lists, in colexicographic order (the legacy numeric mask
+    /// order). Each has `parties - threshold + 1` members. Storage is necessarily
+    /// combinatorial for RSS; this removes the unrelated five-party/32-bit ceilings.
+    pub subsets: Vec<Vec<usize>>,
 }
 
 impl Structure {
     pub fn new(parties: usize, threshold: usize) -> Result<Self, MpcError> {
-        if threshold < 2 || parties > MAX_MPC_PARTIES || parties < 2 * threshold - 1 {
+        if threshold < 2 || parties > MAX_MPC_PARTIES || threshold > parties
+            || threshold > parties.div_ceil(2) {
             return Err(MpcError::UnsupportedStructure { parties, threshold });
         }
-        let size = (parties - threshold + 1) as u32;
-        let subsets = (1u32..(1u32 << parties))
-            .filter(|mask| mask.count_ones() == size)
-            .collect();
+        let size = parties - threshold + 1;
+        // Subset IDs are u32 in the PRSS transcript. Check this representational
+        // bound before allocating or narrowing, instead of scanning all 2^n masks.
+        let mut count = 1usize;
+        for i in 1..threshold {
+            count = count.checked_mul(parties + 1 - i)
+                .ok_or(MpcError::UnsupportedStructure { parties, threshold })? / i;
+            if count > u32::MAX as usize {
+                return Err(MpcError::UnsupportedStructure { parties, threshold });
+            }
+        }
+        let mut subsets = Vec::new();
+        subsets.try_reserve_exact(count)
+            .map_err(|_| MpcError::UnsupportedStructure { parties, threshold })?;
+        let mut next: Vec<usize> = (0..size).collect();
+        loop {
+            subsets.push(next.clone());
+            let Some(i) = (0..size).find(|&i| next[i] + 1 < next.get(i + 1).copied().unwrap_or(parties)) else { break; };
+            next[i] += 1;
+            for (j, entry) in next[..i].iter_mut().enumerate() { *entry = j; }
+        }
         Ok(Self {
             parties,
             threshold,
@@ -171,11 +191,11 @@ impl Structure {
     }
 
     pub fn holds(&self, subset: usize, party: usize) -> bool {
-        (self.subsets[subset] >> party) & 1 == 1
+        self.subsets[subset].binary_search(&party).is_ok()
     }
 
     fn lowest_holder(&self, subset: usize) -> usize {
-        self.subsets[subset].trailing_zeros() as usize
+        self.subsets[subset][0]
     }
 
     /// Subsets containing `party`, ascending.
@@ -879,8 +899,8 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
             .map(|&sa| {
                 (0..comps.len())
                     .filter(|&j| {
-                        let both = st.subsets[sa] & st.subsets[comps[j]];
-                        both.trailing_zeros() as usize == me
+                        st.subsets[sa].iter().copied()
+                            .find(|&p| st.holds(comps[j], p)) == Some(me)
                     })
                     .collect()
             })
