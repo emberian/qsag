@@ -1810,3 +1810,1790 @@ theorem encodePolyRqLe_length : ∀ {N : Nat} (p : PolyRq N), (encodePolyRqLe p)
       encodePolyRqLe_length (fun i => p ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)]
     omega
 
+theorem encodePolyRqLe_injective : ∀ {N : Nat} {p q : PolyRq N},
+    encodePolyRqLe p = encodePolyRqLe q → p = q
+  | 0, p, q, _ => funext fun i => Fin.elim0 i
+  | n + 1, p, q, hEq => by
+    simp only [encodePolyRqLe] at hEq
+    obtain ⟨hHead, hTail⟩ := List.append_inj hEq (by simp [encodeNatLeBytes_length])
+    have hp0Lt : (p ⟨0, Nat.zero_lt_succ n⟩).val < 256 ^ 2 := by
+      have := (p ⟨0, Nat.zero_lt_succ n⟩).isLt; omega
+    have hq0Lt : (q ⟨0, Nat.zero_lt_succ n⟩).val < 256 ^ 2 := by
+      have := (q ⟨0, Nat.zero_lt_succ n⟩).isLt; omega
+    have hDec := congrArg decodeNatLeBytes hHead
+    rw [decodeNatLeBytes_encodeNatLeBytes 2 _ hp0Lt,
+        decodeNatLeBytes_encodeNatLeBytes 2 _ hq0Lt] at hDec
+    have h0Eq : p ⟨0, Nat.zero_lt_succ n⟩ = q ⟨0, Nat.zero_lt_succ n⟩ := Zq12289.ext hDec
+    have hRestEq := encodePolyRqLe_injective hTail
+    funext ⟨k, hk⟩
+    cases k with
+    | zero => exact h0Eq
+    | succ k' => exact congrFun hRestEq ⟨k', Nat.lt_of_succ_lt_succ hk⟩
+
+/-- Little-endian serializer for an `R`-tuple of commitment pairs `(w0, w1)` (`4096 * R` bytes). -/
+def encodeJointOrCommsLe : {R : Nat} → (Fin R → (PolyRq1024 × PolyRq1024)) → List UInt8
+  | 0, _ => []
+  | r + 1, comms =>
+    let c0 := comms ⟨0, Nat.zero_lt_succ r⟩
+    encodePolyRqLe c0.1 ++ encodePolyRqLe c0.2 ++
+    encodeJointOrCommsLe (fun i => comms ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+
+theorem encodeJointOrCommsLe_injective : ∀ {R : Nat} {c1 c2 : Fin R → (PolyRq1024 × PolyRq1024)},
+    encodeJointOrCommsLe c1 = encodeJointOrCommsLe c2 → c1 = c2
+  | 0, c1, c2, _ => funext fun i => Fin.elim0 i
+  | r + 1, c1, c2, hEq => by
+    simp only [encodeJointOrCommsLe, List.append_assoc] at hEq
+    obtain ⟨hA, hRest1⟩ := List.append_inj hEq (by simp [encodePolyRqLe_length])
+    obtain ⟨hB, hTail⟩ := List.append_inj hRest1 (by simp [encodePolyRqLe_length])
+    have hHead : c1 ⟨0, Nat.zero_lt_succ r⟩ = c2 ⟨0, Nat.zero_lt_succ r⟩ :=
+      Prod.ext (encodePolyRqLe_injective hA) (encodePolyRqLe_injective hB)
+    have hTailEq := encodeJointOrCommsLe_injective hTail
+    funext ⟨k, hk⟩
+    cases k with
+    | zero => exact hHead
+    | succ k' => exact congrFun hTailEq ⟨k', Nat.lt_of_succ_lt_succ hk⟩
+
+/-- Exact Fiat-Shamir byte preimage absorbed into `cSHAKE256("QSAG.OT.RLWE.ZKPOK/v3")` in
+    `hash_rlwe_zkpok_joint_challenges` (`preprocessing.rs:1160-1171`), including explicit 4-byte
+    big-endian challenge-bit-width framing `be 4 rlweZkpokChalBits` (`11`). -/
+def encodeRlweZkpokFsInput (R : Nat)
+    (crsCoin sessionId : List UInt8)
+    (senderId receiverId otIdx : Nat)
+    (pk0 tCrs : PolyRq1024)
+    (comms : Fin R → (PolyRq1024 × PolyRq1024)) : List UInt8 :=
+  crsCoin ++
+  sessionId ++
+  be 8 senderId ++
+  be 8 receiverId ++
+  be 4 otIdx ++
+  be 4 R ++
+  be 4 rlweZkpokChalBits ++
+  encodePolyRqLe pk0 ++
+  encodePolyRqLe tCrs ++
+  encodeJointOrCommsLe comms
+
+/-- **Fiat-Shamir Tuple Framing Injectivity (`encodeRlweZkpokFsInput_injective`, `H1`)**:
+    On fixed-width context fields (`|crsCoin| = |sessionId| = 32`, `senderId, receiverId < 2^64`,
+    `otIdx < 2^32`), `encodeRlweZkpokFsInput` is injective in all 8 absorbed statement and
+    commitment components `(crsCoin, sessionId, senderId, receiverId, otIdx, pk0, tCrs, comms)`. -/
+theorem encodeRlweZkpokFsInput_injective {R : Nat}
+    {c1 c2 s1 s2 : List UInt8}
+    {snd1 snd2 rcv1 rcv2 ot1 ot2 : Nat}
+    {pk1 pk2 t1 t2 : PolyRq1024}
+    {comms1 comms2 : Fin R → (PolyRq1024 × PolyRq1024)}
+    (hc1 : c1.length = 32) (hc2 : c2.length = 32)
+    (hs1 : s1.length = 32) (hs2 : s2.length = 32)
+    (hsnd1 : snd1 < 2 ^ 64) (hsnd2 : snd2 < 2 ^ 64)
+    (hrcv1 : rcv1 < 2 ^ 64) (hrcv2 : rcv2 < 2 ^ 64)
+    (hot1 : ot1 < 2 ^ 32) (hot2 : ot2 < 2 ^ 32)
+    (hEq : encodeRlweZkpokFsInput R c1 s1 snd1 rcv1 ot1 pk1 t1 comms1 =
+           encodeRlweZkpokFsInput R c2 s2 snd2 rcv2 ot2 pk2 t2 comms2) :
+    c1 = c2 ∧ s1 = s2 ∧ snd1 = snd2 ∧ rcv1 = rcv2 ∧ ot1 = ot2 ∧
+    pk1 = pk2 ∧ t1 = t2 ∧ comms1 = comms2 := by
+  simp only [encodeRlweZkpokFsInput, List.append_assoc] at hEq
+  obtain ⟨hC, h1⟩ := List.append_inj hEq (by omega)
+  obtain ⟨hS, h2⟩ := List.append_inj h1 (by omega)
+  obtain ⟨hSnd, h3⟩ := List.append_inj h2 (by simp [length_be])
+  obtain ⟨hRcv, h4⟩ := List.append_inj h3 (by simp [length_be])
+  obtain ⟨hOt, h5⟩ := List.append_inj h4 (by simp [length_be])
+  obtain ⟨_, h6⟩ := List.append_inj h5 (by simp [length_be])
+  obtain ⟨_, h7⟩ := List.append_inj h6 (by simp [length_be])
+  obtain ⟨hPk, h8⟩ := List.append_inj h7 (by simp [encodePolyRqLe_length])
+  obtain ⟨hT, hComms⟩ := List.append_inj h8 (by simp [encodePolyRqLe_length])
+  exact ⟨hC, hS,
+    be_injective (by omega : snd1 < 256 ^ 8) (by omega : snd2 < 256 ^ 8) hSnd,
+    be_injective (by omega : rcv1 < 256 ^ 8) (by omega : rcv2 < 256 ^ 8) hRcv,
+    be_injective (by omega : ot1 < 256 ^ 4) (by omega : ot2 < 256 ^ 4) hOt,
+    encodePolyRqLe_injective hPk,
+    encodePolyRqLe_injective hT,
+    encodeJointOrCommsLe_injective hComms⟩
+
+/-- Squeeze `R` consecutive 11-bit signed-monomial challenges (`u32::from_le_bytes(out) & 0x7FF`,
+    `preprocessing.rs:1172-1176`) from a squeezed XOF byte stream. -/
+def decodeChal11Stream : (R : Nat) → List UInt8 → (Fin R → BitVec 11)
+  | 0, _, i => Fin.elim0 i
+  | _ + 1, bs, ⟨0, _⟩ =>
+    BitVec.ofNat 11 (decodeNatLeBytes (bs.take 4) % (2 ^ 11))
+  | r + 1, bs, ⟨k + 1, hk⟩ =>
+    decodeChal11Stream r (bs.drop 4) ⟨k, Nat.lt_of_succ_lt_succ hk⟩
+
+/-- Parametric `R`-repetition Fiat-Shamir 11-bit signed-monomial challenge derivation parameterized
+    by XOF oracle `ro` (used for Forking-Lemma rewinding in `jointOrSigma_extract_witness`). -/
+def hashRlweZkpokJointChallengesWithRo (R : Nat) (ro : List UInt8 → List UInt8)
+    (crsCoin sessionId : List UInt8)
+    (senderId receiverId otIdx : Nat)
+    (pk0 tCrs : PolyRq1024)
+    (comms : Fin R → (PolyRq1024 × PolyRq1024)) : Fin R → BitVec 11 :=
+  decodeChal11Stream R
+    (ro (encodeRlweZkpokFsInput R crsCoin sessionId senderId receiverId otIdx pk0 tCrs comms))
+
+/-- Production `cSHAKE256("QSAG.OT.RLWE.ZKPOK/v3")` Fiat-Shamir challenge derivation (`preprocessing.rs:1155-1177`). -/
+def hashRlweZkpokJointChallengesGen (R : Nat)
+    (crsCoin sessionId : List UInt8)
+    (senderId receiverId otIdx : Nat)
+    (pk0 tCrs : PolyRq1024)
+    (comms : Fin R → (PolyRq1024 × PolyRq1024)) : Fin R → BitVec 11 :=
+  hashRlweZkpokJointChallengesWithRo R (cshake256Xof (4 * R) rlweZkpokDomain)
+    crsCoin sessionId senderId receiverId otIdx pk0 tCrs comms
+
+/-- Production 13-repetition (`13 × 11 = 143`-bit classical / `2^71.5` Grover) Fiat-Shamir challenge derivation. -/
+abbrev hashRlweZkpokJointChallenges := hashRlweZkpokJointChallengesGen rlweZkpokReps
+
+/-- Alias for 13-repetition (`143`-bit classical) Fiat-Shamir challenge derivation. -/
+abbrev hashRlweZkpokJointChallengesPq13 := hashRlweZkpokJointChallengesGen rlweZkpokPqReps
+
+/-- 24-repetition (`24 × 11 = 264`-bit QROM / `2^132 ≥ 2^128` Grover) Fiat-Shamir challenge derivation. -/
+abbrev hashRlweZkpokJointChallengesPq24 := hashRlweZkpokJointChallengesGen rlweZkpokPq256Reps
+
+/-- Public statement for 1-out-of-2 Ring-LWE Base-OT OR-Sigma proof of short witness knowledge,
+    binding CRS/session coins, directed `(senderId, receiverId, otIdx)` context, CRS `(a, tCrs)`,
+    and Receiver first-message key `pk0` (`preprocessing.rs:1324-1334`). -/
+structure RlweOrStatement where
+  crsCoin : List UInt8
+  sessionId : List UInt8
+  senderId : Nat
+  receiverId : Nat
+  otIdx : Nat
+  a : PolyRq1024
+  tCrs : PolyRq1024
+  pk0 : PolyRq1024
+
+/-- Branch target $Y_0 = \mathsf{pk}_0$, $Y_1 = \mathsf{pk}_0 + t_{\mathsf{crs}}$. -/
+def RlweOrStatement.branchPk (stmt : RlweOrStatement) (b : Bool) : PolyRq1024 :=
+  if b then CommRingOps.add stmt.pk0 stmt.tCrs else stmt.pk0
+
+/-- Statement framing & non-degenerate CRS check (`|crsCoin| = |sessionId| = 32`, distinct bounded party IDs,
+    `a ≠ 0`, `tCrs ≠ 0`). -/
+def checkRlweOrStatementValid (stmt : RlweOrStatement) : Bool :=
+  decide (stmt.crsCoin.length = 32) &&
+  decide (stmt.sessionId.length = 32) &&
+  decide (stmt.senderId < 2 ^ 64) &&
+  decide (stmt.receiverId < 2 ^ 64) &&
+  decide (stmt.senderId ≠ stmt.receiverId) &&
+  decide (stmt.otIdx < 2 ^ 32) &&
+  !polyRqEq stmt.a CommRingOps.zero &&
+  !polyRqEq stmt.tCrs CommRingOps.zero
+
+/-- Parametric `R`-repetition OR-Sigma transcript over `PolyRq1024` with 11-bit single signed-monomial
+    challenges `chal0, chal1 : Fin R → BitVec 11` matching `RlweReceiverZkPok` (`preprocessing.rs:841-848`). -/
+structure JointOrSigmaTranscriptGen (R : Nat) where
+  comms : Fin R → (PolyRq1024 × PolyRq1024)
+  chal0 : Fin R → BitVec 11
+  chal1 : Fin R → BitVec 11
+  zs0 : Fin R → PolyInt 1024
+  ze0 : Fin R → PolyInt 1024
+  zs1 : Fin R → PolyInt 1024
+  ze1 : Fin R → PolyInt 1024
+
+/-- Production 13-repetition (`143`-bit classical) OR-Sigma transcript. -/
+abbrev JointOrSigmaTranscript := JointOrSigmaTranscriptGen rlweZkpokReps
+
+/-- Alias for 13-repetition (`143`-bit classical) OR-Sigma transcript. -/
+abbrev JointOrSigmaTranscriptPq13 := JointOrSigmaTranscriptGen rlweZkpokPqReps
+
+/-- 24-repetition (`264`-bit QROM / `≥ 2^132` Grover) OR-Sigma transcript. -/
+abbrev JointOrSigmaTranscriptPq24 := JointOrSigmaTranscriptGen rlweZkpokPq256Reps
+
+/-- Recompute commitments `(w0, w1)` from responses and 11-bit signed-monomial challenges (`preprocessing.rs:1359-1367`):
+    `w0 = a * zs0 + ze0 - d(chal0) * pk0`, `w1 = a * zs1 + ze1 - d(chal1) * (pk0 + tCrs)`. -/
+def recomputeJointOrRepComm {R : Nat} (stmt : RlweOrStatement)
+    (tr : JointOrSigmaTranscriptGen R) (j : Fin R) : PolyRq1024 × PolyRq1024 :=
+  let y0 := stmt.pk0
+  let y1 := CommRingOps.add stmt.pk0 stmt.tCrs
+  let w0 := CommRingOps.sub
+    (CommRingOps.add (CommRingOps.mul stmt.a (polyIntToRq (tr.zs0 j))) (polyIntToRq (tr.ze0 j)))
+    (CommRingOps.mul (polyRqFromChal11 (tr.chal0 j)) y0)
+  let w1 := CommRingOps.sub
+    (CommRingOps.add (CommRingOps.mul stmt.a (polyIntToRq (tr.zs1 j))) (polyIntToRq (tr.ze1 j)))
+    (CommRingOps.mul (polyRqFromChal11 (tr.chal1 j)) y1)
+  (w0, w1)
+
+/-- Recompute all `R` commitment pairs from `(stmt, tr)`. -/
+def recomputeJointOrComms {R : Nat} (stmt : RlweOrStatement)
+    (tr : JointOrSigmaTranscriptGen R) : Fin R → (PolyRq1024 × PolyRq1024) :=
+  fun j => recomputeJointOrRepComm stmt tr j
+
+/-- Single-repetition response-box (`-3070 ≤ z_i < 3070`), commitment-equality, and
+    11-bit XOR challenge check; exactly the per-repetition checks of `RlweReceiverZkPok::verify` (`preprocessing.rs:1342-1374`). -/
+def verifyJointOrRepGen {R : Nat} (stmt : RlweOrStatement) (j : Fin R) (expectedChal : BitVec 11)
+    (tr : JointOrSigmaTranscriptGen R) : Bool :=
+  let boundsOk :=
+    polyIntInZkpokBox (tr.zs0 j) &&
+    polyIntInZkpokBox (tr.ze0 j) &&
+    polyIntInZkpokBox (tr.zs1 j) &&
+    polyIntInZkpokBox (tr.ze1 j)
+  let (w0Exp, w1Exp) := recomputeJointOrRepComm stmt tr j
+  let commMatch := polyRqEq w0Exp (tr.comms j).1 && polyRqEq w1Exp (tr.comms j).2
+  let chalOk := decide ((tr.chal0 j ^^^ tr.chal1 j) = expectedChal)
+  boundsOk && commMatch && chalOk
+
+/-- Parametric `R`-repetition OR-Sigma verifier under XOF oracle `ro`. -/
+def verifyJointOrSigmaWithRoGen (R : Nat) (ro : List UInt8 → List UInt8)
+    (stmt : RlweOrStatement) (tr : JointOrSigmaTranscriptGen R) : Bool :=
+  checkRlweOrStatementValid stmt &&
+  let wRecomp := recomputeJointOrComms stmt tr
+  let expected := hashRlweZkpokJointChallengesWithRo R ro
+    stmt.crsCoin stmt.sessionId stmt.senderId stmt.receiverId stmt.otIdx stmt.pk0 stmt.tCrs wRecomp
+  allFin R (fun j => verifyJointOrRepGen stmt j (expected j) tr)
+
+/-- Production 13-repetition (`143`-bit classical) Fiat-Shamir OR-Sigma verifier binding
+    statement & recomputed commitments via `cSHAKE256("QSAG.OT.RLWE.ZKPOK/v3")` (`preprocessing.rs:1324-1375`). -/
+@[expose] def verifyJointOrSigma (stmt : RlweOrStatement) (tr : JointOrSigmaTranscript) : Bool :=
+  verifyJointOrSigmaWithRoGen rlweZkpokReps (cshake256Xof (4 * rlweZkpokReps) rlweZkpokDomain) stmt tr
+
+/-- Alias for the 13-repetition (`143`-bit classical) Fiat-Shamir OR-Sigma verifier. -/
+def verifyJointOrSigmaPq13 (stmt : RlweOrStatement) (tr : JointOrSigmaTranscriptPq13) : Bool :=
+  verifyJointOrSigmaWithRoGen rlweZkpokPqReps (cshake256Xof (4 * rlweZkpokPqReps) rlweZkpokDomain) stmt tr
+
+/-- 24-repetition (`264`-bit QROM / `≥ 2^132` Grover) Fiat-Shamir OR-Sigma verifier. -/
+def verifyJointOrSigmaPq24 (stmt : RlweOrStatement) (tr : JointOrSigmaTranscriptPq24) : Bool :=
+  verifyJointOrSigmaWithRoGen rlweZkpokPq256Reps (cshake256Xof (4 * rlweZkpokPq256Reps) rlweZkpokDomain) stmt tr
+
+/-- Constructively locate the first index `j ∈ Fin R` where two distinct challenge vectors differ
+    (`0 Classical.choice`, supporting all `R`). -/
+def findDiffFin : (R : Nat) → {α : Type} → [DecidableEq α] →
+    (ch ch' : Fin R → α) → ch ≠ ch' → { j : Fin R // ch j ≠ ch' j }
+  | 0, _, _, _, _, hNe =>
+    False.elim <| hNe <| funext fun i => Fin.elim0 i
+  | r + 1, _, _, ch, ch', hNe =>
+    if h0 : ch ⟨0, Nat.zero_lt_succ r⟩ = ch' ⟨0, Nat.zero_lt_succ r⟩ then
+      have hTailNe : (fun i : Fin r => ch ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩) ≠
+          (fun i : Fin r => ch' ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩) := by
+        intro hTailEq
+        apply hNe
+        funext ⟨k, hk⟩
+        cases k with
+        | zero => exact h0
+        | succ k' => exact congrFun hTailEq ⟨k', Nat.lt_of_succ_lt_succ hk⟩
+      let ⟨jTail, hjTail⟩ := findDiffFin r
+        (fun i => ch ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+        (fun i => ch' ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+        hTailNe
+      ⟨⟨jTail.1 + 1, Nat.succ_lt_succ jTail.2⟩, hjTail⟩
+    else
+      ⟨⟨0, Nat.zero_lt_succ r⟩, h0⟩
+
+private theorem rlweBranch_sub_extract_chal11 (a y w : PolyRq1024)
+    (u u' : BitVec 11)
+    (zs ze zs' ze' : PolyInt 1024)
+    (huNe : u ≠ u')
+    (hs : polyIntInfNorm zs ≤ rlweZkpokZBound) (he : polyIntInfNorm ze ≤ rlweZkpokZBound)
+    (hs' : polyIntInfNorm zs' ≤ rlweZkpokZBound) (he' : polyIntInfNorm ze' ≤ rlweZkpokZBound)
+    (h1 : CommRingOps.sub (CommRingOps.add (CommRingOps.mul a (polyIntToRq zs)) (polyIntToRq ze))
+        (CommRingOps.mul (polyRqFromChal11 u) y) = w)
+    (h2 : CommRingOps.sub (CommRingOps.add (CommRingOps.mul a (polyIntToRq zs')) (polyIntToRq ze'))
+        (CommRingOps.mul (polyRqFromChal11 u') y) = w) :
+    let deltaD : PolyInt 1024 := fun k => polyIntFromChal11 u k - polyIntFromChal11 u' k
+    let sWit : PolyInt 1024 := fun k => zs k - zs' k
+    let eWit : PolyInt 1024 := fun k => ze k - ze' k
+    polyIntToRq deltaD ≠ CommRingOps.zero ∧
+    polyIntInfNorm deltaD ≤ 2 ∧
+    polyIntL1Norm deltaD ≤ 2 ∧
+    polyIntInfNorm sWit ≤ 2 * rlweZkpokZBound ∧
+    polyIntInfNorm eWit ≤ 2 * rlweZkpokZBound ∧
+    CommRingOps.add (CommRingOps.mul a (polyIntToRq sWit)) (polyIntToRq eWit) =
+      CommRingOps.mul (polyIntToRq deltaD) y := by
+  intro deltaD sWit eWit
+  obtain ⟨hDeltaNz, hDeltaInf, hDeltaL1, _⟩ := chal11_diff_nonzero_short_and_invertible huNe
+  have hS : polyIntInfNorm sWit ≤ 2 * rlweZkpokZBound := by
+    dsimp only [sWit, rlweZkpokZBound] at *
+    have := polyIntInfNorm_sub_le zs zs'
+    omega
+  have hE : polyIntInfNorm eWit ≤ 2 * rlweZkpokZBound := by
+    dsimp only [eWit, rlweZkpokZBound] at *
+    have := polyIntInfNorm_sub_le ze ze'
+    omega
+  refine ⟨hDeltaNz, hDeltaInf, hDeltaL1, hS, hE, ?_⟩
+  have hEqW := h1.trans h2.symm
+  dsimp only [sWit, eWit, deltaD]
+  have hSubMul : CommRingOps.mul (polyIntToRq (fun k => polyIntFromChal11 u k - polyIntFromChal11 u' k)) y =
+      CommRingOps.sub (CommRingOps.mul (polyRqFromChal11 u) y) (CommRingOps.mul (polyRqFromChal11 u') y) := by
+    unfold polyRqFromChal11
+    rw [polyIntToRq_sub, LawfulCommRing.mul_comm _ y, LawfulCommRing.mul_sub,
+        LawfulCommRing.mul_comm y _, LawfulCommRing.mul_comm y _]
+  rw [polyIntToRq_sub, polyIntToRq_sub, LawfulCommRing.mul_sub, hSubMul]
+  funext k
+  have hk := congrFun hEqW k
+  let AZ := CommRingOps.mul a (polyIntToRq zs) k
+  let AZ' := CommRingOps.mul a (polyIntToRq zs') k
+  let E := polyIntToRq ze k
+  let E' := polyIntToRq ze' k
+  let DY := CommRingOps.mul (polyRqFromChal11 u) y k
+  let DY' := CommRingOps.mul (polyRqFromChal11 u') y k
+  change CommRingOps.sub (CommRingOps.add AZ E) DY = CommRingOps.sub (CommRingOps.add AZ' E') DY' at hk
+  show CommRingOps.add (CommRingOps.sub AZ AZ') (CommRingOps.sub E E') = CommRingOps.sub DY DY'
+  rw [← Zq12289.ofInt_natVal AZ, ← Zq12289.ofInt_natVal AZ',
+      ← Zq12289.ofInt_natVal E, ← Zq12289.ofInt_natVal E',
+      ← Zq12289.ofInt_natVal DY, ← Zq12289.ofInt_natVal DY'] at hk ⊢
+  simp only [← Zq12289.ofInt_add, ← Zq12289.ofInt_sub] at hk ⊢
+  have hkVal := congrArg Zq12289.val hk
+  simp only [Zq12289.ofInt] at hkVal ⊢
+  apply Zq12289.ext
+  dsimp only
+  omega
+
+/-- Transcript-bound relaxed short RLWE witness extracted from two forked OR-Sigma transcripts
+    (`0 Classical.choice`, `0` free fields, supporting all `R`, with 11-bit signed monomials `±X^k`). -/
+structure ExtractedJointOrWitnessGen {R : Nat} (stmt : RlweOrStatement)
+    (ro ro' : List UInt8 → List UInt8)
+    (tr tr' : JointOrSigmaTranscriptGen R) where
+  repIdx : Fin R
+  branch : Bool
+  uChal : BitVec 11
+  uChal' : BitVec 11
+  deltaChal : PolyInt 1024
+  sWit : PolyInt 1024
+  eWit : PolyInt 1024
+  branch_chal_diff : uChal ≠ uChal'
+  deltaChal_eq : deltaChal = fun k => polyIntFromChal11 uChal k - polyIntFromChal11 uChal' k
+  deltaChal_nonzero : polyIntToRq deltaChal ≠ CommRingOps.zero
+  deltaChal_inf_le : polyIntInfNorm deltaChal ≤ 2
+  deltaChal_l1_le : polyIntL1Norm deltaChal ≤ 2
+  s_short : polyIntInfNorm sWit ≤ 2 * rlweZkpokZBound
+  e_short : polyIntInfNorm eWit ≤ 2 * rlweZkpokZBound
+  relaxed_rlwe_rel :
+    CommRingOps.add (CommRingOps.mul stmt.a (polyIntToRq sWit)) (polyIntToRq eWit) =
+      CommRingOps.mul (polyIntToRq deltaChal) (stmt.branchPk branch)
+
+abbrev ExtractedJointOrWitness := @ExtractedJointOrWitnessGen rlweZkpokReps
+abbrev ExtractedJointOrWitnessPq13 := @ExtractedJointOrWitnessGen rlweZkpokPqReps
+abbrev ExtractedJointOrWitnessPq24 := @ExtractedJointOrWitnessGen rlweZkpokPq256Reps
+
+/-- **Constructive 2-Special Soundness Relaxed Knowledge Extractor (`jointOrSigma_extract_witness`)**:
+    Given two accepting forked OR-Sigma transcripts `(tr, tr')` under random oracles `(ro, ro')` on the
+    same statement `stmt` and commitment tuple `tr.comms = tr'.comms` whose forked joint 11-bit challenges
+    differ (`ch ≠ ch'`), constructively locates `j ∈ Fin R` and extracts `(branch, uChal, uChal', deltaChal, sWit, eWit)`
+    satisfying `a * sWit + eWit = (d(uChal) - d(uChal')) * stmt.branchPk branch` in `PolyRq1024` with
+    `polyIntToRq deltaChal ∈ R_{12289}^×`, `‖deltaChal‖_1 ≤ 2`, and `‖sWit‖_∞, ‖eWit‖_∞ ≤ 2 * 3070 = 6140 < 6144`
+    (`0 Classical.choice`)! -/
+def jointOrSigma_extract_witness {R : Nat} (stmt : RlweOrStatement)
+    (ro ro' : List UInt8 → List UInt8)
+    (tr tr' : JointOrSigmaTranscriptGen R)
+    (hComms : tr.comms = tr'.comms)
+    (hNe : hashRlweZkpokJointChallengesWithRo R ro stmt.crsCoin stmt.sessionId
+             stmt.senderId stmt.receiverId stmt.otIdx stmt.pk0 stmt.tCrs tr.comms ≠
+           hashRlweZkpokJointChallengesWithRo R ro' stmt.crsCoin stmt.sessionId
+             stmt.senderId stmt.receiverId stmt.otIdx stmt.pk0 stmt.tCrs tr'.comms)
+    (hAcc : verifyJointOrSigmaWithRoGen R ro stmt tr = true)
+    (hAcc' : verifyJointOrSigmaWithRoGen R ro' stmt tr' = true) :
+    ExtractedJointOrWitnessGen stmt ro ro' tr tr' :=
+  let ch := hashRlweZkpokJointChallengesWithRo R ro stmt.crsCoin stmt.sessionId
+    stmt.senderId stmt.receiverId stmt.otIdx stmt.pk0 stmt.tCrs tr.comms
+  let ch' := hashRlweZkpokJointChallengesWithRo R ro' stmt.crsCoin stmt.sessionId
+    stmt.senderId stmt.receiverId stmt.otIdx stmt.pk0 stmt.tCrs tr'.comms
+  let ⟨j, hjDiff⟩ := findDiffFin R ch ch' hNe
+  have hRecompEq : recomputeJointOrComms stmt tr = tr.comms := by
+    unfold verifyJointOrSigmaWithRoGen at hAcc
+    simp only [Bool.and_eq_true] at hAcc
+    have hAll := (allFin_eq_true_iff _).mp hAcc.2
+    funext idx
+    have hIdx := hAll idx
+    unfold verifyJointOrRepGen at hIdx
+    simp only [Bool.and_eq_true, polyRqEq_iff] at hIdx
+    exact Prod.ext hIdx.1.2.1 hIdx.1.2.2
+  have hRecompEq' : recomputeJointOrComms stmt tr' = tr'.comms := by
+    unfold verifyJointOrSigmaWithRoGen at hAcc'
+    simp only [Bool.and_eq_true] at hAcc'
+    have hAll := (allFin_eq_true_iff _).mp hAcc'.2
+    funext idx
+    have hIdx := hAll idx
+    unfold verifyJointOrRepGen at hIdx
+    simp only [Bool.and_eq_true, polyRqEq_iff] at hIdx
+    exact Prod.ext hIdx.1.2.1 hIdx.1.2.2
+  have hRep : verifyJointOrRepGen stmt j (ch j) tr = true := by
+    unfold verifyJointOrSigmaWithRoGen at hAcc
+    simp only [Bool.and_eq_true] at hAcc
+    have hAll := (allFin_eq_true_iff _).mp hAcc.2 j
+    rw [hRecompEq] at hAll
+    exact hAll
+  have hRep' : verifyJointOrRepGen stmt j (ch' j) tr' = true := by
+    unfold verifyJointOrSigmaWithRoGen at hAcc'
+    simp only [Bool.and_eq_true] at hAcc'
+    have hAll := (allFin_eq_true_iff _).mp hAcc'.2 j
+    rw [hRecompEq'] at hAll
+    exact hAll
+  if hc0 : tr.chal0 j = tr'.chal0 j then
+    have hc1Ne : tr.chal1 j ≠ tr'.chal1 j := by
+      intro hc1Eq
+      unfold verifyJointOrRepGen at hRep hRep'
+      simp only [Bool.and_eq_true, decide_eq_true_eq] at hRep hRep'
+      have hXor := hRep.2
+      have hXor' := hRep'.2
+      rw [hc0, hc1Eq] at hXor
+      exact hjDiff (hXor.symm.trans hXor')
+    let u := tr.chal1 j
+    let u' := tr'.chal1 j
+    let deltaD : PolyInt 1024 := fun k => polyIntFromChal11 u k - polyIntFromChal11 u' k
+    let sWit : PolyInt 1024 := fun k => tr.zs1 j k - tr'.zs1 j k
+    let eWit : PolyInt 1024 := fun k => tr.ze1 j k - tr'.ze1 j k
+    have hUnp :
+        polyIntInfNorm (tr.zs1 j) ≤ rlweZkpokZBound ∧
+        polyIntInfNorm (tr.ze1 j) ≤ rlweZkpokZBound ∧
+        CommRingOps.sub (CommRingOps.add (CommRingOps.mul stmt.a (polyIntToRq (tr.zs1 j))) (polyIntToRq (tr.ze1 j)))
+          (CommRingOps.mul (polyRqFromChal11 (tr.chal1 j)) (CommRingOps.add stmt.pk0 stmt.tCrs)) = (tr.comms j).2 := by
+      unfold verifyJointOrRepGen recomputeJointOrRepComm at hRep
+      simp only [Bool.and_eq_true, decide_eq_true_eq, polyRqEq_iff] at hRep
+      exact ⟨polyIntInZkpokBox_infNorm_le hRep.1.1.1.2, polyIntInZkpokBox_infNorm_le hRep.1.1.2, hRep.1.2.2⟩
+    have hUnp' :
+        polyIntInfNorm (tr'.zs1 j) ≤ rlweZkpokZBound ∧
+        polyIntInfNorm (tr'.ze1 j) ≤ rlweZkpokZBound ∧
+        CommRingOps.sub (CommRingOps.add (CommRingOps.mul stmt.a (polyIntToRq (tr'.zs1 j))) (polyIntToRq (tr'.ze1 j)))
+          (CommRingOps.mul (polyRqFromChal11 (tr'.chal1 j)) (CommRingOps.add stmt.pk0 stmt.tCrs)) = (tr.comms j).2 := by
+      unfold verifyJointOrRepGen recomputeJointOrRepComm at hRep'
+      simp only [Bool.and_eq_true, decide_eq_true_eq, polyRqEq_iff] at hRep'
+      have hw1' := hRep'.1.2.2
+      rw [← hComms] at hw1'
+      exact ⟨polyIntInZkpokBox_infNorm_le hRep'.1.1.1.2, polyIntInZkpokBox_infNorm_le hRep'.1.1.2, hw1'⟩
+    let hPack := rlweBranch_sub_extract_chal11 stmt.a (CommRingOps.add stmt.pk0 stmt.tCrs) (tr.comms j).2
+      u u' (tr.zs1 j) (tr.ze1 j) (tr'.zs1 j) (tr'.ze1 j) hc1Ne
+      hUnp.1 hUnp.2.1 hUnp'.1 hUnp'.2.1 hUnp.2.2 hUnp'.2.2
+    ⟨j, true, u, u', deltaD, sWit, eWit, hc1Ne, rfl,
+      hPack.1, hPack.2.1, hPack.2.2.1, hPack.2.2.2.1, hPack.2.2.2.2.1, hPack.2.2.2.2.2⟩
+  else
+    let u := tr.chal0 j
+    let u' := tr'.chal0 j
+    let deltaD : PolyInt 1024 := fun k => polyIntFromChal11 u k - polyIntFromChal11 u' k
+    let sWit : PolyInt 1024 := fun k => tr.zs0 j k - tr'.zs0 j k
+    let eWit : PolyInt 1024 := fun k => tr.ze0 j k - tr'.ze0 j k
+    have hUnp :
+        polyIntInfNorm (tr.zs0 j) ≤ rlweZkpokZBound ∧
+        polyIntInfNorm (tr.ze0 j) ≤ rlweZkpokZBound ∧
+        CommRingOps.sub (CommRingOps.add (CommRingOps.mul stmt.a (polyIntToRq (tr.zs0 j))) (polyIntToRq (tr.ze0 j)))
+          (CommRingOps.mul (polyRqFromChal11 (tr.chal0 j)) stmt.pk0) = (tr.comms j).1 := by
+      unfold verifyJointOrRepGen recomputeJointOrRepComm at hRep
+      simp only [Bool.and_eq_true, decide_eq_true_eq, polyRqEq_iff] at hRep
+      exact ⟨polyIntInZkpokBox_infNorm_le hRep.1.1.1.1.1, polyIntInZkpokBox_infNorm_le hRep.1.1.1.1.2, hRep.1.2.1⟩
+    have hUnp' :
+        polyIntInfNorm (tr'.zs0 j) ≤ rlweZkpokZBound ∧
+        polyIntInfNorm (tr'.ze0 j) ≤ rlweZkpokZBound ∧
+        CommRingOps.sub (CommRingOps.add (CommRingOps.mul stmt.a (polyIntToRq (tr'.zs0 j))) (polyIntToRq (tr'.ze0 j)))
+          (CommRingOps.mul (polyRqFromChal11 (tr'.chal0 j)) stmt.pk0) = (tr.comms j).1 := by
+      unfold verifyJointOrRepGen recomputeJointOrRepComm at hRep'
+      simp only [Bool.and_eq_true, decide_eq_true_eq, polyRqEq_iff] at hRep'
+      have hw0' := hRep'.1.2.1
+      rw [← hComms] at hw0'
+      exact ⟨polyIntInZkpokBox_infNorm_le hRep'.1.1.1.1.1, polyIntInZkpokBox_infNorm_le hRep'.1.1.1.1.2, hw0'⟩
+    let hPack := rlweBranch_sub_extract_chal11 stmt.a stmt.pk0 (tr.comms j).1
+      u u' (tr.zs0 j) (tr.ze0 j) (tr'.zs0 j) (tr'.ze0 j) hc0
+      hUnp.1 hUnp.2.1 hUnp'.1 hUnp'.2.1 hUnp.2.2 hUnp'.2.2
+    ⟨j, false, u, u', deltaD, sWit, eWit, hc0, rfl,
+      hPack.1, hPack.2.1, hPack.2.2.1, hPack.2.2.2.1, hPack.2.2.2.2.1, hPack.2.2.2.2.2⟩
+
+/-! ### 2.1a Weld to the Cyclotomic Extractor of `Qsag.RlweCyclotomicExtraction`
+
+`polyRqToCyc` transports the production v3 fork difference to the cyclotomic ring.
+Every distinct 11-bit challenge pair supports the cofactor lift. The 20-bit constructions below
+are historical counterexamples and are not consumed by the v3 verifier. -/
+
+/-- Lower-half signed monomial $\pm X^{p_0}$ of a 20-bit challenge. -/
+def chal20Mono0 (u : BitVec 20) : SignedMonomialChal 10 := ⟨chal20Sign0 u, chal20Pos0 u⟩
+
+/-- Upper-half signed monomial $\pm X^{512 + p_1}$ of a 20-bit challenge. -/
+def chal20Mono1 (u : BitVec 20) : SignedMonomialChal 10 := ⟨chal20Sign1 u, chal20Pos1 u⟩
+
+/-- `poly_from_chal20` is the sum of its two signed monomials. -/
+theorem polyIntFromChal20_eq_two_monomials (u : BitVec 20) :
+    polyIntFromChal20 u = cycIntAdd (chal20Mono0 u).toIntPoly (chal20Mono1 u).toIntPoly := by
+  funext k
+  have hV0 : chal20Val0 u = signBitToInt (chal20Sign0 u) := rfl
+  have hV1 : chal20Val1 u = signBitToInt (chal20Sign1 u) := rfl
+  unfold polyIntFromChal20 cycIntAdd SignedMonomialChal.toIntPoly signedMonomial
+    negacyclicSignedMonomial chal20Mono0 chal20Mono1
+  dsimp only
+  by_cases h0 : k = chal20Pos0 u
+  · simp only [h0, chal20Pos0_ne_pos1 u, ↓reduceIte, hV0, Int.add_zero]
+  · by_cases h1 : k = chal20Pos1 u
+    · simp only [h1, (chal20Pos0_ne_pos1 u).symm, ↓reduceIte, hV1, Int.zero_add]
+    · simp only [h0, h1, ↓reduceIte, Int.add_zero]
+
+/-- A 20-bit challenge is determined by its two signed monomials. -/
+theorem chal20_eq_of_monos_eq {u u' : BitVec 20}
+    (h0 : chal20Mono0 u = chal20Mono0 u') (h1 : chal20Mono1 u = chal20Mono1 u') : u = u' := by
+  apply polyRqFromChal20_injective
+  unfold polyRqFromChal20
+  rw [polyIntFromChal20_eq_two_monomials, polyIntFromChal20_eq_two_monomials, h0, h1]
+
+/-- The cyclotomic OR-Sigma statement `(A, pk0, pk0 + tCrs, 3070)` of a base-OT statement. -/
+def RlweOrStatement.toCyclotomic (stmt : RlweOrStatement) : RlweOrSigmaStatement 10 12289 :=
+  RlweOrSigmaStatement.fromBaseOt (polyRqToCyc stmt.a) (polyRqToCyc stmt.pk0)
+    (polyRqToCyc stmt.tCrs) rlweZkpokZBound
+
+theorem RlweOrStatement.toCyclotomic_branchU (stmt : RlweOrStatement) (b : Bool) :
+    stmt.toCyclotomic.branchU b = polyRqToCyc (stmt.branchPk b) := by
+  cases b
+  · rfl
+  · show cycZqAdd (polyRqToCyc stmt.pk0) (polyRqToCyc stmt.tCrs) =
+      polyRqToCyc (CommRingOps.add stmt.pk0 stmt.tCrs)
+    rw [polyRqToCyc_add]
+
+/-- **The production fork difference in the cyclotomic ring
+    (`jointOrSigma_fork_difference_cyclotomic`)**:
+    the witness of `jointOrSigma_extract_witness` satisfies
+    `A * sWit + eWit = (d(u) - d(u')) * Y_b` in `CycPolyZq 10 12289`, and `(sWit, eWit)` are recovered
+    exactly from their reductions modulo `12289` (`‖·‖_∞ ≤ 6140 < 6144`). This holds for every forked
+    pair of accepting transcripts; it is a relation twisted by the challenge difference, not a witness
+    for `Y_b`. -/
+theorem jointOrSigma_fork_difference_cyclotomic {R : Nat} {stmt : RlweOrStatement}
+    {ro ro' : List UInt8 → List UInt8} {tr tr' : JointOrSigmaTranscriptGen R}
+    (w : ExtractedJointOrWitnessGen stmt ro ro' tr tr') :
+    cycZqAdd (cycZqMul stmt.toCyclotomic.A (cycIntToZq 12289 w.sWit)) (cycIntToZq 12289 w.eWit) =
+      cycZqMul (cycIntToZq 12289 w.deltaChal) (stmt.toCyclotomic.branchU w.branch) ∧
+    cycZqCentered (cycIntToZq 12289 w.sWit) = w.sWit ∧
+    cycZqCentered (cycIntToZq 12289 w.eWit) = w.eWit := by
+  refine ⟨?_, ?_, ?_⟩
+  · have hRel := congrArg polyRqToCyc w.relaxed_rlwe_rel
+    rw [polyRqToCyc_add, polyRqToCyc_mul, polyRqToCyc_mul, polyRqToCyc_polyIntToRq,
+        polyRqToCyc_polyIntToRq, polyRqToCyc_polyIntToRq] at hRel
+    rw [RlweOrStatement.toCyclotomic_branchU]
+    exact hRel
+  · apply rlwe_fork_difference_zero_modular_wraparound_production
+    have hS := w.s_short
+    rw [polyIntInfNorm_eq_cycIntInfNorm] at hS
+    exact hS
+  · apply rlwe_fork_difference_zero_modular_wraparound_production
+    have hE := w.e_short
+    rw [polyIntInfNorm_eq_cycIntInfNorm] at hE
+    exact hE
+
+private theorem cycIntSub_add_cancel_right {N : Nat} (a a' c : NegacyclicPolyInt N) :
+    cycIntSub (cycIntAdd a c) (cycIntAdd a' c) = cycIntSub a a' := by
+  funext k; dsimp only [cycIntSub, cycIntAdd]; omega
+
+private theorem cycIntSub_add_cancel_left {N : Nat} (c a a' : NegacyclicPolyInt N) :
+    cycIntSub (cycIntAdd c a) (cycIntAdd c a') = cycIntSub a a' := by
+  funext k; dsimp only [cycIntSub, cycIntAdd]; omega
+
+/-- Total cofactor lift for the v3 single-monomial fork. The resulting large-norm
+    modular relation alone is not a hardness claim. -/
+def ExtractedJointOrWitnessGen.cofactorLift {R : Nat} {stmt : RlweOrStatement}
+    {ro ro' : List UInt8 → List UInt8} {tr tr' : JointOrSigmaTranscriptGen R}
+    (w : ExtractedJointOrWitnessGen stmt ro ro' tr tr') :
+    ExtractedRlweOrSigmaWitness R 10 12289 stmt.toCyclotomic :=
+  ExtractedRlweOrSigmaWitness.ofForkDifference stmt.toCyclotomic w.repIdx w.branch
+    (chal11ToSignedMonomial w.uChal) (chal11ToSignedMonomial w.uChal')
+    (fun h => w.branch_chal_diff (SignedMonomialChal.ofBitVec_injective h))
+    w.sWit w.eWit
+    (by simpa only [← polyIntInfNorm_eq_cycIntInfNorm, RlweOrStatement.toCyclotomic, RlweOrSigmaStatement.fromBaseOt] using w.s_short)
+    (by simpa only [← polyIntInfNorm_eq_cycIntInfNorm, RlweOrStatement.toCyclotomic, RlweOrSigmaStatement.fromBaseOt] using w.e_short)
+    (by
+      have hDelta : w.deltaChal = cycIntSub
+          (chal11ToSignedMonomial w.uChal).toIntPoly
+          (chal11ToSignedMonomial w.uChal').toIntPoly := by
+        rw [w.deltaChal_eq]
+        funext k
+        simp only [polyIntFromChal11, cycIntSub]
+      have h := (jointOrSigma_fork_difference_cyclotomic w).1
+      rw [hDelta] at h
+      exact h)
+
+/-- The v3 extractor has no shared-monomial side condition. -/
+theorem ExtractedJointOrWitnessGen.cofactorLift_isLeft_iff {R : Nat} {stmt : RlweOrStatement}
+    {ro ro' : List UInt8 → List UInt8} {tr tr' : JointOrSigmaTranscriptGen R}
+    (w : ExtractedJointOrWitnessGen stmt ro ro' tr tr') :
+    Nonempty (ExtractedRlweOrSigmaWitness R 10 12289 stmt.toCyclotomic) :=
+  ⟨w.cofactorLift⟩
+
+/-- Isometric fork relation; the relaxation remains part of the statement. -/
+def ExtractedJointOrWitnessGen.toShortMonomialWitness {R : Nat} {stmt : RlweOrStatement}
+    {ro ro' : List UInt8 → List UInt8} {tr tr' : JointOrSigmaTranscriptGen R}
+    (w : ExtractedJointOrWitnessGen stmt ro ro' tr tr') :
+    ShortMonomialRelaxedRlweWitness R 10 12289 stmt.toCyclotomic :=
+  ShortMonomialRelaxedRlweWitness.ofForkDifference stmt.toCyclotomic w.repIdx w.branch
+    (chal11ToSignedMonomial w.uChal) (chal11ToSignedMonomial w.uChal')
+    (fun h => w.branch_chal_diff (SignedMonomialChal.ofBitVec_injective h))
+    w.sWit w.eWit
+    (by simpa only [← polyIntInfNorm_eq_cycIntInfNorm, RlweOrStatement.toCyclotomic, RlweOrSigmaStatement.fromBaseOt] using w.s_short)
+    (by simpa only [← polyIntInfNorm_eq_cycIntInfNorm, RlweOrStatement.toCyclotomic, RlweOrSigmaStatement.fromBaseOt] using w.e_short)
+    (by
+      have hDelta : w.deltaChal = cycIntSub
+          (chal11ToSignedMonomial w.uChal).toIntPoly
+          (chal11ToSignedMonomial w.uChal').toIntPoly := by
+        rw [w.deltaChal_eq]
+        funext k
+        simp only [polyIntFromChal11, cycIntSub]
+      have h := (jointOrSigma_fork_difference_cyclotomic w).1
+      rw [hDelta] at h
+      exact h)
+
+/-- **Soundness content of a cofactor witness for the production statement
+    (`jointOrSigma_cofactor_witness_sound`)**:
+    every `ExtractedRlweOrSigmaWitness` for `stmt.toCyclotomic` gives
+    1. `‖s2‖_∞, ‖e2‖_∞ ≤ 2 * 1024 * 3070 = 6287360`,
+    2. `A * s2 + e2 = 2 * Y_b` in $R_{12289}$,
+    3. the exact relation `A * (h * s2) + h * e2 = Y_b` with `h = (12289 + 1) / 2`, a preimage of the
+       branch public key modulo `12289` (its centered norm is not bounded by this theorem, because
+       `6287360 ≥ 6144`), and
+    4. the explicit inverse of the challenge difference used
+       (`signedMonomial_1024_challenge_set_2048_pairwise_invertible`). -/
+theorem jointOrSigma_cofactor_witness_sound {R : Nat} (stmt : RlweOrStatement)
+    (cw : ExtractedRlweOrSigmaWitness R 10 12289 stmt.toCyclotomic) :
+    cycIntInfNorm cw.s2 ≤ 6287360 ∧
+    cycIntInfNorm cw.e2 ≤ 6287360 ∧
+    cycZqAdd (cycZqMul (polyRqToCyc stmt.a) (cycIntToZq 12289 cw.s2)) (cycIntToZq 12289 cw.e2) =
+      cycZqScale 2 (polyRqToCyc (stmt.branchPk cw.branch)) ∧
+    cycZqAdd
+      (cycZqMul (polyRqToCyc stmt.a) (cycZqScale (((12289 + 1) / 2 : Nat) : Int) (cycIntToZq 12289 cw.s2)))
+      (cycZqScale (((12289 + 1) / 2 : Nat) : Int) (cycIntToZq 12289 cw.e2)) =
+      polyRqToCyc (stmt.branchPk cw.branch) ∧
+    cycZqMul (cycZqSub (cw.chal.toZqPoly 12289) (cw.chal'.toZqPoly 12289))
+      (signedMonomialDiffInvZq 10 12289 cw.chal cw.chal') = cycZqOne := by
+  have hS : cycIntInfNorm cw.s2 ≤ 6287360 := cw.s2_infNorm_le
+  have hE : cycIntInfNorm cw.e2 ≤ 6287360 := cw.e2_infNorm_le
+  have hRel := cw.relaxed_rlwe_mod_q
+  rw [RlweOrStatement.toCyclotomic_branchU] at hRel
+  have hUn := extracted_witness_unrelaxed_odd_q (by decide : 12289 % 2 = 1) cw
+  dsimp only at hUn
+  rw [RlweOrStatement.toCyclotomic_branchU] at hUn
+  exact ⟨hS, hE, hRel, hUn,
+    (signedMonomial_1024_challenge_set_2048_pairwise_invertible 12289 (by decide) (by decide)
+      cw.chal cw.chal' cw.chal_ne).2.2.1⟩
+
+/-- **`#tooth`: two production challenges whose difference has no inverse
+    (`tooth_chal20_difference_not_invertible`)**:
+    `u = 108` ($X^{108} + X^{512}$) and `u' = 1026` ($X^{2} + X^{513}$) differ in both signed monomials,
+    and `d(u) - d(u')` is not a unit of `PolyRq1024`: both challenges take the value `11331` at the root
+    `1945` of $X^{1024} + 1$ modulo `12289`. A fork on this pair yields the fork difference only. -/
+theorem tooth_chal20_difference_not_invertible :
+    (108#20 : BitVec 20) ≠ 1026#20 ∧
+    chal20Mono0 108#20 ≠ chal20Mono0 1026#20 ∧
+    chal20Mono1 108#20 ≠ chal20Mono1 1026#20 ∧
+    (∀ inv : PolyRq1024,
+      CommRingOps.mul (CommRingOps.sub (polyRqFromChal20 108#20) (polyRqFromChal20 1026#20)) inv ≠
+        CommRingOps.one) := by
+  refine ⟨by decide, by decide, by decide, ?_⟩
+  intro inv hInv
+  have hCyc := congrArg polyRqToCyc hInv
+  unfold polyRqFromChal20 at hCyc
+  rw [polyRqToCyc_mul, polyRqToCyc_sub, polyRqToCyc_polyIntToRq, polyRqToCyc_polyIntToRq,
+      polyRqToCyc_one, polyIntFromChal20_eq_two_monomials, polyIntFromChal20_eq_two_monomials,
+      ← cycIntToZq_sub] at hCyc
+  exact tooth_two_term_challenge_difference_zero_divisor_12289.2.2 (polyRqToCyc inv) hCyc
+
+/-- Masked honest OR-Sigma prover parameterized by XOF oracle `ro`, mirroring `RlweReceiverZkPok::prove_ct`
+    (`preprocessing.rs:1040-1114`): computes real masked commitment `wReal = a * ysMask + yeMask ≠ 0`,
+    simulated fake commitment `wFake = a * zsFake + zeFake - d(uFake) * yFake`, derives joint challenges
+    via `hashRlweZkpokJointChallengesWithRo`, sets `uReal = ch ^^^ uFake`, and masks the secret witness
+    `(sR, e1)` via `zReal = yMask + d(uReal) ⊛ (sR, e1)`. -/
+def buildHonestJointOrTranscriptWithRoGen (R : Nat) (ro : List UInt8 → List UInt8)
+    (stmt : RlweOrStatement) (branch : Bool)
+    (sR e1 : PolyInt 1024)
+    (ysMask yeMask : Fin R → PolyInt 1024)
+    (uFake : Fin R → BitVec 11)
+    (zsFake zeFake : Fin R → PolyInt 1024) : JointOrSigmaTranscriptGen R :=
+  let yFake := if branch then stmt.pk0 else CommRingOps.add stmt.pk0 stmt.tCrs
+  let comms : Fin R → (PolyRq1024 × PolyRq1024) := fun j =>
+    let wReal := CommRingOps.add
+      (CommRingOps.mul stmt.a (polyIntToRq (ysMask j)))
+      (polyIntToRq (yeMask j))
+    let wFake := CommRingOps.sub
+      (CommRingOps.add (CommRingOps.mul stmt.a (polyIntToRq (zsFake j))) (polyIntToRq (zeFake j)))
+      (CommRingOps.mul (polyRqFromChal11 (uFake j)) yFake)
+    if branch then (wFake, wReal) else (wReal, wFake)
+  let ch := hashRlweZkpokJointChallengesWithRo R ro
+    stmt.crsCoin stmt.sessionId stmt.senderId stmt.receiverId stmt.otIdx stmt.pk0 stmt.tCrs comms
+  let uReal : Fin R → BitVec 11 := fun j => ch j ^^^ uFake j
+  let zsReal : Fin R → PolyInt 1024 := fun j k =>
+    polyIntMul (polyIntFromChal11 (uReal j)) sR k + ysMask j k
+  let zeReal : Fin R → PolyInt 1024 := fun j k =>
+    polyIntMul (polyIntFromChal11 (uReal j)) e1 k + yeMask j k
+  if branch then
+    { comms := comms
+      chal0 := uFake
+      chal1 := uReal
+      zs0 := zsFake
+      ze0 := zeFake
+      zs1 := zsReal
+      ze1 := zeReal }
+  else
+    { comms := comms
+      chal0 := uReal
+      chal1 := uFake
+      zs0 := zsReal
+      ze0 := zeReal
+      zs1 := zsFake
+      ze1 := zeFake }
+
+/-- Production masked honest OR-Sigma prover using `cSHAKE256("QSAG.OT.RLWE.ZKPOK/v3")`. -/
+def buildHonestJointOrTranscriptGen (R : Nat)
+    (stmt : RlweOrStatement) (branch : Bool)
+    (sR e1 : PolyInt 1024)
+    (ysMask yeMask : Fin R → PolyInt 1024)
+    (uFake : Fin R → BitVec 11)
+    (zsFake zeFake : Fin R → PolyInt 1024) : JointOrSigmaTranscriptGen R :=
+  buildHonestJointOrTranscriptWithRoGen R (cshake256Xof (4 * R) rlweZkpokDomain)
+    stmt branch sR e1 ysMask yeMask uFake zsFake zeFake
+
+abbrev buildHonestJointOrTranscript := buildHonestJointOrTranscriptGen rlweZkpokReps
+abbrev buildHonestJointOrTranscriptPq13 := buildHonestJointOrTranscriptGen rlweZkpokPqReps
+
+private theorem real_branch_comm_cancel (a yReal : PolyRq1024)
+    (sR e1 ys ye : PolyInt 1024) (u : BitVec 11)
+    (hRel : CommRingOps.add (CommRingOps.mul a (polyIntToRq sR)) (polyIntToRq e1) = yReal) :
+    CommRingOps.sub
+      (CommRingOps.add
+        (CommRingOps.mul a (polyIntToRq (fun k => polyIntMul (polyIntFromChal11 u) sR k + ys k)))
+        (polyIntToRq (fun k => polyIntMul (polyIntFromChal11 u) e1 k + ye k)))
+      (CommRingOps.mul (polyRqFromChal11 u) yReal) =
+    CommRingOps.add (CommRingOps.mul a (polyIntToRq ys)) (polyIntToRq ye) := by
+  rw [polyIntToRq_add, polyIntToRq_add, polyIntToRq_mul, polyIntToRq_mul]
+  change CommRingOps.sub
+      (CommRingOps.add
+        (CommRingOps.mul a (CommRingOps.add (CommRingOps.mul (polyRqFromChal11 u) (polyIntToRq sR)) (polyIntToRq ys)))
+        (CommRingOps.add (CommRingOps.mul (polyRqFromChal11 u) (polyIntToRq e1)) (polyIntToRq ye)))
+      (CommRingOps.mul (polyRqFromChal11 u) yReal) =
+    CommRingOps.add (CommRingOps.mul a (polyIntToRq ys)) (polyIntToRq ye)
+  have hMulShift :
+      CommRingOps.add
+        (CommRingOps.mul a (CommRingOps.mul (polyRqFromChal11 u) (polyIntToRq sR)))
+        (CommRingOps.mul (polyRqFromChal11 u) (polyIntToRq e1)) =
+      CommRingOps.mul (polyRqFromChal11 u) yReal := by
+    rw [← hRel, LawfulCommRing.left_distrib,
+        ← LawfulCommRing.mul_assoc a (polyRqFromChal11 u) (polyIntToRq sR),
+        LawfulCommRing.mul_comm a (polyRqFromChal11 u),
+        LawfulCommRing.mul_assoc (polyRqFromChal11 u) a (polyIntToRq sR)]
+  rw [LawfulCommRing.left_distrib]
+  funext k
+  have hkShift := congrFun hMulShift k
+  let D_AS := CommRingOps.mul a (CommRingOps.mul (polyRqFromChal11 u) (polyIntToRq sR)) k
+  let A_YS := CommRingOps.mul a (polyIntToRq ys) k
+  let D_E := CommRingOps.mul (polyRqFromChal11 u) (polyIntToRq e1) k
+  let YE := polyIntToRq ye k
+  let DY := CommRingOps.mul (polyRqFromChal11 u) yReal k
+  change CommRingOps.add D_AS D_E = DY at hkShift
+  show CommRingOps.sub (CommRingOps.add (CommRingOps.add D_AS A_YS) (CommRingOps.add D_E YE)) DY =
+    CommRingOps.add A_YS YE
+  rw [← Zq12289.ofInt_natVal D_AS, ← Zq12289.ofInt_natVal D_E, ← Zq12289.ofInt_natVal DY] at hkShift
+  rw [← Zq12289.ofInt_natVal D_AS, ← Zq12289.ofInt_natVal A_YS,
+      ← Zq12289.ofInt_natVal D_E, ← Zq12289.ofInt_natVal YE,
+      ← Zq12289.ofInt_natVal DY]
+  simp only [← Zq12289.ofInt_add] at hkShift
+  simp only [← Zq12289.ofInt_add, ← Zq12289.ofInt_sub]
+  have hkVal := congrArg Zq12289.val hkShift
+  simp only [Zq12289.ofInt] at hkVal ⊢
+  apply Zq12289.ext
+  dsimp only
+  omega
+
+private theorem bitvec20_xor_cancel_right (c f : BitVec 11) : (c ^^^ f) ^^^ f = c := by
+  apply BitVec.eq_of_getLsbD_eq; intro i _
+  simp only [BitVec.getLsbD_xor]
+  cases c.getLsbD i <;> cases f.getLsbD i <;> rfl
+
+private theorem bitvec20_xor_cancel_left (f c : BitVec 11) : f ^^^ (c ^^^ f) = c := by
+  apply BitVec.eq_of_getLsbD_eq; intro i _
+  simp only [BitVec.getLsbD_xor]
+  cases f.getLsbD i <;> cases c.getLsbD i <;> rfl
+
+/-- **Completeness of Masked OR-Sigma Prover (`honestJointOrTranscriptWithRo_accepts`)**:
+    Whenever `(sR, e1)` is a short RLWE witness on `stmt.branchPk branch` and masks `(ysMask, yeMask)`
+    lie inside the safe box (`2 * ‖sR‖_∞ + ‖ysMask‖_∞ < 3070`, `2 * ‖e1‖_∞ + ‖yeMask‖_∞ < 3070`)
+    `verifyJointOrSigmaWithRoGen` accepts! -/
+theorem honestJointOrTranscriptWithRo_accepts {R : Nat} (ro : List UInt8 → List UInt8)
+    (stmt : RlweOrStatement) (branch : Bool)
+    (sR e1 : PolyInt 1024)
+    (ysMask yeMask : Fin R → PolyInt 1024)
+    (uFake : Fin R → BitVec 11)
+    (zsFake zeFake : Fin R → PolyInt 1024)
+    (hStmt : checkRlweOrStatementValid stmt = true)
+    (hRel : CommRingOps.add (CommRingOps.mul stmt.a (polyIntToRq sR)) (polyIntToRq e1) =
+      stmt.branchPk branch)
+    (hSafeS : ∀ j : Fin R, 2 * polyIntInfNorm sR + polyIntInfNorm (ysMask j) < rlweZkpokZBound)
+    (hSafeE : ∀ j : Fin R, 2 * polyIntInfNorm e1 + polyIntInfNorm (yeMask j) < rlweZkpokZBound)
+    (hFakeS : ∀ j : Fin R, polyIntInfNorm (zsFake j) < rlweZkpokZBound)
+    (hFakeE : ∀ j : Fin R, polyIntInfNorm (zeFake j) < rlweZkpokZBound) :
+    verifyJointOrSigmaWithRoGen R ro stmt
+      (buildHonestJointOrTranscriptWithRoGen R ro stmt branch sR e1 ysMask yeMask uFake zsFake zeFake) = true := by
+  let tr := buildHonestJointOrTranscriptWithRoGen R ro stmt branch sR e1 ysMask yeMask uFake zsFake zeFake
+  have hRecomp : recomputeJointOrComms stmt tr = tr.comms := by
+    funext j
+    dsimp only [tr, buildHonestJointOrTranscriptWithRoGen, recomputeJointOrComms, recomputeJointOrRepComm]
+    cases branch
+    · simp only [Bool.false_eq_true, ↓reduceIte]
+      unfold RlweOrStatement.branchPk at hRel
+      simp only [Bool.false_eq_true, ↓reduceIte] at hRel
+      exact Prod.ext
+        (real_branch_comm_cancel stmt.a stmt.pk0 sR e1 (ysMask j) (yeMask j) _ hRel)
+        rfl
+    · simp only [↓reduceIte]
+      unfold RlweOrStatement.branchPk at hRel
+      simp only [↓reduceIte] at hRel
+      exact Prod.ext
+        rfl
+        (real_branch_comm_cancel stmt.a (CommRingOps.add stmt.pk0 stmt.tCrs) sR e1 (ysMask j) (yeMask j) _ hRel)
+  unfold verifyJointOrSigmaWithRoGen
+  simp only [hStmt, Bool.true_and]
+  change allFin R (fun j => verifyJointOrRepGen stmt j
+    (hashRlweZkpokJointChallengesWithRo R ro stmt.crsCoin stmt.sessionId
+      stmt.senderId stmt.receiverId stmt.otIdx stmt.pk0 stmt.tCrs (recomputeJointOrComms stmt tr) j) tr) = true
+  rw [hRecomp, allFin_eq_true_iff]
+  intro j
+  have hRepEq : recomputeJointOrRepComm stmt tr j = tr.comms j := congrFun hRecomp j
+  unfold verifyJointOrRepGen
+  rw [hRepEq]
+  have hRealSBound : ∀ u : BitVec 11,
+      polyIntInfNorm (fun k => polyIntMul (polyIntFromChal11 u) sR k + ysMask j k) < rlweZkpokZBound := by
+    intro u
+    have hConv := negacyclic_infNorm_mul_add_le (polyIntFromChal11 u) sR (ysMask j)
+    rw [polyIntFromChal11_l1Norm_eq_one] at hConv
+    have hSafe := hSafeS j
+    omega
+  have hRealEBound : ∀ u : BitVec 11,
+      polyIntInfNorm (fun k => polyIntMul (polyIntFromChal11 u) e1 k + yeMask j k) < rlweZkpokZBound := by
+    intro u
+    have hConv := negacyclic_infNorm_mul_add_le (polyIntFromChal11 u) e1 (yeMask j)
+    rw [polyIntFromChal11_l1Norm_eq_one] at hConv
+    have hSafe := hSafeE j
+    omega
+  have hBounds :
+      (polyIntInZkpokBox (tr.zs0 j) &&
+       polyIntInZkpokBox (tr.ze0 j) &&
+       polyIntInZkpokBox (tr.zs1 j) &&
+       polyIntInZkpokBox (tr.ze1 j)) = true := by
+    dsimp only [tr, buildHonestJointOrTranscriptWithRoGen]
+    cases branch
+    · simp only [Bool.false_eq_true, ↓reduceIte, Bool.and_eq_true]
+      exact ⟨⟨⟨polyIntInZkpokBox_of_infNorm_lt (hRealSBound _),
+        polyIntInZkpokBox_of_infNorm_lt (hRealEBound _)⟩,
+        polyIntInZkpokBox_of_infNorm_lt (hFakeS j)⟩, polyIntInZkpokBox_of_infNorm_lt (hFakeE j)⟩
+    · simp only [↓reduceIte, Bool.and_eq_true]
+      exact ⟨⟨⟨polyIntInZkpokBox_of_infNorm_lt (hFakeS j),
+        polyIntInZkpokBox_of_infNorm_lt (hFakeE j)⟩,
+        polyIntInZkpokBox_of_infNorm_lt (hRealSBound _)⟩, polyIntInZkpokBox_of_infNorm_lt (hRealEBound _)⟩
+  have hMatch : (polyRqEq (tr.comms j).1 (tr.comms j).1 && polyRqEq (tr.comms j).2 (tr.comms j).2) = true := by
+    simp only [polyRqEq_self, Bool.and_self]
+  have hChal : decide ((tr.chal0 j ^^^ tr.chal1 j) =
+      hashRlweZkpokJointChallengesWithRo R ro stmt.crsCoin stmt.sessionId
+        stmt.senderId stmt.receiverId stmt.otIdx stmt.pk0 stmt.tCrs tr.comms j) = true := by
+    dsimp only [tr, buildHonestJointOrTranscriptWithRoGen]
+    cases branch
+    · simp only [Bool.false_eq_true, ↓reduceIte, bitvec20_xor_cancel_right, decide_true]
+    · simp only [↓reduceIte, bitvec20_xor_cancel_left, decide_true]
+  dsimp only
+  rw [hBounds, hMatch, hChal]
+  rfl
+
+/-- **Production Completeness of `verifyJointOrSigma` (`honestJointOrTranscript_accepts`)**:
+    Honest masked transcripts accept under production `cSHAKE256("QSAG.OT.RLWE.ZKPOK/v3")` at both
+    `R = 7` (`verifyJointOrSigma`) and `R = 13` (`verifyJointOrSigmaPq13`). -/
+theorem honestJointOrTranscript_accepts (stmt : RlweOrStatement) (branch : Bool)
+    (sR e1 : PolyInt 1024)
+    (ysMask yeMask : Fin rlweZkpokReps → PolyInt 1024)
+    (uFake : Fin rlweZkpokReps → BitVec 11)
+    (zsFake zeFake : Fin rlweZkpokReps → PolyInt 1024)
+    (hStmt : checkRlweOrStatementValid stmt = true)
+    (hRel : CommRingOps.add (CommRingOps.mul stmt.a (polyIntToRq sR)) (polyIntToRq e1) =
+      stmt.branchPk branch)
+    (hSafeS : ∀ j, 2 * polyIntInfNorm sR + polyIntInfNorm (ysMask j) < rlweZkpokZBound)
+    (hSafeE : ∀ j, 2 * polyIntInfNorm e1 + polyIntInfNorm (yeMask j) < rlweZkpokZBound)
+    (hFakeS : ∀ j, polyIntInfNorm (zsFake j) < rlweZkpokZBound)
+    (hFakeE : ∀ j, polyIntInfNorm (zeFake j) < rlweZkpokZBound) :
+    verifyJointOrSigma stmt
+      (buildHonestJointOrTranscript stmt branch sR e1 ysMask yeMask uFake zsFake zeFake) = true :=
+  honestJointOrTranscriptWithRo_accepts (cshake256Xof (4 * rlweZkpokReps) rlweZkpokDomain)
+    stmt branch sR e1 ysMask yeMask uFake zsFake zeFake hStmt hRel hSafeS hSafeE hFakeS hFakeE
+
+theorem honestJointOrTranscriptPq13_accepts (stmt : RlweOrStatement) (branch : Bool)
+    (sR e1 : PolyInt 1024)
+    (ysMask yeMask : Fin rlweZkpokPqReps → PolyInt 1024)
+    (uFake : Fin rlweZkpokPqReps → BitVec 11)
+    (zsFake zeFake : Fin rlweZkpokPqReps → PolyInt 1024)
+    (hStmt : checkRlweOrStatementValid stmt = true)
+    (hRel : CommRingOps.add (CommRingOps.mul stmt.a (polyIntToRq sR)) (polyIntToRq e1) =
+      stmt.branchPk branch)
+    (hSafeS : ∀ j, 2 * polyIntInfNorm sR + polyIntInfNorm (ysMask j) < rlweZkpokZBound)
+    (hSafeE : ∀ j, 2 * polyIntInfNorm e1 + polyIntInfNorm (yeMask j) < rlweZkpokZBound)
+    (hFakeS : ∀ j, polyIntInfNorm (zsFake j) < rlweZkpokZBound)
+    (hFakeE : ∀ j, polyIntInfNorm (zeFake j) < rlweZkpokZBound) :
+    verifyJointOrSigmaPq13 stmt
+      (buildHonestJointOrTranscriptPq13 stmt branch sR e1 ysMask yeMask uFake zsFake zeFake) = true :=
+  honestJointOrTranscriptWithRo_accepts (cshake256Xof (4 * rlweZkpokPqReps) rlweZkpokDomain)
+    stmt branch sR e1 ysMask yeMask uFake zsFake zeFake hStmt hRel hSafeS hSafeE hFakeS hFakeE
+
+/-- Canonical inhabited OR-Sigma statement (`a = 1, tCrs = 1, pk0 = 1`). -/
+def sampleRlweOrStatement : RlweOrStatement where
+  crsCoin := List.replicate 32 0x11
+  sessionId := List.replicate 32 0x22
+  senderId := 0
+  receiverId := 1
+  otIdx := 0
+  a := CommRingOps.one
+  tCrs := CommRingOps.one
+  pk0 := CommRingOps.one
+
+def sampleUnitPolyInt : PolyInt 1024 := fun k => if k.val = 0 then 1 else 0
+def sampleZeroPolyInt : PolyInt 1024 := fun _ => 0
+
+private theorem sampleUnitPolyInt_toRq : polyIntToRq sampleUnitPolyInt = CommRingOps.one := by
+  funext k; unfold polyIntToRq sampleUnitPolyInt
+  change Zq12289.ofInt (if k.val = 0 then 1 else 0) =
+    (if k.val = 0 then CommRingOps.one else CommRingOps.zero)
+  split <;> rfl
+
+private theorem sampleZeroPolyInt_toRq : polyIntToRq sampleZeroPolyInt = CommRingOps.zero := by
+  funext _; rfl
+
+private theorem sampleUnitPolyInt_infNorm_le : polyIntInfNorm sampleUnitPolyInt ≤ 1 := by
+  rw [polyIntInfNorm_le_iff]; intro k; unfold sampleUnitPolyInt; split <;> decide
+
+private theorem sampleZeroPolyInt_infNorm_eq : polyIntInfNorm sampleZeroPolyInt = 0 := by
+  have hLe : polyIntInfNorm sampleZeroPolyInt ≤ 0 := by
+    rw [polyIntInfNorm_le_iff]; intro _; unfold sampleZeroPolyInt; decide
+  omega
+
+private theorem polyRq1024_one_ne_zero : (CommRingOps.one : PolyRq1024) ≠ CommRingOps.zero := by
+  intro hEq
+  have h0 := congrFun hEq ⟨0, by decide⟩
+  revert h0; decide
+
+private theorem sampleRlweOrStatement_valid : checkRlweOrStatementValid sampleRlweOrStatement = true := by
+  have hOneFalse : polyRqEq (CommRingOps.one : PolyRq1024) CommRingOps.zero = false :=
+    (polyRqEq_eq_false_iff _ _).mpr polyRq1024_one_ne_zero
+  unfold checkRlweOrStatementValid sampleRlweOrStatement
+  dsimp only
+  rw [hOneFalse]
+  decide
+
+/-- Concrete inhabited honest OR-Sigma transcript under production `cSHAKE256`. -/
+def sampleHonestJointOrTranscript : JointOrSigmaTranscript :=
+  buildHonestJointOrTranscript sampleRlweOrStatement false
+    sampleUnitPolyInt sampleZeroPolyInt
+    (fun _ => sampleUnitPolyInt) (fun _ => sampleZeroPolyInt)
+    (fun _ => 0#11)
+    (fun _ => sampleZeroPolyInt) (fun _ => sampleZeroPolyInt)
+
+/-- **Inhabitedness Witness for `verifyJointOrSigma` & `jointOrSigma_extract_witness` (`inhabited_jointOrSigma_and_extractor`)**:
+    Both production `verifyJointOrSigma` (`cSHAKE256`) and the 2-special soundness extractor
+    `jointOrSigma_extract_witness` are constructively inhabited (non-vacuous). -/
+theorem inhabited_jointOrSigma_and_extractor :
+    verifyJointOrSigma sampleRlweOrStatement sampleHonestJointOrTranscript = true ∧
+    Nonempty (Σ (ro ro' : List UInt8 → List UInt8) (tr tr' : JointOrSigmaTranscript),
+      ExtractedJointOrWitness sampleRlweOrStatement ro ro' tr tr') := by
+  have hRel : CommRingOps.add
+      (CommRingOps.mul sampleRlweOrStatement.a (polyIntToRq sampleUnitPolyInt))
+      (polyIntToRq sampleZeroPolyInt) = sampleRlweOrStatement.branchPk false := by
+    rw [sampleUnitPolyInt_toRq, sampleZeroPolyInt_toRq]
+    unfold sampleRlweOrStatement RlweOrStatement.branchPk
+    simp only [Bool.false_eq_true, ↓reduceIte]
+    rw [LawfulCommRing.mul_one, LawfulCommRing.add_zero]
+  have hSafeS : ∀ _ : Fin rlweZkpokReps,
+      2 * polyIntInfNorm sampleUnitPolyInt + polyIntInfNorm sampleUnitPolyInt < rlweZkpokZBound := by
+    intro _; have := sampleUnitPolyInt_infNorm_le; unfold rlweZkpokZBound; omega
+  have hSafeE : ∀ _ : Fin rlweZkpokReps,
+      2 * polyIntInfNorm sampleZeroPolyInt + polyIntInfNorm sampleZeroPolyInt < rlweZkpokZBound := by
+    intro _; rw [sampleZeroPolyInt_infNorm_eq]; decide
+  have hFake : ∀ _ : Fin rlweZkpokReps, polyIntInfNorm sampleZeroPolyInt < rlweZkpokZBound := by
+    intro _; rw [sampleZeroPolyInt_infNorm_eq]; decide
+  refine ⟨honestJointOrTranscript_accepts sampleRlweOrStatement false
+      sampleUnitPolyInt sampleZeroPolyInt
+      (fun _ => sampleUnitPolyInt) (fun _ => sampleZeroPolyInt)
+      (fun _ => 0#11) (fun _ => sampleZeroPolyInt) (fun _ => sampleZeroPolyInt)
+      sampleRlweOrStatement_valid hRel hSafeS hSafeE hFake hFake, ?_⟩
+  let ro0 : List UInt8 → List UInt8 := fun _ => encodeNatLeBytes 4 0 ++ List.replicate 48 0
+  let ro1 : List UInt8 → List UInt8 := fun _ => encodeNatLeBytes 4 1 ++ List.replicate 48 0
+  let tr0 := buildHonestJointOrTranscriptWithRoGen rlweZkpokReps ro0
+    sampleRlweOrStatement false sampleUnitPolyInt sampleZeroPolyInt
+    (fun _ => sampleUnitPolyInt) (fun _ => sampleZeroPolyInt)
+    (fun _ => 0#11) (fun _ => sampleZeroPolyInt) (fun _ => sampleZeroPolyInt)
+  let tr1 := buildHonestJointOrTranscriptWithRoGen rlweZkpokReps ro1
+    sampleRlweOrStatement false sampleUnitPolyInt sampleZeroPolyInt
+    (fun _ => sampleUnitPolyInt) (fun _ => sampleZeroPolyInt)
+    (fun _ => 0#11) (fun _ => sampleZeroPolyInt) (fun _ => sampleZeroPolyInt)
+  have hAcc0 := honestJointOrTranscriptWithRo_accepts ro0 sampleRlweOrStatement false
+    sampleUnitPolyInt sampleZeroPolyInt
+    (fun _ => sampleUnitPolyInt) (fun _ => sampleZeroPolyInt)
+    (fun _ => 0#11) (fun _ => sampleZeroPolyInt) (fun _ => sampleZeroPolyInt)
+    sampleRlweOrStatement_valid hRel hSafeS hSafeE hFake hFake
+  have hAcc1 := honestJointOrTranscriptWithRo_accepts ro1 sampleRlweOrStatement false
+    sampleUnitPolyInt sampleZeroPolyInt
+    (fun _ => sampleUnitPolyInt) (fun _ => sampleZeroPolyInt)
+    (fun _ => 0#11) (fun _ => sampleZeroPolyInt) (fun _ => sampleZeroPolyInt)
+    sampleRlweOrStatement_valid hRel hSafeS hSafeE hFake hFake
+  have hNe : hashRlweZkpokJointChallengesWithRo rlweZkpokReps ro0 sampleRlweOrStatement.crsCoin
+        sampleRlweOrStatement.sessionId sampleRlweOrStatement.senderId sampleRlweOrStatement.receiverId
+        sampleRlweOrStatement.otIdx sampleRlweOrStatement.pk0 sampleRlweOrStatement.tCrs tr0.comms ≠
+      hashRlweZkpokJointChallengesWithRo rlweZkpokReps ro1 sampleRlweOrStatement.crsCoin
+        sampleRlweOrStatement.sessionId sampleRlweOrStatement.senderId sampleRlweOrStatement.receiverId
+        sampleRlweOrStatement.otIdx sampleRlweOrStatement.pk0 sampleRlweOrStatement.tCrs tr1.comms := by
+    intro hEq
+    have h0 := congrFun hEq ⟨0, by decide⟩
+    unfold hashRlweZkpokJointChallengesWithRo decodeChal11Stream rlweZkpokReps at h0
+    dsimp only [ro0, ro1] at h0
+    have hTake0 : (encodeNatLeBytes 4 0 ++ List.replicate 48 0).take 4 = encodeNatLeBytes 4 0 := by
+      have := encodeNatLeBytes_length 4 0
+      rw [List.take_append_of_le_length (by omega), List.take_of_length_le (by omega)]
+    have hTake1 : (encodeNatLeBytes 4 1 ++ List.replicate 48 0).take 4 = encodeNatLeBytes 4 1 := by
+      have := encodeNatLeBytes_length 4 1
+      rw [List.take_append_of_le_length (by omega), List.take_of_length_le (by omega)]
+    rw [hTake0, hTake1,
+        decodeNatLeBytes_encodeNatLeBytes 4 0 (by decide),
+        decodeNatLeBytes_encodeNatLeBytes 4 1 (by decide)] at h0
+    revert h0; decide
+  exact ⟨⟨ro0, ro1, tr0, tr1,
+    jointOrSigma_extract_witness sampleRlweOrStatement ro0 ro1 tr0 tr1 rfl hNe hAcc0 hAcc1⟩⟩
+
+/-- **`#tooth` Mutation Sensitivity of `verifyJointOrSigma` (`tooth_verifyJointOrSigma_rejects_tampering`, `C0-2`)**:
+    Starting from an honest accepting transcript `sampleHonestJointOrTranscript` under production
+    `cSHAKE256("QSAG.OT.RLWE.ZKPOK/v3")`:
+    1. **Tampered `pk0`** (`pk0' = pk0 + 1`): rejected (`verifyJointOrSigma = false`).
+    2. **Tampered `comms`** (corrupting `(comms 0).1` by `+ 1`): rejected (`verifyJointOrSigma = false`).
+    3. **Tampered `chal0 ^^^ chal1`** (flipping `chal0 0 ^^^ 1#11` without re-proving):
+       rejected (`verifyJointOrSigma = false`).
+    4. **Out-of-box response** (`z = 3070`, the excluded upper endpoint of `[-3070, 3070)`): rejected
+       (`verifyJointOrSigma = false`). -/
+theorem tooth_verifyJointOrSigma_rejects_tampering :
+    let stmt := sampleRlweOrStatement
+    let tr := sampleHonestJointOrTranscript
+    let stmtBadPk0 := { stmt with pk0 := CommRingOps.add stmt.pk0 CommRingOps.one }
+    let trBadComms := { tr with comms := fun j =>
+      if j.val = 0 then (CommRingOps.add (tr.comms j).1 CommRingOps.one, (tr.comms j).2) else tr.comms j }
+    let trBadChal := { tr with chal0 := fun j => if j.val = 0 then tr.chal0 j ^^^ 1#11 else tr.chal0 j }
+    let trBadBound := { tr with zs0 := fun j => if j.val = 0 then (fun _ => 3070) else tr.zs0 j }
+    verifyJointOrSigma stmt tr = true ∧
+    verifyJointOrSigma stmtBadPk0 tr = false ∧
+    verifyJointOrSigma stmt trBadComms = false ∧
+    verifyJointOrSigma stmt trBadChal = false ∧
+    verifyJointOrSigma stmt trBadBound = false := by
+  intro stmt tr stmtBadPk0 trBadComms trBadChal trBadBound
+  have hAcc : verifyJointOrSigma stmt tr = true := inhabited_jointOrSigma_and_extractor.1
+  have hRep0 : (recomputeJointOrRepComm stmt tr ⟨0, by decide⟩).1 = (tr.comms ⟨0, by decide⟩).1 := by
+    unfold verifyJointOrSigma verifyJointOrSigmaWithRoGen at hAcc
+    simp only [Bool.and_eq_true] at hAcc
+    have h0 := (allFin_eq_true_iff _).mp hAcc.2 ⟨0, by decide⟩
+    unfold verifyJointOrRepGen at h0
+    simp only [Bool.and_eq_true, polyRqEq_iff] at h0
+    exact h0.1.2.1
+  -- 1. Tampered `pk0`: `w0Exp` shifts by `-d(chal0 0) * 1`, which is non-zero by `polyRqFromChal11_ne_zero`!
+  have hBadPk0 : verifyJointOrSigma stmtBadPk0 tr = false := by
+    unfold verifyJointOrSigma verifyJointOrSigmaWithRoGen
+    cases hc : checkRlweOrStatementValid stmtBadPk0
+    · rfl
+    · simp only [Bool.true_and]
+      apply allFin_eq_false_of_false ⟨0, by decide⟩
+      unfold verifyJointOrRepGen
+      have hNeW0 : (recomputeJointOrRepComm stmtBadPk0 tr ⟨0, by decide⟩).1 ≠ (tr.comms ⟨0, by decide⟩).1 := by
+        rw [← hRep0]
+        unfold recomputeJointOrRepComm
+        dsimp only [stmtBadPk0]
+        intro hEq
+        have hChalNz := polyRqFromChal11_ne_zero (tr.chal0 ⟨0, by decide⟩)
+        apply hChalNz
+        rw [LawfulCommRing.left_distrib, LawfulCommRing.mul_one] at hEq
+        funext k
+        have hk := congrFun hEq k
+        let X := CommRingOps.add (CommRingOps.mul stmt.a (polyIntToRq (tr.zs0 ⟨0, by decide⟩)))
+          (polyIntToRq (tr.ze0 ⟨0, by decide⟩)) k
+        let D0 := CommRingOps.mul (polyRqFromChal11 (tr.chal0 ⟨0, by decide⟩)) stmt.pk0 k
+        let D1 := polyRqFromChal11 (tr.chal0 ⟨0, by decide⟩) k
+        change CommRingOps.sub X (CommRingOps.add D0 D1) = CommRingOps.sub X D0 at hk
+        show D1 = CommRingOps.zero
+        rw [← Zq12289.ofInt_natVal X, ← Zq12289.ofInt_natVal D0, ← Zq12289.ofInt_natVal D1] at hk
+        rw [← Zq12289.ofInt_natVal D1, ← Zq12289.ofInt_zero]
+        simp only [← Zq12289.ofInt_add, ← Zq12289.ofInt_sub] at hk
+        have hv := congrArg Zq12289.val hk
+        have hLt := D1.isLt
+        simp only [Zq12289.ofInt] at hv ⊢
+        apply Zq12289.ext
+        dsimp only
+        omega
+      have hFalse := (polyRqEq_eq_false_iff _ _).mpr hNeW0
+      dsimp only
+      rw [hFalse]
+      simp
+  -- 2. Tampered `comms` (`+ 1` at rep 0): `w0Exp = (tr.comms 0).1 ≠ (tr.comms 0).1 + 1`!
+  have hBadComms : verifyJointOrSigma stmt trBadComms = false := by
+    unfold verifyJointOrSigma verifyJointOrSigmaWithRoGen
+    cases hc : checkRlweOrStatementValid stmt
+    · rfl
+    · simp only [Bool.true_and]
+      apply allFin_eq_false_of_false ⟨0, by decide⟩
+      unfold verifyJointOrRepGen
+      have hSameRecomp : (recomputeJointOrRepComm stmt trBadComms ⟨0, by decide⟩).1 =
+          (tr.comms ⟨0, by decide⟩).1 := hRep0
+      have hNe : (recomputeJointOrRepComm stmt trBadComms ⟨0, by decide⟩).1 ≠
+          (trBadComms.comms ⟨0, by decide⟩).1 := by
+        rw [hSameRecomp]
+        dsimp only [trBadComms]
+        simp only [↓reduceIte]
+        intro hEq
+        have hk0 := congrFun hEq ⟨0, by decide⟩
+        have hVal := congrArg Zq12289.val hk0
+        have hLt := ((tr.comms ⟨0, by decide⟩).1 ⟨0, by decide⟩).isLt
+        change ((tr.comms ⟨0, by decide⟩).1 ⟨0, by decide⟩).val =
+          (((tr.comms ⟨0, by decide⟩).1 ⟨0, by decide⟩).val + 1) % 12289 at hVal
+        omega
+      have hFalse := (polyRqEq_eq_false_iff _ _).mpr hNe
+      dsimp only
+      rw [hFalse]
+      simp
+  -- 4. Tampered `chal0 ^^^ chal1` (`chal0 0 ^^^ 1#11`): `w0Exp` shifts by `-((d(u') - d(u)) * pk0) ≠ 0`!
+  have hBadChal : verifyJointOrSigma stmt trBadChal = false := by
+    unfold verifyJointOrSigma verifyJointOrSigmaWithRoGen
+    cases hc : checkRlweOrStatementValid stmt
+    · rfl
+    · simp only [Bool.true_and]
+      apply allFin_eq_false_of_false ⟨0, by decide⟩
+      unfold verifyJointOrRepGen
+      have hU0Ne : trBadChal.chal0 ⟨0, by decide⟩ ≠ tr.chal0 ⟨0, by decide⟩ := by
+        dsimp only [trBadChal]
+        simp only [↓reduceIte]
+        intro hEq
+        have hBit := congrArg (fun x : BitVec 11 => x.getLsbD 0) hEq
+        simp only [BitVec.getLsbD_xor] at hBit
+        have hb1 : (1#11).getLsbD 0 = true := by decide
+        rw [hb1] at hBit
+        cases hb : (tr.chal0 ⟨0, by decide⟩).getLsbD 0 <;> rw [hb] at hBit <;> cases hBit
+      have hNeW0 : (recomputeJointOrRepComm stmt trBadChal ⟨0, by decide⟩).1 ≠
+          (trBadChal.comms ⟨0, by decide⟩).1 := by
+        have hTarget : (trBadChal.comms ⟨0, by decide⟩).1 =
+            (recomputeJointOrRepComm stmt tr ⟨0, by decide⟩).1 := hRep0.symm
+        rw [hTarget]
+        unfold recomputeJointOrRepComm
+        dsimp only [trBadChal, stmt, sampleRlweOrStatement]
+        simp only [↓reduceIte, LawfulCommRing.mul_one]
+        intro hEq
+        obtain ⟨hDiffNz, _, _⟩ := chal11_diff_nonzero_short_and_invertible hU0Ne
+        apply hDiffNz
+        rw [polyIntToRq_sub]
+        funext k
+        have hk := congrFun hEq k
+        let X := CommRingOps.add
+          (CommRingOps.mul CommRingOps.one (polyIntToRq (tr.zs0 ⟨0, by decide⟩)))
+          (polyIntToRq (tr.ze0 ⟨0, by decide⟩)) k
+        let D' := polyRqFromChal11 (tr.chal0 ⟨0, by decide⟩ ^^^ 1#11) k
+        let D := polyRqFromChal11 (tr.chal0 ⟨0, by decide⟩) k
+        change CommRingOps.sub X D' = CommRingOps.sub X D at hk
+        show CommRingOps.sub D' D = CommRingOps.zero
+        rw [← Zq12289.ofInt_natVal X, ← Zq12289.ofInt_natVal D', ← Zq12289.ofInt_natVal D] at hk
+        rw [← Zq12289.ofInt_natVal D', ← Zq12289.ofInt_natVal D, ← Zq12289.ofInt_zero]
+        simp only [← Zq12289.ofInt_sub] at hk ⊢
+        have hv := congrArg Zq12289.val hk
+        simp only [Zq12289.ofInt] at hv ⊢
+        apply Zq12289.ext
+        dsimp only
+        omega
+      have hFalse := (polyRqEq_eq_false_iff _ _).mpr hNeW0
+      dsimp only
+      rw [hFalse]
+      simp
+  -- 5. Out-of-box response (`z = 3070`): `boundsOk = false`.
+  have hBadBound : verifyJointOrSigma stmt trBadBound = false := by
+    unfold verifyJointOrSigma verifyJointOrSigmaWithRoGen
+    cases hc : checkRlweOrStatementValid stmt
+    · rfl
+    · simp only [Bool.true_and]
+      apply allFin_eq_false_of_false ⟨0, by decide⟩
+      unfold verifyJointOrRepGen
+      have hDecFalse : polyIntInZkpokBox (trBadBound.zs0 ⟨0, by decide⟩) = false := by
+        cases hb : polyIntInZkpokBox (trBadBound.zs0 ⟨0, by decide⟩)
+        · rfl
+        · have h0 := (polyIntInZkpokBox_iff _).mp hb ⟨0, by decide⟩
+          dsimp only [trBadBound] at h0
+          simp only [↓reduceIte] at h0
+          unfold rlweZkpokZBound at h0
+          omega
+      dsimp only
+      rw [hDecFalse]
+      simp
+  exact ⟨hAcc, hBadPk0, hBadComms, hBadChal, hBadBound⟩
+
+/-! ### 2.1b `#tooth` Independent vs. Joint Fiat-Shamir Challenge Grinding (`P0-11` & `G0-D` QROM) -/
+
+/-- Grinding query cost under joint 7-commitment hashing `H(pk0, tCrs, C_0..C_6)` (`2^(7*m)`). -/
+def jointChallengeGrindCost (m : Nat) : Nat := 2 ^ (7 * m)
+
+/-- Grinding query cost when each repetition `j ∈ Fin 7` hashes `H(pk0, tCrs, j, C_j)` independently (`7 * 2^m`). -/
+def indepChallengeGrindCost (m : Nat) : Nat := 7 * (2 ^ m)
+
+/-- Bit-weighted independent grinding cost `k * 2^(k/7)` (`(7 * m) * 2^m`). -/
+def bitWeightedIndepGrindCost (m : Nat) : Nat := (7 * m) * (2 ^ m)
+
+/-- Arithmetic square-root search scale; not a QROM security lower bound `2^((R * m) / 2)` (`G0-D`). -/
+def groverJointChallengeGrindCost (R m : Nat) : Nat := 2 ^ ((R * m) / 2)
+
+/-- Independent per-repetition grinding query cost across `R` slots (`R * 2^m`). -/
+def indepChallengeGrindCostGen (R m : Nat) : Nat := R * (2 ^ m)
+
+private theorem seven_mul_lt_pow_six : ∀ m : Nat, 1 ≤ m → 7 * m < 2 ^ (6 * m)
+  | 0, hm => by omega
+  | 1, _ => by decide
+  | m + 2, _ => by
+    have ih := seven_mul_lt_pow_six (m + 1) (by omega)
+    have hPow : 2 ^ (6 * (m + 2)) = 64 * 2 ^ (6 * (m + 1)) := by
+      have hAdd : 6 * (m + 2) = 6 * (m + 1) + 6 := by omega
+      rw [hAdd, Nat.pow_add, Nat.mul_comm]
+    omega
+
+/-- Arithmetic comparison of independent and joint challenge search spaces. The 20-bit
+    clauses describe the historical profile. The production 13-by-11 profile has square-root
+    exponent floor 71, below 128. These identities are not a QROM reduction. -/
+theorem tooth_independent_challenges_drop_grinding_cost (m : Nat) (hm : 1 ≤ m) :
+    indepChallengeGrindCost m ≤ bitWeightedIndepGrindCost m ∧
+    bitWeightedIndepGrindCost m < jointChallengeGrindCost m ∧
+    indepChallengeGrindCost 20 < 2 ^ 23 ∧
+    bitWeightedIndepGrindCost 20 < 2 ^ 28 ∧
+    jointChallengeGrindCost 20 = 2 ^ 140 ∧
+    groverJointChallengeGrindCost rlweZkpokClassicalReps 20 = 2 ^ 70 ∧
+    groverJointChallengeGrindCost rlweZkpokClassicalReps 20 < 2 ^ 128 ∧
+    groverJointChallengeGrindCost rlweZkpokReps 11 = 2 ^ 71 ∧
+    groverJointChallengeGrindCost rlweZkpokReps 11 < 2 ^ 128 ∧
+    indepChallengeGrindCostGen rlweZkpokReps 20 < 2 ^ 24 := by
+  unfold indepChallengeGrindCost bitWeightedIndepGrindCost jointChallengeGrindCost
+    groverJointChallengeGrindCost indepChallengeGrindCostGen rlweZkpokClassicalReps rlweZkpokReps
+  have h1 : 7 * 2 ^ m ≤ (7 * m) * 2 ^ m := by
+    apply Nat.mul_le_mul_right
+    omega
+  have h2 : (7 * m) * 2 ^ m < 2 ^ (7 * m) := by
+    have hSplit : 7 * m = 6 * m + m := by omega
+    conv => rhs; rw [hSplit, Nat.pow_add]
+    exact Nat.mul_lt_mul_of_pos_right (seven_mul_lt_pow_six m hm) (Nat.two_pow_pos m)
+  exact ⟨h1, h2, by decide, by decide, rfl, rfl, by decide, rfl, by decide, by decide⟩
+
+/-! ### 2.2 Discrete-Gaussian Rejection Sampling Statistical HVZK Bound + `#tooth` -/
+
+/-- Conditional finite-weight rejection model over candidate response space `Fin Z`.
+    The cancellation field is an assumption, not a verified instance of the Rust Q192 sampler.
+    Inside `inSafeBox z = true` (`‖z‖_∞ < B - B_s`), Lyubashevsky rejection sampling accepts
+    shifted sample `y = z - v` with numerator `accNum z` such that `srcWeight z * accNum z = targetWeight z * normConst`,
+    eliminating all dependence on the secret witness shift `v`! -/
+structure GaussianRejWitnessInstance (Z : Nat) where
+  targetWeight : Fin Z → Nat
+  inSafeBox : Fin Z → Bool
+  srcWeight : Fin Z → Nat
+  accNum : Fin Z → Nat
+  normConst : Nat
+  normConst_pos : 0 < normConst
+  safe_box_cancel : ∀ z : Fin Z, inSafeBox z = true →
+    srcWeight z * accNum z = targetWeight z * normConst
+
+/-- Unnormalized accepted response weight emitted by one rejection-sampling trial. -/
+def GaussianRejWitnessInstance.acceptedWeight {Z : Nat}
+    (inst : GaussianRejWitnessInstance Z) (z : Fin Z) : Nat :=
+  if inst.inSafeBox z then inst.srcWeight z * inst.accNum z else 0
+
+/-- Safe-box target mass $\sum_{z \in \mathsf{Safe}} \rho_\sigma(z)$. -/
+def gaussianSafeMass {Z : Nat} (targetWeight : Fin Z → Nat) (inSafeBox : Fin Z → Bool) : Nat :=
+  natFinSum Z (fun z => if inSafeBox z then targetWeight z else 0)
+
+/-- Tail mass $\sum_{z \notin \mathsf{Safe}} \rho_\sigma(z)$ outside the rejection safe box. -/
+def gaussianTailMass {Z : Nat} (targetWeight : Fin Z → Nat) (inSafeBox : Fin Z → Bool) : Nat :=
+  natFinSum Z (fun z => if inSafeBox z then 0 else targetWeight z)
+
+theorem gaussianTotalMass_eq_safe_add_tail {Z : Nat}
+    (targetWeight : Fin Z → Nat) (inSafeBox : Fin Z → Bool) :
+    natFinSum Z targetWeight =
+      gaussianSafeMass targetWeight inSafeBox + gaussianTailMass targetWeight inSafeBox := by
+  unfold gaussianSafeMass gaussianTailMass
+  rw [← natFinSum_add]
+  apply natFinSum_congr
+  intro z
+  cases inSafeBox z <;> simp
+
+/-- **Exact Conditional Witness-Independence (`gaussian_rej_conditional_witness_independent`)**:
+    For ANY two secret witnesses `(w₁, w₂)` sharing `(targetWeight, inSafeBox)`, cross-multiplied
+    accepted response weights are **pointwise identical** (`w₁.acceptedWeight z * w₂.normConst =
+    w₂.acceptedWeight z * w₁.normConst` for every `z : Fin Z`), yielding **zero** conditional
+    statistical distance between any two honest witnesses! -/
+theorem gaussian_rej_conditional_witness_independent {Z : Nat}
+    (w₁ w₂ : GaussianRejWitnessInstance Z)
+    (hTarget : w₁.targetWeight = w₂.targetWeight)
+    (hBox : w₁.inSafeBox = w₂.inSafeBox) (z : Fin Z) :
+    w₁.acceptedWeight z * w₂.normConst = w₂.acceptedWeight z * w₁.normConst := by
+  unfold GaussianRejWitnessInstance.acceptedWeight
+  rw [hBox]
+  cases hSafe : w₂.inSafeBox z
+  · simp
+  · simp only [↓reduceIte]
+    have hSafe1 : w₁.inSafeBox z = true := (congrFun hBox z).trans hSafe
+    rw [w₁.safe_box_cancel z hSafe1, w₂.safe_box_cancel z hSafe, hTarget]
+    exact Nat.mul_right_comm (w₂.targetWeight z) w₁.normConst w₂.normConst
+
+/-- **Discrete-Gaussian Rejection Sampling Statistical HVZK Bound (`discrete_gaussian_rejection_hvzk_bound`)**:
+    1. Conditioned on acceptance (`0 < safeMass`), the prover's accepted distribution equals the
+       box-restricted target Gaussian `z ↦ if inSafeBox z then targetWeight z else 0` independently of the secret witness.
+    2. Comparing the normalized accepted distribution against the unclipped ideal Gaussian `targetWeight`
+       (`totalMass = safeMass + tailMass`), the exact scaled $L_1$ statistical distance is
+       `2 * safeMass * tailMass` (exact TV distance `tailMass / totalMass`), and across all `rlweZkpokReps = 13`
+       OR-Sigma repetitions satisfies `ratLe (rlweZkpokReps * l1Single, 2 * safeMass * totalMass) (rlweZkpokReps * tailMass, totalMass)`! -/
+theorem discrete_gaussian_rejection_hvzk_bound {Z : Nat}
+    (w : GaussianRejWitnessInstance Z)
+    (hSafePos : 0 < gaussianSafeMass w.targetWeight w.inSafeBox) :
+    let safeMass := gaussianSafeMass w.targetWeight w.inSafeBox
+    let tailMass := gaussianTailMass w.targetWeight w.inSafeBox
+    let totalMass := natFinSum Z w.targetWeight
+    let boxWeight := fun z : Fin Z => if w.inSafeBox z then w.targetWeight z else 0
+    let l1Scaled := natFinSum Z (fun z => natDist (boxWeight z * totalMass) (w.targetWeight z * safeMass))
+    (∀ z : Fin Z, w.acceptedWeight z = boxWeight z * w.normConst) ∧
+    l1Scaled = 2 * safeMass * tailMass ∧
+    ratLe (l1Scaled, 2 * safeMass * totalMass) (tailMass, totalMass) ∧
+    ratLe (rlweZkpokReps * l1Scaled, 2 * safeMass * totalMass) (rlweZkpokReps * tailMass, totalMass) := by
+  intro safeMass tailMass totalMass boxWeight l1Scaled
+  have hPoint : ∀ z : Fin Z, w.acceptedWeight z = boxWeight z * w.normConst := by
+    intro z
+    unfold GaussianRejWitnessInstance.acceptedWeight
+    dsimp only [boxWeight]
+    cases hSafe : w.inSafeBox z
+    · simp
+    · simp only [↓reduceIte, w.safe_box_cancel z hSafe]
+  have hTotEq : totalMass = safeMass + tailMass :=
+    gaussianTotalMass_eq_safe_add_tail w.targetWeight w.inSafeBox
+  have hTotPos : 0 < totalMass := by omega
+  have hTermEq : ∀ z : Fin Z,
+      natDist (boxWeight z * totalMass) (w.targetWeight z * safeMass) =
+        (if w.inSafeBox z then w.targetWeight z else 0) * tailMass +
+        (if w.inSafeBox z then 0 else w.targetWeight z) * safeMass := by
+    intro z
+    dsimp only [boxWeight]
+    rw [hTotEq]
+    cases hSafe : w.inSafeBox z
+    · simp only [Bool.false_eq_true, ↓reduceIte, Nat.zero_mul, Nat.zero_add]
+      unfold natDist; split <;> omega
+    · simp only [↓reduceIte, Nat.zero_mul, Nat.add_zero]
+      unfold natDist
+      rw [Nat.mul_add]
+      split <;> omega
+  have hL1Exact : l1Scaled = 2 * safeMass * tailMass := by
+    dsimp only [l1Scaled]
+    rw [natFinSum_congr hTermEq, natFinSum_add, natFinSum_mul_right, natFinSum_mul_right]
+    change safeMass * tailMass + tailMass * safeMass = 2 * safeMass * tailMass
+    rw [Nat.mul_comm tailMass safeMass, ← Nat.two_mul, Nat.mul_assoc]
+  have hDenPos : 0 < 2 * safeMass * totalMass := Nat.mul_pos (by omega) hTotPos
+  refine ⟨hPoint, hL1Exact, ?_, ?_⟩
+  · unfold ratLe
+    dsimp only
+    refine ⟨hDenPos, hTotPos, ?_⟩
+    rw [hL1Exact]
+    simp only [Nat.mul_assoc, Nat.mul_left_comm]
+    exact Nat.le_refl _
+  · unfold ratLe
+    dsimp only
+    refine ⟨hDenPos, hTotPos, ?_⟩
+    rw [hL1Exact]
+    simp only [Nat.mul_assoc, Nat.mul_left_comm]
+    exact Nat.le_refl _
+
+/-- **`#tooth` Omitting Gaussian Rejection Weight Leaks Secret Witness (`tooth_omitting_rejection_leaks_witness_shift`)**:
+    Without rejection weighting (`accNum = 1`), two distinct secret shifts (`v = 0` vs `v = 1`) over
+    `Fin 3` produce distinct conditional response weights inside `inSafeBox`, directly leaking `v`! -/
+theorem tooth_omitting_rejection_leaks_witness_shift :
+    let inSafe : Fin 3 → Bool := fun z => decide (z.val ≤ 1)
+    let rawShift0 : Fin 3 → Nat := fun z => if z.val = 0 then 4 else if z.val = 1 then 2 else 1
+    let rawShift1 : Fin 3 → Nat := fun z => if z.val = 0 then 2 else if z.val = 1 then 4 else 2
+    let mass0 := natFinSum 3 (fun z => if inSafe z then rawShift0 z else 0)
+    let mass1 := natFinSum 3 (fun z => if inSafe z then rawShift1 z else 0)
+    0 < mass0 ∧ 0 < mass1 ∧
+    rawShift0 ⟨0, by decide⟩ * mass1 ≠ rawShift1 ⟨0, by decide⟩ * mass0 := by
+  decide
+
+/-! ### 2.3 Fujisaki-Okamoto (`FO`) Re-Encryption Check Soundness & `PartyMachine` -/
+
+/-- Deterministic FO encryption coins `(r, e2, e3)` derived from `(branch, payload512)`. -/
+structure RlweFoCoins where
+  r : PolyInt 1024
+  e2 : PolyInt 1024
+  e3 : PolyInt 1024
+
+/-- Deterministic Fujisaki-Okamoto branch encryption matching `rlwe_fo_encrypt_branch`. -/
+def rlweFoEncrypt (a pkBranch : PolyRq1024) (payload : Fin 512 → Bool)
+    (coins : RlweFoCoins) : PolyRq1024 × PolyRq1024 :=
+  let u := CommRingOps.add (CommRingOps.mul a (polyIntToRq coins.r)) (polyIntToRq coins.e2)
+  let v := CommRingOps.add
+    (CommRingOps.add (CommRingOps.mul pkBranch (polyIntToRq coins.r)) (polyIntToRq coins.e3))
+    (encodePayload512 payload)
+  (u, v)
+
+/-- Receiver state for one FO-checked Ring-LWE Base-OT (`consumed` enforces single-use decryption). -/
+structure RlweFoReceiverState where
+  a : PolyRq1024
+  tCrs : PolyRq1024
+  pk0 : PolyRq1024
+  sR : PolyInt 1024
+  choiceBit : Bool
+  consumed : Bool
+
+/-- Sender wire response `((u0, v0), (u1, v1))`. -/
+structure RlweFoSenderMsg where
+  u0 : PolyRq1024
+  v0 : PolyRq1024
+  u1 : PolyRq1024
+  v1 : PolyRq1024
+
+/-- Deterministic FO-checked Base-OT Receiver transition wrapped as a `SimulationSpine.PartyMachine`. -/
+def rlweFoReceiverMachine (deriveCoins : Bool → (Fin 512 → Bool) → RlweFoCoins) :
+    PartyMachine RlweFoReceiverState RlweFoSenderMsg (Fin 512 → Bool) :=
+  PartyMachine.ofOption fun st msg =>
+    if st.consumed then none
+    else
+      let u_c := if st.choiceBit then msg.u1 else msg.u0
+      let v_c := if st.choiceBit then msg.v1 else msg.v0
+      let diff := CommRingOps.sub v_c (CommRingOps.mul u_c (polyIntToRq st.sR))
+      let decoded := decodePayload512 diff
+      let pk_c := if st.choiceBit then CommRingOps.add st.pk0 st.tCrs else st.pk0
+      let (uExp, vExp) := rlweFoEncrypt st.a pk_c decoded (deriveCoins st.choiceBit decoded)
+      if polyRqEq u_c uExp && polyRqEq v_c vExp then
+        some ({ st with consumed := true }, decoded)
+      else
+        none
+
+/-- **Fujisaki-Okamoto Re-Encryption Check Soundness & Honest Completeness (`fo_reencryption_soundness`)**:
+    1. **Malicious-Sender Canonicality**: Whenever `rlweFoReceiverMachine` accepts `(st', out)` on an
+       arbitrary adversarial message `msg`, the active ciphertext `(u_c, v_c)` is **forced** to equal
+       the exact deterministic encryption `rlweFoEncrypt st.a pk_c out (deriveCoins st.choiceBit out)`
+       (eliminating all out-of-range noise-flooding / key-dependent-abort ciphertexts), and `st'.consumed = true`.
+    2. **Honest Zero-Failure Completeness**: When `deriveCoins` produces ternary coins (`‖·‖_∞ ≤ 1`) and
+       Receiver holds ternary `(sR, e1)` (`‖·‖_∞ ≤ 1`) for `pk_c = a * sR + e1`, honest FO encryption
+       of `(payload0, payload1)` is accepted with probability `1` and outputs `if choiceBit then payload1 else payload0`! -/
+theorem fo_reencryption_soundness
+    (deriveCoins : Bool → (Fin 512 → Bool) → RlweFoCoins) :
+    (∀ (st st' : RlweFoReceiverState) (msg : RlweFoSenderMsg) (out : Fin 512 → Bool),
+      (rlweFoReceiverMachine deriveCoins).step st msg = some (st', out) →
+      let u_c := if st.choiceBit then msg.u1 else msg.u0
+      let v_c := if st.choiceBit then msg.v1 else msg.v0
+      let pk_c := if st.choiceBit then CommRingOps.add st.pk0 st.tCrs else st.pk0
+      st.consumed = false ∧ st'.consumed = true ∧
+      (u_c, v_c) = rlweFoEncrypt st.a pk_c out (deriveCoins st.choiceBit out)) ∧
+    (∀ (a tCrs : PolyRq1024) (choiceBit : Bool) (sR e1 : PolyInt 1024)
+       (payload0 payload1 : Fin 512 → Bool),
+      polyIntInfNorm sR ≤ 1 → polyIntInfNorm e1 ≤ 1 →
+      (∀ b p, polyIntInfNorm (deriveCoins b p).r ≤ 1 ∧
+              polyIntInfNorm (deriveCoins b p).e2 ≤ 1 ∧
+              polyIntInfNorm (deriveCoins b p).e3 ≤ 1) →
+      let rlweSample := CommRingOps.add (CommRingOps.mul a (polyIntToRq sR)) (polyIntToRq e1)
+      let pk0 := if choiceBit then CommRingOps.sub rlweSample tCrs else rlweSample
+      let pk1 := CommRingOps.add pk0 tCrs
+      let (u0, v0) := rlweFoEncrypt a pk0 payload0 (deriveCoins false payload0)
+      let (u1, v1) := rlweFoEncrypt a pk1 payload1 (deriveCoins true payload1)
+      let st : RlweFoReceiverState := ⟨a, tCrs, pk0, sR, choiceBit, false⟩
+      let target := if choiceBit then payload1 else payload0
+      (rlweFoReceiverMachine deriveCoins).step st ⟨u0, v0, u1, v1⟩ =
+        some ({ st with consumed := true }, target)) := by
+  constructor
+  · intro st st' msg out hStep
+    unfold rlweFoReceiverMachine PartyMachine.ofOption at hStep
+    dsimp only at hStep
+    cases hCons : st.consumed
+    · rw [hCons] at hStep
+      cases hc : st.choiceBit <;>
+        simp only [hc, Bool.false_eq_true, ↓reduceIte] at hStep ⊢ <;>
+        split at hStep
+      · rename_i hCheck
+        injection hStep with hPair
+        injection hPair with hSt hOut
+        subst hSt; subst hOut
+        simp only [Bool.and_eq_true, polyRqEq_iff] at hCheck
+        exact ⟨trivial, rfl, Prod.ext hCheck.1 hCheck.2⟩
+      · cases hStep
+      · rename_i hCheck
+        injection hStep with hPair
+        injection hPair with hSt hOut
+        subst hSt; subst hOut
+        simp only [Bool.and_eq_true, polyRqEq_iff] at hCheck
+        exact ⟨trivial, rfl, Prod.ext hCheck.1 hCheck.2⟩
+      · cases hStep
+    · rw [hCons] at hStep; simp at hStep
+  · intro a tCrs choiceBit sR e1 payload0 payload1 hsR he1 hTern
+    intro rlweSample pk0 pk1
+    let target := if choiceBit then payload1 else payload0
+    let coins := deriveCoins choiceBit target
+    have hC := hTern choiceBit target
+    have hDec := rlwe1024_poly_ot_decrypt_correct a tCrs choiceBit sR e1 coins.r coins.e2 coins.e3
+      payload0 payload1 hsR he1 hC.1 hC.2.1 hC.2.2
+    unfold rlweFoReceiverMachine PartyMachine.ofOption
+    dsimp only
+    cases choiceBit
+    · have hDec0 : decodePayload512 (CommRingOps.sub
+          (rlweFoEncrypt a pk0 payload0 (deriveCoins false payload0)).2
+          (CommRingOps.mul (rlweFoEncrypt a pk0 payload0 (deriveCoins false payload0)).1
+            (polyIntToRq sR))) = payload0 := hDec
+      simp only [Bool.false_eq_true, ↓reduceIte, hDec0, polyRqEq_self, Bool.and_self]
+    · have hDec1 : decodePayload512 (CommRingOps.sub
+          (rlweFoEncrypt a pk1 payload1 (deriveCoins true payload1)).2
+          (CommRingOps.mul (rlweFoEncrypt a pk1 payload1 (deriveCoins true payload1)).1
+            (polyIntToRq sR))) = payload1 := hDec
+      have hPk1Def : CommRingOps.add pk0 tCrs = pk1 := rfl
+      simp only [↓reduceIte, Bool.false_eq_true, hDec1, hPk1Def, polyRqEq_self, Bool.and_self]
+
+/-- **The FO accept set is public (`fo_accept_iff_canonical`)**:
+    for a receiver holding any ternary key `(sR, e1)` of its active public key `pk_c = a * sR + e1`, and
+    ternary derived coins, the machine accepts an **arbitrary** sender message with output `out` if and
+    only if the active ciphertext is the canonical encryption of `out` under `pk_c`. The right-hand side
+    mentions only public data `(a, pk_c, deriveCoins)`: the inactive ciphertext is never inspected, and
+    no sender message can make acceptance depend on the secret key. `fo_reencryption_soundness` gives
+    only the forward direction; the converse is the decryption margin `2049 < 3072` applied to an
+    adversarially chosen canonical ciphertext. -/
+theorem fo_accept_iff_canonical
+    (deriveCoins : Bool → (Fin 512 → Bool) → RlweFoCoins)
+    (hTern : ∀ b p, polyIntInfNorm (deriveCoins b p).r ≤ 1 ∧
+                    polyIntInfNorm (deriveCoins b p).e2 ≤ 1 ∧
+                    polyIntInfNorm (deriveCoins b p).e3 ≤ 1)
+    (a tCrs pk0 : PolyRq1024) (choiceBit : Bool) (sR e1 : PolyInt 1024)
+    (hsR : polyIntInfNorm sR ≤ 1) (he1 : polyIntInfNorm e1 ≤ 1)
+    (hKey : (if choiceBit then CommRingOps.add pk0 tCrs else pk0) =
+      CommRingOps.add (CommRingOps.mul a (polyIntToRq sR)) (polyIntToRq e1))
+    (msg : RlweFoSenderMsg) (out : Fin 512 → Bool) :
+    (∃ st' : RlweFoReceiverState,
+      (rlweFoReceiverMachine deriveCoins).step ⟨a, tCrs, pk0, sR, choiceBit, false⟩ msg =
+        some (st', out)) ↔
+      ((if choiceBit then msg.u1 else msg.u0), (if choiceBit then msg.v1 else msg.v0)) =
+        rlweFoEncrypt a (if choiceBit then CommRingOps.add pk0 tCrs else pk0) out
+          (deriveCoins choiceBit out) := by
+  constructor
+  · rintro ⟨st', hStep⟩
+    exact ((fo_reencryption_soundness deriveCoins).1 _ st' msg out hStep).2.2
+  · intro hCanon
+    refine ⟨⟨a, tCrs, pk0, sR, choiceBit, true⟩, ?_⟩
+    have hC := hTern choiceBit out
+    have hDecKey := rlwe1024_poly_ot_decrypt_correct a CommRingOps.zero false sR e1
+      (deriveCoins choiceBit out).r (deriveCoins choiceBit out).e2 (deriveCoins choiceBit out).e3
+      out out hsR he1 hC.1 hC.2.1 hC.2.2
+    unfold rlweFoReceiverMachine PartyMachine.ofOption
+    dsimp only
+    cases choiceBit
+    · simp only [Bool.false_eq_true, ↓reduceIte] at hCanon hKey ⊢
+      have hU := congrArg Prod.fst hCanon
+      have hV := congrArg Prod.snd hCanon
+      dsimp only at hU hV
+      have hDec : decodePayload512
+          (CommRingOps.sub msg.v0 (CommRingOps.mul msg.u0 (polyIntToRq sR))) = out := by
+        rw [hU, hV, hKey]; exact hDecKey
+      simp only [hDec, ← hU, ← hV, polyRqEq_self, Bool.and_self, ↓reduceIte]
+    · simp only [↓reduceIte] at hCanon hKey ⊢
+      have hU := congrArg Prod.fst hCanon
+      have hV := congrArg Prod.snd hCanon
+      dsimp only at hU hV
+      have hDec : decodePayload512
+          (CommRingOps.sub msg.v1 (CommRingOps.mul msg.u1 (polyIntToRq sR))) = out := by
+        rw [hU, hV, hKey]; exact hDecKey
+      simp only [hDec, ← hU, ← hV, polyRqEq_self, Bool.and_self, Bool.false_eq_true, ↓reduceIte]
+
+/-- **No key-dependent abort (`fo_accept_key_independent`)**:
+    two receivers holding different ternary keys `(sR, e1)`, `(sR', e1')` of the same public key accept
+    exactly the same sender messages with exactly the same outputs. A malicious sender therefore learns
+    nothing about which short key the receiver holds from the accept/abort bit. -/
+theorem fo_accept_key_independent
+    (deriveCoins : Bool → (Fin 512 → Bool) → RlweFoCoins)
+    (hTern : ∀ b p, polyIntInfNorm (deriveCoins b p).r ≤ 1 ∧
+                    polyIntInfNorm (deriveCoins b p).e2 ≤ 1 ∧
+                    polyIntInfNorm (deriveCoins b p).e3 ≤ 1)
+    (a tCrs pk0 : PolyRq1024) (choiceBit : Bool) (sR e1 sR' e1' : PolyInt 1024)
+    (hsR : polyIntInfNorm sR ≤ 1) (he1 : polyIntInfNorm e1 ≤ 1)
+    (hsR' : polyIntInfNorm sR' ≤ 1) (he1' : polyIntInfNorm e1' ≤ 1)
+    (hKey : (if choiceBit then CommRingOps.add pk0 tCrs else pk0) =
+      CommRingOps.add (CommRingOps.mul a (polyIntToRq sR)) (polyIntToRq e1))
+    (hKey' : (if choiceBit then CommRingOps.add pk0 tCrs else pk0) =
+      CommRingOps.add (CommRingOps.mul a (polyIntToRq sR')) (polyIntToRq e1'))
+    (msg : RlweFoSenderMsg) (out : Fin 512 → Bool) :
+    (∃ st' : RlweFoReceiverState,
+      (rlweFoReceiverMachine deriveCoins).step ⟨a, tCrs, pk0, sR, choiceBit, false⟩ msg =
+        some (st', out)) ↔
+    (∃ st' : RlweFoReceiverState,
+      (rlweFoReceiverMachine deriveCoins).step ⟨a, tCrs, pk0, sR', choiceBit, false⟩ msg =
+        some (st', out)) :=
+  (fo_accept_iff_canonical deriveCoins hTern a tCrs pk0 choiceBit sR e1 hsR he1 hKey msg out).trans
+    (fo_accept_iff_canonical deriveCoins hTern a tCrs pk0 choiceBit sR' e1' hsR' he1' hKey' msg out).symm
+
+/-- **Selective failure of one base OT (`fo_corrupted_branch_rejected_iff_chosen`)**:
+    if the sender's branch-`badBranch` ciphertext is not a canonical encryption of any payload while
+    the other branch carries a canonical one, a receiver holding a ternary key accepts exactly when its
+    choice bit avoids the corrupted branch. The accept bit therefore equals the predicate
+    `choiceBit ≠ badBranch`: one corrupted ciphertext leaks one choice bit and nothing about the key.
+    Over `k` such OTs this is the event counted by `fo_cut_and_choose_selective_failure_bound` in
+    `Qsag.Preprocessing` (one surviving choice vector out of `2^k`). -/
+theorem fo_corrupted_branch_rejected_iff_chosen
+    (deriveCoins : Bool → (Fin 512 → Bool) → RlweFoCoins)
+    (hTern : ∀ b p, polyIntInfNorm (deriveCoins b p).r ≤ 1 ∧
+                    polyIntInfNorm (deriveCoins b p).e2 ≤ 1 ∧
+                    polyIntInfNorm (deriveCoins b p).e3 ≤ 1)
+    (a tCrs pk0 : PolyRq1024) (choiceBit badBranch : Bool) (sR e1 : PolyInt 1024)
+    (hsR : polyIntInfNorm sR ≤ 1) (he1 : polyIntInfNorm e1 ≤ 1)
+    (hKey : (if choiceBit then CommRingOps.add pk0 tCrs else pk0) =
+      CommRingOps.add (CommRingOps.mul a (polyIntToRq sR)) (polyIntToRq e1))
+    (msg : RlweFoSenderMsg) (goodOut : Fin 512 → Bool)
+    (hBad : ∀ out : Fin 512 → Bool,
+      ((if badBranch then msg.u1 else msg.u0), (if badBranch then msg.v1 else msg.v0)) ≠
+        rlweFoEncrypt a (if badBranch then CommRingOps.add pk0 tCrs else pk0) out
+          (deriveCoins badBranch out))
+    (hGood :
+      ((if !badBranch then msg.u1 else msg.u0), (if !badBranch then msg.v1 else msg.v0)) =
+        rlweFoEncrypt a (if !badBranch then CommRingOps.add pk0 tCrs else pk0) goodOut
+          (deriveCoins (!badBranch) goodOut)) :
+    (∃ (st' : RlweFoReceiverState) (out : Fin 512 → Bool),
+      (rlweFoReceiverMachine deriveCoins).step ⟨a, tCrs, pk0, sR, choiceBit, false⟩ msg =
+        some (st', out)) ↔ choiceBit ≠ badBranch := by
+  constructor
+  · rintro ⟨st', out, hStep⟩ hEq
+    subst hEq
+    exact hBad out ((fo_accept_iff_canonical deriveCoins hTern a tCrs pk0 choiceBit sR e1
+      hsR he1 hKey msg out).mp ⟨st', hStep⟩)
+  · intro hNe
+    have hChoice : choiceBit = !badBranch := by
+      cases choiceBit <;> cases badBranch <;> first | rfl | exact absurd rfl hNe
+    subst hChoice
+    obtain ⟨st', hStep⟩ := (fo_accept_iff_canonical deriveCoins hTern a tCrs pk0 (!badBranch) sR e1
+      hsR he1 hKey msg goodOut).mpr hGood
+    exact ⟨st', goodOut, hStep⟩
+
+/-- **`#tooth` Passive RLWE Decryption Without FO Leaks Secret-Key Bits (`tooth_passive_rlwe_decrypt_without_fo_allows_key_dependent_abort`)**:
+    A malicious sender crafting boundary ciphertext `u_mal = 1`, `v_mal = 3072` causes passive decryption
+    `decodePayload512 (v_mal - u_mal * sR)` at index `0` to output `true` when `sR[0] = 0` (`3072 ∈ [3072, 9216)`)
+    and `false` when `sR[0] = 1` (`3071 < 3072`) — directly leaking 1 bit of Receiver's secret key `sR` —
+    whereas `rlweFoReceiverMachine` with ternary `deriveCoins` (`a = 0`, `‖e2‖_∞ ≤ 0` or `uExp = 0`) rejects `(u_mal, v_mal)`! -/
+theorem tooth_passive_rlwe_decrypt_without_fo_allows_key_dependent_abort :
+    let uMal : PolyRq1024 := CommRingOps.one
+    let vMal : PolyRq1024 := fun k => if k.val = 0 then ⟨3072, by decide⟩ else CommRingOps.zero
+    let sZero : PolyInt 1024 := fun _ => 0
+    let sOne : PolyInt 1024 := fun k => if k.val = 0 then 1 else 0
+    let zeroCoins : Bool → (Fin 512 → Bool) → RlweFoCoins := fun _ _ => ⟨sZero, sZero, sZero⟩
+    let st0 : RlweFoReceiverState := ⟨CommRingOps.zero, CommRingOps.zero, CommRingOps.zero, sZero, false, false⟩
+    let st1 : RlweFoReceiverState := ⟨CommRingOps.zero, CommRingOps.zero, CommRingOps.zero, sOne, false, false⟩
+    polyIntInfNorm sZero ≤ 1 ∧ polyIntInfNorm sOne ≤ 1 ∧
+    decodePayload512 (CommRingOps.sub vMal (CommRingOps.mul uMal (polyIntToRq sZero))) ⟨0, by decide⟩ = true ∧
+    decodePayload512 (CommRingOps.sub vMal (CommRingOps.mul uMal (polyIntToRq sOne))) ⟨0, by decide⟩ = false ∧
+    (rlweFoReceiverMachine zeroCoins).step st0 ⟨uMal, vMal, uMal, vMal⟩ = none ∧
+    (rlweFoReceiverMachine zeroCoins).step st1 ⟨uMal, vMal, uMal, vMal⟩ = none := by
+  intro uMal vMal sZero sOne zeroCoins st0 st1
+  have hs0 : polyIntInfNorm sZero ≤ 1 := by rw [polyIntInfNorm_le_iff]; intro _; decide
+  have hs1 : polyIntInfNorm sOne ≤ 1 := by rw [polyIntInfNorm_le_iff]; intro k; dsimp [sOne]; split <;> decide
+  have hOneMul0 : CommRingOps.mul uMal (polyIntToRq sZero) = polyIntToRq sZero :=
+    LawfulCommRing.one_mul _
+  have hOneMul1 : CommRingOps.mul uMal (polyIntToRq sOne) = polyIntToRq sOne :=
+    LawfulCommRing.one_mul _
+  have hDec0 : decodePayload512 (CommRingOps.sub vMal (CommRingOps.mul uMal (polyIntToRq sZero)))
+      ⟨0, by decide⟩ = true := by
+    rw [hOneMul0]
+    unfold decodePayload512; dsimp [vMal, sZero, polyIntToRq]; decide
+  have hDec1 : decodePayload512 (CommRingOps.sub vMal (CommRingOps.mul uMal (polyIntToRq sOne)))
+      ⟨0, by decide⟩ = false := by
+    rw [hOneMul1]
+    unfold decodePayload512; dsimp [vMal, sOne, polyIntToRq]; decide
+  have hRej : ∀ st : RlweFoReceiverState,
+      st.a = CommRingOps.zero → st.choiceBit = false → st.consumed = false →
+      (rlweFoReceiverMachine zeroCoins).step st ⟨uMal, vMal, uMal, vMal⟩ = none := by
+    intro st ha hc hcons
+    unfold rlweFoReceiverMachine PartyMachine.ofOption
+    simp only [hcons, hc, Bool.false_eq_true, ↓reduceIte]
+    let dec := decodePayload512 (CommRingOps.sub vMal (CommRingOps.mul uMal (polyIntToRq st.sR)))
+    have hNeU : polyRqEq uMal (rlweFoEncrypt st.a st.pk0 dec (zeroCoins false dec)).1 = false := by
+      rw [Bool.eq_false_iff]
+      intro hEq
+      have hFun := (polyRqEq_iff _ _).mp hEq
+      dsimp only [rlweFoEncrypt, zeroCoins] at hFun
+      rw [ha, LawfulCommRing.zero_mul] at hFun
+      have hZeroRq : polyIntToRq sZero = CommRingOps.zero := by funext _; rfl
+      rw [hZeroRq, LawfulCommRing.add_zero] at hFun
+      have hAt0 := congrArg Zq12289.val (congrFun hFun ⟨0, by decide⟩)
+      dsimp only [uMal] at hAt0
+      change 1 = 0 at hAt0
+      exact absurd hAt0 (by decide)
+    rw [hNeU]
+    rfl
+  exact ⟨hs0, hs1, hDec0, hDec1, hRej st0 rfl rfl rfl, hRej st1 rfl rfl rfl⟩
+
+/-! ## 3. Real Bitwise-AND KOS OT Extension + Binary `GF(2)` Leftover Hash Lemma (`[P0-05]` Closure) -/
+
+/-! ### 3.1 Exhaustive Constructive `BitVec k` Hypercube Enumeration & Summation -/
+
+private theorem getLsbD_setWidth_of_lt {w n i : Nat} (x : BitVec w) (hi : i < n) :
+    (x.setWidth n).getLsbD i = x.getLsbD i := by
+  simp only [BitVec.getLsbD_setWidth, hi, decide_true, Bool.true_and]
+
+private theorem getLsbD_cons_of_lt {k i : Nat} (b : Bool) (u : BitVec k) (hi : i < k) :
+    (BitVec.cons b u).getLsbD i = u.getLsbD i := by
+  have hne : i ≠ k := Nat.ne_of_lt hi
+  simp only [BitVec.getLsbD_cons, hne, ↓reduceIte]
+
+private theorem setWidth_cons {k : Nat} (b : Bool) (u : BitVec k) :
+    (BitVec.cons b u).setWidth k = u := by
+  apply BitVec.eq_of_getLsbD_eq; intro i hi
+  rw [getLsbD_setWidth_of_lt _ hi, getLsbD_cons_of_lt b u hi]
+
+private theorem setWidth_zero (w n : Nat) : (0#w).setWidth n = 0#n := by
+  apply BitVec.eq_of_getLsbD_eq; intro i hi
+  rw [getLsbD_setWidth_of_lt _ hi, BitVec.getLsbD_zero, BitVec.getLsbD_zero]
+
+private theorem setWidth_xor {w : Nat} (n : Nat) (u v : BitVec w) :
+    (u ^^^ v).setWidth n = u.setWidth n ^^^ v.setWidth n := by
+  apply BitVec.eq_of_getLsbD_eq; intro i hi
+  rw [getLsbD_setWidth_of_lt _ hi, BitVec.getLsbD_xor, BitVec.getLsbD_xor,
+      getLsbD_setWidth_of_lt _ hi, getLsbD_setWidth_of_lt _ hi]
+
+private theorem bvCons_split {k : Nat} (v : BitVec (k + 1)) :
+    BitVec.cons (v.getLsbD k) (v.setWidth k) = v := by
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hi
+  by_cases hik : i = k
+  · subst hik; simp only [BitVec.getLsbD_cons, ↓reduceIte]
+  · have hlt : i < k := by omega
+    rw [getLsbD_cons_of_lt _ _ hlt, getLsbD_setWidth_of_lt _ hlt]
+
+private theorem bvCons_inj {k : Nat} {b₁ b₂ : Bool} {u₁ u₂ : BitVec k} :
+    BitVec.cons b₁ u₁ = BitVec.cons b₂ u₂ ↔ b₁ = b₂ ∧ u₁ = u₂ := by
+  constructor
+  · intro h
+    have hb : (BitVec.cons b₁ u₁).getLsbD k = (BitVec.cons b₂ u₂).getLsbD k := by rw [h]
+    have hu : (BitVec.cons b₁ u₁).setWidth k = (BitVec.cons b₂ u₂).setWidth k := by rw [h]
+    simp only [BitVec.getLsbD_cons, ↓reduceIte] at hb
+    rw [setWidth_cons, setWidth_cons] at hu
+    exact ⟨hb, hu⟩
+  · rintro ⟨rfl, rfl⟩; rfl
+
+private theorem bvZero_eq_cons (k : Nat) : (0#(k + 1)) = BitVec.cons false (0#k) := by
+  apply BitVec.eq_of_getLsbD_eq
+  intro i _
+  simp only [BitVec.getLsbD_zero, BitVec.getLsbD_cons]
+  split <;> rfl
+
+/-- Exhaustive duplicate-free list of all $2^k$ bitvectors in `BitVec k`. -/
+def bvEnum : (k : Nat) → List (BitVec k)
+  | 0 => [0#0]
+  | k + 1 => (bvEnum k).map (BitVec.cons false) ++ (bvEnum k).map (BitVec.cons true)
+
+theorem bvEnum_length_nodup_complete (k : Nat) :
+    (bvEnum k).length = 2 ^ k ∧
+    (bvEnum k).Nodup ∧
+    (∀ v : BitVec k, v ∈ bvEnum k) := by
+  induction k with
+  | zero =>
+    refine ⟨rfl, List.Pairwise.cons (by intro _ h; cases h) .nil, ?_⟩
+    intro v
+    have hv : v = 0#0 := BitVec.eq_nil v
+    subst hv; exact List.Mem.head _
+  | succ k ih =>
+    obtain ⟨hLen, hNodup, hMem⟩ := ih
+    refine ⟨?_, ?_, ?_⟩
+    · simp only [bvEnum, List.length_append, List.length_map, hLen, Nat.pow_succ]
+      omega
+    · simp only [bvEnum]
+      rw [List.nodup_append]
+      have hInj : ∀ b : Bool, ∀ u₁ u₂ : BitVec k,
+          BitVec.cons b u₁ = BitVec.cons b u₂ → u₁ = u₂ :=
+        fun _ _ _ h => (bvCons_inj.mp h).2
+      refine ⟨List.Pairwise.map (BitVec.cons false) (fun u₁ u₂ hne heq => hne (hInj false u₁ u₂ heq)) hNodup,
+              List.Pairwise.map (BitVec.cons true) (fun u₁ u₂ hne heq => hne (hInj true u₁ u₂ heq)) hNodup,
+              ?_⟩
+      intro x hx y hy hxy
+      rw [List.mem_map] at hx hy
+      rcases hx with ⟨u₁, _, rfl⟩
+      rcases hy with ⟨u₂, _, rfl⟩
+      have hb := (bvCons_inj.mp hxy).1
+      contradiction
+    · intro v
+      rw [← bvCons_split v]
+      simp only [bvEnum, List.mem_append, List.mem_map]
+      cases v.getLsbD k
+      · exact Or.inl ⟨v.setWidth k, hMem _, rfl⟩
+      · exact Or.inr ⟨v.setWidth k, hMem _, rfl⟩
+
+/-- Symbolic hypercube summation $\sum_{v \in \mathrm{BitVec}\, k} f(v)$ in `Nat`. -/
+def bvSum : (k : Nat) → (BitVec k → Nat) → Nat
+  | 0, f => f 0#0
+  | k + 1, f =>
+    bvSum k (fun v => f (BitVec.cons false v)) +
+    bvSum k (fun v => f (BitVec.cons true v))
+
+/-- Symbolic hypercube summation $\sum_{v \in \mathrm{BitVec}\, k} f(v)$ in `Int`. -/
+def intBvSum : (k : Nat) → (BitVec k → Int) → Int
+  | 0, f => f 0#0
+  | k + 1, f =>
+    intBvSum k (fun v => f (BitVec.cons false v)) +
+    intBvSum k (fun v => f (BitVec.cons true v))
+

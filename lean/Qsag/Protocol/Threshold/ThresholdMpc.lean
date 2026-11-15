@@ -3169,3 +3169,1587 @@ private theorem mpcPoseidon2SqueezeSecret32_valid
     exact (((hDecomp _ (by simp [hLen])).append (hDecomp _ (by simp [hLen]))).append
       (hDecomp _ (by simp [hLen]))).append (hDecomp _ (by simp [hLen]))
 
+def mpcPoseidon2ThChainShared
+    (lambdas : List Goldilocks)
+    (decomp8 : List Goldilocks → List (List Goldilocks))
+    (pkSeed : List UInt8) (layer : UInt32) (tree : UInt64) (kp chain : Nat) :
+    Nat → Nat → List (List Goldilocks) → (Nat → Nat → Poseidon2CallPrep) → Option (List (List Goldilocks))
+  | _, 0, curSh, _ => some curSh
+  | startStep, rem + 1, curSh, stepPrep =>
+    let adrs : HashAdrs := ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat chain, UInt32.ofNat startStep⟩
+    let preSh := shamirFrameSingleSecretCall lambdas.length tagThF pkSeed adrs curSh
+    match mpcPoseidon2SqueezeSecret32 lambdas decomp8 preSh (stepPrep startStep) with
+    | none => none
+    | some nextSh =>
+      mpcPoseidon2ThChainShared lambdas decomp8 pkSeed layer tree kp chain (startStep + 1) rem nextSh stepPrep
+
+private theorem mpcPoseidon2ThChainShared_simulates
+    (lambdas : List Goldilocks) (hSumOne : ringListSum lambdas = Goldilocks.one)
+    {decomp8 : List Goldilocks → List (List Goldilocks)}
+    (hDecomp : ValidShamirLimbDecomp8 lambdas decomp8)
+    (pkSeed : List UInt8) (layer : UInt32) (tree : UInt64) (kp chain : Nat)
+    (stepPrep : Nat → Nat → Poseidon2CallPrep)
+    (hPrep : ∀ s blk, (stepPrep s blk).validAt lambdas) :
+    ∀ (rem startStep : Nat) {curSh : List (List Goldilocks)} {cur : List UInt8},
+      ShamirByteSharesValid lambdas curSh cur →
+      ∃ outSh : List (List Goldilocks),
+        mpcPoseidon2ThChainShared lambdas decomp8 pkSeed layer tree kp chain startStep rem curSh stepPrep = some outSh ∧
+        ShamirByteSharesValid lambdas outSh
+          (wotsChainSteps poseidon2Suite pkSeed layer tree kp chain startStep rem cur)
+  | 0, _, curSh, _, hCur =>
+    ⟨curSh, rfl, by rw [wotsChainSteps_zero]; exact hCur⟩
+  | rem + 1, startStep, curSh, cur, hCur => by
+    let adrs : HashAdrs := ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat chain, UInt32.ofNat startStep⟩
+    have hFrame := shamirFrameSingleSecretCall_valid lambdas hSumOne tagThF pkSeed adrs hCur
+    obtain ⟨nextSh, hSq, hNextValid⟩ :=
+      mpcPoseidon2SqueezeSecret32_valid lambdas hSumOne hDecomp hFrame (stepPrep startStep) (hPrep startStep)
+    have hNextEq : poseidon2Hash32 (thPreimage tagThF pkSeed adrs [cur]) =
+        thChainF poseidon2Suite pkSeed adrs cur := by
+      rw [thChainF_eq, thCall_eq]; rfl
+    rw [hNextEq] at hNextValid
+    obtain ⟨outSh, hRest, hOutValid⟩ :=
+      mpcPoseidon2ThChainShared_simulates lambdas hSumOne hDecomp pkSeed layer tree kp chain stepPrep hPrep
+        rem (startStep + 1) hNextValid
+    refine ⟨outSh, ?_, ?_⟩
+    · simp only [mpcPoseidon2ThChainShared]
+      change (match mpcPoseidon2SqueezeSecret32 lambdas decomp8
+                (shamirFrameSingleSecretCall lambdas.length tagThF pkSeed adrs curSh) (stepPrep startStep) with
+              | none => none
+              | some nextSh => mpcPoseidon2ThChainShared lambdas decomp8 pkSeed layer tree kp chain
+                  (startStep + 1) rem nextSh stepPrep) = some outSh
+      rw [hSq]
+      exact hRest
+    · rw [wotsChainSteps_succ]; exact hOutValid
+
+def shamirReconstructOpenBytes (lambdas : List Goldilocks) (rows : List (List Goldilocks)) : List UInt8 :=
+  rows.map (fun row => UInt8.ofNat (lagrangeCombine lambdas row).val)
+
+private theorem shamirReconstructOpenBytes_eq (lambdas : List Goldilocks) :
+    ∀ {rows : List (List Goldilocks)} {bs : List UInt8},
+      ShamirByteSharesValid lambdas rows bs →
+      shamirReconstructOpenBytes lambdas rows = bs
+  | [], [], _ => rfl
+  | row :: rows, b :: bs, ⟨_, hC, hRest⟩ => by
+    simp only [shamirReconstructOpenBytes, List.map_cons, hC]
+    have hbLt : b.toNat < goldilocksPrime :=
+      Nat.lt_trans b.toNat_lt (by unfold goldilocksPrime; decide)
+    have hByte : UInt8.ofNat (Goldilocks.ofNat b.toNat).val = b := by
+      simp [Goldilocks.ofNat, Nat.mod_eq_of_lt hbLt]
+    rw [hByte]
+    change b :: shamirReconstructOpenBytes lambdas rows = b :: bs
+    rw [shamirReconstructOpenBytes_eq lambdas hRest]
+
+/-- **Cleartext-Free `(t, n)` Shamir `Poseidon2` Cut-Boundary Oracles (`mkShamirPoseidon2MpcOracles`)**:
+    Evaluates all 4 `poseidon2Suite` cut functions (`evalPrfMsg`, `evalWotsChainEnd`, `evalForsReveal`,
+    `evalForsLeafHash`) over Shamir-shared secret bytes `skSeedSh, skPrfSh` using share-level
+    `runSharedPoseidon2PermOnline` (`evalSharedPow7Binomial` + SPDZ `GoldilocksExt2` `MacCheck`);
+    `skSeed` and `skPrf` are NEVER reconstructed in cleartext! -/
+def mkShamirPoseidon2MpcOracles
+    (lambdas : List Goldilocks)
+    (skSeedSh skPrfSh : List (List Goldilocks))
+    (pkSeed : List UInt8)
+    (decomp8 : List Goldilocks → List (List Goldilocks))
+    (callPrep : Nat → Nat → Poseidon2CallPrep) : PqHashMpcOracles where
+  evalPrfMsg optRand mu :=
+    let pubPrefix :=
+      leb128 6 ++ encodeListField tagPrfMsg ++ encodeListField [] ++
+      encodeListField (encodeAdrs zeroAdrs) ++ leb128 skPrfSh.length
+    let pubSuffix := encodeListField optRand ++ encodeListField mu
+    let preSh := shamirPublicByteShares lambdas.length pubPrefix ++
+                 (skPrfSh ++ shamirPublicByteShares lambdas.length pubSuffix)
+    mpcPoseidon2Hash32Shared lambdas preSh (callPrep 0)
+  evalWotsChainEnd layer tree kp chain steps :=
+    let baseAdrs : HashAdrs := ⟨layer, tree, .wotsPrf, UInt32.ofNat kp, UInt32.ofNat chain, 0⟩
+    let preBase := shamirFrameSingleSecretCall lambdas.length tagPrf pkSeed baseAdrs skSeedSh
+    match steps with
+    | 0 => mpcPoseidon2Hash32Shared lambdas preBase (callPrep 0)
+    | steps' + 1 =>
+      match mpcPoseidon2SqueezeSecret32 lambdas decomp8 preBase (callPrep 0) with
+      | none => []
+      | some baseSh =>
+        match mpcPoseidon2ThChainShared lambdas decomp8 pkSeed layer tree kp chain 0 (steps' + 1) baseSh
+                (fun s => callPrep (s + 1)) with
+        | none => []
+        | some endSh => shamirReconstructOpenBytes lambdas endSh
+  evalForsReveal tree0 kp0 globalU :=
+    let adrs : HashAdrs := ⟨0, tree0, .forsPrf, UInt32.ofNat kp0, 0, UInt32.ofNat globalU⟩
+    mpcPoseidon2Hash32Shared lambdas
+      (shamirFrameSingleSecretCall lambdas.length tagPrf pkSeed adrs skSeedSh) (callPrep 0)
+  evalForsLeafHash tree0 kp0 globalU :=
+    let prfAdrs : HashAdrs := ⟨0, tree0, .forsPrf, UInt32.ofNat kp0, 0, UInt32.ofNat globalU⟩
+    match mpcPoseidon2SqueezeSecret32 lambdas decomp8
+            (shamirFrameSingleSecretCall lambdas.length tagPrf pkSeed prfAdrs skSeedSh) (callPrep 0) with
+    | none => []
+    | some secSh =>
+      let treeAdrs : HashAdrs := ⟨0, tree0, .forsTree, UInt32.ofNat kp0, 0, UInt32.ofNat globalU⟩
+      mpcPoseidon2Hash32Shared lambdas
+        (shamirFrameSingleSecretCall lambdas.length tagThF pkSeed treeAdrs secSh) (callPrep 1)
+
+/-- **Constructive `(t, n)` Shamir `Poseidon2` `MatchesKey` Theorem (`mkShamirPoseidon2MpcOracles_matchesKey`)**:
+    Discharges `PqHashMpcOracles.MatchesKey poseidon2Suite sk` end-to-end from share-level Shamir
+    `Poseidon2` (`evalSharedPoseidon2Perm` + `evalSharedPow7Binomial`) with `0` cleartext key reconstruction! -/
+theorem mkShamirPoseidon2MpcOracles_matchesKey
+    (lambdas : List Goldilocks) (hSumOne : ringListSum lambdas = Goldilocks.one)
+    {skSeedSh skPrfSh : List (List Goldilocks)} {skSeed skPrf : List UInt8}
+    (hSeed : ShamirByteSharesValid lambdas skSeedSh skSeed)
+    (hPrf  : ShamirByteSharesValid lambdas skPrfSh skPrf)
+    (pkSeed : List UInt8)
+    {decomp8 : List Goldilocks → List (List Goldilocks)}
+    (hDecomp : ValidShamirLimbDecomp8 lambdas decomp8)
+    (callPrep : Nat → Nat → Poseidon2CallPrep)
+    (hPrep : ∀ step blk, (callPrep step blk).validAt lambdas) :
+    (mkShamirPoseidon2MpcOracles lambdas skSeedSh skPrfSh pkSeed decomp8 callPrep).MatchesKey
+      poseidon2Suite { skSeed := skSeed, skPrf := skPrf, pkSeed := pkSeed } := by
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · intro optRand mu
+    dsimp only [mkShamirPoseidon2MpcOracles]
+    let pubPrefix :=
+      leb128 6 ++ encodeListField tagPrfMsg ++ encodeListField [] ++
+      encodeListField (encodeAdrs zeroAdrs) ++ leb128 skPrfSh.length
+    let pubSuffix := encodeListField optRand ++ encodeListField mu
+    have hPreValid : ShamirByteSharesValid lambdas
+        (shamirPublicByteShares lambdas.length pubPrefix ++
+          (skPrfSh ++ shamirPublicByteShares lambdas.length pubSuffix))
+        (pubPrefix ++ (skPrf ++ pubSuffix)) :=
+      (shamirPublicByteShares_valid lambdas hSumOne pubPrefix).append
+        (hPrf.append (shamirPublicByteShares_valid lambdas hSumOne pubSuffix))
+    rw [(mpcPoseidon2SpongeShared_simulates lambdas hSumOne hPreValid (callPrep 0) (hPrep 0)).2,
+        thPrfMsg_eq, thCall_eq, thPreimage_eq]
+    dsimp only [pubPrefix, pubSuffix]
+    rw [hPrf.length_eq]
+    simp only [poseidon2Suite, List.cons_append, List.nil_append,
+      encodeMultiFrame, List.length_cons, List.length_nil, encodeByteFields_cons, encodeByteFields_nil,
+      List.append_nil, encodeListField_eq skPrf, List.append_assoc]
+  · intro layer tree kp chain steps
+    dsimp only [mkShamirPoseidon2MpcOracles]
+    have hBaseFrame := shamirFrameSingleSecretCall_valid lambdas hSumOne tagPrf pkSeed
+      ⟨layer, tree, .wotsPrf, UInt32.ofNat kp, UInt32.ofNat chain, 0⟩ hSeed
+    cases steps with
+    | zero =>
+      rw [wotsChainSteps_zero,
+          (mpcPoseidon2SpongeShared_simulates lambdas hSumOne hBaseFrame (callPrep 0) (hPrep 0)).2,
+          wotsSecretBase_eq, thSecretPrf_eq, thCall_eq]
+      rfl
+    | succ steps' =>
+      obtain ⟨baseSh, hSqBase, hBaseValid⟩ :=
+        mpcPoseidon2SqueezeSecret32_valid lambdas hSumOne hDecomp hBaseFrame (callPrep 0) (hPrep 0)
+      have hBaseEq : poseidon2Hash32 (thPreimage tagPrf pkSeed
+          ⟨layer, tree, .wotsPrf, UInt32.ofNat kp, UInt32.ofNat chain, 0⟩ [skSeed]) =
+          wotsSecretBase poseidon2Suite { skSeed := skSeed, skPrf := skPrf, pkSeed := pkSeed }
+            layer tree kp chain := by
+        rw [wotsSecretBase_eq, thSecretPrf_eq, thCall_eq]; rfl
+      rw [hBaseEq] at hBaseValid
+      obtain ⟨endSh, hChain, hEndValid⟩ :=
+        mpcPoseidon2ThChainShared_simulates lambdas hSumOne hDecomp pkSeed layer tree kp chain
+          (fun s => callPrep (s + 1)) (fun s blk => hPrep (s + 1) blk) (steps' + 1) 0 hBaseValid
+      rw [hSqBase]
+      dsimp only
+      rw [hChain]
+      exact shamirReconstructOpenBytes_eq lambdas hEndValid
+  · intro tree0 kp0 globalU
+    dsimp only [mkShamirPoseidon2MpcOracles]
+    have hFrame := shamirFrameSingleSecretCall_valid lambdas hSumOne tagPrf pkSeed
+      ⟨0, tree0, .forsPrf, UInt32.ofNat kp0, 0, UInt32.ofNat globalU⟩ hSeed
+    rw [(mpcPoseidon2SpongeShared_simulates lambdas hSumOne hFrame (callPrep 0) (hPrep 0)).2,
+        forsSecretLeaf_eq, thSecretPrf_eq, thCall_eq]
+    rfl
+  · intro tree0 kp0 globalU
+    dsimp only [mkShamirPoseidon2MpcOracles]
+    have hF1 := shamirFrameSingleSecretCall_valid lambdas hSumOne tagPrf pkSeed
+      ⟨0, tree0, .forsPrf, UInt32.ofNat kp0, 0, UInt32.ofNat globalU⟩ hSeed
+    obtain ⟨secSh, hSqSec, hSecValid⟩ :=
+      mpcPoseidon2SqueezeSecret32_valid lambdas hSumOne hDecomp hF1 (callPrep 0) (hPrep 0)
+    have hF2 := shamirFrameSingleSecretCall_valid lambdas hSumOne tagThF pkSeed
+      ⟨0, tree0, .forsTree, UInt32.ofNat kp0, 0, UInt32.ofNat globalU⟩ hSecValid
+    rw [hSqSec]
+    dsimp only
+    rw [(mpcPoseidon2SpongeShared_simulates lambdas hSumOne hF2 (callPrep 1) (hPrep 1)).2,
+        forsLeafFn_eq, forsSecretLeaf_eq, thChainF_eq, thSecretPrf_eq, thCall_eq, thCall_eq]
+    rfl
+
+/-- **Arbitrary $t$-of-$n$ Shamir `Poseidon2` Threshold Signing Bit-Identity
+    (`shamir_poseidon2_thresholdSign_eq_evalSingleSign`)**:
+    Whenever Shamir-shared `Poseidon2` cut-boundary oracles `o` satisfy `o.MatchesKey poseidon2Suite sk`
+    (discharged constructively by `mkShamirPoseidon2MpcOracles_matchesKey`), distributed key generation
+    and signing emit the **exact same** public key and signature as single-party `evalSingleSign`,
+    and every emitted signature passes `verifyPqHashSig`. -/
+theorem shamir_poseidon2_thresholdSign_eq_evalSingleSign
+    (params : PqHashParams) (o : PqHashMpcOracles) (sk : PqSecretKey)
+    (msg optRand : List UInt8) (leafGlobalIdx maxGrind : Nat)
+    (hMatch : o.MatchesKey poseidon2Suite sk) :
+    derivePublicKeyMpc poseidon2Suite params o sk.pkSeed = derivePublicKey poseidon2Suite params sk ∧
+    evalCutBatchSignMpc poseidon2Suite params o (derivePublicKeyMpc poseidon2Suite params o sk.pkSeed)
+      msg optRand leafGlobalIdx maxGrind =
+      evalSingleSign poseidon2Suite params sk msg optRand leafGlobalIdx maxGrind ∧
+    (∀ sig,
+      evalCutBatchSignMpc poseidon2Suite params o (derivePublicKeyMpc poseidon2Suite params o sk.pkSeed)
+        msg optRand leafGlobalIdx maxGrind = some sig →
+      verifyPqHashSig poseidon2Suite params (derivePublicKeyMpc poseidon2Suite params o sk.pkSeed) msg sig = true) :=
+  evalCutBatchSignMpc_eq_evalSingleSign poseidon2Suite params o sk msg optRand leafGlobalIdx maxGrind hMatch
+
+/-- **End-to-End Share-Level `(t, n)` Shamir `Poseidon2` Threshold Signing (`shamir_poseidon2_shared_thresholdSign_eq_evalSingleSign`)**:
+    Wires `mkShamirPoseidon2MpcOracles` (`evalSharedPoseidon2Perm` + `evalSharedPow7Binomial`) directly into
+    `shamir_poseidon2_thresholdSign_eq_evalSingleSign` with `0` cleartext secret reconstruction! -/
+theorem shamir_poseidon2_shared_thresholdSign_eq_evalSingleSign
+    (params : PqHashParams)
+    (lambdas : List Goldilocks) (hSumOne : ringListSum lambdas = Goldilocks.one)
+    {skSeedSh skPrfSh : List (List Goldilocks)} {skSeed skPrf : List UInt8}
+    (hSeed : ShamirByteSharesValid lambdas skSeedSh skSeed)
+    (hPrf  : ShamirByteSharesValid lambdas skPrfSh skPrf)
+    (pkSeed msg optRand : List UInt8) (leafGlobalIdx maxGrind : Nat)
+    {decomp8 : List Goldilocks → List (List Goldilocks)}
+    (hDecomp : ValidShamirLimbDecomp8 lambdas decomp8)
+    (callPrep : Nat → Nat → Poseidon2CallPrep)
+    (hPrep : ∀ step blk, (callPrep step blk).validAt lambdas) :
+    let o := mkShamirPoseidon2MpcOracles lambdas skSeedSh skPrfSh pkSeed decomp8 callPrep
+    let sk : PqSecretKey := { skSeed := skSeed, skPrf := skPrf, pkSeed := pkSeed }
+    derivePublicKeyMpc poseidon2Suite params o pkSeed = derivePublicKey poseidon2Suite params sk ∧
+    evalCutBatchSignMpc poseidon2Suite params o (derivePublicKeyMpc poseidon2Suite params o pkSeed)
+      msg optRand leafGlobalIdx maxGrind =
+      evalSingleSign poseidon2Suite params sk msg optRand leafGlobalIdx maxGrind ∧
+    (∀ sig,
+      evalCutBatchSignMpc poseidon2Suite params o (derivePublicKeyMpc poseidon2Suite params o pkSeed)
+        msg optRand leafGlobalIdx maxGrind = some sig →
+      verifyPqHashSig poseidon2Suite params (derivePublicKeyMpc poseidon2Suite params o pkSeed) msg sig = true) :=
+  shamir_poseidon2_thresholdSign_eq_evalSingleSign params _ _ msg optRand leafGlobalIdx maxGrind
+    (mkShamirPoseidon2MpcOracles_matchesKey lambdas hSumOne hSeed hPrf pkSeed hDecomp callPrep hPrep)
+
+/-! ## 4. Checked stateless threshold path (`HashSigs` weld) -/
+
+/-- Threshold counterpart of `evalStatelessCheckedSign`: the leaf is the HXOF-derived index of
+    `deriveStatelessInputs` on the opened randomizer, and the digit geometry must pass
+    `PqHashParams.checkedDigitGeometry`. Only cut-boundary oracles are consulted. -/
+def thresholdStatelessCheckedSign (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : PqHashMpcOracles) (pk : PqPublicKey) (msg optRand : List UInt8)
+    (maxGrind : Nat) : Option PqHashSig :=
+  if !params.checkedDigitGeometry then none
+  else
+    match deriveStatelessInputs suite params
+        (o.evalPrfMsg optRand (thPreHash suite pk.pkSeed pk.pkRoot msg))
+        pk.pkSeed pk.pkRoot (thPreHash suite pk.pkSeed pk.pkRoot msg) with
+    | none => none
+    | some (leaf, _) => evalCutBatchSignMpc suite params o pk msg optRand leaf maxGrind
+
+/-- The threshold checked path is the checked single-signer path, output for output. -/
+theorem thresholdStatelessCheckedSign_eq_evalStatelessCheckedSign
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : PqHashMpcOracles) (sk : PqSecretKey) (msg optRand : List UInt8) (maxGrind : Nat)
+    (hMatch : o.MatchesKey suite sk) :
+    thresholdStatelessCheckedSign suite params o (derivePublicKeyMpc suite params o sk.pkSeed)
+      msg optRand maxGrind =
+      evalStatelessCheckedSign suite params sk msg optRand maxGrind := by
+  have hPk := (evalCutBatchSignMpc_eq_evalSingleSign suite params o sk msg optRand 0 maxGrind hMatch).1
+  have hSeed : (derivePublicKey suite params sk).pkSeed = sk.pkSeed := rfl
+  have key : ∀ leaf, evalCutBatchSignMpc suite params o (derivePublicKey suite params sk)
+      msg optRand leaf maxGrind = evalSingleSign suite params sk msg optRand leaf maxGrind := by
+    intro leaf
+    have h := (evalCutBatchSignMpc_eq_evalSingleSign suite params o sk msg optRand leaf maxGrind hMatch).2.1
+    rwa [hPk] at h
+  unfold thresholdStatelessCheckedSign
+  rw [evalStatelessCheckedSign_eq, hPk]
+  simp only [hSeed, hMatch.1, key]
+  rfl
+
+/-- Every signature emitted by the threshold checked path passes the checked verifier, and its
+    digits at the message layer are the successful output of `extractBaseWDigitsChecked`. -/
+theorem thresholdStatelessCheckedSign_accepted
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : PqHashMpcOracles) (sk : PqSecretKey) (msg optRand : List UInt8) (maxGrind : Nat)
+    (hMatch : o.MatchesKey suite sk) (sig : PqHashSig)
+    (hSign : thresholdStatelessCheckedSign suite params o
+      (derivePublicKeyMpc suite params o sk.pkSeed) msg optRand maxGrind = some sig) :
+    verifyStatelessChecked suite params (derivePublicKeyMpc suite params o sk.pkSeed) msg sig = true ∧
+    ∃ digits hmsg0,
+      grindTswCounterAux suite params.w params.ell1 params.targetSum sig.rRand sk.pkSeed
+        (derivePublicKey suite params sk).pkRoot
+        (thPreHash suite sk.pkSeed (derivePublicKey suite params sk).pkRoot msg)
+        0 (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ params.subtreeHeight))
+        (UInt32.ofNat (sig.leafGlobalIdx % 2 ^ params.subtreeHeight)) 0 maxGrind =
+          some (sig.msgTswCtr, digits, hmsg0) ∧
+      extractBaseWDigitsChecked params.w params.ell1 hmsg0 = some digits := by
+  have hPk := (evalCutBatchSignMpc_eq_evalSingleSign suite params o sk msg optRand 0 maxGrind hMatch).1
+  rw [thresholdStatelessCheckedSign_eq_evalStatelessCheckedSign suite params o sk msg optRand maxGrind hMatch] at hSign
+  have hVer := verifyStatelessChecked_evalStatelessCheckedSign suite params sk msg optRand maxGrind sig hSign
+  obtain ⟨hGeom, hSt, _, _⟩ := verifyStatelessChecked_sound suite params _ msg sig hVer
+  refine ⟨by rw [hPk]; exact hVer, ?_⟩
+  rw [evalStatelessCheckedSign_eq] at hSign
+  simp only [hGeom, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hSign
+  split at hSign
+  · cases hSign
+  · rename_i leaf idxs hD
+    obtain ⟨_, _, hR, hL, ⟨dg, hmsg0, hG, _⟩, _⟩ :=
+      evalSingleSign_stateless_inv suite params sk msg optRand leaf maxGrind sig hSt hSign
+    rw [← hR, ← hL] at hG
+    exact ⟨dg, hmsg0, hG, grindTswCounterAux_checked hGeom hG⟩
+
+/-- Concrete 2-of-3 RSS instance of the checked weld for `cshake256Suite`. -/
+theorem rss_thresholdStatelessCheckedSign_eq_evalStatelessCheckedSign (params : PqHashParams)
+    {skSeedSh skPrfSh : RssByteShares} (hSeedWf : skSeedSh.WellFormed) (hPrfWf : skPrfSh.WellFormed)
+    (pkSeed msg optRand : List UInt8) (maxGrind : Nat)
+    (tape : Nat → Nat → Nat → Nat → RssPrfZeroSeeds) :
+    thresholdStatelessCheckedSign cshake256Suite params
+      (mkRssCshakePqHashMpcOracles skSeedSh skPrfSh pkSeed tape)
+      (derivePublicKeyMpc cshake256Suite params
+        (mkRssCshakePqHashMpcOracles skSeedSh skPrfSh pkSeed tape) pkSeed)
+      msg optRand maxGrind =
+      evalStatelessCheckedSign cshake256Suite params
+        ⟨reconstructRssBytes skSeedSh, reconstructRssBytes skPrfSh, pkSeed⟩ msg optRand maxGrind :=
+  thresholdStatelessCheckedSign_eq_evalStatelessCheckedSign cshake256Suite params _
+    ⟨reconstructRssBytes skSeedSh, reconstructRssBytes skPrfSh, pkSeed⟩ msg optRand maxGrind
+    (mkRssCshakePqHashMpcOracles_matchesKey hSeedWf hPrfWf pkSeed tape)
+
+/-- Share-level evaluation of the production `(j, u)`-addressed FORS secret. -/
+def mpcForsIndexedSecretRss (skSeedSh : RssByteShares) (pkSeed : List UInt8)
+    (tree : UInt64) (kp j u : Nat) (tape : Nat → Nat → Nat → RssPrfZeroSeeds) : RssByteShares :=
+  mpcCshake256SharedRss 32 pqCshakeSuiteCustom
+    (rssFrameSingleSecretCall tagPrf pkSeed
+      ⟨0, tree, .forsPrf, UInt32.ofNat kp, UInt32.ofNat j, UInt32.ofNat u⟩ skSeedSh) tape
+
+/-- Share-level evaluation of the production `(j, u)`-addressed FORS leaf hash. -/
+def mpcForsIndexedLeafHashRss (skSeedSh : RssByteShares) (pkSeed : List UInt8)
+    (tree : UInt64) (kp j u : Nat) (tape : Nat → Nat → Nat → Nat → RssPrfZeroSeeds) : RssByteShares :=
+  mpcCshake256SharedRss 32 pqCshakeSuiteCustom
+    (rssFrameSingleSecretCall tagThF pkSeed
+      ⟨0, tree, .forsTree, UInt32.ofNat kp, UInt32.ofNat j, UInt32.ofNat u⟩
+      (mpcForsIndexedSecretRss skSeedSh pkSeed tree kp j u (tape 0))) (tape 1)
+
+/-- The RSS cut evaluates the production FORS address format `(j, u)` exactly. -/
+theorem reconstructRssBytes_mpcForsIndexedRss
+    {skSeedSh : RssByteShares} (hSeedWf : skSeedSh.WellFormed) (skPrf pkSeed : List UInt8)
+    (tree : UInt64) (kp j u : Nat) (tape : Nat → Nat → Nat → Nat → RssPrfZeroSeeds) :
+    reconstructRssBytes (mpcForsIndexedSecretRss skSeedSh pkSeed tree kp j u (tape 0)) =
+      forsIndexedSecretLeaf cshake256Suite ⟨reconstructRssBytes skSeedSh, skPrf, pkSeed⟩ tree kp j u ∧
+    reconstructRssBytes (mpcForsIndexedLeafHashRss skSeedSh pkSeed tree kp j u tape) =
+      forsIndexedLeafHash cshake256Suite pkSeed tree kp j u
+        (forsIndexedSecretLeaf cshake256Suite ⟨reconstructRssBytes skSeedSh, skPrf, pkSeed⟩ tree kp j u) := by
+  unfold mpcForsIndexedLeafHashRss mpcForsIndexedSecretRss
+  obtain ⟨hF1Wf, hF1Rec⟩ := reconstructRssBytes_rssFrameSingleSecretCall tagPrf pkSeed
+    ⟨0, tree, .forsPrf, UInt32.ofNat kp, UInt32.ofNat j, UInt32.ofNat u⟩ hSeedWf
+  obtain ⟨hSecWf, hSecRec⟩ := reconstructRssBytes_mpcCshake256SharedRss 32 pqCshakeSuiteCustom hF1Wf (tape 0)
+  obtain ⟨hF2Wf, hF2Rec⟩ := reconstructRssBytes_rssFrameSingleSecretCall tagThF pkSeed
+    ⟨0, tree, .forsTree, UInt32.ofNat kp, UInt32.ofNat j, UInt32.ofNat u⟩ hSecWf
+  have hSec : reconstructRssBytes (mpcCshake256SharedRss 32 pqCshakeSuiteCustom
+      (rssFrameSingleSecretCall tagPrf pkSeed
+        ⟨0, tree, .forsPrf, UInt32.ofNat kp, UInt32.ofNat j, UInt32.ofNat u⟩ skSeedSh) (tape 0)) =
+      forsIndexedSecretLeaf cshake256Suite ⟨reconstructRssBytes skSeedSh, skPrf, pkSeed⟩ tree kp j u := by
+    rw [hSecRec, hF1Rec, forsIndexedSecretLeaf_eq, thSecretPrf_eq, thCall_eq]; rfl
+  refine ⟨hSec, ?_⟩
+  rw [(reconstructRssBytes_mpcCshake256SharedRss 32 pqCshakeSuiteCustom hF2Wf (tape 1)).2,
+      hF2Rec, hSec, forsIndexedLeafHash_eq, thChainF_eq, thCall_eq]; rfl
+
+/-! ## 5. Threshold output equals single-signer FIPS 205 & `Poseidon2` output
+
+Sharing models covered, and at which level:
+* **2-of-3 replicated (XOR) sharing (`SHAKE256` / `cSHAKE256`)**: the concrete share-level `Keccak`
+  protocol `mkRssSlhMpcOracles` (and `mkRssCshakePqHashMpcOracles`), for every two-party quorum,
+  every well-formed sharing, and every zero-sharing tape.
+* **Arbitrary `(t, n)` Shamir sharing (`Poseidon2` suite, Section 3)**: the concrete share-level
+  `Poseidon2` protocol `mkShamirPoseidon2MpcOracles` (`evalSharedPoseidon2Perm` +
+  `evalSharedPow7Binomial` + SPDZ `GoldilocksExt2` `MacCheck`), with `MatchesKey` proved
+  constructively in `mkShamirPoseidon2MpcOracles_matchesKey` and zero cleartext secret reconstruction.
+* **Arbitrary `(t, n)` Shamir quorum-recombination (`SlhThresholdRun.ofShamir`)**: `ShamirQuorum`
+  packages Lagrange-at-zero recombination (`shamirReconstructBytes_quorum`) for FIPS 205
+  `SlhMpcOracles`, paired below with `shamir_single_share_privacy_bijection` and the pure-Shamir
+  `shamir_poseidon2_threshold_sig_witness`. -/
+
+/-- The three two-party quorums of 2-of-3 replicated sharing. -/
+inductive RssQuorum where
+  | p01 | p12 | p20
+  deriving DecidableEq, Repr
+
+/-- The two parties' local views (each party holds two of the three components). -/
+def RssQuorum.views (q : RssQuorum) (sh : RssByteShares) :
+    (List UInt8 × List UInt8) × (List UInt8 × List UInt8) :=
+  match q with
+  | .p01 => ((sh.b0, sh.b1), (sh.b1, sh.b2))
+  | .p12 => ((sh.b1, sh.b2), (sh.b2, sh.b0))
+  | .p20 => ((sh.b2, sh.b0), (sh.b0, sh.b1))
+
+/-- Reassemble the share triple from the two quorum members' views alone. -/
+def RssQuorum.assemble (q : RssQuorum)
+    (v : (List UInt8 × List UInt8) × (List UInt8 × List UInt8)) : RssByteShares :=
+  match q with
+  | .p01 => ⟨v.1.1, v.1.2, v.2.2⟩
+  | .p12 => ⟨v.2.2, v.1.1, v.1.2⟩
+  | .p20 => ⟨v.1.2, v.2.2, v.1.1⟩
+
+theorem RssQuorum.assemble_views (q : RssQuorum) (sh : RssByteShares) :
+    q.assemble (q.views sh) = sh := by
+  cases q <;> rfl
+
+/-- Regression: one party's view does not determine the triple; two sharings of different secrets
+    can agree on party 0's whole view. -/
+theorem rss_single_view_does_not_determine_secret :
+    (RssQuorum.p01.views ⟨[1], [2], [3]⟩).1 = (RssQuorum.p01.views ⟨[1], [2], [4]⟩).1 ∧
+    reconstructRssBytes ⟨[1], [2], [3]⟩ ≠ reconstructRssBytes ⟨[1], [2], [4]⟩ := by
+  decide +kernel
+
+/-- FIPS 205 signature bytes produced by a two-party quorum running the share-level RSS protocol
+    on the triples it reassembles from its own views. -/
+def rssQuorumSlhSignBytes (p : Fips205Params) (q : RssQuorum)
+    (seedViews prfViews : (List UInt8 × List UInt8) × (List UInt8 × List UInt8))
+    (pkSeed : List UInt8) (tape : Nat → Nat → Nat → Nat → RssPrfZeroSeeds)
+    (msgPrime optRand : List UInt8) : List UInt8 :=
+  thresholdSlhSignBytes p
+    (mkRssSlhMpcOracles p (q.assemble seedViews) (q.assemble prfViews) pkSeed tape) msgPrime
+    (slhKeygenMpc p
+      (mkRssSlhMpcOracles p (q.assemble seedViews) (q.assemble prfViews) pkSeed tape) pkSeed)
+    optRand
+
+/-- Lagrange-at-zero data of a Shamir quorum at threshold `t`: evaluation points and
+    recombination coefficients satisfying the Vandermonde conditions up to degree `t - 1`. -/
+structure ShamirQuorum (R : Type) [CommRingOps R] (t : Nat) where
+  pts : List R
+  lambdas : List R
+  sum_one : ringDot lambdas (pts.map (fun _ => CommRingOps.one)) = CommRingOps.one
+  kills_higher : ∀ d, 1 ≤ d → d < t →
+    ringDot lambdas (pts.map (fun x => ringPow x d)) = CommRingOps.zero
+
+/-- Share matrix seen by a quorum: one row per secret byte, one column per quorum member. -/
+def shamirQuorumShares {R : Type} [CommRingOps R] (pts : List R) (polys : List (List R)) :
+    List (List R) :=
+  polys.map (fun c => pts.map (fun x => RoundPoly.evalCoeffs c x))
+
+/-- Quorum-side recombination of every secret byte. -/
+def shamirReconstructBytes {R : Type} [CommRingOps R] (decode : R → UInt8) (lambdas : List R)
+    (shares : List (List R)) : List UInt8 :=
+  shares.map (fun row => decode (ringDot lambdas row))
+
+/-- The shared byte string: the decoded constant terms. -/
+def shamirSecretBytes {R : Type} [CommRingOps R] (decode : R → UInt8) (polys : List (List R)) :
+    List UInt8 :=
+  polys.map (fun c => decode (RoundPoly.evalCoeffs c CommRingOps.zero))
+
+/-- Any quorum recombines any degree-`< t` sharing to the same secret bytes. -/
+theorem shamirReconstructBytes_quorum {R : Type} [LawfulCommRing R] (decode : R → UInt8)
+    (t : Nat) (Q : ShamirQuorum R t) (polys : List (List R))
+    (hDeg : ∀ c ∈ polys, c.length ≤ t) :
+    shamirReconstructBytes decode Q.lambdas (shamirQuorumShares Q.pts polys) =
+      shamirSecretBytes decode polys := by
+  unfold shamirReconstructBytes shamirQuorumShares shamirSecretBytes
+  rw [List.map_map]
+  apply List.map_congr_left
+  intro c hc
+  simp only [Function.comp]
+  rw [lagrangeAtZero_evalCoeffs Q.lambdas Q.pts c t (hDeg c hc) Q.sum_one Q.kills_higher]
+
+/-- A correct threshold signing run for the key `(skSeed, skPrf, pkSeed)`: cut-boundary oracles
+    together with the proof that they evaluate that key. Constructors below build runs from the
+    RSS share-level protocol and from a Shamir quorum.
+
+    The field `matchesKey` is a correctness proof carried inside the run. A value of this type is
+    therefore an honest run by construction: theorems quantified over `SlhThresholdRun` range over
+    correct executions only, and say nothing about parties that deviate, about aborts, or about
+    any distribution over runs. -/
+structure SlhThresholdRun (p : Fips205Params) (skSeed skPrf pkSeed : List UInt8) where
+  oracles : SlhMpcOracles
+  matchesKey : oracles.MatchesKey p skSeed skPrf pkSeed
+
+/-- Signature bytes output by a run. -/
+def SlhThresholdRun.signBytes {p : Fips205Params} {skSeed skPrf pkSeed : List UInt8}
+    (r : SlhThresholdRun p skSeed skPrf pkSeed) (msgPrime optRand : List UInt8) : List UInt8 :=
+  thresholdSlhSignBytes p r.oracles msgPrime (slhKeygenMpc p r.oracles pkSeed) optRand
+
+/-- Run of the concrete RSS protocol by quorum `q` on its own views. -/
+def SlhThresholdRun.ofRss (p : Fips205Params) (q : RssQuorum)
+    {skSeedSh skPrfSh : RssByteShares} (hSeedWf : skSeedSh.WellFormed) (hPrfWf : skPrfSh.WellFormed)
+    (pkSeed : List UInt8) (tape : Nat → Nat → Nat → Nat → RssPrfZeroSeeds) :
+    SlhThresholdRun p (reconstructRssBytes skSeedSh) (reconstructRssBytes skPrfSh) pkSeed where
+  oracles := mkRssSlhMpcOracles p (q.assemble (q.views skSeedSh)) (q.assemble (q.views skPrfSh)) pkSeed tape
+  matchesKey := by
+    rw [RssQuorum.assemble_views, RssQuorum.assemble_views]
+    exact mkRssSlhMpcOracles_matchesKey p hSeedWf hPrfWf pkSeed tape
+
+/-- Run by a Shamir quorum: the oracles are assumed correct on the key the quorum recombines
+    from its own shares; the run is then a run for the shared secret itself. -/
+def SlhThresholdRun.ofShamir {R : Type} [LawfulCommRing R] (p : Fips205Params)
+    (decode : R → UInt8) (t : Nat) (Q : ShamirQuorum R t)
+    (seedPolys prfPolys : List (List R))
+    (hSeedDeg : ∀ c ∈ seedPolys, c.length ≤ t) (hPrfDeg : ∀ c ∈ prfPolys, c.length ≤ t)
+    (pkSeed : List UInt8) (o : SlhMpcOracles)
+    (hO : o.MatchesKey p
+      (shamirReconstructBytes decode Q.lambdas (shamirQuorumShares Q.pts seedPolys))
+      (shamirReconstructBytes decode Q.lambdas (shamirQuorumShares Q.pts prfPolys)) pkSeed) :
+    SlhThresholdRun p (shamirSecretBytes decode seedPolys) (shamirSecretBytes decode prfPolys) pkSeed where
+  oracles := o
+  matchesKey := by
+    rw [← shamirReconstructBytes_quorum decode t Q seedPolys hSeedDeg,
+        ← shamirReconstructBytes_quorum decode t Q prfPolys hPrfDeg]
+    exact hO
+
+/-- **Threshold output is the single-signer FIPS 205 output
+    (`threshold_sig_deterministic_and_matches_single_signer`).** For any two correct runs for the
+    same key (arbitrary and possibly different thresholds, party counts, quorums, share values and
+    protocol randomness, all hidden inside the runs), the signature bytes on `(msgPrime, optRand)`
+    are bit-identical to each other and to `slh_sign_internal` under that key, and verify.
+    `optRand := pkSeed` is the deterministic variant; any other value is the hedged variant.
+
+    This is functional correctness plus determinism of correct runs. Both runs carry
+    `matchesKey`, so no adversary, abort event or probability distribution appears in the
+    statement, and it is not an indistinguishability result about an execution with corrupted
+    parties. -/
+theorem threshold_sig_deterministic_and_matches_single_signer
+    (p : Fips205Params) (hWf : p.wellFormed = true) {skSeed skPrf pkSeed : List UInt8}
+    (r₁ r₂ : SlhThresholdRun p skSeed skPrf pkSeed) (msgPrime optRand : List UInt8) :
+    r₁.signBytes msgPrime optRand =
+      encodeSlhSig (slhSignInternal p msgPrime (slhKeygenInternal p skSeed skPrf pkSeed).1 optRand) ∧
+    r₁.signBytes msgPrime optRand = r₂.signBytes msgPrime optRand ∧
+    slhKeygenMpc p r₁.oracles pkSeed = (slhKeygenInternal p skSeed skPrf pkSeed).2 ∧
+    slhVerifyInternal p msgPrime
+      (slhSignMpc p r₁.oracles msgPrime (slhKeygenMpc p r₁.oracles pkSeed) optRand)
+      (slhKeygenInternal p skSeed skPrf pkSeed).2 = true := by
+  obtain ⟨hPk₁, _, hB₁, _, hV₁⟩ :=
+    thresholdSlhSign_eq_slhSignInternal p hWf r₁.oracles skSeed skPrf pkSeed msgPrime optRand r₁.matchesKey
+  obtain ⟨hPk₂, _, hB₂, _, _⟩ :=
+    thresholdSlhSign_eq_slhSignInternal p hWf r₂.oracles skSeed skPrf pkSeed msgPrime optRand r₂.matchesKey
+  have e₁ : r₁.signBytes msgPrime optRand =
+      encodeSlhSig (slhSignInternal p msgPrime (slhKeygenInternal p skSeed skPrf pkSeed).1 optRand) := by
+    unfold SlhThresholdRun.signBytes
+    rw [hPk₁]
+    exact hB₁
+  have e₂ : r₂.signBytes msgPrime optRand =
+      encodeSlhSig (slhSignInternal p msgPrime (slhKeygenInternal p skSeed skPrf pkSeed).1 optRand) := by
+    unfold SlhThresholdRun.signBytes
+    rw [hPk₂]
+    exact hB₂
+  refine ⟨e₁, e₁.trans e₂.symm, hPk₁, ?_⟩
+  rw [hPk₁]
+  exact hV₁
+
+/-- Earlier name of `threshold_sig_deterministic_and_matches_single_signer`, kept because the
+    challenge roster refers to it. The statement is the same determinism-and-correctness
+    statement about correct runs; despite the name it is not an indistinguishability result. -/
+theorem threshold_sig_perfectly_indistinguishable_from_single_signer
+    (p : Fips205Params) (hWf : p.wellFormed = true) {skSeed skPrf pkSeed : List UInt8}
+    (r₁ r₂ : SlhThresholdRun p skSeed skPrf pkSeed) (msgPrime optRand : List UInt8) :
+    r₁.signBytes msgPrime optRand =
+      encodeSlhSig (slhSignInternal p msgPrime (slhKeygenInternal p skSeed skPrf pkSeed).1 optRand) ∧
+    r₁.signBytes msgPrime optRand = r₂.signBytes msgPrime optRand ∧
+    slhKeygenMpc p r₁.oracles pkSeed = (slhKeygenInternal p skSeed skPrf pkSeed).2 ∧
+    slhVerifyInternal p msgPrime
+      (slhSignMpc p r₁.oracles msgPrime (slhKeygenMpc p r₁.oracles pkSeed) optRand)
+      (slhKeygenInternal p skSeed skPrf pkSeed).2 = true :=
+  threshold_sig_deterministic_and_matches_single_signer p hWf r₁ r₂ msgPrime optRand
+
+/-- **Hedged variant, output equality (`threshold_sig_hedged_output_equality`).** Index the
+    joint randomness (sharing randomness, quorum choice, protocol tapes and the shared hedging
+    value) by `Fin N`. For every Boolean test on signature bytes, the number of indices on which
+    the threshold output is accepted equals the number on which the single-signer output with the
+    same hedging value is accepted.
+
+    The two counted quantities are pointwise equal (each run's bytes equal the single-signer
+    bytes by `threshold_sig_deterministic_and_matches_single_signer`), so the difference is zero
+    for every `hedge : Fin N → List UInt8`, including constant ones. `hedge` is a parameter, not a
+    sampled value: the theorem does not compare two output laws and is not a statistical-distance
+    bound for a hedging distribution. -/
+theorem threshold_sig_hedged_output_equality
+    (p : Fips205Params) (hWf : p.wellFormed = true) {skSeed skPrf pkSeed : List UInt8}
+    (N : Nat) (run : Fin N → SlhThresholdRun p skSeed skPrf pkSeed)
+    (hedge : Fin N → List UInt8) (msgPrime : List UInt8) (D : List UInt8 → Bool) :
+    natAbsDiff
+      (finSum N (fun i => if D ((run i).signBytes msgPrime (hedge i)) then 1 else 0))
+      (finSum N (fun i => if D (encodeSlhSig (slhSignInternal p msgPrime
+        (slhKeygenInternal p skSeed skPrf pkSeed).1 (hedge i))) then 1 else 0)) = 0 := by
+  have hLe := finSum_indicator_diff_le
+    (fun i => D ((run i).signBytes msgPrime (hedge i)))
+    (fun i => D (encodeSlhSig (slhSignInternal p msgPrime
+      (slhKeygenInternal p skSeed skPrf pkSeed).1 (hedge i))))
+    (fun _ => false)
+    (fun i _ => by
+      rw [(threshold_sig_deterministic_and_matches_single_signer p hWf (run i) (run i)
+        msgPrime (hedge i)).1])
+  have hZero : finSum N (fun _ : Fin N => if (false : Bool) = true then 1 else 0) = 0 := by
+    have h := finSum_const N 0
+    rw [Nat.mul_zero] at h
+    exact h
+  rw [hZero] at hLe
+  exact Nat.eq_zero_of_le_zero hLe
+
+/-- Earlier name of `threshold_sig_hedged_output_equality`, kept because the challenge roster
+    refers to it. The statement is the same pointwise output equality; despite the name it does
+    not bound a statistical distance between output distributions. -/
+theorem threshold_sig_hedged_statistical_distance_zero
+    (p : Fips205Params) (hWf : p.wellFormed = true) {skSeed skPrf pkSeed : List UInt8}
+    (N : Nat) (run : Fin N → SlhThresholdRun p skSeed skPrf pkSeed)
+    (hedge : Fin N → List UInt8) (msgPrime : List UInt8) (D : List UInt8 → Bool) :
+    natAbsDiff
+      (finSum N (fun i => if D ((run i).signBytes msgPrime (hedge i)) then 1 else 0))
+      (finSum N (fun i => if D (encodeSlhSig (slhSignInternal p msgPrime
+        (slhKeygenInternal p skSeed skPrf pkSeed).1 (hedge i))) then 1 else 0)) = 0 :=
+  threshold_sig_hedged_output_equality p hWf N run hedge msgPrime D
+
+/-- **2-of-3 RSS, concrete protocol.** Any two-party quorum, any well-formed sharing and any
+    word tape (an arbitrary function into `RssPrfZeroSeeds`; its PRF expansion is not modelled)
+    give the single-signer signature; two runs that share only the reconstructed key give
+    identical bytes. -/
+theorem rss_threshold_sig_independent_of_quorum_and_sharing
+    (p : Fips205Params) (hWf : p.wellFormed = true) (q₁ q₂ : RssQuorum)
+    {seed₁ prf₁ seed₂ prf₂ : RssByteShares}
+    (hS₁ : seed₁.WellFormed) (hP₁ : prf₁.WellFormed) (hS₂ : seed₂.WellFormed) (hP₂ : prf₂.WellFormed)
+    (hSeed : reconstructRssBytes seed₁ = reconstructRssBytes seed₂)
+    (hPrf : reconstructRssBytes prf₁ = reconstructRssBytes prf₂)
+    (pkSeed : List UInt8) (tape₁ tape₂ : Nat → Nat → Nat → Nat → RssPrfZeroSeeds)
+    (msgPrime optRand : List UInt8) :
+    rssQuorumSlhSignBytes p q₁ (q₁.views seed₁) (q₁.views prf₁) pkSeed tape₁ msgPrime optRand =
+      encodeSlhSig (slhSignInternal p msgPrime
+        (slhKeygenInternal p (reconstructRssBytes seed₁) (reconstructRssBytes prf₁) pkSeed).1 optRand) ∧
+    rssQuorumSlhSignBytes p q₁ (q₁.views seed₁) (q₁.views prf₁) pkSeed tape₁ msgPrime optRand =
+      rssQuorumSlhSignBytes p q₂ (q₂.views seed₂) (q₂.views prf₂) pkSeed tape₂ msgPrime optRand := by
+  have h₁ := (threshold_sig_deterministic_and_matches_single_signer p hWf
+    (SlhThresholdRun.ofRss p q₁ hS₁ hP₁ pkSeed tape₁) (SlhThresholdRun.ofRss p q₁ hS₁ hP₁ pkSeed tape₁)
+    msgPrime optRand).1
+  have h₂ := (threshold_sig_deterministic_and_matches_single_signer p hWf
+    (SlhThresholdRun.ofRss p q₂ hS₂ hP₂ pkSeed tape₂) (SlhThresholdRun.ofRss p q₂ hS₂ hP₂ pkSeed tape₂)
+    msgPrime optRand).1
+  have e : encodeSlhSig (slhSignInternal p msgPrime
+      (slhKeygenInternal p (reconstructRssBytes seed₁) (reconstructRssBytes prf₁) pkSeed).1 optRand) =
+      encodeSlhSig (slhSignInternal p msgPrime
+      (slhKeygenInternal p (reconstructRssBytes seed₂) (reconstructRssBytes prf₂) pkSeed).1 optRand) := by
+    rw [hSeed, hPrf]
+  exact ⟨h₁, h₁.trans (e.trans h₂.symm)⟩
+
+/-- **Shamir `(t, n)`, reconstruction level.** Two Shamir presentations (possibly different rings,
+    thresholds, quorums and polynomials) of the same key bytes, each with cut oracles that are
+    correct on the key its quorum recombines, give identical signature bytes, equal to the
+    single-signer output. -/
+theorem shamir_threshold_sig_independent_of_threshold_quorum_and_sharing
+    {R₁ R₂ : Type} [LawfulCommRing R₁] [LawfulCommRing R₂]
+    (p : Fips205Params) (hWf : p.wellFormed = true)
+    (decode₁ : R₁ → UInt8) (t₁ : Nat) (Q₁ : ShamirQuorum R₁ t₁) (seedPolys₁ prfPolys₁ : List (List R₁))
+    (hSD₁ : ∀ c ∈ seedPolys₁, c.length ≤ t₁) (hPD₁ : ∀ c ∈ prfPolys₁, c.length ≤ t₁)
+    (decode₂ : R₂ → UInt8) (t₂ : Nat) (Q₂ : ShamirQuorum R₂ t₂) (seedPolys₂ prfPolys₂ : List (List R₂))
+    (hSD₂ : ∀ c ∈ seedPolys₂, c.length ≤ t₂) (hPD₂ : ∀ c ∈ prfPolys₂, c.length ≤ t₂)
+    (hSeed : shamirSecretBytes decode₁ seedPolys₁ = shamirSecretBytes decode₂ seedPolys₂)
+    (hPrf : shamirSecretBytes decode₁ prfPolys₁ = shamirSecretBytes decode₂ prfPolys₂)
+    (pkSeed : List UInt8) (o₁ o₂ : SlhMpcOracles)
+    (hO₁ : o₁.MatchesKey p
+      (shamirReconstructBytes decode₁ Q₁.lambdas (shamirQuorumShares Q₁.pts seedPolys₁))
+      (shamirReconstructBytes decode₁ Q₁.lambdas (shamirQuorumShares Q₁.pts prfPolys₁)) pkSeed)
+    (hO₂ : o₂.MatchesKey p
+      (shamirReconstructBytes decode₂ Q₂.lambdas (shamirQuorumShares Q₂.pts seedPolys₂))
+      (shamirReconstructBytes decode₂ Q₂.lambdas (shamirQuorumShares Q₂.pts prfPolys₂)) pkSeed)
+    (msgPrime optRand : List UInt8) :
+    thresholdSlhSignBytes p o₁ msgPrime (slhKeygenMpc p o₁ pkSeed) optRand =
+      encodeSlhSig (slhSignInternal p msgPrime
+        (slhKeygenInternal p (shamirSecretBytes decode₁ seedPolys₁)
+          (shamirSecretBytes decode₁ prfPolys₁) pkSeed).1 optRand) ∧
+    thresholdSlhSignBytes p o₁ msgPrime (slhKeygenMpc p o₁ pkSeed) optRand =
+      thresholdSlhSignBytes p o₂ msgPrime (slhKeygenMpc p o₂ pkSeed) optRand := by
+  have h₁ := (threshold_sig_deterministic_and_matches_single_signer p hWf
+    (SlhThresholdRun.ofShamir p decode₁ t₁ Q₁ seedPolys₁ prfPolys₁ hSD₁ hPD₁ pkSeed o₁ hO₁)
+    (SlhThresholdRun.ofShamir p decode₁ t₁ Q₁ seedPolys₁ prfPolys₁ hSD₁ hPD₁ pkSeed o₁ hO₁)
+    msgPrime optRand).1
+  have h₂ := (threshold_sig_deterministic_and_matches_single_signer p hWf
+    (SlhThresholdRun.ofShamir p decode₂ t₂ Q₂ seedPolys₂ prfPolys₂ hSD₂ hPD₂ pkSeed o₂ hO₂)
+    (SlhThresholdRun.ofShamir p decode₂ t₂ Q₂ seedPolys₂ prfPolys₂ hSD₂ hPD₂ pkSeed o₂ hO₂)
+    msgPrime optRand).1
+  have e : encodeSlhSig (slhSignInternal p msgPrime
+      (slhKeygenInternal p (shamirSecretBytes decode₁ seedPolys₁)
+        (shamirSecretBytes decode₁ prfPolys₁) pkSeed).1 optRand) =
+      encodeSlhSig (slhSignInternal p msgPrime
+      (slhKeygenInternal p (shamirSecretBytes decode₂ seedPolys₂)
+        (shamirSecretBytes decode₂ prfPolys₂) pkSeed).1 optRand) := by
+    rw [hSeed, hPrf]
+  exact ⟨h₁, h₁.trans (e.trans h₂.symm)⟩
+
+/-! ### Satisfiability witnesses -/
+
+/-- Two distinct well-formed sharings of the same seed, used with two distinct quorums. -/
+theorem rss_threshold_sig_witness (pkSeed msgPrime optRand : List UInt8)
+    (tape₁ tape₂ : Nat → Nat → Nat → Nat → RssPrfZeroSeeds) :
+    (⟨[1], [2], [3]⟩ : RssByteShares) ≠ ⟨[7], [7], [0]⟩ ∧
+    rssQuorumSlhSignBytes slhDsaShake128f .p01
+      (RssQuorum.p01.views ⟨[1], [2], [3]⟩) (RssQuorum.p01.views ⟨[5], [0], [0]⟩)
+      pkSeed tape₁ msgPrime optRand =
+    rssQuorumSlhSignBytes slhDsaShake128f .p12
+      (RssQuorum.p12.views ⟨[7], [7], [0]⟩) (RssQuorum.p12.views ⟨[0], [5], [0]⟩)
+      pkSeed tape₂ msgPrime optRand :=
+  ⟨by decide +kernel,
+   (rss_threshold_sig_independent_of_quorum_and_sharing slhDsaShake128f slhDsaShake128f_wellFormed
+    .p01 .p12 ⟨rfl, rfl⟩ ⟨rfl, rfl⟩ ⟨rfl, rfl⟩ ⟨rfl, rfl⟩ (by decide +kernel) (by decide +kernel)
+    pkSeed tape₁ tape₂ msgPrime optRand).2⟩
+
+/-- Quorum `{1, 2}` of a threshold-2 Goldilocks sharing: `2·f(1) − f(2) = f(0)`. -/
+def shamirGoldilocksQuorum12 : ShamirQuorum Goldilocks 2 where
+  pts := [Goldilocks.ofNat 1, Goldilocks.ofNat 2]
+  lambdas := [Goldilocks.ofNat 2, Goldilocks.ofNat (goldilocksPrime - 1)]
+  sum_one := by decide +kernel
+  kills_higher := by
+    intro d h1 h2
+    have hd : d = 1 := by omega
+    subst hd
+    decide +kernel
+
+/-- Quorum `{2, 3}` of a threshold-2 Goldilocks sharing: `3·f(2) − 2·f(3) = f(0)`. -/
+def shamirGoldilocksQuorum23 : ShamirQuorum Goldilocks 2 where
+  pts := [Goldilocks.ofNat 2, Goldilocks.ofNat 3]
+  lambdas := [Goldilocks.ofNat 3, Goldilocks.ofNat (goldilocksPrime - 2)]
+  sum_one := by decide +kernel
+  kills_higher := by
+    intro d h1 h2
+    have hd : d = 1 := by omega
+    subst hd
+    decide +kernel
+
+/-- Two different quorums of a 2-of-3 Goldilocks sharing hold different non-zero degree-1 shares
+    of the byte `5` and recombine it identically; pairing each quorum with distinct non-zero
+    masked 3-party sharings shows the FIPS 205 `SlhThresholdRun.ofShamir` hypotheses are
+    jointly satisfiable without `rssPublicBytes`. (See `shamir_poseidon2_threshold_sig_witness`
+    below for the pure-Shamir `Poseidon2` share-level protocol witness with zero RSS.) -/
+theorem shamir_threshold_sig_witness (pkSeed msgPrime optRand : List UInt8)
+    (tape : Nat → Nat → Nat → Nat → RssPrfZeroSeeds) :
+    shamirQuorumShares shamirGoldilocksQuorum12.pts [[Goldilocks.ofNat 5, Goldilocks.ofNat 7]] ≠
+      shamirQuorumShares shamirGoldilocksQuorum23.pts [[Goldilocks.ofNat 5, Goldilocks.ofNat 7]] ∧
+    ∃ o₁ o₂ : SlhMpcOracles,
+      thresholdSlhSignBytes slhDsaShake128f o₁ msgPrime (slhKeygenMpc slhDsaShake128f o₁ pkSeed) optRand =
+        thresholdSlhSignBytes slhDsaShake128f o₂ msgPrime (slhKeygenMpc slhDsaShake128f o₂ pkSeed) optRand ∧
+      thresholdSlhSignBytes slhDsaShake128f o₁ msgPrime (slhKeygenMpc slhDsaShake128f o₁ pkSeed) optRand =
+        encodeSlhSig (slhSignInternal slhDsaShake128f msgPrime
+          (slhKeygenInternal slhDsaShake128f [5] [5] pkSeed).1 optRand) := by
+  refine ⟨by decide +kernel, ?_⟩
+  let dec : Goldilocks → UInt8 := fun g => UInt8.ofNat g.val
+  let polys : List (List Goldilocks) := [[Goldilocks.ofNat 5, Goldilocks.ofNat 7]]
+  have hDeg : ∀ c ∈ polys, c.length ≤ 2 := by
+    intro c hc
+    rcases List.mem_singleton.mp hc with rfl
+    exact Nat.le_refl 2
+  let sh₁ : RssByteShares := ⟨[0xA0], [0xA0], [0x05]⟩
+  let sh₂ : RssByteShares := ⟨[0x39], [0x30], [0x0C]⟩
+  have hKey₁ : shamirReconstructBytes dec shamirGoldilocksQuorum12.lambdas
+      (shamirQuorumShares shamirGoldilocksQuorum12.pts polys) = reconstructRssBytes sh₁ := by
+    decide +kernel
+  have hKey₂ : shamirReconstructBytes dec shamirGoldilocksQuorum23.lambdas
+      (shamirQuorumShares shamirGoldilocksQuorum23.pts polys) = reconstructRssBytes sh₂ := by
+    decide +kernel
+  have hM₁ := mkRssSlhMpcOracles_matchesKey slhDsaShake128f
+    (skSeedSh := sh₁) (skPrfSh := sh₁) ⟨rfl, rfl⟩ ⟨rfl, rfl⟩ pkSeed tape
+  have hM₂ := mkRssSlhMpcOracles_matchesKey slhDsaShake128f
+    (skSeedSh := sh₂) (skPrfSh := sh₂) ⟨rfl, rfl⟩ ⟨rfl, rfl⟩ pkSeed tape
+  rw [← hKey₁] at hM₁
+  rw [← hKey₂] at hM₂
+  have hSecret : shamirSecretBytes dec polys = [5] := by decide +kernel
+  have h := shamir_threshold_sig_independent_of_threshold_quorum_and_sharing
+    slhDsaShake128f slhDsaShake128f_wellFormed
+    dec 2 shamirGoldilocksQuorum12 polys polys hDeg hDeg
+    dec 2 shamirGoldilocksQuorum23 polys polys hDeg hDeg rfl rfl pkSeed _ _ hM₁ hM₂ msgPrime optRand
+  rw [hSecret] at h
+  exact ⟨_, _, h.2, h.1⟩
+
+/-- **`(t, n)` Shamir Sub-Threshold View Privacy Bijection (`shamir_single_share_privacy_bijection`)**:
+    For any `< t` corrupt evaluation points `corruptPts` (`corruptPts.length + 1 ≤ t`, `∀ c ∈ corruptPts, c ≠ 0`)
+    and any two secrets `s₁ s₂ : Goldilocks`, `shamir_rebalanceEquiv` exhibits an explicit `SimpleEquiv`
+    bijection on degree-`< t` Shamir polynomials mapping secret `s₁` to secret `s₂` while keeping
+    every corrupt party's share identical (`RoundPoly.evalCoeffs Q.1 xc = RoundPoly.evalCoeffs P.1 xc`). -/
+theorem shamir_single_share_privacy_bijection
+    (t : Nat) (corruptPts : List Goldilocks) (s₁ s₂ : Goldilocks)
+    (hCard : corruptPts.length + 1 ≤ t)
+    (hNonZero : ∀ c ∈ corruptPts, c ≠ Goldilocks.zero)
+    (P : ShamirPadPoly Goldilocks t)
+    (hSec₁ : RoundPoly.evalCoeffs P.1 Goldilocks.zero = s₁) :
+    let eqv := shamir_rebalanceEquiv Goldilocks.inv t corruptPts (Goldilocks.sub s₂ s₁) hCard
+    let Q := eqv.toFun P
+    eqv.invFun Q = P ∧
+    RoundPoly.evalCoeffs Q.1 Goldilocks.zero = s₂ ∧
+    (∀ xc ∈ corruptPts, RoundPoly.evalCoeffs Q.1 xc = RoundPoly.evalCoeffs P.1 xc) := by
+  intro eqv Q
+  obtain ⟨hAt0, hCorr⟩ := pad_bijection_masked_openings_uniform
+    Goldilocks.inv (fun _ hx => Goldilocks.mul_inv_cancel hx)
+    t corruptPts (Goldilocks.sub s₂ s₁) hCard hNonZero P
+  have hQ0 : RoundPoly.evalCoeffs Q.1 Goldilocks.zero = s₂ := by
+    change RoundPoly.evalCoeffs ((shamir_rebalanceEquiv Goldilocks.inv t corruptPts (Goldilocks.sub s₂ s₁) hCard).toFun P).1
+      CommRingOps.zero = s₂
+    rw [← LawfulCommRing.zero_add (RoundPoly.evalCoeffs _ CommRingOps.zero), hAt0]
+    change CommRingOps.add (CommRingOps.sub s₂ s₁) (RoundPoly.evalCoeffs P.1 Goldilocks.zero) = s₂
+    rw [hSec₁, LawfulCommRing.sub_eq_add_neg, LawfulCommRing.add_assoc,
+        LawfulCommRing.add_left_neg, LawfulCommRing.add_zero]
+  exact ⟨eqv.left_inv P, hQ0, hCorr⟩
+
+/-- Concrete 1-of-3 view witness for threshold `t = 2`: party `x = 1` observes identical share `12`
+    under degree-1 sharings of secret `5` (`5 + 7X`) and secret `42` (`42 + (p - 30)X`). -/
+theorem shamir_single_share_does_not_determine_secret :
+    let p₁ : List Goldilocks := [Goldilocks.ofNat 5, Goldilocks.ofNat 7]
+    let p₂ : List Goldilocks := [Goldilocks.ofNat 42, Goldilocks.sub (Goldilocks.ofNat 12) (Goldilocks.ofNat 42)]
+    RoundPoly.evalCoeffs p₁ (Goldilocks.ofNat 1) = RoundPoly.evalCoeffs p₂ (Goldilocks.ofNat 1) ∧
+    RoundPoly.evalCoeffs p₁ Goldilocks.zero ≠ RoundPoly.evalCoeffs p₂ Goldilocks.zero := by
+  decide +kernel
+
+def demoPow7TupleQuorum12 : SharedPow7Tuple :=
+  { rSh  := demoPow7TupleFor4.rSh.take 2
+    r2Sh := demoPow7TupleFor4.r2Sh.take 2
+    r3Sh := demoPow7TupleFor4.r3Sh.take 2
+    r4Sh := demoPow7TupleFor4.r4Sh.take 2
+    r5Sh := demoPow7TupleFor4.r5Sh.take 2
+    r6Sh := demoPow7TupleFor4.r6Sh.take 2
+    r7Sh := demoPow7TupleFor4.r7Sh.take 2 }
+
+def demoPow7TupleQuorum23 : SharedPow7Tuple :=
+  { rSh  := demoPow7TupleFor4.rSh.drop 1
+    r2Sh := demoPow7TupleFor4.r2Sh.drop 1
+    r3Sh := demoPow7TupleFor4.r3Sh.drop 1
+    r4Sh := demoPow7TupleFor4.r4Sh.drop 1
+    r5Sh := demoPow7TupleFor4.r5Sh.drop 1
+    r6Sh := demoPow7TupleFor4.r6Sh.drop 1
+    r7Sh := demoPow7TupleFor4.r7Sh.drop 1 }
+
+def demoZeroMasks2 : List GoldilocksExt2 :=
+  [⟨Goldilocks.ofNat 19, Goldilocks.ofNat 23⟩,
+   GoldilocksExt2.neg ⟨Goldilocks.ofNat 19, Goldilocks.ofNat 23⟩]
+
+def demoCallPrep12 : Poseidon2CallPrep :=
+  { extInit := fun _ _ => (demoPow7TupleQuorum12, demoZeroMasks2)
+    inter   := fun _   => (demoPow7TupleQuorum12, demoZeroMasks2)
+    extTerm := fun _ _ => (demoPow7TupleQuorum12, demoZeroMasks2) }
+
+def demoCallPrep23 : Poseidon2CallPrep :=
+  { extInit := fun _ _ => (demoPow7TupleQuorum23, demoZeroMasks2)
+    inter   := fun _   => (demoPow7TupleQuorum23, demoZeroMasks2)
+    extTerm := fun _ _ => (demoPow7TupleQuorum23, demoZeroMasks2) }
+
+/-- Ideal `ℱ_bitdecomp` masked byte-share reference specification for `ShamirQuorum Goldilocks 2`:
+    deals non-constant degree-1 Shamir shares `[b, maskSlope]` across `Q.pts` to witness
+    `ValidShamirLimbDecomp8` satisfiability without any RSS scaffolding. -/
+def idealShamirBitDecompRef (Q : ShamirQuorum Goldilocks 2) (maskSlope : Goldilocks)
+    (limbSh : List Goldilocks) : List (List Goldilocks) :=
+  (be 8 (lagrangeCombine Q.lambdas limbSh).val).map (fun b =>
+    Q.pts.map (fun pt => RoundPoly.evalCoeffs [Goldilocks.ofNat b.toNat, maskSlope] pt))
+
+private theorem idealShamirBitDecompRef_valid
+    (Q : ShamirQuorum Goldilocks 2) (hPtsLen : Q.pts.length = Q.lambdas.length)
+    (maskSlope : Goldilocks) :
+    ValidShamirLimbDecomp8 Q.lambdas (idealShamirBitDecompRef Q maskSlope) := by
+  intro limbSh _
+  unfold idealShamirBitDecompRef
+  suffices hAll : ∀ (bs : List UInt8),
+      ShamirByteSharesValid Q.lambdas
+        (bs.map (fun b => Q.pts.map (fun pt => RoundPoly.evalCoeffs [Goldilocks.ofNat b.toNat, maskSlope] pt))) bs by
+    exact hAll _
+  intro bs
+  induction bs with
+  | nil => trivial
+  | cons b rest ih =>
+    refine ⟨by simp [hPtsLen], ?_, ih⟩
+    unfold lagrangeCombine
+    rw [lagrangeAtZero_evalCoeffs Q.lambdas Q.pts [Goldilocks.ofNat b.toNat, maskSlope] 2
+          (Nat.le_refl 2) Q.sum_one Q.kills_higher]
+    simp [RoundPoly.evalCoeffs, LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
+
+/-- **Pure-Shamir Share-Level `Poseidon2` Threshold Signing Witness (`shamir_poseidon2_threshold_sig_witness`)**:
+    Two distinct 2-of-3 `Goldilocks` Shamir quorums (`{1, 2}` and `{2, 3}`) holding distinct
+    non-zero degree-1 shares of `skSeed = [5]` (`5 + 7X`) and `skPrf = [9]` (`9 + 11X`),
+    distinct non-zero `SharedPow7Tuple` shares (`demoPow7TupleQuorum12`, `demoPow7TupleQuorum23`),
+    and non-zero `GoldilocksExt2` SPDZ MAC masks (`demoZeroMasks2`) execute `mkShamirPoseidon2MpcOracles`
+    (with **zero** `RssByteShares` or `rssPublicBytes`) and derive the exact same `Poseidon2`
+    public key and `evalCutBatchSignMpc` output as single-party `evalSingleSign poseidon2Suite`! -/
+theorem shamir_poseidon2_threshold_sig_witness
+    (params : PqHashParams) (pkSeed msg optRand : List UInt8) (leafGlobalIdx maxGrind : Nat) :
+    let seedPolys := [[Goldilocks.ofNat 5, Goldilocks.ofNat 7]]
+    let prfPolys  := [[Goldilocks.ofNat 9, Goldilocks.ofNat 11]]
+    let seedSh₁ := shamirQuorumShares shamirGoldilocksQuorum12.pts seedPolys
+    let seedSh₂ := shamirQuorumShares shamirGoldilocksQuorum23.pts seedPolys
+    let prfSh₁  := shamirQuorumShares shamirGoldilocksQuorum12.pts prfPolys
+    let prfSh₂  := shamirQuorumShares shamirGoldilocksQuorum23.pts prfPolys
+    let o₁ := mkShamirPoseidon2MpcOracles shamirGoldilocksQuorum12.lambdas seedSh₁ prfSh₁ pkSeed
+                (idealShamirBitDecompRef shamirGoldilocksQuorum12 (Goldilocks.ofNat 13))
+                (fun _ _ => demoCallPrep12)
+    let o₂ := mkShamirPoseidon2MpcOracles shamirGoldilocksQuorum23.lambdas seedSh₂ prfSh₂ pkSeed
+                (idealShamirBitDecompRef shamirGoldilocksQuorum23 (Goldilocks.ofNat 17))
+                (fun _ _ => demoCallPrep23)
+    let sk : PqSecretKey := { skSeed := [5], skPrf := [9], pkSeed := pkSeed }
+    seedSh₁ ≠ seedSh₂ ∧
+    prfSh₁ ≠ prfSh₂ ∧
+    derivePublicKeyMpc poseidon2Suite params o₁ pkSeed = derivePublicKey poseidon2Suite params sk ∧
+    derivePublicKeyMpc poseidon2Suite params o₂ pkSeed = derivePublicKey poseidon2Suite params sk ∧
+    evalCutBatchSignMpc poseidon2Suite params o₁ (derivePublicKeyMpc poseidon2Suite params o₁ pkSeed)
+      msg optRand leafGlobalIdx maxGrind =
+      evalCutBatchSignMpc poseidon2Suite params o₂ (derivePublicKeyMpc poseidon2Suite params o₂ pkSeed)
+        msg optRand leafGlobalIdx maxGrind ∧
+    evalCutBatchSignMpc poseidon2Suite params o₁ (derivePublicKeyMpc poseidon2Suite params o₁ pkSeed)
+      msg optRand leafGlobalIdx maxGrind =
+      evalSingleSign poseidon2Suite params sk msg optRand leafGlobalIdx maxGrind := by
+  intro seedPolys prfPolys seedSh₁ seedSh₂ prfSh₁ prfSh₂ o₁ o₂ sk
+  have hSum₁ : ringListSum shamirGoldilocksQuorum12.lambdas = Goldilocks.one := by decide +kernel
+  have hSum₂ : ringListSum shamirGoldilocksQuorum23.lambdas = Goldilocks.one := by decide +kernel
+  have hSeed₁ : ShamirByteSharesValid shamirGoldilocksQuorum12.lambdas seedSh₁ [5] :=
+    ⟨by decide +kernel, by decide +kernel, trivial⟩
+  have hSeed₂ : ShamirByteSharesValid shamirGoldilocksQuorum23.lambdas seedSh₂ [5] :=
+    ⟨by decide +kernel, by decide +kernel, trivial⟩
+  have hPrf₁ : ShamirByteSharesValid shamirGoldilocksQuorum12.lambdas prfSh₁ [9] :=
+    ⟨by decide +kernel, by decide +kernel, trivial⟩
+  have hPrf₂ : ShamirByteSharesValid shamirGoldilocksQuorum23.lambdas prfSh₂ [9] :=
+    ⟨by decide +kernel, by decide +kernel, trivial⟩
+  have hTup12 : demoPow7TupleQuorum12.validAt shamirGoldilocksQuorum12.lambdas := by
+    unfold SharedPow7Tuple.validAt; decide +kernel
+  have hTup23 : demoPow7TupleQuorum23.validAt shamirGoldilocksQuorum23.lambdas := by
+    unfold SharedPow7Tuple.validAt; decide +kernel
+  have hMac2 : verifySpdzZeroSumMac demoZeroMasks2 = true := by decide +kernel
+  have hPrep₁ : ∀ _ _ : Nat, demoCallPrep12.validAt shamirGoldilocksQuorum12.lambdas :=
+    fun _ _ => ⟨fun _ _ => ⟨hTup12, hMac2⟩, fun _ => ⟨hTup12, hMac2⟩, fun _ _ => ⟨hTup12, hMac2⟩⟩
+  have hPrep₂ : ∀ _ _ : Nat, demoCallPrep23.validAt shamirGoldilocksQuorum23.lambdas :=
+    fun _ _ => ⟨fun _ _ => ⟨hTup23, hMac2⟩, fun _ => ⟨hTup23, hMac2⟩, fun _ _ => ⟨hTup23, hMac2⟩⟩
+  have hRun₁ := shamir_poseidon2_shared_thresholdSign_eq_evalSingleSign
+    params shamirGoldilocksQuorum12.lambdas hSum₁ hSeed₁ hPrf₁ pkSeed msg optRand leafGlobalIdx maxGrind
+    (idealShamirBitDecompRef_valid shamirGoldilocksQuorum12 rfl (Goldilocks.ofNat 13))
+    (fun _ _ => demoCallPrep12) hPrep₁
+  have hRun₂ := shamir_poseidon2_shared_thresholdSign_eq_evalSingleSign
+    params shamirGoldilocksQuorum23.lambdas hSum₂ hSeed₂ hPrf₂ pkSeed msg optRand leafGlobalIdx maxGrind
+    (idealShamirBitDecompRef_valid shamirGoldilocksQuorum23 rfl (Goldilocks.ofNat 17))
+    (fun _ _ => demoCallPrep23) hPrep₂
+  exact ⟨by decide +kernel, by decide +kernel, hRun₁.1, hRun₂.1, hRun₁.2.1.trans hRun₂.2.1.symm, hRun₁.2.1⟩
+
+/-- XOR with a corrupt coin fixed before the independent uniform honest coin preserves the
+    single-signer hedged output law, for every encoding and every signature distinguisher.
+    This is a counting statement about the joint coin before selective abort. Applying it to
+    a commitment protocol additionally requires a hiding/independence argument; a deterministic
+    commitment hash alone does not supply that premise. -/
+theorem threshold_joint_coin_output_law
+    (p : Fips205Params) (sk : SlhSecretKey) (msg : List UInt8)
+    (width : Nat) (encode : BitVec width → List UInt8) (corruptCoin : BitVec width)
+    (D : List UInt8 → Bool) :
+    finSum (2 ^ width) (fun i => if D (encodeSlhSig
+      (slhSignInternal p msg sk (encode (BitVec.ofFin i ^^^ corruptCoin)))) then 1 else 0) =
+    finSum (2 ^ width) (fun i => if D (encodeSlhSig
+      (slhSignInternal p msg sk (encode (BitVec.ofFin i)))) then 1 else 0) := by
+  let flip : Fin (2 ^ width) → Fin (2 ^ width) :=
+    fun i => (BitVec.ofFin i ^^^ corruptCoin).toFin
+  have hInv : ∀ i, flip (flip i) = i := by
+    intro i
+    apply Fin.ext
+    have h : (BitVec.ofFin i ^^^ corruptCoin) ^^^ corruptCoin = BitVec.ofFin i := by
+      rw [BitVec.xor_assoc, BitVec.xor_self, BitVec.xor_zero]
+    exact congrArg BitVec.toNat h
+  exact finSum_perm_invariant flip flip hInv hInv
+    (fun i => if D (encodeSlhSig (slhSignInternal p msg sk (encode (BitVec.ofFin i)))) then 1 else 0)
+
+/-- A corrupt party can commit to zero, observe the honest coin, and open only when the
+    joint coin is one. Even an ideal hiding commitment cannot stop this selective abort.
+    Of two equally likely honest coins there is one accepted execution, and its coin is
+    always one; the unconditioned uniform coin is one on only one of two executions.
+    Thus output laws conditioned on success cannot in general use the original uniform
+    hedge law. Security with abort must give the ideal adversary the same abort capability. -/
+theorem tooth_selective_abort_biases_committed_joint_coin :
+    let honest : Fin 2 → Bool := fun i => i.val == 1
+    let accepted : Fin 2 → Option Bool := fun i =>
+      if honest i ^^ false then some (honest i ^^ false) else none
+    finSum 2 (fun i => if (accepted i).isSome then 1 else 0) = 1 ∧
+    finSum 2 (fun i => if accepted i == some true then 1 else 0) = 1 ∧
+    (∀ i, accepted i ≠ some false) ∧
+    finSum 2 (fun i => if honest i then 1 else 0) = 1 := by
+  decide +kernel
+
+/-! ### Active-malicious hedged signing: abort, exact single-signer output, or counted tag forgery
+
+One corrupt party, one hedged signing run. The order of play is the order of the fields below:
+the corrupt coin share is fixed before the honest coin share is opened (that is what a hiding
+commitment buys, and the binding side is that the opened value is the committed one); the
+corrupt party then sees the honest coin and chooses its share modification; the consistency
+challenge is sampled after the modification is fixed; finally the corrupt party may refuse to
+finish. The statements below hold for every tag scheme. The number of accepted non-zero
+deviations is left as an explicit term; `Qsag.RssSlhFullSecurity` bounds it by `deg / 2^128`
+for the `GF(2^128)` Horner tag. -/
+
+/-- A consistency-tag check as the honest parties see it: which deviations are the zero
+    deviation, and which `(deviation, challenge)` pairs are accepted. Completeness is the only
+    law: an unmodified execution is never rejected. Soundness is not a field; the theorems below
+    count the accepted non-zero deviations instead of assuming there are none. -/
+structure ConsistencyTagScheme (Dev : Type) (nChal : Nat) where
+  isHonest : Dev → Bool
+  accepts : Dev → Fin nChal → Bool
+  complete : ∀ d c, isHonest d = true → accepts d c = true
+
+/-- Strategy of the corrupt party in one hedged signing run.
+    * `corruptCoin` is committed before the honest coin share is visible.
+    * `deviation` is the share modification, chosen knowing the honest coin share and before the
+      consistency challenge.
+    * `tamperedOutput` is what the honest parties would release if the modification passed the
+      tag check.
+    * `aborts` is the decision to stop the run, taken with the honest coin share and the
+      challenge in view. -/
+structure ActiveSlhAdversary (width nChal : Nat) (Dev : Type) where
+  corruptCoin : BitVec width
+  deviation : BitVec width → Dev
+  tamperedOutput : BitVec width → Fin nChal → List UInt8
+  aborts : BitVec width → Fin nChal → Bool
+
+/-- Output of the honest parties in one run against `adv`: `none` on abort (the corrupt party
+    stopped, or the tag check rejected), otherwise the released signature bytes. The hedging
+    value is `encode (honestCoin ⊕ corruptCoin)`. -/
+def activeMaliciousThresholdSign {p : Fips205Params} {skSeed skPrf pkSeed : List UInt8}
+    (run : SlhThresholdRun p skSeed skPrf pkSeed) {width nChal : Nat} {Dev : Type}
+    (tags : ConsistencyTagScheme Dev nChal) (adv : ActiveSlhAdversary width nChal Dev)
+    (encode : BitVec width → List UInt8) (msgPrime : List UInt8)
+    (honestCoin : Fin (2 ^ width)) (chal : Fin nChal) : Option (List UInt8) :=
+  if adv.aborts (BitVec.ofFin honestCoin) chal then none
+  else if !(tags.accepts (adv.deviation (BitVec.ofFin honestCoin)) chal) then none
+  else if tags.isHonest (adv.deviation (BitVec.ofFin honestCoin)) then
+    some (run.signBytes msgPrime (encode (BitVec.ofFin honestCoin ^^^ adv.corruptCoin)))
+  else some (adv.tamperedOutput (BitVec.ofFin honestCoin) chal)
+
+/-- The failure event: a non-zero deviation that the tag check accepts in a run the corrupt
+    party lets finish. -/
+def activeTagForgery {width nChal : Nat} {Dev : Type}
+    (tags : ConsistencyTagScheme Dev nChal) (adv : ActiveSlhAdversary width nChal Dev)
+    (honestCoin : Fin (2 ^ width)) (chal : Fin nChal) : Bool :=
+  !(adv.aborts (BitVec.ofFin honestCoin) chal) &&
+    tags.accepts (adv.deviation (BitVec.ofFin honestCoin)) chal &&
+    !(tags.isHonest (adv.deviation (BitVec.ofFin honestCoin)))
+
+/-- The runs in which the ideal functionality with abort releases a signature: the corrupt party
+    does not stop and did not modify its shares. -/
+def activeReleased {width nChal : Nat} {Dev : Type}
+    (tags : ConsistencyTagScheme Dev nChal) (adv : ActiveSlhAdversary width nChal Dev)
+    (honestCoin : Fin (2 ^ width)) (chal : Fin nChal) : Bool :=
+  !(adv.aborts (BitVec.ofFin honestCoin) chal) &&
+    tags.isHonest (adv.deviation (BitVec.ofFin honestCoin))
+
+private theorem finSum_natAbsDiff_le : ∀ (n : Nat) (f g b : Fin n → Nat),
+    (∀ i, natAbsDiff (f i) (g i) ≤ b i) →
+    natAbsDiff (finSum n f) (finSum n g) ≤ finSum n b
+  | 0, _, _, _, _ => by simp [finSum, natAbsDiff]
+  | n + 1, f, g, b, h => by
+    simp only [finSum]
+    have ih := finSum_natAbsDiff_le n
+      (fun i => f ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+      (fun i => g ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+      (fun i => b ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+      (fun i => h ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+    exact Nat.le_trans (natAbsDiff_add_le _ _ _ _)
+      (Nat.add_le_add (h ⟨0, Nat.zero_lt_succ n⟩) ih)
+
+/-- In every run, the honest parties abort, or release exactly the single-signer signature on
+    the hedge `encode (honestCoin ⊕ corruptCoin)`, or the run is a tag forgery. -/
+theorem activeMaliciousThresholdSign_cases
+    (p : Fips205Params) (hWf : p.wellFormed = true) {skSeed skPrf pkSeed : List UInt8}
+    (run : SlhThresholdRun p skSeed skPrf pkSeed) {width nChal : Nat} {Dev : Type}
+    (tags : ConsistencyTagScheme Dev nChal) (adv : ActiveSlhAdversary width nChal Dev)
+    (encode : BitVec width → List UInt8) (msgPrime : List UInt8)
+    (honestCoin : Fin (2 ^ width)) (chal : Fin nChal) :
+    (activeTagForgery tags adv honestCoin chal = false →
+      activeMaliciousThresholdSign run tags adv encode msgPrime honestCoin chal =
+        if activeReleased tags adv honestCoin chal then
+          some (encodeSlhSig (slhSignInternal p msgPrime
+            (slhKeygenInternal p skSeed skPrf pkSeed).1
+            (encode (BitVec.ofFin honestCoin ^^^ adv.corruptCoin))))
+        else none) ∧
+    (activeTagForgery tags adv honestCoin chal = true →
+      activeMaliciousThresholdSign run tags adv encode msgPrime honestCoin chal =
+        some (adv.tamperedOutput (BitVec.ofFin honestCoin) chal)) := by
+  have hSig := (threshold_sig_deterministic_and_matches_single_signer p hWf run run msgPrime
+    (encode (BitVec.ofFin honestCoin ^^^ adv.corruptCoin))).1
+  unfold activeMaliciousThresholdSign activeTagForgery activeReleased
+  cases hA : adv.aborts (BitVec.ofFin honestCoin) chal
+  · cases hH : tags.isHonest (adv.deviation (BitVec.ofFin honestCoin))
+    · cases hT : tags.accepts (adv.deviation (BitVec.ofFin honestCoin)) chal
+      · exact ⟨fun _ => rfl, fun h => Bool.noConfusion h⟩
+      · exact ⟨fun h => Bool.noConfusion h, fun _ => rfl⟩
+    · have hT := tags.complete (adv.deviation (BitVec.ofFin honestCoin)) chal hH
+      rw [hT]
+      exact ⟨fun _ => congrArg some hSig, fun h => Bool.noConfusion h⟩
+  · exact ⟨fun _ => rfl, fun h => Bool.noConfusion h⟩
+
+/-- **Active-malicious hedged threshold signing
+    (`active_malicious_threshold_sig_abort_or_exact_hedged_dist`).** For one corrupt party with
+    an arbitrary strategy `adv`, any tag scheme, a uniform honest coin share and a uniform
+    consistency challenge:
+
+    1. Every run aborts, or releases exactly `slh_sign_internal` under the shared key with
+       hedge `encode (honestCoin ⊕ corruptCoin)`, or is a tag forgery
+       (`activeTagForgery`: a modified share accepted by the check).
+    2. For every test `D` on signature bytes, the number of runs whose released bytes pass `D`
+       differs from the number of runs in which the ideal functionality with abort releases a
+       single-signer signature passing `D` by at most the number of tag forgeries. The ideal
+       count uses the same release set `activeReleased`, which the corrupt party controls:
+       this is security with abort, and the released law is the single-signer hedged law
+       restricted to that set, not the unconditioned one
+       (`tooth_selective_abort_biases_committed_joint_coin`).
+    3. The abort pattern does not depend on the key: for a run of any other key, with the same
+       strategy, exactly the same `(honestCoin, challenge)` pairs abort.
+
+    The statement makes no claim that tag forgeries are rare; that is a property of the tag
+    scheme and is proved for the `GF(2^128)` Horner tag in `Qsag.RssSlhFullSecurity`
+    (`rss_active_tag_forgery_count_le`). The independence of `corruptCoin` and of `deviation`
+    from later values is built into `ActiveSlhAdversary`; deriving it from a concrete commitment
+    needs a hiding assumption that is not discharged here. -/
+theorem active_malicious_threshold_sig_abort_or_exact_hedged_dist
+    (p : Fips205Params) (hWf : p.wellFormed = true) {skSeed skPrf pkSeed : List UInt8}
+    (run : SlhThresholdRun p skSeed skPrf pkSeed) {width nChal : Nat} {Dev : Type}
+    (tags : ConsistencyTagScheme Dev nChal) (adv : ActiveSlhAdversary width nChal Dev)
+    (encode : BitVec width → List UInt8) (msgPrime : List UInt8) :
+    (∀ (honestCoin : Fin (2 ^ width)) (chal : Fin nChal),
+      activeMaliciousThresholdSign run tags adv encode msgPrime honestCoin chal = none ∨
+      activeMaliciousThresholdSign run tags adv encode msgPrime honestCoin chal =
+        some (encodeSlhSig (slhSignInternal p msgPrime
+          (slhKeygenInternal p skSeed skPrf pkSeed).1
+          (encode (BitVec.ofFin honestCoin ^^^ adv.corruptCoin)))) ∨
+      activeTagForgery tags adv honestCoin chal = true) ∧
+    (∀ D : List UInt8 → Bool,
+      natAbsDiff
+        (finSum (2 ^ width) (fun h => finSum nChal (fun c =>
+          if (match activeMaliciousThresholdSign run tags adv encode msgPrime h c with
+              | some s => D s
+              | none => false) then 1 else 0)))
+        (finSum (2 ^ width) (fun h => finSum nChal (fun c =>
+          if (activeReleased tags adv h c &&
+              D (encodeSlhSig (slhSignInternal p msgPrime
+                (slhKeygenInternal p skSeed skPrf pkSeed).1
+                (encode (BitVec.ofFin h ^^^ adv.corruptCoin))))) then 1 else 0))) ≤
+      finSum (2 ^ width) (fun h => finSum nChal (fun c =>
+        if activeTagForgery tags adv h c then 1 else 0))) ∧
+    (∀ {skSeed' skPrf' pkSeed' : List UInt8} (run' : SlhThresholdRun p skSeed' skPrf' pkSeed')
+       (msgPrime' : List UInt8) (honestCoin : Fin (2 ^ width)) (chal : Fin nChal),
+      (activeMaliciousThresholdSign run tags adv encode msgPrime honestCoin chal).isSome =
+      (activeMaliciousThresholdSign run' tags adv encode msgPrime' honestCoin chal).isSome) := by
+  refine ⟨?_, ?_, ?_⟩
+  · intro honestCoin chal
+    have hC := activeMaliciousThresholdSign_cases p hWf run tags adv encode msgPrime honestCoin chal
+    cases hF : activeTagForgery tags adv honestCoin chal
+    · have h := hC.1 hF
+      cases hR : activeReleased tags adv honestCoin chal
+      · rw [hR] at h; exact Or.inl h
+      · rw [hR] at h; exact Or.inr (Or.inl h)
+    · exact Or.inr (Or.inr rfl)
+  · intro D
+    apply finSum_natAbsDiff_le
+    intro h
+    apply finSum_indicator_diff_le
+      (fun c => match activeMaliciousThresholdSign run tags adv encode msgPrime h c with
+                | some s => D s
+                | none => false)
+      (fun c => activeReleased tags adv h c &&
+                D (encodeSlhSig (slhSignInternal p msgPrime
+                  (slhKeygenInternal p skSeed skPrf pkSeed).1
+                  (encode (BitVec.ofFin h ^^^ adv.corruptCoin)))))
+      (fun c => activeTagForgery tags adv h c)
+    intro c hF
+    have hEq := (activeMaliciousThresholdSign_cases p hWf run tags adv encode msgPrime h c).1 hF
+    rw [hEq]
+    cases activeReleased tags adv h c <;> rfl
+  · intro skSeed' skPrf' pkSeed' run' msgPrime' honestCoin chal
+    unfold activeMaliciousThresholdSign
+    cases adv.aborts (BitVec.ofFin honestCoin) chal
+    · cases tags.accepts (adv.deviation (BitVec.ofFin honestCoin)) chal
+      · rfl
+      · cases tags.isHonest (adv.deviation (BitVec.ofFin honestCoin)) <;> rfl
+    · rfl
+
+/-- **Exact hedged law without abort.** If the corrupt party neither modifies its shares nor
+    stops, then for every test `D` the count of accepted released signatures over the uniform
+    honest coin share and challenge equals `nChal` times the count of accepted single-signer
+    signatures over a uniform hedge: the released law is the single-signer hedged law, whatever
+    coin share the corrupt party committed to. -/
+theorem active_threshold_sig_no_abort_exact_single_signer_law
+    (p : Fips205Params) (hWf : p.wellFormed = true) {skSeed skPrf pkSeed : List UInt8}
+    (run : SlhThresholdRun p skSeed skPrf pkSeed) {width nChal : Nat} {Dev : Type}
+    (tags : ConsistencyTagScheme Dev nChal) (adv : ActiveSlhAdversary width nChal Dev)
+    (encode : BitVec width → List UInt8) (msgPrime : List UInt8)
+    (hNoAbort : ∀ h c, adv.aborts h c = false)
+    (hNoDeviation : ∀ h, tags.isHonest (adv.deviation h) = true)
+    (D : List UInt8 → Bool) :
+    finSum (2 ^ width) (fun h => finSum nChal (fun c =>
+      if (match activeMaliciousThresholdSign run tags adv encode msgPrime h c with
+          | some s => D s
+          | none => false) then 1 else 0)) =
+    nChal * finSum (2 ^ width) (fun u =>
+      if D (encodeSlhSig (slhSignInternal p msgPrime
+        (slhKeygenInternal p skSeed skPrf pkSeed).1 (encode (BitVec.ofFin u)))) then 1 else 0) := by
+  rw [← threshold_joint_coin_output_law p (slhKeygenInternal p skSeed skPrf pkSeed).1 msgPrime
+        width encode adv.corruptCoin D,
+      ← finSum_mul_left]
+  apply finSum_congr
+  intro h
+  have hInner : ∀ c : Fin nChal,
+      (if (match activeMaliciousThresholdSign run tags adv encode msgPrime h c with
+           | some s => D s
+           | none => false) then 1 else 0) =
+      (if D (encodeSlhSig (slhSignInternal p msgPrime
+        (slhKeygenInternal p skSeed skPrf pkSeed).1
+        (encode (BitVec.ofFin h ^^^ adv.corruptCoin)))) then 1 else 0) := by
+    intro c
+    have hF : activeTagForgery tags adv h c = false := by
+      unfold activeTagForgery
+      rw [hNoDeviation]
+      exact Bool.and_false _
+    have hR : activeReleased tags adv h c = true := by
+      unfold activeReleased
+      rw [hNoAbort, hNoDeviation]
+      rfl
+    rw [(activeMaliciousThresholdSign_cases p hWf run tags adv encode msgPrime h c).1 hF, hR]
+    rfl
+  rw [finSum_congr hInner, finSum_const]
+
+/-- The forgery term of `active_malicious_threshold_sig_abort_or_exact_hedged_dist` cannot be
+    dropped: with a tag check that accepts one modified execution, the honest parties release
+    the corrupt party's bytes in that run, for any key and any bytes. -/
+theorem tooth_active_tag_forgery_releases_tampered_output
+    {p : Fips205Params} {skSeed skPrf pkSeed : List UInt8}
+    (run : SlhThresholdRun p skSeed skPrf pkSeed) (encode : BitVec 1 → List UInt8)
+    (msgPrime bogus : List UInt8) :
+    let tags : ConsistencyTagScheme Bool 2 :=
+      { isHonest := fun d => !d
+        accepts := fun d c => !d || c.val == 0
+        complete := fun d c h => by cases d <;> simp_all }
+    let adv : ActiveSlhAdversary 1 2 Bool :=
+      { corruptCoin := 0#1
+        deviation := fun _ => true
+        tamperedOutput := fun _ _ => bogus
+        aborts := fun _ _ => false }
+    activeMaliciousThresholdSign run tags adv encode msgPrime
+      ⟨0, by decide⟩ ⟨0, by decide⟩ = some bogus ∧
+    activeMaliciousThresholdSign run tags adv encode msgPrime
+      ⟨0, by decide⟩ ⟨1, by decide⟩ = none ∧
+    finSum (2 ^ 1) (fun h => finSum 2 (fun c =>
+      if activeTagForgery tags adv h c then 1 else 0)) = 2 := by
+  exact ⟨rfl, rfl, rfl⟩
+
+/-- The share view of the party outside quorum `q` (the corrupt party when `q` is honest). -/
+def RssQuorum.outsiderView (q : RssQuorum) (sh : RssByteShares) : List UInt8 × List UInt8 :=
+  match q with
+  | .p01 => (sh.b2, sh.b0)
+  | .p12 => (sh.b0, sh.b1)
+  | .p20 => (sh.b1, sh.b2)
+
+/-- **Abort leaks nothing beyond the corrupt party's own share view (2-of-3 RSS).** Let the
+    corrupt strategy be any function of the corrupt party's views of the two key sharings.
+    For two sharings, of possibly different keys, that give the corrupt party the same views,
+    the honest quorum aborts on exactly the same `(honestCoin, challenge)` pairs. Sharings of
+    different secrets with a common single-party view exist
+    (`rss_single_view_does_not_determine_secret`). -/
+theorem rss_active_abort_pattern_depends_only_on_corrupt_view
+    (p : Fips205Params) (q : RssQuorum)
+    {seed₁ prf₁ seed₂ prf₂ : RssByteShares}
+    (hS₁ : seed₁.WellFormed) (hP₁ : prf₁.WellFormed) (hS₂ : seed₂.WellFormed) (hP₂ : prf₂.WellFormed)
+    (hSeedView : q.outsiderView seed₁ = q.outsiderView seed₂)
+    (hPrfView : q.outsiderView prf₁ = q.outsiderView prf₂)
+    (pkSeed₁ pkSeed₂ : List UInt8) (tape₁ tape₂ : Nat → Nat → Nat → Nat → RssPrfZeroSeeds)
+    {width nChal : Nat} {Dev : Type} (tags : ConsistencyTagScheme Dev nChal)
+    (strategy : List UInt8 × List UInt8 → List UInt8 × List UInt8 → ActiveSlhAdversary width nChal Dev)
+    (encode : BitVec width → List UInt8) (msg₁ msg₂ : List UInt8)
+    (honestCoin : Fin (2 ^ width)) (chal : Fin nChal) :
+    (activeMaliciousThresholdSign (SlhThresholdRun.ofRss p q hS₁ hP₁ pkSeed₁ tape₁) tags
+      (strategy (q.outsiderView seed₁) (q.outsiderView prf₁)) encode msg₁ honestCoin chal).isSome =
+    (activeMaliciousThresholdSign (SlhThresholdRun.ofRss p q hS₂ hP₂ pkSeed₂ tape₂) tags
+      (strategy (q.outsiderView seed₂) (q.outsiderView prf₂)) encode msg₂ honestCoin chal).isSome := by
+  rw [hSeedView, hPrfView]
+  unfold activeMaliciousThresholdSign
+  cases (strategy (q.outsiderView seed₂) (q.outsiderView prf₂)).aborts (BitVec.ofFin honestCoin) chal
+  · cases tags.accepts
+      ((strategy (q.outsiderView seed₂) (q.outsiderView prf₂)).deviation (BitVec.ofFin honestCoin)) chal
+    · rfl
+    · cases tags.isHonest
+        ((strategy (q.outsiderView seed₂) (q.outsiderView prf₂)).deviation (BitVec.ofFin honestCoin)) <;> rfl
+  · rfl
+
+
+/-! ## Production HashSigs cut interface
+
+The extra FORS coordinate is essential: flattening `(j,u)` into one legacy
+coordinate changes the PRF domain. These routines consume only public data and
+cut outputs; a secret key appears only in their refinement propositions.
+-/
+structure ProductionPqHashMpcOracles extends PqHashMpcOracles where
+  evalIndexedForsReveal : UInt64 → Nat → Nat → Nat → List UInt8
+  evalIndexedForsLeafHash : UInt64 → Nat → Nat → Nat → List UInt8
+
+def ProductionPqHashMpcOracles.MatchesKey (o : ProductionPqHashMpcOracles)
+    (suite : TweakableHashSuite) (sk : PqSecretKey) : Prop :=
+  o.toPqHashMpcOracles.MatchesKey suite sk ∧
+  (∀ tree kp j u, o.evalIndexedForsReveal tree kp j u = forsIndexedSecretLeaf suite sk tree kp j u) ∧
+  (∀ tree kp j u, o.evalIndexedForsLeafHash tree kp j u = forsIndexedLeafFn suite sk tree kp j u)
+
+def mpcComputeProductionForsPk (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (pkSeed : List UInt8) (tree0 : UInt64) (kp0 : Nat) : List UInt8 :=
+  let kpU32 := UInt32.ofNat kp0
+  let roots := (List.range params.forsTrees).map fun j =>
+    computeMerkleNodeKp suite pkSeed 0 tree0 .forsTree kpU32
+      (o.evalIndexedForsLeafHash tree0 kp0 j) params.forsHeight j 0
+  thTweakTl suite pkSeed ⟨0, tree0, .forsRoots, kpU32, 0, 0⟩ roots
+
+def mpcBuildProductionForsOpenings (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (pkSeed : List UInt8) (tree0 : UInt64) (kp0 : Nat) (idxs : List Nat) : List ForsTreeOpening :=
+  let kpU32 := UInt32.ofNat kp0
+  (List.range params.forsTrees).map fun j =>
+    let idxJ := idxs.getD j 0
+    { secretVal := o.evalIndexedForsReveal tree0 kp0 j idxJ
+      authPath  := buildMerkleAuthPathKp suite pkSeed 0 tree0 .forsTree kpU32
+                     (o.evalIndexedForsLeafHash tree0 kp0 j) params.forsHeight j 0 idxJ }
+
+def mpcSignProductionHypertreeLayers (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (pkSeed : List UInt8) (pkRoot rRand : List UInt8) (maxGrind : Nat) :
+    Nat → Nat → List UInt8 → Nat → Option (List LayerXmssSig)
+  | _, _, _, 0 => some []
+  | layerIdx, globalIdx, curRoot, rem + 1 =>
+    let subLeaves := 2 ^ params.subtreeHeight
+    let kpIdx := globalIdx % subLeaves
+    let kpU32 := UInt32.ofNat kpIdx
+    let treeIdxNat := globalIdx / subLeaves
+    let treeIdx := UInt64.ofNat treeIdxNat
+    let layerU32 := UInt32.ofNat layerIdx
+    let grindRes :=
+      if params.statefulJorts && decide (layerIdx = 0) then
+        grindTswLeafCounterAux suite params.w params.ell1 params.targetSum
+          rRand pkSeed pkRoot curRoot treeIdx kpU32 0 maxGrind
+      else
+        grindTswInternalCounterAux suite params.w params.ell1 params.targetSum
+          pkSeed pkRoot curRoot layerU32 treeIdx kpU32 0 maxGrind
+    match grindRes with
+    | none => none
+    | some (ctr, digits, _) =>
+      let wotsChains := (List.range params.ell1).map fun r =>
+        let dr := digits.getD r 0
+        o.evalWotsChainEnd layerU32 treeIdx kpIdx r dr
+      let authPath := buildMerkleAuthPathKp suite pkSeed layerU32 treeIdx .tree 0
+        (mpcComputeWotsPk suite params o.toPqHashMpcOracles pkSeed layerU32 treeIdx) params.subtreeHeight 0 0 kpIdx
+      let nextRoot := mpcComputeXmssSubtreeRoot suite params o.toPqHashMpcOracles pkSeed layerU32 treeIdx
+      match mpcSignProductionHypertreeLayers suite params o pkSeed pkRoot rRand maxGrind (layerIdx + 1) treeIdxNat nextRoot rem with
+      | none => none
+      | some restSigs =>
+        some ({ tswCtr := ctr, wotsChains := wotsChains, authPath := authPath } :: restSigs)
+
+def mpcSignProductionHypertreeCore (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (pkSeed : List UInt8) (pk : PqPublicKey) (msg mu rRand : List UInt8)
+    (leafGlobalIdx : Nat) (forsIdxs : Option (List Nat)) (maxGrind : Nat) : Option PqHashSig :=
+  let subLeaves := 2 ^ params.subtreeHeight
+  match (if params.statefulJorts then some ([], mu)
+         else
+           match forsIdxs with
+           | none => none
+           | some idxs =>
+             let kp0 := leafGlobalIdx % subLeaves
+             let tree0 := UInt64.ofNat (leafGlobalIdx / subLeaves)
+             some (mpcBuildProductionForsOpenings suite params o pkSeed tree0 kp0 idxs,
+                   mpcComputeProductionForsPk suite params o pkSeed tree0 kp0)) with
+  | none => none
+  | some (forsOpenings, curRoot) =>
+    match mpcSignProductionHypertreeLayers suite params o pkSeed pk.pkRoot rRand maxGrind 0 leafGlobalIdx curRoot params.numLayers with
+    | none => none
+    | some layerSigs =>
+      let sig : PqHashSig :=
+        { rRand := rRand
+          msgTswCtr := 0
+          leafGlobalIdx := leafGlobalIdx
+          forsOpenings := forsOpenings
+          layerSigs := layerSigs }
+      if verifyProductionPqHashSig suite params pk msg sig then some sig else none
+
+def mpcEvalProductionStatelessSign (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (pkSeed : List UInt8) (msg optRand : List UInt8) (maxGrind : Nat) : Option PqHashSig :=
+  if params.statefulJorts || !params.productionWellFormed then none
+  else
+    let pk := derivePublicKeyMpc suite params o.toPqHashMpcOracles pkSeed
+    let mu := thPreHash suite pk.pkSeed pk.pkRoot msg
+    let rRand := o.evalPrfMsg optRand mu
+    match deriveProductionStatelessInputs suite params rRand pk.pkSeed pk.pkRoot mu with
+    | none => none
+    | some (leafGlobalIdx, forsIdxs) =>
+      mpcSignProductionHypertreeCore suite params o pkSeed pk msg mu rRand leafGlobalIdx (some forsIdxs) maxGrind
+
+def mpcEvalProductionStatefulSign (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (pkSeed : List UInt8) (msg optRand : List UInt8) (epoch maxGrind : Nat) : Option PqHashSig :=
+  if !params.statefulJorts || !params.productionWellFormed || !params.productionLeafIdxInRange epoch then none
+  else
+    let pk := derivePublicKeyMpc suite params o.toPqHashMpcOracles pkSeed
+    let mu := thPreHash suite pk.pkSeed pk.pkRoot msg
+    let rRand := o.evalPrfMsg optRand mu
+    mpcSignProductionHypertreeCore suite params o pkSeed pk msg mu rRand epoch none maxGrind
+
+private theorem production_mpc_fors_refines
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (sk : PqSecretKey)
+    (hm : o.MatchesKey suite sk) (tree : UInt64) (kp : Nat) (idxs : List Nat) :
+    mpcComputeProductionForsPk suite params o sk.pkSeed tree kp =
+      computeProductionForsPk suite params sk tree kp ∧
+    mpcBuildProductionForsOpenings suite params o sk.pkSeed tree kp idxs =
+      buildProductionForsOpenings suite params sk tree kp idxs := by
+  have hl : o.evalIndexedForsLeafHash tree kp = forsIndexedLeafFn suite sk tree kp :=
+    funext fun j => funext fun u => hm.2.2 tree kp j u
+  have hs : o.evalIndexedForsReveal tree kp = forsIndexedSecretLeaf suite sk tree kp :=
+    funext fun j => funext fun u => hm.2.1 tree kp j u
+  constructor
+  · simp only [mpcComputeProductionForsPk, computeProductionForsPk, hl]
+  · simp only [mpcBuildProductionForsOpenings, buildProductionForsOpenings, hl, hs]
+
+private theorem production_mpc_layers_refines
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (sk : PqSecretKey)
+    (hm : o.MatchesKey suite sk) (pkRoot rRand : List UInt8) (maxGrind : Nat) :
+    ∀ rem layer idx root,
+    mpcSignProductionHypertreeLayers suite params o sk.pkSeed pkRoot rRand maxGrind layer idx root rem =
+      signProductionHypertreeLayers suite params sk pkRoot rRand maxGrind layer idx root rem := by
+  intro rem
+  induction rem with
+  | zero => intros; rfl
+  | succ rem ih =>
+    intro layer idx root
+    have hw : mpcComputeWotsPk suite params o.toPqHashMpcOracles sk.pkSeed =
+        computeWotsPk suite params sk :=
+      funext fun l => funext fun t => funext fun k =>
+        mpcComputeWotsPk_eq suite params o.toPqHashMpcOracles sk hm.1 l t k
+    simp only [mpcSignProductionHypertreeLayers, signProductionHypertreeLayers,
+      hm.1.2.1, hw, mpcComputeXmssSubtreeRoot_eq suite params o.toPqHashMpcOracles sk hm.1, ih]
+    rfl
+
+private theorem production_mpc_core_refines
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (sk : PqSecretKey)
+    (hm : o.MatchesKey suite sk) (pk : PqPublicKey) (msg mu rRand : List UInt8)
+    (leaf : Nat) (idxs : Option (List Nat)) (maxGrind : Nat) :
+    mpcSignProductionHypertreeCore suite params o sk.pkSeed pk msg mu rRand leaf idxs maxGrind =
+      signProductionHypertreeCore suite params sk pk msg mu rRand leaf idxs maxGrind := by
+  have hf := production_mpc_fors_refines suite params o sk hm
+  simp only [mpcSignProductionHypertreeCore, signProductionHypertreeCore,
+    (fun tree kp => (hf tree kp []).1), (hf _ _ _).2, production_mpc_layers_refines suite params o sk hm]
+  rfl
+
+theorem thresholdProductionStatelessSign_eq_evalProductionStatelessSign
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (sk : PqSecretKey)
+    (hm : o.MatchesKey suite sk) (msg optRand : List UInt8) (maxGrind : Nat) :
+    mpcEvalProductionStatelessSign suite params o sk.pkSeed msg optRand maxGrind =
+      evalProductionStatelessSign suite params sk msg optRand maxGrind := by
+  have hp : derivePublicKeyMpc suite params o.toPqHashMpcOracles sk.pkSeed =
+      derivePublicKey suite params sk := by
+    unfold derivePublicKeyMpc
+    dsimp only
+    rw [mpcComputeXmssSubtreeRoot_eq suite params o.toPqHashMpcOracles sk hm.1]
+    rfl
+  simp only [mpcEvalProductionStatelessSign, evalProductionStatelessSign, hp, hm.1.1,
+    production_mpc_core_refines suite params o sk hm]
+  rfl
+
+theorem thresholdProductionStatefulSign_eq_evalProductionStatefulSign
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (sk : PqSecretKey)
+    (hm : o.MatchesKey suite sk) (msg optRand : List UInt8) (epoch maxGrind : Nat) :
+    mpcEvalProductionStatefulSign suite params o sk.pkSeed msg optRand epoch maxGrind =
+      evalProductionStatefulSign suite params sk msg optRand epoch maxGrind := by
+  have hp : derivePublicKeyMpc suite params o.toPqHashMpcOracles sk.pkSeed =
+      derivePublicKey suite params sk := by
+    unfold derivePublicKeyMpc
+    dsimp only
+    rw [mpcComputeXmssSubtreeRoot_eq suite params o.toPqHashMpcOracles sk hm.1]
+    rfl
+  simp only [mpcEvalProductionStatefulSign, evalProductionStatefulSign, hp, hm.1.1,
+    production_mpc_core_refines suite params o sk hm]
+
+
+/-- RSS implementation of the production FORS addresses. Only cut outputs are reconstructed. -/
+def mkRssProductionPqHashMpcOracles (skSeedSh skPrfSh : RssByteShares)
+    (pkSeed : List UInt8) (tape : Nat → Nat → Nat → Nat → RssPrfZeroSeeds) :
+    ProductionPqHashMpcOracles where
+  toPqHashMpcOracles := mkRssCshakePqHashMpcOracles skSeedSh skPrfSh pkSeed tape
+  evalIndexedForsReveal tree0 kp0 j u :=
+    let adrs : HashAdrs := ⟨0, tree0, .forsPrf, UInt32.ofNat kp0, UInt32.ofNat j, UInt32.ofNat u⟩
+    let secSh := mpcCshake256SharedRss 32 pqCshakeSuiteCustom
+                   (rssFrameSingleSecretCall tagPrf pkSeed adrs skSeedSh) (tape 0)
+    reconstructRssBytes secSh
+  evalIndexedForsLeafHash tree0 kp0 j u :=
+    let prfAdrs : HashAdrs := ⟨0, tree0, .forsPrf, UInt32.ofNat kp0, UInt32.ofNat j, UInt32.ofNat u⟩
+    let secSh := mpcCshake256SharedRss 32 pqCshakeSuiteCustom
+                   (rssFrameSingleSecretCall tagPrf pkSeed prfAdrs skSeedSh) (tape 0)
+    let treeAdrs : HashAdrs := ⟨0, tree0, .forsTree, UInt32.ofNat kp0, UInt32.ofNat j, UInt32.ofNat u⟩
+    let hashSh := mpcCshake256SharedRss 32 pqCshakeSuiteCustom
+                    (rssFrameSingleSecretCall tagThF pkSeed treeAdrs secSh) (tape 1)
+    reconstructRssBytes hashSh
+
+set_option maxHeartbeats 800000 in
+ theorem mkRssProductionPqHashMpcOracles_matchesKey
+    {skSeedSh skPrfSh : RssByteShares} (hSeedWf : skSeedSh.WellFormed) (hPrfWf : skPrfSh.WellFormed)
+    (pkSeed : List UInt8) (tape : Nat → Nat → Nat → Nat → RssPrfZeroSeeds) :
+    (mkRssProductionPqHashMpcOracles skSeedSh skPrfSh pkSeed tape).MatchesKey cshake256Suite
+      ⟨reconstructRssBytes skSeedSh, reconstructRssBytes skPrfSh, pkSeed⟩ := by
+  refine ⟨mkRssCshakePqHashMpcOracles_matchesKey hSeedWf hPrfWf pkSeed tape, ?_, ?_⟩
+  · intro tree0 kp0 j u
+    dsimp only [mkRssProductionPqHashMpcOracles]
+    obtain ⟨hFWf, hFRec⟩ := reconstructRssBytes_rssFrameSingleSecretCall tagPrf pkSeed _ hSeedWf
+    rw [(reconstructRssBytes_mpcCshake256SharedRss 32 pqCshakeSuiteCustom hFWf (tape 0)).2,
+        hFRec]
+    rfl
+  · intro tree0 kp0 j u
+    dsimp only [mkRssProductionPqHashMpcOracles]
+    obtain ⟨hF1Wf, hF1Rec⟩ := reconstructRssBytes_rssFrameSingleSecretCall tagPrf pkSeed _ hSeedWf
+    obtain ⟨hSecWf, hSecRec⟩ := reconstructRssBytes_mpcCshake256SharedRss 32 pqCshakeSuiteCustom hF1Wf (tape 0)
+    obtain ⟨hF2Wf, hF2Rec⟩ := reconstructRssBytes_rssFrameSingleSecretCall tagThF pkSeed _ hSecWf
+    rw [(reconstructRssBytes_mpcCshake256SharedRss 32 pqCshakeSuiteCustom hF2Wf (tape 1)).2,
+        hF2Rec, hSecRec, hF1Rec]
+    rfl
+
+theorem rss_production_stateless_sign_refines
+    (params : PqHashParams) {seed prf : RssByteShares}
+    (hs : seed.WellFormed) (hp : prf.WellFormed)
+    (pkSeed msg rand : List UInt8) (maxGrind : Nat)
+    (tape : Nat → Nat → Nat → Nat → RssPrfZeroSeeds) :
+    mpcEvalProductionStatelessSign cshake256Suite params
+      (mkRssProductionPqHashMpcOracles seed prf pkSeed tape) pkSeed msg rand maxGrind =
+      evalProductionStatelessSign cshake256Suite params
+        ⟨reconstructRssBytes seed, reconstructRssBytes prf, pkSeed⟩ msg rand maxGrind :=
+  thresholdProductionStatelessSign_eq_evalProductionStatelessSign _ _ _ _
+    (mkRssProductionPqHashMpcOracles_matchesKey hs hp pkSeed tape) _ _ _
+
+/-! ### Authenticated Shamir wires and local MAC propagation -/
+
+/-- A Shamir wire with additive extension-field MAC shares. -/
+structure AuthShamirWire where
+  shares : List Goldilocks
+  macs : List GoldilocksExt2
+  deriving DecidableEq, Repr
+
+/-- Authentication refers only to the wire's actual shares and the global key. -/
+def AuthShamirWire.Valid (ls : List Goldilocks) (keys : List GoldilocksExt2)
+    (w : AuthShamirWire) : Prop :=
+  w.shares.length = ls.length ∧ w.macs.length = keys.length ∧
+  ringListSum w.macs = CommRingOps.mul (ringListSum keys)
+    (GoldilocksExt2.ofBase (lagrangeCombine ls w.shares))
+
+def AuthShamirWire.add (x y : AuthShamirWire) : AuthShamirWire :=
+  ⟨ringListZipAdd x.shares y.shares, ringListZipAdd x.macs y.macs⟩
+
+def AuthShamirWire.scale (c : Goldilocks) (x : AuthShamirWire) : AuthShamirWire :=
+  ⟨shareScale c x.shares, shareScale (GoldilocksExt2.ofBase c) x.macs⟩
+
+/-- Public offsets use the party's key share, not a reconstructed key. -/
+def AuthShamirWire.addPublic (keys : List GoldilocksExt2)
+    (c : Goldilocks) (x : AuthShamirWire) : AuthShamirWire :=
+  ⟨shareAddConst c x.shares,
+    ringListZipAdd (shareScale (GoldilocksExt2.ofBase c) keys) x.macs⟩
+
+theorem AuthShamirWire.Valid.add {ls keys x y}
+    (hx : AuthShamirWire.Valid ls keys x) (hy : AuthShamirWire.Valid ls keys y) :
+    AuthShamirWire.Valid ls keys (x.add y) := by
+  refine ⟨?_, ?_, ?_⟩
+  · exact (ringListZipAdd_length_of_eq (hx.1.trans hy.1.symm)).trans hx.1
+  · exact (ringListZipAdd_length_of_eq (hx.2.1.trans hy.2.1.symm)).trans hx.2.1
+  · change ringListSum (ringListZipAdd x.macs y.macs) = _
+    rw [ringListSum_zipAdd, hx.2.2, hy.2.2]
+    change _ = CommRingOps.mul _ (GoldilocksExt2.ofBase (ringDot ls (ringListZipAdd x.shares y.shares)))
+    rw [ringDot_zipAdd (hx.1.trans hy.1.symm), GoldilocksExt2.ofBase_add,
+      LawfulCommRing.left_distrib]
+    rfl
+
+theorem AuthShamirWire.Valid.scale {ls keys x} (c : Goldilocks)
+    (hx : AuthShamirWire.Valid ls keys x) :
+    AuthShamirWire.Valid ls keys (x.scale c) := by
+  refine ⟨by simpa [AuthShamirWire.scale] using hx.1,
+    by simpa [AuthShamirWire.scale] using hx.2.1, ?_⟩
+  change ringListSum (shareScale (GoldilocksExt2.ofBase c) x.macs) =
+    CommRingOps.mul _ (GoldilocksExt2.ofBase (ringDot ls (shareScale c x.shares)))
+  rw [ringListSum_scale, hx.2.2, ringDot_scale, GoldilocksExt2.ofBase_mul,
+    ← LawfulCommRing.mul_assoc, ← LawfulCommRing.mul_assoc,
+    LawfulCommRing.mul_comm (GoldilocksExt2.ofBase c) (ringListSum keys)]
+  rfl
+
+theorem AuthShamirWire.Valid.addPublic {ls keys x} (c : Goldilocks)
+    (hOne : ringListSum ls = Goldilocks.one) (hx : AuthShamirWire.Valid ls keys x) :
+    AuthShamirWire.Valid ls keys (x.addPublic keys c) := by
+  refine ⟨by simpa [AuthShamirWire.addPublic] using hx.1, ?_, ?_⟩
+  · change (ringListZipAdd (shareScale _ keys) x.macs).length = keys.length
+    rw [ringListZipAdd_length_of_eq (by simpa using hx.2.1.symm), shareScale_length]
+  · change ringListSum (ringListZipAdd (shareScale _ keys) x.macs) =
+      CommRingOps.mul _ (GoldilocksExt2.ofBase (ringDot ls (shareAddConst c x.shares)))
+    have hOneMul : CommRingOps.mul Goldilocks.one c = c := LawfulCommRing.one_mul c
+    rw [ringListSum_zipAdd, ringListSum_scale, hx.2.2,
+      ringDot_addConst c (Nat.le_of_eq hx.1.symm), hOne,
+      hOneMul,
+      GoldilocksExt2.ofBase_add, LawfulCommRing.left_distrib,
+      LawfulCommRing.mul_comm (GoldilocksExt2.ofBase c) (ringListSum keys)]
+    rfl
+
+/-- Each of the seven preprocessed powers carries its own additive MAC shares. -/
