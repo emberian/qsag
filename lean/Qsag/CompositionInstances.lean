@@ -11,17 +11,26 @@ the bad and forgery events are FALSE, the checked objects are computed by the mo
 constructions (`signAggNative` / `verifyAggNativeSig`, `poseidon2Perm12`, `cshakePrefix`), and
 wrong-context or invalid constituents are rejected.
 
-What the fixtures are not. `transparentVerify` is a non-succinct reference aggregator (its
-"proof" is the signature table); it is not the WHIR verifier. `toyHash` and `toyVerifier` are
-key-, role- and transcript-bound checksums that anyone can compute; they exercise binding and
-rejection, never unforgeability. No fixture here instantiates a cryptographic assumption.
+What the fixtures are and are not. `transparentVerify` is a non-succinct reference aggregator
+(its "proof" is the signature table) retained for negative-control rejection tests; alongside it,
+`boundary_of_hem_opening_batch` and `hemOpeningShardVerify` connect `ExtractionBoundary` directly
+to `HemExtractedOpeningBridge.verifyHemOpeningBatch` (`verifyOpeningBatch` + `verifyHemAffineWhir`)
+composed with `SuccinctAggregationIop`. Similarly, alongside the lightweight `toyHash` /
+`toyVerifier` negative controls, `cshakeHybridHash` (`evalCshake256Sponge keccakF1600`) and
+`jortsNativeVerifier` (`verifyAggNativeSig compactAuditGeom`) instantiate `HybridSecurity` over
+modelled cryptographic primitives (`real_hybrid_keybound_instance`).
 -/
 public import Qsag.ComposedQsAgAndMergeSecurity
 public import Qsag.CrossProtocolAndDualOracleComposition
 public import Qsag.HybridAddrPolicyAndFullPresetSecurity
+public import Qsag.HemExtractedOpeningBridge
 import all Qsag.ComposedQsAgAndMergeSecurity
 import all Qsag.CrossProtocolAndDualOracleComposition
 import all Qsag.HybridAddrPolicyAndFullPresetSecurity
+import all Qsag.HemExtractedOpeningBridge
+import all Qsag.QromBatchMerkleExtraction
+import all Qsag.QromMeasuredMerkleExtraction
+import all Qsag.MultiRoundFsQrom
 import all Qsag.SuccinctAggregationIop
 import all Qsag.ThresholdApproval
 import all Qsag.Aggregation
@@ -225,6 +234,143 @@ theorem shared_verify_rejects_per_signer_mode :
     sharedVerify (shardFor (headerFor (.perSigner [auditMsg, auditMsg])) 3#2) = false := by
   decide +kernel
 
+/-- Consumer bridge from authenticated `verifyHemOpeningBatch` (`verifyOpeningBatch` + multistage
+`verifyHemAffineWhir`) + `SuccinctAggregationIop` AIR trace constraints directly to
+`Composed.ExtractionBoundary`, eliminating `transparentVerify`'s signature-table premise for any
+succinct shard verifier factored through `verifyHemOpeningBatch`. -/
+theorem boundary_of_hem_opening_batch {n cardX w : Nat}
+    (geom : AggSigGeometry) (custody : Fin n → Custody) (bad : Shard n → Prop)
+    (L : MerkleAddressLayout cardX w) (slots : List (MerkleOpeningSlot cardX w))
+    (hemInst : Shard n → HemWhirInstance QuarticGoldilocks)
+    (decode : Shard n → Fin cardX → List (Option (MerkleOpeningValue w)) →
+      List (HemTranscriptRound QuarticGoldilocks))
+    (oracleOf : Shard n → Fin cardX → BitVec w)
+    (outOf : Shard n → Fin cardX)
+    (modeOk : Shard n → Bool)
+    (stmt : Shard n → AggArithPublicStmt) (slot : Fin n → Nat)
+    (hemSound : ∀ s,
+      verifyHemOpeningBatch L slots (hemInst s) (decode s) (oracleOf s) (outOf s) = true →
+      modeOk s = true →
+      bad s ∨ HemStatementValid (hemInst s))
+    (hemToTrace : ∀ s, HemStatementValid (hemInst s) → modeOk s = true →
+      ∃ tr, traceSatisfiesAllConstraints (stmt s) tr = true)
+    (binds : ∀ s, modeOk s = true → (stmt s).geom = geom ∧
+      ∀ v : Fin n, s.bitmap.getLsbD v.val = true →
+        (stmt s).committeePks[slot v]? = some (custody v).state.pk ∧
+        (stmt s).msg = s.header.mode.message v.val) :
+    ExtractionBoundary geom custody
+      (fun s => verifyHemOpeningBatch L slots (hemInst s) (decode s) (oracleOf s) (outOf s) && modeOk s)
+      bad := by
+  refine boundary_of_committee_trace geom custody _ bad stmt slot (fun s h => ?_) (fun s h => ?_)
+  · obtain ⟨hHem, hMode⟩ := Bool.and_eq_true_iff.mp h
+    rcases hemSound s hHem hMode with hb | hValid
+    · exact .inl hb
+    · exact .inr (hemToTrace s hValid hMode)
+  · exact binds s (Bool.and_eq_true_iff.mp h).2
+
+/-- Concrete 1-level 8-bit `MerkleAddressLayout` (`65536` addresses = `u || v`) exercising both
+`verifyOpeningBatch` path verification and `verifyHemAffineWhir` transcript verification without
+storing native signatures in `Shard.proof`. -/
+def compactMerkleLayout : MerkleAddressLayout 65536 8 where
+  encode _ _ u v := ⟨u.toNat * 256 + v.toNat, by
+    have hu : u.toNat < 256 := u.isLt
+    have hv : v.toNat < 256 := v.isLt
+    omega⟩
+  decode x := some (0, 0, BitVec.ofNat 8 (x.val / 256), BitVec.ofNat 8 (x.val % 256))
+  levels := 1
+  nodes := 1
+  decode_sound x l n u v h := by
+    injection h with hTuple
+    rcases Prod.mk.inj hTuple with ⟨_, hRest1⟩
+    rcases Prod.mk.inj hRest1 with ⟨_, hUV⟩
+    rcases Prod.mk.inj hUV with ⟨hu, hv⟩
+    subst hu; subst hv
+    apply Fin.ext
+    have hx : x.val < 65536 := x.isLt
+    have hDiv : (BitVec.ofNat 8 (x.val / 256)).toNat = x.val / 256 := by
+      rw [BitVec.toNat_ofNat]; change (x.val / 256) % 256 = x.val / 256; omega
+    have hMod : (BitVec.ofNat 8 (x.val % 256)).toNat = x.val % 256 := by
+      rw [BitVec.toNat_ofNat]; change (x.val % 256) % 256 = x.val % 256; omega
+    dsimp only; rw [hDiv, hMod]; omega
+  decode_encode l n u v hl hn := by
+    have hl0 : l = 0 := by omega
+    have hn0 : n = 0 := by omega
+    subst hl0; subst hn0
+    have hu : u.toNat < 256 := u.isLt
+    have hv : v.toNat < 256 := v.isLt
+    have hDiv : (u.toNat * 256 + v.toNat) / 256 = u.toNat := by omega
+    have hMod : (u.toNat * 256 + v.toNat) % 256 = v.toNat := by omega
+    dsimp only
+    rw [hDiv, hMod, BitVec.ofNat_toNat, BitVec.ofNat_toNat]
+    rfl
+
+def compactHemOracle : Fin 65536 → BitVec 8 := fun x => BitVec.ofNat 8 ((x.val + 0x5A) % 256)
+
+def compactHemSlot : MerkleOpeningSlot 65536 8 where
+  level := 0
+  depth := 1
+  readout := fun _ =>
+    { rt := compactHemOracle (compactMerkleLayout.encode 0 0 0x11#8 0x22#8)
+      idx := 0
+      leaf := 0x11#8
+      path := [0x22#8] }
+
+def compactHemInst : HemWhirInstance QuarticGoldilocks where
+  batchOracles := [fun _ => CommRingOps.one]
+  batchClaims := [CommRingOps.one]
+  initDomainPts := [CommRingOps.zero, CommRingOps.one]
+  initDegBound := 0
+  initMinAgree := 2
+  initKernel := [CommRingOps.one]
+  stages := []
+
+def compactHemDecode : Fin 65536 → List (Option (MerkleOpeningValue 8)) →
+    List (HemTranscriptRound QuarticGoldilocks)
+  | _, [some _] =>
+    [.cascade [CommRingOps.zero] [(CommRingOps.one, CommRingOps.zero)] [[CommRingOps.one]],
+     .finalQuery [CommRingOps.one]]
+  | _, _ => []
+
+/-- Shard verifier backed by `verifyHemOpeningBatch` (`fullShard.proof = []`, zero signature table). -/
+def hemOpeningShardVerify (s : Shard 2) : Bool :=
+  verifyHemOpeningBatch compactMerkleLayout [compactHemSlot] compactHemInst compactHemDecode
+    compactHemOracle ⟨0, by decide⟩ &&
+  decide (s.header = goodHeader)
+
+theorem compactHemInst_valid : HemStatementValid compactHemInst :=
+  ⟨by decide, ⟨[CommRingOps.one], by decide +kernel⟩, trivial⟩
+
+theorem hemOpeningShardVerify_accepts : hemOpeningShardVerify fullShard = true := by decide +kernel
+
+theorem hemOpeningShardVerify_tree_accepts :
+    checkTree goodHeader hemOpeningShardVerify 16 goodTree = true := by decide +kernel
+
+theorem hemOpeningShardVerify_rejects_per_signer :
+    hemOpeningShardVerify (shardFor (headerFor (.perSigner [auditMsg, auditMsg])) 3#2) = false := by
+  decide +kernel
+
+theorem hemOpeningShardVerify_boundary :
+    ExtractionBoundary compactAuditGeom custodyOf hemOpeningShardVerify (fun _ => False) :=
+  boundary_of_hem_opening_batch compactAuditGeom custodyOf (fun _ => False)
+    compactMerkleLayout [compactHemSlot]
+    (fun _ => compactHemInst) (fun _ => compactHemDecode)
+    (fun _ => compactHemOracle) (fun _ => ⟨0, by decide⟩)
+    (fun s => decide (s.header = goodHeader))
+    (fun _ => committeeStmt) (fun v => v.val)
+    (fun _ _ _ => .inr compactHemInst_valid)
+    (fun _ _ _ => ⟨_, committee_trace_satisfied⟩)
+    (fun s hMode => ⟨rfl, fun v _ => ⟨committee_slots v, by
+      rw [of_decide_eq_true hMode]; rfl⟩⟩)
+
+theorem hem_opening_regime_instance : ∃ geom custody verify bad,
+    ExtractionBoundary (n := 2) geom custody verify bad ∧
+    ∃ s : Shard 2, ∃ v : Fin 2, verify s = true ∧ s.bitmap.getLsbD v.val = true ∧
+    ∃ root tree, checkTree root verify 16 tree = true ∧ tree.bitmap.getLsbD v.val = true :=
+  ⟨compactAuditGeom, custodyOf, hemOpeningShardVerify, fun _ => False,
+    hemOpeningShardVerify_boundary, fullShard, 0,
+    hemOpeningShardVerify_accepts, good_bits 0,
+    goodHeader, goodTree, hemOpeningShardVerify_tree_accepts, good_bits 0⟩
+
 /-- Validator `1` is assigned a message it did not sign: the leaf is rejected. -/
 theorem rejects_unsigned_per_signer_message :
     checkTree (headerFor (.perSigner [auditMsg, otherMsg])) goodVerify 16
@@ -406,6 +552,122 @@ theorem both_components_broken_instance :
     mass (fun _ : Fin 2 => 1) (fun j =>
       hybridWins toyHash brokenClassical brokenClassical hk hrpQs 1 [paid] (advOut j)) = 1 := by
   decide +kernel
+
+/-! ### Real `cSHAKE256` (`keccakF1600`) + `verifyAggNativeSig` (`Poseidon2` Jorts) Hybrid Envelope -/
+
+/-- ASCII customization string `"QSAG.HYBRID.V2"` for `cSHAKE256` envelope hashing. -/
+def hybridCshakeTag : Bytes :=
+  [0x51, 0x53, 0x41, 0x47, 0x2E, 0x48, 0x59, 0x42, 0x52, 0x49, 0x44, 0x2E, 0x56, 0x32]
+
+def beNat (bs : Bytes) : Nat :=
+  bs.foldl (fun acc b => acc * 256 + b.toNat) 0
+
+/-- Real 256-bit `cSHAKE256` (`evalCshake256Sponge keccakF1600`) domain-separated hash for
+`HybridSecurity.Hash`, replacing the polynomial checksum `toyHash`. -/
+def cshakeHybridHash : HybridSecurity.Hash := fun x =>
+  ⟨beNat (evalCshake256Sponge keccakF1600 zeroKState xorRate136 rateBlockBytes
+      [] hybridCshakeTag (encodePre x) 32) % 256 ^ 32,
+   Nat.mod_lt _ (Nat.pow_pos (by decide))⟩
+
+def encodeLane4Bytes (d : Digest4) : Bytes :=
+  be 8 d.x0.val ++ (be 8 d.x1.val ++ (be 8 d.x2.val ++ be 8 d.x3.val))
+
+def decodeLane4Bytes (bs : Bytes) : Option Digest4 :=
+  if bs.length = 32 then
+    some ⟨Goldilocks.ofNat (beNat (bs.take 8)),
+          Goldilocks.ofNat (beNat ((bs.drop 8).take 8)),
+          Goldilocks.ofNat (beNat ((bs.drop 16).take 8)),
+          Goldilocks.ofNat (beNat ((bs.drop 24).take 8))⟩
+  else none
+
+def encodeCompactJortsPk (pk : AggValidatorPk) : Bytes :=
+  encodeLane4Bytes pk.pkSeed ++ encodeLane4Bytes pk.pkRoot
+
+def decodeCompactJortsPk (bs : Bytes) : Option AggValidatorPk :=
+  if bs.length = 64 then
+    match decodeLane4Bytes (bs.take 32), decodeLane4Bytes (bs.drop 32) with
+    | some s, some r => some ⟨.xmssPoseidon2, s, r⟩
+    | _, _ => none
+  else none
+
+def encodeCompactJortsSig (sig : AggNativeSignature) : Bytes :=
+  match sig.layers with
+  | [⟨ctr, [c0, c1], [s0]⟩] =>
+    be 8 sig.statefulLeafIdx ++ (be 8 ctr ++
+      (encodeLane4Bytes sig.rRand ++
+        (encodeLane4Bytes c0 ++ (encodeLane4Bytes c1 ++ encodeLane4Bytes s0))))
+  | _ => []
+
+def decodeCompactJortsSig (bs : Bytes) : Option AggNativeSignature :=
+  if bs.length = 144 then
+    match decodeLane4Bytes ((bs.drop 16).take 32),
+          decodeLane4Bytes ((bs.drop 48).take 32),
+          decodeLane4Bytes ((bs.drop 80).take 32),
+          decodeLane4Bytes ((bs.drop 112).take 32) with
+    | some rR, some c0, some c1, some s0 =>
+      some ⟨.xmssPoseidon2, rR, beNat (bs.take 8), [],
+        [⟨beNat ((bs.drop 8).take 8), [c0, c1], [s0]⟩]⟩
+    | _, _, _, _ => none
+  else none
+
+/-- Real `Poseidon2` Jorts signature verifier (`verifyAggNativeSig compactAuditGeom`) over decoded
+public-key and signature bytes, replacing the publicly forgeable `toyVerifier`. -/
+def jortsNativeVerifier : Verifier := fun pkBytes t sigBytes =>
+  match decodeCompactJortsPk pkBytes, decodeCompactJortsSig sigBytes with
+  | some pk, some sig => verifyAggNativeSig compactAuditGeom pk (transcriptFields t) sig
+  | _, _ => false
+
+def realHk : Keys :=
+  ⟨.secpMl44, encodeCompactJortsPk (pkOf 0), encodeCompactJortsPk (pkOf 1)⟩
+
+/-- Literal native signatures on the `cshakeHybridHash` classical/PQ transcripts for `paid`
+(`tswCtr = 534` and `2`), tied to `signAggNative` by `real_hybrid_sigs_are_modelled_outputs`. -/
+def realHybridSig0 : AggNativeSignature :=
+  ⟨.xmssPoseidon2, auditRRand, 0, [], [⟨534,
+    [lane 13114432238372060916 12016953556726374818 3669076513781295907 7706576668694258860,
+     lane 5214530183828569437 8695090849526209258 6156362808110527505 11985450357935518617],
+    [lane 10115896709169784647 11913327531000105763 6390924361611074928 16255170532119731419]⟩]⟩
+
+def realHybridSig1 : AggNativeSignature :=
+  ⟨.xmssPoseidon2, auditRRand, 1, [], [⟨2,
+    [lane 6827400690795841236 9142268317945543930 7533254204467450509 1080846719237328644,
+     lane 2579495626017817171 15292570552375798192 2116332967024616565 97932414014730607],
+    [lane 6728612734466122233 15854675676448426872 13233423373936609707 12603034427201441080]⟩]⟩
+
+theorem real_hybrid_sigs_are_modelled_outputs :
+    realHybridSig0 = signAggNative compactAuditGeom (skOf 0) (pkOf 0)
+      (transcriptFields (transcript cshakeHybridHash realHk false paid)) auditRRand 0 534 [] ∧
+    realHybridSig1 = signAggNative compactAuditGeom (skOf 1) (pkOf 1)
+      (transcriptFields (transcript cshakeHybridHash realHk true paid)) auditRRand 1 2 [] := by
+  decide +kernel
+
+def realEnvelopePaid : HybridPinnedEnvelope :=
+  ⟨realHk, encodeCompactJortsSig realHybridSig0, encodeCompactJortsSig realHybridSig1⟩
+
+theorem real_hybrid_honest_accepts :
+    validateForAddress cshakeHybridHash realEnvelopePaid (addressOf cshakeHybridHash realHk hrpQs 1) ∧
+    verifyWith cshakeHybridHash jortsNativeVerifier jortsNativeVerifier realEnvelopePaid paid := by
+  unfold validateForAddress verifyWith; decide +kernel
+
+theorem real_hybrid_rejects_other_message :
+    ¬ verifyWith cshakeHybridHash jortsNativeVerifier jortsNativeVerifier realEnvelopePaid unpaid := by
+  unfold verifyWith; decide +kernel
+
+theorem real_hybrid_rejects_rogue_partner :
+    ¬ (jortsNativeVerifier realHk.pq
+        (transcript cshakeHybridHash { realHk with classical := encodeCompactJortsPk (pkOf 1) } true paid)
+        realEnvelopePaid.pqSignature = true) := by
+  decide +kernel
+
+attribute [local irreducible] cshakeHybridHash jortsNativeVerifier realEnvelopePaid
+
+theorem real_hybrid_keybound_instance :
+    ∃ (H : HybridSecurity.Hash) (vc vp : Verifier) (k : Keys) (hrp : Bytes)
+      (v : Nat) (e : HybridPinnedEnvelope) (m : Bytes) (qs : List Bytes),
+      validateForAddress H e (addressOf H k hrp v) ∧ verifyWith H vc vp e m ∧ m ∉ qs :=
+  ⟨cshakeHybridHash, jortsNativeVerifier, jortsNativeVerifier, realHk, hrpQs, 1,
+    realEnvelopePaid, paid, [unpaid],
+    real_hybrid_honest_accepts.1, real_hybrid_honest_accepts.2, by decide⟩
 
 def pol : TransactionPolicy := ⟨9, [7, 8], 100, 150, [⟨50, 1⟩, ⟨100, 2⟩]⟩
 def intentHash (i : TransactionIntent) : Nat :=
@@ -680,6 +942,10 @@ theorem same_label_reprogram_changes_game :
 end Cross
 
 #verify_constructive transparent_boundary boundary_of_committee_trace
+  boundary_of_hem_opening_batch compactHemInst_valid
+  hemOpeningShardVerify_accepts hemOpeningShardVerify_tree_accepts
+  hemOpeningShardVerify_rejects_per_signer hemOpeningShardVerify_boundary
+  hem_opening_regime_instance
   fixtures_are_modelled_outputs native_accepts
   native_rejects_other_message native_rejects_other_key native_rejects_tampered_randomizer
   good_full_accepts good_tree_accepts good_bits good_participation good_no_forgery
@@ -696,7 +962,11 @@ end Cross
   hybrid_rejects_relabelled_version hybrid_address_commitments_differ
   hybrid_rejects_other_keys_address hybrid_rejects_swapped_roles
   hybrid_rejects_rogue_partner hybrid_keybound_instance robust_combiner_instance
-  both_components_broken_instance only_honest_member acceptsA acceptsB stepA stepB
+  both_components_broken_instance
+  real_hybrid_sigs_are_modelled_outputs
+  real_hybrid_honest_accepts real_hybrid_rejects_other_message
+  real_hybrid_rejects_rogue_partner real_hybrid_keybound_instance
+  only_honest_member acceptsA acceptsB stepA stepB
   corrupt_token_not_minted corrupt_quorum_instance two_intent_spending_instance
   rejects_over_per_tx_cap rejects_unlisted_recipient rejects_insufficient_approvals
   rejects_nonce_replay rejects_window_overspend rejects_stale_window token_is_intent_specific
@@ -707,9 +977,12 @@ end Cross
   digest_collision_is_hash_collision real_label_partition_instance
   foreign_label_reprogram_instance same_label_reprogram_changes_game
 #verify_inhabited Qsag.Composed.merged_quorum_reduction good_regime_instance
+#verify_inhabited Qsag.Composed.merged_quorum_reduction hem_opening_regime_instance
 #verify_inhabited Qsag.Composed.quorum_aggregation_reduction good_regime_instance
+#verify_inhabited Qsag.Composed.quorum_aggregation_reduction hem_opening_regime_instance
 #verify_inhabited Qsag.Composed.quorum_advantage_from_extraction forgery_regime_instance
 #verify_inhabited Qsag.HybridSecurity.dual_key_euf_cma hybrid_keybound_instance
+#verify_inhabited Qsag.HybridSecurity.dual_key_euf_cma real_hybrid_keybound_instance
 #verify_inhabited Qsag.HybridSecurity.threshold_policy_composition corrupt_quorum_instance
 #verify_inhabited Qsag.HybridSecurity.threshold_spending_safety two_intent_spending_instance
 #verify_inhabited Qsag.CrossProtocol.checked_preimage_is_transcript_hit real_transcript_instance
