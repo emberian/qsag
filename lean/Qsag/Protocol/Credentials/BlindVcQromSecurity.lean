@@ -475,3 +475,498 @@ theorem blindVcTableConflict_extract {k : Nat}
 /-- The total acceptance event decomposes before assigning any numerical bound.
 A separate computational bound for `blindVcTableConflict` is required to turn the
 filtered QROM mass estimate into a total soundness estimate. -/
+theorem blindVc_fs_acceptance_decomposition {cardX k : Nat}
+    (H : List UInt8 → List UInt8)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (stmtAt : Fin cardX → BlindVcPublicStatement)
+    (msgAt : Fin cardX → BlindVcParallelMsg k)
+    (O : Fin cardX → BitVec (64 * k)) (x : Fin cardX)
+    (hAccept : blindVcFsUnfilteredLiveAfter H prgExpand stmtAt msgAt O x = true) :
+    blindVcTableConflict H (stmtAt x) (msgAt x) = true ∨
+    blindVcFsLiveAfter H prgExpand stmtAt msgAt O x = true := by
+  cases hc : blindVcTableConflict H (stmtAt x) (msgAt x) with
+  | true => exact Or.inl rfl
+  | false =>
+    right
+    apply List.all_eq_true.mpr
+    intro idx hMem
+    have hlt : idx < k := List.mem_range.mp hMem
+    have hRaw := List.all_eq_true.mp hAccept idx hMem
+    have hClean := List.any_eq_false.mp hc idx hMem
+    rw [dite_true hlt] at hRaw hClean ⊢
+    simp only [verifyCollisionFreeCommittedBlindVcRep, hClean, Bool.not_false,
+      Bool.true_and]
+    exact hRaw
+
+/-- Constructive `QromRbrRound` instantiation for `k`-repetition `BlindVC` Fiat-Shamir squeezing. -/
+def blindVcQromFsRound
+    {cardX : Nat} {H_hash : List UInt8 → List UInt8}
+    (hHLen : ∀ m, (H_hash m).length < 256 ^ 8)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (k : Nat) (stmtAt : Fin cardX → BlindVcPublicStatement)
+    (msgAt : (x : Fin cardX) → BlindVcParallelMsg k)
+    (isDoomedBool : Fin cardX → Bool)
+    (hDoomedSound : ∀ x : Fin cardX, isDoomedBool x = true →
+      ¬ (blindVcParallelIop H_hash prgExpand k).inLang (stmtAt x))
+    (O : Fin cardX → BitVec (64 * k)) : QromRbrRound cardX (64 * k) O where
+  proj := id
+  isDoomedAt := fun _ x => isDoomedBool x
+  isLiveAfter := blindVcFsLiveAfter H_hash prgExpand stmtAt msgAt
+  badCard := blindVcBadWord64 ^ k
+  doomed_local := fun _ _ => rfl
+  flip_bound := fun x hD => by
+    have hNotIn := hDoomedSound x hD
+    have hNoWit : ¬ ∃ wit : BlindVcSecretWitness (stmtAt x).schema.arity (stmtAt x).treeDepth,
+        BlindVcWitnessValid (stmtAt x) wit := hNotIn
+    let p : Nat → Fin (2 ^ 64) → Bool := fun idx u =>
+      if hIdx : idx < k then
+        let fi : Fin k := ⟨idx, hIdx⟩
+        let e : Fin 3 := ⟨u.1 % 3, Nat.mod_lt _ (by decide)⟩
+        verifyCollisionFreeCommittedBlindVcRep H_hash prgExpand (stmtAt x) idx
+          (Vec.get (msgAt x).allRound1 fi) (Vec.get (msgAt x).openTable fi).get e
+      else true
+    have hEach : ∀ idx < k, qsum (2 ^ 64) (fun u => if p idx u = true then 1 else 0) ≤
+        blindVcBadWord64 := by
+      intro idx hlt
+      let fi : Fin k := ⟨idx, hlt⟩
+      let q3 : Fin 3 → Bool := fun e =>
+        verifyCollisionFreeCommittedBlindVcRep H_hash prgExpand (stmtAt x) idx
+          (Vec.get (msgAt x).allRound1 fi) (Vec.get (msgAt x).openTable fi).get e
+      have hNotAll3 : fin3AllTrue q3 = false := by
+        unfold fin3AllTrue
+        cases hAll : (q3 0 && q3 1 && q3 2) with
+        | false => rfl
+        | true =>
+          have h3 : qsum 3 (fun e => if q3 e = true then 1 else 0) = 3 := by
+            simp only [Bool.and_eq_true] at hAll; rcases hAll with ⟨⟨h0, h1⟩, h2⟩
+            simp only [qsum, Nat.add_zero]
+            change (if q3 0 = true then 1 else 0) +
+              ((if q3 1 = true then 1 else 0) + (if q3 2 = true then 1 else 0)) = 3
+            rw [h0, h1, h2]; decide
+          have hLe2 := blindVc_rep_pigeonhole_le_two (prgExpand := prgExpand) hHLen hNoWit idx
+            (Vec.get (msgAt x).allRound1 fi) ((Vec.get (msgAt x).openTable fi).get)
+          change qsum 3 (fun e => if q3 e = true then 1 else 0) ≤ 2 at hLe2; omega
+      have hCong : ∀ u : Fin (2 ^ 64),
+          (if p idx u = true then 1 else 0) =
+          (if q3 ⟨u.1 % 3, Nat.mod_lt _ (by decide)⟩ = true then 1 else 0) := by
+        intro u
+        have hpu : p idx u = q3 ⟨u.1 % 3, Nat.mod_lt _ (by decide)⟩ := dite_true hlt _ _
+        rw [hpu]
+      rw [qsum_congr hCong]; exact word64_mod3_bad_count_le q3 hNotAll3
+    have hPowEq : 2 ^ (64 * k) = (2 ^ 64) ^ k := Nat.pow_mul 2 64 k
+    rw [qsum_cast hPowEq]
+    refine Nat.le_trans ?_ (product_bad_count_le_pow (2 ^ 64) blindVcBadWord64 k p hEach)
+    apply qsum_le_qsum; intro ch
+    have hChLt : ch.1 < 2 ^ (64 * k) := by rw [hPowEq]; exact ch.isLt
+    let chBv : BitVec (64 * k) := BitVec.ofFin ⟨ch.1, hChLt⟩
+    have hReprog : (reprogramOracle O x chBv x).toNat = ch.1 := by
+      unfold reprogramOracle; rw [ite_true rfl]; rfl
+    have hAllEq :
+        blindVcFsLiveAfter H_hash prgExpand stmtAt msgAt (reprogramOracle O x chBv) x =
+        (List.range k).all (fun idx =>
+          if hM : 0 < 2 ^ 64 then p idx ⟨(ch.1 / (2 ^ 64) ^ idx) % 2 ^ 64, Nat.mod_lt _ hM⟩
+          else false) := by
+      unfold blindVcFsLiveAfter
+      congr 1; funext idx
+      rw [dite_true (Nat.two_pow_pos 64)]
+      have hFinEq : squeeze64Mod3At (reprogramOracle O x chBv x) idx =
+          ⟨((ch.1 / (2 ^ 64) ^ idx) % 2 ^ 64) % 3, Nat.mod_lt _ (by decide)⟩ := by
+        apply Fin.ext; dsimp only [squeeze64Mod3At]; rw [hReprog]
+      dsimp only [p]; rw [hFinEq]
+    change (if blindVcFsLiveAfter H_hash prgExpand stmtAt msgAt (reprogramOracle O x chBv) x = true
+      then 1 else 0) ≤ _
+    rw [hAllEq]; exact Nat.le_refl _
+
+/-- Parametric `k`-repetition QROM Fiat-Shamir round bound (symbolic in `k`, zero big-int WHNF). -/
+theorem blindVc_qrom_fs_round_bound
+    {cardX cardAnc Q : Nat} (k : Nat)
+    (A : QuantumAdv cardX (64 * k) cardAnc Q)
+    {H_hash : List UInt8 → List UInt8} (hHLen : ∀ m, (H_hash m).length < 256 ^ 8)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (stmtAt : Fin cardX → BlindVcPublicStatement)
+    (msgAt : (x : Fin cardX) → BlindVcParallelMsg k)
+    (isDoomedBool : Fin cardX → Bool)
+    (hDoomedSound : ∀ x : Fin cardX, isDoomedBool x = true →
+      ¬ (blindVcParallelIop H_hash prgExpand k).inLang (stmtAt x)) :
+    let norm := prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init
+    RatBound.le
+      ⟨uniformOracleSum (64 * k) cardX
+         (fun O => qromOrdinaryFlipMass A O id (fun _ x => isDoomedBool x)
+           (blindVcFsLiveAfter H_hash prgExpand stmtAt msgAt)),
+       (2 ^ (64 * k)) ^ cardX * norm,
+       Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos _))
+         (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      ⟨(2 * Q + 1) ^ 2 * blindVcBadWord64 ^ k, 2 ^ (64 * k), Nat.two_pow_pos _⟩ :=
+  qrom_uniform_oracle_round_bound A
+    (blindVcQromFsRound hHLen prgExpand k stmtAt msgAt isDoomedBool hDoomedSound)
+    id (fun _ x => isDoomedBool x)
+    (blindVcFsLiveAfter H_hash prgExpand stmtAt msgAt)
+    (blindVcBadWord64 ^ k) (fun _ => rfl) (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
+
+/-- **Flagship §2 Theorem — `438`-Repetition QROM Fiat-Shamir Soundness (`blindVc_quantum128_qrom_fs_soundness`)**:
+    Bounds the defined collision-filtered doomed-to-live query mass by `(2 * Q + 1)^2 * blindVcBadWord64^438 / 2^(64 * 438)`,
+    strictly `< 2^-128` for all `Q ≤ 2^60` quantum random-oracle queries. -/
+theorem blindVc_quantum128_qrom_fs_soundness
+    {cardX cardAnc Q : Nat} (hQ : Q ≤ 2 ^ 60)
+    (A : QuantumAdv cardX (64 * 438) cardAnc Q)
+    {H_hash : List UInt8 → List UInt8} (hHLen : ∀ m, (H_hash m).length < 256 ^ 8)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (stmtAt : Fin cardX → BlindVcPublicStatement)
+    (msgAt : (x : Fin cardX) → BlindVcParallelMsg 438)
+    (isDoomedBool : Fin cardX → Bool)
+    (hDoomedSound : ∀ x : Fin cardX, isDoomedBool x = true →
+      ¬ (blindVcParallelIop H_hash prgExpand 438).inLang (stmtAt x)) :
+    let norm := prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init
+    RatBound.le
+      ⟨uniformOracleSum (64 * 438) cardX
+         (fun O => qromOrdinaryFlipMass A O id (fun _ x => isDoomedBool x)
+           (blindVcFsLiveAfter H_hash prgExpand stmtAt msgAt)),
+       (2 ^ (64 * 438)) ^ cardX * norm,
+       Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos _))
+         (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      ⟨(2 * Q + 1) ^ 2 * blindVcBadWord64 ^ 438, 2 ^ (64 * 438), Nat.two_pow_pos _⟩ ∧
+    (2 * Q + 1) ^ 2 * blindVcBadWord64 ^ 438 * 2 ^ 128 < (2 ^ 64) ^ 438 := by
+  refine ⟨blindVc_qrom_fs_round_bound 438 A hHLen prgExpand stmtAt msgAt isDoomedBool hDoomedSound, ?_⟩
+  have hStepRatio : blindVcBadWord64 * 3071 ≤ 2 ^ 64 * 2048 := by decide
+  have hPowRatio : (blindVcBadWord64 * 3071) ^ 438 ≤ (2 ^ 64 * 2048) ^ 438 :=
+    Nat.pow_le_pow_left hStepRatio 438
+  rw [Nat.mul_pow, Nat.mul_pow] at hPowRatio
+  have hQMono : (2 * Q + 1) ^ 2 ≤ (2 * 2 ^ 60 + 1) ^ 2 := Nat.pow_le_pow_left (by omega) 2
+  have hMargin : (2 * 2 ^ 60 + 1) ^ 2 * 2048 ^ 438 * 2 ^ 128 < 3071 ^ 438 := by decide
+  have hQMargin : (2 * Q + 1) ^ 2 * 2048 ^ 438 * 2 ^ 128 < 3071 ^ 438 :=
+    Nat.lt_of_le_of_lt
+      (Nat.mul_le_mul_right (2 ^ 128) (Nat.mul_le_mul_right (2048 ^ 438) hQMono)) hMargin
+  apply nat_lt_of_mul_lt_mul_right (c := 3071 ^ 438)
+  have hLhsEq :
+      (2 * Q + 1) ^ 2 * blindVcBadWord64 ^ 438 * 2 ^ 128 * 3071 ^ 438 =
+      ((2 * Q + 1) ^ 2 * 2 ^ 128) * (blindVcBadWord64 ^ 438 * 3071 ^ 438) := by
+    simp only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm]
+  have hMidLe :
+      ((2 * Q + 1) ^ 2 * 2 ^ 128) * (blindVcBadWord64 ^ 438 * 3071 ^ 438) ≤
+      ((2 * Q + 1) ^ 2 * 2048 ^ 438 * 2 ^ 128) * (2 ^ 64) ^ 438 := by
+    have h1 := Nat.mul_le_mul_left ((2 * Q + 1) ^ 2 * 2 ^ 128) hPowRatio
+    simpa only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm] using h1
+  have hStrict :
+      ((2 * Q + 1) ^ 2 * 2048 ^ 438 * 2 ^ 128) * (2 ^ 64) ^ 438 <
+      3071 ^ 438 * (2 ^ 64) ^ 438 :=
+    Nat.mul_lt_mul_of_pos_right hQMargin (Nat.pow_pos (Nat.two_pow_pos 64))
+  rw [hLhsEq, Nat.mul_comm ((2 ^ 64) ^ 438) (3071 ^ 438)]
+  exact Nat.lt_of_le_of_lt hMidLe hStrict
+
+/-! ## §3. Merkle Path Bridge & Issuer `ML-DSA` Root-Attestation Unforgeability -/
+
+def vcBoolStepsIdx : List (Bool × Lane6) → Nat
+  | [] => 0
+  | (b, _) :: rest => (if b then 1 else 0) + 2 * vcBoolStepsIdx rest
+
+theorem evalVcMerklePathBool_eq_merkleRootFromPath (epoch : UInt64) :
+    ∀ (layer : Nat) (cur : Lane6) (steps : List (Bool × Lane6)),
+      evalVcMerklePathBool epoch layer cur steps =
+        merkleRootFromPath (fun lvl _ l r => vcMerkleHashPair l r epoch lvl)
+          layer (vcBoolStepsIdx steps) cur (steps.map Prod.snd)
+  | _, _, [] => rfl
+  | layer, cur, (false, _) :: rest => by
+    simp only [evalVcMerklePathBool, vcBoolStepsIdx, List.map, merkleRootFromPath,
+      Bool.false_eq_true, ↓reduceIte]
+    have hMod : (0 + 2 * vcBoolStepsIdx rest) % 2 = 0 := by omega
+    have hDiv : (0 + 2 * vcBoolStepsIdx rest) / 2 = vcBoolStepsIdx rest := by omega
+    rw [ite_true hMod, hDiv]
+    exact evalVcMerklePathBool_eq_merkleRootFromPath epoch (layer + 1) _ rest
+  | layer, cur, (true, _) :: rest => by
+    simp only [evalVcMerklePathBool, vcBoolStepsIdx, List.map, merkleRootFromPath, ↓reduceIte]
+    have hMod : (1 + 2 * vcBoolStepsIdx rest) % 2 ≠ 0 := by omega
+    have hDiv : (1 + 2 * vcBoolStepsIdx rest) / 2 = vcBoolStepsIdx rest := by omega
+    rw [ite_false hMod, hDiv]
+    exact evalVcMerklePathBool_eq_merkleRootFromPath epoch (layer + 1) _ rest
+
+inductive VcMerkleTree : Nat → Type where
+  | leaf (val : Lane6) : VcMerkleTree 0
+  | branch {d : Nat} (left right : VcMerkleTree d) : VcMerkleTree (d + 1)
+
+def vcMerkleTreeRoot (epoch : UInt64) : {d : Nat} → Nat → VcMerkleTree d → Lane6
+  | 0, _, .leaf v => v
+  | d + 1, layer, .branch l r =>
+    vcMerkleHashPair (vcMerkleTreeRoot epoch layer l) (vcMerkleTreeRoot epoch layer r) epoch (layer + d)
+
+def vcMerkleTreeLeaves : {d : Nat} → VcMerkleTree d → List Lane6
+  | 0, .leaf v => [v]
+  | _ + 1, .branch l r => vcMerkleTreeLeaves l ++ vcMerkleTreeLeaves r
+
+private def listSnocSplit {α : Type} : (x : α) → (xs : List α) →
+    { p : List α × α // x :: xs = p.1 ++ [p.2] ∧ p.1.length = xs.length }
+  | x, [] => ⟨([], x), rfl, rfl⟩
+  | x, y :: ys =>
+    let ⟨(ini, lst), hEq, hLen⟩ := listSnocSplit y ys
+    ⟨(x :: ini, lst), by simp [hEq], by simp [hLen]⟩
+
+private theorem evalVcMerklePathBool_append_singleton (epoch : UInt64) :
+    ∀ (steps : List (Bool × Lane6)) (layer : Nat) (cur : Lane6) (b : Bool) (sib : Lane6),
+      evalVcMerklePathBool epoch layer cur (steps ++ [(b, sib)]) =
+        (if b then vcMerkleHashPair sib (evalVcMerklePathBool epoch layer cur steps) epoch (layer + steps.length)
+         else vcMerkleHashPair (evalVcMerklePathBool epoch layer cur steps) sib epoch (layer + steps.length))
+  | [], _, _, false, _ => by simp [evalVcMerklePathBool]
+  | [], _, _, true, _ => by simp [evalVcMerklePathBool]
+  | (b0, _) :: rest, layer, _, b, sib => by
+    cases b0 <;> dsimp only [List.cons_append, evalVcMerklePathBool, List.length_cons] <;>
+      rw [evalVcMerklePathBool_append_singleton epoch rest (layer + 1) _ b sib] <;>
+      rw [show layer + 1 + rest.length = layer + (rest.length + 1) by omega]
+
+/-- **Merkle Accumulator Membership or Reachable Sponge Collision (`vcMerkleTree_opening_sound`)**. -/
+theorem vcMerkleTree_opening_sound (epoch : UInt64) :
+    ∀ {d : Nat} (tree : VcMerkleTree d) (layer : Nat) (leaf : Lane6) (steps : List (Bool × Lane6)),
+      steps.length = d → evalVcMerklePathBool epoch layer leaf steps = vcMerkleTreeRoot epoch layer tree →
+      leaf ∈ vcMerkleTreeLeaves tree ∨
+      ∃ (c₁ c₂ : Lane6 × Lane6 × Lane6) (r : Fin 3),
+        Poseidon2Perm12Sponge6Collision (spongeTrace204 c₁ r) (spongeTrace204 c₂ r)
+  | 0, .leaf _, _, _, [], _, hEq =>
+    Or.inl (by dsimp [evalVcMerklePathBool, vcMerkleTreeRoot] at hEq; rw [hEq]; exact .head [])
+  | 0, .leaf _, _, _, _ :: _, hLen, _ => by cases hLen
+  | _ + 1, .branch _ _, _, _, [], hLen, _ => by cases hLen
+  | d + 1, .branch lTree rTree, layer, leaf, s0 :: sRest, hLen, hEq => by
+    obtain ⟨⟨ini, bTop, sibTop⟩, hSplit, hIniLen⟩ := listSnocSplit s0 sRest
+    dsimp only at hSplit hIniLen
+    have hd : ini.length = d := by simp only [List.length_cons] at hLen; omega
+    rw [hSplit, evalVcMerklePathBool_append_singleton, hd] at hEq
+    simp only [vcMerkleTreeRoot] at hEq
+    let subRoot := evalVcMerklePathBool epoch layer leaf ini
+    let lRoot := vcMerkleTreeRoot epoch layer lTree
+    let rRoot := vcMerkleTreeRoot epoch layer rTree
+    cases bTop with
+    | false =>
+      simp only [Bool.false_eq_true, ↓reduceIte] at hEq
+      if hChildren : subRoot = lRoot ∧ sibTop = rRoot then
+        rcases vcMerkleTree_opening_sound epoch lTree layer leaf ini hd hChildren.1 with hMem | hColl
+        · exact Or.inl (List.mem_append_left _ hMem)
+        · exact Or.inr hColl
+      else
+        have hChunksNe : vcMerkleChunks subRoot sibTop epoch (layer + d) ≠
+            vcMerkleChunks lRoot rRoot epoch (layer + d) :=
+          fun hc => hChildren ⟨congrArg Prod.fst hc, congrArg (fun p => p.2.1) hc⟩
+        obtain ⟨r, hCol⟩ := absorbRate6Sponge3_reachable_collision204 hChunksNe hEq
+        exact Or.inr ⟨_, _, r, hCol⟩
+    | true =>
+      simp only [↓reduceIte] at hEq
+      if hChildren : sibTop = lRoot ∧ subRoot = rRoot then
+        rcases vcMerkleTree_opening_sound epoch rTree layer leaf ini hd hChildren.2 with hMem | hColl
+        · exact Or.inl (List.mem_append_right _ hMem)
+        · exact Or.inr hColl
+      else
+        have hChunksNe : vcMerkleChunks sibTop subRoot epoch (layer + d) ≠
+            vcMerkleChunks lRoot rRoot epoch (layer + d) :=
+          fun hc => hChildren ⟨congrArg Prod.fst hc, congrArg (fun p => p.2.1) hc⟩
+        obtain ⟨r, hCol⟩ := absorbRate6Sponge3_reachable_collision204 hChunksNe hEq
+        exact Or.inr ⟨_, _, r, hCol⟩
+
+def encodeIssuerRootAttestationMsg (issuerRootTag : Vec UInt8 32) (epoch : UInt64) (accRoot : Lane6) : List UInt8 :=
+  [0x51, 0x53, 0x41, 0x47, 0x2E, 0x52, 0x4F, 0x4F, 0x54] ++
+  issuerRootTag.toList ++ encodeNatLeBytes 8 epoch.toNat ++
+  encodeGoldilocksVecLe [accRoot.x0, accRoot.x1, accRoot.x2, accRoot.x3, accRoot.x4, accRoot.x5]
+
+def verifyBlindVcWithIssuerAttestation
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8) (sampleInBall : List UInt8 → Poly256)
+    (issuerA : PolyMat4) (issuerT1Scaled : PolyVec4) (H : List UInt8 → List UInt8)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (trusted : BlindVcTrustedContext) (expectedSchema : VcSchema) (treeDepth : Nat)
+    (verifierChallenge : List UInt8) (rootSig : ThresholdSignSig) (pres : BlindVcPresentation) : Bool :=
+  mldsaVerify chalHash sampleInBall issuerA issuerT1Scaled
+    (encodeIssuerRootAttestationMsg trusted.issuerRootTag trusted.issuerEpoch trusted.accumulatorRoot)
+    rootSig.cTilde rootSig.z rootSig.h &&
+  verifyBlindVcPresentationTrusted H prgExpand .quantum128 trusted expectedSchema treeDepth verifierChallenge pres
+
+structure IssuerMintedEpoch (schema : VcSchema) (treeDepth : Nat) where
+  issuerRootTag : Vec UInt8 32
+  epoch : UInt64
+  tree : VcMerkleTree treeDepth
+  mintedCreds : List (List Goldilocks × Lane4)
+  hLeaves : ∀ leaf ∈ vcMerkleTreeLeaves tree,
+    ∃ cred ∈ mintedCreds, computeVcPoseidon2Commit schema cred.1 cred.2 vcAttrCommitTag = some leaf
+
+/-- **End-to-End `BlindVC` -> Issuer `ML-DSA` Unforgeability & Collision Reduction
+    (`blindVc_presentation_reduces_to_issuer_mldsa`)**. -/
+theorem blindVc_presentation_reduces_to_issuer_mldsa
+    {chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8} {sampleInBall : List UInt8 → Poly256}
+    {issuerA : PolyMat4} {issuerT1Scaled : PolyVec4} {H : List UInt8 → List UInt8}
+    (hHLen : ∀ m, (H m).length < 256 ^ 8)
+    {prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D}
+    {trusted : BlindVcTrustedContext} {expectedSchema : VcSchema} {treeDepth : Nat}
+    {verifierChallenge : List UInt8} {rootSig : ThresholdSignSig} {pres : BlindVcPresentation}
+    (epochLog : IssuerMintedEpoch expectedSchema treeDepth) (o0 o1 o2 : OpenedBlindVcRep)
+    (hVer : verifyBlindVcWithIssuerAttestation chalHash sampleInBall issuerA issuerT1Scaled
+      H prgExpand trusted expectedSchema treeDepth verifierChallenge rootSig pres = true)
+    (hRew01 : reconstructRepRound1 H pres.presentationNonce 0 o0 =
+      reconstructRepRound1 H pres.presentationNonce 0 o1)
+    (hRew12 : reconstructRepRound1 H pres.presentationNonce 0 o1 =
+      reconstructRepRound1 H pres.presentationNonce 0 o2)
+    (hRep0 : verifyOpenedBlindVcRep prgExpand expectedSchema pres.issuerEpoch treeDepth
+      pres.accumulatorRoot pres.presCommit pres.scopeTag pres.verifierScopeLimbs
+      pres.disclosedAttrs 0 0 o0 = true)
+    (hRep1 : verifyOpenedBlindVcRep prgExpand expectedSchema pres.issuerEpoch treeDepth
+      pres.accumulatorRoot pres.presCommit pres.scopeTag pres.verifierScopeLimbs
+      pres.disclosedAttrs 0 1 o1 = true)
+    (hRep2 : verifyOpenedBlindVcRep prgExpand expectedSchema pres.issuerEpoch treeDepth
+      pres.accumulatorRoot pres.presCommit pres.scopeTag pres.verifierScopeLimbs
+      pres.disclosedAttrs 0 2 o2 = true) :
+    (mldsaVerify chalHash sampleInBall issuerA issuerT1Scaled
+       (encodeIssuerRootAttestationMsg trusted.issuerRootTag trusted.issuerEpoch trusted.accumulatorRoot)
+       rootSig.cTilde rootSig.z rootSig.h = true ∧
+     (trusted.issuerRootTag ≠ epochLog.issuerRootTag ∨ trusted.issuerEpoch ≠ epochLog.epoch ∨
+      trusted.accumulatorRoot ≠ vcMerkleTreeRoot epochLog.epoch 0 epochLog.tree)) ∨
+    (∃ m₁ m₂ : List UInt8, m₁ ≠ m₂ ∧ H m₁ = H m₂) ∨
+    (∃ (c₁ c₂ : Lane6 × Lane6 × Lane6) (r : Fin 3),
+      Poseidon2Perm12Sponge6Collision (spongeTrace204 c₁ r) (spongeTrace204 c₂ r)) ∨
+    (∃ cred ∈ epochLog.mintedCreds, ∃ presBlind : Lane4,
+      (pres.disclosedAttrs.map Prod.fst).Nodup ∧
+      (∀ p ∈ pres.disclosedAttrs, p.1 < expectedSchema.arity ∧ cred.1[p.1]? = some p.2) ∧
+      computeVcPoseidon2Commit expectedSchema cred.1 presBlind vcPresCommitTag = some pres.presCommit ∧
+      computeVcScopeTag expectedSchema.schemaId cred.2 trusted.verifierScopeLimbs = pres.scopeTag) := by
+  unfold verifyBlindVcWithIssuerAttestation at hVer
+  rw [Bool.and_eq_true] at hVer; obtain ⟨hSigOk, hTrustedOk⟩ := hVer
+  obtain ⟨hRootEq, _, hEpEq, hScopeEq, _⟩ := verifyBlindVcPresentationTrusted_context hTrustedOk
+  if hAttestMatch :
+      trusted.issuerRootTag = epochLog.issuerRootTag ∧ trusted.issuerEpoch = epochLog.epoch ∧
+      trusted.accumulatorRoot = vcMerkleTreeRoot epochLog.epoch 0 epochLog.tree then
+    obtain ⟨_, hEpLog, hRootLog⟩ := hAttestMatch
+    rcases verifyOpenedBlindVcRep_extract3_from_rewound hHLen hRew01 hRew12 hRep0 hRep1 hRep2
+      with hHColl | hWit
+    · exact Or.inr (Or.inl hHColl)
+    · obtain ⟨attrs, hb, pb, leaf, steps, hNodup, _, hDisc, hLeaf, hSLen, hMerkle, hPres, hScope⟩ := hWit
+      rw [hEpEq, hEpLog, hRootEq, hRootLog] at hMerkle
+      rcases vcMerkleTree_opening_sound epochLog.epoch epochLog.tree 0 leaf steps hSLen hMerkle
+        with hLeafIn | hMkColl
+      · obtain ⟨cred, hCredMem, hCredLeaf⟩ := epochLog.hLeaves leaf hLeafIn
+        if hSameCred : (attrs, hb) = cred then
+          rcases cred with ⟨cAttrs, cHb⟩
+          injection hSameCred with hAEq hHbEq; subst hAEq hHbEq; rw [← hScopeEq]
+          exact Or.inr (Or.inr (Or.inr ⟨(attrs, hb), hCredMem, pb, hNodup, hDisc, hPres, hScope⟩))
+        else
+          have hTripleNe : (expectedSchema, attrs, hb) ≠ (expectedSchema, cred.1, cred.2) := by
+            intro he; injection he with _ h2; injection h2 with ha hbEq
+            exact hSameCred (Prod.ext ha hbEq)
+          obtain ⟨r, hCol⟩ := blindVcReachableBinding204 expectedSchema expectedSchema
+            attrs cred.1 hb cred.2 vcAttrCommitTag leaf hLeaf hCredLeaf hTripleNe
+          exact Or.inr (Or.inr (Or.inl ⟨_, _, r, hCol⟩))
+      · exact Or.inr (Or.inr (Or.inl hMkColl))
+  else
+    left; refine ⟨hSigOk, ?_⟩
+    if h1 : trusted.issuerRootTag = epochLog.issuerRootTag then
+      if h2 : trusted.issuerEpoch = epochLog.epoch then
+        exact Or.inr (Or.inr fun h3 => hAttestMatch ⟨h1, h2, h3⟩)
+      else exact Or.inr (Or.inl h2)
+    else exact Or.inl h1
+
+theorem tooth_blindVc_unsigned_issuer_root_rejected
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8) (sampleInBall : List UInt8 → Poly256)
+    (issuerA : PolyMat4) (issuerT1Scaled : PolyVec4) (H : List UInt8 → List UInt8)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (trusted : BlindVcTrustedContext) (expectedSchema : VcSchema) (treeDepth : Nat)
+    (verifierChallenge : List UInt8) (rootSig : ThresholdSignSig) (pres : BlindVcPresentation)
+    (hBadSig : mldsaVerify chalHash sampleInBall issuerA issuerT1Scaled
+      (encodeIssuerRootAttestationMsg trusted.issuerRootTag trusted.issuerEpoch trusted.accumulatorRoot)
+      rootSig.cTilde rootSig.z rootSig.h = false) :
+    verifyBlindVcWithIssuerAttestation chalHash sampleInBall issuerA issuerT1Scaled
+      H prgExpand trusted expectedSchema treeDepth verifierChallenge rootSig pres = false := by
+  unfold verifyBlindVcWithIssuerAttestation; rw [hBadSig, Bool.false_and]
+
+theorem tooth_single_rep_two_of_three_tight :
+    ∃ p : Fin 3 → Bool, fin3AllTrue p = false ∧
+      qsum 3 (fun e => if p e = true then 1 else 0) = 2 ∧ ¬ (2 ^ 1 * 2 ^ 1 < 3 ^ 1) :=
+  ⟨fun e => decide (e.1 < 2), by decide, by decide, by decide⟩
+
+theorem fin3_not_all_count_witness :
+    ∃ p : Fin 3 → Bool, fin3AllTrue p = false ∧
+      qsum 3 (fun e => if p e = true then 1 else 0) ≤ 2 :=
+  ⟨fun e => decide (e.1 < 2), by decide, by decide⟩
+
+theorem vcMerkleTree_opening_witness :
+    ∃ (epoch : UInt64) (tree : VcMerkleTree 0) (layer : Nat) (leaf : Lane6) (steps : List (Bool × Lane6)),
+      steps.length = 0 ∧ evalVcMerklePathBool epoch layer leaf steps = vcMerkleTreeRoot epoch layer tree :=
+  let z6 : Lane6 :=
+    ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩
+  ⟨0, .leaf z6, 0, z6, [], rfl, rfl⟩
+
+/-- The repaired language has false instances even for a constant hash. The previous
+collision-in-language disjunct made every statement true for that hash. -/
+theorem blindVcParallelIop_false_statement_witness
+    (H : List UInt8 → List UInt8)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D) (k : Nat) :
+    ∃ stmt, ¬ (blindVcParallelIop H prgExpand k).inLang stmt := by
+  let z6 : Lane6 := ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero,
+    Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩
+  let z4 : Lane4 := ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩
+  let stmt : BlindVcPublicStatement :=
+    { schema := ⟨0, 1, by decide, by decide⟩, treeDepth := 0,
+      presNonce := Vec.replicate 32 0, issuerEpoch := 0, accumulatorRoot := z6,
+      presCommit := z6, scopeTag := z6, verifierScopeLimbs := z4,
+      disclosedAttrs := [(0, Goldilocks.zero), (0, Goldilocks.zero)] }
+  refine ⟨stmt, ?_⟩
+  rintro ⟨wit, hw⟩
+  have h := hw.1
+  change false = true at h
+  cases h
+
+/-- Consistent copies never trigger the finite collision event, for any hash. -/
+theorem vcRewoundCommitConflict_consistent_table
+    (H : List UInt8 → List UInt8) (nonce : Vec UInt8 32) (idx : Nat) (o : OpenedBlindVcRep) :
+    let clean := { o with viewE1 := o.viewE }
+    ¬ VcRewoundCommitConflict H nonce idx clean clean clean := by
+  intro clean
+  simp only [VcRewoundCommitConflict, clean, ne_eq, not_true_eq_false, false_and, or_self,
+    not_false_eq_true]
+
+/-- The actual honest three-opening construction is never removed by the filter. -/
+theorem vcRewoundCommitConflict_honest_table
+    (H : List UInt8 → List UInt8) (nonce : Vec UInt8 32) (idx : Nat)
+    (tr : BlindVcRepTriple) :
+    ¬ VcRewoundCommitConflict H nonce idx
+      (openBlindVcRep H nonce idx tr 0)
+      (openBlindVcRep H nonce idx tr 1)
+      (openBlindVcRep H nonce idx tr 2) := by
+  simp only [VcRewoundCommitConflict, openBlindVcRep, vcNextParty3,
+    ne_eq, not_true_eq_false, false_and, or_self, not_false_eq_true]
+
+theorem blindVc_collision_filter_preserves_honest_openings
+    (H : List UInt8 → List UInt8)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (stmt : BlindVcPublicStatement) (idx : Nat)
+    (r1 : Triple3 (List UInt8) × VcRepFinalOuts3) (tr : BlindVcRepTriple) (e : Fin 3) :
+    verifyCollisionFreeCommittedBlindVcRep H prgExpand stmt idx r1
+      (openBlindVcRep H stmt.presNonce idx tr) e =
+    verifyCommittedBlindVcRep H prgExpand stmt idx r1 e
+      (openBlindVcRep H stmt.presNonce idx tr e) := by
+  simp only [verifyCollisionFreeCommittedBlindVcRep,
+    vcRewoundCommitConflict_honest_table, decide_false, Bool.not_false, Bool.true_and]
+
+/-- A constant hash and two concretely different views do trigger the event. The
+candidate table is retained, rather than replacing it by an unrelated global collision. -/
+theorem vcRewoundCommitConflict_constant_hash
+    (nonce : Vec UInt8 32) (idx : Nat) (o : OpenedBlindVcRep) :
+    let bad := { o with
+      viewE := { o.viewE with attrShares := [] }
+      viewE1 := { o.viewE with attrShares := [Goldilocks.zero] } }
+    VcRewoundCommitConflict (fun _ => []) nonce idx bad bad bad := by
+  intro bad
+  apply Or.inl
+  refine ⟨?_, rfl⟩
+  intro he
+  have hh := congrArg PartyVcRepView.attrShares he
+  change [Goldilocks.zero] = [] at hh
+  cases hh
+
+#verify_constructive blindVcParallelIop_false_statement_witness
+  vcRewoundCommitConflict_consistent_table vcRewoundCommitConflict_constant_hash
+  blindVc_committed_acceptance_decomposition blindVcTableConflict_extract
+  blindVc_fs_acceptance_decomposition vcRewoundCommitConflict_honest_table
+  blindVc_collision_filter_preserves_honest_openings
+
+#verify_constructive blindVc_rep_pigeonhole_le_two blindVc_quantum128_interactive_rbr_bound
+  word64_mod3_bad_count_le blindVc_qrom_fs_round_bound blindVc_quantum128_qrom_fs_soundness
+  evalVcMerklePathBool_eq_merkleRootFromPath vcMerkleTree_opening_sound
+  blindVc_presentation_reduces_to_issuer_mldsa
+#tooth_pair fin3_not_all_count_le_two vs tooth_single_rep_two_of_three_tight
+#verify_inhabited fin3_not_all_count_le_two fin3_not_all_count_witness
+#tooth_pair word64_mod3_bad_count_le vs tooth_single_rep_two_of_three_tight
+#verify_inhabited word64_mod3_bad_count_le fin3_not_all_count_witness
+#verify_inhabited vcMerkleTree_opening_sound vcMerkleTree_opening_witness
+#tooth_pair blindVc_presentation_reduces_to_issuer_mldsa vs tooth_blindVc_unsigned_issuer_root_rejected
+
+end Qsag

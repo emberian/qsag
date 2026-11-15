@@ -1321,3 +1321,1323 @@ variable {R : Type} [LawfulCommRing R]
 
 /-- Residual of sacrificing the triple `(a, b, c)` against `(x, y, z)` under challenge `t`, with
 `t x - a` and `y - b` opened. -/
+def czkSacrificeResidual (t x y z a b c : R) : R :=
+  sub (mul t z)
+    (add (add (add c (mul (sub y b) a)) (mul (sub (mul t x) a) b))
+      (mul (sub (mul t x) a) (sub y b)))
+
+theorem czkSacrificeResidual_eq (t x y a b ez ec : R) :
+    czkSacrificeResidual t x y (add (mul x y) ez) a b (add (mul a b) ec) =
+      sub (mul t ez) ec := by
+  have hP : mul t (mul x y) =
+      add (add (add (mul a b) (mul (sub y b) a)) (mul (sub (mul t x) a) b))
+        (mul (sub (mul t x) a) (sub y b)) := by
+    have h1 : mul t (mul x y) = mul (add (sub (mul t x) a) a) (add (sub y b) b) := by
+      rw [ring_sub_add_cancel_right, ring_sub_add_cancel_right, LawfulCommRing.mul_assoc]
+    rw [h1]
+    simp only [LawfulCommRing.left_distrib, LawfulCommRing.right_distrib,
+      LawfulCommRing.add_assoc, LawfulCommRing.add_comm, LawfulCommRing.mul_comm]
+  have hD : add (add (add (add (mul a b) ec) (mul (sub y b) a)) (mul (sub (mul t x) a) b))
+      (mul (sub (mul t x) a) (sub y b)) =
+      add (add (add (add (mul a b) (mul (sub y b) a)) (mul (sub (mul t x) a) b))
+        (mul (sub (mul t x) a) (sub y b))) ec := by
+    simp only [LawfulCommRing.add_assoc, LawfulCommRing.add_comm]
+  unfold czkSacrificeResidual
+  rw [LawfulCommRing.left_distrib, hD, hP, add_sub_add_left]
+
+/-- **Pre-open sacrifice.** A product with nonzero error `ez` passes the sacrifice for exactly one
+challenge, whatever error `ec` the auxiliary triple carries. Both errors are fixed before the
+challenge is drawn. -/
+theorem cozk_preopen_sacrifice_sound (inv : R → R)
+    (hInv : ∀ x : R, x ≠ zero → mul x (inv x) = one) (t x y a b ez ec : R) (hez : ez ≠ zero) :
+    czkSacrificeResidual t x y (add (mul x y) ez) a b (add (mul a b) ec) = zero ↔
+      t = mul ec (inv ez) := by
+  rw [czkSacrificeResidual_eq, LawfulCommRing.sub_eq_zero_iff]
+  constructor
+  · intro h
+    rw [← h, LawfulCommRing.mul_assoc, hInv ez hez, LawfulCommRing.mul_one]
+  · intro h
+    subst h
+    rw [LawfulCommRing.mul_assoc, LawfulCommRing.mul_comm (inv ez) ez, hInv ez hez,
+      LawfulCommRing.mul_one]
+
+/-- A correct product with a correct auxiliary triple passes for every challenge. -/
+theorem cozk_preopen_sacrifice_complete (t x y a b : R) :
+    czkSacrificeResidual t x y (add (mul x y) zero) a b (add (mul a b) zero) = zero := by
+  rw [czkSacrificeResidual_eq, LawfulCommRing.mul_zero, LawfulCommRing.sub_self]
+
+end CoZkSacrifice
+
+/-! ### Repetitions -/
+
+section CoZkReps
+variable {R : Type} [LawfulCommRing R] [DecidableEq R]
+
+/-- A challenge vector opens pair `es[i]` of repetition `i`; it is accepted when every opening
+verifies. -/
+def czkVerifyAll (gs : List (CzkGate R)) (outs : List Nat) :
+    List (Fin 3) → List (List (CzkGateCommit R) × List (Fin 3 → R)) → Bool
+  | [], [] => true
+  | e :: es, r :: rs =>
+    czkVerifyPair e outs r.2 gs r.1 czkEmptyWires 0 && czkVerifyAll gs outs es rs
+  | [], _ :: _ => false
+  | _ :: _, [] => false
+
+def czkAcceptCount (gs : List (CzkGate R)) (outs : List Nat) :
+    List (List (CzkGateCommit R) × List (Fin 3 → R)) → Nat
+  | [] => 1
+  | r :: rs => czkValidPairCount gs outs r * czkAcceptCount gs outs rs
+
+end CoZkReps
+
+/-- All challenge vectors of length `n`. -/
+def czkChallenges : Nat → List (List (Fin 3))
+  | 0 => [[]]
+  | n + 1 => (czkChallenges n).flatMap fun es => [0 :: es, 1 :: es, 2 :: es]
+
+theorem czkChallenges_length : ∀ n, (czkChallenges n).length = 3 ^ n
+  | 0 => rfl
+  | n + 1 => by
+    have aux : ∀ l : List (List (Fin 3)),
+        (l.flatMap fun es => [0 :: es, 1 :: es, 2 :: es]).length = l.length * 3 := by
+      intro l
+      induction l with
+      | nil => rfl
+      | cons x l ih =>
+        rw [List.flatMap_cons, List.length_append, ih]
+        show 3 + l.length * 3 = (l.length + 1) * 3
+        omega
+    show ((czkChallenges n).flatMap fun es => [0 :: es, 1 :: es, 2 :: es]).length = 3 ^ (n + 1)
+    rw [aux, czkChallenges_length n, Nat.pow_succ]
+
+section CoZkCount
+variable {R : Type} [LawfulCommRing R] [DecidableEq R]
+
+theorem filter3_length {α : Type} (p : α → Bool) (x y z : α) :
+    ([x, y, z].filter p).length = (p x).toNat + (p y).toNat + (p z).toNat := by
+  cases hx : p x <;> cases hy : p y <;> cases hz : p z <;>
+    simp [List.filter, hx, hy, hz]
+
+/-- The accepting challenge vectors number exactly the product of the per-repetition counts. -/
+theorem czk_accepting_challenge_count (gs : List (CzkGate R)) (outs : List Nat) :
+    ∀ reps : List (List (CzkGateCommit R) × List (Fin 3 → R)),
+      ((czkChallenges reps.length).filter fun es => czkVerifyAll gs outs es reps).length =
+        czkAcceptCount gs outs reps := by
+  intro reps
+  induction reps with
+  | nil => rfl
+  | cons r rs ih =>
+    have pt : ∀ v0 v1 v2 q : Bool,
+        (v0 && q).toNat + (v1 && q).toNat + (v2 && q).toNat =
+          (v0.toNat + v1.toNat + v2.toNat) * q.toNat := by decide
+    have aux : ∀ l : List (List (Fin 3)),
+        ((l.flatMap fun es => [0 :: es, 1 :: es, 2 :: es]).filter
+          fun es => czkVerifyAll gs outs es (r :: rs)).length =
+        czkValidPairCount gs outs r * (l.filter fun es => czkVerifyAll gs outs es rs).length := by
+      intro l
+      induction l with
+      | nil => rfl
+      | cons es l ihl =>
+        rw [List.flatMap_cons, List.filter_append, List.length_append, ihl, filter3_length]
+        show (czkVerifyPair 0 outs r.2 gs r.1 czkEmptyWires 0 && czkVerifyAll gs outs es rs).toNat +
+            (czkVerifyPair 1 outs r.2 gs r.1 czkEmptyWires 0 && czkVerifyAll gs outs es rs).toNat +
+            (czkVerifyPair 2 outs r.2 gs r.1 czkEmptyWires 0 && czkVerifyAll gs outs es rs).toNat +
+            _ = _
+        rw [pt]
+        have hcons : ((es :: l).filter fun es => czkVerifyAll gs outs es rs).length =
+            (czkVerifyAll gs outs es rs).toNat +
+              (l.filter fun es => czkVerifyAll gs outs es rs).length := by
+          cases hq : czkVerifyAll gs outs es rs <;> simp [List.filter, hq]
+          omega
+        rw [hcons, Nat.mul_add]
+        rfl
+    show (((czkChallenges rs.length).flatMap fun es => [0 :: es, 1 :: es, 2 :: es]).filter
+      fun es => czkVerifyAll gs outs es (r :: rs)).length = _
+    rw [aux, ih]
+    rfl
+
+theorem czkAcceptCount_le (gs : List (CzkGate R)) (outs : List Nat)
+    (hFalse : ∀ ws : List R, ¬ czkAccepts gs outs ws) :
+    ∀ reps : List (List (CzkGateCommit R) × List (Fin 3 → R)),
+      czkAcceptCount gs outs reps ≤ 2 ^ reps.length := by
+  intro reps
+  induction reps with
+  | nil => exact Nat.le_refl 1
+  | cons r rs ih =>
+    calc czkValidPairCount gs outs r * czkAcceptCount gs outs rs
+        ≤ 2 * 2 ^ rs.length :=
+          Nat.mul_le_mul (cozk_false_statement_caught_at_least_one_pair gs outs hFalse r) ih
+      _ = 2 ^ (rs.length + 1) := by rw [Nat.pow_succ, Nat.mul_comm]
+
+end CoZkCount
+
+theorem cozk_438_classical_bound : 2 ^ 438 * 2 ^ 256 < 3 ^ 438 := by decide +kernel
+
+theorem cozk_219_qrom_amplitude_bound : 2 ^ 219 * 2 ^ 128 < 3 ^ 219 := by decide +kernel
+
+/-- `Q^2 (2/3)^438 < 1` for every `Q ≤ 2^128`: the Grover search arithmetic for challenge
+grinding. -/
+theorem cozk_438_grover_query_floor (Q : Nat) (hQ : Q ≤ 2 ^ 128) :
+    Q * Q * 2 ^ 438 < 3 ^ 438 :=
+  Nat.lt_of_le_of_lt (Nat.mul_le_mul_right _ (Nat.mul_le_mul hQ hQ)) (by decide +kernel)
+
+/-- **438 repetitions.** For a circuit no witness satisfies and any 438 committed repetitions,
+the accepting challenge vectors are fewer than a `2^-256` fraction of all `3^438`; and for every
+opened pair and any two witnesses each opened view has exactly one preimage under either. -/
+theorem cozk_3party_active_soundness_and_2privacy {R : Type} [LawfulCommRing R] [DecidableEq R]
+    (gs : List (CzkGate R)) (outs : List Nat)
+    (hFalse : ∀ ws : List R, ¬ czkAccepts gs outs ws)
+    (reps : List (List (CzkGateCommit R) × List (Fin 3 → R))) (hReps : reps.length = 438) :
+    ((czkChallenges reps.length).filter fun es => czkVerifyAll gs outs es reps).length * 2 ^ 256 <
+        (czkChallenges reps.length).length ∧
+    ∀ (e : Fin 3) (w₁ w₂ : List R) (v : CzkView R gs),
+      (∃ ρ : CzkRand R gs, czkRunView e gs czkEmptyWires 0 w₁ ρ = v ∧
+        ∀ ρ' : CzkRand R gs, czkRunView e gs czkEmptyWires 0 w₁ ρ' = v → ρ' = ρ) ∧
+      (∃ ρ : CzkRand R gs, czkRunView e gs czkEmptyWires 0 w₂ ρ = v ∧
+        ∀ ρ' : CzkRand R gs, czkRunView e gs czkEmptyWires 0 w₂ ρ' = v → ρ' = ρ) := by
+  refine ⟨?_, fun e w₁ w₂ v => cozk_opened_pair_uniform e gs w₁ w₂ v⟩
+  have hle := czkAcceptCount_le gs outs hFalse reps
+  rw [czk_accepting_challenge_count, czkChallenges_length, hReps]
+  rw [hReps] at hle
+  exact Nat.lt_of_le_of_lt (Nat.mul_le_mul_right _ hle) cozk_438_classical_bound
+
+/-! ## Production replicated TOPRF
+
+There are five components, indexed by the excluded singleton, not ten components.
+Authenticated identities, valid context and canonical field encodings are checked before
+these optional responses enter the voter. An invalid response is represented by `none`.
+-/
+
+abbrev replicatedHolds (server component : Fin 5) : Prop := server ≠ component
+
+theorem replicated_access_exact (coalition : Fin 5 → Prop) :
+    (∀ component, ∃ server, coalition server ∧ replicatedHolds server component) ↔
+      ∃ a b, coalition a ∧ coalition b ∧ a ≠ b := by
+  constructor
+  · intro h
+    obtain ⟨a, ha, _⟩ := h 0
+    obtain ⟨b, hb, hba⟩ := h a
+    exact ⟨a, b, ha, hb, Ne.symm hba⟩
+  · rintro ⟨a, b, ha, hb, hab⟩ c
+    by_cases hac : a = c
+    · exact ⟨b, hb, by simpa [replicatedHolds, ← hac] using Ne.symm hab⟩
+    · exact ⟨a, ha, hac⟩
+
+def replicatedVotes {F : Type} [DecidableEq F] (c : Fin 5)
+    (responses : Fin 5 → Option F) (v : F) : Nat :=
+  count5 (fun p => decide (p ≠ c ∧ responses p = some v))
+
+/-- First candidate having three matching authenticated holders, in server order. -/
+def replicatedVote {F : Type} [DecidableEq F] (c : Fin 5)
+    (responses : Fin 5 → Option F) : Option F :=
+  [0, 1, 2, 3, 4].findSome? fun p =>
+    if p = c then none else
+      (responses p).bind fun v => if 3 ≤ replicatedVotes c responses v then some v else none
+
+theorem count5_ge_three_except_two (a b : Fin 5) (p : Fin 5 → Bool)
+    (h : ∀ i, i ≠ a → i ≠ b → p i = true) : 3 ≤ count5 p := by
+  have h4 := count5_ge_four_of_all_but a (fun i => p i || decide (i = b))
+    (fun i hi => by
+      by_cases hb : i = b
+      · simp [hb]
+      · simp [h i hi hb])
+  have h1 := count5_le_one_of_all_but b (fun i => decide (i = b))
+    (fun i hi => by simp [hi])
+  have pt : ∀ x y : Bool, (x || y).toNat ≤ x.toNat + y.toNat := by decide
+  have h0 := pt (p 0) (decide (0 = b))
+  have h2 := pt (p 1) (decide (1 = b))
+  have h3 := pt (p 2) (decide (2 = b))
+  have h5 := pt (p 3) (decide (3 = b))
+  have h6 := pt (p 4) (decide (4 = b))
+  simp only [count5] at *
+  omega
+
+theorem replicated_votes_correct {F : Type} [DecidableEq F]
+    (c liar : Fin 5) (responses : Fin 5 → Option F) (honest : F)
+    (h : ∀ p, p ≠ c → p ≠ liar → responses p = some honest) :
+    3 ≤ replicatedVotes c responses honest ∧
+      ∀ v, 3 ≤ replicatedVotes c responses v → v = honest := by
+  constructor
+  · exact count5_ge_three_except_two c liar _ (fun p hc hl => by simp [hc, h p hc hl])
+  · intro v hv
+    by_cases he : v = honest
+    · exact he
+    · have hsmall := count5_le_one_of_all_but liar
+        (fun p => decide (p ≠ c ∧ responses p = some v)) (fun p hl => by
+          by_cases hc : p = c
+          · simp [hc]
+          · simp [h p hc hl, Ne.symm he])
+      unfold replicatedVotes at hv
+      omega
+
+theorem replicated_vote_correct {F : Type} [DecidableEq F]
+    (c liar : Fin 5) (responses : Fin 5 → Option F) (honest : F)
+    (h : ∀ p, p ≠ c → p ≠ liar → responses p = some honest) :
+    replicatedVote c responses = some honest := by
+  obtain ⟨hcount, huniq⟩ := replicated_votes_correct c liar responses honest h
+  let candidate := fun p => if p = c then none else
+    (responses p).bind fun v => if 3 ≤ replicatedVotes c responses v then some v else none
+  have hcand : ∀ p v, candidate p = some v → v = honest := by
+    intro p v hp
+    dsimp [candidate] at hp
+    split at hp
+    · contradiction
+    · cases hr : responses p with
+      | none => simp [hr] at hp
+      | some x =>
+        simp only [hr, Option.bind_some] at hp
+        split at hp
+        · cases hp; exact huniq v ‹_›
+        · contradiction
+  have hex : ∃ p : Fin 5, candidate p = some honest := by
+    obtain ⟨a, b, hab, ha, hb⟩ := count5_two
+      (fun p => decide (p ≠ c ∧ p ≠ liar))
+      (Nat.le_trans (by decide) (count5_ge_three_except_two c liar _
+        (fun p hc hl => by simp [hc, hl])))
+    have hh := of_decide_eq_true ha
+    exact ⟨a, by simp [candidate, hh.1, h a hh.1 hh.2, hcount]⟩
+  have aux : ∀ ps : List (Fin 5), (∃ p ∈ ps, candidate p = some honest) →
+      ps.findSome? candidate = some honest := by
+    intro ps
+    induction ps with
+    | nil => simp
+    | cons p ps ih =>
+      intro hex
+      cases hp : candidate p with
+      | some v => simpa [List.findSome?, hp] using congrArg some (hcand p v hp)
+      | none =>
+        have ht : ∃ q ∈ ps, candidate q = some honest := by
+          obtain ⟨q, hq, hv⟩ := hex
+          rcases List.mem_cons.mp hq with he | he
+          · subst q; rw [hp] at hv; contradiction
+          · exact ⟨q, he, hv⟩
+        simpa [List.findSome?, hp] using ih ht
+  apply aux
+  obtain ⟨p, hp⟩ := hex
+  refine ⟨p, ?_, hp⟩
+  have : ∀ p : Fin 5, p ∈ ([0, 1, 2, 3, 4] : List (Fin 5)) := by decide
+  exact this p
+
+/-- Four output lanes each use this same five-component reconstruction. -/
+def reconstructReplicatedToprf2of5 {F : Type} [LawfulCommRing F] [DecidableEq F]
+    (responses : Fin 5 → Fin 5 → Option F) : Option F := do
+  let a ← replicatedVote 0 (fun p => responses p 0)
+  let b ← replicatedVote 1 (fun p => responses p 1)
+  let c ← replicatedVote 2 (fun p => responses p 2)
+  let d ← replicatedVote 3 (fun p => responses p 3)
+  let e ← replicatedVote 4 (fun p => responses p 4)
+  return add a (add b (add c (add d e)))
+
+theorem replicated_toprf_any_single_byzantine {F : Type} [LawfulCommRing F] [DecidableEq F]
+    (shares : Fin 5 → F) (liar : Fin 5) (responses : Fin 5 → Fin 5 → Option F)
+    (h : ∀ p c, p ≠ c → p ≠ liar → responses p c = some (shares c)) :
+    reconstructReplicatedToprf2of5 responses = some (sum5 shares) := by
+  have hv : ∀ c, replicatedVote c (fun p => responses p c) = some (shares c) :=
+    fun c => replicated_vote_correct c liar _ _ (fun p hc hl => h p c hc hl)
+  simp [reconstructReplicatedToprf2of5, hv, sum5]
+
+/-- Actual client coins: four independent components and the residual fifth component. -/
+def replicatedClientBlind {F : Type} [LawfulCommRing F]
+    (input : F) (coins : Fin 4 → F) : Fin 5 → F :=
+  fun i => if h : i.val < 4 then coins ⟨i.val, h⟩ else
+    sub input (add (coins 0) (add (coins 1) (add (coins 2) (coins 3))))
+
+theorem replicated_client_blind_sum {F : Type} [LawfulCommRing F]
+    (input : F) (coins : Fin 4 → F) : sum5 (replicatedClientBlind input coins) = input := by
+  change add (coins 0) (add (coins 1) (add (coins 2) (add (coins 3)
+    (sub input (add (coins 0) (add (coins 1) (add (coins 2) (coins 3)))))))) = input
+  rw [← LawfulCommRing.add_assoc, ← LawfulCommRing.add_assoc, ← LawfulCommRing.add_assoc]
+  rw [LawfulCommRing.add_assoc (coins 0) (coins 1) (coins 2),
+    LawfulCommRing.add_assoc (coins 0) (add (coins 1) (coins 2)) (coins 3),
+    LawfulCommRing.add_assoc (coins 1) (coins 2) (coins 3)]
+  exact LawfulCommRing.add_sub_cancel_left _ _
+
+theorem replicated_holders_exactly_four :
+    ∀ c : Fin 5, count5 (fun p => decide (replicatedHolds p c)) = 4 := by decide
+
+def replicatedClientCoins {F : Type} (shares : Fin 5 → F) : Fin 4 → F :=
+  fun i => shares ⟨i.val, by omega⟩
+
+theorem replicated_client_coins_roundtrip {F : Type} [LawfulCommRing F]
+    (input : F) (coins : Fin 4 → F) :
+    replicatedClientCoins (replicatedClientBlind input coins) = coins := by
+  funext i
+  simp [replicatedClientCoins, replicatedClientBlind, i.isLt]
+
+theorem replicated_client_shares_roundtrip {F : Type} [LawfulCommRing F]
+    (input : F) (shares : Fin 5 → F) (hs : sum5 shares = input) :
+    replicatedClientBlind input (replicatedClientCoins shares) = shares := by
+  have h4 : input = add (add (shares 0) (add (shares 1) (add (shares 2) (shares 3))))
+      (shares 4) := by
+    rw [← hs]
+    simp only [sum5, LawfulCommRing.add_assoc]
+  funext i
+  match i with
+  | 0 => rfl
+  | 1 => rfl
+  | 2 => rfl
+  | 3 => rfl
+  | 4 =>
+    change sub input (add (shares 0) (add (shares 1) (add (shares 2) (shares 3)))) = shares 4
+    rw [h4]
+    exact add_sub_cancel _ _
+
+/-- The production four-coin sampler, followed by own-component zeroing, has
+exactly one preimage for every legal server view and every candidate input.
+Uniform independent coins therefore give perfect privacy; cSHAKE expansion is
+an additional computational hop in the actual client. -/
+theorem replicated_client_blind_four_coin_privacy {F : Type} [LawfulCommRing F]
+    (p : Fin 5) (view : Fin 5 → F) (hv : view p = zero) (input : F) :
+    ∃ coins : Fin 4 → F,
+      toprfServerView p (replicatedClientBlind input coins) = view ∧
+      ∀ other : Fin 4 → F,
+        toprfServerView p (replicatedClientBlind input other) = view → other = coins := by
+  obtain ⟨shares, ⟨hs, hview⟩, hu⟩ := toprf_client_blind_perfect_privacy p view hv input
+  refine ⟨replicatedClientCoins shares, ?_, ?_⟩
+  · rw [replicated_client_shares_roundtrip input shares hs]
+    exact hview
+  · intro other ho
+    have he := hu (replicatedClientBlind input other) (replicated_client_blind_sum input other) ho
+    have hc := congrArg replicatedClientCoins he
+    rw [replicated_client_coins_roundtrip] at hc
+    exact hc
+
+/-! ## A tight false-statement execution
+
+The circuit asserts `1 * 1 = 0`. Party zero changes its multiplication output
+from one to zero; both other multiplication shares and all masks are zero.
+-/
+
+def czkTightCircuit : List (CzkGate Goldilocks) := [.const one, .mul 0 0]
+def czkTightRep : List (CzkGateCommit Goldilocks) × List (Fin 3 → Goldilocks) :=
+  ([⟨(fun p => if p = 0 then one else zero), fun _ => zero⟩,
+    ⟨(fun _ => zero), fun _ => zero⟩], [fun _ => zero])
+
+theorem tooth_cozk_single_corrupt_mul_passes_exactly_two_pairs :
+    (∀ ws, ¬ czkAccepts czkTightCircuit [1] ws) ∧
+    czkValidPairCount czkTightCircuit [1] czkTightRep = 2 := by
+  constructor
+  · intro ws h
+    have hf := h 1 (by simp)
+    have hone : czkPlainEval czkTightCircuit (fun _ => zero) 0 ws 1 =
+        (one : Goldilocks) := by
+      simp [czkPlainEval, czkTightCircuit, czkPlainGate, LawfulCommRing.mul_one]
+    rw [hone] at hf
+    exact (by decide : (one : Goldilocks) ≠ zero) hf
+  · decide +kernel
+
+theorem cozk_tight_repetitions (n : Nat) :
+    czkAcceptCount czkTightCircuit [1] (List.replicate n czkTightRep) = 2 ^ n := by
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+    simp only [List.replicate_succ, czkAcceptCount,
+      tooth_cozk_single_corrupt_mul_passes_exactly_two_pairs.2, ih, Nat.pow_succ]
+    exact Nat.mul_comm _ _
+
+theorem cozk_438_exact_accepting_fraction :
+    ((czkChallenges 438).filter fun es =>
+      czkVerifyAll czkTightCircuit [1] es (List.replicate 438 czkTightRep)).length = 2 ^ 438 ∧
+    (czkChallenges 438).length = 3 ^ 438 := by
+  constructor
+  · have h := czk_accepting_challenge_count czkTightCircuit [1] (List.replicate 438 czkTightRep)
+    simpa only [List.length_replicate, cozk_tight_repetitions] using h
+  · exact czkChallenges_length 438
+
+/-! ## Inventory XOR and the short-tweak boundary
+
+The missing subset supplies an entire domain-separated table of 256-bit PRF outputs.
+The ideal table has independent entries. An enrolled batch reveals a function only of
+its entries; changing any other entry leaves that batch unchanged. Real leakage is
+bounded by a PRF distinguishing advantage, not asserted to be identically zero.
+-/
+
+def inventoryXorChild (known hidden : BitVec 256) : BitVec 256 := hidden ^^^ known
+
+def inventoryTableMask {I : Type} (known : I → BitVec 256) :
+    SimpleEquiv (I → BitVec 256) (I → BitVec 256) where
+  toFun h := fun i => inventoryXorChild (known i) (h i)
+  invFun h := fun i => inventoryXorChild (known i) (h i)
+  left_inv h := by funext i; dsimp [inventoryXorChild]; bv_xor_cancel
+  right_inv h := by funext i; dsimp [inventoryXorChild]; bv_xor_cancel
+
+theorem inventory_ideal_table_uniform {I : Type} {C : Nat}
+    (enum : SimpleEquiv (Fin C) (I → BitVec 256)) (known : I → BitVec 256)
+    (test : (I → BitVec 256) → Nat) :
+    finSum C (fun r => test ((inventoryTableMask known).toFun (enum.toFun r))) =
+      finSum C (fun r => test (enum.toFun r)) :=
+  finSum_bijection_invariant enum (inventoryTableMask known) test
+
+/-- Every prescribed child table has exactly one hidden table, including an arbitrary
+assignment outside the enrolled batch. There is no additive master in this path. -/
+theorem inventory_batch_fiber_unique {I : Type} (known desired : I → BitVec 256) :
+    ∃ hidden : I → BitVec 256, (∀ i, inventoryXorChild (known i) (hidden i) = desired i) ∧
+      ∀ other : I → BitVec 256, (∀ i, inventoryXorChild (known i) (other i) = desired i) → other = hidden := by
+  refine ⟨(inventoryTableMask known).invFun desired, ?_, ?_⟩
+  · intro i; exact congrFun ((inventoryTableMask known).right_inv desired) i
+  · intro other h
+    have he : (inventoryTableMask known).toFun other = desired := funext h
+    rw [← he, (inventoryTableMask known).left_inv]
+
+def hdGameHits {X : Type} {N : Nat} (sample : Fin N → X) (test : X → Bool) : Nat :=
+  finSum N (fun r => (test (sample r)).toNat)
+
+def hdGameGap (a b : Nat) : Nat := (a - b) + (b - a)
+
+/-- Generic postprocessing identity: the distinguisher for reconstructed child tables is the PRF
+adversary that XORs the known components before invoking its caller. Same coins,
+same advantage numerator; divide by `N > 0` for probabilities. No adaptive custody query
+history, child leakage policy, or production subset-seed experiment is instantiated here. -/
+theorem inventory_prf_game_hop {I : Type} {N : Nat}
+    (real ideal : Fin N → I → BitVec 256) (known : I → BitVec 256)
+    (test : (I → BitVec 256) → Bool) (epsilon : Nat)
+    (hPRF : hdGameGap
+      (hdGameHits real (fun table => test ((inventoryTableMask known).toFun table)))
+      (hdGameHits ideal (fun table => test ((inventoryTableMask known).toFun table))) ≤ epsilon) :
+    hdGameGap
+      (hdGameHits (fun r => (inventoryTableMask known).toFun (real r)) test)
+      (hdGameHits (fun r => (inventoryTableMask known).toFun (ideal r)) test) ≤ epsilon := hPRF
+
+/-- Four bits per coefficient, exactly the low/high-nibble popcount difference. -/
+def hdCbd2 (bits : Fin 4 → Bool) : Int :=
+  (bits 0).toNat + (bits 1).toNat - (bits 2).toNat - (bits 3).toNat
+
+theorem hd_cbd2_support (bits : Fin 4 → Bool) : -2 ≤ hdCbd2 bits ∧ hdCbd2 bits ≤ 2 := by
+  cases h0 : bits 0 <;> cases h1 : bits 1 <;> cases h2 : bits 2 <;> cases h3 : bits 3 <;>
+    simp only [hdCbd2, h0, h1, h2, h3] <;> decide +kernel
+
+def hdCbd2Field (bits : Fin 4 → Bool) : HdFq204 := HdFq204.ofInt (hdCbd2 bits)
+
+theorem tooth_cbd2_is_not_uniform_secret :
+    (∀ bits, hdCbd2Field bits ≠ HdFq204.ofNat 3) ∧
+      (HdFq204.ofNat 3).val < 8380417 := by
+  constructor
+  · intro bits
+    cases h0 : bits 0 <;> cases h1 : bits 1 <;> cases h2 : bits 2 <;> cases h3 : bits 3 <;>
+      simp only [hdCbd2Field, hdCbd2, h0, h1, h2, h3] <;> decide +kernel
+  · decide
+
+/-- A ring polynomial has 256 coefficients; vectors have four polynomials per half. -/
+abbrev HdModulePoly := Fin 256 → HdFq204
+abbrev HdModuleHalf := Fin 4 → HdModulePoly
+abbrev HdModuleMatrix := Fin 4 → Fin 4 → HdModulePoly
+
+def hdPolyAdd (a b : HdModulePoly) : HdModulePoly := fun i => add (a i) (b i)
+def hdModuleAdd (a b : HdModuleHalf) : HdModuleHalf := fun i => hdPolyAdd (a i) (b i)
+
+/-- Negacyclic convolution modulo X^256+1. -/
+def hdPolyMul (a b : HdModulePoly) : HdModulePoly := fun k =>
+  (List.finRange 256).foldl (fun acc i => add acc
+    (if h : i.val ≤ k.val then mul (a i) (b ⟨k.val - i.val, by omega⟩)
+     else neg (mul (a i) (b ⟨k.val + 256 - i.val, by omega⟩)))) zero
+
+def hdModuleImage (A : HdModuleMatrix) (s e : HdModuleHalf) : HdModuleHalf :=
+  fun row => hdPolyAdd
+    (fun k => (List.finRange 4).foldl
+      (fun acc j => add acc (hdPolyMul (A row j) (s j) k)) zero) (e row)
+
+def hdShortHalf (coins : Fin 4 → Fin 256 → Fin 4 → Bool) : HdModuleHalf :=
+  fun j k => hdCbd2Field (coins j k)
+
+/-- Explicit MLWE experiment: shared public A, CBD2 secret and error versus uniform
+public ring vectors. This assumption concerns public images, never secret offsets.
+Multi-child auxiliary information must be included in the experiment, not discarded. -/
+def hdMlweSample {N : Nat} (A : Fin N → HdModuleMatrix)
+    (s e : Fin N → Fin 4 → Fin 256 → Fin 4 → Bool) :
+    Fin N → HdModuleMatrix × HdModuleHalf :=
+  fun r => (A r, hdModuleImage (A r) (hdShortHalf (s r)) (hdShortHalf (e r)))
+
+set_option maxHeartbeats 2000000 in
+/-- Generic public-image postprocessing identity with a fixed known public offset. A CBD2-to-uniform
+*secret* hop is deliberately absent: `tooth_cbd2_is_not_uniform_secret` refutes it. -/
+theorem hd_mlwe_public_offset_hop {N : Nat}
+    (A : Fin N → HdModuleMatrix)
+    (s e : Fin N → Fin 4 → Fin 256 → Fin 4 → Bool)
+    (uniform : Fin N → HdModuleHalf) (known : HdModuleHalf)
+    (test : HdModuleMatrix × HdModuleHalf → Bool) (epsilon : Nat)
+    (hMLWE : hdGameGap
+      (hdGameHits (hdMlweSample A s e) (fun x => test (x.1, hdModuleAdd known x.2)))
+      (hdGameHits (fun r => (A r, uniform r))
+        (fun x => test (x.1, hdModuleAdd known x.2))) ≤ epsilon) :
+    hdGameGap
+      (hdGameHits (fun r => (A r, hdModuleAdd known
+        (hdModuleImage (A r) (hdShortHalf (s r)) (hdShortHalf (e r))))) test)
+      (hdGameHits (fun r => (A r, hdModuleAdd known (uniform r))) test) ≤ epsilon := hMLWE
+
+/-! ## Commitment binding and the Fiat–Shamir boundary
+
+The production root hashes the ordered repetition roots, each of which hashes three
+view commitments and all three output byte strings. Framing must be injective.
+Binding compares two openings of the same root; it does not supply an opening of
+an arbitrary digest and does not make an adversarially selected FS challenge uniform.
+-/
+
+/-- Constructive collision extractor for any injectively framed commitment layer. -/
+theorem cozk_commitment_binding_extract {V : Type} [DecidableEq V]
+    (H : Hash) (encode : V → List UInt8)
+    (injective : ∀ a b, encode a = encode b → a = b)
+    (before after : V) (same : H (encode before) = H (encode after)) :
+    before = after ∨ Collision H := by
+  by_cases he : before = after
+  · exact Or.inl he
+  · exact Or.inr ⟨encode before, encode after, fun h => he (injective _ _ h), same⟩
+
+/-- If an unopened party is later opened differently under its committed digest,
+these two framed view strings are a hash collision, independently of the challenge. -/
+theorem cozk_unopened_view_equivocation_collision
+    (H : Hash) (before after : List UInt8)
+    (changed : before ≠ after) (bound : H before = H after) : Collision H :=
+  ⟨before, after, changed, bound⟩
+
+/-- Lift acceptance to the committed transcript or extract a collision. `encode`
+is the canonical full transcript encoding at the layer being compared. For the
+production hash tree this lemma is applied from root to repetition to party view. -/
+theorem cozk_committed_challenge_soundness {R : Type} [LawfulCommRing R] [DecidableEq R]
+    (gs : List (CzkGate R)) (outs : List Nat) (H : Hash)
+    (encode : List (List (CzkGateCommit R) × List (Fin 3 → R)) → List UInt8)
+    (injective : ∀ a b, encode a = encode b → a = b)
+    (before after : List (List (CzkGateCommit R) × List (Fin 3 → R)))
+    (es : List (Fin 3)) (same : H (encode before) = H (encode after))
+    (accepted : czkVerifyAll gs outs es after = true) :
+    czkVerifyAll gs outs es before = true ∨ Collision H := by
+  by_cases he : encode before = encode after
+  · exact Or.inl (by rw [injective _ _ he]; exact accepted)
+  · exact Or.inr ⟨encode before, encode after, he, same⟩
+
+/-- With binding fixed, the 438-repetition counting theorem applies. This is the
+single uniform-challenge experiment. FS grinding needs a separate oracle-query
+bound; collision resistance alone cannot remove its query factor. -/
+theorem cozk_binding_fixed_438_bound {R : Type} [LawfulCommRing R] [DecidableEq R]
+    (gs : List (CzkGate R)) (outs : List Nat)
+    (hFalse : ∀ ws : List R, ¬ czkAccepts gs outs ws)
+    (reps : List (List (CzkGateCommit R) × List (Fin 3 → R))) (hlen : reps.length = 438) :
+    ((czkChallenges 438).filter (fun es => czkVerifyAll gs outs es reps)).length ≤ 2 ^ 438 := by
+  have h := czkAcceptCount_le gs outs hFalse reps
+  rw [← czk_accepting_challenge_count, hlen] at h
+  exact h
+
+/-- Two distinct authorized servers recover every component of the client wire. -/
+theorem replicated_two_server_reconstruct {F : Type} [LawfulCommRing F]
+    (a b : Fin 5) (hab : a ≠ b) (shares : Fin 5 → F) :
+    (fun c => if c = a then toprfServerView b shares c else toprfServerView a shares c) =
+      shares := by
+  funext c
+  by_cases hc : c = a
+  · simp [hc, toprfServerView, hab]
+  · simp [hc, toprfServerView]
+
+/-- An explicit change of ideal coins at an un-enrolled child. Every enrolled
+child remains identical, while the target seed is translated by an arbitrary delta. -/
+theorem inventory_unenrolled_coin_transport {I : Type} [DecidableEq I]
+    (enrolled : I → Bool) (j : I) (hj : enrolled j = false)
+    (known hidden : I → BitVec 256) (delta : BitVec 256) :
+    let shifted := (inventoryTableMask (fun i => if i = j then delta else 0)).toFun hidden
+    (∀ i, enrolled i = true → inventoryXorChild (known i) (shifted i) =
+      inventoryXorChild (known i) (hidden i)) ∧
+    inventoryXorChild (known j) (shifted j) =
+      inventoryXorChild (known j) (hidden j) ^^^ delta := by
+  dsimp [inventoryTableMask, inventoryXorChild]
+  constructor
+  · intro i hi
+    have hij : i ≠ j := by intro he; subst i; rw [hj] at hi; contradiction
+    simp [hij]
+  · simp only [↓reduceIte]
+    bv_xor_cancel
+
+/-- Exact uniform-coin transport, valid for arbitrary batch-view distinguishers. -/
+theorem inventory_unenrolled_joint_distribution {I : Type} [DecidableEq I] {C : Nat}
+    (enum : SimpleEquiv (Fin C) (I → BitVec 256)) (j : I) (delta : BitVec 256)
+    (test : (I → BitVec 256) → Nat) :
+    finSum C (fun r => test ((inventoryTableMask
+      (fun i => if i = j then delta else 0)).toFun (enum.toFun r))) =
+      finSum C (fun r => test (enum.toFun r)) :=
+  inventory_ideal_table_uniform enum _ test
+
+theorem hd_game_gap_triangle (a b c : Nat) :
+    hdGameGap a c ≤ hdGameGap a b + hdGameGap b c := by
+  unfold hdGameGap
+  omega
+
+/-- Compose PRF expansion and the public-image MLWE hop without silently replacing
+short secrets by uniform field secrets. All games use the same finite denominator. -/
+theorem hd_prf_mlwe_composed_bound (real cbd ideal prfBudget mlweBudget : Nat)
+    (hPRF : hdGameGap real cbd ≤ prfBudget)
+    (hMLWE : hdGameGap cbd ideal ≤ mlweBudget) :
+    hdGameGap real ideal ≤ prfBudget + mlweBudget :=
+  Nat.le_trans (hd_game_gap_triangle real cbd ideal) (Nat.add_le_add hPRF hMLWE)
+
+/-- The uniform *public-offset* endpoint uses exactly the additive translation
+behind `hd_watch_only_subspace_isolation`, coefficient by coefficient. -/
+def hdPublicOffsetEquiv (known : HdModuleHalf) : SimpleEquiv HdModuleHalf HdModuleHalf where
+  toFun u := hdModuleAdd known u
+  invFun v := fun i k => sub (v i k) (known i k)
+  left_inv u := by
+    funext i k
+    exact add_sub_cancel (known i k) (u i k)
+  right_inv v := by
+    funext i k
+    exact LawfulCommRing.add_sub_cancel_left (known i k) (v i k)
+
+theorem hd_uniform_public_offset_endpoint {C : Nat}
+    (enum : SimpleEquiv (Fin C) HdModuleHalf) (known : HdModuleHalf)
+    (test : HdModuleHalf → Nat) :
+    finSum C (fun r => test (hdModuleAdd known (enum.toFun r))) =
+      finSum C (fun r => test (enum.toFun r)) :=
+  finSum_bijection_invariant enum (hdPublicOffsetEquiv known) test
+
+/-- A batch adversary's real target-translation advantage is at most the sum of
+two PRF advantages. The middle ideal games are equal by the explicit coin bijection;
+`inventory_unenrolled_coin_transport` shows why the enrolled batch is unchanged. -/
+theorem inventory_batch_privacy_prf_bound {I : Type} [DecidableEq I] {C : Nat}
+    (enum : SimpleEquiv (Fin C) (I → BitVec 256))
+    (real : Fin C → I → BitVec 256) (j : I) (delta : BitVec 256)
+    (test : (I → BitVec 256) → Bool) (eps₀ eps₁ : Nat)
+    (h₀ : hdGameGap (hdGameHits real test) (hdGameHits enum.toFun test) ≤ eps₀)
+    (h₁ : hdGameGap
+      (hdGameHits enum.toFun (fun t => test ((inventoryTableMask
+        (fun i => if i = j then delta else 0)).toFun t)))
+      (hdGameHits real (fun t => test ((inventoryTableMask
+        (fun i => if i = j then delta else 0)).toFun t))) ≤ eps₁) :
+    hdGameGap (hdGameHits real test)
+      (hdGameHits real (fun t => test ((inventoryTableMask
+        (fun i => if i = j then delta else 0)).toFun t))) ≤ eps₀ + eps₁ := by
+  have hid := inventory_unenrolled_joint_distribution enum j delta (fun t => (test t).toNat)
+  change hdGameHits enum.toFun (fun t => test ((inventoryTableMask
+    (fun i => if i = j then delta else 0)).toFun t)) = hdGameHits enum.toFun test at hid
+  rw [hid] at h₁
+  exact hd_prf_mlwe_composed_bound _ _ _ _ _ h₀ h₁
+
+/-- A repetition root includes the unopened third digest and all output strings.
+The caller supplies the injective framing used for this tagged hash layer. -/
+def czkRepetitionRoot (H : Hash) (frame : List (List UInt8) → List UInt8)
+    (views : Fin 3 → List UInt8) (outputs : Fin 3 → List UInt8) : List UInt8 :=
+  H (frame [H (views 0), H (views 1), H (views 2), outputs 0, outputs 1, outputs 2])
+
+/-- Collision extraction descends through the repetition layer, including the
+unopened view. No assumption that the unopened view is checked by replay is used. -/
+theorem cozk_repetition_root_binds_hidden_view
+    (H : Hash) (frame : List (List UInt8) → List UInt8)
+    (inj : ∀ a b, frame a = frame b → a = b)
+    (before after : Fin 3 → List UInt8) (oldOut newOut : Fin 3 → List UInt8)
+    (p : Fin 3) (changed : before p ≠ after p)
+    (same : czkRepetitionRoot H frame before oldOut =
+      czkRepetitionRoot H frame after newOut) : Collision H := by
+  let a := [H (before 0), H (before 1), H (before 2), oldOut 0, oldOut 1, oldOut 2]
+  let b := [H (after 0), H (after 1), H (after 2), newOut 0, newOut 1, newOut 2]
+  by_cases he : frame a = frame b
+  · have hs := inj a b he
+    have hv : ∀ p : Fin 3, H (before p) = H (after p) := by
+      have hh : H (before 0) = H (after 0) ∧ H (before 1) = H (after 1) ∧
+          H (before 2) = H (after 2) := by
+        simp only [a, b, List.cons.injEq] at hs
+        exact ⟨hs.1, hs.2.1, hs.2.2.1⟩
+      exact fin3_all hh.1 hh.2.1 hh.2.2
+    exact ⟨before p, after p, changed, hv p⟩
+  · exact ⟨frame a, frame b, he, same⟩
+
+/-- Descend from the outer transcript root through a repetition root to a
+changed party view. This covers the unopened third digest in the production
+three-layer commitment layout, with injective domain/length framing explicit. -/
+theorem cozk_transcript_root_binds_hidden_view
+    (H : Hash) (outerFrame repFrame : List (List UInt8) → List UInt8)
+    (outerInj : ∀ a b, outerFrame a = outerFrame b → a = b)
+    (repInj : ∀ a b, repFrame a = repFrame b → a = b)
+    (oldRoots newRoots : List (List UInt8)) (rep : Nat)
+    (before after : Fin 3 → List UInt8) (oldOut newOut : Fin 3 → List UInt8)
+    (oldAt : oldRoots[rep]? = some (czkRepetitionRoot H repFrame before oldOut))
+    (newAt : newRoots[rep]? = some (czkRepetitionRoot H repFrame after newOut))
+    (p : Fin 3) (changed : before p ≠ after p)
+    (same : H (outerFrame oldRoots) = H (outerFrame newRoots)) : Collision H := by
+  by_cases he : outerFrame oldRoots = outerFrame newRoots
+  · have hl := outerInj oldRoots newRoots he
+    rw [hl, newAt] at oldAt
+    exact cozk_repetition_root_binds_hidden_view H repFrame repInj before after oldOut newOut
+      p changed (Option.some.inj oldAt).symm
+  · exact ⟨outerFrame oldRoots, outerFrame newRoots, he, same⟩
+
+/-- Binding is not a guarantee of rejection after the challenge is known: pair
+one accepts the fixed false transcript without any change to a commitment. -/
+theorem tooth_cozk_binding_does_not_prevent_lucky_challenge :
+    czkVerifyAll czkTightCircuit [1] [1] [czkTightRep] = true ∧
+    (∀ H : Hash, ∀ encode :
+      (List (CzkGateCommit Goldilocks) × List (Fin 3 → Goldilocks)) → List UInt8,
+      H (encode czkTightRep) = H (encode czkTightRep)) := by
+  constructor
+  · decide +kernel
+  · intros; rfl
+
+theorem tooth_cozk_two_pairs_witness :
+    ∃ rep, czkValidPairCount czkTightCircuit [1] rep = 2 ∧
+      ∀ ws, ¬ czkAccepts czkTightCircuit [1] ws :=
+  ⟨czkTightRep, tooth_cozk_single_corrupt_mul_passes_exactly_two_pairs.2,
+    tooth_cozk_single_corrupt_mul_passes_exactly_two_pairs.1⟩
+
+/-! ## Two-of-three replicated TOPRF
+
+Three additive components; server `p` holds the two components other than `p`, so every
+component has exactly two holders. Two servers cover all components and one server
+misses its own. Two copies cannot outvote a liar, so unlike the five-server voter above
+this decoder gives security with abort: a single deviation is either harmless or
+detected, and never changes the output.
+-/
+
+abbrev rss3Holds (server component : Fin 3) : Prop := server ≠ component
+
+def rss3First (c : Fin 3) : Fin 3 := ⟨(c.val + 1) % 3, Nat.mod_lt _ (by decide)⟩
+def rss3Second (c : Fin 3) : Fin 3 := ⟨(c.val + 2) % 3, Nat.mod_lt _ (by decide)⟩
+
+theorem rss3_holders_distinct :
+    ∀ c : Fin 3, rss3First c ≠ c ∧ rss3Second c ≠ c ∧ rss3First c ≠ rss3Second c := by decide
+
+theorem rss3_holder_cases :
+    ∀ c p : Fin 3, p ≠ c → p = rss3First c ∨ p = rss3Second c := by decide
+
+theorem rss3_access_exact (coalition : Fin 3 → Prop) :
+    (∀ component, ∃ server, coalition server ∧ rss3Holds server component) ↔
+      ∃ a b, coalition a ∧ coalition b ∧ a ≠ b := by
+  constructor
+  · intro h
+    obtain ⟨a, ha, _⟩ := h 0
+    obtain ⟨b, hb, hba⟩ := h a
+    exact ⟨a, b, ha, hb, Ne.symm hba⟩
+  · rintro ⟨a, b, ha, hb, hab⟩ c
+    by_cases hac : a = c
+    · exact ⟨b, hb, by simpa [rss3Holds, ← hac] using Ne.symm hab⟩
+    · exact ⟨a, ha, hac⟩
+
+/-- Both holders of component `c` must answer, and their answers must agree. -/
+def rss3Vote {F : Type} [DecidableEq F] (c : Fin 3) (responses : Fin 3 → Option F) :
+    Option F :=
+  match responses (rss3First c), responses (rss3Second c) with
+  | some u, some v => if u = v then some u else none
+  | _, _ => none
+
+theorem rss3_vote_honest {F : Type} [DecidableEq F] (c : Fin 3)
+    (responses : Fin 3 → Option F) (honest : F)
+    (h : ∀ p, p ≠ c → responses p = some honest) :
+    rss3Vote c responses = some honest := by
+  obtain ⟨h1, h2, _⟩ := rss3_holders_distinct c
+  simp only [rss3Vote, h _ h1, h _ h2, ↓reduceIte]
+
+/-- With one deviating server, the vote for a component is the honest value or an abort. -/
+theorem rss3_vote_sound {F : Type} [DecidableEq F] (c liar : Fin 3)
+    (responses : Fin 3 → Option F) (honest : F)
+    (h : ∀ p, p ≠ c → p ≠ liar → responses p = some honest) :
+    rss3Vote c responses = some honest ∨ rss3Vote c responses = none := by
+  obtain ⟨h1, h2, h12⟩ := rss3_holders_distinct c
+  if hl : rss3First c = liar then
+    have hs := h _ h2 (fun e => h12 (hl.trans e.symm))
+    unfold rss3Vote
+    rw [hs]
+    cases responses (rss3First c) with
+    | none => exact .inr rfl
+    | some u =>
+      if hu : u = honest then
+        left
+        simp only [hu, ↓reduceIte]
+      else
+        right
+        simp only [hu, ↓reduceIte]
+  else
+    have hf := h _ h1 hl
+    unfold rss3Vote
+    rw [hf]
+    cases responses (rss3Second c) with
+    | none => exact .inr rfl
+    | some v =>
+      if hv : honest = v then
+        left
+        simp only [hv, ↓reduceIte]
+      else
+        right
+        simp only [hv, ↓reduceIte]
+
+section Rss3Ring
+variable {F : Type} [LawfulCommRing F]
+
+def sum3 (c : Fin 3 → F) : F := add (c 0) (add (c 1) (c 2))
+
+def reconstructRss3Toprf [DecidableEq F] (responses : Fin 3 → Fin 3 → Option F) :
+    Option F := do
+  let a ← rss3Vote 0 (fun p => responses p 0)
+  let b ← rss3Vote 1 (fun p => responses p 1)
+  let c ← rss3Vote 2 (fun p => responses p 2)
+  return add a (add b c)
+
+theorem rss3_toprf_honest [DecidableEq F] (shares : Fin 3 → F)
+    (responses : Fin 3 → Fin 3 → Option F)
+    (h : ∀ p c, p ≠ c → responses p c = some (shares c)) :
+    reconstructRss3Toprf responses = some (sum3 shares) := by
+  have hv : ∀ c, rss3Vote c (fun p => responses p c) = some (shares c) :=
+    fun c => rss3_vote_honest c _ _ (fun p hc => h p c hc)
+  simp [reconstructRss3Toprf, hv, sum3]
+
+/-- **Security with abort against one Byzantine server.** Whatever one server sends on
+the components it holds, the reconstruction is the correct output or an abort. -/
+theorem rss3_toprf_single_byzantine_detected [DecidableEq F] (shares : Fin 3 → F)
+    (liar : Fin 3) (responses : Fin 3 → Fin 3 → Option F)
+    (h : ∀ p c, p ≠ c → p ≠ liar → responses p c = some (shares c)) :
+    reconstructRss3Toprf responses = some (sum3 shares) ∨
+      reconstructRss3Toprf responses = none := by
+  have hv : ∀ c, rss3Vote c (fun p => responses p c) = some (shares c) ∨
+      rss3Vote c (fun p => responses p c) = none :=
+    fun c => rss3_vote_sound c liar _ _ (fun p hc hl => h p c hc hl)
+  rcases hv 0 with h0 | h0 <;> rcases hv 1 with h1 | h1 <;> rcases hv 2 with h2 | h2 <;>
+    simp [reconstructRss3Toprf, h0, h1, h2, sum3]
+
+/-- What server `p` receives of a request: both components it holds, its own as zero. -/
+def rss3ServerView (p : Fin 3) (c : Fin 3 → F) : Fin 3 → F :=
+  fun i => if i = p then zero else c i
+
+/-- Two servers together hold every component. -/
+theorem rss3_two_server_reconstruct (a b : Fin 3) (hab : a ≠ b) (shares : Fin 3 → F) :
+    (fun c => if c = a then rss3ServerView b shares c else rss3ServerView a shares c) =
+      shares := by
+  funext c
+  by_cases hc : c = a
+  · simp [hc, rss3ServerView, hab]
+  · simp [hc, rss3ServerView]
+
+theorem sum3_set : ∀ (p : Fin 3) (v : Fin 3 → F) (a : F), v p = zero →
+    sum3 (fun i => if i = p then a else v i) = add a (sum3 v)
+  | 0, v, a, h => by
+    simp only [sum3, h, Fin.reduceEq, ↓reduceIte, LawfulCommRing.zero_add]
+  | 1, v, a, h => by
+    simp only [sum3, h, Fin.reduceEq, ↓reduceIte, LawfulCommRing.zero_add]
+    exact CustodyAlgebra.add_left_comm _ _ _
+  | 2, v, a, h => by
+    simp only [sum3, h, Fin.reduceEq, ↓reduceIte, LawfulCommRing.add_zero]
+    rw [LawfulCommRing.add_comm (v 1) a, CustodyAlgebra.add_left_comm (v 0) a]
+
+theorem sum3_split (p : Fin 3) (c : Fin 3 → F) :
+    sum3 c = add (c p) (sum3 (rss3ServerView p c)) := by
+  have h := sum3_set p (rss3ServerView p c) (c p) (ite_eq_left rfl)
+  have e : (fun i => if i = p then c p else rss3ServerView p c i) = c := by
+    funext i
+    show (if i = p then c p else if i = p then zero else c i) = c i
+    refine if hi : i = p then ?_ else ?_
+    · rw [ite_eq_left hi, hi]
+    · rw [ite_eq_right hi, ite_eq_right hi]
+  rw [e] at h
+  exact h
+
+/-- **Client input obliviousness for one server.** For every server, every view it can
+receive and every candidate input, exactly one additive sharing of that input produces
+the view. -/
+theorem rss3_client_blind_perfect_privacy (p : Fin 3) (view : Fin 3 → F)
+    (hview : view p = zero) (x : F) :
+    ∃ c : Fin 3 → F, (sum3 c = x ∧ rss3ServerView p c = view) ∧
+      ∀ c' : Fin 3 → F, sum3 c' = x → rss3ServerView p c' = view → c' = c := by
+  refine ⟨fun i => if i = p then sub x (sum3 view) else view i, ⟨?_, ?_⟩, ?_⟩
+  · rw [sum3_set p view _ hview]
+    exact ring_sub_add_cancel_right x (sum3 view)
+  · funext i
+    show (if i = p then zero else if i = p then sub x (sum3 view) else view i) = view i
+    refine if hi : i = p then ?_ else ?_
+    · rw [ite_eq_left hi, hi, hview]
+    · rw [ite_eq_right hi, ite_eq_right hi]
+  · intro c' hs hv
+    funext i
+    show c' i = if i = p then sub x (sum3 view) else view i
+    refine if hi : i = p then ?_ else ?_
+    · rw [ite_eq_left hi, hi]
+      have h := sum3_split p c'
+      rw [hs, hv] at h
+      exact CustodyAlgebra.eq_sub_of_add_eq h.symm
+    · rw [ite_eq_right hi, ← hv]
+      show c' i = if i = p then zero else c' i
+      rw [ite_eq_right hi]
+
+end Rss3Ring
+
+/-- Two copies cannot correct: a silent server forces an abort although both other
+servers answer honestly. The five-server voter returns the output in the same situation
+(`replicated_toprf_any_single_byzantine`). -/
+theorem tooth_rss3_single_silent_server_aborts :
+    ∃ (shares : Fin 3 → Goldilocks) (liar : Fin 3)
+      (responses : Fin 3 → Fin 3 → Option Goldilocks),
+      (∀ p c, p ≠ c → p ≠ liar → responses p c = some (shares c)) ∧
+      reconstructRss3Toprf responses = none := by
+  refine ⟨fun _ => zero, 0, fun p _ => if p = 0 then none else some zero, ?_, ?_⟩
+  · intro p c _ hl
+    simp only [hl, ↓reduceIte]
+  · rfl
+
+theorem rss3_single_byzantine_inhabited :
+    ∃ (shares : Fin 3 → Goldilocks) (liar : Fin 3)
+      (responses : Fin 3 → Fin 3 → Option Goldilocks),
+      (∀ p c, p ≠ c → p ≠ liar → responses p c = some (shares c)) ∧
+      reconstructRss3Toprf responses = some (sum3 shares) := by
+  refine ⟨fun c => if c = 0 then one else zero, 0,
+    fun _ c => some (if c = 0 then one else zero), fun _ _ _ _ => rfl, ?_⟩
+  exact rss3_toprf_honest _ _ (fun _ _ _ => rfl)
+
+/-! ## Audits -/
+
+#tooth_pair
+  Qsag.cozk_false_statement_caught_at_least_one_pair
+  vs
+  Qsag.tooth_cozk_two_pairs_witness
+
+#verify_constructive Qsag.inventory_batch_privacy_prf_bound
+#verify_constructive Qsag.replicated_holders_exactly_four
+#verify_constructive Qsag.replicated_client_coins_roundtrip
+#verify_constructive Qsag.replicated_client_shares_roundtrip
+#verify_constructive Qsag.replicated_client_blind_four_coin_privacy
+#verify_constructive Qsag.replicated_access_exact
+#verify_constructive Qsag.count5_ge_three_except_two
+#verify_constructive Qsag.replicated_votes_correct
+#verify_constructive Qsag.replicated_vote_correct
+#verify_constructive Qsag.replicated_toprf_any_single_byzantine
+#verify_constructive Qsag.replicated_client_blind_sum
+#verify_constructive Qsag.tooth_cozk_single_corrupt_mul_passes_exactly_two_pairs
+#verify_constructive Qsag.cozk_tight_repetitions
+#verify_constructive Qsag.cozk_438_exact_accepting_fraction
+#verify_constructive Qsag.inventory_ideal_table_uniform
+#verify_constructive Qsag.inventory_batch_fiber_unique
+#verify_constructive Qsag.inventory_prf_game_hop
+#verify_constructive Qsag.hd_cbd2_support
+#verify_constructive Qsag.tooth_cbd2_is_not_uniform_secret
+#verify_constructive Qsag.hd_mlwe_public_offset_hop
+#verify_constructive Qsag.cozk_commitment_binding_extract
+#verify_constructive Qsag.cozk_unopened_view_equivocation_collision
+#verify_constructive Qsag.cozk_committed_challenge_soundness
+#verify_constructive Qsag.cozk_binding_fixed_438_bound
+#verify_constructive Qsag.replicated_two_server_reconstruct
+#verify_constructive Qsag.inventory_unenrolled_coin_transport
+#verify_constructive Qsag.inventory_unenrolled_joint_distribution
+#verify_constructive Qsag.hd_game_gap_triangle
+#verify_constructive Qsag.hd_prf_mlwe_composed_bound
+#verify_constructive Qsag.hd_uniform_public_offset_endpoint
+#verify_constructive Qsag.cozk_repetition_root_binds_hidden_view
+#verify_constructive Qsag.cozk_transcript_root_binds_hidden_view
+#verify_constructive Qsag.tooth_cozk_binding_does_not_prevent_lucky_challenge
+
+#tooth_pair
+  Qsag.hd_watch_only_subspace_isolation
+  vs
+  Qsag.tooth_unkeyed_public_tweak_pins_master
+
+#tooth_pair
+  Qsag.toprf_2of5_byzantine_unique_decoding
+  vs
+  Qsag.ambiguous_2of3_witness
+
+#verify_inhabited
+  Qsag.toprf_2of5_byzantine_unique_decoding
+  Qsag.toprf_one_byzantine_inhabited
+
+#verify_constructive
+  Qsag.hd_state_unique_of_children
+  Qsag.hd_watch_only_subspace_isolation
+  Qsag.hd_unenrolled_fiber_card_exact
+  Qsag.master_secret_recoverable
+  Qsag.tooth_unkeyed_public_tweak_pins_master
+  Qsag.hd_child_mac_forgery_pins_key
+  Qsag.hd_child_mac_lanes_unique_forging_key
+  Qsag.hd_child_mac_unforgeable_below_threshold
+  Qsag.hd_child_mac_six_limb_bound
+  Qsag.hd_child_mac_seven_lane_bound
+  Qsag.line_unique_of_two_points
+  Qsag.toprf_line_unique_of_three_agree
+  Qsag.extractUniqueToprfEval_sound
+  Qsag.toprf_any_single_forgery_corrected
+  Qsag.toprf_client_blind_perfect_privacy
+  Qsag.toprf_2of5_byzantine_unique_decoding
+  Qsag.toprf_2of5_any_single_forgery_corrected
+  Qsag.toprf_one_byzantine_inhabited
+  Qsag.ambiguous_2of3_witness
+  Qsag.cozk_opened_pair_uniform
+  Qsag.cozk_three_valid_pairs_extract_witness
+  Qsag.cozk_false_statement_caught_at_least_one_pair
+  Qsag.cozk_corrupted_mul_wire_fails_owner_pair
+  Qsag.cozk_preopen_sacrifice_sound
+  Qsag.cozk_preopen_sacrifice_complete
+  Qsag.czk_accepting_challenge_count
+  Qsag.cozk_438_classical_bound
+  Qsag.cozk_219_qrom_amplitude_bound
+  Qsag.cozk_438_grover_query_floor
+  Qsag.cozk_3party_active_soundness_and_2privacy
+
+open Lean Elab Command in
+run_cmd do
+  let names : List Name := [
+    ``Qsag.CustodyAlgebra.add_left_comm,
+    ``Qsag.CustodyAlgebra.mul_left_comm,
+    ``Qsag.CustodyAlgebra.add_sub_cancel,
+    ``Qsag.CustodyAlgebra.sub_sub_self,
+    ``Qsag.CustodyAlgebra.add_sub_add_left,
+    ``Qsag.CustodyAlgebra.add_right_cancel,
+    ``Qsag.CustodyAlgebra.eq_sub_of_add_eq,
+    ``Qsag.CustodyAlgebra.sub_add_sub_cancel,
+    ``Qsag.CustodyAlgebra.telescope3,
+    ``Qsag.HdCustodyState,
+    ``Qsag.hdChildSecret,
+    ``Qsag.hdStateOfChildren,
+    ``Qsag.hdChildSecret_stateOfChildren,
+    ``Qsag.hdStateOfChildren_childSecret,
+    ``Qsag.hd_state_unique_of_children,
+    ``Qsag.hd_watch_only_subspace_isolation,
+    ``Qsag.finProdEquiv,
+    ``Qsag.finVecEquiv,
+    ``Qsag.hdFieldFinEquiv,
+    ``Qsag.hdLimbVecCardEquiv,
+    ``Qsag.hdUnenrolledFiberEquiv,
+    ``Qsag.hd_unenrolled_fiber_card_exact,
+    ``Qsag.naiveBip32Child,
+    ``Qsag.masterSecretRecoverable,
+    ``Qsag.master_secret_recoverable,
+    ``Qsag.tooth_unkeyed_public_tweak_pins_master,
+    ``Qsag.hdMacVerify,
+    ``Qsag.hd_child_mac_forgery_pins_key,
+    ``Qsag.hd_child_mac_lanes_unique_forging_key,
+    ``Qsag.hd_child_mac_unforgeable_below_threshold,
+    ``Qsag.hd_child_mac_six_limb_bound,
+    ``Qsag.hd_child_mac_seven_lane_bound,
+    ``Qsag.lineAt,
+    ``Qsag.lineAt_zero,
+    ``Qsag.lineAt_diff,
+    ``Qsag.line_unique_of_two_points,
+    ``Qsag.lineThrough,
+    ``Qsag.lineThrough_of_on_line,
+    ``Qsag.count5,
+    ``Qsag.count5_good,
+    ``Qsag.count5_two,
+    ``Qsag.count5_ge_four_of_all_but,
+    ``Qsag.count5_le_one_of_all_but,
+    ``Qsag.toprfAgree,
+    ``Qsag.toprfWrong,
+    ``Qsag.ToprfOneByzantine,
+    ``Qsag.toprf_agree_not_wrong,
+    ``Qsag.toprf_line_unique_of_three_agree,
+    ``Qsag.all5,
+    ``Qsag.all5_mem,
+    ``Qsag.toprfCandidates,
+    ``Qsag.extractUniqueToprfEval,
+    ``Qsag.extractUniqueToprfEval_sound,
+    ``Qsag.toprf_any_single_forgery_corrected,
+    ``Qsag.sum5,
+    ``Qsag.toprfServerView,
+    ``Qsag.sum5_set,
+    ``Qsag.sum5_split,
+    ``Qsag.toprf_client_blind_perfect_privacy,
+    ``Qsag.toprfPoint,
+    ``Qsag.toprfPoint_distinct,
+    ``Qsag.goldilocks_mul_inv,
+    ``Qsag.toprf_2of5_byzantine_unique_decoding,
+    ``Qsag.toprf_2of5_any_single_forgery_corrected,
+    ``Qsag.toprf_one_byzantine_inhabited,
+    ``Qsag.ambiguous_2of3_witness,
+    ``Qsag.CzkGate,
+    ``Qsag.CzkGateRand,
+    ``Qsag.CzkGateView,
+    ``Qsag.CzkRand,
+    ``Qsag.CzkView,
+    ``Qsag.CzkGateCommit,
+    ``Qsag.czkMulProd,
+    ``Qsag.czkMulShare,
+    ``Qsag.czkEmptyWires,
+    ``Qsag.czkPush,
+    ``Qsag.czkSum3,
+    ``Qsag.czkLocalShare,
+    ``Qsag.czkInputShares,
+    ``Qsag.czkMulShares,
+    ``Qsag.czkGateShares,
+    ``Qsag.czkGateView,
+    ``Qsag.czkInputSim,
+    ``Qsag.czkMulSim,
+    ``Qsag.czkGateSim,
+    ``Qsag.czkNextWit,
+    ``Qsag.czkRunView,
+    ``Qsag.czkSimRand,
+    ``Qsag.fin3_cycle,
+    ``Qsag.czkInputSim_view,
+    ``Qsag.czkInputView_sim,
+    ``Qsag.czkMulSim_view,
+    ``Qsag.czkMulView_sim,
+    ``Qsag.czkGateSim_view,
+    ``Qsag.czkGateView_sim,
+    ``Qsag.czkSimRand_runView,
+    ``Qsag.czkRunView_simRand,
+    ``Qsag.czk_view_fiber_unique,
+    ``Qsag.cozk_opened_pair_uniform,
+    ``Qsag.czkPlainGate,
+    ``Qsag.czkPlainEval,
+    ``Qsag.czkAccepts,
+    ``Qsag.czkGateWitness,
+    ``Qsag.czkExtractWitness,
+    ``Qsag.czk_mul_sum,
+    ``Qsag.czkPairGateOk,
+    ``Qsag.czkOutputsOk,
+    ``Qsag.czkVerifyPair,
+    ``Qsag.fin3_all,
+    ``Qsag.czk_gate_sum,
+    ``Qsag.czk_circuit_sum,
+    ``Qsag.czk_outputs_zero,
+    ``Qsag.cozk_three_valid_pairs_extract_witness,
+    ``Qsag.czkValidPairCount,
+    ``Qsag.three_bools_le_two,
+    ``Qsag.cozk_false_statement_caught_at_least_one_pair,
+    ``Qsag.czkReplayWires,
+    ``Qsag.czkVerifyPair_gate_ok,
+    ``Qsag.cozk_corrupted_mul_wire_fails_owner_pair,
+    ``Qsag.czkSacrificeResidual,
+    ``Qsag.czkSacrificeResidual_eq,
+    ``Qsag.cozk_preopen_sacrifice_sound,
+    ``Qsag.cozk_preopen_sacrifice_complete,
+    ``Qsag.czkVerifyAll,
+    ``Qsag.czkAcceptCount,
+    ``Qsag.czkChallenges,
+    ``Qsag.czkChallenges_length,
+    ``Qsag.filter3_length,
+    ``Qsag.czk_accepting_challenge_count,
+    ``Qsag.czkAcceptCount_le,
+    ``Qsag.cozk_438_classical_bound,
+    ``Qsag.cozk_219_qrom_amplitude_bound,
+    ``Qsag.cozk_438_grover_query_floor,
+    ``Qsag.cozk_3party_active_soundness_and_2privacy,
+    ``Qsag.replicatedHolds,
+    ``Qsag.replicated_access_exact,
+    ``Qsag.replicatedVotes,
+    ``Qsag.replicatedVote,
+    ``Qsag.count5_ge_three_except_two,
+    ``Qsag.replicated_votes_correct,
+    ``Qsag.replicated_vote_correct,
+    ``Qsag.reconstructReplicatedToprf2of5,
+    ``Qsag.replicated_toprf_any_single_byzantine,
+    ``Qsag.replicatedClientBlind,
+    ``Qsag.replicated_client_blind_sum,
+    ``Qsag.replicated_holders_exactly_four,
+    ``Qsag.replicatedClientCoins,
+    ``Qsag.replicated_client_coins_roundtrip,
+    ``Qsag.replicated_client_shares_roundtrip,
+    ``Qsag.replicated_client_blind_four_coin_privacy,
+    ``Qsag.czkTightCircuit,
+    ``Qsag.czkTightRep,
+    ``Qsag.tooth_cozk_single_corrupt_mul_passes_exactly_two_pairs,
+    ``Qsag.cozk_tight_repetitions,
+    ``Qsag.cozk_438_exact_accepting_fraction,
+    ``Qsag.inventoryXorChild,
+    ``Qsag.inventoryTableMask,
+    ``Qsag.inventory_ideal_table_uniform,
+    ``Qsag.inventory_batch_fiber_unique,
+    ``Qsag.hdGameHits,
+    ``Qsag.hdGameGap,
+    ``Qsag.inventory_prf_game_hop,
+    ``Qsag.hdCbd2,
+    ``Qsag.hd_cbd2_support,
+    ``Qsag.hdCbd2Field,
+    ``Qsag.tooth_cbd2_is_not_uniform_secret,
+    ``Qsag.HdModulePoly,
+    ``Qsag.HdModuleHalf,
+    ``Qsag.HdModuleMatrix,
+    ``Qsag.hdPolyAdd,
+    ``Qsag.hdModuleAdd,
+    ``Qsag.hdPolyMul,
+    ``Qsag.hdModuleImage,
+    ``Qsag.hdShortHalf,
+    ``Qsag.hdMlweSample,
+    ``Qsag.hd_mlwe_public_offset_hop,
+    ``Qsag.cozk_commitment_binding_extract,
+    ``Qsag.cozk_unopened_view_equivocation_collision,
+    ``Qsag.cozk_committed_challenge_soundness,
+    ``Qsag.cozk_binding_fixed_438_bound,
+    ``Qsag.replicated_two_server_reconstruct,
+    ``Qsag.inventory_unenrolled_coin_transport,
+    ``Qsag.inventory_unenrolled_joint_distribution,
+    ``Qsag.hd_game_gap_triangle,
+    ``Qsag.hd_prf_mlwe_composed_bound,
+    ``Qsag.hdPublicOffsetEquiv,
+    ``Qsag.hd_uniform_public_offset_endpoint,
+    ``Qsag.inventory_batch_privacy_prf_bound,
+    ``Qsag.czkRepetitionRoot,
+    ``Qsag.cozk_repetition_root_binds_hidden_view,
+    ``Qsag.cozk_transcript_root_binds_hidden_view,
+    ``Qsag.tooth_cozk_binding_does_not_prevent_lucky_challenge,
+    ``Qsag.tooth_cozk_two_pairs_witness]
+  let mut rejected : Nat := 0
+  for n in names do
+    let axs ← Lean.collectAxioms n
+    for ax in axs do
+      unless ax == ``propext || ax == ``Quot.sound do
+        logInfo m!"Rejected dependency: {n}: {ax}"
+        rejected := rejected + 1
+  if rejected != 0 then
+    throwError m!"Module axiom audit rejected {rejected} dependencies"
+  logInfo m!"Module axiom audit: {names.length} declarations, 0 rejected axioms"
+
+
+/-! ## Multi-gate TOPRF layer transport
+
+Each layer carries its own context, layer counter and honest gate vectors.
+The transport uses the Rust threshold and digest-holder rotation from the
+threshold module. The extractor stops with concrete hash preimages on failure.
+-/
+
+structure ToprfLayerTransport204 where
+  context : List UInt8
+  layer : UInt64
+  values : Fin 5 → Fin 5 → List Goldilocks
+  faultyValues : Fin 5 → Fin 5 → Option (List Goldilocks)
+  faultyDigest : Fin 5 → Fin 5 → Option (List UInt8)
+  contextBound : context.length < 2 ^ 20
+  valuesBound : ∀ i j, (values i j).length < 2 ^ 20
+
+def toprfLayerDecoded204 (H : List UInt8 → List UInt8) (bad : Fin 5)
+    (L : ToprfLayerTransport204) (i j : Fin 5) : Option (List Goldilocks) :=
+  toprfGroupTransport204 H L.context L.layer i j bad (L.values i j)
+    (L.faultyValues i j) (L.faultyDigest i j)
+
+/-- A complete layer: all groups are decoded correctly, or explicit collision
+bytes are returned. Group size can vary between pairs and between layers. -/
+def toprfLayerExtract204 (H : List UInt8 → List UInt8) (bad : Fin 5)
+    (L : ToprfLayerTransport204) :
+    PSum (∀ i j, i ≠ j → toprfLayerDecoded204 H bad L i j = some (L.values i j))
+      (ToprfCollisionWitness204 H) :=
+  finiteChecks204 (fun i => finiteChecks204 (fun j =>
+    if h : i = j then .inl (fun hn => False.elim (hn h))
+    else match toprfGroupTransport204_extract H L.context L.layer i j bad (L.values i j)
+      (L.faultyValues i j) (L.faultyDigest i j) L.contextBound (L.valuesBound i j) with
+      | .inr collision => .inr collision
+      | .inl he => .inl (fun _ => he)))
+
+/-- No global collision-freeness premise, and no fixed one-gate restriction. -/
+def toprfLayersExtract204 (H : List UInt8 → List UInt8) (bad : Fin 5) :
+    (layers : List ToprfLayerTransport204) →
+    PSum (∀ L ∈ layers, ∀ i j, i ≠ j → toprfLayerDecoded204 H bad L i j = some (L.values i j))
+      (ToprfCollisionWitness204 H)
+  | [] => .inl (by intro L h; cases h)
+  | L :: rest =>
+    match toprfLayerExtract204 H bad L with
+    | .inr collision => .inr collision
+    | .inl hL =>
+      match toprfLayersExtract204 H bad rest with
+      | .inr collision => .inr collision
+      | .inl hs => .inl (by
+          intro K hK i j hij
+          rcases List.mem_cons.mp hK with h | h
+          · subst K; exact hL i j hij
+          · exact hs K h i j hij)
+
+theorem toprfRotation204_not_constant :
+    (toprfGroupRoles204 0 1).2.2 ≠ (toprfHolders 0 1).getD 2 0 := by decide
+
+#tooth_pair
+  Qsag.rss3_toprf_single_byzantine_detected
+  vs
+  Qsag.tooth_rss3_single_silent_server_aborts
+
+#verify_inhabited
+  Qsag.rss3_toprf_single_byzantine_detected
+  Qsag.rss3_single_byzantine_inhabited
+
+#verify_constructive
+  Qsag.rss3_access_exact
+  Qsag.rss3_vote_sound
+  Qsag.rss3_toprf_honest
+  Qsag.rss3_toprf_single_byzantine_detected
+  Qsag.rss3_two_server_reconstruct
+  Qsag.rss3_client_blind_perfect_privacy
+
+end Qsag
+end
