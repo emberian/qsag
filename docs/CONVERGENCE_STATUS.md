@@ -1,8 +1,24 @@
-# Unified convergence and release acceptance
+# Convergence and construction acceptance
 
-Integration date: 2026-11-14.
+Current source reconciliation: 2026-11-14.
 
-This is the continuing acceptance tracker. A successful build is distinct from production refinement, cryptographic composition, artifact freshness, and performance acceptance. The release is not certified while the open entries below remain.
+## Current construction status
+
+The current runtime defaults to Johnson QROM; capacity-proximity tags reject. RLWE now uses 24×11-bit signed-monomial challenges and joint Q192 Gaussian rejection with M≈40. ML-DSA-44/65/87 are enabled. Earlier profile values and measurements below describe their recorded source snapshots.
+
+The compact Hem authorization API now requires locally verified child evidence bound to the exact context and proof digests. Its outer AIR is still a public commitment chain, so genuine recursive child verification remains open. Hem quorum lifecycle APIs now require private per-party RNGs; public session IDs are context, never key-generation entropy. These are source changes with targeted validation tracked separately from the old workspace acceptance.
+
+The [construction proof ledger](../PROJECT.md#construction-proof-obligations) governs current open work: actual ideal-functionality refinement, CWYZ decomposition, arbitrary-batch/multistage RBR soundness, coherent-query extraction, actual hash attack reductions, production sampler hypotheses and retry/abort privacy. A passing axiom census cannot discharge those semantic premises.
+
+The scoped Lean 4.35 check of `QromExtractionBoundary.lean` passed, including five constructively audited theorems about measured-query branch masses, response/Merkle consistency, locality and recording disturbance. This is a measured-query interface, with coherent-execution extraction still a separate instantiation task.
+
+The later named-kernel freshness run passed 19/19 x86-64 and 9/9 AArch64 kernels and certificate checks; it supersedes the historical ELF failure below. Linked-program coverage remains separate.
+
+## Recorded earlier integration snapshot
+
+The remaining sections preserve the earlier 2026-11-14 source snapshot and its acceptance records. Their PASS/FAIL labels and counts are historical, not a fresh validation of the current tree. Subsequent changes and unresolved obligations above take precedence.
+
+This was the integrated acceptance snapshot. A successful build is distinct from production refinement, cryptographic composition, artifact freshness, and performance acceptance. The release is not certified while the open entries below remain.
 
 ## Earlier audit gap disposition
 
@@ -24,9 +40,9 @@ This is the continuing acceptance tracker. A successful build is distinct from p
 
 - Production curve and sacrifice refinements; full-presentation privacy, seed/FS and concurrent composition reductions.
 - POSIX/Rust syscall-order refinement, whole-directory crash behavior, codec roundtrips, and append-host nontruncation/external-anchor composition. Crash-safe modeled transitions do not prove that every live caller follows them.
-- The live RLWE rejection parameter remains approximately 24. The proposed bimodal sampler does not preserve the extraction argument and is not an accepted replacement.
+- At this snapshot the RLWE rejection parameter was approximately 24 (current joint parameter: approximately 40). The proposed bimodal sampler does not preserve the extraction argument and is not an accepted replacement.
 - Runtime shader functional equivalence to the modeled SPIR-V subset remains open. Bit-exact GPU comparisons and telemetry are separate evidence.
-- The current binary differs from the historical certificate fixtures in all 16 x86 kernels and one of seven AArch64 kernels; five new kernels lack full historical-certificate coverage. Refresh code, decoder coverage, contracts, invariants and byte-pinned functional proofs together.
+- At this snapshot the binary differed from the historical certificate fixtures in all 16 x86 kernels and one of seven AArch64 kernels; five new kernels lack full historical-certificate coverage. Refresh code, decoder coverage, contracts, invariants and byte-pinned functional proofs together.
 - Both mock-chain programs return success, but Beam's 8 ms verification target is missed in all measured regimes. All final measured regimes also miss the 4-second proving target.
 
 The strict live-spec differential run passes 1,952/1,952 vectors with zero mismatches, 500 modeled WAL schedules, 500 Rust latch schedules, 500 quorum checks, 700 certificate cases, 1,100 field metamorphic checks, 100 RSS/party-subset metamorphic checks and 64 ledger cases. All 13 production-source mutations are detected. The crash adapter reconstructs durable contents on restart and discards the pending test-only fault flag; it does not establish POSIX crash refinement. Post-convergence findings are dispositioned below. None of these obligations is a permission barrier or delegated back to the user.
@@ -83,4 +99,4 @@ The GPU receipt domain changed to V4 and the architecture tag now states SPIR-V 
 
 The machine-readable acceptance record is [CONVERGENCE_EVIDENCE.json](CONVERGENCE_EVIDENCE.json); [CONVERGENCE_SOURCE.json](CONVERGENCE_SOURCE.json) pins the 350 source/control files checked on the primary host. The canonical sorted JSON source-map digest is `88a549fff899dc481c07bcbc91c114d8b3b529b1df9744efe8d3a1ca15868612`. Both build hosts had the same 172-file Rust source fingerprint, `3b104d9e2183809a6bafcb5383c135badbc2eff656e97bb63d7883fbf0b83562`.
 
-Cleanup completed after evidence retention: both designated warm main-library caches reproduce the final census. Temporary convergence and deputy checkouts are removed; the source tree is committed unsigned and is not pushed.
+Cleanup completed after evidence retention: both designated warm main-library caches reproduce the final census. Temporary convergence and deputy checkouts are removed; the recorded source tree was committed unsigned and was not pushed. This does not describe subsequent working-tree changes.

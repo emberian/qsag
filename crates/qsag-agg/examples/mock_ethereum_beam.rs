@@ -1,6 +1,7 @@
 //! Ethereum Beam Chain (`4.0 s` Slot) Consensus Aggregation & Optional `3f + 1` DVT Benchmark.
 //!
-//! Cleanly separates the two orthogonal layers of post-quantum Ethereum Beam Chain engineering:
+//! Separates the orthogonal layers of post-quantum Ethereum Beam Chain engineering and then
+//! composes them into a full-network slot:
 //! 1. **Section 1 — Consensus Attestation Subnet Aggregation & `< 8.0 ms` Block Verification**:
 //!    - Regional attestation subnets (`4 x 128 = 512` full-density `JortsPoseidon2` validators,
 //!      `4 x 32 = 128` `JortsPoseidon2` validators, and mixed `JortsPoseidon2` + stateless
@@ -11,6 +12,8 @@
 //!      `40 gas/nonzero` EIP-7623 floor), per-subnet aggregator & 4-subnet joint prover latency vs
 //!      the `4,000 ms` Beam slot, and multi-core & 1-core block verification (`p50`, `p99`, `min`)
 //!      against the **`< 8.0 ms` Beam Chain client verification target**.
+//!    - Builds the compact hierarchy commitment and checks it against
+//!      `VerifiedHierarchicalHemEvidence` from a full child verification.
 //! 2. **Section 2 — Optional Institutional Validator DVT Feeder (`QS-B BftShamirJorts`, `n >= 3f + 1`)**:
 //!    - Consensus aggregation (`Hem`) operates over independent validator public keys; threshold
 //!      custody is purely an optional per-validator Obol/SSV-style DVT layer protecting a single
@@ -21,16 +24,21 @@
 //!    - `M` genuinely distinct 128-validator subnets (distinct keys, shard ids and custodian
 //!      clusters under one policy registry), each signing its registry-pinned subnet statement.
 //!    - Measures the per-subnet aggregator prove (one 128-key shard, warm), the single-host joint
-//!      prove of all `M` shards, the block proposer's `M`-shard verification and
-//!      `compress_verified_hierarchical_hem` outer compression, the succinct certificate's wire
-//!      bytes and calldata gas, and multi-core / 1-core client verification.
+//!      prove of all `M` shards, the hierarchy's wire bytes and calldata gas, and multi-core /
+//!      1-core verification of all `M` child proofs (the proposer's check and a first-time
+//!      client's check alike).
+//!    - The compact commitment (`compress_verified_hierarchical_hem`) is built and checked against
+//!      `VerifiedHierarchicalHemEvidence`, off the authorization path: its outer proof certifies
+//!      the summary hash chain, not the child proofs, so it does not replace the hierarchy for a
+//!      verifier without evidence.
 //!    - Measures attester signing through the durable `FsWalEpochSink` (file record + `fsync`)
 //!      next to an in-memory WAL; the WAL directory (`QSAG_WAL_DIR`, default the system temp dir)
 //!      is reported with its filesystem type, since a `tmpfs` directory does not measure media.
 //!    - Prints the end-to-end `4,000 ms` slot budget: measured phases from this host, network
 //!      phases from an explicit model (`QSAG_BEAM_PROPOSAL_MS`, `QSAG_BEAM_GOSSIP_HOP_MS`,
-//!      `QSAG_BEAM_PROPOSER_MBPS`).
-//!    - `QSAG_BEAM_SUBNETS=16,64,128` selects the subnet counts (`0` skips the section).
+//!      `QSAG_BEAM_PROPOSER_MBPS`, `QSAG_BEAM_CLIENT_MBPS`).
+//!    - `QSAG_BEAM_SUBNETS=16,64,128` selects the subnet counts (`0` skips the section);
+//!      `QSAG_BEAM_JOINT_WORKERS=n` bounds the single-host joint prove's concurrency.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -39,9 +47,9 @@ use qsag_agg::{
     AggSigProfile, EpochWalSink, FsWalEpochSink, HemAggConfig, HierarchicalHemAggregate,
     PreparedPolicyRegistry, ShardHemPolicy, ShardHemWitness, SigError, SignerBitmap, SigningMode,
     StatelessBudgetWalSink, SuccinctHierarchicalHemAggregate, ValidatorKeypair, ValidatorSignature,
-    WhirSecurityRegime, aggregate_signatures_with_config, compress_verified_hierarchical_hem,
-    compute_policy_registry_root, hierarchical_hem_message, prove_hierarchical_hem,
-    check_hierarchical_hem_commitment, verify_hierarchical_hem, verify_hierarchical_hem_evidence,
+    WhirSecurityRegime, aggregate_signatures_with_config, check_hierarchical_hem_commitment,
+    compress_verified_hierarchical_hem, compute_policy_registry_root, hierarchical_hem_message,
+    prove_hierarchical_hem, verify_hierarchical_hem, verify_hierarchical_hem_evidence,
     verify_hierarchical_hem_prepared, verify_succinct_hierarchical_hem, with_worker_limit,
 };
 use qsag_core::belt_latch::{BeltLatchRecord, BeltLatchState, DurableWal, WalError};
@@ -774,6 +782,7 @@ struct NetworkSlotResult {
     subnets: usize,
     validators: usize,
     joint_host_ms: f64,
+    joint_workers: usize,
     hierarchy_bytes: usize,
     shard_gossip_bytes: usize,
     gas_eip2028: u64,
@@ -867,15 +876,25 @@ fn run_network_slot(
     let mut cfg = HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, seed32(0x74, epoch));
     cfg.regime = WhirSecurityRegime::BciksJohnsonQrom128;
 
+    // The joint prove runs about one shard per worker at once, and on the CPU backend each
+    // in-flight shard holds its own prover state; `QSAG_BEAM_JOINT_WORKERS` bounds that for
+    // memory-capped hosts. The per-subnet aggregator measurement is not affected.
+    let joint_workers = std::env::var("QSAG_BEAM_JOINT_WORKERS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(workers);
     let t_joint = Instant::now();
-    let agg = prove_hierarchical_hem(
-        &policies,
-        &witnesses,
-        epoch,
-        beacon_root_msg,
-        min_global,
-        &cfg,
-    )
+    let agg = with_worker_limit(joint_workers, || {
+        prove_hierarchical_hem(
+            &policies,
+            &witnesses,
+            epoch,
+            beacon_root_msg,
+            min_global,
+            &cfg,
+        )
+    })
     .expect("full-network hierarchical Hem");
     let joint_host_ms = t_joint.elapsed().as_secs_f64() * 1_000.0;
     let wire = agg.to_bytes();
@@ -987,6 +1006,7 @@ fn run_network_slot(
         subnets,
         validators: subnets * SUBNET_SIZE,
         joint_host_ms,
+        joint_workers,
         hierarchy_bytes: wire.len(),
         shard_gossip_bytes,
         gas_eip2028,
@@ -1053,6 +1073,7 @@ fn run_full_network_section(workers: usize, verify_iters: usize) {
     let proposal_ms = env_f64("QSAG_BEAM_PROPOSAL_MS", 500.0);
     let hop_ms = env_f64("QSAG_BEAM_GOSSIP_HOP_MS", 180.0);
     let proposer_mbps = env_f64("QSAG_BEAM_PROPOSER_MBPS", 1_000.0).max(1.0);
+    let client_mbps = env_f64("QSAG_BEAM_CLIENT_MBPS", 100.0).max(1.0);
     let backend = backend_label();
 
     println!(
@@ -1130,28 +1151,22 @@ fn run_full_network_section(workers: usize, verify_iters: usize) {
     for (run, &m) in subnet_counts.iter().enumerate() {
         let r = run_network_slot(&mut subnet_keys[..m], 1 + run as u64, workers, verify_iters);
         println!(
-            "\n  [Beam-Network-{m}x{SUBNET_SIZE}] validators={} | joint_host_prove = {:.0} ms | shard gossip to proposer = {:.1} KiB ({:.1} KiB/shard)",
+            "\n  [Beam-Network-{m}x{SUBNET_SIZE}] validators={} | joint_host_prove = {:.0} ms ({} workers) | shard gossip to proposer = {:.1} KiB ({:.1} KiB/shard)",
             r.validators,
             r.joint_host_ms,
+            r.joint_workers,
             r.shard_gossip_bytes as f64 / 1024.0,
             r.shard_gossip_bytes as f64 / 1024.0 / m as f64,
         );
         println!(
-            "    Proposer  : verify {m} shards p50 = {:.1} ms | compress (re-verifies + outer proof) = {:.1} ms",
-            r.proposer_verify_p50_ms, r.compress_ms,
-        );
-        println!(
-            "    Succinct  : {} B ({:.1} KiB) | {:.1}x vs raw Jorts, {:.1}x vs ML-DSA-44 | calldata {} gas (EIP-2028) / {} gas (EIP-7623 floor)",
-            r.succinct_bytes,
-            r.succinct_bytes as f64 / 1024.0,
-            (r.validators * AggSigProfile::JortsPoseidon2.raw_signature_bytes()) as f64
-                / r.succinct_bytes as f64,
-            (r.validators * ML_DSA_44_SIG_BYTES) as f64 / r.succinct_bytes as f64,
+            "    Hierarchy : {} B ({:.1} KiB) = what a first-time verifier must receive | calldata {} gas (EIP-2028) / {} gas (EIP-7623 floor)",
+            r.hierarchy_bytes,
+            r.hierarchy_bytes as f64 / 1024.0,
             r.gas_eip2028,
             r.gas_eip7623,
         );
         println!(
-            "    Client    : multi-core p50/p99 = {:.2}/{:.2} ms | 1-core p50/p99 = {:.2}/{:.2} ms | target < {BEAM_VERIFY_TARGET_MS:.1} ms: {}",
+            "    Verify    : all {m} child proofs, prepared registry: multi-core p50/p99 = {:.2}/{:.2} ms | 1-core p50/p99 = {:.2}/{:.2} ms | target < {BEAM_VERIFY_TARGET_MS:.1} ms: {}",
             r.verify_all_p50_ms,
             r.verify_all_p99_ms,
             r.verify_1c_p50_ms,
@@ -1163,6 +1178,18 @@ fn run_full_network_section(workers: usize, verify_iters: usize) {
             } else {
                 "MISSED"
             },
+        );
+        println!(
+            "    Compact   : {} B ({:.1} KiB) commitment, built in {:.1} ms; checked against evidence in {:.2} ms (evidence from a cold-registry verify: {:.1} ms)",
+            r.compact_bytes,
+            r.compact_bytes as f64 / 1024.0,
+            r.compact_build_ms,
+            r.compact_check_p50_ms,
+            r.evidence_ms,
+        );
+        println!(
+            "                commitment relation alone: {:.2} ms. It certifies the summary hash chain, not the child proofs or signatures.",
+            r.commitment_only_p50_ms,
         );
         results.push(r);
     }
@@ -1178,6 +1205,8 @@ fn run_full_network_section(workers: usize, verify_iters: usize) {
     println!("  {}", "-".repeat(66 + 13 * results.len()));
     let ingress_ms =
         |r: &NetworkSlotResult| r.shard_gossip_bytes as f64 * 8.0 / (proposer_mbps * 1_000.0);
+    let client_dl_ms =
+        |r: &NetworkSlotResult| r.hierarchy_bytes as f64 * 8.0 / (client_mbps * 1_000.0);
     type PhaseRow<'a> = (
         String,
         &'static str,
@@ -1215,9 +1244,9 @@ fn run_full_network_section(workers: usize, verify_iters: usize) {
             Box::new(ingress_ms),
         ),
         (
-            "Proposer M-shard compress (incl. re-verify)".to_string(),
+            "Proposer verifies all M child proofs (multi-core p50)".to_string(),
             "measured",
-            Box::new(|r| r.compress_ms),
+            Box::new(|r| r.verify_all_p50_ms),
         ),
         (
             "Block gossip hop".to_string(),
@@ -1225,7 +1254,12 @@ fn run_full_network_section(workers: usize, verify_iters: usize) {
             Box::new(|_| hop_ms),
         ),
         (
-            "Client succinct verify (multi-core p50)".to_string(),
+            format!("Client receives the hierarchy @ {client_mbps:.0} Mbps"),
+            "model",
+            Box::new(client_dl_ms),
+        ),
+        (
+            "Client verifies all M child proofs (multi-core p50)".to_string(),
             "measured",
             Box::new(|r| r.verify_all_p50_ms),
         ),
@@ -1257,6 +1291,11 @@ fn run_full_network_section(workers: usize, verify_iters: usize) {
     );
     for r in &results {
         print!(" {:>12.1}", r.joint_host_ms);
+    }
+    println!();
+    print!("  {:<56} {:>8}", "Off path: compact commitment build", "");
+    for r in &results {
+        print!(" {:>12.1}", r.compact_build_ms);
     }
     println!();
 }

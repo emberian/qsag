@@ -6944,8 +6944,13 @@ inductive ProdHonestHashTarget (suite : TweakableHashSuite) (params : PqHashPara
       ProdHonestHashTarget suite params sk log
         (thPreimage tagHPre sk.pkSeed zeroAdrs [(derivePublicKey suite params sk).pkRoot, e.1])
 
-/-- **Target-collision break (production).** A hash input different from an honest target with the
-    same raw hash value. -/
+/-- **Target-collision existence (production).** A hash input different from an honest target
+    with the same raw hash value. This is a structural `Prop`, not the winning event of a
+    computational collision adversary: it does not record an algorithm output, a query budget,
+    or a finite target set. In particular it is independent of `sigStar`. To obtain a primitive
+    game reduction, return the specific collision produced along the verifier walk and bound
+    its construction and target selection; do not bound this unrestricted existence event by
+    a standard adversary-success assumption. -/
 inductive ProdSmTcrBreak (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
     (log : List (List UInt8 × PqHashSig)) : Prop where
   | mk (target forged : List UInt8) (honest : ProdHonestHashTarget suite params sk log target)
@@ -7656,7 +7661,10 @@ theorem prodEufCmaWin_rejects_signed_message (suite : TweakableHashSuite) (param
 /-- **Production EUF-CMA union bound over explicit outcome counts**, in the format of
     `hypertree_euf_cma_advantage_bound`: the number of winning coins is at most the sum of the ITSR,
     target-collision and preimage event counts. In a stateful profile the experiment must respect
-    the one-time-leaf discipline on every coin. -/
+    the one-time-leaf discipline on every coin. The supplied Boolean events cover structural
+    witnesses; this theorem does not itself construct resource-bounded primitive-game
+    adversaries or establish probabilities for those events. The unrestricted `ProdSmTcrBreak`
+    predicate in particular must not be identified with such an adversary's output event. -/
 theorem production_euf_cma_advantage_bound {Ω : Type} (suite : TweakableHashSuite)
     (params : PqHashParams) (hw : params.w = 4 ∨ params.w = 16)
     (coins : List Ω) (game : Ω → ProdEufCmaOutcome) (isItsr isTcr isPre : Ω → Bool)

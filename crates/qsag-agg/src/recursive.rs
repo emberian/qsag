@@ -8,6 +8,8 @@
 //!    That proof certifies the commitment chain, not execution of the child verifiers.
 //!    Quorum verification therefore requires locally checked [`VerifiedHierarchicalHemEvidence`].
 //!    Recipients without that evidence must obtain and verify the full child hierarchy.
+//!    [`crate::recursion_census`] measures the child-verifier hash work an outer relation
+//!    would have to absorb to remove that requirement.
 
 use crate::arithmetize::{
     ROW_SUMCHECK_COEFFS, ROW_SUMCHECK_WIRE_COEFFS, build_shift_tables_ext4, eval_eq_not_last_ext4,
@@ -1036,6 +1038,13 @@ pub struct SuccinctHierarchicalHemAggregate {
 /// use qsag_agg::VerifiedHierarchicalHemEvidence;
 /// let fabricated = VerifiedHierarchicalHemEvidence {};
 /// ```
+///
+/// ```compile_fail
+/// use qsag_agg::VerifiedHierarchicalHemEvidence;
+/// fn change_context(evidence: &mut VerifiedHierarchicalHemEvidence) {
+///     evidence.minimum_global_quorums = 0;
+/// }
+/// ```
 #[derive(Clone, Debug)]
 pub struct VerifiedHierarchicalHemEvidence {
     policy_registry_root: [u8; 32],
@@ -1044,6 +1053,52 @@ pub struct VerifiedHierarchicalHemEvidence {
     minimum_global_quorums: usize,
     regime: WhirSecurityRegime,
     shards: Vec<ShardHemSummary>,
+}
+
+impl VerifiedHierarchicalHemEvidence {
+    /// Registry root the children were verified under.
+    pub fn policy_registry_root(&self) -> &[u8; 32] {
+        &self.policy_registry_root
+    }
+
+    /// Epoch floor the children were verified at.
+    pub fn epoch_floor(&self) -> u64 {
+        self.epoch_floor
+    }
+
+    /// Framed digest of the verified message.
+    pub fn message_digest(&self) -> &[u8; 32] {
+        &self.message_digest
+    }
+
+    /// Global threshold the verification enforced.
+    pub fn minimum_global_quorums(&self) -> usize {
+        self.minimum_global_quorums
+    }
+
+    /// Security regime every child proof was verified under.
+    pub fn regime(&self) -> WhirSecurityRegime {
+        self.regime
+    }
+
+    /// Verified shard summaries, in registry order.
+    pub fn summaries(&self) -> &[ShardHemSummary] {
+        &self.shards
+    }
+
+    /// Verified signer total (`None` on overflow).
+    pub fn checked_total_quorums(&self) -> Option<usize> {
+        checked_sum_usize(self.shards.iter().map(ShardHemSummary::num_signers))
+    }
+
+    /// Whether `commitment` names exactly the verified registry, summaries and chain digest.
+    /// Context (epoch, message, threshold, regime) and the outer proof are not examined;
+    /// authorization goes through [`verify_succinct_hierarchical_hem_with_regime`].
+    pub fn names_same_children(&self, commitment: &SuccinctHierarchicalHemAggregate) -> bool {
+        self.policy_registry_root == commitment.policy_registry_root
+            && self.shards == commitment.shards
+            && compact_summary_chain_digest(&self.shards) == commitment.terminal_chain_digest
+    }
 }
 
 fn hierarchy_summaries(aggregate: &HierarchicalHemAggregate) -> Vec<ShardHemSummary> {
@@ -1081,6 +1136,41 @@ pub fn verify_hierarchical_hem_evidence(
     if !regime.meets_qrom_128_floor()
         || !verify_hierarchical_hem_inner(
             policies,
+            epoch_floor,
+            message,
+            minimum_global_quorums,
+            regime,
+            aggregate,
+        )
+    {
+        return None;
+    }
+    Some(VerifiedHierarchicalHemEvidence {
+        policy_registry_root: aggregate.policy_registry_root,
+        epoch_floor,
+        message_digest: compute_framed_message_digest(message),
+        minimum_global_quorums,
+        regime,
+        shards: hierarchy_summaries(aggregate),
+    })
+}
+
+/// [`verify_hierarchical_hem_evidence`] against a [`PreparedPolicyRegistry`]: one pass over
+/// the children both verifies them and yields the evidence, without rebuilding committee roots.
+pub fn verify_hierarchical_hem_evidence_prepared(
+    registry: &PreparedPolicyRegistry,
+    epoch_floor: u64,
+    message: impl AsRef<[u8]>,
+    minimum_global_quorums: usize,
+    regime: WhirSecurityRegime,
+    aggregate: &HierarchicalHemAggregate,
+) -> Option<VerifiedHierarchicalHemEvidence> {
+    let message = message.as_ref();
+    if !regime.meets_qrom_128_floor()
+        || !verify_hierarchical_hem_with_roots(
+            &registry.policies,
+            &registry.committee_roots,
+            registry.policy_registry_root,
             epoch_floor,
             message,
             minimum_global_quorums,
@@ -1165,6 +1255,23 @@ fn jive_weighted_ff_step(
         next_chain[j] = perm_out[j] + b0 + (b1 + b1) + (b2 + b2 + b2);
     }
     (st_in, sbox, next_chain)
+}
+
+/// Recompute the terminal Poseidon2 chain digest of `shards` directly.
+///
+/// This is the value the outer proof of a [`SuccinctHierarchicalHemAggregate`] certifies: a
+/// deterministic function of the public summaries, costing two permutations per shard. A
+/// verifier holding the summaries can therefore obtain it without the outer proof.
+pub fn compact_summary_chain_digest(shards: &[ShardHemSummary]) -> [Goldilocks; 4] {
+    let mut chain = [Goldilocks::ZERO; 4];
+    for summary in shards {
+        let hdr = digest32_to_u32_limbs(&shard_summary_header_digest(summary));
+        let prf = digest32_to_u32_limbs(&summary.child_proof_digest);
+        for limbs in [hdr, prf] {
+            chain = jive_weighted_ff_step(chain, limbs).2;
+        }
+    }
+    chain
 }
 
 #[inline]
@@ -1362,6 +1469,24 @@ impl SuccinctHierarchicalHemAggregate {
         checked_sum_usize(self.shards.iter().map(ShardHemSummary::num_signers))
     }
 
+    /// WHIR schedule of the outer chain proof under `regime` (`None` for an invalid shard count).
+    pub fn outer_schedule(&self, regime: WhirSecurityRegime) -> Option<WhirSchedule> {
+        let (_, log_rows) = outer_chain_num_rows(self.shards.len())?;
+        Some(regime.schedule(LOG_TRACE_COLS + log_rows))
+    }
+
+    /// Merkle hash work of verifying the outer chain proof under `regime`.
+    pub fn outer_merkle_census(
+        &self,
+        regime: WhirSecurityRegime,
+    ) -> Option<crate::recursion_census::MerkleHashCensus> {
+        crate::recursion_census::whir_opening_merkle_census(
+            &self.outer_schedule(regime)?,
+            &self.outer_proof.witness_comm,
+            &self.outer_proof.pcs_opening,
+        )
+    }
+
     /// Serialize to canonical self-delimiting wire bytes (`SUCCINCT_HIERARCHICAL_HEM_WIRE_MAGIC`).
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(112 + self.shards.len().saturating_mul(192) + 16_384);
@@ -1555,12 +1680,30 @@ pub fn compress_verified_hierarchical_hem(
     }
     let min_global_u64 =
         u64::try_from(minimum_global_quorums).map_err(|_| HemAggError::InvalidShardConfig)?;
+    prove_outer_summary_chain(
+        aggregate.policy_registry_root,
+        hierarchy_summaries(aggregate),
+        epoch_floor,
+        compute_framed_message_digest(msg_bytes),
+        min_global_u64,
+        blinding_seed,
+    )
+}
+
+/// Outer chain prover over public summaries. It takes no child proof: the relation it proves
+/// is the summary hash chain alone, which is why callers must gate it on child verification.
+fn prove_outer_summary_chain(
+    policy_registry_root: [u8; 32],
+    shards: Vec<ShardHemSummary>,
+    epoch_floor: u64,
+    expected_msg_digest: [u8; 32],
+    min_global_u64: u64,
+    blinding_seed: [u8; 32],
+) -> Result<SuccinctHierarchicalHemAggregate, HemAggError> {
     let (num_rows, log_rows) =
-        outer_chain_num_rows(aggregate.shards.len()).ok_or(HemAggError::InvalidShardConfig)?;
+        outer_chain_num_rows(shards.len()).ok_or(HemAggError::InvalidShardConfig)?;
     let num_vars = LOG_TRACE_COLS + log_rows;
     let schedule = WhirSecurityRegime::BciksJohnsonQrom128.schedule(num_vars);
-
-    let shards = hierarchy_summaries(aggregate);
 
     // Build the `num_rows x 256` outer commitment-chain trace.
     let active_rows = 2 * shards.len();
@@ -1597,7 +1740,7 @@ pub fn compress_verified_hierarchical_hem(
         let row_seed = encode_multi_frame(&[
             b"QSAG.SHM.OUTER.IDLE.BLIND/v1",
             &blinding_seed,
-            &aggregate.policy_registry_root,
+            &policy_registry_root,
             &t_bytes,
         ]);
         shake256_into(&row_seed, &mut stream);
@@ -1632,13 +1775,12 @@ pub fn compress_verified_hierarchical_hem(
     let salt_seed = poseidon2_hash32(&encode_multi_frame(&[
         b"QSAG.SHM.OUTER.SALT/v1",
         &blinding_seed,
-        &aggregate.policy_registry_root,
+        &policy_registry_root,
     ]));
     let (witness_comm, prover_state) = whir_commit_owned_with_schedule(flat, &salt_seed, &schedule);
 
-    let expected_msg_digest = compute_framed_message_digest(msg_bytes);
     let mut transcript = init_outer_chain_transcript(
-        &aggregate.policy_registry_root,
+        &policy_registry_root,
         epoch_floor,
         &expected_msg_digest,
         min_global_u64,
@@ -1815,7 +1957,7 @@ pub fn compress_verified_hierarchical_hem(
     let pcs_opening = whir_open(&prover_state, &point, v_star, &mut transcript);
 
     Ok(SuccinctHierarchicalHemAggregate {
-        policy_registry_root: aggregate.policy_registry_root,
+        policy_registry_root,
         shards,
         terminal_chain_digest,
         outer_proof: OuterHemChainProof {
@@ -1872,9 +2014,39 @@ pub fn check_hierarchical_hem_commitment_with_regime(
     expected_regime: WhirSecurityRegime,
     aggregate: &SuccinctHierarchicalHemAggregate,
 ) -> bool {
+    if !valid_policies(policies) {
+        return false;
+    }
+    let committee_roots = compute_committee_roots(policies);
+    let expected_registry_root =
+        compute_policy_registry_root_with_roots(policies, &committee_roots);
+    check_hierarchical_hem_commitment_with_roots(
+        policies,
+        &committee_roots,
+        expected_registry_root,
+        epoch_floor,
+        message.as_ref(),
+        minimum_global_quorums,
+        expected_regime,
+        aggregate,
+    )
+}
+
+/// Commitment check against an already validated registry and its committee roots.
+#[allow(clippy::too_many_arguments)]
+fn check_hierarchical_hem_commitment_with_roots(
+    policies: &[ShardHemPolicy],
+    committee_roots: &[[u8; 32]],
+    expected_registry_root: [u8; 32],
+    epoch_floor: u64,
+    msg_bytes: &[u8],
+    minimum_global_quorums: usize,
+    expected_regime: WhirSecurityRegime,
+    aggregate: &SuccinctHierarchicalHemAggregate,
+) -> bool {
     if !expected_regime.meets_qrom_128_floor()
-        || !valid_policies(policies)
         || aggregate.shards.len() != policies.len()
+        || committee_roots.len() != policies.len()
         || minimum_global_quorums == 0
     {
         return false;
@@ -1891,13 +2063,9 @@ pub fn check_hierarchical_hem_commitment_with_regime(
         return false;
     }
 
-    let committee_roots = compute_committee_roots(policies);
-    let expected_registry_root =
-        compute_policy_registry_root_with_roots(policies, &committee_roots);
     if aggregate.policy_registry_root != expected_registry_root {
         return false;
     }
-    let msg_bytes = message.as_ref();
     let expected_msg_digest = compute_framed_message_digest(msg_bytes);
 
     let mut counts_u64 = Vec::with_capacity(policies.len());
@@ -2064,6 +2232,8 @@ pub fn check_hierarchical_hem_commitment(
 /// Verify a compact hierarchy against independently validated child evidence.
 ///
 /// Matching includes every summary field and the digest of canonical child-proof bytes.
+/// The terminal chain digest is also recomputed from the evidence's own summaries, so the
+/// authorization decision does not rest on the outer proof alone.
 /// The evidence is tied to the exact security regime and requested authorization context;
 /// a commitment proof alone can never satisfy this API.
 #[allow(clippy::too_many_arguments)]
@@ -2077,17 +2247,60 @@ pub fn verify_succinct_hierarchical_hem_with_regime(
     evidence: &VerifiedHierarchicalHemEvidence,
 ) -> bool {
     let message = message.as_ref();
-    if evidence.policy_registry_root != aggregate.policy_registry_root
-        || evidence.epoch_floor != epoch_floor
-        || evidence.message_digest != compute_framed_message_digest(message)
-        || evidence.minimum_global_quorums != minimum_global_quorums
-        || evidence.regime != expected_regime
-        || evidence.shards != aggregate.shards
-    {
-        return false;
-    }
-    check_hierarchical_hem_commitment_with_regime(
+    evidence_authorizes(
+        evidence,
+        epoch_floor,
+        message,
+        minimum_global_quorums,
+        expected_regime,
+        aggregate,
+    ) && check_hierarchical_hem_commitment_with_regime(
         policies,
+        epoch_floor,
+        message,
+        minimum_global_quorums,
+        expected_regime,
+        aggregate,
+    )
+}
+
+fn evidence_authorizes(
+    evidence: &VerifiedHierarchicalHemEvidence,
+    epoch_floor: u64,
+    message: &[u8],
+    minimum_global_quorums: usize,
+    expected_regime: WhirSecurityRegime,
+    aggregate: &SuccinctHierarchicalHemAggregate,
+) -> bool {
+    evidence.epoch_floor == epoch_floor
+        && evidence.message_digest == compute_framed_message_digest(message)
+        && evidence.minimum_global_quorums == minimum_global_quorums
+        && evidence.regime == expected_regime
+        && evidence.names_same_children(aggregate)
+}
+
+/// [`verify_succinct_hierarchical_hem_with_regime`] against a [`PreparedPolicyRegistry`].
+pub fn verify_succinct_hierarchical_hem_prepared(
+    registry: &PreparedPolicyRegistry,
+    epoch_floor: u64,
+    message: impl AsRef<[u8]>,
+    minimum_global_quorums: usize,
+    expected_regime: WhirSecurityRegime,
+    aggregate: &SuccinctHierarchicalHemAggregate,
+    evidence: &VerifiedHierarchicalHemEvidence,
+) -> bool {
+    let message = message.as_ref();
+    evidence_authorizes(
+        evidence,
+        epoch_floor,
+        message,
+        minimum_global_quorums,
+        expected_regime,
+        aggregate,
+    ) && check_hierarchical_hem_commitment_with_roots(
+        &registry.policies,
+        &registry.committee_roots,
+        registry.policy_registry_root,
         epoch_floor,
         message,
         minimum_global_quorums,
@@ -2735,21 +2948,74 @@ mod tests {
             compress_verified_hierarchical_hem(&policies, epoch, msg, 6, &full, cfg.blinding_seed)
                 .unwrap();
 
-        let evidence = verify_hierarchical_hem_evidence(
-            &policies, epoch, msg, 6, cfg.regime, &full,
-        ).expect("full child proofs establish local evidence");
+        let evidence =
+            verify_hierarchical_hem_evidence(&policies, epoch, msg, 6, cfg.regime, &full)
+                .expect("full child proofs establish local evidence");
+        {
+            let registry = PreparedPolicyRegistry::new(policies.clone()).unwrap();
+            let prepared = verify_hierarchical_hem_evidence_prepared(
+                &registry, epoch, msg, 6, cfg.regime, &full,
+            )
+            .expect("prepared registry yields the same evidence");
+            assert_eq!(prepared.summaries(), evidence.summaries());
+            assert_eq!(prepared.policy_registry_root(), evidence.policy_registry_root());
+            assert_eq!(prepared.message_digest(), evidence.message_digest());
+            assert_eq!(
+                (prepared.epoch_floor(), prepared.minimum_global_quorums(), prepared.regime()),
+                (epoch, 6, cfg.regime)
+            );
+        }
         assert!(check_hierarchical_hem_commitment(
             &policies, epoch, msg, 6, &succinct,
         ));
+
+        // The outer proof certifies a value any holder of the summaries can recompute.
+        assert_eq!(
+            compact_summary_chain_digest(&succinct.shards),
+            succinct.terminal_chain_digest
+        );
+
+        // Merkle hash work of the real child verifiers against that of the outer proof.
+        let child = crate::recursion_census::hierarchy_merkle_census(&full).unwrap();
+        let outer = succinct.outer_merkle_census(cfg.regime).unwrap();
+        assert_eq!(child.whir_openings, 3);
+        assert_eq!(outer.whir_openings, 1);
+        let child_perms = child.keccak_permutations().unwrap();
+        std::eprintln!(
+            "recursion census: child {child:?} keccak={child_perms} num_vars>={:?} rate8={:?}",
+            child.bitwise_keccak_num_vars(),
+            child.algebraic_rate8_permutations(),
+        );
+        std::eprintln!(
+            "recursion census: outer {outer:?} keccak={:?} num_vars>={:?}",
+            outer.keccak_permutations(),
+            outer.bitwise_keccak_num_vars(),
+        );
+        assert!(child_perms > outer.keccak_permutations().unwrap());
 
         // Even a correctly committed full hierarchy cannot mint evidence when a child
         // fails verification. Keep the outer digest internally consistent in this case.
         full.shards[0].proof.committee_root[0] ^= 1;
         full.root_commitment = root_commitment(&full.policy_registry_root, &full.shards);
-        assert!(verify_hierarchical_hem_evidence(
-            &policies, epoch, msg, 6, cfg.regime, &full,
-        ).is_none());
+        assert!(
+            verify_hierarchical_hem_evidence(&policies, epoch, msg, 6, cfg.regime, &full).is_none()
+        );
         // Evidence owns its snapshot: mutating the source after validation cannot change it.
+        assert_eq!(evidence.checked_total_quorums(), Some(6));
+        assert_eq!(evidence.summaries(), succinct.shards.as_slice());
+        assert!(evidence.names_same_children(&succinct));
+        let registry = PreparedPolicyRegistry::new(policies.clone()).unwrap();
+        // The source hierarchy is now invalid: the prepared path refuses it as well.
+        assert!(
+            verify_hierarchical_hem_evidence_prepared(&registry, epoch, msg, 6, cfg.regime, &full)
+                .is_none()
+        );
+        assert!(verify_succinct_hierarchical_hem_prepared(
+            &registry, epoch, msg, 6, cfg.regime, &succinct, &evidence,
+        ));
+        assert!(!verify_succinct_hierarchical_hem_prepared(
+            &registry, epoch, msg, 5, cfg.regime, &succinct, &evidence,
+        ));
         assert_eq!(succinct.checked_total_quorums(), Some(6));
         assert!(verify_succinct_hierarchical_hem(
             &policies, epoch, msg, 6, &succinct, &evidence
@@ -2835,6 +3101,96 @@ mod tests {
         bad_col.outer_proof.col_evals[OUTER_COL_NEXT_CHAIN] += GoldilocksExt4::ONE;
         assert!(!verify_succinct_hierarchical_hem(
             &policies, epoch, msg, 6, &bad_col, &evidence
+        ));
+    }
+
+    /// The outer relation is satisfiable for summaries that no child proof backs: the
+    /// commitment check accepts them, and only child-verification evidence refuses them.
+    #[test]
+    fn commitment_relation_accepts_unbacked_summaries_and_evidence_gate_refuses_them() {
+        let epoch = 41;
+        let msg = b"no child proof exists for this message";
+        let mut policies = Vec::new();
+        let mut region_keys = Vec::new();
+        for region in 0..2u64 {
+            let keys: Vec<_> = (0..2)
+                .map(|i| {
+                    ValidatorKeypair::keygen_deterministic(
+                        AggSigProfile::JortsPoseidon2,
+                        &[region as u8 + 0x61; 32],
+                        i,
+                    )
+                })
+                .collect();
+            policies.push(ShardHemPolicy {
+                shard_id: region,
+                custodian_cluster: [region as u8 + 0x20; 32],
+                quorum_keys: keys.iter().map(|k| k.pk).collect(),
+                minimum_quorums: 2,
+            });
+            region_keys.push(keys);
+        }
+        let committee_roots = compute_committee_roots(&policies);
+        let registry_root = compute_policy_registry_root(&policies);
+        let message_digest = compute_framed_message_digest(msg);
+
+        // Nobody signed. Summaries claim full participation and name arbitrary child digests.
+        let unbacked: Vec<ShardHemSummary> = policies
+            .iter()
+            .zip(&committee_roots)
+            .map(|(p, c_root)| ShardHemSummary {
+                shard_id: p.shard_id,
+                custodian_cluster: p.custodian_cluster,
+                shard_quorum_set_root: *c_root,
+                minimum_quorums: 2,
+                epoch_floor: epoch,
+                message_digest,
+                bitmap: SignerBitmap::from_active_indices(2, &[0, 1]).unwrap(),
+                child_proof_digest: [0xEE; 32],
+            })
+            .collect();
+        let forged =
+            prove_outer_summary_chain(registry_root, unbacked, epoch, message_digest, 4, [9; 32])
+                .unwrap();
+        assert!(check_hierarchical_hem_commitment(&policies, epoch, msg, 4, &forged));
+        let wire = forged.to_bytes();
+        assert_eq!(
+            SuccinctHierarchicalHemAggregate::from_bytes_canonical(&wire).unwrap(),
+            forged
+        );
+
+        // Evidence from a real, fully signed hierarchy over the same registry and context
+        // names different children, so the authorization path refuses the forged commitment.
+        let bitmaps: Vec<_> = (0..2)
+            .map(|_| SignerBitmap::from_active_indices(2, &[0, 1]).unwrap())
+            .collect();
+        let mut region_sigs = Vec::new();
+        for (p, keys) in policies.iter().zip(region_keys.iter_mut()) {
+            let region_msg = hierarchical_hem_message(&registry_root, p, epoch, msg);
+            let sigs: Vec<_> = keys
+                .iter_mut()
+                .map(|kp| kp.sign_stateful_for_unit_test(&region_msg, 0).unwrap())
+                .collect();
+            region_sigs.push(sigs);
+        }
+        let witnesses: Vec<_> = bitmaps
+            .iter()
+            .zip(&region_sigs)
+            .map(|(bitmap, signatures)| ShardHemWitness { bitmap, signatures })
+            .collect();
+        let cfg = HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, [0x78; 32]);
+        let full = prove_hierarchical_hem(&policies, &witnesses, epoch, msg, 4, &cfg).unwrap();
+        let evidence =
+            verify_hierarchical_hem_evidence(&policies, epoch, msg, 4, cfg.regime, &full).unwrap();
+        assert!(!evidence.names_same_children(&forged));
+        assert!(!verify_succinct_hierarchical_hem(
+            &policies, epoch, msg, 4, &forged, &evidence
+        ));
+        let honest =
+            compress_verified_hierarchical_hem(&policies, epoch, msg, 4, &full, cfg.blinding_seed)
+                .unwrap();
+        assert!(verify_succinct_hierarchical_hem(
+            &policies, epoch, msg, 4, &honest, &evidence
         ));
     }
 

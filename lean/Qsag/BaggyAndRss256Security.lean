@@ -4,7 +4,7 @@ module
 
 Constructive (`0 Classical.choice`) formalization of 256-bit `WOTS+C` extraction, active-malicious
 `Rss256` field/transcript/barrier security, and `Baggy` `Waistband` canopy, MAC-enrolled cache,
-crash-resilient durable release, and full concrete `FORS+C` / `H_msg` / hypertree EUF-CMA security:
+crash-resilient durable release, and an upper-hypertree reduction with an explicit bottom-layer residual:
 
 1. **256-Bit `WOTS+C` (`w = 4, chains = 128, target_sum = 192`)**:
    - MSB-first dibit packing, strict constant-sum incomparability (`wotsC256_strict_incomparability`),
@@ -17,7 +17,9 @@ crash-resilient durable release, and full concrete `FORS+C` / `H_msg` / hypertre
 4. Crash-visible reservation/write/sync/release transitions, plus adaptive Rust two-pass
    `product_proof` (`ROUND1` + `ROUND2`) Frobenius-basis tensor folding & masked cross-product
    barrier soundness (`Rss256ProductProof.rss256_two_pass_product_proof_sound` and
-   `rss256_inline_wave_two_pass_product_proof_sound`). Concrete full Baggy EUF-CMA is formalized below.
+   `rss256_inline_wave_two_pass_product_proof_sound`). The upper reduction may return
+   `bottomLayerReachedGenuineRoot`; closing that case requires the bottom WOTS/FORS/index
+   derivation reduction and primitive game bounds.
 -/
 
 public import Qsag.Constructive

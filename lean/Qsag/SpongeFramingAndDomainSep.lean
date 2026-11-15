@@ -762,14 +762,15 @@ theorem witness_cross_domain_pair :
   ⟨136, domShake256, domCshake256, [0x01], [0x02], rfl, rfl,
    by decide, ⟨by decide, by decide⟩, ⟨by decide, by decide⟩, by decide⟩
 
+/-- `cshakePrefix_prefix_free` applied at the Canopy leaf tag: its hypotheses are jointly
+dischargeable. The equation forces repeated components, which the positional
+`#verify_inhabited` matcher cannot assign, so the application itself is the witness. -/
 theorem witness_cshakePrefix_canopy :
-    ∃ (N₁ S₁ N₂ S₂ m₁ m₂ : List UInt8),
-      8 * N₁.length < 256 ^ 255 ∧ 8 * S₁.length < 256 ^ 255 ∧
-      8 * N₂.length < 256 ^ 255 ∧ 8 * S₂.length < 256 ^ 255 ∧
-      cshakePrefix N₁ S₁ ++ m₁ = cshakePrefix N₂ S₂ ++ m₂ :=
-  ⟨[], qsagTagCanopyLeaf, [], qsagTagCanopyLeaf, [0x01], [0x01],
-   bitlen_lt_sp800_bound (by decide), bitlen_lt_sp800_bound (by decide),
-   bitlen_lt_sp800_bound (by decide), bitlen_lt_sp800_bound (by decide), rfl⟩
+    ([] : List UInt8) = [] ∧ qsagTagCanopyLeaf = qsagTagCanopyLeaf ∧ ([0x01] : List UInt8) = [0x01] :=
+  cshakePrefix_prefix_free (N₁ := []) (S₁ := qsagTagCanopyLeaf) (N₂ := []) (S₂ := qsagTagCanopyLeaf)
+    (m₁ := [0x01]) (m₂ := [0x01])
+    (bitlen_lt_sp800_bound (by decide)) (bitlen_lt_sp800_bound (by decide))
+    (bitlen_lt_sp800_bound (by decide)) (bitlen_lt_sp800_bound (by decide)) rfl
 
 theorem witness_keccak_midstate_canopy :
     ∃ (S msg : List UInt8) (outLen : Nat),
@@ -785,7 +786,7 @@ theorem witness_keccak_midstate_canopy :
 
 #verify_inhabited Qsag.pad10star1_injective Qsag.witness_pad10star1_valid_domain
 #verify_inhabited Qsag.absorbPayload_cross_domain_disjoint Qsag.witness_cross_domain_pair
-#verify_inhabited Qsag.cshakePrefix_prefix_free Qsag.witness_cshakePrefix_canopy
+#verify_constructive Qsag.witness_cshakePrefix_canopy
 #verify_inhabited Qsag.keccak_cshake256_precomputed_midstate_eq Qsag.witness_keccak_midstate_canopy
 
 #tooth_pair Qsag.pad10star1_injective vs Qsag.tooth_zero_domByte_pad10star1_collides

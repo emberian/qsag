@@ -2224,6 +2224,7 @@ fn e2e_hem_quorum_switch_2of3_to_3of5_and_untrusted_public_aggregate() {
         0,
     );
     let pk0_hex_before = json_member(&dir.read("v0.pk"), "validator_public_key");
+    let original_latch_seed = json_member(&dir.read("v0-2of3/quorum-meta.json"), "latch_seed");
 
     expect(
         &[
@@ -2281,6 +2282,9 @@ fn e2e_hem_quorum_switch_2of3_to_3of5_and_untrusted_public_aggregate() {
         "dynamic (2,3)->(3,5) quorum switch must preserve the exact 65-byte validator pubkey"
     );
 
+    let reshare_latch_seed = json_member(&dir.read("v0-3of5/quorum-meta.json"), "latch_seed");
+    assert_ne!(reshare_latch_seed, original_latch_seed);
+
     // Proactive security: retired (2, 3) vault is wiped & refused (exit 4), and < 3 signers
     // on the new (3, 5) vault cannot sign (exit 4)!
     expect(
@@ -2327,6 +2331,9 @@ fn e2e_hem_quorum_switch_2of3_to_3of5_and_untrusted_public_aggregate() {
         ],
         0,
     );
+    let refreshed_latch_seed = json_member(&dir.read("v0-3of5/quorum-meta.json"), "latch_seed");
+    assert_ne!(refreshed_latch_seed, reshare_latch_seed,
+        "refresh must rotate persisted latch authority as well as secret shares");
     expect(
         &[
             "quorum",

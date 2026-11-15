@@ -36,7 +36,7 @@
 //!   one party per thread. [`CommitteePartitionedJorts`] and [`BftShamirJorts`] drive all
 //!   custodians in one process and exist for tests and measurements.
 //! * [`stage_committee_partitioned`] and [`stage_bft_shamir`] are deterministic single-seed
-//!   test and measurement helpers. Deployment dealerless distributed MPC staging and proactive
+//!   test and measurement helpers. In-process dealerless MPC staging and proactive
 //!   share refresh are provided in [`crate::dealerless_staging`]
 //!   ([`crate::dealerless_staging::stage_committee_partitioned_dealerless_mpc`],
 //!   [`crate::dealerless_staging::stage_bft_shamir_dealerless_mpc`],

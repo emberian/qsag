@@ -15,7 +15,7 @@ use qsag_fts::{
     LeafBurnPersistence, ParallelSeededDkgConfig, ParallelSeededDkgOutput,
     ParallelSeededDkgProducts, ParallelSeededDkgRound1State, ParallelSeededDkgSharePackage,
     ParallelSeededError, ParallelSeededMerkleLayers, ParallelSeededParams,
-    ParallelSeededPartyShare, ParallelSeededPublicKey, ParallelSeededSignRequest,
+    ParallelSeededPublicKey, ParallelSeededSignRequest,
     ParallelSeededSignResult, ParallelSeededSignSession, ParallelSeededSignature,
     assemble_parallel_seeded_public_key, finalize_parallel_seeded_dkg_party,
 };
@@ -378,7 +378,9 @@ impl ParallelSeededDkgProducts for PairwiseBeaverProductChannel {
 pub struct DealerlessThresholdFtsSetup {
     pub pk: ParallelSeededPublicKey,
     pub public_tree_layers: ParallelSeededMerkleLayers,
-    shares: Vec<ParallelSeededPartyShare>,
+    /// Activated DKG outputs. Each key share stays inside its output and is reached only through
+    /// `ParallelSeededDkgOutput::share_mut`.
+    outputs: Vec<ParallelSeededDkgOutput>,
     roster: Vec<u16>,
 }
 
@@ -544,8 +546,11 @@ impl DealerlessThresholdFtsSetup {
         }
 
         let pk_seed_bytes = outputs[0].pk_seed_bytes;
-        let mut shares: Vec<ParallelSeededPartyShare> =
-            outputs.into_iter().map(|o| o.share).collect();
+        // This driver never consumes the DKG's output Beaver triples: drop (and so wipe) them
+        // here, where the outputs were previously consumed for their shares.
+        for out in &mut outputs {
+            out.beaver_triples.clear();
+        }
 
         let (pk, public_tree_layers) = if let Some((cached_pk, cached_layers)) = cached_tree {
             if cached_pk.pk_seed_bytes != pk_seed_bytes || cached_layers.is_empty() {
@@ -569,9 +574,12 @@ impl DealerlessThresholdFtsSetup {
                     &[&dkg_session, &epoch.to_be_bytes()],
                 );
                 let mut sessions = Vec::with_capacity(parties);
-                for sh in &mut shares {
+                for out in &mut outputs {
                     sessions.push(ParallelSeededSignSession::begin_leaf_preparation(
-                        sh, epoch, leaf_sid, &roster,
+                        out.share_mut(),
+                        epoch,
+                        leaf_sid,
+                        &roster,
                     )?);
                 }
                 match drive_sign_sessions(&mut sessions)? {
@@ -588,7 +596,7 @@ impl DealerlessThresholdFtsSetup {
         Ok(Self {
             pk,
             public_tree_layers,
-            shares,
+            outputs,
             roster,
         })
     }
@@ -621,9 +629,9 @@ impl DealerlessThresholdFtsSetup {
             siblings: &siblings,
         };
 
-        let mut sessions = Vec::with_capacity(self.shares.len());
-        for sh in &mut self.shares {
-            sessions.push(ParallelSeededSignSession::begin(sh, &req, persistence)?);
+        let mut sessions = Vec::with_capacity(self.outputs.len());
+        for out in &mut self.outputs {
+            sessions.push(ParallelSeededSignSession::begin(out.share_mut(), &req, persistence)?);
         }
         match drive_sign_sessions(&mut sessions)? {
             ParallelSeededSignResult::Signature(sig) => Ok(sig),

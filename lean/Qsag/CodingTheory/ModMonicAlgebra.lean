@@ -13,6 +13,7 @@ Constructive quotient ring `ModMonic M` (`R[W]/(M(W))` for monic `M` of degree `
 -/
 
 public import Qsag.CodingTheory.SylvesterDeriv
+import all Qsag.CodingTheory.UniversalHenselLift
 import all Qsag.CodingTheory.PolyMv3
 import all Qsag.CodingTheory.DynamicGcdSplit
 import all Qsag.CodingTheory.MatrixDet
@@ -461,6 +462,155 @@ theorem sylResDeriv_eq_zero_of_common_factor_ge_two {m N d_G : Nat}
   apply ModMonic.modInl_inj M2
   rw [hStep1, hStep2]
 
+/-! ## Polynomial coordinates for common roots -/
+
+/-- Homogeneous evaluation padded to degree `l.length`. The extra denominator factor
+keeps the recursion uniform, including the zero and constant polynomials. -/
+def homEvalCoeffs (a b : R) : List R → R
+  | [] => zero
+  | c :: cs => add (mul c (CRing.npow b (cs.length + 1))) (mul a (homEvalCoeffs a b cs))
+
+omit [DecidableEq R] in
+/-- Clearing denominators uses a polynomial identity, so it also holds in quotient rings. -/
+theorem homEvalCoeffs_mul (z b : R) : ∀ l : List R,
+    homEvalCoeffs (mul z b) b l = mul (CRing.npow b l.length) (evalCoeffs l z)
+  | [] => by
+    show zero = mul one zero
+    rw [LawfulCommRing.mul_zero]
+  | c :: cs => by
+    simp only [homEvalCoeffs, List.length_cons]
+    rw [homEvalCoeffs_mul z b cs]
+    show add (mul c (mul (CRing.npow b cs.length) b))
+      (mul (mul z b) (mul (CRing.npow b cs.length) (evalCoeffs cs z))) =
+      mul (mul (CRing.npow b cs.length) b) (add c (mul z (evalCoeffs cs z)))
+    constructive_ring
+
+omit [DecidableEq R] in
+theorem map_homEvalCoeffs {S : Type} [LawfulCommRing S]
+    (φ : RingHom R S) (a b : R) : ∀ l : List R,
+    φ.toFun (homEvalCoeffs a b l) = homEvalCoeffs (φ.toFun a) (φ.toFun b) (l.map φ.toFun)
+  | [] => φ.map_zero
+  | c :: cs => by
+    simp only [homEvalCoeffs, List.map_cons, List.length_map]
+    rw [φ.map_add, φ.map_mul, φ.map_mul, RingHom.map_npow, map_homEvalCoeffs φ a b cs]
+
+/-- Naturality plus denominator clearing; normalization of mapped coefficient lists is unnecessary. -/
+theorem homEvalCoeffs_map_root {S : Type} [LawfulCommRing S]
+    (φ : RingHom R S) (a b : R) (z : S) (h : φ.toFun a = mul z (φ.toFun b)) (P : UPoly R) :
+    φ.toFun (homEvalCoeffs a b P.coeffs) =
+      mul (CRing.npow (φ.toFun b) P.coeffs.length) (eval₂ φ z P) := by
+  rw [map_homEvalCoeffs, h, homEvalCoeffs_mul, List.length_map]
+  rfl
+
+/-- Clearing an invertible denominator preserves precisely the zero constraints,
+even when the target quotient has zero divisors. -/
+theorem homEvalCoeffs_map_zero_iff {S : Type} [LawfulCommRing S]
+    (φ : RingHom R S) (a b : R) (z b_inv : S)
+    (hcoord : φ.toFun a = mul z (φ.toFun b)) (hunit : mul b_inv (φ.toFun b) = one)
+    (P : UPoly R) :
+    φ.toFun (homEvalCoeffs a b P.coeffs) = zero ↔ eval₂ φ z P = zero := by
+  have hpow : ∀ n, mul (CRing.npow b_inv n) (CRing.npow (φ.toFun b) n) = one := by
+    intro n; induction n with
+    | zero => exact LawfulCommRing.one_mul one
+    | succ n ih =>
+      have hEq : mul (mul (CRing.npow b_inv n) b_inv) (mul (CRing.npow (φ.toFun b) n) (φ.toFun b)) =
+          mul (mul (CRing.npow b_inv n) (CRing.npow (φ.toFun b) n)) (mul b_inv (φ.toFun b)) := by
+        constructive_ring
+      change mul (mul (CRing.npow b_inv n) b_inv) (mul (CRing.npow (φ.toFun b) n) (φ.toFun b)) = one
+      rw [hEq, ih, hunit, LawfulCommRing.one_mul]
+  rw [homEvalCoeffs_map_root φ a b z hcoord P]
+  constructor
+  · intro h
+    have hcancel := congrArg (mul (CRing.npow b_inv P.coeffs.length)) h
+    rwa [← LawfulCommRing.mul_assoc, hpow, LawfulCommRing.one_mul,
+      LawfulCommRing.mul_zero] at hcancel
+  · intro h
+    rw [h, LawfulCommRing.mul_zero]
+
+omit [DecidableEq R] in
+/-- Degree control depends only on the input coefficients and the two resultant coordinates. -/
+theorem degFn_homEvalCoeffs_le {w : R → Nat} (hw : DegFn w) (hw1 : w one = 0)
+    (a b : R) (A B : Nat) (ha : w a ≤ B) (hb : w b ≤ B) :
+    ∀ l : List R, (∀ c ∈ l, w c ≤ A) → w (homEvalCoeffs a b l) ≤ A + l.length * B
+  | [], _ => by show w zero ≤ A + 0 * B; rw [hw.zero]; omega
+  | c :: cs, hc => by
+    have hhead := hc c (.head _)
+    have htail := degFn_homEvalCoeffs_le hw hw1 a b A B ha hb cs (fun x hx => hc x (.tail _ hx))
+    have hpow := degFn_npow_le hw hw1 b B hb (cs.length + 1)
+    have hleft := hw.mul_le c (CRing.npow b (cs.length + 1))
+    have hright := hw.mul_le a (homEvalCoeffs a b cs)
+    have hadd := hw.add_le (mul c (CRing.npow b (cs.length + 1))) (mul a (homEvalCoeffs a b cs))
+    change w (add (mul c (CRing.npow b (cs.length + 1))) (mul a (homEvalCoeffs a b cs))) ≤ _
+    rw [List.length_cons, Nat.succ_mul]
+    rw [Nat.succ_mul] at hpow
+    omega
+
+/-- Weighted polynomial-degree form of the denominator-clearing bound. -/
+theorem degFn_homEvalCoeffs_poly_le {w : R → Nat} (hw : DegFn w) (hw1 : w one = 0)
+    (a b : R) (B : Nat) (ha : w a ≤ B) (hb : w b ≤ B) (P : UPoly R) :
+    w (homEvalCoeffs a b P.coeffs) ≤ P.wdeg w 1 + (P.natDeg + 1) * B := by
+  have hc : ∀ c ∈ P.coeffs, w c ≤ P.wdeg w 1 := by
+    intro c hmem
+    obtain ⟨k, hk⟩ := List.getElem?_of_mem hmem
+    have hget : coeffAt P.coeffs k = c := by simp [coeffAt, List.getD, hk]
+    if h0 : c = zero then rw [h0, hw.zero]; exact Nat.zero_le _
+    else
+      have hne : coeffAt P.coeffs k ≠ zero := by rwa [hget]
+      have hdeg := le_wdeg w 1 P k hne
+      rw [hget] at hdeg
+      omega
+  have hlen : P.coeffs.length ≤ P.natDeg + 1 := by unfold natDeg; omega
+  exact Nat.le_trans (degFn_homEvalCoeffs_le hw hw1 a b _ B ha hb P.coeffs hc)
+    (Nat.add_le_add_left (Nat.mul_le_mul_right B hlen) _)
+
+/-- At a common root, the two derivative resultants are homogeneous coordinates for it. -/
+theorem sylResDeriv_X_common_root {m N : Nat} {C1 P0 : UPoly R} {z : R}
+    (hm : 1 ≤ m) (hN : 1 ≤ N) (hC : C1.natDeg ≤ m) (hP : P0.natDeg ≤ N)
+    (hCz : C1.eval z = zero) (hPz : P0.eval z = zero) :
+    sylResDeriv m N C1 P0 X = mul z (sylResDeriv m N C1 P0 one) := by
+  have hX : (X : UPoly R).natDeg ≤ N := by
+    apply Nat.le_trans (m := 1) ?_ hN
+    apply natDeg_le_of_coeffAt
+    intro k hk
+    cases k with
+    | zero => omega
+    | succ k => cases k with
+      | zero => omega
+      | succ k =>
+        show coeffAt (ofList [zero, one]).coeffs (k + 2) = zero
+        rw [coeffAt_ofList, coeffAt_cons_succ, coeffAt_cons_succ, coeffAt_nil]
+  have h := sylResDeriv_common_root hm hC hP hX hCz hPz
+  rwa [eval_X] at h
+
+/-- The homogeneous root coordinates commute with coefficient specialization. -/
+theorem sylResDeriv_X_mapped_common_root {S : Type} [LawfulCommRing S] [DecidableEq S]
+    (φ : RingHom R S) {m N : Nat} {C1 P0 : UPoly R} {z : S}
+    (hm : 1 ≤ m) (hN : 1 ≤ N) (hC : C1.natDeg ≤ m) (hP : P0.natDeg ≤ N)
+    (hCz : ((mapHom φ).toFun C1).eval z = zero)
+    (hPz : ((mapHom φ).toFun P0).eval z = zero) :
+    φ.toFun (sylResDeriv m N C1 P0 X) = mul z (φ.toFun (sylResDeriv m N C1 P0 one)) := by
+  rw [map_sylResDeriv, map_sylResDeriv, mapHom_X, RingHom.map_one]
+  exact sylResDeriv_X_common_root hm hN (Nat.le_trans (natDeg_mapHom_le φ C1) hC)
+    (Nat.le_trans (natDeg_mapHom_le φ P0) hP) hCz hPz
+
+/-- All polynomial constraints can be pulled back with an explicit polynomial denominator. -/
+theorem homEvalCoeffs_resultant_root {m N : Nat} {C1 P0 P : UPoly R} {z : R}
+    (hm : 1 ≤ m) (hN : 1 ≤ N) (hC : C1.natDeg ≤ m) (hP : P0.natDeg ≤ N)
+    (hCz : C1.eval z = zero) (hPz : P0.eval z = zero) :
+    homEvalCoeffs (sylResDeriv m N C1 P0 X) (sylResDeriv m N C1 P0 one) P.coeffs =
+      mul (CRing.npow (sylResDeriv m N C1 P0 one) P.coeffs.length) (P.eval z) := by
+  rw [sylResDeriv_X_common_root hm hN hC hP hCz hPz, homEvalCoeffs_mul, UPoly.eval_eq]
+
+/-- The derivative-zero locus is the only possible ambiguity in the projected root. -/
+theorem common_root_unique_of_sylResDeriv_ne_zero [NoZeroDivisors R]
+    {m N : Nat} {C1 P0 : UPoly R} {z z' : R}
+    (hm : 1 ≤ m) (hN : 1 ≤ N) (hC : C1.natDeg ≤ m) (hP : P0.natDeg ≤ N)
+    (hCz : C1.eval z = zero) (hPz : P0.eval z = zero)
+    (hCz' : C1.eval z' = zero) (hPz' : P0.eval z' = zero)
+    (hDeriv : sylResDeriv m N C1 P0 one ≠ zero) : z = z' :=
+  mul_right_cancel' hDeriv ((sylResDeriv_X_common_root hm hN hC hP hCz hPz).symm.trans
+    (sylResDeriv_X_common_root hm hN hC hP hCz' hPz'))
+
 end ModMonicRing
 end SylElim
 
@@ -496,6 +646,36 @@ theorem tooth_sylResDeriv_nonzero_for_deg_one_gcd :
     by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
     by decide +kernel, by decide +kernel, rfl, by decide +kernel, rfl, by decide +kernel⟩
 
+/-- A simple common root has nonzero derivative resultant and is uniquely recovered. -/
+theorem inhabited_common_root_unique :
+    ∃ (m N : Nat) (C1 P0 : UPoly Goldilocks) (z z' : Goldilocks),
+      1 ≤ m ∧ 1 ≤ N ∧ C1.natDeg ≤ m ∧ P0.natDeg ≤ N ∧
+      C1.eval z = zero ∧ P0.eval z = zero ∧ C1.eval z' = zero ∧ P0.eval z' = zero ∧
+      sylResDeriv m N C1 P0 one ≠ zero ∧ z = z' := by
+  refine ⟨1, 1, ofList [neg (g 1), g 1], ofList [neg (g 1), g 1], g 1, g 1,
+    by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
+    by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
+    by decide +kernel, rfl⟩
+
+/-- Without the derivative condition, even a squarefree first polynomial has two common roots. -/
+theorem tooth_common_root_unique_needs_derivative :
+    ∃ (m N : Nat) (C1 P0 : UPoly Goldilocks) (z z' : Goldilocks),
+      1 ≤ m ∧ 1 ≤ N ∧ C1.natDeg ≤ m ∧ P0.natDeg ≤ N ∧
+      C1.eval z = zero ∧ P0.eval z = zero ∧ C1.eval z' = zero ∧ P0.eval z' = zero ∧
+      z ≠ z' := by
+  refine ⟨2, 1, ofList [neg (g 1), g 0, g 1], zero, g 1, neg (g 1),
+    by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
+    by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
+    by decide +kernel⟩
+
+#verify_constructive inhabited_common_root_unique tooth_common_root_unique_needs_derivative
+#verify_inhabited SylElim.common_root_unique_of_sylResDeriv_ne_zero inhabited_common_root_unique
+#tooth_pair SylElim.common_root_unique_of_sylResDeriv_ne_zero vs tooth_common_root_unique_needs_derivative
+
+#verify_constructive SylElim.homEvalCoeffs_mul SylElim.map_homEvalCoeffs SylElim.homEvalCoeffs_map_root SylElim.homEvalCoeffs_map_zero_iff SylElim.degFn_homEvalCoeffs_le
+#verify_constructive SylElim.degFn_homEvalCoeffs_poly_le
+#verify_constructive SylElim.sylResDeriv_X_common_root SylElim.sylResDeriv_X_mapped_common_root SylElim.homEvalCoeffs_resultant_root
+#verify_constructive SylElim.common_root_unique_of_sylResDeriv_ne_zero
 #verify_constructive SylElim.wdeg_divModLead_rem_le SylElim.ModMonic.eval_modGen_eq_zero
 #verify_constructive SylElim.sylResDeriv_eq_zero_of_common_factor_ge_two
 #verify_constructive inhabited_sylResDeriv_eq_zero_of_common_factor_ge_two tooth_sylResDeriv_nonzero_for_deg_one_gcd

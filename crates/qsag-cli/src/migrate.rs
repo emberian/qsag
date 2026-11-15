@@ -22,8 +22,7 @@ use qsag_migrate::{
 };
 
 use crate::cli::{
-    Args, CliError, MAX_KEY_FILE_BYTES, MAX_SIG_PROOF_BYTES, Secret32, os_random_32,
-    read_bounded_file, write_new,
+    Args, CliError, MAX_KEY_FILE_BYTES, Secret32, os_random_32, read_bounded_file, write_new,
 };
 use crate::codec::{Json, from_hex, from_hex_exact, to_hex};
 
@@ -40,8 +39,55 @@ const MIGRATE_CLAIM_FORMAT: &str = "qsag-migration-claim-v1";
 const MIGRATE_PROOF_FORMAT: &str = "qsag-migration-proof-v1";
 const DEFAULT_DOMAIN_LABEL: &[u8] = b"QSAG.CLI.MIGRATE.DEFAULT_DOMAIN.V1";
 const PROOF_WIRE_MAGIC: &[u8; 8] = b"QSAGMIGP";
-/// Migration ZKBoo proofs across 438 repetitions encode to ~1.5-4 MB hex JSON.
-const MAX_MIGRATION_PROOF_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+// Size contract of a `qsag-migration-proof-v1` file, shared by `prove` and `verify`.
+//
+// The `zk_proof` wire payload is
+//   magic (8) | views_merkle_root (32) | repetition count (4, always `MIT_REPETITIONS`) |
+//   per repetition: opened_e (1) | 2 x [seed (32) | inputs | products | outputs] |
+//                   hidden_party_commit (32) | hidden_outputs
+// where each named field is a little-endian u32 length followed by that many bytes. The field
+// lengths are fixed by the ownership circuit of the legacy kind, which the verifier replays
+// exactly; the caps below only bound what is read before that check. Measured per repetition
+// (inputs, products, outputs): btc-p2wpkh (288, 81424, 85), eth-eoa (288, 80480, 85),
+// btc-taproot (288, 75680, 98), ed25519-slip10 (288, 65600, 97), i.e. 57.9 to 71.7 MB of wire.
+const WIRE_HEADER_BYTES: u64 = 8 + 32 + 4;
+const WIRE_REP_FIXED_BYTES: u64 = 1 + 2 * 32 + 32;
+const WIRE_LEN_PREFIX_BYTES: u64 = 4;
+const MAX_VIEW_INPUT_BYTES: usize = 1024;
+const MAX_VIEW_PRODUCT_BYTES: usize = 128 * 1024;
+const MAX_VIEW_OUTPUT_BYTES: usize = 1024;
+
+const fn checked(value: Option<u64>) -> u64 {
+    match value {
+        Some(v) => v,
+        None => panic!("migration proof size bound overflows u64"),
+    }
+}
+
+/// Largest wire payload the schema admits: every framed field at its cap.
+const MAX_PROOF_WIRE_BYTES: u64 = {
+    let inputs = checked(WIRE_LEN_PREFIX_BYTES.checked_add(MAX_VIEW_INPUT_BYTES as u64));
+    let products = checked(WIRE_LEN_PREFIX_BYTES.checked_add(MAX_VIEW_PRODUCT_BYTES as u64));
+    let outputs = checked(WIRE_LEN_PREFIX_BYTES.checked_add(MAX_VIEW_OUTPUT_BYTES as u64));
+    // Two opened views carry inputs, products and outputs; the hidden view only its outputs.
+    let mut rep = WIRE_REP_FIXED_BYTES;
+    rep = checked(rep.checked_add(checked(inputs.checked_mul(2))));
+    rep = checked(rep.checked_add(checked(products.checked_mul(2))));
+    rep = checked(rep.checked_add(checked(outputs.checked_mul(3))));
+    checked(WIRE_HEADER_BYTES.checked_add(checked(rep.checked_mul(MIT_REPETITIONS as u64))))
+};
+/// Everything in the JSON document other than the hex of the wire payload: eleven short
+/// members (hashes, the Bech32m address, a u64 epoch) and their punctuation. `prove` writes
+/// under 700 bytes of it.
+const MAX_PROOF_ENVELOPE_BYTES: u64 = 4096;
+/// Largest proof file `verify` reads and `prove` writes: the wire payload in hex plus the
+/// envelope (about 223 MiB; files written today are 116 to 144 MB).
+const MAX_MIGRATION_PROOF_FILE_BYTES: u64 = checked(
+    checked(MAX_PROOF_WIRE_BYTES.checked_mul(2)).checked_add(MAX_PROOF_ENVELOPE_BYTES),
+);
+// The wire payload must be addressable on the host before it is decoded into memory.
+const _: () = assert!(MAX_MIGRATION_PROOF_FILE_BYTES <= usize::MAX as u64);
 
 fn ensure_absent(path: &str) -> Result<(), CliError> {
     match std::fs::symlink_metadata(path) {
@@ -173,7 +219,13 @@ fn bytes_to_limbs4(bytes: &[u8; 32]) -> [u64; 4] {
     })
 }
 
-fn put_u32_framed(out: &mut Vec<u8>, slice: &[u8]) -> Result<(), CliError> {
+fn put_u32_framed(out: &mut Vec<u8>, slice: &[u8], max_len: usize) -> Result<(), CliError> {
+    if slice.len() > max_len {
+        return Err(CliError::input(format!(
+            "migration proof field of {} bytes exceeds its {max_len}-byte wire bound",
+            slice.len()
+        )));
+    }
     let len = u32::try_from(slice.len())
         .map_err(|_| CliError::input("proof field exceeds u32 framing bound"))?;
     out.extend_from_slice(&len.to_le_bytes());
@@ -190,19 +242,36 @@ fn take_exact<'a>(cursor: &mut &'a [u8], len: usize) -> Result<&'a [u8], CliErro
     Ok(head)
 }
 
-fn take_u32_framed(cursor: &mut &[u8]) -> Result<Vec<u8>, CliError> {
+/// Read one length-prefixed field. The claimed length is checked against the field's cap and
+/// then against the bytes actually present, so nothing is allocated for a forged length.
+fn take_u32_framed(cursor: &mut &[u8], max_len: usize) -> Result<Vec<u8>, CliError> {
     let len_bytes = take_exact(cursor, 4)?;
-    let len = u32::from_le_bytes(len_bytes.try_into().unwrap_or([0; 4])) as usize;
-    if len > 256 * 1024 {
+    let len = usize::try_from(u32::from_le_bytes(len_bytes.try_into().unwrap_or([0; 4])))
+        .map_err(|_| CliError::verify("oversized repetition field in migration proof"))?;
+    if len > max_len {
         return Err(CliError::verify("oversized repetition field in migration proof"));
     }
     Ok(take_exact(cursor, len)?.to_vec())
 }
 
+fn take_party_view(cursor: &mut &[u8]) -> Result<PartyView, CliError> {
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(take_exact(cursor, 32)?);
+    Ok(PartyView {
+        seed,
+        inputs: take_u32_framed(cursor, MAX_VIEW_INPUT_BYTES)?,
+        products: take_u32_framed(cursor, MAX_VIEW_PRODUCT_BYTES)?,
+        outputs: take_u32_framed(cursor, MAX_VIEW_OUTPUT_BYTES)?,
+    })
+}
+
 fn encode_zk_proof_wire(proof: &MigrationZkProof) -> Result<Vec<u8>, CliError> {
-    let mut out = Vec::with_capacity(512 * 1024);
+    let mut out = Vec::new();
     out.extend_from_slice(PROOF_WIRE_MAGIC);
     out.extend_from_slice(&proof.views_merkle_root);
+    if proof.repetitions.len() != MIT_REPETITIONS {
+        return Err(CliError::input("invalid repetition count"));
+    }
     let rep_count = u32::try_from(proof.repetitions.len())
         .map_err(|_| CliError::input("invalid repetition count"))?;
     out.extend_from_slice(&rep_count.to_le_bytes());
@@ -210,17 +279,21 @@ fn encode_zk_proof_wire(proof: &MigrationZkProof) -> Result<Vec<u8>, CliError> {
         out.push(rep.opened_e);
         for pv in &rep.pair {
             out.extend_from_slice(&pv.seed);
-            put_u32_framed(&mut out, &pv.inputs)?;
-            put_u32_framed(&mut out, &pv.products)?;
-            put_u32_framed(&mut out, &pv.outputs)?;
+            put_u32_framed(&mut out, &pv.inputs, MAX_VIEW_INPUT_BYTES)?;
+            put_u32_framed(&mut out, &pv.products, MAX_VIEW_PRODUCT_BYTES)?;
+            put_u32_framed(&mut out, &pv.outputs, MAX_VIEW_OUTPUT_BYTES)?;
         }
         out.extend_from_slice(&rep.hidden_party_commit);
-        put_u32_framed(&mut out, &rep.hidden_outputs)?;
+        put_u32_framed(&mut out, &rep.hidden_outputs, MAX_VIEW_OUTPUT_BYTES)?;
     }
+    debug_assert!(out.len() as u64 <= MAX_PROOF_WIRE_BYTES);
     Ok(out)
 }
 
 fn decode_zk_proof_wire(bytes: &[u8]) -> Result<MigrationZkProof, CliError> {
+    if !u64::try_from(bytes.len()).is_ok_and(|len| len <= MAX_PROOF_WIRE_BYTES) {
+        return Err(CliError::verify("oversized migration ZK proof wire payload"));
+    }
     let mut cur = bytes;
     let magic = take_exact(&mut cur, 8)?;
     if magic != PROOF_WIRE_MAGIC {
@@ -238,25 +311,11 @@ fn decode_zk_proof_wire(bytes: &[u8]) -> Result<MigrationZkProof, CliError> {
     let mut repetitions = Vec::with_capacity(rep_count);
     for _ in 0..rep_count {
         let opened_e = take_exact(&mut cur, 1)?[0];
-        let mut p0_seed = [0u8; 32];
-        p0_seed.copy_from_slice(take_exact(&mut cur, 32)?);
-        let p0 = PartyView {
-            seed: p0_seed,
-            inputs: take_u32_framed(&mut cur)?,
-            products: take_u32_framed(&mut cur)?,
-            outputs: take_u32_framed(&mut cur)?,
-        };
-        let mut p1_seed = [0u8; 32];
-        p1_seed.copy_from_slice(take_exact(&mut cur, 32)?);
-        let p1 = PartyView {
-            seed: p1_seed,
-            inputs: take_u32_framed(&mut cur)?,
-            products: take_u32_framed(&mut cur)?,
-            outputs: take_u32_framed(&mut cur)?,
-        };
+        let p0 = take_party_view(&mut cur)?;
+        let p1 = take_party_view(&mut cur)?;
         let mut hidden_party_commit = [0u8; 32];
         hidden_party_commit.copy_from_slice(take_exact(&mut cur, 32)?);
-        let hidden_outputs = take_u32_framed(&mut cur)?;
+        let hidden_outputs = take_u32_framed(&mut cur, MAX_VIEW_OUTPUT_BYTES)?;
         repetitions.push(OpenedRepetitionView {
             opened_e,
             pair: [p0, p1],
@@ -415,7 +474,15 @@ fn prove(raw: &[String]) -> Result<(), CliError> {
         ("views_merkle_root", Json::hex(&zk_proof.views_merkle_root)),
         ("zk_proof", Json::hex(&wire_bytes)),
     ]);
-    write_new(out_path, doc.to_pretty().as_bytes(), false)?;
+    let encoded = doc.to_pretty();
+    // Never write a proof that `verify` would refuse to read.
+    if !u64::try_from(encoded.len()).is_ok_and(|len| len <= MAX_MIGRATION_PROOF_FILE_BYTES) {
+        return Err(CliError::input(format!(
+            "encoded migration proof is {} bytes, above the {MAX_MIGRATION_PROOF_FILE_BYTES}-byte file bound",
+            encoded.len()
+        )));
+    }
+    write_new(out_path, encoded.as_bytes(), false)?;
 
     if args.flag("json") {
         let report = Json::object(vec![
@@ -453,7 +520,7 @@ fn verify(raw: &[String]) -> Result<(), CliError> {
     }
     args.no_positionals()?;
     let proof_path = args.require("proof")?;
-    let raw_file = read_bounded_file(proof_path, MAX_MIGRATION_PROOF_FILE_BYTES.max(MAX_SIG_PROOF_BYTES))?;
+    let raw_file = read_bounded_file(proof_path, MAX_MIGRATION_PROOF_FILE_BYTES)?;
     let text = std::str::from_utf8(&raw_file.0)
         .map_err(|_| CliError::verify("migration proof file is not valid UTF-8"))?;
     let json = Json::parse(text)
@@ -529,6 +596,11 @@ fn verify(raw: &[String]) -> Result<(), CliError> {
     let wire_hex = json
         .field_str("zk_proof")
         .map_err(|e| CliError::verify(e.message))?;
+    if !u64::try_from(wire_hex.len())
+        .is_ok_and(|len| len <= checked(MAX_PROOF_WIRE_BYTES.checked_mul(2)))
+    {
+        return Err(CliError::verify("oversized migration ZK proof wire payload"));
+    }
     let wire_bytes = from_hex(wire_hex)
         .map_err(|e| CliError::verify(format!("invalid zk_proof hex: {e}")))?;
     let zk_proof = decode_zk_proof_wire(&wire_bytes.0)?;
@@ -592,5 +664,138 @@ pub fn run(raw: &[String]) -> Result<(), CliError> {
         other => Err(CliError::usage(format!(
             "unknown migrate subcommand '{other}' (expected commit, prove, or verify)"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn view(inputs: usize, products: usize, outputs: usize) -> PartyView {
+        PartyView {
+            seed: [7; 32],
+            inputs: vec![1; inputs],
+            products: vec![2; products],
+            outputs: vec![3; outputs],
+        }
+    }
+
+    fn proof(inputs: usize, products: usize, outputs: usize) -> MigrationZkProof {
+        MigrationZkProof {
+            views_merkle_root: [9; 32],
+            repetitions: (0..MIT_REPETITIONS)
+                .map(|rep| OpenedRepetitionView {
+                    opened_e: (rep % 3) as u8,
+                    pair: [
+                        view(inputs, products, outputs),
+                        view(inputs, products, outputs),
+                    ],
+                    hidden_party_commit: [5; 32],
+                    hidden_outputs: vec![4; outputs],
+                })
+                .collect(),
+        }
+    }
+
+    fn wire_len(inputs: u64, products: u64, outputs: u64) -> u64 {
+        44 + 438 * (97 + 7 * 4 + 2 * inputs + 2 * products + 3 * outputs)
+    }
+
+    #[test]
+    fn size_bounds_follow_the_wire_schema_and_cover_every_legacy_kind() {
+        assert_eq!(MIT_REPETITIONS, 438);
+        assert_eq!(MAX_PROOF_WIRE_BYTES, wire_len(1024, 128 * 1024, 1024));
+        assert_eq!(MAX_PROOF_WIRE_BYTES, 117_116_426);
+        assert_eq!(MAX_MIGRATION_PROOF_FILE_BYTES, 2 * 117_116_426 + 4096);
+        // (inputs, products, outputs, wire bytes) written by `migrate prove` for each kind.
+        for (inputs, products, outputs, wire) in [
+            (288, 81_424, 85, 71_746_196u64), // btc-p2wpkh
+            (288, 80_480, 85, 70_919_252),    // eth-eoa
+            (288, 75_680, 98, 66_731_534),    // btc-taproot
+            (288, 65_600, 97, 57_900_140),    // ed25519-slip10
+        ] {
+            assert_eq!(wire_len(inputs, products, outputs), wire);
+            assert!(inputs as usize <= MAX_VIEW_INPUT_BYTES);
+            assert!(products as usize <= MAX_VIEW_PRODUCT_BYTES);
+            assert!(outputs as usize <= MAX_VIEW_OUTPUT_BYTES);
+            assert!(2 * wire + MAX_PROOF_ENVELOPE_BYTES <= MAX_MIGRATION_PROOF_FILE_BYTES);
+        }
+    }
+
+    #[test]
+    fn wire_codec_accepts_the_bound_exactly_and_rejects_anything_larger() {
+        let full = proof(
+            MAX_VIEW_INPUT_BYTES,
+            MAX_VIEW_PRODUCT_BYTES,
+            MAX_VIEW_OUTPUT_BYTES,
+        );
+        let wire = encode_zk_proof_wire(&full).unwrap();
+        assert_eq!(wire.len() as u64, MAX_PROOF_WIRE_BYTES);
+        assert!(decode_zk_proof_wire(&wire).unwrap() == full);
+        drop(full);
+
+        let mut padded = wire;
+        padded.push(0);
+        let err = decode_zk_proof_wire(&padded).unwrap_err();
+        assert_eq!(err.code, crate::cli::exit::VERIFY_FAILED);
+        assert!(err.message.contains("oversized"), "{}", err.message);
+        drop(padded);
+
+        for (inputs, products, outputs) in [
+            (MAX_VIEW_INPUT_BYTES + 1, 0, 0),
+            (0, MAX_VIEW_PRODUCT_BYTES + 1, 0),
+            (0, 0, MAX_VIEW_OUTPUT_BYTES + 1),
+        ] {
+            let err = encode_zk_proof_wire(&proof(inputs, products, outputs)).unwrap_err();
+            assert!(err.message.contains("wire bound"), "{}", err.message);
+        }
+    }
+
+    #[test]
+    fn wire_decoder_rejects_forged_lengths_truncation_trailing_bytes_and_bad_headers() {
+        let small = proof(3, 5, 2);
+        let wire = encode_zk_proof_wire(&small).unwrap();
+        assert_eq!(wire.len() as u64, wire_len(3, 5, 2));
+        assert!(decode_zk_proof_wire(&wire).unwrap() == small);
+
+        let rejects = |bytes: &[u8], what: &str| {
+            let err = decode_zk_proof_wire(bytes).unwrap_err();
+            assert_eq!(err.code, crate::cli::exit::VERIFY_FAILED, "{what}");
+            assert!(err.message.contains(what), "{what}: {}", err.message);
+        };
+        // Offsets inside the first repetition: opened_e at 44, first seed at 45, then the
+        // inputs / products / outputs length prefixes of the first opened view.
+        let inputs_len_at = 44 + 1 + 32;
+        let products_len_at = inputs_len_at + 4 + 3;
+        let outputs_len_at = products_len_at + 4 + 5;
+        for (offset, cap) in [
+            (inputs_len_at, MAX_VIEW_INPUT_BYTES),
+            (products_len_at, MAX_VIEW_PRODUCT_BYTES),
+            (outputs_len_at, MAX_VIEW_OUTPUT_BYTES),
+        ] {
+            for claimed in [cap as u32 + 1, u32::MAX] {
+                let mut forged = wire.clone();
+                forged[offset..offset + 4].copy_from_slice(&claimed.to_le_bytes());
+                rejects(&forged, "oversized repetition field");
+            }
+            // A length within the cap but beyond the bytes present is a truncation.
+            let mut short = wire[..offset + 4].to_vec();
+            short[offset..offset + 4].copy_from_slice(&(cap as u32).to_le_bytes());
+            rejects(&short, "truncated");
+        }
+        rejects(&wire[..wire.len() - 1], "truncated");
+        rejects(&wire[..43], "truncated");
+        rejects(&[], "truncated");
+        let mut trailing = wire.clone();
+        trailing.push(0);
+        rejects(&trailing, "trailing");
+        let mut magic = wire.clone();
+        magic[0] ^= 1;
+        rejects(&magic, "magic");
+        for count in [0u32, 437, 439, u32::MAX] {
+            let mut reps = wire.clone();
+            reps[40..44].copy_from_slice(&count.to_le_bytes());
+            rejects(&reps, "invalid repetition count");
+        }
     }
 }

@@ -1,10 +1,13 @@
 module
 /-
-# Unitary QROM Merkle Online Extraction (`merkleRootFromPath` & `verifyCanopyMultiproof`)
+# Classical Merkle Query-Table Extraction and Conditional QROM Target-Hit Bounds
 
-Constructive (`0 sorry`, `0` custom `axiom`, `0 Classical.choice`) quantum random-oracle online
-extraction reduction for tweaked Merkle paths (`merkleRootFromPath`) and Steiner-deduplicated
-`CanopyMultiProof` commitments (`verifyCanopyMultiproof` from `pcs.rs`):
+Constructive classical extraction for tweaked Merkle paths (`merkleRootFromPath`) and
+Steiner-deduplicated `CanopyMultiProof` commitments (`verifyCanopyMultiproof` from `pcs.rs`),
+followed by a conditional quantum target-hit bound. These are separate interfaces: this module
+does not construct a classical query table from a coherent quantum adversary, bound the
+disturbance of extracting such a table, or instantiate the quantum covering/locality premises
+from the classical classifier.
 
 1. **Pre-Challenge Online Query-Table Extraction (`extractOnlineMerkleOpening`,
    `classifyOnlineMerkleOpening`, `onlineMerkle_preChallenge_unique`)**:
@@ -25,14 +28,19 @@ extraction reduction for tweaked Merkle paths (`merkleRootFromPath`) and Steiner
    `CanopyRootCollision`, `CanopyNodeCollision`, unqueried root preimage (`1` target), or unqueried
    internal node preimage (`≤ 2 * Q + 1` targets).
 
-3. **Unitary `QVec` / `GaussInt` Quantum Extraction Bound (`qrom_unitary_target_hit_bound`,
+3. **Unitary `QVec` / `GaussInt` Conditional Target-Hit Bound (`qrom_unitary_target_hit_bound`,
    `qrom_unitary_single_root_merkle_extract_bound`,
    `qrom_unitary_multiRoot_merkle_extract_bound`)**:
-   Mechanizes `qromMerkleOnlineExtractBound numRoots w Q` directly from unitary
-   `QVec` / `GaussInt` oracle executions via `QromRbrRound` and `qrom_uniform_oracle_success_bound`:
+   Bounds an event supplied by the caller, assuming it is covered by hits on small target
+   lists invariant under reprogramming the tested coordinate. Via `QromRbrRound` and
+   `qrom_uniform_oracle_success_bound`, the result is dominated by
+   `qromMerkleOnlineExtractBound numRoots w Q`:
    hitting `1` root target costs `≤ (2Q + 1)^2 / 2^w ≤ quantumGroverSingleTargetBound w Q`, and
    hitting `≤ 2Q + 1` query-child / collision targets costs
    `≤ (2Q + 1)^3 / 2^w ≤ 8(Q + 1)^3 / 2^w = quantumBhtCollisionBound w Q`.
+   Instantiating those lists from adaptive quantum commitments, including collisions and
+   post-challenge openings, remains a separate reduction obligation. The inhabitedness
+   witness below is a zero-query singleton-target search event, not a Merkle execution.
 -/
 
 public import Qsag.MultiRoundFsQrom
@@ -78,8 +86,8 @@ theorem findFirst_none_spec {α : Type} (p : α → Bool) :
       · exact findFirst_none_spec p h x htl
     · rw [hp] at h; simp only [↓reduceIte] at h; cases h
 
-/-- One recorded compression query `(lvl, node, left, right) ↦ out` in a pre-challenge QROM
-    query table. -/
+/-- One recorded compression query `(lvl, node, left, right) ↦ out` in a classical
+    pre-challenge query table. Coherent QROM access does not itself provide such a record. -/
 structure RecordedMerkleQuery (D : Type) where
   lvl : Nat
   node : Nat
@@ -904,8 +912,9 @@ theorem qsum_ofFin_listHasElem_le_length (w : Nat) :
     simp only [List.length_cons]
     omega
 
-/-- `QromRbrRound` bounding the event that an unqueried coordinate `x = proj z` hashes into a
-    pre-challenge target digest list `targetSet O x` of size `≤ T`. -/
+/-- `QromRbrRound` for a coordinate `x = proj z` hashing into a target list of size `≤ T`
+    that is invariant under reprogramming `x`. The definition does not assert that `x` was
+    unqueried, or that the targets were extracted before a protocol challenge. -/
 def qromTargetSetRound {cardX w : Nat} (H : Fin cardX → BitVec w)
     (proj : Fin cardX → Fin cardX)
     (targetSet : (Fin cardX → BitVec w) → Fin cardX → List (BitVec w))
@@ -1004,8 +1013,10 @@ theorem unitary_merkle_raw_le_qromMerkleOnlineExtractBound (numRoots w Q : Nat) 
   rw [hRhsEq]
   exact Nat.mul_le_mul_right (W * W) hScaled
 
-/-- **Unitary Multi-Root QROM Merkle / Canopy Online Extraction Theorem
-    (`qrom_unitary_multiRoot_merkle_extract_bound`)**. -/
+/-- Conditional target-hit union bound with the arithmetic Merkle extraction budget.
+    `failExtract` is an arbitrary event. A protocol reduction must supply `hCover`, `hLocal`,
+    and `hCard`; this theorem neither constructs a query table nor relates that event to
+    `classifyOnlineMerkleOpening` or `classifyOnlineCanopyOpening`. -/
 theorem qrom_unitary_multiRoot_merkle_extract_bound {cardX w cardAnc Q : Nat}
     (numRoots : Nat)
     (A : QuantumAdv cardX w cardAnc Q)
@@ -1135,7 +1146,8 @@ private theorem witnessCoverProof (H : Fin 2 → BitVec 2) :
       exact Nat.zero_le _
   exact Nat.le_trans hLe (Nat.le_add_right _ _)
 
-/-- Inhabitedness witness for `qrom_unitary_multiRoot_merkle_extract_bound`. -/
+/-- Inhabitedness of the conditional target-hit premises: zero queries, two-bit answers,
+    and constant singleton targets. This is not an inhabited Merkle extraction execution. -/
 theorem inhabited_qrom_unitary_merkle_extract :
     ∃ (cardX w cardAnc Q numRoots : Nat)
       (A : QuantumAdv cardX w cardAnc Q)

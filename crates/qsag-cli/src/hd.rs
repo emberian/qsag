@@ -589,9 +589,15 @@ fn recover(raw: &[String]) -> Result<(), CliError> {
 
     // Emit a vault-enrolled `qsag-secret-key-v1` SLH-DSA-SHAKE-128f key file usable directly by `qsag sign`.
     let mut vault = crate::vault::Vault::acquire(secret_out, true)?;
+    // Same enrollment sequence as `qsag keygen`. The vault state MAC covers a fresh 16-byte
+    // `enrollment_nonce` (`vault::tag` refuses a secret file without one), so recovering the same
+    // child twice yields two enrollments whose lock files are not interchangeable. The nonce is
+    // not mixed into the key: an SLH-DSA child is fully determined by the recovered seed.
+    let enrollment_entropy = Secret32(os_random_32()?);
     let mut secret_doc = Json::object(vec![
         ("format", Json::str(SECRET_FORMAT)),
         ("scheme", Json::str("slh-dsa-shake-128f")),
+        ("enrollment_nonce", Json::hex(&enrollment_entropy[..16])),
         ("uses_completed", Json::num(0)),
         ("child_idx", Json::num(child_idx)),
         ("master_root_pk", Json::hex(&master_root)),

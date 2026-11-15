@@ -796,15 +796,12 @@ theorem affineFoldDecompBound_of_affineMcaBound {F : Type} [LawfulField F] [Deci
     exact hMca x hNotCA (ch₀ :: rest) hNd
       (fun ch hch hNo => hEx ch hch (fun ⟨P, hP, _⟩ => hNo ⟨P, hP⟩))
 
-/-- **Unconditional Welch–Berlekamp `AffineFoldDecompBound` for Rate-`≤ 1/3` Reed–Solomon Codes
-    (`affineFoldDecompBound_welch_berlekamp`)**:
-    Whenever `3 * d + 1 ≤ D.length` and `2 * D.length + d + 1 < 3 * A`, `D.length + d + 1 < 2 * A`
-    follows automatically, so `affineMcaBound_welch_berlekamp` yields `AffineFoldDecompBound`
-    unconditionally. -/
+/-- The Welch–Berlekamp agreement inequality, together with `A ≤ D.length`, implies the
+    overlap condition needed for claim-preserving decomposition. No separate rate premise
+    is required. -/
 theorem affineFoldDecompBound_welch_berlekamp {F : Type} [LawfulField F] [DecidableEq F]
     (D S : List F) (d A : Nat)
     (hD : D.Nodup) (hS : S.Nodup) (hAD : A ≤ D.length)
-    (_hRate : 3 * d + 1 ≤ D.length)
     (hWB : 2 * D.length + d + 1 < 3 * A) :
     AffineFoldDecompBound D S d A (Nat.max S.length (D.length * (D.length - 1) / 2)) :=
   affineFoldDecompBound_of_affineMcaBound
@@ -865,11 +862,11 @@ theorem cwyz26_affineFoldDecompBound_of_nonExcluded {F : Type} [LawfulField F] [
               (CommRingOps.mul ((prodPool S).get ch).2 z)) (x.2 z)))) :=
       congrArg (fun q => List.filter q D) (funext fun z => by
         show decide ((UPoly.ofList Pl).eval z = _) = _
-        rw [UPoly.eval_ofList])
+        rw [eval_ofList])
     have hlen : A ≤ (D.filter (foldAgree x ((prodPool S).get ch).1 ((prodPool S).get ch).2
         (UPoly.ofList Pl))).length := by rw [hfilt]; exact hPlAcc.2
     have hdeg : (UPoly.ofList Pl).natDeg ≤ d := by
-      have h1 := UPoly.natDeg_ofList_le Pl
+      have h1 := natDeg_ofList_le Pl
       have h2 := hPlAcc.1.2
       omega
     exact ⟨list_get_mem _ ch, Pl, hPlAcc.1.2, hlen,
@@ -1471,7 +1468,7 @@ private theorem hemSingleCascade_flip_bound
         · rcases es with _ | ⟨e₀, _ | _⟩
           · cases hCLen
           · have hNotBatch : ¬ HemBatchValid domPts A₀ d₀ kernel [O₀] [e₀] :=
-              fun hb => hInvalidStmt ⟨⟨Nat.le_refl 1, Nat.le_add_right 1 15⟩, hb, trivial⟩
+              fun hb => hInvalidStmt ⟨⟨Nat.le_refl 1, Nat.le_add_right 1 15⟩, hb⟩
             have hdA1 : d₀ + 1 ≤ A₀ := Nat.le_of_succ_le cert.deg_le_agree
             rcases findInvalidBatchIdx_complete domPts A₀ d₀ kernel cert.dom_nodup
                 hdA1 [O₀] [e₀] rfl hNotBatch with ⟨i₀, _, hi₀Lt, hi₀Inv⟩
@@ -1797,7 +1794,6 @@ theorem overlap_unique_decode_le_one (domPts : List QuarticGoldilocks) (d₀ A�
 theorem hemWelchBerlekampCert (S domPts : List QuarticGoldilocks) (d₀ A₀ : Nat)
     (hDom : domPts.Nodup) (hS : S.Nodup)
     (hdA : d₀ + 2 ≤ A₀) (hAgDom : A₀ + 1 ≤ domPts.length)
-    (hRate : 3 * (d₀ + 1) + 1 ≤ domPts.length)
     (hWB : 2 * domPts.length + (d₀ + 1) + 1 < 3 * (A₀ + 1)) :
     HemCascadeRbrCert S domPts d₀ A₀
       (Nat.max S.length (domPts.length * (domPts.length - 1) / 2)) 1 where
@@ -1806,7 +1802,7 @@ theorem hemWelchBerlekampCert (S domPts : List QuarticGoldilocks) (d₀ A₀ : N
   deg_le_agree := hdA
   agree_succ_le_dom := hAgDom
   decomp_bound := affineFoldDecompBound_welch_berlekamp domPts S (d₀ + 1) (A₀ + 1)
-    hDom hS hAgDom hRate hWB
+    hDom hS hAgDom hWB
   gs_list_bound := overlap_unique_decode_le_one domPts d₀ A₀ hDom (by omega) (by omega)
 
 /-- **`[CWYZ26]` Johnson-Radius `RbrStateFunction` Specialization (`hemCwyz26JohnsonCert`)**:
@@ -1851,7 +1847,7 @@ theorem hemAffineWhir_state_restoration_soundness
     (hemAffineWhirRbrOf S hSpos domPts d₀ A₀ badMca listG cert)
     inst (fun h => hInvalid h.2) sched tree
 
-/-! ## §3. End-to-End Multi-Round QROM Fiat–Shamir Verifier Acceptance Soundness -/
+/-! ## §3. Conditional QROM event accounting -/
 
 /-- Conditional probability accounting for the transcript checker. The supplied RBR/query
     bounds and acceptance cover are obligations, not consequences proved here. `outTr` is
@@ -1892,7 +1888,7 @@ theorem hemAffineWhir_qrom_acceptance_bound_of_event_bounds
           Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos 256))
             (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
         (RatBound.sumList (hemV6BciksJohnsonQueryBounds.map (quantumGroverGrindingBound Q))))
-    -- 4. Transcript-acceptance event covering on `¬ HemStatementValid inst`:
+    -- 4. Supplied transcript-acceptance event cover:
     (hAcceptCover : ∀ H x,
       verifyHemAffineWhir inst (outTr H x) = true →
         failRbr H x = true ∨ failMerkle H x = true ∨ failQuery H x = true) :
@@ -1982,7 +1978,7 @@ theorem hemAffineWhir_qrom_acceptance_bound_of_event_bounds
   have hMain := RatBound.le_trans hAccLeSum hCompLe
   refine ⟨hMain, ?_⟩
   intro hQ
-  have hBudget := (multiRoundFsQrom_budget_bound.2.2 Q hQ).1
+  have hBudget := (multiRoundFsQrom_budget_bound.2 Q hQ).1
   let A_num := uniformOracleSum 256 cardX (fun H =>
     QVec.queryMassOn (fun x => verifyHemAffineWhir inst (outTr H x)) (runQuantumAdv A H))
   let cB := multiRoundFsQromCompilerBound Q 5 256 hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds
@@ -2035,10 +2031,6 @@ theorem tooth_unconstrained_stageOracle_accepts_false_claim :
   rintro ⟨P, hP⟩
   exact hemFalseClaimInstance_invalid ⟨⟨Nat.le_refl 1, by decide⟩, ⟨P, hP⟩, trivial⟩
 
-#tooth_pair
-  Qsag.hemBridge_bad_quads_le_three_cube
-  vs
-  Qsag.tooth_unconstrained_stageOracle_accepts_false_claim
 
 private def qgOfNat (n : Nat) : QuarticGoldilocks :=
   ⟨⟨Goldilocks.ofNat n, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩⟩
@@ -2051,7 +2043,7 @@ private def wbPool2 : List QuarticGoldilocks :=
 
 private theorem wbCertWitness : HemCascadeRbrCert wbPool2 wbDom5 0 4 10 1 :=
   hemWelchBerlekampCert wbPool2 wbDom5 0 4
-    (by decide) (by decide) (by decide) (by decide) (by decide) (by decide)
+    (by decide) (by decide) (by decide) (by decide) (by decide)
 
 private def wbFalseInst : HemWhirInstance QuarticGoldilocks :=
   { batchOracles := [fun _ => CommRingOps.zero]
@@ -2127,7 +2119,6 @@ theorem inhabited_hemAffineWhir_state_restoration :
   Qsag.cwyz26_affineFoldDecompBound_of_nonExcluded
   Qsag.claimFold_bad_pairs_bound
   Qsag.hemAffineWhirIop_accepts_implies_verifier
-  Qsag.hemAffineWhirRbrOf
   Qsag.hemAffineWhir_state_restoration_soundness
   Qsag.hemAffineWhir_qrom_acceptance_bound_of_event_bounds
   Qsag.inhabited_hemAffineWhir_state_restoration

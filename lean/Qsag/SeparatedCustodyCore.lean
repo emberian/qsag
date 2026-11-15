@@ -1,5 +1,6 @@
 module
 public import Qsag.HypertreeEufCma
+import all Qsag.HypertreeEufCma
 public import Qsag.MaliciousSecurity
 import Qsag.Tactic.AssuranceKit
 
@@ -11,6 +12,7 @@ The signer is partial: exhausted grinding burns its leaf without releasing a sig
 public section
 namespace Qsag.Custody
 set_option autoImplicit false
+set_option maxRecDepth 4096
 
 structure Intent where
   session : Nat
@@ -32,12 +34,15 @@ theorem payload_injective {i j : Nat} {r s : Intent}
     (h : payload i r = payload j s) : i = j ∧ r = s := by
   have hf := encodeMultiFrame_injective h
   simp only [List.cons.injEq] at hf
-  obtain ⟨hi, hs, hr, hl, hv, hm⟩ :=
-    ⟨leb_inj hf.2.1, leb_inj hf.2.2.1, leb_inj hf.2.2.2.1,
-     leb_inj hf.2.2.2.2.1, leb_inj hf.2.2.2.2.2.1, hf.2.2.2.2.2.2.1⟩
+  have hi := leb_inj hf.2.1
+  have hs := leb_inj hf.2.2.1
+  have hr := leb_inj hf.2.2.2.1
+  have hl := leb_inj hf.2.2.2.2.1
+  have hv := leb_inj hf.2.2.2.2.2.1
+  have hm := hf.2.2.2.2.2.2.1
   refine ⟨hi, ?_⟩
   cases r; cases s
-  simp_all only [Intent.mk.injEq]
+  simp_all only
 
 structure SigningConfig where
   suite : TweakableHashSuite
@@ -80,12 +85,36 @@ structure RoundPolicy where
   roster : List Nat
   digest : Nat → List UInt8
 
+def roundDomain : List UInt8 := "QSAG.CUSTODY.ROUND1/v2".toUTF8.toList
+
+/-- The committed round binds the entire intent before any permit is minted. -/
+def roundCommitment (r : Intent) : List UInt8 :=
+  cshake256Bytes roundDomain (payload 0 r)
+
 def checkRound (p : RoundPolicy) (r : Intent) (digest : List UInt8)
     (ops : List RoundOpening) : Bool :=
-  decide (digest.length = 32 ∧ digest = p.digest r.session) &&
+  decide (digest.length = 32 ∧ digest = p.digest r.session ∧ digest = roundCommitment r) &&
   decide (ops ≠ [] ∧ ops.map (fun o => o.opening.partyId) = p.roster ∧ p.roster.Nodup) &&
   ops.all (fun o => decide (o.session = r.session ∧ o.round = r.round) &&
     verifyBdozPairMac (p.keys r.session r.round) o.opening)
+
+theorem checkRound_commitment (p : RoundPolicy) (r : Intent) (digest : List UInt8)
+    (ops : List RoundOpening) (h : checkRound p r digest ops = true) :
+    digest = roundCommitment r :=
+  (of_decide_eq_true (Bool.and_eq_true_iff.mp (Bool.and_eq_true_iff.mp h).1).1).2.2
+
+/-- Reusing a committed round for another intent supplies a concrete pair of
+different cSHAKE inputs with equal output. No collision-freedom axiom is used. -/
+theorem accepted_round_context_or_collision (p : RoundPolicy) (r s : Intent)
+    (digest : List UInt8) (ops ops' : List RoundOpening)
+    (hr : checkRound p r digest ops = true) (hs : checkRound p s digest ops' = true) :
+    r = s ∨ (payload 0 r ≠ payload 0 s ∧
+      cshake256Bytes roundDomain (payload 0 r) = cshake256Bytes roundDomain (payload 0 s)) := by
+  by_cases he : r = s
+  · exact .inl he
+  · exact .inr ⟨(fun hp => he (payload_injective hp).2),
+      (checkRound_commitment p r digest ops hr).symm.trans
+        (checkRound_commitment p s digest ops' hs)⟩
 
 theorem checkRound_opening (p : RoundPolicy) (r : Intent) (digest : List UInt8)
     (ops : List RoundOpening) (o : RoundOpening) (hm : o ∈ ops)
@@ -139,7 +168,9 @@ theorem certificate_invalid_rejected (cfg : SigningConfig) (pks : Nat → PqPubl
 
 end Qsag.Custody
 end
+set_option maxRecDepth 4096
 #verify_constructive Qsag.Custody.payload_injective
 #verify_constructive Qsag.Custody.sign_verifies
 #verify_constructive Qsag.Custody.checkRound_changed_share
 #verify_constructive Qsag.Custody.certificate_wrong_session
+#verify_constructive Qsag.Custody.accepted_round_context_or_collision

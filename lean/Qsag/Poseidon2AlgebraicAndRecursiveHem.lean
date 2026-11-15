@@ -52,13 +52,14 @@ module
    and transpose-linear branch bounds for `applyME` (single-block `≥ 7 ≥ 5`, multi-block `≥ 8`,
    universal `= 7`) and `applyMI` (nonzero-sum `= 13` with full 12-lane diffusion on single-lane
    inputs, universal `≥ 4`).
-9. **§9 `sbox7` differential uniformity `≤ 6` & width-12 `(R_F = 8, R_P = 22)` wide-trail bounds.**
+9. **§9 `sbox7` differential uniformity `≤ 6` and width-12 activity.**
    Degree-6 root bound on `(x + Δ)^7 - x^7 = δ` (`Δ ≠ 0`), `≥ 28` active S-boxes across the
-   deployed 30-round `poseidon2Perm12`, and `< 2 ^ (-256)` differential and squared-linear
-   characteristic bounds.
-10. **§10 Width-12 symbolic circuit, univariate saturation & CICO-1 Macaulay/Bézout bounds.**
-    Full width-12 `PoseidonExpr` lifting of `poseidon2Perm12`, forward/backward degree saturation
-    past `goldilocksPrime`, and CICO-1 Bézout and Macaulay matrix dimension bounds `> 2 ^ 128`.
+   deployed 30-round `poseidon2Perm12`, and arithmetic powers of component bounds. No
+   fixed-permutation differential probability or Fourier linear-trail theorem is proved.
+10. **§10 Width-12 symbolic circuit and nominal CICO arithmetic.**
+    `PoseidonExpr` evaluation equals `poseidon2Perm12`; affine inputs have syntactic degree
+    at most `7^30`. Exponent and matrix-size inequalities do not prove actual degree,
+    semi-regularity, matrix rank, or attack-complexity lower bounds.
 11. **§11 Succinct outer recursive `Hem` aggregation & soundness composition.** Single outer
     `bciksJohnsonQrom128` certificate over length-framed compressed shard headers with constructive
     witness extraction and finite-coin error bound `M · ε_hem + ε_outer`.
@@ -6051,12 +6052,14 @@ private theorem pow_lt_pow_of_lt_base (u v k : Nat) (hu : 1 ≤ u) (huv : u < v)
     exact Nat.lt_of_lt_of_le (Nat.mul_lt_mul_of_pos_right ih' (by omega))
       (Nat.mul_le_mul_left _ (Nat.le_of_lt huv))
 
-/-- **Width-12 `(R_F = 8, R_P = 22)` Wide-Trail Active S-Box & Characteristic Probability Theorem**:
-    1. Every distinct input pair `a ≠ b` activates `≥ 28` S-boxes across `poseidon2Perm12`
-       (`≥ 14` in the 4 initial full rounds + `≥ 14` in the 4 terminal full rounds).
-    2. Because `sbox7` has differential uniformity `≤ 6` and degree-7 squared linear correlation
-       weight `≤ (7 - 1)^2 = 36`, any trail with `28 ≤ active` S-boxes satisfies both
-       `(6 / p)^active < 2^(-1680) < 2^(-256)` and `(36 / p)^active < 2^(-1596) < 2^(-256)`. -/
+/-- Actual activity lower bound plus separate arithmetic inequalities. Every distinct input
+    pair activates at least 28 S-boxes. Interpreting `6^active / p^active` as a differential
+    trajectory probability needs an appropriate conditional-distribution experiment: a
+    realized trail of a fixed width-12 permutation under uniform inputs has mass at least
+    `p^-12`, which rules out that product as a universal bound for those events. Linear trail
+    contributions are signed Fourier quantities, not such events, and can multiply without
+    stochastic independence. Here neither the component character-sum estimate underlying
+    `36/p` nor the Fourier trail/hull connection is formalized. Historical name retained. -/
 theorem poseidon2_width12_wide_trail_and_characteristic_bounds :
     (∀ a b : Poseidon2State12, a ≠ b → 28 ≤ poseidon2Perm12ActiveSboxes a b) ∧
     (∀ active : Nat, 28 ≤ active →
@@ -6467,19 +6470,14 @@ private theorem binomCoeff_mono_both (a a' b b' : Nat) (ha : a ≤ a') (hb : b �
     rwa [hsub] at hs
   omega
 
-/-- **Width-12 Symbolic Evaluation, Forward/Backward Degree Saturation & CICO-1/GSR/`2026/306` Bounds**:
-    1. `symbolicPerm12` evaluates identically to `poseidon2Perm12` and has degree `≤ 7^30` on affine inputs.
-    2. Forward/backward univariate root-finding saturates `goldilocksPrime`: for every split `rFwd + rBwd = 30`,
-       either `rBwd = 0` (`7^rFwd = 7^30 > goldilocksPrime`), or `1 ≤ rBwd` (`poseidon2DInv > 2^63` per backward
-       inverse S-box, with combined Bézout degree `7^rFwd * 7^rBwd = 7^30 > goldilocksPrime` and `(7^30)^2 > 2^128`).
-    3. CICO-1 round/S-box Gröbner Macaulay & Bézout bounds exceed `2^128`:
-       - Half-full + partial S-box Bézout bound `7^(12 * (8 / 2) + 22) = 7^70 > 2^196 > 2^128`;
-       - Merz–Rodríguez García (`2026/306`) worst-case skipped ideal degree `7^(22 + 4) = 7^26` satisfies
-         `(7^26)^2 = 7^52 > 2^145 > 2^128`;
-       - Bhati–Tariq–Ashur (`2026/1692`) GSR with `R_F0 = 4` leaves `7^(3 * 11 + 16) = 7^49 > 2^128`
-         (and CICO-4 `7^(4 * 22) = 7^88 > 2^247 > 2^128`);
-       - Macaulay matrix column count `binomCoeff (70 + cicoMacaulayDegree 26) 70 ≥ 2^70` has quadratic
-         linear-algebra cost `(binomCoeff (70 + cicoMacaulayDegree 26) 70)^2 > 2^128`. -/
+/-- Symbolic evaluation correctness, a syntactic degree upper bound, and parameter arithmetic.
+    `symbolicPerm12` evaluates to the actual permutation and has syntactic degree at most `7^30`
+    on affine inputs. The remaining conjuncts compare nominal exponent products and a binomial
+    matrix-size expression to `2^128`. They do not establish reduced polynomial degree,
+    semi-regularity, Macaulay rank, a minimum number of monomials, or attack running-time lower
+    bounds. In particular a large upper bound, or the size of one possible algorithm's matrix,
+    is not a lower bound on every solving algorithm. No cited attack is formalized by these
+    numerical expressions. Historical theorem name retained for compatibility. -/
 theorem poseidon2_width12_cico_groebner_and_interpolation_bounds :
     (∀ (v : Nat → Goldilocks) (st : SymbolicState12),
       (symbolicPerm12 st).eval v = poseidon2Perm12 (st.eval v)) ∧

@@ -1,29 +1,29 @@
 # QSAG quorum custody and consensus scaling
 
-Engineering assessment, 2026-11-14. Scope: the checked-out implementation, paper-reported measurements, and explicitly parameterized deployment scenarios. No new cryptographic or hardware benchmark was run for this report.
+Engineering assessment, reconciled 2026-11-14. The numerical tables retain the older affine-v6 calibration and explicit deployment hypotheses; they are not current prover benchmarks. Habr24 rows are historical: those regimes and wire tags are now rejected. The current default is Johnson QROM. No new hardware benchmark was run for this documentation update.
 
 ## Executive finding
 
 QSAG addresses two independent problems: Hem aggregates signatures from independently controlled validator keys, while threshold custody distributes control of each signing key. A validator fleet does not need threshold custody to use Hem. Conversely, a custody committee does not replace a consensus validator set: distributing one key among custodians still yields one validator vote.
 
-The implementation does **not yet establish the requested 150 ms end-to-end consensus path, sub-millisecond Hem verification, or constant-size two-level recursive proof**. The affine v6 measurements are seconds of proving and tens of milliseconds of verification at a small batch size. The hierarchy in `recursive.rs` verifies every regional proof and commits to their contents; its root digest alone is not a proof of those verifications. The useful engineering destination is larger jointly witnessed batches, bounded-memory parallel proving, and eventually a genuine recursive verifier circuit. Calling concatenation recursion would conceal the dominant scaling cost.
+The implementation does **not yet establish the requested 150 ms end-to-end consensus path, sub-millisecond Hem verification, or constant-size two-level recursive proof**. The older affine v6 measurements are seconds of proving and tens of milliseconds of verification at a small batch size; newer GPU and prepared-verifier implementations are not represented by that calibration. The hierarchy in `recursive.rs` verifies every regional proof and commits to their contents. The compact outer proof checks only the public commitment chain; authorization requires `VerifiedHierarchicalHemEvidence` obtained by checking the real children and bound to the same registry, epoch, message, threshold, regime and child digests. The useful engineering destination is larger jointly witnessed batches, bounded-memory parallel proving, and eventually a genuine recursive verifier circuit. Calling concatenation recursion would conceal the dominant scaling cost.
 
 ## Reproduction and interpretation
 
-Run from any working directory:
+Run from the repository root:
 
 ```sh
 python3 scripts/quorum_and_consensus_scaling.py --self-test
 python3 scripts/quorum_and_consensus_scaling.py --self-test -o ./scaling-report.json
 ```
 
-The second command writes the requested summary and numerical tables to the literal filename `-o`. The model uses only the Python standard library; self-test performs bounded arithmetic and small source/document reads, with no build, network, GPU initialization, or prover execution. `--write-tables` regenerates the marked block below. Self-test checks exact equality of every generated table, independent arithmetic identities, invalid-input boundaries, and selected source drift guards. It does not certify prose, cryptography, or the accuracy of historical benchmark measurements.
+The second command writes the summary and numerical tables to `./scaling-report.json`. The model uses only the Python standard library; self-test performs bounded arithmetic and small source/document reads, with no build, network, GPU initialization, or prover execution. `--write-tables` regenerates the marked block below. Self-test checks exact equality of every generated table, independent arithmetic identities, invalid-input boundaries, and selected source drift guards. It does not certify prose, cryptography, or the accuracy of historical benchmark measurements.
 
 Use `--help` for sensitivity parameters. For example, `--proof-bytes 500000 --verify-ms 25 --gpu-fraction 0.5 --gpu-kernel-speedup 4` changes hypothetical batch costs without changing the checked-in report. No hardware speedup is inferred from a GPU's marketing FLOPS. Bytes are decimal B; MB means decimal million bytes. GiB is binary. Durations are explicitly labelled. All bandwidth totals count one delivered copy, not network-wide gossip traffic.
 
 ## Evidence and model equations
 
-The calibration is the affine v6 `bench_affine_regimes`, K=8, Intel Core i9-12900, as reported in [the paper, protocol latency section](../paper/qsag.typ). Habr24 capacity proximity is conjectural; the Johnson schedule avoids that particular conjecture. Neither label resolves the paper's outstanding multi-round QROM Fiat–Shamir extraction or trace-to-verifier linkage obligations. Old pre-v6 numbers are deliberately excluded from the model. The reported decimals are rounded observations, not distributions or p99 estimates; no raw benchmark artifact was available in the inspected report.
+The calibration is the affine v6 `bench_affine_regimes`, K=8, Intel Core i9-12900, as recorded in an earlier paper snapshot. The [current paper source](../paper/qsag.typ) may use newer results; this model retains its named calibration constants. Habr24 capacity-proximity regimes have since been retired; their rows are historical calibration only. The Johnson schedule avoids that capacity claim, but its integration still needs the CWYZ decomposition and concrete checker reduction. Neither label resolves the paper's outstanding multi-round QROM Fiat–Shamir extraction or trace-to-verifier linkage obligations. Old pre-v6 numbers are deliberately excluded from the model. The reported decimals are rounded observations, not distributions or p99 estimates; no raw benchmark artifact was available in the inspected report.
 
 There are three distinct quantitative layers:
 
@@ -135,7 +135,7 @@ Even a recursively succinct cryptographic proof does not automatically make expl
 | Independent validator fleet | One secret key per validator | Hem proof over independent public keys and messages | Supported for the two algebraic Hem profiles; threshold sharing is unnecessary |
 | Threshold validator custody | A single validator key distributed among custodians | One signature under that validator's key | Threshold count need not add signature wire bytes; setup, policy and transcript traffic remain off chain |
 | Threshold FIPS 205 custody | Shares of a standard SLH-DSA secret key | Standard SLH-DSA signature | Stock verification is distinct from Hem's current algebraic signature verifier |
-| Threshold algebraic custody feeding Hem | Shares producing exactly the selected Hem profile's signature | Hem proof over validator keys | Requires a checked adapter and matching encoding/parameters; not established merely by choosing a committee key |
+| Threshold algebraic custody feeding Hem | Shares producing exactly the selected Hem profile's signature | Hem proof over validator keys | `hem_quorum.rs` implements the matching Jorts adapter and lifecycle; separated-party refinement and complete deployment composition remain open |
 
 Hem is neither threshold-only nor a universal signature SNARK. [Its profile enum and verifier](../crates/qsag-agg/src/sig.rs) accept JortsPoseidon2 and CorduroyPoseidon2. These cover individual WOTS+C and FORS-based signature verification. They are not FIPS 205 SLH-DSA wire formats. Generic SHAKE/SHA2 SLH-DSA aggregation would need its own trace and performance evidence. The statement “single standard FIPS 205 / Hem-aggregatable signature” must therefore be read as two separate possible outputs, not as an established interchangeable format.
 
@@ -153,7 +153,7 @@ A signature implementation, an aggregation virtual machine, and proof-system com
 | Proof backend | Degree-eight sumcheck, GoldilocksExt4, WHIR, affine RS folds | Match proven/conjectural proximity assumptions, query budget and Fiat–Shamir threat model |
 | Composition | Shared openings within a batch; child-proof retention across batches | Compare actual recursive proof output against actual concatenated output, including public inputs |
 | Performance | Paper-reported small-batch host measurements | Same CPU threads/RAM, release flags, security regime, cold/warm state, serialized bytes and p50/p99 |
-| GPU | Vulkan kernels exist; no end-to-end Hem timing established here | Measure whole prover with transfer, launches, receipts and CPU residual work |
+| GPU | Persistent prover arena, GPU AIR/sumcheck and WHIR paths exist; older tables do not calibrate them | Measure the current whole prover with transfer, launches, receipts and CPU residual work |
 | Custody | Dedicated threshold protocols, preprocessing and durable state | Treat custody as an additional capability; it does not itself accelerate a proof backend |
 
 There is no matched competitor benchmark in this report, so it makes **no numerical throughput or proof-size superiority claim**. A reproducible comparison should record immutable commits for both stacks and raw machine-readable runs at each requested population, separating key generation, signing, aggregation and verification. This is a concrete missing measurement, not a reason to substitute an unrelated microbenchmark.
@@ -166,7 +166,7 @@ Likewise, `z=2, S=480` is not the current Hem trace parameter set. The inspected
 
 ## GPU and deployment work that would change the answer
 
-The RX 6750 XT RDNA2 Vulkan path has a [hardware benchmark entry point](../crates/qsag-accel/examples/rdna2_vulkan_bench.rs), [backend](../crates/qsag-accel/src/vulkan.rs), and shader kernels. Their existence is not a measured Hem prover integration or latency. The GPU table is therefore a sensitivity analysis only. Kernel receipt checking and CPU revalidation must be included where enabled; accelerating Poseidon2 alone may leave Keccak commitments, extension arithmetic, sumcheck, NTTs and memory traffic dominant.
+The RX 6750 XT RDNA2 Vulkan path now includes a persistent prover arena, AIR/sumcheck and WHIR integration in `acceleration.rs`, `arithmetize.rs` and `pcs.rs`, as well as a [hardware benchmark entry point](../crates/qsag-accel/examples/rdna2_vulkan_bench.rs), [backend](../crates/qsag-accel/src/vulkan.rs), and shader kernels. The older kernel-only calibration below is not a measurement of that integrated path. The GPU table is therefore a sensitivity analysis only. Kernel receipt checking and CPU revalidation must be included where enabled; accelerating Poseidon2 alone may leave Keccak commitments, extension arithmetic, sumcheck, NTTs and memory traffic dominant.
 
 The next useful gates are:
 

@@ -407,6 +407,23 @@ structure SessionScheduleReq where
   honestApprovers : List Nat
   deriving DecidableEq, Repr
 
+/-- Complete, domain-separated WAL intent. There is no profile field in
+    `SessionScheduleReq`; the version tag identifies this encoding, not a profile.
+    `optRand` is included as supplied. No hash truncation discards message suffixes. -/
+def encodeUcSigningRequest (req : SessionScheduleReq) : List UInt8 :=
+  encodeMultiFrame ["QSAG.UC.SIGNING-REQUEST/v1".toUTF8.data.toList,
+    leb128 req.sessionId, leb128 req.reqEpoch, req.msg, req.optRand,
+    encodeMultiFrame (req.honestApprovers.map leb128)]
+
+/-- Full public-key binding preimage. Including both components prevents a common
+    32-byte seed from masking changes to the public root. Hash collision resistance
+    remains an explicit obligation when the digest, rather than this preimage, is used. -/
+def encodeUcPqPublicKey (pk : PqPublicKey) : List UInt8 :=
+  encodeMultiFrame ["QSAG.UC.PQ-PUBLIC-KEY/v1".toUTF8.data.toList, pk.pkSeed, pk.pkRoot]
+
+def ucPqPublicKeyDigest (pk : PqPublicKey) : List UInt8 :=
+  shake256Xof 32 (encodeUcPqPublicKey pk)
+
 /-- Wire-level multi-round transcript recorded for a single scheduled session. -/
 structure SessionWireRecord where
   request        : SessionScheduleReq
@@ -615,11 +632,11 @@ theorem RealProtocolExec_succ {PK ShareT SessionTape R1St R2St R3St AdvState : T
       let (clF, trRest) := RealProtocolExec proto A s (fun i => tapes (i + 1)) cl1 advSt1
       (clF, ⟨trRest.finalAdvState, rec1 :: trRest.sessions⟩) := by rfl
 
-/-- **Explicit Black-Box UC Simulator (`BlackBoxUcSimulator`)**:
-    Notice that `ShareT` and `SK` DO NOT APPEAR anywhere in `BlackBoxUcSimulator`'s type!
-    In each quorum-approved, WAL-authorized session, `IdealFunctionalityExec` queries the ideal
-    functionality's `idealSignOracle` for `idealSigBytes : ByteArray` and hands ONLY
-    `(pk, corruptParties, req, cursor, idealSigBytes, simTape)` to `Sim`! -/
+/-- Simulator callback interface. Rounds 1 and 2 receive public request data and
+    the simulation tape; Round 3 additionally receives the ideal signing result.
+    There is no explicit secret-share argument. A callback can nevertheless capture
+    secrets in its closure, so secret independence is a concrete-constructor proof
+    obligation, not a consequence of this interface's type. -/
 structure BlackBoxUcSimulator (PK SimTape SimR1 SimR2 SimR3 : Type) where
   pkDigestOf      : PK → List UInt8
   msgDigestOf     : SessionScheduleReq → List UInt8
@@ -634,9 +651,49 @@ structure BlackBoxUcSimulator (PK SimTape SimR1 SimR2 SimR3 : Type) where
   /-- Programs Round-3 honest cut-opening shares solely from public `(pk, req, idealSigBytes)`! -/
   simRound3       : PK → List Nat → SessionScheduleReq → SimR3 → ByteArray → SimTape →
                       List (Nat × ByteArray) × SimR3
+  /-- Legacy wire reconstruction callback. Its abort choice is observed, but its
+      proposed success bytes are replaced by the ideal oracle result at delivery. -/
   simFinalizeCut  : PK → SessionScheduleReq → SimR3 → ByteArray →
                       List (Nat × ByteArray) → List (Nat × ByteArray) →
                       PSum AbortReason ByteArray
+
+/-- The simulator controls delivery or abort, never the functionality's signature.
+    The legacy callback's success payload is a wire-reconstruction proposal; it has no
+    authority to replace the result returned by the ideal signing oracle. Both sequential
+    and concurrent ideal executions use this boundary. -/
+def BlackBoxUcSimulator.finalizeIdealCut {PK SimTape SimR1 SimR2 SimR3 : Type}
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (pk : PK) (req : SessionScheduleReq) (st : SimR3) (idealSig : ByteArray)
+    (honest corrupt : List (Nat × ByteArray)) : PSum AbortReason ByteArray :=
+  match sim.simFinalizeCut pk req st idealSig honest corrupt with
+  | .inl err => .inl err
+  | .inr _ => .inr idealSig
+
+/-- Successful delivery cannot substitute a simulator-chosen signature. -/
+theorem BlackBoxUcSimulator.finalizeIdealCut_output
+    {PK SimTape SimR1 SimR2 SimR3 : Type}
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (pk : PK) (req : SessionScheduleReq) (st : SimR3) (idealSig out : ByteArray)
+    (honest corrupt : List (Nat × ByteArray))
+    (h : sim.finalizeIdealCut pk req st idealSig honest corrupt = .inr out) :
+    out = idealSig := by
+  unfold finalizeIdealCut at h
+  cases hf : sim.simFinalizeCut pk req st idealSig honest corrupt with
+  | inl err => rw [hf] at h; cases h
+  | inr proposal => rw [hf] at h; cases h; rfl
+
+/-- Output enforcement preserves every simulator-selected abort and its reason. -/
+theorem BlackBoxUcSimulator.finalizeIdealCut_abort_iff
+    {PK SimTape SimR1 SimR2 SimR3 : Type}
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (pk : PK) (req : SessionScheduleReq) (st : SimR3) (idealSig : ByteArray)
+    (honest corrupt : List (Nat × ByteArray)) (err : AbortReason) :
+    sim.finalizeIdealCut pk req st idealSig honest corrupt = .inl err ↔
+      sim.simFinalizeCut pk req st idealSig honest corrupt = .inl err := by
+  unfold finalizeIdealCut
+  cases hf : sim.simFinalizeCut pk req st idealSig honest corrupt with
+  | inl reason => rfl
+  | inr proposal => constructor <;> intro h <;> cases h
 
 /-- Strictly `sk`-free ideal-world state (`IdealTsigState` + public `WalLatchState` + session cursor). -/
 structure IdealClusterState (PK : Type) where
@@ -708,7 +765,7 @@ def execIdealSession {PK SimTape SimR1 SimR2 SimR3 AdvState : Type}
             sim.simRound3 icl.tsig.pk icl.tsig.corruptParties req sR3Init idealSigBytes tape
           let (corrR3Fn, advSt4) := A.rushRound3 advSt3 honR3
           let corrR3 := icl.tsig.corruptParties.map (fun c => (c, corrR3Fn c))
-          match sim.simFinalizeCut icl.tsig.pk req sR3 idealSigBytes honR3 corrR3 with
+          match sim.finalizeIdealCut icl.tsig.pk req sR3 idealSigBytes honR3 corrR3 with
           | .inl cutErr =>
             let iclPoisoned := poisonIdealCluster iclApproved
             let out := SessionOutcome.abort cutErr
@@ -754,7 +811,7 @@ theorem execIdealSession_opening_records_approval
           | inl _ => intro hOpen; exact False.elim (hOpen rfl)
           | inr _ =>
             dsimp only
-            cases sim.simFinalizeCut _ _ _ _ _ _ <;> intro _ <;> exact List.mem_cons_self
+            cases sim.finalizeIdealCut _ _ _ _ _ _ <;> intro _ <;> exact List.mem_cons_self
 
 /-- Run `Q_s` adaptively scheduled interactive rushing sessions of `IdealFunctionalityExec`. -/
 def IdealFunctionalityExec {PK SimTape SimR1 SimR2 SimR3 AdvState : Type}
@@ -1290,7 +1347,7 @@ theorem execIdealSession_request {PK SimTape SimR1 SimR2 SimR3 AdvState : Type}
           | inl _ => rfl
           | inr _ =>
             dsimp only
-            cases sim.simFinalizeCut _ _ _ _ _ _ <;> rfl
+            cases sim.finalizeIdealCut _ _ _ _ _ _ <;> rfl
 
 /-- **Single-Session Signing-Oracle Locality (`execIdealSession_oracle_congr`)**:
     an ideal session reads `idealSignOracle` at most at its own scheduled request, and only when the
@@ -1329,7 +1386,7 @@ theorem execIdealSession_oracle_congr {PK SimTape SimR1 SimR2 SimR3 AdvState : T
             intro hAgree
             have hEq : O' (A.scheduleSession advSt).1 = O (A.scheduleSession advSt).1 := by
               apply hAgree
-              cases sim.simFinalizeCut _ _ _ _ _ _ <;> exact hR3 _ _ _ _ _ _
+              cases sim.finalizeIdealCut _ _ _ _ _ _ <;> exact hR3 _ _ _ _ _ _
             rw [hEq]
 
 /-- **Multi-Session Signing-Oracle Locality (`IdealFunctionalityExec_oracle_congr`)**:
@@ -2010,7 +2067,7 @@ def idealConcurrentEngine {PK SimTape SimR1 SimR2 SimR3 : Type} {Q_s : Nat}
       let (honR3, s3') := sim.simRound3 pk corr req s3Pair.1 s3Pair.2 (simTapes j)
       (honR3, (s3', s3Pair.2))
     slotFinalize := fun _ pk req s3Pair h3 c3 =>
-      sim.simFinalizeCut pk req s3Pair.1 s3Pair.2 h3 c3 }
+      sim.finalizeIdealCut pk req s3Pair.1 s3Pair.2 h3 c3 }
 
 /-- `h`-Hybrid `ConcurrentSlotEngine`: slots `< h` run `sim`, slots `≥ h` run `proto`. -/
 def hybridConcurrentEngine {PK ShareT SessionTape R1St R2St R3St SimTape SimR1 SimR2 SimR3 : Type}
@@ -2070,7 +2127,7 @@ def hybridConcurrentEngine {PK ShareT SessionTape R1St R2St R3St SimTape SimR1 S
     slotFinalize := fun _ pk req st3 h3 c3 =>
       match st3 with
       | .inl r3 => proto.finalizeCutOpen pk req r3 h3 c3
-      | .inr s3Pair => sim.simFinalizeCut pk req s3Pair.1 s3Pair.2 h3 c3 }
+      | .inr s3Pair => sim.finalizeIdealCut pk req s3Pair.1 s3Pair.2 h3 c3 }
 
 /-- **Concurrently Interleaved Real-World Protocol Execution (`ConcurrentProtocolExec`)**:
     Adversary `A` arbitrarily interleaves Round 1 / Round 2 / Round 3 steps across up to `Q_s`
@@ -2320,21 +2377,21 @@ private theorem execConcurrentStep_preserves_sidInvariant
             dsimp only [ConcurrentSidInvariant]
             refine ⟨hNodup, hCompSeen, ?_, ?_⟩
             · intro j sid' hSome
-              have hSameSid : ∀ x, slotPhaseSid
+              have hSameSid : ∀ (h2 c2 : List (Nat × ByteArray)) x, slotPhaseSid
                   (updateConcurrentSlot st.slots slot
-                    (.afterR2 ep msgDig req honR1 corrR1 _ _ r3Init) x) =
+                    (.afterR2 ep msgDig req honR1 corrR1 h2 c2 r3Init) x) =
                   slotPhaseSid (st.slots x) := by
-                intro x
+                intro h2 c2 x
                 by_cases hx : x = slot
                 · subst hx
                   rw [updateConcurrentSlot_same, hPh]
                   rfl
                 · rw [updateConcurrentSlot_ne _ _ x _ hx]
-              rw [hSameSid j] at hSome
+              rw [hSameSid] at hSome
               obtain ⟨hjSeen, hjComp, hjOther⟩ := hSlotInv j sid' hSome
               refine ⟨hjSeen, hjComp, ?_⟩
               intro k hkNe
-              rw [hSameSid k]
+              rw [hSameSid]
               exact hjOther k hkNe
             · intro j hj
               have hUnJ := hUnalloc j hj
@@ -2883,7 +2940,7 @@ structure PerSessionRoundSimSpec
     wR = wS ∧ RelR3 p c req r3' s3'
   hFinalize      : ∀ p c req r3 s3 h3 c3, RelR3 p c req r3 s3 →
     proto.finalizeCutOpen pk req r3 h3 c3 =
-      sim.simFinalizeCut pk req s3 (idealSignOracle req) h3 c3
+      sim.finalizeIdealCut pk req s3 (idealSignOracle req) h3 c3
   hBadCheckBound : ∀ req h2 c2,
     finSum cardCheck (fun c => if badCheck req h2 c2 c then 1 else 0) ≤ epsCheck
 
@@ -3247,7 +3304,7 @@ theorem concurrent_hybrid_simulation_reduces_to_per_session
                   dsimp only
                   have hFinEq := spec.hFinalize p c rq r3' s3' wR3 _ hRel3'
                   rw [hFinEq]
-                  cases sim.simFinalizeCut cl.tsig.pk rq s3' (idealSignOracle rq) wR3 _ <;>
+                  cases sim.finalizeIdealCut cl.tsig.pk rq s3' (idealSignOracle rq) wR3 _ <;>
                     exact ih _ (updateConcurrentSlot slotsS slot .closed) _ hPkE hCorrE hIdxAlloc hClosedOther (.inl hClosedIdx)
                 · simp only [↓reduceIte]
                   exact ih _ (updateConcurrentSlot slotsS slot .closed) _ hPkE hCorrE hIdxAlloc hClosedOther (.inl hClosedIdx)
@@ -3906,8 +3963,8 @@ def activeShamirThresholdProtocol
       (ShamirPadPoly Goldilocks t × GoldilocksExt2)
       (ShamirPadPoly Goldilocks t × GoldilocksExt2)
       Unit :=
-  { pkDigestOf := fun pk => (pk.pkSeed ++ pk.pkRoot).take 32
-    msgDigestOf := fun req => req.msg.take 32
+  { pkDigestOf := ucPqPublicKeyDigest
+    msgDigestOf := encodeUcSigningRequest
     honestRound1 := fun _ corruptParties _ _ _ (padPoly, alpha) =>
       let wires := (corruptParties.zip corruptPts).map
         (fun cx => (cx.1, packGoldilocksWire (RoundPoly.evalCoeffs padPoly.1 cx.2)))
@@ -3945,8 +4002,8 @@ def activeShamirBlackBoxSimulator
       (ShamirPadPoly Goldilocks t)
       (ShamirPadPoly Goldilocks t)
       Unit :=
-  { pkDigestOf := fun pk => (pk.pkSeed ++ pk.pkRoot).take 32
-    msgDigestOf := fun req => req.msg.take 32
+  { pkDigestOf := ucPqPublicKeyDigest
+    msgDigestOf := encodeUcSigningRequest
     simRound1 := fun _ corruptParties _ _ simPoly =>
       let wires := (corruptParties.zip corruptPts).map
         (fun cx => (cx.1, packGoldilocksWire (RoundPoly.evalCoeffs simPoly.1 cx.2)))
@@ -4096,7 +4153,10 @@ def activeShamir_perSessionRoundSimSpec
       · exact .inl ⟨.activeConsistencyFailed, rfl, rfl⟩
       · exact .inr ⟨(), (), rfl, rfl, trivial⟩
     hRound3 := fun _ _ _ _ _ _ => ⟨rfl, trivial⟩
-    hFinalize := fun _ _ _ _ _ _ _ _ => rfl
+    hFinalize := fun _ _ _ _ _ _ corrR3 _ => by
+      dsimp only [activeShamirThresholdProtocol, activeShamirBlackBoxSimulator,
+        BlackBoxUcSimulator.finalizeIdealCut]
+      cases corrR3.all (fun cw => decide (cw.2.size > 0)) <;> rfl
     hBadCheckBound := fun _ _ corrR2 =>
       Nat.le_trans (spdzGateStream_pin_count_le (unpackSpdzGates maxGates corrR2))
         (unpackSpdzGates_length_le maxGates corrR2) }
@@ -4436,7 +4496,7 @@ theorem perSessionRoundSim_sequential_bound
               | inl _ => exact ⟨rfl, rfl, fun _ => rfl⟩
               | inr _ =>
                 dsimp only
-                cases sim.simFinalizeCut _ _ _ _ _ _ with
+                cases sim.finalizeIdealCut _ _ _ _ _ _ with
                 | inl _ => exact ⟨rfl, rfl, fun _ => rfl⟩
                 | inr _ => exact ⟨rfl, rfl, fun hp => by rw [hNotP] at hp; cases hp⟩
     obtain ⟨hP1, hC1, hMono⟩ := hSub ⟨clIn.tsig, clIn.honestWal, clIn.maskSessionCursor⟩
@@ -4671,7 +4731,7 @@ theorem perSessionRoundSim_sequential_bound
                       subst hW3Eq
                       dsimp only
                       rw [spec.hFinalize p c req r3' s3' w3_R _ hRel3']
-                      cases sim.simFinalizeCut cl.tsig.pk req s3' (idealSignOracle req) w3_R _ with
+                      cases sim.finalizeIdealCut cl.tsig.pk req s3' (idealSignOracle req) w3_R _ with
                       | inl cutErr =>
                         dsimp only [poisonRealCluster, poisonIdealCluster, walQuarantine]
                         simp [hNotPois]

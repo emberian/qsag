@@ -113,10 +113,12 @@ structure RatBound where
 @[expose] def exceedsBitBudget (b : Nat) (bound : RatBound) : Prop :=
   bound.den < bound.num * 2 ^ b
 
-instance (a b : RatBound) : Decidable (RatBound.le a b) :=
+/- These two instances are named: the generated names `instDecidableLe` / `instDecidableLt` are
+   also generated for `ExactRat` in `GaussianHvzkAndDualLpn.lean`, and the library root imports both. -/
+instance RatBound.decidableLe (a b : RatBound) : Decidable (RatBound.le a b) :=
   Nat.decLe (a.num * b.den) (b.num * a.den)
 
-instance (a b : RatBound) : Decidable (RatBound.lt a b) :=
+instance RatBound.decidableLt (a b : RatBound) : Decidable (RatBound.lt a b) :=
   Nat.decLt (a.num * b.den) (b.num * a.den)
 
 instance (b : Nat) (bound : RatBound) : Decidable (atLeastBits b bound) :=
@@ -3165,13 +3167,16 @@ theorem goldilocksExt4_schwartz_zippel_root_bound
 
 /-- Exact quartic extension cardinality `|𝔽_{p^4}| = p^4` (`> 2^255`). -/
 def goldilocksExt4Card : Nat := goldilocksPrime ^ 4
-def goldilocksExt2Card : Nat := goldilocksPrime ^ 2
+/-- Quadratic extension cardinality `p^2` (`< 2^128`). Named apart from `Qsag.goldilocksExt2Card`
+    in `ThresholdMpc.lean` (`p * p`, the index type of its field enumeration): the library root and
+    `CorduroyAndHemAirCompleteness` import both modules. -/
+def goldilocksQuadraticExtCard : Nat := goldilocksPrime ^ 2
 
 theorem goldilocksExt4Card_pos : 0 < goldilocksExt4Card := by
   unfold goldilocksExt4Card goldilocksPrime; decide
 
-theorem goldilocksExt2Card_pos : 0 < goldilocksExt2Card := by
-  unfold goldilocksExt2Card goldilocksPrime; decide
+theorem goldilocksQuadraticExtCard_pos : 0 < goldilocksQuadraticExtCard := by
+  unfold goldilocksQuadraticExtCard goldilocksPrime; decide
 
 /-- Canonical 2-regime unconditional WHIR Johnson security ladder mirroring
     `crates/qsag-agg/src/pcs.rs` (`WhirSecurityRegime`, `#[repr(u8)]` tags `{2, 4}`,
@@ -3534,11 +3539,11 @@ theorem whirBudgetRegime_multistage_union_and_session_bounds :
        (`exceedsBitBudget 0`), justifying why default `bciksJohnsonQrom128` (`q = 258, 130, 88, 66`)
        is required for `136`-bit QROM round-search work! -/
 theorem tooth_hem_ext2_folding_under_100bits :
-    exceedsBitBudget 100 ⟨(2 ^ 22) ^ 2, goldilocksExt2Card, goldilocksExt2Card_pos⟩ ∧
+    exceedsBitBudget 100 ⟨(2 ^ 22) ^ 2, goldilocksQuadraticExtCard, goldilocksQuadraticExtCard_pos⟩ ∧
     exceedsBitBudget 0
       (quantumGroverGrindingBound (2 ^ 72)
         (whirPositiveEtaJohnsonStageBound ⟨2, 6, 26, 129, by decide⟩ 128 (by decide) 16)) := by
-  refine ⟨by unfold exceedsBitBudget goldilocksExt2Card goldilocksPrime; decide,
+  refine ⟨by unfold exceedsBitBudget goldilocksQuadraticExtCard goldilocksPrime; decide,
           by unfold exceedsBitBudget quantumGroverGrindingBound whirPositiveEtaJohnsonStageBound
                RatBound.scale; decide⟩
 

@@ -1,0 +1,156 @@
+{
+  "checks": [],
+  "format": 1,
+  "purpose": "Source scopes of the recorded CONVERGENCE_EVIDENCE.json gates, and later scoped checks with their own explicit input hashes. Read with scripts/check_evidence_freshness.py; a check whose inputs changed is stale, never re-labelled.",
+  "recorded_gate_scopes": {
+    "cross-kat": [
+      "crates/*",
+      "Cargo.toml",
+      "Cargo.lock",
+      "rust-toolchain.toml",
+      "aeneas/qsag-verified/*",
+      "aeneas/qsag-whir-verified/*",
+      "lean/*",
+      "scripts/cross_kat_runner.py"
+    ],
+    "dense-pcg-soaks": [
+      "crates/*",
+      "Cargo.toml",
+      "Cargo.lock",
+      "rust-toolchain.toml",
+      "aeneas/qsag-verified/*",
+      "aeneas/qsag-whir-verified/*"
+    ],
+    "differential": [
+      "crates/*",
+      "Cargo.toml",
+      "Cargo.lock",
+      "rust-toolchain.toml",
+      "aeneas/qsag-verified/*",
+      "aeneas/qsag-whir-verified/*",
+      "lean/*",
+      "scripts/spec_differential_fuzz.py",
+      "scripts/run_differential_validation.sh"
+    ],
+    "elf-fixture-freshness": [
+      "crates/qsag-asm/*",
+      "scripts/extract_rlib_elf.py",
+      "lean/Qsag/Elf*.lean",
+      "lean/Qsag/CompiledRlibFixtures.lean",
+      "lean/tools/*"
+    ],
+    "elf-instruction-screen": [
+      "crates/qsag-asm/*",
+      "scripts/audit_elf_ct.py",
+      "scripts/extract_rlib_elf.py"
+    ],
+    "gpu-final-measurement": [
+      "crates/qsag-accel/*"
+    ],
+    "gpu-tests-and-benchmark": [
+      "crates/qsag-accel/*"
+    ],
+    "gpu-wave64-refusal": [
+      "crates/qsag-accel/*"
+    ],
+    "isa-cosim": [
+      "crates/qsag-asm/*",
+      "scripts/isa_cosim_silicon.py",
+      "lean/IsaCosim.lean",
+      "lean/Qsag/IsaCosim.lean",
+      "lean/Qsag/ConstantTimeIsa.lean"
+    ],
+    "main-comparator": [
+      "lean/*"
+    ],
+    "main-lean": [
+      "lean/*"
+    ],
+    "mir-comparator-and-census": [
+      "lean/*",
+      "aeneas/lean/*",
+      "scripts/run_mir_comparator.py"
+    ],
+    "mir-fresh-extraction": [
+      "aeneas/qsag-verified/*",
+      "aeneas/lean/*",
+      "aeneas/extract.sh",
+      "scripts/check_extraction_provenance.py"
+    ],
+    "mock-alpenglow": [
+      "crates/*",
+      "Cargo.toml",
+      "Cargo.lock",
+      "rust-toolchain.toml",
+      "aeneas/qsag-verified/*",
+      "aeneas/qsag-whir-verified/*"
+    ],
+    "mock-beam": [
+      "crates/*",
+      "Cargo.toml",
+      "Cargo.lock",
+      "rust-toolchain.toml",
+      "aeneas/qsag-verified/*",
+      "aeneas/qsag-whir-verified/*"
+    ],
+    "production-base-ot": [
+      "crates/*",
+      "Cargo.toml",
+      "Cargo.lock",
+      "rust-toolchain.toml",
+      "aeneas/qsag-verified/*",
+      "aeneas/qsag-whir-verified/*"
+    ],
+    "production-fips-soak": [
+      "crates/*",
+      "Cargo.toml",
+      "Cargo.lock",
+      "rust-toolchain.toml",
+      "aeneas/qsag-verified/*",
+      "aeneas/qsag-whir-verified/*"
+    ],
+    "quickstart-25s": [
+      "crates/*",
+      "Cargo.toml",
+      "Cargo.lock",
+      "rust-toolchain.toml",
+      "aeneas/qsag-verified/*",
+      "aeneas/qsag-whir-verified/*"
+    ],
+    "rust-workspace": [
+      "crates/*",
+      "Cargo.toml",
+      "Cargo.lock",
+      "rust-toolchain.toml",
+      "aeneas/qsag-verified/*",
+      "aeneas/qsag-whir-verified/*"
+    ],
+    "shader-regeneration": [
+      "crates/qsag-accel/shaders/*",
+      "crates/qsag-accel/tools/*",
+      "crates/qsag-accel/src/spirv_kernels.rs"
+    ],
+    "simd-cosim": [
+      "crates/qsag-asm/*",
+      "scripts/simd_isa_cosim.py",
+      "lean/Qsag/SimdBinaryEquiv.lean"
+    ],
+    "sydtv": [
+      "crates/qsag-asm/*",
+      "scripts/sydtv_driver.py",
+      "lean/Qsag/SydTvTranslationValidation.lean"
+    ],
+    "warm-main-gpu-host": [
+      "lean/*"
+    ],
+    "warm-main-primary": [
+      "lean/*"
+    ],
+    "whir-fresh-extraction-and-audit": [
+      "aeneas/qsag-whir-verified/*",
+      "aeneas/lean-whir/*",
+      "aeneas/extract_whir.sh",
+      "scripts/check_extraction_provenance.py"
+    ]
+  }
+}

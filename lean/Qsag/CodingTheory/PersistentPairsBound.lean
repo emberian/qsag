@@ -4,6 +4,9 @@ module
 
 Proves `IsPersistent`, `nonpersistent_common_agree_le` (`c ≤ B` for Claim 4.8),
 `persistent_challenges_per_witness_le` (Lemma 4.4), and `persistent_pairs_card_le` (Lemma 4.5).
+The `exceptional_` versions retain the selected candidate and exclude its polynomial
+explanations; they do not require the whole received word to lack correlated agreement.
+Nonempty instances and countermodels are in `PersistentPairsBoundTests`.
 -/
 
 public import Qsag.CodingTheory.JohnsonSetSystem
@@ -461,9 +464,9 @@ Unlike a global correlated-agreement premise this retains the accepted polynomia
     add (ofList F_poly) (mul (line α β) (ofList G_poly)) = P
 
 /-- **`[CWYZ26]` Lemma 4.4 (`persistent_challenges_per_witness_le`)**:
-    For any fixed rational pair `(F_rat, G_rat) ∈ F(X)²`, if `(f, g)` lacks correlated agreement
-    `≥ A - 1`, at most `max(|S|, |D|(|D| - 1)/2)` challenges `(α, β) ∈ S × S` yield a degree-`≤ d`
-    polynomial `P = F_rat + (α + β X) G_rat` agreeing with the fold on `≥ A` points of `D`. -/
+    For any fixed rational pair `(F_rat, G_rat) ∈ F(X)²`, at most `max(|S|, |D|(|D| - 1)/2)` challenges `(α, β) ∈ S × S` yield a degree-`≤ d`
+    polynomial `P = F_rat + (α + β X) G_rat` agreeing with the fold on `≥ A` points of `D`
+    and lacking a polynomial explanation with correlated agreement `≥ A - 1`. -/
 theorem exceptional_persistent_challenges_per_witness_le
     (x : (F → F) × (F → F)) (D S : List F) (d A : Nat)
     (hD : D.Nodup) (hS : S.Nodup)
@@ -563,8 +566,28 @@ private def persRatPair (α β : F) (P H L : UPoly F) : RatFunc F × RatFunc F :
   (sub ((Frac.of (D := UPoly F)).toFun P)
     (mul ((Frac.of (D := UPoly F)).toFun (line α β)) G_rat), G_rat)
 
+/-- Retain an explicit rational explanation, including its denominator, agreement set,
+and identity for the selected polynomial. This witness does not identify other accepted
+polynomials at the same challenge. -/
+theorem IsPersistent.rational_explanation (x : (F → F) × (F → F)) (D : List F)
+    (d B : Nat) (α β : F) (P : UPoly F) (h : IsPersistent x D d B α β P) :
+    ∃ (H L : UPoly F) (F_rat G_rat : RatFunc F),
+      L ≠ zero ∧ L.natDeg ≤ 1 ∧ H.natDeg ≤ d ∧
+      B ≤ (D.filter (fun z => decide (L.eval z ≠ zero) && foldAgreePt x α β P z &&
+        decide (H.eval z = mul (x.2 z) (L.eval z)))).length ∧
+      G_rat = mul ((Frac.of (D := UPoly F)).toFun H)
+        (LawfulField.inv ((Frac.of (D := UPoly F)).toFun L)) ∧
+      F_rat = sub ((Frac.of (D := UPoly F)).toFun P)
+        (mul ((Frac.of (D := UPoly F)).toFun (line α β)) G_rat) ∧
+      ratFold F_rat G_rat α β = (Frac.of (D := UPoly F)).toFun P := by
+  obtain ⟨H, L, hL, hLd, hHd, hAgree⟩ := h
+  refine ⟨H, L, (persRatPair α β P H L).1, (persRatPair α β P H L).2,
+    hL, hLd, hHd, hAgree, rfl, rfl, ?_⟩
+  dsimp [persRatPair, ratFold]
+  constructive_ring
+
 /-- **`[CWYZ26]` Lemma 4.5 (`persistent_pairs_card_le`)**:
-    Under `¬ HasCorrelatedAgreement d (A - 1) f g D` and the Johnson condition
+    For selected candidates without polynomial explanations, under the Johnson condition
     `D.length * (d + 1) < B * B`, at most
     `((D.length * (B - (d + 1))) / (B * B - D.length * (d + 1))) * max(|S|, |D|(|D| - 1)/2)`
     challenges `(α, β) ∈ S × S` admit a `B`-persistent degree-`≤ d` candidate with `≥ A`
@@ -748,85 +771,9 @@ theorem persistent_pairs_card_le
 
 end Persistent
 
-/-! ## Assurance Witnesses -/
-
-namespace PersistentPairsTests
-open UPoly Poly3
-
-def g (n : Nat) : Goldilocks := Goldilocks.ofNat n
-
-def dom4 : List Goldilocks := [g 0, g 1, g 2, g 3]
-def pool2 : List Goldilocks := [g 1, g 2]
-
-/-- Witness that `persistent_pairs_card_le` is inhabited on `Goldilocks` (`|D| = 4`, `d = 1`,
-    `B = 3`, `A = 4`, where `4 * 2 = 8 < 9 = 3^2`, using `poleWords` which has no correlated
-    agreement `≥ 3` while diagonal challenges `(β, β)` have rational explanation `H = 1, L = X + 1`). -/
-theorem inhabited_persistent_pairs_card_le :
-    ∃ (x : (Goldilocks → Goldilocks) × (Goldilocks → Goldilocks))
-      (D S : List Goldilocks) (d A B : Nat) (L : List (Goldilocks × Goldilocks)),
-      D.Nodup ∧ S.Nodup ∧ D.length * (d + 1) < B * B ∧
-      ¬ HasCorrelatedAgreement d (A - 1) x.1 x.2 D ∧
-      L.Nodup ∧ (∀ p ∈ L, p ∈ prodPool S) ∧ 1 ≤ L.length ∧
-      (∀ p ∈ L, ∃ P : UPoly Goldilocks, P.natDeg ≤ d ∧
-        A ≤ (D.filter (foldAgreePt x p.1 p.2 P)).length ∧
-        IsPersistent x D d B p.1 p.2 P) := by
-  refine ⟨poleWords, dom4, pool2, 1, 4, 3, [(g 1, g 1)],
-    by decide, by decide, by decide,
-    poleWords_far dom4 1 4 (by decide) (by decide +kernel) (by decide) (by decide),
-    by decide, by decide, by decide, ?_⟩
-  intro p hp
-  rw [List.mem_singleton.mp hp]
-  refine ⟨C (g 1), by decide +kernel, by decide +kernel,
-    one, ofList [one, one], by decide +kernel, by decide +kernel, by decide +kernel,
-    by decide +kernel⟩
-
-/-- `#tooth`: dropping `¬ HasCorrelatedAgreement d (A - 1) f g D` invalidates Lemma 4.5:
-    for `f = 0, g = 0` on `D = [0, 1, 2, 3]`, `S = [0, 1, 2]` (`|S| = 3`), `d = 1, B = 3, A = 4`,
-    ALL `|S|² = 9` challenges admit `P = 0` (persistent via `H = 0, L = 1`), exceeding
-    `ℓ · max(|S|, n(n-1)/2) = (4·1 / 1) · max(3, 6)` at `S = [0, 1, 2, 3, 4, 5, 6]` (`49 > 4 · 7 = 28`). -/
-theorem tooth_persistent_needs_far :
-    ∃ (x : (Goldilocks → Goldilocks) × (Goldilocks → Goldilocks))
-      (D S : List Goldilocks) (d A B : Nat) (L : List (Goldilocks × Goldilocks)),
-      D.Nodup ∧ S.Nodup ∧ D.length * (d + 1) < B * B ∧
-      L.Nodup ∧ (∀ p ∈ L, p ∈ prodPool S) ∧
-      (∀ p ∈ L, ∃ P : UPoly Goldilocks, P.natDeg ≤ d ∧
-        A ≤ (D.filter (foldAgreePt x p.1 p.2 P)).length ∧
-        IsPersistent x D d B p.1 p.2 P) ∧
-      ¬ (L.length ≤ ((D.length * (B - (d + 1))) / (B * B - D.length * (d + 1))) *
-          Nat.max S.length (D.length * (D.length - 1) / 2)) := by
-  let S7 : List Goldilocks := [g 0, g 1, g 2, g 3, g 4, g 5, g 6]
-  refine ⟨(fun _ => zero, fun _ => zero), dom4, S7, 1, 4, 3, prodPool S7,
-    by decide, by decide, by decide, prodPool_nodup (by decide), fun _ h => h, ?_, by decide⟩
-  intro p _
-  have hz0 : ∀ z : Goldilocks, (zero : UPoly Goldilocks).eval z = zero := fun _ => rfl
-  have hAgAll : dom4.filter (foldAgreePt (fun _ => zero, fun _ => zero) p.1 p.2 zero) = dom4 :=
-    filter_eq_self_of_all _ dom4 (fun z _ => decide_eq_true (by
-      show (zero : UPoly Goldilocks).eval z = add zero (mul (add p.1 (mul p.2 z)) zero)
-      rw [hz0 z, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]))
-  have hPersAll : dom4.filter (fun z =>
-      decide ((one : UPoly Goldilocks).eval z ≠ zero) &&
-      foldAgreePt (fun _ => zero, fun _ => zero) p.1 p.2 zero z &&
-      decide ((zero : UPoly Goldilocks).eval z = mul zero ((one : UPoly Goldilocks).eval z))) = dom4 :=
-    filter_eq_self_of_all _ dom4 (fun z _ => by
-      simp only [Bool.and_eq_true]
-      have h1 : (one : UPoly Goldilocks).eval z = one := by rw [one_eq_C, eval_C]
-      refine ⟨⟨decide_eq_true (by rw [h1]; exact LawfulField.one_ne_zero), ?_⟩,
-        decide_eq_true (by rw [hz0 z, LawfulCommRing.zero_mul])⟩
-      exact decide_eq_true (by
-        show (zero : UPoly Goldilocks).eval z = add zero (mul (add p.1 (mul p.2 z)) zero)
-        rw [hz0 z, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]))
-  refine ⟨zero, by decide +kernel, ?_, zero, one, by decide +kernel, by decide +kernel,
-    by decide +kernel, ?_⟩
-  · rw [hAgAll]; decide
-  · rw [hPersAll]; decide
-
-#verify_constructive nonpersistent_common_agree_le rat_pair_collinear_or_polys
+#verify_constructive nonpersistent_common_agree_le rat_pair_collinear_or_polys IsPersistent.rational_explanation
+#verify_constructive exceptional_persistent_challenges_per_witness_le exceptional_persistent_pairs_card_le
 #verify_constructive persistent_challenges_per_witness_le persistent_pairs_card_le
-#verify_constructive inhabited_persistent_pairs_card_le tooth_persistent_needs_far
-#tooth_pair persistent_pairs_card_le vs tooth_persistent_needs_far
-#verify_inhabited persistent_pairs_card_le inhabited_persistent_pairs_card_le
-
-end PersistentPairsTests
 
 end Qsag
 end

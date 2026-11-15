@@ -978,8 +978,8 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
 
     let msg = read_input_arg(&args)?;
     let ctx = match args.get("context-hex") {
-        Some(h) => from_hex(h)?.0,
-        None => Vec::new(),
+        Some(h) => from_hex(h)?,
+        None => ZeroizingBuf(Vec::new()),
     };
     if ctx.len() > 255 {
         return Err(CliError::usage("--context-hex must be at most 255 bytes"));
@@ -992,7 +992,7 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
     let parties = meta.field_u64("parties")? as usize;
     let dkg_session_id = from_hex_exact::<32>(meta.field_str("session_id")?, "session_id")?;
     let key_id = from_hex_exact::<32>(meta.field_str("key_id")?, "key_id")?;
-    let expected_pk = meta.field_hex("public_key")?.0;
+    let expected_pk = meta.field_hex("public_key")?;
 
     let min_quorum = 2 * threshold - 1;
     let signer_indices = parse_party_indices(args.get("signers"), parties, min_quorum)?;
@@ -1061,7 +1061,7 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
         std::thread::scope(|s| {
             let mut handles = Vec::with_capacity(selected.len());
             let msg_ref = msg.0.as_slice();
-            let ctx_ref = ctx.as_slice();
+            let ctx_ref = ctx.0.as_slice();
             let sess_ref = &sign_session;
             for (pos, (idx, mut share, mac_key, sign_ent)) in selected.into_iter().enumerate() {
                 let hub_ref = Arc::clone(&hub);
@@ -1177,17 +1177,16 @@ fn mldsa_verify(raw: &[String]) -> Result<(), CliError> {
         ));
     }
     let (level, _) = parse_mldsa_level(Some(scheme_name))?;
-    let pk_bytes = pub_json.field_hex("public_key")?.0;
-    let sig_bytes = sig_json.field_hex("signature")?.0;
+    let pk_bytes = pub_json.field_hex("public_key")?;
+    let sig_bytes = sig_json.field_hex("signature")?;
     let ctx = match args.get("context-hex") {
-        Some(h) => from_hex(h)?.0,
+        Some(h) => from_hex(h)?,
         None => sig_json
             .get("context")
             .and_then(Json::as_str)
             .map(from_hex)
             .transpose()?
-            .map(|z| z.0)
-            .unwrap_or_default(),
+            .unwrap_or_else(|| ZeroizingBuf(Vec::new())),
     };
 
     if !ml_dsa_verify(level, &pk_bytes, &msg.0, &ctx, &sig_bytes) {
