@@ -238,6 +238,18 @@ fn cached_customization_midstate(tag: &[u8]) -> Option<[u64; 25]> {
         b"QSAG.GILBOA.GL.LHL_G/v1",
         b"QSAG.DKG.FELDMAN.V2",
         b"QSAG.DKG.SCHNORR.CHAL/v1",
+        b"QSAG.TRIPLE.F2.TRANSCRIPT/v1",
+        b"QSAG.TRIPLE.F2.DEAL/v1",
+        b"QSAG.OT.RLWE.CRS.COIN/v1",
+        b"QSAG.OT.RLWE.FO.STREAM/v2",
+        b"QSAG.OT.CRS.COMMIT/v1",
+        b"QSAG.OT.COMBINER.COMMIT/v1",
+        b"QSAG.OT.PARCOMB.RNG/v1",
+        b"QSAG.OT.KOS.BIND/v2",
+        b"QSAG.COIN.COMMIT/v1",
+        b"QSAG.BASE_OT.PROOF/v2",
+        b"QSAG.OT.MESH.SENDER/v1",
+        b"QSAG.OT.MESH.RECEIVER/v1",
     )
 }
 
@@ -463,7 +475,6 @@ impl Cshake256Xof {
 
 /// Squeeze equal-length `u64` streams from eight independent single-block `cSHAKE256` inputs
 /// sharing `midstate` (`inputs[i].len() < SHAKE256_RATE_BYTES`).
-#[cfg(test)]
 pub(crate) fn cshake256_8x_squeeze_u64s(
     midstate: &[u64; 25],
     inputs: [&[u8]; 8],
