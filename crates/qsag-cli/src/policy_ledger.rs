@@ -505,20 +505,15 @@ fn ledger_id(
 
 /// Whether the ledger was enrolled with an external anchor, checked against the options given.
 fn anchor_enrolled(root: &Json, supplied: bool) -> Result<bool, CliError> {
-    let required = match root.get("anchor_required") {
-        None => false,
-        Some(Json::Bool(flag)) => *flag,
-        Some(_) => return Err(rolled_back("anchor requirement is malformed")),
-    };
-    match (required, supplied) {
-        (true, false) => Err(CliError::state(
+    anchor_requirement(root, supplied).map_err(|e| match e {
+        AnchorRequirementError::Malformed => rolled_back("anchor requirement is malformed"),
+        AnchorRequirementError::AnchorMissing => CliError::state(
             "policy ledger was enrolled with an external anchor; its anchor directory is required",
-        )),
-        (false, true) => Err(CliError::state(
-            "policy ledger was not enrolled with an external anchor",
-        )),
-        (flag, _) => Ok(flag),
-    }
+        ),
+        AnchorRequirementError::NotEnrolled => {
+            CliError::state("policy ledger was not enrolled with an external anchor")
+        }
+    })
 }
 
 /// Every party's exported guard checkpoint at one generation, under one MAC.
@@ -591,24 +586,6 @@ fn decode_bundle<'a>(
         checkpoints,
         shared,
     })
-}
-
-fn anchor_config(
-    args: &Args,
-    dir: &str,
-    dir_option: &str,
-    flag: &str,
-) -> Result<Option<AnchorConfig>, CliError> {
-    let anchor_dir = args.get(dir_option).map(str::to_owned);
-    let allow_single_disk = args.flag(flag);
-    if anchor_dir.is_none() && allow_single_disk {
-        return Err(CliError::usage(format!("--{flag} requires --{dir_option}")));
-    }
-    Ok(anchor_dir.map(|anchor_dir| AnchorConfig {
-        anchor_dir,
-        vault_dir: Some(dir.to_owned()),
-        allow_single_disk,
-    }))
 }
 
 /// Provision the committee's guard shares from the ledger seed. The same seed always yields
@@ -923,17 +900,10 @@ impl OpenLedger {
     }
 
     fn record_mac(&self, record: &Json) -> [u8; 32] {
-        let mut unsigned = record.clone();
-        if let Json::Object(fields) = &mut unsigned {
-            fields.retain(|(name, _)| name != "record_mac");
-        }
+        let unsigned = crate::persist::authenticated_bytes(record, &["record_mac"]);
         cshake256_framed_32(
             b"QSAG.CLI.POLICY.INTENT_RECORD.V1",
-            &[
-                &self.record_key().0,
-                &self.id,
-                unsigned.to_pretty().as_bytes(),
-            ],
+            &[&self.record_key().0, &self.id, &unsigned],
         )
     }
 

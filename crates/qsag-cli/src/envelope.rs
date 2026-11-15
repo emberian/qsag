@@ -46,29 +46,28 @@ fn secret_field_name(json: &Json) -> Result<&'static str, CliError> {
     }
 }
 
+/// Everything the envelope tag does not cover: the envelope's own fields, the secret
+/// itself (covered as ciphertext), and the vault state that moves with every use.
+const MUTABLE_FIELDS: [&str; 13] = [
+    "envelope",
+    "salt",
+    "envelope_tag",
+    "vault_device",
+    "vault_inode",
+    "uses_completed",
+    "ledger_checkpoint_gen",
+    "ledger_checkpoint_tag",
+    "ceremony_checkpoint_gen",
+    "ceremony_checkpoint_tag",
+    "belt_checkpoint_gen",
+    "belt_checkpoint_tag",
+    "state_mac",
+];
+
 fn immutable_header_bytes(json: &Json, secret_field: &str) -> ZeroizingBuf {
-    let mut header = json.clone();
-    if let Json::Object(fields) = &mut header {
-        fields.retain(|(name, _)| {
-            !matches!(
-                name.as_str(),
-                "envelope"
-                    | "salt"
-                    | "envelope_tag"
-                    | "vault_device"
-                    | "vault_inode"
-                    | "uses_completed"
-                    | "ledger_checkpoint_gen"
-                    | "ledger_checkpoint_tag"
-                    | "ceremony_checkpoint_gen"
-                    | "ceremony_checkpoint_tag"
-                    | "belt_checkpoint_gen"
-                    | "belt_checkpoint_tag"
-                    | "state_mac"
-            ) && name != secret_field
-        });
-    }
-    ZeroizingBuf(header.to_pretty().into_bytes())
+    let mut excluded = MUTABLE_FIELDS.to_vec();
+    excluded.push(secret_field);
+    crate::persist::authenticated_bytes(json, &excluded)
 }
 
 fn derive(pass: &[u8], salt: &[u8; 32], scheme: &str) -> (Secret32, Secret32) {

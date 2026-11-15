@@ -6,7 +6,7 @@
 //! `dev_le64 || ino_le64 || seal8` identity (`lock_identity_seal`) is authenticated inside the
 //! `QSAGANC1` checkpoint record MAC, paired with single-use ceremony ticket consumption.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,8 +17,9 @@ use qsag_accel::keccak::cshake256_framed_32;
 use qsag_core::ceremony_journal::CeremonyContext;
 use qsag_core::{ExternalMonotoneAnchor, LedgerCheckpoint};
 
-use crate::cli::{Args, CliError, Secret32, ZeroizingBuf, os_random_32, private_dir};
+use crate::cli::{Args, CliError, Secret32, ZeroizingBuf, os_random_32};
 use crate::codec::{Json, from_hex_exact, to_hex};
+use crate::persist::{self, file_identity, parent_dir, private_dir};
 
 const LOCK_MAGIC: &[u8; 8] = b"QSAGLCK1";
 const ANCHOR_MAGIC: &[u8; 8] = b"QSAGANC1";
@@ -51,12 +52,23 @@ impl AnchorConfig {
     }
 
     pub fn from_quorum_args(args: &Args, vault_dir: &str) -> Result<Option<Self>, CliError> {
-        let anchor_dir = args.get("anchor-dir").map(str::to_owned);
-        let allow_single_disk = args.flag("allow-single-disk-anchor");
+        Self::for_vault(args, vault_dir, "anchor-dir", "allow-single-disk-anchor")
+    }
+
+    /// The anchor of a vault directory the command already names, read from the option
+    /// `dir_option` and the flag `single_disk_flag`.
+    pub fn for_vault(
+        args: &Args,
+        vault_dir: &str,
+        dir_option: &str,
+        single_disk_flag: &str,
+    ) -> Result<Option<Self>, CliError> {
+        let anchor_dir = args.get(dir_option).map(str::to_owned);
+        let allow_single_disk = args.flag(single_disk_flag);
         if anchor_dir.is_none() && allow_single_disk {
-            return Err(CliError::usage(
-                "--allow-single-disk-anchor requires --anchor-dir",
-            ));
+            return Err(CliError::usage(format!(
+                "--{single_disk_flag} requires --{dir_option}"
+            )));
         }
         Ok(anchor_dir.map(|anchor_dir| Self {
             anchor_dir,
@@ -73,102 +85,110 @@ impl AnchorConfig {
         explicit_dirs: &[&str],
         create_anchor_dir: bool,
     ) -> Result<(), CliError> {
-        private_dir(&self.anchor_dir, create_anchor_dir)?;
-        let (anchor_dev, anchor_ino) = open_verified_dir_identity(Path::new(&self.anchor_dir))?;
-        let anchor_canon = std::fs::canonicalize(&self.anchor_dir)
-            .map_err(|e| CliError::io(format_args!("resolving {}", self.anchor_dir), e))?;
-        let anchor_canon_meta = std::fs::metadata(&anchor_canon)
-            .map_err(|e| CliError::io(format_args!("inspecting {}", self.anchor_dir), e))?;
-        if metadata_identity(&anchor_canon_meta) != (anchor_dev, anchor_ino) {
+        let anchor = Location {
+            id: private_dir(&self.anchor_dir, create_anchor_dir)?,
+            canon: canonical(&self.anchor_dir)?,
+        };
+        if Location::of(&anchor.canon)?.id != anchor.id {
             return Err(CliError::state(
                 "--anchor-dir changed identity during validation",
             ));
         }
 
-        let explicit_vault_canon = if let Some(vd) = &self.vault_dir {
-            private_dir(vd, create_anchor_dir)?;
-            let (vd_dev, vd_ino) = open_verified_dir_identity(Path::new(vd))?;
-            if (vd_dev, vd_ino) == (anchor_dev, anchor_ino) {
-                return Err(CliError::state(
-                    "--anchor-dir resolves to the same directory/inode as --vault-dir",
-                ));
+        let explicit_vault = match &self.vault_dir {
+            Some(vd) => {
+                let vault = Location {
+                    id: private_dir(vd, create_anchor_dir)?,
+                    canon: canonical(vd)?,
+                };
+                self.refuse_overlap(&anchor, &vault, "--vault-dir")?;
+                self.refuse_shared_device(&anchor, &vault, "--vault-dir")?;
+                Some(vault)
             }
-            let vd_canon = std::fs::canonicalize(vd)
-                .map_err(|e| CliError::io(format_args!("resolving {vd}"), e))?;
-            if anchor_canon.starts_with(&vd_canon) || vd_canon.starts_with(&anchor_canon) {
-                return Err(CliError::state(
-                    "--anchor-dir must not overlap or nest with --vault-dir",
-                ));
-            }
-            if vd_dev == anchor_dev && !self.allow_single_disk {
-                return Err(CliError::state(
-                    "--anchor-dir resides on the same filesystem device as --vault-dir; mount an independent device or pass --allow-single-disk-anchor",
-                ));
-            }
-            Some(vd_canon)
-        } else {
-            None
+            None => None,
         };
 
         for file_path in custody_files {
-            let parent = Path::new(file_path)
-                .parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .unwrap_or(Path::new("."));
-            let meta = std::fs::metadata(parent)
-                .map_err(|e| CliError::io(format_args!("inspecting {}", parent.display()), e))?;
-            let (c_dev, c_ino) = metadata_identity(&meta);
-            if (c_dev, c_ino) == (anchor_dev, anchor_ino) {
-                return Err(CliError::state(
-                    "--anchor-dir resolves to the same directory/inode as custody state",
-                ));
-            }
-            let parent_canon = std::fs::canonicalize(parent)
-                .map_err(|e| CliError::io(format_args!("resolving {}", parent.display()), e))?;
+            let parent = Location::of(parent_dir(Path::new(file_path)))?;
             // Without --vault-dir the custody directory is the key file's own directory. An
             // anchor inside it (or around it) travels with any snapshot of that directory.
-            if anchor_canon.starts_with(&parent_canon) || parent_canon.starts_with(&anchor_canon) {
-                return Err(CliError::state(
-                    "--anchor-dir must not overlap or nest with the directory holding custody state",
-                ));
-            }
-            if let Some(vd_canon) = &explicit_vault_canon
-                && !parent_canon.starts_with(vd_canon)
+            self.refuse_overlap(&anchor, &parent, "the directory holding custody state")?;
+            if let Some(vault) = &explicit_vault
+                && !parent.canon.starts_with(&vault.canon)
             {
                 return Err(CliError::state(format!(
                     "custody file {file_path} does not reside inside --vault-dir"
                 )));
             }
-            if c_dev == anchor_dev && !self.allow_single_disk {
-                return Err(CliError::state(
-                    "--anchor-dir resides on the same filesystem device as custody state; mount an independent device or pass --allow-single-disk-anchor",
-                ));
-            }
+            self.refuse_shared_device(&anchor, &parent, "custody state")?;
         }
 
         for dir_path in explicit_dirs {
-            let meta = std::fs::metadata(dir_path)
-                .map_err(|e| CliError::io(format_args!("inspecting {dir_path}"), e))?;
-            let (d_dev, d_ino) = metadata_identity(&meta);
-            if (d_dev, d_ino) == (anchor_dev, anchor_ino) {
-                return Err(CliError::state(
-                    "--anchor-dir resolves to the same directory/inode as custody directory",
-                ));
-            }
-            let dir_canon = std::fs::canonicalize(dir_path)
-                .map_err(|e| CliError::io(format_args!("resolving {dir_path}"), e))?;
-            if anchor_canon.starts_with(&dir_canon) || dir_canon.starts_with(&anchor_canon) {
-                return Err(CliError::state(
-                    "--anchor-dir must not overlap or nest with custody directory",
-                ));
-            }
-            if d_dev == anchor_dev && !self.allow_single_disk {
-                return Err(CliError::state(
-                    "--anchor-dir resides on the same filesystem device as custody directory; mount an independent device or pass --allow-single-disk-anchor",
-                ));
-            }
+            let dir = Location::of(Path::new(dir_path))?;
+            self.refuse_overlap(&anchor, &dir, "custody directory")?;
+            self.refuse_shared_device(&anchor, &dir, "custody directory")?;
         }
         Ok(())
+    }
+
+    /// The anchor may be neither the directory `other`, nor inside it, nor around it. No
+    /// option waives this: such an anchor travels with every snapshot of `other`.
+    fn refuse_overlap(
+        &self,
+        anchor: &Location,
+        other: &Location,
+        what: &str,
+    ) -> Result<(), CliError> {
+        if other.id == anchor.id {
+            return Err(CliError::state(format!(
+                "--anchor-dir resolves to the same directory/inode as {what}"
+            )));
+        }
+        if anchor.canon.starts_with(&other.canon) || other.canon.starts_with(&anchor.canon) {
+            return Err(CliError::state(format!(
+                "--anchor-dir must not overlap or nest with {what}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn refuse_shared_device(
+        &self,
+        anchor: &Location,
+        other: &Location,
+        what: &str,
+    ) -> Result<(), CliError> {
+        if other.id.0 == anchor.id.0 && !self.allow_single_disk {
+            return Err(CliError::state(format!(
+                "--anchor-dir resides on the same filesystem device as {what}; mount an independent device or pass --allow-single-disk-anchor"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// A directory as the isolation rules see it: `(device, inode)` and resolved path.
+struct Location {
+    id: (u64, u64),
+    canon: PathBuf,
+}
+
+fn canonical(path: impl AsRef<Path>) -> Result<PathBuf, CliError> {
+    let path = path.as_ref();
+    std::fs::canonicalize(path)
+        .map_err(|e| CliError::io(format_args!("resolving {}", path.display()), e))
+}
+
+impl Location {
+    /// A custody directory wherever it lives: unlike the anchor and `--vault-dir`, it is
+    /// not required to be private, and a symlink to it is resolved.
+    fn of(path: &Path) -> Result<Self, CliError> {
+        let meta = std::fs::metadata(path)
+            .map_err(|e| CliError::io(format_args!("inspecting {}", path.display()), e))?;
+        Ok(Self {
+            id: file_identity(&meta),
+            canon: canonical(path)?,
+        })
     }
 }
 
@@ -189,23 +209,45 @@ pub fn parse_ceremony_context(
     })
 }
 
+/// How the `"anchor_required"` field of a custody file disagrees with the options given.
+pub enum AnchorRequirementError {
+    /// The field is present but is not a boolean.
+    Malformed,
+    /// The file was enrolled with an external anchor and none was supplied.
+    AnchorMissing,
+    /// An anchor was supplied for a file enrolled without one.
+    NotEnrolled,
+}
+
+/// Whether `file` was enrolled with an external anchor, checked against whether one was
+/// `supplied`. Enrollment and the anchor options must agree in both directions.
+pub fn anchor_requirement(file: &Json, supplied: bool) -> Result<bool, AnchorRequirementError> {
+    let required = match file.get("anchor_required") {
+        None => false,
+        Some(Json::Bool(flag)) => *flag,
+        Some(_) => return Err(AnchorRequirementError::Malformed),
+    };
+    match (required, supplied) {
+        (true, false) => Err(AnchorRequirementError::AnchorMissing),
+        (false, true) => Err(AnchorRequirementError::NotEnrolled),
+        (flag, _) => Ok(flag),
+    }
+}
+
 /// Enforce that `"anchor_required"` in `secret_json` matches whether `--anchor-dir` was supplied.
 pub fn enforce_anchor_requirement(
     secret: &Json,
     anchor_cfg: Option<&AnchorConfig>,
 ) -> Result<bool, CliError> {
-    let required = match secret.get("anchor_required") {
-        None => false,
-        Some(Json::Bool(flag)) => *flag,
-        Some(_) => return Err(crate::vault::corrupt()),
-    };
-    match (required, anchor_cfg.is_some()) {
-        (true, false) => Err(CliError::state(
-            "key requires --anchor-dir external monotone anchor",
-        )),
-        (false, true) => Err(CliError::state("key was not enrolled with --anchor-dir")),
-        (flag, _) => Ok(flag),
-    }
+    anchor_requirement(secret, anchor_cfg.is_some()).map_err(|e| match e {
+        AnchorRequirementError::Malformed => crate::vault::corrupt(),
+        AnchorRequirementError::AnchorMissing => {
+            CliError::state("key requires --anchor-dir external monotone anchor")
+        }
+        AnchorRequirementError::NotEnrolled => {
+            CliError::state("key was not enrolled with --anchor-dir")
+        }
+    })
 }
 
 /// Compute a deterministic 256-bit monotonic floor checkpoint tag for integer watermarks.
@@ -227,109 +269,10 @@ fn invalid_anchor(msg: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
 }
 
-#[cfg(unix)]
-fn metadata_identity(meta: &std::fs::Metadata) -> (u64, u64) {
-    use std::os::unix::fs::MetadataExt;
-    (meta.dev(), meta.ino())
-}
-
-#[cfg(not(unix))]
-fn metadata_identity(_meta: &std::fs::Metadata) -> (u64, u64) {
-    (0, 0)
-}
-
-#[cfg(unix)]
-fn identity_bytes16(meta: &std::fs::Metadata) -> [u8; 16] {
-    let (dev, ino) = metadata_identity(meta);
-    let mut out = [0u8; 16];
-    out[..8].copy_from_slice(&dev.to_le_bytes());
-    out[8..].copy_from_slice(&ino.to_le_bytes());
-    out
-}
-
-#[cfg(not(unix))]
-fn identity_bytes16(_meta: &std::fs::Metadata) -> [u8; 16] {
-    [0u8; 16]
-}
-
-#[cfg(unix)]
-fn open_verified_dir_identity(path: &Path) -> Result<(u64, u64), CliError> {
-    use std::os::unix::fs::PermissionsExt;
-    let lstat = std::fs::symlink_metadata(path)
-        .map_err(|e| CliError::io(format_args!("inspecting {}", path.display()), e))?;
-    if !lstat.is_dir() || lstat.permissions().mode() & 0o077 != 0 {
-        return Err(CliError::state(format!(
-            "{} must be a private 0700 directory, not a symlink",
-            path.display()
-        )));
-    }
-    let mut opts = OpenOptions::new();
-    opts.read(true);
-    crate::cli::set_nofollow_nonblocking(&mut opts)?;
-    let dir_file = opts
-        .open(path)
-        .map_err(|e| CliError::io(format_args!("opening directory {}", path.display()), e))?;
-    let fstat = dir_file
-        .metadata()
-        .map_err(|e| CliError::io(format_args!("inspecting {}", path.display()), e))?;
-    if !fstat.is_dir()
-        || fstat.permissions().mode() & 0o077 != 0
-        || metadata_identity(&lstat) != metadata_identity(&fstat)
-    {
-        return Err(CliError::state(format!(
-            "{} failed directory identity or 0700 permission verification",
-            path.display()
-        )));
-    }
-    Ok(metadata_identity(&fstat))
-}
-
-#[cfg(not(unix))]
-fn open_verified_dir_identity(path: &Path) -> Result<(u64, u64), CliError> {
-    Err(CliError::state(format!(
-        "{}: external anchor directories require Unix file identity support",
-        path.display()
-    )))
-}
-
-fn sync_parent_io(path: &Path) -> io::Result<()> {
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    File::open(parent)?.sync_all()
-}
-
 fn side_path(path: &Path, suffix: &str) -> PathBuf {
     let mut os = path.as_os_str().to_os_string();
     os.push(suffix);
     PathBuf::from(os)
-}
-
-fn regular_metadata_io(path: &Path) -> io::Result<Option<std::fs::Metadata>> {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_file() => Ok(Some(meta)),
-        Ok(_) => Err(invalid_anchor("anchor path is not a regular file")),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
-    }
-}
-
-fn verify_file_identity(file: &File, path: &Path) -> io::Result<std::fs::Metadata> {
-    let held = file.metadata()?;
-    let named = regular_metadata_io(path)?
-        .ok_or_else(|| invalid_anchor("anchor sidecar or record vanished"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if held.permissions().mode() & 0o077 != 0 {
-            return Err(invalid_anchor("anchor file permissions exceed 0600"));
-        }
-    }
-    if !held.is_file() || identity_bytes16(&held) != identity_bytes16(&named) {
-        return Err(invalid_anchor("anchor file inode mismatch"));
-    }
-    Ok(held)
 }
 
 /// Safe-Rust exclusive lock sidecar binding `dev_le64 || ino_le64 || seal8`.
@@ -352,7 +295,7 @@ impl AnchorLockedRecord {
 
     #[cfg(unix)]
     fn acquire(path: PathBuf, must_create: bool) -> io::Result<Self> {
-        use std::os::unix::fs::{FileExt, OpenOptionsExt};
+        use std::os::unix::fs::FileExt;
 
         if must_create {
             match std::fs::symlink_metadata(&path) {
@@ -365,7 +308,7 @@ impl AnchorLockedRecord {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e),
             }
-        } else if regular_metadata_io(&path)?.is_none() {
+        } else if persist::regular_metadata(&path)?.is_none() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 "provisioned external anchor record is missing",
@@ -373,42 +316,17 @@ impl AnchorLockedRecord {
         }
 
         let lock_path = side_path(&path, ".lock");
-        regular_metadata_io(&lock_path)?;
-
-        let mut opts = OpenOptions::new();
-        opts.read(true)
-            .write(true)
-            .create_new(must_create)
-            .mode(0o600);
-        crate::cli::set_nofollow_nonblocking(&mut opts)
-            .map_err(|e| io::Error::new(io::ErrorKind::Unsupported, e.message))?;
-
-        let mut lock_file = opts.open(&lock_path).map_err(|e| {
-            if !must_create && e.kind() == io::ErrorKind::NotFound {
-                invalid_anchor("external anchor lock sidecar missing")
-            } else {
-                e
-            }
-        })?;
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            match lock_file.try_lock() {
-                Ok(()) => break,
-                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
+        let (mut lock_file, held_meta) =
+            persist::acquire_lock(&lock_path, must_create).map_err(|e| match e.kind() {
+                io::ErrorKind::NotFound if !must_create => {
+                    invalid_anchor("external anchor lock sidecar missing")
                 }
-                Err(_) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        "external anchor lock unavailable",
-                    ));
+                io::ErrorKind::WouldBlock => {
+                    io::Error::new(io::ErrorKind::WouldBlock, "external anchor lock unavailable")
                 }
-            }
-        }
-
-        let held_meta = verify_file_identity(&lock_file, &lock_path)?;
-        let inode = identity_bytes16(&held_meta);
+                _ => e,
+            })?;
+        let inode = persist::identity_bytes(&held_meta);
         let mut header = [0u8; 32];
         if must_create {
             let rand = os_random_32().map_err(|e| io::Error::other(e.message))?;
@@ -417,7 +335,7 @@ impl AnchorLockedRecord {
             header[16..32].copy_from_slice(&inode);
             lock_file.write_all(&header)?;
             lock_file.sync_all()?;
-            sync_parent_io(&lock_path)?;
+            persist::sync_parent_dir(&lock_path)?;
         } else {
             if held_meta.len() != 32 {
                 return Err(invalid_anchor("external anchor lock header truncated"));
@@ -428,7 +346,7 @@ impl AnchorLockedRecord {
             }
         }
 
-        if must_create && regular_metadata_io(&path)?.is_some() {
+        if must_create && persist::regular_metadata(&path)?.is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "external anchor record appeared concurrently",
@@ -445,35 +363,8 @@ impl AnchorLockedRecord {
             poisoned: AtomicBool::new(false),
         };
         this.check_lock()?;
-        this.remove_interrupted_writes();
+        persist::remove_interrupted_replacements(&this.path);
         Ok(this)
-    }
-
-    /// Unlink the temporary files of writes that were interrupted before their rename. The
-    /// exclusive lock is held, so no live writer owns one. Best effort: a leftover is inert.
-    #[cfg(unix)]
-    fn remove_interrupted_writes(&self) {
-        let (Some(dir), Some(name)) = (
-            self.path.parent(),
-            self.path.file_name().and_then(|n| n.to_str()),
-        ) else {
-            return;
-        };
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let file_name = entry.file_name();
-            let stale = file_name
-                .to_str()
-                .and_then(|n| n.strip_prefix(name))
-                .and_then(|n| n.strip_prefix('.'))
-                .and_then(|n| n.strip_suffix(".tmp"))
-                .is_some_and(|hex| hex.len() == 32 && hex.bytes().all(|b| b.is_ascii_hexdigit()));
-            if stale && entry.file_type().is_ok_and(|t| t.is_file()) {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
     }
 
     /// Canonical 24-byte `dev_le64 || ino_le64 || nonce8` lock identity seal.
@@ -500,8 +391,8 @@ impl AnchorLockedRecord {
     fn check_lock(&self) -> io::Result<()> {
         use std::os::unix::fs::FileExt;
         let lock_path = side_path(&self.path, ".lock");
-        let meta = verify_file_identity(&self.lock_file, &lock_path)?;
-        if meta.len() != 32 || identity_bytes16(&meta) != self.inode {
+        let meta = persist::verify_held(&self.lock_file, &lock_path, true)?;
+        if meta.len() != 32 || persist::identity_bytes(&meta) != self.inode {
             return Err(invalid_anchor("external anchor lock sidecar replaced"));
         }
         let mut header = [0u8; 32];
@@ -528,16 +419,12 @@ impl AnchorLockedRecord {
         if let Err(e) = self.check_lock() {
             return self.poison(e);
         }
-        if regular_metadata_io(&self.path)?.is_none() {
+        if persist::regular_metadata(&self.path)?.is_none() {
             return Ok(None);
         }
         let result = (|| -> io::Result<ZeroizingBuf> {
-            let mut opts = OpenOptions::new();
-            opts.read(true);
-            crate::cli::set_nofollow_nonblocking(&mut opts)
-                .map_err(|e| io::Error::new(io::ErrorKind::Unsupported, e.message))?;
-            let mut file = opts.open(&self.path)?;
-            let meta = verify_file_identity(&file, &self.path)?;
+            let mut file = persist::no_follow()?.read(true).open(&self.path)?;
+            let meta = persist::verify_held(&file, &self.path, true)?;
             if meta.len() != ANCHOR_RECORD_LEN as u64 {
                 return Err(invalid_anchor("external anchor record length invalid"));
             }
@@ -566,34 +453,13 @@ impl AnchorLockedRecord {
 
     #[cfg(unix)]
     fn replace(&self, contents: &[u8]) -> io::Result<()> {
-        use std::os::unix::fs::OpenOptionsExt;
         self.check_not_poisoned()?;
         if let Err(e) = self.check_lock() {
             return self.poison(e);
         }
-        let rand = os_random_32().map_err(|e| io::Error::other(e.message))?;
-        let tmp_suffix = format!(".{}.tmp", to_hex(&rand[..16]));
-        let tmp_path = side_path(&self.path, &tmp_suffix);
-        let result = (|| -> io::Result<()> {
-            let mut opts = OpenOptions::new();
-            opts.write(true).create_new(true).mode(0o600);
-            crate::cli::set_nofollow_nonblocking(&mut opts)
-                .map_err(|e| io::Error::new(io::ErrorKind::Unsupported, e.message))?;
-            let mut tmp = opts.open(&tmp_path)?;
-            verify_file_identity(&tmp, &tmp_path)?;
-            tmp.write_all(contents)?;
-            tmp.sync_all()?;
-            drop(tmp);
-            self.check_lock()?;
-            std::fs::rename(&tmp_path, &self.path)?;
-            sync_parent_io(&self.path)?;
-            self.check_lock()
-        })();
-        if let Err(e) = result {
-            let _ = std::fs::remove_file(&tmp_path);
-            return self.poison(e);
-        }
-        Ok(())
+        persist::replace(&self.path, contents, || self.check_lock())
+            .and_then(|()| self.check_lock())
+            .or_else(|e| self.poison(e))
     }
 
     #[cfg(not(unix))]
