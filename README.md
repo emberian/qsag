@@ -10,7 +10,7 @@ The recorded 2026-11-14 compiled-kernel freshness gate passed: fresh Rust 1.99.1
 
 `qsag` is a post-quantum threshold signing, aggregation, and custody stack: NIST **FIPS 205 SLH-DSA-SHAKE** and **FIPS 204 ML-DSA-44/65/87** alongside the custom **Pants** pure-hash and algebraic suite. It combines Rust implementations with Lean protocol proofs, compiler-extracted MIR proofs, scoped machine-code verification, and executable specification tests.
 
-The **14-package Rust project** has **0 external crates.io dependencies**: 12 root workspace packages and two separately rooted extraction crates, `aeneas/qsag-verified` and `aeneas/qsag-whir-verified`. Libraries support `no_std` with `alloc`; host adapters and the CLI require `std`. Production core, policy and quorum use `qsag-verified`; aggregation uses `qsag-whir-verified`. Platform unsafe code lives in `qsag-asm` and the Linux/std raw Vulkan FFI in `qsag-accel`. Rust 1.85+ / Edition 2024; Lean 4.35.
+The **14-package Rust project** has **0 external crates.io dependencies**: 12 root workspace packages and two separately rooted extraction crates, `aeneas/qsag-verified` and `aeneas/qsag-whir-verified`. Libraries support `no_std` with `alloc`; host adapters and the CLI require `std`. Production core, policy and quorum use `qsag-verified`; aggregation uses `qsag-whir-verified`. Platform unsafe code lives in `qsag-asm` and the Linux/std raw Vulkan FFI in `qsag-accel`. Rust 1.99.1 (pinned toolchain) / Edition 2024; Lean 4.35.
 
 **Research preview:** implementations and proof coverage are evolving. A proved model, a passing benchmark, and an integrated deployment guarantee are different results. See [the exact theorem map](docs/SECURITY_AND_CT_PROOFS.md#current-parameter-and-theorem-map) and [PROJECT.md](PROJECT.md) for status and [ASSURANCE.md](ASSURANCE.md) for assumptions and remaining integration work.
 
@@ -23,7 +23,7 @@ The **14-package Rust project** has **0 external crates.io dependencies**: 12 ro
 - **Corduroy**: the algebraic `Poseidon2` stateless threshold custody hypertree.
 - **Hem** (`qsag-agg`): non-interactive $K$-to-$1$ succinct signature aggregation and binary-tree proof merging over **GoldilocksExt4**, $\mathbb{F}_p[v]/(v^4-7)$, where $p=2^{64}-2^{32}+1$ and $p^4>2^{255.99}$. It uses EUROCRYPT 2025 rate-escalating **WHIR** and Steiner-deduplicated **CanopyMultiProof** Merkle-Canopy commitments. The default `BciksJohnsonQrom128` query schedule is $q=(258,130,88,66)$; `BciksJohnsonClassical128` remains available in lower-level APIs. Capacity-proximity regimes, including Habr24, are retired and their wire tags are rejected. Johnson query accounting does not close the remaining CWYZ decomposition and concrete WHIR soundness proof. The aggregate verifier enforces a mandatory **128-bit QROM Grover search floor for query accounting**. This is not a total Fiat–Shamir/QROM security proof: field errors, commitment binding, list sizes, adaptive reduction losses, and composition still matter. Merge trees verify constituent proofs and signer disjointness. The compact hierarchy proves a public commitment chain; its authorization API additionally requires locally verified child evidence. It does not prove the child-verifier relation inside the outer proof.
 
-The surrounding stack covers `FrontierSumFts` / `ParallelSeededFts`, secret-keyed dealerless PQ HD wallets, `Bech32m` addresses and `HybridPinnedEnvelope`, authenticated rolling-window BDOZ custody guards, threshold `ML-DSA-44/65/87`, 2-of-5 `Poseidon2` TOPRF, six-limb `Quantum128` BlindVC, three-party co-ZK migration from `secp256k1` / `Taproot` / `Ed25519`, and accelerator backends.
+The surrounding stack covers `FrontierSumFts` / `ParallelSeededFts`, secret-keyed dealerless PQ HD wallets, `Bech32m` addresses and `HybridPinnedEnvelope`, authenticated rolling-window BDOZ custody guards, threshold `ML-DSA-44/65/87`, 2-of-5 `Poseidon2` TOPRF, six-limb `Quantum128` BlindVC, three-party co-ZK migration from `secp256k1` / `Taproot` / `Ed25519` plus standalone 438-repetition ZKBoo migration for `Pallas` (`Orchard` / `RedPallas`) and `BLS12-381` (`G1`), and accelerator backends.
 
 Threshold Hem-compatible Jorts signing, refresh and reshare now have implementations in `qsag-quorum::hem_quorum`. The seed-SPDZ lifecycle takes private RNGs from each party; an in-process coordinator still does not establish separated custody. See the [construction obligations](PROJECT.md#construction-proof-obligations) for the remaining implementation-to-ideal-functionality work.
 
@@ -80,7 +80,7 @@ Optional `std` features provide WAL storage and Linux Vulkan execution. Fresh ex
 
 ## Quickstart: CLI & Runnable Examples
 
-Run from the repository root on Linux with the pinned Rust 1.99.1 toolchain (the declared 1.85 minimum is not verified by this run) and `/dev/urandom`. The temporary directory is new on each run because key/signature outputs refuse accidental overwrites. These are demonstration keys.
+Run from the repository root on Linux with the pinned Rust 1.99.1 toolchain (`rust-version = "1.99.1"`) and `/dev/urandom`. The temporary directory is new on each run because key/signature outputs refuse accidental overwrites. These are demonstration keys.
 
 ```bash
 umask 077
