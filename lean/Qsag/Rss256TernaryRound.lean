@@ -153,6 +153,13 @@ theorem exists_eval_nonzero_quadratic_tower128 (c0 c1 c2 : Tower128)
     · exact ⟨towerOne 7, h1⟩
   · exact ⟨towerZero 7, h0⟩
 
+theorem evalCoeffs3_eq (c0 c1 c2 x : Tower128) :
+    RoundPoly.evalCoeffs [c0, c1, c2] x =
+      towerAdd 7 c0 (towerMul 7 x (towerAdd 7 c1 (towerMul 7 x c2))) := by
+  change towerAdd 7 c0 (towerMul 7 x (towerAdd 7 c1 (towerMul 7 x
+    (towerAdd 7 c2 (towerMul 7 x (towerZero 7)))))) = _
+  rw [towerMul_zero, towerAdd_zero]
+
 theorem quadratic_roots_le_two_tower128 (c0 c1 c2 : Tower128) (S : List Tower128) (hS : S.Nodup)
     (hNe : c0 ≠ towerZero 7 ∨ c1 ≠ towerZero 7 ∨ c2 ≠ towerZero 7) :
     (S.filter (fun x => decide (RoundPoly.evalCoeffs [c0, c1, c2] x = towerZero 7))).length ≤ 2 := by
@@ -351,9 +358,9 @@ theorem ternaryEval_step_eq_evalCoeffs {b : Nat} (g : Tower128) (rest : Challeng
     ternaryEval (.cons g rest) (.branch t0 t1 t2) =
       RoundPoly.evalCoeffs [e0, towerAdd 7 (towerAdd 7 e0 e1) e2, e2] g := by
   dsimp only
+  rw [evalCoeffs3_eq]
   simp only [ternaryEval, ternaryBasis0, ternaryBasis1, ternaryBasisSlope, towerFrobeniusPoly,
-    RoundPoly.evalCoeffs, towerMul_zero, towerAdd_zero, towerAdd_mul_distrib,
-    towerMul_add_distrib, towerOne_mul]
+    towerAdd_mul_distrib, towerMul_add_distrib, towerOne_mul]
   ac_rfl
 
 theorem ternaryEval_diffTab {b : Nat} (gs : ChallengeTuple b) (x y : TernaryTab b) :
@@ -649,27 +656,25 @@ theorem frobenius_quadratic_interp_eq (g p0 p1 mid : Tower128) :
       (towerMul 7 (ternaryBasis1 g) (towerMul 7 (ternaryBasis1 g) p1)) := by
   dsimp only [ternaryBasis0, ternaryBasis1, ternaryBasisSlope, towerFrobeniusPoly]
   simp only [towerAdd_mul_distrib, towerMul_add_distrib, towerOne_mul]
-  trans towerAdd 7
-    (towerAdd 7 p0
-      (towerAdd 7
-        (towerAdd 7 (towerMul 7 g p0) (towerMul 7 g p0))
-        (towerAdd 7 (towerMul 7 g p1) (towerMul 7 g p1))))
-    (towerAdd 7 (towerMul 7 g mid)
-      (towerAdd 7
-        (towerAdd 7 (towerMul 7 (towerMul 7 g g) p0) (towerMul 7 (towerMul 7 g g) mid))
-        (towerMul 7 (towerMul 7 g g) p1)))
-  · ac_rfl
-  · rw [towerAdd_self_zero, towerAdd_self_zero, towerAdd_zero, towerAdd_zero]
-    symm
-    trans towerAdd 7
-      (towerAdd 7 p0 (towerAdd 7 (towerMul 7 g p0) (towerMul 7 g p0)))
-      (towerAdd 7 (towerMul 7 g mid)
-        (towerAdd 7
+  have hL : towerAdd 7 (towerAdd 7 (towerAdd 7 p0 (towerMul 7 g p0)) (towerMul 7 g p1))
+      (towerAdd 7 (towerAdd 7 (towerAdd 7 (towerMul 7 (towerMul 7 g g) p0) (towerMul 7 g p0))
+          (towerAdd 7 (towerMul 7 (towerMul 7 g g) mid) (towerMul 7 g mid)))
+        (towerAdd 7 (towerMul 7 (towerMul 7 g g) p1) (towerMul 7 g p1))) =
+      towerAdd 7 (towerAdd 7 p0 (towerAdd 7 (towerAdd 7 (towerMul 7 g p0) (towerMul 7 g p0))
+          (towerAdd 7 (towerMul 7 g p1) (towerMul 7 g p1))))
+        (towerAdd 7 (towerMul 7 g mid) (towerAdd 7
+          (towerAdd 7 (towerMul 7 (towerMul 7 g g) p0) (towerMul 7 (towerMul 7 g g) mid))
+          (towerMul 7 (towerMul 7 g g) p1))) := by ac_rfl
+  have hR : towerAdd 7 (towerAdd 7
+        (towerAdd 7 (towerAdd 7 p0 (towerMul 7 g p0)) (towerAdd 7 (towerMul 7 g p0) (towerMul 7 g (towerMul 7 g p0))))
+        (towerAdd 7 (towerMul 7 g mid) (towerMul 7 g (towerMul 7 g mid))))
+      (towerMul 7 g (towerMul 7 g p1)) =
+      towerAdd 7 (towerAdd 7 p0 (towerAdd 7 (towerMul 7 g p0) (towerMul 7 g p0)))
+        (towerAdd 7 (towerMul 7 g mid) (towerAdd 7
           (towerAdd 7 (towerMul 7 g (towerMul 7 g p0)) (towerMul 7 g (towerMul 7 g mid)))
-          (towerMul 7 g (towerMul 7 g p1))))
-    · ac_rfl
-    · rw [towerAdd_self_zero, towerAdd_zero]
-      simp only [towerMul_assoc]
+          (towerMul 7 g (towerMul 7 g p1)))) := by ac_rfl
+  rw [hL, hR, towerAdd_self_zero, towerAdd_self_zero, towerAdd_zero, towerAdd_zero]
+  simp only [towerMul_assoc]
 
 theorem ternaryEval_honestRoundTab_eq (m b : Nat) :
     ∀ (gammas : ChallengeTuple b) (xp yq xq yp : Vec128 (m + b)),

@@ -193,7 +193,7 @@ theorem fips205_wellFormed_exact_hMsg_bytes (p : Fips205Params) (hWf : p.wellFor
   exact hWf.2
 
 theorem tooth_slhDsaShake128s_m34_rejected :
-    ({ slhDsaShake128s with m := 34 } : Fips205Params).wellFormed = false := by
+    ({ slhDsaShake128s with m := 34 } : Fips205Params).wellFormed ≠ true := by
   decide
 
 theorem witness_slhDsaShake128s_m30_wellFormed :

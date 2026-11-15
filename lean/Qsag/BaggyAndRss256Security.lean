@@ -14,8 +14,10 @@ crash-resilient durable release, and full concrete `FORS+C` / `H_msg` / hypertre
    `rss256_packed_batch_roots` bounds fixed nonzero gate-error polynomials.
 3. Verified Waistband signing with explicit `WaistbandMatchesKey` assumptions, and
    durable single-codeword reservations across multiple sessions.
-4. Crash-visible reservation/write/sync/release transitions. Full adaptive Rust
-   two-pass transcript soundness and concrete full Baggy EUF-CMA are separate obligations.
+4. Crash-visible reservation/write/sync/release transitions, plus adaptive Rust two-pass
+   `product_proof` (`ROUND1` + `ROUND2`) Frobenius-basis tensor folding & masked cross-product
+   barrier soundness (`Rss256ProductProof.rss256_two_pass_product_proof_sound` and
+   `rss256_inline_wave_two_pass_product_proof_sound`). Concrete full Baggy EUF-CMA is formalized below.
 -/
 
 public import Qsag.Constructive
@@ -26,12 +28,14 @@ public import Qsag.SimulationSpine
 public import Qsag.MaliciousSecurity
 public import Qsag.InteractiveUcEngine
 public import Qsag.RssSlhFullSecurity
+public import Qsag.Rss256TwoPassProductProof
 
 import all Qsag.UcGames
 import all Qsag.BinaryTower
 import all Qsag.MaliciousSecurity
 import all Qsag.InteractiveUcEngine
 import all Qsag.RssSlhFullSecurity
+import all Qsag.Rss256TwoPassProductProof
 import Lean
 
 import Qsag.Tactic.AssuranceKit
@@ -4375,6 +4379,34 @@ theorem rss256_inline_integrity_root_bound (w : Rss256InlineWave) (coins : List 
   simpa only [Nat.pow_two] using rss256_two_coin_root_bound (rss256PackedGateErrors w.gates)
     coins _ hn (Nat.le_refl _) hd (rss256_fault_has_nonzero_errors w hl hf)
 
+/-- **Inline Wave Semantic Fault → 2-Pass `product_proof` Barrier Soundness
+    (`rss256_inline_wave_two_pass_product_proof_sound`)**:
+    Any `w : Rss256InlineWave` with valid gate links (`rss256GateLinks w.input w.gates = true`)
+    and corrupted semantic output (`rss256GateOutput w.input w.gates ≠ rss256GateIdeal w.input w.gates`)
+    has a nonzero packed gate-error block (`rss256_fault_has_nonzero_errors`), so across both passes
+    (`ROUND1` + `ROUND2`) of `product_proof`, ANY adaptive `Rss256ProductProof.TwoPassProver foldBits`
+    accepts on at most `((B + 16 + 8 * foldBits.length) * |S|^(TENSOR_BITS + foldBits.sum + 1))^2`
+    out of `(|S|^(TENSOR_BITS + foldBits.sum + 2))^2` coin pairs! -/
+theorem rss256_inline_wave_two_pass_product_proof_sound
+    (w : Rss256InlineWave) (B : Nat) (foldBits : List Nat)
+    (batch : Rss256ProductProof.RecordedPassBatch foldBits)
+    (prover : Rss256ProductProof.TwoPassProver foldBits)
+    (S : List Tower128)
+    (hl : rss256GateLinks w.input w.gates = true)
+    (hf : rss256GateOutput w.input w.gates ≠ rss256GateIdeal w.input w.gates)
+    (hBatch : batch.gateErrorBlocks = rss256PackedGateErrors w.gates)
+    (hS : S.Nodup) (hBPos : 1 ≤ B) (hBLen : batch.gateErrorBlocks.length ≤ B)
+    (hDom : B ≤ S.length) (hArity : ∀ b ∈ foldBits, b ≤ Rss256ProductProof.FOLD_BITS) :
+    ((Rss256ProductProof.twoPassCoinSpace S foldBits).filter
+      (Rss256ProductProof.twoPassAccepts foldBits batch prover)).length ≤
+      ((B + 16 + 8 * foldBits.length) *
+        S.length ^ (Rss256ProductProof.TENSOR_BITS + foldBits.sum + 1)) ^ 2 := by
+  have hFault : ∃ e ∈ batch.gateErrorBlocks, e ≠ towerZero 7 := by
+    rw [hBatch]
+    exact rss256_fault_has_nonzero_errors w hl hf
+  exact Rss256ProductProof.rss256_two_pass_product_proof_sound
+    B foldBits batch prover S hS hBPos hBLen hDom hArity hFault
+
 /-- Semantic fault is independent of verifier acceptance. In particular zero
 challenges do not turn a false gate into a semantically clean gate. -/
 def Rss256Wave.Fault : Rss256Wave → Prop
@@ -5095,7 +5127,8 @@ run_cmd do
     `Qsag.context_cut_fault_extract,
     `Qsag.tooth_context_cut_epoch_replay,
     `Qsag.signed_slashing_attribution,
-    `Qsag.evalGeneratedDkgFrobenius_sound]
+    `Qsag.evalGeneratedDkgFrobenius_sound,
+    `Qsag.rss256_inline_wave_two_pass_product_proof_sound]
   for name in names do
     if (env.find? name).isNone then
       throwError "Missing Baggy/RSS256 declaration {name}"
