@@ -1661,5 +1661,425 @@ theorem shamir_share_pad_rebalance_gf4
 
 end ShareRebalance
 
+/-! ## 6. Multi-Session Product-Tape Bijections & Concurrent Hybrid Game Combinator -/
+
+/-- Constructive pairing `Fin A × Fin B → Fin (A * B)`. -/
+def ucPairFin {A B : Nat} (a : Fin A) (b : Fin B) : Fin (A * B) :=
+  ⟨a.val * B + b.val, by
+    have h1 : (a.val + 1) * B ≤ A * B := Nat.mul_le_mul_right B a.isLt
+    rw [Nat.add_mul, Nat.one_mul] at h1
+    have h2 : b.val < B := b.isLt
+    omega⟩
+
+/-- Left quotient projection `Fin (A * B) → Fin A` (`0 < B`). -/
+def ucSplitLeft {A B : Nat} (hB : 0 < B) (x : Fin (A * B)) : Fin A :=
+  ⟨x.val / B, (Nat.div_lt_iff_lt_mul hB).mpr x.isLt⟩
+
+/-- Right remainder projection `Fin (A * B) → Fin B` (`0 < B`). -/
+def ucSplitRight {A B : Nat} (hB : 0 < B) (x : Fin (A * B)) : Fin B :=
+  ⟨x.val % B, Nat.mod_lt x.val hB⟩
+
+theorem ucPair_split {A B : Nat} (hB : 0 < B) (x : Fin (A * B)) :
+    ucPairFin (ucSplitLeft hB x) (ucSplitRight hB x) = x := by
+  apply Fin.ext
+  dsimp [ucPairFin, ucSplitLeft, ucSplitRight]
+  have h := Nat.div_add_mod x.val B
+  rw [Nat.mul_comm B (x.val / B)] at h
+  exact h
+
+theorem ucSplitLeft_pair {A B : Nat} (hB : 0 < B) (a : Fin A) (b : Fin B) :
+    ucSplitLeft hB (ucPairFin a b) = a := by
+  apply Fin.ext
+  dsimp [ucSplitLeft, ucPairFin]
+  rw [Nat.mul_comm a.val B, Nat.mul_add_div hB, Nat.div_eq_of_lt b.isLt, Nat.add_zero]
+
+theorem ucSplitRight_pair {A B : Nat} (hB : 0 < B) (a : Fin A) (b : Fin B) :
+    ucSplitRight hB (ucPairFin a b) = b := by
+  apply Fin.ext
+  dsimp [ucSplitRight, ucPairFin]
+  rw [Nat.mul_comm a.val B, Nat.mul_add_mod, Nat.mod_eq_of_lt b.isLt]
+
+private theorem uc_finSum_snoc : ∀ (k : Nat) (g : Nat → Nat),
+    finSum (k + 1) (fun i => g i.val) = finSum k (fun i => g i.val) + g k
+  | 0, g => by simp [finSum]
+  | k + 1, g => by
+    conv => lhs; rw [finSum]
+    dsimp only
+    rw [uc_finSum_snoc k (fun j => g (j + 1))]
+    conv => rhs; rw [finSum]
+    dsimp only
+    omega
+
+private theorem uc_finSum_nat_eq_of_eq {m n : Nat} (h : m = n) (g : Nat → Nat) :
+    finSum m (fun i => g i.val) = finSum n (fun i => g i.val) := by
+  subst h; rfl
+
+private theorem uc_finSum_nat_add_split (m : Nat) : ∀ (n : Nat) (g : Nat → Nat),
+    finSum (m + n) (fun i => g i.val) =
+      finSum m (fun i => g i.val) + finSum n (fun j => g (m + j.val))
+  | 0, g => by
+    simp [finSum]
+  | n + 1, g => by
+    have hStep : m + (n + 1) = (m + n) + 1 := rfl
+    rw [hStep, uc_finSum_snoc (m + n) g, uc_finSum_nat_add_split m n g,
+        uc_finSum_snoc n (fun j => g (m + j))]
+    omega
+
+private theorem uc_finSum_mul_nat : ∀ (A B : Nat) (g : Nat → Nat),
+    finSum (A * B) (fun i => g i.val) =
+      finSum A (fun a => finSum B (fun b => g (a.val * B + b.val)))
+  | 0, B, g => by
+    rw [uc_finSum_nat_eq_of_eq (Nat.zero_mul B) g]
+    rfl
+  | A + 1, B, g => by
+    rw [uc_finSum_nat_eq_of_eq (Nat.succ_mul A B) g,
+        uc_finSum_nat_add_split (A * B) B g,
+        uc_finSum_mul_nat A B g,
+        uc_finSum_snoc A (fun a => finSum B (fun b => g (a * B + b.val)))]
+
+/-- Exact Fubini decomposition of `finSum (A * B)` over `ucPairFin`. -/
+theorem finSum_ucPairFin {A B : Nat} (f : Fin (A * B) → Nat) :
+    finSum (A * B) f = finSum A (fun a => finSum B (fun b => f (ucPairFin a b))) := by
+  let g : Nat → Nat := fun n => if h : n < A * B then f ⟨n, h⟩ else 0
+  have hL : finSum (A * B) f = finSum (A * B) (fun i => g i.val) :=
+    finSum_congr (fun i => by
+      dsimp only [g]
+      split
+      · rfl
+      · next hn => exact absurd i.isLt hn)
+  have hR : finSum A (fun a => finSum B (fun b => g (a.val * B + b.val))) =
+      finSum A (fun a => finSum B (fun b => f (ucPairFin a b))) :=
+    finSum_congr (fun a => finSum_congr (fun b => by
+      dsimp only [g]
+      split
+      · rfl
+      · next hn => exact absurd (ucPairFin a b).isLt hn))
+  rw [hL, uc_finSum_mul_nat A B g, hR]
+
+private theorem uc_finSum_mul_right : ∀ (n c : Nat) (f : Fin n → Nat),
+    finSum n (fun i => f i * c) = finSum n f * c
+  | 0, _, _ => by simp [finSum]
+  | n + 1, c, f => by
+    simp only [finSum, uc_finSum_mul_right n c, Nat.add_mul]
+
+/-- Reducible session-product cardinality `ucPow C Q_s = C ^ Q_s`. -/
+def ucPow (C : Nat) : Nat → Nat
+  | 0 => 1
+  | k + 1 => ucPow C k * C
+
+theorem ucPow_zero (C : Nat) : ucPow C 0 = 1 := by rfl
+
+theorem ucPow_succ (C k : Nat) : ucPow C (k + 1) = ucPow C k * C := by rfl
+
+theorem ucPow_pos {C : Nat} (hC : 0 < C) : ∀ Q_s : Nat, 0 < ucPow C Q_s
+  | 0 => by rw [ucPow_zero]; exact Nat.zero_lt_one
+  | k + 1 => by rw [ucPow_succ]; exact Nat.mul_pos (ucPow_pos hC k) hC
+
+theorem ucPow_eq_pow (C : Nat) : ∀ Q_s : Nat, ucPow C Q_s = C ^ Q_s
+  | 0 => by rfl
+  | k + 1 => by
+    rw [ucPow_succ, ucPow_eq_pow C k, Nat.pow_succ]
+
+/-- Update a single session slot `idx` in a `Q_s`-session tape vector `Fin Q_s → α`. -/
+def updateFinVec {Q_s : Nat} {α : Type} (v : Fin Q_s → α) (idx : Fin Q_s) (x : α) :
+    Fin Q_s → α :=
+  fun j => if j = idx then x else v j
+
+theorem updateFinVec_self {Q_s : Nat} {α : Type} (v : Fin Q_s → α) (idx : Fin Q_s) :
+    updateFinVec v idx (v idx) = v := by
+  funext j
+  unfold updateFinVec
+  by_cases hj : j = idx
+  · rw [ite_eq_left hj, hj]
+  · rw [ite_eq_right hj]
+
+theorem updateFinVec_same {Q_s : Nat} {α : Type} (v : Fin Q_s → α) (idx : Fin Q_s) (x : α) :
+    updateFinVec v idx x idx = x := by
+  unfold updateFinVec
+  exact ite_eq_left rfl
+
+theorem updateFinVec_other {Q_s : Nat} {α : Type} (v : Fin Q_s → α) (idx j : Fin Q_s) (x : α)
+    (hNe : j ≠ idx) :
+    updateFinVec v idx x j = v j := by
+  unfold updateFinVec
+  exact ite_eq_right hNe
+
+theorem updateFinVec_twice {Q_s : Nat} {α : Type} (v : Fin Q_s → α) (idx : Fin Q_s) (x y : α) :
+    updateFinVec (updateFinVec v idx x) idx y = updateFinVec v idx y := by
+  funext j
+  unfold updateFinVec
+  by_cases hj : j = idx
+  · rw [ite_eq_left hj, ite_eq_left hj]
+  · rw [ite_eq_right hj, ite_eq_right hj, ite_eq_right hj]
+
+/-- Append one session coordinate onto `Fin k → α`. -/
+def snocFinVec {k : Nat} {α : Type} (v : Fin k → α) (last : α) : Fin (k + 1) → α :=
+  fun i => if h : i.val < k then v ⟨i.val, h⟩ else last
+
+/-- Prefix projection of `Fin (k + 1) → α` onto `Fin k → α`. -/
+def initFinVec {k : Nat} {α : Type} (v : Fin (k + 1) → α) : Fin k → α :=
+  fun j => v ⟨j.val, Nat.lt_succ_of_lt j.isLt⟩
+
+private theorem initFinVec_snocFinVec {k : Nat} {α : Type} (v : Fin k → α) (last : α) :
+    initFinVec (snocFinVec v last) = v := by
+  funext j
+  unfold initFinVec snocFinVec
+  dsimp only
+  split
+  · rfl
+  · next hn => exact absurd j.isLt hn
+
+private theorem snocFinVec_last {k : Nat} {α : Type} (v : Fin k → α) (last : α) :
+    snocFinVec v last ⟨k, Nat.lt_succ_self k⟩ = last := by
+  unfold snocFinVec
+  dsimp only
+  split
+  · next h => exact absurd h (Nat.lt_irrefl k)
+  · rfl
+
+private theorem snocFinVec_init_last {k : Nat} {α : Type} (w : Fin (k + 1) → α) :
+    snocFinVec (initFinVec w) (w ⟨k, Nat.lt_succ_self k⟩) = w := by
+  funext ⟨iv, isLt⟩
+  unfold snocFinVec initFinVec
+  dsimp only
+  split
+  · rfl
+  · next hn =>
+    have hEq : iv = k := by omega
+    subst hEq
+    rfl
+
+/-- Constructive `0 Classical.choice` bijection `Fin (ucPow C Q_s) ≃ (Fin Q_s → Fin C)` (`0 < C`). -/
+def finPowVecEquiv {C : Nat} (hC : 0 < C) :
+    (Q_s : Nat) → SimpleEquiv (Fin (ucPow C Q_s)) (Fin Q_s → Fin C)
+  | 0 =>
+    { toFun := fun _ i => Fin.elim0 i
+      invFun := fun _ => ⟨0, Nat.zero_lt_one⟩
+      left_inv := fun ⟨v, hv⟩ => by
+        have hv1 : v < 1 := hv
+        have hv0 : v = 0 := by omega
+        subst hv0
+        rfl
+      right_inv := fun f => funext (fun i => Fin.elim0 i) }
+  | k + 1 =>
+    let prev := finPowVecEquiv hC k
+    { toFun := fun idx => snocFinVec (prev.toFun (ucSplitLeft hC idx)) (ucSplitRight hC idx)
+      invFun := fun w => ucPairFin (prev.invFun (initFinVec w)) (w ⟨k, Nat.lt_succ_self k⟩)
+      left_inv := fun idx => by
+        change ucPairFin (prev.invFun (initFinVec (snocFinVec _ _)))
+            (snocFinVec _ _ ⟨k, Nat.lt_succ_self k⟩) = idx
+        rw [initFinVec_snocFinVec, prev.left_inv, snocFinVec_last]
+        exact ucPair_split hC idx
+      right_inv := fun w => by
+        change snocFinVec (prev.toFun (ucSplitLeft hC (ucPairFin _ _)))
+            (ucSplitRight hC (ucPairFin _ _)) = w
+        rw [ucSplitLeft_pair hC, ucSplitRight_pair hC, prev.right_inv, snocFinVec_init_last] }
+
+/-- Lift a coordinate bijection `bij v : SimpleEquiv (Fin C) (Fin C)` that does not depend on
+    coordinate `idx` to a global bijection on `Fin Q_s → Fin C`. -/
+def liftCoordVecEquiv {Q_s C : Nat} (idx : Fin Q_s)
+    (bij : (Fin Q_s → Fin C) → SimpleEquiv (Fin C) (Fin C))
+    (hIndep : ∀ (v : Fin Q_s → Fin C) (x y : Fin C),
+      bij (updateFinVec v idx x) = bij (updateFinVec v idx y)) :
+    SimpleEquiv (Fin Q_s → Fin C) (Fin Q_s → Fin C) :=
+  have hInv : ∀ (v : Fin Q_s → Fin C) (x : Fin C), bij (updateFinVec v idx x) = bij v := by
+    intro v x
+    have h1 := hIndep v x (v idx)
+    rw [updateFinVec_self] at h1
+    exact h1
+  { toFun := fun v => updateFinVec v idx ((bij v).toFun (v idx))
+    invFun := fun w => updateFinVec w idx ((bij w).invFun (w idx))
+    left_inv := fun v => by
+      change updateFinVec (updateFinVec v idx ((bij v).toFun (v idx))) idx
+        ((bij (updateFinVec v idx ((bij v).toFun (v idx)))).invFun
+          (updateFinVec v idx ((bij v).toFun (v idx)) idx)) = v
+      rw [hInv v ((bij v).toFun (v idx)), updateFinVec_same, (bij v).left_inv,
+          updateFinVec_twice, updateFinVec_self]
+    right_inv := fun w => by
+      change updateFinVec (updateFinVec w idx ((bij w).invFun (w idx))) idx
+        ((bij (updateFinVec w idx ((bij w).invFun (w idx)))).toFun
+          (updateFinVec w idx ((bij w).invFun (w idx)) idx)) = w
+      rw [hInv w ((bij w).invFun (w idx)), updateFinVec_same, (bij w).right_inv,
+          updateFinVec_twice, updateFinVec_self] }
+
+/-- Marginal Fubini slice bound over `ucPow C Q_s`: if fixing all coordinates `j ≠ idx` caps the
+    slice sum over `x : Fin C` at `eps`, then the full product sum scaled by `C` is
+    `≤ eps * ucPow C Q_s`. -/
+theorem finPow_coord_sum_le {C : Nat} (hC : 0 < C) :
+    ∀ (Q_s : Nat) (idx : Fin Q_s) (W : (Fin Q_s → Fin C) → Nat) (eps : Nat),
+      (∀ v : Fin Q_s → Fin C, finSum C (fun x => W (updateFinVec v idx x)) ≤ eps) →
+      finSum (ucPow C Q_s) (fun ω => W ((finPowVecEquiv hC Q_s).toFun ω)) * C ≤
+        eps * ucPow C Q_s
+  | 0, idx, _, _, _ => Fin.elim0 idx
+  | k + 1, ⟨idxVal, idxIsLt⟩, W, eps, hSlice => by
+    let idx : Fin (k + 1) := ⟨idxVal, idxIsLt⟩
+    have hSplit :
+        finSum (ucPow C (k + 1)) (fun ω => W ((finPowVecEquiv hC (k + 1)).toFun ω)) =
+        finSum (ucPow C k) (fun pref =>
+          finSum C (fun last => W (snocFinVec ((finPowVecEquiv hC k).toFun pref) last))) := by
+      change finSum (ucPow C k * C) (fun ω => W ((finPowVecEquiv hC (k + 1)).toFun ω)) = _
+      rw [finSum_ucPairFin]
+      apply finSum_congr
+      intro pref
+      apply finSum_congr
+      intro last
+      change W (snocFinVec ((finPowVecEquiv hC k).toFun (ucSplitLeft hC (ucPairFin pref last)))
+        (ucSplitRight hC (ucPairFin pref last))) = _
+      rw [ucSplitLeft_pair hC, ucSplitRight_pair hC]
+    rw [hSplit]
+    by_cases hLt : idxVal < k
+    · let idx' : Fin k := ⟨idxVal, hLt⟩
+      rw [finSum_comm (fun (pref : Fin (ucPow C k)) (last : Fin C) =>
+        W (snocFinVec ((finPowVecEquiv hC k).toFun pref) last))]
+      rw [← uc_finSum_mul_right]
+      have hEachLast : ∀ last : Fin C,
+          finSum (ucPow C k) (fun pref =>
+            W (snocFinVec ((finPowVecEquiv hC k).toFun pref) last)) * C ≤ eps * ucPow C k := by
+        intro last
+        apply finPow_coord_sum_le hC k idx' (fun u => W (snocFinVec u last)) eps
+        intro u
+        have hEqUpd : ∀ x : Fin C,
+            snocFinVec (updateFinVec u idx' x) last = updateFinVec (snocFinVec u last) idx x := by
+          intro x
+          funext ⟨jv, jLt⟩
+          unfold snocFinVec updateFinVec
+          dsimp only
+          split
+          · next hj =>
+            by_cases hEqJ : jv = idxVal
+            · have h1 : (⟨jv, hj⟩ : Fin k) = idx' := Fin.ext hEqJ
+              have h2 : (⟨jv, jLt⟩ : Fin (k + 1)) = idx := Fin.ext hEqJ
+              rw [ite_eq_left h1, ite_eq_left h2]
+            · have h1 : (⟨jv, hj⟩ : Fin k) ≠ idx' := fun he => hEqJ (congrArg Fin.val he)
+              have h2 : (⟨jv, jLt⟩ : Fin (k + 1)) ≠ idx := fun he => hEqJ (congrArg Fin.val he)
+              rw [ite_eq_right h1, ite_eq_right h2]
+          · next hj =>
+            have h2 : (⟨jv, jLt⟩ : Fin (k + 1)) ≠ idx := fun he => by
+              have hv : jv = idxVal := congrArg Fin.val he
+              exact hj (by omega)
+            rw [ite_eq_right h2]
+        have hCong : finSum C (fun x => W (snocFinVec (updateFinVec u idx' x) last)) =
+            finSum C (fun x => W (updateFinVec (snocFinVec u last) idx x)) :=
+          finSum_congr (fun x => congrArg W (hEqUpd x))
+        rw [hCong]
+        exact hSlice (snocFinVec u last)
+      have hSumLe := finSum_le_finSum hEachLast
+      rw [finSum_const] at hSumLe
+      have hR : C * (eps * ucPow C k) = eps * ucPow C (k + 1) := by
+        rw [ucPow_succ]
+        ac_rfl
+      rw [hR] at hSumLe
+      exact hSumLe
+    · have hIdxVal : idxVal = k := by omega
+      have hEachPref : ∀ pref : Fin (ucPow C k),
+          finSum C (fun last => W (snocFinVec ((finPowVecEquiv hC k).toFun pref) last)) ≤ eps := by
+        intro pref
+        let v0 := snocFinVec ((finPowVecEquiv hC k).toFun pref) ⟨0, hC⟩
+        have hEqLast : ∀ last : Fin C,
+            snocFinVec ((finPowVecEquiv hC k).toFun pref) last = updateFinVec v0 idx last := by
+          intro last
+          funext ⟨jv, jLt⟩
+          unfold snocFinVec updateFinVec
+          dsimp only
+          split
+          · next hj =>
+            have hNe : (⟨jv, jLt⟩ : Fin (k + 1)) ≠ idx := fun he => by
+              have hv : jv = idxVal := congrArg Fin.val he
+              omega
+            rw [ite_eq_right hNe]
+            unfold v0 snocFinVec
+            dsimp only
+            split
+            · rfl
+            · next hn => exact absurd hj hn
+          · next hj =>
+            have hJvK : jv = idxVal := by omega
+            have hEq : (⟨jv, jLt⟩ : Fin (k + 1)) = idx := Fin.ext hJvK
+            rw [ite_eq_left hEq]
+        rw [finSum_congr (fun last => congrArg W (hEqLast last))]
+        exact hSlice v0
+      have hPrefSum := finSum_le_finSum hEachPref
+      rw [finSum_const] at hPrefSum
+      have hMul := Nat.mul_le_mul_right C hPrefSum
+      have hR : ucPow C k * eps * C = eps * ucPow C (k + 1) := by
+        rw [ucPow_succ]
+        ac_rfl
+      rw [hR] at hMul
+      exact hMul
+
+/-- Single-coordinate concurrent hybrid hop over `ucPow C Q_s`. -/
+theorem concurrent_coord_hop_bound {View : Type} {C Q_s : Nat} (hC : 0 < C)
+    (idx : Fin Q_s)
+    (G₀ G₁ : (Fin Q_s → Fin C) → View)
+    (bij : (Fin Q_s → Fin C) → SimpleEquiv (Fin C) (Fin C))
+    (hIndep : ∀ v x y, bij (updateFinVec v idx x) = bij (updateFinVec v idx y))
+    (bad : (Fin Q_s → Fin C) → Bool) (eps : Nat)
+    (hAgree : ∀ v, bad v = false → G₀ v = G₁ (updateFinVec v idx ((bij v).toFun (v idx))))
+    (hBadSlice : ∀ v, finSum C (fun x => if bad (updateFinVec v idx x) then 1 else 0) ≤ eps)
+    (D : View → Bool) :
+    let enum := finPowVecEquiv hC Q_s
+    natAbsDiff (finSum (ucPow C Q_s) (fun ω => if D (G₀ (enum.toFun ω)) then 1 else 0))
+               (finSum (ucPow C Q_s) (fun ω => if D (G₁ (enum.toFun ω)) then 1 else 0)) * C ≤
+      eps * ucPow C Q_s := by
+  intro enum
+  let eVec := liftCoordVecEquiv idx bij hIndep
+  have hInv := finSum_bijection_invariant enum eVec (fun v => if D (G₁ v) then 1 else 0)
+  have hDiff := finSum_indicator_diff_le
+    (fun ω => D (G₀ (enum.toFun ω)))
+    (fun ω => D (G₁ (eVec.toFun (enum.toFun ω))))
+    (fun ω => bad (enum.toFun ω))
+    (fun ω hb => congrArg D (hAgree (enum.toFun ω) hb))
+  rw [hInv] at hDiff
+  exact Nat.le_trans (Nat.mul_le_mul_right C hDiff)
+    (finPow_coord_sum_le hC Q_s idx (fun v => if bad v then 1 else 0) eps hBadSlice)
+
+/-- **Concurrent Product-Tape Hybrid Theorem (`concurrent_product_hybrid_bound`)**:
+    Given `Q_s + 1` concurrent hybrids `hybrids h` (`0 ≤ h ≤ Q_s`) over `(Fin Q_s → Fin C)` (`0 < C`),
+    if each per-session hop `idx → idx + 1` agrees along a context-compatible coordinate bijection
+    outside a bad event of slice cardinality `≤ eps` out of `C`, then for EVERY distinguisher `D`,
+    the total distinguishing count scaled by `C` is at most `(Q_s * eps) * ucPow C Q_s`. -/
+theorem concurrent_product_hybrid_bound {View : Type} {C Q_s : Nat} (hC : 0 < C)
+    (hybrids : (h : Nat) → h ≤ Q_s → (Fin Q_s → Fin C) → View)
+    (bij : (idx : Fin Q_s) → (Fin Q_s → Fin C) → SimpleEquiv (Fin C) (Fin C))
+    (hIndep : ∀ idx v x y, bij idx (updateFinVec v idx x) = bij idx (updateFinVec v idx y))
+    (bad : Fin Q_s → (Fin Q_s → Fin C) → Bool)
+    (eps : Nat)
+    (hAgree : ∀ (idx : Fin Q_s) v, bad idx v = false →
+      hybrids idx.val (Nat.le_of_lt idx.isLt) v =
+        hybrids (idx.val + 1) idx.isLt (updateFinVec v idx ((bij idx v).toFun (v idx))))
+    (hBadSlice : ∀ (idx : Fin Q_s) v,
+      finSum C (fun x => if bad idx (updateFinVec v idx x) then 1 else 0) ≤ eps)
+    (D : View → Bool) :
+    let enum := finPowVecEquiv hC Q_s
+    let acc := fun (h : Nat) (hh : h ≤ Q_s) =>
+      finSum (ucPow C Q_s) (fun ω => if D (hybrids h hh (enum.toFun ω)) then 1 else 0)
+    natAbsDiff (acc 0 (Nat.zero_le Q_s)) (acc Q_s (Nat.le_refl Q_s)) * C ≤
+      (Q_s * eps) * ucPow C Q_s := by
+  intro enum acc
+  have hTel : ∀ (k : Nat) (hk : k ≤ Q_s),
+      natAbsDiff (acc 0 (Nat.zero_le Q_s)) (acc k hk) * C ≤ (k * eps) * ucPow C Q_s := by
+    intro k
+    induction k with
+    | zero =>
+      intro _
+      simp [natAbsDiff]
+    | succ k ih =>
+      intro hkSucc
+      have hkLe : k ≤ Q_s := Nat.le_of_lt hkSucc
+      have ihK := ih hkLe
+      let idx : Fin Q_s := ⟨k, hkSucc⟩
+      have hStep := concurrent_coord_hop_bound hC idx
+        (hybrids k hkLe) (hybrids (k + 1) hkSucc)
+        (bij idx) (hIndep idx) (bad idx) eps (hAgree idx) (hBadSlice idx) D
+      have hTri := Nat.mul_le_mul_right C
+        (natAbsDiff_triangle (acc 0 (Nat.zero_le Q_s)) (acc k hkLe) (acc (k + 1) hkSucc))
+      rw [Nat.add_mul] at hTri
+      have hSum := Nat.add_le_add ihK hStep
+      have hR : (k * eps) * ucPow C Q_s + eps * ucPow C Q_s = ((k + 1) * eps) * ucPow C Q_s := by
+        rw [Nat.succ_mul, Nat.add_mul]
+      rw [hR] at hSum
+      exact Nat.le_trans hTri hSum
+  exact hTel Q_s (Nat.le_refl Q_s)
+
 end Qsag
 end
