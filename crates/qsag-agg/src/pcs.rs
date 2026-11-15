@@ -52,7 +52,7 @@ use crate::sponge::{
     CANOPY_MIDSTATE, FiatShamirTranscript, InstanceBound, POW_MIDSTATE,
     cshake256_from_midstate_16_x4, cshake256_from_midstate_16_x8, cshake256_from_midstate_32,
     cshake256_from_midstate_32_x4, cshake256_from_midstate_32_x8, cshake256_from_midstate_into,
-    cshake256_pow_u64_single, cshake256_pow_u64_x8,
+    cshake256_pow_u64_single, cshake256_pow_u64_x8, poseidon2_pow_word,
 };
 
 /// Default Stage-0 Reed–Solomon blowup factor ($1/\rho_0 = 4$ at $K = 8, 16, 32$).
@@ -75,8 +75,13 @@ pub const MAX_FOLD_STEP_VARS: usize = 6;
 /// Maximum coset fiber arity ($2^{\text{MAX\_FOLD\_STEP\_VARS}} = 64$).
 const MAX_FIBER_ARITY: usize = 1usize << MAX_FOLD_STEP_VARS;
 
-/// Largest number of multilinear variables supported by the PCS (`24` -> $2^{24}$ witness entries).
-pub const MAX_PCS_NUM_VARS: usize = 24;
+/// Largest number of multilinear variables supported by the PCS (`28` -> $2^{28}$ witness entries;
+/// the Stage-0 domain is then $2^{30}$, inside the $2^{31}$ cap of [`WhirSchedule::validate`]).
+pub const MAX_PCS_NUM_VARS: usize = 28;
+
+/// Largest `num_vars` the Vulkan WHIR session supports (its Kronecker tables hold 24 variables).
+#[cfg(feature = "vulkan")]
+const MAX_GPU_PCS_NUM_VARS: usize = 24;
 
 /// Largest number of polynomials committed jointly under one Round-0 Merkle-Canopy tree.
 pub const MAX_BATCH_POLYS: usize = 16;
@@ -84,7 +89,7 @@ pub const MAX_BATCH_POLYS: usize = 16;
 /// Largest number of base-field elements inside a single Round-0 batch leaf (`16 * 64 = 1024`).
 const MAX_ROUND0_LEAF_VALS: usize = MAX_BATCH_POLYS * MAX_FIBER_ARITY;
 
-/// Maximum number of WHIR stages across `2..=24` variables.
+/// Maximum number of WHIR stages across `2..=MAX_PCS_NUM_VARS` variables.
 const MAX_WHIR_STAGES: usize = 4;
 
 // Prefix-free 1-byte domain tags under `CANOPY_MIDSTATE` (`cSHAKE256("", ., "QSAG.PCS.CANOPY/v2")`):
@@ -96,7 +101,7 @@ const TAG_ROUND0_BATCH: u8 = 0x11;
 const TAG_EXT4_STAGE_LEAF: u8 = 0x12;
 
 // ============================================================================
-// 1. WHIR Rate-Escalation Schedule (`num_vars` in `2..=24`)
+// 1. WHIR Rate-Escalation Schedule (`num_vars` in `2..=28`)
 // ============================================================================
 
 /// Parameters for one WHIR folding & proximity-testing stage.
@@ -111,12 +116,20 @@ pub struct WhirStageSpec {
     pub num_queries: usize,
 }
 
-/// Unconditional Johnson-radius query-accounting regimes (`BCIKS20`, agreement $\sqrt{\rho} + \eta$).
+/// Johnson-radius query-accounting regimes (`BCIKS20`, agreement $\sqrt{\rho} + \eta$).
 ///
 /// Capacity proximity-gap wire tags (`0`, `1`, `3`) are permanently retired and rejected on
 /// deserialization (`Crites & Stewart 2025/2046`, `Krachun-Kazanin-Habock 2026/782`). These are
 /// per-stage query bounds, not a proof of total Fiat–Shamir/QROM security (which also needs
 /// reduction, list-size, field-error, and union-bound accounting).
+///
+/// The `Cdhz25*` regimes use the per-stage query tables of
+/// `lean/Qsag/QromSaltedMerkleStateRestoration.lean` (`HemOptimizedQromSchedule.minQueries`):
+/// `Cdhz25Johnson*` is `cdhzPow16At2pow38` (pure query target `2^-200`, 16-bit PoW, stated there
+/// for at most `2^38` oracle queries) and `Cdhz25ZeroPow*` is `unitaryZeroPow` (pure query target
+/// `2^-214`, no PoW, stated for `Q + 1 <= 2^40`). The `Poseidon2*` variants use the same query
+/// tables with the width-12 Poseidon2 Merkle-Canopy and Fiat–Shamir transcript in place of
+/// `cSHAKE256`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u8)]
 pub enum WhirSecurityRegime {
@@ -124,19 +137,71 @@ pub enum WhirSecurityRegime {
     /// Default: unconditional Johnson-radius QROM budget (`ceil(512/log2(B)) + 2`).
     #[default]
     BciksJohnsonQrom128 = 4,
+    /// `(202, 102, 70, 52)` queries at blowups `(4, 16, 64, 256)` plus 16-bit PoW, `cSHAKE256`.
+    Cdhz25JohnsonQrom128 = 5,
+    /// `(216, 109, 74, 56)` queries at blowups `(4, 16, 64, 256)`, no PoW, `cSHAKE256`.
+    Cdhz25ZeroPowQrom128 = 6,
+    /// [`Self::Cdhz25JohnsonQrom128`] query table over the Poseidon2 canopy and transcript.
+    Poseidon2Cdhz25JohnsonQrom128 = 7,
+    /// [`Self::Cdhz25ZeroPowQrom128`] query table over the Poseidon2 canopy and transcript.
+    Poseidon2Cdhz25ZeroPowQrom128 = 8,
 }
 
 impl WhirSecurityRegime {
+    /// Every wire-decodable regime.
+    pub const ALL: [Self; 6] = [
+        Self::BciksJohnsonClassical128,
+        Self::BciksJohnsonQrom128,
+        Self::Cdhz25JohnsonQrom128,
+        Self::Cdhz25ZeroPowQrom128,
+        Self::Poseidon2Cdhz25JohnsonQrom128,
+        Self::Poseidon2Cdhz25ZeroPowQrom128,
+    ];
+
     pub fn from_u8(value: u8) -> Option<Self> {
         match value {
             2 => Some(Self::BciksJohnsonClassical128),
             4 => Some(Self::BciksJohnsonQrom128),
+            5 => Some(Self::Cdhz25JohnsonQrom128),
+            6 => Some(Self::Cdhz25ZeroPowQrom128),
+            7 => Some(Self::Poseidon2Cdhz25JohnsonQrom128),
+            8 => Some(Self::Poseidon2Cdhz25ZeroPowQrom128),
             _ => None,
         }
     }
 
     pub fn meets_qrom_128_floor(self) -> bool {
-        matches!(self, Self::BciksJohnsonQrom128)
+        !matches!(self, Self::BciksJohnsonClassical128)
+    }
+
+    /// Merkle-Canopy trees and the Fiat–Shamir transcript use width-12 Poseidon2.
+    pub fn uses_poseidon2_canopy(self) -> bool {
+        matches!(
+            self,
+            Self::Poseidon2Cdhz25JohnsonQrom128 | Self::Poseidon2Cdhz25ZeroPowQrom128
+        )
+    }
+
+    /// Proof-of-Work grinding bits before every fold, stage and batch challenge squeeze.
+    pub fn pow_bits(self) -> u32 {
+        match self {
+            Self::BciksJohnsonClassical128
+            | Self::BciksJohnsonQrom128
+            | Self::Cdhz25JohnsonQrom128
+            | Self::Poseidon2Cdhz25JohnsonQrom128 => PCS_POW_BITS,
+            Self::Cdhz25ZeroPowQrom128 | Self::Poseidon2Cdhz25ZeroPowQrom128 => 0,
+        }
+    }
+
+    /// Exponent `t` such that every non-exhaustive canonical stage has distinct-fiber query
+    /// error below `2^-t` (checked against the finite witnesses in `pcs/affine_schedule.rs`).
+    pub fn pure_query_target_bits(self) -> u32 {
+        match self {
+            Self::BciksJohnsonClassical128 => 128,
+            Self::BciksJohnsonQrom128 => 256,
+            Self::Cdhz25JohnsonQrom128 | Self::Poseidon2Cdhz25JohnsonQrom128 => 200,
+            Self::Cdhz25ZeroPowQrom128 | Self::Poseidon2Cdhz25ZeroPowQrom128 => 214,
+        }
     }
 
     /// Conservative per-round query plus PoW budget, before other protocol errors.
@@ -144,6 +209,7 @@ impl WhirSecurityRegime {
         match self {
             Self::BciksJohnsonClassical128 => 144,
             Self::BciksJohnsonQrom128 => 272,
+            _ => self.pure_query_target_bits() + self.pow_bits(),
         }
     }
 
@@ -153,9 +219,21 @@ impl WhirSecurityRegime {
     }
 
     fn minimum_queries(self, log_b: usize) -> usize {
+        let by_blowup = |table: [usize; 4]| match log_b {
+            0..=2 => table[0],
+            3..=4 => table[1],
+            5..=6 => table[2],
+            _ => table[3],
+        };
         match self {
             Self::BciksJohnsonClassical128 => 256usize.div_ceil(log_b) + 1,
             Self::BciksJohnsonQrom128 => 512usize.div_ceil(log_b) + 2,
+            Self::Cdhz25JohnsonQrom128 | Self::Poseidon2Cdhz25JohnsonQrom128 => {
+                by_blowup([202, 102, 70, 52])
+            }
+            Self::Cdhz25ZeroPowQrom128 | Self::Poseidon2Cdhz25ZeroPowQrom128 => {
+                by_blowup([216, 109, 74, 56])
+            }
         }
     }
 
@@ -265,6 +343,26 @@ fn stage_geometry(num_vars: usize) -> WhirSchedule {
             regime: WhirSecurityRegime::default(),
             early_stop_vars: 8,
             stages: vec![sp(4, 6), sp(16, 4), sp(64, 3), sp(256, 3)],
+        },
+        25 => WhirSchedule {
+            regime: WhirSecurityRegime::default(),
+            early_stop_vars: 8,
+            stages: vec![sp(4, 6), sp(16, 4), sp(64, 4), sp(256, 3)],
+        },
+        26 => WhirSchedule {
+            regime: WhirSecurityRegime::default(),
+            early_stop_vars: 8,
+            stages: vec![sp(4, 6), sp(16, 5), sp(64, 4), sp(256, 3)],
+        },
+        27 => WhirSchedule {
+            regime: WhirSecurityRegime::default(),
+            early_stop_vars: 8,
+            stages: vec![sp(4, 6), sp(16, 5), sp(64, 4), sp(256, 4)],
+        },
+        28 => WhirSchedule {
+            regime: WhirSecurityRegime::default(),
+            early_stop_vars: 8,
+            stages: vec![sp(4, 6), sp(16, 6), sp(64, 4), sp(256, 4)],
         },
         _ => unreachable!(),
     }
@@ -1703,6 +1801,311 @@ fn hash_ext4_group_x8(
 }
 
 // ============================================================================
+// 2B. Poseidon2 Merkle-Canopy (`WhirSecurityRegime::uses_poseidon2_canopy`)
+// ============================================================================
+
+/// Merkle-Canopy hash backend of one committed oracle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CanopyHash {
+    /// `CANOPY_MIDSTATE` `cSHAKE256` digests.
+    Cshake256,
+    /// Width-12 Poseidon2 digests (four canonical `Goldilocks` limbs, little-endian) for the
+    /// oracle of WHIR stage `stage_idx`.
+    Poseidon2 { stage_idx: u8 },
+}
+
+impl CanopyHash {
+    /// Backend of the stage-`stage_idx` oracle under `regime`.
+    pub fn for_stage(regime: WhirSecurityRegime, stage_idx: usize) -> Self {
+        if regime.uses_poseidon2_canopy() {
+            Self::Poseidon2 {
+                stage_idx: stage_idx as u8,
+            }
+        } else {
+            Self::Cshake256
+        }
+    }
+}
+
+/// Node key of the Poseidon2 canopy tree of stage `stage_idx` with `2^log_leaves` leaves. The
+/// trees carry no tree-level salt; blinding salts enter the Round-0 leaves.
+#[inline]
+pub fn poseidon2_canopy_key(stage_idx: u8, log_leaves: u8) -> [Goldilocks; 4] {
+    crate::sponge::poseidon2_canopy_tree_key(stage_idx, log_leaves, [Goldilocks::ZERO; 4])
+}
+
+/// Poseidon2 internal node `node_idx` (1-indexed heap position) over two child digests.
+/// `None` if a child is not four canonical limbs.
+#[inline]
+pub fn poseidon2_canopy_node(
+    key: [Goldilocks; 4],
+    node_idx: u32,
+    left: &[u8; 32],
+    right: &[u8; 32],
+) -> Option<[u8; 32]> {
+    let l = crate::sponge::bytes32_to_limbs4_le_canonical(left)?;
+    let r = crate::sponge::bytes32_to_limbs4_le_canonical(right)?;
+    Some(crate::sponge::limbs4_to_le_bytes32(
+        crate::sponge::poseidon2_canopy_internal(node_idx, key, l, r),
+    ))
+}
+
+/// Poseidon2 commitment digest binding the top node to `(stage_idx, log_leaves)`.
+/// `None` if `top_node` is not four canonical limbs.
+#[inline]
+pub fn poseidon2_canopy_commitment_root(
+    stage_idx: u8,
+    log_leaves: u8,
+    top_node: &[u8; 32],
+) -> Option<[u8; 32]> {
+    let top = crate::sponge::bytes32_to_limbs4_le_canonical(top_node)?;
+    Some(crate::sponge::limbs4_to_le_bytes32(
+        crate::sponge::poseidon2_canopy_root(stage_idx, log_leaves, [Goldilocks::ZERO; 4], top),
+    ))
+}
+
+/// Poseidon2 Round-0 salted leaf: capacity `[leaf_idx, arity, num_polys, 0]`, rate stream
+/// `[salt[0..7], salt[7..14], salt[14..16]] ++ vals` under the single- or batch-leaf domain tag.
+pub fn poseidon2_round0_leaf(
+    leaf_idx: u32,
+    salt: &[u8; 16],
+    num_polys: usize,
+    vals: &[Goldilocks],
+) -> [u8; 32] {
+    debug_assert!(
+        (1..=MAX_BATCH_POLYS).contains(&num_polys) && vals.len() <= MAX_ROUND0_LEAF_VALS
+    );
+    let arity = vals.len() / num_polys;
+    let mut limbs = [Goldilocks::ZERO; 3 + MAX_ROUND0_LEAF_VALS];
+    for (dst, chunk) in limbs.iter_mut().zip(salt.chunks(7)) {
+        let mut word = [0u8; 8];
+        word[..chunk.len()].copy_from_slice(chunk);
+        *dst = Goldilocks::from_u64_reduced(u64::from_le_bytes(word));
+    }
+    limbs[3..3 + vals.len()].copy_from_slice(vals);
+    let domain = if num_polys == 1 {
+        crate::sponge::P2_DOMAIN_CANOPY_LEAF_R0
+    } else {
+        crate::sponge::P2_DOMAIN_CANOPY_LEAF_BATCH
+    };
+    let out = crate::sponge::poseidon2_sponge_hash_limbs(
+        domain,
+        [
+            Goldilocks::from_u64_reduced(leaf_idx as u64),
+            Goldilocks::from_u64_reduced(arity as u64),
+            Goldilocks::from_u64_reduced(num_polys as u64),
+            Goldilocks::ZERO,
+        ],
+        &limbs[..3 + vals.len()],
+    );
+    qsag_asm::volatile_fill(&mut limbs[..3 + vals.len()], Goldilocks::ZERO);
+    crate::sponge::limbs4_to_le_bytes32(out)
+}
+
+/// Poseidon2 stage `>= 1` leaf over one `GoldilocksExt4` coset fiber: capacity
+/// `[leaf_idx, arity, stage_idx, 0]`, rate stream the four limbs of every value in order.
+pub fn poseidon2_ext4_leaf(stage_idx: u8, leaf_idx: u32, vals: &[GoldilocksExt4]) -> [u8; 32] {
+    debug_assert!(vals.len() <= MAX_FIBER_ARITY);
+    let mut limbs = [Goldilocks::ZERO; 4 * MAX_FIBER_ARITY];
+    for (dst, v) in limbs.as_chunks_mut::<4>().0.iter_mut().zip(vals) {
+        *dst = v.to_limbs();
+    }
+    crate::sponge::limbs4_to_le_bytes32(crate::sponge::poseidon2_sponge_hash_limbs(
+        crate::sponge::P2_DOMAIN_CANOPY_LEAF_EXT4,
+        [
+            Goldilocks::from_u64_reduced(leaf_idx as u64),
+            Goldilocks::from_u64_reduced(vals.len() as u64),
+            Goldilocks::from_u64_reduced(stage_idx as u64),
+            Goldilocks::ZERO,
+        ],
+        &limbs[..4 * vals.len()],
+    ))
+}
+
+impl MerkleCanopyTree {
+    /// Build the full (non-compact) Poseidon2 canopy tree of stage `stage_idx` from a leaf digest
+    /// closure. `leaf_fn` must return canonical Poseidon2 digests.
+    pub fn build_poseidon2<F>(num_leaves: usize, stage_idx: u8, leaf_fn: F) -> Self
+    where
+        F: Fn(usize) -> [u8; 32] + Sync,
+    {
+        let n = num_leaves;
+        assert!(n.is_power_of_two() && n >= 1);
+        let log_leaves = n.trailing_zeros() as usize;
+        assert!(log_leaves <= 28);
+        let key = poseidon2_canopy_key(stage_idx, log_leaves as u8);
+        let mut nodes = vec![[0u8; 32]; 2 * n];
+        fill_indexed(&mut nodes[n..], leaf_fn);
+        for depth in (0..log_leaves).rev() {
+            let half = 1usize << depth;
+            let (upper, children) = nodes[..4 * half].split_at_mut(2 * half);
+            let children = &*children;
+            fill_indexed(&mut upper[half..], |i| {
+                match poseidon2_canopy_node(
+                    key,
+                    (half + i) as u32,
+                    &children[2 * i],
+                    &children[2 * i + 1],
+                ) {
+                    Some(parent) => parent,
+                    None => panic!("non-canonical Poseidon2 canopy digest"),
+                }
+            });
+        }
+        let root = match poseidon2_canopy_commitment_root(stage_idx, log_leaves as u8, &nodes[1]) {
+            Some(root) => root,
+            None => panic!("non-canonical Poseidon2 canopy digest"),
+        };
+        Self {
+            log_leaves,
+            is_compact: false,
+            nodes,
+            root,
+        }
+    }
+}
+
+/// Verify a canonical Steiner-deduplicated `CanopyMultiProof` under `hash` against `commitment`
+/// and strictly ascending `(index, leaf_hash)` pairs.
+pub fn verify_canopy_multiproof_with(
+    hash: CanopyHash,
+    commitment: &CanopyCommitment,
+    sorted_leaves: &[(usize, [u8; 32])],
+    proof: &CanopyMultiProof,
+) -> bool {
+    let stage_idx = match hash {
+        CanopyHash::Cshake256 => {
+            return verify_canopy_multiproof(commitment, sorted_leaves, proof);
+        }
+        CanopyHash::Poseidon2 { stage_idx } => stage_idx,
+    };
+    let _phase = crate::profile::span("verify_canopy_multiproof_poseidon2");
+    let log_leaves = commitment.log_leaves as usize;
+    if log_leaves > 28 || sorted_leaves.is_empty() {
+        return false;
+    }
+    let n = 1usize << log_leaves;
+    if sorted_leaves.windows(2).any(|w| w[0].0 >= w[1].0)
+        || sorted_leaves.last().is_some_and(|leaf| leaf.0 >= n)
+    {
+        return false;
+    }
+    let key = poseidon2_canopy_key(stage_idx, commitment.log_leaves);
+    let mut active: Vec<(usize, [u8; 32])> =
+        sorted_leaves.iter().map(|&(idx, h)| (n + idx, h)).collect();
+    let mut sib_cursor = 0usize;
+    for _ in 0..log_leaves {
+        let mut write = 0usize;
+        let mut k = 0usize;
+        while k < active.len() {
+            let (u, hu) = active[k];
+            let sib = u ^ 1;
+            let hsib = if k + 1 < active.len() && active[k + 1].0 == sib {
+                let coalesced = active[k + 1].1;
+                k += 2;
+                coalesced
+            } else {
+                let Some(&supplied) = proof.auth_siblings.get(sib_cursor) else {
+                    return false;
+                };
+                sib_cursor += 1;
+                k += 1;
+                supplied
+            };
+            let Some(pair) = qsag_whir_verified::step_merkle_pair_order(u as u64, 0, hu, hsib)
+            else {
+                return false;
+            };
+            let Some(parent) = poseidon2_canopy_node(key, (u >> 1) as u32, &pair.left, &pair.right)
+            else {
+                return false;
+            };
+            active[write] = (u >> 1, parent);
+            write += 1;
+        }
+        active.truncate(write);
+    }
+    if sib_cursor != proof.auth_siblings.len() {
+        return false;
+    }
+    matches!(
+        active.as_slice(),
+        [(1, top)] if poseidon2_canopy_commitment_root(stage_idx, commitment.log_leaves, top)
+            == Some(commitment.root)
+    )
+}
+
+/// Round-0 leaf digest of opened values under `hash`.
+#[inline]
+fn round0_leaf_digest(
+    hash: CanopyHash,
+    leaf_idx: u32,
+    salt: &[u8; 16],
+    num_polys: usize,
+    vals: &[Goldilocks],
+) -> [u8; 32] {
+    match hash {
+        CanopyHash::Cshake256 => hash_round0_leaf(leaf_idx, salt, num_polys, vals),
+        CanopyHash::Poseidon2 { .. } => poseidon2_round0_leaf(leaf_idx, salt, num_polys, vals),
+    }
+}
+
+/// Poseidon2 Round-0 leaf digest of fiber `g` read from the committed codewords.
+fn poseidon2_round0_leaf_from_codewords(
+    codewords: &[Vec<Goldilocks>],
+    salt_seed: &[u8; 32],
+    g: usize,
+    num_groups: usize,
+    arity: usize,
+) -> [u8; 32] {
+    let salt = derive_round0_salt(salt_seed, g as u32);
+    let used = codewords.len() * arity;
+    let mut vals = [Goldilocks::ZERO; MAX_ROUND0_LEAF_VALS];
+    for (chunk, codeword) in vals[..used].chunks_exact_mut(arity).zip(codewords) {
+        for (k, slot) in chunk.iter_mut().enumerate() {
+            *slot = codeword[g + k * num_groups];
+        }
+    }
+    let out = poseidon2_round0_leaf(g as u32, &salt, codewords.len(), &vals[..used]);
+    qsag_asm::volatile_fill(&mut vals[..used], Goldilocks::ZERO);
+    out
+}
+
+/// Commit one `GoldilocksExt4` stage codeword under the canopy backend of `regime`.
+fn build_ext4_stage_tree(
+    regime: WhirSecurityRegime,
+    stage_idx: u8,
+    codeword: &[GoldilocksExt4],
+    num_groups: usize,
+    arity: usize,
+) -> MerkleCanopyTree {
+    if regime.uses_poseidon2_canopy() {
+        return MerkleCanopyTree::build_poseidon2(num_groups, stage_idx, |g| {
+            let fiber = collect_coset_group_ext4(codeword, g, num_groups, arity);
+            poseidon2_ext4_leaf(stage_idx, g as u32, &fiber[..arity])
+        });
+    }
+    if num_groups >= 8 {
+        MerkleCanopyTree::build_from_fn_x8(num_groups, |base_g| {
+            hash_ext4_group_x8(stage_idx, codeword, base_g, num_groups, arity)
+        })
+    } else {
+        MerkleCanopyTree::build_from_fn_x4(num_groups, |base_g| {
+            hash_ext4_group_x4(stage_idx, codeword, base_g, num_groups, arity)
+        })
+    }
+}
+
+/// Leaf digest of one `GoldilocksExt4` stage fiber under `hash`.
+#[inline]
+fn ext4_leaf_digest(hash: CanopyHash, stage_idx: u8, leaf_idx: u32, vals: &[GoldilocksExt4]) -> [u8; 32] {
+    match hash {
+        CanopyHash::Cshake256 => hash_ext4_group(stage_idx, leaf_idx, vals),
+        CanopyHash::Poseidon2 { .. } => poseidon2_ext4_leaf(stage_idx, leaf_idx, vals),
+    }
+}
+
+// ============================================================================
 // 3. `Hem` WHIR Proof Structures & Canonical Wire Serialization
 // ============================================================================
 
@@ -2821,6 +3224,8 @@ pub(crate) fn whir_commit_batch_owned_with_schedule_and_extra_vram(
 
     #[cfg(feature = "vulkan")]
     if table_len >= 4_096
+        && num_vars <= MAX_GPU_PCS_NUM_VARS
+        && !schedule.regime.uses_poseidon2_canopy()
         && let Some(session) = crate::acceleration::try_acquire_whir_session()
     {
         const PAR_CHUNK: usize = 262_144;
@@ -2903,7 +3308,8 @@ pub(crate) fn whir_commit_batch_owned_with_schedule_and_extra_vram(
     #[cfg(not(feature = "vulkan"))]
     let _ = extra_witness_words;
 
-    let (codewords_0, tree_0) = build_cpu_round0(&polys, salt_seed, st0.blowup, group_arity_0);
+    let (codewords_0, tree_0) =
+        build_cpu_round0(&polys, salt_seed, schedule.regime, st0.blowup, group_arity_0);
     let comm = tree_0.commitment();
     (
         comm,
@@ -2924,6 +3330,7 @@ pub(crate) fn whir_commit_batch_owned_with_schedule_and_extra_vram(
 fn build_cpu_round0(
     polys: &[Vec<Goldilocks>],
     salt_seed: &[u8; 32],
+    regime: WhirSecurityRegime,
     blowup: usize,
     group_arity_0: usize,
 ) -> (Vec<Vec<Goldilocks>>, MerkleCanopyTree) {
@@ -2961,7 +3368,17 @@ fn build_cpu_round0(
     let domain_len = codewords_0[0].len();
     let num_groups = domain_len / group_arity_0;
 
-    let tree_0 = if num_groups >= 8 {
+    let tree_0 = if regime.uses_poseidon2_canopy() {
+        MerkleCanopyTree::build_poseidon2(num_groups, 0, |g| {
+            poseidon2_round0_leaf_from_codewords(
+                &codewords_0,
+                salt_seed,
+                g,
+                num_groups,
+                group_arity_0,
+            )
+        })
+    } else if num_groups >= 8 {
         MerkleCanopyTree::build_from_fn_x8(num_groups, |base_g| {
             round0_leaf_hash_x8(&codewords_0, salt_seed, base_g, num_groups, group_arity_0)
         })
@@ -3261,6 +3678,7 @@ fn whir_open_core(
             build_cpu_round0(
                 &state.hypercube_evals,
                 &state.salt_seed,
+                state.schedule.regime,
                 state.schedule.stages[0].blowup,
                 state.group_arity_0,
             )
@@ -3383,15 +3801,13 @@ fn whir_open_core(
             let cw_next = encode_overflow(&cur_coeffs, next_spec.blowup);
             let num_groups_next = cw_next.len() / next_arity;
             let next_stage_u8 = (stage_idx + 1) as u8;
-            let tree_next = if num_groups_next >= 8 {
-                MerkleCanopyTree::build_from_fn_x8(num_groups_next, |base_g| {
-                    hash_ext4_group_x8(next_stage_u8, &cw_next, base_g, num_groups_next, next_arity)
-                })
-            } else {
-                MerkleCanopyTree::build_from_fn_x4(num_groups_next, |base_g| {
-                    hash_ext4_group_x4(next_stage_u8, &cw_next, base_g, num_groups_next, next_arity)
-                })
-            };
+            let tree_next = build_ext4_stage_tree(
+                sched.regime,
+                next_stage_u8,
+                &cw_next,
+                num_groups_next,
+                next_arity,
+            );
             let comm_next = tree_next.commitment();
             transcript.absorb(b"WHIR_NEXT_COMMIT", &comm_next.to_bytes());
 
@@ -4891,6 +5307,7 @@ fn whir_verify_core(
 
             let shift_claims = if stage_idx == 0 {
                 verify_and_fold_stage0_fibers(
+                    CanopyHash::for_stage(sched.regime, 0),
                     comm_0,
                     num_polys,
                     weights,
@@ -4908,6 +5325,7 @@ fn whir_verify_core(
                 let cur_layer = &proof.folded_layers[stage_idx - 1];
                 let domain_cur = (1usize << (rem_vars + st.step_vars)) * st.blowup;
                 verify_and_fold_ext4_stage_fibers(
+                    CanopyHash::for_stage(sched.regime, stage_idx),
                     stage_idx,
                     cur_layer,
                     domain_cur,
@@ -5001,6 +5419,7 @@ fn whir_verify_core(
 
             let final_claims = if stage_idx == 0 {
                 verify_and_fold_stage0_fibers(
+                    CanopyHash::for_stage(sched.regime, 0),
                     comm_0,
                     num_polys,
                     weights,
@@ -5018,6 +5437,7 @@ fn whir_verify_core(
                 let cur_layer = &proof.folded_layers[stage_idx - 1];
                 let domain_cur = (1usize << (rem_vars + st.step_vars)) * st.blowup;
                 verify_and_fold_ext4_stage_fibers(
+                    CanopyHash::for_stage(sched.regime, stage_idx),
                     stage_idx,
                     cur_layer,
                     domain_cur,
@@ -5099,6 +5519,7 @@ fn accepted_fiber_claims(folded: Vec<FoldedFiber>) -> Option<Vec<(Goldilocks, Go
 /// value must also equal the terminal polynomial at its shift point.
 #[allow(clippy::too_many_arguments)]
 fn verify_and_fold_stage0_fibers(
+    hash: CanopyHash,
     comm_0: &CanopyCommitment,
     num_polys: usize,
     weights: &[[GoldilocksExt4; 2]],
@@ -5157,7 +5578,7 @@ fn verify_and_fold_stage0_fibers(
         let page = &val_pages[batch / batches_per_page];
         let page_off = (batch % batches_per_page) * 4 * per_query;
         let mut leaves = [(0usize, [0u8; 32]); 4];
-        if indices.len() == 4 {
+        if indices.len() == 4 && hash == CanopyHash::Cshake256 {
             let hashes = queried_round0_hash_x4(
                 indices,
                 &salts[start..],
@@ -5174,7 +5595,13 @@ fn verify_and_fold_stage0_fibers(
                 let off = page_off + lane * per_query;
                 leaves[lane] = (
                     g,
-                    hash_round0_leaf(g as u32, &salts[i], num_polys, &page[off..off + per_query]),
+                    round0_leaf_digest(
+                        hash,
+                        g as u32,
+                        &salts[i],
+                        num_polys,
+                        &page[off..off + per_query],
+                    ),
                 );
             }
         }
@@ -5230,7 +5657,7 @@ fn verify_and_fold_stage0_fibers(
         sorted_leaves.extend_from_slice(&leaves[..len]);
         folded.extend_from_slice(&values[..len]);
     }
-    if !verify_canopy_multiproof(comm_0, &sorted_leaves, &proof.round0_multiproof) {
+    if !verify_canopy_multiproof_with(hash, comm_0, &sorted_leaves, &proof.round0_multiproof) {
         return None;
     }
     accepted_fiber_claims(folded)
@@ -5240,6 +5667,7 @@ fn verify_and_fold_stage0_fibers(
 /// (final stage) every folded value must also equal the terminal polynomial at its shift point.
 #[allow(clippy::too_many_arguments)]
 fn verify_and_fold_ext4_stage_fibers(
+    hash: CanopyHash,
     stage_idx: usize,
     layer: &WhirStageProof,
     domain_cur: usize,
@@ -5293,7 +5721,7 @@ fn verify_and_fold_ext4_stage_fibers(
         let page = &val_pages[batch / batches_per_page];
         let page_off = (batch % batches_per_page) * 4 * arity;
         let mut leaves = [(0usize, [0u8; 32]); 4];
-        if indices.len() == 4 {
+        if indices.len() == 4 && hash == CanopyHash::Cshake256 {
             let hashes = queried_ext4_hash_x4(stage_u8, indices, &page[page_off..], arity);
             for (slot, (&index, hash)) in leaves.iter_mut().zip(indices.iter().zip(hashes)) {
                 *slot = (index, hash);
@@ -5303,7 +5731,7 @@ fn verify_and_fold_ext4_stage_fibers(
                 let off = page_off + lane * arity;
                 leaves[lane] = (
                     g,
-                    hash_ext4_group(stage_u8, g as u32, &page[off..off + arity]),
+                    ext4_leaf_digest(hash, stage_u8, g as u32, &page[off..off + arity]),
                 );
             }
         }
@@ -5328,7 +5756,8 @@ fn verify_and_fold_ext4_stage_fibers(
         sorted_leaves.extend_from_slice(&leaves[..len]);
         folded.extend_from_slice(&values[..len]);
     }
-    if !verify_canopy_multiproof(&layer.commitment, &sorted_leaves, &layer.multiproof) {
+    if !verify_canopy_multiproof_with(hash, &layer.commitment, &sorted_leaves, &layer.multiproof)
+    {
         return None;
     }
     accepted_fiber_claims(folded)
@@ -5338,27 +5767,53 @@ fn verify_and_fold_ext4_stage_fibers(
 // 6. Deterministic 4-Way SIMD Proof-of-Work (`POW_MIDSTATE`)
 // ============================================================================
 
-/// Deterministically find the minimum `nonce: u64` whose `POW_MIDSTATE` digest has at least
-/// `PCS_POW_BITS` low zero bits, scanning in 8-way SIMD (`cshake256_pow_u64_x8`) across worker threads.
+/// Deterministically find the minimum `nonce: u64` whose PoW word has at least
+/// `transcript.pow_bits()` low zero bits. `cSHAKE256` transcripts scan `POW_MIDSTATE` in 8-way
+/// SIMD (`cshake256_pow_u64_x8`); Poseidon2 transcripts scan [`poseidon2_pow_word`]. Returns `0`
+/// without hashing when the regime has no PoW.
 fn grind_pcs_pow(transcript: &FiatShamirTranscript<InstanceBound>) -> u64 {
     let _phase = crate::profile::span("grind_pcs_pow");
-    if PCS_POW_BITS == 0 {
+    let pow_bits = transcript.pow_bits();
+    if pow_bits == 0 {
         return 0;
     }
+    let mask = (1u64 << pow_bits) - 1;
+    if let Some(chain) = transcript.poseidon2_chain() {
+        return grind_min_nonce(|n| {
+            (0..8u64).find_map(|lane| {
+                let nonce = n.checked_add(lane)?;
+                (poseidon2_pow_word(chain, nonce) & mask == 0).then_some(nonce)
+            })
+        });
+    }
     let chal = transcript.transcript_digest();
-    let mask = (1u64 << PCS_POW_BITS) - 1;
+    grind_min_nonce(|n| {
+        let words = cshake256_pow_u64_x8(&POW_MIDSTATE, &chal, n);
+        words
+            .iter()
+            .position(|&w| (w & mask) == 0)
+            .map(|lane| n + lane as u64)
+    })
+}
 
+/// Smallest nonce accepted by `scan8`, where `scan8(n)` reports the first hit in `n .. n + 8`.
+/// Scans fixed windows across worker threads; the result does not depend on the thread count.
+fn grind_min_nonce<F>(scan8: F) -> u64
+where
+    F: Fn(u64) -> Option<u64> + Sync,
+{
     #[cfg(feature = "std")]
     {
         use core::sync::atomic::{AtomicU64, Ordering};
         let threads = crate::parallel_workers() as u64;
-        const PER_THREAD: u64 = 4_096; // 512 `x8` calls per thread
+        const PER_THREAD: u64 = 4_096; // 512 `scan8` calls per thread
         let window: u64 = threads * PER_THREAD;
 
         let mut win_base = 0u64;
         loop {
             let best = AtomicU64::new(u64::MAX);
             let best_ref = &best;
+            let scan_ref = &scan8;
             std::thread::scope(|scope| {
                 for t in 0..threads {
                     let start = win_base + t * PER_THREAD;
@@ -5369,13 +5824,9 @@ fn grind_pcs_pow(transcript: &FiatShamirTranscript<InstanceBound>) -> u64 {
                             if n >= best_ref.load(Ordering::Relaxed) {
                                 break;
                             }
-                            let words = cshake256_pow_u64_x8(&POW_MIDSTATE, &chal, n);
-                            for (lane, &w) in words.iter().enumerate() {
-                                if (w & mask) == 0 {
-                                    let hit = n + lane as u64;
-                                    best_ref.fetch_min(hit, Ordering::Relaxed);
-                                    return;
-                                }
+                            if let Some(hit) = scan_ref(n) {
+                                best_ref.fetch_min(hit, Ordering::Relaxed);
+                                return;
                             }
                         }
                     });
@@ -5396,11 +5847,8 @@ fn grind_pcs_pow(transcript: &FiatShamirTranscript<InstanceBound>) -> u64 {
     {
         let mut n = 0u64;
         loop {
-            let words = cshake256_pow_u64_x8(&POW_MIDSTATE, &chal, n);
-            for (lane, &w) in words.iter().enumerate() {
-                if (w & mask) == 0 {
-                    return n + lane as u64;
-                }
+            if let Some(hit) = scan8(n) {
+                return hit;
             }
             n = match n.checked_add(8) {
                 Some(next) => next,
@@ -5410,14 +5858,18 @@ fn grind_pcs_pow(transcript: &FiatShamirTranscript<InstanceBound>) -> u64 {
     }
 }
 
+/// Check a PoW nonce against the transcript state. A regime without PoW admits only nonce `0`.
 #[inline]
 fn verify_pcs_pow(transcript: &FiatShamirTranscript<InstanceBound>, nonce: u64) -> bool {
-    if PCS_POW_BITS == 0 {
-        return true;
+    let pow_bits = transcript.pow_bits();
+    if pow_bits == 0 {
+        return nonce == 0;
     }
-    let chal = transcript.transcript_digest();
-    let word = cshake256_pow_u64_single(&POW_MIDSTATE, &chal, nonce);
-    qsag_whir_verified::verify_stage_pow_mask(word, PCS_POW_BITS)
+    let word = match transcript.poseidon2_chain() {
+        Some(chain) => poseidon2_pow_word(chain, nonce),
+        None => cshake256_pow_u64_single(&POW_MIDSTATE, &transcript.transcript_digest(), nonce),
+    };
+    qsag_whir_verified::verify_stage_pow_mask(word, pow_bits)
 }
 
 #[cfg(test)]
@@ -5546,12 +5998,21 @@ mod pcs_unit_tests {
         assert_eq!(WhirSecurityRegime::from_u8(1), None);
         assert_eq!(WhirSecurityRegime::from_u8(3), None);
 
-        for (tag, counts, bits) in [(2, [129, 65, 44, 33], 144), (4, [258, 130, 88, 66], 272)] {
+        for (tag, counts, bits, pow_bits, poseidon2) in [
+            (2, [129, 65, 44, 33], 144, 16, false),
+            (4, [258, 130, 88, 66], 272, 16, false),
+            (5, [202, 102, 70, 52], 216, 16, false),
+            (6, [216, 109, 74, 56], 214, 0, false),
+            (7, [202, 102, 70, 52], 216, 16, true),
+            (8, [216, 109, 74, 56], 214, 0, true),
+        ] {
             let regime = WhirSecurityRegime::from_u8(tag).unwrap();
             assert_eq!(regime as u8, tag);
             assert_eq!(regime.classical_fs_round_bits(), bits);
             assert_eq!(regime.qrom_grover_round_bits(), bits / 2);
-            assert_eq!(regime.meets_qrom_128_floor(), tag == 4);
+            assert_eq!(regime.meets_qrom_128_floor(), tag != 2);
+            assert_eq!(regime.pow_bits(), pow_bits);
+            assert_eq!(regime.uses_poseidon2_canopy(), poseidon2);
             assert_eq!(
                 regime
                     .schedule(24)
@@ -5566,17 +6027,18 @@ mod pcs_unit_tests {
             assert!(!excessive.validate(24));
             assert!(WhirSchedule::from_bytes_canonical(&excessive.to_bytes(), 24).is_none());
         }
-        for tag in (0..=255u8).filter(|&t| t != 2 && t != 4) {
+        for tag in (0..=255u8).filter(|t| !matches!(t, 2 | 4..=8)) {
             assert_eq!(WhirSecurityRegime::from_u8(tag), None);
         }
+        assert_eq!(
+            WhirSecurityRegime::ALL.map(|r| r as u8),
+            [2u8, 4, 5, 6, 7, 8]
+        );
     }
 
     #[test]
     fn security_regimes_roundtrip_and_query_budgets() {
-        for regime in [
-            WhirSecurityRegime::BciksJohnsonClassical128,
-            WhirSecurityRegime::BciksJohnsonQrom128,
-        ] {
+        for regime in WhirSecurityRegime::ALL {
             for nv in 2..=MAX_PCS_NUM_VARS {
                 let schedule = regime.schedule(nv);
                 if !regime.meets_qrom_128_floor() {
@@ -5592,16 +6054,12 @@ mod pcs_unit_tests {
                 );
                 for stage in &schedule.stages {
                     let log_b = stage.blowup.trailing_zeros() as usize;
-                    match regime {
-                        WhirSecurityRegime::BciksJohnsonQrom128 => {
-                            assert!(stage.num_queries * log_b > 512)
-                        }
-                        WhirSecurityRegime::BciksJohnsonClassical128 => {
-                            assert!(stage.num_queries * log_b > 256)
-                        }
-                    }
+                    // Johnson agreement `sqrt(rho)` gives `log_b / 2` bits per query.
+                    assert!(
+                        stage.num_queries * log_b > 2 * regime.pure_query_target_bits() as usize
+                    );
                 }
-                for retired_or_unknown_tag in [0u8, 1, 2, 3, 5] {
+                for retired_or_unknown_tag in [0u8, 1, 2, 3, 9] {
                     let mut mutated = wire.clone();
                     mutated[0] = retired_or_unknown_tag;
                     assert!(WhirSchedule::from_bytes_canonical(&mutated, nv).is_none());
@@ -5851,5 +6309,368 @@ mod pcs_unit_tests {
             assert_eq!(y0s[i], Goldilocks::NON_RESIDUE * omega.pow(g as u64));
             assert_eq!(inv_y0s[i], inv_shift * inv_omega.pow(g as u64));
         }
+    }
+
+    fn regime_test_poly(nv: usize, tag: u64) -> Vec<Goldilocks> {
+        (0..1u64 << nv)
+            .map(|i| {
+                Goldilocks::from_u64_reduced(
+                    (i + 1)
+                        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                        .wrapping_add(tag.wrapping_mul(0xD1B5_4A32_D192_ED03)),
+                )
+            })
+            .collect()
+    }
+
+    fn regime_test_point(nv: usize, tag: u64) -> Vec<GoldilocksExt4> {
+        (0..nv as u64)
+            .map(|k| {
+                GoldilocksExt4::from_limbs([
+                    Goldilocks::from_u64_reduced((k + 1) * 31_337 + tag),
+                    Goldilocks::from_u64_reduced((k + 5) * 4_242 + tag),
+                    Goldilocks::from_u64_reduced((k + 9) * 1_717 + tag),
+                    Goldilocks::from_u64_reduced((k + 13) * 9_001 + tag),
+                ])
+            })
+            .collect()
+    }
+
+    fn regime_transcript(
+        schedule: &WhirSchedule,
+        instance: &[u8],
+    ) -> FiatShamirTranscript<InstanceBound> {
+        FiatShamirTranscript::new()
+            .bind_relation(b"REGIME_TEST", b"", schedule)
+            .bind_instance(&[instance])
+    }
+
+    /// Commit, batch-open and verify three polynomials at `nv` under `regime`.
+    #[allow(clippy::type_complexity)]
+    fn regime_batch_proof(
+        regime: WhirSecurityRegime,
+        nv: usize,
+    ) -> (
+        WhirSchedule,
+        CanopyCommitment,
+        Vec<Vec<GoldilocksExt4>>,
+        Vec<GoldilocksExt4>,
+        HemWhirBatchOpeningProof,
+    ) {
+        let schedule = regime.schedule(nv);
+        let polys: Vec<_> = (0..3).map(|t| regime_test_poly(nv, 40 + t)).collect();
+        let points: Vec<_> = (0..3).map(|t| regime_test_point(nv, 50 + t)).collect();
+        let evals: Vec<_> = polys
+            .iter()
+            .zip(&points)
+            .map(|(w, p)| crate::field::mle_eval_base_at_ext4(w, p))
+            .collect();
+        let refs: Vec<&[GoldilocksExt4]> = points.iter().map(Vec::as_slice).collect();
+        let (comm, state) = whir_commit_batch_owned_with_schedule(polys, &[3; 32], &schedule);
+        let proof = whir_open_batch(
+            &state,
+            &refs,
+            &evals,
+            &mut regime_transcript(&schedule, b"inst"),
+        );
+        (schedule, comm, points, evals, proof)
+    }
+
+    fn regime_batch_accepts(
+        schedule: &WhirSchedule,
+        comm: &CanopyCommitment,
+        points: &[Vec<GoldilocksExt4>],
+        evals: &[GoldilocksExt4],
+        proof: &HemWhirBatchOpeningProof,
+        instance: &[u8],
+    ) -> bool {
+        let refs: Vec<&[GoldilocksExt4]> = points.iter().map(Vec::as_slice).collect();
+        whir_verify_batch_with_schedule(
+            comm,
+            points[0].len(),
+            &refs,
+            evals,
+            proof,
+            &mut regime_transcript(schedule, instance),
+            schedule,
+        )
+    }
+
+    #[test]
+    fn cdhz25_and_poseidon2_regimes_accept_honest_and_reject_tampered_openings() {
+        // `nv = 16` has three stages: a salted Round-0 tree and two `Ext4` stage trees.
+        let nv = 16;
+        for regime in [
+            WhirSecurityRegime::Cdhz25JohnsonQrom128,
+            WhirSecurityRegime::Cdhz25ZeroPowQrom128,
+            WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128,
+            WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128,
+        ] {
+            let (schedule, comm, points, evals, proof) = regime_batch_proof(regime, nv);
+            let accepts = |p: &HemWhirBatchOpeningProof| {
+                regime_batch_accepts(&schedule, &comm, &points, &evals, p, b"inst")
+            };
+            assert!(accepts(&proof), "{regime:?}");
+            assert_eq!(proof.opening.folded_layers.len(), 2);
+
+            let mut wire = Vec::new();
+            proof.push_bytes(&mut wire);
+            let (decoded, used) = HemWhirBatchOpeningProof::from_bytes_canonical(&wire).unwrap();
+            assert_eq!(used, wire.len());
+            assert_eq!(decoded, proof);
+
+            // Mutated Round-0 leaf value and leaf salt.
+            let mut bad = proof.clone();
+            bad.opening.round0_vals[5] += Goldilocks::ONE;
+            assert!(!accepts(&bad), "{regime:?} leaf value");
+            let mut bad = proof.clone();
+            bad.opening.round0_salts[0][15] ^= 1;
+            assert!(!accepts(&bad), "{regime:?} leaf salt");
+            // Mutated Round-0 sibling (low byte keeps a Poseidon2 limb canonical).
+            let mut bad = proof.clone();
+            bad.opening.round0_multiproof.auth_siblings[0][0] ^= 1;
+            assert!(!accepts(&bad), "{regime:?} round0 sibling");
+            // Mutated `Ext4` stage leaf, stage sibling and stage root.
+            for layer in 0..2 {
+                let mut bad = proof.clone();
+                bad.opening.folded_layers[layer].opened_vals[1] += GoldilocksExt4::ONE;
+                assert!(!accepts(&bad), "{regime:?} stage {layer} leaf");
+                let mut bad = proof.clone();
+                bad.opening.folded_layers[layer].multiproof.auth_siblings[0][8] ^= 1;
+                assert!(!accepts(&bad), "{regime:?} stage {layer} sibling");
+                let mut bad = proof.clone();
+                bad.opening.folded_layers[layer].commitment.root[0] ^= 1;
+                assert!(!accepts(&bad), "{regime:?} stage {layer} root");
+            }
+            // Wrong commitment and wrong claimed evaluation.
+            let mut bad_comm = comm;
+            bad_comm.root[0] ^= 1;
+            assert!(!regime_batch_accepts(
+                &schedule, &bad_comm, &points, &evals, &proof, b"inst"
+            ));
+            let mut bad_evals = evals.clone();
+            bad_evals[1] += GoldilocksExt4::ONE;
+            assert!(!regime_batch_accepts(
+                &schedule, &comm, &points, &bad_evals, &proof, b"inst"
+            ));
+            // A different bound instance changes every Fiat–Shamir challenge.
+            assert!(!regime_batch_accepts(
+                &schedule, &comm, &points, &evals, &proof, b"other"
+            ));
+            // Sumcheck, OOD, terminal polynomial.
+            let mut bad = proof.clone();
+            bad.opening.fold_sumcheck_polys[2][1] += GoldilocksExt4::ONE;
+            assert!(!accepts(&bad), "{regime:?} fold sumcheck");
+            let mut bad = proof.clone();
+            bad.opening.stage0_ood_evals[1] += GoldilocksExt4::ONE;
+            assert!(!accepts(&bad), "{regime:?} ood");
+            let mut bad = proof.clone();
+            bad.opening.final_coeffs[0] += GoldilocksExt4::ONE;
+            assert!(!accepts(&bad), "{regime:?} final coeffs");
+            // PoW nonces: a zero-PoW regime admits only nonce 0; a 16-bit regime rejects a
+            // nonce whose PoW word misses the mask.
+            let mut bad = proof.clone();
+            bad.opening.fold_pow_nonces[0] ^= 1;
+            let mut bad_stage = proof.clone();
+            bad_stage.opening.pow_nonce ^= 1;
+            let mut bad_batch = proof.clone();
+            bad_batch.batch_pow_nonce ^= 1;
+            if regime.pow_bits() == 0 {
+                assert_eq!(proof.opening.pow_nonce, 0);
+                assert_eq!(proof.batch_pow_nonce, 0);
+                assert!(proof.opening.fold_pow_nonces.iter().all(|&n| n == 0));
+                assert!(proof.opening.folded_layers.iter().all(|l| l.pow_nonce == 0));
+            }
+            assert!(!accepts(&bad), "{regime:?} fold pow");
+            assert!(!accepts(&bad_stage), "{regime:?} stage pow");
+            assert!(!accepts(&bad_batch), "{regime:?} batch pow");
+
+            // Every other regime, including the one sharing this query table, rejects the proof.
+            for other in WhirSecurityRegime::ALL {
+                if other == regime || !other.meets_qrom_128_floor() {
+                    continue;
+                }
+                let other_schedule = other.schedule(nv);
+                assert!(
+                    !regime_batch_accepts(&other_schedule, &comm, &points, &evals, &proof, b"inst"),
+                    "{regime:?} proof accepted under {other:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn poseidon2_openings_reject_noncanonical_digests() {
+        let regime = WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128;
+        let (schedule, comm, points, evals, proof) = regime_batch_proof(regime, 12);
+        assert!(regime_batch_accepts(
+            &schedule, &comm, &points, &evals, &proof, b"inst"
+        ));
+        // `limb + p` encodes the same field element in eight non-canonical bytes.
+        let lift = |digest: &mut [u8; 32]| -> bool {
+            let mut word = [0u8; 8];
+            word.copy_from_slice(&digest[..8]);
+            let limb = u64::from_le_bytes(word);
+            match limb.checked_add(crate::field::GOLDILOCKS_PRIME) {
+                Some(lifted) => {
+                    digest[..8].copy_from_slice(&lifted.to_le_bytes());
+                    true
+                }
+                None => false,
+            }
+        };
+        let mut lifted_any = false;
+        for i in 0..proof.opening.round0_multiproof.auth_siblings.len() {
+            let mut bad = proof.clone();
+            if lift(&mut bad.opening.round0_multiproof.auth_siblings[i]) {
+                lifted_any = true;
+                assert!(!regime_batch_accepts(
+                    &schedule, &comm, &points, &evals, &bad, b"inst"
+                ));
+            }
+        }
+        assert!(lifted_any, "no sibling limb below 2^32 - 1 to lift");
+        let mut bad = proof.clone();
+        bad.opening.round0_multiproof.auth_siblings[0] = [0xFF; 32];
+        assert!(!regime_batch_accepts(
+            &schedule, &comm, &points, &evals, &bad, b"inst"
+        ));
+    }
+
+    #[test]
+    fn poseidon2_canopy_multiproofs_bind_position_depth_and_stage() {
+        let stage = 2u8;
+        let leaf = |i: usize| {
+            poseidon2_ext4_leaf(
+                stage,
+                i as u32,
+                &[
+                    GoldilocksExt4::from_base(Goldilocks::from_u64_reduced(i as u64 + 1)),
+                    GoldilocksExt4::from_base(Goldilocks::from_u64_reduced(7 * i as u64 + 3)),
+                ],
+            )
+        };
+        let tree = MerkleCanopyTree::build_poseidon2(32, stage, leaf);
+        let comm = tree.commitment();
+        let hash = CanopyHash::Poseidon2 { stage_idx: stage };
+        assert!(crate::sponge::bytes32_to_limbs4_le_canonical(&comm.root).is_some());
+        for stride in 1..=9 {
+            for offset in 0..stride {
+                let indices: Vec<_> = (offset..32).step_by(stride).collect();
+                let leaves: Vec<_> = indices.iter().map(|&i| (i, leaf(i))).collect();
+                let proof = tree.open_multi_with_leaf_fn(&indices, leaf);
+                assert!(verify_canopy_multiproof_with(hash, &comm, &leaves, &proof));
+                // Other backend, other stage, other depth.
+                assert!(!verify_canopy_multiproof(&comm, &leaves, &proof));
+                assert!(!verify_canopy_multiproof_with(
+                    CanopyHash::Poseidon2 { stage_idx: 1 },
+                    &comm,
+                    &leaves,
+                    &proof
+                ));
+                let mut deeper = comm;
+                deeper.log_leaves += 1;
+                assert!(!verify_canopy_multiproof_with(hash, &deeper, &leaves, &proof));
+                let mut shallower = comm;
+                shallower.log_leaves -= 1;
+                assert!(!verify_canopy_multiproof_with(hash, &shallower, &leaves, &proof));
+
+                let mut extra = proof.clone();
+                extra.auth_siblings.push([0; 32]);
+                assert!(!verify_canopy_multiproof_with(hash, &comm, &leaves, &extra));
+                if !proof.auth_siblings.is_empty() {
+                    let mut short = proof.clone();
+                    short.auth_siblings.pop();
+                    assert!(!verify_canopy_multiproof_with(hash, &comm, &leaves, &short));
+                    let mut bad = proof.clone();
+                    bad.auth_siblings[0][0] ^= 1;
+                    assert!(!verify_canopy_multiproof_with(hash, &comm, &leaves, &bad));
+                }
+                let mut bad = leaves.clone();
+                bad[0].1[0] ^= 1;
+                assert!(!verify_canopy_multiproof_with(hash, &comm, &bad, &proof));
+                // A leaf digest moved to a neighbouring position.
+                if indices[0] > 0 {
+                    let mut moved = leaves.clone();
+                    moved[0].0 -= 1;
+                    assert!(!verify_canopy_multiproof_with(hash, &comm, &moved, &proof));
+                }
+                let mut duplicate = leaves.clone();
+                duplicate.insert(0, leaves[0]);
+                assert!(!verify_canopy_multiproof_with(hash, &comm, &duplicate, &proof));
+            }
+        }
+        // Leaf digests bind their own index, arity, stage and (Round 0) salt and batch width.
+        let vals = [Goldilocks::ONE, Goldilocks::TWO, Goldilocks::ONE, Goldilocks::TWO];
+        let base = poseidon2_round0_leaf(3, &[1; 16], 1, &vals);
+        assert_ne!(base, poseidon2_round0_leaf(4, &[1; 16], 1, &vals));
+        assert_ne!(base, poseidon2_round0_leaf(3, &[2; 16], 1, &vals));
+        assert_ne!(base, poseidon2_round0_leaf(3, &[1; 16], 2, &vals));
+        assert_ne!(base, poseidon2_round0_leaf(3, &[1; 16], 1, &vals[..2]));
+        let mut last_salt_byte = [1u8; 16];
+        last_salt_byte[15] = 2;
+        assert_ne!(base, poseidon2_round0_leaf(3, &last_salt_byte, 1, &vals));
+        let e = [GoldilocksExt4::ONE, GoldilocksExt4::ZERO];
+        assert_ne!(poseidon2_ext4_leaf(1, 0, &e), poseidon2_ext4_leaf(2, 0, &e));
+        assert_ne!(poseidon2_ext4_leaf(1, 0, &e), poseidon2_ext4_leaf(1, 1, &e));
+    }
+
+    #[test]
+    fn poseidon2_pow_grind_returns_the_minimum_nonce() {
+        let schedule = WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128.schedule(12);
+        let transcript = regime_transcript(&schedule, b"pow");
+        let chain = transcript.poseidon2_chain().unwrap();
+        let nonce = grind_pcs_pow(&transcript);
+        assert!(verify_pcs_pow(&transcript, nonce));
+        let mask = (1u64 << transcript.pow_bits()) - 1;
+        assert_eq!(transcript.pow_bits(), 16);
+        assert!((0..nonce).all(|n| poseidon2_pow_word(chain, n) & mask != 0));
+        assert!((0..nonce).all(|n| !verify_pcs_pow(&transcript, n)));
+    }
+
+    /// One flat opening above the former `nv = 24` ceiling under the default regime.
+    #[test]
+    fn nv25_single_opening_roundtrip() {
+        let nv = 25;
+        let schedule = whir_stage_schedule(nv);
+        assert_eq!(schedule.stages.len(), 4);
+        let evals = regime_test_poly(nv, 77);
+        let point = regime_test_point(nv, 78);
+        let value = crate::field::mle_eval_base_at_ext4(&evals, &point);
+        let (comm, state) = whir_commit_owned_with_schedule(evals, &[5; 32], &schedule);
+        assert_eq!(comm.log_leaves, 21);
+        let proof = whir_open(&state, &point, value, &mut regime_transcript(&schedule, b"nv25"));
+        drop(state);
+        assert!(whir_verify_with_schedule(
+            &comm,
+            nv,
+            &point,
+            value,
+            &proof,
+            &mut regime_transcript(&schedule, b"nv25"),
+            &schedule
+        ));
+        let mut bad = proof.clone();
+        bad.round0_vals[0] += Goldilocks::ONE;
+        assert!(!whir_verify_with_schedule(
+            &comm,
+            nv,
+            &point,
+            value,
+            &bad,
+            &mut regime_transcript(&schedule, b"nv25"),
+            &schedule
+        ));
+        let mut bad = proof;
+        bad.folded_layers[2].opened_vals[0] += GoldilocksExt4::ONE;
+        assert!(!whir_verify_with_schedule(
+            &comm,
+            nv,
+            &point,
+            value,
+            &bad,
+            &mut regime_transcript(&schedule, b"nv25"),
+            &schedule
+        ));
     }
 }

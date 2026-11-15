@@ -23,8 +23,7 @@
 //! approving parties. With `--anchor-dir` the fence generation is also ratcheted in an
 //! external monotone anchor, so restoring an old copy of the whole ledger directory is refused.
 //!
-//! Capacity: a guard share carries 64 single-use barrier slots, so one ledger authorizes at
-//! most 64 intents per approving party.
+//! The enrollment policy selects `preprocessing_slots`; every slot remains single use.
 
 use std::path::Path;
 
@@ -32,13 +31,13 @@ use qsag_accel::ct::ct_eq_bytes;
 use qsag_accel::keccak::cshake256_framed_32;
 use qsag_addr::{QsagAddress, WitnessSuiteTag};
 use qsag_policy::{
-    AuthorizedSignReleaseToken, BDOZ_PREPROC_SLOTS, FsPolicyGenerationFence, InitiatorPeerMac,
+    SharedWindowSpendLedger, evaluate_policy_committed_barrier_with_ledger, BDOZ_PREPROC_SLOTS, FsPolicyGenerationFence, InitiatorPeerMac,
     PolicySignerGuardShare, PolicyViolation, QuorumTierRule, SigningPayloadBinding,
     TransactionIntent, TransactionPolicy, WindowAdvanceAuthorization,
 };
 
 use crate::anchor::{AnchorConfig, FsExternalMountAnchor};
-use crate::dealerless_ceremony::provision_distributed_policy_guards;
+use crate::dealerless_ceremony::provision_distributed_policy_guards_with_capacity;
 use crate::cli::{
     Args, CliError, MAX_KEY_FILE_BYTES, Secret32, ZeroizingBuf, exit, os_random_32, private_dir,
     read_bounded_file, read_input, read_text, replace_secret, write_new,
@@ -53,16 +52,16 @@ const INTENT_FORMAT: &str = "qsag-policy-intent-v1";
 const CUSTODY_MODEL: &str = "single-host guard committee derived from one provisioning seed";
 const ANCHOR_DOMAIN: &str = "policy_fence";
 const ANCHOR_SEAL_FIELD: &str = "anchor_fence_seal";
-const BUNDLE_MAGIC: &[u8; 8] = b"QSAGPLB1";
+const BUNDLE_MAGIC: &[u8; 8] = b"QSAGPLB2";
 const BUNDLE_DOMAIN: &[u8] = b"QSAG.CLI.POLICY.COMMITTEE_CHECKPOINT.V1";
 const MAX_BUNDLE_BYTES: u64 = 4 * 1024 * 1024;
 const POLICY_REVISION: u64 = 1;
 const DEFAULT_INTENT_TTL_SECS: u64 = 86_400;
 /// How far an intent timestamp may run ahead of the local clock.
 const CLOCK_SKEW_SECS: u64 = 60;
-const MAX_PARTIES: usize = 16;
+const MAX_PARTIES: usize = u16::MAX as usize;
 const MAX_ALLOWLIST: usize = 1024;
-const MAX_TIERS: usize = 16;
+const MAX_TIERS: usize = u16::MAX as usize;
 const STATE_PROPOSED: &str = "proposed";
 const STATE_RELEASED: &str = "released";
 /// Field of a secret key file that pins the key to one policy ledger.
@@ -207,6 +206,7 @@ fn bool_field(json: &Json, key: &str) -> Result<bool, CliError> {
 
 /// The committee and timing parameters fixed when a ledger is created.
 struct Committee {
+    preprocessing_slots: usize,
     parties: Vec<u16>,
     /// Length of one velocity window in seconds; zero keeps a single window for the ledger's life.
     window_secs: u64,
@@ -288,7 +288,7 @@ fn policy_from_json(json: &Json) -> Result<(TransactionPolicy, Committee), CliEr
     parties.dedup();
     if parties.len() != listed || !(2..=MAX_PARTIES).contains(&listed) {
         return Err(CliError::input(
-            "parties must hold 2..=16 distinct party ids",
+            "parties must hold 2..=65535 distinct party ids",
         ));
     }
     if hardware_guardian_party.is_some_and(|g| !parties.contains(&g)) {
@@ -316,10 +316,15 @@ fn policy_from_json(json: &Json) -> Result<(TransactionPolicy, Committee), CliEr
         Some(_) => json.field_u64(key),
     };
     let committee = Committee {
+        preprocessing_slots: usize::try_from(optional("preprocessing_slots", BDOZ_PREPROC_SLOTS as u64)?)
+            .map_err(|_| CliError::input("preprocessing capacity does not fit usize"))?,
         parties,
         window_secs: optional("window_secs", 0)?,
         intent_ttl_secs: optional("intent_ttl_secs", DEFAULT_INTENT_TTL_SECS)?,
     };
+    if committee.preprocessing_slots == 0 || committee.preprocessing_slots > qsag_policy::MAX_POLICY_CAPACITY {
+        return Err(CliError::input("preprocessing_slots must be in 1..=1048576"));
+    }
     if committee.intent_ttl_secs == 0 {
         return Err(CliError::input("intent_ttl_secs must be positive"));
     }
@@ -329,6 +334,7 @@ fn policy_from_json(json: &Json) -> Result<(TransactionPolicy, Committee), CliEr
 /// The canonical stored form: allowlist entries are kept as their 32-byte commitments.
 fn policy_to_json(policy: &TransactionPolicy, committee: &Committee) -> Json {
     let mut members = vec![
+        ("preprocessing_slots", Json::num(committee.preprocessing_slots)),
         ("chain_id", Json::num(policy.chain_id)),
         ("suite", Json::str(suite_name(policy.pinned_suite))),
         (
@@ -440,11 +446,13 @@ fn stored_policy(json: &Json) -> Result<(TransactionPolicy, Committee), CliError
         quorum_tiers,
     };
     let committee = Committee {
+        preprocessing_slots: usize::try_from(field("preprocessing_slots")?).map_err(|_| corrupt())?,
         parties: party_list(json, "parties").map_err(|_| corrupt())?,
         window_secs: field("window_secs")?,
         intent_ttl_secs: field("intent_ttl_secs")?,
     };
-    if committee.parties.len() < 2
+    if committee.preprocessing_slots == 0 || committee.preprocessing_slots > qsag_policy::MAX_POLICY_CAPACITY
+        || committee.parties.len() < 2
         || committee.parties.len() > MAX_PARTIES
         || committee.parties.windows(2).any(|w| w[0] >= w[1])
     {
@@ -476,6 +484,7 @@ fn ledger_id(
             &parties,
             &committee.window_secs.to_be_bytes(),
             &committee.intent_ttl_secs.to_be_bytes(),
+            &(committee.preprocessing_slots as u64).to_be_bytes(),
             nonce,
         ],
     )
@@ -505,6 +514,7 @@ fn encode_bundle(
     ledger: &[u8; 32],
     generation: u64,
     checkpoints: &[(u16, Vec<u8>)],
+    shared: &[u8],
 ) -> Vec<u8> {
     let mut out = BUNDLE_MAGIC.to_vec();
     out.extend_from_slice(ledger);
@@ -515,6 +525,8 @@ fn encode_bundle(
         out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
         out.extend_from_slice(bytes);
     }
+    out.extend_from_slice(&(shared.len() as u32).to_be_bytes());
+    out.extend_from_slice(shared);
     let tag = cshake256_framed_32(BUNDLE_DOMAIN, &[&key.0, &out]);
     out.extend_from_slice(&tag);
     out
@@ -525,6 +537,7 @@ fn encode_bundle(
 struct Bundle<'a> {
     generation: u64,
     checkpoints: Vec<(u16, &'a [u8])>,
+    shared: &'a [u8],
 }
 
 fn decode_bundle<'a>(
@@ -555,12 +568,15 @@ fn decode_bundle<'a>(
         let len = u32::from_be_bytes(take(4)?.try_into().map_err(|_| bad())?);
         checkpoints.push((party, take(len as usize)?));
     }
+    let len = u32::from_be_bytes(take(4)?.try_into().map_err(|_| bad())?) as usize;
+    let shared = take(len)?;
     if !rest.is_empty() {
         return Err(bad());
     }
     Ok(Bundle {
         generation,
         checkpoints,
+        shared,
     })
 }
 
@@ -588,10 +604,11 @@ fn provision_guards(
     seed: &Secret32,
     ledger: &[u8; 32],
     parties: &[u16],
+    slots: usize,
 ) -> Result<Vec<PolicySignerGuardShare>, CliError> {
     let entropy = party_secret(seed, b"guard dealer entropy", 0);
     let authority = party_secret(seed, b"window authority", 0);
-    provision_distributed_policy_guards(entropy.0, parties)
+    provision_distributed_policy_guards_with_capacity(entropy.0, parties, slots)
         .map_err(|e| CliError::state(format!("provisioning policy guard failed: {e:?}")))?
         .into_iter()
         .map(|guard| {
@@ -602,14 +619,15 @@ fn provision_guards(
         .collect()
 }
 
-fn write_bundle(
+fn write_bundle<'a>(
     seed: &Secret32,
     ledger: &[u8; 32],
     generation: u64,
-    guards: &[PolicySignerGuardShare],
+    guards: impl IntoIterator<Item = &'a PolicySignerGuardShare>,
+    shared: &SharedWindowSpendLedger,
 ) -> Vec<u8> {
-    let checkpoints: Vec<(u16, Vec<u8>)> = guards
-        .iter()
+    let mut checkpoints: Vec<(u16, Vec<u8>)> = guards
+        .into_iter()
         .map(|guard| {
             let key = party_secret(seed, b"guard checkpoint key", guard.party_id);
             (
@@ -618,11 +636,13 @@ fn write_bundle(
             )
         })
         .collect();
+    checkpoints.sort_unstable_by_key(|c| c.0);
     encode_bundle(
         &party_secret(seed, b"committee checkpoint mac", 0),
         ledger,
         generation,
         &checkpoints,
+        &shared.export_durable_checkpoint(&party_secret(seed, b"shared checkpoint key", 0).0),
     )
 }
 
@@ -643,6 +663,7 @@ pub struct OpenLedger {
     committee: Committee,
     seed: Secret32,
     guards: Vec<PolicySignerGuardShare>,
+    shared: SharedWindowSpendLedger,
     /// Generation of the committee checkpoint on disk.
     generation: u64,
     fence: FsPolicyGenerationFence,
@@ -715,13 +736,14 @@ impl OpenLedger {
         let Bundle {
             generation,
             checkpoints,
+            shared: shared_bytes,
         } = decode_bundle(&bundle_key, &id, &bundle)?;
         if generation < fence.generation() {
             return Err(rolled_back(
                 "committee checkpoint is older than its generation fence",
             ));
         }
-        let mut guards = provision_guards(&seed, &id, &committee.parties)?;
+        let mut guards = provision_guards(&seed, &id, &committee.parties, committee.preprocessing_slots)?;
         if checkpoints.len() != guards.len() {
             return Err(rolled_back(
                 "committee checkpoint does not cover the committee",
@@ -744,6 +766,12 @@ impl OpenLedger {
                 )));
             }
         }
+        let mut shared = SharedWindowSpendLedger::new(&policy, 0)
+            .with_window_authority(id, party_secret(&seed, b"window authority", 0).0)
+            .map_err(violation)?;
+        shared.restore_from_durable_checkpoint(shared_bytes,
+            &party_secret(&seed, b"shared checkpoint key", 0).0, 0)
+            .map_err(|_| rolled_back("shared accounting checkpoint refused"))?;
         if access == Access::Update {
             // A crash between the checkpoint rename and its fence leaves the fence behind.
             fence
@@ -761,6 +789,7 @@ impl OpenLedger {
             committee,
             seed,
             guards,
+            shared,
             generation,
             fence,
             anchor,
@@ -789,7 +818,7 @@ impl OpenLedger {
             .max(self.fence.generation())
             .checked_add(1)
             .ok_or_else(|| CliError::state("policy checkpoint generation exhausted"))?;
-        let bundle = write_bundle(&self.seed, &self.id, generation, &self.guards);
+        let bundle = write_bundle(&self.seed, &self.id, generation, &self.guards, &self.shared);
         replace_secret(&bundle_path(&self.dir)?, &bundle)?;
         self.generation = generation;
         self.fence
@@ -828,6 +857,12 @@ impl OpenLedger {
                 .map_err(|e| CliError::state(format!("advancing velocity window failed: {e:?}")))?;
             moved = true;
         }
+        if target > self.shared.current_window_id() {
+            let authorization = WindowAdvanceAuthorization::new(&authority.0, &self.id,
+                self.shared.current_window_id(), target);
+            self.shared.advance_velocity_window(&authorization).map_err(violation)?;
+            moved = true;
+        }
         if moved {
             self.persist()?;
         }
@@ -842,16 +877,10 @@ impl OpenLedger {
             .any(|guard| guard.is_nonce_burned(&intent.nonce))
     }
 
-    /// The window spend the listed parties jointly account for. A quorum the policy accepts
-    /// contains the accounting guardian or the whole committee, so this is the committee's spend.
+    /// The shared accumulator is authoritative across every subset of the committee.
     fn window_spend(&self, parties: &[u16]) -> Result<u128, CliError> {
-        let mut spend = 0;
-        for party in parties {
-            spend = self.guards[self.index_of(*party)?]
-                .accumulated_window_spend()
-                .max(spend);
-        }
-        Ok(spend)
+        for party in parties { self.index_of(*party)?; }
+        Ok(self.shared.accumulated_window_spend())
     }
 
     fn record_key(&self) -> Secret32 {
@@ -923,17 +952,6 @@ impl OpenLedger {
         let initiator = self.index_of(request.initiator)?;
         for party in request.approvers {
             self.index_of(*party)?;
-        }
-        // Per-party ledgers see the committee's whole window spend only through a quorum that
-        // contains the accounting guardian or every party; the guards refuse any other.
-        let accounted = self.policy.velocity_window_cap == u128::MAX
-            || request.approvers.len() == self.committee.parties.len()
-            || self
-                .policy
-                .hardware_guardian_party
-                .is_some_and(|guardian| request.approvers.contains(&guardian));
-        if !accounted {
-            return Err(violation(PolicyViolation::MissingHardwareGuardian));
         }
         let spend = self.window_spend(request.approvers)?;
         let window = self.current_window();
@@ -1054,11 +1072,6 @@ impl OpenLedger {
         {
             return Err(violation(PolicyViolation::TimestampOutsideWindow));
         }
-        let quorum: Vec<usize> = intent
-            .approver_parties
-            .iter()
-            .map(|party| self.index_of(*party))
-            .collect::<Result<_, _>>()?;
         self.sync_window(now)?;
         if intent.window_id != self.current_window() {
             return Err(violation(PolicyViolation::WindowIdMismatch));
@@ -1072,8 +1085,31 @@ impl OpenLedger {
         }
         // A refusal inside the barrier leaves the checkpoint on disk untouched: the guards
         // that moved in memory are dropped with this handle.
-        let tokens = run_barrier(&self.policy, &mut self.guards, &quorum, intent, spend)
-            .map_err(violation)?;
+        let (mut selected, others): (Vec<_>, Vec<_>) = std::mem::take(&mut self.guards)
+            .into_iter().partition(|g| intent.approver_parties.contains(&g.party_id));
+        let generation = self.generation.checked_add(1)
+            .ok_or_else(|| CliError::state("policy checkpoint generation exhausted"))?;
+        let result = evaluate_policy_committed_barrier_with_ledger(
+            &self.policy, intent, intent.session_id, intent.timestamp_secs,
+            &mut selected, &mut self.shared,
+            |shared, participating| {
+                let bundle = write_bundle(&self.seed, &self.id, generation,
+                    participating.iter().chain(&others), shared);
+                replace_secret(&bundle_path(&self.dir).map_err(|_| PolicyViolation::LedgerPersistenceFailed)?, &bundle)
+                    .map_err(|_| PolicyViolation::LedgerPersistenceFailed)?;
+                self.fence.ratchet_to(generation).map_err(|_| PolicyViolation::LedgerPersistenceFailed)?;
+                if let Some(anchor) = &self.anchor {
+                    anchor.advance_floor(ANCHOR_DOMAIN.as_bytes(), generation)
+                        .map_err(|_| PolicyViolation::LedgerPersistenceFailed)?;
+                }
+                Ok(())
+            }, &qsag_accel::CpuReferenceBackend::new());
+        selected.extend(others);
+        selected.sort_unstable_by_key(|g| g.party_id);
+        self.guards = selected;
+        let token = result.map_err(violation)?;
+        self.generation = generation;
+        let tokens = [token];
         for token in &tokens {
             if !token.matches_signing_for_policy(
                 key_id,
@@ -1088,60 +1124,8 @@ impl OpenLedger {
                 ));
             }
         }
-        self.persist()?;
         Ok(authorization)
     }
-}
-
-/// The four-round committed MAC barrier among the approving guards. Each guard re-evaluates
-/// the policy, authenticates the initiator, and checks the window, nonce and projected spend
-/// against its own restored ledger before it commits.
-fn run_barrier(
-    policy: &TransactionPolicy,
-    guards: &mut [PolicySignerGuardShare],
-    quorum: &[usize],
-    intent: &TransactionIntent,
-    window_spend: u128,
-) -> Result<Vec<AuthorizedSignReleaseToken>, PolicyViolation> {
-    let mut round1 = Vec::with_capacity(quorum.len());
-    let mut commits = Vec::with_capacity(quorum.len());
-    for &index in quorum {
-        let (state, commit) = guards[index].round1_commit_intent_authenticated(
-            policy,
-            intent,
-            intent.session_id,
-            intent.timestamp_secs,
-            window_spend,
-        )?;
-        round1.push(state);
-        commits.push(commit);
-    }
-    let mut round2 = Vec::with_capacity(quorum.len());
-    let mut opens = Vec::with_capacity(quorum.len());
-    for (state, &index) in round1.into_iter().zip(quorum) {
-        let (state, open) = state.round2_open_delta(&mut guards[index], &commits)?;
-        round2.push(state);
-        opens.push(open);
-    }
-    let mut round3 = Vec::with_capacity(quorum.len());
-    let mut sigma_commits = Vec::with_capacity(quorum.len());
-    for (state, &index) in round2.into_iter().zip(quorum) {
-        let (state, commit) = state.round3_commit_sigma(&mut guards[index], &opens)?;
-        round3.push(state);
-        sigma_commits.push(commit);
-    }
-    let mut round4 = Vec::with_capacity(quorum.len());
-    let mut sigma_opens = Vec::with_capacity(quorum.len());
-    for (state, &index) in round3.into_iter().zip(quorum) {
-        let (state, open) = state.round4_open_sigma(&mut guards[index], &sigma_commits)?;
-        round4.push(state);
-        sigma_opens.push(open);
-    }
-    let mut tokens = Vec::with_capacity(quorum.len());
-    for (state, &index) in round4.into_iter().zip(quorum) {
-        tokens.push(state.finalize(&mut guards[index], &sigma_opens)?);
-    }
-    Ok(tokens)
 }
 
 struct Proposal<'a> {
@@ -1427,7 +1411,7 @@ one velocity window; 0 or absent keeps one window for the ledger's life) and
 Every guard share is derived from one provisioning seed stored in <dir>/ledger.json, so the
 committee lives on this host: the ledger makes authorization durable, replay-proof and
 velocity-capped across invocations, and does not separate the approving parties from each
-other. One ledger authorizes at most 64 intents per approving party.
+other. Set `preprocessing_slots` in the enrollment policy to budget single-use barrier slots.
 
   --anchor-dir <dir>            ratchet every guard generation in an external monotone anchor,
                                 so restoring an old copy of the ledger directory is refused
@@ -1492,11 +1476,14 @@ fn init(raw: &[String]) -> Result<(), CliError> {
     let nonce = &nonce[..16];
     let id = ledger_id(&seed, &policy, &committee, nonce);
 
-    let guards = provision_guards(&seed, &id, &committee.parties)?;
+    let guards = provision_guards(&seed, &id, &committee.parties, committee.preprocessing_slots)?;
+    let shared = SharedWindowSpendLedger::new(&policy, 0)
+        .with_window_authority(id, party_secret(&seed, b"window authority", 0).0)
+        .map_err(violation)?;
     let generation = 1;
     write_new(
         &bundle_path(dir)?,
-        &write_bundle(&seed, &id, generation, &guards),
+        &write_bundle(&seed, &id, generation, &guards, &shared),
         true,
     )?;
     FsPolicyGenerationFence::create_new(
@@ -1756,7 +1743,7 @@ fn status(raw: &[String]) -> Result<(), CliError> {
                 ("window_id", Json::num(guard.current_window_id())),
                 ("window_spend", Json::num(guard.accumulated_window_spend())),
                 ("intents_released", Json::num(released)),
-                ("release_capacity", Json::num(BDOZ_PREPROC_SLOTS)),
+                ("release_capacity", Json::num(ledger.committee.preprocessing_slots)),
             ])
         })
         .collect();
@@ -2170,7 +2157,7 @@ mod tests {
         // A checkpoint that reached disk without its fence is adopted, never rolled past.
         let mut ledger = open(&dir);
         let generation = ledger.generation + 1;
-        let ahead = write_bundle(&ledger.seed, &ledger.id, generation, &ledger.guards);
+        let ahead = write_bundle(&ledger.seed, &ledger.id, generation, &ledger.guards, &ledger.shared);
         drop(ledger);
         std::fs::write(&checkpoint, &ahead).unwrap();
         let inspected = OpenLedger::open(&dir, None, None, Access::Inspect).unwrap();
@@ -2211,12 +2198,13 @@ mod tests {
         let key = Secret32([9; 32]);
         let ledger = [3u8; 32];
         let parts = vec![(1u16, vec![1u8, 2, 3]), (2u16, Vec::new())];
-        let bytes = encode_bundle(&key, &ledger, 7, &parts);
+        let bytes = encode_bundle(&key, &ledger, 7, &parts, b"shared");
         assert_eq!(
             decode_bundle(&key, &ledger, &bytes).unwrap(),
             Bundle {
                 generation: 7,
                 checkpoints: vec![(1u16, &[1u8, 2, 3][..]), (2u16, &[][..])],
+                shared: b"shared",
             }
         );
         assert!(decode_bundle(&Secret32([8; 32]), &ledger, &bytes).is_err());

@@ -64,11 +64,11 @@
 //! adversary chose) and the corrupt custodians' own shares. No MAC key is
 //! exposed by a failed rekey, so a failed rekey does not retire the family.
 
-use crate::seeds::CustodianSet;
 use super::*;
 use crate::erase::SecretWords;
 use crate::inventory::RekeyFault;
 use crate::seeds::CustodianSeeds;
+use crate::seeds::CustodianSet;
 use qsag_accel::ct::ct_eq_bytes;
 use qsag_accel::keccak::{Shake256, commit_mpc_broadcast, finalize_cshake256, init_cshake256};
 
@@ -180,14 +180,17 @@ pub fn pack_field_elements(values: &[u32]) -> Vec<u8> {
 /// Inverse of [`pack_field_elements`]. Rejects a wrong length, a non-canonical
 /// residue and nonzero padding bits.
 pub fn unpack_field_elements(bytes: &[u8], count: usize) -> Result<Vec<u32>, HdError> {
-    let bits = count.checked_mul(23).ok_or(HdError::RekeyAborted(RekeyFault::MalformedMessage))?;
+    let bits = count
+        .checked_mul(23)
+        .ok_or(HdError::RekeyAborted(RekeyFault::MalformedMessage))?;
     if bytes.len() != bits.div_ceil(8) {
         return abort(RekeyFault::MalformedMessage);
     }
     let mut values = alloc::vec![0; count];
     unpack_coefficients(bytes, &mut values);
     if values.iter().any(|&v| v >= MODULE_Q)
-        || (bits % 8 != 0 && bytes.last().is_some_and(|b| b >> (bits % 8) != 0)) {
+        || (bits % 8 != 0 && bytes.last().is_some_and(|b| b >> (bits % 8) != 0))
+    {
         return abort(RekeyFault::MalformedMessage);
     }
     Ok(values)
@@ -242,13 +245,15 @@ pub struct RekeyZeroOpening {
 }
 
 impl RekeyHello {
-    /// Canonical wire encoding; also the bytes bound into the session key.
+    /// V2 canonical wire encoding: 256-bit subsets and a 64-bit entry count.
+    /// The version prefix is also bound into the session key.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(68 + self.public_shares.len() * (2 + MODULE_K * 736));
+        let mut out = Vec::with_capacity(75 + self.public_shares.len() * (32 + MODULE_K * 736));
+        out.push(2);
         out.extend_from_slice(&self.party_id.to_be_bytes());
         out.extend_from_slice(&self.nonce);
         out.extend_from_slice(&self.coin_commitment);
-        out.extend_from_slice(&(self.public_shares.len() as u16).to_be_bytes());
+        out.extend_from_slice(&(self.public_shares.len() as u64).to_be_bytes());
         for (subset, image) in &self.public_shares {
             out.extend_from_slice(&subset.to_be_bytes());
             for poly in image {
@@ -328,6 +333,7 @@ impl Drop for ParentAuth {
 
 /// Everything a child inherits from its custodian's parent handle.
 struct Lineage {
+    additive: bool,
     seed_a: [u8; 32],
     matrix: Arc<ExpandedHdMatrix>,
     family_id: Option<[u8; 32]>,
@@ -530,6 +536,7 @@ impl<'a> RekeyRound1<'a> {
                 );
                 (
                     Lineage {
+                        additive: false,
                         seed_a,
                         matrix: Arc::new(ExpandedHdMatrix::new(seed_a)),
                         family_id: None,
@@ -551,11 +558,24 @@ impl<'a> RekeyRound1<'a> {
             }
             Some((share, expected)) => {
                 share.require_poison_journal()?;
-                let valid_scheme = matches!(
-                    share.scheme,
-                    ShareScheme::Shamir { threshold, eval_point }
-                        if threshold == config.threshold() && eval_point == own_x
-                );
+                let valid_scheme = match share.scheme {
+                    ShareScheme::Shamir {
+                        threshold,
+                        eval_point,
+                    } => threshold == config.threshold() && eval_point == own_x,
+                    ShareScheme::Additive { num_parties } => {
+                        usize::from(num_parties) == members.len()
+                            && share.additive_source_threshold == Some(config.threshold())
+                    }
+                };
+                // Converted sum shares retain their original Shamir polynomial.
+                // Normalize locally for this degree-checked rekey protocol and
+                // convert its output back to sum coordinates after authentication.
+                let normalization = if matches!(share.scheme, ShareScheme::Additive { .. }) {
+                    mod_q_inv_or_zero(interpolation_weight(&xs, own_x))
+                } else {
+                    1
+                };
                 if share.is_poisoned()
                     || !valid_scheme
                     || share.party_id != party_id
@@ -587,6 +607,7 @@ impl<'a> RekeyRound1<'a> {
                     .s_shares
                     .iter()
                     .flat_map(|poly| poly.expose().coeffs)
+                    .map(|value| mod_q_mul(value, normalization))
                     .collect();
                 let auth = ParentAuth {
                     s: parent_s.clone(),
@@ -594,11 +615,15 @@ impl<'a> RekeyRound1<'a> {
                         .spdz_macs
                         .iter()
                         .flat_map(|lane| lane.iter().flat_map(|poly| poly.expose().coeffs))
+                        .map(|value| mod_q_mul(value, normalization))
                         .collect(),
-                    alpha: share.spdz_alpha_shares,
+                    alpha: share
+                        .spdz_alpha_shares
+                        .map(|value| mod_q_mul(value, normalization)),
                 };
                 (
                     Lineage {
+                        additive: matches!(share.scheme, ShareScheme::Additive { .. }),
                         seed_a: share.seed_a,
                         matrix: Arc::clone(&share.matrix),
                         family_id: Some(share.family_id),
@@ -826,11 +851,8 @@ impl<'a> RekeyRound1<'a> {
             }
             for subset in config.subsets() {
                 let mut images = hellos.iter().filter_map(|hello| {
-                    hello
-                        .public_shares
-                        .iter()
-                        .find(|entry| entry.0 == subset)
-                        .map(|entry| &entry.1)
+                    hello.public_shares.binary_search_by_key(&subset, |entry| entry.0)
+                        .ok().map(|i| &hello.public_shares[i].1)
                 });
                 let first = images
                     .next()
@@ -1241,6 +1263,7 @@ impl RekeyRound6 {
                 threshold: core.threshold,
                 eval_point: core.members[core.position].1,
             },
+            additive_source_threshold: None,
             seed_a: lineage.seed_a,
             family_id: lineage
                 .family_id
@@ -1265,6 +1288,11 @@ impl RekeyRound6 {
             evaluation_queries: Arc::clone(&lineage.evaluation_queries),
             depth_used: lineage.depth_used,
             max_depth: lineage.max_depth,
+        };
+        let share = if lineage.additive {
+            share.into_additive()?
+        } else {
+            share
         };
         if let Some(journal) = &core.lineage.poison_journal {
             journal
@@ -1525,6 +1553,26 @@ mod tests {
 
     fn centered_abs(value: u32) -> u32 {
         value.min(MODULE_Q - value)
+    }
+
+    #[test]
+    fn additive_coordinates_survive_authenticated_dealerless_rekey() {
+        let config = committee(2, 3);
+        let seeds = crate::seeds::run_seed_ceremony(&config, 73);
+        let (pk, shares) = honest(&seeds, None, 0, false, 1);
+        let additive: Vec<_> = shares
+            .into_iter()
+            .map(|s| s.into_additive().unwrap())
+            .collect();
+        let (child_pk, child) = honest(&seeds, Some((&additive, &pk)), 3, false, 2);
+        assert_eq!(child_pk, pk.derive_child(3).unwrap());
+        assert!(
+            child
+                .iter()
+                .all(|s| matches!(s.scheme, ShareScheme::Additive { num_parties: 3 }))
+        );
+        assert!(reconstruct_for_recovery_or_test(&child, &child_pk).is_ok());
+        assert!(reconstruct_for_recovery_or_test(&child[..2], &child_pk).is_err());
     }
 
     #[test]
@@ -1922,7 +1970,7 @@ mod tests {
         let outcome = run(&seeds, parents, 5, false, 2, &mut |stage| {
             if let Stage::Hello(hellos) = stage {
                 let image = core::array::from_fn(|_| RingPoly::zero());
-                hellos[1].public_shares.push((0b011, image));
+                hellos[1].public_shares.push((CustodianSet::from(0b011), image));
             }
         });
         all_fail(outcome, None, RekeyFault::MalformedMessage);

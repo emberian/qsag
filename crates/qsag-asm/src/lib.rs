@@ -42,6 +42,7 @@ extern crate std;
 
 pub mod bitslice;
 pub mod cpuid;
+mod linear_map;
 pub mod ntt_simd;
 pub mod portable;
 pub mod sha2_hw;
@@ -938,6 +939,11 @@ fn transpose64x64(rows: &mut [u64]) {
 /// 128 coefficient planes and every output plane is a XOR of input-plane combinations chosen by
 /// public selectors, so the running time and memory accesses do not depend on `vals`.
 pub fn tower128_to_poly128_x64_ct(vals: &mut [u128; 64]) {
+    #[cfg(target_arch = "x86_64")]
+    if probe_capabilities().gfni {
+        linear_map::map_batch(vals, false);
+        return;
+    }
     let mut planes = [0u64; 128];
     for (e, v) in vals.iter().enumerate() {
         planes[e] = *v as u64;
@@ -1851,4 +1857,13 @@ pub fn keccak_f1600_batch_with_backend(states: &mut [[u64; 25]], backend: SimdBa
         }
         volatile_fill(&mut packed.0, [0; 4]);
     }
+}
+
+/// In-place tower-to-polynomial map with eight independent inputs per GFNI block.
+pub fn tower128_to_poly128_batch_ct(values: &mut [u128]) {
+    linear_map::map_batch(values, false);
+}
+/// In-place inverse of [`tower128_to_poly128_batch_ct`].
+pub fn poly128_to_tower128_batch_ct(values: &mut [u128]) {
+    linear_map::map_batch(values, true);
 }

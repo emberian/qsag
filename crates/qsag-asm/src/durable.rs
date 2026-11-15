@@ -720,6 +720,9 @@ mod tests {
             record.read_bounded(4096).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
-        assert_eq!(record.read().unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            record.read().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 }

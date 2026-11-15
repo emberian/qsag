@@ -83,8 +83,9 @@ fn query_error_below_2pow_minus256(n: u128, agreement: u128, queries: usize) -> 
     query_error_below_2pow_minus_bits(n, agreement, queries, 256)
 }
 
-// High-capacity (`nv = 25..=28`) finite Johnson witnesses covering ALL QROM-128 regimes
-// simultaneously (`256`, `214`, and `200` pure distinct-fiber query target bits).
+// Finite Johnson witnesses for `nv = 25..=28`. Each row passes `check_witness_row` at every
+// QROM regime's query count and target (`256`, `214` and `200` pure distinct-fiber query bits).
+// These rows have no Lean counterpart: `hemOptimizedQromWitnessTable` stops at `nv = 24`.
 const HIGH_CAPACITY_WITNESSES: &[(usize, usize, u128, u128, u128)] = &[
     (25, 0, 1054283, 128, 6353),
     (25, 1, 133941, 32, 1732),
@@ -104,8 +105,8 @@ const HIGH_CAPACITY_WITNESSES: &[(usize, usize, u128, u128, u128)] = &[
     (28, 3, 4481, 16, 1056),
 ];
 
-// Universal 49-row `[CDHZ25]` finite Johnson witness table (`nv = 2..=24`) matching
-// `lean/Qsag/QromSaltedMerkleStateRestoration.lean::hemOptimizedQromWitnessTable` verbatim.
+// 49-row finite Johnson witness table (`nv = 2..=24`) for the `Cdhz25*` regimes, equal to
+// `lean/Qsag/QromSaltedMerkleStateRestoration.lean::hemOptimizedQromWitnessTable`.
 const CDHZ25_WITNESSES: &[(usize, usize, u128, u128, u128)] = &[
     (7, 1, 98, 1, 25),
     (8, 1, 98, 1, 25),
@@ -156,17 +157,6 @@ const CDHZ25_WITNESSES: &[(usize, usize, u128, u128, u128)] = &[
     (24, 1, 66992, 32, 11069),
     (24, 2, 17484, 16, 5228),
     (24, 3, 4482, 16, 2067),
-];
-
-// Single-stage `Mini-WHIR` (`nv = 9..=14`, `B_0 = 256, early_stop_vars = 8, step_vars = nv - 8`)
-// finite Johnson witnesses covering `256`, `214`, and `200` pure query target bits.
-const MINI_WHIR_WITNESSES: &[(usize, usize, u128, u128, u128)] = &[
-    (9, 0, 4484, 16, 1051),
-    (10, 0, 4483, 16, 1293),
-    (11, 0, 4482, 16, 1277),
-    (12, 0, 4481, 16, 1261),
-    (13, 0, 4480, 16, 1245),
-    (14, 0, 4479, 16, 1229),
 ];
 
 fn bits(n: u128) -> u32 {
@@ -254,14 +244,13 @@ fn finite_johnson_witnesses_cover_every_canonical_stage() {
     assert_eq!(seen_base, WITNESSES.len());
     assert_eq!(seen_high, HIGH_CAPACITY_WITNESSES.len());
 
-    // Verify all `[CDHZ25]` and `Mini-WHIR` QROM-128 regimes across `2..=28` as well:
+    // The `Cdhz25*` regimes share the stage geometry and use their own query tables.
+    let mut seen_cdhz = 0usize;
     for regime in [
         WhirSecurityRegime::Cdhz25JohnsonQrom128,
         WhirSecurityRegime::Cdhz25ZeroPowQrom128,
         WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128,
         WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128,
-        WhirSecurityRegime::MiniWhirCdhz25Qrom128,
-        WhirSecurityRegime::Poseidon2MiniWhirCdhz25ZeroPowQrom128,
     ] {
         let target_bits = regime.pure_query_target_bits();
         for nv in 2..=MAX_PCS_NUM_VARS {
@@ -273,9 +262,8 @@ fn finite_johnson_witnesses_cover_every_canonical_stage() {
                 if spec.num_queries as u128 >= n {
                     continue;
                 }
-                let table = if regime.uses_mini_whir_geometry() && (9..=14).contains(&nv) {
-                    MINI_WHIR_WITNESSES
-                } else if nv <= 24 {
+                let table = if nv <= 24 {
+                    seen_cdhz += 1;
                     CDHZ25_WITNESSES
                 } else {
                     HIGH_CAPACITY_WITNESSES
@@ -290,6 +278,8 @@ fn finite_johnson_witnesses_cover_every_canonical_stage() {
             }
         }
     }
+
+    assert_eq!(seen_cdhz, 4 * CDHZ25_WITNESSES.len());
 
     // p^4 > 127^2 * 2^242 > 2000 * 2^245, certifying >245 stage
     // combiner bits for the bound above. This is not a protocol-wide union bound.

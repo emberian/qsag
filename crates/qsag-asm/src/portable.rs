@@ -480,7 +480,7 @@ macro_rules! linear128_step {
 /// Constant-time linear basis map $\Psi : \mathcal{T}_7 \to \mathbb{F}_2[z]/(z^{128} + z^7 + z^2 + z + 1)$
 /// (`0` branches, `0` variable shifts, `0` 16 KiB table scans — pure constant-shift bit-matrix XOR!).
 #[inline]
-pub fn tower128_to_poly128_ct(x: u128) -> u128 {
+pub fn tower128_to_poly128_portable(x: u128) -> u128 {
     let x = black_box(x);
     let lo = x as u64;
     let hi = (x >> 64) as u64;
@@ -667,7 +667,7 @@ pub fn tower128_to_poly128_ct(x: u128) -> u128 {
 /// Constant-time inverse linear basis map $\Psi^{-1} : \mathbb{F}_2[z]/(z^{128} + z^7 + z^2 + z + 1) \to \mathcal{T}_7$
 /// (`0` branches, `0` variable shifts, `0` 16 KiB table scans!).
 #[inline]
-pub fn poly128_to_tower128_ct(y: u128) -> u128 {
+pub fn poly128_to_tower128_portable(y: u128) -> u128 {
     let y = black_box(y);
     let lo = y as u64;
     let hi = (y >> 64) as u64;
@@ -1256,3 +1256,12 @@ const _: () = {
     assert!(gfni_poly_mul_u8(x1, x1) ^ gfni_poly_mul_u8(x0, x1) == 1);
     assert!(gfni_poly_mul_u8(x2, x2) ^ gfni_poly_mul_u8(x1, x2) == 1);
 };
+
+/// Runtime-dispatched, constant-time tower-to-polynomial basis map.
+pub fn tower128_to_poly128_ct(x: u128) -> u128 {
+    crate::linear_map::map(x, false)
+}
+/// Runtime-dispatched, constant-time inverse basis map.
+pub fn poly128_to_tower128_ct(x: u128) -> u128 {
+    crate::linear_map::map(x, true)
+}

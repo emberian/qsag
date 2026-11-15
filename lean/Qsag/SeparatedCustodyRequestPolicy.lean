@@ -84,7 +84,7 @@ theorem reserve_admitted (profile : RssProduction.Profile) (p : RoundPolicy) (ca
       exact (Bool.and_eq_true_iff.mp hg).2
     · simp only [reserve, hc, authenticatedPolicyGuardStep, ha, ↓reduceIte] at h
       cases h
-  · simp only [reserve, hc, ↓reduceIte] at h
+  · simp only [reserve, hc] at h
     cases h
 
 theorem reserve_attempted (profile : RssProduction.Profile) (p : RoundPolicy) (cap anchor : Nat)

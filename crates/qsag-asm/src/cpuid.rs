@@ -425,8 +425,13 @@ pub fn detect_backend() -> SimdBackend {
         _ => {}
     }
 
-    let caps = probe_capabilities();
-    let selected = if caps.avx512
+    let selected = backend_for_capabilities(probe_capabilities());
+    CACHED_BACKEND.store(selected as u8, Ordering::Relaxed);
+    selected
+}
+
+fn backend_for_capabilities(caps: CpuCapabilities) -> SimdBackend {
+    if caps.avx512
         && caps.avx2
         && caps.bmi1
         && caps.bmi2
@@ -439,14 +444,22 @@ pub fn detect_backend() -> SimdBackend {
         SimdBackend::X86Avx2GfniVpclmul
     } else if caps.avx2 && caps.bmi1 && caps.bmi2 && caps.adx && caps.pclmulqdq {
         SimdBackend::X86Avx2Pclmul
-    } else if caps.aarch64_neon && caps.aarch64_sha3 && caps.aarch64_pmull && caps.aarch64_dit {
+    } else if caps.aarch64_neon && caps.aarch64_sha3 && caps.aarch64_pmull {
         SimdBackend::Aarch64NeonSha3Pmull
     } else {
         SimdBackend::Portable
-    };
+    }
+}
 
-    CACHED_BACKEND.store(selected as u8, Ordering::Relaxed);
-    selected
+#[test]
+fn arm_acceleration_does_not_require_optional_dit() {
+    let mut caps = decode_caps(CAP_A64_NEON | CAP_A64_SHA3 | CAP_A64_PMULL);
+    assert!(!caps.aarch64_dit);
+    assert_eq!(backend_for_capabilities(caps), SimdBackend::Aarch64NeonSha3Pmull);
+    caps.aarch64_dit = true;
+    assert_eq!(backend_for_capabilities(caps), SimdBackend::Aarch64NeonSha3Pmull);
+    caps.aarch64_pmull = false;
+    assert_eq!(backend_for_capabilities(caps), SimdBackend::Portable);
 }
 
 /// Activate per-thread `PSTATE.DIT = 1` on `FEAT_DIT`-capable `aarch64` cores before entering

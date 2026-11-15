@@ -3419,9 +3419,31 @@ mod tests {
         );
     }
     #[test]
+    fn replay_capacity_exceeds_legacy_limit_and_is_durable() {
+        let mut guards = raw_test_guards([9; 32], &[1, 2]);
+        let guard = &mut guards[0];
+        guard.set_replay_capacity(600).unwrap();
+        for i in 0u64..600 {
+            let mut nonce = [0; 32]; nonce[..8].copy_from_slice(&i.to_be_bytes());
+            guard.record_approved_intent(u128::MAX, i as u128, nonce, nonce).unwrap();
+        }
+        let snapshot = guard.export_durable_checkpoint(&[7; 32], 600);
+        let mut restored = raw_test_guards([9; 32], &[1, 2]);
+        restored[0].restore_from_durable_checkpoint(&snapshot, &[7; 32], 600).unwrap();
+        assert_eq!(restored[0].replay_capacity, 600);
+        assert_eq!(restored[0].export_durable_checkpoint(&[7; 32], 600), snapshot);
+        assert_eq!(restored[0].record_approved_intent(u128::MAX, 601, [255; 32], [255; 32]),
+            Err(PolicyViolation::ReplayWindowExhausted));
+        assert!(restored[0].set_replay_capacity(599).is_err());
+        restored[0].set_replay_capacity(601).unwrap();
+        restored[0].record_approved_intent(u128::MAX, 601, [255; 32], [255; 32]).unwrap();
+    }
+
+    #[test]
     fn bounded_replay_window_retains_random_nonces_until_authenticated_rotation() {
         let mut guards = raw_test_guards([9; 32], &[1, 2]);
         let guard = &mut guards[0];
+        guard.set_replay_capacity(256).unwrap();
         let nonces: Vec<_> = (0u32..256)
             .map(|i| cshake256_framed_32(b"nonce test", &[&i.to_be_bytes()]))
             .collect();
@@ -3853,7 +3875,7 @@ mod tests {
             alternatives: &[[u128; 2]],
             choices: &[bool],
         ) -> Result<Vec<u128>, PolicyViolation> {
-            assert_eq!(alternatives.len(), BDOZ_PREPROC_SLOTS * 256);
+            assert!(alternatives.len().is_multiple_of(256));
             assert_eq!(choices.len(), alternatives.len());
             let (_, local_alpha, _) = self
                 .peers
@@ -3902,7 +3924,7 @@ mod tests {
         let mut ot = IdealPolicyOt { peers: Vec::new() };
         for id in all_ids {
             let (state, messages) =
-                PolicyGuardDkgRound1::new(id, &all_ids, [20; 32], [id as u8; 32]).unwrap();
+                PolicyGuardDkgRound1::new_with_capacity(id, &all_ids, [20; 32], [id as u8; 32], 130).unwrap();
             ot.peers.push((
                 id,
                 state.guard.bdoz_alpha_share,
@@ -3937,7 +3959,7 @@ mod tests {
                 if g.party_id == peer.party_id {
                     continue;
                 }
-                for slot in 0..BDOZ_PREPROC_SLOTS {
+                for slot in 0..130 {
                     let m = g.outgoing_mac(peer.party_id, slot).unwrap();
                     let k = peer.incoming_key(g.party_id, slot).unwrap();
                     let peer_alpha = peer.incoming_slot_alpha(g.party_id, slot);

@@ -104,8 +104,14 @@ fn ot_endpoints(parties: &[u16], session: [u8; 32])
 /// ceremony (`PolicyGuardDkgRound1::new` -> `round2_open_seeds` -> `finalize_distributed_policy_guard`)
 /// without any `test-dealer` dependency.
 pub fn provision_distributed_policy_guards(
-    mut ceremony_seed: [u8; 32],
+    ceremony_seed: [u8; 32],
     parties: &[u16],
+) -> Result<Vec<PolicySignerGuardShare>, PolicyViolation> {
+    provision_distributed_policy_guards_with_capacity(ceremony_seed, parties, qsag_policy::BDOZ_PREPROC_SLOTS)
+}
+
+pub fn provision_distributed_policy_guards_with_capacity(
+    mut ceremony_seed: [u8; 32], parties: &[u16], slots: usize,
 ) -> Result<Vec<PolicySignerGuardShare>, PolicyViolation> {
     let setup_id = cshake256_framed_32(b"QSAG.CLI.POLICY.DKG.SETUP.V1", &[&ceremony_seed]);
     let mut entropies = Vec::with_capacity(parties.len());
@@ -120,7 +126,7 @@ pub fn provision_distributed_policy_guards(
     let mut round1_states = Vec::with_capacity(parties.len());
     let mut commits = Vec::new();
     for (&id, entropy) in parties.iter().zip(entropies) {
-        let (st, msgs) = PolicyGuardDkgRound1::new(id, parties, setup_id, entropy)?;
+        let (st, msgs) = PolicyGuardDkgRound1::new_with_capacity(id, parties, setup_id, entropy, slots)?;
         round1_states.push((id, st));
         commits.extend(msgs);
     }

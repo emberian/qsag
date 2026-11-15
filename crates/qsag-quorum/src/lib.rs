@@ -1,6 +1,7 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
+// Only volatile_coupon::memory permits audited Linux memory-protection FFI.
 //! Generalized `(t, n)` quorum-switching `Jorts` signatures and isolated single-party
 //! protocol nodes that talk over a framed wire transport.
 //!
@@ -52,3 +53,6 @@ pub use wire_channel::{ConfidentialWireChannel, MacSealedWireChannel};
 mod directory_anchor;
 #[cfg(feature = "std")]
 pub use directory_anchor::FsDirectoryMonotoneAnchor;
+
+#[cfg(all(any(test, feature = "std"), target_os = "linux", target_pointer_width = "64"))]
+pub mod volatile_coupon;

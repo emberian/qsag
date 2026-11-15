@@ -206,7 +206,7 @@ fn bit_planes(st: &Structure, me: usize, values: &[u32], seed: u8) -> Vec<Sh> {
 
 #[test]
 fn engine_products_open_to_plaintext_products() {
-    for (parties, threshold) in [(3, 2), (5, 2), (5, 3)] {
+    for (parties, threshold) in [(3, 2), (5, 2), (5, 3), (6, 2), (7, 4)] {
         let st = Structure::new(parties, threshold).unwrap();
         let mut rng = Rng(parties as u64 * 10 + threshold as u64);
         let x: Vec<u32> = (0..97).map(|_| rng.field()).collect();
@@ -611,7 +611,7 @@ fn sign(
 /// Sums each distinct subset component once: the secret no party holds.
 fn reconstruct(shares: &[ThresholdMlDsaSignerShare]) -> (Vec<Poly256>, Vec<Poly256>) {
     let params = shares[0].verification_pack().level.params();
-    let mut seen: Vec<(u32, Vec<Poly256>, Vec<Poly256>)> = Vec::new();
+    let mut seen: Vec<(Vec<usize>, Vec<Poly256>, Vec<Poly256>)> = Vec::new();
     for share in shares {
         for (holders, s1, s2) in share.components_for_test() {
             match seen.iter().find(|entry| entry.0 == holders) {
@@ -851,13 +851,7 @@ fn unsupported_configurations_and_quorums_are_rejected() {
             num_parties: 3
         }
     );
-    assert_eq!(
-        attempt(config(MlDsaLevel::MlDsa87, 2, &[1, 2, 3, 4, 5, 6]), &mut net),
-        ThresholdMlDsaError::InvalidThresholdParameters {
-            threshold: 2,
-            num_parties: 6
-        }
-    );
+    assert!(config(MlDsaLevel::MlDsa87, 2, &[1, 2, 3, 4, 5, 6]).validate().is_ok());
     assert_eq!(
         attempt(config(MlDsaLevel::MlDsa44, 2, &[1, 2, 2]), &mut net),
         ThresholdMlDsaError::DuplicateOrUnknownParty { party_id: 2 }
@@ -1596,4 +1590,36 @@ fn mldsa65_and_mldsa87_pq128_threshold_keygen_signing_and_negative_forgery() {
             level, outputs[0].attempts
         );
     }
+}
+
+#[test]
+fn parametric_holder_sets_preserve_order_and_exceed_word_width() {
+    for n in 3..=9 {
+        for t in 2..=n.div_ceil(2) {
+            let st = Structure::new(n, t).unwrap();
+            let old: Vec<_> = (1u32..1u32 << n)
+                .filter(|m| m.count_ones() as usize == n - t + 1)
+                .map(|m| (0..n).filter(|p| (m >> p) & 1 == 1).collect::<Vec<_>>()).collect();
+            assert_eq!(st.subsets, old);
+        }
+    }
+    let st = Structure::new(67, 2).unwrap();
+    assert_eq!(st.subsets.len(), 67);
+    assert!(st.subsets.iter().all(|s| s.len() == 66));
+    assert_eq!(st.subsets_of(66).len(), 66);
+    assert!(Structure::new(3, usize::MAX).is_err());
+    assert!(Structure::new(3, 3).is_err()); // dishonest-majority RSS remains unsound
+}
+
+#[test]
+fn parametric_two_of_six_keygen_and_nonprefix_session_sign() {
+    let mut shares = dkg(&[1, 2, 3, 4, 5, 6], 2, 0x91);
+    assert_fips_key(&shares);
+    let pk = shares[0].verification_pack().pk_bytes.clone();
+    let (results, _) = sign(&mut shares, &[2, 4, 6], 0x92,
+        b"dynamic six-custodian holder sets", Vec::new(), None);
+    let outputs: Vec<_> = results.into_iter().map(Result::unwrap).collect();
+    assert!(outputs.iter().all(|o| o.signature == outputs[0].signature));
+    assert!(ml_dsa_verify(MlDsaLevel::MlDsa44, &pk,
+        b"dynamic six-custodian holder sets", b"ctx", &outputs[0].signature));
 }

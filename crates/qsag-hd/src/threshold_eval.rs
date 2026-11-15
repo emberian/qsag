@@ -251,7 +251,20 @@ impl<'a> HdThresholdEvalRound1Commit<'a> {
                 threshold,
                 eval_point,
             } => (threshold, eval_point),
-            _ => return Err(HdError::InvalidThresholdParameters),
+            ShareScheme::Additive { num_parties } => {
+                if roster != share.committee || roster.len() != usize::from(num_parties) {
+                    return Err(HdError::InvalidThresholdParameters);
+                }
+                (
+                    num_parties,
+                    share
+                        .committee
+                        .iter()
+                        .find(|entry| entry.0 == share.party_id)
+                        .ok_or(HdError::InvalidThresholdParameters)?
+                        .1,
+                )
+            }
         };
         if share.is_poisoned()
             || (share.hardened && expected.chain_code.is_some())
@@ -277,15 +290,10 @@ impl<'a> HdThresholdEvalRound1Commit<'a> {
         share.burn_query()?;
         let xs: Vec<_> = roster.iter().map(|entry| entry.1).collect();
         validate_shamir_eval_points(&xs)?;
-        let mut numerator = 1;
-        let mut denominator = 1;
-        for &x in &xs {
-            if x != own_x {
-                numerator = mod_q_mul(numerator, mod_q_sub(0, x));
-                denominator = mod_q_mul(denominator, mod_q_sub(own_x, x));
-            }
-        }
-        let lambda = mod_q_mul(numerator, mod_q_inv_or_zero(denominator));
+        let lambda = match share.scheme {
+            ShareScheme::Shamir { .. } => interpolation_weight(&xs, own_x),
+            ShareScheme::Additive { .. } => 1,
+        };
         let value = mod_q_add(
             mod_q_mul(lambda, linear_value(form, &share.s_shares)),
             mask.value,
@@ -302,6 +310,10 @@ impl<'a> HdThresholdEvalRound1Commit<'a> {
         if let Some(cc) = expected.chain_code {
             context.extend_from_slice(&cc);
         }
+        context.push(u8::from(matches!(
+            share.scheme,
+            ShareScheme::Additive { .. }
+        )));
         context.extend_from_slice(&threshold.to_be_bytes());
         for &(id, x) in roster {
             context.extend_from_slice(&id.to_be_bytes());
@@ -310,7 +322,7 @@ impl<'a> HdThresholdEvalRound1Commit<'a> {
         for poly in form {
             context.extend_from_slice(&poly.to_bytes());
         }
-        let session = cshake256_framed_32(b"QSAG.HD.EVAL.CONTEXT.V1", &[&session_id, &context]);
+        let session = cshake256_framed_32(b"QSAG.HD.EVAL.CONTEXT.V2", &[&session_id, &context]);
         let value_salt =
             cshake256_framed_32(b"QSAG.HD.EVAL.VALUE_SALT.V1", &[entropy.expose(), &session]);
         let mac_salt =
@@ -793,7 +805,8 @@ mod tests {
             .iter()
             .map(|s| match s.scheme {
                 ShareScheme::Shamir { eval_point, .. } => (s.party_id, eval_point),
-                _ => unreachable!(),
+                ShareScheme::Additive { .. } => *s.committee.iter()
+                    .find(|entry| entry.0 == s.party_id).unwrap(),
             })
             .collect();
         let masks = trusted_dealer_opening_masks(&roster, [1; 32], [31; 32]).unwrap();
@@ -1012,6 +1025,22 @@ mod tests {
             assert!(parents.iter().all(LinearModulePartyShare::is_poisoned));
         }
     }
+    #[test]
+    fn additive_opening_authenticates_and_rejects_missing_party() {
+        let (pk, shares) = setup_shamir_linear_module([18; 32], 3, &[1, 2, 3], 3).unwrap();
+        let secret = reconstruct_for_recovery_or_test(&shares, &pk).unwrap();
+        let expected = form().iter().zip(&secret).fold(0, |sum, (l, s)| {
+            l.coeffs.iter().zip(&s.coeffs).fold(sum, |acc, (&a, &b)| mod_q_add(acc, mod_q_mul(a, b)))
+        });
+        let mut shares: Vec<_> = shares.into_iter().map(|s| s.into_additive().unwrap()).collect();
+        let short = [(0, 1), (1, 2)];
+        let mask = trusted_dealer_opening_masks(&short, [7; 32], [31; 32]).unwrap().remove(0);
+        assert!(HdThresholdEvalRound1Commit::begin_inner(&mut shares[0], &pk, &short,
+            &form(), [7; 32], mask, [2; 32]).is_err());
+        assert_eq!(verify_all(states(&mut shares, &pk, false)).unwrap(), [expected; 3]);
+        assert_eq!(verify_all(states(&mut shares, &pk, true)), Err(HdError::MacCheckFailed));
+    }
+
     #[test]
     fn fresh_zero_masks_and_honest_opening() {
         let roster = [(0, 1), (1, 2), (2, 3)];

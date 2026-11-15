@@ -67,15 +67,15 @@ theorem run_history (profile : RssProduction.Profile) (d : Deployment) (corrupt 
 
 theorem resource_history_is_generated (profile : RssProduction.Profile) (d : Deployment)
     (corrupt : List Nat) (cs : List ResourceCommand) :
-    (resourceRun profile d corrupt (resourceInitial profile d) cs).history =
-      generatedHistory profile d (projectedHistory profile d corrupt (resourceInitial profile d) cs) :=
+    (resourceRun profile d corrupt (resourceInitial d) cs).history =
+      generatedHistory profile d (projectedHistory profile d corrupt (resourceInitial d) cs) :=
   run_history profile d corrupt _ cs
 
 /-- Contextual approval provenance and one-time accounting apply at every actual
 resource execution prefix, including interrupted production and lost returns. -/
 theorem resource_history_valid (profile : RssProduction.Profile) (d : Deployment)
     (corrupt : List Nat) (cs : List ResourceCommand) :
-    Generated profile d (resourceRun profile d corrupt (resourceInitial profile d) cs).history := by
+    Generated profile d (resourceRun profile d corrupt (resourceInitial d) cs).history := by
   rw [resource_history_is_generated]
   exact generatedHistory_valid profile d _
 

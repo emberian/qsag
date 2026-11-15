@@ -3,7 +3,7 @@
 //!
 //! # Model (read this before deploying)
 //!
-//! `n <= 5` custodians, a privacy threshold `t >= 2`, and `n >= 2t - 1`.
+//! custodians identified by distinct `u16` IDs, a privacy threshold `t >= 2`, and `n >= 2t - 1`.
 //! At most `t - 1` custodians are statically and maliciously corrupt. Key
 //! generation needs all `n`; **signing needs a quorum of at least `2t - 1`
 //! custodians** (three for `t = 2`, five for `t = 3`), so that the corrupt
@@ -82,8 +82,8 @@ use qsag_accel::keccak::{KECCAK_RC, Shake256, cshake256_framed_32};
 use qsag_policy::AuthorizedSignReleaseToken;
 use qsag_verified::{MlDsaBarrierChecks, MlDsaReleaseGate};
 
-/// Maximum custodians.
-pub const MAX_THRESHOLD_MLDSA_PARTIES: usize = 5;
+/// Maximum distinct custodian identifiers (the RSS holder sets are dynamically sized).
+pub const MAX_THRESHOLD_MLDSA_PARTIES: usize = crate::rss_mpc::MAX_MPC_PARTIES;
 /// Attempts per signing session before `RejectionBudgetExhausted`.
 pub const DEFAULT_MAX_REJECTION_ATTEMPTS: u32 = 256;
 
@@ -412,7 +412,7 @@ fn check_parameters(
             num_parties: parties,
         });
     }
-    if parties < 2 * threshold - 1 {
+    if threshold > parties.div_ceil(2) {
         return Err(ThresholdMlDsaError::InsufficientHonestHolderCoverage {
             threshold,
             num_parties: parties,
@@ -459,8 +459,8 @@ impl ThresholdVerificationPack {
 }
 
 struct SubsetShare {
-    /// Holders, as a bitmask over positions in the sorted custodian list.
-    holders: u32,
+    /// Sorted holder positions in the global custodian list.
+    holders: Vec<usize>,
     s1_hat: Vec<Poly256>,
     s2_hat: Vec<Poly256>,
 }
@@ -528,10 +528,10 @@ impl ThresholdMlDsaSignerShare {
 
     /// Test-only access to the additive components this custodian holds.
     #[cfg(test)]
-    pub(crate) fn components_for_test(&self) -> Vec<(u32, Vec<Poly256>, Vec<Poly256>)> {
+    pub(crate) fn components_for_test(&self) -> Vec<(Vec<usize>, Vec<Poly256>, Vec<Poly256>)> {
         self.subsets
             .iter()
-            .map(|s| (s.holders, s.s1_hat.clone(), s.s2_hat.clone()))
+            .map(|s| (s.holders.clone(), s.s1_hat.clone(), s.s2_hat.clone()))
             .collect()
     }
 }
@@ -714,7 +714,7 @@ pub fn threshold_mldsa_dkg_party<T: MpcTransport>(
         let t: Vec<Poly256> = product.iter().zip(&s2).map(|(p, e)| p.add(e)).collect();
         t_share.c[i] = flatten(&t);
         subsets.push(SubsetShare {
-            holders: structure.subsets[subset],
+            holders: structure.subsets[subset].clone(),
             s1_hat,
             s2_hat: ntt_all(s2),
         });
@@ -1670,7 +1670,7 @@ fn session_key(
         s2_hat: vec![vec![Poly256::zero(); params.k]; comps.len()],
     };
     for subset in &share.subsets {
-        let mut present = 0u32;
+        let mut present = Vec::new();
         for (position, id) in quorum.iter().enumerate() {
             let global = share
                 .pack
@@ -1678,14 +1678,14 @@ fn session_key(
                 .iter()
                 .position(|p| p == id)
                 .expect("validated quorum");
-            if (subset.holders >> global) & 1 == 1 {
-                present |= 1 << position;
+            if subset.holders.binary_search(&global).is_ok() {
+                present.push(position);
             }
         }
         let target = structure
             .subsets
             .iter()
-            .position(|&mask| mask & present == mask)
+            .position(|holders| holders.iter().all(|p| present.binary_search(p).is_ok()))
             .ok_or(ThresholdMlDsaError::ProtocolInvariantViolated)?;
         if let Some(i) = comps.iter().position(|&c| c == target) {
             for (acc, poly) in key.s1_hat[i].iter_mut().zip(&subset.s1_hat) {

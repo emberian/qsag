@@ -262,7 +262,11 @@ fn reconstruct_child_seed_with_min_holders(
         let mut holders = 0usize;
         for vault in vaults {
             let components = vault.child_components(child_idx)?;
-            let Some((_, component)) = components.binary_search_by_key(&subset, |entry| entry.0).ok().map(|i| &components[i]) else {
+            let Some((_, component)) = components
+                .binary_search_by_key(&subset, |entry| entry.0)
+                .ok()
+                .map(|i| &components[i])
+            else {
                 continue;
             };
             holders += 1;
@@ -674,7 +678,7 @@ mod signature_tests {
                 .child_components(1)
                 .unwrap()
                 .iter()
-                .all(|entry| entry.0 != 0b110)
+                .all(|entry| entry.0 != CustodianSet::from(0b110))
         );
         let seed_a = recover_child_signing_seed_unchecked(&config, &[&va[1], &va[2]], 1).unwrap();
         let seed_b = recover_child_signing_seed_unchecked(&config, &[&vb[1], &vb[2]], 1).unwrap();
@@ -686,7 +690,7 @@ mod signature_tests {
         // A corrupted component is caught by a second holder ...
         let shared = vaults[2].children[3][0].0;
         vaults[2].children[3][0].1.expose_mut()[0] ^= 1;
-        let other = if shared & 1 == 1 { 0 } else { 1 };
+        let other = if shared.contains(0) { 0 } else { 1 };
         assert_eq!(
             recover_child_signing_seed(&config, &[&vaults[other], &vaults[2]], 3, Some(&pk)).err(),
             Some(HdError::RekeyAborted(RekeyFault::ReplicatedShareMismatch))

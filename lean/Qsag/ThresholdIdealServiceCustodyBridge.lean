@@ -107,14 +107,14 @@ theorem actual_prefix_authorizes_or_forgery (c : Config) (s : State)
     (hst : d.signer.params.statefulJorts = true)
     (hledger : s.approvals = Custody.RequestPolicy.approvedParticipantInputs
       (Custody.RequestPolicy.resourceRun c.profile d c.corrupt
-        (Custody.RequestPolicy.resourceInitial c.profile d) commands).history)
+        (Custody.RequestPolicy.resourceInitial d) commands).history)
     (hg : Custody.RequestPolicy.gate c.profile d c.corrupt
       (Custody.RequestPolicy.resourceRun c.profile d c.corrupt
-        (Custody.RequestPolicy.resourceInitial c.profile d) commands).history a certs = true) :
+        (Custody.RequestPolicy.resourceInitial d) commands).history a certs = true) :
     authorized c s a.request = true ∨
       ∃ cert ∈ certs, Custody.RequestPolicy.CandidateForgery d
         (Custody.RequestPolicy.resourceRun c.profile d c.corrupt
-          (Custody.RequestPolicy.resourceInitial c.profile d) commands).history cert := by
+          (Custody.RequestPolicy.resourceInitial d) commands).history cert := by
   rw [Custody.RequestPolicy.resource_history_is_generated] at hledger hg ⊢
   exact gate_authorizes_or_forgery c s d _ a certs ha hw hst hledger hg
 

@@ -49,18 +49,28 @@ impl CustodianSet {
     }
     pub fn to_be_bytes(self) -> [u8; 32] {
         let mut bytes = [0; 32];
-        for (dst, word) in bytes.chunks_exact_mut(8).zip(self.0.iter().rev()) {
+        for (dst, word) in bytes
+            .as_chunks_mut::<8>()
+            .0
+            .iter_mut()
+            .zip(self.0.iter().rev())
+        {
             dst.copy_from_slice(&word.to_be_bytes());
         }
         bytes
     }
     pub fn trailing_zeros(self) -> u32 {
-        self.0.iter().enumerate().find(|(_, w)| **w != 0)
+        self.0
+            .iter()
+            .enumerate()
+            .find(|(_, w)| **w != 0)
             .map_or(256, |(i, w)| i as u32 * 64 + w.trailing_zeros())
     }
 }
 impl From<u16> for CustodianSet {
-    fn from(value: u16) -> Self { Self([u64::from(value), 0, 0, 0]) }
+    fn from(value: u16) -> Self {
+        Self([u64::from(value), 0, 0, 0])
+    }
 }
 impl Ord for CustodianSet {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
@@ -68,7 +78,9 @@ impl Ord for CustodianSet {
     }
 }
 impl PartialOrd for CustodianSet {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> { Some(self.cmp(other)) }
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 /// Field modulus of the linear module; evaluation points are nonzero residues.
@@ -150,20 +162,29 @@ impl CommitteeConfig {
         let mut subsets = Vec::new();
         loop {
             let mut subset = CustodianSet::default();
-            for &p in &positions { subset.insert(p); }
+            for &p in &positions {
+                subset.insert(p);
+            }
             subsets.push(subset);
-            let Some(i) = (0..size).find(|&i| positions[i] + 1 <
-                if i + 1 == size { n } else { positions[i + 1] }) else { break };
+            let Some(i) = (0..size)
+                .find(|&i| positions[i] + 1 < if i + 1 == size { n } else { positions[i + 1] })
+            else {
+                break;
+            };
             positions[i] += 1;
-            for (j, p) in positions[..i].iter_mut().enumerate() { *p = j; }
+            for (j, p) in positions[..i].iter_mut().enumerate() {
+                *p = j;
+            }
         }
         subsets
     }
 
     pub(crate) fn subsets_of(&self, position: usize) -> Vec<CustodianSet> {
-        self.subsets().into_iter().filter(|mask| mask.contains(position)).collect()
+        self.subsets()
+            .into_iter()
+            .filter(|mask| mask.contains(position))
+            .collect()
     }
-
 }
 
 /// Round 1 broadcast: one hiding commitment for each subset the sender belongs to.
@@ -540,8 +561,17 @@ impl CustodianSeeds {
     }
 
     /// Domain-separated 32-byte PRF output under the seed of `subset`.
-    pub(crate) fn prf32(&self, subset: CustodianSet, domain: &[u8], context: &[&[u8]]) -> Option<[u8; 32]> {
-        let seed = &self.seeds[self.seeds.binary_search_by_key(&subset, |entry| entry.0).ok()?].1;
+    pub(crate) fn prf32(
+        &self,
+        subset: CustodianSet,
+        domain: &[u8],
+        context: &[&[u8]],
+    ) -> Option<[u8; 32]> {
+        let seed = &self.seeds[self
+            .seeds
+            .binary_search_by_key(&subset, |entry| entry.0)
+            .ok()?]
+        .1;
         let mut frames: Vec<&[u8]> = Vec::with_capacity(context.len() + 3);
         let subset_bytes = subset.to_be_bytes();
         frames.push(seed.expose());
@@ -617,9 +647,12 @@ pub(crate) fn run_seed_ceremony(config: &CommitteeConfig, entropy_tag: u8) -> Ve
     let mut commits = Vec::new();
     let mut states = Vec::new();
     for (position, &(id, _)) in config.members().iter().enumerate() {
-        let (state, commit) =
-            SeedCeremonyRound1::begin(config, id, [entropy_tag ^ (position as u8).wrapping_add(1); 32])
-                .unwrap();
+        let (state, commit) = SeedCeremonyRound1::begin(
+            config,
+            id,
+            [entropy_tag ^ (position as u8).wrapping_add(1); 32],
+        )
+        .unwrap();
         states.push(state);
         commits.push(commit);
     }
@@ -654,6 +687,32 @@ mod tests {
     fn config(t: u16, n: u16) -> CommitteeConfig {
         let members: Vec<_> = (0..n).map(|i| (i + 10, u32::from(i) + 1)).collect();
         CommitteeConfig::new(t, &members, [7; 32]).unwrap()
+    }
+
+    #[test]
+    fn committee_positions_span_all_four_words() {
+        for n in [8, 17, 64, 65, 128, 129, 255, 256] {
+            let cfg = config(2, n);
+            let subsets = cfg.subsets();
+            assert_eq!(subsets.len(), usize::from(n));
+            assert!(subsets.windows(2).all(|w| w[0] < w[1]));
+            for position in 0..usize::from(n) {
+                assert_eq!(
+                    subsets.iter().filter(|s| s.contains(position)).count(),
+                    usize::from(n - 1)
+                );
+            }
+        }
+        let cfg = config(1, 256);
+        assert_eq!(cfg.subsets(), [CustodianSet([u64::MAX; 4])]);
+        let seeds = run_seed_ceremony(&cfg, 0x40);
+        let set = cfg.subsets()[0];
+        let expected = seeds[0].prf32(set, b"wide-committee", &[]);
+        assert!(
+            seeds
+                .iter()
+                .all(|s| s.prf32(set, b"wide-committee", &[]) == expected)
+        );
     }
 
     #[test]
@@ -794,8 +853,8 @@ mod tests {
         }
         // Custodian 2 confirms a different seed for a subset it shares with custodian 0.
         let shared = confirmations[0].tags[0].0;
-        assert_eq!(shared >> 2 & 1 | shared >> 1 & 1, 1);
-        let liar = if shared >> 1 & 1 == 1 { 1 } else { 2 };
+        assert!(shared.contains(2) || shared.contains(1));
+        let liar = if shared.contains(1) { 1 } else { 2 };
         let entry = confirmations[liar]
             .tags
             .iter_mut()
