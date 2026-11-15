@@ -78,7 +78,7 @@ fn cpu_drain<J: Send>(
     std::thread::scope(|scope| {
         for _ in 1..workers {
             if std::thread::Builder::new()
-                .spawn_scoped(scope, &drain)
+                .spawn_scoped(scope, drain)
                 .is_err()
             {
                 break;

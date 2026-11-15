@@ -334,13 +334,17 @@ impl<'a> ParallelSeededSignSession<'a> {
         )
     }
     fn own_commitment(&self) -> [u8; 32] {
-        commit_mpc_broadcast(
+        // The payload is this party's unopened share until the matching open phase.
+        let mut encoded = encode_values(&self.payload);
+        let digest = commit_mpc_broadcast(
             &self.session,
             self.sequence,
             self.share.party_id,
-            &encode_values(&self.payload),
+            &encoded,
             &self.salt(),
-        )
+        );
+        ct_zeroize_bytes(&mut encoded);
+        digest
     }
     pub fn outbound(&self) -> Result<ParallelSeededSignMessage, ParallelSeededError> {
         if self.share.poisoned || self.phase == Phase::Aborted {

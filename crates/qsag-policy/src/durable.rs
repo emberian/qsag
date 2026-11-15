@@ -28,6 +28,19 @@ pub enum PolicyGuardError {
     ActiveSession,
 }
 
+/// Whether every identifier in `old` is still burned by `new` or lies at or below `floor`.
+/// Both lists are strictly ascending, so one merge pass decides it.
+fn retains_burns(old: &[[u8; 32]], new: &[[u8; 32]], floor: Option<[u8; 32]>) -> bool {
+    let mut new = new.iter().peekable();
+    old.iter().all(|burned| {
+        if floor.is_some_and(|f| *burned <= f) {
+            return true;
+        }
+        while new.next_if(|candidate| *candidate < burned).is_some() {}
+        new.peek() == Some(&burned)
+    })
+}
+
 struct Reader<'a>(&'a [u8]);
 impl Reader<'_> {
     fn take<const N: usize>(&mut self) -> Result<[u8; N], PolicyGuardError> {
@@ -51,17 +64,18 @@ impl Reader<'_> {
     fn count(&mut self) -> Result<usize, PolicyGuardError> {
         Ok(u32::from_be_bytes(self.take()?) as usize)
     }
-    fn ring(&mut self, capacity: usize) -> Result<(Vec<[u8; 32]>, usize), PolicyGuardError> {
+    /// A replay set: count, a reserved u32 that must be zero, then the entries.
+    fn replay_set(&mut self, capacity: usize) -> Result<Vec<[u8; 32]>, PolicyGuardError> {
         let count = self.count()?;
-        let cursor = self.count()?;
-        if count > capacity || cursor != 0 || count > self.0.len() / 32 {
+        let reserved = self.count()?;
+        if count > capacity || reserved != 0 || count > self.0.len() / 32 {
             return Err(PolicyGuardError::InvalidCheckpoint);
         }
         let mut values = Vec::with_capacity(count);
         for _ in 0..count {
             values.push(self.take()?);
         }
-        Ok((values, cursor))
+        Ok(values)
     }
 }
 
@@ -89,12 +103,9 @@ impl PolicySignerGuardShare {
         out.extend_from_slice(&(self.next_slot.get() as u32).to_be_bytes());
         out.push(u8::from(self.poisoned || self.active_phase.is_some()));
         out.push(u8::from(self.require_authenticated_initiator));
-        for (values, cursor) in [
-            (&self.burned_intent_nonces, self.burned_nonce_cursor),
-            (&self.burned_sessions, self.burned_session_cursor),
-        ] {
+        for values in [&self.burned_intent_nonces, &self.burned_sessions] {
             out.extend_from_slice(&(values.len() as u32).to_be_bytes());
-            out.extend_from_slice(&(cursor as u32).to_be_bytes());
+            out.extend_from_slice(&0u32.to_be_bytes());
             for value in values {
                 out.extend_from_slice(value);
             }
@@ -120,6 +131,28 @@ impl PolicySignerGuardShare {
         let tag = cshake256_framed_32(DOMAIN, &[storage_mac_key, &out]);
         out.extend_from_slice(&tag);
         out
+    }
+
+    /// The largest checkpoint this guard can be asked to restore: its committed pool size
+    /// and peer set fix the slot bitmaps, and each replay set holds at most
+    /// [`MAX_POLICY_CAPACITY`] identifiers. `None` only if that does not fit in `usize`.
+    pub fn max_durable_checkpoint_len(&self) -> Option<usize> {
+        // Domain, key id, party, generation, window, spend, capacity, cursor, two flags.
+        const HEAD: usize = DOMAIN.len() + 32 + 2 + 8 + 8 + 16 + 4 + 4 + 2;
+        // Two replay sets (count, reserved word, entries) and two optional floors.
+        const REPLAY: usize = 2 * (8 + MAX_POLICY_CAPACITY * 32) + 2 * 33;
+        // Peer count; velocity generation, pinned flag and cap; tag.
+        const TAIL: usize = 2 + 8 + 1 + 16 + 32;
+        let per_peer = self
+            .preproc_r
+            .len()
+            .div_ceil(64)
+            .checked_mul(8)?
+            .checked_add(2 + 4)?;
+        self.consumed_peer_slots
+            .len()
+            .checked_mul(per_peer)?
+            .checked_add(HEAD + REPLAY + TAIL)
     }
 
     /// Authenticate and validate completely before mutating the ledger. Live
@@ -162,8 +195,8 @@ impl PolicySignerGuardShare {
         let next = r.count()?;
         let poisoned = r.flag()?;
         let authenticated = r.flag()?;
-        let (nonces, nonce_cursor) = r.ring(replay_capacity)?;
-        let (sessions, session_cursor) = r.ring(replay_capacity)?;
+        let nonces = r.replay_set(replay_capacity)?;
+        let sessions = r.replay_set(replay_capacity)?;
         let nonce_floor = if r.flag()? {
             Some(r.take::<32>()?)
         } else {
@@ -180,9 +213,7 @@ impl PolicySignerGuardShare {
             }
             None
         };
-        if nonce_cursor != 0
-            || session_cursor != 0
-            || nonces.windows(2).any(|w| w[0] >= w[1])
+        if nonces.windows(2).any(|w| w[0] >= w[1])
             || sessions.windows(2).any(|w| w[0] >= w[1])
             || nonces.iter().any(|n| nonce_floor.is_some_and(|f| *n <= f))
             || sessions
@@ -245,17 +276,12 @@ impl PolicySignerGuardShare {
             || velocity_generation < self.velocity_generation
             || window < self.current_window_id
             || (window == self.current_window_id && spend < self.accumulated_window_spend)
+            // Replay sets and floors belong to one window; a newer window starts them afresh.
             || (window == self.current_window_id
-                && self
-                    .burned_intent_nonces
-                    .iter()
-                    .any(|n| !nonces.contains(n) && !nonce_floor.is_some_and(|f| *n <= f))
-                || nonce_floor < self.min_nonce_watermark
-                || session_floor < self.min_session_watermark
-                || self
-                    .burned_sessions
-                    .iter()
-                    .any(|s| !sessions.contains(s) && !session_floor.is_some_and(|f| *s <= f)))
+                && (nonce_floor < self.min_nonce_watermark
+                    || session_floor < self.min_session_watermark
+                    || !retains_burns(&self.burned_intent_nonces, &nonces, nonce_floor)
+                    || !retains_burns(&self.burned_sessions, &sessions, session_floor)))
             || next < self.next_slot.get()
             || (self.poisoned && !poisoned)
             || (self.require_authenticated_initiator && !authenticated)
@@ -275,10 +301,8 @@ impl PolicySignerGuardShare {
         self.velocity_generation = velocity_generation;
         self.replay_capacity = replay_capacity;
         self.burned_intent_nonces = nonces;
-        self.burned_nonce_cursor = nonce_cursor;
         self.min_nonce_watermark = nonce_floor;
         self.burned_sessions = sessions;
-        self.burned_session_cursor = session_cursor;
         self.min_session_watermark = session_floor;
         self.next_slot.set(next);
         self.require_authenticated_initiator = authenticated;
@@ -303,122 +327,89 @@ impl PolicySignerGuardShare {
     }
 }
 
+/// A locked record together with the MAC key that seals it to its sidecar: the supplied
+/// key is bound to the sidecar's `(dev, ino)` identity and its genesis seal, both taken from
+/// the lock the handle holds, so a record cannot migrate to a replacement sidecar inode.
 #[cfg(feature = "std")]
-fn policy_lock_inode(path: &std::path::Path) -> std::io::Result<[u8; 16]> {
-    let mut os = path.as_os_str().to_os_string();
-    os.push(".lock");
-    let meta = std::fs::symlink_metadata(std::path::PathBuf::from(os))?;
-    if !meta.is_file() || meta.file_type().is_symlink() {
-        return Err(std::io::Error::other(
-            "policy lock sidecar is not a regular file",
-        ));
+struct SealedRecord {
+    record: qsag_asm::durable::LockedRecord,
+    key: SecretBytes<32>,
+}
+#[cfg(feature = "std")]
+impl SealedRecord {
+    fn open(
+        path: std::path::PathBuf,
+        key: [u8; 32],
+        domain: &[u8],
+        create: bool,
+    ) -> std::io::Result<Self> {
+        let key = SecretBuffer(key);
+        let record = if create {
+            qsag_asm::durable::LockedRecord::create_new(path)?
+        } else {
+            qsag_asm::durable::LockedRecord::open_existing(path)?
+        };
+        let key = secret_digest(domain, &[&*key, &record.lock_inode(), &record.lock_seal()]);
+        Ok(Self { record, key })
     }
-    let mut id = [0u8; 16];
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        id[..8].copy_from_slice(&meta.dev().to_le_bytes());
-        id[8..].copy_from_slice(&meta.ino().to_le_bytes());
-    }
-    Ok(id)
 }
 
-/// Disk-backed authenticated checkpoints. Both the sidecar `(dev, ino)` identity and
-/// its genesis seal are bound into the MAC key derivation, preventing a record from
-/// migrating to a replacement sidecar inode.
+/// Disk-backed authenticated checkpoints, sealed to their lock sidecar.
 /// Whole-directory rollback still requires an external monotonic generation fence.
 #[cfg(feature = "std")]
 pub struct FsPolicyDurableLedger {
-    path: std::path::PathBuf,
-    lock_id: [u8; 16],
-    record: qsag_asm::durable::LockedRecord,
-    key: qsag_accel::ct::RedactedSecret<32>,
+    sealed: SealedRecord,
     generation: u64,
-    initialized: bool,
 }
 #[cfg(feature = "std")]
 impl FsPolicyDurableLedger {
+    const DOMAIN: &[u8] = b"QSAG.POLICY.FS.SEAL.V2";
+
     pub fn create_new(
         path: impl Into<std::path::PathBuf>,
-        mut key: [u8; 32],
+        key: [u8; 32],
         guard: &PolicySignerGuardShare,
     ) -> std::io::Result<Self> {
-        let path = path.into();
-        let record = qsag_asm::durable::LockedRecord::create_new(&path)?;
-        let lock_id = policy_lock_inode(&path)?;
-        let derived = cshake256_framed_32(
-            b"QSAG.POLICY.FS.SEAL.V2",
-            &[&key, &lock_id, &record.lock_seal()],
-        );
-        ct_zeroize_bytes(&mut key);
-        let key = qsag_accel::ct::RedactedSecret::new(derived);
         let mut ledger = Self {
-            path,
-            lock_id,
-            record,
-            key,
+            sealed: SealedRecord::open(path.into(), key, Self::DOMAIN, true)?,
             generation: guard.durable_generation.get(),
-            initialized: false,
         };
         ledger.sync_persist(guard)?;
         Ok(ledger)
     }
     pub fn open_existing(
         path: impl Into<std::path::PathBuf>,
-        mut key: [u8; 32],
+        key: [u8; 32],
         guard: &mut PolicySignerGuardShare,
         min_generation: u64,
     ) -> std::io::Result<Self> {
-        let path = path.into();
-        let record = qsag_asm::durable::LockedRecord::open_existing(&path)?;
-        let lock_id = policy_lock_inode(&path)?;
-        let derived = cshake256_framed_32(
-            b"QSAG.POLICY.FS.SEAL.V2",
-            &[&key, &lock_id, &record.lock_seal()],
-        );
-        ct_zeroize_bytes(&mut key);
-        let key = qsag_accel::ct::RedactedSecret::new(derived);
+        let sealed = SealedRecord::open(path.into(), key, Self::DOMAIN, false)?;
+        let bound = guard
+            .max_durable_checkpoint_len()
+            .ok_or_else(|| std::io::Error::other("policy checkpoint bound overflow"))?;
         let generation = guard
             .restore_from_durable_checkpoint(
-                &record.read_bounded(MAX_POLICY_CAPACITY * 80 + 1024 * 1024)?,
-                key.expose(),
+                &sealed.record.read_bounded(bound)?,
+                &sealed.key,
                 min_generation,
             )
             .map_err(|_| std::io::Error::other("invalid policy checkpoint"))?;
-        Ok(Self {
-            path,
-            lock_id,
-            record,
-            key,
-            generation,
-            initialized: true,
-        })
+        Ok(Self { sealed, generation })
     }
     pub fn generation(&self) -> u64 {
         self.generation
     }
     /// Call before releasing any authorized signature; failure is fail-closed.
     pub fn sync_persist(&mut self, guard: &PolicySignerGuardShare) -> std::io::Result<()> {
-        if policy_lock_inode(&self.path)? != self.lock_id {
-            return Err(std::io::Error::other("policy lock sidecar inode replaced"));
-        }
-        if self.initialized {
-            let meta = std::fs::symlink_metadata(&self.path)?;
-            if !meta.is_file() {
-                return Err(std::io::Error::other(
-                    "policy checkpoint path is not a regular file",
-                ));
-            }
-        }
         let generation = self
             .generation
             .max(guard.durable_generation.get())
             .checked_add(1)
             .ok_or_else(|| std::io::Error::other("generation exhausted"))?;
-        self.record
-            .replace(&guard.export_durable_checkpoint(self.key.expose(), generation))?;
+        self.sealed
+            .record
+            .replace(&guard.export_durable_checkpoint(&self.sealed.key, generation))?;
         self.generation = generation;
-        self.initialized = true;
         Ok(())
     }
 }
@@ -428,10 +419,7 @@ impl FsPolicyDurableLedger {
 /// file is caught on [`FsPolicyDurableLedger::open_existing`].
 #[cfg(feature = "std")]
 pub struct FsPolicyGenerationFence {
-    path: std::path::PathBuf,
-    lock_id: [u8; 16],
-    record: qsag_asm::durable::LockedRecord,
-    key: qsag_accel::ct::RedactedSecret<32>,
+    sealed: SealedRecord,
     generation: u64,
     failed: bool,
 }
@@ -442,46 +430,32 @@ impl FsPolicyGenerationFence {
 
     pub fn create_new(
         path: impl Into<std::path::PathBuf>,
-        mut key: [u8; 32],
+        key: [u8; 32],
         initial_generation: u64,
     ) -> std::io::Result<Self> {
-        let path = path.into();
-        let record = qsag_asm::durable::LockedRecord::create_new(&path)?;
-        let lock_id = policy_lock_inode(&path)?;
-        let derived = cshake256_framed_32(Self::DOMAIN, &[&key, &lock_id, &record.lock_seal()]);
-        ct_zeroize_bytes(&mut key);
         let fence = Self {
-            path,
-            lock_id,
-            record,
-            key: qsag_accel::ct::RedactedSecret::new(derived),
+            sealed: SealedRecord::open(path.into(), key, Self::DOMAIN, true)?,
             generation: initial_generation,
             failed: false,
         };
-        fence.record.replace(&fence.encode(initial_generation))?;
+        fence
+            .sealed
+            .record
+            .replace(&fence.encode(initial_generation))?;
         Ok(fence)
     }
 
     pub fn open_existing(
         path: impl Into<std::path::PathBuf>,
-        mut key: [u8; 32],
+        key: [u8; 32],
     ) -> std::io::Result<Self> {
-        let path = path.into();
-        let record = qsag_asm::durable::LockedRecord::open_existing(&path)?;
-        let lock_id = policy_lock_inode(&path)?;
-        let derived = cshake256_framed_32(Self::DOMAIN, &[&key, &lock_id, &record.lock_seal()]);
-        ct_zeroize_bytes(&mut key);
-        let key = qsag_accel::ct::RedactedSecret::new(derived);
-        let raw = record.read_bounded(40)?;
-        let generation = Self::decode(key.expose(), &lock_id, &record.lock_seal(), &raw)?;
-        Ok(Self {
-            path,
-            lock_id,
-            record,
-            key,
-            generation,
+        let mut fence = Self {
+            sealed: SealedRecord::open(path.into(), key, Self::DOMAIN, false)?,
+            generation: 0,
             failed: false,
-        })
+        };
+        fence.generation = fence.read_disk_generation()?;
+        Ok(fence)
     }
 
     pub const fn generation(&self) -> u64 {
@@ -501,64 +475,48 @@ impl FsPolicyGenerationFence {
     }
 
     fn ratchet_inner(&mut self, next_generation: u64) -> std::io::Result<()> {
-        if policy_lock_inode(&self.path)? != self.lock_id {
-            return Err(std::io::Error::other("policy fence lock sidecar replaced"));
-        }
-        let meta = std::fs::symlink_metadata(&self.path)?;
-        if !meta.is_file() {
-            return Err(std::io::Error::other(
-                "policy fence path is not a regular file",
-            ));
-        }
-        let disk_gen = Self::decode(
-            self.key.expose(),
-            &self.lock_id,
-            &self.record.lock_seal(),
-            &self.record.read_bounded(40)?,
-        )?;
+        let disk_gen = self.read_disk_generation()?;
         if disk_gen != self.generation || next_generation < self.generation {
             return Err(std::io::Error::other("policy generation fence rollback"));
         }
         if next_generation > self.generation {
-            self.record.replace(&self.encode(next_generation))?;
+            self.sealed.record.replace(&self.encode(next_generation))?;
             self.generation = next_generation;
         }
         Ok(())
     }
 
-    fn encode(&self, generation: u64) -> Vec<u8> {
-        let gen_be = generation.to_be_bytes();
-        let tag = cshake256_framed_32(
+    fn tag(&self, gen_be: &[u8]) -> [u8; 32] {
+        let record = &self.sealed.record;
+        cshake256_framed_32(
             Self::DOMAIN,
             &[
-                self.key.expose(),
-                &self.lock_id,
-                &self.record.lock_seal(),
-                &gen_be,
+                &*self.sealed.key,
+                &record.lock_inode(),
+                &record.lock_seal(),
+                gen_be,
             ],
-        );
+        )
+    }
+
+    fn encode(&self, generation: u64) -> Vec<u8> {
+        let gen_be = generation.to_be_bytes();
         let mut out = Vec::with_capacity(40);
         out.extend_from_slice(&gen_be);
-        out.extend_from_slice(&tag);
+        out.extend_from_slice(&self.tag(&gen_be));
         out
     }
 
-    fn decode(
-        key: &[u8; 32],
-        lock_id: &[u8; 16],
-        lock_seal: &[u8; 8],
-        raw: &[u8],
-    ) -> std::io::Result<u64> {
-        if raw.len() != 40 {
-            return Err(std::io::Error::other("invalid policy fence length"));
-        }
-        let expected = cshake256_framed_32(Self::DOMAIN, &[key, lock_id, lock_seal, &raw[..8]]);
-        if !ct_eq_bytes(&expected, &raw[8..40]) {
+    fn read_disk_generation(&self) -> std::io::Result<u64> {
+        let raw = self.sealed.record.read_bounded(40)?;
+        let (gen_be, tag) = raw
+            .split_first_chunk::<8>()
+            .filter(|(_, tag)| tag.len() == 32)
+            .ok_or_else(|| std::io::Error::other("invalid policy fence length"))?;
+        if !ct_eq_bytes(&self.tag(gen_be), tag) {
             return Err(std::io::Error::other("invalid policy fence MAC"));
         }
-        let mut gen_be = [0u8; 8];
-        gen_be.copy_from_slice(&raw[..8]);
-        Ok(u64::from_be_bytes(gen_be))
+        Ok(u64::from_be_bytes(*gen_be))
     }
 }
 
@@ -681,10 +639,7 @@ impl SharedWindowSpendLedger {
         .zip(&sets)
         {
             if window == self.current_window_id
-                && (*floor < old_floor
-                    || old
-                        .iter()
-                        .any(|v| !new.contains(v) && !floor.is_some_and(|f| *v <= f)))
+                && (*floor < old_floor || !retains_burns(old, new, *floor))
             {
                 return Err(PolicyGuardError::Rollback);
             }

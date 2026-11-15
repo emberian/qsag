@@ -76,6 +76,7 @@ pub enum Error {
     MultiplicationCheck,
     InvalidTape,
     InvalidProof,
+    MissingPreprocessing,
 }
 
 /// Authenticated envelopes also require confidential delivery. Implementations
@@ -124,7 +125,30 @@ pub trait Transport: Send {
     }
     #[cfg(test)]
     fn on_public_or_view_open(&self) {}
-    fn exchange(&mut self, outgoing: [Envelope; 2]) -> Result<[Envelope; 2], Error>;
+    fn exchange(&mut self, _outgoing: [Envelope; 2]) -> Result<[Envelope; 2], Error> {
+        Err(Error::InvalidConfiguration)
+    }
+
+    /// General quorum delivery, ordered by the configured quorum with self omitted.
+    /// Each envelope must remain confidential to its recipient.
+    fn exchange_many(&mut self, _outgoing: Vec<Envelope>) -> Result<Vec<Envelope>, Error> {
+        Err(Error::InvalidConfiguration)
+    }
+    /// Consume fresh, independent trusted-dealer triples. Never recycle a batch,
+    /// including after an abort. See `threshold_mpc` for the security contract.
+    fn take_boolean_triples(
+        &mut self,
+        _count: usize,
+    ) -> Result<Vec<crate::threshold_mpc::BooleanTriple>, Error> {
+        Err(Error::MissingPreprocessing)
+    }
+    fn take_field_triples(
+        &mut self,
+        _field: crate::threshold_mpc::ThresholdField,
+        _count: usize,
+    ) -> Result<Vec<crate::threshold_mpc::FieldTriple>, Error> {
+        Err(Error::MissingPreprocessing)
+    }
 }
 
 /// Wire envelope. Authentication binds the session, identities and sequence.
@@ -777,6 +801,7 @@ impl FaultInjection {
 }
 
 pub(crate) struct Engine<T> {
+    pub(crate) threshold: Option<crate::threshold_mpc::State>,
     pub party: usize,
     #[cfg(any(feature = "std", test))]
     pub(crate) batch_cancelled: Option<alloc::sync::Arc<core::sync::atomic::AtomicBool>>,
@@ -853,6 +878,7 @@ impl<T: Transport> Engine<T> {
         #[cfg(test)]
         let fault = transport.test_fault_raw().map(FaultInjection::from_raw);
         Ok(Self {
+            threshold: None,
             party,
             session,
             keys,
@@ -875,6 +901,21 @@ impl<T: Transport> Engine<T> {
             fault,
             transport,
         })
+    }
+
+    pub(crate) fn new_threshold(
+        party: usize,
+        session: [u8; 32],
+        config: crate::threshold_mpc::ThresholdConfig,
+        keys: Vec<[u8; 32]>,
+        transport: T,
+    ) -> Result<Self, Error> {
+        let state = crate::threshold_mpc::State::new(config, party, session, keys)?;
+        // Reuse scratch initialization; the additive path never uses RSS pads or edges.
+        let mut engine = Self::new(0, session, [[0; 32]; 2], transport)?;
+        engine.party = party;
+        engine.threshold = Some(state);
+        Ok(engine)
     }
 
     /// Release evaluation scratch after a repetition batch has passed all
@@ -911,6 +952,16 @@ impl<T: Transport> Engine<T> {
 
     #[inline]
     pub fn constant(&self, x: u64) -> Bit {
+        if let Some(state) = &self.threshold {
+            return Bit([
+                if self.party == state.config.quorum()[0] {
+                    x
+                } else {
+                    0
+                },
+                0,
+            ]);
+        }
         Bit([
             if self.party == 0 { x } else { 0 },
             if (self.party + 1) % 3 == 0 { x } else { 0 },
@@ -1043,6 +1094,9 @@ impl<T: Transport> Engine<T> {
     }
 
     pub fn share(&mut self, own: &[u64]) -> Result<Word, Error> {
+        if self.threshold.is_some() {
+            return Ok(own.iter().map(|&x| Bit([x, 0])).collect());
+        }
         let (mut mine, mut next) = self.raw_share_owned(own.to_vec())?;
         let out = mine.iter().zip(&next).map(|(&a, &b)| Bit([a, b])).collect();
         ct_zeroize_u64s(&mut mine);
@@ -1055,6 +1109,9 @@ impl<T: Transport> Engine<T> {
     pub fn share_uniform_lanes(&mut self, own: &[u64]) -> Result<Word, Error> {
         if own.iter().any(|&w| w != 0 && w != u64::MAX) {
             return Err(Error::InvalidConfiguration);
+        }
+        if self.threshold.is_some() {
+            return self.share(own);
         }
         let (mut mine, mut next) = self.raw_share_owned(own.to_vec())?;
         if next.iter().any(|&w| w != 0 && w != u64::MAX) {
@@ -2380,6 +2437,10 @@ impl<T: Transport> Engine<T> {
             out.clear();
             return Err(Error::MultiplicationCheck);
         }
+        if let Some(state) = &mut self.threshold {
+            *out = state.and(&mut self.transport, pairs)?;
+            return Ok(());
+        }
         let k = pairs.len();
         if k == 0 {
             out.clear();
@@ -2448,11 +2509,18 @@ impl<T: Transport> Engine<T> {
     /// component; inconsistencies abort before the caller receives any output.
     pub fn open(&mut self, bits: &[Bit]) -> Result<Vec<u64>, Error> {
         self.verify_all_pending()?;
+        if let Some(state) = &mut self.threshold {
+            let own: SecretVec<u64> = bits.iter().map(|b| b.0[0]).collect();
+            return state.open_bits(&mut self.transport, &own);
+        }
         self.open_raw_bits(bits)
     }
 
     pub fn agree(&mut self, root: [u8; 32]) -> Result<(), Error> {
         self.verify_all_pending()?;
+        if let Some(state) = &mut self.threshold {
+            return state.agree(&mut self.transport, root);
+        }
         let words: Vec<_> = root
             .chunks_exact(8)
             .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
@@ -3122,6 +3190,20 @@ pub(crate) fn encode(out: &mut Word, value: &[Bit]) {
 
 impl<T: Transport> Engine<T> {
     pub fn fconstant(&self, value: Value) -> FieldWord {
+        if let Some(state) = &self.threshold {
+            return vec![
+                [
+                    if self.party == state.config.quorum()[0] {
+                        value
+                    } else {
+                        [0; 4]
+                    },
+                    [0; 4]
+                ];
+                64
+            ]
+            .into();
+        }
         vec![
             [
                 if self.party == 0 { value } else { [0; 4] },
@@ -3173,6 +3255,11 @@ impl<T: Transport> Engine<T> {
     }
 
     fn frandom(&mut self, d: Domain) -> FieldWord {
+        if self.threshold.is_some() {
+            return (0..64)
+                .map(|_| [Self::field_pad(&mut self.coin_rng, d), [0; 4]])
+                .collect();
+        }
         (0..64)
             .map(|_| {
                 [
@@ -3190,6 +3277,9 @@ impl<T: Transport> Engine<T> {
     ) -> Result<Vec<FieldWord>, Error> {
         if self.poisoned {
             return Err(Error::MultiplicationCheck);
+        }
+        if let Some(state) = &mut self.threshold {
+            return state.mul(&mut self.transport, pairs, d);
         }
         if pairs.is_empty() {
             return Ok(Vec::new());
@@ -3276,6 +3366,11 @@ impl<T: Transport> Engine<T> {
             return Ok(Vec::new());
         }
         self.verify_all_pending()?;
+        if let Some(state) = &mut self.threshold {
+            let own: SecretVec<Value> = words.iter().flat_map(|w| w.iter().map(|v| v[0])).collect();
+            let opened = state.open_fields(&mut self.transport, &own, d)?;
+            return Ok(opened.chunks_exact(64).map(|v| v.to_vec()).collect());
+        }
         let k = words.len();
         let mut payload = Vec::with_capacity(k * 512);
         for w in words {
@@ -3383,6 +3478,9 @@ impl<T: Transport> Engine<T> {
         words: &[Word],
         d: Domain,
     ) -> Result<Vec<FieldWord>, Error> {
+        if self.threshold.is_some() {
+            return self.threshold_bits_to_field(words, d);
+        }
         let mut out = Vec::with_capacity(words.len());
         for chunk in words.chunks(CONVERT_CHUNK_WORDS) {
             let masks: Vec<FieldWord> = (0..chunk.len())
@@ -3481,6 +3579,9 @@ impl<T: Transport> Engine<T> {
         words: &[&FieldWord],
         d: Domain,
     ) -> Result<Vec<Word>, Error> {
+        if self.threshold.is_some() {
+            return self.threshold_field_to_bits(words, d);
+        }
         if words.is_empty() {
             return Ok(Vec::new());
         }
@@ -3514,6 +3615,9 @@ impl<T: Transport> Engine<T> {
     }
 
     pub fn lift_bits_many(&mut self, bits: &[Bit], d: Domain) -> Result<Vec<FieldWord>, Error> {
+        if self.threshold.is_some() {
+            return self.threshold_lift(bits, d);
+        }
         if bits.is_empty() {
             return Ok(Vec::new());
         }
@@ -3856,7 +3960,18 @@ pub(crate) mod tests {
         let mut scratch = BitCheckScratch::new_boxed();
         // Growing, shrinking and odd group counts, in one scratch as across flushes.
         let mut peak_ptrs: Option<[*const u128; 8]> = None;
-        for groups in [1usize, 3, 2, 7, 33, 5, MAX_BIT_GROUPS, 33, 7, MAX_BIT_GROUPS] {
+        for groups in [
+            1usize,
+            3,
+            2,
+            7,
+            33,
+            5,
+            MAX_BIT_GROUPS,
+            33,
+            7,
+            MAX_BIT_GROUPS,
+        ] {
             let needed = groups * BIT_LANES;
             scratch.prepare_tables(needed);
             let sc = &mut *scratch;

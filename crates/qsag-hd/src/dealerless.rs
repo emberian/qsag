@@ -62,7 +62,9 @@
 //! degree `2t - 2` sharings, `rho_k` by `b_k`, and the opened `w` shares of
 //! the honest custodians are a function of `w(0)` (zero, or an error the
 //! adversary chose) and the corrupt custodians' own shares. No MAC key is
-//! exposed by a failed rekey, so a failed rekey does not retire the family.
+//! exposed by a failed rekey. An abandoned or aborted child rekey still
+//! quarantines the parent family at this custodian (fail closed): a corrupt
+//! custodian can stop further use of a parent, never learn or forge under it.
 
 use super::*;
 use crate::erase::SecretWords;
@@ -199,19 +201,12 @@ pub fn pack_field_elements(values: &[u32]) -> Vec<u8> {
 /// Inverse of [`pack_field_elements`]. Rejects a wrong length, a non-canonical
 /// residue and nonzero padding bits.
 pub fn unpack_field_elements(bytes: &[u8], count: usize) -> Result<Vec<u32>, HdError> {
-    let bits = count
-        .checked_mul(23)
-        .ok_or(HdError::RekeyAborted(RekeyFault::MalformedMessage))?;
-    if bytes.len() != bits.div_ceil(8) {
-        return abort(RekeyFault::MalformedMessage);
+    let malformed = HdError::RekeyAborted(RekeyFault::MalformedMessage);
+    if count.checked_mul(23).map(|bits| bits.div_ceil(8)) != Some(bytes.len()) {
+        return Err(malformed);
     }
     let mut values = alloc::vec![0; count];
-    unpack_coefficients(bytes, &mut values);
-    if values.iter().any(|&v| v >= MODULE_Q)
-        || (bits % 8 != 0 && bytes.last().is_some_and(|b| b >> (bits % 8) != 0))
-    {
-        return abort(RekeyFault::MalformedMessage);
-    }
+    unpack_canonical_coefficients(bytes, &mut values).ok_or(malformed)?;
     Ok(values)
 }
 
@@ -1361,26 +1356,6 @@ impl LinearModulePartyShare {
                 root_chain_seed: None,
                 session_id,
             },
-            private_entropy,
-        )
-    }
-
-    /// Alias of [`Self::derive_child_share`].
-    pub fn derive_child_share_dealerless<'a>(
-        &'a self,
-        seeds: &'a CustodianSeeds,
-        expected: &LinearModuleXPub,
-        child_index: u32,
-        hardened: bool,
-        session_id: [u8; 32],
-        private_entropy: [u8; 32],
-    ) -> Result<(RekeyRound1<'a>, RekeyHello), HdError> {
-        self.derive_child_share(
-            seeds,
-            expected,
-            child_index,
-            hardened,
-            session_id,
             private_entropy,
         )
     }

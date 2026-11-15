@@ -74,74 +74,16 @@ fn lock_path_for(path: &Path) -> PathBuf {
     PathBuf::from(os)
 }
 
+/// The shared no-follow, non-blocking, `0600` open options; unsupported targets fail closed.
 fn nofollow_options() -> Result<OpenOptions, NodeError> {
-    let mut options = OpenOptions::new();
-    #[cfg(all(target_os = "linux", any(target_arch = "aarch64", target_arch = "arm")))]
-    let flags = 0x8000 | 0x800;
-    #[cfg(all(
-        target_os = "linux",
-        any(
-            target_arch = "x86_64",
-            target_arch = "x86",
-            target_arch = "riscv64",
-            target_arch = "riscv32"
-        )
-    ))]
-    let flags = 0x20000 | 0x800;
-    #[cfg(target_os = "macos")]
-    let flags = 0x100 | 0x4;
-    #[cfg(any(
-        target_os = "macos",
-        all(
-            target_os = "linux",
-            any(
-                target_arch = "aarch64",
-                target_arch = "arm",
-                target_arch = "x86_64",
-                target_arch = "x86",
-                target_arch = "riscv64",
-                target_arch = "riscv32"
-            )
-        )
-    ))]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600).custom_flags(flags);
-        Ok(options)
-    }
-    #[cfg(not(any(
-        target_os = "macos",
-        all(
-            target_os = "linux",
-            any(
-                target_arch = "aarch64",
-                target_arch = "arm",
-                target_arch = "x86_64",
-                target_arch = "x86",
-                target_arch = "riscv64",
-                target_arch = "riscv32"
-            )
-        )
-    )))]
-    {
-        let _ = &mut options;
-        Err(NodeError::Journal)
-    }
+    qsag_asm::durable::no_follow_options().map_err(|_| NodeError::Journal)
 }
 
 fn regular_dev_ino(meta: &fs::Metadata) -> Result<(u64, u64), NodeError> {
     if !meta.is_file() || meta.file_type().is_symlink() {
         return Err(NodeError::Journal);
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        Ok((meta.dev(), meta.ino()))
-    }
-    #[cfg(not(unix))]
-    {
-        Err(NodeError::Journal)
-    }
+    qsag_asm::durable::file_dev_ino(meta).ok_or(NodeError::Journal)
 }
 
 fn check_regular_if_present(path: &Path) -> Result<Option<(u64, u64)>, NodeError> {

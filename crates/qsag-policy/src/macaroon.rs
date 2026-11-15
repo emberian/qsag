@@ -9,6 +9,7 @@
 //! Tags are 256 bits; this is not a claim of 256-bit quantum forgery resistance.
 extern crate alloc;
 use alloc::vec::Vec;
+use qsag_asm::wipe::{SecretBuffer, SecretBytes};
 use qsag_accel::{
     ct::ct_eq_bytes,
     keccak::{Shake256, cshake256_framed_32, finalize_cshake256, init_cshake256},
@@ -140,12 +141,7 @@ pub struct Discharge<'a> {
 pub struct MacaroonVerifier {
     identifier: [u8; 32],
     audience: [u8; 32],
-    root_tag: [u8; 32],
-}
-impl Drop for MacaroonVerifier {
-    fn drop(&mut self) {
-        qsag_accel::ct::ct_zeroize_bytes(&mut self.root_tag);
-    }
+    root_tag: SecretBytes<32>,
 }
 impl MacaroonVerifier {
     pub fn new(key: &[u8; 32], identifier: [u8; 32], audience: [u8; 32]) -> Self {
@@ -167,7 +163,7 @@ impl MacaroonVerifier {
         {
             return Err(CapabilityError::Denied);
         }
-        token.authenticate_from(self.root_tag)?;
+        token.authenticate_from(&self.root_tag)?;
         token.check_primary(request, discharges)
     }
 }
@@ -183,7 +179,7 @@ pub struct SpongeMacaroon {
 }
 impl Drop for SpongeMacaroon {
     fn drop(&mut self) {
-        qsag_accel::ct::ct_zeroize_bytes(&mut self.tag);
+        qsag_asm::wipe::wipe(&mut self.tag);
     }
 }
 impl SpongeMacaroon {
@@ -191,7 +187,7 @@ impl SpongeMacaroon {
         Self::new(root_key, identifier, audience, false)
     }
     fn new(key: &[u8; 32], identifier: [u8; 32], audience: [u8; 32], discharge: bool) -> Self {
-        let tag = Self::root_tag(key, &identifier, &audience, discharge);
+        let tag = *Self::root_tag(key, &identifier, &audience, discharge);
         Self {
             discharge,
             identifier,
@@ -200,11 +196,16 @@ impl SpongeMacaroon {
             tag,
         }
     }
-    fn root_tag(key: &[u8; 32], id: &[u8; 32], audience: &[u8; 32], discharge: bool) -> [u8; 32] {
+    fn root_tag(
+        key: &[u8; 32],
+        id: &[u8; 32],
+        audience: &[u8; 32],
+        discharge: bool,
+    ) -> SecretBytes<32> {
         let mut identity = [0u8; 33];
         identity[0] = u8::from(discharge);
         identity[1..].copy_from_slice(id);
-        mac_hash(true, &[key, &identity, audience])
+        SecretBuffer(mac_hash(true, &[key, &identity, audience]))
     }
     fn chained(tag: &[u8; 32], caveat: &Caveat) -> [u8; 32] {
         let (bytes, len) = caveat.encoded();
@@ -249,20 +250,19 @@ impl SpongeMacaroon {
     }
 
     fn authenticate(&self, key: &[u8; 32]) -> Result<(), CapabilityError> {
-        self.authenticate_from(Self::root_tag(
+        self.authenticate_from(&Self::root_tag(
             key,
             &self.identifier,
             &self.audience,
             self.discharge,
         ))
     }
-    fn authenticate_from(&self, mut expected: [u8; 32]) -> Result<(), CapabilityError> {
+    fn authenticate_from(&self, root_tag: &[u8; 32]) -> Result<(), CapabilityError> {
+        let mut expected = SecretBuffer(*root_tag);
         for caveat in &self.caveats {
-            expected = Self::chained(&expected, caveat);
+            *expected = Self::chained(&expected, caveat);
         }
-        let ok = ct_eq_bytes(&expected, &self.tag);
-        qsag_accel::ct::ct_zeroize_bytes(&mut expected);
-        if ok {
+        if ct_eq_bytes(&*expected, &self.tag) {
             Ok(())
         } else {
             Err(CapabilityError::InvalidTag)

@@ -186,7 +186,8 @@ impl<W: AuthenticatedOtWire> CommittedCorrelatedOt<W> {
             let mut pads = channel
                 .round4_verify_and_finish(pending, &proof)
                 .map_err(|_| invalid())?;
-            let ciphertexts = (pads.len() == alternatives.len())
+            // The extension pads cover whole 64-OT words; only the first `len` are used.
+            let ciphertexts = (pads.len() >= alternatives.len())
                 .then(|| encrypt_alternatives(&context, self.party, peer, &pads, alternatives));
             for (a, b) in &mut pads {
                 ct_zeroize_bytes(a);
@@ -252,7 +253,7 @@ impl<W: AuthenticatedOtWire> CommittedCorrelatedOt<W> {
                 else {
                     return Err(invalid());
                 };
-                if ciphertexts.len() != count || pads.len() != count {
+                if ciphertexts.len() != count || pads.len() < count {
                     return Err(invalid());
                 }
                 Ok(decrypt_chosen(
@@ -446,38 +447,59 @@ mod tests {
             Ok(message)
         }
     }
-    #[test]
-    #[ignore = "full production Ring-LWE bootstrap soak; run explicitly with the remote resource limit"]
-    fn production_base_ot_roundtrip_and_replay_rejection() {
+    /// Two engines over freshly established production base-OT channels, one per direction.
+    fn engine_pair() -> (CommittedCorrelatedOt<Wire>, CommittedCorrelatedOt<Wire>) {
         use qsag_core::preprocessing::try_establish_rlwe_ot_ext_channel;
         // The independent directional base handshakes can run concurrently;
         // neither borrows entropy or protocol state from the other direction.
         let forward = std::thread::spawn(|| {
             let mut a = PartyPrivateRng::from_seed([1; 32], b"test a forward");
             let mut b = PartyPrivateRng::from_seed([2; 32], b"test b forward");
-            let channels =
-                try_establish_rlwe_ot_ext_channel([3; 32], 0, 1, &mut a, &mut b).unwrap();
-            std::eprintln!("production forward base OT established");
-            channels
+            try_establish_rlwe_ot_ext_channel([3; 32], 0, 1, &mut a, &mut b).unwrap()
         });
         let reverse = std::thread::spawn(|| {
             let mut a = PartyPrivateRng::from_seed([8; 32], b"test a reverse");
             let mut b = PartyPrivateRng::from_seed([9; 32], b"test b reverse");
-            let channels =
-                try_establish_rlwe_ot_ext_channel([4; 32], 1, 0, &mut b, &mut a).unwrap();
-            std::eprintln!("production reverse base OT established");
-            channels
+            try_establish_rlwe_ot_ext_channel([4; 32], 1, 0, &mut b, &mut a).unwrap()
         });
         let (s0, r1) = forward.join().unwrap();
         let (s1, r0) = reverse.join().unwrap();
         let (tx0, rx1) = std::sync::mpsc::channel();
         let (tx1, rx0) = std::sync::mpsc::channel();
-        let mut left =
+        (
             CommittedCorrelatedOt::new(0, alloc::vec![(1, s0, r0)], [5; 32], Wire(tx0, rx0))
-                .unwrap();
-        let mut right =
+                .unwrap(),
             CommittedCorrelatedOt::new(1, alloc::vec![(0, s1, r1)], [6; 32], Wire(tx1, rx1))
-                .unwrap();
+                .unwrap(),
+        )
+    }
+
+    /// One call larger than a single extension: both ends must cut it at the same place
+    /// and derive the same per-chunk contexts.
+    #[test]
+    fn production_ot_splits_a_long_call_identically_on_both_ends() {
+        let (mut left, mut right) = engine_pair();
+        let words: Vec<u128> = (0..MAX_OTS as u128 / 128 + 1)
+            .map(|i| (i + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15_f39c_c060_5ced_c835))
+            .collect();
+        let total = words.len() * 128;
+        let alternative = |i: usize| [i as u128, (i as u128) << 64 | 1];
+        let sender = std::thread::spawn(move || {
+            let pairs: Vec<_> = (0..total).map(alternative).collect();
+            ParallelSeededDkgOt::send(&mut left, 1, [9; 32], &pairs).unwrap();
+        });
+        let values = ParallelSeededDkgOt::receive(&mut right, 0, [9; 32], &words).unwrap();
+        sender.join().unwrap();
+        assert_eq!(values.len(), total);
+        for (i, value) in values.iter().enumerate() {
+            let bit = ((words[i / 128] >> (i % 128)) & 1) as usize;
+            assert_eq!(*value, alternative(i)[bit], "OT {i}");
+        }
+    }
+
+    #[test]
+    fn production_base_ot_roundtrip_and_replay_rejection() {
+        let (mut left, mut right) = engine_pair();
         let pairs: Vec<_> = (0u128..65).map(|i| [i, 1000 + i]).collect();
         let choices: Vec<_> = (0..65).map(|i| i % 2 == 1).collect();
         // The Gilboa-facing entry points: 128 OTs per packed choice word, least significant

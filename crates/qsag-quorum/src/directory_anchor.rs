@@ -48,9 +48,7 @@ impl FsDirectoryMonotoneAnchor {
             io::ErrorKind::Unsupported,
             "private directories require Unix permissions",
         ));
-        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            std::fs::File::open(parent)?.sync_all()?;
-        }
+        qsag_asm::durable::sync_parent_dir(path)?;
         let slots = [
             LockedRecord::create_new(path.join("slot_a"))?,
             LockedRecord::create_new(path.join("slot_b"))?,

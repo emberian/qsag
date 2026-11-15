@@ -24,19 +24,28 @@ fn framed<B: AcceleratorBackend>(accel: &B, custom: &[u8], frames: &[Vec<&[u8]>]
         prefix.extend_from_slice(custom);
         prefix.resize(prefix.len().div_ceil(136) * 136, 0);
     }
-    let mut streams: Vec<_> = frames
+    // Keep payloads borrowed. Only the small framing headers are owned.
+    let headers: Vec<Vec<[u8; 8]>> = frames
         .iter()
         .map(|f| {
-            prefix
-                .iter()
-                .copied()
-                .chain((f.len() as u64).to_le_bytes())
-                .chain(f.iter().flat_map(|frame| {
-                    (frame.len() as u64)
-                        .to_le_bytes()
-                        .into_iter()
-                        .chain(frame.iter().copied())
-                }))
+            core::iter::once((f.len() as u64).to_le_bytes())
+                .chain(f.iter().map(|frame| (frame.len() as u64).to_le_bytes()))
+                .collect()
+        })
+        .collect();
+    let mut streams: Vec<_> = frames
+        .iter()
+        .zip(&headers)
+        .map(|(f, h)| {
+            let pieces: Vec<&[u8]> = core::iter::once(prefix.as_slice())
+                .chain(core::iter::once(h[0].as_slice()))
+                .chain(
+                    f.iter()
+                        .zip(&h[1..])
+                        .flat_map(|(frame, len)| [len.as_slice(), *frame]),
+                )
+                .collect();
+            (pieces, 0usize, 0usize)
         })
         .collect();
     let mut states: SecretVec<[u64; 25]> = (0..frames.len()).map(|_| [0; 25]).collect();
@@ -46,20 +55,29 @@ fn framed<B: AcceleratorBackend>(accel: &B, custom: &[u8], frames: &[Vec<&[u8]>]
     while !active.is_empty() {
         finished.clear();
         for (i, &index) in active.iter().enumerate() {
-            let stream = &mut streams[index];
-            for offset in 0..136 {
-                let byte = match stream.next() {
-                    Some(byte) => byte,
-                    None => {
-                        states[i][offset / 8] ^=
-                            (if custom.is_empty() { 0x1f } else { 0x04 }) << (8 * (offset % 8));
-                        states[i][16] ^= 0x8000_0000_0000_0000;
-                        finished.push(i);
-                        break;
-                    }
-                };
-                states[i][offset / 8] ^= u64::from(byte) << (8 * (offset % 8));
+            let (pieces, piece, offset) = &mut streams[index];
+            let mut block = [0u8; 136];
+            let mut filled = 0;
+            while filled < block.len() && *piece < pieces.len() {
+                let input = &pieces[*piece][*offset..];
+                let take = input.len().min(block.len() - filled);
+                block[filled..filled + take].copy_from_slice(&input[..take]);
+                filled += take;
+                *offset += take;
+                if *offset == pieces[*piece].len() {
+                    *piece += 1;
+                    *offset = 0;
+                }
             }
+            if filled < block.len() {
+                block[filled] = if custom.is_empty() { 0x1f } else { 0x04 };
+                block[135] |= 0x80;
+                finished.push(i);
+            }
+            for (word, bytes) in states[i].iter_mut().zip(block.chunks_exact(8)) {
+                *word ^= u64::from_le_bytes(bytes.try_into().unwrap());
+            }
+            qsag_accel::ct::ct_zeroize_bytes(&mut block);
         }
         accel.batch_keccak_f1600(&mut states);
         for &i in finished.iter().rev() {
@@ -123,7 +141,14 @@ mod tests {
             .into_iter()
             .map(|len| (0..len).map(|i| i as u8).collect())
             .collect();
-        let frames: Vec<_> = messages.iter().map(|m| alloc::vec![m.as_slice()]).collect();
+        let mut frames: Vec<_> = messages.iter().map(|m| alloc::vec![m.as_slice()]).collect();
+        frames.push(alloc::vec![]);
+        frames.push(alloc::vec![&[], &[], &[]]);
+        for m in &messages {
+            for split in 0..=m.len().min(136) {
+                frames.push(alloc::vec![&m[..split], &[], &m[split..]]);
+            }
+        }
         for custom in [b"".as_slice(), b"QSAG.MIGRATE.VIEW.V3", &[42; 200]] {
             let actual = framed(backend, custom, &frames);
             let expected: Vec<_> = frames

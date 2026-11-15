@@ -2,7 +2,7 @@
 //! ceremonies (`qsag cred`), backed by [`qsag_cred::voprf`] and [`qsag_cred::threshold_mldsa`].
 //!
 //! Subcommands:
-//! - `voprf-keygen` — 5-party `(2, 5)` dealerless verifiable lattice OPRF setup (`PiVoprf`).
+//! - `voprf-keygen` — Five-server dealerless Poseidon2 TOPRF setup with encrypted party bundles.
 //! - `voprf-eval` — Blinded client query + 5-server replicated evaluation with durable
 //!   monotone counter reservation.
 //! - `mldsa-keygen` — Dealerless `(t, n)` threshold FIPS 204 ML-DSA (`44`/`65`/`87`) setup.
@@ -34,8 +34,8 @@ const CRED_HELP: &str = "\
 qsag cred <subcommand> [options]
 
 Post-quantum threshold credential & standard-verifier FIPS 204 threshold ML-DSA ceremonies:
-  voprf-keygen  run dealerless (2, 5) lattice TOPRF setup into a private custodian vault
-  voprf-eval    evaluate a blinded input across the (2, 5) TOPRF committee (monotone counter)
+  voprf-keygen  run dealerless Poseidon2 TOPRF setup (five servers, privacy threshold two)
+  voprf-eval    evaluate from five persisted TOPRF party bundles (monotone counter)
   mldsa-keygen  run dealerless (t, n) threshold FIPS 204 ML-DSA key generation (44 / 65 / 87)
   mldsa-sign    co-sign a message with >= 2t - 1 threshold ML-DSA custodians (sealed-w1 ZK)
   mldsa-verify  verify a standard FIPS 204 ML-DSA signature against the threshold public key
@@ -389,22 +389,16 @@ fn voprf_keygen(raw: &[String]) -> Result<(), CliError> {
     } else {
         os_random_32()?
     };
-    let entropies: [Secret32; TOPRF_SERVERS] = core::array::from_fn(|party| {
-        let bytes = if deterministic {
+    let mut entropies: [Secret32; TOPRF_SERVERS] = core::array::from_fn(|_| Secret32([0; 32]));
+    for (party, entropy) in entropies.iter_mut().enumerate() {
+        entropy.0 = if deterministic {
             cshake256_framed_32(
                 b"QSAG.CLI.TOPRF.DET.SEED.V1",
                 &[&(party as u64).to_le_bytes()],
             )
         } else {
-            os_random_32().unwrap_or([0u8; 32])
+            os_random_32()?
         };
-        Secret32(bytes)
-    });
-    if !deterministic && entropies.iter().any(|s| s.0 == [0u8; 32]) {
-        return Err(CliError::new(
-            crate::cli::exit::IO,
-            "OS CSPRNG returned all-zero entropy",
-        ));
     }
 
     let servers = run_voprf_dkg_threads(session, &entropies)?;
@@ -419,8 +413,10 @@ fn voprf_keygen(raw: &[String]) -> Result<(), CliError> {
 
     for (party, server) in servers.iter().enumerate() {
         let payload = ZeroizingBuf(server.to_secret_bytes());
+        let enrollment_nonce = Secret32(os_random_32()?);
         let mut bundle = Json::object(vec![
             ("format", Json::str(VOPRF_SHARE_FORMAT)),
+            ("enrollment_nonce", Json::hex(&enrollment_nonce[..16])),
             ("scheme", Json::str("voprf-poseidon2-2of5")),
             ("party", Json::num(party)),
             ("threshold", Json::num(2)),

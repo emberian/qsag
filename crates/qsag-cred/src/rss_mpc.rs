@@ -152,7 +152,7 @@ pub struct Structure {
     pub threshold: usize,
     /// Sorted holder-index lists, in colexicographic order (the legacy numeric mask
     /// order). Each has `parties - threshold + 1` members. Storage is necessarily
-    /// combinatorial for RSS; this removes the unrelated five-party/32-bit ceilings.
+    /// combinatorial for RSS and bounded by `MAX_MPC_PARTIES`.
     pub subsets: Vec<Vec<usize>>,
 }
 

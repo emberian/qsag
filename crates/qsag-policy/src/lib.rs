@@ -23,22 +23,10 @@ use core::fmt;
 use qsag_accel::AcceleratorBackend;
 use qsag_accel::ct::ct_eq_bytes;
 
-#[inline(never)]
-fn ct_zeroize_bytes(secret: &mut [u8]) {
-    secret.fill(0);
-    core::hint::black_box(&mut *secret);
-    qsag_accel::ct::ct_zeroize_bytes(secret);
-}
-
-#[inline(never)]
-fn ct_zeroize_u128s(secret: &mut [u128]) {
-    secret.fill(0);
-    core::hint::black_box(&mut *secret);
-    qsag_accel::ct::ct_zeroize_u128s(secret);
-}
 use qsag_accel::gf2_128::gf2_128_mul;
 use qsag_accel::keccak::{commit_mpc_broadcast, cshake256_framed_32};
 use qsag_addr::{QsagAddress, WitnessSuiteTag};
+use qsag_asm::wipe::{SecretBuffer, SecretBytes, SecretVec, wipe};
 
 /// Default number of single-use preprocessed pairwise BDOZ MAC tuples per signer guard.
 pub const BDOZ_PREPROC_SLOTS: usize = 64;
@@ -431,7 +419,7 @@ struct WindowAuthority {
 }
 impl Drop for WindowAuthority {
     fn drop(&mut self) {
-        ct_zeroize_bytes(&mut self.key);
+        wipe(&mut self.key);
     }
 }
 
@@ -461,10 +449,8 @@ pub struct PolicySignerGuardShare {
     accumulated_window_spend: u128,
     replay_capacity: usize,
     burned_intent_nonces: Vec<[u8; 32]>,
-    burned_nonce_cursor: usize,
     min_nonce_watermark: Option<[u8; 32]>,
     burned_sessions: Vec<[u8; 32]>,
-    burned_session_cursor: usize,
     min_session_watermark: Option<[u8; 32]>,
     require_authenticated_initiator: bool,
     window_authority: Option<WindowAuthority>,
@@ -512,18 +498,21 @@ impl fmt::Debug for PolicySignerGuardShare {
     }
 }
 
-fn derive_peer_slot_alpha(alpha_root: &[u128; 2], peer_id: u16, peer_slot: usize) -> [u128; 2] {
-    let mut root_bytes = policy_pair_bytes(alpha_root);
-    let raw = cshake256_framed_32(
+fn derive_peer_slot_alpha(
+    alpha_root: &[u128; 2],
+    peer_id: u16,
+    peer_slot: usize,
+) -> SecretBuffer<[u128; 2]> {
+    let root_bytes = SecretBuffer(policy_pair_bytes(alpha_root));
+    let raw = secret_digest(
         b"QSAG.POLICY.PEER_SLOT_ALPHA.V1",
         &[
-            &root_bytes,
+            &*root_bytes,
             &peer_id.to_be_bytes(),
             &(peer_slot as u64).to_be_bytes(),
         ],
     );
-    ct_zeroize_bytes(&mut root_bytes);
-    policy_pair(raw)
+    SecretBuffer(policy_pair(&raw))
 }
 
 impl PolicySignerGuardShare {
@@ -561,7 +550,7 @@ impl PolicySignerGuardShare {
             || self.active_phase.is_some()
             || self.poisoned
         {
-            ct_zeroize_bytes(&mut key);
+            wipe(&mut key);
             return Err(PolicyViolation::IntentBindingMismatch);
         }
         // The verified guard is pinned to the key ID, which changes below.
@@ -572,7 +561,7 @@ impl PolicySignerGuardShare {
             &[&self.durable_key_id, &policy_id, &key],
         );
         self.window_authority = Some(WindowAuthority { policy_id, key });
-        ct_zeroize_bytes(&mut key);
+        wipe(&mut key);
         Ok(self)
     }
 
@@ -750,13 +739,17 @@ impl PolicySignerGuardShare {
         if intent.initiator_party == self.party_id && policy.forbid_initiator_self_approval {
             return Err(PolicyViolation::InitiatorSelfApprovalForbidden);
         }
-        let expected_tag = self.initiator_tag(intent.initiator_party, self.party_id, &auth_digest)?;
+        let expected_tag = SecretBuffer(self.initiator_tag(
+            intent.initiator_party,
+            self.party_id,
+            &auth_digest,
+        )?);
         let mut matched = false;
         let mut count_for_self = 0usize;
         for m in &intent.initiator_macs {
             if m.approver_party == self.party_id {
                 count_for_self += 1;
-                matched |= ct_eq_bytes(&m.mac_tag, &expected_tag);
+                matched |= ct_eq_bytes(&m.mac_tag, &*expected_tag);
             }
         }
         if count_for_self != 1 || !matched {
@@ -914,7 +907,7 @@ impl PolicySignerGuardShare {
         Ok(())
     }
 
-    fn incoming_slot_alpha(&self, peer_id: u16, peer_slot: usize) -> [u128; 2] {
+    fn incoming_slot_alpha(&self, peer_id: u16, peer_slot: usize) -> SecretBuffer<[u128; 2]> {
         derive_peer_slot_alpha(&self.bdoz_alpha_share, peer_id, peer_slot)
     }
 
@@ -934,16 +927,20 @@ impl PolicySignerGuardShare {
 
     fn retire_own_slot(&mut self, slot: usize) {
         if let Some(r) = self.preproc_r.get_mut(slot) {
-            ct_zeroize_u128s(r);
+            wipe(r);
         }
         for (_, vec_m) in &mut self.preproc_outgoing_macs {
             if let Some(m) = vec_m.get_mut(slot) {
-                ct_zeroize_u128s(m);
+                wipe(m);
             }
         }
     }
 
     fn retire_peer_slot(&mut self, peer_id: u16, peer_slot: usize) {
+        // Bits past the pool size must stay clear: the checkpoint codec rejects them.
+        if peer_slot >= self.preproc_r.len() {
+            return;
+        }
         if let Some((_, words)) = self
             .consumed_peer_slots
             .iter_mut()
@@ -956,7 +953,7 @@ impl PolicySignerGuardShare {
             if *p == peer_id
                 && let Some(k) = vec_k.get_mut(peer_slot)
             {
-                ct_zeroize_u128s(k);
+                wipe(k);
             }
         }
     }
@@ -974,22 +971,22 @@ impl PolicySignerGuardShare {
     fn poison(&mut self) {
         self.poisoned = true;
         self.active_phase = None;
-        ct_zeroize_u128s(&mut self.bdoz_alpha_share);
-        ct_zeroize_bytes(&mut self.local_salt_seed);
+        wipe(&mut self.bdoz_alpha_share);
+        wipe(&mut self.local_salt_seed);
         for (_, seed) in &mut self.pairwise_zero_seeds {
-            ct_zeroize_bytes(seed);
+            wipe(seed);
         }
         for r in &mut self.preproc_r {
-            ct_zeroize_u128s(r);
+            wipe(r);
         }
         for (_, vec_m) in &mut self.preproc_outgoing_macs {
             for m in vec_m {
-                ct_zeroize_u128s(m);
+                wipe(m);
             }
         }
         for (_, vec_k) in &mut self.preproc_incoming_keys {
             for k in vec_k {
-                ct_zeroize_u128s(k);
+                wipe(k);
             }
         }
     }
@@ -1101,14 +1098,14 @@ pub fn trusted_dealer_setup_for_testing(
     let mut all_r: Vec<Vec<[u128; 2]>> = Vec::with_capacity(n);
     for &pid in party_ids {
         let p_be = pid.to_be_bytes();
-        let raw = cshake256_framed_32(b"QSAG.POLICY.ALPHA_SH.V2", &[&ent, &p_be]);
-        alphas.push([policy_pair(raw)[0], policy_pair(raw)[1]]);
+        let raw = secret_digest(b"QSAG.POLICY.ALPHA_SH.V2", &[&ent, &p_be]);
+        alphas.push(policy_pair(&raw));
 
         let mut r_slots = Vec::with_capacity(BDOZ_PREPROC_SLOTS);
         for s in 0..BDOZ_PREPROC_SLOTS {
             let s_be = (s as u32).to_be_bytes();
-            let r_raw = cshake256_framed_32(b"QSAG.POLICY.PREPROC_R.V2", &[&ent, &p_be, &s_be]);
-            r_slots.push([policy_pair(r_raw)[0], policy_pair(r_raw)[1]]);
+            let r_raw = secret_digest(b"QSAG.POLICY.PREPROC_R.V2", &[&ent, &p_be, &s_be]);
+            r_slots.push(policy_pair(&r_raw));
         }
         all_r.push(r_slots);
     }
@@ -1144,11 +1141,8 @@ pub fn trusted_dealer_setup_for_testing(
                 let alpha_j_slot = derive_peer_slot_alpha(&alphas[j_idx], pid_i, s);
                 // Key held by `j` on `i`'s wire `r_{i, s}`:
                 let k_j_from_i_raw =
-                    cshake256_framed_32(b"QSAG.POLICY.BDOZ_KEY.V2", &[&ent, &pj_be, &pi_be, &s_be]);
-                let k_j_from_i = [
-                    policy_pair(k_j_from_i_raw)[0],
-                    policy_pair(k_j_from_i_raw)[1],
-                ];
+                    secret_digest(b"QSAG.POLICY.BDOZ_KEY.V2", &[&ent, &pj_be, &pi_be, &s_be]);
+                let k_j_from_i = SecretBuffer(policy_pair(&k_j_from_i_raw));
                 let m_i_to_j = [
                     k_j_from_i[0] ^ gf2_128_mul(alpha_j_slot[0], r_is[0]),
                     k_j_from_i[1] ^ gf2_128_mul(alpha_j_slot[1], r_is[1]),
@@ -1157,11 +1151,8 @@ pub fn trusted_dealer_setup_for_testing(
 
                 // Key held by `i` on `j`'s wire `r_{j, s}`:
                 let k_i_from_j_raw =
-                    cshake256_framed_32(b"QSAG.POLICY.BDOZ_KEY.V2", &[&ent, &pi_be, &pj_be, &s_be]);
-                k_vec.push([
-                    policy_pair(k_i_from_j_raw)[0],
-                    policy_pair(k_i_from_j_raw)[1],
-                ]);
+                    secret_digest(b"QSAG.POLICY.BDOZ_KEY.V2", &[&ent, &pi_be, &pj_be, &s_be]);
+                k_vec.push(policy_pair(&k_i_from_j_raw));
             }
             preproc_outgoing_macs.push((pid_j, m_vec));
             preproc_incoming_keys.push((pid_j, k_vec));
@@ -1189,10 +1180,8 @@ pub fn trusted_dealer_setup_for_testing(
             accumulated_window_spend: 0,
             replay_capacity: MAX_BURNED_INTENT_NONCES,
             burned_intent_nonces: Vec::new(),
-            burned_nonce_cursor: 0,
             min_nonce_watermark: None,
             burned_sessions: Vec::new(),
-            burned_session_cursor: 0,
             min_session_watermark: None,
             require_authenticated_initiator: true,
         });
@@ -1200,14 +1189,14 @@ pub fn trusted_dealer_setup_for_testing(
 
     // Zeroize all offline preprocessing material before returning!
     for a in &mut alphas {
-        ct_zeroize_u128s(a);
+        wipe(a);
     }
     for vec_r in &mut all_r {
         for r in vec_r {
-            ct_zeroize_u128s(r);
+            wipe(r);
         }
     }
-    ct_zeroize_bytes(&mut ent);
+    wipe(&mut ent);
     out
 }
 
@@ -1237,16 +1226,14 @@ fn compute_folded_policy_wire<B: AcceleratorBackend>(
             intent_nonce,
         ],
     );
+    let lanes = |digest: &[u8; 32]| {
+        let [lo, hi] = policy_pair(digest);
+        (lo, hi)
+    };
     let x_vec = [
-        (
-            policy_pair(*policy_digest)[0],
-            policy_pair(*policy_digest)[1],
-        ),
-        (
-            policy_pair(*intent_digest)[0],
-            policy_pair(*intent_digest)[1],
-        ),
-        (policy_pair(meta)[0], policy_pair(meta)[1]),
+        lanes(policy_digest),
+        lanes(intent_digest),
+        lanes(&meta),
         (1u128, 1u128),
     ];
     let w_raw = cshake256_framed_32(
@@ -1259,8 +1246,7 @@ fn compute_folded_policy_wire<B: AcceleratorBackend>(
             &window_id.to_be_bytes(),
         ],
     );
-    let w0 = policy_pair(w_raw)[0];
-    let w1 = policy_pair(w_raw)[1];
+    let [w0, w1] = policy_pair(&w_raw);
     let weights = [
         (w0, w1),
         (w1 ^ 0x55, w0 ^ 0xAA),
@@ -1278,23 +1264,23 @@ impl PolicySignerGuardShare {
         quorum_ids: &[u16],
         session_id: &[u8; 32],
         q_digest: &[u8; 32],
-    ) -> (u128, u128) {
-        let mut z0 = 0u128;
-        let mut z1 = 0u128;
+    ) -> SecretBuffer<[u128; 2]> {
+        let mut z = SecretBuffer([0u128; 2]);
         for &peer in quorum_ids {
             if peer == self.party_id {
                 continue;
             }
             if let Some((_, seed)) = self.pairwise_zero_seeds.iter().find(|(p, _)| *p == peer) {
-                let prf = cshake256_framed_32(
+                let prf = secret_digest(
                     b"QSAG.POLICY.PAIR_ZERO_PRF.V2",
                     &[seed, session_id, q_digest],
                 );
-                z0 ^= policy_pair(prf)[0];
-                z1 ^= policy_pair(prf)[1];
+                let share = SecretBuffer(policy_pair(&prf));
+                z[0] ^= share[0];
+                z[1] ^= share[1];
             }
         }
-        (z0, z1)
+        z
     }
 
     fn outgoing_mac(&self, peer_id: u16, slot: usize) -> Result<[u128; 2], PolicyViolation> {
@@ -1407,10 +1393,14 @@ impl SharedWindowSpendLedger {
         policy_id: [u8; 32],
         key: [u8; 32],
     ) -> Result<Self, PolicyViolation> {
+        let key = SecretBuffer(key);
         if self.window_authority.is_some() {
             return Err(PolicyViolation::IntentBindingMismatch);
         }
-        self.window_authority = Some(WindowAuthority { policy_id, key });
+        self.window_authority = Some(WindowAuthority {
+            policy_id,
+            key: *key,
+        });
         Ok(self)
     }
 
@@ -1832,7 +1822,7 @@ fn evaluate_per_party_intents_barrier_inner<B: AcceleratorBackend>(
                 &intent_i.nonce,
                 accel,
             )?;
-            let r_mask = g.preproc_r[slot];
+            let r_mask = SecretBuffer(g.preproc_r[slot]);
             let delta = (r_mask[0] ^ folded_x.0, r_mask[1] ^ folded_x.1);
             #[cfg(test)]
             let delta = {
@@ -1867,18 +1857,18 @@ fn evaluate_per_party_intents_barrier_inner<B: AcceleratorBackend>(
         // Round 2a (Commit ONLY): Every party `i` computes its pairwise BDOZ difference share `sigma_i`
         // strictly from its own `PolicySignerGuardShare` + Round-1 `delta_broadcast`s and commits BEFORE any open!
         let mut commits = Vec::with_capacity(m);
-        let mut deferred_openings = Vec::with_capacity(m);
+        let mut deferred_openings: SecretVec<(u16, [u8; 32], [u128; 2], [u8; 32])> =
+            SecretVec::with_capacity(m);
 
         for (g, st_i) in quorum_guards.iter().zip(r1_states.iter()) {
-            let (mut sigma0, mut sigma1) =
-                g.pairwise_zero_share(&quorum_ids, &session_id, &quorum_digest);
+            let mut sigma = g.pairwise_zero_share(&quorum_ids, &session_id, &quorum_digest);
 
             for st_j in &r1_states {
                 if st_j.party_id == g.party_id {
                     continue;
                 }
-                let m_ij = g.outgoing_mac(st_j.party_id, st_i.slot)?;
-                let k_ij = g.incoming_key(st_j.party_id, st_j.slot)?;
+                let m_ij = SecretBuffer(g.outgoing_mac(st_j.party_id, st_i.slot)?);
+                let k_ij = SecretBuffer(g.incoming_key(st_j.party_id, st_j.slot)?);
                 let alpha_ij = g.incoming_slot_alpha(st_j.party_id, st_j.slot);
                 let expected_r_j0 = st_i.folded_x.0 ^ st_j.delta_broadcast.0;
                 let expected_r_j1 = st_i.folded_x.1 ^ st_j.delta_broadcast.1;
@@ -1895,27 +1885,26 @@ fn evaluate_per_party_intents_barrier_inner<B: AcceleratorBackend>(
                         &g.party_id.max(st_j.party_id).to_be_bytes(),
                     ],
                 );
-                let chi0 = policy_pair(chi)[0];
-                let chi1 = policy_pair(chi)[1];
-                sigma0 ^= gf2_128_mul(
+                let [chi0, chi1] = policy_pair(&chi);
+                sigma[0] ^= gf2_128_mul(
                     chi0,
                     m_ij[0] ^ k_ij[0] ^ gf2_128_mul(alpha_ij[0], expected_r_j0),
                 );
-                sigma1 ^= gf2_128_mul(
+                sigma[1] ^= gf2_128_mul(
                     chi1,
                     m_ij[1] ^ k_ij[1] ^ gf2_128_mul(alpha_ij[1], expected_r_j1),
                 );
             }
 
-            let payload = policy_pair_bytes(&[sigma0, sigma1]);
+            let payload = SecretBuffer(policy_pair_bytes(&sigma));
             let slot_be = (st_i.slot as u32).to_be_bytes();
-            let salt = cshake256_framed_32(
+            let salt = secret_digest(
                 b"QSAG.POLICY.COMMIT_SALT.V2",
                 &[&g.local_salt_seed, &session_id, &slot_be],
             );
-            let comm = commit_mpc_broadcast(&session_id, 0x504F_4C32, g.party_id, &payload, &salt);
+            let comm = commit_mpc_broadcast(&session_id, 0x504F_4C32, g.party_id, &*payload, &salt);
             commits.push((g.party_id, comm));
-            deferred_openings.push((g.party_id, payload, (sigma0, sigma1), salt));
+            deferred_openings.push_wiping((g.party_id, *payload, *sigma, *salt));
         }
 
         // Round 2b: Verify ALL commitments in constant time FIRST, then verify `\bigoplus_i \sigma_i == (0, 0)`!
@@ -1929,7 +1918,7 @@ fn evaluate_per_party_intents_barrier_inner<B: AcceleratorBackend>(
             if !ct_eq_bytes(&expected_comm, comm) {
                 return Err(PolicyViolation::BarrierCommitmentMismatch { party_id: *o_pid });
             }
-            sigma_openings.push((*comm, expected_comm, [sigmas.0, sigmas.1]));
+            sigma_openings.push((*comm, expected_comm, *sigmas));
         }
 
         let mut all_digests_equal = true;
@@ -2183,7 +2172,7 @@ impl<W: qsag_fts::ot::AuthenticatedOtWire> PolicyAuthenticatedOt
             return Err(PolicyViolation::IntentBindingMismatch);
         }
         let failed = |_| PolicyViolation::BarrierBdozMacFailed;
-        let mut result = SecretVec(Vec::with_capacity(choices.len()));
+        let mut result = SecretVec::with_capacity(choices.len());
         for (index, (pairs, bits)) in alternatives
             .chunks(65_536)
             .zip(choices.chunks(65_536))
@@ -2205,10 +2194,10 @@ impl<W: qsag_fts::ot::AuthenticatedOtWire> PolicyAuthenticatedOt
                 self.send_values(peer, context, pairs).map_err(failed)?;
                 values
             };
-            let values = SecretVec(values);
-            result.extend_from_slice(&values);
+            let values = SecretVec::new(values);
+            result.extend_wiping(&values);
         }
-        Ok(core::mem::take(&mut result.0))
+        Ok(result.into_inner())
     }
 }
 
@@ -2231,7 +2220,7 @@ pub struct PolicyGuardSeedOpenMsg {
 
 impl Drop for PolicyGuardSeedOpenMsg {
     fn drop(&mut self) {
-        ct_zeroize_bytes(&mut self.seed);
+        wipe(&mut self.seed);
     }
 }
 
@@ -2245,31 +2234,6 @@ pub struct PolicyGuardDkgRound1 {
 pub struct PolicyGuardDkgRound2 {
     first: PolicyGuardDkgRound1,
     peer_commits: Vec<PolicyGuardSeedCommitMsg>,
-}
-
-/// Wipe OT buffers on errors and transport panics as well as normal completion.
-struct SecretVec<T: Copy + Default + PartialEq>(Vec<T>);
-impl<T: Copy + Default + PartialEq> core::ops::Deref for SecretVec<T> {
-    type Target = Vec<T>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-impl<T: Copy + Default + PartialEq> core::ops::DerefMut for SecretVec<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-impl<T: Copy + Default + PartialEq> Drop for SecretVec<T> {
-    fn drop(&mut self) {
-        qsag_asm::volatile_fill(&mut self.0, T::default());
-        #[cfg(test)]
-        OT_WIPES.with(|events| {
-            if let Some(events) = &mut *events.borrow_mut() {
-                events.push((self.0.len(), self.0.iter().all(|v| *v == T::default())));
-            }
-        });
-    }
 }
 
 fn policy_seed_commit(o: &PolicyGuardSeedOpenMsg) -> [u8; 32] {
@@ -2305,13 +2269,13 @@ impl PolicyGuardDkgRound1 {
         preprocessing_slots: usize,
     ) -> Result<(Self, Vec<PolicyGuardSeedCommitMsg>), PolicyViolation> {
         if preprocessing_slots == 0 || preprocessing_slots > MAX_POLICY_CAPACITY {
-            ct_zeroize_bytes(&mut entropy);
+            wipe(&mut entropy);
             return Err(PolicyViolation::BarrierPreprocExhausted);
         }
         let mut ids = party_ids.to_vec();
         ids.sort_unstable();
         if ids.len() < 2 || !ids.contains(&party_id) || ids.windows(2).any(|w| w[0] == w[1]) {
-            ct_zeroize_bytes(&mut entropy);
+            wipe(&mut entropy);
             return Err(PolicyViolation::IntentBindingMismatch);
         }
         let digest = cshake256_framed_32(
@@ -2326,16 +2290,13 @@ impl PolicyGuardDkgRound1 {
             b"QSAG.POLICY.DKG.LOCAL.V1",
             &[&entropy, &digest, &party_id.to_be_bytes()],
         );
-        ct_zeroize_bytes(&mut entropy);
+        wipe(&mut entropy);
         let mut guard = PolicySignerGuardShare {
             party_id,
             enrolled_party_id: party_id,
             active_phase: None,
             poisoned: false,
-            bdoz_alpha_share: policy_pair(cshake256_framed_32(
-                b"QSAG.POLICY.DKG.ALPHA.V1",
-                &[&local],
-            )),
+            bdoz_alpha_share: policy_pair(&secret_digest(b"QSAG.POLICY.DKG.ALPHA.V1", &[&local])),
             window_authority: None,
             durable_key_id: cshake256_framed_32(b"QSAG.POLICY.DURABLE_KEY.V2", &[&local]),
             durable_generation: Cell::new(0),
@@ -2352,16 +2313,14 @@ impl PolicyGuardDkgRound1 {
             accumulated_window_spend: 0,
             replay_capacity: MAX_BURNED_INTENT_NONCES,
             burned_intent_nonces: Vec::new(),
-            burned_nonce_cursor: 0,
             min_nonce_watermark: None,
             burned_sessions: Vec::new(),
-            burned_session_cursor: 0,
             min_session_watermark: None,
             require_authenticated_initiator: true,
         };
-        ct_zeroize_bytes(&mut local);
+        wipe(&mut local);
         for slot in 0..preprocessing_slots {
-            guard.preproc_r.push(policy_pair(cshake256_framed_32(
+            guard.preproc_r.push(policy_pair(&secret_digest(
                 b"QSAG.POLICY.DKG.R.V1",
                 &[&guard.local_salt_seed, &(slot as u64).to_be_bytes()],
             )));
@@ -2486,8 +2445,8 @@ pub fn finalize_distributed_policy_guard<O: PolicyAuthenticatedOt>(
         ));
         g.consumed_peer_slots
             .push((o.sender, alloc::vec![0u64; g.preproc_r.len().div_ceil(64)]));
-        let mut keys = SecretVec(Vec::with_capacity(g.preproc_r.len()));
-        let mut macs = SecretVec(Vec::with_capacity(g.preproc_r.len()));
+        let mut keys = SecretVec::with_capacity(g.preproc_r.len());
+        let mut macs = SecretVec::with_capacity(g.preproc_r.len());
         // Bound scratch buffers independently of the caller's durable pool capacity.
         for start in (0..g.preproc_r.len()).step_by(256) {
             let end = (start + 256).min(g.preproc_r.len());
@@ -2503,14 +2462,14 @@ pub fn finalize_distributed_policy_guard<O: PolicyAuthenticatedOt>(
                     ],
                 )
             };
-            let mut alternatives = SecretVec(Vec::with_capacity((end - start) * 256));
-            let mut choices = SecretVec(Vec::with_capacity((end - start) * 256));
+            let mut alternatives = SecretVec::with_capacity((end - start) * 256);
+            let mut choices = SecretVec::with_capacity((end - start) * 256);
             for slot in start..end {
-                let mut slot_alpha = g.incoming_slot_alpha(o.sender, slot);
-                let mut key = [0u128; 2];
+                let slot_alpha = g.incoming_slot_alpha(o.sender, slot);
+                let mut key = SecretBuffer([0u128; 2]);
                 for (lane, key_lane) in key.iter_mut().enumerate() {
                     for bit in 0..128 {
-                        let mut raw = cshake256_framed_32(
+                        let raw = secret_digest(
                             b"QSAG.POLICY.DKG.OT_PAD.V1",
                             &[
                                 &g.local_salt_seed,
@@ -2519,34 +2478,37 @@ pub fn finalize_distributed_policy_guard<O: PolicyAuthenticatedOt>(
                                 &[lane as u8, bit as u8],
                             ],
                         );
-                        let pad = policy_pair(raw)[0];
-                        ct_zeroize_bytes(&mut raw);
-                        alternatives.push([pad, pad ^ gf2_128_mul(slot_alpha[lane], 1u128 << bit)]);
-                        choices.push(((g.preproc_r[slot][lane] >> bit) & 1) != 0);
-                        *key_lane ^= pad;
+                        let pad = SecretBuffer(policy_pair(&raw)[0]);
+                        alternatives
+                            .push_wiping([*pad, *pad ^ gf2_128_mul(slot_alpha[lane], 1u128 << bit)]);
+                        choices.push_wiping(((g.preproc_r[slot][lane] >> bit) & 1) != 0);
+                        *key_lane ^= *pad;
                     }
                 }
-                ct_zeroize_u128s(&mut slot_alpha);
-                keys.push(key);
-                ct_zeroize_u128s(&mut key);
+                keys.push_wiping(*key);
             }
             let mut selected =
-                SecretVec(ot.exchange(g.party_id, o.sender, domain, &alternatives, &choices)?);
+                SecretVec::new(ot.exchange(
+                g.party_id,
+                o.sender,
+                domain,
+                &alternatives,
+                &choices,
+            )?);
             if selected.len() != (end - start) * 256 {
                 return Err(PolicyViolation::BarrierBdozMacFailed);
             }
             for chunk in selected.as_chunks::<256>().0 {
-                macs.push([
+                macs.push_wiping([
                     chunk[..128].iter().fold(0, |a, b| a ^ b),
                     chunk[128..].iter().fold(0, |a, b| a ^ b),
                 ]);
             }
-            ct_zeroize_u128s(&mut selected);
         }
         g.preproc_outgoing_macs
-            .push((o.sender, core::mem::take(&mut macs.0)));
+            .push((o.sender, macs.into_inner()));
         g.preproc_incoming_keys
-            .push((o.sender, core::mem::take(&mut keys.0)));
+            .push((o.sender, keys.into_inner()));
     }
     Ok(state.first.guard)
 }
@@ -2608,12 +2570,12 @@ struct PartyPolicyContext {
 
 impl Drop for PartyPolicyContext {
     fn drop(&mut self) {
-        ct_zeroize_bytes(&mut self.guard_binding);
-        ct_zeroize_bytes(&mut self.salt);
-        ct_zeroize_bytes(&mut self.sigma_salt);
-        ct_zeroize_u128s(&mut self.delta);
-        ct_zeroize_u128s(&mut self.folded);
-        ct_zeroize_u128s(&mut self.sigma);
+        wipe(&mut self.guard_binding);
+        wipe(&mut self.salt);
+        wipe(&mut self.sigma_salt);
+        wipe(&mut self.delta);
+        wipe(&mut self.folded);
+        wipe(&mut self.sigma);
     }
 }
 
@@ -2655,13 +2617,16 @@ fn policy_pair_bytes(pair: &[u128; 2]) -> [u8; 32] {
     bytes
 }
 
-fn policy_pair(mut bytes: [u8; 32]) -> [u128; 2] {
-    let pair = [
+fn policy_pair(bytes: &[u8; 32]) -> [u128; 2] {
+    [
         u128::from_le_bytes(core::array::from_fn(|i| bytes[i])),
         u128::from_le_bytes(core::array::from_fn(|i| bytes[16 + i])),
-    ];
-    ct_zeroize_bytes(&mut bytes);
-    pair
+    ]
+}
+
+/// A digest derived from guard secrets, erased when it leaves scope.
+fn secret_digest(domain: &[u8], fields: &[&[u8]]) -> SecretBytes<32> {
+    SecretBuffer(cshake256_framed_32(domain, fields))
 }
 
 fn delta_commitment(c: &PartyPolicyDeltaCommitMsg, salt: &[u8; 32], delta: &[u128; 2]) -> [u8; 32] {
@@ -2764,10 +2729,12 @@ impl PolicySignerGuardShare {
             return Err(PolicyViolation::MissingHardwareGuardian);
         }
         let slot = self.next_slot.get();
-        let r = *self
-            .preproc_r
-            .get(slot)
-            .ok_or(PolicyViolation::BarrierPreprocExhausted)?;
+        let r = SecretBuffer(
+            *self
+                .preproc_r
+                .get(slot)
+                .ok_or(PolicyViolation::BarrierPreprocExhausted)?,
+        );
         for &peer in &ids {
             if peer != self.party_id {
                 self.outgoing_mac(peer, slot)?;
@@ -3030,16 +2997,16 @@ impl PartyPolicyRound2State {
                     &transcript,
                 ],
             );
-            let z = guard.pairwise_zero_share(&own.quorum_ids, &own.session_id, &q_digest);
-            let mut sigma = [z.0, z.1];
+            let mut sigma =
+                guard.pairwise_zero_share(&own.quorum_ids, &own.session_id, &q_digest);
             for (c, o) in self.commits.iter().zip(&opens) {
                 if c.party_id == own.party_id {
                     continue;
                 }
-                let m = guard.outgoing_mac(c.party_id, own.slot)?;
-                let k = guard.incoming_key(c.party_id, c.slot)?;
-                let mut peer_alpha = guard.incoming_slot_alpha(c.party_id, c.slot);
-                let chi = policy_pair(cshake256_framed_32(
+                let m = SecretBuffer(guard.outgoing_mac(c.party_id, own.slot)?);
+                let k = SecretBuffer(guard.incoming_key(c.party_id, c.slot)?);
+                let peer_alpha = guard.incoming_slot_alpha(c.party_id, c.slot);
+                let chi = policy_pair(&cshake256_framed_32(
                     b"QSAG.POLICY.PAIR_WEIGHT.V3",
                     &[
                         &digest,
@@ -3058,9 +3025,8 @@ impl PartyPolicyRound2State {
                             ),
                     );
                 }
-                ct_zeroize_u128s(&mut peer_alpha);
             }
-            let salt = cshake256_framed_32(
+            let salt = secret_digest(
                 b"QSAG.POLICY.SIGMA_SALT.V1",
                 &[
                     &guard.local_salt_seed,
@@ -3075,8 +3041,8 @@ impl PartyPolicyRound2State {
             };
             msg.commitment = sigma_commitment(&msg, &salt, &sigma);
             guard.active_phase = Some((own.slot, 3));
-            self.context.sigma = sigma;
-            self.context.sigma_salt = salt;
+            self.context.sigma = *sigma;
+            self.context.sigma_salt = *salt;
             Ok((
                 PartyPolicyRound3State {
                     context: self.context,
@@ -4070,8 +4036,8 @@ mod tests {
     impl Drop for IdealPolicyOt {
         fn drop(&mut self) {
             for (_, alpha, seed) in &mut self.peers {
-                ct_zeroize_u128s(alpha);
-                ct_zeroize_bytes(seed);
+                wipe(alpha);
+                wipe(seed);
             }
         }
     }
@@ -4125,7 +4091,7 @@ mod tests {
                         &[lane as u8, bit as u8],
                     ],
                 );
-                let pad = policy_pair(raw)[0];
+                let pad = policy_pair(&raw)[0];
                 selected.push(
                     pad ^ if *choice {
                         gf2_128_mul(peer_slot_alpha[lane], 1u128 << bit)
@@ -5132,45 +5098,189 @@ mod tests {
     }
 }
 
+/// Test-only allocator hook: reports whether a watched heap block was all zero at the moment
+/// it was handed back to the allocator.
 #[cfg(test)]
-std::thread_local! {
-    static OT_WIPES: std::cell::RefCell<Option<Vec<(usize, bool)>>> = const { std::cell::RefCell::new(None) };
+mod freed_secret_watch {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+
+    const SLOTS: usize = 32;
+    const FREE: usize = 0;
+    const CLAIMED: usize = 1;
+    const WATCHING: usize = 2;
+    const FREED_ZERO: usize = 3;
+    const FREED_DIRTY: usize = 4;
+    static STATE: [AtomicUsize; SLOTS] = [const { AtomicUsize::new(FREE) }; SLOTS];
+    static ADDR: [AtomicUsize; SLOTS] = [const { AtomicUsize::new(0) }; SLOTS];
+    static LEN: [AtomicUsize; SLOTS] = [const { AtomicUsize::new(0) }; SLOTS];
+
+    struct Watching;
+    // SAFETY: every request is forwarded unchanged to the system allocator.
+    unsafe impl GlobalAlloc for Watching {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: the caller's contract is passed through.
+            unsafe { System.alloc(layout) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            for slot in 0..SLOTS {
+                if STATE[slot].load(SeqCst) == WATCHING && ADDR[slot].load(SeqCst) == ptr as usize {
+                    let len = LEN[slot].load(SeqCst).min(layout.size());
+                    // SAFETY: the block is still allocated here, and the watched prefix was
+                    // initialized when it was registered.
+                    let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+                    let verdict = if bytes.iter().all(|b| *b == 0) {
+                        FREED_ZERO
+                    } else {
+                        FREED_DIRTY
+                    };
+                    STATE[slot].store(verdict, SeqCst);
+                }
+            }
+            // SAFETY: the caller's contract is passed through.
+            unsafe { System.dealloc(ptr, layout) }
+        }
+    }
+    #[global_allocator]
+    static ALLOCATOR: Watching = Watching;
+
+    /// Watch the heap block that starts at `live`'s first element.
+    pub(super) fn watch<T>(live: &[T]) -> usize {
+        assert!(!live.is_empty());
+        for slot in 0..SLOTS {
+            if STATE[slot]
+                .compare_exchange(FREE, CLAIMED, SeqCst, SeqCst)
+                .is_ok()
+            {
+                ADDR[slot].store(live.as_ptr() as usize, SeqCst);
+                LEN[slot].store(core::mem::size_of_val(live), SeqCst);
+                STATE[slot].store(WATCHING, SeqCst);
+                return slot;
+            }
+        }
+        panic!("no free watch slot");
+    }
+
+    /// `Some(true)` if the block was freed all zero, `Some(false)` if freed with content,
+    /// `None` if it has not been freed. Releases the slot.
+    pub(super) fn outcome(slot: usize) -> Option<bool> {
+        let verdict = match STATE[slot].load(SeqCst) {
+            FREED_ZERO => Some(true),
+            FREED_DIRTY => Some(false),
+            _ => None,
+        };
+        STATE[slot].store(FREE, SeqCst);
+        verdict
+    }
 }
+
 #[cfg(test)]
 mod cleanup_tests {
     use super::*;
-    struct FailOt;
-    impl PolicyAuthenticatedOt for FailOt {
+    use super::freed_secret_watch::{outcome, watch};
+
+    /// Records where the scratch handed to the OT lives, then fails, panics or answers.
+    enum Behave {
+        Fail,
+        Panic,
+        Answer(usize),
+    }
+    struct WatchingOt {
+        behave: Behave,
+        watched: Vec<usize>,
+    }
+    impl PolicyAuthenticatedOt for WatchingOt {
         fn exchange(
             &mut self,
             _: u16,
             _: u16,
             _: [u8; 32],
-            _: &[[u128; 2]],
-            _: &[bool],
+            alternatives: &[[u128; 2]],
+            choices: &[bool],
         ) -> Result<Vec<u128>, PolicyViolation> {
-            Err(PolicyViolation::BarrierBdozMacFailed)
+            assert_eq!(alternatives.len(), BDOZ_PREPROC_SLOTS * 256);
+            assert!(alternatives.iter().all(|pair| *pair != [0; 2]));
+            assert!(choices.iter().any(|bit| *bit));
+            self.watched.push(watch(alternatives));
+            self.watched.push(watch(choices));
+            match self.behave {
+                Behave::Fail => Err(PolicyViolation::BarrierBdozMacFailed),
+                Behave::Panic => panic!("injected transport failure"),
+                Behave::Answer(len) => {
+                    let answer = alloc::vec![u128::MAX; len];
+                    self.watched.push(watch(&answer));
+                    Ok(answer)
+                }
+            }
         }
     }
-    #[test]
-    fn failed_ot_erases_all_partially_prepared_buffers() {
+    fn dkg_ready() -> (PolicyGuardDkgRound2, Vec<PolicyGuardSeedOpenMsg>) {
         let (a, ac) = PolicyGuardDkgRound1::new(1, &[1, 2], [3; 32], [4; 32]).unwrap();
         let (b, bc) = PolicyGuardDkgRound1::new(2, &[1, 2], [3; 32], [5; 32]).unwrap();
         let (a, _) = a.round2_open_seeds(&bc).unwrap();
         let (_, bo) = b.round2_open_seeds(&ac).unwrap();
-        OT_WIPES.with(|events| *events.borrow_mut() = Some(Vec::new()));
-        assert!(finalize_distributed_policy_guard(a, &bo, &mut FailOt).is_err());
-        let mut events = OT_WIPES.with(|events| events.borrow_mut().take().unwrap());
-        events.sort_unstable();
+        (a, bo)
+    }
+    fn all_erased(ot: &WatchingOt, expected: usize) {
+        assert_eq!(ot.watched.len(), expected);
+        for &slot in &ot.watched {
+            assert_eq!(outcome(slot), Some(true), "freed with secret bytes in it");
+        }
+    }
+
+    #[test]
+    fn the_watch_reports_a_buffer_freed_with_its_contents() {
+        let plain = alloc::vec![0xa5u8; 4096];
+        let slot = watch(&plain);
+        drop(plain);
+        assert_eq!(outcome(slot), Some(false));
+        let guarded = SecretVec::new(alloc::vec![0xa5u8; 4096]);
+        let slot = watch(&guarded);
+        drop(guarded);
+        assert_eq!(outcome(slot), Some(true));
+    }
+
+    #[test]
+    fn ot_scratch_is_erased_before_release_on_error_unwind_and_completion() {
+        let (state, opens) = dkg_ready();
+        let mut ot = WatchingOt {
+            behave: Behave::Fail,
+            watched: Vec::new(),
+        };
+        assert!(finalize_distributed_policy_guard(state, &opens, &mut ot).is_err());
+        all_erased(&ot, 2);
+
+        let (state, opens) = dkg_ready();
+        let mut ot = WatchingOt {
+            behave: Behave::Panic,
+            watched: Vec::new(),
+        };
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = finalize_distributed_policy_guard(state, &opens, &mut ot);
+        }));
+        assert!(unwound.is_err());
+        all_erased(&ot, 2);
+
+        // A short answer is refused; the received values are erased all the same.
+        let (state, opens) = dkg_ready();
+        let mut ot = WatchingOt {
+            behave: Behave::Answer(BDOZ_PREPROC_SLOTS * 256 - 1),
+            watched: Vec::new(),
+        };
         assert_eq!(
-            events,
-            alloc::vec![
-                (0, true),
-                (BDOZ_PREPROC_SLOTS, true),
-                (BDOZ_PREPROC_SLOTS * 256, true),
-                (BDOZ_PREPROC_SLOTS * 256, true)
-            ]
+            finalize_distributed_policy_guard(state, &opens, &mut ot).err(),
+            Some(PolicyViolation::BarrierBdozMacFailed)
         );
+        all_erased(&ot, 3);
+
+        let (state, opens) = dkg_ready();
+        let mut ot = WatchingOt {
+            behave: Behave::Answer(BDOZ_PREPROC_SLOTS * 256),
+            watched: Vec::new(),
+        };
+        let guard = finalize_distributed_policy_guard(state, &opens, &mut ot).unwrap();
+        all_erased(&ot, 3);
+        drop(guard);
     }
 
     #[test]

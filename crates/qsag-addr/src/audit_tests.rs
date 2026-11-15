@@ -244,7 +244,7 @@ fn pinned_address_encodings() {
         &preimage,
     )
     .unwrap();
-    assert_eq!(v1.encode().unwrap(), "V1_PLACEHOLDER");
+    assert_eq!(v1.encode().unwrap(), "qsp1pqypqz4s9532yap0ujqxrleyll5c7amlwcljae2deya8d62jpxny0jpta6szewe");
     let v2 = QsagAddress::from_pubkey_poseidon2(
         "qsp",
         WitnessSuiteTag::PolicyPredicateScript,
@@ -252,5 +252,5 @@ fn pinned_address_encodings() {
         &preimage,
     )
     .unwrap();
-    assert_eq!(v2.encode().unwrap(), "V2_PLACEHOLDER");
+    assert_eq!(v2.encode().unwrap(), "qsp1zqcqs8q9dpcanthu7s02cjf0wymexxz0th5vrtgyppu9t93g52tvhlqwgk8y6yw");
 }

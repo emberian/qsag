@@ -1241,6 +1241,8 @@ fn big_endian_bits(bits: &[Wire]) -> Vec<Wire> {
 }
 
 fn poseidon_me(c: &PalBuilder, st: &mut [Wire; 12]) {
+    // M4 tensor P3: transpose lanes, apply P3 tensor M4, transpose back.
+    *st = [st[0], st[3], st[6], st[9], st[1], st[4], st[7], st[10], st[2], st[5], st[8], st[11]];
     let mut ys = *st;
     for row in ys.chunks_exact_mut(4) {
         let old: [Wire; 4] = core::array::from_fn(|i| row[i]);
@@ -1252,11 +1254,12 @@ fn poseidon_me(c: &PalBuilder, st: &mut [Wire; 12]) {
     for (i, x) in st.iter_mut().enumerate() {
         *x = c.add(ys[i], c.add(c.add(ys[i % 4], ys[i % 4 + 4]), ys[i % 4 + 8]));
     }
+    *st = [st[0], st[4], st[8], st[1], st[5], st[9], st[2], st[6], st[10], st[3], st[7], st[11]];
 }
 
 fn poseidon_mi(c: &PalBuilder, st: &mut [Wire; 12]) {
     let s = st.iter().copied().reduce(|a, b| c.add(a, b)).unwrap();
-    st[0] = c.sub(s, c.scale(st[0], 2));
+    st[0] = c.sub(s, c.scale(st[0], 64));
     st[1] = c.add(s, st[1]);
     for (i, x) in st.iter_mut().enumerate().skip(2) {
         *x = c.add(s, c.scale(*x, 1 << (i - 1)));
@@ -1619,17 +1622,25 @@ fn simulate_pallas(c: &PallasOwnershipCircuit, seeds: [[u8; 32]; 3]) -> [PartyVi
     views
 }
 
-fn replay_pallas(
+fn replay_pallas_with_scratch(
     c: &PallasOwnershipCircuit,
     rep: usize,
     view: &OpenedRepetitionView,
+    wires: &mut [PalWires; 2],
 ) -> Result<(), MigrateError> {
     let e = view.opened_e as usize;
     let mut tapes = view.pair.each_ref().map(|v| PalTape::new(&v.seed));
     let mut inputs = view.pair.each_ref().map(|v| v.inputs.as_slice());
-    let mut products = view.pair.each_ref().map(|v| PalPackedReader::new(&v.products));
-    let mut wires: [PalWires; 2] =
-        core::array::from_fn(|_| PalWires(Vec::with_capacity(c.nodes.len())));
+    let mut products = view
+        .pair
+        .each_ref()
+        .map(|v| PalPackedReader::new(&v.products));
+    for wire in wires.iter_mut() {
+        for value in &mut wire.0 {
+            ct_zeroize_u64s(value);
+        }
+        wire.0.clear();
+    }
     for (gate_idx, node) in c.nodes.iter().enumerate() {
         let d = node.domain;
         let values = match node.op {
@@ -1910,8 +1921,14 @@ pub fn verify_pallas_migration_with_backend<B: AcceleratorBackend>(
     }
     let dummy_one = [1u8; 32];
     let circuit = build_pallas_ownership_circuit(statement, expected_affine, &dummy_one, &[0; 32]);
-    for res in crate::parallel::map(MIT_REPETITIONS, |rep| {
-        replay_pallas(&circuit, rep, &proof.repetitions[rep])
+    let workers = crate::parallel::workers(MIT_REPETITIONS);
+    let chunk = MIT_REPETITIONS.div_ceil(workers);
+    for res in crate::parallel::map(workers, |worker| {
+        let mut wires = core::array::from_fn(|_| PalWires(Vec::with_capacity(circuit.nodes.len())));
+        for rep in worker * chunk..((worker + 1) * chunk).min(MIT_REPETITIONS) {
+            replay_pallas_with_scratch(&circuit, rep, &proof.repetitions[rep], &mut wires)?;
+        }
+        Ok::<(), MigrateError>(())
     }) {
         res?;
     }
@@ -2082,5 +2099,17 @@ mod tests {
                 Ok(())
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod poseidon2_canonical_kat {
+    use super::*;
+    #[test]
+    fn migration_poseidon2_circuit_matches_canonical_kat() {
+        let c = PalBuilder::default();
+        let mut st = core::array::from_fn(|i| c.small(PalDom::Gold, i as u64));
+        poseidon_perm(&c, &mut st);
+        assert_eq!(st.map(|w| c.value(w)[0]), [13782584570844608145, 13136387643152332171, 7171133015474200819, 7643370872200861694, 14144755201299840503, 16470027036684692562, 1748465969625202405, 1718729118078964347, 6141020819996733037, 16322330185628708898, 11650380702735067362, 2734959974607798415]);
     }
 }

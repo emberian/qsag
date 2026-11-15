@@ -450,7 +450,7 @@ pub fn intt_goldilocks(a: &mut [Goldilocks]) {
                 for sub in a.chunks_mut(chunk) {
                     crate::spawn_bounded(scope, move || {
                         for x in sub.iter_mut() {
-                            *x *= n_inv;
+                            *x = x.const_mul(n_inv);
                         }
                     });
                 }
@@ -472,7 +472,7 @@ pub fn intt_goldilocks(a: &mut [Goldilocks]) {
     }
     let n_inv = Goldilocks::from_u64_reduced(n as u64).inv();
     for x in a.iter_mut() {
-        *x *= n_inv;
+        *x = x.const_mul(n_inv);
     }
 }
 
@@ -518,8 +518,8 @@ pub fn encode_rs_coset_goldilocks(coeffs: &[Goldilocks], blowup: usize) -> Vec<G
                             let mut sp = Goldilocks::ONE;
                             for (i, &c) in coeffs.iter().enumerate() {
                                 let dst = i.reverse_bits() >> rev_shift_c;
-                                row[dst] = c * sp;
-                                sp *= s_r;
+                                row[dst] = c.const_mul(sp);
+                                sp = sp.const_mul(s_r);
                             }
                             let mut len = 2;
                             let mut stage = 1;
@@ -551,8 +551,8 @@ pub fn encode_rs_coset_goldilocks(coeffs: &[Goldilocks], blowup: usize) -> Vec<G
                                 let mut sp = s_r.pow((ti * sub_c) as u64);
                                 crate::spawn_bounded(inner, move || {
                                     for (d, &c) in dst_s.iter_mut().zip(src_s.iter()) {
-                                        *d = c * sp;
-                                        sp *= s_r;
+                                        *d = c.const_mul(sp);
+                                        sp = sp.const_mul(s_r);
                                     }
                                 });
                             }
@@ -615,8 +615,8 @@ pub fn encode_rs_coset_goldilocks(coeffs: &[Goldilocks], blowup: usize) -> Vec<G
     let shift = Goldilocks::NON_RESIDUE;
     let mut shift_pow = Goldilocks::ONE;
     for (i, &c) in coeffs.iter().enumerate() {
-        buf[i] = c * shift_pow;
-        shift_pow *= shift;
+        buf[i] = c.const_mul(shift_pow);
+        shift_pow = shift_pow.const_mul(shift);
     }
     ntt_goldilocks(&mut buf);
     buf
