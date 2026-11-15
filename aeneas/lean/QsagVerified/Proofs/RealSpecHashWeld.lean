@@ -1,7 +1,7 @@
 module
 import all QsagVerified.Funs
 public import QsagVerified.Proofs.PantsAndQuorumGuards
-public import Qsag.HashSigs
+public import Qsag.Protocol.Signing.HashSigs
 
 /-!
 This file welds the WOTS+C digit predicate, including both acceptance and rejection.

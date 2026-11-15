@@ -47,7 +47,9 @@ mod linux {
     use qsag_core::preprocessing::PartyPrivateRng;
     use qsag_core::rss256::Rss256Engine;
     use qsag_quorum::quorum_jorts::grind;
-    use qsag_quorum::volatile_coupon::mint::{AuthenticatedWaistband, MintPlan, PendingCouponBatch};
+    use qsag_quorum::volatile_coupon::mint::{
+        AuthenticatedWaistband, MintPlan, PendingCouponBatch,
+    };
     use qsag_quorum::volatile_coupon::{
         BaggyV2Sig, CertifiedCoupon, CouponError, CouponPool, InitiatorKey, LockedBytes,
         ProtectedMintProcess, SHARE_BYTES, SignRequest, baggy_v2_verify, combine,
@@ -101,8 +103,10 @@ inside this one process.
   --vault-dir <dir>         directory holding coupon-root-party-{0,1,2}.sk
   --members <i,j,..>        the coupon's fixed subset: at least two increasing party indices
   --parties <n>             size of the roster the indices refer to (default 3)
-  --coupons <n>             coupons to mint; each takes tens of seconds of MPC
-  --ttl-secs <s>            lifetime: coupons and their signatures expire s seconds from now
+  --coupons <n>             coupons to mint; each takes about a minute of MPC, more for a
+                            larger subset
+  --ttl-secs <s>            lifetime: coupons and their signatures expire s seconds from now;
+                            the time spent minting counts against it
   --waistband-layers <0..4> top root layers to precompute and cache in memory (default 0);
                             worth its cost only for batches of a dozen coupons or more
   --passphrase-env <VAR> / --passphrase-file <PATH>  unlock sealed party seeds
@@ -287,7 +291,9 @@ signature stops verifying when its coupon expires.
         if args.flag("json") {
             print!("{}", public.to_pretty());
         } else {
-            println!("generated 2-of-3 Baggy coupon root ({params_name}) in {vault_dir} -> {public_out}");
+            println!(
+                "generated 2-of-3 Baggy coupon root ({params_name}) in {vault_dir} -> {public_out}"
+            );
         }
         Ok(())
     }
@@ -456,7 +462,9 @@ signature stops verifying when its coupon expires.
                 .map_err(|e| coupon_error("combining the openings", e))?;
             drop(openings);
             if !baggy_v2_verify(&self.parent, &self.params, &message, &signature) {
-                return Err(CliError::state("the combined coupon signature does not verify").into());
+                return Err(
+                    CliError::state("the combined coupon signature does not verify").into(),
+                );
             }
             let wire = signature
                 .to_wire_bytes()

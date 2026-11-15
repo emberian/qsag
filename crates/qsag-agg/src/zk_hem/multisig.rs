@@ -130,6 +130,10 @@ impl Policy {
             || threshold == 0
             || threshold as usize > members.len()
             || members.iter().any(|pk| pk.profile != AggSigProfile::JortsPoseidon2)
+            || members
+                .iter()
+                .enumerate()
+                .any(|(i, pk)| members[..i].contains(pk))
         {
             return Err(MultisigError::InvalidPolicy);
         }

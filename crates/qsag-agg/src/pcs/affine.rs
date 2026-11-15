@@ -16,6 +16,7 @@ fn monomial_table_core(point: &[E]) -> Vec<E> {
 }
 
 pub(super) fn monomial_table(point: &[E]) -> Vec<E> {
+    let _phase = crate::profile::span("monomial_table");
     #[cfg(feature = "std")]
     if point.len() >= 14 {
         let workers = crate::parallel_pow2_workers(1usize << (point.len() - 10));

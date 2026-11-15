@@ -3,8 +3,8 @@ module
 public import Aeneas
 public import QsagVerified.Types
 public import QsagVerified.Funs
-public import Qsag.Keccak
-public import Qsag.BinaryTower
+public import Qsag.Oracle.Keccak
+public import Qsag.Math.BinaryTower
 public import QsagVerifiedChallengeDefs2
 
 public section

@@ -6,7 +6,7 @@ import re
 import struct
 
 root = Path(__file__).resolve().parents[1]
-source = (root / 'Qsag/CompiledRlibFixtures.lean').read_text()
+source = (root / 'Qsag/Machine/CompiledRlibFixtures.lean').read_text()
 
 def slices(arch):
     length = int(re.search(rf'def {arch}RlibArchiveLen : Nat := (\d+)', source).group(1))
@@ -72,4 +72,4 @@ for arch, count in [('x86', 16), ('aarch64', 7)]:
     code := {byte_list(code)} }}''')
     out += ',\n'.join(records) + '\n]\n\n'
 out += 'end Qsag\n'
-(root / 'Qsag/ElfFixtureSlices.lean').write_text(out)
+(root / 'Qsag/Machine/ElfFixtureSlices.lean').write_text(out)

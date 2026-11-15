@@ -70,7 +70,7 @@ def run : IO Unit := do
     let b := lane (n+4)
     let c := lane (n+8)
     emit s!"poseidon {n}" (csv ((poseidon2Perm12 ⟨a,b,c⟩).toList.map (·.val)))
-    emit s!"compress {n}" (laneOut (poseidon2Compress12FF a b c))
+    emit s!"compress {n}" (laneOut (poseidon2CompressWeighted ⟨a,b,c⟩))
     emit s!"tree {n}" (laneOut (merkleNodeHash (Goldilocks.ofNat 42) c 1 0x123456789abcdef0 3 7 a b))
   for n in [16,24,32] do
     for value in [0,27,255] do

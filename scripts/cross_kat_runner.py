@@ -15,6 +15,10 @@ and does not certify that the full crate builds. The default always builds the u
 Intermediate tower inverses use Tower128's subfield embedding, independently
 of Lean's recursive norm inversion. Zero inverse is normalized to zero.
 Temporary sources/build products are owned by this process and cleaned on exit.
+
+Poseidon2-12 is checked three ways: every Lean `poseidon`/`compress` row and the committed KAT
+fixtures are also compared with an independent dense-matrix reference of the canonical profile.
+`--check-poseidon2-fixtures` runs the fixture half alone, with no build, on any OS.
 """
 import argparse
 from collections import Counter
@@ -68,6 +72,115 @@ fn main(){for line in io::stdin().lock().lines(){let line=line.unwrap();println!
 EXPECTED = {"gold": 24, "ext2": 25, "ext4": 25, "tower": 60,
             "shake": 24, "cshake": 72, "keccak": 4, "poseidon": 3,
             "compress": 3, "tree": 3, "wotsplus": 9, "wotsc": 4, "adrs": 21}
+
+
+# Independent reference for the canonical Poseidon2-12 profile over Goldilocks, as dense matrices:
+#   M_E = M_4 (x) P_3 in flattened lane order (lane 3a+b pairs M_4 row a with P_3 row b),
+#         M_4 = circ(2,3,1,1), P_3 = circ(2,1,1);
+#   M_I = J + diag(-64, 1, 2, 4, ..., 1024);
+#   4 + 22 + 4 rounds of x^7 with the POS2_GL1 round-constant generator;
+#   compress(in0, in1, tweak) = perm(in0 || in1 || tweak)[0..4] + in0 + 2*in1 + 4*tweak.
+# It shares no code with the Lean specification or the Rust kernels it is compared against.
+P2_P = 2**64 - 2**32 + 1
+P2_IV = 0x504f53325f474c31  # "POS2_GL1"
+P2_M4 = [[2, 3, 1, 1], [1, 2, 3, 1], [1, 1, 2, 3], [3, 1, 1, 2]]
+P2_ME = [[P2_M4[i // 3][j // 3] * (2 if i % 3 == j % 3 else 1) for j in range(12)] for i in range(12)]
+P2_MI = [[1 + ((-64 if i == 0 else 1 << (i - 1)) if i == j else 0) for j in range(12)] for i in range(12)]
+P2_EMPTY_HASH32 = "b6a8416a0036177c167477c74bfdca917b0d73c8ba8fcf42a2a1c609dc25b0a2"
+
+
+def p2_mul(matrix, x):
+    return [sum(a * b for a, b in zip(row, x)) % P2_P for row in matrix]
+
+
+def p2_mix(x):
+    x = (x + 0x9e3779b97f4a7c15) & (2**64 - 1)
+    x = ((x ^ (x >> 30)) * 0xbf58476d1ce4e5b9) & (2**64 - 1)
+    x = ((x ^ (x >> 27)) * 0x94d049bb133111eb) & (2**64 - 1)
+    return x ^ (x >> 31)
+
+
+def p2_rc(phase, rnd, lane):
+    return p2_mix(p2_mix(p2_mix(P2_IV ^ phase) ^ rnd) ^ lane) % P2_P
+
+
+def p2_perm(x):
+    x = p2_mul(P2_ME, [v % P2_P for v in x])
+    for phase, rounds in ((0, 4), (1, 22), (2, 4)):
+        for rnd in range(rounds):
+            if phase == 1:
+                x[0] = pow((x[0] + p2_rc(1, rnd, 0)) % P2_P, 7, P2_P)
+                x = p2_mul(P2_MI, x)
+            else:
+                x = p2_mul(P2_ME, [pow((v + p2_rc(phase, rnd, i)) % P2_P, 7, P2_P) for i, v in enumerate(x)])
+    return x
+
+
+def p2_compress(x):
+    x = [v % P2_P for v in x]
+    return [(v + x[i] + 2 * x[4 + i] + 4 * x[8 + i]) % P2_P for i, v in enumerate(p2_perm(x)[:4])]
+
+
+def p2_hash32(msg):
+    msg = msg + b"\x01"
+    msg += b"\0" * (-len(msg) % 7)
+    limbs = [int.from_bytes(msg[i:i + 7], "big") for i in range(0, len(msg), 7)]
+    pad = (8 - (len(limbs) + 1) % 8) % 8
+    limbs += [2**56 + 1] if pad == 0 else [1] + [0] * (pad - 1) + [2**56]
+    x = [0] * 8 + [8, 4, 32, P2_IV]
+    for i in range(0, len(limbs), 8):
+        x = p2_perm([(x[j] + limbs[i + j]) % P2_P for j in range(8)] + x[8:])
+    return b"".join(v.to_bytes(8, "big") for v in x[:4]).hex()
+
+
+def poseidon2_reference_checks(rows):
+    """Compare every Lean `poseidon`/`compress` row with the reference; returns the count."""
+    if p2_hash32(b"") != P2_EMPTY_HASH32:
+        raise ValueError("Poseidon2 reference does not reproduce the canonical empty hash32")
+    checked = 0
+    for request, lean in rows:
+        op, _, arg = request.partition(" ")
+        if op in ("poseidon", "compress"):
+            state = [int(arg) + i for i in range(12)]
+            want = ",".join(map(str, (p2_perm if op == "poseidon" else p2_compress)(state)))
+            if lean != want:
+                raise ValueError(f"Lean is off the canonical Poseidon2-12 profile at {request!r}: "
+                                 f"Lean={lean!r}, reference={want!r}")
+            checked += 1
+    if checked != EXPECTED["poseidon"] + EXPECTED["compress"]:
+        raise ValueError(f"Poseidon2 reference covered {checked} rows")
+    return checked
+
+
+def poseidon2_fixture_checks(root):
+    """Check the committed Poseidon2 KAT fixtures against the reference. Needs no build."""
+    failures, checked = [], 0
+
+    def expect(where, got, want):
+        nonlocal checked
+        checked += 1
+        if got != want:
+            failures.append(f"{where}: fixture={got!r}, canonical={want!r}")
+
+    label = b"qsag-poseidon2-kat"
+    for path in ("tests/kat_vectors.json", "validation/tests/fixtures/lean_kat_snapshot.json"):
+        kat = json.loads((root / path).read_text())["poseidon2_goldilocks_12"]
+        expect(f"{path}: perm_zero", kat["perm_zero"], [str(v) for v in p2_perm([0] * 12)])
+        expect(f"{path}: perm_seq_0_11", kat["perm_seq_0_11"], [str(v) for v in p2_perm(list(range(12)))])
+        for key, msg in (("hash32_empty", b""), ("hash32_00", b"\0"),
+                         ("hash32_010203", b"\x01\x02\x03"), ("hash32_label", label)):
+            expect(f"{path}: {key}", kat[key], p2_hash32(msg))
+    path = "validation/tests/fixtures/lean_external_oracle_vectors.json"
+    oracle = json.loads((root / path).read_text())
+    for i, row in enumerate(oracle["poseidon2_12"]):
+        expect(f"{path}: poseidon2_12[{i}].perm", row["perm"],
+               [str(v) for v in p2_perm([int(v) for v in row["input"]])])
+    for i, row in enumerate(oracle["poseidon2_hash32"]):
+        expect(f"{path}: poseidon2_hash32[{i}]", row["poseidon2_hash32_hex"],
+               p2_hash32(bytes.fromhex(row["msg_hex"])))
+    if failures:
+        raise ValueError("Poseidon2 fixtures are off the canonical profile:\n  " + "\n  ".join(failures))
+    return checked
 
 
 def bounded(command, cwd, **kwargs):
@@ -140,7 +253,15 @@ def main():
     parser.add_argument('--root', type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument('--isolate-agg-modules', action='store_true',
                         help='compile unmodified agg primitive modules under a minimal no_std facade')
+    parser.add_argument('--check-poseidon2-fixtures', action='store_true',
+                        help='only check committed Poseidon2 KAT fixtures against the reference (no build, any OS)')
     args = parser.parse_args()
+    if args.check_poseidon2_fixtures:
+        if p2_hash32(b"") != P2_EMPTY_HASH32:
+            raise ValueError("Poseidon2 reference does not reproduce the canonical empty hash32")
+        checked = poseidon2_fixture_checks(args.root.resolve())
+        print(json.dumps({'status': 'PASS', 'poseidon2_fixture_values': checked}, sort_keys=True))
+        return
     if platform.system() != 'Linux':
         parser.error('run on Linux; Lean and Cargo builds are forbidden on macOS')
     root = args.root.resolve()
@@ -149,6 +270,8 @@ def main():
     exe = root / 'lean/.lake/build/bin/qsag-kat'
     first = bounded([str(exe), "--cross-kat"], root, capture_output=True).stdout
     rows = parse_vectors(first)
+    reference_rows = poseidon2_reference_checks(rows)
+    reference_fixtures = poseidon2_fixture_checks(root)
     if first != bounded([str(exe), "--cross-kat"], root, capture_output=True).stdout:
         raise ValueError('Lean output is nondeterministic')
     # Use on-disk temporary storage; never /dev/shm, even if TMPDIR points there.
@@ -200,6 +323,8 @@ def main():
     print(json.dumps({'status': 'PASS', 'vectors': len(rows), 'coverage': EXPECTED,
                       'output_and_count_mutations_rejected': mutations,
                       'wotsc_invalid_digests_rejected': 3, 'lean_deterministic': True,
+                      'poseidon2_reference_rows': reference_rows,
+                      'poseidon2_fixture_values': reference_fixtures,
                       'isolated_agg_modules': args.isolate_agg_modules}, sort_keys=True))
 
 

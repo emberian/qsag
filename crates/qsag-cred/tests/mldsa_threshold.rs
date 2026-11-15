@@ -4,8 +4,9 @@ use qsag_cred::{
     MlDsaLevel, MpcTransport, MpcTransportError, NonceBurnPersistence, RoundInbox, RoundInfo,
     ThresholdMlDsaDkgConfig, ThresholdMlDsaError, ThresholdSignSession, ml_dsa_keygen_from_seed,
     ml_dsa_sign_deterministic, ml_dsa_verify, threshold_mldsa_dkg_party,
-    threshold_sign_mldsa_party,
+    threshold_mldsa_shamir_expand_party, threshold_sign_mldsa_party,
 };
+use qsag_cred::{ThresholdMlDsaSignerShare, ThresholdVerificationPack};
 use std::sync::{Arc, Barrier, Mutex};
 
 type Row = Option<(Vec<Vec<u8>>, Vec<u8>)>;
@@ -179,4 +180,155 @@ fn standard_fips204_remains_available() {
         assert!(ml_dsa_verify(level, &pk, b"standard signing", b"", &sig));
         assert!(!ml_dsa_verify(level, &pk, b"changed", b"", &sig));
     }
+}
+
+fn sign_with(
+    shares: &mut [ThresholdMlDsaSignerShare],
+    quorum: &[u16],
+    session: u8,
+) -> Vec<Result<Vec<u8>, ThresholdMlDsaError>> {
+    let request = ThresholdSignSession {
+        session_id: [session; 32],
+        quorum: quorum.to_vec(),
+    };
+    let states: Vec<_> = shares
+        .iter_mut()
+        .filter(|share| quorum.contains(&share.party_id()))
+        .map(|share| (share, Burn(Vec::new())))
+        .collect();
+    run(states, |me, (share, mut burn), net| {
+        threshold_sign_mldsa_party(
+            share,
+            &request,
+            b"eighteen custodians",
+            b"",
+            &[session ^ (me as u8 + 1); 32],
+            &mut burn,
+            net,
+        )
+        .map(|output| output.signature)
+    })
+}
+
+/// The Shamir ceremony: the sampling committee generates the key, then every
+/// custodian takes part in the expansion.
+fn shamir_ceremony(config: &ThresholdMlDsaDkgConfig) -> Vec<ThresholdMlDsaSignerShare> {
+    let committee = config.shamir_committee().unwrap();
+    let sampled: Vec<_> = run(committee.party_ids.clone(), |me, id, net| {
+        threshold_mldsa_dkg_party(&committee, id, &[me as u8 + 0x30; 32], net)
+    })
+    .into_iter()
+    .map(|share| Some(share.expect("committee key generation")))
+    .collect();
+    let states: Vec<_> = config
+        .party_ids
+        .iter()
+        .copied()
+        .zip(sampled.into_iter().chain(std::iter::repeat_with(|| None)))
+        .collect();
+    run(states, |me, (id, share), net| {
+        threshold_mldsa_shamir_expand_party(config, id, share, &[me as u8 + 0x50; 32], net)
+    })
+    .into_iter()
+    .map(|share| share.expect("Shamir expansion"))
+    .collect()
+}
+
+/// Eighteen custodians with privacy threshold three: the key is Shamir-shared, and
+/// any five custodians sign a standard FIPS 204 signature.
+#[test]
+fn eighteen_custodians_hold_shamir_shares_and_any_five_sign() {
+    let ids: Vec<u16> = (100..118).collect();
+    let config = ThresholdMlDsaDkgConfig {
+        level: MlDsaLevel::MlDsa44,
+        threshold: 3,
+        party_ids: ids.clone(),
+        session_id: [0x44; 32],
+    };
+    // The replicated ceremony refuses the committee before any network round.
+    assert!(matches!(
+        config.validate(),
+        Err(ThresholdMlDsaError::Mpc(_))
+    ));
+    assert_eq!(config.shamir_committee().unwrap().party_ids, ids[..5]);
+    let mut shares = shamir_ceremony(&config);
+    let pack = shares[0].verification_pack().clone();
+    assert_eq!(pack.party_ids, ids);
+    assert!(shares.iter().all(|s| s.is_shamir() && s.verification_pack() == &pack));
+    assert_eq!(
+        ThresholdVerificationPack::from_bytes(&pack.to_bytes()).unwrap(),
+        pack
+    );
+
+    // Four custodians are below the 2t - 1 quorum.
+    for result in sign_with(&mut shares, &[101, 107, 112, 117], 1) {
+        assert_eq!(
+            result,
+            Err(ThresholdMlDsaError::QuorumTooSmall { have: 4, need: 5 })
+        );
+    }
+
+    // Five custodians, four of them outside the sampling committee.
+    let quorum = [103u16, 106, 109, 113, 117];
+    let signatures = sign_with(&mut shares, &quorum, 2);
+    for signature in &signatures {
+        let signature = signature.as_ref().expect("threshold signing");
+        assert!(ml_dsa_verify(
+            MlDsaLevel::MlDsa44,
+            &pack.pk_bytes,
+            b"eighteen custodians",
+            b"",
+            signature
+        ));
+    }
+
+    // A custodian that substitutes its share is caught before any mask is sampled:
+    // every honest custodian aborts with the same verdict.
+    let at = shares.iter().position(|s| s.party_id() == 109).unwrap();
+    let mut bytes = shares[at].to_shamir_bytes().unwrap();
+    let restored =
+        ThresholdMlDsaSignerShare::from_shamir_bytes(&bytes, pack.clone(), 109).unwrap();
+    assert_eq!(restored.to_shamir_bytes().unwrap(), bytes);
+    bytes[18 + 3 * 700] ^= 1;
+    shares[at] = ThresholdMlDsaSignerShare::from_shamir_bytes(&bytes, pack.clone(), 109).unwrap();
+    for result in sign_with(&mut shares, &quorum, 3) {
+        assert_eq!(result, Err(ThresholdMlDsaError::KeyShareInconsistent));
+    }
+}
+
+/// The committee bound itself: sixty-four custodians, and three of them sign.
+#[test]
+fn sixty_four_custodians_enroll_and_three_sign() {
+    let config = ThresholdMlDsaDkgConfig {
+        level: MlDsaLevel::MlDsa44,
+        threshold: 2,
+        party_ids: (1..=64).collect(),
+        session_id: [0x64; 32],
+    };
+    let mut shares = shamir_ceremony(&config);
+    assert_eq!(shares.len(), 64);
+    let pk = shares[0].verification_pack().pk_bytes.clone();
+    for signature in sign_with(&mut shares, &[6, 41, 64], 4) {
+        assert!(ml_dsa_verify(
+            MlDsaLevel::MlDsa44,
+            &pk,
+            b"eighteen custodians",
+            b"",
+            &signature.expect("threshold signing")
+        ));
+    }
+    // Sixty-five custodians, or a quorum above the session engine, are refused.
+    let too_many = ThresholdMlDsaDkgConfig {
+        party_ids: (1..=65).collect(),
+        ..config.clone()
+    };
+    assert!(too_many.validate_shamir().is_err());
+    let too_wide = ThresholdMlDsaDkgConfig {
+        threshold: 9,
+        ..config
+    };
+    assert!(matches!(
+        too_wide.validate_shamir(),
+        Err(ThresholdMlDsaError::Mpc(_))
+    ));
 }

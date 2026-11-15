@@ -616,6 +616,74 @@ fn gf128_mul(a: u128, b: u128) -> u128 {
 }
 
 /// Stream deterministic `u64` words from `SHAKE256` over framed inputs.
+/// The byte string [`expand_u64_stream`] absorbs for `(domain, parts)`.
+fn stream_message(domain: &[u8], parts: &[&[u8]]) -> SecretBuffer<Vec<u8>> {
+    let mut msg = SecretBuffer(Vec::with_capacity(
+        8 + domain.len() + parts.iter().map(|p| 8 + p.len()).sum::<usize>(),
+    ));
+    for part in core::iter::once(&domain).chain(parts.iter()) {
+        msg.extend_from_slice(&(part.len() as u64).to_be_bytes());
+        msg.extend_from_slice(part);
+    }
+    msg
+}
+
+/// [`expand_u64_stream`] for up to eight inputs of one length at once: `outs[i]` receives the
+/// stream of `msgs[i]` (built by [`stream_message`]), all on one eight-way `Keccak-f[1600]`.
+/// The column streams of a correlated-OT extension are 384 such streams of equal shape.
+fn expand_u64_streams_x8(
+    msgs: &[SecretBuffer<Vec<u8>>],
+    outs: &mut [&mut [u64]],
+    backend: qsag_asm::SimdBackend,
+) {
+    const RATE: usize = 136;
+    let lanes = msgs.len();
+    assert!((1..=8).contains(&lanes) && outs.len() == lanes);
+    let len = msgs[0].len();
+    let words = outs[0].len();
+    assert!(msgs.iter().all(|m| m.len() == len) && outs.iter().all(|o| o.len() == words));
+
+    let mut st = qsag_asm::KeccakState8x::default();
+    let mut block = SecretBuffer([[0u8; RATE]; 8]);
+    let mut offset = 0;
+    loop {
+        let take = (len - offset).min(RATE);
+        for (blk, msg) in block.iter_mut().zip(msgs) {
+            *blk = [0u8; RATE];
+            blk[..take].copy_from_slice(&msg[offset..offset + take]);
+            if take < RATE {
+                // SHAKE256 padding in the last block.
+                blk[take] ^= 0x1f;
+                blk[RATE - 1] ^= 0x80;
+            }
+        }
+        for (w, lane) in st.0.iter_mut().enumerate().take(RATE / 8) {
+            for (slot, blk) in lane.iter_mut().zip(block.iter()).take(lanes) {
+                *slot ^= u64::from_le_bytes(core::array::from_fn(|i| blk[8 * w + i]));
+            }
+        }
+        qsag_asm::keccak_f1600_x8_with_backend(&mut st, backend);
+        offset += take;
+        if take < RATE {
+            break;
+        }
+    }
+    let mut written = 0;
+    while written < words {
+        let n = (words - written).min(RATE / 8);
+        for (w, lane) in st.0.iter().enumerate().take(n) {
+            for (out, &val) in outs.iter_mut().zip(lane.iter()) {
+                out[written + w] = val;
+            }
+        }
+        written += n;
+        if written < words {
+            qsag_asm::keccak_f1600_x8_with_backend(&mut st, backend);
+        }
+    }
+    qsag_asm::volatile_fill(&mut st.0, [0u64; 8]);
+}
+
 fn expand_u64_stream(domain: &[u8], parts: &[&[u8]], out: &mut [u64]) {
     let mut xof = Cshake256Xof::new_shake256();
     for part in core::iter::once(&domain).chain(parts.iter()) {
@@ -772,51 +840,45 @@ impl PairwiseSubfieldVole {
         let ctr_le = ext_ctr.to_le_bytes();
 
         let mut t0_cols = SecretBuffer(vec![vec![0u64; total_words]; 128]);
+        let mut t1_cols = SecretBuffer(vec![vec![0u64; total_words]; 128]);
         let mut q_cols = SecretBuffer(vec![vec![0u64; total_words]; 128]);
         let mut u_cols = vec![vec![0u64; total_words]; 128];
-        let mut t1_tmp = SecretBuffer(vec![0u64; total_words]);
 
-        for col in 0..128 {
-            let col_le = (col as u64).to_le_bytes();
-            expand_u64_stream(
-                TAG_ABIT_COL,
-                &[
-                    session_id,
-                    &holder_le,
-                    &owner_le,
-                    &ctr_le,
-                    &col_le,
-                    &self.seeds0[col],
-                ],
-                &mut t0_cols[col],
-            );
-            expand_u64_stream(
-                TAG_ABIT_COL,
-                &[
-                    session_id,
-                    &holder_le,
-                    &owner_le,
-                    &ctr_le,
-                    &col_le,
-                    &self.seeds1[col],
-                ],
-                &mut t1_tmp,
-            );
-            for w in 0..total_words {
-                u_cols[col][w] = t0_cols[col][w] ^ t1_tmp[w] ^ full_owner[w];
+        // Three streams per column (the two sender seeds and the receiver's chosen seed),
+        // eight columns per permutation.
+        let backend = qsag_asm::detect_backend();
+        for base in (0..128).step_by(8) {
+            for (seeds, cols) in [
+                (&self.seeds0, &mut t0_cols),
+                (&self.seeds1, &mut t1_cols),
+                (&self.chosen, &mut q_cols),
+            ] {
+                let msgs: Vec<SecretBuffer<Vec<u8>>> = (base..base + 8)
+                    .map(|col| {
+                        stream_message(
+                            TAG_ABIT_COL,
+                            &[
+                                session_id,
+                                &holder_le,
+                                &owner_le,
+                                &ctr_le,
+                                &(col as u64).to_le_bytes(),
+                                &seeds[col],
+                            ],
+                        )
+                    })
+                    .collect();
+                let mut outs: Vec<&mut [u64]> = cols[base..base + 8]
+                    .iter_mut()
+                    .map(Vec::as_mut_slice)
+                    .collect();
+                expand_u64_streams_x8(&msgs, &mut outs, backend);
             }
-            expand_u64_stream(
-                TAG_ABIT_COL,
-                &[
-                    session_id,
-                    &holder_le,
-                    &owner_le,
-                    &ctr_le,
-                    &col_le,
-                    &self.chosen[col],
-                ],
-                &mut q_cols[col],
-            );
+        }
+        for col in 0..128 {
+            for w in 0..total_words {
+                u_cols[col][w] = t0_cols[col][w] ^ t1_cols[col][w] ^ full_owner[w];
+            }
             let d_bit = ((black_box(self.delta_holder) >> col) & 1) as u64;
             let d_mask = 0u64.wrapping_sub(d_bit);
             for w in 0..total_words {
@@ -835,7 +897,6 @@ impl PairwiseSubfieldVole {
         for col in q_cols.iter_mut() {
             wipe_u64s(col);
         }
-        wipe_u64s(&mut t1_tmp);
 
         // Holder samples `chi_seed` strictly after `u_cols` is locked.
         let chi_seed = holder_rng.next_bytes32();
@@ -3760,6 +3821,35 @@ pub fn refresh_staged_bft_shamir_keys(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn eight_way_stream_expansion_equals_the_scalar_stream() {
+        let backend = qsag_asm::detect_backend();
+        // Message lengths around the 136-byte block boundary, outputs around the 17-word one.
+        for extra in [0usize, 1, 60, 97, 98, 99, 233, 234, 235] {
+            for words in [1usize, 16, 17, 18, 34, 35, 300] {
+                for lanes in [1usize, 3, 8] {
+                    let tails: Vec<Vec<u8>> = (0..lanes)
+                        .map(|l| (0..extra).map(|i| (i as u8).wrapping_mul(31) ^ l as u8).collect())
+                        .collect();
+                    let lane_ids: Vec<[u8; 8]> =
+                        (0..lanes).map(|l| (l as u64).to_le_bytes()).collect();
+                    let msgs: Vec<SecretBuffer<Vec<u8>>> = (0..lanes)
+                        .map(|l| stream_message(b"x8-test", &[&lane_ids[l], &tails[l]]))
+                        .collect();
+                    let mut got = vec![vec![0u64; words]; lanes];
+                    let mut outs: Vec<&mut [u64]> =
+                        got.iter_mut().map(Vec::as_mut_slice).collect();
+                    expand_u64_streams_x8(&msgs, &mut outs, backend);
+                    for l in 0..lanes {
+                        let mut want = vec![0u64; words];
+                        expand_u64_stream(b"x8-test", &[&lane_ids[l], &tails[l]], &mut want);
+                        assert_eq!(got[l], want, "extra {extra} words {words} lane {l}");
+                    }
+                }
+            }
+        }
+    }
     use crate::party_node::{IsolatedJortsParty, IsolatedQuorumParty};
     use crate::quorum_jorts::{
         BftShamirJorts, CommitteePartitionedJorts, LatchCertificate, QuorumJortsSig, chain_step,

@@ -40,6 +40,14 @@
 //! still controls arithmetic parallelism inside it. Increasing prover jobs trades memory
 //! for cross-batch concurrency. This bounds active witnesses, not each witness's byte size;
 //! `HemAggConfig::max_shards_per_batch` separately controls joint-batch width.
+//!
+//! # Zero-knowledge relations
+//!
+//! [`zk_hem::protocol`] is a separate zero-knowledge argument over the same commitment scheme
+//! for relations built from S-box and multiplication rows ([`zk_hem::relation`]). Sumcheck
+//! masks and companion words are committed with the witness, and WHIR opens only their blend.
+//! [`zk_hem::blind_vc`] and [`zk_hem::multisig`] are the two relations defined on it. Aggregate
+//! proofs above are not zero-knowledge and do not use it.
 
 #![no_std]
 #![forbid(unsafe_code)]

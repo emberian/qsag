@@ -9,6 +9,10 @@ export SWARM_MEM_MAX=${SWARM_MEM_MAX:-8G}
 export MALLOC_ARENA_MAX=${MALLOC_ARENA_MAX:-2}
 filters=(
     zk_hem::tests
+    zk_hem::relation::tests
+    zk_hem::protocol::tests
+    zk_hem::blind_vc::tests
+    zk_hem::multisig::tests
     recursion_census::tests
     recursive_fold::tests
     pcs::pcs_unit_tests::security_regimes_roundtrip_and_query_budgets
@@ -31,4 +35,4 @@ swarm-build timeout 600s cargo clippy -p qsag-agg --all-targets --no-deps -- -D 
     > logs/astra-clippy.log 2>&1
 swarm-build timeout 600s cargo check -p qsag-agg --no-default-features \
     > logs/astra-nostd.log 2>&1
-echo 'Targeted zk-Hem components, child PCS, hierarchy boundary, clippy and no_std checks passed.'
+echo 'Targeted zk-Hem algebra, committed protocol and applications, child PCS, hierarchy boundary, clippy and no_std checks passed.'

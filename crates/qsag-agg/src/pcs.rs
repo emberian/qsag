@@ -2120,10 +2120,6 @@ pub struct HemWhirProverState {
     pub hypercube_evals: Vec<Vec<Goldilocks>>,
     /// Stage-0 Reed–Solomon codewords, one per committed polynomial.
     pub codewords_0: Vec<Vec<Goldilocks>>,
-    /// Monomial coefficients of each polynomial, kept from the commitment's encoding so the
-    /// opening does not repeat the Möbius transform. Empty when the commitment did not run on
-    /// the CPU; the opening then derives them from `hypercube_evals`.
-    pub monomial_coeffs: Vec<Vec<Goldilocks>>,
     pub salt_seed: [u8; 32],
     pub tree_0: MerkleCanopyTree,
     #[cfg(feature = "vulkan")]
@@ -3286,7 +3282,6 @@ pub(crate) fn whir_commit_batch_owned_with_schedule_and_extra_vram(
                         group_arity_0,
                         hypercube_evals: polys,
                         codewords_0: Vec::new(),
-                        monomial_coeffs: Vec::new(),
                         salt_seed: *salt_seed,
                         tree_0,
                         gpu_session: Some(session),
@@ -3300,7 +3295,7 @@ pub(crate) fn whir_commit_batch_owned_with_schedule_and_extra_vram(
     #[cfg(not(feature = "vulkan"))]
     let _ = extra_witness_words;
 
-    let (codewords_0, tree_0, monomial_coeffs) =
+    let (codewords_0, tree_0) =
         build_cpu_round0(&polys, salt_seed, schedule.regime, st0.blowup, group_arity_0);
     let comm = tree_0.commitment();
     (
@@ -3311,7 +3306,6 @@ pub(crate) fn whir_commit_batch_owned_with_schedule_and_extra_vram(
             group_arity_0,
             hypercube_evals: polys,
             codewords_0,
-            monomial_coeffs,
             salt_seed: *salt_seed,
             tree_0,
             #[cfg(feature = "vulkan")]
@@ -3326,14 +3320,13 @@ fn build_cpu_round0(
     regime: WhirSecurityRegime,
     blowup: usize,
     group_arity_0: usize,
-) -> (Vec<Vec<Goldilocks>>, MerkleCanopyTree, Vec<Vec<Goldilocks>>) {
+) -> (Vec<Vec<Goldilocks>>, MerkleCanopyTree) {
     let encode = |evals: &Vec<Goldilocks>| {
         let coeffs = hypercube_to_monomial_coeffs(evals);
-        let codeword = encode_rs_coset_goldilocks(&coeffs, blowup);
-        (codeword, coeffs)
+        encode_rs_coset_goldilocks(&coeffs, blowup)
     };
     #[cfg(feature = "std")]
-    let encoded: Vec<(Vec<Goldilocks>, Vec<Goldilocks>)> = if polys.len() > 1 && crate::parallel_workers() > 1 {
+    let codewords_0: Vec<Vec<Goldilocks>> = if polys.len() > 1 && crate::parallel_workers() > 1 {
         std::thread::scope(|scope| {
             let handles: Vec<_> = polys
                 .iter()
@@ -3345,12 +3338,11 @@ fn build_cpu_round0(
         polys.iter().map(encode).collect()
     };
     #[cfg(not(feature = "std"))]
-    let encoded: Vec<(Vec<Goldilocks>, Vec<Goldilocks>)> = polys.iter().map(encode).collect();
-    let (codewords_0, monomial_coeffs): (Vec<Vec<Goldilocks>>, Vec<Vec<Goldilocks>>) =
-        encoded.into_iter().unzip();
+    let codewords_0: Vec<Vec<Goldilocks>> = polys.iter().map(encode).collect();
     let domain_len = codewords_0[0].len();
     let num_groups = domain_len / group_arity_0;
 
+    let _phase = crate::profile::span("round0_merkle_tree");
     let tree_0 = if regime.uses_poseidon2_canopy() {
         MerkleCanopyTree::build_poseidon2(num_groups, 0, |g| {
             poseidon2_round0_leaf_from_codewords(
@@ -3370,7 +3362,7 @@ fn build_cpu_round0(
             round0_leaf_hash_x4(&codewords_0, salt_seed, base_g, num_groups, group_arity_0)
         })
     };
-    (codewords_0, tree_0, monomial_coeffs)
+    (codewords_0, tree_0)
 }
 
 /// Produce a `[P0-01]`-hardened `Hem` WHIR opening proof over `GoldilocksExt4` for one evaluation
@@ -3568,13 +3560,7 @@ pub fn whir_open_batch(
             .map(|w| hypercube_to_monomial_coeffs(w))
             .collect()
     };
-    let derived_monomial_polys;
-    let monomial_polys: &[Vec<Goldilocks>] = if state.monomial_coeffs.is_empty() {
-        derived_monomial_polys = derive_monomial_polys();
-        &derived_monomial_polys
-    } else {
-        &state.monomial_coeffs
-    };
+    let monomial_polys = derive_monomial_polys();
     let shifted_evals: Vec<_> = monomial_polys
         .iter()
         .map(|c| dot_base_ext4_fast(c, &kernel[1..1 + c.len()]))
@@ -3588,7 +3574,7 @@ pub fn whir_open_batch(
     let combined_claim = combine_claims(&weights, &common_point_evals, &shifted_evals);
     let opening = whir_open_core(
         state,
-        Some(monomial_polys),
+        Some(&monomial_polys),
         &weights,
         kernel,
         combined_claim,
@@ -3666,7 +3652,7 @@ fn whir_open_core(
     mut cur_sum_claim: GoldilocksExt4,
     transcript: &mut FiatShamirTranscript<InstanceBound>,
 ) -> HemWhirOpeningProof {
-    let lazy_cpu_r0: Option<(Vec<Vec<Goldilocks>>, MerkleCanopyTree, Vec<Vec<Goldilocks>>)> =
+    let lazy_cpu_r0: Option<(Vec<Vec<Goldilocks>>, MerkleCanopyTree)> =
         state.codewords_0.is_empty().then(|| {
             build_cpu_round0(
                 &state.hypercube_evals,
@@ -3677,7 +3663,7 @@ fn whir_open_core(
             )
         });
     let (codewords_0, tree_0): (&[Vec<Goldilocks>], &MerkleCanopyTree) = match &lazy_cpu_r0 {
-        Some((cws, tr, _)) => (cws.as_slice(), tr),
+        Some((cws, tr)) => (cws.as_slice(), tr),
         None => (state.codewords_0.as_slice(), &state.tree_0),
     };
 
@@ -3690,12 +3676,12 @@ fn whir_open_core(
     let fold_vars = state.num_vars - early_stop;
     absorb_whir_schedule(transcript, sched);
     let core_len = 1usize << state.num_vars;
+    let combine_phase = crate::profile::span("whir_open_combine_coeffs");
     let mut cur_coeffs = vec![GoldilocksExt4::ZERO; core_len + 2];
     for (poly_idx, (w, table)) in weights.iter().zip(&state.hypercube_evals).enumerate() {
         let owned_c;
         let c: &[Goldilocks] = match precomputed_monomial_polys {
             Some(pre) => &pre[poly_idx],
-            None if !state.monomial_coeffs.is_empty() => &state.monomial_coeffs[poly_idx],
             None => {
                 owned_c = hypercube_to_monomial_coeffs(table);
                 &owned_c
@@ -3731,6 +3717,8 @@ fn whir_open_core(
         }
         cur_coeffs[core_len] += w[1].mul_base(c[core_len - 1]);
     }
+    drop(combine_phase);
+    let ood_phase = crate::profile::span("whir_open_stage0_ood");
     let z_ood_0 = core::array::from_fn::<_, 2, _>(|_| transcript.squeeze_ext4(b"WHIR_OOD_CHAL"));
     let stage0_ood_evals = z_ood_0.map(|z| eval_univariate_ext4(&cur_coeffs, z));
     for e in stage0_ood_evals {
@@ -3741,6 +3729,7 @@ fn whir_open_core(
         add_geometric_scaled_in_place(&mut cur_k, xi, z);
         cur_sum_claim += xi * e;
     }
+    drop(ood_phase);
 
     let inv_two = Goldilocks::TWO.inv();
     let inv_zetas = build_inv_zetas();
@@ -3795,6 +3784,7 @@ fn whir_open_core(
             let cw_next = encode_overflow(&cur_coeffs, next_spec.blowup);
             let num_groups_next = cw_next.len() / next_arity;
             let next_stage_u8 = (stage_idx + 1) as u8;
+            let _tree_phase = crate::profile::span("whir_open_stage_tree_and_queries");
             let tree_next = build_ext4_stage_tree(
                 sched.regime,
                 next_stage_u8,

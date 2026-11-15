@@ -148,10 +148,8 @@ impl Created {
     /// Remove the file, but only while the name still refers to the inode created here: an
     /// entry that replaced it is never removed.
     fn discard(&self) {
-        if let (Ok(held), Ok(named)) = (
-            self.file.metadata(),
-            std::fs::symlink_metadata(&self.path),
-        ) && named.is_file()
+        if let (Ok(held), Ok(named)) = (self.file.metadata(), std::fs::symlink_metadata(&self.path))
+            && named.is_file()
             && file_identity(&held) == file_identity(&named)
         {
             let _ = std::fs::remove_file(&self.path);
@@ -195,8 +193,7 @@ pub fn replace(
 /// The caller holds the exclusive lock of `path`, so no live writer owns one. Best effort:
 /// a leftover is inert.
 pub fn remove_interrupted_replacements(path: &Path) {
-    let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str()))
-    else {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else {
         return;
     };
     let Ok(entries) = std::fs::read_dir(dir) else {

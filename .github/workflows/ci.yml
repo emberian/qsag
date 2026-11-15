@@ -411,7 +411,7 @@ jobs:
           set -euo pipefail
           python3 scripts/audit_elf_ct.py \
             --fixture-generation current --fixture-binding kernel-bytes \
-            --check-fixtures lean/Qsag/CompiledRlibFixtures.lean \
+            --check-fixtures lean/Qsag/Machine/CompiledRlibFixtures.lean \
             --fixture-x86-rlib target/ct-audit/release/libqsag_asm.rlib \
             --fixture-aarch64-rlib target/ct-audit/aarch64-unknown-linux-gnu/release/libqsag_asm.rlib
 

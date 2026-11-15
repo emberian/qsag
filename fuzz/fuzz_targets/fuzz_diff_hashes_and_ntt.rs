@@ -4,8 +4,8 @@
 //! Coverage-guided differential fuzzer cross-checking `qsag-asm`, `qsag-accel`, `qsag-core`,
 //! and `qsag-agg` hardware/SIMD kernels (`AVX-512` 8-way Keccak, `SHA-NI` SHA-256, `GFNI`
 //! `GF(2^8)`, `VPCLMULQDQ` `GF(2^128)`, `AVX-512` Seiler `ML-DSA` NTT, and `BMI2/ADX`
-//! `Goldilocks`) against independent upstream crates (`sha3`, `tiny-keccak`, `sha2`, `blake3`,
-//! `ghash`, and `p3-goldilocks`) on arbitrary fuzzer-synthesized inputs and slice alignments.
+//! `Goldilocks`) against independent upstream crates (`sha3`, `tiny-keccak`, `sha2`, `ghash`,
+//! and `p3-goldilocks`) on arbitrary fuzzer-synthesized inputs and slice alignments.
 
 use arbitrary::Arbitrary;
 use ghash::universal_hash::{KeyInit, UniversalHash};
@@ -16,7 +16,7 @@ use qsag_accel::keccak::{cshake256_framed_xof, keccak256, sha3_256, shake256_xof
 use qsag_accel::sha2::sha256;
 use qsag_asm::{
     SimdBackend, detect_backend, gf2_128_dot_with_backend, gf256_shamir_mac_with_backend,
-    goldilocks_mul_u64, keccak_f1600_batch, mldsa_inv_ntt_with_backend, mldsa_ntt_with_backend,
+    goldilocks_mul_ct, keccak_f1600_batch, mldsa_inv_ntt_with_backend, mldsa_ntt_with_backend,
     mldsa_pointwise_mul_with_backend, sha256_compress_blocks,
 };
 use qsag_core::field::goldilocks::Goldilocks as CoreGl;
@@ -47,7 +47,7 @@ fuzz_target!(|input: DiffFuzzInput| {
     aligned_buf[pad..pad + payload_cap].copy_from_slice(&input.payload[..payload_cap]);
     let msg = &aligned_buf[pad..pad + payload_cap];
 
-    // 2. SHA-256 (`SHA-NI`) vs RustCrypto `sha2::Sha256` & `blake3` sanity
+    // 2. SHA-256 (`SHA-NI`) vs RustCrypto `sha2::Sha256`
     let exp_sha256: [u8; 32] = sha2::Sha256::digest(msg).into();
     assert_eq!(sha256(msg), exp_sha256);
     if msg.len() >= 64 {
@@ -68,7 +68,6 @@ fuzz_target!(|input: DiffFuzzInput| {
         qsag_asm::sha256_compress_blocks_portable(&mut st_port, blocks);
         assert_eq!(st_hw, st_port);
     }
-    let _b3 = blake3::hash(msg);
 
     // 3. `SHA3-256`, `Keccak-256`, `SHAKE256`, and `cSHAKE256` vs `sha3` & `tiny-keccak`
     let exp_sha3: [u8; 32] = sha3::Sha3_256::digest(msg).into();
@@ -192,9 +191,7 @@ fuzz_target!(|input: DiffFuzzInput| {
         let pa_gl = P3Goldilocks::from_canonical_u64(a_raw % 0xFFFF_FFFF_0000_0001);
         let pb_gl = P3Goldilocks::from_canonical_u64(b_raw % 0xFFFF_FFFF_0000_0001);
         let q_mul = (qa * qb).to_canonical_u64();
-        let asm_mul =
-            CoreGl::from_u64_reduced(goldilocks_mul_u64(qa.to_canonical_u64(), qb.to_canonical_u64()))
-                .to_canonical_u64();
+        let asm_mul = goldilocks_mul_ct(qa.to_canonical_u64(), qb.to_canonical_u64());
         let p3_mul = (pa_gl * pb_gl).as_canonical_u64();
         assert_eq!(q_mul, p3_mul);
         assert_eq!(asm_mul, p3_mul);

@@ -915,6 +915,7 @@ impl<T: Transport> Engine<T> {
     }
 
     /// Session and channel keys, for starting this custodian's batch engines.
+    #[cfg(any(feature = "std", test))]
     pub(crate) fn custody(&self) -> ([u8; 32], [[u8; 32]; 2]) {
         (self.session, self.keys)
     }
@@ -2598,6 +2599,9 @@ impl<T: Transport> Core for Engine<T> {
     }
 }
 
+/// Per-word sums and the carry out of each word.
+pub(crate) type SumsAndCarries<B> = (Vec<Word<B>>, Word<B>);
+
 /// Backend-independent gadgets over any [`Core`] engine.
 pub(crate) trait Gadgets: Core {
     fn and(&mut self, pairs: &[(Self::Bit, Self::Bit)]) -> Result<Word<Self::Bit>, Error> {
@@ -2722,7 +2726,7 @@ pub(crate) trait Gadgets: Core {
         a_words: &[Word<Self::Bit>],
         b_words: &[Word<Self::Bit>],
         carry_mask: u64,
-    ) -> Result<(Vec<Word<Self::Bit>>, Word<Self::Bit>), Error> {
+    ) -> Result<SumsAndCarries<Self::Bit>, Error> {
         if a_words.is_empty() {
             return Ok((Vec::new(), SecretVec::new()));
         }
@@ -2761,7 +2765,7 @@ pub(crate) trait Gadgets: Core {
         k_val: Value,
         carry_mask: u64,
         width: usize,
-    ) -> Result<(Vec<Word<Self::Bit>>, Word<Self::Bit>), Error> {
+    ) -> Result<SumsAndCarries<Self::Bit>, Error> {
         if a_words.is_empty() {
             return Ok((Vec::new(), SecretVec::new()));
         }
@@ -3767,10 +3771,11 @@ pub(crate) mod tests {
             }
         }
     }
+    /// Repetition batches each test custodian evaluates at once. All seven
+    /// run in one wave when the three custodians' 21 threads roughly fit the
+    /// host; smaller hosts take two waves of four and three.
     pub(crate) fn parallel_batches() -> usize {
-        if std::thread::available_parallelism().is_ok_and(|n| n.get() >= 24) {
-            4
-        } else if std::thread::available_parallelism().is_ok_and(|n| n.get() >= 21) {
+        if std::thread::available_parallelism().is_ok_and(|n| n.get() >= 18) {
             7
         } else {
             4

@@ -956,81 +956,8 @@ fn poseidon2_perm12_layered(st: &mut [Goldilocks; 12]) {
     }
 }
 
-/// Zero-allocation streaming 32-byte `Poseidon2` hash (`Qsag.poseidon2Hash32`) with volatile zeroization.
-pub fn poseidon2_hash32(msg: &[u8]) -> [u8; 32] {
-    let mut st = [Goldilocks::ZERO; 12];
-    st[8] = Goldilocks::from_u64_reduced(8);
-    st[9] = Goldilocks::from_u64_reduced(4);
-    st[10] = Goldilocks::from_u64_reduced(32);
-    st[11] = Goldilocks::from_u64_reduced(POSEIDON2_CONST_IV);
-
-    let mut blk = [Goldilocks::ZERO; 8];
-    let mut cur_l = 0usize;
-
-    let (chunks7, rem) = msg.as_chunks::<7>();
-    for c in chunks7 {
-        let v = ((c[0] as u64) << 48)
-            | ((c[1] as u64) << 40)
-            | ((c[2] as u64) << 32)
-            | ((c[3] as u64) << 24)
-            | ((c[4] as u64) << 16)
-            | ((c[5] as u64) << 8)
-            | (c[6] as u64);
-        blk[cur_l] = Goldilocks::from_u64_reduced(v);
-        cur_l += 1;
-        if cur_l == 8 {
-            for i in 0..8 {
-                st[i] += blk[i];
-            }
-            poseidon2_perm12(&mut st);
-            blk = [Goldilocks::ZERO; 8];
-            cur_l = 0;
-        }
-    }
-
-    let mut last7 = [0u8; 7];
-    last7[..rem.len()].copy_from_slice(rem);
-    last7[rem.len()] = 0x01;
-    let v_last = ((last7[0] as u64) << 48)
-        | ((last7[1] as u64) << 40)
-        | ((last7[2] as u64) << 32)
-        | ((last7[3] as u64) << 24)
-        | ((last7[4] as u64) << 16)
-        | ((last7[5] as u64) << 8)
-        | (last7[6] as u64);
-    qsag_asm::volatile_fill(&mut last7, 0);
-
-    blk[cur_l] = Goldilocks::from_u64_reduced(v_last);
-    cur_l += 1;
-    if cur_l == 8 {
-        for i in 0..8 {
-            st[i] += blk[i];
-        }
-        poseidon2_perm12(&mut st);
-        blk = [Goldilocks::ZERO; 8];
-        cur_l = 0;
-    }
-
-    if cur_l == 7 {
-        blk[7] = Goldilocks::from_u64_reduced((1u64 << 56) + 1);
-    } else {
-        blk[cur_l] = Goldilocks::ONE;
-        blk[7] = Goldilocks::from_u64_reduced(1u64 << 56);
-    }
-    for i in 0..8 {
-        st[i] += blk[i];
-    }
-    poseidon2_perm12(&mut st);
-
-    qsag_asm::volatile_fill(&mut blk, Goldilocks::ZERO);
-
-    let mut out = [0u8; 32];
-    for (i, limb) in st[..4].iter().enumerate() {
-        out[8 * i..8 * (i + 1)].copy_from_slice(&limb.to_canonical_u64().to_be_bytes());
-    }
-    qsag_asm::volatile_fill(&mut st, Goldilocks::ZERO);
-    out
-}
+/// 256-bit `Poseidon2` sponge hash of a byte string (`Qsag.poseidon2Hash32`).
+pub use qsag_core::sponge::poseidon2_hash32;
 
 /// Algebraic 256-bit (4-limb) compression `H_comp(left4, right4, tweak4) -> [Goldilocks; 4]`:
 /// runs `poseidon2_perm12([left4, right4, tweak4])` with weighted Jive feed-forward `+ left4 + 2*right4 + 4*tweak4` so the
@@ -1884,6 +1811,24 @@ mod internal_matrix_tests {
         let (core_ns, c) = time(&|st| qsag_core::sponge::poseidon2_perm12(st));
         assert_eq!(a, c);
         std::println!("PERM12 agg_ns={agg_ns:.1} core_ns={core_ns:.1}");
+    }
+
+    #[test]
+    fn linear_layers_match_the_qsag_core_specification() {
+        let mut state: [Goldilocks; 12] = core::array::from_fn(|i| {
+            Goldilocks::from_u64_reduced(0xFFFF_FFFF_0000_0000u64.wrapping_sub(977 * i as u64))
+        });
+        for _ in 0..8 {
+            let (mut me, mut mi) = (state, state);
+            let (mut spec_me, mut spec_mi) = (state, state);
+            poseidon2_apply_me(&mut me);
+            poseidon2_apply_mi(&mut mi);
+            qsag_core::sponge::poseidon2_apply_me(&mut spec_me);
+            qsag_core::sponge::poseidon2_apply_mi(&mut spec_mi);
+            assert_eq!(me, spec_me);
+            assert_eq!(mi, spec_mi);
+            state = core::array::from_fn(|i| me[i] + mi[(i + 5) % 12]);
+        }
     }
 
     #[test]

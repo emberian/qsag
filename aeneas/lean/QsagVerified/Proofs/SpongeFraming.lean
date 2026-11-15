@@ -2,7 +2,7 @@ module
 import all QsagVerified.Funs
 import all QsagVerified.Proofs.Adrs
 public import QsagVerified.Proofs.SpongeConformance
-import all Qsag.Keccak
+import all Qsag.Oracle.Keccak
 import all QsagVerified.Proofs.RealSpecKeccakWeld
 
 /-!

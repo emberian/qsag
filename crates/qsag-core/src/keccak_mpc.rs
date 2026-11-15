@@ -5633,15 +5633,13 @@ pub fn sign_stateless_tsw_rss_mpc(
             auth_path,
         });
     }
-    let fors_pk_adrs = HashAdrs {
-        layer: 0,
-        tree: tree0,
-        kind: AdrsKind::ForsRoots,
-        key_pair: kp0,
-        chain_idx: 0,
-        hash_step: 0,
-    };
-    let mut cur_root = th_tweak_tl(Cshake256Suite, &pk.pk_seed, &fors_pk_adrs, &fors_roots);
+    let mut cur_root = crate::tsw_baggy::fors_pk_from_roots(
+        Cshake256Suite,
+        &pk.pk_seed,
+        tree0,
+        kp0,
+        &fors_roots,
+    );
 
     // Evaluate hypertree layers `0..num_layers` with public TSW target-sum grinding (`0` r_rand on internal nodes `[P0-02]`)
     let target_sum = canonical_target_sum(params.w, params.ell1);

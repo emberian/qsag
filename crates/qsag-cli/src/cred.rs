@@ -6,7 +6,8 @@
 //!   replicated five-server backend, or the Shamir-SPDZ backend for any `2 <= t <= n <= 64`.
 //! - `voprf-eval` — Blinded client query and evaluation with durable monotone counter
 //!   reservation: all five servers (replicated), or any `t` persisted shares (Shamir-SPDZ).
-//! - `mldsa-keygen` — Dealerless `(t, n)` threshold FIPS 204 ML-DSA (`44`/`65`/`87`) setup.
+//! - `mldsa-keygen` — Dealerless `(t, n)` threshold FIPS 204 ML-DSA (`44`/`65`/`87`) setup:
+//!   replicated key shares up to sixteen custodians, Shamir key shares up to sixty-four.
 //! - `mldsa-sign` — Sealed-`w1` abort-private `(2t - 1)`-of-`n` threshold FIPS 204 signing
 //!   with crash-atomic [`FsNonceBurnStore`] persistence.
 //! - `mldsa-verify` — Standard unmodified FIPS 204 `ml_dsa_verify` check.
@@ -24,7 +25,8 @@ use qsag_cred::voprf_spdz::{SpdzConfig, SpdzPublic, SpdzServer, SpdzSession, spd
 use qsag_cred::{
     FsNonceBurnStore, MlDsaLevel, MpcTransport, MpcTransportError, RoundInbox, RoundInfo,
     RoundKind, ThresholdMlDsaDkgConfig, ThresholdMlDsaError, ThresholdMlDsaSignerShare,
-    ThresholdSignSession, ml_dsa_verify, threshold_mldsa_dkg_party, threshold_sign_mldsa_party,
+    ThresholdSignSession, ThresholdVerificationPack, ml_dsa_verify, threshold_mldsa_dkg_party,
+    threshold_mldsa_shamir_expand_party, threshold_sign_mldsa_party,
 };
 
 use crate::cli::{
@@ -316,6 +318,45 @@ fn voprf_counter_path(vault_dir: &str, party: usize) -> String {
         .into_owned()
 }
 
+/// Seal one party's secret bundle under the passphrase (if any), bind it to its
+/// vault lock and write it. Shared by the TOPRF and ML-DSA custody formats.
+fn write_party_bundle(
+    path: &str,
+    mut bundle: Json,
+    passphrase: Option<&[u8]>,
+    limit: u64,
+) -> Result<(), CliError> {
+    if let Some(pass) = passphrase {
+        crate::envelope::seal(&mut bundle, pass)?;
+    }
+    let mut lock = crate::vault::Vault::acquire(path, true)?;
+    let opened = crate::envelope::open(&bundle, passphrase)?;
+    lock.set_key_material(&opened);
+    lock.bind(&mut bundle)?;
+    lock.seal(&mut bundle)?;
+    let encoded = ZeroizingBuf(bundle.to_pretty().into_bytes());
+    if encoded.len() as u64 > limit {
+        return Err(CliError::input("party share bundle exceeds file bound"));
+    }
+    write_new(path, &encoded, true)
+}
+
+/// Open and authenticate one party's secret bundle. The lock is held by the caller
+/// for as long as the secret is in use.
+fn open_party_bundle(
+    path: &str,
+    format: &str,
+    limit: u64,
+    passphrase: Option<&[u8]>,
+) -> Result<(crate::vault::Vault, Json, crate::envelope::OpenedSecret), CliError> {
+    let mut lock = crate::vault::Vault::acquire(path, false)?;
+    let bundle = load_json_checked(path, format, limit)?;
+    let opened = crate::envelope::open(&bundle, passphrase)?;
+    lock.set_key_material(&opened);
+    lock.authenticate(&bundle)?;
+    Ok((lock, bundle, opened))
+}
+
 /// Enrollment facts every TOPRF party bundle is bound to.
 struct VoprfEnrollment<'a> {
     share_format: &'a str,
@@ -335,7 +376,7 @@ fn write_voprf_bundle(
     passphrase: Option<&[u8]>,
 ) -> Result<(), CliError> {
     let enrollment_nonce = Secret32(os_random_32()?);
-    let mut bundle = Json::object(vec![
+    let bundle = Json::object(vec![
         ("format", Json::str(enrollment.share_format)),
         ("enrollment_nonce", Json::hex(&enrollment_nonce[..16])),
         ("scheme", Json::str(enrollment.scheme)),
@@ -346,17 +387,12 @@ fn write_voprf_bundle(
         ("commitment", Json::hex(&enrollment.commitment)),
         ("secret_key", Json::hex(payload)),
     ]);
-    if let Some(pass) = passphrase {
-        crate::envelope::seal(&mut bundle, pass)?;
-    }
-    let path = voprf_share_path(vault_dir, party);
-    let mut lock = crate::vault::Vault::acquire(&path, true)?;
-    let opened = crate::envelope::open(&bundle, passphrase)?;
-    lock.set_key_material(&opened);
-    lock.bind(&mut bundle)?;
-    lock.seal(&mut bundle)?;
-    let encoded = ZeroizingBuf(bundle.to_pretty().into_bytes());
-    write_new(&path, &encoded, true)?;
+    write_party_bundle(
+        &voprf_share_path(vault_dir, party),
+        bundle,
+        passphrase,
+        MAX_KEY_FILE_BYTES,
+    )?;
     let counter_doc = Json::object(vec![
         ("format", Json::str(VOPRF_COUNTER_FORMAT)),
         ("party", Json::num(party)),
@@ -377,12 +413,12 @@ fn load_voprf_bundle(
     enrollment: &VoprfEnrollment<'_>,
     passphrase: Option<&[u8]>,
 ) -> Result<(crate::vault::Vault, crate::envelope::OpenedSecret), CliError> {
-    let path = voprf_share_path(vault_dir, party);
-    let mut lock = crate::vault::Vault::acquire(&path, false)?;
-    let bundle = load_json_checked(&path, enrollment.share_format, MAX_KEY_FILE_BYTES)?;
-    let opened = crate::envelope::open(&bundle, passphrase)?;
-    lock.set_key_material(&opened);
-    lock.authenticate(&bundle)?;
+    let (lock, bundle, opened) = open_party_bundle(
+        &voprf_share_path(vault_dir, party),
+        enrollment.share_format,
+        MAX_KEY_FILE_BYTES,
+        passphrase,
+    )?;
     if bundle.field_u64("party")? != party as u64
         || bundle.field_u64("threshold")? != enrollment.threshold as u64
         || bundle.field_u64("parties")? != enrollment.parties as u64
@@ -1168,6 +1204,7 @@ impl MpcTransport for LocalMpcEndpoint {
 // Until the core exposes a direct share codec, replaying this authenticated local
 // transcript rebuilds one share without contacting or reconstructing absent peers.
 const MLDSA_SHARE_FORMAT: &str = "qsag-cred-mldsa-local-share-v1";
+const MLDSA_SHAMIR_SHARE_FORMAT: &str = "qsag-cred-mldsa-shamir-share-v1";
 const MLDSA_BUNDLE_LIMIT: u64 = 256 * 1024 * 1024;
 
 fn round_binding(info: RoundInfo, private: &[Vec<u8>], broadcast: &[u8]) -> [u8; 32] {
@@ -1179,6 +1216,7 @@ fn round_binding(info: RoundInfo, private: &[Vec<u8>], broadcast: &[u8]) -> [u8;
         RoundKind::ViewDigest => 4,
         RoundKind::Open => 5,
         RoundKind::Confirm => 6,
+        RoundKind::Input => 7,
     };
     let index = info.index.to_le_bytes();
     let phase_kind = [info.phase, kind];
@@ -1378,6 +1416,58 @@ fn run_mldsa_dkg_threads(
         .map_err(map_mldsa_err)
 }
 
+/// The Shamir ceremony for committees above sixteen custodians: the first `2t - 1`
+/// custodians sample the key with the replicated ceremony, then all `n` expand it
+/// into one Shamir share each.
+fn run_mldsa_shamir_ceremony(
+    config: &ThresholdMlDsaDkgConfig,
+    entropies: &[Secret32],
+) -> Result<Vec<ThresholdMlDsaSignerShare>, CliError> {
+    let committee = config.shamir_committee().map_err(map_mldsa_err)?;
+    let sampled = run_mldsa_dkg_threads(&committee, &entropies[..committee.party_ids.len()])?;
+    let n = config.party_ids.len();
+    let mut states: Vec<Option<ThresholdMlDsaSignerShare>> =
+        sampled.into_iter().map(|(share, _)| Some(share)).collect();
+    states.resize_with(n, || None);
+    let hub = SharedMpcHub::new(n);
+    let outputs: Vec<Result<_, ThresholdMlDsaError>> = std::thread::scope(|s| {
+        let mut handles = Vec::with_capacity(n);
+        for (pos, ((&party_id, ent), share)) in
+            config.party_ids.iter().zip(entropies).zip(states).enumerate()
+        {
+            let hub_ref = Arc::clone(&hub);
+            let seed = Secret32(cshake256_framed_32(
+                b"QSAG.CLI.TMLDSA.SHAMIR.EXPAND_SEED.V1",
+                &[&ent.0],
+            ));
+            handles.push(s.spawn(move || {
+                let mut net = LocalMpcEndpoint {
+                    me: pos,
+                    hub: Arc::clone(&hub_ref),
+                };
+                let res =
+                    threshold_mldsa_shamir_expand_party(config, party_id, share, &seed.0, &mut net);
+                if res.is_err() {
+                    hub_ref.abort_all();
+                }
+                res
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|h| {
+                h.join().unwrap_or(Err(ThresholdMlDsaError::Mpc(
+                    qsag_cred::MpcError::Transport,
+                )))
+            })
+            .collect()
+    });
+    outputs
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(map_mldsa_err)
+}
+
 fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
     let args = Args::parse(
         raw,
@@ -1385,6 +1475,7 @@ fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
             "threshold",
             "parties",
             "level",
+            "backend",
             "vault-dir",
             "public-out",
             "passphrase-env",
@@ -1394,7 +1485,7 @@ fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
     )?;
     if args.flag("help") {
         println!(
-            "qsag cred mldsa-keygen [--threshold <t>] [--parties <n>] [--level <44|65|87>] --vault-dir <dir> --public-out <path> [--passphrase-env <VAR> | --passphrase-file <PATH>] [--allow-unencrypted] [--deterministic] [--json]"
+            "qsag cred mldsa-keygen [--threshold <t>] [--parties <n>] [--level <44|65|87>] [--backend rss|shamir] --vault-dir <dir> --public-out <path> [--passphrase-env <VAR> | --passphrase-file <PATH>] [--allow-unencrypted] [--deterministic] [--json]\n  rss: replicated key shares, at most 16 custodians. shamir: one Shamir share per custodian, at most 64 custodians and threshold 8 (default above 16). Both sign with >= 2t - 1 custodians."
         );
         return Ok(());
     }
@@ -1435,7 +1526,26 @@ fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
         party_ids,
         session_id,
     };
-    dkg_cfg.validate().map_err(map_mldsa_err)?;
+    let shamir = match args.get("backend") {
+        None => parties > qsag_cred::rss_mpc::MAX_MPC_PARTIES,
+        Some("rss") => false,
+        Some("shamir") => true,
+        Some(other) => {
+            return Err(CliError::usage(format!(
+                "unknown ML-DSA --backend '{other}' (expected rss or shamir)"
+            )));
+        }
+    };
+    if shamir {
+        dkg_cfg.validate_shamir().map_err(map_mldsa_err)?;
+    } else {
+        dkg_cfg.validate().map_err(map_mldsa_err)?;
+    }
+    let share_format = if shamir {
+        MLDSA_SHAMIR_SHARE_FORMAT
+    } else {
+        MLDSA_SHARE_FORMAT
+    };
 
     let mut entropies = Vec::with_capacity(parties);
     for idx in 0..parties {
@@ -1450,7 +1560,21 @@ fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
         entropies.push(Secret32(seed));
     }
 
-    let shares = run_mldsa_dkg_threads(&dkg_cfg, &entropies)?;
+    // Custody payload after the burn MAC key: the recorded ceremony transcript and its
+    // entropy (replicated), or the encoded Shamir share.
+    let shares: Vec<(ThresholdMlDsaSignerShare, ZeroizingBuf)> = if shamir {
+        run_mldsa_shamir_ceremony(&dkg_cfg, &entropies)?
+            .into_iter()
+            .map(|share| {
+                let encoded = share
+                    .to_shamir_bytes()
+                    .ok_or_else(|| CliError::state("Shamir ceremony returned a replicated share"))?;
+                Ok((share, ZeroizingBuf(encoded)))
+            })
+            .collect::<Result<_, CliError>>()?
+    } else {
+        run_mldsa_dkg_threads(&dkg_cfg, &entropies)?
+    };
     let pack = shares[0].0.verification_pack();
     let pk_bytes = pack.pk_bytes.clone();
     let key_id = pack.policy_signing_key_id();
@@ -1466,12 +1590,14 @@ fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
             os_random_32()?
         });
         let mut payload = ZeroizingBuf(Vec::with_capacity(64 + transcript.len()));
-        payload.0.extend_from_slice(&ent.0);
+        if !shamir {
+            payload.0.extend_from_slice(&ent.0);
+        }
         payload.0.extend_from_slice(&mac_key.0);
         payload.0.extend_from_slice(transcript);
         let enrollment_nonce = Secret32(os_random_32()?);
-        let mut bundle = Json::object(vec![
-            ("format", Json::str(MLDSA_SHARE_FORMAT)),
+        let bundle = Json::object(vec![
+            ("format", Json::str(share_format)),
             ("enrollment_nonce", Json::hex(&enrollment_nonce[..16])),
             ("scheme", Json::str(level_name)),
             ("party", Json::num(idx)),
@@ -1482,27 +1608,19 @@ fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
             ("public_key", Json::hex(&pk_bytes)),
             ("secret_key", Json::hex(&payload)),
         ]);
-        if let Some(pass) = &passphrase {
-            crate::envelope::seal(&mut bundle, pass)?;
-        }
-        let path = mldsa_share_path(vault_dir, idx);
-        let mut lock = crate::vault::Vault::acquire(&path, true)?;
-        let opened = crate::envelope::open(&bundle, passphrase.as_deref())?;
-        lock.set_key_material(&opened);
-        lock.bind(&mut bundle)?;
-        lock.seal(&mut bundle)?;
-        let encoded = ZeroizingBuf(bundle.to_pretty().into_bytes());
-        if encoded.len() as u64 > MLDSA_BUNDLE_LIMIT {
-            return Err(CliError::input("ML-DSA local share exceeds file bound"));
-        }
-        write_new(&path, &encoded, true)?;
+        write_party_bundle(
+            &mldsa_share_path(vault_dir, idx),
+            bundle,
+            passphrase.as_deref(),
+            MLDSA_BUNDLE_LIMIT,
+        )?;
         FsNonceBurnStore::create(mldsa_burn_path(vault_dir, idx), key_id, mac_key.0)
             .map_err(|e| CliError::io("creating threshold ML-DSA nonce burn ledger", e))?;
     }
 
-    let meta = Json::object(vec![
+    let mut meta_fields = vec![
         ("format", Json::str(MLDSA_META_FORMAT)),
-        ("share_format", Json::str(MLDSA_SHARE_FORMAT)),
+        ("share_format", Json::str(share_format)),
         ("scheme", Json::str(level_name)),
         ("threshold", Json::num(threshold)),
         ("parties", Json::num(parties)),
@@ -1510,7 +1628,12 @@ fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
         ("key_id", Json::hex(&key_id)),
         ("issuer_pk_digest", Json::hex(&issuer_digest)),
         ("public_key", Json::hex(&pk_bytes)),
-    ]);
+    ];
+    if shamir {
+        // Shamir shares are restored against the public key-generation result.
+        meta_fields.push(("verification_pack", Json::hex(&pack.to_bytes())));
+    }
+    let meta = Json::object(meta_fields);
     write_new(
         &mldsa_meta_path(vault_dir),
         meta.to_pretty().as_bytes(),
@@ -1646,20 +1769,38 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
             .collect(),
         session_id: dkg_session_id,
     };
-    dkg_cfg.validate().map_err(map_mldsa_err)?;
+    let share_format = meta.get("share_format").and_then(Json::as_str);
+    // Shamir vaults pin the public key-generation result their shares restore against.
+    let shamir_pack = if share_format == Some(MLDSA_SHAMIR_SHARE_FORMAT) {
+        dkg_cfg.validate_shamir().map_err(map_mldsa_err)?;
+        let pack = ThresholdVerificationPack::from_bytes(&meta.field_hex("verification_pack")?.0)
+            .map_err(map_mldsa_err)?;
+        if pack.level != level
+            || pack.threshold != threshold
+            || pack.party_ids != dkg_cfg.party_ids
+            || pack.pk_bytes != expected_pk.0
+            || pack.policy_signing_key_id() != key_id
+        {
+            return Err(CliError::state("ML-DSA vault metadata does not match its public key"));
+        }
+        Some(pack)
+    } else {
+        dkg_cfg.validate().map_err(map_mldsa_err)?;
+        None
+    };
     let mut locks = Vec::new();
     let mut loaded = Vec::new();
-    if meta.get("share_format").is_some() {
-        if meta.field_str("share_format")? != MLDSA_SHARE_FORMAT {
+    if let Some(share_format) = share_format {
+        if shamir_pack.is_none() && share_format != MLDSA_SHARE_FORMAT {
             return Err(CliError::input("unsupported ML-DSA share format"));
         }
         for &idx in &signer_indices {
-            let path = mldsa_share_path(vault_dir, idx);
-            let mut lock = crate::vault::Vault::acquire(&path, false)?;
-            let bundle = load_json_checked(&path, MLDSA_SHARE_FORMAT, MLDSA_BUNDLE_LIMIT)?;
-            let opened = crate::envelope::open(&bundle, passphrase.as_deref())?;
-            lock.set_key_material(&opened);
-            lock.authenticate(&bundle)?;
+            let (lock, bundle, opened) = open_party_bundle(
+                &mldsa_share_path(vault_dir, idx),
+                share_format,
+                MLDSA_BUNDLE_LIMIT,
+                passphrase.as_deref(),
+            )?;
             if bundle.field_u64("party")? != idx as u64
                 || bundle.field_u64("threshold")? != threshold as u64
                 || bundle.field_u64("parties")? != parties as u64
@@ -1671,6 +1812,20 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
                 return Err(CliError::state("ML-DSA share enrollment mismatch"));
             }
             let payload = opened.secret_key()?;
+            if let Some(pack) = &shamir_pack {
+                let (mac, encoded) = payload
+                    .split_at_checked(32)
+                    .ok_or_else(|| CliError::input("truncated ML-DSA share"))?;
+                let share = ThresholdMlDsaSignerShare::from_shamir_bytes(
+                    encoded,
+                    pack.clone(),
+                    (idx + 1) as u16,
+                )
+                .map_err(|e| CliError::input(format!("invalid ML-DSA Shamir share: {e}")))?;
+                loaded.push((idx, share, Secret32(mac.try_into().unwrap())));
+                locks.push(lock);
+                continue;
+            }
             if payload.len() < 64 {
                 return Err(CliError::input("truncated ML-DSA share"));
             }

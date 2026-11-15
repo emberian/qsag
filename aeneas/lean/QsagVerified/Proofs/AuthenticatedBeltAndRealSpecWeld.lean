@@ -3,7 +3,7 @@ import all QsagVerified.Funs
 
 public import QsagVerified.Proofs.RealSpecFieldWeld
 public import QsagVerified.Proofs.RssCutSession
-public import Qsag.MirSpecBridge
+public import Qsag.Exec.MirSpecBridge
 
 /-!
 # Guard weld between the Aeneas extraction and the `Qsag` protocol specifications

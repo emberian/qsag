@@ -254,14 +254,11 @@ proptest! {
         let rem_hw = sha256_compress_bytes(&mut st_hw, msg);
         prop_assert_eq!(rem_hw, &msg[(msg.len() / 64) * 64..]);
 
-        let blocks: Vec<[u8; 64]> = msg
-            .chunks_exact(64)
-            .map(|c| c.try_into().unwrap())
-            .collect();
+        let blocks = msg.as_chunks::<64>().0;
         let mut st_port = init_iv;
-        sha256_compress_blocks_portable(&mut st_port, &blocks);
+        sha256_compress_blocks_portable(&mut st_port, blocks);
         let mut st_disp = init_iv;
-        sha256_compress_blocks(&mut st_disp, &blocks);
+        sha256_compress_blocks(&mut st_disp, blocks);
         prop_assert_eq!(st_hw, st_port);
         prop_assert_eq!(st_disp, st_port);
 
@@ -339,33 +336,33 @@ proptest! {
         // Explicitly test `keccak_f1600_x8_with_backend` and `keccak_f1600_x4_with_backend`
         if states.len() >= 8 {
             let mut st8 = KeccakState8x::default();
-            for lane in 0..25 {
-                for inst in 0..8 {
-                    st8.0[lane][inst] = states[inst][lane];
+            for (inst, state) in states.iter().take(8).enumerate() {
+                for (lane, &word) in state.iter().enumerate() {
+                    st8.0[lane][inst] = word;
                 }
             }
             for backend in ALL_SIMD_BACKENDS {
-                let mut cur = st8.clone();
+                let mut cur = st8;
                 keccak_f1600_x8_with_backend(&mut cur, backend);
-                for inst in 0..8 {
+                for (inst, want) in expected.iter().take(8).enumerate() {
                     let got: [u64; 25] = core::array::from_fn(|lane| cur.0[lane][inst]);
-                    prop_assert_eq!(got, expected[inst]);
+                    prop_assert_eq!(&got, want);
                 }
             }
         }
         if states.len() >= 4 {
             let mut st4 = KeccakState4x::default();
-            for lane in 0..25 {
-                for inst in 0..4 {
-                    st4.0[lane][inst] = states[inst][lane];
+            for (inst, state) in states.iter().take(4).enumerate() {
+                for (lane, &word) in state.iter().enumerate() {
+                    st4.0[lane][inst] = word;
                 }
             }
             for backend in ALL_SIMD_BACKENDS {
-                let mut cur = st4.clone();
+                let mut cur = st4;
                 keccak_f1600_x4_with_backend(&mut cur, backend);
-                for inst in 0..4 {
+                for (inst, want) in expected.iter().take(4).enumerate() {
                     let got: [u64; 25] = core::array::from_fn(|lane| cur.0[lane][inst]);
-                    prop_assert_eq!(got, expected[inst]);
+                    prop_assert_eq!(&got, want);
                 }
             }
         }

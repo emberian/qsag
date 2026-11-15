@@ -384,7 +384,7 @@ fn run_threshold_mldsa_2of3_sign(
         party_ids: party_ids.clone(),
         session_id: [session_tag; 32],
     };
-    let mut shares: Vec<ThresholdMlDsaSignerShare> =
+    let shares: Vec<ThresholdMlDsaSignerShare> =
         run_mpc_parties(party_ids.clone(), |me, id, net| {
             let entropy = [session_tag.wrapping_add((me as u8) * 17 + 3); 32];
             threshold_mldsa_dkg_party(&dkg_cfg, id, &entropy, net).expect("threshold ML-DSA DKG")
@@ -399,7 +399,7 @@ fn run_threshold_mldsa_2of3_sign(
         quorum: vec![1u16, 2u16, 3u16],
     };
     // Run across all 3 RSS custodians (`2t - 1 = 3` active quorum for `t = 2`)
-    let outputs = run_mpc_parties(shares.drain(..).collect(), |me, mut share, net| {
+    let outputs = run_mpc_parties(shares, |me, mut share, net| {
         let entropy = [session_tag.wrapping_add((me as u8) * 29 + 0x41); 32];
         let mut burn = InMemoryBurn;
         threshold_sign_mldsa_party(&mut share, &sign_session, msg, ctx, &entropy, &mut burn, net)

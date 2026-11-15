@@ -491,6 +491,11 @@ impl LockedRecord {
 /// Size of one high-water-mark slot: `counter(8) || tip(32) || mac(32) || zero(8)`.
 pub const HWM_SLOT_BYTES: usize = 80;
 
+/// Size of the storage page each slot should own. A slot placed at the start of its own
+/// page shares no 512-byte or 4096-byte physical sector with the other slot or with the
+/// journal header, so one torn sector write damages at most one of them.
+pub const HWM_PAGE_BYTES: u64 = 4096;
+
 /// Byte order of the slot counter. It is part of each journal's persisted format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CounterOrder {
@@ -512,19 +517,74 @@ pub struct ChainHead<'a> {
     pub previous_tip: &'a [u8; 32],
 }
 
+/// What one stored slot is, as far as its bytes and MAC can tell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HwmSlotState {
+    /// Every byte is zero: the slot was never written, or its page was lost whole.
+    Uninitialized,
+    /// The MAC verifies for this slot index.
+    Valid { counter: u64, tip: [u8; 32] },
+    /// Anything else, including a wrong length: a torn or damaged write.
+    Corrupt,
+}
+
+/// What [`TwoSlotHwm::recover_with_outcome`] found and did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HwmRecovery {
+    /// Both slots already agreed with the chain; nothing was written.
+    Steady,
+    /// Slot A did not authenticate and was rewritten from slot B and the chain.
+    RepairedSlotA,
+    /// Slot B was behind slot A, or did not authenticate, and was rewritten.
+    RepairedSlotB,
+    /// The chain held one synced record beyond the mark; both slots were advanced onto it.
+    Advanced,
+}
+
 /// Two authenticated high-water-mark slots guarding an append-only hash chain
 /// against tail truncation.
 ///
 /// A commit appends and syncs the record first, then writes and syncs slot A, then
-/// slot B. A valid file therefore has `A == B` (steady state) or `A == B + 1` (crash
-/// between the two slot syncs), and the chain holds `A` or `A + 1` records (crash
-/// after the record sync, before slot A). Anything else, including a chain shorter
-/// than `A`, is rejected; the two crash states are healed forward.
+/// slot B. With both slots readable, a valid file has `A == B` (steady state) or
+/// `A == B + 1` (crash between the two slot syncs), and the chain holds `A` or `A + 1`
+/// records (crash after the record sync, before slot A).
+///
+/// A crash can also tear the one slot that was being written. The slots are never
+/// written in the same step, so the other one still authenticates, and recovery
+/// continues from it: a lone valid slot at counter `c` accepts a chain of `c` records
+/// ending at its tip, or `c + 1` records whose last one extends its tip, and the
+/// damaged slot is rewritten. Everything else is rejected without writing: no valid
+/// slot, a chain shorter than a valid slot, or a chain more than one record ahead.
+///
+/// Why one surviving slot is enough against truncation: a commit is acknowledged only
+/// after both slot syncs, so for the last acknowledged counter `G` both slots hold at
+/// least `G`. Destroying one leaves the other at `G` or above, and a chain cut below
+/// `G` is refused. A record that reached the disk without its commit being
+/// acknowledged may be healed forward or, if someone removes it, dropped; it was never
+/// reported as durable. Replaying old slot bytes together with an old chain is whole-file
+/// rollback, which needs an external monotonic anchor and is out of scope here.
+///
+/// Place the slots on distinct pages ([`TwoSlotHwm::paged`]). Two slots inside one
+/// sector can be torn together, and then nothing is left to recover from.
 pub struct TwoSlotHwm<'a> {
     pub offset_a: u64,
     pub offset_b: u64,
     pub order: CounterOrder,
     pub mac: HwmSlotMac<'a>,
+}
+
+impl<'a> TwoSlotHwm<'a> {
+    /// Slot A at the start of page `first_page`, slot B at the start of the next page
+    /// (pages of [`HWM_PAGE_BYTES`]).
+    pub const fn paged(first_page: u32, order: CounterOrder, mac: HwmSlotMac<'a>) -> Self {
+        let offset_a = first_page as u64 * HWM_PAGE_BYTES;
+        Self {
+            offset_a,
+            offset_b: offset_a + HWM_PAGE_BYTES,
+            order,
+            mac,
+        }
+    }
 }
 
 impl TwoSlotHwm<'_> {
@@ -533,6 +593,17 @@ impl TwoSlotHwm<'_> {
             CounterOrder::Big => counter.to_be_bytes(),
             CounterOrder::Little => counter.to_le_bytes(),
         }
+    }
+
+    /// True when each slot lies inside one page and the two pages differ, so no single
+    /// page or sector write covers both.
+    pub const fn slots_on_distinct_pages(&self) -> bool {
+        const fn fits(offset: u64) -> bool {
+            offset % HWM_PAGE_BYTES + HWM_SLOT_BYTES as u64 <= HWM_PAGE_BYTES
+        }
+        fits(self.offset_a)
+            && fits(self.offset_b)
+            && self.offset_a / HWM_PAGE_BYTES != self.offset_b / HWM_PAGE_BYTES
     }
 
     pub fn encode(&self, slot: u8, counter: u64, tip: &[u8; 32]) -> [u8; HWM_SLOT_BYTES] {
@@ -563,17 +634,35 @@ impl TwoSlotHwm<'_> {
         Ok((counter, tip))
     }
 
-    /// Record `counter` records ending at `tip`: slot A, sync, slot B, sync. Call
-    /// only after the record itself is synced.
-    pub fn commit(&self, file: &File, counter: u64, tip: &[u8; 32]) -> io::Result<()> {
-        write_at_exact(file, self.offset_a, &self.encode(0, counter, tip))?;
-        file.sync_all()?;
-        write_at_exact(file, self.offset_b, &self.encode(1, counter, tip))?;
+    /// Tell an unwritten slot, an authenticated one and a damaged one apart.
+    pub fn classify(&self, slot: u8, raw: &[u8]) -> HwmSlotState {
+        match self.verify(slot, raw) {
+            Ok((counter, tip)) => HwmSlotState::Valid { counter, tip },
+            Err(_) if raw.len() == HWM_SLOT_BYTES && raw.iter().all(|&b| b == 0) => {
+                HwmSlotState::Uninitialized
+            }
+            Err(_) => HwmSlotState::Corrupt,
+        }
+    }
+
+    fn write_slot(&self, file: &File, slot: u8, counter: u64, tip: &[u8; 32]) -> io::Result<()> {
+        let offset = if slot == 0 {
+            self.offset_a
+        } else {
+            self.offset_b
+        };
+        write_at_exact(file, offset, &self.encode(slot, counter, tip))?;
         file.sync_all()
     }
 
-    /// Reconcile both stored slots with the chain found on disk, healing the two
-    /// legal crash states. Returns an error, without writing, for every other state.
+    /// Record `counter` records ending at `tip`: slot A, sync, slot B, sync. Call
+    /// only after the record itself is synced.
+    pub fn commit(&self, file: &File, counter: u64, tip: &[u8; 32]) -> io::Result<()> {
+        self.write_slot(file, 0, counter, tip)?;
+        self.write_slot(file, 1, counter, tip)
+    }
+
+    /// [`Self::recover_with_outcome`] without the report.
     pub fn recover(
         &self,
         file: &File,
@@ -581,29 +670,91 @@ impl TwoSlotHwm<'_> {
         raw_b: &[u8],
         head: &ChainHead<'_>,
     ) -> io::Result<()> {
-        let (a, tip_a) = self.verify(0, raw_a)?;
-        let (b, tip_b) = self.verify(1, raw_b)?;
-        if a < b || a - b > 1 {
-            return Err(invalid());
+        self.recover_with_outcome(file, raw_a, raw_b, head)
+            .map(|_| ())
+    }
+
+    /// Reconcile the stored slots with the chain found on disk, healing every state a
+    /// crash during [`Self::commit`] (or during an earlier recovery) can leave, including
+    /// one torn slot. Returns an error, without writing, for every other state.
+    pub fn recover_with_outcome(
+        &self,
+        file: &File,
+        raw_a: &[u8],
+        raw_b: &[u8],
+        head: &ChainHead<'_>,
+    ) -> io::Result<HwmRecovery> {
+        use HwmSlotState::Valid;
+        match (self.classify(0, raw_a), self.classify(1, raw_b)) {
+            (
+                Valid {
+                    counter: a,
+                    tip: tip_a,
+                },
+                Valid {
+                    counter: b,
+                    tip: tip_b,
+                },
+            ) => {
+                if a < b || a - b > 1 {
+                    return Err(invalid());
+                }
+                if head.len == a {
+                    if !crate::ct_eq_32(head.tip, &tip_a) {
+                        return Err(invalid());
+                    }
+                    if b != a || !crate::ct_eq_32(&tip_b, &tip_a) {
+                        self.write_slot(file, 1, a, head.tip)?;
+                        return Ok(HwmRecovery::RepairedSlotB);
+                    }
+                    Ok(HwmRecovery::Steady)
+                } else if a.checked_add(1) == Some(head.len) {
+                    // The record reached the disk; neither slot was advanced yet.
+                    if a != b
+                        || !crate::ct_eq_32(&tip_a, &tip_b)
+                        || !crate::ct_eq_32(head.previous_tip, &tip_a)
+                    {
+                        return Err(invalid());
+                    }
+                    self.commit(file, head.len, head.tip)?;
+                    Ok(HwmRecovery::Advanced)
+                } else {
+                    Err(invalid())
+                }
+            }
+            (Valid { counter, tip }, _) => self.recover_from_lone_slot(file, 1, counter, &tip, head),
+            (_, Valid { counter, tip }) => self.recover_from_lone_slot(file, 0, counter, &tip, head),
+            _ => Err(invalid()),
         }
-        if head.len == a {
-            if !crate::ct_eq_32(head.tip, &tip_a) {
+    }
+
+    /// One slot authenticates at `(counter, tip)`; slot `damaged` does not.
+    fn recover_from_lone_slot(
+        &self,
+        file: &File,
+        damaged: u8,
+        counter: u64,
+        tip: &[u8; 32],
+        head: &ChainHead<'_>,
+    ) -> io::Result<HwmRecovery> {
+        if head.len == counter {
+            if !crate::ct_eq_32(head.tip, tip) {
                 return Err(invalid());
             }
-            if b != a || !crate::ct_eq_32(&tip_b, &tip_a) {
-                write_at_exact(file, self.offset_b, &self.encode(1, a, head.tip))?;
-                file.sync_all()?;
-            }
-            Ok(())
-        } else if a.checked_add(1) == Some(head.len) {
-            // The record reached the disk; neither slot was advanced yet.
-            if a != b
-                || !crate::ct_eq_32(&tip_a, &tip_b)
-                || !crate::ct_eq_32(head.previous_tip, &tip_a)
-            {
+            self.write_slot(file, damaged, counter, head.tip)?;
+            Ok(if damaged == 0 {
+                HwmRecovery::RepairedSlotA
+            } else {
+                HwmRecovery::RepairedSlotB
+            })
+        } else if counter.checked_add(1) == Some(head.len) {
+            // Slot A was torn while moving onto the synced record (slot B is the survivor),
+            // or the record was synced and a slot was lost independently.
+            if !crate::ct_eq_32(head.previous_tip, tip) {
                 return Err(invalid());
             }
-            self.commit(file, head.len, head.tip)
+            self.commit(file, head.len, head.tip)?;
+            Ok(HwmRecovery::Advanced)
         } else {
             Err(invalid())
         }
@@ -1021,6 +1172,185 @@ mod tests {
             assert!(hwm.recover(&disk.file, &a1, &b, &head(2)).is_err());
             let a3 = hwm.encode(0, 3, &tips[3]);
             assert!(hwm.recover(&disk.file, &a3, &b1, &head(3)).is_err());
+        }
+    }
+
+    /// Slots on their own pages, with a page of header in front, as journals lay them out.
+    struct PagedHwmFile {
+        _temp: Temp,
+        file: File,
+    }
+    impl PagedHwmFile {
+        fn new() -> Self {
+            let temp = Temp::new();
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(temp.record())
+                .unwrap();
+            file.set_len(3 * HWM_PAGE_BYTES).unwrap();
+            Self { _temp: temp, file }
+        }
+        fn slot(&self, hwm: &TwoSlotHwm<'_>, slot: u8) -> [u8; HWM_SLOT_BYTES] {
+            use std::os::unix::fs::FileExt;
+            let offset = if slot == 0 { hwm.offset_a } else { hwm.offset_b };
+            let mut raw = [0u8; HWM_SLOT_BYTES];
+            self.file.read_exact_at(&mut raw, offset).unwrap();
+            raw
+        }
+        /// Overwrite a whole slot page with pseudo-random bytes: a torn page write.
+        fn tear_page(&self, hwm: &TwoSlotHwm<'_>, slot: u8, seed: u64) {
+            let offset = if slot == 0 { hwm.offset_a } else { hwm.offset_b };
+            let mut x = seed | 1;
+            let page: std::vec::Vec<u8> = (0..HWM_PAGE_BYTES)
+                .map(|_| {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    x as u8
+                })
+                .collect();
+            write_at_exact(&self.file, offset, &page).unwrap();
+        }
+        fn recover(&self, hwm: &TwoSlotHwm<'_>, head: &ChainHead<'_>) -> io::Result<HwmRecovery> {
+            hwm.recover_with_outcome(&self.file, &self.slot(hwm, 0), &self.slot(hwm, 1), head)
+        }
+    }
+
+    #[test]
+    fn paged_layout_separates_the_slots() {
+        let hwm = TwoSlotHwm::paged(1, CounterOrder::Big, &toy_mac);
+        assert_eq!((hwm.offset_a, hwm.offset_b), (4096, 8192));
+        assert!(hwm.slots_on_distinct_pages());
+        let headerless = TwoSlotHwm::paged(0, CounterOrder::Little, &toy_mac);
+        assert_eq!((headerless.offset_a, headerless.offset_b), (0, 4096));
+        assert!(headerless.slots_on_distinct_pages());
+        for (offset_a, offset_b) in [(104, 184), (0, 80), (4096, 4096 + 80), (4090, 8192)] {
+            let shared = TwoSlotHwm {
+                offset_a,
+                offset_b,
+                order: CounterOrder::Big,
+                mac: &toy_mac,
+            };
+            assert!(!shared.slots_on_distinct_pages(), "{offset_a} {offset_b}");
+        }
+    }
+
+    #[test]
+    fn two_slot_hwm_recovers_from_one_torn_slot_and_repairs_it() {
+        for order in [CounterOrder::Big, CounterOrder::Little] {
+            let hwm = TwoSlotHwm::paged(1, order, &toy_mac);
+            let tips: [[u8; 32]; 4] = core::array::from_fn(|i| [i as u8 + 1; 32]);
+            let head = |len: usize| ChainHead {
+                len: len as u64,
+                tip: &tips[len],
+                previous_tip: &tips[len.saturating_sub(1)],
+            };
+            let disk = PagedHwmFile::new();
+            hwm.commit(&disk.file, 2, &tips[2]).unwrap();
+            let (a2, b2) = (disk.slot(&hwm, 0), disk.slot(&hwm, 1));
+            assert_eq!(disk.recover(&hwm, &head(2)).unwrap(), HwmRecovery::Steady);
+
+            // Slot B torn after the commit: recovered from A, and B is rewritten on disk.
+            for seed in 1..9u64 {
+                disk.tear_page(&hwm, 1, seed);
+                assert_eq!(
+                    hwm.classify(1, &disk.slot(&hwm, 1)),
+                    HwmSlotState::Corrupt
+                );
+                assert_eq!(
+                    disk.recover(&hwm, &head(2)).unwrap(),
+                    HwmRecovery::RepairedSlotB
+                );
+                assert_eq!((disk.slot(&hwm, 0), disk.slot(&hwm, 1)), (a2, b2));
+                assert_eq!(disk.recover(&hwm, &head(2)).unwrap(), HwmRecovery::Steady);
+            }
+
+            // Slot A torn with the chain at the mark: recovered from B, and A is rewritten.
+            for seed in 1..9u64 {
+                disk.tear_page(&hwm, 0, seed);
+                assert_eq!(
+                    disk.recover(&hwm, &head(2)).unwrap(),
+                    HwmRecovery::RepairedSlotA
+                );
+                assert_eq!((disk.slot(&hwm, 0), disk.slot(&hwm, 1)), (a2, b2));
+            }
+
+            // Crash while slot A moved from 2 to 3: the record is synced, A is torn, B still
+            // holds 2. Both slots advance onto the record.
+            disk.tear_page(&hwm, 0, 77);
+            assert_eq!(disk.recover(&hwm, &head(3)).unwrap(), HwmRecovery::Advanced);
+            assert_eq!(hwm.verify(0, &disk.slot(&hwm, 0)).unwrap(), (3, tips[3]));
+            assert_eq!(hwm.verify(1, &disk.slot(&hwm, 1)).unwrap(), (3, tips[3]));
+            // Crash while slot B moved from 2 to 3 (A already at 3).
+            hwm.commit(&disk.file, 3, &tips[3]).unwrap();
+            disk.tear_page(&hwm, 1, 78);
+            assert_eq!(
+                disk.recover(&hwm, &head(3)).unwrap(),
+                HwmRecovery::RepairedSlotB
+            );
+            assert_eq!(hwm.verify(1, &disk.slot(&hwm, 1)).unwrap(), (3, tips[3]));
+
+            // A page that never reached the disk reads as zeros: same repair.
+            write_at_exact(&disk.file, hwm.offset_b, &[0u8; HWM_SLOT_BYTES]).unwrap();
+            assert_eq!(
+                hwm.classify(1, &disk.slot(&hwm, 1)),
+                HwmSlotState::Uninitialized
+            );
+            assert_eq!(
+                disk.recover(&hwm, &head(3)).unwrap(),
+                HwmRecovery::RepairedSlotB
+            );
+
+            // One surviving slot never licenses a shorter or foreign chain, and a refused
+            // recovery writes nothing.
+            for torn in [0u8, 1] {
+                hwm.commit(&disk.file, 3, &tips[3]).unwrap();
+                disk.tear_page(&hwm, torn, 99);
+                let before = (disk.slot(&hwm, 0), disk.slot(&hwm, 1));
+                for len in [0usize, 1, 2] {
+                    assert!(disk.recover(&hwm, &head(len)).is_err(), "torn {torn} len {len}");
+                }
+                let foreign = ChainHead {
+                    len: 3,
+                    tip: &tips[1],
+                    previous_tip: &tips[2],
+                };
+                assert!(disk.recover(&hwm, &foreign).is_err());
+                let wrong_parent = ChainHead {
+                    len: 4,
+                    tip: &tips[0],
+                    previous_tip: &tips[1],
+                };
+                assert!(disk.recover(&hwm, &wrong_parent).is_err());
+                let two_ahead = ChainHead {
+                    len: 5,
+                    tip: &tips[0],
+                    previous_tip: &tips[3],
+                };
+                assert!(disk.recover(&hwm, &two_ahead).is_err());
+                assert_eq!((disk.slot(&hwm, 0), disk.slot(&hwm, 1)), before);
+            }
+
+            // Both slots torn, or both never written: fail closed, nothing written.
+            hwm.commit(&disk.file, 3, &tips[3]).unwrap();
+            disk.tear_page(&hwm, 0, 5);
+            disk.tear_page(&hwm, 1, 6);
+            let before = (disk.slot(&hwm, 0), disk.slot(&hwm, 1));
+            for len in 0..4 {
+                assert!(disk.recover(&hwm, &head(len)).is_err());
+            }
+            assert_eq!((disk.slot(&hwm, 0), disk.slot(&hwm, 1)), before);
+            let zero = [0u8; HWM_SLOT_BYTES];
+            assert!(
+                hwm.recover_with_outcome(&disk.file, &zero, &zero, &head(0))
+                    .is_err()
+            );
+            assert!(
+                hwm.recover_with_outcome(&disk.file, &zero, &before.1, &head(0))
+                    .is_err()
+            );
         }
     }
 }

@@ -11,6 +11,7 @@ pub mod blind_vc;
 pub mod fips204_ntt;
 pub mod rss_mpc;
 pub mod threshold_mldsa;
+pub mod threshold_mldsa_shamir;
 mod toprf_engine;
 pub mod transport;
 pub mod voprf;
@@ -31,3 +32,4 @@ pub use threshold_mldsa::{
     ThresholdSignOutput, ThresholdSignSession, ThresholdVerificationPack,
     threshold_mldsa_dkg_party, threshold_sign_mldsa_party, threshold_sign_mldsa_party_policy_gated,
 };
+pub use threshold_mldsa_shamir::threshold_mldsa_shamir_expand_party;

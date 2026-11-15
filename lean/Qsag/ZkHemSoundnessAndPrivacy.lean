@@ -50,11 +50,11 @@ uniform on the other, so the two views are identically distributed.
     with a challenge outside `F_{p^2}` mask a word over `F_{p^4}` perfectly.
 -/
 
-public import Qsag.GoldilocksPrimalityAndExt4Field
-import all Qsag.Goldilocks
-import all Qsag.GoldilocksPrimalityAndExt4Field
-public import Qsag.AffineProximityGaps
-public import Qsag.MultiRoundFsQrom
+public import Qsag.Math.GoldilocksPrimalityAndExt4Field
+import all Qsag.Math.Goldilocks
+import all Qsag.Math.GoldilocksPrimalityAndExt4Field
+public import Qsag.Coding.AffineProximityGaps
+public import Qsag.Oracle.MultiRoundFsQrom
 public import Qsag.Tactic.ConstructiveRing
 public import Qsag.Tactic.AssuranceKit
 

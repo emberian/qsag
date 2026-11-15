@@ -60,6 +60,22 @@
 //!    Only after acceptance do the custodians open `(w1, z)` in Phase 4 and
 //!    assemble the standard FIPS 204 signature `(c_tilde, z, h)`.
 //!
+//! # Committees above sixteen custodians
+//!
+//! Replicated sharing stores one component per `(t - 1)`-subset, so it is bounded at
+//! [`crate::rss_mpc::MAX_MPC_PARTIES`]. Larger committees (up to
+//! [`MAX_THRESHOLD_MLDSA_PARTIES`]) hold the key as degree-`t - 1` Shamir shares over
+//! `F_q`, one vector per custodian whatever `n` is; see
+//! [`crate::threshold_mldsa_shamir`] for the ceremony. A signing quorum of `2t - 1 <=
+//! m <= 16` custodians converts those shares into this module's replicated sharing
+//! over the quorum: each custodian inputs its share with [`Engine::input_all`], the
+//! key is the Lagrange combination of the first `t` inputs, and the other `m - t`
+//! inputs must open to zero against that polynomial. At most `t - 1` inputs are
+//! wrong, and a nonzero error of that weight cannot satisfy `m - t >= t - 1` checks,
+//! so a substituted share aborts the session before any mask is sampled. The signing
+//! protocol below then runs unchanged. The quorum rule is the same (`2t - 1`); this
+//! is not an exact-`t` protocol.
+//!
 //! Nonce safety: every session derives its subset keys from fresh
 //! contributions of all holders, bound to the session, the quorum and the
 //! message representative, so two sessions never share `y` while one honest
@@ -71,10 +87,12 @@ use crate::fips204_ntt::{
     fq_add, fq_mul, fq_sub, high_bits_ct, mat_vec_mul_ntt, ml_dsa_verify, pk_encode, power2round,
     sample_in_ball, sig_encode, use_hint, w1_encode,
 };
+use crate::fips204_ntt::fq_inv_or_zero;
 use crate::rss_mpc::{
     BinSh, EXT_DEGREE, Engine, MpcError, MpcStats, MpcTransport, Sh, Structure, less_than_public,
     masked_range_test,
 };
+use qsag_core::wipe::SecretBuffer;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
@@ -83,8 +101,8 @@ use qsag_accel::keccak::{KECCAK_RC, Shake256, cshake256_framed_32};
 use qsag_policy::AuthorizedSignReleaseToken;
 use qsag_verified::{MlDsaBarrierChecks, MlDsaReleaseGate};
 
-/// Enrollment identifier limit. The current RSS backend additionally enforces
-/// `rss_mpc::MAX_MPC_PARTIES`; a polynomial-sharing backend is needed above it.
+/// Largest committee. Replicated key shares stop at `rss_mpc::MAX_MPC_PARTIES`;
+/// above it the key is Shamir-shared ([`crate::threshold_mldsa_shamir`]).
 pub const MAX_THRESHOLD_MLDSA_PARTIES: usize = 64;
 /// Attempts per signing session before `RejectionBudgetExhausted`.
 pub const DEFAULT_MAX_REJECTION_ATTEMPTS: u32 = 256;
@@ -95,9 +113,13 @@ pub const PHASE_SIGN_MASKS: u8 = 1;
 pub const PHASE_SIGN_HIGH_BITS: u8 = 2;
 pub const PHASE_SIGN_REJECTION: u8 = 3;
 pub const PHASE_SIGN_RELEASE: u8 = 4;
+/// Conversion of Shamir key shares into the quorum's sharing.
+pub const PHASE_SIGN_KEY: u8 = 5;
 pub const PHASE_DKG_COIN: u8 = 10;
 pub const PHASE_DKG_SAMPLE: u8 = 11;
 pub const PHASE_DKG_PUBLIC_KEY: u8 = 12;
+/// Expansion of a committee's key into Shamir shares for all custodians.
+pub const PHASE_DKG_SHAMIR: u8 = 13;
 
 const MASK_BITS: usize = 23;
 const SPARE_MASKS: usize = 64;
@@ -130,6 +152,12 @@ pub enum ThresholdMlDsaError {
     KeySamplingShortfall,
     /// An opened value was outside the domain its verified circuit allows.
     ProtocolInvariantViolated,
+    /// A custodian's Shamir key share is not on the enrolled polynomial.
+    KeyShareInconsistent,
+    /// A Shamir dealing in the expansion ceremony failed its consistency check.
+    ShamirDealingInconsistent,
+    /// The operation needs the other kind of key share (replicated or Shamir).
+    WrongKeyShareKind,
     SignatureVerificationFailed,
     RejectionBudgetExhausted {
         attempts: u32,
@@ -384,7 +412,7 @@ pub struct ThresholdMlDsaDkgConfig {
     pub session_id: [u8; 32],
 }
 
-fn sorted_distinct(ids: &[u16]) -> Result<Vec<u16>, ThresholdMlDsaError> {
+pub(crate) fn sorted_distinct(ids: &[u16]) -> Result<Vec<u16>, ThresholdMlDsaError> {
     let mut sorted = ids.to_vec();
     sorted.sort_unstable();
     if let Some(pair) = sorted.windows(2).find(|w| w[0] == w[1]) {
@@ -393,11 +421,11 @@ fn sorted_distinct(ids: &[u16]) -> Result<Vec<u16>, ThresholdMlDsaError> {
     Ok(sorted)
 }
 
-fn ids_bytes(ids: &[u16]) -> Vec<u8> {
+pub(crate) fn ids_bytes(ids: &[u16]) -> Vec<u8> {
     ids.iter().flat_map(|id| id.to_le_bytes()).collect()
 }
 
-fn check_parameters(
+pub(crate) fn check_parameters(
     level: MlDsaLevel,
     threshold: usize,
     parties: usize,
@@ -420,18 +448,24 @@ fn check_parameters(
             num_parties: parties,
         });
     }
-    // Reject before starting any network round. The identifier limit is not a
-    // claim that this replicated engine implements polynomial secret sharing.
-    if parties > crate::rss_mpc::MAX_MPC_PARTIES {
-        return Err(MpcError::UnsupportedStructure { parties, threshold }.into());
-    }
     Ok(())
 }
 
 impl ThresholdMlDsaDkgConfig {
-    /// Checks the configuration and returns the sorted custodian list.
+    /// Checks the configuration for the replicated ceremony
+    /// ([`threshold_mldsa_dkg_party`]) and returns the sorted custodian list.
+    /// Committees above `rss_mpc::MAX_MPC_PARTIES` are rejected here, before any
+    /// network round; they use [`crate::threshold_mldsa_shamir`].
     pub fn validate(&self) -> Result<Vec<u16>, ThresholdMlDsaError> {
-        check_parameters(self.level, self.threshold, self.party_ids.len())?;
+        let parties = self.party_ids.len();
+        check_parameters(self.level, self.threshold, parties)?;
+        if parties > crate::rss_mpc::MAX_MPC_PARTIES {
+            return Err(MpcError::UnsupportedStructure {
+                parties,
+                threshold: self.threshold,
+            }
+            .into());
+        }
         sorted_distinct(&self.party_ids)
     }
 }
@@ -465,11 +499,11 @@ impl ThresholdVerificationPack {
     }
 }
 
-struct SubsetShare {
+pub(crate) struct SubsetShare {
     /// Sorted holder positions in the global custodian list.
-    holders: Vec<usize>,
-    s1_hat: Vec<Poly256>,
-    s2_hat: Vec<Poly256>,
+    pub(crate) holders: Vec<usize>,
+    pub(crate) s1_hat: Vec<Poly256>,
+    pub(crate) s2_hat: Vec<Poly256>,
 }
 
 impl Drop for SubsetShare {
@@ -480,12 +514,30 @@ impl Drop for SubsetShare {
     }
 }
 
+/// One custodian's degree-`t - 1` Shamir share of `(s1, s2)` in NTT form, at the
+/// evaluation point `position + 1` of the sorted custodian list.
+pub(crate) struct ShamirShare {
+    pub(crate) s1_hat: Vec<Poly256>,
+    pub(crate) s2_hat: Vec<Poly256>,
+}
+
+impl Drop for ShamirShare {
+    fn drop(&mut self) {
+        for poly in self.s1_hat.iter_mut().chain(&mut self.s2_hat) {
+            poly.zeroize();
+        }
+    }
+}
+
 /// One custodian's key material. Not cloneable; erased on drop.
 pub struct ThresholdMlDsaSignerShare {
-    party_id: u16,
-    pack: ThresholdVerificationPack,
-    subsets: Vec<SubsetShare>,
-    next_epoch: u64,
+    pub(crate) party_id: u16,
+    pub(crate) pack: ThresholdVerificationPack,
+    /// Replicated components; empty when the key is Shamir-shared.
+    pub(crate) subsets: Vec<SubsetShare>,
+    /// The Shamir share, for committees enrolled through `threshold_mldsa_shamir`.
+    pub(crate) shamir: Option<ShamirShare>,
+    pub(crate) next_epoch: u64,
 }
 
 impl fmt::Debug for ThresholdMlDsaSignerShare {
@@ -517,14 +569,25 @@ impl ThresholdMlDsaSignerShare {
         &self.pack
     }
 
-    fn custody_digest(&self) -> [u8; 32] {
+    /// Whether the key is Shamir-shared (committees above sixteen custodians).
+    pub fn is_shamir(&self) -> bool {
+        self.shamir.is_some()
+    }
+
+    pub(crate) fn custody_digest(&self) -> [u8; 32] {
         let mut xof = Shake256::new();
         xof.absorb(b"QSAG.TMLDSA.CUSTODY.V1");
-        for subset in &self.subsets {
-            for poly in subset.s1_hat.iter().chain(&subset.s2_hat) {
-                for &c in &poly.coeffs {
-                    xof.absorb(&c.to_le_bytes());
-                }
+        let replicated = self
+            .subsets
+            .iter()
+            .flat_map(|subset| subset.s1_hat.iter().chain(&subset.s2_hat));
+        let shamir = self
+            .shamir
+            .iter()
+            .flat_map(|share| share.s1_hat.iter().chain(&share.s2_hat));
+        for poly in replicated.chain(shamir) {
+            for &c in &poly.coeffs {
+                xof.absorb(&c.to_le_bytes());
             }
         }
         xof.finalize(0x1F);
@@ -543,7 +606,7 @@ impl ThresholdMlDsaSignerShare {
     }
 }
 
-fn to_polys(flat: &[u32]) -> Vec<Poly256> {
+pub(crate) fn to_polys(flat: &[u32]) -> Vec<Poly256> {
     flat.as_chunks::<MLDSA_N>()
         .0
         .iter()
@@ -551,7 +614,7 @@ fn to_polys(flat: &[u32]) -> Vec<Poly256> {
         .collect()
 }
 
-fn flatten(polys: &[Poly256]) -> Vec<u32> {
+pub(crate) fn flatten(polys: &[Poly256]) -> Vec<u32> {
     polys
         .iter()
         .flat_map(|p| p.coeffs.iter().copied())
@@ -565,7 +628,7 @@ fn ntt_all(mut polys: Vec<Poly256>) -> Vec<Poly256> {
     polys
 }
 
-fn inv_ntt_all(mut polys: Vec<Poly256>) -> Vec<Poly256> {
+pub(crate) fn inv_ntt_all(mut polys: Vec<Poly256>) -> Vec<Poly256> {
     for poly in &mut polys {
         poly.inv_ntt();
     }
@@ -764,6 +827,7 @@ pub fn threshold_mldsa_dkg_party<T: MpcTransport>(
             t,
         },
         subsets,
+        shamir: None,
         next_epoch: 0,
     })
 }
@@ -1706,6 +1770,69 @@ fn session_key(
     Ok(key)
 }
 
+/// Lagrange weights that map values at `nodes` to the value at `target`, for a
+/// polynomial of degree below `nodes.len()` over `F_q`. The nodes are distinct.
+pub(crate) fn lagrange_weights(nodes: &[u32], target: u32) -> Vec<u32> {
+    nodes
+        .iter()
+        .enumerate()
+        .map(|(i, &node)| {
+            let (mut numerator, mut denominator) = (1u32, 1u32);
+            for (j, &other) in nodes.iter().enumerate() {
+                if i != j {
+                    numerator = fq_mul(numerator, fq_sub(target, other));
+                    denominator = fq_mul(denominator, fq_sub(node, other));
+                }
+            }
+            fq_mul(numerator, fq_inv_or_zero(denominator))
+        })
+        .collect()
+}
+
+/// The Shamir evaluation point of a custodian: its position in the sorted list, plus one.
+pub(crate) fn shamir_point(pack: &ThresholdVerificationPack, party_id: u16) -> Option<u32> {
+    pack.party_ids
+        .iter()
+        .position(|&id| id == party_id)
+        .map(|position| position as u32 + 1)
+}
+
+/// Converts the quorum's Shamir key shares into a sharing of `(s1, s2)` over the
+/// session. Every custodian inputs its share; the first `t` inputs define the key and
+/// the remaining `m - t` must open to zero against them (see the module header).
+fn shamir_session_key<T: MpcTransport>(
+    engine: &mut Engine<'_, T>,
+    pack: &ThresholdVerificationPack,
+    quorum: &[u16],
+    share: &ShamirShare,
+) -> Result<Sh, ThresholdMlDsaError> {
+    let t = pack.threshold;
+    let points = quorum
+        .iter()
+        .map(|&id| shamir_point(pack, id))
+        .collect::<Option<Vec<u32>>>()
+        .ok_or(ThresholdMlDsaError::ProtocolInvariantViolated)?;
+    let mut mine = SecretBuffer(flatten(&share.s1_hat));
+    mine.extend_from_slice(&flatten(&share.s2_hat));
+    let inputs = engine.input_all(&mine)?;
+    let combine = |weights: &[u32]| {
+        inputs[1..t]
+            .iter()
+            .zip(&weights[1..])
+            .fold(inputs[0].scale(weights[0]), |acc, (input, &weight)| {
+                acc.add(&input.scale(weight))
+            })
+    };
+    let checks: Vec<Sh> = (t..quorum.len())
+        .map(|j| inputs[j].sub(&combine(&lagrange_weights(&points[..t], points[j]))))
+        .collect();
+    let opened = engine.open(&checks.iter().collect::<Vec<_>>())?;
+    if opened.iter().flatten().any(|&value| value != 0) {
+        return Err(ThresholdMlDsaError::KeyShareInconsistent);
+    }
+    Ok(combine(&lagrange_weights(&points[..t], 0)))
+}
+
 /// Runs one custodian's side of a signing session and returns a standard
 /// FIPS 204 signature.
 ///
@@ -1723,6 +1850,9 @@ pub fn threshold_sign_mldsa_party<T: MpcTransport>(
     let level = share.pack.level;
     let threshold = share.pack.threshold;
     check_parameters(level, threshold, share.pack.party_ids.len())?;
+    if share.shamir.is_some() != share.subsets.is_empty() {
+        return Err(ThresholdMlDsaError::ProtocolInvariantViolated);
+    }
     let params = level.params();
     let quorum = sorted_distinct(&session.quorum)?;
     if let Some(&unknown) = quorum.iter().find(|id| !share.pack.party_ids.contains(id)) {
@@ -1757,7 +1887,6 @@ pub fn threshold_sign_mldsa_party<T: MpcTransport>(
         &[entropy, &share.custody_digest(), &context],
     );
     let mut engine = Engine::setup(net, structure.clone(), me, &context, &hedged)?;
-    let key = session_key(share, &quorum, &structure, engine.comps(), &params)?;
     let comps = engine.comps().len();
 
     let a_hat = expand_a_ntt(&params, &share.pack.rho);
@@ -1792,12 +1921,22 @@ pub fn threshold_sign_mldsa_party<T: MpcTransport>(
     let masks_needed = 4 * w_len + z_len + 1;
     let masks = masks_needed + SPARE_MASKS;
 
-    let mut s_hat_sh = engine.zeros(z_len + w_len)?;
-    for i in 0..comps {
-        let mut flat_s = flatten(&key.s1_hat[i]);
-        flat_s.extend_from_slice(&flatten(&key.s2_hat[i]));
-        s_hat_sh.c[i] = flat_s;
-    }
+    let s_hat_sh = match &share.shamir {
+        Some(shamir) => {
+            engine.set_phase(PHASE_SIGN_KEY);
+            shamir_session_key(&mut engine, &share.pack, &quorum, shamir)?
+        }
+        None => {
+            let key = session_key(share, &quorum, &structure, engine.comps(), &params)?;
+            let mut s_hat_sh = engine.zeros(z_len + w_len)?;
+            for i in 0..comps {
+                let mut flat_s = flatten(&key.s1_hat[i]);
+                flat_s.extend_from_slice(&flatten(&key.s2_hat[i]));
+                s_hat_sh.c[i] = flat_s;
+            }
+            s_hat_sh
+        }
+    };
 
     for attempt in 0..DEFAULT_MAX_REJECTION_ATTEMPTS {
         let epoch = share.next_epoch;
