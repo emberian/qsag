@@ -403,6 +403,26 @@ impl MemoryFirstSigned {
         Self::default()
     }
 
+    /// Canonical public-state commitment for an external keyed integrity wrapper.
+    /// This is not itself a MAC or a durability guarantee.
+    pub fn authentication_digest(&self) -> [u8; 32] {
+        let mut xof = crate::sponge::keccak::Cshake256Xof::new(b"QSAG.BAGGY.MEMORY_RECORDS/v1");
+        xof.absorb(&(self.records.len() as u64).to_be_bytes());
+        for (key, digits) in &self.records {
+            xof.absorb(&key.identity);
+            xof.absorb(&key.layer.to_be_bytes());
+            xof.absorb(&key.tree.to_be_bytes());
+            xof.absorb(&key.key_pair.to_be_bytes());
+            xof.absorb(&(digits.len() as u64).to_be_bytes());
+            xof.absorb(digits);
+        }
+        xof.absorb(&self.syncs.to_be_bytes());
+        xof.absorb(&[u8::from(self.fail_next)]);
+        let mut out = [0; 32];
+        xof.squeeze(&mut out);
+        out
+    }
+
     /// Keys with a record.
     pub fn len(&self) -> usize {
         self.records.len()
@@ -984,6 +1004,55 @@ pub struct WaistbandCache {
 }
 
 impl WaistbandCache {
+    /// Canonical commitment to every field that can influence signing. Callers
+    /// must authenticate this digest with a secret MAC key before trusting it.
+    /// Counters are included too so the representation has no uncommitted fields.
+    pub fn authentication_digest(&self) -> [u8; 32] {
+        let mut xof = crate::sponge::keccak::Cshake256Xof::new(b"QSAG.BAGGY.WAISTBAND.STATE/v1");
+        for n in [
+            self.top_layers,
+            self.max_entries,
+            self.leaves.len(),
+            self.sigs.len(),
+        ] {
+            xof.absorb(&(n as u64).to_be_bytes());
+        }
+        xof.absorb(&[u8::from(self.bound.is_some())]);
+        if let Some(binding) = &self.bound {
+            xof.absorb(&binding.identity());
+        }
+        for ((layer, tree), entry) in &self.leaves {
+            xof.absorb(&layer.to_be_bytes());
+            xof.absorb(&tree.to_be_bytes());
+            xof.absorb(&entry.root);
+            xof.absorb(&(entry.leaves.len() as u64).to_be_bytes());
+            for node in &entry.leaves {
+                xof.absorb(node);
+            }
+        }
+        for ((layer, tree, key_pair), entry) in &self.sigs {
+            xof.absorb(&layer.to_be_bytes());
+            xof.absorb(&tree.to_be_bytes());
+            xof.absorb(&key_pair.to_be_bytes());
+            xof.absorb(&entry.child_root);
+            xof.absorb(&entry.layer_root);
+            xof.absorb(&entry.sig.ctr.to_be_bytes());
+            xof.absorb(&(entry.sig.chains.len() as u64).to_be_bytes());
+            for node in &entry.sig.chains {
+                xof.absorb(node);
+            }
+            xof.absorb(&(entry.sig.auth.len() as u64).to_be_bytes());
+            for node in &entry.sig.auth {
+                xof.absorb(node);
+            }
+        }
+        xof.absorb(&self.hits.to_be_bytes());
+        xof.absorb(&self.misses.to_be_bytes());
+        let mut out = [0; 32];
+        xof.squeeze(&mut out);
+        out
+    }
+
     /// Cache the top `top_layers` layers, holding at most `max_entries` signatures and as
     /// many leaf sets. `top_layers = 0` disables the cache.
     pub fn new(top_layers: usize, max_entries: usize) -> Self {

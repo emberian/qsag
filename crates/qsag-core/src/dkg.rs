@@ -4199,14 +4199,14 @@ mod tests {
         // Nonzero, unequal polynomial coefficients make wrong interpolation indices
         // observable. Every constant term is a bit, but local shares need not be bits.
         let mut shares = vec![[Goldilocks::ZERO; 256]; 4];
-        for bit in 0..256 {
-            let poly = [
-                Goldilocks::from_u64_reduced((bit % 2) as u64),
-                Goldilocks::from_u64_reduced(bit as u64 + 11),
-                Goldilocks::from_u64_reduced(bit as u64 + 23),
-            ];
-            for (p, &x) in pts.iter().enumerate() {
-                shares[p][bit] = eval_poly_goldilocks(&poly, x);
+        for (party_shares, &x) in shares.iter_mut().zip(&pts) {
+            for (bit, share) in party_shares.iter_mut().enumerate() {
+                let poly = [
+                    Goldilocks::from_u64_reduced((bit % 2) as u64),
+                    Goldilocks::from_u64_reduced(bit as u64 + 11),
+                    Goldilocks::from_u64_reduced(bit as u64 + 23),
+                ];
+                *share = eval_poly_goldilocks(&poly, x);
             }
         }
         spdz_verify_seed256_boolean_goldilocks_with_quorum(
