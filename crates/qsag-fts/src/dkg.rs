@@ -1203,7 +1203,7 @@ mod gilboa_tests {
         const EDGES: [u128; 6] = [0, 1, 2, 1 << 127, u128::MAX, 0x87];
         (0..len)
             .map(|i| {
-                if i < EDGES.len() && salt % 2 == 0 {
+                if i < EDGES.len() && salt.is_multiple_of(2) {
                     EDGES[i]
                 } else {
                     (i as u128 + salt).wrapping_mul(0x9e37_79b9_7f4a_7c15_f39c_c060_5ced_c835)

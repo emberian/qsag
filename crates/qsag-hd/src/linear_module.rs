@@ -314,23 +314,6 @@ pub fn expand_matrix_a(seed_a: &[u8; 32]) -> [[RingPoly; MODULE_L]; MODULE_K] {
     })
 }
 
-/// Compute $\mathbf{A}\mathbf{s} \bmod q$ for $\mathbf{s} \in \mathcal{R}_q^L$.
-pub fn mat_vec_mul(
-    mat_a: &[[RingPoly; MODULE_L]; MODULE_K],
-    s: &[RingPoly; MODULE_L],
-) -> [RingPoly; MODULE_K] {
-    let matrix = ExpandedHdMatrix::from_coefficients([0; 32], mat_a);
-    matrix.multiply(s)
-}
-
-/// Compute $\mathbf{A}_{:, 0} \cdot \mathbf{r}_i \bmod q$ (column `1` in 1-based math notation).
-pub fn col1_mul(
-    mat_a: &[[RingPoly; MODULE_L]; MODULE_K],
-    r_poly: &RingPoly,
-) -> [RingPoly; MODULE_K] {
-    core::array::from_fn(|row| mat_a[row][0].mul_negacyclic(r_poly))
-}
-
 ///Threshold share kind supported by `PiHdLinearModule`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShareScheme {
@@ -1106,9 +1089,7 @@ fn inverse(mut poly: RingPoly) -> RingPoly {
 }
 impl ExpandedHdMatrix {
     pub fn new(seed: [u8; 32]) -> Self {
-        Self::from_coefficients(seed, &expand_matrix_a(&seed))
-    }
-    fn from_coefficients(seed: [u8; 32], matrix: &[[RingPoly; MODULE_L]; MODULE_K]) -> Self {
+        let matrix = expand_matrix_a(&seed);
         Self {
             seed,
             ntt: core::array::from_fn(|r| core::array::from_fn(|c| forward(&matrix[r][c]))),
@@ -1150,6 +1131,17 @@ fn pack_coefficients(values: &[u32], out: &mut [u8]) {
         out[cursor] = buffer as u8;
     }
 }
+/// Canonical decoding of exactly `values.len()` packed 23-bit residues:
+/// `None` for a wrong length, a residue `>= q` or nonzero padding bits.
+fn unpack_canonical_coefficients(bytes: &[u8], values: &mut [u32]) -> Option<()> {
+    let bits = values.len().checked_mul(23)?;
+    if bytes.len() != bits.div_ceil(8) {
+        return None;
+    }
+    unpack_coefficients(bytes, values);
+    let padded = bits % 8 != 0 && bytes.last().is_some_and(|last| last >> (bits % 8) != 0);
+    (!padded && values.iter().all(|&value| value < MODULE_Q)).then_some(())
+}
 fn unpack_coefficients(bytes: &[u8], values: &mut [u32]) {
     let mut buffer = 0u64;
     let mut bits = 0;
@@ -1178,14 +1170,9 @@ impl RingPoly {
         Ok(out)
     }
     pub fn decode_packed_v1(bytes: &[u8]) -> Result<Self, HdError> {
-        if bytes.len() != 736 {
-            return Err(HdError::InvalidThresholdParameters);
-        }
         let mut out = Self::zero();
-        unpack_coefficients(bytes, &mut out.coeffs);
-        if out.coeffs.iter().any(|&c| c >= MODULE_Q) {
-            return Err(HdError::InvalidThresholdParameters);
-        }
+        unpack_canonical_coefficients(bytes, &mut out.coeffs)
+            .ok_or(HdError::InvalidThresholdParameters)?;
         Ok(out)
     }
 }
