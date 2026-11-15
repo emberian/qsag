@@ -946,3 +946,960 @@ def hemKernelFold {F : Type} [CommRingOps F] (φ : F) : List F → List F
     `(φ, θ, α, β)`, the verifier DERIVES `f = w₀ + φ w₁`, `g = w₂ + φ (claim - w₀)` and the next
     claim `g + α (f + θ g) + β (c_F + θ c_G)`. There is no separate consistency check: the
     fourth cross term is forced to `claim - w₀`. -/
+def hemBridgeFoldClaim {F : Type} [CommRingOps F]
+    (claim w₀ w₁ w₂ c_F c_G φ θ α β : F) : F :=
+  CommRingOps.add
+    (CommRingOps.add w₂ (CommRingOps.mul φ (CommRingOps.sub claim w₀)))
+    (CommRingOps.add
+      (CommRingOps.mul α
+        (CommRingOps.add (CommRingOps.add w₀ (CommRingOps.mul φ w₁))
+          (CommRingOps.mul θ (CommRingOps.add w₂ (CommRingOps.mul φ (CommRingOps.sub claim w₀))))))
+      (CommRingOps.mul β (CommRingOps.add c_F (CommRingOps.mul θ c_G))))
+
+/-- Interleave even- and odd-indexed halves back into one coefficient / kernel vector. -/
+def hemInterleave {F : Type} : List F → List F → List F
+  | a :: as, b :: bs => a :: b :: hemInterleave as bs
+  | _, _ => []
+
+theorem hemKernelFold_interleave {F : Type} [CommRingOps F] (φ : F) :
+    ∀ (kE kO : List F), kE.length = kO.length →
+      hemKernelFold φ (hemInterleave kE kO) =
+        List.zipWith (fun a b => CommRingOps.add a (CommRingOps.mul φ b)) kE kO ++
+          [CommRingOps.zero]
+  | [], [], _ => rfl
+  | [], _ :: _, h => absurd h (Nat.succ_ne_zero _).symm
+  | _ :: _, [], h => absurd h (Nat.succ_ne_zero _)
+  | a :: as, b :: bs, h =>
+    congrArg (List.cons (CommRingOps.add a (CommRingOps.mul φ b)))
+      (hemKernelFold_interleave φ as bs (Nat.succ.inj h))
+
+theorem ringDot_zipFold {F : Type} [LawfulCommRing F] (φ : F) :
+    ∀ (c kE kO : List F), kE.length = kO.length →
+      ringDot c (List.zipWith (fun a b => CommRingOps.add a (CommRingOps.mul φ b)) kE kO) =
+        CommRingOps.add (ringDot c kE) (CommRingOps.mul φ (ringDot c kO))
+  | [], _, _, _ => by
+    simp only [ringDot, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+  | _ :: _, [], [], _ => by
+    simp only [List.zipWith_nil_left, ringDot, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+  | _ :: _, [], _ :: _, h => absurd h (Nat.succ_ne_zero _).symm
+  | _ :: _, _ :: _, [], h => absurd h (Nat.succ_ne_zero _)
+  | x :: xs, a :: as, b :: bs, h => by
+    have ih := ringDot_zipFold φ xs as bs (Nat.succ.inj h)
+    simp only [List.zipWith_cons_cons, ringDot]
+    rw [ih, LawfulCommRing.left_distrib x a (CommRingOps.mul φ b),
+        ← LawfulCommRing.mul_assoc x φ b, LawfulCommRing.mul_comm x φ,
+        LawfulCommRing.mul_assoc φ x b, LawfulCommRing.add_add_add_comm,
+        ← LawfulCommRing.left_distrib φ (CommRingOps.mul x b) (ringDot xs bs)]
+
+/-- **Rust-Faithful Dual Bridge (`hem_bridge_fold_claim_eq_dot`, `affine.rs::prove_fold`)**:
+    split coefficients and kernel into even / odd halves `(cE, cO)`, `(kE, kO)`. With the honest
+    cross wires `w₀ = ⟨cE, kE⟩`, `w₁ = ⟨cE, kO⟩`, `w₂ = ⟨cO, kE⟩`, the running claim
+    `⟨cE, kE⟩ + ⟨cO, kO⟩`, and the shift wires against the folded kernel `k' = kE + φ kO`,
+    `hemBridgeFoldClaim` IS the inner product of the folded coefficients
+    `affineCombine θ α β cE cO = cO + (α + β X)(cE + θ cO)` (`fold_coeffs`) with `k'`: the Lean
+    counterpart of `debug_assert_eq!(dot_ext4_fast(c, k), next)`. -/
+theorem hem_bridge_fold_claim_eq_dot {F : Type} [LawfulCommRing F]
+    (φ θ α β : F) (cE cO kE kO : List F) (h : kE.length = kO.length) :
+    hemBridgeFoldClaim
+        (CommRingOps.add (ringDot cE kE) (ringDot cO kO))
+        (ringDot cE kE) (ringDot cE kO) (ringDot cO kE)
+        (ringDot (shiftPoly cE)
+          (List.zipWith (fun a b => CommRingOps.add a (CommRingOps.mul φ b)) kE kO))
+        (ringDot (shiftPoly cO)
+          (List.zipWith (fun a b => CommRingOps.add a (CommRingOps.mul φ b)) kE kO))
+        φ θ α β =
+      ringDot (affineCombine θ α β cE cO)
+        (List.zipWith (fun a b => CommRingOps.add a (CommRingOps.mul φ b)) kE kO) := by
+  have hSub : CommRingOps.sub (CommRingOps.add (ringDot cE kE) (ringDot cO kO)) (ringDot cE kE) =
+      ringDot cO kO := by
+    rw [LawfulCommRing.sub_eq_add_neg,
+        LawfulCommRing.add_comm (ringDot cE kE) (ringDot cO kO),
+        LawfulCommRing.add_assoc, LawfulCommRing.add_right_neg, LawfulCommRing.add_zero]
+  unfold hemBridgeFoldClaim
+  rw [ringDot_affineCombine_eq_bridge, ringDot_zipFold φ cE kE kO h,
+      ringDot_zipFold φ cO kE kO h, hSub]
+
+def evalHemRbrPrefix {F : Type} [CommRingOps F] [DecidableEq F]
+    (curLive : Bool)
+    (curOracle : Nat → F)
+    (curDom : List F)
+    (curDeg curMinAgree : Nat)
+    (curKernel : List F)
+    (curClaim : F) :
+    List (HemWhirStageSpec F) → List (HemTranscriptRound F) → Bool
+  | _, [] => curLive
+  | remStages, .cascade _ _ cascadeDecoded :: restTr =>
+    let nextLive :=
+      cascadeDecoded.any (fun P =>
+        polyWitnessValid curDom curMinAgree (curDeg + 1) curOracle curKernel curClaim P)
+    evalHemRbrPrefix (curLive || nextLive) curOracle curDom (curDeg + 1) curMinAgree
+      curKernel curClaim remStages restTr
+  | st :: remStages,
+    .stageFold stageOracle w₀ w₁ w₂ c_F c_G φ θ α β z₀ z₁ ood₀ ood₁ stageDecoded :: restTr =>
+    let expectedFoldClaim := hemBridgeFoldClaim curClaim w₀ w₁ w₂ c_F c_G φ θ α β
+    let nextKernel := hemKernelFold φ curKernel
+    let stageHasWitness :=
+      stageDecoded.any (fun P =>
+        polyWitnessValid st.domainPts st.minAgree st.degBound stageOracle nextKernel expectedFoldClaim P &&
+        decide (RoundPoly.evalCoeffs P z₀ = ood₀) &&
+        decide (RoundPoly.evalCoeffs P z₁ = ood₁))
+    evalHemRbrPrefix stageHasWitness stageOracle st.domainPts st.degBound st.minAgree
+      nextKernel expectedFoldClaim remStages restTr
+  | [], [.finalQuery finalCoeffs] =>
+    decide (finalCoeffs.length ≤ curDeg + 1) &&
+    decide (ringDot finalCoeffs curKernel = curClaim) &&
+    checkQueriedCosets curDom curOracle finalCoeffs
+      (List.range (Nat.min curMinAgree curDom.length))
+  | _, _ => false
+
+/-- Boolean liveness of a nonempty transcript prefix of the `Hem` v6 model: Round 0 asymmetric
+    cascade (`S_poly ≤ 16`), `S` stages of monomial-shift affine folding with the `affine.rs`
+    five-wire bridge (`hemBridgeFoldClaim`, verifier-computed `hemKernelFold`) + dual OOD
+    pinning, and final coefficients + coset checks. Every stage check is algebraic; the decoded
+    polynomial witnessing a live stage is read from the transcript's decoded lists. -/
+def hemPrefixState {F : Type} [CommRingOps F] [DecidableEq F]
+    (inst : HemWhirInstance F) (tr : List (HemTranscriptRound F)) : Bool :=
+  match tr with
+  | .cascade absorbedShifts weights cascadeDecoded :: restTr =>
+    let okLengths :=
+      decide (1 ≤ inst.batchOracles.length ∧ inst.batchOracles.length ≤ 16 ∧
+      inst.batchClaims.length = inst.batchOracles.length) &&
+      decide (absorbedShifts.length = inst.batchClaims.length) &&
+      decide (weights.length = inst.batchClaims.length)
+    if okLengths = true then
+      let combClaim := evalCascadeClaim inst.batchClaims absorbedShifts weights
+      let combOracle := evalCascadeOracle inst.initDomainPts inst.batchOracles weights
+      let cascadeLive :=
+        cascadeDecoded.any (fun P =>
+          polyWitnessValid inst.initDomainPts inst.initMinAgree (inst.initDegBound + 1)
+            combOracle inst.initKernel combClaim P)
+      evalHemRbrPrefix cascadeLive combOracle inst.initDomainPts (inst.initDegBound + 1)
+        inst.initMinAgree inst.initKernel combClaim inst.stages restTr
+    else false
+  | _ => false
+
+/-- **State predicate of the `Hem` v6 transcript model (`hemAffineWhirStateFunction`)** over
+    `QuarticGoldilocks` (`F = QuarticGoldilocks` by default). The empty transcript is live
+    exactly when the statement is in the language `HemStatementValid` (an existential over
+    polynomial witnesses, independent of any prover-supplied candidate list); a nonempty
+    prefix is live when `hemPrefixState` holds. -/
+@[expose] def hemAffineWhirStateFunction {F : Type} [CommRingOps F] [DecidableEq F]
+    (inst : HemWhirInstance F) (tr : List (HemTranscriptRound F)) : Prop :=
+  match tr with
+  | [] => HemStatementValid inst
+  | _ :: _ => hemPrefixState inst tr = true
+
+def verifyHemStages {F : Type} [CommRingOps F] [DecidableEq F]
+    (curOracle : Nat → F)
+    (curDom : List F)
+    (curDeg curMinAgree : Nat)
+    (curKernel : List F)
+    (curClaim : F) :
+    List (HemWhirStageSpec F) → List (HemTranscriptRound F) → Bool
+  | [], [.finalQuery finalCoeffs] =>
+    decide (finalCoeffs.length ≤ curDeg + 1) &&
+    decide (ringDot finalCoeffs curKernel = curClaim) &&
+    checkQueriedCosets curDom curOracle finalCoeffs
+      (List.range (Nat.min curMinAgree curDom.length))
+  | st :: remStages,
+    .stageFold stageOracle w₀ w₁ w₂ c_F c_G φ θ α β z₀ z₁ ood₀ ood₁ stageDecoded :: restTr =>
+    let expectedFoldClaim := hemBridgeFoldClaim curClaim w₀ w₁ w₂ c_F c_G φ θ α β
+    let nextKernel := hemKernelFold φ curKernel
+    stageDecoded.any (fun P =>
+      polyWitnessValid st.domainPts st.minAgree st.degBound stageOracle nextKernel expectedFoldClaim P &&
+      decide (RoundPoly.evalCoeffs P z₀ = ood₀) &&
+      decide (RoundPoly.evalCoeffs P z₁ = ood₁) &&
+      checkQueriedCosets st.domainPts stageOracle P st.queriedCosets) &&
+    verifyHemStages stageOracle st.domainPts st.degBound st.minAgree
+      nextKernel expectedFoldClaim remStages restTr
+  | _, _ => false
+
+/-- Deterministic `Hem` v6 full-transcript verifier (`verifyHemAffineWhir`). -/
+@[expose] def verifyHemAffineWhir {F : Type} [CommRingOps F] [DecidableEq F]
+    (inst : HemWhirInstance F) (tr : List (HemTranscriptRound F)) : Bool :=
+  match tr with
+  | .cascade absorbedShifts weights cascadeDecoded :: restTr =>
+    decide (1 ≤ inst.batchOracles.length ∧ inst.batchOracles.length ≤ 16 ∧
+      inst.batchClaims.length = inst.batchOracles.length) &&
+    decide (absorbedShifts.length = inst.batchClaims.length) &&
+    decide (weights.length = inst.batchClaims.length) &&
+    let combClaim := evalCascadeClaim inst.batchClaims absorbedShifts weights
+    let combOracle := evalCascadeOracle inst.initDomainPts inst.batchOracles weights
+    cascadeDecoded.any (fun P =>
+      polyWitnessValid inst.initDomainPts inst.initMinAgree (inst.initDegBound + 1)
+        combOracle inst.initKernel combClaim P) &&
+    verifyHemStages combOracle inst.initDomainPts (inst.initDegBound + 1)
+      inst.initMinAgree inst.initKernel combClaim inst.stages restTr
+  | _ => false
+
+private theorem verifyHemStages_implies_evalHemRbrPrefix {F : Type} [CommRingOps F] [DecidableEq F] :
+    ∀ (curLive : Bool) (curOracle : Nat → F)
+      (curDom : List F) (curDeg curMinAgree : Nat)
+      (curKernel : List F) (curClaim : F)
+      (remStages : List (HemWhirStageSpec F)) (restTr : List (HemTranscriptRound F)),
+      verifyHemStages curOracle curDom curDeg curMinAgree curKernel curClaim remStages restTr = true →
+      evalHemRbrPrefix curLive curOracle curDom curDeg curMinAgree curKernel curClaim remStages restTr = true
+  | _, _, _, _, _, _, _, [], [.finalQuery _], hVer => hVer
+  | _, _, _, _, _, _, _, [], [], hVer => Bool.noConfusion hVer
+  | _, _, _, _, _, _, _, [], .cascade _ _ _ :: _, hVer => Bool.noConfusion hVer
+  | _, _, _, _, _, _, _, [], .stageFold _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ :: _, hVer =>
+    Bool.noConfusion hVer
+  | _, _, _, _, _, _, _, [], .finalQuery _ :: _ :: _, hVer => Bool.noConfusion hVer
+  | _, _, _, _, _, _, _, _ :: _, [], hVer => Bool.noConfusion hVer
+  | _, _, _, _, _, _, _, _ :: _, .cascade _ _ _ :: _, hVer => Bool.noConfusion hVer
+  | _, _, _, _, _, _, _, _ :: _, .finalQuery _ :: _, hVer => Bool.noConfusion hVer
+  | _, _, _, _, _, _, _, st :: remStages,
+    .stageFold stageOracle w₀ w₁ w₂ c_F c_G φ θ α β z₀ z₁ ood₀ ood₁ stageDecoded :: restTr,
+    hVer => by
+    simp only [verifyHemStages, Bool.and_eq_true] at hVer
+    simp only [evalHemRbrPrefix]
+    exact verifyHemStages_implies_evalHemRbrPrefix _ stageOracle st.domainPts st.degBound
+      st.minAgree _ _ remStages restTr hVer.2
+
+private theorem honest_cascade_completeness_poly {F : Type} [LawfulCommRing F] [DecidableEq F]
+    (W kernel domPts : List F) (d₀ : Nat) (α β : F) (hWLen : W.length ≤ d₀ + 1) :
+    let O : Nat → F := fun idx => RoundPoly.evalCoeffs W (domPts.getD idx CommRingOps.zero)
+    let e := ringDot W kernel
+    let s := ringDot (shiftPoly W) kernel
+    let P_comb := evalCascadePolySum [W] [(α, β)]
+    let inst : HemWhirInstance F :=
+      { batchOracles := [O]
+        batchClaims := [e]
+        initDomainPts := domPts
+        initDegBound := d₀
+        initMinAgree := domPts.length
+        initKernel := kernel
+        stages := [] }
+    let tr : List (HemTranscriptRound F) :=
+      [ .cascade [s] [(α, β)] [P_comb],
+        .finalQuery P_comb ]
+    HemStatementValid inst ∧
+    verifyHemAffineWhir inst tr = true := by
+  dsimp only
+  let O : Nat → F := fun idx => RoundPoly.evalCoeffs W (domPts.getD idx CommRingOps.zero)
+  let P_comb := evalCascadePolySum [W] [(α, β)]
+  have hAgreeW : hemCosetAgreeCount domPts O W = domPts.length := by
+    unfold hemCosetAgreeCount
+    have hOnes : qsum domPts.length (fun idx =>
+        if O idx.1 = RoundPoly.evalCoeffs W (domPts.get idx) then 1 else 0) =
+        qsum domPts.length (fun _ => 1) := by
+      apply qsum_congr; intro idx
+      have hEq : O idx.1 = RoundPoly.evalCoeffs W (domPts.get idx) := by
+        dsimp only [O]
+        rw [list_getD_eq_get domPts CommRingOps.zero idx]
+      simp only [hEq, ↓reduceIte]
+    rw [hOnes, qsum_const, Nat.mul_one]
+  have hPCombLen : P_comb.length ≤ (d₀ + 1) + 1 := by
+    dsimp only [P_comb, evalCascadePolySum]
+    have h1 : (polyScaleVar α W).length ≤ d₀ + 2 := by
+      simp only [polyScaleVar, List.length_map]; omega
+    have h2 : (polyScaleVar β (shiftPoly W)).length ≤ d₀ + 2 := by
+      simp only [polyScaleVar, shiftPoly, List.length_map, List.length_cons]; omega
+    have h3 := polyAddVar_length_le _ _ (d₀ + 2) h1 h2
+    exact polyAddVar_length_le _ [] (d₀ + 2) h3 (Nat.zero_le _)
+  have hPCombEval : ∀ z : F,
+      RoundPoly.evalCoeffs P_comb z =
+        CommRingOps.add
+          (CommRingOps.mul (CommRingOps.add α (CommRingOps.mul β z)) (RoundPoly.evalCoeffs W z))
+          CommRingOps.zero := by
+    intro z
+    dsimp only [P_comb, evalCascadePolySum]
+    rw [evalCoeffs_polyAddVar, evalCoeffs_polyAddVar, evalCoeffs_polyScaleVar,
+        evalCoeffs_polyScaleVar, evalCoeffs_shiftPoly]
+    change CommRingOps.add
+        (CommRingOps.add (CommRingOps.mul α (RoundPoly.evalCoeffs W z))
+          (CommRingOps.mul β (CommRingOps.mul z (RoundPoly.evalCoeffs W z))))
+        CommRingOps.zero = _
+    rw [← LawfulCommRing.mul_assoc β z (RoundPoly.evalCoeffs W z),
+        ← LawfulCommRing.right_distrib]
+  have hAgreeComb :
+      hemCosetAgreeCount domPts (evalCascadeOracle domPts [O] [(α, β)]) P_comb = domPts.length := by
+    unfold hemCosetAgreeCount
+    have hOnes : qsum domPts.length (fun idx =>
+        if evalCascadeOracle domPts [O] [(α, β)] idx.1 =
+            RoundPoly.evalCoeffs P_comb (domPts.get idx) then 1 else 0) =
+        qsum domPts.length (fun _ => 1) := by
+      apply qsum_congr; intro idx
+      have hEq : evalCascadeOracle domPts [O] [(α, β)] idx.1 =
+          RoundPoly.evalCoeffs P_comb (domPts.get idx) := by
+        dsimp only [evalCascadeOracle, O]
+        rw [list_getD_eq_get domPts CommRingOps.zero idx, hPCombEval (domPts.get idx)]
+      simp only [hEq, ↓reduceIte]
+    rw [hOnes, qsum_const, Nat.mul_one]
+  have hDotComb :
+      ringDot P_comb kernel =
+        evalCascadeClaim [ringDot W kernel] [ringDot (shiftPoly W) kernel] [(α, β)] :=
+    ringDot_evalCascadePolySum kernel [W] [(α, β)] rfl
+  have hMinSelf : Nat.min domPts.length domPts.length = domPts.length := by simp
+  have hQueriedComb :
+      checkQueriedCosets domPts (evalCascadeOracle domPts [O] [(α, β)]) P_comb
+        (List.range (Nat.min domPts.length domPts.length)) = true := by
+    rw [hMinSelf]
+    have hRange : ∀ (idxs : List Nat),
+        (∀ idx ∈ idxs, idx < domPts.length) →
+        checkQueriedCosets domPts (evalCascadeOracle domPts [O] [(α, β)]) P_comb idxs = true := by
+      intro idxs hLt
+      induction idxs with
+      | nil => rfl
+      | cons idx rest ih =>
+        have hi := hLt idx (.head rest)
+        have hEqPt : evalCascadeOracle domPts [O] [(α, β)] idx =
+            RoundPoly.evalCoeffs P_comb (domPts.getD idx CommRingOps.zero) := by
+          dsimp only [evalCascadeOracle, O]
+          rw [hPCombEval (domPts.getD idx CommRingOps.zero)]
+        simp only [checkQueriedCosets, hi, hEqPt, decide_true, Bool.true_and,
+          ih (fun j hj => hLt j (.tail idx hj))]
+    exact hRange (List.range domPts.length) (fun idx hMem => List.mem_range.mp hMem)
+  have hValidInst :
+      HemStatementValid
+        ({ batchOracles := [O]
+           batchClaims := [ringDot W kernel]
+           initDomainPts := domPts
+           initDegBound := d₀
+           initMinAgree := domPts.length
+           initKernel := kernel
+           stages := [] } : HemWhirInstance F) := by
+    have hW : polyWitnessValid domPts domPts.length d₀ O kernel (ringDot W kernel) W = true := by
+      unfold polyWitnessValid
+      rw [hAgreeW]
+      simp only [hWLen, Nat.le_refl, decide_true, eq_self, Bool.and_self]
+    show (1 ≤ [O].length ∧ [O].length ≤ 16) ∧
+      ((∃ P : List F,
+        polyWitnessValid domPts domPts.length d₀ O kernel (ringDot W kernel) P = true) ∧ True)
+    exact ⟨⟨Nat.le_refl 1, Nat.le_of_ble_eq_true rfl⟩, ⟨W, hW⟩, trivial⟩
+  have hVerTr :
+      verifyHemAffineWhir
+        { batchOracles := [O]
+          batchClaims := [ringDot W kernel]
+          initDomainPts := domPts
+          initDegBound := d₀
+          initMinAgree := domPts.length
+          initKernel := kernel
+          stages := [] }
+        [ .cascade [ringDot (shiftPoly W) kernel] [(α, β)] [P_comb],
+          .finalQuery P_comb ] = true := by
+    unfold verifyHemAffineWhir
+    dsimp only [polyWitnessValid, verifyHemStages, List.length_cons, List.length_nil,
+      List.any_cons, List.any_nil]
+    rw [hAgreeComb, hDotComb, hQueriedComb]
+    simp only [hPCombLen, Nat.le_refl, decide_true, Bool.or_false, Bool.and_self]
+    decide
+  exact ⟨hValidInst, hVerTr⟩
+
+private theorem accept_implies_live_poly {F : Type} [CommRingOps F] [DecidableEq F]
+    (inst : HemWhirInstance F) (fullTr : List (HemTranscriptRound F)) :
+    verifyHemAffineWhir inst fullTr = true → hemAffineWhirStateFunction inst fullTr := by
+  cases fullTr with
+  | nil => intro hVer; exact Bool.noConfusion hVer
+  | cons hd restTr =>
+    cases hd with
+    | stageFold _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => intro hVer; exact Bool.noConfusion hVer
+    | finalQuery _ => intro hVer; exact Bool.noConfusion hVer
+    | cascade absorbedShifts weights cascadeDecoded =>
+      intro hVer
+      unfold verifyHemAffineWhir at hVer
+      dsimp only at hVer
+      rcases (Bool.and_eq_true _ _).mp hVer with ⟨hOk, hRest⟩
+      rcases (Bool.and_eq_true _ _).mp hRest with ⟨_, hStages⟩
+      show hemPrefixState inst (.cascade absorbedShifts weights cascadeDecoded :: restTr) = true
+      unfold hemPrefixState
+      dsimp only
+      rw [hOk]
+      simp only [↓reduceIte]
+      exact verifyHemStages_implies_evalHemRbrPrefix _ _ _ _ _ _ _ inst.stages restTr hStages
+
+/-- **`Hem` v6 doomed-init, accept-implies-live and honest completeness
+    (`hemAffineWhir_rbr_completeness_and_doomed_init`)**, over `QuarticGoldilocks`:
+    1. a statement outside `HemStatementValid` is doomed on the empty transcript;
+    2. a doomed full transcript is rejected by the deterministic verifier;
+    3. an accepted full transcript is live;
+    4. any polynomial `W` of degree `≤ d₀`, with its shifted functional claim absorbed before
+       the challenge squeeze, gives a statement in the language and a live, accepted
+       transcript.
+    These are the first two laws of `RbrStateFunction` together with completeness. The third
+    law, a per-round flip bound, is NOT proved for this model:
+    `tooth_hem_zero_cascade_weights_accept_false_claim` exhibits a flip, and bounding the
+    number of flipping challenges at the deployed radius needs a mutual correlated agreement
+    bound for the 16-fold cascade and for each fold (`AffineMcaBound` at the Johnson radius). -/
+theorem hemAffineWhir_rbr_completeness_and_doomed_init :
+    (∀ inst : HemWhirInstance QuarticGoldilocks,
+      ¬ HemStatementValid inst → ¬ hemAffineWhirStateFunction inst []) ∧
+    (∀ (inst : HemWhirInstance QuarticGoldilocks) (fullTr : List (HemTranscriptRound QuarticGoldilocks)),
+      ¬ hemAffineWhirStateFunction inst fullTr → verifyHemAffineWhir inst fullTr = false) ∧
+    (∀ (inst : HemWhirInstance QuarticGoldilocks) (fullTr : List (HemTranscriptRound QuarticGoldilocks)),
+      verifyHemAffineWhir inst fullTr = true → hemAffineWhirStateFunction inst fullTr) ∧
+    (∀ (W kernel domPts : List QuarticGoldilocks) (d₀ : Nat) (α β : QuarticGoldilocks),
+      W.length ≤ d₀ + 1 →
+      let O : Nat → QuarticGoldilocks := fun idx =>
+        RoundPoly.evalCoeffs W (domPts.getD idx CommRingOps.zero)
+      let e := ringDot W kernel
+      let s := ringDot (shiftPoly W) kernel
+      let P_comb := evalCascadePolySum [W] [(α, β)]
+      let inst : HemWhirInstance QuarticGoldilocks :=
+        { batchOracles := [O]
+          batchClaims := [e]
+          initDomainPts := domPts
+          initDegBound := d₀
+          initMinAgree := domPts.length
+          initKernel := kernel
+          stages := [] }
+      let tr : List (HemTranscriptRound QuarticGoldilocks) :=
+        [ .cascade [s] [(α, β)] [P_comb],
+          .finalQuery P_comb ]
+      HemStatementValid inst ∧
+      hemAffineWhirStateFunction inst tr ∧
+      verifyHemAffineWhir inst tr = true) := by
+  refine ⟨fun _ hInv => hInv, ?_, accept_implies_live_poly, ?_⟩
+  · intro inst fullTr hDoomed
+    cases hv : verifyHemAffineWhir inst fullTr
+    · rfl
+    · exact absurd (accept_implies_live_poly inst fullTr hv) hDoomed
+  · intro W kernel domPts d₀ α β hWLen
+    rcases honest_cascade_completeness_poly W kernel domPts d₀ α β hWLen with ⟨hVal, hVer⟩
+    exact ⟨hVal, accept_implies_live_poly _ _ hVer, hVer⟩
+
+/-- A false `Hem` statement: the zero oracle on the domain `{0, 1}` with the claim that its
+    degree-0 interpolant evaluates to `1` under the functional `[1]`. -/
+def hemFalseClaimInstance : HemWhirInstance QuarticGoldilocks :=
+  { batchOracles := [fun _ => CommRingOps.zero]
+    batchClaims := [CommRingOps.one]
+    initDomainPts := [CommRingOps.zero, CommRingOps.one]
+    initDegBound := 0
+    initMinAgree := 2
+    initKernel := [CommRingOps.one]
+    stages := [] }
+
+/-- No polynomial witnesses the false statement: a constant agreeing with the zero oracle on
+    both domain points is zero, and the zero polynomial does not meet the claim `1`. -/
+theorem hemFalseClaimInstance_invalid : ¬ HemStatementValid hemFalseClaimInstance := by
+  intro h
+  have h' : (1 ≤ 1 ∧ 1 ≤ 16) ∧
+      ((∃ P : List QuarticGoldilocks,
+        polyWitnessValid [CommRingOps.zero, CommRingOps.one] 2 0 (fun _ => CommRingOps.zero)
+          [CommRingOps.one] CommRingOps.one P = true) ∧ True) := h
+  obtain ⟨_, ⟨P, hP⟩, _⟩ := h'
+  unfold polyWitnessValid at hP
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at hP
+  obtain ⟨⟨hLen, hAg⟩, hDot⟩ := hP
+  rcases P with _ | ⟨c, _ | ⟨c2, rest⟩⟩
+  · exact absurd hDot (by decide)
+  · have hc : c = CommRingOps.zero := by
+      apply Decidable.byContradiction
+      intro hne
+      have hne' : ¬ ((CommRingOps.zero : QuarticGoldilocks) =
+          RoundPoly.evalCoeffs [c] (CommRingOps.zero : QuarticGoldilocks)) := by
+        intro h
+        apply hne
+        have e : RoundPoly.evalCoeffs [c] (CommRingOps.zero : QuarticGoldilocks) = c := by
+          show CommRingOps.add c (CommRingOps.mul CommRingOps.zero CommRingOps.zero) = c
+          rw [LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+        rw [e] at h
+        exact h.symm
+      change 2 ≤ (if (CommRingOps.zero : QuarticGoldilocks) =
+            RoundPoly.evalCoeffs [c] (CommRingOps.zero : QuarticGoldilocks) then 1 else 0) +
+          ((if (CommRingOps.zero : QuarticGoldilocks) =
+            RoundPoly.evalCoeffs [c] (CommRingOps.one : QuarticGoldilocks) then 1 else 0) + 0)
+        at hAg
+      simp only [hne', ↓reduceIte] at hAg
+      by_cases h1 : (CommRingOps.zero : QuarticGoldilocks) =
+          RoundPoly.evalCoeffs [c] (CommRingOps.one : QuarticGoldilocks)
+      · simp only [h1, ↓reduceIte] at hAg
+        exact absurd hAg (by decide)
+      · simp only [h1, ↓reduceIte] at hAg
+        exact absurd hAg (by decide)
+    subst hc
+    exact absurd hDot (by decide)
+  · simp only [List.length_cons] at hLen
+    omega
+
+/-- **A flip of the `Hem` v6 state exists.** The false statement `hemFalseClaimInstance` is
+    doomed on the empty transcript, yet the deterministic verifier accepts it when the cascade
+    challenge is `(α, β) = (0, 0)`: the combined oracle and the combined claim both vanish.
+    Hence every round-by-round flip bound for the cascade round counts at least this
+    challenge, and soundness of the model rests on bounding the number of such challenges. -/
+theorem tooth_hem_zero_cascade_weights_accept_false_claim :
+    ¬ hemAffineWhirStateFunction hemFalseClaimInstance [] ∧
+    verifyHemAffineWhir hemFalseClaimInstance
+      [.cascade [CommRingOps.zero] [(CommRingOps.zero, CommRingOps.zero)] [[]],
+       .finalQuery []] = true :=
+  ⟨hemFalseClaimInstance_invalid, by decide⟩
+
+
+/-- Conditional round-0 cascade profile input over `QuarticGoldilocks`, computed from the
+    stage-0 paper numerator and the point-reduction term. This definition does not prove
+    the arbitrary-batch RBR bound; the stronger incidence and cascade composition are
+    required before charging this input to an acceptance event. -/
+def hemV6CascadeRbrBound : RatBound :=
+  match whirAffineStageWitnesses 24 true with
+  | w :: _ =>
+    ⟨15 * (whirAffineStageSimpleNum w / w.sFolds) + 72, goldilocksExt4Card, goldilocksExt4Card_pos⟩
+  | [] => RatBound.one
+
+/-- Conditional RBR paper/profile inputs for `Hem` v6 (`nv = 24`). Their numbers are computed
+    from deployed witness rows, but no RBR event bound is derived by this definition.
+    The stronger incidence constant, the equal-degree three-challenge lift, intermediate
+    fold geometries and arbitrary-batch/stage composition remain obligations. In particular
+    the larger proved sliced binary-fold counts do not justify these inputs. Multiplying
+    these rational inputs by `(2Q+1)^2` is arithmetic until the execution-level reduction
+    supplies its matching RBR bound. -/
+def hemV6FiveRoundRbrBounds : List RatBound :=
+  hemV6CascadeRbrBound ::
+    (whirAffineStageWitnesses 24 true).map whirAffineEqualDegreeCommitFoldBound
+
+/-- The conditional profile inputs evaluate to `(4182, 1644, 824, 489, 792) / p^4` (total `7931 / p^4`). -/
+theorem hemV6FiveRoundRbrBounds_eq_deployed :
+    hemV6FiveRoundRbrBounds.map (fun b => (b.num, b.den)) =
+      [4182, 1644, 824, 489, 792].map (fun n => (n, goldilocksExt4Card)) := by
+  decide +kernel
+
+/-- Pure 4-stage `Hem` v6 coset-query error bounds under default `BciksJohnsonQrom128`, DERIVED
+    from the same deployed `whirAffineStageWitnesses 24 true` rows as the fold bounds: the exact
+    distinct-fiber bound `(A + s_i)_{q_i} / (n)_{q_i}` at each row's own agreement threshold
+    (`whirAffine_deployed_pure_query_bounds`), with no proof-of-work density. -/
+def hemV6BciksJohnsonQueryBounds : List RatBound :=
+  (whirAffineStageWitnesses 24 true).map whirAffinePureQueryBoundOrOne
+
+private theorem hemCompiler_budget_up_to (QMax digestBits : Nat)
+    (hBciksMax : strictlyMoreThanBits 128
+      (multiRoundFsQromCompilerBound QMax 5 digestBits
+        hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds)) :
+    ∀ Q : Nat, Q ≤ QMax →
+      strictlyMoreThanBits 128 (multiRoundFsQromCompilerBound Q 5 digestBits
+        hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) ∧
+      atLeastBits 128 (multiRoundFsQromCompilerBound Q 5 digestBits
+        hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) := by
+  have hMonoScale : ∀ {a b : Nat} (hab : a ≤ b) (r : RatBound),
+      RatBound.le (RatBound.scale a r) (RatBound.scale b r) := by
+    intro a b hab r
+    unfold RatBound.le RatBound.scale
+    dsimp only
+    exact Nat.mul_le_mul_right r.den (Nat.mul_le_mul_right r.num hab)
+  have hScaleMono : ∀ (k : Nat) {a b : RatBound},
+      RatBound.le a b → RatBound.le (RatBound.scale k a) (RatBound.scale k b) := by
+    intro k a b h
+    unfold RatBound.le at h
+    unfold RatBound.le RatBound.scale
+    dsimp only
+    rw [Nat.mul_assoc, Nat.mul_assoc]
+    exact Nat.mul_le_mul_left k h
+  have hMonoSum : ∀ (xs ys : List RatBound) (hLen : xs.length = ys.length),
+      (∀ i : Fin xs.length, RatBound.le (xs.get i) (ys.get ⟨i.1, Nat.lt_of_lt_of_eq i.2 hLen⟩)) →
+      RatBound.le (RatBound.sumList xs) (RatBound.sumList ys) := by
+    intro xs
+    induction xs with
+    | nil =>
+      intro ys hLen _
+      cases ys with
+      | nil => exact RatBound.le_refl _
+      | cons _ _ => exact absurd hLen.symm (Nat.succ_ne_zero _)
+    | cons x xs' ih =>
+      intro ys hLen hPt
+      cases ys with
+      | nil => exact absurd hLen (Nat.succ_ne_zero _)
+      | cons y ys' =>
+        have hLen' : xs'.length = ys'.length := Nat.succ.inj hLen
+        simp only [RatBound.sumList]
+        exact RatBound.add_le_add
+          (hPt ⟨0, Nat.zero_lt_succ _⟩)
+          (ih ys' hLen' (fun i => hPt ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩))
+  have hStrictOfLe : ∀ {b₁ b₂ : RatBound},
+      RatBound.le b₁ b₂ → strictlyMoreThanBits 128 b₂ → strictlyMoreThanBits 128 b₁ := by
+    intro b₁ b₂ hLe hStrict
+    unfold RatBound.le at hLe
+    unfold strictlyMoreThanBits at hStrict ⊢
+    have h1 : b₁.num * 2 ^ 128 * b₂.den ≤ b₂.num * 2 ^ 128 * b₁.den := by
+      have hm := Nat.mul_le_mul_right (2 ^ 128) hLe
+      have e1 : b₁.num * b₂.den * 2 ^ 128 = b₁.num * 2 ^ 128 * b₂.den := by
+        rw [Nat.mul_right_comm]
+      have e2 : b₂.num * b₁.den * 2 ^ 128 = b₂.num * 2 ^ 128 * b₁.den := by
+        rw [Nat.mul_right_comm]
+      rwa [e1, e2] at hm
+    have h2 : b₂.num * 2 ^ 128 * b₁.den < b₂.den * b₁.den :=
+      Nat.mul_lt_mul_of_pos_right hStrict b₁.h_pos
+    have h3 : b₁.num * 2 ^ 128 * b₂.den < b₁.den * b₂.den := by
+      rw [Nat.mul_comm b₁.den b₂.den]
+      exact Nat.lt_of_le_of_lt h1 h2
+    if hLt : b₁.num * 2 ^ 128 < b₁.den then
+      exact hLt
+    else
+      exfalso
+      have hGe := Nat.mul_le_mul_right b₂.den (Nat.le_of_not_lt hLt)
+      exact Nat.not_le_of_gt h3 hGe
+  have hCompilerMono : ∀ {Q : Nat} (hQ : Q ≤ QMax) (qBounds : List RatBound),
+      RatBound.le
+        (multiRoundFsQromCompilerBound Q 5 digestBits hemV6FiveRoundRbrBounds qBounds)
+        (multiRoundFsQromCompilerBound QMax 5 digestBits hemV6FiveRoundRbrBounds qBounds) := by
+    intro Q hQ qBounds
+    unfold multiRoundFsQromCompilerBound
+    have hSqLe : (2 * Q + 1) ^ 2 ≤ (2 * QMax + 1) ^ 2 :=
+      Nat.pow_le_pow_left (by omega) 2
+    have hRbrLe :
+        RatBound.le
+          (RatBound.sumList (hemV6FiveRoundRbrBounds.map (dfmRoundScale Q)))
+          (RatBound.sumList (hemV6FiveRoundRbrBounds.map (dfmRoundScale QMax))) := by
+      apply hMonoSum _ _ (by simp only [List.length_map])
+      intro i
+      simp only [List.get_eq_getElem, List.getElem_map]
+      exact hMonoScale hSqLe _
+    have hGrindLe : 8 * (Q + 1) ^ 2 ≤ 8 * (QMax + 1) ^ 2 :=
+      Nat.mul_le_mul_left 8 (Nat.pow_le_pow_left (by omega) 2)
+    have hQueryLe :
+        RatBound.le
+          (RatBound.sumList (qBounds.map (quantumGroverGrindingBound Q)))
+          (RatBound.sumList (qBounds.map (quantumGroverGrindingBound QMax))) := by
+      apply hMonoSum _ _ (by simp only [List.length_map])
+      intro i
+      simp only [List.get_eq_getElem, List.getElem_map]
+      exact hMonoScale hGrindLe _
+    have hMerkleLe :
+        RatBound.le (qromMerkleOnlineExtractBound 5 digestBits Q)
+          (qromMerkleOnlineExtractBound 5 digestBits QMax) := by
+      unfold qromMerkleOnlineExtractBound
+      apply hScaleMono
+      apply RatBound.add_le_add
+      · unfold RatBound.le quantumGroverSingleTargetBound quantumZhandryMultiTargetBound
+        dsimp only
+        exact Nat.mul_le_mul_right _
+          (Nat.mul_le_mul_left _ (Nat.pow_le_pow_left (by omega) 2))
+      · unfold RatBound.le quantumBhtCollisionBound
+        dsimp only
+        exact Nat.mul_le_mul_right _
+          (Nat.mul_le_mul_left _ (Nat.pow_le_pow_left (by omega) 3))
+    exact RatBound.add_le_add hRbrLe (RatBound.add_le_add hMerkleLe hQueryLe)
+  intro Q hQ
+  have hb := hStrictOfLe (hCompilerMono hQ hemV6BciksJohnsonQueryBounds) hBciksMax
+  exact ⟨hb, Nat.le_of_lt hb⟩
+
+/-- **Multi-round Fiat–Shamir QROM numerical budget (`multiRoundFsQrom_budget_bound`)**.
+    For every oracle budget `Q + 1 ≤ 2^40`, `multiRoundFsQromCompilerBound` at the deployed
+    `num_vars = 24` parameters (five aggregated RBR entries derived from the deployed witness
+    rows, five committed Merkle roots over `256`-bit digests, four query stages) is strictly
+    below `2^-128` for the witness-derived `BciksJohnsonQrom128` query bounds.
+
+    The range is forced by the collision term of commitment extraction: at `Q + 1 = 2^41` the
+    same expression exceeds `2^-128` (`tooth_multiRoundFsQrom_budget_fails_at_2pow41`).
+
+    This is arithmetic about the budget expression. It becomes an acceptance-probability bound
+    for the deployed verifier only together with (a) an `RbrStateFunction` for the `Hem`
+    transcript whose flip bounds are the listed round bounds, which needs `[CWYZ26]`
+    Theorem 4.8 at the Johnson radius, and (b) a quantum extraction reduction for the
+    commitment charge. Neither is proved in this module. -/
+theorem multiRoundFsQrom_budget_bound :
+    hemV6FiveRoundRbrBounds.length = 5 ∧
+    (∀ Q : Nat, Q + 1 ≤ 2 ^ 40 →
+      strictlyMoreThanBits 128
+        (multiRoundFsQromCompilerBound Q 5 256
+          hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) ∧
+      atLeastBits 128
+        (multiRoundFsQromCompilerBound Q 5 256
+          hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds)) := by
+  refine ⟨by decide +kernel, ?_⟩
+  intro Q hQ
+  exact hemCompiler_budget_up_to (2 ^ 40 - 1) 256 (by decide +kernel) Q (by omega)
+
+
+/-- `#tooth`: the oracle-budget range of `multiRoundFsQrom_budget_bound` is not slack. One more
+    bit of budget (`Q + 1 = 2^41`) pushes the same expression above `2^-128`, through the
+    `8 (Q + 1)^3 / 2^256` collision term of commitment extraction. -/
+theorem tooth_multiRoundFsQrom_budget_fails_at_2pow41 :
+    ¬ atLeastBits 128
+      (multiRoundFsQromCompilerBound (2 ^ 41 - 1) 5 256
+        hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) := by
+  decide +kernel
+
+
+/-! ## §4. Fiat–Shamir Ordering `#tooth` Witness (`tooth_unabsorbed_shifted_claim_breaks_rbr`) -/
+
+/-- Expected `[CWYZ26]` §5.1 / `affine.rs:61` folded linear-functional claim
+    `σ' = γ_G + α * (γ_F + θ * γ_G) + β * (c_F + θ * c_G)` over any commutative ring `F`. -/
+def hemFoldClaimUpdate {F : Type} [CommRingOps F] (γ_F γ_G c_F c_G θ α β : F) : F :=
+  CommRingOps.add γ_G
+    (CommRingOps.add
+      (CommRingOps.mul α (CommRingOps.add γ_F (CommRingOps.mul θ γ_G)))
+      (CommRingOps.mul β (CommRingOps.add c_F (CommRingOps.mul θ c_G))))
+
+/-- Explicit cheating shifted-claim calculation when a buggy Fiat–Shamir transcript squeezes
+    `(θ, α, β)` BEFORE absorbing `(c_F, c_G)`: on the committed zero polynomial (`F = [], G = []`,
+    true folded claim `= 0`), chooses `c_G := 0` and `c_F := - β⁻¹ * (γ_G + α * (γ_F + θ * γ_G))`! -/
+def cheatUnabsorbedShiftClaimGen {F : Type} [CommRingOps F] (inv : F → F)
+    (γ_F γ_G θ α β : F) : F × F :=
+  let baseTerm := CommRingOps.add γ_G
+    (CommRingOps.mul α (CommRingOps.add γ_F (CommRingOps.mul θ γ_G)))
+  (CommRingOps.mul (inv β) (CommRingOps.neg baseTerm), CommRingOps.zero)
+
+def cheatUnabsorbedShiftClaim (γ_F γ_G θ α β : QuarticGoldilocks) :
+    QuarticGoldilocks × QuarticGoldilocks :=
+  cheatUnabsorbedShiftClaimGen QuarticGoldilocks.inv γ_F γ_G θ α β
+
+/-- Checks whether an affine fold step from committed zero polynomials `(F = [], G = [])` with
+    claimed `(γ_F, γ_G)` lands in a `live` (`true`) post-fold `StateFunction` state on the zero
+    oracle (`hemFoldClaimUpdate γ_F γ_G c_F c_G θ α β = 0`). -/
+def zeroPolyPostFoldStateLive {F : Type} [CommRingOps F] [DecidableEq F]
+    (γ_F γ_G c_F c_G θ α β : F) : Bool :=
+  decide (hemFoldClaimUpdate γ_F γ_G c_F c_G θ α β = CommRingOps.zero)
+
+private theorem unabsorbed_shift_forgery_prob_one_poly
+    {F : Type} [LawfulCommRing F] [DecidableEq F]
+    (inv : F → F)
+    (hInv : ∀ x : F, x ≠ CommRingOps.zero → CommRingOps.mul x (inv x) = CommRingOps.one)
+    (γ_F γ_G : F) (S_θ S_α S_β : List F)
+    (hθ : 0 < S_θ.length) (hα : 0 < S_α.length) (hβ : 0 < S_β.length)
+    (hNz : ∀ β ∈ S_β, β ≠ CommRingOps.zero) :
+    let totalCard := S_θ.length * (S_α.length * S_β.length)
+    let hitCount :=
+      qsum S_θ.length (fun i =>
+        qsum S_α.length (fun j =>
+          qsum S_β.length (fun k =>
+            let θ := S_θ.get i
+            let α := S_α.get j
+            let β := S_β.get k
+            let (c_F, c_G) := cheatUnabsorbedShiftClaimGen inv γ_F γ_G θ α β
+            if zeroPolyPostFoldStateLive γ_F γ_G c_F c_G θ α β = true then 1 else 0)))
+    hitCount = totalCard ∧
+    RatBound.le RatBound.one
+      ⟨hitCount, totalCard, Nat.mul_pos hθ (Nat.mul_pos hα hβ)⟩ ∧
+    RatBound.le
+      ⟨hitCount, totalCard, Nat.mul_pos hθ (Nat.mul_pos hα hβ)⟩
+      RatBound.one := by
+  dsimp only
+  have hPointZero : ∀ (θ α β : F), β ≠ CommRingOps.zero →
+      let (c_F, c_G) := cheatUnabsorbedShiftClaimGen inv γ_F γ_G θ α β
+      hemFoldClaimUpdate γ_F γ_G c_F c_G θ α β = CommRingOps.zero := by
+    intro θ α β hβNz
+    dsimp only [cheatUnabsorbedShiftClaimGen, hemFoldClaimUpdate]
+    let baseTerm := CommRingOps.add γ_G
+      (CommRingOps.mul α (CommRingOps.add γ_F (CommRingOps.mul θ γ_G)))
+    change CommRingOps.add γ_G
+        (CommRingOps.add
+          (CommRingOps.mul α (CommRingOps.add γ_F (CommRingOps.mul θ γ_G)))
+          (CommRingOps.mul β
+            (CommRingOps.add
+              (CommRingOps.mul (inv β) (CommRingOps.neg baseTerm))
+              (CommRingOps.mul θ CommRingOps.zero)))) = CommRingOps.zero
+    rw [LawfulCommRing.mul_zero, LawfulCommRing.add_zero,
+        ← LawfulCommRing.mul_assoc β (inv β) (CommRingOps.neg baseTerm),
+        hInv β hβNz,
+        LawfulCommRing.one_mul,
+        ← LawfulCommRing.add_assoc γ_G _ (CommRingOps.neg baseTerm)]
+    exact LawfulCommRing.add_right_neg baseTerm
+  have hInnerβ : ∀ (θ α : F),
+      qsum S_β.length (fun k =>
+        let (c_F, c_G) := cheatUnabsorbedShiftClaimGen inv γ_F γ_G θ α (S_β.get k)
+        if zeroPolyPostFoldStateLive γ_F γ_G c_F c_G θ α (S_β.get k) = true then 1 else 0) =
+      S_β.length := by
+    intro θ α
+    have h1 : qsum S_β.length (fun k =>
+        let (c_F, c_G) := cheatUnabsorbedShiftClaimGen inv γ_F γ_G θ α (S_β.get k)
+        if zeroPolyPostFoldStateLive γ_F γ_G c_F c_G θ α (S_β.get k) = true then 1 else 0) =
+        qsum S_β.length (fun _ => 1) := by
+      apply qsum_congr; intro k
+      have hkNz : S_β.get k ≠ CommRingOps.zero := hNz (S_β.get k) (List.get_mem S_β k)
+      have hEq0 := hPointZero θ α (S_β.get k) hkNz
+      dsimp only at hEq0
+      unfold zeroPolyPostFoldStateLive
+      simp only [hEq0, decide_true, ↓reduceIte]
+    rw [h1, qsum_const, Nat.mul_one]
+  have hInnerα : ∀ (θ : F),
+      qsum S_α.length (fun j =>
+        qsum S_β.length (fun k =>
+          let (c_F, c_G) := cheatUnabsorbedShiftClaimGen inv γ_F γ_G θ (S_α.get j) (S_β.get k)
+          if zeroPolyPostFoldStateLive γ_F γ_G c_F c_G θ (S_α.get j) (S_β.get k) = true then 1 else 0)) =
+      S_α.length * S_β.length := by
+    intro θ
+    rw [qsum_congr (fun j => hInnerβ θ (S_α.get j)), qsum_const]
+  have hHitEq :
+      qsum S_θ.length (fun i =>
+        qsum S_α.length (fun j =>
+          qsum S_β.length (fun k =>
+            let (c_F, c_G) := cheatUnabsorbedShiftClaimGen inv γ_F γ_G (S_θ.get i) (S_α.get j) (S_β.get k)
+            if zeroPolyPostFoldStateLive γ_F γ_G c_F c_G (S_θ.get i) (S_α.get j) (S_β.get k) = true
+            then 1 else 0))) =
+      S_θ.length * (S_α.length * S_β.length) := by
+    rw [qsum_congr (fun i => hInnerα (S_θ.get i)), qsum_const]
+  refine ⟨hHitEq, ?_, ?_⟩
+  · unfold RatBound.le RatBound.one; dsimp only; rw [hHitEq, Nat.one_mul, Nat.mul_one]; exact Nat.le_refl _
+  · unfold RatBound.le RatBound.one; dsimp only; rw [hHitEq, Nat.one_mul, Nat.mul_one]; exact Nat.le_refl _
+
+private theorem absorbed_shift_preserves_soundness_poly
+    {F : Type} [LawfulCommRing F] [DecidableEq F]
+    (c_F c_G θ : F) (S : List F) (hPos : 0 < S.length) (hNodup : S.Nodup) :
+    let absorbedHits :=
+      qsum S.length (fun i =>
+        qsum S.length (fun j =>
+          if zeroPolyPostFoldStateLive CommRingOps.one CommRingOps.zero
+               c_F c_G θ (S.get i) (S.get j) = true then 1 else 0))
+    absorbedHits ≤ S.length ∧
+    RatBound.le
+      ⟨absorbedHits, S.length ^ 2, Nat.pow_pos hPos⟩
+      ⟨1, S.length, hPos⟩ := by
+  dsimp only
+  rw [qsum_comm]
+  have hPerBeta : ∀ j : Fin S.length,
+      qsum S.length (fun i =>
+        if zeroPolyPostFoldStateLive CommRingOps.one CommRingOps.zero
+             c_F c_G θ (S.get i) (S.get j) = true then 1 else 0) ≤ 1 := by
+    intro j
+    apply qsum_le_one_of_subsingleton
+    intro i₁ i₂ h₁ h₂
+    have e₁ : hemFoldClaimUpdate CommRingOps.one CommRingOps.zero
+        c_F c_G θ (S.get i₁) (S.get j) = CommRingOps.zero := of_decide_eq_true h₁
+    have e₂ : hemFoldClaimUpdate CommRingOps.one CommRingOps.zero
+        c_F c_G θ (S.get i₂) (S.get j) = CommRingOps.zero := of_decide_eq_true h₂
+    let shiftVal := CommRingOps.mul (S.get j) (CommRingOps.add c_F (CommRingOps.mul θ c_G))
+    have hSimp : ∀ α : F,
+        hemFoldClaimUpdate CommRingOps.one CommRingOps.zero c_F c_G θ α (S.get j) =
+          CommRingOps.add α shiftVal := by
+      intro α
+      unfold hemFoldClaimUpdate
+      rw [LawfulCommRing.zero_add, LawfulCommRing.mul_zero, LawfulCommRing.add_zero,
+          LawfulCommRing.mul_one]
+    rw [hSimp (S.get i₁)] at e₁
+    rw [hSimp (S.get i₂)] at e₂
+    have hEqAlpha : S.get i₁ = S.get i₂ := by
+      have c1 := congrArg (fun u => CommRingOps.add u (CommRingOps.neg shiftVal)) e₁
+      have c2 := congrArg (fun u => CommRingOps.add u (CommRingOps.neg shiftVal)) e₂
+      rw [LawfulCommRing.add_assoc, LawfulCommRing.add_right_neg, LawfulCommRing.add_zero,
+          LawfulCommRing.zero_add] at c1 c2
+      exact c1.trans c2.symm
+    exact nodup_get_inj hNodup hEqAlpha
+  have hHitsLe :
+      qsum S.length (fun j =>
+        qsum S.length (fun i =>
+          if zeroPolyPostFoldStateLive CommRingOps.one CommRingOps.zero
+               c_F c_G θ (S.get i) (S.get j) = true then 1 else 0)) ≤
+      S.length := by
+    have h1 := qsum_le_qsum hPerBeta
+    rw [qsum_const, Nat.mul_one] at h1
+    exact h1
+  refine ⟨hHitsLe, ?_⟩
+  unfold RatBound.le
+  dsimp only
+  rw [Nat.one_mul, Nat.pow_two]
+  exact Nat.mul_le_mul_right S.length hHitsLe
+
+/-- **`#tooth` Unabsorbed Shifted Claim Breaks RBR Soundness With Probability `1`
+    (`tooth_unabsorbed_shifted_claim_breaks_rbr`)**:
+    1. **False Initial Statement is Doomed**: committing the zero oracle over
+       `QuarticGoldilocks` while claiming the non-zero evaluation `σ = 1` is outside the language
+       for EVERY polynomial witness (`hemFalseClaimInstance_invalid`), so the empty transcript is
+       doomed.
+    2. **Buggy Squeeze-Before-Absorb Transcript Flips `false → true` With Exact Probability `1`**:
+       When `(θ, α, β)` is squeezed BEFORE absorbing `(c_F, c_G)`, for EVERY challenge `(θ, α, β)`
+       with `β ≠ 0` (`∀ β ∈ S_β, β ≠ 0`), `cheatUnabsorbedShiftClaim` flips `zeroPolyPostFoldStateLive`
+       to `true` on **100% of challenges** (`hitCount = S_θ.length * S_α.length * S_β.length`,
+       exact `RatBound` probability = `1 / 1 = RatBound.one`!).
+    3. **Deployed `Hem` v6 Absorb-Before-Squeeze Ordering Preserves `≤ 1 / |S|` Soundness**:
+       When `(c_F, c_G)` MUST be absorbed BEFORE squeezing `(α, β)` from any duplicate-free pool
+       `S`, at `(γ_F = 1, γ_G = 0)`, at most `S.length` out of `S.length ^ 2` pairs (`≤ 1 / S.length`)
+       flip `zeroPolyPostFoldStateLive` to `true`! -/
+theorem tooth_unabsorbed_shifted_claim_breaks_rbr :
+    (¬ hemAffineWhirStateFunction hemFalseClaimInstance []) ∧
+    (∀ (γ_F γ_G : QuarticGoldilocks)
+       (S_θ S_α S_β : List QuarticGoldilocks)
+       (hθ : 0 < S_θ.length) (hα : 0 < S_α.length) (hβ : 0 < S_β.length),
+       (∀ β ∈ S_β, β ≠ CommRingOps.zero) →
+      let totalCard := S_θ.length * (S_α.length * S_β.length)
+      let hitCount :=
+        qsum S_θ.length (fun i =>
+          qsum S_α.length (fun j =>
+            qsum S_β.length (fun k =>
+              let θ := S_θ.get i
+              let α := S_α.get j
+              let β := S_β.get k
+              let (c_F, c_G) := cheatUnabsorbedShiftClaim γ_F γ_G θ α β
+              if zeroPolyPostFoldStateLive γ_F γ_G c_F c_G θ α β = true then 1 else 0)))
+      hitCount = totalCard ∧
+      RatBound.le RatBound.one
+        ⟨hitCount, totalCard, Nat.mul_pos hθ (Nat.mul_pos hα hβ)⟩ ∧
+      RatBound.le
+        ⟨hitCount, totalCard, Nat.mul_pos hθ (Nat.mul_pos hα hβ)⟩
+        RatBound.one) ∧
+    (∀ (c_F c_G θ : QuarticGoldilocks) (S : List QuarticGoldilocks)
+       (hPos : 0 < S.length), S.Nodup →
+      let absorbedHits :=
+        qsum S.length (fun i =>
+          qsum S.length (fun j =>
+            if zeroPolyPostFoldStateLive CommRingOps.one CommRingOps.zero
+                 c_F c_G θ (S.get i) (S.get j) = true then 1 else 0))
+      absorbedHits ≤ S.length ∧
+      RatBound.le
+        ⟨absorbedHits, S.length ^ 2, Nat.pow_pos hPos⟩
+        ⟨1, S.length, hPos⟩) := by
+  refine ⟨hemFalseClaimInstance_invalid, ?_, ?_⟩
+  · intro γ_F γ_G S_θ S_α S_β hθ hα hβ hNz
+    exact unabsorbed_shift_forgery_prob_one_poly
+      QuarticGoldilocks.inv
+      (fun _ hx => QuarticGoldilocks.mul_inv_cancel hx)
+      γ_F γ_G S_θ S_α S_β hθ hα hβ hNz
+  · intro c_F c_G θ S hPos hNodup
+    exact absorbed_shift_preserves_soundness_poly c_F c_G θ S hPos hNodup
+
+/-- **Non-Vacuity & Inhabitedness Certificate (`inhabited_multi_round_fs_qrom`)**:
+    Certifies that all concrete schedules, unitary quantum superposition adversaries (`hadamardQuery2`),
+    honest `HemWhirInstance` transcripts, and `multiRoundFsQrom_budget_bound` budgets are
+    strictly inhabited with positive numerators and non-trivial quantum/field witnesses! -/
+theorem inhabited_multi_round_fs_qrom :
+    0 < (multiRoundFsQromCompilerBound (2 ^ 39) 5 256
+           hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds).num ∧
+    (∃ (A : QuantumAdv 2 2 1 1) (H : Fin 2 → BitVec 2),
+      0 < QVec.stateNormSq (runQuantumAdv A H) ∧
+      RatBound.le
+        ⟨qsum 2 (fun xStar =>
+           qsum 4 (fun j =>
+             if decide (j.1 = 0) = true then
+               QVec.queryWeight (runQuantumAdv A (reprogramOracle H xStar (BitVec.ofFin j))) xStar
+             else 0)),
+         4 * QVec.stateNormSq (runQuantumAdv A H),
+         Nat.mul_pos (by decide) (runQuantumAdv_normSq_pos A H)⟩
+        ⟨(2 * 1 + 1) ^ 2 * 1, 4, by decide⟩) := by
+  refine ⟨by decide +kernel, ?_⟩
+  let initVec : QVec 2 2 1 := fun x y _ =>
+    if x.1 == 0 && y.1 == 0 then GaussInt.one else GaussInt.zero
+  have hInitPos : 0 < QVec.stateNormSq initVec := by
+    unfold QVec.stateNormSq QVec.queryWeight initVec GaussInt.normSq GaussInt.one GaussInt.zero
+    decide
+  let A : QuantumAdv 2 2 1 1 :=
+    { init := initVec
+      h_init_pos := hInitPos
+      steps := fun _ => hadamardQuery2 2 1 }
+  let H : Fin 2 → BitVec 2 := fun _ => 0#2
+  refine ⟨A, H, runQuantumAdv_normSq_pos A H, ?_⟩
+  have hStep := qrom_unitary_measure_reprogram_rbr_step A H (fun _ => true)
+    (fun _ bv => decide (bv.toNat = 0)) 1
+    (by
+      intro _ _
+      decide)
+  simpa only [↓reduceIte, BitVec.toNat_ofFin] using hStep
+
+
+/-- Arithmetic repair of the conditional paper/profile expression at `2^56` queries: changing
+    only its digest parameter to 384 makes that expression small enough. This neither
+    discharges the RBR input nor upgrades the larger proved sliced counts. It is not a
+    security claim for either a 256-bit or a 384-bit deployed verifier. -/
+theorem multiRoundFsQrom_budget_384_at_2pow56 (Q : Nat) (hQ : Q ≤ 2 ^ 56) :
+    strictlyMoreThanBits 128 (multiRoundFsQromCompilerBound Q 5 384
+      hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) ∧
+    atLeastBits 128 (multiRoundFsQromCompilerBound Q 5 384
+      hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) :=
+  hemCompiler_budget_up_to (2 ^ 56) 384 (by decide +kernel) Q hQ
+
+/-- Keeping the deployed 256-bit commitment parameter fails the requested budget. -/
+theorem tooth_multiRoundFsQrom_256_at_2pow56 :
+    ¬ atLeastBits 128 (multiRoundFsQromCompilerBound (2 ^ 56) 5 256
+      hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) := by
+  decide +kernel
+
+/-- Nonzero portfolio query budget satisfying the repaired bound. -/
+theorem inhabited_multiRoundFsQrom_384 :
+    ∃ Q : Nat, Q = 2 ^ 56 ∧ Q ≤ 2 ^ 56 ∧
+      atLeastBits 128 (multiRoundFsQromCompilerBound Q 5 384
+        hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) :=
+  ⟨2 ^ 56, rfl, Nat.le_refl _,
+    (multiRoundFsQrom_budget_384_at_2pow56 (2 ^ 56) (Nat.le_refl _)).2⟩
+
+#tooth_pair multiRoundFsQrom_budget_384_at_2pow56 vs tooth_multiRoundFsQrom_256_at_2pow56
+#tooth_pair hemAffineWhir_rbr_completeness_and_doomed_init vs hemFalseClaimInstance_invalid
+#tooth_pair hem_johnson_fold_state_restoration_of_mca vs tooth_deployed_rows_exceed_welch_berlekamp_radius
+#verify_inhabited multiRoundFsQrom_budget_384_at_2pow56 inhabited_multiRoundFsQrom_384
+
+end Qsag
