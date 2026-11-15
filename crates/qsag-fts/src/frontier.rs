@@ -10,7 +10,7 @@
 //! 3. Mandatory `SK.prf`-derived per-signature randomizer `R` + monotonic `UseBudgetLatch`
 //!    preventing deterministic 2-message reuse or unbounded `q >= 3` over-signing.
 //! 4. Full 256-bit message digest pre-binding across all profiles, with exact `514 B`, `770 B`,
-//!    `1,314 B`, and `Full256Bit` (`2,338 B`) wire profiles.
+//!    `1,122 B`, `1,314 B`, and `Full256Bit` (`2,338 B`) wire profiles.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -44,6 +44,12 @@ pub enum FrontierFtsProfile {
     /// 16-byte nodes: 64-bit generic Grover preimage ceiling (not 128-bit PQ).
     /// High-resilience `1,314 B` signature (`h=15, w=5, L=81, S=162, n=16, r=335, s=16`, 128-bit 2-use).
     Compact1314,
+    /// Single-use 1,122-byte profile: 34 chain values, a 32-byte randomizer and a 2-byte counter.
+    /// `(h=8, w=96, L=34, S=1615, n=32, r=256)` gives `M > 2^263`.
+    /// Fits a 1,232-byte payload with a 96-byte vote header (1,218 bytes total).
+    /// 256-bit nodes and ranks avoid truncating the generic preimage/Grover search domain;
+    /// these parameter checks are not a complete signature-security reduction.
+    Compact1122,
     /// 32-byte nodes cap generic preimage strength at 256 classical / 128 Grover bits.
     /// The constant-sum frontier domain contains every 256-bit message rank.
     /// Full 256-bit chain-width `2,338 B` 1-use custody profile (`h=8, w=5, L=72, S=144, n=32, r=256, s=16`).
@@ -98,6 +104,16 @@ impl FrontierFtsProfile {
                 index_bits: 335,
                 counter_bits: 16,
                 max_safe_uses: 2,
+            },
+            Self::Compact1122 => FrontierFtsParams {
+                node_bytes: 32,
+                tree_height: 8,
+                winternitz_w: 96,
+                frontier_len: 34,
+                target_sum: 1615,
+                index_bits: 256,
+                counter_bits: 16,
+                max_safe_uses: 1,
             },
             Self::Full256Bit => FrontierFtsParams {
                 node_bytes: 32,
@@ -601,7 +617,7 @@ impl Drop for FrontierFtsSigningKey {
     }
 }
 
-/// Compact `FrontierSumFts` signature (`514 B` / `770 B` / `1,314 B` / `2,338 B`).
+/// Compact `FrontierSumFts` signature (size is determined by its profile).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FrontierFtsSignature {
     pub randomizer: Vec<u8>,
@@ -643,6 +659,124 @@ impl FrontierFtsSignature {
             randomizer,
             grind_counter,
             chain_values,
+        })
+    }
+}
+
+/// Link from `epoch` to `epoch + 1`, authenticated by the current epoch's vote.
+/// Epoch keys share the public profile and `pk_seed`; their secret seeds must be independent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EpochKeyLink {
+    pub epoch: u64,
+    pub next_epoch_pk_root: [u8; 32],
+}
+
+/// A fixed 72-byte vote/link header followed by the profile's canonical signature.
+/// With `Compact1122` the envelope is 1,194 bytes. Transport framing is additional.
+/// A trusted current key and expected epoch are required: this is not a self-authenticating
+/// initial key or a durable replay tracker. Persist the verified next key before advancing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RotatedEpochVote {
+    pub link: EpochKeyLink,
+    pub vote_digest: [u8; 32],
+    pub signature: FrontierFtsSignature,
+}
+
+impl EpochKeyLink {
+    fn message(&self, chain_id: &[u8; 32], vote_digest: &[u8; 32]) -> [u8; 32] {
+        let mut digest = [0; 32];
+        cshake256_framed_xof(
+            b"QSAG.FTS.EPOCH.VOTE.V1",
+            &[
+                chain_id,
+                &self.epoch.to_be_bytes(),
+                vote_digest,
+                &self.next_epoch_pk_root,
+            ],
+            &mut digest,
+        );
+        digest
+    }
+}
+
+impl RotatedEpochVote {
+    pub fn to_bytes(&self, profile: FrontierFtsProfile) -> Vec<u8> {
+        let mut out = Vec::with_capacity(72 + profile.signature_bytes());
+        out.extend_from_slice(&self.link.epoch.to_be_bytes());
+        out.extend_from_slice(&self.vote_digest);
+        out.extend_from_slice(&self.link.next_epoch_pk_root);
+        out.extend_from_slice(&self.signature.to_bytes(profile));
+        out
+    }
+
+    pub fn from_bytes(profile: FrontierFtsProfile, bytes: &[u8]) -> Result<Self, FrontierFtsError> {
+        if bytes.len() != 72 + profile.signature_bytes() {
+            return Err(FrontierFtsError::MalformedSignatureLength);
+        }
+        Ok(Self {
+            link: EpochKeyLink {
+                epoch: u64::from_be_bytes(core::array::from_fn(|i| bytes[i])),
+                next_epoch_pk_root: core::array::from_fn(|i| bytes[40 + i]),
+            },
+            vote_digest: core::array::from_fn(|i| bytes[8 + i]),
+            signature: FrontierFtsSignature::from_bytes(profile, &bytes[72..])?,
+        })
+    }
+
+    /// Authenticate the vote and return the key for exactly `expected_epoch + 1`.
+    pub fn verify(
+        &self,
+        current: &FrontierFtsPublicKey,
+        dp: &FrontierDpTable,
+        chain_id: &[u8; 32],
+        expected_epoch: u64,
+        expected_vote_digest: &[u8; 32],
+    ) -> Result<FrontierFtsPublicKey, FrontierFtsError> {
+        if current.profile.params().node_bytes != 32
+            || current.profile.params().max_safe_uses != 1
+            || current.root.len() != 32
+            || self.link.epoch != expected_epoch
+            || expected_epoch.checked_add(1).is_none()
+            || &self.vote_digest != expected_vote_digest
+        {
+            return Err(FrontierFtsError::SignatureVerificationFailed);
+        }
+        verify_frontier_fts(
+            current,
+            dp,
+            &self.link.message(chain_id, &self.vote_digest),
+            &self.signature,
+        )?;
+        Ok(FrontierFtsPublicKey {
+            profile: current.profile,
+            pk_seed: current.pk_seed,
+            root: self.link.next_epoch_pk_root.to_vec(),
+        })
+    }
+}
+
+impl FrontierFtsSigningKey {
+    /// Sign the current vote and the next key together, spending the normal durable use budget.
+    /// Reusing the public `pk_seed` lets the envelope carry only the next 32-byte root.
+    pub fn sign_rotated_epoch_vote(
+        &mut self,
+        dp: &FrontierDpTable,
+        chain_id: &[u8; 32],
+        link: EpochKeyLink,
+        vote_digest: [u8; 32],
+        opt_hedging_nonce: &[u8; 32],
+    ) -> Result<RotatedEpochVote, FrontierFtsError> {
+        if self.profile.params().node_bytes != 32
+            || self.profile.params().max_safe_uses != 1
+            || link.epoch.checked_add(1).is_none()
+        {
+            return Err(FrontierFtsError::ProfileMismatch);
+        }
+        let signature = self.sign(dp, &link.message(chain_id, &vote_digest), opt_hedging_nonce)?;
+        Ok(RotatedEpochVote {
+            link,
+            vote_digest,
+            signature,
         })
     }
 }

@@ -428,7 +428,8 @@ impl<'a> ParallelSeededSignSession<'a> {
                 {
                     if *session != self.session
                         || *round != self.sequence
-                        || (id == self.share.party_id && *digest != self.own_commitment())
+                        || (id == self.share.party_id
+                            && !qsag_accel::ct::ct_eq_bytes(digest, &self.own_commitment()))
                     {
                         return Err(ParallelSeededError::CommitmentMismatch { party_id: id });
                     }

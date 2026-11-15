@@ -21,40 +21,37 @@ fn pad_batch(
 ) -> [u128; 8] {
     const MIDSTATE: [u64; 25] =
         qsag_core::sponge::keccak::cshake256_static_midstate(b"QSAG.CUSTODY.OT.PAD.V1");
-    let mut states = [MIDSTATE; 8];
-    let mut blocks = [[0u8; 272]; 8];
+    // The six length-framed fields occupy 156 bytes, hence exactly two rate blocks.
+    // Assemble their little-endian words directly, without eight temporary byte buffers.
+    let mut prefix = MIDSTATE;
+    prefix[0] ^= 6;
+    prefix[1] ^= 48;
+    prefix[8] ^= 32;
+    for (word, bytes) in prefix[9..13].iter_mut().zip(context.chunks_exact(8)) {
+        *word ^= u64::from_le_bytes(core::array::from_fn(|i| bytes[i]));
+    }
+    prefix[13] ^= 2;
+    prefix[14] ^= u64::from(sender.swap_bytes()) | (2 << 16);
+    prefix[15] ^= (u64::from(receiver.swap_bytes()) << 16) | (8 << 32);
+    let mut states = [prefix; 8];
     for lane in 0..8 {
-        let sender = sender.to_be_bytes();
-        let receiver = receiver.to_be_bytes();
-        let index = (indices[lane] as u64).to_be_bytes();
-        let count = (count as u64).to_be_bytes();
-        let frames: [&[u8]; 6] = [raw[lane], context, &sender, &receiver, &index, &count];
-        blocks[lane][..8].copy_from_slice(&6u64.to_le_bytes());
-        let mut offset = 8;
-        for frame in frames {
-            blocks[lane][offset..offset + 8].copy_from_slice(&(frame.len() as u64).to_le_bytes());
-            offset += 8;
-            blocks[lane][offset..offset + frame.len()].copy_from_slice(frame);
-            offset += frame.len();
+        for (word, bytes) in states[lane][2..8].iter_mut().zip(raw[lane].chunks_exact(8)) {
+            *word ^= u64::from_le_bytes(core::array::from_fn(|i| bytes[i]));
         }
-        blocks[lane][offset] = 0x04;
-        blocks[lane][271] = 0x80;
+        // The big-endian index straddles the 136-byte rate boundary at offset 132.
+        states[lane][16] ^= (indices[lane] as u64).swap_bytes() << 32;
     }
-    for block in 0..2 {
-        for lane in 0..8 {
-            for (word, state_word) in states[lane].iter_mut().take(17).enumerate() {
-                let offset = block * 136 + word * 8;
-                *state_word ^=
-                    u64::from_le_bytes(core::array::from_fn(|b| blocks[lane][offset + b]));
-            }
-        }
-        qsag_core::sponge::keccak::keccak_f1600_batch(&mut states);
+    qsag_core::sponge::keccak::keccak_f1600_batch(&mut states);
+    let count = (count as u64).swap_bytes();
+    for lane in 0..8 {
+        states[lane][0] ^= ((indices[lane] as u64).swap_bytes() >> 32) | (8 << 32);
+        states[lane][1] ^= count << 32;
+        states[lane][2] ^= (count >> 32) | (4 << 32);
+        states[lane][16] ^= 1 << 63;
     }
+    qsag_core::sponge::keccak::keccak_f1600_batch(&mut states);
     let result =
         core::array::from_fn(|lane| states[lane][0] as u128 | ((states[lane][1] as u128) << 64));
-    for block in &mut blocks {
-        ct_zeroize_bytes(block);
-    }
     for state in &mut states {
         qsag_accel::ct::ct_zeroize_u64s(state);
     }
@@ -184,9 +181,8 @@ impl<W: AuthenticatedOtWire> CommittedCorrelatedOt<W> {
                 .map_err(|_| invalid())?;
             let mut ciphertexts = Vec::with_capacity(alternatives.len());
             for base in (0..alternatives.len()).step_by(4) {
-                let indices = core::array::from_fn(|lane| {
-                    (base + lane / 2).min(alternatives.len() - 1)
-                });
+                let indices =
+                    core::array::from_fn(|lane| (base + lane / 2).min(alternatives.len() - 1));
                 let mut batch = pad_batch(
                     &context,
                     self.party,
@@ -194,7 +190,11 @@ impl<W: AuthenticatedOtWire> CommittedCorrelatedOt<W> {
                     indices,
                     alternatives.len(),
                     core::array::from_fn(|lane| {
-                        if lane % 2 == 0 { &pads[indices[lane]].0 } else { &pads[indices[lane]].1 }
+                        if lane % 2 == 0 {
+                            &pads[indices[lane]].0
+                        } else {
+                            &pads[indices[lane]].1
+                        }
                     }),
                 );
                 for lane in 0..(alternatives.len() - base).min(4) {
@@ -433,6 +433,41 @@ mod tests {
 #[cfg(test)]
 mod pad_tests {
     use super::*;
+    #[cfg(feature = "std")]
+    #[test]
+    #[ignore = "pad throughput benchmark"]
+    fn benchmark_pad_batches() {
+        let context = [0xa7; 32];
+        let raw = [[0x32; 48]; 8];
+        let start = std::time::Instant::now();
+        for base in (0..MAX_OTS).step_by(8) {
+            core::hint::black_box(pad_batch(
+                &context,
+                17,
+                42,
+                core::array::from_fn(|i| base + i),
+                MAX_OTS,
+                core::array::from_fn(|i| &raw[i]),
+            ));
+        }
+        std::eprintln!("batched {MAX_OTS} pads: {:?}", start.elapsed());
+        let start = std::time::Instant::now();
+        for index in 0..MAX_OTS {
+            core::hint::black_box(cshake256_framed_32(
+                b"QSAG.CUSTODY.OT.PAD.V1",
+                &[
+                    &raw[index % 8],
+                    &context,
+                    &17u16.to_be_bytes(),
+                    &42u16.to_be_bytes(),
+                    &(index as u64).to_be_bytes(),
+                    &(MAX_OTS as u64).to_be_bytes(),
+                ],
+            ));
+        }
+        std::eprintln!("scalar {MAX_OTS} pads: {:?}", start.elapsed());
+    }
+
     #[test]
     fn batched_pad_matches_framed_reference() {
         for count in [1usize, 3, 4, 7, 8, 9, 127, 65536, MAX_OTS] {

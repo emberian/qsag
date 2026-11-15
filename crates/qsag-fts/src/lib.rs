@@ -14,8 +14,9 @@ mod release_gate;
 pub mod u384;
 
 pub use frontier::{
-    FrontierDpTable, FrontierFtsError, FrontierFtsParams, FrontierFtsProfile, FrontierFtsPublicKey,
-    FrontierFtsSignature, FrontierFtsSigningKey, FtsEpochWal, verify_frontier_fts,
+    EpochKeyLink, FrontierDpTable, FrontierFtsError, FrontierFtsParams, FrontierFtsProfile,
+    FrontierFtsPublicKey, FrontierFtsSignature, FrontierFtsSigningKey, FtsEpochWal,
+    RotatedEpochVote, verify_frontier_fts,
 };
 #[cfg(any(test, feature = "testing-ephemeral"))]
 pub use parallel_mpc::InMemoryBurnLog;
@@ -45,6 +46,104 @@ mod tests {
     use qsag_accel::CpuReferenceBackend;
 
     use super::*;
+
+    #[test]
+    fn compact1122_domain_wire_and_epoch_rotation() {
+        let profile = FrontierFtsProfile::Compact1122;
+        assert_eq!(profile.signature_bytes(), 1122);
+        assert!(profile.signature_bytes() + 96 <= 1232);
+        let dp = FrontierDpTable::build(profile);
+        assert_eq!(dp.total_cardinality.public_bit_len(), 264);
+        let rank_limit = U384([0, 0, 0, 0, 1, 0]);
+        assert!(rank_limit.ct_lt(dp.total_cardinality));
+        for rank in [
+            U384::ZERO,
+            U384::ONE,
+            U384([u64::MAX, u64::MAX, u64::MAX, u64::MAX, 0, 0]),
+            dp.total_cardinality.overflowing_sub(U384::ONE).0,
+        ] {
+            let (frontier, offsets) = dp.unrank(rank).unwrap();
+            assert_eq!(dp.rank(&frontier, &offsets).unwrap(), rank);
+        }
+        let accel = CpuReferenceBackend::new();
+        let mut current =
+            FrontierFtsSigningKey::keygen(profile, [1; 32], [2; 32], [3; 32], true, &accel);
+        let mut next =
+            FrontierFtsSigningKey::keygen(profile, [4; 32], [5; 32], [3; 32], true, &accel);
+        let chain = [6; 32];
+        let vote_digest = [7; 32];
+        let link = EpochKeyLink {
+            epoch: 42,
+            next_epoch_pk_root: next.pk.root.as_slice().try_into().unwrap(),
+        };
+        let vote = current
+            .sign_rotated_epoch_vote(&dp, &chain, link.clone(), vote_digest, &[8; 32])
+            .unwrap();
+        let bytes = vote.to_bytes(profile);
+        assert_eq!(bytes.len(), 1194);
+        let decoded = RotatedEpochVote::from_bytes(profile, &bytes).unwrap();
+        assert_eq!(vote, decoded);
+        assert_eq!(
+            decoded
+                .verify(&current.pk, &dp, &chain, 42, &vote_digest)
+                .unwrap(),
+            next.pk
+        );
+        assert_eq!(
+            current.sign_rotated_epoch_vote(&dp, &chain, link, vote_digest, &[8; 32]),
+            Err(FrontierFtsError::UseBudgetExhausted)
+        );
+        // Every envelope region is bound: epoch, message, root, randomizer, counter and chains.
+        for position in [0, 8, 40, 72, 104, bytes.len() - 1] {
+            let mut changed = bytes.clone();
+            changed[position] ^= 1;
+            let forged = RotatedEpochVote::from_bytes(profile, &changed).unwrap();
+            assert!(
+                forged
+                    .verify(&current.pk, &dp, &chain, 42, &vote_digest)
+                    .is_err()
+            );
+        }
+        assert!(
+            decoded
+                .verify(&current.pk, &dp, &[9; 32], 42, &vote_digest)
+                .is_err()
+        );
+        assert!(
+            decoded
+                .verify(&current.pk, &dp, &chain, 43, &vote_digest)
+                .is_err()
+        );
+        assert!(
+            decoded
+                .verify(&next.pk, &dp, &chain, 42, &vote_digest)
+                .is_err()
+        );
+        assert!(RotatedEpochVote::from_bytes(profile, &bytes[..bytes.len() - 1]).is_err());
+        let mut extended = bytes.clone();
+        extended.push(0);
+        assert!(RotatedEpochVote::from_bytes(profile, &extended).is_err());
+        let verified_next = decoded
+            .verify(&current.pk, &dp, &chain, 42, &vote_digest)
+            .unwrap();
+        let next_vote = next
+            .sign_rotated_epoch_vote(
+                &dp,
+                &chain,
+                EpochKeyLink {
+                    epoch: 43,
+                    next_epoch_pk_root: [10; 32],
+                },
+                [11; 32],
+                &[12; 32],
+            )
+            .unwrap();
+        assert!(
+            next_vote
+                .verify(&verified_next, &dp, &chain, 43, &[11; 32])
+                .is_ok()
+        );
+    }
 
     #[test]
     fn test_compact_profile_exact_signature_sizes_and_dp_bijection() {
