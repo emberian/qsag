@@ -43,7 +43,6 @@ mod filesystem {
     use std::io;
 
     pub struct FsHdPoisonJournal {
-        path: std::path::PathBuf,
         lock_id: [u8; 16],
         record: LockedRecord,
         family: [u8; 32],
@@ -51,33 +50,15 @@ mod filesystem {
         failed: std::sync::atomic::AtomicBool,
         active: std::sync::Mutex<Option<[u8; 32]>>,
     }
-    fn lock_inode_seal(path: &std::path::Path) -> io::Result<[u8; 16]> {
-        let mut name = path.as_os_str().to_os_string();
-        name.push(".lock");
-        let meta = std::fs::symlink_metadata(std::path::PathBuf::from(name))?;
-        if !meta.is_file() || meta.file_type().is_symlink() {
-            return Err(io::Error::other("invalid HD poison lock sidecar"));
-        }
-        let mut out = [0u8; 16];
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            out[..8].copy_from_slice(&meta.dev().to_le_bytes());
-            out[8..].copy_from_slice(&meta.ino().to_le_bytes());
-        }
-        Ok(out)
-    }
     impl FsHdPoisonJournal {
         pub fn create_new(
             path: impl Into<std::path::PathBuf>,
             family: [u8; 32],
             key: [u8; 32],
         ) -> io::Result<Self> {
-            let path = path.into();
-            let record = LockedRecord::create_new(&path)?;
-            let lock_id = lock_inode_seal(&path)?;
+            let record = LockedRecord::create_new(path)?;
+            let lock_id = record.lock_inode();
             let this = Self {
-                path,
                 lock_id,
                 record,
                 family,
@@ -93,11 +74,9 @@ mod filesystem {
             family: [u8; 32],
             key: [u8; 32],
         ) -> io::Result<Self> {
-            let path = path.into();
-            let record = LockedRecord::open_existing(&path)?;
-            let lock_id = lock_inode_seal(&path)?;
+            let record = LockedRecord::open_existing(path)?;
+            let lock_id = record.lock_inode();
             let this = Self {
-                path,
                 lock_id,
                 record,
                 family,
@@ -122,9 +101,7 @@ mod filesystem {
         }
         fn read_authenticated(&self) -> io::Result<alloc::vec::Vec<u8>> {
             let result = (|| {
-                if self.failed.load(std::sync::atomic::Ordering::Acquire)
-                    || lock_inode_seal(&self.path)? != self.lock_id
-                {
+                if self.failed.load(std::sync::atomic::Ordering::Acquire) {
                     return Err(io::Error::other("HD poison journal failed"));
                 }
                 let bytes = self.record.read()?;
@@ -154,9 +131,6 @@ mod filesystem {
             result
         }
         fn persist_inner(&self, poisoned: bool) -> io::Result<()> {
-            if lock_inode_seal(&self.path)? != self.lock_id {
-                return Err(io::Error::other("HD poison lock sidecar replaced"));
-            }
             let mut bytes = [0; 33];
             bytes[0] = u8::from(poisoned);
             let tag = self.tag(bytes[0]);

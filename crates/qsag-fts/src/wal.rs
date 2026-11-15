@@ -7,17 +7,19 @@
 use alloc::boxed::Box;
 use qsag_accel::ct::{RedactedSecret, ct_eq_bytes, ct_zeroize_bytes};
 use qsag_accel::keccak::cshake256_framed_32;
+use qsag_asm::durable::{
+    ChainHead, CounterOrder, HWM_SLOT_BYTES, TwoSlotHwm, file_dev_ino, no_follow_options,
+    sync_parent_dir, write_at_exact,
+};
 use qsag_core::{ExternalMonotoneAnchor, LedgerCheckpoint};
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
-#[cfg(not(unix))]
-use std::io::Write;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const MAGIC: &[u8; 8] = b"QSBURN04";
 const GENESIS_PREFIX_LEN: usize = 104;
-const HWM_SLOT_LEN: usize = 80;
+const HWM_SLOT_LEN: usize = HWM_SLOT_BYTES;
 const HWM_SLOT_A_OFFSET: usize = GENESIS_PREFIX_LEN;
 const HWM_SLOT_B_OFFSET: usize = GENESIS_PREFIX_LEN + HWM_SLOT_LEN;
 const HEADER_LEN: usize = GENESIS_PREFIX_LEN + 2 * HWM_SLOT_LEN; // 264 bytes
@@ -41,76 +43,33 @@ fn invalid() -> io::Error {
     io::Error::other("invalid, truncated, replaced, or locked burn journal")
 }
 
-/// Explicit Linux architecture mapping for `O_NOFOLLOW | O_NONBLOCK`.
-/// Returns `None` on unrecognized targets so callers fail closed rather than
-/// passing wrong architecture-specific `fcntl` constants (e.g. MIPS/SPARC/PowerPC).
-pub(crate) const fn linux_open_nofollow_nonblock_flags(arch: &str) -> Option<i32> {
-    match arch.as_bytes() {
-        b"x86_64" | b"x86" | b"riscv64" | b"riscv32" | b"s390x" | b"loongarch64" => {
-            Some(0x20000 | 0x800)
-        }
-        b"aarch64" | b"arm" | b"powerpc" | b"powerpc64" => Some(0x8000 | 0x800),
-        b"mips" | b"mips64" => Some(0x20000 | 0x80),
-        b"sparc" | b"sparc64" => Some(0x20000 | 0x4000),
-        _ => None,
-    }
-}
-
 fn guard_mac_key(mut raw: [u8; 32]) -> RedactedSecret<32> {
     let guarded = RedactedSecret::new(raw);
     ct_zeroize_bytes(&mut raw);
     guarded
 }
 
-fn write_at_exact(file: &mut File, offset: u64, bytes: &[u8]) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileExt;
-        file.write_all_at(bytes, offset)
-    }
-    #[cfg(not(unix))]
-    {
-        file.seek(SeekFrom::Start(offset))?;
-        file.write_all(bytes)
-    }
-}
-
 fn private_file(path: &Path) -> io::Result<OpenOptions> {
     if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err(invalid());
     }
-    let mut opts = OpenOptions::new();
+    let mut opts = no_follow_options().map_err(|_| invalid())?;
     opts.read(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-        #[cfg(target_os = "linux")]
-        {
-            let flags =
-                linux_open_nofollow_nonblock_flags(std::env::consts::ARCH).ok_or_else(invalid)?;
-            opts.custom_flags(flags);
-        }
-        #[cfg(target_os = "macos")]
-        opts.custom_flags(0x0100 | 0x4); // O_NOFOLLOW | O_NONBLOCK
-    }
     Ok(opts)
 }
+
+/// `dev_be64 || ino_be64` of the held descriptor. The big-endian layout is bound
+/// into the genesis and high-water-mark MACs of the `QSBURN04` format.
 fn file_identity(file: &File) -> io::Result<[u8; 16]> {
     let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Err(invalid());
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let mut identity = [0; 16];
-        identity[..8].copy_from_slice(&metadata.dev().to_be_bytes());
-        identity[8..].copy_from_slice(&metadata.ino().to_be_bytes());
-        Ok(identity)
-    }
-    #[cfg(not(unix))]
-    Err(invalid())
+    let (dev, ino) = file_dev_ino(&metadata).ok_or_else(invalid)?;
+    let mut identity = [0; 16];
+    identity[..8].copy_from_slice(&dev.to_be_bytes());
+    identity[8..].copy_from_slice(&ino.to_be_bytes());
+    Ok(identity)
 }
 
 impl DurableBurnJournal {
@@ -190,72 +149,33 @@ impl DurableBurnJournal {
         Self::open_existing(path, key, mac_key)
     }
 
-    fn encode_hwm_slot(
-        &self,
-        slot_idx: u8,
-        generation: u64,
-        tip_tag: &[u8; 32],
-    ) -> [u8; HWM_SLOT_LEN] {
-        let mut slot = [0u8; HWM_SLOT_LEN];
-        let gen_be = generation.to_be_bytes();
-        slot[..8].copy_from_slice(&gen_be);
-        slot[8..40].copy_from_slice(tip_tag);
-        let reserved = [0u8; 8];
-        let mac = cshake256_framed_32(
-            b"QSAG.BURN.HWM.V4",
-            &[
-                self.mac_key.expose(),
-                &self.identity,
-                &self.key,
-                &self.genesis,
-                &[slot_idx],
-                &gen_be,
-                tip_tag,
-                &reserved,
-            ],
-        );
-        slot[40..72].copy_from_slice(&mac);
-        slot
-    }
-
-    fn verify_hwm_slot(&self, slot_idx: u8, raw: &[u8]) -> io::Result<(u64, [u8; 32])> {
-        if raw.len() != HWM_SLOT_LEN {
-            return Err(invalid());
-        }
-        let gen_be: [u8; 8] = raw[..8].try_into().map_err(|_| invalid())?;
-        let generation = u64::from_be_bytes(gen_be);
-        let tip_tag: [u8; 32] = raw[8..40].try_into().map_err(|_| invalid())?;
-        let stored_mac = &raw[40..72];
-        let reserved = &raw[72..80];
-        if !ct_eq_bytes(reserved, &[0u8; 8]) {
-            return Err(invalid());
-        }
-        let expected_mac = cshake256_framed_32(
-            b"QSAG.BURN.HWM.V4",
-            &[
-                self.mac_key.expose(),
-                &self.identity,
-                &self.key,
-                &self.genesis,
-                &[slot_idx],
-                &gen_be,
-                &tip_tag,
-                reserved,
-            ],
-        );
-        if !ct_eq_bytes(&expected_mac, stored_mac) {
-            return Err(invalid());
-        }
-        Ok((generation, tip_tag))
-    }
-
-    fn sync_hwm_slots(&mut self, generation: u64, tip_tag: &[u8; 32]) -> io::Result<()> {
-        let slot_a = self.encode_hwm_slot(0, generation, tip_tag);
-        write_at_exact(&mut self.file, HWM_SLOT_A_OFFSET as u64, &slot_a)?;
-        self.file.sync_all()?;
-        let slot_b = self.encode_hwm_slot(1, generation, tip_tag);
-        write_at_exact(&mut self.file, HWM_SLOT_B_OFFSET as u64, &slot_b)?;
-        self.file.sync_all()
+    /// Runs `f` with this journal's two anti-truncation slots: big-endian generation,
+    /// MAC bound to the storage key, file identity, public key and genesis.
+    fn with_hwm<T>(&self, f: impl FnOnce(&TwoSlotHwm<'_>, &File) -> T) -> T {
+        let mac = |slot: u8, generation: &[u8; 8], tip: &[u8; 32], reserved: &[u8; 8]| {
+            cshake256_framed_32(
+                b"QSAG.BURN.HWM.V4",
+                &[
+                    self.mac_key.expose(),
+                    &self.identity,
+                    &self.key,
+                    &self.genesis,
+                    &[slot],
+                    generation,
+                    tip,
+                    reserved,
+                ],
+            )
+        };
+        f(
+            &TwoSlotHwm {
+                offset_a: HWM_SLOT_A_OFFSET as u64,
+                offset_b: HWM_SLOT_B_OFFSET as u64,
+                order: CounterOrder::Big,
+                mac: &mac,
+            },
+            &self.file,
+        )
     }
 
     fn load_guarded(
@@ -308,20 +228,18 @@ impl DurableBurnJournal {
                 &[journal.mac_key.expose(), &identity, &header],
             );
             header.extend_from_slice(&journal.last_tag);
-            let slot_a = journal.encode_hwm_slot(0, 0, &journal.last_tag);
-            let slot_b = journal.encode_hwm_slot(1, 0, &journal.last_tag);
+            let (slot_a, slot_b) = journal.with_hwm(|hwm, _| {
+                (
+                    hwm.encode(0, 0, &journal.last_tag),
+                    hwm.encode(1, 0, &journal.last_tag),
+                )
+            });
             header.extend_from_slice(&slot_a);
             header.extend_from_slice(&slot_b);
             debug_assert_eq!(header.len(), HEADER_LEN);
-            write_at_exact(&mut journal.file, 0, &header)?;
+            write_at_exact(&journal.file, 0, &header)?;
             journal.file.sync_all()?;
-            #[cfg(unix)]
-            File::open(
-                path.parent()
-                    .filter(|p| !p.as_os_str().is_empty())
-                    .unwrap_or(Path::new(".")),
-            )?
-            .sync_all()?;
+            sync_parent_dir(path)?;
         } else {
             let held_len = journal.file.metadata()?.len();
             if held_len < HEADER_LEN as u64 || held_len > MAX_JOURNAL_BYTES {
@@ -347,19 +265,6 @@ impl DurableBurnJournal {
             if !ct_eq_bytes(&journal.last_tag, &bytes[72..GENESIS_PREFIX_LEN]) {
                 return Err(invalid());
             }
-            let (gen_a, tip_a) =
-                journal.verify_hwm_slot(0, &bytes[HWM_SLOT_A_OFFSET..HWM_SLOT_B_OFFSET])?;
-            let (gen_b, tip_b) =
-                journal.verify_hwm_slot(1, &bytes[HWM_SLOT_B_OFFSET..HEADER_LEN])?;
-            // Slot A is updated strictly before Slot B on each reservation, so valid
-            // states satisfy either `gen_a == gen_b` (steady state) or `gen_a == gen_b + 1`
-            // (crash between Slot A sync and Slot B sync).
-            if gen_a < gen_b || gen_a - gen_b > 1 {
-                return Err(invalid());
-            }
-            let hwm_gen = gen_a;
-            let hwm_tip = tip_a;
-
             let mut prev_tag = journal.last_tag;
             for record in bytes[HEADER_LEN..].as_chunks::<RECORD_LEN>().0 {
                 prev_tag = journal.last_tag;
@@ -374,32 +279,22 @@ impl DurableBurnJournal {
                 }
                 journal.last_tag = tag;
             }
-            let actual_gen = journal.entries.len() as u64;
-            // Reject any tail truncation (`actual_gen < hwm_gen`) or unexplained gap (`> hwm_gen + 1`).
-            if actual_gen < hwm_gen || actual_gen > hwm_gen + 1 {
-                return Err(invalid());
-            }
-            if actual_gen == hwm_gen {
-                if !ct_eq_bytes(&journal.last_tag, &hwm_tip) {
-                    return Err(invalid());
-                }
-                if gen_b != gen_a || !ct_eq_bytes(&tip_b, &hwm_tip) {
-                    // Heal Slot B after crash between Slot A sync and Slot B sync.
-                    let slot_b = journal.encode_hwm_slot(1, actual_gen, &journal.last_tag);
-                    write_at_exact(&mut journal.file, HWM_SLOT_B_OFFSET as u64, &slot_b)?;
-                    journal.file.sync_all()?;
-                }
-            } else {
-                // `actual_gen == hwm_gen + 1`: crash occurred after full record sync, before Slot A sync.
-                if !ct_eq_bytes(&prev_tag, &hwm_tip)
-                    || gen_a != gen_b
-                    || !ct_eq_bytes(&tip_a, &tip_b)
-                {
-                    return Err(invalid());
-                }
-                let tip = journal.last_tag;
-                journal.sync_hwm_slots(actual_gen, &tip)?;
-            }
+            // Rejects tail truncation and unexplained gaps; heals the two crash states
+            // (record synced before slot A, slot A synced before slot B).
+            journal
+                .with_hwm(|hwm, file| {
+                    hwm.recover(
+                        file,
+                        &bytes[HWM_SLOT_A_OFFSET..HWM_SLOT_B_OFFSET],
+                        &bytes[HWM_SLOT_B_OFFSET..HEADER_LEN],
+                        &ChainHead {
+                            len: journal.entries.len() as u64,
+                            tip: &journal.last_tag,
+                            previous_tip: &prev_tag,
+                        },
+                    )
+                })
+                .map_err(|_| invalid())?;
         }
         journal.check_identity()?;
         Ok(journal)
@@ -421,13 +316,8 @@ impl DurableBurnJournal {
         if !metadata.is_file() {
             return Err(invalid());
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            let held = self.file.metadata()?;
-            if metadata.dev() != held.dev() || metadata.ino() != held.ino() {
-                return Err(invalid());
-            }
+        if file_dev_ino(&metadata) != file_dev_ino(&self.file.metadata()?) {
+            return Err(invalid());
         }
         if metadata.len() != (HEADER_LEN + RECORD_LEN * self.entries.len()) as u64 {
             return Err(invalid());
@@ -446,10 +336,10 @@ impl DurableBurnJournal {
         record[2..10].copy_from_slice(&epoch.to_be_bytes());
         let tag = self.record_tag(&record[..10]);
         record[10..].copy_from_slice(&tag);
-        write_at_exact(&mut self.file, append_offset, &record)?;
+        write_at_exact(&self.file, append_offset, &record)?;
         self.file.sync_all()?;
         let next_gen = (self.entries.len() + 1) as u64;
-        self.sync_hwm_slots(next_gen, &tag)?;
+        self.with_hwm(|hwm, file| hwm.commit(file, next_gen, &tag))?;
         self.entries.insert((party, epoch));
         self.last_tag = tag;
         self.check_identity()?;
@@ -764,30 +654,5 @@ mod tests {
             .unwrap();
         assert!(DurableBurnJournal::open_existing(&path, [5; 32], [6; 32]).is_err());
         std::fs::remove_file(&path).unwrap();
-    }
-
-    #[test]
-    fn linux_nofollow_nonblock_flag_table_fails_closed_on_unknown_arch() {
-        assert_eq!(
-            linux_open_nofollow_nonblock_flags("x86_64"),
-            Some(0x20000 | 0x800)
-        );
-        assert_eq!(
-            linux_open_nofollow_nonblock_flags("riscv64"),
-            Some(0x20000 | 0x800)
-        );
-        assert_eq!(
-            linux_open_nofollow_nonblock_flags("aarch64"),
-            Some(0x8000 | 0x800)
-        );
-        assert_eq!(
-            linux_open_nofollow_nonblock_flags("powerpc64"),
-            Some(0x8000 | 0x800)
-        );
-        assert_eq!(
-            linux_open_nofollow_nonblock_flags("mips64"),
-            Some(0x20000 | 0x80)
-        );
-        assert_eq!(linux_open_nofollow_nonblock_flags("unknown_isa"), None);
     }
 }

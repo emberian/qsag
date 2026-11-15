@@ -26,6 +26,9 @@ use std::sync::Mutex;
 const LOCK_MAGIC: &[u8; 8] = b"QSAGLCK1";
 const RECORD_MAGIC: &[u8; 8] = b"QSAGREC1";
 
+/// Length of the `magic || lock seal` prefix that precedes the payload in a record file.
+pub const RECORD_HEADER_BYTES: usize = 16;
+
 /// Holds a permanent sidecar inode locked for the lifetime of this handle.
 /// The seal detects accidental sidecar replacement; it is not an authentication tag.
 pub struct LockedRecord {
@@ -314,6 +317,16 @@ impl LockedRecord {
         self.seal
     }
 
+    /// The `magic || lock seal` prefix of this record's file. Journals that append
+    /// to the record file in place, instead of going through [`Self::replace`], write
+    /// it once at genesis so [`Self::read_bounded`] accepts the file.
+    pub fn record_header(&self) -> [u8; RECORD_HEADER_BYTES] {
+        let mut header = [0; RECORD_HEADER_BYTES];
+        header[..8].copy_from_slice(RECORD_MAGIC);
+        header[8..].copy_from_slice(&self.seal);
+        header
+    }
+
     /// `dev_le64 || ino_le64` of the sidecar inode this handle holds locked, taken
     /// from the descriptor at acquisition and re-checked on every operation. Callers
     /// that bind the sidecar into a MAC or KDF use this, never a fresh `lstat` of the
@@ -412,7 +425,10 @@ impl LockedRecord {
             regular_metadata(&self.path)?;
             let mut file = no_follow_options()?.read(true).open(&self.path)?;
             let meta = verify_path(&file, &self.path)?;
-            let raw_payload_len = meta.len().checked_sub(16).ok_or_else(invalid)?;
+            let raw_payload_len = meta
+                .len()
+                .checked_sub(RECORD_HEADER_BYTES as u64)
+                .ok_or_else(invalid)?;
             if raw_payload_len > max_bytes as u64 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -420,9 +436,9 @@ impl LockedRecord {
                 ));
             }
             let len = usize::try_from(raw_payload_len).map_err(|_| invalid())?;
-            let mut header = [0u8; 16];
+            let mut header = [0u8; RECORD_HEADER_BYTES];
             file.read_exact(&mut header)?;
-            if &header[..8] != RECORD_MAGIC || header[8..] != self.seal {
+            if header != self.record_header() {
                 return Err(invalid());
             }
             // A failed read erases the partial payload. One allocation at the observed
@@ -454,8 +470,7 @@ impl LockedRecord {
                 fs::remove_file(&name)?;
             }
             let mut file = no_follow_options()?.write(true).create_new(true).open(&name)?;
-            file.write_all(RECORD_MAGIC)?;
-            file.write_all(&self.lock_seal())?;
+            file.write_all(&self.record_header())?;
             file.write_all(bytes)?;
             file.sync_all()?;
             verify_path(&file, &name)?;
