@@ -1269,3 +1269,1237 @@ theorem uc_transitive_composition {InnerView OuterView : Type}
 /-- **Inhabitedness & Tightness Witness (`inhabited_interactive_uc_combinators`)**:
     Exhibits concrete non-trivial `SimpleEquiv` XOR-bijection over `Fin 4`, non-zero bad-event bound,
     and 2-hop heterogeneous `uc_transitive_composition` (`N₁ = 2, N₂ = 4, N₃ = 2`). -/
+theorem inhabited_interactive_uc_combinators :
+    ∃ (bij : SimpleEquiv (Fin 4) (Fin 4)) (realE idealE : Fin 4 → Bool) (bad : Fin 4 → Bool),
+      bij.toFun ⟨0, by decide⟩ ≠ ⟨0, by decide⟩ ∧
+      (∀ ω, bad ω = false → realE ω = idealE (bij.toFun ω)) ∧
+      ratLe (rationalAcceptDiff 4 realE 4 idealE id) (1, 4) := by
+  let flip : Fin 4 → Fin 4 := fun i => ⟨3 - i.1, by omega⟩
+  have hInv : ∀ i : Fin 4, flip (flip i) = i := fun i => Fin.ext (by dsimp [flip]; omega)
+  let bij : SimpleEquiv (Fin 4) (Fin 4) := ⟨flip, flip, hInv, hInv⟩
+  let idealE : Fin 4 → Bool := fun i => i.1 == 3
+  let realE : Fin 4 → Bool := fun i => (i.1 == 0) || (i.1 == 1)
+  let bad : Fin 4 → Bool := fun i => i.1 == 1
+  have hAgree : ∀ ω : Fin 4, bad ω = false → realE ω = idealE (bij.toFun ω) := by
+    intro ⟨v, hv⟩ hBad
+    dsimp [bad] at hBad
+    dsimp [realE, idealE, bij, flip]
+    match v with
+    | 0 => rfl
+    | 1 => cases hBad
+    | 2 => rfl
+    | 3 => rfl
+    | n + 4 => omega
+  have hMain := (bad_event_fundamental_lemma 4 (by decide) realE idealE bij bad hAgree id).2.2
+  have hBadCount : finSum 4 (fun ω : Fin 4 => if bad ω then 1 else 0) = 1 := rfl
+  have hNe0 : bij.toFun ⟨0, by decide⟩ ≠ ⟨0, by decide⟩ := by
+    intro hEq
+    have hVal : (bij.toFun ⟨0, by decide⟩).val = 0 := congrArg Fin.val hEq
+    dsimp [bij, flip] at hVal
+    omega
+  rw [hBadCount] at hMain
+  exact ⟨bij, realE, idealE, bad, hNe0, hAgree, hMain⟩
+
+/-! ## 5. Signing-Oracle Locality of the Ideal World & Forgery-Count Transfer -/
+
+theorem IdealFunctionalityExec_succ_eq {PK SimTape SimR1 SimR2 SimR3 AdvState : Type}
+    (idealSignOracle : SessionScheduleReq → ByteArray)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (A : UcRushingAdversary AdvState) (s : Nat) (tapes : Nat → SimTape)
+    (icl : IdealClusterState PK) (advSt : AdvState) :
+    IdealFunctionalityExec idealSignOracle sim A (s + 1) tapes icl advSt =
+      ((IdealFunctionalityExec idealSignOracle sim A s (fun i => tapes (i + 1))
+          (execIdealSession idealSignOracle sim A icl advSt (tapes 0)).1
+          (execIdealSession idealSignOracle sim A icl advSt (tapes 0)).2.1).1,
+       ⟨(IdealFunctionalityExec idealSignOracle sim A s (fun i => tapes (i + 1))
+          (execIdealSession idealSignOracle sim A icl advSt (tapes 0)).1
+          (execIdealSession idealSignOracle sim A icl advSt (tapes 0)).2.1).2.finalAdvState,
+        (execIdealSession idealSignOracle sim A icl advSt (tapes 0)).2.2 ::
+          (IdealFunctionalityExec idealSignOracle sim A s (fun i => tapes (i + 1))
+            (execIdealSession idealSignOracle sim A icl advSt (tapes 0)).1
+            (execIdealSession idealSignOracle sim A icl advSt (tapes 0)).2.1).2.sessions⟩) := by
+  rfl
+
+/-- The wire record of an ideal session always carries the request the adversary scheduled. -/
+theorem execIdealSession_request {PK SimTape SimR1 SimR2 SimR3 AdvState : Type}
+    (idealSignOracle : SessionScheduleReq → ByteArray)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (A : UcRushingAdversary AdvState)
+    (icl : IdealClusterState PK) (advSt : AdvState) (tape : SimTape) :
+    (execIdealSession idealSignOracle sim A icl advSt tape).2.2.request =
+      (A.scheduleSession advSt).1 := by
+  unfold execIdealSession
+  dsimp only
+  cases validThresholdApproval icl.tsig (A.scheduleSession advSt).1.honestApprovers
+  · rfl
+  · simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+    cases walPreSignStep icl.honestWal _ _ _ with
+    | err _ _ => rfl
+    | ok _ resOut =>
+      cases resOut with
+      | replayCached _ => rfl
+      | authorizedFresh _ =>
+        dsimp only
+        cases sim.simVerifyRound1 _ _ _ _ _ with
+        | inl p1 => rcases p1 with ⟨_, b⟩; cases b <;> rfl
+        | inr _ =>
+          dsimp only
+          cases sim.simPreCutBarrier _ _ _ _ _ with
+          | inl _ => rfl
+          | inr _ =>
+            dsimp only
+            cases sim.finalizeIdealCut _ _ _ _ _ _ <;> rfl
+
+/-- **Single-Session Signing-Oracle Locality (`execIdealSession_oracle_congr`)**:
+    an ideal session reads `idealSignOracle` at most at its own scheduled request, and only when the
+    session reaches Round 3. Two oracles that agree there produce the same cluster state, adversary
+    state and wire record, for every simulator whose Round-3 message list is never empty. -/
+theorem execIdealSession_oracle_congr {PK SimTape SimR1 SimR2 SimR3 AdvState : Type}
+    (O O' : SessionScheduleReq → ByteArray)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (hR3 : ∀ pk corr req s3 sigB tape, (sim.simRound3 pk corr req s3 sigB tape).1 ≠ [])
+    (A : UcRushingAdversary AdvState)
+    (icl : IdealClusterState PK) (advSt : AdvState) (tape : SimTape)
+    (hAgree : (execIdealSession O sim A icl advSt tape).2.2.honestRound3 ≠ [] →
+      O' (A.scheduleSession advSt).1 = O (A.scheduleSession advSt).1) :
+    execIdealSession O' sim A icl advSt tape = execIdealSession O sim A icl advSt tape := by
+  revert hAgree
+  unfold execIdealSession
+  dsimp only
+  cases validThresholdApproval icl.tsig (A.scheduleSession advSt).1.honestApprovers
+  · intro _; rfl
+  · simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+    cases walPreSignStep icl.honestWal _ _ _ with
+    | err _ _ => intro _; rfl
+    | ok _ resOut =>
+      cases resOut with
+      | replayCached _ => intro _; rfl
+      | authorizedFresh _ =>
+        dsimp only
+        cases sim.simVerifyRound1 _ _ _ _ _ with
+        | inl p1 => intro _; rfl
+        | inr _ =>
+          dsimp only
+          cases sim.simPreCutBarrier _ _ _ _ _ with
+          | inl _ => intro _; rfl
+          | inr _ =>
+            dsimp only
+            intro hAgree
+            have hEq : O' (A.scheduleSession advSt).1 = O (A.scheduleSession advSt).1 := by
+              apply hAgree
+              cases sim.finalizeIdealCut _ _ _ _ _ _ <;> exact hR3 _ _ _ _ _ _
+            rw [hEq]
+
+/-- **Multi-Session Signing-Oracle Locality (`IdealFunctionalityExec_oracle_congr`)**:
+    across any number of adaptively scheduled sessions, the whole ideal-world result (final cluster
+    state and complete transcript) is determined by the values of the signing oracle on the requests
+    of the sessions that reached Round 3. Nothing else about the signing key can influence what the
+    adversary sees. -/
+theorem IdealFunctionalityExec_oracle_congr {PK SimTape SimR1 SimR2 SimR3 AdvState : Type}
+    (O O' : SessionScheduleReq → ByteArray)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (hR3 : ∀ pk corr req s3 sigB tape, (sim.simRound3 pk corr req s3 sigB tape).1 ≠ [])
+    (A : UcRushingAdversary AdvState) :
+    ∀ (s : Nat) (tapes : Nat → SimTape) (icl : IdealClusterState PK) (advSt : AdvState),
+      (∀ rec ∈ (IdealFunctionalityExec O sim A s tapes icl advSt).2.sessions,
+        rec.honestRound3 ≠ [] → O' rec.request = O rec.request) →
+      IdealFunctionalityExec O' sim A s tapes icl advSt =
+        IdealFunctionalityExec O sim A s tapes icl advSt
+  | 0, _, _, _, _ => rfl
+  | s + 1, tapes, icl, advSt, hAgree => by
+    rw [IdealFunctionalityExec_succ_eq O sim A s tapes icl advSt] at hAgree
+    rw [IdealFunctionalityExec_succ_eq O' sim A s tapes icl advSt,
+        IdealFunctionalityExec_succ_eq O sim A s tapes icl advSt]
+    have hHead : execIdealSession O' sim A icl advSt (tapes 0) =
+        execIdealSession O sim A icl advSt (tapes 0) := by
+      apply execIdealSession_oracle_congr O O' sim hR3
+      intro hNe
+      have h := hAgree _ (List.Mem.head _) hNe
+      rwa [execIdealSession_request] at h
+    rw [hHead]
+    have hTail := IdealFunctionalityExec_oracle_congr O O' sim hR3 A s (fun i => tapes (i + 1))
+      (execIdealSession O sim A icl advSt (tapes 0)).1
+      (execIdealSession O sim A icl advSt (tapes 0)).2.1
+      (fun rec hMem hNe => hAgree rec (List.Mem.tail _ hMem) hNe)
+    rw [hTail]
+
+private theorem nat_count_transfer (R I c e1 e2 : Nat) (hc : 0 < c)
+    (h : natAbsDiff (R * c) (I * c) * e2 ≤ e1 * (c * c)) :
+    R * e2 ≤ I * e2 + e1 * c := by
+  rw [natAbsDiff_mul_right] at h
+  have hL : natAbsDiff R I * c * e2 = natAbsDiff R I * e2 * c := by ac_rfl
+  have hR : e1 * (c * c) = e1 * c * c := by ac_rfl
+  rw [hL, hR] at h
+  have h3 : natAbsDiff R I * e2 ≤ e1 * c := Nat.le_of_mul_le_mul_right h hc
+  have h4 : R ≤ I + natAbsDiff R I := by
+    unfold natAbsDiff
+    split <;> omega
+  have h5 : R * e2 ≤ (I + natAbsDiff R I) * e2 := Nat.mul_le_mul_right e2 h4
+  rw [Nat.add_mul] at h5
+  exact Nat.le_trans h5 (Nat.add_le_add_left h3 _)
+
+/-- **Combinator 4: Forgery-Count Transfer (`forgery_count_transfer`)**:
+    if two executions over the same tape space are within `eps` for the Boolean event `win`, then
+    `Pr[win in real] ≤ Pr[win in ideal] + eps`, stated as an exact cross-multiplied count inequality. -/
+theorem forgery_count_transfer {View : Type} (card : Nat)
+    (realExec idealExec : Fin card → View) (win : View → Bool) (eps : Nat × Nat)
+    (hUc : ratLe (rationalAcceptDiff card realExec card idealExec win) eps) :
+    distAcceptCount card realExec win * eps.2 ≤
+      distAcceptCount card idealExec win * eps.2 + eps.1 * card := by
+  obtain ⟨hDen, _, hLe⟩ := hUc
+  have hCard : 0 < card := by
+    rcases Nat.eq_zero_or_pos card with h0 | hPos
+    · have hDen' : 0 < card * card := hDen
+      rw [h0] at hDen'
+      exact absurd hDen' (by decide)
+    · exact hPos
+  exact nat_count_transfer _ _ card eps.1 eps.2 hCard hLe
+
+/-- If no tape lets the ideal execution win, the real winning count is bounded by `eps` alone. -/
+theorem forgery_count_le_of_ideal_never_wins {View : Type} (card : Nat)
+    (realExec idealExec : Fin card → View) (win : View → Bool) (eps : Nat × Nat)
+    (hUc : ratLe (rationalAcceptDiff card realExec card idealExec win) eps)
+    (hNever : ∀ ω : Fin card, win (idealExec ω) = false) :
+    distAcceptCount card realExec win * eps.2 ≤ eps.1 * card := by
+  have hT := forgery_count_transfer card realExec idealExec win eps hUc
+  have hZero : distAcceptCount card idealExec win = 0 := by
+    unfold distAcceptCount
+    have hC : finSum card (fun ω => if win (idealExec ω) then 1 else 0) = finSum card (fun _ => 0) :=
+      finSum_congr (fun ω => by rw [hNever ω]; rfl)
+    rw [hC, finSum_const, Nat.mul_zero]
+  rw [hZero, Nat.zero_mul, Nat.zero_add] at hT
+  exact hT
+
+/-! ## 6. `F_tsig` over the Checked Stateless Hypertree Signer: UC Emulation ⇒ Concrete Hash-Game Witness -/
+
+/-- Signing oracle of the ideal functionality instantiated with the checked stateless hypertree
+    signer. `ser` is an arbitrary wire encoding of the (possibly failed) signing result. -/
+def hypertreeIdealSignOracle (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (grindLimit : Nat) (ser : Option PqHashSig → ByteArray) : SessionScheduleReq → ByteArray :=
+  fun req => ser (evalStatelessCheckedSign suite params sk req.msg req.optRand grindLimit)
+
+/-- Signing queries visible in a transcript: exactly the requests of sessions that reached Round 3. -/
+def transcriptHypertreeQueries {AdvState : Type} (grindLimit : Nat)
+    (tr : ExecTranscript AdvState) : List CheckedStatelessQuery :=
+  (tr.sessions.filter (fun rec => !rec.honestRound3.isEmpty)).map
+    (fun rec => ⟨rec.request.msg, rec.request.optRand, grindLimit⟩)
+
+/-- EUF-CMA winning predicate on a transcript: the forger's output verifies under the checked
+    stateless verifier and its message was never the request of a session that reached Round 3. -/
+def hypertreeForgeryWins {AdvState : Type} (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (forgeOut : ExecTranscript AdvState → List UInt8 × PqHashSig)
+    (tr : ExecTranscript AdvState) : Bool :=
+  verifyStatelessChecked suite params pk (forgeOut tr).1 (forgeOut tr).2 &&
+  tr.sessions.all (fun rec => rec.honestRound3.isEmpty || decide (rec.request.msg ≠ (forgeOut tr).1))
+
+private theorem list_isEmpty_false_of_ne_nil {α : Type} : ∀ {l : List α}, l ≠ [] → l.isEmpty = false
+  | [], h => absurd rfl h
+  | _ :: _, _ => rfl
+
+private theorem list_ne_nil_of_isEmpty_false {α : Type} : ∀ {l : List α}, l.isEmpty = false → l ≠ []
+  | [], h => by cases h
+  | _ :: _, _ => fun hNil => by cases hNil
+
+/-- Constructive extraction of a `HypertreeForgeryBreak` from any transcript on which
+    `hypertreeForgeryWins` holds. The query log is read off the transcript, and no upper-layer oracle
+    premise is left to the caller. -/
+def hypertreeForgeryBreak_of_wins {AdvState : Type}
+    (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey) (grindLimit : Nat)
+    (hGeom : (params.w = 4 ∧ params.ell1 = 128) ∨ (params.w = 16 ∧ params.ell1 = 64))
+    (hLayers : params.numLayers ≤ 2 ^ 32)
+    (forgeOut : ExecTranscript AdvState → List UInt8 × PqHashSig)
+    (tr : ExecTranscript AdvState)
+    (hWin : hypertreeForgeryWins suite params (derivePublicKey suite params sk) forgeOut tr = true) :
+    HypertreeForgeryBreak suite params sk (forgeOut tr).1 (forgeOut tr).2
+      ((signingOracleLog suite params sk
+          (toLegacyStatelessQueries suite params sk (transcriptHypertreeQueries grindLimit tr))).flatMap fun e =>
+        (List.range params.forsTrees).map fun j =>
+          (UInt64.ofNat (e.2.leafGlobalIdx / 2 ^ params.subtreeHeight),
+           e.2.leafGlobalIdx % 2 ^ params.subtreeHeight,
+           sigForsLeafIdx suite params (derivePublicKey suite params sk) e.1 e.2 j)) :=
+  checked_stateless_hypertree_euf_cma_extract_of_fresh_queries suite params sk
+    (transcriptHypertreeQueries grindLimit tr) (forgeOut tr).1 (forgeOut tr).2 hGeom hLayers
+    (fun q hq => by
+      unfold hypertreeForgeryWins at hWin
+      have hAll := (Bool.and_eq_true_iff.mp hWin).2
+      unfold transcriptHypertreeQueries at hq
+      obtain ⟨rec, hRecF, hQEq⟩ := List.mem_map.mp hq
+      obtain ⟨hRecMem, hR3⟩ := List.mem_filter.mp hRecF
+      have hRecOk := List.all_eq_true.mp hAll rec hRecMem
+      have hNotEmpty : rec.honestRound3.isEmpty = false := by
+        cases hE : rec.honestRound3.isEmpty
+        · rfl
+        · rw [hE] at hR3; cases hR3
+      rw [hNotEmpty, Bool.false_or] at hRecOk
+      rw [← hQEq]
+      exact of_decide_eq_true hRecOk)
+    (Bool.and_eq_true_iff.mp (by unfold hypertreeForgeryWins at hWin; exact hWin)).1
+
+/-- **UC Emulation of `F_tsig[hypertree]` ⇒ Concrete Hash-Game Witness
+    (`uc_emulation_forgery_to_hypertree_hash_game`)**:
+    Let `proto` be ANY 3-round interactive threshold protocol, `sim` ANY black-box simulator with a
+    non-empty Round-3 message list, and `A` ANY rushing adversary scheduling `Q_s` sessions. Suppose
+    the real execution and the ideal execution (ideal functionality instantiated with the checked
+    stateless hypertree signer) are within `eps` for the forgery event `hypertreeForgeryWins`
+    (premise `hUc`, the UC-emulation bound of the protocol at hand). Then:
+    1. `Pr[A forges in the real protocol] ≤ Pr[A forges in the ideal world] + eps`
+       (exact cross-multiplied count inequality);
+    2. every tape on which the forger wins in the ideal world yields a `HypertreeForgeryBreak`
+       (WOTS backward inversion, FORS preimage, raw-hash collision, or FORS subset cover) whose
+       revealed-FORS index list is computed from the transcript's own Round-3 requests; and
+    3. the ideal transcript is unchanged by replacing the signing oracle with any oracle that agrees
+       on the Round-3 requests of that transcript, so the forger's input depends on the signing key
+       only through those signing queries.
+    No upper-layer oracle premise and no abstract EUF-CMA hypothesis appears. -/
+theorem uc_emulation_forgery_to_hypertree_hash_game
+    {PK ShareT SessionTape R1St R2St R3St SimTape SimR1 SimR2 SimR3 AdvState : Type}
+    (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (grindLimit : Nat) (ser : Option PqHashSig → ByteArray)
+    (hGeom : (params.w = 4 ∧ params.ell1 = 128) ∨ (params.w = 16 ∧ params.ell1 = 64))
+    (hLayers : params.numLayers ≤ 2 ^ 32)
+    (proto : InteractiveThresholdProtocol PK ShareT SessionTape R1St R2St R3St)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (hR3 : ∀ pk corr req s3 sigB tape, (sim.simRound3 pk corr req s3 sigB tape).1 ≠ [])
+    (A : UcRushingAdversary AdvState) (Q_s card : Nat)
+    (realTapes : Fin card → Nat → SessionTape) (simTapes : Fin card → Nat → SimTape)
+    (cl : RealClusterState PK ShareT) (icl : IdealClusterState PK) (advSt : AdvState)
+    (forgeOut : ExecTranscript AdvState → List UInt8 × PqHashSig)
+    (eps : Nat × Nat)
+    (hUc : ratLe
+      (rationalAcceptDiff card
+        (fun ω => (RealProtocolExec proto A Q_s (realTapes ω) cl advSt).2)
+        card
+        (fun ω => (IdealFunctionalityExec (hypertreeIdealSignOracle suite params sk grindLimit ser)
+          sim A Q_s (simTapes ω) icl advSt).2)
+        (hypertreeForgeryWins suite params (derivePublicKey suite params sk) forgeOut)) eps) :
+    let O := hypertreeIdealSignOracle suite params sk grindLimit ser
+    let win := hypertreeForgeryWins suite params (derivePublicKey suite params sk) forgeOut
+    let realView : Fin card → ExecTranscript AdvState := fun ω =>
+      (RealProtocolExec proto A Q_s (realTapes ω) cl advSt).2
+    let idealView : Fin card → ExecTranscript AdvState := fun ω =>
+      (IdealFunctionalityExec O sim A Q_s (simTapes ω) icl advSt).2
+    distAcceptCount card realView win * eps.2 ≤
+      distAcceptCount card idealView win * eps.2 + eps.1 * card ∧
+    (∀ ω : Fin card, win (idealView ω) = true →
+      Nonempty (HypertreeForgeryBreak suite params sk (forgeOut (idealView ω)).1 (forgeOut (idealView ω)).2
+        ((signingOracleLog suite params sk
+            (toLegacyStatelessQueries suite params sk
+              (transcriptHypertreeQueries grindLimit (idealView ω)))).flatMap fun e =>
+          (List.range params.forsTrees).map fun j =>
+            (UInt64.ofNat (e.2.leafGlobalIdx / 2 ^ params.subtreeHeight),
+             e.2.leafGlobalIdx % 2 ^ params.subtreeHeight,
+             sigForsLeafIdx suite params (derivePublicKey suite params sk) e.1 e.2 j)))) ∧
+    (∀ (ω : Fin card) (O' : SessionScheduleReq → ByteArray),
+      (∀ rec ∈ (idealView ω).sessions, rec.honestRound3 ≠ [] → O' rec.request = O rec.request) →
+      (IdealFunctionalityExec O' sim A Q_s (simTapes ω) icl advSt).2 = idealView ω) := by
+  intro O win realView idealView
+  refine ⟨forgery_count_transfer card realView idealView win eps hUc, ?_, ?_⟩
+  · intro ω hWin
+    exact ⟨hypertreeForgeryBreak_of_wins suite params sk grindLimit hGeom hLayers forgeOut
+      (idealView ω) hWin⟩
+  · intro ω O' hAgree
+    exact congrArg Prod.snd
+      (IdealFunctionalityExec_oracle_congr O O' sim hR3 A Q_s (simTapes ω) icl advSt hAgree)
+
+/-- A released opening has an actual successful barrier execution on the recorded
+request and Round-2 messages. This records the verifier equation, not a trusted
+Boolean label attached by a caller. -/
+def SessionBarrierJustified {PK ShareT SessionTape R1St R2St R3St : Type}
+    (proto : InteractiveThresholdProtocol PK ShareT SessionTape R1St R2St R3St)
+    (rec : SessionWireRecord) : Prop :=
+  rec.honestRound3 ≠ [] → ∃ (pk : PK) (r2 : R2St) (r3 : R3St),
+    proto.preCutBarrier pk rec.request r2 rec.honestRound2 rec.corruptRound2 = .inr r3
+
+theorem execRealSession_opening_has_barrier_witness
+    {PK ShareT SessionTape R1St R2St R3St AdvState : Type}
+    (proto : InteractiveThresholdProtocol PK ShareT SessionTape R1St R2St R3St)
+    (A : UcRushingAdversary AdvState) (cl : RealClusterState PK ShareT)
+    (advSt : AdvState) (tape : SessionTape) :
+    SessionBarrierJustified proto (execRealSession proto A cl advSt tape).2.2 := by
+  unfold SessionBarrierJustified execRealSession
+  dsimp only
+  cases validThresholdApproval cl.tsig (A.scheduleSession advSt).1.honestApprovers
+  · intro h; exact False.elim (h rfl)
+  · simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+    cases walPreSignStep cl.honestWal _ _ _ with
+    | err _ _ => intro h; exact False.elim (h rfl)
+    | ok _ auth =>
+      cases auth with
+      | replayCached _ => intro h; exact False.elim (h rfl)
+      | authorizedFresh _ =>
+        dsimp only
+        cases proto.verifyRound1 _ _ _ _ _ with
+        | inl _ => intro h; exact False.elim (h rfl)
+        | inr _ =>
+          dsimp only
+          cases hb : proto.preCutBarrier _ _ _ _ _ with
+          | inl _ => intro h; exact False.elim (h rfl)
+          | inr r3 =>
+            dsimp only
+            cases proto.finalizeCutOpen _ _ _ _ _ <;> intro _ <;>
+              exact ⟨cl.tsig.pk, _, r3, hb⟩
+
+/-- Every opening in every adaptively scheduled session is justified by the
+actual pre-cut verifier. Replayed signatures expose no new Round-3 messages. -/
+theorem RealProtocolExec_openings_have_barrier_witnesses
+    {PK ShareT SessionTape R1St R2St R3St AdvState : Type}
+    (proto : InteractiveThresholdProtocol PK ShareT SessionTape R1St R2St R3St)
+    (A : UcRushingAdversary AdvState) (numSessions : Nat)
+    (tapes : Nat → SessionTape) (cl : RealClusterState PK ShareT) (advSt : AdvState) :
+    ∀ rec ∈ (RealProtocolExec proto A numSessions tapes cl advSt).2.sessions,
+      SessionBarrierJustified proto rec := by
+  induction numSessions generalizing tapes cl advSt with
+  | zero => intro rec h; cases h
+  | succ n ih =>
+    rw [RealProtocolExec_succ]
+    dsimp only
+    intro rec h
+    rcases List.mem_cons.mp h with he | hr
+    · subst rec
+      exact execRealSession_opening_has_barrier_witness proto A cl advSt (tapes 0)
+    · exact ih _ _ _ rec hr
+
+
+/-- A nonempty enrolled custody vault can consume a real mask slot. -/
+theorem witness_custody_mask_consumption :
+    ∃ (v v' : HonestCustodyVault Nat) (out : Nat),
+      consumeVaultMaskSlot v (fun cursor share => cursor + share) = some (out, v') := by
+  exact ⟨enrollHonestVault 1 [1] 7,
+    { enrollHonestVault 1 [1] 7 with maskSessionCursor := 1 }, 7, rfl⟩
+
+theorem tooth_quarantined_mask_consumption (v v' : HonestCustodyVault Nat) (out : Nat) :
+    consumeVaultMaskSlot (walPoisonVault v) (fun cursor share => cursor + share) ≠ some (out, v') := by
+  simp [consumeVaultMaskSlot, walPoisonVault, walQuarantine]
+
+#tooth_pair Qsag.consumeVaultMaskSlot_strictly_advances vs Qsag.tooth_quarantined_mask_consumption
+#verify_inhabited Qsag.consumeVaultMaskSlot_strictly_advances Qsag.witness_custody_mask_consumption
+
+/-- Production threshold signing oracle, using the Rust-exact MPC signer. -/
+def productionThresholdSignOracle (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (pkSeed : List UInt8) (grindLimit : Nat)
+    (ser : Option PqHashSig → ByteArray) : SessionScheduleReq → ByteArray :=
+  fun req => ser (mpcEvalProductionStatelessSign suite params o pkSeed req.msg req.optRand grindLimit)
+
+theorem productionThresholdSignOracle_eq (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (sk : PqSecretKey) (hm : o.MatchesKey suite sk)
+    (grindLimit : Nat) (ser : Option PqHashSig → ByteArray) :
+    productionThresholdSignOracle suite params o sk.pkSeed grindLimit ser =
+      fun req => ser (evalProductionStatelessSign suite params sk req.msg req.optRand grindLimit) := by
+  funext req
+  exact congrArg ser (thresholdProductionStatelessSign_eq_evalProductionStatelessSign
+    suite params o sk hm req.msg req.optRand grindLimit)
+
+/-- The production reduction reads its query log from actual Round-3 requests. -/
+def productionTranscriptQueries {AdvState : Type} (grindLimit : Nat)
+    (tr : ExecTranscript AdvState) : List ProdSigningQuery :=
+  (tr.sessions.filter (fun rec => !rec.honestRound3.isEmpty)).map
+    (fun rec => ⟨rec.request.msg, rec.request.optRand, rec.request.reqEpoch, grindLimit⟩)
+
+def productionForgeryWins {AdvState : Type} (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (forgeOut : ExecTranscript AdvState → List UInt8 × PqHashSig)
+    (tr : ExecTranscript AdvState) : Bool :=
+  verifyProductionPqHashSig suite params pk (forgeOut tr).1 (forgeOut tr).2 &&
+  tr.sessions.all (fun rec => rec.honestRound3.isEmpty || decide (rec.request.msg ≠ (forgeOut tr).1))
+
+def ProductionTranscriptBreak {AdvState : Type} (suite : TweakableHashSuite)
+    (params : PqHashParams) (sk : PqSecretKey) (grindLimit : Nat)
+    (forgeOut : ExecTranscript AdvState → List UInt8 × PqHashSig)
+    (tr : ExecTranscript AdvState) : Prop :=
+  let log := productionSigningLog suite params sk (productionTranscriptQueries grindLimit tr)
+  ProdForsItsrBreak suite params (derivePublicKey suite params sk) log (forgeOut tr).1 (forgeOut tr).2 ∨
+    ProdSmTcrBreak suite params sk log ∨
+    ProdPreimageBreak suite params sk log (forgeOut tr).1 (forgeOut tr).2
+
+theorem productionForgeryBreak_of_wins {AdvState : Type}
+    (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey) (grindLimit : Nat)
+    (hw : params.w = 4 ∨ params.w = 16) (hStateless : params.statefulJorts = false)
+    (forgeOut : ExecTranscript AdvState → List UInt8 × PqHashSig) (tr : ExecTranscript AdvState)
+    (hWin : productionForgeryWins suite params (derivePublicKey suite params sk) forgeOut tr = true) :
+    ProductionTranscriptBreak suite params sk grindLimit forgeOut tr := by
+  have hwins := Bool.and_eq_true_iff.mp hWin
+  apply production_stateless_forgery_break suite params sk
+    (productionTranscriptQueries grindLimit tr) (forgeOut tr).1 (forgeOut tr).2 hw hStateless
+  · intro e he
+    obtain ⟨q, hq, heq, _⟩ := productionSigningLog_generated suite params sk _ e he
+    obtain ⟨rec, hrec, hqeq⟩ := List.mem_map.mp hq
+    obtain ⟨hm, hr3⟩ := List.mem_filter.mp hrec
+    have hf := List.all_eq_true.mp hwins.2 rec hm
+    have hn : rec.honestRound3.isEmpty = false := by
+      cases hh : rec.honestRound3.isEmpty
+      · rfl
+      · rw [hh] at hr3; cases hr3
+    rw [hn, Bool.false_or] at hf
+    rw [heq, ← hqeq]
+    exact of_decide_eq_true hf
+  · exact hwins.1
+
+/-- UC transfer for the production verifier and the threshold production signing oracle.
+The emulation bound remains an explicit premise; the oracle equality is discharged by
+`ThresholdMpc`, and hash-game extraction uses the production verifier directly. -/
+theorem uc_production_threshold_forgery_transfer
+    {PK ShareT SessionTape R1St R2St R3St SimTape SimR1 SimR2 SimR3 AdvState : Type}
+    (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (o : ProductionPqHashMpcOracles) (hm : o.MatchesKey suite sk)
+    (grindLimit : Nat) (ser : Option PqHashSig → ByteArray)
+    (hw : params.w = 4 ∨ params.w = 16) (hStateless : params.statefulJorts = false)
+    (proto : InteractiveThresholdProtocol PK ShareT SessionTape R1St R2St R3St)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (A : UcRushingAdversary AdvState) (Q_s card : Nat)
+    (realTapes : Fin card → Nat → SessionTape) (simTapes : Fin card → Nat → SimTape)
+    (cl : RealClusterState PK ShareT) (icl : IdealClusterState PK) (advSt : AdvState)
+    (forgeOut : ExecTranscript AdvState → List UInt8 × PqHashSig) (eps : Nat × Nat)
+    (hUc : ratLe (rationalAcceptDiff card
+      (fun ω => (RealProtocolExec proto A Q_s (realTapes ω) cl advSt).2) card
+      (fun ω => (IdealFunctionalityExec
+        (productionThresholdSignOracle suite params o sk.pkSeed grindLimit ser)
+        sim A Q_s (simTapes ω) icl advSt).2)
+      (productionForgeryWins suite params (derivePublicKey suite params sk) forgeOut)) eps) :
+    let oracle := productionThresholdSignOracle suite params o sk.pkSeed grindLimit ser
+    let win := productionForgeryWins suite params (derivePublicKey suite params sk) forgeOut
+    let realView := fun ω => (RealProtocolExec proto A Q_s (realTapes ω) cl advSt).2
+    let idealView := fun ω => (IdealFunctionalityExec oracle sim A Q_s (simTapes ω) icl advSt).2
+    (oracle = fun req => ser (evalProductionStatelessSign suite params sk req.msg req.optRand grindLimit)) ∧
+    distAcceptCount card realView win * eps.2 ≤
+      distAcceptCount card idealView win * eps.2 + eps.1 * card ∧
+    (∀ ω : Fin card, win (idealView ω) = true →
+      ProductionTranscriptBreak suite params sk grindLimit forgeOut (idealView ω)) := by
+  intro oracle win realView idealView
+  exact ⟨productionThresholdSignOracle_eq suite params o sk hm grindLimit ser,
+    forgery_count_transfer card realView idealView win eps hUc,
+    fun ω h => productionForgeryBreak_of_wins suite params sk grindLimit hw hStateless
+      forgeOut (idealView ω) h⟩
+
+/-! ## 7. Concurrently Interleaved Multi-Session UC Execution & Hybrid Reduction -/
+
+/-- Domain-separating concurrent session identifier. -/
+abbrev SessionId := Nat
+
+/-- Adversary-driven concurrent round-interleaving command across live sessions. -/
+inductive ConcurrentScheduleStep where
+  | startRound1 (req : SessionScheduleReq)
+  | stepRound2  (sid : SessionId)
+  | stepRound3  (sid : SessionId)
+  deriving DecidableEq, Repr
+
+/-- Arbitrary stateful rushing adversary interleaving Round 1 / Round 2 / Round 3 steps
+    across up to `Q_s` live concurrent threshold signing sessions. -/
+structure ConcurrentUcAdversary (AdvState : Type) where
+  chooseNextStep : AdvState → ConcurrentScheduleStep × AdvState
+  rushRound1     : AdvState → SessionId → List (Nat × ByteArray) → (Nat → ByteArray) × AdvState
+  rushRound2     : AdvState → SessionId → List (Nat × ByteArray) → (Nat → ByteArray) × AdvState
+  rushRound3     : AdvState → SessionId → List (Nat × ByteArray) → (Nat → ByteArray) × AdvState
+  observeOutcome : AdvState → SessionId → SessionOutcome → AdvState
+
+/-- Per-slot phase state for concurrently interleaved sessions. -/
+inductive ConcurrentSlotPhase (SlotR2 SlotR3 : Type) where
+  | unallocated
+  | afterR1 (ep : Nat) (msgDig : List UInt8) (req : SessionScheduleReq)
+      (honR1 corrR1 : List (Nat × ByteArray)) (r2St : SlotR2)
+  | afterR2 (ep : Nat) (msgDig : List UInt8) (req : SessionScheduleReq)
+      (honR1 corrR1 honR2 corrR2 : List (Nat × ByteArray)) (r3St : SlotR3)
+  | closed
+
+/-- Update slot `idx` in a `Q_s`-slot table. -/
+def updateConcurrentSlot {Q_s : Nat} {α : Type}
+    (slots : Fin Q_s → α) (idx : Fin Q_s) (v : α) : Fin Q_s → α :=
+  fun j => if j = idx then v else slots j
+
+theorem updateConcurrentSlot_same {Q_s : Nat} {α : Type}
+    (slots : Fin Q_s → α) (idx : Fin Q_s) (v : α) :
+    updateConcurrentSlot slots idx v idx = v := by
+  unfold updateConcurrentSlot
+  rw [ite_eq_left rfl]
+
+theorem updateConcurrentSlot_ne {Q_s : Nat} {α : Type}
+    (slots : Fin Q_s → α) (idx j : Fin Q_s) (v : α) (hNe : j ≠ idx) :
+    updateConcurrentSlot slots idx v j = slots j := by
+  unfold updateConcurrentSlot
+  rw [ite_eq_right hNe]
+
+/-- Look up the allocated slot for `sid` in `sidMap`. -/
+def lookupSidSlot {Q_s : Nat} (sid : SessionId) : List (SessionId × Fin Q_s) → Option (Fin Q_s)
+  | [] => none
+  | (s, slot) :: rest => if s = sid then some slot else lookupSidSlot sid rest
+
+/-- Polymorphic slot handler unifying real, ideal, and `h`-hybrid concurrent execution. -/
+structure ConcurrentSlotEngine (PK : Type) (Q_s : Nat) (SlotR1 SlotR2 SlotR3 : Type) where
+  pkDigestOf   : PK → List UInt8
+  msgDigestOf  : SessionScheduleReq → List UInt8
+  slotRound1   : Fin Q_s → PK → List Nat → SessionScheduleReq → Nat →
+                   List (Nat × ByteArray) × SlotR1
+  slotVerify1  : Fin Q_s → PK → SessionScheduleReq → SlotR1 →
+                   List (Nat × ByteArray) → List (Nat × ByteArray) →
+                   PSum (AbortReason × Bool) SlotR2
+  slotRound2   : Fin Q_s → PK → List Nat → SessionScheduleReq → SlotR2 →
+                   List (Nat × ByteArray) × SlotR2
+  slotPreCut   : Fin Q_s → PK → SessionScheduleReq → SlotR2 →
+                   List (Nat × ByteArray) → List (Nat × ByteArray) →
+                   PSum AbortReason SlotR3
+  slotRound3   : Fin Q_s → PK → List Nat → SessionScheduleReq → SlotR3 →
+                   List (Nat × ByteArray) × SlotR3
+  slotFinalize : Fin Q_s → PK → SessionScheduleReq → SlotR3 →
+                   List (Nat × ByteArray) → List (Nat × ByteArray) →
+                   PSum AbortReason ByteArray
+
+/-- Live concurrent cluster + session table state. -/
+structure ConcurrentExecState (PK : Type) (Q_s : Nat) (SlotR2 SlotR3 : Type) where
+  tsig              : IdealTsigState PK (List UInt8)
+  honestWal         : WalLatchState
+  maskSessionCursor : Nat
+  seenSids          : List SessionId
+  allocatedSlots    : Nat
+  sidMap            : List (SessionId × Fin Q_s)
+  slots             : Fin Q_s → ConcurrentSlotPhase SlotR2 SlotR3
+  completed         : List SessionWireRecord
+
+def initConcurrentExecState {PK : Type} (Q_s : Nat) (SlotR2 SlotR3 : Type)
+    (tsig : IdealTsigState PK (List UInt8)) (wal : WalLatchState) (cursor : Nat) :
+    ConcurrentExecState PK Q_s SlotR2 SlotR3 :=
+  { tsig              := tsig
+    honestWal         := wal
+    maskSessionCursor := cursor
+    seenSids          := []
+    allocatedSlots    := 0
+    sidMap            := []
+    slots             := fun _ => .unallocated
+    completed         := [] }
+
+/-- Execute one adversary-scheduled concurrent round step with mandatory unique `SessionId`
+    domain separation, cross-session quarantine, and pre-cut consistency barrier. -/
+def execConcurrentStep {PK SlotR1 SlotR2 SlotR3 AdvState : Type} {Q_s : Nat}
+    (eng : ConcurrentSlotEngine PK Q_s SlotR1 SlotR2 SlotR3)
+    (A : ConcurrentUcAdversary AdvState)
+    (st : ConcurrentExecState PK Q_s SlotR2 SlotR3) (advSt : AdvState) :
+    ConcurrentExecState PK Q_s SlotR2 SlotR3 × AdvState :=
+  let (cmd, advSt1) := A.chooseNextStep advSt
+  match cmd with
+  | .startRound1 req =>
+    if decide (req.sessionId ∈ st.seenSids) then
+      -- Domain-separation gate: duplicate `SessionId`s are rejected immediately.
+      (st, A.observeOutcome advSt1 req.sessionId (.abort .walEpochRejected))
+    else
+      let seen' := req.sessionId :: st.seenSids
+      if hSlot : st.allocatedSlots < Q_s then
+        if !(validThresholdApproval st.tsig req.honestApprovers) then
+          let out := SessionOutcome.abort .quorumRejected
+          let wireRec : SessionWireRecord := ⟨req, [], [], [], [], [], [], out⟩
+          ({ st with seenSids := seen', completed := wireRec :: st.completed },
+           A.observeOutcome advSt1 req.sessionId out)
+        else
+          let pkDig := eng.pkDigestOf st.tsig.pk
+          let msgDig := eng.msgDigestOf req
+          match walPreSignStep st.honestWal pkDig req.reqEpoch msgDig with
+          | .err wal' rej =>
+            let out := SessionOutcome.abort (mapWalRejectReason rej)
+            let wireRec : SessionWireRecord := ⟨req, [], [], [], [], [], [], out⟩
+            ({ st with honestWal := wal', seenSids := seen', completed := wireRec :: st.completed },
+             A.observeOutcome advSt1 req.sessionId out)
+          | .ok wal' auth =>
+            match auth with
+            | .replayCached cachedSig =>
+              let out := SessionOutcome.signOk cachedSig
+              let wireRec : SessionWireRecord := ⟨req, [], [], [], [], [], [], out⟩
+              ({ st with honestWal := wal', seenSids := seen', completed := wireRec :: st.completed },
+               A.observeOutcome advSt1 req.sessionId out)
+            | .authorizedFresh ep =>
+              let slot : Fin Q_s := ⟨st.allocatedSlots, hSlot⟩
+              let cursorUsed := st.maskSessionCursor
+              let walReserved : WalLatchState := { wal' with nextEpoch := ep + 1 }
+              let (honR1, r1St) :=
+                eng.slotRound1 slot st.tsig.pk st.tsig.corruptParties req cursorUsed
+              let (corrR1Fn, advSt2) := A.rushRound1 advSt1 req.sessionId honR1
+              let corrR1 := st.tsig.corruptParties.map (fun c => (c, corrR1Fn c))
+              match eng.slotVerify1 slot st.tsig.pk req r1St honR1 corrR1 with
+              | .inl errPair =>
+                let r1Err := errPair.1
+                let doPoison := errPair.2
+                let walF := if doPoison then walQuarantine walReserved else walReserved
+                let out := SessionOutcome.abort r1Err
+                let wireRec : SessionWireRecord := ⟨req, honR1, corrR1, [], [], [], [], out⟩
+                ({ st with
+                    honestWal := walF
+                    maskSessionCursor := cursorUsed + 1
+                    seenSids := seen'
+                    allocatedSlots := st.allocatedSlots + 1
+                    completed := wireRec :: st.completed },
+                 A.observeOutcome advSt2 req.sessionId out)
+              | .inr r2Init =>
+                ({ st with
+                    honestWal := walReserved
+                    maskSessionCursor := cursorUsed + 1
+                    seenSids := seen'
+                    allocatedSlots := st.allocatedSlots + 1
+                    sidMap := (req.sessionId, slot) :: st.sidMap
+                    slots := updateConcurrentSlot st.slots slot
+                      (.afterR1 ep msgDig req honR1 corrR1 r2Init) },
+                 advSt2)
+      else
+        let out := SessionOutcome.abort .quorumRejected
+        let wireRec : SessionWireRecord := ⟨req, [], [], [], [], [], [], out⟩
+        ({ st with seenSids := seen', completed := wireRec :: st.completed },
+         A.observeOutcome advSt1 req.sessionId out)
+  | .stepRound2 sid =>
+    match lookupSidSlot sid st.sidMap with
+    | none => (st, A.observeOutcome advSt1 sid (.abort .walEpochRejected))
+    | some slot =>
+      match st.slots slot with
+      | .unallocated => (st, A.observeOutcome advSt1 sid (.abort .walEpochRejected))
+      | .afterR2 _ _ _ _ _ _ _ _ => (st, A.observeOutcome advSt1 sid (.abort .walEpochRejected))
+      | .closed => (st, A.observeOutcome advSt1 sid (.abort .walEpochRejected))
+      | .afterR1 ep msgDig req honR1 corrR1 r2Init =>
+        if st.honestWal.poisoned then
+          let out := SessionOutcome.abort .walPoisoned
+          let wireRec : SessionWireRecord := ⟨req, honR1, corrR1, [], [], [], [], out⟩
+          ({ st with
+              slots := updateConcurrentSlot st.slots slot .closed
+              completed := wireRec :: st.completed },
+           A.observeOutcome advSt1 sid out)
+        else
+          let (honR2, r2St) :=
+            eng.slotRound2 slot st.tsig.pk st.tsig.corruptParties req r2Init
+          let (corrR2Fn, advSt2) := A.rushRound2 advSt1 sid honR2
+          let corrR2 := st.tsig.corruptParties.map (fun c => (c, corrR2Fn c))
+          match eng.slotPreCut slot st.tsig.pk req r2St honR2 corrR2 with
+          | .inl barrierErr =>
+            let out := SessionOutcome.abort barrierErr
+            let wireRec : SessionWireRecord := ⟨req, honR1, corrR1, honR2, corrR2, [], [], out⟩
+            ({ st with
+                honestWal := walQuarantine st.honestWal
+                slots := updateConcurrentSlot st.slots slot .closed
+                completed := wireRec :: st.completed },
+             A.observeOutcome advSt2 sid out)
+          | .inr r3Init =>
+            ({ st with
+                tsig := { st.tsig with approvedMsgs := req.msg :: st.tsig.approvedMsgs }
+                slots := updateConcurrentSlot st.slots slot
+                  (.afterR2 ep msgDig req honR1 corrR1 honR2 corrR2 r3Init) },
+             advSt2)
+  | .stepRound3 sid =>
+    match lookupSidSlot sid st.sidMap with
+    | none => (st, A.observeOutcome advSt1 sid (.abort .walEpochRejected))
+    | some slot =>
+      match st.slots slot with
+      | .unallocated => (st, A.observeOutcome advSt1 sid (.abort .walEpochRejected))
+      | .afterR1 _ _ _ _ _ _ => (st, A.observeOutcome advSt1 sid (.abort .walEpochRejected))
+      | .closed => (st, A.observeOutcome advSt1 sid (.abort .walEpochRejected))
+      | .afterR2 ep msgDig req honR1 corrR1 honR2 corrR2 r3Init =>
+        if st.honestWal.poisoned then
+          let out := SessionOutcome.abort .walPoisoned
+          let wireRec : SessionWireRecord := ⟨req, honR1, corrR1, honR2, corrR2, [], [], out⟩
+          ({ st with
+              slots := updateConcurrentSlot st.slots slot .closed
+              completed := wireRec :: st.completed },
+           A.observeOutcome advSt1 sid out)
+        else
+          let (honR3, r3St) :=
+            eng.slotRound3 slot st.tsig.pk st.tsig.corruptParties req r3Init
+          let (corrR3Fn, advSt2) := A.rushRound3 advSt1 sid honR3
+          let corrR3 := st.tsig.corruptParties.map (fun c => (c, corrR3Fn c))
+          match eng.slotFinalize slot st.tsig.pk req r3St honR3 corrR3 with
+          | .inl cutErr =>
+            let out := SessionOutcome.abort cutErr
+            let wireRec : SessionWireRecord := ⟨req, honR1, corrR1, honR2, corrR2, honR3, corrR3, out⟩
+            ({ st with
+                honestWal := walQuarantine st.honestWal
+                slots := updateConcurrentSlot st.slots slot .closed
+                completed := wireRec :: st.completed },
+             A.observeOutcome advSt2 sid out)
+          | .inr sigBytes =>
+            let committedWal : WalLatchState :=
+              { st.honestWal with
+                nextEpoch := Nat.max st.honestWal.nextEpoch (ep + 1)
+                latchedRecord := some (ep, msgDig, sigBytes) }
+            let out := SessionOutcome.signOk sigBytes
+            let wireRec : SessionWireRecord := ⟨req, honR1, corrR1, honR2, corrR2, honR3, corrR3, out⟩
+            ({ st with
+                honestWal := committedWal
+                slots := updateConcurrentSlot st.slots slot .closed
+                completed := wireRec :: st.completed },
+             A.observeOutcome advSt2 sid out)
+
+/-- Run `numSteps` arbitrarily interleaved concurrent round transitions. -/
+def execConcurrentSteps {PK SlotR1 SlotR2 SlotR3 AdvState : Type} {Q_s : Nat}
+    (eng : ConcurrentSlotEngine PK Q_s SlotR1 SlotR2 SlotR3)
+    (A : ConcurrentUcAdversary AdvState) :
+    (numSteps : Nat) → ConcurrentExecState PK Q_s SlotR2 SlotR3 → AdvState →
+    ConcurrentExecState PK Q_s SlotR2 SlotR3 × ExecTranscript AdvState
+  | 0, st, advSt => (st, ⟨advSt, st.completed⟩)
+  | n + 1, st, advSt =>
+    let (st1, advSt1) := execConcurrentStep eng A st advSt
+    execConcurrentSteps eng A n st1 advSt1
+
+/-- Real-world `ConcurrentSlotEngine` running `proto` on `realTapes slot`. -/
+def realConcurrentEngine {PK ShareT SessionTape R1St R2St R3St : Type} {Q_s : Nat}
+    (proto : InteractiveThresholdProtocol PK ShareT SessionTape R1St R2St R3St)
+    (honestShares : Nat → Option ShareT)
+    (realTapes : Fin Q_s → SessionTape) :
+    ConcurrentSlotEngine PK Q_s R1St R2St R3St :=
+  { pkDigestOf   := proto.pkDigestOf
+    msgDigestOf  := proto.msgDigestOf
+    slotRound1   := fun j pk corr req cur =>
+      proto.honestRound1 pk corr req cur honestShares (realTapes j)
+    slotVerify1  := fun _ pk req r1 h1 c1 => proto.verifyRound1 pk req r1 h1 c1
+    slotRound2   := fun j pk corr req r2 =>
+      proto.honestRound2 pk corr req r2 honestShares (realTapes j)
+    slotPreCut   := fun _ pk req r2 h2 c2 => proto.preCutBarrier pk req r2 h2 c2
+    slotRound3   := fun j pk corr req r3 =>
+      proto.honestRound3 pk corr req r3 honestShares (realTapes j)
+    slotFinalize := fun _ pk req r3 h3 c3 => proto.finalizeCutOpen pk req r3 h3 c3 }
+
+/-- Ideal-world `sk`-free `ConcurrentSlotEngine` running `sim` on `simTapes slot` and querying
+    `idealSignOracle` strictly after `simPreCutBarrier` passes. -/
+def idealConcurrentEngine {PK SimTape SimR1 SimR2 SimR3 : Type} {Q_s : Nat}
+    (idealSignOracle : SessionScheduleReq → ByteArray)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (simTapes : Fin Q_s → SimTape) :
+    ConcurrentSlotEngine PK Q_s SimR1 SimR2 (SimR3 × ByteArray) :=
+  { pkDigestOf   := sim.pkDigestOf
+    msgDigestOf  := sim.msgDigestOf
+    slotRound1   := fun j pk corr req cur =>
+      sim.simRound1 pk corr req cur (simTapes j)
+    slotVerify1  := fun _ pk req s1 h1 c1 => sim.simVerifyRound1 pk req s1 h1 c1
+    slotRound2   := fun j pk corr req s2 =>
+      sim.simRound2 pk corr req s2 (simTapes j)
+    slotPreCut   := fun _ pk req s2 h2 c2 =>
+      match sim.simPreCutBarrier pk req s2 h2 c2 with
+      | .inl err => .inl err
+      | .inr s3  => .inr (s3, idealSignOracle req)
+    slotRound3   := fun j pk corr req s3Pair =>
+      let (honR3, s3') := sim.simRound3 pk corr req s3Pair.1 s3Pair.2 (simTapes j)
+      (honR3, (s3', s3Pair.2))
+    slotFinalize := fun _ pk req s3Pair h3 c3 =>
+      sim.finalizeIdealCut pk req s3Pair.1 s3Pair.2 h3 c3 }
+
+/-- `h`-Hybrid `ConcurrentSlotEngine`: slots `< h` run `sim`, slots `≥ h` run `proto`. -/
+def hybridConcurrentEngine {PK ShareT SessionTape R1St R2St R3St SimTape SimR1 SimR2 SimR3 : Type}
+    {Q_s : Nat} (h : Nat)
+    (proto : InteractiveThresholdProtocol PK ShareT SessionTape R1St R2St R3St)
+    (honestShares : Nat → Option ShareT)
+    (idealSignOracle : SessionScheduleReq → ByteArray)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (realTapes : Fin Q_s → SessionTape) (simTapes : Fin Q_s → SimTape) :
+    ConcurrentSlotEngine PK Q_s
+      (PSum R1St SimR1) (PSum R2St SimR2) (PSum R3St (SimR3 × ByteArray)) :=
+  { pkDigestOf   := proto.pkDigestOf
+    msgDigestOf  := proto.msgDigestOf
+    slotRound1   := fun j pk corr req cur =>
+      if j.val < h then
+        let (w, s1) := sim.simRound1 pk corr req cur (simTapes j)
+        (w, .inr s1)
+      else
+        let (w, r1) := proto.honestRound1 pk corr req cur honestShares (realTapes j)
+        (w, .inl r1)
+    slotVerify1  := fun _ pk req st1 h1 c1 =>
+      match st1 with
+      | .inl r1 =>
+        match proto.verifyRound1 pk req r1 h1 c1 with
+        | .inl err => .inl err
+        | .inr r2  => .inr (.inl r2)
+      | .inr s1 =>
+        match sim.simVerifyRound1 pk req s1 h1 c1 with
+        | .inl err => .inl err
+        | .inr s2  => .inr (.inr s2)
+    slotRound2   := fun j pk corr req st2 =>
+      match st2 with
+      | .inl r2 =>
+        let (w, r2') := proto.honestRound2 pk corr req r2 honestShares (realTapes j)
+        (w, .inl r2')
+      | .inr s2 =>
+        let (w, s2') := sim.simRound2 pk corr req s2 (simTapes j)
+        (w, .inr s2')
+    slotPreCut   := fun _ pk req st2 h2 c2 =>
+      match st2 with
+      | .inl r2 =>
+        match proto.preCutBarrier pk req r2 h2 c2 with
+        | .inl err => .inl err
+        | .inr r3  => .inr (.inl r3)
+      | .inr s2 =>
+        match sim.simPreCutBarrier pk req s2 h2 c2 with
+        | .inl err => .inl err
+        | .inr s3  => .inr (.inr (s3, idealSignOracle req))
+    slotRound3   := fun j pk corr req st3 =>
+      match st3 with
+      | .inl r3 =>
+        let (w, r3') := proto.honestRound3 pk corr req r3 honestShares (realTapes j)
+        (w, .inl r3')
+      | .inr s3Pair =>
+        let (w, s3') := sim.simRound3 pk corr req s3Pair.1 s3Pair.2 (simTapes j)
+        (w, .inr (s3', s3Pair.2))
+    slotFinalize := fun _ pk req st3 h3 c3 =>
+      match st3 with
+      | .inl r3 => proto.finalizeCutOpen pk req r3 h3 c3
+      | .inr s3Pair => sim.finalizeIdealCut pk req s3Pair.1 s3Pair.2 h3 c3 }
+
+/-- **Concurrently Interleaved Real-World Protocol Execution (`ConcurrentProtocolExec`)**:
+    Adversary `A` arbitrarily interleaves Round 1 / Round 2 / Round 3 steps across up to `Q_s`
+    live sessions keyed by `SessionId` over `numSteps` scheduling steps. -/
+def ConcurrentProtocolExec {PK ShareT SessionTape R1St R2St R3St AdvState : Type}
+    (proto : InteractiveThresholdProtocol PK ShareT SessionTape R1St R2St R3St)
+    (A : ConcurrentUcAdversary AdvState) (Q_s numSteps : Nat)
+    (realTapes : Fin Q_s → SessionTape)
+    (cl : RealClusterState PK ShareT) (advSt : AdvState) :
+    RealClusterState PK ShareT × ExecTranscript AdvState :=
+  let eng := realConcurrentEngine proto cl.honestShares realTapes
+  let st0 := initConcurrentExecState Q_s R2St R3St cl.tsig cl.honestWal cl.maskSessionCursor
+  let (stF, tr) := execConcurrentSteps eng A numSteps st0 advSt
+  let sharesF := if stF.honestWal.poisoned && !cl.honestWal.poisoned then (fun _ => none) else cl.honestShares
+  ({ tsig := stF.tsig
+     honestWal := stF.honestWal
+     maskSessionCursor := stF.maskSessionCursor
+     honestShares := sharesF }, tr)
+
+/-- **Concurrently Interleaved Ideal-World Execution (`ConcurrentIdealExec`)**:
+    Strictly `sk`-free black-box `Sim` coupled to `idealSignOracle` across up to `Q_s` live
+    concurrently interleaved sessions. -/
+def ConcurrentIdealExec {PK SimTape SimR1 SimR2 SimR3 AdvState : Type}
+    (idealSignOracle : SessionScheduleReq → ByteArray)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (A : ConcurrentUcAdversary AdvState) (Q_s numSteps : Nat)
+    (simTapes : Fin Q_s → SimTape)
+    (icl : IdealClusterState PK) (advSt : AdvState) :
+    IdealClusterState PK × ExecTranscript AdvState :=
+  let eng := idealConcurrentEngine idealSignOracle sim simTapes
+  let st0 := initConcurrentExecState Q_s SimR2 (SimR3 × ByteArray)
+    icl.tsig icl.honestWal icl.maskSessionCursor
+  let (stF, tr) := execConcurrentSteps eng A numSteps st0 advSt
+  ({ tsig := stF.tsig
+     honestWal := stF.honestWal
+     maskSessionCursor := stF.maskSessionCursor }, tr)
+
+/-- **`h`-Hybrid Concurrent Execution (`ConcurrentHybridExec`)**:
+    Slots `< h` execute `sim` on `simTapes`; slots `≥ h` execute `proto` on `realTapes`. -/
+def ConcurrentHybridExec
+    {PK ShareT SessionTape R1St R2St R3St SimTape SimR1 SimR2 SimR3 AdvState : Type}
+    (h : Nat)
+    (proto : InteractiveThresholdProtocol PK ShareT SessionTape R1St R2St R3St)
+    (idealSignOracle : SessionScheduleReq → ByteArray)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (A : ConcurrentUcAdversary AdvState) (Q_s numSteps : Nat)
+    (realTapes : Fin Q_s → SessionTape) (simTapes : Fin Q_s → SimTape)
+    (cl : RealClusterState PK ShareT) (advSt : AdvState) :
+    ExecTranscript AdvState :=
+  let eng := hybridConcurrentEngine h proto cl.honestShares idealSignOracle sim realTapes simTapes
+  let st0 := initConcurrentExecState Q_s (PSum R2St SimR2) (PSum R3St (SimR3 × ByteArray))
+    cl.tsig cl.honestWal cl.maskSessionCursor
+  (execConcurrentSteps eng A numSteps st0 advSt).2
+
+private def slotPhaseSid {SlotR2 SlotR3 : Type} : ConcurrentSlotPhase SlotR2 SlotR3 → Option SessionId
+  | .unallocated => none
+  | .afterR1 _ _ req _ _ _ => some req.sessionId
+  | .afterR2 _ _ req _ _ _ _ _ => some req.sessionId
+  | .closed => none
+
+private def ConcurrentSidInvariant {PK SlotR2 SlotR3 : Type} {Q_s : Nat}
+    (st : ConcurrentExecState PK Q_s SlotR2 SlotR3) : Prop :=
+  (st.completed.map (fun r => r.request.sessionId)).Nodup ∧
+  (∀ r ∈ st.completed, r.request.sessionId ∈ st.seenSids) ∧
+  (∀ (j : Fin Q_s) (sid : SessionId), slotPhaseSid (st.slots j) = some sid →
+    sid ∈ st.seenSids ∧
+    (∀ r ∈ st.completed, r.request.sessionId ≠ sid) ∧
+    (∀ k : Fin Q_s, k ≠ j → slotPhaseSid (st.slots k) ≠ some sid)) ∧
+  (∀ j : Fin Q_s, st.allocatedSlots ≤ j.val → st.slots j = .unallocated)
+
+private theorem execConcurrentStep_preserves_sidInvariant
+    {PK SlotR1 SlotR2 SlotR3 AdvState : Type} {Q_s : Nat}
+    (eng : ConcurrentSlotEngine PK Q_s SlotR1 SlotR2 SlotR3)
+    (A : ConcurrentUcAdversary AdvState)
+    (st : ConcurrentExecState PK Q_s SlotR2 SlotR3) (advSt : AdvState)
+    (hInv : ConcurrentSidInvariant st) :
+    ConcurrentSidInvariant (execConcurrentStep eng A st advSt).1 := by
+  obtain ⟨hNodup, hCompSeen, hSlotInv, hUnalloc⟩ := hInv
+  unfold execConcurrentStep
+  dsimp only
+  cases (A.chooseNextStep advSt).1 with
+  | startRound1 req =>
+    dsimp only
+    by_cases hSeen : req.sessionId ∈ st.seenSids
+    · rw [ite_eq_left (decide_eq_true hSeen)]
+      exact ⟨hNodup, hCompSeen, hSlotInv, hUnalloc⟩
+    · rw [ite_eq_right (fun h => hSeen (of_decide_eq_true h))]
+      have hPushComp : ∀ (wal' : WalLatchState) (cur' alloc' : Nat)
+          (wRec : SessionWireRecord), wRec.request = req → st.allocatedSlots ≤ alloc' →
+          ConcurrentSidInvariant
+            { st with
+              honestWal := wal'
+              maskSessionCursor := cur'
+              seenSids := req.sessionId :: st.seenSids
+              allocatedSlots := alloc'
+              completed := wRec :: st.completed } := by
+        intro wal' cur' alloc' wRec hRecReq hAllocLe
+        refine ⟨?_, ?_, ?_, ?_⟩
+        · rw [List.map_cons, List.nodup_cons]
+          refine ⟨?_, hNodup⟩
+          intro hMemMap
+          obtain ⟨rOld, hrMem, hrEq⟩ := List.mem_map.mp hMemMap
+          rw [hRecReq] at hrEq
+          exact hSeen (hrEq ▸ hCompSeen rOld hrMem)
+        · intro r hr
+          rcases List.mem_cons.mp hr with rfl | hOld
+          · rw [hRecReq]; exact .head _
+          · exact .tail _ (hCompSeen r hOld)
+        · intro j sid hSome
+          obtain ⟨hsSeen, hsComp, hsOther⟩ := hSlotInv j sid hSome
+          refine ⟨.tail _ hsSeen, ?_, hsOther⟩
+          intro r hr
+          rcases List.mem_cons.mp hr with rfl | hOld
+          · rw [hRecReq]; intro hEq; exact hSeen (hEq ▸ hsSeen)
+          · exact hsComp r hOld
+        · intro j hj
+          exact hUnalloc j (Nat.le_trans hAllocLe hj)
+      split
+      · next hSlot =>
+        cases validThresholdApproval st.tsig req.honestApprovers
+        · exact hPushComp st.honestWal st.maskSessionCursor st.allocatedSlots _ rfl (Nat.le_refl _)
+        · simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+          cases walPreSignStep st.honestWal _ _ _ with
+          | err wal' _ =>
+            exact hPushComp wal' st.maskSessionCursor st.allocatedSlots _ rfl (Nat.le_refl _)
+          | ok wal' auth =>
+            cases auth with
+            | replayCached _ =>
+              exact hPushComp wal' st.maskSessionCursor st.allocatedSlots _ rfl (Nat.le_refl _)
+            | authorizedFresh ep =>
+              dsimp only
+              cases eng.slotVerify1 _ _ _ _ _ _ with
+              | inl pErr =>
+                exact hPushComp _ (st.maskSessionCursor + 1) (st.allocatedSlots + 1) _ rfl
+                  (Nat.le_succ _)
+              | inr r2Init =>
+                dsimp only [ConcurrentSidInvariant]
+                let slot : Fin Q_s := ⟨st.allocatedSlots, hSlot⟩
+                refine ⟨hNodup, fun r hr => .tail _ (hCompSeen r hr), ?_, ?_⟩
+                · intro j sid hSome
+                  by_cases hJ : j = slot
+                  · subst hJ
+                    rw [updateConcurrentSlot_same] at hSome
+                    dsimp only [slotPhaseSid] at hSome
+                    injection hSome with hSidEq
+                    subst hSidEq
+                    refine ⟨.head _, ?_, ?_⟩
+                    · intro r hr hEq
+                      exact hSeen (hEq ▸ hCompSeen r hr)
+                    · intro k hkNe hkSome
+                      rw [updateConcurrentSlot_ne _ _ k _ hkNe] at hkSome
+                      obtain ⟨hkSeen, _, _⟩ := hSlotInv k req.sessionId hkSome
+                      exact hSeen hkSeen
+                  · rw [updateConcurrentSlot_ne _ _ j _ hJ] at hSome
+                    obtain ⟨hjSeen, hjComp, hjOther⟩ := hSlotInv j sid hSome
+                    refine ⟨.tail _ hjSeen, hjComp, ?_⟩
+                    intro k hkNe
+                    by_cases hK : k = slot
+                    · subst hK
+                      rw [updateConcurrentSlot_same]
+                      dsimp only [slotPhaseSid]
+                      intro hEq
+                      injection hEq with hEqSid
+                      exact hSeen (hEqSid ▸ hjSeen)
+                    · rw [updateConcurrentSlot_ne _ _ k _ hK]
+                      exact hjOther k hkNe
+                · intro j hj
+                  have hNe : j ≠ ⟨st.allocatedSlots, hSlot⟩ := by
+                    intro he
+                    have hv := congrArg Fin.val he
+                    dsimp only at hv hj
+                    omega
+                  rw [updateConcurrentSlot_ne _ _ j _ hNe]
+                  exact hUnalloc j (Nat.le_of_succ_le hj)
+      · exact hPushComp st.honestWal st.maskSessionCursor st.allocatedSlots _ rfl (Nat.le_refl _)
+  | stepRound2 sid =>
+    dsimp only
+    cases lookupSidSlot sid st.sidMap with
+    | none => exact ⟨hNodup, hCompSeen, hSlotInv, hUnalloc⟩
+    | some slot =>
+      dsimp only
+      have hClose : ∀ (wal' : WalLatchState) (req : SessionScheduleReq) (wRec : SessionWireRecord),
+          slotPhaseSid (st.slots slot) = some req.sessionId →
+          wRec.request = req →
+          ConcurrentSidInvariant
+            { st with
+              honestWal := wal'
+              slots := updateConcurrentSlot st.slots slot .closed
+              completed := wRec :: st.completed } := by
+        intro wal' req wRec hAtSlot hRecReq
+        dsimp only [ConcurrentSidInvariant]
+        obtain ⟨hsSeen, hsComp, hsOther⟩ := hSlotInv slot req.sessionId hAtSlot
+        refine ⟨?_, ?_, ?_, ?_⟩
+        · rw [List.map_cons, List.nodup_cons]
+          refine ⟨?_, hNodup⟩
+          intro hMemMap
+          obtain ⟨rOld, hrMem, hrEq⟩ := List.mem_map.mp hMemMap
+          rw [hRecReq] at hrEq
+          exact hsComp rOld hrMem hrEq
+        · intro r hr
+          rcases List.mem_cons.mp hr with rfl | hOld
+          · rw [hRecReq]; exact hsSeen
+          · exact hCompSeen r hOld
+        · intro j sid' hSome
+          by_cases hJ : j = slot
+          · subst hJ
+            rw [updateConcurrentSlot_same] at hSome
+            cases hSome
+          · rw [updateConcurrentSlot_ne _ _ j _ hJ] at hSome
+            obtain ⟨hjSeen, hjComp, hjOther⟩ := hSlotInv j sid' hSome
+            refine ⟨hjSeen, ?_, ?_⟩
+            · intro r hr
+              rcases List.mem_cons.mp hr with rfl | hOld
+              · rw [hRecReq]
+                intro hEq
+                subst hEq
+                exact hsOther j hJ hSome
+              · exact hjComp r hOld
+            · intro k hkNe
+              by_cases hK : k = slot
+              · subst hK
+                rw [updateConcurrentSlot_same]
+                intro hC; cases hC
+              · rw [updateConcurrentSlot_ne _ _ k _ hK]
+                exact hjOther k hkNe
+        · intro j hj
+          have hUnJ := hUnalloc j hj
+          by_cases hJ : j = slot
+          · subst hJ
+            rw [hUnJ] at hAtSlot
+            cases hAtSlot
+          · rw [updateConcurrentSlot_ne _ _ j _ hJ]
+            exact hUnJ
+      cases hPh : st.slots slot with
+      | unallocated => exact ⟨hNodup, hCompSeen, hSlotInv, hUnalloc⟩
+      | afterR2 _ _ _ _ _ _ _ _ => exact ⟨hNodup, hCompSeen, hSlotInv, hUnalloc⟩
+      | closed => exact ⟨hNodup, hCompSeen, hSlotInv, hUnalloc⟩
+      | afterR1 ep msgDig req honR1 corrR1 r2Init =>
+        dsimp only
+        have hAtSlot : slotPhaseSid (st.slots slot) = some req.sessionId := by
+          rw [hPh]; rfl
+        cases st.honestWal.poisoned
+        · simp only [Bool.false_eq_true, ↓reduceIte]
+          cases eng.slotPreCut _ _ _ _ _ _ with
+          | inl _ => exact hClose (walQuarantine st.honestWal) req _ hAtSlot rfl
+          | inr r3Init =>
+            dsimp only [ConcurrentSidInvariant]
+            refine ⟨hNodup, hCompSeen, ?_, ?_⟩
+            · intro j sid' hSome
+              have hSameSid : ∀ (h2 c2 : List (Nat × ByteArray)) x, slotPhaseSid
+                  (updateConcurrentSlot st.slots slot
+                    (.afterR2 ep msgDig req honR1 corrR1 h2 c2 r3Init) x) =
+                  slotPhaseSid (st.slots x) := by
+                intro h2 c2 x
+                by_cases hx : x = slot
+                · subst hx
+                  rw [updateConcurrentSlot_same, hPh]
+                  rfl
+                · rw [updateConcurrentSlot_ne _ _ x _ hx]
+              rw [hSameSid] at hSome
+              obtain ⟨hjSeen, hjComp, hjOther⟩ := hSlotInv j sid' hSome
+              refine ⟨hjSeen, hjComp, ?_⟩
+              intro k hkNe
+              rw [hSameSid]
+              exact hjOther k hkNe
+            · intro j hj
+              have hUnJ := hUnalloc j hj
+              by_cases hJ : j = slot
+              · subst hJ; rw [hUnJ] at hPh; cases hPh
+              · rw [updateConcurrentSlot_ne _ _ j _ hJ]; exact hUnJ
+        · simp only [↓reduceIte]
+          exact hClose st.honestWal req _ hAtSlot rfl
+  | stepRound3 sid =>
+    dsimp only
+    cases lookupSidSlot sid st.sidMap with
+    | none => exact ⟨hNodup, hCompSeen, hSlotInv, hUnalloc⟩
+    | some slot =>
+      dsimp only
+      have hClose : ∀ (wal' : WalLatchState) (req : SessionScheduleReq) (wRec : SessionWireRecord),
+          slotPhaseSid (st.slots slot) = some req.sessionId →
+          wRec.request = req →
+          ConcurrentSidInvariant
+            { st with
+              honestWal := wal'
+              slots := updateConcurrentSlot st.slots slot .closed
+              completed := wRec :: st.completed } := by
+        intro wal' req wRec hAtSlot hRecReq
+        dsimp only [ConcurrentSidInvariant]
+        obtain ⟨hsSeen, hsComp, hsOther⟩ := hSlotInv slot req.sessionId hAtSlot
+        refine ⟨?_, ?_, ?_, ?_⟩
+        · rw [List.map_cons, List.nodup_cons]
+          refine ⟨?_, hNodup⟩
+          intro hMemMap
+          obtain ⟨rOld, hrMem, hrEq⟩ := List.mem_map.mp hMemMap
+          rw [hRecReq] at hrEq
+          exact hsComp rOld hrMem hrEq
+        · intro r hr
+          rcases List.mem_cons.mp hr with rfl | hOld
+          · rw [hRecReq]; exact hsSeen
+          · exact hCompSeen r hOld
+        · intro j sid' hSome
+          by_cases hJ : j = slot
+          · subst hJ
+            rw [updateConcurrentSlot_same] at hSome
+            cases hSome
+          · rw [updateConcurrentSlot_ne _ _ j _ hJ] at hSome
+            obtain ⟨hjSeen, hjComp, hjOther⟩ := hSlotInv j sid' hSome
+            refine ⟨hjSeen, ?_, ?_⟩
+            · intro r hr
+              rcases List.mem_cons.mp hr with rfl | hOld
+              · rw [hRecReq]
+                intro hEq
+                subst hEq
+                exact hsOther j hJ hSome
+              · exact hjComp r hOld
+            · intro k hkNe
+              by_cases hK : k = slot
+              · subst hK
+                rw [updateConcurrentSlot_same]
+                intro hC; cases hC
+              · rw [updateConcurrentSlot_ne _ _ k _ hK]
+                exact hjOther k hkNe
+        · intro j hj
+          have hUnJ := hUnalloc j hj
+          by_cases hJ : j = slot
+          · subst hJ; rw [hUnJ] at hAtSlot; cases hAtSlot
+          · rw [updateConcurrentSlot_ne _ _ j _ hJ]; exact hUnJ
+      cases hPh : st.slots slot with
+      | unallocated => exact ⟨hNodup, hCompSeen, hSlotInv, hUnalloc⟩
+      | afterR1 _ _ _ _ _ _ => exact ⟨hNodup, hCompSeen, hSlotInv, hUnalloc⟩
+      | closed => exact ⟨hNodup, hCompSeen, hSlotInv, hUnalloc⟩
+      | afterR2 ep msgDig req honR1 corrR1 honR2 corrR2 r3Init =>
+        dsimp only
+        have hAtSlot : slotPhaseSid (st.slots slot) = some req.sessionId := by
+          rw [hPh]; rfl
+        cases st.honestWal.poisoned
+        · simp only [Bool.false_eq_true, ↓reduceIte]
+          cases eng.slotFinalize _ _ _ _ _ _ with
+          | inl _ => exact hClose (walQuarantine st.honestWal) req _ hAtSlot rfl
+          | inr sigBytes => exact hClose _ req _ hAtSlot rfl
+        · simp only [↓reduceIte]
+          exact hClose st.honestWal req _ hAtSlot rfl
+
+/-- **Unique `SessionId` Domain-Separation Theorem (`concurrentProtocolExec_unique_sessionIds`)**:
+    Across any `numSteps`-step arbitrarily interleaved execution of `ConcurrentProtocolExec`,
+    every recorded session in the transcript carries a strictly unique `sessionId`. -/
+theorem concurrentProtocolExec_unique_sessionIds
+    {PK ShareT SessionTape R1St R2St R3St AdvState : Type}
+    (proto : InteractiveThresholdProtocol PK ShareT SessionTape R1St R2St R3St)
+    (A : ConcurrentUcAdversary AdvState) (Q_s numSteps : Nat)
+    (realTapes : Fin Q_s → SessionTape)
+    (cl : RealClusterState PK ShareT) (advSt : AdvState) :
+    (((ConcurrentProtocolExec proto A Q_s numSteps realTapes cl advSt).2.sessions).map
+      (fun r => r.request.sessionId)).Nodup := by
+  have hLoop : ∀ (n : Nat)
+      (st : ConcurrentExecState PK Q_s R2St R3St) (a : AdvState),
+      ConcurrentSidInvariant st →
+      (((execConcurrentSteps (realConcurrentEngine proto cl.honestShares realTapes) A n st a).2.sessions).map
+        (fun r => r.request.sessionId)).Nodup := by
+    intro n
+    induction n with
+    | zero => intro st _ hInv; exact hInv.1
+    | succ m ih =>
+      intro st a hInv
+      exact ih _ _ (execConcurrentStep_preserves_sidInvariant _ A st a hInv)
+  apply hLoop numSteps
+  refine ⟨List.nodup_nil, (fun _ h => by cases h), ?_, fun _ _ => rfl⟩
+  intro _ _ hSome
+  cases hSome
+
+/-- **Concurrent Pre-Cut Barrier Soundness (`concurrentProtocolExec_openings_have_barrier_witnesses`)**:
+    Even under arbitrary round interleaving across `Q_s` concurrent sessions, every session exposing
+    non-empty `honestRound3` wire bytes in `ConcurrentProtocolExec` has an explicit `preCutBarrier`
+    success witness. -/
