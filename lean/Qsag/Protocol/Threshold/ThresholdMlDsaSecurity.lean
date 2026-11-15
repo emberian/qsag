@@ -935,3 +935,936 @@ theorem mldsaHighBits32_eq_fips204HighBits32 (r : Fq204) :
   dsimp only
   split <;> split <;> split <;> omega
 
+theorem decompose32_reconstruct (r : Fq204) :
+    mldsaHighBits32 r < 16 ∧
+    -261888 ≤ mldsaLowBits32 r ∧ mldsaLowBits32 r ≤ 261888 ∧
+    (mldsaHighBits32 r ≠ 0 → -261888 < mldsaLowBits32 r) ∧
+    Fq204.ofInt ((mldsaHighBits32 r : Int) * 523776 + mldsaLowBits32 r) = r := by
+  have hr := r.isLt
+  have hCore :
+      mldsaHighBits32 r < 16 ∧
+      -261888 ≤ mldsaLowBits32 r ∧ mldsaLowBits32 r ≤ 261888 ∧
+      (mldsaHighBits32 r ≠ 0 → -261888 < mldsaLowBits32 r) ∧
+      (((mldsaHighBits32 r : Int) * 523776 + mldsaLowBits32 r = (r.val : Int)) ∨
+       ((mldsaHighBits32 r : Int) * 523776 + mldsaLowBits32 r = (r.val : Int) - 8380417)) := by
+    unfold mldsaHighBits32 mldsaLowBits32 decompose32
+    unfold mldsaQ at hr
+    dsimp only
+    split <;> split <;> dsimp only <;> (refine ⟨?_, ?_, ?_, ?_, ?_⟩ <;> omega)
+  refine ⟨hCore.1, hCore.2.1, hCore.2.2.1, hCore.2.2.2.1, ?_⟩
+  rcases hCore.2.2.2.2 with hExact | hWrap
+  · rw [hExact, Fq204.ofInt_nat]
+  · rw [hWrap]
+    apply Fq204.ext; apply Int.ofNat_inj.mp
+    rw [Fq204.ofInt_val]; unfold mldsaQ at hr ⊢
+    rw [← Int.add_emod_right _ ((8380417 : Nat) : Int)]
+    have hCancel : (r.val : Int) - 8380417 + ((8380417 : Nat) : Int) = (r.val : Int) := by omega
+    rw [hCancel]
+    exact Int.emod_eq_of_lt (by omega) (by omega)
+
+theorem decompose32_ofInt_interior {u1 : Nat} {u0 : Int}
+    (hu1 : u1 < 16) (hu0Lo : -261888 < u0 ∨ (u1 = 0 ∧ u0 = -261888)) (hu0Hi : u0 ≤ 261888) :
+    decompose32 (Fq204.ofInt ((u1 : Int) * 523776 + u0)) = (u1, u0) := by
+  if hCorner : (u1 = 0 ∧ u0 = -261888) ∨ (u1 = 0 ∧ u0 = -1) then
+    rcases hCorner with ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩ <;> decide
+  else
+    have hu0Strict : -261888 < u0 := by
+      rcases hu0Lo with h | h
+      · exact h
+      · exact absurd (Or.inl h) hCorner
+    clear hu0Lo
+    have hv : ((Fq204.ofInt ((u1 : Int) * 523776 + u0)).val : Int) =
+        ((u1 : Int) * 523776 + u0) % (8380417 : Int) := Fq204.ofInt_val _
+    unfold decompose32
+    if hWrap : u1 = 0 ∧ u0 < 0 then
+      rcases hWrap with ⟨hu1Zero, hu0Neg⟩
+      subst hu1Zero
+      have hu0NeM1 : u0 ≠ -1 := fun h => hCorner (Or.inr ⟨rfl, h⟩)
+      clear hCorner
+      have hu0LeMinus2 : u0 ≤ -2 := by omega
+      simp only [Int.ofNat_zero, Int.zero_mul, Int.zero_add] at hv ⊢
+      have hMod : u0 % (8380417 : Int) = 8380417 + u0 := by
+        rw [← Int.add_emod_right u0 (8380417 : Int)]
+        have hEq : u0 + (8380417 : Int) = 8380417 + u0 := by omega
+        rw [hEq]
+        exact Int.emod_eq_of_lt (by omega) (by omega)
+      rw [hMod] at hv
+      generalize (Fq204.ofInt u0).val = n at hv ⊢
+      have hnDiv : n / 523776 = 15 := by omega
+      have hgt : 261888 < n % 523776 := by omega
+      have htop : (n : Int) - (((n % 523776 : Nat) : Int) - 523776) = 8380416 := by omega
+      simp only [hgt, ↓reduceIte, htop]
+      exact Prod.ext rfl (by omega)
+    else
+      have hNonneg : 0 ≤ (u1 : Int) * 523776 + u0 := by
+        rcases Nat.eq_zero_or_pos u1 with h0 | hpos
+        · have hu0nn : ¬ (u0 < 0) := fun h => hWrap ⟨h0, h⟩
+          clear hWrap hCorner; omega
+        · clear hWrap hCorner; omega
+      clear hWrap hCorner
+      have hMod : ((u1 : Int) * 523776 + u0) % (8380417 : Int) = (u1 : Int) * 523776 + u0 :=
+        Int.emod_eq_of_lt hNonneg (by omega)
+      rw [hMod] at hv
+      generalize (Fq204.ofInt ((u1 : Int) * 523776 + u0)).val = n at hv ⊢
+      dsimp only
+      if hu0Pos : 0 ≤ u0 then
+        have hngt : ¬ (261888 < n % 523776) := by omega
+        have hntop : (n : Int) - ((n % 523776 : Nat) : Int) ≠ 8380416 := by omega
+        simp only [hngt, ↓reduceIte, hntop]
+        exact Prod.ext (by omega) (by omega)
+      else
+        have hgt : 261888 < n % 523776 := by omega
+        have hntop : (n : Int) - (((n % 523776 : Nat) : Int) - 523776) ≠ 8380416 := by omega
+        simp only [hgt, ↓reduceIte, hntop]
+        exact Prod.ext (by omega) (by omega)
+
+theorem centered_diff32_lt_iff_lowBits_and_highBits (r : Fq204) {w1 B : Nat}
+    (hw1 : w1 < 16) (hB : B ≤ 261888) :
+    Fq204.centeredAbs (Fq204.sub r (Fq204.ofNat (w1 * 523776))) < B ↔
+      (mldsaLowBits32 r).natAbs < B ∧ mldsaHighBits32 r = w1 := by
+  have hw1Int : Fq204.ofNat (w1 * 523776) = Fq204.ofInt ((w1 : Int) * 523776) := by
+    apply Fq204.ext; apply Int.ofNat_inj.mp
+    rw [Fq204.ofInt_val, Fq204.ofNat_val, Int.natCast_emod, Int.natCast_mul]
+    rfl
+  constructor
+  · intro hAbs
+    let diff := Fq204.sub r (Fq204.ofNat (w1 * 523776))
+    let d := Fq204.toCenteredInt diff
+    have hdAbs : d.natAbs < B := by dsimp [d]; rwa [Fq204.toCenteredInt_natAbs]
+    have hrEq : r = Fq204.ofInt ((w1 : Int) * 523776 + d) := by
+      calc r = Fq204.add (Fq204.ofNat (w1 * 523776)) diff := by
+            dsimp [diff]
+            rw [Fq204.sub_eq_add_neg, Fq204.add_comm _ (Fq204.add r _),
+                Fq204.add_assoc, Fq204.add_left_neg, Fq204.add_zero]
+      _ = Fq204.add (Fq204.ofInt ((w1 : Int) * 523776)) (Fq204.ofInt d) := by
+            rw [hw1Int, Fq204.ofInt_toCenteredInt]
+      _ = Fq204.ofInt ((w1 : Int) * 523776 + d) := Fq204.ofInt_add _ _
+    have hdec := decompose32_ofInt_interior hw1 (u0 := d) (Or.inl (by omega)) (by omega)
+    rw [← hrEq] at hdec
+    have h1 : mldsaHighBits32 r = w1 := congrArg Prod.fst hdec
+    have h2 : mldsaLowBits32 r = d := congrArg Prod.snd hdec
+    rw [h2]; exact ⟨hdAbs, h1⟩
+  · rintro ⟨hLow, hHigh⟩
+    obtain ⟨_, _, _, _, hRec⟩ := decompose32_reconstruct r
+    have hSub : Fq204.sub r (Fq204.ofNat (w1 * 523776)) = Fq204.ofInt (mldsaLowBits32 r) := by
+      conv => lhs; rw [← hRec, hHigh, hw1Int, Fq204.ofInt_sub]
+      congr 1; omega
+    rw [hSub, ← Fq204.toCenteredInt_natAbs,
+        Fq204.toCenteredInt_ofInt_eq (by omega) (by omega)]
+    exact hLow
+
+def makeHint32 (z r : Fq204) : Bool :=
+  decide (mldsaHighBits32 r ≠ mldsaHighBits32 (Fq204.add r z))
+
+def useHint32 (h : Bool) (r : Fq204) : Nat :=
+  let (r1, r0) := decompose32 r
+  if !h then r1
+  else if 0 < r0 then
+    if r1 + 1 = 16 then 0 else r1 + 1
+  else
+    if r1 = 0 then 15 else r1 - 1
+
+theorem useHint32_makeHint32_eq_highBits32 (u ct0 : Fq204)
+    (hLow : (mldsaLowBits32 u).natAbs < 261888)
+    (hCt0 : Fq204.centeredAbs ct0 < 261888) :
+    useHint32 (makeHint32 (Fq204.neg ct0) (Fq204.add u ct0)) (Fq204.add u ct0) =
+      mldsaHighBits32 u := by
+  have hCancel : Fq204.add (Fq204.add u ct0) (Fq204.neg ct0) = u := by
+    rw [Fq204.add_assoc, Fq204.add_right_neg, Fq204.add_zero]
+  unfold makeHint32 useHint32
+  rw [hCancel]
+  obtain ⟨hu1Lt, _, _, -, huRec⟩ := decompose32_reconstruct u
+  let u1 := mldsaHighBits32 u
+  let u0 := mldsaLowBits32 u
+  let e := Fq204.toCenteredInt ct0
+  have hu0Bounds : -261888 < u0 ∧ u0 < 261888 := by dsimp [u0]; constructor <;> omega
+  have heAbs : e.natAbs < 261888 := by dsimp [e]; rwa [Fq204.toCenteredInt_natAbs]
+  have heBounds : -261888 < e ∧ e < 261888 := by constructor <;> omega
+  have hrEq : Fq204.add u ct0 = Fq204.ofInt ((u1 : Int) * 523776 + (u0 + e)) := by
+    conv => lhs; rw [← huRec, ← Fq204.ofInt_toCenteredInt ct0]
+    rw [Fq204.ofInt_add]; dsimp [u1, u0, e]; rw [Int.add_assoc]
+  let s := u0 + e
+  if hsMid : -261888 < s ∧ s ≤ 261888 then
+    have hdecR : decompose32 (Fq204.add u ct0) = (u1, s) := by
+      rw [hrEq]; exact decompose32_ofInt_interior hu1Lt (Or.inl hsMid.1) hsMid.2
+    have hr1 : mldsaHighBits32 (Fq204.add u ct0) = u1 := by unfold mldsaHighBits32; rw [hdecR]
+    change (let (r1, r0) := decompose32 (Fq204.add u ct0)
+            if !decide (mldsaHighBits32 (Fq204.add u ct0) ≠ u1) then r1
+            else if 0 < r0 then if r1 + 1 = 16 then 0 else r1 + 1
+            else if r1 = 0 then 15 else r1 - 1) = u1
+    rw [hdecR, hr1]
+    simp only [ne_eq, not_true_eq_false, decide_false, Bool.not_false, ↓reduceIte]
+  else if hsHi : 261888 < s then
+    clear hsMid
+    let w0 := s - 523776
+    have hw0Bounds : -261888 < w0 ∧ w0 < 0 := by dsimp [w0, s] at *; constructor <;> omega
+    if hu1Top : u1 + 1 = 16 then
+      have hu1Val : u1 = 15 := by omega
+      have hrEqWrap : Fq204.add u ct0 = Fq204.ofInt (((0 : Nat) : Int) * 523776 + (w0 - 1)) := by
+        rw [hrEq]; apply Fq204.ext; apply Int.ofNat_inj.mp
+        rw [Fq204.ofInt_val, Fq204.ofInt_val]; unfold mldsaQ
+        have hDiff : (u1 : Int) * 523776 + (u0 + e) =
+            (((0 : Nat) : Int) * 523776 + (w0 - 1)) + ((8380417 : Nat) : Int) := by
+          dsimp [w0, s] at *; omega
+        rw [hDiff, Int.add_emod_right]
+      have hdecR : decompose32 (Fq204.add u ct0) = (0, w0 - 1) := by
+        rw [hrEqWrap]
+        exact decompose32_ofInt_interior (u1 := 0) (u0 := w0 - 1) (by omega)
+          (by if hInt : -261888 < w0 - 1 then exact Or.inl hInt else exact Or.inr ⟨rfl, by omega⟩)
+          (by omega)
+      have hr1 : mldsaHighBits32 (Fq204.add u ct0) = 0 := by unfold mldsaHighBits32; rw [hdecR]
+      have hne : (0 : Nat) ≠ u1 := by omega
+      have hnPos : ¬ (0 < w0 - 1) := by omega
+      change (let (r1, r0) := decompose32 (Fq204.add u ct0)
+              if !decide (mldsaHighBits32 (Fq204.add u ct0) ≠ u1) then r1
+              else if 0 < r0 then if r1 + 1 = 16 then 0 else r1 + 1
+              else if r1 = 0 then 15 else r1 - 1) = u1
+      rw [hdecR, hr1, decide_eq_true hne]
+      simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte, hnPos]
+      omega
+    else
+      have hrEqCarry : Fq204.add u ct0 = Fq204.ofInt (((u1 + 1 : Nat) : Int) * 523776 + w0) := by
+        rw [hrEq]; apply congrArg Fq204.ofInt; dsimp [w0, s]; omega
+      have hdecR : decompose32 (Fq204.add u ct0) = (u1 + 1, w0) := by
+        rw [hrEqCarry]
+        exact decompose32_ofInt_interior (u1 := u1 + 1) (u0 := w0) (by omega) (Or.inl hw0Bounds.1) (by omega)
+      have hr1 : mldsaHighBits32 (Fq204.add u ct0) = u1 + 1 := by unfold mldsaHighBits32; rw [hdecR]
+      have hne : u1 + 1 ≠ u1 := by omega
+      have hnPos : ¬ (0 < w0) := by omega
+      have hnz : u1 + 1 ≠ 0 := by omega
+      change (let (r1, r0) := decompose32 (Fq204.add u ct0)
+              if !decide (mldsaHighBits32 (Fq204.add u ct0) ≠ u1) then r1
+              else if 0 < r0 then if r1 + 1 = 16 then 0 else r1 + 1
+              else if r1 = 0 then 15 else r1 - 1) = u1
+      rw [hdecR, hr1, decide_eq_true hne]
+      simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte, hnPos, hnz]
+      omega
+  else
+    have hsLe : s ≤ -261888 :=
+      Int.not_lt.mp (fun h => hsMid ⟨h, Int.not_lt.mp hsHi⟩)
+    clear hsMid
+    if hsExactZero : u1 = 0 ∧ s = -261888 then
+      rcases hsExactZero with ⟨hu1Zero, hsEq⟩
+      have hSumEq : u0 + e = -261888 := hsEq
+      have hdecR : decompose32 (Fq204.add u ct0) = (0, -261888) := by
+        rw [hrEq, hu1Zero, hSumEq]; decide
+      have hr1 : mldsaHighBits32 (Fq204.add u ct0) = 0 := by unfold mldsaHighBits32; rw [hdecR]
+      change (let (r1, r0) := decompose32 (Fq204.add u ct0)
+              if !decide (mldsaHighBits32 (Fq204.add u ct0) ≠ u1) then r1
+              else if 0 < r0 then if r1 + 1 = 16 then 0 else r1 + 1
+              else if r1 = 0 then 15 else r1 - 1) = u1
+      rw [hdecR, hr1, hu1Zero]
+      simp only [ne_eq, not_true_eq_false, decide_false, Bool.not_false, ↓reduceIte]
+    else
+      let w0 := s + 523776
+      if hu1Zero : u1 = 0 then
+        have hsNe : s ≠ -261888 := fun h => hsExactZero ⟨hu1Zero, h⟩
+        clear hsExactZero
+        have hsLt : s < -261888 := by omega
+        have hw0Bounds : 0 < w0 ∧ w0 < 261888 := by dsimp [w0, s] at *; constructor <;> omega
+        have hrEqBorrow : Fq204.add u ct0 = Fq204.ofInt (((15 : Nat) : Int) * 523776 + (w0 + 1)) := by
+          rw [hrEq]; apply Fq204.ext; apply Int.ofNat_inj.mp
+          rw [Fq204.ofInt_val, Fq204.ofInt_val]; unfold mldsaQ
+          have hDiff : ((u1 : Int) * 523776 + (u0 + e)) + ((8380417 : Nat) : Int) =
+              ((15 : Nat) : Int) * 523776 + (w0 + 1) := by
+            dsimp [w0, s] at *; omega
+          rw [← Int.add_emod_right ((u1 : Int) * 523776 + (u0 + e)) ((8380417 : Nat) : Int), hDiff]
+        have hdecR : decompose32 (Fq204.add u ct0) = (15, w0 + 1) := by
+          rw [hrEqBorrow]
+          exact decompose32_ofInt_interior (u1 := 15) (u0 := w0 + 1) (by omega) (Or.inl (by omega)) (by omega)
+        have hr1 : mldsaHighBits32 (Fq204.add u ct0) = 15 := by unfold mldsaHighBits32; rw [hdecR]
+        have hne : (15 : Nat) ≠ u1 := by omega
+        have hPos : 0 < w0 + 1 := by omega
+        change (let (r1, r0) := decompose32 (Fq204.add u ct0)
+                if !decide (mldsaHighBits32 (Fq204.add u ct0) ≠ u1) then r1
+                else if 0 < r0 then if r1 + 1 = 16 then 0 else r1 + 1
+                else if r1 = 0 then 15 else r1 - 1) = u1
+        rw [hdecR, hr1, decide_eq_true hne]
+        simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte, hPos]
+        omega
+      else
+        clear hsExactZero
+        have hw0Bounds : 0 < w0 ∧ w0 ≤ 261888 := by dsimp [w0, s] at *; constructor <;> omega
+        have hrEqBorrow : Fq204.add u ct0 = Fq204.ofInt (((u1 - 1 : Nat) : Int) * 523776 + w0) := by
+          rw [hrEq]; apply congrArg Fq204.ofInt; dsimp [w0, s]; omega
+        have hdecR : decompose32 (Fq204.add u ct0) = (u1 - 1, w0) := by
+          rw [hrEqBorrow]
+          exact decompose32_ofInt_interior (u1 := u1 - 1) (u0 := w0) (by omega) (Or.inl (by omega)) (by omega)
+        have hr1 : mldsaHighBits32 (Fq204.add u ct0) = u1 - 1 := by unfold mldsaHighBits32; rw [hdecR]
+        have hne : u1 - 1 ≠ u1 := by omega
+        have hPos : 0 < w0 := by omega
+        have hnTop : (u1 - 1) + 1 ≠ 16 := by omega
+        change (let (r1, r0) := decompose32 (Fq204.add u ct0)
+                if !decide (mldsaHighBits32 (Fq204.add u ct0) ≠ u1) then r1
+                else if 0 < r0 then if r1 + 1 = 16 then 0 else r1 + 1
+                else if r1 = 0 then 15 else r1 - 1) = u1
+        rw [hdecR, hr1, decide_eq_true hne]
+        simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte, hPos, hnTop]
+        omega
+
+def highBitsTree32 : {d : Nat} → PolyTree d → NatTree d
+  | 0, .leaf r => .leaf (mldsaHighBits32 r)
+  | _ + 1, .branch lo hi => .branch (highBitsTree32 lo) (highBitsTree32 hi)
+
+def lowBitsNormTree32 : {d : Nat} → PolyTree d → Nat
+  | 0, .leaf r => (mldsaLowBits32 r).natAbs
+  | _ + 1, .branch lo hi => max (lowBitsNormTree32 lo) (lowBitsNormTree32 hi)
+
+def makeHintTree32 : {d : Nat} → PolyTree d → PolyTree d → HintTree d
+  | 0, .leaf z, .leaf r => .leaf (makeHint32 z r)
+  | _ + 1, .branch z0 z1, .branch r0 r1 => .branch (makeHintTree32 z0 r0) (makeHintTree32 z1 r1)
+
+def useHintTree32 : {d : Nat} → HintTree d → PolyTree d → NatTree d
+  | 0, .leaf h, .leaf r => .leaf (useHint32 h r)
+  | _ + 1, .branch h0 h1, .branch r0 r1 => .branch (useHintTree32 h0 r0) (useHintTree32 h1 r1)
+
+def centeredDiffNormTree32 : {d : Nat} → PolyTree d → NatTree d → Nat
+  | 0, .leaf r, .leaf w1 => Fq204.centeredAbs (Fq204.sub r (Fq204.ofNat (w1 * 523776)))
+  | _ + 1, .branch r0 r1, .branch w0 w1 =>
+    max (centeredDiffNormTree32 r0 w0) (centeredDiffNormTree32 r1 w1)
+
+def natTreeAllLt16 : {d : Nat} → NatTree d → Prop
+  | 0, .leaf w1 => w1 < 16
+  | _ + 1, .branch w0 w1 => natTreeAllLt16 w0 ∧ natTreeAllLt16 w1
+
+theorem highBitsTree32_allLt16 : ∀ {d : Nat} (p : PolyTree d), natTreeAllLt16 (highBitsTree32 p)
+  | 0, .leaf r => (decompose32_reconstruct r).1
+  | _ + 1, .branch p0 p1 => ⟨highBitsTree32_allLt16 p0, highBitsTree32_allLt16 p1⟩
+
+theorem useHintTree32_makeHintTree32 : ∀ {d : Nat} (u ct0 : PolyTree d),
+    lowBitsNormTree32 u < 261888 →
+    PolyTree.infNorm ct0 < 261888 →
+    useHintTree32 (makeHintTree32 (PolyTree.neg ct0) (PolyTree.add u ct0)) (PolyTree.add u ct0) =
+      highBitsTree32 u
+  | 0, .leaf u, .leaf ct0, hLow, hCt0 =>
+    congrArg NatTree.leaf (useHint32_makeHint32_eq_highBits32 u ct0 hLow hCt0)
+  | _ + 1, .branch u0 u1, .branch c0 c1, hLow, hCt0 => by
+    simp only [lowBitsNormTree32, PolyTree.infNorm] at hLow hCt0
+    simp only [PolyTree.neg, PolyTree.add, makeHintTree32, useHintTree32, highBitsTree32,
+      useHintTree32_makeHintTree32 u0 c0 (by omega) (by omega),
+      useHintTree32_makeHintTree32 u1 c1 (by omega) (by omega)]
+
+theorem centeredDiffNormTree32_lt_iff : ∀ {d : Nat} (r : PolyTree d) (w1 : NatTree d) {B : Nat},
+    natTreeAllLt16 w1 → B ≤ 261888 →
+    (centeredDiffNormTree32 r w1 < B ↔ lowBitsNormTree32 r < B ∧ highBitsTree32 r = w1)
+  | 0, .leaf r, .leaf w1, B, hw1, hB => by
+    simp only [centeredDiffNormTree32, lowBitsNormTree32, highBitsTree32, NatTree.leaf.injEq]
+    exact centered_diff32_lt_iff_lowBits_and_highBits r hw1 hB
+  | _ + 1, .branch r0 r1, .branch w0 w1, B, hw, hB => by
+    rcases hw with ⟨hw0, hw1⟩
+    simp only [centeredDiffNormTree32, lowBitsNormTree32, highBitsTree32, NatTree.branch.injEq]
+    have ih0 := centeredDiffNormTree32_lt_iff r0 w0 hw0 hB
+    have ih1 := centeredDiffNormTree32_lt_iff r1 w1 hw1 hB
+    constructor
+    · intro hLt
+      obtain ⟨l0, e0⟩ := ih0.mp (by omega)
+      obtain ⟨l1, e1⟩ := ih1.mp (by omega)
+      exact ⟨by omega, e0, e1⟩
+    · rintro ⟨hLow, e0, e1⟩
+      have h0 : centeredDiffNormTree32 r0 w0 < B := ih0.mpr ⟨by omega, e0⟩
+      have h1 : centeredDiffNormTree32 r1 w1 < B := ih1.mpr ⟨by omega, e1⟩
+      omega
+
+/-- Parameterized FIPS 204 polynomial rounding & hint recovery structure instantiated across
+    all three NIST security categories (`ML-DSA-44` `γ₂ = 95232`, `ML-DSA-65/87` `γ₂ = 261888`). -/
+structure MlDsaRoundingScheme where
+  gamma1 : Nat
+  gamma2 : Nat
+  beta : Nat
+  omega : Nat
+  hBetaLtGamma1 : beta < gamma1
+  hBetaLtGamma2 : beta < gamma2
+  highBitsOp : Poly256 → NatTree 8
+  lowBitsNormOp : Poly256 → Nat
+  makeHintOp : Poly256 → Poly256 → HintTree 8
+  useHintOp : HintTree 8 → Poly256 → NatTree 8
+  centeredDiffNormOp : Poly256 → NatTree 8 → Nat
+  centeredDiff_lt_iff : ∀ (u w : Poly256),
+    centeredDiffNormOp u (highBitsOp w) < gamma2 - beta ↔
+      lowBitsNormOp u < gamma2 - beta ∧ highBitsOp u = highBitsOp w
+  useHint_makeHint_eq : ∀ (u ct0 : Poly256),
+    lowBitsNormOp u < gamma2 → PolyTree.infNorm ct0 < gamma2 →
+    useHintOp (makeHintOp (PolyTree.neg ct0) (PolyTree.add u ct0)) (PolyTree.add u ct0) = highBitsOp u
+
+def mlDsa44RoundingScheme : MlDsaRoundingScheme where
+  gamma1 := 131072
+  gamma2 := 95232
+  beta := 78
+  omega := 80
+  hBetaLtGamma1 := by decide
+  hBetaLtGamma2 := by decide
+  highBitsOp := highBitsTree
+  lowBitsNormOp := lowBitsNormTree
+  makeHintOp := makeHintTree
+  useHintOp := useHintTree
+  centeredDiffNormOp := centeredDiffNormTree
+  centeredDiff_lt_iff u w := centeredDiffNormTree_lt_iff u (highBitsTree w) (highBitsTree_allLt44 w) (by decide)
+  useHint_makeHint_eq u ct0 hL hC := useHintTree_makeHintTree u ct0 hL hC
+
+def mlDsa65RoundingScheme : MlDsaRoundingScheme where
+  gamma1 := 524288
+  gamma2 := 261888
+  beta := 196
+  omega := 55
+  hBetaLtGamma1 := by decide
+  hBetaLtGamma2 := by decide
+  highBitsOp := highBitsTree32
+  lowBitsNormOp := lowBitsNormTree32
+  makeHintOp := makeHintTree32
+  useHintOp := useHintTree32
+  centeredDiffNormOp := centeredDiffNormTree32
+  centeredDiff_lt_iff u w := centeredDiffNormTree32_lt_iff u (highBitsTree32 w) (highBitsTree32_allLt16 w) (by decide)
+  useHint_makeHint_eq u ct0 hL hC := useHintTree32_makeHintTree32 u ct0 hL hC
+
+def mlDsa87RoundingScheme : MlDsaRoundingScheme where
+  gamma1 := 524288
+  gamma2 := 261888
+  beta := 120
+  omega := 75
+  hBetaLtGamma1 := by decide
+  hBetaLtGamma2 := by decide
+  highBitsOp := highBitsTree32
+  lowBitsNormOp := lowBitsNormTree32
+  makeHintOp := makeHintTree32
+  useHintOp := useHintTree32
+  centeredDiffNormOp := centeredDiffNormTree32
+  centeredDiff_lt_iff u w := centeredDiffNormTree32_lt_iff u (highBitsTree32 w) (highBitsTree32_allLt16 w) (by decide)
+  useHint_makeHint_eq u ct0 hL hC := useHintTree32_makeHintTree32 u ct0 hL hC
+
+/-- Variable-dimension polynomial vector `R_q^d` and rectangular matrix `R_q^{k × ℓ}`
+    covering `(k, ℓ) = (4, 4)` (`ML-DSA-44`), `(6, 5)` (`ML-DSA-65`), and `(8, 7)` (`ML-DSA-87`). -/
+abbrev PolyFlexVec (d : Nat) := Fin d → Poly256
+abbrev PolyRectMat (k ell : Nat) := Fin k → Fin ell → Poly256
+
+def zeroFlexVec (d : Nat) : PolyFlexVec d := fun _ => PolyTree.zero 8
+def addFlexVec {d : Nat} (u v : PolyFlexVec d) : PolyFlexVec d := fun i => PolyTree.add (u i) (v i)
+def subFlexVec {d : Nat} (u v : PolyFlexVec d) : PolyFlexVec d := fun i => PolyTree.sub (u i) (v i)
+def negFlexVec {d : Nat} (u : PolyFlexVec d) : PolyFlexVec d := fun i => PolyTree.neg (u i)
+def mulPolyFlexVec {d : Nat} (c : Poly256) (v : PolyFlexVec d) : PolyFlexVec d :=
+  fun i => negacyclicMul c (v i)
+
+def flexDot : {ell : Nat} → (Fin ell → Poly256) → (Fin ell → Poly256) → Poly256
+  | 0, _, _ => PolyTree.zero 8
+  | _ + 1, row, v =>
+    PolyTree.add (negacyclicMul (row ⟨0, Nat.zero_lt_succ _⟩) (v ⟨0, Nat.zero_lt_succ _⟩))
+      (flexDot (fun j => row ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+               (fun j => v ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩))
+
+def matVecMulRect {k ell : Nat} (A : PolyRectMat k ell) (v : PolyFlexVec ell) : PolyFlexVec k :=
+  fun i => flexDot (A i) v
+
+private theorem flexDot_add : ∀ {ell : Nat} (row u v : Fin ell → Poly256),
+    flexDot row (fun j => PolyTree.add (u j) (v j)) =
+      PolyTree.add (flexDot row u) (flexDot row v)
+  | 0, _, _, _ => (polyTree_add_zero (PolyTree.zero 8)).symm
+  | _ + 1, row, u, v => by
+    dsimp only [flexDot]
+    rw [negacyclicMul_left_distrib, flexDot_add, polyTree_add_add_comm]
+
+private theorem flexDot_mulPoly : ∀ {ell : Nat} (row v : Fin ell → Poly256) (c : Poly256),
+    flexDot row (fun j => negacyclicMul c (v j)) = negacyclicMul c (flexDot row v)
+  | 0, _, _, c => by
+    dsimp only [flexDot]
+    rw [negacyclicMul_comm c (PolyTree.zero 8), negacyclicMul_zero_left]
+  | _ + 1, row, v, c => by
+    dsimp only [flexDot]
+    have hSwap : negacyclicMul (row ⟨0, Nat.zero_lt_succ _⟩) (negacyclicMul c (v ⟨0, Nat.zero_lt_succ _⟩)) =
+        negacyclicMul c (negacyclicMul (row ⟨0, Nat.zero_lt_succ _⟩) (v ⟨0, Nat.zero_lt_succ _⟩)) := by
+      rw [← negacyclicMul_assoc, negacyclicMul_comm (row _) c, negacyclicMul_assoc]
+    rw [hSwap, flexDot_mulPoly, ← negacyclicMul_left_distrib]
+
+theorem matVecMulRect_add {k ell : Nat} (A : PolyRectMat k ell) (u v : PolyFlexVec ell) :
+    matVecMulRect A (addFlexVec u v) = addFlexVec (matVecMulRect A u) (matVecMulRect A v) := by
+  funext i; exact flexDot_add (A i) u v
+
+theorem matVecMulRect_mulPoly {k ell : Nat} (A : PolyRectMat k ell) (c : Poly256) (v : PolyFlexVec ell) :
+    matVecMulRect A (mulPolyFlexVec c v) = mulPolyFlexVec c (matVecMulRect A v) := by
+  funext i; exact flexDot_mulPoly (A i) v c
+
+def power2RoundHighFlex {d : Nat} (t : PolyFlexVec d) : PolyFlexVec d :=
+  fun i => power2RoundHighTree (t i)
+def power2RoundLowFlex {d : Nat} (t : PolyFlexVec d) : PolyFlexVec d :=
+  fun i => power2RoundLowTree (t i)
+
+/-- **Rectangular Module-Lattice Verification Identity (`az_sub_ct1_eq_w_sub_cs2_add_ct0_rect`)**:
+    Over `R_q^k × R_q^ℓ` for arbitrary `(k, ℓ)` (including `(4,4)`, `(6,5)`, `(8,7)`),
+    whenever `z = y + c · s₁`, `w = A · y`, and `t = A · s₁ + s₂ = t₁ · 2^d + t₀`,
+    `A · z - c · (t₁ · 2^d) = (w - c · s₂) + c · t₀` identically in `R_q^k`. -/
+theorem az_sub_ct1_eq_w_sub_cs2_add_ct0_rect {k ell : Nat}
+    (A : PolyRectMat k ell) (s1 y : PolyFlexVec ell) (s2 : PolyFlexVec k) (c : Poly256) :
+    let t := addFlexVec (matVecMulRect A s1) s2
+    let t1Scaled := power2RoundHighFlex t
+    let t0 := power2RoundLowFlex t
+    let w := matVecMulRect A y
+    let z := addFlexVec y (mulPolyFlexVec c s1)
+    subFlexVec (matVecMulRect A z) (mulPolyFlexVec c t1Scaled) =
+      addFlexVec (subFlexVec w (mulPolyFlexVec c s2)) (mulPolyFlexVec c t0) := by
+  intro t t1Scaled t0 w z
+  have htSplit : addFlexVec t1Scaled t0 = t := by
+    funext i; exact power2RoundTree_reconstruct (t i)
+  have hAz : matVecMulRect A z = addFlexVec w (mulPolyFlexVec c (matVecMulRect A s1)) := by
+    dsimp [z, w]; rw [matVecMulRect_add, matVecMulRect_mulPoly]
+  rw [hAz]
+  funext i
+  have htRow : PolyTree.add (t1Scaled i) (t0 i) = PolyTree.add (matVecMulRect A s1 i) (s2 i) :=
+    congrFun htSplit i
+  dsimp only [addFlexVec, subFlexVec, mulPolyFlexVec]
+  apply poly256_add_left_cancel (a := negacyclicMul c (t1Scaled i))
+  have hSubCancel : ∀ x y : Poly256, PolyTree.add y (PolyTree.sub x y) = x := fun x y => by
+    rw [polyTree_sub_eq_add_neg, polyTree_add_comm y, polyTree_add_assoc,
+        polyTree_add_left_neg, polyTree_add_zero]
+  rw [hSubCancel]
+  have hRhs :
+      PolyTree.add (negacyclicMul c (t1Scaled i))
+        (PolyTree.add (PolyTree.sub (w i) (negacyclicMul c (s2 i))) (negacyclicMul c (t0 i))) =
+      PolyTree.add (PolyTree.sub (w i) (negacyclicMul c (s2 i)))
+        (negacyclicMul c (PolyTree.add (t1Scaled i) (t0 i))) := by
+    rw [negacyclicMul_left_distrib, polyTree_add_comm (negacyclicMul c (t1Scaled i)),
+        polyTree_add_assoc, polyTree_add_comm (negacyclicMul c (t0 i))]
+  rw [hRhs, htRow, negacyclicMul_left_distrib,
+      polyTree_add_comm (negacyclicMul c (matVecMulRect A s1 i)) (negacyclicMul c (s2 i)),
+      ← polyTree_add_assoc, polyTree_add_comm (PolyTree.sub (w i) _), hSubCancel]
+
+def rssMaskAddFlexEquiv {d : Nat} (target : PolyFlexVec d) :
+    SimpleEquiv (PolyFlexVec d) (PolyFlexVec d) where
+  toFun m := addFlexVec target m
+  invFun v := subFlexVec v target
+  left_inv m := by
+    funext i; dsimp only [addFlexVec, subFlexVec]
+    rw [polyTree_sub_eq_add_neg, polyTree_add_comm (target i) (m i),
+        polyTree_add_assoc, polyTree_add_comm (target i) (PolyTree.neg (target i)),
+        polyTree_add_left_neg, polyTree_add_zero]
+  right_inv v := by
+    funext i; dsimp only [addFlexVec, subFlexVec]
+    rw [polyTree_sub_eq_add_neg, polyTree_add_comm (v i),
+        ← polyTree_add_assoc, polyTree_add_comm (target i) (PolyTree.neg (target i)),
+        polyTree_add_left_neg, polyTree_zero_add]
+
+def finMax : (n : Nat) → (Fin n → Nat) → Nat
+  | 0, _ => 0
+  | _ + 1, f => max (f ⟨0, Nat.zero_lt_succ _⟩) (finMax _ (fun i => f ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩))
+
+private theorem finMax_lt_iff {B : Nat} (hB : 0 < B) :
+    ∀ {n : Nat} (f : Fin n → Nat), finMax n f < B ↔ ∀ i : Fin n, f i < B
+  | 0, _ => by
+    constructor
+    · intro _ i; exact Fin.elim0 i
+    · intro _; exact hB
+  | _ + 1, f => by
+    dsimp only [finMax]
+    have ih := finMax_lt_iff hB (fun i => f ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+    constructor
+    · intro hLt i
+      rcases i with ⟨val, isLt⟩
+      rcases val with _ | k
+      · omega
+      · exact ih.mp (by omega) ⟨k, Nat.lt_of_succ_lt_succ isLt⟩
+    · intro hAll
+      have h0 := hAll ⟨0, Nat.zero_lt_succ _⟩
+      have hRest := ih.mpr (fun j => hAll ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+      omega
+
+def infNormFlexVec {d : Nat} (v : PolyFlexVec d) : Nat :=
+  finMax d (fun i => PolyTree.infNorm (v i))
+
+def hintWeightFlexVec {k : Nat} (h : Fin k → HintTree 8) : Nat :=
+  finSum k (fun i => HintTree.weight (h i))
+
+structure ThresholdRectSignSig (k ell : Nat) where
+  cTilde : List UInt8
+  z : PolyFlexVec ell
+  h : Fin k → HintTree 8
+  usedAttempt : Nat
+
+structure SealedRectAttemptPads (k ell : Nat) where
+  maskW : PolyFlexVec k
+  maskZ : PolyFlexVec ell
+  maskLow : PolyFlexVec k
+  maskBin : BitVec 256
+  verdictBlind : Ext6Fq204
+
+structure SealedRectSignAttemptView (k ell : Nat) where
+  openedW : PolyFlexVec k
+  openedZ : PolyFlexVec ell
+  openedLow : PolyFlexVec k
+  openedBin : BitVec 256
+  openedVerdict : Ext6Fq204
+  released : Option ((Fin k → NatTree 8) × ThresholdRectSignSig k ell)
+
+def sealedRectAcceptBool {k ell : Nat} (R : MlDsaRoundingScheme)
+    (chalHash : List UInt8 → (Fin k → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (A : PolyRectMat k ell) (s1 y : PolyFlexVec ell) (s2 : PolyFlexVec k)
+    (mu : List UInt8) : Bool :=
+  let t := addFlexVec (matVecMulRect A s1) s2
+  let t0 := power2RoundLowFlex t
+  let w := matVecMulRect A y
+  let w1 : Fin k → NatTree 8 := fun i => R.highBitsOp (w i)
+  let c := sampleInBall (chalHash mu w1)
+  let z := addFlexVec y (mulPolyFlexVec c s1)
+  let u := subFlexVec w (mulPolyFlexVec c s2)
+  let ct0 := mulPolyFlexVec c t0
+  let h : Fin k → HintTree 8 := fun i => R.makeHintOp (PolyTree.neg (ct0 i)) (PolyTree.add (u i) (ct0 i))
+  decide (infNormFlexVec ct0 < R.gamma2) &&
+  decide (infNormFlexVec z < R.gamma1 - R.beta) &&
+  decide (finMax k (fun i => R.centeredDiffNormOp (u i) (w1 i)) < R.gamma2 - R.beta) &&
+  decide (hintWeightFlexVec h ≤ R.omega)
+
+def realSealedRectAttemptView {k ell : Nat} (R : MlDsaRoundingScheme)
+    (chalHash : List UInt8 → (Fin k → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (A : PolyRectMat k ell) (s1 y : PolyFlexVec ell) (s2 : PolyFlexVec k)
+    (mu : List UInt8) (attempt : Nat) (keccakTraceBits : BitVec 256) (failTag : Fq204)
+    (pads : SealedRectAttemptPads k ell) : SealedRectSignAttemptView k ell :=
+  let t := addFlexVec (matVecMulRect A s1) s2
+  let t0 := power2RoundLowFlex t
+  let w := matVecMulRect A y
+  let w1 : Fin k → NatTree 8 := fun i => R.highBitsOp (w i)
+  let cTilde := chalHash mu w1
+  let c := sampleInBall cTilde
+  let z := addFlexVec y (mulPolyFlexVec c s1)
+  let u := subFlexVec w (mulPolyFlexVec c s2)
+  let ct0 := mulPolyFlexVec c t0
+  let h : Fin k → HintTree 8 := fun i => R.makeHintOp (PolyTree.neg (ct0 i)) (PolyTree.add (u i) (ct0 i))
+  let accept := sealedRectAcceptBool R chalHash sampleInBall A s1 y s2 mu
+  { openedW := addFlexVec w pads.maskW, openedZ := addFlexVec z pads.maskZ,
+    openedLow := addFlexVec u pads.maskLow, openedBin := keccakTraceBits ^^^ pads.maskBin,
+    openedVerdict := if accept then ext6Zero else ext6Scale pads.verdictBlind failTag,
+    released := if accept then
+      some (w1, { cTilde := cTilde, z := z, h := h, usedAttempt := attempt }) else none }
+
+def thresholdMlDsaRectAttemptSimulator {k ell : Nat} (R : MlDsaRoundingScheme)
+    (sampleInBall : List UInt8 → Poly256) (A : PolyRectMat k ell) (t1Scaled : PolyFlexVec k)
+    (out : Option (ThresholdRectSignSig k ell))
+    (pads : SealedRectAttemptPads k ell) : SealedRectSignAttemptView k ell :=
+  match out with
+  | none =>
+    { openedW := pads.maskW, openedZ := pads.maskZ, openedLow := pads.maskLow,
+      openedBin := pads.maskBin, openedVerdict := pads.verdictBlind, released := none }
+  | some sig =>
+    let c := sampleInBall sig.cTilde
+    let azSubCt1 := subFlexVec (matVecMulRect A sig.z) (mulPolyFlexVec c t1Scaled)
+    let w1Sim : Fin k → NatTree 8 := fun i => R.useHintOp (sig.h i) (azSubCt1 i)
+    { openedW := pads.maskW, openedZ := pads.maskZ, openedLow := pads.maskLow,
+      openedBin := pads.maskBin, openedVerdict := ext6Zero, released := some (w1Sim, sig) }
+
+private def sealedRectPadsTupleEquiv (k ell : Nat) :
+    SimpleEquiv (SealedRectAttemptPads k ell)
+      (PolyFlexVec k × PolyFlexVec ell × PolyFlexVec k × BitVec 256 × Ext6Fq204) where
+  toFun p := (p.maskW, p.maskZ, p.maskLow, p.maskBin, p.verdictBlind)
+  invFun t := ⟨t.1, t.2.1, t.2.2.1, t.2.2.2.1, t.2.2.2.2⟩
+  left_inv := fun ⟨_, _, _, _, _⟩ => rfl
+  right_inv := fun ⟨_, _, _, _, _⟩ => rfl
+
+def sealedRectAttemptPadEquiv {k ell : Nat}
+    (w : PolyFlexVec k) (z : PolyFlexVec ell) (u : PolyFlexVec k)
+    (keccakTraceBits : BitVec 256) (accept : Bool) (failTag : Fq204) (hFail : failTag ≠ Fq204.zero) :
+    SimpleEquiv (SealedRectAttemptPads k ell) (SealedRectAttemptPads k ell) :=
+  let verdictEquiv : SimpleEquiv Ext6Fq204 Ext6Fq204 :=
+    if accept then SimpleEquiv.refl _ else ext6ScaleEquiv failTag hFail
+  SimpleEquiv.trans (sealedRectPadsTupleEquiv k ell)
+    (SimpleEquiv.trans
+      (SimpleEquiv.prodCongr (rssMaskAddFlexEquiv w)
+        (SimpleEquiv.prodCongr (rssMaskAddFlexEquiv z)
+          (SimpleEquiv.prodCongr (rssMaskAddFlexEquiv u)
+            (SimpleEquiv.prodCongr (bv256XorEquiv keccakTraceBits) verdictEquiv))))
+      (SimpleEquiv.symm (sealedRectPadsTupleEquiv k ell)))
+
+def sealedRectStepPadEquiv {k ell : Nat} (R : MlDsaRoundingScheme)
+    (chalHash : List UInt8 → (Fin k → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (A : PolyRectMat k ell) (s1 y : PolyFlexVec ell) (s2 : PolyFlexVec k)
+    (mu : List UInt8) (keccakTraceBits : BitVec 256) (failTag : Fq204) (hFail : failTag ≠ Fq204.zero) :
+    SimpleEquiv (SealedRectAttemptPads k ell) (SealedRectAttemptPads k ell) :=
+  let w := matVecMulRect A y
+  let w1 : Fin k → NatTree 8 := fun i => R.highBitsOp (w i)
+  let c := sampleInBall (chalHash mu w1)
+  sealedRectAttemptPadEquiv w (addFlexVec y (mulPolyFlexVec c s1))
+    (subFlexVec w (mulPolyFlexVec c s2)) keccakTraceBits
+    (sealedRectAcceptBool R chalHash sampleInBall A s1 y s2 mu) failTag hFail
+
+def sealedRectAttemptPublicOutcome {k ell : Nat} (R : MlDsaRoundingScheme)
+    (chalHash : List UInt8 → (Fin k → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (A : PolyRectMat k ell) (s1 y : PolyFlexVec ell) (s2 : PolyFlexVec k)
+    (mu : List UInt8) (attempt : Nat) : Option (ThresholdRectSignSig k ell) :=
+  let t := addFlexVec (matVecMulRect A s1) s2
+  let t0 := power2RoundLowFlex t
+  let w := matVecMulRect A y
+  let w1 : Fin k → NatTree 8 := fun i => R.highBitsOp (w i)
+  let cTilde := chalHash mu w1
+  let c := sampleInBall cTilde
+  let z := addFlexVec y (mulPolyFlexVec c s1)
+  let u := subFlexVec w (mulPolyFlexVec c s2)
+  let ct0 := mulPolyFlexVec c t0
+  let h : Fin k → HintTree 8 := fun i => R.makeHintOp (PolyTree.neg (ct0 i)) (PolyTree.add (u i) (ct0 i))
+  if sealedRectAcceptBool R chalHash sampleInBall A s1 y s2 mu then
+    some { cTilde := cTilde, z := z, h := h, usedAttempt := attempt }
+  else none
+
+theorem sealedRectAttempt_sim_eq_real {k ell : Nat} (R : MlDsaRoundingScheme)
+    (chalHash : List UInt8 → (Fin k → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (A : PolyRectMat k ell) (s1 y : PolyFlexVec ell) (s2 : PolyFlexVec k)
+    (mu : List UInt8) (attempt : Nat) (keccakTraceBits : BitVec 256) (failTag : Fq204)
+    (hFail : failTag ≠ Fq204.zero) (pads : SealedRectAttemptPads k ell) :
+    thresholdMlDsaRectAttemptSimulator R sampleInBall A
+      (power2RoundHighFlex (addFlexVec (matVecMulRect A s1) s2))
+      (sealedRectAttemptPublicOutcome R chalHash sampleInBall A s1 y s2 mu attempt)
+      ((sealedRectStepPadEquiv R chalHash sampleInBall A s1 y s2 mu keccakTraceBits failTag hFail).toFun pads) =
+    realSealedRectAttemptView R chalHash sampleInBall A s1 y s2 mu attempt keccakTraceBits failTag pads := by
+  unfold realSealedRectAttemptView sealedRectAttemptPublicOutcome
+    thresholdMlDsaRectAttemptSimulator sealedRectStepPadEquiv
+  dsimp only
+  cases hAcc : sealedRectAcceptBool R chalHash sampleInBall A s1 y s2 mu with
+  | false =>
+    simp only [sealedRectAttemptPadEquiv, SimpleEquiv.trans, SimpleEquiv.prodCongr,
+      SimpleEquiv.symm, sealedRectPadsTupleEquiv, rssMaskAddFlexEquiv, bv256XorEquiv,
+      ext6ScaleEquiv, Bool.false_eq_true, ↓reduceIte]
+  | true =>
+    unfold sealedRectAcceptBool at hAcc
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hAcc
+    rcases hAcc with ⟨⟨⟨hCt0Max, _⟩, hDiffMax⟩, _⟩
+    have hG2Pos : 0 < R.gamma2 := Nat.lt_of_le_of_lt (Nat.zero_le _) R.hBetaLtGamma2
+    have hG2SubPos : 0 < R.gamma2 - R.beta := Nat.sub_pos_of_lt R.hBetaLtGamma2
+    have hCt0All := (finMax_lt_iff hG2Pos _).mp hCt0Max
+    have hDiffAll := (finMax_lt_iff hG2SubPos _).mp hDiffMax
+    let t := addFlexVec (matVecMulRect A s1) s2
+    let t1Scaled := power2RoundHighFlex t
+    let t0 := power2RoundLowFlex t
+    let w := matVecMulRect A y
+    let w1 : Fin k → NatTree 8 := fun i => R.highBitsOp (w i)
+    let c := sampleInBall (chalHash mu w1)
+    let z := addFlexVec y (mulPolyFlexVec c s1)
+    let u := subFlexVec w (mulPolyFlexVec c s2)
+    let ct0 := mulPolyFlexVec c t0
+    have hId := az_sub_ct1_eq_w_sub_cs2_add_ct0_rect A s1 y s2 c
+    dsimp only at hId
+    have hW1Eq : (fun i : Fin k => R.useHintOp
+        (R.makeHintOp (PolyTree.neg (ct0 i)) (PolyTree.add (u i) (ct0 i)))
+        (subFlexVec (matVecMulRect A z) (mulPolyFlexVec c t1Scaled) i)) = w1 := by
+      rw [hId]
+      funext i
+      dsimp only [addFlexVec, w1]
+      obtain ⟨hLowI, hHighEqI⟩ := (R.centeredDiff_lt_iff (u i) (w i)).mp (hDiffAll i)
+      have hLowLtG2 : R.lowBitsNormOp (u i) < R.gamma2 := Nat.lt_of_lt_of_le hLowI (Nat.sub_le _ _)
+      exact (R.useHint_makeHint_eq (u i) (ct0 i) hLowLtG2 (hCt0All i)).trans hHighEqI
+    simp only [sealedRectAttemptPadEquiv, SimpleEquiv.trans, SimpleEquiv.prodCongr,
+      SimpleEquiv.symm, SimpleEquiv.refl, sealedRectPadsTupleEquiv, rssMaskAddFlexEquiv, bv256XorEquiv,
+      ↓reduceIte]
+    dsimp only [t, t1Scaled, t0, w, w1, c, z, u, ct0] at hW1Eq
+    rw [hW1Eq]
+
+structure SealedRectAttemptStepSpec (ell : Nat) where
+  y : PolyFlexVec ell
+  attempt : Nat
+  keccakTraceBits : BitVec 256
+  failTag : Fq204
+
+def realSealedRectSignTrace {k ell : Nat} (R : MlDsaRoundingScheme)
+    (chalHash : List UInt8 → (Fin k → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (A : PolyRectMat k ell) (s1 : PolyFlexVec ell) (s2 : PolyFlexVec k) (mu : List UInt8) :
+    (steps : List (SealedRectAttemptStepSpec ell)) →
+    (Fin steps.length → SealedRectAttemptPads k ell) →
+    List (SealedRectSignAttemptView k ell)
+  | [], _ => []
+  | stp :: rest, padFn =>
+    realSealedRectAttemptView R chalHash sampleInBall A s1 stp.y s2 mu stp.attempt
+      stp.keccakTraceBits stp.failTag (padFn ⟨0, Nat.zero_lt_succ _⟩) ::
+    realSealedRectSignTrace R chalHash sampleInBall A s1 s2 mu rest
+      (fun i => padFn ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+
+def thresholdMlDsaRectTraceSimulator {k ell : Nat} (R : MlDsaRoundingScheme)
+    (sampleInBall : List UInt8 → Poly256) (A : PolyRectMat k ell) (t1Scaled : PolyFlexVec k) :
+    (outs : List (Option (ThresholdRectSignSig k ell))) →
+    (Fin outs.length → SealedRectAttemptPads k ell) →
+    List (SealedRectSignAttemptView k ell)
+  | [], _ => []
+  | out :: rest, padFn =>
+    thresholdMlDsaRectAttemptSimulator R sampleInBall A t1Scaled out (padFn ⟨0, Nat.zero_lt_succ _⟩) ::
+    thresholdMlDsaRectTraceSimulator R sampleInBall A t1Scaled rest
+      (fun i => padFn ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+
+def sealedRectTraceOutcomes {k ell : Nat} (R : MlDsaRoundingScheme)
+    (chalHash : List UInt8 → (Fin k → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (A : PolyRectMat k ell) (s1 : PolyFlexVec ell) (s2 : PolyFlexVec k) (mu : List UInt8)
+    (steps : List (SealedRectAttemptStepSpec ell)) : List (Option (ThresholdRectSignSig k ell)) :=
+  steps.map (fun stp => sealedRectAttemptPublicOutcome R chalHash sampleInBall A s1 stp.y s2 mu stp.attempt)
+
+private def splitRectPadsEquiv (k ell n : Nat) :
+    SimpleEquiv (Fin (n + 1) → SealedRectAttemptPads k ell)
+      (SealedRectAttemptPads k ell × (Fin n → SealedRectAttemptPads k ell)) where
+  toFun f := (f ⟨0, Nat.zero_lt_succ _⟩, fun i => f ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+  invFun p := Fin.cases p.1 p.2
+  left_inv f := by funext j; refine Fin.cases ?_ (fun _ => ?_) j <;> rfl
+  right_inv := fun ⟨_, _⟩ => rfl
+
+private def consRectPadEquiv {k ell n m : Nat}
+    (bijHead : SimpleEquiv (SealedRectAttemptPads k ell) (SealedRectAttemptPads k ell))
+    (bijRest : SimpleEquiv (Fin n → SealedRectAttemptPads k ell) (Fin m → SealedRectAttemptPads k ell)) :
+    SimpleEquiv (Fin (n + 1) → SealedRectAttemptPads k ell) (Fin (m + 1) → SealedRectAttemptPads k ell) :=
+  SimpleEquiv.trans (splitRectPadsEquiv k ell n)
+    (SimpleEquiv.trans (SimpleEquiv.prodCongr bijHead bijRest)
+      (SimpleEquiv.symm (splitRectPadsEquiv k ell m)))
+
+private theorem rectTraceSim_cons {k ell : Nat} (R : MlDsaRoundingScheme)
+    (sampleInBall : List UInt8 → Poly256) (A : PolyRectMat k ell) (t1Scaled : PolyFlexVec k)
+    (out : Option (ThresholdRectSignSig k ell)) (outsRest : List (Option (ThresholdRectSignSig k ell)))
+    {n : Nat}
+    (bijHead : SimpleEquiv (SealedRectAttemptPads k ell) (SealedRectAttemptPads k ell))
+    (bijRest : SimpleEquiv (Fin n → SealedRectAttemptPads k ell)
+                           (Fin outsRest.length → SealedRectAttemptPads k ell))
+    (padFn : Fin (n + 1) → SealedRectAttemptPads k ell) :
+    thresholdMlDsaRectTraceSimulator R sampleInBall A t1Scaled (out :: outsRest)
+      ((consRectPadEquiv bijHead bijRest).toFun padFn) =
+    thresholdMlDsaRectAttemptSimulator R sampleInBall A t1Scaled out
+      (bijHead.toFun (padFn ⟨0, Nat.zero_lt_succ n⟩)) ::
+    thresholdMlDsaRectTraceSimulator R sampleInBall A t1Scaled outsRest
+      (bijRest.toFun (fun i => padFn ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)) := rfl
+
+/-- **Rectangular `ML-DSA-44/65/87` Sealed-`w₁` Abort-Transcript Zero-Knowledge
+    (`threshold_mldsa_rect_abort_transcript_zk`)**:
+    Generalizes `threshold_mldsa_abort_transcript_zk` from square `4 × 4` (`ML-DSA-44`) to arbitrary
+    rectangular module dimensions `(k, ℓ)` and any FIPS 204 `MlDsaRoundingScheme` — instantiated
+    constructively at `(4, 4)` (`mlDsa44RoundingScheme`), `(6, 5)` (`mlDsa65RoundingScheme`), and
+    `(8, 7)` (`mlDsa87RoundingScheme`). Conditional on the public `SimAttemptOutcome` list, a
+    `0-Classical` pad bijection maps `realSealedRectSignTrace` to `thresholdMlDsaRectTraceSimulator`
+    using only public `(A, t₁ · 2^d)`. -/
+theorem threshold_mldsa_rect_abort_transcript_zk {k ell : Nat} (R : MlDsaRoundingScheme)
+    (chalHash : List UInt8 → (Fin k → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (A : PolyRectMat k ell) (s1 : PolyFlexVec ell) (s2 : PolyFlexVec k) (mu : List UInt8)
+    (steps : List (SealedRectAttemptStepSpec ell))
+    (hFail : ∀ stp ∈ steps, stp.failTag ≠ Fq204.zero) :
+    let t1Scaled := power2RoundHighFlex (addFlexVec (matVecMulRect A s1) s2)
+    let outs := sealedRectTraceOutcomes R chalHash sampleInBall A s1 s2 mu steps
+    ∃ (_hLen : outs.length = steps.length)
+      (padBij : SimpleEquiv (Fin steps.length → SealedRectAttemptPads k ell)
+                            (Fin outs.length → SealedRectAttemptPads k ell)),
+      (∀ padFn,
+        thresholdMlDsaRectTraceSimulator R sampleInBall A t1Scaled outs (padBij.toFun padFn) =
+          realSealedRectSignTrace R chalHash sampleInBall A s1 s2 mu steps padFn) ∧
+      (∀ {M : Nat} (enum : SimpleEquiv (Fin M) (Fin steps.length → SealedRectAttemptPads k ell))
+         (enumOut : SimpleEquiv (Fin M) (Fin outs.length → SealedRectAttemptPads k ell))
+         (D : List (SealedRectSignAttemptView k ell) → Bool),
+        finSum M (fun m =>
+          (D (realSealedRectSignTrace R chalHash sampleInBall A s1 s2 mu steps (enum.toFun m))).toNat) =
+        finSum M (fun m =>
+          (D (thresholdMlDsaRectTraceSimulator R sampleInBall A t1Scaled outs (enumOut.toFun m))).toNat)) := by
+  induction steps with
+  | nil => exact ⟨rfl, SimpleEquiv.refl _, (fun _ => rfl), fun _ _ _ => rfl⟩
+  | cons stp rest ih =>
+    have hHeadFail : stp.failTag ≠ Fq204.zero := hFail stp (.head rest)
+    obtain ⟨_, bijRest, hEqRest, _⟩ := ih (fun s hs => hFail s (.tail stp hs))
+    have hLenCons : (sealedRectTraceOutcomes R chalHash sampleInBall A s1 s2 mu (stp :: rest)).length =
+        (stp :: rest).length := List.length_map _
+    have hPointwise : ∀ padFn : Fin (rest.length + 1) → SealedRectAttemptPads k ell,
+        thresholdMlDsaRectTraceSimulator R sampleInBall A
+          (power2RoundHighFlex (addFlexVec (matVecMulRect A s1) s2))
+          (sealedRectTraceOutcomes R chalHash sampleInBall A s1 s2 mu (stp :: rest))
+          ((consRectPadEquiv (sealedRectStepPadEquiv R chalHash sampleInBall A s1 stp.y s2 mu
+              stp.keccakTraceBits stp.failTag hHeadFail) bijRest).toFun padFn) =
+        realSealedRectSignTrace R chalHash sampleInBall A s1 s2 mu (stp :: rest) padFn := by
+      intro padFn
+      have hHd := sealedRectAttempt_sim_eq_real R chalHash sampleInBall A s1 stp.y s2 mu stp.attempt
+        stp.keccakTraceBits stp.failTag hHeadFail (padFn ⟨0, Nat.zero_lt_succ _⟩)
+      have hTl := hEqRest (fun i => padFn ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+      exact (rectTraceSim_cons R sampleInBall A (power2RoundHighFlex (addFlexVec (matVecMulRect A s1) s2))
+        (sealedRectAttemptPublicOutcome R chalHash sampleInBall A s1 stp.y s2 mu stp.attempt)
+        (sealedRectTraceOutcomes R chalHash sampleInBall A s1 s2 mu rest)
+        (sealedRectStepPadEquiv R chalHash sampleInBall A s1 stp.y s2 mu
+          stp.keccakTraceBits stp.failTag hHeadFail)
+        bijRest padFn).trans (by dsimp only [realSealedRectSignTrace]; rw [hHd, hTl])
+    exact ⟨hLenCons,
+      consRectPadEquiv (sealedRectStepPadEquiv R chalHash sampleInBall A s1 stp.y s2 mu
+        stp.keccakTraceBits stp.failTag hHeadFail) bijRest,
+      hPointwise,
+      fun enum enumOut D => finSum_sim_eq_of_equiv _ _ _ hPointwise enum enumOut D⟩
+
+/-- Concrete `ML-DSA-65` (`(k, ℓ) = (6, 5)`, `γ₁ = 2^19`, `γ₂ = 261888`) specialization. -/
+theorem threshold_mldsa65_abort_transcript_zk
+    (chalHash : List UInt8 → (Fin 6 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (A : PolyRectMat 6 5) (s1 : PolyFlexVec 5) (s2 : PolyFlexVec 6) (mu : List UInt8)
+    (steps : List (SealedRectAttemptStepSpec 5))
+    (hFail : ∀ stp ∈ steps, stp.failTag ≠ Fq204.zero) :
+    let t1Scaled := power2RoundHighFlex (addFlexVec (matVecMulRect A s1) s2)
+    let outs := sealedRectTraceOutcomes mlDsa65RoundingScheme chalHash sampleInBall A s1 s2 mu steps
+    ∃ (_hLen : outs.length = steps.length)
+      (padBij : SimpleEquiv (Fin steps.length → SealedRectAttemptPads 6 5)
+                            (Fin outs.length → SealedRectAttemptPads 6 5)),
+      (∀ padFn,
+        thresholdMlDsaRectTraceSimulator mlDsa65RoundingScheme sampleInBall A t1Scaled outs
+          (padBij.toFun padFn) =
+        realSealedRectSignTrace mlDsa65RoundingScheme chalHash sampleInBall A s1 s2 mu steps padFn) ∧
+      (∀ {M : Nat} (enum : SimpleEquiv (Fin M) (Fin steps.length → SealedRectAttemptPads 6 5))
+         (enumOut : SimpleEquiv (Fin M) (Fin outs.length → SealedRectAttemptPads 6 5))
+         (D : List (SealedRectSignAttemptView 6 5) → Bool),
+        finSum M (fun m =>
+          (D (realSealedRectSignTrace mlDsa65RoundingScheme chalHash sampleInBall A s1 s2 mu steps
+            (enum.toFun m))).toNat) =
+        finSum M (fun m =>
+          (D (thresholdMlDsaRectTraceSimulator mlDsa65RoundingScheme sampleInBall A t1Scaled outs
+            (enumOut.toFun m))).toNat)) :=
+  threshold_mldsa_rect_abort_transcript_zk mlDsa65RoundingScheme chalHash sampleInBall A s1 s2 mu steps hFail
+
+/-- Concrete `ML-DSA-87` (`(k, ℓ) = (8, 7)`, `γ₁ = 2^19`, `γ₂ = 261888`) specialization. -/
+theorem threshold_mldsa87_abort_transcript_zk
+    (chalHash : List UInt8 → (Fin 8 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (A : PolyRectMat 8 7) (s1 : PolyFlexVec 7) (s2 : PolyFlexVec 8) (mu : List UInt8)
+    (steps : List (SealedRectAttemptStepSpec 7))
+    (hFail : ∀ stp ∈ steps, stp.failTag ≠ Fq204.zero) :
+    let t1Scaled := power2RoundHighFlex (addFlexVec (matVecMulRect A s1) s2)
+    let outs := sealedRectTraceOutcomes mlDsa87RoundingScheme chalHash sampleInBall A s1 s2 mu steps
+    ∃ (_hLen : outs.length = steps.length)
+      (padBij : SimpleEquiv (Fin steps.length → SealedRectAttemptPads 8 7)
+                            (Fin outs.length → SealedRectAttemptPads 8 7)),
+      (∀ padFn,
+        thresholdMlDsaRectTraceSimulator mlDsa87RoundingScheme sampleInBall A t1Scaled outs
+          (padBij.toFun padFn) =
+        realSealedRectSignTrace mlDsa87RoundingScheme chalHash sampleInBall A s1 s2 mu steps padFn) ∧
+      (∀ {M : Nat} (enum : SimpleEquiv (Fin M) (Fin steps.length → SealedRectAttemptPads 8 7))
+         (enumOut : SimpleEquiv (Fin M) (Fin outs.length → SealedRectAttemptPads 8 7))
+         (D : List (SealedRectSignAttemptView 8 7) → Bool),
+        finSum M (fun m =>
+          (D (realSealedRectSignTrace mlDsa87RoundingScheme chalHash sampleInBall A s1 s2 mu steps
+            (enum.toFun m))).toNat) =
+        finSum M (fun m =>
+          (D (thresholdMlDsaRectTraceSimulator mlDsa87RoundingScheme sampleInBall A t1Scaled outs
+            (enumOut.toFun m))).toNat)) :=
+  threshold_mldsa_rect_abort_transcript_zk mlDsa87RoundingScheme chalHash sampleInBall A s1 s2 mu steps hFail
+
+theorem threshold_mldsa87_rect_abort_zk_witness :
+    ∃ (chalHash : List UInt8 → (Fin 8 → NatTree 8) → List UInt8)
+      (sampleInBall : List UInt8 → Poly256)
+      (A : PolyRectMat 8 7) (s1 : PolyFlexVec 7) (s2 : PolyFlexVec 8) (mu : List UInt8)
+      (steps : List (SealedRectAttemptStepSpec 7)),
+      (∀ stp ∈ steps, stp.failTag ≠ Fq204.zero) ∧
+      (sealedRectTraceOutcomes mlDsa87RoundingScheme chalHash sampleInBall A s1 s2 mu steps).length =
+        steps.length := by
+  refine ⟨(fun _ _ => []), (fun _ => PolyTree.zero 8),
+    (fun _ _ => PolyTree.zero 8), zeroFlexVec 7, zeroFlexVec 8, [],
+    [{ y := zeroFlexVec 7, attempt := 0, keccakTraceBits := 0#256, failTag := Fq204.one }],
+    ?_, List.length_map _⟩
+  intro s hs
+  rcases List.mem_cons.mp hs with rfl | hNil
+  · decide
+  · cases hNil
+
+#verify_constructive fips204ExpandMaskCoord_range fips204_asymmetric_2gamma1_plateau_shift_invariant
+  tooth_closed_box_le_breaks_asymmetric_2gamma1_plateau mldsaHighBits32_eq_fips204HighBits32
+  useHint32_makeHint32_eq_highBits32 az_sub_ct1_eq_w_sub_cs2_add_ct0_rect
+  threshold_mldsa_rect_abort_transcript_zk threshold_mldsa65_abort_transcript_zk
+  threshold_mldsa87_abort_transcript_zk
+#tooth_pair fips204_asymmetric_2gamma1_plateau_shift_invariant vs
+  tooth_closed_box_le_breaks_asymmetric_2gamma1_plateau
+#verify_inhabited fips204_asymmetric_2gamma1_plateau_shift_invariant
+  fips204_asymmetric_2gamma1_plateau_witness
+#tooth_pair threshold_mldsa87_abort_transcript_zk vs
+  tooth_unsealed_w1_or_irwin_hall_abort_leaks_secret
+#verify_inhabited threshold_mldsa87_abort_transcript_zk threshold_mldsa87_rect_abort_zk_witness
+
+end Qsag

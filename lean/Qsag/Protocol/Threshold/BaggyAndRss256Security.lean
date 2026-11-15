@@ -1373,3 +1373,1199 @@ theorem rss256_one_corrupt_perfect_view_privacy
   exact ⟨hPointwise, hCountEq, hRatDiff⟩
 
 /-- Verifier `P0`'s pad-cancellation extractor against the naive `(prg0, prg1, prg2)` assignment. -/
+def p0CancelNaivePads (u0Naive x0 y0 prg0 prg1 : Plane256) : Plane256 :=
+  u0Naive ^^^ prg0 ^^^ prg1 ^^^ (x0 &&& y0)
+
+/-- **`#tooth` Off-by-One `(prg0, prg1, prg2)` Mask-Key Assignment Leaks `(x0 & y1) ⊕ (x1 & y0)` (`tooth_off_by_one_prg_map_leaks_and_wire`)**:
+    Under the naive `(prg0, prg1, prg2)` assignment, gate reconstruction STILL passes (`u0 ⊕ u1 ⊕ u2 = x & y`),
+    yet verifier `P0` (holding `(x2, x0, y2, y0)` and `(prg0, prg1)`) cancels BOTH pads on `u0` and
+    recovers `(x0 &&& y1) ^^^ (x1 &&& y0)` with probability `1` (`distAcceptCount` difference = `2^256`)! -/
+theorem tooth_off_by_one_prg_map_leaks_and_wire
+    (x y : RssPlane256Share) (prg0 prg1 prg2 : Plane256) :
+    let uNaive := rss256AndWireNaiveOffByOne x y prg0 prg1 prg2
+    uNaive.reconstruct = (x.reconstruct &&& y.reconstruct) ∧
+    p0CancelNaivePads uNaive.s0 x.s0 y.s0 prg0 prg1 =
+      ((x.s0 &&& y.s1) ^^^ (x.s1 &&& y.s0)) ∧
+    (let xA : RssPlane256Share := { s0 := 0#256, s1 := BitVec.allOnes 256, s2 := 0#256 }
+     let xB : RssPlane256Share := { s0 := 0#256, s1 := 0#256, s2 := 0#256 }
+     let yFixed : RssPlane256Share := { s0 := BitVec.allOnes 256, s1 := 0#256, s2 := 0#256 }
+     xA.s0 = xB.s0 ∧ xA.s2 = xB.s2 ∧
+     finSum (2 ^ 256) (fun ω =>
+       if p0CancelNaivePads
+            (rss256AndWireNaiveOffByOne xA yFixed prg0 prg1 (BitVec.ofFin ω)).s0
+            xA.s0 yFixed.s0 prg0 prg1 == BitVec.allOnes 256 then 1 else 0) = 2 ^ 256 ∧
+     finSum (2 ^ 256) (fun ω =>
+       if p0CancelNaivePads
+            (rss256AndWireNaiveOffByOne xB yFixed prg0 prg1 (BitVec.ofFin ω)).s0
+            xB.s0 yFixed.s0 prg0 prg1 == BitVec.allOnes 256 then 1 else 0) = 0) := by
+  refine ⟨(rss256_and_gate_reconstructs x y prg0 prg1 prg2).2, ?_, ?_⟩
+  · apply BitVec.eq_of_getLsbD_eq
+    intro i _
+    simp only [p0CancelNaivePads, rss256AndWireNaiveOffByOne, rss256CrossTerms,
+      BitVec.getLsbD_xor, BitVec.getLsbD_and]
+    cases x.s0.getLsbD i <;> cases x.s1.getLsbD i <;>
+      cases y.s0.getLsbD i <;> cases y.s1.getLsbD i <;>
+      cases prg0.getLsbD i <;> cases prg1.getLsbD i <;> rfl
+  · dsimp only
+    have hExtractEq : ∀ (u : RssPlane256Share) (p2 : Plane256),
+        p0CancelNaivePads (rss256AndWireNaiveOffByOne u { s0 := BitVec.allOnes 256, s1 := 0#256, s2 := 0#256 } prg0 prg1 p2).s0
+          u.s0 (BitVec.allOnes 256) prg0 prg1 =
+        (u.s1 &&& BitVec.allOnes 256) := by
+      intro u p2
+      apply BitVec.eq_of_getLsbD_eq
+      intro i _
+      simp only [p0CancelNaivePads, rss256AndWireNaiveOffByOne, rss256CrossTerms,
+        BitVec.getLsbD_xor, BitVec.getLsbD_and, BitVec.getLsbD_zero]
+      cases u.s0.getLsbD i <;> cases u.s1.getLsbD i <;>
+        cases (BitVec.allOnes 256).getLsbD i <;>
+        cases prg0.getLsbD i <;> cases prg1.getLsbD i <;> rfl
+    refine ⟨rfl, rfl, ?_, ?_⟩
+    · have h1 : finSum (2 ^ 256) (fun ω =>
+          if p0CancelNaivePads
+               (rss256AndWireNaiveOffByOne { s0 := 0#256, s1 := BitVec.allOnes 256, s2 := 0#256 }
+                 { s0 := BitVec.allOnes 256, s1 := 0#256, s2 := 0#256 } prg0 prg1 (BitVec.ofFin ω)).s0
+               0#256 (BitVec.allOnes 256) prg0 prg1 == BitVec.allOnes 256 then 1 else 0) =
+          finSum (2 ^ 256) (fun _ => 1) := by
+        apply finSum_congr
+        intro ω
+        rw [hExtractEq { s0 := 0#256, s1 := BitVec.allOnes 256, s2 := 0#256 } (BitVec.ofFin ω)]
+        simp
+      rw [h1, finSum_const, Nat.mul_one]
+    · have h0 : finSum (2 ^ 256) (fun ω =>
+          if p0CancelNaivePads
+               (rss256AndWireNaiveOffByOne { s0 := 0#256, s1 := 0#256, s2 := 0#256 }
+                 { s0 := BitVec.allOnes 256, s1 := 0#256, s2 := 0#256 } prg0 prg1 (BitVec.ofFin ω)).s0
+               0#256 (BitVec.allOnes 256) prg0 prg1 == BitVec.allOnes 256 then 1 else 0) =
+          finSum (2 ^ 256) (fun _ => 0) := by
+        apply finSum_congr
+        intro ω
+        rw [hExtractEq { s0 := 0#256, s1 := 0#256, s2 := 0#256 } (BitVec.ofFin ω)]
+        dsimp only
+        have hNeOnes : ((0#256 &&& BitVec.allOnes 256) == BitVec.allOnes 256) = false := by
+          apply beq_false_of_ne
+          intro hEq
+          have hb := congrArg (fun v : BitVec 256 => v.getLsbD 0) hEq
+          rw [BitVec.zero_and, BitVec.getLsbD_zero, Qsag.Constructive.getLsbD_allOnes] at hb
+          cases hb
+        rw [hNeOnes]
+        rfl
+      rw [h0, finSum_const, Nat.mul_zero]
+
+private theorem finSum_mul_right_nat : ∀ (n c : Nat) (f : Fin n → Nat),
+    finSum n (fun i => f i * c) = finSum n f * c
+  | 0, _, _ => by simp [finSum]
+  | n + 1, c, f => by simp only [finSum, finSum_mul_right_nat n c, Nat.add_mul]
+
+/-- A full recorded AND gate, with three replicated-share components per wire. -/
+structure Rss256RecordedGate where
+  x : RssPlane256Share
+  y : RssPlane256Share
+  z : RssPlane256Share
+
+/-- Actual reconstructed gate error, rather than a caller-supplied validity flag. -/
+def Rss256RecordedGate.error (g : Rss256RecordedGate) : Plane256 :=
+  g.z.reconstruct ^^^ (g.x.reconstruct &&& g.y.reconstruct)
+
+/-- Each party holds two adjacent shares; these overlap exactly as in `(2,3)` RSS. -/
+def RssPlane256Share.partyViews (s : RssPlane256Share) :
+    (Plane256 × Plane256) × (Plane256 × Plane256) × (Plane256 × Plane256) :=
+  ((s.s2, s.s0), (s.s0, s.s1), (s.s1, s.s2))
+
+theorem rss256_replicated_share_binding (s : RssPlane256Share) :
+    s.partyViews.1.2 = s.partyViews.2.1.1 ∧
+    s.partyViews.2.1.2 = s.partyViews.2.2.1 ∧
+    s.partyViews.2.2.2 = s.partyViews.1.1 ∧
+    s.partyViews.1.1 ^^^ s.partyViews.1.2 ^^^ s.partyViews.2.1.2 = s.reconstruct := by
+  refine ⟨rfl, rfl, rfl, ?_⟩
+  apply BitVec.eq_of_getLsbD_eq
+  intro i _
+  simp only [RssPlane256Share.partyViews, RssPlane256Share.reconstruct, BitVec.getLsbD_xor]
+  cases s.s0.getLsbD i <;> cases s.s1.getLsbD i <;> cases s.s2.getLsbD i <;> rfl
+
+theorem rss256_honest_recorded_gate_error (x y : RssPlane256Share) (a b c : Plane256) :
+    (Rss256RecordedGate.mk x y (rss256AndWireCorrected x y a b c)).error = 0#256 := by
+  unfold Rss256RecordedGate.error
+  rw [(rss256_and_gate_reconstructs x y a b c).1, BitVec.xor_self]
+
+/-- Independent-coordinate linear combination. Coins are indexed by gate/lane, never
+    one scalar multiplied by the sum of all errors. A fresh stream is required per pass
+    and per folding round; the transcript errors are fixed before that stream is sampled. -/
+def rss256WeightedErrors : List Tower128 → (Nat → Tower128) → Tower128
+  | [], _ => towerZero 7
+  | e :: es, coins => towerAdd 7 (towerMul 7 e (coins 0))
+      (rss256WeightedErrors es (fun i => coins (i + 1)))
+
+/-- Expose one independently sampled coordinate, keeping all other coins fixed. -/
+def rss256PivotCheck (delta : Tower128) (rest : List Tower128)
+    (coins : Nat → Tower128) (r : Tower128) : Tower128 :=
+  rss256WeightedErrors (delta :: rest) (fun i => if i = 0 then r else coins (i - 1))
+
+theorem rss256PivotCheck_eq (delta : Tower128) (rest : List Tower128)
+    (coins : Nat → Tower128) (r : Tower128) :
+    rss256PivotCheck delta rest coins r =
+      towerAdd 7 (towerMul 7 delta r) (rss256WeightedErrors rest coins) := by
+  simp only [rss256PivotCheck, rss256WeightedErrors, ↓reduceIte,
+    Nat.add_one_ne_zero, Nat.add_sub_cancel]
+
+/-- Conditional on every other coin, a nonzero gate error pins at most one fresh
+    GF(2^128) challenge. Thus independent gate weighting has error at most 1/2^128.
+    The designated erroneous coordinate may be placed first in the batch. -/
+theorem rss256_independent_gate_weight_soundness (delta : Tower128)
+    (rest : List Tower128) (coins : Nat → Tower128) (hdelta : delta ≠ towerZero 7) :
+    ratLe (finSum (2^128) (fun r =>
+      if rss256PivotCheck delta rest coins (unpackTower 7 (BitVec.ofFin r)) == towerZero 7
+      then 1 else 0), 2^128) (1, 2^128) := by
+  have hCount : finSum (2^128) (fun r =>
+      if rss256PivotCheck delta rest coins (unpackTower 7 (BitVec.ofFin r)) == towerZero 7
+      then 1 else 0) ≤ 1 := by
+    apply finSum_indicator_le_one_of_unique
+    intro i j hi hj
+    have hi' := eq_of_beq hi
+    have hj' := eq_of_beq hj
+    rw [rss256PivotCheck_eq] at hi' hj'
+    have he := hi'.trans hj'.symm
+    have hc := congrArg (fun v => towerAdd 7 v (rss256WeightedErrors rest coins)) he
+    simp only [towerAdd_assoc, towerAdd_self_zero, towerAdd_zero] at hc
+    have hf := towerMul_cancel_left 7 delta _ _ hdelta hc
+    have hp := congrArg (packTower 7) hf
+    simp only [packTower_unpackTower] at hp
+    exact Fin.ext (congrArg BitVec.toNat hp)
+  exact ⟨Nat.two_pow_pos 128, Nat.two_pow_pos 128,
+    Nat.mul_le_mul_right (2^128) hCount⟩
+
+/-- Encode every lane of every recorded gate; false lanes contribute the nonzero field
+    element one. This binds the independent-coordinate check to the 256-lane RSS invariant. -/
+def rss256GateErrors (gates : List Rss256RecordedGate) : List Tower128 :=
+  gates.flatMap (fun g => (List.finRange 256).map (fun lane =>
+    if g.error.getLsbD lane.val then towerOne 7 else towerZero 7))
+
+def rss256Pass1Check (gates : List Rss256RecordedGate) (coins : Nat → Tower128) : Bool :=
+  rss256WeightedErrors (rss256GateErrors gates) coins == towerZero 7
+
+/-- Polynomial weighting (the production alternative to independently sampled gate
+    coordinates) uses distinct monomials. In the existing Horner convention coefficient
+    zero has weight chi, so the degree bound is the coefficient-list length. -/
+theorem rss256_polynomial_gate_weight_soundness (deg : Nat) (errors : List Tower128)
+    (hLen : errors.length ≤ deg) (hNz : ∃ e ∈ errors, e ≠ towerZero 7) :
+    ratLe (finSum (2^128) (fun r =>
+      if batchDeviationPoly errors (unpackTower 7 (BitVec.ofFin r)) == towerZero 7
+      then 1 else 0), 2^128) (deg, 2^128) := by
+  exact ⟨Nat.two_pow_pos 128, Nat.two_pow_pos 128,
+    Nat.mul_le_mul_right (2^128) (tower128_roots_finSum_le deg errors hLen hNz)⟩
+
+/-- A false bit of a reconstructed gate becomes an actual nonzero coefficient. -/
+theorem rss256_recorded_fault_nonzero (gates : List Rss256RecordedGate)
+    (g : Rss256RecordedGate) (hg : g ∈ gates) (lane : Fin 256)
+    (hFault : g.error.getLsbD lane.val = true) :
+    ∃ e ∈ rss256GateErrors gates, e ≠ towerZero 7 := by
+  refine ⟨towerOne 7, ?_, towerOne_ne_zero 7⟩
+  apply List.mem_flatMap.mpr
+  refine ⟨g, hg, ?_⟩
+  apply List.mem_map.mpr
+  exact ⟨lane, List.mem_finRange lane, by rw [hFault]; rfl⟩
+
+/-- End-to-end algebraic batching bound from an actual RSS gate/lane fault. This
+    is the polynomial-weight variant; it does not assume a caller's `relationValid`. -/
+theorem rss256_recorded_gate_polynomial_soundness (gates : List Rss256RecordedGate)
+    (g : Rss256RecordedGate) (hg : g ∈ gates) (lane : Fin 256)
+    (hFault : g.error.getLsbD lane.val = true) :
+    ratLe (finSum (2^128) (fun r =>
+      if batchDeviationPoly (rss256GateErrors gates)
+        (unpackTower 7 (BitVec.ofFin r)) == towerZero 7 then 1 else 0), 2^128)
+      ((rss256GateErrors gates).length, 2^128) :=
+  rss256_polynomial_gate_weight_soundness _ _ (Nat.le_refl _)
+    (rss256_recorded_fault_nonzero gates g hg lane hFault)
+
+/-- Pass and round are separate coordinates. Uniform independent sampling of this
+    family is the coin-model premise, not a claim that a deterministic XOF is random. -/
+structure Rss256ChallengeFamily where
+  gate : Fin 2 → Nat → Nat → Tower128
+  evaluation : Fin 2 → Nat → Tower128
+
+def rss256Pass1At (gates : List Rss256RecordedGate) (coins : Rss256ChallengeFamily)
+    (pass : Fin 2) (round : Nat) : Bool :=
+  rss256Pass1Check gates (coins.gate pass round)
+
+/-- Each folding polynomial must be fixed before its own evaluation coin is drawn.
+    The bound is conditional on the preceding transcript, including earlier rounds. -/
+theorem rss256_folding_round_soundness (deg : Nat) (errors : List Tower128)
+    (hLen : errors.length ≤ deg) (hNz : ∃ e ∈ errors, e ≠ towerZero 7) :
+    ratLe (finSum (2^128) (fun r =>
+      if batchDeviationPoly errors (unpackTower 7 (BitVec.ofFin r)) == towerZero 7
+      then 1 else 0), 2^128) (deg, 2^128) :=
+  rss256_polynomial_gate_weight_soundness deg errors hLen hNz
+
+/-- `#tooth`: identical weights erase two equal nonzero gate errors in characteristic 2. -/
+theorem tooth_rss256_reused_gate_weights (c : Tower128) :
+    towerOne 7 ≠ towerZero 7 ∧
+    rss256WeightedErrors [towerOne 7, towerOne 7] (fun _ => c) = towerZero 7 := by
+  constructor
+  · exact towerOne_ne_zero 7
+  · simp only [rss256WeightedErrors, towerAdd_zero, towerAdd_self_zero]
+
+/-- Post-wave 2-challenge `GF(2^{128})` (`Tower128`) check predicate over `Fin ((2 ^ 128) * (2 ^ 128))`. -/
+def postWaveTwoChallengeAccepts (waveCoeffs : List Tower128)
+    (ω : Fin ((2 ^ 128) * (2 ^ 128))) : Bool :=
+  let chi1 := unpackTower 7 (BitVec.ofFin (splitFinLeft (Nat.two_pow_pos 128) ω))
+  let chi2 := unpackTower 7 (BitVec.ofFin (splitFinRight (Nat.two_pow_pos 128) ω))
+  (batchDeviationPoly waveCoeffs chi1 == towerZero 7) &&
+  (batchDeviationPoly waveCoeffs chi2 == towerZero 7)
+
+/-- **Post-Wave Commit-Reveal 2-Challenge `GF(2^{128})` `BGIN19` / Horner Soundness
+    (`rss256_post_wave_two_challenge_bgin19_soundness`)**:
+    When the joint commit-then-open coin flip runs *after* the wave gate/Horner transcript
+    `waveCoeffs` (of degree `≤ 2 * deg` with at least one nonzero error coefficient) is committed,
+    both independent `GF(2^{128})` challenges accept on at most `(2 * deg) ^ 2` pairs out of
+    `(2 ^ 128) ^ 2`, establishing `ratLe (acceptCount, (2 ^ 128) ^ 2) ((2 * deg) ^ 2, (2 ^ 128) ^ 2)`. -/
+theorem rss256_post_wave_two_challenge_bgin19_soundness
+    (deg : Nat) (waveCoeffs : List Tower128)
+    (hDeg : waveCoeffs.length ≤ 2 * deg)
+    (hNonzero : ∃ c ∈ waveCoeffs, c ≠ towerZero 7) :
+    let acceptCount := finSum ((2 ^ 128) * (2 ^ 128))
+      (fun ω => if postWaveTwoChallengeAccepts waveCoeffs ω then 1 else 0)
+    acceptCount ≤ (2 * deg) ^ 2 ∧
+    ratLe (acceptCount, (2 ^ 128) ^ 2) ((2 * deg) ^ 2, (2 ^ 128) ^ 2) := by
+  intro acceptCount
+  let pass1 : Fin (2 ^ 128) → Bool :=
+    fun r => batchDeviationPoly waveCoeffs (unpackTower 7 (BitVec.ofFin r)) == towerZero 7
+  have hSingle : finSum (2 ^ 128) (fun r => if pass1 r then 1 else 0) ≤ 2 * deg :=
+    tower128_roots_finSum_le (2 * deg) waveCoeffs hDeg hNonzero
+  have hFactor :
+      acceptCount =
+      (finSum (2 ^ 128) (fun r => if pass1 r then 1 else 0)) *
+      (finSum (2 ^ 128) (fun r => if pass1 r then 1 else 0)) := by
+    dsimp only [acceptCount]
+    rw [finSum_prod_eq (2 ^ 128) (2 ^ 128)]
+    have hInner : ∀ r1 : Fin (2 ^ 128),
+        finSum (2 ^ 128) (fun r2 => if postWaveTwoChallengeAccepts waveCoeffs (pairFin r1 r2) then 1 else 0) =
+        (if pass1 r1 then 1 else 0) * finSum (2 ^ 128) (fun r2 => if pass1 r2 then 1 else 0) := by
+      intro r1
+      have hPt : ∀ r2 : Fin (2 ^ 128),
+          (if postWaveTwoChallengeAccepts waveCoeffs (pairFin r1 r2) then 1 else 0) =
+          (if pass1 r1 then 1 else 0) * (if pass1 r2 then 1 else 0) := by
+        intro r2
+        unfold postWaveTwoChallengeAccepts
+        rw [splitFinLeft_pairFin (Nat.two_pow_pos 128), splitFinRight_pairFin (Nat.two_pow_pos 128)]
+        change (if pass1 r1 && pass1 r2 then 1 else 0) = (if pass1 r1 then 1 else 0) * (if pass1 r2 then 1 else 0)
+        cases pass1 r1 <;> cases pass1 r2 <;> rfl
+      rw [finSum_congr hPt, finSum_mul_left]
+    rw [finSum_congr hInner, finSum_mul_right_nat]
+  have hSqLe : acceptCount ≤ (2 * deg) ^ 2 := by
+    rw [hFactor, Nat.pow_two]
+    exact Nat.mul_le_mul hSingle hSingle
+  have hDenPos : 0 < (2 ^ 128) ^ 2 := by
+    rw [Nat.pow_two]
+    exact Nat.mul_pos (Nat.two_pow_pos 128) (Nat.two_pow_pos 128)
+  refine ⟨hSqLe, hDenPos, hDenPos, Nat.mul_le_mul_right ((2 ^ 128) ^ 2) hSqLe⟩
+
+/-- Rushing attacker's nonzero fault pair `(e1, e2) = (χ, 1) ∈ ker(χ)` when `χ` is leaked pre-wave. -/
+def preWaveKernelFaultPair (chi : Tower128) : List Tower128 :=
+  [chi, towerOne 7]
+
+/-- Rushing attacker's nonzero 3-term fault `[χ1 * χ2, χ1 ⊕ χ2, 1]` annihilating BOTH pre-wave challenges `(χ1, χ2)`. -/
+def preWaveTwoChallengeKernelFault (chi1 chi2 : Tower128) : List Tower128 :=
+  [towerMul 7 chi1 chi2, towerAdd 7 chi1 chi2, towerOne 7]
+
+/-- **`#tooth` Pre-Wave Challenge Kernel Bypass (`tooth_pre_wave_challenge_kernel_bypass`)**:
+    If a rushing attacker learns `χ` before committing gate wire messages `u`, the explicit nonzero
+    fault pair `(e1, e2) = (χ, 1)` (`e2 = 1 ≠ 0`) lies in `ker(χ)` (`batchDeviationPoly [χ, 1] χ = 0`)
+    and passes verification on **100% of `Fin (2 ^ 128)`** (probability `1`), and similarly
+    `preWaveTwoChallengeKernelFault χ1 χ2` passes BOTH challenges on **100% of `Fin ((2 ^ 128) ^ 2)`**! -/
+theorem tooth_pre_wave_challenge_kernel_bypass :
+    (∀ chi : Tower128,
+      (∃ e ∈ preWaveKernelFaultPair chi, e ≠ towerZero 7) ∧
+      batchDeviationPoly (preWaveKernelFaultPair chi) chi = towerZero 7) ∧
+    finSum (2 ^ 128) (fun r =>
+      let chi := unpackTower 7 (BitVec.ofFin r)
+      if batchDeviationPoly (preWaveKernelFaultPair chi) chi == towerZero 7 then 1 else 0) = 2 ^ 128 ∧
+    (∀ chi1 chi2 : Tower128,
+      (∃ e ∈ preWaveTwoChallengeKernelFault chi1 chi2, e ≠ towerZero 7) ∧
+      batchDeviationPoly (preWaveTwoChallengeKernelFault chi1 chi2) chi1 = towerZero 7 ∧
+      batchDeviationPoly (preWaveTwoChallengeKernelFault chi1 chi2) chi2 = towerZero 7) ∧
+    finSum ((2 ^ 128) * (2 ^ 128)) (fun ω =>
+      let chi1 := unpackTower 7 (BitVec.ofFin (splitFinLeft (Nat.two_pow_pos 128) ω))
+      let chi2 := unpackTower 7 (BitVec.ofFin (splitFinRight (Nat.two_pow_pos 128) ω))
+      if postWaveTwoChallengeAccepts (preWaveTwoChallengeKernelFault chi1 chi2) ω then 1 else 0) =
+      (2 ^ 128) * (2 ^ 128) := by
+  have hOneEv : ∀ chi : Tower128, batchDeviationPoly (preWaveKernelFaultPair chi) chi = towerZero 7 := by
+    intro chi
+    change towerAdd 7 (towerZero 7)
+      (towerMul 7 chi (towerAdd 7 chi (towerMul 7 chi (towerAdd 7 (towerOne 7) (towerMul 7 chi (towerZero 7)))))) =
+      towerZero 7
+    simp only [towerMul_zero, towerAdd_zero, towerMul_one, towerAdd_self_zero]
+  have hTwoEv1 : ∀ chi1 chi2 : Tower128,
+      batchDeviationPoly (preWaveTwoChallengeKernelFault chi1 chi2) chi1 = towerZero 7 := by
+    intro chi1 chi2
+    change towerAdd 7 (towerZero 7)
+      (towerMul 7 chi1
+        (towerAdd 7 (towerMul 7 chi1 chi2)
+          (towerMul 7 chi1
+            (towerAdd 7 (towerAdd 7 chi1 chi2)
+              (towerMul 7 chi1 (towerAdd 7 (towerOne 7) (towerMul 7 chi1 (towerZero 7)))))))) =
+      towerZero 7
+    simp only [towerMul_zero, towerAdd_zero, towerMul_one, towerZero_add, towerMul_add_distrib]
+    simp only [towerAdd_comm, towerAdd_self_zero, towerAdd_cancel]
+  have hTwoEv2 : ∀ chi1 chi2 : Tower128,
+      batchDeviationPoly (preWaveTwoChallengeKernelFault chi1 chi2) chi2 = towerZero 7 := by
+    intro chi1 chi2
+    have hSwap : preWaveTwoChallengeKernelFault chi1 chi2 = preWaveTwoChallengeKernelFault chi2 chi1 := by
+      unfold preWaveTwoChallengeKernelFault
+      rw [towerMul_comm 7 chi1 chi2, towerAdd_comm 7 chi1 chi2]
+    rw [hSwap]
+    exact hTwoEv1 chi2 chi1
+  have hTwoAccept : ∀ (c1 c2 : Tower128) (ω : Fin ((2 ^ 128) * (2 ^ 128))),
+      c1 = unpackTower 7 (BitVec.ofFin (splitFinLeft (Nat.two_pow_pos 128) ω)) →
+      c2 = unpackTower 7 (BitVec.ofFin (splitFinRight (Nat.two_pow_pos 128) ω)) →
+      postWaveTwoChallengeAccepts (preWaveTwoChallengeKernelFault c1 c2) ω = true := by
+    intro c1 c2 ω hc1 hc2
+    unfold postWaveTwoChallengeAccepts
+    dsimp only
+    rw [← hc1, ← hc2, hTwoEv1 c1 c2, hTwoEv2 c1 c2]
+    simp only [beq_self_eq_true, Bool.and_self]
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · intro chi
+    exact ⟨⟨towerOne 7, .tail _ (.head _), towerOne_ne_zero 7⟩, hOneEv chi⟩
+  · have hAll1 : finSum (2 ^ 128) (fun r =>
+        let chi := unpackTower 7 (BitVec.ofFin r)
+        if batchDeviationPoly (preWaveKernelFaultPair chi) chi == towerZero 7 then 1 else 0) =
+        finSum (2 ^ 128) (fun _ => 1) := by
+      apply finSum_congr
+      intro r
+      dsimp only
+      rw [hOneEv (unpackTower 7 (BitVec.ofFin r))]
+      simp only [beq_self_eq_true, ↓reduceIte]
+    rw [hAll1, finSum_const, Nat.mul_one]
+  · intro chi1 chi2
+    exact ⟨⟨towerOne 7, .tail _ (.tail _ (.head _)), towerOne_ne_zero 7⟩,
+           hTwoEv1 chi1 chi2, hTwoEv2 chi1 chi2⟩
+  · have hAll2 : finSum ((2 ^ 128) * (2 ^ 128)) (fun ω =>
+        let chi1 := unpackTower 7 (BitVec.ofFin (splitFinLeft (Nat.two_pow_pos 128) ω))
+        let chi2 := unpackTower 7 (BitVec.ofFin (splitFinRight (Nat.two_pow_pos 128) ω))
+        if postWaveTwoChallengeAccepts (preWaveTwoChallengeKernelFault chi1 chi2) ω then 1 else 0) =
+        finSum ((2 ^ 128) * (2 ^ 128)) (fun _ => 1) := by
+      apply finSum_congr
+      intro ω
+      have hAcc := hTwoAccept
+        (unpackTower 7 (BitVec.ofFin (splitFinLeft (Nat.two_pow_pos 128) ω)))
+        (unpackTower 7 (BitVec.ofFin (splitFinRight (Nat.two_pow_pos 128) ω)))
+        ω rfl rfl
+      dsimp only
+      rw [hAcc]
+      rfl
+    rw [hAll2, finSum_const, Nat.mul_one]
+
+/-- Boolean barrier abstraction used only for the historical sticky-poison counterexample.
+    Operational inputs are defined by `Rss256EngineOp` below. -/
+structure Rss256BarrierState where
+  unverified : Bool
+  poisoned : Bool
+  pendingInlineValid : List Bool
+  pendingOpenedValid : List Bool
+  sharedPlane : Plane256
+  taintedSinceLastCleanCheck : Bool
+  deriving DecidableEq, Repr
+
+def Rss256BarrierState.init : Rss256BarrierState :=
+  { unverified := false
+    poisoned := false
+    pendingInlineValid := []
+    pendingOpenedValid := []
+    sharedPlane := 0
+    taintedSinceLastCleanCheck := false }
+
+inductive Rss256BarrierOp where
+  | permuteInline (relationValid : Bool) (outPlane : Plane256)
+  | permuteBank (openingConsistent : Bool) (outPlane : Plane256)
+  | check
+  | openPlanes
+  deriving DecidableEq, Repr
+
+inductive Rss256EngineErr where
+  | enginePoisoned
+  | multiplicationCheckFailed
+  | openingConsistencyFailed
+  | openBeforeCheck
+  deriving DecidableEq, Repr
+
+/-- **Hardened `Rss256Engine` Transition (`rss256BarrierStep`)**:
+    Every cryptographic barrier failure irreversibly latches `poisoned = true` and wipes state;
+    every operation rejects a poisoned engine. -/
+@[expose] def rss256BarrierStep (st : Rss256BarrierState) (op : Rss256BarrierOp) :
+    StepOutcome Rss256BarrierState (Option Plane256) Rss256EngineErr :=
+  if st.poisoned then
+    .err st .enginePoisoned
+  else
+    let poisonNow : Rss256BarrierState :=
+      { st with
+        poisoned := true
+        pendingInlineValid := []
+        pendingOpenedValid := []
+        sharedPlane := 0 }
+    match op with
+    | .permuteInline relOk outPlane =>
+      .ok { st with
+            unverified := true
+            pendingInlineValid := relOk :: st.pendingInlineValid
+            sharedPlane := outPlane
+            taintedSinceLastCleanCheck := st.taintedSinceLastCleanCheck || !relOk } none
+    | .permuteBank openOk outPlane =>
+      .ok { st with
+            unverified := true
+            pendingOpenedValid := openOk :: st.pendingOpenedValid
+            sharedPlane := outPlane
+            taintedSinceLastCleanCheck := st.taintedSinceLastCleanCheck || !openOk } none
+    | .check =>
+      if !st.unverified then
+        .ok st none
+      else if st.pendingInlineValid.any (fun b => !b) then
+        .err poisonNow .multiplicationCheckFailed
+      else if st.pendingOpenedValid.any (fun b => !b) then
+        .err poisonNow .openingConsistencyFailed
+      else
+        .ok { st with
+              unverified := false
+              pendingInlineValid := []
+              pendingOpenedValid := []
+              taintedSinceLastCleanCheck := false } none
+    | .openPlanes =>
+      if st.unverified then
+        .err st .openBeforeCheck
+      else
+        .ok st (some st.sharedPlane)
+
+/-- `PartyMachine` (`SimulationSpine`) instantiation of hardened `Rss256Engine`. -/
+def rss256BarrierMachine : PartyMachine Rss256BarrierState Rss256BarrierOp (Option Plane256) :=
+  PartyMachine.ofOutcome rss256BarrierStep
+
+/-- Buggy pre-fix `Rss256Engine` transition:
+    clears `pendingInlineValid` / `pendingOpenedValid` on `check()` BEFORE returning `Err`,
+    without latching `poisoned = true`! -/
+def rss256StepBuggy (st : Rss256BarrierState) (op : Rss256BarrierOp) :
+    StepOutcome Rss256BarrierState (Option Plane256) Rss256EngineErr :=
+  match op with
+  | .permuteInline relOk outPlane =>
+    .ok { st with
+          unverified := true
+          pendingInlineValid := relOk :: st.pendingInlineValid
+          sharedPlane := outPlane
+          taintedSinceLastCleanCheck := st.taintedSinceLastCleanCheck || !relOk } none
+  | .permuteBank openOk outPlane =>
+    .ok { st with
+          unverified := true
+          pendingOpenedValid := openOk :: st.pendingOpenedValid
+          sharedPlane := outPlane
+          taintedSinceLastCleanCheck := st.taintedSinceLastCleanCheck || !openOk } none
+  | .check =>
+    if !st.unverified then
+      .ok st none
+    else
+      -- `verify_rss_boolean_triples_seeded` clears `pending` unconditionally before returning!
+      let inlineFailed := st.pendingInlineValid.any (fun b => !b)
+      let stAfterInline := { st with pendingInlineValid := [] }
+      if inlineFailed then
+        .err stAfterInline .multiplicationCheckFailed
+      else
+        -- Mode-1A clears `self.opened` before returning `OpeningConsistencyFailed`!
+        let openedFailed := stAfterInline.pendingOpenedValid.any (fun b => !b)
+        let stAfterOpened := { stAfterInline with pendingOpenedValid := [] }
+        if openedFailed then
+          .err stAfterOpened .openingConsistencyFailed
+        else
+          .ok { stAfterOpened with unverified := false } none
+  | .openPlanes =>
+    if st.unverified then
+      .err st .openBeforeCheck
+    else
+      .ok st (some st.sharedPlane)
+
+/-- Run a multi-step call sequence and record `(finalState, releasedPlanes, stepOutcomes)`. -/
+def rss256BarrierTrace (stepFn : Rss256BarrierState → Rss256BarrierOp →
+      StepOutcome Rss256BarrierState (Option Plane256) Rss256EngineErr) :
+    Rss256BarrierState → List Rss256BarrierOp → Rss256BarrierState × List Plane256
+  | st, [] => (st, [])
+  | st, op :: rest =>
+    match stepFn st op with
+    | .ok st' (some p) =>
+      let (stFinal, ps) := rss256BarrierTrace stepFn st' rest
+      (stFinal, p :: ps)
+    | .ok st' none => rss256BarrierTrace stepFn st' rest
+    | .err st' _ => rss256BarrierTrace stepFn st' rest
+
+/-- Data-bearing entry point: the pending result is computed from every recorded
+    share relation under the two pass-specific coin streams. -/
+def rss256RecordedWaveOp (gates : List Rss256RecordedGate)
+    (coins : Rss256ChallengeFamily) (round : Nat) : Rss256BarrierOp :=
+  .permuteInline (rss256Pass1At gates coins ⟨0, by decide⟩ round &&
+    rss256Pass1At gates coins ⟨1, by decide⟩ round)
+    (gates.foldl (fun _ g => g.z.reconstruct) 0#256)
+
+theorem rss256_recorded_wave_rejection_poison (gates : List Rss256RecordedGate)
+    (coins : Rss256ChallengeFamily) (round : Nat)
+    (hReject : rss256Pass1At gates coins ⟨0, by decide⟩ round = false) :
+    let result := rss256BarrierTrace rss256BarrierStep Rss256BarrierState.init
+      [rss256RecordedWaveOp gates coins round, .check, .check, .openPlanes]
+    result.1.poisoned = true ∧ result.2 = [] := by
+  simp only [rss256RecordedWaveOp, hReject, Bool.false_and]
+  exact ⟨rfl, rfl⟩
+
+/-- Multi-turn invariant of `rss256BarrierStep`:
+    if `taintedSinceLastCleanCheck = true` and `poisoned = false`, then `unverified = true` and at
+    least one pending queue contains `false` (`any (!·) = true`). -/
+def Rss256SafeInvariant (st : Rss256BarrierState) : Prop :=
+  st.poisoned = true ∨
+  (st.taintedSinceLastCleanCheck = false) ∨
+  (st.unverified = true ∧
+    (st.pendingInlineValid.any (fun b => !b) = true ∨
+     st.pendingOpenedValid.any (fun b => !b) = true))
+
+private theorem rss256BarrierStep_preserves_inv (st : Rss256BarrierState) (op : Rss256BarrierOp)
+    (hInv : Rss256SafeInvariant st) :
+    match rss256BarrierStep st op with
+    | .ok st' (some _) => Rss256SafeInvariant st' ∧ st.taintedSinceLastCleanCheck = false ∧ st.poisoned = false
+    | .ok st' none => Rss256SafeInvariant st'
+    | .err st' _ => Rss256SafeInvariant st' ∧ (st'.poisoned = true ∨ st' = st) := by
+  unfold rss256BarrierStep
+  cases hp : st.poisoned
+  · simp only [Bool.false_eq_true, ↓reduceIte]
+    have hInvClean : st.taintedSinceLastCleanCheck = false ∨
+        (st.unverified = true ∧
+          (st.pendingInlineValid.any (fun b => !b) = true ∨
+           st.pendingOpenedValid.any (fun b => !b) = true)) := by
+      rcases hInv with hP | hRest
+      · rw [hp] at hP; cases hP
+      · exact hRest
+    cases op with
+    | permuteInline relOk outPlane =>
+      dsimp only [Rss256SafeInvariant]
+      cases relOk
+      · right; right
+        exact ⟨rfl, Or.inl (by simp)⟩
+      · rcases hInvClean with hTaint0 | ⟨_, hAny⟩
+        · right; left; simp [hTaint0]
+        · right; right
+          refine ⟨rfl, ?_⟩
+          rcases hAny with hIn | hOp
+          · exact Or.inl (by simp [hIn])
+          · exact Or.inr hOp
+    | permuteBank openOk outPlane =>
+      dsimp only [Rss256SafeInvariant]
+      cases openOk
+      · right; right
+        exact ⟨rfl, Or.inr (by simp)⟩
+      · rcases hInvClean with hTaint0 | ⟨_, hAny⟩
+        · right; left; simp [hTaint0]
+        · right; right
+          refine ⟨rfl, ?_⟩
+          rcases hAny with hIn | hOp
+          · exact Or.inl hIn
+          · exact Or.inr (by simp [hOp])
+    | check =>
+      cases hUnv : st.unverified
+      · simp only [Bool.not_false, ↓reduceIte]
+        exact hInv
+      · simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+        cases hInFail : st.pendingInlineValid.any (fun b => !b)
+        · simp only [Bool.false_eq_true, ↓reduceIte]
+          cases hOpFail : st.pendingOpenedValid.any (fun b => !b)
+          · simp only [Bool.false_eq_true, ↓reduceIte]
+            exact Or.inr (Or.inl rfl)
+          · simp only [↓reduceIte]
+            exact ⟨Or.inl rfl, Or.inl trivial⟩
+        · simp only [↓reduceIte]
+          exact ⟨Or.inl rfl, Or.inl trivial⟩
+    | openPlanes =>
+      cases hUnv : st.unverified
+      · simp only [Bool.false_eq_true, ↓reduceIte]
+        rcases hInvClean with hTaint0 | ⟨hUnvTrue, _⟩
+        · exact ⟨hInv, hTaint0, trivial⟩
+        · rw [hUnv] at hUnvTrue; cases hUnvTrue
+      · simp only [↓reduceIte]
+        exact ⟨hInv, Or.inr trivial⟩
+  · simp only [↓reduceIte]
+    exact ⟨Or.inl hp, Or.inl hp⟩
+
+/-- **Sticky `poisoned = true` Terminal Absorption & Multi-Turn Anti-Fault Opening Safety
+    (`rss256_sticky_poison_terminal_absorption`)**:
+    1. **Terminal Absorption**: From ANY state with `st.poisoned = true`, across ANY call sequence
+       `ops : List Rss256BarrierOp`, `poisoned` stays `true`, `rss256BarrierMachine.step` returns
+       `none` on every step, and `rss256BarrierTrace` releases `[]` (`0` planes)!
+    2. **Unverified/Faulted Wave Quarantine**: From `Rss256BarrierState.init`, across ANY sequence
+       `ops` containing a faulted inline gate (`.permuteInline false _`) or inconsistent Mode-1A
+       opening (`.permuteBank false _`), NO plane is ever released after that fault! -/
+theorem rss256_sticky_poison_terminal_absorption :
+    (∀ (st : Rss256BarrierState) (ops : List Rss256BarrierOp),
+      st.poisoned = true →
+      (∀ op : Rss256BarrierOp, rss256BarrierMachine.step st op = none) ∧
+      (rss256BarrierTrace rss256BarrierStep st ops).1.poisoned = true ∧
+      (rss256BarrierTrace rss256BarrierStep st ops).2 = []) ∧
+    (∀ (st : Rss256BarrierState) (ops : List Rss256BarrierOp),
+      Rss256SafeInvariant st →
+      st.taintedSinceLastCleanCheck = true →
+      (rss256BarrierTrace rss256BarrierStep st ops).2 = []) := by
+  have hAbsorb : ∀ (st : Rss256BarrierState) (ops : List Rss256BarrierOp),
+      st.poisoned = true →
+      (rss256BarrierTrace rss256BarrierStep st ops).1.poisoned = true ∧
+      (rss256BarrierTrace rss256BarrierStep st ops).2 = [] := by
+    intro st ops hp
+    induction ops generalizing st with
+    | nil => exact ⟨hp, rfl⟩
+    | cons op rest ih =>
+      simp only [rss256BarrierTrace, rss256BarrierStep, hp, ↓reduceIte]
+      exact ih st hp
+  refine ⟨?_, ?_⟩
+  · intro st ops hp
+    refine ⟨fun op => by simp [rss256BarrierMachine, PartyMachine.ofOutcome, rss256BarrierStep, hp],
+            (hAbsorb st ops hp).1, (hAbsorb st ops hp).2⟩
+  · intro st ops hInv hTaint
+    induction ops generalizing st with
+    | nil => rfl
+    | cons op rest ih =>
+      have hStep := rss256BarrierStep_preserves_inv st op hInv
+      cases hOut : rss256BarrierStep st op with
+      | err st' errVal =>
+        rw [hOut] at hStep
+        simp only [rss256BarrierTrace, hOut]
+        rcases hStep.2 with hPoison | hSame
+        · exact (hAbsorb st' rest hPoison).2
+        · subst st'
+          exact ih st hStep.1 hTaint
+      | ok st' mbPlane =>
+        rw [hOut] at hStep
+        cases mbPlane with
+        | some p =>
+          exfalso
+          rw [hTaint] at hStep
+          exact Bool.noConfusion hStep.2.1
+        | none =>
+          simp only [rss256BarrierTrace, hOut]
+          -- Show `st'.taintedSinceLastCleanCheck = true` (since `op` was `.ok st' none` and `st` was tainted!).
+          have hStillTainted : st'.taintedSinceLastCleanCheck = true := by
+            unfold rss256BarrierStep at hOut
+            cases hp : st.poisoned
+            · rw [hp] at hOut; simp only [Bool.false_eq_true, ↓reduceIte] at hOut
+              cases op with
+              | permuteInline relOk outP =>
+                injection hOut with hStEq _
+                rw [← hStEq]; simp [hTaint]
+              | permuteBank openOk outP =>
+                injection hOut with hStEq _
+                rw [← hStEq]; simp [hTaint]
+              | check =>
+                rcases hInv with hP | hT0 | ⟨hUnv, hAny⟩
+                · rw [hp] at hP; cases hP
+                · rw [hTaint] at hT0; cases hT0
+                · simp only [hUnv, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hOut
+                  rcases hAny with hIn | hOp
+                  · rw [hIn] at hOut; simp at hOut
+                  · cases hIn2 : st.pendingInlineValid.any (fun b => !b) <;>
+                      simp [hIn2, hOp] at hOut
+              | openPlanes =>
+                cases hUnv : st.unverified <;> simp [hUnv] at hOut
+            · rw [hp] at hOut; simp at hOut
+          exact ih st' hStep hStillTainted
+
+/-- **`#tooth` Non-Sticky `check()` Clear Unlocks Unverified Opening (`tooth_non_sticky_check_clear_unlocks_unverified_open`)**:
+    In `rss256StepBuggy`, after a faulted inline wave (`.permuteInline false faultedPlane`) OR
+    an inconsistent Mode-1A wave (`.permuteBank false faultedPlane`):
+    - First `check()` returns `.err` after clearing `pending` / `opened`;
+    - Second `check()` sees empty queues, sets `unverified = false`, and returns `.ok`;
+    - `openPlanes()` then **succeeds and releases `[faultedPlane]`**, whereas `rss256BarrierStep`
+      latches `poisoned = true` on the first `check()` and releases `[]`! -/
+theorem tooth_non_sticky_check_clear_unlocks_unverified_open (faultedPlane : Plane256) :
+    let inlineAttack : List Rss256BarrierOp :=
+      [.permuteInline false faultedPlane, .check, .check, .openPlanes]
+    let bankAttack : List Rss256BarrierOp :=
+      [.permuteBank false faultedPlane, .check, .check, .openPlanes]
+    (rss256BarrierTrace rss256StepBuggy Rss256BarrierState.init inlineAttack).2 = [faultedPlane] ∧
+    (rss256BarrierTrace rss256StepBuggy Rss256BarrierState.init bankAttack).2 = [faultedPlane] ∧
+    (rss256BarrierTrace rss256BarrierStep Rss256BarrierState.init inlineAttack).2 = [] ∧
+    (rss256BarrierTrace rss256BarrierStep Rss256BarrierState.init bankAttack).2 = [] ∧
+    (rss256BarrierTrace rss256BarrierStep Rss256BarrierState.init inlineAttack).1.poisoned = true ∧
+    (rss256BarrierTrace rss256BarrierStep Rss256BarrierState.init bankAttack).1.poisoned = true := by
+  exact ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+/-! ## 3. `Waistband` Canopy Top-`L` Static Child-Root Cache Soundness & `#tooth` Witnesses -/
+
+/-- `Baggy` hypertree & `Waistband` canopy geometry (`topLayers < numLayers`, so layer `0` is dynamic). -/
+structure BaggyTreeParams where
+  numLayers : Nat
+  subtreeHeight : Nat
+  topLayers : Nat
+  deriving DecidableEq, Repr
+
+def BaggyTreeParams.WellFormed (p : BaggyTreeParams) : Prop :=
+  2 ≤ p.numLayers ∧ 1 ≤ p.subtreeHeight ∧ p.topLayers < p.numLayers
+
+def BaggyTreeParams.coversLayer (p : BaggyTreeParams) (layer : Nat) : Bool :=
+  decide (p.numLayers ≤ layer + p.topLayers ∧ 1 ≤ layer)
+
+def BaggyTreeParams.pathAt (p : BaggyTreeParams) (leafIdx : Nat) (layer : Nat) : Nat × Nat :=
+  let shifted := leafIdx / (2 ^ (p.subtreeHeight * layer))
+  let subLeaves := 2 ^ p.subtreeHeight
+  (shifted % subLeaves, shifted / subLeaves)
+
+/-- Child subtree index `(tree * 2^{h'} + kp)` signed by static leaf `(layer, tree, kp)` (`layer ≥ 1`). -/
+def baggyChildTreeIdx (p : BaggyTreeParams) (tree kp : Nat) : Nat :=
+  tree * (2 ^ p.subtreeHeight) + kp
+
+theorem baggyChildTreeIdx_pathAt (p : BaggyTreeParams) (leafIdx layer : Nat) :
+    let (kpParent, treeParent) := p.pathAt leafIdx (layer + 1)
+    let (_, treeChild) := p.pathAt leafIdx layer
+    baggyChildTreeIdx p treeParent kpParent = treeChild := by
+  dsimp only [BaggyTreeParams.pathAt, baggyChildTreeIdx]
+  have hPow : 2 ^ (p.subtreeHeight * (layer + 1)) = (2 ^ (p.subtreeHeight * layer)) * (2 ^ p.subtreeHeight) := by
+    rw [Nat.mul_succ, Nat.pow_add]
+  rw [hPow, ← Nat.div_div_eq_div_mul]
+  let S := (leafIdx / (2 ^ (p.subtreeHeight * layer))) / (2 ^ p.subtreeHeight)
+  let B := 2 ^ p.subtreeHeight
+  change (S / B) * B + S % B = S
+  rw [Nat.mul_comm (S / B) B]
+  exact Nat.div_add_mod S B
+
+structure BaggySecretKey256 where
+  pkSeed : BitVec 256
+  skSeed : BitVec 256
+  skPrf : BitVec 256
+
+structure BaggyPublicKey256 where
+  pkSeed : BitVec 256
+  pkRoot : BitVec 256
+  deriving DecidableEq, Repr
+
+/-- Tweakable hash & `FORS+C` suite for `Baggy` over 256-bit `WOTS+C` (`w = 4, v = 128, S = 192`). -/
+structure BaggySuite256 where
+  wots : WotsC256HashSuite
+  thNodeH : BitVec 256 → Nat → Nat → Nat → Nat → BitVec 256 → BitVec 256 → BitVec 256
+  paramsDigest : BaggyTreeParams → BitVec 256
+  prfRand : BitVec 256 → BitVec 256 → BitVec 256
+  hmsgLeaf : BaggyTreeParams → BaggyPublicKey256 → BitVec 256 → BitVec 256 → UInt32 → Option Nat
+  forsSign : BitVec 256 → BitVec 256 → Nat → Nat → BitVec 256 → BitVec 256 × BitVec 256
+  forsRecoverPk : BitVec 256 → Nat → Nat → BitVec 256 → BitVec 256 → BitVec 256
+  /-- Deterministic valid `WOTS+C` grind counter (`wotsC256DecodeValidDigest ... = some d`). -/
+  grindCounter : BitVec 256 → WotsLeafAdrs → BitVec 256 → UInt32
+
+def BaggySuite256.WellGrinded (suite : BaggySuite256) : Prop :=
+  (∀ pkSeed skSeed tree0 kp0 msg,
+    let (forsSig, forsPk) := suite.forsSign pkSeed skSeed tree0 kp0 msg
+    suite.forsRecoverPk pkSeed tree0 kp0 msg forsSig = forsPk) ∧
+  (∀ pkSeed adrs node,
+    (wotsC256DecodeValidDigest
+      (suite.wots.thDigest pkSeed adrs node (suite.grindCounter pkSeed adrs node))).isSome = true)
+
+/-- Binary Merkle subtree root over `2 ^ hp` leaves (`0 Classical.choice`). -/
+def baggyMerkleRoot (suite : BaggySuite256) (pkSeed : BitVec 256) (layer tree : Nat) :
+    (hp : Nat) → (prefixIdx : Nat) → (Fin (2 ^ hp) → BitVec 256) → BitVec 256
+  | 0, _, leaves => leaves ⟨0, Nat.zero_lt_one⟩
+  | hp + 1, prefixIdx, leaves =>
+    let hHalf : 2 ^ hp + 2 ^ hp = 2 ^ (hp + 1) := by rw [Nat.pow_succ, Nat.mul_two]
+    let left := baggyMerkleRoot suite pkSeed layer tree hp (2 * prefixIdx)
+      (fun i => leaves ⟨i.val, by omega⟩)
+    let right := baggyMerkleRoot suite pkSeed layer tree hp (2 * prefixIdx + 1)
+      (fun i => leaves ⟨2 ^ hp + i.val, by omega⟩)
+    suite.thNodeH pkSeed layer tree (hp + 1) prefixIdx left right
+
+/-- Root-first authentication path of leaf `kp < 2 ^ hp` (`baggy.rs` / `wots_c.rs:307`). -/
+def baggyMerkleAuthPath (suite : BaggySuite256) (pkSeed : BitVec 256) (layer tree : Nat) :
+    (hp : Nat) → (prefixIdx : Nat) → (Fin (2 ^ hp) → BitVec 256) → (kp : Nat) → List (BitVec 256)
+  | 0, _, _, _ => []
+  | hp + 1, prefixIdx, leaves, kp =>
+    let hHalf : 2 ^ hp + 2 ^ hp = 2 ^ (hp + 1) := by rw [Nat.pow_succ, Nat.mul_two]
+    let leftFn : Fin (2 ^ hp) → BitVec 256 := fun i => leaves ⟨i.val, by omega⟩
+    let rightFn : Fin (2 ^ hp) → BitVec 256 := fun i => leaves ⟨2 ^ hp + i.val, by omega⟩
+    if kp < 2 ^ hp then
+      baggyMerkleRoot suite pkSeed layer tree hp (2 * prefixIdx + 1) rightFn ::
+        baggyMerkleAuthPath suite pkSeed layer tree hp (2 * prefixIdx) leftFn kp
+    else
+      baggyMerkleRoot suite pkSeed layer tree hp (2 * prefixIdx) leftFn ::
+        baggyMerkleAuthPath suite pkSeed layer tree hp (2 * prefixIdx + 1) rightFn (kp - 2 ^ hp)
+
+/-- Walk a root-first authentication path from `leaf` at `kp` up to the height-`hp` subtree root. -/
+def baggyWalkMerkleRootFirst (suite : BaggySuite256) (pkSeed : BitVec 256) (layer tree : Nat) :
+    (hp : Nat) → (prefixIdx : Nat) → (kp : Nat) → BitVec 256 → List (BitVec 256) → Option (BitVec 256)
+  | 0, _, _, leaf, [] => some leaf
+  | 0, _, _, _, _ :: _ => none
+  | _ + 1, _, _, _, [] => none
+  | hp + 1, prefixIdx, kp, leaf, sib :: rest =>
+    if kp < 2 ^ hp then
+      match baggyWalkMerkleRootFirst suite pkSeed layer tree hp (2 * prefixIdx) kp leaf rest with
+      | none => none
+      | some childL => some (suite.thNodeH pkSeed layer tree (hp + 1) prefixIdx childL sib)
+    else
+      match baggyWalkMerkleRootFirst suite pkSeed layer tree hp (2 * prefixIdx + 1) (kp - 2 ^ hp) leaf rest with
+      | none => none
+      | some childR => some (suite.thNodeH pkSeed layer tree (hp + 1) prefixIdx sib childR)
+
+private theorem baggyWalkMerkle_authPath_eq (suite : BaggySuite256) (pkSeed : BitVec 256) (layer tree : Nat) :
+    ∀ (hp prefixIdx : Nat) (leaves : Fin (2 ^ hp) → BitVec 256) (kp : Fin (2 ^ hp)),
+      baggyWalkMerkleRootFirst suite pkSeed layer tree hp prefixIdx kp.val (leaves kp)
+        (baggyMerkleAuthPath suite pkSeed layer tree hp prefixIdx leaves kp.val) =
+      some (baggyMerkleRoot suite pkSeed layer tree hp prefixIdx leaves)
+  | 0, _, leaves, ⟨0, _⟩ => rfl
+  | 0, _, _, ⟨k + 1, hk⟩ => False.elim (Nat.not_lt_zero k (Nat.lt_of_succ_lt_succ hk))
+  | hp + 1, prefixIdx, leaves, ⟨kp, hKp⟩ => by
+    have hHalf : 2 ^ hp + 2 ^ hp = 2 ^ (hp + 1) := by rw [Nat.pow_succ, Nat.mul_two]
+    simp only [baggyMerkleAuthPath, baggyMerkleRoot]
+    if hLt : kp < 2 ^ hp then
+      simp only [hLt, ↓reduceIte, baggyWalkMerkleRootFirst]
+      have ih := baggyWalkMerkle_authPath_eq suite pkSeed layer tree hp (2 * prefixIdx)
+        (fun i => leaves ⟨i.val, by have := i.isLt; omega⟩)
+        ⟨kp, hLt⟩
+      rw [ih]
+    else
+      simp only [hLt, ↓reduceIte, baggyWalkMerkleRootFirst]
+      have hSubLt : kp - 2 ^ hp < 2 ^ hp := by omega
+      have ih := baggyWalkMerkle_authPath_eq suite pkSeed layer tree hp (2 * prefixIdx + 1)
+        (fun i => leaves ⟨2 ^ hp + i.val, by have := i.isLt; omega⟩)
+        ⟨kp - 2 ^ hp, hSubLt⟩
+      have hIdxEq : (⟨2 ^ hp + (kp - 2 ^ hp), by omega⟩ : Fin (2 ^ (hp + 1))) =
+          ⟨kp, hKp⟩ := Fin.ext (Nat.add_sub_of_le (Nat.le_of_not_lt hLt))
+      rw [hIdxEq] at ih
+      rw [ih]
+
+/-- Explicit Merkle node collision witness (`0 Classical.choice`). -/
+structure BaggyMerkleCollision (suite : BaggySuite256) (pkSeed : BitVec 256) : Type where
+  layer : Nat
+  tree : Nat
+  height : Nat
+  prefixIdx : Nat
+  left1 : BitVec 256
+  right1 : BitVec 256
+  left2 : BitVec 256
+  right2 : BitVec 256
+  pair_ne : (left1, right1) ≠ (left2, right2)
+  hash_eq : suite.thNodeH pkSeed layer tree height prefixIdx left1 right1 =
+            suite.thNodeH pkSeed layer tree height prefixIdx left2 right2
+
+/-- Constructively extract a `BaggyMerkleCollision` whenever a walked path reaches the genuine root from a different leaf. -/
+def extractBaggyMerkleCollision (suite : BaggySuite256) (pkSeed : BitVec 256) (layer tree : Nat) :
+    ∀ (hp prefixIdx : Nat) (leaves : Fin (2 ^ hp) → BitVec 256) (kp : Fin (2 ^ hp))
+      (leaf' : BitVec 256) (auth' : List (BitVec 256)),
+      leaf' ≠ leaves kp →
+      baggyWalkMerkleRootFirst suite pkSeed layer tree hp prefixIdx kp.val leaf' auth' =
+        some (baggyMerkleRoot suite pkSeed layer tree hp prefixIdx leaves) →
+      BaggyMerkleCollision suite pkSeed
+  | 0, _, leaves, ⟨0, _⟩, leaf', [], hLeafNe, hWalk =>
+    False.elim <| by
+      simp only [baggyWalkMerkleRootFirst, baggyMerkleRoot] at hWalk
+      injection hWalk with hEq
+      exact hLeafNe hEq
+  | 0, _, _, ⟨0, _⟩, _, _ :: _, _, hWalk => False.elim (by cases hWalk)
+  | 0, _, _, ⟨k + 1, hk⟩, _, _, _, _ => False.elim (Nat.not_lt_zero k (Nat.lt_of_succ_lt_succ hk))
+  | _ + 1, _, _, _, _, [], _, hWalk => False.elim (by cases hWalk)
+  | hp + 1, prefixIdx, leaves, ⟨kp, hKp⟩, leaf', sib :: rest, hLeafNe, hWalk =>
+    let hHalf : 2 ^ hp + 2 ^ hp = 2 ^ (hp + 1) := by rw [Nat.pow_succ, Nat.mul_two]
+    let leftFn : Fin (2 ^ hp) → BitVec 256 := fun i => leaves ⟨i.val, by have := i.isLt; omega⟩
+    let rightFn : Fin (2 ^ hp) → BitVec 256 := fun i => leaves ⟨2 ^ hp + i.val, by have := i.isLt; omega⟩
+    let L := baggyMerkleRoot suite pkSeed layer tree hp (2 * prefixIdx) leftFn
+    let R := baggyMerkleRoot suite pkSeed layer tree hp (2 * prefixIdx + 1) rightFn
+    if hLt : kp < 2 ^ hp then
+      match hChild : baggyWalkMerkleRootFirst suite pkSeed layer tree hp (2 * prefixIdx) kp leaf' rest with
+      | none =>
+        False.elim <| by
+          simp only [baggyWalkMerkleRootFirst, hLt, ↓reduceIte, hChild] at hWalk
+          cases hWalk
+      | some childL =>
+        have hRootEq : suite.thNodeH pkSeed layer tree (hp + 1) prefixIdx childL sib =
+            suite.thNodeH pkSeed layer tree (hp + 1) prefixIdx L R := by
+          simp only [baggyWalkMerkleRootFirst, baggyMerkleRoot, hLt, ↓reduceIte, hChild] at hWalk
+          injection hWalk with hEq
+        if hPairEq : (childL, sib) = (L, R) then
+          extractBaggyMerkleCollision suite pkSeed layer tree hp (2 * prefixIdx) leftFn ⟨kp, hLt⟩
+            leaf' rest hLeafNe (hChild.trans (congrArg (some ∘ Prod.fst) hPairEq))
+        else
+          { layer := layer, tree := tree, height := hp + 1, prefixIdx := prefixIdx
+            left1 := childL, right1 := sib, left2 := L, right2 := R
+            pair_ne := hPairEq, hash_eq := hRootEq }
+    else
+      match hChild : baggyWalkMerkleRootFirst suite pkSeed layer tree hp (2 * prefixIdx + 1) (kp - 2 ^ hp) leaf' rest with
+      | none =>
+        False.elim <| by
+          simp only [baggyWalkMerkleRootFirst, hLt, ↓reduceIte, hChild] at hWalk
+          cases hWalk
+      | some childR =>
+        have hRootEq : suite.thNodeH pkSeed layer tree (hp + 1) prefixIdx sib childR =
+            suite.thNodeH pkSeed layer tree (hp + 1) prefixIdx L R := by
+          simp only [baggyWalkMerkleRootFirst, baggyMerkleRoot, hLt, ↓reduceIte, hChild] at hWalk
+          injection hWalk with hEq
+        if hPairEq : (sib, childR) = (L, R) then
+          have hSubLt : kp - 2 ^ hp < 2 ^ hp := by omega
+          have hIdxEq : (⟨2 ^ hp + (kp - 2 ^ hp), by omega⟩ : Fin (2 ^ (hp + 1))) = ⟨kp, hKp⟩ :=
+            Fin.ext (Nat.add_sub_of_le (Nat.le_of_not_lt hLt))
+          have hLeafNeR : leaf' ≠ rightFn ⟨kp - 2 ^ hp, hSubLt⟩ := by
+            dsimp [rightFn]; rw [hIdxEq]; exact hLeafNe
+          extractBaggyMerkleCollision suite pkSeed layer tree hp (2 * prefixIdx + 1) rightFn
+            ⟨kp - 2 ^ hp, hSubLt⟩ leaf' rest hLeafNeR
+            (hChild.trans (congrArg (some ∘ Prod.snd) hPairEq))
+        else
+          { layer := layer, tree := tree, height := hp + 1, prefixIdx := prefixIdx
+            left1 := sib, right1 := childR, left2 := L, right2 := R
+            pair_ne := hPairEq, hash_eq := hRootEq }
+
+def baggyLeafAdrs (layer tree kp : Nat) : WotsLeafAdrs :=
+  { layer := UInt32.ofNat layer, tree := UInt64.ofNat tree, keyPair := UInt32.ofNat kp }
+
+def baggySubtreeLeaves (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (layer tree : Nat) : Fin (2 ^ p.subtreeHeight) → BitVec 256 :=
+  fun kp => wotsC256PkLeaf suite.wots sk.pkSeed sk.skSeed (baggyLeafAdrs layer tree kp.val)
+
+def baggyTrueSubtreeRoot (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (layer tree : Nat) : BitVec 256 :=
+  baggyMerkleRoot suite sk.pkSeed layer tree p.subtreeHeight 0 (baggySubtreeLeaves suite p sk layer tree)
+
+def baggyKeygen256 (suite : BaggySuite256) (p : BaggyTreeParams) (sk : BaggySecretKey256) : BaggyPublicKey256 :=
+  { pkSeed := sk.pkSeed
+    pkRoot := baggyTrueSubtreeRoot suite p sk (p.numLayers - 1) 0 }
+
+/-- Layer signature (`WOTS+C` counter + 128 chain nodes + height-`h'` authentication path). -/
+structure BaggyLayerSig256 where
+  ctr : UInt32
+  chains : Fin 128 → BitVec 256
+  auth : List (BitVec 256)
+
+/-- Complete `Baggy` signature over 256-bit `WOTS+C`. -/
+structure BaggySig256 where
+  r : BitVec 256
+  msgCtr : UInt32
+  forsSig : BitVec 256
+  layers : List BaggyLayerSig256
+
+/-- Recompute the subtree root implied by `layerSig` signing `childNode` (`baggy.rs:313` `layer_root`). -/
+def baggyLayerRecoverRoot (suite : BaggySuite256) (p : BaggyTreeParams)
+    (pkSeed : BitVec 256) (layer tree kp : Nat) (childNode : BitVec 256)
+    (sig : BaggyLayerSig256) : Option (BitVec 256) :=
+  let adrs := baggyLeafAdrs layer tree kp
+  match wotsC256DecodeValidDigest (suite.wots.thDigest pkSeed adrs childNode sig.ctr) with
+  | none => none
+  | some d =>
+    let leaf := suite.wots.thTl pkSeed adrs (fun c =>
+      wotsC256CompleteTo3 suite.wots pkSeed adrs c (d.digits c) (sig.chains c))
+    baggyWalkMerkleRootFirst suite pkSeed layer tree p.subtreeHeight 0 kp leaf sig.auth
+
+def baggyWalkLayersVerify (suite : BaggySuite256) (p : BaggyTreeParams)
+    (pkSeed : BitVec 256) (leafIdx : Nat) :
+    Nat → BitVec 256 → List BaggyLayerSig256 → Option (BitVec 256)
+  | _, node, [] => some node
+  | layer, node, sig :: rest =>
+    let (kp, tree) := p.pathAt leafIdx layer
+    match baggyLayerRecoverRoot suite p pkSeed layer tree kp node sig with
+    | none => none
+    | some nextRoot => baggyWalkLayersVerify suite p pkSeed leafIdx (layer + 1) nextRoot rest
+
+/-- Standalone `Baggy` signature verification (`baggy.rs:351` `baggy_verify`). -/
+@[expose] def baggyVerify (suite : BaggySuite256) (p : BaggyTreeParams)
+    (pk : BaggyPublicKey256) (msg : BitVec 256) (sig : BaggySig256) : Bool :=
+  if sig.layers.length != p.numLayers then false
+  else
+    match suite.hmsgLeaf p pk sig.r msg sig.msgCtr with
+    | none => false
+    | some leafIdx =>
+      let (kp0, tree0) := p.pathAt leafIdx 0
+      let forsPk := suite.forsRecoverPk pk.pkSeed tree0 kp0 msg sig.forsSig
+      match baggyWalkLayersVerify suite p pk.pkSeed leafIdx 0 forsPk sig.layers with
+      | none => false
+      | some finalRoot => finalRoot == pk.pkRoot
+
+/-- Static child root signed by `(layer, tree, kp)` for `layer ≥ 1` (`trueSubtreeRoot (layer - 1) childTree`). -/
+def baggyCanonicalStaticChildRoot (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (layer tree kp : Nat) : BitVec 256 :=
+  baggyTrueSubtreeRoot suite p sk (layer - 1) (baggyChildTreeIdx p tree kp)
+
+/-- Canonical single `WOTS+C` codeword ever signed by static address `(layer, tree, kp)` (`layer ≥ 1`) in uncached `Baggy`. -/
+def baggyCanonicalStaticDigits (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (layer tree kp : Nat) : Option WotsC256Digits :=
+  let adrs := baggyLeafAdrs layer tree kp
+  let childRoot := baggyCanonicalStaticChildRoot suite p sk layer tree kp
+  let ctr := suite.grindCounter sk.pkSeed adrs childRoot
+  wotsC256DecodeValidDigest (suite.wots.thDigest sk.pkSeed adrs childRoot ctr)
+
+/-- Record of a static (`layer ≥ 1`) WOTS+C Round-2 codeword opening during signing. -/
+structure StaticWotsOpeningRecord where
+  layer : Nat
+  tree : Nat
+  kp : Nat
+  signedNode : BitVec 256
+  digits : WotsC256Digits
+  deriving DecidableEq
+
+/-- Build one genuine layer signature and record static (`layer ≥ 1`) codeword openings. -/
+def baggySignLayerFresh (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (layer tree kp : Nat) (childNode : BitVec 256) :
+    Option (BaggyLayerSig256 × BitVec 256 × Option StaticWotsOpeningRecord) :=
+  if _hKp : kp < 2 ^ p.subtreeHeight then
+    let adrs := baggyLeafAdrs layer tree kp
+    let ctr := suite.grindCounter sk.pkSeed adrs childNode
+    match wotsC256DecodeValidDigest (suite.wots.thDigest sk.pkSeed adrs childNode ctr),
+          wotsC256Sign suite.wots sk.pkSeed sk.skSeed adrs childNode ctr with
+    | some d, some chains =>
+      let leaves := baggySubtreeLeaves suite p sk layer tree
+      let auth := baggyMerkleAuthPath suite sk.pkSeed layer tree p.subtreeHeight 0 leaves kp
+      let root := baggyMerkleRoot suite sk.pkSeed layer tree p.subtreeHeight 0 leaves
+      let recOpt := if 1 ≤ layer then some { layer := layer, tree := tree, kp := kp, signedNode := childNode, digits := d } else none
+      some ({ ctr := ctr, chains := chains, auth := auth }, root, recOpt)
+    | _, _ => none
+  else
+    none
+
+def baggySignLayersUncachedAux (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (leafIdx : Nat) :
+    Nat → Nat → BitVec 256 → Option (List BaggyLayerSig256 × BitVec 256 × List StaticWotsOpeningRecord)
+  | _, 0, node => some ([], node, [])
+  | layer, rem + 1, node =>
+    let (kp, tree) := p.pathAt leafIdx layer
+    match baggySignLayerFresh suite p sk layer tree kp node with
+    | none => none
+    | some (sig, nextRoot, recOpt) =>
+      match baggySignLayersUncachedAux suite p sk leafIdx (layer + 1) rem nextRoot with
+      | none => none
+      | some (restSigs, topRoot, restRecs) =>
+        let allRecs := match recOpt with | some r => r :: restRecs | none => restRecs
+        some (sig :: restSigs, topRoot, allRecs)
+
+/-- Uncached `Baggy` signer returning `(sig, staticOpenings)`. -/
+def baggySignUncached (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (pk : BaggyPublicKey256)
+    (msg : BitVec 256) (msgCtr : UInt32) : Option (BaggySig256 × List StaticWotsOpeningRecord) :=
+  if pk.pkSeed != sk.pkSeed then none
+  else
+    let r := suite.prfRand sk.skPrf msg
+    match suite.hmsgLeaf p pk r msg msgCtr with
+    | none => none
+    | some leafIdx =>
+      let (kp0, tree0) := p.pathAt leafIdx 0
+      let (forsSig, forsPk) := suite.forsSign sk.pkSeed sk.skSeed tree0 kp0 msg
+      match baggySignLayersUncachedAux suite p sk leafIdx 0 p.numLayers forsPk with
+      | none => none
+      | some (layers, topRoot, recs) =>
+        if topRoot != pk.pkRoot then none
+        else
+          let sig : BaggySig256 := { r := r, msgCtr := msgCtr, forsSig := forsSig, layers := layers }
+          if baggyVerify suite p pk msg sig then some (sig, recs) else none
+
+/-- **Hardened `VerifiedWaistbandCache` (cache-mutation Fix)**:
+    1. Pinned to `(pinnedPkSeed, pinnedPkRoot, pinnedParamsDigest)`.
+    2. Carries authenticated `expectedSubtreeRoot (layer, tree)` chained up to `(d - 1, 0) = pkRoot`! -/
+structure VerifiedWaistbandCache where
+  pinnedPkSeed : BitVec 256
+  pinnedPkRoot : BitVec 256
+  pinnedParamsDigest : BitVec 256
+  expectedSubtreeRoot : Nat → Nat → Option (BitVec 256)
+  cachedSig : Nat → Nat → Nat → Option BaggyLayerSig256
+
+/-- Check upward Merkle-signature chaining from `(layer, tree)` up to `(d - 1, 0) == pkRoot` (`0 Classical.choice`). -/
+def verifyCanopyChainToTop (suite : BaggySuite256) (p : BaggyTreeParams)
+    (pk : BaggyPublicKey256) (cache : VerifiedWaistbandCache) :
+    (stepsToTop : Nat) → (layer : Nat) → (tree : Nat) → (curRoot : BitVec 256) → Bool
+  | 0, layer, tree, curRoot =>
+    (layer == p.numLayers - 1) && (tree == 0) && (curRoot == pk.pkRoot)
+  | rem + 1, layer, tree, curRoot =>
+    let subLeaves := 2 ^ p.subtreeHeight
+    let kpParent := tree % subLeaves
+    let treeParent := tree / subLeaves
+    let parentLayer := layer + 1
+    match cache.expectedSubtreeRoot parentLayer treeParent,
+          cache.cachedSig parentLayer treeParent kpParent with
+    | some expParentRoot, some parentSig =>
+      (baggyLayerRecoverRoot suite p pk.pkSeed parentLayer treeParent kpParent curRoot parentSig ==
+        some expParentRoot) &&
+      verifyCanopyChainToTop suite p pk cache rem parentLayer treeParent expParentRoot
+    | _, _ => false
+
+/-- Verify a `VerifiedWaistbandCache` hit at `(layer, tree, kp)` on `childNode` BEFORE using it. -/
+@[expose] def verifyWaistbandCanopy (suite : BaggySuite256) (p : BaggyTreeParams)
+    (pk : BaggyPublicKey256) (cache : VerifiedWaistbandCache)
+    (layer tree kp : Nat) (childNode : BitVec 256) : Option (BaggyLayerSig256 × BitVec 256) :=
+  if cache.pinnedPkSeed != pk.pkSeed ||
+     cache.pinnedPkRoot != pk.pkRoot ||
+     cache.pinnedParamsDigest != suite.paramsDigest p ||
+     !p.coversLayer layer then
+    none
+  else
+    match cache.expectedSubtreeRoot (layer - 1) (baggyChildTreeIdx p tree kp),
+          cache.expectedSubtreeRoot layer tree,
+          cache.cachedSig layer tree kp with
+    | some expChildRoot, some expLayerRoot, some sig =>
+      if childNode != expChildRoot then none
+      else if baggyLayerRecoverRoot suite p pk.pkSeed layer tree kp childNode sig != some expLayerRoot then none
+      else if !verifyCanopyChainToTop suite p pk cache ((p.numLayers - 1) - layer) layer tree expLayerRoot then none
+      else some (sig, expLayerRoot)
+    | _, _, _ => none
+
+/-- Abstract per-party static WOTS record `(layer, tree, kp) ↦ firstSignedDigits`. -/
+abbrev DurableStaticWotsGuard := List (Nat × Nat × Nat × WotsC256Digits)
+
+def lookupDurableDigits (g : DurableStaticWotsGuard) (layer tree kp : Nat) : Option WotsC256Digits :=
+  match g with
+  | [] => none
+  | (l, t, k, d) :: rest =>
+    if l == layer && t == tree && k == kp then some d
+    else lookupDurableDigits rest layer tree kp
+
+/-- Atomic specification of first-signed consistency. Persistence and release
+    are modeled separately by `baggyReleaseStep` below. -/
+def enforceDurableStaticOpenings :
+    DurableStaticWotsGuard → List StaticWotsOpeningRecord → Option DurableStaticWotsGuard
+  | g, [] => some g
+  | g, rec :: rest =>
+    match lookupDurableDigits g rec.layer rec.tree rec.kp with
+    | some prevDigits =>
+      if prevDigits == rec.digits then
+        enforceDurableStaticOpenings g rest
+      else
+        none
+    | none =>
+      enforceDurableStaticOpenings ((rec.layer, rec.tree, rec.kp, rec.digits) :: g) rest
+
+/-- Recursive layer planner/signer with `VerifiedWaistbandCache`:
+    cached hits emit `0` fresh MPC openings; misses compute genuine subtree roots and record static openings. -/
+def baggySignLayersVerifiedCacheAux (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (pk : BaggyPublicKey256) (cache : VerifiedWaistbandCache)
+    (leafIdx : Nat) :
+    Nat → Nat → BitVec 256 → Option (List BaggyLayerSig256 × BitVec 256 × List StaticWotsOpeningRecord)
+  | _, 0, node => some ([], node, [])
+  | layer, rem + 1, node =>
+    let (kp, tree) := p.pathAt leafIdx layer
+    match verifyWaistbandCanopy suite p pk cache layer tree kp node with
+    | some (cachedLayerSig, verifiedRoot) =>
+      match baggySignLayersVerifiedCacheAux suite p sk pk cache leafIdx (layer + 1) rem verifiedRoot with
+      | none => none
+      | some (restSigs, topRoot, restRecs) =>
+        some (cachedLayerSig :: restSigs, topRoot, restRecs)
+    | none =>
+      if (cache.cachedSig layer tree kp).isSome then none else
+      match baggySignLayerFresh suite p sk layer tree kp node with
+      | none => none
+      | some (sig, nextRoot, recOpt) =>
+        match baggySignLayersVerifiedCacheAux suite p sk pk cache leafIdx (layer + 1) rem nextRoot with
+        | none => none
+        | some (restSigs, topRoot, restRecs) =>
+          let allRecs := match recOpt with | some r => r :: restRecs | none => restRecs
+          some (sig :: restSigs, topRoot, allRecs)
+
+/-- Pure single-session signature specification with cache checking and an atomic
+    first-signed guard. This function has no crash or storage semantics. -/
+def baggySignVerifiedWaistband (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (pk : BaggyPublicKey256)
+    (cache : VerifiedWaistbandCache) (guard : DurableStaticWotsGuard)
+    (msg : BitVec 256) (msgCtr : UInt32) :
+    Option (BaggySig256 × DurableStaticWotsGuard × List StaticWotsOpeningRecord) :=
+  if pk.pkSeed != sk.pkSeed then none
+  else
+    let r := suite.prfRand sk.skPrf msg
+    match suite.hmsgLeaf p pk r msg msgCtr with
+    | none => none
+    | some leafIdx =>
+      let (kp0, tree0) := p.pathAt leafIdx 0
+      let (forsSig, forsPk) := suite.forsSign sk.pkSeed sk.skSeed tree0 kp0 msg
+      match baggySignLayersVerifiedCacheAux suite p sk pk cache leafIdx 0 p.numLayers forsPk with
+      | none => none
+      | some (layers, topRoot, recs) =>
+        if topRoot != pk.pkRoot then none
+        else
+          -- Pure guard specification; actual durability belongs to baggyReleaseStep.
+          match enforceDurableStaticOpenings guard recs with
+          | none => none
+          | some guard' =>
+            let sig : BaggySig256 := { r := r, msgCtr := msgCtr, forsSig := forsSig, layers := layers }
+            if baggyVerify suite p pk msg sig then some (sig, guard', recs) else none
+
+/-- Multi-session `Baggy` signing runner accumulating all Round-2 static WOTS codeword openings across sessions. -/
