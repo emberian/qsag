@@ -859,6 +859,7 @@ impl ExternalMonotoneAnchor for FsExternalMountAnchor {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::fs::OpenOptions;
 
     fn temp_root(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

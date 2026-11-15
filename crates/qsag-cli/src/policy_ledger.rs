@@ -37,7 +37,9 @@ use qsag_policy::{
     evaluate_policy_committed_barrier_with_ledger,
 };
 
-use crate::anchor::{AnchorConfig, FsExternalMountAnchor};
+use crate::anchor::{
+    AnchorConfig, AnchorRequirementError, FsExternalMountAnchor, anchor_requirement,
+};
 use crate::cli::{
     Args, CliError, MAX_KEY_FILE_BYTES, Secret32, ZeroizingBuf, exit, os_random_32, private_dir,
     read_bounded_file, read_input, read_text, replace_secret, write_new,
@@ -1329,7 +1331,7 @@ impl Gate {
             "policy-passphrase-env",
             "policy-passphrase-file",
         )?;
-        let anchor_cfg = anchor_config(
+        let anchor_cfg = AnchorConfig::for_vault(
             args,
             dir,
             "policy-anchor-dir",
@@ -1480,7 +1482,7 @@ fn init(raw: &[String]) -> Result<(), CliError> {
     let policy_text = read_text(args.require("policy")?)?;
     let (policy, committee) = policy_from_json(&Json::parse(&policy_text)?)?;
     let passphrase = crate::envelope::passphrase(&args)?;
-    let anchor_cfg = anchor_config(&args, dir, "anchor-dir", "allow-single-disk-anchor")?;
+    let anchor_cfg = AnchorConfig::for_vault(&args, dir, "anchor-dir", "allow-single-disk-anchor")?;
 
     private_dir(dir, true)?;
     let occupied = std::fs::read_dir(dir)
@@ -1594,7 +1596,7 @@ const LEDGER_OPTIONS: [&str; 4] = [
 fn open_from_args(args: &Args, access: Access) -> Result<OpenLedger, CliError> {
     let dir = args.require("ledger-dir")?;
     let passphrase = crate::envelope::passphrase(args)?;
-    let anchor_cfg = anchor_config(args, dir, "anchor-dir", "allow-single-disk-anchor")?;
+    let anchor_cfg = AnchorConfig::for_vault(args, dir, "anchor-dir", "allow-single-disk-anchor")?;
     OpenLedger::open(dir, passphrase.as_deref(), anchor_cfg.as_ref(), access)
 }
 
