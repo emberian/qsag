@@ -403,9 +403,9 @@ fn run_threshold_mldsa_2of3_sign(
 
     let sign_session = ThresholdSignSession {
         session_id: [session_tag ^ 0xA5; 32],
-        quorum: vec![1u16, 3u16],
+        quorum: vec![1u16, 2u16, 3u16],
     };
-    // Run across all 3 RSS custodians for quorum {1, 3}
+    // Run across all 3 RSS custodians (`2t - 1 = 3` active quorum for `t = 2`)
     let outputs = run_mpc_parties(shares.drain(..).collect(), |me, mut share, net| {
         let entropy = [session_tag.wrapping_add((me as u8) * 29 + 0x41); 32];
         let mut burn = InMemoryBurn;

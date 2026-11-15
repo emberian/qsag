@@ -29,6 +29,7 @@ use qsag_core::sponge::keccak::{
     cshake256_32, cshake256_xof, encode_multi_frame, keccak_f1600 as core_keccak_f1600,
     shake256_32, shake256_xof,
 };
+use qsag_external_validation::{cshake256_nist_sp800_185_ref, cshake256_unpadded_prefix};
 use ripemd::Ripemd160;
 use sha2::{Digest as _, Sha256, Sha512};
 use sha3::digest::{ExtendableOutput, Update, XofReader};
@@ -210,23 +211,44 @@ proptest! {
         accel_shake256_xof(msg, &mut accel_xof);
         prop_assert_eq!(accel_xof, exp_xof);
 
-        // 2. cSHAKE256 + multi-frame equivalence across `qsag_core`, `qsag_accel`, and `tiny-keccak`
-        let mut tk_cs = CShake::v256(b"", &custom);
-        tk_cs.update(msg);
-        let mut exp_cs = vec![0u8; out_len];
-        tk_cs.squeeze(&mut exp_cs);
-        prop_assert_eq!(cshake256_xof(out_len, &custom, msg), exp_cs);
+        // 2. cSHAKE256 + multi-frame equivalence across `qsag_core`, `qsag_accel`, exact
+        //    NIST SP 800-185 §3.3 reference oracle, and `tiny-keccak` (outside `tiny-keccak 2.0.2`'s
+        //    known `fill_block` double-permutation bug at exact 136-byte `bytepad` multiples).
+        let exp_cs = cshake256_nist_sp800_185_ref(b"", &custom, msg, out_len);
+        prop_assert_eq!(cshake256_xof(out_len, &custom, msg), exp_cs.clone());
 
         let f0 = &msg[..msg.len() / 2];
         let f1 = &msg[msg.len() / 2..];
+        // 2a. `qsag_core::encode_multi_frame` (LEB128 length framing) vs NIST SP 800-185 reference
         let encoded_frames = encode_multi_frame(&[f0, f1]);
-        let mut tk_mf = CShake::v256(b"", &custom);
-        tk_mf.update(&encoded_frames);
-        let mut exp_mf = vec![0u8; out_len];
-        tk_mf.squeeze(&mut exp_mf);
+        let exp_mf_leb = cshake256_nist_sp800_185_ref(b"", &custom, &encoded_frames, out_len);
+        prop_assert_eq!(cshake256_xof(out_len, &custom, &encoded_frames), exp_mf_leb.clone());
+
+        // 2b. `qsag_accel::cshake256_framed_xof` (`u64_le` count + length framing) vs NIST SP 800-185 reference
+        let mut u64_frames = Vec::with_capacity(24 + msg.len());
+        u64_frames.extend_from_slice(&(2u64).to_le_bytes());
+        u64_frames.extend_from_slice(&(f0.len() as u64).to_le_bytes());
+        u64_frames.extend_from_slice(f0);
+        u64_frames.extend_from_slice(&(f1.len() as u64).to_le_bytes());
+        u64_frames.extend_from_slice(f1);
+        let exp_mf_u64 = cshake256_nist_sp800_185_ref(b"", &custom, &u64_frames, out_len);
         let mut got_accel_mf = vec![0u8; out_len];
         cshake256_framed_xof(&custom, &[f0, f1], &mut got_accel_mf);
-        prop_assert_eq!(got_accel_mf, exp_mf);
+        prop_assert_eq!(got_accel_mf, exp_mf_u64.clone());
+
+        if custom.is_empty() || !cshake256_unpadded_prefix(b"", &custom).len().is_multiple_of(136) {
+            let mut tk_cs = CShake::v256(b"", &custom);
+            tk_cs.update(msg);
+            let mut tk_out = vec![0u8; out_len];
+            tk_cs.squeeze(&mut tk_out);
+            prop_assert_eq!(tk_out, exp_cs);
+
+            let mut tk_mf = CShake::v256(b"", &custom);
+            tk_mf.update(&u64_frames);
+            let mut tk_mf_out = vec![0u8; out_len];
+            tk_mf.squeeze(&mut tk_mf_out);
+            prop_assert_eq!(tk_mf_out, exp_mf_u64);
+        }
 
         // 3. Hardware `SHA-NI` raw block compressor (`qsag_asm::sha256_compress_blocks` & `sha256_compress_bytes`)
         let init_iv: [u32; 8] = [
@@ -425,5 +447,47 @@ fn bitslice_256x200_pack_unpack_roundtrip_across_backends() {
             backend,
         );
         assert_eq!(unpacked, raw_states, "unpack_256x200 mismatch on {backend:?}");
+    }
+}
+
+/// Regression test for exact NIST SP 800-185 §2.3.3 `bytepad` rate multiples:
+/// when `N = ""` and `S.len() == 129` (`2 + 2 + 3 + 129 = 136`) or `S.len() == 265`
+/// (`2 + 2 + 3 + 265 = 272`), `bytepad` must append **zero** padding bytes (`while len mod w != 0`).
+/// Verifies `qsag_core`, `qsag_accel`, and `qsag_agg` strictly obey NIST SP 800-185 §2.3.3,
+/// whereas upstream `tiny-keccak 2.0.2` exhibits its known unconditional `fill_block()` bug.
+#[test]
+fn cshake256_exact_rate_boundary_129_and_265_nist_sp800_185_compliance() {
+    let msg = b"nist-sp800-185-bytepad-exact-rate-multiple-regression";
+    for exact_custom_len in [129usize, 265usize] {
+        let custom: Vec<u8> = (0..exact_custom_len)
+            .map(|i| ((i * 37 + 11) & 0xFF) as u8)
+            .collect();
+        assert_eq!(cshake256_unpadded_prefix(b"", &custom).len() % 136, 0);
+
+        let expected = cshake256_nist_sp800_185_ref(b"", &custom, msg, 64);
+        assert_eq!(cshake256_xof(64, &custom, msg), expected);
+        let exp32: [u8; 32] = expected[..32].try_into().unwrap();
+        assert_eq!(cshake256_32(&custom, msg), exp32);
+        assert_eq!(qsag_agg::sponge::cshake256_32(&custom, msg), exp32);
+
+        let mut u64_framed = Vec::new();
+        u64_framed.extend_from_slice(&(1u64).to_le_bytes());
+        u64_framed.extend_from_slice(&(msg.len() as u64).to_le_bytes());
+        u64_framed.extend_from_slice(msg);
+        let expected_framed = cshake256_nist_sp800_185_ref(b"", &custom, &u64_framed, 64);
+        let mut accel_out = [0u8; 64];
+        cshake256_framed_xof(&custom, &[msg], &mut accel_out);
+        assert_eq!(&accel_out[..], expected_framed.as_slice());
+
+        // Witness that upstream `tiny-keccak 2.0.2` double-permutes at this exact boundary:
+        let mut tk = CShake::v256(b"", &custom);
+        tk.update(msg);
+        let mut tk_buggy = [0u8; 64];
+        tk.squeeze(&mut tk_buggy);
+        assert_ne!(
+            &tk_buggy[..],
+            expected.as_slice(),
+            "tiny-keccak 2.0.2 is known to absorb an extra 136B zero block at custom.len()={exact_custom_len}"
+        );
     }
 }

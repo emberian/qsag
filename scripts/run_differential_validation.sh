@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# External Differential Validation, Property-Based Testing (`proptest`),
+# Lean 4 Executable Specification Oracle, and `libFuzzer` Harness Runner.
+#
+# Usage:
+#   ./scripts/run_differential_validation.sh                # Run full differential proptest + Lean spec-oracle suite
+#   ./scripts/run_differential_validation.sh --regen-lean   # Regenerate Lean 4 spec-oracle vectors via `lake` first
+#   ./scripts/run_differential_validation.sh --fuzz [secs]  # Also run coverage-guided libFuzzer campaign (default 15s/target)
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REGEN_LEAN=0
+RUN_FUZZ=0
+FUZZ_SECS=15
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --regen-lean)
+            REGEN_LEAN=1
+            shift
+            ;;
+        --fuzz)
+            RUN_FUZZ=1
+            if [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]]; then
+                FUZZ_SECS="$2"
+                shift 2
+            else
+                shift
+            fi
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            exit 2
+            ;;
+    esac
+done
+
+if [[ "$REGEN_LEAN" -eq 1 ]]; then
+    echo "==> Regenerating Lean 4 executable specification vectors..."
+    FIXTURES_DIR="${REPO_ROOT}/validation/tests/fixtures"
+    mkdir -p "${FIXTURES_DIR}"
+    (
+        cd "${REPO_ROOT}/lean"
+        lake build qsag-kat
+        lake env lean --run "${REPO_ROOT}/validation/lean/ExternalSpecOracle.lean" \
+            > "${FIXTURES_DIR}/lean_external_oracle_vectors.json"
+        ./.lake/build/bin/qsag-kat --cross-kat \
+            > "${FIXTURES_DIR}/lean_cross_kat.jsonl"
+        ./.lake/build/bin/qsag-kat \
+            > "${FIXTURES_DIR}/lean_kat_snapshot.json"
+    )
+fi
+
+echo "==> Running external differential validation & property-based test suite..."
+(
+    cd "${REPO_ROOT}/validation"
+    cargo test --release -- --nocapture
+)
+
+if [[ "$RUN_FUZZ" -eq 1 ]]; then
+    echo "==> Running coverage-guided libFuzzer campaign (${FUZZ_SECS}s per target)..."
+    HOST_TRIPLE="$(rustc -vV | awk '/^host:/ { print $2 }')"
+    SANCOV_RUSTFLAGS="--cfg fuzzing -Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-inline-8bit-counters -Cllvm-args=-sanitizer-coverage-pc-table -Cllvm-args=-sanitizer-coverage-trace-compares"
+    (
+        cd "${REPO_ROOT}/fuzz"
+        RUSTFLAGS="${SANCOV_RUSTFLAGS}" cargo +nightly build --release --target "${HOST_TRIPLE}"
+        for target in fuzz_whir_agg_verify fuzz_fips205_and_fts_decode fuzz_diff_hashes_and_ntt; do
+            echo "--- Fuzzing ${target} (${FUZZ_SECS}s) ---"
+            CORPUS_DIR="${REPO_ROOT}/fuzz/corpus/${target}"
+            mkdir -p "${CORPUS_DIR}"
+            "./target/${HOST_TRIPLE}/release/${target}" "${CORPUS_DIR}" \
+                -max_total_time="${FUZZ_SECS}" \
+                -print_final_stats=1
+        done
+    )
+fi
+
+echo "==> External differential validation completed cleanly."

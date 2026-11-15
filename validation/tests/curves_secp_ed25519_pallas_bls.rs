@@ -17,7 +17,7 @@ use blstrs::{G1Affine as BlsRefG1Affine, G1Projective as BlsRefG1Proj, Scalar as
 use curve25519_dalek::edwards::EdwardsPoint;
 use ed25519_dalek::SigningKey as DalekEdSigningKey;
 use ff::{Field as FfField, FromUniformBytes, PrimeField};
-use group::{Curve, Group, GroupEncoding};
+use group::{Group, GroupEncoding};
 use hmac::{Hmac, Mac};
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::{ProjectivePoint as K256Proj, Scalar as K256Scalar, SecretKey as K256SecretKey};
@@ -349,29 +349,23 @@ proptest! {
 
     #[test]
     fn pbt_bls12_381_g1_and_validator_commitments_match_blstrs(
-        wide_sk_lo in prop::array::uniform32(any::<u8>()),
-        wide_sk_hi in prop::array::uniform32(any::<u8>()),
-        wide_sk2_lo in prop::array::uniform32(any::<u8>()),
-        wide_sk2_hi in prop::array::uniform32(any::<u8>()),
+        mut sk1_be in prop::array::uniform32(any::<u8>()),
+        mut sk2_be in prop::array::uniform32(any::<u8>()),
     ) {
-        let mut sk1_64 = [0u8; 64];
-        sk1_64[..32].copy_from_slice(&wide_sk_lo);
-        sk1_64[32..].copy_from_slice(&wide_sk_hi);
-        let mut ref_sk1 = BlsRefScalar::from_uniform_bytes(&sk1_64);
+        // Reduce into `[1, r - 1]` (`r = 0x73eda753...`, so top byte `< 0x73` is strictly `< r`)
+        sk1_be[0] %= 0x73;
+        let mut ref_sk1 = BlsRefScalar::from_bytes_be(&sk1_be).expect("canonical BlsRefScalar");
         if bool::from(ref_sk1.is_zero()) {
             ref_sk1 = BlsRefScalar::ONE;
+            sk1_be = ref_sk1.to_bytes_be();
         }
 
-        let mut sk2_64 = [0u8; 64];
-        sk2_64[..32].copy_from_slice(&wide_sk2_lo);
-        sk2_64[32..].copy_from_slice(&wide_sk2_hi);
-        let mut ref_sk2 = BlsRefScalar::from_uniform_bytes(&sk2_64);
+        sk2_be[0] %= 0x73;
+        let mut ref_sk2 = BlsRefScalar::from_bytes_be(&sk2_be).expect("canonical BlsRefScalar");
         if bool::from(ref_sk2.is_zero()) {
             ref_sk2 = BlsRefScalar::ONE;
+            sk2_be = ref_sk2.to_bytes_be();
         }
-
-        let sk1_be = ref_sk1.to_bytes_be();
-        let sk2_be = ref_sk2.to_bytes_be();
 
         // 1. Scalar arithmetic vs `blstrs::Scalar`
         let q_sk1 = FrBls381::from_nonzero_be_bytes(&sk1_be).expect("nonzero FrBls381");
@@ -401,8 +395,8 @@ proptest! {
         // 4. Complete addition, doubling, & compressed 48-byte roundtrip
         let qp1 = BlsG1Point::from_validator_pubkey_48(&ref_pk48_1).expect("valid G1 pubkey 1");
         let qp2 = BlsG1Point::from_validator_pubkey_48(&ref_pk48_2).expect("valid G1 pubkey 2");
-        prop_assert_eq!(qp1, BlsG1Point::generator_mul_ct(&q_sk1));
-        prop_assert_eq!(qp2, BlsG1Point::generator_mul_ct(&q_sk2));
+        prop_assert_eq!(qp1.clone(), BlsG1Point::generator_mul_ct(&q_sk1));
+        prop_assert_eq!(qp2.clone(), BlsG1Point::generator_mul_ct(&q_sk2));
         prop_assert_eq!(
             qp1.complete_add(&qp2).to_compressed_48(),
             BlsRefG1Affine::from(ref_pt1 + ref_pt2).to_compressed()
@@ -547,7 +541,9 @@ fn e2e_zkboo_migration_ceremonies_from_upstream_crates_and_adversarial_rejection
     }
 
     // 4. Upstream `blstrs` Ethereum Beacon `0x02` `BeaconValidatorPubkey` & unrevealed `0x00` ceremonies
-    let ref_bls_sk = BlsRefScalar::from_uniform_bytes(&[0x6Cu8; 64]);
+    let mut bls_sk_be = [0x6Cu8; 32];
+    bls_sk_be[0] = 0x51;
+    let ref_bls_sk = BlsRefScalar::from_bytes_be(&bls_sk_be).expect("canonical BlsRefScalar");
     let ref_bls_pk48 = BlsRefG1Affine::from(BlsRefG1Proj::generator() * ref_bls_sk).to_compressed();
     let mut ref_cred_0x00: [u8; 32] = Sha256::digest(ref_bls_pk48).into();
     ref_cred_0x00[0] = 0x00;
