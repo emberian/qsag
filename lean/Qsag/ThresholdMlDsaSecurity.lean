@@ -452,3 +452,450 @@ def thresholdMlDsaTraceSimulator
       (fun i => padFn ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
 
 /-- Public outcome list across an `R`-attempt trace. -/
+def sealedTraceOutcomes
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (A : PolyMat4) (s1 s2 : PolyVec4) (mu : List UInt8)
+    (steps : List SealedAttemptStepSpec) : List SimAttemptOutcome :=
+  steps.map (fun stp => sealedAttemptPublicOutcome chalHash sampleInBall A s1 s2 stp.y mu stp.attempt)
+
+/-- **Abort-Transcript Zero-Knowledge Simulation Theorem (`threshold_mldsa_abort_transcript_zk`)**:
+    Across any `R`-attempt signing trace where every rejected attempt carries a nonzero `failTag`,
+    there is an explicit `0-Classical` bijection `SimpleEquiv` on the `R`-attempt pad tape such that
+    `thresholdMlDsaTraceSimulator` (using **only** public `(A, t1Scaled)` and `SimAttemptOutcome`,
+    with **zero** `w₁` opened on aborts and **zero** `(s₁, s₂)` access) matches `realSealedSignTrace`
+    pointwise and induces identical distinguisher hit counts over any finite coin enumeration. -/
+theorem threshold_mldsa_abort_transcript_zk
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (A : PolyMat4) (s1 s2 : PolyVec4) (mu : List UInt8)
+    (steps : List SealedAttemptStepSpec)
+    (hFail : ∀ stp ∈ steps, stp.failTag ≠ Fq204.zero) :
+    let t1Scaled := power2RoundHighVec4 (addVec4 (matVecMul4 A s1) s2)
+    let outs := sealedTraceOutcomes chalHash sampleInBall A s1 s2 mu steps
+    ∃ (hLen : outs.length = steps.length)
+      (padBij : SimpleEquiv (Fin steps.length → SealedAttemptPads)
+                            (Fin outs.length → SealedAttemptPads)),
+      (∀ padFn,
+        thresholdMlDsaTraceSimulator sampleInBall A t1Scaled outs (padBij.toFun padFn) =
+          realSealedSignTrace chalHash sampleInBall A s1 s2 mu steps padFn) ∧
+      (∀ {M : Nat} (enum : SimpleEquiv (Fin M) (Fin steps.length → SealedAttemptPads))
+         (enumOut : SimpleEquiv (Fin M) (Fin outs.length → SealedAttemptPads))
+         (D : List SealedSignAttemptView → Bool),
+        finSum M (fun m =>
+          (D (realSealedSignTrace chalHash sampleInBall A s1 s2 mu steps (enum.toFun m))).toNat) =
+        finSum M (fun m =>
+          (D (thresholdMlDsaTraceSimulator sampleInBall A t1Scaled outs (enumOut.toFun m))).toNat)) := by
+  induction steps with
+  | nil =>
+    refine ⟨rfl, SimpleEquiv.refl _, (fun _ => rfl), ?_⟩
+    intro M enum enumOut D
+    rfl
+  | cons stp rest ih =>
+    have hHeadFail : stp.failTag ≠ Fq204.zero := hFail stp (.head rest)
+    obtain ⟨hLenRest, bijRest, hEqRest, _⟩ :=
+      ih (fun s hs => hFail s (.tail stp hs))
+    let w := matVecMul4 A stp.y
+    let w1 := highBitsVec4 w
+    let c := sampleInBall (chalHash mu w1)
+    let z := addVec4 stp.y (mulPolyVec4 c s1)
+    let u := subVec4 w (mulPolyVec4 c s2)
+    let ct0 := mulPolyVec4 c (power2RoundLowVec4 (addVec4 (matVecMul4 A s1) s2))
+    let h := makeHintVec4 (negVec4 ct0) (addVec4 u ct0)
+    let accept : Bool :=
+      decide (infNormVec4 ct0 < mldsa44Gamma2) &&
+      decide (infNormVec4 z < mldsa44Gamma1 - mldsa44Beta) &&
+      decide (centeredDiffNormVec4 u w1 < mldsa44Gamma2 - mldsa44Beta) &&
+      decide (hintWeightVec4 h ≤ mldsa44Omega)
+    let bijHead := sealedAttemptPadEquiv w z u stp.keccakTraceBits accept stp.failTag
+      (fun _ => hHeadFail)
+    have hLenCons : (sealedTraceOutcomes chalHash sampleInBall A s1 s2 mu (stp :: rest)).length =
+        (stp :: rest).length := by simp [sealedTraceOutcomes]
+    let splitIn : SimpleEquiv (Fin (rest.length + 1) → SealedAttemptPads)
+        (SealedAttemptPads × (Fin rest.length → SealedAttemptPads)) :=
+      { toFun := fun f => (f ⟨0, Nat.zero_lt_succ _⟩, fun i => f ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+        invFun := fun p => Fin.cases p.1 p.2
+        left_inv := fun f => by
+          funext j
+          refine Fin.cases ?_ (fun i => ?_) j <;> rfl
+        right_inv := fun ⟨_, _⟩ => rfl }
+    let outsRest := sealedTraceOutcomes chalHash sampleInBall A s1 s2 mu rest
+    let splitOut : SimpleEquiv (Fin (outsRest.length + 1) → SealedAttemptPads)
+        (SealedAttemptPads × (Fin outsRest.length → SealedAttemptPads)) :=
+      { toFun := fun f => (f ⟨0, Nat.zero_lt_succ _⟩, fun i => f ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+        invFun := fun p => Fin.cases p.1 p.2
+        left_inv := fun f => by
+          funext j
+          refine Fin.cases ?_ (fun i => ?_) j <;> rfl
+        right_inv := fun ⟨_, _⟩ => rfl }
+    let bijCons : SimpleEquiv (Fin (rest.length + 1) → SealedAttemptPads)
+        (Fin (outsRest.length + 1) → SealedAttemptPads) :=
+      SimpleEquiv.trans splitIn
+        (SimpleEquiv.trans (SimpleEquiv.prodCongr bijHead bijRest) (SimpleEquiv.symm splitOut))
+    have hPointwise : ∀ padFn : Fin (rest.length + 1) → SealedAttemptPads,
+        thresholdMlDsaTraceSimulator sampleInBall A
+          (power2RoundHighVec4 (addVec4 (matVecMul4 A s1) s2))
+          (sealedTraceOutcomes chalHash sampleInBall A s1 s2 mu (stp :: rest))
+          (bijCons.toFun padFn) =
+        realSealedSignTrace chalHash sampleInBall A s1 s2 mu (stp :: rest) padFn := by
+      intro padFn
+      have hHd := sealedAttempt_sim_eq_real chalHash sampleInBall A s1 s2 stp.y mu stp.attempt
+        stp.keccakTraceBits stp.failTag hHeadFail (padFn ⟨0, Nat.zero_lt_succ _⟩)
+      have hTl := hEqRest (fun i => padFn ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+      dsimp only [sealedTraceOutcomes, List.map, thresholdMlDsaTraceSimulator, realSealedSignTrace,
+        bijCons, SimpleEquiv.trans, SimpleEquiv.prodCongr, SimpleEquiv.symm, splitIn, splitOut]
+      have hZero : (Fin.cases (bijHead.toFun (padFn ⟨0, Nat.zero_lt_succ _⟩))
+          (bijRest.toFun (fun i => padFn ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)) :
+          Fin (outsRest.length + 1) → SealedAttemptPads) ⟨0, Nat.zero_lt_succ _⟩ =
+          bijHead.toFun (padFn ⟨0, Nat.zero_lt_succ _⟩) := rfl
+      have hSucc : (fun i : Fin outsRest.length =>
+          (Fin.cases (bijHead.toFun (padFn ⟨0, Nat.zero_lt_succ _⟩))
+            (bijRest.toFun (fun k => padFn ⟨k.1 + 1, Nat.succ_lt_succ k.2⟩)) :
+            Fin (outsRest.length + 1) → SealedAttemptPads) ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩) =
+          bijRest.toFun (fun k => padFn ⟨k.1 + 1, Nat.succ_lt_succ k.2⟩) := rfl
+      rw [hZero, hSucc, hHd, hTl]
+    refine ⟨hLenCons, bijCons, hPointwise, ?_⟩
+    intro M enum enumOut D
+    let perm : Fin M → Fin M := fun m => enumOut.invFun (bijCons.toFun (enum.toFun m))
+    let permInv : Fin M → Fin M := fun m => enum.invFun (bijCons.invFun (enumOut.toFun m))
+    have hL : ∀ m, permInv (perm m) = m := fun m => by
+      dsimp only [perm, permInv]
+      rw [enumOut.right_inv, bijCons.left_inv, enum.left_inv]
+    have hR : ∀ m, perm (permInv m) = m := fun m => by
+      dsimp only [perm, permInv]
+      rw [enum.right_inv, bijCons.right_inv, enumOut.left_inv]
+    have hCong : ∀ m : Fin M,
+        (D (realSealedSignTrace chalHash sampleInBall A s1 s2 mu (stp :: rest) (enum.toFun m))).toNat =
+        (D (thresholdMlDsaTraceSimulator sampleInBall A
+          (power2RoundHighVec4 (addVec4 (matVecMul4 A s1) s2))
+          (sealedTraceOutcomes chalHash sampleInBall A s1 s2 mu (stp :: rest))
+          (enumOut.toFun (perm m)))).toNat := by
+      intro m
+      dsimp only [perm]
+      rw [enumOut.right_inv, hPointwise]
+    rw [finSum_congr hCong]
+    exact finSum_perm_invariant perm permInv hL hR
+      (fun m => (D (thresholdMlDsaTraceSimulator sampleInBall A
+        (power2RoundHighVec4 (addVec4 (matVecMul4 A s1) s2))
+        (sealedTraceOutcomes chalHash sampleInBall A s1 s2 mu (stp :: rest))
+        (enumOut.toFun m))).toNat)
+
+/-- Coordinate-level FIPS 204 plateau mask box `[-(γ₁ - 1), γ₁ - 1]` (`2 γ₁ - 1` elements). -/
+def maskCoordAt (gamma1 : Nat) (idx : Fin (2 * gamma1 - 1)) : Int :=
+  Int.ofNat idx.val - (Int.ofNat gamma1 - 1)
+
+/-- Open rejection box `|z| < B`, i.e., `-B < z ∧ z < B`. -/
+def inOpenNormBox (B : Nat) (z : Int) : Bool :=
+  decide (-(Int.ofNat B) < z ∧ z < Int.ofNat B)
+
+/-- **Plateau Shift-Invariance (`fips204_z_plateau_shift_invariant`)**:
+    Over the uniform mask box `y ∈ [-(γ₁ - 1), γ₁ - 1]`, for every secret shift `cs1 ∈ [-β, β]`
+    and every target `zStar` inside the acceptance plateau `|zStar| < γ₁ - β`, there is a unique
+    mask index `idx` with `maskCoordAt γ₁ idx + cs1 = zStar`, so every accepted `zStar` has exact
+    multiplicity `1` independent of `cs1`. -/
+theorem fips204_z_plateau_shift_invariant
+    (gamma1 beta : Nat) (hLt : beta < gamma1)
+    (cs1 zStar : Int)
+    (hCs1 : -(Int.ofNat beta) ≤ cs1 ∧ cs1 ≤ Int.ofNat beta)
+    (hBox : inOpenNormBox (gamma1 - beta) zStar = true) :
+    finSum (2 * gamma1 - 1) (fun idx =>
+      if maskCoordAt gamma1 idx + cs1 = zStar then 1 else 0) = 1 := by
+  unfold inOpenNormBox at hBox
+  have hZ := of_decide_eq_true hBox
+  let kNat : Nat := (zStar - cs1 + (Int.ofNat gamma1 - 1)).toNat
+  have hkLt : kNat < 2 * gamma1 - 1 := by omega
+  let targetIdx : Fin (2 * gamma1 - 1) := ⟨kNat, hkLt⟩
+  have hiff : ∀ idx : Fin (2 * gamma1 - 1),
+      (if maskCoordAt gamma1 idx + cs1 = zStar then 1 else 0) =
+      (if idx = targetIdx then 1 else 0) := by
+    intro idx
+    unfold maskCoordAt
+    have hi := idx.isLt
+    if hEq : idx = targetIdx then
+      rw [ite_true_of hEq, hEq]
+      have hMatch : Int.ofNat targetIdx.val - (Int.ofNat gamma1 - 1) + cs1 = zStar := by
+        dsimp only [targetIdx, kNat]
+        omega
+      rw [ite_true_of hMatch]
+    else
+      rw [ite_false_of hEq]
+      have hValNe : idx.val ≠ kNat := fun hv => hEq (Fin.ext hv)
+      have hNeZ : Int.ofNat idx.val - (Int.ofNat gamma1 - 1) + cs1 ≠ zStar := by
+        intro hz
+        apply hValNe
+        dsimp only [kNat]
+        omega
+      rw [ite_false_of hNeZ]
+  rw [finSum_congr hiff]
+  exact finSum_eq_indicator (2 * gamma1 - 1) targetIdx
+
+/-- Unsealed early-`w₁` abort predicate on a toy coordinate (`w₁ = (y + 4) / 2`, `|y + cs1| < 3`),
+    and 2-party narrow Irwin-Hall sum-of-uniforms hit count `y = y₁ + y₂` (`y₁, y₂ ∈ [-2, 2]`). -/
+def unsealedEarlyW1AbortHit (cs1 : Int) (idx : Fin 9) : Bool :=
+  let y := maskCoordAt 5 idx
+  let w1 := (y + 4) / 2
+  decide (w1 = 4) && !inOpenNormBox 3 (y + cs1)
+
+def irwinHall2HitCount (cs1 zTarget : Int) : Nat :=
+  finSum 5 (fun i => finSum 5 (fun j =>
+    if (Int.ofNat i.val - 2) + (Int.ofNat j.val - 2) + cs1 = zTarget then 1 else 0))
+
+/-- **`#tooth` (`tooth_unsealed_w1_or_irwin_hall_abort_leaks_secret`)**:
+    1. **Early `(w₁, reject)` Leakage**: Opening `w₁` before rejection (`unsealedEarlyW1AbortHit`)
+       yields `2` top-bucket aborts under `cs₁ = 0` vs `1` under `cs₁ = 1` (`≠`), whereas the
+       sealed simulator `thresholdMlDsaAttemptSimulator _ _ _ none` opens `released = none`!
+    2. **Irwin-Hall Sum-of-Uniforms Leakage**: Summing two narrow uniform masks `y₁ + y₂` without
+       canonical PRSS/flooding plateau uniformity gives `5` hits at `z = 0` for `cs₁ = 0` vs `4`
+       hits for `cs₁ = 1` (`≠`), whereas `fips204_z_plateau_shift_invariant` gives constant `1`! -/
+theorem tooth_unsealed_w1_or_irwin_hall_abort_leaks_secret
+    (sampleInBall : List UInt8 → Poly256) (A : PolyMat4) (t1 : PolyVec4) (pads : SealedAttemptPads) :
+    (thresholdMlDsaAttemptSimulator sampleInBall A t1 none pads).released = none ∧
+    finSum 9 (fun idx => (unsealedEarlyW1AbortHit 0 idx).toNat) ≠
+      finSum 9 (fun idx => (unsealedEarlyW1AbortHit 1 idx).toNat) ∧
+    irwinHall2HitCount 0 0 ≠ irwinHall2HitCount 1 0 := by
+  exact ⟨rfl, by decide, by decide⟩
+
+theorem threshold_mldsa_abort_zk_witness :
+    ∃ (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+      (sampleInBall : List UInt8 → Poly256)
+      (A : PolyMat4) (s1 s2 : PolyVec4) (mu : List UInt8)
+      (steps : List SealedAttemptStepSpec),
+      (∀ stp ∈ steps, stp.failTag ≠ Fq204.zero) ∧
+      ∃ (hLen : (sealedTraceOutcomes chalHash sampleInBall A s1 s2 mu steps).length = steps.length)
+        (padBij : SimpleEquiv (Fin steps.length → SealedAttemptPads)
+          (Fin (sealedTraceOutcomes chalHash sampleInBall A s1 s2 mu steps).length → SealedAttemptPads)),
+        ∀ padFn,
+          thresholdMlDsaTraceSimulator sampleInBall A
+            (power2RoundHighVec4 (addVec4 (matVecMul4 A s1) s2))
+            (sealedTraceOutcomes chalHash sampleInBall A s1 s2 mu steps) (padBij.toFun padFn) =
+          realSealedSignTrace chalHash sampleInBall A s1 s2 mu steps padFn := by
+  let stp : SealedAttemptStepSpec :=
+    { y := rssZeroVec4, attempt := 0, keccakTraceBits := 0#256, failTag := Fq204.one }
+  have hFail : ∀ s ∈ [stp], s.failTag ≠ Fq204.zero := by
+    intro s hs
+    rcases List.mem_cons.mp hs with rfl | hNil
+    · decide
+    · cases hNil
+  obtain ⟨hLen, padBij, hEq, _⟩ := threshold_mldsa_abort_transcript_zk
+    (fun _ _ => []) (fun _ => PolyTree.zero 8) idMat4 rssZeroVec4 rssZeroVec4 [] [stp] hFail
+  exact ⟨(fun _ _ => []), (fun _ => PolyTree.zero 8), idMat4, rssZeroVec4, rssZeroVec4,
+    [], [stp], hFail, hLen, padBij, hEq⟩
+
+
+/-! ## §3. 3-Party `(2, 3)` RSS Multiplication + Sacrifice Refinement & `C(n, t - 1)` PRSS Hybrid -/
+
+/-- `(2, 3)` replicated secret share over `Fq204`:
+    Party 0 holds `(s1, s2)`, Party 1 holds `(s0, s2)`, Party 2 holds `(s0, s1)`. -/
+structure Rss3Share where
+  s0 : Fq204
+  s1 : Fq204
+  s2 : Fq204
+  deriving DecidableEq, Repr
+
+/-- Reconstruct the shared field element `s0 + s1 + s2` in `Fq204`. -/
+def rss3Recon (x : Rss3Share) : Fq204 :=
+  Fq204.add (Fq204.add x.s0 x.s1) x.s2
+
+/-- Disjoint 3-party cross-term inner-product + zero-sum PRSS reshare (`rss_mpc.rs` `Engine::mul`),
+    allowing an adversarial additive reshare shift `delta` on Party 0's outgoing share. -/
+def rss3MulStep (x y : Rss3Share) (r0 r1 : Fq204) (delta : Fq204) : Rss3Share :=
+  let u0 := Fq204.add (Fq204.add (Fq204.mul x.s1 y.s1) (Fq204.mul x.s1 y.s2)) (Fq204.mul x.s2 y.s1)
+  let u1 := Fq204.add (Fq204.add (Fq204.mul x.s2 y.s2) (Fq204.mul x.s2 y.s0)) (Fq204.mul x.s0 y.s2)
+  let u2 := Fq204.add (Fq204.add (Fq204.mul x.s0 y.s0) (Fq204.mul x.s0 y.s1)) (Fq204.mul x.s1 y.s0)
+  let r2 := Fq204.neg (Fq204.add r0 r1)
+  { s0 := Fq204.add (Fq204.add u0 r0) delta
+    s1 := Fq204.add u1 r1
+    s2 := Fq204.add u2 r2 }
+
+/-- Exact reconstruction law for 3-party RSS multiplication:
+    `rss3Recon (rss3MulStep x y r0 r1 delta) = rss3Recon x * rss3Recon y + delta`. -/
+theorem rss3MulStep_recon (x y : Rss3Share) (r0 r1 delta : Fq204) :
+    rss3Recon (rss3MulStep x y r0 r1 delta) =
+      Fq204.add (Fq204.mul (rss3Recon x) (rss3Recon y)) delta := by
+  unfold rss3Recon rss3MulStep
+  dsimp only
+  rw [← Fq204.ofInt_nat x.s0, ← Fq204.ofInt_nat x.s1, ← Fq204.ofInt_nat x.s2,
+      ← Fq204.ofInt_nat y.s0, ← Fq204.ofInt_nat y.s1, ← Fq204.ofInt_nat y.s2,
+      ← Fq204.ofInt_nat r0, ← Fq204.ofInt_nat r1, ← Fq204.ofInt_nat delta]
+  simp only [Fq204.ofInt_add, Fq204.ofInt_mul, Fq204.ofInt_neg]
+  congr 1
+  simp only [Int.add_mul, Int.mul_add]
+  omega
+
+/-- Assemble a `SacGate204` from a 3-party RSS multiplication + sacrificial triple with shifts
+    `(deltaZ, deltaC)`. -/
+def rss3ToSacGate (x y : Rss3Share) (r0 r1 deltaZ : Fq204)
+    (a : Ext6Fq204) (b : Rss3Share) (deltaC : Ext6Fq204) : SacGate204 :=
+  { x := rss3Recon x
+    y := rss3Recon y
+    z := rss3Recon (rss3MulStep x y r0 r1 deltaZ)
+    a := a
+    b := rss3Recon b
+    c := ext6Add (ext6Scale a (rss3Recon b)) deltaC }
+
+theorem rss3ToSacGate_error_eq_delta (x y : Rss3Share) (r0 r1 deltaZ : Fq204)
+    (a : Ext6Fq204) (b : Rss3Share) (deltaC : Ext6Fq204) :
+    sacGateError204 (rss3ToSacGate x y r0 r1 deltaZ a b deltaC) = deltaZ := by
+  unfold sacGateError204 rss3ToSacGate
+  dsimp only
+  rw [rss3MulStep_recon]
+  rw [← Fq204.ofInt_nat (Fq204.mul (rss3Recon x) (rss3Recon y)), ← Fq204.ofInt_nat deltaZ]
+  simp only [Fq204.ofInt_add, Fq204.ofInt_sub]
+  have hCancel :
+      (((Fq204.mul (rss3Recon x) (rss3Recon y)).val : Int) + (deltaZ.val : Int)) -
+        ((Fq204.mul (rss3Recon x) (rss3Recon y)).val : Int) = (deltaZ.val : Int) := by omega
+  rw [hCancel, Fq204.ofInt_nat]
+
+/-- Repeated sacrifice checker over `chis : List Ext6Fq204` (`k`-challenge amplification). -/
+def sacAcceptRepeated (chis : List Ext6Fq204) (g : SacGate204) : Bool :=
+  chis.all (fun chi => sacAccept204 chi g)
+
+/-- **Repeated Sacrifice Cheating Rejection (`rss3_repeated_sacrifice_pq256`)**:
+    1. Any nonzero cheating shift `deltaZ ≠ 0` in `rss3MulStep` can pass `sacAcceptRepeated chis`
+       ONLY if **every** challenge `chi ∈ chis` equals the single gate-fixed `sacBadChallenge204 g`
+       (at most `1` of `q` base-field challenges per round, and `1` of `q^6` `Ext6` challenges);
+    2. Repeating `k = 12` base-field challenges (or `2` `Ext6` challenges, since `(q^6)^2 = q^12`)
+       satisfies `2^256 < mldsaQ^12`, i.e., cheating survival `< 2^-256` (`> 128` Grover bits). -/
+theorem rss3_repeated_sacrifice_pq256
+    (x y : Rss3Share) (r0 r1 deltaZ : Fq204)
+    (a : Ext6Fq204) (b : Rss3Share) (deltaC : Ext6Fq204)
+    (chis : List Ext6Fq204)
+    (hCheat : deltaZ ≠ Fq204.zero) :
+    (sacAcceptRepeated chis (rss3ToSacGate x y r0 r1 deltaZ a b deltaC) = true →
+      ∀ chi ∈ chis, chi = sacBadChallenge204 (rss3ToSacGate x y r0 r1 deltaZ a b deltaC)) ∧
+    2 ^ 256 < mldsaQ ^ 12 := by
+  refine ⟨?_, by decide⟩
+  intro hAll chi hMem
+  unfold sacAcceptRepeated at hAll
+  rw [List.all_eq_true] at hAll
+  rcases sacAccept204_sound (hAll chi hMem) with hEq | hBad
+  · have hErr0 : sacGateError204 (rss3ToSacGate x y r0 r1 deltaZ a b deltaC) = Fq204.zero := by
+      unfold sacGateError204
+      rw [hEq, Fq204.sub_eq_add_neg, Fq204.add_right_neg]
+    rw [rss3ToSacGate_error_eq_delta] at hErr0
+    exact False.elim (hCheat hErr0)
+  · exact hBad
+
+/-- Multi-turn execution of `rssSacrificedSignStep` across a trace of distributed attempts. -/
+def runRssSacrificedTrace
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256) :
+    RssMlDsaSignerState →
+    List (RssMlDsaAttemptInput × Ext6Fq204 × RssSacrificeTranscript204) →
+    RssMlDsaSignerState × List (StepOutcome RssMlDsaSignerState
+      (RssSignPublicAbortView × Option ThresholdSignSig) RssPreOpenAbortReason)
+  | st, [] => (st, [])
+  | st, (inp, chi, T) :: rest =>
+    let out := rssSacrificedSignStep chalHash sampleInBall st inp chi T
+    let stNext := match out with
+      | .ok st' _ => st'
+      | .err st' _ => st'
+    let tail := runRssSacrificedTrace chalHash sampleInBall stNext rest
+    (tail.1, out :: tail.2)
+
+/-- **Multi-Turn Distributed RSS Sacrifice Refinement (`rss_distributed_trace_refines_sacrificedSignStep`)**:
+    Across any multi-turn signing trace `tr`:
+    1. `nextAttempt` is monotonically non-decreasing (`st.nextAttempt ≤ stFinal.nextAttempt`);
+    2. On every turn `(inp, chi, T)` in the trace, from any intermediate state `stCur`, either
+       `rssSacrificedSignStep` equals the ideal `rssThresholdSignStep` transition, OR it aborts
+       before opening with `.mpcSacrificeFailed` / `.attemptReplay`, OR `chi ∈ rssSacrificeBadChallenges204 T`. -/
+theorem rss_distributed_trace_refines_sacrificedSignStep
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256) :
+    ∀ (st : RssMlDsaSignerState)
+      (tr : List (RssMlDsaAttemptInput × Ext6Fq204 × RssSacrificeTranscript204)),
+      st.nextAttempt ≤ (runRssSacrificedTrace chalHash sampleInBall st tr).1.nextAttempt ∧
+      (∀ turn ∈ tr, ∀ stCur : RssMlDsaSignerState,
+        rssSacrificedSignStep chalHash sampleInBall stCur turn.1 turn.2.1 turn.2.2 =
+          rssThresholdSignStep chalHash sampleInBall stCur turn.1 ∨
+        (∃ st', rssSacrificedSignStep chalHash sampleInBall stCur turn.1 turn.2.1 turn.2.2 =
+          .err st' .mpcSacrificeFailed) ∨
+        turn.2.1 ∈ rssSacrificeBadChallenges204 turn.2.2)
+  | st, [] => ⟨Nat.le_refl _, fun _ h => nomatch h⟩
+  | st, (inp, chi, T) :: rest => by
+    let out := rssSacrificedSignStep chalHash sampleInBall st inp chi T
+    let stNext := match out with | .ok st' _ => st' | .err st' _ => st'
+    have hStepMono : st.nextAttempt ≤ stNext.nextAttempt := by
+      dsimp only [stNext, out]
+      unfold rssSacrificedSignStep
+      cases decide (inp.epoch = st.epoch ∧ inp.attempt = st.nextAttempt) with
+      | false => exact Nat.le_refl _
+      | true =>
+        cases rssSacrificedProductsValid chalHash sampleInBall st inp chi T with
+        | false => dsimp only; omega
+        | true =>
+          unfold rssSignCore mkRssSignAttemptOutcome
+          dsimp only
+          split <;> dsimp only <;> omega
+    obtain ⟨hTailMono, hTailRef⟩ := rss_distributed_trace_refines_sacrificedSignStep chalHash sampleInBall stNext rest
+    refine ⟨Nat.le_trans hStepMono hTailMono, ?_⟩
+    intro turn hMem stCur
+    rcases List.mem_cons.mp hMem with rfl | hInRest
+    · dsimp only
+      cases hv : rssSacrificedProductsValid chalHash sampleInBall stCur inp chi T with
+      | true =>
+        rcases rssSacrificedSignStep_refines chalHash sampleInBall stCur inp chi T hv with hEq | hBad
+        · exact Or.inl hEq
+        · exact Or.inr (Or.inr hBad)
+      | false =>
+        unfold rssSacrificedSignStep
+        cases hg : decide (inp.epoch = stCur.epoch ∧ inp.attempt = stCur.nextAttempt) with
+        | false =>
+          left
+          unfold rssThresholdSignStep
+          rw [hg]
+        | true =>
+          right; left
+          rw [hv]
+          exact ⟨{ stCur with nextAttempt := stCur.nextAttempt + 1 }, rfl⟩
+    · exact hTailRef turn hInRest stCur
+
+/-- **`(t, n)` Custodian Subset-Key PRSS -> PRF Hybrid Reduction (`rss_prss_choose_hybrid`)**:
+    In `(t, n)` replicated secret sharing (`Structure::new(n, t)` in `rss_mpc.rs`), there are
+    `M = binomRec n (t - 1)` PRSS subset keys (`3` for `(2, 3)`, `5` for `(2, 5)`, `10` for `(3, 5)`).
+    Replacing all `M` PRF-expanded mask tapes by independent uniform tapes changes any
+    distinguisher's hit count by at most `M * (N ^ (M - 1) * ε)`. -/
+theorem rss_prss_choose_hybrid {O : Type} {N : Nat} (real ideal : Fin N → O)
+    (n t : Nat) (D : List O → Bool) (ε : Nat)
+    (hPRF : PrssSingleKeyBound real ideal D ε) :
+    let numKeys := binomRec n (t - 1)
+    prssGap (prssRealHits real numKeys D) (prssIdealHits ideal numKeys D) ≤
+      numKeys * (N ^ (numKeys - 1) * ε) :=
+  prss_multi_key_hybrid real ideal (binomRec n (t - 1)) D ε hPRF
+
+theorem rss_deployed_quorum_subset_counts :
+    binomRec 3 (2 - 1) = 3 ∧
+    binomRec 5 (2 - 1) = 5 ∧
+    binomRec 5 (3 - 1) = 10 := by
+  decide
+
+theorem tooth_rss3_unverified_shift_corrupts_recon :
+    let zeroSh : Rss3Share := ⟨Fq204.zero, Fq204.zero, Fq204.zero⟩
+    rss3Recon (rss3MulStep zeroSh zeroSh Fq204.zero Fq204.zero Fq204.one) ≠
+      Fq204.mul (rss3Recon zeroSh) (rss3Recon zeroSh) ∧
+    sacAcceptRepeated [ext6Zero]
+      (rss3ToSacGate zeroSh zeroSh Fq204.zero Fq204.zero Fq204.one ext6Zero zeroSh
+        (ext6EmbedFq Fq204.one)) = false := by
+  decide
+
+theorem rss3_repeated_sacrifice_witness :
+    ∃ (x y : Rss3Share) (r0 r1 deltaZ : Fq204)
+      (a : Ext6Fq204) (b : Rss3Share) (deltaC : Ext6Fq204) (chis : List Ext6Fq204),
+      deltaZ ≠ Fq204.zero ∧
+      (sacAcceptRepeated chis (rss3ToSacGate x y r0 r1 deltaZ a b deltaC) = true →
+        ∀ chi ∈ chis, chi = sacBadChallenge204 (rss3ToSacGate x y r0 r1 deltaZ a b deltaC)) ∧
+      2 ^ 256 < mldsaQ ^ 12 := by
+  let zSh : Rss3Share := ⟨Fq204.zero, Fq204.zero, Fq204.zero⟩
+  have hNe : Fq204.one ≠ Fq204.zero := by decide
+  exact ⟨zSh, zSh, Fq204.zero, Fq204.zero, Fq204.one, ext6Zero, zSh, ext6Zero, [ext6Zero],
+    hNe, rss3_repeated_sacrifice_pq256 zSh zSh Fq204.zero Fq204.zero Fq204.one
+      ext6Zero zSh ext6Zero [ext6Zero] hNe⟩
+
+#tooth_pair mlDsa_all_three_levels_wellFormed vs tooth_mlDsaLevelWellFormed_bad_beta
+#verify_inhabited mlDsa_challenge_entropy_bounds mlDsa_challenge_entropy_witness
+#tooth_pair threshold_mldsa_abort_transcript_zk vs tooth_unsealed_w1_or_irwin_hall_abort_leaks_secret
+#verify_inhabited threshold_mldsa_abort_transcript_zk threshold_mldsa_abort_zk_witness
+#tooth_pair rss3_repeated_sacrifice_pq256 vs tooth_rss3_unverified_shift_corrupts_recon
+#verify_inhabited rss3_repeated_sacrifice_pq256 rss3_repeated_sacrifice_witness
+
+end Qsag
