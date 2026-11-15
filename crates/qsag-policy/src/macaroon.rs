@@ -2,18 +2,26 @@
 //!
 //! Every caveat is conjunctive: adding one can only restrict authorization. The
 //! verifier supplies trusted request facts and discharge keys; token contents
-//! never select an authority key. A discharge must be explicitly bound to the
-//! final parent tag, so it cannot be transplanted to another capability.
+//! never select an authority key. A third party issues a discharge without ever
+//! seeing the parent capability; the holder then binds it to a one-way commitment
+//! of the parent's final tag, so it cannot be transplanted to another capability
+//! and neither the third party nor the discharge bytes reveal the parent's tag.
 //! Tags are 256 bits; this is not a claim of 256-bit quantum forgery resistance.
 extern crate alloc;
 use alloc::vec::Vec;
 use qsag_accel::{
     ct::ct_eq_bytes,
-    keccak::{Shake256, finalize_cshake256, init_cshake256},
+    keccak::{Shake256, cshake256_framed_32, finalize_cshake256, init_cshake256},
 };
 
 const ROOT_DOMAIN: &[u8] = b"QSAG.MACAROON.ROOT.V1";
 const CAVEAT_DOMAIN: &[u8] = b"QSAG.MACAROON.CAVEAT.V1";
+const BIND_DOMAIN: &[u8] = b"QSAG.MACAROON.BIND.V1";
+
+/// What a bound discharge carries in place of the parent's bearer tag.
+fn parent_binding(parent_tag: &[u8; 32]) -> [u8; 32] {
+    cshake256_framed_32(BIND_DOMAIN, &[parent_tag])
+}
 
 /// Only the public domain prefix is cached. Keys and bearer tags never enter shared state.
 fn prefix(root: bool) -> Shake256 {
@@ -57,6 +65,7 @@ pub enum Caveat {
     Resource([u8; 32]),
     Actions(u64),
     MaxAmount(u128),
+    /// One-way commitment to the final tag of the capability this discharge serves.
     BindToParent([u8; 32]),
     ThirdParty([u8; 32]),
 }
@@ -105,6 +114,8 @@ pub enum CapabilityError {
     Denied,
     MissingDischarge,
     UnboundDischarge,
+    /// A supplied discharge answers no third-party caveat of the capability.
+    UnusedDischarge,
 }
 
 /// Request facts derived by the service, never accepted from untrusted token claims.
@@ -157,7 +168,7 @@ impl MacaroonVerifier {
             return Err(CapabilityError::Denied);
         }
         token.authenticate_from(self.root_tag)?;
-        token.check(request, discharges, None)
+        token.check_primary(request, discharges)
     }
 }
 
@@ -213,13 +224,22 @@ impl SpongeMacaroon {
         self.caveats.push(caveat);
         Ok(())
     }
-    /// Issue after the third party has authorized the obligation identified by `identifier`.
-    pub fn issue_discharge(key: &[u8; 32], identifier: [u8; 32], parent: &Self) -> Self {
-        let mut token = Self::new(key, identifier, parent.audience, true);
-        let binding = Caveat::BindToParent(parent.tag);
-        token.tag = Self::chained(&token.tag, &binding);
-        token.caveats.push(binding);
-        token
+    /// Third-party side: issue after authorizing the obligation identified by `identifier`.
+    /// The result is unbound and must reach only the holder, who binds it with
+    /// [`Self::bind_discharge`] before presenting it. The third party never needs the parent.
+    pub fn issue_discharge(key: &[u8; 32], identifier: [u8; 32], audience: [u8; 32]) -> Self {
+        Self::new(key, identifier, audience, true)
+    }
+    /// Holder side: bind `discharge` to this capability as it stands now. Attenuating this
+    /// capability afterwards invalidates the binding.
+    pub fn bind_discharge(&self, discharge: &mut Self) -> Result<(), CapabilityError> {
+        if self.discharge
+            || !discharge.discharge
+            || !ct_eq_bytes(&self.audience, &discharge.audience)
+        {
+            return Err(CapabilityError::Denied);
+        }
+        discharge.attenuate(Caveat::BindToParent(parent_binding(&self.tag)))
     }
     pub fn identifier(&self) -> &[u8; 32] {
         &self.identifier
@@ -258,8 +278,29 @@ impl SpongeMacaroon {
             return Err(CapabilityError::Denied);
         }
         self.authenticate(key)?;
-        self.check(request, discharges, None)
+        self.check_primary(request, discharges)
     }
+    fn check_primary(
+        &self,
+        request: &CapabilityRequest,
+        discharges: &[Discharge<'_>],
+    ) -> Result<(), CapabilityError> {
+        // Every discharge must answer a third-party caveat, so more than that many cannot.
+        if discharges.len() > self.caveats.len() {
+            return Err(CapabilityError::UnusedDischarge);
+        }
+        self.check(request, discharges, None)?;
+        let unused = discharges.iter().any(|d| {
+            !self.caveats.iter().any(
+                |c| matches!(c, Caveat::ThirdParty(id) if ct_eq_bytes(id, &d.token.identifier)),
+            )
+        });
+        if unused {
+            return Err(CapabilityError::UnusedDischarge);
+        }
+        Ok(())
+    }
+    /// `parent` is the binding commitment of the capability a discharge is presented with.
     fn check(
         &self,
         r: &CapabilityRequest,
@@ -294,7 +335,8 @@ impl SpongeMacaroon {
                         return Err(CapabilityError::Denied);
                     }
                     d.token.authenticate(d.root_key)?;
-                    d.token.check(r, &[], Some(&self.tag))?;
+                    d.token
+                        .check(r, &[], Some(&parent_binding(&self.tag)))?;
                     true
                 }
             };
@@ -486,7 +528,8 @@ mod tests {
             parent.verify(&[1; 32], &request(), &[]),
             Err(CapabilityError::MissingDischarge)
         );
-        let discharge = SpongeMacaroon::issue_discharge(&[6; 32], [5; 32], &parent);
+        let mut discharge = SpongeMacaroon::issue_discharge(&[6; 32], [5; 32], [2; 32]);
+        parent.bind_discharge(&mut discharge).unwrap();
         let d = [Discharge {
             token: &discharge,
             root_key: &[6; 32],
@@ -497,7 +540,7 @@ mod tests {
             parent.verify(&[1; 32], &request(), &d),
             Err(CapabilityError::Denied)
         );
-        let unbound = SpongeMacaroon::new(&[6; 32], [5; 32], [2; 32], true);
+        let unbound = SpongeMacaroon::issue_discharge(&[6; 32], [5; 32], [2; 32]);
         assert_eq!(
             parent.verify(
                 &[1; 32],
@@ -524,5 +567,283 @@ mod tests {
         m.attenuate(Caveat::ExpiresAt(10)).unwrap();
         m.attenuate(Caveat::ExpiresAt(u64::MAX)).unwrap();
         assert!(m.verify(&[1; 32], &request(), &[]).is_err());
+    }
+
+    const ROOT: [u8; 32] = [1; 32];
+    const THIRD: [u8; 32] = [6; 32];
+    fn parent_with_third_party(id: [u8; 32]) -> SpongeMacaroon {
+        let mut parent = SpongeMacaroon::issue(&ROOT, [4; 32], [2; 32]);
+        parent.attenuate(Caveat::Resource([3; 32])).unwrap();
+        parent.attenuate(Caveat::ThirdParty(id)).unwrap();
+        parent
+    }
+    fn bound_discharge(parent: &SpongeMacaroon, id: [u8; 32]) -> SpongeMacaroon {
+        let mut discharge = SpongeMacaroon::issue_discharge(&THIRD, id, [2; 32]);
+        parent.bind_discharge(&mut discharge).unwrap();
+        discharge
+    }
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+    #[test]
+    fn bound_discharge_never_carries_the_parent_bearer_tag() {
+        let parent = parent_with_third_party([5; 32]);
+        let discharge = bound_discharge(&parent, [5; 32]);
+        assert!(!contains(&discharge.to_bytes(), &parent.tag));
+        for caveat in discharge.caveats() {
+            if let Caveat::BindToParent(binding) = caveat {
+                assert_ne!(binding, &parent.tag);
+                assert_eq!(binding, &parent_binding(&parent.tag));
+            }
+        }
+        let d = [Discharge {
+            token: &discharge,
+            root_key: &THIRD,
+        }];
+        assert_eq!(parent.verify(&ROOT, &request(), &d), Ok(()));
+    }
+    #[test]
+    fn discharge_cannot_be_transplanted_stripped_or_rebound() {
+        let parent = parent_with_third_party([5; 32]);
+        let discharge = bound_discharge(&parent, [5; 32]);
+        // Another capability of the same issuer carrying the same third-party caveat.
+        let mut other = SpongeMacaroon::issue(&ROOT, [4; 32], [2; 32]);
+        other.attenuate(Caveat::ThirdParty([5; 32])).unwrap();
+        let d = [Discharge {
+            token: &discharge,
+            root_key: &THIRD,
+        }];
+        assert_eq!(
+            other.verify(&ROOT, &request(), &d),
+            Err(CapabilityError::Denied)
+        );
+        // Binding it a second time to the other capability keeps the first binding in force.
+        let mut twice = discharge.clone();
+        other.bind_discharge(&mut twice).unwrap();
+        for target in [&parent, &other] {
+            assert_eq!(
+                target.verify(
+                    &ROOT,
+                    &request(),
+                    &[Discharge {
+                        token: &twice,
+                        root_key: &THIRD
+                    }]
+                ),
+                Err(CapabilityError::Denied)
+            );
+        }
+        // Dropping the binding caveat from the wire breaks the chained tag.
+        let wire = discharge.to_bytes();
+        let mut stripped = wire[..75].to_vec();
+        stripped[9..11].copy_from_slice(&0u16.to_be_bytes());
+        stripped.extend_from_slice(&wire[wire.len() - 32..]);
+        let stripped = SpongeMacaroon::from_bytes(&stripped).unwrap();
+        assert_eq!(
+            parent.verify(
+                &ROOT,
+                &request(),
+                &[Discharge {
+                    token: &stripped,
+                    root_key: &THIRD
+                }]
+            ),
+            Err(CapabilityError::InvalidTag)
+        );
+        // A discharge keyed by a different authority, or for a different audience, is refused.
+        assert_eq!(
+            parent.verify(
+                &ROOT,
+                &request(),
+                &[Discharge {
+                    token: &discharge,
+                    root_key: &[7; 32]
+                }]
+            ),
+            Err(CapabilityError::InvalidTag)
+        );
+        let mut foreign = SpongeMacaroon::issue_discharge(&THIRD, [5; 32], [9; 32]);
+        assert_eq!(
+            parent.bind_discharge(&mut foreign),
+            Err(CapabilityError::Denied)
+        );
+    }
+    #[test]
+    fn unused_duplicate_and_nested_discharges_are_rejected() {
+        let parent = parent_with_third_party([5; 32]);
+        let discharge = bound_discharge(&parent, [5; 32]);
+        let stray = bound_discharge(&parent, [8; 32]);
+        let good = Discharge {
+            token: &discharge,
+            root_key: &THIRD,
+        };
+        let extra = Discharge {
+            token: &stray,
+            root_key: &THIRD,
+        };
+        let again = Discharge {
+            token: &discharge,
+            root_key: &THIRD,
+        };
+        assert_eq!(
+            parent.verify(&ROOT, &request(), &[good, extra]),
+            Err(CapabilityError::UnusedDischarge)
+        );
+        let good = Discharge {
+            token: &discharge,
+            root_key: &THIRD,
+        };
+        assert_eq!(
+            parent.verify(&ROOT, &request(), &[good, again]),
+            Err(CapabilityError::Denied)
+        );
+        // A capability without third-party caveats accepts no discharge at all.
+        let plain = SpongeMacaroon::issue(&ROOT, [4; 32], [2; 32]);
+        let verifier = MacaroonVerifier::new(&ROOT, [4; 32], [2; 32]);
+        for result in [
+            plain.verify(
+                &ROOT,
+                &request(),
+                &[Discharge {
+                    token: &discharge,
+                    root_key: &THIRD,
+                }],
+            ),
+            verifier.verify(
+                &plain,
+                &request(),
+                &[Discharge {
+                    token: &discharge,
+                    root_key: &THIRD,
+                }],
+            ),
+        ] {
+            assert_eq!(result, Err(CapabilityError::UnusedDischarge));
+        }
+        // Discharges cannot demand further discharges, and primaries cannot carry bindings.
+        let mut nested = SpongeMacaroon::issue_discharge(&THIRD, [5; 32], [2; 32]);
+        assert_eq!(
+            nested.attenuate(Caveat::ThirdParty([9; 32])),
+            Err(CapabilityError::Denied)
+        );
+        let mut primary = SpongeMacaroon::issue(&ROOT, [4; 32], [2; 32]);
+        assert_eq!(
+            primary.attenuate(Caveat::BindToParent([0; 32])),
+            Err(CapabilityError::Denied)
+        );
+        assert_eq!(
+            discharge.bind_discharge(&mut nested),
+            Err(CapabilityError::Denied)
+        );
+        // A discharge's own first-party caveats restrict the request too.
+        let mut expired = SpongeMacaroon::issue_discharge(&THIRD, [5; 32], [2; 32]);
+        expired.attenuate(Caveat::ExpiresAt(10)).unwrap();
+        parent.bind_discharge(&mut expired).unwrap();
+        assert_eq!(
+            parent.verify(
+                &ROOT,
+                &request(),
+                &[Discharge {
+                    token: &expired,
+                    root_key: &THIRD
+                }]
+            ),
+            Err(CapabilityError::Denied)
+        );
+    }
+    #[test]
+    fn caveat_order_kind_and_role_are_authenticated() {
+        let mut m = SpongeMacaroon::issue(&ROOT, [4; 32], [2; 32]);
+        m.attenuate(Caveat::Resource([3; 32])).unwrap();
+        m.attenuate(Caveat::ExpiresAt(20)).unwrap();
+        m.attenuate(Caveat::NotBefore(5)).unwrap();
+        let wire = m.to_bytes();
+        assert_eq!(
+            SpongeMacaroon::from_bytes(&wire)
+                .unwrap()
+                .verify(&ROOT, &request(), &[]),
+            Ok(())
+        );
+        // Swap the two eight-byte caveats (each 10 bytes on the wire, after a 34-byte one).
+        let mut swapped = wire.clone();
+        let (a, b) = (75 + 34, 75 + 44);
+        let first: [u8; 10] = wire[a..b].try_into().unwrap();
+        swapped.copy_within(b..b + 10, a);
+        swapped[b..b + 10].copy_from_slice(&first);
+        assert_ne!(swapped, wire);
+        // Reinterpret ExpiresAt as NotBefore, and Resource as a third-party obligation.
+        let mut rekind = wire.clone();
+        rekind[a] = 2;
+        let mut third = wire.clone();
+        third[75] = 7;
+        // Present the primary as a discharge.
+        let mut role = wire.clone();
+        role[8] = 1;
+        for forged in [swapped, rekind, third, role] {
+            let token = SpongeMacaroon::from_bytes(&forged).unwrap();
+            assert_eq!(
+                token.authenticate(&ROOT),
+                Err(CapabilityError::InvalidTag)
+            );
+        }
+        // Dropping the last caveat cannot be repaired without the previous chaining tag.
+        let mut dropped = wire[..wire.len() - 42].to_vec();
+        dropped[9..11].copy_from_slice(&2u16.to_be_bytes());
+        dropped.extend_from_slice(&wire[wire.len() - 32..]);
+        assert_eq!(
+            SpongeMacaroon::from_bytes(&dropped)
+                .unwrap()
+                .verify(&ROOT, &request(), &[]),
+            Err(CapabilityError::InvalidTag)
+        );
+        // Root and caveat hashing are separate domains over identical fields.
+        let fields: &[&[u8]] = &[&[1; 32], &[2; 33], &[3; 32]];
+        assert_ne!(mac_hash(true, fields), mac_hash(false, fields));
+        assert_ne!(
+            parent_binding(&[1; 32]),
+            mac_hash(false, &[&[1u8; 32][..]])
+        );
+    }
+    #[test]
+    fn caveat_bounds_match_on_mint_and_parse() {
+        let mut m = SpongeMacaroon::issue(&ROOT, [4; 32], [2; 32]);
+        for _ in 0..MAX_CAVEATS {
+            m.attenuate(Caveat::Actions(1)).unwrap();
+        }
+        assert_eq!(
+            m.attenuate(Caveat::Actions(1)),
+            Err(CapabilityError::TooManyCaveats)
+        );
+        let wire = m.to_bytes();
+        let parsed = SpongeMacaroon::from_bytes(&wire).unwrap();
+        assert_eq!(parsed.verify(&ROOT, &request(), &[]), Ok(()));
+        let mut over = wire.clone();
+        over[9..11].copy_from_slice(&(MAX_CAVEATS as u16 + 1).to_be_bytes());
+        assert_eq!(
+            SpongeMacaroon::from_bytes(&over).err(),
+            Some(CapabilityError::TooManyCaveats)
+        );
+        // A full discharge has no room left for its binding.
+        let mut full = SpongeMacaroon::issue_discharge(&THIRD, [5; 32], [2; 32]);
+        for _ in 0..MAX_CAVEATS {
+            full.attenuate(Caveat::Actions(1)).unwrap();
+        }
+        let parent = parent_with_third_party([5; 32]);
+        assert_eq!(
+            parent.bind_discharge(&mut full),
+            Err(CapabilityError::TooManyCaveats)
+        );
+        // Wrong value lengths and unknown kinds are malformed, whatever the count says.
+        for (kind, len) in [(1u8, 16u8), (3, 8), (5, 8), (0, 8), (8, 32), (6, 32)] {
+            let mut bad = wire[..75].to_vec();
+            bad[9..11].copy_from_slice(&1u16.to_be_bytes());
+            bad.extend_from_slice(&[kind, len]);
+            bad.extend(core::iter::repeat_n(0u8, usize::from(len)));
+            bad.extend_from_slice(&[0; 32]);
+            assert_eq!(
+                SpongeMacaroon::from_bytes(&bad).err(),
+                Some(CapabilityError::Malformed)
+            );
+        }
     }
 }
