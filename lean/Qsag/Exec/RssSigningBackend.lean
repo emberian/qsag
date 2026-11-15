@@ -1,8 +1,8 @@
 module
-public import Qsag.RssSigningHashCalls
-import all Qsag.RssSigningHashCalls
-import all Qsag.ThresholdMpc
-import all Qsag.HashSigs
+public import Qsag.Exec.RssSigningHashCalls
+import all Qsag.Exec.RssSigningHashCalls
+import all Qsag.Protocol.Threshold.ThresholdMpc
+import all Qsag.Protocol.Signing.HashSigs
 import Qsag.Tactic.AssuranceKit
 
 /-!

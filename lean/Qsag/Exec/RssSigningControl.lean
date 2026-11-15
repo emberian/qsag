@@ -1,8 +1,8 @@
 module
-public import Qsag.RssSigningProgram
-import all Qsag.RssSigningProgram
-import all Qsag.ThresholdMpc
-import all Qsag.HashSigs
+public import Qsag.Exec.RssSigningProgram
+import all Qsag.Exec.RssSigningProgram
+import all Qsag.Protocol.Threshold.ThresholdMpc
+import all Qsag.Protocol.Signing.HashSigs
 import Qsag.Tactic.AssuranceKit
 
 /-! Complete resumable production signing control, including both stateful Jorts

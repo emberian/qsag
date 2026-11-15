@@ -1,12 +1,12 @@
 module
-public import Qsag.RssSigningBackend
-public import Qsag.RssSigningMachine
-import all Qsag.RssSigningBackend
-import all Qsag.RssSigningMachine
-import all Qsag.RssSigningControl
-import all Qsag.RssSigningProgram
-import all Qsag.RssProductionProfile
-import all Qsag.UcGames
+public import Qsag.Exec.RssSigningBackend
+public import Qsag.Exec.RssSigningMachine
+import all Qsag.Exec.RssSigningBackend
+import all Qsag.Exec.RssSigningMachine
+import all Qsag.Exec.RssSigningControl
+import all Qsag.Exec.RssSigningProgram
+import all Qsag.Exec.RssProductionProfile
+import all Qsag.Oracle.UcGames
 import Qsag.Tactic.AssuranceKit
 
 /-!

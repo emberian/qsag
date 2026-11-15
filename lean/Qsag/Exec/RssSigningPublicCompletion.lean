@@ -1,11 +1,11 @@
 module
-public import Qsag.RssSigningBackend
-public import Qsag.RssSigningEnrollment
-import all Qsag.RssSigningBackend
-import all Qsag.RssSigningEnrollment
-import all Qsag.RssProductionProfile
-import all Qsag.ThresholdMpc
-import all Qsag.HashSigs
+public import Qsag.Exec.RssSigningBackend
+public import Qsag.Exec.RssSigningEnrollment
+import all Qsag.Exec.RssSigningBackend
+import all Qsag.Exec.RssSigningEnrollment
+import all Qsag.Exec.RssProductionProfile
+import all Qsag.Protocol.Threshold.ThresholdMpc
+import all Qsag.Protocol.Signing.HashSigs
 import Qsag.Tactic.AssuranceKit
 
 /-!

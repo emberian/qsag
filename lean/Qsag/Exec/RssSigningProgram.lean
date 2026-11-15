@@ -1,8 +1,8 @@
 module
-public import Qsag.ThresholdMpc
-import all Qsag.ThresholdMpc
-import all Qsag.HashSigs
-import all Qsag.UcGames
+public import Qsag.Protocol.Threshold.ThresholdMpc
+import all Qsag.Protocol.Threshold.ThresholdMpc
+import all Qsag.Protocol.Signing.HashSigs
+import all Qsag.Oracle.UcGames
 import Qsag.Tactic.AssuranceKit
 
 /-!

@@ -1,7 +1,7 @@
 module
-public import Qsag.RssSigningControl
-import all Qsag.RssSigningControl
-import all Qsag.RssSigningProgram
+public import Qsag.Exec.RssSigningControl
+import all Qsag.Exec.RssSigningControl
+import all Qsag.Exec.RssSigningProgram
 import Qsag.Tactic.AssuranceKit
 
 /-!

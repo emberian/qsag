@@ -1,10 +1,10 @@
 module
-public import Qsag.RssSigningBatches
-import all Qsag.RssSigningBatches
-import all Qsag.RssSigningProgram
-import all Qsag.RssProductionProfile
-import all Qsag.ThresholdMpc
-import all Qsag.HashSigs
+public import Qsag.Exec.RssSigningBatches
+import all Qsag.Exec.RssSigningBatches
+import all Qsag.Exec.RssSigningProgram
+import all Qsag.Exec.RssProductionProfile
+import all Qsag.Protocol.Threshold.ThresholdMpc
+import all Qsag.Protocol.Signing.HashSigs
 import Qsag.Tactic.AssuranceKit
 
 /-! One grouped WOTS subtree producer followed by public-only root/path work.
