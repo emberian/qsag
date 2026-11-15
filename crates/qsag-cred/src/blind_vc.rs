@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop, clippy::type_complexity)]
+
 //! Credentials enrolled using the threshold symmetric OPRF in `voprf`.
 //!
 //! The issuer authorizes the disclosed issuance attributes and a proof of their
@@ -24,7 +26,7 @@ use core::fmt;
 
 use qsag_accel::ct::{ct_eq_bytes, ct_zeroize_bytes, ct_zeroize_u64s};
 use qsag_accel::goldilocks::{
-    GOLDILOCKS_PRIME, gl_add, gl_is_canonical, gl_mul, gl_reduce_u64, gl_sub,
+    GOLDILOCKS_PRIME, gl_add, gl_is_canonical, gl_mul, gl_reduce_u64, gl_reduce128, gl_sub,
 };
 use qsag_accel::keccak::{
     InterleavedTranscript, Shake256, commit_mpc_broadcast, cshake256_framed_32,
@@ -2161,10 +2163,6 @@ impl PlaintextGateRecorder {
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Explicit selective-disclosure statement and secret witness slices"
-)]
 fn eval_sd_plaintext_circuit(
     arity: usize,
     issuer_epoch: u64,
@@ -2654,7 +2652,7 @@ impl EvalTables {
 #[inline]
 fn gl_reduce_split_u192(lo: u128, hi: u128) -> u64 {
     // Exact modulo p = 2^64 - 2^32 + 1 since 2^64 === 0xffff_ffff (mod p).
-    gl_add(gl_reduce_u128(lo), gl_mul(gl_reduce_u128(hi), 0xffff_ffff))
+    gl_add(gl_reduce128(lo), gl_mul(gl_reduce128(hi), 0xffff_ffff))
 }
 
 #[inline]
