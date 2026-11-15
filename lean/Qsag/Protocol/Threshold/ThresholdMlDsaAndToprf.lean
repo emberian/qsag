@@ -13973,10 +13973,25 @@ instance : LawfulCommRing Ext6Fq204 where
 instance : NoZeroDivisors Ext6Fq204 where
   eq_zero_or_eq_zero_of_mul_eq_zero := ext6Mul_eq_zero
 
+theorem ext6Inv_zero : ext6Inv ext6Zero = ext6Zero := by
+  have hTwist : ∀ c : Fq204, ext6Twist c ext6Zero = ext6Zero := fun c => by
+    unfold ext6Twist ext6Zero
+    dsimp only
+    simp only [Fq204.zero_mul]
+  have hConj : ext6ConjProduct ext6Zero = ext6Zero := by
+    unfold ext6ConjProduct
+    rw [hTwist, ext6Zero_mul]
+  unfold ext6Inv
+  rw [hConj]
+  unfold ext6Scale ext6Zero
+  dsimp only
+  simp only [Fq204.zero_mul]
+
 /-- The verification extension as a field, with the executable inverse `ext6Inv`. -/
 instance : LawfulField Ext6Fq204 where
   inv := ext6Inv
   zero_ne_one := by decide
+  inv_zero := ext6Inv_zero
   mul_inv_cancel := ext6Mul_inv_cancel
 
 end Ext6Field

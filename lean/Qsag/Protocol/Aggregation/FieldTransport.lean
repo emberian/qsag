@@ -42,11 +42,13 @@ namespace Qsag
 instance instLawfulFieldSuccinctExt4 : LawfulField Qsag.GoldilocksExt4 where
   inv := Qsag.GoldilocksExt4.inv
   zero_ne_one := by decide
+  inv_zero := Qsag.QuarticGoldilocks.inv_zero
   mul_inv_cancel := Qsag.GoldilocksExt4.mul_inv_cancel
 
 instance instLawfulFieldAggExt4 : LawfulField Qsag.Aggregation.GoldilocksExt4 where
   inv := Qsag.Aggregation.GoldilocksExt4.inv
   zero_ne_one := by decide
+  inv_zero := Qsag.QuarticGoldilocks.inv_zero
   mul_inv_cancel := Qsag.Aggregation.GoldilocksExt4.mul_inv_cancel
 
 theorem certifiedExt4_zero_ne_one :
@@ -59,6 +61,7 @@ theorem certifiedExt4_zero_ne_one :
 instance instLawfulFieldCertifiedExt4 : LawfulField Qsag.GoldilocksField.GoldilocksExt4 where
   inv := Qsag.GoldilocksField.GoldilocksExt4.inv
   zero_ne_one := certifiedExt4_zero_ne_one
+  inv_zero := Qsag.QuarticGoldilocks.inv_zero
   mul_inv_cancel {_a} ha := (Qsag.GoldilocksField.GoldilocksExt4.ext4_mul_inv_cancel ha).1
 
 end Qsag
@@ -110,65 +113,33 @@ def ringIsoQuarticToCertified :
   map_mul _ _ := rfl
 
 theorem succinctExt4_inv_zero :
-    LawfulField.inv (CommRingOps.zero : Qsag.GoldilocksExt4) = CommRingOps.zero := by
-  change Qsag.GoldilocksExt4.inv Qsag.GoldilocksExt4.zero = Qsag.GoldilocksExt4.zero
-  unfold Qsag.GoldilocksExt4.inv Qsag.GoldilocksExt4.norm Qsag.GoldilocksExt4.zero
-  apply Qsag.GoldilocksExt4.ext <;> dsimp only
-  · exact LawfulCommRing.zero_mul _
-  · rw [LawfulCommRing.zero_mul]
-    have h1 := LawfulCommRing.add_left_neg (CommRingOps.zero : Qsag.GoldilocksExt2)
-    rw [LawfulCommRing.add_zero] at h1
-    exact h1
+    LawfulField.inv (CommRingOps.zero : Qsag.GoldilocksExt4) = CommRingOps.zero :=
+  LawfulField.inv_zero
 
 theorem aggExt4_inv_zero :
-    LawfulField.inv (CommRingOps.zero : Qsag.Aggregation.GoldilocksExt4) = CommRingOps.zero := by
-  change Qsag.Aggregation.GoldilocksExt4.inv Qsag.Aggregation.GoldilocksExt4.zero =
-    Qsag.Aggregation.GoldilocksExt4.zero
-  unfold Qsag.Aggregation.GoldilocksExt4.inv Qsag.Aggregation.GoldilocksExt4.norm
-    Qsag.Aggregation.GoldilocksExt4.zero
-  apply Qsag.Aggregation.GoldilocksExt4.ext <;> dsimp only
-  · exact LawfulCommRing.zero_mul _
-  · rw [LawfulCommRing.zero_mul]
-    have h1 := LawfulCommRing.add_left_neg (CommRingOps.zero : Qsag.GoldilocksExt2)
-    rw [LawfulCommRing.add_zero] at h1
-    exact h1
+    LawfulField.inv (CommRingOps.zero : Qsag.Aggregation.GoldilocksExt4) = CommRingOps.zero :=
+  LawfulField.inv_zero
 
 theorem certifiedExt4_inv_zero :
-    LawfulField.inv (CommRingOps.zero : Qsag.GoldilocksField.GoldilocksExt4) = CommRingOps.zero := by
-  change Qsag.GoldilocksField.GoldilocksExt4.inv Qsag.GoldilocksField.GoldilocksExt4.zero =
-    Qsag.GoldilocksField.GoldilocksExt4.zero
-  unfold Qsag.GoldilocksField.GoldilocksExt4.inv Qsag.GoldilocksField.GoldilocksExt4.norm
-    Qsag.GoldilocksField.GoldilocksExt4.zero
-  apply Qsag.GoldilocksField.GoldilocksExt4.ext <;> dsimp only
-  · exact LawfulCommRing.zero_mul _
-  · rw [LawfulCommRing.zero_mul]
-    have h1 := LawfulCommRing.add_left_neg (CommRingOps.zero : Qsag.GoldilocksExt2)
-    rw [LawfulCommRing.add_zero] at h1
-    exact h1
+    LawfulField.inv (CommRingOps.zero : Qsag.GoldilocksField.GoldilocksExt4) = CommRingOps.zero :=
+  LawfulField.inv_zero
 
 theorem quarticGoldilocks_inv_zero :
-    LawfulField.inv (CommRingOps.zero : Qsag.QuarticGoldilocks) = CommRingOps.zero := by
-  change Qsag.QuarticGoldilocks.inv Qsag.QuarticGoldilocks.zero = Qsag.QuarticGoldilocks.zero
-  unfold Qsag.QuarticGoldilocks.inv Qsag.QuarticGoldilocks.zero
-  apply Qsag.QuarticGoldilocks.ext <;> dsimp only
-  · exact LawfulCommRing.zero_mul _
-  · rw [LawfulCommRing.zero_mul]
-    have h1 := LawfulCommRing.add_left_neg (CommRingOps.zero : Qsag.GoldilocksExt2)
-    rw [LawfulCommRing.add_zero] at h1
-    exact h1
+    LawfulField.inv (CommRingOps.zero : Qsag.QuarticGoldilocks) = CommRingOps.zero :=
+  LawfulField.inv_zero
 
 /-- Full field isomorphism `QuarticGoldilocks ≃+* Qsag.GoldilocksExt4`. -/
 @[expose] def isoQuarticToSuccinct : FieldIso Qsag.QuarticGoldilocks Qsag.GoldilocksExt4 :=
-  ringIsoQuarticToSuccinct.toFieldIso quarticGoldilocks_inv_zero succinctExt4_inv_zero
+  ringIsoQuarticToSuccinct.toFieldIso
 
 /-- Full field isomorphism `QuarticGoldilocks ≃+* Qsag.Aggregation.GoldilocksExt4`. -/
 @[expose] def isoQuarticToAgg : FieldIso Qsag.QuarticGoldilocks Qsag.Aggregation.GoldilocksExt4 :=
-  ringIsoQuarticToAgg.toFieldIso quarticGoldilocks_inv_zero aggExt4_inv_zero
+  ringIsoQuarticToAgg.toFieldIso
 
 /-- Full field isomorphism `QuarticGoldilocks ≃+* Qsag.GoldilocksField.GoldilocksExt4`. -/
 @[expose] def isoQuarticToCertified :
     FieldIso Qsag.QuarticGoldilocks Qsag.GoldilocksField.GoldilocksExt4 :=
-  ringIsoQuarticToCertified.toFieldIso quarticGoldilocks_inv_zero certifiedExt4_inv_zero
+  ringIsoQuarticToCertified.toFieldIso
 
 /-- Composed field isomorphism `Qsag.GoldilocksExt4 ≃+* Qsag.Aggregation.GoldilocksExt4`. -/
 @[expose] def isoSuccinctToAgg :

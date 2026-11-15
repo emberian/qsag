@@ -1478,9 +1478,17 @@ namespace Qsag
 theorem towerZero_ne_towerOne (k : Nat) : towerZero k ≠ towerOne k :=
   fun h => towerOne_ne_zero k h.symm
 
+theorem Math.towerInv_zero : ∀ k : Nat, towerInv k (towerZero k) = towerZero k
+  | 0 => rfl
+  | k + 1 => by
+    unfold towerInv towerZero
+    dsimp only
+    rw [towerMul_zero, towerAdd_zero, towerZero_mul]
+
 instance instLawfulFieldTowerElem (k : Nat) : LawfulField (TowerElem k) where
   inv := towerInv k
   zero_ne_one := towerZero_ne_towerOne k
+  inv_zero := Math.towerInv_zero k
   mul_inv_cancel {_a} ha := towerMul_inv k _ ha
 
 end Qsag
@@ -1605,9 +1613,14 @@ theorem zero_ne_one : (CommRingOps.zero : Gf2Pow128) ≠ CommRingOps.one := by
   have hb : (0#128 : BitVec 128) = 1#128 := congrArg Gf2Pow128.bits h
   exact absurd hb (by decide)
 
+theorem inv_zero : inv zero = zero := by
+  unfold inv zero
+  rw [Qsag.polyToTower128_zero, towerInv_zero 7, Qsag.psiTower128ToPoly_zero]
+
 instance : LawfulField Gf2Pow128 where
   inv := inv
   zero_ne_one := zero_ne_one
+  inv_zero := inv_zero
   mul_inv_cancel := mul_inv_cancel
 
 instance : NoZeroDivisors Gf2Pow128 :=
@@ -1628,27 +1641,18 @@ def ringIsoTower128ToPoly : RingIso Qsag.Tower128 Gf2Pow128 where
   map_sub x y := Gf2Pow128.ext (Qsag.psiTower128ToPoly_add x y)
   map_mul x y := Gf2Pow128.ext (Qsag.psiTower128ToPoly_mul x y)
 
-theorem towerInv_zero : ∀ k : Nat, Qsag.towerInv k (Qsag.towerZero k) = Qsag.towerZero k
-  | 0 => rfl
-  | k + 1 => by
-    unfold Qsag.towerInv Qsag.towerZero
-    dsimp only
-    rw [Qsag.towerMul_zero, Qsag.towerAdd_zero, Qsag.towerZero_mul]
-
 theorem towerInv7_zero :
     LawfulField.inv (CommRingOps.zero : Qsag.Tower128) = CommRingOps.zero :=
-  towerInv_zero 7
+  LawfulField.inv_zero
 
 theorem gf2Pow128_inv_zero :
-    LawfulField.inv (CommRingOps.zero : Gf2Pow128) = CommRingOps.zero := by
-  change Gf2Pow128.inv Gf2Pow128.zero = Gf2Pow128.zero
-  unfold Gf2Pow128.inv Gf2Pow128.zero
-  rw [Qsag.polyToTower128_zero, towerInv_zero 7, Qsag.psiTower128ToPoly_zero]
+    LawfulField.inv (CommRingOps.zero : Gf2Pow128) = CommRingOps.zero :=
+  LawfulField.inv_zero
 
 /-- **Canonical Field Isomorphism (`isoTower128ToPoly : FieldIso Tower128 Gf2Pow128`)**:
     Preserves `0, 1, +, -, sub, *`, and `inv` across Wiedemann's tower and the polynomial basis. -/
 @[expose] def isoTower128ToPoly : FieldIso Qsag.Tower128 Gf2Pow128 :=
-  ringIsoTower128ToPoly.toFieldIso towerInv7_zero gf2Pow128_inv_zero
+  ringIsoTower128ToPoly.toFieldIso
 
 
 end Qsag.Math

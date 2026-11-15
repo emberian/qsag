@@ -779,11 +779,13 @@ theorem goldilocksExt2_card_gt_two_pow_126 (k : Nat) (hk : k ≤ 127) :
 instance : LawfulField Goldilocks where
   inv := Goldilocks.inv
   zero_ne_one := by decide
+  inv_zero := by decide
   mul_inv_cancel := Goldilocks.mul_inv_cancel
 
 instance : LawfulField GoldilocksExt2 where
   inv := GoldilocksExt2.inv
   zero_ne_one := by decide
+  inv_zero := by decide
   mul_inv_cancel := GoldilocksExt2.mul_inv_cancel
 
 /-! ## 2. Universal Two-Sided Multiplicative Inverse & Bezout Equivalence on `Goldilocks` -/
