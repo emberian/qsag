@@ -230,11 +230,7 @@ impl FpPallas {
             b = Self::ct_select(need_mul, b.mul_mod(c2), b);
             c = c2;
         }
-        if x.sq() == self {
-            Some(x)
-        } else {
-            None
-        }
+        if x.sq() == self { Some(x) } else { None }
     }
 }
 
@@ -545,7 +541,9 @@ impl PartialEq for PallasPoint {
         match (self.z.is_zero(), other.z.is_zero()) {
             (true, true) => true,
             (true, false) | (false, true) => false,
-            (false, false) => (self.x * other.z == other.x * self.z) && (self.y * other.z == other.y * self.z),
+            (false, false) => {
+                (self.x * other.z == other.x * self.z) && (self.y * other.z == other.y * self.z)
+            }
         }
     }
 }
@@ -648,7 +646,10 @@ impl PallasOwnershipWitness {
         ))
     }
 
-    pub fn effective_scalar(&self, kind: &PallasCommitmentKind) -> Option<(FqPallas, FqPallas, FqPallas)> {
+    pub fn effective_scalar(
+        &self,
+        kind: &PallasCommitmentKind,
+    ) -> Option<(FqPallas, FqPallas, FqPallas)> {
         let ask = FqPallas::from_nonzero_le_bytes(self.ask_le.expose())?;
         match kind {
             PallasCommitmentKind::OrchardSpendAuthKey(_) => {
@@ -959,9 +960,11 @@ impl PalBuilder {
     }
 
     fn pack_gold(&self, bits: &[Wire]) -> Wire {
-        bits.iter().rev().fold(self.small(PalDom::Gold, 0), |a, &b| {
-            self.add(self.scale(a, 2), self.lift(b, PalDom::Gold))
-        })
+        bits.iter()
+            .rev()
+            .fold(self.small(PalDom::Gold, 0), |a, &b| {
+                self.add(self.scale(a, 2), self.lift(b, PalDom::Gold))
+            })
     }
 
     fn add_bits(&self, a: &[Wire], b: &[Wire], carry: Wire) -> (Vec<Wire>, Wire) {
@@ -1132,7 +1135,9 @@ fn big_endian_bits(bits: &[Wire]) -> Vec<Wire> {
 
 fn poseidon_me(c: &PalBuilder, st: &mut [Wire; 12]) {
     // M4 tensor P3: transpose lanes, apply P3 tensor M4, transpose back.
-    *st = [st[0], st[3], st[6], st[9], st[1], st[4], st[7], st[10], st[2], st[5], st[8], st[11]];
+    *st = [
+        st[0], st[3], st[6], st[9], st[1], st[4], st[7], st[10], st[2], st[5], st[8], st[11],
+    ];
     let mut ys = *st;
     for row in ys.chunks_exact_mut(4) {
         let old: [Wire; 4] = core::array::from_fn(|i| row[i]);
@@ -1144,7 +1149,9 @@ fn poseidon_me(c: &PalBuilder, st: &mut [Wire; 12]) {
     for (i, x) in st.iter_mut().enumerate() {
         *x = c.add(ys[i], c.add(c.add(ys[i % 4], ys[i % 4 + 4]), ys[i % 4 + 8]));
     }
-    *st = [st[0], st[4], st[8], st[1], st[5], st[9], st[2], st[6], st[10], st[3], st[7], st[11]];
+    *st = [
+        st[0], st[4], st[8], st[1], st[5], st[9], st[2], st[6], st[10], st[3], st[7], st[11],
+    ];
 }
 
 fn poseidon_mi(c: &PalBuilder, st: &mut [Wire; 12]) {
@@ -1574,7 +1581,10 @@ fn replay_pallas_with_scratch(
     if inputs.iter().any(|s| !s.is_empty()) {
         return Err(MigrateError::MalformedProofStructure);
     }
-    let mut outputs = view.pair.each_ref().map(|v| PalPackedReader::new(&v.outputs));
+    let mut outputs = view
+        .pair
+        .each_ref()
+        .map(|v| PalPackedReader::new(&v.outputs));
     let mut hidden = PalPackedReader::new(&view.hidden_outputs);
     for &w in &c.outputs {
         let d = c.nodes[w].domain;
@@ -1595,7 +1605,8 @@ fn pallas_transcript(
     statement: &PallasMigrationStatement,
     root: &[u8; 32],
 ) -> InterleavedTranscript {
-    let mut t = InterleavedTranscript::new(b"QSAG.PALLAS.MIGRATE.V1", &statement.to_transcript_bytes());
+    let mut t =
+        InterleavedTranscript::new(b"QSAG.PALLAS.MIGRATE.V1", &statement.to_transcript_bytes());
     t.absorb(b"VIEWS", root);
     t
 }
@@ -1709,10 +1720,7 @@ pub fn prove_pallas_migration_in_domain<B: AcceleratorBackend>(
             let hidden_outputs = core::mem::take(&mut rep_views[hidden].outputs);
             repetitions.push(OpenedRepetitionView {
                 opened_e: e,
-                pair: [
-                    rep_views[e_idx].clone(),
-                    rep_views[(e_idx + 1) % 3].clone(),
-                ],
+                pair: [rep_views[e_idx].clone(), rep_views[(e_idx + 1) % 3].clone()],
                 hidden_party_commit: commits[hidden],
                 hidden_outputs,
             });
@@ -1845,12 +1853,7 @@ mod tests {
     #[test]
     fn pasta_pallas_and_orchard_generator_constants_hold() {
         // Verify `(p - 1)^2 == 1 (mod p)` (`p^2` wraparound check) and Fermat inversion.
-        let pm1 = FpPallas([
-            PALLAS_P[0] - 1,
-            PALLAS_P[1],
-            PALLAS_P[2],
-            PALLAS_P[3],
-        ]);
+        let pm1 = FpPallas([PALLAS_P[0] - 1, PALLAS_P[1], PALLAS_P[2], PALLAS_P[3]]);
         assert_eq!(pm1 * pm1, FpPallas::ONE);
         assert_eq!(pm1 + FpPallas::ONE, FpPallas::ZERO);
         let five_inv = FpPallas::B.inv_or_zero();
@@ -1872,12 +1875,7 @@ mod tests {
         );
 
         // `[q - 1] SpendAuthG == -SpendAuthG`
-        let qm1 = FqPallas([
-            PALLAS_Q[0] - 1,
-            PALLAS_Q[1],
-            PALLAS_Q[2],
-            PALLAS_Q[3],
-        ]);
+        let qm1 = FqPallas([PALLAS_Q[0] - 1, PALLAS_Q[1], PALLAS_Q[2], PALLAS_Q[3]]);
         assert_eq!(
             PallasPoint::spend_auth_mul_ct(&qm1),
             PallasPoint::ORCHARD_SPEND_AUTH_G.neg_point()
@@ -2000,6 +1998,22 @@ mod poseidon2_canonical_kat {
         let c = PalBuilder::default();
         let mut st = core::array::from_fn(|i| c.small(PalDom::Gold, i as u64));
         poseidon_perm(&c, &mut st);
-        assert_eq!(st.map(|w| c.value(w)[0]), [13782584570844608145, 13136387643152332171, 7171133015474200819, 7643370872200861694, 14144755201299840503, 16470027036684692562, 1748465969625202405, 1718729118078964347, 6141020819996733037, 16322330185628708898, 11650380702735067362, 2734959974607798415]);
+        assert_eq!(
+            st.map(|w| c.value(w)[0]),
+            [
+                13782584570844608145,
+                13136387643152332171,
+                7171133015474200819,
+                7643370872200861694,
+                14144755201299840503,
+                16470027036684692562,
+                1748465969625202405,
+                1718729118078964347,
+                6141020819996733037,
+                16322330185628708898,
+                11650380702735067362,
+                2734959974607798415
+            ]
+        );
     }
 }

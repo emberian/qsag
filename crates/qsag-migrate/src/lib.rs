@@ -45,21 +45,20 @@ pub use pallas::{
 };
 mod boolean_hash;
 mod circuit;
-mod limbs;
 pub mod co_zk_mpc;
+mod limbs;
 mod ownership;
 pub use co_zk_mpc::CoZkCustodianShare;
 mod batch_hash;
 mod outer_mpc;
-pub mod threshold_mpc;
-pub mod threshold_prep;
 mod parallel;
 mod secret;
 mod tape_sponge;
+pub mod threshold_mpc;
+pub mod threshold_prep;
 pub use zk_engine::{
     MIT_PARTIES, MIT_REPETITIONS, MigrateError, MigrationRequest, MigrationStatement,
-    MigrationZkProof, OpenedRepetitionView, prove_migration_in_domain, prove_migration_ownership,
-    verify_migration_proof,
+    MigrationZkProof, OpenedRepetitionView, prove_migration_in_domain, verify_migration_proof,
 };
 
 #[cfg(test)]

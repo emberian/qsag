@@ -194,14 +194,21 @@ canonical result: `R + k*c < 2^n + 2c < 2p` for all three fields.
 Both directions verify **all** pending Boolean and prime-field multiplications
 before any masked difference opens. Automatic Boolean checks retain a partial
 chunk for the next batch; openings always check that remainder too. Auxiliary
-curve inverses multiply by a fresh shared field mask, authenticate that product,
-open the masked product, and scale the secret mask by its public inverse.
-For nonzero operands the opened product is uniform and independent of the
-operand. A zero product retries the mask, with an abort after three attempts;
-a zero operand therefore aborts and its zero status is revealed. The curve
-inversion gate requires a nonzero projective coordinate on valid witnesses.
-The active multiplication checks still run before the masked opening, so this
-is one multiplication plus one opening, not two total transport exchanges.
+curve inverses (`Gadgets::finverse`) first test that no lane of the operand is
+zero without showing which: six rotate-and-multiply rounds put the product of
+all 64 lanes in every lane, that word is multiplied by a fresh shared mask and
+opened. It is all zero exactly when some lane is zero (unless all 64 mask lanes
+are zero), and then the gate aborts with `InvalidProof`; the set of zero lanes
+and their number are not opened. Only after that test passes does the gate
+multiply the operand by a second fresh mask, open the masked product, and scale
+the secret mask by its public inverse. Every lane is nonzero at that point, so
+the opened product is uniform and independent of the operand, and a zero in it
+is a zero mask lane: the mask is redrawn, with an abort after three attempts.
+A zero operand therefore aborts and reveals that some lane is zero, nothing
+else. The curve inversion gate requires a nonzero projective coordinate on
+valid witnesses. The active multiplication checks run before both openings.
+One inversion costs eight field-word multiplications, two random field words
+and two openings (the general-quorum backend takes these from preprocessing).
 Final ZKBoo shares and the proof format are unchanged; outer-MPC traffic changes.
 
 ### Mandatory active multiplication verification (`P0-01`)
@@ -287,9 +294,10 @@ This matches the native `Tape::sample` stream, including the Edwards high-bit
 mask and the full byte width consumed by each draw.
 
 Repair starts with two attempts per draw. If any draw remains unresolved, the
-original PRG stream is extended and replayed with a doubled budget. There is no
-fixed rejection limit for honest PRG draws; malformed finite buffers, invalid
-schedules, and size overflow return `InvalidTape`. Every scratch buffer remains
+original PRG stream is extended and replayed with a doubled budget, up to
+`MAX_TAPE_ATTEMPTS = 8` candidates per draw. A draw with eight non-canonical
+candidates in a row has probability at most `2^-256`; that event, malformed
+finite buffers and invalid schedules return `InvalidTape`. Every scratch buffer remains
 wipe-on-drop. Only the same aggregate per-head, per-lane validity masks as the
 initial range check are opened, after multiplication verification; individual
 candidate values and per-draw rejection masks are never opened.
@@ -383,14 +391,16 @@ The integrated 2026-11-14 validation run passed all 39 migration unit tests in
 892.97 seconds, including both complete 438-repetition Bitcoin and Ed25519
 ceremonies and both witness-substitution regressions. Its compile-fail doctest
 also passed. This closes the earlier timed-out Bitcoin execution check; it does
-not establish the open production privacy or FS/QROM refinements. The unified
-proof census and remaining boundaries are tracked in
-[the convergence record](../../docs/CONVERGENCE_STATUS.md).
+not establish the open production privacy or FS/QROM refinements. The
+remaining boundaries are tracked in the
+[assurance and deployment boundary](../../ASSURANCE.md#further-model-and-integration-boundaries)
+and the open proof obligations in the
+[security proof guide](../../docs/SECURITY_AND_CT_PROOFS.md#from-component-statements-to-actual-construction-security).
 
 The subsequent gadget-storage update adds two zeroization tests. All unit
-tests and the compile-fail doctest pass in host-native release runs; summary
-verification status and remaining boundaries are tracked in
-[the convergence record](../../docs/CONVERGENCE_STATUS.md).
+tests and the compile-fail doctest pass in host-native release runs; the layout
+of the Lean library and its audit commands are in the
+[proof architecture guide](../../docs/PROOF_ARCHITECTURE.md#6-independent-verification-commands).
 
 Unit and adversarial integration tests verify:
 
@@ -526,7 +536,12 @@ It targets security with abort against all quorum members but one:
   once per ordered pair, so its key is fixed structurally, and the owner's
   consistency is enforced by an opened, masked random combination under a
   commit-then-open MAC check. A further check binds each holder to one key
-  towards all owners.
+  towards all owners: the sum over the owners of one random item each is
+  opened and MAC-checked under the global key shares. Every pair masks its two
+  value shares with a common pad stream (the first pads of 64 base OTs with
+  choice bit 0), so the shares of two honest owners determine only the sum of
+  their items; a holder that commits to its check share after seeing them
+  cannot subtract its key difference times one owner's item.
 * Field triples follow MASCOT triple generation with privacy amplification
   over `tau` components and `sigma` sacrificial triples: `tau = 3`, `sigma = 1`
   for the 255/256-bit fields, `tau = 7`, `sigma = 2` for Goldilocks.

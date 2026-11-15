@@ -9,15 +9,14 @@ use alloc::{boxed::Box, vec, vec::Vec};
 use qsag_accel::{
     ct::{ct_eq_bytes_mask, ct_zeroize_bytes, ct_zeroize_u64s},
     goldilocks::{GOLDILOCKS_PRIME as GOLDILOCKS_P, gl_add, gl_mul, gl_sub},
-    keccak::{KECCAK_RC, cshake256_framed_32, reduce_192_zero_bias},
+    keccak::{KECCAK_RC, cshake256_framed_32, reduce_192_mod_p},
+};
+use qsag_asm::{
+    BitPlane256, SimdBackend, XorCombinePattern, detect_backend, gf2_64x128_clmul_acc_with_backend,
+    gf2_128_dot_with_backend, gf2_128_mul_acc_batch_with_backend,
+    gf2_xor_combine_planes_with_backend, transpose64x256_with_backend,
 };
 use qsag_core::sponge::keccak::{Cshake256Xof, SHAKE256_RATE_BYTES, cshake256_static_midstate};
-use qsag_asm::{
-    BitPlane256, SimdBackend, XorCombinePattern, detect_backend,
-    gf2_64x128_clmul_acc_with_backend, gf2_128_dot_with_backend,
-    gf2_128_mul_acc_batch_with_backend, gf2_xor_combine_planes_with_backend,
-    transpose64x256_with_backend,
-};
 
 const MAX_PENDING_BITS: usize = 262_144;
 const BIT_TENSOR_BITS: usize = 6;
@@ -131,8 +130,7 @@ pub(crate) trait Core {
         words: &[&FieldWord],
         d: Domain,
     ) -> Result<Vec<Word<Self::Bit>>, Error>;
-    fn lift_bits_many(&mut self, bits: &[Self::Bit], d: Domain)
-    -> Result<Vec<FieldWord>, Error>;
+    fn lift_bits_many(&mut self, bits: &[Self::Bit], d: Domain) -> Result<Vec<FieldWord>, Error>;
 
     /// Test hook: move a pending field-multiplication fault out of the way
     /// (and back) so regressions can aim it at a chosen phase.
@@ -503,55 +501,13 @@ fn zeroize_gf128_slice(slice: &mut [Gf128]) {
     ct_zeroize_u64s(slice.as_flattened_mut());
 }
 
-/// Set `v` to `len` words without ever leaving secret words in freed or
-/// truncated storage: a shrink wipes the dropped tail and a growth wipes the old
-/// allocation before it is released. Growth past the capacity does not keep the
-/// old contents; callers overwrite the whole buffer.
-#[cfg(test)]
+/// Grow the reusable scratch `v` to at least `len` words. It never shrinks: the
+/// high-water tail stays allocated for later calls and is erased with the rest when
+/// the owner is released or dropped.
 #[inline]
-fn resize_wiped(v: &mut Vec<u64>, len: usize) {
-    if len < v.len() {
-        ct_zeroize_u64s(&mut v[len..]);
-    } else if len > v.capacity() {
-        ct_zeroize_u64s(v);
-        *v = Vec::with_capacity(len);
-    }
-    v.resize(len, 0);
-}
-
-/// Grow `v` to at least `len` words, wiping any reallocated backing buffer without
-/// zeroing and shrinking the reusable high-water tail on smaller calls (`Engine`
-/// wipes the entire buffer in `release_verified_scratch` and `Drop`).
-#[inline]
-fn ensure_scratch_len(v: &mut Vec<u64>, len: usize) {
+fn ensure_scratch_len(v: &mut SecretVec<u64>, len: usize) {
     if len > v.len() {
-        if len > v.capacity() {
-            let cap = len.max(2 * v.capacity());
-            ct_zeroize_u64s(v);
-            *v = Vec::with_capacity(cap);
-        }
         v.resize(len, 0);
-    }
-}
-
-/// `Vec::reserve` that wipes the old allocation when it has to move.
-#[inline]
-fn reserve_wiped(v: &mut Vec<u64>, additional: usize) {
-    let need = v.len() + additional;
-    if need > v.capacity() {
-        let mut grown = Vec::with_capacity(need.max(2 * v.capacity()));
-        grown.extend_from_slice(v);
-        ct_zeroize_u64s(v);
-        *v = grown;
-    }
-}
-
-struct ZeroizeRepGf128Vec(Vec<RepGf128>);
-impl Drop for ZeroizeRepGf128Vec {
-    fn drop(&mut self) {
-        for item in &mut self.0 {
-            zeroize_gf128_slice(item);
-        }
     }
 }
 
@@ -724,7 +680,7 @@ fn squeeze_g3_challenge(xof: &mut WordSponge136) -> GoldExt3 {
     for (dst, slice24) in out.iter_mut().zip(raw.chunks_exact(24)) {
         let mut arr = [0u8; 24];
         arr.copy_from_slice(slice24);
-        *dst = reduce_192_zero_bias(&arr);
+        *dst = reduce_192_mod_p(&arr);
     }
     out
 }
@@ -828,12 +784,12 @@ pub(crate) struct Engine<T> {
     coin_rng: WordSponge136,
     sequence: u64,
     poisoned: bool,
-    pending_bits_raw: Vec<u64>,
+    pending_bits_raw: SecretVec<u64>,
     pending_secp: Vec<PendingFieldTriple>,
     pending_ed: Vec<PendingFieldTriple>,
     pending_gold: Vec<PendingFieldTriple>,
-    scratch_r: Vec<u64>,
-    scratch_s: Vec<u64>,
+    scratch_r: SecretVec<u64>,
+    scratch_s: SecretVec<u64>,
     bit_scratch: Option<Box<BitCheckScratch>>,
     #[cfg(test)]
     pub(crate) fault: Option<FaultInjection>,
@@ -845,9 +801,6 @@ impl<T> Drop for Engine<T> {
         for key in &mut self.keys {
             ct_zeroize_bytes(key);
         }
-        ct_zeroize_u64s(&mut self.scratch_r);
-        ct_zeroize_u64s(&mut self.scratch_s);
-        ct_zeroize_u64s(&mut self.pending_bits_raw);
     }
 }
 
@@ -901,12 +854,12 @@ impl<T: Transport> Engine<T> {
             poisoned: false,
             #[cfg(any(feature = "std", test))]
             batch_cancelled: None,
-            pending_bits_raw: Vec::new(),
+            pending_bits_raw: SecretVec::new(),
             pending_secp: Vec::new(),
             pending_ed: Vec::new(),
             pending_gold: Vec::new(),
-            scratch_r: Vec::new(),
-            scratch_s: Vec::new(),
+            scratch_r: SecretVec::new(),
+            scratch_s: SecretVec::new(),
             bit_scratch: None,
             #[cfg(test)]
             fault,
@@ -936,8 +889,7 @@ impl<T: Transport> Engine<T> {
             &mut self.scratch_s,
             &mut self.pending_bits_raw,
         ] {
-            ct_zeroize_u64s(scratch);
-            *scratch = Vec::new();
+            *scratch = SecretVec::new();
         }
     }
 
@@ -1338,7 +1290,7 @@ impl<T: Transport> Engine<T> {
 
         let reshared_res = self.reshare_gf128_many(&fold_locals);
         zeroize_gf128_slice(&mut fold_locals);
-        let lr_sh = ZeroizeRepGf128Vec(reshared_res?);
+        let lr_sh: SecretVec<RepGf128> = reshared_res?.into();
 
         let seed_rk = self.coin_flip(b"QSAG.OUTER.MULCHECK.BITS.FOLD.V1")?;
         let mut xof_rk = WordSponge136::from_shake_seed(&seed_rk);
@@ -1356,7 +1308,7 @@ impl<T: Transport> Engine<T> {
             let gi_u = gf128_to_u128(gamma_inv[t]);
             let scales = [gamma_inv[t], gamma[t]];
             for side in 0..2 {
-                let msgs = [lr_sh.0[2 * t][side], lr_sh.0[2 * t + 1][side]];
+                let msgs = [lr_sh[2 * t][side], lr_sh[2 * t + 1][side]];
                 gf128_dot_acc(&mut scratch.c_claim[t][side], &scales, &msgs, backend);
 
                 let (x_lo, x_rest) = scratch.x_tab[t][side].split_at_mut(upper);
@@ -1532,7 +1484,7 @@ impl<T: Transport> Engine<T> {
 
             let sc_res = self.reshare_gf128_many(&sc_locals);
             zeroize_gf128_slice(&mut sc_locals);
-            let s_sh = ZeroizeRepGf128Vec(sc_res?);
+            let s_sh: SecretVec<RepGf128> = sc_res?.into();
 
             let seed_sc = self.coin_flip(b"QSAG.OUTER.MULCHECK.BITS.SUMCHECK.V1")?;
             let mut xof_sc = WordSponge136::from_shake_seed(&seed_sc);
@@ -1551,10 +1503,10 @@ impl<T: Transport> Engine<T> {
                 bound_weight[t] = gf128_mul_u128(bound_weight[t], w, backend);
 
                 for side in 0..2 {
-                    let s1 = gf128_to_u128(s_sh.0[2 * t][side]);
-                    let s2 = gf128_to_u128(s_sh.0[2 * t + 1][side]);
-                    let s0 = gf128_to_u128(scratch.c_claim[t][side])
-                        ^ gf128_mul_u128(mu_i, s1, backend);
+                    let s1 = gf128_to_u128(s_sh[2 * t][side]);
+                    let s2 = gf128_to_u128(s_sh[2 * t + 1][side]);
+                    let s0 =
+                        gf128_to_u128(scratch.c_claim[t][side]) ^ gf128_mul_u128(mu_i, s1, backend);
                     let next_c = gf128_mul_u128(c0, s0, backend)
                         ^ gf128_mul_u128(c1, s1, backend)
                         ^ gf128_mul_u128(c2, s2, backend);
@@ -1714,7 +1666,7 @@ impl<T: Transport> Engine<T> {
 
         let d_res = self.reshare_gf128_many(&base_locals);
         zeroize_gf128_slice(&mut base_locals);
-        let d_sh = ZeroizeRepGf128Vec(d_res?);
+        let d_sh: SecretVec<RepGf128> = d_res?.into();
 
         let seed_base = self.coin_flip(b"QSAG.OUTER.MULCHECK.BITS.BASE.V1")?;
         let mut xof_base = WordSponge136::from_shake_seed(&seed_base);
@@ -1743,7 +1695,7 @@ impl<T: Transport> Engine<T> {
                     gf128_mul_hw(scratch.v_mask[t][side], rb[t], backend),
                 );
                 let mut g_val = scratch.c_claim[t][side];
-                let d_arr = [d_sh.0[2 * t][side], d_sh.0[2 * t + 1][side]];
+                let d_arr = [d_sh[2 * t][side], d_sh[2 * t + 1][side]];
                 gf128_dot_acc(&mut g_val, &d_arr, &pows2, backend);
                 gamma_sh[side] = g_val;
             }
@@ -1809,14 +1761,10 @@ impl<T: Transport> Engine<T> {
             batch.len()
         };
         for chunk in batch[..checked].chunks(MAX_PENDING_BITS * 6) {
-            if let Err(err) = self.verify_pending_bits_slice(chunk) {
-                ct_zeroize_u64s(&mut batch);
-                return Err(err);
-            }
+            self.verify_pending_bits_slice(chunk)?;
         }
         let remaining = batch.len() - checked;
         batch.copy_within(checked.., 0);
-        ct_zeroize_u64s(&mut batch[remaining..]);
         batch.truncate(remaining);
         self.pending_bits_raw = batch;
         Ok(())
@@ -2451,7 +2399,6 @@ impl<T: Transport> Engine<T> {
             *dst = Bit([a, b]);
         }
         let old_raw = self.pending_bits_raw.len();
-        reserve_wiped(&mut self.pending_bits_raw, k * 6);
         self.pending_bits_raw.resize(old_raw + k * 6, 0);
         for (dst, (&(a, b), &z)) in self.pending_bits_raw[old_raw..]
             .chunks_exact_mut(6)
@@ -2495,9 +2442,7 @@ impl<T: Transport> Engine<T> {
         }
         Ok(())
     }
-
 }
-
 
 impl<T: Transport> Core for Engine<T> {
     type Bit = Bit;
@@ -2627,7 +2572,12 @@ pub(crate) trait Gadgets: Core {
     }
 
     #[cfg(test)]
-    fn select(&mut self, c: Self::Bit, a: &[Self::Bit], b: &[Self::Bit]) -> Result<Word<Self::Bit>, Error> {
+    fn select(
+        &mut self,
+        c: Self::Bit,
+        a: &[Self::Bit],
+        b: &[Self::Bit],
+    ) -> Result<Word<Self::Bit>, Error> {
         let pairs: SecretVec<_> = a.iter().zip(b).map(|(&a, &b)| (c, a ^ b)).collect();
         Ok(self
             .and(&pairs)?
@@ -2663,7 +2613,12 @@ pub(crate) trait Gadgets: Core {
 
     /// Parallel-prefix binary adder; logarithmic communication depth for single words.
     #[cfg(test)]
-    fn add(&mut self, a: &[Self::Bit], b: &[Self::Bit], carry: Self::Bit) -> Result<(Word<Self::Bit>, Self::Bit), Error> {
+    fn add(
+        &mut self,
+        a: &[Self::Bit],
+        b: &[Self::Bit],
+        carry: Self::Bit,
+    ) -> Result<(Word<Self::Bit>, Self::Bit), Error> {
         let n = a.len();
         let p = self.xor(a, b);
         let mut pp = p.clone();
@@ -2771,15 +2726,17 @@ pub(crate) trait Gadgets: Core {
         }
         let k = a_words.len();
         let k_bits = self.number(k_val, width);
-        let mut sums: Vec<Word<Self::Bit>> = (0..k).map(|_| SecretVec::with_capacity(width)).collect();
+        let mut sums: Vec<Word<Self::Bit>> =
+            (0..k).map(|_| SecretVec::with_capacity(width)).collect();
         let mut carries: Word<Self::Bit> = vec![self.constant(carry_mask); k].into();
         let zero = self.constant(0);
         let mut pairs = SecretVec::with_capacity(k);
         pairs.resize(k, (zero, zero));
         let mut prods = SecretVec::with_capacity(k);
         for (bit, &kb) in k_bits.iter().enumerate() {
-            for (pair_slot, (a, (&c, sum_w))) in
-                pairs.iter_mut().zip(a_words.iter().zip(carries.iter().zip(&mut sums)))
+            for (pair_slot, (a, (&c, sum_w))) in pairs
+                .iter_mut()
+                .zip(a_words.iter().zip(carries.iter().zip(&mut sums)))
             {
                 let ai = a[bit];
                 sum_w.push(ai ^ kb ^ c);
@@ -2795,7 +2752,11 @@ pub(crate) trait Gadgets: Core {
 
     /// Check `v < d.modulus()` across `v_words` (`width == d.width()`).
     /// Since `p = 2^n - c`, `v < p <==> v + c < 2^n <==> carry_out_n(v + c) == 0`.
-    fn less_than_modulus_many(&mut self, v_words: &[Word<Self::Bit>], d: Domain) -> Result<Word<Self::Bit>, Error> {
+    fn less_than_modulus_many(
+        &mut self,
+        v_words: &[Word<Self::Bit>],
+        d: Domain,
+    ) -> Result<Word<Self::Bit>, Error> {
         if v_words.is_empty() {
             return Ok(SecretVec::new());
         }
@@ -2819,7 +2780,12 @@ pub(crate) trait Gadgets: Core {
     }
 
     #[cfg(test)]
-    fn field_add(&mut self, a: &[Self::Bit], b: &[Self::Bit], d: Domain) -> Result<Word<Self::Bit>, Error> {
+    fn field_add(
+        &mut self,
+        a: &[Self::Bit],
+        b: &[Self::Bit],
+        d: Domain,
+    ) -> Result<Word<Self::Bit>, Error> {
         if d == Domain::Bit {
             return Ok(self.xor(a, b));
         }
@@ -2857,7 +2823,12 @@ pub(crate) trait Gadgets: Core {
     }
 
     #[cfg(test)]
-    fn field_sub(&mut self, a: &[Self::Bit], b: &[Self::Bit], d: Domain) -> Result<Word<Self::Bit>, Error> {
+    fn field_sub(
+        &mut self,
+        a: &[Self::Bit],
+        b: &[Self::Bit],
+        d: Domain,
+    ) -> Result<Word<Self::Bit>, Error> {
         if d == Domain::Bit {
             return Ok(self.xor(a, b));
         }
@@ -2870,7 +2841,11 @@ pub(crate) trait Gadgets: Core {
 
     /// Carry-save tree; all compressors at a level share one network round.
     #[cfg(test)]
-    fn sum_rows(&mut self, mut rows: Vec<Word<Self::Bit>>, width: usize) -> Result<Word<Self::Bit>, Error> {
+    fn sum_rows(
+        &mut self,
+        mut rows: Vec<Word<Self::Bit>>,
+        width: usize,
+    ) -> Result<Word<Self::Bit>, Error> {
         for r in &mut rows {
             r.resize(width, self.constant(0));
         }
@@ -2898,7 +2873,12 @@ pub(crate) trait Gadgets: Core {
         }
     }
     #[cfg(test)]
-    fn field_mul(&mut self, a: &[Self::Bit], b: &[Self::Bit], d: Domain) -> Result<Word<Self::Bit>, Error> {
+    fn field_mul(
+        &mut self,
+        a: &[Self::Bit],
+        b: &[Self::Bit],
+        d: Domain,
+    ) -> Result<Word<Self::Bit>, Error> {
         if d == Domain::Bit {
             return self.and(&[(a[0], b[0])]);
         }
@@ -2918,7 +2898,12 @@ pub(crate) trait Gadgets: Core {
         self.reduce_wide(wide, d)
     }
     #[cfg(test)]
-    fn field_scale(&mut self, a: &[Self::Bit], value: Value, d: Domain) -> Result<Word<Self::Bit>, Error> {
+    fn field_scale(
+        &mut self,
+        a: &[Self::Bit],
+        value: Value,
+        d: Domain,
+    ) -> Result<Word<Self::Bit>, Error> {
         if d == Domain::Bit {
             return Ok(if value[0] == 0 {
                 vec![self.constant(0)].into()
@@ -2977,7 +2962,11 @@ pub(crate) trait Gadgets: Core {
         self.reduce_wide(wide, d)
     }
     #[cfg(test)]
-    fn reduce_wide(&mut self, mut wide: Word<Self::Bit>, d: Domain) -> Result<Word<Self::Bit>, Error> {
+    fn reduce_wide(
+        &mut self,
+        mut wide: Word<Self::Bit>,
+        d: Domain,
+    ) -> Result<Word<Self::Bit>, Error> {
         let n = d.width();
         let c = match d {
             Domain::Ed => 19u64,
@@ -3085,7 +3074,6 @@ pub(crate) trait Gadgets: Core {
         Ok(self.fmul_many(&[(a, b)], d)?.pop().unwrap())
     }
 
-
     #[cfg(test)]
     fn bits_to_field(&mut self, v: &[Self::Bit], d: Domain) -> Result<FieldWord, Error> {
         Ok(self
@@ -3099,11 +3087,40 @@ pub(crate) trait Gadgets: Core {
         Ok(self.field_to_bits_many(&[v], d)?.pop().unwrap())
     }
 
+    /// Lane-wise inverse of a shared field word whose lanes must all be nonzero.
+    ///
+    /// The only thing a zero operand discloses is that some lane is zero. Opening
+    /// `a[i] * mask[i]` directly would show every party which lanes are zero, so
+    /// the product of all lanes is tested first: six rotate-and-multiply rounds
+    /// leave that one product in every lane, and it is opened under a fresh
+    /// uniform mask. The opened word is all zero exactly when some lane of `a` is
+    /// zero (up to all 64 mask lanes being zero), so it does not depend on which
+    /// lane or on how many. Only after that test passes are the per-lane masked
+    /// products opened, and then a zero can come from the mask alone.
     fn finverse(&mut self, a: &FieldWord, d: Domain) -> Result<FieldWord, Error> {
-        // Opening authenticates all pending products first. Only the uniformly
-        // masked product is public; the mask and inverse remain shared.
-        // Inversion gates require a nonzero operand. Bound retries so malformed
-        // zero operands abort instead of hanging a ceremony indefinitely.
+        if a.len() != BIT_LANES {
+            self.poison();
+            return Err(Error::InvalidConfiguration);
+        }
+        let mut all: FieldWord = a.iter().copied().collect();
+        for shift in [1, 2, 4, 8, 16, 32] {
+            let rotated: FieldWord = (0..BIT_LANES)
+                .map(|lane| all[(lane + shift) % BIT_LANES])
+                .collect();
+            all = self.fmul(&all, &rotated, d)?;
+        }
+        let gate_mask = self.frandom(d)?;
+        let gate = self.fmul(&all, &gate_mask, d)?;
+        let gate = self.fopen_many(&[gate], d)?;
+        let nonzero = gate[0]
+            .iter()
+            .fold(0u64, |acc, v| acc | v[0] | v[1] | v[2] | v[3]);
+        if nonzero == 0 {
+            self.poison();
+            return Err(Error::InvalidProof);
+        }
+        // Every lane of `a` is nonzero here, so a zero below is a zero mask lane,
+        // which is independent of `a`; that mask is discarded and redrawn.
         for _ in 0..3 {
             let mask = self.frandom(d)?;
             let product = self.fmul(a, &mask, d)?;
@@ -3171,11 +3188,7 @@ impl<B: ShareBit> Sponge<B> {
         Ok(())
     }
     #[cfg(test)]
-    pub fn squeeze<E: Core<Bit = B>>(
-        &mut self,
-        e: &mut E,
-        count: usize,
-    ) -> Result<Word<B>, Error> {
+    pub fn squeeze<E: Core<Bit = B>>(&mut self, e: &mut E, count: usize) -> Result<Word<B>, Error> {
         let mut out = SecretVec::with_capacity(count);
         for _ in 0..count {
             if self.pos == 1088 {
@@ -3213,8 +3226,10 @@ pub(crate) fn squeeze_sponges_lockstep<E: Core>(
     sponges: &mut [Sponge<E::Bit>],
     counts: &[usize],
 ) -> Result<Vec<Word<E::Bit>>, Error> {
-    let mut outs: Vec<Word<E::Bit>> =
-        counts.iter().map(|&c| SecretVec::with_capacity(c)).collect();
+    let mut outs: Vec<Word<E::Bit>> = counts
+        .iter()
+        .map(|&c| SecretVec::with_capacity(c))
+        .collect();
     loop {
         let mut need_perm = Vec::new();
         for (idx, (sp, &target)) in sponges.iter_mut().zip(counts).enumerate() {
@@ -3680,7 +3695,6 @@ impl<T: Transport> Engine<T> {
             })
             .collect())
     }
-
 }
 
 #[cfg(test)]
@@ -3904,6 +3918,121 @@ pub(crate) mod tests {
         });
     }
 
+    /// Delegates to a backend and records every opened field word.
+    struct FieldOpenings<E>(E, Vec<Vec<Value>>);
+    impl<E: Core> Core for FieldOpenings<E> {
+        type Bit = E::Bit;
+        fn constant(&self, x: u64) -> Self::Bit {
+            self.0.constant(x)
+        }
+        fn share(&mut self, own: &[u64]) -> Result<Word<Self::Bit>, Error> {
+            self.0.share(own)
+        }
+        fn share_uniform_lanes(&mut self, own: &[u64]) -> Result<Word<Self::Bit>, Error> {
+            self.0.share_uniform_lanes(own)
+        }
+        fn and_into(
+            &mut self,
+            pairs: &[(Self::Bit, Self::Bit)],
+            out: &mut Word<Self::Bit>,
+        ) -> Result<(), Error> {
+            self.0.and_into(pairs, out)
+        }
+        fn verify_all_pending(&mut self) -> Result<(), Error> {
+            self.0.verify_all_pending()
+        }
+        fn open(&mut self, bits: &[Self::Bit]) -> Result<Vec<u64>, Error> {
+            self.0.open(bits)
+        }
+        fn open_lanes(&mut self, bits: &[Self::Bit], mask: u64) -> Result<Vec<u64>, Error> {
+            self.0.open_lanes(bits, mask)
+        }
+        fn agree(&mut self, root: [u8; 32]) -> Result<(), Error> {
+            self.0.agree(root)
+        }
+        fn poison(&mut self) {
+            self.0.poison()
+        }
+        fn fconstant(&self, value: Value, d: Domain) -> FieldWord {
+            self.0.fconstant(value, d)
+        }
+        fn fscale_lanes(&self, a: &FieldWord, by: &[Value], d: Domain) -> FieldWord {
+            self.0.fscale_lanes(a, by, d)
+        }
+        fn fadd(&self, a: &FieldWord, b: &FieldWord, d: Domain) -> FieldWord {
+            self.0.fadd(a, b, d)
+        }
+        fn fsub(&self, a: &FieldWord, b: &FieldWord, d: Domain) -> FieldWord {
+            self.0.fsub(a, b, d)
+        }
+        fn fscale(&self, a: &FieldWord, b: Value, d: Domain) -> FieldWord {
+            self.0.fscale(a, b, d)
+        }
+        fn frandom(&mut self, d: Domain) -> Result<FieldWord, Error> {
+            self.0.frandom(d)
+        }
+        fn fmul_many(
+            &mut self,
+            pairs: &[(&FieldWord, &FieldWord)],
+            d: Domain,
+        ) -> Result<Vec<FieldWord>, Error> {
+            self.0.fmul_many(pairs, d)
+        }
+        fn fopen_many(&mut self, words: &[FieldWord], d: Domain) -> Result<Vec<Vec<Value>>, Error> {
+            let opened = self.0.fopen_many(words, d)?;
+            self.1.extend(opened.iter().cloned());
+            Ok(opened)
+        }
+        fn bits_to_field_many(
+            &mut self,
+            words: &[Word<Self::Bit>],
+            d: Domain,
+        ) -> Result<Vec<FieldWord>, Error> {
+            self.0.bits_to_field_many(words, d)
+        }
+        fn field_to_bits_many(
+            &mut self,
+            words: &[&FieldWord],
+            d: Domain,
+        ) -> Result<Vec<Word<Self::Bit>>, Error> {
+            self.0.field_to_bits_many(words, d)
+        }
+        fn lift_bits_many(
+            &mut self,
+            bits: &[Self::Bit],
+            d: Domain,
+        ) -> Result<Vec<FieldWord>, Error> {
+            self.0.lift_bits_many(bits, d)
+        }
+    }
+
+    #[test]
+    fn inverse_of_zero_lanes_opens_nothing_that_identifies_them() {
+        for (d, zero_lanes) in [
+            (Domain::Gold, &[17usize][..]),
+            (Domain::Secp, &[0, 63]),
+            (Domain::Ed, &[40]),
+            (Domain::Gold, &[3, 4, 5, 62]),
+        ] {
+            run(|party, network| {
+                let engine = Engine::new(party, [0x92; 32], keys(party), network).unwrap();
+                let mut e = FieldOpenings(engine, Vec::new());
+                let random = Core::frandom(&mut e, d).unwrap();
+                let keep: Vec<Value> = (0..64)
+                    .map(|lane| [u64::from(!zero_lanes.contains(&lane)), 0, 0, 0])
+                    .collect();
+                let a = e.fscale_lanes(&random, &keep, d);
+                assert!(matches!(e.finverse(&a, d), Err(Error::InvalidProof)));
+                // What was opened is the same word whichever lanes are zero.
+                assert_eq!(e.1, vec![vec![[0u64; 4]; 64]]);
+                assert!(matches!(
+                    Core::frandom(&mut e, d).and_then(|r| e.fopen_many(&[r], d)),
+                    Err(Error::MultiplicationCheck)
+                ));
+            });
+        }
+    }
+
     pub fn audited_networks() -> [(Network, AuditHandle); 3] {
         let mut networks = networks().map(Some);
         core::array::from_fn(|p| {
@@ -3990,21 +4119,20 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn wiped_growth_keeps_pending_words_and_clears_scratch() {
-        let mut pending = vec![1u64, 2, 3];
-        reserve_wiped(&mut pending, 1_000);
-        assert_eq!(pending, [1, 2, 3]);
-        assert!(pending.capacity() >= 1_003);
+    fn scratch_growth_keeps_pending_words_and_never_shrinks() {
+        let mut pending: SecretVec<u64> = vec![1u64, 2, 3].into();
+        pending.resize(1_003, 0);
+        assert_eq!(pending[..3], [1, 2, 3]);
+        assert!(pending[3..].iter().all(|&w| w == 0));
 
-        let mut scratch = vec![7u64; 8];
-        resize_wiped(&mut scratch, 2);
-        assert_eq!(scratch, [7, 7]);
-        resize_wiped(&mut scratch, 4);
-        assert_eq!(scratch, [7, 7, 0, 0]);
+        let mut scratch: SecretVec<u64> = vec![7u64; 8].into();
+        ensure_scratch_len(&mut scratch, 2);
+        assert_eq!(scratch.len(), 8);
         let len = scratch.capacity() + 1;
-        resize_wiped(&mut scratch, len);
+        ensure_scratch_len(&mut scratch, len);
         assert_eq!(scratch.len(), len);
-        assert!(scratch.iter().all(|&w| w == 0));
+        assert_eq!(scratch[..8], [7; 8]);
+        assert!(scratch[8..].iter().all(|&w| w == 0));
     }
 
     #[test]

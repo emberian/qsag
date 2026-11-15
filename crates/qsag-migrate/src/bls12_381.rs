@@ -231,11 +231,7 @@ impl FpBls381 {
     /// Constant-time square root `a^((p + 1) / 4) mod p` (`p ≡ 3 (mod 4)`).
     pub fn sqrt_ct(self) -> Option<Self> {
         let cand = Self(Self::pow_ct(self.0, BLS_P_PLUS_1_DIV_4));
-        if cand.sq() == self {
-            Some(cand)
-        } else {
-            None
-        }
+        if cand.sq() == self { Some(cand) } else { None }
     }
 }
 
@@ -890,7 +886,11 @@ impl BlsBuilder {
     }
 
     fn input_bit(&self, bit: u8) -> Wire {
-        self.push(BlsDom::Bit, BlsOp::Input, [u64::from(bit & 1), 0, 0, 0, 0, 0])
+        self.push(
+            BlsDom::Bit,
+            BlsOp::Input,
+            [u64::from(bit & 1), 0, 0, 0, 0, 0],
+        )
     }
 
     fn input_fp(&self, x: FpBls381) -> Wire {
@@ -1258,10 +1258,18 @@ fn sha256_48_bytes(c: &BlsBuilder, msg_384_bits: &[Wire]) -> Vec<Wire> {
     .map(|x| sha_word(c, x));
     let [mut a, mut b, mut cc, mut d, mut e, mut f, mut g, mut h] = iv;
     for (&k, &ww) in SHA256_K.iter().zip(&w) {
-        let s1 = sha_xor(c, sha_xor(c, sha_rotr(e, 6), sha_rotr(e, 11)), sha_rotr(e, 25));
+        let s1 = sha_xor(
+            c,
+            sha_xor(c, sha_rotr(e, 6), sha_rotr(e, 11)),
+            sha_rotr(e, 25),
+        );
         let ch = sha_xor(c, g, sha_and(c, e, sha_xor(c, f, g)));
         let t1 = sha_sum(c, &[h, s1, ch, sha_word(c, k), ww]);
-        let s0 = sha_xor(c, sha_xor(c, sha_rotr(a, 2), sha_rotr(a, 13)), sha_rotr(a, 22));
+        let s0 = sha_xor(
+            c,
+            sha_xor(c, sha_rotr(a, 2), sha_rotr(a, 13)),
+            sha_rotr(a, 22),
+        );
         let maj = sha_xor(c, a, sha_and(c, sha_xor(c, a, b), sha_xor(c, a, cc)));
         let t2 = sha_add(c, s0, maj);
         h = g;
@@ -1291,7 +1299,9 @@ fn big_endian_bits(bits: &[Wire]) -> Vec<Wire> {
 
 fn poseidon_me(c: &BlsBuilder, st: &mut [Wire; 12]) {
     // Conjugate P3 tensor M4 by the lane transpose.
-    *st = [st[0], st[3], st[6], st[9], st[1], st[4], st[7], st[10], st[2], st[5], st[8], st[11]];
+    *st = [
+        st[0], st[3], st[6], st[9], st[1], st[4], st[7], st[10], st[2], st[5], st[8], st[11],
+    ];
     let mut ys = *st;
     for row in ys.chunks_exact_mut(4) {
         let old: [Wire; 4] = core::array::from_fn(|i| row[i]);
@@ -1303,7 +1313,9 @@ fn poseidon_me(c: &BlsBuilder, st: &mut [Wire; 12]) {
     for (i, x) in st.iter_mut().enumerate() {
         *x = c.add(ys[i], c.add(c.add(ys[i % 4], ys[i % 4 + 4]), ys[i % 4 + 8]));
     }
-    *st = [st[0], st[4], st[8], st[1], st[5], st[9], st[2], st[6], st[10], st[3], st[7], st[11]];
+    *st = [
+        st[0], st[4], st[8], st[1], st[5], st[9], st[2], st[6], st[10], st[3], st[7], st[11],
+    ];
 }
 
 fn poseidon_mi(c: &BlsBuilder, st: &mut [Wire; 12]) {
@@ -1733,7 +1745,10 @@ fn replay_bls(
     let e = view.opened_e as usize;
     let mut tapes = view.pair.each_ref().map(|v| BlsTape::new(&v.seed));
     let mut inputs = view.pair.each_ref().map(|v| v.inputs.as_slice());
-    let mut products = view.pair.each_ref().map(|v| BlsPackedReader::new(&v.products));
+    let mut products = view
+        .pair
+        .each_ref()
+        .map(|v| BlsPackedReader::new(&v.products));
     let mut wires: [BlsWires; 2] =
         core::array::from_fn(|_| BlsWires(Vec::with_capacity(c.nodes.len())));
     for (gate_idx, node) in c.nodes.iter().enumerate() {
@@ -1779,7 +1794,10 @@ fn replay_bls(
     if inputs.iter().any(|s| !s.is_empty()) {
         return Err(MigrateError::MalformedProofStructure);
     }
-    let mut outputs = view.pair.each_ref().map(|v| BlsPackedReader::new(&v.outputs));
+    let mut outputs = view
+        .pair
+        .each_ref()
+        .map(|v| BlsPackedReader::new(&v.outputs));
     let mut hidden = BlsPackedReader::new(&view.hidden_outputs);
     for &w in &c.outputs {
         let d = c.nodes[w].domain;
@@ -1796,10 +1814,7 @@ fn replay_bls(
     Ok(())
 }
 
-fn bls_transcript(
-    statement: &BlsMigrationStatement,
-    root: &[u8; 32],
-) -> InterleavedTranscript {
+fn bls_transcript(statement: &BlsMigrationStatement, root: &[u8; 32]) -> InterleavedTranscript {
     let mut t = InterleavedTranscript::new(
         b"QSAG.BLS12_381.MIGRATE.V1",
         &statement.to_transcript_bytes(),
@@ -1893,10 +1908,7 @@ pub fn prove_bls_migration_in_domain<B: AcceleratorBackend>(
             return Err(MigrateError::WitnessMismatchWithLegacyCommitment);
         }
         let stmt_bytes = statement.to_transcript_bytes();
-        entropy = cshake256_framed_32(
-            b"QSAG.BLS12_381.HEDGE.V1",
-            &[&entropy, &sk_le, &stmt_bytes],
-        );
+        entropy = cshake256_framed_32(b"QSAG.BLS12_381.HEDGE.V1", &[&entropy, &sk_le, &stmt_bytes]);
         ct_zeroize_bytes(&mut sk_le);
 
         let views = crate::parallel::map(MIT_REPETITIONS, |rep| {
@@ -1924,10 +1936,7 @@ pub fn prove_bls_migration_in_domain<B: AcceleratorBackend>(
             let hidden_outputs = core::mem::take(&mut rep_views[hidden].outputs);
             repetitions.push(OpenedRepetitionView {
                 opened_e: e,
-                pair: [
-                    rep_views[e_idx].clone(),
-                    rep_views[(e_idx + 1) % 3].clone(),
-                ],
+                pair: [rep_views[e_idx].clone(), rep_views[(e_idx + 1) % 3].clone()],
                 hidden_party_commit: commits[hidden],
                 hidden_outputs,
             });
@@ -1984,7 +1993,10 @@ pub fn verify_bls_migration_with_backend<B: AcceleratorBackend>(
         BlsValidatorCommitment::BeaconValidatorPubkey(pk_48) => {
             let pt = BlsG1Point::from_validator_pubkey_48(pk_48)
                 .ok_or(MigrateError::MalformedProofStructure)?;
-            Some(pt.to_affine().ok_or(MigrateError::MalformedProofStructure)?)
+            Some(
+                pt.to_affine()
+                    .ok_or(MigrateError::MalformedProofStructure)?,
+            )
         }
         BlsValidatorCommitment::UnrevealedBls0x00Credential(_) => None,
     };
@@ -2078,7 +2090,10 @@ mod tests {
             0x17, 0x1b, 0xac, 0x58, 0x6c, 0x55, 0xe8, 0x3f, 0xf9, 0x7a, 0x1a, 0xef, 0xfb, 0x3a,
             0xf0, 0x0a, 0xdb, 0x22, 0xc6, 0xbb,
         ];
-        assert_eq!(BlsG1Point::GENERATOR.to_compressed_48(), expected_g1_compressed);
+        assert_eq!(
+            BlsG1Point::GENERATOR.to_compressed_48(),
+            expected_g1_compressed
+        );
         assert!(BlsG1Point::GENERATOR.is_in_g1_subgroup());
         assert_eq!(
             BlsG1Point::from_validator_pubkey_48(&expected_g1_compressed).unwrap(),
@@ -2217,6 +2232,22 @@ mod poseidon2_canonical_kat {
         let c = BlsBuilder::default();
         let mut st = core::array::from_fn(|i| c.small(BlsDom::Gold, i as u64));
         poseidon_perm(&c, &mut st);
-        assert_eq!(st.map(|w| c.value(w)[0]), [13782584570844608145, 13136387643152332171, 7171133015474200819, 7643370872200861694, 14144755201299840503, 16470027036684692562, 1748465969625202405, 1718729118078964347, 6141020819996733037, 16322330185628708898, 11650380702735067362, 2734959974607798415]);
+        assert_eq!(
+            st.map(|w| c.value(w)[0]),
+            [
+                13782584570844608145,
+                13136387643152332171,
+                7171133015474200819,
+                7643370872200861694,
+                14144755201299840503,
+                16470027036684692562,
+                1748465969625202405,
+                1718729118078964347,
+                6141020819996733037,
+                16322330185628708898,
+                11650380702735067362,
+                2734959974607798415
+            ]
+        );
     }
 }
