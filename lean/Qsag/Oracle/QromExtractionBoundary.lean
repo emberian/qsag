@@ -7,8 +7,8 @@ unsound shortcuts for supplying its hypotheses: cardinality alone does not give 
 and copying a coherent query into an orthogonal record is not observationally neutral.
 -/
 
-public import Qsag.QromMerkleOnlineExtraction
-import all Qsag.QromMerkleOnlineExtraction
+public import Qsag.Oracle.QromMerkleOnlineExtraction
+import all Qsag.Oracle.QromMerkleOnlineExtraction
 
 public section
 namespace Qsag

@@ -1129,3 +1129,1257 @@ private theorem qsum_get_filter_eq {α : Type} (p : α → Bool) :
 /-- Single-pair algebraic Dual OOD bound: any two distinct degree-`≤ d` polynomials over
     `QuarticGoldilocks` collide on BOTH independent OOD points `(z₀, z₁) ∈ S × S` on at most
     `d ^ 2` pairs! -/
+theorem dual_ood_single_pair_le_deg_sq
+    (d : Nat) (S : List QuarticGoldilocks) (hNodup : S.Nodup)
+    (P₁ P₂ : List QuarticGoldilocks)
+    (hDeg₁ : P₁.length ≤ d + 1) (hDeg₂ : P₂.length ≤ d + 1)
+    (hDiff : ∃ x₀ : QuarticGoldilocks, RoundPoly.evalCoeffs P₁ x₀ ≠ RoundPoly.evalCoeffs P₂ x₀) :
+    dualOodPairCollisionCount S P₁ P₂ ≤ d ^ 2 := by
+  let diff := polySubVar P₁ P₂
+  have hDiffLen : diff.length ≤ d + 1 :=
+    polySubVar_length_le P₁ P₂ (d + 1) hDeg₁ hDeg₂
+  rcases hDiff with ⟨x₀, hx₀⟩
+  have hDiffNz : ∃ x₀ : QuarticGoldilocks, RoundPoly.evalCoeffs diff x₀ ≠ CommRingOps.zero := by
+    refine ⟨x₀, ?_⟩
+    rw [evalCoeffs_polySubVar]
+    intro hSub0
+    have hEq := congrArg (fun u => CommRingOps.add u (RoundPoly.evalCoeffs P₂ x₀)) hSub0
+    rw [LawfulCommRing.sub_eq_add_neg, LawfulCommRing.add_assoc,
+        LawfulCommRing.add_left_neg, LawfulCommRing.add_zero, LawfulCommRing.zero_add] at hEq
+    exact hx₀ hEq
+  have hRootsLe :
+      (S.filter (fun r => decide (RoundPoly.evalCoeffs diff r = CommRingOps.zero))).length ≤ d :=
+    RoundPoly.roots_nodup_length_le d diff S hNodup hDiffLen hDiffNz
+  let pEq : QuarticGoldilocks → Bool :=
+    fun r => decide (RoundPoly.evalCoeffs diff r = CommRingOps.zero)
+  have hOneCoord :
+      qsum S.length (fun i =>
+        if decide (RoundPoly.evalCoeffs P₁ (S.get i) = RoundPoly.evalCoeffs P₂ (S.get i)) = true
+        then 1 else 0) ≤ d := by
+    have hEqFilt :
+        qsum S.length (fun i =>
+          if decide (RoundPoly.evalCoeffs P₁ (S.get i) = RoundPoly.evalCoeffs P₂ (S.get i)) = true
+          then 1 else 0) =
+        qsum S.length (fun i => if pEq (S.get i) = true then 1 else 0) := by
+      apply qsum_congr; intro i
+      have hBoolEq :
+          decide (RoundPoly.evalCoeffs P₁ (S.get i) = RoundPoly.evalCoeffs P₂ (S.get i)) =
+            pEq (S.get i) := by
+        dsimp only [pEq]
+        by_cases h : RoundPoly.evalCoeffs P₁ (S.get i) = RoundPoly.evalCoeffs P₂ (S.get i)
+        · have hd : RoundPoly.evalCoeffs diff (S.get i) = CommRingOps.zero := by
+            rw [evalCoeffs_polySubVar, h, LawfulCommRing.sub_self]
+          simp only [h, hd, decide_true]
+        · have hd : RoundPoly.evalCoeffs diff (S.get i) ≠ CommRingOps.zero := by
+            rw [evalCoeffs_polySubVar]
+            intro hSub0
+            apply h
+            have hA := congrArg (fun u => CommRingOps.add u (RoundPoly.evalCoeffs P₂ (S.get i))) hSub0
+            rw [LawfulCommRing.sub_eq_add_neg, LawfulCommRing.add_assoc,
+                LawfulCommRing.add_left_neg, LawfulCommRing.add_zero, LawfulCommRing.zero_add] at hA
+            exact hA
+          simp only [h, hd, decide_false]
+      rw [hBoolEq]
+    rw [hEqFilt, qsum_get_filter_eq pEq S]
+    exact hRootsLe
+  unfold dualOodPairCollisionCount
+  have hFactor :
+      qsum S.length (fun i =>
+        qsum S.length (fun j =>
+          if (decide (RoundPoly.evalCoeffs P₁ (S.get i) = RoundPoly.evalCoeffs P₂ (S.get i)) &&
+              decide (RoundPoly.evalCoeffs P₁ (S.get j) = RoundPoly.evalCoeffs P₂ (S.get j))) = true
+          then 1 else 0)) =
+      qsum S.length (fun i =>
+        (if decide (RoundPoly.evalCoeffs P₁ (S.get i) = RoundPoly.evalCoeffs P₂ (S.get i)) = true
+         then 1 else 0) *
+        qsum S.length (fun j =>
+          if decide (RoundPoly.evalCoeffs P₁ (S.get j) = RoundPoly.evalCoeffs P₂ (S.get j)) = true
+          then 1 else 0)) := by
+    apply qsum_congr; intro i
+    cases hi : decide (RoundPoly.evalCoeffs P₁ (S.get i) = RoundPoly.evalCoeffs P₂ (S.get i))
+    · simp only [Bool.false_and, Bool.false_eq_true, ↓reduceIte, Nat.zero_mul, qsum_const, Nat.mul_zero]
+    · simp only [Bool.true_and, ↓reduceIte, Nat.one_mul]
+  rw [hFactor, qsum_mul_right]
+  have hSq : d * d = d ^ 2 := (Nat.pow_two d).symm
+  rw [← hSq]
+  exact Nat.mul_le_mul hOneCoord hOneCoord
+
+/-- Sum of `dualOodPairCollisionCount` across all unordered pairs `{P_a, P_b}` (`a < b`) in `cands`. -/
+def dualOodAllPairsSum (S : List QuarticGoldilocks) :
+    List (List QuarticGoldilocks) → Nat
+  | [] => 0
+  | P :: rest =>
+    (rest.foldl (fun acc Q => acc + dualOodPairCollisionCount S P Q) 0) +
+      dualOodAllPairsSum S rest
+
+private theorem foldl_pair_collision_le (d : Nat) (S : List QuarticGoldilocks) (hNodup : S.Nodup)
+    (P : List QuarticGoldilocks) (hDegP : P.length ≤ d + 1) :
+    ∀ (rest : List (List QuarticGoldilocks)) (acc : Nat),
+      (∀ Q ∈ rest, Q.length ≤ d + 1 ∧
+        ∃ x₀ : QuarticGoldilocks, RoundPoly.evalCoeffs P x₀ ≠ RoundPoly.evalCoeffs Q x₀) →
+      rest.foldl (fun a Q => a + dualOodPairCollisionCount S P Q) acc ≤
+        acc + rest.length * d ^ 2
+  | [], acc, _ => by simp
+  | Q :: qs, acc, hAll => by
+    simp only [List.foldl_cons, List.length_cons]
+    rcases hAll Q (.head qs) with ⟨hDegQ, hDiffPQ⟩
+    have hPair := dual_ood_single_pair_le_deg_sq d S hNodup P Q hDegP hDegQ hDiffPQ
+    have ih := foldl_pair_collision_le d S hNodup P hDegP qs
+      (acc + dualOodPairCollisionCount S P Q)
+      (fun R hR => hAll R (.tail Q hR))
+    have hDist : (qs.length + 1) * d ^ 2 = d ^ 2 + qs.length * d ^ 2 := by
+      rw [Nat.add_mul, Nat.one_mul, Nat.add_comm]
+    rw [hDist]
+    omega
+
+private theorem dualOodAllPairsSum_le_exact
+    (d : Nat) (S : List QuarticGoldilocks) (hNodup : S.Nodup) :
+    ∀ (cands : List (List QuarticGoldilocks)),
+      (∀ P ∈ cands, P.length ≤ d + 1) →
+      cands.Pairwise (fun P Q =>
+        ∃ x₀ : QuarticGoldilocks, RoundPoly.evalCoeffs P x₀ ≠ RoundPoly.evalCoeffs Q x₀) →
+      dualOodAllPairsSum S cands ≤ binom2 cands.length * d ^ 2
+  | [], _, _ => by simp [dualOodAllPairsSum, binom2]
+  | P :: rest, hDeg, hDistinct => by
+    rcases List.pairwise_cons.mp hDistinct with ⟨hHead, hTailPw⟩
+    have hDegP := hDeg P (.head rest)
+    have hDegRest : ∀ Q ∈ rest, Q.length ≤ d + 1 := fun Q hQ => hDeg Q (.tail P hQ)
+    have ihRest := dualOodAllPairsSum_le_exact d S hNodup rest hDegRest hTailPw
+    have hFold := foldl_pair_collision_le d S hNodup P hDegP rest 0
+      (fun Q hQ => ⟨hDegRest Q hQ, hHead Q hQ⟩)
+    simp only [Nat.zero_add] at hFold
+    simp only [dualOodAllPairsSum, List.length_cons, binom2_succ, Nat.add_mul]
+    exact Nat.add_le_add hFold ihRest
+
+/-- **Algebraic Dual OOD List-Collision Theorem (`dual_ood_list_collision_bound`)**:
+    Over `QuarticGoldilocks`, for ANY decoded polynomial list `cands` of size `≤ L` whose entries
+    have degree `≤ d` and are pairwise semantically distinct, and ANY duplicate-free challenge pool
+    `S` of size `M > 0`, the fraction of dual OOD pairs `(z₀, z₁) ∈ S × S` on which some distinct
+    pair in `cands` collides is bounded by `binomial(L, 2) * d^2 / M^2`
+    (`= ((d / q)^2) * binomial(L, 2)` when `S = 𝔽_{p^4}`)! -/
+theorem dual_ood_list_collision_bound
+    (d L : Nat) (S : List QuarticGoldilocks) (hPos : 0 < S.length) (hNodup : S.Nodup)
+    (cands : List (List QuarticGoldilocks))
+    (hLen : cands.length ≤ L)
+    (hDeg : ∀ P ∈ cands, P.length ≤ d + 1)
+    (hDistinct : cands.Pairwise (fun P Q =>
+      ∃ x₀ : QuarticGoldilocks, RoundPoly.evalCoeffs P x₀ ≠ RoundPoly.evalCoeffs Q x₀)) :
+    dualOodAllPairsSum S cands ≤ binom2 L * d ^ 2 ∧
+    RatBound.le
+      ⟨dualOodAllPairsSum S cands, S.length ^ 2, Nat.pow_pos hPos⟩
+      ⟨binom2 L * d ^ 2, S.length ^ 2, Nat.pow_pos hPos⟩ := by
+  have hExactCands := dualOodAllPairsSum_le_exact d S hNodup cands hDeg hDistinct
+  have hBinomMono : ∀ (b a : Nat), a ≤ b → binom2 a ≤ binom2 b := by
+    intro b
+    induction b with
+    | zero =>
+      intro a hab
+      have ha0 : a = 0 := by omega
+      rw [ha0]
+      exact Nat.le_refl _
+    | succ m ihm =>
+      intro a hab
+      if haEq : a = m + 1 then
+        rw [haEq]
+        exact Nat.le_refl _
+      else
+        have haLe : a ≤ m := by omega
+        rw [binom2_succ]
+        exact Nat.le_trans (ihm a haLe) (Nat.le_add_left _ _)
+  have hTotal : dualOodAllPairsSum S cands ≤ binom2 L * d ^ 2 :=
+    Nat.le_trans hExactCands (Nat.mul_le_mul_right (d ^ 2) (hBinomMono L cands.length hLen))
+  refine ⟨hTotal, ?_⟩
+  unfold RatBound.le
+  dsimp only
+  exact Nat.mul_le_mul_right (S.length ^ 2) hTotal
+
+/-- Count of `q`-query coset tuples in `(Fin n)^q` where EVERY queried coset passes `passCoset`. -/
+def cosetSurvivalTupleCount (n : Nat) (passCoset : Fin n → Bool) : Nat → Nat
+  | 0 => 1
+  | q + 1 =>
+    qsum n (fun idx =>
+      if passCoset idx = true then cosetSurvivalTupleCount n passCoset q else 0)
+
+/-- **`δ_j`-Far Codeword Multi-Query Survival Theorem (`far_codeword_coset_queries_survive_bound`)**:
+    If a `δ_j`-far oracle table passes single-coset verification on at most `agreeMax` out of `n`
+    cosets (`agreeMax / n = 1 - δ_j`), then across all `n ^ q` independent `q`-coset query
+    schedules, at most `agreeMax ^ q` schedules survive all `q` checks (`≤ (1 - δ_j)^q`)! -/
+theorem far_codeword_coset_queries_survive_bound
+    (n agreeMax : Nat) (hNPos : 0 < n) (passCoset : Fin n → Bool)
+    (hFar : qsum n (fun idx => if passCoset idx = true then 1 else 0) ≤ agreeMax) :
+    ∀ (q : Nat),
+      cosetSurvivalTupleCount n passCoset q ≤ agreeMax ^ q ∧
+      RatBound.le
+        ⟨cosetSurvivalTupleCount n passCoset q, n ^ q, Nat.pow_pos hNPos⟩
+        ⟨agreeMax ^ q, n ^ q, Nat.pow_pos hNPos⟩
+  | 0 => ⟨Nat.le_refl 1, Nat.le_refl 1⟩
+  | q + 1 => by
+    let prev := cosetSurvivalTupleCount n passCoset q
+    have ih : prev ≤ agreeMax ^ q :=
+      (far_codeword_coset_queries_survive_bound n agreeMax hNPos passCoset hFar q).1
+    have hFactor :
+        cosetSurvivalTupleCount n passCoset (q + 1) =
+          qsum n (fun idx => (if passCoset idx = true then 1 else 0) * prev) := by
+      change qsum n (fun idx => if passCoset idx = true then prev else 0) = _
+      apply qsum_congr; intro idx
+      cases passCoset idx
+      · simp only [Bool.false_eq_true, ↓reduceIte, Nat.zero_mul]
+      · simp only [↓reduceIte, Nat.one_mul]
+    have hLe : cosetSurvivalTupleCount n passCoset (q + 1) ≤ agreeMax ^ (q + 1) := by
+      rw [hFactor, qsum_mul_right, Nat.pow_succ, Nat.mul_comm (agreeMax ^ q) agreeMax]
+      exact Nat.mul_le_mul hFar ih
+    refine ⟨hLe, ?_⟩
+    unfold RatBound.le
+    dsimp only
+    exact Nat.mul_le_mul_right (n ^ (q + 1)) hLe
+
+/-! ### §2.3 Explicit `Hem` v6 Multi-Round Protocol, `hemAffineWhirStateFunction` & Verifier -/
+
+/-- Exact coset agreement count between oracle `O : Nat → F` and polynomial `P` over `domPts`. -/
+def hemCosetAgreeCount {F : Type} [CommRingOps F] [DecidableEq F]
+    (domPts : List F) (oracleAt : Nat → F) (P : List F) : Nat :=
+  qsum domPts.length (fun idx =>
+    if oracleAt idx.1 = RoundPoly.evalCoeffs P (domPts.get idx) then 1 else 0)
+
+/-- Checks whether polynomial `P` has degree `≤ degBound`, coset agreement `≥ minAgree` with
+    `oracleAt` on `domPts`, and linear-functional evaluation `ringDot P kernel = claim`. -/
+def polyWitnessValid {F : Type} [CommRingOps F] [DecidableEq F]
+    (domPts : List F) (minAgree degBound : Nat)
+    (oracleAt : Nat → F) (kernel : List F) (claim : F) (P : List F) : Bool :=
+  decide (P.length ≤ degBound + 1) &&
+  decide (minAgree ≤ hemCosetAgreeCount domPts oracleAt P) &&
+  decide (ringDot P kernel = claim)
+
+/-- Asymmetric cascade polynomial combiner `∑_i (α_i + β_i X) W_i` (`deg ≤ d₀ + 1`). -/
+def evalCascadePolySum {F : Type} [CommRingOps F] :
+    List (List F) → List (F × F) → List F
+  | [], _ => []
+  | _, [] => []
+  | W :: ws, (α, β) :: abs =>
+    polyAddVar
+      (polyAddVar (polyScaleVar α W) (polyScaleVar β (shiftPoly W)))
+      (evalCascadePolySum ws abs)
+
+/-- Asymmetric cascade combined claim `∑_i (α_i * e_i + β_i * s_i)` matching `PCS_BATCH_SHIFT`. -/
+def evalCascadeClaim {F : Type} [CommRingOps F] :
+    List F → List F → List (F × F) → F
+  | [], _, _ => CommRingOps.zero
+  | _, [], _ => CommRingOps.zero
+  | _, _, [] => CommRingOps.zero
+  | e :: es, s :: ss, (α, β) :: abs =>
+    CommRingOps.add
+      (CommRingOps.add (CommRingOps.mul α e) (CommRingOps.mul β s))
+      (evalCascadeClaim es ss abs)
+
+/-- Asymmetric cascade combined oracle `O_cascade(idx) = ∑_i (α_i + β_i * dom[idx]) * O_i(idx)`. -/
+def evalCascadeOracle {F : Type} [CommRingOps F] (domPts : List F) :
+    List (Nat → F) → List (F × F) → Nat → F
+  | [], _, _ => CommRingOps.zero
+  | _, [], _ => CommRingOps.zero
+  | O :: os, (α, β) :: abs, idx =>
+    let x := domPts.getD idx CommRingOps.zero
+    let w := CommRingOps.add α (CommRingOps.mul β x)
+    CommRingOps.add (CommRingOps.mul w (O idx)) (evalCascadeOracle domPts os abs idx)
+
+theorem ringDot_evalCascadePolySum {F : Type} [LawfulCommRing F] (kernel : List F) :
+    ∀ (ws : List (List F)) (abs : List (F × F)),
+      ws.length = abs.length →
+      ringDot (evalCascadePolySum ws abs) kernel =
+        evalCascadeClaim
+          (ws.map (fun W => ringDot W kernel))
+          (ws.map (fun W => ringDot (shiftPoly W) kernel))
+          abs
+  | [], [], _ => rfl
+  | _ :: _, [], h => absurd h (Nat.succ_ne_zero _)
+  | [], _ :: _, h => absurd h.symm (Nat.succ_ne_zero _)
+  | W :: ws, (α, β) :: abs, h => by
+    have hSub : ws.length = abs.length := Nat.succ.inj h
+    dsimp only [evalCascadePolySum, evalCascadeClaim, List.map]
+    rw [ringDot_polyAddVar, ringDot_polyAddVar, ringDot_polyScaleVar, ringDot_polyScaleVar,
+        ringDot_evalCascadePolySum kernel ws abs hSub]
+termination_by structural ws => ws
+
+/-- Stage specification of `Hem` v6 Affine WHIR over field `F` (`QuarticGoldilocks`). -/
+structure HemWhirStageSpec (F : Type := QuarticGoldilocks) where
+  domainPts : List F
+  degBound : Nat
+  minAgree : Nat
+  listBound : Nat
+  queriedCosets : List Nat
+  deriving Repr
+
+/-- Complete `Hem` v6 statement & committed codeword instance (`S_poly ≤ 16` batch polynomials
+    reduced across `stages.length` WHIR affine-folding + dual-OOD + coset-query stages). -/
+structure HemWhirInstance (F : Type := QuarticGoldilocks) where
+  batchOracles : List (Nat → F)
+  batchClaims : List F
+  initDomainPts : List F
+  initDegBound : Nat
+  initMinAgree : Nat
+  initKernel : List F
+  stages : List (HemWhirStageSpec F)
+
+/-- Explicit multi-round transcript message & challenge record for `Hem` v6. -/
+inductive HemTranscriptRound (F : Type := QuarticGoldilocks) where
+  | cascade
+      (absorbedShifts : List F)
+      (weights : List (F × F))
+      (cascadeDecoded : List (List F))
+  | stageFold
+      (stageOracle : Nat → F)
+      (w₀ w₁ w₂ c_F c_G : F)
+      (φ θ α β : F)
+      (z₀ z₁ ood₀ ood₁ : F)
+      (stageDecoded : List (List F))
+  | finalQuery
+      (finalCoeffs : List F)
+
+/-- Language of a `Hem` batch: every batch oracle has SOME polynomial of degree `≤ degBound`
+    that agrees with it on at least `minAgree` domain points and meets its linear-functional
+    claim. The polynomial is existentially quantified: it is not supplied with the instance. -/
+def HemBatchValid {F : Type} [CommRingOps F] [DecidableEq F]
+    (domPts : List F) (minAgree degBound : Nat) (kernel : List F) :
+    List (Nat → F) → List F → Prop
+  | [], [] => True
+  | O :: os, e :: es =>
+    (∃ P : List F, polyWitnessValid domPts minAgree degBound O kernel e P = true) ∧
+      HemBatchValid domPts minAgree degBound kernel os es
+  | _, _ => False
+
+/-- Language of the `Hem` v6 statement: between 1 and 16 batch oracles, each with a valid
+    polynomial witness. Membership depends on the oracles and claims alone. -/
+def HemStatementValid {F : Type} [CommRingOps F] [DecidableEq F]
+    (inst : HemWhirInstance F) : Prop :=
+  (1 ≤ inst.batchOracles.length ∧ inst.batchOracles.length ≤ 16) ∧
+  HemBatchValid inst.initDomainPts inst.initMinAgree inst.initDegBound inst.initKernel
+    inst.batchOracles inst.batchClaims
+
+def checkQueriedCosets {F : Type} [CommRingOps F] [DecidableEq F]
+    (domPts : List F) (oracleAt : Nat → F) (P : List F) : List Nat → Bool
+  | [] => true
+  | idx :: rest =>
+    decide (idx < domPts.length) &&
+    decide (oracleAt idx = RoundPoly.evalCoeffs P (domPts.getD idx CommRingOps.zero)) &&
+    checkQueriedCosets domPts oracleAt P rest
+
+/-- `affine.rs::fold_kernel`: `k'_i = k_{2i} + φ k_{2i+1}` followed by the extra zero overflow slot
+    (`chunks_exact(2)` drops an unpaired tail element). The NEXT kernel is computed by the
+    verifier from the challenge `φ`; it is never a prover-supplied transcript field. -/
+def hemKernelFold {F : Type} [CommRingOps F] (φ : F) : List F → List F
+  | a :: b :: rest => CommRingOps.add a (CommRingOps.mul φ b) :: hemKernelFold φ rest
+  | _ => [CommRingOps.zero]
+
+/-- `affine.rs::bridge_finish`: from the five bridge wires `(w₀, w₁, w₂, c_F, c_G)`
+    (`WHIR_AFFINE_CROSS` ×3, then `WHIR_AFFINE_SHIFT` ×2), the running claim and the challenges
+    `(φ, θ, α, β)`, the verifier DERIVES `f = w₀ + φ w₁`, `g = w₂ + φ (claim - w₀)` and the next
+    claim `g + α (f + θ g) + β (c_F + θ c_G)`. There is no separate consistency check: the
+    fourth cross term is forced to `claim - w₀`. -/
+def hemBridgeFoldClaim {F : Type} [CommRingOps F]
+    (claim w₀ w₁ w₂ c_F c_G φ θ α β : F) : F :=
+  CommRingOps.add
+    (CommRingOps.add w₂ (CommRingOps.mul φ (CommRingOps.sub claim w₀)))
+    (CommRingOps.add
+      (CommRingOps.mul α
+        (CommRingOps.add (CommRingOps.add w₀ (CommRingOps.mul φ w₁))
+          (CommRingOps.mul θ (CommRingOps.add w₂ (CommRingOps.mul φ (CommRingOps.sub claim w₀))))))
+      (CommRingOps.mul β (CommRingOps.add c_F (CommRingOps.mul θ c_G))))
+
+/-- Interleave even- and odd-indexed halves back into one coefficient / kernel vector. -/
+def hemInterleave {F : Type} : List F → List F → List F
+  | a :: as, b :: bs => a :: b :: hemInterleave as bs
+  | _, _ => []
+
+theorem hemKernelFold_interleave {F : Type} [CommRingOps F] (φ : F) :
+    ∀ (kE kO : List F), kE.length = kO.length →
+      hemKernelFold φ (hemInterleave kE kO) =
+        List.zipWith (fun a b => CommRingOps.add a (CommRingOps.mul φ b)) kE kO ++
+          [CommRingOps.zero]
+  | [], [], _ => rfl
+  | [], _ :: _, h => absurd h (Nat.succ_ne_zero _).symm
+  | _ :: _, [], h => absurd h (Nat.succ_ne_zero _)
+  | a :: as, b :: bs, h =>
+    congrArg (List.cons (CommRingOps.add a (CommRingOps.mul φ b)))
+      (hemKernelFold_interleave φ as bs (Nat.succ.inj h))
+
+theorem ringDot_zipFold {F : Type} [LawfulCommRing F] (φ : F) :
+    ∀ (c kE kO : List F), kE.length = kO.length →
+      ringDot c (List.zipWith (fun a b => CommRingOps.add a (CommRingOps.mul φ b)) kE kO) =
+        CommRingOps.add (ringDot c kE) (CommRingOps.mul φ (ringDot c kO))
+  | [], _, _, _ => by
+    simp only [ringDot, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+  | _ :: _, [], [], _ => by
+    simp only [List.zipWith_nil_left, ringDot, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+  | _ :: _, [], _ :: _, h => absurd h (Nat.succ_ne_zero _).symm
+  | _ :: _, _ :: _, [], h => absurd h (Nat.succ_ne_zero _)
+  | x :: xs, a :: as, b :: bs, h => by
+    have ih := ringDot_zipFold φ xs as bs (Nat.succ.inj h)
+    simp only [List.zipWith_cons_cons, ringDot]
+    rw [ih, LawfulCommRing.left_distrib x a (CommRingOps.mul φ b),
+        ← LawfulCommRing.mul_assoc x φ b, LawfulCommRing.mul_comm x φ,
+        LawfulCommRing.mul_assoc φ x b, LawfulCommRing.add_add_add_comm,
+        ← LawfulCommRing.left_distrib φ (CommRingOps.mul x b) (ringDot xs bs)]
+
+/-- **Rust-Faithful Dual Bridge (`hem_bridge_fold_claim_eq_dot`, `affine.rs::prove_fold`)**:
+    split coefficients and kernel into even / odd halves `(cE, cO)`, `(kE, kO)`. With the honest
+    cross wires `w₀ = ⟨cE, kE⟩`, `w₁ = ⟨cE, kO⟩`, `w₂ = ⟨cO, kE⟩`, the running claim
+    `⟨cE, kE⟩ + ⟨cO, kO⟩`, and the shift wires against the folded kernel `k' = kE + φ kO`,
+    `hemBridgeFoldClaim` IS the inner product of the folded coefficients
+    `affineCombine θ α β cE cO = cO + (α + β X)(cE + θ cO)` (`fold_coeffs`) with `k'`: the Lean
+    counterpart of `debug_assert_eq!(dot_ext4_fast(c, k), next)`. -/
+theorem hem_bridge_fold_claim_eq_dot {F : Type} [LawfulCommRing F]
+    (φ θ α β : F) (cE cO kE kO : List F) (h : kE.length = kO.length) :
+    hemBridgeFoldClaim
+        (CommRingOps.add (ringDot cE kE) (ringDot cO kO))
+        (ringDot cE kE) (ringDot cE kO) (ringDot cO kE)
+        (ringDot (shiftPoly cE)
+          (List.zipWith (fun a b => CommRingOps.add a (CommRingOps.mul φ b)) kE kO))
+        (ringDot (shiftPoly cO)
+          (List.zipWith (fun a b => CommRingOps.add a (CommRingOps.mul φ b)) kE kO))
+        φ θ α β =
+      ringDot (affineCombine θ α β cE cO)
+        (List.zipWith (fun a b => CommRingOps.add a (CommRingOps.mul φ b)) kE kO) := by
+  have hSub : CommRingOps.sub (CommRingOps.add (ringDot cE kE) (ringDot cO kO)) (ringDot cE kE) =
+      ringDot cO kO := by
+    rw [LawfulCommRing.sub_eq_add_neg,
+        LawfulCommRing.add_comm (ringDot cE kE) (ringDot cO kO),
+        LawfulCommRing.add_assoc, LawfulCommRing.add_right_neg, LawfulCommRing.add_zero]
+  unfold hemBridgeFoldClaim
+  rw [ringDot_affineCombine_eq_bridge, ringDot_zipFold φ cE kE kO h,
+      ringDot_zipFold φ cO kE kO h, hSub]
+
+def evalHemRbrPrefix {F : Type} [CommRingOps F] [DecidableEq F]
+    (curLive : Bool)
+    (curOracle : Nat → F)
+    (curDom : List F)
+    (curDeg curMinAgree : Nat)
+    (curKernel : List F)
+    (curClaim : F) :
+    List (HemWhirStageSpec F) → List (HemTranscriptRound F) → Bool
+  | _, [] => curLive
+  | remStages, .cascade _ _ cascadeDecoded :: restTr =>
+    let nextLive :=
+      cascadeDecoded.any (fun P =>
+        polyWitnessValid curDom curMinAgree (curDeg + 1) curOracle curKernel curClaim P)
+    evalHemRbrPrefix (curLive || nextLive) curOracle curDom (curDeg + 1) curMinAgree
+      curKernel curClaim remStages restTr
+  | st :: remStages,
+    .stageFold stageOracle w₀ w₁ w₂ c_F c_G φ θ α β z₀ z₁ ood₀ ood₁ stageDecoded :: restTr =>
+    let expectedFoldClaim := hemBridgeFoldClaim curClaim w₀ w₁ w₂ c_F c_G φ θ α β
+    let nextKernel := hemKernelFold φ curKernel
+    let stageHasWitness :=
+      stageDecoded.any (fun P =>
+        polyWitnessValid st.domainPts st.minAgree st.degBound stageOracle nextKernel expectedFoldClaim P &&
+        decide (RoundPoly.evalCoeffs P z₀ = ood₀) &&
+        decide (RoundPoly.evalCoeffs P z₁ = ood₁))
+    evalHemRbrPrefix stageHasWitness stageOracle st.domainPts st.degBound st.minAgree
+      nextKernel expectedFoldClaim remStages restTr
+  | [], [.finalQuery finalCoeffs] =>
+    decide (finalCoeffs.length ≤ curDeg + 1) &&
+    decide (ringDot finalCoeffs curKernel = curClaim) &&
+    checkQueriedCosets curDom curOracle finalCoeffs
+      (List.range (Nat.min curMinAgree curDom.length))
+  | _, _ => false
+
+/-- Boolean liveness of a nonempty transcript prefix of the `Hem` v6 model: Round 0 asymmetric
+    cascade (`S_poly ≤ 16`), `S` stages of monomial-shift affine folding with the `affine.rs`
+    five-wire bridge (`hemBridgeFoldClaim`, verifier-computed `hemKernelFold`) + dual OOD
+    pinning, and final coefficients + coset checks. Every stage check is algebraic; the decoded
+    polynomial witnessing a live stage is read from the transcript's decoded lists. -/
+def hemPrefixState {F : Type} [CommRingOps F] [DecidableEq F]
+    (inst : HemWhirInstance F) (tr : List (HemTranscriptRound F)) : Bool :=
+  match tr with
+  | .cascade absorbedShifts weights cascadeDecoded :: restTr =>
+    let okLengths :=
+      decide (1 ≤ inst.batchOracles.length ∧ inst.batchOracles.length ≤ 16 ∧
+      inst.batchClaims.length = inst.batchOracles.length) &&
+      decide (absorbedShifts.length = inst.batchClaims.length) &&
+      decide (weights.length = inst.batchClaims.length)
+    if okLengths = true then
+      let combClaim := evalCascadeClaim inst.batchClaims absorbedShifts weights
+      let combOracle := evalCascadeOracle inst.initDomainPts inst.batchOracles weights
+      let cascadeLive :=
+        cascadeDecoded.any (fun P =>
+          polyWitnessValid inst.initDomainPts inst.initMinAgree (inst.initDegBound + 1)
+            combOracle inst.initKernel combClaim P)
+      evalHemRbrPrefix cascadeLive combOracle inst.initDomainPts (inst.initDegBound + 1)
+        inst.initMinAgree inst.initKernel combClaim inst.stages restTr
+    else false
+  | _ => false
+
+/-- **State predicate of the `Hem` v6 transcript model (`hemAffineWhirStateFunction`)** over
+    `QuarticGoldilocks` (`F = QuarticGoldilocks` by default). The empty transcript is live
+    exactly when the statement is in the language `HemStatementValid` (an existential over
+    polynomial witnesses, independent of any prover-supplied candidate list); a nonempty
+    prefix is live when `hemPrefixState` holds. -/
+@[expose] def hemAffineWhirStateFunction {F : Type} [CommRingOps F] [DecidableEq F]
+    (inst : HemWhirInstance F) (tr : List (HemTranscriptRound F)) : Prop :=
+  match tr with
+  | [] => HemStatementValid inst
+  | _ :: _ => hemPrefixState inst tr = true
+
+def verifyHemStages {F : Type} [CommRingOps F] [DecidableEq F]
+    (curOracle : Nat → F)
+    (curDom : List F)
+    (curDeg curMinAgree : Nat)
+    (curKernel : List F)
+    (curClaim : F) :
+    List (HemWhirStageSpec F) → List (HemTranscriptRound F) → Bool
+  | [], [.finalQuery finalCoeffs] =>
+    decide (finalCoeffs.length ≤ curDeg + 1) &&
+    decide (ringDot finalCoeffs curKernel = curClaim) &&
+    checkQueriedCosets curDom curOracle finalCoeffs
+      (List.range (Nat.min curMinAgree curDom.length))
+  | st :: remStages,
+    .stageFold stageOracle w₀ w₁ w₂ c_F c_G φ θ α β z₀ z₁ ood₀ ood₁ stageDecoded :: restTr =>
+    let expectedFoldClaim := hemBridgeFoldClaim curClaim w₀ w₁ w₂ c_F c_G φ θ α β
+    let nextKernel := hemKernelFold φ curKernel
+    stageDecoded.any (fun P =>
+      polyWitnessValid st.domainPts st.minAgree st.degBound stageOracle nextKernel expectedFoldClaim P &&
+      decide (RoundPoly.evalCoeffs P z₀ = ood₀) &&
+      decide (RoundPoly.evalCoeffs P z₁ = ood₁) &&
+      checkQueriedCosets st.domainPts stageOracle P st.queriedCosets) &&
+    verifyHemStages stageOracle st.domainPts st.degBound st.minAgree
+      nextKernel expectedFoldClaim remStages restTr
+  | _, _ => false
+
+/-- Deterministic `Hem` v6 full-transcript verifier (`verifyHemAffineWhir`). -/
+@[expose] def verifyHemAffineWhir {F : Type} [CommRingOps F] [DecidableEq F]
+    (inst : HemWhirInstance F) (tr : List (HemTranscriptRound F)) : Bool :=
+  match tr with
+  | .cascade absorbedShifts weights cascadeDecoded :: restTr =>
+    decide (1 ≤ inst.batchOracles.length ∧ inst.batchOracles.length ≤ 16 ∧
+      inst.batchClaims.length = inst.batchOracles.length) &&
+    decide (absorbedShifts.length = inst.batchClaims.length) &&
+    decide (weights.length = inst.batchClaims.length) &&
+    let combClaim := evalCascadeClaim inst.batchClaims absorbedShifts weights
+    let combOracle := evalCascadeOracle inst.initDomainPts inst.batchOracles weights
+    cascadeDecoded.any (fun P =>
+      polyWitnessValid inst.initDomainPts inst.initMinAgree (inst.initDegBound + 1)
+        combOracle inst.initKernel combClaim P) &&
+    verifyHemStages combOracle inst.initDomainPts (inst.initDegBound + 1)
+      inst.initMinAgree inst.initKernel combClaim inst.stages restTr
+  | _ => false
+
+private theorem verifyHemStages_implies_evalHemRbrPrefix {F : Type} [CommRingOps F] [DecidableEq F] :
+    ∀ (curLive : Bool) (curOracle : Nat → F)
+      (curDom : List F) (curDeg curMinAgree : Nat)
+      (curKernel : List F) (curClaim : F)
+      (remStages : List (HemWhirStageSpec F)) (restTr : List (HemTranscriptRound F)),
+      verifyHemStages curOracle curDom curDeg curMinAgree curKernel curClaim remStages restTr = true →
+      evalHemRbrPrefix curLive curOracle curDom curDeg curMinAgree curKernel curClaim remStages restTr = true
+  | _, _, _, _, _, _, _, [], [.finalQuery _], hVer => hVer
+  | _, _, _, _, _, _, _, [], [], hVer => Bool.noConfusion hVer
+  | _, _, _, _, _, _, _, [], .cascade _ _ _ :: _, hVer => Bool.noConfusion hVer
+  | _, _, _, _, _, _, _, [], .stageFold _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ :: _, hVer =>
+    Bool.noConfusion hVer
+  | _, _, _, _, _, _, _, [], .finalQuery _ :: _ :: _, hVer => Bool.noConfusion hVer
+  | _, _, _, _, _, _, _, _ :: _, [], hVer => Bool.noConfusion hVer
+  | _, _, _, _, _, _, _, _ :: _, .cascade _ _ _ :: _, hVer => Bool.noConfusion hVer
+  | _, _, _, _, _, _, _, _ :: _, .finalQuery _ :: _, hVer => Bool.noConfusion hVer
+  | _, _, _, _, _, _, _, st :: remStages,
+    .stageFold stageOracle w₀ w₁ w₂ c_F c_G φ θ α β z₀ z₁ ood₀ ood₁ stageDecoded :: restTr,
+    hVer => by
+    simp only [verifyHemStages, Bool.and_eq_true] at hVer
+    simp only [evalHemRbrPrefix]
+    exact verifyHemStages_implies_evalHemRbrPrefix _ stageOracle st.domainPts st.degBound
+      st.minAgree _ _ remStages restTr hVer.2
+
+private theorem honest_cascade_completeness_poly {F : Type} [LawfulCommRing F] [DecidableEq F]
+    (W kernel domPts : List F) (d₀ : Nat) (α β : F) (hWLen : W.length ≤ d₀ + 1) :
+    let O : Nat → F := fun idx => RoundPoly.evalCoeffs W (domPts.getD idx CommRingOps.zero)
+    let e := ringDot W kernel
+    let s := ringDot (shiftPoly W) kernel
+    let P_comb := evalCascadePolySum [W] [(α, β)]
+    let inst : HemWhirInstance F :=
+      { batchOracles := [O]
+        batchClaims := [e]
+        initDomainPts := domPts
+        initDegBound := d₀
+        initMinAgree := domPts.length
+        initKernel := kernel
+        stages := [] }
+    let tr : List (HemTranscriptRound F) :=
+      [ .cascade [s] [(α, β)] [P_comb],
+        .finalQuery P_comb ]
+    HemStatementValid inst ∧
+    verifyHemAffineWhir inst tr = true := by
+  dsimp only
+  let O : Nat → F := fun idx => RoundPoly.evalCoeffs W (domPts.getD idx CommRingOps.zero)
+  let P_comb := evalCascadePolySum [W] [(α, β)]
+  have hAgreeW : hemCosetAgreeCount domPts O W = domPts.length := by
+    unfold hemCosetAgreeCount
+    have hOnes : qsum domPts.length (fun idx =>
+        if O idx.1 = RoundPoly.evalCoeffs W (domPts.get idx) then 1 else 0) =
+        qsum domPts.length (fun _ => 1) := by
+      apply qsum_congr; intro idx
+      have hEq : O idx.1 = RoundPoly.evalCoeffs W (domPts.get idx) := by
+        dsimp only [O]
+        rw [list_getD_eq_get domPts CommRingOps.zero idx]
+      simp only [hEq, ↓reduceIte]
+    rw [hOnes, qsum_const, Nat.mul_one]
+  have hPCombLen : P_comb.length ≤ (d₀ + 1) + 1 := by
+    dsimp only [P_comb, evalCascadePolySum]
+    have h1 : (polyScaleVar α W).length ≤ d₀ + 2 := by
+      simp only [polyScaleVar, List.length_map]; omega
+    have h2 : (polyScaleVar β (shiftPoly W)).length ≤ d₀ + 2 := by
+      simp only [polyScaleVar, shiftPoly, List.length_map, List.length_cons]; omega
+    have h3 := polyAddVar_length_le _ _ (d₀ + 2) h1 h2
+    exact polyAddVar_length_le _ [] (d₀ + 2) h3 (Nat.zero_le _)
+  have hPCombEval : ∀ z : F,
+      RoundPoly.evalCoeffs P_comb z =
+        CommRingOps.add
+          (CommRingOps.mul (CommRingOps.add α (CommRingOps.mul β z)) (RoundPoly.evalCoeffs W z))
+          CommRingOps.zero := by
+    intro z
+    dsimp only [P_comb, evalCascadePolySum]
+    rw [evalCoeffs_polyAddVar, evalCoeffs_polyAddVar, evalCoeffs_polyScaleVar,
+        evalCoeffs_polyScaleVar, evalCoeffs_shiftPoly]
+    change CommRingOps.add
+        (CommRingOps.add (CommRingOps.mul α (RoundPoly.evalCoeffs W z))
+          (CommRingOps.mul β (CommRingOps.mul z (RoundPoly.evalCoeffs W z))))
+        CommRingOps.zero = _
+    rw [← LawfulCommRing.mul_assoc β z (RoundPoly.evalCoeffs W z),
+        ← LawfulCommRing.right_distrib]
+  have hAgreeComb :
+      hemCosetAgreeCount domPts (evalCascadeOracle domPts [O] [(α, β)]) P_comb = domPts.length := by
+    unfold hemCosetAgreeCount
+    have hOnes : qsum domPts.length (fun idx =>
+        if evalCascadeOracle domPts [O] [(α, β)] idx.1 =
+            RoundPoly.evalCoeffs P_comb (domPts.get idx) then 1 else 0) =
+        qsum domPts.length (fun _ => 1) := by
+      apply qsum_congr; intro idx
+      have hEq : evalCascadeOracle domPts [O] [(α, β)] idx.1 =
+          RoundPoly.evalCoeffs P_comb (domPts.get idx) := by
+        dsimp only [evalCascadeOracle, O]
+        rw [list_getD_eq_get domPts CommRingOps.zero idx, hPCombEval (domPts.get idx)]
+      simp only [hEq, ↓reduceIte]
+    rw [hOnes, qsum_const, Nat.mul_one]
+  have hDotComb :
+      ringDot P_comb kernel =
+        evalCascadeClaim [ringDot W kernel] [ringDot (shiftPoly W) kernel] [(α, β)] :=
+    ringDot_evalCascadePolySum kernel [W] [(α, β)] rfl
+  have hMinSelf : Nat.min domPts.length domPts.length = domPts.length := by simp
+  have hQueriedComb :
+      checkQueriedCosets domPts (evalCascadeOracle domPts [O] [(α, β)]) P_comb
+        (List.range (Nat.min domPts.length domPts.length)) = true := by
+    rw [hMinSelf]
+    have hRange : ∀ (idxs : List Nat),
+        (∀ idx ∈ idxs, idx < domPts.length) →
+        checkQueriedCosets domPts (evalCascadeOracle domPts [O] [(α, β)]) P_comb idxs = true := by
+      intro idxs hLt
+      induction idxs with
+      | nil => rfl
+      | cons idx rest ih =>
+        have hi := hLt idx (.head rest)
+        have hEqPt : evalCascadeOracle domPts [O] [(α, β)] idx =
+            RoundPoly.evalCoeffs P_comb (domPts.getD idx CommRingOps.zero) := by
+          dsimp only [evalCascadeOracle, O]
+          rw [hPCombEval (domPts.getD idx CommRingOps.zero)]
+        simp only [checkQueriedCosets, hi, hEqPt, decide_true, Bool.true_and,
+          ih (fun j hj => hLt j (.tail idx hj))]
+    exact hRange (List.range domPts.length) (fun idx hMem => List.mem_range.mp hMem)
+  have hValidInst :
+      HemStatementValid
+        ({ batchOracles := [O]
+           batchClaims := [ringDot W kernel]
+           initDomainPts := domPts
+           initDegBound := d₀
+           initMinAgree := domPts.length
+           initKernel := kernel
+           stages := [] } : HemWhirInstance F) := by
+    have hW : polyWitnessValid domPts domPts.length d₀ O kernel (ringDot W kernel) W = true := by
+      unfold polyWitnessValid
+      rw [hAgreeW]
+      simp only [hWLen, Nat.le_refl, decide_true, eq_self, Bool.and_self]
+    show (1 ≤ [O].length ∧ [O].length ≤ 16) ∧
+      ((∃ P : List F,
+        polyWitnessValid domPts domPts.length d₀ O kernel (ringDot W kernel) P = true) ∧ True)
+    exact ⟨⟨Nat.le_refl 1, Nat.le_of_ble_eq_true rfl⟩, ⟨W, hW⟩, trivial⟩
+  have hVerTr :
+      verifyHemAffineWhir
+        { batchOracles := [O]
+          batchClaims := [ringDot W kernel]
+          initDomainPts := domPts
+          initDegBound := d₀
+          initMinAgree := domPts.length
+          initKernel := kernel
+          stages := [] }
+        [ .cascade [ringDot (shiftPoly W) kernel] [(α, β)] [P_comb],
+          .finalQuery P_comb ] = true := by
+    unfold verifyHemAffineWhir
+    dsimp only [polyWitnessValid, verifyHemStages, List.length_cons, List.length_nil,
+      List.any_cons, List.any_nil]
+    rw [hAgreeComb, hDotComb, hQueriedComb]
+    simp only [hPCombLen, Nat.le_refl, decide_true, Bool.or_false, Bool.and_self]
+    decide
+  exact ⟨hValidInst, hVerTr⟩
+
+private theorem accept_implies_live_poly {F : Type} [CommRingOps F] [DecidableEq F]
+    (inst : HemWhirInstance F) (fullTr : List (HemTranscriptRound F)) :
+    verifyHemAffineWhir inst fullTr = true → hemAffineWhirStateFunction inst fullTr := by
+  cases fullTr with
+  | nil => intro hVer; exact Bool.noConfusion hVer
+  | cons hd restTr =>
+    cases hd with
+    | stageFold _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => intro hVer; exact Bool.noConfusion hVer
+    | finalQuery _ => intro hVer; exact Bool.noConfusion hVer
+    | cascade absorbedShifts weights cascadeDecoded =>
+      intro hVer
+      unfold verifyHemAffineWhir at hVer
+      dsimp only at hVer
+      rcases (Bool.and_eq_true _ _).mp hVer with ⟨hOk, hRest⟩
+      rcases (Bool.and_eq_true _ _).mp hRest with ⟨_, hStages⟩
+      show hemPrefixState inst (.cascade absorbedShifts weights cascadeDecoded :: restTr) = true
+      unfold hemPrefixState
+      dsimp only
+      rw [hOk]
+      simp only [↓reduceIte]
+      exact verifyHemStages_implies_evalHemRbrPrefix _ _ _ _ _ _ _ inst.stages restTr hStages
+
+/-- **`Hem` v6 doomed-init, accept-implies-live and honest completeness
+    (`hemAffineWhir_rbr_completeness_and_doomed_init`)**, over `QuarticGoldilocks`:
+    1. a statement outside `HemStatementValid` is doomed on the empty transcript;
+    2. a doomed full transcript is rejected by the deterministic verifier;
+    3. an accepted full transcript is live;
+    4. any polynomial `W` of degree `≤ d₀`, with its shifted functional claim absorbed before
+       the challenge squeeze, gives a statement in the language and a live, accepted
+       transcript.
+    These are the first two laws of `RbrStateFunction` together with completeness. The third
+    law, a per-round flip bound, is NOT proved for this model:
+    `tooth_hem_zero_cascade_weights_accept_false_claim` exhibits a flip, and bounding the
+    number of flipping challenges at the deployed radius needs a mutual correlated agreement
+    bound for the 16-fold cascade and for each fold (`AffineMcaBound` at the Johnson radius). -/
+theorem hemAffineWhir_rbr_completeness_and_doomed_init :
+    (∀ inst : HemWhirInstance QuarticGoldilocks,
+      ¬ HemStatementValid inst → ¬ hemAffineWhirStateFunction inst []) ∧
+    (∀ (inst : HemWhirInstance QuarticGoldilocks) (fullTr : List (HemTranscriptRound QuarticGoldilocks)),
+      ¬ hemAffineWhirStateFunction inst fullTr → verifyHemAffineWhir inst fullTr = false) ∧
+    (∀ (inst : HemWhirInstance QuarticGoldilocks) (fullTr : List (HemTranscriptRound QuarticGoldilocks)),
+      verifyHemAffineWhir inst fullTr = true → hemAffineWhirStateFunction inst fullTr) ∧
+    (∀ (W kernel domPts : List QuarticGoldilocks) (d₀ : Nat) (α β : QuarticGoldilocks),
+      W.length ≤ d₀ + 1 →
+      let O : Nat → QuarticGoldilocks := fun idx =>
+        RoundPoly.evalCoeffs W (domPts.getD idx CommRingOps.zero)
+      let e := ringDot W kernel
+      let s := ringDot (shiftPoly W) kernel
+      let P_comb := evalCascadePolySum [W] [(α, β)]
+      let inst : HemWhirInstance QuarticGoldilocks :=
+        { batchOracles := [O]
+          batchClaims := [e]
+          initDomainPts := domPts
+          initDegBound := d₀
+          initMinAgree := domPts.length
+          initKernel := kernel
+          stages := [] }
+      let tr : List (HemTranscriptRound QuarticGoldilocks) :=
+        [ .cascade [s] [(α, β)] [P_comb],
+          .finalQuery P_comb ]
+      HemStatementValid inst ∧
+      hemAffineWhirStateFunction inst tr ∧
+      verifyHemAffineWhir inst tr = true) := by
+  refine ⟨fun _ hInv => hInv, ?_, accept_implies_live_poly, ?_⟩
+  · intro inst fullTr hDoomed
+    cases hv : verifyHemAffineWhir inst fullTr
+    · rfl
+    · exact absurd (accept_implies_live_poly inst fullTr hv) hDoomed
+  · intro W kernel domPts d₀ α β hWLen
+    rcases honest_cascade_completeness_poly W kernel domPts d₀ α β hWLen with ⟨hVal, hVer⟩
+    exact ⟨hVal, accept_implies_live_poly _ _ hVer, hVer⟩
+
+/-- A false `Hem` statement: the zero oracle on the domain `{0, 1}` with the claim that its
+    degree-0 interpolant evaluates to `1` under the functional `[1]`. -/
+def hemFalseClaimInstance : HemWhirInstance QuarticGoldilocks :=
+  { batchOracles := [fun _ => CommRingOps.zero]
+    batchClaims := [CommRingOps.one]
+    initDomainPts := [CommRingOps.zero, CommRingOps.one]
+    initDegBound := 0
+    initMinAgree := 2
+    initKernel := [CommRingOps.one]
+    stages := [] }
+
+/-- No polynomial witnesses the false statement: a constant agreeing with the zero oracle on
+    both domain points is zero, and the zero polynomial does not meet the claim `1`. -/
+theorem hemFalseClaimInstance_invalid : ¬ HemStatementValid hemFalseClaimInstance := by
+  intro h
+  have h' : (1 ≤ 1 ∧ 1 ≤ 16) ∧
+      ((∃ P : List QuarticGoldilocks,
+        polyWitnessValid [CommRingOps.zero, CommRingOps.one] 2 0 (fun _ => CommRingOps.zero)
+          [CommRingOps.one] CommRingOps.one P = true) ∧ True) := h
+  obtain ⟨_, ⟨P, hP⟩, _⟩ := h'
+  unfold polyWitnessValid at hP
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at hP
+  obtain ⟨⟨hLen, hAg⟩, hDot⟩ := hP
+  rcases P with _ | ⟨c, _ | ⟨c2, rest⟩⟩
+  · exact absurd hDot (by decide)
+  · have hc : c = CommRingOps.zero := by
+      apply Decidable.byContradiction
+      intro hne
+      have hne' : ¬ ((CommRingOps.zero : QuarticGoldilocks) =
+          RoundPoly.evalCoeffs [c] (CommRingOps.zero : QuarticGoldilocks)) := by
+        intro h
+        apply hne
+        have e : RoundPoly.evalCoeffs [c] (CommRingOps.zero : QuarticGoldilocks) = c := by
+          show CommRingOps.add c (CommRingOps.mul CommRingOps.zero CommRingOps.zero) = c
+          rw [LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+        rw [e] at h
+        exact h.symm
+      change 2 ≤ (if (CommRingOps.zero : QuarticGoldilocks) =
+            RoundPoly.evalCoeffs [c] (CommRingOps.zero : QuarticGoldilocks) then 1 else 0) +
+          ((if (CommRingOps.zero : QuarticGoldilocks) =
+            RoundPoly.evalCoeffs [c] (CommRingOps.one : QuarticGoldilocks) then 1 else 0) + 0)
+        at hAg
+      simp only [hne', ↓reduceIte] at hAg
+      by_cases h1 : (CommRingOps.zero : QuarticGoldilocks) =
+          RoundPoly.evalCoeffs [c] (CommRingOps.one : QuarticGoldilocks)
+      · simp only [h1, ↓reduceIte] at hAg
+        exact absurd hAg (by decide)
+      · simp only [h1, ↓reduceIte] at hAg
+        exact absurd hAg (by decide)
+    subst hc
+    exact absurd hDot (by decide)
+  · simp only [List.length_cons] at hLen
+    omega
+
+/-- **A flip of the `Hem` v6 state exists.** The false statement `hemFalseClaimInstance` is
+    doomed on the empty transcript, yet the deterministic verifier accepts it when the cascade
+    challenge is `(α, β) = (0, 0)`: the combined oracle and the combined claim both vanish.
+    Hence every round-by-round flip bound for the cascade round counts at least this
+    challenge, and soundness of the model rests on bounding the number of such challenges. -/
+theorem tooth_hem_zero_cascade_weights_accept_false_claim :
+    ¬ hemAffineWhirStateFunction hemFalseClaimInstance [] ∧
+    verifyHemAffineWhir hemFalseClaimInstance
+      [.cascade [CommRingOps.zero] [(CommRingOps.zero, CommRingOps.zero)] [[]],
+       .finalQuery []] = true :=
+  ⟨hemFalseClaimInstance_invalid, by decide⟩
+
+
+/-! ## §3. Multi-Round Fiat–Shamir QROM Reduction via Measure-and-Reprogram & Online Merkle Extraction -/
+
+/-! ### §3.1 Unitary `(2 * Q + 1)`-Branch Amplitude Decomposition & `(2 * Q + 1)^2` RBR Step -/
+
+/-- Project `QVec` onto a single target query coordinate `xStar : Fin cardX`. -/
+def projSingle {cardX w cardAnc : Nat} (xStar : Fin cardX)
+    (ψ : QVec cardX w cardAnc) : QVec cardX w cardAnc :=
+  fun x y a => if x = xStar then ψ x y a else GaussInt.zero
+
+/-- Negate all Gaussian-integer amplitudes of a `QVec`. -/
+def negQVec {cardX w cardAnc : Nat} (ψ : QVec cardX w cardAnc) : QVec cardX w cardAnc :=
+  (QVec.zero cardX w cardAnc).sub ψ
+
+private theorem projSingle_normSq {cardX w cardAnc : Nat} (xStar : Fin cardX)
+    (ψ : QVec cardX w cardAnc) :
+    QVec.stateNormSq (projSingle xStar ψ) = QVec.queryWeight ψ xStar := by
+  unfold QVec.stateNormSq
+  have hPt :
+      qsum cardX (fun x => QVec.queryWeight (projSingle xStar ψ) x) =
+      qsum cardX (fun x => (if x = xStar then 1 else 0) * QVec.queryWeight ψ xStar) := by
+    apply qsum_congr; intro x
+    by_cases hx : x = xStar
+    · subst hx
+      simp only [↓reduceIte, Nat.one_mul, QVec.queryWeight, projSingle]
+    · simp only [hx, ↓reduceIte, Nat.zero_mul, QVec.queryWeight, projSingle]
+      have h0 : qsum (2 ^ w) (fun _ => qsum cardAnc (fun _ => GaussInt.normSq GaussInt.zero)) =
+          qsum (2 ^ w) (fun _ => 0) := by
+        apply qsum_congr; intro _
+        have ha : GaussInt.normSq GaussInt.zero = 0 := rfl
+        rw [qsum_congr (fun _ => ha), qsum_const, Nat.mul_zero]
+      rw [h0, qsum_const, Nat.mul_zero]
+  rw [hPt, qsum_mul_right, qsum_eq_indicator, Nat.one_mul]
+
+private theorem negQVec_normSq {cardX w cardAnc : Nat} (ψ : QVec cardX w cardAnc) :
+    QVec.stateNormSq (negQVec ψ) = QVec.stateNormSq ψ := by
+  have hIntAbs : ∀ z : Int, (0 - z).natAbs = z.natAbs := by
+    intro z; rw [Int.zero_sub, Int.natAbs_neg]
+  unfold QVec.stateNormSq QVec.queryWeight negQVec QVec.sub QVec.zero
+  apply qsum_congr; intro x
+  apply qsum_congr; intro y
+  apply qsum_congr; intro a
+  unfold GaussInt.normSq GaussInt.sub GaussInt.zero
+  dsimp only
+  rw [hIntAbs, hIntAbs]
+
+private theorem oracleXor_reprogram_diff_eq_projSingle {cardX w cardAnc : Nat}
+    (H : Fin cardX → BitVec w) (xStar : Fin cardX) (ch : BitVec w)
+    (ψ : QVec cardX w cardAnc) :
+    (oracleXor (reprogramOracle H xStar ch) ψ).sub (oracleXor H ψ) =
+      (oracleXor (reprogramOracle H xStar ch) (projSingle xStar ψ)).sub
+        (oracleXor H (projSingle xStar ψ)) := by
+  funext x y a
+  by_cases hx : x = xStar
+  · subst hx
+    simp only [QVec.sub, oracleXor, projSingle, ↓reduceIte]
+  · simp only [QVec.sub, oracleXor, projSingle, reprogramOracle, hx, ↓reduceIte]
+    unfold GaussInt.sub GaussInt.zero
+    ext <;> dsimp only <;> omega
+
+/-- Structural `2 * q + 1` counter matching `finGaussSum` & `qsum` front-peeling recursion. -/
+def twoMulPlusOne : Nat → Nat
+  | 0 => 1
+  | q + 1 => (twoMulPlusOne q + 1) + 1
+
+private theorem twoMulPlusOne_eq (q : Nat) : twoMulPlusOne q = 2 * q + 1 := by
+  induction q with
+  | zero => rfl
+  | succ m ih => simp only [twoMulPlusOne, ih]; omega
+
+/-- Interleaves `q` positive reprogramming branches, `q` negative pre-reprogramming branches, and
+    `1` base execution branch into `twoMulPlusOne q` (`= 2 * q + 1`) vectors. -/
+def interleaveDfmBranches {α : Type} :
+    (q : Nat) → (Fin q → α) → (Fin q → α) → α → Fin (twoMulPlusOne q) → α
+  | 0, _, _, base, _ => base
+  | q + 1, posB, _, _, ⟨0, _⟩ => posB ⟨0, Nat.zero_lt_succ q⟩
+  | q + 1, _, negB, _, ⟨1, _⟩ => negB ⟨0, Nat.zero_lt_succ q⟩
+  | q + 1, posB, negB, base, ⟨k + 2, hk⟩ =>
+    interleaveDfmBranches q
+      (fun t => posB ⟨t.1 + 1, Nat.succ_lt_succ t.2⟩)
+      (fun t => negB ⟨t.1 + 1, Nat.succ_lt_succ t.2⟩)
+      base
+      ⟨k, Nat.lt_of_succ_lt_succ (Nat.lt_of_succ_lt_succ hk)⟩
+
+private theorem finGaussSum_interleaveDfmBranches :
+    ∀ (q : Nat) (posB negB : Fin q → GaussInt) (base : GaussInt),
+      finGaussSum (twoMulPlusOne q) (interleaveDfmBranches q posB negB base) =
+        GaussInt.add (finGaussSum q (fun t => GaussInt.add (posB t) (negB t))) base
+  | 0, _, _, base => by
+    simp only [twoMulPlusOne, finGaussSum, interleaveDfmBranches, GaussInt.add, GaussInt.zero]
+    ext <;> dsimp only <;> omega
+  | q + 1, posB, negB, base => by
+    let posTail : Fin q → GaussInt := fun t => posB ⟨t.1 + 1, Nat.succ_lt_succ t.2⟩
+    let negTail : Fin q → GaussInt := fun t => negB ⟨t.1 + 1, Nat.succ_lt_succ t.2⟩
+    have ih := finGaussSum_interleaveDfmBranches q posTail negTail base
+    change GaussInt.add (posB ⟨0, Nat.zero_lt_succ q⟩)
+        (GaussInt.add (negB ⟨0, Nat.zero_lt_succ q⟩)
+          (finGaussSum (twoMulPlusOne q) (interleaveDfmBranches q posTail negTail base))) =
+      GaussInt.add
+        (GaussInt.add
+          (GaussInt.add (posB ⟨0, Nat.zero_lt_succ q⟩) (negB ⟨0, Nat.zero_lt_succ q⟩))
+          (finGaussSum q (fun t => GaussInt.add (posTail t) (negTail t))))
+        base
+    rw [ih]
+    unfold GaussInt.add
+    ext <;> dsimp only <;> omega
+
+private theorem qsum_interleaveDfmBranches {α : Type} (wt : α → Nat) :
+    ∀ (q : Nat) (posB negB : Fin q → α) (base : α),
+      qsum (twoMulPlusOne q) (fun k => wt (interleaveDfmBranches q posB negB base k)) =
+        qsum q (fun t => wt (posB t) + wt (negB t)) + wt base
+  | 0, _, _, base => by simp [twoMulPlusOne, qsum, interleaveDfmBranches]
+  | q + 1, posB, negB, base => by
+    let posTail : Fin q → α := fun t => posB ⟨t.1 + 1, Nat.succ_lt_succ t.2⟩
+    let negTail : Fin q → α := fun t => negB ⟨t.1 + 1, Nat.succ_lt_succ t.2⟩
+    have ih := qsum_interleaveDfmBranches wt q posTail negTail base
+    change wt (posB ⟨0, Nat.zero_lt_succ q⟩) +
+        (wt (negB ⟨0, Nat.zero_lt_succ q⟩) +
+          qsum (twoMulPlusOne q) (fun k => wt (interleaveDfmBranches q posTail negTail base k))) =
+      (wt (posB ⟨0, Nat.zero_lt_succ q⟩) + wt (negB ⟨0, Nat.zero_lt_succ q⟩) +
+        qsum q (fun t => wt (posTail t) + wt (negTail t))) + wt base
+    rw [ih]
+    omega
+
+private theorem interleaveDfmBranches_eval {cardX w cardAnc : Nat}
+    (x : Fin cardX) (y : Fin (2 ^ w)) (a : Fin cardAnc) :
+    ∀ (m : Nat) (pV nV : Fin m → QVec cardX w cardAnc) (bV : QVec cardX w cardAnc)
+      (k : Fin (twoMulPlusOne m)),
+      interleaveDfmBranches m pV nV bV k x y a =
+        interleaveDfmBranches m (fun t => pV t x y a) (fun t => nV t x y a) (bV x y a) k
+  | 0, _, _, _, _ => rfl
+  | _ + 1, _, _, _, ⟨0, _⟩ => rfl
+  | _ + 1, _, _, _, ⟨1, _⟩ => rfl
+  | m' + 1, pV, nV, bV, ⟨k' + 2, hk⟩ =>
+    interleaveDfmBranches_eval x y a m'
+      (fun t => pV ⟨t.1 + 1, Nat.succ_lt_succ t.2⟩)
+      (fun t => nV ⟨t.1 + 1, Nat.succ_lt_succ t.2⟩)
+      bV
+      ⟨k', Nat.lt_of_succ_lt_succ (Nat.lt_of_succ_lt_succ hk)⟩
+
+private theorem advStateAt_congr_idx {cardX w cardAnc q : Nat}
+    (A : QuantumAdv cardX w cardAnc q) (H : Fin cardX → BitVec w)
+    {k₁ k₂ : Nat} (hk₁ : k₁ ≤ q) (hk₂ : k₂ ≤ q) (hEq : k₁ = k₂) :
+    advStateAt A H k₁ hk₁ = advStateAt A H k₂ hk₂ := by
+  subst hEq
+  rfl
+
+private theorem telescope_hybridAdv_reprogram {cardX w cardAnc q : Nat}
+    (A : QuantumAdv cardX w cardAnc q)
+    (H : Fin cardX → BitVec w) (xStar : Fin cardX) (ch : BitVec w)
+    (x : Fin cardX) (y : Fin (2 ^ w)) (a : Fin cardAnc) :
+    let H_ch := reprogramOracle H xStar ch
+    let posB : Fin q → QVec cardX w cardAnc := fun t =>
+      applySuffixFrom A H_ch t.1 t.2
+        (oracleXor H_ch (projSingle xStar (advStateAt A H t.1 (Nat.le_of_lt t.2))))
+    let negB : Fin q → QVec cardX w cardAnc := fun t =>
+      negQVec (applySuffixFrom A H_ch t.1 t.2
+        (oracleXor H (projSingle xStar (advStateAt A H t.1 (Nat.le_of_lt t.2)))))
+    finGaussSum (twoMulPlusOne q)
+        (fun k => interleaveDfmBranches q posB negB (runQuantumAdv A H) k x y a) =
+      runQuantumAdv A H_ch x y a := by
+  dsimp only
+  let H_ch := reprogramOracle H xStar ch
+  let posVal : Fin q → GaussInt := fun t =>
+    applySuffixFrom A H_ch t.1 t.2
+      (oracleXor H_ch (projSingle xStar (advStateAt A H t.1 (Nat.le_of_lt t.2)))) x y a
+  let negVal : Fin q → GaussInt := fun t =>
+    negQVec (applySuffixFrom A H_ch t.1 t.2
+      (oracleXor H (projSingle xStar (advStateAt A H t.1 (Nat.le_of_lt t.2))))) x y a
+  have hInter :
+      finGaussSum (twoMulPlusOne q)
+        (fun k => interleaveDfmBranches q
+          (fun t => applySuffixFrom A H_ch t.1 t.2
+            (oracleXor H_ch (projSingle xStar (advStateAt A H t.1 (Nat.le_of_lt t.2)))))
+          (fun t => negQVec (applySuffixFrom A H_ch t.1 t.2
+            (oracleXor H (projSingle xStar (advStateAt A H t.1 (Nat.le_of_lt t.2))))))
+          (runQuantumAdv A H) k x y a) =
+      finGaussSum (twoMulPlusOne q)
+        (interleaveDfmBranches q posVal negVal (runQuantumAdv A H x y a)) :=
+    congrArg (finGaussSum (twoMulPlusOne q))
+      (funext (interleaveDfmBranches_eval x y a q _ _ _))
+  rw [hInter, finGaussSum_interleaveDfmBranches]
+  have hStepEq : ∀ t : Fin q,
+      GaussInt.add (posVal t) (negVal t) =
+        GaussInt.sub
+          (hybridAdv A H_ch H t.1 (Nat.le_of_lt t.2) x y a)
+          (hybridAdv A H_ch H (t.1 + 1) t.2 x y a) := by
+    intro t
+    have hSubVec :
+        (hybridAdv A H_ch H t.1 (Nat.le_of_lt t.2)).sub (hybridAdv A H_ch H (t.1 + 1) t.2) =
+          (applySuffixFrom A H_ch t.1 t.2
+            (oracleXor H_ch (projSingle xStar (advStateAt A H t.1 (Nat.le_of_lt t.2))))).sub
+          (applySuffixFrom A H_ch t.1 t.2
+            (oracleXor H (projSingle xStar (advStateAt A H t.1 (Nat.le_of_lt t.2))))) := by
+      have hRhs2 :
+          applySuffixFrom A H_ch t.1 t.2 (oracleXor H (advStateAt A H t.1 (Nat.le_of_lt t.2))) =
+            hybridAdv A H_ch H (t.1 + 1) t.2 := by
+        rw [applySuffixFrom.eq_def]
+        dsimp only
+        have hStep : (A.steps t).apply (oracleXor H (advStateAt A H t.1 (Nat.le_of_lt t.2))) =
+            advStateAt A H (t.1 + 1) t.2 := rfl
+        rw [hStep]
+        unfold hybridAdv
+        if hNext : t.1 + 1 < q then
+          simp only [hNext, ↓reduceDIte]
+        else
+          have hEqQ : t.1 + 1 = q := by omega
+          simp only [hNext, ↓reduceDIte]
+          exact advStateAt_congr_idx A H t.2 (Nat.le_refl q) hEqQ
+      have hLhs1 : hybridAdv A H_ch H t.1 (Nat.le_of_lt t.2) =
+          applySuffixFrom A H_ch t.1 t.2 (oracleXor H_ch (advStateAt A H t.1 (Nat.le_of_lt t.2))) := by
+        unfold hybridAdv
+        simp only [t.2, ↓reduceDIte]
+      rw [hLhs1, ← hRhs2, ← applySuffixFrom_sub,
+          oracleXor_reprogram_diff_eq_projSingle H xStar ch, applySuffixFrom_sub]
+    have hAtCoord := congrFun (congrFun (congrFun hSubVec x) y) a
+    dsimp only [posVal, negVal, negQVec, QVec.sub, QVec.zero] at hAtCoord ⊢
+    rw [hAtCoord]
+    unfold GaussInt.add GaussInt.sub GaussInt.zero
+    ext <;> dsimp only <;> omega
+  have hCongrG : ∀ {m : Nat} (f g : Fin m → GaussInt),
+      (∀ i, f i = g i) → finGaussSum m f = finGaussSum m g := by
+    intro m f g hfg
+    exact congrArg (finGaussSum m) (funext hfg)
+  rw [hCongrG _ _ hStepEq]
+  have hTele : ∀ (m : Nat) (seq : (k : Nat) → k ≤ m → GaussInt),
+      finGaussSum m (fun t => GaussInt.sub (seq t.1 (Nat.le_of_lt t.2)) (seq (t.1 + 1) t.2)) =
+        GaussInt.sub (seq 0 (Nat.zero_le m)) (seq m (Nat.le_refl m)) := by
+    intro m
+    induction m with
+    | zero => intro seq; simp [finGaussSum, GaussInt.sub, GaussInt.zero]
+    | succ m' ihm =>
+      intro seq
+      simp only [finGaussSum]
+      rw [ihm (fun k hk => seq (k + 1) (Nat.succ_le_succ hk))]
+      unfold GaussInt.add GaussInt.sub
+      ext <;> dsimp only <;> omega
+  rw [hTele q (fun k hk => hybridAdv A H_ch H k hk x y a)]
+  have hHyb0 : hybridAdv A H_ch H 0 (Nat.zero_le q) = runQuantumAdv A H_ch := by
+    have hSuffEq : ∀ (k : Nat) (hk : k ≤ q),
+        (if hlt : k < q then applySuffixFrom A H_ch k hlt (oracleXor H_ch (advStateAt A H_ch k hk))
+         else advStateAt A H_ch q (Nat.le_refl q)) = runQuantumAdv A H_ch := by
+      intro k hk
+      induction hRem : q - k generalizing k with
+      | zero =>
+        have hEqQ : k = q := by omega
+        subst hEqQ
+        simp [runQuantumAdv]
+      | succ rem ihRem =>
+        have hlt : k < q := by omega
+        simp only [hlt, ↓reduceDIte]
+        rw [applySuffixFrom.eq_def]
+        dsimp only
+        have hAdvNext : (A.steps ⟨k, hlt⟩).apply (oracleXor H_ch (advStateAt A H_ch k hk)) =
+            advStateAt A H_ch (k + 1) hlt := rfl
+        rw [hAdvNext]
+        if hNext : k + 1 < q then
+          simp only [hNext, ↓reduceDIte]
+          have ih' := ihRem (k + 1) (Nat.le_of_lt hNext) (by omega)
+          simp only [hNext, ↓reduceDIte] at ih'
+          exact ih'
+        else
+          have hEqQ : k + 1 = q := by omega
+          simp only [hNext, ↓reduceDIte, runQuantumAdv]
+          exact advStateAt_congr_idx A H_ch hlt (Nat.le_refl q) hEqQ
+    cases q with
+    | zero => rfl
+    | succ q' =>
+      have hPos : 0 < q' + 1 := Nat.zero_lt_succ q'
+      have h0 := hSuffEq 0 (Nat.zero_le (q' + 1))
+      simp only [hPos, ↓reduceDIte] at h0
+      unfold hybridAdv
+      simp only [hPos, ↓reduceDIte]
+      exact h0
+  have hHybQ : hybridAdv A H_ch H q (Nat.le_refl q) = runQuantumAdv A H := by
+    unfold hybridAdv runQuantumAdv
+    simp
+  rw [hHyb0, hHybQ]
+  dsimp only [H_ch]
+  unfold GaussInt.add GaussInt.sub
+  ext <;> dsimp only <;> omega
+
+/-- `ch`-independent squared-amplitude envelope of `A` reprogrammed at `xStar` under `H`, for an
+    arbitrary OUTPUT event `T` on the final query/output register. -/
+def dfmEventEnvelope {cardX w cardAnc q : Nat}
+    (A : QuantumAdv cardX w cardAnc q) (H : Fin cardX → BitVec w) (xStar : Fin cardX)
+    (T : Fin cardX → Bool) : Nat :=
+  qsum q (fun t =>
+    2 * (suffixScale A t.1 (Nat.le_of_lt t.2) *
+      QVec.queryWeight (advStateAt A H t.1 (Nat.le_of_lt t.2)) xStar)) +
+    QVec.queryMassOn T (runQuantumAdv A H)
+
+private theorem queryMassOn_reprogram_le_dfmEventEnvelope {cardX w cardAnc q : Nat}
+    (A : QuantumAdv cardX w cardAnc q) (H : Fin cardX → BitVec w)
+    (xStar : Fin cardX) (ch : BitVec w) (T : Fin cardX → Bool) :
+    QVec.queryMassOn T (runQuantumAdv A (reprogramOracle H xStar ch)) ≤
+      (2 * q + 1) * dfmEventEnvelope A H xStar T := by
+  let H_ch := reprogramOracle H xStar ch
+  let posB : Fin q → QVec cardX w cardAnc := fun t =>
+    applySuffixFrom A H_ch t.1 t.2
+      (oracleXor H_ch (projSingle xStar (advStateAt A H t.1 (Nat.le_of_lt t.2))))
+  let negB : Fin q → QVec cardX w cardAnc := fun t =>
+    negQVec (applySuffixFrom A H_ch t.1 t.2
+      (oracleXor H (projSingle xStar (advStateAt A H t.1 (Nat.le_of_lt t.2)))))
+  let V := interleaveDfmBranches q posB negB (runQuantumAdv A H)
+  have hPtCS : ∀ x : Fin cardX,
+      QVec.queryWeight (runQuantumAdv A H_ch) x ≤
+        twoMulPlusOne q * qsum (twoMulPlusOne q) (fun k => QVec.queryWeight (V k) x) := by
+    intro x
+    unfold QVec.queryWeight
+    have hStep1 :
+        qsum (2 ^ w) (fun y => qsum cardAnc (fun a =>
+          GaussInt.normSq (runQuantumAdv A H_ch x y a))) ≤
+        qsum (2 ^ w) (fun y => qsum cardAnc (fun a =>
+          twoMulPlusOne q * qsum (twoMulPlusOne q) (fun k => GaussInt.normSq (V k x y a)))) := by
+      apply qsum_le_qsum; intro y
+      apply qsum_le_qsum; intro a
+      rw [← telescope_hybridAdv_reprogram A H xStar ch x y a]
+      exact normSq_finGaussSum_le (twoMulPlusOne q) (fun k => V k x y a)
+    apply Nat.le_trans hStep1
+    have hSwap : ∀ y,
+        qsum cardAnc (fun a =>
+          twoMulPlusOne q * qsum (twoMulPlusOne q) (fun k => GaussInt.normSq (V k x y a))) =
+        twoMulPlusOne q * qsum (twoMulPlusOne q) (fun k =>
+          qsum cardAnc (fun a => GaussInt.normSq (V k x y a))) := by
+      intro y
+      rw [qsum_mul_left, qsum_comm]
+    rw [qsum_congr hSwap, qsum_mul_left, qsum_comm]
+    exact Nat.le_refl _
+  have hMass :
+      QVec.queryMassOn T (runQuantumAdv A H_ch) ≤
+        twoMulPlusOne q * qsum (twoMulPlusOne q) (fun k => QVec.queryMassOn T (V k)) := by
+    have hPt :
+        qsum cardX (fun x =>
+          if T x = true then QVec.queryWeight (runQuantumAdv A H_ch) x else 0) ≤
+        qsum cardX (fun x =>
+          twoMulPlusOne q * qsum (twoMulPlusOne q) (fun k =>
+            if T x = true then QVec.queryWeight (V k) x else 0)) := by
+      apply qsum_le_qsum; intro x
+      cases T x
+      · simp only [Bool.false_eq_true, ↓reduceIte, Nat.zero_le]
+      · simp only [↓reduceIte]
+        exact hPtCS x
+    rw [qsum_mul_left, qsum_comm] at hPt
+    exact hPt
+  rw [qsum_interleaveDfmBranches (fun φ => QVec.queryMassOn T φ), twoMulPlusOne_eq] at hMass
+  apply Nat.le_trans hMass
+  apply Nat.mul_le_mul_left (2 * q + 1)
+  unfold dfmEventEnvelope
+  apply Nat.add_le_add_right
+  apply qsum_le_qsum; intro t
+  have hPosNorm :
+      QVec.queryMassOn T (posB t) ≤
+        suffixScale A t.1 (Nat.le_of_lt t.2) *
+          QVec.queryWeight (advStateAt A H t.1 (Nat.le_of_lt t.2)) xStar := by
+    have h1 := QVec.queryMassOn_le_stateNormSq T (posB t)
+    dsimp only [posB] at h1
+    rw [applySuffixFrom_normSq, oracleXor_isometry, projSingle_normSq] at h1
+    exact h1
+  have hNegNorm :
+      QVec.queryMassOn T (negB t) ≤
+        suffixScale A t.1 (Nat.le_of_lt t.2) *
+          QVec.queryWeight (advStateAt A H t.1 (Nat.le_of_lt t.2)) xStar := by
+    have h1 := QVec.queryMassOn_le_stateNormSq T (negB t)
+    dsimp only [negB] at h1
+    rw [negQVec_normSq, applySuffixFrom_normSq, oracleXor_isometry, projSingle_normSq] at h1
+    exact h1
+  omega
+
+private theorem qsum_queryMassOn_fiber {cardX w cardAnc : Nat}
+    (proj : Fin cardX → Fin cardX) (ψ : QVec cardX w cardAnc) :
+    qsum cardX (fun xStar => QVec.queryMassOn (fun x => decide (xStar = proj x)) ψ) =
+      QVec.stateNormSq ψ := by
+  unfold QVec.queryMassOn QVec.stateNormSq
+  rw [qsum_comm]
+  apply qsum_congr; intro x
+  have h : qsum cardX (fun xs =>
+      if decide (xs = proj x) = true then QVec.queryWeight ψ x else 0) =
+      qsum cardX (fun xs => if xs = proj x then QVec.queryWeight ψ x else 0) := by
+    apply qsum_congr; intro xs
+    simp only [decide_eq_true_eq]
+  rw [h, qsum_ite_eq]
+
+private theorem queryMassOn_point_eq {cardX w cardAnc : Nat}
+    (ψ : QVec cardX w cardAnc) (xStar : Fin cardX) :
+    QVec.queryMassOn (fun x => decide (xStar = x)) ψ = QVec.queryWeight ψ xStar := by
+  unfold QVec.queryMassOn
+  have hEq : qsum cardX (fun x =>
+      if decide (xStar = x) = true then QVec.queryWeight ψ x else 0) =
+      qsum cardX (fun x => if x = xStar then QVec.queryWeight ψ xStar else 0) := by
+    apply qsum_congr; intro x
+    by_cases hx : x = xStar
+    · subst hx; simp
+    · have hx' : ¬ xStar = x := fun h => hx h.symm
+      simp [hx, hx']
+  rw [hEq, qsum_ite_eq]
+
+private theorem sum_dfmEventEnvelope_fiber_eq {cardX w cardAnc q : Nat}
+    (A : QuantumAdv cardX w cardAnc q) (H : Fin cardX → BitVec w)
+    (proj : Fin cardX → Fin cardX) :
+    qsum cardX (fun xStar =>
+      dfmEventEnvelope A H xStar (fun x => decide (xStar = proj x))) =
+      (2 * q + 1) * QVec.stateNormSq (runQuantumAdv A H) := by
+  unfold dfmEventEnvelope
+  rw [qsum_add, qsum_comm, qsum_queryMassOn_fiber]
+  have hEachT :
+      qsum q (fun t =>
+        qsum cardX (fun xStar =>
+          2 * (suffixScale A t.1 (Nat.le_of_lt t.2) *
+            QVec.queryWeight (advStateAt A H t.1 (Nat.le_of_lt t.2)) xStar))) =
+      qsum q (fun _ => 2 * QVec.stateNormSq (runQuantumAdv A H)) := by
+    apply qsum_congr; intro t
+    rw [qsum_mul_left 2, qsum_mul_left (suffixScale A t.1 (Nat.le_of_lt t.2))]
+    change 2 * (suffixScale A t.1 (Nat.le_of_lt t.2) *
+        QVec.stateNormSq (advStateAt A H t.1 (Nat.le_of_lt t.2))) = _
+    rw [advStateAt_normSq, ← Nat.mul_assoc (suffixScale A t.1 _),
+        Nat.mul_comm (suffixScale A t.1 _), prefix_mul_suffix_eq_total,
+        ← runQuantumAdv_normSq A H]
+  rw [hEachT, qsum_const]
+  rw [← Nat.mul_assoc q 2, Nat.mul_comm q 2, Nat.add_mul, Nat.one_mul]
+
+/-- **Projected Unitary Measure-and-Reprogram RBR Step
+    (`qrom_unitary_measure_reprogram_rbr_step_projected`)**:
+    For ANY `Q`-query unitary quantum adversary `A` (arbitrary scaled unitaries between
+    superposition oracle calls, i.e. fully adaptive), ANY background oracle `H`, and ANY
+    projection `proj` from the adversary's final OUTPUT register to the Fiat–Shamir query point
+    it must be consistent with (in a transcript-chained `k`-round protocol the output is the full
+    transcript and `proj` returns its round-`r` prefix), the total Born mass of outputs whose
+    projected point `xStar = proj x` is doomed and is reprogrammed to a flipping challenge is at
+    most **`(2 * Q + 1)^2 * badCard / 2^w`**. The fibers `{x | proj x = xStar}` are disjoint, so
+    the bound does NOT pay for the size of the output register. -/

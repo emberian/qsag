@@ -6,11 +6,11 @@ Each step executes one controlled XOR query, one adversary local gate, and known
 basis changes. The oracle register is never measured during execution. Exact integer
 normalizations are tracked; this is full-table infrastructure, not sparse online extraction.
 -/
-public import Qsag.QromFourierTable
-import all Qsag.QromFourierTable
-import all Qsag.QromClassicalQueryTransfer
-import all Qsag.MultiRoundFsQrom
-import all Qsag.ConcreteSecurityBudget
+public import Qsag.Oracle.QromFourierTable
+import all Qsag.Oracle.QromFourierTable
+import all Qsag.Oracle.QromClassicalQueryTransfer
+import all Qsag.Oracle.MultiRoundFsQrom
+import all Qsag.Oracle.ConcreteSecurityBudget
 
 public section
 namespace Qsag

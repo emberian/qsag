@@ -15,13 +15,13 @@ excludes superposition queries: `qromParityAdv` is outside it, and for that adve
 two executions differ (`measured_parity_execution`).
 -/
 
-public import Qsag.QromMeasuredMerkleExtraction
-import all Qsag.QromMeasuredMerkleExtraction
-import all Qsag.QromMeasuredQueryExperiment
-import all Qsag.QromExtractionBoundary
-import all Qsag.QromMerkleOnlineExtraction
-import all Qsag.MultiRoundFsQrom
-import all Qsag.ConcreteSecurityBudget
+public import Qsag.Oracle.QromMeasuredMerkleExtraction
+import all Qsag.Oracle.QromMeasuredMerkleExtraction
+import all Qsag.Oracle.QromMeasuredQueryExperiment
+import all Qsag.Oracle.QromExtractionBoundary
+import all Qsag.Oracle.QromMerkleOnlineExtraction
+import all Qsag.Oracle.MultiRoundFsQrom
+import all Qsag.Oracle.ConcreteSecurityBudget
 
 public section
 namespace Qsag

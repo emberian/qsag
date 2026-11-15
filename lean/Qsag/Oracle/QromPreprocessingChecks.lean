@@ -1,10 +1,10 @@
 module
 /- Executed finite preprocessing attacks, including a chronology counterexample.
 All arithmetic is kernel-reduced; these are classical experiments, not QAI security. -/
-public import Qsag.QromPreprocessingGame
-import all Qsag.QromPreprocessingGame
-import all Qsag.MultiRoundFsQrom
-import all Qsag.ConcreteSecurityBudget
+public import Qsag.Oracle.QromPreprocessingGame
+import all Qsag.Oracle.QromPreprocessingGame
+import all Qsag.Oracle.MultiRoundFsQrom
+import all Qsag.Oracle.ConcreteSecurityBudget
 
 public section
 namespace Qsag.PreprocessingGame

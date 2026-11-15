@@ -7,9 +7,9 @@ All amplitudes remain Gaussian integers; Walsh is unnormalized, with squared-nor
 2^n and square equal to multiplication by 2^n. This full truth-table representation uses
 2^n amplitudes, not a sparse compressed-oracle data structure.
 -/
-public import Qsag.QromClassicalQueryTransfer
-import all Qsag.QromClassicalQueryTransfer
-import all Qsag.ConcreteSecurityBudget
+public import Qsag.Oracle.QromClassicalQueryTransfer
+import all Qsag.Oracle.QromClassicalQueryTransfer
+import all Qsag.Oracle.ConcreteSecurityBudget
 
 public section
 namespace Qsag

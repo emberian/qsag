@@ -12,11 +12,11 @@ stored-table bound applies only to the specified zero-query table strategy, not 
 arbitrary advice. Neither theorem is a QAI-QROM theorem; quantum advice would require
 state semantics and non-cloning/measurement accounting absent from this module.
 -/
-public import Qsag.MultiRoundFsQrom
-public import Qsag.HashSigs
-import all Qsag.MultiRoundFsQrom
-import all Qsag.ConcreteSecurityBudget
-import all Qsag.HashSigs
+public import Qsag.Oracle.MultiRoundFsQrom
+public import Qsag.Protocol.Signing.HashSigs
+import all Qsag.Oracle.MultiRoundFsQrom
+import all Qsag.Oracle.ConcreteSecurityBudget
+import all Qsag.Protocol.Signing.HashSigs
 
 public section
 namespace Qsag.PreprocessingGame

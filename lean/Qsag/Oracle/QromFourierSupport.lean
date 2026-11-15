@@ -6,10 +6,10 @@ A phase query toggles one Fourier coordinate. This is a coherent permutation of 
 oracle basis, not an observation of a query address. The empty-label initialization and
 Hamming-weight facts are the first sparse-database invariant components.
 -/
-public import Qsag.QromCoherentOracleRegister
-import all Qsag.QromCoherentOracleRegister
-import all Qsag.QromFourierTable
-import all Qsag.ConcreteSecurityBudget
+public import Qsag.Oracle.QromCoherentOracleRegister
+import all Qsag.Oracle.QromCoherentOracleRegister
+import all Qsag.Oracle.QromFourierTable
+import all Qsag.Oracle.ConcreteSecurityBudget
 
 public section
 namespace Qsag
