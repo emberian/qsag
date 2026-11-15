@@ -374,7 +374,8 @@ struct ZkBooVerifierTape<'a> {
     e1: usize,
     r_e: ZeroizingU64Vec,
     r_e1: ZeroizingU64Vec,
-    out_e: &'a [u64],
+    out_e: Option<&'a [u64]>,
+    reconstructed_out_e: Vec<u64>,
     out_e1: &'a [u64],
     gate_cursor: usize,
     ok: bool,
@@ -398,7 +399,32 @@ impl<'a> ZkBooVerifierTape<'a> {
             e1,
             r_e,
             r_e1,
-            out_e,
+            out_e: Some(out_e),
+            reconstructed_out_e: Vec::new(),
+            out_e1,
+            gate_cursor: 0,
+            ok,
+        }
+    }
+
+    fn new_reconstructing(
+        e: usize,
+        seed_e: &[u8; 32],
+        seed_e1: &[u8; 32],
+        out_e1: &'a [u64],
+        num_gates: usize,
+    ) -> Self {
+        let e1 = (e + 1) % 3;
+        let ok = out_e1.len() == num_gates;
+        let r_e = sample_canonical_gl_vec(b"QSAG.VC.ZKBOO_R.V1", seed_e, &[e as u8], num_gates);
+        let r_e1 = sample_canonical_gl_vec(b"QSAG.VC.ZKBOO_R.V1", seed_e1, &[e1 as u8], num_gates);
+        Self {
+            e,
+            e1,
+            r_e,
+            r_e1,
+            out_e: None,
+            reconstructed_out_e: Vec::with_capacity(if ok { num_gates } else { 0 }),
             out_e1,
             gate_cursor: 0,
             ok,
@@ -427,12 +453,17 @@ impl<'a> ZkBooVerifierTape<'a> {
             gl_add(gl_mul(x[0], y[1]), gl_mul(x[1], y[0])),
         );
         let expected_ze = gl_sub(gl_add(cross, self.r_e[g]), self.r_e1[g]);
-        // Opened-view multiplication equation, including the adjacent mask shares.
-        let equation = gl_sub(self.out_e[g], expected_ze);
-        if equation != 0 {
-            self.ok = false;
-        }
-        [self.out_e[g], self.out_e1[g]]
+        let ze = if let Some(out_e) = self.out_e {
+            // Opened-view multiplication equation, including the adjacent mask shares.
+            if gl_sub(out_e[g], expected_ze) != 0 {
+                self.ok = false;
+            }
+            out_e[g]
+        } else {
+            self.reconstructed_out_e.push(expected_ze);
+            expected_ze
+        };
+        [ze, self.out_e1[g]]
     }
 
     #[inline]
@@ -2324,159 +2355,20 @@ pub fn verify_presentation_with_profile(
             SD_TOTAL_GATES,
         );
 
-        let mut cursor = 0usize;
-        let mut attr_wires = [[0u64; 2]; MAX_VC_ATTRS];
-        for (i, slot_w) in attr_wires.iter_mut().enumerate() {
-            if i >= expected_arity {
-                *slot_w = [0; 2];
-            } else if let Some(&(_, pub_val)) =
-                pres.disclosed_attrs.iter().find(|&&(idx, _)| idx == i)
-            {
-                *slot_w = verifier.add_const([0, 0], pub_val);
-            } else {
-                *slot_w = [o.in_shares_e[cursor], o.in_shares_e1[cursor]];
-                cursor += 1;
-            }
-        }
-        let hb_wires: [[u64; 2]; 4] = core::array::from_fn(|_| {
-            let v = [o.in_shares_e[cursor], o.in_shares_e1[cursor]];
-            cursor += 1;
-            v
-        });
-        let pb_wires: [[u64; 2]; 4] = core::array::from_fn(|_| {
-            let v = [o.in_shares_e[cursor], o.in_shares_e1[cursor]];
-            cursor += 1;
-            v
-        });
-        let bit_wires: [[u64; 2]; VC_ACCUMULATOR_DEPTH] = core::array::from_fn(|_| {
-            let v = [o.in_shares_e[cursor], o.in_shares_e1[cursor]];
-            cursor += 1;
-            v
-        });
-        let sib_wires: [[[u64; 2]; 6]; VC_ACCUMULATOR_DEPTH] = core::array::from_fn(|_| {
-            core::array::from_fn(|_| {
-                let v = [o.in_shares_e[cursor], o.in_shares_e1[cursor]];
-                cursor += 1;
-                v
-            })
-        });
-
-        let mut st_attr: [[u64; 2]; 13] = [
-            attr_wires[0],
-            attr_wires[1],
-            attr_wires[2],
-            attr_wires[3],
-            attr_wires[4],
-            attr_wires[5],
-            hb_wires[0],
-            hb_wires[1],
-            hb_wires[2],
-            hb_wires[3],
-            verifier.add_const([0, 0], pres.schema_id & 0xffff_ffff),
-            verifier.add_const(
-                [0, 0],
-                gl_add(pres.schema_id >> 32, gl_reduce_u64(VC_ATTR_COMMIT_TAG)),
-            ),
-            verifier.add_const([0, 0], expected_arity as u64),
-        ];
-        verifier.perm12(&mut st_attr);
-        let mut cur_node: [[u64; 2]; 6] = core::array::from_fn(|j| st_attr[j]);
-
-        let mut bool_zeros = [[0u64; 2]; VC_ACCUMULATOR_DEPTH];
-        for (lvl, (zero, &b)) in bool_zeros.iter_mut().zip(&bit_wires).enumerate() {
-            let one_wire = verifier.add_const([0, 0], 1);
-            let one_minus_b = [gl_sub(one_wire[0], b[0]), gl_sub(one_wire[1], b[1])];
-            *zero = verifier.mul_gate(b, one_minus_b);
-
-            let mut left = [[0u64; 2]; 6];
-            let mut right = [[0u64; 2]; 6];
-            for (j, (left_slot, right_slot)) in left.iter_mut().zip(&mut right).enumerate() {
-                let sib_j = sib_wires[lvl][j];
-                let diff = [
-                    gl_sub(sib_j[0], cur_node[j][0]),
-                    gl_sub(sib_j[1], cur_node[j][1]),
-                ];
-                let delta = verifier.mul_gate(b, diff);
-                *left_slot = [
-                    gl_add(cur_node[j][0], delta[0]),
-                    gl_add(cur_node[j][1], delta[1]),
-                ];
-                *right_slot = [gl_sub(sib_j[0], delta[0]), gl_sub(sib_j[1], delta[1])];
-            }
-
-            let mut st_mk: [[u64; 2]; 16] = [
-                left[0],
-                left[1],
-                left[2],
-                left[3],
-                left[4],
-                left[5],
-                right[0],
-                right[1],
-                right[2],
-                right[3],
-                right[4],
-                right[5],
-                verifier.add_const([0, 0], pres.issuer_epoch & 0xffff_ffff),
-                verifier.add_const([0, 0], lvl as u64),
-                verifier.add_const([0, 0], gl_reduce_u64(VC_MERKLE_NODE_TAG)),
-                verifier.add_const(
-                    [0, 0],
-                    gl_add(pres.issuer_epoch >> 32, gl_reduce_u64(POSEIDON2_CONST_IV)),
-                ),
-            ];
-            verifier.perm12(&mut st_mk);
-            cur_node = core::array::from_fn(|j| st_mk[j]);
-        }
-
-        let mut st_pres: [[u64; 2]; 13] = [
-            attr_wires[0],
-            attr_wires[1],
-            attr_wires[2],
-            attr_wires[3],
-            attr_wires[4],
-            attr_wires[5],
-            pb_wires[0],
-            pb_wires[1],
-            pb_wires[2],
-            pb_wires[3],
-            verifier.add_const([0, 0], pres.schema_id & 0xffff_ffff),
-            verifier.add_const(
-                [0, 0],
-                gl_add(pres.schema_id >> 32, gl_reduce_u64(VC_PRES_COMMIT_TAG)),
-            ),
-            verifier.add_const([0, 0], expected_arity as u64),
-        ];
-        verifier.perm12(&mut st_pres);
-
-        let mut st_sc: [[u64; 2]; 12] = [
-            hb_wires[0],
-            hb_wires[1],
-            hb_wires[2],
-            hb_wires[3],
-            verifier.add_const([0, 0], pres.verifier_scope_limbs[0]),
-            verifier.add_const([0, 0], pres.verifier_scope_limbs[1]),
-            verifier.add_const([0, 0], pres.verifier_scope_limbs[2]),
-            verifier.add_const([0, 0], pres.verifier_scope_limbs[3]),
-            [0, 0],
-            [0, 0],
-            verifier.add_const([0, 0], pres.schema_id & 0xffff_ffff),
-            verifier.add_const(
-                [0, 0],
-                gl_add(pres.schema_id >> 32, gl_reduce_u64(VC_SCOPE_TAG_DOM)),
-            ),
-        ];
-        verifier.perm12(&mut st_sc);
+        let replayed_16 = replay_sd_circuit(
+            &mut verifier,
+            expected_arity,
+            pres.issuer_epoch,
+            pres.schema_id,
+            &pres.verifier_scope_limbs,
+            &pres.disclosed_attrs,
+            &o.in_shares_e,
+            &o.in_shares_e1,
+        );
 
         if !verifier.ok || verifier.gate_cursor != SD_TOTAL_GATES {
             return false;
         }
-
-        let mut replayed_16 = [[0u64; 2]; VC_FINAL_OUTPUTS];
-        replayed_16[..6].copy_from_slice(&cur_node);
-        replayed_16[6..12].copy_from_slice(&st_pres[..6]);
-        replayed_16[12..18].copy_from_slice(&st_sc[..6]);
-        replayed_16[18..].copy_from_slice(&bool_zeros);
 
         for (j, replayed) in replayed_16.iter().enumerate() {
             for &s_val in &o.final_outs_all3[j] {
@@ -2537,6 +2429,480 @@ pub fn verify_presentation_with_profile(
         }
     }
     true
+}
+
+const SD_COMPACT_WIRE_MAGIC: &[u8; 24] = b"QSAG.BVC.SD.COMPACT.V1\0\0";
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Explicit selective-disclosure circuit statement and party input-share bindings"
+)]
+fn replay_sd_circuit(
+    verifier: &mut ZkBooVerifierTape<'_>,
+    expected_arity: usize,
+    issuer_epoch: u64,
+    schema_id: u64,
+    verifier_scope_limbs: &[u64; 4],
+    disclosed_attrs: &[(usize, u64)],
+    in_shares_e: &[u64],
+    in_shares_e1: &[u64],
+) -> [[u64; 2]; VC_FINAL_OUTPUTS] {
+    let mut cursor = 0usize;
+    let mut attr_wires = [[0u64; 2]; MAX_VC_ATTRS];
+    for (i, slot_w) in attr_wires.iter_mut().enumerate() {
+        if i >= expected_arity {
+            *slot_w = [0; 2];
+        } else if let Some(&(_, pub_val)) = disclosed_attrs.iter().find(|&&(idx, _)| idx == i) {
+            *slot_w = verifier.add_const([0, 0], pub_val);
+        } else {
+            *slot_w = [in_shares_e[cursor], in_shares_e1[cursor]];
+            cursor += 1;
+        }
+    }
+    let hb_wires: [[u64; 2]; 4] = core::array::from_fn(|_| {
+        let v = [in_shares_e[cursor], in_shares_e1[cursor]];
+        cursor += 1;
+        v
+    });
+    let pb_wires: [[u64; 2]; 4] = core::array::from_fn(|_| {
+        let v = [in_shares_e[cursor], in_shares_e1[cursor]];
+        cursor += 1;
+        v
+    });
+    let bit_wires: [[u64; 2]; VC_ACCUMULATOR_DEPTH] = core::array::from_fn(|_| {
+        let v = [in_shares_e[cursor], in_shares_e1[cursor]];
+        cursor += 1;
+        v
+    });
+    let sib_wires: [[[u64; 2]; 6]; VC_ACCUMULATOR_DEPTH] = core::array::from_fn(|_| {
+        core::array::from_fn(|_| {
+            let v = [in_shares_e[cursor], in_shares_e1[cursor]];
+            cursor += 1;
+            v
+        })
+    });
+
+    let mut st_attr: [[u64; 2]; 13] = [
+        attr_wires[0],
+        attr_wires[1],
+        attr_wires[2],
+        attr_wires[3],
+        attr_wires[4],
+        attr_wires[5],
+        hb_wires[0],
+        hb_wires[1],
+        hb_wires[2],
+        hb_wires[3],
+        verifier.add_const([0, 0], schema_id & 0xffff_ffff),
+        verifier.add_const(
+            [0, 0],
+            gl_add(schema_id >> 32, gl_reduce_u64(VC_ATTR_COMMIT_TAG)),
+        ),
+        verifier.add_const([0, 0], expected_arity as u64),
+    ];
+    verifier.perm12(&mut st_attr);
+    let mut cur_node: [[u64; 2]; 6] = core::array::from_fn(|j| st_attr[j]);
+
+    let mut bool_zeros = [[0u64; 2]; VC_ACCUMULATOR_DEPTH];
+    for (lvl, (zero, &b)) in bool_zeros.iter_mut().zip(&bit_wires).enumerate() {
+        let one_wire = verifier.add_const([0, 0], 1);
+        let one_minus_b = [gl_sub(one_wire[0], b[0]), gl_sub(one_wire[1], b[1])];
+        *zero = verifier.mul_gate(b, one_minus_b);
+
+        let mut left = [[0u64; 2]; 6];
+        let mut right = [[0u64; 2]; 6];
+        for (j, (left_slot, right_slot)) in left.iter_mut().zip(&mut right).enumerate() {
+            let sib_j = sib_wires[lvl][j];
+            let diff = [
+                gl_sub(sib_j[0], cur_node[j][0]),
+                gl_sub(sib_j[1], cur_node[j][1]),
+            ];
+            let delta = verifier.mul_gate(b, diff);
+            *left_slot = [
+                gl_add(cur_node[j][0], delta[0]),
+                gl_add(cur_node[j][1], delta[1]),
+            ];
+            *right_slot = [gl_sub(sib_j[0], delta[0]), gl_sub(sib_j[1], delta[1])];
+        }
+
+        let mut st_mk: [[u64; 2]; 16] = [
+            left[0],
+            left[1],
+            left[2],
+            left[3],
+            left[4],
+            left[5],
+            right[0],
+            right[1],
+            right[2],
+            right[3],
+            right[4],
+            right[5],
+            verifier.add_const([0, 0], issuer_epoch & 0xffff_ffff),
+            verifier.add_const([0, 0], lvl as u64),
+            verifier.add_const([0, 0], gl_reduce_u64(VC_MERKLE_NODE_TAG)),
+            verifier.add_const(
+                [0, 0],
+                gl_add(issuer_epoch >> 32, gl_reduce_u64(POSEIDON2_CONST_IV)),
+            ),
+        ];
+        verifier.perm12(&mut st_mk);
+        cur_node = core::array::from_fn(|j| st_mk[j]);
+    }
+
+    let mut st_pres: [[u64; 2]; 13] = [
+        attr_wires[0],
+        attr_wires[1],
+        attr_wires[2],
+        attr_wires[3],
+        attr_wires[4],
+        attr_wires[5],
+        pb_wires[0],
+        pb_wires[1],
+        pb_wires[2],
+        pb_wires[3],
+        verifier.add_const([0, 0], schema_id & 0xffff_ffff),
+        verifier.add_const(
+            [0, 0],
+            gl_add(schema_id >> 32, gl_reduce_u64(VC_PRES_COMMIT_TAG)),
+        ),
+        verifier.add_const([0, 0], expected_arity as u64),
+    ];
+    verifier.perm12(&mut st_pres);
+
+    let mut st_sc: [[u64; 2]; 12] = [
+        hb_wires[0],
+        hb_wires[1],
+        hb_wires[2],
+        hb_wires[3],
+        verifier.add_const([0, 0], verifier_scope_limbs[0]),
+        verifier.add_const([0, 0], verifier_scope_limbs[1]),
+        verifier.add_const([0, 0], verifier_scope_limbs[2]),
+        verifier.add_const([0, 0], verifier_scope_limbs[3]),
+        [0, 0],
+        [0, 0],
+        verifier.add_const([0, 0], schema_id & 0xffff_ffff),
+        verifier.add_const(
+            [0, 0],
+            gl_add(schema_id >> 32, gl_reduce_u64(VC_SCOPE_TAG_DOM)),
+        ),
+    ];
+    verifier.perm12(&mut st_sc);
+
+    let mut replayed_16 = [[0u64; 2]; VC_FINAL_OUTPUTS];
+    replayed_16[..6].copy_from_slice(&cur_node);
+    replayed_16[6..12].copy_from_slice(&st_pres[..6]);
+    replayed_16[12..18].copy_from_slice(&st_sc[..6]);
+    replayed_16[18..].copy_from_slice(&bool_zeros);
+    replayed_16
+}
+
+impl SelectiveDisclosurePresentation {
+    /// Lossless compact wire encoding of a [`SelectiveDisclosurePresentation`].
+    ///
+    /// In 3-party ZKBoo, party `e`'s multiplication-gate outputs `gate_outs_e` (`32,708` Goldilocks
+    /// elements per repetition, `114,608,832` bytes across `438` repetitions) are uniquely fixed by
+    /// `z_e[g] = x_e y_e + x_e y_{e+1} + x_{e+1} y_e + r_e[g] - r_{e+1}[g] (mod p)`.
+    /// Eliding `gate_outs_e` on the wire and replaying the circuit during deserialization cuts the
+    /// selective-disclosure wire payload by ~50% (`~220 MiB -> ~111 MiB` at `Quantum128`, `~55 MiB`
+    /// at `Classical128`) with zero change to the `digest_party_view` commitments or QROM soundness.
+    ///
+    /// Note on accumulator Merkle path privacy: the 20 Poseidon2 Merkle levels cannot be moved
+    /// outside ZKBoo in plaintext without exposing `(leaf_index, attr_commit)` and breaking
+    /// [`PresentationMode::UnlinkableFresh`] unlinkability; sub-15 MiB wire size requires proving
+    /// the Merkle path inside a succinct ZK argument (`qsag-hem` WHIR over Poseidon2 AIR).
+    pub fn to_compact_wire_bytes(&self) -> Result<Vec<u8>, BlindVcError> {
+        if !(1..=MAX_VC_ATTRS).contains(&self.arity)
+            || self.disclosed_attrs.len() > self.arity
+            || (self.opened_reps.len() != ZkSoundnessProfile::Classical128.repetitions()
+                && self.opened_reps.len() != ZkSoundnessProfile::Quantum128.repetitions())
+        {
+            return Err(BlindVcError::SelectiveDisclosureProofInvalid);
+        }
+        let num_secret_wires = (self.arity - self.disclosed_attrs.len())
+            + 4
+            + 4
+            + VC_ACCUMULATOR_DEPTH
+            + 6 * VC_ACCUMULATOR_DEPTH;
+        let per_rep_bytes = 1
+            + 32 * 5
+            + num_secret_wires * 16
+            + SD_TOTAL_GATES * 8
+            + VC_FINAL_OUTPUTS * 3 * 8;
+        let mode_extra = match self.mode {
+            PresentationMode::UnlinkableFresh => 1,
+            PresentationMode::ScopedPseudonym(_) => 33,
+        };
+        let header_bytes = 24
+            + 8
+            + 32
+            + mode_extra
+            + 32
+            + 8
+            + 8
+            + 48
+            + 32
+            + 32
+            + 4
+            + self.disclosed_attrs.len() * 12
+            + 48
+            + 48
+            + 4;
+        let mut out = Vec::with_capacity(header_bytes + self.opened_reps.len() * per_rep_bytes);
+        out.extend_from_slice(SD_COMPACT_WIRE_MAGIC);
+        out.extend_from_slice(&(self.arity as u64).to_le_bytes());
+        out.extend_from_slice(&self.verifier_challenge);
+        match self.mode {
+            PresentationMode::UnlinkableFresh => out.push(0),
+            PresentationMode::ScopedPseudonym(id) => {
+                out.push(1);
+                out.extend_from_slice(&id);
+            }
+        }
+        out.extend_from_slice(&self.presentation_nonce);
+        out.extend_from_slice(&self.issuer_epoch.to_le_bytes());
+        out.extend_from_slice(&self.schema_id.to_le_bytes());
+        for &v in &self.accumulator_root {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&self.issuer_root_tag);
+        for &v in &self.verifier_scope_limbs {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&(self.disclosed_attrs.len() as u32).to_le_bytes());
+        for &(idx, val) in &self.disclosed_attrs {
+            out.extend_from_slice(&(idx as u32).to_le_bytes());
+            out.extend_from_slice(&val.to_le_bytes());
+        }
+        for &v in self.pres_commit.iter().chain(self.scope_tag.iter()) {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&(self.opened_reps.len() as u32).to_le_bytes());
+        for o in &self.opened_reps {
+            if (o.e as usize) >= 3
+                || o.num_active_final_outs != VC_FINAL_OUTPUTS
+                || o.in_shares_e.len() != num_secret_wires
+                || o.in_shares_e1.len() != num_secret_wires
+                || o.gate_outs_e.len() != SD_TOTAL_GATES
+                || o.gate_outs_e1.len() != SD_TOTAL_GATES
+            {
+                return Err(BlindVcError::SelectiveDisclosureProofInvalid);
+            }
+            out.push(o.e);
+            out.extend_from_slice(&o.unopened_commitment);
+            out.extend_from_slice(&o.salt_e);
+            out.extend_from_slice(&o.salt_e1);
+            out.extend_from_slice(&o.tape_seed_e);
+            out.extend_from_slice(&o.tape_seed_e1);
+            for &v in o
+                .in_shares_e
+                .iter()
+                .chain(o.in_shares_e1.iter())
+                .chain(o.gate_outs_e1.iter())
+            {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            for row in &o.final_outs_all3 {
+                for &v in row {
+                    out.extend_from_slice(&v.to_le_bytes());
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Reconstruct a full [`SelectiveDisclosurePresentation`] (including `gate_outs_e`) from
+    /// [`Self::to_compact_wire_bytes`], validating header bounds and exact payload length before
+    /// allocating repetition buffers.
+    pub fn from_compact_wire_bytes(bytes: &[u8]) -> Result<Self, BlindVcError> {
+        fn take<'a>(cur: &mut &'a [u8], n: usize) -> Result<&'a [u8], BlindVcError> {
+            if cur.len() < n {
+                return Err(BlindVcError::SelectiveDisclosureProofInvalid);
+            }
+            let (head, tail) = cur.split_at(n);
+            *cur = tail;
+            Ok(head)
+        }
+        fn take_32(cur: &mut &[u8]) -> Result<[u8; 32], BlindVcError> {
+            let s = take(cur, 32)?;
+            let mut out = [0u8; 32];
+            out.copy_from_slice(s);
+            Ok(out)
+        }
+        fn take_u32(cur: &mut &[u8]) -> Result<u32, BlindVcError> {
+            let s = take(cur, 4)?;
+            Ok(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+        }
+        fn take_u64(cur: &mut &[u8]) -> Result<u64, BlindVcError> {
+            let s = take(cur, 8)?;
+            let mut b = [0u8; 8];
+            b.copy_from_slice(s);
+            Ok(u64::from_le_bytes(b))
+        }
+        fn take_gl(cur: &mut &[u8]) -> Result<u64, BlindVcError> {
+            let v = take_u64(cur)?;
+            if !gl_is_canonical(v) {
+                return Err(BlindVcError::SelectiveDisclosureProofInvalid);
+            }
+            Ok(v)
+        }
+
+        let mut cur = bytes;
+        let magic = take(&mut cur, 24)?;
+        if !ct_eq_bytes(magic, SD_COMPACT_WIRE_MAGIC) {
+            return Err(BlindVcError::SelectiveDisclosureProofInvalid);
+        }
+        let arity_u64 = take_u64(&mut cur)?;
+        if !(1..=MAX_VC_ATTRS as u64).contains(&arity_u64) {
+            return Err(BlindVcError::SelectiveDisclosureProofInvalid);
+        }
+        let arity = arity_u64 as usize;
+        let verifier_challenge = take_32(&mut cur)?;
+        let mode_tag = take(&mut cur, 1)?[0];
+        let mode = match mode_tag {
+            0 => PresentationMode::UnlinkableFresh,
+            1 => PresentationMode::ScopedPseudonym(take_32(&mut cur)?),
+            _ => return Err(BlindVcError::SelectiveDisclosureProofInvalid),
+        };
+        let presentation_nonce = take_32(&mut cur)?;
+        let issuer_epoch = take_u64(&mut cur)?;
+        let schema_id = take_u64(&mut cur)?;
+        let mut accumulator_root = [0u64; 6];
+        for slot in &mut accumulator_root {
+            *slot = take_gl(&mut cur)?;
+        }
+        let issuer_root_tag = take_32(&mut cur)?;
+        let mut verifier_scope_limbs = [0u64; 4];
+        for slot in &mut verifier_scope_limbs {
+            *slot = take_gl(&mut cur)?;
+        }
+        let disclosed_count = take_u32(&mut cur)? as usize;
+        if disclosed_count > arity {
+            return Err(BlindVcError::SelectiveDisclosureProofInvalid);
+        }
+        let mut disclosed_attrs = Vec::with_capacity(disclosed_count);
+        let mut prev_idx: Option<usize> = None;
+        for _ in 0..disclosed_count {
+            let idx = take_u32(&mut cur)? as usize;
+            let val = take_gl(&mut cur)?;
+            if idx >= arity || prev_idx.is_some_and(|p| idx <= p) {
+                return Err(BlindVcError::SelectiveDisclosureProofInvalid);
+            }
+            prev_idx = Some(idx);
+            disclosed_attrs.push((idx, val));
+        }
+        let mut pres_commit = [0u64; 6];
+        for slot in &mut pres_commit {
+            *slot = take_gl(&mut cur)?;
+        }
+        let mut scope_tag = [0u64; 6];
+        for slot in &mut scope_tag {
+            *slot = take_gl(&mut cur)?;
+        }
+        let num_reps = take_u32(&mut cur)? as usize;
+        if num_reps != ZkSoundnessProfile::Classical128.repetitions()
+            && num_reps != ZkSoundnessProfile::Quantum128.repetitions()
+        {
+            return Err(BlindVcError::SelectiveDisclosureProofInvalid);
+        }
+        let num_secret_wires = (arity - disclosed_count)
+            + 4
+            + 4
+            + VC_ACCUMULATOR_DEPTH
+            + 6 * VC_ACCUMULATOR_DEPTH;
+        let per_rep_bytes = 1
+            + 32 * 5
+            + num_secret_wires * 16
+            + SD_TOTAL_GATES * 8
+            + VC_FINAL_OUTPUTS * 3 * 8;
+        if cur.len() != num_reps * per_rep_bytes {
+            return Err(BlindVcError::SelectiveDisclosureProofInvalid);
+        }
+
+        let mut opened_reps = Vec::with_capacity(num_reps);
+        for _ in 0..num_reps {
+            let e = take(&mut cur, 1)?[0];
+            if (e as usize) >= 3 {
+                return Err(BlindVcError::SelectiveDisclosureProofInvalid);
+            }
+            let unopened_commitment = take_32(&mut cur)?;
+            let salt_e = take_32(&mut cur)?;
+            let salt_e1 = take_32(&mut cur)?;
+            let tape_seed_e = take_32(&mut cur)?;
+            let tape_seed_e1 = take_32(&mut cur)?;
+            let mut in_shares_e = Vec::with_capacity(num_secret_wires);
+            for _ in 0..num_secret_wires {
+                in_shares_e.push(take_gl(&mut cur)?);
+            }
+            let mut in_shares_e1 = Vec::with_capacity(num_secret_wires);
+            for _ in 0..num_secret_wires {
+                in_shares_e1.push(take_gl(&mut cur)?);
+            }
+            let mut gate_outs_e1 = Vec::with_capacity(SD_TOTAL_GATES);
+            for _ in 0..SD_TOTAL_GATES {
+                gate_outs_e1.push(take_gl(&mut cur)?);
+            }
+            let mut final_outs_all3 = [[0u64; 3]; VC_FINAL_OUTPUTS];
+            for row in &mut final_outs_all3 {
+                for slot in row.iter_mut() {
+                    *slot = take_gl(&mut cur)?;
+                }
+            }
+
+            let mut replay = ZkBooVerifierTape::new_reconstructing(
+                e as usize,
+                &tape_seed_e,
+                &tape_seed_e1,
+                &gate_outs_e1,
+                SD_TOTAL_GATES,
+            );
+            let _ = replay_sd_circuit(
+                &mut replay,
+                arity,
+                issuer_epoch,
+                schema_id,
+                &verifier_scope_limbs,
+                &disclosed_attrs,
+                &in_shares_e,
+                &in_shares_e1,
+            );
+            if !replay.ok
+                || replay.gate_cursor != SD_TOTAL_GATES
+                || replay.reconstructed_out_e.len() != SD_TOTAL_GATES
+            {
+                return Err(BlindVcError::SelectiveDisclosureProofInvalid);
+            }
+            opened_reps.push(OpenedZkBooRepetition {
+                e,
+                unopened_commitment,
+                salt_e,
+                salt_e1,
+                in_shares_e,
+                in_shares_e1,
+                tape_seed_e,
+                tape_seed_e1,
+                gate_outs_e: replay.reconstructed_out_e,
+                gate_outs_e1,
+                final_outs_all3,
+                num_active_final_outs: VC_FINAL_OUTPUTS,
+            });
+        }
+        Ok(Self {
+            arity,
+            verifier_challenge,
+            mode,
+            presentation_nonce,
+            issuer_epoch,
+            schema_id,
+            accumulator_root,
+            issuer_root_tag,
+            verifier_scope_limbs,
+            disclosed_attrs,
+            pres_commit,
+            scope_tag,
+            opened_reps,
+        })
+    }
 }
 
 impl core::fmt::Display for BlindVcError {
@@ -2870,5 +3236,102 @@ mod tests {
         assert_eq!(digest_party_view(&[2], &[1; 32], &[3], &[4]), expected);
         assert_ne!(digest_party_view(&[2, 3], &[1; 32], &[], &[4]), expected);
         assert_ne!(digest_party_view(&[2], &[1; 32], &[3, 0], &[4]), expected);
+    }
+
+    #[test]
+    fn selective_disclosure_compact_wire_halves_payload_and_roundtrips() {
+        let holder = HolderCredentialSecret {
+            schema_id: 42,
+            arity: 5,
+            attrs: [840, 1994, 3, 9910, 2030, 0],
+            holder_blind: [17, 18, 19, 20],
+            seen_challenges: core::cell::RefCell::new(Vec::new()),
+        };
+        let commitment = compute_vc_poseidon2_commit(
+            holder.schema_id,
+            &holder.attrs[..holder.arity],
+            &holder.holder_blind,
+            VC_ATTR_COMMIT_TAG,
+        )
+        .unwrap();
+        let oprf_pk = PublicKey::test_key();
+        let mut accumulator = IssuerCredentialAccumulator::new(oprf_pk.clone(), 7);
+        let index = accumulator.enroll(commitment).unwrap();
+        let (issuer_mldsa_pk, issuer_mldsa_sk) =
+            crate::fips204_ntt::ml_dsa_keygen_from_seed(MlDsaLevel::MlDsa44, &[0x55; 32]);
+        let root_attestation = accumulator
+            .attest_root_deterministic(
+                MlDsaLevel::MlDsa44,
+                &issuer_mldsa_sk,
+                issuer_mldsa_pk.clone(),
+            )
+            .unwrap();
+        let cred = BlindVerifiableCredential {
+            issuer_epoch: 7,
+            schema_id: 42,
+            attr_commit: commitment,
+            issuance_token: [0; 32],
+            accumulator_leaf_index: index,
+        };
+        let pres = prove_selective_disclosure_with_profile(
+            &cred,
+            &holder,
+            &accumulator.membership_witness(index).unwrap(),
+            &[0, 2],
+            PresentationRequest {
+                verifier_scope: b"compact-wire",
+                verifier_challenge: &[0x73; 32],
+                mode: PresentationMode::UnlinkableFresh,
+            },
+            [0x42; 32],
+            ZkSoundnessProfile::Classical128,
+        )
+        .unwrap();
+
+        let compact = pres.to_compact_wire_bytes().unwrap();
+        let elided_gate_outs_e_bytes = pres.opened_reps.len() * SD_TOTAL_GATES * 8;
+        assert_eq!(elided_gate_outs_e_bytes, 219 * 32_708 * 8);
+        assert!(compact.len() < elided_gate_outs_e_bytes + 800_000);
+
+        let decoded = SelectiveDisclosurePresentation::from_compact_wire_bytes(&compact).unwrap();
+        assert_eq!(decoded, pres);
+        assert!(verify_presentation_with_profile(
+            &decoded,
+            &root_attestation,
+            &issuer_mldsa_pk,
+            &oprf_pk,
+            b"compact-wire",
+            &[0x73; 32],
+            PresentationMode::UnlinkableFresh,
+            42,
+            holder.arity,
+            ZkSoundnessProfile::Classical128,
+        ));
+
+        // Truncated or hostile-count buffers fail cleanly before allocation; tampered
+        // `tape_seed_e` reconstructs a mismatched `gate_outs_e` and fails Fiat-Shamir verification.
+        assert!(
+            SelectiveDisclosurePresentation::from_compact_wire_bytes(
+                &compact[..compact.len() - 1]
+            )
+            .is_err()
+        );
+        let mut tampered = compact;
+        let last = tampered.len() - 64;
+        tampered[last] ^= 1;
+        if let Ok(bad_pres) = SelectiveDisclosurePresentation::from_compact_wire_bytes(&tampered) {
+            assert!(!verify_presentation_with_profile(
+                &bad_pres,
+                &root_attestation,
+                &issuer_mldsa_pk,
+                &oprf_pk,
+                b"compact-wire",
+                &[0x73; 32],
+                PresentationMode::UnlinkableFresh,
+                42,
+                holder.arity,
+                ZkSoundnessProfile::Classical128,
+            ));
+        }
     }
 }
