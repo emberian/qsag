@@ -1056,3 +1056,1057 @@ instance : LawfulCommRing (Dual R) where
   left_distrib a b c := by apply Dual.ext <;> dsimp <;> constructive_ring
   right_distrib a b c := by apply Dual.ext <;> dsimp <;> constructive_ring
 
+def inl : RingHom R (Dual R) where
+  toFun a := ⟨a, zero⟩
+  map_zero := rfl
+  map_one := rfl
+  map_add a b := by
+    apply Dual.ext
+    · rfl
+    · show zero = add zero zero; rw [LawfulCommRing.add_zero]
+  map_mul a b := by
+    apply Dual.ext
+    · rfl
+    · show zero = add (mul a zero) (mul zero b); constructive_ring
+
+def fstHom : RingHom (Dual R) R where
+  toFun x := x.fst
+  map_zero := rfl
+  map_one := rfl
+  map_add _ _ := rfl
+  map_mul _ _ := rfl
+
+def map (φ : RingHom R S) : RingHom (Dual R) (Dual S) where
+  toFun x := ⟨φ.toFun x.fst, φ.toFun x.snd⟩
+  map_zero := by apply Dual.ext <;> exact φ.map_zero
+  map_one := by
+    apply Dual.ext
+    · exact φ.map_one
+    · exact φ.map_zero
+  map_add a b := by apply Dual.ext <;> exact φ.map_add _ _
+  map_mul a b := by
+    apply Dual.ext
+    · exact φ.map_mul _ _
+    · show φ.toFun (add (mul a.fst b.snd) (mul a.snd b.fst)) =
+        add (mul (φ.toFun a.fst) (φ.toFun b.snd)) (mul (φ.toFun a.snd) (φ.toFun b.fst))
+      rw [φ.map_add, φ.map_mul, φ.map_mul]
+
+@[expose] def eps : Dual R := ⟨zero, one⟩
+
+end Ring
+end Dual
+
+section Deriv
+variable {R : Type} [LawfulCommRing R] [DecidableEq R]
+open UPoly
+
+private theorem C_zero_deriv : (C zero : UPoly R) = zero := by
+  rw [← CHom_apply]; exact CHom.map_zero
+
+def dualPerturb (P0 B : UPoly R) : UPoly (Dual R) :=
+  add ((mapHom Dual.inl).toFun P0) (mul (C Dual.eps) ((mapHom Dual.inl).toFun B))
+
+/-- Formal directional resultant derivative `[ε¹] sylRes m N C1 (P0 + ε · B)`. -/
+@[expose] def sylResDeriv (m N : Nat) (C1 P0 B : UPoly R) : R :=
+  (sylRes m N ((mapHom Dual.inl).toFun C1) (dualPerturb P0 B)).snd
+
+private theorem mapHom_comp {A B C' : Type}
+    [LawfulCommRing A] [DecidableEq A] [LawfulCommRing B] [DecidableEq B] [LawfulCommRing C'] [DecidableEq C']
+    (ψ : RingHom B C') (φ : RingHom A B) (p : UPoly A) :
+    (mapHom ψ).toFun ((mapHom φ).toFun p) = (mapHom (ψ.comp φ)).toFun p := by
+  apply ext_coeffAt; intro k
+  rw [coeffAt_mapHom, coeffAt_mapHom, coeffAt_mapHom, RingHom.comp_apply]
+
+private theorem mapHom_eq_of_toFun {A B : Type}
+    [LawfulCommRing A] [DecidableEq A] [LawfulCommRing B] [DecidableEq B]
+    (φ ψ : RingHom A B) (h : ∀ a, φ.toFun a = ψ.toFun a) (p : UPoly A) :
+    (mapHom φ).toFun p = (mapHom ψ).toFun p := by
+  apply ext_coeffAt; intro k
+  rw [coeffAt_mapHom, coeffAt_mapHom, h]
+
+private theorem mapHom_id (p : UPoly R) : (mapHom (RingHom.id R)).toFun p = p := by
+  apply ext_coeffAt; intro k
+  rw [coeffAt_mapHom, RingHom.id_apply]
+
+theorem map_sylResDeriv {S : Type} [LawfulCommRing S] [DecidableEq S]
+    (φ : RingHom R S) (m N : Nat) (C1 P0 B : UPoly R) :
+    φ.toFun (sylResDeriv m N C1 P0 B) =
+      sylResDeriv m N ((mapHom φ).toFun C1) ((mapHom φ).toFun P0) ((mapHom φ).toFun B) := by
+  unfold sylResDeriv
+  have h1 : (Dual.map φ).toFun (sylRes m N ((mapHom Dual.inl).toFun C1) (dualPerturb P0 B)) =
+      sylRes m N ((mapHom (Dual.map φ)).toFun ((mapHom Dual.inl).toFun C1))
+        ((mapHom (Dual.map φ)).toFun (dualPerturb P0 B)) :=
+    map_sylRes (Dual.map φ) m N _ _
+  have hComm : ∀ q : UPoly R,
+      (mapHom (Dual.map φ)).toFun ((mapHom Dual.inl).toFun q) =
+        (mapHom Dual.inl).toFun ((mapHom φ).toFun q) := fun q => by
+    rw [mapHom_comp, mapHom_comp]
+    refine mapHom_eq_of_toFun _ _ (fun a => ?_) q
+    simp only [RingHom.comp_apply]
+    show (⟨φ.toFun a, φ.toFun zero⟩ : Dual S) = ⟨φ.toFun a, zero⟩
+    rw [φ.map_zero]
+  have hP : (mapHom (Dual.map φ)).toFun (dualPerturb P0 B) =
+      dualPerturb ((mapHom φ).toFun P0) ((mapHom φ).toFun B) := by
+    unfold dualPerturb
+    rw [RingHom.map_add, RingHom.map_mul, mapHom_C, hComm P0, hComm B]
+    have hEps : (Dual.map φ).toFun Dual.eps = Dual.eps := by
+      show (⟨φ.toFun zero, φ.toFun one⟩ : Dual S) = ⟨zero, one⟩
+      rw [φ.map_zero, φ.map_one]
+    rw [hEps]
+  rw [hComm C1, hP] at h1
+  exact congrArg Dual.snd h1
+
+/-- **Key Derivative-Factor Identity**: if `C1 = (X - C ζ) * Q`, `Q.natDeg ≤ m'`, `P0.natDeg ≤ N`,
+    `B.natDeg ≤ N`, and `P0.eval ζ = 0`, then
+    `sylResDeriv (m' + 1) N C1 P0 B = B.eval ζ * sylRes m' N Q P0`! -/
+theorem sylResDeriv_of_factor (m' N : Nat) (ζ : R) (Q P0 B : UPoly R)
+    (hQ : Q.natDeg ≤ m') (hP0 : P0.natDeg ≤ N) (hB : B.natDeg ≤ N) (hP0z : P0.eval ζ = zero) :
+    sylResDeriv (m' + 1) N (mul (sub X (C ζ)) Q) P0 B = mul (B.eval ζ) (sylRes m' N Q P0) := by
+  unfold sylResDeriv
+  have hMapC1 : (mapHom (Dual.inl (R := R))).toFun (mul (sub X (C ζ)) Q) =
+      mul (sub X (C (Dual.inl.toFun ζ))) ((mapHom Dual.inl).toFun Q) := by
+    rw [RingHom.map_mul, RingHom.map_sub, mapHom_C]
+    have hX : (mapHom (Dual.inl (R := R))).toFun X = X := mapHom_X _
+    rw [hX]
+  have hDegQ : ((mapHom (Dual.inl (R := R))).toFun Q).natDeg ≤ m' :=
+    Nat.le_trans (natDeg_mapHom_le _ Q) hQ
+  have hDegPert : (dualPerturb P0 B).natDeg ≤ N := by
+    unfold dualPerturb
+    apply natDeg_le_of_coeffAt; intro k hk
+    rw [coeffAt_add, coeffAt_C_mul, coeffAt_mapHom, coeffAt_mapHom,
+      P0.coeffAt_eq_zero_of_natDeg_lt (by omega), B.coeffAt_eq_zero_of_natDeg_lt (by omega),
+      Dual.inl.map_zero, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+  rw [hMapC1, sylRes_mul_X_sub m' N (Dual.inl.toFun ζ) _ _ hDegQ hDegPert]
+  have hEvalPert : (dualPerturb P0 B).eval (Dual.inl.toFun ζ) = (⟨zero, B.eval ζ⟩ : Dual R) := by
+    unfold dualPerturb
+    rw [← evalHom_apply]
+    rw [RingHom.map_add, RingHom.map_mul, evalHom_apply, evalHom_apply, evalHom_apply,
+      eval_C, eval_mapHom, eval_mapHom, hP0z]
+    apply Dual.ext
+    · show add zero (mul zero (B.eval ζ)) = zero; constructive_ring
+    · show add zero (add (mul zero zero) (mul one (B.eval ζ))) = B.eval ζ; constructive_ring
+  have hFstInl : ∀ q : UPoly R, (mapHom Dual.fstHom).toFun ((mapHom Dual.inl).toFun q) = q := fun q => by
+    rw [mapHom_comp, mapHom_eq_of_toFun (Dual.fstHom.comp Dual.inl) (RingHom.id R) (fun a => by simp only [RingHom.comp_apply, RingHom.id_apply]; rfl) q, mapHom_id]
+  have hFstRes : (sylRes m' N ((mapHom Dual.inl).toFun Q) (dualPerturb P0 B)).fst =
+      sylRes m' N Q P0 := by
+    change Dual.fstHom.toFun (sylRes m' N ((mapHom Dual.inl).toFun Q) (dualPerturb P0 B)) = _
+    rw [map_sylRes Dual.fstHom, hFstInl Q]
+    have hP1 : (mapHom Dual.fstHom).toFun (dualPerturb P0 B) = P0 := by
+      unfold dualPerturb
+      rw [RingHom.map_add, RingHom.map_mul, mapHom_C, hFstInl P0, hFstInl B]
+      have hEps0 : Dual.fstHom.toFun (Dual.eps (R := R)) = zero := rfl
+      have hC0 : (C zero : UPoly R) = zero := C_zero_deriv
+      rw [hEps0, hC0, LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
+    rw [hP1]
+  rw [hEvalPert]
+  generalize sylRes m' N ((mapHom Dual.inl).toFun Q) (dualPerturb P0 B) = R_dual at hFstRes ⊢
+  obtain ⟨r0, r1⟩ := R_dual
+  dsimp at hFstRes
+  subst hFstRes
+  show add (mul zero r1) (mul (B.eval ζ) (sylRes m' N Q P0)) = _
+  rw [LawfulCommRing.zero_mul, LawfulCommRing.zero_add]
+
+/-- At ANY common root `ζ` of `(C1, P0)` (`1 ≤ m`), `sylResDeriv m N C1 P0 B = B.eval ζ * sylResDeriv m N C1 P0 1`! -/
+theorem sylResDeriv_common_root {m N : Nat} {C1 P0 B : UPoly R} {ζ : R}
+    (hm : 1 ≤ m) (hC1 : C1.natDeg ≤ m) (hP0 : P0.natDeg ≤ N) (hB : B.natDeg ≤ N)
+    (hC1z : C1.eval ζ = zero) (hP0z : P0.eval ζ = zero) :
+    sylResDeriv m N C1 P0 B = mul (B.eval ζ) (sylResDeriv m N C1 P0 one) := by
+  obtain ⟨hDiv, hDeg⟩ := divXSub_spec C1 ζ
+  rw [hC1z, C_zero_deriv, LawfulCommRing.zero_add] at hDiv
+  obtain ⟨m', rfl⟩ : ∃ m', m = m' + 1 := ⟨m - 1, by omega⟩
+  have h1 : (one : UPoly R).natDeg ≤ N := by rw [natDeg_one]; exact Nat.zero_le N
+  have hEval1 : (one : UPoly R).eval ζ = one := by rw [one_eq_C, eval_C]
+  rw [hDiv,
+    sylResDeriv_of_factor m' N ζ (divXSub C1 ζ) P0 B (by omega) hP0 hB hP0z,
+    sylResDeriv_of_factor m' N ζ (divXSub C1 ζ) P0 one (by omega) hP0 h1 hP0z,
+    hEval1, LawfulCommRing.one_mul]
+
+private theorem max_le_of_le {a b c : Nat} (ha : a ≤ c) (hb : b ≤ c) : max a b ≤ c := by
+  if h : a ≤ b then rw [Nat.max_eq_right h]; exact hb
+  else rw [Nat.max_eq_left (by omega)]; exact ha
+
+/-- Weighted `DegFn` bound on `sylResDeriv m N C1 P0 B`. -/
+theorem degFn_sylResDeriv_le {w : R → Nat} (hw : DegFn w) (hw1 : w one = 0)
+    (m N h_A h_B : Nat) (C1 P0 B : UPoly R)
+    (hC1 : C1.wdeg w 1 ≤ h_A) (hP0 : P0.wdeg w 1 ≤ h_B) (hB : B.wdeg w 1 ≤ h_B)
+    (hm : m ≤ h_A) (hN : N ≤ h_B) :
+    w (sylResDeriv m N C1 P0 B) ≤ h_A * h_B := by
+  let wD (x : Dual R) : Nat := max (w x.fst) (w x.snd)
+  have hwD : DegFn wD := {
+    zero := by
+      show max (w zero) (w zero) = 0
+      rw [hw.zero, Nat.max_self]
+    add_le := fun x y =>
+      max_le_of_le
+        (Nat.le_trans (hw.add_le x.fst y.fst)
+          (max_le_of_le
+            (Nat.le_trans (Nat.le_max_left _ _) (Nat.le_max_left _ _))
+            (Nat.le_trans (Nat.le_max_left _ _) (Nat.le_max_right _ _))))
+        (Nat.le_trans (hw.add_le x.snd y.snd)
+          (max_le_of_le
+            (Nat.le_trans (Nat.le_max_right _ _) (Nat.le_max_left _ _))
+            (Nat.le_trans (Nat.le_max_right _ _) (Nat.le_max_right _ _))))
+    mul_le := fun x y => by
+      have h1 : w (mul x.fst y.fst) ≤ wD x + wD y :=
+        Nat.le_trans (hw.mul_le x.fst y.fst)
+          (Nat.add_le_add (Nat.le_max_left _ _) (Nat.le_max_left _ _))
+      have h2a : w (mul x.fst y.snd) ≤ wD x + wD y :=
+        Nat.le_trans (hw.mul_le x.fst y.snd)
+          (Nat.add_le_add (Nat.le_max_left _ _) (Nat.le_max_right _ _))
+      have h2b : w (mul x.snd y.fst) ≤ wD x + wD y :=
+        Nat.le_trans (hw.mul_le x.snd y.fst)
+          (Nat.add_le_add (Nat.le_max_right _ _) (Nat.le_max_left _ _))
+      exact max_le_of_le h1
+        (Nat.le_trans (hw.add_le _ _) (max_le_of_le h2a h2b))
+    neg_le := fun x =>
+      max_le_of_le
+        (Nat.le_trans (hw.neg_le x.fst) (Nat.le_max_left _ _))
+        (Nat.le_trans (hw.neg_le x.snd) (Nat.le_max_right _ _))
+  }
+  have hwD1 : wD (one : Dual R) = 0 := by
+    show max (w one) (w zero) = 0
+    rw [hw1, hw.zero]; rfl
+  have hC1D : ((mapHom Dual.inl).toFun C1).wdeg wD 1 ≤ h_A := by
+    apply wdeg_le; intro k hk
+    rw [coeffAt_mapHom] at hk ⊢
+    have hcNe : coeffAt C1.coeffs k ≠ zero := fun e => hk (by rw [e]; rfl)
+    have hle := Nat.le_trans (le_wdeg w 1 C1 k hcNe) hC1
+    show max (w (coeffAt C1.coeffs k)) (w zero) + 1 * k ≤ h_A
+    rw [hw.zero, Nat.max_zero]; exact hle
+  have hPD : (dualPerturb P0 B).wdeg wD 1 ≤ h_B := by
+    apply wdeg_le; intro k hk
+    unfold dualPerturb at hk ⊢
+    rw [coeffAt_add, coeffAt_C_mul, coeffAt_mapHom, coeffAt_mapHom] at hk ⊢
+    have hCoeff : add (Dual.inl.toFun (coeffAt P0.coeffs k))
+        (mul Dual.eps (Dual.inl.toFun (coeffAt B.coeffs k))) =
+        (⟨coeffAt P0.coeffs k, coeffAt B.coeffs k⟩ : Dual R) := by
+      apply Dual.ext
+      · show add (coeffAt P0.coeffs k) (mul zero (coeffAt B.coeffs k)) = coeffAt P0.coeffs k
+        constructive_ring
+      · show add zero (add (mul zero zero) (mul one (coeffAt B.coeffs k))) = coeffAt B.coeffs k
+        constructive_ring
+    rw [hCoeff] at hk ⊢
+    if hkB : k ≤ h_B then
+      have hP0k : w (coeffAt P0.coeffs k) ≤ h_B - k := by
+        if hz : coeffAt P0.coeffs k = zero then rw [hz, hw.zero]; omega
+        else have := Nat.le_trans (le_wdeg w 1 P0 k hz) hP0; omega
+      have hBk : w (coeffAt B.coeffs k) ≤ h_B - k := by
+        if hz : coeffAt B.coeffs k = zero then rw [hz, hw.zero]; omega
+        else have := Nat.le_trans (le_wdeg w 1 B k hz) hB; omega
+      have hMax : max (w (coeffAt P0.coeffs k)) (w (coeffAt B.coeffs k)) ≤ h_B - k :=
+        max_le_of_le hP0k hBk
+      show max (w (coeffAt P0.coeffs k)) (w (coeffAt B.coeffs k)) + 1 * k ≤ h_B
+      omega
+    else
+      exfalso
+      have hzP : coeffAt P0.coeffs k = zero := by
+        apply Decidable.byContradiction; intro hz
+        have := Nat.le_trans (le_wdeg w 1 P0 k hz) hP0; omega
+      have hzB : coeffAt B.coeffs k = zero := by
+        apply Decidable.byContradiction; intro hz
+        have := Nat.le_trans (le_wdeg w 1 B k hz) hB; omega
+      rw [hzP, hzB] at hk; exact hk rfl
+  have hMain := degFn_sylRes_le hwD hwD1 m N h_A h_B _ _ hC1D hPD hm hN
+  exact Nat.le_trans (Nat.le_max_right _ _) hMain
+
+end Deriv
+end SylElim
+
+end Qsag
+
+end
+
+section
+namespace Qsag
+
+set_option autoImplicit false
+open CommRingOps RoundPoly
+
+namespace SylElim
+
+section WdegDiv
+variable {R : Type} [LawfulCommRing R] [DecidableEq R]
+open UPoly
+
+theorem wdeg_divModLead_rem_le {w : R → Nat} (hw : DegFn w)
+    (A : UPoly R) (m T : Nat) (c_inv : R)
+    (hm : 1 ≤ m) (hAdeg : A.natDeg ≤ m) (hInv : mul c_inv (coeffAt A.coeffs m) = one)
+    (hcinv : w c_inv = 0) (hAw : A.wdeg w 1 ≤ m)
+    (P : UPoly R) (hPw : P.wdeg w 1 ≤ T) :
+    (divModLead A m c_inv P).2.wdeg w 1 ≤ T := by
+  have hwSub : ∀ X Y : UPoly R, X.wdeg w 1 ≤ T → Y.wdeg w 1 ≤ T → (sub X Y).wdeg w 1 ≤ T := by
+    intro X Y hX hY
+    have hD := UPoly.degFn_wdeg hw 1
+    rw [LawfulCommRing.sub_eq_add_neg]
+    have h1 := hD.add_le X (neg Y)
+    have h2 := Nat.le_trans (hD.neg_le Y) hY
+    if hmxy : X.wdeg w 1 ≤ (neg Y).wdeg w 1 then
+      rw [Nat.max_eq_right hmxy] at h1; exact Nat.le_trans h1 h2
+    else
+      rw [Nat.max_eq_left (by omega)] at h1; exact Nat.le_trans h1 hX
+  have aux : ∀ (fuel : Nat) (P : UPoly R), P.natDeg < fuel → P.wdeg w 1 ≤ T →
+      (divModLeadAux A m c_inv fuel P).2.wdeg w 1 ≤ T := by
+    intro fuel; induction fuel with
+    | zero => intros _ h _; exfalso; omega
+    | succ fuel ih =>
+      intro P hFuel hPT
+      unfold divModLeadAux
+      if hlt : P.natDeg < m then
+        rw [ite_pos hlt]; exact hPT
+      else
+        rw [ite_neg hlt]
+        have hP0 : P ≠ zero := fun e => by
+          rw [e] at hlt; have : (zero : UPoly R).natDeg = 0 := UPoly.natDeg_zero
+          omega
+        have hLeadW : w P.lead + 1 * P.natDeg ≤ T :=
+          by simpa only [lead_eq] using (Nat.le_trans (le_wdeg w 1 P P.natDeg (by simpa only [lead_eq] using (lead_ne_zero hP0))) hPT)
+        let qTop := mul (C (mul (coeffAt P.coeffs P.natDeg) c_inv)) (monom (P.natDeg - m))
+        let P' := sub P (mul qTop A)
+        have hqTopW : qTop.wdeg w 1 ≤ T - m := by
+          apply wdeg_le; intro k hk
+          dsimp only [qTop] at hk ⊢
+          rw [coeffAt_C_mul, coeffAt_monom] at hk ⊢
+          if hEq : k = P.natDeg - m then
+            subst hEq; rw [ite_pos rfl, LawfulCommRing.mul_one] at hk ⊢
+            have hwMul := hw.mul_le P.lead c_inv
+            simp only [lead_eq] at hwMul hLeadW
+            rw [hcinv] at hwMul; omega
+          else
+            rw [ite_neg hEq, LawfulCommRing.mul_zero] at hk; exact absurd rfl hk
+        have hMulW : (mul qTop A).wdeg w 1 ≤ T := by
+          have h1 := (UPoly.degFn_wdeg hw 1).mul_le qTop A
+          omega
+        have hCancel : ∀ k, P.natDeg ≤ k → coeffAt P'.coeffs k = zero := by
+          intro k hk
+          dsimp only [P', qTop]
+          have hqA : mul (mul (C (mul (coeffAt P.coeffs P.natDeg) c_inv)) (monom (P.natDeg - m))) A =
+              mul (C (mul (coeffAt P.coeffs P.natDeg) c_inv)) (mul (monom (P.natDeg - m)) A) := by
+            constructive_ring
+          rw [coeffAt_sub, hqA, coeffAt_C_mul, coeffAt_monom_mul, ite_pos (by omega)]
+          if hEq : k = P.natDeg then
+            subst hEq; rw [show P.natDeg - (P.natDeg - m) = m by omega]
+            have h1 : mul (mul (coeffAt P.coeffs P.natDeg) c_inv) (coeffAt A.coeffs m) =
+                mul (coeffAt P.coeffs P.natDeg) (mul c_inv (coeffAt A.coeffs m)) := by constructive_ring
+            rw [h1, hInv, LawfulCommRing.mul_one, LawfulCommRing.sub_self]
+          else
+            rw [P.coeffAt_eq_zero_of_natDeg_lt (by omega),
+              A.coeffAt_eq_zero_of_natDeg_lt (by omega), LawfulCommRing.mul_zero, LawfulCommRing.sub_self]
+        have hDegP' : P'.natDeg < fuel := by
+          have hle := natDeg_le_of_coeffAt P' (P.natDeg - 1) fun k hk => hCancel k (by omega)
+          omega
+        exact ih P' hDegP' (hwSub P (mul qTop A) hPT hMulW)
+  exact aux (P.natDeg + 1) P (Nat.lt_succ_self _) hPw
+
+end WdegDiv
+
+/-! ## Monic Quotient Algebra `ModMonic M = R[W]/(M)` -/
+
+structure MonicPoly (R : Type) [LawfulCommRing R] [DecidableEq R] where
+  poly : UPoly R
+  deg : Nat
+  deg_pos : 1 ≤ deg
+  natDeg_le : poly.natDeg ≤ deg
+  coeff_deg : coeffAt poly.coeffs deg = one
+
+section ModMonicRing
+variable {R : Type} [LawfulCommRing R] [DecidableEq R]
+open UPoly
+
+def remM (M : MonicPoly R) (P : UPoly R) : UPoly R :=
+  (divModLead M.poly M.deg one P).2
+
+def quotM (M : MonicPoly R) (P : UPoly R) : UPoly R :=
+  (divModLead M.poly M.deg one P).1
+
+theorem quotM_remM_spec (M : MonicPoly R) (P : UPoly R) :
+    P = add (mul (quotM M P) M.poly) (remM M P) ∧ (remM M P).natDeg < M.deg := by
+  have hInv : mul (one : R) (coeffAt M.poly.coeffs M.deg) = one := by
+    rw [M.coeff_deg, LawfulCommRing.one_mul]
+  exact divModLead_spec M.poly M.deg one M.deg_pos M.natDeg_le hInv P
+
+theorem eq_zero_of_mul_monic_lt (M : MonicPoly R) {Q : UPoly R}
+    (hLt : (mul Q M.poly).natDeg < M.deg) : Q = zero := by
+  apply Decidable.byContradiction; intro hQ0
+  let u := Q.natDeg
+  have hZero : coeffAt (mul Q M.poly).coeffs (u + M.deg) = zero :=
+    (mul Q M.poly).coeffAt_eq_zero_of_natDeg_lt (by omega)
+  if hM0 : M.poly = zero then
+    have h10 : (one : R) = zero := by
+      rw [← M.coeff_deg, hM0, coeffs_zero, coeffAt_nil]
+    have hQl : Q.lead = zero := by
+      rw [← LawfulCommRing.mul_one Q.lead, h10, LawfulCommRing.mul_zero]
+    exact lead_ne_zero hQ0 hQl
+  else
+    have hMdeg : M.poly.natDeg = M.deg := by
+      apply Nat.le_antisymm M.natDeg_le
+      apply Decidable.byContradiction; intro hNot
+      have hz := M.poly.coeffAt_eq_zero_of_natDeg_lt (Nat.lt_of_not_le hNot)
+      rw [M.coeff_deg] at hz
+      exact lead_ne_zero hQ0 (by
+        rw [← LawfulCommRing.mul_one Q.lead, hz, LawfulCommRing.mul_zero])
+    have hTop := (coeffAt_mul_top Q M.poly).2
+    simp only [lead_eq] at hTop
+    rw [hMdeg, M.coeff_deg, LawfulCommRing.mul_one] at hTop
+    rw [hTop] at hZero
+    exact lead_ne_zero hQ0 (by simpa only [lead_eq] using hZero)
+
+theorem remM_eq_of_sub_mul (M : MonicPoly R) {P R0 Q : UPoly R}
+    (hSub : sub P R0 = mul Q M.poly) (hDeg : R0.natDeg < M.deg) :
+    remM M P = R0 := by
+  obtain ⟨hDiv, hRemDeg⟩ := quotM_remM_spec M P
+  have hDiff : sub (remM M P) R0 = mul (sub Q (quotM M P)) M.poly := by
+    have h1 : remM M P = sub P (mul (quotM M P) M.poly) := by
+      conv => rhs; lhs; rw [hDiv]
+      constructive_ring
+    rw [h1]
+    have h2 : sub (sub P (mul (quotM M P) M.poly)) R0 =
+        sub (sub P R0) (mul (quotM M P) M.poly) := by constructive_ring
+    rw [h2, hSub]; constructive_ring
+  have hDiffDeg : (mul (sub Q (quotM M P)) M.poly).natDeg < M.deg := by
+    rw [← hDiff, LawfulCommRing.sub_eq_add_neg]
+    have h1 := natDeg_add_le (remM M P) (neg R0)
+    have hNeg : (neg R0).natDeg ≤ R0.natDeg :=
+      natDeg_le_of_coeffAt _ _ fun k hk => by
+        rw [coeffAt_neg, R0.coeffAt_eq_zero_of_natDeg_lt hk, LawfulCommRing.neg_zero]
+    omega
+  have hQeq := eq_zero_of_mul_monic_lt M hDiffDeg
+  rw [hQeq, LawfulCommRing.zero_mul] at hDiff
+  exact LawfulCommRing.sub_eq_zero_iff.mp hDiff
+
+theorem remM_of_lt (M : MonicPoly R) {P : UPoly R} (hP : P.natDeg < M.deg) :
+    remM M P = P :=
+  remM_eq_of_sub_mul M (Q := zero)
+    (by rw [LawfulCommRing.sub_self, LawfulCommRing.zero_mul]) hP
+
+@[ext]
+structure ModMonic (M : MonicPoly R) where
+  rep : UPoly R
+  reduced : rep.natDeg < M.deg
+
+instance (M : MonicPoly R) : DecidableEq (ModMonic M) := fun a b =>
+  if h : a.rep = b.rep then isTrue (ModMonic.ext h)
+  else isFalse (fun e => h (congrArg ModMonic.rep e))
+
+namespace ModMonic
+
+theorem natDeg_zero_lt (M : MonicPoly R) : (zero : UPoly R).natDeg < M.deg := by
+  have : (zero : UPoly R).natDeg = 0 := UPoly.natDeg_zero
+  have := M.deg_pos; omega
+
+theorem natDeg_C_lt (M : MonicPoly R) (c : R) : (C c : UPoly R).natDeg < M.deg := by
+  have hc0 : (C c : UPoly R).natDeg = 0 :=
+    Nat.le_zero.mp (natDeg_le_of_coeffAt _ 0 fun k hk => by
+      cases k with
+      | zero => omega
+      | succ k => exact coeffAt_C_succ c k)
+  have := M.deg_pos; omega
+
+theorem natDeg_add_lt (M : MonicPoly R) {a b : UPoly R}
+    (ha : a.natDeg < M.deg) (hb : b.natDeg < M.deg) : (add a b).natDeg < M.deg := by
+  have h := natDeg_add_le a b; omega
+
+theorem natDeg_neg_lt (M : MonicPoly R) {a : UPoly R}
+    (ha : a.natDeg < M.deg) : (neg a).natDeg < M.deg := by
+  have h : (neg a).natDeg ≤ a.natDeg :=
+    natDeg_le_of_coeffAt _ _ fun k hk => by
+      rw [coeffAt_neg, a.coeffAt_eq_zero_of_natDeg_lt hk, LawfulCommRing.neg_zero]
+  omega
+
+instance (M : MonicPoly R) : LawfulCommRing (ModMonic M) where
+  zero := ⟨zero, natDeg_zero_lt M⟩
+  one := ⟨one, by rw [one_eq_C]; exact natDeg_C_lt M one⟩
+  add a b := ⟨add a.rep b.rep, natDeg_add_lt M a.reduced b.reduced⟩
+  mul a b := ⟨remM M (mul a.rep b.rep), (quotM_remM_spec M _).2⟩
+  neg a := ⟨neg a.rep, natDeg_neg_lt M a.reduced⟩
+  sub a b := ⟨sub a.rep b.rep, by
+    rw [LawfulCommRing.sub_eq_add_neg]
+    exact natDeg_add_lt M a.reduced (natDeg_neg_lt M b.reduced)⟩
+  add_assoc a b c := by apply ModMonic.ext; exact LawfulCommRing.add_assoc _ _ _
+  add_comm a b := by apply ModMonic.ext; exact LawfulCommRing.add_comm _ _
+  zero_add a := by apply ModMonic.ext; exact LawfulCommRing.zero_add _
+  add_zero a := by apply ModMonic.ext; exact LawfulCommRing.add_zero _
+  add_left_neg a := by apply ModMonic.ext; exact LawfulCommRing.add_left_neg _
+  sub_eq_add_neg a b := by apply ModMonic.ext; exact LawfulCommRing.sub_eq_add_neg _ _
+  mul_comm a b := by apply ModMonic.ext; dsimp; rw [LawfulCommRing.mul_comm]
+  one_mul a := by
+    apply ModMonic.ext; dsimp
+    rw [LawfulCommRing.one_mul, remM_of_lt M a.reduced]
+  mul_one a := by
+    apply ModMonic.ext; dsimp
+    rw [LawfulCommRing.mul_one, remM_of_lt M a.reduced]
+  left_distrib a b c := by
+    apply ModMonic.ext; dsimp
+    rw [LawfulCommRing.left_distrib]
+    obtain ⟨hB, hBd⟩ := quotM_remM_spec M (mul a.rep b.rep)
+    obtain ⟨hC, hCd⟩ := quotM_remM_spec M (mul a.rep c.rep)
+    refine remM_eq_of_sub_mul M (Q := add (quotM M (mul a.rep b.rep)) (quotM M (mul a.rep c.rep)))
+      ?_ (natDeg_add_lt M hBd hCd)
+    conv => lhs; lhs; rw [hB, hC]
+    constructive_ring
+  right_distrib a b c := by
+    apply ModMonic.ext; dsimp
+    rw [LawfulCommRing.right_distrib]
+    obtain ⟨hA, hAd⟩ := quotM_remM_spec M (mul a.rep c.rep)
+    obtain ⟨hB, hBd⟩ := quotM_remM_spec M (mul b.rep c.rep)
+    refine remM_eq_of_sub_mul M (Q := add (quotM M (mul a.rep c.rep)) (quotM M (mul b.rep c.rep)))
+      ?_ (natDeg_add_lt M hAd hBd)
+    conv => lhs; lhs; rw [hA, hB]
+    constructive_ring
+  mul_assoc a b c := by
+    apply ModMonic.ext; dsimp
+    obtain ⟨hAB, _⟩ := quotM_remM_spec M (mul a.rep b.rep)
+    obtain ⟨hBC, _⟩ := quotM_remM_spec M (mul b.rep c.rep)
+    obtain ⟨hR, hRd⟩ := quotM_remM_spec M (mul a.rep (remM M (mul b.rep c.rep)))
+    refine remM_eq_of_sub_mul M
+      (Q := sub (add (quotM M (mul a.rep (remM M (mul b.rep c.rep)))) (mul a.rep (quotM M (mul b.rep c.rep))))
+        (mul (quotM M (mul a.rep b.rep)) c.rep)) ?_ hRd
+    have hEqABC : mul (add (mul (quotM M (mul a.rep b.rep)) M.poly) (remM M (mul a.rep b.rep))) c.rep =
+        mul a.rep (add (mul (quotM M (mul b.rep c.rep)) M.poly) (remM M (mul b.rep c.rep))) := by
+      rw [← hAB, ← hBC, LawfulCommRing.mul_assoc]
+    have hRemEq : mul (remM M (mul a.rep b.rep)) c.rep =
+        sub (mul a.rep (add (mul (quotM M (mul b.rep c.rep)) M.poly) (remM M (mul b.rep c.rep))))
+          (mul (mul (quotM M (mul a.rep b.rep)) M.poly) c.rep) := by
+      rw [← hEqABC]; constructive_ring
+    rw [hRemEq]
+    have hR' : remM M (mul a.rep (remM M (mul b.rep c.rep))) =
+        sub (mul a.rep (remM M (mul b.rep c.rep)))
+          (mul (quotM M (mul a.rep (remM M (mul b.rep c.rep)))) M.poly) := by
+      conv => rhs; lhs; rw [hR]
+      constructive_ring
+    conv => lhs; rhs; rw [hR']
+    constructive_ring
+
+instance [NontrivialRing R] (M : MonicPoly R) : NontrivialRing (ModMonic M) where
+  one_ne_zero h := by
+    have hRep : (one : UPoly R) = zero := congrArg ModMonic.rep h
+    have hc := congrArg (fun p : UPoly R => coeffAt p.coeffs 0) hRep
+    rw [one_eq_C, coeffAt_C_zero, coeffs_zero, coeffAt_nil] at hc
+    exact NontrivialRing.one_ne_zero hc
+
+theorem rep_zero (M : MonicPoly R) : (zero : ModMonic M).rep = (zero : UPoly R) := by rfl
+
+def modQuotHom (M : MonicPoly R) : RingHom (UPoly R) (ModMonic M) where
+  toFun P := ⟨remM M P, (quotM_remM_spec M P).2⟩
+  map_zero := by apply ModMonic.ext; exact remM_of_lt M (natDeg_zero_lt M)
+  map_one := by
+    apply ModMonic.ext
+    exact remM_of_lt M (by rw [one_eq_C]; exact natDeg_C_lt M one)
+  map_add A B := by
+    apply ModMonic.ext
+    change remM M (add A B) = add (remM M A) (remM M B)
+    obtain ⟨hA, hAd⟩ := quotM_remM_spec M A
+    obtain ⟨hB, hBd⟩ := quotM_remM_spec M B
+    refine remM_eq_of_sub_mul M (Q := add (quotM M A) (quotM M B)) ?_ (natDeg_add_lt M hAd hBd)
+    conv => lhs; lhs; rw [hA, hB]
+    constructive_ring
+  map_mul A B := by
+    apply ModMonic.ext
+    change remM M (mul A B) = remM M (mul (remM M A) (remM M B))
+    obtain ⟨hA, _⟩ := quotM_remM_spec M A
+    obtain ⟨hB, _⟩ := quotM_remM_spec M B
+    obtain ⟨hR, hRd⟩ := quotM_remM_spec M (mul (remM M A) (remM M B))
+    refine remM_eq_of_sub_mul M
+      (Q := add (add (mul (quotM M A) (mul (quotM M B) M.poly))
+          (add (mul (quotM M A) (remM M B)) (mul (remM M A) (quotM M B))))
+        (quotM M (mul (remM M A) (remM M B)))) ?_ hRd
+    conv => lhs; lhs; rw [hA, hB]
+    have hR' : remM M (mul (remM M A) (remM M B)) =
+        sub (mul (remM M A) (remM M B))
+          (mul (quotM M (mul (remM M A) (remM M B))) M.poly) := by
+      conv => rhs; lhs; rw [hR]
+      constructive_ring
+    conv => lhs; rhs; rw [hR']
+    constructive_ring
+
+def modInl (M : MonicPoly R) : RingHom R (ModMonic M) :=
+  (modQuotHom M).comp CHom
+
+theorem modInl_inj (M : MonicPoly R) {r : R} (h : (modInl M).toFun r = zero) : r = zero := by
+  have hRep : remM M (C r) = zero := by
+    simpa only [modInl, RingHom.comp_apply, CHom_apply, modQuotHom, rep_zero] using congrArg ModMonic.rep h
+  rw [remM_of_lt M (natDeg_C_lt M r)] at hRep
+  have hc := congrArg (fun p : UPoly R => coeffAt p.coeffs 0) hRep
+  rwa [coeffAt_C_zero, coeffs_zero, coeffAt_nil] at hc
+
+def modGen (M : MonicPoly R) : ModMonic M :=
+  (modQuotHom M).toFun X
+
+theorem eval_mapHom_modInl (M : MonicPoly R) (P : UPoly R) :
+    ((mapHom (modInl M)).toFun P).eval (modGen M) = (modQuotHom M).toFun P := by
+  show eval₂ (RingHom.id _) (modGen M) ((mapHom (modInl M)).toFun P) = _
+  rw [eval₂_mapHom]
+  have hEqFun : ∀ c : R, ((RingHom.id (ModMonic M)).comp (modInl M)).toFun c =
+      ((modQuotHom M).comp CHom).toFun c := fun c => by simp only [RingHom.comp_apply, RingHom.id_apply, modInl]
+  show evalCoeffs (P.coeffs.map ((RingHom.id (ModMonic M)).comp (modInl M)).toFun) (modGen M) = _
+  have hMap : P.coeffs.map ((RingHom.id (ModMonic M)).comp (modInl M)).toFun =
+      P.coeffs.map ((modQuotHom M).comp CHom).toFun := List.map_congr_left fun c _ => hEqFun c
+  rw [hMap]
+  change eval₂ ((modQuotHom M).comp CHom) ((modQuotHom M).toFun X) P = (modQuotHom M).toFun P
+  have hIdP : P = eval₂ CHom X P := by
+    conv => lhs; rw [← ofList_coeffs P]
+    change ofList P.coeffs = evalCoeffs (P.coeffs.map CHom.toFun) X
+    generalize P.coeffs = l
+    induction l with
+    | nil => rfl
+    | cons c cs ih =>
+      simp only [List.map_cons, evalCoeffs, CHom_apply]
+      show ofList (c :: cs) = add (C c) (mul X _)
+      rw [ofList_cons, ← ih]
+  conv => rhs; rw [hIdP]
+  exact (hom_eval₂ (modQuotHom M) CHom X P).symm
+
+theorem modQuotHom_self_eq_zero (M : MonicPoly R) : (modQuotHom M).toFun M.poly = zero := by
+  apply ModMonic.ext
+  change remM M M.poly = zero
+  exact remM_eq_of_sub_mul M (Q := one)
+    (by rw [LawfulCommRing.sub_zero, LawfulCommRing.one_mul]) (natDeg_zero_lt M)
+
+theorem eval_modGen_eq_zero (M : MonicPoly R) :
+    ((mapHom (modInl M)).toFun M.poly).eval (modGen M) = zero := by
+  rw [eval_mapHom_modInl, modQuotHom_self_eq_zero]
+
+end ModMonic
+
+/-! ## `d_G ≥ 2` Common-Factor Vanishing of `sylResDeriv` -/
+
+theorem sylResDeriv_eq_zero_of_common_factor_ge_two {m N d_G : Nat}
+    {C1 P0 G Q_C Q_P : UPoly R}
+    (hdG : 2 ≤ d_G) (hdGm : d_G ≤ m) (hP0 : P0.natDeg ≤ N)
+    (hGdeg : G.natDeg ≤ d_G) (hGmon : coeffAt G.coeffs d_G = one)
+    (hC1fac : C1 = mul G Q_C) (hQCdeg : Q_C.natDeg ≤ m - d_G)
+    (hP0fac : P0 = mul G Q_P) :
+    sylResDeriv m N C1 P0 one = zero := by
+  let M1 : MonicPoly R := ⟨G, d_G, by omega, hGdeg, hGmon⟩
+  let φ1 := ModMonic.modInl M1
+  let T1 := ModMonic.modGen M1
+  let G_1 := (mapHom φ1).toFun G
+  have hG1root : G_1.eval T1 = zero := ModMonic.eval_modGen_eq_zero M1
+  obtain ⟨hG1div, hG1deg_raw⟩ := divXSub_spec G_1 T1
+  have hC0_1 : (C (zero : ModMonic M1) : UPoly (ModMonic M1)) = zero := by
+    rw [← CHom_apply]; exact CHom.map_zero
+  rw [hG1root, hC0_1, LawfulCommRing.zero_add] at hG1div
+  let G1 := divXSub G_1 T1
+  have hG1_le : G1.natDeg ≤ d_G - 1 := by
+    have hmap : G_1.natDeg ≤ G.natDeg := natDeg_mapHom_le φ1 G
+    change (divXSub G_1 T1).natDeg ≤ d_G - 1
+    omega
+  have hG1_mon : coeffAt G1.coeffs (d_G - 1) = one := by
+    have hTop : coeffAt G_1.coeffs d_G = one := by
+      dsimp only [G_1]; rw [coeffAt_mapHom, hGmon, φ1.map_one]
+    have hExpand : mul (sub X (C T1)) G1 = sub (mul X G1) (mul (C T1) G1) := by constructive_ring
+    obtain ⟨d', hd'⟩ : ∃ d', d_G = d' + 1 := ⟨d_G - 1, by omega⟩
+    rw [hG1div, hExpand, hd', coeffAt_sub, coeffAt_X_mul_succ, coeffAt_C_mul,
+      G1.coeffAt_eq_zero_of_natDeg_lt (k := d' + 1) (by omega), LawfulCommRing.mul_zero,
+      LawfulCommRing.sub_zero] at hTop
+    rwa [show d_G - 1 = d' by omega]
+  let C1_1 := (mapHom φ1).toFun C1
+  let P0_1 := (mapHom φ1).toFun P0
+  let QC_1 := (mapHom φ1).toFun Q_C
+  let QP_1 := (mapHom φ1).toFun Q_P
+  have hC1_1_eq : C1_1 = mul (sub X (C T1)) (mul G1 QC_1) := by
+    dsimp only [C1_1, QC_1]
+    rw [hC1fac, RingHom.map_mul]; change mul G_1 QC_1 = _
+    rw [hG1div, LawfulCommRing.mul_assoc]
+  have hP0_1_root : P0_1.eval T1 = zero := by
+    dsimp only [P0_1]
+    rw [hP0fac, RingHom.map_mul]; rw [← evalHom_apply]
+    rw [RingHom.map_mul, evalHom_apply, hG1root, LawfulCommRing.zero_mul]
+  have hG1QC_deg : (mul G1 QC_1).natDeg ≤ m - 1 := by
+    have h1 := natDeg_mul_le G1 QC_1
+    have h2 : QC_1.natDeg ≤ Q_C.natDeg := natDeg_mapHom_le φ1 Q_C
+    omega
+  have hP0_1_deg : P0_1.natDeg ≤ N := Nat.le_trans (natDeg_mapHom_le φ1 P0) hP0
+  have hOne_deg : (one : UPoly (ModMonic M1)).natDeg ≤ N := by
+    rw [natDeg_one]; exact Nat.zero_le N
+  have hStep1 : φ1.toFun (sylResDeriv m N C1 P0 one) = sylRes (m - 1) N (mul G1 QC_1) P0_1 := by
+    rw [map_sylResDeriv φ1, RingHom.map_one]
+    change sylResDeriv m N C1_1 P0_1 one = _
+    obtain ⟨m', hm'⟩ : ∃ m', m = m' + 1 := ⟨m - 1, by omega⟩
+    rw [hm', show m' + 1 - 1 = m' by omega] at hG1QC_deg ⊢
+    rw [hC1_1_eq, sylResDeriv_of_factor m' N T1 (mul G1 QC_1) P0_1 one hG1QC_deg hP0_1_deg hOne_deg hP0_1_root,
+      one_eq_C, eval_C, LawfulCommRing.one_mul]
+  let M2 : MonicPoly (ModMonic M1) := ⟨G1, d_G - 1, by omega, hG1_le, hG1_mon⟩
+  let φ2 := ModMonic.modInl M2
+  let T2 := ModMonic.modGen M2
+  have hG1_2_root : ((mapHom φ2).toFun G1).eval T2 = zero := ModMonic.eval_modGen_eq_zero M2
+  have hStep2 : φ2.toFun (sylRes (m - 1) N (mul G1 QC_1) P0_1) = zero := by
+    rw [map_sylRes φ2]
+    refine sylRes_eq_zero_of_common_root (ζ := T2) (by omega)
+      (Nat.le_trans (natDeg_mapHom_le φ2 _) hG1QC_deg)
+      (Nat.le_trans (natDeg_mapHom_le φ2 _) hP0_1_deg) ?_ ?_
+    · rw [RingHom.map_mul]; rw [← evalHom_apply]
+      rw [RingHom.map_mul, evalHom_apply, hG1_2_root, LawfulCommRing.zero_mul]
+    · dsimp only [P0_1]
+      rw [hP0fac, RingHom.map_mul]; change ((mapHom φ2).toFun (mul G_1 QP_1)).eval T2 = zero
+      rw [hG1div, RingHom.map_mul, RingHom.map_mul]
+      rw [← evalHom_apply]
+      rw [RingHom.map_mul, RingHom.map_mul, evalHom_apply T2 ((mapHom φ2).toFun G1), hG1_2_root,
+        LawfulCommRing.mul_zero, LawfulCommRing.zero_mul]
+  apply ModMonic.modInl_inj M1
+  apply ModMonic.modInl_inj M2
+  rw [hStep1, hStep2]
+
+/-! ## Polynomial coordinates for common roots -/
+
+/-- Homogeneous evaluation padded to degree `l.length`. The extra denominator factor
+keeps the recursion uniform, including the zero and constant polynomials. -/
+def homEvalCoeffs (a b : R) : List R → R
+  | [] => zero
+  | c :: cs => add (mul c (CRing.npow b (cs.length + 1))) (mul a (homEvalCoeffs a b cs))
+
+omit [DecidableEq R] in
+/-- Clearing denominators uses a polynomial identity, so it also holds in quotient rings. -/
+theorem homEvalCoeffs_mul (z b : R) : ∀ l : List R,
+    homEvalCoeffs (mul z b) b l = mul (CRing.npow b l.length) (evalCoeffs l z)
+  | [] => by
+    show zero = mul one zero
+    rw [LawfulCommRing.mul_zero]
+  | c :: cs => by
+    simp only [homEvalCoeffs, List.length_cons]
+    rw [homEvalCoeffs_mul z b cs]
+    show add (mul c (mul (CRing.npow b cs.length) b))
+      (mul (mul z b) (mul (CRing.npow b cs.length) (evalCoeffs cs z))) =
+      mul (mul (CRing.npow b cs.length) b) (add c (mul z (evalCoeffs cs z)))
+    constructive_ring
+
+omit [DecidableEq R] in
+theorem map_homEvalCoeffs {S : Type} [LawfulCommRing S]
+    (φ : RingHom R S) (a b : R) : ∀ l : List R,
+    φ.toFun (homEvalCoeffs a b l) = homEvalCoeffs (φ.toFun a) (φ.toFun b) (l.map φ.toFun)
+  | [] => φ.map_zero
+  | c :: cs => by
+    simp only [homEvalCoeffs, List.map_cons, List.length_map]
+    rw [φ.map_add, φ.map_mul, φ.map_mul, RingHom.map_npow, map_homEvalCoeffs φ a b cs]
+
+/-- Naturality plus denominator clearing; normalization of mapped coefficient lists is unnecessary. -/
+theorem homEvalCoeffs_map_root {S : Type} [LawfulCommRing S]
+    (φ : RingHom R S) (a b : R) (z : S) (h : φ.toFun a = mul z (φ.toFun b)) (P : UPoly R) :
+    φ.toFun (homEvalCoeffs a b P.coeffs) =
+      mul (CRing.npow (φ.toFun b) P.coeffs.length) (eval₂ φ z P) := by
+  rw [map_homEvalCoeffs, h, homEvalCoeffs_mul, List.length_map]
+  rfl
+
+/-- Clearing an invertible denominator preserves precisely the zero constraints,
+even when the target quotient has zero divisors. -/
+theorem homEvalCoeffs_map_zero_iff {S : Type} [LawfulCommRing S]
+    (φ : RingHom R S) (a b : R) (z b_inv : S)
+    (hcoord : φ.toFun a = mul z (φ.toFun b)) (hunit : mul b_inv (φ.toFun b) = one)
+    (P : UPoly R) :
+    φ.toFun (homEvalCoeffs a b P.coeffs) = zero ↔ eval₂ φ z P = zero := by
+  have hpow : ∀ n, mul (CRing.npow b_inv n) (CRing.npow (φ.toFun b) n) = one := by
+    intro n; induction n with
+    | zero => exact LawfulCommRing.one_mul one
+    | succ n ih =>
+      have hEq : mul (mul (CRing.npow b_inv n) b_inv) (mul (CRing.npow (φ.toFun b) n) (φ.toFun b)) =
+          mul (mul (CRing.npow b_inv n) (CRing.npow (φ.toFun b) n)) (mul b_inv (φ.toFun b)) := by
+        constructive_ring
+      change mul (mul (CRing.npow b_inv n) b_inv) (mul (CRing.npow (φ.toFun b) n) (φ.toFun b)) = one
+      rw [hEq, ih, hunit, LawfulCommRing.one_mul]
+  rw [homEvalCoeffs_map_root φ a b z hcoord P]
+  constructor
+  · intro h
+    have hcancel := congrArg (mul (CRing.npow b_inv P.coeffs.length)) h
+    rwa [← LawfulCommRing.mul_assoc, hpow, LawfulCommRing.one_mul,
+      LawfulCommRing.mul_zero] at hcancel
+  · intro h
+    rw [h, LawfulCommRing.mul_zero]
+
+omit [DecidableEq R] in
+/-- Degree control depends only on the input coefficients and the two resultant coordinates. -/
+theorem degFn_homEvalCoeffs_le {w : R → Nat} (hw : DegFn w) (hw1 : w one = 0)
+    (a b : R) (A B : Nat) (ha : w a ≤ B) (hb : w b ≤ B) :
+    ∀ l : List R, (∀ c ∈ l, w c ≤ A) → w (homEvalCoeffs a b l) ≤ A + l.length * B
+  | [], _ => by show w zero ≤ A + 0 * B; rw [hw.zero]; omega
+  | c :: cs, hc => by
+    have hhead := hc c (.head _)
+    have htail := degFn_homEvalCoeffs_le hw hw1 a b A B ha hb cs (fun x hx => hc x (.tail _ hx))
+    have hpow := degFn_npow_le hw hw1 b B hb (cs.length + 1)
+    have hleft := hw.mul_le c (CRing.npow b (cs.length + 1))
+    have hright := hw.mul_le a (homEvalCoeffs a b cs)
+    have hadd := hw.add_le (mul c (CRing.npow b (cs.length + 1))) (mul a (homEvalCoeffs a b cs))
+    change w (add (mul c (CRing.npow b (cs.length + 1))) (mul a (homEvalCoeffs a b cs))) ≤ _
+    rw [List.length_cons, Nat.succ_mul]
+    rw [Nat.succ_mul] at hpow
+    omega
+
+/-- Weighted polynomial-degree form of the denominator-clearing bound. -/
+theorem degFn_homEvalCoeffs_poly_le {w : R → Nat} (hw : DegFn w) (hw1 : w one = 0)
+    (a b : R) (B : Nat) (ha : w a ≤ B) (hb : w b ≤ B) (P : UPoly R) :
+    w (homEvalCoeffs a b P.coeffs) ≤ P.wdeg w 1 + (P.natDeg + 1) * B := by
+  have hc : ∀ c ∈ P.coeffs, w c ≤ P.wdeg w 1 := by
+    intro c hmem
+    obtain ⟨k, hk⟩ := List.getElem?_of_mem hmem
+    have hget : coeffAt P.coeffs k = c := by simp [coeffAt_eq_getD, List.getD, hk]
+    if h0 : c = zero then rw [h0, hw.zero]; exact Nat.zero_le _
+    else
+      have hne : coeffAt P.coeffs k ≠ zero := by rwa [hget]
+      have hdeg := le_wdeg w 1 P k hne
+      rw [hget] at hdeg
+      omega
+  have hlen : P.coeffs.length ≤ P.natDeg + 1 := by unfold natDeg; omega
+  exact Nat.le_trans (degFn_homEvalCoeffs_le hw hw1 a b _ B ha hb P.coeffs hc)
+    (Nat.add_le_add_left (Nat.mul_le_mul_right B hlen) _)
+
+/-- At a common root, the two derivative resultants are homogeneous coordinates for it. -/
+theorem sylResDeriv_X_common_root {m N : Nat} {C1 P0 : UPoly R} {z : R}
+    (hm : 1 ≤ m) (hN : 1 ≤ N) (hC : C1.natDeg ≤ m) (hP : P0.natDeg ≤ N)
+    (hCz : C1.eval z = zero) (hPz : P0.eval z = zero) :
+    sylResDeriv m N C1 P0 X = mul z (sylResDeriv m N C1 P0 one) := by
+  have hX : (X : UPoly R).natDeg ≤ N := by
+    apply Nat.le_trans (m := 1) ?_ hN
+    apply natDeg_le_of_coeffAt
+    intro k hk
+    cases k with
+    | zero => omega
+    | succ k => cases k with
+      | zero => omega
+      | succ k =>
+        show coeffAt (ofList [zero, one]).coeffs (k + 2) = zero
+        rw [coeffAt_ofList, coeffAt_cons_succ, coeffAt_cons_succ, coeffAt_nil]
+  have h := sylResDeriv_common_root hm hC hP hX hCz hPz
+  rwa [eval_X] at h
+
+/-- The homogeneous root coordinates commute with coefficient specialization. -/
+theorem sylResDeriv_X_mapped_common_root {S : Type} [LawfulCommRing S] [DecidableEq S]
+    (φ : RingHom R S) {m N : Nat} {C1 P0 : UPoly R} {z : S}
+    (hm : 1 ≤ m) (hN : 1 ≤ N) (hC : C1.natDeg ≤ m) (hP : P0.natDeg ≤ N)
+    (hCz : ((mapHom φ).toFun C1).eval z = zero)
+    (hPz : ((mapHom φ).toFun P0).eval z = zero) :
+    φ.toFun (sylResDeriv m N C1 P0 X) = mul z (φ.toFun (sylResDeriv m N C1 P0 one)) := by
+  rw [map_sylResDeriv, map_sylResDeriv, mapHom_X, RingHom.map_one]
+  exact sylResDeriv_X_common_root hm hN (Nat.le_trans (natDeg_mapHom_le φ C1) hC)
+    (Nat.le_trans (natDeg_mapHom_le φ P0) hP) hCz hPz
+
+/-- All polynomial constraints can be pulled back with an explicit polynomial denominator. -/
+theorem homEvalCoeffs_resultant_root {m N : Nat} {C1 P0 P : UPoly R} {z : R}
+    (hm : 1 ≤ m) (hN : 1 ≤ N) (hC : C1.natDeg ≤ m) (hP : P0.natDeg ≤ N)
+    (hCz : C1.eval z = zero) (hPz : P0.eval z = zero) :
+    homEvalCoeffs (sylResDeriv m N C1 P0 X) (sylResDeriv m N C1 P0 one) P.coeffs =
+      mul (CRing.npow (sylResDeriv m N C1 P0 one) P.coeffs.length) (P.eval z) := by
+  rw [sylResDeriv_X_common_root hm hN hC hP hCz hPz, homEvalCoeffs_mul, UPoly.eval_eq]
+
+/-- The derivative-zero locus is the only possible ambiguity in the projected root. -/
+theorem common_root_unique_of_sylResDeriv_ne_zero [NoZeroDivisors R]
+    {m N : Nat} {C1 P0 : UPoly R} {z z' : R}
+    (hm : 1 ≤ m) (hN : 1 ≤ N) (hC : C1.natDeg ≤ m) (hP : P0.natDeg ≤ N)
+    (hCz : C1.eval z = zero) (hPz : P0.eval z = zero)
+    (hCz' : C1.eval z' = zero) (hPz' : P0.eval z' = zero)
+    (hDeriv : sylResDeriv m N C1 P0 one ≠ zero) : z = z' :=
+  mul_right_cancel' hDeriv ((sylResDeriv_X_common_root hm hN hC hP hCz hPz).symm.trans
+    (sylResDeriv_X_common_root hm hN hC hP hCz' hPz'))
+
+end ModMonicRing
+end SylElim
+
+end Qsag
+
+end
+
+section
+namespace Qsag
+
+set_option autoImplicit false
+
+open CommRingOps RoundPoly
+
+namespace Poly2
+section Field
+variable {E : Type} [LawfulField E] [DecidableEq E]
+open UPoly
+
+local instance : NoZeroDivisors E := LawfulField.toNoZeroDivisors E
+
+theorem C_mul_eq {R : Type} [LawfulCommRing R] [DecidableEq R] (a b : R) :
+    mul (C a) (C b) = (C (mul a b) : UPoly R) :=
+  (UPoly.C_mul_eq a b).symm
+
+theorem C_zero_eq {R : Type} [LawfulCommRing R] [DecidableEq R] :
+    (C (zero : R) : UPoly R) = zero :=
+  UPoly.C_zero_eq
+
+/-! ## Total-degree additivity via homogenization `P(Y, Z) ↦ P(T, X·T)` -/
+
+abbrev c2 (P : Poly2 E) (i d : Nat) : E :=
+  coeffAt (coeffAt P.coeffs d).coeffs i
+
+theorem c2_zero (i d : Nat) : c2 (zero : Poly2 E) i d = zero := by
+  unfold c2
+  rw [coeffs_zero]
+  rw [coeffAt_nil, coeffs_zero, coeffAt_nil]
+
+theorem c2_add (A B : Poly2 E) (i d : Nat) :
+    c2 (add A B) i d = add (c2 A i d) (c2 B i d) := by
+  show coeffAt (coeffAt (add A B).coeffs d).coeffs i = _
+  rw [coeffAt_add, coeffAt_add]
+
+def innerHom : RingHom (UPoly E) (Poly2 E) :=
+  eval₂Hom (CHom.comp CHom) X
+
+private def homogHom : RingHom (Poly2 E) (Poly2 E) :=
+  eval₂Hom innerHom (mul (C X) X)
+
+theorem c2_X_mul_zero (H : Poly2 E) (i : Nat) : c2 (mul X H) i 0 = zero := by
+  show coeffAt (coeffAt (mul X H).coeffs 0).coeffs i = zero
+  rw [coeffAt_X_mul_zero, coeffs_zero, coeffAt_nil]
+
+theorem c2_X_mul_succ (H : Poly2 E) (i d : Nat) :
+    c2 (mul X H) i (d + 1) = c2 H i d := by
+  show coeffAt (coeffAt (mul X H).coeffs (d + 1)).coeffs i = _
+  rw [coeffAt_X_mul_succ]
+
+theorem c2_CX_mul_zero (H : Poly2 E) (d : Nat) : c2 (mul (C X) H) 0 d = zero := by
+  show coeffAt (coeffAt (mul (C X) H).coeffs d).coeffs 0 = zero
+  rw [coeffAt_C_mul, coeffAt_X_mul_zero]
+
+theorem c2_CX_mul_succ (H : Poly2 E) (j d : Nat) :
+    c2 (mul (C X) H) (j + 1) d = c2 H j d := by
+  show coeffAt (coeffAt (mul (C X) H).coeffs d).coeffs (j + 1) = _
+  rw [coeffAt_C_mul, coeffAt_X_mul_succ]
+
+theorem c2_innerHom_eval :
+    ∀ (cs : List E) (j d : Nat),
+      c2 (evalCoeffs (cs.map (CHom.comp (CHom (R := E))).toFun) X) j d =
+        if j = 0 then coeffAt cs d else zero
+  | [], j, d => by
+    show c2 (zero : Poly2 E) j d = _
+    rw [c2_zero]
+    split
+    · exact (coeffAt_nil d).symm
+    · rfl
+  | c :: tl, j, d => by
+    simp only [List.map_cons, RingHom.comp_apply, CHom_apply, evalCoeffs]
+    show c2 (add (C (C c)) (mul X (evalCoeffs _ X))) j d = _
+    rw [c2_add]
+    cases d with
+    | zero =>
+      rw [c2_X_mul_zero, LawfulCommRing.add_zero]
+      show coeffAt (coeffAt (C (C c)).coeffs 0).coeffs j = _
+      rw [coeffAt_C_zero]
+      cases j with
+      | zero => rw [coeffAt_C_zero, coeffAt_cons_zero]; rfl
+      | succ j => rw [coeffAt_C_succ]; rfl
+    | succ d =>
+      have hCC0 : c2 (C (C c) : Poly2 E) j (d + 1) = zero := by
+        show coeffAt (coeffAt (C (C c)).coeffs (d + 1)).coeffs j = zero
+        rw [coeffAt_C_succ, coeffs_zero, coeffAt_nil]
+      rw [hCC0, LawfulCommRing.zero_add, c2_X_mul_succ, c2_innerHom_eval tl j d]
+      cases j <;> simp only [coeffAt_cons_succ, Nat.succ_ne_zero, reduceIte]
+
+private theorem c2_homog_eval :
+    ∀ (qs : List (UPoly E)) (j d : Nat),
+      c2 (evalCoeffs (qs.map (innerHom (E := E)).toFun) (mul (C X) X)) j d =
+        if j ≤ d then coeffAt (coeffAt qs j).coeffs (d - j) else zero
+  | [], j, d => by
+    show c2 (zero : Poly2 E) j d = _
+    rw [c2_zero]
+    split
+    · rw [coeffAt_nil, coeffs_zero, coeffAt_nil]
+    · rfl
+  | q :: tl, j, d => by
+    show c2 (add (innerHom.toFun q) (mul (mul (C X) X) (evalCoeffs _ _))) j d = _
+    rw [c2_add, LawfulCommRing.mul_assoc]
+    have hq : c2 (innerHom.toFun q) j d = if j = 0 then coeffAt q.coeffs d else zero :=
+      by simpa only [innerHom, eval₂Hom_apply, eval₂] using c2_innerHom_eval (E := E) q.coeffs j d
+    rw [hq]
+    cases j with
+    | zero =>
+      rw [c2_CX_mul_zero, LawfulCommRing.add_zero]
+      simp only [coeffAt_cons_zero, Nat.zero_le, Nat.sub_zero, reduceIte]
+    | succ j =>
+      rw [c2_CX_mul_succ]
+      cases d with
+      | zero =>
+        rw [c2_X_mul_zero]
+        simp [LawfulCommRing.add_zero]
+      | succ d =>
+        rw [c2_X_mul_succ, c2_homog_eval tl j d]
+        simp only [Nat.succ_ne_zero, ↓reduceIte, LawfulCommRing.zero_add, Nat.succ_le_succ_iff,
+          Nat.succ_sub_succ_eq_sub, coeffAt_cons_succ]
+
+private theorem c2_homogHom (P : Poly2 E) (j d : Nat) :
+    c2 (homogHom.toFun P) j d = if j ≤ d then c2 P (d - j) j else zero :=
+  by simpa only [homogHom, eval₂Hom_apply, eval₂, c2] using c2_homog_eval (E := E) P.coeffs j d
+
+private theorem homogHom_ne_zero {P : Poly2 E} (hP : P ≠ zero) : homogHom.toFun P ≠ zero := by
+  intro h0
+  apply hP
+  apply ext_coeffAt; intro j
+  rw [coeffs_zero, coeffAt_nil]
+  apply ext_coeffAt; intro i
+  rw [coeffs_zero, coeffAt_nil]
+  have h := c2_homogHom P j (i + j)
+  rw [h0, c2_zero] at h
+  have hle : j ≤ i + j := Nat.le_add_left j i
+  simp only [hle, ↓reduceIte, show i + j - j = i by omega] at h
+  exact h.symm
+
+private theorem natDeg_homogHom (P : Poly2 E) : (homogHom.toFun P).natDeg = tdeg P := by
+  apply Nat.le_antisymm
+  · refine natDeg_le_of_coeffAt _ (tdeg P) (fun d hd => ext_coeffAt fun j => ?_)
+    rw [coeffs_zero, coeffAt_nil]
+    have h := c2_homogHom P j d
+    show c2 (homogHom.toFun P) j d = zero
+    rw [h]
+    split
+    · next hjd =>
+      if hcj : coeffAt P.coeffs j = zero then
+        show coeffAt (coeffAt P.coeffs j).coeffs (d - j) = zero
+        rw [hcj, coeffs_zero, coeffAt_nil]
+      else
+        have hw : (coeffAt P.coeffs j).natDeg + 1 * j ≤ tdeg P := le_wdeg UPoly.natDeg 1 P j hcj
+        exact (coeffAt P.coeffs j).coeffAt_eq_zero_of_natDeg_lt (by omega)
+    · rfl
+  · if hP : P = zero then
+      rw [hP, RingHom.map_zero]
+      have ht0 : tdeg (zero : Poly2 E) = 0 :=
+        Nat.le_zero.mp (wdeg_le _ _ _ 0 (fun _ hk => absurd (by rw [coeffs_zero, coeffAt_nil]) hk))
+      rw [ht0]; exact Nat.zero_le _
+    else
+      apply Decidable.byContradiction
+      intro hlt
+      have hlt' : (homogHom.toFun P).natDeg < tdeg P := Nat.lt_of_not_le hlt
+      apply Nat.lt_irrefl (tdeg P)
+      refine Nat.lt_of_le_of_lt (wdeg_le UPoly.natDeg 1 P ((homogHom.toFun P).natDeg) ?_) hlt'
+      intro j hcj
+      have hlead := lead_ne_zero hcj
+      let i := (coeffAt P.coeffs j).natDeg
+      show i + 1 * j ≤ (homogHom.toFun P).natDeg
+      apply Decidable.byContradiction
+      intro hij
+      have hdgt : (homogHom.toFun P).natDeg < i + j := by omega
+      have hz : coeffAt (homogHom.toFun P).coeffs (i + j) = zero :=
+        (homogHom.toFun P).coeffAt_eq_zero_of_natDeg_lt hdgt
+      have hz2 : c2 (homogHom.toFun P) j (i + j) = zero := by
+        show coeffAt (coeffAt (homogHom.toFun P).coeffs (i + j)).coeffs j = zero
+        rw [hz, coeffs_zero, coeffAt_nil]
+      have hle : j ≤ i + j := Nat.le_add_left j i
+      rw [c2_homogHom] at hz2
+      simp only [hle, ↓reduceIte, show i + j - j = i by omega] at hz2
+      exact hlead (by simpa only [lead_eq, c2, i] using hz2)
+
+/-- **Total-degree additivity (`tdeg_mul`)**: over a field, `tdeg (mul A B) = tdeg A + tdeg B`
+    for nonzero bivariate polynomials `A, B`. -/
+theorem tdeg_mul {A B : Poly2 E} (hA : A ≠ zero) (hB : B ≠ zero) :
+    tdeg (mul A B) = tdeg A + tdeg B := by
+  rw [← natDeg_homogHom (mul A B), RingHom.map_mul,
+    UPoly.natDeg_mul (homogHom_ne_zero hA) (homogHom_ne_zero hB),
+    natDeg_homogHom A, natDeg_homogHom B]
+
+theorem tdeg_C (c : UPoly E) : tdeg (C c : Poly2 E) = c.natDeg := by
+  if hc : c = zero then
+    subst hc
+    rw [C_zero_eq]
+    have hc0 : (zero : UPoly E).natDeg = 0 := UPoly.natDeg_zero
+    rw [hc0]
+    exact Nat.le_zero.mp (wdeg_le _ _ _ 0 (fun _ hk => absurd (by rw [coeffs_zero, coeffAt_nil]) hk))
+  else
+    apply Nat.le_antisymm
+    · refine wdeg_le UPoly.natDeg 1 (C c) c.natDeg (fun k hk => ?_)
+      cases k with
+      | zero => rw [coeffAt_C_zero]; omega
+      | succ k => exact absurd (coeffAt_C_succ c k) hk
+    · have h0 : coeffAt (C c : Poly2 E).coeffs 0 ≠ zero := by rw [coeffAt_C_zero]; exact hc
+      have hw : (coeffAt (C c : Poly2 E).coeffs 0).natDeg + 1 * 0 ≤ tdeg (C c) :=
+        le_wdeg UPoly.natDeg 1 (C c) 0 h0
+      rw [coeffAt_C_zero] at hw; omega
+
