@@ -3729,7 +3729,12 @@ theorem poseidon2_symbolic_round_degree_bound (x : Nat → Fin 4 → PoseidonExp
     simpa only [Nat.pow_succ, Nat.mul_comm] using h
 
 
-/-! ## 8. Width-12 `M_E` & `M_I` Differential/Linear Branch Numbers & `2026/306` Subspace Analysis -/
+/-! ## 8. Width-12 `M_E` & `M_I` Differential/Linear Branch Numbers & `2026/306` Subspace Analysis
+
+The deployed external layer is `applyME = T₃₄ ∘ applyMEStd ∘ T₄₃` (`M_4 ⊗ P_3`), the lane-transposition
+conjugate of the block-circulant factor `applyMEStd = P_3 ⊗ M_4 = circ(2 M_4, M_4, M_4)`. Block-structured
+bounds are proved for `applyMEStd` (names `…me12std…`) and transferred to `applyME` through the weight-
+preserving transpositions. The internal layer `applyMI` is `1·1ᵀ + diag(-64, 1, 2, 4, …, 1024)`. -/
 
 /-- Exact 12-lane Hamming weight (count of nonzero `Goldilocks` elements) on `Poseidon2State12`. -/
 def stateWeight12 (s : Poseidon2State12) : Nat :=
@@ -3748,9 +3753,9 @@ def lane4Rev (a : Lane4) : Lane4 := ⟨a.x0, a.x3, a.x2, a.x1⟩
 def state12Rev4 (s : Poseidon2State12) : Poseidon2State12 :=
   ⟨lane4Rev s.b0, lane4Rev s.b1, lane4Rev s.b2⟩
 
-/-- Exact transpose of `applyME` with respect to the standard 12-lane dot product. -/
-def applyMETranspose (s : Poseidon2State12) : Poseidon2State12 :=
-  state12Rev4 (applyME (state12Rev4 s))
+/-- Exact transpose of `applyMEStd` with respect to the standard 12-lane dot product. -/
+def applyMEStdTranspose (s : Poseidon2State12) : Poseidon2State12 :=
+  state12Rev4 (applyMEStd (state12Rev4 s))
 
 def lane4Dot (a b : Lane4) : Goldilocks :=
   Goldilocks.add
@@ -3891,24 +3896,24 @@ private theorem lane4Add_sum3_swap01 (a b c : Lane4) :
   apply Lane4.ext <;> gold_cring
 
 private theorem applyME_rot12 (s : Poseidon2State12) :
-    applyME (rot12 s) = rot12 (applyME s) := by
-  unfold applyME rot12
+    applyMEStd (rot12 s) = rot12 (applyMEStd s) := by
+  unfold applyMEStd rot12
   dsimp only
   rw [lane4Add_sum3_rot]
 
 private theorem applyME_swap01 (s : Poseidon2State12) :
-    applyME (swap01 s) = swap01 (applyME s) := by
-  unfold applyME swap01
+    applyMEStd (swap01 s) = swap01 (applyMEStd s) := by
+  unfold applyMEStd swap01
   dsimp only
   rw [lane4Add_sum3_swap01]
 
 private theorem applyME_single_b0 (b : Lane4) (hb : b ≠ lane4Zero) :
     7 ≤ stateWeight12 ⟨b, lane4Zero, lane4Zero⟩ +
-      stateWeight12 (applyME ⟨b, lane4Zero, lane4Zero⟩) := by
+      stateWeight12 (applyMEStd ⟨b, lane4Zero, lane4Zero⟩) := by
   have hzM4 : applyM4 lane4Zero = lane4Zero := by decide +kernel
-  have hOut : applyME ⟨b, lane4Zero, lane4Zero⟩ =
+  have hOut : applyMEStd ⟨b, lane4Zero, lane4Zero⟩ =
       ⟨lane4Scale (Goldilocks.ofNat 2) (applyM4 b), applyM4 b, applyM4 b⟩ := by
-    unfold applyME
+    unfold applyMEStd
     dsimp only
     rw [hzM4]
     unfold lane4Add lane4Scale lane4Zero
@@ -3922,14 +3927,14 @@ private theorem applyME_single_b0 (b : Lane4) (hb : b ≠ lane4Zero) :
   have hy := laneWeight4_pos_of_ne_zero (applyM4_ne_zero_of_ne_zero hb)
   omega
 
-/-- **Single-Active-Block Width-12 `M_E` Branch Bound (`poseidon2_me12_single_block_branch_ge_seven`)**:
+/-- **Single-Active-Block Width-12 `M_E` Branch Bound (`poseidon2_me12std_single_block_branch_ge_seven`)**:
     Across any nonzero state supported in a single 4-lane block (`activeBlocks12 x = 1`),
-    `stateWeight12 x + stateWeight12 (applyME x) ≥ 7` (hence strictly above `5`). -/
-theorem poseidon2_me12_single_block_branch_ge_seven (x : Poseidon2State12)
+    `stateWeight12 x + stateWeight12 (applyMEStd x) ≥ 7` (hence strictly above `5`). -/
+theorem poseidon2_me12std_single_block_branch_ge_seven (x : Poseidon2State12)
     (h1 : activeBlocks12 x = 1) :
-    7 ≤ stateWeight12 x + stateWeight12 (applyME x) ∧
-    5 ≤ stateWeight12 x + stateWeight12 (applyME x) := by
-  have h7 : 7 ≤ stateWeight12 x + stateWeight12 (applyME x) := by
+    7 ≤ stateWeight12 x + stateWeight12 (applyMEStd x) ∧
+    5 ≤ stateWeight12 x + stateWeight12 (applyMEStd x) := by
+  have h7 : 7 ≤ stateWeight12 x + stateWeight12 (applyMEStd x) := by
     unfold activeBlocks12 at h1
     by_cases hb0 : x.b0 = lane4Zero <;>
       by_cases hb1 : x.b1 = lane4Zero <;>
@@ -3957,7 +3962,7 @@ theorem poseidon2_me12_single_block_branch_ge_seven (x : Poseidon2State12)
   exact ⟨h7, by omega⟩
 
 private theorem applyMEInv_single_b0 (z : Lane4) (hz : z ≠ lane4Zero) :
-    7 ≤ stateWeight12 (applyMEInv ⟨z, lane4Zero, lane4Zero⟩) +
+    7 ≤ stateWeight12 (applyMEStdInv ⟨z, lane4Zero, lane4Zero⟩) +
       stateWeight12 ⟨z, lane4Zero, lane4Zero⟩ := by
   let cinv4 : Goldilocks := Goldilocks.ofNat 13835058052060938241
   let c3 : Goldilocks := Goldilocks.mul (Goldilocks.ofNat 3) cinv4
@@ -3969,14 +3974,14 @@ private theorem applyMEInv_single_b0 (z : Lane4) (hz : z ≠ lane4Zero) :
     fun c v => by
       unfold applyM4 lane4Scale lane4Sum
       apply Lane4.ext <;> gold_cring
-  have hInvShape : applyMEInv ⟨z, lane4Zero, lane4Zero⟩ =
+  have hInvShape : applyMEStdInv ⟨z, lane4Zero, lane4Zero⟩ =
       ⟨lane4Scale c3 (applyM4Inv z), lane4Scale cn1 (applyM4Inv z), lane4Scale cn1 (applyM4Inv z)⟩ := by
-    suffices hFwd : applyME ⟨lane4Scale c3 (applyM4Inv z),
+    suffices hFwd : applyMEStd ⟨lane4Scale c3 (applyM4Inv z),
         lane4Scale cn1 (applyM4Inv z), lane4Scale cn1 (applyM4Inv z)⟩ = ⟨z, lane4Zero, lane4Zero⟩ by
-      have h := congrArg applyMEInv hFwd
-      rw [applyMEInv_applyME] at h
+      have h := congrArg applyMEStdInv hFwd
+      rw [applyMEStdInv_applyMEStd] at h
       exact h.symm
-    unfold applyME
+    unfold applyMEStd
     dsimp only
     rw [hLinM4, hLinM4, applyM4_applyM4Inv]
     unfold c3 cn1 lane4Add lane4Scale lane4Zero
@@ -4015,10 +4020,10 @@ private theorem applyMEInv_single_b0 (z : Lane4) (hz : z ≠ lane4Zero) :
   omega
 
 private theorem applyME_single_out_branch_ge_seven (x : Poseidon2State12)
-    (h1 : activeBlocks12 (applyME x) = 1) :
-    7 ≤ stateWeight12 x + stateWeight12 (applyME x) := by
-  let y := applyME x
-  have hyEq : x = applyMEInv y := (applyMEInv_applyME x).symm
+    (h1 : activeBlocks12 (applyMEStd x) = 1) :
+    7 ≤ stateWeight12 x + stateWeight12 (applyMEStd x) := by
+  let y := applyMEStd x
+  have hyEq : x = applyMEStdInv y := (applyMEStdInv_applyMEStd x).symm
   unfold activeBlocks12 at h1
   change (if y.b0 = lane4Zero then 0 else 1) +
       (if y.b1 = lane4Zero then 0 else 1) +
@@ -4029,22 +4034,22 @@ private theorem applyME_single_out_branch_ge_seven (x : Poseidon2State12)
   · simp [hy0, hy1, hy2] at h1
   · have hRot : rot12 (rot12 y) = ⟨y.b2, lane4Zero, lane4Zero⟩ :=
       Poseidon2State12.ext rfl hy0 hy1
-    have hInvRot : applyMEInv ⟨y.b2, lane4Zero, lane4Zero⟩ = rot12 (rot12 x) := by
-      suffices hFwd : applyME (applyMEInv ⟨y.b2, lane4Zero, lane4Zero⟩) = applyME (rot12 (rot12 x)) by
-        have h := congrArg applyMEInv hFwd
-        rwa [applyMEInv_applyME, applyMEInv_applyME] at h
-      rw [applyME_applyMEInv, applyME_rot12, applyME_rot12, ← hRot]
+    have hInvRot : applyMEStdInv ⟨y.b2, lane4Zero, lane4Zero⟩ = rot12 (rot12 x) := by
+      suffices hFwd : applyMEStd (applyMEStdInv ⟨y.b2, lane4Zero, lane4Zero⟩) = applyMEStd (rot12 (rot12 x)) by
+        have h := congrArg applyMEStdInv hFwd
+        rwa [applyMEStdInv_applyMEStd, applyMEStdInv_applyMEStd] at h
+      rw [applyMEStd_applyMEStdInv, applyME_rot12, applyME_rot12, ← hRot]
     have hm := applyMEInv_single_b0 y.b2 hy2
     rw [hInvRot, ← hRot, stateWeight12_rot12, stateWeight12_rot12,
         stateWeight12_rot12, stateWeight12_rot12] at hm
     exact hm
   · have hRot : rot12 y = ⟨y.b1, lane4Zero, lane4Zero⟩ :=
       Poseidon2State12.ext rfl hy2 hy0
-    have hInvRot : applyMEInv ⟨y.b1, lane4Zero, lane4Zero⟩ = rot12 x := by
-      suffices hFwd : applyME (applyMEInv ⟨y.b1, lane4Zero, lane4Zero⟩) = applyME (rot12 x) by
-        have h := congrArg applyMEInv hFwd
-        rwa [applyMEInv_applyME, applyMEInv_applyME] at h
-      rw [applyME_applyMEInv, applyME_rot12, ← hRot]
+    have hInvRot : applyMEStdInv ⟨y.b1, lane4Zero, lane4Zero⟩ = rot12 x := by
+      suffices hFwd : applyMEStd (applyMEStdInv ⟨y.b1, lane4Zero, lane4Zero⟩) = applyMEStd (rot12 x) by
+        have h := congrArg applyMEStdInv hFwd
+        rwa [applyMEStdInv_applyMEStd, applyMEStdInv_applyMEStd] at h
+      rw [applyMEStd_applyMEStdInv, applyME_rot12, ← hRot]
     have hm := applyMEInv_single_b0 y.b1 hy1
     rw [hInvRot, ← hRot, stateWeight12_rot12, stateWeight12_rot12] at hm
     exact hm
@@ -4059,52 +4064,52 @@ private theorem applyME_single_out_branch_ge_seven (x : Poseidon2State12)
   · simp [hy0, hy1, hy2] at h1
 
 private theorem applyME_block_diffs (x : Poseidon2State12) :
-    lane4Sub (applyME x).b0 (applyME x).b1 = applyM4 (lane4Sub x.b0 x.b1) ∧
-    lane4Sub (applyME x).b1 (applyME x).b2 = applyM4 (lane4Sub x.b1 x.b2) ∧
-    lane4Sub (applyME x).b2 (applyME x).b0 = applyM4 (lane4Sub x.b2 x.b0) := by
+    lane4Sub (applyMEStd x).b0 (applyMEStd x).b1 = applyM4 (lane4Sub x.b0 x.b1) ∧
+    lane4Sub (applyMEStd x).b1 (applyMEStd x).b2 = applyM4 (lane4Sub x.b1 x.b2) ∧
+    lane4Sub (applyMEStd x).b2 (applyMEStd x).b0 = applyM4 (lane4Sub x.b2 x.b0) := by
   refine ⟨?_, ?_, ?_⟩
-  · unfold applyME applyM4 lane4Add lane4Sub lane4Sum
+  · unfold applyMEStd applyM4 lane4Add lane4Sub lane4Sum
     apply Lane4.ext <;> gold_cring
-  · unfold applyME applyM4 lane4Add lane4Sub lane4Sum
+  · unfold applyMEStd applyM4 lane4Add lane4Sub lane4Sum
     apply Lane4.ext <;> gold_cring
-  · unfold applyME applyM4 lane4Add lane4Sub lane4Sum
+  · unfold applyMEStd applyM4 lane4Add lane4Sub lane4Sum
     apply Lane4.ext <;> gold_cring
 
 private theorem applyME_multiblock_b1_eq_b2 (x : Poseidon2State12)
     (hEq12 : x.b1 = x.b2)
     (hIn : 2 ≤ activeBlocks12 x)
-    (hOut : 2 ≤ activeBlocks12 (applyME x)) :
-    8 ≤ stateWeight12 x + stateWeight12 (applyME x) := by
+    (hOut : 2 ≤ activeBlocks12 (applyMEStd x)) :
+    8 ≤ stateWeight12 x + stateWeight12 (applyMEStd x) := by
   have hb1nz : x.b1 ≠ lane4Zero := fun hz => by
     unfold activeBlocks12 at hIn
     rw [← hEq12, hz] at hIn
     by_cases hb0 : x.b0 = lane4Zero <;> simp [hb0] at hIn
-  have houtEq12 : (applyME x).b1 = (applyME x).b2 := by
-    unfold applyME; rw [hEq12]
-  have hout1nz : (applyME x).b1 ≠ lane4Zero := fun hz => by
+  have houtEq12 : (applyMEStd x).b1 = (applyMEStd x).b2 := by
+    unfold applyMEStd; rw [hEq12]
+  have hout1nz : (applyMEStd x).b1 ≠ lane4Zero := fun hz => by
     unfold activeBlocks12 at hOut
     rw [← houtEq12, hz] at hOut
-    by_cases hy0 : (applyME x).b0 = lane4Zero <;> simp [hy0] at hOut
+    by_cases hy0 : (applyMEStd x).b0 = lane4Zero <;> simp [hy0] at hOut
   have h2nz : Goldilocks.ofNat 2 ≠ Goldilocks.zero := by decide +kernel
   have h3nz : Goldilocks.ofNat 3 ≠ Goldilocks.zero := by decide +kernel
   have h4nz : Goldilocks.ofNat 4 ≠ Goldilocks.zero := by decide +kernel
-  have hout0Eq : (applyME x).b0 =
+  have hout0Eq : (applyMEStd x).b0 =
       lane4Scale (Goldilocks.ofNat 2) (applyM4 (lane4Add x.b0 x.b1)) := by
-    unfold applyME
+    unfold applyMEStd
     rw [hEq12]
     dsimp only
     unfold applyM4 lane4Add lane4Scale lane4Sum
     apply Lane4.ext <;> gold_cring
   have h4y1 : lane4Scale (Goldilocks.ofNat 4) (applyM4 x.b1) =
-      lane4Sub (lane4Scale (Goldilocks.ofNat 2) (applyME x).b1) (applyME x).b0 := by
-    unfold applyME
+      lane4Sub (lane4Scale (Goldilocks.ofNat 2) (applyMEStd x).b1) (applyMEStd x).b0 := by
+    unfold applyMEStd
     rw [hEq12]
     dsimp only
     unfold lane4Add lane4Sub lane4Scale
     apply Lane4.ext <;> gold_cring
   by_cases hb0 : x.b0 = lane4Zero
-  · have hout1Scale : (applyME x).b1 = lane4Scale (Goldilocks.ofNat 3) (applyM4 x.b1) := by
-      unfold applyME
+  · have hout1Scale : (applyMEStd x).b1 = lane4Scale (Goldilocks.ofNat 3) (applyM4 x.b1) := by
+      unfold applyMEStd
       rw [hb0, ← hEq12, show applyM4 lane4Zero = lane4Zero from by decide +kernel]
       unfold lane4Add lane4Scale lane4Zero
       apply Lane4.ext <;> gold_cring
@@ -4117,7 +4122,7 @@ private theorem applyME_multiblock_b1_eq_b2 (x : Poseidon2State12)
         show laneWeight4 lane4Zero = 0 from rfl]
     have hm := m4_mds_branch_lower x.b1 hb1nz
     omega
-  · by_cases hy0 : (applyME x).b0 = lane4Zero
+  · by_cases hy0 : (applyMEStd x).b0 = lane4Zero
     · have hSumZero : lane4Add x.b0 x.b1 = lane4Zero := by
         by_cases hs : lane4Add x.b0 x.b1 = lane4Zero
         · exact hs
@@ -4140,11 +4145,11 @@ private theorem applyME_multiblock_b1_eq_b2 (x : Poseidon2State12)
         apply Lane4.ext <;> gold_cring
       have hw0 : laneWeight4 x.b0 = laneWeight4 x.b1 := by
         rw [hb0Neg, laneWeight4_scale_ne_zero (by decide +kernel)]
-      have hwOut1 : laneWeight4 (applyM4 x.b1) = laneWeight4 (applyME x).b1 := by
+      have hwOut1 : laneWeight4 (applyM4 x.b1) = laneWeight4 (applyMEStd x).b1 := by
         have h := congrArg laneWeight4 h4y1
         rw [hy0, laneWeight4_scale_ne_zero h4nz] at h
-        have hSub0 : lane4Sub (lane4Scale (Goldilocks.ofNat 2) (applyME x).b1) lane4Zero =
-            lane4Scale (Goldilocks.ofNat 2) (applyME x).b1 := by
+        have hSub0 : lane4Sub (lane4Scale (Goldilocks.ofNat 2) (applyMEStd x).b1) lane4Zero =
+            lane4Scale (Goldilocks.ofNat 2) (applyMEStd x).b1 := by
           unfold lane4Sub lane4Zero
           apply Lane4.ext <;> exact LawfulCommRing.sub_zero _
         rw [hSub0, laneWeight4_scale_ne_zero h2nz] at h
@@ -4157,19 +4162,19 @@ private theorem applyME_multiblock_b1_eq_b2 (x : Poseidon2State12)
         rw [hz, show applyM4 lane4Zero = lane4Zero from by decide +kernel] at hout0Eq
         have : lane4Scale (Goldilocks.ofNat 2) lane4Zero = lane4Zero := by decide +kernel
         exact hy0 (hout0Eq.trans this)
-      have hmSum : 5 ≤ laneWeight4 x.b0 + laneWeight4 x.b1 + laneWeight4 (applyME x).b0 := by
+      have hmSum : 5 ≤ laneWeight4 x.b0 + laneWeight4 x.b1 + laneWeight4 (applyMEStd x).b0 := by
         have hm := m4_mds_branch_lower (lane4Add x.b0 x.b1) hSumNz
-        have hwOut0 : laneWeight4 (applyME x).b0 = laneWeight4 (applyM4 (lane4Add x.b0 x.b1)) := by
+        have hwOut0 : laneWeight4 (applyMEStd x).b0 = laneWeight4 (applyM4 (lane4Add x.b0 x.b1)) := by
           rw [hout0Eq, laneWeight4_scale_ne_zero h2nz]
         have hTri := laneWeight4_add_le x.b0 x.b1
         omega
-      have hmB1 : 5 ≤ laneWeight4 x.b1 + laneWeight4 (applyME x).b0 + laneWeight4 (applyME x).b1 := by
+      have hmB1 : 5 ≤ laneWeight4 x.b1 + laneWeight4 (applyMEStd x).b0 + laneWeight4 (applyMEStd x).b1 := by
         have hm := m4_mds_branch_lower x.b1 hb1nz
         have hwt4 : laneWeight4 (applyM4 x.b1) ≤
-            laneWeight4 (applyME x).b1 + laneWeight4 (applyME x).b0 := by
+            laneWeight4 (applyMEStd x).b1 + laneWeight4 (applyMEStd x).b0 := by
           have h := congrArg laneWeight4 h4y1
           rw [laneWeight4_scale_ne_zero h4nz] at h
-          have hTri := laneWeight4_sub_le (lane4Scale (Goldilocks.ofNat 2) (applyME x).b1) (applyME x).b0
+          have hTri := laneWeight4_sub_le (lane4Scale (Goldilocks.ofNat 2) (applyMEStd x).b1) (applyMEStd x).b0
           rw [laneWeight4_scale_ne_zero h2nz] at hTri
           omega
         omega
@@ -4180,17 +4185,17 @@ private theorem applyME_multiblock_b1_eq_b2 (x : Poseidon2State12)
       rw [← hEq12, ← houtEq12]
       omega
 
-/-- **Multi-Block Width-12 `M_E` Branch Bound (`poseidon2_me12_multiblock_branch_ge_eight`)**:
-    Whenever both input `x` and output `applyME x` activate at least two 4-lane blocks,
-    `8 ≤ stateWeight12 x + stateWeight12 (applyME x)`. -/
-theorem poseidon2_me12_multiblock_branch_ge_eight (x : Poseidon2State12)
-    (hIn : 2 ≤ activeBlocks12 x) (hOut : 2 ≤ activeBlocks12 (applyME x)) :
-    8 ≤ stateWeight12 x + stateWeight12 (applyME x) := by
+/-- **Multi-Block Width-12 `M_E` Branch Bound (`poseidon2_me12std_multiblock_branch_ge_eight`)**:
+    Whenever both input `x` and output `applyMEStd x` activate at least two 4-lane blocks,
+    `8 ≤ stateWeight12 x + stateWeight12 (applyMEStd x)`. -/
+theorem poseidon2_me12std_multiblock_branch_ge_eight (x : Poseidon2State12)
+    (hIn : 2 ≤ activeBlocks12 x) (hOut : 2 ≤ activeBlocks12 (applyMEStd x)) :
+    8 ≤ stateWeight12 x + stateWeight12 (applyMEStd x) := by
   by_cases h01 : x.b0 = x.b1
   · have hRotEq : (rot12 (rot12 x)).b1 = (rot12 (rot12 x)).b2 := h01
     have hIn' : 2 ≤ activeBlocks12 (rot12 (rot12 x)) := by
       rw [activeBlocks12_rot12, activeBlocks12_rot12]; exact hIn
-    have hOut' : 2 ≤ activeBlocks12 (applyME (rot12 (rot12 x))) := by
+    have hOut' : 2 ≤ activeBlocks12 (applyMEStd (rot12 (rot12 x))) := by
       rw [applyME_rot12, applyME_rot12, activeBlocks12_rot12, activeBlocks12_rot12]; exact hOut
     have hm := applyME_multiblock_b1_eq_b2 (rot12 (rot12 x)) hRotEq hIn' hOut'
     rw [stateWeight12_rot12, stateWeight12_rot12,
@@ -4202,7 +4207,7 @@ theorem poseidon2_me12_multiblock_branch_ge_eight (x : Poseidon2State12)
       · have hRotEq : (rot12 x).b1 = (rot12 x).b2 := h20
         have hIn' : 2 ≤ activeBlocks12 (rot12 x) := by
           rw [activeBlocks12_rot12]; exact hIn
-        have hOut' : 2 ≤ activeBlocks12 (applyME (rot12 x)) := by
+        have hOut' : 2 ≤ activeBlocks12 (applyMEStd (rot12 x)) := by
           rw [applyME_rot12, activeBlocks12_rot12]; exact hOut
         have hm := applyME_multiblock_b1_eq_b2 (rot12 x) hRotEq hIn' hOut'
         rw [stateWeight12_rot12, applyME_rot12, stateWeight12_rot12] at hm
@@ -4223,9 +4228,9 @@ theorem poseidon2_me12_multiblock_branch_ge_eight (x : Poseidon2State12)
         have t1 := laneWeight4_sub_le x.b0 x.b1
         have t2 := laneWeight4_sub_le x.b1 x.b2
         have t3 := laneWeight4_sub_le x.b2 x.b0
-        have u1 := laneWeight4_sub_le (applyME x).b0 (applyME x).b1
-        have u2 := laneWeight4_sub_le (applyME x).b1 (applyME x).b2
-        have u3 := laneWeight4_sub_le (applyME x).b2 (applyME x).b0
+        have u1 := laneWeight4_sub_le (applyMEStd x).b0 (applyMEStd x).b1
+        have u2 := laneWeight4_sub_le (applyMEStd x).b1 (applyMEStd x).b2
+        have u3 := laneWeight4_sub_le (applyMEStd x).b2 (applyMEStd x).b0
         unfold stateWeight12
         omega
 
@@ -4234,14 +4239,14 @@ def me12BranchSevenWitness : Poseidon2State12 :=
    ⟨goldilocksNegOne, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩,
    ⟨goldilocksNegOne, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩⟩
 
-/-- **Exact Universal Width-12 `M_E` Branch Number = 7 (`poseidon2_me12_branch_number_eq_seven`)**:
-    Every nonzero 12-lane state satisfies `7 ≤ stateWeight12 x + stateWeight12 (applyME x)`,
+/-- **Exact Universal Width-12 `M_E` Branch Number = 7 (`poseidon2_me12std_branch_number_eq_seven`)**:
+    Every nonzero 12-lane state satisfies `7 ≤ stateWeight12 x + stateWeight12 (applyMEStd x)`,
     and `me12BranchSevenWitness` attains `3 + 4 = 7`. -/
-theorem poseidon2_me12_branch_number_eq_seven :
+theorem poseidon2_me12std_branch_number_eq_seven :
     (∀ x : Poseidon2State12, x ≠ state12Zero →
-      7 ≤ stateWeight12 x + stateWeight12 (applyME x)) ∧
+      7 ≤ stateWeight12 x + stateWeight12 (applyMEStd x)) ∧
     me12BranchSevenWitness ≠ state12Zero ∧
-    stateWeight12 me12BranchSevenWitness + stateWeight12 (applyME me12BranchSevenWitness) = 7 := by
+    stateWeight12 me12BranchSevenWitness + stateWeight12 (applyMEStd me12BranchSevenWitness) = 7 := by
   refine ⟨?_, by decide +kernel, by decide +kernel⟩
   intro x hx
   have hInPos : 1 ≤ activeBlocks12 x := by
@@ -4251,39 +4256,39 @@ theorem poseidon2_me12_branch_number_eq_seven :
       by_cases h2 : x.b2 = lane4Zero
     · exact False.elim (hx (Poseidon2State12.ext h0 h1 h2))
     all_goals simp [h0, h1, h2]
-  have hyNz : applyME x ≠ state12Zero := fun hz => by
+  have hyNz : applyMEStd x ≠ state12Zero := fun hz => by
     apply hx
-    have hInv := congrArg applyMEInv hz
-    rw [applyMEInv_applyME] at hInv
+    have hInv := congrArg applyMEStdInv hz
+    rw [applyMEStdInv_applyMEStd] at hInv
     exact hInv.trans (by decide +kernel)
-  have hOutPos : 1 ≤ activeBlocks12 (applyME x) := by
+  have hOutPos : 1 ≤ activeBlocks12 (applyMEStd x) := by
     unfold activeBlocks12
-    by_cases h0 : (applyME x).b0 = lane4Zero <;>
-      by_cases h1 : (applyME x).b1 = lane4Zero <;>
-      by_cases h2 : (applyME x).b2 = lane4Zero
+    by_cases h0 : (applyMEStd x).b0 = lane4Zero <;>
+      by_cases h1 : (applyMEStd x).b1 = lane4Zero <;>
+      by_cases h2 : (applyMEStd x).b2 = lane4Zero
     · exact False.elim (hyNz (Poseidon2State12.ext h0 h1 h2))
     all_goals simp [h0, h1, h2]
   by_cases hIn1 : activeBlocks12 x = 1
-  · exact (poseidon2_me12_single_block_branch_ge_seven x hIn1).1
-  · by_cases hOut1 : activeBlocks12 (applyME x) = 1
+  · exact (poseidon2_me12std_single_block_branch_ge_seven x hIn1).1
+  · by_cases hOut1 : activeBlocks12 (applyMEStd x) = 1
     · exact applyME_single_out_branch_ge_seven x hOut1
     · have h2In : 2 ≤ activeBlocks12 x := by omega
-      have h2Out : 2 ≤ activeBlocks12 (applyME x) := by omega
-      have h8 := poseidon2_me12_multiblock_branch_ge_eight x h2In h2Out
+      have h2Out : 2 ≤ activeBlocks12 (applyMEStd x) := by omega
+      have h8 := poseidon2_me12std_multiblock_branch_ge_eight x h2In h2Out
       omega
 
-/-- Exact bilinear transpose laws for `applyME` and symmetric `applyMI` (`M_I^T = M_I`),
-    plus identical universal linear branch bound `≥ 7` for `applyMETranspose`. -/
-theorem poseidon2_me12_and_mi12_linear_transpose_laws (x y : Poseidon2State12) :
-    state12Dot (applyME x) y = state12Dot x (applyMETranspose y) ∧
+/-- Exact bilinear transpose laws for `applyMEStd` and symmetric `applyMI` (`M_I^T = M_I`),
+    plus identical universal linear branch bound `≥ 7` for `applyMEStdTranspose`. -/
+theorem poseidon2_me12std_and_mi12_linear_transpose_laws (x y : Poseidon2State12) :
+    state12Dot (applyMEStd x) y = state12Dot x (applyMEStdTranspose y) ∧
     state12Dot (applyMI x) y = state12Dot x (applyMI y) ∧
-    (y ≠ state12Zero → 7 ≤ stateWeight12 y + stateWeight12 (applyMETranspose y)) := by
+    (y ≠ state12Zero → 7 ≤ stateWeight12 y + stateWeight12 (applyMEStdTranspose y)) := by
   have hwRev4 : ∀ b : Lane4, laneWeight4 (lane4Rev b) = laneWeight4 b := fun b => by
     unfold laneWeight4 lane4Rev; dsimp only; omega
   have hwRev12 : ∀ s : Poseidon2State12, stateWeight12 (state12Rev4 s) = stateWeight12 s := fun s => by
     unfold stateWeight12 state12Rev4; dsimp only; rw [hwRev4, hwRev4, hwRev4]
   refine ⟨?_, ?_, ?_⟩
-  · unfold state12Dot applyMETranspose state12Rev4 lane4Rev applyME applyM4 lane4Add lane4Sum lane4Dot
+  · unfold state12Dot applyMEStdTranspose state12Rev4 lane4Rev applyMEStd applyM4 lane4Add lane4Sum lane4Dot
     gold_cring
   · unfold state12Dot applyMI state12Sum lane4Sum lane4Dot
     gold_cring
@@ -4293,10 +4298,62 @@ theorem poseidon2_me12_and_mi12_linear_transpose_laws (x y : Poseidon2State12) :
       have hInv : state12Rev4 (state12Rev4 y) = y := by
         rcases y with ⟨⟨_, _, _, _⟩, ⟨_, _, _, _⟩, ⟨_, _, _, _⟩⟩; rfl
       rw [← hInv, hz]; rfl
-    have hm := poseidon2_me12_branch_number_eq_seven.1 (state12Rev4 y) hRevNz
-    unfold applyMETranspose
+    have hm := poseidon2_me12std_branch_number_eq_seven.1 (state12Rev4 y) hRevNz
+    unfold applyMEStdTranspose
     rw [hwRev12]
     rw [hwRev12] at hm
+    exact hm
+
+private theorem stateWeight12_transpose4x3 (s : Poseidon2State12) :
+    stateWeight12 (poseidon2Transpose4x3 s) = stateWeight12 s := by
+  unfold stateWeight12 poseidon2Transpose4x3 laneWeight4; dsimp only; omega
+
+private theorem stateWeight12_transpose3x4 (s : Poseidon2State12) :
+    stateWeight12 (poseidon2Transpose3x4 s) = stateWeight12 s := by
+  unfold stateWeight12 poseidon2Transpose3x4 laneWeight4; dsimp only; omega
+
+/-- **Exact universal branch number `7` of the deployed `M_E = M_4 ⊗ P_3`
+    (`poseidon2_me12_branch_number_eq_seven`)**: `applyME` is the lane transposition conjugate of
+    `applyMEStd`, and lane transpositions preserve Hamming weight, so every nonzero 12-lane state
+    satisfies `7 ≤ stateWeight12 x + stateWeight12 (applyME x)`; the transposed witness attains `7`. -/
+theorem poseidon2_me12_branch_number_eq_seven :
+    (∀ x : Poseidon2State12, x ≠ state12Zero →
+      7 ≤ stateWeight12 x + stateWeight12 (applyME x)) ∧
+    poseidon2Transpose3x4 me12BranchSevenWitness ≠ state12Zero ∧
+    stateWeight12 (poseidon2Transpose3x4 me12BranchSevenWitness) +
+      stateWeight12 (applyME (poseidon2Transpose3x4 me12BranchSevenWitness)) = 7 := by
+  refine ⟨?_, by decide +kernel, by decide +kernel⟩
+  intro x hx
+  have hNz : poseidon2Transpose4x3 x ≠ state12Zero := fun hz => by
+    apply hx; rw [← poseidon2Transpose34_43 x, hz]; rfl
+  have hm := poseidon2_me12std_branch_number_eq_seven.1 (poseidon2Transpose4x3 x) hNz
+  unfold applyME
+  rw [stateWeight12_transpose3x4]
+  rw [stateWeight12_transpose4x3] at hm
+  exact hm
+
+/-- Exact transpose of the deployed `applyME` with respect to the standard 12-lane dot product:
+    the lane transpositions are permutation matrices, so `(T₃₄ · M · T₄₃)ᵀ = T₃₄ · Mᵀ · T₄₃`. -/
+def applyMETranspose (s : Poseidon2State12) : Poseidon2State12 :=
+  poseidon2Transpose3x4 (applyMEStdTranspose (poseidon2Transpose4x3 s))
+
+/-- Bilinear transpose law for the deployed `applyME` and the universal linear branch bound `≥ 7`
+    for `applyMETranspose`. -/
+theorem poseidon2_me12_linear_transpose_laws (x y : Poseidon2State12) :
+    state12Dot (applyME x) y = state12Dot x (applyMETranspose y) ∧
+    (y ≠ state12Zero → 7 ≤ stateWeight12 y + stateWeight12 (applyMETranspose y)) := by
+  refine ⟨?_, ?_⟩
+  · unfold state12Dot applyMETranspose applyMEStdTranspose state12Rev4 lane4Rev applyME
+      poseidon2Transpose3x4 poseidon2Transpose4x3 applyMEStd applyM4 lane4Add lane4Sum lane4Dot
+    gold_cring
+  · intro hy
+    have hNz : poseidon2Transpose4x3 y ≠ state12Zero := fun hz => by
+      apply hy; rw [← poseidon2Transpose34_43 y, hz]; rfl
+    have hm := (poseidon2_me12std_and_mi12_linear_transpose_laws state12Zero
+      (poseidon2Transpose4x3 y)).2.2 hNz
+    unfold applyMETranspose
+    rw [stateWeight12_transpose3x4]
+    rw [stateWeight12_transpose4x3] at hm
     exact hm
 
 private theorem mi_lane_wt_ge_one (v : Int) (x s : Goldilocks) (hs : s ≠ Goldilocks.zero) :
@@ -4376,12 +4433,12 @@ private theorem mi_lane1_scaled_of_wt_le_one (x s : Goldilocks)
   exact h1
 
 private theorem mi_u0_bounds (x : Goldilocks) :
-    0 ≤ (if x = Goldilocks.zero then (0 : Int) else -(-512)) ∧
-    (if x = Goldilocks.zero then (0 : Int) else -(-512)) ≤ 512 := by
+    0 ≤ (if x = Goldilocks.zero then (0 : Int) else -(-16)) ∧
+    (if x = Goldilocks.zero then (0 : Int) else -(-16)) ≤ 16 := by
   if hx : x = Goldilocks.zero then
     simp only [hx, ↓reduceIte]; exact ⟨Int.le_refl 0, by decide +kernel⟩
   else
-    simp only [hx, ↓reduceIte]; exact ⟨by decide +kernel, Int.le_refl 512⟩
+    simp only [hx, ↓reduceIte]; exact ⟨by decide +kernel, Int.le_refl 16⟩
 
 private theorem sum12_pairs_le_one
     (a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11
@@ -4400,7 +4457,7 @@ private theorem sum12_pairs_le_one
 
 private theorem mi_u_bounds
     (u0 u1 u2 u3 u4 u5 u6 u7 u8 u9 u10 u11 : Int)
-    (b0 : 0 ≤ u0 ∧ u0 ≤ 512)
+    (b0 : 0 ≤ u0 ∧ u0 ≤ 16)
     (b1 : -1024 ≤ u1 ∧ u1 ≤ 0) (b2 : -512 ≤ u2 ∧ u2 ≤ 0) (b3 : -256 ≤ u3 ∧ u3 ≤ 0)
     (b4 : -128 ≤ u4 ∧ u4 ≤ 0) (b5 : -64 ≤ u5 ∧ u5 ≤ 0) (b6 : -32 ≤ u6 ∧ u6 ≤ 0)
     (b7 : -16 ≤ u7 ∧ u7 ≤ 0) (b8 : -8 ≤ u8 ∧ u8 ≤ 0) (b9 : -4 ≤ u9 ∧ u9 ≤ 0)
@@ -4420,7 +4477,7 @@ private theorem ite_nonpos_bounds (p : Prop) [hDec : Decidable p] (k : Int) (hk 
 
 /-- **Exact Nonzero-Sum `M_I` Branch Number = 13 (`poseidon2_mi12_nonzero_sum_branch_eq_thirteen`)**:
     1. Whenever `state12Sum x ≠ 0`, `13 ≤ stateWeight12 x + stateWeight12 (applyMI x)`
-       (proven via `v_0 = -2, v_1..v_11 = 2^(i-1)` forcing `512 ≤ 1024 - Σ_{i ∈ S} (-1024 / v_i) ≤ 3071 < p`).
+       (proven via `v_0 = -64, v_1..v_11 = 2^(i-1)` forcing `1008 ≤ 1024 - Σ_{i ∈ S} (-1024 / v_i) ≤ 3071 < p`).
     2. Every single-lane partial-round difference `⟨⟨Δ, 0, 0, 0⟩, 0, 0⟩` with `Δ ≠ 0` achieves
        full 12-lane diffusion `stateWeight12 (applyMI x) = 12` and attains `1 + 12 = 13`.
     3. Across ALL nonzero `x ≠ state12Zero` (including zero-sum states), `4 ≤ stateWeight12 x + stateWeight12 (applyMI x)`. -/
@@ -4443,7 +4500,7 @@ theorem poseidon2_mi12_nonzero_sum_branch_eq_thirteen :
       let s := state12Sum x
       have hMIEq : ∀ (st : Poseidon2State12) (sm : Goldilocks), state12Sum st = sm →
           stateWeight12 (applyMI st) =
-            ((if Goldilocks.add (Goldilocks.mul (goldOfInt (-2)) st.b0.x0) sm = Goldilocks.zero then 0 else 1) +
+            ((if Goldilocks.add (Goldilocks.mul (goldOfInt (-64)) st.b0.x0) sm = Goldilocks.zero then 0 else 1) +
              (if Goldilocks.add st.b0.x1 sm = Goldilocks.zero then 0 else 1) +
              (if Goldilocks.add (Goldilocks.mul (goldOfInt 2) st.b0.x2) sm = Goldilocks.zero then 0 else 1) +
              (if Goldilocks.add (Goldilocks.mul (goldOfInt 4) st.b0.x3) sm = Goldilocks.zero then 0 else 1)) +
@@ -4459,7 +4516,7 @@ theorem poseidon2_mi12_nonzero_sum_branch_eq_thirteen :
       have hLe12 : stateWeight12 x + stateWeight12 (applyMI x) ≤ 12 := by omega
       rw [hMIEq x s rfl] at hLe12
       unfold stateWeight12 laneWeight4 at hLe12
-      have g0 := mi_lane_wt_ge_one (-2) x.b0.x0 s hs
+      have g0 := mi_lane_wt_ge_one (-64) x.b0.x0 s hs
       have g1 := mi_lane1_wt_ge_one x.b0.x1 s hs
       have g2 := mi_lane_wt_ge_one 2 x.b0.x2 s hs
       have g3 := mi_lane_wt_ge_one 4 x.b0.x3 s hs
@@ -4473,7 +4530,7 @@ theorem poseidon2_mi12_nonzero_sum_branch_eq_thirteen :
       have g11 := mi_lane_wt_ge_one 1024 x.b2.x3 s hs
       have hPairs := sum12_pairs_le_one _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
         hLe12 g0 g1 g2 g3 g4 g5 g6 g7 g8 g9 g10 g11
-      have e0 := mi_lane_scaled_of_wt_le_one (-2) (-512) rfl x.b0.x0 s hPairs.1.1
+      have e0 := mi_lane_scaled_of_wt_le_one (-64) (-16) rfl x.b0.x0 s hPairs.1.1
       have e1 := mi_lane1_scaled_of_wt_le_one x.b0.x1 s hPairs.1.2.1
       have e2 := mi_lane_scaled_of_wt_le_one 2 512 rfl x.b0.x2 s hPairs.1.2.2.1
       have e3 := mi_lane_scaled_of_wt_le_one 4 256 rfl x.b0.x3 s hPairs.1.2.2.2
@@ -4485,7 +4542,7 @@ theorem poseidon2_mi12_nonzero_sum_branch_eq_thirteen :
       have e9 := mi_lane_scaled_of_wt_le_one 256 4 rfl x.b2.x1 s hPairs.2.2.2.1
       have e10 := mi_lane_scaled_of_wt_le_one 512 2 rfl x.b2.x2 s hPairs.2.2.2.2.1
       have e11 := mi_lane_scaled_of_wt_le_one 1024 1 rfl x.b2.x3 s hPairs.2.2.2.2.2
-      let u0 : Int := if x.b0.x0 = Goldilocks.zero then 0 else -(-512)
+      let u0 : Int := if x.b0.x0 = Goldilocks.zero then 0 else -(-16)
       let u1 : Int := if x.b0.x1 = Goldilocks.zero then 0 else -1024
       let u2 : Int := if x.b0.x2 = Goldilocks.zero then 0 else -512
       let u3 : Int := if x.b0.x3 = Goldilocks.zero then 0 else -256
@@ -4700,79 +4757,32 @@ theorem sbox7_odd (u : Goldilocks) :
   unfold sbox7
   gold_cring
 
-/-- Index transposition `3×4 ↔ 4×3` converting `P_3 ⊗ M_4` (`applyME`) into `M_4 ⊗ P_3` (`2026/306` §6)
-    with zero additional multiplications. -/
-def transposeIdx4x3 (s : Poseidon2State12) : Poseidon2State12 :=
-  ⟨⟨s.b0.x0, s.b0.x3, s.b1.x2, s.b2.x1⟩,
-   ⟨s.b0.x1, s.b1.x0, s.b1.x3, s.b2.x2⟩,
-   ⟨s.b0.x2, s.b1.x1, s.b2.x0, s.b2.x3⟩⟩
-
-def transposeIdx3x4 (u : Poseidon2State12) : Poseidon2State12 :=
-  ⟨⟨u.b0.x0, u.b1.x0, u.b2.x0, u.b0.x1⟩,
-   ⟨u.b1.x1, u.b2.x1, u.b0.x2, u.b1.x2⟩,
-   ⟨u.b2.x2, u.b0.x3, u.b1.x3, u.b2.x3⟩⟩
-
-def applyMEKroneckerSwap (s : Poseidon2State12) : Poseidon2State12 :=
-  transposeIdx3x4 (applyME (transposeIdx4x3 s))
-
-def applyMEKroneckerSwapInv (s : Poseidon2State12) : Poseidon2State12 :=
-  transposeIdx3x4 (applyMEInv (transposeIdx4x3 s))
-
-/-- Weighted Jive feed-forward `in0 + 2 · in1 + 4 · tweak` (`M_C · x` from `2026/306` §2). -/
-def jiveWeightedFeedForward (s : Poseidon2State12) : Lane4 :=
-  lane4Add (lane4Add s.b0 (lane4Scale (Goldilocks.ofNat 2) s.b1))
-    (lane4Scale (Goldilocks.ofNat 4) s.b2)
-
-/-- **Zero-Extra-Mul `M_4 ⊗ P_3` & Weighted Jive Mitigation Theorem (`poseidon2_kronecker_swap_kills_subspace_skip`)**:
-    1. `applyMEKroneckerSwap` (`M_4 ⊗ P_3`) has two-sided inverse `applyMEKroneckerSwapInv` and
-       universal 12-lane branch number `≥ 7`.
-    2. Unlike `P_3 ⊗ M_4`, `M_4 ⊗ P_3` maps `(X, -X, 0)` injectively into `b2` (`det = 128 = 2^7`)
-       and `(0, X, -X)` injectively into `b0` (`|det| = 112 = 16 · 7`): ONLY `X = 0` avoids activating
-       the capacity/output block!
-    3. `jiveWeightedFeedForward` is injective in `X` on all three difference subspaces
-       `(U0 + X, -X, U2)`, `(U0, U1 + X, -X)`, and `(U0 + X, U1, -X)`. -/
+/-- **Subspace round-skipping is blocked by the deployed `M_E = M_4 ⊗ P_3` and weighted compression
+    (`poseidon2_kronecker_swap_kills_subspace_skip`, Merz–Rodríguez García `2026/306` §6)**:
+    1. `applyME` maps `(X, -X, 0)` injectively into `b2` (`det = 128 = 2^7`) and `(0, X, -X)`
+       injectively into `b0` (`|det| = 112 = 16 · 7`): only `X = 0` leaves the capacity/output block
+       inactive. The block-circulant factor `applyMEStd = P_3 ⊗ M_4` alone does not have this property.
+    2. `poseidon2WeightedFeedForward` (`in0 + 2 · in1 + 4 · tweak`) is injective in `X` on all three
+       difference subspaces `(U0 + X, -X, U2)`, `(U0, U1 + X, -X)`, and `(U0 + X, U1, -X)`.
+    Invertibility and the branch number of `applyME` are `applyMEInv_applyME`, `applyME_applyMEInv`
+    and `poseidon2_me12_branch_number_eq_seven`. -/
 theorem poseidon2_kronecker_swap_kills_subspace_skip :
-    (∀ s : Poseidon2State12,
-      applyMEKroneckerSwapInv (applyMEKroneckerSwap s) = s ∧
-      applyMEKroneckerSwap (applyMEKroneckerSwapInv s) = s) ∧
-    (∀ s : Poseidon2State12, s ≠ state12Zero →
-      7 ≤ stateWeight12 s + stateWeight12 (applyMEKroneckerSwap s)) ∧
     (∀ X : Lane4,
-      (applyMEKroneckerSwap ⟨X, lane4Neg X, lane4Zero⟩).b2 = lane4Zero ↔ X = lane4Zero) ∧
+      (applyME ⟨X, lane4Neg X, lane4Zero⟩).b2 = lane4Zero ↔ X = lane4Zero) ∧
     (∀ X : Lane4,
-      (applyMEKroneckerSwap ⟨lane4Zero, X, lane4Neg X⟩).b0 = lane4Zero ↔ X = lane4Zero) ∧
+      (applyME ⟨lane4Zero, X, lane4Neg X⟩).b0 = lane4Zero ↔ X = lane4Zero) ∧
     (∀ U0 U1 U2 X Y : Lane4,
-      (jiveWeightedFeedForward ⟨lane4Add U0 X, lane4Neg X, U2⟩ =
-       jiveWeightedFeedForward ⟨lane4Add U0 Y, lane4Neg Y, U2⟩ → X = Y) ∧
-      (jiveWeightedFeedForward ⟨U0, lane4Add U1 X, lane4Neg X⟩ =
-       jiveWeightedFeedForward ⟨U0, lane4Add U1 Y, lane4Neg Y⟩ → X = Y) ∧
-      (jiveWeightedFeedForward ⟨lane4Add U0 X, U1, lane4Neg X⟩ =
-       jiveWeightedFeedForward ⟨lane4Add U0 Y, U1, lane4Neg Y⟩ → X = Y)) := by
-  have hT1 : ∀ s : Poseidon2State12, transposeIdx3x4 (transposeIdx4x3 s) = s := fun s => by
-    rcases s with ⟨⟨_, _, _, _⟩, ⟨_, _, _, _⟩, ⟨_, _, _, _⟩⟩; rfl
-  have hT2 : ∀ u : Poseidon2State12, transposeIdx4x3 (transposeIdx3x4 u) = u := fun u => by
-    rcases u with ⟨⟨_, _, _, _⟩, ⟨_, _, _, _⟩, ⟨_, _, _, _⟩⟩; rfl
-  have hw43 : ∀ s : Poseidon2State12, stateWeight12 (transposeIdx4x3 s) = stateWeight12 s := fun s => by
-    unfold stateWeight12 transposeIdx4x3 laneWeight4; dsimp only; omega
-  have hw34 : ∀ u : Poseidon2State12, stateWeight12 (transposeIdx3x4 u) = stateWeight12 u := fun u => by
-    unfold stateWeight12 transposeIdx3x4 laneWeight4; dsimp only; omega
-  refine ⟨?_, ?_, ?_, ?_, ?_⟩
-  · intro s
-    unfold applyMEKroneckerSwapInv applyMEKroneckerSwap
-    rw [hT2, applyMEInv_applyME, hT1, hT2, applyME_applyMEInv, hT1]
-    exact ⟨rfl, rfl⟩
-  · intro s hs
-    have hNz : transposeIdx4x3 s ≠ state12Zero := fun hz => by
-      apply hs; rw [← hT1 s, hz]; rfl
-    have hm := poseidon2_me12_branch_number_eq_seven.1 (transposeIdx4x3 s) hNz
-    unfold applyMEKroneckerSwap
-    rw [hw34]
-    rw [hw43] at hm
-    exact hm
+      (poseidon2WeightedFeedForward ⟨lane4Add U0 X, lane4Neg X, U2⟩ =
+       poseidon2WeightedFeedForward ⟨lane4Add U0 Y, lane4Neg Y, U2⟩ → X = Y) ∧
+      (poseidon2WeightedFeedForward ⟨U0, lane4Add U1 X, lane4Neg X⟩ =
+       poseidon2WeightedFeedForward ⟨U0, lane4Add U1 Y, lane4Neg Y⟩ → X = Y) ∧
+      (poseidon2WeightedFeedForward ⟨lane4Add U0 X, U1, lane4Neg X⟩ =
+       poseidon2WeightedFeedForward ⟨lane4Add U0 Y, U1, lane4Neg Y⟩ → X = Y)) := by
+  refine ⟨?_, ?_, ?_⟩
   · intro X
     constructor
     · intro hb2
-      let y := (applyMEKroneckerSwap ⟨X, lane4Neg X, lane4Zero⟩).b2
+      let y := (applyME ⟨X, lane4Neg X, lane4Zero⟩).b2
       have hy0 : y.x0 = Goldilocks.zero := congrArg Lane4.x0 hb2
       have hy1 : y.x1 = Goldilocks.zero := congrArg Lane4.x1 hb2
       have hy2 : y.x2 = Goldilocks.zero := congrArg Lane4.x2 hb2
@@ -4780,7 +4790,7 @@ theorem poseidon2_kronecker_swap_kills_subspace_skip :
       have c0 : Goldilocks.mul (goldOfInt 128) X.x0 =
           Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt 32) y.x0) (Goldilocks.mul (goldOfInt 28) y.x1))
             (Goldilocks.add (Goldilocks.mul (goldOfInt (-4)) y.x2) (Goldilocks.mul (goldOfInt (-4)) y.x3)) := by
-        unfold y applyMEKroneckerSwap transposeIdx3x4 transposeIdx4x3 applyME applyM4
+        unfold y applyME poseidon2Transpose3x4 poseidon2Transpose4x3 applyMEStd applyM4
           lane4Neg lane4Add lane4Sub lane4Sum lane4Zero
         dsimp only
         rw [← goldOfInt_nat X.x0, ← goldOfInt_nat X.x1, ← goldOfInt_nat X.x2, ← goldOfInt_nat X.x3]
@@ -4790,7 +4800,7 @@ theorem poseidon2_kronecker_swap_kills_subspace_skip :
       have c1 : Goldilocks.mul (goldOfInt 128) X.x1 =
           Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (-24)) y.x0) (Goldilocks.mul (goldOfInt (-1)) y.x1))
             (Goldilocks.add (Goldilocks.mul (goldOfInt 23) y.x2) (Goldilocks.mul (goldOfInt (-9)) y.x3)) := by
-        unfold y applyMEKroneckerSwap transposeIdx3x4 transposeIdx4x3 applyME applyM4
+        unfold y applyME poseidon2Transpose3x4 poseidon2Transpose4x3 applyMEStd applyM4
           lane4Neg lane4Add lane4Sub lane4Sum lane4Zero
         dsimp only
         rw [← goldOfInt_nat X.x0, ← goldOfInt_nat X.x1, ← goldOfInt_nat X.x2, ← goldOfInt_nat X.x3]
@@ -4800,7 +4810,7 @@ theorem poseidon2_kronecker_swap_kills_subspace_skip :
       have c2 : Goldilocks.mul (goldOfInt 128) X.x2 =
           Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (-8)) y.x0) (Goldilocks.mul (goldOfInt (-11)) y.x1))
             (Goldilocks.add (Goldilocks.mul (goldOfInt (-3)) y.x2) (Goldilocks.mul (goldOfInt 29) y.x3)) := by
-        unfold y applyMEKroneckerSwap transposeIdx3x4 transposeIdx4x3 applyME applyM4
+        unfold y applyME poseidon2Transpose3x4 poseidon2Transpose4x3 applyMEStd applyM4
           lane4Neg lane4Add lane4Sub lane4Sum lane4Zero
         dsimp only
         rw [← goldOfInt_nat X.x0, ← goldOfInt_nat X.x1, ← goldOfInt_nat X.x2, ← goldOfInt_nat X.x3]
@@ -4810,7 +4820,7 @@ theorem poseidon2_kronecker_swap_kills_subspace_skip :
       have c3 : Goldilocks.mul (goldOfInt 128) X.x3 =
           Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (-104)) y.x0) (Goldilocks.mul (goldOfInt 1) y.x1))
             (Goldilocks.add (Goldilocks.mul (goldOfInt (-23)) y.x2) (Goldilocks.mul (goldOfInt 9) y.x3)) := by
-        unfold y applyMEKroneckerSwap transposeIdx3x4 transposeIdx4x3 applyME applyM4
+        unfold y applyME poseidon2Transpose3x4 poseidon2Transpose4x3 applyMEStd applyM4
           lane4Neg lane4Add lane4Sub lane4Sum lane4Zero
         dsimp only
         rw [← goldOfInt_nat X.x0, ← goldOfInt_nat X.x1, ← goldOfInt_nat X.x2, ← goldOfInt_nat X.x3]
@@ -4827,7 +4837,7 @@ theorem poseidon2_kronecker_swap_kills_subspace_skip :
   · intro X
     constructor
     · intro hb0
-      let y := (applyMEKroneckerSwap ⟨lane4Zero, X, lane4Neg X⟩).b0
+      let y := (applyME ⟨lane4Zero, X, lane4Neg X⟩).b0
       have hy0 : y.x0 = Goldilocks.zero := congrArg Lane4.x0 hb0
       have hy1 : y.x1 = Goldilocks.zero := congrArg Lane4.x1 hb0
       have hy2 : y.x2 = Goldilocks.zero := congrArg Lane4.x2 hb0
@@ -4835,7 +4845,7 @@ theorem poseidon2_kronecker_swap_kills_subspace_skip :
       have c0 : Goldilocks.mul (goldOfInt 112) X.x0 =
           Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt 45) y.x0) (Goldilocks.mul (goldOfInt 5) y.x1))
             (Goldilocks.add (Goldilocks.mul (goldOfInt (-11)) y.x2) (Goldilocks.mul (goldOfInt (-8)) y.x3)) := by
-        unfold y applyMEKroneckerSwap transposeIdx3x4 transposeIdx4x3 applyME applyM4
+        unfold y applyME poseidon2Transpose3x4 poseidon2Transpose4x3 applyMEStd applyM4
           lane4Neg lane4Add lane4Sub lane4Sum lane4Zero
         dsimp only
         rw [← goldOfInt_nat X.x0, ← goldOfInt_nat X.x1, ← goldOfInt_nat X.x2, ← goldOfInt_nat X.x3]
@@ -4845,7 +4855,7 @@ theorem poseidon2_kronecker_swap_kills_subspace_skip :
       have c1 : Goldilocks.mul (goldOfInt 112) X.x1 =
           Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (-31)) y.x0) (Goldilocks.mul (goldOfInt 9) y.x1))
             (Goldilocks.add (Goldilocks.mul (goldOfInt 25) y.x2) (Goldilocks.mul (goldOfInt 8) y.x3)) := by
-        unfold y applyMEKroneckerSwap transposeIdx3x4 transposeIdx4x3 applyME applyM4
+        unfold y applyME poseidon2Transpose3x4 poseidon2Transpose4x3 applyMEStd applyM4
           lane4Neg lane4Add lane4Sub lane4Sum lane4Zero
         dsimp only
         rw [← goldOfInt_nat X.x0, ← goldOfInt_nat X.x1, ← goldOfInt_nat X.x2, ← goldOfInt_nat X.x3]
@@ -4855,7 +4865,7 @@ theorem poseidon2_kronecker_swap_kills_subspace_skip :
       have c2 : Goldilocks.mul (goldOfInt 112) X.x2 =
           Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt 53) y.x0) (Goldilocks.mul (goldOfInt (-19)) y.x1))
             (Goldilocks.add (Goldilocks.mul (goldOfInt (-3)) y.x2) (Goldilocks.mul (goldOfInt 8) y.x3)) := by
-        unfold y applyMEKroneckerSwap transposeIdx3x4 transposeIdx4x3 applyME applyM4
+        unfold y applyME poseidon2Transpose3x4 poseidon2Transpose4x3 applyMEStd applyM4
           lane4Neg lane4Add lane4Sub lane4Sum lane4Zero
         dsimp only
         rw [← goldOfInt_nat X.x0, ← goldOfInt_nat X.x1, ← goldOfInt_nat X.x2, ← goldOfInt_nat X.x3]
@@ -4865,7 +4875,7 @@ theorem poseidon2_kronecker_swap_kills_subspace_skip :
       have c3 : Goldilocks.mul (goldOfInt 112) X.x3 =
           Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (-110)) y.x0) (Goldilocks.mul (goldOfInt 50) y.x1))
             (Goldilocks.add (Goldilocks.mul (goldOfInt 2) y.x2) (Goldilocks.mul (goldOfInt 32) y.x3)) := by
-        unfold y applyMEKroneckerSwap transposeIdx3x4 transposeIdx4x3 applyME applyM4
+        unfold y applyME poseidon2Transpose3x4 poseidon2Transpose4x3 applyMEStd applyM4
           lane4Neg lane4Add lane4Sub lane4Sum lane4Zero
         dsimp only
         rw [← goldOfInt_nat X.x0, ← goldOfInt_nat X.x1, ← goldOfInt_nat X.x2, ← goldOfInt_nat X.x3]
@@ -4896,225 +4906,28 @@ theorem poseidon2_kronecker_swap_kills_subspace_skip :
     refine ⟨?_, ?_, ?_⟩
     · intro hEq
       have hDiff : lane4Sub Y X =
-          lane4Sub (jiveWeightedFeedForward ⟨lane4Add U0 X, lane4Neg X, U2⟩)
-                   (jiveWeightedFeedForward ⟨lane4Add U0 Y, lane4Neg Y, U2⟩) := by
-        unfold jiveWeightedFeedForward lane4Add lane4Scale lane4Neg lane4Sub lane4Zero
+          lane4Sub (poseidon2WeightedFeedForward ⟨lane4Add U0 X, lane4Neg X, U2⟩)
+                   (poseidon2WeightedFeedForward ⟨lane4Add U0 Y, lane4Neg Y, U2⟩) := by
+        unfold poseidon2WeightedFeedForward lane4Add lane4Scale lane4Neg lane4Sub lane4Zero
         apply Lane4.ext <;> gold_cring
       rw [hEq, (lane4Sub_eq_zero_iff _ _).mpr rfl] at hDiff
       exact ((lane4Sub_eq_zero_iff Y X).mp hDiff).symm
     · intro hEq
       have hDiff : lane4Scale (Goldilocks.ofNat 2) (lane4Sub Y X) =
-          lane4Sub (jiveWeightedFeedForward ⟨U0, lane4Add U1 X, lane4Neg X⟩)
-                   (jiveWeightedFeedForward ⟨U0, lane4Add U1 Y, lane4Neg Y⟩) := by
-        unfold jiveWeightedFeedForward lane4Add lane4Scale lane4Neg lane4Sub lane4Zero
+          lane4Sub (poseidon2WeightedFeedForward ⟨U0, lane4Add U1 X, lane4Neg X⟩)
+                   (poseidon2WeightedFeedForward ⟨U0, lane4Add U1 Y, lane4Neg Y⟩) := by
+        unfold poseidon2WeightedFeedForward lane4Add lane4Scale lane4Neg lane4Sub lane4Zero
         apply Lane4.ext <;> gold_cring
       rw [hEq, (lane4Sub_eq_zero_iff _ _).mpr rfl] at hDiff
       exact ((lane4Sub_eq_zero_iff Y X).mp (cancelScaleNz (Goldilocks.ofNat 2) (by decide +kernel) _ hDiff)).symm
     · intro hEq
       have hDiff : lane4Scale (Goldilocks.ofNat 3) (lane4Sub Y X) =
-          lane4Sub (jiveWeightedFeedForward ⟨lane4Add U0 X, U1, lane4Neg X⟩)
-                   (jiveWeightedFeedForward ⟨lane4Add U0 Y, U1, lane4Neg Y⟩) := by
-        unfold jiveWeightedFeedForward lane4Add lane4Scale lane4Neg lane4Sub lane4Zero
+          lane4Sub (poseidon2WeightedFeedForward ⟨lane4Add U0 X, U1, lane4Neg X⟩)
+                   (poseidon2WeightedFeedForward ⟨lane4Add U0 Y, U1, lane4Neg Y⟩) := by
+        unfold poseidon2WeightedFeedForward lane4Add lane4Scale lane4Neg lane4Sub lane4Zero
         apply Lane4.ext <;> gold_cring
       rw [hEq, (lane4Sub_eq_zero_iff _ _).mpr rfl] at hDiff
       exact ((lane4Sub_eq_zero_iff Y X).mp (cancelScaleNz (Goldilocks.ofNat 3) (by decide +kernel) _ hDiff)).symm
-
-/-- Explicit rational 12-lane Goldilocks eigenvector of `applyMI` (`V[0] = -2`) for eigenvalue
-    `λ₀ = 8914261387277420341`. -/
-def miRationalEigvec0 : Poseidon2State12 :=
-  ⟨⟨Goldilocks.ofNat 8415733694666260766, Goldilocks.ofNat 10081604446170657914,
-    Goldilocks.ofNat 13429757962329074280, Goldilocks.ofNat 7212905167159261059⟩,
-   ⟨Goldilocks.ofNat 7177536167446655380, Goldilocks.ofNat 16173559831921257667,
-    Goldilocks.ofNat 11410676009809774369, Goldilocks.ofNat 263994636750658321⟩,
-   ⟨Goldilocks.ofNat 11338638786567724180, Goldilocks.ofNat 17416777037312523837,
-    Goldilocks.ofNat 8867871345638664998, Goldilocks.ofNat 17338153400129577477⟩⟩
-
-/-- Rabin-irreducible single-shift internal diffusion matrix `diag(-64, 1, 2, 4, ..., 1024) + 1·1ᵀ`
-    (`0` multiplications; `χ_{M_I^k}` irreducible of degree 12 over Goldilocks for `1 ≤ k ≤ 32`). -/
-def applyMIIrred (st : Poseidon2State12) : Poseidon2State12 :=
-  let s := state12Sum st
-  let b0 := st.b0
-  let b1 := st.b1
-  let b2 := st.b2
-  ⟨⟨Goldilocks.add (Goldilocks.mul (goldOfInt (-64)) b0.x0) s,
-    Goldilocks.add b0.x1 s,
-    Goldilocks.add (Goldilocks.mul (goldOfInt 2) b0.x2) s,
-    Goldilocks.add (Goldilocks.mul (goldOfInt 4) b0.x3) s⟩,
-   ⟨Goldilocks.add (Goldilocks.mul (goldOfInt 8) b1.x0) s,
-    Goldilocks.add (Goldilocks.mul (goldOfInt 16) b1.x1) s,
-    Goldilocks.add (Goldilocks.mul (goldOfInt 32) b1.x2) s,
-    Goldilocks.add (Goldilocks.mul (goldOfInt 64) b1.x3) s⟩,
-   ⟨Goldilocks.add (Goldilocks.mul (goldOfInt 128) b2.x0) s,
-    Goldilocks.add (Goldilocks.mul (goldOfInt 256) b2.x1) s,
-    Goldilocks.add (Goldilocks.mul (goldOfInt 512) b2.x2) s,
-    Goldilocks.add (Goldilocks.mul (goldOfInt 1024) b2.x3) s⟩⟩
-
-private def inv1024IrredG : Goldilocks := Goldilocks.ofNat 18428729670909296641
-private def inv3055IrredG : Goldilocks := Goldilocks.ofNat 10802365021336396514
-
-private def weightedSumMIIrred (y : Poseidon2State12) : Goldilocks :=
-  let t0 := Goldilocks.add
-    (Goldilocks.add (Goldilocks.mul (goldOfInt (-16)) y.b0.x0) (Goldilocks.mul (goldOfInt 1024) y.b0.x1))
-    (Goldilocks.add (Goldilocks.mul (goldOfInt 512) y.b0.x2) (Goldilocks.mul (goldOfInt 256) y.b0.x3))
-  let t1 := Goldilocks.add
-    (Goldilocks.add (Goldilocks.mul (goldOfInt 128) y.b1.x0) (Goldilocks.mul (goldOfInt 64) y.b1.x1))
-    (Goldilocks.add (Goldilocks.mul (goldOfInt 32) y.b1.x2) (Goldilocks.mul (goldOfInt 16) y.b1.x3))
-  let t2 := Goldilocks.add
-    (Goldilocks.add (Goldilocks.mul (goldOfInt 8) y.b2.x0) (Goldilocks.mul (goldOfInt 4) y.b2.x1))
-    (Goldilocks.add (Goldilocks.mul (goldOfInt 2) y.b2.x2) y.b2.x3)
-  Goldilocks.add (Goldilocks.add t0 t1) t2
-
-private def makeMIIrredInvRaw (y : Poseidon2State12) (s : Goldilocks) : Poseidon2State12 :=
-  let scale (w : Int) (yi : Goldilocks) : Goldilocks :=
-    Goldilocks.mul inv1024IrredG (Goldilocks.mul (goldOfInt w) (Goldilocks.sub yi s))
-  ⟨⟨scale (-16) y.b0.x0, scale 1024 y.b0.x1, scale 512 y.b0.x2, scale 256 y.b0.x3⟩,
-   ⟨scale 128 y.b1.x0, scale 64 y.b1.x1, scale 32 y.b1.x2, scale 16 y.b1.x3⟩,
-   ⟨scale 8 y.b2.x0, scale 4 y.b2.x1, scale 2 y.b2.x2, scale 1 y.b2.x3⟩⟩
-
-/-- Sherman–Morrison inverse of `applyMIIrred` (`1 + ∑ V_i⁻¹ = 3055 / 1024`). -/
-def applyMIIrredInv (y : Poseidon2State12) : Poseidon2State12 :=
-  makeMIIrredInvRaw y (Goldilocks.mul inv3055IrredG (weightedSumMIIrred y))
-
-private theorem mul_cancel_irred {u k : Goldilocks} (h : Goldilocks.mul u k = Goldilocks.one)
-    (x : Goldilocks) : Goldilocks.mul u (Goldilocks.mul k x) = x := by
-  change CommRingOps.mul u (CommRingOps.mul k x) = x
-  rw [← LawfulCommRing.mul_assoc]
-  change CommRingOps.mul (Goldilocks.mul u k) x = x
-  rw [h]
-  exact LawfulCommRing.one_mul x
-
-private theorem inv1024Irred_mul_cancel (x : Goldilocks) :
-    Goldilocks.mul inv1024IrredG (Goldilocks.mul (Goldilocks.ofNat 1024) x) = x :=
-  mul_cancel_irred (by decide +kernel) x
-
-private theorem inv3055Irred_mul_cancel (x : Goldilocks) :
-    Goldilocks.mul inv3055IrredG (Goldilocks.mul (Goldilocks.ofNat 3055) x) = x :=
-  mul_cancel_irred (by decide +kernel) x
-
-private theorem mul_inv3055Irred_cancel (x : Goldilocks) :
-    Goldilocks.mul (Goldilocks.ofNat 3055) (Goldilocks.mul inv3055IrredG x) = x :=
-  mul_cancel_irred (by decide +kernel) x
-
-private theorem mi_irred_lane_recover (v w : Int) (hv : v * w = 1024) (x s : Goldilocks) :
-    Goldilocks.mul inv1024IrredG (Goldilocks.mul (goldOfInt w)
-      (Goldilocks.sub (Goldilocks.add (Goldilocks.mul (goldOfInt v) x) s) s)) = x := by
-  have hProd : Goldilocks.mul (goldOfInt w)
-      (Goldilocks.sub (Goldilocks.add (Goldilocks.mul (goldOfInt v) x) s) s) =
-      Goldilocks.mul (Goldilocks.ofNat 1024) x := by
-    rw [← goldOfInt_nat x, ← goldOfInt_nat s, ofNat_eq_goldOfInt]
-    simp only [goldOfInt_add, goldOfInt_sub, goldOfInt_mul]
-    congr 1
-    have hEq : w * (v * (x.val : Int) + (s.val : Int) - (s.val : Int)) = (v * w) * (x.val : Int) := by
-      rw [Int.add_sub_cancel, ← Int.mul_assoc, Int.mul_comm w v]
-    rw [hEq, hv]
-    omega
-  rw [hProd, inv1024Irred_mul_cancel x]
-
-private theorem mi_irred_lane_forward (v w : Int) (hv : v * w = 1024) (yi s : Goldilocks) :
-    Goldilocks.add (Goldilocks.mul (goldOfInt v)
-      (Goldilocks.mul inv1024IrredG (Goldilocks.mul (goldOfInt w) (Goldilocks.sub yi s)))) s = yi := by
-  have hAssoc : Goldilocks.mul (goldOfInt v)
-      (Goldilocks.mul inv1024IrredG (Goldilocks.mul (goldOfInt w) (Goldilocks.sub yi s))) =
-      Goldilocks.mul inv1024IrredG (Goldilocks.mul (Goldilocks.ofNat 1024) (Goldilocks.sub yi s)) := by
-    rw [← goldOfInt_nat inv1024IrredG, ← goldOfInt_nat yi, ← goldOfInt_nat s, ofNat_eq_goldOfInt]
-    simp only [goldOfInt_sub, goldOfInt_mul]
-    congr 1
-    have hEq : v * ((inv1024IrredG.val : Int) * (w * ((yi.val : Int) - (s.val : Int)))) =
-        (inv1024IrredG.val : Int) * ((v * w) * ((yi.val : Int) - (s.val : Int))) := by
-      rw [← Int.mul_assoc, ← Int.mul_assoc, Int.mul_comm v (inv1024IrredG.val : Int),
-          Int.mul_assoc (inv1024IrredG.val : Int) v w, Int.mul_assoc]
-    rw [hEq, hv]
-    rfl
-  rw [hAssoc, inv1024Irred_mul_cancel (Goldilocks.sub yi s)]
-  change CommRingOps.add (CommRingOps.sub yi s) s = yi
-  rw [LawfulCommRing.add_comm, LawfulCommRing.add_sub_cancel_left]
-
-/-- **Two-Sided Sherman–Morrison Invertibility of Rabin-Irreducible `applyMIIrred` (`V[0] = -64`)**. -/
-theorem poseidon2_mi_irred_two_sided_inverse (st : Poseidon2State12) :
-    applyMIIrredInv (applyMIIrred st) = st ∧ applyMIIrred (applyMIIrredInv st) = st := by
-  constructor
-  · have hWS : weightedSumMIIrred (applyMIIrred st) =
-        Goldilocks.mul (Goldilocks.ofNat 3055) (state12Sum st) := by
-      unfold weightedSumMIIrred applyMIIrred state12Sum lane4Sum
-      dsimp only
-      rw [← goldOfInt_nat st.b0.x0, ← goldOfInt_nat st.b0.x1, ← goldOfInt_nat st.b0.x2, ← goldOfInt_nat st.b0.x3,
-          ← goldOfInt_nat st.b1.x0, ← goldOfInt_nat st.b1.x1, ← goldOfInt_nat st.b1.x2, ← goldOfInt_nat st.b1.x3,
-          ← goldOfInt_nat st.b2.x0, ← goldOfInt_nat st.b2.x1, ← goldOfInt_nat st.b2.x2, ← goldOfInt_nat st.b2.x3]
-      simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
-      congr 1; omega
-    unfold applyMIIrredInv
-    rw [hWS, inv3055Irred_mul_cancel (state12Sum st)]
-    unfold makeMIIrredInvRaw applyMIIrred
-    dsimp only
-    have h1 : Goldilocks.add st.b0.x1 (state12Sum st) =
-        Goldilocks.add (Goldilocks.mul (goldOfInt 1) st.b0.x1) (state12Sum st) := by
-      have hone : goldOfInt 1 = CommRingOps.one := rfl
-      change _ = Goldilocks.add (CommRingOps.mul (goldOfInt 1) st.b0.x1) _
-      rw [hone, LawfulCommRing.one_mul]
-    apply Poseidon2State12.ext
-    · apply Lane4.ext
-      · exact mi_irred_lane_recover (-64) (-16) rfl st.b0.x0 (state12Sum st)
-      · rw [h1]; exact mi_irred_lane_recover 1 1024 rfl st.b0.x1 (state12Sum st)
-      · exact mi_irred_lane_recover 2 512 rfl st.b0.x2 (state12Sum st)
-      · exact mi_irred_lane_recover 4 256 rfl st.b0.x3 (state12Sum st)
-    · apply Lane4.ext
-      · exact mi_irred_lane_recover 8 128 rfl st.b1.x0 (state12Sum st)
-      · exact mi_irred_lane_recover 16 64 rfl st.b1.x1 (state12Sum st)
-      · exact mi_irred_lane_recover 32 32 rfl st.b1.x2 (state12Sum st)
-      · exact mi_irred_lane_recover 64 16 rfl st.b1.x3 (state12Sum st)
-    · apply Lane4.ext
-      · exact mi_irred_lane_recover 128 8 rfl st.b2.x0 (state12Sum st)
-      · exact mi_irred_lane_recover 256 4 rfl st.b2.x1 (state12Sum st)
-      · exact mi_irred_lane_recover 512 2 rfl st.b2.x2 (state12Sum st)
-      · exact mi_irred_lane_recover 1024 1 rfl st.b2.x3 (state12Sum st)
-  · let s := Goldilocks.mul inv3055IrredG (weightedSumMIIrred st)
-    have hSumRaw : state12Sum (makeMIIrredInvRaw st s) =
-        Goldilocks.mul inv1024IrredG (Goldilocks.sub (weightedSumMIIrred st)
-          (Goldilocks.mul (goldOfInt 2031) s)) := by
-      unfold state12Sum makeMIIrredInvRaw lane4Sum weightedSumMIIrred
-      dsimp only
-      rw [← goldOfInt_nat inv1024IrredG, ← goldOfInt_nat s,
-          ← goldOfInt_nat st.b0.x0, ← goldOfInt_nat st.b0.x1, ← goldOfInt_nat st.b0.x2, ← goldOfInt_nat st.b0.x3,
-          ← goldOfInt_nat st.b1.x0, ← goldOfInt_nat st.b1.x1, ← goldOfInt_nat st.b1.x2, ← goldOfInt_nat st.b1.x3,
-          ← goldOfInt_nat st.b2.x0, ← goldOfInt_nat st.b2.x1, ← goldOfInt_nat st.b2.x2, ← goldOfInt_nat st.b2.x3]
-      simp only [goldOfInt_add, goldOfInt_sub, goldOfInt_mul, ← Int.mul_add]
-      congr 1; congr 1; omega
-    have h3055Sub : Goldilocks.sub (Goldilocks.mul (Goldilocks.ofNat 3055) s)
-        (Goldilocks.mul (goldOfInt 2031) s) = Goldilocks.mul (Goldilocks.ofNat 1024) s := by
-      rw [← goldOfInt_nat s, ofNat_eq_goldOfInt, ofNat_eq_goldOfInt]
-      simp only [goldOfInt_sub, goldOfInt_mul]
-      congr 1; omega
-    have hSum : state12Sum (makeMIIrredInvRaw st s) = s := by
-      rw [hSumRaw]
-      have hws : weightedSumMIIrred st = Goldilocks.mul (Goldilocks.ofNat 3055) s :=
-        (mul_inv3055Irred_cancel (weightedSumMIIrred st)).symm
-      rw [hws, h3055Sub, inv1024Irred_mul_cancel s]
-    unfold applyMIIrredInv
-    change applyMIIrred (makeMIIrredInvRaw st s) = st
-    unfold applyMIIrred
-    rw [hSum]
-    unfold makeMIIrredInvRaw
-    dsimp only
-    have h1 : ∀ a : Goldilocks, a = Goldilocks.mul (goldOfInt 1) a := fun a => by
-      rw [← goldOfInt_nat a, goldOfInt_mul, Int.one_mul]
-    apply Poseidon2State12.ext
-    · apply Lane4.ext
-      · exact mi_irred_lane_forward (-64) (-16) rfl st.b0.x0 s
-      · rw [h1 (Goldilocks.mul inv1024IrredG (Goldilocks.mul (goldOfInt 1024) (Goldilocks.sub st.b0.x1 s)))]
-        exact mi_irred_lane_forward 1 1024 rfl st.b0.x1 s
-      · exact mi_irred_lane_forward 2 512 rfl st.b0.x2 s
-      · exact mi_irred_lane_forward 4 256 rfl st.b0.x3 s
-    · apply Lane4.ext
-      · exact mi_irred_lane_forward 8 128 rfl st.b1.x0 s
-      · exact mi_irred_lane_forward 16 64 rfl st.b1.x1 s
-      · exact mi_irred_lane_forward 32 32 rfl st.b1.x2 s
-      · exact mi_irred_lane_forward 64 16 rfl st.b1.x3 s
-    · apply Lane4.ext
-      · exact mi_irred_lane_forward 128 8 rfl st.b2.x0 s
-      · exact mi_irred_lane_forward 256 4 rfl st.b2.x1 s
-      · exact mi_irred_lane_forward 512 2 rfl st.b2.x2 s
-      · exact mi_irred_lane_forward 1024 1 rfl st.b2.x3 s
-
 
 /-! ## 9. `sbox7` Differential Uniformity `≤ 6` & Width-12 `(R_F = 8, R_P = 22)` Wide-Trail Bounds -/
 
@@ -5236,10 +5049,19 @@ private theorem state12Sub_eq_zero_iff (a b : Poseidon2State12) :
       ((lane4Sub_eq_zero_iff _ _).mpr rfl)
       ((lane4Sub_eq_zero_iff _ _).mpr rfl)
 
+private theorem applyMEStd_sub (a b : Poseidon2State12) :
+    state12Sub (applyMEStd a) (applyMEStd b) = applyMEStd (state12Sub a b) := by
+  unfold applyMEStd applyM4 state12Sub lane4Add lane4Sub lane4Sum
+  apply Poseidon2State12.ext <;> apply Lane4.ext <;> gold_cring
+
 private theorem applyME_sub (a b : Poseidon2State12) :
     state12Sub (applyME a) (applyME b) = applyME (state12Sub a b) := by
-  unfold applyME applyM4 state12Sub lane4Add lane4Sub lane4Sum
-  apply Poseidon2State12.ext <;> apply Lane4.ext <;> gold_cring
+  have ht : poseidon2Transpose4x3 (state12Sub a b) =
+      state12Sub (poseidon2Transpose4x3 a) (poseidon2Transpose4x3 b) := rfl
+  have hu (x y : Poseidon2State12) : state12Sub (poseidon2Transpose3x4 x) (poseidon2Transpose3x4 y) =
+      poseidon2Transpose3x4 (state12Sub x y) := rfl
+  unfold applyME
+  rw [hu, applyMEStd_sub, ht]
 
 theorem sboxState12_preserves_differential_activity (a b rc : Poseidon2State12) :
     stateWeight12 (state12Sub (sboxState12 (state12Add a rc)) (sboxState12 (state12Add b rc))) =
@@ -5470,15 +5292,28 @@ def symbolicApplyM4 (b : SymbolicLane4) : SymbolicLane4 :=
    .add s (.add b.x2 (.mul c2 b.x3)),
    .add s (.add b.x3 (.mul c2 b.x0))⟩
 
-def symbolicME12 (st : SymbolicState12) : SymbolicState12 :=
+def symbolicTranspose4x3 (s : SymbolicState12) : SymbolicState12 :=
+  ⟨⟨s.b0.x0, s.b0.x3, s.b1.x2, s.b2.x1⟩,
+   ⟨s.b0.x1, s.b1.x0, s.b1.x3, s.b2.x2⟩,
+   ⟨s.b0.x2, s.b1.x1, s.b2.x0, s.b2.x3⟩⟩
+
+def symbolicTranspose3x4 (s : SymbolicState12) : SymbolicState12 :=
+  ⟨⟨s.b0.x0, s.b1.x0, s.b2.x0, s.b0.x1⟩,
+   ⟨s.b1.x1, s.b2.x1, s.b0.x2, s.b1.x2⟩,
+   ⟨s.b2.x2, s.b0.x3, s.b1.x3, s.b2.x3⟩⟩
+
+def symbolicME12Std (st : SymbolicState12) : SymbolicState12 :=
   let y0 := symbolicApplyM4 st.b0
   let y1 := symbolicApplyM4 st.b1
   let y2 := symbolicApplyM4 st.b2
   let s := symbolicLane4Add (symbolicLane4Add y0 y1) y2
   ⟨symbolicLane4Add y0 s, symbolicLane4Add y1 s, symbolicLane4Add y2 s⟩
 
+def symbolicME12 (st : SymbolicState12) : SymbolicState12 :=
+  symbolicTranspose3x4 (symbolicME12Std (symbolicTranspose4x3 st))
+
 def symbolicMI12WithSum (st : SymbolicState12) (s : PoseidonExpr) : SymbolicState12 :=
-  ⟨⟨.add (.mul (.constant (goldOfInt (-2))) st.b0.x0) s,
+  ⟨⟨.add (.mul (.constant (goldOfInt (-64))) st.b0.x0) s,
     .add st.b0.x1 s,
     .add (.mul (.constant (goldOfInt 2)) st.b0.x2) s,
     .add (.mul (.constant (goldOfInt 4)) st.b0.x3) s⟩,
@@ -5561,8 +5396,43 @@ private theorem symbolicApplyM4_maxDeg_le (b : SymbolicLane4) (k : Nat)
   dsimp only
   apply max_le_of_le <;> apply max_le_of_le <;> (dsimp only [PoseidonExpr.degree]; omega)
 
-private theorem symbolicME12_maxDeg_le (st : SymbolicState12) (k : Nat) (h : st.maxDeg ≤ k) :
-    (symbolicME12 st).maxDeg ≤ k := by
+private theorem symbolicState12_coord_degrees {st : SymbolicState12} {k : Nat} (h : st.maxDeg ≤ k) :
+    ((st.b0.x0.degree ≤ k ∧ st.b0.x1.degree ≤ k) ∧ (st.b0.x2.degree ≤ k ∧ st.b0.x3.degree ≤ k)) ∧
+    ((st.b1.x0.degree ≤ k ∧ st.b1.x1.degree ≤ k) ∧ (st.b1.x2.degree ≤ k ∧ st.b1.x3.degree ≤ k)) ∧
+    ((st.b2.x0.degree ≤ k ∧ st.b2.x1.degree ≤ k) ∧ (st.b2.x2.degree ≤ k ∧ st.b2.x3.degree ≤ k)) := by
+  have lane : ∀ b : SymbolicLane4, b.maxDeg ≤ k →
+      (b.x0.degree ≤ k ∧ b.x1.degree ≤ k) ∧ (b.x2.degree ≤ k ∧ b.x3.degree ≤ k) := fun b hb =>
+    ⟨⟨le_of_max_le_left (le_of_max_le_left hb), le_of_max_le_right (le_of_max_le_left hb)⟩,
+     ⟨le_of_max_le_left (le_of_max_le_right hb), le_of_max_le_right (le_of_max_le_right hb)⟩⟩
+  exact ⟨lane _ (le_of_max_le_left (le_of_max_le_left h)),
+    lane _ (le_of_max_le_right (le_of_max_le_left h)), lane _ (le_of_max_le_right h)⟩
+
+private theorem symbolicState12_maxDeg_le_of_coords {a0 a1 a2 a3 b0 b1 b2 b3 c0 c1 c2 c3 : PoseidonExpr}
+    {k : Nat} (ha : (a0.degree ≤ k ∧ a1.degree ≤ k) ∧ (a2.degree ≤ k ∧ a3.degree ≤ k))
+    (hb : (b0.degree ≤ k ∧ b1.degree ≤ k) ∧ (b2.degree ≤ k ∧ b3.degree ≤ k))
+    (hc : (c0.degree ≤ k ∧ c1.degree ≤ k) ∧ (c2.degree ≤ k ∧ c3.degree ≤ k)) :
+    (SymbolicState12.mk ⟨a0, a1, a2, a3⟩ ⟨b0, b1, b2, b3⟩ ⟨c0, c1, c2, c3⟩).maxDeg ≤ k :=
+  max_le_of_le
+    (max_le_of_le (max_le_of_le (max_le_of_le ha.1.1 ha.1.2) (max_le_of_le ha.2.1 ha.2.2))
+      (max_le_of_le (max_le_of_le hb.1.1 hb.1.2) (max_le_of_le hb.2.1 hb.2.2)))
+    (max_le_of_le (max_le_of_le hc.1.1 hc.1.2) (max_le_of_le hc.2.1 hc.2.2))
+
+private theorem symbolicTranspose4x3_maxDeg_le (st : SymbolicState12) (k : Nat) (h : st.maxDeg ≤ k) :
+    (symbolicTranspose4x3 st).maxDeg ≤ k := by
+  obtain ⟨⟨⟨h00, h01⟩, h02, h03⟩, ⟨⟨h10, h11⟩, h12, h13⟩, ⟨h20, h21⟩, h22, h23⟩ :=
+    symbolicState12_coord_degrees h
+  exact symbolicState12_maxDeg_le_of_coords ⟨⟨h00, h03⟩, h12, h21⟩ ⟨⟨h01, h10⟩, h13, h22⟩
+    ⟨⟨h02, h11⟩, h20, h23⟩
+
+private theorem symbolicTranspose3x4_maxDeg_le (st : SymbolicState12) (k : Nat) (h : st.maxDeg ≤ k) :
+    (symbolicTranspose3x4 st).maxDeg ≤ k := by
+  obtain ⟨⟨⟨h00, h01⟩, h02, h03⟩, ⟨⟨h10, h11⟩, h12, h13⟩, ⟨h20, h21⟩, h22, h23⟩ :=
+    symbolicState12_coord_degrees h
+  exact symbolicState12_maxDeg_le_of_coords ⟨⟨h00, h10⟩, h20, h01⟩ ⟨⟨h11, h21⟩, h02, h12⟩
+    ⟨⟨h22, h03⟩, h13, h23⟩
+
+private theorem symbolicME12Std_maxDeg_le (st : SymbolicState12) (k : Nat) (h : st.maxDeg ≤ k) :
+    (symbolicME12Std st).maxDeg ≤ k := by
   unfold SymbolicState12.maxDeg at h
   have hb0 : st.b0.maxDeg ≤ k := le_of_max_le_left (le_of_max_le_left h)
   have hb1 : st.b1.maxDeg ≤ k := le_of_max_le_right (le_of_max_le_left h)
@@ -5571,10 +5441,15 @@ private theorem symbolicME12_maxDeg_le (st : SymbolicState12) (k : Nat) (h : st.
   have hy1 := symbolicApplyM4_maxDeg_le st.b1 k hb1
   have hy2 := symbolicApplyM4_maxDeg_le st.b2 k hb2
   have hs := symbolicLane4Add_maxDeg_le _ _ k (symbolicLane4Add_maxDeg_le _ _ k hy0 hy1) hy2
-  unfold symbolicME12 SymbolicState12.maxDeg
+  unfold symbolicME12Std SymbolicState12.maxDeg
   exact max_le_of_le
     (max_le_of_le (symbolicLane4Add_maxDeg_le _ _ k hy0 hs) (symbolicLane4Add_maxDeg_le _ _ k hy1 hs))
     (symbolicLane4Add_maxDeg_le _ _ k hy2 hs)
+
+private theorem symbolicME12_maxDeg_le (st : SymbolicState12) (k : Nat) (h : st.maxDeg ≤ k) :
+    (symbolicME12 st).maxDeg ≤ k :=
+  symbolicTranspose3x4_maxDeg_le _ k
+    (symbolicME12Std_maxDeg_le _ k (symbolicTranspose4x3_maxDeg_le st k h))
 
 private theorem symbolicMI12WithSum_maxDeg_le (st : SymbolicState12) (s : PoseidonExpr) (k : Nat)
     (h : st.maxDeg ≤ k) (hs : s.degree ≤ k) :

@@ -382,6 +382,8 @@ pub(crate) enum Fault {
     SplitInput,
     /// Send different opening shares to different peers.
     Equivocate,
+    /// Open the correct value share but hold a wrong MAC share for it.
+    WrongMac,
 }
 
 impl<T> Drop for SpdzEngine<T> {
@@ -406,7 +408,7 @@ impl<T: Transport> SpdzEngine<T> {
         party: usize,
         session: [u8; 32],
         config: ThresholdConfig,
-        link_keys: Vec<[u8; 32]>,
+        mut link_keys: Vec<[u8; 32]>,
         keys: MacKeyShare,
         transport: T,
     ) -> Result<Self, Error> {
@@ -414,6 +416,9 @@ impl<T: Transport> SpdzEngine<T> {
             || link_keys.len() != config.quorum.len() - 1
             || !keys.valid()
         {
+            for key in &mut link_keys {
+                ct_zeroize_bytes(key);
+            }
             return Err(Error::InvalidConfiguration);
         }
         #[cfg(any(feature = "std", test))]
@@ -1004,6 +1009,15 @@ impl<T: Transport> Core for SpdzEngine<T> {
             self.fault = None;
             let mut forged: SecretVec<ABit> = bits.iter().copied().collect();
             forged[0].0[0] ^= 1 << (lane & 63);
+            let opened = self.partial_open(&forged)?;
+            self.check()?;
+            return Ok(opened);
+        }
+        #[cfg(test)]
+        if self.fault == Some(Fault::WrongMac) && !bits.is_empty() {
+            self.fault = None;
+            let mut forged: SecretVec<ABit> = bits.iter().copied().collect();
+            forged[0].0[1] ^= 1;
             let opened = self.partial_open(&forged)?;
             self.check()?;
             return Ok(opened);
@@ -1942,11 +1956,15 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn split_inputs_and_equivocation_are_caught() {
+    fn split_inputs_wrong_macs_and_equivocation_are_caught() {
         for cheater in [0, 2, 4] {
             cheat(Fault::SplitInput, cheater, |e, _| {
                 let w = e.share_uniform_lanes(&[u64::MAX])?;
                 e.open(&w)
+            });
+            cheat(Fault::WrongMac, cheater, |e, party| {
+                let (a, b) = inputs(e, party)?;
+                e.open(&[a ^ b])
             });
             cheat(Fault::Equivocate, cheater, |e, party| {
                 let (a, b) = inputs(e, party)?;

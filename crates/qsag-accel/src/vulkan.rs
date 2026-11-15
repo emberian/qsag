@@ -718,6 +718,13 @@ impl VulkanSpirvBackend {
     }
 
     /// Acquire exclusive ownership of the persistent VRAM prover arena for one proving session.
+    ///
+    /// The `prover_*` calls of a session start with a round-0 commit
+    /// ([`Self::prover_whir_commit_round0_with`]), which sizes the arena. Before it, and for
+    /// any offset, length or uploaded index that would reach outside what the session holds,
+    /// they return [`VulkanError::Accel`] ([`AccelError::LengthOverflow`] or
+    /// [`AccelError::LengthMismatch`]) without touching the device. A failed call scrubs the
+    /// arena and ends the session's data: commit again to continue.
     pub fn try_acquire_prover_session(&self) -> Result<(), VulkanError> {
         #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
         {

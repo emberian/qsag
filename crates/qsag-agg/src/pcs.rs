@@ -34,7 +34,7 @@
 //! [`whir_open_batch`] proves $W_i(p_i) = e_i$ for all $i \in [0, S)$ with one point-reduction
 //! sumcheck over $\mathbb{F}_{p^4}$ followed by an asymmetric affine cascade [CWYZ26].
 
-mod affine;
+pub(crate) mod affine;
 #[cfg(test)]
 mod affine_schedule;
 use affine::*;
@@ -171,8 +171,32 @@ impl WhirSecurityRegime {
         }
     }
 
+    /// Nominal single-round Grover search work is at least 128 bits.
+    /// This is a per-round work estimate, not a composed QROM security theorem.
+    /// Tag 2 has 72 bits, tag 4 has 136; tags 5/7 have 108 and 6/8 have 107.
+    pub fn meets_unconditional_grover_128_floor(self) -> bool {
+        self.qrom_grover_round_bits() >= 128
+    }
+
+    /// Uses a CDHZ25 bounded-query profile, rather than a 128-bit nominal Grover floor.
+    /// The PoW profile is accounted for at Q <= 2^38, and the zero-PoW profile at
+    /// Q + 1 <= 2^40, as documented on Self. This does not promise security at 2^64 queries.
+    pub fn meets_bounded_qrom_128_profile(self) -> bool {
+        matches!(
+            self,
+            Self::Cdhz25JohnsonQrom128
+                | Self::Cdhz25ZeroPowQrom128
+                | Self::Poseidon2Cdhz25JohnsonQrom128
+                | Self::Poseidon2Cdhz25ZeroPowQrom128
+        )
+    }
+
+    /// Backwards-compatible aggregate authorization policy: either the nominal Grover
+    /// floor or a bounded-query CDHZ25 profile. Despite the historical name, true does
+    /// NOT imply 128 bits of unconditional Grover work. Use the separate predicates
+    /// above when inspecting security assumptions. Classical tag 2 is never authorized.
     pub fn meets_qrom_128_floor(self) -> bool {
-        !matches!(self, Self::BciksJohnsonClassical128)
+        self.meets_unconditional_grover_128_floor() || self.meets_bounded_qrom_128_profile()
     }
 
     /// Merkle-Canopy trees and the Fiat–Shamir transcript use width-12 Poseidon2.
@@ -370,8 +394,15 @@ fn stage_geometry(num_vars: usize) -> WhirSchedule {
 }
 
 impl WhirSchedule {
-    /// Reject malformed, under-budget, or oversized schedules before any allocation.
+    /// Aggregate authorization: canonical structure plus an accepted QROM profile.
     pub fn validate(&self, num_vars: usize) -> bool {
+        self.validate_structural(num_vars) && self.regime.meets_qrom_128_floor()
+    }
+
+    /// Validate geometry, resource limits, and the canonical query table of the selected
+    /// regime, without imposing aggregate authorization policy. Explicit low-level PCS
+    /// callers may select classical tag 2; aggregate callers must use validate instead.
+    pub fn validate_structural(&self, num_vars: usize) -> bool {
         if !(2..=MAX_PCS_NUM_VARS).contains(&num_vars)
             || !(1..=EARLY_STOP_VARS).contains(&self.early_stop_vars)
             || self.stages.is_empty()
@@ -409,9 +440,7 @@ impl WhirSchedule {
             }
             remaining -= stage.step_vars;
         }
-        remaining == self.early_stop_vars
-            && self.regime.meets_qrom_128_floor()
-            && self.is_canonical(num_vars)
+        remaining == self.early_stop_vars && self.is_canonical(num_vars)
     }
 
     /// Is this exactly the canonical schedule of its own regime for `num_vars`? Only canonical
@@ -1873,9 +1902,7 @@ pub fn poseidon2_round0_leaf(
     num_polys: usize,
     vals: &[Goldilocks],
 ) -> [u8; 32] {
-    debug_assert!(
-        (1..=MAX_BATCH_POLYS).contains(&num_polys) && vals.len() <= MAX_ROUND0_LEAF_VALS
-    );
+    debug_assert!((1..=MAX_BATCH_POLYS).contains(&num_polys) && vals.len() <= MAX_ROUND0_LEAF_VALS);
     let arity = vals.len() / num_polys;
     let mut limbs = [Goldilocks::ZERO; 3 + MAX_ROUND0_LEAF_VALS];
     for (dst, chunk) in limbs.iter_mut().zip(salt.chunks(7)) {
@@ -2099,7 +2126,12 @@ fn build_ext4_stage_tree(
 
 /// Leaf digest of one `GoldilocksExt4` stage fiber under `hash`.
 #[inline]
-fn ext4_leaf_digest(hash: CanopyHash, stage_idx: u8, leaf_idx: u32, vals: &[GoldilocksExt4]) -> [u8; 32] {
+fn ext4_leaf_digest(
+    hash: CanopyHash,
+    stage_idx: u8,
+    leaf_idx: u32,
+    vals: &[GoldilocksExt4],
+) -> [u8; 32] {
     match hash {
         CanopyHash::Cshake256 => hash_ext4_group(stage_idx, leaf_idx, vals),
         CanopyHash::Poseidon2 { .. } => poseidon2_ext4_leaf(stage_idx, leaf_idx, vals),
@@ -3204,7 +3236,7 @@ pub(crate) fn whir_commit_batch_owned_with_schedule_and_extra_vram(
     let num_vars = table_len.trailing_zeros() as usize;
     assert!(num_vars <= MAX_PCS_NUM_VARS);
 
-    assert!(schedule.validate(num_vars));
+    assert!(schedule.validate_structural(num_vars));
     let schedule = schedule.clone();
     let st0 = schedule.stages[0];
     let group_arity_0 = 1usize << st0.step_vars;
@@ -3295,8 +3327,13 @@ pub(crate) fn whir_commit_batch_owned_with_schedule_and_extra_vram(
     #[cfg(not(feature = "vulkan"))]
     let _ = extra_witness_words;
 
-    let (codewords_0, tree_0) =
-        build_cpu_round0(&polys, salt_seed, schedule.regime, st0.blowup, group_arity_0);
+    let (codewords_0, tree_0) = build_cpu_round0(
+        &polys,
+        salt_seed,
+        schedule.regime,
+        st0.blowup,
+        group_arity_0,
+    );
     let comm = tree_0.commitment();
     (
         comm,
@@ -3643,6 +3680,8 @@ where
     run(0, half)
 }
 
+type ActiveStageOracle = (Vec<GoldilocksExt4>, MerkleCanopyTree, [GoldilocksExt4; 2]);
+
 /// Core multi-stage `Hem` WHIR rate-escalated opening over `GoldilocksExt4`.
 fn whir_open_core(
     state: &HemWhirProverState,
@@ -3747,11 +3786,7 @@ fn whir_open_core(
     let mut k_scratch = Vec::with_capacity(cur_k.len() / 2 + 2);
 
     // Staged `Ext4` oracle currently active for `stage_idx >= 1`: `(cw, tree, ood_eval)`.
-    let mut active_stage_oracle: Option<(
-        Vec<GoldilocksExt4>,
-        MerkleCanopyTree,
-        [GoldilocksExt4; 2],
-    )> = None;
+    let mut active_stage_oracle: Option<ActiveStageOracle> = None;
     let mut folded_layers: Vec<WhirStageProof> = Vec::with_capacity(num_stages.saturating_sub(1));
 
     for (stage_idx, st) in sched.stages.iter().enumerate() {
@@ -5161,7 +5196,11 @@ pub struct WeightedPoint {
 
 /// `kernel[i] += weight * prod_j point[j]^{bit_j(i)}` for `i < 2^point.len()`: the
 /// monomial-basis functional of `weight * W(point, 0, ..., 0)`.
-pub fn add_point_kernel(kernel: &mut [GoldilocksExt4], weight: GoldilocksExt4, point: &[GoldilocksExt4]) {
+pub fn add_point_kernel(
+    kernel: &mut [GoldilocksExt4],
+    weight: GoldilocksExt4,
+    point: &[GoldilocksExt4],
+) {
     assert!(kernel.len() >= 1usize << point.len());
     let mut table = Vec::with_capacity(1usize << point.len());
     table.push(weight);
@@ -5197,7 +5236,14 @@ pub fn whir_open_blend(
     assert_eq!(kernel.len(), (1usize << state.num_vars) + 2);
     let weights: Vec<[GoldilocksExt4; 2]> =
         scalars.iter().map(|&s| [s, GoldilocksExt4::ZERO]).collect();
-    whir_open_core(state, Some(monomial_polys), &weights, kernel, claim, transcript)
+    whir_open_core(
+        state,
+        Some(monomial_polys),
+        &weights,
+        kernel,
+        claim,
+        transcript,
+    )
 }
 
 /// Verify a [`whir_open_blend`] proof for the functional
@@ -5277,7 +5323,7 @@ fn whir_verify_core_claims(
         return false;
     }
 
-    if !sched.validate(num_vars) {
+    if !sched.validate_structural(num_vars) {
         return false;
     }
     let num_stages = sched.stages.len();
@@ -5843,8 +5889,7 @@ fn verify_and_fold_ext4_stage_fibers(
         sorted_leaves.extend_from_slice(&leaves[..len]);
         folded.extend_from_slice(&values[..len]);
     }
-    if !verify_canopy_multiproof_with(hash, &layer.commitment, &sorted_leaves, &layer.multiproof)
-    {
+    if !verify_canopy_multiproof_with(hash, &layer.commitment, &sorted_leaves, &layer.multiproof) {
         return None;
     }
     accepted_fiber_claims(folded)
@@ -6010,7 +6055,11 @@ mod pcs_unit_tests {
                     }
                 }
             }
-            assert_eq!(hypercube_to_monomial_coeffs_ext4(&ext), expected_ext, "ext ell {ell}");
+            assert_eq!(
+                hypercube_to_monomial_coeffs_ext4(&ext),
+                expected_ext,
+                "ext ell {ell}"
+            );
         }
     }
 
@@ -6149,6 +6198,8 @@ mod pcs_unit_tests {
             assert_eq!(regime.classical_fs_round_bits(), bits);
             assert_eq!(regime.qrom_grover_round_bits(), bits / 2);
             assert_eq!(regime.meets_qrom_128_floor(), tag != 2);
+            assert_eq!(regime.meets_unconditional_grover_128_floor(), tag == 4);
+            assert_eq!(regime.meets_bounded_qrom_128_profile(), tag >= 5);
             assert_eq!(regime.pow_bits(), pow_bits);
             assert_eq!(regime.uses_poseidon2_canopy(), poseidon2);
             assert_eq!(
@@ -6179,6 +6230,7 @@ mod pcs_unit_tests {
         for regime in WhirSecurityRegime::ALL {
             for nv in 2..=MAX_PCS_NUM_VARS {
                 let schedule = regime.schedule(nv);
+                assert!(schedule.validate_structural(nv));
                 if !regime.meets_qrom_128_floor() {
                     assert!(!schedule.validate(nv));
                     assert!(WhirSchedule::from_bytes_canonical(&schedule.to_bytes(), nv).is_none());
@@ -6212,6 +6264,42 @@ mod pcs_unit_tests {
                 assert!(!bad.validate(nv));
             }
         }
+    }
+
+    #[test]
+    fn explicit_classical_pcs_works_without_authorizing_aggregates() {
+        let nv = 3;
+        let schedule = WhirSecurityRegime::BciksJohnsonClassical128.schedule(nv);
+        assert!(schedule.validate_structural(nv));
+        assert!(!schedule.validate(nv));
+        let values: Vec<_> = (0..1u64 << nv).map(Goldilocks::from_u64_reduced).collect();
+        let point = vec![GoldilocksExt4::from_u64(3); nv];
+        let value = crate::field::mle_eval_base_at_ext4(&values, &point);
+        let transcript = || {
+            FiatShamirTranscript::new()
+                .bind_relation(b"EXPLICIT_CLASSICAL_PCS", b"", &schedule)
+                .bind_instance(&[b"test"])
+        };
+        let (comm, state) =
+            whir_commit_batch_owned_with_schedule(vec![values], &[8; 32], &schedule);
+        let proof = whir_open(&state, &point, value, &mut transcript());
+        assert!(whir_verify_with_schedule(
+            &comm,
+            nv,
+            &point,
+            value,
+            &proof,
+            &mut transcript(),
+            &schedule
+        ));
+        assert!(!whir_verify(
+            &comm,
+            nv,
+            &point,
+            value,
+            &proof,
+            &mut transcript()
+        ));
     }
 
     #[test]
@@ -6709,10 +6797,14 @@ mod pcs_unit_tests {
                 ));
                 let mut deeper = comm;
                 deeper.log_leaves += 1;
-                assert!(!verify_canopy_multiproof_with(hash, &deeper, &leaves, &proof));
+                assert!(!verify_canopy_multiproof_with(
+                    hash, &deeper, &leaves, &proof
+                ));
                 let mut shallower = comm;
                 shallower.log_leaves -= 1;
-                assert!(!verify_canopy_multiproof_with(hash, &shallower, &leaves, &proof));
+                assert!(!verify_canopy_multiproof_with(
+                    hash, &shallower, &leaves, &proof
+                ));
 
                 let mut extra = proof.clone();
                 extra.auth_siblings.push([0; 32]);
@@ -6736,11 +6828,18 @@ mod pcs_unit_tests {
                 }
                 let mut duplicate = leaves.clone();
                 duplicate.insert(0, leaves[0]);
-                assert!(!verify_canopy_multiproof_with(hash, &comm, &duplicate, &proof));
+                assert!(!verify_canopy_multiproof_with(
+                    hash, &comm, &duplicate, &proof
+                ));
             }
         }
         // Leaf digests bind their own index, arity, stage and (Round 0) salt and batch width.
-        let vals = [Goldilocks::ONE, Goldilocks::TWO, Goldilocks::ONE, Goldilocks::TWO];
+        let vals = [
+            Goldilocks::ONE,
+            Goldilocks::TWO,
+            Goldilocks::ONE,
+            Goldilocks::TWO,
+        ];
         let base = poseidon2_round0_leaf(3, &[1; 16], 1, &vals);
         assert_ne!(base, poseidon2_round0_leaf(4, &[1; 16], 1, &vals));
         assert_ne!(base, poseidon2_round0_leaf(3, &[2; 16], 1, &vals));
@@ -6778,7 +6877,12 @@ mod pcs_unit_tests {
         let value = crate::field::mle_eval_base_at_ext4(&evals, &point);
         let (comm, state) = whir_commit_owned_with_schedule(evals, &[5; 32], &schedule);
         assert_eq!(comm.log_leaves, 21);
-        let proof = whir_open(&state, &point, value, &mut regime_transcript(&schedule, b"nv25"));
+        let proof = whir_open(
+            &state,
+            &point,
+            value,
+            &mut regime_transcript(&schedule, b"nv25"),
+        );
         drop(state);
         assert!(whir_verify_with_schedule(
             &comm,

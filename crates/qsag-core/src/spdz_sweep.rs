@@ -48,7 +48,7 @@ use crate::preprocessing::{
 use crate::rss256::Rss256Error;
 use crate::sponge::keccak::SHAKE256_RATE_BYTES;
 use crate::tsw_baggy::{HashAdrs, TAG_PRF, TAG_TH_F};
-use crate::wipe::SecretVec;
+use crate::wipe::{SecretVec, secret_vec_push, secret_vecs_with_capacity};
 use crate::wots_c::LaneSpec;
 
 /// Sponge instances per bitsliced permutation.
@@ -406,8 +406,9 @@ impl<'a> SpdzSweepEngine<'a> {
             return self.fail(KeccakMpcError::InvalidParameters);
         };
         let m = self.quorum_pts.len();
-        let mut cut_sh = SecretVec::new(vec![Vec::new(); m]);
-        let mut cut_mac = SecretVec::new(vec![Vec::new(); m]);
+        let cut_words = groups.len() * DIGEST_BITS;
+        let mut cut_sh = secret_vecs_with_capacity(m, cut_words);
+        let mut cut_mac = secret_vecs_with_capacity(m, cut_words);
         for &(value, mask) in groups {
             for p in 0..m {
                 for bit in 0..DIGEST_BITS {
@@ -423,11 +424,15 @@ impl<'a> SpdzSweepEngine<'a> {
                             }
                         }
                     }
-                    cut_sh[p].push(word);
-                    cut_mac[p].push(tags);
+                    secret_vec_push(&mut cut_sh[p], word);
+                    secret_vec_push(&mut cut_mac[p], tags);
                 }
             }
         }
+        debug_assert!(
+            cut_sh.iter().all(|v| v.capacity() == cut_words)
+                && cut_mac.iter().all(|v| v.capacity() == cut_words)
+        );
         let opened = match commit_and_open_spdz_bs_gf256_batch_quorum(
             &self.session_id,
             "baggy_spdz_open",

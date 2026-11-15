@@ -35,6 +35,8 @@ public import Qsag.Math.Goldilocks
 public import Qsag.Math.Gf2Pow128
 public import Qsag.Oracle.Poseidon2
 public import Qsag.Protocol.Aggregation.UcGames
+import all Qsag.Math.Algebra
+import all Qsag.Oracle.Qrom
 import all Qsag.Math.Goldilocks
 import all Qsag.Math.Gf2Pow128
 import all Qsag.Oracle.Poseidon2
@@ -341,12 +343,15 @@ def shareAddConst (c : R) (xs : List R) : List R :=
 @[simp] theorem shareAddConst_length (c : R) (xs : List R) :
     (shareAddConst c xs).length = xs.length := List.length_map _
 
+private theorem ringDot_consC (a b : R) (as bs : List R) :
+    ringDot (a :: as) (b :: bs) = add (mul a b) (ringDot as bs) := by rfl
+
 theorem ringListSum_zipWith_mul :
     ∀ (ls xs : List R), ringListSum (List.zipWith mul ls xs) = ringDot ls xs
   | [], _ => rfl
   | _ :: _, [] => rfl
   | l :: ls, x :: xs => by
-    simp only [List.zipWith, ringListSum, ringDot, ringListSum_zipWith_mul ls xs]
+    simp only [List.zipWith, ringListSum, ringDot_consC, ringListSum_zipWith_mul ls xs]
 
 theorem ringDot_zipAdd :
     ∀ {ls xs ys : List R}, xs.length = ys.length →
@@ -354,7 +359,7 @@ theorem ringDot_zipAdd :
   | [], _, _, _ => by simp [ringDot, LawfulCommRing.add_zero]
   | _ :: _, [], [], _ => by simp [ringListZipAdd, ringDot, LawfulCommRing.add_zero]
   | _ :: ls, _ :: xs, _ :: ys, h => by
-    simp only [ringListZipAdd, ringDot, ringDot_zipAdd (Nat.succ.inj h),
+    simp only [ringListZipAdd, ringDot_consC, ringDot_zipAdd (Nat.succ.inj h),
       LawfulCommRing.left_distrib, LawfulCommRing.add_add_add_comm]
 
 theorem ringDot_zipSub :
@@ -363,7 +368,7 @@ theorem ringDot_zipSub :
   | [], _, _, _ => by simp [ringDot, LawfulCommRing.sub_self]
   | _ :: _, [], [], _ => by simp [shareZipSub, ringDot, LawfulCommRing.sub_self]
   | l :: ls, x :: xs, y :: ys, h => by
-    simp only [shareZipSub, ringDot, ringDot_zipSub (Nat.succ.inj h), LawfulCommRing.mul_sub]
+    simp only [shareZipSub, ringDot_consC, ringDot_zipSub (Nat.succ.inj h), LawfulCommRing.mul_sub]
     apply LawfulCommRing.add_left_cancel (a := add (mul l y) (ringDot ls ys))
     rw [LawfulCommRing.add_sub_cancel_left,
         LawfulCommRing.add_add_add_comm,
@@ -455,12 +460,13 @@ theorem shamirBeaverFromPairwiseOle_valid
         | cons l ls' ih =>
           cases qs with
           | nil => rfl
-          | cons _ qs' => simp [ringDot, LawfulCommRing.mul_zero, ih qs', LawfulCommRing.zero_add]
+          | cons _ qs' => simp [ringDot_consC, LawfulCommRing.mul_zero, ih qs', LawfulCommRing.zero_add]
       exact h0 lambdas pts
     | cons p ps' ih =>
       simp only [sumSubPolyShares, List.map_cons, ringListSum]
       rw [ringDot_zipAdd (by simp [sumSubPolyShares_length]),
-          lagrangeAtZero_evalCoeffs lambdas pts p t (hPsDeg p (.head _)) hZero hHigher,
+          show ringDot lambdas (pts.map (RoundPoly.evalCoeffs p)) = RoundPoly.evalCoeffs p zero from
+            lagrangeAtZero_evalCoeffs lambdas pts p t (hPsDeg p (.head _)) hZero hHigher,
           ih (fun q hq => hPsDeg q (.tail _ hq))]
   refine ⟨hALen, hBLen, (sumSubPolyShares_length pts cPolys).trans hPtsLen, ?_⟩
   rw [hSubSum cPolys hDeg, hConst, ole_pairwise_cross_sum_eq_mul hOle,
@@ -853,7 +859,7 @@ theorem ringDot_ofBase :
   | [], _ => rfl
   | _ :: _, [] => rfl
   | l :: ls, x :: xs => by
-    simp only [List.map_cons, ringDot, GoldilocksExt2.ofBase_add, GoldilocksExt2.ofBase_mul,
+    simp only [List.map_cons, ringDot_consC, GoldilocksExt2.ofBase_add, GoldilocksExt2.ofBase_mul,
       ringDot_ofBase ls xs]
 
 theorem ringListSum_scale {R : Type} [LawfulCommRing R] (c : R) :

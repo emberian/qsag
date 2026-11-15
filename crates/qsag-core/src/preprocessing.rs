@@ -50,8 +50,8 @@ pub use crate::field::tower::{
 };
 use crate::sponge::keccak::{Cshake256Xof, cshake256_32, cshake256_32_multi_frame, keccak_f1600};
 use crate::wipe::{
-    SecretBuffer, ct_eq_bytes32, secret_vec_extend_from_slice, wipe_bytes, wipe_bytes32, wipe_u16s,
-    wipe_u64s, wipe_u128s,
+    SecretBuffer, ct_eq_bytes32, secret_vec_extend_from_slice, secret_vec_push, wipe_bytes,
+    wipe_bytes32, wipe_u16s, wipe_u64s, wipe_u128s,
 };
 
 mod triple_f2;
@@ -7649,8 +7649,8 @@ pub fn commit_and_open_spdz_bs_gf256_batch_quorum(
                 &salt,
             ],
         );
-        sigmas.push([s0, s1]);
-        sig_salts.push(salt);
+        secret_vec_push(&mut sigmas, [s0, s1]);
+        secret_vec_push(&mut sig_salts, salt);
         sig_coms.push(com);
     }
 
@@ -8607,7 +8607,7 @@ pub fn commit_and_open_degree_ext2(
         wipe_bytes(&mut pid);
         wipe_bytes(&mut c0_b);
         wipe_bytes(&mut c1_b);
-        salts.push(salt);
+        secret_vec_push(&mut salts, salt);
         wipe_bytes32(&mut salt);
         coms.push(com);
     }
@@ -9133,7 +9133,7 @@ pub fn commit_and_open_spdz_goldilocks_batch_quorum(
         }
         let mut com = [0u8; 32];
         xof.squeeze(&mut com);
-        salts.push(salt);
+        secret_vec_push(&mut salts, salt);
         wipe_bytes32(&mut salt);
         coms.push(com);
     }
@@ -9238,8 +9238,8 @@ pub fn commit_and_open_spdz_goldilocks_batch_quorum(
         wipe_bytes(&mut q_be);
         wipe_bytes(&mut c0_b);
         wipe_bytes(&mut c1_b);
-        sigmas.push(sig_q);
-        sig_salts.push(salt);
+        secret_vec_push(&mut sigmas, sig_q);
+        secret_vec_push(&mut sig_salts, salt);
         wipe_bytes32(&mut salt);
         sig_coms.push(com);
     }

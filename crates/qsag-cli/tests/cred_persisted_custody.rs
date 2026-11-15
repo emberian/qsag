@@ -9,8 +9,8 @@ impl Scratch {
         Self::named("rss")
     }
     fn named(tag: &str) -> Self {
-        let path = std::env::temp_dir()
-            .join(format!("qsag-cred-custody-{tag}-{}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("qsag-cred-custody-{tag}-{}", std::process::id()));
         std::fs::create_dir(&path).unwrap();
         Self(path)
     }
@@ -153,8 +153,18 @@ fn mldsa_seventeen_custodians_sign_from_three_shamir_share_files() {
     std::fs::write(&message, b"seventeen custodians, three online").unwrap();
     let keygen = |backend: &[&str], out: &str| {
         let mut args = vec![
-            "cred", "mldsa-keygen", "--threshold", "2", "--parties", "17", "--vault-dir", out,
-            "--public-out", &public, "--deterministic", "--passphrase-env",
+            "cred",
+            "mldsa-keygen",
+            "--threshold",
+            "2",
+            "--parties",
+            "17",
+            "--vault-dir",
+            out,
+            "--public-out",
+            &public,
+            "--deterministic",
+            "--passphrase-env",
             "QSAG_CUSTODY_TEST_PASS",
         ];
         args.extend_from_slice(backend);
@@ -188,8 +198,20 @@ fn mldsa_seventeen_custodians_sign_from_three_shamir_share_files() {
     let sign = |signers: &str, epoch: &str, out: &str| {
         run(
             &[
-                "cred", "mldsa-sign", "--vault-dir", &vault, "--signers", signers, "--epoch",
-                epoch, "--in", &message, "--out", out, "--deterministic", "--passphrase-env",
+                "cred",
+                "mldsa-sign",
+                "--vault-dir",
+                &vault,
+                "--signers",
+                signers,
+                "--epoch",
+                epoch,
+                "--in",
+                &message,
+                "--out",
+                out,
+                "--deterministic",
+                "--passphrase-env",
                 "QSAG_CUSTODY_TEST_PASS",
             ],
             "custody test passphrase",
@@ -202,7 +224,14 @@ fn mldsa_seventeen_custodians_sign_from_three_shamir_share_files() {
         String::from_utf8_lossy(&signed.stderr)
     );
     success(&[
-        "cred", "mldsa-verify", "--public", &public, "--in", &message, "--sig", &signature,
+        "cred",
+        "mldsa-verify",
+        "--public",
+        &public,
+        "--in",
+        &message,
+        "--sig",
+        &signature,
     ]);
     let refused = sign("3,16", "1", &dir.path("too-small"));
     assert_eq!(refused.status.code(), Some(4));

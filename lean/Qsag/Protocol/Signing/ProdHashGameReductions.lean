@@ -8,6 +8,7 @@ import all Qsag.Protocol.Signing.ProdCollisionWitness
 import all Qsag.Protocol.Signing.HypertreeEufCma
 import all Qsag.Protocol.Signing.HashSigs
 import all Qsag.Protocol.Aggregation.UcGames
+import all Qsag.Math.Algebra
 import Qsag.Tactic.AssuranceKit
 
 /-!

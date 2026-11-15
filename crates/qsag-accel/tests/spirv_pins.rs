@@ -85,8 +85,8 @@ fn embedded_spirv_modules_match_their_sha256_pins() {
         assert!(
             words
                 .iter()
-                .zip(bytes.chunks_exact(4))
-                .all(|(w, b)| w.to_le_bytes() == b),
+                .zip(bytes.as_chunks::<4>().0)
+                .all(|(w, b)| w.to_le_bytes() == *b),
             "{name}"
         );
         let pinned = PINS

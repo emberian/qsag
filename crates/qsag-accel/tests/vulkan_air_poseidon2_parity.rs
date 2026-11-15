@@ -297,9 +297,9 @@ fn op_constraints(
             emit(prev(ST_REM_PACK + slot) - (idx_j + quot.scale(256)));
             emit(next(ST_REM_PACK + slot) - quot);
             let tweak1 = prev(ST_KP_IDX).scale(1 << 24) + step_c0 + idx_j;
-            for i in 0..4 {
+            for (i, &seed_i) in pk_seed.iter().enumerate() {
                 emit(st_in(i) - aux(i));
-                emit(st_in(4 + i) - pk_seed[i]);
+                emit(st_in(4 + i) - seed_i);
                 emit(next(ST_WORK + i) - feed_forward(aux(i), i));
             }
             emit(st_in(8) - E::base(DOMAIN_FORS_LEAF));
@@ -322,10 +322,10 @@ fn op_constraints(
             let rem_r = E::base(3) - (u0 + u1 + u2);
             emit(prev(ST_REM_PACK + slot) - (rem_r + quot.scale(4)));
             emit(next(ST_REM_PACK + slot) - quot);
-            for i in 0..4 {
+            for (i, &seed_i) in pk_seed.iter().enumerate() {
                 let sig_i = aux(i);
                 emit(st_in(i) - sig_i);
-                emit(st_in(4 + i) - pk_seed[i]);
+                emit(st_in(4 + i) - seed_i);
                 let ff_i = feed_forward(sig_i, i);
                 emit(next(ST_WORK + i) - (u0 * sig_i + (E::ONE - u0) * ff_i));
             }
@@ -346,10 +346,10 @@ fn op_constraints(
                 (_, 0) => (prev(ST_WOTS_U2), ST_SUB_SPONGE),
                 _ => (prev(ST_WOTS_U2), ST_WORK),
             };
-            for i in 0..4 {
+            for (i, &seed_i) in pk_seed.iter().enumerate() {
                 let cur_i = prev(ST_WORK + i);
                 emit(st_in(i) - cur_i);
-                emit(st_in(4 + i) - pk_seed[i]);
+                emit(st_in(4 + i) - seed_i);
                 let ff_i = feed_forward(cur_i, i);
                 emit(next(dst + i) - (skip * cur_i + (E::ONE - skip) * ff_i));
             }
@@ -453,14 +453,15 @@ fn honest_row(
             gl_add(gl_mul(2, st_in[4 + i]), gl_mul(4, st_in[8 + i])),
         )
     };
-    let hash_input = |st_in: &mut [u64; 12], in0: [u64; 4], domain: u64, tweak: u64, prev: &[u64]| {
-        st_in[..4].copy_from_slice(&in0);
-        st_in[4..8].copy_from_slice(pk_seed);
-        st_in[8] = gl_reduce_u64(domain);
-        st_in[9] = tweak;
-        st_in[10] = prev[ST_TREE_LO];
-        st_in[11] = prev[ST_TREE_HI];
-    };
+    let hash_input =
+        |st_in: &mut [u64; 12], in0: [u64; 4], domain: u64, tweak: u64, prev: &[u64]| {
+            st_in[..4].copy_from_slice(&in0);
+            st_in[4..8].copy_from_slice(pk_seed);
+            st_in[8] = gl_reduce_u64(domain);
+            st_in[9] = tweak;
+            st_in[10] = prev[ST_TREE_LO];
+            st_in[11] = prev[ST_TREE_HI];
+        };
     let addr_limb = |prev: &[u64]| gl_add(step_c0, gl_mul(prev[ST_KP_IDX], 1 << 16));
     let mut sbox = [0u64; NUM_SBOX];
     let mut next;
@@ -479,10 +480,7 @@ fn honest_row(
             }
             aux[8] = if zero_prev { 0 } else { rng.word() >> 24 };
             prev[ST_REM_PACK + slot] = gl_add(idx_j, gl_mul(aux[8], 256));
-            let tweak1 = gl_add(
-                gl_mul(prev[ST_KP_IDX], 1 << 24),
-                gl_add(step_c0, idx_j),
-            );
+            let tweak1 = gl_add(gl_mul(prev[ST_KP_IDX], 1 << 24), gl_add(step_c0, idx_j));
             let leaf = [aux[0], aux[1], aux[2], aux[3]];
             hash_input(&mut st_in, leaf, DOMAIN_FORS_LEAF, tweak1, &prev);
             let perm = record_canonical_perm(st_in, &mut sbox);
@@ -809,16 +807,26 @@ fn fixture_rows_satisfy_the_canonical_air_and_violate_the_retired_one() {
             );
             (emitted, group_a_bad, op_bad)
         };
-        assert_eq!(residuals(CANONICAL), (NUM_GROUP_A, 0, 0), "row {row} uid {uid}");
+        assert_eq!(
+            residuals(CANONICAL),
+            (NUM_GROUP_A, 0, 0),
+            "row {row} uid {uid}"
+        );
         let (_, legacy_group_a_bad, legacy_op_bad) = residuals(LEGACY);
-        assert!(legacy_group_a_bad > 0, "row {row}: retired matrices accepted");
+        assert!(
+            legacy_group_a_bad > 0,
+            "row {row}: retired matrices accepted"
+        );
         // The feed-forward is live unless the row is idle or a first chain step that skips
         // the hash (`u0 = 1` keeps the signature limb).
         let kind = UNIQUE_OPS[uid].0;
         let skips_hash = kind == KIND_WOTS_CHAIN_STEP0 && st.cols[row][COL_AUX + 4] == E::ONE;
         if kind != KIND_IDLE && !skips_hash {
             feed_forward_rows += 1;
-            assert!(legacy_op_bad > 0, "row {row}: retired feed-forward accepted");
+            assert!(
+                legacy_op_bad > 0,
+                "row {row}: retired feed-forward accepted"
+            );
         }
     }
     assert!(kinds_seen.iter().all(|&n| n >= 8), "{kinds_seen:?}");
@@ -911,7 +919,12 @@ fn dyn_tables(fx: &Fixture, tables: &StaticTables, st: &RoundState) -> DynTables
         words.extend_from_slice(&[(entries.len() / 3) as u64, pairs.len() as u64, 0, 0]);
         for (uid, v0, dv) in pairs {
             let (kind, arg) = UNIQUE_OPS[uid];
-            entries.push([u64::from(kind), u64::from(arg), tables.op_gamma_base[uid], 0]);
+            entries.push([
+                u64::from(kind),
+                u64::from(arg),
+                tables.op_gamma_base[uid],
+                0,
+            ]);
             entries.push(v0.0);
             entries.push(dv.0);
         }
@@ -1027,8 +1040,16 @@ fn air_row_group_kernels_match_the_canonical_poseidon2_and_weighted_wots_referen
     ]);
     let col_dst = 0u32;
     let sh_dst = (3 * ROWS) as u32;
-    gpu.prover_air_fold_round(true, ROWS, cols_base_word_offset, col_dst, 0, sh_dst, chal.0)
-        .expect("round 0 fold");
+    gpu.prover_air_fold_round(
+        true,
+        ROWS,
+        cols_base_word_offset,
+        col_dst,
+        0,
+        sh_dst,
+        chal.0,
+    )
+    .expect("round 0 fold");
     let st1 = fold(st0, chal);
     let half = ROWS / 2;
     let mut gpu_cols = vec![[0u64; 4]; NUM_COLS * half];
@@ -1037,7 +1058,11 @@ fn air_row_group_kernels_match_the_canonical_poseidon2_and_weighted_wots_referen
         .expect("read folded tables");
     for c in 0..NUM_COLS {
         for row in 0..half {
-            assert_eq!(E(gpu_cols[c * half + row]), st1.cols[row][c], "col {c} row {row}");
+            assert_eq!(
+                E(gpu_cols[c * half + row]),
+                st1.cols[row][c],
+                "col {c} row {row}"
+            );
         }
     }
     for (t, table) in [&st1.eq_tau, &st1.eq_not_last, &st1.shift_tau]

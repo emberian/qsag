@@ -29,6 +29,7 @@ use alloc::vec::Vec;
 pub mod blind_vc;
 pub mod multisig;
 pub mod protocol;
+pub mod recursive_whir;
 pub mod relation;
 
 use crate::field::{
@@ -596,11 +597,14 @@ pub fn interp(xs: &[E], ys: &[E]) -> Option<Vec<E>> {
     for (&xi, &yi) in rest_x.iter().zip(&ys[1..]) {
         let dx = xi - x;
         if dx.is_zero() {
+            qsag_asm::volatile_fill(&mut diffs, E::ZERO);
             return None;
         }
         diffs.push((yi - y) * dx.inv());
     }
-    let q = interp(rest_x, &diffs)?;
+    let result = interp(rest_x, &diffs);
+    qsag_asm::volatile_fill(&mut diffs, E::ZERO);
+    let mut q = result?;
     // Coefficients of `y + (X - x) q(X)` (`unquot`).
     let mut out = vec![E::ZERO; q.len() + 1];
     let mut carry = y;
@@ -609,6 +613,7 @@ pub fn interp(xs: &[E], ys: &[E]) -> Option<Vec<E>> {
         carry = qk;
     }
     out[q.len()] = carry;
+    qsag_asm::volatile_fill(&mut q, E::ZERO);
     Some(out)
 }
 

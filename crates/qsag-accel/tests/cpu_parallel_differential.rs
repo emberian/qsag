@@ -215,11 +215,11 @@ fn canonical_spirv_pin_digests_are_frozen() {
         ),
         (
             ProverKernelSlot::AirRowGroupA,
-            "67a5dd6aad52e4835f4cc1a417825c1fcab987dafb7a1dbe540757d8cd201fa7",
+            "147e99f14ec62bda0bdd0782a42ec3bc600c11bf811396e612c03467736cdcb1",
         ),
         (
             ProverKernelSlot::AirRowGroupB,
-            "5f2d1d2380b416ba3c40f68e0bc49842b867b9e42a5b2bc364df5ce82c5ddf60",
+            "3471e16328ed2f3566ce946dd4cde7aced74edf23884355964dc9d9cd8cdfaa0",
         ),
     ];
     assert_eq!(prover.map(|(slot, _)| slot), ProverKernelSlot::ALL);

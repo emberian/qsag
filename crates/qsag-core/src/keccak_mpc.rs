@@ -49,7 +49,7 @@ use crate::tsw_baggy::{
 };
 use crate::wipe::{
     SecretBuffer, ct_eq_bytes, ct_eq_bytes32, ct_eq_u64, secret_vec_extend_from_slice,
-    secret_vec_push, wipe_bytes, wipe_bytes32, wipe_u64s, wipe_u128s,
+    secret_vec_push, secret_vecs_with_capacity, wipe_bytes, wipe_bytes32, wipe_u64s, wipe_u128s,
 };
 
 /// Overflow-safe active-lane bitmask for 64-way bitsliced batches (`batch_len == 64 -> u64::MAX`,
@@ -3460,8 +3460,8 @@ pub(crate) fn verify_pending_spdz_mac_batch(
             b"QSAG.SPDZ.KECCAK.PEND.MAC.COM/v1",
             &[session_id, phase.as_bytes(), &q_be, &s0_b, &s1_b, &salt],
         );
-        sigmas.push(sig_q);
-        sig_salts.push(salt);
+        secret_vec_push(&mut sigmas, sig_q);
+        secret_vec_push(&mut sig_salts, salt);
         sig_coms.push(com);
     }
     for z in z_masks.iter_mut() {
@@ -3594,8 +3594,8 @@ pub fn eval_spdz_keccak_f1600_single(
         }
 
         // 2. Chi: 25 parallel Beaver AND words (`50` masked words opened in 1 round!)
-        let mut de_sh = SecretBuffer(vec![Vec::with_capacity(50); m]);
-        let mut de_mac = SecretBuffer(vec![Vec::with_capacity(50); m]);
+        let mut de_sh = secret_vecs_with_capacity(m, 50);
+        let mut de_mac = secret_vecs_with_capacity(m, 50);
         let mut round_triples_a = SecretBuffer(vec![[[0u64; 8]; 25]; m]);
         let mut round_triples_b = SecretBuffer(vec![[[0u64; 8]; 25]; m]);
         let mut round_triples_c = SecretBuffer(vec![[[0u64; 8]; 25]; m]);
@@ -3639,10 +3639,10 @@ pub fn eval_spdz_keccak_f1600_single(
                 let mut e_m = b_mac[p][v_lane];
                 xor_spdz_macs_assign(&mut e_m, &round_mac_b[p][lane]);
 
-                de_sh[p].push(d_w);
-                de_sh[p].push(e_w);
-                de_mac[p].push(d_m);
-                de_mac[p].push(e_m);
+                secret_vec_push(&mut de_sh[p], d_w);
+                secret_vec_push(&mut de_sh[p], e_w);
+                secret_vec_push(&mut de_mac[p], d_m);
+                secret_vec_push(&mut de_mac[p], e_m);
             }
         }
 
@@ -3777,8 +3777,8 @@ pub fn eval_spdz_keccak_f1600_batch64(
     let mut mac_a = SecretBuffer(vec![vec![ZERO_MAC; N]; m]);
     let mut mac_b = SecretBuffer(vec![vec![ZERO_MAC; N]; m]);
     let mut mac_c = SecretBuffer(vec![vec![ZERO_MAC; N]; m]);
-    let mut de_sh = SecretBuffer(vec![Vec::with_capacity(2 * N); m]);
-    let mut de_mac = SecretBuffer(vec![Vec::with_capacity(2 * N); m]);
+    let mut de_sh = secret_vecs_with_capacity(m, 2 * N);
+    let mut de_mac = secret_vecs_with_capacity(m, 2 * N);
 
     for (rnd, &rc) in KECCAK_ROUND_CONSTANTS.iter().enumerate() {
         // 1. Theta + Rho + Pi on shares and MAC shares: no rotation inside a word, only moves.
@@ -3858,10 +3858,10 @@ pub fn eval_spdz_keccak_f1600_batch64(
                 xor_spdz_macs_assign(&mut d_m, &mac_a[p][idx]);
                 let mut e_m = b_mac[p][v];
                 xor_spdz_macs_assign(&mut e_m, &mac_b[p][idx]);
-                de_sh[p].push(bs_gf256_xor(&not_u_sh, &tr_a[p][idx]));
-                de_sh[p].push(bs_gf256_xor(&b_sh[p][v], &tr_b[p][idx]));
-                de_mac[p].push(d_m);
-                de_mac[p].push(e_m);
+                secret_vec_push(&mut de_sh[p], bs_gf256_xor(&not_u_sh, &tr_a[p][idx]));
+                secret_vec_push(&mut de_sh[p], bs_gf256_xor(&b_sh[p][v], &tr_b[p][idx]));
+                secret_vec_push(&mut de_mac[p], d_m);
+                secret_vec_push(&mut de_mac[p], e_m);
             }
         }
 
@@ -4738,8 +4738,8 @@ impl<'a> SlhMpcOracles for SpdzSlhMpcCluster<'a> {
             }
         }
 
-        let mut cut_sh = SecretBuffer(vec![Vec::with_capacity(out_words); m]);
-        let mut cut_mac = SecretBuffer(vec![Vec::with_capacity(out_words); m]);
+        let mut cut_sh = secret_vecs_with_capacity(m, out_words);
+        let mut cut_mac = secret_vecs_with_capacity(m, out_words);
         for p in 0..m {
             for w in 0..out_words {
                 secret_vec_push(&mut cut_sh[p], st_sh[p][w]);

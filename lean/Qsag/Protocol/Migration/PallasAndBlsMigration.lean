@@ -2,7 +2,7 @@ module
 /-
 # Qsag.Protocol.Migration.PallasAndBlsMigration — Zcash Orchard (`Pallas` / `RedPallas`) & Ethereum Beacon (`BLS12-381`) PQ Ownership Migration
 
-Constructive (`0 Classical.choice`, `0 native_decide`, `0 sorry`) formalization of:
+Items 1–3 are defined and proved in `Qsag.Math.EllipticCurves` and audited here; items 4–5 are this module.
 1. Exact `Pallas` (`y^2 = x^3 + 5`, `p_pallas`, `q_pallas`, `orchardSpendAuthG`) and `BLS12-381` (`y^2 = x^3 + 4`, `p_bls381`, `r_bls381`, `bls381G1`) parameters matching `pallas.rs` and `bls12_381.rs`.
 2. Constructive Lucas–Pratt primality verifier (`checkPrattStep_sound`, `checkPrattDAG_sound`) via binary `lucasPowMod`, certifying `p_pallas`, `q_pallas`, `r_bls381`, `p_bls381`, paired with Carmichael `561` (`#tooth`).
 3. Complete projective RCB addition (`rcbAdd`), curve membership, and prime subgroup annihilation (`[q_pallas] SpendAuthG = O`, `[r_bls381] G_1 = O`), paired with the `BLS12-381` 3-torsion point `(0, 2)` (`#tooth`).
@@ -10,6 +10,7 @@ Constructive (`0 Classical.choice`, `0 native_decide`, `0 sorry`) formalization 
 -/
 
 public import Qsag.Math.EllipticCurves
+import all Qsag.Math.EllipticCurves
 public import Qsag.Tactic.AssuranceKit
 
 public section
@@ -266,10 +267,9 @@ theorem tooth_unreduced_256bit_scalar_alias_all_four_curves
 #verify_constructive
   Qsag.pallas_and_bls381_limbs_and_bit_bounds Qsag.IsPrimeMod.dvd_mul Qsag.lucasPowMod_eq_pow_mod
   Qsag.isPrime_of_lucas_pratt Qsag.checkPrattStep_sound Qsag.checkPrattDAG_sound
-  Qsag.tooth_carmichael_561_passes_fermat_but_fails_pratt
   Qsag.p_pallas_isPrime Qsag.q_pallas_isPrime Qsag.r_bls381_isPrime Qsag.p_bls381_isPrime
   Qsag.pallas_and_bls381_moduli_prime Qsag.orchardSpendAuthG_onCurve_and_prime_subgroup_order
-  Qsag.bls381G1_onCurve_and_prime_subgroup_order Qsag.tooth_bls381_torsion3_onCurve_but_off_subgroup
+  Qsag.bls381G1_onCurve_and_prime_subgroup_order
   Qsag.projEqAffine_zk_constraint_sound Qsag.PrimeSubgroup.smul_injective Qsag.extractThreeShares_complete
   Qsag.zkboo_two_challenge_extraction_sound
   Qsag.tooth_zkboo_single_challenge_information_theoretically_hides_witness

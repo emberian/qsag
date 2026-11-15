@@ -92,6 +92,7 @@ public import Qsag.Tactic.AssuranceKit
 
 import all Qsag.Tactic.Prelude
 import all Qsag.Exec.SimulationSpine
+import all Qsag.Math.Algebra
 import all Qsag.Math.Goldilocks
 import all Qsag.Math.Gf2Pow128
 import all Qsag.Protocol.Aggregation.UcGames
@@ -3021,12 +3022,6 @@ def abortConditionedStatDistNum {SK Msg Rand CorruptIn : Type} {Q w : Nat}
       (survivingRealSigCount spec sk msg cardR decodeRand adv hQ abortPred sig * cardR)
       (idealStandaloneSigCount spec sk msg cardR decodeRand sig * totalSurv))
 
-private theorem qsum_mul_right {n : Nat} (f : Fin n → Nat) (c : Nat) :
-    qsum n (fun i => f i * c) = qsum n f * c := by
-  have h1 : qsum n (fun i => f i * c) = qsum n (fun i => c * f i) :=
-    qsum_congr (fun i => Nat.mul_comm (f i) c)
-  rw [h1, qsum_mul_left, Nat.mul_comm]
-
 private theorem qsum_two (f : Fin 2 → Nat) :
     qsum 2 f = f ⟨0, Nat.zero_lt_succ 1⟩ + f ⟨1, Nat.succ_lt_succ (Nat.zero_lt_succ 0)⟩ := by
   simp [qsum]
@@ -3895,6 +3890,18 @@ private theorem natAbsDiff_comm (a b : Nat) : natAbsDiff a b = natAbsDiff b a :=
   unfold natAbsDiff
   split <;> split <;> omega
 
+private theorem ite_decide_eq_ite {p : Prop} (i₁ i₂ : Decidable p) (a b : Nat) :
+    (if @decide p i₁ = true then a else b) = @ite Nat p i₂ a b := by
+  cases i₁ with
+  | isTrue h =>
+    cases i₂ with
+    | isTrue _ => rfl
+    | isFalse h' => exact absurd h h'
+  | isFalse h =>
+    cases i₂ with
+    | isTrue h' => exact absurd h' h
+    | isFalse _ => rfl
+
 /-- **Blind-guessing bound, one mask assignment**: for fixed Beaver masks, fresh tag and tape,
     at most `q1 + q2 + q3` of the `2^bw` blinds make the real output differ from the simulation,
     for every distinguishing predicate `D` on the adversary's output. -/
@@ -3926,10 +3933,11 @@ theorem romCommit_blind_count_bound
       D (romRealRun spec adv sk msg R hQ tape mr mx ((enumBitVec bw).toFun bi) tagFresh))
     (fun _ => D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr)
       (romViewXor spec adv sk msg R hQ tape mr mx) tagFresh))
-    (fun bi => decide (bi ∈
+    (fun bi => @decide (bi ∈
       ((romIdealAsked adv tape (romViewRing spec sk msg R hQ mr)
         (romViewXor spec adv sk msg R hQ tape mr mx) tagFresh).map spec.blindOf).map
-        (enumBitVec bw).invFun))
+        (enumBitVec bw).invFun)
+      (@List.instDecidableMemOfLawfulBEq (Fin (2 ^ bw)) instBEqOfDecidableEq inferInstance bi _))
     (by
       intro bi hBad
       have hNot := of_decide_eq_false hBad
@@ -3944,8 +3952,16 @@ theorem romCommit_blind_count_bound
   rw [List.length_map, List.length_map] at hCount
   refine Nat.le_trans (Nat.le_trans (Nat.le_of_eq (qsum_congr (fun bi => ?_))) hCount)
     (romIdealAsked_length_le adv tape hQry _ _ _)
-  simp only [decide_eq_true_eq]
+  exact ite_decide_eq_ite _ _ _ _
 
+#print axioms askedRo_length_le --TMPAX
+#print axioms runRo_lookup_none --TMPAX
+#print axioms runRo_agree_off --TMPAX
+#print axioms romIdealAsked_length_le --TMPAX
+#print axioms romReal_eq_ideal_of_blind_unqueried --TMPAX
+#print axioms natAbsDiff_qsum_le_const --TMPAX
+#print axioms natAbsDiff_comm --TMPAX
+#print axioms romCommit_blind_count_bound --TMPAX
 /-- Number of honest mask assignments `(ring mask, boolean mask, 2^bw-blind)` on which the real
     adversary output satisfies `D`. -/
 def romRealCount {SK Msg Rand CorruptIn X T St1 St2 Out : Type} {Q w bw : Nat} [DecidableEq X]

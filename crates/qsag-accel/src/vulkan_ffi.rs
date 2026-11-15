@@ -27,6 +27,31 @@
 //! staging mapping and the VRAM allocations keep the failed job's data until the process exits
 //! and the driver reclaims them. A host that sends secrets to this backend must treat a
 //! device-lost error as a reason to end the process.
+//!
+//! A buffer that a job displaces is cleared before it is freed: a host mapping by a volatile
+//! zero fill of its whole capacity (`destroy_gpu_buffer`), a device-local prover buffer by a
+//! `vkCmdFillBuffer` submission over the extent the session used (`ensure_one_prover_buf`).
+//! No buffer is allocated, replaced or freed, no descriptor set is written and no command pool
+//! is reset unless the engine is `Ready`; `run_job` and `run_prover_job` establish that first.
+//!
+//! # Prover session bounds
+//!
+//! The prover entry points take offsets and lengths from safe callers and hand them to
+//! `vkCmdCopyBuffer` and to shaders that index storage buffers without bounds checks, so every
+//! range is validated on the host before a command is recorded:
+//!
+//! * `job_prover_whir_commit_round0` establishes the arena (`ProverArena::session`). Every
+//!   other prover job fails without it, and a scrub of the session removes it.
+//! * `GpuBuffer::used` is the extent the session has reserved or written. A range the device
+//!   reads must lie inside `used` (`GpuBuffer::check_read`); a range it writes must lie inside
+//!   `capacity` and extends `used` (`GpuBuffer::reserve_write`). New prover buffers start
+//!   zero-filled, so a read inside `used` returns session data or zeros.
+//! * Lengths are combined with checked `u64` arithmetic and narrowed with `to_u32`.
+//! * Tables the AIR shaders index through (sorted rows, opcode headers and entries) and the
+//!   query and sibling lists of the gather kernel are validated value by value
+//!   (`AirTables::validate_op_tables`, `exec_prover_whir_gather_queries`).
+//!
+//! A prover job that fails, including one rejected here, scrubs and ends its session.
 
 use core::ffi::{c_char, c_void};
 use core::mem::{MaybeUninit, size_of};
@@ -4913,11 +4938,7 @@ impl RawVulkanEngine {
             return Err(VulkanError::WorkspacePoisoned);
         }
         self.prover.session.ok_or_else(|| {
-            out_of_range(
-                "prover session arena (no committed round-0 witness)",
-                1,
-                0,
-            )
+            out_of_range("prover session arena (no committed round-0 witness)", 1, 0)
         })
     }
 
@@ -5308,8 +5329,7 @@ impl RawVulkanEngine {
         let req_cw_stage = cmul(cmul(2, u64::from(stg_cw_stride))?, EXT4_BYTES)?;
         let req_tree_stage = cmul(cmul(2, u64::from(stg_tr_stride))?, EXT4_BYTES)?;
         let req_aux_in = 8 * 1024 * 1024;
-        let req_aux_b =
-            cmul(cmul(6, (extra / 256).max(1024))?, EXT4_BYTES)?.max(8 * 1024 * 1024);
+        let req_aux_b = cmul(cmul(6, (extra / 256).max(1024))?, EXT4_BYTES)?.max(8 * 1024 * 1024);
         let req_partials = 4 * 1024 * 1024;
 
         unsafe {
@@ -6615,10 +6635,10 @@ impl RawVulkanEngine {
                 "vram_mono (opening polynomials)",
                 span_end(0, mono_polys, to_u64(core_len), WORD_BYTES)?,
             )?;
-            engine
-                .prover
-                .vram_aux_in
-                .reserve_write("vram_aux_in (weights, OOD Kronecker tables)", w_bytes.max(z_bytes))?;
+            engine.prover.vram_aux_in.reserve_write(
+                "vram_aux_in (weights, OOD Kronecker tables)",
+                w_bytes.max(z_bytes),
+            )?;
             engine.prover.vram_work_b.reserve_write(
                 "vram_work_b (opening coefficients)",
                 cmul(to_u64(coeff_len), EXT4_BYTES)?,
@@ -7792,11 +7812,7 @@ impl RawVulkanEngine {
             let num_s = sib_indices.len();
             let is_ext4 = stage_idx > 0;
             let (nq, ns) = (to_u64(num_q), to_u64(num_s));
-            let (arity, np, ng) = (
-                to_u64(group_arity),
-                to_u64(num_polys),
-                to_u64(num_groups),
-            );
+            let (arity, np, ng) = (to_u64(group_arity), to_u64(num_polys), to_u64(num_groups));
             let salt_words = if is_ext4 { 0 } else { cmul(2, nq)? };
             let fiber_words = if is_ext4 {
                 cmul(cmul(4, arity)?, nq)?
@@ -8338,7 +8354,11 @@ impl RawVulkanEngine {
             // `idx` and `idx + cur_r / 2`) and the signer table (`idx / cur_r + cur_s / 2`).
             let row_capacity = if folding_signer { cmul(sg, r)? } else { r };
             if m > row_capacity {
-                return Err(out_of_range("AIR round rows (step/signer tables)", row_capacity, m));
+                return Err(out_of_range(
+                    "AIR round rows (step/signer tables)",
+                    row_capacity,
+                    m,
+                ));
             }
             let dyn_bytes = cmul(to_u64(dyn_words.len().max(1)), WORD_BYTES)?;
             let dyn_dst_off = cmul(u64::from(dyn_ext4_off), EXT4_BYTES)?;
@@ -8745,10 +8765,10 @@ impl RawVulkanEngine {
             let sh_off = cmul(u64::from(sh_src_ext4), EXT4_BYTES)?;
             // Refuse before staging grows: both sources must be session data.
             if col_bytes > 0 {
-                engine
-                    .prover
-                    .vram_work_a
-                    .check_read("vram_work_a (AIR folded columns)", cadd(col_off, col_bytes)?)?;
+                engine.prover.vram_work_a.check_read(
+                    "vram_work_a (AIR folded columns)",
+                    cadd(col_off, col_bytes)?,
+                )?;
             }
             if sh_bytes > 0 {
                 engine
@@ -9090,7 +9110,14 @@ mod tests {
     fn live_engine() -> Option<RawVulkanEngine> {
         match RawVulkanEngine::try_new() {
             Ok((engine, _info)) => Some(engine),
-            Err(VulkanError::LibraryLoadFailed | VulkanError::NoDiscreteGpuFound) => None,
+            Err(VulkanError::LibraryLoadFailed | VulkanError::NoDiscreteGpuFound) => {
+                // The audit gate must not turn missing hardware into a green skip.
+                assert!(
+                    std::env::var_os("QSAG_REQUIRE_GPU_AUDIT").is_none(),
+                    "QSAG_REQUIRE_GPU_AUDIT is set but no Vulkan GPU is available"
+                );
+                None
+            }
             Err(other) => panic!("unexpected engine init error: {other}"),
         }
     }
@@ -9267,6 +9294,333 @@ mod tests {
         engine.instance = instance;
         engine.lib_handle = lib_handle;
         engine.radv_lib_handle = radv_lib_handle;
+        engine.exec_state = EngineExecState::Ready;
+    }
+
+    /// `(buffer, memory, capacity, used)` of staging and of every prover buffer.
+    fn buffer_snapshot(engine: &RawVulkanEngine) -> std::vec::Vec<(u64, u64, u64, u64)> {
+        let p = &engine.prover;
+        [
+            &engine.staging,
+            &p.twiddles_24,
+            &p.vram_witness,
+            &p.vram_mono,
+            &p.vram_cw0,
+            &p.vram_tree0,
+            &p.vram_work_a,
+            &p.vram_work_b,
+            &p.vram_cw_stage,
+            &p.vram_tree_stage,
+            &p.vram_aux_in,
+            &p.vram_aux_b,
+            &p.vram_partials,
+        ]
+        .iter()
+        .map(|b| (b.buffer, b.memory, b.capacity, b.used))
+        .collect()
+    }
+
+    /// A one-polynomial, 12-variable session with room for one 16-row AIR shard.
+    fn commit_small_session(engine: &mut RawVulkanEngine) {
+        let poly: std::vec::Vec<u64> = (0..4096u64).map(|i| i * 7 + 1).collect();
+        engine
+            .exec_prover_whir_commit_round0_with(
+                1,
+                &[7; 32],
+                12,
+                4,
+                16,
+                0,
+                0,
+                4096,
+                |_, pos, dst| {
+                    dst.copy_from_slice(&poly[pos..pos + dst.len()]);
+                },
+            )
+            .expect("round-0 commit");
+        assert_eq!(
+            engine.prover.session,
+            Some(ProverSessionDims {
+                num_polys: 1,
+                num_vars: 12
+            })
+        );
+    }
+
+    #[test]
+    fn quarantined_engine_refuses_prover_growth_before_touching_any_buffer() {
+        let Some(mut engine) = live_engine() else {
+            return;
+        };
+        commit_small_session(&mut engine);
+        let before = buffer_snapshot(&engine);
+        let counters = engine.mutation_counters.get();
+        let eq = std::vec![[1u64, 0, 0, 0]; 768];
+        let lam = [[1u64, 0, 0, 0]];
+        // 2^14 rows need work buffers far beyond the 12-variable arena: this call would grow
+        // (replace and free) `vram_work_a`, `vram_work_b` and `vram_aux_b`.
+        let rows = 1usize << 14;
+        let shifts = std::vec![[0u64; 4]; 3 * rows];
+        let gammas = std::vec![[1u64, 0, 0, 0]; 250];
+
+        // A prior submission may still be in flight, and idle cannot be established.
+        engine.exec_state = EngineExecState::InFlightQuarantined;
+        inject(
+            &engine,
+            FaultPoint::DeviceWaitIdle,
+            VK_ERROR_OUT_OF_HOST_MEMORY,
+        );
+        assert!(matches!(
+            engine.exec_prover_air_init_shard(0, 0, rows, &shifts, &gammas),
+            Err(VulkanError::WorkspacePoisoned)
+        ));
+        inject(
+            &engine,
+            FaultPoint::DeviceWaitIdle,
+            VK_ERROR_OUT_OF_HOST_MEMORY,
+        );
+        assert!(matches!(
+            engine.exec_prover_whir_batch_sumcheck_init(&eq, &lam, 12),
+            Err(VulkanError::WorkspacePoisoned)
+        ));
+        inject(
+            &engine,
+            FaultPoint::DeviceWaitIdle,
+            VK_ERROR_OUT_OF_HOST_MEMORY,
+        );
+        assert!(matches!(
+            engine.exec_prover_whir_batch_sumcheck_eval(0, 4096, 1, 0),
+            Err(VulkanError::WorkspacePoisoned)
+        ));
+        // The inner guards refuse on their own, without consulting the device.
+        let grow_to = engine.prover.vram_partials.capacity * 4;
+        unsafe {
+            assert!(matches!(
+                engine.ensure_one_prover_buf(|p| &mut p.vram_partials, grow_to),
+                Err(VulkanError::WorkspacePoisoned)
+            ));
+            assert!(matches!(
+                engine.refresh_prover_descriptor_sets(),
+                Err(VulkanError::WorkspacePoisoned)
+            ));
+            assert!(matches!(
+                engine.begin_cmd(),
+                Err(VulkanError::WorkspacePoisoned)
+            ));
+        }
+        assert_eq!(engine.exec_state, EngineExecState::InFlightQuarantined);
+        assert_eq!(
+            buffer_snapshot(&engine),
+            before,
+            "a buffer was freed or reallocated"
+        );
+        assert_eq!(
+            engine.mutation_counters.get(),
+            counters,
+            "an allocation or a descriptor write was attempted"
+        );
+        assert!(engine.prover.session.is_some());
+
+        // Device lost: the same, permanently.
+        engine.exec_state = EngineExecState::DeviceLostQuarantined;
+        assert!(matches!(
+            engine.exec_prover_air_init_shard(0, 0, rows, &shifts, &gammas),
+            Err(VulkanError::WorkspacePoisoned)
+        ));
+        assert!(matches!(
+            engine.exec_prover_whir_batch_sumcheck_read_tail(1, 1, 0, &mut [[0; 4]], &mut [[0; 4]]),
+            Err(VulkanError::WorkspacePoisoned)
+        ));
+        assert_eq!(buffer_snapshot(&engine), before);
+        assert_eq!(engine.mutation_counters.get(), counters);
+
+        // The test device really is idle: once that is established the engine works again,
+        // and growth is allowed.
+        engine.exec_state = EngineExecState::InFlightQuarantined;
+        engine
+            .exec_prover_whir_batch_sumcheck_init(&eq, &lam, 12)
+            .expect("init after idle");
+        assert_eq!(engine.exec_state, EngineExecState::Ready);
+        let old_partials = engine.prover.vram_partials.buffer;
+        assert!(unsafe {
+            engine
+                .ensure_one_prover_buf(|p| &mut p.vram_partials, grow_to)
+                .expect("growth when ready")
+        });
+        assert_ne!(engine.prover.vram_partials.buffer, old_partials);
+        assert!(engine.prover.vram_partials.capacity >= grow_to);
+        unsafe {
+            engine.refresh_prover_descriptor_sets().expect("refresh");
+        }
+    }
+
+    #[test]
+    fn displaced_buffers_are_wiped_before_they_are_released() {
+        let Some(mut engine) = live_engine() else {
+            return;
+        };
+        // 1. Host-mapped staging displaced by a second, larger reservation inside one job.
+        let first = engine.staging.capacity.max(4096);
+        let words = (first / 8) as usize;
+        unsafe {
+            engine.reserve_job_staging(first).expect("reserve");
+            engine.write_staging_u64s(0, &std::vec![SECRET_WORD; words]);
+            assert!(
+                staging_words(&engine, words)
+                    .iter()
+                    .all(|&w| w == SECRET_WORD)
+            );
+            let old = engine.staging.buffer;
+            engine.last_unmapped.set(None);
+            engine.reserve_job_staging(first * 2 + 8).expect("grow");
+            assert_ne!(engine.staging.buffer, old);
+            assert_eq!(
+                engine.last_unmapped.get(),
+                Some((first, true)),
+                "the displaced mapping still held job data when it was unmapped"
+            );
+            engine.settle_staging();
+        }
+        assert_eq!(engine.staging_residue_bytes, 0);
+
+        // 2. A device-local prover buffer displaced mid-session: if its scrub cannot complete,
+        //    it stays installed and nothing is freed while the device may still be using it.
+        commit_small_session(&mut engine);
+        let before = buffer_snapshot(&engine);
+        let grow_to = engine.prover.vram_work_b.capacity * 2;
+        assert!(engine.prover.vram_work_b.used > 0);
+        inject(
+            &engine,
+            FaultPoint::QueueSubmit,
+            VK_ERROR_OUT_OF_HOST_MEMORY,
+        );
+        inject(
+            &engine,
+            FaultPoint::DeviceWaitIdle,
+            VK_ERROR_OUT_OF_HOST_MEMORY,
+        );
+        let res = unsafe { engine.ensure_one_prover_buf(|p| &mut p.vram_work_b, grow_to) };
+        assert!(matches!(
+            res,
+            Err(VulkanError::VkResult {
+                op: "vkQueueSubmit",
+                code: VK_ERROR_OUT_OF_HOST_MEMORY
+            })
+        ));
+        assert_eq!(engine.exec_state, EngineExecState::InFlightQuarantined);
+        assert_eq!(buffer_snapshot(&engine), before);
+        assert_eq!(
+            engine.prover.limbo.len(),
+            1,
+            "the replacement must be parked, not freed"
+        );
+        // Drain the unused idle fault, then recover and grow for real.
+        assert!(unsafe { engine.ensure_ready() }.is_err());
+        unsafe {
+            engine.ensure_ready().expect("idle");
+            assert!(
+                engine
+                    .ensure_one_prover_buf(|p| &mut p.vram_work_b, grow_to)
+                    .expect("growth")
+            );
+            engine.refresh_prover_descriptor_sets().expect("refresh");
+        }
+        assert_ne!(engine.prover.vram_work_b.buffer, before[7].0);
+        // The replacement starts out zero: read its first words back.
+        let probe = 512usize;
+        unsafe {
+            engine
+                .reserve_job_staging((probe * 8) as u64)
+                .expect("reserve");
+            engine.write_staging_u64s(0, &std::vec![SECRET_WORD; probe]);
+            let copy = checked_copy(
+                "probe",
+                &engine.prover.vram_work_b,
+                0,
+                engine.staging.capacity,
+                0,
+                (probe * 8) as u64,
+            )
+            .expect("range");
+            engine.begin_cmd().expect("begin");
+            (engine.fns.cmd_copy_buffer)(
+                engine.cmd_buf,
+                engine.prover.vram_work_b.buffer,
+                engine.staging.buffer,
+                1,
+                &copy,
+            );
+            engine.cmd_barrier(
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_HOST_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_HOST_READ_BIT,
+            );
+            engine.submit_and_wait().expect("readback");
+        }
+        assert!(staging_words(&engine, probe).iter().all(|&w| w == 0));
+        unsafe {
+            engine.settle_staging();
+        }
+    }
+
+    #[test]
+    fn prover_entry_points_need_a_committed_session_and_in_range_arguments() {
+        let Some(mut engine) = live_engine() else {
+            return;
+        };
+        fn clean<T: core::fmt::Debug>(res: Result<T, VulkanError>) {
+            assert!(
+                matches!(
+                    res,
+                    Err(VulkanError::Accel(
+                        crate::AccelError::LengthOverflow
+                            | crate::AccelError::LengthMismatch { .. }
+                    ))
+                ),
+                "{res:?}"
+            );
+        }
+        let mut one = [[0u64; 4]; 1];
+        let mut other = [[0u64; 4]; 1];
+        // No arena at all: nothing is bound, copied or dispatched.
+        let counters = engine.mutation_counters.get();
+        clean(engine.exec_prover_whir_batch_sumcheck_read_tail(1, 1, 0, &mut one, &mut other));
+        clean(engine.exec_prover_whir_batch_sumcheck_eval(0, 4096, 1, 0));
+        clean(engine.exec_prover_air_read_tail(0, 0, &mut one, &mut other));
+        clean(engine.exec_prover_whir_read_final_coeffs(0, &mut one));
+        assert_eq!(engine.mutation_counters.get(), counters);
+
+        commit_small_session(&mut engine);
+        let work_b_used = engine.prover.vram_work_b.used;
+        // The last element of the reserved extent is readable, one past it is not.
+        let last = (work_b_used / 32 - 1) as u32;
+        engine
+            .exec_prover_whir_read_final_coeffs(last, &mut one)
+            .expect("in range");
+        clean(engine.exec_prover_whir_read_final_coeffs(last + 1, &mut one));
+        // A rejected call ends the session: its buffers are scrubbed and unreadable.
+        assert_eq!(engine.prover.session, None);
+        assert_eq!(engine.prover.vram_work_b.used, 0);
+        clean(engine.exec_prover_whir_read_final_coeffs(0, &mut one));
+
+        commit_small_session(&mut engine);
+        clean(engine.exec_prover_whir_batch_sumcheck_read_tail(
+            1,
+            1,
+            u32::MAX,
+            &mut one,
+            &mut other,
+        ));
+        commit_small_session(&mut engine);
+        let eq = std::vec![[1u64, 0, 0, 0]; 768];
+        let lam = [[1u64, 0, 0, 0]];
+        for num_vars in [27usize, 63, 64, usize::BITS as usize, usize::MAX] {
+            clean(engine.exec_prover_whir_batch_sumcheck_init(&eq, &lam, num_vars));
+            commit_small_session(&mut engine);
+        }
+        // Dimensions other than the committed ones.
+        clean(engine.exec_prover_whir_batch_sumcheck_init(&eq, &lam, 11));
         engine.exec_state = EngineExecState::Ready;
     }
 }

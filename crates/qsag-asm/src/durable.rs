@@ -218,13 +218,17 @@ impl LockedRecord {
         regular_metadata(&name)?;
         // A record without its sidecar is damage, not absence: keep `NotFound` for the record.
         let open_present = || {
-            no_follow_options()?.read(true).write(true).open(&name).map_err(|e| {
-                if present && e.kind() == io::ErrorKind::NotFound {
-                    invalid()
-                } else {
-                    e
-                }
-            })
+            no_follow_options()?
+                .read(true)
+                .write(true)
+                .open(&name)
+                .map_err(|e| {
+                    if present && e.kind() == io::ErrorKind::NotFound {
+                        invalid()
+                    } else {
+                        e
+                    }
+                })
         };
         let (mut lock, fresh) = match sidecar {
             Sidecar::MustExist => (open_present()?, false),
@@ -469,7 +473,10 @@ impl LockedRecord {
             if regular_metadata(&name)?.is_some() {
                 fs::remove_file(&name)?;
             }
-            let mut file = no_follow_options()?.write(true).create_new(true).open(&name)?;
+            let mut file = no_follow_options()?
+                .write(true)
+                .create_new(true)
+                .open(&name)?;
             file.write_all(&self.record_header())?;
             file.write_all(bytes)?;
             file.sync_all()?;
@@ -722,8 +729,12 @@ impl TwoSlotHwm<'_> {
                     Err(invalid())
                 }
             }
-            (Valid { counter, tip }, _) => self.recover_from_lone_slot(file, 1, counter, &tip, head),
-            (_, Valid { counter, tip }) => self.recover_from_lone_slot(file, 0, counter, &tip, head),
+            (Valid { counter, tip }, _) => {
+                self.recover_from_lone_slot(file, 1, counter, &tip, head)
+            }
+            (_, Valid { counter, tip }) => {
+                self.recover_from_lone_slot(file, 0, counter, &tip, head)
+            }
             _ => Err(invalid()),
         }
     }
@@ -1045,7 +1056,10 @@ mod tests {
             open_nofollow_nonblock_flags("linux", "sparc64"),
             Some(0x20000 | 0x4000)
         );
-        assert_eq!(open_nofollow_nonblock_flags("macos", "aarch64"), Some(0x104));
+        assert_eq!(
+            open_nofollow_nonblock_flags("macos", "aarch64"),
+            Some(0x104)
+        );
         assert_eq!(open_nofollow_nonblock_flags("linux", "alpha"), None);
         assert_eq!(open_nofollow_nonblock_flags("freebsd", "x86_64"), None);
     }
@@ -1092,7 +1106,9 @@ mod tests {
             let mut a = [0u8; HWM_SLOT_BYTES];
             let mut b = [0u8; HWM_SLOT_BYTES];
             self.file.read_exact_at(&mut a, 0).unwrap();
-            self.file.read_exact_at(&mut b, HWM_SLOT_BYTES as u64).unwrap();
+            self.file
+                .read_exact_at(&mut b, HWM_SLOT_BYTES as u64)
+                .unwrap();
             (a, b)
         }
     }
@@ -1194,14 +1210,22 @@ mod tests {
         }
         fn slot(&self, hwm: &TwoSlotHwm<'_>, slot: u8) -> [u8; HWM_SLOT_BYTES] {
             use std::os::unix::fs::FileExt;
-            let offset = if slot == 0 { hwm.offset_a } else { hwm.offset_b };
+            let offset = if slot == 0 {
+                hwm.offset_a
+            } else {
+                hwm.offset_b
+            };
             let mut raw = [0u8; HWM_SLOT_BYTES];
             self.file.read_exact_at(&mut raw, offset).unwrap();
             raw
         }
         /// Overwrite a whole slot page with pseudo-random bytes: a torn page write.
         fn tear_page(&self, hwm: &TwoSlotHwm<'_>, slot: u8, seed: u64) {
-            let offset = if slot == 0 { hwm.offset_a } else { hwm.offset_b };
+            let offset = if slot == 0 {
+                hwm.offset_a
+            } else {
+                hwm.offset_b
+            };
             let mut x = seed | 1;
             let page: std::vec::Vec<u8> = (0..HWM_PAGE_BYTES)
                 .map(|_| {
@@ -1255,10 +1279,7 @@ mod tests {
             // Slot B torn after the commit: recovered from A, and B is rewritten on disk.
             for seed in 1..9u64 {
                 disk.tear_page(&hwm, 1, seed);
-                assert_eq!(
-                    hwm.classify(1, &disk.slot(&hwm, 1)),
-                    HwmSlotState::Corrupt
-                );
+                assert_eq!(hwm.classify(1, &disk.slot(&hwm, 1)), HwmSlotState::Corrupt);
                 assert_eq!(
                     disk.recover(&hwm, &head(2)).unwrap(),
                     HwmRecovery::RepairedSlotB
@@ -1310,7 +1331,10 @@ mod tests {
                 disk.tear_page(&hwm, torn, 99);
                 let before = (disk.slot(&hwm, 0), disk.slot(&hwm, 1));
                 for len in [0usize, 1, 2] {
-                    assert!(disk.recover(&hwm, &head(len)).is_err(), "torn {torn} len {len}");
+                    assert!(
+                        disk.recover(&hwm, &head(len)).is_err(),
+                        "torn {torn} len {len}"
+                    );
                 }
                 let foreign = ChainHead {
                     len: 3,

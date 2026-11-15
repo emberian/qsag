@@ -70,8 +70,8 @@ use crate::tsw_baggy::{
     th_pre_hash, th_tweak_tl, verify_pq_hash_sig,
 };
 use crate::wipe::{
-    SecretBuffer, SecretWipe, ct_eq_bytes32, secret_vec_push, secret_vec_reserve, wipe_bytes32,
-    wipe_ext2, wipe_goldilocks,
+    SecretBuffer, SecretWipe, ct_eq_bytes32, secret_vec_push, secret_vec_reserve,
+    secret_vecs_with_capacity, wipe_bytes32, wipe_ext2, wipe_goldilocks,
 };
 
 /// Number of $x^7$ S-boxes in one Width-12 `poseidon2_perm12` (`4 * 12 + 22 * 1 + 4 * 12 = 118`).
@@ -591,7 +591,7 @@ fn eval_sbox7_batch_spdz(
     let count = inputs_per_party[0].len();
     let mut tuples_p = Vec::with_capacity(m);
     let alphas = SecretBuffer(vaults.iter().map(|v| v.mac_alpha_share).collect::<Vec<_>>());
-    let mut masked_wires = SecretBuffer(vec![Vec::with_capacity(count); m]);
+    let mut masked_wires = secret_vecs_with_capacity(m, count);
     for (p, vault) in vaults.iter_mut().enumerate() {
         let p_tups = vault.reserve_pow7(count)?;
         for (input, tup) in inputs_per_party[p][..count].iter().zip(p_tups) {
@@ -599,7 +599,7 @@ fn eval_sbox7_batch_spdz(
                 val: tup.r_pows[0],
                 mac: tup.r_macs[0],
             };
-            masked_wires[p].push(input.add(r_wire));
+            secret_vec_push(&mut masked_wires[p], input.add(r_wire));
         }
         tuples_p.push(p_tups);
     }
@@ -625,7 +625,7 @@ fn eval_sbox7_batch_spdz(
     let c21 = Goldilocks::from_u64_reduced(21);
     let c35 = Goldilocks::from_u64_reduced(35);
 
-    let mut out = SecretBuffer(vec![Vec::with_capacity(count); m]);
+    let mut out = secret_vecs_with_capacity(m, count);
     for p in 0..m {
         let alpha_p = alphas[p];
         for k in 0..count {
@@ -650,7 +650,7 @@ fn eval_sbox7_batch_spdz(
             acc = acc.sub(rw(4).scale(c21 * y2));
             acc = acc.add(rw(5).scale(c7 * y));
             acc = acc.sub(rw(6));
-            out[p].push(acc);
+            secret_vec_push(&mut out[p], acc);
         }
     }
     Ok(core::mem::take(&mut out.0))
@@ -679,14 +679,14 @@ fn eval_spdz_poseidon2_perm12_batch(
 
     // First 4 external rounds (`tag = 0`)
     for r in 0..POSEIDON2_HALF_EXTERNAL_ROUNDS {
-        let mut sbox_in = SecretBuffer(vec![Vec::with_capacity(batch * 12); m]);
+        let mut sbox_in = secret_vecs_with_capacity(m, batch * 12);
         for p in 0..m {
             let alpha_p = vaults[p].mac_alpha_share;
             for st in &states_per_party[p][..batch] {
                 for (lane, wire) in st.iter().enumerate() {
                     let rc =
                         AuthGlWire::public_const(poseidon2_const_at(0, r, lane as u64), alpha_p);
-                    sbox_in[p].push(wire.add(rc));
+                    secret_vec_push(&mut sbox_in[p], wire.add(rc));
                 }
             }
         }
@@ -705,12 +705,12 @@ fn eval_spdz_poseidon2_perm12_batch(
 
     // 22 internal partial rounds (`tag = 1`, S-box on lane 0 BEFORE `apply_mi`)
     for r in 0..POSEIDON2_INTERNAL_ROUNDS {
-        let mut sbox_in = SecretBuffer(vec![Vec::with_capacity(batch); m]);
+        let mut sbox_in = secret_vecs_with_capacity(m, batch);
         for p in 0..m {
             let alpha_p = vaults[p].mac_alpha_share;
             let rc0 = AuthGlWire::public_const(poseidon2_const_at(1, r, 0), alpha_p);
             for st in &states_per_party[p][..batch] {
-                sbox_in[p].push(st[0].add(rc0));
+                secret_vec_push(&mut sbox_in[p], st[0].add(rc0));
             }
         }
         let sbox_out = SecretBuffer(eval_sbox7_batch_spdz(
@@ -726,14 +726,14 @@ fn eval_spdz_poseidon2_perm12_batch(
 
     // Final 4 external rounds (`tag = 2`)
     for r in 0..POSEIDON2_HALF_EXTERNAL_ROUNDS {
-        let mut sbox_in = SecretBuffer(vec![Vec::with_capacity(batch * 12); m]);
+        let mut sbox_in = secret_vecs_with_capacity(m, batch * 12);
         for p in 0..m {
             let alpha_p = vaults[p].mac_alpha_share;
             for st in &states_per_party[p][..batch] {
                 for (lane, wire) in st.iter().enumerate() {
                     let rc =
                         AuthGlWire::public_const(poseidon2_const_at(2, r, lane as u64), alpha_p);
-                    sbox_in[p].push(wire.add(rc));
+                    secret_vec_push(&mut sbox_in[p], wire.add(rc));
                 }
             }
         }
@@ -783,7 +783,7 @@ fn eval_spdz_poseidon2_hash32_templates(
 
     // Build authenticated limb vectors per `(party, item)` using exact 56-bit byte weights
     let mut item_limbs_p: SecretBuffer<Vec<Vec<Vec<AuthGlWire>>>> =
-        SecretBuffer(vec![Vec::with_capacity(batch); m]);
+        secret_vecs_with_capacity(m, batch);
     for p in 0..m {
         let alpha_p = vaults[p].mac_alpha_share;
         for item in 0..batch {
@@ -805,7 +805,7 @@ fn eval_spdz_poseidon2_hash32_templates(
 
     // Initialize sponge states to `POSEIDON2_INIT_STATE`
     let mut states_p: SecretBuffer<Vec<Vec<[AuthGlWire; 12]>>> =
-        SecretBuffer(vec![Vec::with_capacity(batch); m]);
+        secret_vecs_with_capacity(m, batch);
     for p in 0..m {
         let alpha_p = vaults[p].mac_alpha_share;
         let mut init_st = [AuthGlWire::ZERO; 12];
@@ -813,7 +813,7 @@ fn eval_spdz_poseidon2_hash32_templates(
             init_st[lane] = AuthGlWire::public_const(POSEIDON2_INIT_STATE[lane], alpha_p);
         }
         for _ in 0..batch {
-            states_p[p].push(init_st);
+            secret_vec_push(&mut states_p[p], init_st);
         }
     }
 
@@ -822,14 +822,14 @@ fn eval_spdz_poseidon2_hash32_templates(
         let active_indices: Vec<usize> = (0..batch)
             .filter(|&item| blk < padded_templates[item].len() / 8)
             .collect();
-        let mut sub_states = SecretBuffer(vec![Vec::with_capacity(active_indices.len()); m]);
+        let mut sub_states = secret_vecs_with_capacity(m, active_indices.len());
         for p in 0..m {
             for &item in &active_indices {
                 let mut st = states_p[p][item];
                 for lane in 0..8 {
                     st[lane] = st[lane].add(item_limbs_p[p][item][8 * blk + lane]);
                 }
-                sub_states[p].push(st);
+                secret_vec_push(&mut sub_states[p], st);
             }
         }
         eval_spdz_poseidon2_perm12_batch(t, quorum_pts, &mut sub_states, vaults, pending)?;
@@ -840,10 +840,10 @@ fn eval_spdz_poseidon2_hash32_templates(
         }
     }
 
-    let mut out = SecretBuffer(vec![Vec::with_capacity(batch); m]);
+    let mut out = secret_vecs_with_capacity(m, batch);
     for p in 0..m {
         for st in &states_p[p][..batch] {
-            out[p].push([st[0], st[1], st[2], st[3]]);
+            secret_vec_push(&mut out[p], [st[0], st[1], st[2], st[3]]);
         }
     }
     Ok(core::mem::take(&mut out.0))
@@ -866,7 +866,7 @@ fn eval_spdz_beaver_mul_batch(
     }
     let mut triples_p = Vec::with_capacity(m);
     let alphas = SecretBuffer(vaults.iter().map(|v| v.mac_alpha_share).collect::<Vec<_>>());
-    let mut de_wires = SecretBuffer(vec![Vec::with_capacity(2 * count); m]);
+    let mut de_wires = secret_vecs_with_capacity(m, 2 * count);
     for (p, vault) in vaults.iter_mut().enumerate() {
         let p_tr = vault.reserve_beaver(count)?;
         for (k, tr) in p_tr.iter().enumerate() {
@@ -878,8 +878,8 @@ fn eval_spdz_beaver_mul_batch(
                 val: tr.b,
                 mac: tr.b_mac,
             };
-            de_wires[p].push(xs_per_party[p][k].sub(a_w));
-            de_wires[p].push(ys_per_party[p][k].sub(b_w));
+            secret_vec_push(&mut de_wires[p], xs_per_party[p][k].sub(a_w));
+            secret_vec_push(&mut de_wires[p], ys_per_party[p][k].sub(b_w));
         }
         triples_p.push(p_tr);
     }
@@ -901,7 +901,7 @@ fn eval_spdz_beaver_mul_batch(
     }
     drop(sh_buf);
 
-    let mut out = SecretBuffer(vec![Vec::with_capacity(count); m]);
+    let mut out = secret_vecs_with_capacity(m, count);
     for p in 0..m {
         let alpha_p = alphas[p];
         for k in 0..count {
@@ -922,7 +922,7 @@ fn eval_spdz_beaver_mul_batch(
             };
             let de_const = AuthGlWire::public_const(d * e, alpha_p);
             let z = c_w.add(b_w.scale(d)).add(a_w.scale(e)).add(de_const);
-            out[p].push(z);
+            secret_vec_push(&mut out[p], z);
         }
     }
     Ok(core::mem::take(&mut out.0))
@@ -949,8 +949,8 @@ fn eval_spdz_canonical_a2b_state4_batch_to_bytes32(
 
     // 1. Pop 1 `CanonicalBitMask64Share` (`r < p`) per lane and open `z = (x - r) mod p`
     let mut r_bits_p: SecretBuffer<Vec<Vec<[AuthGlWire; 64]>>> =
-        SecretBuffer(vec![Vec::with_capacity(num_lanes); m]);
-    let mut z_wires = SecretBuffer(vec![Vec::with_capacity(num_lanes); m]);
+        secret_vecs_with_capacity(m, num_lanes);
+    let mut z_wires = secret_vecs_with_capacity(m, num_lanes);
     for p in 0..m {
         for st4 in &states4_per_party[p][..batch] {
             for lane_wire in st4 {
@@ -959,12 +959,12 @@ fn eval_spdz_canonical_a2b_state4_batch_to_bytes32(
                     val: mask.field_sum_share,
                     mac: mask.field_sum_mac,
                 };
-                z_wires[p].push(lane_wire.sub(r_sum));
+                secret_vec_push(&mut z_wires[p], lane_wire.sub(r_sum));
                 let rb: [AuthGlWire; 64] = core::array::from_fn(|bit| AuthGlWire {
                     val: mask.bit_shares[bit],
                     mac: mask.bit_macs[bit],
                 });
-                r_bits_p[p].push(rb);
+                secret_vec_push(&mut r_bits_p[p], rb);
             }
         }
     }
@@ -1017,15 +1017,15 @@ fn eval_spdz_canonical_a2b_state4_batch_to_bytes32(
 
     // Bits 1..64 (`2 * num_lanes` Beaver multiplications per bit position across all lanes in parallel)
     for bit in 1..64 {
-        let mut mul_x = SecretBuffer(vec![Vec::with_capacity(2 * num_lanes); m]);
-        let mut mul_y = SecretBuffer(vec![Vec::with_capacity(2 * num_lanes); m]);
+        let mut mul_x = secret_vecs_with_capacity(m, 2 * num_lanes);
+        let mut mul_y = secret_vecs_with_capacity(m, 2 * num_lanes);
         for p in 0..m {
             for idx in 0..num_lanes {
                 let rk = r_bits_p[p][idx][bit];
-                mul_x[p].push(rk);
-                mul_y[p].push(carry_a_p[p][idx]);
-                mul_x[p].push(rk);
-                mul_y[p].push(carry_b_p[p][idx]);
+                secret_vec_push(&mut mul_x[p], rk);
+                secret_vec_push(&mut mul_y[p], carry_a_p[p][idx]);
+                secret_vec_push(&mut mul_x[p], rk);
+                secret_vec_push(&mut mul_y[p], carry_b_p[p][idx]);
             }
         }
         let prods = SecretBuffer(eval_spdz_beaver_mul_batch(
@@ -1065,14 +1065,14 @@ fn eval_spdz_canonical_a2b_state4_batch_to_bytes32(
     }
 
     // 3. Mux all 64 bits in 1 batched Beaver round: `x_k = u_k + c_b * (v_k - u_k)`
-    let mut mux_x = SecretBuffer(vec![Vec::with_capacity(64 * num_lanes); m]);
-    let mut mux_y = SecretBuffer(vec![Vec::with_capacity(64 * num_lanes); m]);
+    let mut mux_x = secret_vecs_with_capacity(m, 64 * num_lanes);
+    let mut mux_y = secret_vecs_with_capacity(m, 64 * num_lanes);
     for p in 0..m {
         for idx in 0..num_lanes {
             let cb = carry_b_p[p][idx];
             for bit in 0..64 {
-                mux_x[p].push(cb);
-                mux_y[p].push(v_bits_p[p][idx][bit].sub(u_bits_p[p][idx][bit]));
+                secret_vec_push(&mut mux_x[p], cb);
+                secret_vec_push(&mut mux_y[p], v_bits_p[p][idx][bit].sub(u_bits_p[p][idx][bit]));
             }
         }
     }
@@ -1081,7 +1081,7 @@ fn eval_spdz_canonical_a2b_state4_batch_to_bytes32(
     )?);
 
     // 4. Pack canonical big-endian bytes `to_be_bytes()` (`byte 0` = bits `56..64`, ..., `byte 7` = bits `0..8`)
-    let mut out_bytes_p = SecretBuffer(vec![Vec::with_capacity(batch); m]);
+    let mut out_bytes_p = secret_vecs_with_capacity(m, batch);
     for p in 0..m {
         for item in 0..batch {
             let mut bytes32 = [AuthGlWire::ZERO; 32];
@@ -1100,7 +1100,7 @@ fn eval_spdz_canonical_a2b_state4_batch_to_bytes32(
                     bytes32[8 * lane + byte_in_lane] = acc;
                 }
             }
-            out_bytes_p[p].push(bytes32);
+            secret_vec_push(&mut out_bytes_p[p], bytes32);
         }
     }
     Ok(core::mem::take(&mut out_bytes_p.0))
@@ -1158,21 +1158,21 @@ fn flush_verify_and_open_cut_states4(
     let pend_len = 0;
     let total_wires = 4 * num_states + 32 * num_byte_blocks;
 
-    let mut all_sh = SecretBuffer(vec![Vec::with_capacity(total_wires); m]);
-    let mut all_mac = SecretBuffer(vec![Vec::with_capacity(total_wires); m]);
+    let mut all_sh = secret_vecs_with_capacity(m, total_wires);
+    let mut all_mac = secret_vecs_with_capacity(m, total_wires);
     let mut alpha_sh = SecretBuffer(Vec::with_capacity(m));
     for p in 0..m {
-        alpha_sh.push(vaults[p].mac_alpha_share);
+        secret_vec_push(&mut alpha_sh, vaults[p].mac_alpha_share);
         for st in &cut_states4_per_party[p] {
             for w in st {
-                all_sh[p].push(w.val);
-                all_mac[p].push(w.mac);
+                secret_vec_push(&mut all_sh[p], w.val);
+                secret_vec_push(&mut all_mac[p], w.mac);
             }
         }
         for blk in &extra_cut_bytes_per_party[p] {
             for w in blk {
-                all_sh[p].push(w.val);
-                all_mac[p].push(w.mac);
+                secret_vec_push(&mut all_sh[p], w.val);
+                secret_vec_push(&mut all_mac[p], w.mac);
             }
         }
     }
@@ -1316,11 +1316,11 @@ fn eval_wots_chains_mpc_cut(
         };
         prf_tmpls.push(build_single_secret32_template(TAG_PRF, pk_seed, &adrs));
     }
-    let mut prf_secrets = SecretBuffer(vec![Vec::with_capacity(count); m]);
+    let mut prf_secrets = secret_vecs_with_capacity(m, count);
     for p in 0..m {
         let seed_w = SecretBuffer(key_seed_wires(key_shares[p]));
         for _ in 0..count {
-            prf_secrets[p].push(*seed_w);
+            secret_vec_push(&mut prf_secrets[p], *seed_w);
         }
     }
 
@@ -1344,10 +1344,10 @@ fn eval_wots_chains_mpc_cut(
     let max_steps = targets.iter().map(|x| x.4).max().unwrap_or(0);
     for step in 0..max_steps {
         let active: Vec<usize> = (0..count).filter(|&i| step < targets[i].4).collect();
-        let mut active_st = SecretBuffer(vec![Vec::with_capacity(active.len()); m]);
+        let mut active_st = secret_vecs_with_capacity(m, active.len());
         for p in 0..m {
             for &i in &active {
-                active_st[p].push(cur_states[p][i]);
+                secret_vec_push(&mut active_st[p], cur_states[p][i]);
             }
         }
         let active_bytes = SecretBuffer(
@@ -1745,11 +1745,11 @@ fn sign_hypertree_poseidon2_mpc_core(
                 ));
             }
         }
-        let mut prf_secs = SecretBuffer(vec![Vec::with_capacity(total_fors); m]);
+        let mut prf_secs = secret_vecs_with_capacity(m, total_fors);
         for p in 0..m {
             let sw = SecretBuffer(key_seed_wires(key_shares[p]));
             for _ in 0..total_fors {
-                prf_secs[p].push(*sw);
+                secret_vec_push(&mut prf_secs[p], *sw);
             }
         }
         let sec_states = SecretBuffer(
@@ -2003,10 +2003,10 @@ fn eval_prf_msg_mpc_cut(
     let mut pending = SpdzGoldilocksPendingChecks::new(m);
     let tmpl = build_prf_msg_template(opt_rand, mu);
     let tmpls = [tmpl];
-    let mut prf_secs = SecretBuffer(vec![Vec::with_capacity(1); m]);
+    let mut prf_secs = secret_vecs_with_capacity(m, 1);
     for p in 0..m {
         let pw = SecretBuffer(key_prf_wires(key_shares[p]));
-        prf_secs[p].push(*pw);
+        secret_vec_push(&mut prf_secs[p], *pw);
     }
     let st4 = SecretBuffer(
         match eval_spdz_poseidon2_hash32_templates(
@@ -3355,7 +3355,7 @@ fn expand_hem_secret_digests_mpc(
     pending: &mut SpdzGoldilocksPendingChecks,
 ) -> Result<ExpandedHemSecretDigestPair, PreprocessError> {
     let m = quorum_pts.len();
-    let mut states = SecretBuffer(vec![Vec::with_capacity(2); m]);
+    let mut states = secret_vecs_with_capacity(m, 2);
     let mut seed_low4 = SecretBuffer(vec![[AuthGlWire::ZERO; 4]; m]);
     let mut prf_low4 = SecretBuffer(vec![[AuthGlWire::ZERO; 4]; m]);
 
@@ -3383,11 +3383,11 @@ fn expand_hem_secret_digests_mpc(
             alpha_p,
         );
 
-        states[p].push([
+        secret_vec_push(&mut states[p], [
             ls[0], ls[1], ls[2], ls[3], ls[4], pks[0], pks[1], pks[2], pks[3], dom_s,
             AuthGlWire::ZERO, iv,
         ]);
-        states[p].push([
+        secret_vec_push(&mut states[p], [
             lp[0], lp[1], lp[2], lp[3], lp[4], pks[0], pks[1], pks[2], pks[3], dom_p,
             AuthGlWire::ZERO, iv,
         ]);
@@ -3425,7 +3425,7 @@ fn eval_spdz_hem_compress12_ff_batch(
     if batch == 0 {
         return Ok(vec![Vec::new(); m]);
     }
-    let mut states = SecretBuffer(vec![Vec::with_capacity(batch); m]);
+    let mut states = secret_vecs_with_capacity(m, batch);
     for p in 0..m {
         let alpha_p = vaults[p].mac_alpha_share;
         let pks: [AuthGlWire; 4] =
@@ -3434,7 +3434,7 @@ fn eval_spdz_hem_compress12_ff_batch(
             let x = in0_per_party[p][k];
             let tw_w: [AuthGlWire; 4] =
                 core::array::from_fn(|i| AuthGlWire::public_const(tw[i], alpha_p));
-            states[p].push([
+            secret_vec_push(&mut states[p], [
                 x[0], x[1], x[2], x[3], pks[0], pks[1], pks[2], pks[3], tw_w[0], tw_w[1], tw_w[2],
                 tw_w[3],
             ]);
@@ -3443,11 +3443,11 @@ fn eval_spdz_hem_compress12_ff_batch(
 
     eval_spdz_poseidon2_perm12_batch(t, quorum_pts, &mut states, vaults, pending)?;
 
-    let mut out = SecretBuffer(vec![Vec::with_capacity(batch); m]);
+    let mut out = secret_vecs_with_capacity(m, batch);
     for p in 0..m {
         for k in 0..batch {
             let x = in0_per_party[p][k];
-            out[p].push([
+            secret_vec_push(&mut out[p], [
                 states[p][k][0].add(x[0]).add(AuthGlWire::public_const(
                     pk_seed[0] * Goldilocks::TWO + tweaks[k][0] * Goldilocks::from_u64_reduced(4),
                     vaults[p].mac_alpha_share,
@@ -3511,13 +3511,13 @@ fn flush_verify_and_open_hem_digests4(
     }
 
     let total_wires = 4 * num_digests;
-    let mut all_sh = SecretBuffer(vec![Vec::with_capacity(total_wires); m]);
-    let mut all_mac = SecretBuffer(vec![Vec::with_capacity(total_wires); m]);
+    let mut all_sh = secret_vecs_with_capacity(m, total_wires);
+    let mut all_mac = secret_vecs_with_capacity(m, total_wires);
     for p in 0..m {
         for st in &cut_digests_per_party[p] {
             for w in st {
-                all_sh[p].push(w.val);
-                all_mac[p].push(w.mac);
+                secret_vec_push(&mut all_sh[p], w.val);
+                secret_vec_push(&mut all_mac[p], w.mac);
             }
         }
     }
@@ -3566,10 +3566,10 @@ fn eval_hem_wots_chains_native_spdz(
         return Ok(vec![Vec::new(); m]);
     }
 
-    let mut base_in = SecretBuffer(vec![Vec::with_capacity(count); m]);
+    let mut base_in = secret_vecs_with_capacity(m, count);
     for p in 0..m {
         for _ in 0..count {
-            base_in[p].push(sk_seed_per_party[p]);
+            secret_vec_push(&mut base_in[p], sk_seed_per_party[p]);
         }
     }
     let mut base_tweaks = Vec::with_capacity(count);
@@ -3594,10 +3594,10 @@ fn eval_hem_wots_chains_native_spdz(
     let max_steps = targets.iter().map(|x| x.2).max().unwrap_or(0);
     for step in 0..max_steps {
         let active: Vec<usize> = (0..count).filter(|&i| step < targets[i].2).collect();
-        let mut active_in = SecretBuffer(vec![Vec::with_capacity(active.len()); m]);
+        let mut active_in = secret_vecs_with_capacity(m, active.len());
         for p in 0..m {
             for &i in &active {
-                active_in[p].push(cur_states[p][i]);
+                secret_vec_push(&mut active_in[p], cur_states[p][i]);
             }
         }
         let mut step_tweaks = Vec::with_capacity(active.len());
@@ -4020,11 +4020,11 @@ fn sign_hem_jorts_poseidon2_mpc_core(
         }
     };
 
-    let mut r_states = SecretBuffer(vec![Vec::with_capacity(1); m]);
+    let mut r_states = secret_vecs_with_capacity(m, 1);
     for p in 0..m {
         let alpha_p = vaults[p].mac_alpha_share;
         let c = |g: Goldilocks| AuthGlWire::public_const(g, alpha_p);
-        r_states[p].push([
+        secret_vec_push(&mut r_states[p], [
             sk_prf_p[p][0],
             sk_prf_p[p][1],
             sk_prf_p[p][2],

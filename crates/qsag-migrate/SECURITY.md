@@ -476,14 +476,21 @@ transcript chains, flips a coin by commit-then-open, each party commits to
 `sigma_i = sum_j chi_j (m_ij - key_i * v_j)` for the coin-derived `chi`, and
 the `sigma_i` are opened and must sum to zero. The check runs before any
 output opening is sent, again before an opened output is returned to the
-caller, and inside every `agree`. A custodian that flips a wire share, lies
-in a Beaver opening, uses a wrong product share, forges a conversion mask or
-sends different values to different peers passes one check with probability
-at most `2^-127` (Boolean), `2^-126` (Goldilocks) or `2^-254` (secp256k1 and
-Ed25519 base fields). Any failed check, malformed or unauthenticated message,
-non-canonical share or exhausted preprocessing poisons the engine: it erases
-its MAC key shares and refuses all further work. Abort is not identifiable
-and not fair; one corrupt custodian can force it.
+caller, inside every `agree`, and on the root engine before the batch engines
+start. A custodian that flips a wire share, lies in a Beaver opening, uses a
+wrong product share or forges a conversion mask passes one check of one
+engine with probability at most `2^-127` (Boolean), `2^-126` (Goldilocks) or
+`2^-254` (secp256k1 and Ed25519 base fields); the root and the seven batch
+engines share one key, so the ceremony bound is eight times that. Sending
+different values to different peers is caught by the transcript comparison of
+the next check (or, for a share of an opened value, by the MAC check itself).
+The rounds of a check and the final `agree` broadcast are compared only by a
+later check, so equivocating there can make one honest custodian abort while
+another completes, but cannot make any custodian accept a wrong value. Any
+failed check, malformed or unauthenticated message, non-canonical share or
+exhausted preprocessing poisons the engine: it erases its MAC key shares and
+every interactive operation fails from then on. Abort is not identifiable and
+not fair; one corrupt custodian can force it.
 
 Privacy holds against any strict subset of the quorum, and for Shamir custody
 against fewer than `t` custodians overall. The security argument is the
@@ -500,6 +507,12 @@ given to `CoZkCustodianShare`. `threshold_prep::PartyPreprocessing` is the
 per-custodian store. Material is used once, including across aborts and
 forks; each batch stream needs its own supply; a stream that runs dry fails
 closed with `MissingPreprocessing` and there is no witness-opening fallback.
+The engine checks only counts and canonical encodings of what it is served.
+It relies on the ceremony for the MAC relations, the triple and bit relations,
+independent Goldilocks keys and a nonzero Boolean key, and on the operator for
+identical consumption order at all members and for never serving an item
+twice (a restored store is a two-time pad on masks, undetectable online).
+Session identifiers must never repeat with the same channel keys.
 
 `threshold_prep::dealerless::run_dealerless_preprocessing` produces the key
 shares and the stores without any party that knows a key or a shared value.

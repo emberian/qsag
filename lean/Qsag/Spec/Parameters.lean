@@ -2,16 +2,23 @@ module
 /-
 # Qsag.Spec.Parameters — Normative Cryptographic Parameter Profiles
 
-Centralized, human-auditable parameter records aligned 1-for-1 with the production Rust crates
-(`crates/qsag-core`, `crates/qsag-agg`, `crates/qsag-cred`, `crates/qsag-quorum`):
-1. Stateless tweakable-hash hypertree + FORS/TSW signing (`baggy128fProfile`, `corduroyCustody128Profile`,
-   and NIST FIPS-205 `slhDsaShake128fProfile`),
-2. FORS-free stateful epoch XMSS/Jorts signing (`jortsPoseidon2Profile`, `hemJortsXmssProfile`),
+Parameter records transcribed from the production Rust crates, each constant citing its source line:
+1. Tweakable-hash hypertree signing (`pq128StatelessProfile`, `corduroyCustody128Profile`,
+   `jortsPoseidon2HashProfile`: `crates/qsag-core/src/tsw_baggy.rs`) with `HashSigProfile.WellFormed`
+   following `PqHashParams::is_well_formed`, and the NIST FIPS-205 reference shape
+   (`slhDsaShake128fProfile`, `HashSigProfile.Fips205Shaped`),
+2. FORS-free stateful epoch XMSS/Jorts signing (`pq128StatefulEpochProfile`, `hemJortsXmssProfile`),
 3. Quartic-Goldilocks Reed-Solomon IOP succinct aggregation (`hemGoldilocksExt4Profile`),
-4. `PiBlindVc` selective-disclosure anonymous credentials (`N = 256` parties, `33` quantum / `17`
-   classical repetitions over `GF(p^5)`) and FIPS-204 `ML-DSA-44` (`pqCredentialProfile`),
-5. `DensePCG V3` 4-tree `12`-regular QC-LPN & `RLWE-1024` preprocessing (`densePcgV3Profile`), and
+4. `PiBlindVc` credentials (`pqCredentialProfile`): at most `32` attributes, a 2-of-5 replicated
+   TOPRF, `438` ZKBoo issuance repetitions, and `N = 256`, `33`-repetition `GF(p^5)`
+   selective-disclosure presentations; FIPS-204 `ML-DSA-44`,
+5. Dense dual-LPN PCG (`densePcgV3Profile`: `64` trees, `2^21` columns at depth `15`, row weight
+   `192`) and `RLWE-1024` preprocessing, and
 6. Separated threshold custody quorum geometry (`CustodyQuorumProfile`).
+
+The `WellFormed` predicates state the parameter equations the Rust validators enforce together
+with two-sided bounds on the security label; each comes with rejection theorems for the
+ill-formed variants it excludes.
 -/
 
 public import Qsag.Spec.Primitives
@@ -23,11 +30,15 @@ namespace Qsag.Spec
 set_option autoImplicit false
 
 /-- Normative parameter profile for tweakable-hash hypertree signing (supporting both stateless
-    FORS/TSW presets and FORS-free stateful `Jorts` presets with `forsTrees = 0`). -/
+    FORS/TSW presets and FORS-free stateful `Jorts` presets with `forsTrees = 0`). Mirrors
+    `PqHashParams` (`crates/qsag-core/src/tsw_baggy.rs:608`): `winternitzRadix = w`,
+    `wotsChainCount = ell1`, `subtreeHeight = h'`, `hypertreeLayers = d`, `forsTrees = k`,
+    `forsTreeHeight = a`. `winternitzLog2` is `log2 w` (Rust derives it as `w.trailing_zeros()`). -/
 structure HashSigProfile where
   securityBits : Nat
   digestBytes : Nat
   winternitzRadix : Nat
+  winternitzLog2 : Nat
   wotsChainCount : Nat
   subtreeHeight : Nat
   hypertreeLayers : Nat
@@ -37,25 +48,64 @@ structure HashSigProfile where
   statefulBottomLayer : Bool
   deriving DecidableEq, Repr
 
-/-- Well-formedness predicate for a `HashSigProfile`: stateless profiles require `0 < forsTrees` and
-    `0 < forsTreeHeight`, while stateful FORS-free `Jorts` profiles set `forsTrees = 0` and `forsTreeHeight = 0`. -/
-def HashSigProfile.WellFormed (p : HashSigProfile) : Prop :=
-  128 ≤ p.securityBits ∧
-  (p.digestBytes = 16 ∨ p.digestBytes = 32) ∧
-  (p.winternitzRadix = 4 ∨ p.winternitzRadix = 16) ∧
-  0 < p.wotsChainCount ∧
-  0 < p.subtreeHeight ∧
+/-- Parameter equations of a deployed `HashSigProfile`, following `PqHashParams::is_well_formed`
+    (`crates/qsag-core/src/tsw_baggy.rs:630`):
+    * `w = 2 ^ lg w` with `1 ≤ lg w ≤ 8` (Rust: `2 ≤ w ≤ 256`, power of two);
+    * the target-sum WOTS chains carry the whole digest: `ell1 * lg w = 8 * digestBytes = 256`
+      (Rust: `digest_bits != 256` is rejected; there are no checksum chains);
+    * `0 < h' ≤ 30`, `a ≤ 30`, `0 < d`, total height `d * h' ≤ 62`;
+    * `0 < maxSigsLog2 ≤ d * h'`: the signature budget never exceeds the number of leaves;
+    * stateless profiles have `0 < k`, `0 < a`; stateful profiles have `k = a = 0`.
+
+    The `securityBits` label is bounded on both sides by quantities of the profile: it is at least
+    `128`, at most half the digest width (a `2n`-bit budget is the most a generic quantum
+    preimage search leaves an `n`-bit hash), and for stateless profiles at most the `k * a` bits of
+    FORS index material. With the 256-bit digest this pins the label to exactly `128`
+    (`HashSigProfile.WellFormed.securityBits_eq`). These are necessary conditions on the label, not
+    a security proof of the scheme. -/
+@[expose] def HashSigProfile.WellFormed (p : HashSigProfile) : Prop :=
+  1 ≤ p.winternitzLog2 ∧ p.winternitzLog2 ≤ 8 ∧
+  p.winternitzRadix = 2 ^ p.winternitzLog2 ∧
+  p.digestBytes = 32 ∧
+  p.wotsChainCount * p.winternitzLog2 = 8 * p.digestBytes ∧
+  0 < p.subtreeHeight ∧ p.subtreeHeight ≤ 30 ∧
+  p.forsTreeHeight ≤ 30 ∧
   0 < p.hypertreeLayers ∧
-  p.hypertreeLayers * p.subtreeHeight ≤ 66 ∧
-  ((p.statefulBottomLayer = false ∧ 0 < p.forsTrees ∧ 0 < p.forsTreeHeight) ∨
+  p.hypertreeLayers * p.subtreeHeight ≤ 62 ∧
+  0 < p.maxSigsLog2 ∧
+  p.maxSigsLog2 ≤ p.hypertreeLayers * p.subtreeHeight ∧
+  128 ≤ p.securityBits ∧
+  2 * p.securityBits ≤ 8 * p.digestBytes ∧
+  ((p.statefulBottomLayer = false ∧ 0 < p.forsTrees ∧ 0 < p.forsTreeHeight ∧
+      p.securityBits ≤ p.forsTrees * p.forsTreeHeight) ∨
    (p.statefulBottomLayer = true ∧ p.forsTrees = 0 ∧ p.forsTreeHeight = 0))
 
-/-- Deployed 128-bit PQ stateless `Baggy-128f` profile (`PqHashParams::BAGGY_TSW_128F` in `tsw_baggy.rs`:
-    32-byte digest, `w = 4, ell1 = 128`, `d = 16, h' = 2` (`h = 32`), `k = 33, a = 6`, `Q_max = 2^16`). -/
+/-- Shape of a NIST FIPS-205 `SLH-DSA` reference parameter set, which is NOT a deployed
+    `PqHashParams` profile: checksum WOTS+ with `lg w = 4` and `len = 2n + 3` chains
+    (`len1 = 8n / 4 = 2n`, `len2 = 3`), classical label `8n`, total height at most `66 = 64 + 2`
+    and at least the `2^64` signature budget. -/
+def HashSigProfile.Fips205Shaped (p : HashSigProfile) : Prop :=
+  p.winternitzLog2 = 4 ∧
+  p.winternitzRadix = 2 ^ p.winternitzLog2 ∧
+  (p.digestBytes = 16 ∨ p.digestBytes = 24 ∨ p.digestBytes = 32) ∧
+  p.wotsChainCount = 2 * p.digestBytes + 3 ∧
+  p.securityBits = 8 * p.digestBytes ∧
+  p.statefulBottomLayer = false ∧
+  0 < p.forsTrees ∧ 0 < p.forsTreeHeight ∧
+  p.securityBits ≤ p.forsTrees * p.forsTreeHeight ∧
+  0 < p.subtreeHeight ∧ 0 < p.hypertreeLayers ∧
+  p.maxSigsLog2 = 64 ∧
+  p.maxSigsLog2 ≤ p.hypertreeLayers * p.subtreeHeight ∧
+  p.hypertreeLayers * p.subtreeHeight ≤ 66
+
+/-- Deployed 128-bit PQ stateless `Baggy-128f` profile (`PqHashParams::BAGGY_TSW_128F`,
+    `crates/qsag-core/src/tsw_baggy.rs:749`: 32-byte digest, `w = 4, ell1 = 128`, `d = 16, h' = 2`
+    (`h = 32`), `k = 33, a = 6`, `Q_max = 2^16`). -/
 @[expose] def pq128StatelessProfile : HashSigProfile where
   securityBits := 128
   digestBytes := 32
   winternitzRadix := 4
+  winternitzLog2 := 2
   wotsChainCount := 128
   subtreeHeight := 2
   hypertreeLayers := 16
@@ -64,13 +114,14 @@ def HashSigProfile.WellFormed (p : HashSigProfile) : Prop :=
   maxSigsLog2 := 16
   statefulBottomLayer := false
 
-/-- Deployed 128-bit PQ stateless `Corduroy-Custody-128` profile (`PqHashParams::CORDUROY_CUSTODY_128`
-    in `tsw_baggy.rs`: 32-byte digest, `w = 4, ell1 = 128`, `d = 7, h' = 4` (`h = 28`), `k = 33, a = 6`,
-    `Q_max = 2^12`). -/
+/-- Deployed 128-bit PQ stateless `Corduroy-Custody-128` profile (`PqHashParams::CORDUROY_CUSTODY_128`,
+    `crates/qsag-core/src/tsw_baggy.rs:737`: 32-byte digest, `w = 4, ell1 = 128`, `d = 7, h' = 4`
+    (`h = 28`), `k = 33, a = 6`, `Q_max = 2^12`). -/
 @[expose] def corduroyCustody128Profile : HashSigProfile where
   securityBits := 128
   digestBytes := 32
   winternitzRadix := 4
+  winternitzLog2 := 2
   wotsChainCount := 128
   subtreeHeight := 4
   hypertreeLayers := 7
@@ -79,11 +130,14 @@ def HashSigProfile.WellFormed (p : HashSigProfile) : Prop :=
   maxSigsLog2 := 12
   statefulBottomLayer := false
 
-/-- Deployed FORS-free stateful `JortsPoseidon2` `HashSigProfile` (`forsTrees = 0, forsTreeHeight = 0`). -/
+/-- Deployed FORS-free stateful `JortsPoseidon2` `HashSigProfile` (`PqHashParams::JORTS_POSEIDON2`,
+    `crates/qsag-core/src/tsw_baggy.rs:761`: `w = 4, ell1 = 128`, `d = 1, h' = 16`, `k = a = 0`,
+    `Q_max = 2^16`). -/
 def jortsPoseidon2HashProfile : HashSigProfile where
   securityBits := 128
   digestBytes := 32
   winternitzRadix := 4
+  winternitzLog2 := 2
   wotsChainCount := 128
   subtreeHeight := 16
   hypertreeLayers := 1
@@ -92,27 +146,82 @@ def jortsPoseidon2HashProfile : HashSigProfile where
   maxSigsLog2 := 16
   statefulBottomLayer := true
 
-/-- NIST FIPS-205 `SLH-DSA-SHAKE-128f` reference profile (`n = 16`-byte digest, `w = 16, ell1 = 35`,
-    `d = 22, h' = 3` (`h = 66`), `k = 33, a = 6`). -/
+/-- NIST FIPS-205 `SLH-DSA-SHAKE-128f` reference profile (`n = 16`-byte digest, `w = 16`,
+    `len = 35 = 32 + 3`, `d = 22, h' = 3` (`h = 66`), `k = 33, a = 6`, `2^64` signatures). Not a
+    deployed `PqHashParams` preset; it satisfies `Fips205Shaped`, not `WellFormed`. -/
 def slhDsaShake128fProfile : HashSigProfile where
   securityBits := 128
   digestBytes := 16
   winternitzRadix := 16
+  winternitzLog2 := 4
   wotsChainCount := 35
   subtreeHeight := 3
   hypertreeLayers := 22
   forsTrees := 33
   forsTreeHeight := 6
-  maxSigsLog2 := 66
+  maxSigsLog2 := 64
   statefulBottomLayer := false
 
 theorem pq128StatelessProfile_wellFormed :
     pq128StatelessProfile.WellFormed ∧
     corduroyCustody128Profile.WellFormed ∧
     jortsPoseidon2HashProfile.WellFormed ∧
-    slhDsaShake128fProfile.WellFormed := by
-  unfold HashSigProfile.WellFormed pq128StatelessProfile corduroyCustody128Profile
-    jortsPoseidon2HashProfile slhDsaShake128fProfile
+    slhDsaShake128fProfile.Fips205Shaped := by
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · unfold HashSigProfile.WellFormed pq128StatelessProfile
+    decide
+  · unfold HashSigProfile.WellFormed corduroyCustody128Profile
+    decide
+  · unfold HashSigProfile.WellFormed jortsPoseidon2HashProfile
+    decide
+  · unfold HashSigProfile.Fips205Shaped slhDsaShake128fProfile
+    decide
+
+/-- A well-formed profile carries exactly the `128`-bit label. -/
+theorem HashSigProfile.WellFormed.securityBits_eq {p : HashSigProfile} (h : p.WellFormed) :
+    p.securityBits = 128 := by
+  obtain ⟨_, _, _, hDig, _, _, _, _, _, _, _, _, hLo, hHi, _⟩ := h
+  rw [hDig] at hHi
+  omega
+
+/-- A well-formed profile has exactly as many WOTS chains as the 256-bit digest has base-`w`
+    digits (`ell1 * lg w = 256`, `tsw_baggy.rs:640`). -/
+theorem HashSigProfile.WellFormed.wotsChainCount_mul_log2 {p : HashSigProfile} (h : p.WellFormed) :
+    p.wotsChainCount * p.winternitzLog2 = 256 ∧ p.winternitzRadix = 2 ^ p.winternitzLog2 := by
+  obtain ⟨_, _, hRad, hDig, hChain, _⟩ := h
+  rw [hDig] at hChain
+  exact ⟨hChain, hRad⟩
+
+/-- The signature budget of a well-formed profile fits in its `2 ^ (d * h')` hypertree leaves, of
+    which there are at most `2 ^ 62`. -/
+theorem HashSigProfile.WellFormed.maxSigs_le_leaves {p : HashSigProfile} (h : p.WellFormed) :
+    2 ^ p.maxSigsLog2 ≤ 2 ^ (p.hypertreeLayers * p.subtreeHeight) ∧
+    2 ^ (p.hypertreeLayers * p.subtreeHeight) ≤ 2 ^ 62 := by
+  obtain ⟨_, _, _, _, _, _, _, _, _, hTot, _, hSigs, _⟩ := h
+  exact ⟨Nat.pow_le_pow_right (by decide) hSigs, Nat.pow_le_pow_right (by decide) hTot⟩
+
+/-- Tooth (audit #28): an oversized security label is rejected. -/
+theorem HashSigProfile.wellFormed_rejects_oversized_securityBits :
+    ¬ ({ pq128StatelessProfile with securityBits := 256 } : HashSigProfile).WellFormed := by
+  unfold HashSigProfile.WellFormed pq128StatelessProfile
+  decide
+
+/-- Tooth (audit #28): a positive WOTS chain count that does not cover the digest is rejected. -/
+theorem HashSigProfile.wellFormed_rejects_wrong_wotsChainCount :
+    ¬ ({ pq128StatelessProfile with wotsChainCount := 35 } : HashSigProfile).WellFormed := by
+  unfold HashSigProfile.WellFormed pq128StatelessProfile
+  decide
+
+/-- Tooth (audit #28): a signature budget above the number of hypertree leaves is rejected. -/
+theorem HashSigProfile.wellFormed_rejects_maxSigs_above_leaves :
+    ¬ ({ pq128StatelessProfile with maxSigsLog2 := 33 } : HashSigProfile).WellFormed := by
+  unfold HashSigProfile.WellFormed pq128StatelessProfile
+  decide
+
+/-- The FIPS-205 reference shape (16-byte digest, checksum chains, `h = 66`) is not a deployed
+    `PqHashParams` profile. -/
+theorem slhDsaShake128fProfile_not_wellFormed : ¬ slhDsaShake128fProfile.WellFormed := by
+  unfold HashSigProfile.WellFormed slhDsaShake128fProfile
   decide
 
 /-- Normative parameter profile for FORS-free stateful epoch XMSS/Jorts signing. -/
@@ -120,26 +229,33 @@ structure StatefulJortsProfile where
   securityBits : Nat
   digestBytes : Nat
   winternitzRadix : Nat
+  winternitzLog2 : Nat
   wotsChainCount : Nat
   treeHeight : Nat
   maxEpochLeavesLog2 : Nat
   deriving DecidableEq, Repr
 
-/-- Well-formedness predicate for a FORS-free `StatefulJortsProfile`. -/
-def StatefulJortsProfile.WellFormed (p : StatefulJortsProfile) : Prop :=
-  128 ≤ p.securityBits ∧
+/-- Parameter equations of a FORS-free `StatefulJortsProfile` (the stateful, single-layer case of
+    `PqHashParams::is_well_formed`, `crates/qsag-core/src/tsw_baggy.rs:630`): `w = 2 ^ lg w`,
+    `1 ≤ lg w ≤ 8`, `ell1 * lg w = 8 * digestBytes = 256`, `0 < h ≤ 30`, one epoch leaf per
+    signature (`maxEpochLeavesLog2 = h`), and a label between `128` and half the digest width. -/
+@[expose] def StatefulJortsProfile.WellFormed (p : StatefulJortsProfile) : Prop :=
+  1 ≤ p.winternitzLog2 ∧ p.winternitzLog2 ≤ 8 ∧
+  p.winternitzRadix = 2 ^ p.winternitzLog2 ∧
   p.digestBytes = 32 ∧
-  (p.winternitzRadix = 4 ∨ p.winternitzRadix = 16) ∧
-  0 < p.wotsChainCount ∧
-  0 < p.treeHeight ∧
-  p.maxEpochLeavesLog2 = p.treeHeight
+  p.wotsChainCount * p.winternitzLog2 = 8 * p.digestBytes ∧
+  0 < p.treeHeight ∧ p.treeHeight ≤ 30 ∧
+  p.maxEpochLeavesLog2 = p.treeHeight ∧
+  128 ≤ p.securityBits ∧
+  2 * p.securityBits ≤ 8 * p.digestBytes
 
-/-- Deployed stateful `JortsPoseidon2` profile (`PqHashParams::JORTS_POSEIDON2`: FORS-free,
-    `w = 4, ell1 = 128`, `h = 16`, `2^16` leaves). -/
+/-- Deployed stateful `JortsPoseidon2` profile (`PqHashParams::JORTS_POSEIDON2`,
+    `crates/qsag-core/src/tsw_baggy.rs:761`: FORS-free, `w = 4, ell1 = 128`, `h = 16`, `2^16` leaves). -/
 @[expose] def pq128StatefulEpochProfile : StatefulJortsProfile where
   securityBits := 128
   digestBytes := 32
   winternitzRadix := 4
+  winternitzLog2 := 2
   wotsChainCount := 128
   treeHeight := 16
   maxEpochLeavesLog2 := 16
@@ -150,6 +266,7 @@ def hemJortsXmssProfile : StatefulJortsProfile where
   securityBits := 128
   digestBytes := 32
   winternitzRadix := 4
+  winternitzLog2 := 2
   wotsChainCount := 128
   treeHeight := 6
   maxEpochLeavesLog2 := 6
@@ -158,6 +275,33 @@ theorem pq128StatefulEpochProfile_wellFormed :
     pq128StatefulEpochProfile.WellFormed ∧
     hemJortsXmssProfile.WellFormed := by
   unfold StatefulJortsProfile.WellFormed pq128StatefulEpochProfile hemJortsXmssProfile
+  decide
+
+/-- A well-formed stateful profile carries exactly the `128`-bit label and `256 / lg w` chains. -/
+theorem StatefulJortsProfile.WellFormed.securityBits_eq {p : StatefulJortsProfile}
+    (h : p.WellFormed) :
+    p.securityBits = 128 ∧ p.wotsChainCount * p.winternitzLog2 = 256 := by
+  obtain ⟨_, _, _, hDig, hChain, _, _, _, hLo, hHi⟩ := h
+  rw [hDig] at hHi hChain
+  exact ⟨by omega, hChain⟩
+
+/-- Tooth (audit #28): neither an oversized label nor a non-covering chain count is accepted. -/
+theorem StatefulJortsProfile.wellFormed_rejects_oversized_or_wrong_chains :
+    ¬ (({ pq128StatefulEpochProfile with securityBits := 256 } : StatefulJortsProfile).WellFormed ∨
+       ({ pq128StatefulEpochProfile with wotsChainCount := 64 } : StatefulJortsProfile).WellFormed) := by
+  unfold StatefulJortsProfile.WellFormed pq128StatefulEpochProfile
+  decide
+
+/-- The two encodings of the deployed `JortsPoseidon2` preset agree field by field. -/
+theorem jortsPoseidon2HashProfile_eq_statefulEpochProfile :
+    jortsPoseidon2HashProfile.securityBits = pq128StatefulEpochProfile.securityBits ∧
+    jortsPoseidon2HashProfile.digestBytes = pq128StatefulEpochProfile.digestBytes ∧
+    jortsPoseidon2HashProfile.winternitzRadix = pq128StatefulEpochProfile.winternitzRadix ∧
+    jortsPoseidon2HashProfile.wotsChainCount = pq128StatefulEpochProfile.wotsChainCount ∧
+    jortsPoseidon2HashProfile.hypertreeLayers * jortsPoseidon2HashProfile.subtreeHeight =
+      pq128StatefulEpochProfile.treeHeight ∧
+    jortsPoseidon2HashProfile.maxSigsLog2 = pq128StatefulEpochProfile.maxEpochLeavesLog2 := by
+  unfold jortsPoseidon2HashProfile pq128StatefulEpochProfile
   decide
 
 /-- Normative parameter profile for quartic-Goldilocks Reed-Solomon IOP succinct aggregation (`HEM`/`WHIR`),
@@ -195,23 +339,31 @@ structure AggregationProfile where
   maxMergeDepth := 16
 
 theorem hemGoldilocksExt4Profile_basePrime_eq :
-    hemGoldilocksExt4Profile.basePrime = Qsag.goldilocksPrime ∧
+    hemGoldilocksExt4Profile.basePrime = 2 ^ 64 - 2 ^ 32 + 1 ∧
     hemGoldilocksExt4Profile.extDegree = 4 ∧
     hemGoldilocksExt4Profile.stageBlowups = [4, 16, 64, 256] ∧
     hemGoldilocksExt4Profile.johnsonQromQueries = [258, 130, 88, 66] ∧
     hemGoldilocksExt4Profile.cdhzQromQueries = [202, 102, 70, 52] := by
-  unfold hemGoldilocksExt4Profile Qsag.goldilocksPrime
+  unfold hemGoldilocksExt4Profile
   decide
 
-/-- Normative parameter profile for `PiBlindVc` selective-disclosure credentials (`crates/qsag-cred/src/blind_vc.rs`),
-    threshold symmetric `VOPRF` (`crates/qsag-cred/src/voprf.rs`), and `ThresholdMlDsa` (`MlDsa44Parameters`). -/
+/-- Normative parameter profile for `PiBlindVc` credentials (`crates/qsag-cred/src/blind_vc.rs`),
+    the replicated threshold OPRF (`crates/qsag-cred/src/voprf.rs`), and `ThresholdMlDsa`
+    (`MlDsa44Parameters`). Issuance and presentation are different proof systems with separate
+    fields: issuance commitments use 3-party Goldilocks ZKBoo (`issuance*`), selective-disclosure
+    membership presentations use the `N = 256` seed-tree MPC-in-the-head check over `GF(p^5)`
+    (`sd*`). -/
 structure CredentialProfile where
   maxAttrs : Nat
   accumulatorDepth : Nat
   spongeRate : Nat
   spongeCapacity : Nat
-  voprfParties : Nat
-  voprfThreshold : Nat
+  toprfServers : Nat
+  toprfThreshold : Nat
+  toprfMaxCorrupt : Nat
+  toprfOnlineServers : Nat
+  toprfMaxBatch : Nat
+  toprfCounterWindow : Nat
   issuanceParties : Nat
   issuanceRepsClassical : Nat
   issuanceRepsQuantum : Nat
@@ -222,22 +374,71 @@ structure CredentialProfile where
   sdRepsQuantum : Nat
   mlDsaModulus : Nat
   mlDsaChallengeWeight : Nat
+  mlDsaEta : Nat
   mlDsaGamma1 : Nat
   mlDsaBeta : Nat
   mlDsaSacrificeExtDegree : Nat
   deriving DecidableEq, Repr
 
-/-- Production `PiBlindVc` + `VOPRF` + `ThresholdMlDsa` credential profile (`MAX_VC_ATTRS = 6`,
-    `VC_ACCUMULATOR_DEPTH = 20`, 2-of-3 symmetric `VOPRF`, `438` 3-party ZKBoo issuance repetitions,
-    `N = 256 = 2^8` GGM MPCitH selective-disclosure parties, `33` quantum / `17` classical repetitions
-    over `GF(p^5) = GF(p)[T]/(T^5 - 3)`, `ML-DSA-44` `τ = 39`, `𝔽_{q^6}` sacrifice). -/
+/-- Parameter equations of a `CredentialProfile`:
+    * credentials have between `1` and `maxAttrs` attributes, so `0 < maxAttrs`
+      (`blind_vc.rs:179`: `(1..=MAX_VC_ATTRS).contains(&attrs.len())`), and `0 < accumulatorDepth`;
+    * the sponge capacity holds at least `256` bits of `63`-bit-or-wider Goldilocks limbs;
+    * TOPRF committee (`voprf.rs:4`–`17`): `maxCorrupt < threshold ≤ online ≤ servers`, and each
+      cross term is held by the `servers - 2` parties other than its two component holders, of
+      which a strict majority is honest (`2 * maxCorrupt < servers - 2`); `0 < maxBatch`;
+    * issuance ZKBoo: the quantum repetition count is twice the classical one, and the classical
+      count `r` makes the `(2/3)^r` challenge-guessing probability at most `2^-128`
+      (`2^128 * 2^r ≤ 3^r`);
+    * presentation: `sdLimboParties = 2 ^ sdGgmDepth`, and guessing the hidden party in every
+      repetition has probability at most `2^-128` (classical) and `2^-256` (quantum count), with
+      a check field of more than `256` bits;
+    * `ML-DSA`: `q = 2^23 - 2^13 + 1`, `β = τ * η`, `β < γ₁`.
+    These are the arithmetic preconditions of the cited soundness arguments, not those arguments. -/
+@[expose] def CredentialProfile.WellFormed (p : CredentialProfile) : Prop :=
+  0 < p.maxAttrs ∧ 0 < p.accumulatorDepth ∧
+  256 ≤ 63 * p.spongeCapacity ∧
+  p.toprfMaxCorrupt < p.toprfThreshold ∧
+  p.toprfThreshold ≤ p.toprfOnlineServers ∧
+  p.toprfOnlineServers ≤ p.toprfServers ∧
+  2 * p.toprfMaxCorrupt + 2 < p.toprfServers ∧
+  0 < p.toprfMaxBatch ∧
+  p.issuanceParties = 3 ∧
+  p.issuanceRepsQuantum = 2 * p.issuanceRepsClassical ∧
+  2 ^ 128 * 2 ^ p.issuanceRepsClassical ≤ 3 ^ p.issuanceRepsClassical ∧
+  p.sdLimboParties = 2 ^ p.sdGgmDepth ∧
+  128 ≤ p.sdRepsClassical * p.sdGgmDepth ∧
+  256 ≤ p.sdRepsQuantum * p.sdGgmDepth ∧
+  256 ≤ 63 * p.sdExtDegree ∧
+  p.mlDsaModulus = 2 ^ 23 - 2 ^ 13 + 1 ∧
+  p.mlDsaBeta = p.mlDsaChallengeWeight * p.mlDsaEta ∧
+  p.mlDsaBeta < p.mlDsaGamma1
+
+/-- Production credential profile.
+    * `maxAttrs = 32`: `MAX_VC_ATTRS`, `crates/qsag-cred/src/blind_vc.rs:42`;
+    * `accumulatorDepth = 20`: `VC_ACCUMULATOR_DEPTH`, `blind_vc.rs:44`;
+    * rate-6 / capacity-6 Poseidon2 sponge: `blind_vc.rs:10`–`11`;
+    * `toprfServers = 5`: `SERVERS`, `crates/qsag-cred/src/voprf.rs:70`; threshold `t = 2`, at most
+      one statically corrupt server, four servers online: `voprf.rs:4`–`5`; `MAX_BATCH = 64`,
+      `voprf.rs:71`; `MAX_COUNTER_WINDOW = 64`, `voprf.rs:76`;
+    * issuance: 3-party ZKBoo, `219` classical / `438` quantum repetitions
+      (`ZkSoundnessProfile::repetitions`, `blind_vc.rs:65`–`66`; `VC_ZKBOO_REPS = 438`, `blind_vc.rs:46`);
+    * selective-disclosure presentation: `VC_SD_LIMBO_PARTIES = 256` (`blind_vc.rs:57`),
+      `VC_SD_GGM_DEPTH = 8` (`blind_vc.rs:59`), `17` classical / `33` quantum repetitions
+      (`ZkSoundnessProfile::sd_repetitions`, `blind_vc.rs:74`–`75`) over
+      `GF(p^5) = GF(p)[T]/(T^5 - 3)` (`blind_vc.rs:14`);
+    * `ML-DSA-44`: `q = 8380417`, `τ = 39`, `η = 2`, `γ₁ = 2^17`, `β = 78`; `𝔽_{q^6}` sacrifice. -/
 @[expose] def pqCredentialProfile : CredentialProfile where
-  maxAttrs := 6
+  maxAttrs := 32
   accumulatorDepth := 20
   spongeRate := 6
   spongeCapacity := 6
-  voprfParties := 3
-  voprfThreshold := 2
+  toprfServers := 5
+  toprfThreshold := 2
+  toprfMaxCorrupt := 1
+  toprfOnlineServers := 4
+  toprfMaxBatch := 64
+  toprfCounterWindow := 64
   issuanceParties := 3
   issuanceRepsClassical := 219
   issuanceRepsQuantum := 438
@@ -248,12 +449,13 @@ structure CredentialProfile where
   sdRepsQuantum := 33
   mlDsaModulus := 8380417
   mlDsaChallengeWeight := 39
+  mlDsaEta := 2
   mlDsaGamma1 := 131072
   mlDsaBeta := 78
   mlDsaSacrificeExtDegree := 6
 
-/-- Normative parameter profile for `DensePCG V3` QC-LPN & `RLWE-1024` preprocessing
-    (`crates/qsag-core/src/preprocessing.rs`). -/
+/-- Normative parameter profile for the dense dual-LPN PCG (`crates/qsag-core/src/pcg_dense.rs`)
+    and the `RLWE-1024` base-OT preprocessing (`crates/qsag-core/src/preprocessing.rs`). -/
 structure DensePcgProfile where
   defaultTreeDepth : Nat
   leavesPerTree : Nat
@@ -263,7 +465,8 @@ structure DensePcgProfile where
   lpnRowWeight : Nat
   numPackedWords : Nat
   numBoolTriples : Nat
-  numTowerTriples : Nat
+  numFullFieldCompanions : Nat
+  spcotCheckReps : Nat
   maxSeedWireBytes : Nat
   rlweRingDim : Nat
   rlweModulus : Nat
@@ -271,24 +474,68 @@ structure DensePcgProfile where
   rlweChallengeBits : Nat
   deriving DecidableEq, Repr
 
+/-- Canonical wire length in bytes of a 2-party (one-peer) seed at the profile's tree depth:
+    `max_wire_seed_bytes(2, depth)` (`crates/qsag-core/src/pcg_dense.rs:84`), i.e. a `64`-byte
+    header plus one peer record `2 + 32 + 2t + 32·d·t + 16t + 32 + 16·reps + 32`. -/
+@[expose] def DensePcgProfile.twoPartySeedWireBytes (p : DensePcgProfile) : Nat :=
+  64 + (2 + 32 + 2 * p.treesPerBundle + 32 * p.defaultTreeDepth * p.treesPerBundle +
+    16 * p.treesPerBundle + 32 + 16 * p.spcotCheckReps + 32)
+
+/-- Parameter equations of a `DensePcgProfile`: production depth `14` or `15`
+    (`PcgTreeDepth`, `pcg_dense.rs:130`), `leavesPerTree = 2 ^ depth`, ambient dimension
+    `trees * leaves`, row weight `trees * taps`, `64` Boolean triples per packed word
+    (`pcg_dense.rs:68`), the exact 2-party wire length within the advertised bound, an
+    NTT-friendly RLWE modulus (`q ≡ 1 mod 2n`), and at least `256` joint challenge bits in the
+    RLWE proof of knowledge. -/
+@[expose] def DensePcgProfile.WellFormed (p : DensePcgProfile) : Prop :=
+  (p.defaultTreeDepth = 14 ∨ p.defaultTreeDepth = 15) ∧
+  p.leavesPerTree = 2 ^ p.defaultTreeDepth ∧
+  p.bundleAmbientDim = p.treesPerBundle * p.leavesPerTree ∧
+  p.lpnRowWeight = p.treesPerBundle * p.tapsPerTree ∧
+  p.numBoolTriples = p.numPackedWords * 64 ∧
+  0 < p.spcotCheckReps ∧
+  p.twoPartySeedWireBytes ≤ p.maxSeedWireBytes ∧
+  p.rlweModulus % (2 * p.rlweRingDim) = 1 ∧
+  256 ≤ p.rlweZkpokReps * p.rlweChallengeBits
+
+/-- Production dense-PCG profile (`crates/qsag-core/src/pcg_dense.rs`):
+    * `treesPerBundle = 64`: `DENSE_PCG_NUM_TREES`, `pcg_dense.rs:59`;
+    * `tapsPerTree = 3`: `DENSE_PCG_TAPS_PER_TREE`, `pcg_dense.rs:62`; row weight `64 · 3 = 192`;
+    * depth `15`, `2^15 = 32768` leaves per tree, `64 · 2^15 = 2^21 = 2097152` columns:
+      `PcgTreeDepth::Depth15`, `pcg_dense.rs:137`–`138`;
+    * `numPackedWords = 1024`: `DENSE_PCG_NUM_WORDS`, `pcg_dense.rs:65`;
+    * `numBoolTriples = 65536`: `DENSE_PCG_NUM_BOOL_TRIPLES`, `pcg_dense.rs:68`;
+    * `numFullFieldCompanions = 64`: `DENSE_PCG_NUM_VOLE128`, `pcg_dense.rs:71`;
+    * `spcotCheckReps = 2`: `SPCOT_CHECK_REPS`, `pcg_dense.rs:703`;
+    * `maxSeedWireBytes = 36864`: `DENSE_PCG_MAX_SEED_BYTES`, `pcg_dense.rs:75`;
+    * `RLWE_N = 1024`, `RLWE_Q = 12289`, `RLWE_ZKPOK_REPS = 24`, `RLWE_ZKPOK_CHAL_BITS = 11`:
+      `crates/qsag-core/src/preprocessing.rs:616`, `:626`, `:1080`, `:1083`. -/
 @[expose] def densePcgV3Profile : DensePcgProfile where
   defaultTreeDepth := 15
   leavesPerTree := 32768
-  treesPerBundle := 4
-  bundleAmbientDim := 131072
+  treesPerBundle := 64
+  bundleAmbientDim := 2097152
   tapsPerTree := 3
-  lpnRowWeight := 12
-  numPackedWords := 1025
-  numBoolTriples := 65600
-  numTowerTriples := 8
-  maxSeedWireBytes := 24576
+  lpnRowWeight := 192
+  numPackedWords := 1024
+  numBoolTriples := 65536
+  numFullFieldCompanions := 64
+  spcotCheckReps := 2
+  maxSeedWireBytes := 36864
   rlweRingDim := 1024
   rlweModulus := 12289
   rlweZkpokReps := 24
   rlweChallengeBits := 11
 
+theorem pqCredentialProfile_wellFormed :
+    pqCredentialProfile.WellFormed ∧ densePcgV3Profile.WellFormed := by
+  unfold CredentialProfile.WellFormed DensePcgProfile.WellFormed
+    DensePcgProfile.twoPartySeedWireBytes pqCredentialProfile densePcgV3Profile
+  decide
+
+/-- Rust-parity literals of the production credential and dense-PCG profiles. -/
 theorem pqCredentialProfile_soundness_params :
-    pqCredentialProfile.maxAttrs = 6 ∧
+    pqCredentialProfile.maxAttrs = 32 ∧
     pqCredentialProfile.sdLimboParties = 2 ^ pqCredentialProfile.sdGgmDepth ∧
     pqCredentialProfile.sdLimboParties = 256 ∧
     pqCredentialProfile.sdExtDegree = 5 ∧
@@ -297,6 +544,51 @@ theorem pqCredentialProfile_soundness_params :
     densePcgV3Profile.bundleAmbientDim = densePcgV3Profile.treesPerBundle * densePcgV3Profile.leavesPerTree ∧
     densePcgV3Profile.lpnRowWeight = densePcgV3Profile.treesPerBundle * densePcgV3Profile.tapsPerTree := by
   unfold pqCredentialProfile densePcgV3Profile
+  decide
+
+/-- Rust-parity literals added with the `voprf.rs` / `pcg_dense.rs` update: five TOPRF servers with
+    threshold two, `438` issuance repetitions against `33` presentation repetitions, and the dense
+    PCG geometry with its exact 2-party seed length. -/
+theorem pqCredentialProfile_rust_parity :
+    pqCredentialProfile.toprfServers = 5 ∧
+    pqCredentialProfile.toprfThreshold = 2 ∧
+    pqCredentialProfile.issuanceRepsQuantum = 438 ∧
+    pqCredentialProfile.sdRepsQuantum = 33 ∧
+    densePcgV3Profile.treesPerBundle = 64 ∧
+    densePcgV3Profile.bundleAmbientDim = 2097152 ∧
+    densePcgV3Profile.lpnRowWeight = 192 ∧
+    densePcgV3Profile.numPackedWords = 1024 ∧
+    densePcgV3Profile.numBoolTriples = 65536 ∧
+    densePcgV3Profile.numFullFieldCompanions = 64 ∧
+    densePcgV3Profile.maxSeedWireBytes = 36864 ∧
+    densePcgV3Profile.twoPartySeedWireBytes = 32066 := by
+  unfold DensePcgProfile.twoPartySeedWireBytes pqCredentialProfile densePcgV3Profile
+  decide
+
+/-- A well-formed credential profile admits no empty credential and its presentation party count
+    is the size of its GGM tree. -/
+theorem CredentialProfile.WellFormed.attrs_and_parties {p : CredentialProfile} (h : p.WellFormed) :
+    0 < p.maxAttrs ∧ p.sdLimboParties = 2 ^ p.sdGgmDepth ∧
+    p.toprfMaxCorrupt < p.toprfThreshold ∧ p.toprfThreshold ≤ p.toprfServers := by
+  obtain ⟨hA, _, _, hC, hT, hO, _, _, _, _, _, hN, _⟩ := h
+  exact ⟨hA, hN, hC, Nat.le_trans hT hO⟩
+
+/-- Tooth (audit #10): a 3-server committee fails the honest-majority equation, an issuance proof
+    with presentation-sized repetition counts fails the ZKBoo budget, and `maxAttrs = 0` is rejected. -/
+theorem CredentialProfile.wellFormed_rejects_stale_committee_and_reps :
+    ¬ (({ pqCredentialProfile with toprfServers := 3 } : CredentialProfile).WellFormed ∨
+       ({ pqCredentialProfile with issuanceRepsClassical := 17, issuanceRepsQuantum := 34 } :
+          CredentialProfile).WellFormed ∨
+       ({ pqCredentialProfile with maxAttrs := 0 } : CredentialProfile).WellFormed) := by
+  unfold CredentialProfile.WellFormed pqCredentialProfile
+  decide
+
+/-- Tooth (rust-spec-parity #6): the retired 4-tree geometry with the current ambient dimension,
+    and an advertised seed bound below the real wire length, are both rejected. -/
+theorem DensePcgProfile.wellFormed_rejects_stale_geometry :
+    ¬ (({ densePcgV3Profile with treesPerBundle := 4 } : DensePcgProfile).WellFormed ∨
+       ({ densePcgV3Profile with maxSeedWireBytes := 24576 } : DensePcgProfile).WellFormed) := by
+  unfold DensePcgProfile.WellFormed DensePcgProfile.twoPartySeedWireBytes densePcgV3Profile
   decide
 
 /-- Normative quorum profile for separated threshold custody (`0 < threshold ≤ numParties`). -/
@@ -324,10 +616,32 @@ theorem CustodyQuorumProfile.honest_quorum_intersection
 
 #verify_constructive
   Qsag.Spec.pq128StatelessProfile_wellFormed
+  Qsag.Spec.HashSigProfile.WellFormed.securityBits_eq
+  Qsag.Spec.HashSigProfile.WellFormed.wotsChainCount_mul_log2
+  Qsag.Spec.HashSigProfile.WellFormed.maxSigs_le_leaves
+  Qsag.Spec.slhDsaShake128fProfile_not_wellFormed
   Qsag.Spec.pq128StatefulEpochProfile_wellFormed
+  Qsag.Spec.StatefulJortsProfile.WellFormed.securityBits_eq
+  Qsag.Spec.jortsPoseidon2HashProfile_eq_statefulEpochProfile
   Qsag.Spec.hemGoldilocksExt4Profile_basePrime_eq
+  Qsag.Spec.pqCredentialProfile_wellFormed
   Qsag.Spec.pqCredentialProfile_soundness_params
+  Qsag.Spec.pqCredentialProfile_rust_parity
+  Qsag.Spec.CredentialProfile.WellFormed.attrs_and_parties
   Qsag.Spec.CustodyQuorumProfile.honest_quorum_intersection
+
+#tooth_pair Qsag.Spec.HashSigProfile.WellFormed.securityBits_eq vs
+  Qsag.Spec.HashSigProfile.wellFormed_rejects_oversized_securityBits
+#tooth_pair Qsag.Spec.HashSigProfile.WellFormed.wotsChainCount_mul_log2 vs
+  Qsag.Spec.HashSigProfile.wellFormed_rejects_wrong_wotsChainCount
+#tooth_pair Qsag.Spec.HashSigProfile.WellFormed.maxSigs_le_leaves vs
+  Qsag.Spec.HashSigProfile.wellFormed_rejects_maxSigs_above_leaves
+#tooth_pair Qsag.Spec.StatefulJortsProfile.WellFormed.securityBits_eq vs
+  Qsag.Spec.StatefulJortsProfile.wellFormed_rejects_oversized_or_wrong_chains
+#tooth_pair Qsag.Spec.CredentialProfile.WellFormed.attrs_and_parties vs
+  Qsag.Spec.CredentialProfile.wellFormed_rejects_stale_committee_and_reps
+#tooth_pair Qsag.Spec.pqCredentialProfile_wellFormed vs
+  Qsag.Spec.DensePcgProfile.wellFormed_rejects_stale_geometry
 
 end Qsag.Spec
 end

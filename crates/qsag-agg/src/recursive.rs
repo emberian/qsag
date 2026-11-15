@@ -10,6 +10,21 @@
 //!    Recipients without that evidence must obtain and verify the full child hierarchy.
 //!    [`crate::recursion_census`] measures the child-verifier hash work an outer relation
 //!    would have to absorb to remove that requirement.
+//! 3. Succinct shard-opening merges ([`SuccinctShardWhirAggregate`]), where one committed
+//!    outer relation executes the fixed-path WHIR verifier of every shard's evaluation claim
+//!    and each claim is bound to its shard summary and policy registry. The parent is
+//!    smaller than the child openings it replaces from four 4,096-cell children upward.
+//!    It certifies the openings, not the signature relation behind a shard commitment.
+
+/// The `k`-child PCS-verifier relation behind [`SuccinctShardWhirAggregate`]; unlike the
+/// legacy digest hierarchy, it checks the child openings in the outer relation. It does not
+/// by itself certify the signature/AIR relation that produced a child opening statement.
+pub use crate::zk_hem::recursive_whir::{
+    ChildWhirMergeRelation, ChildWhirRelationStats, ChildWhirStatement, FixedPathWhirParams,
+    FixedPathWhirProof, MAX_MERGE_CHILDREN, RecursiveWhirError, SuccinctChildWhirMerge,
+    merged_child_whir_root, prove_for_recursion, prove_succinct_children_whir_merge,
+    verify_fixed_path, verify_succinct_children_whir_merge,
+};
 
 use crate::arithmetize::{
     ROW_SUMCHECK_COEFFS, ROW_SUMCHECK_WIRE_COEFFS, build_shift_tables_ext4, eval_eq_not_last_ext4,
@@ -566,18 +581,33 @@ fn prove_hierarchical_hem_inner(
     minimum_global_quorums: usize,
     config: &HemAggConfig,
 ) -> Result<HierarchicalHemAggregate, HemAggError> {
-    if !valid_policies(policies) { return Err(HemAggError::InvalidShardConfig); }
+    if !valid_policies(policies) {
+        return Err(HemAggError::InvalidShardConfig);
+    }
     let committee_roots = compute_committee_roots(policies);
     let policy_registry_root = compute_policy_registry_root_with_roots(policies, &committee_roots);
-    prove_hierarchical_hem_with_roots(policies, &committee_roots, policy_registry_root,
-        witnesses, epoch_floor, message, minimum_global_quorums, config)
+    prove_hierarchical_hem_with_roots(
+        policies,
+        &committee_roots,
+        policy_registry_root,
+        witnesses,
+        epoch_floor,
+        message,
+        minimum_global_quorums,
+        config,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
 fn prove_hierarchical_hem_with_roots(
-    policies: &[ShardHemPolicy], committee_roots: &[[u8;32]], policy_registry_root: [u8;32],
-    witnesses: &[ShardHemWitness<'_>], epoch_floor: u64, message: &[u8],
-    minimum_global_quorums: usize, config: &HemAggConfig,
+    policies: &[ShardHemPolicy],
+    committee_roots: &[[u8; 32]],
+    policy_registry_root: [u8; 32],
+    witnesses: &[ShardHemWitness<'_>],
+    epoch_floor: u64,
+    message: &[u8],
+    minimum_global_quorums: usize,
+    config: &HemAggConfig,
 ) -> Result<HierarchicalHemAggregate, HemAggError> {
     if !valid_policies(policies) || witnesses.len() != policies.len() || minimum_global_quorums == 0
     {
@@ -958,12 +988,22 @@ pub fn prove_hierarchical_hem(
 /// Shares the exact statement and transcript of [`prove_hierarchical_hem`].
 pub fn prove_hierarchical_hem_prepared(
     registry: &PreparedPolicyRegistry,
-    witnesses: &[ShardHemWitness<'_>], epoch_floor: u64, message: impl AsRef<[u8]>,
-    minimum_global_quorums: usize, config: &HemAggConfig,
+    witnesses: &[ShardHemWitness<'_>],
+    epoch_floor: u64,
+    message: impl AsRef<[u8]>,
+    minimum_global_quorums: usize,
+    config: &HemAggConfig,
 ) -> Result<HierarchicalHemAggregate, HemAggError> {
-    prove_hierarchical_hem_with_roots(&registry.policies, &registry.committee_roots,
-        registry.policy_registry_root, witnesses, epoch_floor, message.as_ref(),
-        minimum_global_quorums, config)
+    prove_hierarchical_hem_with_roots(
+        &registry.policies,
+        &registry.committee_roots,
+        registry.policy_registry_root,
+        witnesses,
+        epoch_floor,
+        message.as_ref(),
+        minimum_global_quorums,
+        config,
+    )
 }
 
 /// Verify a two-layer hierarchical `Hem` aggregate against `policies`, exact `epoch_floor` and
@@ -1568,8 +1608,8 @@ impl SuccinctHierarchicalHemAggregate {
             let off = 40 + 8 * j;
             let mut lb = [0u8; 8];
             lb.copy_from_slice(&bytes[off..off + 8]);
-            *dst =
-                Goldilocks::from_le_bytes_canonical(lb).map_err(|_| HemAggError::MalformedWireBytes)?;
+            *dst = Goldilocks::from_le_bytes_canonical(lb)
+                .map_err(|_| HemAggError::MalformedWireBytes)?;
         }
         let num_shards = u32::from_le_bytes(bytes[72..76].try_into().unwrap()) as usize;
         let (_, log_rows) =
@@ -1704,9 +1744,14 @@ pub fn compress_verified_hierarchical_hem(
     blinding_seed: [u8; 32],
 ) -> Result<SuccinctHierarchicalHemAggregate, HemAggError> {
     let evidence = verify_hierarchical_hem_evidence(
-        policies, epoch_floor, message, minimum_global_quorums,
-        WhirSecurityRegime::BciksJohnsonQrom128, aggregate,
-    ).ok_or(HemAggError::InvalidShardConfig)?;
+        policies,
+        epoch_floor,
+        message,
+        minimum_global_quorums,
+        WhirSecurityRegime::BciksJohnsonQrom128,
+        aggregate,
+    )
+    .ok_or(HemAggError::InvalidShardConfig)?;
     compress_hierarchical_hem_evidence(&evidence, blinding_seed)
 }
 
@@ -1725,8 +1770,12 @@ pub fn compress_hierarchical_hem_evidence(
     let minimum = u64::try_from(evidence.minimum_global_quorums)
         .map_err(|_| HemAggError::InvalidShardConfig)?;
     prove_outer_summary_chain(
-        evidence.policy_registry_root, evidence.shards.clone(), evidence.epoch_floor,
-        evidence.message_digest, minimum, blinding_seed,
+        evidence.policy_registry_root,
+        evidence.shards.clone(),
+        evidence.epoch_floor,
+        evidence.message_digest,
+        minimum,
+        blinding_seed,
     )
 }
 
@@ -2371,6 +2420,150 @@ pub fn verify_succinct_hierarchical_hem(
     )
 }
 
+// ============================================================================
+// Succinct shard-opening mode
+// ============================================================================
+
+/// One shard's evaluation claim about its fixed-path witness commitment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShardWhirClaim {
+    pub summary: ShardHemSummary,
+    pub commitment: [Goldilocks; 4],
+    pub point: Vec<GoldilocksExt4>,
+    pub value: GoldilocksExt4,
+}
+
+/// Header binding a shard opening to its registry and its whole summary, including the
+/// signer bitmap and the child-proof digest.
+pub fn shard_whir_header(policy_registry_root: &[u8; 32], summary: &ShardHemSummary) -> [u8; 32] {
+    poseidon2_hash32(&encode_multi_frame(&[
+        b"QSAG.SHM.WHIR.HDR/v1",
+        policy_registry_root,
+        &shard_summary_header_digest(summary),
+        &summary.child_proof_digest,
+    ]))
+}
+
+impl ShardWhirClaim {
+    /// Public opening statement the merge relation verifies for this shard.
+    pub fn statement(&self, policy_registry_root: &[u8; 32]) -> ChildWhirStatement {
+        ChildWhirStatement {
+            shard_header: shard_whir_header(policy_registry_root, &self.summary),
+            commitment: self.commitment,
+            point: self.point.clone(),
+            value: self.value,
+        }
+    }
+}
+
+/// Shard summaries, their evaluation claims and one parent proof that every claim's WHIR
+/// opening verifies. No child opening proof is carried.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SuccinctShardWhirAggregate {
+    pub policy_registry_root: [u8; 32],
+    pub claims: Vec<ShardWhirClaim>,
+    pub merge: SuccinctChildWhirMerge,
+}
+
+fn shard_whir_statements(
+    policy_registry_root: &[u8; 32],
+    claims: &[ShardWhirClaim],
+) -> Vec<ChildWhirStatement> {
+    claims
+        .iter()
+        .map(|c| c.statement(policy_registry_root))
+        .collect()
+}
+
+/// Merge the shards' fixed-path openings into one parent proof. `openings[i]` must open
+/// `claims[i]` under the header [`shard_whir_header`] derives for it.
+pub fn prove_succinct_shard_whir_merge(
+    relation: &ChildWhirMergeRelation,
+    policy_registry_root: [u8; 32],
+    claims: Vec<ShardWhirClaim>,
+    openings: &[FixedPathWhirProof],
+    regime: WhirSecurityRegime,
+    seed: &[u8; 32],
+) -> Result<SuccinctShardWhirAggregate, RecursiveWhirError> {
+    let statements = shard_whir_statements(&policy_registry_root, &claims);
+    if !statements
+        .iter()
+        .zip(openings)
+        .all(|(s, p)| verify_fixed_path(relation.params(), s, p))
+    {
+        return Err(RecursiveWhirError::InvalidOpening);
+    }
+    let merge = prove_succinct_children_whir_merge(relation, &statements, openings, regime, seed)?;
+    Ok(SuccinctShardWhirAggregate {
+        policy_registry_root,
+        claims,
+        merge,
+    })
+}
+
+/// Verify the parent proof against `policies` in the exact `epoch_floor` / `message`
+/// context: every summary must name its policy and meet its quorum minimum, the summed
+/// quorums must reach `minimum_global_quorums`, and each claim's opening must verify inside
+/// the merge relation under the header of that summary.
+///
+/// As with [`check_hierarchical_hem_commitment`], the signer bitmaps are claims of the
+/// summaries: this does not verify the shard signatures.
+pub fn verify_succinct_shard_whir_merge(
+    relation: &ChildWhirMergeRelation,
+    policies: &[ShardHemPolicy],
+    epoch_floor: u64,
+    message: impl AsRef<[u8]>,
+    minimum_global_quorums: usize,
+    regime: WhirSecurityRegime,
+    aggregate: &SuccinctShardWhirAggregate,
+) -> bool {
+    if !valid_policies(policies)
+        || aggregate.claims.len() != policies.len()
+        || minimum_global_quorums == 0
+    {
+        return false;
+    }
+    let committee_roots = compute_committee_roots(policies);
+    if aggregate.policy_registry_root
+        != compute_policy_registry_root_with_roots(policies, &committee_roots)
+    {
+        return false;
+    }
+    let message_digest = compute_framed_message_digest(message.as_ref());
+    let mut counts = Vec::with_capacity(policies.len());
+    let mut minimums = Vec::with_capacity(policies.len());
+    for ((p, claim), c_root) in policies.iter().zip(&aggregate.claims).zip(&committee_roots) {
+        let s = &claim.summary;
+        let (Ok(minimum), Ok(signers)) = (
+            u64::try_from(p.minimum_quorums),
+            u64::try_from(s.num_signers()),
+        ) else {
+            return false;
+        };
+        if s.shard_id != p.shard_id
+            || s.custodian_cluster != p.custodian_cluster
+            || s.shard_quorum_set_root != *c_root
+            || s.minimum_quorums != minimum
+            || s.epoch_floor != epoch_floor
+            || s.message_digest != message_digest
+            || s.bitmap.num_validators() as usize != p.quorum_keys.len()
+            || s.num_signers() < p.minimum_quorums
+        {
+            return false;
+        }
+        counts.push(signers);
+        minimums.push(minimum);
+    }
+    let Ok(minimum_global) = u64::try_from(minimum_global_quorums) else {
+        return false;
+    };
+    if qsag_whir_verified::checked_quorum_sum(&counts, &minimums, minimum_global).is_none() {
+        return false;
+    }
+    let statements = shard_whir_statements(&aggregate.policy_registry_root, &aggregate.claims);
+    verify_succinct_children_whir_merge(relation, &statements, regime, &aggregate.merge)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3000,10 +3193,17 @@ mod tests {
             )
             .expect("prepared registry yields the same evidence");
             assert_eq!(prepared.summaries(), evidence.summaries());
-            assert_eq!(prepared.policy_registry_root(), evidence.policy_registry_root());
+            assert_eq!(
+                prepared.policy_registry_root(),
+                evidence.policy_registry_root()
+            );
             assert_eq!(prepared.message_digest(), evidence.message_digest());
             assert_eq!(
-                (prepared.epoch_floor(), prepared.minimum_global_quorums(), prepared.regime()),
+                (
+                    prepared.epoch_floor(),
+                    prepared.minimum_global_quorums(),
+                    prepared.regime()
+                ),
                 (epoch, 6, cfg.regime)
             );
         }
@@ -3069,13 +3269,23 @@ mod tests {
             (epoch, msg.as_slice(), 5),
         ] {
             assert!(!verify_succinct_hierarchical_hem(
-                &policies, other_epoch, other_msg, other_min, &succinct, &evidence,
+                &policies,
+                other_epoch,
+                other_msg,
+                other_min,
+                &succinct,
+                &evidence,
             ));
         }
         let mut other_registry = policies.clone();
         other_registry[0].custodian_cluster[0] ^= 1;
         assert!(!verify_succinct_hierarchical_hem(
-            &other_registry, epoch, msg, 6, &succinct, &evidence,
+            &other_registry,
+            epoch,
+            msg,
+            6,
+            &succinct,
+            &evidence,
         ));
 
         // This compact commitment needs the separately verified child evidence above.
@@ -3146,6 +3356,131 @@ mod tests {
         ));
     }
 
+    /// Four shards: the parent proof stands in for the four child openings, and every part
+    /// of a shard's context is bound through its header.
+    #[test]
+    #[cfg(feature = "std")]
+    fn succinct_shard_whir_merge_binds_summaries_claims_and_context() {
+        let epoch = 77;
+        let msg = b"succinct shard openings";
+        let regime = WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128;
+        let mut policies = Vec::new();
+        for region in 0..4u64 {
+            let keys: Vec<_> = (0..2)
+                .map(|i| {
+                    ValidatorKeypair::keygen_deterministic(
+                        AggSigProfile::JortsPoseidon2,
+                        &[region as u8 + 0x31; 32],
+                        i,
+                    )
+                })
+                .collect();
+            policies.push(ShardHemPolicy {
+                shard_id: region,
+                custodian_cluster: [region as u8 + 0x40; 32],
+                quorum_keys: keys.iter().map(|k| k.pk).collect(),
+                minimum_quorums: 2,
+            });
+        }
+        let committee_roots = compute_committee_roots(&policies);
+        let registry_root = compute_policy_registry_root(&policies);
+        let params = FixedPathWhirParams::new(regime, 3).unwrap();
+        let relation = ChildWhirMergeRelation::with_children(params.clone(), 4).unwrap();
+        let (claims, openings): (Vec<_>, Vec<_>) = policies
+            .iter()
+            .zip(&committee_roots)
+            .map(|(p, root)| {
+                let summary = ShardHemSummary {
+                    shard_id: p.shard_id,
+                    custodian_cluster: p.custodian_cluster,
+                    shard_quorum_set_root: *root,
+                    minimum_quorums: 2,
+                    epoch_floor: epoch,
+                    message_digest: compute_framed_message_digest(msg),
+                    bitmap: SignerBitmap::from_active_indices(2, &[0, 1]).unwrap(),
+                    child_proof_digest: [p.shard_id as u8 + 1; 32],
+                };
+                let table: Vec<_> = (0..8u64)
+                    .map(|i| Goldilocks::from_u64_reduced(i * i + 31 * p.shard_id + 5))
+                    .collect();
+                let point: Vec<_> = (0..3u64)
+                    .map(|i| GoldilocksExt4::from_u64(1000 + 17 * i + p.shard_id))
+                    .collect();
+                let header = shard_whir_header(&registry_root, &summary);
+                let (statement, opening) =
+                    prove_for_recursion(&params, header, &table, &point).unwrap();
+                let claim = ShardWhirClaim {
+                    summary,
+                    commitment: statement.commitment,
+                    point,
+                    value: statement.value,
+                };
+                assert_eq!(claim.statement(&registry_root), statement);
+                (claim, opening)
+            })
+            .unzip();
+        let aggregate = prove_succinct_shard_whir_merge(
+            &relation,
+            registry_root,
+            claims,
+            &openings,
+            regime,
+            &[9; 32],
+        )
+        .unwrap();
+        let check = |policies: &[ShardHemPolicy], epoch, msg: &[u8], min, agg: &_| {
+            verify_succinct_shard_whir_merge(&relation, policies, epoch, msg, min, regime, agg)
+        };
+        assert!(check(&policies, epoch, msg, 8, &aggregate));
+        assert!(!check(&policies, epoch + 1, msg, 8, &aggregate));
+        assert!(!check(&policies, epoch, b"relabel", 8, &aggregate));
+        assert!(!check(&policies, epoch, msg, 9, &aggregate));
+        let mut other = policies.clone();
+        other[0].custodian_cluster[0] ^= 1;
+        assert!(!check(&other, epoch, msg, 8, &aggregate));
+
+        // Fields the policy checks do not see are bound by the header inside the relation.
+        let mut bad = aggregate.clone();
+        bad.claims[2].summary.child_proof_digest[0] ^= 1;
+        assert!(!check(&policies, epoch, msg, 8, &bad));
+        // Recomputing the merged digest for the altered header does not help.
+        bad.merge.merged_root =
+            merged_child_whir_root(&shard_whir_statements(&registry_root, &bad.claims));
+        assert!(!check(&policies, epoch, msg, 8, &bad));
+        let mut bad = aggregate.clone();
+        bad.claims[1].value += GoldilocksExt4::ONE;
+        assert!(!check(&policies, epoch, msg, 8, &bad));
+        let mut bad = aggregate.clone();
+        bad.claims[3].point[0] += GoldilocksExt4::ONE;
+        assert!(!check(&policies, epoch, msg, 8, &bad));
+        let mut bad = aggregate.clone();
+        bad.claims[0].commitment[0] += Goldilocks::ONE;
+        assert!(!check(&policies, epoch, msg, 8, &bad));
+        // A shard cannot borrow another shard's opening.
+        let mut bad = aggregate.clone();
+        let (a, b) = (bad.claims[0].clone(), bad.claims[1].clone());
+        (bad.claims[0].commitment, bad.claims[0].point, bad.claims[0].value) =
+            (b.commitment, b.point, b.value);
+        (bad.claims[1].commitment, bad.claims[1].point, bad.claims[1].value) =
+            (a.commitment, a.point, a.value);
+        assert!(!check(&policies, epoch, msg, 8, &bad));
+
+        // The prover refuses an opening made under another shard's header.
+        let mut swapped = openings.clone();
+        swapped.swap(0, 1);
+        assert_eq!(
+            prove_succinct_shard_whir_merge(
+                &relation,
+                registry_root,
+                aggregate.claims.clone(),
+                &swapped,
+                regime,
+                &[9; 32],
+            ),
+            Err(RecursiveWhirError::InvalidOpening)
+        );
+    }
+
     /// The outer relation is satisfiable for summaries that no child proof backs: the
     /// commitment check accepts them, and only child-verification evidence refuses them.
     #[test]
@@ -3194,7 +3529,9 @@ mod tests {
         let forged =
             prove_outer_summary_chain(registry_root, unbacked, epoch, message_digest, 4, [9; 32])
                 .unwrap();
-        assert!(check_hierarchical_hem_commitment(&policies, epoch, msg, 4, &forged));
+        assert!(check_hierarchical_hem_commitment(
+            &policies, epoch, msg, 4, &forged
+        ));
         let wire = forged.to_bytes();
         assert_eq!(
             SuccinctHierarchicalHemAggregate::from_bytes_canonical(&wire).unwrap(),
@@ -3295,18 +3632,44 @@ mod tests {
         let cfg = HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, [0x44; 32]);
         let agg = prove_hierarchical_hem(&policies, &witnesses, epoch, msg, 4, &cfg).unwrap();
         let regime = WhirSecurityRegime::BciksJohnsonQrom128;
-        let prepared_agg = prove_hierarchical_hem_prepared(&prepared, &witnesses, epoch, msg, 4, &cfg).unwrap();
-        assert!(verify_hierarchical_hem_prepared(&prepared, epoch, msg, 4, regime, &prepared_agg));
-        let evidence = verify_hierarchical_hem_evidence_prepared(&prepared, epoch, msg, 4, regime, &agg).unwrap();
-        let compact = compress_hierarchical_hem_evidence(&evidence, [97;32]).unwrap();
+        let prepared_agg =
+            prove_hierarchical_hem_prepared(&prepared, &witnesses, epoch, msg, 4, &cfg).unwrap();
+        assert!(verify_hierarchical_hem_prepared(
+            &prepared,
+            epoch,
+            msg,
+            4,
+            regime,
+            &prepared_agg
+        ));
+        let evidence =
+            verify_hierarchical_hem_evidence_prepared(&prepared, epoch, msg, 4, regime, &agg)
+                .unwrap();
+        let compact = compress_hierarchical_hem_evidence(&evidence, [97; 32]).unwrap();
         assert!(evidence.names_same_children(&compact));
-        assert!(verify_succinct_hierarchical_hem_prepared(&prepared, epoch, msg, 4, regime, &compact, &evidence));
-        assert!(!verify_succinct_hierarchical_hem_prepared(&prepared, epoch+1, msg, 4, regime, &compact, &evidence));
-        assert!(!verify_succinct_hierarchical_hem_prepared(&prepared, epoch, b"relabel", 4, regime, &compact, &evidence));
-        assert!(!verify_succinct_hierarchical_hem_prepared(&prepared, epoch, msg, 3, regime, &compact, &evidence));
-        let mut changed = compact.clone(); changed.shards[0].child_proof_digest[0] ^= 1;
-        assert!(!verify_succinct_hierarchical_hem_prepared(&prepared, epoch, msg, 4, regime, &changed, &evidence));
-
+        assert!(verify_succinct_hierarchical_hem_prepared(
+            &prepared, epoch, msg, 4, regime, &compact, &evidence
+        ));
+        assert!(!verify_succinct_hierarchical_hem_prepared(
+            &prepared,
+            epoch + 1,
+            msg,
+            4,
+            regime,
+            &compact,
+            &evidence
+        ));
+        assert!(!verify_succinct_hierarchical_hem_prepared(
+            &prepared, epoch, b"relabel", 4, regime, &compact, &evidence
+        ));
+        assert!(!verify_succinct_hierarchical_hem_prepared(
+            &prepared, epoch, msg, 3, regime, &compact, &evidence
+        ));
+        let mut changed = compact.clone();
+        changed.shards[0].child_proof_digest[0] ^= 1;
+        assert!(!verify_succinct_hierarchical_hem_prepared(
+            &prepared, epoch, msg, 4, regime, &changed, &evidence
+        ));
 
         assert!(verify_hierarchical_hem(
             &policies, epoch, msg, 4, regime, &agg
@@ -3352,49 +3715,130 @@ mod tests {
     #[cfg(feature = "std")]
     fn pipeline_evidence_reuse_benchmark() {
         use std::time::Instant;
-        let count=std::env::var("QSAG_PIPELINE_SIGNERS").ok().and_then(|x|x.parse::<usize>().ok()).unwrap_or(16);
+        let count = std::env::var("QSAG_PIPELINE_SIGNERS")
+            .ok()
+            .and_then(|x| x.parse::<usize>().ok())
+            .unwrap_or(16);
         assert!((2..=128).contains(&count));
-        let epoch=101; let msg=b"qsag-pipeline-real-shards";
-        let start=Instant::now();
-        let mut keys:Vec<Vec<_>>=(0..2).map(|region| (0..count).map(|i|
-            ValidatorKeypair::keygen_deterministic(AggSigProfile::JortsPoseidon2,&[region+121;32],i as u32)
-        ).collect()).collect();
-        let policies:Vec<_>=keys.iter().enumerate().map(|(i,keys)|ShardHemPolicy{
-            shard_id:i as u64,custodian_cluster:[i as u8;32],quorum_keys:keys.iter().map(|k|k.pk).collect(),minimum_quorums:count,
-        }).collect();
-        let registry=PreparedPolicyRegistry::new(policies.clone()).unwrap();
-        let bm=SignerBitmap::from_active_indices(count as u32,&(0..count).collect::<Vec<_>>()).unwrap();
-        let sigs:Vec<Vec<_>>=keys.iter_mut().zip(&policies).map(|(keys,p)| {
-            let framed=hierarchical_hem_message(&registry.policy_registry_root(),p,epoch,msg);
-            keys.iter_mut().map(|k|k.sign_stateful_for_unit_test(&framed,0).unwrap()).collect()
-        }).collect();
-        let witnesses:Vec<_>=sigs.iter().map(|s|ShardHemWitness{bitmap:&bm,signatures:s}).collect();
-        let setup_ms=start.elapsed().as_secs_f64()*1000.0;
-        let cfg=HemAggConfig::default_for(AggSigProfile::JortsPoseidon2,[84;32]);
-        let start=Instant::now();
-        let agg=prove_hierarchical_hem_prepared(&registry,&witnesses,epoch,msg,2*count,&cfg).unwrap();
-        let prove_ms=start.elapsed().as_secs_f64()*1000.0;
-        let wire=agg.to_bytes();
-        let agg=HierarchicalHemAggregate::from_bytes_canonical(&wire).unwrap();
-        let mut fresh=Vec::new();let mut reuse=Vec::new();let mut duplicate=Vec::new();let mut compact_bytes=0;
+        let epoch = 101;
+        let msg = b"qsag-pipeline-real-shards";
+        let start = Instant::now();
+        let mut keys: Vec<Vec<_>> = (0..2)
+            .map(|region| {
+                (0..count)
+                    .map(|i| {
+                        ValidatorKeypair::keygen_deterministic(
+                            AggSigProfile::JortsPoseidon2,
+                            &[region + 121; 32],
+                            i as u32,
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+        let policies: Vec<_> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, keys)| ShardHemPolicy {
+                shard_id: i as u64,
+                custodian_cluster: [i as u8; 32],
+                quorum_keys: keys.iter().map(|k| k.pk).collect(),
+                minimum_quorums: count,
+            })
+            .collect();
+        let registry = PreparedPolicyRegistry::new(policies.clone()).unwrap();
+        let bm = SignerBitmap::from_active_indices(count as u32, &(0..count).collect::<Vec<_>>())
+            .unwrap();
+        let sigs: Vec<Vec<_>> = keys
+            .iter_mut()
+            .zip(&policies)
+            .map(|(keys, p)| {
+                let framed =
+                    hierarchical_hem_message(&registry.policy_registry_root(), p, epoch, msg);
+                keys.iter_mut()
+                    .map(|k| k.sign_stateful_for_unit_test(&framed, 0).unwrap())
+                    .collect()
+            })
+            .collect();
+        let witnesses: Vec<_> = sigs
+            .iter()
+            .map(|s| ShardHemWitness {
+                bitmap: &bm,
+                signatures: s,
+            })
+            .collect();
+        let setup_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let cfg = HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, [84; 32]);
+        let start = Instant::now();
+        let agg =
+            prove_hierarchical_hem_prepared(&registry, &witnesses, epoch, msg, 2 * count, &cfg)
+                .unwrap();
+        let prove_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let wire = agg.to_bytes();
+        let agg = HierarchicalHemAggregate::from_bytes_canonical(&wire).unwrap();
+        let mut fresh = Vec::new();
+        let mut reuse = Vec::new();
+        let mut duplicate = Vec::new();
+        let mut compact_bytes = 0;
         for sample in 0..4 {
-            let start=Instant::now();
-            let ev=verify_hierarchical_hem_evidence_prepared(&registry,epoch,msg,2*count,cfg.regime,&agg).unwrap();
-            let evidence_ms=start.elapsed().as_secs_f64()*1000.0;
-            let start=Instant::now();
-            let compact=compress_hierarchical_hem_evidence(&ev,[85;32]).unwrap();
-            let reuse_ms=start.elapsed().as_secs_f64()*1000.0;
-            compact_bytes=compact.to_bytes().len();
-            assert!(verify_succinct_hierarchical_hem_prepared(&registry,epoch,msg,2*count,cfg.regime,&compact,&ev));
-            let start=Instant::now();
-            let legacy=compress_verified_hierarchical_hem(&policies,epoch,msg,2*count,&agg,[85;32]).unwrap();
-            let duplicate_ms=evidence_ms+start.elapsed().as_secs_f64()*1000.0;
+            let start = Instant::now();
+            let ev = verify_hierarchical_hem_evidence_prepared(
+                &registry,
+                epoch,
+                msg,
+                2 * count,
+                cfg.regime,
+                &agg,
+            )
+            .unwrap();
+            let evidence_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let start = Instant::now();
+            let compact = compress_hierarchical_hem_evidence(&ev, [85; 32]).unwrap();
+            let reuse_ms = start.elapsed().as_secs_f64() * 1000.0;
+            compact_bytes = compact.to_bytes().len();
+            assert!(verify_succinct_hierarchical_hem_prepared(
+                &registry,
+                epoch,
+                msg,
+                2 * count,
+                cfg.regime,
+                &compact,
+                &ev
+            ));
+            let start = Instant::now();
+            let legacy = compress_verified_hierarchical_hem(
+                &policies,
+                epoch,
+                msg,
+                2 * count,
+                &agg,
+                [85; 32],
+            )
+            .unwrap();
+            let duplicate_ms = evidence_ms + start.elapsed().as_secs_f64() * 1000.0;
             assert!(ev.names_same_children(&legacy));
-            if sample>0 {fresh.push(evidence_ms+reuse_ms);reuse.push(reuse_ms);duplicate.push(duplicate_ms);}
+            if sample > 0 {
+                fresh.push(evidence_ms + reuse_ms);
+                reuse.push(reuse_ms);
+                duplicate.push(duplicate_ms);
+            }
         }
-        let median=|mut xs:Vec<f64>| {xs.sort_by(|a,b|a.partial_cmp(b).unwrap());xs[xs.len()/2]};
-        std::println!("pipeline signers={} regions=2 prover_jobs={} setup_ms={:.2} prove_ms={:.2} signers_per_s={:.2} hierarchy_bytes={} compact_bytes={} fresh_evidence_plus_build_p50_ms={:.3} reused_evidence_build_p50_ms={:.3} duplicate_verify_pipeline_p50_ms={:.3}",
-            2*count,crate::prover_parallel_jobs(),setup_ms,prove_ms,2000.0*count as f64/prove_ms,wire.len(),compact_bytes,median(fresh),median(reuse),median(duplicate));
+        let median = |mut xs: Vec<f64>| {
+            xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            xs[xs.len() / 2]
+        };
+        std::println!(
+            "pipeline signers={} regions=2 prover_jobs={} setup_ms={:.2} prove_ms={:.2} signers_per_s={:.2} hierarchy_bytes={} compact_bytes={} fresh_evidence_plus_build_p50_ms={:.3} reused_evidence_build_p50_ms={:.3} duplicate_verify_pipeline_p50_ms={:.3}",
+            2 * count,
+            crate::prover_parallel_jobs(),
+            setup_ms,
+            prove_ms,
+            2000.0 * count as f64 / prove_ms,
+            wire.len(),
+            compact_bytes,
+            median(fresh),
+            median(reuse),
+            median(duplicate)
+        );
     }
-
 }

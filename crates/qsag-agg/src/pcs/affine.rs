@@ -95,7 +95,7 @@ pub(super) fn add_geometric_scaled_in_place(dst: &mut [E], xi: E, z: E) {
 }
 
 /// Reusable-buffer dual fold (`pairs + 1` slots; trailing slot is zero so overflow never wraps).
-pub(super) fn fold_kernel_into(k: &[E], phi: E, out: &mut Vec<E>) {
+pub(crate) fn fold_kernel_into(k: &[E], phi: E, out: &mut Vec<E>) {
     let pairs = k.len() / 2;
     out.resize(pairs + 1, E::ZERO);
     fill_indexed(&mut out[..pairs], |i| k[2 * i] + phi * k[2 * i + 1]);
@@ -103,7 +103,7 @@ pub(super) fn fold_kernel_into(k: &[E], phi: E, out: &mut Vec<E>) {
 }
 
 /// Reusable-buffer primal monomial affine fold (`c.len() / 2 + 1` slots, zero per-round alloc).
-pub(super) fn fold_coeffs_into(c: &[E], [theta, alpha, beta]: [E; 3], out: &mut Vec<E>) {
+pub(crate) fn fold_coeffs_into(c: &[E], [theta, alpha, beta]: [E; 3], out: &mut Vec<E>) {
     let m = c.len() / 2;
     if m == 0 {
         out.clear();
@@ -344,7 +344,7 @@ pub(super) fn prove_fold(
 
 /// Encode the power-of-two core using the existing fast NTT, then add the
 /// two overflow monomials on exactly the same coset (no domain enlargement).
-pub(super) fn encode_overflow(c: &[E], blowup: usize) -> Vec<E> {
+pub(crate) fn encode_overflow(c: &[E], blowup: usize) -> Vec<E> {
     let n = c.len() - 2;
     let mut cw = encode_rs_coset_ext4(&c[..n], blowup);
     let omega = Goldilocks::two_adic_generator(cw.len().trailing_zeros() as usize);

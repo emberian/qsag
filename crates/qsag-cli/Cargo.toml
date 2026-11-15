@@ -23,6 +23,10 @@ qsag-migrate = { path = "../qsag-migrate", features = ["std"] }
 qsag-policy = { path = "../qsag-policy", features = ["std"] }
 qsag-quorum = { path = "../qsag-quorum", features = ["std"] }
 
+[dev-dependencies]
+# Unit tests provision `fts-threshold` shares with the trusted dealer; the shipped binary never does.
+qsag-fts = { path = "../qsag-fts", features = ["std", "test-dealer"] }
+
 [features]
 default = []
 test-dealer = ["qsag-fts/test-dealer", "qsag-policy/test-dealer"]

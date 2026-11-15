@@ -79,6 +79,30 @@ fn query_error_below_2pow_minus_bits(
     exponent >= target_bits && mantissa < (1u128 << 64)
 }
 
+// Fixed-path recursion samples distinct indices by partial Fisher-Yates, using a
+// canonical field word modulo the remaining range. Bound that tiny modulo bias
+// multiplicatively, not by an additive statistical error that would swamp 2^-214.
+fn fixed_path_query_error(n: u128, agreement: u128, queries: usize, target: u32) -> bool {
+    if agreement < queries as u128 {
+        return true;
+    }
+    let p = u128::from(crate::field::GOLDILOCKS_PRIME);
+    let mut mantissa = 1u128 << 64;
+    let mut exponent = 0;
+    for i in 0..queries as u128 {
+        let numerator = (agreement - i) * p.div_ceil(n - i);
+        if numerator >= p {
+            return false;
+        }
+        mantissa = (mantissa * numerator).div_ceil(p);
+        while mantissa < 1u128 << 63 {
+            mantissa *= 2;
+            exponent += 1;
+        }
+    }
+    exponent >= target && mantissa < 1u128 << 64
+}
+
 fn query_error_below_2pow_minus256(n: u128, agreement: u128, queries: usize) -> bool {
     query_error_below_2pow_minus_bits(n, agreement, queries, 256)
 }
@@ -192,14 +216,18 @@ fn check_witness_row(
         query_error_below_2pow_minus_bits(n, a + loss, spec.num_queries, query_target_bits),
         "query error: nv={nv} stage={stage} target={query_target_bits}"
     );
+    assert!(
+        fixed_path_query_error(n, a + loss, spec.num_queries, query_target_bits),
+        "fixed-path modulo bias: nv={nv} stage={stage} target={query_target_bits}"
+    );
     let list = n * (b - d - 1) / (b * b - n * (d + 1));
     let list0 = n * (a - 1 - d) / ((a - 1) * (a - 1) - n * d);
     // Upper bound the nonpersistent numerator, even dropping (A-B)^2.
     // loss * (D^2 + 4 d^2 M^2 D^3 n^2) < 2^255 < p^4,
     // hence its total contribution is < 1/p^4.
-    let numerator_bits =
-        (2 * bits(big_d)).max(2 + 2 * bits(d) + 2 * bits(big_m) + 3 * bits(big_d) + 2 * bits(n))
-            + 1;
+    let numerator_bits = (2 * bits(big_d))
+        .max(2 + 2 * bits(d) + 2 * bits(big_m) + 3 * bits(big_d) + 2 * bits(n))
+        + 1;
     assert!(bits(loss) + numerator_bits < 255);
     // Include one additional field-error unit per dual cross-term reduction.
     assert!(loss * (list + 2 * list0 + 1) + 1 < 2000);

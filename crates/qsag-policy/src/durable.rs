@@ -777,7 +777,10 @@ mod tests {
         let key = [0x42; 32];
         let provision = || {
             let mut guards = trusted_dealer_setup_for_testing([0x63; 32], &[1, 2]);
-            guards.remove(0).with_window_authority([7; 32], [8; 32]).unwrap()
+            guards
+                .remove(0)
+                .with_window_authority([7; 32], [8; 32])
+                .unwrap()
         };
         let burn = |guard: &mut PolicySignerGuardShare, spend: u128, tag: u8| {
             guard
@@ -816,7 +819,9 @@ mod tests {
         burn(&mut live, 10, 0x20);
         let before_burn = {
             let mut earlier = provision();
-            earlier.record_approved_intent(1000, 10, [0x21; 32], [0xa1; 32]).unwrap();
+            earlier
+                .record_approved_intent(1000, 10, [0x21; 32], [0xa1; 32])
+                .unwrap();
             earlier.export_durable_checkpoint(&key, 5)
         };
         assert_eq!(
@@ -878,10 +883,7 @@ mod tests {
         });
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_file(std::format!("{}.lock", path.display())).unwrap();
-        assert_eq!(
-            refused.unwrap_err().kind(),
-            std::io::ErrorKind::InvalidData
-        );
+        assert_eq!(refused.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
         assert_eq!(restarted.consumed_peer_slots.len(), 700);
     }
 

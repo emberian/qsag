@@ -1,25 +1,19 @@
 module
 /-
-# Qsag.Protocol.Aggregation.Poseidon2AlgebraicAndRecursiveHem — Poseidon2 Algebraic Margins & 2-Layer `Hem` Extraction
+# Qsag.Protocol.Aggregation.Poseidon2AlgebraicAndRecursiveHem — 2-Layer `Hem` Extraction over the Poseidon2 Registry Commitment
 
-1. **§1 Power maps on `Goldilocks`.** Fermat on the field carrier (`goldilocksPow_fermat`), the
-   exponent-inverse law `d * e = k * (p - 1) + 1 → (x ^ d) ^ e = x`
-   (`goldilocksPow_pow_of_exponent_inverse`), its `d = 7` instance, and non-injectivity of
-   `x ↦ x ^ d` for every `2 ≤ d < 7` (`sbox7_is_minimal_nontrivial_power_permutation`,
-   `tooth_d3_not_permutation_on_goldilocks`, `tooth_d5_not_permutation_on_goldilocks`).
-2. **§2 Width-16 external layer.** `applyM4` is `circ(2, 3, 1, 1)` (`applyM4_eq_circ_2_3_1_1`);
-   the width-16 layer `M_E = circ(2 M_4, M_4, M_4, M_4)` has a two-sided inverse
-   (`applyME16Inv_applyME16`, `applyME16_applyME16Inv`) and maps non-zero states to non-zero
-   states. The deployed permutation `poseidon2Perm12` has width 12; its layer is inverted in
-   `Qsag.Poseidon2`.
-3. **§3 Round-count arithmetic for `R_F = 8`, `R_P = 22`, `d = 7`.** The nominal degree `7 ^ r`
-   first reaches `p` at `r = 23` (`poseidon2_nominal_degree_threshold`), `2 ^ 84 < 7 ^ 30 < 2 ^ 85`
-   (`tooth_univariate_degree_alone_below_two_pow_128`), the interpolation round inequality
-   `1 + ⌈64 log_7 2⌉ + ⌈log_7 t⌉ ≤ R_F + R_P` for `t ∈ {12, 16}` with a failing `R_P = 17`
-   tooth, and the sample lower bound behind it: any `n` sample points admit a non-zero polynomial
-   with `n + 1` coefficients vanishing on all of them (`univariate_interpolation_underdetermined`).
-   These are statements about the parameter set and about polynomials of a given degree. The
-   degree of the permutation's actual interpolation polynomial is not computed here.
+The Poseidon2 algebra this module once carried (§1–§3, §5, §6, §8–§10: power maps, the width-16
+layer, round-count arithmetic, inverses, branch numbers, wide-trail activity, the symbolic circuit and
+nominal CICO arithmetic) lives in `Qsag.Oracle.Poseidon2`, stated for the deployed canonical profile:
+the external layer `applyME = M_4 ⊗ P_3` (lane-transposition conjugate of the block-circulant
+`applyMEStd = P_3 ⊗ M_4 = circ(2 M_4, M_4, M_4)`, universal branch number exactly `7`:
+`poseidon2_me12_branch_number_eq_seven`, with the `(X, -X, 0)` subspace skip of `2026/306` killed:
+`poseidon2_kronecker_swap_kills_subspace_skip`), the internal layer
+`applyMI = 1·1ᵀ + diag(-64, 1, 2, 4, …, 1024)` (`poseidon2_mi12_nonzero_sum_branch_eq_thirteen`), at least
+`28` active S-boxes across the 30 rounds of `poseidon2Perm12`
+(`poseidon2_width12_wide_trail_and_characteristic_bounds`), and the weighted feed-forward compression
+`poseidon2CompressWeighted`. What remains here are the protocol sections, numbered as before:
+
 4. **§4 Two-layer hierarchical `Hem`.** Root verifiers (`verifyHierarchicalHem`, `verifyHemHierarchy`,
    and direct policy check `verifyHemHierarchyAgainstRegistry`) over `M` shard certificates, each a
    `verifySuccinctAggregate` proof on `shardBoundMessage shardId epochFloor msg`, with
@@ -33,33 +27,12 @@ module
    root mismatch), paired with `#tooth` theorems `tooth_forged_lower_shard_threshold_rejected` and
    `tooth_unscoped_shard_id_allows_quorum_replay_multiplication`. The root verifies shard
    certificates directly; no verifier is arithmetized inside another proof.
-5. **§5 Deployed width-12 inverses and exact M4 branch number.** Both actual linear layers and
-   both round types have two-sided inverses. The deployed permutation is injective. Cofactor
-   certificates for all 69 square minors establish the universal M4 branch bound, with a unit
-   vector attaining five; `m4_mds_branch_number_eq_five` uses the `Fin 4 → Goldilocks` interface.
-6. **§6 Actual four-lane differential and symbolic circuits.** The seventh-power S-box preserves
-   differential support. Two consecutive four-lane rounds have at least five active S-boxes;
-   eight such rounds have at least twenty. A polynomial-expression circuit evaluates to the
-   actual four-lane round and has degree at most `7^r` after `r` rounds. These are component
-   bounds, not a differential probability or interpolation-degree lower bound for width 12.
 7. **§7 Concrete hierarchical certificates & prover transcripts.** Two distinct singleton committees
    with threshold one use the honest two-stage WHIR prover, verified commitment-opening transcripts,
-   and a Poseidon2 registry commitment, alongside concrete Poseidon2 forged-threshold rejection
-   witnesses (`1 → 0` and `2 → 1` on a two-key committee) and unconditional replay rejection. The
-   example uses the field-based signature suite from `Aggregation`, not a claimed secure
-   instantiation of that suite.
-8. **§8 Width-12 `M_E` & `M_I` differential and linear branch numbers.** Exact 12-lane differential
-   and transpose-linear branch bounds for `applyME` (single-block `≥ 7 ≥ 5`, multi-block `≥ 8`,
-   universal `= 7`) and `applyMI` (nonzero-sum `= 13` with full 12-lane diffusion on single-lane
-   inputs, universal `≥ 4`).
-9. **§9 `sbox7` differential uniformity `≤ 6` and width-12 activity.**
-   Degree-6 root bound on `(x + Δ)^7 - x^7 = δ` (`Δ ≠ 0`), `≥ 28` active S-boxes across the
-   deployed 30-round `poseidon2Perm12`, and arithmetic powers of component bounds. No
-   fixed-permutation differential probability or Fourier linear-trail theorem is proved.
-10. **§10 Width-12 symbolic circuit and nominal CICO arithmetic.**
-    `PoseidonExpr` evaluation equals `poseidon2Perm12`; affine inputs have syntactic degree
-    at most `7^30`. Exponent and matrix-size inequalities do not prove actual degree,
-    semi-regularity, matrix rank, or attack-complexity lower bounds.
+   and a registry commitment under the deployed `poseidon2Hash32`, alongside concrete forged-threshold
+   rejection witnesses (`1 → 0` and `2 → 1` on a two-key committee) and unconditional replay
+   rejection. The example uses the field-based signature suite from `Aggregation`, not a claimed
+   secure instantiation of that suite.
 11. **§11 Succinct outer recursive `Hem` aggregation & soundness composition.** Single outer
     `bciksJohnsonQrom128` certificate over length-framed compressed shard headers with constructive
     witness extraction and finite-coin error bound `M · ε_hem + ε_outer`.

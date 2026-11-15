@@ -1,0 +1,2110 @@
+//! Fixed-topology Poseidon2 WHIR verifier and its committed zk-Hem relation.
+//!
+//! This is a separately domain-separated opening mode, not a decoder for the legacy
+//! byte-transcript/Steiner proofs. It uses the same CWYZ affine primal/dual folds,
+//! two OOD pins per oracle, rate escalation, and terminal contraction, but distinct
+//! fixed-path queries from a bounded partial Fisher-Yates shuffle.
+//! Thus circuit shape depends only on the public schedule and polynomial dimension.
+//! A merge certifies `k` PCS opening statements, each bound to a caller-supplied shard
+//! header, not signature verification or quorum authorization. The caller must connect
+//! these openings to the relevant child relation ([`crate::recursive`] does so for shard
+//! summaries).
+//! The bounded-query security labels retain their assumptions; this new transcript's
+//! composed QROM reduction has not been mechanized.
+
+use super::protocol::{self, ZkHemError, ZkHemProof};
+use super::relation::{ConstraintSystem, Lc, Shape, poseidon2_perm};
+use crate::field::{Goldilocks as F, GoldilocksExt4 as E, GoldilocksOps as _};
+use crate::pcs::{WhirSchedule, WhirSecurityRegime, hypercube_to_monomial_coeffs};
+use crate::sponge::poseidon2_perm12;
+use alloc::{vec, vec::Vec};
+
+pub type Digest = [F; 4];
+
+// Separate field-native framing from every byte-oriented transcript and Merkle domain.
+const VERSION: u64 = 0x4657_4849_5200_0001;
+const LEAF: u64 = 0x4657_4C45_4146;
+const NODE: u64 = 0x4657_4E4F_4445;
+const MERGE: u64 = 0x4657_4D45_5247;
+
+fn f(v: u64) -> F {
+    F::from_u64_reduced(v)
+}
+
+trait Base: Clone {
+    fn constant(v: F) -> Self;
+    fn plus(&self, rhs: &Self) -> Self;
+    fn minus(&self, rhs: &Self) -> Self;
+    fn scale(&self, k: F) -> Self;
+}
+impl Base for F {
+    fn constant(v: F) -> Self {
+        v
+    }
+    fn plus(&self, rhs: &Self) -> Self {
+        *self + *rhs
+    }
+    fn minus(&self, rhs: &Self) -> Self {
+        *self - *rhs
+    }
+    fn scale(&self, k: F) -> Self {
+        self.const_mul(k)
+    }
+}
+impl Base for Lc {
+    fn constant(v: F) -> Self {
+        Lc::constant(v)
+    }
+    fn plus(&self, rhs: &Self) -> Self {
+        self.plus(rhs)
+    }
+    fn minus(&self, rhs: &Self) -> Self {
+        self.minus(rhs)
+    }
+    fn scale(&self, k: F) -> Self {
+        self.scaled(k)
+    }
+}
+trait Backend {
+    type W: Base;
+    fn alloc(&mut self, v: F) -> Self::W;
+    fn value(&self, v: &Self::W) -> F;
+    fn mul(&mut self, a: &Self::W, b: &Self::W) -> Self::W;
+    fn equal(&mut self, a: &Self::W, b: &Self::W);
+    /// One row `a * b = c` without a fresh product variable.
+    fn product(&mut self, a: &Self::W, b: &Self::W, c: &Self::W);
+    fn perm(&mut self, s: &mut [Self::W; 12]);
+    fn pin(&mut self, v: Self::W) -> Self::W {
+        let out = self.alloc(self.value(&v));
+        self.equal(&out, &v);
+        out
+    }
+}
+#[derive(Default)]
+struct Native {
+    failed: bool,
+}
+impl Backend for Native {
+    type W = F;
+    fn alloc(&mut self, v: F) -> F {
+        v
+    }
+    fn value(&self, v: &F) -> F {
+        *v
+    }
+    fn mul(&mut self, a: &F, b: &F) -> F {
+        a.const_mul(*b)
+    }
+    fn equal(&mut self, a: &F, b: &F) {
+        self.failed |= a != b;
+    }
+    fn product(&mut self, a: &F, b: &F, c: &F) {
+        self.failed |= a.const_mul(*b) != *c;
+    }
+    fn perm(&mut self, s: &mut [F; 12]) {
+        poseidon2_perm12(s);
+    }
+    fn pin(&mut self, v: F) -> F {
+        v
+    }
+}
+impl Backend for ConstraintSystem {
+    type W = Lc;
+    fn alloc(&mut self, v: F) -> Lc {
+        ConstraintSystem::alloc(self, v).into()
+    }
+    fn value(&self, v: &Lc) -> F {
+        self.eval(v)
+    }
+    fn mul(&mut self, a: &Lc, b: &Lc) -> Lc {
+        ConstraintSystem::mul(self, a, b).into()
+    }
+    fn equal(&mut self, a: &Lc, b: &Lc) {
+        self.enforce_equal(a, b);
+    }
+    fn product(&mut self, a: &Lc, b: &Lc, c: &Lc) {
+        self.enforce_mul(a.clone(), b.clone(), c.clone());
+    }
+    fn perm(&mut self, s: &mut [Lc; 12]) {
+        poseidon2_perm(self, s);
+    }
+}
+
+/// Tower limbs [1, u, v, uv], u²=7, v²=u (polynomial order [1,v²,v,v³]).
+#[derive(Clone)]
+struct Ext<W: Base>([W; 4]);
+impl<W: Base> Ext<W> {
+    fn constant(v: E) -> Self {
+        Self(v.to_limbs().map(W::constant))
+    }
+    fn zero() -> Self {
+        Self::constant(E::ZERO)
+    }
+    fn one() -> Self {
+        Self::constant(E::ONE)
+    }
+    fn base(v: W) -> Self {
+        Self([
+            v,
+            W::constant(F::ZERO),
+            W::constant(F::ZERO),
+            W::constant(F::ZERO),
+        ])
+    }
+    fn alloc<B: Backend<W = W>>(b: &mut B, v: E) -> Self {
+        Self(v.to_limbs().map(|v| b.alloc(v)))
+    }
+    /// A base-field value: only limb zero is a wire, the other limbs are the constant zero.
+    fn alloc_base<B: Backend<W = W>>(b: &mut B, v: E) -> Self {
+        Self::base(b.alloc(v.to_limbs()[0]))
+    }
+    fn value<B: Backend<W = W>>(&self, b: &B) -> E {
+        E::from_limbs(core::array::from_fn(|i| b.value(&self.0[i])))
+    }
+    fn add(&self, v: &Self) -> Self {
+        Self(core::array::from_fn(|i| self.0[i].plus(&v.0[i])))
+    }
+    fn sub(&self, v: &Self) -> Self {
+        Self(core::array::from_fn(|i| self.0[i].minus(&v.0[i])))
+    }
+    fn scale(&self, k: F) -> Self {
+        Self(core::array::from_fn(|i| self.0[i].scale(k)))
+    }
+    fn mul_base<B: Backend<W = W>>(&self, b: &mut B, v: &W) -> Self {
+        Self(core::array::from_fn(|i| b.mul(&self.0[i], v)))
+    }
+    fn mul<B: Backend<W = W>>(&self, b: &mut B, v: &Self) -> Self {
+        fn pair<B: Backend>(b: &mut B, a: &[B::W], c: &[B::W]) -> [B::W; 2] {
+            let p = b.mul(&a[0], &c[0]);
+            let q = b.mul(&a[1], &c[1]);
+            let r = b.mul(&a[0].plus(&a[1]), &c[0].plus(&c[1]));
+            [p.plus(&q.scale(f(7))), r.minus(&p).minus(&q)]
+        }
+        let ac = pair(b, &self.0[..2], &v.0[..2]);
+        let bd = pair(b, &self.0[2..], &v.0[2..]);
+        let a = [self.0[0].plus(&self.0[2]), self.0[1].plus(&self.0[3])];
+        let c = [v.0[0].plus(&v.0[2]), v.0[1].plus(&v.0[3])];
+        let mid = pair(b, &a, &c);
+        Self([
+            b.pin(ac[0].plus(&bd[1].scale(f(7)))),
+            b.pin(ac[1].plus(&bd[0])),
+            b.pin(mid[0].minus(&ac[0]).minus(&bd[0])),
+            b.pin(mid[1].minus(&ac[1]).minus(&bd[1])),
+        ])
+    }
+    fn equal<B: Backend<W = W>>(&self, b: &mut B, v: &Self) {
+        for i in 0..4 {
+            b.equal(&self.0[i], &v.0[i]);
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Transcript<W: Base> {
+    state: [W; 12],
+}
+impl<W: Base> Transcript<W> {
+    fn new() -> Self {
+        Self {
+            state: core::array::from_fn(|_| W::constant(F::ZERO)),
+        }
+    }
+    // Fixed-length, domain-separated duplex frames. Capacity receives tag and length;
+    // padding is mandatory even at an exact rate boundary.
+    fn absorb<B: Backend<W = W>>(&mut self, b: &mut B, tag: u64, msg: &[W]) {
+        self.state[10] = self.state[10].plus(&W::constant(f(tag)));
+        self.state[11] = self.state[11].plus(&W::constant(f(msg.len() as u64)));
+        for chunk in msg.chunks(6) {
+            for (a, c) in self.state.iter_mut().zip(chunk) {
+                *a = a.plus(c);
+            }
+            if chunk.len() < 6 {
+                self.state[chunk.len()] = self.state[chunk.len()].plus(&W::constant(F::ONE));
+            }
+            b.perm(&mut self.state);
+        }
+        if msg.len().is_multiple_of(6) {
+            self.state[0] = self.state[0].plus(&W::constant(F::ONE));
+            b.perm(&mut self.state);
+        }
+    }
+    fn ext<B: Backend<W = W>>(&mut self, b: &mut B, tag: u64) -> Ext<W> {
+        self.absorb(b, tag, &[]);
+        // A challenge enters many products: give it single-variable limbs. The state
+        // itself stays a linear form over the permutation's last S-box outputs.
+        Ext(core::array::from_fn(|i| b.pin(self.state[i].clone())))
+    }
+    fn absorb_exts<B: Backend<W = W>>(&mut self, b: &mut B, tag: u64, es: &[Ext<W>]) {
+        let words: Vec<_> = es.iter().flat_map(|e| e.0.clone()).collect();
+        self.absorb(b, tag, &words);
+    }
+}
+
+/// Little-endian Boolean decomposition. Below 64 bits the integer sum cannot reach `p`;
+/// at 64 bits the alias `x + p` is excluded explicitly.
+fn bits<B: Backend>(b: &mut B, value: &B::W, n: usize) -> Vec<B::W> {
+    assert!(n <= 64);
+    let raw = b.value(value).to_canonical_u64();
+    let zero = B::W::constant(F::ZERO);
+    let one = B::W::constant(F::ONE);
+    let out: Vec<_> = (0..n)
+        .map(|i| {
+            let v = b.alloc(f((raw >> i) & 1));
+            b.product(&v, &one.minus(&v), &zero);
+            v
+        })
+        .collect();
+    let weighted = |bits: &[B::W]| {
+        bits.iter().enumerate().fold(zero.clone(), |a, (i, bit)| {
+            a.plus(&bit.scale(f(1u64 << i)))
+        })
+    };
+    b.equal(value, &weighted(&out));
+    if n == 64 {
+        // p = 2^64 - 2^32 + 1: when the high 32 bits are all one, the low 32 must be zero.
+        let mut high = out[32].clone();
+        for v in &out[33..] {
+            high = b.mul(&high, v);
+        }
+        b.product(&high, &weighted(&out[..32]), &zero);
+    }
+    out
+}
+
+/// The canonical representative of `word` has `difficulty` trailing zero bits.
+fn low_bits_zero<B: Backend>(b: &mut B, word: &B::W, difficulty: u32) {
+    let binary = bits(b, word, 64);
+    for bit in &binary[..difficulty as usize] {
+        b.equal(bit, &B::W::constant(F::ZERO));
+    }
+}
+
+fn pow<B: Backend>(b: &mut B, tr: &mut Transcript<B::W>, nonce: [u32; 2], difficulty: u32) {
+    let limbs = nonce.map(|v| b.alloc(f(u64::from(v))));
+    if difficulty == 0 {
+        // No grinding: the nonce is pinned to zero and stays out of the transcript.
+        for limb in &limbs {
+            b.equal(limb, &B::W::constant(F::ZERO));
+        }
+        return;
+    }
+    for limb in &limbs {
+        bits(b, limb, 32);
+    }
+    let mut challenge = tr.clone();
+    challenge.absorb(b, 30, &limbs);
+    low_bits_zero(b, &challenge.state[0], difficulty);
+    tr.absorb(b, 31, &limbs);
+}
+fn grind(tr: &Transcript<F>, difficulty: u32) -> [u32; 2] {
+    if difficulty == 0 {
+        return [0; 2];
+    }
+    let mut b = Native::default();
+    for nonce in 0..u64::MAX {
+        let limbs = [nonce as u32, (nonce >> 32) as u32];
+        let mut trial = tr.clone();
+        trial.absorb(&mut b, 30, &limbs.map(|x| f(u64::from(x))));
+        if trial.state[0].to_canonical_u64() & ((1u64 << difficulty) - 1) == 0 {
+            return limbs;
+        }
+    }
+    unreachable!("PoW nonce space exhausted")
+}
+
+fn compress<B: Backend>(
+    b: &mut B,
+    left: &[B::W; 4],
+    right: &[B::W; 4],
+    stage: usize,
+    level: usize,
+) -> [B::W; 4] {
+    let tweak = [f(NODE), f(stage as u64), f(level as u64), f(VERSION)].map(B::W::constant);
+    let mut state = core::array::from_fn(|i| {
+        if i < 4 {
+            left[i].clone()
+        } else if i < 8 {
+            right[i - 4].clone()
+        } else {
+            tweak[i - 8].clone()
+        }
+    });
+    b.perm(&mut state);
+    core::array::from_fn(|i| {
+        b.pin(
+            state[i]
+                .plus(&left[i])
+                .plus(&right[i].scale(F::TWO))
+                .plus(&tweak[i].scale(f(4))),
+        )
+    })
+}
+/// Leaf digest of one fiber. Stage 0 commits a base-field codeword, so its leaves hash one
+/// limb per value; later stages hash all four.
+fn leaf<B: Backend>(b: &mut B, stage: usize, index: &B::W, values: &[Ext<B::W>]) -> [B::W; 4] {
+    let mut msg = vec![
+        B::W::constant(f(VERSION)),
+        B::W::constant(f(stage as u64)),
+        index.clone(),
+    ];
+    if stage == 0 {
+        msg.extend(values.iter().map(|v| v.0[0].clone()));
+    } else {
+        msg.extend(values.iter().flat_map(|v| v.0.clone()));
+    }
+    let mut tr = Transcript::new();
+    tr.absorb(b, LEAF, &msg);
+    core::array::from_fn(|i| b.pin(tr.state[i].clone()))
+}
+
+/// One explicitly authenticated coset fiber. Path length is fixed by the stage geometry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FixedPathQuery {
+    pub values: Vec<E>,
+    pub siblings: Vec<Digest>,
+}
+/// Private witness for a fixed-path affine WHIR opening. The parent never serializes this.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FixedPathWhirProof {
+    pub stage_roots: Vec<Digest>,
+    pub ood_evals: Vec<[E; 2]>,
+    pub fold_polys: Vec<[E; 5]>,
+    pub fold_nonces: Vec<[u32; 2]>,
+    pub query_nonces: Vec<[u32; 2]>,
+    pub queries: Vec<Vec<FixedPathQuery>>,
+    pub final_coeffs: Vec<E>,
+}
+/// Public PCS statement, bound to a caller-supplied shard header digest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChildWhirStatement {
+    pub shard_header: [u8; 32],
+    pub commitment: Digest,
+    pub point: Vec<E>,
+    pub value: E,
+}
+impl ChildWhirStatement {
+    fn words(&self) -> Vec<F> {
+        let mut out: Vec<_> = self
+            .shard_header
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|x| f(u64::from(u32::from_le_bytes(*x))))
+            .collect();
+        out.extend(self.commitment);
+        out.extend(self.point.iter().flat_map(|v| v.to_limbs()));
+        out.extend(self.value.to_limbs());
+        out
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RecursiveWhirError {
+    InvalidParameters,
+    MalformedProof,
+    InvalidOpening,
+    ZkHem(ZkHemError),
+}
+
+/// Pin the verifier geometry. Only the two Poseidon2 profiles are accepted.
+/// domain_log2 is the log of the first RS oracle's domain, including blowup.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FixedPathWhirParams {
+    pub schedule: WhirSchedule,
+    pub domain_log2: usize,
+}
+impl FixedPathWhirParams {
+    pub fn new(regime: WhirSecurityRegime, num_vars: usize) -> Result<Self, RecursiveWhirError> {
+        if !(2..=crate::pcs::MAX_PCS_NUM_VARS).contains(&num_vars)
+            || !regime.uses_poseidon2_canopy()
+        {
+            return Err(RecursiveWhirError::InvalidParameters);
+        }
+        let schedule = regime.schedule(num_vars);
+        let domain_log2 = num_vars + schedule.stages[0].blowup.trailing_zeros() as usize;
+        Ok(Self {
+            schedule,
+            domain_log2,
+        })
+    }
+    pub fn num_vars(&self) -> Option<usize> {
+        let stage = self.schedule.stages.first()?;
+        let nv = self
+            .domain_log2
+            .checked_sub(stage.blowup.trailing_zeros() as usize)?;
+        (self.schedule.validate(nv) && self.schedule.regime.uses_poseidon2_canopy()).then_some(nv)
+    }
+    fn geometries(&self) -> Vec<(usize, usize, usize)> {
+        let mut rem = self.num_vars().expect("validated parameters");
+        self.schedule
+            .stages
+            .iter()
+            .map(|s| {
+                let arity = 1 << s.step_vars;
+                let groups = (1usize << rem) * s.blowup / arity;
+                rem -= s.step_vars;
+                (arity, groups, s.num_queries.min(groups))
+            })
+            .collect()
+    }
+    fn placeholder(&self) -> FixedPathWhirProof {
+        let nv = self.num_vars().expect("validated parameters");
+        FixedPathWhirProof {
+            stage_roots: vec![[F::ZERO; 4]; self.schedule.stages.len()],
+            ood_evals: vec![[E::ZERO; 2]; self.schedule.stages.len()],
+            fold_polys: vec![[E::ZERO; 5]; nv - self.schedule.early_stop_vars],
+            fold_nonces: vec![[0; 2]; nv - self.schedule.early_stop_vars],
+            query_nonces: vec![[0; 2]; self.schedule.stages.len()],
+            queries: self
+                .geometries()
+                .iter()
+                .map(|&(arity, groups, count)| {
+                    vec![
+                        FixedPathQuery {
+                            values: vec![E::ZERO; arity],
+                            siblings: vec![[F::ZERO; 4]; groups.trailing_zeros() as usize]
+                        };
+                        count
+                    ]
+                })
+                .collect(),
+            final_coeffs: vec![E::ZERO; (1 << self.schedule.early_stop_vars) + 2],
+        }
+    }
+    fn well_formed(&self, statement: &ChildWhirStatement, proof: &FixedPathWhirProof) -> bool {
+        let Some(nv) = self.num_vars() else {
+            return false;
+        };
+        let stages = self.schedule.stages.len();
+        statement.point.len() == nv
+            && proof.stage_roots.len() == stages
+            && proof.ood_evals.len() == stages
+            && proof.fold_polys.len() == nv - self.schedule.early_stop_vars
+            && proof.fold_nonces.len() == proof.fold_polys.len()
+            && proof.query_nonces.len() == stages
+            && proof.final_coeffs.len() == (1 << self.schedule.early_stop_vars) + 2
+            && proof.queries.len() == stages
+            && self.geometries().iter().zip(&proof.queries).all(
+                |(&(arity, groups, count), queries)| {
+                    queries.len() == count
+                        && queries.iter().all(|q| {
+                            q.values.len() == arity
+                                && q.siblings.len() == groups.trailing_zeros() as usize
+                        })
+                },
+            )
+            // The committed polynomial and its first codeword are over the base field.
+            && proof.queries[0]
+                .iter()
+                .flat_map(|q| &q.values)
+                .all(|v| v.to_limbs()[1..] == [F::ZERO; 3])
+    }
+}
+
+fn start<B: Backend>(b: &mut B, params: &FixedPathWhirParams, public: &[B::W]) -> Transcript<B::W> {
+    // Header bytes are represented by eight independent u32 limbs, without modular aliases.
+    for word in &public[..8] {
+        bits(b, word, 32);
+    }
+    let mut tr = Transcript::new();
+    let mut geometry = vec![f(VERSION), f(params.domain_log2 as u64)];
+    geometry.extend(params.schedule.to_bytes().iter().map(|&x| f(u64::from(x))));
+    tr.absorb(
+        b,
+        1,
+        &geometry.into_iter().map(B::W::constant).collect::<Vec<_>>(),
+    );
+    tr.absorb(b, 2, public);
+    tr
+}
+// All comparisons synthesize the same constraints. Values choose only the assignments
+// of inverse/slack witnesses, never control flow or coefficients of the relation.
+fn equal_bit<B: Backend>(b: &mut B, a: &B::W, c: &B::W) -> B::W {
+    let d = a.minus(c);
+    let v = b.value(&d);
+    let eq = b.alloc(if v == F::ZERO { F::ONE } else { F::ZERO });
+    let inv = b.alloc(v.inv_or_zero());
+    b.product(&d, &eq, &B::W::constant(F::ZERO));
+    b.product(&d, &inv, &B::W::constant(F::ONE).minus(&eq));
+    eq
+}
+/// `0 <= v <= max` as integers. Both summands have `n < 64` bits, so `v + slack = max`
+/// cannot hold through a wrap modulo `p`.
+fn bounded<B: Backend>(b: &mut B, v: &B::W, max: u64) {
+    let n = (64 - max.leading_zeros()) as usize;
+    assert!(n < 64);
+    bits(b, v, n);
+    let slack = b.alloc(f(max.saturating_sub(b.value(v).to_canonical_u64())));
+    bits(b, &slack, n);
+    b.equal(&v.plus(&slack), &B::W::constant(f(max)));
+}
+fn select<B: Backend>(b: &mut B, bit: &B::W, yes: &B::W, no: &B::W) -> B::W {
+    let delta = yes.minus(no);
+    let out = b.alloc(b.value(no) + b.value(bit).const_mul(b.value(&delta)));
+    b.product(bit, &delta, &out.minus(no));
+    out
+}
+// Canonical integer remainder of a uniform field challenge; the quotient and remainder
+// bounds exclude modular wrap. At most ceil(p/divisor) preimages per remainder.
+fn remainder<B: Backend>(b: &mut B, word: &B::W, divisor: u64) -> B::W {
+    let raw = b.value(word).to_canonical_u64();
+    let q = b.alloc(f(raw / divisor));
+    let r = b.alloc(f(raw % divisor));
+    let max = (crate::field::GOLDILOCKS_PRIME - 1) / divisor;
+    bounded(b, &q, max);
+    bounded(b, &r, divisor - 1);
+    let at_max = equal_bit(b, &q, &B::W::constant(f(max)));
+    let tail = b.mul(&at_max, &r);
+    bounded(b, &tail, (crate::field::GOLDILOCKS_PRIME - 1) % divisor);
+    b.equal(word, &q.scale(f(divisor)).plus(&r));
+    r
+}
+#[derive(Default)]
+struct QuerySampler<W> {
+    swaps: Vec<(W, W)>,
+}
+impl<W: Base> QuerySampler<W> {
+    fn lookup<B: Backend<W = W>>(&self, b: &mut B, key: &W) -> W {
+        let mut out = key.clone();
+        for (k, v) in &self.swaps {
+            let equal = equal_bit(b, key, k);
+            out = select(b, &equal, v, &out);
+        }
+        out
+    }
+    fn next<B: Backend<W = W>>(
+        &mut self,
+        b: &mut B,
+        tr: &mut Transcript<W>,
+        groups: usize,
+        count: usize,
+        q: usize,
+    ) -> (W, Vec<W>) {
+        let depth = groups.trailing_zeros() as usize;
+        let index = if count == groups {
+            W::constant(f(q as u64))
+        } else {
+            let word = tr.ext(b, 40).0[0].clone();
+            let rank = remainder(b, &word, (groups - q) as u64);
+            let index = self.lookup(b, &rank);
+            let replacement = self.lookup(b, &W::constant(f((groups - q - 1) as u64)));
+            self.swaps.push((rank, replacement));
+            index
+        };
+        let binary = bits(b, &index, depth);
+        (index, binary)
+    }
+}
+fn merkle<B: Backend>(
+    b: &mut B,
+    stage: usize,
+    index: &B::W,
+    binary: &[B::W],
+    values: &[Ext<B::W>],
+    path: &[Digest],
+    root: &[B::W; 4],
+) {
+    let mut cur = leaf(b, stage, index, values);
+    for (level, (bit, sibling)) in binary.iter().zip(path).enumerate() {
+        let sibling = sibling.map(|x| b.alloc(x));
+        let left = core::array::from_fn(|i| {
+            let delta = b.mul(bit, &sibling[i].minus(&cur[i]));
+            cur[i].plus(&delta)
+        });
+        let right = core::array::from_fn(|i| cur[i].plus(&sibling[i]).minus(&left[i]));
+        cur = compress(b, &left, &right, stage, level);
+    }
+    for i in 0..4 {
+        b.equal(&cur[i], &root[i]);
+    }
+}
+fn coset_point<B: Backend>(b: &mut B, binary: &[B::W], domain_log2: usize) -> B::W {
+    let omega = F::two_adic_generator(domain_log2);
+    let mut out = B::W::constant(F::NON_RESIDUE);
+    let mut power = omega;
+    for bit in binary {
+        let factor = B::W::constant(F::ONE).plus(&bit.scale(power - F::ONE));
+        out = b.mul(&out, &factor);
+        power *= power;
+    }
+    out
+}
+/// Fold one fiber `values[k] = f(x * zeta^k)` down to the next oracle's value at `x^arity`.
+/// `x^-1` is witnessed once; every other point, inverse and square is a public multiple.
+fn fold_fiber<B: Backend>(
+    b: &mut B,
+    values: &[Ext<B::W>],
+    mut x: B::W,
+    chals: &[[Ext<B::W>; 3]],
+    base_values: bool,
+) -> (B::W, Ext<B::W>) {
+    let mut values = values.to_vec();
+    let mut zeta = F::two_adic_generator(chals.len());
+    let mut inv = b.alloc(b.value(&x).inv_or_zero());
+    b.product(&x, &inv, &B::W::constant(F::ONE));
+    let half_inv = F::TWO.inv();
+    for (level, [theta, alpha, beta]) in chals.iter().enumerate() {
+        let half = values.len() / 2;
+        let x2 = b.mul(&x, &x);
+        let beta_x2 = beta.mul_base(b, &x2);
+        let zeta_inv = zeta.inv();
+        let zeta2 = zeta.const_mul(zeta);
+        // zeta^-i / 2 and zeta^2i.
+        let (mut inv_scale, mut square_scale) = (half_inv, F::ONE);
+        for i in 0..half {
+            let inv_k = inv.scale(inv_scale);
+            let even = values[i].add(&values[i + half]).scale(half_inv);
+            let diff = values[i].sub(&values[i + half]);
+            let (odd, theta_odd) = if base_values && level == 0 {
+                let odd = b.mul(&diff.0[0], &inv_k);
+                (Ext::base(odd.clone()), theta.mul_base(b, &odd))
+            } else {
+                let odd = diff.mul_base(b, &inv_k);
+                let theta_odd = theta.mul(b, &odd);
+                (odd, theta_odd)
+            };
+            let mixed = even.add(&theta_odd);
+            let gamma = alpha.add(&beta_x2.scale(square_scale));
+            values[i] = odd.add(&gamma.mul(b, &mixed));
+            inv_scale = inv_scale.const_mul(zeta_inv);
+            square_scale = square_scale.const_mul(zeta2);
+        }
+        values.truncate(half);
+        if level + 1 < chals.len() {
+            inv = b.mul(&inv, &inv);
+        }
+        x = x2;
+        zeta = zeta2;
+    }
+    (x, values[0].clone())
+}
+
+fn bridge<B: Backend>(
+    b: &mut B,
+    w: &[Ext<B::W>; 5],
+    claim: &Ext<B::W>,
+    phi: &Ext<B::W>,
+    chals: &[Ext<B::W>; 3],
+) -> Ext<B::W> {
+    let [theta, alpha, beta] = chals;
+    let ff = w[0].add(&phi.mul(b, &w[1]));
+    let gg = w[2].add(&phi.mul(b, &claim.sub(&w[0])));
+    let mixed = ff.add(&theta.mul(b, &gg));
+    let core = gg.add(&alpha.mul(b, &mixed));
+    let shift = w[3].add(&theta.mul(b, &w[4]));
+    core.add(&beta.mul(b, &shift))
+}
+enum KernelPoint<W: Base> {
+    Ext {
+        point: Vec<Ext<W>>,
+        overflow: [Ext<W>; 2],
+    },
+    /// `(z, z^2, z^4, ...)` for a base-field shift point, then `z^n` and `z^(n+1)`.
+    Base { powers: Vec<W>, overflow: [W; 2] },
+}
+struct Kernel<W: Base> {
+    offset: usize,
+    weight: Ext<W>,
+    point: KernelPoint<W>,
+}
+impl<W: Base> Kernel<W> {
+    fn initial(point: Vec<Ext<W>>) -> Self {
+        Self {
+            offset: 0,
+            weight: Ext::one(),
+            point: KernelPoint::Ext {
+                point,
+                overflow: [Ext::zero(), Ext::zero()],
+            },
+        }
+    }
+}
+fn geometric<B: Backend>(
+    b: &mut B,
+    offset: usize,
+    weight: Ext<B::W>,
+    z: Ext<B::W>,
+    vars: usize,
+) -> Kernel<B::W> {
+    let mut point = Vec::with_capacity(vars);
+    let mut cur = z.clone();
+    for _ in 0..vars {
+        point.push(cur.clone());
+        cur = cur.mul(b, &cur);
+    }
+    let tail = cur.mul(b, &z);
+    Kernel {
+        offset,
+        weight,
+        point: KernelPoint::Ext {
+            point,
+            overflow: [cur, tail],
+        },
+    }
+}
+fn geometric_base<B: Backend>(
+    b: &mut B,
+    offset: usize,
+    weight: Ext<B::W>,
+    z: B::W,
+    vars: usize,
+) -> Kernel<B::W> {
+    let mut powers = Vec::with_capacity(vars);
+    let mut cur = z.clone();
+    for _ in 0..vars {
+        powers.push(cur.clone());
+        cur = b.mul(&cur, &cur);
+    }
+    let tail = b.mul(&cur, &z);
+    Kernel {
+        offset,
+        weight,
+        point: KernelPoint::Base {
+            powers,
+            overflow: [cur, tail],
+        },
+    }
+}
+/// `<final coefficients, deferred kernel>`, mirroring `pcs::affine::terminal_sum_serial`.
+fn terminal<B: Backend>(
+    b: &mut B,
+    coeffs: &[Ext<B::W>],
+    phis: &[Ext<B::W>],
+    kernels: &[Kernel<B::W>],
+) -> Ext<B::W> {
+    let n = coeffs.len() - 2;
+    let mut total = Ext::zero();
+    // Base kernels folded at least once meet `coeffs[n]` through one product per offset.
+    let mut shared: Vec<Option<[Ext<B::W>; 2]>> = vec![None; phis.len() + 1];
+    for k in kernels {
+        let prefix = phis.len() - k.offset;
+        let mut scale = k.weight.clone();
+        match &k.point {
+            KernelPoint::Ext { point, overflow } => {
+                for (r, phi) in point.iter().zip(&phis[k.offset..]) {
+                    let factor = Ext::one().add(&phi.mul(b, r));
+                    scale = scale.mul(b, &factor);
+                }
+                let mut values = coeffs[..n].to_vec();
+                for r in &point[prefix..] {
+                    let next: Vec<_> = values
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|pair| pair[0].add(&r.mul(b, &pair[1])))
+                        .collect();
+                    values = next;
+                }
+                total = total.add(&scale.mul(b, &values[0]));
+                let tail = if prefix == 0 {
+                    overflow[0]
+                        .mul(b, &coeffs[n])
+                        .add(&overflow[1].mul(b, &coeffs[n + 1]))
+                } else {
+                    let factor = overflow[0].add(&phis[k.offset].mul(b, &overflow[1]));
+                    factor.mul(b, &coeffs[n])
+                };
+                total = total.add(&k.weight.mul(b, &tail));
+            }
+            KernelPoint::Base { powers, overflow } => {
+                for (r, phi) in powers.iter().zip(&phis[k.offset..]) {
+                    let factor = Ext::one().add(&phi.mul_base(b, r));
+                    scale = scale.mul(b, &factor);
+                }
+                // The unfolded suffix of a geometric point is a univariate evaluation.
+                let value = horner(b, &coeffs[..n], &powers[prefix]);
+                total = total.add(&scale.mul(b, &value));
+                if prefix == 0 {
+                    let tail = coeffs[n]
+                        .mul_base(b, &overflow[0])
+                        .add(&coeffs[n + 1].mul_base(b, &overflow[1]));
+                    total = total.add(&k.weight.mul(b, &tail));
+                } else {
+                    let terms = [
+                        k.weight.mul_base(b, &overflow[0]),
+                        k.weight.mul_base(b, &overflow[1]),
+                    ];
+                    shared[k.offset] = Some(match shared[k.offset].take() {
+                        Some([p, q]) => [p.add(&terms[0]), q.add(&terms[1])],
+                        None => terms,
+                    });
+                }
+            }
+        }
+    }
+    for (offset, sums) in shared.into_iter().enumerate() {
+        if let Some([p, q]) = sums {
+            let factor = p.add(&phis[offset].mul(b, &q));
+            total = total.add(&factor.mul(b, &coeffs[n]));
+        }
+    }
+    total
+}
+fn horner<B: Backend>(b: &mut B, coeffs: &[Ext<B::W>], x: &B::W) -> Ext<B::W> {
+    let (last, rest) = coeffs.split_last().expect("nonempty polynomial");
+    rest.iter()
+        .rev()
+        .fold(last.clone(), |a, c| a.mul_base(b, x).add(c))
+}
+
+// This one verifier executes both natively and as a relation; equality checks never
+// influence the control flow, and no witness value selects a circuit branch.
+fn verify_gadget<B: Backend>(
+    b: &mut B,
+    params: &FixedPathWhirParams,
+    public: &[B::W],
+    proof: &FixedPathWhirProof,
+) {
+    let nv = params.num_vars().expect("validated parameters");
+    let point: Vec<_> = public[12..12 + nv * 4]
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|x| Ext(x.clone()))
+        .collect();
+    let mut claim = Ext(public[12 + nv * 4..].to_vec().try_into().ok().unwrap());
+    let mut tr = start(b, params, public);
+    let roots: Vec<[B::W; 4]> = proof
+        .stage_roots
+        .iter()
+        .map(|r| r.map(|v| b.alloc(v)))
+        .collect();
+    for i in 0..4 {
+        b.equal(&roots[0][i], &public[8 + i]);
+    }
+    let mut kernels = vec![Kernel::initial(point)];
+    let mut phis = Vec::new();
+    let mut cursor = 0;
+    let mut remaining = nv;
+    let geos = params.geometries();
+    // Each commitment is absorbed BEFORE its OOD points and before any dependent folds.
+    tr.absorb(b, 3, &roots[0]);
+    let zs = [tr.ext(b, 4), tr.ext(b, 4)];
+    let ood: Vec<_> = proof.ood_evals[0]
+        .iter()
+        .map(|&v| Ext::alloc(b, v))
+        .collect();
+    tr.absorb_exts(b, 5, &ood);
+    for (z, e) in zs.into_iter().zip(ood) {
+        let weight = tr.ext(b, 6);
+        claim = claim.add(&weight.mul(b, &e));
+        kernels.push(geometric(b, cursor, weight, z, remaining));
+    }
+    for (stage, spec) in params.schedule.stages.iter().enumerate() {
+        let mut chals = Vec::with_capacity(spec.step_vars);
+        for _ in 0..spec.step_vars {
+            let wire = proof.fold_polys[cursor].map(|v| Ext::alloc(b, v));
+            tr.absorb_exts(b, 10, &wire[..3]);
+            let phi = tr.ext(b, 11);
+            tr.absorb_exts(b, 12, &wire[3..]);
+            pow(
+                b,
+                &mut tr,
+                proof.fold_nonces[cursor],
+                params.schedule.regime.pow_bits(),
+            );
+            let chal = [tr.ext(b, 13), tr.ext(b, 14), tr.ext(b, 15)];
+            claim = bridge(b, &wire, &claim, &phi, &chal);
+            phis.push(phi);
+            chals.push(chal);
+            cursor += 1;
+        }
+        remaining -= spec.step_vars;
+        let last = stage + 1 == params.schedule.stages.len();
+        // Next commitment (or final polynomial) is fixed BEFORE querying the current oracle.
+        let mut next_ood = None;
+        let final_coeffs: Vec<_> = if last {
+            let values: Vec<_> = proof
+                .final_coeffs
+                .iter()
+                .map(|&v| Ext::alloc(b, v))
+                .collect();
+            tr.absorb_exts(b, 21, &values);
+            let expected = terminal(b, &values, &phis, &kernels);
+            claim.equal(b, &expected);
+            values
+        } else {
+            tr.absorb(b, 3, &roots[stage + 1]);
+            let zs = [tr.ext(b, 4), tr.ext(b, 4)];
+            let ood = proof.ood_evals[stage + 1].map(|v| Ext::alloc(b, v));
+            tr.absorb_exts(b, 5, &ood);
+            next_ood = Some((zs, ood));
+            Vec::new()
+        };
+        pow(
+            b,
+            &mut tr,
+            proof.query_nonces[stage],
+            params.schedule.regime.pow_bits(),
+        );
+        let (arity, groups, count) = geos[stage];
+        let mut shifted = Vec::with_capacity(count);
+        let mut sampler = QuerySampler { swaps: Vec::new() };
+        for q in 0..count {
+            let (index, binary) = sampler.next(b, &mut tr, groups, count, q);
+            let query = &proof.queries[stage][q];
+            // Initial codeword is over the base field, as is the committed polynomial.
+            let values: Vec<_> = query
+                .values
+                .iter()
+                .map(|&v| {
+                    if stage == 0 {
+                        Ext::alloc_base(b, v)
+                    } else {
+                        Ext::alloc(b, v)
+                    }
+                })
+                .collect();
+            merkle(
+                b,
+                stage,
+                &index,
+                &binary,
+                &values,
+                &query.siblings,
+                &roots[stage],
+            );
+            let x = coset_point(b, &binary, (groups * arity).trailing_zeros() as usize);
+            let (z, e) = fold_fiber(b, &values, x, &chals, stage == 0);
+            if last {
+                let expected = horner(b, &final_coeffs, &z);
+                e.equal(b, &expected);
+            }
+            shifted.push((z, e));
+        }
+        if !last {
+            let values: Vec<_> = shifted.iter().map(|(_, e)| e.clone()).collect();
+            tr.absorb_exts(b, 22, &values);
+            let (zs, ood) = next_ood.expect("nonterminal stage OOD pins");
+            for (z, e) in zs.into_iter().zip(ood) {
+                let weight = tr.ext(b, 6);
+                claim = claim.add(&weight.mul(b, &e));
+                kernels.push(geometric(b, cursor, weight, z, remaining));
+            }
+            let gamma = tr.ext(b, 23);
+            let mut weight = gamma.clone();
+            for (z, e) in shifted {
+                claim = claim.add(&weight.mul(b, &e));
+                kernels.push(geometric_base(b, cursor, weight.clone(), z, remaining));
+                weight = weight.mul(b, &gamma);
+            }
+        }
+    }
+}
+
+/// Verify a fixed-path child opening independently of a parent proof.
+pub fn verify_fixed_path(
+    params: &FixedPathWhirParams,
+    statement: &ChildWhirStatement,
+    proof: &FixedPathWhirProof,
+) -> bool {
+    if !params.well_formed(statement, proof) {
+        return false;
+    }
+    let mut b = Native::default();
+    verify_gadget(&mut b, params, &statement.words(), proof);
+    !b.failed
+}
+
+struct Oracle {
+    codeword: Vec<E>,
+    levels: Vec<Vec<Digest>>,
+    arity: usize,
+}
+impl Oracle {
+    fn new(coeffs: &[E], blowup: usize, arity: usize, stage: usize) -> Self {
+        let codeword = crate::pcs::affine::encode_overflow(coeffs, blowup);
+        let groups = codeword.len() / arity;
+        let mut b = Native::default();
+        let leaves = (0..groups)
+            .map(|g| {
+                let fiber: Vec<_> = (0..arity)
+                    .map(|j| Ext::constant(codeword[g + j * groups]))
+                    .collect();
+                leaf(&mut b, stage, &f(g as u64), &fiber)
+            })
+            .collect();
+        let mut levels: Vec<Vec<Digest>> = vec![leaves];
+        while levels.last().unwrap().len() > 1 {
+            let depth = levels.len() - 1;
+            let next = levels[depth]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|p| compress(&mut b, &p[0], &p[1], stage, depth))
+                .collect();
+            levels.push(next);
+        }
+        Self {
+            codeword,
+            levels,
+            arity,
+        }
+    }
+    fn root(&self) -> Digest {
+        self.levels.last().unwrap()[0]
+    }
+    fn query(&self, index: usize) -> FixedPathQuery {
+        let groups = self.codeword.len() / self.arity;
+        FixedPathQuery {
+            values: (0..self.arity)
+                .map(|j| self.codeword[index + j * groups])
+                .collect(),
+            siblings: (0..self.levels.len() - 1)
+                .map(|d| self.levels[d][(index >> d) ^ 1])
+                .collect(),
+        }
+    }
+}
+impl Drop for Oracle {
+    fn drop(&mut self) {
+        qsag_asm::volatile_fill(&mut self.codeword, E::ZERO);
+    }
+}
+struct SecretExts(Vec<E>);
+impl Drop for SecretExts {
+    fn drop(&mut self) {
+        qsag_asm::volatile_fill(&mut self.0, E::ZERO);
+    }
+}
+fn dense_point(point: &[E]) -> Vec<E> {
+    let mut out = vec![E::ONE];
+    for &r in point {
+        let len = out.len();
+        for i in 0..len {
+            out.push(out[i] * r);
+        }
+    }
+    out.extend([E::ZERO; 2]);
+    out
+}
+fn add_geometric(kernel: &mut [E], weight: E, z: E) {
+    let mut power = weight;
+    for v in kernel {
+        *v += power;
+        power *= z;
+    }
+}
+fn dot(a: &[E], b: &[E]) -> E {
+    a.iter().zip(b).fold(E::ZERO, |v, (&x, &y)| v + x * y)
+}
+
+/// Commit to a base-field evaluation table and prove its multilinear evaluation using
+/// the recursion transcript. The returned commitment is part of the opening statement.
+/// This PCS mode is binding but not independently hiding; keep child witnesses private
+/// when using the zero-knowledge merge.
+pub fn prove_for_recursion(
+    params: &FixedPathWhirParams,
+    shard_header: [u8; 32],
+    evaluations: &[F],
+    point: &[E],
+) -> Result<(ChildWhirStatement, FixedPathWhirProof), RecursiveWhirError> {
+    let nv = params
+        .num_vars()
+        .ok_or(RecursiveWhirError::InvalidParameters)?;
+    if point.len() != nv || evaluations.len() != 1usize << nv {
+        return Err(RecursiveWhirError::InvalidParameters);
+    }
+    let mut base = hypercube_to_monomial_coeffs(evaluations);
+    let mut coeffs = SecretExts(Vec::with_capacity(base.len() + 2));
+    coeffs.0.extend(base.iter().copied().map(E::from_base));
+    qsag_asm::volatile_fill(&mut base, F::ZERO);
+    coeffs.0.extend([E::ZERO; 2]);
+    let mut kernel = dense_point(point);
+    let mut claim = dot(&coeffs.0, &kernel);
+    let spec = params.schedule.stages[0];
+    let mut oracle = Oracle::new(&coeffs.0, spec.blowup, 1 << spec.step_vars, 0);
+    let statement = ChildWhirStatement {
+        shard_header,
+        commitment: oracle.root(),
+        point: point.to_vec(),
+        value: claim,
+    };
+    let mut proof = params.placeholder();
+    proof.stage_roots[0] = oracle.root();
+    let mut b = Native::default();
+    let mut tr = start(&mut b, params, &statement.words());
+    tr.absorb(&mut b, 3, &oracle.root());
+    let mut cursor = 0;
+    let mut scratch_c = SecretExts(Vec::new());
+    let mut scratch_k = Vec::new();
+    let zs = [tr.ext(&mut b, 4).value(&b), tr.ext(&mut b, 4).value(&b)];
+    let evals = zs.map(|z| crate::field::eval_univariate_ext4(&coeffs.0, z));
+    proof.ood_evals[0] = evals;
+    tr.absorb_exts(&mut b, 5, &evals.map(Ext::constant));
+    for (z, e) in zs.into_iter().zip(evals) {
+        let weight = tr.ext(&mut b, 6).value(&b);
+        claim += weight * e;
+        add_geometric(&mut kernel, weight, z);
+    }
+    for (stage, spec) in params.schedule.stages.iter().enumerate() {
+        let mut chals = Vec::with_capacity(spec.step_vars);
+        for _ in 0..spec.step_vars {
+            let mut wire = [E::ZERO; 5];
+            for (c, k) in coeffs
+                .0
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .zip(kernel.as_chunks::<2>().0.iter())
+            {
+                wire[0] += c[0] * k[0];
+                wire[1] += c[0] * k[1];
+                wire[2] += c[1] * k[0];
+            }
+            tr.absorb_exts(
+                &mut b,
+                10,
+                &wire[..3]
+                    .iter()
+                    .copied()
+                    .map(Ext::constant)
+                    .collect::<Vec<_>>(),
+            );
+            let phi = tr.ext(&mut b, 11);
+            crate::pcs::affine::fold_kernel_into(&kernel, phi.value(&b), &mut scratch_k);
+            core::mem::swap(&mut kernel, &mut scratch_k);
+            for (i, c) in coeffs.0.as_chunks::<2>().0.iter().enumerate() {
+                wire[3] += c[0] * kernel[i + 1];
+                wire[4] += c[1] * kernel[i + 1];
+            }
+            tr.absorb_exts(
+                &mut b,
+                12,
+                &wire[3..]
+                    .iter()
+                    .copied()
+                    .map(Ext::constant)
+                    .collect::<Vec<_>>(),
+            );
+            let nonce = grind(&tr, params.schedule.regime.pow_bits());
+            pow(&mut b, &mut tr, nonce, params.schedule.regime.pow_bits());
+            let chal = [tr.ext(&mut b, 13), tr.ext(&mut b, 14), tr.ext(&mut b, 15)];
+            claim = bridge(
+                &mut b,
+                &wire.map(Ext::constant),
+                &Ext::constant(claim),
+                &phi,
+                &chal,
+            )
+            .value(&b);
+            let chal_values = core::array::from_fn(|i| chal[i].value(&b));
+            crate::pcs::affine::fold_coeffs_into(&coeffs.0, chal_values, &mut scratch_c.0);
+            // Erase the old table before the scratch buffer can shrink on another round.
+            qsag_asm::volatile_fill(&mut coeffs.0, E::ZERO);
+            core::mem::swap(&mut coeffs.0, &mut scratch_c.0);
+            debug_assert_eq!(dot(&coeffs.0, &kernel), claim);
+            proof.fold_polys[cursor] = wire;
+            proof.fold_nonces[cursor] = nonce;
+            chals.push(chal);
+            cursor += 1;
+        }
+        let last = stage + 1 == params.schedule.stages.len();
+        let mut next_ood = None;
+        let next = if last {
+            proof.final_coeffs.clone_from(&coeffs.0);
+            tr.absorb_exts(
+                &mut b,
+                21,
+                &coeffs
+                    .0
+                    .iter()
+                    .copied()
+                    .map(Ext::constant)
+                    .collect::<Vec<_>>(),
+            );
+            None
+        } else {
+            let spec = params.schedule.stages[stage + 1];
+            let next = Oracle::new(&coeffs.0, spec.blowup, 1 << spec.step_vars, stage + 1);
+            proof.stage_roots[stage + 1] = next.root();
+            tr.absorb(&mut b, 3, &next.root());
+            let zs = [tr.ext(&mut b, 4).value(&b), tr.ext(&mut b, 4).value(&b)];
+            let ood = zs.map(|z| crate::field::eval_univariate_ext4(&coeffs.0, z));
+            proof.ood_evals[stage + 1] = ood;
+            tr.absorb_exts(&mut b, 5, &ood.map(Ext::constant));
+            next_ood = Some((zs, ood));
+            Some(next)
+        };
+        let nonce = grind(&tr, params.schedule.regime.pow_bits());
+        proof.query_nonces[stage] = nonce;
+        pow(&mut b, &mut tr, nonce, params.schedule.regime.pow_bits());
+        let groups = oracle.codeword.len() / oracle.arity;
+        let count = groups.min(spec.num_queries);
+        let mut shifted = Vec::with_capacity(count);
+        let mut sampler = QuerySampler { swaps: Vec::new() };
+        for q in 0..count {
+            let (index, binary) = sampler.next(&mut b, &mut tr, groups, count, q);
+            let query = oracle.query(index.to_canonical_u64() as usize);
+            let values: Vec<_> = query.values.iter().copied().map(Ext::constant).collect();
+            let x = coset_point(
+                &mut b,
+                &binary,
+                oracle.codeword.len().trailing_zeros() as usize,
+            );
+            shifted.push(fold_fiber(&mut b, &values, x, &chals, stage == 0));
+            proof.queries[stage][q] = query;
+        }
+        if let Some(next) = next {
+            let values: Vec<_> = shifted.iter().map(|(_, e)| e.clone()).collect();
+            tr.absorb_exts(&mut b, 22, &values);
+            let (zs, ood) = next_ood.expect("nonterminal stage OOD pins");
+            for (z, e) in zs.into_iter().zip(ood) {
+                let weight = tr.ext(&mut b, 6).value(&b);
+                claim += weight * e;
+                add_geometric(&mut kernel, weight, z);
+            }
+            let gamma = tr.ext(&mut b, 23).value(&b);
+            let mut weight = gamma;
+            for (z, e) in shifted {
+                claim += weight * e.value(&b);
+                add_geometric(&mut kernel, weight, E::from_base(z));
+                weight *= gamma;
+            }
+            oracle = next;
+        }
+    }
+    debug_assert!(!b.failed);
+    Ok((statement, proof))
+}
+
+/// Largest fan-in of one merge relation.
+pub const MAX_MERGE_CHILDREN: usize = 16;
+const MERGE_LABEL: &[u8] = b"QSAG.FIXED.WHIR.MERGE/v1";
+
+/// One outer proof and one merged digest for any number of children and any child path
+/// counts. The child statements are verifier inputs, not hidden assertions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SuccinctChildWhirMerge {
+    pub merged_root: Digest,
+    pub proof: ZkHemProof,
+}
+impl SuccinctChildWhirMerge {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = b"QSAGFWZ1".to_vec();
+        for x in self.merged_root {
+            out.extend_from_slice(&x.to_le_bytes());
+        }
+        out.extend(self.proof.to_bytes());
+        out
+    }
+    pub fn from_bytes(
+        bytes: &[u8],
+        relation: &ChildWhirMergeRelation,
+        regime: WhirSecurityRegime,
+    ) -> Option<Self> {
+        if bytes.get(..8)? != b"QSAGFWZ1" {
+            return None;
+        }
+        let mut root = [F::ZERO; 4];
+        for (i, v) in root.iter_mut().enumerate() {
+            let word = u64::from_le_bytes(bytes.get(8 + 8 * i..16 + 8 * i)?.try_into().ok()?);
+            if word >= crate::field::GOLDILOCKS_PRIME {
+                return None;
+            }
+            *v = f(word);
+        }
+        let proof = ZkHemProof::from_bytes(bytes.get(40..)?, &relation.shape, regime)?;
+        Some(Self {
+            merged_root: root,
+            proof,
+        })
+    }
+}
+fn statement_words(children: &[ChildWhirStatement]) -> Vec<F> {
+    children
+        .iter()
+        .flat_map(ChildWhirStatement::words)
+        .collect()
+}
+// The frame length in the sponge capacity separates fan-ins and statement sizes.
+fn merged_gadget<B: Backend>(b: &mut B, public: &[B::W]) -> [B::W; 4] {
+    let mut tr = Transcript::new();
+    tr.absorb(b, MERGE, public);
+    core::array::from_fn(|i| tr.state[i].clone())
+}
+/// Digest of the ordered child statements (shard header, commitment, point and value each).
+pub fn merged_child_whir_root(children: &[ChildWhirStatement]) -> Digest {
+    merged_gadget(&mut Native::default(), &statement_words(children))
+}
+
+/// Counts exclude padding and the twelve masking rows added by the outer protocol.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChildWhirRelationStats {
+    pub sbox_rows: usize,
+    pub multiplication_rows: usize,
+    pub padded_rows: usize,
+    pub variables: usize,
+}
+#[derive(Clone, Debug)]
+pub struct ChildWhirMergeRelation {
+    params: FixedPathWhirParams,
+    children: usize,
+    shape: Shape,
+    stats: ChildWhirRelationStats,
+}
+impl ChildWhirMergeRelation {
+    /// Two-child relation.
+    pub fn new(params: FixedPathWhirParams) -> Result<Self, RecursiveWhirError> {
+        Self::with_children(params, 2)
+    }
+    /// Relation verifying `children` openings that share one verifier geometry.
+    pub fn with_children(
+        params: FixedPathWhirParams,
+        children: usize,
+    ) -> Result<Self, RecursiveWhirError> {
+        let nv = params
+            .num_vars()
+            .ok_or(RecursiveWhirError::InvalidParameters)?;
+        if !(1..=MAX_MERGE_CHILDREN).contains(&children) {
+            return Err(RecursiveWhirError::InvalidParameters);
+        }
+        let statements = vec![
+            ChildWhirStatement {
+                shard_header: [0; 32],
+                commitment: [F::ZERO; 4],
+                point: vec![E::ZERO; nv],
+                value: E::ZERO,
+            };
+            children
+        ];
+        let proofs = vec![params.placeholder(); children];
+        let (shape, mut z, used) = synthesize_merge(&params, &statements, &proofs, [F::ZERO; 4]);
+        qsag_asm::volatile_fill(&mut z, F::ZERO);
+        let stats = ChildWhirRelationStats {
+            sbox_rows: shape.num_sbox,
+            multiplication_rows: used - shape.num_sbox,
+            padded_rows: shape.num_rows(),
+            variables: shape.num_vars,
+        };
+        Ok(Self {
+            params,
+            children,
+            shape,
+            stats,
+        })
+    }
+    pub fn shape(&self) -> &Shape {
+        &self.shape
+    }
+    pub fn stats(&self) -> ChildWhirRelationStats {
+        self.stats
+    }
+    pub fn params(&self) -> &FixedPathWhirParams {
+        &self.params
+    }
+    pub fn num_children(&self) -> usize {
+        self.children
+    }
+}
+fn synthesize_merge(
+    params: &FixedPathWhirParams,
+    children: &[ChildWhirStatement],
+    proofs: &[FixedPathWhirProof],
+    root: Digest,
+) -> (Shape, Vec<F>, usize) {
+    let mut cs = ConstraintSystem::new();
+    let words = statement_words(children);
+    let public: Vec<Lc> = words.iter().map(|&x| cs.public_input(x).into()).collect();
+    let merged: [Lc; 4] = root.map(|x| cs.public_input(x).into());
+    for (statement, proof) in public.chunks(words.len() / children.len()).zip(proofs) {
+        verify_gadget(&mut cs, params, statement, proof);
+    }
+    let digest = merged_gadget(&mut cs, &public);
+    for i in 0..4 {
+        cs.enforce_equal(&merged[i], &digest[i]);
+    }
+    let used = cs.num_rows();
+    let (shape, z) = cs.finish();
+    (shape, z, used)
+}
+
+/// Prove every child's complete fixed-path WHIR verification inside one committed outer
+/// relation. No native-verification Boolean is trusted or inserted as a witness.
+pub fn prove_succinct_children_whir_merge(
+    relation: &ChildWhirMergeRelation,
+    children: &[ChildWhirStatement],
+    proofs: &[FixedPathWhirProof],
+    regime: WhirSecurityRegime,
+    seed: &[u8; 32],
+) -> Result<SuccinctChildWhirMerge, RecursiveWhirError> {
+    if !regime.meets_qrom_128_floor()
+        || children.len() != relation.children
+        || proofs.len() != relation.children
+    {
+        return Err(RecursiveWhirError::InvalidParameters);
+    }
+    if !children
+        .iter()
+        .zip(proofs)
+        .all(|(c, p)| relation.params.well_formed(c, p))
+    {
+        return Err(RecursiveWhirError::MalformedProof);
+    }
+    let merged_root = merged_child_whir_root(children);
+    let (shape, z, _) = synthesize_merge(&relation.params, children, proofs, merged_root);
+    if shape != relation.shape {
+        return Err(RecursiveWhirError::InvalidParameters);
+    }
+    drop(shape);
+    let proof = protocol::prove(&relation.shape, z, MERGE_LABEL, regime, seed)
+        .map_err(RecursiveWhirError::ZkHem)?;
+    Ok(SuccinctChildWhirMerge { merged_root, proof })
+}
+
+/// Verify using only the public child headers/opening statements and the one parent proof.
+pub fn verify_succinct_children_whir_merge(
+    relation: &ChildWhirMergeRelation,
+    children: &[ChildWhirStatement],
+    regime: WhirSecurityRegime,
+    parent: &SuccinctChildWhirMerge,
+) -> bool {
+    if !regime.meets_qrom_128_floor()
+        || children.len() != relation.children
+        || children
+            .iter()
+            .any(|c| Some(c.point.len()) != relation.params.num_vars())
+        || parent.merged_root != merged_child_whir_root(children)
+    {
+        return false;
+    }
+    let mut public = statement_words(children);
+    public.extend(parent.merged_root);
+    protocol::verify(&relation.shape, &public, MERGE_LABEL, regime, &parent.proof)
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+    const REGIME: WhirSecurityRegime = WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128;
+    fn sample(i: usize) -> E {
+        E::from_limbs(core::array::from_fn(
+            |j| f((19 + i * 7919 + j * 313) as u64),
+        ))
+    }
+    fn child(params: &FixedPathWhirParams, tag: u8) -> (ChildWhirStatement, FixedPathWhirProof) {
+        let nv = params.num_vars().unwrap();
+        let values: Vec<_> = (0..1 << nv)
+            .map(|i| f((i * i + usize::from(tag) * 7919 + 11) as u64))
+            .collect();
+        let point: Vec<_> = (0..nv).map(|i| sample(i + usize::from(tag))).collect();
+        let out = prove_for_recursion(params, [tag; 32], &values, &point).unwrap();
+        assert_eq!(
+            out.0.value,
+            crate::field::mle_eval_base_at_ext4(&values, &point)
+        );
+        out
+    }
+    fn relation_for_child(
+        params: &FixedPathWhirParams,
+        child: &ChildWhirStatement,
+        proof: &FixedPathWhirProof,
+    ) -> (Shape, Vec<F>) {
+        let mut cs = ConstraintSystem::new();
+        let public: Vec<Lc> = child
+            .words()
+            .into_iter()
+            .map(|x| cs.public_input(x).into())
+            .collect();
+        verify_gadget(&mut cs, params, &public, proof);
+        cs.finish()
+    }
+
+    /// Witness-crafting backend: chosen allocations take forged values and every later
+    /// wire is derived from them, so only rows that bind a forged wire can fail.
+    #[derive(Default)]
+    struct Forger {
+        cs: ConstraintSystem,
+        allocated: Vec<F>,
+        forged: alloc::collections::BTreeMap<usize, F>,
+    }
+    impl Backend for Forger {
+        type W = Lc;
+        fn alloc(&mut self, v: F) -> Lc {
+            let v = *self.forged.get(&self.allocated.len()).unwrap_or(&v);
+            self.allocated.push(v);
+            self.cs.alloc(v).into()
+        }
+        fn value(&self, v: &Lc) -> F {
+            self.cs.eval(v)
+        }
+        fn mul(&mut self, a: &Lc, b: &Lc) -> Lc {
+            self.cs.mul(a, b).into()
+        }
+        fn equal(&mut self, a: &Lc, b: &Lc) {
+            self.cs.enforce_equal(a, b);
+        }
+        fn product(&mut self, a: &Lc, b: &Lc, c: &Lc) {
+            self.cs.enforce_mul(a.clone(), b.clone(), c.clone());
+        }
+        fn perm(&mut self, s: &mut [Lc; 12]) {
+            poseidon2_perm(&mut self.cs, s);
+        }
+    }
+    fn forge(
+        forged: &[(usize, F)],
+        run: impl FnOnce(&mut Forger),
+    ) -> (Shape, Vec<F>, Vec<F>) {
+        let mut forger = Forger {
+            forged: forged.iter().copied().collect(),
+            ..Forger::default()
+        };
+        run(&mut forger);
+        let (shape, z) = forger.cs.finish();
+        (shape, z, forger.allocated)
+    }
+    fn violated(shape: &Shape, z: &[F]) -> Vec<usize> {
+        (0..shape.num_rows())
+            .filter(|&i| {
+                let a = shape.a.row_dot(i, z);
+                let c = shape.c.row_dot(i, z);
+                if i < shape.num_sbox {
+                    crate::sponge::poseidon2_sbox7(a) != c
+                } else {
+                    a.const_mul(shape.b.row_dot(i, z)) != c
+                }
+            })
+            .collect()
+    }
+    #[test]
+    fn ext4_tower_arithmetic_matches_native_and_constrains_outputs() {
+        for i in 0..12 {
+            let mut cs = ConstraintSystem::new();
+            let a = Ext::alloc(&mut cs, sample(i));
+            let c = Ext::alloc(&mut cs, sample(i + 17));
+            let mul = a.mul(&mut cs, &c);
+            assert_eq!(mul.value(&cs), sample(i) * sample(i + 17));
+            assert_eq!(a.add(&c).value(&cs), sample(i) + sample(i + 17));
+            let output = mul.0[0].terms()[0].0 as usize;
+            let (shape, mut z) = cs.finish();
+            assert!(shape.is_satisfied(&z));
+            z[output] += F::ONE;
+            assert!(!shape.is_satisfied(&z));
+        }
+    }
+    #[test]
+    fn fixed_path_native_handles_rate_escalation_and_both_pow_profiles() {
+        for (regime, nv) in [
+            (REGIME, 2),
+            (REGIME, 7),
+            (REGIME, 12),
+            (WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128, 2),
+        ] {
+            let params = FixedPathWhirParams::new(regime, nv).unwrap();
+            let (statement, proof) = child(&params, 5);
+            assert!(verify_fixed_path(&params, &statement, &proof), "nv={nv}");
+            let wire = proof.to_bytes();
+            assert_eq!(
+                FixedPathWhirProof::from_bytes(&wire, &params),
+                Some(proof.clone())
+            );
+            let mut trailing = wire.clone();
+            trailing.push(0);
+            assert!(FixedPathWhirProof::from_bytes(&trailing, &params).is_none());
+            assert!(FixedPathWhirProof::from_bytes(&wire[..wire.len() - 1], &params).is_none());
+            let mut alias = wire;
+            alias[8..16].copy_from_slice(&crate::field::GOLDILOCKS_PRIME.to_le_bytes());
+            assert!(FixedPathWhirProof::from_bytes(&alias, &params).is_none());
+            let mut bad = proof.clone();
+            bad.query_nonces[0][0] ^= 1;
+            assert!(!verify_fixed_path(&params, &statement, &bad));
+            let mut bad = proof.clone();
+            bad.final_coeffs[0] += E::V;
+            assert!(!verify_fixed_path(&params, &statement, &bad));
+            if proof.stage_roots.len() > 1 {
+                let mut bad = proof.clone();
+                bad.stage_roots[1][2] += F::ONE;
+                assert!(!verify_fixed_path(&params, &statement, &bad));
+                let mut bad = proof.clone();
+                bad.ood_evals[1][0] += E::ONE;
+                assert!(!verify_fixed_path(&params, &statement, &bad));
+            }
+        }
+    }
+    #[test]
+    fn fixed_path_relation_has_no_witness_dependent_topology() {
+        let params = FixedPathWhirParams::new(REGIME, 7).unwrap();
+        let (a, pa) = child(&params, 1);
+        let (b, pb) = child(&params, 2);
+        let (shape, za) = relation_for_child(&params, &a, &pa);
+        assert!(shape.is_satisfied(&za));
+        let (other, zb) = relation_for_child(&params, &b, &pb);
+        assert_eq!(shape, other);
+        assert!(shape.is_satisfied(&zb));
+        // Actual queried indices differ, including partial Fisher-Yates replacements.
+        assert_ne!(pa.queries, pb.queries);
+    }
+    #[test]
+    fn pow_and_canonical_bits_are_enforced_in_relation() {
+        let mut native = Native::default();
+        let mut tr = Transcript::new();
+        tr.absorb(&mut native, 77, &[f(123)]);
+        let nonce = grind(&tr, 16);
+        let mut cs = ConstraintSystem::new();
+        let mut circuit = Transcript::new();
+        circuit.absorb(&mut cs, 77, &[Lc::constant(f(123))]);
+        pow(&mut cs, &mut circuit, nonce, 16);
+        let (shape, z) = cs.finish();
+        assert!(shape.is_satisfied(&z));
+        let mut wrong = nonce;
+        wrong[0] ^= 1;
+        // Select a nonce whose PoW is actually invalid (valid nonces are not unique).
+        loop {
+            let mut b = Native::default();
+            let mut check = tr.clone();
+            pow(&mut b, &mut check, wrong, 16);
+            if b.failed {
+                break;
+            }
+            wrong[0] = wrong[0].wrapping_add(1);
+        }
+        let mut cs = ConstraintSystem::new();
+        let mut circuit = Transcript::new();
+        circuit.absorb(&mut cs, 77, &[Lc::constant(f(123))]);
+        pow(&mut cs, &mut circuit, wrong, 16);
+        let (other, z) = cs.finish();
+        assert_eq!(shape, other);
+        assert!(!shape.is_satisfied(&z));
+    }
+
+    #[test]
+    fn forged_bit_two_violates_booleanity() {
+        // 2 = 0b10. The forgery (bit0, bit1) = (2, 0) keeps the weighted sum intact.
+        let run = |b: &mut Forger| {
+            let input = b.alloc(f(2));
+            bits(b, &input, 8);
+        };
+        let (shape, z, _) = forge(&[], run);
+        assert!(violated(&shape, &z).is_empty());
+        let (other, z, _) = forge(&[(1, f(2)), (2, F::ZERO)], run);
+        assert_eq!(shape, other);
+        assert_eq!(violated(&shape, &z), [0]);
+
+        // The same forged direction bit inside a Merkle path.
+        let values = [sample(1), sample(2)].map(Ext::constant);
+        let path = [[f(11), f(12), f(13), f(14)], [f(21), f(22), f(23), f(24)]];
+        let mut native = Native::default();
+        let index = f(2);
+        let binary = bits(&mut native, &index, 2);
+        let mut root = leaf(&mut native, 1, &index, &values);
+        for (level, (bit, sibling)) in binary.iter().zip(&path).enumerate() {
+            root = if *bit == F::ZERO {
+                compress(&mut native, &root, sibling, 1, level)
+            } else {
+                compress(&mut native, sibling, &root, 1, level)
+            };
+        }
+        let run = |b: &mut Forger| {
+            let index = b.alloc(f(2));
+            let binary = bits(b, &index, 2);
+            let values: Vec<_> = [sample(1), sample(2)]
+                .iter()
+                .map(|&v| Ext::alloc(b, v))
+                .collect();
+            merkle(b, 1, &index, &binary, &values, &path, &root.map(Lc::constant));
+        };
+        let (shape, z, _) = forge(&[], run);
+        assert!(violated(&shape, &z).is_empty());
+        let (other, z, _) = forge(&[(1, f(2)), (2, F::ZERO)], run);
+        assert_eq!(shape, other);
+        let rows = violated(&shape, &z);
+        // The first multiplication row is bit zero's booleanity check.
+        assert!(rows.contains(&shape.num_sbox));
+    }
+
+    #[test]
+    fn forged_noncanonical_limb_cannot_spoof_pow_bits() {
+        // w = 2^16 - 1 fails a 16-bit PoW, but w + p = 2^64 - 2^32 + 2^16 fits in 64 bits
+        // and has sixteen trailing zeros.
+        let word = (1u64 << 16) - 1;
+        let alias = u128::from(word) + u128::from(crate::field::GOLDILOCKS_PRIME);
+        assert!(alias < 1u128 << 64 && alias.trailing_zeros() == 16);
+        let run = |b: &mut Forger| {
+            let input = b.alloc(f(word));
+            low_bits_zero(b, &input, 16);
+        };
+        let (shape, z, _) = forge(&[], run);
+        // Honest decomposition: exactly the sixteen low-bit rows fail.
+        assert_eq!(violated(&shape, &z).len(), 16);
+        let forged: Vec<_> = (0..64)
+            .map(|t| (1 + t, f(((alias >> t) & 1) as u64)))
+            .collect();
+        let (other, z, _) = forge(&forged, run);
+        assert_eq!(shape, other);
+        // Booleanity, the weighted sum modulo p and the low-bit rows all hold for the
+        // alias. Only the canonical-range row (64 Boolean rows, the sum row and the 31
+        // rows of the high-bit product precede it) rejects.
+        assert_eq!(violated(&shape, &z), [64 + 1 + 31]);
+    }
+
+    #[test]
+    fn forged_challenge_wire_and_header_limb_break_the_relation() {
+        let params = FixedPathWhirParams::new(REGIME, 2).unwrap();
+        let (statement, proof) = child(&params, 3);
+        // Replay the transcript natively up to the first fold challenge.
+        let mut b = Native::default();
+        let mut tr = start(&mut b, &params, &statement.words());
+        tr.absorb(&mut b, 3, &statement.commitment);
+        let _ = [tr.ext(&mut b, 4), tr.ext(&mut b, 4)];
+        tr.absorb_exts(&mut b, 5, &proof.ood_evals[0].map(Ext::constant));
+        let _ = [tr.ext(&mut b, 6), tr.ext(&mut b, 6)];
+        tr.absorb_exts(&mut b, 10, &proof.fold_polys[0].map(Ext::constant)[..3]);
+        let phi = tr.ext(&mut b, 11).value(&b).to_limbs();
+
+        let words = statement.words();
+        let run = |b: &mut Forger| {
+            let public: Vec<Lc> = words.iter().map(|&x| b.cs.public_input(x).into()).collect();
+            verify_gadget(b, &params, &public, &proof);
+        };
+        let (shape, z, allocated) = forge(&[], run);
+        assert!(violated(&shape, &z).is_empty());
+        // The challenge is a pinned transcript lane, hence one of the allocations.
+        let at = allocated
+            .windows(4)
+            .position(|w| w == phi)
+            .expect("fold challenge is a transcript wire");
+        // A prover that picks its own challenge and derives everything after it honestly.
+        let (other, z, _) = forge(&[(at, phi[0] + F::ONE)], run);
+        assert_eq!(shape, other);
+        let rows = violated(&shape, &z);
+        assert!(!rows.is_empty() && rows.iter().all(|&row| row >= shape.num_sbox));
+
+        // Public header limbs: a changed limb and an out-of-range alias both reject.
+        let (shape, z) = relation_for_child(&params, &statement, &proof);
+        let mut bad = z.clone();
+        bad[1] += F::ONE;
+        assert!(!shape.is_satisfied(&bad));
+        let mut cs = ConstraintSystem::new();
+        let mut aliased = statement.words();
+        aliased[0] += f(1 << 32);
+        let public: Vec<Lc> = aliased
+            .into_iter()
+            .map(|x| cs.public_input(x).into())
+            .collect();
+        verify_gadget(&mut cs, &params, &public, &proof);
+        let (other, z) = cs.finish();
+        assert_eq!(shape, other);
+        // Thirty-two Boolean rows of limb zero, then its weighted-sum row.
+        assert!(violated(&shape, &z).contains(&(shape.num_sbox + 32)));
+    }
+
+    #[test]
+    fn shuffle_is_distinct_and_modulo_constraints_exclude_aliases() {
+        let mut cs = ConstraintSystem::new();
+        let input: Lc = cs.alloc(f(crate::field::GOLDILOCKS_PRIME - 1)).into();
+        let r = remainder(&mut cs, &input, 127);
+        assert_eq!(
+            cs.eval(&r).to_canonical_u64(),
+            (crate::field::GOLDILOCKS_PRIME - 1) % 127
+        );
+        let (shape, mut z) = cs.finish();
+        assert!(shape.is_satisfied(&z));
+        // Alter the allocated quotient, retaining the claimed remainder.
+        z[2] += F::ONE;
+        assert!(!shape.is_satisfied(&z));
+        for groups in [128, 256, 1024] {
+            let mut b = Native::default();
+            let mut tr = Transcript::new();
+            let mut sampler = QuerySampler { swaps: Vec::new() };
+            let count = 109;
+            let mut selected = alloc::collections::BTreeSet::new();
+            for q in 0..count {
+                let (index, _) = sampler.next(&mut b, &mut tr, groups, count, q);
+                assert!(selected.insert(index.to_canonical_u64()));
+                assert!(index.to_canonical_u64() < groups as u64);
+            }
+            assert!(!b.failed);
+        }
+    }
+    #[test]
+    fn merkle_and_recomputed_fake_sumcheck_claim_fail_inside_relation() {
+        let params = FixedPathWhirParams::new(REGIME, 2).unwrap();
+        let (statement, proof) = child(&params, 3);
+        let (shape, z) = relation_for_child(&params, &statement, &proof);
+        assert!(shape.is_satisfied(&z));
+        for kind in 0..4 {
+            let mut bad = proof.clone();
+            match kind {
+                0 => bad.queries[0][0].values[0] += E::ONE,
+                1 => bad.queries[0][0].siblings[0][0] += F::ONE,
+                2 => bad.fold_polys[0][2] += E::V,
+                _ => bad.final_coeffs[1] += E::ONE,
+            }
+            assert!(!verify_fixed_path(&params, &statement, &bad));
+            let (other, z) = relation_for_child(&params, &statement, &bad);
+            assert_eq!(shape, other);
+            assert!(!shape.is_satisfied(&z), "tamper kind={kind}");
+        }
+
+        // Solve the affine bridge for a fake input claim after changing a polynomial.
+        // Keeping the original challenges can make the final algebraic equation true,
+        // but the altered claim is part of Fiat-Shamir, so the real replay must reject.
+        let mut b = Native::default();
+        let mut tr = start(&mut b, &params, &statement.words());
+        tr.absorb(&mut b, 3, &statement.commitment);
+        let zs = [tr.ext(&mut b, 4), tr.ext(&mut b, 4)];
+        let ood = proof.ood_evals[0].map(Ext::constant);
+        tr.absorb_exts(&mut b, 5, &ood);
+        let mut ood_sum = E::ZERO;
+        let mut kernels = vec![Kernel::initial(
+            statement.point.iter().copied().map(Ext::constant).collect(),
+        )];
+        for (z, e) in zs.into_iter().zip(&ood) {
+            let weight = tr.ext(&mut b, 6);
+            ood_sum += weight.value(&b) * e.value(&b);
+            kernels.push(geometric(&mut b, 0, weight, z, 2));
+        }
+        let wire = proof.fold_polys[0].map(Ext::constant);
+        tr.absorb_exts(&mut b, 10, &wire[..3]);
+        let phi = tr.ext(&mut b, 11);
+        tr.absorb_exts(&mut b, 12, &wire[3..]);
+        pow(&mut b, &mut tr, proof.fold_nonces[0], 0);
+        let chals = [tr.ext(&mut b, 13), tr.ext(&mut b, 14), tr.ext(&mut b, 15)];
+        let coeffs: Vec<_> = proof
+            .final_coeffs
+            .iter()
+            .copied()
+            .map(Ext::constant)
+            .collect();
+        let target = terminal(&mut b, &coeffs, core::slice::from_ref(&phi), &kernels).value(&b);
+        let mut fake = proof.clone();
+        fake.fold_polys[0][0] += E::ONE;
+        let fw = fake.fold_polys[0].map(Ext::constant);
+        let zero = bridge(&mut b, &fw, &Ext::zero(), &phi, &chals).value(&b);
+        let one = bridge(&mut b, &fw, &Ext::one(), &phi, &chals).value(&b);
+        let fake_claim = (target - zero) * (one - zero).inv() - ood_sum;
+        assert_ne!(fake_claim, statement.value);
+        let mut altered = statement;
+        altered.value = fake_claim;
+        assert!(!verify_fixed_path(&params, &altered, &fake));
+        let (other, z) = relation_for_child(&params, &altered, &fake);
+        assert_eq!(shape, other);
+        assert!(!shape.is_satisfied(&z));
+    }
+    #[test]
+    fn succinct_merge_public_binding_for_two_and_four_children() {
+        measure_children(2, 2);
+        measure_children(2, 4);
+    }
+
+    #[test]
+    #[ignore = "explicit release benchmark: three-stage 4096-cell child oracles"]
+    fn two_child_multistage_release_benchmark() {
+        measure_children(12, 2);
+    }
+
+    #[test]
+    #[ignore = "explicit release benchmark: four 4096-cell children, parent below their sum"]
+    fn four_child_multistage_compression_benchmark() {
+        let (parent, children) = measure_children(12, 4);
+        assert!(parent < children, "parent={parent} children={children}");
+    }
+
+    /// Returns `(parent bytes, summed child proof bytes)`.
+    fn measure_children(nv: usize, arity: usize) -> (usize, usize) {
+        let params = FixedPathWhirParams::new(REGIME, nv).unwrap();
+        let start = Instant::now();
+        let (children, proofs): (Vec<_>, Vec<_>) =
+            (0..arity).map(|i| child(&params, 7 + i as u8)).unzip();
+        let child_time = start.elapsed();
+        let child_bytes: usize = proofs.iter().map(|p| p.to_bytes().len()).sum();
+        let setup = Instant::now();
+        let relation = ChildWhirMergeRelation::with_children(params, arity).unwrap();
+        let setup_time = setup.elapsed();
+        assert_eq!(relation.num_children(), arity);
+        let start = Instant::now();
+        let parent =
+            prove_succinct_children_whir_merge(&relation, &children, &proofs, REGIME, &[42; 32])
+                .unwrap();
+        let prove_time = start.elapsed();
+        let bytes = parent.to_bytes();
+        // Precisely the magic, merged digest and ONE committed outer proof.
+        assert_eq!(bytes.len(), 40 + parent.proof.to_bytes().len());
+        let decoded = SuccinctChildWhirMerge::from_bytes(&bytes, &relation, REGIME).unwrap();
+        let start = Instant::now();
+        assert!(verify_succinct_children_whir_merge(
+            &relation, &children, REGIME, &decoded
+        ));
+        let verify_time = start.elapsed();
+        assert_eq!(parent, decoded);
+        std::println!(
+            "FIXED_PATH_MERGE child_nv={nv} arity={arity} sbox_rows={} multiplication_rows={} padded_rows={} variables={} parent_bytes={} children_bytes={child_bytes} children_prove_ms={:.3} setup_ms={:.3} prove_ms={:.3} verify_ms={:.3}",
+            relation.stats.sbox_rows,
+            relation.stats.multiplication_rows,
+            relation.stats.padded_rows,
+            relation.stats.variables,
+            bytes.len(),
+            child_time.as_secs_f64() * 1000.,
+            setup_time.as_secs_f64() * 1000.,
+            prove_time.as_secs_f64() * 1000.,
+            verify_time.as_secs_f64() * 1000.
+        );
+
+        let mut bad_children = children.clone();
+        bad_children[arity - 1].shard_header[0] ^= 1;
+        assert!(!verify_succinct_children_whir_merge(
+            &relation,
+            &bad_children,
+            REGIME,
+            &parent
+        ));
+        let mut rerooted = parent.clone();
+        rerooted.merged_root = merged_child_whir_root(&bad_children);
+        // Even recomputing the public root cannot bypass the relation's public-cell checks.
+        assert!(!verify_succinct_children_whir_merge(
+            &relation,
+            &bad_children,
+            REGIME,
+            &rerooted
+        ));
+        // Order and count of the children are part of the statement.
+        let mut swapped = children.clone();
+        swapped.swap(0, 1);
+        assert!(!verify_succinct_children_whir_merge(
+            &relation, &swapped, REGIME, &parent
+        ));
+        assert!(!verify_succinct_children_whir_merge(
+            &relation,
+            &children[..arity - 1],
+            REGIME,
+            &parent
+        ));
+        assert_eq!(
+            prove_succinct_children_whir_merge(
+                &relation,
+                &children[..arity - 1],
+                &proofs[..arity - 1],
+                REGIME,
+                &[42; 32]
+            ),
+            Err(RecursiveWhirError::InvalidParameters)
+        );
+        let mut bad = parent.clone();
+        bad.proof.row_rounds[0][0] += E::ONE;
+        assert!(!verify_succinct_children_whir_merge(
+            &relation, &children, REGIME, &bad
+        ));
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(SuccinctChildWhirMerge::from_bytes(&trailing, &relation, REGIME).is_none());
+        assert!(
+            SuccinctChildWhirMerge::from_bytes(&bytes[..bytes.len() - 1], &relation, REGIME)
+                .is_none()
+        );
+        assert!(!verify_succinct_children_whir_merge(
+            &relation,
+            &children,
+            WhirSecurityRegime::BciksJohnsonClassical128,
+            &parent
+        ));
+        (bytes.len(), child_bytes)
+    }
+}
+
+impl FixedPathWhirProof {
+    /// Fixed-width field encoding. Lengths come exclusively from the externally pinned
+    /// parameters; there are no prover-supplied vector lengths or query indices.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = b"QSAGFWP1".to_vec();
+        for root in &self.stage_roots {
+            for x in root {
+                out.extend_from_slice(&x.to_le_bytes());
+            }
+        }
+        for e in self
+            .ood_evals
+            .iter()
+            .flatten()
+            .chain(self.fold_polys.iter().flatten())
+        {
+            out.extend_from_slice(&e.to_le_bytes());
+        }
+        for n in self.fold_nonces.iter().chain(&self.query_nonces) {
+            for limb in n {
+                out.extend_from_slice(&limb.to_le_bytes());
+            }
+        }
+        for queries in &self.queries {
+            for q in queries {
+                for e in &q.values {
+                    out.extend_from_slice(&e.to_le_bytes());
+                }
+                for d in &q.siblings {
+                    for x in d {
+                        out.extend_from_slice(&x.to_le_bytes());
+                    }
+                }
+            }
+        }
+        for e in &self.final_coeffs {
+            out.extend_from_slice(&e.to_le_bytes());
+        }
+        out
+    }
+
+    /// Strict canonical parsing with a size check before allocating any proof vectors.
+    pub fn from_bytes(bytes: &[u8], params: &FixedPathWhirParams) -> Option<Self> {
+        let nv = params.num_vars()?;
+        let stages = params.schedule.stages.len();
+        let rounds = nv - params.schedule.early_stop_vars;
+        let mut size = 8 + stages * 32 + stages * 64 + rounds * 160 + (rounds + stages) * 8;
+        for (arity, groups, count) in params.geometries() {
+            size += count * (arity + groups.trailing_zeros() as usize) * 32;
+        }
+        size += ((1usize << params.schedule.early_stop_vars) + 2) * 32;
+        if bytes.len() != size || bytes.get(..8)? != b"QSAGFWP1" {
+            return None;
+        }
+        struct Reader<'a>(&'a [u8]);
+        impl Reader<'_> {
+            fn word<const N: usize>(&mut self) -> Option<[u8; N]> {
+                let (head, tail) = self.0.split_at_checked(N)?;
+                self.0 = tail;
+                head.try_into().ok()
+            }
+            fn base(&mut self) -> Option<F> {
+                let w = u64::from_le_bytes(self.word()?);
+                (w < crate::field::GOLDILOCKS_PRIME).then(|| f(w))
+            }
+            fn ext(&mut self) -> Option<E> {
+                E::from_le_bytes_canonical(self.word()?)
+            }
+        }
+        let mut r = Reader(&bytes[8..]);
+        let mut proof = params.placeholder();
+        for root in &mut proof.stage_roots {
+            for x in root {
+                *x = r.base()?;
+            }
+        }
+        for e in proof
+            .ood_evals
+            .iter_mut()
+            .flatten()
+            .chain(proof.fold_polys.iter_mut().flatten())
+        {
+            *e = r.ext()?;
+        }
+        for n in proof.fold_nonces.iter_mut().chain(&mut proof.query_nonces) {
+            for limb in n {
+                *limb = u32::from_le_bytes(r.word()?);
+            }
+        }
+        for queries in &mut proof.queries {
+            for q in queries {
+                for e in &mut q.values {
+                    *e = r.ext()?;
+                }
+                for d in &mut q.siblings {
+                    for x in d {
+                        *x = r.base()?;
+                    }
+                }
+            }
+        }
+        for e in &mut proof.final_coeffs {
+            *e = r.ext()?;
+        }
+        r.0.is_empty().then_some(proof)
+    }
+}

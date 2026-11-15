@@ -439,6 +439,10 @@ fn few_time_key_enforces_its_use_budget_across_invocations() {
     );
 }
 
+// The dealerless height-3 ceremony behind `fts-threshold` takes hours (measured: ~294 OT wire
+// messages/s against ~4.6 million OT calls per keygen), so this runs only against a trusted-dealer
+// binary: `cargo test --release -p qsag-cli --features test-dealer --test cli_smoke threshold_few_time`.
+#[cfg(feature = "test-dealer")]
 #[test]
 fn threshold_few_time_signature_burns_each_epoch_once() {
     let dir = Workdir::new("threshold");

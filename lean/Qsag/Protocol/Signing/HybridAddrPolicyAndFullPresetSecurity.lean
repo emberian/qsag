@@ -12,6 +12,8 @@ public import Qsag.Protocol.Signing.Fips205
 import all Qsag.Protocol.Signing.Fips205
 public import Qsag.Tactic.AssuranceKit
 import all Qsag.Protocol.Aggregation.UcGames
+public import Qsag.Math.Algebra
+import all Qsag.Math.Algebra
 public section
 namespace Qsag.HybridSecurity
 set_option autoImplicit false

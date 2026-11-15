@@ -885,33 +885,33 @@ theorem tooth_poseidon2_margin_fails_at_rp17 : ¬ Poseidon2InterpolationMargin 1
 
 
 /-- `#tooth` **Merz–Rodríguez García (`2026/306`) `(X, -X, 0)` Subspace & Partial Feed-Forward Vulnerability**:
-    1. On standard `applyME = P_3 ⊗ M_4 = circ(2 M_4, M_4, M_4)`, the entire 4-dimensional subspace
+    1. On the block-circulant factor `applyMEStd = P_3 ⊗ M_4 = circ(2 M_4, M_4, M_4)` (the external layer before the `M_4 ⊗ P_3` lane transposition was deployed), the entire 4-dimensional subspace
        `⟨X, -X, 0⟩` maps to `⟨M_4 X, -M_4 X, 0⟩`, leaving the sponge capacity block `b2 = 0` untouched!
-    2. Across a full round `sboxState12 (state12Add (applyME ⟨U0 + X, -X, U2⟩) C)` under the two linear
-       antisymmetry conditions `(applyME ⟨U0, 0, U2⟩).b0 + C.b0 = -((applyME ⟨U0, 0, U2⟩).b1 + C.b1)`,
+    2. Across a full round `sboxState12 (state12Add (applyMEStd ⟨U0 + X, -X, U2⟩) C)` under the two linear
+       antisymmetry conditions `(applyMEStd ⟨U0, 0, U2⟩).b0 + C.b0 = -((applyMEStd ⟨U0, 0, U2⟩).b1 + C.b1)`,
        oddness of `sbox7` preserves `(X^(1), -X^(1))` in blocks `0, 1` while keeping block `b2` independent of `X`!
     3. Partial feed-forward `(perm st).b0 + st.b0` (`poseidon2_compress12_ff` in `sponge.rs`) and naive
        uniform sum `st.b0 + st.b1 + st.b2` leave `(0, X, -X)` canceled in the feed-forward term. -/
 theorem tooth_poseidon2_me_std_admits_x_neg_x_subspace_skip (X U0 U2 : Lane4)
     (C : Poseidon2State12)
-    (hAnti : lane4Add (applyME ⟨U0, lane4Zero, U2⟩).b0 C.b0 =
-             lane4Neg (lane4Add (applyME ⟨U0, lane4Zero, U2⟩).b1 C.b1)) :
-    applyME ⟨X, lane4Neg X, lane4Zero⟩ = ⟨applyM4 X, lane4Neg (applyM4 X), lane4Zero⟩ ∧
-    let afterSbox := sboxState12 (state12Add (applyME ⟨lane4Add U0 X, lane4Neg X, U2⟩) C)
+    (hAnti : lane4Add (applyMEStd ⟨U0, lane4Zero, U2⟩).b0 C.b0 =
+             lane4Neg (lane4Add (applyMEStd ⟨U0, lane4Zero, U2⟩).b1 C.b1)) :
+    applyMEStd ⟨X, lane4Neg X, lane4Zero⟩ = ⟨applyM4 X, lane4Neg (applyM4 X), lane4Zero⟩ ∧
+    let afterSbox := sboxState12 (state12Add (applyMEStd ⟨lane4Add U0 X, lane4Neg X, U2⟩) C)
     afterSbox.b1 = lane4Neg afterSbox.b0 ∧
-    afterSbox.b2 = sboxLane4 (lane4Add (applyME ⟨U0, lane4Zero, U2⟩).b2 C.b2) ∧
+    afterSbox.b2 = sboxLane4 (lane4Add (applyMEStd ⟨U0, lane4Zero, U2⟩).b2 C.b2) ∧
     (⟨U0, X, lane4Neg X⟩ : Poseidon2State12).b0 = U0 ∧
     lane4Add (lane4Add U0 X) (lane4Neg X) = U0 := by
-  have hLinSub : applyME ⟨X, lane4Neg X, lane4Zero⟩ =
+  have hLinSub : applyMEStd ⟨X, lane4Neg X, lane4Zero⟩ =
       ⟨applyM4 X, lane4Neg (applyM4 X), lane4Zero⟩ := by
-    unfold applyME lane4Neg applyM4 lane4Add lane4Sub lane4Sum lane4Zero
+    unfold applyMEStd lane4Neg applyM4 lane4Add lane4Sub lane4Sum lane4Zero
     apply Poseidon2State12.ext <;> apply Lane4.ext <;> gold_cring
   have hDecomp : ⟨lane4Add U0 X, lane4Neg X, U2⟩ =
       state12Add ⟨U0, lane4Zero, U2⟩ ⟨X, lane4Neg X, lane4Zero⟩ := by
     unfold state12Add lane4Add lane4Neg lane4Sub lane4Zero
     apply Poseidon2State12.ext <;> apply Lane4.ext <;> gold_cring
   refine ⟨hLinSub, ?_, ?_, rfl, ?_⟩
-  · rw [hDecomp, applyME_add, hLinSub]
+  · rw [hDecomp, applyMEStd_add, hLinSub]
     unfold state12Add sboxState12 sboxLane4
     dsimp only
     have hHelper : ∀ (M0 M1 A C0 C1 : Lane4),
@@ -963,13 +963,13 @@ theorem tooth_poseidon2_me_std_admits_x_neg_x_subspace_skip (X U0 U2 : Lane4)
           rw [hInv] at this
           exact this.symm
         rw [hL, rhsEq, hFlip]
-    have hSumAnti := hHelper (applyME ⟨U0, lane4Zero, U2⟩).b0 (applyME ⟨U0, lane4Zero, U2⟩).b1
+    have hSumAnti := hHelper (applyMEStd ⟨U0, lane4Zero, U2⟩).b0 (applyMEStd ⟨U0, lane4Zero, U2⟩).b1
       (applyM4 X) C.b0 C.b1 hAnti
     rw [hSumAnti]
     unfold lane4Neg lane4Sub lane4Zero
     dsimp only
     exact Lane4.ext (sbox7_odd _) (sbox7_odd _) (sbox7_odd _) (sbox7_odd _)
-  · rw [hDecomp, applyME_add, hLinSub]
+  · rw [hDecomp, applyMEStd_add, hLinSub]
     unfold state12Add sboxState12
     dsimp only
     have hAddZ : ∀ a : Lane4, lane4Add a lane4Zero = a := fun a => by
@@ -979,14 +979,43 @@ theorem tooth_poseidon2_me_std_admits_x_neg_x_subspace_skip (X U0 U2 : Lane4)
     apply Lane4.ext <;> gold_cring
 
 
-/-- `#tooth` **Current `V[0] = -2` Internal Matrix Has Rational 1D Eigenspaces Over Goldilocks**:
-    Exhibits an explicit nonzero 12-lane Goldilocks vector `miRationalEigvec0 ≠ 0` satisfying
-    `applyMI miRationalEigvec0 = λ₀ · miRationalEigvec0` (`λ₀ = 8914261387277420341`), confirming
-    that `diag(-2, 1, 2, ..., 1024) + 1·1ᵀ` has reducible characteristic polynomial over `𝔽_p`. -/
+/-- Superseded internal diffusion matrix `diag(-2, 1, 2, 4, ..., 1024) + 1·1ᵀ` (first diagonal entry
+    `-2`; the deployed `applyMI` uses `-64`). Kept only as the object of the tooth below. -/
+def applyMIFirstEntryNegTwo (st : Poseidon2State12) : Poseidon2State12 :=
+  let s := state12Sum st
+  ⟨⟨Goldilocks.add (Goldilocks.mul (goldOfInt (-2)) st.b0.x0) s,
+    Goldilocks.add st.b0.x1 s,
+    Goldilocks.add (Goldilocks.mul (goldOfInt 2) st.b0.x2) s,
+    Goldilocks.add (Goldilocks.mul (goldOfInt 4) st.b0.x3) s⟩,
+   ⟨Goldilocks.add (Goldilocks.mul (goldOfInt 8) st.b1.x0) s,
+    Goldilocks.add (Goldilocks.mul (goldOfInt 16) st.b1.x1) s,
+    Goldilocks.add (Goldilocks.mul (goldOfInt 32) st.b1.x2) s,
+    Goldilocks.add (Goldilocks.mul (goldOfInt 64) st.b1.x3) s⟩,
+   ⟨Goldilocks.add (Goldilocks.mul (goldOfInt 128) st.b2.x0) s,
+    Goldilocks.add (Goldilocks.mul (goldOfInt 256) st.b2.x1) s,
+    Goldilocks.add (Goldilocks.mul (goldOfInt 512) st.b2.x2) s,
+    Goldilocks.add (Goldilocks.mul (goldOfInt 1024) st.b2.x3) s⟩⟩
+
+/-- Explicit 12-lane Goldilocks eigenvector of `applyMIFirstEntryNegTwo` for eigenvalue
+    `λ₀ = 8914261387277420341`. -/
+def miRationalEigvec0 : Poseidon2State12 :=
+  ⟨⟨Goldilocks.ofNat 8415733694666260766, Goldilocks.ofNat 10081604446170657914,
+    Goldilocks.ofNat 13429757962329074280, Goldilocks.ofNat 7212905167159261059⟩,
+   ⟨Goldilocks.ofNat 7177536167446655380, Goldilocks.ofNat 16173559831921257667,
+    Goldilocks.ofNat 11410676009809774369, Goldilocks.ofNat 263994636750658321⟩,
+   ⟨Goldilocks.ofNat 11338638786567724180, Goldilocks.ofNat 17416777037312523837,
+    Goldilocks.ofNat 8867871345638664998, Goldilocks.ofNat 17338153400129577477⟩⟩
+
+/-- `#tooth` **The superseded `V[0] = -2` internal matrix has a rational eigenvector over Goldilocks**:
+    `applyMIFirstEntryNegTwo miRationalEigvec0 = λ₀ · miRationalEigvec0` with `miRationalEigvec0 ≠ 0`, so
+    `diag(-2, 1, 2, ..., 1024) + 1·1ᵀ` has a reducible characteristic polynomial over `𝔽_p`. The same
+    vector is not an eigenvector of the deployed `applyMI` for `λ₀`. -/
 theorem tooth_current_mi_has_rational_eigenvector :
     miRationalEigvec0 ≠ state12Zero ∧
-    applyMI miRationalEigvec0 =
-      state12Scale (Goldilocks.ofNat 8914261387277420341) miRationalEigvec0 := by decide
+    applyMIFirstEntryNegTwo miRationalEigvec0 =
+      state12Scale (Goldilocks.ofNat 8914261387277420341) miRationalEigvec0 ∧
+    ¬ (applyMI miRationalEigvec0 =
+      state12Scale (Goldilocks.ofNat 8914261387277420341) miRationalEigvec0) := by decide
 
 
 /-- `#tooth` **Reduced-Round `(R_F = 4, R_P = 10)` & Single-Initial-Round GSR Failure (`tooth_reduced_poseidon2_fails_cico_and_gsr`)**:
