@@ -3191,3 +3191,1789 @@ inductive Fips205HashGameBreak {AdvState : Type}
   | prfMsg            (w : PrfMsgBreak p)
 
 /-- Embed a hash-game witness into the five-way interactive break union. -/
+def Fips205HashGameBreak.toInteractive {AdvState : Type}
+    {p : Fips205Params} {sk : SlhSecretKey}
+    {clInit : RealClusterState SlhPublicKey RssPartyKeyShare}
+    {tr : ExecTranscript AdvState} {mStar : List UInt8} {sigStar : SlhSignature}
+    (corrView : RssPartyKeyShare) (cIdx : Fin 3) (deg : Nat) :
+    Fips205HashGameBreak p sk clInit tr mStar sigStar →
+    RssSlhInteractiveSecurityBreak corrView p cIdx deg sk clInit tr mStar sigStar
+  | .forsItsr w       => .forsItsr w
+  | .wotsChainSmTcr w => .wotsChainSmTcr w
+  | .xmssMerkleTcr w  => .xmssMerkleTcr w
+  | .prfMsg w         => .prfMsg w
+
+private theorem wellFormed_props {p : Fips205Params} (hWf : p.wellFormed = true) :
+    0 < p.n ∧ p.n ≤ 32 ∧ 0 < p.d ∧ p.h = p.d * p.hp ∧ 0 < p.k ∧ 0 < p.a := by
+  unfold Fips205Params.wellFormed at hWf
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at hWf
+  exact ⟨hWf.1.1.1.1.1.1, hWf.1.1.1.1.1.2, hWf.1.1.1.1.2, hWf.1.1.1.2, hWf.1.1.2, hWf.1.2⟩
+
+private theorem fipsXmssNode_length (p : Fips205Params) (skSeed pkSeed : List UInt8) (layer tree : Nat) :
+    ∀ (z nodeIdx : Nat), (fipsXmssNode p skSeed pkSeed layer tree z nodeIdx).length = p.n
+  | 0, nodeIdx => by simp [fipsXmssNode, fipsWotsPkGen]
+  | z + 1, nodeIdx => by simp [fipsXmssNode]
+
+private theorem fipsForsNode_length (p : Fips205Params) (skSeed pkSeed : List UInt8) (tree idxLeaf : Nat) :
+    ∀ (z nodeIdx : Nat), (fipsForsNode p skSeed pkSeed tree idxLeaf z nodeIdx).length = p.n
+  | 0, nodeIdx => by simp [fipsForsNode]
+  | z + 1, nodeIdx => by simp [fipsForsNode]
+
+private theorem fipsForsPkGen_length (p : Fips205Params) (skSeed pkSeed : List UInt8) (tree idxLeaf : Nat) :
+    (fipsForsPkGen p skSeed pkSeed tree idxLeaf).length = p.n := by
+  simp [fipsForsPkGen]
+
+private theorem fipsForsPkFromSig_length (p : Fips205Params) (fsig : List FipsForsTreeSig)
+    (md pkSeed : List UInt8) (tree idxLeaf : Nat) :
+    (fipsForsPkFromSig p fsig md pkSeed tree idxLeaf).length = p.n := by
+  simp [fipsForsPkFromSig]
+
+private theorem honestSlhWotsMsg_length (p : Fips205Params) (skSeed pkSeed : List UInt8)
+    (layer tree leaf : Nat) :
+    (honestSlhWotsMsg p skSeed pkSeed layer tree leaf).length = p.n := by
+  cases layer with
+  | zero => exact fipsForsPkGen_length p skSeed pkSeed tree leaf
+  | succ l => exact fipsXmssNode_length p skSeed pkSeed l _ p.hp 0
+
+private theorem fipsWalkBottomUp_length (n : Nat) (pkSeed : List UInt8) (layer tree kp : Nat)
+    (ty : FipsAdrsType) :
+    ∀ (path : List (List UInt8)) (z idx : Nat) (node : List UInt8),
+      node.length = n →
+      (fipsWalkBottomUp n pkSeed layer tree kp ty z idx node path).length = n
+  | [], _, _, _, hN => hN
+  | authZ :: rest, z, idx, node, _ => by
+    simp only [fipsWalkBottomUp]
+    by_cases hPar : idx % 2 = 0
+    · rw [ite_eq_left hPar]
+      exact fipsWalkBottomUp_length n pkSeed layer tree kp ty rest (z + 1) (idx / 2) _ (fipsH_length _ _ _ _ _)
+    · rw [ite_eq_right hPar]
+      exact fipsWalkBottomUp_length n pkSeed layer tree kp ty rest (z + 1) (idx / 2) _ (fipsH_length _ _ _ _ _)
+
+private theorem fipsXmssPkFromSig_length (p : Fips205Params) (idx : Nat) (xsig : FipsXmssSig)
+    (msg pkSeed : List UInt8) (layer tree : Nat) :
+    (fipsXmssPkFromSig p idx xsig msg pkSeed layer tree).length = p.n := by
+  unfold fipsXmssPkFromSig
+  exact fipsWalkBottomUp_length p.n pkSeed layer tree 0 .tree xsig.authPath 0 idx _ (by simp [fipsWotsPkFromSig])
+
+private theorem flatten_inj_fixed {n : Nat} (hn : 0 < n) :
+    ∀ {xs ys : List (List UInt8)},
+      xs.length = ys.length →
+      (∀ x ∈ xs, x.length = n) →
+      (∀ y ∈ ys, y.length = n) →
+      xs.flatten = ys.flatten →
+      xs = ys
+  | [], [], _, _, _, _ => rfl
+  | x :: xs, y :: ys, hLen, hX, hY, hFlat => by
+    simp only [List.flatten_cons] at hFlat
+    have hxL : x.length = n := hX x (.head _)
+    have hyL : y.length = n := hY y (.head _)
+    obtain ⟨hxy, hRest⟩ := List.append_inj hFlat (hxL.trans hyL.symm)
+    rw [hxy, flatten_inj_fixed hn (Nat.succ.inj hLen)
+      (fun a ha => hX a (.tail _ ha)) (fun b hb => hY b (.tail _ hb)) hRest]
+
+/-- Constructive bottom-up Merkle collision finder (`0 Classical.choice`) shared by `.tree` (XMSS)
+    and `.forsTree` (FORS): walks `path` until `nextNode = nodeF (z + 1) (idx / 2)` while
+    `curNode ≠ nodeF z idx`, extracting an explicit `SHAKE256` collision prefixed by `pkSeed`. -/
+private def extractMerkleWalkCollision (n : Nat) (pkSeed : List UInt8)
+    (layer tree kp : Nat) (ty : FipsAdrsType)
+    (nodeF : Nat → Nat → List UInt8)
+    (hNodeLen : ∀ z ni, (nodeF z ni).length = n)
+    (hNodeStep : ∀ z ni,
+      nodeF (z + 1) ni = fipsH n pkSeed (mkFipsAdrs layer tree ty kp (z + 1) ni)
+                           (nodeF z (2 * ni)) (nodeF z (2 * ni + 1))) :
+    (path : List (List UInt8)) →
+    (z idx : Nat) →
+    (curNode : List UInt8) →
+    curNode.length = n →
+    (∀ s ∈ path, s.length = n) →
+    curNode ≠ nodeF z idx →
+    fipsWalkBottomUp n pkSeed layer tree kp ty z idx curNode path =
+      nodeF (z + path.length) (idx / (2 ^ path.length)) →
+    { coll : Fips205ShakeCollision n // pkSeed <+: coll.in1 ∧ pkSeed <+: coll.in2 }
+  | [], z, idx, curNode, _, _, hNe, hWalk =>
+    False.elim (hNe (by simpa [fipsWalkBottomUp] using hWalk))
+  | authZ :: rest, z, idx, curNode, hCurLen, hPathLen, hNe, hWalk =>
+    let parentIdx := idx / 2
+    let adrs := mkFipsAdrs layer tree ty kp (z + 1) parentIdx
+    let nextNode := if idx % 2 = 0 then fipsH n pkSeed adrs curNode authZ else fipsH n pkSeed adrs authZ curNode
+    let honParent := nodeF (z + 1) parentIdx
+    if hParentEq : nextNode = honParent then
+      if hPar : idx % 2 = 0 then
+        have hNextDef : nextNode = fipsH n pkSeed adrs curNode authZ := by
+          dsimp only [nextNode]; exact ite_eq_left hPar
+        have hIdxEven : 2 * parentIdx = idx := by dsimp only [parentIdx]; omega
+        have hHonDef : honParent = fipsH n pkSeed adrs (nodeF z (2 * parentIdx)) (nodeF z (2 * parentIdx + 1)) :=
+          hNodeStep z parentIdx
+        ⟨{ in1 := pkSeed ++ encodeFips205Adrs adrs ++ curNode ++ authZ
+           in2 := pkSeed ++ encodeFips205Adrs adrs ++ nodeF z (2 * parentIdx) ++ nodeF z (2 * parentIdx + 1)
+           hNe := fun hIn => by
+             simp only [List.append_assoc, List.append_cancel_left_eq] at hIn
+             obtain ⟨hLeftEq, _⟩ := List.append_inj hIn (hCurLen.trans (hNodeLen z (2 * parentIdx)).symm)
+             rw [hIdxEven] at hLeftEq
+             exact hNe hLeftEq
+           hEq := by
+             have hE := hNextDef.symm.trans (hParentEq.trans hHonDef)
+             simpa [fipsH] using hE },
+         ⟨⟨encodeFips205Adrs adrs ++ curNode ++ authZ, by simp [List.append_assoc]⟩,
+          ⟨encodeFips205Adrs adrs ++ nodeF z (2 * parentIdx) ++ nodeF z (2 * parentIdx + 1), by simp [List.append_assoc]⟩⟩⟩
+      else
+        have hNextDef : nextNode = fipsH n pkSeed adrs authZ curNode := by
+          dsimp only [nextNode]; exact ite_eq_right hPar
+        have hIdxOdd : 2 * parentIdx + 1 = idx := by dsimp only [parentIdx]; omega
+        have hHonDef : honParent = fipsH n pkSeed adrs (nodeF z (2 * parentIdx)) (nodeF z (2 * parentIdx + 1)) :=
+          hNodeStep z parentIdx
+        have hAuthLen : authZ.length = n := hPathLen authZ (.head _)
+        ⟨{ in1 := pkSeed ++ encodeFips205Adrs adrs ++ authZ ++ curNode
+           in2 := pkSeed ++ encodeFips205Adrs adrs ++ nodeF z (2 * parentIdx) ++ nodeF z (2 * parentIdx + 1)
+           hNe := fun hIn => by
+             simp only [List.append_assoc, List.append_cancel_left_eq] at hIn
+             obtain ⟨_, hRightEq⟩ := List.append_inj hIn (hAuthLen.trans (hNodeLen z (2 * parentIdx)).symm)
+             rw [hIdxOdd] at hRightEq
+             exact hNe hRightEq
+           hEq := by
+             have hE := hNextDef.symm.trans (hParentEq.trans hHonDef)
+             simpa [fipsH] using hE },
+         ⟨⟨encodeFips205Adrs adrs ++ authZ ++ curNode, by simp [List.append_assoc]⟩,
+          ⟨encodeFips205Adrs adrs ++ nodeF z (2 * parentIdx) ++ nodeF z (2 * parentIdx + 1), by simp [List.append_assoc]⟩⟩⟩
+    else
+      have hNextLen : nextNode.length = n := by
+        dsimp only [nextNode]
+        by_cases hp2 : idx % 2 = 0
+        · rw [ite_eq_left hp2]; exact fipsH_length _ _ _ _ _
+        · rw [ite_eq_right hp2]; exact fipsH_length _ _ _ _ _
+      have hWalkRest :
+          fipsWalkBottomUp n pkSeed layer tree kp ty (z + 1) parentIdx nextNode rest =
+            nodeF ((z + 1) + rest.length) (parentIdx / (2 ^ rest.length)) := by
+        have hW : fipsWalkBottomUp n pkSeed layer tree kp ty (z + 1) parentIdx nextNode rest =
+            nodeF (z + (rest.length + 1)) (idx / (2 ^ (rest.length + 1))) := by
+          simpa [fipsWalkBottomUp, parentIdx, adrs, nextNode] using hWalk
+        have hZ : z + (rest.length + 1) = (z + 1) + rest.length := by omega
+        have hD : idx / (2 ^ (rest.length + 1)) = parentIdx / (2 ^ rest.length) := by
+          dsimp only [parentIdx]
+          rw [Nat.div_div_eq_div_mul, Nat.pow_succ, Nat.mul_comm 2 (2 ^ rest.length)]
+        rw [← hZ, ← hD]
+        exact hW
+      extractMerkleWalkCollision n pkSeed layer tree kp ty nodeF hNodeLen hNodeStep
+        rest (z + 1) parentIdx nextNode hNextLen (fun s hs => hPathLen s (.tail _ hs))
+        hParentEq hWalkRest
+
+/-- Single-layer XMSS forgery splitter (`0 Classical.choice`): given `curNode ≠ honestSlhWotsMsg`
+    verifying against `fipsXmssNode p sk.skSeed sk.pkSeed layer tree p.hp 0`, extracts EITHER
+    `XmssMerkleTcrBreak` OR `WotsChainSmTcrBreak`! -/
+private def extractSingleXmssLayerBreak (p : Fips205Params)
+    (hnPos : 0 < p.n) (hnLe : p.n ≤ 128)
+    (sk : SlhSecretKey) (layer tree leaf : Nat)
+    (hLayerLt : layer < p.d) (hLeafLt : leaf < 2 ^ p.hp)
+    (xsig : FipsXmssSig)
+    (hWLen : xsig.wotsSig.length = p.ell)
+    (hWEach : ∀ w ∈ xsig.wotsSig, w.length = p.n)
+    (hApLen : xsig.authPath.length = p.hp)
+    (hApEach : ∀ u ∈ xsig.authPath, u.length = p.n)
+    (curNode : List UInt8) (hCurLen : curNode.length = p.n)
+    (hCurNe : curNode ≠ honestSlhWotsMsg p sk.skSeed sk.pkSeed layer tree leaf)
+    (hXmssEq : fipsXmssPkFromSig p leaf xsig curNode sk.pkSeed layer tree =
+                 fipsXmssNode p sk.skSeed sk.pkSeed layer tree p.hp 0) :
+    PSum (WotsChainSmTcrBreak p sk) (XmssMerkleTcrBreak p ⟨sk.pkSeed, sk.pkRoot⟩) :=
+  let wotsPkStar := fipsWotsPkFromSig p xsig.wotsSig curNode sk.pkSeed layer tree leaf
+  let honWotsPk := fipsWotsPkGen p sk.skSeed sk.pkSeed layer tree leaf
+  if hWotsEq : wotsPkStar = honWotsPk then
+    have hSigElem : ∀ i : Nat, i < p.ell → (xsig.wotsSig.getD i []).length = p.n := by
+      intro i hi
+      have hi' : i < xsig.wotsSig.length := by rw [hWLen]; exact hi
+      rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hi']
+      exact hWEach _ (List.getElem_mem hi')
+    match extractFips205WotsForgery p hnPos hnLe sk.pkSeed sk.skSeed
+            (honestSlhWotsMsg p sk.skSeed sk.pkSeed layer tree leaf) curNode
+            layer tree leaf xsig.wotsSig
+            (honestSlhWotsMsg_length p sk.skSeed sk.pkSeed layer tree leaf)
+            hCurLen (Ne.symm hCurNe) hSigElem hWotsEq with
+    | .inl coll => .inl (.wotsHashCollision coll)
+    | .inr preBrk => .inl (.wotsBackwardPreimage layer tree leaf hLayerLt hLeafLt preBrk)
+  else
+    have hWalk :
+        fipsWalkBottomUp p.n sk.pkSeed layer tree 0 .tree 0 leaf wotsPkStar xsig.authPath =
+          fipsXmssNode p sk.skSeed sk.pkSeed layer tree (0 + xsig.authPath.length) (leaf / (2 ^ xsig.authPath.length)) := by
+      rw [Nat.zero_add, hApLen, Nat.div_eq_of_lt hLeafLt]
+      exact hXmssEq
+    let ⟨coll, hPref⟩ := extractMerkleWalkCollision p.n sk.pkSeed layer tree 0 .tree
+      (fipsXmssNode p sk.skSeed sk.pkSeed layer tree)
+      (fipsXmssNode_length p sk.skSeed sk.pkSeed layer tree)
+      (fun _ _ => rfl)
+      xsig.authPath 0 leaf wotsPkStar (by simp [wotsPkStar, fipsWotsPkFromSig]) hApEach hWotsEq hWalk
+    .inr ⟨coll, hPref⟩
+
+/-- Multi-layer hypertree extractor (`0 Classical.choice`) walking `rem` remaining layers `layer .. p.d - 1`. -/
+private def extractHypertreeBreakAux (p : Fips205Params)
+    (hnPos : 0 < p.n) (hnLe : p.n ≤ 128) (sk : SlhSecretKey) :
+    (rem : Nat) → (hRemPos : 0 < rem) →
+    (layer idxTree idxLeaf : Nat) →
+    (hLayerSum : layer + rem = p.d) →
+    (hLeafLt : idxLeaf < 2 ^ p.hp) →
+    (hTreeLt : idxTree < 2 ^ ((rem - 1) * p.hp)) →
+    (curNode : List UInt8) → (hCurLen : curNode.length = p.n) →
+    (hCurNe : curNode ≠ honestSlhWotsMsg p sk.skSeed sk.pkSeed layer idxTree idxLeaf) →
+    (htRest : List FipsXmssSig) → (hHtLen : htRest.length = rem) →
+    (hHtEach : ∀ x ∈ htRest,
+      x.wotsSig.length = p.ell ∧ (∀ w ∈ x.wotsSig, w.length = p.n) ∧
+      x.authPath.length = p.hp ∧ (∀ u ∈ x.authPath, u.length = p.n)) →
+    (hTopVerify : fipsHtVerifyAux p sk.pkSeed layer idxTree idxLeaf curNode htRest =
+                    fipsXmssNode p sk.skSeed sk.pkSeed (p.d - 1) 0 p.hp 0) →
+    PSum (WotsChainSmTcrBreak p sk) (XmssMerkleTcrBreak p ⟨sk.pkSeed, sk.pkRoot⟩)
+  | 0, hPos, _, _, _, _, _, _, _, _, _, _, _, _, _ =>
+    False.elim (Nat.lt_irrefl 0 hPos)
+  | 1, _, layer, idxTree, idxLeaf, hLayerSum, hLeafLt, hTreeLt, curNode, hCurLen, hCurNe, htRest, hHtLen, hHtEach, hTopVerify =>
+    match htRest, hHtLen with
+    | [], h => False.elim (by cases h)
+    | _ :: _ :: _, h => False.elim (Nat.noConfusion (Nat.succ.inj h))
+    | [xsig], _ =>
+      have hTreeZero : idxTree = 0 := by
+        simp only [Nat.sub_self, Nat.zero_mul, Nat.pow_zero] at hTreeLt
+        omega
+      have hLayerEq : layer = p.d - 1 := by omega
+      have hLayerLt : layer < p.d := by omega
+      let hX := hHtEach xsig (.head _)
+      have hXmssEq : fipsXmssPkFromSig p idxLeaf xsig curNode sk.pkSeed layer idxTree =
+          fipsXmssNode p sk.skSeed sk.pkSeed layer idxTree p.hp 0 := by
+        have hV : fipsXmssPkFromSig p idxLeaf xsig curNode sk.pkSeed layer idxTree =
+            fipsXmssNode p sk.skSeed sk.pkSeed (p.d - 1) 0 p.hp 0 := by
+          simpa [fipsHtVerifyAux] using hTopVerify
+        rw [hV, ← hLayerEq, ← hTreeZero]
+      extractSingleXmssLayerBreak p hnPos hnLe sk layer idxTree idxLeaf
+        hLayerLt hLeafLt xsig hX.1 hX.2.1 hX.2.2.1 hX.2.2.2 curNode hCurLen hCurNe hXmssEq
+  | rem + 2, _, layer, idxTree, idxLeaf, hLayerSum, hLeafLt, hTreeLt, curNode, hCurLen, hCurNe, htRest, hHtLen, hHtEach, hTopVerify =>
+    match htRest, hHtLen with
+    | [], h => False.elim (by cases h)
+    | xsig :: rest, hConsLen =>
+      let nextNode := fipsXmssPkFromSig p idxLeaf xsig curNode sk.pkSeed layer idxTree
+      let honRoot := fipsXmssNode p sk.skSeed sk.pkSeed layer idxTree p.hp 0
+      if hNodeEq : nextNode = honRoot then
+        have hLayerLt : layer < p.d := by omega
+        let hX := hHtEach xsig (.head _)
+        extractSingleXmssLayerBreak p hnPos hnLe sk layer idxTree idxLeaf
+          hLayerLt hLeafLt xsig hX.1 hX.2.1 hX.2.2.1 hX.2.2.2 curNode hCurLen hCurNe hNodeEq
+      else
+        let nextLeaf := idxTree % (2 ^ p.hp)
+        let nextTree := idxTree / (2 ^ p.hp)
+        have hSubPos : 0 < 2 ^ p.hp := Nat.two_pow_pos p.hp
+        have hNextLeafLt : nextLeaf < 2 ^ p.hp := Nat.mod_lt _ hSubPos
+        have hNextTreeLt : nextTree < 2 ^ (rem * p.hp) := by
+          have hPow : 2 ^ ((rem + 1) * p.hp) = 2 ^ (rem * p.hp) * (2 ^ p.hp) := by
+            rw [Nat.succ_mul, Nat.pow_add]
+          have hTreeLt' : idxTree < 2 ^ ((rem + 1) * p.hp) := by simpa using hTreeLt
+          exact (Nat.div_lt_iff_lt_mul hSubPos).mpr (hPow ▸ hTreeLt')
+        have hTreeRecomb : nextTree * (2 ^ p.hp) + nextLeaf = idxTree := by
+          dsimp only [nextTree, nextLeaf]
+          rw [Nat.mul_comm _ (2 ^ p.hp), Nat.div_add_mod]
+        have hNextNe : nextNode ≠ honestSlhWotsMsg p sk.skSeed sk.pkSeed (layer + 1) nextTree nextLeaf := by
+          unfold honestSlhWotsMsg
+          rw [hTreeRecomb]
+          exact hNodeEq
+        extractHypertreeBreakAux p hnPos hnLe sk (rem + 1) (Nat.succ_pos rem)
+          (layer + 1) nextTree nextLeaf (by omega) hNextLeafLt
+          (by simpa using hNextTreeLt)
+          nextNode (fipsXmssPkFromSig_length p idxLeaf xsig curNode sk.pkSeed layer idxTree)
+          hNextNe rest (Nat.succ.inj hConsLen)
+          (fun x hx => hHtEach x (.tail _ hx))
+          (by simpa [fipsHtVerifyAux, nextNode, nextLeaf, nextTree] using hTopVerify)
+
+/-- Constructive list scanner (`0 Classical.choice`) finding the first element satisfying decidable `P`. -/
+private def findDecidableElem {α : Type} (P : α → Prop) [∀ x, Decidable (P x)] :
+    (xs : List α) →
+    PSum { x : α // x ∈ xs ∧ P x } (PLift (∀ x ∈ xs, ¬ P x))
+  | [] => .inr ⟨fun _ hMem => by cases hMem⟩
+  | x :: xs =>
+    if hPx : P x then
+      .inl ⟨x, .head _, hPx⟩
+    else
+      match findDecidableElem P xs with
+      | .inl ⟨y, hyMem, hyP⟩ => .inl ⟨y, .tail _ hyMem, hyP⟩
+      | .inr ⟨hNone⟩ => .inr ⟨fun z hz => by
+          rcases List.mem_cons.mp hz with rfl | hTl
+          · exact hPx
+          · exact hNone z hTl⟩
+
+private def scanActiveConsistencyWires {AdvState : Type}
+    (corrView : RssPartyKeyShare) (cIdx : Fin 3) (deg : Nat)
+    (tr : ExecTranscript AdvState) (rec : SessionWireRecord)
+    (hRec : rec ∈ tr.sessions)
+    (hR3 : rec.honestRound3 ≠ []) :
+    (ws : List (Nat × ByteArray)) →
+    (∀ w ∈ ws, w ∈ rec.corruptRound2) →
+    Option (ActiveConsistencySoundnessBreak corrView cIdx deg tr)
+  | [], _ => none
+  | (pid, cWire2) :: wRest, hWSub =>
+    if hPid : pid = cIdx.val then
+      match hParse : parseCorruptRound2Wire deg cWire2 with
+      | none => scanActiveConsistencyWires corrView cIdx deg tr rec hRec hR3 wRest
+                  (fun w hw => hWSub w (.tail _ hw))
+      | some (nonceC, sentWires) =>
+        let expectedWires := corruptExpectedChiStream cIdx deg (some corrView) rec.request.msg
+        let deltas := zipXorTower 7 sentWires expectedWires
+        match findDecidableElem (fun d => d ≠ towerZero 7) deltas with
+        | .inl ⟨d, hdMem, hdNe⟩ =>
+          some
+            { sessRec := rec
+              hMem := hRec
+              cWire2 := cWire2
+              hWireMem := by
+                have hM := hWSub (pid, cWire2) (.head _)
+                rwa [hPid] at hM
+              nonceC := nonceC
+              sentWires := sentWires
+              hParse := hParse
+              hDeg := Nat.le_trans (zipXorTower_length_le_left 7 sentWires expectedWires)
+                        (parseCorruptRound2Wire_length_le deg cWire2 hParse)
+              devElem := d
+              hDevMem := hdMem
+              hDevNonzero := hdNe
+              hPassedBarrier := hR3 }
+        | .inr _ => scanActiveConsistencyWires corrView cIdx deg tr rec hRec hR3 wRest
+                      (fun w hw => hWSub w (.tail _ hw))
+    else
+      scanActiveConsistencyWires corrView cIdx deg tr rec hRec hR3 wRest
+        (fun w hw => hWSub w (.tail _ hw))
+
+private def scanActiveConsistencyAux {AdvState : Type}
+    (corrView : RssPartyKeyShare) (cIdx : Fin 3) (deg : Nat)
+    (tr : ExecTranscript AdvState) :
+    (rem : List SessionWireRecord) →
+    (∀ r ∈ rem, r ∈ tr.sessions) →
+    Option (ActiveConsistencySoundnessBreak corrView cIdx deg tr)
+  | [], _ => none
+  | rec :: rest, hSub =>
+    if hR3 : rec.honestRound3 = [] then
+      scanActiveConsistencyAux corrView cIdx deg tr rest (fun r hr => hSub r (.tail _ hr))
+    else
+      match scanActiveConsistencyWires corrView cIdx deg tr rec (hSub rec (.head _)) hR3
+              rec.corruptRound2 (fun _ hw => hw) with
+      | some brk => some brk
+      | none =>
+        scanActiveConsistencyAux corrView cIdx deg tr rest (fun r hr => hSub r (.tail _ hr))
+
+/-- Constructive scanner over `tr.sessions` (`0 Classical.choice`) checking if ANY session that
+    reached Round 3 carries corrupt wires differing from the corrupt party's private stream. -/
+private def scanActiveConsistencyBreak {AdvState : Type}
+    (corrView : RssPartyKeyShare) (cIdx : Fin 3) (deg : Nat)
+    (tr : ExecTranscript AdvState) :
+    Option (ActiveConsistencySoundnessBreak corrView cIdx deg tr) :=
+  scanActiveConsistencyAux corrView cIdx deg tr tr.sessions (fun _ h => h)
+
+private theorem map_eq_on_mem {α β : Type} {f g : α → β} :
+    ∀ {xs : List α}, xs.map f = xs.map g → ∀ x ∈ xs, f x = g x
+  | [], _, _, hx => by cases hx
+  | a :: xs, hEq, x, hx => by
+    simp only [List.map_cons, List.cons.injEq] at hEq
+    rcases List.mem_cons.mp hx with rfl | hTl
+    · exact hEq.1
+    · exact map_eq_on_mem hEq.2 x hTl
+
+/-- Scan FORS trees `0 .. count - 1` (`0 Classical.choice`) to verify either a Merkle/`.forsTree`
+    `SHAKE256` collision OR that EVERY `j < count` satisfies `(sigStar.forsSig.getD j).skVal = honSkVal j`! -/
+private def verifyOrExtractForsTrees (p : Fips205Params) (sk : SlhSecretKey)
+    (md : List UInt8) (idxTree idxLeaf : Nat)
+    (sigStar : SlhSignature)
+    (hFLen : sigStar.forsSig.length = p.k)
+    (hFEach : ∀ f ∈ sigStar.forsSig,
+      f.skVal.length = p.n ∧ f.authPath.length = p.a ∧ ∀ u ∈ f.authPath, u.length = p.n)
+    (hRootEqAt : ∀ j : Nat, j < p.k →
+      let idxJ := (base2b md p.a p.k).getD j 0
+      let entry := sigStar.forsSig.getD j ⟨[], []⟩
+      let globalLeaf := j * (2 ^ p.a) + idxJ
+      let node0 := fipsF p.n sk.pkSeed (mkFipsAdrs 0 idxTree .forsTree idxLeaf 0 globalLeaf) entry.skVal
+      fipsWalkBottomUp p.n sk.pkSeed 0 idxTree idxLeaf .forsTree 0 globalLeaf node0 entry.authPath =
+        fipsForsNode p sk.skSeed sk.pkSeed idxTree idxLeaf p.a j) :
+    (count : Nat) → (hCountLe : count ≤ p.k) →
+    PSum (Fips205ShakeCollision p.n)
+         (PLift (∀ j : Nat, j < count →
+            let idxJ := (base2b md p.a p.k).getD j 0
+            (sigStar.forsSig.getD j ⟨[], []⟩).skVal =
+              fipsPrf p.n sk.pkSeed sk.skSeed
+                (mkFipsAdrs 0 idxTree .forsPrf idxLeaf 0 (j * (2 ^ p.a) + idxJ))))
+  | 0, _ => .inr ⟨fun _ hj => False.elim (Nat.not_lt_zero _ hj)⟩
+  | j + 1, hLe =>
+    match verifyOrExtractForsTrees p sk md idxTree idxLeaf sigStar hFLen hFEach hRootEqAt j (Nat.le_of_succ_le hLe) with
+    | .inl coll => .inl coll
+    | .inr ⟨hPrev⟩ =>
+      have hjLt : j < p.k := hLe
+      let idxJ := (base2b md p.a p.k).getD j 0
+      let entry := sigStar.forsSig.getD j ⟨[], []⟩
+      let globalLeaf := j * (2 ^ p.a) + idxJ
+      let adrsTree0 := mkFipsAdrs 0 idxTree .forsTree idxLeaf 0 globalLeaf
+      let adrsPrf := mkFipsAdrs 0 idxTree .forsPrf idxLeaf 0 globalLeaf
+      let node0Star := fipsF p.n sk.pkSeed adrsTree0 entry.skVal
+      let honSkVal := fipsPrf p.n sk.pkSeed sk.skSeed adrsPrf
+      let honNode0 := fipsForsNode p sk.skSeed sk.pkSeed idxTree idxLeaf 0 globalLeaf
+      have hEntryMem : entry ∈ sigStar.forsSig := by
+        have hj' : j < sigStar.forsSig.length := by rw [hFLen]; exact hjLt
+        have hEqG : entry = sigStar.forsSig[j]'hj' := by
+          dsimp only [entry]
+          rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hj']; rfl
+        rw [hEqG]
+        exact List.getElem_mem hj'
+      let hFE := hFEach entry hEntryMem
+      have hApLen := hFE.2.1
+      have hApEach := hFE.2.2
+      if hNode0Eq : node0Star = honNode0 then
+        if hSkEq : entry.skVal = honSkVal then
+          .inr ⟨fun i hi => by
+            by_cases hiEq : i = j
+            · subst hiEq; exact hSkEq
+            · exact hPrev i (by omega)⟩
+        else
+          .inl
+            { in1 := sk.pkSeed ++ encodeFips205Adrs adrsTree0 ++ entry.skVal
+              in2 := sk.pkSeed ++ encodeFips205Adrs adrsTree0 ++ honSkVal
+              hNe := fun hIn => by
+                simp only [List.append_assoc, List.append_cancel_left_eq] at hIn
+                exact hSkEq hIn
+              hEq := by
+                have hE : node0Star = fipsF p.n sk.pkSeed adrsTree0 honSkVal := hNode0Eq
+                simpa [node0Star, fipsF] using hE }
+      else
+        have hBLen := (base2b_bounds md p.a p.k).1
+        have hBBound := (base2b_bounds md p.a p.k).2
+        have hjB : j < (base2b md p.a p.k).length := by rw [hBLen]; exact hjLt
+        have hIdxJLt : idxJ < 2 ^ p.a := by
+          dsimp only [idxJ]
+          rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hjB]
+          exact hBBound _ (List.getElem_mem hjB)
+        have hGlobalDiv : globalLeaf / (2 ^ p.a) = j := by
+          dsimp only [globalLeaf]
+          rw [Nat.mul_comm j (2 ^ p.a), Nat.mul_add_div (Nat.two_pow_pos p.a),
+              Nat.div_eq_of_lt hIdxJLt, Nat.add_zero]
+        have hWalk :
+            fipsWalkBottomUp p.n sk.pkSeed 0 idxTree idxLeaf .forsTree 0 globalLeaf node0Star entry.authPath =
+              fipsForsNode p sk.skSeed sk.pkSeed idxTree idxLeaf (0 + entry.authPath.length)
+                (globalLeaf / (2 ^ entry.authPath.length)) := by
+          rw [Nat.zero_add, hApLen, hGlobalDiv]
+          exact hRootEqAt j hjLt
+        let ⟨coll, _⟩ := extractMerkleWalkCollision p.n sk.pkSeed 0 idxTree idxLeaf .forsTree
+          (fipsForsNode p sk.skSeed sk.pkSeed idxTree idxLeaf)
+          (fipsForsNode_length p sk.skSeed sk.pkSeed idxTree idxLeaf)
+          (fun _ _ => rfl)
+          entry.authPath 0 globalLeaf node0Star (fipsF_length _ _ _ _) hApEach hNode0Eq hWalk
+        .inl coll
+
+/-- Scan `0 .. count - 1` (`0 Classical.choice`) to test whether every FORS coordinate `(idxTree, idxLeaf, j, idxJ)`
+    was covered by some approved Round-3 session in `tr.sessions`, or pinpoint the exact unqueried `j < count`! -/
+private def checkForsSubsetCoverage {AdvState : Type}
+    (p : Fips205Params) (sk : SlhSecretKey)
+    (clInit : RealClusterState SlhPublicKey RssPartyKeyShare)
+    (tr : ExecTranscript AdvState)
+    (mdStar : List UInt8) (idxTreeStar idxLeafStar : Nat) :
+    (count : Nat) →
+    PSum { j : Nat // j < count ∧
+            ∀ rec ∈ tr.sessions,
+              validThresholdApproval clInit.tsig rec.request.honestApprovers = true →
+              rec.honestRound3 ≠ [] →
+              let rRec := fipsPrfMsg p.n sk.skPrf rec.request.optRand rec.request.msg
+              let dRec := fipsHMsg p.m rRec sk.pkSeed sk.pkRoot rec.request.msg
+              let (mdRec, tRec, lRec) := fipsSplitDigest p dRec
+              ¬ (tRec = idxTreeStar ∧ lRec = idxLeafStar ∧
+                 (base2b mdRec p.a p.k).getD j 0 = (base2b mdStar p.a p.k).getD j 0) }
+         (PLift (∀ j : Nat, j < count →
+            ∃ rec ∈ tr.sessions,
+              validThresholdApproval clInit.tsig rec.request.honestApprovers = true ∧
+              rec.honestRound3 ≠ [] ∧
+              let rRec := fipsPrfMsg p.n sk.skPrf rec.request.optRand rec.request.msg
+              let dRec := fipsHMsg p.m rRec sk.pkSeed sk.pkRoot rec.request.msg
+              let (mdRec, tRec, lRec) := fipsSplitDigest p dRec
+              tRec = idxTreeStar ∧ lRec = idxLeafStar ∧
+              (base2b mdRec p.a p.k).getD j 0 = (base2b mdStar p.a p.k).getD j 0))
+  | 0 => .inr ⟨fun _ hj => False.elim (Nat.not_lt_zero _ hj)⟩
+  | j + 1 =>
+    match checkForsSubsetCoverage p sk clInit tr mdStar idxTreeStar idxLeafStar j with
+    | .inl ⟨u, huLt, huUncov⟩ => .inl ⟨u, Nat.lt_trans huLt (Nat.lt_succ_self j), huUncov⟩
+    | .inr ⟨hPrevCov⟩ =>
+      let MatchPred (rec : SessionWireRecord) : Prop :=
+        validThresholdApproval clInit.tsig rec.request.honestApprovers = true ∧
+        rec.honestRound3 ≠ [] ∧
+        (let rRec := fipsPrfMsg p.n sk.skPrf rec.request.optRand rec.request.msg
+         let dRec := fipsHMsg p.m rRec sk.pkSeed sk.pkRoot rec.request.msg
+         let (mdRec, tRec, lRec) := fipsSplitDigest p dRec
+         tRec = idxTreeStar ∧ lRec = idxLeafStar ∧
+         (base2b mdRec p.a p.k).getD j 0 = (base2b mdStar p.a p.k).getD j 0)
+      match findDecidableElem MatchPred tr.sessions with
+      | .inl ⟨rec, hMem, hMP⟩ =>
+        .inr ⟨fun i hi => by
+          by_cases hiEq : i = j
+          · subst hiEq; exact ⟨rec, hMem, hMP⟩
+          · exact hPrevCov i (by omega)⟩
+      | .inr ⟨hNone⟩ =>
+        .inl ⟨j, Nat.lt_succ_self j, fun rec hMem hVal hR3 hHit =>
+          hNone rec hMem ⟨hVal, hR3, hHit⟩⟩
+
+/-- **Constructive Hash-Game Forgery Extractor (`extractSlhHashGameBreak`)**:
+    Given ANY transcript `tr` and ANY well-typed signature `sigStar` verifying on a message `mStar` that
+    was never the request of a quorum-approved session that reached Round 3, constructively
+    (`0 Classical.choice`, `Type`-valued) extracts a concrete `Fips205HashGameBreak`. Freshness is only
+    required of sessions whose Round-3 openings were actually released: a request that was approved but
+    aborted before Round 3 revealed no signature and does not disqualify the forgery. -/
+def extractSlhHashGameBreak {AdvState : Type}
+    (p : Fips205Params) (hWf : p.wellFormed = true)
+    (skSeed skPrf pkSeed : List UInt8)
+    (clInit : RealClusterState SlhPublicKey RssPartyKeyShare)
+    (tr : ExecTranscript AdvState)
+    (mStar : List UInt8) (sigStar : SlhSignature)
+    (hSigWt : sigStar.WellTyped p)
+    (hVerify : slhVerifyInternal p mStar sigStar (slhKeygenInternal p skSeed skPrf pkSeed).2 = true)
+    (hFresh : ∀ rec ∈ tr.sessions,
+      validThresholdApproval clInit.tsig rec.request.honestApprovers = true →
+      rec.honestRound3 ≠ [] →
+      rec.request.msg ≠ mStar) :
+    Fips205HashGameBreak p (slhKeygenInternal p skSeed skPrf pkSeed).1 clInit tr mStar sigStar :=
+  let sk := (slhKeygenInternal p skSeed skPrf pkSeed).1
+  let hWfP := wellFormed_props hWf
+  have hnPos : 0 < p.n := hWfP.1
+  have hnLe32 : p.n ≤ 32 := hWfP.2.1
+  have hdPos : 0 < p.d := hWfP.2.2.1
+  have hHdEq : p.h = p.d * p.hp := hWfP.2.2.2.1
+  have hkPos : 0 < p.k := hWfP.2.2.2.2.1
+  have hnLe128 : p.n ≤ 128 := Nat.le_trans hnLe32 (by decide)
+  have hRLen := hSigWt.1
+  have hFLen := hSigWt.2.1
+  have hFEach := hSigWt.2.2.1
+  have hHtLen := hSigWt.2.2.2.1
+  have hHtEach := hSigWt.2.2.2.2
+  let dStar := fipsHMsg p.m sigStar.rRand sk.pkSeed sk.pkRoot mStar
+  let splitStar := fipsSplitDigest p dStar
+  let mdStar := splitStar.1
+  let idxTreeStar := splitStar.2.1
+  let idxLeafStar := splitStar.2.2
+  let pkForsStar := fipsForsPkFromSig p sigStar.forsSig mdStar sk.pkSeed idxTreeStar idxLeafStar
+  let honPkFors := fipsForsPkGen p sk.skSeed sk.pkSeed idxTreeStar idxLeafStar
+  have hTopVerify :
+      fipsHtVerifyAux p sk.pkSeed 0 idxTreeStar idxLeafStar pkForsStar sigStar.htSig =
+        fipsXmssNode p sk.skSeed sk.pkSeed (p.d - 1) 0 p.hp 0 := by
+    have hShapes := slhVerifyInternal_shapes p mStar sigStar
+      (slhKeygenInternal p skSeed skPrf pkSeed).2 hVerify
+    have hForsShape := hShapes.2.2.2.1
+    have hHtShape := hShapes.2.2.2.2
+    have hV := hVerify
+    unfold slhVerifyInternal slhKeygenInternal at hV
+    dsimp only at hV
+    simp only [hRLen, hFLen, hHtLen, hForsShape, hHtShape, ne_eq,
+               not_true_eq_false, decide_false, Bool.not_true, Bool.false_or,
+               Bool.false_eq_true, ↓reduceIte, decide_eq_true_eq] at hV
+    exact hV
+  if hForsEq : pkForsStar = honPkFors then
+    let rootsStar := (List.range p.k).map fun j =>
+      let idxJ := (base2b mdStar p.a p.k).getD j 0
+      let entry := sigStar.forsSig.getD j ⟨[], []⟩
+      let globalLeaf := j * (2 ^ p.a) + idxJ
+      let node0 := fipsF p.n sk.pkSeed (mkFipsAdrs 0 idxTreeStar .forsTree idxLeafStar 0 globalLeaf) entry.skVal
+      fipsWalkBottomUp p.n sk.pkSeed 0 idxTreeStar idxLeafStar .forsTree 0 globalLeaf node0 entry.authPath
+    let rootsHon := (List.range p.k).map fun j =>
+      fipsForsNode p sk.skSeed sk.pkSeed idxTreeStar idxLeafStar p.a j
+    if hRootsEq : rootsStar = rootsHon then
+      have hRootEqAt : ∀ j : Nat, j < p.k →
+          let idxJ := (base2b mdStar p.a p.k).getD j 0
+          let entry := sigStar.forsSig.getD j ⟨[], []⟩
+          let globalLeaf := j * (2 ^ p.a) + idxJ
+          let node0 := fipsF p.n sk.pkSeed (mkFipsAdrs 0 idxTreeStar .forsTree idxLeafStar 0 globalLeaf) entry.skVal
+          fipsWalkBottomUp p.n sk.pkSeed 0 idxTreeStar idxLeafStar .forsTree 0 globalLeaf node0 entry.authPath =
+            fipsForsNode p sk.skSeed sk.pkSeed idxTreeStar idxLeafStar p.a j := by
+        intro j hj
+        exact map_eq_on_mem hRootsEq j (List.mem_range.mpr hj)
+      match verifyOrExtractForsTrees p sk mdStar idxTreeStar idxLeafStar
+              sigStar hFLen hFEach hRootEqAt p.k (Nat.le_refl p.k) with
+      | .inl coll => .forsItsr (.forsHashCollision coll)
+      | .inr ⟨hAllSkEq⟩ =>
+        let HMsgCollPred (rec : SessionWireRecord) : Prop :=
+          validThresholdApproval clInit.tsig rec.request.honestApprovers = true ∧
+          rec.honestRound3 ≠ [] ∧
+          fipsHMsg p.m (fipsPrfMsg p.n sk.skPrf rec.request.optRand rec.request.msg)
+            sk.pkSeed sk.pkRoot rec.request.msg = dStar
+        match findDecidableElem HMsgCollPred tr.sessions with
+        | .inl ⟨rec, hMem, hVal, hR3Rec, hDigEq⟩ =>
+          let rRec := fipsPrfMsg p.n sk.skPrf rec.request.optRand rec.request.msg
+          have hMsgNe : rec.request.msg ≠ mStar := hFresh rec hMem hVal hR3Rec
+          .prfMsg ⟨{
+            in1 := sigStar.rRand ++ sk.pkSeed ++ sk.pkRoot ++ mStar
+            in2 := rRec ++ sk.pkSeed ++ sk.pkRoot ++ rec.request.msg
+            hNe := fun hIn => by
+              have hPrefLen : (sigStar.rRand ++ sk.pkSeed ++ sk.pkRoot).length =
+                              (rRec ++ sk.pkSeed ++ sk.pkRoot).length := by
+                simp [hRLen, rRec, fipsPrfMsg]
+              obtain ⟨_, hMsgEq⟩ := List.append_inj hIn hPrefLen
+              exact hMsgNe hMsgEq.symm
+            hEq := by
+              simpa [fipsHMsg, dStar, rRec] using hDigEq.symm }⟩
+        | .inr ⟨hNoDigColl⟩ =>
+          match checkForsSubsetCoverage p sk clInit tr mdStar idxTreeStar idxLeafStar p.k with
+          | .inl ⟨treeIdx, hTreeLt, hNeverOpened⟩ =>
+            .forsItsr (.forsUnqueriedPrfRecovery treeIdx hTreeLt
+              (hAllSkEq treeIdx hTreeLt) hNeverOpened)
+          | .inr ⟨hAllCov⟩ =>
+            .forsItsr (.forsInterleavedSubsetCover hkPos (fun j hj => by
+              obtain ⟨rec, hMem, hVal, hR3, hCoord⟩ := hAllCov j hj
+              refine ⟨rec, hMem, hVal, hR3, hFresh rec hMem hVal hR3, ?_, hCoord.1, hCoord.2.1, hCoord.2.2⟩
+              intro hDigEq
+              exact hNoDigColl rec hMem ⟨hVal, hR3, hDigEq⟩))
+    else
+      let adrsRoots := mkFipsAdrs 0 idxTreeStar .forsRoots idxLeafStar 0 0
+      .forsItsr (.forsHashCollision
+        { in1 := sk.pkSeed ++ encodeFips205Adrs adrsRoots ++ rootsStar.flatten
+          in2 := sk.pkSeed ++ encodeFips205Adrs adrsRoots ++ rootsHon.flatten
+          hNe := fun hIn => by
+            simp only [List.append_assoc, List.append_cancel_left_eq] at hIn
+            have hS1 : ∀ x ∈ rootsStar, x.length = p.n := by
+              intro x hx
+              rw [List.mem_map] at hx
+              obtain ⟨j, _, rfl⟩ := hx
+              exact fipsWalkBottomUp_length _ _ _ _ _ _ _ _ _ _ (fipsF_length _ _ _ _)
+            have hS2 : ∀ y ∈ rootsHon, y.length = p.n := by
+              intro y hy
+              rw [List.mem_map] at hy
+              obtain ⟨j, _, rfl⟩ := hy
+              exact fipsForsNode_length _ _ _ _ _ _ _
+            have hLenEq : rootsStar.length = rootsHon.length := by simp [rootsStar, rootsHon]
+            exact hRootsEq (flatten_inj_fixed hnPos hLenEq hS1 hS2 hIn)
+          hEq := by
+            simpa [pkForsStar, honPkFors, fipsForsPkFromSig, fipsForsPkGen,
+                   rootsStar, rootsHon, fipsTl, adrsRoots] using hForsEq })
+  else
+    have hLeafLt : idxLeafStar < 2 ^ p.hp := Nat.mod_lt _ (Nat.two_pow_pos p.hp)
+    have hTreeExp : p.h - p.hp = (p.d - 1) * p.hp := by
+      have hd1 : p.d = (p.d - 1) + 1 := by omega
+      have hMul : p.d * p.hp = (p.d - 1) * p.hp + p.hp := by
+        conv => lhs; rw [hd1]
+        rw [Nat.succ_mul]
+      omega
+    have hTreeLt : idxTreeStar < 2 ^ ((p.d - 1) * p.hp) := by
+      dsimp only [idxTreeStar, splitStar, fipsSplitDigest]
+      rw [← hTreeExp]
+      exact Nat.mod_lt _ (Nat.two_pow_pos _)
+    match extractHypertreeBreakAux p hnPos hnLe128 sk p.d hdPos
+            0 idxTreeStar idxLeafStar (Nat.zero_add p.d) hLeafLt hTreeLt
+            pkForsStar (fipsForsPkFromSig_length p sigStar.forsSig mdStar sk.pkSeed idxTreeStar idxLeafStar)
+            hForsEq sigStar.htSig hHtLen hHtEach hTopVerify with
+    | .inl wotsBrk => .wotsChainSmTcr wotsBrk
+    | .inr xmssBrk => .xmssMerkleTcr xmssBrk
+
+/-- **Constructive Whole-Transcript Interactive Forgery Extractor (`extractInteractiveSlhBreak`)**:
+    Given ANY transcript `tr` from `RealProtocolExec` and ANY valid wire signature `rawSigStar` on a
+    message `mStar` never quorum-approved in `tr.sessions`, constructively (`0 Classical.choice`,
+    `Type`-valued!) extracts a concrete `RssSlhInteractiveSecurityBreak` witness: an
+    `ActiveConsistencySoundnessBreak` against the corrupt party's private stream if the scan finds
+    one, otherwise `extractSlhHashGameBreak`. -/
+def extractInteractiveSlhBreak {AdvState : Type}
+    (corrView : RssPartyKeyShare)
+    (p : Fips205Params) (hWf : p.wellFormed = true)
+    (cIdx : Fin 3) (deg : Nat)
+    (skSeed skPrf pkSeed : List UInt8)
+    (clInit : RealClusterState SlhPublicKey RssPartyKeyShare)
+    (tr : ExecTranscript AdvState)
+    (mStar : List UInt8) (sigStar : SlhSignature)
+    (hSigWt : sigStar.WellTyped p)
+    (hVerify : slhVerifyInternal p mStar sigStar (slhKeygenInternal p skSeed skPrf pkSeed).2 = true)
+    (hUnapproved : ∀ rec ∈ tr.sessions,
+      validThresholdApproval clInit.tsig rec.request.honestApprovers = true →
+      rec.request.msg ≠ mStar) :
+    RssSlhInteractiveSecurityBreak corrView p cIdx deg
+      (slhKeygenInternal p skSeed skPrf pkSeed).1 clInit tr mStar sigStar :=
+  match scanActiveConsistencyBreak corrView cIdx deg tr with
+  | some activeBrk => .activeConsistency activeBrk
+  | none =>
+    (extractSlhHashGameBreak p hWf skSeed skPrf pkSeed clInit tr mStar sigStar hSigWt hVerify
+      (fun rec hMem hVal _ => hUnapproved rec hMem hVal)).toInteractive corrView cIdx deg
+
+private theorem sharedVerifyRound1_cursor (cIdx : Fin 3) (r1St : RssRound1State)
+    (corrR1 : List (Nat × ByteArray)) {r2Init : RssRound2State}
+    (h : sharedVerifyRound1 cIdx r1St corrR1 = .inr r2Init) :
+    r2Init.cursor = r1St.cursor := by
+  unfold sharedVerifyRound1 at h
+  cases hFind : corrR1.find? (fun pr => pr.1 == cIdx.val) with
+  | none => rw [hFind] at h; cases h
+  | some pr =>
+    rcases pr with ⟨_, cWire⟩
+    rw [hFind] at h
+    dsimp only at h
+    split at h
+    · cases h
+    · injection h with hEq; rw [← hEq]
+
+/-- **Honesty Link (`activeConsistencyBreak_implies_schwartzZippel_root`)**:
+    Whenever a single session `rec = (execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt tape).2.2`
+    witnesses `rec.honestRound3 ≠ []` with corrupt party `cIdx` (`cl.tsig.corruptParties = [cIdx.val]`),
+    its Round-2 wire `cWire2` parsed to `(nonceC, sentWires)` **necessarily satisfied**, at the joint
+    coin `gamma = coinA ⊕ coinB ⊕ openingCoin nonceC`, BOTH:
+    0. `sentWires.length = expectedWires.length` for the private stream `expectedWires` the honest
+       pair computed from its vault,
+    1. `bbcggiWireAccumulator sentWires gamma = bbcggiWireAccumulator expectedWires gamma`, AND
+    2. `batchDeviationPoly (zipXorTower 7 sentWires expectedWires) gamma = towerZero 7`!
+    Thus `ActiveConsistencySoundnessBreak` is NEVER an unconstrained label — in `RealProtocolExec`,
+    it forces a genuine non-zero degree-`≤ deg` polynomial root hit in `GF(2^128)`. -/
+theorem activeConsistencyBreak_implies_schwartzZippel_root {AdvState : Type}
+    (p : Fips205Params) (cIdx : Fin 3) (deg : Nat)
+    (A : UcRushingAdversary AdvState)
+    (cl : RealClusterState SlhPublicKey RssPartyKeyShare)
+    (advSt : AdvState) (tape : RssSlhSessionTape p.sigBytes)
+    (hSingleCorrupt : cl.tsig.corruptParties = [cIdx.val])
+    {cWire2 : ByteArray} {nonceC : List UInt8} {sentWires : List Tower128}
+    (hR3Nonempty : (execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt tape).2.2.honestRound3 ≠ [])
+    (hWireMem : (cIdx.val, cWire2) ∈ (execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt tape).2.2.corruptRound2)
+    (hParse : parseCorruptRound2Wire deg cWire2 = some (nonceC, sentWires)) :
+    let expectedWires :=
+      corruptExpectedChiStream cIdx deg (corruptViewOfVault cIdx cl.honestShares)
+        (A.scheduleSession advSt).1.msg
+    let gamma := unpackTower 7 ((tape.gammaBits ^^^ tape.coinB) ^^^ openingCoin nonceC)
+    sentWires.length = expectedWires.length ∧
+    bbcggiWireAccumulator sentWires gamma = bbcggiWireAccumulator expectedWires gamma ∧
+    batchDeviationPoly (zipXorTower 7 sentWires expectedWires) gamma = towerZero 7 := by
+  intro expectedWires gamma
+  dsimp only [expectedWires, gamma]
+  unfold execRealSession rssSlhInteractiveProtocol rssSlhCoinProtocol sharedCoinTossBarrier at hR3Nonempty hWireMem
+  dsimp only at hR3Nonempty hWireMem
+  cases hQ : validThresholdApproval cl.tsig (A.scheduleSession advSt).1.honestApprovers
+  · rw [hQ] at hR3Nonempty; simp at hR3Nonempty
+  · rw [hQ, ite_eq_right (by decide : ¬ ((!true) = true))] at hR3Nonempty hWireMem
+    cases hW : walPreSignStep cl.honestWal (slhPkDigest cl.tsig.pk)
+        (A.scheduleSession advSt).1.reqEpoch (slhReqDigest (A.scheduleSession advSt).1) with
+    | err _ _ => rw [hW] at hR3Nonempty; simp at hR3Nonempty
+    | ok wal' wAuth =>
+      rw [hW] at hR3Nonempty hWireMem
+      cases wAuth with
+      | replayCached _ => simp at hR3Nonempty
+      | authorizedFresh _ =>
+        dsimp only at hR3Nonempty hWireMem
+        cases hVR1 : sharedVerifyRound1 cIdx _ _ with
+        | inl _ => rw [hVR1] at hR3Nonempty; simp at hR3Nonempty
+        | inr r2Init =>
+          have hCurEq : r2Init.cursor = cl.maskSessionCursor :=
+            sharedVerifyRound1_cursor cIdx _ _ hVR1
+          rw [hVR1] at hR3Nonempty hWireMem
+          dsimp only at hR3Nonempty hWireMem
+          cases hBar : sharedPreCutBarrier cIdx deg cl.tsig.pk _ _ _ with
+          | inl _ => rw [hBar] at hR3Nonempty; simp at hR3Nonempty
+          | inr r3Init =>
+            rw [hBar] at hWireMem
+            dsimp only at hWireMem
+            unfold sharedPreCutBarrier at hBar
+            rw [hSingleCorrupt] at hBar hWireMem
+            cases hFin : sharedFinalizeCutOpen p cIdx cl.tsig.pk _ _ _ <;>
+              rw [hFin] at hWireMem <;>
+              dsimp only at hWireMem
+            all_goals
+              simp only [List.map, List.mem_singleton, Prod.mk.injEq] at hWireMem
+              rcases hWireMem with ⟨_, hWireEq⟩
+              subst hWireEq
+              simp only [corruptOpenedCoin, List.map, List.find?, beq_self_eq_true, hParse, hCurEq] at hBar
+              cases hCmt : (round1NonceCommit cl.tsig.pk _ cl.maskSessionCursor cIdx.val nonceC != r2Init.corrR1Commit)
+              · rw [hCmt] at hBar
+                simp only [Bool.false_eq_true, ↓reduceIte] at hBar
+                cases hVer : verifyPrivateChiWires
+                    (corruptExpectedChiStream cIdx deg (corruptViewOfVault cIdx cl.honestShares)
+                      (A.scheduleSession advSt).1.msg)
+                    sentWires (unpackTower 7 ((tape.gammaBits ^^^ tape.coinB) ^^^ openingCoin nonceC))
+                · rw [hVer] at hBar; simp at hBar
+                · have hLen := of_decide_eq_true (Bool.and_eq_true_iff.mp hVer).1
+                  have hAcc := (Bool.and_eq_true_iff.mp hVer).2
+                  have hAccEq := of_decide_eq_true (by simpa [beq_iff_eq] using hAcc)
+                  have hBatchBool := (bbcggiWireAccumulator_eq_iff_batchDeviationPoly hLen
+                    (unpackTower 7 ((tape.gammaBits ^^^ tape.coinB) ^^^ openingCoin nonceC))).symm.trans hAcc
+                  exact ⟨hLen, hAccEq, of_decide_eq_true (by simpa [beq_iff_eq] using hBatchBool)⟩
+              · rw [hCmt] at hBar; simp at hBar
+
+/-- **Non-Cosplay Witness Guard (`no_trivial_break_on_empty_transcript`)**:
+    Neither `ActiveConsistencySoundnessBreak` nor `Fips205ForsItsrBreak.forsInterleavedSubsetCover` can
+    ever be inhabited on an empty session transcript (`tr.sessions = []`). -/
+theorem no_trivial_break_on_empty_transcript {AdvState : Type}
+    (corrView : RssPartyKeyShare) (cIdx : Fin 3) (deg : Nat) (advSt : AdvState) :
+    (ActiveConsistencySoundnessBreak corrView cIdx deg (⟨advSt, []⟩ : ExecTranscript AdvState) → False) ∧
+    (∀ (p : Fips205Params) (_hK : 0 < p.k)
+       (P : Nat → SessionWireRecord → Prop),
+       (∀ j : Nat, j < p.k → ∃ rec ∈ ([] : List SessionWireRecord), P j rec) → False) := by
+  refine ⟨fun w => (by cases w.hMem), fun p hK P hAll => ?_⟩
+  obtain ⟨_, hMem, _⟩ := hAll 0 hK
+  cases hMem
+
+/-- **Crown-Jewel Theorem 2 (`rss_slh_interactive_euf_cma_reduction`)**:
+    **Constructive Black-Box Interactive `EUF-CMA` Security Reduction (`0 Classical.choice`, `0` cheat hypotheses!)**:
+    For ANY well-formed NIST `FIPS 205` parameter set `p`, ANY 2-of-3 RSS secret-key sharing `(seedSh, prfSh)`,
+    ANY stateful rushing adversary `A` scheduling `Q_s` interactive threshold sessions in `RealProtocolExec`,
+    and ANY post-interaction forgery extractor `forgeOut : ExecTranscript AdvState → List UInt8 × ByteArray`,
+    if `forgeOut tr = (mStar, rawSigBytes)` decodes via `decodeSlhSig p` to a valid `SlhSignature` `sigStar`
+    verifying under `slhVerifyInternal p mStar sigStar pk = true` while `mStar` was **never approved by a
+    valid `t`-quorum** in `clInit.tsig.approvedMsgs` or any session of `tr.sessions`, then our explicit
+    `Type`-valued reduction `extractInteractiveSlhBreak` constructively produces a concrete witness of:
+    - `ActiveConsistencySoundnessBreak` (`GF(2^128)` Schwartz-Zippel consistency hit), **OR**
+    - `Fips205ForsItsrBreak` (FORS collision / unqueried `sk.skSeed` PRF recovery / multi-query `H_msg` ITSR cover), **OR**
+    - `WotsChainSmTcrBreak` (WOTS+ hash collision or backward chain preimage on `honestSlhWotsMsg`), **OR**
+    - `XmssMerkleTcrBreak` (XMSS `.tree` `SHAKE256` collision under `pk.pkSeed`), **OR**
+    - `PrfMsgBreak` (`SHAKE256` `H_msg` collision against an approved session)! -/
+theorem rss_slh_interactive_euf_cma_reduction {AdvState : Type}
+    (p : Fips205Params) (hWf : p.wellFormed = true)
+    (cIdx : Fin 3) (deg Q_s : Nat)
+    {seedSh prfSh : RssByteShares}
+    (pkSeed : List UInt8)
+    (A : UcRushingAdversary AdvState)
+    (tapes : Nat → RssSlhSessionTape p.sigBytes)
+    (clInit : RealClusterState SlhPublicKey RssPartyKeyShare)
+    (advSt0 : AdvState)
+    (hPkKey : clInit.tsig.pk =
+      (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).2)
+    (forgeOut : ExecTranscript AdvState → List UInt8 × ByteArray)
+    {sigStar : SlhSignature}
+    (hDecode :
+      let (_, tr) := RealProtocolExec (rssSlhInteractiveProtocol p cIdx deg) A Q_s tapes clInit advSt0
+      decodeSlhSig p (unpackWireBytes (forgeOut tr).2) = some sigStar)
+    (hVerify :
+      let (_, tr) := RealProtocolExec (rssSlhInteractiveProtocol p cIdx deg) A Q_s tapes clInit advSt0
+      slhVerifyInternal p (forgeOut tr).1 sigStar clInit.tsig.pk = true)
+    (hFreshMsg :
+      let (clF, tr) := RealProtocolExec (rssSlhInteractiveProtocol p cIdx deg) A Q_s tapes clInit advSt0
+      (forgeOut tr).1 ∉ clF.tsig.approvedMsgs ∧
+      ∀ rec ∈ tr.sessions,
+        validThresholdApproval clInit.tsig rec.request.honestApprovers = true →
+        rec.request.msg ≠ (forgeOut tr).1) :
+    let (_, tr) := RealProtocolExec (rssSlhInteractiveProtocol p cIdx deg) A Q_s tapes clInit advSt0
+    let sk := (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).1
+    Nonempty (ActiveConsistencySoundnessBreak (corruptRssView cIdx seedSh prfSh) cIdx deg tr) ∨
+    Nonempty (Fips205ForsItsrBreak p sk clInit tr (forgeOut tr).1 sigStar) ∨
+    Nonempty (WotsChainSmTcrBreak p sk) ∨
+    Nonempty (XmssMerkleTcrBreak p ⟨sk.pkSeed, sk.pkRoot⟩) ∨
+    Nonempty (PrfMsgBreak p) := by
+  dsimp only at hDecode hVerify hFreshMsg ⊢
+  let tr := (RealProtocolExec (rssSlhInteractiveProtocol p cIdx deg) A Q_s tapes clInit advSt0).2
+  have hSigWt : sigStar.WellTyped p := decodeSlhSig_wellTyped hDecode
+  have hVerKey : slhVerifyInternal p (forgeOut tr).1 sigStar
+      (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).2 = true := by
+    rwa [← hPkKey]
+  match extractInteractiveSlhBreak (corruptRssView cIdx seedSh prfSh) p hWf cIdx deg
+          (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed
+          clInit tr (forgeOut tr).1 sigStar hSigWt hVerKey hFreshMsg.2 with
+  | .activeConsistency w => exact .inl ⟨w⟩
+  | .forsItsr w          => exact .inr (.inl ⟨w⟩)
+  | .wotsChainSmTcr w    => exact .inr (.inr (.inl ⟨w⟩))
+  | .xmssMerkleTcr w     => exact .inr (.inr (.inr (.inl ⟨w⟩)))
+  | .prfMsg w            => exact .inr (.inr (.inr (.inr ⟨w⟩)))
+
+/-- **Inhabitedness Witness for Theorem 2 (`inhabited_rss_slh_euf_cma_reduction`)**:
+    Demonstrates non-vacuity of `rss_slh_interactive_euf_cma_reduction` on `slhDsaShake128f`:
+    an adversary outputting an unqueried `0`-session valid signature satisfies every premise of
+    `rss_slh_interactive_euf_cma_reduction` (`decodeSlhSig = some`, `slhVerifyInternal = true`,
+    `mStar ∉ approvedMsgs`), and the constructive extractor extracts a concrete break witness! -/
+theorem inhabited_rss_slh_euf_cma_reduction :
+    let p := slhDsaShake128f
+    let seedSh : RssByteShares := ⟨List.replicate 16 1, List.replicate 16 2, List.replicate 16 3⟩
+    let prfSh : RssByteShares := ⟨List.replicate 16 4, List.replicate 16 5, List.replicate 16 6⟩
+    let pkSeed : List UInt8 := List.replicate 16 7
+    let sk := (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).1
+    let pk := (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).2
+    let clInit : RealClusterState SlhPublicKey RssPartyKeyShare :=
+      ⟨⟨pk, 2, 3, [0], [], []⟩, initWalLatchState (slhPkDigest pk), 0,
+       dealHonestRssVault ⟨0, by decide⟩ seedSh prfSh⟩
+    let mStar : List UInt8 := [0x42, 0x99]
+    let sigStar := slhSignInternal p mStar sk []
+    ∃ (rawSig : ByteArray),
+      decodeSlhSig p (unpackWireBytes rawSig) = some sigStar ∧
+      slhVerifyInternal p mStar sigStar clInit.tsig.pk = true ∧
+      mStar ∉ clInit.tsig.approvedMsgs ∧
+      Nonempty (RssSlhInteractiveSecurityBreak (corruptRssView ⟨0, by decide⟩ seedSh prfSh)
+        p ⟨0, by decide⟩ 4 sk clInit ⟨(), []⟩ mStar sigStar) := by
+  intro p seedSh prfSh pkSeed sk pk clInit mStar sigStar
+  let rawSig := packWireBytes (encodeSlhSig sigStar)
+  have hDec : decodeSlhSig p (unpackWireBytes rawSig) = some sigStar := by
+    rw [unpackWireBytes_packWireBytes]
+    exact decodeSlhSig_encodeSlhSig (slhSignInternal_wellTyped p mStar sk [])
+  have hVer : slhVerifyInternal p mStar sigStar clInit.tsig.pk = true :=
+    slhVerifyInternal_slhSignInternal p slhDsaShake128f_wellFormed
+      (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed mStar []
+  have hUnapp : ∀ rec ∈ ([] : List SessionWireRecord),
+      validThresholdApproval clInit.tsig rec.request.honestApprovers = true →
+      rec.request.msg ≠ mStar := fun _ hM => by cases hM
+  refine ⟨rawSig, hDec, hVer, by simp [clInit], ?_⟩
+  exact ⟨extractInteractiveSlhBreak (corruptRssView ⟨0, by decide⟩ seedSh prfSh)
+    p slhDsaShake128f_wellFormed ⟨0, by decide⟩ 4
+    (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed
+    clInit ⟨(), []⟩ mStar sigStar
+    (slhSignInternal_wellTyped p mStar sk []) hVer hUnapp⟩
+
+/-! ## 4b. End-to-End Weld: Multi-Session Rushing Forgery ⇒ Counted `GF(2^128)` Root Hit or Hash-Game Witness -/
+
+/-- The honest Round-3 message list is never empty, for either world. -/
+theorem buildHonestRound3Msgs_ne_nil (cIdx : Fin 3) (cutSh : RssByteShares) :
+    buildHonestRound3Msgs cIdx cutSh ≠ [] := by
+  rcases cIdx with ⟨_ | _ | _ | n, hv⟩
+  · intro h; cases h
+  · intro h; cases h
+  · intro h; cases h
+  · exact False.elim (Nat.not_lt_zero n (Nat.lt_of_add_lt_add_right hv))
+
+/-- `Sim_RssSlh` always emits Round-3 messages once it is handed the ideal signature, so a session
+    record with empty `honestRound3` is exactly a session in which the signing oracle was not read. -/
+theorem Sim_RssSlh_round3_ne_nil (corrView : RssPartyKeyShare) (p : Fips205Params) (cIdx : Fin 3) (deg : Nat)
+    (pk : SlhPublicKey) (corr : List Nat) (req : SessionScheduleReq) (s3 : RssRound3State)
+    (sigB : ByteArray) (tape : RssSlhSessionTape p.sigBytes) :
+    ((Sim_RssSlh corrView p cIdx deg).simRound3 pk corr req s3 sigB tape).1 ≠ [] :=
+  fun h => buildHonestRound3Msgs_ne_nil cIdx _ (List.append_eq_nil_iff.mp h).1
+
+/-- **EUF-CMA winning predicate on a transcript (`slhForgeryWins`)**: the forger's wire output decodes
+    to a signature that verifies under `pk`, on a message that was never the request of a session that
+    reached Round 3. Requests that were scheduled but aborted earlier do not disqualify the forgery. -/
+def slhForgeryWins {AdvState : Type} (p : Fips205Params) (pk : SlhPublicKey)
+    (forgeOut : ExecTranscript AdvState → List UInt8 × ByteArray)
+    (tr : ExecTranscript AdvState) : Bool :=
+  match decodeSlhSig p (unpackWireBytes (forgeOut tr).2) with
+  | none => false
+  | some sig =>
+    slhVerifyInternal p (forgeOut tr).1 sig pk &&
+    tr.sessions.all (fun rec => rec.honestRound3.isEmpty || decide (rec.request.msg ≠ (forgeOut tr).1))
+
+/-- Decoded forgery together with the concrete hash-game witness it yields against `tr`. -/
+structure SlhForgeryHashGameWitness {AdvState : Type}
+    (p : Fips205Params) (sk : SlhSecretKey)
+    (clInit : RealClusterState SlhPublicKey RssPartyKeyShare)
+    (forgeOut : ExecTranscript AdvState → List UInt8 × ByteArray)
+    (tr : ExecTranscript AdvState) where
+  sigStar : SlhSignature
+  hDecode : decodeSlhSig p (unpackWireBytes (forgeOut tr).2) = some sigStar
+  brk     : Fips205HashGameBreak p sk clInit tr (forgeOut tr).1 sigStar
+
+private theorem isEmpty_false_of_ne_nil {α : Type} : ∀ {l : List α}, l ≠ [] → l.isEmpty = false
+  | [], h => absurd rfl h
+  | _ :: _, _ => rfl
+
+/-- Constructive extraction (`0 Classical.choice`) of a hash-game witness from ANY transcript on which
+    `slhForgeryWins` holds. -/
+def slhForgeryHashGameWitness_of_wins {AdvState : Type}
+    (p : Fips205Params) (hWf : p.wellFormed = true)
+    (skSeed skPrf pkSeed : List UInt8)
+    (clInit : RealClusterState SlhPublicKey RssPartyKeyShare)
+    (forgeOut : ExecTranscript AdvState → List UInt8 × ByteArray)
+    (tr : ExecTranscript AdvState)
+    (hWin : slhForgeryWins p (slhKeygenInternal p skSeed skPrf pkSeed).2 forgeOut tr = true) :
+    SlhForgeryHashGameWitness p (slhKeygenInternal p skSeed skPrf pkSeed).1 clInit forgeOut tr :=
+  match hDec : decodeSlhSig p (unpackWireBytes (forgeOut tr).2) with
+  | none => False.elim (by
+      unfold slhForgeryWins at hWin
+      rw [hDec] at hWin
+      cases hWin)
+  | some sig =>
+    have hBoth :
+        (slhVerifyInternal p (forgeOut tr).1 sig (slhKeygenInternal p skSeed skPrf pkSeed).2 &&
+          tr.sessions.all (fun rec =>
+            rec.honestRound3.isEmpty || decide (rec.request.msg ≠ (forgeOut tr).1))) = true := by
+      unfold slhForgeryWins at hWin
+      rw [hDec] at hWin
+      exact hWin
+    { sigStar := sig
+      hDecode := hDec
+      brk := extractSlhHashGameBreak p hWf skSeed skPrf pkSeed clInit tr (forgeOut tr).1 sig
+        (decodeSlhSig_wellTyped hDec) (Bool.and_eq_true_iff.mp hBoth).1
+        (fun rec hMem _ hR3 => by
+          have hOk := List.all_eq_true.mp (Bool.and_eq_true_iff.mp hBoth).2 rec hMem
+          rw [isEmpty_false_of_ne_nil hR3, Bool.false_or] at hOk
+          exact of_decide_eq_true hOk) }
+
+/-- **Mutation witness for `slhForgeryWins`**: a forgery on a message that some session carried into
+    Round 3 never counts as a win, whatever the signature. -/
+theorem slhForgeryWins_rejects_queried_message {AdvState : Type}
+    (p : Fips205Params) (pk : SlhPublicKey)
+    (forgeOut : ExecTranscript AdvState → List UInt8 × ByteArray)
+    (tr : ExecTranscript AdvState)
+    (rec : SessionWireRecord) (hMem : rec ∈ tr.sessions) (hR3 : rec.honestRound3 ≠ [])
+    (hMsg : rec.request.msg = (forgeOut tr).1) :
+    slhForgeryWins p pk forgeOut tr = false := by
+  cases hW : slhForgeryWins p pk forgeOut tr
+  · rfl
+  · exfalso
+    unfold slhForgeryWins at hW
+    cases hD : decodeSlhSig p (unpackWireBytes (forgeOut tr).2) with
+    | none => rw [hD] at hW; cases hW
+    | some sig =>
+      rw [hD] at hW
+      have hBoth :
+          (slhVerifyInternal p (forgeOut tr).1 sig pk &&
+            tr.sessions.all (fun rec =>
+              rec.honestRound3.isEmpty || decide (rec.request.msg ≠ (forgeOut tr).1))) = true := hW
+      have hOk := List.all_eq_true.mp (Bool.and_eq_true_iff.mp hBoth).2 rec hMem
+      rw [isEmpty_false_of_ne_nil hR3, Bool.false_or] at hOk
+      exact (of_decide_eq_true hOk) hMsg
+
+/-- **Inhabitedness of the winning predicate and of the extracted witness**: on `slhDsaShake128f`, a
+    forger that outputs a genuine signature on a message no session carried into Round 3 satisfies
+    `slhForgeryWins`, and `slhForgeryHashGameWitness_of_wins` returns a witness for it. -/
+private theorem inhabited_slhForgeryWins_for (p : Fips205Params) (hWf : p.wellFormed = true) :
+    let seedSh : RssByteShares := ⟨List.replicate 16 1, List.replicate 16 2, List.replicate 16 3⟩
+    let prfSh : RssByteShares := ⟨List.replicate 16 4, List.replicate 16 5, List.replicate 16 6⟩
+    let pkSeed : List UInt8 := List.replicate 16 7
+    let sk := (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).1
+    let pk := (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).2
+    let clInit : RealClusterState SlhPublicKey RssPartyKeyShare :=
+      ⟨⟨pk, 2, 3, [0], [], []⟩, initWalLatchState (slhPkDigest pk), 0,
+       dealHonestRssVault ⟨0, by decide⟩ seedSh prfSh⟩
+    let mStar : List UInt8 := [0x42, 0x99]
+    let forgeOut : ExecTranscript Unit → List UInt8 × ByteArray :=
+      fun _ => (mStar, packWireBytes (encodeSlhSig (slhSignInternal p mStar sk [])))
+    slhForgeryWins p pk forgeOut ⟨(), []⟩ = true ∧
+    Nonempty (SlhForgeryHashGameWitness p sk clInit forgeOut ⟨(), []⟩) := by
+  intro seedSh prfSh pkSeed sk pk clInit mStar forgeOut
+  have hDec : decodeSlhSig p (unpackWireBytes (forgeOut ⟨(), []⟩).2) =
+      some (slhSignInternal p mStar sk []) := by
+    show decodeSlhSig p (unpackWireBytes (packWireBytes (encodeSlhSig (slhSignInternal p mStar sk [])))) =
+      some (slhSignInternal p mStar sk [])
+    rw [unpackWireBytes_packWireBytes]
+    exact decodeSlhSig_encodeSlhSig (slhSignInternal_wellTyped p mStar sk [])
+  have hVer : slhVerifyInternal p mStar (slhSignInternal p mStar sk []) pk = true :=
+    slhVerifyInternal_slhSignInternal p hWf
+      (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed mStar []
+  have hWin : slhForgeryWins p pk forgeOut ⟨(), []⟩ = true := by
+    unfold slhForgeryWins
+    rw [hDec]
+    exact Bool.and_eq_true_iff.mpr ⟨hVer, rfl⟩
+  exact ⟨hWin, ⟨slhForgeryHashGameWitness_of_wins p hWf
+    (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed clInit forgeOut ⟨(), []⟩ hWin⟩⟩
+
+
+theorem inhabited_slhForgeryWins :
+    let p := slhDsaShake128f
+    let seedSh : RssByteShares := ⟨List.replicate 16 1, List.replicate 16 2, List.replicate 16 3⟩
+    let prfSh : RssByteShares := ⟨List.replicate 16 4, List.replicate 16 5, List.replicate 16 6⟩
+    let pkSeed : List UInt8 := List.replicate 16 7
+    let sk := (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).1
+    let pk := (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).2
+    let clInit : RealClusterState SlhPublicKey RssPartyKeyShare :=
+      ⟨⟨pk, 2, 3, [0], [], []⟩, initWalLatchState (slhPkDigest pk), 0,
+       dealHonestRssVault ⟨0, by decide⟩ seedSh prfSh⟩
+    let mStar : List UInt8 := [0x42, 0x99]
+    let forgeOut : ExecTranscript Unit → List UInt8 × ByteArray :=
+      fun _ => (mStar, packWireBytes (encodeSlhSig (slhSignInternal p mStar sk [])))
+    slhForgeryWins p pk forgeOut ⟨(), []⟩ = true ∧
+    Nonempty (SlhForgeryHashGameWitness p sk clInit forgeOut ⟨(), []⟩) :=
+  inhabited_slhForgeryWins_for slhDsaShake128f slhDsaShake128f_wellFormed
+
+/-- Forgery-count transfer through the root-hit event, with the commitment-hop gap explicit. -/
+private theorem count_transfer_with_coin_gap {cR cI bR bD card num : Nat} (hCard : 0 < card)
+    (hT : cR * card ≤ cI * card + bR * card) (hDecoy : bD * 2 ^ 128 ≤ num * card) :
+    cR * 2 ^ 128 ≤ cI * 2 ^ 128 + num * card + natAbsDiff bR bD * 2 ^ 128 := by
+  have h1 : cR ≤ cI + bR := by
+    rw [← Nat.add_mul] at hT
+    exact Nat.le_of_mul_le_mul_right hT hCard
+  have hTri : bR ≤ bD + natAbsDiff bR bD := by
+    unfold natAbsDiff
+    split <;> omega
+  have h2 := Nat.mul_le_mul_right (2 ^ 128) (Nat.le_trans h1 (Nat.add_le_add_left hTri cI))
+  rw [Nat.add_mul, Nat.add_mul] at h2
+  have h3 : cI * 2 ^ 128 + (bD * 2 ^ 128 + natAbsDiff bR bD * 2 ^ 128) ≤
+      cI * 2 ^ 128 + num * card + natAbsDiff bR bD * 2 ^ 128 := by
+    rw [Nat.add_assoc]
+    exact Nat.add_le_add_left (Nat.add_le_add_right hDecoy _) _
+  exact Nat.le_trans h2 h3
+
+/-- **End-to-End Composed Theorem (`rss_slh_uc_forgery_to_hash_game`)**:
+    For ANY well-formed NIST `FIPS 205` parameter set, ANY 2-of-3 replicated sharing of the key, ANY
+    rushing adversary `A` controlling `cIdx` and adaptively scheduling `Q_s` sessions against matched
+    real/ideal clusters, and ANY forger `forgeOut` reading the whole multi-session transcript:
+    1. **Pointwise dichotomy on the real protocol.** On every uniform multi-session tape `ω` on which
+       the forger wins against `RealProtocolExec`, either `ω` is a counted `GF(2^128)` batch-consistency
+       root hit (`multiSessionBadHit true`, the only way a deviating Round-2 wire passes the pre-cut
+       barrier), or the real transcript on `ω` IS the ideal transcript on the image tape and that
+       transcript yields a concrete `Fips205HashGameBreak` (FORS / WOTS+ / XMSS Merkle / `H_msg`).
+    2. **The root-hit event is counted in the commitment-decoy game**: at most a
+       `Q_s * deg / 2^128` fraction of tapes when the honest Round-1 commitments carry the zero coin.
+    3. **Probability transfer**: `Pr[real forgery] ≤ Pr[ideal forgery] + Q_s * deg / 2^128 + gap`,
+       where `gap = |badReal - badDecoy| / card` is the change in root-hit probability between the
+       protocol and the decoy game (the coin-commitment hiding term, not bounded here).
+    4. **Every ideal-world forgery is a hash-game witness**, with no active-consistency alternative.
+    5. **Signing-oracle locality**: the ideal transcript is unchanged under any oracle agreeing with
+       `slhIdealSignOracle` on the requests of the sessions that reached Round 3, so the forger's whole
+       input depends on the signing key only through those signatures.
+    No abstract unforgeability hypothesis, no simulator oracle closure and no cheat hypothesis appears. -/
+theorem rss_slh_uc_forgery_to_hash_game {AdvState : Type}
+    (p : Fips205Params) (hWf : p.wellFormed = true)
+    (cIdx : Fin 3) (Q_s deg : Nat)
+    {seedSh prfSh : RssByteShares}
+    (hSeedWf : seedSh.WellFormed) (hPrfWf : prfSh.WellFormed)
+    (pkSeed : List UInt8)
+    (A : UcRushingAdversary AdvState)
+    (cl : RealClusterState SlhPublicKey RssPartyKeyShare)
+    (icl : IdealClusterState SlhPublicKey)
+    (advSt : AdvState)
+    (hMatch : RealIdealClusterMatch cIdx seedSh prfSh cl icl)
+    (hPkKey : cl.tsig.pk = (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).2)
+    (forgeOut : ExecTranscript AdvState → List UInt8 × ByteArray) :
+    let card := rssMultiSessionCard p.sigBytes Q_s
+    let sk := (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).1
+    let O := slhIdealSignOracle p sk
+    let win := slhForgeryWins p cl.tsig.pk forgeOut
+    let realView : Fin card → ExecTranscript AdvState := fun ω =>
+      (RealProtocolExec (rssSlhInteractiveProtocol p cIdx deg) A Q_s
+        (decodeMultiSessionTapes p.sigBytes Q_s ω) cl advSt).2
+    let idealView : Fin card → ExecTranscript AdvState := fun ω =>
+      (IdealFunctionalityExec O (Sim_RssSlh (corruptRssView cIdx seedSh prfSh) p cIdx deg) A Q_s
+        (decodeMultiSessionTapes p.sigBytes Q_s ω) icl advSt).2
+    let bad := multiSessionBadHit true p cIdx deg A Q_s cl advSt
+    let badDecoy := multiSessionBadHit false p cIdx deg A Q_s cl advSt
+    let bij := multiSessionTapeEquiv p cIdx deg A Q_s cl advSt
+    (∀ ω : Fin card, win (realView ω) = true →
+      bad ω = true ∨
+      (realView ω = idealView (bij.toFun ω) ∧
+       Nonempty (SlhForgeryHashGameWitness p sk cl forgeOut (idealView (bij.toFun ω))))) ∧
+    finSum card (fun ω => if badDecoy ω then 1 else 0) * (2 ^ 128) ≤ (Q_s * deg) * card ∧
+    distAcceptCount card realView win * (2 ^ 128) ≤
+      distAcceptCount card idealView win * (2 ^ 128) + (Q_s * deg) * card +
+        natAbsDiff (finSum card (fun ω => if bad ω then 1 else 0))
+                   (finSum card (fun ω => if badDecoy ω then 1 else 0)) * (2 ^ 128) ∧
+    (∀ ω : Fin card, win (idealView ω) = true →
+      Nonempty (SlhForgeryHashGameWitness p sk cl forgeOut (idealView ω))) ∧
+    (∀ (ω : Fin card) (O' : SessionScheduleReq → ByteArray),
+      (∀ rec ∈ (idealView ω).sessions, rec.honestRound3 ≠ [] → O' rec.request = O rec.request) →
+      (IdealFunctionalityExec O' (Sim_RssSlh (corruptRssView cIdx seedSh prfSh) p cIdx deg) A Q_s
+        (decodeMultiSessionTapes p.sigBytes Q_s ω) icl advSt).2 = idealView ω) := by
+  intro card sk O win realView idealView bad badDecoy bij
+  have hIdealWit : ∀ ω : Fin card, win (idealView ω) = true →
+      Nonempty (SlhForgeryHashGameWitness p sk cl forgeOut (idealView ω)) := by
+    intro ω hWin
+    have hWin' : slhForgeryWins p
+        (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).2
+        forgeOut (idealView ω) = true := by
+      rw [← hPkKey]; exact hWin
+    exact ⟨slhForgeryHashGameWitness_of_wins p hWf (reconstructRssBytes seedSh)
+      (reconstructRssBytes prfSh) pkSeed cl forgeOut (idealView ω) hWin'⟩
+  have hInd := rss_slh_real_ideal_view_indistinguishable (OuterView := ExecTranscript AdvState)
+    p hWf cIdx Q_s deg hSeedWf hPrfWf pkSeed A cl icl advSt hMatch hPkKey ⟨id⟩ win
+    1 Nat.one_pos (fun _ _ => defaultRssSessionTape p.sigBytes)
+  have hUc : ratLe (rationalAcceptDiff card realView card idealView win)
+      (finSum card (fun ω => if bad ω then 1 else 0), card) :=
+    hInd.1
+  have hDecoy := multiSessionBadHit_finSum_bound p cIdx deg A Q_s cl advSt
+  refine ⟨?_, hDecoy,
+    count_transfer_with_coin_gap (rssMultiSessionCard_pos p.sigBytes Q_s)
+      (forgery_count_transfer card realView idealView win _ hUc) hDecoy, hIdealWit, ?_⟩
+  · intro ω hWin
+    cases hB : bad ω
+    · have hEq : realView ω = idealView (bij.toFun ω) :=
+        multiSession_real_eq_ideal_unless_bad p hWf cIdx deg hSeedWf hPrfWf pkSeed A
+          Q_s cl icl advSt hMatch hPkKey ω hB
+      have hWinI : win (idealView (bij.toFun ω)) = true := by
+        rw [← hEq]; exact hWin
+      exact .inr ⟨hEq, hIdealWit (bij.toFun ω) hWinI⟩
+    · exact .inl rfl
+  · intro ω O' hAgree
+    exact congrArg Prod.snd
+      (IdealFunctionalityExec_oracle_congr O O' (Sim_RssSlh (corruptRssView cIdx seedSh prfSh) p cIdx deg)
+        (Sim_RssSlh_round3_ne_nil (corruptRssView cIdx seedSh prfSh) p cIdx deg) A Q_s
+        (decodeMultiSessionTapes p.sigBytes Q_s ω) icl advSt hAgree)
+
+/-- **Concrete EUF-CMA Bound from Fresh Enrollment (`rss_slh_fresh_enrollment_euf_cma_bound`)**:
+    The initial real and ideal clusters are fixed to the freshly enrolled ones (clean WAL latch, mask
+    cursor `0`, honest vault dealt from the sharing), so nothing about the starting state is left to the
+    caller beyond the public `tsig` record. If the forger never produces a `FIPS 205` hash-game witness
+    against the ideal transcript on any tape, then its real-world forgery probability across `Q_s`
+    adaptively scheduled rushing sessions is at most `Q_s * deg / 2^128` plus the coin-commitment
+    hop `|badReal - badDecoy| / card` (see `rss_slh_real_ideal_view_indistinguishable`).
+    Contrapositively, a forger exceeding that bound exhibits, on some tape, a concrete
+    FORS / WOTS+ / XMSS / `H_msg` witness. The premise is qualitative (no witness on any tape);
+    the theorem does not bound the probability of a witness by a hash-game advantage. -/
+theorem rss_slh_fresh_enrollment_euf_cma_bound {AdvState : Type}
+    (p : Fips205Params) (hWf : p.wellFormed = true)
+    (cIdx : Fin 3) (Q_s deg : Nat)
+    {seedSh prfSh : RssByteShares}
+    (hSeedWf : seedSh.WellFormed) (hPrfWf : prfSh.WellFormed)
+    (pkSeed : List UInt8)
+    (A : UcRushingAdversary AdvState)
+    (tsig : IdealTsigState SlhPublicKey (List UInt8))
+    (advSt : AdvState)
+    (hPkKey : tsig.pk = (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).2)
+    (forgeOut : ExecTranscript AdvState → List UInt8 × ByteArray) :
+    let card := rssMultiSessionCard p.sigBytes Q_s
+    let sk := (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).1
+    let cl : RealClusterState SlhPublicKey RssPartyKeyShare :=
+      ⟨tsig, initWalLatchState (slhPkDigest tsig.pk), 0, dealHonestRssVault cIdx seedSh prfSh⟩
+    let icl : IdealClusterState SlhPublicKey :=
+      ⟨tsig, initWalLatchState (slhPkDigest tsig.pk), 0⟩
+    let win := slhForgeryWins p tsig.pk forgeOut
+    let realView : Fin card → ExecTranscript AdvState := fun ω =>
+      (RealProtocolExec (rssSlhInteractiveProtocol p cIdx deg) A Q_s
+        (decodeMultiSessionTapes p.sigBytes Q_s ω) cl advSt).2
+    let idealView : Fin card → ExecTranscript AdvState := fun ω =>
+      (IdealFunctionalityExec (slhIdealSignOracle p sk) (Sim_RssSlh (corruptRssView cIdx seedSh prfSh) p cIdx deg) A Q_s
+        (decodeMultiSessionTapes p.sigBytes Q_s ω) icl advSt).2
+    (∀ ω : Fin card, ¬ Nonempty (SlhForgeryHashGameWitness p sk cl forgeOut (idealView ω))) →
+    distAcceptCount card realView win * (2 ^ 128) ≤
+      (Q_s * deg) * card +
+        natAbsDiff
+          (finSum card (fun ω => if multiSessionBadHit true p cIdx deg A Q_s cl advSt ω then 1 else 0))
+          (finSum card (fun ω => if multiSessionBadHit false p cIdx deg A Q_s cl advSt ω then 1 else 0)) *
+          (2 ^ 128) := by
+  intro card sk cl icl win realView idealView hNoBreak
+  have hMatch : RealIdealClusterMatch cIdx seedSh prfSh cl icl :=
+    ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, fun _ => rfl⟩
+  have hMain := rss_slh_uc_forgery_to_hash_game p hWf cIdx Q_s deg hSeedWf hPrfWf pkSeed A
+    cl icl advSt hMatch hPkKey forgeOut
+  have hIdealWit : ∀ ω : Fin card, win (idealView ω) = true →
+      Nonempty (SlhForgeryHashGameWitness p sk cl forgeOut (idealView ω)) := hMain.2.2.2.1
+  have hNever : ∀ ω : Fin card, win (idealView ω) = false := by
+    intro ω
+    cases hW : win (idealView ω)
+    · rfl
+    · exact absurd (hIdealWit ω hW) (hNoBreak ω)
+  have hT := hMain.2.2.1
+  have hZero : distAcceptCount card idealView win = 0 := by
+    unfold distAcceptCount
+    have hC : finSum card (fun ω => if win (idealView ω) then 1 else 0) = finSum card (fun _ => 0) :=
+      finSum_congr (fun ω => by rw [hNever ω]; rfl)
+    rw [hC, finSum_const, Nat.mul_zero]
+  rw [hZero, Nat.zero_mul, Nat.zero_add] at hT
+  exact hT
+
+/-! ## 5. Crown-Jewel Theorem 3: Perfect Quorum & Sharing Privacy (`threshold_slh_output_perfect_quorum_privacy`) -/
+
+private theorem encodeSlhSig_length {p : Fips205Params} {sig : SlhSignature}
+    (hWt : sig.WellTyped p) :
+    (encodeSlhSig sig).length = p.sigBytes := by
+  have hDec := decodeSlhSig_encodeSlhSig hWt
+  unfold decodeSlhSig at hDec
+  by_cases hEq : (encodeSlhSig sig).length = p.sigBytes
+  · exact hEq
+  · rw [ite_eq_left hEq] at hDec
+    cases hDec
+
+/-- Rushing Round-3 echo helper: reconstructs the corrupt party's expected `FLNW17` cut-opening
+    share pair `(cFirst ++ cSecond)` from the two honest parties' public Round-3 messages `honR3`. -/
+def echoHonestRound3 (L : Nat) (honR3 : List (Nat × ByteArray)) : ByteArray :=
+  match honR3 with
+  | (_, w0) :: (_, w1) :: _ =>
+    packWireBytes (((unpackWireBytes w1).drop L) ++ ((unpackWireBytes w0).take L))
+  | _ => ByteArray.empty
+
+/-- The echo reads only the two cut-opening messages; the coin openings after them are ignored. -/
+private theorem echoHonestRound3_append (L : Nat) (cIdx : Fin 3) (cutSh : RssByteShares)
+    (extra : List (Nat × ByteArray)) :
+    echoHonestRound3 L (buildHonestRound3Msgs cIdx cutSh ++ extra) =
+      echoHonestRound3 L (buildHonestRound3Msgs cIdx cutSh) := by
+  rcases cIdx with ⟨_ | _ | _ | n, hv⟩
+  · rfl
+  · rfl
+  · rfl
+  · exact False.elim (Nat.not_lt_zero n (Nat.lt_of_add_lt_add_right hv))
+
+private theorem checkRound3ActiveOpen_echoHonestRound3 (L : Nat) (cIdx : Fin 3)
+    (cutSh : RssByteShares)
+    (h0 : cutSh.b0.length = L) (h1 : cutSh.b1.length = L) (h2 : cutSh.b2.length = L) :
+    checkRound3ActiveOpen L cIdx cutSh
+      [(cIdx.val, echoHonestRound3 L (buildHonestRound3Msgs cIdx cutSh))] =
+      some (reconstructRssBytes cutSh) := by
+  rcases cIdx with ⟨_ | _ | _ | n, hv⟩
+  · have hc : (⟨0, hv⟩ : Fin 3) = ⟨0, by decide⟩ := rfl
+    rw [hc]
+    simp only [buildHonestRound3Msgs, echoHonestRound3, checkRound3ActiveOpen,
+               verifyRssActiveOpenBytes, Nat.reduceBEq, ↓reduceIte,
+               List.find?, unpackWireBytes_packWireBytes]
+    have hd2 : (cutSh.b2 ++ cutSh.b0).drop L = cutSh.b0 := by rw [← h2, List.drop_left]
+    have ht1 : (cutSh.b1 ++ cutSh.b2).take L = cutSh.b1 := by rw [← h1, List.take_left]
+    rw [hd2, ht1]
+    have ht0 : (cutSh.b0 ++ cutSh.b1).take L = cutSh.b0 := by rw [← h0, List.take_left]
+    have hd0 : (cutSh.b0 ++ cutSh.b1).drop L = cutSh.b1 := by rw [← h0, List.drop_left]
+    rw [ht0, hd0]
+    simp [h0, h1, h2]
+  · have hc : (⟨0 + 1, hv⟩ : Fin 3) = ⟨1, by decide⟩ := rfl
+    rw [hc]
+    simp only [buildHonestRound3Msgs, echoHonestRound3, checkRound3ActiveOpen,
+               verifyRssActiveOpenBytes, Nat.reduceBEq, Bool.false_eq_true, ↓reduceIte,
+               List.find?, unpackWireBytes_packWireBytes]
+    have hd0 : (cutSh.b0 ++ cutSh.b1).drop L = cutSh.b1 := by rw [← h0, List.drop_left]
+    have ht2 : (cutSh.b2 ++ cutSh.b0).take L = cutSh.b2 := by rw [← h2, List.take_left]
+    rw [hd0, ht2]
+    have ht1 : (cutSh.b1 ++ cutSh.b2).take L = cutSh.b1 := by rw [← h1, List.take_left]
+    have hd1 : (cutSh.b1 ++ cutSh.b2).drop L = cutSh.b2 := by rw [← h1, List.drop_left]
+    rw [ht1, hd1]
+    simp [h0, h1, h2]
+  · have hc : (⟨0 + 1 + 1, hv⟩ : Fin 3) = ⟨2, by decide⟩ := rfl
+    rw [hc]
+    simp only [buildHonestRound3Msgs, echoHonestRound3, checkRound3ActiveOpen,
+               verifyRssActiveOpenBytes, Nat.reduceBEq, Bool.false_eq_true, ↓reduceIte,
+               List.find?, unpackWireBytes_packWireBytes]
+    have hd1 : (cutSh.b1 ++ cutSh.b2).drop L = cutSh.b2 := by rw [← h1, List.drop_left]
+    have ht0 : (cutSh.b0 ++ cutSh.b1).take L = cutSh.b0 := by rw [← h0, List.take_left]
+    rw [hd1, ht0]
+    have ht2 : (cutSh.b2 ++ cutSh.b0).take L = cutSh.b2 := by rw [← h2, List.take_left]
+    have hd2 : (cutSh.b2 ++ cutSh.b0).drop L = cutSh.b0 := by rw [← h2, List.drop_left]
+    rw [ht2, hd2]
+    simp [h0, h1, h2]
+  · exact False.elim (Nat.not_lt_zero n (Nat.lt_of_add_lt_add_right hv))
+
+private theorem sharedPreCutBarrier_passive
+    (cIdx : Fin 3) (deg : Nat) (hDeg : 0 < deg) (pk : SlhPublicKey) (req : SessionScheduleReq)
+    (cur : Nat) (gBits : BitVec 128) (ws : List Tower128) (hl : ws.length = deg) :
+    sharedPreCutBarrier cIdx deg pk req
+      { cursor := cur
+        corrR1Commit := round1NonceCommit pk req cur cIdx.val (List.replicate 24 0)
+        gammaBits := gBits, expectedWires := ws }
+      [(cIdx.val, encodeCorruptRound2Wire (List.replicate 24 0) ws)] =
+    .inr { sentWires := ws, expectedWires := ws, cutShares := ⟨[], [], []⟩ } := by
+  unfold sharedPreCutBarrier
+  simp only [List.find?, beq_self_eq_true]
+  rw [← hl, parseCorruptRound2Wire_encode _ ws (List.length_replicate ..) (by omega)]
+  dsimp only
+  refine (ite_bne_self_false _ _ _).trans ?_
+  rw [verifyPrivateChiWires_self]
+  rfl
+
+private theorem batchDeviationPoly_nil (x : Tower128) :
+    batchDeviationPoly ([] : List Tower128) x = towerZero 7 := by
+  simp only [batchDeviationPoly, RoundPoly.evalCoeffs,
+             LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+  rfl
+
+private theorem batchDeviationPoly_singleton_one (x : Tower128) :
+    batchDeviationPoly [towerOne 7] x = x := by
+  simp only [batchDeviationPoly, RoundPoly.evalCoeffs,
+             LawfulCommRing.mul_zero, LawfulCommRing.add_zero,
+             LawfulCommRing.zero_add]
+  exact LawfulCommRing.mul_one x
+
+private theorem RealProtocolExec_one {PK ShareT SessionTape R1St R2St R3St AdvState : Type}
+    (proto : InteractiveThresholdProtocol PK ShareT SessionTape R1St R2St R3St)
+    (A : UcRushingAdversary AdvState) (tapes : Nat → SessionTape)
+    (cl : RealClusterState PK ShareT) (advSt : AdvState) :
+    RealProtocolExec proto A 1 tapes cl advSt =
+      let (cl1, advSt1, rec0) := execRealSession proto A cl advSt (tapes 0)
+      (cl1, ⟨advSt1, [rec0]⟩) := by
+  simpa [RealProtocolExec_zero] using RealProtocolExec_succ proto A 0 tapes cl advSt
+
+private theorem IdealFunctionalityExec_one {PK SimTape SimR1 SimR2 SimR3 AdvState : Type}
+    (idealSignOracle : SessionScheduleReq → ByteArray)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (A : UcRushingAdversary AdvState) (tapes : Nat → SimTape)
+    (icl : IdealClusterState PK) (advSt : AdvState) :
+    IdealFunctionalityExec idealSignOracle sim A 1 tapes icl advSt =
+      let (icl1, advSt1, rec0) := execIdealSession idealSignOracle sim A icl advSt (tapes 0)
+      (icl1, ⟨advSt1, [rec0]⟩) := by
+  simpa [IdealFunctionalityExec_zero] using IdealFunctionalityExec_succ idealSignOracle sim A 0 tapes icl advSt
+
+private theorem RealProtocolExec_two {PK ShareT SessionTape R1St R2St R3St AdvState : Type}
+    (proto : InteractiveThresholdProtocol PK ShareT SessionTape R1St R2St R3St)
+    (A : UcRushingAdversary AdvState) (tapes : Nat → SessionTape)
+    (cl : RealClusterState PK ShareT) (advSt : AdvState) :
+    RealProtocolExec proto A 2 tapes cl advSt =
+      let (cl1, advSt1, rec0) := execRealSession proto A cl advSt (tapes 0)
+      let (cl2, advSt2, rec1) := execRealSession proto A cl1 advSt1 (tapes 1)
+      (cl2, ⟨advSt2, [rec0, rec1]⟩) := by
+  have hStep := RealProtocolExec_succ proto A 1 tapes cl advSt
+  dsimp only at hStep
+  rw [hStep]
+  rcases execRealSession proto A cl advSt (tapes 0) with ⟨cl1, advSt1, rec0⟩
+  dsimp only
+  rw [RealProtocolExec_one]
+
+/-- Concrete passive rushing adversary scheduling `reqs sIdx` (`sIdx = 0, 1, ...`) and completing
+    all 3 rounds with the private `χ` stream of its own share view `corrView` and
+    `echoHonestRound3`. -/
+def passiveRushingAdv (cIdx : Fin 3) (corrView : RssPartyKeyShare) (p : Fips205Params) (pk : SlhPublicKey)
+    (reqs : Nat → SessionScheduleReq) (deg : Nat) : UcRushingAdversary Nat where
+  scheduleSession := fun sIdx => (reqs sIdx, sIdx)
+  rushRound1 := fun sIdx _ =>
+    (fun pid => round1NonceCommit pk (reqs sIdx) sIdx pid (List.replicate 24 0), sIdx)
+  rushRound2 := fun sIdx _ =>
+    (fun _ => encodeCorruptRound2Wire (List.replicate 24 0)
+      (corruptExpectedChiStream cIdx deg (some corrView) (reqs sIdx).msg), sIdx)
+  rushRound3 := fun sIdx honR3 =>
+    (fun _ => echoHonestRound3 p.sigBytes honR3, sIdx)
+  observeOutcome := fun sIdx _ => sIdx + 1
+
+private theorem sessionBadHit_passive
+    (p : Fips205Params) (cIdx : Fin 3) (deg : Nat) (hDeg : 0 < deg)
+    (corrView : RssPartyKeyShare)
+    (pk : SlhPublicKey) (reqs : Nat → SessionScheduleReq)
+    (cl : RealClusterState SlhPublicKey RssPartyKeyShare) (idx : Nat)
+    (hPk : cl.tsig.pk = pk) (hCorr : cl.tsig.corruptParties = [cIdx.val])
+    (hCur : cl.maskSessionCursor = idx)
+    (hView : corruptViewOfVault cIdx cl.honestShares = some corrView)
+    (cur : Fin (rssFullSessionCard p.sigBytes)) :
+    sessionBadHit true p cIdx deg (passiveRushingAdv cIdx corrView p pk reqs deg) cl idx cur = false := by
+  have hExtract : ∀ tape : RssSlhSessionTape p.sigBytes,
+      extractSessionNonzeroDeltas true p cIdx deg
+        (passiveRushingAdv cIdx corrView p pk reqs deg) cl idx tape = none := by
+    intro tape
+    unfold extractSessionNonzeroDeltas rssSlhCoinProtocol committedCoin passiveRushingAdv
+    dsimp only
+    split
+    · rfl
+    · split
+      · rfl
+      · rfl
+      · rw [hPk, hCorr, hCur]
+        have hLen : (unpackWireBytes (round1NonceCommit pk (reqs idx) idx cIdx.val
+            (List.replicate 24 0))).length = 32 := by
+          unfold round1NonceCommit
+          rw [unpackWireBytes_packWireBytes, shake256Xof_length]
+        simp only [List.map, sharedVerifyRound1, List.find?, beq_self_eq_true, hLen,
+          bne, Bool.not_true, Bool.false_eq_true, ↓reduceIte, hView]
+        let ws := corruptExpectedChiStream cIdx deg (some corrView) (reqs idx).msg
+        have hl : ws.length = deg := corruptExpectedChiStream_length _ _ _ _
+        have hp := parseCorruptRound2Wire_encode (List.replicate 24 0) ws rfl (by omega)
+        rw [hl] at hp
+        rw [hp]
+        dsimp only
+        have hbne : (!(round1NonceCommit pk (reqs idx) idx cIdx.val (List.replicate 24 0) ==
+            round1NonceCommit pk (reqs idx) idx cIdx.val (List.replicate 24 0))) = false :=
+          byteArray_bne_self _
+        rw [hbne]
+        simp only [Bool.false_eq_true, ↓reduceIte, ne_eq]
+        have hz : ∀ xs : List Tower128,
+            (zipXorTower 7 xs xs).any (fun d => decide (d ≠ towerZero 7)) = false := by
+          intro xs
+          induction xs with
+          | nil => rfl
+          | cons x xs ih =>
+            rw [zipXorTower, List.any_cons, towerAdd_self_zero, ih]
+            simp
+        rw [hz]
+        simp
+  simp only [sessionBadHit, hExtract]
+
+/-- Single-session execution characterization for `passiveRushingAdv` on `rssSlhInteractiveProtocol`:
+    whenever quorum approval and `walPreSignStep` authorize `reqs sIdx`, `execRealSession` completes
+    all 3 rounds and emits the exact standalone NIST `FIPS 205` wire signature, independent of `cIdx`,
+    secret sharing `(seedSh, prfSh)`, and random session tape `tape`! -/
+theorem execRealSession_passiveRushingAdv_ok
+    (p : Fips205Params) (hWf : p.wellFormed = true)
+    (cIdx : Fin 3) (deg sIdx : Nat)
+    {seedSh prfSh : RssByteShares}
+    (hSeedWf : seedSh.WellFormed) (hPrfWf : prfSh.WellFormed)
+    (pkSeed : List UInt8)
+    (reqs : Nat → SessionScheduleReq)
+    (cl : RealClusterState SlhPublicKey RssPartyKeyShare)
+    (wal' : WalLatchState)
+    (tape : RssSlhSessionTape p.sigBytes)
+    (hPk : cl.tsig.pk = (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).2)
+    (hCorr : cl.tsig.corruptParties = [cIdx.val])
+    (hCur : cl.maskSessionCursor = sIdx)
+    (hShares : cl.honestShares = dealHonestRssVault cIdx seedSh prfSh)
+    (hQuorum : validThresholdApproval cl.tsig (reqs sIdx).honestApprovers = true)
+    (hWal : walPreSignStep cl.honestWal (slhPkDigest cl.tsig.pk)
+              (reqs sIdx).reqEpoch (slhReqDigest (reqs sIdx)) =
+              .ok wal' (.authorizedFresh (reqs sIdx).reqEpoch)) (hDeg : 0 < deg) :
+    let sk := (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).1
+    let pk := (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).2
+    let expSig := packWireBytes (encodeSlhSig (slhSignInternal p (reqs sIdx).msg sk (reqs sIdx).optRand))
+    let runOut :=
+      execRealSession (rssSlhInteractiveProtocol p cIdx deg)
+        (passiveRushingAdv cIdx (corruptRssView cIdx seedSh prfSh) p pk reqs deg) cl sIdx tape
+    runOut.2.1 = sIdx + 1 ∧
+    runOut.2.2.outcome = .signOk expSig ∧
+    runOut.2.2.honestRound2 =
+      (let (hA, hB, _) := honestPairForCorrupt cIdx
+       let wA := match dealHonestRssVault cIdx seedSh prfSh hA with
+                 | some shA => computeHonestChiWord hA shA (reqs sIdx).msg
+                 | none => 0#64
+       let wB := match dealHonestRssVault cIdx seedSh prfSh hB with
+                 | some shB => computeHonestChiWord hB shB (reqs sIdx).msg
+                 | none => 0#64
+       [(hA, packWireBytes (bvToFixedBytes 8 (wA ^^^ tape.chiMaskA))),
+        (hB, packWireBytes (bvToFixedBytes 8 (wB ^^^ tape.chiMaskB)))]) ∧
+    runOut.1.maskSessionCursor = sIdx + 1 ∧
+    runOut.1.honestShares = dealHonestRssVault cIdx seedSh prfSh ∧
+    runOut.1.tsig.pk = pk ∧
+    runOut.1.tsig.corruptParties = [cIdx.val] ∧
+    runOut.1.tsig.threshold = cl.tsig.threshold ∧
+    runOut.1.tsig.numParties = cl.tsig.numParties ∧
+    runOut.1.tsig.identifiedCheaters = cl.tsig.identifiedCheaters ∧
+    runOut.1.honestWal =
+      { wal' with
+        nextEpoch := (reqs sIdx).reqEpoch + 1
+        latchedRecord := some ((reqs sIdx).reqEpoch, slhReqDigest (reqs sIdx), expSig) } := by
+  intro sk pk expSig runOut
+  dsimp only [runOut]
+  unfold execRealSession rssSlhInteractiveProtocol rssSlhCoinProtocol sharedCoinTossBarrier passiveRushingAdv
+  dsimp only
+  rw [hQuorum, ite_eq_right (by decide : ¬ ((!true) = true)), hWal]
+  dsimp only
+  rw [hCorr, hCur, hPk, hShares]
+  simp only [corruptViewOfVault_deal]
+  have hCmtLen : (unpackWireBytes (round1NonceCommit pk (reqs sIdx) sIdx cIdx.val (List.replicate 24 0))).length = 32 := by
+    unfold round1NonceCommit
+    rw [unpackWireBytes_packWireBytes, shake256Xof_length]
+  have hVR1 :
+      sharedVerifyRound1 cIdx
+        { cursor := sIdx }
+        [(cIdx.val, round1NonceCommit pk (reqs sIdx) sIdx cIdx.val (List.replicate 24 0))] =
+      .inr { cursor := sIdx,
+             corrR1Commit := round1NonceCommit pk (reqs sIdx) sIdx cIdx.val (List.replicate 24 0),
+             gammaBits := 0#128, expectedWires := [] } := by
+    unfold sharedVerifyRound1
+    simp only [List.find?, beq_self_eq_true]
+    rw [hCmtLen]
+    rfl
+  simp only [List.map]
+  rw [hVR1]
+  dsimp only
+  let ws := corruptExpectedChiStream cIdx deg (some (corruptRssView cIdx seedSh prfSh)) (reqs sIdx).msg
+  rw [sharedPreCutBarrier_passive cIdx deg hDeg pk (reqs sIdx) sIdx _ ws
+    (corruptExpectedChiStream_length _ _ _ _)]
+  dsimp only
+  have hExt := extractHonestQuorumViews_deal p.sigBytes cIdx seedSh prfSh (reqs sIdx)
+  dsimp only at hExt
+  rw [hExt]
+  dsimp only
+  let q := (honestPairForCorrupt cIdx).2.2
+  let rawTag0 := (honestSessionShifts p.sigBytes cIdx (dealHonestRssVault cIdx seedSh prfSh) (reqs sIdx)).2.2.1
+  let rawTag1 := (honestSessionShifts p.sigBytes cIdx (dealHonestRssVault cIdx seedSh prfSh) (reqs sIdx)).2.2.2
+  have hQuorumBytes :
+      rssQuorumSlhSignBytes p q (q.views seedSh) (q.views prfSh) pk.pkSeed
+        (expandPairwiseSeedTape tape.prgSeeds) (reqs sIdx).msg (reqs sIdx).optRand =
+      encodeSlhSig (slhSignInternal p (reqs sIdx).msg sk (reqs sIdx).optRand) := by
+    have hPkSeed : pk.pkSeed = pkSeed := rfl
+    rw [hPkSeed]
+    exact (rss_threshold_sig_independent_of_quorum_and_sharing p hWf q q
+      hSeedWf hPrfWf hSeedWf hPrfWf rfl rfl pkSeed
+      (expandPairwiseSeedTape tape.prgSeeds) (expandPairwiseSeedTape tape.prgSeeds) (reqs sIdx).msg (reqs sIdx).optRand).1
+  let sigEnc := encodeSlhSig (slhSignInternal p (reqs sIdx).msg sk (reqs sIdx).optRand)
+  have hSigLen : sigEnc.length = p.sigBytes :=
+    encodeSlhSig_length (slhSignInternal_wellTyped p (reqs sIdx).msg sk (reqs sIdx).optRand)
+  have hPreCutNil :
+      xorByteStream
+        (rssQuorumSlhSignBytes p q (q.views seedSh) (q.views prfSh) pk.pkSeed
+          (expandPairwiseSeedTape tape.prgSeeds) (reqs sIdx).msg (reqs sIdx).optRand)
+        (evalReplicatedGateCrossByte (q.views seedSh).1.1 ws ws :: List.replicate (p.sigBytes - 1) 0) =
+      sigEnc := by
+    rw [evalReplicatedGateCrossByte_self, hQuorumBytes]
+    exact xorByteStream_zero_head_replicate hSigLen
+  let b0 := bvToFixedBytes p.sigBytes (rawTag0 ^^^ tape.cutMask0)
+  let b1 := bvToFixedBytes p.sigBytes (rawTag1 ^^^ tape.cutMask1)
+  let b2 := xorByteStream sigEnc (xorByteStream b0 b1)
+  have hb0Len : b0.length = p.sigBytes := bvToFixedBytes_length p.sigBytes _
+  have hb1Len : b1.length = p.sigBytes := bvToFixedBytes_length p.sigBytes _
+  have hb2Len : b2.length = p.sigBytes := by
+    dsimp only [b2]
+    have h01 : (xorByteStream b0 b1).length = p.sigBytes :=
+      (xorByteStream_length (hb0Len.trans hb1Len.symm)).trans hb0Len
+    rw [xorByteStream_length (hSigLen.trans h01.symm)]
+    exact hSigLen
+  have hRecCut : reconstructRssBytes ⟨b0, b1, b2⟩ = sigEnc :=
+    reconstructRssBytes_masked_eq (hSigLen.trans hb0Len.symm) (hb0Len.trans hb1Len.symm)
+  have hCheckOpen :
+      checkRound3ActiveOpen p.sigBytes cIdx ⟨b0, b1, b2⟩
+        [(cIdx.val, echoHonestRound3 p.sigBytes (buildHonestRound3Msgs cIdx ⟨b0, b1, b2⟩))] =
+      some sigEnc := by
+    rw [checkRound3ActiveOpen_echoHonestRound3 p.sigBytes cIdx ⟨b0, b1, b2⟩ hb0Len hb1Len hb2Len, hRecCut]
+  have hDecEnc : decodeSlhSig p sigEnc = some (slhSignInternal p (reqs sIdx).msg sk (reqs sIdx).optRand) :=
+    decodeSlhSig_encodeSlhSig (slhSignInternal_wellTyped p (reqs sIdx).msg sk (reqs sIdx).optRand)
+  have hVerEnc : slhVerifyInternal p (reqs sIdx).msg (slhSignInternal p (reqs sIdx).msg sk (reqs sIdx).optRand) pk = true :=
+    slhVerifyInternal_slhSignInternal p hWf (reconstructRssBytes seedSh) (reconstructRssBytes prfSh)
+      pkSeed (reqs sIdx).msg (reqs sIdx).optRand
+  have hFinOk :
+      sharedFinalizeCutOpen p cIdx pk (reqs sIdx) ⟨b0, b1, b2⟩
+        [(cIdx.val, echoHonestRound3 p.sigBytes (buildHonestRound3Msgs cIdx ⟨b0, b1, b2⟩))] =
+      .inr expSig := by
+    unfold sharedFinalizeCutOpen
+    rw [hCheckOpen]
+    dsimp only
+    rw [hDecEnc]
+    dsimp only
+    rw [hVerEnc]
+    rfl
+  rw [hPreCutNil, echoHonestRound3_append]
+  rw [hFinOk]
+  exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+/-- **Crown-Jewel Theorem 3 (`threshold_slh_output_perfect_quorum_privacy`)**:
+    **Exact Statistical Distance `0` Quorum & Secret-Sharing Privacy for 2-of-3 RSS and `t`-of-`n` Shamir `SLH-DSA`**:
+    For ANY well-formed NIST `FIPS 205` parameter set `p`, ANY underlying secret key `(skSeed, skPrf, pkSeed)`,
+    ANY message `msg`, ANY hedged randomness family `hedge : Fin N → List UInt8` (`0 < N`), and ANY
+    wire-signature distinguisher `D : ByteArray → Bool`:
+    1. **Unified Hedged Statistical Distance `0` (`SlhThresholdRun`)**: Across ANY two families of
+       threshold executions `run₁, run₂ : Fin N → SlhThresholdRun p skSeed skPrf pkSeed` (each coin
+       instantiating ANY 2-of-3 RSS quorum/sharing `SlhThresholdRun.ofRss` OR ANY `t`-of-`n` Shamir
+       quorum/sharing `SlhThresholdRun.ofShamir`), the emitted wire `ByteArray` equals standalone
+       single-signer `packWireBytes (encodeSlhSig (slhSignInternal p msg sk (hedge i)))` pointwise AND
+       achieves **`natAbsDiff = 0`** and **`ratLe (rationalAcceptDiff ...) (0, 1)`**!
+    2. **2-of-3 RSS Cross-Quorum & Cross-Sharing Wire Identity (`RealProtocolExec`)**: For ANY two
+       quorum complements `cIdx₁, cIdx₂ : Fin 3` and ANY two valid sharings `(seed₁, prf₁)`, `(seed₂, prf₂)`
+       reconstructing the same `(skSeed, skPrf)`, the interactive 3-round protocol `rssSlhInteractiveProtocol`
+       emits the **identical** `SessionOutcome.signOk` wire `ByteArray`!
+    3. **`t`-of-`n` SPDZ / Shamir Cross-Ring, Cross-Threshold, Cross-Quorum Wire Identity**: For ANY
+       two `LawfulCommRing`s `R₁, R₂`, thresholds `t₁, t₂`, quorums `Q₁, Q₂`, and polynomial sharings
+       reconstructing the same `(skSeed, skPrf)`, the wire `ByteArray` signatures are bit-for-bit identical! -/
+theorem threshold_slh_output_perfect_quorum_privacy
+    {R₁ R₂ : Type} [LawfulCommRing R₁] [LawfulCommRing R₂]
+    (p : Fips205Params) (hWf : p.wellFormed = true)
+    {skSeed skPrf : List UInt8} (pkSeed msg optRand : List UInt8) :
+    let sk := (slhKeygenInternal p skSeed skPrf pkSeed).1
+    let standaloneWire := fun h : List UInt8 =>
+      packWireBytes (encodeSlhSig (slhSignInternal p msg sk h))
+    -- (1) Exact statistical distance `0` across arbitrary hedged `SlhThresholdRun` distributions:
+    (∀ (N : Nat) (_hN : 0 < N)
+       (run₁ run₂ : Fin N → SlhThresholdRun p skSeed skPrf pkSeed)
+       (hedge : Fin N → List UInt8) (D : ByteArray → Bool),
+       let wire₁ := fun i : Fin N => packWireBytes ((run₁ i).signBytes msg (hedge i))
+       let wire₂ := fun i : Fin N => packWireBytes ((run₂ i).signBytes msg (hedge i))
+       let single := fun i : Fin N => standaloneWire (hedge i)
+       (∀ i : Fin N, wire₁ i = single i ∧ wire₂ i = single i) ∧
+       natAbsDiff (distAcceptCount N wire₁ D) (distAcceptCount N single D) = 0 ∧
+       ratLe (rationalAcceptDiff N wire₁ N wire₂ D) (0, 1) ∧
+       ratLe (rationalAcceptDiff N wire₁ N single D) (0, 1)) ∧
+    -- (2) Interactive 3-round `rssSlhInteractiveProtocol` wire output independence across quorums & sharings:
+    (∀ (cIdx₁ cIdx₂ : Fin 3) (deg : Nat) (_hDeg : 0 < deg)
+       {seed₁ prf₁ seed₂ prf₂ : RssByteShares}
+       (_hS₁ : seed₁.WellFormed) (_hP₁ : prf₁.WellFormed)
+       (_hS₂ : seed₂.WellFormed) (_hP₂ : prf₂.WellFormed)
+       (_hSeedEq₁ : reconstructRssBytes seed₁ = skSeed)
+       (_hPrfEq₁  : reconstructRssBytes prf₁ = skPrf)
+       (_hSeedEq₂ : reconstructRssBytes seed₂ = skSeed)
+       (_hPrfEq₂  : reconstructRssBytes prf₂ = skPrf)
+       (tape₁ tape₂ : RssSlhSessionTape p.sigBytes),
+       let pk := (slhKeygenInternal p skSeed skPrf pkSeed).2
+       let reqs₁ : Nat → SessionScheduleReq := fun _ =>
+         ⟨0, 0, msg, optRand, [(honestPairForCorrupt cIdx₁).1, (honestPairForCorrupt cIdx₁).2.1]⟩
+       let reqs₂ : Nat → SessionScheduleReq := fun _ =>
+         ⟨0, 0, msg, optRand, [(honestPairForCorrupt cIdx₂).1, (honestPairForCorrupt cIdx₂).2.1]⟩
+       let cl₁ : RealClusterState SlhPublicKey RssPartyKeyShare :=
+         ⟨⟨pk, 2, 3, [cIdx₁.val], [], []⟩, initWalLatchState (slhPkDigest pk), 0,
+          dealHonestRssVault cIdx₁ seed₁ prf₁⟩
+       let cl₂ : RealClusterState SlhPublicKey RssPartyKeyShare :=
+         ⟨⟨pk, 2, 3, [cIdx₂.val], [], []⟩, initWalLatchState (slhPkDigest pk), 0,
+          dealHonestRssVault cIdx₂ seed₂ prf₂⟩
+       let out₁ := (execRealSession (rssSlhInteractiveProtocol p cIdx₁ deg)
+                     (passiveRushingAdv cIdx₁ (corruptRssView cIdx₁ seed₁ prf₁) p pk reqs₁ deg) cl₁ 0 tape₁).2.2.outcome
+       let out₂ := (execRealSession (rssSlhInteractiveProtocol p cIdx₂ deg)
+                     (passiveRushingAdv cIdx₂ (corruptRssView cIdx₂ seed₂ prf₂) p pk reqs₂ deg) cl₂ 0 tape₂).2.2.outcome
+       out₁ = .signOk (standaloneWire optRand) ∧ out₁ = out₂) ∧
+    -- (3) `t`-of-`n` Shamir cross-quorum / cross-sharing wire `ByteArray` identity:
+    (∀ (decode₁ : R₁ → UInt8) (t₁ : Nat) (Q₁ : ShamirQuorum R₁ t₁) (seedPolys₁ prfPolys₁ : List (List R₁))
+       (_hSD₁ : ∀ c ∈ seedPolys₁, c.length ≤ t₁) (_hPD₁ : ∀ c ∈ prfPolys₁, c.length ≤ t₁)
+       (decode₂ : R₂ → UInt8) (t₂ : Nat) (Q₂ : ShamirQuorum R₂ t₂) (seedPolys₂ prfPolys₂ : List (List R₂))
+       (_hSD₂ : ∀ c ∈ seedPolys₂, c.length ≤ t₂) (_hPD₂ : ∀ c ∈ prfPolys₂, c.length ≤ t₂)
+       (_hSeed₁ : shamirSecretBytes decode₁ seedPolys₁ = skSeed)
+       (_hPrf₁  : shamirSecretBytes decode₁ prfPolys₁ = skPrf)
+       (_hSeed₂ : shamirSecretBytes decode₂ seedPolys₂ = skSeed)
+       (_hPrf₂  : shamirSecretBytes decode₂ prfPolys₂ = skPrf)
+       (o₁ o₂ : SlhMpcOracles)
+       (_hO₁ : o₁.MatchesKey p
+         (shamirReconstructBytes decode₁ Q₁.lambdas (shamirQuorumShares Q₁.pts seedPolys₁))
+         (shamirReconstructBytes decode₁ Q₁.lambdas (shamirQuorumShares Q₁.pts prfPolys₁)) pkSeed)
+       (_hO₂ : o₂.MatchesKey p
+         (shamirReconstructBytes decode₂ Q₂.lambdas (shamirQuorumShares Q₂.pts seedPolys₂))
+         (shamirReconstructBytes decode₂ Q₂.lambdas (shamirQuorumShares Q₂.pts prfPolys₂)) pkSeed),
+       let shWire₁ := packWireBytes (thresholdSlhSignBytes p o₁ msg (slhKeygenMpc p o₁ pkSeed) optRand)
+       let shWire₂ := packWireBytes (thresholdSlhSignBytes p o₂ msg (slhKeygenMpc p o₂ pkSeed) optRand)
+       shWire₁ = standaloneWire optRand ∧ shWire₁ = shWire₂) := by
+  intro sk standaloneWire
+  refine ⟨?_, ?_, ?_⟩
+  · intro N hN run₁ run₂ hedge D wire₁ wire₂ single
+    have hPt : ∀ i : Fin N, wire₁ i = single i ∧ wire₂ i = single i := by
+      intro i
+      have h1 := (threshold_sig_perfectly_indistinguishable_from_single_signer p hWf
+        (run₁ i) (run₁ i) msg (hedge i)).1
+      have h2 := (threshold_sig_perfectly_indistinguishable_from_single_signer p hWf
+        (run₂ i) (run₂ i) msg (hedge i)).1
+      exact ⟨congrArg packWireBytes h1, congrArg packWireBytes h2⟩
+    have hCnt1 : distAcceptCount N wire₁ D = distAcceptCount N single D := by
+      unfold distAcceptCount
+      exact finSum_congr (fun i => by rw [(hPt i).1])
+    have hCnt2 : distAcceptCount N wire₂ D = distAcceptCount N single D := by
+      unfold distAcceptCount
+      exact finSum_congr (fun i => by rw [(hPt i).2])
+    have hAbs0 : ∀ a : Nat, natAbsDiff a a = 0 := fun a => by unfold natAbsDiff; simp
+    refine ⟨hPt, ?_, ?_, ?_⟩
+    · rw [hCnt1]; exact hAbs0 _
+    · unfold ratLe rationalAcceptDiff
+      dsimp only
+      rw [hCnt1, hCnt2, hAbs0]
+      exact ⟨Nat.mul_pos hN hN, Nat.zero_lt_one, Nat.zero_le _⟩
+    · unfold ratLe rationalAcceptDiff
+      dsimp only
+      rw [hCnt1, hAbs0]
+      exact ⟨Nat.mul_pos hN hN, Nat.zero_lt_one, Nat.zero_le _⟩
+  · intro cIdx₁ cIdx₂ deg hDeg seed₁ prf₁ seed₂ prf₂ hS₁ hP₁ hS₂ hP₂
+          hSeedEq₁ hPrfEq₁ hSeedEq₂ hPrfEq₂ tape₁ tape₂ pk reqs₁ reqs₂ cl₁ cl₂ out₁ out₂
+    have hQuorumAll : ∀ (cIdx : Fin 3),
+        validThresholdApproval (⟨pk, 2, 3, [cIdx.val], [], []⟩ : IdealTsigState SlhPublicKey (List UInt8))
+          [(honestPairForCorrupt cIdx).1, (honestPairForCorrupt cIdx).2.1] = true := by
+      intro cIdx
+      rcases cIdx with ⟨_ | _ | _ | n, hv⟩
+      · have hc : (⟨0, hv⟩ : Fin 3).val = 0 := rfl
+        unfold honestPairForCorrupt
+        rw [hc]; simp [validThresholdApproval]
+      · have hc : (⟨0 + 1, hv⟩ : Fin 3).val = 1 := rfl
+        unfold honestPairForCorrupt
+        rw [hc]; simp [validThresholdApproval]
+      · have hc : (⟨0 + 1 + 1, hv⟩ : Fin 3).val = 2 := rfl
+        unfold honestPairForCorrupt
+        rw [hc]; simp [validThresholdApproval]
+      · exact False.elim (Nat.not_lt_zero n (Nat.lt_of_add_lt_add_right hv))
+    have hWalInit₁ :
+        walPreSignStep (initWalLatchState (slhPkDigest pk)) (slhPkDigest pk) 0 (slhReqDigest (reqs₁ 0)) =
+        .ok (initWalLatchState (slhPkDigest pk)) (.authorizedFresh 0) := by
+      unfold walPreSignStep initWalLatchState
+      simp
+    have hWalInit₂ :
+        walPreSignStep (initWalLatchState (slhPkDigest pk)) (slhPkDigest pk) 0 (slhReqDigest (reqs₂ 0)) =
+        .ok (initWalLatchState (slhPkDigest pk)) (.authorizedFresh 0) := by
+      unfold walPreSignStep initWalLatchState
+      simp
+    have hPk₁ : cl₁.tsig.pk = (slhKeygenInternal p (reconstructRssBytes seed₁) (reconstructRssBytes prf₁) pkSeed).2 := by
+      dsimp only [cl₁, pk]; rw [hSeedEq₁, hPrfEq₁]
+    have hPk₂ : cl₂.tsig.pk = (slhKeygenInternal p (reconstructRssBytes seed₂) (reconstructRssBytes prf₂) pkSeed).2 := by
+      dsimp only [cl₂, pk]; rw [hSeedEq₂, hPrfEq₂]
+    have hRun₁ : out₁ = .signOk (standaloneWire optRand) := by
+      dsimp only [out₁, pk, reqs₁, standaloneWire, sk]
+      have hOk := (execRealSession_passiveRushingAdv_ok p hWf cIdx₁ deg 0 hS₁ hP₁ pkSeed reqs₁ cl₁
+        (initWalLatchState (slhPkDigest pk)) tape₁ hPk₁ rfl rfl rfl (hQuorumAll cIdx₁) hWalInit₁ hDeg).2.1
+      dsimp only [reqs₁] at hOk
+      rw [hSeedEq₁, hPrfEq₁] at hOk
+      exact hOk
+    have hRun₂ : out₂ = .signOk (standaloneWire optRand) := by
+      dsimp only [out₂, pk, reqs₂, standaloneWire, sk]
+      have hOk := (execRealSession_passiveRushingAdv_ok p hWf cIdx₂ deg 0 hS₂ hP₂ pkSeed reqs₂ cl₂
+        (initWalLatchState (slhPkDigest pk)) tape₂ hPk₂ rfl rfl rfl (hQuorumAll cIdx₂) hWalInit₂ hDeg).2.1
+      dsimp only [reqs₂] at hOk
+      rw [hSeedEq₂, hPrfEq₂] at hOk
+      exact hOk
+    exact ⟨hRun₁, hRun₁.trans hRun₂.symm⟩
+  · intro decode₁ t₁ Q₁ seedPolys₁ prfPolys₁ hSD₁ hPD₁
+          decode₂ t₂ Q₂ seedPolys₂ prfPolys₂ hSD₂ hPD₂
+          hSeed₁ hPrf₁ hSeed₂ hPrf₂ o₁ o₂ hO₁ hO₂ shWire₁ shWire₂
+    have hSh := shamir_threshold_sig_independent_of_threshold_quorum_and_sharing p hWf
+      decode₁ t₁ Q₁ seedPolys₁ prfPolys₁ hSD₁ hPD₁
+      decode₂ t₂ Q₂ seedPolys₂ prfPolys₂ hSD₂ hPD₂
+      (hSeed₁.trans hSeed₂.symm) (hPrf₁.trans hPrf₂.symm)
+      pkSeed o₁ o₂ hO₁ hO₂ msg optRand
+    have h1 : shWire₁ = standaloneWire optRand := by
+      dsimp only [shWire₁, standaloneWire, sk]
+      rw [hSh.1, hSeed₁, hPrf₁]
+    exact ⟨h1, congrArg packWireBytes hSh.2⟩
+
+/-- **Inhabitedness Witness for Theorem 3 (`inhabited_threshold_slh_quorum_privacy`)**:
+    Exhibits two distinct 2-of-3 RSS quorums (`cIdx = 0` vs `cIdx = 2`, i.e., `.p12 ≠ .p01`) with
+    distinct secret sharings AND two distinct 2-of-3 Goldilocks Shamir quorums (`{1, 2} ≠ {2, 3}`)
+    with distinct share evaluations emitting bit-identical `slhDsaShake128f` wire `ByteArray`s! -/
+private theorem inhabited_threshold_slh_quorum_privacy_for
+    (p : Fips205Params) (hWf : p.wellFormed = true) :
+    let seed₁ : RssByteShares := ⟨List.replicate 16 1, List.replicate 16 2, List.replicate 16 3⟩
+    let seed₂ : RssByteShares := ⟨List.replicate 16 7, List.replicate 16 7, List.replicate 16 0⟩
+    let prf₁  : RssByteShares := ⟨List.replicate 16 5, List.replicate 16 0, List.replicate 16 0⟩
+    let prf₂  : RssByteShares := ⟨List.replicate 16 0, List.replicate 16 5, List.replicate 16 0⟩
+    seed₁ ≠ seed₂ ∧
+    reconstructRssBytes seed₁ = reconstructRssBytes seed₂ ∧
+    reconstructRssBytes prf₁ = reconstructRssBytes prf₂ ∧
+    shamirQuorumShares shamirGoldilocksQuorum12.pts [[Goldilocks.ofNat 5, Goldilocks.ofNat 7]] ≠
+      shamirQuorumShares shamirGoldilocksQuorum23.pts [[Goldilocks.ofNat 5, Goldilocks.ofNat 7]] ∧
+    (∀ (pkSeed msg optRand : List UInt8) (tape₁ tape₂ : RssSlhSessionTape p.sigBytes),
+      let pk := (slhKeygenInternal p (reconstructRssBytes seed₁) (reconstructRssBytes prf₁) pkSeed).2
+      let reqs₁ : Nat → SessionScheduleReq := fun _ => ⟨0, 0, msg, optRand, [1, 2]⟩
+      let reqs₂ : Nat → SessionScheduleReq := fun _ => ⟨0, 0, msg, optRand, [0, 1]⟩
+      let cl₁ : RealClusterState SlhPublicKey RssPartyKeyShare :=
+        ⟨⟨pk, 2, 3, [0], [], []⟩, initWalLatchState (slhPkDigest pk), 0,
+         dealHonestRssVault ⟨0, by decide⟩ seed₁ prf₁⟩
+      let cl₂ : RealClusterState SlhPublicKey RssPartyKeyShare :=
+        ⟨⟨pk, 2, 3, [2], [], []⟩, initWalLatchState (slhPkDigest pk), 0,
+         dealHonestRssVault ⟨2, by decide⟩ seed₂ prf₂⟩
+      (execRealSession (rssSlhInteractiveProtocol p ⟨0, by decide⟩ 4)
+        (passiveRushingAdv ⟨0, by decide⟩ (corruptRssView ⟨0, by decide⟩ seed₁ prf₁) p pk reqs₁ 4) cl₁ 0 tape₁).2.2.outcome =
+      (execRealSession (rssSlhInteractiveProtocol p ⟨2, by decide⟩ 4)
+        (passiveRushingAdv ⟨2, by decide⟩ (corruptRssView ⟨2, by decide⟩ seed₂ prf₂) p pk reqs₂ 4) cl₂ 0 tape₂).2.2.outcome) := by
+  intro seed₁ seed₂ prf₁ prf₂
+  have hSeedEq : reconstructRssBytes seed₁ = reconstructRssBytes seed₂ := by decide +kernel
+  have hPrfEq : reconstructRssBytes prf₁ = reconstructRssBytes prf₂ := by decide +kernel
+  refine ⟨by decide +kernel, hSeedEq, hPrfEq, by decide +kernel, ?_⟩
+  intro pkSeed msg optRand tape₁ tape₂ pk reqs₁ reqs₂ cl₁ cl₂
+  have hPriv := (threshold_slh_output_perfect_quorum_privacy (R₁ := Goldilocks) (R₂ := Goldilocks)
+    p hWf pkSeed msg optRand).2.1
+    ⟨0, by decide⟩ ⟨2, by decide⟩ 4 (by decide) ⟨rfl, rfl⟩ ⟨rfl, rfl⟩ ⟨rfl, rfl⟩ ⟨rfl, rfl⟩
+    rfl rfl hSeedEq.symm hPrfEq.symm tape₁ tape₂
+  exact hPriv.2
+
