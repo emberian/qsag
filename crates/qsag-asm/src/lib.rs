@@ -37,6 +37,8 @@
 //!    - `x86_64` `AVX2` shift-and-mask butterfly, `PCLMULQDQ` / 256-bit `VPCLMULQDQ` Karatsuba,
 //!    - `aarch64` `NEON` butterfly, `PMULL` Karatsuba, and a branch-free portable reference.
 
+#[cfg(feature = "alloc")]
+extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
@@ -1221,6 +1223,28 @@ pub fn ct_memzero(buf: &mut [u8]) {
 mod tests {
     use super::*;
 
+    /// The certified `qsag_asm_gf256_shamir_{mul,mac}_avx2` kernels are reachable only
+    /// through these two wrappers; the dispatcher prefers GFNI and `vpshufb`.
+    #[test]
+    fn certified_avx2_russian_peasant_kernels_match_portable_at_every_tail() {
+        let a: [u8; 131] = core::array::from_fn(|i| (i as u8).wrapping_mul(0x9d) ^ 0x35);
+        let b: [u8; 131] = core::array::from_fn(|i| (i as u8).wrapping_mul(0x4f) ^ 0xc6);
+        for len in 0..=a.len() {
+            let mut got = [0xeeu8; 131];
+            let mut want = [0xeeu8; 131];
+            gf256_shamir_mul_avx2_russian_peasant(&mut got[..len], &a[..len], &b[..len]);
+            portable::gf256_shamir_mul_portable(&mut want[..len], &a[..len], &b[..len]);
+            assert_eq!(got, want, "mul len={len}");
+            for scalar in [0u8, 1, 2, 0x53, 0x80, 0xff] {
+                let mut got = b;
+                let mut want = b;
+                gf256_shamir_mac_avx2_russian_peasant(&mut got[..len], &a[..len], scalar);
+                portable::gf256_shamir_mac_portable(&mut want[..len], &a[..len], scalar);
+                assert_eq!(got, want, "mac len={len} scalar={scalar}");
+            }
+        }
+    }
+
     #[test]
     #[cfg(all(target_arch = "aarch64", feature = "std"))]
     fn goldilocks_add_and_sub_enter_dit_like_their_siblings() {
@@ -1811,6 +1835,7 @@ pub fn volatile_fill<T: Copy>(buf: &mut [T], value: T) {
 
 #[cfg(feature = "std")]
 pub mod durable;
+pub mod wipe;
 
 /// Permute independent states in eight-state (`AVX-512`) or four-state SIMD blocks,
 /// including a padded tail with explicit volatile scratch zeroization.
