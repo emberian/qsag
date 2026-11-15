@@ -51,14 +51,18 @@ struct EvalState<'a> {
 }
 impl EvalState<'_> {
     fn disclosure_authorized(&self) -> bool {
-        if self.share.poisoned.load(Ordering::Acquire) { return false; }
+        if self.share.poisoned.load(Ordering::Acquire) {
+            return false;
+        }
         if let Some(journal) = &self.share.poison_journal {
             if self.disclosure_started.get() {
                 journal.disclosure_active(self.session).unwrap_or(false)
             } else {
                 !journal.is_poisoned().unwrap_or(true)
             }
-        } else { self.share.testing_poison_journal }
+        } else {
+            self.share.testing_poison_journal
+        }
     }
 }
 impl Drop for EvalState<'_> {
