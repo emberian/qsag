@@ -8,9 +8,9 @@ The zero-oracle family below gives a concrete false-statement case in which acce
 forces a linear challenge collision. This is not a proof for arbitrary Hem statements,
 nor a refinement of the Rust Fiat–Shamir transcript parser.
 -/
-public import Qsag.HemWhirRbrSoundness
-import all Qsag.HemWhirRbrSoundness
-import all Qsag.MultiRoundFsQrom
+public import Qsag.Protocol.Aggregation.HemWhirRbrSoundness
+import all Qsag.Protocol.Aggregation.HemWhirRbrSoundness
+import all Qsag.Oracle.MultiRoundFsQrom
 
 public section
 namespace Qsag

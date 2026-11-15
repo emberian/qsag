@@ -8,13 +8,13 @@ on the batched extraction-failure event. The measured bound is consumed directly
 there is no supplied Merkle cover. The decoder is an explicit interface, not a claim
 that Rust transcript bytes or Fiat–Shamir challenges have been refined here.
 -/
-public import Qsag.QromBatchMerkleExtraction
-public import Qsag.HemVerifierAcceptance
-import all Qsag.QromBatchMerkleExtraction
-import all Qsag.QromMeasuredMerkleExtraction
-import all Qsag.QromMeasuredQueryExperiment
-import all Qsag.HemVerifierAcceptance
-import all Qsag.MultiRoundFsQrom
+public import Qsag.Oracle.QromBatchMerkleExtraction
+public import Qsag.Protocol.Aggregation.HemVerifierAcceptance
+import all Qsag.Oracle.QromBatchMerkleExtraction
+import all Qsag.Oracle.QromMeasuredMerkleExtraction
+import all Qsag.Oracle.QromMeasuredQueryExperiment
+import all Qsag.Protocol.Aggregation.HemVerifierAcceptance
+import all Qsag.Oracle.MultiRoundFsQrom
 
 public section
 namespace Qsag

@@ -8,14 +8,14 @@ remaining invalid-mixture premise; it is not the three-challenge Theorem 5.1 lif
 The numerical stage profiles below concern one binary fold at each final-stage geometry.
 They are never substituted into the multistage/QROM acceptance theorem.
 -/
-public import Qsag.CodingTheory.Cwyz26DeployedStages
-public import Qsag.HemVerifierAcceptance
-import all Qsag.CodingTheory.Cwyz26DeployedStages
-import all Qsag.HemWhirRbrSoundness
-import all Qsag.HemVerifierAcceptance
-import all Qsag.MultiRoundFsQrom
-import all Qsag.ConcreteSecurityBudget
-import all Qsag.AffineProximityGaps
+public import Qsag.Coding.Cwyz26DeployedStages
+public import Qsag.Protocol.Aggregation.HemVerifierAcceptance
+import all Qsag.Coding.Cwyz26DeployedStages
+import all Qsag.Protocol.Aggregation.HemWhirRbrSoundness
+import all Qsag.Protocol.Aggregation.HemVerifierAcceptance
+import all Qsag.Oracle.MultiRoundFsQrom
+import all Qsag.Oracle.ConcreteSecurityBudget
+import all Qsag.Coding.AffineProximityGaps
 
 public section
 namespace Qsag

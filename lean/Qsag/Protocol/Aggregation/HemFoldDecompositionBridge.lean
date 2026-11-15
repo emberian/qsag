@@ -6,12 +6,12 @@ The incidence development uses canonical `UPoly`; the Hem state-function develop
 coefficient lists. Their polynomial explanation predicates are equivalent, including the
 identity of the selected post-fold polynomial. No uniqueness-radius premise is required.
 -/
-public import Qsag.HemWhirRbrSoundness
-public import Qsag.CodingTheory.PersistentPairsBound
-import all Qsag.HemWhirRbrSoundness
-import all Qsag.CodingTheory.PolyMv3
-import all Qsag.MultiRoundFsQrom
-import all Qsag.AffineProximityGaps
+public import Qsag.Protocol.Aggregation.HemWhirRbrSoundness
+public import Qsag.Coding.PersistentPairsBound
+import all Qsag.Protocol.Aggregation.HemWhirRbrSoundness
+import all Qsag.Coding.PolyMv3
+import all Qsag.Oracle.MultiRoundFsQrom
+import all Qsag.Coding.AffineProximityGaps
 
 public section
 namespace Qsag
