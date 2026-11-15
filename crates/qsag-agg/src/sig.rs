@@ -2128,12 +2128,11 @@ impl SignerBitmap {
             words.push(u64::from_le_bytes(wb));
         }
         let rem = (num_validators as usize) % 64;
-        if rem != 0 {
-            if let Some(&last) = words.last() {
-                if (last >> rem) != 0 {
-                    return None;
-                }
-            }
+        if rem != 0
+            && let Some(&last) = words.last()
+            && (last >> rem) != 0
+        {
+            return None;
         }
         Some((
             Self {

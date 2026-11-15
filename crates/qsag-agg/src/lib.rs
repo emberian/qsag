@@ -810,10 +810,10 @@ pub(crate) fn aggregate_signatures_with_committee_root(
     if sigs.len() != active.len() {
         return Err(HemAggError::SignatureCountMismatch);
     }
-    if let SigningMode::PerSignerMessages(ms) = mode {
-        if ms.len() != active.len() {
-            return Err(HemAggError::MessageCountMismatch);
-        }
+    if let SigningMode::PerSignerMessages(ms) = mode
+        && ms.len() != active.len()
+    {
+        return Err(HemAggError::MessageCountMismatch);
     }
 
     let profile = pks[active[0]].profile;

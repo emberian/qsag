@@ -342,7 +342,7 @@ impl WhirSchedule {
             return None;
         }
         let mut stages = Vec::with_capacity(count);
-        for chunk in bytes.get(3..3 + 5 * count)?.chunks_exact(5) {
+        for chunk in bytes.get(3..3 + 5 * count)?.as_chunks::<5>().0 {
             stages.push(WhirStageSpec {
                 blowup: u16::from_le_bytes([chunk[0], chunk[1]]) as usize,
                 step_vars: chunk[2] as usize,
@@ -453,14 +453,7 @@ impl CanopyMultiProof {
         }
         let end = 4usize.checked_add(sib_len.checked_mul(32)?)?;
         let sib_bytes = bytes.get(4..end)?;
-        let auth_siblings = sib_bytes
-            .chunks_exact(32)
-            .map(|c| {
-                let mut h = [0u8; 32];
-                h.copy_from_slice(c);
-                h
-            })
-            .collect();
+        let auth_siblings = sib_bytes.as_chunks::<32>().0.to_vec();
         Some((Self { auth_siblings }, end))
     }
 }
@@ -606,8 +599,9 @@ impl MerkleCanopyTree {
                         for (t_idx, sub) in quarter_slice.chunks_mut(4 * m_chunk).enumerate() {
                             let base_m = t_idx * m_chunk;
                             crate::spawn_bounded(scope, move || {
-                                for (off, dst4) in sub.chunks_exact_mut(4).enumerate() {
-                                    dst4.copy_from_slice(&fold_ref(base_m + off));
+                                for (off, dst4) in sub.as_chunks_mut::<4>().0.iter_mut().enumerate()
+                                {
+                                    *dst4 = fold_ref(base_m + off);
                                 }
                             });
                         }
@@ -628,7 +622,9 @@ impl MerkleCanopyTree {
                             {
                                 let base_node = half + t_idx * p_chunk;
                                 crate::spawn_bounded(scope, move || {
-                                    for (g, dst4) in p_sub.chunks_exact_mut(4).enumerate() {
+                                    for (g, dst4) in
+                                        p_sub.as_chunks_mut::<4>().0.iter_mut().enumerate()
+                                    {
                                         let c = 8 * g;
                                         let out4 = hash_merkle_internal_x4(
                                             (base_node + 4 * g) as u32,
@@ -990,8 +986,8 @@ fn hash_round0_leaf(
         buf[2] = num_polys as u8;
         buf[3..7].copy_from_slice(&leaf_idx.to_le_bytes());
         buf[7..23].copy_from_slice(salt);
-        for (dst, v) in buf[23..used_bytes].chunks_exact_mut(8).zip(vals) {
-            dst.copy_from_slice(&v.to_le_bytes());
+        for (dst, v) in buf[23..used_bytes].as_chunks_mut::<8>().0.iter_mut().zip(vals) {
+            *dst = v.to_le_bytes();
         }
         return cshake256_from_midstate_32(&CANOPY_MIDSTATE, &buf[..used_bytes]);
     }
@@ -1001,8 +997,8 @@ fn hash_round0_leaf(
     buf[2] = num_polys as u8;
     buf[3..7].copy_from_slice(&leaf_idx.to_le_bytes());
     buf[7..23].copy_from_slice(salt);
-    for (dst, v) in buf[23..used_bytes].chunks_exact_mut(8).zip(vals) {
-        dst.copy_from_slice(&v.to_le_bytes());
+    for (dst, v) in buf[23..used_bytes].as_chunks_mut::<8>().0.iter_mut().zip(vals) {
+        *dst = v.to_le_bytes();
     }
     cshake256_from_midstate_32(&CANOPY_MIDSTATE, &buf[..used_bytes])
 }
@@ -1024,10 +1020,12 @@ fn queried_round0_hash_x4(
             buf[2..6].copy_from_slice(&(indices[lane] as u32).to_le_bytes());
             buf[6..22].copy_from_slice(&salts[lane]);
             for (dst, v) in buf[22..used]
-                .chunks_exact_mut(8)
+                .as_chunks_mut::<8>()
+                .0
+                .iter_mut()
                 .zip(&vals[lane * per_query..(lane + 1) * per_query])
             {
-                dst.copy_from_slice(&v.to_le_bytes());
+                *dst = v.to_le_bytes();
             }
         }
         return cshake256_from_midstate_32_x4(
@@ -1045,10 +1043,12 @@ fn queried_round0_hash_x4(
         buf[3..7].copy_from_slice(&(indices[lane] as u32).to_le_bytes());
         buf[7..header].copy_from_slice(&salts[lane]);
         for (dst, v) in buf[header..used]
-            .chunks_exact_mut(8)
+            .as_chunks_mut::<8>()
+            .0
+            .iter_mut()
             .zip(&vals[lane * per_query..(lane + 1) * per_query])
         {
-            dst.copy_from_slice(&v.to_le_bytes());
+            *dst = v.to_le_bytes();
         }
     }
     cshake256_from_midstate_32_x4(&CANOPY_MIDSTATE, bufs.each_ref().map(|b| &b[..used]))
@@ -1068,10 +1068,12 @@ fn queried_ext4_hash_x4(
         buf[2] = arity as u8;
         buf[3..7].copy_from_slice(&(indices[lane] as u32).to_le_bytes());
         for (dst, v) in buf[7..used]
-            .chunks_exact_mut(32)
+            .as_chunks_mut::<32>()
+            .0
+            .iter_mut()
             .zip(&vals[lane * arity..(lane + 1) * arity])
         {
-            dst.copy_from_slice(&v.to_le_bytes());
+            *dst = v.to_le_bytes();
         }
     }
     cshake256_from_midstate_32_x4(&CANOPY_MIDSTATE, bufs.each_ref().map(|b| &b[..used]))
@@ -1472,25 +1474,16 @@ impl HemWhirOpeningProof {
             return None;
         }
         let salt_bytes = bytes.get(pos..pos.checked_add(16 * n_queries)?)?;
-        let round0_salts: Vec<[u8; 16]> = salt_bytes
-            .chunks_exact(16)
-            .map(|c| {
-                let mut salt = [0u8; 16];
-                salt.copy_from_slice(c);
-                salt
-            })
-            .collect();
+        let round0_salts: Vec<[u8; 16]> = salt_bytes.as_chunks::<16>().0.to_vec();
         pos += 16 * n_queries;
 
         let n_r0 = read_u32(bytes, &mut pos)? as usize;
-        if n_r0 == 0 || n_r0 % n_queries != 0 || n_r0 / n_queries > MAX_ROUND0_LEAF_VALS {
+        if n_r0 == 0 || !n_r0.is_multiple_of(n_queries) || n_r0 / n_queries > MAX_ROUND0_LEAF_VALS {
             return None;
         }
         let val_bytes = bytes.get(pos..pos.checked_add(8 * n_r0)?)?;
         let mut round0_vals = Vec::with_capacity(n_r0);
-        for c in val_bytes.chunks_exact(8) {
-            let mut lb = [0u8; 8];
-            lb.copy_from_slice(c);
+        for &lb in val_bytes.as_chunks::<8>().0 {
             round0_vals.push(Goldilocks::from_le_bytes_canonical(lb)?);
         }
         pos += 8 * n_r0;
@@ -1825,6 +1818,16 @@ impl FiberLastDuet {
     }
 }
 
+const COSET_FOLD_ZETAS: [Goldilocks; MAX_FOLD_STEP_VARS + 1] = [
+    Goldilocks::ONE,
+    Goldilocks::two_adic_generator(1),
+    Goldilocks::two_adic_generator(2),
+    Goldilocks::two_adic_generator(3),
+    Goldilocks::two_adic_generator(4),
+    Goldilocks::two_adic_generator(5),
+    Goldilocks::two_adic_generator(6),
+];
+
 /// Fold a coset fiber `vals` of size $A = 2^s \in \{2, 4, 8, 16, 32, 64\}$ at points
 /// $x_k = y_0 \cdot \zeta_A^k$ across all but the last of `chals[0..s]`, leaving the final duet
 /// for [`FiberLastDuet::accepts`] (`qsag_whir_verified::verify_cwyz_duet_fold_step`).
@@ -1843,17 +1846,85 @@ fn fold_coset_group_to_last_duet(
     buf[..vals.len()].copy_from_slice(vals);
     let mut cur_len = vals.len();
     let mut inv_zeta = inv_zetas[step];
-    const ZETAS: [Goldilocks; MAX_FOLD_STEP_VARS + 1] = [
-        Goldilocks::ONE,
-        Goldilocks::two_adic_generator(1),
-        Goldilocks::two_adic_generator(2),
-        Goldilocks::two_adic_generator(3),
-        Goldilocks::two_adic_generator(4),
-        Goldilocks::two_adic_generator(5),
-        Goldilocks::two_adic_generator(6),
-    ];
-    let mut zeta = ZETAS[step];
+    let mut zeta = COSET_FOLD_ZETAS[step];
     for &[theta, alpha, beta] in &chals[..step - 1] {
+        let half = cur_len / 2;
+        let mut inv_two_xk = inv_two * inv_y0;
+        let mut xk = y0;
+        for k in 0..half {
+            let v0 = buf[k];
+            let v1 = buf[k + half];
+            let even = (v0 + v1).mul_base(inv_two);
+            let odd = (v0 - v1).mul_base(inv_two_xk);
+            let mixed = even + theta * odd;
+            let gamma = alpha + beta.mul_base(xk.square());
+            buf[k] = odd + gamma * mixed;
+            xk *= zeta;
+            inv_two_xk *= inv_zeta;
+        }
+        cur_len = half;
+        inv_y0 = inv_y0.square();
+        inv_zeta = inv_zeta.square();
+        y0 = y0.square();
+        zeta = zeta.square();
+    }
+    FiberLastDuet {
+        v0: buf[0],
+        v1: buf[1],
+        inv_two_x: inv_two * inv_y0,
+        x_sq: y0.square(),
+        chal: chals[step - 1],
+    }
+}
+
+/// Base-field specialized counterpart to [`fold_coset_group_to_last_duet`] for single-polynomial
+/// Round-0 fibers (`vals: &[Goldilocks]`), executing Round 0 directly over `Goldilocks` before
+/// continuing in `GoldilocksExt4`.
+#[inline]
+fn fold_base_coset_group_to_last_duet(
+    vals: &[Goldilocks],
+    mut y0: Goldilocks,
+    mut inv_y0: Goldilocks,
+    inv_two: Goldilocks,
+    inv_zetas: &[Goldilocks; MAX_FOLD_STEP_VARS + 1],
+    chals: &[[GoldilocksExt4; 3]],
+) -> FiberLastDuet {
+    let step = chals.len();
+    assert!((1..=MAX_FOLD_STEP_VARS).contains(&step) && vals.len() == (1usize << step));
+    if step == 1 {
+        return FiberLastDuet {
+            v0: GoldilocksExt4::from_base(vals[0]),
+            v1: GoldilocksExt4::from_base(vals[1]),
+            inv_two_x: inv_two * inv_y0,
+            x_sq: y0.square(),
+            chal: chals[0],
+        };
+    }
+    let mut buf = [GoldilocksExt4::ZERO; MAX_FIBER_ARITY / 2];
+    let mut cur_len = vals.len() / 2;
+    let mut inv_zeta = inv_zetas[step];
+    let mut zeta = COSET_FOLD_ZETAS[step];
+    {
+        let [theta, alpha, beta] = chals[0];
+        let mut inv_two_xk = inv_two * inv_y0;
+        let mut xk = y0;
+        for (k, slot) in buf[..cur_len].iter_mut().enumerate() {
+            let v0 = vals[k];
+            let v1 = vals[k + cur_len];
+            let even_b = (v0 + v1) * inv_two;
+            let odd_b = (v0 - v1) * inv_two_xk;
+            let mixed = GoldilocksExt4::from_base(even_b) + theta.mul_base(odd_b);
+            let gamma = alpha + beta.mul_base(xk.square());
+            *slot = GoldilocksExt4::from_base(odd_b) + gamma * mixed;
+            xk *= zeta;
+            inv_two_xk *= inv_zeta;
+        }
+        inv_y0 = inv_y0.square();
+        inv_zeta = inv_zeta.square();
+        y0 = y0.square();
+        zeta = zeta.square();
+    }
+    for &[theta, alpha, beta] in &chals[1..step - 1] {
         let half = cur_len / 2;
         let mut inv_two_xk = inv_two * inv_y0;
         let mut xk = y0;
@@ -4516,8 +4587,17 @@ fn verify_and_fold_stage0_fibers(
     let (y0s, inv_y0s) = batch_coset_points_and_inverses(omega_0, &q_indices);
 
     let q_len = q_indices.len();
+    // Partition `round0_vals` into `<= 32 KiB` pages (aligned to 4-query batches) so every `Arc`
+    // stays strictly inside glibc per-thread `tcache` (`< 128 KiB` `MMAP_THRESHOLD`, zero IPI TLB shootdowns).
+    let batches_per_page = (32_768 / (4 * per_query * core::mem::size_of::<Goldilocks>())).max(1);
+    let queries_per_page = batches_per_page * 4;
+    let val_pages: alloc::sync::Arc<[alloc::sync::Arc<[Goldilocks]>]> = proof
+        .round0_vals
+        .chunks(queries_per_page * per_query)
+        .map(alloc::sync::Arc::<[Goldilocks]>::from)
+        .collect::<Vec<_>>()
+        .into();
     let q_indices: alloc::sync::Arc<[usize]> = q_indices.into();
-    let vals: alloc::sync::Arc<[Goldilocks]> = proof.round0_vals.as_slice().into();
     let salts: alloc::sync::Arc<[[u8; 16]]> = proof.round0_salts.as_slice().into();
     let y0s: alloc::sync::Arc<[Goldilocks]> = y0s.into();
     let inv_y0s: alloc::sync::Arc<[Goldilocks]> = inv_y0s.into();
@@ -4528,17 +4608,19 @@ fn verify_and_fold_stage0_fibers(
 
     let batches = q_len.div_ceil(4);
     // Each pool item hashes four leaves with SIMD and folds their public values.
-    let results = map_query_indices(batches, 4, move |batch| {
+    let results = map_query_indices(batches, 2, move |batch| {
         let start = batch * 4;
         let end = (start + 4).min(q_len);
         let indices = &q_indices[start..end];
+        let page = &val_pages[batch / batches_per_page];
+        let page_off = (batch % batches_per_page) * 4 * per_query;
         let mut leaves = [(0usize, [0u8; 32]); 4];
         if indices.len() == 4 {
             let hashes = queried_round0_hash_x4(
                 indices,
                 &salts[start..],
                 num_polys,
-                &vals[start * per_query..],
+                &page[page_off..],
                 per_query,
             );
             for (slot, (&index, hash)) in leaves.iter_mut().zip(indices.iter().zip(hashes)) {
@@ -4547,27 +4629,39 @@ fn verify_and_fold_stage0_fibers(
         } else {
             for (lane, &g) in indices.iter().enumerate() {
                 let i = start + lane;
+                let off = page_off + lane * per_query;
                 leaves[lane] = (
                     g,
-                    hash_round0_leaf(
-                        g as u32,
-                        &salts[i],
-                        num_polys,
-                        &vals[i * per_query..(i + 1) * per_query],
-                    ),
+                    hash_round0_leaf(g as u32, &salts[i], num_polys, &page[off..off + per_query]),
                 );
             }
         }
         let mut folded = [(Goldilocks::ZERO, GoldilocksExt4::ZERO, false); 4];
-        for (slot, i) in folded.iter_mut().zip(start..end) {
-            let q_vals = &vals[i * per_query..(i + 1) * per_query];
+        for (lane, (slot, i)) in folded.iter_mut().zip(start..end).enumerate() {
+            let off = page_off + lane * per_query;
+            let q_vals = &page[off..off + per_query];
             let y0 = y0s[i];
-            let mut ext_vals = [GoldilocksExt4::ZERO; MAX_FIBER_ARITY];
             if num_polys == 1 {
-                for (dst, &v) in ext_vals.iter_mut().zip(q_vals) {
-                    *dst = GoldilocksExt4::from_base(v);
-                }
+                let duet = fold_base_coset_group_to_last_duet(
+                    q_vals,
+                    y0,
+                    inv_y0s[i],
+                    inv_two,
+                    &inv_zetas,
+                    &stage_chals,
+                );
+                let v_shift = duet.fold(inv_two);
+                let z_u = pow2_iter_base(y0, stage_chals.len());
+                let pinned = terminal.as_ref().is_none_or(|coeffs| {
+                    qsag_whir_verified::verify_ext4_univariate_at_base_pin(
+                        coeffs,
+                        z_u.to_canonical_u64(),
+                        to_verified_ext4(v_shift),
+                    ) && duet.accepts(inv_two, to_verified_ext4(v_shift))
+                });
+                *slot = (z_u, v_shift, pinned);
             } else {
+                let mut ext_vals = [GoldilocksExt4::ZERO; MAX_FIBER_ARITY];
                 for (w, poly_vals) in weights.iter().zip(q_vals.chunks_exact(arity_0)) {
                     let mut x = y0;
                     for (dst, &v) in ext_vals.iter_mut().zip(poly_vals) {
@@ -4575,16 +4669,16 @@ fn verify_and_fold_stage0_fibers(
                         x *= zeta_0;
                     }
                 }
+                *slot = fold_and_pin_fiber(
+                    &ext_vals[..arity_0],
+                    y0,
+                    inv_y0s[i],
+                    inv_two,
+                    &inv_zetas,
+                    &stage_chals,
+                    terminal.as_ref().map(|coeffs| coeffs.as_slice()),
+                );
             }
-            *slot = fold_and_pin_fiber(
-                &ext_vals[..arity_0],
-                y0,
-                inv_y0s[i],
-                inv_two,
-                &inv_zetas,
-                &stage_chals,
-                terminal.as_ref().map(|coeffs| coeffs.as_slice()),
-            );
         }
         (leaves, folded, end - start)
     });
@@ -4633,8 +4727,16 @@ fn verify_and_fold_ext4_stage_fibers(
     let stage_u8 = stage_idx as u8;
 
     let q_len = q_indices.len();
+    let batches_per_page =
+        (32_768 / (4 * arity * core::mem::size_of::<GoldilocksExt4>())).max(1);
+    let queries_per_page = batches_per_page * 4;
+    let val_pages: alloc::sync::Arc<[alloc::sync::Arc<[GoldilocksExt4]>]> = layer
+        .opened_vals
+        .chunks(queries_per_page * arity)
+        .map(alloc::sync::Arc::<[GoldilocksExt4]>::from)
+        .collect::<Vec<_>>()
+        .into();
     let q_indices: alloc::sync::Arc<[usize]> = q_indices.into();
-    let vals: alloc::sync::Arc<[GoldilocksExt4]> = layer.opened_vals.as_slice().into();
     let y0s: alloc::sync::Arc<[Goldilocks]> = y0s.into();
     let inv_y0s: alloc::sync::Arc<[Goldilocks]> = inv_y0s.into();
     let stage_chals: alloc::sync::Arc<[[GoldilocksExt4; 3]]> = stage_chals.into();
@@ -4643,29 +4745,29 @@ fn verify_and_fold_ext4_stage_fibers(
 
     let batches = q_len.div_ceil(4);
     // Each pool item hashes four leaves with SIMD and folds their public values.
-    let results = map_query_indices(batches, 4, move |batch| {
+    let results = map_query_indices(batches, 2, move |batch| {
         let start = batch * 4;
         let end = (start + 4).min(q_len);
         let indices = &q_indices[start..end];
+        let page = &val_pages[batch / batches_per_page];
+        let page_off = (batch % batches_per_page) * 4 * arity;
         let mut leaves = [(0usize, [0u8; 32]); 4];
         if indices.len() == 4 {
-            let hashes = queried_ext4_hash_x4(stage_u8, indices, &vals[start * arity..], arity);
+            let hashes = queried_ext4_hash_x4(stage_u8, indices, &page[page_off..], arity);
             for (slot, (&index, hash)) in leaves.iter_mut().zip(indices.iter().zip(hashes)) {
                 *slot = (index, hash);
             }
         } else {
             for (lane, &g) in indices.iter().enumerate() {
-                let i = start + lane;
-                leaves[lane] = (
-                    g,
-                    hash_ext4_group(stage_u8, g as u32, &vals[i * arity..(i + 1) * arity]),
-                );
+                let off = page_off + lane * arity;
+                leaves[lane] = (g, hash_ext4_group(stage_u8, g as u32, &page[off..off + arity]));
             }
         }
         let mut folded = [(Goldilocks::ZERO, GoldilocksExt4::ZERO, false); 4];
-        for (slot, i) in folded.iter_mut().zip(start..end) {
+        for (lane, (slot, i)) in folded.iter_mut().zip(start..end).enumerate() {
+            let off = page_off + lane * arity;
             *slot = fold_and_pin_fiber(
-                &vals[i * arity..(i + 1) * arity],
+                &page[off..off + arity],
                 y0s[i],
                 inv_y0s[i],
                 inv_two,

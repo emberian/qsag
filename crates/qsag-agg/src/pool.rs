@@ -144,16 +144,11 @@ where
         return (0..count).map(f).collect();
     }
     let outer_lanes = crate::active_scoped_workers().saturating_add(1);
-    let max_lanes_per_call = if outer_lanes > 1 { 4 } else { 8 };
-    let target_workers = (max_workers / outer_lanes).clamp(1, max_lanes_per_call);
+    let target_workers = (max_workers / outer_lanes).clamp(1, 8);
     if target_workers <= 1 {
         return (0..count).map(f).collect();
     }
-    let min_items = if outer_lanes > 1 { 16 } else { 8 };
-    let chunk = chunk
-        .max(1)
-        .max(count.div_ceil(target_workers))
-        .max(min_items);
+    let chunk = chunk.max(1).max(count.div_ceil(target_workers));
     let num_chunks = count.div_ceil(chunk);
     if num_chunks <= 1 {
         return (0..count).map(f).collect();

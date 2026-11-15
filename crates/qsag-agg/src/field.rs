@@ -1501,11 +1501,11 @@ fn horner_ext4_interleaved(coeffs: &[GoldilocksExt4], z: GoldilocksExt4) -> Gold
             .rev()
             .fold(GoldilocksExt4::ZERO, |acc, &c| acc * z + c);
     }
-    let mut blocks = coeffs.chunks_exact(4);
+    let (blocks, rem) = coeffs.as_chunks::<4>();
     let mut lanes = [GoldilocksExt4::ZERO; 4];
-    lanes[..blocks.remainder().len()].copy_from_slice(blocks.remainder());
+    lanes[..rem.len()].copy_from_slice(rem);
     let z4 = z.square().square();
-    for block in blocks.by_ref().rev() {
+    for block in blocks.iter().rev() {
         for lane in 0..4 {
             lanes[lane] = lanes[lane] * z4 + block[lane];
         }

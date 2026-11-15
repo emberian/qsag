@@ -297,13 +297,12 @@ pub const POW_MIDSTATE: [u64; 25] = cshake256_static_midstate(POW_CUSTOM);
 
 #[inline]
 fn absorb_and_squeeze_from_state(mut state: [u64; 25], input: &[u8], suffix: u8, out: &mut [u8]) {
-    let mut chunks = input.chunks_exact(SHAKE256_RATE);
-    for blk in &mut chunks {
+    let (chunks, rem) = input.as_chunks::<SHAKE256_RATE>();
+    for blk in chunks {
         xor_slice_136(&mut state, blk);
         keccak_f1600(&mut state);
     }
 
-    let rem = chunks.remainder();
     let mut block = [0u8; SHAKE256_RATE];
     block[..rem.len()].copy_from_slice(rem);
     block[rem.len()] ^= suffix;
@@ -343,7 +342,7 @@ fn absorb_and_squeeze_from_state(mut state: [u64; 25], input: &[u8], suffix: u8,
 fn absorb_and_squeeze_keccak(prefix_blocks: &[u8], input: &[u8], suffix: u8, out: &mut [u8]) {
     debug_assert_eq!(prefix_blocks.len() % SHAKE256_RATE, 0);
     let mut state = [0u64; 25];
-    for blk in prefix_blocks.chunks_exact(SHAKE256_RATE) {
+    for blk in prefix_blocks.as_chunks::<SHAKE256_RATE>().0 {
         xor_slice_136(&mut state, blk);
         keccak_f1600(&mut state);
     }
@@ -815,8 +814,8 @@ pub fn poseidon2_hash32(msg: &[u8]) -> [u8; 32] {
     let mut blk = [Goldilocks::ZERO; 8];
     let mut cur_l = 0usize;
 
-    let mut chunks7 = msg.chunks_exact(7);
-    for c in &mut chunks7 {
+    let (chunks7, rem) = msg.as_chunks::<7>();
+    for c in chunks7 {
         let v = ((c[0] as u64) << 48)
             | ((c[1] as u64) << 40)
             | ((c[2] as u64) << 32)
@@ -836,7 +835,6 @@ pub fn poseidon2_hash32(msg: &[u8]) -> [u8; 32] {
         }
     }
 
-    let rem = chunks7.remainder();
     let mut last7 = [0u8; 7];
     last7[..rem.len()].copy_from_slice(rem);
     last7[rem.len()] = 0x01;
@@ -1061,10 +1059,10 @@ impl FiatShamirTranscript<InstanceBound> {
         let frame = encode_multi_frame(&[b"SQUEEZE_IDX", &self.chain_digest, label, &ctr_bytes]);
         let mut raw = vec![0u8; 8 * num_queries];
         cshake256_from_midstate_into(&FS_MIDSTATE, &frame, &mut raw);
-        raw.chunks_exact(8)
-            .map(|c| {
-                let mut b = [0u8; 8];
-                b.copy_from_slice(c);
+        raw.as_chunks::<8>()
+            .0
+            .iter()
+            .map(|&b| {
                 qsag_whir_verified::canonical_query_group_idx(
                     u64::from_le_bytes(b),
                     half_domain_len as u64,

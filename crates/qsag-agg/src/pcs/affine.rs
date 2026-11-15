@@ -60,14 +60,14 @@ fn add_geometric_chunk(dst: &mut [E], initial: E, z: E) {
     let z2 = z.square();
     let z4 = z2.square();
     let mut powers = [initial, initial * z, initial * z2, initial * z2 * z];
-    let mut chunks = dst.chunks_exact_mut(4);
-    for chunk in chunks.by_ref() {
+    let (chunks, rem) = dst.as_chunks_mut::<4>();
+    for chunk in chunks {
         for lane in 0..4 {
             chunk[lane] += powers[lane];
             powers[lane] *= z4;
         }
     }
-    for (slot, power) in chunks.into_remainder().iter_mut().zip(powers) {
+    for (slot, power) in rem.iter_mut().zip(powers) {
         *slot += power;
     }
 }
