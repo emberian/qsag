@@ -33,7 +33,44 @@ use qsag_accel::keccak::{Shake256, cshake256_framed_32, finalize_cshake256, init
 use crate::inventory::{HdError, RekeyFault};
 
 /// Largest supported committee. Subset counts grow as `binomial(n, t - 1)`.
-pub const MAX_CUSTODIANS: usize = 7;
+pub const MAX_CUSTODIANS: usize = 256;
+/// Public set of committee positions, with a canonical 32-byte big-endian codec.
+/// Ordering is numerical, so subset vectors can be searched by binary search.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct CustodianSet(pub [u64; 4]);
+
+impl CustodianSet {
+    pub fn contains(self, position: usize) -> bool {
+        position < MAX_CUSTODIANS && (self.0[position / 64] >> (position % 64)) & 1 != 0
+    }
+    pub fn insert(&mut self, position: usize) {
+        assert!(position < MAX_CUSTODIANS);
+        self.0[position / 64] |= 1u64 << (position % 64);
+    }
+    pub fn to_be_bytes(self) -> [u8; 32] {
+        let mut bytes = [0; 32];
+        for (dst, word) in bytes.chunks_exact_mut(8).zip(self.0.iter().rev()) {
+            dst.copy_from_slice(&word.to_be_bytes());
+        }
+        bytes
+    }
+    pub fn trailing_zeros(self) -> u32 {
+        self.0.iter().enumerate().find(|(_, w)| **w != 0)
+            .map_or(256, |(i, w)| i as u32 * 64 + w.trailing_zeros())
+    }
+}
+impl From<u16> for CustodianSet {
+    fn from(value: u16) -> Self { Self([u64::from(value), 0, 0, 0]) }
+}
+impl Ord for CustodianSet {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.0.iter().rev().cmp(other.0.iter().rev())
+    }
+}
+impl PartialOrd for CustodianSet {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> { Some(self.cmp(other)) }
+}
+
 /// Field modulus of the linear module; evaluation points are nonzero residues.
 const POINT_MODULUS: u32 = 8_380_417;
 
@@ -95,7 +132,7 @@ impl CommitteeConfig {
             bytes.extend_from_slice(&id.to_be_bytes());
             bytes.extend_from_slice(&x.to_be_bytes());
         }
-        cshake256_framed_32(b"QSAG.HD.SEEDS.CONFIG.V1", &[&self.label, &bytes])
+        cshake256_framed_32(b"QSAG.HD.SEEDS.CONFIG.V2", &[&self.label, &bytes])
     }
 
     pub(crate) fn position(&self, party_id: u16) -> Option<usize> {
@@ -103,32 +140,42 @@ impl CommitteeConfig {
     }
 
     /// Every subset of `n - t + 1` member positions as an ascending bit mask list.
-    pub fn subsets(&self) -> Vec<u16> {
+    pub fn subsets(&self) -> Vec<CustodianSet> {
+        // Generate only the required combinations, in colexicographic order.
+        // Replicated PRSS still needs C(n,t-1) seeds; widening the representation
+        // does not change that protocol's communication cost.
         let n = self.members.len();
-        let size = (n + 1 - usize::from(self.threshold)) as u32;
-        (1u16..(1u16 << n))
-            .filter(|mask| mask.count_ones() == size)
-            .collect()
+        let size = n + 1 - usize::from(self.threshold);
+        let mut positions: Vec<_> = (0..size).collect();
+        let mut subsets = Vec::new();
+        loop {
+            let mut subset = CustodianSet::default();
+            for &p in &positions { subset.insert(p); }
+            subsets.push(subset);
+            let Some(i) = (0..size).find(|&i| positions[i] + 1 <
+                if i + 1 == size { n } else { positions[i + 1] }) else { break };
+            positions[i] += 1;
+            for (j, p) in positions[..i].iter_mut().enumerate() { *p = j; }
+        }
+        subsets
     }
 
-    pub(crate) fn subsets_of(&self, position: usize) -> Vec<u16> {
-        self.subsets()
-            .into_iter()
-            .filter(|mask| mask >> position & 1 == 1)
-            .collect()
+    pub(crate) fn subsets_of(&self, position: usize) -> Vec<CustodianSet> {
+        self.subsets().into_iter().filter(|mask| mask.contains(position)).collect()
     }
+
 }
 
 /// Round 1 broadcast: one hiding commitment for each subset the sender belongs to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SeedContributionCommit {
     pub party_id: u16,
-    pub digests: Vec<(u16, [u8; 32])>,
+    pub digests: Vec<(CustodianSet, [u8; 32])>,
 }
 
 /// One private opening: the contribution to subset `subset` and its commitment salt.
 pub struct SeedOpening {
-    pub subset: u16,
+    pub subset: CustodianSet,
     pub contribution: [u8; 32],
     pub salt: [u8; 32],
 }
@@ -152,18 +199,18 @@ pub struct SeedPrivateDelivery {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SeedConfirmation {
     pub party_id: u16,
-    pub tags: Vec<(u16, [u8; 32])>,
+    pub tags: Vec<(CustodianSet, [u8; 32])>,
 }
 
 fn commit_contribution(
     config: &[u8; 32],
     party_id: u16,
-    subset: u16,
+    subset: CustodianSet,
     contribution: &[u8; 32],
     salt: &[u8; 32],
 ) -> [u8; 32] {
     cshake256_framed_32(
-        b"QSAG.HD.SEEDS.COMMIT.V1",
+        b"QSAG.HD.SEEDS.COMMIT.V2",
         &[
             config,
             &party_id.to_be_bytes(),
@@ -216,11 +263,11 @@ impl SeedCeremonyRound1 {
             .map(|subset| SeedOpening {
                 subset,
                 contribution: cshake256_framed_32(
-                    b"QSAG.HD.SEEDS.CONTRIBUTION.V1",
+                    b"QSAG.HD.SEEDS.CONTRIBUTION.V2",
                     &[entropy.expose(), &digest, &subset.to_be_bytes()],
                 ),
                 salt: cshake256_framed_32(
-                    b"QSAG.HD.SEEDS.SALT.V1",
+                    b"QSAG.HD.SEEDS.SALT.V2",
                     &[entropy.expose(), &digest, &subset.to_be_bytes()],
                 ),
             })
@@ -289,7 +336,7 @@ impl SeedCeremonyRound1 {
             return abort(RekeyFault::CommitmentMismatch);
         }
         let transcript =
-            cshake256_framed_32(b"QSAG.HD.SEEDS.TRANSCRIPT.V1", &[&digest, &transcript]);
+            cshake256_framed_32(b"QSAG.HD.SEEDS.TRANSCRIPT.V2", &[&digest, &transcript]);
         let deliveries = members
             .iter()
             .enumerate()
@@ -300,7 +347,7 @@ impl SeedCeremonyRound1 {
                 openings: self
                     .contributions
                     .iter()
-                    .filter(|c| c.subset >> position & 1 == 1)
+                    .filter(|c| c.subset.contains(position))
                     .map(|c| SeedOpening {
                         subset: c.subset,
                         contribution: c.contribution,
@@ -340,7 +387,7 @@ impl SeedCeremonyRound2 {
         for own in &self.contributions {
             let mut frames: Vec<RedactedSecret<32>> = Vec::with_capacity(members.len());
             for (position, &(id, _)) in members.iter().enumerate() {
-                if own.subset >> position & 1 == 0 {
+                if !own.subset.contains(position) {
                     continue;
                 }
                 if position == self.position {
@@ -380,14 +427,14 @@ impl SeedCeremonyRound2 {
                 ct_zeroize_bytes(frame.expose_mut());
             }
             let seed = cshake256_framed_32(
-                b"QSAG.HD.SEEDS.KEY.V1",
+                b"QSAG.HD.SEEDS.KEY.V2",
                 &[&self.transcript, &own.subset.to_be_bytes(), &joined.0],
             );
             ct_zeroize_bytes(&mut joined.0);
             seeds.push((own.subset, RedactedSecret::new(seed)));
         }
         let seeds = CustodianSeeds {
-            ceremony: cshake256_framed_32(b"QSAG.HD.SEEDS.CEREMONY.V1", &[&self.transcript]),
+            ceremony: cshake256_framed_32(b"QSAG.HD.SEEDS.CEREMONY.V2", &[&self.transcript]),
             config: self.config,
             position: self.position,
             seeds,
@@ -440,7 +487,7 @@ pub struct CustodianSeeds {
     config: CommitteeConfig,
     position: usize,
     ceremony: [u8; 32],
-    seeds: Vec<(u16, RedactedSecret<32>)>,
+    seeds: Vec<(CustodianSet, RedactedSecret<32>)>,
 }
 
 impl Drop for CustodianSeeds {
@@ -469,7 +516,7 @@ impl CustodianSeeds {
         self.ceremony
     }
 
-    pub(crate) fn held_subsets(&self) -> impl Iterator<Item = u16> + '_ {
+    pub(crate) fn held_subsets(&self) -> impl Iterator<Item = CustodianSet> + '_ {
         self.seeds.iter().map(|entry| entry.0)
     }
 
@@ -483,7 +530,7 @@ impl CustodianSeeds {
                     (
                         *subset,
                         cshake256_framed_32(
-                            b"QSAG.HD.SEEDS.CONFIRM.V1",
+                            b"QSAG.HD.SEEDS.CONFIRM.V2",
                             &[seed.expose(), &self.ceremony, &subset.to_be_bytes()],
                         ),
                     )
@@ -493,8 +540,8 @@ impl CustodianSeeds {
     }
 
     /// Domain-separated 32-byte PRF output under the seed of `subset`.
-    pub(crate) fn prf32(&self, subset: u16, domain: &[u8], context: &[&[u8]]) -> Option<[u8; 32]> {
-        let seed = &self.seeds.iter().find(|entry| entry.0 == subset)?.1;
+    pub(crate) fn prf32(&self, subset: CustodianSet, domain: &[u8], context: &[&[u8]]) -> Option<[u8; 32]> {
+        let seed = &self.seeds[self.seeds.binary_search_by_key(&subset, |entry| entry.0).ok()?].1;
         let mut frames: Vec<&[u8]> = Vec::with_capacity(context.len() + 3);
         let subset_bytes = subset.to_be_bytes();
         frames.push(seed.expose());
@@ -507,12 +554,12 @@ impl CustodianSeeds {
     /// Streaming PRF output under the seed of `subset`.
     pub(crate) fn prf_stream(
         &self,
-        subset: u16,
+        subset: CustodianSet,
         domain: &[u8],
         context: &[&[u8]],
     ) -> Option<Shake256> {
         let mut key = self.prf32(subset, domain, context)?;
-        let mut sponge = init_cshake256(b"", b"QSAG.HD.SEEDS.STREAM.V1");
+        let mut sponge = init_cshake256(b"", b"QSAG.HD.SEEDS.STREAM.V2");
         sponge.absorb(&key);
         ct_zeroize_bytes(&mut key);
         finalize_cshake256(&mut sponge, true);
@@ -531,7 +578,7 @@ impl CustodianSeeds {
         let high = (self.position.max(other) as u16).to_be_bytes();
         let mut joined = SecretBytes(Vec::with_capacity(self.seeds.len() * 32));
         for (subset, seed) in &self.seeds {
-            if subset >> other & 1 == 1 {
+            if subset.contains(other) {
                 joined.0.extend_from_slice(seed.expose());
             }
         }
@@ -547,7 +594,7 @@ impl CustodianSeeds {
         config: &CommitteeConfig,
         party_id: u16,
         ceremony: [u8; 32],
-        seed_of: impl Fn(u16) -> [u8; 32],
+        seed_of: impl Fn(CustodianSet) -> [u8; 32],
     ) -> Self {
         let position = config.position(party_id).unwrap();
         Self {
@@ -571,7 +618,7 @@ pub(crate) fn run_seed_ceremony(config: &CommitteeConfig, entropy_tag: u8) -> Ve
     let mut states = Vec::new();
     for (position, &(id, _)) in config.members().iter().enumerate() {
         let (state, commit) =
-            SeedCeremonyRound1::begin(config, id, [entropy_tag ^ (position as u8 + 1); 32])
+            SeedCeremonyRound1::begin(config, id, [entropy_tag ^ (position as u8).wrapping_add(1); 32])
                 .unwrap();
         states.push(state);
         commits.push(commit);
@@ -613,14 +660,14 @@ mod tests {
     fn unsupported_committees_are_rejected() {
         let members =
             |n: u16| -> Vec<(u16, u32)> { (0..n).map(|i| (i, u32::from(i) + 1)).collect() };
-        for (t, n) in [(0, 3), (2, 2), (3, 4), (4, 6), (2, 8)] {
+        for (t, n) in [(0, 3), (2, 2), (3, 4), (4, 6), (2, 257)] {
             assert_eq!(
                 CommitteeConfig::new(t, &members(n), [0; 32]),
                 Err(HdError::UnsupportedCommittee),
                 "({t},{n})"
             );
         }
-        for (t, n) in [(1, 1), (2, 3), (2, 5), (3, 5), (4, 7)] {
+        for (t, n) in [(1, 1), (2, 3), (2, 5), (3, 5), (4, 7), (2, 256)] {
             assert!(CommitteeConfig::new(t, &members(n), [0; 32]).is_ok());
         }
         for bad in [
@@ -655,7 +702,7 @@ mod tests {
                 let complement = !coalition & ((1 << n) - 1);
                 for (position, custodian) in seeds.iter().enumerate() {
                     assert_eq!(
-                        custodian.prf32(complement, b"test", &[]).is_some(),
+                        custodian.prf32(complement.into(), b"test", &[]).is_some(),
                         coalition >> position & 1 == 0
                     );
                 }
