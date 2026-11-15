@@ -103,15 +103,32 @@ impl Goldilocks {
     }
 
     /// Branchless canonicalization of an arbitrary `u64` modulo $p$ (`x < p ? x : x - p`).
-    #[inline]
+    #[inline(always)]
     pub const fn from_u64_reduced(x: u64) -> Self {
         let (diff, borrow) = x.overflowing_sub(GOLDILOCKS_PRIME);
         let mask = (borrow as u64).wrapping_neg();
         Self((x & mask) | (diff & !mask))
     }
 
+    /// Reduce `lo + 2^64 * hi` for `hi < 2^32`, using $2^{64} \equiv 2^{32} - 1 \pmod p$.
+    #[inline(always)]
+    pub const fn reduce96(lo: u64, hi: u64) -> Self {
+        debug_assert!(hi >> 32 == 0);
+        let adj = (hi << 32).wrapping_sub(hi);
+        let (s, c) = lo.overflowing_add(adj);
+        Self::from_u64_reduced(s.wrapping_add((c as u64).wrapping_neg() & GOLDILOCKS_EPSILON))
+    }
+
+    /// `7 * self` (the quadratic non-residue) without a 64x64 multiplication.
+    #[inline(always)]
+    pub const fn mul_by_7(self) -> Self {
+        let v = self.0 as u128;
+        let prod = (v << 3) - v;
+        Self::reduce96(prod as u64, (prod >> 64) as u64)
+    }
+
     /// Branchless 128-to-64 Goldilocks modular reduction.
-    #[inline]
+    #[inline(always)]
     pub const fn reduce128(x: u128) -> Self {
         let lo = x as u64;
         let hi = (x >> 64) as u64;
@@ -150,13 +167,13 @@ impl Goldilocks {
     }
 
     /// Return the guaranteed-canonical representative in $[0, p - 1]$.
-    #[inline]
+    #[inline(always)]
     pub const fn to_canonical_u64(self) -> u64 {
         self.0
     }
 
     /// Alias for [`Self::to_canonical_u64`].
-    #[inline]
+    #[inline(always)]
     pub const fn canonical(self) -> u64 {
         self.0
     }
@@ -188,7 +205,7 @@ impl Goldilocks {
     }
 
     /// Branchless modular addition.
-    #[inline]
+    #[inline(always)]
     pub const fn const_add(self, rhs: Self) -> Self {
         let rem_p = GOLDILOCKS_PRIME - rhs.0;
         let (diff, borrow) = self.0.overflowing_sub(rem_p);
@@ -198,7 +215,7 @@ impl Goldilocks {
     }
 
     /// Branchless modular subtraction.
-    #[inline]
+    #[inline(always)]
     pub const fn const_sub(self, rhs: Self) -> Self {
         let (diff, borrow) = self.0.overflowing_sub(rhs.0);
         let adj = (borrow as u64).wrapping_neg() & GOLDILOCKS_PRIME;
@@ -206,18 +223,18 @@ impl Goldilocks {
     }
 
     /// Branchless negation (`0 - self mod p`).
-    #[inline]
+    #[inline(always)]
     pub const fn const_neg(self) -> Self {
         Self::ZERO.const_sub(self)
     }
 
     /// Branchless modular multiplication via 128-to-64 shift/mask reduction.
-    #[inline]
+    #[inline(always)]
     pub const fn const_mul(self, rhs: Self) -> Self {
         Self::reduce128((self.0 as u128) * (rhs.0 as u128))
     }
 
-    #[inline]
+    #[inline(always)]
     pub const fn square(self) -> Self {
         self.const_mul(self)
     }
@@ -268,14 +285,14 @@ impl Goldilocks {
 
 impl Add for Goldilocks {
     type Output = Self;
-    #[inline]
+    #[inline(always)]
     fn add(self, rhs: Self) -> Self {
         self.const_add(rhs)
     }
 }
 
 impl AddAssign for Goldilocks {
-    #[inline]
+    #[inline(always)]
     fn add_assign(&mut self, rhs: Self) {
         *self = self.const_add(rhs);
     }
@@ -283,14 +300,14 @@ impl AddAssign for Goldilocks {
 
 impl Sub for Goldilocks {
     type Output = Self;
-    #[inline]
+    #[inline(always)]
     fn sub(self, rhs: Self) -> Self {
         self.const_sub(rhs)
     }
 }
 
 impl SubAssign for Goldilocks {
-    #[inline]
+    #[inline(always)]
     fn sub_assign(&mut self, rhs: Self) {
         *self = self.const_sub(rhs);
     }
@@ -298,7 +315,7 @@ impl SubAssign for Goldilocks {
 
 impl Neg for Goldilocks {
     type Output = Self;
-    #[inline]
+    #[inline(always)]
     fn neg(self) -> Self {
         self.const_neg()
     }
@@ -351,12 +368,12 @@ impl GoldilocksExt2 {
         c1: Goldilocks::ONE,
     };
 
-    #[inline]
+    #[inline(always)]
     pub const fn new(c0: Goldilocks, c1: Goldilocks) -> Self {
         Self { c0, c1 }
     }
 
-    #[inline]
+    #[inline(always)]
     pub const fn from_base(c0: Goldilocks) -> Self {
         Self {
             c0,
@@ -414,7 +431,7 @@ impl GoldilocksExt2 {
         ct_eq_u64(d0 | d1, 0)
     }
 
-    #[inline]
+    #[inline(always)]
     pub const fn const_add(self, rhs: Self) -> Self {
         Self {
             c0: self.c0.const_add(rhs.c0),
@@ -422,7 +439,7 @@ impl GoldilocksExt2 {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub const fn const_sub(self, rhs: Self) -> Self {
         Self {
             c0: self.c0.const_sub(rhs.c0),
@@ -430,7 +447,7 @@ impl GoldilocksExt2 {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub const fn const_neg(self) -> Self {
         Self {
             c0: self.c0.const_neg(),
@@ -439,21 +456,18 @@ impl GoldilocksExt2 {
     }
 
     /// $(a_0 + a_1 u)(b_0 + b_1 u) = (a_0 b_0 + 7 a_1 b_1) + (a_0 b_1 + a_1 b_0) u$.
-    #[inline]
+    #[inline(always)]
     pub const fn const_mul(self, rhs: Self) -> Self {
         let a0b0 = self.c0.const_mul(rhs.c0);
         let a1b1 = self.c1.const_mul(rhs.c1);
         let sum_a = self.c0.const_add(self.c1);
         let sum_b = rhs.c0.const_add(rhs.c1);
         let c1 = sum_a.const_mul(sum_b).const_sub(a0b0).const_sub(a1b1);
-        let two = a1b1.const_add(a1b1);
-        let four = two.const_add(two);
-        let seven_a1b1 = four.const_add(two).const_add(a1b1);
-        let c0 = a0b0.const_add(seven_a1b1);
+        let c0 = a0b0.const_add(a1b1.mul_by_7());
         Self { c0, c1 }
     }
 
-    #[inline]
+    #[inline(always)]
     pub const fn mul_base(self, scalar: Goldilocks) -> Self {
         Self {
             c0: self.c0.const_mul(scalar),
@@ -461,12 +475,17 @@ impl GoldilocksExt2 {
         }
     }
 
-    #[inline]
+    /// `(c_0^2 + 7 c_1^2) + 2 c_0 c_1 u`: two base squarings and one base product.
+    #[inline(always)]
     pub const fn square(self) -> Self {
-        self.const_mul(self)
+        let ab = self.c0.const_mul(self.c1);
+        Self {
+            c0: self.c0.square().const_add(self.c1.square().mul_by_7()),
+            c1: ab.const_add(ab),
+        }
     }
 
-    #[inline]
+    #[inline(always)]
     pub const fn conj(self) -> Self {
         Self {
             c0: self.c0,
@@ -474,12 +493,11 @@ impl GoldilocksExt2 {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub const fn norm(self) -> Goldilocks {
         let a0_sq = self.c0.square();
         let a1_sq = self.c1.square();
-        let seven_a1_sq = Goldilocks::NON_RESIDUE.const_mul(a1_sq);
-        a0_sq.const_sub(seven_a1_sq)
+        a0_sq.const_sub(a1_sq.mul_by_7())
     }
 
     #[inline]
@@ -493,14 +511,14 @@ impl GoldilocksExt2 {
 
 impl Add for GoldilocksExt2 {
     type Output = Self;
-    #[inline]
+    #[inline(always)]
     fn add(self, rhs: Self) -> Self {
         self.const_add(rhs)
     }
 }
 
 impl AddAssign for GoldilocksExt2 {
-    #[inline]
+    #[inline(always)]
     fn add_assign(&mut self, rhs: Self) {
         *self = self.const_add(rhs);
     }
@@ -508,14 +526,14 @@ impl AddAssign for GoldilocksExt2 {
 
 impl Sub for GoldilocksExt2 {
     type Output = Self;
-    #[inline]
+    #[inline(always)]
     fn sub(self, rhs: Self) -> Self {
         self.const_sub(rhs)
     }
 }
 
 impl SubAssign for GoldilocksExt2 {
-    #[inline]
+    #[inline(always)]
     fn sub_assign(&mut self, rhs: Self) {
         *self = self.const_sub(rhs);
     }
@@ -523,7 +541,7 @@ impl SubAssign for GoldilocksExt2 {
 
 impl Neg for GoldilocksExt2 {
     type Output = Self;
-    #[inline]
+    #[inline(always)]
     fn neg(self) -> Self {
         self.const_neg()
     }
@@ -531,14 +549,14 @@ impl Neg for GoldilocksExt2 {
 
 impl Mul for GoldilocksExt2 {
     type Output = Self;
-    #[inline]
+    #[inline(always)]
     fn mul(self, rhs: Self) -> Self {
         self.const_mul(rhs)
     }
 }
 
 impl MulAssign for GoldilocksExt2 {
-    #[inline]
+    #[inline(always)]
     fn mul_assign(&mut self, rhs: Self) {
         *self = *self * rhs;
     }
@@ -642,6 +660,13 @@ mod tests {
         let p = GOLDILOCKS_PRIME as u128;
         for &ar in &vals {
             let a = Goldilocks::from_canonical(ar).unwrap();
+            assert_eq!(a.mul_by_7().to_canonical_u64(), ((ar as u128 * 7) % p) as u64);
+            for hi in [0u64, 1, 6, (1 << 32) - 1] {
+                assert_eq!(
+                    Goldilocks::reduce96(ar, hi).to_canonical_u64(),
+                    ((ar as u128 + ((hi as u128) << 64)) % p) as u64
+                );
+            }
             if ar != 0 {
                 assert_eq!(a * a.inv(), Goldilocks::ONE);
             } else {
@@ -661,6 +686,19 @@ mod tests {
                     (a * b).to_canonical_u64(),
                     ((ar as u128 * br as u128) % p) as u64
                 );
+                assert_eq!(a.const_mul(b), a * b);
+                // Schoolbook product and square over u^2 = 7.
+                let (e, g) = (GoldilocksExt2::new(a, b), GoldilocksExt2::new(b, a + a));
+                let seven = Goldilocks::NON_RESIDUE;
+                assert_eq!(
+                    e * g,
+                    GoldilocksExt2::new(a * b + seven * b * (a + a), a * (a + a) + b * b)
+                );
+                assert_eq!(
+                    e.square(),
+                    GoldilocksExt2::new(a * a + seven * b * b, a * b + a * b)
+                );
+                assert_eq!(e.norm(), a * a - seven * b * b);
             }
         }
         let x = GoldilocksExt2::from_canonical_u64_pair(GOLDILOCKS_PRIME - 5, 123_456_789).unwrap();

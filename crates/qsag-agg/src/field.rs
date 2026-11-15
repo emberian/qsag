@@ -18,29 +18,12 @@ const _: () = assert!(GOLDILOCKS_PRIME == qsag_whir_verified::GOLDILOCKS_P);
 /// Primitive $2^{32}$-th root of unity $\omega_{2^{32}} = 7^{2^{32} - 1} \bmod p$.
 pub const TWO_ADIC_ROOT_OF_UNITY_32: u64 = GOLDILOCKS_ROOT_2_32;
 
-/// Reduce `lo + 2^64 * hi` for `hi < 2^32` using $2^{64} \equiv 2^{32} - 1 \pmod p$.
-#[inline(always)]
-const fn fold_small_carry(lo: u64, hi: u64) -> Goldilocks {
-    let adj = (hi << 32).wrapping_sub(hi);
-    let (s, c) = lo.overflowing_add(adj);
-    let s2 = s.wrapping_add((0u64.wrapping_sub(c as u64)) & EPSILON);
-    Goldilocks::from_u64_reduced(s2)
-}
-
-/// `7 * x` without a 64x64 multiplication.
-#[inline(always)]
-pub(crate) const fn gl_mul_by_7(x: Goldilocks) -> Goldilocks {
-    let v = x.to_canonical_u64() as u128;
-    let prod = (v << 3) - v;
-    fold_small_carry(prod as u64, (prod >> 64) as u64)
-}
-
 /// `2^S * x` for `1 <= S <= 31` using shifts and one $\epsilon$ fold.
 #[inline(always)]
 pub(crate) const fn gl_shl_small<const S: u32>(x: Goldilocks) -> Goldilocks {
     const { assert!(S >= 1 && S <= 31) };
     let v = x.to_canonical_u64();
-    fold_small_carry(v << S, v >> (64 - S))
+    Goldilocks::reduce96(v << S, v >> (64 - S))
 }
 
 /// Primitive $2^k$-th root of unity for $k \le 32$.
@@ -59,52 +42,12 @@ pub(crate) const fn gl_two_adic_generator(log_n: usize) -> Goldilocks {
 /// `(c_0 + c_1 u) * u = 7 c_1 + c_0 u`.
 #[inline(always)]
 pub(crate) const fn ext2_mul_by_u(x: GoldilocksExt2) -> GoldilocksExt2 {
-    GoldilocksExt2::new(gl_mul_by_7(x.c1), x.c0)
+    GoldilocksExt2::new(x.c1.mul_by_7(), x.c0)
 }
 
 #[inline(always)]
 pub(crate) const fn ext2_shl_small<const S: u32>(x: GoldilocksExt2) -> GoldilocksExt2 {
     GoldilocksExt2::new(gl_shl_small::<S>(x.c0), gl_shl_small::<S>(x.c1))
-}
-
-/// `x^2 = (c_0^2 + 7 c_1^2) + 2 c_0 c_1 u` with two base squarings and one base product.
-#[inline(always)]
-pub(crate) const fn ext2_square(x: GoldilocksExt2) -> GoldilocksExt2 {
-    let ab = x.c0.const_mul(x.c1);
-    GoldilocksExt2::new(
-        x.c0.square().const_add(gl_mul_by_7(x.c1.square())),
-        ab.const_add(ab),
-    )
-}
-
-/// Karatsuba product over $\mathbb{F}_p[u]/(u^2 - 7)$ (`3` base multiplications), inlined into
-/// the quartic arithmetic. Equal to `GoldilocksExt2::const_mul`.
-#[inline(always)]
-pub(crate) const fn ext2_mul(a: GoldilocksExt2, b: GoldilocksExt2) -> GoldilocksExt2 {
-    let a0b0 = a.c0.const_mul(b.c0);
-    let a1b1 = a.c1.const_mul(b.c1);
-    let mid = a
-        .c0
-        .const_add(a.c1)
-        .const_mul(b.c0.const_add(b.c1))
-        .const_sub(a0b0)
-        .const_sub(a1b1);
-    GoldilocksExt2::new(a0b0.const_add(gl_mul_by_7(a1b1)), mid)
-}
-
-/// `a + b` on canonical words: a carry out of 64 bits is worth `2^32 - 1`, and the sum is below
-/// `2p`, so one conditional subtraction canonicalizes it.
-#[inline(always)]
-const fn gl_add(a: Goldilocks, b: Goldilocks) -> Goldilocks {
-    let (s, carry) = a.to_canonical_u64().overflowing_add(b.to_canonical_u64());
-    Goldilocks::from_u64_reduced(s.wrapping_add(EPSILON & 0u64.wrapping_sub(carry as u64)))
-}
-
-/// `a - b` on canonical words: a borrow is repaid by adding `p`, i.e. subtracting `2^32 - 1`.
-#[inline(always)]
-const fn gl_sub(a: Goldilocks, b: Goldilocks) -> Goldilocks {
-    let (d, borrow) = a.to_canonical_u64().overflowing_sub(b.to_canonical_u64());
-    Goldilocks::from_u64_reduced(d.wrapping_sub(EPSILON & 0u64.wrapping_sub(borrow as u64)))
 }
 
 /// Reduce `lo + 2^64 * hi` (`lo, hi < 2^70`) to a canonical element, using
@@ -116,7 +59,7 @@ const fn reduce_lo_hi(lo: u128, hi: u128) -> Goldilocks {
     let x = lo + hi * EPSILON as u128;
     // `y < 2^64 + 2^38 * 2^32`.
     let y = (x as u64) as u128 + (x >> 64) * EPSILON as u128;
-    fold_small_carry(y as u64, (y >> 64) as u64)
+    Goldilocks::reduce96(y as u64, (y >> 64) as u64)
 }
 
 /// Sum of base-field products as separate low-word and high-word accumulators, so several
@@ -171,8 +114,6 @@ pub trait GoldilocksOps: Copy {
     /// Strict canonical constructor: `None` if `v >= GOLDILOCKS_PRIME`.
     fn from_canonical_u64(v: u64) -> Option<Self>;
     fn is_zero(self) -> bool;
-    /// Multiply by the quadratic non-residue `7` without a 64x64 multiplication.
-    fn mul_by_7(self) -> Self;
     /// Multiply by $2^S$ (`1 <= S <= 31`) without a multiplication.
     fn shl_small<const S: u32>(self) -> Self;
     /// Montgomery prefix-product batch inversion in place (`1` inversion + $3(N - 1)$
@@ -191,11 +132,6 @@ impl GoldilocksOps for Goldilocks {
     #[inline(always)]
     fn is_zero(self) -> bool {
         self.to_canonical_u64() == 0
-    }
-
-    #[inline(always)]
-    fn mul_by_7(self) -> Self {
-        gl_mul_by_7(self)
     }
 
     #[inline(always)]
@@ -323,7 +259,7 @@ impl GoldilocksExt2Ops for GoldilocksExt2 {
             if (exp & 1) == 1 {
                 acc = acc.const_mul(base);
             }
-            base = ext2_square(base);
+            base = base.square();
             exp >>= 1;
         }
         acc
@@ -859,24 +795,24 @@ impl GoldilocksExt4 {
     #[inline(always)]
     pub const fn mul_ext2(self, s: GoldilocksExt2) -> Self {
         Self {
-            c0: ext2_mul(self.c0, s),
-            c1: ext2_mul(self.c1, s),
+            c0: self.c0.const_mul(s),
+            c1: self.c1.const_mul(s),
         }
     }
 
     #[inline(always)]
     pub const fn const_add(self, rhs: Self) -> Self {
         Self {
-            c0: GoldilocksExt2::new(gl_add(self.c0.c0, rhs.c0.c0), gl_add(self.c0.c1, rhs.c0.c1)),
-            c1: GoldilocksExt2::new(gl_add(self.c1.c0, rhs.c1.c0), gl_add(self.c1.c1, rhs.c1.c1)),
+            c0: self.c0.const_add(rhs.c0),
+            c1: self.c1.const_add(rhs.c1),
         }
     }
 
     #[inline(always)]
     pub const fn const_sub(self, rhs: Self) -> Self {
         Self {
-            c0: GoldilocksExt2::new(gl_sub(self.c0.c0, rhs.c0.c0), gl_sub(self.c0.c1, rhs.c0.c1)),
-            c1: GoldilocksExt2::new(gl_sub(self.c1.c0, rhs.c1.c0), gl_sub(self.c1.c1, rhs.c1.c1)),
+            c0: self.c0.const_sub(rhs.c0),
+            c1: self.c1.const_sub(rhs.c1),
         }
     }
 
@@ -952,9 +888,9 @@ impl GoldilocksExt4 {
     /// [`Self::const_mul`] is tested against.
     #[cfg(test)]
     pub(crate) const fn const_mul_tower(self, rhs: Self) -> Self {
-        let v0 = ext2_mul(self.c0, rhs.c0);
-        let v1 = ext2_mul(self.c1, rhs.c1);
-        let mid = ext2_mul(self.c0.const_add(self.c1), rhs.c0.const_add(rhs.c1))
+        let v0 = self.c0.const_mul(rhs.c0);
+        let v1 = self.c1.const_mul(rhs.c1);
+        let mid = self.c0.const_add(self.c1).const_mul(rhs.c0.const_add(rhs.c1))
             .const_sub(v0)
             .const_sub(v1);
         Self {
@@ -982,7 +918,7 @@ impl GoldilocksExt4 {
     /// Relative norm $\mathrm{N}_{\mathbb{F}_{p^4}/\mathbb{F}_{p^2}}(c_0 + c_1 v) = c_0^2 - u c_1^2 \in \mathbb{F}_{p^2}$.
     #[inline(always)]
     pub const fn norm_to_ext2(self) -> GoldilocksExt2 {
-        ext2_square(self.c0).const_sub(ext2_mul_by_u(ext2_square(self.c1)))
+        self.c0.square().const_sub(ext2_mul_by_u(self.c1.square()))
     }
 
     /// Absolute norm $\mathrm{N}_{\mathbb{F}_{p^4}/\mathbb{F}_p}(x) \in \mathbb{F}_p$.
@@ -1952,24 +1888,10 @@ mod base_ntt_tests {
         }
     }
 
+    /// The wide accumulator against the `qsag-core` operations, on random words and on
+    /// every pair from the boundary set (carry, borrow and `2^32` limb edges).
     #[test]
-    fn inlined_ext2_product_equals_core_product() {
-        let v = sample(64, 0xE2);
-        for w in v.windows(4) {
-            let a = GoldilocksExt2::new(w[0], w[1]);
-            let b = GoldilocksExt2::new(w[2], w[3]);
-            assert_eq!(ext2_mul(a, b), a.const_mul(b));
-            assert_eq!(ext2_square(a), a.const_mul(a));
-        }
-        let top = Goldilocks::from_u64_reduced(GOLDILOCKS_PRIME - 1);
-        let e = GoldilocksExt2::new(top, top);
-        assert_eq!(ext2_mul(e, e), e.const_mul(e));
-    }
-
-    /// The inlined base-field operations against the `qsag-core` definitions, on random words
-    /// and on every pair from the boundary set (carry, borrow and `2^32` limb edges).
-    #[test]
-    fn inlined_base_operations_equal_core_operations() {
+    fn wide_accumulator_equals_core_operations() {
         let p = GOLDILOCKS_PRIME;
         let mut xs: Vec<Goldilocks> = [
             0,
@@ -1991,8 +1913,6 @@ mod base_ntt_tests {
         xs.extend(sample(200, 0xBA5E));
         for &a in &xs {
             for &b in &xs {
-                assert_eq!(gl_add(a, b), a.const_add(b));
-                assert_eq!(gl_sub(a, b), a.const_sub(b));
                 assert_eq!(
                     WideAcc::ZERO.add_mul(a, b, 14).add_mul(b, b, 7).add_elem(a).reduce(),
                     a.const_mul(b).const_mul(Goldilocks::from_u64_reduced(14))
