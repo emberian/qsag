@@ -436,6 +436,7 @@ private def poly128MulRange : Nat → BitVec 128 → BitVec 128 → BitVec 128
   | k + 1, a, b =>
     poly128MulRange k a b ^^^ poly128MulRange k (poly128ShiftPow k a) (b >>> (2 ^ k))
 
+/-- Equal to the Rust `gf2_128_mul` loop model: `gf2_128_mul_bv_eq_rustGf128Mul`. -/
 def gf2_128_mul_bv (a b : BitVec 128) : BitVec 128 := poly128MulRange 7 a b
 
 private def tower128PolyGen : Fin 7 → BitVec 128
@@ -455,6 +456,7 @@ private def psiRec : (k : Nat) → (hk : k ≤ 7) → TowerElem k → BitVec 128
     psiRec k (Nat.le_of_succ_le hk) a0 ^^^
       gf2_128_mul_bv (tower128PolyGen ⟨k, hk⟩) (psiRec k (Nat.le_of_succ_le hk) a1)
 
+/-- A field isomorphism: `Tower128PolyBasisIso.psiTower128ToPoly_field_isomorphism`. -/
 def psiTower128ToPoly (x : Tower128) : BitVec 128 := psiRec 7 (Nat.le_refl 7) x
 
 private theorem packTower_towerOne_7 : packTower 7 (towerOne 7) = 1#128 := by decide
