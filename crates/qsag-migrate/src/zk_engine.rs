@@ -703,12 +703,7 @@ pub fn verify_migration_proof_with_backend<B: AcceleratorBackend>(
         return Err(MigrateError::ViewsMerkleRootMismatch);
     }
     let circuit = crate::ownership::build(statement, &[0; 32]);
-    #[cfg(any(feature = "std", test))]
-    let workers = std::thread::available_parallelism()
-        .map_or(1, usize::from)
-        .min(16);
-    #[cfg(not(any(feature = "std", test)))]
-    let workers = 1;
+    let workers = crate::parallel::workers(MIT_REPETITIONS);
     let chunk = MIT_REPETITIONS.div_ceil(workers);
     for result in crate::parallel::map(workers, |worker| {
         let mut wires = core::array::from_fn(|_| Wires(alloc::vec![ZERO; circuit.nodes.len()]));

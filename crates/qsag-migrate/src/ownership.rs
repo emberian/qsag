@@ -179,6 +179,8 @@ fn big_endian(bits: &[Wire]) -> Vec<Wire> {
     bits.chunks_exact(8).rev().flatten().copied().collect()
 }
 fn me(c: &Builder, st: &mut [Wire; 12]) {
+    // M4 tensor P3: transpose lanes, apply P3 tensor M4, transpose back.
+    *st = [st[0], st[3], st[6], st[9], st[1], st[4], st[7], st[10], st[2], st[5], st[8], st[11]];
     let mut ys = *st;
     for row in ys.chunks_exact_mut(4) {
         let old: [Wire; 4] = core::array::from_fn(|i| row[i]);
@@ -190,10 +192,11 @@ fn me(c: &Builder, st: &mut [Wire; 12]) {
     for (i, x) in st.iter_mut().enumerate() {
         *x = c.add(ys[i], c.add(c.add(ys[i % 4], ys[i % 4 + 4]), ys[i % 4 + 8]));
     }
+    *st = [st[0], st[4], st[8], st[1], st[5], st[9], st[2], st[6], st[10], st[3], st[7], st[11]];
 }
 fn mi(c: &Builder, st: &mut [Wire; 12]) {
     let s = st.iter().copied().reduce(|a, b| c.add(a, b)).unwrap();
-    st[0] = c.sub(s, c.scale(st[0], 2));
+    st[0] = c.sub(s, c.scale(st[0], 64));
     st[1] = c.add(s, st[1]);
     for (i, x) in st.iter_mut().enumerate().skip(2) {
         *x = c.add(s, c.scale(*x, 1 << (i - 1)));
@@ -391,5 +394,17 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod poseidon2_canonical_kat {
+    use super::*;
+    #[test]
+    fn migration_poseidon2_circuit_matches_canonical_kat() {
+        let c = Builder::default();
+        let mut st = core::array::from_fn(|i| c.small(Domain::Gold, i as u64));
+        perm(&c, &mut st);
+        assert_eq!(st.map(|w| c.value(w)[0]), [13782584570844608145, 13136387643152332171, 7171133015474200819, 7643370872200861694, 14144755201299840503, 16470027036684692562, 1748465969625202405, 1718729118078964347, 6141020819996733037, 16322330185628708898, 11650380702735067362, 2734959974607798415]);
     }
 }
