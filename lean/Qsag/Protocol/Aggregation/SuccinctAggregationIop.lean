@@ -212,10 +212,10 @@ structure AggValidatorPk where
   pkRoot  : Digest4
   deriving DecidableEq, Repr
 
-/-- Jive feed-forward 12-to-4 `Poseidon2` compression (`poseidon2_compress12_ff` in `sig.rs:88`). -/
+/-- Weighted Jive feed-forward 12-to-4 `Poseidon2` compression
+    `perm.b0 + in0 + 2·in1 + 4·tweak` (`poseidon2_compress12_ff` in `sponge.rs`). -/
 def poseidon2Compress12FF (in0 in1 tweak : Digest4) : Digest4 :=
-  let permOut := poseidon2Perm12 ⟨in0, in1, tweak⟩
-  lane4Add permOut.b0 in0
+  poseidon2CompressWeighted ⟨in0, in1, tweak⟩
 
 /-- Bijective `< 2^62` packed WOTS+C address limb (`pack_wots_addr_limb` in `sig.rs:285`). -/
 def packWotsAddrLimb (layer kpIdx chainIdx stepIdx : Nat) : Goldilocks :=
@@ -4734,11 +4734,14 @@ def honestUnaryWotsChainWitness (pkSeed : Digest4) (layer treeIdx kpIdx chainIdx
   let a1 := if digit ≤ 1 then Goldilocks.one else Goldilocks.zero
   let a2 := if digit ≤ 2 then Goldilocks.one else Goldilocks.zero
   let p0 := honestPoseidon2PermWitness ⟨sigVal, pkSeed, wotsStepTweak4 layer treeIdx kpIdx chainIdx 0⟩
-  let s1 := if a0 == Goldilocks.one then lane4Add p0.output.b0 sigVal else sigVal
+  let s1 := if a0 == Goldilocks.one then lane4Add p0.output.b0
+      (poseidon2WeightedFeedForward ⟨sigVal, pkSeed, wotsStepTweak4 layer treeIdx kpIdx chainIdx 0⟩) else sigVal
   let p1 := honestPoseidon2PermWitness ⟨s1, pkSeed, wotsStepTweak4 layer treeIdx kpIdx chainIdx 1⟩
-  let s2 := if a1 == Goldilocks.one then lane4Add p1.output.b0 s1 else s1
+  let s2 := if a1 == Goldilocks.one then lane4Add p1.output.b0
+      (poseidon2WeightedFeedForward ⟨s1, pkSeed, wotsStepTweak4 layer treeIdx kpIdx chainIdx 1⟩) else s1
   let p2 := honestPoseidon2PermWitness ⟨s2, pkSeed, wotsStepTweak4 layer treeIdx kpIdx chainIdx 2⟩
-  let s3 := if a2 == Goldilocks.one then lane4Add p2.output.b0 s2 else s2
+  let s3 := if a2 == Goldilocks.one then lane4Add p2.output.b0
+      (poseidon2WeightedFeedForward ⟨s2, pkSeed, wotsStepTweak4 layer treeIdx kpIdx chainIdx 2⟩) else s2
   { act0 := a0, act1 := a1, act2 := a2, sigVal := sigVal,
     s1 := s1, s2 := s2, endVal := s3, perm0 := p0, perm1 := p1, perm2 := p2 }
 
@@ -4752,13 +4755,16 @@ def unaryWotsChainResiduals (pkSeed : Digest4) (layer treeIdx kpIdx chainIdx : N
   [boolBitResidual w.act0, boolBitResidual w.act1, boolBitResidual w.act2, mono01, mono12, sumEq] ++
   (state12Sub w.perm0.input ⟨w.sigVal, pkSeed, wotsStepTweak4 layer treeIdx kpIdx chainIdx 0⟩).toList ++
   poseidon2PermResiduals w.perm0 ++
-  muxDigest4Residuals w.act0 (lane4Add w.perm0.output.b0 w.sigVal) w.sigVal w.s1 ++
+  muxDigest4Residuals w.act0 (lane4Add w.perm0.output.b0
+      (poseidon2WeightedFeedForward ⟨w.sigVal, pkSeed, wotsStepTweak4 layer treeIdx kpIdx chainIdx 0⟩)) w.sigVal w.s1 ++
   (state12Sub w.perm1.input ⟨w.s1, pkSeed, wotsStepTweak4 layer treeIdx kpIdx chainIdx 1⟩).toList ++
   poseidon2PermResiduals w.perm1 ++
-  muxDigest4Residuals w.act1 (lane4Add w.perm1.output.b0 w.s1) w.s1 w.s2 ++
+  muxDigest4Residuals w.act1 (lane4Add w.perm1.output.b0
+      (poseidon2WeightedFeedForward ⟨w.s1, pkSeed, wotsStepTweak4 layer treeIdx kpIdx chainIdx 1⟩)) w.s1 w.s2 ++
   (state12Sub w.perm2.input ⟨w.s2, pkSeed, wotsStepTweak4 layer treeIdx kpIdx chainIdx 2⟩).toList ++
   poseidon2PermResiduals w.perm2 ++
-  muxDigest4Residuals w.act2 (lane4Add w.perm2.output.b0 w.s2) w.s2 w.endVal
+  muxDigest4Residuals w.act2 (lane4Add w.perm2.output.b0
+      (poseidon2WeightedFeedForward ⟨w.s2, pkSeed, wotsStepTweak4 layer treeIdx kpIdx chainIdx 2⟩)) w.s2 w.endVal
 
 private theorem monotone_bits_sum_three_unique {d a0 a1 a2 : Goldilocks}
     (hd : d.val < 4)
@@ -4789,8 +4795,9 @@ private theorem monotone_bits_sum_three_unique {d a0 a1 a2 : Goldilocks}
 
 private theorem wotsStepHash_eq_tweak4 (pkSeed cur : Digest4) (layer treeIdx kpIdx chainIdx stp : Nat) :
     wotsStepHash pkSeed cur layer treeIdx kpIdx chainIdx stp =
-      lane4Add (poseidon2Perm12 ⟨cur, pkSeed, wotsStepTweak4 layer treeIdx kpIdx chainIdx stp⟩).b0 cur := by
-  unfold wotsStepHash poseidon2Compress12FF wotsStepTweak4
+      lane4Add (poseidon2Perm12 ⟨cur, pkSeed, wotsStepTweak4 layer treeIdx kpIdx chainIdx stp⟩).b0
+        (poseidon2WeightedFeedForward ⟨cur, pkSeed, wotsStepTweak4 layer treeIdx kpIdx chainIdx stp⟩) := by
+  unfold wotsStepHash poseidon2Compress12FF poseidon2CompressWeighted wotsStepTweak4
   rfl
 
 private theorem wotsChainWalk_zero_steps (pkSeed : Digest4) (layer treeIdx kpIdx chainIdx s : Nat)
@@ -6134,8 +6141,10 @@ private theorem forsLeafHash_eq_perm (geom : AggSigGeometry) (pkSeed val : Diges
     (leafGlobalIdx j idx : Nat) :
     forsLeafHash geom pkSeed val leafGlobalIdx j idx =
       lane4Add (poseidon2Perm12
-        ⟨val, pkSeed, forsLeafTweak4 domainForsLeaf geom leafGlobalIdx j idx⟩).b0 val := by
-  unfold forsLeafHash poseidon2Compress12FF
+        ⟨val, pkSeed, forsLeafTweak4 domainForsLeaf geom leafGlobalIdx j idx⟩).b0
+        (poseidon2WeightedFeedForward
+          ⟨val, pkSeed, forsLeafTweak4 domainForsLeaf geom leafGlobalIdx j idx⟩) := by
+  unfold forsLeafHash poseidon2Compress12FF poseidon2CompressWeighted
   rfl
 
 structure ForsOpeningTraceWitness where
@@ -6152,7 +6161,9 @@ def forsOpeningWitnessSig (w : ForsOpeningTraceWitness) : AggForsTreeOpening :=
 def honestForsOpeningTraceWitness (geom : AggSigGeometry) (pkSeed : Digest4) (leafGlobalIdx t idx : Nat)
     (op : AggForsTreeOpening) : ForsOpeningTraceWitness :=
   let lp := honestPoseidon2PermWitness ⟨op.secretVal, pkSeed, forsLeafTweak4 domainForsLeaf geom leafGlobalIdx t idx⟩
-  let leaf := lane4Add lp.output.b0 op.secretVal
+  let leaf := lane4Add lp.output.b0
+      (poseidon2WeightedFeedForward
+        ⟨op.secretVal, pkSeed, forsLeafTweak4 domainForsLeaf geom leafGlobalIdx t idx⟩)
   let mp := honestMerklePathWitness domainForsNode pkSeed 0 (forsHyperTreeIdx geom leafGlobalIdx)
       (forsTreeNodeAddr geom leafGlobalIdx t) 1 idx leaf op.authPath
   let rt := (merklePathResiduals domainForsNode pkSeed 0 (forsHyperTreeIdx geom leafGlobalIdx)
@@ -6164,7 +6175,9 @@ def forsOpeningResiduals (geom : AggSigGeometry) (pkSeed : Digest4)
   let shapeRes :=
     if decide (idx < 2 ^ geom.forsHeight) && (w.merkle.length == geom.forsHeight) then []
     else [Goldilocks.one]
-  let leaf := lane4Add w.leafPerm.output.b0 w.secretVal
+  let leaf := lane4Add w.leafPerm.output.b0
+      (poseidon2WeightedFeedForward
+        ⟨w.secretVal, pkSeed, forsLeafTweak4 domainForsLeaf geom leafGlobalIdx t idx⟩)
   let (walkedRt, mRes) := merklePathResiduals domainForsNode pkSeed 0 (forsHyperTreeIdx geom leafGlobalIdx)
       (forsTreeNodeAddr geom leafGlobalIdx t) 1 idx leaf w.merkle
   shapeRes ++
@@ -6185,12 +6198,16 @@ theorem forsOpeningResiduals_sound (geom : AggSigGeometry) (pkSeed : Digest4)
   · have hPermOut : (honestPoseidon2PermWitness ⟨w.secretVal, pkSeed, forsLeafTweak4 domainForsLeaf geom leafGlobalIdx t idx⟩).output =
         poseidon2Perm12 ⟨w.secretVal, pkSeed, forsLeafTweak4 domainForsLeaf geom leafGlobalIdx t idx⟩ := by
       unfold poseidon2Perm12 honestPoseidon2PermWitness; rfl
-    have hLeafEq : lane4Add w.leafPerm.output.b0 w.secretVal =
+    have hLeafEq : lane4Add w.leafPerm.output.b0
+      (poseidon2WeightedFeedForward
+        ⟨w.secretVal, pkSeed, forsLeafTweak4 domainForsLeaf geom leafGlobalIdx t idx⟩) =
         forsLeafHash geom pkSeed w.secretVal leafGlobalIdx t idx := by
       rw [hLp, hPermOut, forsLeafHash_eq_perm]
     have hMIff := merklePathResiduals_allZero_iff domainForsNode pkSeed 0 (forsHyperTreeIdx geom leafGlobalIdx)
       (forsTreeNodeAddr geom leafGlobalIdx t) 1 idx
-      (lane4Add w.leafPerm.output.b0 w.secretVal) w.merkle
+      (lane4Add w.leafPerm.output.b0
+      (poseidon2WeightedFeedForward
+        ⟨w.secretVal, pkSeed, forsLeafTweak4 domainForsLeaf geom leafGlobalIdx t idx⟩)) w.merkle
     have hWalkEq := hMIff.2 (hMIff.1.mp hM)
     unfold verifySingleForsOpening forsOpeningWitnessSig
     rcases hChk with ⟨hIdxDec, hMpLenB⟩
@@ -6216,7 +6233,9 @@ theorem forsOpeningResiduals_complete (geom : AggSigGeometry) (pkSeed : Digest4)
         poseidon2Perm12 ⟨op.secretVal, pkSeed, forsLeafTweak4 domainForsLeaf geom leafGlobalIdx t idx⟩ := by
       unfold poseidon2Perm12 honestPoseidon2PermWitness; rfl
     let lp := honestPoseidon2PermWitness ⟨op.secretVal, pkSeed, forsLeafTweak4 domainForsLeaf geom leafGlobalIdx t idx⟩
-    let leaf := lane4Add lp.output.b0 op.secretVal
+    let leaf := lane4Add lp.output.b0
+      (poseidon2WeightedFeedForward
+        ⟨op.secretVal, pkSeed, forsLeafTweak4 domainForsLeaf geom leafGlobalIdx t idx⟩)
     have hLeafEq : leaf = forsLeafHash geom pkSeed op.secretVal leafGlobalIdx t idx := by
       dsimp only [leaf, lp]; rw [hPermOut, forsLeafHash_eq_perm]
     let mp := honestMerklePathWitness domainForsNode pkSeed 0 (forsHyperTreeIdx geom leafGlobalIdx)
