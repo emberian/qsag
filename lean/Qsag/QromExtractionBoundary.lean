@@ -113,14 +113,40 @@ theorem measuredOracleQueryBranch_consistent {cardX w cardAnc : Nat}
   have hFinZero : xorFin y (H x) = (0 : Fin (2 ^ w)) := Fin.ext hAnsZero
   have hInv := congrArg (fun z => xorFin z (H x)) hFinZero
   rw [xorFin_involutive] at hInv
-  have hOutput : y = (H x).toFin := by simpa [xorFin] using hInv
+  have hZeroXor : (0#w ^^^ H x) = H x := by
+    apply BitVec.eq_of_getLsbD_eq
+    intro i _
+    simp only [BitVec.getLsbD_xor, BitVec.getLsbD_zero, Bool.false_xor]
+  have hOutput : y = (H x).toFin := by
+    change y = (0#w ^^^ H x).toFin at hInv
+    rw [hZeroXor] at hInv
+    exact hInv
   exact ⟨rfl, by rw [hOutput, BitVec.ofFin_toFin]⟩
+
+/-- An observed zero-response oracle query supplies the classical classifier's actual
+    `merkleQueryConsistent` premise for a chosen compression-input encoding. This lemma
+    only establishes record consistency: injective domain encoding, sequential recording,
+    pre-challenge timing, and disturbance bounds remain separate obligations. -/
+theorem measuredOracleQuery_merkle_record_consistent {cardX w cardAnc : Nat}
+    (H : Fin cardX → BitVec w)
+    (encode : Nat → Nat → BitVec w → BitVec w → Fin cardX)
+    (ψ : QVec cardX w cardAnc)
+    (hZero : ∀ x y a, y.val ≠ 0 → ψ x y a = GaussInt.zero)
+    (lvl node : Nat) (left right : BitVec w)
+    (y : Fin (2 ^ w)) (a : Fin cardAnc)
+    (hMass : measuredOracleQueryBranch H ψ (encode lvl node left right)
+      (encode lvl node left right) y a ≠ GaussInt.zero) :
+    merkleQueryConsistent (fun l n u v => H (encode l n u v))
+      ⟨lvl, node, left, right, BitVec.ofFin y⟩ :=
+  (measuredOracleQueryBranch_consistent H ψ hZero
+    (encode lvl node left right) (encode lvl node left right) y a hMass).2.symm
 
 #verify_constructive
   Qsag.tooth_qrom_self_target_not_local
   Qsag.tooth_qrom_query_record_changes_born_probability
   Qsag.measuredOracleQueryBranch_mass
   Qsag.measuredOracleQueryBranch_consistent
+  Qsag.measuredOracleQuery_merkle_record_consistent
 
 end Qsag
 end
