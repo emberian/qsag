@@ -744,13 +744,22 @@ impl GateRecord {
     // Retain previous gates until their barrier, wiping the old allocation on growth.
     fn reserve(&mut self, additional: usize) -> Result<(), NodeError> {
         for words in [
-            &mut self.a_mine, &mut self.b_mine, &mut self.a_next,
-            &mut self.b_next, &mut self.pad_mine, &mut self.pad_next, &mut self.received,
+            &mut self.a_mine,
+            &mut self.b_mine,
+            &mut self.a_next,
+            &mut self.b_next,
+            &mut self.pad_mine,
+            &mut self.pad_next,
+            &mut self.received,
         ] {
-            let needed = words.len().checked_add(additional).ok_or(NodeError::Poisoned)?;
+            let needed = words
+                .len()
+                .checked_add(additional)
+                .ok_or(NodeError::Poisoned)?;
             if needed > words.capacity() {
                 let mut next = Vec::new();
-                next.try_reserve_exact(needed).map_err(|_| NodeError::Poisoned)?;
+                next.try_reserve_exact(needed)
+                    .map_err(|_| NodeError::Poisoned)?;
                 next.extend_from_slice(words);
                 qsag_asm::volatile_fill(words, 0);
                 *words = next;
@@ -819,12 +828,9 @@ impl<T: WireTransport, J: PoisonJournal> Drop for IsolatedRss256Party<T, J> {
         for state in &mut self.states {
             qsag_asm::volatile_fill(&mut state.mine[..], 0);
             qsag_asm::volatile_fill(&mut state.next[..], 0);
-
-
         }
         for key in self.slot_keys.iter_mut().chain(&mut self.mac_keys) {
             qsag_asm::volatile_fill(&mut key[..], 0);
-
         }
     }
 }
@@ -994,12 +1000,12 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
         let mut pad_next = Shake256Prg256::new(&self.slot_keys[1], &self.session_id, domain);
         let (succ, pred) = (self.succ(), self.pred());
         self.unverified = true;
-        self.record.reserve(n.checked_mul(25 * 24).ok_or(NodeError::Poisoned)?)?;
+        self.record
+            .reserve(n.checked_mul(25 * 24).ok_or(NodeError::Poisoned)?)?;
         struct ZeroizingWords(Vec<u64>);
         impl Drop for ZeroizingWords {
             fn drop(&mut self) {
                 qsag_asm::volatile_fill(&mut self.0[..], 0);
-
             }
         }
         struct ZeroizingStateBuf(Vec<[u64; 25]>);
@@ -1007,7 +1013,6 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
             fn drop(&mut self) {
                 for st in &mut self.0 {
                     qsag_asm::volatile_fill(&mut st[..], 0);
-
                 }
             }
         }
@@ -1521,8 +1526,6 @@ impl Drop for SharePair {
     fn drop(&mut self) {
         qsag_asm::volatile_fill(&mut self.mine[..], 0);
         qsag_asm::volatile_fill(&mut self.next[..], 0);
-
-
     }
 }
 impl core::fmt::Debug for Rss256PartyKeys {
@@ -1539,7 +1542,6 @@ impl Drop for Rss256PartyKeys {
             .chain(core::iter::once(&mut self.rng_seed))
         {
             qsag_asm::volatile_fill(&mut key[..], 0);
-
         }
     }
 }

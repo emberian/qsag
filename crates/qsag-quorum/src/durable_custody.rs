@@ -553,8 +553,9 @@ impl AnchoredFirstSignedCustody {
             journal_key.0,
             Box::new(journal_anchor),
         )?;
-        let first_signed = FsFirstSignedLedger::provision_genesis(ledger_path.as_ref(), ledger_key.0)
-            .map_err(|_| io::Error::other("failed to provision FsFirstSignedLedger"))?;
+        let first_signed =
+            FsFirstSignedLedger::provision_genesis(ledger_path.as_ref(), ledger_key.0)
+                .map_err(|_| io::Error::other("failed to provision FsFirstSignedLedger"))?;
         let initial = first_signed.checkpoint();
         let anchor = FsLedgerCheckpointAnchor::provision_genesis(
             anchor_path.as_ref(),

@@ -8,13 +8,19 @@ use qsag_core::wipe::ct_eq_bytes32;
 pub(crate) struct SecretKey(pub(crate) [u8; 32]);
 impl core::ops::Deref for SecretKey {
     type Target = [u8; 32];
-    fn deref(&self) -> &Self::Target { &self.0 }
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 impl core::ops::DerefMut for SecretKey {
-    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
 impl Drop for SecretKey {
-    fn drop(&mut self) { qsag_asm::ct_memzero(&mut self.0); }
+    fn drop(&mut self) {
+        qsag_asm::ct_memzero(&mut self.0);
+    }
 }
 
 fn absorb_framed(xof: &mut Cshake256Xof, part: &[u8]) {
