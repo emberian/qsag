@@ -6296,7 +6296,7 @@ theorem rustSum_add_split (n : Nat) (f : Nat → RustGf128) : ∀ m : Nat,
 theorem rustSum_blocks (B K : Nat) (f : Nat → RustGf128) :
     rustSum (B * K) f = rustSum B (fun b => rustSum K (fun u => f (K * b + u))) := by
   induction B with
-  | zero => simp [rustSum]
+  | zero => simp only [Nat.zero_mul, rustSum]
   | succ B ih =>
     have hEq : (B + 1) * K = B * K + K := by rw [Nat.add_mul, Nat.one_mul]
     rw [hEq, rustSum_add_split (B * K) f K, ih]
@@ -6326,7 +6326,8 @@ def packBlock128 (f : Nat → Bool) : RustGf128 :=
 theorem packBlock128_aux_bit : ∀ (n : Nat), n ≤ 128 → ∀ (f : Nat → Bool) (i : Nat),
     (rustSum n (fun k => if f k then BitVec.twoPow 128 k else 0#128)).getLsbD i =
       (decide (i < n) && f i)
-  | 0, _, f, i => by simp [rustSum]
+  | 0, _, f, i => by
+    simp only [rustSum, BitVec.getLsbD_zero, Nat.not_lt_zero, decide_false, Bool.false_and]
   | n + 1, hn, f, i => by
     show (rustSum n (fun k => if f k then BitVec.twoPow 128 k else 0#128) ^^^
       (if f n then BitVec.twoPow 128 n else 0#128)).getLsbD i = (decide (i < n + 1) && f i)
@@ -6470,9 +6471,10 @@ def polySumRust : Nat → (Nat → List RustGf128) → List RustGf128
 
 theorem polyAddRust_length : ∀ (a b : List RustGf128),
     (polyAddRust a b).length = Nat.max a.length b.length
-  | [], b => by simp [polyAddRust]
-  | a :: as, [] => by simp [polyAddRust]
-  | a :: as, b :: bs => by simp [polyAddRust, polyAddRust_length as bs, Nat.succ_max_succ]
+  | [], b => by simp only [polyAddRust, List.length_nil, Nat.zero_max]
+  | a :: as, [] => by simp only [polyAddRust, List.length_nil, Nat.max_zero]
+  | a :: as, b :: bs => by
+    simp only [polyAddRust, List.length_cons, polyAddRust_length as bs, Nat.succ_max_succ]
 
 theorem evalCoeffs_polyAddRust : ∀ (a b : List RustGf128) (x : RustGf128),
     RoundPoly.evalCoeffs (polyAddRust a b) x =
@@ -6610,15 +6612,17 @@ theorem polyMulRust_coeffAt (cs ds : List RustGf128) (k : Nat) :
       rw [hStep, polyAddRust_coeffAt, polyScaleRust_coeffAt]
       simp only [coeffAt]
       rw [ih k', rustSum_succ_head (k' + 1)]
-      rfl
+      simp only [coeffAt, Nat.sub_zero, Nat.succ_sub_succ_eq_sub]
 
 theorem coeffAt_ofFn {n : Nat} (f : Fin n → RustGf128) (k : Nat) :
     coeffAt (List.ofFn f) k = if hk : k < n then f ⟨k, hk⟩ else 0#128 := by
   induction n generalizing k with
-  | zero => simp [coeffAt]
+  | zero => simp only [List.ofFn_zero, coeffAt, Nat.not_lt_zero, ↓reduceDIte]
   | succ n ih =>
     cases k with
-    | zero => simp [List.ofFn_succ, coeffAt]
+    | zero =>
+      simp only [List.ofFn_succ, coeffAt, Nat.zero_lt_succ, ↓reduceDIte]
+      rfl
     | succ k' =>
       simp only [List.ofFn_succ, coeffAt, ih (fun i : Fin n => f i.succ) k']
       by_cases hk : k' < n
@@ -6739,13 +6743,14 @@ theorem round0IpClaim_err_eq_evalCoeffs
       intro blk _
       have hB : 1 ≤ (blockPolyB pending (128 * (blk / 8) + 16 * (blk % 8))
           (rustGf128Mul (gammas (blk / 8)) (BitVec.twoPow 128 (16 * (blk % 8)))) lane).length := by
-        simp [blockPolyB]
+        simp only [blockPolyB, List.length_ofFn]
+        decide
       have hMul := polyMulRust_length_le
         (blockPolyA pending (128 * (blk / 8) + 16 * (blk % 8)) lane) _ hB
       simp only [blockPolyA, blockPolyB, List.length_ofFn] at hMul
       exact hMul
     have hH0Len : (round0H0Coeffs (step0ZAcc pending numSuper gammas lane) h0).length = 31 := by
-      simp [round0H0Coeffs]
+      simp only [round0H0Coeffs, List.length_ofFn]
     exact Nat.max_le.mpr ⟨hSumLe, Nat.le_of_eq hH0Len⟩
   · unfold round0DefectCoeffs
     rw [polyAddRust_coeffAt, polySumRust_coeffAt]
@@ -6753,7 +6758,7 @@ theorem round0IpClaim_err_eq_evalCoeffs
         step0ZAcc pending numSuper gammas lane := by
       unfold round0H0Coeffs
       rw [coeffAt_ofFn, cDIte_pos (by decide : 15 < 31)]
-      simp
+      simp only [Nat.lt_irrefl, ↓reduceDIte]
     rw [hH0Mid]
     have hBlkMid : ∀ blk : Nat,
         coeffAt (polyMulRust
@@ -6779,11 +6784,11 @@ theorem round0IpClaim_err_eq_evalCoeffs
       rw [hSubSub]
       cases gateLhsBit pending (128 * (blk / 8) + 16 * (blk % 8) + u) lane <;>
         cases gateRhsBit pending (128 * (blk / 8) + 16 * (blk % 8) + u) lane
-      · simp only [Bool.false_and, ↓reduceIte]
+      · simp only [Bool.false_and, Bool.false_eq_true, ↓reduceIte]
         rw [rustGf128Mul_zero_left, rustGf128Mul_zero_right]
-      · simp only [Bool.false_and, ↓reduceIte]
+      · simp only [Bool.false_and, Bool.false_eq_true, ↓reduceIte]
         rw [rustGf128Mul_zero_left, rustGf128Mul_zero_right]
-      · simp only [Bool.and_false, ↓reduceIte]
+      · simp only [Bool.and_false, Bool.false_eq_true, ↓reduceIte]
         rw [rustGf128Mul_zero_right, rustGf128Mul_zero_right]
       · simp only [Bool.and_self, ↓reduceIte]
         rw [rustGf128Mul_left_comm (BitVec.twoPow 128 u), rustGf128Mul_comm (BitVec.twoPow 128 u),
@@ -6926,7 +6931,7 @@ theorem tooth_round0_unlocked_mid_forges_every_coin :
           | zero => decide
           | succ _ => rfl
         rw [hFalse]; rfl
-      · simp [hu]
+      · simp only [hu, ↓reduceDIte, ↓reduceIte]
     have hEvalZero : ∀ n, RoundPoly.evalCoeffs (List.replicate n (0#128 : RustGf128)) r0 = 0#128 := by
       intro n; induction n with
       | zero => rfl
@@ -6950,9 +6955,9 @@ theorem tooth_round0_unlocked_mid_forges_every_coin :
       by_cases hs : s < 31
       · simp only [hs, ↓reduceDIte, ↓reduceIte]
         by_cases hs15 : s < 15
-        · simp [hs15]
-        · by_cases hsEq : s = 15 <;> simp [hs15, hsEq]
-      · simp [hs]
+        · simp only [hs15, ↓reduceDIte]
+        · by_cases hsEq : s = 15 <;> simp only [hs15, hsEq, Nat.lt_irrefl, ↓reduceDIte]
+      · simp only [hs, ↓reduceDIte, ↓reduceIte]
     dsimp only
     rw [hDot0 8 (Nat.le_refl 8), hH0Zero, hEvalZero 31, BitVec.xor_zero]
 
