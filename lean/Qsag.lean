@@ -47,6 +47,7 @@ public import Qsag.MirSpecBridge
 public import Qsag.MirSpecBridgeCore
 public import Qsag.MirSpecBridgeWitnesses
 public import Qsag.MultiRoundFsQrom
+public import Qsag.ParallelSeededSpnSecurity
 public import Qsag.Poseidon2
 public import Qsag.Poseidon2AlgebraicAndRecursiveHem
 public import Qsag.PosixCrashWal
