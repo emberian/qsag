@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Check source policy; compiled dependency audits remain authoritative."""
+"""Check source policy; compiled dependency audits remain authoritative.
+
+Source-level gates over `lean/`, `aeneas/lean/` and `aeneas/lean-whir/`:
+  * no `axiom`, `sorry`, `native_decide`, `bv_decide`, `grind`, `Classical.choice` or compiler-trust
+    escapes; LAW-M1 expose budget; LAW-M2 meta imports; docstring citations resolve;
+  * every on-disk module is registered in its root umbrella and its axiom-audit manifest;
+  * `lean/Qsag/` is layered (see `LAYER_RANK`): imports only go down, every library module is
+    reachable from `Qsag/Top/`, and `import all` does not occur inside the library.
+There are no opt-outs: a tree that is mid-migration fails with the list of what is left.
+"""
+from collections import Counter
 import json
 from pathlib import Path
 import re
@@ -73,7 +83,7 @@ library_prefixes = (
     "aeneas/lean-whir/QsagWhirVerified/",
 )
 forbidden_tokens = re.compile(
-    r"\baxiom\b|\bsorry\b|\bnative_decide\b|\bbv_decide\b"
+    r"\baxiom\b|\bsorry\b|\bnative_decide\b|\bbv_decide\b|\bgrind\b"
     r"|\bClassical\.choice\b|\bLean\.ofReduceBool\b|\bLean\.ofReduceNat\b|\bLean\.trustCompiler\b"
 )
 declaration_pattern = re.compile(
@@ -170,6 +180,9 @@ for path in files:
         tok = match[0]
         if tok == "sorry" and relative in challenge_paths:
             continue
+        # A local binder or `match` scrutinee named `grind` (the WOTS+C grinding counter) is not the tactic.
+        if tok == "grind" and re.match(r"\s*(?::=|with\b)", source[match.end():]):
+            continue
         # Quoted declaration names (`Name or ``Name) in rejection/negative-control checks do not invoke the axiom.
         if tok in {"Classical.choice", "Lean.ofReduceBool", "Lean.ofReduceNat", "Lean.trustCompiler"} and (
             match.start() > 0 and source[match.start() - 1] == "`"
@@ -209,6 +222,105 @@ for manifest, import_pattern, base_dir, prefix in (
     }
     for missing in sorted(required - imported):
         errors.append(f"{manifest}: missing {missing}")
+
+
+# Layered architecture of `lean/Qsag/`. A module may import its own directory and any directory of
+# strictly lower rank. The ranks refine the tiers
+#   Spec <- {Math, Coding, Oracle} <- {Protocol, Custody} <- {Exec, Machine} <- Top <- Tests
+# with the one-way edges inside a tier that keep the directory graph acyclic: Coding and Oracle sit on
+# Math and do not import each other, Custody sits on Protocol, Machine sits on Exec. `Tactic` is
+# proof support below everything and imports no library layer.
+LAYER_RANK = {
+    "Tactic": 0, "Spec": 1, "Math": 2, "Coding": 3, "Oracle": 3,
+    "Protocol": 4, "Custody": 5, "Exec": 6, "Machine": 7, "Top": 8, "Tests": 9,
+}
+module_import_pattern = re.compile(
+    r"(?m)^[ \t]*(?:(?:public|private)[ \t]+)?(?:meta[ \t]+)?import[ \t]+(all[ \t]+)?([A-Za-z_][\w.]*)"
+)
+
+
+def layer_of(module):
+    """`Qsag.<Layer>.…` -> `<Layer>`; a module sitting directly in `lean/Qsag/` has no layer."""
+    parts = module.split(".")
+    return parts[1] if len(parts) > 2 else None
+
+
+def layer_violation(source, target):
+    """Why `source` may not import `target`, or None. Unplaced modules are reported separately."""
+    s, t = layer_of(source), layer_of(target)
+    if s not in LAYER_RANK or t not in LAYER_RANK or s == t or LAYER_RANK[t] < LAYER_RANK[s]:
+        return None
+    if LAYER_RANK[t] == LAYER_RANK[s]:
+        return f"{s} and {t} are peers and must not import each other"
+    return f"{s} must not import the higher layer {t}"
+
+
+for source, target, legal in (
+    ("Qsag.Top.A", "Qsag.Spec.B", True),
+    ("Qsag.Tests.A", "Qsag.Top.B", True),
+    ("Qsag.Coding.A", "Qsag.Coding.B", True),
+    ("Qsag.Custody.A", "Qsag.Protocol.Signing.B", True),
+    ("Qsag.Math.A", "Qsag.Protocol.Signing.B", False),
+    ("Qsag.Spec.A", "Qsag.Math.B", False),
+    ("Qsag.Coding.A", "Qsag.Oracle.B", False),
+    ("Qsag.Exec.A", "Qsag.Machine.B", False),
+    ("Qsag.Top.A", "Qsag.Tests.B", False),
+    ("Qsag.Tactic.A", "Qsag.Math.B", False),
+):
+    if (layer_violation(source, target) is None) != legal:
+        raise RuntimeError(f"layer rule control failed: {source} -> {target}")
+
+qsag_dir = root / "lean/Qsag"
+file_imports = {}  # relative path -> [(line, is `import all`, imported module)]
+qsag_imports = {}  # Qsag module -> (relative path, the same list)
+for path in files:
+    relative = str(path.relative_to(root))
+    source = code(path.read_text())
+    file_imports[relative] = [
+        (source[: m.start()].count("\n") + 1, bool(m[1]), m[2])
+        for m in module_import_pattern.finditer(source)
+    ]
+    if relative.startswith("lean/Qsag/"):
+        module = "Qsag." + ".".join(path.relative_to(qsag_dir).with_suffix("").parts)
+        qsag_imports[module] = (relative, file_imports[relative])
+qsag_modules = set(qsag_imports) | {"Qsag"}
+layer_counts = Counter()
+
+for relative, imports in file_imports.items():
+    for line, _, target in imports:
+        if target.startswith("Qsag.") and target not in qsag_modules:
+            layer_counts["dangling"] += 1
+            errors.append(f"{relative}:{line}: imports missing module {target}")
+
+for module, (relative, imports) in sorted(qsag_imports.items()):
+    if layer_of(module) not in LAYER_RANK:
+        layer_counts["unplaced"] += 1
+        errors.append(
+            f"{relative}: layering: module is not under one of lean/Qsag/{{{','.join(LAYER_RANK)}}}/"
+        )
+    import_all = sum(is_all for _, is_all, _ in imports)
+    if import_all:
+        layer_counts["import_all_files"] += 1
+        layer_counts["import_all_edges"] += import_all
+        errors.append(f"{relative}: LAW-M1: {import_all} `import all` inside lean/Qsag/")
+    for line, _, target in imports:
+        if target in qsag_imports and (why := layer_violation(module, target)):
+            layer_counts["layer_order"] += 1
+            errors.append(f"{relative}:{line}: layering: imports {target}: {why}")
+
+# Zero islands: every library module is in the import closure of `Qsag/Top/`.
+reached, frontier = set(), [m for m in qsag_imports if layer_of(m) == "Top"]
+if not frontier:
+    errors.append("lean/Qsag/Top: layering: no Top modules; nothing composes the library")
+while frontier:
+    module = frontier.pop()
+    if module not in reached and module in qsag_imports:
+        reached.add(module)
+        frontier.extend(target for _, _, target in qsag_imports[module][1])
+for module, (relative, _) in sorted(qsag_imports.items()):
+    if module not in reached and layer_of(module) not in ("Top", "Tests"):
+        layer_counts["islands"] += 1
+        errors.append(f"{relative}: layering: not reachable from any Qsag.Top module")
 
 
 # Mechanical 100% symbol-coverage gate for extracted `aeneas/lean-whir/QsagWhirVerified/Funs.lean`.
@@ -329,12 +441,18 @@ for unanchored in sorted(whir_comparator_short - whir_anchored_short):
         f"aeneas/lean-whir/AuditWhirMirAxioms.lean: comparator theorem `{unanchored}` missing from requiredWhirMirTheorems"
     )
 
-print(
-    "\n".join(errors)
-    if errors
-    else (
-        f"PASS: {len(files)} library/support/challenge source files; no forbidden proof escapes; "
-        f"expose limit 12; {len(whir_funs_defs)}/{len(whir_funs_defs)} WHIR Funs.lean definitions covered"
+if errors:
+    print("\n".join(errors))
+    print(
+        f"FAIL: {len(errors)} policy violations; layering: "
+        f"{layer_counts['import_all_edges']} `import all` in {layer_counts['import_all_files']} files, "
+        f"{layer_counts['layer_order']} upward or peer imports, {layer_counts['islands']} islands, "
+        f"{layer_counts['unplaced']} unplaced modules, {layer_counts['dangling']} dangling imports"
     )
-)
+else:
+    print(
+        f"PASS: {len(files)} library/support/challenge source files; no forbidden proof escapes; "
+        f"expose limit 12; {len(qsag_imports)} Qsag modules layered, reachable from Top, no `import all`; "
+        f"{len(whir_funs_defs)}/{len(whir_funs_defs)} WHIR Funs.lean definitions covered"
+    )
 raise SystemExit(bool(errors))
