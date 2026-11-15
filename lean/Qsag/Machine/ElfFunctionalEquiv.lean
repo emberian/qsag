@@ -7412,3 +7412,3687 @@ private theorem gf256MacAvx2_reaches_full (k : Nat) (hk : k + 1 < 0x100000000000
   rw [hN] at hComb
   exact hComb
 
+theorem current_gf256_shamir_mac_avx2_loop_functional
+    (k : Nat) (s : X86State)
+    (hk : 32 * (k + 1) ≤ 0x10000000000000000)
+    (hpc : s.pc = 0) (hh : s.halted = false)
+    (hc : s.gpr.get 1 = UInt64.ofNat (k + 1))
+    (hDisj : ∀ i j : Nat, i < 32 * (k + 1) → j < 32 * (k + 1) →
+      s.gpr.get 7 + UInt64.ofNat i ≠ s.gpr.get 6 + UInt64.ofNat j)
+    (hTables : gf256MacAvx2Tables s.mem (s.gpr.get 8)) :
+    ∃ slice prog, findSliceByNameBytes currentX86ExtractedSlices
+      gf256MacAvx2Name = some slice ∧
+      decodeX86Stream slice.code = some prog ∧
+      ∀ extra : Nat,
+        let result := runX86 prog (135 + 14 * k + extra) s
+        result.1.halted = true ∧ result.1.pc = 554 ∧
+        result.2.length = 135 + 14 * k ∧ result.1.ymmDirty = false ∧
+        result.1.ymm = Bank16.const Vec256.zero ∧
+        (∀ idx : Nat, idx < 32 * (k + 1) →
+          Simulates 3
+            (towerAdd 3 (unpackTower 3 (s.mem (s.gpr.get 7 + UInt64.ofNat idx)).toBitVec)
+              (towerMul 3 (unpackTower 3 (s.mem (s.gpr.get 6 + UInt64.ofNat idx)).toBitVec)
+                (unpackTower 3 (maskGprWidth false (s.gpr.get 2)).toUInt8.toBitVec)))
+            (result.1.mem (s.gpr.get 7 + UInt64.ofNat idx)).toBitVec) ∧
+        (∀ a : UInt64, (∀ idx : Nat, idx < 32 * (k + 1) →
+          a ≠ s.gpr.get 7 + UInt64.ofNat idx) → result.1.mem a = s.mem a) := by
+  obtain ⟨slice, hf, hd⟩ := gf256MacAvx2_fresh_decode
+  refine ⟨slice, gf256MacAvx2Prog, hf, hd, ?_⟩
+  rcases s with ⟨pc, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+    ⟨y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, y14, y15⟩,
+    cf, o, zf, dy, hlt, mem⟩
+  dsimp only at hpc hh; subst hpc hh
+  have hr1 : r1 = UInt64.ofNat (k + 1) := hc
+  subst hr1
+  have hR := gf256MacAvx2_reaches_full k (by omega)
+    r0 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15
+    y0 y1 y2 y3 y4 y5 y6 y7 y8 y9 y10 y11 y12 y13 y14 y15 cf o zf dy mem hTables
+  obtain ⟨_, _, hPost⟩ := ExecReachesX86_ret hR rfl (show
+    findInstrAtPc 554 gf256MacAvx2Prog = some ⟨554, 1, .ret⟩ from rfl)
+  intro extra
+  have hRun := (hPost extra).1
+  have hLen := (hPost extra).2
+  have hN : 134 + 14 * k + 1 = 135 + 14 * k := by omega
+  rw [hN] at hRun hLen
+  dsimp only
+  rw [hRun, hLen]
+  refine ⟨rfl, rfl, rfl, rfl, rfl, ?_, ?_⟩
+  · intro idx hidx
+    dsimp only
+    simp only [b16get_7, b16get_6, b16get_2]
+    rw [gf256MacGfniIterMem_at (k + 1) mem r7 r6 r2 hk hDisj idx hidx,
+      UInt8.toBitVec_xor]
+    exact Simulates.add 3 (packTower_unpackTower 3 _)
+      (gfniTowerMulByte_simulates_binaryTower _ _)
+  · intro a ha
+    exact gf256MacGfniIterMem_outside (k + 1) mem r7 r6 r2 a hk ha
+
+
+
+
+def gf256MacAvx2WitnessState : X86State :=
+  ⟨0, ⟨0, 1, 0, 0, 0, 0, 256, 384, 0, 0, 0, 0, 0, 0, 0, 0⟩,
+    Bank16.const Vec256.zero, false, false, false, false, false, gf256Avx2WitnessMem⟩
+
+theorem gf256MacAvx2Witness_tables : gf256MacAvx2Tables gf256Avx2WitnessMem 0 := by
+  exact ⟨gf256MulAvx2Witness_tables, by decide +kernel⟩
+
+theorem gf256MacAvx2_inhabited :
+    ∃ k : Nat, ∃ s : X86State,
+      32 * (k + 1) ≤ 0x10000000000000000 ∧
+      s.pc = 0 ∧ s.halted = false ∧ s.gpr.get 1 = UInt64.ofNat (k + 1) ∧
+      (∀ i j : Nat, i < 32 * (k + 1) → j < 32 * (k + 1) →
+        s.gpr.get 7 + UInt64.ofNat i ≠ s.gpr.get 6 + UInt64.ofNat j) ∧
+      gf256MacAvx2Tables s.mem (s.gpr.get 8) := by
+  exact ⟨0, gf256MacAvx2WitnessState, by decide, rfl, rfl, rfl,
+    gf256MulAvx2Witness_disjointA, gf256MacAvx2Witness_tables⟩
+
+theorem gf256MacAvx2_overwrite_tooth :
+    ∃ slice prog, findSliceByNameBytes currentX86ExtractedSlices gf256MacAvx2Name = some slice ∧
+      decodeX86Stream slice.code = some prog ∧
+      (runX86 prog 135 gf256MacAvx2WitnessState).1.mem 384 ≠
+        gfniTowerMulByte (gf256MacAvx2WitnessState.mem 256) 0 := by
+  obtain ⟨slice, prog, hf, hd, hfun⟩ := current_gf256_shamir_mac_avx2_loop_functional
+    0 gf256MacAvx2WitnessState (by decide) rfl rfl rfl
+    gf256MulAvx2Witness_disjointA gf256MacAvx2Witness_tables
+  refine ⟨slice, prog, hf, hd, ?_⟩
+  have hb := (hfun 0).2.2.2.2.2.1 0 (by decide)
+  change Simulates 3 (towerAdd 3 (unpackTower 3 (1 : UInt8).toBitVec)
+    (towerMul 3 (unpackTower 3 (1 : UInt8).toBitVec)
+      (unpackTower 3 (0 : UInt8).toBitVec)))
+    ((runX86 prog 135 gf256MacAvx2WitnessState).1.mem 384).toBitVec at hb
+  have hone : ((runX86 prog 135 gf256MacAvx2WitnessState).1.mem 384).toBitVec = 1#8 := hb.symm
+  intro heq
+  have hzero := congrArg UInt8.toBitVec heq
+  rw [hone] at hzero
+  exact (by decide : (1#8 : BitVec 8) ≠ (gfniTowerMulByte 1 0).toBitVec) hzero
+
+#tooth_pair current_gf256_shamir_mac_avx2_loop_functional vs gf256MacAvx2_overwrite_tooth
+#verify_inhabited current_gf256_shamir_mac_avx2_loop_functional gf256MacAvx2_inhabited
+
+
+end
+
+
+
+section KeccakMpcFreshVerification
+set_option maxHeartbeats 2000000
+set_option linter.unusedSimpArgs false
+
+def keccakChiMpcName : List UInt8 := [113, 115, 97, 103, 95, 97, 115, 109, 95, 107, 101, 99, 99, 97, 107, 95, 99, 104, 105, 95, 109, 112, 99, 95, 97, 118, 120, 50]
+
+def keccakChiMpcProg : List (DecodedInstr X86Instr) := [
+  ⟨0, 4, .vload true 0 (.baseDisp 6 0)⟩,
+  ⟨4, 5, .vload true 1 (.baseDisp 6 32)⟩,
+  ⟨9, 5, .vload true 2 (.baseDisp 6 64)⟩,
+  ⟨14, 5, .vload true 3 (.baseDisp 6 96)⟩,
+  ⟨19, 8, .vload true 4 (.baseDisp 6 128)⟩,
+  ⟨27, 4, .vload true 5 (.baseDisp 2 0)⟩,
+  ⟨31, 5, .vload true 6 (.baseDisp 2 32)⟩,
+  ⟨36, 5, .vload true 7 (.baseDisp 2 64)⟩,
+  ⟨41, 5, .vload true 8 (.baseDisp 2 96)⟩,
+  ⟨46, 8, .vload true 9 (.baseDisp 2 128)⟩,
+  ⟨54, 4, .vbinOp .vpxor true 10 2 7⟩,
+  ⟨58, 4, .vbinOp .vpand true 10 10 1⟩,
+  ⟨62, 4, .vbinOp .vpand true 11 6 2⟩,
+  ⟨66, 5, .vbinOp .vpxor true 10 10 11⟩,
+  ⟨71, 4, .vbinOp .vpxor true 11 0 2⟩,
+  ⟨75, 5, .vbinOp .vpxor true 10 10 11⟩,
+  ⟨80, 4, .vpxorLoad256 10 10 (.baseDisp 1 0)⟩,
+  ⟨84, 4, .vstore true 10 (.baseDisp 7 0)⟩,
+  ⟨88, 4, .vbinOp .vpxor true 10 8 3⟩,
+  ⟨92, 4, .vbinOp .vpand true 10 10 2⟩,
+  ⟨96, 4, .vbinOp .vpand true 11 7 3⟩,
+  ⟨100, 5, .vbinOp .vpxor true 10 10 11⟩,
+  ⟨105, 4, .vbinOp .vpxor true 11 1 3⟩,
+  ⟨109, 5, .vbinOp .vpxor true 10 10 11⟩,
+  ⟨114, 5, .vpxorLoad256 10 10 (.baseDisp 1 32)⟩,
+  ⟨119, 5, .vstore true 10 (.baseDisp 7 32)⟩,
+  ⟨124, 4, .vbinOp .vpxor true 10 9 4⟩,
+  ⟨128, 4, .vbinOp .vpand true 10 10 3⟩,
+  ⟨132, 4, .vbinOp .vpand true 11 8 4⟩,
+  ⟨136, 5, .vbinOp .vpxor true 10 10 11⟩,
+  ⟨141, 4, .vbinOp .vpxor true 11 2 4⟩,
+  ⟨145, 5, .vbinOp .vpxor true 10 10 11⟩,
+  ⟨150, 5, .vpxorLoad256 10 10 (.baseDisp 1 64)⟩,
+  ⟨155, 5, .vstore true 10 (.baseDisp 7 64)⟩,
+  ⟨160, 4, .vbinOp .vpxor true 10 0 5⟩,
+  ⟨164, 4, .vbinOp .vpand true 10 10 4⟩,
+  ⟨168, 4, .vbinOp .vpand true 11 9 0⟩,
+  ⟨172, 5, .vbinOp .vpxor true 10 10 11⟩,
+  ⟨177, 4, .vbinOp .vpxor true 11 3 0⟩,
+  ⟨181, 5, .vbinOp .vpxor true 10 10 11⟩,
+  ⟨186, 5, .vpxorLoad256 10 10 (.baseDisp 1 96)⟩,
+  ⟨191, 5, .vstore true 10 (.baseDisp 7 96)⟩,
+  ⟨196, 4, .vbinOp .vpxor true 10 1 6⟩,
+  ⟨200, 4, .vbinOp .vpand true 10 10 0⟩,
+  ⟨204, 4, .vbinOp .vpand true 11 5 1⟩,
+  ⟨208, 5, .vbinOp .vpxor true 10 10 11⟩,
+  ⟨213, 4, .vbinOp .vpxor true 11 4 1⟩,
+  ⟨217, 5, .vbinOp .vpxor true 10 10 11⟩,
+  ⟨222, 8, .vpxorLoad256 10 10 (.baseDisp 1 128)⟩,
+  ⟨230, 8, .vstore true 10 (.baseDisp 7 128)⟩,
+  ⟨238, 4, .vbinOp .vpxor true 0 0 0⟩,
+  ⟨242, 4, .vbinOp .vpxor true 1 1 1⟩,
+  ⟨246, 4, .vbinOp .vpxor true 2 2 2⟩,
+  ⟨250, 4, .vbinOp .vpxor true 3 3 3⟩,
+  ⟨254, 4, .vbinOp .vpxor true 4 4 4⟩,
+  ⟨258, 4, .vbinOp .vpxor true 5 5 5⟩,
+  ⟨262, 4, .vbinOp .vpxor true 6 6 6⟩,
+  ⟨266, 4, .vbinOp .vpxor true 7 7 7⟩,
+  ⟨270, 5, .vbinOp .vpxor true 8 8 8⟩,
+  ⟨275, 5, .vbinOp .vpxor true 9 9 9⟩,
+  ⟨280, 5, .vbinOp .vpxor true 10 10 10⟩,
+  ⟨285, 5, .vbinOp .vpxor true 11 11 11⟩,
+  ⟨290, 3, .vzeroall⟩,
+  ⟨293, 3, .vzeroupper⟩,
+  ⟨296, 2, .aluRegReg .xorOp false 7 7⟩,
+  ⟨298, 2, .aluRegReg .xorOp false 6 6⟩,
+  ⟨300, 2, .aluRegReg .xorOp false 2 2⟩,
+  ⟨302, 2, .aluRegReg .xorOp false 1 1⟩,
+  ⟨304, 3, .aluRegReg .xorOp false 8 8⟩,
+  ⟨307, 3, .aluRegReg .xorOp false 9 9⟩,
+  ⟨310, 3, .aluRegReg .xorOp false 10 10⟩,
+  ⟨313, 3, .aluRegReg .xorOp false 11 11⟩,
+  ⟨316, 2, .aluRegReg .xorOp false 0 0⟩,
+  ⟨318, 1, .ret⟩
+]
+
+theorem keccakChiMpc_decoded :
+    (findSliceByNameBytes currentX86ExtractedSlices keccakChiMpcName).bind
+      (fun sl => decodeX86Stream sl.code) = some keccakChiMpcProg := by decide +kernel
+
+
+/-- One party's RSS share of a Keccak chi gate. `a,b,c` belong to its first
+share, and `bNext,cNext` to the next party's share; `r` is its zero-share mask. -/
+def keccakChiMpcShareWord (a b c bNext cNext r : UInt64) : UInt64 :=
+  (((c ^^^ cNext) &&& b) ^^^ (bNext &&& c)) ^^^ (a ^^^ c) ^^^ r
+
+private theorem keccakChiMpc_bool_identity :
+    ∀ (a0 a1 a2 b0 b1 b2 c0 c1 c2 r0 r1 r2 : Bool),
+    ((((((c0 ^^ c1) && b0) ^^ (b1 && c0)) ^^ (a0 ^^ c0)) ^^ r0) ^^
+    (((((c1 ^^ c2) && b1) ^^ (b2 && c1)) ^^ (a1 ^^ c1)) ^^ r1) ^^
+    (((((c2 ^^ c0) && b2) ^^ (b0 && c2)) ^^ (a2 ^^ c2)) ^^ r2)) =
+      (keccakChiBit (a0 ^^ a1 ^^ a2) (b0 ^^ b1 ^^ b2) (c0 ^^ c1 ^^ c2) ^^
+        (r0 ^^ r1 ^^ r2)) := by
+  decide +kernel
+
+/-- Three cyclic RSS parties reconstruct ordinary chi, with all masks exposed. -/
+theorem keccakChiMpcShareWord_reconstruct
+    (a0 a1 a2 b0 b1 b2 c0 c1 c2 r0 r1 r2 : UInt64)
+    (hr : r0 ^^^ r1 ^^^ r2 = 0) :
+    keccakChiMpcShareWord a0 b0 c0 b1 c1 r0 ^^^
+      keccakChiMpcShareWord a1 b1 c1 b2 c2 r1 ^^^
+      keccakChiMpcShareWord a2 b2 c2 b0 c0 r2 =
+    (a0 ^^^ a1 ^^^ a2) ^^^ ((~~~(b0 ^^^ b1 ^^^ b2)) &&& (c0 ^^^ c1 ^^^ c2)) := by
+  apply UInt64.eq_of_toBitVec_eq
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hi
+  have hm := congrArg (fun x : UInt64 => x.toBitVec.getLsbD i) hr
+  simp only [UInt64.toBitVec_xor, BitVec.getLsbD_xor] at hm
+  have hzero : (0 : UInt64).toBitVec.getLsbD i = false := by simp
+  rw [hzero] at hm
+  rw [chiWordBit_eq_keccakChiBit _ _ _ i hi]
+  simp only [keccakChiMpcShareWord, UInt64.toBitVec_xor, UInt64.toBitVec_and,
+    BitVec.getLsbD_xor, BitVec.getLsbD_and]
+  rw [keccakChiMpc_bool_identity, hm, Bool.xor_false]
+
+/-- All 64 bits of each reconstructed word are the canonical boolean chi gate. -/
+theorem keccakChiMpcShareWord_reconstruct_bit
+    (a0 a1 a2 b0 b1 b2 c0 c1 c2 r0 r1 r2 : UInt64)
+    (hr : r0 ^^^ r1 ^^^ r2 = 0) (i : Nat) (hi : i < 64) :
+    (keccakChiMpcShareWord a0 b0 c0 b1 c1 r0 ^^^
+      keccakChiMpcShareWord a1 b1 c1 b2 c2 r1 ^^^
+      keccakChiMpcShareWord a2 b2 c2 b0 c0 r2).toBitVec.getLsbD i =
+    keccakChiBit ((a0 ^^^ a1 ^^^ a2).toBitVec.getLsbD i)
+      ((b0 ^^^ b1 ^^^ b2).toBitVec.getLsbD i)
+      ((c0 ^^^ c1 ^^^ c2).toBitVec.getLsbD i) := by
+  rw [keccakChiMpcShareWord_reconstruct _ _ _ _ _ _ _ _ _ _ _ _ hr]
+  exact chiWordBit_eq_keccakChiBit _ _ _ i hi
+
+/-- The five 256-bit vectors are five chi row coordinates, each containing four
+independent 64-bit words. They are not two XOR-reconstructed shares of a state. -/
+def keccakChiMpcRowWord (s t r : Nat → Nat → UInt64) (x q : Nat) : UInt64 :=
+  keccakChiMpcShareWord (s x q) (s ((x + 1) % 5) q) (s ((x + 2) % 5) q)
+    (t ((x + 1) % 5) q) (t ((x + 2) % 5) q) (r x q)
+
+/-- Embed any one of the four independent input rows in the first row of a
+Keccak state. The unused rows are zero and stay zero under chi. -/
+def keccakChiMpcRowState (s : Nat → Nat → UInt64) (q : Nat) : KState :=
+  ⟨s 0 q, s 1 q, s 2 q, s 3 q, s 4 q,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0⟩
+
+/-- Every one of the four rows (all 5 × 256 boolean gates) reconstructs to
+`Keccak.chiS`; masks may vary independently between coordinates and words. -/
+theorem keccakChiMpcRow_reconstruct
+    (s0 s1 s2 r0 r1 r2 : Nat → Nat → UInt64)
+    (hr : ∀ x q : Nat, x < 5 → q < 4 → r0 x q ^^^ r1 x q ^^^ r2 x q = 0)
+    (q : Nat) (hq : q < 4) :
+    keccakChiMpcRowState (fun x j =>
+      keccakChiMpcRowWord s0 s1 r0 x j ^^^ keccakChiMpcRowWord s1 s2 r1 x j ^^^
+        keccakChiMpcRowWord s2 s0 r2 x j) q =
+    chiS (keccakChiMpcRowState (fun x j => s0 x j ^^^ s1 x j ^^^ s2 x j) q) := by
+  unfold keccakChiMpcRowState chiS keccakChiMpcRowWord
+  dsimp only
+  congr 1
+  all_goals first
+    | exact keccakChiMpcShareWord_reconstruct _ _ _ _ _ _ _ _ _ _ _ _ (hr _ q (by decide) hq)
+    | rfl
+
+/-- Omitting the linear `c` contribution is a wrong specification: even a
+single set input bit with zero neighbours must survive the NOT term. -/
+theorem keccakChiMpcShareWord_tooth :
+    keccakChiMpcShareWord 0 0 1 0 0 0 ≠ (0 : UInt64) := by
+  decide +kernel
+
+theorem keccakChiMpcRow_inhabited :
+    ∃ (s0 s1 s2 r0 r1 r2 : Nat → Nat → UInt64) (q : Nat),
+      (∀ x j : Nat, x < 5 → j < 4 → r0 x j ^^^ r1 x j ^^^ r2 x j = 0) ∧
+      q < 4 ∧ keccakChiMpcRowState s0 q = zeroKState ∧
+      keccakChiMpcRowState s1 q = zeroKState ∧ keccakChiMpcRowState s2 q = zeroKState := by
+  refine ⟨(fun _ _ => 0), (fun _ _ => 0), (fun _ _ => 0),
+    (fun _ _ => 0), (fun _ _ => 0), (fun _ _ => 0), 0, ?_, by decide, rfl, rfl, rfl⟩
+  intro _ _ _ _
+  change (0 : UInt64) ^^^ 0 ^^^ 0 = 0
+  decide +kernel
+
+#tooth_pair keccakChiMpcRow_reconstruct vs keccakChiMpcShareWord_tooth
+#verify_inhabited keccakChiMpcRow_reconstruct keccakChiMpcRow_inhabited
+
+theorem keccakChiMpc_readMem64_writeMem256_disjoint
+    (mem : UInt64 → UInt8) (a1 a2 : UInt64) (v : Vec256)
+    (hd : ∀ i k : Nat, i < 8 → k < 32 → a1 + UInt64.ofNat i ≠ a2 + UInt64.ofNat k) :
+    readMem64 (writeMem256 mem a2 v) a1 = readMem64 mem a1 := by
+  rw [readMem64_eq_mapBytes64, readMem64_eq_mapBytes64]
+  unfold mapBytes64
+  simp only [writeMem256_outside mem a2 v _ (hd 0 · (by decide)),
+    writeMem256_outside mem a2 v _ (hd 1 · (by decide)),
+    writeMem256_outside mem a2 v _ (hd 2 · (by decide)),
+    writeMem256_outside mem a2 v _ (hd 3 · (by decide)),
+    writeMem256_outside mem a2 v _ (hd 4 · (by decide)),
+    writeMem256_outside mem a2 v _ (hd 5 · (by decide)),
+    writeMem256_outside mem a2 v _ (hd 6 · (by decide)),
+    writeMem256_outside mem a2 v _ (hd 7 · (by decide))]
+
+theorem keccakChiMpc_readMem256_writeMem256_disjoint
+    (mem : UInt64 → UInt8) (a1 a2 : UInt64) (v : Vec256)
+    (hd : ∀ i k : Nat, i < 32 → k < 32 → a1 + UInt64.ofNat i ≠ a2 + UInt64.ofNat k) :
+    readMem256 (writeMem256 mem a2 v) a1 = readMem256 mem a1 := by
+  have h (off : Nat) (ho : off ≤ 24) :
+      readMem64 (writeMem256 mem a2 v) (a1 + UInt64.ofNat off) =
+        readMem64 mem (a1 + UInt64.ofNat off) := by
+    apply keccakChiMpc_readMem64_writeMem256_disjoint
+    intro i k hi hk heq
+    rw [u64_add_ofNat_assoc a1 off i (by omega)] at heq
+    exact hd (off + i) k (by omega) hk heq
+  unfold readMem256
+  have h0 := h 0 (by decide)
+  have hz : UInt64.ofNat 0 = (0 : UInt64) := by decide +kernel
+  rw [hz, UInt64.add_zero] at h0
+  have h8 : UInt64.ofNat 8 = (8 : UInt64) := by decide +kernel
+  have h16 : UInt64.ofNat 16 = (16 : UInt64) := by decide +kernel
+  have h24 : UInt64.ofNat 24 = (24 : UInt64) := by decide +kernel
+  rw [← h8, ← h16, ← h24]
+  rw [h0, h 8 (by decide), h 16 (by decide), h 24 (by decide)]
+
+theorem keccakChiMpc_readMem256_writeMem256_same
+    (mem : UInt64 → UInt8) (a : UInt64) (v : Vec256) :
+    readMem256 (writeMem256 mem a v) a = v := by
+  have hd (o1 o2 : Nat) (h1 : o1 ≤ 24) (h2 : o2 ≤ 24)
+      (hne : o1 + 8 ≤ o2 ∨ o2 + 8 ≤ o1)
+      (m : UInt64 → UInt8) (w : UInt64) :
+      readMem64 (writeMem64 m (a + UInt64.ofNat o2) w) (a + UInt64.ofNat o1) =
+        readMem64 m (a + UInt64.ofNat o1) := by
+    apply readMem64_writeMem64_disjoint
+    intro i j hi hj heq
+    rw [u64_add_ofNat_assoc a o1 i (by omega),
+      u64_add_ofNat_assoc a o2 j (by omega)] at heq
+    have := u64_add_ofNat_inj (by omega) (by omega) heq
+    omega
+  have hd0 (o2 : Nat) (h2 : o2 ≤ 24) (hne : 8 ≤ o2)
+      (m : UInt64 → UInt8) (w : UInt64) :
+      readMem64 (writeMem64 m (a + UInt64.ofNat o2) w) a = readMem64 m a := by
+    have hz : UInt64.ofNat 0 = (0 : UInt64) := by decide +kernel
+    simpa only [hz, UInt64.add_zero] using hd 0 o2 (by decide) h2 (Or.inl hne) m w
+  unfold readMem256 writeMem256
+  dsimp only
+  have h8 : UInt64.ofNat 8 = (8 : UInt64) := by decide +kernel
+  have h16 : UInt64.ofNat 16 = (16 : UInt64) := by decide +kernel
+  have h24 : UInt64.ofNat 24 = (24 : UInt64) := by decide +kernel
+  rw [← h8, ← h16, ← h24]
+  rw [hd0 24 (by decide) (by decide), hd0 16 (by decide) (by decide),
+    hd0 8 (by decide) (by decide), readMem64_writeMem64_same,
+    hd 8 24 (by decide) (by decide) (by omega),
+    hd 8 16 (by decide) (by decide) (by omega), readMem64_writeMem64_same,
+    hd 16 24 (by decide) (by decide) (by omega), readMem64_writeMem64_same,
+    readMem64_writeMem64_same]
+
+
+/-- Output stores may alias the two input share rows (which are loaded first),
+but not the mask row, which is read incrementally. -/
+def keccakChiMpcSeparated (dst mask : UInt64) : Prop :=
+  ∀ i j : Nat, i < 160 → j < 160 → dst + UInt64.ofNat i ≠ mask + UInt64.ofNat j
+
+private theorem keccakChiMpc_maskRead (mem : UInt64 → UInt8) (dst mask : UInt64)
+    (h : keccakChiMpcSeparated dst mask) (i j : Nat) (hi : i ≤ 128) (hj : j ≤ 128)
+    (v : Vec256) :
+    readMem256 (writeMem256 mem (dst + UInt64.ofNat i) v) (mask + UInt64.ofNat j) =
+      readMem256 mem (mask + UInt64.ofNat j) := by
+  apply keccakChiMpc_readMem256_writeMem256_disjoint
+  intro k l hk hl he
+  rw [u64_add_ofNat_assoc mask j k (by omega),
+    u64_add_ofNat_assoc dst i l (by omega)] at he
+  exact h (i + l) (j + k) (by omega) (by omega) he.symm
+
+/-- Four independent words of a single RSS output coordinate. -/
+def keccakChiMpcShareVec (a b c bn cn r : Vec256) : Vec256 :=
+  ⟨keccakChiMpcShareWord a.w0 b.w0 c.w0 bn.w0 cn.w0 r.w0,
+   keccakChiMpcShareWord a.w1 b.w1 c.w1 bn.w1 cn.w1 r.w1,
+   keccakChiMpcShareWord a.w2 b.w2 c.w2 bn.w2 cn.w2 r.w2,
+   keccakChiMpcShareWord a.w3 b.w3 c.w3 bn.w3 cn.w3 r.w3⟩
+
+def keccakChiMpcOutVec (mem : UInt64 → UInt8) (s0 s1 mask : UInt64) (x : Nat) : Vec256 :=
+  keccakChiMpcShareVec (readMem256 mem (s0 + UInt64.ofNat (32 * x)))
+    (readMem256 mem (s0 + UInt64.ofNat (32 * ((x + 1) % 5))))
+    (readMem256 mem (s0 + UInt64.ofNat (32 * ((x + 2) % 5))))
+    (readMem256 mem (s1 + UInt64.ofNat (32 * ((x + 1) % 5))))
+    (readMem256 mem (s1 + UInt64.ofNat (32 * ((x + 2) % 5))))
+    (readMem256 mem (mask + UInt64.ofNat (32 * x)))
+
+/-- The entire 160-byte RSS chi output, all five coordinates and all four words. -/
+def keccakChiMpcOutMem (mem : UInt64 → UInt8) (dst s0 s1 mask : UInt64) : UInt64 → UInt8 :=
+  let m0 := writeMem256 mem (dst + 0) (keccakChiMpcOutVec mem s0 s1 mask 0)
+  let m1 := writeMem256 m0 (dst + 32) (keccakChiMpcOutVec mem s0 s1 mask 1)
+  let m2 := writeMem256 m1 (dst + 64) (keccakChiMpcOutVec mem s0 s1 mask 2)
+  let m3 := writeMem256 m2 (dst + 96) (keccakChiMpcOutVec mem s0 s1 mask 3)
+  let m4 := writeMem256 m3 (dst + 128) (keccakChiMpcOutVec mem s0 s1 mask 4)
+  m4
+
+private theorem keccakChiMpc_xor_comm (a b : UInt64) : a ^^^ b = b ^^^ a := by
+  apply UInt64.eq_of_toBitVec_eq
+  simp only [UInt64.toBitVec_xor, BitVec.xor_comm]
+
+private theorem keccakChiMpc_loads (g : Bank16 UInt64) (y : Bank16 Vec256)
+    (cf o zf dy : Bool) (m : UInt64 → UInt8) :
+    ExecReachesX86 keccakChiMpcProg 10
+      ⟨0, g, y, cf, o, zf, dy, false, m⟩
+      ⟨54, g, ⟨readMem256 m (g.get 6 + 0), readMem256 m (g.get 6 + 32), readMem256 m (g.get 6 + 64), readMem256 m (g.get 6 + 96), readMem256 m (g.get 6 + 128), readMem256 m (g.get 2 + 0), readMem256 m (g.get 2 + 32), readMem256 m (g.get 2 + 64), readMem256 m (g.get 2 + 96), readMem256 m (g.get 2 + 128), y.get 10, y.get 11, y.get 12, y.get 13, y.get 14, y.get 15⟩, cf, o, zf, true, false, m⟩ := by
+  apply StepsX86.toExecReaches
+  iterate 10
+    apply StepsX86.cons rfl rfl
+    · simp only [ite_true, ite_false, stepX86, evalX86Addr, clampVecWidth, Bank16.set, Bank16.get, Bool.or_true]
+      rfl
+  exact StepsX86.zero _
+
+private theorem keccakChiMpc_lane0 (g : Bank16 UInt64)
+    (a0 a1 a2 a3 a4 b0 b1 b2 b3 b4 t10 t11 y12 y13 y14 y15 : Vec256)
+    (cf o zf : Bool) (m : UInt64 → UInt8) :
+    ExecReachesX86 keccakChiMpcProg 8
+      ⟨54, g, ⟨a0, a1, a2, a3, a4, b0, b1, b2, b3, b4, t10, t11, y12, y13, y14, y15⟩, cf, o, zf, true, false, m⟩
+      ⟨88, g, ⟨a0, a1, a2, a3, a4, b0, b1, b2, b3, b4, (keccakChiMpcShareVec a0 a1 a2 b1 b2 (readMem256 m (g.get 1 + 0))), (evalVecBin256 .vpxor a0 a2), y12, y13, y14, y15⟩, cf, o, zf, true, false, (writeMem256 m (g.get 7 + 0) (keccakChiMpcShareVec a0 a1 a2 b1 b2 (readMem256 m (g.get 1 + 0))))⟩ := by
+  apply StepsX86.toExecReaches
+  iterate 8
+    apply StepsX86.cons rfl rfl
+    · simp only [ite_true, ite_false, stepX86, evalX86Addr, clampVecWidth, Bank16.set, Bank16.get, evalVecBin256]
+      rfl
+  simp only [keccakChiMpcShareVec, keccakChiMpcShareWord, evalVecBin256]
+
+  exact StepsX86.zero _
+
+private theorem keccakChiMpc_lane1 (g : Bank16 UInt64)
+    (a0 a1 a2 a3 a4 b0 b1 b2 b3 b4 t10 t11 y12 y13 y14 y15 : Vec256)
+    (cf o zf : Bool) (m : UInt64 → UInt8) :
+    ExecReachesX86 keccakChiMpcProg 8
+      ⟨88, g, ⟨a0, a1, a2, a3, a4, b0, b1, b2, b3, b4, t10, t11, y12, y13, y14, y15⟩, cf, o, zf, true, false, m⟩
+      ⟨124, g, ⟨a0, a1, a2, a3, a4, b0, b1, b2, b3, b4, (keccakChiMpcShareVec a1 a2 a3 b2 b3 (readMem256 m (g.get 1 + 32))), (evalVecBin256 .vpxor a1 a3), y12, y13, y14, y15⟩, cf, o, zf, true, false, (writeMem256 m (g.get 7 + 32) (keccakChiMpcShareVec a1 a2 a3 b2 b3 (readMem256 m (g.get 1 + 32))))⟩ := by
+  apply StepsX86.toExecReaches
+  iterate 8
+    apply StepsX86.cons rfl rfl
+    · simp only [ite_true, ite_false, stepX86, evalX86Addr, clampVecWidth, Bank16.set, Bank16.get, evalVecBin256]
+      rfl
+  simp only [keccakChiMpcShareVec, keccakChiMpcShareWord, evalVecBin256]
+
+  rw [keccakChiMpc_xor_comm b3.w0 a3.w0]
+  rw [keccakChiMpc_xor_comm b3.w1 a3.w1]
+  rw [keccakChiMpc_xor_comm b3.w2 a3.w2]
+  rw [keccakChiMpc_xor_comm b3.w3 a3.w3]
+  exact StepsX86.zero _
+
+private theorem keccakChiMpc_lane2 (g : Bank16 UInt64)
+    (a0 a1 a2 a3 a4 b0 b1 b2 b3 b4 t10 t11 y12 y13 y14 y15 : Vec256)
+    (cf o zf : Bool) (m : UInt64 → UInt8) :
+    ExecReachesX86 keccakChiMpcProg 8
+      ⟨124, g, ⟨a0, a1, a2, a3, a4, b0, b1, b2, b3, b4, t10, t11, y12, y13, y14, y15⟩, cf, o, zf, true, false, m⟩
+      ⟨160, g, ⟨a0, a1, a2, a3, a4, b0, b1, b2, b3, b4, (keccakChiMpcShareVec a2 a3 a4 b3 b4 (readMem256 m (g.get 1 + 64))), (evalVecBin256 .vpxor a2 a4), y12, y13, y14, y15⟩, cf, o, zf, true, false, (writeMem256 m (g.get 7 + 64) (keccakChiMpcShareVec a2 a3 a4 b3 b4 (readMem256 m (g.get 1 + 64))))⟩ := by
+  apply StepsX86.toExecReaches
+  iterate 8
+    apply StepsX86.cons rfl rfl
+    · simp only [ite_true, ite_false, stepX86, evalX86Addr, clampVecWidth, Bank16.set, Bank16.get, evalVecBin256]
+      rfl
+  simp only [keccakChiMpcShareVec, keccakChiMpcShareWord, evalVecBin256]
+
+  rw [keccakChiMpc_xor_comm b4.w0 a4.w0]
+  rw [keccakChiMpc_xor_comm b4.w1 a4.w1]
+  rw [keccakChiMpc_xor_comm b4.w2 a4.w2]
+  rw [keccakChiMpc_xor_comm b4.w3 a4.w3]
+  exact StepsX86.zero _
+
+private theorem keccakChiMpc_lane3 (g : Bank16 UInt64)
+    (a0 a1 a2 a3 a4 b0 b1 b2 b3 b4 t10 t11 y12 y13 y14 y15 : Vec256)
+    (cf o zf : Bool) (m : UInt64 → UInt8) :
+    ExecReachesX86 keccakChiMpcProg 8
+      ⟨160, g, ⟨a0, a1, a2, a3, a4, b0, b1, b2, b3, b4, t10, t11, y12, y13, y14, y15⟩, cf, o, zf, true, false, m⟩
+      ⟨196, g, ⟨a0, a1, a2, a3, a4, b0, b1, b2, b3, b4, (keccakChiMpcShareVec a3 a4 a0 b4 b0 (readMem256 m (g.get 1 + 96))), (evalVecBin256 .vpxor a3 a0), y12, y13, y14, y15⟩, cf, o, zf, true, false, (writeMem256 m (g.get 7 + 96) (keccakChiMpcShareVec a3 a4 a0 b4 b0 (readMem256 m (g.get 1 + 96))))⟩ := by
+  apply StepsX86.toExecReaches
+  iterate 8
+    apply StepsX86.cons rfl rfl
+    · simp only [ite_true, ite_false, stepX86, evalX86Addr, clampVecWidth, Bank16.set, Bank16.get, evalVecBin256]
+      rfl
+  simp only [keccakChiMpcShareVec, keccakChiMpcShareWord, evalVecBin256]
+
+  exact StepsX86.zero _
+
+private theorem keccakChiMpc_lane4 (g : Bank16 UInt64)
+    (a0 a1 a2 a3 a4 b0 b1 b2 b3 b4 t10 t11 y12 y13 y14 y15 : Vec256)
+    (cf o zf : Bool) (m : UInt64 → UInt8) :
+    ExecReachesX86 keccakChiMpcProg 8
+      ⟨196, g, ⟨a0, a1, a2, a3, a4, b0, b1, b2, b3, b4, t10, t11, y12, y13, y14, y15⟩, cf, o, zf, true, false, m⟩
+      ⟨238, g, ⟨a0, a1, a2, a3, a4, b0, b1, b2, b3, b4, (keccakChiMpcShareVec a4 a0 a1 b0 b1 (readMem256 m (g.get 1 + 128))), (evalVecBin256 .vpxor a4 a1), y12, y13, y14, y15⟩, cf, o, zf, true, false, (writeMem256 m (g.get 7 + 128) (keccakChiMpcShareVec a4 a0 a1 b0 b1 (readMem256 m (g.get 1 + 128))))⟩ := by
+  apply StepsX86.toExecReaches
+  iterate 8
+    apply StepsX86.cons rfl rfl
+    · simp only [ite_true, ite_false, stepX86, evalX86Addr, clampVecWidth, Bank16.set, Bank16.get, evalVecBin256]
+      rfl
+  simp only [keccakChiMpcShareVec, keccakChiMpcShareWord, evalVecBin256]
+
+  exact StepsX86.zero _
+
+private theorem keccakChiMpc_cleanup
+    (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
+    (y : Bank16 Vec256) (cf o zf : Bool) (m : UInt64 → UInt8) :
+    ExecReachesX86 keccakChiMpcProg 24
+      ⟨238, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, true, false, m⟩
+      ⟨318, ⟨0, 0, 0, r3, r4, r5, 0, 0, 0, 0, 0, 0, r12, r13, r14, r15⟩, Bank16.const Vec256.zero, false, false, true, false, true, m⟩ := by
+  apply StepsX86.toExecReaches
+  iterate 12
+    apply StepsX86.cons rfl rfl
+    · simp only [ite_true, ite_false, stepX86, evalX86Addr, clampVecWidth, Bank16.set, Bank16.get,
+        evalVecBin256, u64_xor_self]
+      rfl
+  iterate 11
+    apply StepsX86.cons rfl rfl
+    · simp only [current_vzeroall_step, current_vzeroupper_zero_step, stepX86_xorRR,
+        mask32_xor_self, u64_zero_beq_zero,
+        b16set_0, b16set_1, b16set_2, b16set_6, b16set_7,
+        b16set_8, b16set_9, b16set_10, b16set_11]
+      rfl
+  apply StepsX86.cons rfl rfl rfl
+  exact StepsX86.zero _
+
+private theorem keccakChiMpc_reaches
+    (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
+    (y : Bank16 Vec256) (cf o zf dy : Bool) (m : UInt64 → UInt8)
+    (h : keccakChiMpcSeparated r7 r1) :
+    ExecReachesX86 keccakChiMpcProg 74
+      ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, m⟩
+      ⟨318, ⟨0, 0, 0, r3, r4, r5, 0, 0, 0, 0, 0, 0, r12, r13, r14, r15⟩, Bank16.const Vec256.zero, false, false, true, false, true, (keccakChiMpcOutMem m r7 r6 r2 r1)⟩ := by
+  let g : Bank16 UInt64 := ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩
+
+  let a0 := readMem256 m (r6 + 0)
+  let a1 := readMem256 m (r6 + 32)
+  let a2 := readMem256 m (r6 + 64)
+  let a3 := readMem256 m (r6 + 96)
+  let a4 := readMem256 m (r6 + 128)
+  let b0 := readMem256 m (r2 + 0)
+  let b1 := readMem256 m (r2 + 32)
+  let b2 := readMem256 m (r2 + 64)
+  let b3 := readMem256 m (r2 + 96)
+  let b4 := readMem256 m (r2 + 128)
+  let v0 := keccakChiMpcShareVec a0 a1 a2 b1 b2 (readMem256 m (r1 + 0))
+  let t0 := evalVecBin256 .vpxor a0 a2
+  let m0 := writeMem256 m (r7 + 0) v0
+  let v1 := keccakChiMpcShareVec a1 a2 a3 b2 b3 (readMem256 m (r1 + 32))
+  let t1 := evalVecBin256 .vpxor a1 a3
+  let m1 := writeMem256 m0 (r7 + 32) v1
+  let v2 := keccakChiMpcShareVec a2 a3 a4 b3 b4 (readMem256 m (r1 + 64))
+  let t2 := evalVecBin256 .vpxor a2 a4
+  let m2 := writeMem256 m1 (r7 + 64) v2
+  let v3 := keccakChiMpcShareVec a3 a4 a0 b4 b0 (readMem256 m (r1 + 96))
+  let t3 := evalVecBin256 .vpxor a3 a0
+  let m3 := writeMem256 m2 (r7 + 96) v3
+  let v4 := keccakChiMpcShareVec a4 a0 a1 b0 b1 (readMem256 m (r1 + 128))
+  let t4 := evalVecBin256 .vpxor a4 a1
+  let m4 := writeMem256 m3 (r7 + 128) v4
+  have hn0 : UInt64.ofNat 0 = (0 : UInt64) := by decide +kernel
+  have hn32 : UInt64.ofNat 32 = (32 : UInt64) := by decide +kernel
+  have hn64 : UInt64.ofNat 64 = (64 : UInt64) := by decide +kernel
+  have hn96 : UInt64.ofNat 96 = (96 : UInt64) := by decide +kernel
+  have hn128 : UInt64.ofNat 128 = (128 : UInt64) := by decide +kernel
+  have hr0_1 (mm : UInt64 → UInt8) (v : Vec256) :
+      readMem256 (writeMem256 mm (r7 + 0) v) (r1 + 32) = readMem256 mm (r1 + 32) := by
+    simpa only [hn0, hn32] using
+      keccakChiMpc_maskRead mm r7 r1 h 0 32 (by decide) (by decide) v
+  have hr0_2 (mm : UInt64 → UInt8) (v : Vec256) :
+      readMem256 (writeMem256 mm (r7 + 0) v) (r1 + 64) = readMem256 mm (r1 + 64) := by
+    simpa only [hn0, hn64] using
+      keccakChiMpc_maskRead mm r7 r1 h 0 64 (by decide) (by decide) v
+  have hr1_2 (mm : UInt64 → UInt8) (v : Vec256) :
+      readMem256 (writeMem256 mm (r7 + 32) v) (r1 + 64) = readMem256 mm (r1 + 64) := by
+    simpa only [hn32, hn64] using
+      keccakChiMpc_maskRead mm r7 r1 h 32 64 (by decide) (by decide) v
+  have hr0_3 (mm : UInt64 → UInt8) (v : Vec256) :
+      readMem256 (writeMem256 mm (r7 + 0) v) (r1 + 96) = readMem256 mm (r1 + 96) := by
+    simpa only [hn0, hn96] using
+      keccakChiMpc_maskRead mm r7 r1 h 0 96 (by decide) (by decide) v
+  have hr1_3 (mm : UInt64 → UInt8) (v : Vec256) :
+      readMem256 (writeMem256 mm (r7 + 32) v) (r1 + 96) = readMem256 mm (r1 + 96) := by
+    simpa only [hn32, hn96] using
+      keccakChiMpc_maskRead mm r7 r1 h 32 96 (by decide) (by decide) v
+  have hr2_3 (mm : UInt64 → UInt8) (v : Vec256) :
+      readMem256 (writeMem256 mm (r7 + 64) v) (r1 + 96) = readMem256 mm (r1 + 96) := by
+    simpa only [hn64, hn96] using
+      keccakChiMpc_maskRead mm r7 r1 h 64 96 (by decide) (by decide) v
+  have hr0_4 (mm : UInt64 → UInt8) (v : Vec256) :
+      readMem256 (writeMem256 mm (r7 + 0) v) (r1 + 128) = readMem256 mm (r1 + 128) := by
+    simpa only [hn0, hn128] using
+      keccakChiMpc_maskRead mm r7 r1 h 0 128 (by decide) (by decide) v
+  have hr1_4 (mm : UInt64 → UInt8) (v : Vec256) :
+      readMem256 (writeMem256 mm (r7 + 32) v) (r1 + 128) = readMem256 mm (r1 + 128) := by
+    simpa only [hn32, hn128] using
+      keccakChiMpc_maskRead mm r7 r1 h 32 128 (by decide) (by decide) v
+  have hr2_4 (mm : UInt64 → UInt8) (v : Vec256) :
+      readMem256 (writeMem256 mm (r7 + 64) v) (r1 + 128) = readMem256 mm (r1 + 128) := by
+    simpa only [hn64, hn128] using
+      keccakChiMpc_maskRead mm r7 r1 h 64 128 (by decide) (by decide) v
+  have hr3_4 (mm : UInt64 → UInt8) (v : Vec256) :
+      readMem256 (writeMem256 mm (r7 + 96) v) (r1 + 128) = readMem256 mm (r1 + 128) := by
+    simpa only [hn96, hn128] using
+      keccakChiMpc_maskRead mm r7 r1 h 96 128 (by decide) (by decide) v
+  have hp := keccakChiMpc_loads g y cf o zf dy m
+  have he0 := keccakChiMpc_lane0 g a0 a1 a2 a3 a4 b0 b1 b2 b3 b4 (y.get 10) (y.get 11) (y.get 12) (y.get 13) (y.get 14) (y.get 15) cf o zf m
+  have he1 := keccakChiMpc_lane1 g a0 a1 a2 a3 a4 b0 b1 b2 b3 b4 v0 t0 (y.get 12) (y.get 13) (y.get 14) (y.get 15) cf o zf m0
+  simp only [g, Bank16.get, m0, hr0_1] at he1
+  have he2 := keccakChiMpc_lane2 g a0 a1 a2 a3 a4 b0 b1 b2 b3 b4 v1 t1 (y.get 12) (y.get 13) (y.get 14) (y.get 15) cf o zf m1
+  simp only [g, Bank16.get, m0, m1, hr1_2, hr0_2] at he2
+  have he3 := keccakChiMpc_lane3 g a0 a1 a2 a3 a4 b0 b1 b2 b3 b4 v2 t2 (y.get 12) (y.get 13) (y.get 14) (y.get 15) cf o zf m2
+  simp only [g, Bank16.get, m0, m1, m2, hr2_3, hr1_3, hr0_3] at he3
+  have he4 := keccakChiMpc_lane4 g a0 a1 a2 a3 a4 b0 b1 b2 b3 b4 v3 t3 (y.get 12) (y.get 13) (y.get 14) (y.get 15) cf o zf m3
+  simp only [g, Bank16.get, m0, m1, m2, m3, hr3_4, hr2_4, hr1_4, hr0_4] at he4
+  have ht := keccakChiMpc_cleanup r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 ⟨a0, a1, a2, a3, a4, b0, b1, b2, b3, b4, v4, t4, (y.get 12), (y.get 13), (y.get 14), (y.get 15)⟩ cf o zf m4
+  have hall := ExecReachesX86_trans hp (ExecReachesX86_trans he0 (ExecReachesX86_trans he1
+    (ExecReachesX86_trans he2 (ExecReachesX86_trans he3 (ExecReachesX86_trans he4 ht)))))
+  have hm4 : m4 = keccakChiMpcOutMem m r7 r6 r2 r1 := by
+    simp only [m4, m3, m2, m1, m0, v0, v1, v2, v3, v4,
+      a0, a1, a2, a3, a4, b0, b1, b2, b3, b4, keccakChiMpcOutMem, keccakChiMpcOutVec]
+    simp only [hn0, hn32, hn64, hn96, hn128]
+  rw [hm4] at hall
+  exact hall
+
+
+/-- Entry and aliasing preconditions, with no restriction on secret data or registers. -/
+def keccakChiMpcInitial (s : X86State) : Prop :=
+  s.pc = 0 ∧ s.halted = false ∧ keccakChiMpcSeparated (s.gpr.get 7) (s.gpr.get 1)
+
+/-- Fresh AVX2 execution computes every byte of all five 256-bit RSS chi shares. -/
+theorem keccakChiMpc_current_functional (s : X86State) (h : keccakChiMpcInitial s) :
+    ∃ slice prog,
+      findSliceByNameBytes currentX86ExtractedSlices
+        keccakChiMpcName = some slice ∧
+      decodeX86Stream slice.code = some prog ∧
+      ∀ extra : Nat,
+        (runX86 prog (74 + extra) s).1.halted = true ∧
+        (runX86 prog (74 + extra) s).1.mem =
+          keccakChiMpcOutMem s.mem (s.gpr.get 7) (s.gpr.get 6) (s.gpr.get 2) (s.gpr.get 1) := by
+  have hd := keccakChiMpc_decoded
+  cases hf : findSliceByNameBytes currentX86ExtractedSlices
+      keccakChiMpcName with
+  | none => rw [hf] at hd; contradiction
+  | some slice =>
+    rw [hf] at hd
+    refine ⟨slice, keccakChiMpcProg, rfl, hd, ?_⟩
+    rcases s with ⟨pc, ⟨r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11,r12,r13,r14,r15⟩,
+      y, cf, o, zf, dy, hlt, mem⟩
+    rcases h with ⟨hp, hh, hdisj⟩
+    dsimp only at hp hh
+    subst pc hlt
+    intro extra
+    have he := (keccakChiMpc_reaches r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11
+      r12 r13 r14 r15 y cf o zf dy mem hdisj extra).1
+    let t : X86State :=
+      ⟨318, ⟨0, 0, 0, r3, r4, r5, 0, 0, 0, 0, 0, 0, r12, r13, r14, r15⟩,
+        Bank16.const Vec256.zero, false, false, true, false, true,
+        keccakChiMpcOutMem mem r7 r6 r2 r1⟩
+    rw [runX86_halted_fst keccakChiMpcProg extra t rfl] at he
+    rw [he]
+    exact ⟨rfl, rfl⟩
+
+theorem keccakChiMpc_inhabited : ∃ s : X86State, keccakChiMpcInitial s := by
+  refine ⟨⟨0, Bank16.ofFn (fun i => if i == 1 then 256 else 0),
+    Bank16.const Vec256.zero, false, false, false, false, false, fun _ => 0⟩,
+    rfl, rfl, ?_⟩
+  change keccakChiMpcSeparated 0 256
+  intro i j hi hj he
+  have hn := congrArg UInt64.toNat he
+  simp only [UInt64.toNat_add, UInt64.toNat_ofNat, UInt64.toNat_ofNat'] at hn
+  omega
+
+/-- The wrong specification that always writes zero fails on a single set input bit. -/
+theorem keccakChiMpc_current_tooth :
+    keccakChiMpcOutMem (fun a => if a == 64 then 1 else 0) 1024 0 256 512 1024 ≠ 0 := by
+  decide +kernel
+
+#tooth_pair keccakChiMpc_current_functional vs keccakChiMpc_current_tooth
+#verify_inhabited keccakChiMpc_current_functional keccakChiMpc_inhabited
+
+/-- Select one of the four 64-bit words of a vector (`q < 4` at callers). -/
+def keccakChiMpcVecWord (v : Vec256) : Nat → UInt64
+  | 0 => v.w0
+  | 1 => v.w1
+  | 2 => v.w2
+  | _ => v.w3
+
+def keccakChiMpcReadRows (mem : UInt64 → UInt8) (ptr : UInt64) (x q : Nat) : UInt64 :=
+  keccakChiMpcVecWord (readMem256 mem (ptr + UInt64.ofNat (32 * x))) q
+
+theorem keccakChiMpcOutVec_word (mem : UInt64 → UInt8) (s0 s1 mask : UInt64) (x q : Nat) :
+    keccakChiMpcVecWord (keccakChiMpcOutVec mem s0 s1 mask x) q =
+      keccakChiMpcRowWord (keccakChiMpcReadRows mem s0)
+        (keccakChiMpcReadRows mem s1) (keccakChiMpcReadRows mem mask) x q := by
+  match q with
+  | 0 | 1 | 2 | _ + 3 => rfl
+
+/-- All five vector stores read back in their entirety, including wrapping
+addresses; distinct offsets below 160 remain distinct modulo 2^64. -/
+theorem keccakChiMpcOutMem_readback (mem : UInt64 → UInt8) (dst s0 s1 mask : UInt64)
+    (x : Nat) (hx : x < 5) :
+    readMem256 (keccakChiMpcOutMem mem dst s0 s1 mask)
+      (dst + UInt64.ofNat (32 * x)) = keccakChiMpcOutVec mem s0 s1 mask x := by
+  have hd (o1 o2 : Nat) (h1 : o1 ≤ 128) (h2 : o2 ≤ 128)
+      (hgap : o1 + 32 ≤ o2 ∨ o2 + 32 ≤ o1)
+      (m : UInt64 → UInt8) (v : Vec256) :
+      readMem256 (writeMem256 m (dst + UInt64.ofNat o2) v) (dst + UInt64.ofNat o1) =
+        readMem256 m (dst + UInt64.ofNat o1) := by
+    apply keccakChiMpc_readMem256_writeMem256_disjoint
+    intro i j hi hj heq
+    rw [u64_add_ofNat_assoc dst o1 i (by omega),
+      u64_add_ofNat_assoc dst o2 j (by omega)] at heq
+    have := u64_add_ofNat_inj (by omega) (by omega) heq
+    omega
+  unfold keccakChiMpcOutMem
+  dsimp only
+  have hn0 : UInt64.ofNat 0 = (0 : UInt64) := by decide +kernel
+  have hn32 : UInt64.ofNat 32 = (32 : UInt64) := by decide +kernel
+  have hn64 : UInt64.ofNat 64 = (64 : UInt64) := by decide +kernel
+  have hn96 : UInt64.ofNat 96 = (96 : UInt64) := by decide +kernel
+  have hn128 : UInt64.ofNat 128 = (128 : UInt64) := by decide +kernel
+  rw [← hn0, ← hn32, ← hn64, ← hn96, ← hn128]
+  match x, hx with
+  | 0, _ =>
+    rw [hd 0 128 (by decide) (by decide) (by omega),
+      hd 0 96 (by decide) (by decide) (by omega),
+      hd 0 64 (by decide) (by decide) (by omega),
+      hd 0 32 (by decide) (by decide) (by omega),
+      keccakChiMpc_readMem256_writeMem256_same]
+  | 1, _ =>
+    rw [hd 32 128 (by decide) (by decide) (by omega),
+      hd 32 96 (by decide) (by decide) (by omega),
+      hd 32 64 (by decide) (by decide) (by omega),
+      keccakChiMpc_readMem256_writeMem256_same]
+  | 2, _ =>
+    rw [hd 64 128 (by decide) (by decide) (by omega),
+      hd 64 96 (by decide) (by decide) (by omega),
+      keccakChiMpc_readMem256_writeMem256_same]
+  | 3, _ =>
+    rw [hd 96 128 (by decide) (by decide) (by omega),
+      keccakChiMpc_readMem256_writeMem256_same]
+  | 4, _ => exact keccakChiMpc_readMem256_writeMem256_same _ _ _
+  | _ + 5, h => omega
+
+theorem keccakChiMpcOutMem_readRows (mem : UInt64 → UInt8) (dst s0 s1 mask : UInt64)
+    (x q : Nat) (hx : x < 5) :
+    keccakChiMpcReadRows (keccakChiMpcOutMem mem dst s0 s1 mask) dst x q =
+      keccakChiMpcRowWord (keccakChiMpcReadRows mem s0)
+        (keccakChiMpcReadRows mem s1) (keccakChiMpcReadRows mem mask) x q := by
+  unfold keccakChiMpcReadRows
+  rw [keccakChiMpcOutMem_readback _ _ _ _ _ x hx]
+  exact keccakChiMpcOutVec_word mem s0 s1 mask x q
+
+/-- Cyclic replicated shares agree only on the 160 bytes actually read, with no
+constraints on unrelated memory, scratch registers, or output values. -/
+def keccakChiMpcSharesMatch (s t : X86State) : Prop :=
+  ∀ x q : Nat, x < 5 → q < 4 →
+    keccakChiMpcReadRows s.mem (s.gpr.get 2) x q =
+      keccakChiMpcReadRows t.mem (t.gpr.get 6) x q
+
+def keccakChiMpcMasksZero (s0 s1 s2 : X86State) : Prop :=
+  ∀ x q : Nat, x < 5 → q < 4 →
+    keccakChiMpcReadRows s0.mem (s0.gpr.get 1) x q ^^^
+      keccakChiMpcReadRows s1.mem (s1.gpr.get 1) x q ^^^
+      keccakChiMpcReadRows s2.mem (s2.gpr.get 1) x q = 0
+
+/-- The mathematical reconstruction of all five stored vectors, independent of
+machine scheduling. This composes the byte-memory readback with the RSS identity. -/
+theorem keccakChiMpcOutMem_reconstruct
+    (s0 s1 s2 : X86State)
+    (h01 : keccakChiMpcSharesMatch s0 s1)
+    (h12 : keccakChiMpcSharesMatch s1 s2)
+    (h20 : keccakChiMpcSharesMatch s2 s0)
+    (hm : keccakChiMpcMasksZero s0 s1 s2) (q : Nat) (hq : q < 4) :
+    keccakChiMpcRowState (fun x j =>
+      keccakChiMpcReadRows
+        (keccakChiMpcOutMem s0.mem (s0.gpr.get 7) (s0.gpr.get 6) (s0.gpr.get 2) (s0.gpr.get 1))
+        (s0.gpr.get 7) x j ^^^
+      keccakChiMpcReadRows
+        (keccakChiMpcOutMem s1.mem (s1.gpr.get 7) (s1.gpr.get 6) (s1.gpr.get 2) (s1.gpr.get 1))
+        (s1.gpr.get 7) x j ^^^
+      keccakChiMpcReadRows
+        (keccakChiMpcOutMem s2.mem (s2.gpr.get 7) (s2.gpr.get 6) (s2.gpr.get 2) (s2.gpr.get 1))
+        (s2.gpr.get 7) x j) q =
+    chiS (keccakChiMpcRowState (fun x j =>
+      keccakChiMpcReadRows s0.mem (s0.gpr.get 6) x j ^^^
+      keccakChiMpcReadRows s1.mem (s1.gpr.get 6) x j ^^^
+      keccakChiMpcReadRows s2.mem (s2.gpr.get 6) x j) q) := by
+  let a0 := keccakChiMpcReadRows s0.mem (s0.gpr.get 6)
+  let a1 := keccakChiMpcReadRows s1.mem (s1.gpr.get 6)
+  let a2 := keccakChiMpcReadRows s2.mem (s2.gpr.get 6)
+  let r0 := keccakChiMpcReadRows s0.mem (s0.gpr.get 1)
+  let r1 := keccakChiMpcReadRows s1.mem (s1.gpr.get 1)
+  let r2 := keccakChiMpcReadRows s2.mem (s2.gpr.get 1)
+  have ho (s t : X86State) (hst : keccakChiMpcSharesMatch s t) (x : Nat) (hx : x < 5) :
+      keccakChiMpcReadRows
+        (keccakChiMpcOutMem s.mem (s.gpr.get 7) (s.gpr.get 6) (s.gpr.get 2) (s.gpr.get 1))
+        (s.gpr.get 7) x q =
+      keccakChiMpcRowWord (keccakChiMpcReadRows s.mem (s.gpr.get 6))
+        (keccakChiMpcReadRows t.mem (t.gpr.get 6)) (keccakChiMpcReadRows s.mem (s.gpr.get 1)) x q := by
+    rw [keccakChiMpcOutMem_readRows _ _ _ _ _ x q hx]
+    unfold keccakChiMpcRowWord
+    rw [hst ((x + 1) % 5) q (Nat.mod_lt _ (by decide)) hq,
+      hst ((x + 2) % 5) q (Nat.mod_lt _ (by decide)) hq]
+  have hrecon := keccakChiMpcRow_reconstruct a0 a1 a2 r0 r1 r2 hm q hq
+  calc
+    _ = keccakChiMpcRowState (fun x j =>
+          keccakChiMpcRowWord a0 a1 r0 x j ^^^ keccakChiMpcRowWord a1 a2 r1 x j ^^^
+            keccakChiMpcRowWord a2 a0 r2 x j) q := by
+      unfold keccakChiMpcRowState
+      dsimp only
+      congr 1
+      all_goals rw [ho s0 s1 h01 _ (by decide), ho s1 s2 h12 _ (by decide),
+        ho s2 s0 h20 _ (by decide)]
+    _ = _ := hrecon
+
+
+/-- Fresh machine-code RSS chi reconstruction for all 1,280 gates: three
+cyclic-party executions halt and their complete four rows reconstruct `chiS`.
+Only the input replicated shares and correlated masks are related. -/
+theorem keccakChiMpc_current_reconstruct
+    (s0 s1 s2 : X86State)
+    (h0 : keccakChiMpcInitial s0) (h1 : keccakChiMpcInitial s1) (h2 : keccakChiMpcInitial s2)
+    (h01 : keccakChiMpcSharesMatch s0 s1)
+    (h12 : keccakChiMpcSharesMatch s1 s2)
+    (h20 : keccakChiMpcSharesMatch s2 s0)
+    (hm : keccakChiMpcMasksZero s0 s1 s2) :
+    ∃ slice prog,
+      findSliceByNameBytes currentX86ExtractedSlices keccakChiMpcName = some slice ∧
+      decodeX86Stream slice.code = some prog ∧
+      ∀ extra : Nat,
+        (runX86 prog (74 + extra) s0).1.halted = true ∧
+        (runX86 prog (74 + extra) s1).1.halted = true ∧
+        (runX86 prog (74 + extra) s2).1.halted = true ∧
+        ∀ q : Nat, q < 4 →
+          keccakChiMpcRowState (fun x j =>
+            keccakChiMpcReadRows (runX86 prog (74 + extra) s0).1.mem (s0.gpr.get 7) x j ^^^
+            keccakChiMpcReadRows (runX86 prog (74 + extra) s1).1.mem (s1.gpr.get 7) x j ^^^
+            keccakChiMpcReadRows (runX86 prog (74 + extra) s2).1.mem (s2.gpr.get 7) x j) q =
+          chiS (keccakChiMpcRowState (fun x j =>
+            keccakChiMpcReadRows s0.mem (s0.gpr.get 6) x j ^^^
+            keccakChiMpcReadRows s1.mem (s1.gpr.get 6) x j ^^^
+            keccakChiMpcReadRows s2.mem (s2.gpr.get 6) x j) q) := by
+  obtain ⟨sl0, p0, hf0, hd0, he0⟩ := keccakChiMpc_current_functional s0 h0
+  obtain ⟨sl1, p1, hf1, hd1, he1⟩ := keccakChiMpc_current_functional s1 h1
+  obtain ⟨sl2, p2, hf2, hd2, he2⟩ := keccakChiMpc_current_functional s2 h2
+  have hs1 : sl1 = sl0 := Option.some.inj (hf1.symm.trans hf0)
+  have hs2 : sl2 = sl0 := Option.some.inj (hf2.symm.trans hf0)
+  subst sl1 sl2
+  have hp1 : p1 = p0 := Option.some.inj (hd1.symm.trans hd0)
+  have hp2 : p2 = p0 := Option.some.inj (hd2.symm.trans hd0)
+  subst p1 p2
+  refine ⟨sl0, p0, hf0, hd0, ?_⟩
+  intro extra
+  obtain ⟨hh0, he0⟩ := he0 extra
+  obtain ⟨hh1, he1⟩ := he1 extra
+  obtain ⟨hh2, he2⟩ := he2 extra
+  refine ⟨hh0, hh1, hh2, ?_⟩
+  intro q hq
+  rw [he0, he1, he2]
+  exact keccakChiMpcOutMem_reconstruct s0 s1 s2 h01 h12 h20 hm q hq
+
+/-- A concrete valid party: disjoint output/mask buffers and zero input shares. -/
+def keccakChiMpcZeroParty : X86State :=
+  ⟨0, Bank16.ofFn (fun i => if i == 1 then 256 else 0),
+    Bank16.const Vec256.zero, false, false, false, false, false, fun _ => 0⟩
+
+theorem keccakChiMpc_reconstruct_inhabited :
+    ∃ s0 s1 s2 : X86State,
+      keccakChiMpcInitial s0 ∧ keccakChiMpcInitial s1 ∧ keccakChiMpcInitial s2 ∧
+      keccakChiMpcSharesMatch s0 s1 ∧ keccakChiMpcSharesMatch s1 s2 ∧
+      keccakChiMpcSharesMatch s2 s0 ∧ keccakChiMpcMasksZero s0 s1 s2 := by
+  have hi : keccakChiMpcInitial keccakChiMpcZeroParty := by
+    refine ⟨rfl, rfl, ?_⟩
+    change keccakChiMpcSeparated 0 256
+    intro i j hi hj he
+    have hn := congrArg UInt64.toNat he
+    simp only [UInt64.toNat_add, UInt64.toNat_ofNat, UInt64.toNat_ofNat'] at hn
+    omega
+  have hs : keccakChiMpcSharesMatch keccakChiMpcZeroParty keccakChiMpcZeroParty := by
+    intro x q _ _
+    rfl
+  have hz (p : UInt64) (x q : Nat) (hq : q < 4) :
+      keccakChiMpcReadRows (fun _ => 0) p x q = 0 := by
+    unfold keccakChiMpcReadRows readMem256 readMem64
+    dsimp only
+    match q, hq with
+    | 0, _ | 1, _ | 2, _ | 3, _ =>
+      dsimp only [keccakChiMpcVecWord]
+      decide +kernel
+    | n + 4, h => omega
+  refine ⟨keccakChiMpcZeroParty, keccakChiMpcZeroParty, keccakChiMpcZeroParty,
+    hi, hi, hi, hs, hs, hs, ?_⟩
+  intro x q _ hq
+  change keccakChiMpcReadRows (fun _ => 0) 256 x q ^^^
+    keccakChiMpcReadRows (fun _ => 0) 256 x q ^^^
+    keccakChiMpcReadRows (fun _ => 0) 256 x q = 0
+  rw [hz _ _ _ hq]
+  decide +kernel
+
+/-- The zero-output specification is refuted by a nonzero reconstructed row. -/
+theorem keccakChiMpc_reconstruct_tooth :
+    chiS (keccakChiMpcRowState (fun x _ => if x == 2 then 1 else 0) 0) ≠ zeroKState := by
+  decide +kernel
+
+#tooth_pair keccakChiMpc_current_reconstruct vs keccakChiMpc_reconstruct_tooth
+#verify_inhabited keccakChiMpc_current_reconstruct keccakChiMpc_reconstruct_inhabited
+
+end KeccakMpcFreshVerification
+
+section KeccakThetaRhoFreshVerification
+set_option linter.unusedSimpArgs false
+
+/-! Full two-sponge theta/rho/pi kernel. -/
+
+def keccakThetaRhoProg : List (DecodedInstr Arm64Instr) := [
+  ⟨0, 4, .ldrQ 0 1 0⟩,
+  ⟨4, 4, .ldrQ 5 1 80⟩,
+  ⟨8, 4, .ldrQ 6 1 160⟩,
+  ⟨12, 4, .veor3_16b 0 0 5 6⟩,
+  ⟨16, 4, .ldrQ 5 1 240⟩,
+  ⟨20, 4, .ldrQ 6 1 320⟩,
+  ⟨24, 4, .veor3_16b 0 0 5 6⟩,
+  ⟨28, 4, .ldrQ 1 1 16⟩,
+  ⟨32, 4, .ldrQ 5 1 96⟩,
+  ⟨36, 4, .ldrQ 6 1 176⟩,
+  ⟨40, 4, .veor3_16b 1 1 5 6⟩,
+  ⟨44, 4, .ldrQ 5 1 256⟩,
+  ⟨48, 4, .ldrQ 6 1 336⟩,
+  ⟨52, 4, .veor3_16b 1 1 5 6⟩,
+  ⟨56, 4, .ldrQ 2 1 32⟩,
+  ⟨60, 4, .ldrQ 5 1 112⟩,
+  ⟨64, 4, .ldrQ 6 1 192⟩,
+  ⟨68, 4, .veor3_16b 2 2 5 6⟩,
+  ⟨72, 4, .ldrQ 5 1 272⟩,
+  ⟨76, 4, .ldrQ 6 1 352⟩,
+  ⟨80, 4, .veor3_16b 2 2 5 6⟩,
+  ⟨84, 4, .ldrQ 3 1 48⟩,
+  ⟨88, 4, .ldrQ 5 1 128⟩,
+  ⟨92, 4, .ldrQ 6 1 208⟩,
+  ⟨96, 4, .veor3_16b 3 3 5 6⟩,
+  ⟨100, 4, .ldrQ 5 1 288⟩,
+  ⟨104, 4, .ldrQ 6 1 368⟩,
+  ⟨108, 4, .veor3_16b 3 3 5 6⟩,
+  ⟨112, 4, .ldrQ 4 1 64⟩,
+  ⟨116, 4, .ldrQ 5 1 144⟩,
+  ⟨120, 4, .ldrQ 6 1 224⟩,
+  ⟨124, 4, .veor3_16b 4 4 5 6⟩,
+  ⟨128, 4, .ldrQ 5 1 304⟩,
+  ⟨132, 4, .ldrQ 6 1 384⟩,
+  ⟨136, 4, .veor3_16b 4 4 5 6⟩,
+  ⟨140, 4, .vrax1_2d 16 4 1⟩,
+  ⟨144, 4, .vrax1_2d 17 0 2⟩,
+  ⟨148, 4, .vrax1_2d 18 1 3⟩,
+  ⟨152, 4, .vrax1_2d 19 2 4⟩,
+  ⟨156, 4, .vrax1_2d 20 3 0⟩,
+  ⟨160, 4, .ldrQ 0 1 0⟩,
+  ⟨164, 4, .vxar_2d 0 0 16 0⟩,
+  ⟨168, 4, .strQ 0 0 0⟩,
+  ⟨172, 4, .ldrQ 0 1 16⟩,
+  ⟨176, 4, .vxar_2d 0 0 17 63⟩,
+  ⟨180, 4, .strQ 0 0 160⟩,
+  ⟨184, 4, .ldrQ 0 1 32⟩,
+  ⟨188, 4, .vxar_2d 0 0 18 2⟩,
+  ⟨192, 4, .strQ 0 0 320⟩,
+  ⟨196, 4, .ldrQ 0 1 48⟩,
+  ⟨200, 4, .vxar_2d 0 0 19 36⟩,
+  ⟨204, 4, .strQ 0 0 80⟩,
+  ⟨208, 4, .ldrQ 0 1 64⟩,
+  ⟨212, 4, .vxar_2d 0 0 20 37⟩,
+  ⟨216, 4, .strQ 0 0 240⟩,
+  ⟨220, 4, .ldrQ 0 1 80⟩,
+  ⟨224, 4, .vxar_2d 0 0 16 28⟩,
+  ⟨228, 4, .strQ 0 0 256⟩,
+  ⟨232, 4, .ldrQ 0 1 96⟩,
+  ⟨236, 4, .vxar_2d 0 0 17 20⟩,
+  ⟨240, 4, .strQ 0 0 16⟩,
+  ⟨244, 4, .ldrQ 0 1 112⟩,
+  ⟨248, 4, .vxar_2d 0 0 18 58⟩,
+  ⟨252, 4, .strQ 0 0 176⟩,
+  ⟨256, 4, .ldrQ 0 1 128⟩,
+  ⟨260, 4, .vxar_2d 0 0 19 9⟩,
+  ⟨264, 4, .strQ 0 0 336⟩,
+  ⟨268, 4, .ldrQ 0 1 144⟩,
+  ⟨272, 4, .vxar_2d 0 0 20 44⟩,
+  ⟨276, 4, .strQ 0 0 96⟩,
+  ⟨280, 4, .ldrQ 0 1 160⟩,
+  ⟨284, 4, .vxar_2d 0 0 16 61⟩,
+  ⟨288, 4, .strQ 0 0 112⟩,
+  ⟨292, 4, .ldrQ 0 1 176⟩,
+  ⟨296, 4, .vxar_2d 0 0 17 54⟩,
+  ⟨300, 4, .strQ 0 0 272⟩,
+  ⟨304, 4, .ldrQ 0 1 192⟩,
+  ⟨308, 4, .vxar_2d 0 0 18 21⟩,
+  ⟨312, 4, .strQ 0 0 32⟩,
+  ⟨316, 4, .ldrQ 0 1 208⟩,
+  ⟨320, 4, .vxar_2d 0 0 19 39⟩,
+  ⟨324, 4, .strQ 0 0 192⟩,
+  ⟨328, 4, .ldrQ 0 1 224⟩,
+  ⟨332, 4, .vxar_2d 0 0 20 25⟩,
+  ⟨336, 4, .strQ 0 0 352⟩,
+  ⟨340, 4, .ldrQ 0 1 240⟩,
+  ⟨344, 4, .vxar_2d 0 0 16 23⟩,
+  ⟨348, 4, .strQ 0 0 368⟩,
+  ⟨352, 4, .ldrQ 0 1 256⟩,
+  ⟨356, 4, .vxar_2d 0 0 17 19⟩,
+  ⟨360, 4, .strQ 0 0 128⟩,
+  ⟨364, 4, .ldrQ 0 1 272⟩,
+  ⟨368, 4, .vxar_2d 0 0 18 49⟩,
+  ⟨372, 4, .strQ 0 0 288⟩,
+  ⟨376, 4, .ldrQ 0 1 288⟩,
+  ⟨380, 4, .vxar_2d 0 0 19 43⟩,
+  ⟨384, 4, .strQ 0 0 48⟩,
+  ⟨388, 4, .ldrQ 0 1 304⟩,
+  ⟨392, 4, .vxar_2d 0 0 20 56⟩,
+  ⟨396, 4, .strQ 0 0 208⟩,
+  ⟨400, 4, .ldrQ 0 1 320⟩,
+  ⟨404, 4, .vxar_2d 0 0 16 46⟩,
+  ⟨408, 4, .strQ 0 0 224⟩,
+  ⟨412, 4, .ldrQ 0 1 336⟩,
+  ⟨416, 4, .vxar_2d 0 0 17 62⟩,
+  ⟨420, 4, .strQ 0 0 384⟩,
+  ⟨424, 4, .ldrQ 0 1 352⟩,
+  ⟨428, 4, .vxar_2d 0 0 18 3⟩,
+  ⟨432, 4, .strQ 0 0 144⟩,
+  ⟨436, 4, .ldrQ 0 1 368⟩,
+  ⟨440, 4, .vxar_2d 0 0 19 8⟩,
+  ⟨444, 4, .strQ 0 0 304⟩,
+  ⟨448, 4, .ldrQ 0 1 384⟩,
+  ⟨452, 4, .vxar_2d 0 0 20 50⟩,
+  ⟨456, 4, .strQ 0 0 64⟩,
+  ⟨460, 4, .veor16b 0 0 0⟩,
+  ⟨464, 4, .veor16b 1 1 1⟩,
+  ⟨468, 4, .veor16b 2 2 2⟩,
+  ⟨472, 4, .veor16b 3 3 3⟩,
+  ⟨476, 4, .veor16b 4 4 4⟩,
+  ⟨480, 4, .veor16b 5 5 5⟩,
+  ⟨484, 4, .veor16b 6 6 6⟩,
+  ⟨488, 4, .veor16b 16 16 16⟩,
+  ⟨492, 4, .veor16b 17 17 17⟩,
+  ⟨496, 4, .veor16b 18 18 18⟩,
+  ⟨500, 4, .veor16b 19 19 19⟩,
+  ⟨504, 4, .veor16b 20 20 20⟩,
+  ⟨508, 4, .ret⟩]
+
+def keccakThetaRhoName : List UInt8 := [113, 115, 97, 103, 95, 97, 115, 109, 95, 107, 101, 99, 99, 97, 107, 95, 116, 104, 101, 116, 97, 95, 114, 104, 111, 95, 115, 104, 97, 51, 95, 110, 101, 111, 110]
+
+theorem keccakThetaRho_decode :
+    (findSliceByNameBytes currentAarch64ExtractedSlices keccakThetaRhoName).bind
+      (fun s => decodeArm64Slice s.code) = some keccakThetaRhoProg := by decide +kernel
+
+/-- Bytewise disjoint input and output regions, including modular addresses. -/
+def keccakThetaRhoDisjoint (outPtr inPtr : UInt64) : Prop :=
+  ∀ i j : Nat, i < 400 → j < 400 →
+    inPtr + UInt64.ofNat i ≠ outPtr + UInt64.ofNat j
+
+theorem keccakThetaRho_readWrite (outPtr inPtr : UInt64)
+    (hd : keccakThetaRhoDisjoint outPtr inPtr)
+    (m : UInt64 → UInt8) (v : Vec128) (i j : Nat) (hi : i ≤ 384) (hj : j ≤ 384) :
+    readMem128 (writeMem128 m (outPtr + UInt64.ofNat j) v) (inPtr + UInt64.ofNat i) =
+      readMem128 m (inPtr + UInt64.ofNat i) := by
+  unfold readMem128
+  congr 1
+  · apply readMem64_writeMem128_disjoint
+    intro a b ha hb he
+    rw [u64_add_ofNat_assoc inPtr i a (by omega),
+      u64_add_ofNat_assoc outPtr j b (by omega)] at he
+    exact hd (i+a) (j+b) (by omega) (by omega) he
+  · apply readMem64_writeMem128_disjoint
+    intro a b ha hb he
+    change ((inPtr + UInt64.ofNat i) + UInt64.ofNat 8) + UInt64.ofNat a = _ at he
+    rw [u64_add_ofNat_assoc inPtr i 8 (by omega),
+      u64_add_ofNat_assoc inPtr (i+8) a (by omega),
+      u64_add_ofNat_assoc outPtr j b (by omega)] at he
+    exact hd (i+8+a) (j+b) (by omega) (by omega) he
+
+def keccakThetaRhoLoad (m : UInt64 → UInt8) (p : UInt64) (block : Nat) : KState :=
+  ⟨(if block == 0 then (readMem128 m (p + 0)).w0 else (readMem128 m (p + 0)).w1),
+   (if block == 0 then (readMem128 m (p + 16)).w0 else (readMem128 m (p + 16)).w1),
+   (if block == 0 then (readMem128 m (p + 32)).w0 else (readMem128 m (p + 32)).w1),
+   (if block == 0 then (readMem128 m (p + 48)).w0 else (readMem128 m (p + 48)).w1),
+   (if block == 0 then (readMem128 m (p + 64)).w0 else (readMem128 m (p + 64)).w1),
+   (if block == 0 then (readMem128 m (p + 80)).w0 else (readMem128 m (p + 80)).w1),
+   (if block == 0 then (readMem128 m (p + 96)).w0 else (readMem128 m (p + 96)).w1),
+   (if block == 0 then (readMem128 m (p + 112)).w0 else (readMem128 m (p + 112)).w1),
+   (if block == 0 then (readMem128 m (p + 128)).w0 else (readMem128 m (p + 128)).w1),
+   (if block == 0 then (readMem128 m (p + 144)).w0 else (readMem128 m (p + 144)).w1),
+   (if block == 0 then (readMem128 m (p + 160)).w0 else (readMem128 m (p + 160)).w1),
+   (if block == 0 then (readMem128 m (p + 176)).w0 else (readMem128 m (p + 176)).w1),
+   (if block == 0 then (readMem128 m (p + 192)).w0 else (readMem128 m (p + 192)).w1),
+   (if block == 0 then (readMem128 m (p + 208)).w0 else (readMem128 m (p + 208)).w1),
+   (if block == 0 then (readMem128 m (p + 224)).w0 else (readMem128 m (p + 224)).w1),
+   (if block == 0 then (readMem128 m (p + 240)).w0 else (readMem128 m (p + 240)).w1),
+   (if block == 0 then (readMem128 m (p + 256)).w0 else (readMem128 m (p + 256)).w1),
+   (if block == 0 then (readMem128 m (p + 272)).w0 else (readMem128 m (p + 272)).w1),
+   (if block == 0 then (readMem128 m (p + 288)).w0 else (readMem128 m (p + 288)).w1),
+   (if block == 0 then (readMem128 m (p + 304)).w0 else (readMem128 m (p + 304)).w1),
+   (if block == 0 then (readMem128 m (p + 320)).w0 else (readMem128 m (p + 320)).w1),
+   (if block == 0 then (readMem128 m (p + 336)).w0 else (readMem128 m (p + 336)).w1),
+   (if block == 0 then (readMem128 m (p + 352)).w0 else (readMem128 m (p + 352)).w1),
+   (if block == 0 then (readMem128 m (p + 368)).w0 else (readMem128 m (p + 368)).w1),
+   (if block == 0 then (readMem128 m (p + 384)).w0 else (readMem128 m (p + 384)).w1)⟩
+
+def keccakThetaRhoOut (m : UInt64 → UInt8) (outPtr inPtr : UInt64) : UInt64 → UInt8 :=
+  let k0 := rhoPiS (thetaS (keccakThetaRhoLoad m inPtr 0))
+  let k1 := rhoPiS (thetaS (keccakThetaRhoLoad m inPtr 1))
+  let m1 := writeMem128 m (outPtr + 0) ⟨k0.a0, k1.a0⟩
+  let m2 := writeMem128 m1 (outPtr + 160) ⟨k0.a10, k1.a10⟩
+  let m3 := writeMem128 m2 (outPtr + 320) ⟨k0.a20, k1.a20⟩
+  let m4 := writeMem128 m3 (outPtr + 80) ⟨k0.a5, k1.a5⟩
+  let m5 := writeMem128 m4 (outPtr + 240) ⟨k0.a15, k1.a15⟩
+  let m6 := writeMem128 m5 (outPtr + 256) ⟨k0.a16, k1.a16⟩
+  let m7 := writeMem128 m6 (outPtr + 16) ⟨k0.a1, k1.a1⟩
+  let m8 := writeMem128 m7 (outPtr + 176) ⟨k0.a11, k1.a11⟩
+  let m9 := writeMem128 m8 (outPtr + 336) ⟨k0.a21, k1.a21⟩
+  let m10 := writeMem128 m9 (outPtr + 96) ⟨k0.a6, k1.a6⟩
+  let m11 := writeMem128 m10 (outPtr + 112) ⟨k0.a7, k1.a7⟩
+  let m12 := writeMem128 m11 (outPtr + 272) ⟨k0.a17, k1.a17⟩
+  let m13 := writeMem128 m12 (outPtr + 32) ⟨k0.a2, k1.a2⟩
+  let m14 := writeMem128 m13 (outPtr + 192) ⟨k0.a12, k1.a12⟩
+  let m15 := writeMem128 m14 (outPtr + 352) ⟨k0.a22, k1.a22⟩
+  let m16 := writeMem128 m15 (outPtr + 368) ⟨k0.a23, k1.a23⟩
+  let m17 := writeMem128 m16 (outPtr + 128) ⟨k0.a8, k1.a8⟩
+  let m18 := writeMem128 m17 (outPtr + 288) ⟨k0.a18, k1.a18⟩
+  let m19 := writeMem128 m18 (outPtr + 48) ⟨k0.a3, k1.a3⟩
+  let m20 := writeMem128 m19 (outPtr + 208) ⟨k0.a13, k1.a13⟩
+  let m21 := writeMem128 m20 (outPtr + 224) ⟨k0.a14, k1.a14⟩
+  let m22 := writeMem128 m21 (outPtr + 384) ⟨k0.a24, k1.a24⟩
+  let m23 := writeMem128 m22 (outPtr + 144) ⟨k0.a9, k1.a9⟩
+  let m24 := writeMem128 m23 (outPtr + 304) ⟨k0.a19, k1.a19⟩
+  let m25 := writeMem128 m24 (outPtr + 64) ⟨k0.a4, k1.a4⟩
+  m25
+
+theorem keccakThetaRho_or_comm (a b : UInt64) : a ||| b = b ||| a := by
+  apply UInt64.eq_of_toBitVec_eq
+  simp only [UInt64.toBitVec_or, BitVec.or_comm]
+
+
+def keccakThetaRhoPerm (i : Nat) : Nat := i / 5 + 5 * ((2 * (i % 5) + 3 * (i / 5)) % 5)
+
+def keccakThetaRhoRor : Nat → Nat
+  | 0 => 0
+  | 1 => 63
+  | 2 => 2
+  | 3 => 36
+  | 4 => 37
+  | 5 => 28
+  | 6 => 20
+  | 7 => 58
+  | 8 => 9
+  | 9 => 44
+  | 10 => 61
+  | 11 => 54
+  | 12 => 21
+  | 13 => 39
+  | 14 => 25
+  | 15 => 23
+  | 16 => 19
+  | 17 => 49
+  | 18 => 43
+  | 19 => 56
+  | 20 => 46
+  | 21 => 62
+  | 22 => 3
+  | 23 => 8
+  | 24 => 50
+  | _ => 0
+
+def keccakThetaRhoGet (k : KState) : Nat → UInt64
+  | 0 => k.a0
+  | 1 => k.a1
+  | 2 => k.a2
+  | 3 => k.a3
+  | 4 => k.a4
+  | 5 => k.a5
+  | 6 => k.a6
+  | 7 => k.a7
+  | 8 => k.a8
+  | 9 => k.a9
+  | 10 => k.a10
+  | 11 => k.a11
+  | 12 => k.a12
+  | 13 => k.a13
+  | 14 => k.a14
+  | 15 => k.a15
+  | 16 => k.a16
+  | 17 => k.a17
+  | 18 => k.a18
+  | 19 => k.a19
+  | 20 => k.a20
+  | 21 => k.a21
+  | 22 => k.a22
+  | 23 => k.a23
+  | _ => k.a24
+
+def keccakThetaRhoVec (m : UInt64 → UInt8) (p : UInt64) (i : Nat) : Vec128 :=
+  ⟨keccakThetaRhoGet (rhoPiS (thetaS (keccakThetaRhoLoad m p 0))) (keccakThetaRhoPerm i),
+   keccakThetaRhoGet (rhoPiS (thetaS (keccakThetaRhoLoad m p 1))) (keccakThetaRhoPerm i)⟩
+
+def keccakThetaRhoD (m : UInt64 → UInt8) (p : UInt64) (x : Nat) : Vec128 :=
+  let c00 := (readMem128 m (p + 0)).w0 ^^^ (readMem128 m (p + 80)).w0 ^^^ (readMem128 m (p + 160)).w0 ^^^ (readMem128 m (p + 240)).w0 ^^^ (readMem128 m (p + 320)).w0
+  let c01 := (readMem128 m (p + 0)).w1 ^^^ (readMem128 m (p + 80)).w1 ^^^ (readMem128 m (p + 160)).w1 ^^^ (readMem128 m (p + 240)).w1 ^^^ (readMem128 m (p + 320)).w1
+  let c10 := (readMem128 m (p + 16)).w0 ^^^ (readMem128 m (p + 96)).w0 ^^^ (readMem128 m (p + 176)).w0 ^^^ (readMem128 m (p + 256)).w0 ^^^ (readMem128 m (p + 336)).w0
+  let c11 := (readMem128 m (p + 16)).w1 ^^^ (readMem128 m (p + 96)).w1 ^^^ (readMem128 m (p + 176)).w1 ^^^ (readMem128 m (p + 256)).w1 ^^^ (readMem128 m (p + 336)).w1
+  let c20 := (readMem128 m (p + 32)).w0 ^^^ (readMem128 m (p + 112)).w0 ^^^ (readMem128 m (p + 192)).w0 ^^^ (readMem128 m (p + 272)).w0 ^^^ (readMem128 m (p + 352)).w0
+  let c21 := (readMem128 m (p + 32)).w1 ^^^ (readMem128 m (p + 112)).w1 ^^^ (readMem128 m (p + 192)).w1 ^^^ (readMem128 m (p + 272)).w1 ^^^ (readMem128 m (p + 352)).w1
+  let c30 := (readMem128 m (p + 48)).w0 ^^^ (readMem128 m (p + 128)).w0 ^^^ (readMem128 m (p + 208)).w0 ^^^ (readMem128 m (p + 288)).w0 ^^^ (readMem128 m (p + 368)).w0
+  let c31 := (readMem128 m (p + 48)).w1 ^^^ (readMem128 m (p + 128)).w1 ^^^ (readMem128 m (p + 208)).w1 ^^^ (readMem128 m (p + 288)).w1 ^^^ (readMem128 m (p + 368)).w1
+  let c40 := (readMem128 m (p + 64)).w0 ^^^ (readMem128 m (p + 144)).w0 ^^^ (readMem128 m (p + 224)).w0 ^^^ (readMem128 m (p + 304)).w0 ^^^ (readMem128 m (p + 384)).w0
+  let c41 := (readMem128 m (p + 64)).w1 ^^^ (readMem128 m (p + 144)).w1 ^^^ (readMem128 m (p + 224)).w1 ^^^ (readMem128 m (p + 304)).w1 ^^^ (readMem128 m (p + 384)).w1
+  match x with
+  | 0 => ⟨c40 ^^^ rotlK c10 1 63, c41 ^^^ rotlK c11 1 63⟩
+  | 1 => ⟨c00 ^^^ rotlK c20 1 63, c01 ^^^ rotlK c21 1 63⟩
+  | 2 => ⟨c10 ^^^ rotlK c30 1 63, c11 ^^^ rotlK c31 1 63⟩
+  | 3 => ⟨c20 ^^^ rotlK c40 1 63, c21 ^^^ rotlK c41 1 63⟩
+  | 4 => ⟨c30 ^^^ rotlK c00 1 63, c31 ^^^ rotlK c01 1 63⟩
+  | _ => Vec128.zero
+
+def keccakThetaRhoXar (a b : Vec128) (imm : Nat) : Vec128 :=
+  let r (x : UInt64) := if imm % 64 == 0 then x
+    else (x >>> UInt64.ofNat (imm % 64)) ||| (x <<< UInt64.ofNat (64 - imm % 64))
+  ⟨r (a.w0 ^^^ b.w0), r (a.w1 ^^^ b.w1)⟩
+
+def keccakThetaRhoPrefix (m : UInt64 → UInt8) (outPtr inPtr : UInt64) : Nat → (UInt64 → UInt8)
+  | 0 => m
+  | n+1 => writeMem128 (keccakThetaRhoPrefix m outPtr inPtr n)
+      (outPtr + UInt64.ofNat (16 * keccakThetaRhoPerm n)) (keccakThetaRhoVec m inPtr n)
+
+theorem keccakThetaRhoPerm_bound (i : Nat) (hi : i < 25) :
+    16 * keccakThetaRhoPerm i ≤ 384 := by
+  unfold keccakThetaRhoPerm
+  have hm := Nat.mod_lt (2 * (i % 5) + 3 * (i / 5)) (by decide : 0 < 5)
+  omega
+
+theorem keccakThetaRhoPrefix_read (m : UInt64 → UInt8) (outPtr inPtr : UInt64)
+    (hd : keccakThetaRhoDisjoint outPtr inPtr) (n : Nat) (hn : n ≤ 25)
+    (i : Nat) (hi : i ≤ 384) :
+    readMem128 (keccakThetaRhoPrefix m outPtr inPtr n) (inPtr + UInt64.ofNat i) =
+      readMem128 m (inPtr + UInt64.ofNat i) := by
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+    rw [keccakThetaRhoPrefix, keccakThetaRho_readWrite outPtr inPtr hd _ _ i
+      (16 * keccakThetaRhoPerm n) hi (keccakThetaRhoPerm_bound n (by omega))]
+    exact ih (by omega)
+
+theorem keccakThetaRhoPrefix_full (m : UInt64 → UInt8) (outPtr inPtr : UInt64) :
+    keccakThetaRhoPrefix m outPtr inPtr 25 = keccakThetaRhoOut m outPtr inPtr := by rfl
+
+set_option linter.unusedSimpArgs false in
+set_option maxHeartbeats 800000 in
+theorem keccakThetaRho_math (m : UInt64 → UInt8) (p : UInt64) (n : Nat) (hn : n < 25) :
+    keccakThetaRhoXar (readMem128 m (p + UInt64.ofNat (16 * n)))
+      (keccakThetaRhoD m p (n % 5)) (keccakThetaRhoRor n) = keccakThetaRhoVec m p n := by
+  match n, hn with
+  | 0, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 1, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 2, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 3, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 4, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 5, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 6, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 7, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 8, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 9, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 10, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 11, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 12, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 13, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 14, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 15, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 16, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 17, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 18, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 19, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 20, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 21, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 22, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 23, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 24, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | n+25, hn => omega
+
+def keccakThetaRhoInv (s t : Arm64State) (n : Nat) : Prop :=
+  t.pc = 160 + 12*n ∧ t.gpr = s.gpr ∧ t.halted = false ∧
+  (∀ x : Nat, x < 5 → t.vec.get (16+x) = keccakThetaRhoD s.mem (s.gpr.get 1) x) ∧
+  t.mem = keccakThetaRhoPrefix s.mem (s.gpr.get 0) (s.gpr.get 1) n
+
+set_option linter.unusedSimpArgs false in
+set_option maxHeartbeats 1000000 in
+theorem keccakThetaRho_parity (s : Arm64State) (hp : s.pc = 0) (hh : s.halted = false) :
+    ∃ t, StepsArm64 keccakThetaRhoProg 40 s t ∧ keccakThetaRhoInv s t 0 := by
+  rcases s with ⟨pc, ⟨⟨r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11,r12,r13,r14,r15⟩, hi⟩,
+    ⟨⟨v0,v1,v2,v3,v4,v5,v6,v7,v8,v9,v10,v11,v12,v13,v14,v15⟩,
+      ⟨v16,v17,v18,v19,v20,v21,v22,v23,v24,v25,v26,v27,v28,v29,v30,v31⟩⟩,
+    cf,zf,dit,hlt,mem⟩
+  dsimp only at hp hh
+  subst pc hlt
+  iterate 40
+    apply StepsArm64_step_ex rfl rfl
+    · conv =>
+        lhs
+        simp [stepArm64, getArmGpr, Bank32.get, Bank32.set, Bank16.get, Bank16.set]
+      all_goals rfl
+  refine ⟨_, StepsArm64.zero _, rfl, rfl, rfl, ?_, rfl⟩
+  intro x hx
+  match x, hx with
+  | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ =>
+    simp [keccakThetaRhoD, rotlK, Bank32.get, Bank16.get]
+  | x+5, hx => omega
+
+theorem keccakThetaRho_fetch (n : Nat) (hn : n < 25) :
+    findInstrAtPc (160+12*n) keccakThetaRhoProg =
+      some ⟨160+12*n, 4, .ldrQ 0 1 (UInt64.ofNat (16*n))⟩ ∧
+    findInstrAtPc (160+12*n+4) keccakThetaRhoProg =
+      some ⟨160+12*n+4, 4, .vxar_2d 0 0 (16+n%5) (keccakThetaRhoRor n)⟩ ∧
+    findInstrAtPc (160+12*n+8) keccakThetaRhoProg =
+      some ⟨160+12*n+8, 4, .strQ 0 0 (UInt64.ofNat (16*keccakThetaRhoPerm n))⟩ := by
+  have hall : ∀ n : Fin 25,
+    findInstrAtPc (160+12*n.val) keccakThetaRhoProg =
+      some ⟨160+12*n.val, 4, .ldrQ 0 1 (UInt64.ofNat (16*n.val))⟩ ∧
+    findInstrAtPc (160+12*n.val+4) keccakThetaRhoProg =
+      some ⟨160+12*n.val+4, 4, .vxar_2d 0 0 (16+n.val%5) (keccakThetaRhoRor n.val)⟩ ∧
+    findInstrAtPc (160+12*n.val+8) keccakThetaRhoProg =
+      some ⟨160+12*n.val+8, 4, .strQ 0 0 (UInt64.ofNat (16*keccakThetaRhoPerm n.val))⟩ := by decide +kernel
+  exact hall ⟨n, hn⟩
+
+set_option linter.unusedSimpArgs false in
+set_option maxHeartbeats 800000 in
+theorem keccakThetaRho_block (s t : Arm64State) (n : Nat) (hn : n < 25)
+    (hd : keccakThetaRhoDisjoint (s.gpr.get 0) (s.gpr.get 1))
+    (h : keccakThetaRhoInv s t n) :
+    ∃ u, StepsArm64 keccakThetaRhoProg 3 t u ∧ keccakThetaRhoInv s u (n+1) := by
+  rcases t with ⟨pc,gpr,vec,cf,zf,dit,hlt,mem⟩
+  rcases h with ⟨hp,hg,hh,hv,hm⟩
+  dsimp only at hp hg hh hv hm
+  subst pc gpr hlt mem
+  have hmod : n % 5 < 5 := Nat.mod_lt n (by decide)
+  have hvn := hv (n%5) hmod
+  have hmath := keccakThetaRho_math s.mem (s.gpr.get 1) n hn
+  dsimp only [keccakThetaRhoXar] at hmath
+  have hf := keccakThetaRho_fetch n hn
+  have hget1 : ∀ st : Arm64State, getArmGpr st 1 = st.gpr.get 1 := fun _ => rfl
+  have hget0 : ∀ st : Arm64State, getArmGpr st 0 = st.gpr.get 0 := fun _ => rfl
+  apply StepsArm64_step_ex rfl hf.1
+  · conv =>
+      lhs
+      simp only [stepArm64, hget1]
+      rw [keccakThetaRhoPrefix_read s.mem (s.gpr.get 0) (s.gpr.get 1) hd n (by omega)
+        (16*n) (by omega)]
+    all_goals rfl
+  apply StepsArm64_step_ex rfl hf.2.1
+  · conv =>
+      lhs
+      simp (disch := omega) only [stepArm64, Bank32.get_set_eq, Bank32.get_set_ne, hvn]
+      rw [hmath]
+    all_goals rfl
+  apply StepsArm64_step_ex rfl (by simpa only [Nat.add_assoc] using hf.2.2)
+  · conv =>
+      lhs
+      simp only [stepArm64, hget0, Bank32.get_set_eq]
+    all_goals rfl
+  refine ⟨_, StepsArm64.zero _, ?_, rfl, rfl, ?_, rfl⟩
+  · dsimp only
+    omega
+  · intro x hx
+    dsimp only
+    simp (disch := omega) only [Bank32.get_set_ne]
+    exact hv x hx
+
+set_option linter.unusedSimpArgs false in
+set_option maxHeartbeats 400000 in
+theorem keccakThetaRho_wipe (s : Arm64State) (hp : s.pc = 460) (hh : s.halted = false) :
+    ∃ t, StepsArm64 keccakThetaRhoProg 13 s t ∧ t.halted = true ∧ t.mem = s.mem := by
+  rcases s with ⟨pc,gpr,⟨⟨v0,v1,v2,v3,v4,v5,v6,v7,v8,v9,v10,v11,v12,v13,v14,v15⟩,
+    ⟨v16,v17,v18,v19,v20,v21,v22,v23,v24,v25,v26,v27,v28,v29,v30,v31⟩⟩,cf,zf,dit,hlt,mem⟩
+  dsimp only at hp hh
+  subst pc hlt
+  iterate 13
+    apply StepsArm64_step_ex rfl rfl
+    · conv =>
+        lhs
+        simp [stepArm64, Bank32.get, Bank32.set, Bank16.get, Bank16.set]
+      all_goals rfl
+  exact ⟨_, StepsArm64.zero _, rfl, rfl⟩
+
+theorem keccakThetaRho_steps_trans {m n : Nat} {s t u : Arm64State}
+    (h : StepsArm64 keccakThetaRhoProg m s t)
+    (h' : StepsArm64 keccakThetaRhoProg n t u) :
+    StepsArm64 keccakThetaRhoProg (m+n) s u := by
+  induction h with
+  | zero => simpa only [Nat.zero_add] using h'
+  | cons hh hf hs h ih =>
+    simpa only [Nat.add_right_comm] using StepsArm64.cons hh hf hs (ih h')
+
+theorem keccakThetaRho_blocks (s t : Arm64State)
+    (hd : keccakThetaRhoDisjoint (s.gpr.get 0) (s.gpr.get 1))
+    (n : Nat) (hn : n ≤ 25) (h : keccakThetaRhoInv s t 0) :
+    ∃ u, StepsArm64 keccakThetaRhoProg (3*n) t u ∧ keccakThetaRhoInv s u n := by
+  induction n with
+  | zero => exact ⟨t, StepsArm64.zero _, h⟩
+  | succ n ih =>
+    obtain ⟨u, hu, hi⟩ := ih (by omega)
+    obtain ⟨v, hv, hi'⟩ := keccakThetaRho_block s u n (by omega) hd hi
+    refine ⟨v, ?_, hi'⟩
+    simpa only [Nat.mul_add, Nat.mul_one] using keccakThetaRho_steps_trans hu hv
+
+theorem keccakThetaRho_steps (s : Arm64State)
+    (hp : s.pc = 0) (hh : s.halted = false)
+    (hd : keccakThetaRhoDisjoint (s.gpr.get 0) (s.gpr.get 1)) :
+    ∃ t, StepsArm64 keccakThetaRhoProg 128 s t ∧ t.halted = true ∧
+      t.mem = keccakThetaRhoOut s.mem (s.gpr.get 0) (s.gpr.get 1) := by
+  obtain ⟨s40, h40, hi⟩ := keccakThetaRho_parity s hp hh
+  obtain ⟨s115, h75, hi'⟩ := keccakThetaRho_blocks s s40 hd 25 (by decide) hi
+  obtain ⟨s128, h13, hh', hm⟩ := keccakThetaRho_wipe s115 hi'.1 hi'.2.2.1
+  refine ⟨s128, keccakThetaRho_steps_trans (keccakThetaRho_steps_trans h40 h75) h13, hh', ?_⟩
+  rw [hm, hi'.2.2.2.2, keccakThetaRhoPrefix_full]
+
+/-- Complete ABI preconditions: entry PC, live machine, disjoint 400-byte buffers. -/
+def keccakThetaRhoInitial (s : Arm64State) : Prop :=
+  s.pc = 0 ∧ s.halted = false ∧ keccakThetaRhoDisjoint (s.gpr.get 0) (s.gpr.get 1)
+
+/-- Fresh decoded machine code computes theta, rho and pi on both full Keccak states.
+`keccakThetaRhoOut` writes all 25 lanes of each state and preserves every other byte. -/
+theorem keccakThetaRho_current_functional (s : Arm64State) (h : keccakThetaRhoInitial s) :
+    ∃ slice prog,
+      findSliceByNameBytes currentAarch64ExtractedSlices keccakThetaRhoName = some slice ∧
+      decodeArm64Slice slice.code = some prog ∧
+      ∀ extra : Nat,
+        (runArm64 prog (128 + extra) s).1.halted = true ∧
+        (runArm64 prog (128 + extra) s).1.mem =
+          keccakThetaRhoOut s.mem (s.gpr.get 0) (s.gpr.get 1) := by
+  have hd := keccakThetaRho_decode
+  cases hf : findSliceByNameBytes currentAarch64ExtractedSlices keccakThetaRhoName with
+  | none => rw [hf] at hd; contradiction
+  | some slice =>
+    rw [hf] at hd
+    refine ⟨slice, keccakThetaRhoProg, rfl, hd, ?_⟩
+    obtain ⟨t, ht, hh, hm⟩ := keccakThetaRho_steps s h.1 h.2.1 h.2.2
+    intro extra
+    have he := (ht.toExecReaches extra).1
+    rw [runArm64_halted_fst keccakThetaRhoProg extra t hh] at he
+    rw [he]
+    exact ⟨hh, hm⟩
+
+theorem keccakThetaRho_inhabited : ∃ s : Arm64State, keccakThetaRhoInitial s := by
+  refine ⟨⟨0, Bank32.ofFn (fun i => if i == 1 then 1024 else 0),
+    Bank32.const Vec128.zero, false, false, false, false, fun _ => 0⟩, rfl, rfl, ?_⟩
+  change keccakThetaRhoDisjoint 0 1024
+  intro i j hi hj he
+  have hn := congrArg UInt64.toNat he
+  simp only [UInt64.toNat_add, UInt64.toNat_ofNat, UInt64.toNat_ofNat'] at hn
+  omega
+
+/-- A wrong implementation omitting theta cannot satisfy the full-state specification. -/
+theorem keccakThetaRho_tooth :
+    rhoPiS (thetaS { zeroKState with a1 := 1 }) ≠
+      rhoPiS { zeroKState with a1 := 1 } := by decide +kernel
+
+#tooth_pair keccakThetaRho_current_functional vs keccakThetaRho_tooth
+#verify_inhabited keccakThetaRho_current_functional keccakThetaRho_inhabited
+
+end KeccakThetaRhoFreshVerification
+
+section Keccak4xFreshVerification
+set_option linter.unusedSimpArgs false
+def keccak4xName : List UInt8 := [113, 115, 97, 103, 95, 97, 115, 109, 95, 107, 101, 99, 99, 97, 107, 95, 102, 49, 54, 48, 48, 95, 97, 118, 120, 50, 95, 52, 120]
+
+def keccak4xProg : List (DecodedInstr X86Instr) := [
+  ⟨0, 1, .pushReg 5⟩,
+  ⟨1, 3, .movRegReg true 5 4⟩,
+  ⟨4, 4, .aluImm .andOp true 4 18446744073709551584⟩,
+  ⟨8, 7, .aluImm .sub true 4 832⟩,
+  ⟨15, 5, .movImm false 1 24⟩,
+  ⟨20, 4, .vload true 0 (.baseDisp 7 0)⟩,
+  ⟨24, 8, .vpxorLoad256 0 0 (.baseDisp 7 160)⟩,
+  ⟨32, 8, .vpxorLoad256 0 0 (.baseDisp 7 320)⟩,
+  ⟨40, 8, .vpxorLoad256 0 0 (.baseDisp 7 480)⟩,
+  ⟨48, 8, .vpxorLoad256 0 0 (.baseDisp 7 640)⟩,
+  ⟨56, 5, .vload true 1 (.baseDisp 7 32)⟩,
+  ⟨61, 8, .vpxorLoad256 1 1 (.baseDisp 7 192)⟩,
+  ⟨69, 8, .vpxorLoad256 1 1 (.baseDisp 7 352)⟩,
+  ⟨77, 8, .vpxorLoad256 1 1 (.baseDisp 7 512)⟩,
+  ⟨85, 8, .vpxorLoad256 1 1 (.baseDisp 7 672)⟩,
+  ⟨93, 5, .vload true 2 (.baseDisp 7 64)⟩,
+  ⟨98, 8, .vpxorLoad256 2 2 (.baseDisp 7 224)⟩,
+  ⟨106, 8, .vpxorLoad256 2 2 (.baseDisp 7 384)⟩,
+  ⟨114, 8, .vpxorLoad256 2 2 (.baseDisp 7 544)⟩,
+  ⟨122, 8, .vpxorLoad256 2 2 (.baseDisp 7 704)⟩,
+  ⟨130, 5, .vload true 3 (.baseDisp 7 96)⟩,
+  ⟨135, 8, .vpxorLoad256 3 3 (.baseDisp 7 256)⟩,
+  ⟨143, 8, .vpxorLoad256 3 3 (.baseDisp 7 416)⟩,
+  ⟨151, 8, .vpxorLoad256 3 3 (.baseDisp 7 576)⟩,
+  ⟨159, 8, .vpxorLoad256 3 3 (.baseDisp 7 736)⟩,
+  ⟨167, 8, .vload true 4 (.baseDisp 7 128)⟩,
+  ⟨175, 8, .vpxorLoad256 4 4 (.baseDisp 7 288)⟩,
+  ⟨183, 8, .vpxorLoad256 4 4 (.baseDisp 7 448)⟩,
+  ⟨191, 8, .vpxorLoad256 4 4 (.baseDisp 7 608)⟩,
+  ⟨199, 8, .vpxorLoad256 4 4 (.baseDisp 7 768)⟩,
+  ⟨207, 5, .vshiftImm .vpsllq true 10 1 1⟩,
+  ⟨212, 5, .vshiftImm .vpsrlq true 11 1 63⟩,
+  ⟨217, 5, .vbinOp .vpor true 10 10 11⟩,
+  ⟨222, 4, .vbinOp .vpxor true 5 10 4⟩,
+  ⟨226, 5, .vshiftImm .vpsllq true 10 2 1⟩,
+  ⟨231, 5, .vshiftImm .vpsrlq true 11 2 63⟩,
+  ⟨236, 5, .vbinOp .vpor true 10 10 11⟩,
+  ⟨241, 4, .vbinOp .vpxor true 6 10 0⟩,
+  ⟨245, 5, .vshiftImm .vpsllq true 10 3 1⟩,
+  ⟨250, 5, .vshiftImm .vpsrlq true 11 3 63⟩,
+  ⟨255, 5, .vbinOp .vpor true 10 10 11⟩,
+  ⟨260, 4, .vbinOp .vpxor true 7 10 1⟩,
+  ⟨264, 5, .vshiftImm .vpsllq true 10 4 1⟩,
+  ⟨269, 5, .vshiftImm .vpsrlq true 11 4 63⟩,
+  ⟨274, 5, .vbinOp .vpor true 10 10 11⟩,
+  ⟨279, 4, .vbinOp .vpxor true 8 10 2⟩,
+  ⟨283, 5, .vshiftImm .vpsllq true 10 0 1⟩,
+  ⟨288, 5, .vshiftImm .vpsrlq true 11 0 63⟩,
+  ⟨293, 5, .vbinOp .vpor true 10 10 11⟩,
+  ⟨298, 4, .vbinOp .vpxor true 9 10 3⟩,
+  ⟨302, 4, .vpxorLoad256 0 5 (.baseDisp 7 0)⟩,
+  ⟨306, 5, .vstore true 0 (.baseDisp 4 0)⟩,
+  ⟨311, 5, .vpxorLoad256 0 6 (.baseDisp 7 32)⟩,
+  ⟨316, 5, .vshiftImm .vpsllq true 1 0 1⟩,
+  ⟨321, 5, .vshiftImm .vpsrlq true 2 0 63⟩,
+  ⟨326, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨330, 9, .vstore true 0 (.baseDisp 4 320)⟩,
+  ⟨339, 5, .vpxorLoad256 0 7 (.baseDisp 7 64)⟩,
+  ⟨344, 5, .vshiftImm .vpsllq true 1 0 62⟩,
+  ⟨349, 5, .vshiftImm .vpsrlq true 2 0 2⟩,
+  ⟨354, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨358, 9, .vstore true 0 (.baseDisp 4 640)⟩,
+  ⟨367, 5, .vpxorLoad256 0 8 (.baseDisp 7 96)⟩,
+  ⟨372, 5, .vshiftImm .vpsllq true 1 0 28⟩,
+  ⟨377, 5, .vshiftImm .vpsrlq true 2 0 36⟩,
+  ⟨382, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨386, 9, .vstore true 0 (.baseDisp 4 160)⟩,
+  ⟨395, 8, .vpxorLoad256 0 9 (.baseDisp 7 128)⟩,
+  ⟨403, 5, .vshiftImm .vpsllq true 1 0 27⟩,
+  ⟨408, 5, .vshiftImm .vpsrlq true 2 0 37⟩,
+  ⟨413, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨417, 9, .vstore true 0 (.baseDisp 4 480)⟩,
+  ⟨426, 8, .vpxorLoad256 0 5 (.baseDisp 7 160)⟩,
+  ⟨434, 5, .vshiftImm .vpsllq true 1 0 36⟩,
+  ⟨439, 5, .vshiftImm .vpsrlq true 2 0 28⟩,
+  ⟨444, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨448, 9, .vstore true 0 (.baseDisp 4 512)⟩,
+  ⟨457, 8, .vpxorLoad256 0 6 (.baseDisp 7 192)⟩,
+  ⟨465, 5, .vshiftImm .vpsllq true 1 0 44⟩,
+  ⟨470, 5, .vshiftImm .vpsrlq true 2 0 20⟩,
+  ⟨475, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨479, 6, .vstore true 0 (.baseDisp 4 32)⟩,
+  ⟨485, 8, .vpxorLoad256 0 7 (.baseDisp 7 224)⟩,
+  ⟨493, 5, .vshiftImm .vpsllq true 1 0 6⟩,
+  ⟨498, 5, .vshiftImm .vpsrlq true 2 0 58⟩,
+  ⟨503, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨507, 9, .vstore true 0 (.baseDisp 4 352)⟩,
+  ⟨516, 8, .vpxorLoad256 0 8 (.baseDisp 7 256)⟩,
+  ⟨524, 5, .vshiftImm .vpsllq true 1 0 55⟩,
+  ⟨529, 5, .vshiftImm .vpsrlq true 2 0 9⟩,
+  ⟨534, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨538, 9, .vstore true 0 (.baseDisp 4 672)⟩,
+  ⟨547, 8, .vpxorLoad256 0 9 (.baseDisp 7 288)⟩,
+  ⟨555, 5, .vshiftImm .vpsllq true 1 0 20⟩,
+  ⟨560, 5, .vshiftImm .vpsrlq true 2 0 44⟩,
+  ⟨565, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨569, 9, .vstore true 0 (.baseDisp 4 192)⟩,
+  ⟨578, 8, .vpxorLoad256 0 5 (.baseDisp 7 320)⟩,
+  ⟨586, 5, .vshiftImm .vpsllq true 1 0 3⟩,
+  ⟨591, 5, .vshiftImm .vpsrlq true 2 0 61⟩,
+  ⟨596, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨600, 9, .vstore true 0 (.baseDisp 4 224)⟩,
+  ⟨609, 8, .vpxorLoad256 0 6 (.baseDisp 7 352)⟩,
+  ⟨617, 5, .vshiftImm .vpsllq true 1 0 10⟩,
+  ⟨622, 5, .vshiftImm .vpsrlq true 2 0 54⟩,
+  ⟨627, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨631, 9, .vstore true 0 (.baseDisp 4 544)⟩,
+  ⟨640, 8, .vpxorLoad256 0 7 (.baseDisp 7 384)⟩,
+  ⟨648, 5, .vshiftImm .vpsllq true 1 0 43⟩,
+  ⟨653, 5, .vshiftImm .vpsrlq true 2 0 21⟩,
+  ⟨658, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨662, 6, .vstore true 0 (.baseDisp 4 64)⟩,
+  ⟨668, 8, .vpxorLoad256 0 8 (.baseDisp 7 416)⟩,
+  ⟨676, 5, .vshiftImm .vpsllq true 1 0 25⟩,
+  ⟨681, 5, .vshiftImm .vpsrlq true 2 0 39⟩,
+  ⟨686, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨690, 9, .vstore true 0 (.baseDisp 4 384)⟩,
+  ⟨699, 8, .vpxorLoad256 0 9 (.baseDisp 7 448)⟩,
+  ⟨707, 5, .vshiftImm .vpsllq true 1 0 39⟩,
+  ⟨712, 5, .vshiftImm .vpsrlq true 2 0 25⟩,
+  ⟨717, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨721, 9, .vstore true 0 (.baseDisp 4 704)⟩,
+  ⟨730, 8, .vpxorLoad256 0 5 (.baseDisp 7 480)⟩,
+  ⟨738, 5, .vshiftImm .vpsllq true 1 0 41⟩,
+  ⟨743, 5, .vshiftImm .vpsrlq true 2 0 23⟩,
+  ⟨748, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨752, 9, .vstore true 0 (.baseDisp 4 736)⟩,
+  ⟨761, 8, .vpxorLoad256 0 6 (.baseDisp 7 512)⟩,
+  ⟨769, 5, .vshiftImm .vpsllq true 1 0 45⟩,
+  ⟨774, 5, .vshiftImm .vpsrlq true 2 0 19⟩,
+  ⟨779, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨783, 9, .vstore true 0 (.baseDisp 4 256)⟩,
+  ⟨792, 8, .vpxorLoad256 0 7 (.baseDisp 7 544)⟩,
+  ⟨800, 5, .vshiftImm .vpsllq true 1 0 15⟩,
+  ⟨805, 5, .vshiftImm .vpsrlq true 2 0 49⟩,
+  ⟨810, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨814, 9, .vstore true 0 (.baseDisp 4 576)⟩,
+  ⟨823, 8, .vpxorLoad256 0 8 (.baseDisp 7 576)⟩,
+  ⟨831, 5, .vshiftImm .vpsllq true 1 0 21⟩,
+  ⟨836, 5, .vshiftImm .vpsrlq true 2 0 43⟩,
+  ⟨841, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨845, 6, .vstore true 0 (.baseDisp 4 96)⟩,
+  ⟨851, 8, .vpxorLoad256 0 9 (.baseDisp 7 608)⟩,
+  ⟨859, 5, .vshiftImm .vpsllq true 1 0 8⟩,
+  ⟨864, 5, .vshiftImm .vpsrlq true 2 0 56⟩,
+  ⟨869, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨873, 9, .vstore true 0 (.baseDisp 4 416)⟩,
+  ⟨882, 8, .vpxorLoad256 0 5 (.baseDisp 7 640)⟩,
+  ⟨890, 5, .vshiftImm .vpsllq true 1 0 18⟩,
+  ⟨895, 5, .vshiftImm .vpsrlq true 2 0 46⟩,
+  ⟨900, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨904, 9, .vstore true 0 (.baseDisp 4 448)⟩,
+  ⟨913, 8, .vpxorLoad256 0 6 (.baseDisp 7 672)⟩,
+  ⟨921, 5, .vshiftImm .vpsllq true 1 0 2⟩,
+  ⟨926, 5, .vshiftImm .vpsrlq true 2 0 62⟩,
+  ⟨931, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨935, 9, .vstore true 0 (.baseDisp 4 768)⟩,
+  ⟨944, 8, .vpxorLoad256 0 7 (.baseDisp 7 704)⟩,
+  ⟨952, 5, .vshiftImm .vpsllq true 1 0 61⟩,
+  ⟨957, 5, .vshiftImm .vpsrlq true 2 0 3⟩,
+  ⟨962, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨966, 9, .vstore true 0 (.baseDisp 4 288)⟩,
+  ⟨975, 8, .vpxorLoad256 0 8 (.baseDisp 7 736)⟩,
+  ⟨983, 5, .vshiftImm .vpsllq true 1 0 56⟩,
+  ⟨988, 5, .vshiftImm .vpsrlq true 2 0 8⟩,
+  ⟨993, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨997, 9, .vstore true 0 (.baseDisp 4 608)⟩,
+  ⟨1006, 8, .vpxorLoad256 0 9 (.baseDisp 7 768)⟩,
+  ⟨1014, 5, .vshiftImm .vpsllq true 1 0 14⟩,
+  ⟨1019, 5, .vshiftImm .vpsrlq true 2 0 50⟩,
+  ⟨1024, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨1028, 9, .vstore true 0 (.baseDisp 4 128)⟩,
+  ⟨1037, 5, .vload true 0 (.baseDisp 4 0)⟩,
+  ⟨1042, 6, .vload true 1 (.baseDisp 4 32)⟩,
+  ⟨1048, 6, .vload true 2 (.baseDisp 4 64)⟩,
+  ⟨1054, 6, .vload true 3 (.baseDisp 4 96)⟩,
+  ⟨1060, 9, .vload true 4 (.baseDisp 4 128)⟩,
+  ⟨1069, 4, .vbinOp .vpandn true 5 1 2⟩,
+  ⟨1073, 4, .vbinOp .vpxor true 5 0 5⟩,
+  ⟨1077, 5, .vpbroadcastLoad64 10 (.baseDisp 6 0)⟩,
+  ⟨1082, 4, .vbinOp .vpxor true 5 10 5⟩,
+  ⟨1086, 4, .vstore true 5 (.baseDisp 7 0)⟩,
+  ⟨1090, 4, .vbinOp .vpandn true 6 2 3⟩,
+  ⟨1094, 4, .vbinOp .vpxor true 6 1 6⟩,
+  ⟨1098, 5, .vstore true 6 (.baseDisp 7 32)⟩,
+  ⟨1103, 4, .vbinOp .vpandn true 7 3 4⟩,
+  ⟨1107, 4, .vbinOp .vpxor true 7 2 7⟩,
+  ⟨1111, 5, .vstore true 7 (.baseDisp 7 64)⟩,
+  ⟨1116, 4, .vbinOp .vpandn true 8 4 0⟩,
+  ⟨1120, 4, .vbinOp .vpxor true 8 8 3⟩,
+  ⟨1124, 5, .vstore true 8 (.baseDisp 7 96)⟩,
+  ⟨1129, 4, .vbinOp .vpandn true 9 0 1⟩,
+  ⟨1133, 4, .vbinOp .vpxor true 9 9 4⟩,
+  ⟨1137, 8, .vstore true 9 (.baseDisp 7 128)⟩,
+  ⟨1145, 9, .vload true 0 (.baseDisp 4 160)⟩,
+  ⟨1154, 9, .vload true 1 (.baseDisp 4 192)⟩,
+  ⟨1163, 9, .vload true 2 (.baseDisp 4 224)⟩,
+  ⟨1172, 9, .vload true 3 (.baseDisp 4 256)⟩,
+  ⟨1181, 9, .vload true 4 (.baseDisp 4 288)⟩,
+  ⟨1190, 4, .vbinOp .vpandn true 5 1 2⟩,
+  ⟨1194, 4, .vbinOp .vpxor true 5 0 5⟩,
+  ⟨1198, 8, .vstore true 5 (.baseDisp 7 160)⟩,
+  ⟨1206, 4, .vbinOp .vpandn true 6 2 3⟩,
+  ⟨1210, 4, .vbinOp .vpxor true 6 1 6⟩,
+  ⟨1214, 8, .vstore true 6 (.baseDisp 7 192)⟩,
+  ⟨1222, 4, .vbinOp .vpandn true 7 3 4⟩,
+  ⟨1226, 4, .vbinOp .vpxor true 7 2 7⟩,
+  ⟨1230, 8, .vstore true 7 (.baseDisp 7 224)⟩,
+  ⟨1238, 4, .vbinOp .vpandn true 8 4 0⟩,
+  ⟨1242, 4, .vbinOp .vpxor true 8 8 3⟩,
+  ⟨1246, 8, .vstore true 8 (.baseDisp 7 256)⟩,
+  ⟨1254, 4, .vbinOp .vpandn true 9 0 1⟩,
+  ⟨1258, 4, .vbinOp .vpxor true 9 9 4⟩,
+  ⟨1262, 8, .vstore true 9 (.baseDisp 7 288)⟩,
+  ⟨1270, 9, .vload true 0 (.baseDisp 4 320)⟩,
+  ⟨1279, 9, .vload true 1 (.baseDisp 4 352)⟩,
+  ⟨1288, 9, .vload true 2 (.baseDisp 4 384)⟩,
+  ⟨1297, 9, .vload true 3 (.baseDisp 4 416)⟩,
+  ⟨1306, 9, .vload true 4 (.baseDisp 4 448)⟩,
+  ⟨1315, 4, .vbinOp .vpandn true 5 1 2⟩,
+  ⟨1319, 4, .vbinOp .vpxor true 5 0 5⟩,
+  ⟨1323, 8, .vstore true 5 (.baseDisp 7 320)⟩,
+  ⟨1331, 4, .vbinOp .vpandn true 6 2 3⟩,
+  ⟨1335, 4, .vbinOp .vpxor true 6 1 6⟩,
+  ⟨1339, 8, .vstore true 6 (.baseDisp 7 352)⟩,
+  ⟨1347, 4, .vbinOp .vpandn true 7 3 4⟩,
+  ⟨1351, 4, .vbinOp .vpxor true 7 2 7⟩,
+  ⟨1355, 8, .vstore true 7 (.baseDisp 7 384)⟩,
+  ⟨1363, 4, .vbinOp .vpandn true 8 4 0⟩,
+  ⟨1367, 4, .vbinOp .vpxor true 8 8 3⟩,
+  ⟨1371, 8, .vstore true 8 (.baseDisp 7 416)⟩,
+  ⟨1379, 4, .vbinOp .vpandn true 9 0 1⟩,
+  ⟨1383, 4, .vbinOp .vpxor true 9 9 4⟩,
+  ⟨1387, 8, .vstore true 9 (.baseDisp 7 448)⟩,
+  ⟨1395, 9, .vload true 0 (.baseDisp 4 480)⟩,
+  ⟨1404, 9, .vload true 1 (.baseDisp 4 512)⟩,
+  ⟨1413, 9, .vload true 2 (.baseDisp 4 544)⟩,
+  ⟨1422, 9, .vload true 3 (.baseDisp 4 576)⟩,
+  ⟨1431, 9, .vload true 4 (.baseDisp 4 608)⟩,
+  ⟨1440, 4, .vbinOp .vpandn true 5 1 2⟩,
+  ⟨1444, 4, .vbinOp .vpxor true 5 0 5⟩,
+  ⟨1448, 8, .vstore true 5 (.baseDisp 7 480)⟩,
+  ⟨1456, 4, .vbinOp .vpandn true 6 2 3⟩,
+  ⟨1460, 4, .vbinOp .vpxor true 6 1 6⟩,
+  ⟨1464, 8, .vstore true 6 (.baseDisp 7 512)⟩,
+  ⟨1472, 4, .vbinOp .vpandn true 7 3 4⟩,
+  ⟨1476, 4, .vbinOp .vpxor true 7 2 7⟩,
+  ⟨1480, 8, .vstore true 7 (.baseDisp 7 544)⟩,
+  ⟨1488, 4, .vbinOp .vpandn true 8 4 0⟩,
+  ⟨1492, 4, .vbinOp .vpxor true 8 8 3⟩,
+  ⟨1496, 8, .vstore true 8 (.baseDisp 7 576)⟩,
+  ⟨1504, 4, .vbinOp .vpandn true 9 0 1⟩,
+  ⟨1508, 4, .vbinOp .vpxor true 9 9 4⟩,
+  ⟨1512, 8, .vstore true 9 (.baseDisp 7 608)⟩,
+  ⟨1520, 9, .vload true 0 (.baseDisp 4 640)⟩,
+  ⟨1529, 9, .vload true 1 (.baseDisp 4 672)⟩,
+  ⟨1538, 9, .vload true 2 (.baseDisp 4 704)⟩,
+  ⟨1547, 9, .vload true 3 (.baseDisp 4 736)⟩,
+  ⟨1556, 9, .vload true 4 (.baseDisp 4 768)⟩,
+  ⟨1565, 4, .vbinOp .vpandn true 5 1 2⟩,
+  ⟨1569, 4, .vbinOp .vpxor true 5 0 5⟩,
+  ⟨1573, 8, .vstore true 5 (.baseDisp 7 640)⟩,
+  ⟨1581, 4, .vbinOp .vpandn true 6 2 3⟩,
+  ⟨1585, 4, .vbinOp .vpxor true 6 1 6⟩,
+  ⟨1589, 8, .vstore true 6 (.baseDisp 7 672)⟩,
+  ⟨1597, 4, .vbinOp .vpandn true 7 3 4⟩,
+  ⟨1601, 4, .vbinOp .vpxor true 7 2 7⟩,
+  ⟨1605, 8, .vstore true 7 (.baseDisp 7 704)⟩,
+  ⟨1613, 4, .vbinOp .vpandn true 8 4 0⟩,
+  ⟨1617, 4, .vbinOp .vpxor true 8 8 3⟩,
+  ⟨1621, 8, .vstore true 8 (.baseDisp 7 736)⟩,
+  ⟨1629, 4, .vbinOp .vpandn true 9 0 1⟩,
+  ⟨1633, 4, .vbinOp .vpxor true 9 9 4⟩,
+  ⟨1637, 8, .vstore true 9 (.baseDisp 7 768)⟩,
+  ⟨1645, 4, .aluImm .add true 6 8⟩,
+  ⟨1649, 2, .incDec false false 1⟩,
+  ⟨1651, 6, .jcc 5 20⟩,
+  ⟨1657, 4, .vbinOp .vpxor true 0 0 0⟩,
+  ⟨1661, 5, .movImm false 1 25⟩,
+  ⟨1666, 3, .movRegReg true 0 4⟩,
+  ⟨1669, 4, .vstore true 0 (.baseDisp 0 0)⟩,
+  ⟨1673, 4, .aluImm .add true 0 32⟩,
+  ⟨1677, 2, .incDec false false 1⟩,
+  ⟨1679, 2, .jcc 5 1669⟩,
+  ⟨1681, 4, .vbinOp .vpxor true 1 1 1⟩,
+  ⟨1685, 4, .vbinOp .vpxor true 2 2 2⟩,
+  ⟨1689, 4, .vbinOp .vpxor true 3 3 3⟩,
+  ⟨1693, 4, .vbinOp .vpxor true 4 4 4⟩,
+  ⟨1697, 4, .vbinOp .vpxor true 5 5 5⟩,
+  ⟨1701, 4, .vbinOp .vpxor true 6 6 6⟩,
+  ⟨1705, 4, .vbinOp .vpxor true 7 7 7⟩,
+  ⟨1709, 5, .vbinOp .vpxor true 8 8 8⟩,
+  ⟨1714, 5, .vbinOp .vpxor true 9 9 9⟩,
+  ⟨1719, 5, .vbinOp .vpxor true 10 10 10⟩,
+  ⟨1724, 5, .vbinOp .vpxor true 11 11 11⟩,
+  ⟨1729, 3, .vzeroall⟩,
+  ⟨1732, 3, .vzeroupper⟩,
+  ⟨1735, 3, .movRegReg true 4 5⟩,
+  ⟨1738, 1, .popReg 5⟩,
+  ⟨1739, 2, .aluRegReg .xorOp false 7 7⟩,
+  ⟨1741, 2, .aluRegReg .xorOp false 6 6⟩,
+  ⟨1743, 2, .aluRegReg .xorOp false 2 2⟩,
+  ⟨1745, 2, .aluRegReg .xorOp false 1 1⟩,
+  ⟨1747, 3, .aluRegReg .xorOp false 8 8⟩,
+  ⟨1750, 3, .aluRegReg .xorOp false 9 9⟩,
+  ⟨1753, 3, .aluRegReg .xorOp false 10 10⟩,
+  ⟨1756, 3, .aluRegReg .xorOp false 11 11⟩,
+  ⟨1759, 2, .aluRegReg .xorOp false 0 0⟩,
+  ⟨1761, 1, .ret⟩
+]
+
+theorem keccak4x_decoded :
+    (findSliceByNameBytes currentX86ExtractedSlices keccak4xName).bind
+      (fun sl => decodeX86Stream sl.code) = some keccak4xProg := by decide +kernel
+
+theorem keccak4x_instruction_count : keccak4xProg.length = 309 := by rfl
+
+/-- One of the four words in an interleaved AVX2 Keccak lane. -/
+def keccak4xWord (v : Vec256) : Nat → UInt64
+  | 0 => v.w0 | 1 => v.w1 | 2 => v.w2 | _ => v.w3
+
+/-- All 25 coordinates of any one of the four independent sponges. -/
+def keccak4xLaneState (v : Nat → Vec256) (q : Nat) : KState :=
+  ⟨keccak4xWord (v 0) q, keccak4xWord (v 1) q, keccak4xWord (v 2) q, keccak4xWord (v 3) q, keccak4xWord (v 4) q, keccak4xWord (v 5) q, keccak4xWord (v 6) q, keccak4xWord (v 7) q, keccak4xWord (v 8) q, keccak4xWord (v 9) q, keccak4xWord (v 10) q, keccak4xWord (v 11) q, keccak4xWord (v 12) q, keccak4xWord (v 13) q, keccak4xWord (v 14) q, keccak4xWord (v 15) q, keccak4xWord (v 16) q, keccak4xWord (v 17) q, keccak4xWord (v 18) q, keccak4xWord (v 19) q, keccak4xWord (v 20) q, keccak4xWord (v 21) q, keccak4xWord (v 22) q, keccak4xWord (v 23) q, keccak4xWord (v 24) q⟩
+
+def keccak4xXor (a b : Vec256) : Vec256 :=
+  ⟨a.w0 ^^^ b.w0, a.w1 ^^^ b.w1, a.w2 ^^^ b.w2, a.w3 ^^^ b.w3⟩
+
+def keccak4xRotl (a : Vec256) (k j : UInt64) : Vec256 :=
+  ⟨rotlK a.w0 k j, rotlK a.w1 k j, rotlK a.w2 k j, rotlK a.w3 k j⟩
+
+def keccak4xColumn (v : Nat → Vec256) (x : Nat) : Vec256 :=
+  keccak4xXor (keccak4xXor (keccak4xXor (keccak4xXor (v x) (v (x+5)))
+    (v (x+10))) (v (x+15))) (v (x+20))
+
+def keccak4xD (v : Nat → Vec256) (x : Nat) : Vec256 :=
+  keccak4xXor (keccak4xColumn v ((x+4)%5)) (keccak4xRotl (keccak4xColumn v ((x+1)%5)) 1 63)
+
+def keccak4xTheta (v : Nat → Vec256) (i : Nat) : Vec256 :=
+  keccak4xXor (v i) (keccak4xD v (i%5))
+
+def keccak4xRhoPi (v : Nat → Vec256) : Nat → Vec256
+  | 0 => v 0
+  | 1 => keccak4xRotl (v 6) 44 20
+  | 2 => keccak4xRotl (v 12) 43 21
+  | 3 => keccak4xRotl (v 18) 21 43
+  | 4 => keccak4xRotl (v 24) 14 50
+  | 5 => keccak4xRotl (v 3) 28 36
+  | 6 => keccak4xRotl (v 9) 20 44
+  | 7 => keccak4xRotl (v 10) 3 61
+  | 8 => keccak4xRotl (v 16) 45 19
+  | 9 => keccak4xRotl (v 22) 61 3
+  | 10 => keccak4xRotl (v 1) 1 63
+  | 11 => keccak4xRotl (v 7) 6 58
+  | 12 => keccak4xRotl (v 13) 25 39
+  | 13 => keccak4xRotl (v 19) 8 56
+  | 14 => keccak4xRotl (v 20) 18 46
+  | 15 => keccak4xRotl (v 4) 27 37
+  | 16 => keccak4xRotl (v 5) 36 28
+  | 17 => keccak4xRotl (v 11) 10 54
+  | 18 => keccak4xRotl (v 17) 15 49
+  | 19 => keccak4xRotl (v 23) 56 8
+  | 20 => keccak4xRotl (v 2) 62 2
+  | 21 => keccak4xRotl (v 8) 55 9
+  | 22 => keccak4xRotl (v 14) 39 25
+  | 23 => keccak4xRotl (v 15) 41 23
+  | 24 => keccak4xRotl (v 21) 2 62
+  | _ => Vec256.zero
+
+def keccak4xChiVec (a b c : Vec256) : Vec256 :=
+  ⟨a.w0 ^^^ ((~~~b.w0) &&& c.w0), a.w1 ^^^ ((~~~b.w1) &&& c.w1),
+   a.w2 ^^^ ((~~~b.w2) &&& c.w2), a.w3 ^^^ ((~~~b.w3) &&& c.w3)⟩
+
+def keccak4xChi (v : Nat → Vec256) (i : Nat) : Vec256 :=
+  keccak4xChiVec (v i) (v (5*(i/5) + (i+1)%5)) (v (5*(i/5) + (i+2)%5))
+
+/-- SIMD round specification, acting on every word of every one of the 25 lanes. -/
+def keccak4xRoundVec (v : Nat → Vec256) (rc : UInt64) (i : Nat) : Vec256 :=
+  let c := keccak4xChi (keccak4xRhoPi (keccak4xTheta v)) i
+  if i == 0 then keccak4xXor c ⟨rc,rc,rc,rc⟩ else c
+
+/-- SIMD representation commutes with the canonical Keccak round on all four sponges. -/
+theorem keccak4xRoundVec_reconstruct (v : Nat → Vec256) (rc : UInt64)
+    (q : Nat) (hq : q < 4) :
+    keccak4xLaneState (keccak4xRoundVec v rc) q = roundS (keccak4xLaneState v q) rc := by
+  match q, hq with
+  | 0, _ | 1, _ | 2, _ | 3, _ => rfl
+  | n+4, h => exact False.elim (by omega)
+
+theorem keccak4xRoundVec_tooth :
+    keccak4xLaneState (keccak4xRoundVec (fun _ => Vec256.zero) 1) 0 ≠ zeroKState := by
+  decide +kernel
+
+theorem keccak4xRoundVec_inhabited :
+    ∃ (v : Nat → Vec256) (rc : UInt64) (q : Nat),
+      q < 4 ∧ keccak4xLaneState v q = zeroKState ∧ rc = 0 := by
+  exact ⟨fun _ => Vec256.zero, 0, 0, by decide, rfl, rfl⟩
+
+#tooth_pair keccak4xRoundVec_reconstruct vs keccak4xRoundVec_tooth
+#verify_inhabited keccak4xRoundVec_reconstruct keccak4xRoundVec_inhabited
+
+/-- Initial lane memory, in the machine's four-word interleaved layout. -/
+def keccak4xSource (mem : UInt64 → UInt8) (p : UInt64) : Nat → Vec256
+  | 0 => readMem256 mem (p + 0)
+  | 1 => readMem256 mem (p + 32)
+  | 2 => readMem256 mem (p + 64)
+  | 3 => readMem256 mem (p + 96)
+  | 4 => readMem256 mem (p + 128)
+  | 5 => readMem256 mem (p + 160)
+  | 6 => readMem256 mem (p + 192)
+  | 7 => readMem256 mem (p + 224)
+  | 8 => readMem256 mem (p + 256)
+  | 9 => readMem256 mem (p + 288)
+  | 10 => readMem256 mem (p + 320)
+  | 11 => readMem256 mem (p + 352)
+  | 12 => readMem256 mem (p + 384)
+  | 13 => readMem256 mem (p + 416)
+  | 14 => readMem256 mem (p + 448)
+  | 15 => readMem256 mem (p + 480)
+  | 16 => readMem256 mem (p + 512)
+  | 17 => readMem256 mem (p + 544)
+  | 18 => readMem256 mem (p + 576)
+  | 19 => readMem256 mem (p + 608)
+  | 20 => readMem256 mem (p + 640)
+  | 21 => readMem256 mem (p + 672)
+  | 22 => readMem256 mem (p + 704)
+  | 23 => readMem256 mem (p + 736)
+  | 24 => readMem256 mem (p + 768)
+  | _ => Vec256.zero
+
+private theorem keccak4x_u64xor_comm (a b : UInt64) : a ^^^ b = b ^^^ a := by
+  apply UInt64.eq_of_toBitVec_eq
+  simp only [UInt64.toBitVec_xor, BitVec.xor_comm]
+
+
+set_option maxHeartbeats 1000000 in
+/-- The first 45 round-body instructions compute all five theta corrections,
+for every word of all four interleaved sponges, without changing memory. -/
+theorem keccak4x_parity_steps
+    (g : Bank16 UInt64) (y : Bank16 Vec256) (cf ofl zf dy : Bool) (mem : UInt64 → UInt8) :
+    ∃ t, StepsX86 keccak4xProg 45 ⟨20,g,y,cf,ofl,zf,dy,false,mem⟩ t ∧
+      t.pc = 302 ∧ t.halted = false ∧ t.gpr = g ∧ t.mem = mem ∧
+      (∀ x : Nat, x < 5 → t.ymm.get (5+x) = keccak4xD (keccak4xSource mem (g.get 7)) x) := by
+  have h1 : UInt64.ofNat 1 = (1 : UInt64) := by decide +kernel
+  have h63 : UInt64.ofNat 63 = (63 : UInt64) := by decide +kernel
+  iterate 45
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        simp [stepX86, evalX86Addr, Bank16.get, Bank16.set, clampVecWidth,
+          evalVecBin256, evalVecShift256, h1, h63]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, rfl, ?_⟩
+  intro x hx
+  match x, hx with
+  | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ =>
+    simp [keccak4xD, keccak4xColumn, keccak4xSource, keccak4xRotl,
+      keccak4xXor, rotlK, Bank16.get, keccak4x_u64xor_comm]
+  | n+5, h => exact False.elim (by omega)
+
+
+/-- Source-to-destination lane permutation used by the compiled rho/pi stores. -/
+def keccak4xPerm : Nat → Nat
+  | 0 => 0
+  | 1 => 10
+  | 2 => 20
+  | 3 => 5
+  | 4 => 15
+  | 5 => 16
+  | 6 => 1
+  | 7 => 11
+  | 8 => 21
+  | 9 => 6
+  | 10 => 7
+  | 11 => 17
+  | 12 => 2
+  | 13 => 12
+  | 14 => 22
+  | 15 => 23
+  | 16 => 8
+  | 17 => 18
+  | 18 => 3
+  | 19 => 13
+  | 20 => 14
+  | 21 => 24
+  | 22 => 9
+  | 23 => 19
+  | 24 => 4
+  | _ => 0
+
+def keccak4xPermInv : Nat → Nat
+  | 0 => 0
+  | 1 => 6
+  | 2 => 12
+  | 3 => 18
+  | 4 => 24
+  | 5 => 3
+  | 6 => 9
+  | 7 => 10
+  | 8 => 16
+  | 9 => 22
+  | 10 => 1
+  | 11 => 7
+  | 12 => 13
+  | 13 => 19
+  | 14 => 20
+  | 15 => 4
+  | 16 => 5
+  | 17 => 11
+  | 18 => 17
+  | 19 => 23
+  | 20 => 2
+  | 21 => 8
+  | 22 => 14
+  | 23 => 15
+  | 24 => 21
+  | _ => 0
+
+theorem keccak4x_perm_lt (i : Nat) (hi : i < 25) : keccak4xPerm i < 25 := by
+  match i, hi with
+  | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ | 5, _ | 6, _ | 7, _ | 8, _ | 9, _ | 10, _ | 11, _ | 12, _ | 13, _ | 14, _ | 15, _ | 16, _ | 17, _ | 18, _ | 19, _ | 20, _ | 21, _ | 22, _ | 23, _ | 24, _ => decide +kernel
+  | n+25, h => exact False.elim (by omega)
+
+theorem keccak4x_permInv_lt (i : Nat) (hi : i < 25) : keccak4xPermInv i < 25 := by
+  match i, hi with
+  | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ | 5, _ | 6, _ | 7, _ | 8, _ | 9, _ | 10, _ | 11, _ | 12, _ | 13, _ | 14, _ | 15, _ | 16, _ | 17, _ | 18, _ | 19, _ | 20, _ | 21, _ | 22, _ | 23, _ | 24, _ => decide +kernel
+  | n+25, h => exact False.elim (by omega)
+
+theorem keccak4x_perm_leftInv (i : Nat) (hi : i < 25) : keccak4xPermInv (keccak4xPerm i) = i := by
+  match i, hi with
+  | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ | 5, _ | 6, _ | 7, _ | 8, _ | 9, _ | 10, _ | 11, _ | 12, _ | 13, _ | 14, _ | 15, _ | 16, _ | 17, _ | 18, _ | 19, _ | 20, _ | 21, _ | 22, _ | 23, _ | 24, _ => decide +kernel
+  | n+25, h => exact False.elim (by omega)
+
+theorem keccak4x_perm_rightInv (i : Nat) (hi : i < 25) : keccak4xPerm (keccak4xPermInv i) = i := by
+  match i, hi with
+  | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ | 5, _ | 6, _ | 7, _ | 8, _ | 9, _ | 10, _ | 11, _ | 12, _ | 13, _ | 14, _ | 15, _ | 16, _ | 17, _ | 18, _ | 19, _ | 20, _ | 21, _ | 22, _ | 23, _ | 24, _ => decide +kernel
+  | n+25, h => exact False.elim (by omega)
+
+def keccak4xRhoRot (a : Vec256) : Nat → Vec256
+  | 0 => a
+  | 1 => keccak4xRotl a 1 63
+  | 2 => keccak4xRotl a 62 2
+  | 3 => keccak4xRotl a 28 36
+  | 4 => keccak4xRotl a 27 37
+  | 5 => keccak4xRotl a 36 28
+  | 6 => keccak4xRotl a 44 20
+  | 7 => keccak4xRotl a 6 58
+  | 8 => keccak4xRotl a 55 9
+  | 9 => keccak4xRotl a 20 44
+  | 10 => keccak4xRotl a 3 61
+  | 11 => keccak4xRotl a 10 54
+  | 12 => keccak4xRotl a 43 21
+  | 13 => keccak4xRotl a 25 39
+  | 14 => keccak4xRotl a 39 25
+  | 15 => keccak4xRotl a 41 23
+  | 16 => keccak4xRotl a 45 19
+  | 17 => keccak4xRotl a 15 49
+  | 18 => keccak4xRotl a 21 43
+  | 19 => keccak4xRotl a 8 56
+  | 20 => keccak4xRotl a 18 46
+  | 21 => keccak4xRotl a 2 62
+  | 22 => keccak4xRotl a 61 3
+  | 23 => keccak4xRotl a 56 8
+  | 24 => keccak4xRotl a 14 50
+  | _ => Vec256.zero
+
+theorem keccak4x_rho_mapping (v : Nat → Vec256) (i : Nat) (hi : i < 25) :
+    keccak4xRhoRot (keccak4xTheta v i) i =
+      keccak4xRhoPi (keccak4xTheta v) (keccak4xPerm i) := by
+  match i, hi with
+  | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ | 5, _ | 6, _ | 7, _ | 8, _ | 9, _ | 10, _ | 11, _ | 12, _ | 13, _ | 14, _ | 15, _ | 16, _ | 17, _ | 18, _ | 19, _ | 20, _ | 21, _ | 22, _ | 23, _ | 24, _ => rfl
+  | n+25, h => exact False.elim (by omega)
+
+/-- Modular disjointness: valid even when a region wraps around the address space. -/
+def keccak4xDisjoint (a : UInt64) (n : Nat) (b : UInt64) (m : Nat) : Prop :=
+  ∀ i j : Nat, i < n → j < m → a + UInt64.ofNat i ≠ b + UInt64.ofNat j
+
+/-- Scratch writes are ordered exactly as rho/pi visits the source lanes. -/
+def keccak4xScratchPrefix (m : UInt64 → UInt8) (sp : UInt64) (v : Nat → Vec256) : Nat → (UInt64 → UInt8)
+  | 0 => m
+  | n+1 => writeMem256 (keccak4xScratchPrefix m sp v n)
+      (sp + UInt64.ofNat (32 * keccak4xPerm n)) (keccak4xRhoPi (keccak4xTheta v) (keccak4xPerm n))
+
+private theorem keccak4x_read256_write_other (m : UInt64 → UInt8) (p : UInt64)
+    (i j : Nat) (hi : i < 25) (hj : j < 25) (hne : i ≠ j) (v : Vec256) :
+    readMem256 (writeMem256 m (p + UInt64.ofNat (32*i)) v) (p + UInt64.ofNat (32*j)) =
+      readMem256 m (p + UInt64.ofNat (32*j)) := by
+  apply keccakChiMpc_readMem256_writeMem256_disjoint
+  intro a b ha hb he
+  rw [u64_add_ofNat_assoc p (32*j) a (by omega),
+    u64_add_ofNat_assoc p (32*i) b (by omega)] at he
+  have := u64_add_ofNat_inj (by omega) (by omega) he
+  omega
+
+theorem keccak4xScratchPrefix_read (m : UInt64 → UInt8) (sp : UInt64) (v : Nat → Vec256)
+    (n : Nat) (hn : n ≤ 25) (j : Nat) (hj : j < 25) :
+    readMem256 (keccak4xScratchPrefix m sp v n) (sp + UInt64.ofNat (32*j)) =
+      if keccak4xPermInv j < n then keccak4xRhoPi (keccak4xTheta v) j
+      else readMem256 m (sp + UInt64.ofNat (32*j)) := by
+  induction n with
+  | zero => simp [keccak4xScratchPrefix]
+  | succ n ih =>
+    have hlt : n < 25 := by omega
+    rw [keccak4xScratchPrefix]
+    by_cases he : keccak4xPerm n = j
+    · rw [he, keccakChiMpc_readMem256_writeMem256_same]
+      have hinv : keccak4xPermInv j = n := by
+        rw [← he]
+        exact keccak4x_perm_leftInv n hlt
+      simp [hinv]
+    · rw [keccak4x_read256_write_other _ sp (keccak4xPerm n) j
+        (keccak4x_perm_lt n hlt) hj he, ih (by omega)]
+      have hne : keccak4xPermInv j ≠ n := by
+        intro e
+        have hperm := congrArg keccak4xPerm e
+        rw [keccak4x_perm_rightInv j hj] at hperm
+        exact he hperm.symm
+      by_cases hl : keccak4xPermInv j < n
+      · rw [ite_eq_left hl, ite_eq_left (by omega)]
+      · rw [ite_eq_right hl, ite_eq_right (by omega)]
+
+theorem keccak4xScratchPrefix_complete (m : UInt64 → UInt8) (sp : UInt64)
+    (v : Nat → Vec256) (j : Nat) (hj : j < 25) :
+    readMem256 (keccak4xScratchPrefix m sp v 25) (sp + UInt64.ofNat (32*j)) =
+      keccak4xRhoPi (keccak4xTheta v) j := by
+  rw [keccak4xScratchPrefix_read _ _ _ 25 (by decide) j hj,
+    ite_eq_left (keccak4x_permInv_lt j hj)]
+
+/-- Rho/pi scratch writes preserve every input-state vector. -/
+theorem keccak4xScratchPrefix_input (m : UInt64 → UInt8) (sp p : UInt64)
+    (v : Nat → Vec256) (hd : keccak4xDisjoint p 800 sp 800)
+    (n : Nat) (hn : n ≤ 25) (j : Nat) (hj : j < 25) :
+    readMem256 (keccak4xScratchPrefix m sp v n) (p + UInt64.ofNat (32*j)) =
+      readMem256 m (p + UInt64.ofNat (32*j)) := by
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+    rw [keccak4xScratchPrefix]
+    have hlt := keccak4x_perm_lt n (by omega)
+    rw [keccakChiMpc_readMem256_writeMem256_disjoint]
+    · exact ih (by omega)
+    · intro a b ha hb he
+      rw [u64_add_ofNat_assoc p (32*j) a (by omega),
+        u64_add_ofNat_assoc sp (32*keccak4xPerm n) b (by omega)] at he
+      exact hd (32*j+a) (32*keccak4xPerm n+b) (by omega) (by omega) he
+
+theorem keccak4xSource_eq (m : UInt64 → UInt8) (p : UInt64) (j : Nat) (hj : j < 25) :
+    keccak4xSource m p j = readMem256 m (p + UInt64.ofNat (32*j)) := by
+  match j, hj with
+  | 0, _ =>
+    change readMem256 m (p + 0) = readMem256 m (p + UInt64.ofNat (32*0))
+    have h : UInt64.ofNat (32*0) = (0 : UInt64) := by decide +kernel
+    rw [h]
+  | 1, _ =>
+    change readMem256 m (p + 32) = readMem256 m (p + UInt64.ofNat (32*1))
+    have h : UInt64.ofNat (32*1) = (32 : UInt64) := by decide +kernel
+    rw [h]
+  | 2, _ =>
+    change readMem256 m (p + 64) = readMem256 m (p + UInt64.ofNat (32*2))
+    have h : UInt64.ofNat (32*2) = (64 : UInt64) := by decide +kernel
+    rw [h]
+  | 3, _ =>
+    change readMem256 m (p + 96) = readMem256 m (p + UInt64.ofNat (32*3))
+    have h : UInt64.ofNat (32*3) = (96 : UInt64) := by decide +kernel
+    rw [h]
+  | 4, _ =>
+    change readMem256 m (p + 128) = readMem256 m (p + UInt64.ofNat (32*4))
+    have h : UInt64.ofNat (32*4) = (128 : UInt64) := by decide +kernel
+    rw [h]
+  | 5, _ =>
+    change readMem256 m (p + 160) = readMem256 m (p + UInt64.ofNat (32*5))
+    have h : UInt64.ofNat (32*5) = (160 : UInt64) := by decide +kernel
+    rw [h]
+  | 6, _ =>
+    change readMem256 m (p + 192) = readMem256 m (p + UInt64.ofNat (32*6))
+    have h : UInt64.ofNat (32*6) = (192 : UInt64) := by decide +kernel
+    rw [h]
+  | 7, _ =>
+    change readMem256 m (p + 224) = readMem256 m (p + UInt64.ofNat (32*7))
+    have h : UInt64.ofNat (32*7) = (224 : UInt64) := by decide +kernel
+    rw [h]
+  | 8, _ =>
+    change readMem256 m (p + 256) = readMem256 m (p + UInt64.ofNat (32*8))
+    have h : UInt64.ofNat (32*8) = (256 : UInt64) := by decide +kernel
+    rw [h]
+  | 9, _ =>
+    change readMem256 m (p + 288) = readMem256 m (p + UInt64.ofNat (32*9))
+    have h : UInt64.ofNat (32*9) = (288 : UInt64) := by decide +kernel
+    rw [h]
+  | 10, _ =>
+    change readMem256 m (p + 320) = readMem256 m (p + UInt64.ofNat (32*10))
+    have h : UInt64.ofNat (32*10) = (320 : UInt64) := by decide +kernel
+    rw [h]
+  | 11, _ =>
+    change readMem256 m (p + 352) = readMem256 m (p + UInt64.ofNat (32*11))
+    have h : UInt64.ofNat (32*11) = (352 : UInt64) := by decide +kernel
+    rw [h]
+  | 12, _ =>
+    change readMem256 m (p + 384) = readMem256 m (p + UInt64.ofNat (32*12))
+    have h : UInt64.ofNat (32*12) = (384 : UInt64) := by decide +kernel
+    rw [h]
+  | 13, _ =>
+    change readMem256 m (p + 416) = readMem256 m (p + UInt64.ofNat (32*13))
+    have h : UInt64.ofNat (32*13) = (416 : UInt64) := by decide +kernel
+    rw [h]
+  | 14, _ =>
+    change readMem256 m (p + 448) = readMem256 m (p + UInt64.ofNat (32*14))
+    have h : UInt64.ofNat (32*14) = (448 : UInt64) := by decide +kernel
+    rw [h]
+  | 15, _ =>
+    change readMem256 m (p + 480) = readMem256 m (p + UInt64.ofNat (32*15))
+    have h : UInt64.ofNat (32*15) = (480 : UInt64) := by decide +kernel
+    rw [h]
+  | 16, _ =>
+    change readMem256 m (p + 512) = readMem256 m (p + UInt64.ofNat (32*16))
+    have h : UInt64.ofNat (32*16) = (512 : UInt64) := by decide +kernel
+    rw [h]
+  | 17, _ =>
+    change readMem256 m (p + 544) = readMem256 m (p + UInt64.ofNat (32*17))
+    have h : UInt64.ofNat (32*17) = (544 : UInt64) := by decide +kernel
+    rw [h]
+  | 18, _ =>
+    change readMem256 m (p + 576) = readMem256 m (p + UInt64.ofNat (32*18))
+    have h : UInt64.ofNat (32*18) = (576 : UInt64) := by decide +kernel
+    rw [h]
+  | 19, _ =>
+    change readMem256 m (p + 608) = readMem256 m (p + UInt64.ofNat (32*19))
+    have h : UInt64.ofNat (32*19) = (608 : UInt64) := by decide +kernel
+    rw [h]
+  | 20, _ =>
+    change readMem256 m (p + 640) = readMem256 m (p + UInt64.ofNat (32*20))
+    have h : UInt64.ofNat (32*20) = (640 : UInt64) := by decide +kernel
+    rw [h]
+  | 21, _ =>
+    change readMem256 m (p + 672) = readMem256 m (p + UInt64.ofNat (32*21))
+    have h : UInt64.ofNat (32*21) = (672 : UInt64) := by decide +kernel
+    rw [h]
+  | 22, _ =>
+    change readMem256 m (p + 704) = readMem256 m (p + UInt64.ofNat (32*22))
+    have h : UInt64.ofNat (32*22) = (704 : UInt64) := by decide +kernel
+    rw [h]
+  | 23, _ =>
+    change readMem256 m (p + 736) = readMem256 m (p + UInt64.ofNat (32*23))
+    have h : UInt64.ofNat (32*23) = (736 : UInt64) := by decide +kernel
+    rw [h]
+  | 24, _ =>
+    change readMem256 m (p + 768) = readMem256 m (p + UInt64.ofNat (32*24))
+    have h : UInt64.ofNat (32*24) = (768 : UInt64) := by decide +kernel
+    rw [h]
+  | n+25, h => exact False.elim (by omega)
+
+theorem keccak4xLaneState_congr (v w : Nat → Vec256)
+    (h : ∀ j : Nat, j < 25 → v j = w j) (q : Nat) :
+    keccak4xLaneState v q = keccak4xLaneState w q := by
+  unfold keccak4xLaneState
+  simp only [h 0 (by decide), h 1 (by decide), h 2 (by decide), h 3 (by decide), h 4 (by decide), h 5 (by decide), h 6 (by decide), h 7 (by decide), h 8 (by decide), h 9 (by decide), h 10 (by decide), h 11 (by decide), h 12 (by decide), h 13 (by decide), h 14 (by decide), h 15 (by decide), h 16 (by decide), h 17 (by decide), h 18 (by decide), h 19 (by decide), h 20 (by decide), h 21 (by decide), h 22 (by decide), h 23 (by decide), h 24 (by decide)]
+
+/-- The public round-constant read survives all rho/pi scratch writes. -/
+theorem keccak4xScratchPrefix_constant (m : UInt64 → UInt8) (sp rp : UInt64)
+    (v : Nat → Vec256) (hd : keccak4xDisjoint rp 8 sp 800)
+    (n : Nat) (hn : n ≤ 25) :
+    readMem64 (keccak4xScratchPrefix m sp v n) rp = readMem64 m rp := by
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+    rw [keccak4xScratchPrefix]
+    have hlt := keccak4x_perm_lt n (by omega)
+    rw [keccakChiMpc_readMem64_writeMem256_disjoint]
+    · exact ih (by omega)
+    · intro a b ha hb he
+      rw [u64_add_ofNat_assoc sp (32*keccak4xPerm n) b (by omega)] at he
+      exact hd a (32*keccak4xPerm n+b) ha (by omega) he
+
+/-- Final state writes are ordered in chi row order. -/
+def keccak4xStatePrefix (m : UInt64 → UInt8) (p : UInt64)
+    (v : Nat → Vec256) (rc : UInt64) : Nat → (UInt64 → UInt8)
+  | 0 => m
+  | n+1 => writeMem256 (keccak4xStatePrefix m p v rc n)
+      (p + UInt64.ofNat (32*n)) (keccak4xRoundVec v rc n)
+
+theorem keccak4xStatePrefix_read (m : UInt64 → UInt8) (p : UInt64)
+    (v : Nat → Vec256) (rc : UInt64) (n : Nat) (hn : n ≤ 25) (j : Nat) (hj : j < 25) :
+    readMem256 (keccak4xStatePrefix m p v rc n) (p + UInt64.ofNat (32*j)) =
+      if j < n then keccak4xRoundVec v rc j
+      else readMem256 m (p + UInt64.ofNat (32*j)) := by
+  induction n with
+  | zero => simp [keccak4xStatePrefix]
+  | succ n ih =>
+    rw [keccak4xStatePrefix]
+    by_cases he : n = j
+    · rw [he, keccakChiMpc_readMem256_writeMem256_same]
+      simp
+    · rw [keccak4x_read256_write_other _ p n j (by omega) hj he, ih (by omega)]
+      by_cases hl : j < n
+      · rw [ite_eq_left hl, ite_eq_left (by omega)]
+      · rw [ite_eq_right hl, ite_eq_right (by omega)]
+
+/-- State writes do not disturb the 25 rho/pi scratch vectors needed by later rows. -/
+theorem keccak4xStatePrefix_scratch (m : UInt64 → UInt8) (p sp : UInt64)
+    (v : Nat → Vec256) (rc : UInt64) (hd : keccak4xDisjoint sp 800 p 800)
+    (n : Nat) (hn : n ≤ 25) (j : Nat) (hj : j < 25) :
+    readMem256 (keccak4xStatePrefix m p v rc n) (sp + UInt64.ofNat (32*j)) =
+      readMem256 m (sp + UInt64.ofNat (32*j)) := by
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+    rw [keccak4xStatePrefix]
+    rw [keccakChiMpc_readMem256_writeMem256_disjoint]
+    · exact ih (by omega)
+    · intro a b ha hb he
+      rw [u64_add_ofNat_assoc sp (32*j) a (by omega),
+        u64_add_ofNat_assoc p (32*n) b (by omega)] at he
+      exact hd (32*j+a) (32*n+b) (by omega) (by omega) he
+
+/-- Whole-memory specification of one round, including its scratch-buffer effects. -/
+def keccak4xRoundMem (m : UInt64 → UInt8) (p sp rp : UInt64) : UInt64 → UInt8 :=
+  let v := keccak4xSource m p
+  keccak4xStatePrefix (keccak4xScratchPrefix m sp v 25) p v (readMem64 m rp) 25
+
+/-- Full readback of the round memory specification, all 25 lanes of all four states. -/
+theorem keccak4xRoundMem_readback (m : UInt64 → UInt8) (p sp rp : UInt64)
+    (q : Nat) (hq : q < 4) :
+    keccak4xLaneState (keccak4xSource (keccak4xRoundMem m p sp rp) p) q =
+      roundS (keccak4xLaneState (keccak4xSource m p) q) (readMem64 m rp) := by
+  calc
+    _ = keccak4xLaneState (keccak4xRoundVec (keccak4xSource m p) (readMem64 m rp)) q := by
+      apply keccak4xLaneState_congr
+      intro j hj
+      rw [keccak4xSource_eq _ _ j hj]
+      unfold keccak4xRoundMem
+      rw [keccak4xStatePrefix_read _ _ _ _ 25 (by decide) j hj, ite_eq_left hj]
+    _ = _ := keccak4xRoundVec_reconstruct _ _ q hq
+
+def keccak4xOffset : Nat → UInt64
+  | 0 => 0
+  | 1 => 32
+  | 2 => 64
+  | 3 => 96
+  | 4 => 128
+  | 5 => 160
+  | 6 => 192
+  | 7 => 224
+  | 8 => 256
+  | 9 => 288
+  | 10 => 320
+  | 11 => 352
+  | 12 => 384
+  | 13 => 416
+  | 14 => 448
+  | 15 => 480
+  | 16 => 512
+  | 17 => 544
+  | 18 => 576
+  | 19 => 608
+  | 20 => 640
+  | 21 => 672
+  | 22 => 704
+  | 23 => 736
+  | 24 => 768
+  | _ => 0
+
+theorem keccak4xOffset_eq (i : Nat) (hi : i < 25) :
+    keccak4xOffset i = UInt64.ofNat (32*i) := by
+  match i, hi with
+  | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ | 5, _ | 6, _ | 7, _ | 8, _ | 9, _ | 10, _ | 11, _ | 12, _ | 13, _ | 14, _ | 15, _ | 16, _ | 17, _ | 18, _ | 19, _ | 20, _ | 21, _ | 22, _ | 23, _ | 24, _ => decide +kernel
+  | n+25, h => exact False.elim (by omega)
+
+def keccak4xRhoPc : Nat → Nat
+  | 0 => 302
+  | 1 => 311
+  | 2 => 339
+  | 3 => 367
+  | 4 => 395
+  | 5 => 426
+  | 6 => 457
+  | 7 => 485
+  | 8 => 516
+  | 9 => 547
+  | 10 => 578
+  | 11 => 609
+  | 12 => 640
+  | 13 => 668
+  | 14 => 699
+  | 15 => 730
+  | 16 => 761
+  | 17 => 792
+  | 18 => 823
+  | 19 => 851
+  | 20 => 882
+  | 21 => 913
+  | 22 => 944
+  | 23 => 975
+  | 24 => 1006
+  | 25 => 1037
+  | _ => 1037
+
+def keccak4xRhoCount (i : Nat) : Nat := if i == 0 then 2 else 5
+
+theorem keccak4x_rho0_steps (s : X86State) (hp : s.pc = 302) (hh : s.halted = false)
+    (a d : Vec256) (hd : s.ymm.get 5 = d)
+    (ha : readMem256 s.mem (s.gpr.get 7 + 0) = a) :
+    ∃ t, StepsX86 keccak4xProg 2 s t ∧
+      t.pc = 311 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = writeMem256 s.mem (s.gpr.get 4 + 0)
+        (keccak4xRhoRot (keccak4xXor d a) 0) ∧
+      (∀ x : Nat, x < 5 → t.ymm.get (5+x) = s.ymm.get (5+x)) := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh hd ha
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at hd ha
+  iterate 2
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, hd, ha]
+        simp [evalVecBin256, evalVecShift256]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_, ?_⟩
+  · simp only [keccak4xRhoRot, keccak4xRotl, keccak4xXor, rotlK, UInt64.add_zero, Bank16.get]
+  · intro x hx
+    match x, hx with
+    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ => simp [Bank16.get, hd]
+    | n+5, h => exact False.elim (by omega)
+
+theorem keccak4x_rho1_steps (s : X86State) (hp : s.pc = 311) (hh : s.halted = false)
+    (a d : Vec256) (hd : s.ymm.get 6 = d)
+    (ha : readMem256 s.mem (s.gpr.get 7 + 32) = a) :
+    ∃ t, StepsX86 keccak4xProg 5 s t ∧
+      t.pc = 339 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = writeMem256 s.mem (s.gpr.get 4 + 320)
+        (keccak4xRhoRot (keccak4xXor d a) 1) ∧
+      (∀ x : Nat, x < 5 → t.ymm.get (5+x) = s.ymm.get (5+x)) := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh hd ha
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at hd ha
+  have hk : UInt64.ofNat 1 = (1 : UInt64) := by decide +kernel
+  have hj : UInt64.ofNat 63 = (63 : UInt64) := by decide +kernel
+  iterate 5
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, hd, ha]
+        simp [evalVecBin256, evalVecShift256, hk, hj]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_, ?_⟩
+  · simp only [keccak4xRhoRot, keccak4xRotl, keccak4xXor, rotlK, UInt64.add_zero, Bank16.get]
+  · intro x hx
+    match x, hx with
+    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ => simp [Bank16.get, hd]
+    | n+5, h => exact False.elim (by omega)
+
+theorem keccak4x_rho2_steps (s : X86State) (hp : s.pc = 339) (hh : s.halted = false)
+    (a d : Vec256) (hd : s.ymm.get 7 = d)
+    (ha : readMem256 s.mem (s.gpr.get 7 + 64) = a) :
+    ∃ t, StepsX86 keccak4xProg 5 s t ∧
+      t.pc = 367 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = writeMem256 s.mem (s.gpr.get 4 + 640)
+        (keccak4xRhoRot (keccak4xXor d a) 2) ∧
+      (∀ x : Nat, x < 5 → t.ymm.get (5+x) = s.ymm.get (5+x)) := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh hd ha
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at hd ha
+  have hk : UInt64.ofNat 62 = (62 : UInt64) := by decide +kernel
+  have hj : UInt64.ofNat 2 = (2 : UInt64) := by decide +kernel
+  iterate 5
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, hd, ha]
+        simp [evalVecBin256, evalVecShift256, hk, hj]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_, ?_⟩
+  · simp only [keccak4xRhoRot, keccak4xRotl, keccak4xXor, rotlK, UInt64.add_zero, Bank16.get]
+  · intro x hx
+    match x, hx with
+    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ => simp [Bank16.get, hd]
+    | n+5, h => exact False.elim (by omega)
+
+theorem keccak4x_rho3_steps (s : X86State) (hp : s.pc = 367) (hh : s.halted = false)
+    (a d : Vec256) (hd : s.ymm.get 8 = d)
+    (ha : readMem256 s.mem (s.gpr.get 7 + 96) = a) :
+    ∃ t, StepsX86 keccak4xProg 5 s t ∧
+      t.pc = 395 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = writeMem256 s.mem (s.gpr.get 4 + 160)
+        (keccak4xRhoRot (keccak4xXor d a) 3) ∧
+      (∀ x : Nat, x < 5 → t.ymm.get (5+x) = s.ymm.get (5+x)) := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh hd ha
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at hd ha
+  have hk : UInt64.ofNat 28 = (28 : UInt64) := by decide +kernel
+  have hj : UInt64.ofNat 36 = (36 : UInt64) := by decide +kernel
+  iterate 5
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, hd, ha]
+        simp [evalVecBin256, evalVecShift256, hk, hj]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_, ?_⟩
+  · simp only [keccak4xRhoRot, keccak4xRotl, keccak4xXor, rotlK, UInt64.add_zero, Bank16.get]
+  · intro x hx
+    match x, hx with
+    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ => simp [Bank16.get, hd]
+    | n+5, h => exact False.elim (by omega)
+
+theorem keccak4x_rho4_steps (s : X86State) (hp : s.pc = 395) (hh : s.halted = false)
+    (a d : Vec256) (hd : s.ymm.get 9 = d)
+    (ha : readMem256 s.mem (s.gpr.get 7 + 128) = a) :
+    ∃ t, StepsX86 keccak4xProg 5 s t ∧
+      t.pc = 426 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = writeMem256 s.mem (s.gpr.get 4 + 480)
+        (keccak4xRhoRot (keccak4xXor d a) 4) ∧
+      (∀ x : Nat, x < 5 → t.ymm.get (5+x) = s.ymm.get (5+x)) := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh hd ha
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at hd ha
+  have hk : UInt64.ofNat 27 = (27 : UInt64) := by decide +kernel
+  have hj : UInt64.ofNat 37 = (37 : UInt64) := by decide +kernel
+  iterate 5
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, hd, ha]
+        simp [evalVecBin256, evalVecShift256, hk, hj]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_, ?_⟩
+  · simp only [keccak4xRhoRot, keccak4xRotl, keccak4xXor, rotlK, UInt64.add_zero, Bank16.get]
+  · intro x hx
+    match x, hx with
+    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ => simp [Bank16.get, hd]
+    | n+5, h => exact False.elim (by omega)
+
+theorem keccak4x_rho5_steps (s : X86State) (hp : s.pc = 426) (hh : s.halted = false)
+    (a d : Vec256) (hd : s.ymm.get 5 = d)
+    (ha : readMem256 s.mem (s.gpr.get 7 + 160) = a) :
+    ∃ t, StepsX86 keccak4xProg 5 s t ∧
+      t.pc = 457 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = writeMem256 s.mem (s.gpr.get 4 + 512)
+        (keccak4xRhoRot (keccak4xXor d a) 5) ∧
+      (∀ x : Nat, x < 5 → t.ymm.get (5+x) = s.ymm.get (5+x)) := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh hd ha
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at hd ha
+  have hk : UInt64.ofNat 36 = (36 : UInt64) := by decide +kernel
+  have hj : UInt64.ofNat 28 = (28 : UInt64) := by decide +kernel
+  iterate 5
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, hd, ha]
+        simp [evalVecBin256, evalVecShift256, hk, hj]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_, ?_⟩
+  · simp only [keccak4xRhoRot, keccak4xRotl, keccak4xXor, rotlK, UInt64.add_zero, Bank16.get]
+  · intro x hx
+    match x, hx with
+    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ => simp [Bank16.get, hd]
+    | n+5, h => exact False.elim (by omega)
+
+theorem keccak4x_rho6_steps (s : X86State) (hp : s.pc = 457) (hh : s.halted = false)
+    (a d : Vec256) (hd : s.ymm.get 6 = d)
+    (ha : readMem256 s.mem (s.gpr.get 7 + 192) = a) :
+    ∃ t, StepsX86 keccak4xProg 5 s t ∧
+      t.pc = 485 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = writeMem256 s.mem (s.gpr.get 4 + 32)
+        (keccak4xRhoRot (keccak4xXor d a) 6) ∧
+      (∀ x : Nat, x < 5 → t.ymm.get (5+x) = s.ymm.get (5+x)) := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh hd ha
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at hd ha
+  have hk : UInt64.ofNat 44 = (44 : UInt64) := by decide +kernel
+  have hj : UInt64.ofNat 20 = (20 : UInt64) := by decide +kernel
+  iterate 5
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, hd, ha]
+        simp [evalVecBin256, evalVecShift256, hk, hj]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_, ?_⟩
+  · simp only [keccak4xRhoRot, keccak4xRotl, keccak4xXor, rotlK, UInt64.add_zero, Bank16.get]
+  · intro x hx
+    match x, hx with
+    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ => simp [Bank16.get, hd]
+    | n+5, h => exact False.elim (by omega)
+
+theorem keccak4x_rho7_steps (s : X86State) (hp : s.pc = 485) (hh : s.halted = false)
+    (a d : Vec256) (hd : s.ymm.get 7 = d)
+    (ha : readMem256 s.mem (s.gpr.get 7 + 224) = a) :
+    ∃ t, StepsX86 keccak4xProg 5 s t ∧
+      t.pc = 516 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = writeMem256 s.mem (s.gpr.get 4 + 352)
+        (keccak4xRhoRot (keccak4xXor d a) 7) ∧
+      (∀ x : Nat, x < 5 → t.ymm.get (5+x) = s.ymm.get (5+x)) := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh hd ha
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at hd ha
+  have hk : UInt64.ofNat 6 = (6 : UInt64) := by decide +kernel
+  have hj : UInt64.ofNat 58 = (58 : UInt64) := by decide +kernel
+  iterate 5
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, hd, ha]
+        simp [evalVecBin256, evalVecShift256, hk, hj]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_, ?_⟩
+  · simp only [keccak4xRhoRot, keccak4xRotl, keccak4xXor, rotlK, UInt64.add_zero, Bank16.get]
+  · intro x hx
+    match x, hx with
+    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ => simp [Bank16.get, hd]
+    | n+5, h => exact False.elim (by omega)
+
+theorem keccak4x_rho8_steps (s : X86State) (hp : s.pc = 516) (hh : s.halted = false)
+    (a d : Vec256) (hd : s.ymm.get 8 = d)
+    (ha : readMem256 s.mem (s.gpr.get 7 + 256) = a) :
+    ∃ t, StepsX86 keccak4xProg 5 s t ∧
+      t.pc = 547 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = writeMem256 s.mem (s.gpr.get 4 + 672)
+        (keccak4xRhoRot (keccak4xXor d a) 8) ∧
+      (∀ x : Nat, x < 5 → t.ymm.get (5+x) = s.ymm.get (5+x)) := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh hd ha
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at hd ha
+  have hk : UInt64.ofNat 55 = (55 : UInt64) := by decide +kernel
+  have hj : UInt64.ofNat 9 = (9 : UInt64) := by decide +kernel
+  iterate 5
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, hd, ha]
+        simp [evalVecBin256, evalVecShift256, hk, hj]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_, ?_⟩
+  · simp only [keccak4xRhoRot, keccak4xRotl, keccak4xXor, rotlK, UInt64.add_zero, Bank16.get]
+  · intro x hx
+    match x, hx with
+    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ => simp [Bank16.get, hd]
+    | n+5, h => exact False.elim (by omega)
+
+theorem keccak4x_rho9_steps (s : X86State) (hp : s.pc = 547) (hh : s.halted = false)
+    (a d : Vec256) (hd : s.ymm.get 9 = d)
+    (ha : readMem256 s.mem (s.gpr.get 7 + 288) = a) :
+    ∃ t, StepsX86 keccak4xProg 5 s t ∧
+      t.pc = 578 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = writeMem256 s.mem (s.gpr.get 4 + 192)
+        (keccak4xRhoRot (keccak4xXor d a) 9) ∧
+      (∀ x : Nat, x < 5 → t.ymm.get (5+x) = s.ymm.get (5+x)) := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh hd ha
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at hd ha
+  have hk : UInt64.ofNat 20 = (20 : UInt64) := by decide +kernel
+  have hj : UInt64.ofNat 44 = (44 : UInt64) := by decide +kernel
+  iterate 5
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, hd, ha]
+        simp [evalVecBin256, evalVecShift256, hk, hj]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_, ?_⟩
+  · simp only [keccak4xRhoRot, keccak4xRotl, keccak4xXor, rotlK, UInt64.add_zero, Bank16.get]
+  · intro x hx
+    match x, hx with
+    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ => simp [Bank16.get, hd]
+    | n+5, h => exact False.elim (by omega)
+
+theorem keccak4x_rho10_steps (s : X86State) (hp : s.pc = 578) (hh : s.halted = false)
+    (a d : Vec256) (hd : s.ymm.get 5 = d)
+    (ha : readMem256 s.mem (s.gpr.get 7 + 320) = a) :
+    ∃ t, StepsX86 keccak4xProg 5 s t ∧
+      t.pc = 609 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = writeMem256 s.mem (s.gpr.get 4 + 224)
+        (keccak4xRhoRot (keccak4xXor d a) 10) ∧
+      (∀ x : Nat, x < 5 → t.ymm.get (5+x) = s.ymm.get (5+x)) := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh hd ha
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at hd ha
+  have hk : UInt64.ofNat 3 = (3 : UInt64) := by decide +kernel
+  have hj : UInt64.ofNat 61 = (61 : UInt64) := by decide +kernel
+  iterate 5
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, hd, ha]
+        simp [evalVecBin256, evalVecShift256, hk, hj]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_, ?_⟩
+  · simp only [keccak4xRhoRot, keccak4xRotl, keccak4xXor, rotlK, UInt64.add_zero, Bank16.get]
+  · intro x hx
+    match x, hx with
+    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ => simp [Bank16.get, hd]
+    | n+5, h => exact False.elim (by omega)
+
+theorem keccak4x_rho11_steps (s : X86State) (hp : s.pc = 609) (hh : s.halted = false)
+    (a d : Vec256) (hd : s.ymm.get 6 = d)
+    (ha : readMem256 s.mem (s.gpr.get 7 + 352) = a) :
+    ∃ t, StepsX86 keccak4xProg 5 s t ∧
+      t.pc = 640 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = writeMem256 s.mem (s.gpr.get 4 + 544)
+        (keccak4xRhoRot (keccak4xXor d a) 11) ∧
+      (∀ x : Nat, x < 5 → t.ymm.get (5+x) = s.ymm.get (5+x)) := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh hd ha
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at hd ha
+  have hk : UInt64.ofNat 10 = (10 : UInt64) := by decide +kernel
+  have hj : UInt64.ofNat 54 = (54 : UInt64) := by decide +kernel
+  iterate 5
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, hd, ha]
+        simp [evalVecBin256, evalVecShift256, hk, hj]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_, ?_⟩
+  · simp only [keccak4xRhoRot, keccak4xRotl, keccak4xXor, rotlK, UInt64.add_zero, Bank16.get]
+  · intro x hx
+    match x, hx with
+    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ => simp [Bank16.get, hd]
+    | n+5, h => exact False.elim (by omega)
+
+theorem keccak4x_rho12_steps (s : X86State) (hp : s.pc = 640) (hh : s.halted = false)
+    (a d : Vec256) (hd : s.ymm.get 7 = d)
+    (ha : readMem256 s.mem (s.gpr.get 7 + 384) = a) :
+    ∃ t, StepsX86 keccak4xProg 5 s t ∧
+      t.pc = 668 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = writeMem256 s.mem (s.gpr.get 4 + 64)
+        (keccak4xRhoRot (keccak4xXor d a) 12) ∧
+      (∀ x : Nat, x < 5 → t.ymm.get (5+x) = s.ymm.get (5+x)) := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh hd ha
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at hd ha
+  have hk : UInt64.ofNat 43 = (43 : UInt64) := by decide +kernel
+  have hj : UInt64.ofNat 21 = (21 : UInt64) := by decide +kernel
+  iterate 5
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, hd, ha]
+        simp [evalVecBin256, evalVecShift256, hk, hj]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_, ?_⟩
+  · simp only [keccak4xRhoRot, keccak4xRotl, keccak4xXor, rotlK, UInt64.add_zero, Bank16.get]
+  · intro x hx
+    match x, hx with
+    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ => simp [Bank16.get, hd]
+    | n+5, h => exact False.elim (by omega)
+
+theorem keccak4x_rho13_steps (s : X86State) (hp : s.pc = 668) (hh : s.halted = false)
+    (a d : Vec256) (hd : s.ymm.get 8 = d)
+    (ha : readMem256 s.mem (s.gpr.get 7 + 416) = a) :
+    ∃ t, StepsX86 keccak4xProg 5 s t ∧
+      t.pc = 699 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = writeMem256 s.mem (s.gpr.get 4 + 384)
+        (keccak4xRhoRot (keccak4xXor d a) 13) ∧
+      (∀ x : Nat, x < 5 → t.ymm.get (5+x) = s.ymm.get (5+x)) := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh hd ha
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at hd ha
+  have hk : UInt64.ofNat 25 = (25 : UInt64) := by decide +kernel
+  have hj : UInt64.ofNat 39 = (39 : UInt64) := by decide +kernel
+  iterate 5
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, hd, ha]
+        simp [evalVecBin256, evalVecShift256, hk, hj]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_, ?_⟩
+  · simp only [keccak4xRhoRot, keccak4xRotl, keccak4xXor, rotlK, UInt64.add_zero, Bank16.get]
+  · intro x hx
+    match x, hx with
+    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ => simp [Bank16.get, hd]
+    | n+5, h => exact False.elim (by omega)
+
+theorem keccak4x_rho14_steps (s : X86State) (hp : s.pc = 699) (hh : s.halted = false)
+    (a d : Vec256) (hd : s.ymm.get 9 = d)
+    (ha : readMem256 s.mem (s.gpr.get 7 + 448) = a) :
+    ∃ t, StepsX86 keccak4xProg 5 s t ∧
+      t.pc = 730 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = writeMem256 s.mem (s.gpr.get 4 + 704)
+        (keccak4xRhoRot (keccak4xXor d a) 14) ∧
+      (∀ x : Nat, x < 5 → t.ymm.get (5+x) = s.ymm.get (5+x)) := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh hd ha
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at hd ha
+  have hk : UInt64.ofNat 39 = (39 : UInt64) := by decide +kernel
+  have hj : UInt64.ofNat 25 = (25 : UInt64) := by decide +kernel
+  iterate 5
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, hd, ha]
+        simp [evalVecBin256, evalVecShift256, hk, hj]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_, ?_⟩
+  · simp only [keccak4xRhoRot, keccak4xRotl, keccak4xXor, rotlK, UInt64.add_zero, Bank16.get]
+  · intro x hx
+    match x, hx with
+    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ => simp [Bank16.get, hd]
+    | n+5, h => exact False.elim (by omega)
+
+theorem keccak4x_rho15_steps (s : X86State) (hp : s.pc = 730) (hh : s.halted = false)
+    (a d : Vec256) (hd : s.ymm.get 5 = d)
+    (ha : readMem256 s.mem (s.gpr.get 7 + 480) = a) :
+    ∃ t, StepsX86 keccak4xProg 5 s t ∧
+      t.pc = 761 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = writeMem256 s.mem (s.gpr.get 4 + 736)
+        (keccak4xRhoRot (keccak4xXor d a) 15) ∧
+      (∀ x : Nat, x < 5 → t.ymm.get (5+x) = s.ymm.get (5+x)) := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh hd ha
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at hd ha
+  have hk : UInt64.ofNat 41 = (41 : UInt64) := by decide +kernel
+  have hj : UInt64.ofNat 23 = (23 : UInt64) := by decide +kernel
+  iterate 5
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, hd, ha]
+        simp [evalVecBin256, evalVecShift256, hk, hj]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_, ?_⟩
+  · simp only [keccak4xRhoRot, keccak4xRotl, keccak4xXor, rotlK, UInt64.add_zero, Bank16.get]
+  · intro x hx
+    match x, hx with
+    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ => simp [Bank16.get, hd]
+    | n+5, h => exact False.elim (by omega)
+
+theorem keccak4x_rho16_steps (s : X86State) (hp : s.pc = 761) (hh : s.halted = false)
+    (a d : Vec256) (hd : s.ymm.get 6 = d)
+    (ha : readMem256 s.mem (s.gpr.get 7 + 512) = a) :
+    ∃ t, StepsX86 keccak4xProg 5 s t ∧
+      t.pc = 792 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = writeMem256 s.mem (s.gpr.get 4 + 256)
+        (keccak4xRhoRot (keccak4xXor d a) 16) ∧
+      (∀ x : Nat, x < 5 → t.ymm.get (5+x) = s.ymm.get (5+x)) := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh hd ha
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at hd ha
+  have hk : UInt64.ofNat 45 = (45 : UInt64) := by decide +kernel
+  have hj : UInt64.ofNat 19 = (19 : UInt64) := by decide +kernel
+  iterate 5
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, hd, ha]
+        simp [evalVecBin256, evalVecShift256, hk, hj]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_, ?_⟩
+  · simp only [keccak4xRhoRot, keccak4xRotl, keccak4xXor, rotlK, UInt64.add_zero, Bank16.get]
+  · intro x hx
+    match x, hx with
+    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ => simp [Bank16.get, hd]
+    | n+5, h => exact False.elim (by omega)
+
+theorem keccak4x_rho17_steps (s : X86State) (hp : s.pc = 792) (hh : s.halted = false)
+    (a d : Vec256) (hd : s.ymm.get 7 = d)
+    (ha : readMem256 s.mem (s.gpr.get 7 + 544) = a) :
+    ∃ t, StepsX86 keccak4xProg 5 s t ∧
+      t.pc = 823 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = writeMem256 s.mem (s.gpr.get 4 + 576)
+        (keccak4xRhoRot (keccak4xXor d a) 17) ∧
+      (∀ x : Nat, x < 5 → t.ymm.get (5+x) = s.ymm.get (5+x)) := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh hd ha
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at hd ha
+  have hk : UInt64.ofNat 15 = (15 : UInt64) := by decide +kernel
+  have hj : UInt64.ofNat 49 = (49 : UInt64) := by decide +kernel
+  iterate 5
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, hd, ha]
+        simp [evalVecBin256, evalVecShift256, hk, hj]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_, ?_⟩
+  · simp only [keccak4xRhoRot, keccak4xRotl, keccak4xXor, rotlK, UInt64.add_zero, Bank16.get]
+  · intro x hx
+    match x, hx with
+    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ => simp [Bank16.get, hd]
+    | n+5, h => exact False.elim (by omega)
+
+theorem keccak4x_rho18_steps (s : X86State) (hp : s.pc = 823) (hh : s.halted = false)
+    (a d : Vec256) (hd : s.ymm.get 8 = d)
+    (ha : readMem256 s.mem (s.gpr.get 7 + 576) = a) :
+    ∃ t, StepsX86 keccak4xProg 5 s t ∧
+      t.pc = 851 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = writeMem256 s.mem (s.gpr.get 4 + 96)
+        (keccak4xRhoRot (keccak4xXor d a) 18) ∧
+      (∀ x : Nat, x < 5 → t.ymm.get (5+x) = s.ymm.get (5+x)) := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh hd ha
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at hd ha
+  have hk : UInt64.ofNat 21 = (21 : UInt64) := by decide +kernel
+  have hj : UInt64.ofNat 43 = (43 : UInt64) := by decide +kernel
+  iterate 5
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, hd, ha]
+        simp [evalVecBin256, evalVecShift256, hk, hj]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_, ?_⟩
+  · simp only [keccak4xRhoRot, keccak4xRotl, keccak4xXor, rotlK, UInt64.add_zero, Bank16.get]
+  · intro x hx
+    match x, hx with
+    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ => simp [Bank16.get, hd]
+    | n+5, h => exact False.elim (by omega)
+
+theorem keccak4x_rho19_steps (s : X86State) (hp : s.pc = 851) (hh : s.halted = false)
+    (a d : Vec256) (hd : s.ymm.get 9 = d)
+    (ha : readMem256 s.mem (s.gpr.get 7 + 608) = a) :
+    ∃ t, StepsX86 keccak4xProg 5 s t ∧
+      t.pc = 882 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = writeMem256 s.mem (s.gpr.get 4 + 416)
+        (keccak4xRhoRot (keccak4xXor d a) 19) ∧
+      (∀ x : Nat, x < 5 → t.ymm.get (5+x) = s.ymm.get (5+x)) := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh hd ha
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at hd ha
+  have hk : UInt64.ofNat 8 = (8 : UInt64) := by decide +kernel
+  have hj : UInt64.ofNat 56 = (56 : UInt64) := by decide +kernel
+  iterate 5
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, hd, ha]
+        simp [evalVecBin256, evalVecShift256, hk, hj]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_, ?_⟩
+  · simp only [keccak4xRhoRot, keccak4xRotl, keccak4xXor, rotlK, UInt64.add_zero, Bank16.get]
+  · intro x hx
+    match x, hx with
+    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ => simp [Bank16.get, hd]
+    | n+5, h => exact False.elim (by omega)
+
+theorem keccak4x_rho20_steps (s : X86State) (hp : s.pc = 882) (hh : s.halted = false)
+    (a d : Vec256) (hd : s.ymm.get 5 = d)
+    (ha : readMem256 s.mem (s.gpr.get 7 + 640) = a) :
+    ∃ t, StepsX86 keccak4xProg 5 s t ∧
+      t.pc = 913 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = writeMem256 s.mem (s.gpr.get 4 + 448)
+        (keccak4xRhoRot (keccak4xXor d a) 20) ∧
+      (∀ x : Nat, x < 5 → t.ymm.get (5+x) = s.ymm.get (5+x)) := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh hd ha
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at hd ha
+  have hk : UInt64.ofNat 18 = (18 : UInt64) := by decide +kernel
+  have hj : UInt64.ofNat 46 = (46 : UInt64) := by decide +kernel
+  iterate 5
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, hd, ha]
+        simp [evalVecBin256, evalVecShift256, hk, hj]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_, ?_⟩
+  · simp only [keccak4xRhoRot, keccak4xRotl, keccak4xXor, rotlK, UInt64.add_zero, Bank16.get]
+  · intro x hx
+    match x, hx with
+    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ => simp [Bank16.get, hd]
+    | n+5, h => exact False.elim (by omega)
+
+theorem keccak4x_rho21_steps (s : X86State) (hp : s.pc = 913) (hh : s.halted = false)
+    (a d : Vec256) (hd : s.ymm.get 6 = d)
+    (ha : readMem256 s.mem (s.gpr.get 7 + 672) = a) :
+    ∃ t, StepsX86 keccak4xProg 5 s t ∧
+      t.pc = 944 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = writeMem256 s.mem (s.gpr.get 4 + 768)
+        (keccak4xRhoRot (keccak4xXor d a) 21) ∧
+      (∀ x : Nat, x < 5 → t.ymm.get (5+x) = s.ymm.get (5+x)) := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh hd ha
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at hd ha
+  have hk : UInt64.ofNat 2 = (2 : UInt64) := by decide +kernel
+  have hj : UInt64.ofNat 62 = (62 : UInt64) := by decide +kernel
+  iterate 5
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, hd, ha]
+        simp [evalVecBin256, evalVecShift256, hk, hj]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_, ?_⟩
+  · simp only [keccak4xRhoRot, keccak4xRotl, keccak4xXor, rotlK, UInt64.add_zero, Bank16.get]
+  · intro x hx
+    match x, hx with
+    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ => simp [Bank16.get, hd]
+    | n+5, h => exact False.elim (by omega)
+
+theorem keccak4x_rho22_steps (s : X86State) (hp : s.pc = 944) (hh : s.halted = false)
+    (a d : Vec256) (hd : s.ymm.get 7 = d)
+    (ha : readMem256 s.mem (s.gpr.get 7 + 704) = a) :
+    ∃ t, StepsX86 keccak4xProg 5 s t ∧
+      t.pc = 975 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = writeMem256 s.mem (s.gpr.get 4 + 288)
+        (keccak4xRhoRot (keccak4xXor d a) 22) ∧
+      (∀ x : Nat, x < 5 → t.ymm.get (5+x) = s.ymm.get (5+x)) := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh hd ha
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at hd ha
+  have hk : UInt64.ofNat 61 = (61 : UInt64) := by decide +kernel
+  have hj : UInt64.ofNat 3 = (3 : UInt64) := by decide +kernel
+  iterate 5
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, hd, ha]
+        simp [evalVecBin256, evalVecShift256, hk, hj]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_, ?_⟩
+  · simp only [keccak4xRhoRot, keccak4xRotl, keccak4xXor, rotlK, UInt64.add_zero, Bank16.get]
+  · intro x hx
+    match x, hx with
+    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ => simp [Bank16.get, hd]
+    | n+5, h => exact False.elim (by omega)
+
+theorem keccak4x_rho23_steps (s : X86State) (hp : s.pc = 975) (hh : s.halted = false)
+    (a d : Vec256) (hd : s.ymm.get 8 = d)
+    (ha : readMem256 s.mem (s.gpr.get 7 + 736) = a) :
+    ∃ t, StepsX86 keccak4xProg 5 s t ∧
+      t.pc = 1006 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = writeMem256 s.mem (s.gpr.get 4 + 608)
+        (keccak4xRhoRot (keccak4xXor d a) 23) ∧
+      (∀ x : Nat, x < 5 → t.ymm.get (5+x) = s.ymm.get (5+x)) := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh hd ha
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at hd ha
+  have hk : UInt64.ofNat 56 = (56 : UInt64) := by decide +kernel
+  have hj : UInt64.ofNat 8 = (8 : UInt64) := by decide +kernel
+  iterate 5
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, hd, ha]
+        simp [evalVecBin256, evalVecShift256, hk, hj]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_, ?_⟩
+  · simp only [keccak4xRhoRot, keccak4xRotl, keccak4xXor, rotlK, UInt64.add_zero, Bank16.get]
+  · intro x hx
+    match x, hx with
+    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ => simp [Bank16.get, hd]
+    | n+5, h => exact False.elim (by omega)
+
+theorem keccak4x_rho24_steps (s : X86State) (hp : s.pc = 1006) (hh : s.halted = false)
+    (a d : Vec256) (hd : s.ymm.get 9 = d)
+    (ha : readMem256 s.mem (s.gpr.get 7 + 768) = a) :
+    ∃ t, StepsX86 keccak4xProg 5 s t ∧
+      t.pc = 1037 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = writeMem256 s.mem (s.gpr.get 4 + 128)
+        (keccak4xRhoRot (keccak4xXor d a) 24) ∧
+      (∀ x : Nat, x < 5 → t.ymm.get (5+x) = s.ymm.get (5+x)) := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh hd ha
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at hd ha
+  have hk : UInt64.ofNat 14 = (14 : UInt64) := by decide +kernel
+  have hj : UInt64.ofNat 50 = (50 : UInt64) := by decide +kernel
+  iterate 5
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, hd, ha]
+        simp [evalVecBin256, evalVecShift256, hk, hj]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_, ?_⟩
+  · simp only [keccak4xRhoRot, keccak4xRotl, keccak4xXor, rotlK, UInt64.add_zero, Bank16.get]
+  · intro x hx
+    match x, hx with
+    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ => simp [Bank16.get, hd]
+    | n+5, h => exact False.elim (by omega)
+
+theorem keccak4x_rho_steps (s : X86State) (i : Nat) (hi : i < 25)
+    (hp : s.pc = keccak4xRhoPc i) (hh : s.halted = false)
+    (a d : Vec256) (hd : s.ymm.get (5+i%5) = d)
+    (ha : readMem256 s.mem (s.gpr.get 7 + keccak4xOffset i) = a) :
+    ∃ t, StepsX86 keccak4xProg (keccak4xRhoCount i) s t ∧
+      t.pc = keccak4xRhoPc (i+1) ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = writeMem256 s.mem (s.gpr.get 4 + keccak4xOffset (keccak4xPerm i))
+        (keccak4xRhoRot (keccak4xXor d a) i) ∧
+      (∀ x : Nat, x < 5 → t.ymm.get (5+x) = s.ymm.get (5+x)) := by
+  match i, hi with
+  | 0, _ => exact keccak4x_rho0_steps s hp hh a d hd ha
+  | 1, _ => exact keccak4x_rho1_steps s hp hh a d hd ha
+  | 2, _ => exact keccak4x_rho2_steps s hp hh a d hd ha
+  | 3, _ => exact keccak4x_rho3_steps s hp hh a d hd ha
+  | 4, _ => exact keccak4x_rho4_steps s hp hh a d hd ha
+  | 5, _ => exact keccak4x_rho5_steps s hp hh a d hd ha
+  | 6, _ => exact keccak4x_rho6_steps s hp hh a d hd ha
+  | 7, _ => exact keccak4x_rho7_steps s hp hh a d hd ha
+  | 8, _ => exact keccak4x_rho8_steps s hp hh a d hd ha
+  | 9, _ => exact keccak4x_rho9_steps s hp hh a d hd ha
+  | 10, _ => exact keccak4x_rho10_steps s hp hh a d hd ha
+  | 11, _ => exact keccak4x_rho11_steps s hp hh a d hd ha
+  | 12, _ => exact keccak4x_rho12_steps s hp hh a d hd ha
+  | 13, _ => exact keccak4x_rho13_steps s hp hh a d hd ha
+  | 14, _ => exact keccak4x_rho14_steps s hp hh a d hd ha
+  | 15, _ => exact keccak4x_rho15_steps s hp hh a d hd ha
+  | 16, _ => exact keccak4x_rho16_steps s hp hh a d hd ha
+  | 17, _ => exact keccak4x_rho17_steps s hp hh a d hd ha
+  | 18, _ => exact keccak4x_rho18_steps s hp hh a d hd ha
+  | 19, _ => exact keccak4x_rho19_steps s hp hh a d hd ha
+  | 20, _ => exact keccak4x_rho20_steps s hp hh a d hd ha
+  | 21, _ => exact keccak4x_rho21_steps s hp hh a d hd ha
+  | 22, _ => exact keccak4x_rho22_steps s hp hh a d hd ha
+  | 23, _ => exact keccak4x_rho23_steps s hp hh a d hd ha
+  | 24, _ => exact keccak4x_rho24_steps s hp hh a d hd ha
+  | n+25, h => exact False.elim (by omega)
+
+private theorem keccak4xXor_comm (a b : Vec256) : keccak4xXor a b = keccak4xXor b a := by
+  cases a
+  cases b
+  unfold keccak4xXor
+  congr 1 <;> exact keccak4x_u64xor_comm _ _
+
+/-- The progressively filled rho/pi scratch area and the five live theta corrections. -/
+structure keccak4xRhoInv (mem : UInt64 → UInt8) (g : Bank16 UInt64) (n : Nat) (s : X86State) : Prop where
+  pc : s.pc = keccak4xRhoPc n
+  halted : s.halted = false
+  gpr : s.gpr = g
+  memory : s.mem = keccak4xScratchPrefix mem (g.get 4) (keccak4xSource mem (g.get 7)) n
+  corrections : ∀ x : Nat, x < 5 → s.ymm.get (5+x) = keccak4xD (keccak4xSource mem (g.get 7)) x
+
+private theorem keccak4x_rho_value (v : Nat → Vec256) (n : Nat) (hn : n < 25) :
+    keccak4xRhoRot (keccak4xXor (keccak4xD v (n%5)) (v n)) n =
+      keccak4xRhoPi (keccak4xTheta v) (keccak4xPerm n) := by
+  rw [keccak4xXor_comm]
+  exact keccak4x_rho_mapping v n hn
+
+theorem keccak4xRhoInv_step (mem : UInt64 → UInt8) (g : Bank16 UInt64)
+    (hd : keccak4xDisjoint (g.get 7) 800 (g.get 4) 800)
+    (n : Nat) (hn : n < 25) (s : X86State) (h : keccak4xRhoInv mem g n s) :
+    ∃ t, StepsX86 keccak4xProg (keccak4xRhoCount n) s t ∧ keccak4xRhoInv mem g (n+1) t := by
+  let v := keccak4xSource mem (g.get 7)
+  have ha : readMem256 s.mem (s.gpr.get 7 + keccak4xOffset n) = v n := by
+    rw [h.gpr, h.memory, keccak4xOffset_eq n hn,
+      keccak4xScratchPrefix_input mem (g.get 4) (g.get 7) v hd n (by omega) n hn]
+    exact (keccak4xSource_eq mem (g.get 7) n hn).symm
+  obtain ⟨t, ht, hp, hh, hg, hm, hv⟩ := keccak4x_rho_steps s n hn h.pc h.halted
+    (v n) (keccak4xD v (n%5)) (h.corrections (n%5) (Nat.mod_lt _ (by decide))) ha
+  refine ⟨t, ht, hp, hh, hg.trans h.gpr, ?_, ?_⟩
+  · rw [hm, h.gpr, h.memory, keccak4xOffset_eq (keccak4xPerm n) (keccak4x_perm_lt n hn),
+      keccak4x_rho_value v n hn]
+    rfl
+  · intro x hx
+    rw [hv x hx]
+    exact h.corrections x hx
+
+def keccak4xRhoFuel : Nat → Nat
+  | 0 => 0
+  | n+1 => keccak4xRhoFuel n + keccak4xRhoCount n
+
+theorem keccak4xRhoInv_iter (mem : UInt64 → UInt8) (g : Bank16 UInt64)
+    (hd : keccak4xDisjoint (g.get 7) 800 (g.get 4) 800)
+    (s : X86State) (h : keccak4xRhoInv mem g 0 s) (n : Nat) (hn : n ≤ 25) :
+    ∃ t, StepsX86 keccak4xProg (keccak4xRhoFuel n) s t ∧ keccak4xRhoInv mem g n t := by
+  induction n with
+  | zero => exact ⟨s, StepsX86.zero _, h⟩
+  | succ n ih =>
+    obtain ⟨t, ht, hi⟩ := ih (by omega)
+    obtain ⟨u, hu, hiu⟩ := keccak4xRhoInv_step mem g hd n (by omega) t hi
+    exact ⟨u, StepsX86_trans ht hu, hiu⟩
+
+theorem keccak4xRhoFuel_full : keccak4xRhoFuel 25 = 122 := by decide +kernel
+
+/-- The 167-instruction theta/rho/pi prefix on four complete Keccak states. -/
+theorem keccak4x_theta_rho_pi_steps (g : Bank16 UInt64) (y : Bank16 Vec256)
+    (cf ofl zf dy : Bool) (mem : UInt64 → UInt8)
+    (hd : keccak4xDisjoint (g.get 7) 800 (g.get 4) 800) :
+    ∃ t, StepsX86 keccak4xProg 167 ⟨20,g,y,cf,ofl,zf,dy,false,mem⟩ t ∧
+      t.pc = 1037 ∧ t.halted = false ∧ t.gpr = g ∧
+      t.mem = keccak4xScratchPrefix mem (g.get 4) (keccak4xSource mem (g.get 7)) 25 := by
+  obtain ⟨t, ht, hp, hh, hg, hm, hv⟩ := keccak4x_parity_steps g y cf ofl zf dy mem
+  have hi : keccak4xRhoInv mem g 0 t := ⟨hp, hh, hg, hm, hv⟩
+  obtain ⟨u, hu, hiu⟩ := keccak4xRhoInv_iter mem g hd t hi 25 (by decide)
+  rw [keccak4xRhoFuel_full] at hu
+  exact ⟨u, StepsX86_trans ht hu, hiu.pc, hiu.halted, hiu.gpr, hiu.memory⟩
+
+def keccak4xRowMem0 (m : UInt64 → UInt8) (p : UInt64) (a0 a1 a2 a3 a4 : Vec256) (rc : UInt64) : UInt64 → UInt8 :=
+  let c0 := keccak4xXor (keccak4xChiVec a0 a1 a2) ⟨rc,rc,rc,rc⟩
+  let c1 := keccak4xChiVec a1 a2 a3
+  let c2 := keccak4xChiVec a2 a3 a4
+  let c3 := keccak4xChiVec a3 a4 a0
+  let c4 := keccak4xChiVec a4 a0 a1
+  let m0 := writeMem256 m (p + 0) c0
+  let m1 := writeMem256 m0 (p + 32) c1
+  let m2 := writeMem256 m1 (p + 64) c2
+  let m3 := writeMem256 m2 (p + 96) c3
+  let m4 := writeMem256 m3 (p + 128) c4
+  m4
+
+set_option maxHeartbeats 500000 in
+theorem keccak4x_row0_steps (s : X86State) (hp : s.pc = 1037) (hh : s.halted = false)
+    (a0 a1 a2 a3 a4 : Vec256) (rc : UInt64)
+    (h0 : readMem256 s.mem (s.gpr.get 4 + 0) = a0)
+    (h1 : readMem256 s.mem (s.gpr.get 4 + 32) = a1)
+    (h2 : readMem256 s.mem (s.gpr.get 4 + 64) = a2)
+    (h3 : readMem256 s.mem (s.gpr.get 4 + 96) = a3)
+    (h4 : readMem256 s.mem (s.gpr.get 4 + 128) = a4)
+    (hr : readMem64 s.mem (s.gpr.get 6 + 0) = rc)
+    : ∃ t, StepsX86 keccak4xProg 22 s t ∧
+      t.pc = 1145 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = keccak4xRowMem0 s.mem (s.gpr.get 7) a0 a1 a2 a3 a4 rc := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh h0 h1 h2 h3 h4 hr
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at h0 h1 h2 h3 h4 hr
+  have hc3_0 := keccak4x_u64xor_comm ((~~~a4.w0) &&& a0.w0) a3.w0
+  have hc3_1 := keccak4x_u64xor_comm ((~~~a4.w1) &&& a0.w1) a3.w1
+  have hc3_2 := keccak4x_u64xor_comm ((~~~a4.w2) &&& a0.w2) a3.w2
+  have hc3_3 := keccak4x_u64xor_comm ((~~~a4.w3) &&& a0.w3) a3.w3
+  have hc4_0 := keccak4x_u64xor_comm ((~~~a0.w0) &&& a1.w0) a4.w0
+  have hc4_1 := keccak4x_u64xor_comm ((~~~a0.w1) &&& a1.w1) a4.w1
+  have hc4_2 := keccak4x_u64xor_comm ((~~~a0.w2) &&& a1.w2) a4.w2
+  have hc4_3 := keccak4x_u64xor_comm ((~~~a0.w3) &&& a1.w3) a4.w3
+  have hrc0 := keccak4x_u64xor_comm rc (a0.w0 ^^^ ((~~~a1.w0) &&& a2.w0))
+  have hrc1 := keccak4x_u64xor_comm rc (a0.w1 ^^^ ((~~~a1.w1) &&& a2.w1))
+  have hrc2 := keccak4x_u64xor_comm rc (a0.w2 ^^^ ((~~~a1.w2) &&& a2.w2))
+  have hrc3 := keccak4x_u64xor_comm rc (a0.w3 ^^^ ((~~~a1.w3) &&& a2.w3))
+  iterate 22
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, h0, h1, h2, h3, h4, hr]
+        simp only [evalVecBin256, hc3_0, hc3_1, hc3_2, hc3_3, hc4_0, hc4_1, hc4_2, hc4_3, hrc0, hrc1, hrc2, hrc3]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_⟩
+  simp only [keccak4xRowMem0, keccak4xChiVec, keccak4xXor, UInt64.add_zero, Bank16.get]
+
+def keccak4xRowMem1 (m : UInt64 → UInt8) (p : UInt64) (a0 a1 a2 a3 a4 : Vec256) (_rc : UInt64) : UInt64 → UInt8 :=
+  let c0 := keccak4xChiVec a0 a1 a2
+  let c1 := keccak4xChiVec a1 a2 a3
+  let c2 := keccak4xChiVec a2 a3 a4
+  let c3 := keccak4xChiVec a3 a4 a0
+  let c4 := keccak4xChiVec a4 a0 a1
+  let m0 := writeMem256 m (p + 160) c0
+  let m1 := writeMem256 m0 (p + 192) c1
+  let m2 := writeMem256 m1 (p + 224) c2
+  let m3 := writeMem256 m2 (p + 256) c3
+  let m4 := writeMem256 m3 (p + 288) c4
+  m4
+
+set_option maxHeartbeats 500000 in
+theorem keccak4x_row1_steps (s : X86State) (hp : s.pc = 1145) (hh : s.halted = false)
+    (a0 a1 a2 a3 a4 : Vec256) (rc : UInt64)
+    (h0 : readMem256 s.mem (s.gpr.get 4 + 160) = a0)
+    (h1 : readMem256 s.mem (s.gpr.get 4 + 192) = a1)
+    (h2 : readMem256 s.mem (s.gpr.get 4 + 224) = a2)
+    (h3 : readMem256 s.mem (s.gpr.get 4 + 256) = a3)
+    (h4 : readMem256 s.mem (s.gpr.get 4 + 288) = a4)
+    : ∃ t, StepsX86 keccak4xProg 20 s t ∧
+      t.pc = 1270 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = keccak4xRowMem1 s.mem (s.gpr.get 7) a0 a1 a2 a3 a4 rc := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh h0 h1 h2 h3 h4
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at h0 h1 h2 h3 h4
+  have hc3_0 := keccak4x_u64xor_comm ((~~~a4.w0) &&& a0.w0) a3.w0
+  have hc3_1 := keccak4x_u64xor_comm ((~~~a4.w1) &&& a0.w1) a3.w1
+  have hc3_2 := keccak4x_u64xor_comm ((~~~a4.w2) &&& a0.w2) a3.w2
+  have hc3_3 := keccak4x_u64xor_comm ((~~~a4.w3) &&& a0.w3) a3.w3
+  have hc4_0 := keccak4x_u64xor_comm ((~~~a0.w0) &&& a1.w0) a4.w0
+  have hc4_1 := keccak4x_u64xor_comm ((~~~a0.w1) &&& a1.w1) a4.w1
+  have hc4_2 := keccak4x_u64xor_comm ((~~~a0.w2) &&& a1.w2) a4.w2
+  have hc4_3 := keccak4x_u64xor_comm ((~~~a0.w3) &&& a1.w3) a4.w3
+  iterate 20
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, h0, h1, h2, h3, h4]
+        simp only [evalVecBin256, hc3_0, hc3_1, hc3_2, hc3_3, hc4_0, hc4_1, hc4_2, hc4_3]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_⟩
+  simp only [keccak4xRowMem1, keccak4xChiVec, keccak4xXor, UInt64.add_zero, Bank16.get]
+
+def keccak4xRowMem2 (m : UInt64 → UInt8) (p : UInt64) (a0 a1 a2 a3 a4 : Vec256) (_rc : UInt64) : UInt64 → UInt8 :=
+  let c0 := keccak4xChiVec a0 a1 a2
+  let c1 := keccak4xChiVec a1 a2 a3
+  let c2 := keccak4xChiVec a2 a3 a4
+  let c3 := keccak4xChiVec a3 a4 a0
+  let c4 := keccak4xChiVec a4 a0 a1
+  let m0 := writeMem256 m (p + 320) c0
+  let m1 := writeMem256 m0 (p + 352) c1
+  let m2 := writeMem256 m1 (p + 384) c2
+  let m3 := writeMem256 m2 (p + 416) c3
+  let m4 := writeMem256 m3 (p + 448) c4
+  m4
+
+set_option maxHeartbeats 500000 in
+theorem keccak4x_row2_steps (s : X86State) (hp : s.pc = 1270) (hh : s.halted = false)
+    (a0 a1 a2 a3 a4 : Vec256) (rc : UInt64)
+    (h0 : readMem256 s.mem (s.gpr.get 4 + 320) = a0)
+    (h1 : readMem256 s.mem (s.gpr.get 4 + 352) = a1)
+    (h2 : readMem256 s.mem (s.gpr.get 4 + 384) = a2)
+    (h3 : readMem256 s.mem (s.gpr.get 4 + 416) = a3)
+    (h4 : readMem256 s.mem (s.gpr.get 4 + 448) = a4)
+    : ∃ t, StepsX86 keccak4xProg 20 s t ∧
+      t.pc = 1395 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = keccak4xRowMem2 s.mem (s.gpr.get 7) a0 a1 a2 a3 a4 rc := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh h0 h1 h2 h3 h4
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at h0 h1 h2 h3 h4
+  have hc3_0 := keccak4x_u64xor_comm ((~~~a4.w0) &&& a0.w0) a3.w0
+  have hc3_1 := keccak4x_u64xor_comm ((~~~a4.w1) &&& a0.w1) a3.w1
+  have hc3_2 := keccak4x_u64xor_comm ((~~~a4.w2) &&& a0.w2) a3.w2
+  have hc3_3 := keccak4x_u64xor_comm ((~~~a4.w3) &&& a0.w3) a3.w3
+  have hc4_0 := keccak4x_u64xor_comm ((~~~a0.w0) &&& a1.w0) a4.w0
+  have hc4_1 := keccak4x_u64xor_comm ((~~~a0.w1) &&& a1.w1) a4.w1
+  have hc4_2 := keccak4x_u64xor_comm ((~~~a0.w2) &&& a1.w2) a4.w2
+  have hc4_3 := keccak4x_u64xor_comm ((~~~a0.w3) &&& a1.w3) a4.w3
+  iterate 20
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, h0, h1, h2, h3, h4]
+        simp only [evalVecBin256, hc3_0, hc3_1, hc3_2, hc3_3, hc4_0, hc4_1, hc4_2, hc4_3]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_⟩
+  simp only [keccak4xRowMem2, keccak4xChiVec, keccak4xXor, UInt64.add_zero, Bank16.get]
+
+def keccak4xRowMem3 (m : UInt64 → UInt8) (p : UInt64) (a0 a1 a2 a3 a4 : Vec256) (_rc : UInt64) : UInt64 → UInt8 :=
+  let c0 := keccak4xChiVec a0 a1 a2
+  let c1 := keccak4xChiVec a1 a2 a3
+  let c2 := keccak4xChiVec a2 a3 a4
+  let c3 := keccak4xChiVec a3 a4 a0
+  let c4 := keccak4xChiVec a4 a0 a1
+  let m0 := writeMem256 m (p + 480) c0
+  let m1 := writeMem256 m0 (p + 512) c1
+  let m2 := writeMem256 m1 (p + 544) c2
+  let m3 := writeMem256 m2 (p + 576) c3
+  let m4 := writeMem256 m3 (p + 608) c4
+  m4
+
+set_option maxHeartbeats 500000 in
+theorem keccak4x_row3_steps (s : X86State) (hp : s.pc = 1395) (hh : s.halted = false)
+    (a0 a1 a2 a3 a4 : Vec256) (rc : UInt64)
+    (h0 : readMem256 s.mem (s.gpr.get 4 + 480) = a0)
+    (h1 : readMem256 s.mem (s.gpr.get 4 + 512) = a1)
+    (h2 : readMem256 s.mem (s.gpr.get 4 + 544) = a2)
+    (h3 : readMem256 s.mem (s.gpr.get 4 + 576) = a3)
+    (h4 : readMem256 s.mem (s.gpr.get 4 + 608) = a4)
+    : ∃ t, StepsX86 keccak4xProg 20 s t ∧
+      t.pc = 1520 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = keccak4xRowMem3 s.mem (s.gpr.get 7) a0 a1 a2 a3 a4 rc := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh h0 h1 h2 h3 h4
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at h0 h1 h2 h3 h4
+  have hc3_0 := keccak4x_u64xor_comm ((~~~a4.w0) &&& a0.w0) a3.w0
+  have hc3_1 := keccak4x_u64xor_comm ((~~~a4.w1) &&& a0.w1) a3.w1
+  have hc3_2 := keccak4x_u64xor_comm ((~~~a4.w2) &&& a0.w2) a3.w2
+  have hc3_3 := keccak4x_u64xor_comm ((~~~a4.w3) &&& a0.w3) a3.w3
+  have hc4_0 := keccak4x_u64xor_comm ((~~~a0.w0) &&& a1.w0) a4.w0
+  have hc4_1 := keccak4x_u64xor_comm ((~~~a0.w1) &&& a1.w1) a4.w1
+  have hc4_2 := keccak4x_u64xor_comm ((~~~a0.w2) &&& a1.w2) a4.w2
+  have hc4_3 := keccak4x_u64xor_comm ((~~~a0.w3) &&& a1.w3) a4.w3
+  iterate 20
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, h0, h1, h2, h3, h4]
+        simp only [evalVecBin256, hc3_0, hc3_1, hc3_2, hc3_3, hc4_0, hc4_1, hc4_2, hc4_3]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_⟩
+  simp only [keccak4xRowMem3, keccak4xChiVec, keccak4xXor, UInt64.add_zero, Bank16.get]
+
+def keccak4xRowMem4 (m : UInt64 → UInt8) (p : UInt64) (a0 a1 a2 a3 a4 : Vec256) (_rc : UInt64) : UInt64 → UInt8 :=
+  let c0 := keccak4xChiVec a0 a1 a2
+  let c1 := keccak4xChiVec a1 a2 a3
+  let c2 := keccak4xChiVec a2 a3 a4
+  let c3 := keccak4xChiVec a3 a4 a0
+  let c4 := keccak4xChiVec a4 a0 a1
+  let m0 := writeMem256 m (p + 640) c0
+  let m1 := writeMem256 m0 (p + 672) c1
+  let m2 := writeMem256 m1 (p + 704) c2
+  let m3 := writeMem256 m2 (p + 736) c3
+  let m4 := writeMem256 m3 (p + 768) c4
+  m4
+
+set_option maxHeartbeats 500000 in
+theorem keccak4x_row4_steps (s : X86State) (hp : s.pc = 1520) (hh : s.halted = false)
+    (a0 a1 a2 a3 a4 : Vec256) (rc : UInt64)
+    (h0 : readMem256 s.mem (s.gpr.get 4 + 640) = a0)
+    (h1 : readMem256 s.mem (s.gpr.get 4 + 672) = a1)
+    (h2 : readMem256 s.mem (s.gpr.get 4 + 704) = a2)
+    (h3 : readMem256 s.mem (s.gpr.get 4 + 736) = a3)
+    (h4 : readMem256 s.mem (s.gpr.get 4 + 768) = a4)
+    : ∃ t, StepsX86 keccak4xProg 20 s t ∧
+      t.pc = 1645 ∧ t.halted = false ∧ t.gpr = s.gpr ∧
+      t.mem = keccak4xRowMem4 s.mem (s.gpr.get 7) a0 a1 a2 a3 a4 rc := by
+  rcases s with ⟨pc,g,y,cf,ofl,zf,dy,hlt,mem⟩
+  dsimp only at hp hh h0 h1 h2 h3 h4
+  subst pc hlt
+  simp only [Bank16.get, UInt64.add_zero] at h0 h1 h2 h3 h4
+  have hc3_0 := keccak4x_u64xor_comm ((~~~a4.w0) &&& a0.w0) a3.w0
+  have hc3_1 := keccak4x_u64xor_comm ((~~~a4.w1) &&& a0.w1) a3.w1
+  have hc3_2 := keccak4x_u64xor_comm ((~~~a4.w2) &&& a0.w2) a3.w2
+  have hc3_3 := keccak4x_u64xor_comm ((~~~a4.w3) &&& a0.w3) a3.w3
+  have hc4_0 := keccak4x_u64xor_comm ((~~~a0.w0) &&& a1.w0) a4.w0
+  have hc4_1 := keccak4x_u64xor_comm ((~~~a0.w1) &&& a1.w1) a4.w1
+  have hc4_2 := keccak4x_u64xor_comm ((~~~a0.w2) &&& a1.w2) a4.w2
+  have hc4_3 := keccak4x_u64xor_comm ((~~~a0.w3) &&& a1.w3) a4.w3
+  iterate 20
+    apply StepsX86_step_ex rfl rfl
+    · conv =>
+        lhs
+        dsimp only [stepX86, evalX86Addr, clampVecWidth, Bank16.get, Bank16.set]
+        simp only [ite_true, ite_false, UInt64.add_zero, h0, h1, h2, h3, h4]
+        simp only [evalVecBin256, hc3_0, hc3_1, hc3_2, hc3_3, hc4_0, hc4_1, hc4_2, hc4_3]
+      all_goals rfl
+  refine ⟨_, StepsX86.zero _, rfl, rfl, rfl, ?_⟩
+  simp only [keccak4xRowMem4, keccak4xChiVec, keccak4xXor, UInt64.add_zero, Bank16.get]
+
+
+private theorem keccak4xDisjoint_symm (a b : UInt64) (n m : Nat)
+    (h : keccak4xDisjoint a n b m) : keccak4xDisjoint b m a n := by
+  intro i j hi hj he
+  exact h j i hj hi he.symm
+
+theorem keccak4xRowMem0_prefix (m : UInt64 → UInt8) (p : UInt64) (v : Nat → Vec256) (rc : UInt64) :
+    keccak4xRowMem0 (keccak4xStatePrefix m p v rc 0) p
+      (keccak4xRhoPi (keccak4xTheta v) 0) (keccak4xRhoPi (keccak4xTheta v) 1) (keccak4xRhoPi (keccak4xTheta v) 2) (keccak4xRhoPi (keccak4xTheta v) 3) (keccak4xRhoPi (keccak4xTheta v) 4) rc =
+    keccak4xStatePrefix m p v rc 5 := by
+  have h0 : UInt64.ofNat (32*0) = (0 : UInt64) := by decide +kernel
+  have h1 : UInt64.ofNat (32*1) = (32 : UInt64) := by decide +kernel
+  have h2 : UInt64.ofNat (32*2) = (64 : UInt64) := by decide +kernel
+  have h3 : UInt64.ofNat (32*3) = (96 : UInt64) := by decide +kernel
+  have h4 : UInt64.ofNat (32*4) = (128 : UInt64) := by decide +kernel
+  conv =>
+    rhs
+    rw [keccak4xStatePrefix, keccak4xStatePrefix, keccak4xStatePrefix,
+      keccak4xStatePrefix, keccak4xStatePrefix]
+  simp [keccak4xRowMem0, keccak4xRoundVec, keccak4xChi, h0, h1, h2, h3, h4]
+
+theorem keccak4xRowMem1_prefix (m : UInt64 → UInt8) (p : UInt64) (v : Nat → Vec256) (rc : UInt64) :
+    keccak4xRowMem1 (keccak4xStatePrefix m p v rc 5) p
+      (keccak4xRhoPi (keccak4xTheta v) 5) (keccak4xRhoPi (keccak4xTheta v) 6) (keccak4xRhoPi (keccak4xTheta v) 7) (keccak4xRhoPi (keccak4xTheta v) 8) (keccak4xRhoPi (keccak4xTheta v) 9) rc =
+    keccak4xStatePrefix m p v rc 10 := by
+  have h0 : UInt64.ofNat (32*5) = (160 : UInt64) := by decide +kernel
+  have h1 : UInt64.ofNat (32*6) = (192 : UInt64) := by decide +kernel
+  have h2 : UInt64.ofNat (32*7) = (224 : UInt64) := by decide +kernel
+  have h3 : UInt64.ofNat (32*8) = (256 : UInt64) := by decide +kernel
+  have h4 : UInt64.ofNat (32*9) = (288 : UInt64) := by decide +kernel
+  conv =>
+    rhs
+    rw [keccak4xStatePrefix, keccak4xStatePrefix, keccak4xStatePrefix,
+      keccak4xStatePrefix, keccak4xStatePrefix]
+  simp [keccak4xRowMem1, keccak4xRoundVec, keccak4xChi, h0, h1, h2, h3, h4]
+
+theorem keccak4xRowMem2_prefix (m : UInt64 → UInt8) (p : UInt64) (v : Nat → Vec256) (rc : UInt64) :
+    keccak4xRowMem2 (keccak4xStatePrefix m p v rc 10) p
+      (keccak4xRhoPi (keccak4xTheta v) 10) (keccak4xRhoPi (keccak4xTheta v) 11) (keccak4xRhoPi (keccak4xTheta v) 12) (keccak4xRhoPi (keccak4xTheta v) 13) (keccak4xRhoPi (keccak4xTheta v) 14) rc =
+    keccak4xStatePrefix m p v rc 15 := by
+  have h0 : UInt64.ofNat (32*10) = (320 : UInt64) := by decide +kernel
+  have h1 : UInt64.ofNat (32*11) = (352 : UInt64) := by decide +kernel
+  have h2 : UInt64.ofNat (32*12) = (384 : UInt64) := by decide +kernel
+  have h3 : UInt64.ofNat (32*13) = (416 : UInt64) := by decide +kernel
+  have h4 : UInt64.ofNat (32*14) = (448 : UInt64) := by decide +kernel
+  conv =>
+    rhs
+    rw [keccak4xStatePrefix, keccak4xStatePrefix, keccak4xStatePrefix,
+      keccak4xStatePrefix, keccak4xStatePrefix]
+  simp [keccak4xRowMem2, keccak4xRoundVec, keccak4xChi, h0, h1, h2, h3, h4]
+
+theorem keccak4xRowMem3_prefix (m : UInt64 → UInt8) (p : UInt64) (v : Nat → Vec256) (rc : UInt64) :
+    keccak4xRowMem3 (keccak4xStatePrefix m p v rc 15) p
+      (keccak4xRhoPi (keccak4xTheta v) 15) (keccak4xRhoPi (keccak4xTheta v) 16) (keccak4xRhoPi (keccak4xTheta v) 17) (keccak4xRhoPi (keccak4xTheta v) 18) (keccak4xRhoPi (keccak4xTheta v) 19) rc =
+    keccak4xStatePrefix m p v rc 20 := by
+  have h0 : UInt64.ofNat (32*15) = (480 : UInt64) := by decide +kernel
+  have h1 : UInt64.ofNat (32*16) = (512 : UInt64) := by decide +kernel
+  have h2 : UInt64.ofNat (32*17) = (544 : UInt64) := by decide +kernel
+  have h3 : UInt64.ofNat (32*18) = (576 : UInt64) := by decide +kernel
+  have h4 : UInt64.ofNat (32*19) = (608 : UInt64) := by decide +kernel
+  conv =>
+    rhs
+    rw [keccak4xStatePrefix, keccak4xStatePrefix, keccak4xStatePrefix,
+      keccak4xStatePrefix, keccak4xStatePrefix]
+  simp [keccak4xRowMem3, keccak4xRoundVec, keccak4xChi, h0, h1, h2, h3, h4]
+
+theorem keccak4xRowMem4_prefix (m : UInt64 → UInt8) (p : UInt64) (v : Nat → Vec256) (rc : UInt64) :
+    keccak4xRowMem4 (keccak4xStatePrefix m p v rc 20) p
+      (keccak4xRhoPi (keccak4xTheta v) 20) (keccak4xRhoPi (keccak4xTheta v) 21) (keccak4xRhoPi (keccak4xTheta v) 22) (keccak4xRhoPi (keccak4xTheta v) 23) (keccak4xRhoPi (keccak4xTheta v) 24) rc =
+    keccak4xStatePrefix m p v rc 25 := by
+  have h0 : UInt64.ofNat (32*20) = (640 : UInt64) := by decide +kernel
+  have h1 : UInt64.ofNat (32*21) = (672 : UInt64) := by decide +kernel
+  have h2 : UInt64.ofNat (32*22) = (704 : UInt64) := by decide +kernel
+  have h3 : UInt64.ofNat (32*23) = (736 : UInt64) := by decide +kernel
+  have h4 : UInt64.ofNat (32*24) = (768 : UInt64) := by decide +kernel
+  conv =>
+    rhs
+    rw [keccak4xStatePrefix, keccak4xStatePrefix, keccak4xStatePrefix,
+      keccak4xStatePrefix, keccak4xStatePrefix]
+  simp [keccak4xRowMem4, keccak4xRoundVec, keccak4xChi, h0, h1, h2, h3, h4]
+
+def keccak4xRowPc : Nat → Nat
+  | 0 => 1037 | 1 => 1145 | 2 => 1270 | 3 => 1395 | 4 => 1520 | _ => 1645
+
+def keccak4xRowCount (r : Nat) : Nat := if r == 0 then 22 else 20
+
+structure keccak4xRowInv (mem : UInt64 → UInt8) (g : Bank16 UInt64) (r : Nat) (s : X86State) : Prop where
+  pc : s.pc = keccak4xRowPc r
+  halted : s.halted = false
+  gpr : s.gpr = g
+  memory : s.mem = keccak4xStatePrefix
+    (keccak4xScratchPrefix mem (g.get 4) (keccak4xSource mem (g.get 7)) 25)
+    (g.get 7) (keccak4xSource mem (g.get 7)) (readMem64 mem (g.get 6)) (5*r)
+
+theorem keccak4xRowInv_read (mem : UInt64 → UInt8) (g : Bank16 UInt64)
+    (hd : keccak4xDisjoint (g.get 7) 800 (g.get 4) 800)
+    (r : Nat) (hr : r ≤ 5) (s : X86State) (h : keccak4xRowInv mem g r s)
+    (j : Nat) (hj : j < 25) :
+    readMem256 s.mem (s.gpr.get 4 + keccak4xOffset j) =
+      keccak4xRhoPi (keccak4xTheta (keccak4xSource mem (g.get 7))) j := by
+  rw [h.gpr, h.memory, keccak4xOffset_eq j hj,
+    keccak4xStatePrefix_scratch _ _ _ _ _
+      (keccak4xDisjoint_symm _ _ _ _ hd) (5*r) (by omega) j hj,
+    keccak4xScratchPrefix_complete _ _ _ j hj]
+
+theorem keccak4xRowInv_step (mem : UInt64 → UInt8) (g : Bank16 UInt64)
+    (hd : keccak4xDisjoint (g.get 7) 800 (g.get 4) 800)
+    (hc : keccak4xDisjoint (g.get 6) 8 (g.get 4) 800)
+    (r : Nat) (hr : r < 5) (s : X86State) (h : keccak4xRowInv mem g r s) :
+    ∃ t, StepsX86 keccak4xProg (keccak4xRowCount r) s t ∧ keccak4xRowInv mem g (r+1) t := by
+  let v := keccak4xSource mem (g.get 7)
+  have hread := keccak4xRowInv_read mem g hd r (by omega) s h
+  match r, hr with
+  | 0, _ =>
+    have hconst : readMem64 s.mem (s.gpr.get 6 + 0) = readMem64 mem (g.get 6) := by
+      rw [UInt64.add_zero, h.gpr, h.memory]
+      exact keccak4xScratchPrefix_constant mem (g.get 4) (g.get 6) v hc 25 (by decide)
+    obtain ⟨t, ht, hp, hh, hg, hm⟩ := keccak4x_row0_steps s h.pc h.halted
+      (keccak4xRhoPi (keccak4xTheta v) 0) (keccak4xRhoPi (keccak4xTheta v) 1) (keccak4xRhoPi (keccak4xTheta v) 2) (keccak4xRhoPi (keccak4xTheta v) 3) (keccak4xRhoPi (keccak4xTheta v) 4) (readMem64 mem (g.get 6))
+      (hread 0 (by decide)) (hread 1 (by decide)) (hread 2 (by decide)) (hread 3 (by decide)) (hread 4 (by decide)) hconst
+    refine ⟨t, ht, hp, hh, hg.trans h.gpr, ?_⟩
+    rw [hm, h.gpr, h.memory, keccak4xRowMem0_prefix]
+  | 1, _ =>
+    obtain ⟨t, ht, hp, hh, hg, hm⟩ := keccak4x_row1_steps s h.pc h.halted
+      (keccak4xRhoPi (keccak4xTheta v) 5) (keccak4xRhoPi (keccak4xTheta v) 6) (keccak4xRhoPi (keccak4xTheta v) 7) (keccak4xRhoPi (keccak4xTheta v) 8) (keccak4xRhoPi (keccak4xTheta v) 9) (readMem64 mem (g.get 6))
+      (hread 5 (by decide)) (hread 6 (by decide)) (hread 7 (by decide)) (hread 8 (by decide)) (hread 9 (by decide))
+    refine ⟨t, ht, hp, hh, hg.trans h.gpr, ?_⟩
+    rw [hm, h.gpr, h.memory, keccak4xRowMem1_prefix]
+  | 2, _ =>
+    obtain ⟨t, ht, hp, hh, hg, hm⟩ := keccak4x_row2_steps s h.pc h.halted
+      (keccak4xRhoPi (keccak4xTheta v) 10) (keccak4xRhoPi (keccak4xTheta v) 11) (keccak4xRhoPi (keccak4xTheta v) 12) (keccak4xRhoPi (keccak4xTheta v) 13) (keccak4xRhoPi (keccak4xTheta v) 14) (readMem64 mem (g.get 6))
+      (hread 10 (by decide)) (hread 11 (by decide)) (hread 12 (by decide)) (hread 13 (by decide)) (hread 14 (by decide))
+    refine ⟨t, ht, hp, hh, hg.trans h.gpr, ?_⟩
+    rw [hm, h.gpr, h.memory, keccak4xRowMem2_prefix]
+  | 3, _ =>
+    obtain ⟨t, ht, hp, hh, hg, hm⟩ := keccak4x_row3_steps s h.pc h.halted
+      (keccak4xRhoPi (keccak4xTheta v) 15) (keccak4xRhoPi (keccak4xTheta v) 16) (keccak4xRhoPi (keccak4xTheta v) 17) (keccak4xRhoPi (keccak4xTheta v) 18) (keccak4xRhoPi (keccak4xTheta v) 19) (readMem64 mem (g.get 6))
+      (hread 15 (by decide)) (hread 16 (by decide)) (hread 17 (by decide)) (hread 18 (by decide)) (hread 19 (by decide))
+    refine ⟨t, ht, hp, hh, hg.trans h.gpr, ?_⟩
+    rw [hm, h.gpr, h.memory, keccak4xRowMem3_prefix]
+  | 4, _ =>
+    obtain ⟨t, ht, hp, hh, hg, hm⟩ := keccak4x_row4_steps s h.pc h.halted
+      (keccak4xRhoPi (keccak4xTheta v) 20) (keccak4xRhoPi (keccak4xTheta v) 21) (keccak4xRhoPi (keccak4xTheta v) 22) (keccak4xRhoPi (keccak4xTheta v) 23) (keccak4xRhoPi (keccak4xTheta v) 24) (readMem64 mem (g.get 6))
+      (hread 20 (by decide)) (hread 21 (by decide)) (hread 22 (by decide)) (hread 23 (by decide)) (hread 24 (by decide))
+    refine ⟨t, ht, hp, hh, hg.trans h.gpr, ?_⟩
+    rw [hm, h.gpr, h.memory, keccak4xRowMem4_prefix]
+  | n+5, hh => exact False.elim (by omega)
+
+def keccak4xRowFuel : Nat → Nat
+  | 0 => 0
+  | r+1 => keccak4xRowFuel r + keccak4xRowCount r
+
+theorem keccak4xRowInv_iter (mem : UInt64 → UInt8) (g : Bank16 UInt64)
+    (hd : keccak4xDisjoint (g.get 7) 800 (g.get 4) 800)
+    (hc : keccak4xDisjoint (g.get 6) 8 (g.get 4) 800)
+    (s : X86State) (h : keccak4xRowInv mem g 0 s) (r : Nat) (hr : r ≤ 5) :
+    ∃ t, StepsX86 keccak4xProg (keccak4xRowFuel r) s t ∧ keccak4xRowInv mem g r t := by
+  induction r with
+  | zero => exact ⟨s, StepsX86.zero _, h⟩
+  | succ r ih =>
+    obtain ⟨t, ht, hi⟩ := ih (by omega)
+    obtain ⟨u, hu, hiu⟩ := keccak4xRowInv_step mem g hd hc r (by omega) t hi
+    exact ⟨u, StepsX86_trans ht hu, hiu⟩
+
+theorem keccak4xRowFuel_full : keccak4xRowFuel 5 = 102 := by decide +kernel
+
+/-- Every instruction computing one round, stopping before public counter maintenance. -/
+theorem keccak4x_round_steps (g : Bank16 UInt64) (y : Bank16 Vec256)
+    (cf ofl zf dy : Bool) (mem : UInt64 → UInt8)
+    (hd : keccak4xDisjoint (g.get 7) 800 (g.get 4) 800)
+    (hc : keccak4xDisjoint (g.get 6) 8 (g.get 4) 800) :
+    ∃ t, StepsX86 keccak4xProg 269 ⟨20,g,y,cf,ofl,zf,dy,false,mem⟩ t ∧
+      t.pc = 1645 ∧ t.halted = false ∧ t.gpr = g ∧
+      t.mem = keccak4xRoundMem mem (g.get 7) (g.get 4) (g.get 6) := by
+  obtain ⟨t, ht, hp, hh, hg, hm⟩ := keccak4x_theta_rho_pi_steps g y cf ofl zf dy mem hd
+  have hi : keccak4xRowInv mem g 0 t := ⟨hp, hh, hg, hm⟩
+  obtain ⟨u, hu, hiu⟩ := keccak4xRowInv_iter mem g hd hc t hi 5 (by decide)
+  rw [keccak4xRowFuel_full] at hu
+  exact ⟨u, StepsX86_trans ht hu, hiu.pc, hiu.halted, hiu.gpr, hiu.memory⟩
+
+/-- Entry to the decoded round body after the prologue, with honest buffer separation.
+The selected public table word may be any UInt64; round selection is handled by the loop. -/
