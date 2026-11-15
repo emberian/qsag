@@ -49,8 +49,9 @@ use qsag_agg::{
     StatelessBudgetWalSink, SuccinctHierarchicalHemAggregate, ValidatorKeypair, ValidatorSignature,
     WhirSecurityRegime, aggregate_signatures_with_config, check_hierarchical_hem_commitment,
     compress_hierarchical_hem_evidence, compute_policy_registry_root, hierarchical_hem_message,
-    prove_hierarchical_hem_prepared, verify_hierarchical_hem, verify_hierarchical_hem_evidence_prepared,
-    verify_hierarchical_hem_prepared, verify_succinct_hierarchical_hem_prepared, with_worker_limit,
+    prove_hierarchical_hem_prepared, verify_hierarchical_hem,
+    verify_hierarchical_hem_evidence_prepared, verify_hierarchical_hem_prepared,
+    verify_succinct_hierarchical_hem_prepared, with_worker_limit,
 };
 use qsag_core::belt_latch::{BeltLatchRecord, BeltLatchState, DurableWal, WalError};
 use qsag_quorum::party_node::IsolatedQuorumParty;
@@ -462,7 +463,7 @@ fn run_beam_hierarchy_bench(
     .expect("child proofs verify into evidence");
     let t_succ_prove = Instant::now();
     let succinct = compress_hierarchical_hem_evidence(&evidence, cfg.blinding_seed)
-    .expect("outer succinct Beam Chain compression");
+        .expect("outer succinct Beam Chain compression");
     let succinct_compress_ms = t_succ_prove.elapsed().as_secs_f64() * 1_000.0;
     let succinct_wire = succinct.to_bytes();
     let succinct_decoded = SuccinctHierarchicalHemAggregate::from_bytes_canonical(&succinct_wire)
@@ -949,7 +950,7 @@ fn run_network_slot(
 
     let t_comp = Instant::now();
     let compact = compress_hierarchical_hem_evidence(&evidence, cfg.blinding_seed)
-    .expect("full-network compact commitment");
+        .expect("full-network compact commitment");
     let compact_build_ms = t_comp.elapsed().as_secs_f64() * 1_000.0;
     let compact_wire = compact.to_bytes();
     let compact_decoded = SuccinctHierarchicalHemAggregate::from_bytes_canonical(&compact_wire)
@@ -1175,7 +1176,10 @@ fn run_full_network_section(workers: usize, verify_iters: usize) {
             r.compact_check_p50_ms,
             r.evidence_ms,
         );
-        println!("                fresh-evidence + build pipeline: {:.2} ms; cached evidence eliminates a second child verification.", r.evidence_ms + r.compact_build_ms);
+        println!(
+            "                fresh-evidence + build pipeline: {:.2} ms; cached evidence eliminates a second child verification.",
+            r.evidence_ms + r.compact_build_ms
+        );
         println!(
             "                commitment relation alone: {:.2} ms. It certifies the summary hash chain, not the child proofs or signatures.",
             r.commitment_only_p50_ms,

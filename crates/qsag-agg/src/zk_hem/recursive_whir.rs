@@ -12,7 +12,7 @@
 //! The bounded-query security labels retain their assumptions; this new transcript's
 //! composed QROM reduction has not been mechanized.
 
-use super::protocol::{self, ZkHemError, ZkHemProof};
+use super::protocol::{self, PublicHemProof, ZkHemError};
 use super::relation::{ConstraintSystem, Lc, Shape, poseidon2_perm};
 use crate::field::{Goldilocks as F, GoldilocksExt4 as E, GoldilocksOps as _};
 use crate::pcs::{WhirSchedule, WhirSecurityRegime, hypercube_to_monomial_coeffs};
@@ -108,6 +108,34 @@ impl Backend for Native {
         v
     }
 }
+/// Execute the same gadget in field arithmetic, recording every allocated wire
+/// in synthesis order. In particular `pin` allocates and each permutation records
+/// all 118 S-box outputs. The compiled Shape still checks the whole assignment.
+#[derive(Default)]
+struct Assignment {
+    values: Vec<F>,
+}
+impl Backend for Assignment {
+    type W = F;
+    fn alloc(&mut self, v: F) -> F {
+        self.values.push(v);
+        v
+    }
+    fn value(&self, v: &F) -> F {
+        *v
+    }
+    fn mul(&mut self, a: &F, b: &F) -> F {
+        self.alloc(a.const_mul(*b))
+    }
+    fn equal(&mut self, _a: &F, _b: &F) {}
+    fn product(&mut self, _a: &F, _b: &F, _c: &F) {}
+    fn perm(&mut self, s: &mut [F; 12]) {
+        let mut outputs = [F::ZERO; 118];
+        *s = crate::trace::record_poseidon2_perm12(*s, &mut outputs);
+        self.values.extend(outputs);
+    }
+}
+
 impl Backend for ConstraintSystem {
     type W = Lc;
     fn alloc(&mut self, v: F) -> Lc {
@@ -174,24 +202,67 @@ impl<W: Base> Ext<W> {
         Self(core::array::from_fn(|i| b.mul(&self.0[i], v)))
     }
     fn mul<B: Backend<W = W>>(&self, b: &mut B, v: &Self) -> Self {
-        fn pair<B: Backend>(b: &mut B, a: &[B::W], c: &[B::W]) -> [B::W; 2] {
-            let p = b.mul(&a[0], &c[0]);
-            let q = b.mul(&a[1], &c[1]);
-            let r = b.mul(&a[0].plus(&a[1]), &c[0].plus(&c[1]));
-            [p.plus(&q.scale(f(7))), r.minus(&p).minus(&q)]
-        }
-        let ac = pair(b, &self.0[..2], &v.0[..2]);
-        let bd = pair(b, &self.0[2..], &v.0[2..]);
-        let a = [self.0[0].plus(&self.0[2]), self.0[1].plus(&self.0[3])];
-        let c = [v.0[0].plus(&v.0[2]), v.0[1].plus(&v.0[3])];
-        let mid = pair(b, &a, &c);
-        Self([
-            b.pin(ac[0].plus(&bd[1].scale(f(7)))),
-            b.pin(ac[1].plus(&bd[0])),
-            b.pin(mid[0].minus(&ac[0]).minus(&bd[0])),
-            b.pin(mid[1].minus(&ac[1]).minus(&bd[1])),
-        ])
+        // Regard the tower as F[v]/(v^4 - 7), with polynomial-order
+        // limbs [0,2,1,3]. Seven products at 0..6 determine the degree-six
+        // product exactly; interpolate and reduce v^4=7. No witness-dependent
+        // branch or random evaluation replaces the multiplication identity.
+        const REDUCE: [[u64; 7]; 4] = [
+            [
+                17806232122559911257,
+                768614336225607671,
+                384307168112803860,
+                3586866902386169150,
+                7301836194143272976,
+                9991986370932899835,
+                15500389113883088215,
+            ],
+            [
+                1255403415835159213,
+                13988780919306059768,
+                4227378849240842255,
+                11785419822125984413,
+                11144907875271311369,
+                13988780919306059774,
+                17396304476572920492,
+            ],
+            [
+                12067245078742040574,
+                15372286724512153608,
+                4995993185466449910,
+                15372286724512153611,
+                4227378849240842234,
+                15987178193492639747,
+                5764607521692057600,
+            ],
+            [
+                384307168112803839,
+                3074457344902430725,
+                11144907875271311351,
+                12297829379609722891,
+                7301836194143272954,
+                15372286724512153603,
+                5764607521692057600,
+            ],
+        ];
+        let evaluate = |x: &Self, t: u64| {
+            x.0[0]
+                .plus(&x.0[2].scale(f(t)))
+                .plus(&x.0[1].scale(f(t * t)))
+                .plus(&x.0[3].scale(f(t * t * t)))
+        };
+        let products: [W; 7] =
+            core::array::from_fn(|i| b.mul(&evaluate(self, i as u64), &evaluate(v, i as u64)));
+        // Each output is a seven-term form over fresh product wires. Keep it
+        // linear: allocating four redundant equality wires would push the merge
+        // over the next power-of-two commitment domain.
+        Self(core::array::from_fn(|i| {
+            products
+                .iter()
+                .zip(REDUCE[i])
+                .fold(W::constant(F::ZERO), |a, (p, c)| a.plus(&p.scale(f(c))))
+        }))
     }
+
     fn equal<B: Backend<W = W>>(&self, b: &mut B, v: &Self) {
         for i in 0..4 {
             b.equal(&self.0[i], &v.0[i]);
@@ -273,9 +344,34 @@ fn bits<B: Backend>(b: &mut B, value: &B::W, n: usize) -> Vec<B::W> {
 
 /// The canonical representative of `word` has `difficulty` trailing zero bits.
 fn low_bits_zero<B: Backend>(b: &mut B, word: &B::W, difficulty: u32) {
-    let binary = bits(b, word, 64);
-    for bit in &binary[..difficulty as usize] {
-        b.equal(bit, &B::W::constant(F::ZERO));
+    if difficulty == 0 {
+        return;
+    }
+    assert!(difficulty <= 64);
+    if difficulty == 64 {
+        b.equal(word, &B::W::constant(F::ZERO));
+        return;
+    }
+    let n = 64 - difficulty as usize;
+    let high = b.alloc(f(b.value(word).to_canonical_u64() >> difficulty));
+    let binary = bits(b, &high, n);
+    b.equal(word, &high.scale(f(1u64 << difficulty)));
+    // Exclude high * 2^difficulty >= p; when the high 32 bits are all
+    // ones the remaining low bits must be zero. For difficulty >= 32
+    // the bit width alone already proves the canonical bound.
+    if difficulty < 32 {
+        let split = 32 - difficulty as usize;
+        let mut all = binary[split].clone();
+        for bit in &binary[split + 1..] {
+            all = b.mul(&all, bit);
+        }
+        let low = binary[..split]
+            .iter()
+            .enumerate()
+            .fold(B::W::constant(F::ZERO), |sum, (i, bit)| {
+                sum.plus(&bit.scale(f(1 << i)))
+            });
+        b.product(&all, &low, &B::W::constant(F::ZERO));
     }
 }
 
@@ -527,15 +623,31 @@ fn equal_bit<B: Backend>(b: &mut B, a: &B::W, c: &B::W) -> B::W {
     b.product(&d, &inv, &B::W::constant(F::ONE).minus(&eq));
     eq
 }
-/// `0 <= v <= max` as integers. Both summands have `n < 64` bits, so `v + slack = max`
-/// cannot hold through a wrap modulo `p`.
+/// `0 <= v <= max` as integers, with a bitwise comparison to the public
+/// bound. At each zero bit of max, equality of its higher prefix forces this
+/// bit to zero. No slack integer or modular comparison is trusted.
 fn bounded<B: Backend>(b: &mut B, v: &B::W, max: u64) {
     let n = (64 - max.leading_zeros()) as usize;
     assert!(n < 64);
-    bits(b, v, n);
-    let slack = b.alloc(f(max.saturating_sub(b.value(v).to_canonical_u64())));
-    bits(b, &slack, n);
-    b.equal(&v.plus(&slack), &B::W::constant(f(max)));
+    let binary = bits(b, v, n);
+    let mut prefix = B::W::constant(F::ONE);
+    let mut first = true;
+    for i in (0..n).rev() {
+        // Trailing ones impose no further upper-bound condition.
+        if max & ((1u64 << (i + 1)) - 1) == (1u64 << (i + 1)) - 1 {
+            break;
+        }
+        if (max >> i) & 1 == 1 {
+            prefix = if first {
+                binary[i].clone()
+            } else {
+                b.mul(&prefix, &binary[i])
+            };
+            first = false;
+        } else {
+            b.product(&prefix, &binary[i], &B::W::constant(F::ZERO));
+        }
+    }
 }
 fn select<B: Backend>(b: &mut B, bit: &B::W, yes: &B::W, no: &B::W) -> B::W {
     let delta = yes.minus(no);
@@ -546,15 +658,34 @@ fn select<B: Backend>(b: &mut B, bit: &B::W, yes: &B::W, no: &B::W) -> B::W {
 // Canonical integer remainder of a uniform field challenge; the quotient and remainder
 // bounds exclude modular wrap. At most ceil(p/divisor) preimages per remainder.
 fn remainder<B: Backend>(b: &mut B, word: &B::W, divisor: u64) -> B::W {
+    if divisor.is_power_of_two() {
+        let binary = bits(b, word, 64);
+        return binary[..divisor.trailing_zeros() as usize]
+            .iter()
+            .enumerate()
+            .fold(B::W::constant(F::ZERO), |a, (i, bit)| {
+                a.plus(&bit.scale(f(1u64 << i)))
+            });
+    }
     let raw = b.value(word).to_canonical_u64();
     let q = b.alloc(f(raw / divisor));
     let r = b.alloc(f(raw % divisor));
     let max = (crate::field::GOLDILOCKS_PRIME - 1) / divisor;
     bounded(b, &q, max);
-    bounded(b, &r, divisor - 1);
+    let n = (64 - (divisor - 1).leading_zeros()) as usize;
+    bits(b, &r, n);
     let at_max = equal_bit(b, &q, &B::W::constant(f(max)));
-    let tail = b.mul(&at_max, &r);
-    bounded(b, &tail, (crate::field::GOLDILOCKS_PRIME - 1) % divisor);
+    // One conditional upper bound replaces two separate range checks. If q
+    // reaches floor((p-1)/d), the remainder is bounded by the final short tail;
+    // otherwise it is bounded by d-1. Both r and slack are short integers.
+    let tail = (crate::field::GOLDILOCKS_PRIME - 1) % divisor;
+    let bound = B::W::constant(f(divisor - 1)).minus(&at_max.scale(f(divisor - 1 - tail)));
+    let slack = b.alloc(f(b
+        .value(&bound)
+        .to_canonical_u64()
+        .saturating_sub(raw % divisor)));
+    bits(b, &slack, n);
+    b.equal(&r.plus(&slack), &bound);
     b.equal(word, &q.scale(f(divisor)).plus(&r));
     r
 }
@@ -594,27 +725,140 @@ impl<W: Base> QuerySampler<W> {
         (index, binary)
     }
 }
-fn merkle<B: Backend>(
-    b: &mut B,
-    stage: usize,
-    index: &B::W,
-    binary: &[B::W],
-    values: &[Ext<B::W>],
-    path: &[Digest],
-    root: &[B::W; 4],
-) {
-    let mut cur = leaf(b, stage, index, values);
-    for (level, (bit, sibling)) in binary.iter().zip(path).enumerate() {
-        let sibling = sibling.map(|x| b.alloc(x));
-        let left = core::array::from_fn(|i| {
-            let delta = b.mul(bit, &sibling[i].minus(&cur[i]));
-            cur[i].plus(&delta)
-        });
-        let right = core::array::from_fn(|i| cur[i].plus(&sibling[i]).minus(&left[i]));
-        cur = compress(b, &left, &right, stage, level);
+// A fixed four-level canopy. Internal nodes are witnesses; an internal hash is
+// enforced whenever a query traverses it. Unvisited subtrees may remain opaque,
+// exactly as in the original authentication paths. Every supplied upper sibling
+// is still compared, so inconsistent duplicate paths are rejected.
+struct CanopyQuery<W> {
+    binary: Vec<W>,
+    current: [W; 4],
+    siblings: Vec<Digest>,
+}
+struct Canopy<W> {
+    depth: usize,
+    base_level: usize,
+    nodes: Vec<Digest>,
+    queries: Vec<CanopyQuery<W>>,
+}
+impl<W: Base> Canopy<W> {
+    fn new(path_depth: usize) -> Self {
+        let depth = path_depth.min(4);
+        Self {
+            depth,
+            base_level: path_depth - depth,
+            nodes: vec![[F::ZERO; 4]; 2 << depth],
+            queries: Vec::new(),
+        }
     }
-    for i in 0..4 {
-        b.equal(&cur[i], &root[i]);
+    fn path<B: Backend<W = W>>(
+        &mut self,
+        b: &mut B,
+        stage: usize,
+        index: &W,
+        binary: &[W],
+        values: &[Ext<W>],
+        path: &[Digest],
+    ) {
+        let mut cur = leaf(b, stage, index, values);
+        for (level, (bit, sibling)) in binary.iter().zip(path).take(self.base_level).enumerate() {
+            let sibling = sibling.map(|x| b.alloc(x));
+            let left = core::array::from_fn(|i| select(b, bit, &sibling[i], &cur[i]));
+            let right = core::array::from_fn(|i| cur[i].plus(&sibling[i]).minus(&left[i]));
+            cur = compress(b, &left, &right, stage, level);
+        }
+        // Assign the shared heap-indexed tree from the existing full paths. Values
+        // affect only witnesses; the emitted rows and coefficients stay fixed.
+        let mut idx =
+            (1 << self.depth) + (b.value(index).to_canonical_u64() as usize >> self.base_level);
+        let mut native = cur.clone().map(|v| b.value(&v));
+        self.nodes[idx] = native;
+        for (level, sibling) in path.iter().enumerate().skip(self.base_level) {
+            self.nodes[idx ^ 1] = *sibling;
+            let (left, right) = if idx & 1 == 0 {
+                (native, *sibling)
+            } else {
+                (*sibling, native)
+            };
+            native = compress(&mut Native::default(), &left, &right, stage, level);
+            idx >>= 1;
+            self.nodes[idx] = native;
+        }
+        self.queries.push(CanopyQuery {
+            binary: binary[self.base_level..].to_vec(),
+            current: cur,
+            siblings: path[self.base_level..].to_vec(),
+        });
+    }
+    fn finish<B: Backend<W = W>>(self, b: &mut B, stage: usize, root: &[W; 4]) {
+        let nodes: Vec<[W; 4]> = self
+            .nodes
+            .into_iter()
+            .map(|d| d.map(|v| b.alloc(v)))
+            .collect();
+        let mut counts = vec![W::constant(F::ZERO); 1 << self.depth];
+        for query in self.queries {
+            // Prefix indicators also give exact nonzero traversal counts. Each
+            // is Boolean, and there are fewer than p queries, so no modular alias.
+            let mut prefixes = vec![W::constant(F::ONE)];
+            for (level, bit) in query.binary.iter().rev().enumerate() {
+                for (i, prefix) in prefixes.iter().enumerate() {
+                    counts[(1 << level) + i] = counts[(1 << level) + i].plus(prefix);
+                }
+                // The bottom layer has no hash of its own, so its indicators are not needed.
+                if level + 1 < self.depth {
+                    prefixes = prefixes
+                        .iter()
+                        .flat_map(|prefix| {
+                            let right = b.mul(prefix, bit);
+                            [prefix.minus(&right), right]
+                        })
+                        .collect();
+                }
+            }
+            let choose = |b: &mut B, mut layer: Vec<[W; 4]>, bits: &[W]| -> [W; 4] {
+                for bit in bits {
+                    layer = layer
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|pair| {
+                            core::array::from_fn(|i| select(b, bit, &pair[1][i], &pair[0][i]))
+                        })
+                        .collect();
+                }
+                layer[0].clone()
+            };
+            let bottom = 1 << self.depth;
+            let selected = choose(b, nodes[bottom..2 * bottom].to_vec(), &query.binary);
+            for (a, c) in query.current.iter().zip(&selected) {
+                b.equal(a, c);
+            }
+            for (level, sibling) in query.siblings.iter().enumerate() {
+                let begin = bottom >> level;
+                let layer = (begin..2 * begin).map(|i| nodes[i ^ 1].clone()).collect();
+                let selected = choose(b, layer, &query.binary[level..]);
+                for (a, c) in sibling.iter().zip(&selected) {
+                    let a = b.alloc(*a);
+                    b.equal(&a, c);
+                }
+            }
+        }
+        for i in 1usize..1 << self.depth {
+            let height = self.depth - i.ilog2() as usize - 1;
+            let digest = compress(
+                b,
+                &nodes[2 * i],
+                &nodes[2 * i + 1],
+                stage,
+                self.base_level + height,
+            );
+            for (a, c) in digest.iter().zip(&nodes[i]) {
+                b.product(&counts[i], &a.minus(c), &W::constant(F::ZERO));
+            }
+        }
+        for (a, c) in nodes[1].iter().zip(root) {
+            b.equal(a, c);
+        }
     }
 }
 fn coset_point<B: Backend>(b: &mut B, binary: &[B::W], domain_log2: usize) -> B::W {
@@ -938,6 +1182,7 @@ fn verify_gadget<B: Backend>(
         );
         let (arity, groups, count) = geos[stage];
         let mut shifted = Vec::with_capacity(count);
+        let mut canopy = Canopy::new(groups.trailing_zeros() as usize);
         let mut sampler = QuerySampler { swaps: Vec::new() };
         for q in 0..count {
             let (index, binary) = sampler.next(b, &mut tr, groups, count, q);
@@ -954,15 +1199,7 @@ fn verify_gadget<B: Backend>(
                     }
                 })
                 .collect();
-            merkle(
-                b,
-                stage,
-                &index,
-                &binary,
-                &values,
-                &query.siblings,
-                &roots[stage],
-            );
+            canopy.path(b, stage, &index, &binary, &values, &query.siblings);
             let x = coset_point(b, &binary, (groups * arity).trailing_zeros() as usize);
             let (z, e) = fold_fiber(b, &values, x, &chals, stage == 0);
             if last {
@@ -971,6 +1208,7 @@ fn verify_gadget<B: Backend>(
             }
             shifted.push((z, e));
         }
+        canopy.finish(b, stage, &roots[stage]);
         if !last {
             let values: Vec<_> = shifted.iter().map(|(_, e)| e.clone()).collect();
             tr.absorb_exts(b, 22, &values);
@@ -1276,11 +1514,11 @@ const MERGE_LABEL: &[u8] = b"QSAG.FIXED.WHIR.MERGE/v1";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SuccinctChildWhirMerge {
     pub merged_root: Digest,
-    pub proof: ZkHemProof,
+    pub proof: PublicHemProof,
 }
 impl SuccinctChildWhirMerge {
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = b"QSAGFWZ1".to_vec();
+        let mut out = b"QSAGFWP1".to_vec();
         for x in self.merged_root {
             out.extend_from_slice(&x.to_le_bytes());
         }
@@ -1292,7 +1530,7 @@ impl SuccinctChildWhirMerge {
         relation: &ChildWhirMergeRelation,
         regime: WhirSecurityRegime,
     ) -> Option<Self> {
-        if bytes.get(..8)? != b"QSAGFWZ1" {
+        if bytes.get(..8)? != b"QSAGFWP1" {
             return None;
         }
         let mut root = [F::ZERO; 4];
@@ -1303,7 +1541,7 @@ impl SuccinctChildWhirMerge {
             }
             *v = f(word);
         }
-        let proof = ZkHemProof::from_bytes(bytes.get(40..)?, &relation.shape, regime)?;
+        let proof = PublicHemProof::from_bytes(bytes.get(40..)?, &relation.shape, regime)?;
         Some(Self {
             merged_root: root,
             proof,
@@ -1403,19 +1641,95 @@ fn synthesize_merge(
     root: Digest,
 ) -> (Shape, Vec<F>, usize) {
     let mut cs = ConstraintSystem::new();
-    let words = statement_words(children);
-    let public: Vec<Lc> = words.iter().map(|&x| cs.public_input(x).into()).collect();
-    let merged: [Lc; 4] = root.map(|x| cs.public_input(x).into());
-    for (statement, proof) in public.chunks(words.len() / children.len()).zip(proofs) {
-        verify_gadget(&mut cs, params, statement, proof);
-    }
-    let digest = merged_gadget(&mut cs, &public);
-    for i in 0..4 {
-        cs.enforce_equal(&merged[i], &digest[i]);
-    }
+    populate_merge(&mut cs, params, children, proofs, root);
     let used = cs.num_rows();
     let (shape, z) = cs.finish();
     (shape, z, used)
+}
+
+fn populate_merge(
+    cs: &mut ConstraintSystem,
+    params: &FixedPathWhirParams,
+    children: &[ChildWhirStatement],
+    proofs: &[FixedPathWhirProof],
+    root: Digest,
+) {
+    let words = statement_words(children);
+    let public: Vec<Lc> = words.iter().map(|&x| cs.public_input(x).into()).collect();
+    let merged: [Lc; 4] = root.map(|x| cs.public_input(x).into());
+    let inputs: Vec<_> = public
+        .chunks(words.len() / children.len())
+        .zip(proofs)
+        .collect();
+    let build = |chunk: &[(&[Lc], &FixedPathWhirProof)]| -> Vec<ConstraintSystem> {
+        chunk
+            .iter()
+            .map(|(statement, proof)| {
+                let mut child = cs.fork_public_inputs();
+                verify_gadget(&mut child, params, statement, proof);
+                child
+            })
+            .collect()
+    };
+    #[cfg(feature = "std")]
+    let circuits = crate::map_chunks_bounded_with_limit(&inputs, children.len(), build)
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    #[cfg(not(feature = "std"))]
+    let circuits = build(&inputs);
+    for circuit in circuits {
+        cs.append(circuit);
+    }
+    let digest = merged_gadget(cs, &public);
+    for i in 0..4 {
+        cs.enforce_equal(&merged[i], &digest[i]);
+    }
+}
+
+fn merge_assignment(
+    relation: &ChildWhirMergeRelation,
+    children: &[ChildWhirStatement],
+    proofs: &[FixedPathWhirProof],
+    root: Digest,
+) -> Result<Vec<F>, RecursiveWhirError> {
+    let public = statement_words(children);
+    let inputs: Vec<_> = public
+        .chunks(public.len() / children.len())
+        .zip(proofs)
+        .collect();
+    let build = |chunk: &[(&[F], &FixedPathWhirProof)]| -> Vec<Vec<F>> {
+        chunk
+            .iter()
+            .map(|(statement, proof)| {
+                let mut assignment = Assignment::default();
+                verify_gadget(&mut assignment, &relation.params, statement, proof);
+                assignment.values
+            })
+            .collect()
+    };
+    #[cfg(feature = "std")]
+    let assignments = crate::map_chunks_bounded_with_limit(&inputs, children.len(), build)
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    #[cfg(not(feature = "std"))]
+    let assignments = build(&inputs);
+    let mut z = Vec::with_capacity(relation.shape.num_vars);
+    z.push(F::ONE);
+    z.extend_from_slice(&public);
+    z.extend(root);
+    for assignment in assignments {
+        z.extend(assignment);
+    }
+    let mut merged = Assignment::default();
+    merged_gadget(&mut merged, &public);
+    z.extend(merged.values);
+    if z.len() != relation.shape.mask_var_base {
+        return Err(RecursiveWhirError::InvalidParameters);
+    }
+    z.resize(relation.shape.num_vars, F::ZERO);
+    Ok(z)
 }
 
 /// Prove every child's complete fixed-path WHIR verification inside one committed outer
@@ -1441,12 +1755,8 @@ pub fn prove_succinct_children_whir_merge(
         return Err(RecursiveWhirError::MalformedProof);
     }
     let merged_root = merged_child_whir_root(children);
-    let (shape, z, _) = synthesize_merge(&relation.params, children, proofs, merged_root);
-    if shape != relation.shape {
-        return Err(RecursiveWhirError::InvalidParameters);
-    }
-    drop(shape);
-    let proof = protocol::prove(&relation.shape, z, MERGE_LABEL, regime, seed)
+    let z = merge_assignment(relation, children, proofs, merged_root)?;
+    let proof = protocol::prove_public(&relation.shape, z, MERGE_LABEL, regime, seed)
         .map_err(RecursiveWhirError::ZkHem)?;
     Ok(SuccinctChildWhirMerge { merged_root, proof })
 }
@@ -1469,7 +1779,7 @@ pub fn verify_succinct_children_whir_merge(
     }
     let mut public = statement_words(children);
     public.extend(parent.merged_root);
-    protocol::verify(&relation.shape, &public, MERGE_LABEL, regime, &parent.proof)
+    protocol::verify_public(&relation.shape, &public, MERGE_LABEL, regime, &parent.proof)
 }
 
 #[cfg(all(test, feature = "std"))]
@@ -1563,6 +1873,48 @@ mod tests {
             })
             .collect()
     }
+    #[test]
+    fn recorded_assignment_matches_symbolic_synthesis_exactly() {
+        let params = FixedPathWhirParams::new(REGIME, 2).unwrap();
+        let (children, proofs): (Vec<_>, Vec<_>) = (0..2).map(|i| child(&params, 7 + i)).unzip();
+        let root = merged_child_whir_root(&children);
+        let relation = ChildWhirMergeRelation::new(params.clone()).unwrap();
+        let (shape, expected, _) = synthesize_merge(&params, &children, &proofs, root);
+        assert_eq!(shape, relation.shape);
+        let actual = merge_assignment(&relation, &children, &proofs, root).unwrap();
+        assert_eq!(actual, expected);
+        assert!(shape.is_satisfied(&actual));
+    }
+
+    #[test]
+    fn seven_product_extension_gadget_matches_tower_arithmetic() {
+        for i in 0..64 {
+            let a = sample(i);
+            let c = sample(i + 71);
+            let mut cs = ConstraintSystem::new();
+            let x = Ext::alloc(&mut cs, a);
+            let y = Ext::alloc(&mut cs, c);
+            let product = x.mul(&mut cs, &y);
+            assert_eq!(product.value(&cs), a * c);
+            let (shape, z) = cs.finish();
+            assert!(shape.is_satisfied(&z));
+        }
+        for i in 0..4 {
+            for j in 0..4 {
+                let mut a = [F::ZERO; 4];
+                a[i] = F::ONE;
+                let mut c = [F::ZERO; 4];
+                c[j] = F::ONE;
+                let (a, c) = (E::from_limbs(a), E::from_limbs(c));
+                let mut b = Native::default();
+                assert_eq!(
+                    Ext::constant(a).mul(&mut b, &Ext::constant(c)).value(&b),
+                    a * c
+                );
+            }
+        }
+    }
+
     #[test]
     fn ext4_tower_arithmetic_matches_native_and_constrains_outputs() {
         for i in 0..12 {
@@ -1698,15 +2050,9 @@ mod tests {
                 .iter()
                 .map(|&v| Ext::alloc(b, v))
                 .collect();
-            merkle(
-                b,
-                1,
-                &index,
-                &binary,
-                &values,
-                &path,
-                &root.map(Lc::constant),
-            );
+            let mut canopy = Canopy::new(binary.len());
+            canopy.path(b, 1, &index, &binary, &values, &path);
+            canopy.finish(b, 1, &root.map(Lc::constant));
         };
         let (shape, z, _) = forge(&[], run);
         assert!(violated(&shape, &z).is_empty());
@@ -1729,17 +2075,16 @@ mod tests {
             low_bits_zero(b, &input, 16);
         };
         let (shape, z, _) = forge(&[], run);
-        // Honest decomposition: exactly the sixteen low-bit rows fail.
-        assert_eq!(violated(&shape, &z).len(), 16);
-        let forged: Vec<_> = (0..64)
-            .map(|t| (1 + t, f(((alias >> t) & 1) as u64)))
-            .collect();
+        // The short quotient cannot reconstruct a word with nonzero low bits.
+        assert_eq!(violated(&shape, &z), [49]);
+        let high = (alias >> 16) as u64;
+        let mut forged = vec![(1, f(high))];
+        forged.extend((0..48).map(|t| (2 + t, f((high >> t) & 1))));
         let (other, z, _) = forge(&forged, run);
         assert_eq!(shape, other);
-        // Booleanity, the weighted sum modulo p and the low-bit rows all hold for the
-        // alias. Only the canonical-range row (64 Boolean rows, the sum row and the 31
-        // rows of the high-bit product precede it) rejects.
-        assert_eq!(violated(&shape, &z), [64 + 1 + 31]);
+        // The forged quotient and its bits reconstruct the alias modulo p;
+        // only the canonical upper-bound constraint rejects it.
+        assert_eq!(violated(&shape, &z), [48 + 1 + 1 + 31]);
     }
 
     #[test]

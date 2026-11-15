@@ -5,8 +5,8 @@
 //! 1. **Section 1 — `Rotor` / `Votor` Notarization & Finalization Vote Matrix (`N = 1,500`)**:
 //!    - `80%` stake (`1,200` votes): 1-round fast finalization (`150.0 ms` slot budget).
 //!    - `60%` stake (`900` votes): 2-round slow finalization (`400.0 ms` slot budget).
-//!    - Side-by-side comparison of sub-MTU `FrontierSumFts::Compact514` (`514 B`) & `Compact770`
-//!      (`770 B`, 2-use), the full-width single-datagram `Compact1122` (`1,122 B` + `96 B` vote
+//!    - Comparison of 32-byte-node `Compact1122` and `Full256Bit` profiles.
+//!      The full-width single-datagram `Compact1122` (`1,122 B` + `96 B` vote
 //!      header = `1,218 B`, which fits the `1,232 B` IPv6 / Agave `PACKET_DATA_SIZE` payload but
 //!      not the `1,200 B` RFC 9000 floor), the forward-secret `RotatedEpochVote` envelope over
 //!      `Compact1122` (`1,194 B`), `Full256Bit` (`2,338 B`), `JortsPoseidon2` (`4,328 B`,
@@ -46,8 +46,8 @@ use qsag_agg::{
 };
 use qsag_fts::{
     EpochKeyLink, FrontierDpTable, FrontierFtsError, FrontierFtsProfile, FrontierFtsPublicKey,
-    FrontierFtsSignature, FrontierFtsSigningKey, FsWalFtsEpochLatch, FtsEpochWal, RotatedEpochVote,
-    verify_frontier_fts, FrontierVerifyInput, RotatedEpochVerifyInput,
+    FrontierFtsSignature, FrontierFtsSigningKey, FrontierVerifyInput, FsWalFtsEpochLatch,
+    FtsEpochWal, RotatedEpochVerifyInput, RotatedEpochVote, verify_frontier_fts,
     verify_frontier_fts_batch, verify_rotated_epoch_votes_batch,
 };
 
@@ -287,19 +287,32 @@ fn verify_fts_votes_batch(votes: &[&FtsVote], dp: &FrontierDpTable) -> bool {
     for v in votes {
         match &v.env {
             FtsVoteEnvelope::Plain { msg, sig } => plain.push(FrontierVerifyInput {
-                pk: &v.pk, dp, message: msg, signature: sig,
+                pk: &v.pk,
+                dp,
+                message: msg,
+                signature: sig,
             }),
-            FtsVoteEnvelope::Rotated { vote, expected_digest, next_root } => {
+            FtsVoteEnvelope::Rotated {
+                vote,
+                expected_digest,
+                next_root,
+            } => {
                 rotated.push(RotatedEpochVerifyInput {
-                    current: &v.pk, dp, vote, chain_id: &ROTATION_CHAIN_ID,
-                    expected_epoch: ROTATION_EPOCH, expected_vote_digest: expected_digest,
+                    current: &v.pk,
+                    dp,
+                    vote,
+                    chain_id: &ROTATION_CHAIN_ID,
+                    expected_epoch: ROTATION_EPOCH,
+                    expected_vote_digest: expected_digest,
                 });
                 next_roots.push(next_root);
             }
         }
     }
     verify_frontier_fts_batch(&plain).iter().all(Result::is_ok)
-        && verify_rotated_epoch_votes_batch(&rotated).into_iter().zip(next_roots)
+        && verify_rotated_epoch_votes_batch(&rotated)
+            .into_iter()
+            .zip(next_roots)
             .all(|(result, root)| result.is_ok_and(|next| next.root.as_slice() == root))
 }
 
@@ -393,11 +406,7 @@ fn bench_fts_rotor_profile(
     let base_trees = if full_distinct_trees {
         ALPENGLOW_VALIDATORS.div_ceil(max_uses)
     } else {
-        match profile {
-            FrontierFtsProfile::Compact514 => 384,
-            FrontierFtsProfile::Compact770 => 256,
-            _ => 256,
-        }
+        256
     };
 
     let chunk = base_trees.div_ceil(workers);
@@ -542,8 +551,18 @@ fn bench_fts_rotor_profile(
     let verify_1core_us = (t_1c.elapsed().as_secs_f64() * 1_000_000.0) / (single_count as f64);
 
     // Same vote work, scalar comparison or eight-lane hashing within each CPU worker.
-    let scalar_batches = std::env::var("QSAG_ALPENGLOW_SCALAR_VERIFY").ok().as_deref() == Some("1");
-    println!("    vote verification batches: {}", if scalar_batches { "scalar reference" } else { "eight-lane multibuffer" });
+    let scalar_batches = std::env::var("QSAG_ALPENGLOW_SCALAR_VERIFY")
+        .ok()
+        .as_deref()
+        == Some("1");
+    println!(
+        "    vote verification batches: {}",
+        if scalar_batches {
+            "scalar reference"
+        } else {
+            "eight-lane multibuffer"
+        }
+    );
     let measure_batch = |count: usize| -> (f64, f64) {
         let slice = &votes[..count];
         let per_worker = count.div_ceil(workers);
@@ -556,7 +575,9 @@ fn bench_fts_rotor_profile(
                     scope.spawn(move || {
                         let valid = if scalar_batches {
                             batch.iter().all(|v| verify_fts_vote(v, dp_ref))
-                        } else { verify_fts_votes_batch(batch, dp_ref) };
+                        } else {
+                            verify_fts_votes_batch(batch, dp_ref)
+                        };
                         assert!(valid, "FTS notarization votes must verify");
                     });
                 }
@@ -1062,9 +1083,15 @@ fn bench_section2_hem_finality_compression(
     // Bound a single batch's trace footprint as well as concurrent batch admission.
     // Every signer remains covered by the existing transcript-bound batch proofs and MergeNode.
     // More batches trade larger certificate bytes for bounded live witness memory.
-    joint_cfg.max_shards_per_batch = env_usize("QSAG_ALPENGLOW_SHARDS_PER_BATCH", joint_cfg.max_shards_per_batch);
-    println!("    joint batch partition: <= {} shards/opening; QSAG_PROVER_JOBS={} (arithmetic workers remain independent)",
-        joint_cfg.max_shards_per_batch, env_usize("QSAG_PROVER_JOBS", 1));
+    joint_cfg.max_shards_per_batch = env_usize(
+        "QSAG_ALPENGLOW_SHARDS_PER_BATCH",
+        joint_cfg.max_shards_per_batch,
+    );
+    println!(
+        "    joint batch partition: <= {} shards/opening; QSAG_PROVER_JOBS={} (arithmetic workers remain independent)",
+        joint_cfg.max_shards_per_batch,
+        env_usize("QSAG_PROVER_JOBS", 1)
+    );
 
     // CPU worker budget is independent of the QSAG_PROVER_JOBS active-witness limit.
     let joint_workers = env_usize("QSAG_ALPENGLOW_JOINT_WORKERS", workers);
@@ -1242,9 +1269,14 @@ fn bench_section2_hem_finality_compression(
     let evidence_ms = evidence_start.elapsed().as_secs_f64() * 1000.0;
     let t_prove_succ = Instant::now();
     let succ_agg = compress_hierarchical_hem_evidence(&evidence, hier_cfg.blinding_seed)
-    .expect("Alpenglow succinct outer Hem compression");
+        .expect("Alpenglow succinct outer Hem compression");
     let succ_prove_ms = t_prove_succ.elapsed().as_secs_f64() * 1_000.0;
-    println!("    compact pipeline: fresh evidence {:.2} ms + reuse-only outer build {:.2} ms = {:.2} ms", evidence_ms, succ_prove_ms, evidence_ms + succ_prove_ms);
+    println!(
+        "    compact pipeline: fresh evidence {:.2} ms + reuse-only outer build {:.2} ms = {:.2} ms",
+        evidence_ms,
+        succ_prove_ms,
+        evidence_ms + succ_prove_ms
+    );
     let succ_wire = succ_agg.to_bytes();
     let succ_decoded = SuccinctHierarchicalHemAggregate::from_bytes_canonical(&succ_wire)
         .expect("canonical succinct decode");
@@ -1467,9 +1499,6 @@ fn main() {
     let workers = std::thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(1);
-    let full_committee = std::env::var("QSAG_ALPENGLOW_FULL_COMMITTEE")
-        .ok()
-        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
     let batch_iters = std::env::var("QSAG_ALPENGLOW_ITERS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
@@ -1504,26 +1533,6 @@ fn main() {
         build_jorts_committee_and_bench_rotor(FAST_QUORUM_80PCT, workers, batch_iters);
 
     if run_section("1") {
-        let row_514 = bench_fts_rotor_profile(
-            "Frontier::Compact514",
-            "128b classical / 64b Grover (16B node, 1-use h=14)",
-            FrontierFtsProfile::Compact514,
-            false,
-            full_committee,
-            workers,
-            batch_iters,
-            durable_samples,
-        );
-        let row_770 = bench_fts_rotor_profile(
-            "Frontier::Compact770",
-            "128b classical / 64b Grover (16B node, 2-use h=15)",
-            FrontierFtsProfile::Compact770,
-            false,
-            full_committee,
-            workers,
-            batch_iters,
-            durable_samples,
-        );
         let row_1122 = bench_fts_rotor_profile(
             "Frontier::Compact1122",
             "256b nodes / 128b generic Grover (1-use h=8 w=96; 1 datagram @1232)",
@@ -1555,7 +1564,7 @@ fn main() {
             durable_samples,
         );
 
-        let rows = [row_514, row_770, row_1122, row_rotated, row_256, row_jorts];
+        let rows = [row_1122, row_rotated, row_256, row_jorts];
         print_section1_rotor_votor_matrix(&rows, &wal_dir, &wal_fstype);
         print_rotor_votor_bandwidth(&rows);
     }
@@ -1583,24 +1592,42 @@ mod batching_tests {
     use super::*;
     #[test]
     fn multibuffer_adapter_preserves_plain_context_and_rotated_next_root() {
-        let profile=FrontierFtsProfile::Compact1122;
-        let dp=FrontierDpTable::build(profile);
-        let accel=CpuReferenceBackend::new();
-        let mut votes=Vec::new();
-        for (idx,rotated) in [(0,false),(1,true)] {
-            let (sk,next_root)=fts_keygen(profile,0xD1,idx,rotated,&accel);
-            let mut sk=sk.attach_wal(Box::new(MemFtsWal::default())).unwrap();
-            let env=sign_fts_vote(&mut sk,&dp,next_root,idx as usize,&[33;32]);
-            votes.push(FtsVote{pk:sk.pk.clone(),env});
+        let profile = FrontierFtsProfile::Compact1122;
+        let dp = FrontierDpTable::build(profile);
+        let accel = CpuReferenceBackend::new();
+        let mut votes = Vec::new();
+        for (idx, rotated) in [(0, false), (1, true)] {
+            let (sk, next_root) = fts_keygen(profile, 0xD1, idx, rotated, &accel);
+            let mut sk = sk.attach_wal(Box::new(MemFtsWal::default())).unwrap();
+            let env = sign_fts_vote(&mut sk, &dp, next_root, idx as usize, &[33; 32]);
+            votes.push(FtsVote {
+                pk: sk.pk.clone(),
+                env,
+            });
         }
-        assert!(verify_fts_votes_batch(&votes.iter().collect::<Vec<_>>(),&dp));
-        assert!(votes.iter().all(|v|verify_fts_vote(v,&dp)));
-        if let FtsVoteEnvelope::Rotated{next_root,..}=&mut votes[1].env {next_root[0]^=1;}
-        assert!(!verify_fts_votes_batch(&votes.iter().collect::<Vec<_>>(),&dp));
-        assert!(!verify_fts_vote(&votes[1],&dp));
-        if let FtsVoteEnvelope::Rotated{next_root,..}=&mut votes[1].env {next_root[0]^=1;}
-        if let FtsVoteEnvelope::Plain{msg,..}=&mut votes[0].env {msg[0]^=1;}
-        assert!(!verify_fts_votes_batch(&votes.iter().collect::<Vec<_>>(),&dp));
-        assert!(!verify_fts_vote(&votes[0],&dp));
+        assert!(verify_fts_votes_batch(
+            &votes.iter().collect::<Vec<_>>(),
+            &dp
+        ));
+        assert!(votes.iter().all(|v| verify_fts_vote(v, &dp)));
+        if let FtsVoteEnvelope::Rotated { next_root, .. } = &mut votes[1].env {
+            next_root[0] ^= 1;
+        }
+        assert!(!verify_fts_votes_batch(
+            &votes.iter().collect::<Vec<_>>(),
+            &dp
+        ));
+        assert!(!verify_fts_vote(&votes[1], &dp));
+        if let FtsVoteEnvelope::Rotated { next_root, .. } = &mut votes[1].env {
+            next_root[0] ^= 1;
+        }
+        if let FtsVoteEnvelope::Plain { msg, .. } = &mut votes[0].env {
+            msg[0] ^= 1;
+        }
+        assert!(!verify_fts_votes_batch(
+            &votes.iter().collect::<Vec<_>>(),
+            &dp
+        ));
+        assert!(!verify_fts_vote(&votes[0], &dp));
     }
 }
