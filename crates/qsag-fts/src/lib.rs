@@ -103,6 +103,19 @@ mod tests {
                     .verify(&current.pk, &dp, &chain, 42, &vote_digest)
                     .is_err()
             );
+            // Matching the forged header in application expectations must still fail
+            // the cryptographic binding, rather than only the epoch/digest precheck.
+            assert!(
+                forged
+                    .verify(
+                        &current.pk,
+                        &dp,
+                        &chain,
+                        forged.link.epoch,
+                        &forged.vote_digest
+                    )
+                    .is_err()
+            );
         }
         assert!(
             decoded
@@ -126,6 +139,19 @@ mod tests {
         let verified_next = decoded
             .verify(&current.pk, &dp, &chain, 42, &vote_digest)
             .unwrap();
+        assert_eq!(
+            next.sign_rotated_epoch_vote(
+                &dp,
+                &chain,
+                EpochKeyLink {
+                    epoch: u64::MAX,
+                    next_epoch_pk_root: [10; 32]
+                },
+                [11; 32],
+                &[12; 32]
+            ),
+            Err(FrontierFtsError::ProfileMismatch)
+        );
         let next_vote = next
             .sign_rotated_epoch_vote(
                 &dp,

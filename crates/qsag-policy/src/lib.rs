@@ -6,7 +6,7 @@
 //! Eurocrypt-2011 pairwise 2-lane BDOZ GF($2^{128}$) MAC barriers before releasing any MPC share.
 
 extern crate alloc;
-#[cfg(feature = "std")]
+#[cfg(any(test, feature = "std"))]
 extern crate std;
 
 pub mod durable;
@@ -674,6 +674,18 @@ impl PolicySignerGuardShare {
         let mut macs = Vec::with_capacity(approvers.len());
         for approver in approvers {
             if approver == self.party_id {
+                let self_tag = cshake256_framed_32(
+                    b"QSAG.POLICY.INITIATOR_SELF_MAC.V1",
+                    &[
+                        &self.local_salt_seed,
+                        &self.party_id.to_be_bytes(),
+                        &auth_digest,
+                    ],
+                );
+                macs.push(InitiatorPeerMac {
+                    approver_party: approver,
+                    mac_tag: self_tag,
+                });
                 continue;
             }
             let (_, z_seed) = self
@@ -713,9 +725,30 @@ impl PolicySignerGuardShare {
         if !must_verify {
             return Ok(());
         }
+        let policy_digest = policy.canonical_digest();
+        let auth_digest = intent.initiator_auth_digest(&policy_digest);
         if intent.initiator_party == self.party_id {
             if policy.forbid_initiator_self_approval {
                 return Err(PolicyViolation::InitiatorSelfApprovalForbidden);
+            }
+            let expected_self_tag = cshake256_framed_32(
+                b"QSAG.POLICY.INITIATOR_SELF_MAC.V1",
+                &[
+                    &self.local_salt_seed,
+                    &self.party_id.to_be_bytes(),
+                    &auth_digest,
+                ],
+            );
+            let mut matched_self = false;
+            let mut count_for_self = 0usize;
+            for m in &intent.initiator_macs {
+                if m.approver_party == self.party_id {
+                    count_for_self += 1;
+                    matched_self |= ct_eq_bytes(&m.mac_tag, &expected_self_tag);
+                }
+            }
+            if count_for_self != 1 || !matched_self {
+                return Err(PolicyViolation::UnauthenticatedInitiator);
             }
             return Ok(());
         }
@@ -724,8 +757,6 @@ impl PolicySignerGuardShare {
             .iter()
             .find(|(p, _)| *p == intent.initiator_party)
             .ok_or(PolicyViolation::UnauthenticatedInitiator)?;
-        let policy_digest = policy.canonical_digest();
-        let auth_digest = intent.initiator_auth_digest(&policy_digest);
         let expected_tag = cshake256_framed_32(
             b"QSAG.POLICY.INITIATOR_AUTH_MAC.V1",
             &[
@@ -852,24 +883,50 @@ impl PolicySignerGuardShare {
         }
         self.velocity_generation = generation;
         self.accumulated_window_spend = projected_spend;
-        // Retain every nonce in this authenticated window, without ordering random values.
-        for (values, floor, value) in [
-            (
-                &mut self.burned_intent_nonces,
-                &mut self.min_nonce_watermark,
-                nonce,
-            ),
-            (
-                &mut self.burned_sessions,
-                &mut self.min_session_watermark,
-                session_id,
-            ),
+        // Retain every nonce above `min_*_watermark` in this authenticated window without
+        // clearing any established monotone replay floor!
+        for (values, value) in [
+            (&mut self.burned_intent_nonces, nonce),
+            (&mut self.burned_sessions, session_id),
         ] {
             values.push(value);
             values.sort_unstable();
             values.dedup();
-            *floor = None;
         }
+        Ok(())
+    }
+
+    /// Ratchet the monotone replay watermarks (`nonce_floor`, `session_floor`) forward,
+    /// permanently burning every nonce `<= nonce_floor` and session `<= session_floor`
+    /// while reclaiming explicit 256-slot replay-set entries at or below those floors.
+    ///
+    /// Random nonces strictly above `nonce_floor` remain explicitly retained and are NEVER
+    /// evicted. Attempting to regress either watermark fails with `IntentBindingMismatch`.
+    pub fn compact_monotone_replay_floor(
+        &mut self,
+        nonce_floor: [u8; 32],
+        session_floor: [u8; 32],
+    ) -> Result<(), PolicyViolation> {
+        if self.poisoned {
+            return Err(PolicyViolation::GuardPoisoned);
+        }
+        if self.active_phase.is_some() || self.party_id != self.enrolled_party_id {
+            self.poison();
+            return Err(PolicyViolation::IntentBindingMismatch);
+        }
+        if self
+            .min_nonce_watermark
+            .is_some_and(|prev| nonce_floor < prev)
+            || self
+                .min_session_watermark
+                .is_some_and(|prev| session_floor < prev)
+        {
+            return Err(PolicyViolation::IntentBindingMismatch);
+        }
+        self.burned_intent_nonces.retain(|n| *n > nonce_floor);
+        self.burned_sessions.retain(|s| *s > session_floor);
+        self.min_nonce_watermark = Some(nonce_floor);
+        self.min_session_watermark = Some(session_floor);
         Ok(())
     }
 
@@ -1509,24 +1566,154 @@ impl SharedWindowSpendLedger {
         }
         self.generation = generation;
         self.accumulated_window_spend = projected_spend;
-        for (values, floor, value) in [
-            (
-                &mut self.burned_intent_nonces,
-                &mut self.min_nonce_watermark,
-                nonce,
-            ),
-            (
-                &mut self.burned_sessions,
-                &mut self.min_session_watermark,
-                session_id,
-            ),
+        for (values, value) in [
+            (&mut self.burned_intent_nonces, nonce),
+            (&mut self.burned_sessions, session_id),
         ] {
             values.push(value);
             values.sort_unstable();
             values.dedup();
-            *floor = None;
         }
         Ok(())
+    }
+
+    /// Ratchet the shared ledger's monotone replay watermarks (`nonce_floor`, `session_floor`),
+    /// permanently burning all values at or below the floors while reclaiming set slots.
+    pub fn compact_monotone_replay_floor(
+        &mut self,
+        nonce_floor: [u8; 32],
+        session_floor: [u8; 32],
+    ) -> Result<(), PolicyViolation> {
+        if self.failed {
+            return Err(PolicyViolation::LedgerPersistenceFailed);
+        }
+        if self
+            .min_nonce_watermark
+            .is_some_and(|prev| nonce_floor < prev)
+            || self
+                .min_session_watermark
+                .is_some_and(|prev| session_floor < prev)
+        {
+            return Err(PolicyViolation::IntentBindingMismatch);
+        }
+        let next_gen = self
+            .generation
+            .checked_add(1)
+            .ok_or(PolicyViolation::LedgerPersistenceFailed)?;
+        self.burned_intent_nonces.retain(|n| *n > nonce_floor);
+        self.burned_sessions.retain(|s| *s > session_floor);
+        self.min_nonce_watermark = Some(nonce_floor);
+        self.min_session_watermark = Some(session_floor);
+        self.generation = next_gen;
+        Ok(())
+    }
+}
+
+/// Bounded TTL-expiring staging pool for pre-quorum pending proposals (`[CUST-06]`).
+///
+/// Isolates unfinalized / pending transaction proposals completely from the committed
+/// `burned_intent_nonces` replay set on [`PolicySignerGuardShare`] and [`SharedWindowSpendLedger`]:
+/// 1. Unauthenticated proposals are rejected at admission (`verify_initiator_authentication`)
+///    before allocating even a staging slot.
+/// 2. Abandoned pending proposals expire deterministically after `ttl_secs` without ever
+///    polluting or exhausting the committed 256-slot replay cache.
+/// 3. Already-burned committed nonces or sessions (including those below `min_nonce_watermark`)
+///    are rejected immediately.
+#[derive(Clone, Debug)]
+pub struct PendingIntentStagingPool {
+    max_pending: usize,
+    entries: Vec<StagedPendingIntent>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StagedPendingIntent {
+    nonce: [u8; 32],
+    session_id: [u8; 32],
+    initiator_party: u16,
+    expires_at_secs: u64,
+}
+
+impl Default for PendingIntentStagingPool {
+    fn default() -> Self {
+        Self::new(MAX_BURNED_INTENT_NONCES)
+    }
+}
+
+impl PendingIntentStagingPool {
+    pub const fn new(max_pending: usize) -> Self {
+        Self {
+            max_pending,
+            entries: Vec::new(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Purge all staged proposals whose TTL has elapsed (`expires_at_secs <= now_secs`).
+    pub fn evict_expired(&mut self, now_secs: u64) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|e| e.expires_at_secs > now_secs);
+        before - self.entries.len()
+    }
+
+    /// Admit an authenticated pending proposal into the TTL-bounded staging pool without
+    /// touching `verifier_guard`'s committed replay ledger.
+    pub fn stage_authenticated_intent(
+        &mut self,
+        policy: &TransactionPolicy,
+        verifier_guard: &PolicySignerGuardShare,
+        intent: &TransactionIntent,
+        now_secs: u64,
+        ttl_secs: u64,
+    ) -> Result<(), PolicyViolation> {
+        if ttl_secs == 0 {
+            return Err(PolicyViolation::TimestampOutsideWindow);
+        }
+        policy.evaluate(intent)?;
+        verifier_guard.verify_initiator_authentication(policy, intent, true)?;
+        if intent.window_id != verifier_guard.current_window_id() {
+            return Err(PolicyViolation::WindowIdMismatch);
+        }
+        if verifier_guard.is_nonce_burned(&intent.nonce)
+            || verifier_guard.is_session_burned(&intent.session_id)
+        {
+            return Err(PolicyViolation::DuplicateIntentNonce);
+        }
+        self.evict_expired(now_secs);
+        for existing in &self.entries {
+            if ct_eq_bytes(&existing.nonce, &intent.nonce)
+                || ct_eq_bytes(&existing.session_id, &intent.session_id)
+            {
+                return Err(PolicyViolation::DuplicateIntentNonce);
+            }
+        }
+        if self.entries.len() >= self.max_pending {
+            return Err(PolicyViolation::ReplayWindowExhausted);
+        }
+        let expires_at_secs = now_secs
+            .checked_add(ttl_secs)
+            .ok_or(PolicyViolation::TimestampOutsideWindow)?;
+        self.entries.push(StagedPendingIntent {
+            nonce: intent.nonce,
+            session_id: intent.session_id,
+            initiator_party: intent.initiator_party,
+            expires_at_secs,
+        });
+        Ok(())
+    }
+
+    /// Remove a proposal from the pending pool once committed (or explicitly cancelled).
+    pub fn complete_intent(&mut self, nonce: &[u8; 32], session_id: &[u8; 32]) -> bool {
+        let before = self.entries.len();
+        self.entries
+            .retain(|e| !ct_eq_bytes(&e.nonce, nonce) && !ct_eq_bytes(&e.session_id, session_id));
+        self.entries.len() != before
     }
 }
 
@@ -4685,5 +4872,174 @@ mod cleanup_tests {
                 (BDOZ_PREPROC_SLOTS * 256, true)
             ]
         );
+    }
+
+    #[test]
+    fn cust06_staging_pool_isolates_unauthenticated_spam_and_enforces_self_mac() {
+        let recipient = QsagAddress::from_pubkey_cshake256(
+            "qsp",
+            WitnessSuiteTag::MlDsa65,
+            qsag_addr::KeyIdentityKind::SingleOrThreshold,
+            b"cust06-recipient",
+        )
+        .unwrap();
+        let policy = TransactionPolicy {
+            chain_id: 1,
+            pinned_suite: WitnessSuiteTag::MlDsa65,
+            recipient_allowlist: alloc::vec![recipient.commitment_256],
+            max_single_tx_amount: 100,
+            velocity_window_cap: 10_000,
+            valid_not_before_secs: 1,
+            valid_not_after_secs: 1_000,
+            forbid_initiator_self_approval: false,
+            hardware_guardian_party: Some(2),
+            quorum_tiers: alloc::vec![QuorumTierRule {
+                max_amount_units: 100,
+                min_approvers: 2,
+                require_hardware_guardian: true,
+            }],
+        };
+        let guards = trusted_dealer_setup_for_testing([0x77; 32], &[1, 2]);
+        let mut pool = PendingIntentStagingPool::new(4);
+
+        // 1. Unauthenticated spammer spoofing `initiator_party == 1` directly against guard 1
+        //    (even when `forbid_initiator_self_approval == false`) is rejected with `UnauthenticatedInitiator`
+        //    and consumes ZERO staging slots and ZERO committed replay slots!
+        for i in 0..500u32 {
+            let mut forged_nonce = [0u8; 32];
+            forged_nonce[..4].copy_from_slice(&i.to_be_bytes());
+            let forged_intent = TransactionIntent {
+                chain_id: 1,
+                suite: WitnessSuiteTag::MlDsa65,
+                recipient: recipient.clone(),
+                amount_units: 10,
+                rolling_window_spent: 0,
+                window_id: 0,
+                nonce: forged_nonce,
+                timestamp_secs: 10,
+                initiator_party: 1,
+                initiator_macs: Vec::new(),
+                approver_parties: alloc::vec![1, 2],
+                payload_digest: [0x11; 32],
+                guard_authority_pk: [0x22; 32],
+                rolling_window_accumulator: [0x33; 32],
+                signing_key_id: [0x44; 32],
+                policy_revision: 1,
+                message_digest: [0; 32],
+                signing_context_digest: [0x55; 32],
+                session_id: forged_nonce,
+                quorum_ids: alloc::vec![1, 2],
+            };
+            assert_eq!(
+                pool.stage_authenticated_intent(&policy, &guards[0], &forged_intent, 10, 30),
+                Err(PolicyViolation::UnauthenticatedInitiator)
+            );
+        }
+        assert!(pool.is_empty());
+
+        // 2. Authenticated pending proposals stage cleanly, expire after TTL without burning committed
+        //    replay slots, and never evict committed replay nonces!
+        for i in 0..4u8 {
+            let mut valid_intent = TransactionIntent {
+                chain_id: 1,
+                suite: WitnessSuiteTag::MlDsa65,
+                recipient: recipient.clone(),
+                amount_units: 10,
+                rolling_window_spent: 0,
+                window_id: 0,
+                nonce: [i + 1; 32],
+                timestamp_secs: 10,
+                initiator_party: 1,
+                initiator_macs: Vec::new(),
+                approver_parties: alloc::vec![1, 2],
+                payload_digest: [0x11; 32],
+                guard_authority_pk: [0x22; 32],
+                rolling_window_accumulator: [0x33; 32],
+                signing_key_id: [0x44; 32],
+                policy_revision: 1,
+                message_digest: [0; 32],
+                signing_context_digest: [0x55; 32],
+                session_id: [i + 0x81; 32],
+                quorum_ids: alloc::vec![1, 2],
+            };
+            guards[0]
+                .authenticate_initiated_intent(&policy, &mut valid_intent)
+                .unwrap();
+            pool.stage_authenticated_intent(&policy, &guards[0], &valid_intent, 10, 30)
+                .unwrap();
+            pool.complete_intent(&valid_intent.nonce, &valid_intent.session_id);
+            pool.stage_authenticated_intent(&policy, &guards[1], &valid_intent, 10, 30)
+                .unwrap();
+        }
+        assert_eq!(pool.len(), 4);
+        // Advance past `10 + 30 = 40`: all 4 abandoned pending proposals expire without touching `guards[1]`.
+        assert_eq!(pool.evict_expired(40), 4);
+        assert!(pool.is_empty());
+        assert!(!guards[1].is_nonce_burned(&[1; 32]));
+    }
+
+    #[test]
+    fn cust06_monotone_replay_floor_compacts_without_unburning_and_survives_checkpoint() {
+        let mut guards = trusted_dealer_setup_for_testing([0x99; 32], &[1, 2]);
+        let guard = &mut guards[0];
+
+        // Fill all 256 slots with monotone nonces `1..=256`, plus keep a high random nonce `[0xFF; 32]`.
+        for i in 1..=255u32 {
+            let mut n = [0u8; 32];
+            n[..4].copy_from_slice(&i.to_be_bytes());
+            guard
+                .record_approved_intent(100_000, i as u128, n, n)
+                .unwrap();
+        }
+        guard
+            .record_approved_intent(100_000, 256, [0xFF; 32], [0xFF; 32])
+            .unwrap();
+
+        // Compact monotone floor up to `200`: nonces `<= 200` remain permanently burned via floor,
+        // nonces `201..=255` and `[0xFF; 32]` remain explicitly retained, and 200 slots are freed!
+        let mut floor200 = [0u8; 32];
+        floor200[..4].copy_from_slice(&200u32.to_be_bytes());
+        guard
+            .compact_monotone_replay_floor(floor200, floor200)
+            .unwrap();
+
+        // Regressing the floor is rejected.
+        let mut floor199 = [0u8; 32];
+        floor199[..4].copy_from_slice(&199u32.to_be_bytes());
+        assert_eq!(
+            guard.compact_monotone_replay_floor(floor199, floor199),
+            Err(PolicyViolation::IntentBindingMismatch)
+        );
+
+        // Floored nonces (`1`, `200`) AND retained high nonces (`[0xFF; 32]`) CANNOT replay!
+        let mut n1 = [0u8; 32];
+        n1[..4].copy_from_slice(&1u32.to_be_bytes());
+        assert!(guard.is_nonce_burned(&n1));
+        assert!(guard.is_nonce_burned(&floor200));
+        assert!(guard.is_nonce_burned(&[0xFF; 32]));
+        assert_eq!(
+            guard.record_approved_intent(100_000, 257, n1, n1),
+            Err(PolicyViolation::DuplicateIntentNonce)
+        );
+
+        // Subsequent new intents (> 256 total in the same window!) succeed AND preserve `min_nonce_watermark`.
+        for i in 256..=320u32 {
+            let mut n = [0u8; 32];
+            n[..4].copy_from_slice(&i.to_be_bytes());
+            guard
+                .record_approved_intent(100_000, (i + 10) as u128, n, n)
+                .unwrap();
+        }
+        assert!(guard.is_nonce_burned(&n1));
+
+        // Durable checkpoint export + restore preserves the monotone floor and blocks floored replays.
+        let snap = guard.export_durable_checkpoint(&[0xAB; 32], 11);
+        let mut fresh_guards = trusted_dealer_setup_for_testing([0x99; 32], &[1, 2]);
+        fresh_guards[0]
+            .restore_from_durable_checkpoint(&snap, &[0xAB; 32], 11)
+            .unwrap();
+        assert!(fresh_guards[0].is_nonce_burned(&n1));
+        assert!(fresh_guards[0].is_nonce_burned(&floor200));
+        assert!(fresh_guards[0].is_nonce_burned(&[0xFF; 32]));
     }
 }
