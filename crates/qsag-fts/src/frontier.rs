@@ -848,6 +848,51 @@ fn squeeze_target_index(
     val
 }
 
+/// Eight equal-shape framed cSHAKE messages. Every length and address is public;
+/// the backend packs these states into KeccakState8x on AVX-512 hosts.
+fn framed_hash8<B: AcceleratorBackend, const F: usize>(
+    tag: &[u8], frames: [[&[u8]; F]; 8], out: &mut [[u8; 32]; 8], accel: &B,
+) {
+    const RATE: usize = 136;
+    assert!(tag.len() < 32);
+    let mut messages = [[0u8; 512]; 8];
+    let mut len = 0;
+    for (message, fields) in messages.iter_mut().zip(frames) {
+        // bytepad(encode_string("") || encode_string(tag), 136).
+        message[..6].copy_from_slice(&[1, 136, 1, 0, 1, (tag.len() * 8) as u8]);
+        message[6..6 + tag.len()].copy_from_slice(tag);
+        let mut cursor = RATE;
+        message[cursor..cursor + 8].copy_from_slice(&(F as u64).to_le_bytes());
+        cursor += 8;
+        for field in fields {
+            message[cursor..cursor + 8].copy_from_slice(&(field.len() as u64).to_le_bytes());
+            cursor += 8;
+            message[cursor..cursor + field.len()].copy_from_slice(field);
+            cursor += field.len();
+        }
+        if len != 0 { assert_eq!(len, cursor); }
+        len = cursor;
+        message[cursor] ^= 0x04;
+        message[(cursor / RATE + 1) * RATE - 1] ^= 0x80;
+    }
+    let mut states = [[0u64; 25]; 8];
+    for block in 0..=len / RATE {
+        for (state, message) in states.iter_mut().zip(&messages) {
+            for (word, bytes) in state.iter_mut().zip(message[block * RATE..][..RATE].chunks_exact(8)) {
+                *word ^= u64::from_le_bytes(bytes.try_into().unwrap());
+            }
+        }
+        accel.batch_keccak_f1600(&mut states);
+    }
+    for (output, state) in out.iter_mut().zip(&states) {
+        for (bytes, word) in output.chunks_exact_mut(8).zip(state) {
+            bytes.copy_from_slice(&word.to_le_bytes());
+        }
+    }
+    for message in &mut messages { ct_zeroize_bytes(message); }
+    for state in &mut states { qsag_accel::ct::ct_zeroize_u64s(state); }
+}
+
 impl FrontierFtsSigningKey {
     /// Generate a `FrontierSumFts` keypair from `(sk_seed, sk_prf, pk_seed)`.
     /// When `cache_tree == true`, caches chain values so signing runs in `< 1 ms` with constant-time
@@ -858,7 +903,7 @@ impl FrontierFtsSigningKey {
         sk_prf: [u8; 32],
         pk_seed: [u8; 32],
         cache_tree: bool,
-        _accel: &B,
+        accel: &B,
     ) -> Self {
         let p = profile.params();
         let pid = profile.pid_bytes();
@@ -875,38 +920,48 @@ impl FrontierFtsSigningKey {
             None
         };
 
-        let first_leaf = 1usize << h;
-        let mut cur = [0u8; 32];
-        let mut next = [0u8; 32];
-
-        for v in (2..total_nodes).rev() {
-            if v >= first_leaf {
-                fts_leaf_start(&pid, &pk_seed, &sk_seed, v as u32, &mut cur[..n]);
-            } else {
-                let l_off = (2 * v) * n;
-                let r_off = (2 * v + 1) * n;
-                fts_merge(
-                    &pid,
-                    &pk_seed,
-                    v as u32,
-                    &endpoints[l_off..l_off + n],
-                    &endpoints[r_off..r_off + n],
-                    &mut cur[..n],
-                );
-            }
-            if let Some(ref mut cbuf) = cache {
-                let off = (v * w) * n;
-                cbuf[off..off + n].copy_from_slice(&cur[..n]);
-            }
-            for step in 0..(w - 1) {
-                fts_chain_step(&pid, &pk_seed, v as u32, step, &cur[..n], &mut next[..n]);
-                cur[..n].copy_from_slice(&next[..n]);
-                if let Some(ref mut cbuf) = cache {
-                    let off = (v * w + step + 1) * n;
-                    cbuf[off..off + n].copy_from_slice(&cur[..n]);
+        // Finish every level before its parents, batching eight independent chains.
+        let mut cur = [[0u8; 32]; 8];
+        for depth in (1..=h).rev() {
+            let begin = 1usize << depth;
+            let end = 1usize << (depth + 1);
+            for base in (begin..end).step_by(8) {
+                let count = (end - base).min(8);
+                // Dummy lanes duplicate a valid node; they never enter the tree.
+                let nodes: [usize; 8] = core::array::from_fn(|i| base + i.min(count - 1));
+                let indices = nodes.map(|v| (v as u64).to_be_bytes());
+                if depth == h {
+                    framed_hash8(TAG_LEAF, core::array::from_fn(|i|
+                        [pid.as_slice(), &pk_seed, &indices[i], &sk_seed]), &mut cur, accel);
+                } else {
+                    framed_hash8(TAG_MERGE, core::array::from_fn(|i| {
+                        let v = nodes[i];
+                        [pid.as_slice(), &pk_seed, &indices[i],
+                         &endpoints[2 * v * n..(2 * v + 1) * n],
+                         &endpoints[(2 * v + 1) * n..(2 * v + 2) * n]]
+                    }), &mut cur, accel);
+                }
+                for step in 0..w {
+                    if let Some(ref mut cbuf) = cache {
+                        for i in 0..count {
+                            let off = (nodes[i] * w + step) * n;
+                            cbuf[off..off + n].copy_from_slice(&cur[i][..n]);
+                        }
+                    }
+                    if step + 1 < w {
+                        let j_be = (step as u64).to_be_bytes();
+                        let mut next = [[0u8; 32]; 8];
+                        framed_hash8(TAG_CHAIN, core::array::from_fn(|i|
+                            [pid.as_slice(), &pk_seed, &indices[i], &j_be, &cur[i][..n]]),
+                            &mut next, accel);
+                        cur = next;
+                        for lane in &mut next { ct_zeroize_bytes(lane); }
+                    }
+                }
+                for i in 0..count {
+                    endpoints[nodes[i] * n..(nodes[i] + 1) * n].copy_from_slice(&cur[i][..n]);
                 }
             }
-            endpoints[v * n..(v + 1) * n].copy_from_slice(&cur[..n]);
         }
 
         let mut root = vec![0u8; n];
@@ -919,8 +974,7 @@ impl FrontierFtsSigningKey {
             &mut root,
         );
 
-        ct_zeroize_bytes(&mut cur);
-        ct_zeroize_bytes(&mut next);
+        for lane in &mut cur { ct_zeroize_bytes(lane); }
         ct_zeroize_bytes(&mut endpoints);
 
         let pk = FrontierFtsPublicKey {
