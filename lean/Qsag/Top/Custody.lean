@@ -13,7 +13,11 @@ complete-mediation, and 4-layer ELF-to-Ideal simulation proofs through `Qsag.Spe
    execution + policy-mediation provenance / `prodEufCmaWin` reduction (`SeparatedCustodyUcBridge`,
    `CompleteMediationBoundary`, `SeparatedCustodyCollision`), and
 4. Crash-consistent POSIX atomic `replaceAtomic` + external monotone anchor coherence with
-   `WalLatchState` and `CompleteMediationBoundary` watermarks (`PosixCrashWal`, `SeparatedCustodyUcBridge`).
+   `WalLatchState` and `CompleteMediationBoundary` watermarks (`PosixCrashWal`, `SeparatedCustodyUcBridge`),
+5. Lockstep `Spec.Refines` of the certificate-quorum coordinator (`certCustodyMachine`: custodian
+   certificates bound to `(deploymentId, intent)`, adversarial certificate submission, adaptive
+   corruption, shared `Spec.CustodyLedger`) into `Spec.idealCustodyMachine`, conditional on the named
+   certificate-layer obligations `CustodyCertLayer` (signing correctness) and `CustodyUnforgeable`.
 -/
 
 public import Qsag.Spec.Primitives
@@ -501,6 +505,502 @@ theorem gate_batches_and_quorum_switching_disjointness
    Qsag.qsB_signature_quorum_switching_disjoint H masterSeed height s₀ s₁ s₂ c₁ c₂ ds₁ ds₂ path₁ path₂
      tape₁ tape₂ pts₁ ws₁ pts₂ ws₂ sig₁ sig₂ hAlloc₁ hAlloc₂⟩
 
+/-! ## 7. Certificate-Quorum Coordinator Refines `Spec.IdealCustody` -/
+
+section CertCustody
+
+open Qsag.Spec
+
+/-- Certificate layer shared by the custodians and the coordinator. `claim c` is the permit a
+    certificate asserts (party, deployment, full intent), `valid c` is the coordinator's
+    verification, and `issue p dep i` is party `p`'s signing of `(dep, i)` under its own key.
+    The two laws are correctness of honest signing. -/
+structure CustodyCertLayer (Cert : Type) where
+  claim : Cert → CustodyApproval
+  valid : Cert → Bool
+  issue : Nat → Nat → CustodyIntent → Cert
+  issue_valid : ∀ (p dep : Nat) (i : CustodyIntent), valid (issue p dep i) = true
+  issue_claim : ∀ (p dep : Nat) (i : CustodyIntent),
+    claim (issue p dep i) = CustodyApproval.mk p dep i
+
+/-- Coordinator state: the shared ledger, the corruption set, and the pool of certificates
+    delivered to the coordinator. The Boolean tag records the port a certificate arrived through
+    (`true`: the issuing custodian's own port). The coordinator's quorum check never reads it. -/
+structure CertCustodyState (PK D Sig Cert : Type) where
+  ledger : CustodyLedger PK D Sig
+  corruptParties : List Nat
+  pool : List (Bool × Cert)
+
+def CertCustodyState.init {PK D Sig Cert : Type}
+    (dep : Nat) (pk : PK) (quorum : CustodyQuorumProfile) : CertCustodyState PK D Sig Cert :=
+  { ledger := (IdealCustodyState.init (D := D) (Sig := Sig) dep pk quorum).ledger
+    corruptParties := []
+    pool := [] }
+
+/-- Permits asserted by the pooled certificates that arrived through ports tagged `tag`. -/
+def certRecords {Cert : Type} (L : CustodyCertLayer Cert) (tag : Bool)
+    (pool : List (Bool × Cert)) : List CustodyApproval :=
+  (pool.filter (fun tc => tc.1 == tag)).map (fun tc => L.claim tc.2)
+
+/-- The coordinator's per-party check: some pooled certificate verifies and asserts exactly
+    `(p, dep, i)`. -/
+def certVoted {Cert : Type} (L : CustodyCertLayer Cert) (pool : List (Bool × Cert))
+    (p dep : Nat) (i : CustodyIntent) : Bool :=
+  pool.any (fun tc => L.valid tc.2 && decide (L.claim tc.2 = CustodyApproval.mk p dep i))
+
+/-- Enrolled parties with a verifying certificate for exactly `(dep, i)`, each counted once. -/
+def certApprovers {Cert : Type} (L : CustodyCertLayer Cert) (numParties : Nat)
+    (pool : List (Bool × Cert)) (dep : Nat) (i : CustodyIntent) : List Nat :=
+  (List.range numParties).filter (fun p => certVoted L pool p dep i)
+
+/-- The certificate the adversary submits for `p`: with `p`'s key once `p` is corrupted, and its
+    forgery attempt `forge` otherwise. -/
+def certAdvCert {PK D Sig Cert : Type} (L : CustodyCertLayer Cert)
+    (forge : CertCustodyState PK D Sig Cert → Nat → Nat → CustodyIntent → Cert)
+    (c : CertCustodyState PK D Sig Cert) (p dep : Nat) (i : CustodyIntent) : Cert :=
+  if p ∈ c.corruptParties then L.issue p dep i else forge c p dep i
+
+/-- Transition of the certificate-quorum coordinator. Custodians issue certificates, the adversary
+    submits certificates that the coordinator accepts whenever they verify for the asserted
+    permit, corruption hands over a party, and signing runs the shared ledger transition on the
+    number of parties with a verifying certificate for exactly `(deploymentId, intent)`. -/
+def certCustodyStep {PK D Sig Cert : Type} [DecidableEq D] (L : CustodyCertLayer Cert)
+    (forge : CertCustodyState PK D Sig Cert → Nat → Nat → CustodyIntent → Cert)
+    (S : CustodyDigestScheme D) (oracleSign : D → Sig)
+    (c : CertCustodyState PK D Sig Cert) (inp : CustodyInput) :
+    Option (CertCustodyState PK D Sig Cert × CustodyOutcome Sig) :=
+  match inp with
+  | .approve p dep i =>
+    if p < c.ledger.quorum.numParties ∧ p ∉ c.corruptParties ∧ dep = c.ledger.deploymentId then
+      some ({ c with pool := (true, L.issue p dep i) :: c.pool }, .approvalRecorded)
+    else none
+  | .advApprove p dep i =>
+    if dep = c.ledger.deploymentId ∧ L.valid (certAdvCert L forge c p dep i) = true ∧
+        L.claim (certAdvCert L forge c p dep i) = CustodyApproval.mk p dep i then
+      some ({ c with pool := (false, certAdvCert L forge c p dep i) :: c.pool }, .approvalRecorded)
+    else none
+  | .corrupt p =>
+    if p < c.ledger.quorum.numParties ∧ p ∉ c.corruptParties ∧
+        c.corruptParties.length + 1 < c.ledger.quorum.threshold then
+      some ({ c with corruptParties := p :: c.corruptParties },
+            .corrupted (custodyRevealed (certRecords L true c.pool) p))
+    else none
+  | .sign dep i ab =>
+    (custodyLedgerSign S oracleSign c.ledger
+      (certApprovers L c.ledger.quorum.numParties c.pool c.ledger.deploymentId i).length
+      dep i ab).map (fun r => ({ c with ledger := r.1 }, r.2))
+
+def certCustodyMachine {PK D Sig Cert : Type} [DecidableEq D] (L : CustodyCertLayer Cert)
+    (forge : CertCustodyState PK D Sig Cert → Nat → Nat → CustodyIntent → Cert)
+    (S : CustodyDigestScheme D) (oracleSign : D → Sig)
+    (dep₀ : Nat) (pk₀ : PK) (quorum₀ : CustodyQuorumProfile) :
+    Qsag.Spec.Machine (CertCustodyState PK D Sig Cert) CustodyInput (CustodyOutcome Sig) where
+  Init c := c = CertCustodyState.init dep₀ pk₀ quorum₀
+  step := certCustodyStep L forge S oracleSign
+  errStep c _ := c
+
+/-- Abstraction to the ideal state: a pooled certificate becomes the permit it asserts. -/
+def certCustodyAbs {PK D Sig Cert : Type} (L : CustodyCertLayer Cert)
+    (c : CertCustodyState PK D Sig Cert) : IdealCustodyState PK D Sig :=
+  { ledger := c.ledger
+    corruptParties := c.corruptParties
+    honestApprovals := certRecords L true c.pool
+    corruptApprovals := certRecords L false c.pool }
+
+/-- **Obligation of the certificate layer (unforgeability).** Whatever the coordinator state, the
+    adversary's certificate for a party it has not corrupted does not both verify and assert that
+    party's permit. For a signature-based layer this is existential unforgeability of the
+    custodians' signatures, taken as an exact (zero-advantage) property. -/
+structure CustodyUnforgeable {PK D Sig Cert : Type} (L : CustodyCertLayer Cert)
+    (forge : CertCustodyState PK D Sig Cert → Nat → Nat → CustodyIntent → Cert) : Prop where
+  honest_not_forged : ∀ (c : CertCustodyState PK D Sig Cert) (p dep : Nat) (i : CustodyIntent),
+    (∀ tc ∈ c.pool, L.valid tc.2 = true) → p ∉ c.corruptParties →
+    ¬ (L.valid (forge c p dep i) = true ∧ L.claim (forge c p dep i) = CustodyApproval.mk p dep i)
+
+/-- A certificate layer whose certificates are the permits themselves; `none` never verifies. -/
+def transparentCertLayer : CustodyCertLayer (Option CustodyApproval) where
+  claim c := c.getD (CustodyApproval.mk 0 0 ⟨0, 0, 0, 0, []⟩)
+  valid c := c.isSome
+  issue p dep i := some (CustodyApproval.mk p dep i)
+  issue_valid _ _ _ := rfl
+  issue_claim _ _ _ := rfl
+
+/-- The unforgeability obligation is satisfiable. -/
+theorem transparentCertLayer_unforgeable {PK D Sig : Type} :
+    CustodyUnforgeable (PK := PK) (D := D) (Sig := Sig) transparentCertLayer
+      (fun _ _ _ _ => none) :=
+  ⟨fun _ _ _ _ _ _ h => Bool.noConfusion (show false = true from h.1)⟩
+
+private theorem cert_if_pos {α : Type} {p : Prop} [Decidable p] (hp : p) (a b : α) :
+    (if p then a else b) = a := by
+  cases ‹Decidable p› with
+  | isTrue _ => rfl
+  | isFalse hn => exact False.elim (hn hp)
+
+private theorem cert_if_neg {α : Type} {p : Prop} [Decidable p] (hnp : ¬ p) (a b : α) :
+    (if p then a else b) = b := by
+  cases ‹Decidable p› with
+  | isTrue hp => exact False.elim (hnp hp)
+  | isFalse _ => rfl
+
+private theorem cert_bool_eq_of_iff : ∀ {a b : Bool}, (a = true ↔ b = true) → a = b
+  | true, true, _ => rfl
+  | false, false, _ => rfl
+  | true, false, h => (h.mp rfl).symm
+  | false, true, h => h.mpr rfl
+
+private theorem cert_filter_congr {α : Type} {p q : α → Bool} :
+    ∀ (l : List α), (∀ x ∈ l, p x = q x) → l.filter p = l.filter q
+  | [], _ => rfl
+  | x :: xs, h => by
+    have hx := h x List.mem_cons_self
+    have ih := cert_filter_congr xs (fun y hy => h y (List.mem_cons_of_mem _ hy))
+    rw [List.filter_cons, List.filter_cons, hx, ih]
+
+/-- With every pooled certificate verifying, the coordinator's per-party check agrees with
+    permit membership in the abstracted state. -/
+private theorem certVoted_iff {Cert : Type} (L : CustodyCertLayer Cert)
+    {pool : List (Bool × Cert)} (hValid : ∀ tc ∈ pool, L.valid tc.2 = true)
+    (p dep : Nat) (i : CustodyIntent) :
+    certVoted L pool p dep i = true ↔
+      (CustodyApproval.mk p dep i ∈ certRecords L true pool ∨
+        CustodyApproval.mk p dep i ∈ certRecords L false pool) := by
+  unfold certVoted certRecords
+  constructor
+  · intro h
+    obtain ⟨tc, hm, hp⟩ := List.any_eq_true.mp h
+    obtain ⟨_, hc⟩ := Bool.and_eq_true_iff.mp hp
+    have hcl : L.claim tc.2 = CustodyApproval.mk p dep i := of_decide_eq_true hc
+    cases hb : tc.1 with
+    | true =>
+      exact .inl (List.mem_map.mpr ⟨tc, List.mem_filter.mpr ⟨hm, beq_iff_eq.mpr hb⟩, hcl⟩)
+    | false =>
+      exact .inr (List.mem_map.mpr ⟨tc, List.mem_filter.mpr ⟨hm, beq_iff_eq.mpr hb⟩, hcl⟩)
+  · intro h
+    have key : ∀ t : Bool,
+        CustodyApproval.mk p dep i ∈
+          (pool.filter (fun tc => tc.1 == t)).map (fun tc => L.claim tc.2) →
+        pool.any (fun tc =>
+          L.valid tc.2 && decide (L.claim tc.2 = CustodyApproval.mk p dep i)) = true := by
+      intro t ht
+      obtain ⟨tc, hf, hcl⟩ := List.mem_map.mp ht
+      obtain ⟨hm, _⟩ := List.mem_filter.mp hf
+      exact List.any_eq_true.mpr
+        ⟨tc, hm, Bool.and_eq_true_iff.mpr ⟨hValid tc hm, decide_eq_true hcl⟩⟩
+    rcases h with h | h
+    · exact key true h
+    · exact key false h
+
+private theorem certApprovers_eq {Cert : Type} (L : CustodyCertLayer Cert)
+    {pool : List (Bool × Cert)} (hValid : ∀ tc ∈ pool, L.valid tc.2 = true)
+    (n dep : Nat) (i : CustodyIntent) :
+    certApprovers L n pool dep i =
+      custodyApprovers n (certRecords L true pool) (certRecords L false pool) dep i := by
+  unfold certApprovers custodyApprovers
+  apply cert_filter_congr
+  intro p _
+  exact cert_bool_eq_of_iff ((certVoted_iff L hValid p dep i).trans
+    ⟨fun h => Bool.or_eq_true_iff.mpr (h.imp decide_eq_true decide_eq_true),
+     fun h => (Bool.or_eq_true_iff.mp h).imp of_decide_eq_true of_decide_eq_true⟩)
+
+section Sim
+
+variable {PK D Sig Cert : Type} [DecidableEq D]
+variable {L : CustodyCertLayer Cert}
+variable {forge : CertCustodyState PK D Sig Cert → Nat → Nat → CustodyIntent → Cert}
+variable {S : CustodyDigestScheme D} {oracleSign : D → Sig}
+
+/-- Accepted coordinator steps keep every pooled certificate verifying. -/
+private theorem certCustodyStep_valid
+    {c c' : CertCustodyState PK D Sig Cert} {inp : CustodyInput} {out : CustodyOutcome Sig}
+    (hValid : ∀ tc ∈ c.pool, L.valid tc.2 = true)
+    (h : certCustodyStep L forge S oracleSign c inp = some (c', out)) :
+    ∀ tc ∈ c'.pool, L.valid tc.2 = true := by
+  cases inp with
+  | approve p dep i =>
+    unfold certCustodyStep at h
+    dsimp only at h
+    by_cases hg : p < c.ledger.quorum.numParties ∧ p ∉ c.corruptParties ∧
+        dep = c.ledger.deploymentId
+    · rw [cert_if_pos hg] at h
+      cases h
+      intro tc htc
+      rcases List.mem_cons.mp htc with hEq | hTail
+      · rw [hEq]
+        exact L.issue_valid p dep i
+      · exact hValid tc hTail
+    · rw [cert_if_neg hg] at h
+      cases h
+  | advApprove p dep i =>
+    unfold certCustodyStep at h
+    dsimp only at h
+    by_cases hg : dep = c.ledger.deploymentId ∧ L.valid (certAdvCert L forge c p dep i) = true ∧
+        L.claim (certAdvCert L forge c p dep i) = CustodyApproval.mk p dep i
+    · rw [cert_if_pos hg] at h
+      cases h
+      intro tc htc
+      rcases List.mem_cons.mp htc with hEq | hTail
+      · rw [hEq]
+        exact hg.2.1
+      · exact hValid tc hTail
+    · rw [cert_if_neg hg] at h
+      cases h
+  | corrupt p =>
+    unfold certCustodyStep at h
+    dsimp only at h
+    by_cases hg : p < c.ledger.quorum.numParties ∧ p ∉ c.corruptParties ∧
+        c.corruptParties.length + 1 < c.ledger.quorum.threshold
+    · rw [cert_if_pos hg] at h
+      cases h
+      exact hValid
+    · rw [cert_if_neg hg] at h
+      cases h
+  | sign dep i ab =>
+    unfold certCustodyStep at h
+    dsimp only at h
+    cases hL : custodyLedgerSign S oracleSign c.ledger
+        (certApprovers L c.ledger.quorum.numParties c.pool c.ledger.deploymentId i).length
+        dep i ab with
+    | none =>
+      rw [hL] at h
+      cases h
+    | some r =>
+      rw [hL] at h
+      cases h
+      exact hValid
+
+/-- Lockstep: under unforgeability, a coordinator step and the ideal step on the abstracted state
+    accept the same inputs with the same outcome and commuting successor states. -/
+private theorem certCustodyStep_abs (hUnf : CustodyUnforgeable L forge)
+    (c : CertCustodyState PK D Sig Cert) (inp : CustodyInput)
+    (hValid : ∀ tc ∈ c.pool, L.valid tc.2 = true) :
+    (certCustodyStep L forge S oracleSign c inp).map (fun r => (certCustodyAbs L r.1, r.2)) =
+      idealCustodyStep S oracleSign (certCustodyAbs L c) inp := by
+  cases inp with
+  | approve p dep i =>
+    by_cases hg : p < c.ledger.quorum.numParties ∧ p ∉ c.corruptParties ∧
+        dep = c.ledger.deploymentId
+    · have hC : certCustodyStep L forge S oracleSign c (.approve p dep i) =
+          some ({ c with pool := (true, L.issue p dep i) :: c.pool }, .approvalRecorded) := by
+        unfold certCustodyStep
+        dsimp only
+        exact cert_if_pos hg _ _
+      have hA : idealCustodyStep S oracleSign (certCustodyAbs L c) (.approve p dep i) =
+          some ({ certCustodyAbs L c with
+                  honestApprovals :=
+                    CustodyApproval.mk p dep i :: (certCustodyAbs L c).honestApprovals },
+                .approvalRecorded) := by
+        unfold idealCustodyStep
+        dsimp only
+        exact cert_if_pos hg _ _
+      rw [hC, hA]
+      exact congrArg
+        (fun a => some ((⟨c.ledger, c.corruptParties, a :: certRecords L true c.pool,
+          certRecords L false c.pool⟩ : IdealCustodyState PK D Sig),
+          (CustodyOutcome.approvalRecorded : CustodyOutcome Sig)))
+        (L.issue_claim p dep i)
+    · have hC : certCustodyStep L forge S oracleSign c (.approve p dep i) = none := by
+        unfold certCustodyStep
+        dsimp only
+        exact cert_if_neg hg _ _
+      have hA : idealCustodyStep S oracleSign (certCustodyAbs L c) (.approve p dep i) = none := by
+        unfold idealCustodyStep
+        dsimp only
+        exact cert_if_neg hg _ _
+      rw [hC, hA]
+      rfl
+  | advApprove p dep i =>
+    by_cases hp : p ∈ c.corruptParties
+    · have hCert : certAdvCert L forge c p dep i = L.issue p dep i := cert_if_pos hp _ _
+      by_cases hd : dep = c.ledger.deploymentId
+      · have hgC : dep = c.ledger.deploymentId ∧
+            L.valid (certAdvCert L forge c p dep i) = true ∧
+            L.claim (certAdvCert L forge c p dep i) = CustodyApproval.mk p dep i := by
+          rw [hCert]
+          exact ⟨hd, L.issue_valid p dep i, L.issue_claim p dep i⟩
+        have hC : certCustodyStep L forge S oracleSign c (.advApprove p dep i) =
+            some ({ c with pool := (false, certAdvCert L forge c p dep i) :: c.pool },
+                  .approvalRecorded) := by
+          unfold certCustodyStep
+          dsimp only
+          exact cert_if_pos hgC _ _
+        have hA : idealCustodyStep S oracleSign (certCustodyAbs L c) (.advApprove p dep i) =
+            some ({ certCustodyAbs L c with
+                    corruptApprovals :=
+                      CustodyApproval.mk p dep i :: (certCustodyAbs L c).corruptApprovals },
+                  .approvalRecorded) := by
+          unfold idealCustodyStep
+          dsimp only
+          exact cert_if_pos (And.intro hp hd) _ _
+        rw [hC, hA]
+        exact congrArg
+          (fun a => some ((⟨c.ledger, c.corruptParties, certRecords L true c.pool,
+            a :: certRecords L false c.pool⟩ : IdealCustodyState PK D Sig),
+            (CustodyOutcome.approvalRecorded : CustodyOutcome Sig)))
+          hgC.2.2
+      · have hC : certCustodyStep L forge S oracleSign c (.advApprove p dep i) = none := by
+          unfold certCustodyStep
+          dsimp only
+          exact cert_if_neg (fun h => hd h.1) _ _
+        have hA : idealCustodyStep S oracleSign (certCustodyAbs L c) (.advApprove p dep i) =
+            none := by
+          unfold idealCustodyStep
+          dsimp only
+          exact cert_if_neg (fun h => hd h.2) _ _
+        rw [hC, hA]
+        rfl
+    · have hCert : certAdvCert L forge c p dep i = forge c p dep i := cert_if_neg hp _ _
+      have hC : certCustodyStep L forge S oracleSign c (.advApprove p dep i) = none := by
+        unfold certCustodyStep
+        dsimp only
+        refine cert_if_neg (fun h => ?_) _ _
+        rw [hCert] at h
+        exact hUnf.honest_not_forged c p dep i hValid hp h.2
+      have hA : idealCustodyStep S oracleSign (certCustodyAbs L c) (.advApprove p dep i) =
+          none := by
+        unfold idealCustodyStep
+        dsimp only
+        exact cert_if_neg (fun h => hp h.1) _ _
+      rw [hC, hA]
+      rfl
+  | corrupt p =>
+    by_cases hg : p < c.ledger.quorum.numParties ∧ p ∉ c.corruptParties ∧
+        c.corruptParties.length + 1 < c.ledger.quorum.threshold
+    · have hC : certCustodyStep L forge S oracleSign c (.corrupt p) =
+          some ({ c with corruptParties := p :: c.corruptParties },
+                .corrupted (custodyRevealed (certRecords L true c.pool) p)) := by
+        unfold certCustodyStep
+        dsimp only
+        exact cert_if_pos hg _ _
+      have hA : idealCustodyStep S oracleSign (certCustodyAbs L c) (.corrupt p) =
+          some ({ certCustodyAbs L c with corruptParties := p :: c.corruptParties },
+                .corrupted (custodyRevealed (certRecords L true c.pool) p)) := by
+        unfold idealCustodyStep
+        dsimp only
+        exact cert_if_pos hg _ _
+      rw [hC, hA]
+      rfl
+    · have hC : certCustodyStep L forge S oracleSign c (.corrupt p) = none := by
+        unfold certCustodyStep
+        dsimp only
+        exact cert_if_neg hg _ _
+      have hA : idealCustodyStep S oracleSign (certCustodyAbs L c) (.corrupt p) = none := by
+        unfold idealCustodyStep
+        dsimp only
+        exact cert_if_neg hg _ _
+      rw [hC, hA]
+      rfl
+  | sign dep i ab =>
+    have hN := certApprovers_eq L hValid c.ledger.quorum.numParties c.ledger.deploymentId i
+    change Option.map _ (Option.map _ (custodyLedgerSign S oracleSign c.ledger
+        (certApprovers L c.ledger.quorum.numParties c.pool c.ledger.deploymentId i).length
+        dep i ab)) =
+      Option.map _ (custodyLedgerSign S oracleSign c.ledger
+        (custodyApprovers c.ledger.quorum.numParties (certRecords L true c.pool)
+          (certRecords L false c.pool) c.ledger.deploymentId i).length dep i ab)
+    rw [hN]
+    cases custodyLedgerSign S oracleSign c.ledger
+        (custodyApprovers c.ledger.quorum.numParties (certRecords L true c.pool)
+          (certRecords L false c.pool) c.ledger.deploymentId i).length dep i ab with
+    | none => rfl
+    | some r => rfl
+
+/-- **Certificate-Quorum Coordinator Refinement (`certCustody_refines_idealCustody`)**: under the
+    certificate layer's signing-correctness laws and the unforgeability obligation, the coordinator
+    that counts verifying certificates for exactly `(deploymentId, intent)` refines
+    `Spec.idealCustodyMachine` in lockstep (`Spec.Refines`), corruption steps included. -/
+def certCustody_refines_idealCustody (L : CustodyCertLayer Cert)
+    (forge : CertCustodyState PK D Sig Cert → Nat → Nat → CustodyIntent → Cert)
+    (hUnf : CustodyUnforgeable L forge)
+    (S : CustodyDigestScheme D) (oracleSign : D → Sig)
+    (dep₀ : Nat) (pk₀ : PK) (quorum₀ : CustodyQuorumProfile) :
+    certCustodyMachine L forge S oracleSign dep₀ pk₀ quorum₀ ⊑
+      idealCustodyMachine S oracleSign dep₀ pk₀ quorum₀ :=
+  Qsag.Spec.LockstepSim.toRefines
+    { Inv := fun c => ∀ tc ∈ c.pool, L.valid tc.2 = true
+      abs := certCustodyAbs L
+      init_inv := fun {c₀} hInit => by
+        have h0 : c₀ = CertCustodyState.init dep₀ pk₀ quorum₀ := hInit
+        subst h0
+        exact ⟨fun _ h => False.elim (List.not_mem_nil h), rfl⟩
+      step_eq := fun {c} inp hI => by
+        have hm := certCustodyStep_abs (S := S) (oracleSign := oracleSign) hUnf c inp hI
+        cases hC : (certCustodyMachine L forge S oracleSign dep₀ pk₀ quorum₀).step c inp with
+        | none =>
+          have hC' : certCustodyStep L forge S oracleSign c inp = none := hC
+          rw [hC'] at hm
+          exact ⟨hI, hm.symm, rfl⟩
+        | some r =>
+          rcases r with ⟨c', out⟩
+          have hC' : certCustodyStep L forge S oracleSign c inp = some (c', out) := hC
+          rw [hC'] at hm
+          exact ⟨certCustodyStep_valid hI hC', hm.symm⟩ }
+
+/-- Every coordinator trace from an invariant state is an ideal trace between the abstractions. -/
+private theorem certCustody_validTrace_abs (hUnf : CustodyUnforgeable L forge)
+    {dep₀ : Nat} {pk₀ : PK} {quorum₀ : CustodyQuorumProfile}
+    {c c' : CertCustodyState PK D Sig Cert} {tr : List (CustodyInput × CustodyOutcome Sig)}
+    (hValid : ∀ tc ∈ c.pool, L.valid tc.2 = true)
+    (hTr : (certCustodyMachine L forge S oracleSign dep₀ pk₀ quorum₀).ValidTrace c tr c') :
+    (idealCustodyMachine S oracleSign dep₀ pk₀ quorum₀).ValidTrace
+      (certCustodyAbs L c) tr (certCustodyAbs L c') := by
+  induction hTr with
+  | nil _ => exact .nil _
+  | @accept s s' _ inp out _ hStep _ ih =>
+    have hStep' : certCustodyStep L forge S oracleSign s inp = some (s', out) := hStep
+    have hm := certCustodyStep_abs (S := S) (oracleSign := oracleSign) hUnf s inp hValid
+    rw [hStep'] at hm
+    exact .accept hm.symm (ih (certCustodyStep_valid hValid hStep'))
+  | @reject s _ inp _ hNone _ ih =>
+    have hNone' : certCustodyStep L forge S oracleSign s inp = none := hNone
+    have hm := certCustodyStep_abs (S := S) (oracleSign := oracleSign) hUnf s inp hValid
+    rw [hNone'] at hm
+    exact .reject inp hm.symm (ih hValid)
+
+/-- **Honest authorization of every coordinator signature.** In any coordinator trace, a released
+    signature is the oracle's signature on `digest dep₀ i`, and the trace contains custodian `p`'s
+    own accepted `.approve p dep₀ i`. -/
+theorem certCustody_trace_release_honestly_approved (hUnf : CustodyUnforgeable L forge)
+    {dep₀ : Nat} {pk₀ : PK} {quorum₀ : CustodyQuorumProfile}
+    {tr : List (CustodyInput × CustodyOutcome Sig)}
+    {dep : Nat} {i : CustodyIntent} {ab : Bool} {sig : Sig}
+    (hAdmits : (certCustodyMachine L forge S oracleSign dep₀ pk₀ quorum₀).AdmitsTrace tr)
+    (hEv : (CustodyInput.sign dep i ab, CustodyOutcome.released sig) ∈ tr) :
+    dep = dep₀ ∧ sig = oracleSign (S.digest dep₀ i) ∧
+    ∃ p, p < quorum₀.numParties ∧
+      (CustodyInput.approve p dep₀ i, (CustodyOutcome.approvalRecorded : CustodyOutcome Sig)) ∈ tr :=
+  idealCustody_admitsTrace_release_honestly_approved
+    ((certCustody_refines_idealCustody L forge hUnf S oracleSign dep₀ pk₀ quorum₀).preserve_admitsTrace
+      hAdmits) hEv
+
+/-- **Coordinator expenditure and certificate provenance.** On every reachable coordinator state
+    the amount spent is the sum of `intent.spend` over the authorized intents and within the
+    budget, and every WAL record carries the oracle's signature on `digest dep₀ intent` for an
+    intent certified through an enrolled custodian's own port. -/
+theorem certCustody_reachable_spend_and_provenance (hUnf : CustodyUnforgeable L forge)
+    {dep₀ : Nat} {pk₀ : PK} {quorum₀ : CustodyQuorumProfile}
+    {c : CertCustodyState PK D Sig Cert}
+    (hR : (certCustodyMachine L forge S oracleSign dep₀ pk₀ quorum₀).Reachable c) :
+    c.ledger.spent = (c.ledger.authorized.map CustodyIntent.spend).sum ∧
+    c.ledger.spent ≤ quorum₀.spendCap ∧
+    ∀ r ∈ c.ledger.releasedHistory,
+      r.sig = oracleSign (S.digest dep₀ r.intent) ∧
+      ∃ p, p < quorum₀.numParties ∧
+        CustodyApproval.mk p dep₀ r.intent ∈ certRecords L true c.pool := by
+  obtain ⟨c₀, tr, hInit, hTr⟩ := hR
+  have h0 : c₀ = CertCustodyState.init dep₀ pk₀ quorum₀ := hInit
+  subst h0
+  have hIdeal : (idealCustodyMachine S oracleSign dep₀ pk₀ quorum₀).Reachable
+      (certCustodyAbs L c) :=
+    ⟨certCustodyAbs L (CertCustodyState.init dep₀ pk₀ quorum₀), tr, rfl,
+      certCustody_validTrace_abs hUnf (fun _ h => False.elim (List.not_mem_nil h)) hTr⟩
+  obtain ⟨hAcc, hBud, _, _⟩ := idealCustody_reachable_spend_accounting hIdeal
+  exact ⟨hAcc, hBud, fun r hr => idealCustody_reachable_release_honestly_approved hIdeal hr⟩
+
+end Sim
+
+end CertCustody
+
 #verify_constructive
   Qsag.Top.rssSharedRelease_preserves_traces
   Qsag.Top.elf_to_idealTsig_trace_inclusion
@@ -509,6 +1009,9 @@ theorem gate_batches_and_quorum_switching_disjointness
   Qsag.Top.posix_wal_commit_and_anchor_rollback_fence
   Qsag.Top.rss_participant_network_gate_and_signing_execution_chain
   Qsag.Top.gate_batches_and_quorum_switching_disjointness
+  Qsag.Top.transparentCertLayer_unforgeable
+  Qsag.Top.certCustody_trace_release_honestly_approved
+  Qsag.Top.certCustody_reachable_spend_and_provenance
 
 end Qsag.Top
 end
