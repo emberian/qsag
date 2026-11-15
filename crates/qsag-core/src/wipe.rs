@@ -15,6 +15,7 @@
 //! | [`SecretVec`]`<T>` | `SecretBuffer<Vec<T>>`: heap secrets; grow with `push_wiping` / `extend_wiping` |
 //! | [`SecretScratch`]`<T>` | vector whose growth, truncation and consuming iteration all wipe |
 //! | [`secret_vec_reserve`], [`secret_vec_push`], [`secret_vec_extend_from_slice`] | wipe-aware growth of a plain `Vec` |
+//! | [`secret_vecs_with_capacity`] | per-party secret vectors that really have their capacity |
 //!
 //! `Vec` growth reached through `DerefMut` of a [`SecretVec`] can reallocate and free the
 //! old storage unwiped: size the vector up front or use the wiping methods.
@@ -167,6 +168,22 @@ pub use qsag_asm::wipe::{
     secret_vec_extend_from_slice, secret_vec_push, secret_vec_reserve, wipe,
 };
 
+/// `outer` secret vectors, each with room for `capacity` items.
+///
+/// `vec![Vec::with_capacity(c); n]` does not do this: `vec!` clones the element and a
+/// cloned `Vec` has no spare capacity, so all but the last vector reallocate on push and
+/// free their old storage unwiped.
+pub fn secret_vecs_with_capacity<T: SecretWipe>(
+    outer: usize,
+    capacity: usize,
+) -> SecretVec<alloc::vec::Vec<T>> {
+    SecretBuffer(
+        (0..outer)
+            .map(|_| alloc::vec::Vec::with_capacity(capacity))
+            .collect(),
+    )
+}
+
 impl SecretWipe for TowerGf256 {
     fn secret_wipe(&mut self) {
         qsag_asm::volatile_fill(core::slice::from_mut(&mut self.0), 0);
@@ -234,6 +251,11 @@ mod raii_tests {
         );
         grow.secret_wipe();
         assert_eq!(grow, alloc::vec![0u64; 6]);
+
+        let per_party = secret_vecs_with_capacity::<u64>(5, 7);
+        assert!(per_party.len() == 5 && per_party.iter().all(|v| v.capacity() >= 7));
+        // The trap the helper replaces: only the moved-in last element keeps its capacity.
+        assert_eq!(alloc::vec![alloc::vec::Vec::<u64>::with_capacity(7); 5][0].capacity(), 0);
 
         let mut key = SecretBytes::<32>::zeroed();
         key[7] = 9;

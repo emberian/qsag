@@ -51,8 +51,9 @@ use crate::field::tower::Tower128;
 use crate::preprocessing::{OtMesh, PartyPrivateRng, PreprocessError, run_commit_and_open_coin};
 use crate::sponge::keccak::{Cshake256Xof, cshake256_32_multi_frame};
 use crate::wipe::{
-    SecretBuffer, ct_eq_bytes32, wipe_bytes, wipe_bytes32, wipe_tower128_slice, wipe_u16s,
-    wipe_u64s, wipe_u128s,
+    SecretBuffer, ct_eq_bytes32, secret_vec_extend_from_slice, secret_vec_push, wipe_bytes,
+    wipe_bytes32, wipe_tower128_slice,
+    wipe_u16s, wipe_u64s, wipe_u128s,
 };
 
 /// Number of regular-noise GGM trees per ordered peer pair (`t = 64`).
@@ -385,8 +386,8 @@ fn ggm_expand_full_depth_with_backend(
                 for (rx, &rb) in r_xor.iter_mut().zip(right.iter()) {
                     *rx ^= rb;
                 }
-                next_level.push(*left);
-                next_level.push(*right);
+                secret_vec_push(&mut next_level, *left);
+                secret_vec_push(&mut next_level, *right);
             }
         }
 
@@ -650,7 +651,7 @@ fn accumulate_sender_lpn_tree(ctx: LpnTapStreamCtx, full_leaves: &[u128], out_ke
     let mut running = SecretBuffer(0u128);
     for &leaf in full_leaves {
         *running ^= leaf;
-        acc.push(*running);
+        secret_vec_push(&mut acc, *running);
     }
 
     let mut tap_gen = BatchedTapGenerator::new(ctx);
@@ -675,7 +676,7 @@ fn accumulate_receiver_lpn_tree(
     let mut running = SecretBuffer(0u128);
     for &leaf in punc_leaves {
         *running ^= leaf;
-        acc.push(*running);
+        secret_vec_push(&mut acc, *running);
     }
 
     let mut tap_gen = BatchedTapGenerator::new(ctx);
@@ -911,7 +912,7 @@ impl SpcotParityMessage {
             let mac = read_u128_le(pad, 0) ^ (ct_bit_mask_u128(bit) & self.corrections[i].0);
             let key_bit = (self.key_parities[i / 64] >> (i % 64)) & 1;
             bad |= (mac ^ u128::from(key_bit ^ bit)) & 1;
-            macs.push(Tower128(mac));
+            secret_vec_push(&mut macs, Tower128(mac));
         }
         if bad != 0 {
             return Err(PreprocessError::MacCheckFailed {
@@ -2495,12 +2496,12 @@ fn setup_dense_pcg_seeds_inner(
         if provided.len() != n || provided.iter().any(|a| (a.0 & 1) == 0) {
             return Err(PreprocessError::PcgInvalidWireSeed);
         }
-        alphas.extend_from_slice(provided);
+        secret_vec_extend_from_slice(&mut alphas, provided);
     } else {
         for rng in party_rngs.iter_mut() {
             let mut a = rng.next_tower128();
             a.0 |= 1; // Enforce LSB(alpha_i) == 1 (`127`-bit entropy, exact dense bit projection)
-            alphas.push(a);
+            secret_vec_push(&mut alphas, a);
         }
     }
 
