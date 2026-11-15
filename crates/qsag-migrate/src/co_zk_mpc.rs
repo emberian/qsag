@@ -1,25 +1,28 @@
-//! Distributed custodian prover with an active 3-custodian RSS fast path
-//! and a general semi-honest threshold backend (see `threshold_mpc`).
+//! Distributed custodian prover over an actively secure outer MPC.
 //!
-//! RSS prover emulation with active 1-of-3 malicious
-//! multiplication verification over authenticated confidential pairwise channels.
+//! Two backends implement the same prover:
 //!
-//! RSS privacy and integrity threshold: at most one corrupted custodian (`1`-of-`3`
-//! honest majority), assuming confidential authenticated pairwise channels and
-//! independently sampled private custodian entropy. Every Boolean `AND` gate and
-//! prime-field multiplication is batch-verified with coin-flipped challenges
-//! (per flush: `< 2^-244` Boolean soundness over `GF(2^128)`, `< 2^-249`
-//! over the curve fields `GF(p)` and `< 2^-186` over Goldilocks `GF(p^3)`)
-//! before any wire opening, masked A2B/B2A conversion difference, view
-//! commitment, public output, or challenged ZKBoo party view is reconstructed.
-//! Two colluding custodians can reconstruct replicated secrets, and abort
-//! remains non-identifiable / unfair (`1` corrupt custodian can force an
-//! abort). See `SECURITY.md` for exact scope.
+//! * `CoZkCustodianShare::new`: three custodians, replicated 2-of-3 sharing,
+//!   at most one corrupted custodian, no preprocessing (`outer_mpc`).
+//! * `CoZkCustodianShare::new_shamir` / `new_additive`: any `(t, n)` quorum,
+//!   MAC-authenticated additive sharing that tolerates corruption of all but
+//!   one quorum member, with witness-independent preprocessing
+//!   (`threshold_mpc`, `threshold_prep`).
+//!
+//! Both assume confidential authenticated pairwise channels and independently
+//! sampled private custodian entropy, and both verify every Boolean `AND`,
+//! prime-field multiplication and conversion before any wire opening, view
+//! commitment, public output, or challenged ZKBoo party view is reconstructed
+//! (replicated: per flush `< 2^-244` Boolean, `< 2^-249` over the curve
+//! fields and `< 2^-186` over Goldilocks `GF(p^3)`; authenticated: per check
+//! `< 2^-126`). Abort is non-identifiable and unfair in both: one corrupt
+//! custodian can force it. See `SECURITY.md` for exact scope.
 pub use crate::outer_mpc::{Envelope, Error, Transport};
-use crate::secret::SecretVec;
+use crate::secret::{SecretVec, Wipe};
 use crate::{
     circuit::{Circuit, Domain, Op},
-    outer_mpc::{self, Bit, Engine, FieldWord, Sponge, Word},
+    outer_mpc::{self, Core, Engine, FieldWord, Gadgets, ShareBit, Sponge, Word},
+    threshold_mpc::{MacKeyShare, SpdzEngine, ThresholdConfig},
     zk_engine::{
         self, MIT_REPETITIONS, MigrationStatement, MigrationZkProof, OpenedRepetitionView,
         PartyView,
@@ -31,35 +34,48 @@ use qsag_accel::{
     keccak::cshake256_framed_32,
 };
 
+/// General-quorum custody: the active quorum, one channel key per other
+/// quorum member (in quorum order) and this custodian's MAC key shares.
+struct QuorumCustody {
+    config: ThresholdConfig,
+    peer_keys: Vec<[u8; 32]>,
+    mac_keys: MacKeyShare,
+}
+impl Drop for QuorumCustody {
+    fn drop(&mut self) {
+        for k in &mut self.peer_keys {
+            ct_zeroize_bytes(k);
+        }
+    }
+}
+
 /// One-shot local custody material. Supply the XOR share of the *normalized
-/// spending scalar*, encoded little endian, not a derivation seed. Each channel
-/// key is shared only with its peer, ordered `[previous, next]`. Session identifiers
-/// must be unique; entropy must be fresh and independent at every custodian.
-/// The RSS `new` constructor needs no dealer. General custody constructors use
-/// the trusted preprocessing contract in `threshold_mpc`. No combined witness
-/// or other custodian's entropy enters either online prover.
+/// spending scalar*, encoded little endian, not a derivation seed. Session
+/// identifiers must be unique; entropy must be fresh and independent at every
+/// custodian. No combined witness or other custodian's entropy enters the
+/// online prover, and no constructor takes a dealer: the general-quorum
+/// constructors take this custodian's MAC key shares, which come out of the
+/// same preprocessing ceremony as the material its transport serves.
 pub struct CoZkCustodianShare {
     party: usize,
     session: [u8; 32],
     witness: [u8; 32],
     entropy: [u8; 32],
+    /// Replicated custody: keys shared with `[previous, next]`.
     channel_keys: [[u8; 32]; 2],
-    threshold: Option<crate::threshold_mpc::ThresholdConfig>,
-    peer_keys: Vec<[u8; 32]>,
+    quorum: Option<QuorumCustody>,
 }
 impl Drop for CoZkCustodianShare {
     fn drop(&mut self) {
         ct_zeroize_bytes(&mut self.witness);
         ct_zeroize_bytes(&mut self.entropy);
-        for k in &mut self.peer_keys {
-            ct_zeroize_bytes(k);
-        }
         for k in &mut self.channel_keys {
             ct_zeroize_bytes(k);
         }
     }
 }
 impl CoZkCustodianShare {
+    /// Replicated 2-of-3 custody for parties `0..3`.
     pub fn new(
         party: usize,
         session: [u8; 32],
@@ -73,8 +89,7 @@ impl CoZkCustodianShare {
             witness,
             entropy,
             channel_keys,
-            threshold: None,
-            peer_keys: Vec::new(),
+            quorum: None,
         };
         if party >= 3 {
             return Err(Error::InvalidConfiguration);
@@ -83,20 +98,29 @@ impl CoZkCustodianShare {
     }
 
     /// General `(t,n)` bytewise Shamir custody. The selected, sorted quorum
-    /// must contain at least `t` members. Keys follow quorum order, omitting self.
-    /// All members use the same session/configuration and independent entropy.
-    /// Requires semi-honest participants and fresh trusted Beaver preprocessing;
-    /// see `threshold_mpc` and `Transport::take_boolean_triples`.
+    /// must contain at least `t` members. `peer_keys` follow quorum order,
+    /// omitting self. All members use the same session and configuration,
+    /// independent entropy, and MAC key shares and preprocessing from one
+    /// ceremony (`threshold_prep`). The transport must implement
+    /// `exchange_many` and the `take_*` preprocessing methods.
     pub fn new_shamir(
         party: usize,
-        config: crate::threshold_mpc::ThresholdConfig,
+        config: ThresholdConfig,
         session: [u8; 32],
         witness: [u8; 32],
         entropy: [u8; 32],
         peer_keys: Vec<[u8; 32]>,
+        mac_keys: MacKeyShare,
     ) -> Result<Self, Error> {
-        let mut share = Self::new_threshold_contribution(party, config, session, witness, entropy, peer_keys)?;
-        let contribution = share.threshold.as_ref().unwrap().shamir_contribution(party, &share.witness)?;
+        let mut share = Self::quorum_contribution(
+            party, config, session, witness, entropy, peer_keys, mac_keys,
+        )?;
+        let contribution = share
+            .quorum
+            .as_ref()
+            .unwrap()
+            .config
+            .shamir_contribution(party, &share.witness)?;
         ct_zeroize_bytes(&mut share.witness);
         share.witness = contribution;
         Ok(share)
@@ -104,7 +128,7 @@ impl CoZkCustodianShare {
 
     /// General n-of-n XOR custody. Every roster member participates. The input
     /// is a share of normalized scalar bytes, not a scalar-field additive share.
-    /// Security/preprocessing requirements are the same as `new_shamir`.
+    /// Requirements are those of `new_shamir`.
     pub fn new_additive(
         party: usize,
         parties: usize,
@@ -112,23 +136,33 @@ impl CoZkCustodianShare {
         witness: [u8; 32],
         entropy: [u8; 32],
         peer_keys: Vec<[u8; 32]>,
+        mac_keys: MacKeyShare,
     ) -> Result<Self, Error> {
-        if !(2..=64).contains(&parties) {
-            drop(Self { party, session, witness, entropy, channel_keys: [[0; 32]; 2], threshold: None, peer_keys });
-            return Err(Error::InvalidConfiguration);
+        let config = if (2..=64).contains(&parties) {
+            ThresholdConfig::new(parties, parties, (0..parties).collect())
+        } else {
+            Err(Error::InvalidConfiguration)
+        };
+        match config {
+            Ok(config) => Self::quorum_contribution(
+                party, config, session, witness, entropy, peer_keys, mac_keys,
+            ),
+            Err(error) => {
+                let mut secrets = (witness, entropy, peer_keys);
+                secrets.secret_wipe();
+                Err(error)
+            }
         }
-        let config =
-            crate::threshold_mpc::ThresholdConfig::new(parties, parties, (0..parties).collect())?;
-        Self::new_threshold_contribution(party, config, session, witness, entropy, peer_keys)
     }
 
-    fn new_threshold_contribution(
+    fn quorum_contribution(
         party: usize,
-        config: crate::threshold_mpc::ThresholdConfig,
+        config: ThresholdConfig,
         session: [u8; 32],
         witness: [u8; 32],
         entropy: [u8; 32],
         peer_keys: Vec<[u8; 32]>,
+        mac_keys: MacKeyShare,
     ) -> Result<Self, Error> {
         let share = Self {
             party,
@@ -136,11 +170,16 @@ impl CoZkCustodianShare {
             witness,
             entropy,
             channel_keys: [[0; 32]; 2],
-            threshold: Some(config),
-            peer_keys,
+            quorum: Some(QuorumCustody {
+                config,
+                peer_keys,
+                mac_keys,
+            }),
         };
-        let config = share.threshold.as_ref().unwrap();
-        if !config.quorum().contains(&party) || share.peer_keys.len() != config.quorum().len() - 1 {
+        let custody = share.quorum.as_ref().unwrap();
+        if !custody.config.quorum().contains(&party)
+            || custody.peer_keys.len() != custody.config.quorum().len() - 1
+        {
             return Err(Error::InvalidConfiguration);
         }
         Ok(share)
@@ -176,7 +215,7 @@ impl CoZkCustodianShare {
         accel: &B,
     ) -> Result<MigrationZkProof, Error> {
         #[cfg(test)]
-        if self.threshold.is_none() {
+        if self.quorum.is_none() {
             transport.audit_private_state(
                 self.party,
                 &self.session,
@@ -186,40 +225,49 @@ impl CoZkCustodianShare {
                 statement,
             );
         }
-        let children = {
-            #[cfg(any(feature = "std", test))]
-            {
-                let mut transport = transport;
-                let mut children = Vec::new();
-                for batch in 0..MIT_REPETITIONS.div_ceil(64) {
-                    if let Some(child) = transport.fork(batch) {
-                        children.push(child);
-                    }
+        #[allow(unused_mut)]
+        let mut transport = transport;
+        #[allow(unused_mut)]
+        let mut children = Vec::new();
+        #[cfg(any(feature = "std", test))]
+        {
+            for batch in 0..MIT_REPETITIONS.div_ceil(64) {
+                if let Some(child) = transport.fork(batch) {
+                    children.push(child);
                 }
-                if !children.is_empty() && children.len() != MIT_REPETITIONS.div_ceil(64) {
-                    return Err(Error::InvalidConfiguration);
-                }
-                (transport, children)
             }
-            #[cfg(not(any(feature = "std", test)))]
-            {
-                (transport, Vec::new())
+            if !children.is_empty() && children.len() != MIT_REPETITIONS.div_ceil(64) {
+                return Err(Error::InvalidConfiguration);
             }
-        };
-        let (transport, children) = children;
-        let mut e = if let Some(config) = &self.threshold {
-            Engine::new_threshold(
-                self.party,
-                self.session,
-                config.clone(),
-                self.peer_keys.clone(),
-                transport,
-            )?
-        } else {
-            Engine::new(self.party, self.session, self.channel_keys, transport)?
-        };
-        e.mix_entropy(&self.entropy);
+        }
+        match &self.quorum {
+            Some(custody) => {
+                let mut e = SpdzEngine::new(
+                    self.party,
+                    self.session,
+                    custody.config.clone(),
+                    custody.peer_keys.clone(),
+                    custody.mac_keys.duplicate(),
+                    transport,
+                )?;
+                e.mix_entropy(&self.entropy);
+                self.run(e, children, statement, accel)
+            }
+            None => {
+                let mut e = Engine::new(self.party, self.session, self.channel_keys, transport)?;
+                e.mix_entropy(&self.entropy);
+                self.run(e, children, statement, accel)
+            }
+        }
+    }
 
+    fn run<E: ProverEngine, B: qsag_accel::AcceleratorBackend>(
+        &self,
+        mut e: E,
+        children: Vec<E::Transport>,
+        statement: &MigrationStatement,
+        accel: &B,
+    ) -> Result<MigrationZkProof, Error> {
         let statement_bytes = statement.to_transcript_bytes();
         e.agree(cshake256_framed_32(
             b"QSAG.OUTER.STATEMENT.V1",
@@ -236,7 +284,7 @@ impl CoZkCustodianShare {
         // Both replicated witness components this custodian holds are wiped on
         // every exit path, as are its shares of all virtual-head tape seeds.
         let witness = shared?;
-        let witness: &[Bit] = &witness;
+        let witness: &[E::Bit] = &witness;
         let circuit = crate::ownership::build(statement, &[0; 32]);
 
         let num_batches = MIT_REPETITIONS.div_ceil(64);
@@ -284,13 +332,7 @@ impl CoZkCustodianShare {
             witness,
             &seeds,
             children,
-            BatchContext {
-                session: self.session,
-                entropy: self.entropy,
-                keys: self.channel_keys,
-                threshold: self.threshold.clone(),
-                peer_keys: self.peer_keys.clone(),
-            },
+            &self.entropy,
         )?;
 
         // Cross-batch barrier: all custodians confirm every batch passed active
@@ -329,7 +371,7 @@ impl CoZkCustodianShare {
         let mut repetitions = Vec::with_capacity(MIT_REPETITIONS);
 
         #[cfg(test)]
-        let audit_inputs: Vec<[Word; 3]> = computed_batches
+        let audit_inputs: Vec<[Word<E::Bit>; 3]> = computed_batches
             .iter()
             .map(|batch| core::array::from_fn(|head| batch.views[head].inputs.clone()))
             .collect();
@@ -349,13 +391,15 @@ impl CoZkCustodianShare {
                 });
                 let total_bits =
                     view.seed.len() + view.inputs.len() + view.products.len() + view.outputs.len();
-                let mut masked = Word::with_capacity(total_bits);
+                let mut flat: Word<E::Bit> = SecretVec::with_capacity(total_bits);
                 for part in [&view.seed, &view.inputs, &view.products, &view.outputs] {
-                    masked.extend(part.iter().map(|b| Bit([b.0[0] & mask, b.0[1] & mask])));
+                    flat.extend_from_slice(part);
                 }
                 #[cfg(test)]
-                opening_engine.transport.on_public_or_view_open();
-                let clear = opening_engine.open(&masked)?;
+                opening_engine.on_public_or_view_open();
+                // Only the two challenged heads of each repetition open; the
+                // third head's lanes stay hidden.
+                let clear = opening_engine.open_lanes(&flat, mask)?;
                 let head_views = (0..count)
                     .map(|lane| {
                         let bytes = outer_mpc::lane_bytes(&clear, lane);
@@ -404,26 +448,208 @@ impl CoZkCustodianShare {
         .map_err(|_| Error::InvalidProof)?;
         e.agree(cshake256_framed_32(b"QSAG.OUTER.COMPLETE.V1", &[&root]))?;
         #[cfg(test)]
-        if self.threshold.is_none() {
-            tests::audit_old_attack(&self, &e, witness, &audit_inputs, &proof);
-        }
+        e.audit(self, witness, &audit_inputs, &proof);
         Ok(proof)
     }
 }
 
-struct BatchComputed<T: Transport> {
-    views: Vec<SharedView>,
-    commit_bits: [Word; 3],
-    engine: Option<Engine<T>>,
+/// What the distributed prover needs from a backend besides [`Core`]: how to
+/// start the engine of one repetition batch on its own transport stream.
+pub(crate) trait ProverEngine: Core + Sized + Send {
+    type Transport: Transport;
+    /// Custody secrets a batch engine starts from; erased on drop.
+    type BatchSeed: Send + Sync;
+    fn batch_seed(&self, entropy: &[u8; 32]) -> Self::BatchSeed;
+    /// Engine for `batch`, bound to a batch-specific session and entropy.
+    /// It aborts at its next exchange once `cancelled` is set.
+    #[cfg(any(feature = "std", test))]
+    fn for_batch(
+        seed: &Self::BatchSeed,
+        batch: usize,
+        transport: Self::Transport,
+        cancelled: alloc::sync::Arc<core::sync::atomic::AtomicBool>,
+    ) -> Result<Self, Error>;
+    /// Called once a batch has passed all checks; the engine stays live for
+    /// the opening rounds.
+    #[cfg(any(feature = "std", test))]
+    fn finish_batch(&mut self);
+    fn max_parallel_batches(&self) -> usize;
+    #[cfg(test)]
+    fn audit(
+        &self,
+        _share: &CoZkCustodianShare,
+        _witness: &[Self::Bit],
+        _inputs: &[[Word<Self::Bit>; 3]],
+        _proof: &MigrationZkProof,
+    ) {
+    }
 }
 
-fn compute_batch<T: Transport>(
-    e: &mut Engine<T>,
+fn batch_session(session: &[u8; 32], batch: usize) -> [u8; 32] {
+    cshake256_framed_32(
+        b"QSAG.OUTER.BATCH.V1",
+        &[session, &(batch as u64).to_le_bytes()],
+    )
+}
+fn batch_entropy(entropy: &[u8; 32], session: &[u8; 32], batch: usize) -> [u8; 32] {
+    cshake256_framed_32(
+        b"QSAG.OUTER.BATCH.ENTROPY.V1",
+        &[entropy, session, &(batch as u64).to_le_bytes()],
+    )
+}
+
+pub(crate) struct ReplicatedSeed {
+    party: usize,
+    session: [u8; 32],
+    entropy: [u8; 32],
+    keys: [[u8; 32]; 2],
+}
+impl Drop for ReplicatedSeed {
+    fn drop(&mut self) {
+        ct_zeroize_bytes(&mut self.entropy);
+        for k in &mut self.keys {
+            ct_zeroize_bytes(k);
+        }
+    }
+}
+impl<T: Transport> ProverEngine for Engine<T> {
+    type Transport = T;
+    type BatchSeed = ReplicatedSeed;
+    fn batch_seed(&self, entropy: &[u8; 32]) -> ReplicatedSeed {
+        let (session, keys) = self.custody();
+        ReplicatedSeed {
+            party: self.party,
+            session,
+            entropy: *entropy,
+            keys,
+        }
+    }
+    #[cfg(any(feature = "std", test))]
+    fn for_batch(
+        seed: &ReplicatedSeed,
+        batch: usize,
+        transport: T,
+        cancelled: alloc::sync::Arc<core::sync::atomic::AtomicBool>,
+    ) -> Result<Self, Error> {
+        let mut entropy = batch_entropy(&seed.entropy, &seed.session, batch);
+        let engine = Engine::new(
+            seed.party,
+            batch_session(&seed.session, batch),
+            seed.keys,
+            transport,
+        );
+        let mut engine = match engine {
+            Ok(engine) => engine,
+            Err(error) => {
+                ct_zeroize_bytes(&mut entropy);
+                return Err(error);
+            }
+        };
+        engine.batch_cancelled = Some(cancelled);
+        engine.mix_entropy(&entropy);
+        ct_zeroize_bytes(&mut entropy);
+        Ok(engine)
+    }
+    #[cfg(any(feature = "std", test))]
+    fn finish_batch(&mut self) {
+        self.release_verified_scratch();
+        self.batch_cancelled = None;
+    }
+    fn max_parallel_batches(&self) -> usize {
+        self.transport.max_parallel_batches()
+    }
+    #[cfg(test)]
+    fn audit(
+        &self,
+        share: &CoZkCustodianShare,
+        witness: &[outer_mpc::Bit],
+        inputs: &[[Word; 3]],
+        proof: &MigrationZkProof,
+    ) {
+        tests::audit_old_attack(share, self, witness, inputs, proof);
+    }
+}
+
+pub(crate) struct QuorumSeed {
+    party: usize,
+    session: [u8; 32],
+    entropy: [u8; 32],
+    config: ThresholdConfig,
+    peer_keys: Vec<[u8; 32]>,
+    mac_keys: MacKeyShare,
+}
+impl Drop for QuorumSeed {
+    fn drop(&mut self) {
+        ct_zeroize_bytes(&mut self.entropy);
+        for k in &mut self.peer_keys {
+            ct_zeroize_bytes(k);
+        }
+    }
+}
+impl<T: Transport> ProverEngine for SpdzEngine<T> {
+    type Transport = T;
+    type BatchSeed = QuorumSeed;
+    fn batch_seed(&self, entropy: &[u8; 32]) -> QuorumSeed {
+        let (session, config, peer_keys, mac_keys) = self.custody();
+        QuorumSeed {
+            party: self.party,
+            session,
+            entropy: *entropy,
+            config,
+            peer_keys,
+            mac_keys,
+        }
+    }
+    #[cfg(any(feature = "std", test))]
+    fn for_batch(
+        seed: &QuorumSeed,
+        batch: usize,
+        transport: T,
+        cancelled: alloc::sync::Arc<core::sync::atomic::AtomicBool>,
+    ) -> Result<Self, Error> {
+        let mut entropy = batch_entropy(&seed.entropy, &seed.session, batch);
+        let engine = SpdzEngine::new(
+            seed.party,
+            batch_session(&seed.session, batch),
+            seed.config.clone(),
+            seed.peer_keys.clone(),
+            seed.mac_keys.duplicate(),
+            transport,
+        );
+        let mut engine = match engine {
+            Ok(engine) => engine,
+            Err(error) => {
+                ct_zeroize_bytes(&mut entropy);
+                return Err(error);
+            }
+        };
+        engine.batch_cancelled = Some(cancelled);
+        engine.mix_entropy(&entropy);
+        ct_zeroize_bytes(&mut entropy);
+        Ok(engine)
+    }
+    #[cfg(any(feature = "std", test))]
+    fn finish_batch(&mut self) {
+        self.batch_cancelled = None;
+    }
+    fn max_parallel_batches(&self) -> usize {
+        self.transport.max_parallel_batches()
+    }
+}
+
+struct BatchComputed<E: Core> {
+    views: Vec<SharedView<E::Bit>>,
+    commit_bits: [Word<E::Bit>; 3],
+    engine: Option<E>,
+}
+
+fn compute_batch<E: Core>(
+    e: &mut E,
     c: &Circuit,
-    witness: &[Bit],
-    seeds: &[Word],
+    witness: &[E::Bit],
+    seeds: &[Word<E::Bit>],
     batch: usize,
-) -> Result<BatchComputed<T>, Error> {
+) -> Result<BatchComputed<E>, Error> {
     let views = evaluate_inner(e, c, witness, seeds, true)?;
     let commit_bits = compute_view_commit_bits(e, batch, &views)?;
     // Verify all pending Boolean and prime-field multiplications in this batch
@@ -436,16 +662,16 @@ fn compute_batch<T: Transport>(
     })
 }
 
-fn open_batch_public_rounds<T: Transport>(
-    e: &mut Engine<T>,
+fn open_batch_public_rounds<E: Core>(
+    e: &mut E,
     batch: usize,
-    commit_bits: &[Word; 3],
-    views: &[SharedView],
+    commit_bits: &[Word<E::Bit>; 3],
+    views: &[SharedView<E::Bit>],
 ) -> Result<Vec<PublicRound>, Error> {
     #[cfg(test)]
-    e.transport.on_public_or_view_open();
+    e.on_public_or_view_open();
     let out_len = views[0].outputs.len();
-    let mut flat = Word::with_capacity(3 * 256 + 3 * out_len);
+    let mut flat = SecretVec::with_capacity(3 * 256 + 3 * out_len);
     for cb in commit_bits {
         flat.extend_from_slice(cb);
     }
@@ -472,44 +698,20 @@ fn open_batch_public_rounds<T: Transport>(
         .collect())
 }
 
-struct BatchContext {
-    session: [u8; 32],
-    entropy: [u8; 32],
-    keys: [[u8; 32]; 2],
-    threshold: Option<crate::threshold_mpc::ThresholdConfig>,
-    peer_keys: Vec<[u8; 32]>,
-}
-impl Drop for BatchContext {
-    fn drop(&mut self) {
-        ct_zeroize_bytes(&mut self.entropy);
-        for k in &mut self.peer_keys {
-            ct_zeroize_bytes(k);
-        }
-        for k in &mut self.keys {
-            ct_zeroize_bytes(k);
-        }
-    }
-}
-
-fn compute_batches<T: Transport>(
-    e: &mut Engine<T>,
+fn compute_batches<E: ProverEngine>(
+    e: &mut E,
     c: &Circuit,
-    witness: &[Bit],
-    seeds: &[Vec<Word>],
-    children: Vec<T>,
-    ctx: BatchContext,
-) -> Result<Vec<BatchComputed<T>>, Error> {
+    witness: &[E::Bit],
+    seeds: &[Vec<Word<E::Bit>>],
+    children: Vec<E::Transport>,
+    entropy: &[u8; 32],
+) -> Result<Vec<BatchComputed<E>>, Error> {
     #[cfg(any(feature = "std", test))]
     if !children.is_empty() {
-        let party = e.party;
-        let session = ctx.session;
-        let entropy = ctx.entropy;
-        let keys = ctx.keys;
-        let config = &ctx.threshold;
-        let peer_keys = &ctx.peer_keys;
+        let seed = e.batch_seed(entropy);
+        let seed = &seed;
         let cancelled = alloc::sync::Arc::new(core::sync::atomic::AtomicBool::new(false));
         let width = e
-            .transport
             .max_parallel_batches()
             .max(1)
             .min(children.len())
@@ -525,32 +727,11 @@ fn compute_batches<T: Transport>(
                         let cancelled = cancelled.clone();
                         scope.spawn(move || {
                             let result = (|| {
-                                let batch_session = cshake256_framed_32(
-                                    b"QSAG.OUTER.BATCH.V1",
-                                    &[&session, &(batch as u64).to_le_bytes()],
-                                );
-                                let mut batch_entropy = cshake256_framed_32(
-                                    b"QSAG.OUTER.BATCH.ENTROPY.V1",
-                                    &[&entropy, &session, &(batch as u64).to_le_bytes()],
-                                );
-                                let mut engine = if let Some(config) = config {
-                                    Engine::new_threshold(
-                                        party,
-                                        batch_session,
-                                        config.clone(),
-                                        peer_keys.clone(),
-                                        transport,
-                                    )?
-                                } else {
-                                    Engine::new(party, batch_session, keys, transport)?
-                                };
-                                engine.batch_cancelled = Some(cancelled.clone());
-                                engine.mix_entropy(&batch_entropy);
-                                ct_zeroize_bytes(&mut batch_entropy);
+                                let mut engine =
+                                    E::for_batch(seed, batch, transport, cancelled.clone())?;
                                 let mut result =
                                     compute_batch(&mut engine, c, witness, &seeds[batch], batch)?;
-                                engine.release_verified_scratch();
-                                engine.batch_cancelled = None;
+                                engine.finish_batch();
                                 result.engine = Some(engine);
                                 Ok(result)
                             })();
@@ -583,7 +764,7 @@ fn compute_batches<T: Transport>(
         return Ok(completed);
     }
     #[cfg(not(any(feature = "std", test)))]
-    let _ = (children, ctx.session, ctx.entropy, ctx.keys, &ctx.threshold);
+    let _ = (children, entropy);
     seeds
         .iter()
         .enumerate()
@@ -597,16 +778,16 @@ struct PublicRound {
     outputs: [Vec<u8>; 3],
 }
 
-struct SharedView {
-    seed: Word,
-    inputs: Word,
-    products: Word,
-    outputs: Word,
+struct SharedView<B: ShareBit> {
+    seed: Word<B>,
+    inputs: Word<B>,
+    products: Word<B>,
+    outputs: Word<B>,
 }
-impl SharedView {
+impl<B: ShareBit> SharedView<B> {
     #[cfg(test)]
-    fn bytes(&self) -> Word {
-        let mut out = Word::with_capacity(
+    fn bytes(&self) -> Word<B> {
+        let mut out = SecretVec::with_capacity(
             self.seed.len() + self.inputs.len() + self.products.len() + self.outputs.len(),
         );
         out.extend_from_slice(&self.seed);
@@ -617,19 +798,19 @@ impl SharedView {
     }
 }
 
-enum SharedValue {
-    Bit(Bit),
+enum SharedValue<B: ShareBit> {
+    Bit(B),
     Field(FieldWord),
 }
-impl SharedValue {
+impl<B: ShareBit> SharedValue<B> {
     fn zero(d: Domain) -> Self {
         if d == Domain::Bit {
-            Self::Bit(Bit::default())
+            Self::Bit(B::default())
         } else {
             Self::Field(vec![[[0; 4]; 2]; 64].into())
         }
     }
-    fn bit(&self) -> Bit {
+    fn bit(&self) -> B {
         match self {
             Self::Bit(b) => *b,
             _ => unreachable!("public circuit domain"),
@@ -642,10 +823,10 @@ impl SharedValue {
         }
     }
 }
-impl Drop for SharedValue {
+impl<B: ShareBit> Drop for SharedValue<B> {
     fn drop(&mut self) {
         match self {
-            Self::Bit(b) => ct_zeroize_u64s(&mut b.0),
+            Self::Bit(b) => b.secret_wipe(),
             Self::Field(_) => {} // FieldWord owns its wipe-on-drop storage.
         }
     }
@@ -695,23 +876,23 @@ struct FieldTapeDraw {
 // unread suffix, including future Boolean refill words. Previously cached bits
 // precede `start` and are never moved. A failed budget is retried from the original
 // stream, so an unresolved draw cannot discard a later draw's valid candidate.
-fn canonical_tape_attempt<T: Transport>(
-    e: &mut Engine<T>,
-    streams: &[Word],
+fn canonical_tape_attempt<E: Core>(
+    e: &mut E,
+    streams: &[Word<E::Bit>],
     draws: &[FieldTapeDraw],
     counts: [usize; 3],
     attempts: usize,
-) -> Result<Option<Vec<Word>>, Error> {
+) -> Result<Option<Vec<Word<E::Bit>>>, Error> {
     let required = tape_counts(draws, counts, attempts)?;
     if streams.len() != 3 || streams.iter().zip(required).any(|(s, n)| s.len() < n) {
         return Err(Error::InvalidTape);
     }
-    let mut out: Vec<Word> = streams
+    let mut out: Vec<Word<E::Bit>> = streams
         .iter()
         .zip(required)
         .map(|(s, n)| s[..n].iter().copied().collect())
         .collect();
-    let mut valid: [Word; 3] = core::array::from_fn(|_| Word::new());
+    let mut valid: [Word<E::Bit>; 3] = core::array::from_fn(|_| SecretVec::new());
     for draw in draws {
         let stream = &mut out[draw.head];
         let width = draw.domain.width();
@@ -771,10 +952,10 @@ fn tape_counts(
     Ok(required)
 }
 
-fn fold_valid_bits<T: Transport>(
-    e: &mut Engine<T>,
-    mut groups: [Word; 3],
-) -> Result<[Bit; 3], Error> {
+fn fold_valid_bits<E: Core>(
+    e: &mut E,
+    mut groups: [Word<E::Bit>; 3],
+) -> Result<[E::Bit; 3], Error> {
     for g in &mut groups {
         if g.is_empty() {
             g.push(e.constant(u64::MAX));
@@ -791,7 +972,7 @@ fn fold_valid_bits<T: Transport>(
         let mut cur = 0usize;
         for g in &mut groups {
             let num_pairs = g.len() / 2;
-            let mut next = Word::with_capacity(num_pairs + (g.len() % 2));
+            let mut next = SecretVec::with_capacity(num_pairs + (g.len() % 2));
             next.extend_from_slice(&prods[cur..cur + num_pairs]);
             cur += num_pairs;
             if g.len() % 2 == 1 {
@@ -803,7 +984,7 @@ fn fold_valid_bits<T: Transport>(
     Ok([groups[0][0], groups[1][0], groups[2][0]])
 }
 
-fn fold_all_true_bits<T: Transport>(e: &mut Engine<T>, mut bits: Word) -> Result<Bit, Error> {
+fn fold_all_true_bits<E: Core>(e: &mut E, mut bits: Word<E::Bit>) -> Result<E::Bit, Error> {
     if bits.is_empty() {
         return Ok(e.constant(u64::MAX));
     }
@@ -822,31 +1003,26 @@ fn fold_all_true_bits<T: Transport>(e: &mut Engine<T>, mut bits: Word) -> Result
 }
 
 #[cfg(test)]
-fn evaluate<T: Transport>(
-    e: &mut Engine<T>,
+fn evaluate<E: Core>(
+    e: &mut E,
     c: &Circuit,
-    witness: &[Bit],
-    seeds: &[Word],
-) -> Result<Vec<SharedView>, Error> {
+    witness: &[E::Bit],
+    seeds: &[Word<E::Bit>],
+) -> Result<Vec<SharedView<E::Bit>>, Error> {
     evaluate_inner(e, c, witness, seeds, false)
 }
 
-fn evaluate_inner<T: Transport>(
-    e: &mut Engine<T>,
+fn evaluate_inner<E: Core>(
+    e: &mut E,
     c: &Circuit,
-    witness: &[Bit],
-    seeds: &[Word],
+    witness: &[E::Bit],
+    seeds: &[Word<E::Bit>],
     verify_zero_outputs: bool,
-) -> Result<Vec<SharedView>, Error> {
+) -> Result<Vec<SharedView<E::Bit>>, Error> {
     // Keep field-fault regressions aimed at circuit evaluation, even when tape
     // conversion itself uses arithmetic multiplications for carry correction.
     #[cfg(test)]
-    let circuit_field_fault = if matches!(e.fault, Some(outer_mpc::FaultInjection::FieldMul { .. }))
-    {
-        e.fault.take()
-    } else {
-        None
-    };
+    let circuit_field_fault = e.take_field_fault();
 
     // 1. Pre-schedule exact `Tape` bit/field draws and topological DAG waves.
     let mut cursors: [TapeCursor; 3] = core::array::from_fn(|_| TapeCursor::default());
@@ -958,8 +1134,8 @@ fn evaluate_inner<T: Transport>(
     )?;
 
     // 3. Batch-check `< modulus` across all field draws per domain and open `valid` upfront.
-    let mut valid_groups: [Word; 3] = core::array::from_fn(|_| Word::new());
-    let mut raw_draw_words: Vec<Word> = field_draws
+    let mut valid_groups: [Word<E::Bit>; 3] = core::array::from_fn(|_| SecretVec::new());
+    let mut raw_draw_words: Vec<Word<E::Bit>> = field_draws
         .iter()
         .map(|fd| {
             squeezed[fd.head][fd.start..fd.start + fd.domain.width()]
@@ -1016,7 +1192,7 @@ fn evaluate_inner<T: Transport>(
     }
 
     // Only `NodeTape::InputField` draws are read again in Step 7; move all `MulField`
-    // draws directly into `bits_to_field_many` so their `Word` buffers free early.
+    // draws directly into `bits_to_field_many` so their `Word<E::Bit>` buffers free early.
     let mut keep_raw_draw = vec![false; field_draws.len()];
     for nt in &node_tapes {
         if let NodeTape::InputField { draws, .. } = *nt {
@@ -1049,8 +1225,8 @@ fn evaluate_inner<T: Transport>(
     }
 
     #[cfg(test)]
-    if circuit_field_fault.is_some() {
-        e.fault = circuit_field_fault;
+    if let Some(fault) = circuit_field_fault {
+        e.restore_fault(fault);
     }
 
     // 5. Execute the circuit wave by wave, batching all parallel communication gates.
@@ -1102,8 +1278,8 @@ fn evaluate_inner<T: Transport>(
         }
     }
 
-    let mut wires: Vec<Option<[SharedValue; 3]>> = (0..c.nodes.len()).map(|_| None).collect();
-    let mut encodings: Vec<[Option<Word>; 3]> =
+    let mut wires: Vec<Option<[SharedValue<E::Bit>; 3]>> = (0..c.nodes.len()).map(|_| None).collect();
+    let mut encodings: Vec<[Option<Word<E::Bit>>; 3]> =
         (0..c.nodes.len()).map(|_| [None, None, None]).collect();
 
     for w in 0..=max_wave {
@@ -1133,7 +1309,7 @@ fn evaluate_inner<T: Transport>(
             for dom in [Domain::Gold, Domain::Secp, Domain::Ed] {
                 let mut lift_idxs = Vec::new();
                 let mut lift_owners = Vec::new();
-                let mut lift_bits = Word::new();
+                let mut lift_bits = SecretVec::new();
                 for &idx in comm_nodes {
                     if c.nodes[idx].domain == dom
                         && let Op::Lift(a, owner) = c.nodes[idx].op
@@ -1289,7 +1465,7 @@ fn evaluate_inner<T: Transport>(
                     if d == Domain::Bit {
                         SharedValue::Bit(e.constant(if value[0] == 0 { 0 } else { u64::MAX }))
                     } else {
-                        SharedValue::Field(e.fconstant(value))
+                        SharedValue::Field(e.fconstant(value, d))
                     },
                     SharedValue::zero(d),
                     SharedValue::zero(d),
@@ -1325,7 +1501,7 @@ fn evaluate_inner<T: Transport>(
                     core::array::from_fn(|head| {
                         if d == Domain::Bit {
                             SharedValue::Bit(if value[0] == 0 {
-                                Bit::default()
+                                E::Bit::default()
                             } else {
                                 wa[head].bit()
                             })
@@ -1349,7 +1525,7 @@ fn evaluate_inner<T: Transport>(
     // Boolean and prime-field output residual reconstructs to `0` across all 3 ZKBoo
     // heads BEFORE converting views or opening any output shares / view commitments.
     if verify_zero_outputs {
-        let mut residual_bits: Word = Word::new();
+        let mut residual_bits: Word<E::Bit> = SecretVec::new();
         for &out in &c.outputs {
             if c.nodes[out].domain == Domain::Bit {
                 let w = wires[out].as_ref().unwrap();
@@ -1380,7 +1556,7 @@ fn evaluate_inner<T: Transport>(
             }
         }
         let ones = e.constant(u64::MAX);
-        let zero_flags: Word = residual_bits.into_iter().map(|b| b ^ ones).collect();
+        let zero_flags: Word<E::Bit> = residual_bits.into_iter().map(|b| b ^ ones).collect();
         let all_outputs_zero = fold_all_true_bits(e, zero_flags)?;
         // Explicitly verify all circuit, conversion, and tree-AND multiplications
         // BEFORE opening the single 1-bit `all_outputs_zero` predicate.
@@ -1440,14 +1616,14 @@ fn evaluate_inner<T: Transport>(
         }
     }
 
-    // 7. Assemble `SharedView`s in exact `c.nodes` / `c.outputs` topological order.
-    let mut views: Vec<SharedView> = seeds
+    // 7. Assemble `SharedView<E::Bit>`s in exact `c.nodes` / `c.outputs` topological order.
+    let mut views: Vec<SharedView<E::Bit>> = seeds
         .iter()
         .map(|seed| SharedView {
             seed: seed.clone(),
-            inputs: Word::new(),
-            products: Word::new(),
-            outputs: Word::new(),
+            inputs: SecretVec::new(),
+            products: SecretVec::new(),
+            outputs: SecretVec::new(),
         })
         .collect();
 
@@ -1514,20 +1690,20 @@ fn evaluate_inner<T: Transport>(
     Ok(views)
 }
 
-fn pad_byte(bits: &mut Word) {
-    bits.resize(bits.len().div_ceil(8) * 8, Bit::default());
+fn pad_byte<B: ShareBit>(bits: &mut Word<B>) {
+    bits.resize(bits.len().div_ceil(8) * 8, B::default());
 }
 
 /// Compute the 256-bit `cSHAKE256("QSAG.MIGRATE.VIEW.V3")` view commitment shares
 /// for all 3 virtual heads in lockstep (`3x` fewer network rounds than sequential
 /// sponges, `0` rounds for the public customization block, `0` intermediate stream
 /// allocations, and `0` wire openings).
-fn compute_view_commit_bits<T: Transport>(
-    e: &mut Engine<T>,
+fn compute_view_commit_bits<E: Core>(
+    e: &mut E,
     batch: usize,
-    views: &[SharedView],
-) -> Result<[Word; 3], Error> {
-    let rep: Word = (0..64)
+    views: &[SharedView<E::Bit>],
+) -> Result<[Word<E::Bit>; 3], Error> {
+    let rep: Word<E::Bit> = (0..64)
         .map(|bit| {
             e.constant((0..64).fold(0, |v, lane| {
                 v | ((((batch * 64 + lane) as u64 >> bit) & 1) << lane)
@@ -1535,7 +1711,7 @@ fn compute_view_commit_bits<T: Transport>(
         })
         .collect();
     let count6 = outer_mpc::public_bytes(e, &6u64.to_le_bytes());
-    let head_bits: [Word; 3] =
+    let head_bits: [Word<E::Bit>; 3] =
         core::array::from_fn(|head| outer_mpc::public_bytes(e, &[head as u8]));
     let len_words =
         |bit_len: usize| outer_mpc::public_bytes(e, &((bit_len / 8) as u64).to_le_bytes());
@@ -1546,10 +1722,10 @@ fn compute_view_commit_bits<T: Transport>(
     let len_prod = len_words(views[0].products.len());
     let len_out = len_words(views[0].outputs.len());
 
-    let mut sponges: [Sponge; 3] =
+    let mut sponges: [Sponge<E::Bit>; 3] =
         core::array::from_fn(|_| Sponge::cshake_public(e, b"QSAG.MIGRATE.VIEW.V3"));
 
-    let segments: [[&[Bit]; 3]; 13] = [
+    let segments: [[&[E::Bit]; 3]; 13] = [
         [&count6, &count6, &count6],
         [&len_rep, &len_rep, &len_rep],
         [&rep, &rep, &rep],
@@ -1610,10 +1786,10 @@ fn compute_view_commit_bits<T: Transport>(
 }
 
 #[cfg(test)]
-fn commit_views<T: Transport>(
-    e: &mut Engine<T>,
+fn commit_views<E: Core>(
+    e: &mut E,
     batch: usize,
-    views: &[SharedView],
+    views: &[SharedView<E::Bit>],
 ) -> Result<Vec<Vec<u64>>, Error> {
     let bits = compute_view_commit_bits(e, batch, views)?;
     bits.iter().map(|b| e.open(b)).collect()
@@ -1627,7 +1803,7 @@ mod tests {
         circuit::Builder,
         legacy::LegacyOwnershipWitness,
         outer_mpc::{
-            FaultInjection,
+            Bit, FaultInjection,
             tests::{Network, audited_networks, keys, run},
         },
     };
@@ -1890,29 +2066,15 @@ mod tests {
     }
 
     #[test]
-    fn threshold_shamir_views_and_commitments_match_native() {
-        use crate::threshold_mpc::{ThresholdConfig, tests as threshold_tests};
+    fn quorum_shamir_views_and_commitments_match_native() {
+        use crate::threshold_mpc::tests as quorum;
         let config = ThresholdConfig::new(3, 8, vec![1, 4, 7]).unwrap();
-        threshold_tests::run(config.clone(), |party, transport| {
+        quorum::run(config.clone(), |party, mac_keys, transport| {
             let witness_bytes = [1; 32];
-            let share = CoZkCustodianShare::new_shamir(
-                party,
-                config.clone(),
-                [9; 32],
-                threshold_tests::shamir_share(party, 3, &witness_bytes),
-                [party as u8; 32],
-                threshold_tests::keys(&config, party),
-            )
-            .unwrap();
-            let mut e = Engine::new_threshold(
-                party,
-                share.session,
-                config.clone(),
-                share.peer_keys.clone(),
-                transport,
-            )
-            .unwrap();
-            e.mix_entropy(&share.entropy);
+            let contribution = config
+                .shamir_contribution(party, &quorum::shamir_share(party, 3, &witness_bytes))
+                .unwrap();
+            let mut e = quorum::engine(&config, party, mac_keys, transport);
             let c = Builder::default();
             let bit = c.input(1);
             c.output(c.mul(bit, bit));
@@ -1924,16 +2086,11 @@ mod tests {
             }
             let c = c.finish();
             let witness = e
-                .share_uniform_lanes(&[if share.witness[0] & 1 != 0 {
-                    u64::MAX
-                } else {
-                    0
-                }])
+                .share_uniform_lanes(&[if contribution[0] & 1 != 0 { u64::MAX } else { 0 }])
                 .unwrap();
             let seeds: Vec<_> = (0..3)
                 .map(|head| {
-                    let bytes =
-                        cshake256_framed_32(b"THRESHOLD.VIEW.TEST", &[&[party as u8, head]]);
+                    let bytes = cshake256_framed_32(b"QUORUM.VIEW.TEST", &[&[party as u8, head]]);
                     let bits: Vec<_> = bytes
                         .iter()
                         .flat_map(|b| {
