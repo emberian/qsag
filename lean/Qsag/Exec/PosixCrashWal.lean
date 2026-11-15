@@ -91,7 +91,7 @@ unified `CeremonyJournalRecord` crash-prefix atomicity, and reserve-before-sign 
    - `inhabited_posix_crash_wal_trace`
 -/
 
-public import Qsag.Math.Constructive
+public import Qsag.Tactic.Prelude
 public import Qsag.Exec.SimulationSpine
 public import Qsag.Oracle.Keccak
 import Qsag.Tactic.AssuranceKit

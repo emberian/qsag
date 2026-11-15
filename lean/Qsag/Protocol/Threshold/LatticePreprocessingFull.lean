@@ -34,14 +34,14 @@ end-to-end active security of the Rust preprocessing protocol.
      proving omitting `H * fullLeaves` collapses 1-density from `1/2` to `rowWeight / 2^d` (`1 / 2^d` in `P0-02`).
 -/
 
-public import Qsag.Math.Constructive
-import all Qsag.Math.Constructive
+public import Qsag.Tactic.Prelude
+import all Qsag.Tactic.Prelude
 public import Qsag.Math.Goldilocks
 import all Qsag.Math.Goldilocks
-public import Qsag.Math.BinaryTower
-import all Qsag.Math.BinaryTower
-public import Qsag.Oracle.UcGames
-import all Qsag.Oracle.UcGames
+public import Qsag.Math.Gf2Pow128
+import all Qsag.Math.Gf2Pow128
+public import Qsag.Protocol.Aggregation.UcGames
+import all Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Exec.SimulationSpine
 import all Qsag.Exec.SimulationSpine
 import all Qsag.Oracle.Keccak
@@ -50,8 +50,8 @@ public import Qsag.Protocol.Threshold.RlweCyclotomicExtraction
 import all Qsag.Protocol.Threshold.RlweCyclotomicExtraction
 public import Qsag.Protocol.Threshold.Preprocessing
 import all Qsag.Protocol.Threshold.Preprocessing
-public import Qsag.Protocol.Threshold.GaussianHvzkAndDualLpn
-import all Qsag.Protocol.Threshold.GaussianHvzkAndDualLpn
+public import Qsag.Math.Lattices
+import all Qsag.Math.Lattices
 import Qsag.Tactic.AssuranceKit
 
 public section
