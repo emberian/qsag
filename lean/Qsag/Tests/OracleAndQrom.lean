@@ -39,19 +39,27 @@ example : shake256Xof 32 [0x61, 0x62, 0x63] =
 
 /-! ## 5. Build-Time Conformance Vectors Matching `poseidon2.rs` -/
 
-example : (poseidon2Perm12 ⟨lane4Zero, lane4Zero, lane4Zero⟩).toList.map (·.val) =
-    [444626622888223479, 10486189390627733761, 5399253379101132897, 5052010181030417489, 6267397916963039069,
-     9245911245446346418, 9661705423445490201, 787089484585814203, 14953692268052641311, 11458212182116269477,
-     16934754160153525625, 6948793053817514326] := by decide +kernel
+example : (poseidon2Perm12 ⟨⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩⟩).toList.map (·.val) =
+    [17528629447354354351, 5014055130248055117, 10679077121839038553, 431078547345611051, 7807009921345120310, 2413869689279715014, 11875300792986830377, 1872634884137602556, 15069512080271275672, 14253608580209913153, 14550618143248480092, 107036164978639472] := by decide +kernel
+
+example : (poseidon2Perm12 ⟨⟨Goldilocks.ofNat 0, Goldilocks.ofNat 1, Goldilocks.ofNat 2, Goldilocks.ofNat 3⟩, ⟨Goldilocks.ofNat 4, Goldilocks.ofNat 5, Goldilocks.ofNat 6, Goldilocks.ofNat 7⟩, ⟨Goldilocks.ofNat 8, Goldilocks.ofNat 9, Goldilocks.ofNat 10, Goldilocks.ofNat 11⟩⟩).toList.map (·.val) =
+    [13782584570844608145, 13136387643152332171, 7171133015474200819, 7643370872200861694, 14144755201299840503, 16470027036684692562, 1748465969625202405, 1718729118078964347, 6141020819996733037, 16322330185628708898, 11650380702735067362, 2734959974607798415] := by decide +kernel
+
 example : poseidon2Hash32 [] =
-    [138, 190, 114, 201, 171, 117, 245, 165, 115, 111, 42, 219, 119, 171, 10, 76, 186, 173, 182, 128, 209, 69, 108,
-     220, 169, 239, 117, 130, 81, 43, 90, 65] := by decide +kernel
-example : poseidon2Hash32 [0x00] =
-    [233, 139, 182, 115, 89, 72, 21, 126, 245, 149, 62, 120, 26, 254, 106, 209, 111, 96, 153, 251, 141, 207, 186,
-     100, 74, 174, 87, 99, 85, 43, 117, 48] := by decide +kernel
-example : poseidon2Hash32 [0x01, 0x02, 0x03] =
-    [196, 180, 177, 170, 216, 21, 133, 248, 62, 149, 42, 39, 133, 17, 81, 112, 144, 59, 209, 93, 95, 26, 110, 112,
-     237, 219, 50, 120, 128, 103, 142, 202] := by decide +kernel
+    [182, 168, 65, 106, 0, 54, 23, 124, 22, 116, 119, 199, 75, 253, 202, 145, 123, 13, 115, 200, 186, 143, 207, 66, 162, 161, 198, 9, 220, 37, 176, 162] := by decide +kernel
+
+example : poseidon2Hash32 [0] =
+    [116, 79, 15, 95, 17, 248, 202, 240, 45, 126, 192, 181, 89, 193, 185, 161, 98, 167, 199, 38, 214, 141, 4, 22, 97, 34, 223, 133, 16, 3, 170, 104] := by decide +kernel
+
+example : poseidon2Hash32 [1, 2, 3] =
+    [149, 79, 171, 160, 0, 49, 166, 60, 204, 121, 241, 71, 102, 130, 24, 17, 35, 162, 114, 249, 194, 254, 120, 46, 18, 111, 254, 27, 106, 81, 178, 227] := by decide +kernel
+
+example : poseidon2Hash32 [113, 115, 97, 103, 45, 112, 111, 115, 101, 105, 100, 111, 110, 50, 45, 107, 97, 116] =
+    [228, 156, 140, 147, 124, 10, 100, 197, 103, 106, 168, 7, 254, 196, 250, 183, 212, 130, 17, 26, 2, 139, 235, 15, 219, 46, 193, 238, 148, 50, 236, 229] := by decide +kernel
+
+example : (let out := poseidon2CompressWeighted ⟨⟨Goldilocks.ofNat 0, Goldilocks.ofNat 1, Goldilocks.ofNat 2, Goldilocks.ofNat 3⟩, ⟨Goldilocks.ofNat 4, Goldilocks.ofNat 5, Goldilocks.ofNat 6, Goldilocks.ofNat 7⟩, ⟨Goldilocks.ofNat 8, Goldilocks.ofNat 9, Goldilocks.ofNat 10, Goldilocks.ofNat 11⟩⟩;
+    [out.x0.val, out.x1.val, out.x2.val, out.x3.val]) =
+    [13782584570844608185, 13136387643152332218, 7171133015474200873, 7643370872200861755] := by decide +kernel
 
 
 /-! ## 4. `#tooth` Cryptanalytic Refutations & Assurance Gates -/
