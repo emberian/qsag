@@ -5,19 +5,14 @@ module
 Layer-0 specification primitives unifying byte/digest carriers, exact non-negative rational bounds,
 and prefix-free serialization codecs across the verification hierarchy.
 
-In particular, `Qsag.Spec.RatBound` provides a single canonical rational upper-bound carrier with
-proved lossless, order-preserving conversions to and from all three rational representations used
-in existing subsystem proofs:
-1. `Qsag.RatBound` (`ConcreteSecurityBudget`),
-2. `Qsag.ratLe` over `Nat × Nat` (`UcGames`), and
-3. `Qsag.ExactRat` (`GaussianHvzkAndDualLpn`).
+`Qsag.Spec.RatBound` is the canonical rational upper-bound carrier, with lossless order-preserving
+conversions to the budget carrier `Qsag.RatBound` of `Qsag.Spec.Bounds`. This module imports only
+`Spec` and `Tactic`; the conversions to the `Nat × Nat` pairs of the QROM games and to the signed
+`Qsag.ExactRat` of the lattice library live above both sides, in `Qsag.Oracle.SpecRatBridges`.
 -/
 
 public import Qsag.Spec.Encoding
-public import Qsag.Protocol.Aggregation.UcGames
-public import Qsag.Protocol.Aggregation.ConcreteSecurityBudget
-public import Qsag.Math.Lattices
-public import Qsag.Exec.SimulationSpine
+public import Qsag.Spec.Bounds
 import Qsag.Tactic.AssuranceKit
 
 public section
@@ -35,9 +30,6 @@ abbrev Bytes32 : Type := { bs : List UInt8 // bs.length = 32 }
 
 /-- Canonical 256-bit digest carrier (`BitVec 256`). -/
 abbrev Digest256 : Type := Qsag.Digest256
-
-/-- Exact finite sum `∑_{i < n} f i` re-exported at Layer 0. -/
-abbrev qsum (n : Nat) (f : Fin n → Nat) : Nat := Qsag.qsum n f
 
 /-- Constructive absolute difference `|a - b|` over `Nat`. -/
 @[expose] def natAbsDiff (a b : Nat) : Nat :=
@@ -236,13 +228,13 @@ theorem RatBound.atLeastBits_of_le {b : Nat} {r₁ r₂ : RatBound}
   (RatBound.atLeastBits_iff_le_invPow2 b r₁).mpr
     (RatBound.le_trans hle ((RatBound.atLeastBits_iff_le_invPow2 b r₂).mp hBits))
 
-/-! ## 3. Lossless Deduplication Bridges to Existing Rational Models -/
+/-! ## 3. Lossless Bridge to the Budget Carrier `Qsag.RatBound` -/
 
-/-- Lossless conversion to `ConcreteSecurityBudget.RatBound` (`Qsag.RatBound`). -/
+/-- Lossless conversion to the budget carrier `Qsag.RatBound` (`Qsag.Spec.Bounds`). -/
 def RatBound.toBudget (r : RatBound) : Qsag.RatBound :=
   ⟨r.num, r.den, r.den_pos⟩
 
-/-- Lossless conversion from `ConcreteSecurityBudget.RatBound` (`Qsag.RatBound`). -/
+/-- Lossless conversion from the budget carrier `Qsag.RatBound` (`Qsag.Spec.Bounds`). -/
 def RatBound.ofBudget (r : Qsag.RatBound) : RatBound :=
   ⟨r.num, r.den, r.h_pos⟩
 
@@ -283,116 +275,6 @@ theorem RatBound.exceedsBitBudget_iff_budget (b : Nat) (r : RatBound) :
 
 theorem RatBound.ofBudget_exceedsBitBudget_iff (b : Nat) (r : Qsag.RatBound) :
     (RatBound.ofBudget r).exceedsBitBudget b ↔ Qsag.exceedsBitBudget b r := Iff.rfl
-
-/-- Lossless pair projection to `UcGames` `(num, den)` carrier. -/
-def RatBound.toUcPair (r : RatBound) : Nat × Nat :=
-  (r.num, r.den)
-
-/-- Lift a certified positive-denominator `UcGames` pair `(num, den)` into `Spec.RatBound`. -/
-def RatBound.ofUcPair (p : Nat × Nat) (hp : 0 < p.2) : RatBound :=
-  ⟨p.1, p.2, hp⟩
-
-/-- Equivalence between `Spec.RatBound.le` and `UcGames.ratLe`. -/
-theorem RatBound.le_iff_ucRatLe (r₁ r₂ : RatBound) :
-    r₁.le r₂ ↔ Qsag.ratLe r₁.toUcPair r₂.toUcPair := by
-  unfold RatBound.le Qsag.ratLe RatBound.toUcPair
-  dsimp only
-  exact ⟨fun h => ⟨r₁.den_pos, r₂.den_pos, h⟩, fun ⟨_, _, h⟩ => h⟩
-
-theorem RatBound.ucRatLe_iff_ofUcPair_le {p₁ p₂ : Nat × Nat}
-    (hp₁ : 0 < p₁.2) (hp₂ : 0 < p₂.2) :
-    Qsag.ratLe p₁ p₂ ↔ (RatBound.ofUcPair p₁ hp₁).le (RatBound.ofUcPair p₂ hp₂) := by
-  unfold Qsag.ratLe RatBound.le RatBound.ofUcPair
-  dsimp only
-  exact ⟨fun ⟨_, _, h⟩ => h, fun h => ⟨hp₁, hp₂, h⟩⟩
-
-/-- Order-preserving embedding into signed `Qsag.ExactRat` (`GaussianHvzkAndDualLpn`). -/
-def RatBound.toExactRat (r : RatBound) : Qsag.ExactRat :=
-  ⟨(r.num : Int), r.den, r.den_pos⟩
-
-/-- Magnitude projection from signed `Qsag.ExactRat` (`|x.num| / x.den`) into `Spec.RatBound`. -/
-def RatBound.ofExactRatAbs (x : Qsag.ExactRat) : RatBound :=
-  ⟨x.num.natAbs, x.den, x.den_pos⟩
-
-theorem RatBound.toExactRat_nonneg (r : RatBound) :
-    0 ≤ (r.toExactRat).num :=
-  Int.natCast_nonneg r.num
-
-theorem RatBound.ofExactRatAbs_toExactRat (r : RatBound) :
-    RatBound.ofExactRatAbs r.toExactRat = r := by
-  cases r with
-  | mk num den hpos =>
-    unfold RatBound.ofExactRatAbs RatBound.toExactRat
-    dsimp only
-    rw [Int.natAbs_natCast]
-
-theorem RatBound.toExactRat_ofNonneg {x : Qsag.ExactRat} (hx : 0 ≤ x.num) :
-    (RatBound.ofExactRatAbs x).toExactRat = x := by
-  cases x with
-  | mk num den hpos =>
-    dsimp only at hx
-    unfold RatBound.ofExactRatAbs RatBound.toExactRat
-    dsimp only
-    exact congrArg (fun n => Qsag.ExactRat.mk n den hpos) (Int.natAbs_of_nonneg hx)
-
-theorem RatBound.le_iff_toExactRat_le (r₁ r₂ : RatBound) :
-    r₁.le r₂ ↔ Qsag.ExactRat.le r₁.toExactRat r₂.toExactRat := by
-  unfold RatBound.le Qsag.ExactRat.le RatBound.toExactRat
-  dsimp only
-  rw [← Int.natCast_mul, ← Int.natCast_mul]
-  exact Int.ofNat_le.symm
-
-theorem RatBound.lt_iff_toExactRat_lt (r₁ r₂ : RatBound) :
-    r₁.lt r₂ ↔ Qsag.ExactRat.lt r₁.toExactRat r₂.toExactRat := by
-  unfold RatBound.lt Qsag.ExactRat.lt RatBound.toExactRat
-  dsimp only
-  rw [← Int.natCast_mul, ← Int.natCast_mul]
-  exact Int.ofNat_lt.symm
-
-theorem RatBound.exactRat_nonneg_le_iff {x y : Qsag.ExactRat}
-    (hx : 0 ≤ x.num) (hy : 0 ≤ y.num) :
-    (RatBound.ofExactRatAbs x).le (RatBound.ofExactRatAbs y) ↔
-      Qsag.ExactRat.le x y := by
-  rw [RatBound.le_iff_toExactRat_le, RatBound.toExactRat_ofNonneg hx,
-      RatBound.toExactRat_ofNonneg hy]
-
-/-- Non-negative clamping projection `max(0, x.num) / x.den` from `Qsag.ExactRat` into `Spec.RatBound`. -/
-def RatBound.clampExactRat (x : Qsag.ExactRat) : RatBound :=
-  ⟨x.num.toNat, x.den, x.den_pos⟩
-
-/-- Any `Qsag.ExactRat` bounded by `ExactRat.twoNegPow b` maps under `clampExactRat` to `atLeastBits b`. -/
-theorem RatBound.clampExactRat_atLeastBits_of_le_twoNegPow {x : Qsag.ExactRat} {b : Nat}
-    (hLe : Qsag.ExactRat.le x (Qsag.ExactRat.twoNegPow b)) :
-    (RatBound.clampExactRat x).atLeastBits b := by
-  unfold Qsag.ExactRat.le Qsag.ExactRat.twoNegPow at hLe
-  dsimp only at hLe
-  unfold RatBound.atLeastBits RatBound.clampExactRat
-  dsimp only
-  by_cases hx : 0 ≤ x.num
-  · have hEq : ((x.num.toNat : Nat) : Int) = x.num := Int.toNat_of_nonneg hx
-    apply Int.ofNat_le.mp
-    rw [Int.natCast_mul, hEq]
-    omega
-  · have hZero : x.num.toNat = 0 := Int.toNat_of_nonpos (by omega)
-    rw [hZero, Nat.zero_mul]
-    exact Nat.zero_le _
-
-theorem RatBound.clampExactRat_strictlyMoreThanBits_of_lt_twoNegPow {x : Qsag.ExactRat} {b : Nat}
-    (hLt : Qsag.ExactRat.lt x (Qsag.ExactRat.twoNegPow b)) :
-    (RatBound.clampExactRat x).strictlyMoreThanBits b := by
-  unfold Qsag.ExactRat.lt Qsag.ExactRat.twoNegPow at hLt
-  dsimp only at hLt
-  unfold RatBound.strictlyMoreThanBits RatBound.clampExactRat
-  dsimp only
-  have hPowPos : (0 : Int) < ((2 ^ b : Nat) : Int) := Int.ofNat_lt.mpr (Nat.two_pow_pos b)
-  by_cases hx : 0 ≤ x.num
-  · have hEq : ((x.num.toNat : Nat) : Int) = x.num := Int.toNat_of_nonneg hx
-    apply Int.ofNat_lt.mp
-    rw [Int.natCast_mul, hEq]
-    omega
-  · have hZero : x.num.toNat = 0 := Int.toNat_of_nonpos (by omega)
-    rw [hZero, Nat.zero_mul]
-    exact x.den_pos
 
 /-! ## 4. Canonical Fixed-Width and Prefix-Free Framed Codecs -/
 
@@ -506,15 +388,6 @@ theorem DomainTag.disjoint {t₁ t₂ : DomainTag} (hNe : t₁ ≠ t₂) (p₁ p
   Qsag.Spec.RatBound.atLeastBits_of_le
   Qsag.Spec.RatBound.ofBudget_toBudget
   Qsag.Spec.RatBound.toBudget_ofBudget
-  Qsag.Spec.RatBound.le_iff_ucRatLe
-  Qsag.Spec.RatBound.ucRatLe_iff_ofUcPair_le
-  Qsag.Spec.RatBound.ofExactRatAbs_toExactRat
-  Qsag.Spec.RatBound.toExactRat_ofNonneg
-  Qsag.Spec.RatBound.le_iff_toExactRat_le
-  Qsag.Spec.RatBound.lt_iff_toExactRat_lt
-  Qsag.Spec.RatBound.exactRat_nonneg_le_iff
-  Qsag.Spec.RatBound.clampExactRat_atLeastBits_of_le_twoNegPow
-  Qsag.Spec.RatBound.clampExactRat_strictlyMoreThanBits_of_lt_twoNegPow
   Qsag.Spec.FramedCodec.prefix_injective
   Qsag.Spec.FramedCodec.encode_injective
   Qsag.Spec.DomainTag.disjoint
