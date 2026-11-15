@@ -5270,3 +5270,2806 @@ private theorem atomicSignStep_preserves_inv
               exact Nat.le_trans hw₀ hWmLe
 
 /-- Single-turn inductive preservation theorem across every `MultiCrashWalEvent` constructor, including crashes in the middle of a reservation. -/
+theorem stepMultiCrashCustody_preserves_inv
+    {macFn : KeyedMacFn} (hMacWf : WellFormedMacFn macFn) {macKey : List UInt8}
+    (hRogueReject : ∀ b : WalRecordBody, b.epoch = 0 → b.payload = [] →
+      verifyWalMac macFn macKey (signWalRecord macFn [] b) = false)
+    {s : MultiCrashCustodyState} (ev : MultiCrashWalEvent)
+    (hInv : CustodyMultiCrashInv macFn macKey s) :
+    let (s', _) := stepMultiCrashCustody macFn macKey s ev
+    CustodyMultiCrashInv macFn macKey s' ∧
+    s.ghostWatermark ≤ s'.ghostWatermark ∧
+    (∃ newRs, s'.emittedReceipts = s.emittedReceipts ++ newRs ∧
+      (∀ w₀ : Nat,
+        w₀ ≤ s.ghostWatermark →
+        (match s.activeHold with | none => True | some (_, resEp, _) => w₀ ≤ resEp) →
+        (match s'.activeHold with | none => True | some (_, resEp, _) => w₀ ≤ resEp) ∧
+        ∀ r ∈ newRs, w₀ ≤ r.epoch)) := by
+  cases ev with
+  | signAtomic pid msg faults =>
+    unfold stepMultiCrashCustody
+    exact atomicSignStep_preserves_inv hMacWf pid msg faults hInv
+  | contenderSignAttempt contenderPid msg =>
+    unfold stepMultiCrashCustody
+    exact atomicSignStep_preserves_inv hMacWf contenderPid msg {} hInv
+  | beginReserveHoldLock pid msg faults =>
+    unfold stepMultiCrashCustody
+    cases hAh : s.activeHold with
+    | some _ =>
+      dsimp only
+      exact ⟨hInv, Nat.le_refl _, ⟨[], by simp, fun _ _ hH => ⟨by rw [hAh]; exact hH, by simp⟩⟩⟩
+    | none =>
+      dsimp only
+      rcases hInv with ⟨hVk32, hNodup, hRcpts, _, hDrvDir, hMemSafe, hNandSafe⟩
+      cases hOp : openExisting s.fs pid s.basePath s.vaultKeyId macFn macKey with
+      | mk fs1 opRes =>
+        cases opRes with
+        | error _ =>
+          dsimp +zetaDelta only
+          obtain ⟨hd, hp, hdr, hn⟩ := openExisting_err_preserves_storage hOp
+          have hFrame1 : ∀ ino < s.fs.nand.nextInode,
+              assocLookup fs1.kernel.pageCache.dirtyFiles ino = assocLookup s.fs.kernel.pageCache.dirtyFiles ino ∧
+              assocLookup fs1.driveCache.cachedFiles ino = assocLookup s.fs.driveCache.cachedFiles ino ∧
+              assocLookup fs1.nand.fileBlocks ino = assocLookup s.fs.nand.fileBlocks ino := by
+            intro ino _; rw [hp, hdr, hn]; exact ⟨rfl, rfl, rfl⟩
+          refine ⟨⟨hVk32, hNodup, hRcpts, trivial, ?_, ?_, ?_⟩, Nat.le_refl _,
+            ⟨[], by simp, fun _ _ _ => ⟨trivial, by simp⟩⟩⟩
+          · dsimp only; rw [hdr]; exact hDrvDir
+          · dsimp only; rw [hd]
+            exact entryWatermarkSafe_frame (by rw [hn]; exact Nat.le_refl _) hFrame1 hMemSafe
+          · dsimp only; rw [hn]
+            exact entryWatermarkSafe_frame (by rw [hn]; exact Nat.le_refl _) hFrame1 hNandSafe
+        | ok hAndRec =>
+          rcases hAndRec with ⟨h, rec⟩
+          obtain ⟨hd, hp, hdr, hn, hBaseEq, hVkEqH, hGid40, hWmLe⟩ :=
+            openExisting_preserves_storage_and_bounds_epoch hMemSafe hOp
+          have hFrameOpen : ∀ ino < s.fs.nand.nextInode,
+              assocLookup fs1.kernel.pageCache.dirtyFiles ino = assocLookup s.fs.kernel.pageCache.dirtyFiles ino ∧
+              assocLookup fs1.driveCache.cachedFiles ino = assocLookup s.fs.driveCache.cachedFiles ino ∧
+              assocLookup fs1.nand.fileBlocks ino = assocLookup s.fs.nand.fileBlocks ino := by
+            intro ino _; rw [hp, hdr, hn]; exact ⟨rfl, rfl, rfl⟩
+          have hFs1Mem : EntryWatermarkSafe fs1 h.vaultKeyId macFn macKey s.ghostWatermark
+              (assocLookup fs1.kernel.dirInode.unsyncedEntries h.basePath) := by
+            rw [hBaseEq, hVkEqH, hd]
+            exact entryWatermarkSafe_frame (by rw [hn]; exact Nat.le_refl _) hFrameOpen hMemSafe
+          have hFs1Nand : EntryWatermarkSafe fs1 h.vaultKeyId macFn macKey s.ghostWatermark
+              (assocLookup fs1.nand.dirNandEntries h.basePath) := by
+            rw [hBaseEq, hVkEqH, hn]
+            exact entryWatermarkSafe_frame (by rw [hn]; exact Nat.le_refl _) hFrameOpen hNandSafe
+          have hFs1Drv : fs1.driveCache.cachedDirEntries = none := by rw [hdr]; exact hDrvDir
+          dsimp +zetaDelta only
+          by_cases hCap :
+              (!(decide (rec.body.epoch < s.maxEpochCap)) ||
+               !(decide (rec.body.epoch + 1 < 2 ^ 64))) = true
+          · simp only [hCap, ↓reduceIte]
+            let fsCl := (closeVaultHandle fs1 h).toOption.getD fs1
+            have hc := posixCloseFd_preserves_storage fs1 h.pid h.lockFd
+            have hFrameCl : ∀ ino < fs1.nand.nextInode,
+                assocLookup fsCl.kernel.pageCache.dirtyFiles ino = assocLookup fs1.kernel.pageCache.dirtyFiles ino ∧
+                assocLookup fsCl.driveCache.cachedFiles ino = assocLookup fs1.driveCache.cachedFiles ino ∧
+                assocLookup fsCl.nand.fileBlocks ino = assocLookup fs1.nand.fileBlocks ino := by
+              intro ino _; dsimp only [fsCl, closeVaultHandle]
+              rw [hc.2.1, hc.2.2.1, hc.2.2.2]; exact ⟨rfl, rfl, rfl⟩
+            refine ⟨⟨hVk32, hNodup, hRcpts, trivial, ?_, ?_, ?_⟩, Nat.le_refl _,
+              ⟨[], by simp, fun _ _ _ => ⟨trivial, by simp⟩⟩⟩
+            · dsimp only [fsCl, closeVaultHandle]; rw [hc.2.2.1]; exact hFs1Drv
+            · dsimp only [fsCl, closeVaultHandle]; rw [hc.1, ← hBaseEq, ← hVkEqH]
+              exact entryWatermarkSafe_frame
+                (by rw [hc.2.2.2]; exact Nat.le_refl _)
+                hFrameCl hFs1Mem
+            · dsimp only [fsCl, closeVaultHandle]; rw [hc.2.2.2, ← hBaseEq, ← hVkEqH]
+              exact entryWatermarkSafe_frame
+                (by rw [hc.2.2.2]; exact Nat.le_refl _)
+                hFrameCl hFs1Nand
+          · simp only [hCap, Bool.false_eq_true, ↓reduceIte]
+            let reservedEp := rec.body.epoch
+            let nextPayload := encodeCustodyWalPayload s.keyKind s.maxEpochCap msg
+            cases hRep : replaceAtomic fs1 h (reservedEp + 1) nextPayload macFn macKey faults with
+            | mk fsRep restRep =>
+              rcases restRep with ⟨hAfter, repRes⟩
+              have hSafeRep := replaceAtomic_preserves_entryWatermarkSafe hMacWf
+                (by rw [hVkEqH]; exact hVk32) hGid40 hFs1Drv hFs1Mem hFs1Nand
+                (Nat.le_trans hWmLe (Nat.le_succ _)) hRep
+              rcases hSafeRep with ⟨hRepDrv, hRepCases⟩
+              dsimp +zetaDelta only
+              cases repRes with
+              | error _ =>
+                dsimp +zetaDelta only
+                rcases hRepCases with ⟨hErrMem, hErrNand⟩
+                let fsCl := (closeVaultHandle fsRep hAfter).toOption.getD fsRep
+                have hc := posixCloseFd_preserves_storage fsRep hAfter.pid hAfter.lockFd
+                have hFrameCl : ∀ ino < fsRep.nand.nextInode,
+                    assocLookup fsCl.kernel.pageCache.dirtyFiles ino = assocLookup fsRep.kernel.pageCache.dirtyFiles ino ∧
+                    assocLookup fsCl.driveCache.cachedFiles ino = assocLookup fsRep.driveCache.cachedFiles ino ∧
+                    assocLookup fsCl.nand.fileBlocks ino = assocLookup fsRep.nand.fileBlocks ino := by
+                  intro ino _; dsimp only [fsCl, closeVaultHandle]
+                  rw [hc.2.1, hc.2.2.1, hc.2.2.2]; exact ⟨rfl, rfl, rfl⟩
+                refine ⟨⟨hVk32, hNodup, hRcpts, trivial, ?_, ?_, ?_⟩, Nat.le_refl _,
+                  ⟨[], by simp, fun _ _ _ => ⟨trivial, by simp⟩⟩⟩
+                · dsimp only [fsCl, closeVaultHandle]; rw [hc.2.2.1]; exact hRepDrv
+                · dsimp only [fsCl, closeVaultHandle]; rw [hc.1, ← hBaseEq, ← hVkEqH]
+                  exact entryWatermarkSafe_frame
+                    (by rw [hc.2.2.2]; exact Nat.le_refl _)
+                    hFrameCl hErrMem
+                · dsimp only [fsCl, closeVaultHandle]; rw [hc.2.2.2, ← hBaseEq, ← hVkEqH]
+                  exact entryWatermarkSafe_frame
+                    (by rw [hc.2.2.2]; exact Nat.le_refl _)
+                    hFrameCl hErrNand
+              | ok _ =>
+                dsimp +zetaDelta only
+                rcases hRepCases with ⟨hOkMem, hOkNand⟩
+                have hRcptsUp : ∀ r ∈ s.emittedReceipts,
+                    r.epoch < reservedEp + 1 ∧ r.keyKind = s.keyKind ∧ r.vaultKeyId = s.vaultKeyId := by
+                  intro r hr
+                  obtain ⟨h1, h2, h3⟩ := hRcpts r hr
+                  exact ⟨Nat.lt_succ_of_lt (Nat.lt_of_lt_of_le h1 hWmLe), h2, h3⟩
+                have hHoldFresh :
+                    reservedEp < reservedEp + 1 ∧ ∀ r ∈ s.emittedReceipts, r.epoch ≠ reservedEp := by
+                  refine ⟨Nat.lt_succ_self _, ?_⟩
+                  intro r hr
+                  exact Nat.ne_of_lt (Nat.lt_of_lt_of_le (hRcpts r hr).1 hWmLe)
+                refine ⟨⟨hVk32, hNodup, hRcptsUp, hHoldFresh, hRepDrv, ?_, ?_⟩,
+                  Nat.le_trans hWmLe (Nat.le_succ _),
+                  ⟨[], by simp, fun _ hw₀ _ => ⟨Nat.le_trans hw₀ hWmLe, by simp⟩⟩⟩
+                · dsimp only; rw [← hBaseEq, ← hVkEqH]; exact hOkMem
+                · dsimp only; rw [← hBaseEq, ← hVkEqH]; exact hOkNand
+  | finishSignFromHold =>
+    unfold stepMultiCrashCustody
+    cases hAh : s.activeHold with
+    | none =>
+      dsimp only
+      exact ⟨hInv, Nat.le_refl _, ⟨[], by simp, fun _ _ _ => ⟨by rw [hAh]; trivial, by simp⟩⟩⟩
+    | some holdTriple =>
+      rcases holdTriple with ⟨h, reservedEp, msg⟩
+      dsimp only
+      rcases hInv with ⟨hVk32, hNodup, hRcpts, hHold, hDrvDir, hMemSafe, hNandSafe⟩
+      rw [hAh] at hHold
+      rcases hHold with ⟨hResLt, hResNe⟩
+      let fsClosed := (closeVaultHandle s.fs h).toOption.getD s.fs
+      have hc := posixCloseFd_preserves_storage s.fs h.pid h.lockFd
+      have hFrameCl : ∀ ino < s.fs.nand.nextInode,
+          assocLookup fsClosed.kernel.pageCache.dirtyFiles ino = assocLookup s.fs.kernel.pageCache.dirtyFiles ino ∧
+          assocLookup fsClosed.driveCache.cachedFiles ino = assocLookup s.fs.driveCache.cachedFiles ino ∧
+          assocLookup fsClosed.nand.fileBlocks ino = assocLookup s.fs.nand.fileBlocks ino := by
+        intro ino _; dsimp only [fsClosed, closeVaultHandle]
+        rw [hc.2.1, hc.2.2.1, hc.2.2.2]; exact ⟨rfl, rfl, rfl⟩
+      let rcpt : SignedEpochReceipt :=
+        { keyKind := s.keyKind, vaultKeyId := s.vaultKeyId, epoch := reservedEp, msg := msg }
+      have hFreshEp : ∀ e ∈ s.emittedReceipts.map (·.epoch), e ≠ reservedEp := by
+        intro e hMemE
+        rcases List.mem_map.mp hMemE with ⟨rOld, hROld, rfl⟩
+        exact hResNe rOld hROld
+      have hNodupNew : ((s.emittedReceipts ++ [rcpt]).map (·.epoch)).Nodup := by
+        rw [List.map_append]
+        exact nodup_snoc hNodup hFreshEp
+      have hRcptsNew : ∀ r ∈ s.emittedReceipts ++ [rcpt],
+          r.epoch < s.ghostWatermark ∧ r.keyKind = s.keyKind ∧ r.vaultKeyId = s.vaultKeyId := by
+        intro r hr
+        rcases List.mem_append.mp hr with hOld | hSing
+        · exact hRcpts r hOld
+        · simp only [List.mem_singleton] at hSing
+          subst hSing
+          exact ⟨hResLt, rfl, rfl⟩
+      refine ⟨⟨hVk32, hNodupNew, hRcptsNew, trivial, ?_, ?_, ?_⟩,
+        Nat.le_refl _,
+        ⟨[rcpt], rfl, fun _ _ hH => ⟨trivial, ?_⟩⟩⟩
+      · dsimp only [fsClosed, closeVaultHandle]; rw [hc.2.2.1]; exact hDrvDir
+      · dsimp only [fsClosed, closeVaultHandle]; rw [hc.1]
+        exact entryWatermarkSafe_frame
+          (by rw [hc.2.2.2]; exact Nat.le_refl _)
+          hFrameCl hMemSafe
+      · dsimp only [fsClosed, closeVaultHandle]; rw [hc.2.2.2]
+        exact entryWatermarkSafe_frame
+          (by rw [hc.2.2.2]; exact Nat.le_refl _)
+          hFrameCl hNandSafe
+      · intro r hr
+        simp only [List.mem_singleton] at hr
+        subst hr
+        exact hH
+  | midReserveCrash pid msg faults stepIdx crash =>
+    unfold stepMultiCrashCustody
+    rcases hInv with ⟨hVk32, hNodup, hRcpts, _, hDrvDir, hMemSafe, hNandSafe⟩
+    have hFin : ∀ fsMid : PosixFsState,
+        BaseEntriesSafe macFn macKey s.vaultKeyId s.basePath s.ghostWatermark fsMid →
+        CustodyMultiCrashInv macFn macKey
+          { s with fs := crash.apply fsMid, activeHold := none } := by
+      intro fsMid hSafe
+      obtain ⟨c1, c2, c3⟩ := baseEntriesSafe_after_crashStep hSafe (crash.apply_crashStep fsMid)
+      exact ⟨hVk32, hNodup, hRcpts, trivial, c1, c2, c3⟩
+    dsimp only
+    cases hOp : openExisting s.fs pid s.basePath s.vaultKeyId macFn macKey with
+    | mk fs1 opRes =>
+      cases opRes with
+      | error _ =>
+        dsimp only
+        obtain ⟨hd, hp, hdr, hn⟩ := openExisting_err_preserves_storage hOp
+        have hFrame1 : ∀ ino < s.fs.nand.nextInode,
+            assocLookup fs1.kernel.pageCache.dirtyFiles ino = assocLookup s.fs.kernel.pageCache.dirtyFiles ino ∧
+            assocLookup fs1.driveCache.cachedFiles ino = assocLookup s.fs.driveCache.cachedFiles ino ∧
+            assocLookup fs1.nand.fileBlocks ino = assocLookup s.fs.nand.fileBlocks ino := by
+          intro ino _; rw [hp, hdr, hn]; exact ⟨rfl, rfl, rfl⟩
+        have hSafe1 : BaseEntriesSafe macFn macKey s.vaultKeyId s.basePath s.ghostWatermark fs1 := by
+          refine ⟨by rw [hdr]; exact hDrvDir, ?_, ?_⟩
+          · rw [hd]
+            exact entryWatermarkSafe_frame (by rw [hn]; exact Nat.le_refl _) hFrame1 hMemSafe
+          · rw [hn]
+            exact entryWatermarkSafe_frame (by rw [hn]; exact Nat.le_refl _) hFrame1 hNandSafe
+        exact ⟨hFin fs1 hSafe1, Nat.le_refl _, ⟨[], by simp, fun _ _ _ => ⟨trivial, by simp⟩⟩⟩
+      | ok hAndRec =>
+        rcases hAndRec with ⟨h, rec⟩
+        obtain ⟨hd, hp, hdr, hn, hBaseEq, hVkEqH, hGid40, hWmLe⟩ :=
+          openExisting_preserves_storage_and_bounds_epoch hMemSafe hOp
+        have hFrameOpen : ∀ ino < s.fs.nand.nextInode,
+            assocLookup fs1.kernel.pageCache.dirtyFiles ino = assocLookup s.fs.kernel.pageCache.dirtyFiles ino ∧
+            assocLookup fs1.driveCache.cachedFiles ino = assocLookup s.fs.driveCache.cachedFiles ino ∧
+            assocLookup fs1.nand.fileBlocks ino = assocLookup s.fs.nand.fileBlocks ino := by
+          intro ino _; rw [hp, hdr, hn]; exact ⟨rfl, rfl, rfl⟩
+        have hSafe1 : BaseEntriesSafe macFn macKey s.vaultKeyId s.basePath s.ghostWatermark fs1 := by
+          refine ⟨by rw [hdr]; exact hDrvDir, ?_, ?_⟩
+          · rw [hd]
+            exact entryWatermarkSafe_frame (by rw [hn]; exact Nat.le_refl _) hFrameOpen hMemSafe
+          · rw [hn]
+            exact entryWatermarkSafe_frame (by rw [hn]; exact Nat.le_refl _) hFrameOpen hNandSafe
+        dsimp only
+        by_cases hCap :
+            (!(decide (rec.body.epoch < s.maxEpochCap)) ||
+             !(decide (rec.body.epoch + 1 < 2 ^ 64))) = true
+        · simp only [hCap, ↓reduceIte]
+          exact ⟨hFin fs1 hSafe1, Nat.le_refl _, ⟨[], by simp, fun _ _ _ => ⟨trivial, by simp⟩⟩⟩
+        · simp only [hCap, Bool.false_eq_true, ↓reduceIte]
+          have hSafe1H : BaseEntriesSafe macFn macKey h.vaultKeyId h.basePath s.ghostWatermark fs1 := by
+            rw [hBaseEq, hVkEqH]; exact hSafe1
+          have hMidSafe := replaceAtomicSteps_all_baseEntriesSafe hMacWf
+            (by rw [hVkEqH]; exact hVk32) hGid40 hSafe1H (Nat.le_trans hWmLe (Nat.le_succ _))
+            (pickStepState_mem
+              (self_mem_replaceAtomicSteps fs1 h (rec.body.epoch + 1)
+                (encodeCustodyWalPayload s.keyKind s.maxEpochCap msg) macFn macKey faults) stepIdx)
+          rw [hBaseEq, hVkEqH] at hMidSafe
+          exact ⟨hFin _ hMidSafe, Nat.le_refl _, ⟨[], by simp, fun _ _ _ => ⟨trivial, by simp⟩⟩⟩
+  | kernelPanic =>
+    unfold stepMultiCrashCustody
+    rcases hInv with ⟨hVk32, hNodup, hRcpts, _, hDrvDir, _, hNandSafe⟩
+    have hCrSafe := entryWatermarkSafe_after_crashStep (CrashStep.kernelPanic s.fs) hNandSafe
+    refine ⟨⟨hVk32, hNodup, hRcpts, trivial, rfl, ?_, ?_⟩,
+      Nat.le_refl _,
+      ⟨[], by simp, fun _ _ _ => ⟨trivial, by simp⟩⟩⟩
+    · dsimp only [KernelPanicCrash]; rw [hDrvDir]; exact hCrSafe
+    · dsimp only [KernelPanicCrash]; rw [hDrvDir]; exact hCrSafe
+  | powerLoss dirPick defaultTear overrides =>
+    unfold stepMultiCrashCustody
+    rcases hInv with ⟨hVk32, hNodup, hRcpts, _, hDrvDir, hMemSafe, hNandSafe⟩
+    let tearFn := evalFiniteTearSchedule defaultTear overrides
+    cases dirPick with
+    | revertToNand =>
+      have hCrSafe := entryWatermarkSafe_after_crashStep
+        (CrashStep.powerLoss .revertToNand tearFn s.fs) hNandSafe
+      refine ⟨⟨hVk32, hNodup, hRcpts, trivial, rfl, ?_, ?_⟩,
+        Nat.le_refl _,
+        ⟨[], by simp, fun _ _ _ => ⟨trivial, by simp⟩⟩⟩
+      · dsimp only [PowerLossCrash]; exact hCrSafe
+      · dsimp only [PowerLossCrash]; exact hCrSafe
+    | flushPendingDir =>
+      have hCrSafe := entryWatermarkSafe_after_crashStep
+        (CrashStep.powerLoss .flushPendingDir tearFn s.fs) hMemSafe
+      refine ⟨⟨hVk32, hNodup, hRcpts, trivial, rfl, ?_, ?_⟩,
+        Nat.le_refl _,
+        ⟨[], by simp, fun _ _ _ => ⟨trivial, by simp⟩⟩⟩
+      · dsimp only [PowerLossCrash]; rw [hDrvDir]; exact hCrSafe
+      · dsimp only [PowerLossCrash]; rw [hDrvDir]; exact hCrSafe
+  | unlinkLockSidecar =>
+    unfold stepMultiCrashCustody
+    rcases hInv with ⟨hVk32, hNodup, hRcpts, hHold, hDrvDir, hMemSafe, hNandSafe⟩
+    dsimp only
+    unfold posixUnlink
+    have hBaseNeLock : s.basePath ≠ walLockPath s.basePath :=
+      fun he => walLockPath_ne_base s.basePath he.symm
+    cases assocLookup s.fs.kernel.dirInode.unsyncedEntries (walLockPath s.basePath) with
+    | none =>
+      simp only [Except.toOption, Option.getD_none]
+      exact ⟨⟨hVk32, hNodup, hRcpts, hHold, hDrvDir, hMemSafe, hNandSafe⟩,
+        Nat.le_refl _, ⟨[], by simp, fun _ _ hH => ⟨hH, by simp⟩⟩⟩
+    | some _ =>
+      simp only [Except.toOption, Option.getD_some]
+      refine ⟨⟨hVk32, hNodup, hRcpts, hHold, hDrvDir, ?_, hNandSafe⟩,
+        Nat.le_refl _, ⟨[], by simp, fun _ _ hH => ⟨hH, by simp⟩⟩⟩
+      dsimp only
+      simp only [assocLookup_erase, hBaseNeLock, ↓reduceIte]
+      exact hMemSafe
+  | recreateSpoofLock actorPid spoofBytes =>
+    unfold stepMultiCrashCustody
+    rcases hInv with ⟨hVk32, hNodup, hRcpts, hHold, hDrvDir, hMemSafe, _⟩
+    dsimp only
+    let lockPath := walLockPath s.basePath
+    have hBaseNeLock : s.basePath ≠ lockPath :=
+      fun he => walLockPath_ne_base s.basePath he.symm
+    have hUnlNone :
+        assocLookup (posixUnlinkIfPresent s.fs lockPath).kernel.dirInode.unsyncedEntries lockPath = none := by
+      simp [posixUnlinkIfPresent]
+    unfold externalUnlinkAndRecreateLock
+    let newDescId := s.fs.kernel.openFds.nextDescId
+    let newIno := s.fs.nand.nextInode
+    let newFd := s.fs.nextFd
+    let stCr : PosixFsState :=
+      { kernel := { (posixUnlinkIfPresent s.fs lockPath).kernel with
+                     openFds := { fdRefs := assocInsert (actorPid, newFd) newDescId s.fs.kernel.openFds.fdRefs
+                                  descriptions := assocInsert newDescId
+                                                    { inode := newIno, writable := true, stickyFsyncErr := false }
+                                                    s.fs.kernel.openFds.descriptions
+                                  nextDescId := newDescId + 1 }
+                     dirInode := { unsyncedEntries :=
+                                     assocInsert lockPath (.regular newIno)
+                                       (posixUnlinkIfPresent s.fs lockPath).kernel.dirInode.unsyncedEntries } }
+        driveCache := s.fs.driveCache
+        nand := { s.fs.nand with
+                   fileBlocks := assocInsert newIno [] s.fs.nand.fileBlocks
+                   nextInode := newIno + 1 }
+        nextFd := newFd + 1 }
+    have hCr : posixCreateExclNoFollow (posixUnlinkIfPresent s.fs lockPath) actorPid lockPath =
+        .ok (stCr, newFd, newIno) := by
+      unfold posixCreateExclNoFollow; rw [hUnlNone]; rfl
+    rw [hCr]
+    dsimp only
+    have hWr :
+        (posixPwriteAll stCr actorPid newFd spoofBytes).toOption.getD stCr =
+          { stCr with
+             kernel := { stCr.kernel with
+                          pageCache := { dirtyFiles := assocInsert newIno spoofBytes s.fs.kernel.pageCache.dirtyFiles } } } := by
+      unfold posixPwriteAll
+      simp only [stCr, resolveOpenFd_insert_self, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+      rfl
+    let stWr := (posixPwriteAll stCr actorPid newFd spoofBytes).toOption.getD stCr
+    have hSy :
+        (posixSyncAllMedia stWr actorPid newFd false).1 =
+          { stWr with
+              kernel := { stWr.kernel with
+                            pageCache := { dirtyFiles := assocErase newIno stWr.kernel.pageCache.dirtyFiles } }
+              driveCache := { stWr.driveCache with
+                               cachedFiles := assocErase newIno stWr.driveCache.cachedFiles }
+              nand := { stWr.nand with
+                         fileBlocks := assocInsert newIno spoofBytes
+                                         stWr.nand.fileBlocks } } := by
+      change (posixSyncAllMedia stWr actorPid newFd false).1 = _
+      dsimp only [stWr]
+      rw [hWr]
+      unfold posixSyncAllMedia readInodeHierarchy pendingVolatileWrite
+      simp [stCr, resolveOpenFd_insert_self]
+    let stSy := (posixSyncAllMedia stWr actorPid newFd false).1
+    let stDir := (posixSyncParentDir stSy false).1
+    have hc := posixCloseFd_preserves_storage stDir actorPid newFd
+    have hFrameSpoof : ∀ ino < s.fs.nand.nextInode,
+        assocLookup stDir.kernel.pageCache.dirtyFiles ino = assocLookup s.fs.kernel.pageCache.dirtyFiles ino ∧
+        assocLookup stDir.driveCache.cachedFiles ino = assocLookup s.fs.driveCache.cachedFiles ino ∧
+        assocLookup stDir.nand.fileBlocks ino = assocLookup s.fs.nand.fileBlocks ino := by
+      intro ino hLt
+      have hNe : ino ≠ newIno := Nat.ne_of_lt hLt
+      simp only [stDir, stSy, posixSyncParentDir, Bool.false_eq_true, ↓reduceIte]
+      rw [hSy]
+      dsimp only [stWr]
+      rw [hWr]
+      simp [stCr, hNe]
+    have hNextLe : s.fs.nand.nextInode ≤ stDir.nand.nextInode := by
+      simp only [stDir, stSy, posixSyncParentDir, Bool.false_eq_true, ↓reduceIte]
+      rw [hSy]; dsimp only [stWr]; rw [hWr]; exact Nat.le_succ _
+    have hBaseEntryEq :
+        assocLookup stDir.kernel.dirInode.unsyncedEntries s.basePath =
+          assocLookup s.fs.kernel.dirInode.unsyncedEntries s.basePath := by
+      simp only [stDir, stSy, posixSyncParentDir, Bool.false_eq_true, ↓reduceIte]
+      rw [hSy]; dsimp only [stWr]; rw [hWr]
+      simp [stCr, posixUnlinkIfPresent, hBaseNeLock]
+    have hDirBaseEq :
+        assocLookup stDir.nand.dirNandEntries s.basePath =
+          assocLookup s.fs.kernel.dirInode.unsyncedEntries s.basePath := by
+      simp only [stDir, posixSyncParentDir, Bool.false_eq_true, ↓reduceIte]
+      exact hBaseEntryEq
+    have hTargetSafe : EntryWatermarkSafe stDir s.vaultKeyId macFn macKey s.ghostWatermark
+        (assocLookup s.fs.kernel.dirInode.unsyncedEntries s.basePath) :=
+      entryWatermarkSafe_frame hNextLe hFrameSpoof hMemSafe
+    let stFin := (posixCloseFd stDir actorPid newFd).toOption.getD stDir
+    have hFrameFin : ∀ ino < stDir.nand.nextInode,
+        assocLookup stFin.kernel.pageCache.dirtyFiles ino = assocLookup stDir.kernel.pageCache.dirtyFiles ino ∧
+        assocLookup stFin.driveCache.cachedFiles ino = assocLookup stDir.driveCache.cachedFiles ino ∧
+        assocLookup stFin.nand.fileBlocks ino = assocLookup stDir.nand.fileBlocks ino := by
+      intro ino _; dsimp only [stFin]; rw [hc.2.1, hc.2.2.1, hc.2.2.2]; exact ⟨rfl, rfl, rfl⟩
+    have hFinSafe : EntryWatermarkSafe stFin s.vaultKeyId macFn macKey s.ghostWatermark
+        (assocLookup s.fs.kernel.dirInode.unsyncedEntries s.basePath) :=
+      entryWatermarkSafe_frame (by dsimp only [stFin]; rw [hc.2.2.2]; exact Nat.le_refl _)
+        hFrameFin hTargetSafe
+    refine ⟨⟨hVk32, hNodup, hRcpts, hHold, ?_, ?_, ?_⟩,
+      Nat.le_refl _, ⟨[], by simp, fun _ _ hH => ⟨hH, by simp⟩⟩⟩
+    · change stFin.driveCache.cachedDirEntries = none
+      dsimp only [stFin]; rw [hc.2.2.1]; rfl
+    · change EntryWatermarkSafe stFin s.vaultKeyId macFn macKey s.ghostWatermark
+        (assocLookup stFin.kernel.dirInode.unsyncedEntries s.basePath)
+      dsimp only [stFin]; rw [hc.1, hBaseEntryEq]; exact hFinSafe
+    · change EntryWatermarkSafe stFin s.vaultKeyId macFn macKey s.ghostWatermark
+        (assocLookup stFin.nand.dirNandEntries s.basePath)
+      dsimp only [stFin]; rw [hc.2.2.2, hDirBaseEq]; exact hFinSafe
+  | attemptReprovisionGenesis actorPid newNonce =>
+    unfold stepMultiCrashCustody
+    rcases hInv with ⟨hVk32, hNodup, hRcpts, hHold, hDrvDir, hMemSafe, hNandSafe⟩
+    dsimp only
+    have hOut := provisionGenesis_noFault_outcome s.fs actorPid s.basePath
+      s.vaultKeyId newNonce [] macFn []
+    cases hGen : provisionGenesis s.fs actorPid s.basePath s.vaultKeyId newNonce [] macFn [] {} with
+    | mk fs' res' =>
+      rw [hGen] at hOut
+      dsimp only at hOut ⊢
+      rcases hOut with hAbort | hRogueOk
+      · rcases hAbort with ⟨hDrvEq, hMemEq, hNandEq, hNextLe, hFrame⟩
+        refine ⟨⟨hVk32, hNodup, hRcpts, hHold, ?_, ?_, ?_⟩,
+          Nat.le_refl _, ⟨[], by simp, fun _ _ hH => ⟨hH, by simp⟩⟩⟩
+        · dsimp only; rw [hDrvEq]; exact hDrvDir
+        · dsimp only; rw [hMemEq]; exact entryWatermarkSafe_frame hNextLe hFrame hMemSafe
+        · dsimp only; rw [hNandEq]; exact entryWatermarkSafe_frame hNextLe hFrame hNandSafe
+      · rcases hRogueOk with ⟨_, hNonce32, _, _, hDrvNone, hMemReg, hNandReg, hInoLt, hPg, hDr, hBs⟩
+        let rogueBody : WalRecordBody :=
+          { vaultKeyId := s.vaultKeyId
+            lockGenesisId := computeLockGenesisId s.fs.nand.nextInode newNonce
+            epoch := 0
+            payload := [] }
+        let rogueRec := signWalRecord macFn [] rogueBody
+        have hRogueWf : rogueRec.WellFormed :=
+          signWalRecord_wellFormed hMacWf []
+            ⟨hVk32, computeLockGenesisId_length hNonce32,
+             Nat.pow_pos (by decide : 0 < 2), Nat.pow_pos (by decide : 0 < 2)⟩
+        have hRogueSafe : EntryWatermarkSafe fs' s.vaultKeyId macFn macKey s.ghostWatermark
+            (some (.regular (s.fs.nand.nextInode + 1))) := by
+          refine ⟨hInoLt, hPg, hDr, encodeWalRecord rogueRec, hBs, ?_⟩
+          intro rec hDec _ hVerTrue
+          rw [decodeWalRecord_encodeWalRecord hRogueWf] at hDec
+          injection hDec with hRecEq
+          rw [← hRecEq] at hVerTrue
+          have hRej := hRogueReject rogueBody rfl rfl
+          rw [hRej] at hVerTrue
+          cases hVerTrue
+        refine ⟨⟨hVk32, hNodup, hRcpts, hHold, hDrvNone, ?_, ?_⟩,
+          Nat.le_refl _, ⟨[], by simp, fun _ _ hH => ⟨hH, by simp⟩⟩⟩
+        · dsimp only; rw [hMemReg]; exact hRogueSafe
+        · dsimp only; rw [hNandReg]; exact hRogueSafe
+  | deleteWalRecord =>
+    unfold stepMultiCrashCustody
+    rcases hInv with ⟨hVk32, hNodup, hRcpts, hHold, hDrvDir, hMemSafe, hNandSafe⟩
+    dsimp only
+    unfold posixUnlink
+    cases assocLookup s.fs.kernel.dirInode.unsyncedEntries s.basePath with
+    | none =>
+      simp only [Except.toOption, Option.getD_none]
+      exact ⟨⟨hVk32, hNodup, hRcpts, hHold, hDrvDir, hMemSafe, hNandSafe⟩,
+        Nat.le_refl _, ⟨[], by simp, fun _ _ hH => ⟨hH, by simp⟩⟩⟩
+    | some _ =>
+      simp only [Except.toOption, Option.getD_some]
+      refine ⟨⟨hVk32, hNodup, hRcpts, hHold, hDrvDir, ?_, hNandSafe⟩,
+        Nat.le_refl _, ⟨[], by simp, fun _ _ hH => ⟨hH, by simp⟩⟩⟩
+      dsimp only
+      simp only [assocLookup_erase, ↓reduceIte]
+      trivial
+  | plantSymlink entryName targetName =>
+    unfold stepMultiCrashCustody
+    rcases hInv with ⟨hVk32, hNodup, hRcpts, hHold, hDrvDir, hMemSafe, hNandSafe⟩
+    dsimp only
+    unfold posixCreateSymlink
+    cases assocLookup s.fs.kernel.dirInode.unsyncedEntries entryName with
+    | some _ =>
+      simp only [Except.toOption, Option.getD_none]
+      exact ⟨⟨hVk32, hNodup, hRcpts, hHold, hDrvDir, hMemSafe, hNandSafe⟩,
+        Nat.le_refl _, ⟨[], by simp, fun _ _ hH => ⟨hH, by simp⟩⟩⟩
+    | none =>
+      simp only [Except.toOption, Option.getD_some]
+      refine ⟨⟨hVk32, hNodup, hRcpts, hHold, hDrvDir, ?_, hNandSafe⟩,
+        Nat.le_refl _, ⟨[], by simp, fun _ _ hH => ⟨hH, by simp⟩⟩⟩
+      dsimp only
+      by_cases hEq : s.basePath = entryName
+      · simp only [assocLookup_insert, hEq, ↓reduceIte]
+        trivial
+      · simp only [assocLookup_insert, hEq, ↓reduceIte]
+        exact hMemSafe
+
+/-- Multi-step inductive trace invariance across arbitrary `List MultiCrashWalEvent` sequences. -/
+theorem runMultiCrashCustodyTrace_preserves_inv
+    {macFn : KeyedMacFn} (hMacWf : WellFormedMacFn macFn) {macKey : List UInt8}
+    (hRogueReject : ∀ b : WalRecordBody, b.epoch = 0 → b.payload = [] →
+      verifyWalMac macFn macKey (signWalRecord macFn [] b) = false)
+    {s : MultiCrashCustodyState} (trace : List MultiCrashWalEvent)
+    (hInv : CustodyMultiCrashInv macFn macKey s) :
+    let sFinal := runMultiCrashCustodyTrace macFn macKey s trace
+    CustodyMultiCrashInv macFn macKey sFinal ∧
+    s.ghostWatermark ≤ sFinal.ghostWatermark ∧
+    (∃ newRs, sFinal.emittedReceipts = s.emittedReceipts ++ newRs ∧
+      (∀ w₀ : Nat,
+        w₀ ≤ s.ghostWatermark →
+        (match s.activeHold with | none => True | some (_, resEp, _) => w₀ ≤ resEp) →
+        (match sFinal.activeHold with | none => True | some (_, resEp, _) => w₀ ≤ resEp) ∧
+        ∀ r ∈ newRs, w₀ ≤ r.epoch)) := by
+  induction trace generalizing s with
+  | nil =>
+    dsimp +zetaDelta only [runMultiCrashCustodyTrace]
+    exact ⟨hInv, Nat.le_refl _, ⟨[], by simp, fun _ _ hH => ⟨hH, by simp⟩⟩⟩
+  | cons ev rest ih =>
+    dsimp +zetaDelta only [runMultiCrashCustodyTrace]
+    have hStep := stepMultiCrashCustody_preserves_inv hMacWf hRogueReject ev hInv
+    cases hSt : stepMultiCrashCustody macFn macKey s ev with
+    | mk s1 out1 =>
+      rw [hSt] at hStep
+      dsimp +zetaDelta only at hStep ⊢
+      rcases hStep with ⟨hInv1, hWm1, ⟨rs1, hEq1, hBound1⟩⟩
+      have hRest := ih hInv1
+      dsimp +zetaDelta only at hRest
+      rcases hRest with ⟨hInvF, hWmF, ⟨rs2, hEq2, hBound2⟩⟩
+      refine ⟨hInvF, Nat.le_trans hWm1 hWmF, ⟨rs1 ++ rs2, ?_, ?_⟩⟩
+      · rw [hEq2, hEq1, List.append_assoc]
+      · intro w₀ hw₀ hH0
+        obtain ⟨hH1, hB1⟩ := hBound1 w₀ hw₀ hH0
+        obtain ⟨hHF, hB2⟩ := hBound2 w₀ (Nat.le_trans hw₀ hWm1) hH1
+        refine ⟨hHF, ?_⟩
+        intro r hr
+        rcases List.mem_append.mp hr with hr1 | hr2
+        · exact hB1 r hr1
+        · exact hB2 r hr2
+
+theorem runMultiCrashCustodyTrace_append (macFn : KeyedMacFn) (macKey : List UInt8)
+    (s : MultiCrashCustodyState) (t₁ t₂ : List MultiCrashWalEvent) :
+    runMultiCrashCustodyTrace macFn macKey s (t₁ ++ t₂) =
+      runMultiCrashCustodyTrace macFn macKey (runMultiCrashCustodyTrace macFn macKey s t₁) t₂ := by
+  induction t₁ generalizing s with
+  | nil => rfl
+  | cons ev rest ih =>
+    simp only [List.cons_append, runMultiCrashCustodyTrace]
+    exact ih (stepMultiCrashCustody macFn macKey s ev).1
+
+/-- **FLAGSHIP THEOREM 3 (`reserve_before_sign_multi_crash_epoch_uniqueness`)**:
+    For **every** stateful signing key family (`StatefulKeyKind`: `.beltLatch`, `.frontier`,
+    `.policyGuard`) provisioned via `initProvisionedCustodyState`, across **arbitrary** multi-turn
+    event traces `prefixTrace ++ suffixTrace` interleaving atomic signing, split-phase lock holds,
+    concurrent contenders, crashes at every syscall boundary INSIDE a reservation
+    (`midReserveCrash`, either crash kind), `KernelPanicCrash`, `PowerLossCrash` with `512B`/`4KiB` `SectorTearMask`s,
+    `.lock` `unlink` + spoofed recreation, rogue genesis re-provisioning, symlink attacks, and
+    WAL deletion attempts:
+    1. **Strict Global Epoch Uniqueness**: `(sFinal.emittedReceipts.map (·.epoch)).Nodup` — no epoch
+       is ever emitted twice,
+    2. **Zero Same-Epoch Message Collisions**: any `r₁, r₂ ∈ sFinal.emittedReceipts` sharing
+       `r₁.epoch = r₂.epoch` satisfy `r₁ = r₂` and `r₁.msg = r₂.msg`,
+    3. **Strict Post-Prefix Monotonicity**: `sFinal.emittedReceipts = sMid.emittedReceipts ++ newRs`,
+       and whenever `sMid.activeHold = none`, every receipt `r ∈ newRs` emitted during `suffixTrace`
+       satisfies `sMid.ghostWatermark ≤ r.epoch`,
+    4. **Zero Epoch-`0` Amnesia / Reset**: once epoch `0` has been emitted (`∃ r₀ ∈ sMid.emittedReceipts, r₀.epoch = 0`),
+       no subsequent suffix event ever emits epoch `0` (`∀ r ∈ newRs, r.epoch ≠ 0`); likewise once
+       `1 ≤ sMid.ghostWatermark` and `sMid.activeHold = none`, every `r ∈ newRs` satisfies `0 < r.epoch`! -/
+theorem reserve_before_sign_multi_crash_epoch_uniqueness
+    {pid : Pid} {basePath : DirName} {keyKind : StatefulKeyKind}
+    {vaultKeyId genesisNonce : List UInt8} {maxEpochCap : Nat}
+    {macFn : KeyedMacFn} (hMacWf : WellFormedMacFn macFn) {macKey : List UInt8}
+    (hRogueReject : ∀ b : WalRecordBody, b.epoch = 0 → b.payload = [] →
+      verifyWalMac macFn macKey (signWalRecord macFn [] b) = false)
+    {s₀ : MultiCrashCustodyState}
+    (hInit : initProvisionedCustodyState pid basePath keyKind vaultKeyId genesisNonce
+               maxEpochCap macFn macKey = some s₀)
+    (prefixTrace suffixTrace : List MultiCrashWalEvent) :
+    let sMid := runMultiCrashCustodyTrace macFn macKey s₀ prefixTrace
+    let sFinal := runMultiCrashCustodyTrace macFn macKey s₀ (prefixTrace ++ suffixTrace)
+    (sFinal.emittedReceipts.map (·.epoch)).Nodup ∧
+    (∀ r₁ ∈ sFinal.emittedReceipts, ∀ r₂ ∈ sFinal.emittedReceipts,
+      r₁.epoch = r₂.epoch → r₁ = r₂ ∧ r₁.msg = r₂.msg) ∧
+    sMid.ghostWatermark ≤ sFinal.ghostWatermark ∧
+    ∃ newRs : List SignedEpochReceipt,
+      sFinal.emittedReceipts = sMid.emittedReceipts ++ newRs ∧
+      (sMid.activeHold = none → ∀ r ∈ newRs, sMid.ghostWatermark ≤ r.epoch) ∧
+      ((∃ r₀ ∈ sMid.emittedReceipts, r₀.epoch = 0) → ∀ r ∈ newRs, r.epoch ≠ 0) ∧
+      (1 ≤ sMid.ghostWatermark → sMid.activeHold = none → ∀ r ∈ newRs, 0 < r.epoch) := by
+  dsimp +zetaDelta only
+  rw [runMultiCrashCustodyTrace_append]
+  obtain ⟨hInv0, _, _, _⟩ := initProvisionedCustodyState_inv hInit
+  obtain ⟨hInvMid, _, _⟩ := runMultiCrashCustodyTrace_preserves_inv hMacWf hRogueReject prefixTrace hInv0
+  let sMid := runMultiCrashCustodyTrace macFn macKey s₀ prefixTrace
+  obtain ⟨hInvFin, hWmLe, ⟨newRs, hAppEq, hWmBound⟩⟩ :=
+    runMultiCrashCustodyTrace_preserves_inv hMacWf hRogueReject suffixTrace hInvMid
+  let sFinal := runMultiCrashCustodyTrace macFn macKey sMid suffixTrace
+  have hNodupFin : (sFinal.emittedReceipts.map (·.epoch)).Nodup := hInvFin.2.1
+  refine ⟨hNodupFin, ?_, hWmLe, ⟨newRs, hAppEq, ?_, ?_, ?_⟩⟩
+  · intro r₁ hr₁ r₂ hr₂ hEpEq
+    have hEq := eq_of_mem_of_map_nodup hNodupFin hr₁ hr₂ hEpEq
+    exact ⟨hEq, congrArg SignedEpochReceipt.msg hEq⟩
+  · intro hHoldNone r hr
+    have hB := hWmBound sMid.ghostWatermark (Nat.le_refl _)
+      (by dsimp only [sMid] at *; rw [hHoldNone]; trivial)
+    exact hB.2 r hr
+  · intro hHasZero r hr hEqZero
+    rcases hHasZero with ⟨r₀, hr₀, hEp0⟩
+    have hNodupApp : ((sMid.emittedReceipts ++ newRs).map (·.epoch)).Nodup := by
+      rw [← hAppEq]; exact hNodupFin
+    have hDisjoint : ∀ (xs ys : List Nat),
+        (xs ++ ys).Nodup → ∀ a ∈ xs, ∀ b ∈ ys, a ≠ b := by
+      intro xs ys hNd
+      induction xs with
+      | nil => intro a ha; cases ha
+      | cons x rest ih =>
+        rw [List.cons_append, List.Nodup, List.pairwise_cons] at hNd
+        intro a ha b hb
+        simp only [List.mem_cons] at ha
+        rcases ha with rfl | haRest
+        · exact hNd.1 b (List.mem_append.mpr (Or.inr hb))
+        · exact ih hNd.2 a haRest b hb
+    rw [List.map_append] at hNodupApp
+    have hNe := hDisjoint _ _ hNodupApp r₀.epoch (List.mem_map_of_mem hr₀)
+      r.epoch (List.mem_map_of_mem hr)
+    rw [hEp0, hEqZero] at hNe
+    exact hNe rfl
+  · intro hGe1 hHoldNone r hr
+    have hB := hWmBound sMid.ghostWatermark (Nat.le_refl _)
+      (by dsimp only [sMid] at *; rw [hHoldNone]; trivial)
+    exact Nat.lt_of_lt_of_le hGe1 (hB.2 r hr)
+
+/-- **Environment Anti-Narrowing Completeness (`honest_sign_complete_when_healthy`)**:
+    Whenever the vault is durable & uncontended (`openFds = {}`, `flockTable = {}`, `VaultDurableAt`),
+    `rec.body.epoch < maxEpochCap`, and `rec.body.epoch + 1 < 2^64`, `execReserveBeforeSignAtomic`
+    with `faults = {}` **succeeds** and emits `some receipt` at `rec.body.epoch`! -/
+theorem honest_sign_complete_when_healthy
+    {st : PosixFsState} {basePath : DirName} {lockIno : InodeId} {genesisNonce : List UInt8}
+    {macFn : KeyedMacFn} {macKey : List UInt8}
+    {rec : WalRecord} (pid : Pid) (keyKind : StatefulKeyKind) (maxEpochCap : Nat) (msg : List UInt8)
+    (hFdsEmpty : st.kernel.openFds = {})
+    (hFlkEmpty : st.kernel.flockTable = {})
+    (hDur : VaultDurableAt st basePath lockIno genesisNonce macFn macKey rec)
+    (hLtCap : rec.body.epoch < maxEpochCap)
+    (hLt64 : rec.body.epoch + 1 < 2 ^ 64) :
+    ∃ st',
+      execReserveBeforeSignAtomic st pid basePath keyKind rec.body.vaultKeyId maxEpochCap msg
+        macFn macKey {} =
+      (st', some { keyKind := keyKind
+                   vaultKeyId := rec.body.vaultKeyId
+                   epoch := rec.body.epoch
+                   msg := msg }) := by
+  rcases hDur with ⟨_, hLock64, hNonceLen, hRecWf, hRecGid, hRecVer,
+    _, hLockUnsync, _, hLockPg, hLockDrv, hLockNand,
+    recIno, _, hRecUnsync, _, hRecPg, hRecDrv, hRecNand⟩
+  have hSealDec :
+      decodeLockSidecar (encodeLockSidecar { sealedLockInode := lockIno, genesisNonce := genesisNonce }) =
+        some { sealedLockInode := lockIno, genesisNonce := genesisNonce } :=
+    decodeLockSidecar_encodeLockSidecar ⟨hLock64, hNonceLen⟩
+  have hRecDec : decodeWalRecord (encodeWalRecord rec) = some rec :=
+    decodeWalRecord_encodeWalRecord hRecWf
+  let st1 : PosixFsState :=
+    { st with
+        kernel := { st.kernel with
+                      openFds := { fdRefs := [((pid, st.nextFd), 1)]
+                                   descriptions := [(1, { inode := lockIno, writable := true, stickyFsyncErr := false })]
+                                   nextDescId := 2 } }
+        nextFd := st.nextFd + 1 }
+  have hOp1 : posixOpenExistingNoFollow st pid (walLockPath basePath) true = .ok (st1, st.nextFd) := by
+    unfold posixOpenExistingNoFollow resolveDentryNoFollow
+    rw [hLockUnsync, hFdsEmpty]
+    rfl
+  let st2 : PosixFsState :=
+    { st1 with kernel := { st1.kernel with flockTable := { locks := [(lockIno, 1)] } } }
+  have hFlk : posixFlockExNb st1 pid st.nextFd = .ok st2 := by
+    unfold posixFlockExNb resolveOpenFd FlockTable.owner
+    dsimp only [st1]
+    rw [hFlkEmpty]
+    simp [assocInsert, st2, st1]
+  have hFst : posixFstatDescAndInode st2 pid st.nextFd = .ok (1, lockIno) := by
+    simp [posixFstatDescAndInode, resolveOpenFd, st2, st1]
+  have hPread1 :
+      posixPreadAll st2 pid st.nextFd =
+        .ok (encodeLockSidecar { sealedLockInode := lockIno, genesisNonce := genesisNonce }) := by
+    unfold posixPreadAll resolveOpenFd readInodeHierarchy pendingVolatileWrite
+    simp [st2, st1, hLockPg, hLockDrv, hLockNand]
+  let st3 : PosixFsState :=
+    { st2 with
+        kernel := { st2.kernel with
+                      openFds := { fdRefs := assocInsert (pid, st.nextFd + 1) 2 st2.kernel.openFds.fdRefs
+                                   descriptions := assocInsert 2 { inode := recIno, writable := false, stickyFsyncErr := false }
+                                                     st2.kernel.openFds.descriptions
+                                   nextDescId := 3 } }
+        nextFd := st.nextFd + 2 }
+  have hOp2 : posixOpenExistingNoFollow st2 pid basePath false = .ok (st3, st.nextFd + 1) := by
+    unfold posixOpenExistingNoFollow resolveDentryNoFollow
+    dsimp only [st2, st1]
+    rw [hRecUnsync]
+  have hPread2 : posixPreadAll st3 pid (st.nextFd + 1) = .ok (encodeWalRecord rec) := by
+    have hRes3 : resolveOpenFd st3.kernel.openFds pid (st.nextFd + 1) =
+        some (2, { inode := recIno, writable := false, stickyFsyncErr := false }) := by
+      dsimp +zetaDelta only [st3]
+      exact resolveOpenFd_insert_self st2.kernel.openFds pid (st.nextFd + 1) 2 _
+    unfold posixPreadAll
+    rw [hRes3]
+    simp only [Bool.false_eq_true, ↓reduceIte]
+    unfold readInodeHierarchy pendingVolatileWrite
+    dsimp +zetaDelta only [st3, st2, st1]
+    rw [hRecPg, hRecDrv, hRecNand]
+  let st4 : PosixFsState :=
+    { st3 with
+        kernel := { st3.kernel with
+                      openFds := { fdRefs := [((pid, st.nextFd), 1)]
+                                   descriptions := [(1, { inode := lockIno, writable := true, stickyFsyncErr := false })]
+                                   nextDescId := 3 }
+                      flockTable := { locks := [(lockIno, 1)] } } }
+  have hCloseRec : (posixCloseFd st3 pid (st.nextFd + 1)).toOption.getD st3 = st4 := by
+    unfold posixCloseFd
+    dsimp only [st3, st2, st1]
+    have hEraseFd :
+        assocErase (pid, st.nextFd + 1)
+          (assocInsert (pid, st.nextFd + 1) 2 [((pid, st.nextFd), 1)]) =
+          [((pid, st.nextFd), 1)] := by
+      have hFdNe : (pid, st.nextFd + 1) ≠ (pid, st.nextFd) :=
+        fun hc => Nat.ne_of_gt (Nat.lt_succ_self st.nextFd) (Prod.mk.inj hc).2
+      simp only [assocInsert, assocErase, ↓reduceIte, hFdNe]
+    rw [assocLookup_insert_self, hEraseFd]
+    dsimp only
+    have hNoRef2 : descHasAnyRef [((pid, st.nextFd), 1)] 2 = false := rfl
+    rw [hNoRef2]
+    simp only [Bool.false_eq_true, ↓reduceIte, assocLookup_insert_self]
+    have hLockNot2 : (assocLookup [(lockIno, (1 : OpenDescriptionId))] recIno == some 2) = false := by
+      by_cases hSame : recIno = lockIno <;> simp [assocLookup, hSame]
+    rw [hLockNot2]
+    have hEraseDesc2 :
+        assocErase (2 : OpenDescriptionId)
+          (assocInsert (2 : OpenDescriptionId)
+            ({ inode := recIno, writable := false, stickyFsyncErr := false } : OpenFileDesc)
+            [(1, { inode := lockIno, writable := true, stickyFsyncErr := false })]) =
+          [(1, { inode := lockIno, writable := true, stickyFsyncErr := false })] := by
+      have h2Ne1 : (2 : OpenDescriptionId) ≠ 1 := by decide
+      simp only [assocInsert, assocErase, ↓reduceIte, h2Ne1]
+    simp only [Bool.false_eq_true, ↓reduceIte, hEraseDesc2, Except.toOption, Option.getD]
+    rfl
+  have hOpenOk :
+      openExisting st pid basePath rec.body.vaultKeyId macFn macKey =
+        (st4, .ok ({ pid := pid
+                     basePath := basePath
+                     lockFd := st.nextFd
+                     lockDescId := 1
+                     lockInode := lockIno
+                     lockGenesisId := computeLockGenesisId lockIno genesisNonce
+                     vaultKeyId := rec.body.vaultKeyId
+                     ioPoisoned := false }, rec)) := by
+    unfold openExisting
+    rw [hOp1]; dsimp +zetaDelta only
+    rw [hFlk]; dsimp +zetaDelta only
+    rw [hFst, hPread1]; dsimp +zetaDelta only
+    rw [hSealDec]; dsimp +zetaDelta only
+    simp only [bne_self_eq_false, Bool.false_eq_true, ↓reduceIte]
+    rw [hOp2]; dsimp +zetaDelta only
+    rw [hPread2]; dsimp +zetaDelta only
+    rw [hCloseRec]; dsimp +zetaDelta only
+    rw [hRecDec]; dsimp +zetaDelta only
+    have hGidFalse : (rec.body.lockGenesisId != computeLockGenesisId lockIno genesisNonce) = false := by
+      rw [hRecGid]; exact bne_self_eq_false _
+    rw [hGidFalse, bne_self_eq_false, hRecVer]
+    simp
+  unfold execReserveBeforeSignAtomic
+  rw [hOpenOk]
+  dsimp +zetaDelta only
+  have hCapFalse :
+      (!(decide (rec.body.epoch < maxEpochCap)) || !(decide (rec.body.epoch + 1 < 2 ^ 64))) = false := by
+    simp [hLtCap, hLt64]
+  rw [hCapFalse]
+  simp only [Bool.false_eq_true, ↓reduceIte]
+  have hPayLt32 : (encodeCustodyWalPayload keyKind maxEpochCap msg).length < 2 ^ 32 :=
+    encodeCustodyWalPayload_lt_two_pow_32 keyKind maxEpochCap msg
+  unfold replaceAtomic
+  dsimp +zetaDelta only
+  have hRepBndFalse :
+      (!(decide (rec.body.epoch + 1 < 2 ^ 64)) ||
+       !(decide ((encodeCustodyWalPayload keyKind maxEpochCap msg).length < 2 ^ 32))) = false := by
+    simp [hLt64, hPayLt32]
+  rw [hRepBndFalse]
+  have hResSt4 :
+      resolveOpenFd st4.kernel.openFds pid st.nextFd =
+        some (1, { inode := lockIno, writable := true, stickyFsyncErr := false }) := by
+    simp [resolveOpenFd, st4]
+  have hFlkSt4 : st4.kernel.flockTable.owner lockIno = some 1 := by
+    simp [FlockTable.owner, st4]
+  rw [hResSt4, hFlkSt4]
+  simp only [Bool.false_eq_true, ↓reduceIte, bne_self_eq_false, Bool.or_self]
+  unfold posixCreateExclNoFollow
+  have hTmpCleared :
+      assocLookup (posixUnlinkIfPresent st4 (walTmpPath basePath)).kernel.dirInode.unsyncedEntries
+        (walTmpPath basePath) = none := by
+    simp [posixUnlinkIfPresent]
+  rw [hTmpCleared]
+  dsimp +zetaDelta only
+  unfold posixPwriteAll
+  simp only [resolveOpenFd_insert_self, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+  unfold posixSyncAllMedia readInodeHierarchy pendingVolatileWrite
+  simp only [resolveOpenFd_insert_self, Bool.false_eq_true, ↓reduceIte, assocLookup_insert_self]
+  unfold posixRename
+  have hTmpAfterClose :
+      ∀ (sX : PosixFsState) (pX : Pid) (fX : FdId),
+        ((posixCloseFd sX pX fX).toOption.getD sX).kernel.dirInode = sX.kernel.dirInode :=
+    fun sX pX fX => (posixCloseFd_preserves_storage sX pX fX).1
+  rw [hTmpAfterClose]
+  simp only [assocLookup_insert_self]
+  unfold posixSyncParentDir
+  simp only [Bool.false_eq_true, ↓reduceIte]
+  exact ⟨_, rfl⟩
+
+/-! ### Unified Ceremony Journal, Deterministic Replay Views, & Crash-Prefix Atomicity (`G1-H`) -/
+
+/-- Exact fixed-width byte prefix splitter (`splitExactBytes n bs = some (bs.take n, bs.drop n)`). -/
+def splitExactBytes (n : Nat) (bs : List UInt8) : Option (List UInt8 × List UInt8) :=
+  if bs.length < n then none else some (bs.take n, bs.drop n)
+
+@[simp]
+theorem splitExactBytes_append {n : Nat} {xs ys : List UInt8} (hLen : xs.length = n) :
+    splitExactBytes n (xs ++ ys) = some (xs, ys) := by
+  unfold splitExactBytes
+  have hNotLt : ¬ ((xs ++ ys).length < n) := by
+    rw [List.length_append, hLen]
+    exact Nat.not_lt_of_ge (Nat.le_add_right n ys.length)
+  simp only [hNotLt, ↓reduceIte,
+    take_append_of_len_eq hLen,
+    drop_append_of_len_eq hLen]
+
+/-- Lifecycle phase recorded in the unified per-key `CeremonyJournalRecord`. -/
+inductive CeremonyRecordPhase where
+  | genesisIdle     -- Epoch-0 provisioned journal before any ceremony executes
+  | round1Reserved  -- Durable intent & all resource burns committed BEFORE Round-1 network output
+  | released        -- Final ceremony signature release committed
+  deriving Repr, DecidableEq
+
+/-- Canonical single-byte tag for `CeremonyRecordPhase`. -/
+def CeremonyRecordPhase.encodeByte : CeremonyRecordPhase → UInt8
+  | .genesisIdle    => 0x00
+  | .round1Reserved => 0x01
+  | .released       => 0x02
+
+/-- Canonical single-byte decoder for `CeremonyRecordPhase`. -/
+def CeremonyRecordPhase.decodeByte : UInt8 → Option CeremonyRecordPhase
+  | 0x00 => some .genesisIdle
+  | 0x01 => some .round1Reserved
+  | 0x02 => some .released
+  | _    => none
+
+@[simp]
+theorem CeremonyRecordPhase.decodeByte_encodeByte (p : CeremonyRecordPhase) :
+    CeremonyRecordPhase.decodeByte p.encodeByte = some p := by
+  cases p <;> rfl
+
+/-- **Unified Per-Key Ceremony Journal Record (`CeremonyJournalRecord`, `G1-H`)**:
+    Atomically binds transaction identity, message/context, cumulative `PolicyGuard` spend,
+    `BeltLatch`/`Frontier` leaf or epoch reservation, `Baggy` `FirstSigned` codeword digest,
+    `pcg_dense` RNG seed generation, preprocessing correlation cursor, and threshold MPC
+    Round-1 nonce slot inside a single `GenesisSealedWal` record. -/
+structure CeremonyJournalRecord where
+  phase                 : CeremonyRecordPhase
+  txId                  : List UInt8
+  msgContext            : List UInt8
+  policyCumulativeSpend : Nat
+  txSpendDelta          : Nat
+  reservedLeafOrEpoch   : Nat
+  nextLeafOrEpoch       : Nat
+  baggyCodewordDigest   : List UInt8
+  reservedRngSeedGen    : Nat
+  nextRngSeedGen        : Nat
+  reservedMpcPrepCursor : Nat
+  nextMpcPrepCursor     : Nat
+  reservedMpcNonceSlot  : Nat
+  nextMpcNonceSlot      : Nat
+  deriving Repr, DecidableEq
+
+/-- Width invariants on `CeremonyJournalRecord` ensuring collision-free fixed/framed encoding `< 2^32`. -/
+def CeremonyJournalRecord.WellFormed (j : CeremonyJournalRecord) : Prop :=
+  j.txId.length = 32 ∧
+  j.baggyCodewordDigest.length = 32 ∧
+  j.msgContext.length ≤ 4096 ∧
+  j.policyCumulativeSpend < 2 ^ 64 ∧
+  j.txSpendDelta < 2 ^ 64 ∧
+  j.reservedLeafOrEpoch < 2 ^ 64 ∧
+  j.nextLeafOrEpoch < 2 ^ 64 ∧
+  j.reservedRngSeedGen < 2 ^ 64 ∧
+  j.nextRngSeedGen < 2 ^ 64 ∧
+  j.reservedMpcPrepCursor < 2 ^ 64 ∧
+  j.nextMpcPrepCursor < 2 ^ 64 ∧
+  j.reservedMpcNonceSlot < 2 ^ 64 ∧
+  j.nextMpcNonceSlot < 2 ^ 64
+
+/-- Right-associative canonical serialization of `CeremonyJournalRecord`. -/
+def encodeCeremonyJournalRecord (j : CeremonyJournalRecord) : List UInt8 :=
+  [j.phase.encodeByte] ++
+    (j.txId ++
+      (j.baggyCodewordDigest ++
+        (encodeU64BeNat j.policyCumulativeSpend ++
+          (encodeU64BeNat j.txSpendDelta ++
+            (encodeU64BeNat j.reservedLeafOrEpoch ++
+              (encodeU64BeNat j.nextLeafOrEpoch ++
+                (encodeU64BeNat j.reservedRngSeedGen ++
+                  (encodeU64BeNat j.nextRngSeedGen ++
+                    (encodeU64BeNat j.reservedMpcPrepCursor ++
+                      (encodeU64BeNat j.nextMpcPrepCursor ++
+                        (encodeU64BeNat j.reservedMpcNonceSlot ++
+                          (encodeU64BeNat j.nextMpcNonceSlot ++
+                            pcwFrameBytes j.msgContext))))))))))))
+
+/-- Canonical decoder for `CeremonyJournalRecord`, rejecting truncated or trailing bytes. -/
+def decodeCeremonyJournalRecord (bs : List UInt8) : Option CeremonyJournalRecord :=
+  match splitExactBytes 1 bs with
+  | none => none
+  | some (bPhase, r0) =>
+    match bPhase with
+    | [phaseByte] =>
+      match CeremonyRecordPhase.decodeByte phaseByte with
+      | none => none
+      | some phase =>
+        match splitExactBytes 32 r0 with
+        | none => none
+        | some (txId, r1) =>
+          match splitExactBytes 32 r1 with
+          | none => none
+          | some (baggyDigest, r2) =>
+            match splitExactBytes 8 r2 with
+            | none => none
+            | some (bPolCum, r3) =>
+              match decodeU64BeNat bPolCum with
+              | none => none
+              | some polCum =>
+                match splitExactBytes 8 r3 with
+                | none => none
+                | some (bTxDelta, r4) =>
+                  match decodeU64BeNat bTxDelta with
+                  | none => none
+                  | some txDelta =>
+                    match splitExactBytes 8 r4 with
+                    | none => none
+                    | some (bResLeaf, r5) =>
+                      match decodeU64BeNat bResLeaf with
+                      | none => none
+                      | some resLeaf =>
+                        match splitExactBytes 8 r5 with
+                        | none => none
+                        | some (bNextLeaf, r6) =>
+                          match decodeU64BeNat bNextLeaf with
+                          | none => none
+                          | some nextLeaf =>
+                            match splitExactBytes 8 r6 with
+                            | none => none
+                            | some (bResRng, r7) =>
+                              match decodeU64BeNat bResRng with
+                              | none => none
+                              | some resRng =>
+                                match splitExactBytes 8 r7 with
+                                | none => none
+                                | some (bNextRng, r8) =>
+                                  match decodeU64BeNat bNextRng with
+                                  | none => none
+                                  | some nextRng =>
+                                    match splitExactBytes 8 r8 with
+                                    | none => none
+                                    | some (bResPrep, r9) =>
+                                      match decodeU64BeNat bResPrep with
+                                      | none => none
+                                      | some resPrep =>
+                                        match splitExactBytes 8 r9 with
+                                        | none => none
+                                        | some (bNextPrep, r10) =>
+                                          match decodeU64BeNat bNextPrep with
+                                          | none => none
+                                          | some nextPrep =>
+                                            match splitExactBytes 8 r10 with
+                                            | none => none
+                                            | some (bResNonce, r11) =>
+                                              match decodeU64BeNat bResNonce with
+                                              | none => none
+                                              | some resNonce =>
+                                                match splitExactBytes 8 r11 with
+                                                | none => none
+                                                | some (bNextNonce, r12) =>
+                                                  match decodeU64BeNat bNextNonce with
+                                                  | none => none
+                                                  | some nextNonce =>
+                                                    match pcwUnframeBytes r12 with
+                                                    | none => none
+                                                    | some (msgCtx, msgTail) =>
+                                                      match msgTail with
+                                                      | [] =>
+                                                        if msgCtx.length ≤ 4096 then
+                                                          some { phase := phase
+                                                                 txId := txId
+                                                                 msgContext := msgCtx
+                                                                 policyCumulativeSpend := polCum
+                                                                 txSpendDelta := txDelta
+                                                                 reservedLeafOrEpoch := resLeaf
+                                                                 nextLeafOrEpoch := nextLeaf
+                                                                 baggyCodewordDigest := baggyDigest
+                                                                 reservedRngSeedGen := resRng
+                                                                 nextRngSeedGen := nextRng
+                                                                 reservedMpcPrepCursor := resPrep
+                                                                 nextMpcPrepCursor := nextPrep
+                                                                 reservedMpcNonceSlot := resNonce
+                                                                 nextMpcNonceSlot := nextNonce }
+                                                        else none
+                                                      | _ :: _ => none
+    | _ => none
+
+theorem encodeCeremonyJournalRecord_lt_two_pow_32 {j : CeremonyJournalRecord}
+    (hWf : j.WellFormed) :
+    (encodeCeremonyJournalRecord j).length < 2 ^ 32 := by
+  rcases hWf with ⟨hTx, hBag, hMsgLe, _⟩
+  apply lt_two_pow_32_of_le_8192
+  rw [encodeCeremonyJournalRecord.eq_1]
+  simp only [List.length_append, List.length_cons, List.length_nil,
+    encodeU64BeNat_length, pcwFrameBytes_length, hTx, hBag]
+  omega
+
+theorem decodeCeremonyJournalRecord_encodeCeremonyJournalRecord {j : CeremonyJournalRecord}
+    (hWf : j.WellFormed) :
+    decodeCeremonyJournalRecord (encodeCeremonyJournalRecord j) = some j := by
+  rcases hWf with ⟨hTx, hBag, hMsgLe, hPol, hDel, hRL, hNL, hRR, hNR, hRP, hNP, hRN, hNN⟩
+  have hMsg32 : j.msgContext.length < 2 ^ 32 :=
+    lt_two_pow_32_of_le_8192 (Nat.le_trans hMsgLe (by decide : 4096 ≤ 8192))
+  rw [decodeCeremonyJournalRecord.eq_1, encodeCeremonyJournalRecord.eq_1]
+  generalize hTail : pcwFrameBytes j.msgContext = tailBytes
+  have hPhaseLen : ([j.phase.encodeByte] : List UInt8).length = 1 := rfl
+  rw [splitExactBytes_append hPhaseLen]; dsimp only
+  rw [CeremonyRecordPhase.decodeByte_encodeByte]; dsimp only
+  rw [splitExactBytes_append hTx]; dsimp only
+  rw [splitExactBytes_append hBag]; dsimp only
+  rw [splitExactBytes_append (encodeU64BeNat_length _)]; dsimp only
+  rw [decodeU64BeNat_encodeU64BeNat hPol]; dsimp only
+  rw [splitExactBytes_append (encodeU64BeNat_length _)]; dsimp only
+  rw [decodeU64BeNat_encodeU64BeNat hDel]; dsimp only
+  rw [splitExactBytes_append (encodeU64BeNat_length _)]; dsimp only
+  rw [decodeU64BeNat_encodeU64BeNat hRL]; dsimp only
+  rw [splitExactBytes_append (encodeU64BeNat_length _)]; dsimp only
+  rw [decodeU64BeNat_encodeU64BeNat hNL]; dsimp only
+  rw [splitExactBytes_append (encodeU64BeNat_length _)]; dsimp only
+  rw [decodeU64BeNat_encodeU64BeNat hRR]; dsimp only
+  rw [splitExactBytes_append (encodeU64BeNat_length _)]; dsimp only
+  rw [decodeU64BeNat_encodeU64BeNat hNR]; dsimp only
+  rw [splitExactBytes_append (encodeU64BeNat_length _)]; dsimp only
+  rw [decodeU64BeNat_encodeU64BeNat hRP]; dsimp only
+  rw [splitExactBytes_append (encodeU64BeNat_length _)]; dsimp only
+  rw [decodeU64BeNat_encodeU64BeNat hNP]; dsimp only
+  rw [splitExactBytes_append (encodeU64BeNat_length _)]; dsimp only
+  rw [decodeU64BeNat_encodeU64BeNat hRN]; dsimp only
+  rw [splitExactBytes_append (encodeU64BeNat_length _)]; dsimp only
+  rw [decodeU64BeNat_encodeU64BeNat hNN]; dsimp only
+  rw [← hTail]
+  have hUnf : pcwUnframeBytes (pcwFrameBytes j.msgContext) = some (j.msgContext, []) := by
+    simpa only [List.append_nil] using
+      (pcwUnframe_frame_append (rest := []) hMsg32)
+  rw [hUnf]
+  dsimp only
+  simp only [hMsgLe, ↓reduceIte]
+
+attribute [irreducible] encodeCeremonyJournalRecord decodeCeremonyJournalRecord
+
+/-- Subordinate authority ledger views deterministically derived by replaying `CeremonyJournalRecord`. -/
+structure SubordinateLedgerViews where
+  beltNextEpoch         : Nat
+  baggyLastCommitted    : Option (List UInt8 × List UInt8)
+  rngNextSeedGen        : Nat
+  mpcNextPrepCursor     : Nat
+  mpcNextNonceSlot      : Nat
+  policyCumulativeSpend : Nat
+  deriving Repr, DecidableEq
+
+/-- Deterministic replay projection deriving all 6 subordinate authority views from one journal record. -/
+def deriveSubordinateViews (j : CeremonyJournalRecord) : SubordinateLedgerViews :=
+  { beltNextEpoch := j.nextLeafOrEpoch
+    baggyLastCommitted :=
+      match j.phase with
+      | .genesisIdle => none
+      | .round1Reserved | .released => some (j.txId, j.baggyCodewordDigest)
+    rngNextSeedGen := j.nextRngSeedGen
+    mpcNextPrepCursor := j.nextMpcPrepCursor
+    mpcNextNonceSlot := j.nextMpcNonceSlot
+    policyCumulativeSpend := j.policyCumulativeSpend }
+
+/-- **`CrashRecoverCeremony` (`G1-H`)**:
+    Recovers the full ceremony state and subordinate ledger views from `PosixFsState` by opening
+    the dual-bound `GenesisSealedWal`, verifying `lockGenesisId` + 256-bit `keyedMac`, decoding
+    `CeremonyJournalRecord`, and replaying `deriveSubordinateViews`. -/
+def CrashRecoverCeremony (st : PosixFsState) (pid : Pid) (basePath : DirName)
+    (vaultKeyId : List UInt8) (macFn : KeyedMacFn) (macKey : List UInt8) :
+    PosixFsState × Except PosixErr (WalRecord × CeremonyJournalRecord × SubordinateLedgerViews) :=
+  match openExisting st pid basePath vaultKeyId macFn macKey with
+  | (stErr, .error e) => (stErr, .error e)
+  | (stOpen, .ok (h, rec)) =>
+    let stClosed := (closeVaultHandle stOpen h).toOption.getD stOpen
+    match decodeCeremonyJournalRecord rec.body.payload with
+    | none => (stClosed, .error .einval)
+    | some j => (stClosed, .ok (rec, j, deriveSubordinateViews j))
+
+/-- Abstract-model Round-1 receipt data. This public Lean value is not an unforgeable capability;
+    only issuance and consumption in a reachable machine execution authorize output. -/
+structure DurableRound1Lease where
+  txId                  : List UInt8
+  msgContext            : List UInt8
+  txSpendDelta          : Nat
+  policySpendCharged    : Nat
+  leafOrEpoch           : Nat
+  baggyCodewordDigest   : List UInt8
+  rngSeedGen            : Nat
+  mpcPrepCursor         : Nat
+  mpcNonceSlot          : Nat
+  walEpoch              : Nat
+  deriving Repr, DecidableEq
+
+/-- Externally visible Round-1 network message consuming threshold MPC nonce, prep cursor, & RNG seed. -/
+structure Round1NetworkPacket where
+  txId                  : List UInt8
+  msgContext            : List UInt8
+  policySpendCharged    : Nat
+  leafOrEpoch           : Nat
+  baggyCodewordDigest   : List UInt8
+  rngSeedGen            : Nat
+  mpcPrepCursor         : Nat
+  mpcNonceSlot          : Nat
+  deriving Repr, DecidableEq
+
+/-- Pure Round-1 output formatter. The reachable machine transition supplies authority. -/
+def emitRound1NetworkPacket (lease : DurableRound1Lease) : Round1NetworkPacket :=
+  { txId := lease.txId
+    msgContext := lease.msgContext
+    policySpendCharged := lease.policySpendCharged
+    leafOrEpoch := lease.leafOrEpoch
+    baggyCodewordDigest := lease.baggyCodewordDigest
+    rngSeedGen := lease.rngSeedGen
+    mpcPrepCursor := lease.mpcPrepCursor
+    mpcNonceSlot := lease.mpcNonceSlot }
+
+/-- Abstract-model release receipt data; the trace transition, not this public constructor,
+    supplies authority. See `RustDurability.IssuedReceipt` for reachability-backed evidence. -/
+structure DurableReleaseReceipt where
+  txId                  : List UInt8
+  msgContext            : List UInt8
+  policySpendCharged    : Nat
+  leafOrEpoch           : Nat
+  baggyCodewordDigest   : List UInt8
+  rngSeedGen            : Nat
+  mpcPrepCursor         : Nat
+  mpcNonceSlot          : Nat
+  releaseWalEpoch       : Nat
+  deriving Repr, DecidableEq
+
+/-- Externally released final ceremony signature artifact gated by `DurableReleaseReceipt`. -/
+structure ReleasedCeremonySig where
+  txId                  : List UInt8
+  msgContext            : List UInt8
+  policySpendCharged    : Nat
+  leafOrEpoch           : Nat
+  baggyCodewordDigest   : List UInt8
+  rngSeedGen            : Nat
+  mpcPrepCursor         : Nat
+  mpcNonceSlot          : Nat
+  sigBytes              : List UInt8
+  deriving Repr, DecidableEq
+
+/-- Pure output formatter. Calling it is not an authorized release transition. -/
+def releaseCeremonySignature (rcpt : DurableReleaseReceipt) (sigBytes : List UInt8) :
+    ReleasedCeremonySig :=
+  { txId := rcpt.txId
+    msgContext := rcpt.msgContext
+    policySpendCharged := rcpt.policySpendCharged
+    leafOrEpoch := rcpt.leafOrEpoch
+    baggyCodewordDigest := rcpt.baggyCodewordDigest
+    rngSeedGen := rcpt.rngSeedGen
+    mpcPrepCursor := rcpt.mpcPrepCursor
+    mpcNonceSlot := rcpt.mpcNonceSlot
+    sigBytes := sigBytes }
+
+/-- Predicate certifying that every reservation required by a released ceremony `sig` is durably
+    reflected in recovered `SubordinateLedgerViews` (`Released(tx) -> all_required_reservations_durable(tx)`). -/
+def AllRequiredReservationsDurable (sig : ReleasedCeremonySig)
+    (views : SubordinateLedgerViews) : Prop :=
+  sig.policySpendCharged ≤ views.policyCumulativeSpend ∧
+  sig.leafOrEpoch < views.beltNextEpoch ∧
+  sig.rngSeedGen < views.rngNextSeedGen ∧
+  sig.mpcPrepCursor < views.mpcNextPrepCursor ∧
+  sig.mpcNonceSlot < views.mpcNextNonceSlot
+
+/-- Predicate certifying that every reservation consumed by an emitted Round-1 packet `pkt`
+    (even if the ceremony later crashed/aborted before signature release!) is durably burned. -/
+def AllRound1ReservationsDurable (pkt : Round1NetworkPacket)
+    (views : SubordinateLedgerViews) : Prop :=
+  pkt.policySpendCharged ≤ views.policyCumulativeSpend ∧
+  pkt.leafOrEpoch < views.beltNextEpoch ∧
+  pkt.rngSeedGen < views.rngNextSeedGen ∧
+  pkt.mpcPrepCursor < views.mpcNextPrepCursor ∧
+  pkt.mpcNonceSlot < views.mpcNextNonceSlot
+
+/-- Deterministic ceremony recovery theorem (`crashRecoverCeremony_of_crashed_durable`):
+    On any rebooted/crashed state (`openFds = {}`, `flockTable = {}`) satisfying `VaultDurableAt`
+    with `rec.body.payload = encodeCeremonyJournalRecord j` and `j.WellFormed`,
+    `CrashRecoverCeremony` deterministically succeeds and returns `(rec, j, deriveSubordinateViews j)`. -/
+theorem crashRecoverCeremony_of_crashed_durable
+    {st : PosixFsState} {basePath : DirName} {lockIno : InodeId} {genesisNonce : List UInt8}
+    {macFn : KeyedMacFn} {macKey : List UInt8} {rec : WalRecord} {j : CeremonyJournalRecord}
+    (pid : Pid)
+    (hFdsEmpty : st.kernel.openFds = {})
+    (hFlkEmpty : st.kernel.flockTable = {})
+    (hDur : VaultDurableAt st basePath lockIno genesisNonce macFn macKey rec)
+    (hPay : rec.body.payload = encodeCeremonyJournalRecord j)
+    (hJWf : j.WellFormed) :
+    ∃ stOut,
+      CrashRecoverCeremony st pid basePath rec.body.vaultKeyId macFn macKey =
+        (stOut, .ok (rec, j, deriveSubordinateViews j)) := by
+  obtain ⟨stOpen, hOut, hOpen⟩ :=
+    openExisting_of_crashed_durable pid hFdsEmpty hFlkEmpty hDur
+  unfold CrashRecoverCeremony
+  rw [hOpen]
+  dsimp +zetaDelta only
+  rw [hPay, decodeCeremonyJournalRecord_encodeCeremonyJournalRecord hJWf]
+  exact ⟨_, rfl⟩
+
+/-- Exact readback lemma for `openExisting` on any state satisfying `VaultDurableAt`:
+    even when arbitrary unrelated descriptors are open, if `openExisting` returns `.ok (h, readRec)`,
+    then `readRec = curRec` and `VaultDurableAt` continues to hold in `st1`! -/
+private theorem openExisting_ok_of_vaultDurableAt
+    {st st1 : PosixFsState} {pid : Pid} {basePath : DirName} {vkId : List UInt8}
+    {lockIno : InodeId} {genesisNonce : List UInt8}
+    {macFn : KeyedMacFn} {macKey : List UInt8}
+    {curRec readRec : WalRecord} {h : LockedVaultHandle}
+    (hDur : VaultDurableAt st basePath lockIno genesisNonce macFn macKey curRec)
+    (hOpen : openExisting st pid basePath vkId macFn macKey = (st1, .ok (h, readRec))) :
+    readRec = curRec ∧
+    h.basePath = basePath ∧
+    h.vaultKeyId = curRec.body.vaultKeyId ∧
+    h.lockGenesisId = computeLockGenesisId lockIno genesisNonce ∧
+    VaultDurableAt st1 basePath lockIno genesisNonce macFn macKey curRec := by
+  have hOpenKeep : ∀ (sA sB : PosixFsState) (p : Pid) (nm : DirName) (w : Bool) (fd : FdId),
+      posixOpenExistingNoFollow sA p nm w = .ok (sB, fd) →
+      sB.kernel.dirInode = sA.kernel.dirInode ∧
+      sB.kernel.pageCache = sA.kernel.pageCache ∧
+      sB.driveCache = sA.driveCache ∧ sB.nand = sA.nand := by
+    intro sA sB p nm w fd hO
+    unfold posixOpenExistingNoFollow at hO
+    cases hR : resolveDentryNoFollow sA.kernel.dirInode.unsyncedEntries nm with
+    | error _ => rw [hR] at hO; cases hO
+    | ok _ =>
+      rw [hR] at hO; injection hO with hP; rw [← (Prod.mk.inj hP).1]; exact ⟨rfl, rfl, rfl, rfl⟩
+  rcases hDur with ⟨hLockLt, hLock64, hNonceLen, hCurWf, hCurGid, hCurVer, hDrvDir,
+    hLockUnsync, hLockNandDir, hLockPg, hLockDrv, hLockNand,
+    recIno, hRecLt, hRecUnsync, hRecNandDir, hRecPg, hRecDrv, hRecNand⟩
+  unfold openExisting at hOpen
+  cases hOp1 : posixOpenExistingNoFollow st pid (walLockPath basePath) true with
+  | error _ => rw [hOp1] at hOpen; cases (Prod.mk.inj hOpen).2
+  | ok p1 =>
+    rcases p1 with ⟨sA, lockFd⟩
+    have hsA := hOpenKeep _ _ _ _ _ _ hOp1
+    rw [hOp1] at hOpen; dsimp only at hOpen
+    cases hFlk : posixFlockExNb sA pid lockFd with
+    | error _ => rw [hFlk] at hOpen; cases (Prod.mk.inj hOpen).2
+    | ok sB =>
+      have hsB_A := posixFlockExNb_preserves_storage hFlk
+      have hsB : sB.kernel.dirInode = st.kernel.dirInode ∧
+                 sB.kernel.pageCache = st.kernel.pageCache ∧
+                 sB.driveCache = st.driveCache ∧ sB.nand = st.nand :=
+        ⟨hsB_A.1.trans hsA.1, hsB_A.2.1.trans hsA.2.1,
+         hsB_A.2.2.1.trans hsA.2.2.1, hsB_A.2.2.2.trans hsA.2.2.2⟩
+      rw [hFlk] at hOpen; dsimp only at hOpen
+      cases hFst : posixFstatDescAndInode sB pid lockFd with
+      | error _ => rw [hFst] at hOpen; cases (Prod.mk.inj hOpen).2
+      | ok dIno =>
+        rcases dIno with ⟨lockDescId, actualLockIno⟩
+        cases hPr1 : posixPreadAll sB pid lockFd with
+        | error _ => rw [hFst, hPr1] at hOpen; cases (Prod.mk.inj hOpen).2
+        | ok rawL =>
+          rw [hFst, hPr1] at hOpen; dsimp only at hOpen
+          cases hDL : decodeLockSidecar rawL with
+          | none => rw [hDL] at hOpen; cases (Prod.mk.inj hOpen).2
+          | some ls =>
+            rw [hDL] at hOpen; dsimp only at hOpen
+            by_cases hM1 : (actualLockIno != ls.sealedLockInode) = true
+            · simp only [hM1, ↓reduceIte] at hOpen; cases (Prod.mk.inj hOpen).2
+            · simp only [hM1, Bool.false_eq_true, ↓reduceIte] at hOpen
+              have hResRec : resolveDentryNoFollow sB.kernel.dirInode.unsyncedEntries basePath = .ok recIno := by
+                unfold resolveDentryNoFollow; rw [hsB.1, hRecUnsync]
+              let recDescId := sB.kernel.openFds.nextDescId
+              let sC0 : PosixFsState :=
+                { sB with
+                   kernel := { sB.kernel with
+                                openFds := { fdRefs := assocInsert (pid, sB.nextFd) recDescId sB.kernel.openFds.fdRefs
+                                             descriptions := assocInsert recDescId
+                                               { inode := recIno, writable := false, stickyFsyncErr := false }
+                                               sB.kernel.openFds.descriptions
+                                             nextDescId := recDescId + 1 } }
+                   nextFd := sB.nextFd + 1 }
+              have hOp2Eq : ∃ sC recFd,
+                  posixOpenExistingNoFollow sB pid basePath false = .ok (sC, recFd) ∧
+                  sC.kernel.dirInode = st.kernel.dirInode ∧
+                  sC.kernel.pageCache = st.kernel.pageCache ∧
+                  sC.driveCache = st.driveCache ∧ sC.nand = st.nand ∧
+                  posixPreadAll sC pid recFd = .ok (encodeWalRecord curRec) := by
+                refine ⟨sC0, sB.nextFd, ?_, hsB.1, hsB.2.1, hsB.2.2.1, hsB.2.2.2, ?_⟩
+                · unfold posixOpenExistingNoFollow; rw [hResRec]
+                · unfold posixPreadAll readInodeHierarchy pendingVolatileWrite
+                  simp only [sC0, resolveOpenFd_insert_self, Bool.false_eq_true, ↓reduceIte]
+                  rw [hsB.2.1, hsB.2.2.1, hsB.2.2.2, hRecPg, hRecDrv, hRecNand]
+              rcases hOp2Eq with ⟨sC, recFd, hOp2, hsCDir, hsCPg, hsCDr, hsCNd, hPr2⟩
+              rw [hOp2] at hOpen; dsimp +zetaDelta only at hOpen
+              rw [hPr2] at hOpen; dsimp +zetaDelta only at hOpen
+              rw [decodeWalRecord_encodeWalRecord hCurWf] at hOpen; dsimp +zetaDelta only at hOpen
+              by_cases hGidM : (curRec.body.lockGenesisId !=
+                  computeLockGenesisId actualLockIno ls.genesisNonce) = true
+              · simp only [hGidM, ↓reduceIte] at hOpen; cases (Prod.mk.inj hOpen).2
+              · simp only [hGidM, Bool.false_eq_true, ↓reduceIte] at hOpen
+                by_cases hMacM : (curRec.body.vaultKeyId != vkId ||
+                    !(verifyWalMac macFn macKey curRec)) = true
+                · simp only [hMacM, ↓reduceIte] at hOpen; cases (Prod.mk.inj hOpen).2
+                · simp only [hMacM, Bool.false_eq_true, ↓reduceIte] at hOpen
+                  rcases Prod.mk.inj hOpen with ⟨hSt1Eq, hOkPair⟩
+                  injection hOkPair with hPairEq
+                  rcases Prod.mk.inj hPairEq with ⟨hHEq, hReadEq⟩
+                  subst hReadEq
+                  have hGidEq : computeLockGenesisId actualLockIno ls.genesisNonce =
+                      computeLockGenesisId lockIno genesisNonce :=
+                    (eq_of_not_bne_true hGidM).symm.trans hCurGid
+                  have hVkEq : vkId = curRec.body.vaultKeyId :=
+                    (eq_of_not_bne_true (fun hc => hMacM (by simp [hc]))).symm
+                  have hc4 := posixCloseFd_preserves_storage sC pid recFd
+                  have hSt1Dir : st1.kernel.dirInode = st.kernel.dirInode := by
+                    rw [← hSt1Eq]; exact hc4.1.trans hsCDir
+                  have hSt1Pg : st1.kernel.pageCache = st.kernel.pageCache := by
+                    rw [← hSt1Eq]; exact hc4.2.1.trans hsCPg
+                  have hSt1Dr : st1.driveCache = st.driveCache := by
+                    rw [← hSt1Eq]; exact hc4.2.2.1.trans hsCDr
+                  have hSt1Nd : st1.nand = st.nand := by
+                    rw [← hSt1Eq]; exact hc4.2.2.2.trans hsCNd
+                  refine ⟨rfl, ?_, ?_, ?_, ?_⟩
+                  · rw [← hHEq]
+                  · rw [← hHEq]; exact hVkEq
+                  · rw [← hHEq]; exact hGidEq
+                  · unfold VaultDurableAt
+                    rw [hSt1Dir, hSt1Pg, hSt1Dr, hSt1Nd]
+                    exact ⟨hLockLt, hLock64, hNonceLen, hCurWf, hCurGid, hCurVer, hDrvDir,
+                      hLockUnsync, hLockNandDir, hLockPg, hLockDrv, hLockNand,
+                      recIno, hRecLt, hRecUnsync, hRecNandDir, hRecPg, hRecDrv, hRecNand⟩
+
+private theorem replaceAtomic_fst_mem_steps (st : PosixFsState) (h : LockedVaultHandle)
+    (ep : Nat) (pay : List UInt8) (macFn : KeyedMacFn) (macKey : List UInt8)
+    (faults : IoFaultSchedule) :
+    (replaceAtomic st h ep pay macFn macKey faults).1 ∈
+      replaceAtomicSteps st h ep pay macFn macKey faults := by
+  unfold replaceAtomic replaceAtomicSteps
+  by_cases h1 : h.ioPoisoned = true
+  · simp [h1]
+  · simp only [h1, Bool.false_eq_true, ↓reduceIte]
+    by_cases h2 : (!(decide (ep < 2 ^ 64)) || !(decide (pay.length < 2 ^ 32))) = true
+    · simp [h2]
+    · simp only [h2, Bool.false_eq_true, ↓reduceIte]
+      cases resolveOpenFd st.kernel.openFds h.pid h.lockFd with
+      | none => simp
+      | some dp =>
+        rcases dp with ⟨dId, lDesc⟩
+        dsimp only
+        by_cases h3 : (dId != h.lockDescId || lDesc.inode != h.lockInode || lDesc.stickyFsyncErr ||
+            st.kernel.flockTable.owner h.lockInode != some h.lockDescId) = true
+        · simp [h3]
+        · simp only [h3, Bool.false_eq_true, ↓reduceIte]
+          cases posixCreateExclNoFollow (posixUnlinkIfPresent st (walTmpPath h.basePath)) h.pid (walTmpPath h.basePath) with
+          | error _ => simp
+          | ok c3 =>
+            rcases c3 with ⟨stCr, tmpFd, _⟩
+            dsimp only
+            cases posixPwriteAll stCr h.pid tmpFd _ with
+            | error _ => simp
+            | ok stWr =>
+              dsimp +zetaDelta only
+              cases (posixSyncAllMedia stWr h.pid tmpFd faults.failRecordSync).2 with
+              | error _ => simp
+              | ok u =>
+                cases u
+                cases posixRename _ (walTmpPath h.basePath) h.basePath with
+                | error _ => simp
+                | ok stRn =>
+                  dsimp +zetaDelta only
+                  cases (posixSyncParentDir stRn faults.failParentSync).2 <;> simp
+
+/-- Genesis idle `CeremonyJournalRecord` (`phase = .genesisIdle`, all watermarks `= 0`). -/
+def ceremonyGenesisJournal : CeremonyJournalRecord :=
+  { phase := .genesisIdle
+    txId := List.replicate 32 0x00
+    msgContext := []
+    policyCumulativeSpend := 0
+    txSpendDelta := 0
+    reservedLeafOrEpoch := 0
+    nextLeafOrEpoch := 0
+    baggyCodewordDigest := List.replicate 32 0x00
+    reservedRngSeedGen := 0
+    nextRngSeedGen := 0
+    reservedMpcPrepCursor := 0
+    nextMpcPrepCursor := 0
+    reservedMpcNonceSlot := 0
+    nextMpcNonceSlot := 0 }
+
+theorem ceremonyGenesisJournal_wellFormed : ceremonyGenesisJournal.WellFormed := by
+  have hZ64 : 0 < 2 ^ 64 := Nat.pow_pos (by decide : 0 < 2)
+  exact ⟨by decide, by decide, by decide,
+    hZ64, hZ64, hZ64, hZ64, hZ64, hZ64, hZ64, hZ64, hZ64, hZ64⟩
+
+/-- Multi-turn ceremony crash state machine combining `PosixFsState` (`GenesisSealedWal`),
+    in-memory volatile `pendingRound1Lease` (wiped on any crash!), and externally observed
+    `emittedRound1Msgs` and `releasedSigs`. -/
+structure CeremonyCrashState where
+  fs                 : PosixFsState
+  basePath           : DirName
+  vaultKeyId         : List UInt8
+  policySpendCap     : Nat
+  emittedRound1Msgs  : List Round1NetworkPacket
+  releasedSigs       : List ReleasedCeremonySig
+  pendingRound1Lease : Option DurableRound1Lease
+  /-- A journal replacement returned an I/O error. The process is still running, the kernel
+      still holds whatever dirty pages and unsynced dentries the failed replacement left, and
+      the journal handle is poisoned: no reservation or release is served until a system crash
+      and recovery. -/
+  ioPoisoned         : Bool := false
+  deriving Repr
+
+/-- Provision an initial ceremony vault on `PosixFsState.empty`. -/
+def initProvisionedCeremonyState (pid : Pid) (basePath : DirName)
+    (vaultKeyId genesisNonce : List UInt8) (policySpendCap : Nat)
+    (macFn : KeyedMacFn) (macKey : List UInt8) : Option CeremonyCrashState :=
+  let initPayload := encodeCeremonyJournalRecord ceremonyGenesisJournal
+  match provisionGenesis PosixFsState.empty pid basePath vaultKeyId genesisNonce
+          initPayload macFn macKey {} with
+  | (_, .error _) => none
+  | (fs0, .ok _) =>
+    some { fs := fs0
+           basePath := basePath
+           vaultKeyId := vaultKeyId
+           policySpendCap := policySpendCap
+           emittedRound1Msgs := []
+           releasedSigs := []
+           pendingRound1Lease := none }
+
+/-- Adversarial & fault-injected multi-turn ceremony trace events (`G1-H`):
+    Includes Round-1 reservation + network emission, final signature release gated on
+    `DurableReleaseReceipt`, mid-`replaceAtomic` crash cuts during BOTH Round-1 reservation and
+    signature release (either crash kind), `KernelPanicCrash` after partial Round-1 network
+    output, and `PowerLossCrash` with `512B`/`4KiB` `SectorTearMask`s. An I/O error during a
+    replacement is NOT a crash: it poisons the host (`ioPoisoned`) and leaves the kernel state
+    as the failed syscall sequence left it. -/
+inductive CeremonyCrashEvent where
+  | reserveAndEmitRound1
+      (pid : Pid) (txId msgCtx : List UInt8) (spendDelta : Nat)
+      (baggyDigest : List UInt8) (faults : IoFaultSchedule)
+  | midReplaceCrashDuringRound1
+      (pid : Pid) (txId msgCtx : List UInt8) (spendDelta : Nat)
+      (baggyDigest : List UInt8) (faults : IoFaultSchedule)
+      (stepIdx : Nat) (crash : MidOpCrash)
+  | releaseSignatureFromRound1
+      (pid : Pid) (sigBytes : List UInt8) (faults : IoFaultSchedule)
+  | midReplaceCrashDuringRelease
+      (pid : Pid) (faults : IoFaultSchedule)
+      (stepIdx : Nat) (crash : MidOpCrash)
+  | kernelPanic
+  | powerLoss
+      (dirPick : DirCrashOutcome) (defaultTear : SectorTearMask)
+      (overrides : List (InodeId × SectorTearMask))
+
+/-- Check width and policy-cap preconditions for allocating a fresh Round-1 ceremony reservation. -/
+def canReserveCeremonyRound1 (curJ : CeremonyJournalRecord) (curWalEpoch policySpendCap : Nat)
+    (txId msgCtx : List UInt8) (spendDelta : Nat) (baggyDigest : List UInt8) : Bool :=
+  (txId.length == 32) &&
+  (baggyDigest.length == 32) &&
+  decide (msgCtx.length ≤ 4096) &&
+  decide (spendDelta < 2 ^ 64) &&
+  decide (curJ.policyCumulativeSpend + spendDelta ≤ policySpendCap) &&
+  decide (curJ.policyCumulativeSpend + spendDelta < 2 ^ 64) &&
+  decide (curJ.nextLeafOrEpoch + 1 < 2 ^ 64) &&
+  decide (curJ.nextRngSeedGen + 1 < 2 ^ 64) &&
+  decide (curJ.nextMpcPrepCursor + 1 < 2 ^ 64) &&
+  decide (curJ.nextMpcNonceSlot + 1 < 2 ^ 64) &&
+  decide (curWalEpoch + 1 < 2 ^ 64)
+
+/-- Build the next `.round1Reserved` journal record advancing all 4 monotone resource watermarks. -/
+def buildRound1JournalRecord (curJ : CeremonyJournalRecord)
+    (txId msgCtx : List UInt8) (spendDelta : Nat) (baggyDigest : List UInt8) :
+    CeremonyJournalRecord :=
+  { phase := .round1Reserved
+    txId := txId
+    msgContext := msgCtx
+    policyCumulativeSpend := curJ.policyCumulativeSpend + spendDelta
+    txSpendDelta := spendDelta
+    reservedLeafOrEpoch := curJ.nextLeafOrEpoch
+    nextLeafOrEpoch := curJ.nextLeafOrEpoch + 1
+    baggyCodewordDigest := baggyDigest
+    reservedRngSeedGen := curJ.nextRngSeedGen
+    nextRngSeedGen := curJ.nextRngSeedGen + 1
+    reservedMpcPrepCursor := curJ.nextMpcPrepCursor
+    nextMpcPrepCursor := curJ.nextMpcPrepCursor + 1
+    reservedMpcNonceSlot := curJ.nextMpcNonceSlot
+    nextMpcNonceSlot := curJ.nextMpcNonceSlot + 1 }
+
+/-- Single-step execution of `CeremonyCrashEvent` on a host whose journal handle is healthy. -/
+def stepCeremonyHealthy (macFn : KeyedMacFn) (macKey : List UInt8)
+    (s : CeremonyCrashState) (ev : CeremonyCrashEvent) : CeremonyCrashState :=
+  match ev with
+  | .reserveAndEmitRound1 pid txId msgCtx spendDelta baggyDigest faults =>
+    match openExisting s.fs pid s.basePath s.vaultKeyId macFn macKey with
+    | (fsErr, .error _) => { s with fs := fsErr }
+    | (fs1, .ok (h, readRec)) =>
+      match decodeCeremonyJournalRecord readRec.body.payload with
+      | none =>
+        { s with fs := (closeVaultHandle fs1 h).toOption.getD fs1 }
+      | some curJ =>
+        if !(canReserveCeremonyRound1 curJ readRec.body.epoch s.policySpendCap
+               txId msgCtx spendDelta baggyDigest) then
+          { s with fs := (closeVaultHandle fs1 h).toOption.getD fs1 }
+        else
+          let nextJ := buildRound1JournalRecord curJ txId msgCtx spendDelta baggyDigest
+          let nextPay := encodeCeremonyJournalRecord nextJ
+          match replaceAtomic fs1 h (readRec.body.epoch + 1) nextPay macFn macKey faults with
+          | (fsFail, _, .error _) =>
+            -- I/O error: no Round-1 lease or packet is emitted; the host is poisoned and the
+            -- kernel keeps the state the failed replacement left behind (no crash happens).
+            { s with fs := fsFail, ioPoisoned := true, pendingRound1Lease := none }
+          | (fsOk, hAfter, .ok _) =>
+            let fsClosed := (closeVaultHandle fsOk hAfter).toOption.getD fsOk
+            let lease : DurableRound1Lease :=
+              { txId := txId
+                msgContext := msgCtx
+                txSpendDelta := spendDelta
+                policySpendCharged := curJ.policyCumulativeSpend + spendDelta
+                leafOrEpoch := curJ.nextLeafOrEpoch
+                baggyCodewordDigest := baggyDigest
+                rngSeedGen := curJ.nextRngSeedGen
+                mpcPrepCursor := curJ.nextMpcPrepCursor
+                mpcNonceSlot := curJ.nextMpcNonceSlot
+                walEpoch := readRec.body.epoch + 1 }
+            let pkt := emitRound1NetworkPacket lease
+            { s with
+                fs := fsClosed
+                emittedRound1Msgs := s.emittedRound1Msgs ++ [pkt]
+                pendingRound1Lease := some lease }
+  | .midReplaceCrashDuringRound1 pid txId msgCtx spendDelta baggyDigest faults
+      stepIdx crash =>
+    match openExisting s.fs pid s.basePath s.vaultKeyId macFn macKey with
+    | (fsErr, .error _) =>
+      { s with fs := crash.apply fsErr, pendingRound1Lease := none }
+    | (fs1, .ok (h, readRec)) =>
+      match decodeCeremonyJournalRecord readRec.body.payload with
+      | none =>
+        { s with fs := crash.apply fs1, pendingRound1Lease := none }
+      | some curJ =>
+        if !(canReserveCeremonyRound1 curJ readRec.body.epoch s.policySpendCap
+               txId msgCtx spendDelta baggyDigest) then
+          { s with fs := crash.apply fs1, pendingRound1Lease := none }
+        else
+          let nextJ := buildRound1JournalRecord curJ txId msgCtx spendDelta baggyDigest
+          let steps := replaceAtomicSteps fs1 h (readRec.body.epoch + 1)
+                         (encodeCeremonyJournalRecord nextJ) macFn macKey faults
+          let mid := pickStepState fs1 steps stepIdx
+          { s with fs := crash.apply mid, pendingRound1Lease := none }
+  | .releaseSignatureFromRound1 pid sigBytes faults =>
+    match s.pendingRound1Lease with
+    | none => s
+    | some lease =>
+      match openExisting s.fs pid s.basePath s.vaultKeyId macFn macKey with
+      | (fsErr, .error _) => { s with fs := fsErr }
+      | (fs1, .ok (h, readRec)) =>
+        match decodeCeremonyJournalRecord readRec.body.payload with
+        | none =>
+          { s with fs := (closeVaultHandle fs1 h).toOption.getD fs1 }
+        | some curJ =>
+          if !(decide (readRec.body.epoch + 1 < 2 ^ 64)) then
+            { s with fs := (closeVaultHandle fs1 h).toOption.getD fs1 }
+          else
+            let relJ : CeremonyJournalRecord := { curJ with phase := .released }
+            let relPay := encodeCeremonyJournalRecord relJ
+            match replaceAtomic fs1 h (readRec.body.epoch + 1) relPay macFn macKey faults with
+            | (fsFail, _, .error _) =>
+              { s with fs := fsFail, ioPoisoned := true, pendingRound1Lease := none }
+            | (fsOk, hAfter, .ok _) =>
+              let fsClosed := (closeVaultHandle fsOk hAfter).toOption.getD fsOk
+              let rcpt : DurableReleaseReceipt :=
+                { txId := lease.txId
+                  msgContext := lease.msgContext
+                  policySpendCharged := lease.policySpendCharged
+                  leafOrEpoch := lease.leafOrEpoch
+                  baggyCodewordDigest := lease.baggyCodewordDigest
+                  rngSeedGen := lease.rngSeedGen
+                  mpcPrepCursor := lease.mpcPrepCursor
+                  mpcNonceSlot := lease.mpcNonceSlot
+                  releaseWalEpoch := readRec.body.epoch + 1 }
+              let sig := releaseCeremonySignature rcpt sigBytes
+              { s with
+                  fs := fsClosed
+                  releasedSigs := s.releasedSigs ++ [sig]
+                  pendingRound1Lease := none }
+  | .midReplaceCrashDuringRelease pid faults stepIdx crash =>
+    match openExisting s.fs pid s.basePath s.vaultKeyId macFn macKey with
+    | (fsErr, .error _) =>
+      { s with fs := crash.apply fsErr, pendingRound1Lease := none }
+    | (fs1, .ok (h, readRec)) =>
+      match decodeCeremonyJournalRecord readRec.body.payload with
+      | none =>
+        { s with fs := crash.apply fs1, pendingRound1Lease := none }
+      | some curJ =>
+        if !(decide (readRec.body.epoch + 1 < 2 ^ 64)) then
+          { s with fs := crash.apply fs1, pendingRound1Lease := none }
+        else
+          let relJ : CeremonyJournalRecord := { curJ with phase := .released }
+          let steps := replaceAtomicSteps fs1 h (readRec.body.epoch + 1)
+                         (encodeCeremonyJournalRecord relJ) macFn macKey faults
+          let mid := pickStepState fs1 steps stepIdx
+          { s with fs := crash.apply mid, pendingRound1Lease := none }
+  | .kernelPanic =>
+    { s with fs := KernelPanicCrash s.fs, pendingRound1Lease := none }
+  | .powerLoss dirPick defaultTear overrides =>
+    let tearFn := evalFiniteTearSchedule defaultTear overrides
+    { s with fs := PowerLossCrash dirPick tearFn s.fs, pendingRound1Lease := none }
+
+/-- A poisoned host serves nothing. Only a system crash (which may strike at any time,
+    including as the "crash" of an attempted operation) clears the poison, by discarding the
+    process together with the kernel state the failed replacement left behind. -/
+def stepCeremonyPoisoned (s : CeremonyCrashState) : CeremonyCrashEvent → CeremonyCrashState
+  | .reserveAndEmitRound1 .. => s
+  | .releaseSignatureFromRound1 .. => s
+  | .midReplaceCrashDuringRound1 _ _ _ _ _ _ _ crash =>
+    { s with fs := crash.apply s.fs, ioPoisoned := false, pendingRound1Lease := none }
+  | .midReplaceCrashDuringRelease _ _ _ crash =>
+    { s with fs := crash.apply s.fs, ioPoisoned := false, pendingRound1Lease := none }
+  | .kernelPanic =>
+    { s with fs := KernelPanicCrash s.fs, ioPoisoned := false, pendingRound1Lease := none }
+  | .powerLoss dirPick defaultTear overrides =>
+    { s with
+        fs := PowerLossCrash dirPick (evalFiniteTearSchedule defaultTear overrides) s.fs
+        ioPoisoned := false
+        pendingRound1Lease := none }
+
+/-- Single-step execution of `CeremonyCrashEvent` on `CeremonyCrashState`. -/
+def stepCeremonyCrashState (macFn : KeyedMacFn) (macKey : List UInt8)
+    (s : CeremonyCrashState) (ev : CeremonyCrashEvent) : CeremonyCrashState :=
+  if s.ioPoisoned then stepCeremonyPoisoned s ev else stepCeremonyHealthy macFn macKey s ev
+
+/-- Execute an arbitrary multi-turn list of `CeremonyCrashEvent`s. -/
+def runCeremonyCrashTrace (macFn : KeyedMacFn) (macKey : List UInt8)
+    (s : CeremonyCrashState) : List CeremonyCrashEvent → CeremonyCrashState
+  | [] => s
+  | ev :: rest => runCeremonyCrashTrace macFn macKey (stepCeremonyCrashState macFn macKey s ev) rest
+
+/-- Monotonicity relation between two `CeremonyJournalRecord` watermarks. -/
+def CeremonyJournalRecord.MonotoneLe (prev next : CeremonyJournalRecord) : Prop :=
+  prev.policyCumulativeSpend ≤ next.policyCumulativeSpend ∧
+  prev.nextLeafOrEpoch ≤ next.nextLeafOrEpoch ∧
+  prev.nextRngSeedGen ≤ next.nextRngSeedGen ∧
+  prev.nextMpcPrepCursor ≤ next.nextMpcPrepCursor ∧
+  prev.nextMpcNonceSlot ≤ next.nextMpcNonceSlot
+
+private theorem ceremonyMonotoneLe_refl (j : CeremonyJournalRecord) : j.MonotoneLe j :=
+  ⟨Nat.le_refl _, Nat.le_refl _, Nat.le_refl _, Nat.le_refl _, Nat.le_refl _⟩
+
+private theorem allRound1ReservationsDurable_mono {pkt : Round1NetworkPacket}
+    {j₁ j₂ : CeremonyJournalRecord} (hLe : j₁.MonotoneLe j₂)
+    (hDur : AllRound1ReservationsDurable pkt (deriveSubordinateViews j₁)) :
+    AllRound1ReservationsDurable pkt (deriveSubordinateViews j₂) :=
+  ⟨Nat.le_trans hDur.1 hLe.1,
+   Nat.lt_of_lt_of_le hDur.2.1 hLe.2.1,
+   Nat.lt_of_lt_of_le hDur.2.2.1 hLe.2.2.1,
+   Nat.lt_of_lt_of_le hDur.2.2.2.1 hLe.2.2.2.1,
+   Nat.lt_of_lt_of_le hDur.2.2.2.2 hLe.2.2.2.2⟩
+
+private theorem allRequiredReservationsDurable_mono {sig : ReleasedCeremonySig}
+    {j₁ j₂ : CeremonyJournalRecord} (hLe : j₁.MonotoneLe j₂)
+    (hDur : AllRequiredReservationsDurable sig (deriveSubordinateViews j₁)) :
+    AllRequiredReservationsDurable sig (deriveSubordinateViews j₂) :=
+  ⟨Nat.le_trans hDur.1 hLe.1,
+   Nat.lt_of_lt_of_le hDur.2.1 hLe.2.1,
+   Nat.lt_of_lt_of_le hDur.2.2.1 hLe.2.2.1,
+   Nat.lt_of_lt_of_le hDur.2.2.2.1 hLe.2.2.2.1,
+   Nat.lt_of_lt_of_le hDur.2.2.2.2 hLe.2.2.2.2⟩
+
+private theorem canReserveCeremonyRound1_sound
+    {curJ : CeremonyJournalRecord} {curEp cap spendDelta : Nat}
+    {txId msgCtx baggyDigest : List UInt8}
+    (hCan : canReserveCeremonyRound1 curJ curEp cap txId msgCtx spendDelta baggyDigest = true) :
+    let nextJ := buildRound1JournalRecord curJ txId msgCtx spendDelta baggyDigest
+    nextJ.WellFormed ∧
+    nextJ.policyCumulativeSpend ≤ cap ∧
+    curJ.MonotoneLe nextJ ∧
+    curEp + 1 < 2 ^ 64 := by
+  unfold canReserveCeremonyRound1 at hCan
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at hCan
+  rcases hCan with ⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨hTxB, hBagB⟩, hMsgLe⟩, hDel64⟩, hCapLe⟩, hCum64⟩,
+    hNL64⟩, hNR64⟩, hNP64⟩, hNN64⟩, hEp64⟩
+  have hTx : txId.length = 32 := Nat.eq_of_beq_eq_true hTxB
+  have hBag : baggyDigest.length = 32 := Nat.eq_of_beq_eq_true hBagB
+  dsimp +zetaDelta only [buildRound1JournalRecord]
+  exact ⟨⟨hTx, hBag, hMsgLe, hCum64, hDel64,
+          Nat.lt_of_le_of_lt (Nat.le_succ _) hNL64, hNL64,
+          Nat.lt_of_le_of_lt (Nat.le_succ _) hNR64, hNR64,
+          Nat.lt_of_le_of_lt (Nat.le_succ _) hNP64, hNP64,
+          Nat.lt_of_le_of_lt (Nat.le_succ _) hNN64, hNN64⟩,
+         hCapLe,
+         ⟨Nat.le_add_right _ _, Nat.le_succ _, Nat.le_succ _, Nat.le_succ _, Nat.le_succ _⟩,
+         hEp64⟩
+
+/-- Ceremony durability & global no-reuse invariant of a host whose storage is settled
+    (`VaultDurableAt`: nothing dirty, both dentries on the current journal record). -/
+def CeremonySettledInv (macFn : KeyedMacFn) (macKey : List UInt8)
+    (s : CeremonyCrashState) : Prop :=
+  ∃ (lockIno : InodeId) (genesisNonce : List UInt8)
+    (curRec : WalRecord) (curJ : CeremonyJournalRecord),
+    VaultDurableAt s.fs s.basePath lockIno genesisNonce macFn macKey curRec ∧
+    curRec.body.vaultKeyId = s.vaultKeyId ∧
+    curRec.body.payload = encodeCeremonyJournalRecord curJ ∧
+    curJ.WellFormed ∧
+    curJ.policyCumulativeSpend ≤ s.policySpendCap ∧
+    (s.emittedRound1Msgs.map (·.mpcNonceSlot)).Nodup ∧
+    (s.emittedRound1Msgs.map (·.mpcPrepCursor)).Nodup ∧
+    (s.emittedRound1Msgs.map (·.rngSeedGen)).Nodup ∧
+    (s.emittedRound1Msgs.map (·.leafOrEpoch)).Nodup ∧
+    (s.releasedSigs.map (·.mpcNonceSlot)).Nodup ∧
+    (s.releasedSigs.map (·.leafOrEpoch)).Nodup ∧
+    (∀ pkt ∈ s.emittedRound1Msgs,
+      AllRound1ReservationsDurable pkt (deriveSubordinateViews curJ)) ∧
+    (∀ sig ∈ s.releasedSigs,
+      AllRequiredReservationsDurable sig (deriveSubordinateViews curJ)) ∧
+    (match s.pendingRound1Lease with
+     | none => True
+     | some lease =>
+       lease.policySpendCharged ≤ curJ.policyCumulativeSpend ∧
+       lease.leafOrEpoch < curJ.nextLeafOrEpoch ∧
+       lease.rngSeedGen < curJ.nextRngSeedGen ∧
+       lease.mpcPrepCursor < curJ.nextMpcPrepCursor ∧
+       lease.mpcNonceSlot < curJ.nextMpcNonceSlot ∧
+       (∀ sig ∈ s.releasedSigs, sig.mpcNonceSlot ≠ lease.mpcNonceSlot) ∧
+       (∀ sig ∈ s.releasedSigs, sig.leafOrEpoch ≠ lease.leafOrEpoch))
+
+/-- Multi-turn ceremony invariant (`CeremonyMultiCrashInv`). A healthy host is settled. A
+    poisoned host (a replacement returned an I/O error, no crash yet) holds unsettled kernel
+    state; what is known about it is what every possible crash from here recovers to. -/
+def CeremonyMultiCrashInv (macFn : KeyedMacFn) (macKey : List UInt8)
+    (s : CeremonyCrashState) : Prop :=
+  (s.ioPoisoned = false ∧ CeremonySettledInv macFn macKey s) ∨
+  (s.ioPoisoned = true ∧
+    ∀ crashed : PosixFsState, CrashStep s.fs crashed →
+      CeremonySettledInv macFn macKey
+        { s with fs := crashed, ioPoisoned := false, pendingRound1Lease := none })
+
+private theorem vaultDurableAt_storage_frame
+    {sA sB : PosixFsState} {basePath : DirName} {lockIno : InodeId} {genesisNonce : List UInt8}
+    {macFn : KeyedMacFn} {macKey : List UInt8} {rec : WalRecord}
+    (hEq : sB.kernel.dirInode = sA.kernel.dirInode ∧
+           sB.kernel.pageCache = sA.kernel.pageCache ∧
+           sB.driveCache = sA.driveCache ∧
+           sB.nand = sA.nand)
+    (hDur : VaultDurableAt sA basePath lockIno genesisNonce macFn macKey rec) :
+    VaultDurableAt sB basePath lockIno genesisNonce macFn macKey rec := by
+  unfold VaultDurableAt at hDur ⊢
+  rw [hEq.1, hEq.2.1, hEq.2.2.1, hEq.2.2.2]
+  exact hDur
+
+private theorem vaultDurableAt_after_crash
+    {st crashed : PosixFsState} {basePath : DirName} {lockIno : InodeId} {genesisNonce : List UInt8}
+    {macFn : KeyedMacFn} {macKey : List UInt8} {rec : WalRecord}
+    (hDur : VaultDurableAt st basePath lockIno genesisNonce macFn macKey rec)
+    (hCr : CrashStep st crashed) :
+    VaultDurableAt crashed basePath lockIno genesisNonce macFn macKey rec := by
+  have hWin := vaultDurableAt_to_window hDur hDur.2.2.2.1 rfl hDur.2.2.2.2.1 hDur.2.2.2.2.2.1
+  rcases (crashStep_preserves_window_to_durable hWin hCr).2.2 with h1 | h2
+  · exact h1
+  · exact h2
+
+/-- Constructive symbolic provisioning theorem (`provisionGenesis_rebooted_succeeds`):
+    On any rebooted/fresh state (`openFds = {}`, `flockTable = {}`, `pageCache = {}`,
+    `driveCache = {}`) where neither `basePath` nor `walLockPath basePath` exists in
+    `unsyncedEntries` and `st.nand.nextInode < 2^64`, `provisionGenesis` with `faults = {}`
+    deterministically succeeds and establishes `VaultDurableAt` at `epoch = 0`! -/
+theorem provisionGenesis_rebooted_succeeds
+    (st : PosixFsState) (pid : Pid) (basePath : DirName)
+    (vkId nonce initPay : List UInt8)
+    (macFn : KeyedMacFn) (hMacWf : WellFormedMacFn macFn) (macKey : List UInt8)
+    (hFds : st.kernel.openFds = {})
+    (hFlk : st.kernel.flockTable = {})
+    (hPg : st.kernel.pageCache = {})
+    (hDrv : st.driveCache = {})
+    (hBaseNone : assocLookup st.kernel.dirInode.unsyncedEntries basePath = none)
+    (hLockNone : assocLookup st.kernel.dirInode.unsyncedEntries (walLockPath basePath) = none)
+    (hIno64 : st.nand.nextInode < 2 ^ 64)
+    (hVk : vkId.length = 32)
+    (hNonce : nonce.length = 32)
+    (hPay : initPay.length < 2 ^ 32) :
+    let rec0 := signWalRecord macFn macKey
+      { vaultKeyId := vkId
+        lockGenesisId := computeLockGenesisId st.nand.nextInode nonce
+        epoch := 0
+        payload := initPay }
+    ∃ fsOut,
+      provisionGenesis st pid basePath vkId nonce initPay macFn macKey {} =
+        (fsOut, .ok (st.nand.nextInode, rec0)) ∧
+      fsOut.nand.nextInode = st.nand.nextInode + 2 ∧
+      VaultDurableAt fsOut basePath st.nand.nextInode nonce macFn macKey rec0 := by
+  dsimp +zetaDelta only
+  let lockIno := st.nand.nextInode
+  let recIno := st.nand.nextInode + 1
+  let rec0 := signWalRecord macFn macKey
+    { vaultKeyId := vkId
+      lockGenesisId := computeLockGenesisId lockIno nonce
+      epoch := 0
+      payload := initPay }
+  have hInvFalse :
+      (vkId.length != 32 || nonce.length != 32 || !(decide (initPay.length < 2 ^ 32))) = false := by
+    simp [hVk, hNonce, hPay]
+  have hNeLock : basePath ≠ walLockPath basePath :=
+    fun he => walLockPath_ne_base basePath he.symm
+  have hBodyWf :
+      ({ vaultKeyId := vkId
+         lockGenesisId := computeLockGenesisId lockIno nonce
+         epoch := 0
+         payload := initPay } : WalRecordBody).WellFormed :=
+    ⟨hVk, computeLockGenesisId_length hNonce, Nat.pow_pos (by decide : 0 < 2), hPay⟩
+  have hRecWf : rec0.WellFormed := signWalRecord_wellFormed hMacWf macKey hBodyWf
+  unfold provisionGenesis
+  rw [hInvFalse]
+  simp only [Bool.false_eq_true, ↓reduceIte, hBaseNone, hLockNone]
+  let st1 : PosixFsState :=
+    { kernel :=
+        { st.kernel with
+            openFds := { fdRefs := [((pid, st.nextFd), 1)]
+                         descriptions := [(1, { inode := lockIno, writable := true, stickyFsyncErr := false })]
+                         nextDescId := 2 }
+            dirInode := { unsyncedEntries :=
+                            assocInsert (walLockPath basePath) (.regular lockIno)
+                              st.kernel.dirInode.unsyncedEntries } }
+      driveCache := st.driveCache
+      nand := { st.nand with
+                  fileBlocks := assocInsert lockIno [] st.nand.fileBlocks
+                  nextInode := recIno }
+      nextFd := st.nextFd + 1 }
+  have hStep1 : posixCreateExclNoFollow st pid (walLockPath basePath) = .ok (st1, st.nextFd, lockIno) := by
+    unfold posixCreateExclNoFollow
+    rw [hLockNone, hFds]
+    rfl
+  rw [hStep1]; dsimp only
+  let st2 : PosixFsState :=
+    { st1 with kernel := { st1.kernel with flockTable := { locks := [(lockIno, 1)] } } }
+  have hStep2 : posixFlockExNb st1 pid st.nextFd = .ok st2 := by
+    unfold posixFlockExNb resolveOpenFd FlockTable.owner
+    dsimp +zetaDelta only [st2, st1]
+    rw [hFlk]
+    simp only [assocLookup, ↓reduceIte]
+    rfl
+  rw [hStep2]; dsimp only
+  let sealBytes := encodeLockSidecar { sealedLockInode := lockIno, genesisNonce := nonce }
+  let st3 : PosixFsState :=
+    { st2 with kernel := { st2.kernel with pageCache := { dirtyFiles := [(lockIno, sealBytes)] } } }
+  have hStep3 : posixPwriteAll st2 pid st.nextFd sealBytes = .ok st3 := by
+    unfold posixPwriteAll resolveOpenFd
+    dsimp +zetaDelta only [st3, st2, st1]
+    rw [hPg]
+    simp only [assocLookup, ↓reduceIte, Bool.not_true, Bool.false_eq_true]
+    rfl
+  rw [hStep3]; dsimp only
+  let st4 : PosixFsState :=
+    { st3 with
+        kernel := { st3.kernel with pageCache := { dirtyFiles := [] } }
+        driveCache := { cachedFiles := [], cachedDirEntries := none }
+        nand := { st3.nand with fileBlocks := assocInsert lockIno sealBytes st3.nand.fileBlocks } }
+  have hStep4 : posixSyncAllMedia st3 pid st.nextFd false = (st4, .ok ()) := by
+    unfold posixSyncAllMedia resolveOpenFd readInodeHierarchy pendingVolatileWrite
+    dsimp +zetaDelta only [st4, st3, st2, st1]
+    rw [hDrv]
+    simp only [assocLookup, assocErase, ↓reduceIte, Bool.false_eq_true]
+  rw [hStep4]; dsimp only
+  let st5 : PosixFsState :=
+    { kernel :=
+        { st4.kernel with
+            openFds :=
+              { fdRefs := assocInsert (pid, st.nextFd + 1) 2 [((pid, st.nextFd), 1)]
+                descriptions := assocInsert 2 { inode := recIno, writable := true, stickyFsyncErr := false }
+                  [(1, { inode := lockIno, writable := true, stickyFsyncErr := false })]
+                nextDescId := 3 }
+            dirInode :=
+              { unsyncedEntries :=
+                  assocInsert basePath (.regular recIno)
+                    (assocInsert (walLockPath basePath) (.regular lockIno)
+                      st.kernel.dirInode.unsyncedEntries) } }
+      driveCache := st4.driveCache
+      nand := { st4.nand with
+                  fileBlocks := assocInsert recIno [] st4.nand.fileBlocks
+                  nextInode := recIno + 1 }
+      nextFd := st.nextFd + 1 + 1 }
+  have hStep5 : posixCreateExclNoFollow st4 pid basePath = .ok (st5, st.nextFd + 1, recIno) := by
+    unfold posixCreateExclNoFollow
+    dsimp +zetaDelta only [st4, st3, st2, st1]
+    simp only [assocLookup_insert, hNeLock, ↓reduceIte, hBaseNone]
+  rw [hStep5]; dsimp only
+  let st6 : PosixFsState :=
+    { st5 with
+        kernel := { st5.kernel with pageCache := { dirtyFiles := [(recIno, encodeWalRecord rec0)] } } }
+  have hStep6 : posixPwriteAll st5 pid (st.nextFd + 1) (encodeWalRecord rec0) = .ok st6 := by
+    have hRes5 : resolveOpenFd st5.kernel.openFds pid (st.nextFd + 1) =
+        some (2, { inode := recIno, writable := true, stickyFsyncErr := false }) := by
+      dsimp +zetaDelta only [st5]
+      exact resolveOpenFd_insert_self st4.kernel.openFds pid (st.nextFd + 1) 2 _
+    unfold posixPwriteAll
+    rw [hRes5]
+    rfl
+  rw [hStep6]; dsimp only
+  let st7 : PosixFsState :=
+    { st6 with
+        kernel := { st6.kernel with pageCache := { dirtyFiles := assocErase recIno [(recIno, encodeWalRecord rec0)] } }
+        driveCache := { cachedFiles := [], cachedDirEntries := none }
+        nand := { st6.nand with fileBlocks := assocInsert recIno (encodeWalRecord rec0) st6.nand.fileBlocks } }
+  have hStep7 : posixSyncAllMedia st6 pid (st.nextFd + 1) false = (st7, .ok ()) := by
+    have hRes6 : resolveOpenFd st6.kernel.openFds pid (st.nextFd + 1) =
+        some (2, { inode := recIno, writable := true, stickyFsyncErr := false }) := by
+      change resolveOpenFd st5.kernel.openFds pid (st.nextFd + 1) = _
+      dsimp +zetaDelta only [st5]
+      exact resolveOpenFd_insert_self st4.kernel.openFds pid (st.nextFd + 1) 2 _
+    have hRead6 : readInodeHierarchy st6 recIno = some (encodeWalRecord rec0) := by
+      have hDirty6 : assocLookup st6.kernel.pageCache.dirtyFiles recIno =
+          some (encodeWalRecord rec0) :=
+        assocLookup_cons_self _ _ _
+      unfold readInodeHierarchy pendingVolatileWrite
+      rw [hDirty6]
+    unfold posixSyncAllMedia
+    rw [hRes6]
+    dsimp only [Bool.false_eq_true, ↓reduceIte]
+    rw [hRead6]
+    rfl
+  rw [hStep7]; dsimp only
+  let st8 : PosixFsState :=
+    { kernel :=
+        { openFds :=
+            { fdRefs := assocInsert (pid, st.nextFd + 1) 2 [((pid, st.nextFd), 1)]
+              descriptions := assocInsert 2 { inode := recIno, writable := true, stickyFsyncErr := false }
+                [(1, { inode := lockIno, writable := true, stickyFsyncErr := false })]
+              nextDescId := 3 }
+          flockTable := { locks := [(lockIno, 1)] }
+          pageCache := { dirtyFiles := assocErase recIno [(recIno, encodeWalRecord rec0)] }
+          dirInode :=
+            { unsyncedEntries :=
+                assocInsert basePath (.regular recIno)
+                  (assocInsert (walLockPath basePath) (.regular lockIno)
+                    st.kernel.dirInode.unsyncedEntries) } }
+      driveCache := { cachedFiles := [], cachedDirEntries := none }
+      nand :=
+        { dirNandEntries :=
+            assocInsert basePath (.regular recIno)
+              (assocInsert (walLockPath basePath) (.regular lockIno)
+                st.kernel.dirInode.unsyncedEntries)
+          fileBlocks :=
+            assocInsert recIno (encodeWalRecord rec0)
+              (assocInsert recIno []
+                (assocInsert lockIno
+                  (encodeLockSidecar { sealedLockInode := lockIno, genesisNonce := nonce })
+                  (assocInsert lockIno [] st.nand.fileBlocks)))
+          nextInode := recIno + 1 }
+      nextFd := st.nextFd + 1 + 1 }
+  have hStep8 : posixSyncParentDir st7 false = (st8, .ok ()) := rfl
+  rw [hStep8]; dsimp only
+  let st9 := (posixCloseFd st8 pid (st.nextFd + 1)).toOption.getD st8
+  let st10 := (posixCloseFd st9 pid st.nextFd).toOption.getD st9
+  have hc8 := posixCloseFd_preserves_storage st8 pid (st.nextFd + 1)
+  have hc9 := posixCloseFd_preserves_storage st9 pid st.nextFd
+  have hDir10 : st10.kernel.dirInode = st8.kernel.dirInode := hc9.1.trans hc8.1
+  have hPg10 : st10.kernel.pageCache = st8.kernel.pageCache := hc9.2.1.trans hc8.2.1
+  have hDr10 : st10.driveCache = st8.driveCache := hc9.2.2.1.trans hc8.2.2.1
+  have hNd10 : st10.nand = st8.nand := hc9.2.2.2.trans hc8.2.2.2
+  refine ⟨st10, rfl, ?_, ?_⟩
+  · rw [hNd10]
+  · unfold VaultDurableAt
+    rw [hDir10, hPg10, hDr10, hNd10]
+    dsimp +zetaDelta only [st8, lockIno, recIno]
+    have hInoNe : st.nand.nextInode ≠ st.nand.nextInode + 1 := Nat.ne_of_lt (Nat.lt_succ_self _)
+    refine ⟨Nat.lt_trans (Nat.lt_succ_self _) (Nat.lt_succ_self _),
+            hIno64, hNonce, hRecWf, rfl, verifyWalMac_signWalRecord _ _ _, rfl,
+            ?_, ?_, ?_, rfl, ?_,
+            st.nand.nextInode + 1, Nat.lt_succ_self _, ?_, ?_, ?_, rfl, ?_⟩
+    · simp [hNeLock.symm]
+    · simp [hNeLock.symm]
+    · simp [assocErase]
+    · simp only [assocLookup_insert_self, assocLookup_insert, hInoNe, ↓reduceIte]
+    · simp
+    · simp
+    · simp [assocErase]
+    · simp
+
+private theorem provisionGenesis_ok_durable
+    {pid : Pid} {basePath : DirName} {vkId nonce initPay : List UInt8}
+    {macFn : KeyedMacFn} (hMacWf : WellFormedMacFn macFn) {macKey : List UInt8}
+    {fs0 : PosixFsState} {lockIno : InodeId} {rec0 : WalRecord}
+    (hGen : provisionGenesis PosixFsState.empty pid basePath vkId nonce initPay macFn macKey {} =
+              (fs0, .ok (lockIno, rec0))) :
+    lockIno = 1 ∧
+    rec0 = signWalRecord macFn macKey
+      { vaultKeyId := vkId
+        lockGenesisId := computeLockGenesisId 1 nonce
+        epoch := 0
+        payload := initPay } ∧
+    VaultDurableAt fs0 basePath lockIno nonce macFn macKey rec0 := by
+  have hPre : vkId.length = 32 ∧ nonce.length = 32 ∧ initPay.length < 2 ^ 32 := by
+    unfold provisionGenesis at hGen
+    by_cases hBad : (vkId.length != 32 || nonce.length != 32 || !(decide (initPay.length < 2 ^ 32))) = true
+    · simp [hBad] at hGen
+    · refine ⟨eq_of_not_bne_true (fun hc => hBad (by simp [hc])),
+              eq_of_not_bne_true (fun hc => hBad (by simp [hc])), ?_⟩
+      cases hd : decide (initPay.length < 2 ^ 32)
+      · exfalso; apply hBad; simp [hd]
+      · exact of_decide_eq_true hd
+  have h1Lt64 : PosixFsState.empty.nand.nextInode < 2 ^ 64 :=
+    Nat.lt_trans (lt_two_pow_32_of_le_8192 (by decide : 1 ≤ 8192))
+      two_pow_32_lt_two_pow_64
+  obtain ⟨fsOut, hGenOk, _, hDurOut⟩ :=
+    provisionGenesis_rebooted_succeeds PosixFsState.empty pid basePath vkId nonce initPay
+      macFn hMacWf macKey rfl rfl rfl rfl rfl rfl h1Lt64 hPre.1 hPre.2.1 hPre.2.2
+  rw [hGenOk] at hGen
+  rcases Prod.mk.inj hGen with ⟨hFsEq, hOkEq⟩
+  injection hOkEq with hPairEq
+  rcases Prod.mk.inj hPairEq with ⟨hInoEq, hRecEq⟩
+  subst hFsEq hInoEq hRecEq
+  exact ⟨rfl, rfl, hDurOut⟩
+
+theorem initProvisionedCeremonyState_inv
+    {pid : Pid} {basePath : DirName} {vaultKeyId genesisNonce : List UInt8}
+    {policySpendCap : Nat} {macFn : KeyedMacFn} (hMacWf : WellFormedMacFn macFn)
+    {macKey : List UInt8} {s₀ : CeremonyCrashState}
+    (hInit : initProvisionedCeremonyState pid basePath vaultKeyId genesisNonce
+               policySpendCap macFn macKey = some s₀) :
+    CeremonyMultiCrashInv macFn macKey s₀ := by
+  unfold initProvisionedCeremonyState at hInit
+  dsimp +zetaDelta only at hInit
+  let initPay := encodeCeremonyJournalRecord ceremonyGenesisJournal
+  cases hGen : provisionGenesis PosixFsState.empty pid basePath vaultKeyId genesisNonce initPay macFn macKey {} with
+  | mk fs0 res0 =>
+    rw [hGen] at hInit
+    cases res0 with
+    | error _ => cases hInit
+    | ok pair0 =>
+      rcases pair0 with ⟨lockIno, rec0⟩
+      injection hInit with hS0
+      rw [← hS0]
+      obtain ⟨hLockEq, hRec0Eq, hDur0⟩ := provisionGenesis_ok_durable hMacWf hGen
+      refine Or.inl ⟨rfl, ?_⟩
+      refine ⟨lockIno, genesisNonce, rec0, ceremonyGenesisJournal,
+        hDur0, ?_, ?_, ceremonyGenesisJournal_wellFormed, Nat.zero_le _,
+        List.nodup_nil, List.nodup_nil, List.nodup_nil, List.nodup_nil,
+        List.nodup_nil, List.nodup_nil,
+        by simp, by simp, trivial⟩
+      · rw [hRec0Eq]; rfl
+      · rw [hRec0Eq]; rfl
+
+private theorem stepCeremonyHealthy_preserves_inv
+    {macFn : KeyedMacFn} (hMacWf : WellFormedMacFn macFn) {macKey : List UInt8}
+    {s : CeremonyCrashState} (ev : CeremonyCrashEvent)
+    (hH : s.ioPoisoned = false)
+    (hInv : CeremonySettledInv macFn macKey s) :
+    CeremonyMultiCrashInv macFn macKey (stepCeremonyHealthy macFn macKey s ev) := by
+  have hLift : ∀ s' : CeremonyCrashState, s'.ioPoisoned = false →
+      CeremonySettledInv macFn macKey s' → CeremonyMultiCrashInv macFn macKey s' :=
+    fun _ h1 h2 => Or.inl ⟨h1, h2⟩
+  rcases hInv with ⟨lockIno, genesisNonce, curRec, curJ,
+    hDur, hVkEq, hPayEq, hJWf, hPolLe,
+    hNdNonce, hNdPrep, hNdRng, hNdLeaf, hNdSigNonce, hNdSigLeaf,
+    hR1All, hSigAll, hLeaseInv⟩
+  cases ev with
+  | kernelPanic =>
+    unfold stepCeremonyHealthy
+    refine hLift _ hH ?_
+    exact ⟨lockIno, genesisNonce, curRec, curJ,
+      vaultDurableAt_after_crash hDur (CrashStep.kernelPanic s.fs),
+      hVkEq, hPayEq, hJWf, hPolLe,
+      hNdNonce, hNdPrep, hNdRng, hNdLeaf, hNdSigNonce, hNdSigLeaf,
+      hR1All, hSigAll, trivial⟩
+  | powerLoss dirPick defaultTear overrides =>
+    unfold stepCeremonyHealthy
+    refine hLift _ hH ?_
+    exact ⟨lockIno, genesisNonce, curRec, curJ,
+      vaultDurableAt_after_crash hDur
+        (CrashStep.powerLoss dirPick (evalFiniteTearSchedule defaultTear overrides) s.fs),
+      hVkEq, hPayEq, hJWf, hPolLe,
+      hNdNonce, hNdPrep, hNdRng, hNdLeaf, hNdSigNonce, hNdSigLeaf,
+      hR1All, hSigAll, trivial⟩
+  | reserveAndEmitRound1 pid txId msgCtx spendDelta baggyDigest faults =>
+    unfold stepCeremonyHealthy
+    dsimp only
+    cases hOp : openExisting s.fs pid s.basePath s.vaultKeyId macFn macKey with
+    | mk fs1 opRes =>
+      cases opRes with
+      | error _ =>
+        dsimp only
+        refine hLift _ hH ?_
+        exact ⟨lockIno, genesisNonce, curRec, curJ,
+          vaultDurableAt_storage_frame (openExisting_err_preserves_storage hOp) hDur,
+          hVkEq, hPayEq, hJWf, hPolLe,
+          hNdNonce, hNdPrep, hNdRng, hNdLeaf, hNdSigNonce, hNdSigLeaf,
+          hR1All, hSigAll, hLeaseInv⟩
+      | ok hPair =>
+        rcases hPair with ⟨h, readRec⟩
+        obtain ⟨hReadEq, hBaseH, hVkH, hGidH, hDur1⟩ := openExisting_ok_of_vaultDurableAt hDur hOp
+        subst readRec
+        dsimp +zetaDelta only
+        rw [hPayEq, decodeCeremonyJournalRecord_encodeCeremonyJournalRecord hJWf]
+        dsimp +zetaDelta only
+        by_cases hNotCan :
+            (!(canReserveCeremonyRound1 curJ curRec.body.epoch s.policySpendCap
+                 txId msgCtx spendDelta baggyDigest)) = true
+        · simp only [hNotCan, ↓reduceIte]
+          refine hLift _ hH ?_
+          exact ⟨lockIno, genesisNonce, curRec, curJ,
+            vaultDurableAt_storage_frame (posixCloseFd_preserves_storage fs1 h.pid h.lockFd) hDur1,
+            hVkEq, hPayEq, hJWf, hPolLe,
+            hNdNonce, hNdPrep, hNdRng, hNdLeaf, hNdSigNonce, hNdSigLeaf,
+            hR1All, hSigAll, hLeaseInv⟩
+        · simp only [hNotCan, Bool.false_eq_true, ↓reduceIte]
+          have hCan : canReserveCeremonyRound1 curJ curRec.body.epoch s.policySpendCap
+              txId msgCtx spendDelta baggyDigest = true := by
+            cases hc : canReserveCeremonyRound1 curJ curRec.body.epoch s.policySpendCap
+              txId msgCtx spendDelta baggyDigest
+            · exfalso; apply hNotCan; simp [hc]
+            · rfl
+          obtain ⟨hNextWf, hNextCap, hMono, hEp64⟩ := canReserveCeremonyRound1_sound hCan
+          let nextJ := buildRound1JournalRecord curJ txId msgCtx spendDelta baggyDigest
+          let nextPay := encodeCeremonyJournalRecord nextJ
+          have hPay32 : nextPay.length < 2 ^ 32 := encodeCeremonyJournalRecord_lt_two_pow_32 hNextWf
+          have hDur1H : VaultDurableAt fs1 h.basePath lockIno genesisNonce macFn macKey curRec := by
+            rw [hBaseH]; exact hDur1
+          cases hRep : replaceAtomic fs1 h (curRec.body.epoch + 1) nextPay macFn macKey faults with
+          | mk fsRep repRest =>
+            rcases repRest with ⟨hAfter, repRes⟩
+            cases repRes with
+            | error _ =>
+              dsimp +zetaDelta only
+              have hMemSteps : fsRep ∈ replaceAtomicSteps fs1 h (curRec.body.epoch + 1)
+                  nextPay macFn macKey faults := by
+                have hm := replaceAtomic_fst_mem_steps fs1 h (curRec.body.epoch + 1)
+                             nextPay macFn macKey faults
+                rw [hRep] at hm; exact hm
+              have hWin := replaceAtomicSteps_all_in_window hMacWf hEp64 hPay32 faults
+                hVkH hGidH hDur1H hMemSteps
+              refine Or.inr ⟨rfl, ?_⟩
+              intro crashed hCr
+              rcases (crashStep_preserves_window_to_durable hWin hCr).2.2 with hOld | hNew
+              · rw [hBaseH] at hOld
+                exact ⟨lockIno, genesisNonce, curRec, curJ,
+                  hOld, hVkEq, hPayEq, hJWf, hPolLe,
+                  hNdNonce, hNdPrep, hNdRng, hNdLeaf, hNdSigNonce, hNdSigLeaf,
+                  hR1All, hSigAll, trivial⟩
+              · rw [hBaseH] at hNew
+                exact ⟨lockIno, genesisNonce, _, nextJ,
+                  hNew, hVkH.trans hVkEq, rfl, hNextWf, hNextCap,
+                  hNdNonce, hNdPrep, hNdRng, hNdLeaf, hNdSigNonce, hNdSigLeaf,
+                  fun p hp => allRound1ReservationsDurable_mono hMono (hR1All p hp),
+                  fun sg hsg => allRequiredReservationsDurable_mono hMono (hSigAll sg hsg),
+                  trivial⟩
+            | ok committedRec =>
+              dsimp +zetaDelta only
+              obtain ⟨_, hComEq, hDurOk⟩ := replaceAtomic_ok_durable hMacWf hVkH hGidH hDur1H hRep
+              rw [hBaseH] at hDurOk
+              have hDurClosed := vaultDurableAt_storage_frame
+                (posixCloseFd_preserves_storage fsRep hAfter.pid hAfter.lockFd) hDurOk
+              refine hLift _ hH ?_
+              refine ⟨lockIno, genesisNonce, committedRec, nextJ,
+                hDurClosed,
+                by rw [hComEq]; exact hVkH.trans hVkEq,
+                by rw [hComEq]; rfl,
+                hNextWf, hNextCap,
+                ?_, ?_, ?_, ?_, hNdSigNonce, hNdSigLeaf,
+                ?_, ?_, ?_⟩
+              · rw [List.map_append]
+                refine nodup_snoc hNdNonce (fun x hx => ?_)
+                rcases List.mem_map.mp hx with ⟨pOld, hpOld, rfl⟩
+                exact Nat.ne_of_lt (hR1All pOld hpOld).2.2.2.2
+              · rw [List.map_append]
+                refine nodup_snoc hNdPrep (fun x hx => ?_)
+                rcases List.mem_map.mp hx with ⟨pOld, hpOld, rfl⟩
+                exact Nat.ne_of_lt (hR1All pOld hpOld).2.2.2.1
+              · rw [List.map_append]
+                refine nodup_snoc hNdRng (fun x hx => ?_)
+                rcases List.mem_map.mp hx with ⟨pOld, hpOld, rfl⟩
+                exact Nat.ne_of_lt (hR1All pOld hpOld).2.2.1
+              · rw [List.map_append]
+                refine nodup_snoc hNdLeaf (fun x hx => ?_)
+                rcases List.mem_map.mp hx with ⟨pOld, hpOld, rfl⟩
+                exact Nat.ne_of_lt (hR1All pOld hpOld).2.1
+              · intro p hp
+                rcases List.mem_append.mp hp with hpOld | hpNew
+                · exact allRound1ReservationsDurable_mono hMono (hR1All p hpOld)
+                · simp only [List.mem_singleton] at hpNew
+                  subst hpNew
+                  exact ⟨Nat.le_refl _, Nat.lt_succ_self _, Nat.lt_succ_self _,
+                         Nat.lt_succ_self _, Nat.lt_succ_self _⟩
+              · intro sg hsg
+                exact allRequiredReservationsDurable_mono hMono (hSigAll sg hsg)
+              · refine ⟨Nat.le_refl _, Nat.lt_succ_self _, Nat.lt_succ_self _,
+                        Nat.lt_succ_self _, Nat.lt_succ_self _, ?_, ?_⟩
+                · intro sg hsg
+                  exact Nat.ne_of_lt (hSigAll sg hsg).2.2.2.2
+                · intro sg hsg
+                  exact Nat.ne_of_lt (hSigAll sg hsg).2.1
+  | midReplaceCrashDuringRound1 pid txId msgCtx spendDelta baggyDigest faults
+      stepIdx crash =>
+    unfold stepCeremonyHealthy
+    dsimp +zetaDelta only
+    cases hOp : openExisting s.fs pid s.basePath s.vaultKeyId macFn macKey with
+    | mk fs1 opRes =>
+      cases opRes with
+      | error _ =>
+        dsimp only
+        have hDurErr := vaultDurableAt_storage_frame (openExisting_err_preserves_storage hOp) hDur
+        refine hLift _ hH ?_
+        exact ⟨lockIno, genesisNonce, curRec, curJ,
+          vaultDurableAt_after_crash hDurErr (crash.apply_crashStep fs1),
+          hVkEq, hPayEq, hJWf, hPolLe,
+          hNdNonce, hNdPrep, hNdRng, hNdLeaf, hNdSigNonce, hNdSigLeaf,
+          hR1All, hSigAll, trivial⟩
+      | ok hPair =>
+        rcases hPair with ⟨h, readRec⟩
+        obtain ⟨hReadEq, hBaseH, hVkH, hGidH, hDur1⟩ := openExisting_ok_of_vaultDurableAt hDur hOp
+        subst readRec
+        dsimp +zetaDelta only
+        rw [hPayEq, decodeCeremonyJournalRecord_encodeCeremonyJournalRecord hJWf]
+        dsimp +zetaDelta only
+        by_cases hNotCan :
+            (!(canReserveCeremonyRound1 curJ curRec.body.epoch s.policySpendCap
+                 txId msgCtx spendDelta baggyDigest)) = true
+        · simp only [hNotCan, ↓reduceIte]
+          refine hLift _ hH ?_
+          exact ⟨lockIno, genesisNonce, curRec, curJ,
+            vaultDurableAt_after_crash hDur1 (crash.apply_crashStep fs1),
+            hVkEq, hPayEq, hJWf, hPolLe,
+            hNdNonce, hNdPrep, hNdRng, hNdLeaf, hNdSigNonce, hNdSigLeaf,
+            hR1All, hSigAll, trivial⟩
+        · simp only [hNotCan, Bool.false_eq_true, ↓reduceIte]
+          have hCan : canReserveCeremonyRound1 curJ curRec.body.epoch s.policySpendCap
+              txId msgCtx spendDelta baggyDigest = true := by
+            cases hc : canReserveCeremonyRound1 curJ curRec.body.epoch s.policySpendCap
+              txId msgCtx spendDelta baggyDigest
+            · exfalso; apply hNotCan; simp [hc]
+            · rfl
+          obtain ⟨hNextWf, hNextCap, hMono, hEp64⟩ := canReserveCeremonyRound1_sound hCan
+          let nextJ := buildRound1JournalRecord curJ txId msgCtx spendDelta baggyDigest
+          let nextPay := encodeCeremonyJournalRecord nextJ
+          have hPay32 : nextPay.length < 2 ^ 32 := encodeCeremonyJournalRecord_lt_two_pow_32 hNextWf
+          have hDur1H : VaultDurableAt fs1 h.basePath lockIno genesisNonce macFn macKey curRec := by
+            rw [hBaseH]; exact hDur1
+          have hMidMem := pickStepState_mem
+            (self_mem_replaceAtomicSteps fs1 h (curRec.body.epoch + 1) nextPay macFn macKey faults)
+            stepIdx
+          have hWin := replaceAtomicSteps_all_in_window hMacWf hEp64 hPay32 faults
+            hVkH hGidH hDur1H hMidMem
+          rcases (crashStep_preserves_window_to_durable hWin
+            (crash.apply_crashStep _)).2.2 with hOld | hNew
+          · rw [hBaseH] at hOld
+            refine hLift _ hH ?_
+            exact ⟨lockIno, genesisNonce, curRec, curJ,
+              hOld, hVkEq, hPayEq, hJWf, hPolLe,
+              hNdNonce, hNdPrep, hNdRng, hNdLeaf, hNdSigNonce, hNdSigLeaf,
+              hR1All, hSigAll, trivial⟩
+          · rw [hBaseH] at hNew
+            refine hLift _ hH ?_
+            exact ⟨lockIno, genesisNonce, _, nextJ,
+              hNew, hVkH.trans hVkEq, rfl, hNextWf, hNextCap,
+              hNdNonce, hNdPrep, hNdRng, hNdLeaf, hNdSigNonce, hNdSigLeaf,
+              fun p hp => allRound1ReservationsDurable_mono hMono (hR1All p hp),
+              fun sg hsg => allRequiredReservationsDurable_mono hMono (hSigAll sg hsg),
+              trivial⟩
+  | releaseSignatureFromRound1 pid sigBytes faults =>
+    unfold stepCeremonyHealthy
+    dsimp only
+    cases hLs : s.pendingRound1Lease with
+    | none =>
+      dsimp only
+      refine hLift _ hH ?_
+      exact ⟨lockIno, genesisNonce, curRec, curJ,
+        hDur, hVkEq, hPayEq, hJWf, hPolLe,
+        hNdNonce, hNdPrep, hNdRng, hNdLeaf, hNdSigNonce, hNdSigLeaf,
+        hR1All, hSigAll, by rw [hLs]; trivial⟩
+    | some lease =>
+      rw [hLs] at hLeaseInv
+      rcases hLeaseInv with ⟨hLsPol, hLsLeaf, hLsRng, hLsPrep, hLsNonce, hLsFreshN, hLsFreshL⟩
+      dsimp only
+      cases hOp : openExisting s.fs pid s.basePath s.vaultKeyId macFn macKey with
+      | mk fs1 opRes =>
+        cases opRes with
+        | error _ =>
+          dsimp only
+          refine hLift _ hH ?_
+          exact ⟨lockIno, genesisNonce, curRec, curJ,
+            vaultDurableAt_storage_frame (openExisting_err_preserves_storage hOp) hDur,
+            hVkEq, hPayEq, hJWf, hPolLe,
+            hNdNonce, hNdPrep, hNdRng, hNdLeaf, hNdSigNonce, hNdSigLeaf,
+            hR1All, hSigAll,
+            ⟨hLsPol, hLsLeaf, hLsRng, hLsPrep, hLsNonce, hLsFreshN, hLsFreshL⟩⟩
+        | ok hPair =>
+          rcases hPair with ⟨h, readRec⟩
+          obtain ⟨hReadEq, hBaseH, hVkH, hGidH, hDur1⟩ := openExisting_ok_of_vaultDurableAt hDur hOp
+          subst readRec
+          dsimp +zetaDelta only
+          rw [hPayEq, decodeCeremonyJournalRecord_encodeCeremonyJournalRecord hJWf]
+          dsimp +zetaDelta only
+          by_cases hNotEp : (!(decide (curRec.body.epoch + 1 < 2 ^ 64))) = true
+          · simp only [hNotEp, ↓reduceIte]
+            refine hLift _ hH ?_
+            exact ⟨lockIno, genesisNonce, curRec, curJ,
+              vaultDurableAt_storage_frame (posixCloseFd_preserves_storage fs1 h.pid h.lockFd) hDur1,
+              hVkEq, hPayEq, hJWf, hPolLe,
+              hNdNonce, hNdPrep, hNdRng, hNdLeaf, hNdSigNonce, hNdSigLeaf,
+              hR1All, hSigAll,
+              ⟨hLsPol, hLsLeaf, hLsRng, hLsPrep, hLsNonce, hLsFreshN, hLsFreshL⟩⟩
+          · simp only [hNotEp, Bool.false_eq_true, ↓reduceIte]
+            have hEp64 : curRec.body.epoch + 1 < 2 ^ 64 := by
+              cases hd : decide (curRec.body.epoch + 1 < 2 ^ 64)
+              · exfalso; apply hNotEp; simp [hd]
+              · exact of_decide_eq_true hd
+            let relJ : CeremonyJournalRecord := { curJ with phase := .released }
+            have hRelWf : relJ.WellFormed := hJWf
+            have hRelMono : curJ.MonotoneLe relJ := ceremonyMonotoneLe_refl curJ
+            let relPay := encodeCeremonyJournalRecord relJ
+            have hRelPay32 : relPay.length < 2 ^ 32 := encodeCeremonyJournalRecord_lt_two_pow_32 hRelWf
+            have hDur1H : VaultDurableAt fs1 h.basePath lockIno genesisNonce macFn macKey curRec := by
+              rw [hBaseH]; exact hDur1
+            cases hRep : replaceAtomic fs1 h (curRec.body.epoch + 1) relPay macFn macKey faults with
+            | mk fsRep repRest =>
+              rcases repRest with ⟨hAfter, repRes⟩
+              cases repRes with
+              | error _ =>
+                dsimp +zetaDelta only
+                have hMemSteps : fsRep ∈ replaceAtomicSteps fs1 h (curRec.body.epoch + 1)
+                    relPay macFn macKey faults := by
+                  have hm := replaceAtomic_fst_mem_steps fs1 h (curRec.body.epoch + 1)
+                               relPay macFn macKey faults
+                  rw [hRep] at hm; exact hm
+                have hWin := replaceAtomicSteps_all_in_window hMacWf hEp64 hRelPay32 faults
+                  hVkH hGidH hDur1H hMemSteps
+                refine Or.inr ⟨rfl, ?_⟩
+                intro crashed hCr
+                rcases (crashStep_preserves_window_to_durable hWin hCr).2.2 with hOld | hNew
+                · rw [hBaseH] at hOld
+                  exact ⟨lockIno, genesisNonce, curRec, curJ,
+                    hOld, hVkEq, hPayEq, hJWf, hPolLe,
+                    hNdNonce, hNdPrep, hNdRng, hNdLeaf, hNdSigNonce, hNdSigLeaf,
+                    hR1All, hSigAll, trivial⟩
+                · rw [hBaseH] at hNew
+                  exact ⟨lockIno, genesisNonce, _, relJ,
+                    hNew, hVkH.trans hVkEq, rfl, hRelWf, hPolLe,
+                    hNdNonce, hNdPrep, hNdRng, hNdLeaf, hNdSigNonce, hNdSigLeaf,
+                    fun p hp => allRound1ReservationsDurable_mono hRelMono (hR1All p hp),
+                    fun sg hsg => allRequiredReservationsDurable_mono hRelMono (hSigAll sg hsg),
+                    trivial⟩
+              | ok committedRec =>
+                dsimp +zetaDelta only
+                obtain ⟨_, hComEq, hDurOk⟩ := replaceAtomic_ok_durable hMacWf hVkH hGidH hDur1H hRep
+                rw [hBaseH] at hDurOk
+                have hDurClosed := vaultDurableAt_storage_frame
+                  (posixCloseFd_preserves_storage fsRep hAfter.pid hAfter.lockFd) hDurOk
+                refine hLift _ hH ?_
+                refine ⟨lockIno, genesisNonce, committedRec, relJ,
+                  hDurClosed,
+                  by rw [hComEq]; exact hVkH.trans hVkEq,
+                  by rw [hComEq]; rfl,
+                  hRelWf, hPolLe,
+                  hNdNonce, hNdPrep, hNdRng, hNdLeaf, ?_, ?_,
+                  fun p hp => allRound1ReservationsDurable_mono hRelMono (hR1All p hp),
+                  ?_, trivial⟩
+                · rw [List.map_append]
+                  refine nodup_snoc hNdSigNonce (fun x hx => ?_)
+                  rcases List.mem_map.mp hx with ⟨sgOld, hsgOld, rfl⟩
+                  exact hLsFreshN sgOld hsgOld
+                · rw [List.map_append]
+                  refine nodup_snoc hNdSigLeaf (fun x hx => ?_)
+                  rcases List.mem_map.mp hx with ⟨sgOld, hsgOld, rfl⟩
+                  exact hLsFreshL sgOld hsgOld
+                · intro sg hsg
+                  rcases List.mem_append.mp hsg with hOld | hNew
+                  · exact allRequiredReservationsDurable_mono hRelMono (hSigAll sg hOld)
+                  · simp only [List.mem_singleton] at hNew
+                    subst hNew
+                    exact ⟨hLsPol, hLsLeaf, hLsRng, hLsPrep, hLsNonce⟩
+  | midReplaceCrashDuringRelease pid faults stepIdx crash =>
+    unfold stepCeremonyHealthy
+    dsimp +zetaDelta only
+    cases hOp : openExisting s.fs pid s.basePath s.vaultKeyId macFn macKey with
+    | mk fs1 opRes =>
+      cases opRes with
+      | error _ =>
+        dsimp only
+        have hDurErr := vaultDurableAt_storage_frame (openExisting_err_preserves_storage hOp) hDur
+        refine hLift _ hH ?_
+        exact ⟨lockIno, genesisNonce, curRec, curJ,
+          vaultDurableAt_after_crash hDurErr (crash.apply_crashStep fs1),
+          hVkEq, hPayEq, hJWf, hPolLe,
+          hNdNonce, hNdPrep, hNdRng, hNdLeaf, hNdSigNonce, hNdSigLeaf,
+          hR1All, hSigAll, trivial⟩
+      | ok hPair =>
+        rcases hPair with ⟨h, readRec⟩
+        obtain ⟨hReadEq, hBaseH, hVkH, hGidH, hDur1⟩ := openExisting_ok_of_vaultDurableAt hDur hOp
+        subst readRec
+        dsimp +zetaDelta only
+        rw [hPayEq, decodeCeremonyJournalRecord_encodeCeremonyJournalRecord hJWf]
+        dsimp +zetaDelta only
+        by_cases hNotEp : (!(decide (curRec.body.epoch + 1 < 2 ^ 64))) = true
+        · simp only [hNotEp, ↓reduceIte]
+          refine hLift _ hH ?_
+          exact ⟨lockIno, genesisNonce, curRec, curJ,
+            vaultDurableAt_after_crash hDur1 (crash.apply_crashStep fs1),
+            hVkEq, hPayEq, hJWf, hPolLe,
+            hNdNonce, hNdPrep, hNdRng, hNdLeaf, hNdSigNonce, hNdSigLeaf,
+            hR1All, hSigAll, trivial⟩
+        · simp only [hNotEp, Bool.false_eq_true, ↓reduceIte]
+          have hEp64 : curRec.body.epoch + 1 < 2 ^ 64 := by
+            cases hd : decide (curRec.body.epoch + 1 < 2 ^ 64)
+            · exfalso; apply hNotEp; simp [hd]
+            · exact of_decide_eq_true hd
+          let relJ : CeremonyJournalRecord := { curJ with phase := .released }
+          have hRelWf : relJ.WellFormed := hJWf
+          have hRelMono : curJ.MonotoneLe relJ := ceremonyMonotoneLe_refl curJ
+          let relPay := encodeCeremonyJournalRecord relJ
+          have hRelPay32 : relPay.length < 2 ^ 32 := encodeCeremonyJournalRecord_lt_two_pow_32 hRelWf
+          have hDur1H : VaultDurableAt fs1 h.basePath lockIno genesisNonce macFn macKey curRec := by
+            rw [hBaseH]; exact hDur1
+          have hMidMem := pickStepState_mem
+            (self_mem_replaceAtomicSteps fs1 h (curRec.body.epoch + 1) relPay macFn macKey faults)
+            stepIdx
+          have hWin := replaceAtomicSteps_all_in_window hMacWf hEp64 hRelPay32 faults
+            hVkH hGidH hDur1H hMidMem
+          rcases (crashStep_preserves_window_to_durable hWin
+            (crash.apply_crashStep _)).2.2 with hOld | hNew
+          · rw [hBaseH] at hOld
+            refine hLift _ hH ?_
+            exact ⟨lockIno, genesisNonce, curRec, curJ,
+              hOld, hVkEq, hPayEq, hJWf, hPolLe,
+              hNdNonce, hNdPrep, hNdRng, hNdLeaf, hNdSigNonce, hNdSigLeaf,
+              hR1All, hSigAll, trivial⟩
+          · rw [hBaseH] at hNew
+            refine hLift _ hH ?_
+            exact ⟨lockIno, genesisNonce, _, relJ,
+              hNew, hVkH.trans hVkEq, rfl, hRelWf, hPolLe,
+              hNdNonce, hNdPrep, hNdRng, hNdLeaf, hNdSigNonce, hNdSigLeaf,
+              fun p hp => allRound1ReservationsDurable_mono hRelMono (hR1All p hp),
+              fun sg hsg => allRequiredReservationsDurable_mono hRelMono (hSigAll sg hsg),
+              trivial⟩
+
+private theorem stepCeremonyPoisoned_preserves_inv
+    {macFn : KeyedMacFn} {macKey : List UInt8}
+    {s : CeremonyCrashState} (ev : CeremonyCrashEvent)
+    (hP : s.ioPoisoned = true)
+    (hAll : ∀ crashed : PosixFsState, CrashStep s.fs crashed →
+      CeremonySettledInv macFn macKey
+        { s with fs := crashed, ioPoisoned := false, pendingRound1Lease := none }) :
+    CeremonyMultiCrashInv macFn macKey (stepCeremonyPoisoned s ev) := by
+  cases ev with
+  | reserveAndEmitRound1 pid txId msgCtx spendDelta baggyDigest faults =>
+    exact Or.inr ⟨hP, hAll⟩
+  | releaseSignatureFromRound1 pid sigBytes faults =>
+    exact Or.inr ⟨hP, hAll⟩
+  | midReplaceCrashDuringRound1 pid txId msgCtx spendDelta baggyDigest faults stepIdx crash =>
+    exact Or.inl ⟨rfl, hAll _ (crash.apply_crashStep s.fs)⟩
+  | midReplaceCrashDuringRelease pid faults stepIdx crash =>
+    exact Or.inl ⟨rfl, hAll _ (crash.apply_crashStep s.fs)⟩
+  | kernelPanic =>
+    exact Or.inl ⟨rfl, hAll _ (CrashStep.kernelPanic s.fs)⟩
+  | powerLoss dirPick defaultTear overrides =>
+    exact Or.inl ⟨rfl, hAll _ (CrashStep.powerLoss dirPick _ s.fs)⟩
+
+theorem stepCeremonyCrashState_preserves_inv
+    {macFn : KeyedMacFn} (hMacWf : WellFormedMacFn macFn) {macKey : List UInt8}
+    {s : CeremonyCrashState} (ev : CeremonyCrashEvent)
+    (hInv : CeremonyMultiCrashInv macFn macKey s) :
+    CeremonyMultiCrashInv macFn macKey (stepCeremonyCrashState macFn macKey s ev) := by
+  unfold stepCeremonyCrashState
+  rcases hInv with ⟨hH, hSettled⟩ | ⟨hP, hAll⟩
+  · rw [hH]
+    exact stepCeremonyHealthy_preserves_inv hMacWf ev hH hSettled
+  · rw [hP]
+    exact stepCeremonyPoisoned_preserves_inv ev hP hAll
+
+theorem runCeremonyCrashTrace_preserves_inv
+    {macFn : KeyedMacFn} (hMacWf : WellFormedMacFn macFn) {macKey : List UInt8}
+    {s : CeremonyCrashState} (trace : List CeremonyCrashEvent)
+    (hInv : CeremonyMultiCrashInv macFn macKey s) :
+    CeremonyMultiCrashInv macFn macKey (runCeremonyCrashTrace macFn macKey s trace) := by
+  induction trace generalizing s with
+  | nil => exact hInv
+  | cons ev rest ih =>
+    unfold runCeremonyCrashTrace
+    exact ih (stepCeremonyCrashState_preserves_inv hMacWf ev hInv)
+
+/-- **FLAGSHIP `G1-H` CEREMONY ATOMICITY & CRASH-PREFIX NO-REUSE THEOREM
+    (`ceremony_journal_released_implies_all_reservations_durable_and_no_reuse`)**:
+    Across **arbitrary** multi-turn ceremony event prefixes `trace` (interleaving Round-1
+    reservations & network emission, final signature releases gated on `DurableReleaseReceipt`,
+    mid-`replaceAtomic` crash cuts of either kind during Round-1 and Release, I/O errors that
+    poison the host without any crash, `KernelPanicCrash` after partial Round-1 network output,
+    and `PowerLossCrash` with `512B`/`4KiB` `SectorTearMask`s) followed
+    by **any** subsequent `CrashStep sFinal.fs fsCrashed`:
+    1. `CrashRecoverCeremony` on `fsCrashed` **deterministically succeeds** and recovers
+       `(rec, j, views)` obeying `views.policyCumulativeSpend ≤ s₀.policySpendCap`,
+    2. **`Released(tx) → all_required_reservations_durable(tx)`**: for every `sig ∈ sFinal.releasedSigs`,
+       `AllRequiredReservationsDurable sig views` holds in the recovered subordinate views,
+    3. **Post-Round-1 Crash-Prefix Burn Durability**: for every `pkt ∈ sFinal.emittedRound1Msgs`
+       (including aborted ceremonies that crashed after Round-1 network output!),
+       `AllRound1ReservationsDurable pkt views` holds in the recovered subordinate views, and
+    4. All four resource projections are `Nodup` for Round-1 packets; the signature conclusions
+       establish nonce-slot and leaf uniqueness. This is the richer abstract journal, not the
+       versioned Rust reservation schema. -/
+theorem ceremony_journal_released_implies_all_reservations_durable_and_no_reuse
+    {pid recoveryPid : Pid} {basePath : DirName}
+    {vaultKeyId genesisNonce : List UInt8} {policySpendCap : Nat}
+    {macFn : KeyedMacFn} (hMacWf : WellFormedMacFn macFn) {macKey : List UInt8}
+    {s₀ : CeremonyCrashState}
+    (hInit : initProvisionedCeremonyState pid basePath vaultKeyId genesisNonce
+               policySpendCap macFn macKey = some s₀)
+    (trace : List CeremonyCrashEvent)
+    {fsCrashed : PosixFsState}
+    (hCrash : CrashStep (runCeremonyCrashTrace macFn macKey s₀ trace).fs fsCrashed) :
+    let sFinal := runCeremonyCrashTrace macFn macKey s₀ trace
+    (sFinal.emittedRound1Msgs.map (·.mpcNonceSlot)).Nodup ∧
+    (sFinal.emittedRound1Msgs.map (·.mpcPrepCursor)).Nodup ∧
+    (sFinal.emittedRound1Msgs.map (·.rngSeedGen)).Nodup ∧
+    (sFinal.emittedRound1Msgs.map (·.leafOrEpoch)).Nodup ∧
+    (sFinal.releasedSigs.map (·.mpcNonceSlot)).Nodup ∧
+    (sFinal.releasedSigs.map (·.leafOrEpoch)).Nodup ∧
+    ∃ fsRecovered rec j views,
+      CrashRecoverCeremony fsCrashed recoveryPid sFinal.basePath sFinal.vaultKeyId macFn macKey =
+        (fsRecovered, .ok (rec, j, views)) ∧
+      views = deriveSubordinateViews j ∧
+      views.policyCumulativeSpend ≤ sFinal.policySpendCap ∧
+      (∀ sig ∈ sFinal.releasedSigs, AllRequiredReservationsDurable sig views) ∧
+      (∀ pkt ∈ sFinal.emittedRound1Msgs, AllRound1ReservationsDurable pkt views) := by
+  dsimp +zetaDelta only
+  have hInv0 := initProvisionedCeremonyState_inv hMacWf hInit
+  have hInvFin := runCeremonyCrashTrace_preserves_inv hMacWf trace hInv0
+  have hKernel : fsCrashed.kernel.openFds = {} ∧ fsCrashed.kernel.flockTable = {} := by
+    cases hCrash <;> exact ⟨rfl, rfl⟩
+  obtain ⟨hFdsEmpty, hFlkEmpty⟩ := hKernel
+  have hSettledCr : CeremonySettledInv macFn macKey
+      { runCeremonyCrashTrace macFn macKey s₀ trace with
+          fs := fsCrashed, ioPoisoned := false, pendingRound1Lease := none } := by
+    rcases hInvFin with ⟨_, lockIno, gn, curRec, curJ,
+      hDur, hVkEq, hPayEq, hJWf, hPolLe,
+      hNd1, hNd2, hNd3, hNd4, hNd5, hNd6, hR1All, hSigAll, _⟩ | ⟨_, hAll⟩
+    · exact ⟨lockIno, gn, curRec, curJ, vaultDurableAt_after_crash hDur hCrash,
+        hVkEq, hPayEq, hJWf, hPolLe,
+        hNd1, hNd2, hNd3, hNd4, hNd5, hNd6, hR1All, hSigAll, trivial⟩
+    · exact hAll fsCrashed hCrash
+  rcases hSettledCr with ⟨lockIno, gn, curRec, curJ,
+    hCrDur0, hVkEq0, hPayEq, hJWf, hPolLe,
+    hNd1, hNd2, hNd3, hNd4, hNd5, hNd6, hR1All, hSigAll, _⟩
+  have hVkEq : curRec.body.vaultKeyId = (runCeremonyCrashTrace macFn macKey s₀ trace).vaultKeyId :=
+    hVkEq0
+  have hCrDur : VaultDurableAt fsCrashed (runCeremonyCrashTrace macFn macKey s₀ trace).basePath
+      lockIno gn macFn macKey curRec := hCrDur0
+  obtain ⟨fsRecovered, hRecOk⟩ :=
+    crashRecoverCeremony_of_crashed_durable recoveryPid hFdsEmpty hFlkEmpty hCrDur hPayEq hJWf
+  rw [hVkEq] at hRecOk
+  exact ⟨hNd1, hNd2, hNd3, hNd4, hNd5, hNd6,
+    ⟨fsRecovered, curRec, curJ, deriveSubordinateViews curJ,
+     hRecOk, rfl, hPolLe, hSigAll, hR1All⟩⟩
+
+/-- **External Monotone Anchor (`LedgerCheckpoint` of `durable_ledger.rs`)**: a generation and a
+    MAC tag held OUTSIDE the device's rollback domain. No local WAL can detect a hypervisor or
+    operator restoring a whole earlier device image; the anchor can. It is a MINIMUM generation,
+    not an exact snapshot: a durable successor whose checkpoint was not yet saved is accepted. -/
+structure ExternalMonotoneAnchor where
+  attestedEpoch : Nat
+  attestedTag   : List UInt8
+  deriving Repr, DecidableEq
+
+/-- The `Ledger::open` filter: accept a strictly newer generation, or the anchored generation
+    with exactly the anchored tag. An older generation, or a different snapshot at the anchored
+    generation (a fork written after a rollback), is refused. -/
+def verifyAgainstExternalAnchor (anchor : ExternalMonotoneAnchor) (onDiskWalEpoch : Nat)
+    (onDiskTag : List UInt8) : Bool :=
+  decide (anchor.attestedEpoch < onDiskWalEpoch) ||
+    (onDiskWalEpoch == anchor.attestedEpoch && onDiskTag == anchor.attestedTag)
+
+theorem externalAnchor_rejects_whole_disk_rollback
+    {anchor : ExternalMonotoneAnchor} {snapshotWalEpoch : Nat} (snapshotTag : List UInt8)
+    (hAdvanced : snapshotWalEpoch < anchor.attestedEpoch) :
+    verifyAgainstExternalAnchor anchor snapshotWalEpoch snapshotTag = false := by
+  have h1 : ¬ anchor.attestedEpoch < snapshotWalEpoch := by omega
+  have h2 : (snapshotWalEpoch == anchor.attestedEpoch) = false :=
+    beq_eq_false_iff_ne.mpr (Nat.ne_of_lt hAdvanced)
+  simp only [verifyAgainstExternalAnchor, h1, decide_false, h2, Bool.false_and, Bool.or_self]
+
+/-- Whatever the anchor admits is at or above the anchored generation. -/
+theorem externalAnchor_admits_only_min_generation
+    {anchor : ExternalMonotoneAnchor} {epoch : Nat} {tag : List UInt8}
+    (h : verifyAgainstExternalAnchor anchor epoch tag = true) : anchor.attestedEpoch ≤ epoch := by
+  simp only [verifyAgainstExternalAnchor, Bool.or_eq_true, decide_eq_true_eq, Bool.and_eq_true,
+    beq_iff_eq] at h
+  rcases h with h | ⟨h, _⟩ <;> omega
+
+/-- A durable successor of the anchored snapshot opens even though its checkpoint is unsaved. -/
+theorem externalAnchor_accepts_durable_successor
+    {anchor : ExternalMonotoneAnchor} {epoch : Nat} (tag : List UInt8)
+    (h : anchor.attestedEpoch < epoch) : verifyAgainstExternalAnchor anchor epoch tag = true := by
+  simp only [verifyAgainstExternalAnchor, h, decide_true, Bool.true_or]
+
+/-- A different snapshot at the anchored generation is refused. -/
+theorem externalAnchor_rejects_same_generation_fork
+    {anchor : ExternalMonotoneAnchor} {tag : List UInt8} (hFork : tag ≠ anchor.attestedTag) :
+    verifyAgainstExternalAnchor anchor anchor.attestedEpoch tag = false := by
+  have h2 : (tag == anchor.attestedTag) = false := beq_eq_false_iff_ne.mpr hFork
+  simp only [verifyAgainstExternalAnchor, Nat.lt_irrefl, decide_false, h2, Bool.and_false,
+    Bool.or_self]
+
+/-- Helper reading a durable 64-bit counter file via `O_NOFOLLOW` + `pread` + `decodeU64BeNat`. -/
+def readDurableU64Counter (st : PosixFsState) (pid : Pid) (path : DirName) : Option Nat :=
+  match posixOpenExistingNoFollow st pid path false with
+  | .error _ => none
+  | .ok (st1, fd) =>
+    match posixPreadAll st1 pid fd with
+    | .error _ => none
+    | .ok raw => decodeU64BeNat raw
+
+/-- **`G1-H` Mutation Witness (`tooth_split_subordinate_wals_crash_between_commits_causes_resource_desync`)**:
+    Demonstrates why storing subordinate ceremony authorities (`beltPath` for `BeltLatch`/`Frontier`
+    and `noncePath` for the threshold MPC Round-1 nonce cursor) in **separate** WAL files instead of
+    a single unified `CeremonyJournalRecord` is unsound under crash faults:
+    when `PowerLossCrash` strikes after `beltPath` commits watermark `1` (and Round-1 packet `pkt`
+    using `(leafOrEpoch = 0, mpcNonceSlot = 0)` is emitted) but **before** `noncePath` commits `1`,
+    post-crash recovery observes `belt = some 1` alongside `nonce = some 0` (`¬ (pkt.mpcNonceSlot < 0)`),
+    desynchronizing the two authorities and allowing Round-1 MPC nonce `0` reuse! -/
+theorem tooth_split_subordinate_wals_crash_between_commits_causes_resource_desync :
+    let beltPath : DirName := ⟨[0x62]⟩
+    let noncePath : DirName := ⟨[0x6e]⟩
+    let beltTmp : DirName := walTmpPath beltPath
+    let b0 := encodeU64BeNat 0
+    let b1 := encodeU64BeNat 1
+    let pkt : Round1NetworkPacket :=
+      { txId := List.replicate 32 0xAA
+        msgContext := [0x01]
+        policySpendCharged := 10
+        leafOrEpoch := 0
+        baggyCodewordDigest := List.replicate 32 0xBB
+        rngSeedGen := 0
+        mpcPrepCursor := 0
+        mpcNonceSlot := 0 }
+    ∃ s1 s2 s3 s4 s5 s6 s7 s8 sInit s9 s10 s11 s12 s13 sBeltCommitted,
+      posixCreateExclNoFollow PosixFsState.empty 1 beltPath = .ok (s1, 3, 1) ∧
+      posixPwriteAll s1 1 3 b0 = .ok s2 ∧
+      posixSyncAllMedia s2 1 3 false = (s3, .ok ()) ∧
+      posixCloseFd s3 1 3 = .ok s4 ∧
+      posixCreateExclNoFollow s4 1 noncePath = .ok (s5, 4, 2) ∧
+      posixPwriteAll s5 1 4 b0 = .ok s6 ∧
+      posixSyncAllMedia s6 1 4 false = (s7, .ok ()) ∧
+      posixCloseFd s7 1 4 = .ok s8 ∧
+      posixSyncParentDir s8 false = (sInit, .ok ()) ∧
+      readDurableU64Counter sInit 2 beltPath = some 0 ∧
+      readDurableU64Counter sInit 2 noncePath = some 0 ∧
+      -- Mutated split-WAL Round-1 commit: `beltPath` commits `1`, then `PowerLossCrash` strikes
+      -- before `noncePath` commits `1`!
+      posixCreateExclNoFollow sInit 1 beltTmp = .ok (s9, 5, 3) ∧
+      posixPwriteAll s9 1 5 b1 = .ok s10 ∧
+      posixSyncAllMedia s10 1 5 false = (s11, .ok ()) ∧
+      posixCloseFd s11 1 5 = .ok s12 ∧
+      posixRename s12 beltTmp beltPath = .ok s13 ∧
+      posixSyncParentDir s13 false = (sBeltCommitted, .ok ()) ∧
+      let sCrashed := PowerLossCrash .revertToNand (fun _ => SectorTearMask.dropAllVolatile) sBeltCommitted
+      readDurableU64Counter sCrashed 2 beltPath = some 1 ∧
+      readDurableU64Counter sCrashed 2 noncePath = some 0 ∧
+      pkt.leafOrEpoch < 1 ∧
+      ¬ (pkt.mpcNonceSlot < 0) := by
+  have h0Lt64 : 0 < 2 ^ 64 := Nat.pow_pos (by decide : 0 < 2)
+  have h1Lt64 : 1 < 2 ^ 64 :=
+    Nat.lt_trans (lt_two_pow_32_of_le_8192 (by decide : 1 ≤ 8192))
+      two_pow_32_lt_two_pow_64
+  have hDec0 : decodeU64BeNat (encodeU64BeNat 0) = some 0 := decodeU64BeNat_encodeU64BeNat h0Lt64
+  have hDec1 : decodeU64BeNat (encodeU64BeNat 1) = some 1 := decodeU64BeNat_encodeU64BeNat h1Lt64
+  refine ⟨_, _, _, _, _, _, _, _, _, _, _, _, _, _, _,
+    rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl,
+    ?_, ?_,
+    rfl, rfl, rfl, rfl, rfl, rfl,
+    ?_, ?_, by decide, by decide⟩
+  · exact hDec0
+  · exact hDec0
+  · exact hDec1
+  · exact hDec0
+
+/-! ## 6. Hardware / POSIX `#tooth` Mutation Witnesses & Concrete Multi-Crash Trace Witness -/
+
+/-- Constructive bounded key-digest accumulator for concrete protocol witnesses (`choice-free`). -/
+def insecureTestMacKeyDigest64 (key : List UInt8) : Nat :=
+  (key.length % 64) + 64 * key.foldl (fun (h : Nat) b => (h * 3 + b.toNat + 1) % 16) 5
+
+/-- INSECURE test authenticator: 32 output bytes, at most 16^4 message tags per key.
+    Used only for executable storage counterexamples; never a cryptographic instantiation. -/
+def insecureTestKeyedMac256 (key msg : List UInt8) : List UInt8 :=
+  let k0 : Nat := insecureTestMacKeyDigest64 key
+  let m0 : Nat := msg.foldl (fun (h : Nat) b => (h * 3 + b.toNat + 1) % 16) 3
+  let m1 : Nat := msg.foldl (fun (h : Nat) b => (h * 5 + b.toNat + 3) % 16) 7
+  let m2 : Nat := msg.foldl (fun (h : Nat) b => (h * 7 + b.toNat + 5) % 16) 11
+  let m3 : Nat := msg.foldl (fun (h : Nat) b => (h * 11 + b.toNat + 7) % 16) 13
+  encodeU64BeNat (k0 + 1088 * m0) ++
+  encodeU64BeNat (k0 + 1088 * m1 + 1) ++
+  encodeU64BeNat (k0 + 1088 * m2 + 2) ++
+  encodeU64BeNat (k0 + 1088 * m3 + 3)
+
+theorem insecureTestKeyedMac256_wellFormed : WellFormedMacFn insecureTestKeyedMac256 := by
+  intro key msg
+  unfold insecureTestKeyedMac256
+  simp [encodeU64BeNat_length]
+
+/-- `#tooth`: the test authenticator is not collision resistant. For every key two different
+    one-byte messages share a tag, so it witnesses tag width and rogue-key separation only. -/
+theorem tooth_insecureTestKeyedMac256_collides (key : List UInt8) :
+    insecureTestKeyedMac256 key [0] = insecureTestKeyedMac256 key [16] ∧
+    ([0] : List UInt8) ≠ [16] :=
+  ⟨rfl, by decide⟩
+
+/-- Concrete 32-byte secret MAC key used in hardware/POSIX `#tooth` & trace witnesses. -/
+def concreteVaultMacKey : List UInt8 :=
+  List.replicate 32 0xA5
+
+/-- Concrete 32-byte enrolled `vaultKeyId`. -/
+def concreteVaultKeyId : List UInt8 :=
+  List.replicate 32 0x11
+
+/-- Concrete 32-byte `genesisNonce`. -/
+def concreteGenesisNonce : List UInt8 :=
+  List.replicate 32 0x22
+
+/-- Concrete base filename `"vault.wal"` (`[0x76, 0x61, 0x75, 0x6c, 0x74, 0x2e, 0x77, 0x61, 0x6c]`). -/
+def concreteBasePath : DirName :=
+  ⟨[0x76, 0x61, 0x75, 0x6c, 0x74, 0x2e, 0x77, 0x61, 0x6c]⟩
+
+private theorem foldl_mod_16_lt (bs : List UInt8) (step : Nat → UInt8 → Nat) (init : Nat)
+    (hInit : init < 16) (hStep : ∀ h b, step h b < 16) :
+    bs.foldl step init < 16 := by
+  induction bs generalizing init with
+  | nil => exact hInit
+  | cons b rest ih => exact ih (step init b) (hStep init b)
+
+/-- Constructive proof that `insecureTestKeyedMac256` under `concreteVaultMacKey` universally rejects
+    any rogue record authenticated under the untrusted empty key `[]`! -/
+theorem insecureTestKeyedMac256_rogueReject (b : WalRecordBody) :
+    verifyWalMac insecureTestKeyedMac256 concreteVaultMacKey
+      (signWalRecord insecureTestKeyedMac256 [] b) = false := by
+  unfold verifyWalMac signWalRecord computeWalMac
+  dsimp only
+  cases hBeq : (insecureTestKeyedMac256 [] (encodeWalBody b) ==
+                insecureTestKeyedMac256 concreteVaultMacKey (encodeWalBody b))
+  · rfl
+  · exfalso
+    have hEq := eq_of_beq hBeq
+    unfold insecureTestKeyedMac256 at hEq
+    dsimp only at hEq
+    have hTake := congrArg (List.take 8) hEq
+    rw [List.append_assoc, List.append_assoc,
+        take_append_of_len_eq (encodeU64BeNat_length _),
+        List.append_assoc, List.append_assoc,
+        take_append_of_len_eq (encodeU64BeNat_length _)] at hTake
+    let m0 : Nat := (encodeWalBody b).foldl (fun (h : Nat) x => (h * 3 + x.toNat + 1) % 16) 3
+    have hm0Lt : m0 < 16 :=
+      foldl_mod_16_lt (encodeWalBody b) (fun (h : Nat) x => (h * 3 + x.toNat + 1) % 16) 3
+        (by decide) (fun _ _ => Nat.mod_lt _ (by decide))
+    have hkEmptyLt : insecureTestMacKeyDigest64 [] < 1088 := by
+      unfold insecureTestMacKeyDigest64; decide
+    have hkKeyLt : insecureTestMacKeyDigest64 concreteVaultMacKey < 1088 := by
+      unfold insecureTestMacKeyDigest64
+      have hf := foldl_mod_16_lt concreteVaultMacKey (fun (h : Nat) x => (h * 3 + x.toNat + 1) % 16) 5
+        (by decide) (fun _ _ => Nat.mod_lt _ (by decide))
+      have hl : concreteVaultMacKey.length % 64 < 64 := Nat.mod_lt _ (by decide)
+      omega
+    have hPow64 : 18496 < 2 ^ 64 := by
+      have h18 : 18496 < 65536 := by decide
+      have h32 : 65536 < 2 ^ 32 := by
+        have hp : 2 ^ 32 = 65536 * 65536 := by decide
+        omega
+      exact Nat.lt_trans h18 (Nat.lt_trans h32
+        two_pow_32_lt_two_pow_64)
+    have hLtA : insecureTestMacKeyDigest64 [] + 1088 * m0 < 2 ^ 64 := by omega
+    have hLtB : insecureTestMacKeyDigest64 concreteVaultMacKey + 1088 * m0 < 2 ^ 64 := by omega
+    have hNatEq := encodeU64BeNat_injective hLtA hLtB hTake
+    have hKeyEq : insecureTestMacKeyDigest64 [] = insecureTestMacKeyDigest64 concreteVaultMacKey := by omega
+    have hModA : insecureTestMacKeyDigest64 [] % 64 = 0 := by unfold insecureTestMacKeyDigest64; decide
+    have hModB : insecureTestMacKeyDigest64 concreteVaultMacKey % 64 = 32 := by
+      unfold insecureTestMacKeyDigest64 concreteVaultMacKey
+      rw [List.length_replicate]
+      omega
+    have hModEq := congrArg (· % 64) hKeyEq
+    rw [hModA, hModB] at hModEq
+    cases hModEq
+
+/-- Helper reading raw file bytes at `path` via `O_NOFOLLOW` + `pread`. -/
+def readRawFileNoFollow (st : PosixFsState) (pid : Pid) (path : DirName) :
+    Except PosixErr (List UInt8) :=
+  match posixOpenExistingNoFollow st pid path false with
+  | .error e => .error e
+  | .ok (st1, fd) => posixPreadAll st1 pid fd
+
+set_option maxRecDepth 4096 in
+/-- **#tooth 1 (`tooth_rename_without_tmp_sync_exposes_torn_or_garbage_file`)**:
+    Models the `ext4` `data=writeback` / delayed-allocation reorder hazard:
+    if a mutated `replaceAtomic` writes `newBytes` (`512` bytes of `0xBB` + `[0xCC]`) to `.tmp`
+    and calls `posixRename(.tmp, concreteBasePath)` **without** `posixSyncAllMedia(.tmp)` first,
+    then on `PowerLossCrash .flushPendingDir`:
+    1. Under `SectorTearMask.dropAllVolatile`, `concreteBasePath` recovers as **0-length `[]`**
+       (neither `oldBytes` nor `newBytes`!), and
+    2. Under a 512B partial sector flush `{ geometry := .bytes512, sectorChoices := [.writeNewSector, .keepOldSector] }`,
+       `concreteBasePath` recovers as a **512-byte torn half-write** `List.replicate 512 0xBB`
+       (strictly neither `oldBytes` nor `newBytes`)! -/
