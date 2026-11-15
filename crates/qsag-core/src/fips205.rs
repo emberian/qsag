@@ -2475,8 +2475,8 @@ impl CommittedHedgedRandomizer {
                 wipe_slice(&mut combined);
                 return Err(Fips205Error::MpcActiveTamperDetected);
             }
-            for b in 0..n_bytes {
-                combined[b] ^= open_entry.r_share[b];
+            for (dst, src) in combined.iter_mut().zip(&open_entry.r_share).take(n_bytes) {
+                *dst ^= *src;
             }
         }
         Ok(Self {

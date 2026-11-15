@@ -1808,6 +1808,8 @@ private theorem witness_forgery_of_suite (base : FrontierHashSuite) (p : Frontie
     unfold verifyFrontierFts at hVer₁ ⊢; rw [hPreEq]; exact hVer₁
   exact ⟨H, p, hL, sk, 0#256, 0, [1], sig₁, hSign₁, [2], sig₁, by decide, hVer₂⟩
 
+attribute [local irreducible] evalFtsCshake256_32 cshakeEpochVoteHasher
+
 theorem witness_compact1122_forgery :
     ∃ (H : FrontierHashSuite) (p : FrontierFtsParams) (_ : 2 ≤ p.frontierLen)
       (sk : FrontierSecretKey) (hedge₁ : BitVec 256) (ctr₁ : UInt16)
@@ -1908,8 +1910,9 @@ theorem witness_corduroy_real_params :
       (params.w = 4 ∨ params.w = 16) ∧ params.statefulJorts = false :=
   ⟨corduroyPoseidon2AggParams, .inl rfl, rfl⟩
 
-end Qsag
-end
+attribute [local irreducible]
+  evalFtsCshake256_32 cshakeEpochVoteHasher cshakeFrontierHashSuite prehashFaultSuite
+  deriveFrontierPk signFrontierFts verifyFrontierFts verifyRotatedEpochChain
 
 #tooth_pair Qsag.compact1122_one_time_euf_cma_reduction vs Qsag.tooth_drop_target_sum_allows_one_sig_forgery
 #tooth_pair Qsag.rotatedEpochVote_forward_secure_chain vs Qsag.tooth_static_key_compromise_forges_historical_epoch
@@ -1932,3 +1935,6 @@ end
   Qsag.corduroy_real_profiles_audit
   Qsag.corduroy_threshold_stateless_euf_cma
   Qsag.corduroy_both_real_profiles_euf_cma
+
+end Qsag
+end

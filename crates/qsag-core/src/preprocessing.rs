@@ -767,12 +767,12 @@ impl RlwePolyNtt {
     #[inline]
     pub(crate) fn pointwise_mul_from_ntt(&self, rhs: &Self) -> RlwePoly {
         let mut c = [0u16; RLWE_N];
-        for i in 0..RLWE_N {
-            c[i] = rlwe_mul(self.0[i], rhs.0[i]);
+        for (dst, (&lhs, &rhs_coeff)) in c.iter_mut().zip(self.0.iter().zip(rhs.0.iter())) {
+            *dst = rlwe_mul(lhs, rhs_coeff);
         }
         RlwePoly::ntt_inverse(&mut c);
-        for i in 0..RLWE_N {
-            c[i] = rlwe_mul(c[i], NTT_INVERSE_SCALES[i]);
+        for (dst, &scale) in c.iter_mut().zip(NTT_INVERSE_SCALES.iter()) {
+            *dst = rlwe_mul(*dst, scale);
         }
         RlwePoly(c)
     }
@@ -4593,10 +4593,14 @@ impl OtMesh {
                     job_slots.push(Mutex::new(Some((i, j, sender, receiver))));
                 }
             }
+            type OtMeshJobOutcome = (
+                usize,
+                usize,
+                Result<(OtExtSenderChannel, OtExtReceiverChannel), PreprocessError>,
+            );
             let total_jobs = job_slots.len();
-            let out_slots: Vec<
-                Mutex<Option<(usize, usize, Result<(OtExtSenderChannel, OtExtReceiverChannel), PreprocessError>)>>,
-            > = (0..total_jobs).map(|_| Mutex::new(None)).collect();
+            let out_slots: Vec<Mutex<Option<OtMeshJobOutcome>>> =
+                (0..total_jobs).map(|_| Mutex::new(None)).collect();
             let max_workers = BaseProofWorkers::hw_cap();
             let workers = total_jobs.min(max_workers).max(1);
             let next_idx = AtomicUsize::new(0);
@@ -4740,8 +4744,113 @@ impl OtMesh {
 // 3. Commit-and-Open Public Coin Flip (`Π_coin`, `0` Trusted Randomness)
 // ============================================================================
 
-/// Commit-and-open multi-party coin toss (`Π_coin`): every party commits `cSHAKE256` to a private
-/// 32-byte share before seeing any peer share, then opens and verifies every peer commitment.
+/// Local single-party state for a separated two-round `Π_coin` ceremony.
+///
+/// Holds only one party's private 32-byte share and commitment; zeroizes the share on [`Drop`].
+/// Distributed callers exchange `commitment` across all `n` parties before calling
+/// [`PartyCoinCommitState::open_share`] and [`verify_and_combine_coin_openings`], which combines
+/// **only the verified supplied wire openings** (never reading remote private shares).
+pub struct PartyCoinCommitState {
+    party_id: usize,
+    share: [u8; 32],
+    commitment: [u8; 32],
+}
+
+impl Drop for PartyCoinCommitState {
+    fn drop(&mut self) {
+        wipe_bytes32(&mut self.share);
+    }
+}
+
+impl PartyCoinCommitState {
+    /// Sample a fresh 32-byte coin share from `rng` and compute its `QSAG.COIN.COMMIT/v1` digest.
+    pub fn commit(
+        party_id: usize,
+        session_id: &[u8; 32],
+        phase_label: &[u8],
+        transcript_digest: &[u8; 32],
+        rng: &mut PartyPrivateRng,
+    ) -> Self {
+        let share = rng.next_bytes32();
+        let pid = (party_id as u64).to_be_bytes();
+        let commitment = cshake256_32_multi_frame(
+            b"QSAG.COIN.COMMIT/v1",
+            &[session_id, phase_label, transcript_digest, &pid, &share],
+        );
+        Self {
+            party_id,
+            share,
+            commitment,
+        }
+    }
+
+    /// Public commitment broadcast in Round 1.
+    #[inline]
+    pub fn commitment(&self) -> [u8; 32] {
+        self.commitment
+    }
+
+    /// Party index bound into the Round-1 commitment frame.
+    #[inline]
+    pub fn party_id(&self) -> usize {
+        self.party_id
+    }
+
+    /// Release this party's Round-2 opening after locking all `n` Round-1 peer commitments.
+    /// Consumes `self` (wiping the stored share via `Drop`) and returns the 32-byte opening.
+    pub fn open_share(self, locked_commitments: &[[u8; 32]]) -> Result<[u8; 32], PreprocessError> {
+        if self.party_id >= locked_commitments.len()
+            || !ct_eq_bytes32(&locked_commitments[self.party_id], &self.commitment)
+        {
+            return Err(PreprocessError::CoinCommitMismatch {
+                party_id: self.party_id,
+            });
+        }
+        Ok(self.share)
+    }
+}
+
+/// Verify all `n` Round-2 wire `openings` against `locked_commitments` and derive the 32-byte
+/// `QSAG.COIN.DERIVE/v1` public coin exclusively from the **verified supplied `openings`**.
+pub fn verify_and_combine_coin_openings(
+    session_id: &[u8; 32],
+    phase_label: &[u8],
+    transcript_digest: &[u8; 32],
+    locked_commitments: &[[u8; 32]],
+    openings: &[[u8; 32]],
+) -> Result<[u8; 32], PreprocessError> {
+    if locked_commitments.is_empty() || locked_commitments.len() != openings.len() {
+        return Err(PreprocessError::CoinCommitMismatch {
+            party_id: locked_commitments.len().min(openings.len()),
+        });
+    }
+    let mut combined = [0u8; 32];
+    for (p, (commit, opened)) in locked_commitments.iter().zip(openings.iter()).enumerate() {
+        let pid = (p as u64).to_be_bytes();
+        let recomputed = cshake256_32_multi_frame(
+            b"QSAG.COIN.COMMIT/v1",
+            &[session_id, phase_label, transcript_digest, &pid, opened],
+        );
+        if !ct_eq_bytes32(&recomputed, commit) {
+            wipe_bytes32(&mut combined);
+            return Err(PreprocessError::CoinCommitMismatch { party_id: p });
+        }
+        for (dst, &src) in combined.iter_mut().zip(opened.iter()) {
+            *dst ^= src;
+        }
+    }
+    let out = cshake256_32_multi_frame(
+        b"QSAG.COIN.DERIVE/v1",
+        &[session_id, phase_label, transcript_digest, &combined],
+    );
+    wipe_bytes32(&mut combined);
+    Ok(out)
+}
+
+/// In-process coordinator coin-toss helper (`Π_coin`): every party commits `cSHAKE256` to a
+/// private 32-byte share before any opening is checked, then verifies all commitments and derives
+/// `QSAG.COIN.DERIVE/v1`. For separated-participant wire ceremonies, use [`PartyCoinCommitState`]
+/// and [`verify_and_combine_coin_openings`].
 pub fn run_commit_and_open_coin(
     session_id: &[u8; 32],
     phase_label: &[u8],
@@ -4759,6 +4868,11 @@ pub fn run_commit_and_open_coin(
 
 /// Same as [`run_commit_and_open_coin`], with an adversarial fault-injection hook on opened shares
 /// for unit-testing `CoinCommitMismatch` detection.
+///
+/// Note: `ProductionCoinReduction.lean` models this exact in-process two-pass helper semantics
+/// (verifying hook-mutated openings against Round-1 commitments and XORing the locked `shares`
+/// vector; separated wire participants instead combine verified wire openings via
+/// [`verify_and_combine_coin_openings`]).
 pub fn run_commit_and_open_coin_with_hook<F>(
     session_id: &[u8; 32],
     phase_label: &[u8],
@@ -14609,6 +14723,54 @@ mod silent_pcg_vault_integration_tests {
             Err(PreprocessError::SacrificeResidualNonZero {
                 phase: "pi_triple_f2"
             })
+        ));
+    }
+
+    #[test]
+    fn test_party_coin_commit_state_matches_helper_and_rejects_tamper() {
+        let sid = [0x42u8; 32];
+        let phase = b"UNIT_SEPARATED_COIN";
+        let transcript = [0x99u8; 32];
+        let mut rngs_helper = [
+            PartyPrivateRng::from_seed([0x11; 32], b"coin_p0"),
+            PartyPrivateRng::from_seed([0x22; 32], b"coin_p1"),
+            PartyPrivateRng::from_seed([0x33; 32], b"coin_p2"),
+        ];
+        let mut rngs_sep = [
+            PartyPrivateRng::from_seed([0x11; 32], b"coin_p0"),
+            PartyPrivateRng::from_seed([0x22; 32], b"coin_p1"),
+            PartyPrivateRng::from_seed([0x33; 32], b"coin_p2"),
+        ];
+
+        let expected = run_commit_and_open_coin(&sid, phase, &transcript, &mut rngs_helper)
+            .expect("honest coin helper");
+
+        let states: Vec<PartyCoinCommitState> = rngs_sep
+            .iter_mut()
+            .enumerate()
+            .map(|(p, rng)| PartyCoinCommitState::commit(p, &sid, phase, &transcript, rng))
+            .collect();
+        let locked_commits: Vec<[u8; 32]> = states.iter().map(|s| s.commitment()).collect();
+        let openings: Vec<[u8; 32]> = states
+            .into_iter()
+            .map(|s| s.open_share(&locked_commits).expect("valid locked commit"))
+            .collect();
+        let derived =
+            verify_and_combine_coin_openings(&sid, phase, &transcript, &locked_commits, &openings)
+                .expect("honest wire openings");
+        assert_eq!(derived, expected);
+
+        let mut bad_openings = openings.clone();
+        bad_openings[1][0] ^= 0x01;
+        assert!(matches!(
+            verify_and_combine_coin_openings(
+                &sid,
+                phase,
+                &transcript,
+                &locked_commits,
+                &bad_openings,
+            ),
+            Err(PreprocessError::CoinCommitMismatch { party_id: 1 })
         ));
     }
 }

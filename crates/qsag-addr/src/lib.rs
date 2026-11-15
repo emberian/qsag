@@ -298,8 +298,8 @@ impl QsagAddress {
 
 fn validate_commitment(version: AddressVersion, commitment: &[u8; 32]) -> Result<(), AddrError> {
     if version == AddressVersion::V2Poseidon2 {
-        for chunk in commitment.chunks_exact(8) {
-            let limb = u64::from_le_bytes(core::array::from_fn(|i| chunk[i]));
+        for chunk in commitment.as_chunks::<8>().0 {
+            let limb = u64::from_le_bytes(*chunk);
             if !gl_is_canonical(limb) {
                 return Err(AddrError::NonCanonicalPoseidonLimb);
             }

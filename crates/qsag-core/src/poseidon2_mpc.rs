@@ -3339,6 +3339,8 @@ fn pack_secret_bytes32_to_limbs56_auth(bytes32: &[AuthGlWire; 32]) -> [AuthGlWir
     out
 }
 
+type ExpandedHemSecretDigestPair = (Vec<[AuthGlWire; 4]>, Vec<[AuthGlWire; 4]>);
+
 /// Expand `(sk_seed_bytes, sk_prf_bytes)` into `(sk_seed, sk_prf)` native `[AuthGlWire; 4]` shares
 /// across the quorum in 1 parallel `eval_spdz_poseidon2_perm12_batch` (`2` perms, `0` A2B!).
 fn expand_hem_secret_digests_mpc(
@@ -3348,7 +3350,7 @@ fn expand_hem_secret_digests_mpc(
     key_shares: &[&mut Poseidon2SpdzAuthenticatedKeyShare],
     vaults: &mut [&mut PreprocessedPoseidonPartyVault],
     pending: &mut SpdzGoldilocksPendingChecks,
-) -> Result<(Vec<[AuthGlWire; 4]>, Vec<[AuthGlWire; 4]>), PreprocessError> {
+) -> Result<ExpandedHemSecretDigestPair, PreprocessError> {
     let m = quorum_pts.len();
     let mut states = SecretBuffer(vec![Vec::with_capacity(2); m]);
     let mut seed_low4 = SecretBuffer(vec![[AuthGlWire::ZERO; 4]; m]);
@@ -3534,10 +3536,6 @@ fn flush_verify_and_open_hem_digests4(
 
 /// Evaluate a batch of `(kp_idx, chain_idx, steps)` targets in native `[Goldilocks; 4]` SPDZ
 /// (`0` intermediate A2B conversions!) starting from already-expanded `sk_seed_per_party`.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Batched native WOTS+C chain evaluation takes quorum, seed shares, targets, vaults and pending checks"
-)]
 fn eval_hem_wots_chains_native_spdz(
     t: usize,
     quorum_pts: &[Goldilocks],
