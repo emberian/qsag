@@ -1446,3 +1446,1101 @@ theorem checkX86Instr_sound
     refine ⟨by simp [execX86Instr, LeakageEvent.clean, hgpr base hb, hymm vidx hvi], ?_⟩
     exact x86_setYmm_lowEq memPol τ s₁ s₂ dst .sec _ _ hLowOrig (by intro h; cases h)
 
+theorem checkX86Block_sound
+    (memPol : BitVec 64 → SecLabel) (secHeap : Bool)
+    (hPol : secHeap = true → ∀ a, memPol a = .sec)
+    (blk : List X86Instr) (τ τ' : X86TaintState) (pc : Nat)
+    (hCheck : checkX86Block secHeap τ blk = some τ')
+    (s₁ s₂ : X86State) (hLow : X86LowEq memPol τ s₁ s₂) :
+    (execX86Block blk pc s₁).2 = (execX86Block blk pc s₂).2 ∧
+    X86LowEq memPol τ' (execX86Block blk pc s₁).1 (execX86Block blk pc s₂).1 := by
+  induction blk generalizing τ pc s₁ s₂ with
+  | nil =>
+    simp [checkX86Block] at hCheck; subst hCheck; exact ⟨rfl, hLow⟩
+  | cons ins rest ih =>
+    simp only [checkX86Block] at hCheck
+    cases hIns : checkX86Instr secHeap τ ins with
+    | none => simp [hIns] at hCheck
+    | some τ1 =>
+      simp [hIns] at hCheck
+      obtain ⟨hEv, hLow1⟩ := checkX86Instr_sound memPol secHeap hPol τ τ1 ins pc hIns s₁ s₂ hLow
+      obtain ⟨hEvs, hLow2⟩ :=
+        ih τ1 (pc + 1) hCheck (execX86Instr ins pc s₁).1 (execX86Instr ins pc s₂).1 hLow1
+      simp only [execX86Block]
+      exact ⟨by rw [hEv, hEvs], hLow2⟩
+
+theorem checkX86Loop_sound
+    (memPol : BitVec 64 → SecLabel) (secHeap : Bool)
+    (hPol : secHeap = true → ∀ a, memPol a = .sec)
+    (trips : Nat) (body : List X86Instr) (τ τ' : X86TaintState) (pc : Nat)
+    (hCheck : checkX86Loop secHeap trips τ body = some τ')
+    (s₁ s₂ : X86State) (hLow : X86LowEq memPol τ s₁ s₂) :
+    (execX86Loop trips body pc s₁).2 = (execX86Loop trips body pc s₂).2 ∧
+    X86LowEq memPol τ' (execX86Loop trips body pc s₁).1 (execX86Loop trips body pc s₂).1 := by
+  induction trips generalizing τ pc s₁ s₂ with
+  | zero =>
+    simp [checkX86Loop] at hCheck; subst hCheck; exact ⟨rfl, hLow⟩
+  | succ n ih =>
+    simp only [checkX86Loop] at hCheck
+    cases hBlk : checkX86Block secHeap τ body with
+    | none => simp [hBlk] at hCheck
+    | some τ1 =>
+      simp [hBlk] at hCheck
+      obtain ⟨hEv1, hLow1⟩ := checkX86Block_sound memPol secHeap hPol body τ τ1 pc hBlk s₁ s₂ hLow
+      obtain ⟨hEv2, hLow2⟩ :=
+        ih τ1 (pc + body.length) hCheck
+          (execX86Block body pc s₁).1 (execX86Block body pc s₂).1 hLow1
+      simp only [execX86Loop]
+      exact ⟨by rw [hEv1, hEv2], hLow2⟩
+
+theorem x86LowEq_join_left (memPol : BitVec 64 → SecLabel)
+    (τ τT τE : X86TaintState) (s₁ s₂ : X86State)
+    (hDoit : τT.doitAssumed = τ.doitAssumed)
+    (hLow : X86LowEq memPol τT s₁ s₂) :
+    X86LowEq memPol
+      { gpr := fun r => (τT.gpr r).join (τE.gpr r)
+        ymm := fun y => (τT.ymm y).join (τE.ymm y)
+        cf := τT.cf.join τE.cf
+        of := τT.of.join τE.of
+        zf := τT.zf.join τE.zf
+        doitAssumed := τ.doitAssumed
+        upperYmmClean := τT.upperYmmClean && τE.upperYmmClean } s₁ s₂ := by
+  rcases hLow with ⟨hg, hy, hc, ho, hz, hm, hdEq, hdReq, hyEq, hyCl⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, hm, hdEq, ?_, hyEq, ?_⟩
+  · intro r hr; exact hg r ((SecLabel.join_eq_pub_iff _ _).mp hr).1
+  · intro y hyP; exact hy y ((SecLabel.join_eq_pub_iff _ _).mp hyP).1
+  · intro hP; exact hc ((SecLabel.join_eq_pub_iff _ _).mp hP).1
+  · intro hP; exact ho ((SecLabel.join_eq_pub_iff _ _).mp hP).1
+  · intro hP; exact hz ((SecLabel.join_eq_pub_iff _ _).mp hP).1
+  · intro hD; exact hdReq (hDoit.trans hD)
+  · intro hC; simp at hC; exact hyCl hC.1
+
+theorem x86LowEq_join_right (memPol : BitVec 64 → SecLabel)
+    (τ τT τE : X86TaintState) (s₁ s₂ : X86State)
+    (hDoit : τE.doitAssumed = τ.doitAssumed)
+    (hLow : X86LowEq memPol τE s₁ s₂) :
+    X86LowEq memPol
+      { gpr := fun r => (τT.gpr r).join (τE.gpr r)
+        ymm := fun y => (τT.ymm y).join (τE.ymm y)
+        cf := τT.cf.join τE.cf
+        of := τT.of.join τE.of
+        zf := τT.zf.join τE.zf
+        doitAssumed := τ.doitAssumed
+        upperYmmClean := τT.upperYmmClean && τE.upperYmmClean } s₁ s₂ := by
+  rcases hLow with ⟨hg, hy, hc, ho, hz, hm, hdEq, hdReq, hyEq, hyCl⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, hm, hdEq, ?_, hyEq, ?_⟩
+  · intro r hr; exact hg r ((SecLabel.join_eq_pub_iff _ _).mp hr).2
+  · intro y hyP; exact hy y ((SecLabel.join_eq_pub_iff _ _).mp hyP).2
+  · intro hP; exact hc ((SecLabel.join_eq_pub_iff _ _).mp hP).2
+  · intro hP; exact ho ((SecLabel.join_eq_pub_iff _ _).mp hP).2
+  · intro hP; exact hz ((SecLabel.join_eq_pub_iff _ _).mp hP).2
+  · intro hD; exact hdReq (hDoit.trans hD)
+  · intro hC; simp at hC; exact hyCl hC.2
+
+/-- **Master `x86_64` Constant-Time Timing-Noninterference Soundness Theorem**:
+    Any `x86_64` assembly program accepted by `checkX86Prog` produces **identical**
+    microarchitectural leakage traces (`branchTaken`, `memAddrs`, `varLatencyOperands`,
+    and `dirtyUpperYmmOnRet = false`) on all secret-varying states `s₁, s₂` satisfying `X86LowEq`. -/
+theorem x86_ct_checker_sound
+    (memPol : BitVec 64 → SecLabel) (secHeap : Bool)
+    (hPol : secHeap = true → ∀ a, memPol a = .sec)
+    (prog : List X86Stmt) (τ τ' : X86TaintState) (pc : Nat)
+    (hCheck : checkX86Prog secHeap τ prog = some τ')
+    (s₁ s₂ : X86State) (hLow : X86LowEq memPol τ s₁ s₂) :
+    (execX86Prog prog pc s₁).2 = (execX86Prog prog pc s₂).2 ∧
+    X86LowEq memPol τ' (execX86Prog prog pc s₁).1 (execX86Prog prog pc s₂).1 := by
+  induction prog generalizing τ pc s₁ s₂ with
+  | nil =>
+    simp [checkX86Prog] at hCheck; subst hCheck; exact ⟨rfl, hLow⟩
+  | cons stmt rest ih =>
+    cases stmt with
+    | instr ins =>
+      simp only [checkX86Prog] at hCheck
+      cases hIns : checkX86Instr secHeap τ ins with
+      | none => simp [hIns] at hCheck
+      | some τ1 =>
+        simp [hIns] at hCheck
+        obtain ⟨hEv, hLow1⟩ := checkX86Instr_sound memPol secHeap hPol τ τ1 ins pc hIns s₁ s₂ hLow
+        obtain ⟨hEvs, hLow2⟩ :=
+          ih τ1 (pc + 1) hCheck (execX86Instr ins pc s₁).1 (execX86Instr ins pc s₂).1 hLow1
+        simp only [execX86Prog]
+        exact ⟨by rw [hEv, hEvs], hLow2⟩
+    | jccNz condReg thenBody elseBody =>
+      simp only [checkX86Prog] at hCheck
+      by_cases hCond : (τ.gpr condReg == .pub) = true
+      · simp [hCond] at hCheck
+        cases hT : checkX86Block secHeap τ thenBody with
+        | none => simp [hT] at hCheck
+        | some τT =>
+          cases hE : checkX86Block secHeap τ elseBody with
+          | none => simp [hT, hE] at hCheck
+          | some τE =>
+            simp [hT, hE] at hCheck
+            have hCondPub : τ.gpr condReg = .pub := by simpa using hCond
+            have hCondEq : s₁.gpr condReg = s₂.gpr condReg := hLow.1 condReg hCondPub
+            simp only [execX86Prog, hCondEq]
+            by_cases hTaken : (s₂.gpr condReg != 0#64) = true
+            · simp only [hTaken, ↓reduceIte]
+              obtain ⟨hEv1, hLowT⟩ :=
+                checkX86Block_sound memPol secHeap hPol thenBody τ τT (pc + 1) hT s₁ s₂ hLow
+              have hJoinLow := x86LowEq_join_left memPol τ τT τE _ _
+                (checkX86Block_doitAssumed secHeap thenBody τ τT hT) hLowT
+              obtain ⟨hEv2, hLowRest⟩ :=
+                ih _ (pc + 1 + thenBody.length) hCheck _ _ hJoinLow
+              exact ⟨by rw [hEv1, hEv2], hLowRest⟩
+            · simp only [hTaken, Bool.false_eq_true, ↓reduceIte]
+              obtain ⟨hEv1, hLowE⟩ :=
+                checkX86Block_sound memPol secHeap hPol elseBody τ τE (pc + 1) hE s₁ s₂ hLow
+              have hJoinLow := x86LowEq_join_right memPol τ τT τE _ _
+                (checkX86Block_doitAssumed secHeap elseBody τ τE hE) hLowE
+              obtain ⟨hEv2, hLowRest⟩ :=
+                ih _ (pc + 1 + elseBody.length) hCheck _ _ hJoinLow
+              exact ⟨by rw [hEv1, hEv2], hLowRest⟩
+      · simp [hCond] at hCheck
+    | pubLoop trips body =>
+      simp only [checkX86Prog] at hCheck
+      cases hLp : checkX86Loop secHeap trips τ body with
+      | none => simp [hLp] at hCheck
+      | some τ1 =>
+        simp [hLp] at hCheck
+        obtain ⟨hEv1, hLow1⟩ :=
+          checkX86Loop_sound memPol secHeap hPol trips body τ τ1 pc hLp s₁ s₂ hLow
+        obtain ⟨hEv2, hLow2⟩ :=
+          ih τ1 (pc + trips * body.length) hCheck
+            (execX86Loop trips body pc s₁).1 (execX86Loop trips body pc s₂).1 hLow1
+        simp only [execX86Prog]
+        exact ⟨by rw [hEv1, hEv2], hLow2⟩
+    | ret =>
+      simp only [checkX86Prog] at hCheck
+      split at hCheck <;> simp_all
+      rename_i hClean; subst hCheck
+      have hd1 : s₁.ymmUpperDirty = false := hLow.2.2.2.2.2.2.2.2.2 hClean
+      have hd2 : s₂.ymmUpperDirty = false := hLow.2.2.2.2.2.2.2.2.1.symm.trans hd1
+      exact ⟨by simp [execX86Prog, hd1, hd2], hLow⟩
+
+/-! ## 5. `aarch64` (`NEON` + `FEAT_SHA3` + `PMULL` + `FEAT_DIT`) Semantics & Soundness -/
+
+inductive ArmGpr where
+  | x0  | x1  | x2  | x3  | x4  | x5  | x6  | x7
+  | x8  | x9  | x10 | x11 | x12 | x13 | x14 | x15
+  | x16 | x17 | x19 | x20 | sp
+  deriving DecidableEq, Repr, Inhabited
+
+inductive NeonReg where
+  | v0  | v1  | v2  | v3  | v4  | v5  | v6  | v7
+  | v16 | v17 | v18 | v19 | v20 | v21
+  deriving DecidableEq, Repr, Inhabited
+
+structure ArmFlags where
+  z : Bool
+  c : Bool
+  deriving DecidableEq, Repr, Inhabited
+
+structure ArmState where
+  gpr : ArmGpr → BitVec 64
+  neon : NeonReg → Vec128
+  flags : ArmFlags
+  mem : BitVec 64 → BitVec 64
+  ditEnabled : Bool
+
+def ArmState.setGpr (st : ArmState) (r : ArmGpr) (v : BitVec 64) : ArmState :=
+  { st with gpr := fun q => if q == r then v else st.gpr q }
+
+def ArmState.setNeon (st : ArmState) (r : NeonReg) (v : Vec128) : ArmState :=
+  { st with neon := fun q => if q == r then v else st.neon q }
+
+def ArmState.writeMem64 (st : ArmState) (addr val : BitVec 64) : ArmState :=
+  { st with mem := fun a => if a == addr then val else st.mem a }
+
+def ArmState.readMem128 (st : ArmState) (addr : BitVec 64) : Vec128 :=
+  ⟨st.mem addr, st.mem (addr + 8#64)⟩
+
+def ArmState.writeMem128 (st : ArmState) (addr : BitVec 64) (v : Vec128) : ArmState :=
+  (st.writeMem64 addr v.lo).writeMem64 (addr + 8#64) v.hi
+
+inductive ArmInstr where
+  | msrDit1
+  | movImm64 (dst : ArmGpr) (imm : BitVec 64)
+  | movReg64 (dst src : ArmGpr)
+  | eor64 (dst a b : ArmGpr)
+  | eorImm64 (dst a : ArmGpr) (imm : BitVec 64)
+  | orr64 (dst a b : ArmGpr)
+  | and64 (dst a b : ArmGpr)
+  | andImm64 (dst a : ArmGpr) (imm : BitVec 64)
+  | lsrImm64 (dst src : ArmGpr) (sh : Nat)
+  | lslImm64 (dst src : ArmGpr) (sh : Nat)
+  | add64 (dst a b : ArmGpr)
+  | addImm64 (dst src : ArmGpr) (imm : BitVec 64)
+  | sub64 (dst a b : ArmGpr)
+  | neg64 (dst src : ArmGpr)
+  | adds64 (dst a b : ArmGpr)
+  | adcZero64 (dst : ArmGpr)
+  | subs64 (dst a b : ArmGpr)
+  | sbcMask64 (dst : ArmGpr)
+  | mulLo64 (dst a b : ArmGpr)
+  | umulh64 (dst a b : ArmGpr)
+  | ldr64 (dst base : ArmGpr) (disp : BitVec 64)
+  | str64 (src base : ArmGpr) (disp : BitVec 64)
+  | ldrQ (dst : NeonReg) (base : ArmGpr) (disp : BitVec 64)
+  | strQ (src : NeonReg) (base : ArmGpr) (disp : BitVec 64)
+  | eorV16b (dst a b : NeonReg)
+  | bcaxV16b (dst vn vm va : NeonReg)
+  | eor3V16b (dst vn vm va : NeonReg)
+  | rax1V2d (dst vn vm : NeonReg)
+  | xarV2d (dst vn vm : NeonReg) (imm6 : Fin 64)
+  | pmull1q (dst a b : NeonReg)
+  | pmull2_1q (dst a b : NeonReg)
+  | extV16b8 (dst a b : NeonReg)
+  | cselEq64 (dst a b : ArmGpr)
+  | udiv64 (dst a b : ArmGpr)
+  | ldrIndexed64 (dst base idx : ArmGpr)
+  deriving DecidableEq, Repr
+
+inductive ArmStmt where
+  | instr (i : ArmInstr)
+  | cbnz (condReg : ArmGpr) (thenBody elseBody : List ArmInstr)
+  | pubLoop (trips : Nat) (body : List ArmInstr)
+  | ret
+  deriving DecidableEq, Repr
+
+def execArmInstr (ins : ArmInstr) (pc : Nat) (st : ArmState) : ArmState × LeakageEvent :=
+  match ins with
+  | .msrDit1 =>
+    ({ st with ditEnabled := true }, LeakageEvent.clean pc)
+  | .movImm64 dst imm =>
+    (st.setGpr dst imm, LeakageEvent.clean pc)
+  | .movReg64 dst src =>
+    (st.setGpr dst (st.gpr src), LeakageEvent.clean pc)
+  | .eor64 dst a b =>
+    (st.setGpr dst (st.gpr a ^^^ st.gpr b), LeakageEvent.clean pc)
+  | .eorImm64 dst a imm =>
+    (st.setGpr dst (st.gpr a ^^^ imm), LeakageEvent.clean pc)
+  | .orr64 dst a b =>
+    (st.setGpr dst (st.gpr a ||| st.gpr b), LeakageEvent.clean pc)
+  | .and64 dst a b =>
+    (st.setGpr dst (st.gpr a &&& st.gpr b), LeakageEvent.clean pc)
+  | .andImm64 dst a imm =>
+    (st.setGpr dst (st.gpr a &&& imm), LeakageEvent.clean pc)
+  | .lsrImm64 dst src sh =>
+    (st.setGpr dst (st.gpr src >>> sh), LeakageEvent.clean pc)
+  | .lslImm64 dst src sh =>
+    (st.setGpr dst (st.gpr src <<< sh), LeakageEvent.clean pc)
+  | .add64 dst a b =>
+    (st.setGpr dst (st.gpr a + st.gpr b), LeakageEvent.clean pc)
+  | .addImm64 dst src imm =>
+    (st.setGpr dst (st.gpr src + imm), LeakageEvent.clean pc)
+  | .sub64 dst a b =>
+    (st.setGpr dst (st.gpr a - st.gpr b), LeakageEvent.clean pc)
+  | .neg64 dst src =>
+    (st.setGpr dst (0#64 - st.gpr src), LeakageEvent.clean pc)
+  | .adds64 dst a b =>
+    let va := st.gpr a
+    let vb := st.gpr b
+    let sumNat := va.toNat + vb.toNat
+    let res := va + vb
+    ({ (st.setGpr dst res) with
+       flags := { z := (res == 0#64), c := decide (sumNat ≥ 2 ^ 64) } },
+     LeakageEvent.clean pc)
+  | .adcZero64 dst =>
+    let res := if st.flags.c then 1#64 else 0#64
+    (st.setGpr dst res, LeakageEvent.clean pc)
+  | .subs64 dst a b =>
+    let va := st.gpr a
+    let vb := st.gpr b
+    let res := va - vb
+    -- ARM64 `SUBS` sets `PSTATE.C = 1` iff NO unsigned borrow (`va.toNat ≥ vb.toNat`)!
+    ({ (st.setGpr dst res) with
+       flags := { z := (res == 0#64), c := decide (va.toNat ≥ vb.toNat) } },
+     LeakageEvent.clean pc)
+  | .sbcMask64 dst =>
+    -- ARM64 `SBC dst, xzr, xzr` computes `0 - 0 - (1 - C)`: `0` if `C = 1`, `-1` if `C = 0`!
+    let mask := if st.flags.c then 0#64 else 0xFFFFFFFFFFFFFFFF#64
+    (st.setGpr dst mask, LeakageEvent.clean pc)
+  | .mulLo64 dst a b =>
+    let prod := (st.gpr a).toNat * (st.gpr b).toNat
+    (st.setGpr dst (BitVec.ofNat 64 prod),
+      { LeakageEvent.clean pc with
+        varLatencyOperands := if st.ditEnabled then [] else [st.gpr a, st.gpr b] })
+  | .umulh64 dst a b =>
+    let prod := (st.gpr a).toNat * (st.gpr b).toNat
+    (st.setGpr dst (BitVec.ofNat 64 (prod / (2 ^ 64))),
+      { LeakageEvent.clean pc with
+        varLatencyOperands := if st.ditEnabled then [] else [st.gpr a, st.gpr b] })
+  | .ldr64 dst base disp =>
+    let addr := st.gpr base + disp
+    (st.setGpr dst (st.mem addr), LeakageEvent.clean pc [addr])
+  | .str64 src base disp =>
+    let addr := st.gpr base + disp
+    (st.writeMem64 addr (st.gpr src), LeakageEvent.clean pc [addr])
+  | .ldrQ dst base disp =>
+    let addr := st.gpr base + disp
+    (st.setNeon dst (st.readMem128 addr), LeakageEvent.clean pc [addr, addr + 8#64])
+  | .strQ src base disp =>
+    let addr := st.gpr base + disp
+    (st.writeMem128 addr (st.neon src), LeakageEvent.clean pc [addr, addr + 8#64])
+  | .eorV16b dst a b =>
+    if a == b then
+      (st.setNeon dst Vec128.zero, LeakageEvent.clean pc)
+    else
+      (st.setNeon dst (Vec128.xor (st.neon a) (st.neon b)), LeakageEvent.clean pc)
+  | .bcaxV16b dst vn vm va =>
+    (st.setNeon dst (Vec128.bcax (st.neon vn) (st.neon vm) (st.neon va)), LeakageEvent.clean pc)
+  | .eor3V16b dst vn vm va =>
+    (st.setNeon dst (Vec128.eor3 (st.neon vn) (st.neon vm) (st.neon va)), LeakageEvent.clean pc)
+  | .rax1V2d dst vn vm =>
+    (st.setNeon dst (Vec128.rax1 (st.neon vn) (st.neon vm)), LeakageEvent.clean pc)
+  | .xarV2d dst vn vm imm6 =>
+    (st.setNeon dst (Vec128.xar (st.neon vn) (st.neon vm) imm6), LeakageEvent.clean pc)
+  | .pmull1q dst a b =>
+    (st.setNeon dst (clmul64 (st.neon a).lo (st.neon b).lo),
+      { LeakageEvent.clean pc with
+        varLatencyOperands := if st.ditEnabled then [] else [(st.neon a).lo, (st.neon b).lo] })
+  | .pmull2_1q dst a b =>
+    (st.setNeon dst (clmul64 (st.neon a).hi (st.neon b).hi),
+      { LeakageEvent.clean pc with
+        varLatencyOperands := if st.ditEnabled then [] else [(st.neon a).hi, (st.neon b).hi] })
+  | .extV16b8 dst a b =>
+    (st.setNeon dst (Vec128.ext8 (st.neon a) (st.neon b)), LeakageEvent.clean pc)
+  | .cselEq64 dst a b =>
+    let res := if st.flags.z then st.gpr a else st.gpr b
+    let varOps :=
+      if st.ditEnabled then []
+      else [if st.flags.z then 1#64 else 0#64, st.gpr a, st.gpr b]
+    (st.setGpr dst res,
+     { pc := pc
+       branchTaken := none
+       memAddrs := []
+       varLatencyOperands := varOps
+       dirtyUpperYmmOnRet := false })
+  | .udiv64 dst a b =>
+    -- Per ARM DDI 0487, `UDIV`/`SDIV` latency is NOT data-independent even when `PSTATE.DIT = 1`!
+    let va := st.gpr a
+    let vb := st.gpr b
+    let q := if vb == 0#64 then 0#64 else BitVec.ofNat 64 (va.toNat / vb.toNat)
+    (st.setGpr dst q,
+     { pc := pc
+       branchTaken := none
+       memAddrs := []
+       varLatencyOperands := [va, vb]
+       dirtyUpperYmmOnRet := false })
+  | .ldrIndexed64 dst base idx =>
+    let addr := st.gpr base + st.gpr idx
+    (st.setGpr dst (st.mem addr), LeakageEvent.clean pc [addr])
+
+def execArmBlock (blk : List ArmInstr) (pc : Nat) (st : ArmState) :
+    ArmState × List LeakageEvent :=
+  match blk with
+  | [] => (st, [])
+  | ins :: rest =>
+    let (st1, ev) := execArmInstr ins pc st
+    let (st2, evs) := execArmBlock rest (pc + 1) st1
+    (st2, ev :: evs)
+
+/-- Compose certified blocks at the advanced PC, preserving the full leakage trace. -/
+theorem execArmBlock_append (a b : List ArmInstr) (pc : Nat) (st : ArmState) :
+    execArmBlock (a ++ b) pc st =
+      let first := execArmBlock a pc st
+      let second := execArmBlock b (pc + a.length) first.1
+      (second.1, first.2 ++ second.2) := by
+  induction a generalizing pc st with
+  | nil => simp only [List.nil_append, execArmBlock, List.length_nil, Nat.add_zero]
+  | cons ins rest ih =>
+    simp only [List.cons_append, execArmBlock, ih, List.length_cons,
+      List.cons_append, Nat.add_assoc, Nat.add_comm 1]
+
+/-- Regression: concatenation must not reset the suffix program counter. -/
+theorem execArmBlock_suffix_pc_not_reset (st : ArmState) :
+    (execArmBlock [.movImm64 .x0 0#64, .movImm64 .x0 1#64] 0 st).2 ≠
+      [LeakageEvent.clean 0 [], LeakageEvent.clean 0 []] := by
+  intro h
+  have hp := congrArg (List.map LeakageEvent.pc) h
+  change [0, 1] = [0, 0] at hp
+  contradiction
+
+def execArmLoop (trips : Nat) (body : List ArmInstr) (pc : Nat) (st : ArmState) :
+    ArmState × List LeakageEvent :=
+  match trips with
+  | 0 => (st, [])
+  | n + 1 =>
+    let (st1, evs1) := execArmBlock body pc st
+    let (st2, evs2) := execArmLoop n body (pc + body.length) st1
+    (st2, evs1 ++ evs2)
+
+def execArmProg (prog : List ArmStmt) (pc : Nat) (st : ArmState) :
+    ArmState × List LeakageEvent :=
+  match prog with
+  | [] => (st, [])
+  | stmt :: rest =>
+    match stmt with
+    | .instr ins =>
+      let (st1, ev) := execArmInstr ins pc st
+      let (st2, evs) := execArmProg rest (pc + 1) st1
+      (st2, ev :: evs)
+    | .cbnz condReg thenBody elseBody =>
+      let taken := st.gpr condReg != 0#64
+      let brEv : LeakageEvent :=
+        { pc := pc
+          branchTaken := some taken
+          memAddrs := []
+          varLatencyOperands := []
+          dirtyUpperYmmOnRet := false }
+      let chosen := if taken then thenBody else elseBody
+      let (st1, evs1) := execArmBlock chosen (pc + 1) st
+      let (st2, evs2) := execArmProg rest (pc + 1 + chosen.length) st1
+      (st2, brEv :: (evs1 ++ evs2))
+    | .pubLoop trips body =>
+      let (st1, evs1) := execArmLoop trips body pc st
+      let (st2, evs2) := execArmProg rest (pc + trips * body.length) st1
+      (st2, evs1 ++ evs2)
+    | .ret =>
+      (st, [LeakageEvent.clean pc])
+
+structure ArmTaintState where
+  gpr : ArmGpr → SecLabel
+  neon : NeonReg → SecLabel
+  z : SecLabel
+  c : SecLabel
+  ditAssumed : Bool
+
+def ArmTaintState.setGpr (τ : ArmTaintState) (r : ArmGpr) (l : SecLabel) : ArmTaintState :=
+  { τ with gpr := fun q => if q == r then l else τ.gpr q }
+
+def ArmTaintState.setNeon (τ : ArmTaintState) (r : NeonReg) (l : SecLabel) : ArmTaintState :=
+  { τ with neon := fun q => if q == r then l else τ.neon q }
+
+@[expose]
+def ArmLowEq (memPol : BitVec 64 → SecLabel) (τ : ArmTaintState) (s₁ s₂ : ArmState) : Prop :=
+  (∀ r, τ.gpr r = .pub → s₁.gpr r = s₂.gpr r) ∧
+  (∀ v, τ.neon v = .pub → s₁.neon v = s₂.neon v) ∧
+  (τ.z = .pub → s₁.flags.z = s₂.flags.z) ∧
+  (τ.c = .pub → s₁.flags.c = s₂.flags.c) ∧
+  (∀ addr, memPol addr = .pub → s₁.mem addr = s₂.mem addr) ∧
+  (s₁.ditEnabled = s₂.ditEnabled) ∧
+  (τ.ditAssumed = true → s₁.ditEnabled = true)
+
+def checkArmInstr (secHeap : Bool) (τ : ArmTaintState) (ins : ArmInstr) :
+    Option ArmTaintState :=
+  match ins with
+  | .msrDit1 => some { τ with ditAssumed := true }
+  | .movImm64 dst _ => some (τ.setGpr dst .pub)
+  | .movReg64 dst src => some (τ.setGpr dst (τ.gpr src))
+  | .eor64 dst a b =>
+    if a == b then some (τ.setGpr dst .pub)
+    else some (τ.setGpr dst ((τ.gpr a).join (τ.gpr b)))
+  | .eorImm64 dst a _ => some (τ.setGpr dst (τ.gpr a))
+  | .orr64 dst a b => some (τ.setGpr dst ((τ.gpr a).join (τ.gpr b)))
+  | .and64 dst a b => some (τ.setGpr dst ((τ.gpr a).join (τ.gpr b)))
+  | .andImm64 dst a _ => some (τ.setGpr dst (τ.gpr a))
+  | .lsrImm64 dst src _ => some (τ.setGpr dst (τ.gpr src))
+  | .lslImm64 dst src _ => some (τ.setGpr dst (τ.gpr src))
+  | .add64 dst a b => some (τ.setGpr dst ((τ.gpr a).join (τ.gpr b)))
+  | .addImm64 dst src _ => some (τ.setGpr dst (τ.gpr src))
+  | .sub64 dst a b => some (τ.setGpr dst ((τ.gpr a).join (τ.gpr b)))
+  | .neg64 dst src => some (τ.setGpr dst (τ.gpr src))
+  | .adds64 dst a b =>
+    let l := (τ.gpr a).join (τ.gpr b)
+    some { (τ.setGpr dst l) with z := l, c := l }
+  | .adcZero64 dst => some (τ.setGpr dst τ.c)
+  | .subs64 dst a b =>
+    let l := (τ.gpr a).join (τ.gpr b)
+    some { (τ.setGpr dst l) with z := l, c := l }
+  | .sbcMask64 dst => some (τ.setGpr dst τ.c)
+  | .mulLo64 dst a b =>
+    let l := (τ.gpr a).join (τ.gpr b)
+    if l == .pub || τ.ditAssumed then some (τ.setGpr dst l) else none
+  | .umulh64 dst a b =>
+    let l := (τ.gpr a).join (τ.gpr b)
+    if l == .pub || τ.ditAssumed then some (τ.setGpr dst l) else none
+  | .ldr64 dst base _ =>
+    if τ.gpr base == .pub then some (τ.setGpr dst .sec) else none
+  | .str64 src base _ =>
+    if τ.gpr base == .pub && (secHeap || τ.gpr src == .pub) then some τ else none
+  | .ldrQ dst base _ =>
+    if τ.gpr base == .pub then some (τ.setNeon dst .sec) else none
+  | .strQ src base _ =>
+    if τ.gpr base == .pub && (secHeap || τ.neon src == .pub) then some τ else none
+  | .eorV16b dst a b =>
+    if a == b then some (τ.setNeon dst .pub)
+    else some (τ.setNeon dst ((τ.neon a).join (τ.neon b)))
+  | .bcaxV16b dst vn vm va =>
+    some (τ.setNeon dst (((τ.neon vn).join (τ.neon vm)).join (τ.neon va)))
+  | .eor3V16b dst vn vm va =>
+    some (τ.setNeon dst (((τ.neon vn).join (τ.neon vm)).join (τ.neon va)))
+  | .rax1V2d dst vn vm =>
+    some (τ.setNeon dst ((τ.neon vn).join (τ.neon vm)))
+  | .xarV2d dst vn vm _ =>
+    some (τ.setNeon dst ((τ.neon vn).join (τ.neon vm)))
+  | .pmull1q dst a b =>
+    let l := (τ.neon a).join (τ.neon b)
+    if l == .pub || τ.ditAssumed then some (τ.setNeon dst l) else none
+  | .pmull2_1q dst a b =>
+    let l := (τ.neon a).join (τ.neon b)
+    if l == .pub || τ.ditAssumed then some (τ.setNeon dst l) else none
+  | .extV16b8 dst a b =>
+    some (τ.setNeon dst ((τ.neon a).join (τ.neon b)))
+  | .cselEq64 dst a b =>
+    let l := (τ.z.join (τ.gpr a)).join (τ.gpr b)
+    if l == .pub then some (τ.setGpr dst .pub)
+    else if τ.ditAssumed then some (τ.setGpr dst .sec)
+    else none
+  | .udiv64 dst a b =>
+    if τ.gpr a == .pub && τ.gpr b == .pub then some (τ.setGpr dst .pub) else none
+  | .ldrIndexed64 dst base idx =>
+    if τ.gpr base == .pub && τ.gpr idx == .pub then some (τ.setGpr dst .sec) else none
+
+def checkArmBlock (secHeap : Bool) (τ : ArmTaintState) (blk : List ArmInstr) :
+    Option ArmTaintState :=
+  match blk with
+  | [] => some τ
+  | ins :: rest =>
+    match checkArmInstr secHeap τ ins with
+    | none => none
+    | some τ1 => checkArmBlock secHeap τ1 rest
+
+def checkArmLoop (secHeap : Bool) (trips : Nat) (τ : ArmTaintState) (body : List ArmInstr) :
+    Option ArmTaintState :=
+  match trips with
+  | 0 => some τ
+  | n + 1 =>
+    match checkArmBlock secHeap τ body with
+    | none => none
+    | some τ1 => checkArmLoop secHeap n τ1 body
+
+def checkArmProg (secHeap : Bool) (τ : ArmTaintState) (prog : List ArmStmt) :
+    Option ArmTaintState :=
+  match prog with
+  | [] => some τ
+  | stmt :: rest =>
+    match stmt with
+    | .instr ins =>
+      match checkArmInstr secHeap τ ins with
+      | none => none
+      | some τ1 => checkArmProg secHeap τ1 rest
+    | .cbnz condReg thenBody elseBody =>
+      if τ.gpr condReg == .pub then
+        match checkArmBlock secHeap τ thenBody, checkArmBlock secHeap τ elseBody with
+        | some τT, some τE =>
+          let τJoin : ArmTaintState :=
+            { gpr := fun r => (τT.gpr r).join (τE.gpr r)
+              neon := fun v => (τT.neon v).join (τE.neon v)
+              z := τT.z.join τE.z
+              c := τT.c.join τE.c
+              ditAssumed := τT.ditAssumed && τE.ditAssumed }
+          checkArmProg secHeap τJoin rest
+        | _, _ => none
+      else
+        none
+    | .pubLoop trips body =>
+      match checkArmLoop secHeap trips τ body with
+      | none => none
+      | some τ1 => checkArmProg secHeap τ1 rest
+    | .ret => some τ
+
+theorem arm_setGpr_lowEq (memPol : BitVec 64 → SecLabel) (τ : ArmTaintState)
+    (s₁ s₂ : ArmState) (r : ArmGpr) (l : SecLabel) (v₁ v₂ : BitVec 64)
+    (hLow : ArmLowEq memPol τ s₁ s₂) (hv : l = .pub → v₁ = v₂) :
+    ArmLowEq memPol (τ.setGpr r l) (s₁.setGpr r v₁) (s₂.setGpr r v₂) := by
+  rcases hLow with ⟨hgpr, hneon, hz, hc, hmem, hditEq, hditReq⟩
+  refine ⟨?_, hneon, hz, hc, hmem, hditEq, hditReq⟩
+  intro q hq
+  simp only [ArmTaintState.setGpr, ArmState.setGpr] at hq ⊢
+  split at hq
+  · rename_i heq; simp [heq, hv hq]
+  · rename_i hne; simp [hne, hgpr q hq]
+
+theorem arm_setNeon_lowEq (memPol : BitVec 64 → SecLabel) (τ : ArmTaintState)
+    (s₁ s₂ : ArmState) (r : NeonReg) (l : SecLabel) (v₁ v₂ : Vec128)
+    (hLow : ArmLowEq memPol τ s₁ s₂) (hv : l = .pub → v₁ = v₂) :
+    ArmLowEq memPol (τ.setNeon r l) (s₁.setNeon r v₁) (s₂.setNeon r v₂) := by
+  rcases hLow with ⟨hgpr, hneon, hz, hc, hmem, hditEq, hditReq⟩
+  refine ⟨hgpr, ?_, hz, hc, hmem, hditEq, hditReq⟩
+  intro q hq
+  simp only [ArmTaintState.setNeon, ArmState.setNeon] at hq ⊢
+  split at hq
+  · rename_i heq; simp [heq, hv hq]
+  · rename_i hne; simp [hne, hneon q hq]
+
+theorem arm_writeMem64_lowEq (memPol : BitVec 64 → SecLabel) (secHeap : Bool)
+    (τ : ArmTaintState) (s₁ s₂ : ArmState) (addr v₁ v₂ : BitVec 64)
+    (hPol : secHeap = true → ∀ a, memPol a = .sec)
+    (hLow : ArmLowEq memPol τ s₁ s₂) (hv : secHeap = false → v₁ = v₂) :
+    ArmLowEq memPol τ (s₁.writeMem64 addr v₁) (s₂.writeMem64 addr v₂) := by
+  rcases hLow with ⟨hgpr, hneon, hz, hc, hmem, hditEq, hditReq⟩
+  refine ⟨hgpr, hneon, hz, hc, ?_, hditEq, hditReq⟩
+  intro a ha
+  simp only [ArmState.writeMem64]
+  split
+  · cases hsh : secHeap
+    · exact hv hsh
+    · have hsec := hPol hsh a; rw [ha] at hsec; cases hsec
+  · exact hmem a ha
+
+theorem checkArmInstr_sound
+    (memPol : BitVec 64 → SecLabel) (secHeap : Bool)
+    (hPol : secHeap = true → ∀ a, memPol a = .sec)
+    (τ τ' : ArmTaintState) (ins : ArmInstr) (pc : Nat)
+    (hCheck : checkArmInstr secHeap τ ins = some τ')
+    (s₁ s₂ : ArmState) (hLow : ArmLowEq memPol τ s₁ s₂) :
+    (execArmInstr ins pc s₁).2 = (execArmInstr ins pc s₂).2 ∧
+    ArmLowEq memPol τ' (execArmInstr ins pc s₁).1 (execArmInstr ins pc s₂).1 := by
+  rcases hLow with ⟨hgpr, hneon, hz, hc, hmem, hditEq, hditReq⟩
+  have hLowOrig : ArmLowEq memPol τ s₁ s₂ := ⟨hgpr, hneon, hz, hc, hmem, hditEq, hditReq⟩
+  cases ins with
+  | msrDit1 =>
+    simp [checkArmInstr] at hCheck; subst hCheck
+    exact ⟨rfl, hgpr, hneon, hz, hc, hmem, rfl, fun _ => rfl⟩
+  | movImm64 dst imm =>
+    simp [checkArmInstr] at hCheck; subst hCheck
+    exact ⟨rfl, arm_setGpr_lowEq memPol τ s₁ s₂ dst .pub imm imm hLowOrig (fun _ => rfl)⟩
+  | movReg64 dst src =>
+    simp [checkArmInstr] at hCheck; subst hCheck
+    exact ⟨rfl, arm_setGpr_lowEq memPol τ s₁ s₂ dst (τ.gpr src) (s₁.gpr src) (s₂.gpr src)
+      hLowOrig (hgpr src)⟩
+  | eor64 dst a b =>
+    simp only [checkArmInstr] at hCheck
+    by_cases hab : (a == b) = true
+    · simp [hab] at hCheck; subst hCheck
+      have hEq : a = b := by simpa using hab
+      subst hEq
+      exact ⟨rfl, arm_setGpr_lowEq memPol τ s₁ s₂ dst .pub
+        (s₁.gpr a ^^^ s₁.gpr a) (s₂.gpr a ^^^ s₂.gpr a) hLowOrig (fun _ => by simp)⟩
+    · simp [hab] at hCheck; subst hCheck
+      refine ⟨rfl, arm_setGpr_lowEq memPol τ s₁ s₂ dst ((τ.gpr a).join (τ.gpr b))
+        (s₁.gpr a ^^^ s₁.gpr b) (s₂.gpr a ^^^ s₂.gpr b) hLowOrig ?_⟩
+      intro hl; rcases (SecLabel.join_eq_pub_iff _ _).mp hl with ⟨h1, h2⟩
+      rw [hgpr a h1, hgpr b h2]
+  | eorImm64 dst a imm =>
+    simp [checkArmInstr] at hCheck; subst hCheck
+    exact ⟨rfl, arm_setGpr_lowEq memPol τ s₁ s₂ dst (τ.gpr a)
+      (s₁.gpr a ^^^ imm) (s₂.gpr a ^^^ imm) hLowOrig (fun hl => by rw [hgpr a hl])⟩
+  | orr64 dst a b =>
+    simp [checkArmInstr] at hCheck; subst hCheck
+    refine ⟨rfl, arm_setGpr_lowEq memPol τ s₁ s₂ dst ((τ.gpr a).join (τ.gpr b))
+      (s₁.gpr a ||| s₁.gpr b) (s₂.gpr a ||| s₂.gpr b) hLowOrig ?_⟩
+    intro hl; rcases (SecLabel.join_eq_pub_iff _ _).mp hl with ⟨h1, h2⟩
+    rw [hgpr a h1, hgpr b h2]
+  | and64 dst a b =>
+    simp [checkArmInstr] at hCheck; subst hCheck
+    refine ⟨rfl, arm_setGpr_lowEq memPol τ s₁ s₂ dst ((τ.gpr a).join (τ.gpr b))
+      (s₁.gpr a &&& s₁.gpr b) (s₂.gpr a &&& s₂.gpr b) hLowOrig ?_⟩
+    intro hl; rcases (SecLabel.join_eq_pub_iff _ _).mp hl with ⟨h1, h2⟩
+    rw [hgpr a h1, hgpr b h2]
+  | andImm64 dst a imm =>
+    simp [checkArmInstr] at hCheck; subst hCheck
+    exact ⟨rfl, arm_setGpr_lowEq memPol τ s₁ s₂ dst (τ.gpr a)
+      (s₁.gpr a &&& imm) (s₂.gpr a &&& imm) hLowOrig (fun hl => by rw [hgpr a hl])⟩
+  | lsrImm64 dst src sh =>
+    simp [checkArmInstr] at hCheck; subst hCheck
+    exact ⟨rfl, arm_setGpr_lowEq memPol τ s₁ s₂ dst (τ.gpr src)
+      (s₁.gpr src >>> sh) (s₂.gpr src >>> sh) hLowOrig (fun hl => by rw [hgpr src hl])⟩
+  | lslImm64 dst src sh =>
+    simp [checkArmInstr] at hCheck; subst hCheck
+    exact ⟨rfl, arm_setGpr_lowEq memPol τ s₁ s₂ dst (τ.gpr src)
+      (s₁.gpr src <<< sh) (s₂.gpr src <<< sh) hLowOrig (fun hl => by rw [hgpr src hl])⟩
+  | add64 dst a b =>
+    simp [checkArmInstr] at hCheck; subst hCheck
+    refine ⟨rfl, arm_setGpr_lowEq memPol τ s₁ s₂ dst ((τ.gpr a).join (τ.gpr b))
+      (s₁.gpr a + s₁.gpr b) (s₂.gpr a + s₂.gpr b) hLowOrig ?_⟩
+    intro hl; rcases (SecLabel.join_eq_pub_iff _ _).mp hl with ⟨h1, h2⟩
+    rw [hgpr a h1, hgpr b h2]
+  | addImm64 dst src imm =>
+    simp [checkArmInstr] at hCheck; subst hCheck
+    exact ⟨rfl, arm_setGpr_lowEq memPol τ s₁ s₂ dst (τ.gpr src)
+      (s₁.gpr src + imm) (s₂.gpr src + imm) hLowOrig (fun hl => by rw [hgpr src hl])⟩
+  | sub64 dst a b =>
+    simp [checkArmInstr] at hCheck; subst hCheck
+    refine ⟨rfl, arm_setGpr_lowEq memPol τ s₁ s₂ dst ((τ.gpr a).join (τ.gpr b))
+      (s₁.gpr a - s₁.gpr b) (s₂.gpr a - s₂.gpr b) hLowOrig ?_⟩
+    intro hl; rcases (SecLabel.join_eq_pub_iff _ _).mp hl with ⟨h1, h2⟩
+    rw [hgpr a h1, hgpr b h2]
+  | neg64 dst src =>
+    simp [checkArmInstr] at hCheck; subst hCheck
+    exact ⟨rfl, arm_setGpr_lowEq memPol τ s₁ s₂ dst (τ.gpr src)
+      (0#64 - s₁.gpr src) (0#64 - s₂.gpr src) hLowOrig (fun hl => by rw [hgpr src hl])⟩
+  | adds64 dst a b =>
+    simp [checkArmInstr, execArmInstr] at hCheck ⊢; subst hCheck
+    let l := (τ.gpr a).join (τ.gpr b)
+    have hOps : l = .pub → s₁.gpr a = s₂.gpr a ∧ s₁.gpr b = s₂.gpr b := by
+      intro hl; rcases (SecLabel.join_eq_pub_iff _ _).mp hl with ⟨h1, h2⟩
+      exact ⟨hgpr a h1, hgpr b h2⟩
+    have hSet := arm_setGpr_lowEq memPol τ s₁ s₂ dst l
+      (s₁.gpr a + s₁.gpr b) (s₂.gpr a + s₂.gpr b) hLowOrig
+      (fun hl => by rcases hOps hl with ⟨e1, e2⟩; rw [e1, e2])
+    rcases hSet with ⟨hg1, hn1, _, _, hm1, hd1, hdr1⟩
+    exact ⟨hg1, hn1, fun hl => by rcases hOps hl with ⟨e1, e2⟩; rw [e1, e2],
+           fun hl => by rcases hOps hl with ⟨e1, e2⟩; rw [e1, e2], hm1, hd1, hdr1⟩
+  | adcZero64 dst =>
+    simp [checkArmInstr] at hCheck; subst hCheck
+    exact ⟨rfl, arm_setGpr_lowEq memPol τ s₁ s₂ dst τ.c
+      (if s₁.flags.c then 1#64 else 0#64) (if s₂.flags.c then 1#64 else 0#64)
+      hLowOrig (fun hl => by rw [hc hl])⟩
+  | subs64 dst a b =>
+    simp [checkArmInstr, execArmInstr] at hCheck ⊢; subst hCheck
+    let l := (τ.gpr a).join (τ.gpr b)
+    have hOps : l = .pub → s₁.gpr a = s₂.gpr a ∧ s₁.gpr b = s₂.gpr b := by
+      intro hl; rcases (SecLabel.join_eq_pub_iff _ _).mp hl with ⟨h1, h2⟩
+      exact ⟨hgpr a h1, hgpr b h2⟩
+    have hSet := arm_setGpr_lowEq memPol τ s₁ s₂ dst l
+      (s₁.gpr a - s₁.gpr b) (s₂.gpr a - s₂.gpr b) hLowOrig
+      (fun hl => by rcases hOps hl with ⟨e1, e2⟩; rw [e1, e2])
+    rcases hSet with ⟨hg1, hn1, _, _, hm1, hd1, hdr1⟩
+    exact ⟨hg1, hn1, fun hl => by rcases hOps hl with ⟨e1, e2⟩; rw [e1, e2],
+           fun hl => by rcases hOps hl with ⟨e1, e2⟩; rw [e1, e2], hm1, hd1, hdr1⟩
+  | sbcMask64 dst =>
+    simp [checkArmInstr] at hCheck; subst hCheck
+    exact ⟨rfl, arm_setGpr_lowEq memPol τ s₁ s₂ dst τ.c
+      (if s₁.flags.c then 0#64 else 0xFFFFFFFFFFFFFFFF#64)
+      (if s₂.flags.c then 0#64 else 0xFFFFFFFFFFFFFFFF#64)
+      hLowOrig (fun hl => by rw [hc hl])⟩
+  | mulLo64 dst a b =>
+    simp only [checkArmInstr] at hCheck
+    split at hCheck
+    rotate_left
+    · cases hCheck
+    simp only [Option.some.injEq, Bool.or_eq_true, beq_iff_eq] at *
+    subst τ'
+    have hv : (τ.gpr a).join (τ.gpr b) = .pub → s₁.gpr a = s₂.gpr a ∧ s₁.gpr b = s₂.gpr b := by
+      intro hl; rcases (SecLabel.join_eq_pub_iff _ _).mp hl with ⟨ha, hb⟩
+      exact ⟨hgpr a ha, hgpr b hb⟩
+    refine ⟨?_, arm_setGpr_lowEq memPol τ s₁ s₂ dst ((τ.gpr a).join (τ.gpr b)) _ _ hLowOrig ?_⟩
+    · rename_i hgate
+      rcases hgate with hp | hd
+      · obtain ⟨ha, hb⟩ := hv hp
+        simp [execArmInstr, hditEq, ha, hb]
+      · have hd1 := hditReq hd
+        have hd2 := hditEq.symm.trans hd1
+        simp [execArmInstr, hd1, hd2]
+    · intro hl; obtain ⟨ha, hb⟩ := hv hl
+      simp [ha, hb]
+  | umulh64 dst a b =>
+    simp only [checkArmInstr] at hCheck
+    split at hCheck
+    rotate_left
+    · cases hCheck
+    simp only [Option.some.injEq, Bool.or_eq_true, beq_iff_eq] at *
+    subst τ'
+    have hv : (τ.gpr a).join (τ.gpr b) = .pub → s₁.gpr a = s₂.gpr a ∧ s₁.gpr b = s₂.gpr b := by
+      intro hl; rcases (SecLabel.join_eq_pub_iff _ _).mp hl with ⟨ha, hb⟩
+      exact ⟨hgpr a ha, hgpr b hb⟩
+    refine ⟨?_, arm_setGpr_lowEq memPol τ s₁ s₂ dst ((τ.gpr a).join (τ.gpr b)) _ _ hLowOrig ?_⟩
+    · rename_i hgate
+      rcases hgate with hp | hd
+      · obtain ⟨ha, hb⟩ := hv hp
+        simp [execArmInstr, hditEq, ha, hb]
+      · have hd1 := hditReq hd
+        have hd2 := hditEq.symm.trans hd1
+        simp [execArmInstr, hd1, hd2]
+    · intro hl; obtain ⟨ha, hb⟩ := hv hl
+      simp [ha, hb]
+  | ldr64 dst base disp =>
+    simp only [checkArmInstr] at hCheck
+    split at hCheck <;> simp_all
+    rename_i hbase; subst hCheck
+    refine ⟨by simp [execArmInstr, LeakageEvent.clean, hgpr base hbase], ?_⟩
+    exact arm_setGpr_lowEq memPol τ s₁ s₂ dst .sec _ _ hLowOrig (by intro h; cases h)
+  | str64 src base disp =>
+    simp only [checkArmInstr] at hCheck
+    split at hCheck <;> simp_all
+    rename_i hcond; rcases hcond with ⟨hbase, hsrcOr⟩; subst hCheck
+    have hAddr : s₁.gpr base + disp = s₂.gpr base + disp := by rw [hgpr base hbase]
+    refine ⟨by simp [execArmInstr, LeakageEvent.clean, hAddr], ?_⟩
+    simp only [execArmInstr]; rw [hAddr]
+    exact arm_writeMem64_lowEq memPol secHeap τ s₁ s₂ (s₂.gpr base + disp)
+      (s₁.gpr src) (s₂.gpr src) hPol hLowOrig
+      (fun hsh => by simp [hsh] at hsrcOr; exact hgpr src hsrcOr)
+  | ldrQ dst base disp =>
+    simp only [checkArmInstr] at hCheck
+    split at hCheck <;> simp_all
+    rename_i hbase; subst hCheck
+    have hAddr : s₁.gpr base + disp = s₂.gpr base + disp := by rw [hgpr base hbase]
+    refine ⟨by simp [execArmInstr, LeakageEvent.clean, hAddr], ?_⟩
+    exact arm_setNeon_lowEq memPol τ s₁ s₂ dst .sec _ _ hLowOrig (by intro h; cases h)
+  | strQ src base disp =>
+    simp only [checkArmInstr] at hCheck
+    split at hCheck <;> simp_all
+    rename_i hcond; rcases hcond with ⟨hbase, hsrcOr⟩; subst hCheck
+    have hAddr : s₁.gpr base + disp = s₂.gpr base + disp := by rw [hgpr base hbase]
+    refine ⟨by simp [execArmInstr, LeakageEvent.clean, hAddr], ?_⟩
+    simp only [execArmInstr, ArmState.writeMem128]; rw [hAddr]
+    have hvEq : secHeap = false → s₁.neon src = s₂.neon src := by
+      intro hsh; simp [hsh] at hsrcOr; exact hneon src hsrcOr
+    have hw0 := arm_writeMem64_lowEq memPol secHeap τ s₁ s₂ (s₂.gpr base + disp)
+      (s₁.neon src).lo (s₂.neon src).lo hPol hLowOrig (fun h => by rw [hvEq h])
+    exact arm_writeMem64_lowEq memPol secHeap τ _ _ (s₂.gpr base + disp + 8#64)
+      (s₁.neon src).hi (s₂.neon src).hi hPol hw0 (fun h => by rw [hvEq h])
+  | eorV16b dst a b =>
+    simp only [checkArmInstr, execArmInstr] at hCheck ⊢
+    by_cases hab : (a == b) = true
+    · simp [hab] at hCheck ⊢; subst hCheck
+      exact arm_setNeon_lowEq memPol τ s₁ s₂ dst .pub Vec128.zero Vec128.zero hLowOrig
+        (fun _ => rfl)
+    · simp [hab] at hCheck ⊢; subst hCheck
+      refine arm_setNeon_lowEq memPol τ s₁ s₂ dst ((τ.neon a).join (τ.neon b))
+        (Vec128.xor (s₁.neon a) (s₁.neon b)) (Vec128.xor (s₂.neon a) (s₂.neon b)) hLowOrig ?_
+      intro hl; rcases (SecLabel.join_eq_pub_iff _ _).mp hl with ⟨h1, h2⟩
+      rw [hneon a h1, hneon b h2]
+  | bcaxV16b dst vn vm va =>
+    simp [checkArmInstr] at hCheck; subst hCheck
+    refine ⟨rfl, arm_setNeon_lowEq memPol τ s₁ s₂ dst
+      (((τ.neon vn).join (τ.neon vm)).join (τ.neon va))
+      (Vec128.bcax (s₁.neon vn) (s₁.neon vm) (s₁.neon va))
+      (Vec128.bcax (s₂.neon vn) (s₂.neon vm) (s₂.neon va)) hLowOrig ?_⟩
+    intro hl
+    rcases (SecLabel.join_eq_pub_iff _ _).mp hl with ⟨h12, h3⟩
+    rcases (SecLabel.join_eq_pub_iff _ _).mp h12 with ⟨h1, h2⟩
+    rw [hneon vn h1, hneon vm h2, hneon va h3]
+  | eor3V16b dst vn vm va =>
+    simp [checkArmInstr] at hCheck; subst hCheck
+    refine ⟨rfl, arm_setNeon_lowEq memPol τ s₁ s₂ dst
+      (((τ.neon vn).join (τ.neon vm)).join (τ.neon va))
+      (Vec128.eor3 (s₁.neon vn) (s₁.neon vm) (s₁.neon va))
+      (Vec128.eor3 (s₂.neon vn) (s₂.neon vm) (s₂.neon va)) hLowOrig ?_⟩
+    intro hl
+    rcases (SecLabel.join_eq_pub_iff _ _).mp hl with ⟨h12, h3⟩
+    rcases (SecLabel.join_eq_pub_iff _ _).mp h12 with ⟨h1, h2⟩
+    rw [hneon vn h1, hneon vm h2, hneon va h3]
+  | rax1V2d dst vn vm =>
+    simp [checkArmInstr] at hCheck; subst hCheck
+    refine ⟨rfl, arm_setNeon_lowEq memPol τ s₁ s₂ dst ((τ.neon vn).join (τ.neon vm))
+      (Vec128.rax1 (s₁.neon vn) (s₁.neon vm)) (Vec128.rax1 (s₂.neon vn) (s₂.neon vm)) hLowOrig ?_⟩
+    intro hl; rcases (SecLabel.join_eq_pub_iff _ _).mp hl with ⟨h1, h2⟩
+    rw [hneon vn h1, hneon vm h2]
+  | xarV2d dst vn vm imm6 =>
+    simp [checkArmInstr] at hCheck; subst hCheck
+    refine ⟨rfl, arm_setNeon_lowEq memPol τ s₁ s₂ dst ((τ.neon vn).join (τ.neon vm))
+      (Vec128.xar (s₁.neon vn) (s₁.neon vm) imm6)
+      (Vec128.xar (s₂.neon vn) (s₂.neon vm) imm6) hLowOrig ?_⟩
+    intro hl; rcases (SecLabel.join_eq_pub_iff _ _).mp hl with ⟨h1, h2⟩
+    rw [hneon vn h1, hneon vm h2]
+  | pmull1q dst a b =>
+    simp only [checkArmInstr] at hCheck
+    split at hCheck
+    rotate_left
+    · cases hCheck
+    simp only [Option.some.injEq, Bool.or_eq_true, beq_iff_eq] at *
+    subst τ'
+    have hv : (τ.neon a).join (τ.neon b) = .pub → s₁.neon a = s₂.neon a ∧ s₁.neon b = s₂.neon b := by
+      intro hl; rcases (SecLabel.join_eq_pub_iff _ _).mp hl with ⟨ha, hb⟩
+      exact ⟨hneon a ha, hneon b hb⟩
+    refine ⟨?_, arm_setNeon_lowEq memPol τ s₁ s₂ dst ((τ.neon a).join (τ.neon b)) _ _ hLowOrig ?_⟩
+    · rename_i hgate
+      rcases hgate with hp | hd
+      · obtain ⟨ha, hb⟩ := hv hp
+        simp [execArmInstr, hditEq, ha, hb]
+      · have hd1 := hditReq hd
+        have hd2 := hditEq.symm.trans hd1
+        simp [execArmInstr, hd1, hd2]
+    · intro hl; obtain ⟨ha, hb⟩ := hv hl
+      simp [ha, hb]
+  | pmull2_1q dst a b =>
+    simp only [checkArmInstr] at hCheck
+    split at hCheck
+    rotate_left
+    · cases hCheck
+    simp only [Option.some.injEq, Bool.or_eq_true, beq_iff_eq] at *
+    subst τ'
+    have hv : (τ.neon a).join (τ.neon b) = .pub → s₁.neon a = s₂.neon a ∧ s₁.neon b = s₂.neon b := by
+      intro hl; rcases (SecLabel.join_eq_pub_iff _ _).mp hl with ⟨ha, hb⟩
+      exact ⟨hneon a ha, hneon b hb⟩
+    refine ⟨?_, arm_setNeon_lowEq memPol τ s₁ s₂ dst ((τ.neon a).join (τ.neon b)) _ _ hLowOrig ?_⟩
+    · rename_i hgate
+      rcases hgate with hp | hd
+      · obtain ⟨ha, hb⟩ := hv hp
+        simp [execArmInstr, hditEq, ha, hb]
+      · have hd1 := hditReq hd
+        have hd2 := hditEq.symm.trans hd1
+        simp [execArmInstr, hd1, hd2]
+    · intro hl; obtain ⟨ha, hb⟩ := hv hl
+      simp [ha, hb]
+  | extV16b8 dst a b =>
+    simp [checkArmInstr] at hCheck; subst hCheck
+    refine ⟨rfl, arm_setNeon_lowEq memPol τ s₁ s₂ dst ((τ.neon a).join (τ.neon b))
+      (Vec128.ext8 (s₁.neon a) (s₁.neon b)) (Vec128.ext8 (s₂.neon a) (s₂.neon b)) hLowOrig ?_⟩
+    intro hl; rcases (SecLabel.join_eq_pub_iff _ _).mp hl with ⟨h1, h2⟩
+    rw [hneon a h1, hneon b h2]
+  | cselEq64 dst a b =>
+    simp only [checkArmInstr] at hCheck
+    by_cases hpub : (((τ.z.join (τ.gpr a)).join (τ.gpr b)) == .pub) = true
+    · simp [hpub] at hCheck; subst hCheck
+      have hpubEq : (τ.z.join (τ.gpr a)).join (τ.gpr b) = .pub := by simpa using hpub
+      rcases (SecLabel.join_eq_pub_iff _ _).mp hpubEq with ⟨hzA, hbP⟩
+      rcases (SecLabel.join_eq_pub_iff _ _).mp hzA with ⟨hzP, haP⟩
+      refine ⟨?_, arm_setGpr_lowEq memPol τ s₁ s₂ dst .pub
+        (if s₁.flags.z then s₁.gpr a else s₁.gpr b)
+        (if s₂.flags.z then s₂.gpr a else s₂.gpr b) hLowOrig ?_⟩
+      · simp [execArmInstr, hditEq, hz hzP, hgpr a haP, hgpr b hbP]
+      · intro _; simp [hz hzP, hgpr a haP, hgpr b hbP]
+    · simp [hpub] at hCheck
+      rcases hCheck with ⟨hditAct, rfl⟩
+      have hd1 : s₁.ditEnabled = true := hditReq hditAct
+      have hd2 : s₂.ditEnabled = true := hditEq.symm.trans hd1
+      refine ⟨by simp [execArmInstr, hd1, hd2], ?_⟩
+      exact arm_setGpr_lowEq memPol τ s₁ s₂ dst .sec _ _ hLowOrig (by intro h; cases h)
+  | udiv64 dst a b =>
+    simp only [checkArmInstr] at hCheck
+    split at hCheck <;> simp_all
+    rename_i habP; rcases habP with ⟨haP, hbP⟩; subst hCheck
+    have ea := hgpr a haP
+    have eb := hgpr b hbP
+    refine ⟨by simp [execArmInstr, ea, eb], ?_⟩
+    exact arm_setGpr_lowEq memPol τ s₁ s₂ dst .pub
+      (if s₁.gpr b == 0#64 then 0#64 else BitVec.ofNat 64 ((s₁.gpr a).toNat / (s₁.gpr b).toNat))
+      (if s₂.gpr b == 0#64 then 0#64 else BitVec.ofNat 64 ((s₂.gpr a).toNat / (s₂.gpr b).toNat))
+      hLowOrig (fun _ => by rw [ea, eb])
+  | ldrIndexed64 dst base idx =>
+    simp only [checkArmInstr] at hCheck
+    split at hCheck <;> simp_all
+    rename_i hbi; rcases hbi with ⟨hbP, hiP⟩; subst hCheck
+    refine ⟨by simp [execArmInstr, LeakageEvent.clean, hgpr base hbP, hgpr idx hiP], ?_⟩
+    exact arm_setGpr_lowEq memPol τ s₁ s₂ dst .sec _ _ hLowOrig (by intro h; cases h)
+
+theorem checkArmBlock_sound
+    (memPol : BitVec 64 → SecLabel) (secHeap : Bool)
+    (hPol : secHeap = true → ∀ a, memPol a = .sec)
+    (blk : List ArmInstr) (τ τ' : ArmTaintState) (pc : Nat)
+    (hCheck : checkArmBlock secHeap τ blk = some τ')
+    (s₁ s₂ : ArmState) (hLow : ArmLowEq memPol τ s₁ s₂) :
+    (execArmBlock blk pc s₁).2 = (execArmBlock blk pc s₂).2 ∧
+    ArmLowEq memPol τ' (execArmBlock blk pc s₁).1 (execArmBlock blk pc s₂).1 := by
+  induction blk generalizing τ pc s₁ s₂ with
+  | nil => simp [checkArmBlock] at hCheck; subst hCheck; exact ⟨rfl, hLow⟩
+  | cons ins rest ih =>
+    simp only [checkArmBlock] at hCheck
+    cases hIns : checkArmInstr secHeap τ ins with
+    | none => simp [hIns] at hCheck
+    | some τ1 =>
+      simp [hIns] at hCheck
+      obtain ⟨hEv, hLow1⟩ := checkArmInstr_sound memPol secHeap hPol τ τ1 ins pc hIns s₁ s₂ hLow
+      obtain ⟨hEvs, hLow2⟩ :=
+        ih τ1 (pc + 1) hCheck (execArmInstr ins pc s₁).1 (execArmInstr ins pc s₂).1 hLow1
+      simp only [execArmBlock]
+      exact ⟨by rw [hEv, hEvs], hLow2⟩
+
+theorem checkArmLoop_sound
+    (memPol : BitVec 64 → SecLabel) (secHeap : Bool)
+    (hPol : secHeap = true → ∀ a, memPol a = .sec)
+    (trips : Nat) (body : List ArmInstr) (τ τ' : ArmTaintState) (pc : Nat)
+    (hCheck : checkArmLoop secHeap trips τ body = some τ')
+    (s₁ s₂ : ArmState) (hLow : ArmLowEq memPol τ s₁ s₂) :
+    (execArmLoop trips body pc s₁).2 = (execArmLoop trips body pc s₂).2 ∧
+    ArmLowEq memPol τ' (execArmLoop trips body pc s₁).1 (execArmLoop trips body pc s₂).1 := by
+  induction trips generalizing τ pc s₁ s₂ with
+  | zero => simp [checkArmLoop] at hCheck; subst hCheck; exact ⟨rfl, hLow⟩
+  | succ n ih =>
+    simp only [checkArmLoop] at hCheck
+    cases hBlk : checkArmBlock secHeap τ body with
+    | none => simp [hBlk] at hCheck
+    | some τ1 =>
+      simp [hBlk] at hCheck
+      obtain ⟨hEv1, hLow1⟩ := checkArmBlock_sound memPol secHeap hPol body τ τ1 pc hBlk s₁ s₂ hLow
+      obtain ⟨hEv2, hLow2⟩ :=
+        ih τ1 (pc + body.length) hCheck
+          (execArmBlock body pc s₁).1 (execArmBlock body pc s₂).1 hLow1
+      simp only [execArmLoop]
+      exact ⟨by rw [hEv1, hEv2], hLow2⟩
+
+theorem armLowEq_join_left (memPol : BitVec 64 → SecLabel)
+    (τT τE : ArmTaintState) (s₁ s₂ : ArmState)
+    (hLow : ArmLowEq memPol τT s₁ s₂) :
+    ArmLowEq memPol
+      { gpr := fun r => (τT.gpr r).join (τE.gpr r)
+        neon := fun v => (τT.neon v).join (τE.neon v)
+        z := τT.z.join τE.z
+        c := τT.c.join τE.c
+        ditAssumed := τT.ditAssumed && τE.ditAssumed } s₁ s₂ := by
+  rcases hLow with ⟨hg, hn, hz, hc, hm, hdEq, hdReq⟩
+  refine ⟨?_, ?_, ?_, ?_, hm, hdEq, ?_⟩
+  · intro r hr; exact hg r ((SecLabel.join_eq_pub_iff _ _).mp hr).1
+  · intro v hv; exact hn v ((SecLabel.join_eq_pub_iff _ _).mp hv).1
+  · intro hP; exact hz ((SecLabel.join_eq_pub_iff _ _).mp hP).1
+  · intro hP; exact hc ((SecLabel.join_eq_pub_iff _ _).mp hP).1
+  · intro hD; simp at hD; exact hdReq hD.1
+
+theorem armLowEq_join_right (memPol : BitVec 64 → SecLabel)
+    (τT τE : ArmTaintState) (s₁ s₂ : ArmState)
+    (hLow : ArmLowEq memPol τE s₁ s₂) :
+    ArmLowEq memPol
+      { gpr := fun r => (τT.gpr r).join (τE.gpr r)
+        neon := fun v => (τT.neon v).join (τE.neon v)
+        z := τT.z.join τE.z
+        c := τT.c.join τE.c
+        ditAssumed := τT.ditAssumed && τE.ditAssumed } s₁ s₂ := by
+  rcases hLow with ⟨hg, hn, hz, hc, hm, hdEq, hdReq⟩
+  refine ⟨?_, ?_, ?_, ?_, hm, hdEq, ?_⟩
+  · intro r hr; exact hg r ((SecLabel.join_eq_pub_iff _ _).mp hr).2
+  · intro v hv; exact hn v ((SecLabel.join_eq_pub_iff _ _).mp hv).2
+  · intro hP; exact hz ((SecLabel.join_eq_pub_iff _ _).mp hP).2
+  · intro hP; exact hc ((SecLabel.join_eq_pub_iff _ _).mp hP).2
+  · intro hD; simp at hD; exact hdReq hD.2
+
+/-- **Master `aarch64` Constant-Time Timing-Noninterference Soundness Theorem**:
+    Any `aarch64` assembly program accepted by `checkArmProg` emits identical microarchitectural
+    leakage traces across all secret-varying states `s₁, s₂` satisfying `ArmLowEq`. -/
+theorem arm_ct_checker_sound
+    (memPol : BitVec 64 → SecLabel) (secHeap : Bool)
+    (hPol : secHeap = true → ∀ a, memPol a = .sec)
+    (prog : List ArmStmt) (τ τ' : ArmTaintState) (pc : Nat)
+    (hCheck : checkArmProg secHeap τ prog = some τ')
+    (s₁ s₂ : ArmState) (hLow : ArmLowEq memPol τ s₁ s₂) :
+    (execArmProg prog pc s₁).2 = (execArmProg prog pc s₂).2 ∧
+    ArmLowEq memPol τ' (execArmProg prog pc s₁).1 (execArmProg prog pc s₂).1 := by
+  induction prog generalizing τ pc s₁ s₂ with
+  | nil => simp [checkArmProg] at hCheck; subst hCheck; exact ⟨rfl, hLow⟩
+  | cons stmt rest ih =>
+    cases stmt with
+    | instr ins =>
+      simp only [checkArmProg] at hCheck
+      cases hIns : checkArmInstr secHeap τ ins with
+      | none => simp [hIns] at hCheck
+      | some τ1 =>
+        simp [hIns] at hCheck
+        obtain ⟨hEv, hLow1⟩ := checkArmInstr_sound memPol secHeap hPol τ τ1 ins pc hIns s₁ s₂ hLow
+        obtain ⟨hEvs, hLow2⟩ :=
+          ih τ1 (pc + 1) hCheck (execArmInstr ins pc s₁).1 (execArmInstr ins pc s₂).1 hLow1
+        simp only [execArmProg]
+        exact ⟨by rw [hEv, hEvs], hLow2⟩
+    | cbnz condReg thenBody elseBody =>
+      simp only [checkArmProg] at hCheck
+      by_cases hCond : (τ.gpr condReg == .pub) = true
+      · simp [hCond] at hCheck
+        cases hT : checkArmBlock secHeap τ thenBody with
+        | none => simp [hT] at hCheck
+        | some τT =>
+          cases hE : checkArmBlock secHeap τ elseBody with
+          | none => simp [hT, hE] at hCheck
+          | some τE =>
+            simp [hT, hE] at hCheck
+            have hCondPub : τ.gpr condReg = .pub := by simpa using hCond
+            have hCondEq : s₁.gpr condReg = s₂.gpr condReg := hLow.1 condReg hCondPub
+            simp only [execArmProg, hCondEq]
+            by_cases hTaken : (s₂.gpr condReg != 0#64) = true
+            · simp only [hTaken, ↓reduceIte]
+              obtain ⟨hEv1, hLowT⟩ :=
+                checkArmBlock_sound memPol secHeap hPol thenBody τ τT (pc + 1) hT s₁ s₂ hLow
+              obtain ⟨hEv2, hLowRest⟩ :=
+                ih _ (pc + 1 + thenBody.length) hCheck _ _ (armLowEq_join_left memPol τT τE _ _ hLowT)
+              exact ⟨by rw [hEv1, hEv2], hLowRest⟩
+            · simp only [hTaken, Bool.false_eq_true, ↓reduceIte]
+              obtain ⟨hEv1, hLowE⟩ :=
+                checkArmBlock_sound memPol secHeap hPol elseBody τ τE (pc + 1) hE s₁ s₂ hLow
+              obtain ⟨hEv2, hLowRest⟩ :=
+                ih _ (pc + 1 + elseBody.length) hCheck _ _ (armLowEq_join_right memPol τT τE _ _ hLowE)
+              exact ⟨by rw [hEv1, hEv2], hLowRest⟩
+      · simp [hCond] at hCheck
+    | pubLoop trips body =>
+      simp only [checkArmProg] at hCheck
+      cases hLp : checkArmLoop secHeap trips τ body with
+      | none => simp [hLp] at hCheck
+      | some τ1 =>
+        simp [hLp] at hCheck
+        obtain ⟨hEv1, hLow1⟩ :=
+          checkArmLoop_sound memPol secHeap hPol trips body τ τ1 pc hLp s₁ s₂ hLow
+        obtain ⟨hEv2, hLow2⟩ :=
+          ih τ1 (pc + trips * body.length) hCheck
+            (execArmLoop trips body pc s₁).1 (execArmLoop trips body pc s₂).1 hLow1
+        simp only [execArmProg]
+        exact ⟨by rw [hEv1, hEv2], hLow2⟩
+    | ret =>
+      simp [checkArmProg] at hCheck; subst hCheck
+      exact ⟨rfl, hLow⟩
+
