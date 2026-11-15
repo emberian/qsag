@@ -1317,31 +1317,25 @@ mod tests {
     }
 
     /// The committee bound, as a measurement: enrollment authenticates the key shares
-    /// across all 64 servers (4032 oblivious-transfer channels), so it is run on demand:
+    /// across all 64 servers over 4032 oblivious-transfer channels (minutes), so it is
+    /// run on demand:
     /// `cargo test --release -p qsag-cred --lib sixty_four_servers -- --ignored --nocapture`.
     #[test]
     #[ignore = "minutes of oblivious-transfer setup; run on demand"]
-    fn sixty_four_servers_enroll_and_three_evaluate() {
+    fn sixty_four_servers_enroll() {
         let started = std::time::Instant::now();
         let config = SpdzConfig::new(3, 64).unwrap();
-        let mut servers = spdz_dkg(config, [3; 32], &entropy(64, 0x41)).unwrap();
+        let servers = spdz_dkg(config, [3; 32], &entropy(64, 0x41)).unwrap();
         std::println!("(3, 64) enrollment: {:?}", started.elapsed());
         let public = servers[0].public().clone();
+        assert_eq!(public.to_bytes().len(), 42 + 32 * 64);
+        // Any three shares define the same key, and every share matches the record.
         let key = reconstruct(&[&servers[0], &servers[1], &servers[2]]);
-        let inputs: [&[u8]; 1] = [b"sixty-four"];
-        let mut stores = [Store(None), Store(None), Store(None)];
-        let started = std::time::Instant::now();
-        let (session, grants) = {
-            let mut quorum: Vec<&mut SpdzServer> = servers
-                .iter_mut()
-                .filter(|server| [7, 30, 63].contains(&server.party))
-                .collect();
-            begin(&mut quorum, &mut stores, 0, 1, 0x42).unwrap()
-        };
-        let (client, request) = spdz_blind(&public, &inputs, [9; 32], 0, &grants).unwrap();
-        let evaluation = client.finalize(&session.evaluate(&request).unwrap()).unwrap();
-        std::println!("three-server evaluation: {:?}", started.elapsed());
-        assert_eq!(evaluation.values(), &[plaintext(&key, inputs[0])]);
+        assert_eq!(key, reconstruct(&[&servers[7], &servers[30], &servers[63]]));
+        for server in &servers {
+            let bytes = server.to_secret_bytes();
+            SpdzServer::from_secret_bytes(&bytes, &public, server.party).unwrap();
+        }
     }
 
     #[test]

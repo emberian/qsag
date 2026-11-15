@@ -1985,3 +1985,842 @@ fn ceremony(
 /// here on separated per-party state. On any failed check the result is
 /// [`Error::MultiplicationCheck`], nothing is returned, and all key shares
 /// and material are erased as their owners go out of scope.
+pub fn run_dealerless_preprocessing(
+    session: [u8; 32],
+    config: &ThresholdConfig,
+    demand: &Demand,
+    mesh: &mut OtMesh,
+    rngs: &mut [PartyPrivateRng],
+) -> Result<Vec<(MacKeyShare, PartyPreprocessing)>, Error> {
+    run_dealerless_preprocessing_with_fault(session, config, demand, mesh, rngs, &mut |_| {})
+}
+
+/// [`run_dealerless_preprocessing`] with a hook that may alter what a party
+/// uses or sends at each [`Fault`] point, for adversarial tests.
+pub fn run_dealerless_preprocessing_with_fault(
+    session: [u8; 32],
+    config: &ThresholdConfig,
+    demand: &Demand,
+    mesh: &mut OtMesh,
+    rngs: &mut [PartyPrivateRng],
+    fault: &mut dyn FnMut(Fault<'_>),
+) -> Result<Vec<(MacKeyShare, PartyPreprocessing)>, Error> {
+    Ok(ceremony(session, config, demand, mesh, rngs, fault)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        outer_mpc::{Core, Gadgets},
+        threshold_mpc::{
+            mac_canonical,
+            tests::{engine, run_stored},
+        },
+    };
+    use std::{println, time::Instant};
+
+    fn quorum() -> ThresholdConfig {
+        ThresholdConfig::new(3, 5, vec![0, 2, 4]).unwrap()
+    }
+
+    /// Real OT mesh over three quorum members and their private generators.
+    fn setup(seed: u8) -> (OtMesh, Vec<PartyPrivateRng>) {
+        let mut rngs: Vec<_> = (0..3u8)
+            .map(|p| {
+                PartyPrivateRng::from_seed(
+                    [seed, p, 7, 1].repeat(8).try_into().unwrap(),
+                    b"TEST.PREP",
+                )
+            })
+            .collect();
+        let mesh = OtMesh::establish([seed; 32], &mut rngs).unwrap();
+        (mesh, rngs)
+    }
+
+    fn honest(_: Fault<'_>) {}
+
+    /// Reconstructs everything from all parties' shares and asserts every
+    /// relation the online engine relies on; the stores are left as found.
+    fn verify_material(demand: &Demand, parties: &mut [(MacKeyShare, PartyPreprocessing)]) {
+        let boolean_key = parties.iter().fold(0, |key, (k, _)| key ^ k.boolean);
+        assert_ne!(boolean_key, 0);
+        let field_key = |field: ThresholdField| {
+            parties.iter().fold(ZERO, |key, (k, _)| {
+                assert!(mac_canonical(field.domain(), k.field[field.index()]));
+                mac_add(field.domain(), key, k.field[field.index()])
+            })
+        };
+        let field_keys = ThresholdField::ALL.map(field_key);
+        for (_, store) in parties.iter() {
+            assert_eq!(store.remaining(), *demand);
+        }
+        let word = |shares: &[&AuthWord]| {
+            let value = shares.iter().fold(0, |word, share| word ^ share.share);
+            for lane in 0..64 {
+                let mac = shares.iter().fold(0, |mac, share| mac ^ share.macs[lane]);
+                let expected = if (value >> lane) & 1 == 1 {
+                    boolean_key
+                } else {
+                    0
+                };
+                assert_eq!(mac, expected, "Boolean MAC of lane {lane}");
+            }
+            value
+        };
+        let element = |field: ThresholdField, shares: &[&FieldShare]| {
+            let d = field.domain();
+            let mut value = ZERO;
+            let mut mac = ZERO;
+            for share in shares {
+                assert!(d.canonical(share.0[0]) && mac_canonical(d, share.0[1]));
+                value = d.add(value, share.0[0]);
+                mac = mac_add(d, mac, share.0[1]);
+            }
+            assert_eq!(
+                mac,
+                mac_scale(d, field_keys[field.index()], value),
+                "{field:?} MAC"
+            );
+            value
+        };
+        fn column<V>(rows: &[Vec<V>], item: usize) -> Vec<&V> {
+            rows.iter().map(|row| &row[item]).collect()
+        }
+
+        let rows: Vec<_> = parties
+            .iter_mut()
+            .map(|(_, s)| s.take_boolean_triples(demand.boolean_triples).unwrap())
+            .collect();
+        let mut seen = Vec::new();
+        for item in 0..demand.boolean_triples {
+            let shares = column(&rows, item);
+            let part = |f: fn(&BooleanTriple) -> &AuthWord| {
+                word(&shares.iter().map(|t| f(t)).collect::<Vec<_>>())
+            };
+            let (a, b, c) = (part(|t| &t.a), part(|t| &t.b), part(|t| &t.c));
+            assert_eq!(c, a & b);
+            seen.push(a);
+            seen.push(b);
+        }
+        for ((_, store), row) in parties.iter_mut().zip(rows) {
+            store.add_boolean_triples(row);
+        }
+        let rows: Vec<_> = parties
+            .iter_mut()
+            .map(|(_, s)| s.take_auth_words(demand.auth_words).unwrap())
+            .collect();
+        for item in 0..demand.auth_words {
+            seen.push(word(&column(&rows, item)));
+        }
+        for ((_, store), row) in parties.iter_mut().zip(rows) {
+            store.add_auth_words(row);
+        }
+        for field in ThresholdField::ALL {
+            let d = field.domain();
+            let i = field.index();
+            let rows: Vec<_> = parties
+                .iter_mut()
+                .map(|(_, s)| {
+                    s.take_field_triples(field, demand.field_triples[i])
+                        .unwrap()
+                })
+                .collect();
+            for item in 0..demand.field_triples[i] {
+                let shares = column(&rows, item);
+                let [a, b, c] = [0, 1, 2].map(|part| {
+                    element(
+                        field,
+                        &shares.iter().map(|t| &t.0[part]).collect::<Vec<_>>(),
+                    )
+                });
+                assert_eq!(c, d.mul(a, b));
+                assert_ne!(a, ZERO);
+                assert_ne!(b, ZERO);
+            }
+            for ((_, store), row) in parties.iter_mut().zip(rows) {
+                store.add_field_triples(field, row);
+            }
+            let rows: Vec<_> = parties
+                .iter_mut()
+                .map(|(_, s)| {
+                    s.take_field_randoms(field, demand.field_randoms[i])
+                        .unwrap()
+                })
+                .collect();
+            for item in 0..demand.field_randoms[i] {
+                assert_ne!(element(field, &column(&rows, item)), ZERO);
+            }
+            for ((_, store), row) in parties.iter_mut().zip(rows) {
+                store.add_field_randoms(field, row);
+            }
+            let rows: Vec<_> = parties
+                .iter_mut()
+                .map(|(_, s)| s.take_dabits(field, demand.dabits[i]).unwrap())
+                .collect();
+            for item in 0..demand.dabits[i] {
+                let shares = column(&rows, item);
+                let bits = word(&shares.iter().map(|w| &w.bits).collect::<Vec<_>>());
+                for lane in 0..64 {
+                    let value = element(
+                        field,
+                        &shares.iter().map(|w| &w.field[lane]).collect::<Vec<_>>(),
+                    );
+                    assert_eq!(
+                        value,
+                        [(bits >> lane) & 1, 0, 0, 0],
+                        "{field:?} daBit lane {lane}"
+                    );
+                }
+                seen.push(bits);
+            }
+            for ((_, store), row) in parties.iter_mut().zip(rows) {
+                store.add_dabits(field, row);
+            }
+        }
+        // Random words: not constant and not repeated.
+        for (i, word) in seen.iter().enumerate() {
+            assert!(*word != 0 && *word != u64::MAX);
+            assert!(!seen[..i].contains(word));
+        }
+        for (_, store) in parties.iter() {
+            assert_eq!(store.remaining(), *demand);
+        }
+    }
+
+    /// Runs the ceremony honestly (must succeed and satisfy the oracle), then
+    /// with `fault`, and returns the deviating outcome after checking that a
+    /// successful deviating run still satisfies the oracle.
+    fn deviate(
+        seed: u8,
+        demand: &Demand,
+        mesh: &mut OtMesh,
+        rngs: &mut [PartyPrivateRng],
+        mut fault: impl FnMut(Fault<'_>) -> bool,
+    ) -> Result<(), Abort> {
+        let config = quorum();
+        let mut out = ceremony([seed; 32], &config, demand, mesh, rngs, &mut honest).unwrap();
+        verify_material(demand, &mut out);
+        let mut fired = false;
+        let outcome = ceremony(
+            [seed ^ 0x80; 32],
+            &config,
+            demand,
+            mesh,
+            rngs,
+            &mut |point| fired |= fault(point),
+        );
+        assert!(fired, "the deviation was never injected");
+        outcome.map(|mut out| verify_material(demand, &mut out))
+    }
+
+    fn bump(d: Domain, value: &mut Value) {
+        *value = mac_add(
+            d,
+            *value,
+            if d == Domain::Gold { [1, 1, 0, 0] } else { ONE },
+        );
+    }
+
+    #[test]
+    fn tower_to_polynomial_map_is_a_field_isomorphism() {
+        use qsag_core::field::tower::Tower128;
+        let mut rng = PartyPrivateRng::from_seed([3; 32], b"TEST.ISO");
+        for _ in 0..64 {
+            let (x, y) = (rng.next_tower128(), rng.next_tower128());
+            let mut mapped = [x.0, y.0, x.mul(y).0, x.add(y).0, 1];
+            qsag_asm::tower128_to_poly128_batch_ct(&mut mapped);
+            assert_eq!(mapped[2], gf2_128_mul(mapped[0], mapped[1]));
+            assert_eq!(mapped[3], mapped[0] ^ mapped[1]);
+            assert_eq!(mapped[4], 1);
+            let mut lanes = [Tower128(0).0; 64];
+            lanes[5] = x.0;
+            qsag_asm::tower128_to_poly128_x64_ct(&mut lanes);
+            assert_eq!(lanes[5], mapped[0]);
+        }
+    }
+
+    #[test]
+    fn pad_elements_are_canonical() {
+        for d in [Domain::Gold, Domain::Secp, Domain::Ed] {
+            assert!(d.canonical(pad_element(d, &[0xff; 48])));
+            assert!(d.canonical(pad_element(d, &[0; 48])));
+            let mut pad = [0xff; 48];
+            pad[40..].copy_from_slice(&5u64.to_le_bytes());
+            let value = pad_element(d, &pad);
+            assert!(d.canonical(value));
+            if d == Domain::Gold {
+                assert_eq!(value, [5, 0, 0, 0]);
+            }
+        }
+    }
+
+    /// Stage 1 on its own: authenticated values reconstruct with valid MACs,
+    /// bits are accepted as bits, and a non-bit is rejected.
+    #[test]
+    fn owners_authenticate_their_values_in_every_field() {
+        let (mut mesh, mut rngs) = setup(1);
+        let hook: &mut dyn FnMut(Fault<'_>) = &mut honest;
+        let mut ceremony = Ceremony::new([1; 32], &mut mesh, &mut rngs, hook).unwrap();
+        ceremony.boolean_stage(0).unwrap();
+        ceremony.sample_field_keys();
+        ceremony.establish_pairs().unwrap();
+        for field in ThresholdField::ALL {
+            let d = field.domain();
+            let key = (0..3).fold(ZERO, |key, p| {
+                mac_add(d, key, ceremony.field_keys[p][field.index()])
+            });
+            let top = d.sub(ZERO, ONE);
+            let inputs: Vec<SecretVec<Value>> = (0..3)
+                .map(|owner| {
+                    let mut values: SecretVec<Value> =
+                        [ZERO, ONE, top, [owner as u64 + 2, 0, 0, 0], ONE, ZERO]
+                            .into_iter()
+                            .collect();
+                    values.push(ceremony.sample(owner, d));
+                    values
+                })
+                .collect();
+            for bits in [0..0, 4..6, 0..2] {
+                let shares = ceremony.authenticate(field, &inputs, bits).unwrap();
+                for owner in 0..3 {
+                    for k in 0..inputs[owner].len() {
+                        let mut total = [ZERO; 2];
+                        for p in 0..3 {
+                            let share = shares[owner][p][k];
+                            assert!(d.canonical(share[0]) && mac_canonical(d, share[1]));
+                            assert_eq!(share[0] != ZERO, p == owner && inputs[owner][k] != ZERO);
+                            total = share_add(d, total, share);
+                        }
+                        assert_eq!(total[0], inputs[owner][k]);
+                        assert_eq!(total[1], mac_scale(d, key, total[0]), "{field:?}");
+                    }
+                }
+            }
+            assert_eq!(
+                ceremony.authenticate(field, &inputs, 2..5).err(),
+                Some(Abort::Check(Check::Bitness)),
+                "{field:?}: p - 1 and 2.. are not bits"
+            );
+        }
+    }
+
+    #[test]
+    fn inconsistent_owner_and_wrong_holder_share_are_caught() {
+        let (mut mesh, mut rngs) = setup(2);
+        let demand = Demand {
+            field_randoms: [2, 1, 1],
+            ..Demand::default()
+        };
+        for target in ThresholdField::ALL {
+            let d = target.domain();
+            // Owner 1 encodes another value under the low 16 bits of holder 2's key.
+            let outcome = deviate(20, &demand, &mut mesh, &mut rngs, |point| match point {
+                Fault::CopeInput {
+                    field,
+                    owner: 1,
+                    holder: 2,
+                    key: 0,
+                    bit,
+                    values,
+                } if field == target && bit < 16 => {
+                    values[0] = d.add(values[0], ONE);
+                    true
+                }
+                _ => false,
+            });
+            assert_eq!(
+                outcome,
+                Err(Abort::Check(Check::InputConsistency)),
+                "{target:?}"
+            );
+            // Holder 0 holds a MAC share of one of owner 2's values that its key does not give.
+            let outcome = deviate(21, &demand, &mut mesh, &mut rngs, |point| match point {
+                Fault::CopeHolderShare {
+                    field,
+                    owner: 2,
+                    holder: 0,
+                    macs,
+                } if field == target => {
+                    bump(d, &mut macs[0]);
+                    true
+                }
+                _ => false,
+            });
+            assert_eq!(
+                outcome,
+                Err(Abort::Check(Check::InputConsistency)),
+                "{target:?}"
+            );
+            // Holder 2 commits to another key towards owner 0 than towards owner 1.
+            let outcome = deviate(22, &demand, &mut mesh, &mut rngs, |point| match point {
+                Fault::FieldKey {
+                    field,
+                    owner: 0,
+                    holder: 2,
+                    key,
+                } if field == target => {
+                    bump(d, key);
+                    true
+                }
+                _ => false,
+            });
+            assert_eq!(
+                outcome,
+                Err(Abort::Check(Check::KeyConsistency)),
+                "{target:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn field_triples_and_randoms_satisfy_the_oracle() {
+        let (mut mesh, mut rngs) = setup(3);
+        let demand = Demand {
+            field_triples: [3, 2, 2],
+            field_randoms: [3, 2, 1],
+            ..Demand::default()
+        };
+        let started = Instant::now();
+        let mut out =
+            run_dealerless_preprocessing([3; 32], &quorum(), &demand, &mut mesh, &mut rngs)
+                .unwrap();
+        println!("triples+randoms {demand:?}: {:?}", started.elapsed());
+        verify_material(&demand, &mut out);
+    }
+
+    #[test]
+    fn wrong_triple_correlation_and_product_are_caught() {
+        let (mut mesh, mut rngs) = setup(4);
+        let demand = Demand {
+            field_triples: [1, 0, 0],
+            ..Demand::default()
+        };
+        // One wrong correlation in one OT changes the product only if the
+        // receiver's choice bit is 1: each run is either caught or harmless.
+        let mut caught = 0;
+        for target in 0..8 {
+            let outcome =
+                deviate(
+                    40 + target as u8,
+                    &demand,
+                    &mut mesh,
+                    &mut rngs,
+                    |point| match point {
+                        Fault::TripleCorrelation {
+                            sender: 1,
+                            receiver: 0,
+                            triple: 0,
+                            slot: 0,
+                            bit,
+                            correlation,
+                            ..
+                        } if bit == target => {
+                            *correlation = Domain::Gold.add(*correlation, ONE);
+                            true
+                        }
+                        _ => false,
+                    },
+                );
+            match outcome {
+                Ok(()) => {}
+                Err(abort) => {
+                    assert_eq!(abort, Abort::Check(Check::TripleSacrifice));
+                    caught += 1;
+                }
+            }
+        }
+        println!("single wrong correlations caught: {caught} of 8");
+        assert!(caught >= 1);
+        for target in [ThresholdField::Goldilocks, ThresholdField::Ed25519] {
+            let demand = Demand {
+                field_triples: [1, 0, 1],
+                ..Demand::default()
+            };
+            let outcome = deviate(50, &demand, &mut mesh, &mut rngs, |point| match point {
+                Fault::TripleProduct {
+                    field,
+                    party: 2,
+                    products,
+                } if field == target => {
+                    products[1] = target.domain().add(products[1], ONE);
+                    true
+                }
+                _ => false,
+            });
+            assert_eq!(
+                outcome,
+                Err(Abort::Check(Check::TripleSacrifice)),
+                "{target:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn boolean_material_satisfies_the_oracle() {
+        let (mut mesh, mut rngs) = setup(5);
+        let demand = Demand {
+            boolean_triples: 3,
+            auth_words: 5,
+            ..Demand::default()
+        };
+        let mut out =
+            run_dealerless_preprocessing([5; 32], &quorum(), &demand, &mut mesh, &mut rngs)
+                .unwrap();
+        verify_material(&demand, &mut out);
+    }
+
+    #[test]
+    fn dabits_satisfy_the_oracle_in_every_field() {
+        let (mut mesh, mut rngs) = setup(6);
+        let demand = Demand {
+            boolean_triples: 1,
+            auth_words: 1,
+            dabits: [2, 1, 1],
+            ..Demand::default()
+        };
+        let started = Instant::now();
+        let mut out =
+            run_dealerless_preprocessing([6; 32], &quorum(), &demand, &mut mesh, &mut rngs)
+                .unwrap();
+        println!("dabits {demand:?}: {:?}", started.elapsed());
+        verify_material(&demand, &mut out);
+    }
+
+    #[test]
+    fn dabit_deviations_are_caught() {
+        let (mut mesh, mut rngs) = setup(7);
+        let demand = Demand {
+            dabits: [1, 0, 0],
+            ..Demand::default()
+        };
+        let cases: [(&str, Check, fn(Fault<'_>) -> bool); 7] = [
+            (
+                "wrong Boolean parity",
+                Check::ParityOpening,
+                |point| match point {
+                    Fault::Parity {
+                        owner: 1,
+                        repetition: 5,
+                        parity,
+                        ..
+                    } => {
+                        *parity ^= 1;
+                        true
+                    }
+                    _ => false,
+                },
+            ),
+            (
+                "wrong share in an opening of the XOR over the owners",
+                Check::XorChain,
+                |point| match point {
+                    Fault::FieldOpening {
+                        party: 2,
+                        check: Check::XorChain,
+                        share,
+                        ..
+                    } => {
+                        *share = Domain::Gold.add(*share, ONE);
+                        true
+                    }
+                    _ => false,
+                },
+            ),
+            (
+                "field form differs from Boolean form",
+                Check::CrossDomain,
+                |point| match point {
+                    Fault::DaBitFieldInput {
+                        owner: 1, values, ..
+                    } => {
+                        values[9][0] ^= 1;
+                        true
+                    }
+                    _ => false,
+                },
+            ),
+            (
+                "mask candidate differs across the domains",
+                Check::CrossDomain,
+                |point| match point {
+                    Fault::DaBitFieldInput {
+                        owner: 0, values, ..
+                    } => {
+                        values[64 + 17][0] ^= 1;
+                        true
+                    }
+                    _ => false,
+                },
+            ),
+            (
+                "field form is not a bit",
+                Check::Bitness,
+                |point| match point {
+                    Fault::DaBitFieldInput {
+                        owner: 2, values, ..
+                    } => {
+                        values[3][0] = 2;
+                        true
+                    }
+                    _ => false,
+                },
+            ),
+            (
+                "Boolean key differs between the stages",
+                Check::BooleanKeyConsistency,
+                |point| match point {
+                    Fault::BooleanKey {
+                        owner: 0,
+                        holder: 1,
+                        key,
+                    } => {
+                        *key ^= 1 << 77;
+                        true
+                    }
+                    _ => false,
+                },
+            ),
+            (
+                "Boolean inputs differ between key bits",
+                Check::BooleanInput,
+                |point| match point {
+                    Fault::BooleanInput {
+                        owner: 2,
+                        holder: 0,
+                        bit,
+                        words,
+                    } if bit < 16 => {
+                        words[0] ^= 1;
+                        true
+                    }
+                    _ => false,
+                },
+            ),
+        ];
+        for (case, (name, check, fault)) in cases.into_iter().enumerate() {
+            let outcome = deviate(70 + case as u8, &demand, &mut mesh, &mut rngs, fault);
+            assert_eq!(outcome, Err(Abort::Check(check)), "{name}");
+        }
+    }
+
+    #[test]
+    fn invalid_configurations_are_rejected() {
+        let mut rngs: Vec<_> = (0..2u8)
+            .map(|p| PartyPrivateRng::from_seed([p; 32], b"TEST.PREP"))
+            .collect();
+        let mut mesh = OtMesh::establish([9; 32], &mut rngs).unwrap();
+        // A three-member quorum on a two-party mesh.
+        assert_eq!(
+            run_dealerless_preprocessing(
+                [9; 32],
+                &quorum(),
+                &Demand::default(),
+                &mut mesh,
+                &mut rngs
+            )
+            .err(),
+            Some(Error::InvalidConfiguration)
+        );
+        let pair = ThresholdConfig::new(2, 2, vec![0, 1]).unwrap();
+        let demand = Demand {
+            boolean_triples: 1,
+            field_triples: [1, 0, 0],
+            dabits: [1, 0, 0],
+            ..Demand::default()
+        };
+        let mut out =
+            run_dealerless_preprocessing([9; 32], &pair, &demand, &mut mesh, &mut rngs).unwrap();
+        verify_material(&demand, &mut out);
+    }
+
+    /// The whole ceremony for a 3-member quorum of a 5-party roster, consumed
+    /// by the online engine. `encode` adds a Goldilocks `field_to_bits`,
+    /// which draws 64 daBit words (8192 field triples for the XOR over three
+    /// owners) and 256 Boolean triple words.
+    fn drive_online_engine(seed: u8, encode: bool) {
+        let (mut mesh, mut rngs) = setup(seed);
+        let config = quorum();
+        let demand = Demand {
+            boolean_triples: 1 + if encode { 256 } else { 0 },
+            auth_words: 3,
+            field_triples: [64, 64, 0],
+            field_randoms: [128, 128, 0],
+            dabits: [1 + if encode { 64 } else { 0 }, 1, 0],
+        };
+        let started = Instant::now();
+        let parties =
+            run_dealerless_preprocessing([seed; 32], &config, &demand, &mut mesh, &mut rngs)
+                .unwrap();
+        println!("end-to-end ceremony {demand:?}: {:?}", started.elapsed());
+        let contribution = |p: usize, k: u64| k.wrapping_mul(p as u64 + 1) ^ (k << 17);
+        let total = |k| {
+            config
+                .quorum()
+                .iter()
+                .fold(0, |v, &p| v ^ contribution(p, k))
+        };
+        run_stored(config.clone(), parties, |party, mac_keys, network| {
+            let mut engine = engine(&config, party, mac_keys, network);
+            engine.agree([17; 32]).unwrap();
+            let a = engine.share(&[contribution(party, 0xa55a_1234)]).unwrap();
+            let b = engine.share(&[contribution(party, 0x81f0_4321)]).unwrap();
+            let c = engine.and(&[(a[0], b[0])]).unwrap();
+            let product = total(0xa55a_1234) & total(0x81f0_4321);
+            assert_ne!(product, 0);
+            assert_eq!(
+                engine.open(&[c[0], a[0]]).unwrap(),
+                vec![product, total(0xa55a_1234)]
+            );
+            let mask = 0x00ff_00ff_0f0f_3333;
+            assert_eq!(
+                engine.open_lanes(&[b[0]], mask).unwrap(),
+                vec![total(0x81f0_4321) & mask]
+            );
+            for d in [Domain::Gold, Domain::Secp] {
+                let r = engine.frandom(d).unwrap();
+                let s = engine.frandom(d).unwrap();
+                let p = engine.fmul(&r, &s, d).unwrap();
+                let lifted = engine.lift_bits_many(&[c[0]], d).unwrap().pop().unwrap();
+                let opened = engine.fopen_many(&[p, r.clone(), s, lifted], d).unwrap();
+                for lane in 0..64 {
+                    assert_eq!(opened[0][lane], d.mul(opened[1][lane], opened[2][lane]));
+                    assert_ne!(opened[1][lane], opened[2][lane]);
+                    assert_eq!(opened[3][lane], [(product >> lane) & 1, 0, 0, 0]);
+                }
+                if encode && d == Domain::Gold {
+                    let bits = engine.field_to_bits(&r, d).unwrap();
+                    let encoding = engine.open(&bits).unwrap();
+                    assert_eq!(encoding.len(), 64);
+                    for (bit, word) in encoding.iter().enumerate() {
+                        let expected = (0..64)
+                            .fold(0, |w, lane| w | (((opened[1][lane][0] >> bit) & 1) << lane));
+                        assert_eq!(*word, expected, "bit {bit}");
+                    }
+                }
+            }
+            engine.agree([18; 32]).unwrap();
+        });
+    }
+
+    #[test]
+    fn ceremony_output_drives_the_online_engine() {
+        drive_online_engine(8, false);
+    }
+
+    /// As above with a Goldilocks `field_to_bits`. Its ceremony runs about
+    /// 22.6 million OTs: measured 22 s on the idle build box and 65 s under
+    /// load, against under 3 s for the test above.
+    #[test]
+    #[ignore = "8448 Goldilocks triples: 22 s to over a minute"]
+    fn ceremony_output_drives_field_to_bits() {
+        drive_online_engine(11, true);
+    }
+
+    /// Cost measurements on the real mesh (run with `--ignored --nocapture`).
+    #[test]
+    #[ignore = "measurement"]
+    fn measure_costs() {
+        let started = Instant::now();
+        let (mut mesh, mut rngs) = setup(9);
+        println!("OT mesh, 3 parties: {:?}", started.elapsed());
+        let config = quorum();
+        let mut run = |name: &str, demand: Demand, items: usize| {
+            let started = Instant::now();
+            run_dealerless_preprocessing([9; 32], &config, &demand, &mut mesh, &mut rngs).unwrap();
+            let elapsed = started.elapsed();
+            println!(
+                "{name}: {items} items in {elapsed:?} ({:?} each)",
+                elapsed / items as u32
+            );
+        };
+        run(
+            "fixed cost (one Goldilocks random)",
+            Demand {
+                field_randoms: [1, 0, 0],
+                ..Demand::default()
+            },
+            1,
+        );
+        for (i, name) in ["Goldilocks", "secp256k1", "Ed25519"]
+            .into_iter()
+            .enumerate()
+        {
+            let mut demand = Demand::default();
+            demand.field_triples[i] = 256;
+            run(&std::format!("{name} triples"), demand, 256);
+            let mut demand = Demand::default();
+            demand.field_randoms[i] = 4096;
+            run(&std::format!("{name} randoms"), demand, 4096);
+            let mut demand = Demand::default();
+            demand.dabits[i] = 4;
+            run(&std::format!("{name} daBit words"), demand, 4);
+        }
+        run(
+            "Boolean triple words",
+            Demand {
+                boolean_triples: 4096,
+                ..Demand::default()
+            },
+            4096,
+        );
+        run(
+            "authenticated words",
+            Demand {
+                auth_words: 4096,
+                ..Demand::default()
+            },
+            4096,
+        );
+    }
+
+    #[test]
+    #[ignore = "measurement"]
+    fn measure_phases() {
+        let (mut mesh, mut rngs) = setup(10);
+        let words = vec![0x1234_5678_9abc_def0u64; 256 * 7];
+        let started = Instant::now();
+        for (s, r) in [(0, 1), (1, 0), (0, 2), (2, 0), (1, 2), (2, 1)] {
+            mesh.run_correlated_ot_words(s, r, &words, &mut rngs)
+                .unwrap();
+        }
+        println!(
+            "raw OTs for 256 Goldilocks triples: {:?}",
+            started.elapsed()
+        );
+        let hook: &mut dyn FnMut(Fault<'_>) = &mut honest;
+        let mut ceremony = Ceremony::new([1; 32], &mut mesh, &mut rngs, hook).unwrap();
+        ceremony.boolean_stage(0).unwrap();
+        ceremony.sample_field_keys();
+        ceremony.establish_pairs().unwrap();
+        for field in [ThresholdField::Goldilocks, ThresholdField::Secp256k1] {
+            let started = Instant::now();
+            let inputs = ceremony.multiply(field, 256).unwrap();
+            println!("{field:?} multiply 256: {:?}", started.elapsed());
+            let started = Instant::now();
+            let shares = ceremony.authenticate(field, &inputs, 0..0).unwrap();
+            println!(
+                "{field:?} authenticate {}: {:?}",
+                inputs[0].len(),
+                started.elapsed()
+            );
+            let d = field.domain();
+            let joint: Vec<SecretVec<Share>> = (0..3)
+                .map(|p| {
+                    (0..inputs[0].len())
+                        .map(|k| {
+                            (1..3)
+                                .fold(shares[0][p][k], |sum, o| share_add(d, sum, shares[o][p][k]))
+                        })
+                        .collect()
+                })
+                .collect();
+            let started = Instant::now();
+            ceremony.sacrifice(field, &joint, 256).unwrap();
+            println!("{field:?} sacrifice: {:?}", started.elapsed());
+            let started = Instant::now();
+            let _ = ceremony.transcript.digest();
+            println!("{field:?} digest: {:?}", started.elapsed());
+        }
+    }
+}
