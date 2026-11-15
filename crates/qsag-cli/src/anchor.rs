@@ -321,9 +321,10 @@ impl AnchorLockedRecord {
                 io::ErrorKind::NotFound if !must_create => {
                     invalid_anchor("external anchor lock sidecar missing")
                 }
-                io::ErrorKind::WouldBlock => {
-                    io::Error::new(io::ErrorKind::WouldBlock, "external anchor lock unavailable")
-                }
+                io::ErrorKind::WouldBlock => io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "external anchor lock unavailable",
+                ),
                 _ => e,
             })?;
         let inode = persist::identity_bytes(&held_meta);

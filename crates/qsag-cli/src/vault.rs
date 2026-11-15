@@ -23,14 +23,13 @@ pub struct Vault {
 impl Vault {
     pub fn acquire(secret: &str, create: bool) -> Result<Self, CliError> {
         let path = format!("{secret}.vault.lock");
-        let (file, _) = persist::acquire_lock(Path::new(&path), create).map_err(|e| {
-            match e.kind() {
+        let (file, _) =
+            persist::acquire_lock(Path::new(&path), create).map_err(|e| match e.kind() {
                 ErrorKind::WouldBlock => CliError::state("vault lock unavailable"),
                 ErrorKind::InvalidData => corrupt(),
                 _ if create => CliError::io("enrolling vault lock", e),
                 _ => corrupt(),
-            }
-        })?;
+            })?;
         let vault = Self {
             file,
             path,
