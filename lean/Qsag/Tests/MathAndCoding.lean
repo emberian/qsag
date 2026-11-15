@@ -4,7 +4,10 @@ import all Qsag.Math.Lattices
 import all Qsag.Coding.AffineProximity
 import all Qsag.Coding.Resultant
 import all Qsag.Math.EllipticCurves
-import all Qsag.Math.Algebra
+import all Qsag.Math.Counting
+import all Qsag.Math.CoeffPoly
+import all Qsag.Math.PolyRing
+import all Qsag.Math.HasseHensel
 import all Qsag.Math.Primality
 import all Qsag.Math.Gf2Pow128
 public import Qsag.Tactic.Prelude

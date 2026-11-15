@@ -1,5 +1,8 @@
 module
-import all Qsag.Math.Algebra
+import all Qsag.Math.Counting
+import all Qsag.Math.CoeffPoly
+import all Qsag.Math.PolyRing
+import all Qsag.Math.HasseHensel
 import all Qsag.Oracle.FiatShamir
 import all Qsag.Math.Goldilocks
 import all Qsag.Oracle.Keccak

@@ -19,7 +19,10 @@ public import Qsag.Coding.Resultant
 import all Qsag.Protocol.Aggregation.HemSlicedFoldBudget
 import all Qsag.Coding.Cwyz26
 import all Qsag.Protocol.Aggregation.Cwyz26JohnsonCertificate
-import all Qsag.Math.Algebra
+import all Qsag.Math.Counting
+import all Qsag.Math.CoeffPoly
+import all Qsag.Math.PolyRing
+import all Qsag.Math.HasseHensel
 import all Qsag.Coding.Resultant
 import all Qsag.Coding.GuruswamiSudan
 import all Qsag.Protocol.Aggregation.HemWhirRbrSoundness
