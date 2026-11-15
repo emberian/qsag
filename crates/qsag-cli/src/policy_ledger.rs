@@ -31,21 +31,22 @@ use qsag_accel::ct::ct_eq_bytes;
 use qsag_accel::keccak::cshake256_framed_32;
 use qsag_addr::{QsagAddress, WitnessSuiteTag};
 use qsag_policy::{
-    SharedWindowSpendLedger, evaluate_policy_committed_barrier_with_ledger, BDOZ_PREPROC_SLOTS, FsPolicyGenerationFence, InitiatorPeerMac,
-    PolicySignerGuardShare, PolicyViolation, QuorumTierRule, SigningPayloadBinding,
+    BDOZ_PREPROC_SLOTS, FsPolicyGenerationFence, InitiatorPeerMac, PolicySignerGuardShare,
+    PolicyViolation, QuorumTierRule, SharedWindowSpendLedger, SigningPayloadBinding,
     TransactionIntent, TransactionPolicy, WindowAdvanceAuthorization,
+    evaluate_policy_committed_barrier_with_ledger,
 };
 
 use crate::anchor::{AnchorConfig, FsExternalMountAnchor};
-use crate::dealerless_ceremony::provision_distributed_policy_guards_with_capacity;
 use crate::cli::{
     Args, CliError, MAX_KEY_FILE_BYTES, Secret32, ZeroizingBuf, exit, os_random_32, private_dir,
     read_bounded_file, read_input, read_text, replace_secret, write_new,
 };
 use crate::codec::{Json, from_hex_exact, to_hex};
+use crate::dealerless_ceremony::provision_distributed_policy_guards_with_capacity;
 use crate::vault::{Vault, set};
 
-const ROOT_FORMAT: &str = "qsag-policy-ledger-v1";
+const ROOT_FORMAT: &str = "qsag-policy-ledger-v2";
 const ROOT_SCHEME: &str = "policy-guard-ledger";
 const POLICY_FORMAT: &str = "qsag-policy-v1";
 const INTENT_FORMAT: &str = "qsag-policy-intent-v1";
@@ -54,7 +55,7 @@ const ANCHOR_DOMAIN: &str = "policy_fence";
 const ANCHOR_SEAL_FIELD: &str = "anchor_fence_seal";
 const BUNDLE_MAGIC: &[u8; 8] = b"QSAGPLB2";
 const BUNDLE_DOMAIN: &[u8] = b"QSAG.CLI.POLICY.COMMITTEE_CHECKPOINT.V1";
-const MAX_BUNDLE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_BUNDLE_BYTES: u64 = 256 * 1024 * 1024;
 const POLICY_REVISION: u64 = 1;
 const DEFAULT_INTENT_TTL_SECS: u64 = 86_400;
 /// How far an intent timestamp may run ahead of the local clock.
@@ -316,14 +317,21 @@ fn policy_from_json(json: &Json) -> Result<(TransactionPolicy, Committee), CliEr
         Some(_) => json.field_u64(key),
     };
     let committee = Committee {
-        preprocessing_slots: usize::try_from(optional("preprocessing_slots", BDOZ_PREPROC_SLOTS as u64)?)
-            .map_err(|_| CliError::input("preprocessing capacity does not fit usize"))?,
+        preprocessing_slots: usize::try_from(optional(
+            "preprocessing_slots",
+            BDOZ_PREPROC_SLOTS as u64,
+        )?)
+        .map_err(|_| CliError::input("preprocessing capacity does not fit usize"))?,
         parties,
         window_secs: optional("window_secs", 0)?,
         intent_ttl_secs: optional("intent_ttl_secs", DEFAULT_INTENT_TTL_SECS)?,
     };
-    if committee.preprocessing_slots == 0 || committee.preprocessing_slots > qsag_policy::MAX_POLICY_CAPACITY {
-        return Err(CliError::input("preprocessing_slots must be in 1..=1048576"));
+    if committee.preprocessing_slots == 0
+        || committee.preprocessing_slots > qsag_policy::MAX_POLICY_CAPACITY
+    {
+        return Err(CliError::input(
+            "preprocessing_slots must be in 1..=1048576",
+        ));
     }
     if committee.intent_ttl_secs == 0 {
         return Err(CliError::input("intent_ttl_secs must be positive"));
@@ -334,7 +342,10 @@ fn policy_from_json(json: &Json) -> Result<(TransactionPolicy, Committee), CliEr
 /// The canonical stored form: allowlist entries are kept as their 32-byte commitments.
 fn policy_to_json(policy: &TransactionPolicy, committee: &Committee) -> Json {
     let mut members = vec![
-        ("preprocessing_slots", Json::num(committee.preprocessing_slots)),
+        (
+            "preprocessing_slots",
+            Json::num(committee.preprocessing_slots),
+        ),
         ("chain_id", Json::num(policy.chain_id)),
         ("suite", Json::str(suite_name(policy.pinned_suite))),
         (
@@ -446,12 +457,14 @@ fn stored_policy(json: &Json) -> Result<(TransactionPolicy, Committee), CliError
         quorum_tiers,
     };
     let committee = Committee {
-        preprocessing_slots: usize::try_from(field("preprocessing_slots")?).map_err(|_| corrupt())?,
+        preprocessing_slots: usize::try_from(field("preprocessing_slots")?)
+            .map_err(|_| corrupt())?,
         parties: party_list(json, "parties").map_err(|_| corrupt())?,
         window_secs: field("window_secs")?,
         intent_ttl_secs: field("intent_ttl_secs")?,
     };
-    if committee.preprocessing_slots == 0 || committee.preprocessing_slots > qsag_policy::MAX_POLICY_CAPACITY
+    if committee.preprocessing_slots == 0
+        || committee.preprocessing_slots > qsag_policy::MAX_POLICY_CAPACITY
         || committee.parties.len() < 2
         || committee.parties.len() > MAX_PARTIES
         || committee.parties.windows(2).any(|w| w[0] >= w[1])
@@ -743,7 +756,12 @@ impl OpenLedger {
                 "committee checkpoint is older than its generation fence",
             ));
         }
-        let mut guards = provision_guards(&seed, &id, &committee.parties, committee.preprocessing_slots)?;
+        let mut guards = provision_guards(
+            &seed,
+            &id,
+            &committee.parties,
+            committee.preprocessing_slots,
+        )?;
         if checkpoints.len() != guards.len() {
             return Err(rolled_back(
                 "committee checkpoint does not cover the committee",
@@ -769,8 +787,12 @@ impl OpenLedger {
         let mut shared = SharedWindowSpendLedger::new(&policy, 0)
             .with_window_authority(id, party_secret(&seed, b"window authority", 0).0)
             .map_err(violation)?;
-        shared.restore_from_durable_checkpoint(shared_bytes,
-            &party_secret(&seed, b"shared checkpoint key", 0).0, 0)
+        shared
+            .restore_from_durable_checkpoint(
+                shared_bytes,
+                &party_secret(&seed, b"shared checkpoint key", 0).0,
+                0,
+            )
             .map_err(|_| rolled_back("shared accounting checkpoint refused"))?;
         if access == Access::Update {
             // A crash between the checkpoint rename and its fence leaves the fence behind.
@@ -819,6 +841,11 @@ impl OpenLedger {
             .checked_add(1)
             .ok_or_else(|| CliError::state("policy checkpoint generation exhausted"))?;
         let bundle = write_bundle(&self.seed, &self.id, generation, &self.guards, &self.shared);
+        if bundle.len() as u64 > MAX_BUNDLE_BYTES {
+            return Err(CliError::state(
+                "policy checkpoint exceeds the configured file budget",
+            ));
+        }
         replace_secret(&bundle_path(&self.dir)?, &bundle)?;
         self.generation = generation;
         self.fence
@@ -858,9 +885,15 @@ impl OpenLedger {
             moved = true;
         }
         if target > self.shared.current_window_id() {
-            let authorization = WindowAdvanceAuthorization::new(&authority.0, &self.id,
-                self.shared.current_window_id(), target);
-            self.shared.advance_velocity_window(&authorization).map_err(violation)?;
+            let authorization = WindowAdvanceAuthorization::new(
+                &authority.0,
+                &self.id,
+                self.shared.current_window_id(),
+                target,
+            );
+            self.shared
+                .advance_velocity_window(&authorization)
+                .map_err(violation)?;
             moved = true;
         }
         if moved {
@@ -879,7 +912,9 @@ impl OpenLedger {
 
     /// The shared accumulator is authoritative across every subset of the committee.
     fn window_spend(&self, parties: &[u16]) -> Result<u128, CliError> {
-        for party in parties { self.index_of(*party)?; }
+        for party in parties {
+            self.index_of(*party)?;
+        }
         Ok(self.shared.accumulated_window_spend())
     }
 
@@ -1086,24 +1121,48 @@ impl OpenLedger {
         // A refusal inside the barrier leaves the checkpoint on disk untouched: the guards
         // that moved in memory are dropped with this handle.
         let (mut selected, others): (Vec<_>, Vec<_>) = std::mem::take(&mut self.guards)
-            .into_iter().partition(|g| intent.approver_parties.contains(&g.party_id));
-        let generation = self.generation.checked_add(1)
+            .into_iter()
+            .partition(|g| intent.approver_parties.contains(&g.party_id));
+        let generation = self
+            .generation
+            .checked_add(1)
             .ok_or_else(|| CliError::state("policy checkpoint generation exhausted"))?;
         let result = evaluate_policy_committed_barrier_with_ledger(
-            &self.policy, intent, intent.session_id, intent.timestamp_secs,
-            &mut selected, &mut self.shared,
+            &self.policy,
+            intent,
+            intent.session_id,
+            intent.timestamp_secs,
+            &mut selected,
+            &mut self.shared,
             |shared, participating| {
-                let bundle = write_bundle(&self.seed, &self.id, generation,
-                    participating.iter().chain(&others), shared);
-                replace_secret(&bundle_path(&self.dir).map_err(|_| PolicyViolation::LedgerPersistenceFailed)?, &bundle)
+                let bundle = write_bundle(
+                    &self.seed,
+                    &self.id,
+                    generation,
+                    participating.iter().chain(&others),
+                    shared,
+                );
+                if bundle.len() as u64 > MAX_BUNDLE_BYTES {
+                    return Err(PolicyViolation::LedgerPersistenceFailed);
+                }
+                replace_secret(
+                    &bundle_path(&self.dir)
+                        .map_err(|_| PolicyViolation::LedgerPersistenceFailed)?,
+                    &bundle,
+                )
+                .map_err(|_| PolicyViolation::LedgerPersistenceFailed)?;
+                self.fence
+                    .ratchet_to(generation)
                     .map_err(|_| PolicyViolation::LedgerPersistenceFailed)?;
-                self.fence.ratchet_to(generation).map_err(|_| PolicyViolation::LedgerPersistenceFailed)?;
                 if let Some(anchor) = &self.anchor {
-                    anchor.advance_floor(ANCHOR_DOMAIN.as_bytes(), generation)
+                    anchor
+                        .advance_floor(ANCHOR_DOMAIN.as_bytes(), generation)
                         .map_err(|_| PolicyViolation::LedgerPersistenceFailed)?;
                 }
                 Ok(())
-            }, &qsag_accel::CpuReferenceBackend::new());
+            },
+            &qsag_accel::CpuReferenceBackend::new(),
+        );
         selected.extend(others);
         selected.sort_unstable_by_key(|g| g.party_id);
         self.guards = selected;
@@ -1476,7 +1535,12 @@ fn init(raw: &[String]) -> Result<(), CliError> {
     let nonce = &nonce[..16];
     let id = ledger_id(&seed, &policy, &committee, nonce);
 
-    let guards = provision_guards(&seed, &id, &committee.parties, committee.preprocessing_slots)?;
+    let guards = provision_guards(
+        &seed,
+        &id,
+        &committee.parties,
+        committee.preprocessing_slots,
+    )?;
     let shared = SharedWindowSpendLedger::new(&policy, 0)
         .with_window_authority(id, party_secret(&seed, b"window authority", 0).0)
         .map_err(violation)?;
@@ -1743,7 +1807,10 @@ fn status(raw: &[String]) -> Result<(), CliError> {
                 ("window_id", Json::num(guard.current_window_id())),
                 ("window_spend", Json::num(guard.accumulated_window_spend())),
                 ("intents_released", Json::num(released)),
-                ("release_capacity", Json::num(ledger.committee.preprocessing_slots)),
+                (
+                    "release_capacity",
+                    Json::num(ledger.committee.preprocessing_slots),
+                ),
             ])
         })
         .collect();
@@ -1922,6 +1989,69 @@ mod tests {
             open(dir).approve(&id, party)?;
         }
         Ok((id, message))
+    }
+
+    #[test]
+    fn guardian_free_partial_quorum_uses_durable_shared_accounting() {
+        let scratch = Scratch::new();
+        let mut document = Json::parse(&policy_document(0)).unwrap();
+        set(&mut document, "hardware_guardian_party", Json::num(1));
+        let mut tiers = document
+            .get("quorum_tiers")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .to_vec();
+        for tier in &mut tiers {
+            set(tier, "require_hardware_guardian", Json::Bool(false));
+        }
+        set(&mut document, "quorum_tiers", Json::Array(tiers));
+        std::fs::write(scratch.path("policy.json"), document.to_pretty()).unwrap();
+        let dir = scratch.path("ledger");
+        let args: Vec<_> = [
+            "--ledger-dir",
+            &dir,
+            "--policy",
+            &scratch.path("policy.json"),
+            "--accept-single-host-custody",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        init(&args).unwrap();
+        let mut ledger = open(&dir);
+        let (record, message) = ledger
+            .propose(
+                &Proposal {
+                    key_id: KEY,
+                    payload: b"partial quorum",
+                    ctx: b"",
+                    recipient: recipient(),
+                    amount_units: 800,
+                    initiator: 1,
+                    approvers: &[2, 3],
+                },
+                NOW,
+            )
+            .unwrap();
+        let mut required = ledger.policy.clone();
+        required.quorum_tiers[0].require_hardware_guardian = true;
+        assert_eq!(
+            required.evaluate(&record.intent),
+            Err(PolicyViolation::MissingHardwareGuardian)
+        );
+        let id = record.intent.canonical_digest();
+        let mut record = record;
+        record.approvals = vec![2, 3];
+        ledger.store_record(&record, false).unwrap();
+        ledger
+            .authorize(&id, &KEY, &message, b"", false, NOW)
+            .unwrap();
+        assert_eq!(ledger.shared.accumulated_window_spend(), 800);
+        drop(ledger);
+        let ledger = open(&dir);
+        assert_eq!(ledger.shared.accumulated_window_spend(), 800);
+        assert!(ledger.shared.is_nonce_burned(&record.intent.nonce));
     }
 
     #[test]
@@ -2157,7 +2287,13 @@ mod tests {
         // A checkpoint that reached disk without its fence is adopted, never rolled past.
         let mut ledger = open(&dir);
         let generation = ledger.generation + 1;
-        let ahead = write_bundle(&ledger.seed, &ledger.id, generation, &ledger.guards, &ledger.shared);
+        let ahead = write_bundle(
+            &ledger.seed,
+            &ledger.id,
+            generation,
+            &ledger.guards,
+            &ledger.shared,
+        );
         drop(ledger);
         std::fs::write(&checkpoint, &ahead).unwrap();
         let inspected = OpenLedger::open(&dir, None, None, Access::Inspect).unwrap();
