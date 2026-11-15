@@ -7,9 +7,9 @@
 //! protocol needs: no local residual leaves before the peer transcript is frozen,
 //! the opened transcript is the frozen one, and every lane sums to zero.
 use crate::HdError;
-use qsag_asm::wipe::wipe;
 use alloc::vec::Vec;
 use qsag_accel::keccak::cshake256_framed_32;
+use qsag_asm::wipe::wipe;
 use qsag_verified::HdCommittedZeroTest;
 
 pub(crate) struct CommittedZeroGates {

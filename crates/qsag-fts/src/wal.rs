@@ -1,6 +1,6 @@
 //! Authenticated append-only burn journal with descriptor-lifetime locking.
 //! The genesis MAC and both A/B high-water-mark slots are bound to the data inode;
-//! copied, legacy, or tail-truncated journals fail closed even before an external
+//! copied or tail-truncated journals fail closed even before an external
 //! monotonic anchor is consulted. Keep the directory private and pair with an
 //! external hardware/hypervisor monotonic anchor (`Tpm2NvMonotoneAnchor`,
 //! `HypervisorGenerationAnchor`) to defeat full-file or whole-VM snapshot rollback.
@@ -10,14 +10,17 @@
 //! and the records follow from page 3. Each slot owns its page, so a torn sector or
 //! page write damages at most one of them and recovery repairs it from the other
 //! (`TwoSlotHwm`). The rest of each header page is zero and is not read back.
-//! `QSBURN04` kept both slots and the genesis prefix inside one 512-byte sector; those
-//! journals are refused.
+//!
+//! A burn interrupted while its record was being written leaves up to one record's
+//! worth of unauthenticated bytes after the chain. Recovery truncates them once the
+//! slots and every committed record verify; a record that did reach the disk whole
+//! stays burned and the slots are advanced onto it.
 use alloc::boxed::Box;
 use qsag_accel::ct::{RedactedSecret, ct_eq_bytes, ct_zeroize_bytes};
 use qsag_accel::keccak::cshake256_framed_32;
 use qsag_asm::durable::{
-    ChainHead, CounterOrder, HWM_PAGE_BYTES, HWM_SLOT_BYTES, TwoSlotHwm, file_dev_ino,
-    no_follow_options, sync_parent_dir, write_at_exact,
+    ChainHead, CounterOrder, HWM_PAGE_BYTES, HWM_SLOT_BYTES, HwmSlotState, TwoSlotHwm,
+    file_dev_ino, no_follow_options, sync_parent_dir, write_at_exact,
 };
 use qsag_core::{ExternalMonotoneAnchor, LedgerCheckpoint};
 use std::collections::BTreeSet;
@@ -82,6 +85,16 @@ fn file_identity(file: &File) -> io::Result<[u8; 16]> {
     identity[..8].copy_from_slice(&dev.to_be_bytes());
     identity[8..].copy_from_slice(&ino.to_be_bytes());
     Ok(identity)
+}
+
+/// True when every slot that authenticates marks exactly `committed` records.
+fn slots_mark_exactly(hwm: &TwoSlotHwm<'_>, raw_a: &[u8], raw_b: &[u8], committed: u64) -> bool {
+    [(0, raw_a), (1, raw_b)]
+        .into_iter()
+        .all(|(slot, raw)| match hwm.classify(slot, raw) {
+            HwmSlotState::Valid { counter, .. } => counter == committed,
+            _ => true,
+        })
 }
 
 impl DurableBurnJournal {
@@ -155,10 +168,6 @@ impl DurableBurnJournal {
         anchor.advance(journal.checkpoint())?;
         journal.anchor = Some(anchor);
         Ok(journal)
-    }
-    /// Compatibility alias for existing-vault recovery only.
-    pub fn open(path: impl AsRef<Path>, key: [u8; 32], mac_key: [u8; 32]) -> io::Result<Self> {
-        Self::open_existing(path, key, mac_key)
     }
 
     /// Runs `f` with this journal's two anti-truncation slots: big-endian generation,
@@ -261,10 +270,7 @@ impl DurableBurnJournal {
             bytes.try_reserve_exact(cap).map_err(|_| invalid())?;
             journal.file.seek(SeekFrom::Start(0))?;
             journal.file.read_to_end(&mut bytes)?;
-            if bytes.len() < HEADER_LEN
-                || !(bytes.len() - HEADER_LEN).is_multiple_of(RECORD_LEN)
-                || &bytes[..8] != MAGIC
-                || !ct_eq_bytes(&bytes[8..40], &key)
+            if bytes.len() < HEADER_LEN || &bytes[..8] != MAGIC || !ct_eq_bytes(&bytes[8..40], &key)
             {
                 return Err(invalid());
             }
@@ -277,35 +283,61 @@ impl DurableBurnJournal {
                 return Err(invalid());
             }
             let mut prev_tag = journal.last_tag;
-            for record in bytes[HEADER_LEN..].as_chunks::<RECORD_LEN>().0 {
-                prev_tag = journal.last_tag;
+            let (records, partial) = bytes[HEADER_LEN..].as_chunks::<RECORD_LEN>();
+            // Bytes after the authenticated chain: everything from the first record whose
+            // tag does not verify, or the partial record at the end of the file.
+            let mut tail_len = partial.len();
+            for (index, record) in records.iter().enumerate() {
                 let tag = journal.record_tag(&record[..10]);
                 if !ct_eq_bytes(&tag, &record[10..]) {
-                    return Err(invalid());
+                    tail_len = bytes.len() - HEADER_LEN - index * RECORD_LEN;
+                    break;
                 }
                 let party = u16::from_be_bytes(record[..2].try_into().map_err(|_| invalid())?);
                 let epoch = u64::from_be_bytes(record[2..10].try_into().map_err(|_| invalid())?);
                 if !journal.entries.insert((party, epoch)) {
                     return Err(invalid());
                 }
+                prev_tag = journal.last_tag;
                 journal.last_tag = tag;
+            }
+            let committed = journal.entries.len() as u64;
+            let slot_a = &bytes[HWM_SLOT_A_OFFSET..HWM_SLOT_A_OFFSET + HWM_SLOT_LEN];
+            let slot_b = &bytes[HWM_SLOT_B_OFFSET..HWM_SLOT_B_OFFSET + HWM_SLOT_LEN];
+            // An interrupted `reserve` leaves at most one record's worth of unauthenticated
+            // bytes after the chain, with every readable slot still on the chain's length.
+            // Nothing else is a torn append: a longer tail, or a tail behind a record the
+            // slots have not reached, is refused before anything is written.
+            if tail_len > RECORD_LEN {
+                return Err(invalid());
             }
             // Rejects tail truncation and unexplained gaps; heals the crash states (record
             // synced before slot A, slot A synced before slot B, one slot torn mid-write).
             journal
                 .with_hwm(|hwm, file| {
+                    if tail_len != 0 && !slots_mark_exactly(hwm, slot_a, slot_b, committed) {
+                        return Err(invalid());
+                    }
                     hwm.recover(
                         file,
-                        &bytes[HWM_SLOT_A_OFFSET..HWM_SLOT_A_OFFSET + HWM_SLOT_LEN],
-                        &bytes[HWM_SLOT_B_OFFSET..HWM_SLOT_B_OFFSET + HWM_SLOT_LEN],
+                        slot_a,
+                        slot_b,
                         &ChainHead {
-                            len: journal.entries.len() as u64,
+                            len: committed,
                             tip: &journal.last_tag,
                             previous_tip: &prev_tag,
                         },
                     )
                 })
                 .map_err(|_| invalid())?;
+            if tail_len != 0 {
+                // The slots hold `committed` and the chain up to it verified, so the tail
+                // was never acknowledged: drop it.
+                let committed_len = (HEADER_LEN + RECORD_LEN * journal.entries.len()) as u64;
+                journal.file.set_len(committed_len)?;
+                journal.file.sync_all()?;
+                sync_parent_dir(path)?;
+            }
         }
         journal.check_identity()?;
         Ok(journal)
@@ -391,8 +423,12 @@ impl FsWalFtsEpochLatch {
     pub fn create(path: impl AsRef<Path>, key: [u8; 32], mac_key: [u8; 32]) -> io::Result<Self> {
         DurableBurnJournal::create(path, key, mac_key).map(Self)
     }
-    pub fn open(path: impl AsRef<Path>, key: [u8; 32], mac_key: [u8; 32]) -> io::Result<Self> {
-        DurableBurnJournal::open(path, key, mac_key).map(Self)
+    pub fn open_existing(
+        path: impl AsRef<Path>,
+        key: [u8; 32],
+        mac_key: [u8; 32],
+    ) -> io::Result<Self> {
+        DurableBurnJournal::open_existing(path, key, mac_key).map(Self)
     }
 }
 impl super::LeafBurnPersistence for FsWalFtsEpochLatch {
@@ -514,7 +550,7 @@ mod tests {
         let signature = key.sign(&dp, b"first", &[0; 32]).unwrap();
         crate::verify_frontier_fts(&key.pk, &dp, b"first", &signature).unwrap();
         drop(key);
-        let wal = FsWalFtsEpochLatch::open(&path, id, [8; 32]).unwrap();
+        let wal = FsWalFtsEpochLatch::open_existing(&path, id, [8; 32]).unwrap();
         let mut key = make().attach_wal(alloc::boxed::Box::new(wal)).unwrap();
         assert_eq!(
             key.sign(&dp, b"second", &[0; 32]),
@@ -536,7 +572,7 @@ mod tests {
         ));
         let make = || {
             crate::FrontierFtsSigningKey::keygen(
-                crate::FrontierFtsProfile::Compact770,
+                crate::FrontierFtsProfile::Full256Bit,
                 [1; 32],
                 [2; 32],
                 [3; 32],
@@ -547,7 +583,7 @@ mod tests {
         let id = make().wal_key();
         drop(FsWalFtsEpochLatch::create(&path, id, [8; 32]).unwrap());
         // Simulate a crash after the vault committed use 1, before the WAL did.
-        let wal = FsWalFtsEpochLatch::open(&path, id, [8; 32]).unwrap();
+        let wal = FsWalFtsEpochLatch::open_existing(&path, id, [8; 32]).unwrap();
         let key = make()
             .resume_at(1)
             .unwrap()
@@ -555,15 +591,13 @@ mod tests {
             .unwrap();
         assert_eq!(key.uses_completed(), 1);
         drop(key);
-        let wal = FsWalFtsEpochLatch::open(&path, id, [8; 32]).unwrap();
+        let wal = FsWalFtsEpochLatch::open_existing(&path, id, [8; 32]).unwrap();
         let mut key = make().attach_wal(alloc::boxed::Box::new(wal)).unwrap();
         assert_eq!(key.uses_completed(), 1);
-        let dp = crate::FrontierDpTable::build(crate::FrontierFtsProfile::Compact770);
-        let signature = key.sign(&dp, b"after recovery", &[0; 32]).unwrap();
-        crate::verify_frontier_fts(&key.pk, &dp, b"after recovery", &signature).unwrap();
-        assert_eq!(key.uses_completed(), 2);
+        assert_eq!(key.uses_remaining(), 0);
+        let dp = crate::FrontierDpTable::build(crate::FrontierFtsProfile::Full256Bit);
         assert_eq!(
-            key.sign(&dp, b"exhausted", &[0; 32]),
+            key.sign(&dp, b"after recovery", &[0; 32]),
             Err(crate::FrontierFtsError::UseBudgetExhausted)
         );
         drop(key);
@@ -588,43 +622,38 @@ mod tests {
         journal.reserve(&[1; 32], 7, 19).unwrap();
         // A sidecar's absence cannot affect the lock held on the journal itself.
         assert!(!dir.join("journal.lock").exists());
-        assert!(DurableBurnJournal::open(&path, [1; 32], [2; 32]).is_err());
+        assert!(DurableBurnJournal::open_existing(&path, [1; 32], [2; 32]).is_err());
         drop(journal);
-        let mut journal = DurableBurnJournal::open(&path, [1; 32], [2; 32]).unwrap();
+        let mut journal = DurableBurnJournal::open_existing(&path, [1; 32], [2; 32]).unwrap();
         assert!(journal.reserve(&[1; 32], 7, 19).is_err());
         drop(journal);
-        assert!(DurableBurnJournal::open(&path, [3; 32], [2; 32]).is_err());
-        assert!(DurableBurnJournal::open(&path, [1; 32], [3; 32]).is_err());
+        assert!(DurableBurnJournal::open_existing(&path, [3; 32], [2; 32]).is_err());
+        assert!(DurableBurnJournal::open_existing(&path, [1; 32], [3; 32]).is_err());
         let original = fs::read(&path).unwrap();
         for len in [0, 40, HEADER_LEN - 1, original.len() - 1] {
             fs::write(&path, &original[..len]).unwrap();
-            assert!(DurableBurnJournal::open(&path, [1; 32], [2; 32]).is_err());
+            assert!(DurableBurnJournal::open_existing(&path, [1; 32], [2; 32]).is_err());
         }
-        for index in [8, 40, 72, HEADER_LEN, original.len() - 1] {
+        for index in [0, 7, 8, 40, 72, HEADER_LEN, original.len() - 1] {
             let mut corrupt = original.clone();
             corrupt[index] ^= 1;
             fs::write(&path, corrupt).unwrap();
-            assert!(DurableBurnJournal::open(&path, [1; 32], [2; 32]).is_err());
+            assert!(DurableBurnJournal::open_existing(&path, [1; 32], [2; 32]).is_err());
         }
         // Damage to both slots at once leaves nothing to recover from.
         let mut corrupt = original.clone();
         corrupt[HWM_SLOT_A_OFFSET] ^= 1;
         corrupt[HWM_SLOT_B_OFFSET] ^= 1;
         fs::write(&path, corrupt).unwrap();
-        assert!(DurableBurnJournal::open(&path, [1; 32], [2; 32]).is_err());
-        // The previous single-sector layout is refused outright.
-        let mut legacy = original.clone();
-        legacy[..8].copy_from_slice(b"QSBURN04");
-        fs::write(&path, legacy).unwrap();
-        assert!(DurableBurnJournal::open(&path, [1; 32], [2; 32]).is_err());
+        assert!(DurableBurnJournal::open_existing(&path, [1; 32], [2; 32]).is_err());
         fs::write(&path, &original).unwrap();
         #[cfg(unix)]
         {
             let link = dir.join("link");
             std::os::unix::fs::symlink(&path, &link).unwrap();
-            assert!(DurableBurnJournal::open(&link, [1; 32], [2; 32]).is_err());
+            assert!(DurableBurnJournal::open_existing(&link, [1; 32], [2; 32]).is_err());
             fs::remove_file(link).unwrap();
-            let mut held = DurableBurnJournal::open(&path, [1; 32], [2; 32]).unwrap();
+            let mut held = DurableBurnJournal::open_existing(&path, [1; 32], [2; 32]).unwrap();
             fs::rename(&path, dir.join("old")).unwrap();
             fs::write(&path, &original).unwrap();
             assert!(held.reserve(&[1; 32], 7, 20).is_err());
@@ -632,7 +661,7 @@ mod tests {
             fs::remove_file(dir.join("old")).unwrap();
         }
         fs::remove_file(&path).unwrap();
-        assert!(DurableBurnJournal::open(&path, [1; 32], [2; 32]).is_err());
+        assert!(DurableBurnJournal::open_existing(&path, [1; 32], [2; 32]).is_err());
         fs::remove_dir(dir).unwrap();
     }
 
@@ -681,19 +710,219 @@ mod tests {
         ))
     }
 
-    /// Overwrite `len` bytes at `offset` with pseudo-random bytes, as a torn write would.
-    fn tear(path: &Path, offset: usize, len: usize, seed: u64) {
+    fn junk(len: usize, seed: u64) -> std::vec::Vec<u8> {
         let mut x = seed | 1;
-        let junk: std::vec::Vec<u8> = (0..len)
+        (0..len)
             .map(|_| {
                 x ^= x << 13;
                 x ^= x >> 7;
                 x ^= x << 17;
                 x as u8
             })
-            .collect();
+            .collect()
+    }
+
+    /// Overwrite `len` bytes at `offset` with pseudo-random bytes, as a torn write would.
+    fn tear(path: &Path, offset: usize, len: usize, seed: u64) {
         let file = OpenOptions::new().write(true).open(path).unwrap();
-        write_at_exact(&file, offset as u64, &junk).unwrap();
+        write_at_exact(&file, offset as u64, &junk(len, seed)).unwrap();
+    }
+
+    /// A journal holding two burns (`(0, 0)` and `(0, 1)`), closed.
+    struct TwoBurns {
+        path: PathBuf,
+        /// The file with both burns committed.
+        committed: std::vec::Vec<u8>,
+        /// The record a third burn of `(0, 2)` appends.
+        next: [u8; RECORD_LEN],
+        /// The file after that third burn committed.
+        advanced: std::vec::Vec<u8>,
+        checkpoint: LedgerCheckpoint,
+    }
+
+    impl TwoBurns {
+        fn new(tag: &str) -> Self {
+            let path = temp_journal(tag);
+            let mut journal = DurableBurnJournal::create(&path, [1; 32], [2; 32]).unwrap();
+            journal.reserve(&[1; 32], 0, 0).unwrap();
+            journal.reserve(&[1; 32], 0, 1).unwrap();
+            let checkpoint = journal.checkpoint();
+            let committed = fs::read(&path).unwrap();
+            journal.reserve(&[1; 32], 0, 2).unwrap();
+            drop(journal);
+            let advanced = fs::read(&path).unwrap();
+            let next = advanced[committed.len()..].try_into().unwrap();
+            // `fs::write` truncates in place: the inode the MACs bind is kept.
+            fs::write(&path, &committed).unwrap();
+            Self {
+                path,
+                committed,
+                next,
+                advanced,
+                checkpoint,
+            }
+        }
+        /// Put the committed file back, followed by `tail`.
+        fn with_tail(&self, tail: &[u8]) -> std::vec::Vec<u8> {
+            let mut bytes = self.committed.clone();
+            bytes.extend_from_slice(tail);
+            fs::write(&self.path, &bytes).unwrap();
+            bytes
+        }
+        fn open(&self) -> io::Result<DurableBurnJournal> {
+            DurableBurnJournal::open_at_least(&self.path, [1; 32], [2; 32], self.checkpoint)
+        }
+        /// Recovery lands on the two committed burns with the tail gone, and the journal
+        /// then burns the third leaf as if the tear had never happened.
+        fn assert_recovers_and_continues(&self) {
+            let mut journal = self.open().unwrap();
+            assert_eq!(journal.checkpoint().generation, 2);
+            assert!(journal.checkpoint().tag == self.checkpoint.tag);
+            assert_eq!(fs::read(&self.path).unwrap(), self.committed);
+            assert!(journal.reserve(&[1; 32], 0, 1).is_err());
+            journal.reserve(&[1; 32], 0, 2).unwrap();
+            assert_eq!(journal.checkpoint().generation, 3);
+            drop(journal);
+            let journal = self.open().unwrap();
+            assert_eq!(journal.checkpoint().generation, 3);
+            drop(journal);
+            assert_eq!(fs::read(&self.path).unwrap(), self.advanced);
+        }
+        /// Recovery refuses the file as it stands and leaves every byte alone.
+        fn assert_fails_closed(&self, on_disk: &[u8]) {
+            assert!(self.open().is_err());
+            assert!(DurableBurnJournal::open_existing(&self.path, [1; 32], [2; 32]).is_err());
+            assert_eq!(fs::read(&self.path).unwrap(), on_disk);
+        }
+    }
+
+    impl Drop for TwoBurns {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+
+    #[test]
+    fn torn_tail_record_is_truncated_and_the_journal_continues() {
+        let journal = TwoBurns::new("burn-tail-partial");
+        for cut in [1, 9, 10, 11, RECORD_LEN - 1] {
+            // A prefix of the real record, a prefix that never left the page cache as
+            // data (zeros), and arbitrary bytes.
+            for tail in [
+                journal.next[..cut].to_vec(),
+                std::vec![0; cut],
+                junk(cut, cut as u64),
+            ] {
+                journal.with_tail(&tail);
+                journal.assert_recovers_and_continues();
+            }
+        }
+        // The tear may coincide with one unreadable slot; the other still marks the chain.
+        for slot_offset in [HWM_SLOT_A_OFFSET, HWM_SLOT_B_OFFSET] {
+            journal.with_tail(&journal.next[..17]);
+            tear(&journal.path, slot_offset, HWM_SLOT_LEN, 31);
+            journal.assert_recovers_and_continues();
+        }
+    }
+
+    #[test]
+    fn full_length_unauthenticated_tail_is_truncated() {
+        let journal = TwoBurns::new("burn-tail-full");
+        let mut bad_tag = journal.next;
+        bad_tag[RECORD_LEN - 1] ^= 1;
+        let mut bad_body = journal.next;
+        bad_body[9] ^= 1;
+        for tail in [
+            bad_tag.to_vec(),
+            bad_body.to_vec(),
+            std::vec![0; RECORD_LEN],
+            junk(RECORD_LEN, 5),
+        ] {
+            journal.with_tail(&tail);
+            journal.assert_recovers_and_continues();
+        }
+    }
+
+    #[test]
+    fn synced_unacknowledged_record_is_rolled_forward_not_truncated() {
+        let journal = TwoBurns::new("burn-tail-valid");
+        journal.with_tail(&journal.next);
+        let mut reopened = journal.open().unwrap();
+        assert_eq!(reopened.checkpoint().generation, 3);
+        assert!(reopened.reserve(&[1; 32], 0, 2).is_err());
+        drop(reopened);
+        assert_eq!(fs::read(&journal.path).unwrap(), journal.advanced);
+    }
+
+    #[test]
+    fn torn_tail_never_excuses_a_corrupt_committed_record() {
+        let journal = TwoBurns::new("burn-tail-corrupt");
+        for record in [0, 1] {
+            for index in [0, 9, 10, RECORD_LEN - 1] {
+                for tail in [
+                    &journal.next[..17],
+                    &junk(RECORD_LEN, 7)[..],
+                    &journal.next[..],
+                    &[][..],
+                ] {
+                    let mut bytes = journal.with_tail(tail);
+                    bytes[HEADER_LEN + record * RECORD_LEN + index] ^= 1;
+                    fs::write(&journal.path, &bytes).unwrap();
+                    journal.assert_fails_closed(&bytes);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn torn_tail_never_excuses_a_slot_ahead_of_the_chain() {
+        let journal = TwoBurns::new("burn-tail-short");
+        for kept in [0, 1] {
+            for tail in [
+                &journal.next[..17],
+                &junk(RECORD_LEN, 9)[..],
+                &junk(RECORD_LEN - 1, 10)[..],
+            ] {
+                let mut bytes = journal.committed[..HEADER_LEN + kept * RECORD_LEN].to_vec();
+                bytes.extend_from_slice(tail);
+                fs::write(&journal.path, &bytes).unwrap();
+                journal.assert_fails_closed(&bytes);
+            }
+        }
+        // One slot ahead of the other is the crash between the two slot writes; the record
+        // it points at must be there, torn tail or not.
+        let mut bytes = journal.committed.clone();
+        bytes[HWM_SLOT_A_OFFSET..HWM_SLOT_A_OFFSET + HWM_SLOT_LEN].copy_from_slice(
+            &journal.advanced[HWM_SLOT_A_OFFSET..HWM_SLOT_A_OFFSET + HWM_SLOT_LEN],
+        );
+        for tail in [&journal.next[..17], &junk(RECORD_LEN, 11)[..], &[][..]] {
+            let mut bytes = bytes.clone();
+            bytes.extend_from_slice(tail);
+            fs::write(&journal.path, &bytes).unwrap();
+            journal.assert_fails_closed(&bytes);
+        }
+    }
+
+    #[test]
+    fn tail_longer_than_one_record_fails_closed() {
+        let journal = TwoBurns::new("burn-tail-long");
+        for len in [RECORD_LEN + 1, 2 * RECORD_LEN - 1, 2 * RECORD_LEN, 4096] {
+            let bytes = journal.with_tail(&junk(len, len as u64));
+            journal.assert_fails_closed(&bytes);
+        }
+        // A synced record the slots have not reached, then more bytes: two appends past
+        // the mark, which one interrupted burn cannot produce.
+        for extra in [1, 17, RECORD_LEN] {
+            let mut tail = journal.next.to_vec();
+            tail.extend_from_slice(&junk(extra, 3));
+            let bytes = journal.with_tail(&tail);
+            journal.assert_fails_closed(&bytes);
+        }
+        // An unauthenticated record followed by an authentic-looking one is no better.
+        let mut tail = junk(RECORD_LEN, 4);
+        tail.extend_from_slice(&journal.next);
+        let bytes = journal.with_tail(&tail);
+        journal.assert_fails_closed(&bytes);
     }
 
     #[test]
@@ -762,10 +991,10 @@ mod tests {
         }
         // The repaired journal still burns and still refuses a replayed leaf.
         tear(&path, HWM_SLOT_B_OFFSET, HWM_SLOT_LEN, 9);
-        let mut journal = DurableBurnJournal::open(&path, [1; 32], [2; 32]).unwrap();
+        let mut journal = DurableBurnJournal::open_existing(&path, [1; 32], [2; 32]).unwrap();
         assert!(journal.reserve(&[1; 32], 0, 1).is_err());
         drop(journal);
-        let mut journal = DurableBurnJournal::open(&path, [1; 32], [2; 32]).unwrap();
+        let mut journal = DurableBurnJournal::open_existing(&path, [1; 32], [2; 32]).unwrap();
         journal.reserve(&[1; 32], 0, 2).unwrap();
         assert_eq!(journal.checkpoint().generation, 3);
         drop(journal);
@@ -826,7 +1055,7 @@ mod tests {
         // A torn slot never excuses a truncated chain.
         fs::write(&path, &committed[..HEADER_LEN + RECORD_LEN]).unwrap();
         tear(&path, HWM_SLOT_A_OFFSET, HWM_SLOT_LEN, 13);
-        assert!(DurableBurnJournal::open(&path, [1; 32], [2; 32]).is_err());
+        assert!(DurableBurnJournal::open_existing(&path, [1; 32], [2; 32]).is_err());
         fs::remove_file(&path).unwrap();
     }
 
@@ -839,14 +1068,14 @@ mod tests {
         tear(&path, HWM_SLOT_A_OFFSET, HWM_SLOT_LEN, 21);
         tear(&path, HWM_SLOT_B_OFFSET, HWM_SLOT_LEN, 22);
         let damaged = fs::read(&path).unwrap();
-        assert!(DurableBurnJournal::open(&path, [1; 32], [2; 32]).is_err());
+        assert!(DurableBurnJournal::open_existing(&path, [1; 32], [2; 32]).is_err());
         assert!(DurableBurnJournal::open_existing(&path, [1; 32], [2; 32]).is_err());
         assert_eq!(fs::read(&path).unwrap(), damaged);
         // Two slot pages that were never written are no better.
         let mut blank = damaged.clone();
         blank[HWM_SLOT_A_OFFSET..HEADER_LEN].fill(0);
         fs::write(&path, &blank).unwrap();
-        assert!(DurableBurnJournal::open(&path, [1; 32], [2; 32]).is_err());
+        assert!(DurableBurnJournal::open_existing(&path, [1; 32], [2; 32]).is_err());
         assert_eq!(fs::read(&path).unwrap(), blank);
         fs::remove_file(&path).unwrap();
     }

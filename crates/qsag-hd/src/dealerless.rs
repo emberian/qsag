@@ -1588,7 +1588,13 @@ mod tests {
             if positions.contains(&p) {
                 let mask = dealerless_opening_mask(&seeds[p], &roster, session, projection)?;
                 states.push(HdThresholdEvalRound1Commit::begin(
-                    share, pk, &roster, projection, session, mask, [p as u8; 32],
+                    share,
+                    pk,
+                    &roster,
+                    projection,
+                    session,
+                    mask,
+                    [p as u8; 32],
                 )?);
             }
         }
@@ -1670,7 +1676,13 @@ mod tests {
             // Every single custodian is a quorum, and so is the whole committee.
             for position in 0..usize::from(n) {
                 assert_eq!(
-                    open_coefficient(&seeds, &mut root, &root_pk, &[position], [position as u8; 32]),
+                    open_coefficient(
+                        &seeds,
+                        &mut root,
+                        &root_pk,
+                        &[position],
+                        [position as u8; 32]
+                    ),
                     Ok(expected)
                 );
             }

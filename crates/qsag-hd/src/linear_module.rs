@@ -14,8 +14,8 @@ use qsag_accel::ct::{RedactedSecret, ct_lt_u64, ct_select_u64};
 use qsag_accel::keccak::{cshake256_framed_32, cshake256_framed_xof};
 use qsag_addr::{KeyIdentityKind, QsagAddress, WitnessSuiteTag};
 
-use qsag_asm::wipe::{SecretBuffer, SecretBytes, SecretWipe, wipe};
 use crate::inventory::HdError;
+use qsag_asm::wipe::{SecretBuffer, SecretBytes, SecretWipe, wipe};
 
 /// Canonical prime modulus $q = 8\_380\_417 = 2^{23} - 2^{13} + 1 \equiv 1 \pmod{512}$.
 pub const MODULE_Q: u32 = 8_380_417;
