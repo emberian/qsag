@@ -86,6 +86,18 @@ impl CoZkCustodianShare {
         statement: &MigrationStatement,
         transport: T,
     ) -> Result<MigrationZkProof, Error> {
+        self.prove_with_backend(statement, transport, &qsag_accel::CpuReferenceBackend)
+    }
+
+    /// Use the backend to hash the challenged views during final verification.
+    /// Unopened commitments remain interactive shared sponges: applying an
+    /// ordinary Keccak kernel to individual shares would not compute their hash.
+    pub fn prove_with_backend<T: Transport, B: qsag_accel::AcceleratorBackend>(
+        self,
+        statement: &MigrationStatement,
+        transport: T,
+        accel: &B,
+    ) -> Result<MigrationZkProof, Error> {
         #[cfg(test)]
         transport.audit_private_state(
             self.party,
@@ -291,11 +303,12 @@ impl CoZkCustodianShare {
             views_merkle_root: root,
             repetitions,
         };
-        zk_engine::verify_migration_proof(
+        zk_engine::verify_migration_proof_with_backend(
             statement,
             &proof,
             &statement.migration_domain,
             statement.epoch_anchor,
+            accel,
         )
         .map_err(|_| Error::InvalidProof)?;
         e.agree(cshake256_framed_32(b"QSAG.OUTER.COMPLETE.V1", &[&root]))?;
@@ -399,7 +412,12 @@ fn compute_batches<T: Transport>(
             .transport
             .max_parallel_batches()
             .max(1)
-            .min(children.len());
+            .min(children.len())
+            .min(
+                std::thread::available_parallelism()
+                    .map_or(1, |n| n.get())
+                    .min(16),
+            );
         let mut jobs = children.into_iter().enumerate();
         let mut completed = Vec::with_capacity(seeds.len());
         while jobs.len() != 0 {
@@ -715,6 +733,16 @@ fn evaluate_inner<T: Transport>(
     seeds: &[Word],
     verify_zero_outputs: bool,
 ) -> Result<Vec<SharedView>, Error> {
+    // Keep field-fault regressions aimed at circuit evaluation, even when tape
+    // conversion itself uses arithmetic multiplications for carry correction.
+    #[cfg(test)]
+    let circuit_field_fault = if matches!(e.fault, Some(outer_mpc::FaultInjection::FieldMul { .. }))
+    {
+        e.fault.take()
+    } else {
+        None
+    };
+
     // 1. Pre-schedule exact `Tape` bit/field draws and topological DAG waves.
     let mut cursors: [TapeCursor; 3] = core::array::from_fn(|_| TapeCursor::default());
     let mut field_draws: Vec<FieldTapeDraw> = Vec::new();
@@ -913,6 +941,11 @@ fn evaluate_inner<T: Transport>(
                 draw_fields[idx] = Some(fw);
             }
         }
+    }
+
+    #[cfg(test)]
+    if circuit_field_fault.is_some() {
+        e.fault = circuit_field_fault;
     }
 
     // 5. Execute the circuit wave by wave, batching all parallel communication gates.
@@ -1831,31 +1864,27 @@ mod tests {
     }
 
     // Bound both ceremonies and per-custodian batches, keeping the suite within
-    // the 12 GiB builder budget while overlapping network synchronization.
+    // the bounded builder memory budget while overlapping network synchronization.
     static HEAVY_CEREMONIES: (std::sync::Mutex<usize>, std::sync::Condvar) =
         (std::sync::Mutex::new(0), std::sync::Condvar::new());
-    struct CeremonySlot;
+    struct CeremonySlot(usize);
     impl CeremonySlot {
-        fn acquire() -> Self {
+        fn acquire(batches: usize) -> Self {
             let (active, ready) = &HEAVY_CEREMONIES;
             let mut count = active.lock().unwrap_or_else(|e| e.into_inner());
-            let limit = if std::thread::available_parallelism().is_ok_and(|n| n.get() >= 24) {
-                4
-            } else {
-                2
-            };
-            while *count >= limit {
+            let limit = 7;
+            while *count + batches > limit {
                 count = ready.wait(count).unwrap_or_else(|e| e.into_inner());
             }
-            *count += 1;
-            Self
+            *count += batches;
+            Self(batches)
         }
     }
     impl Drop for CeremonySlot {
         fn drop(&mut self) {
             let (active, ready) = &HEAVY_CEREMONIES;
-            *active.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
-            ready.notify_one();
+            *active.lock().unwrap_or_else(|e| e.into_inner()) -= self.0;
+            ready.notify_all();
         }
     }
 
@@ -1871,7 +1900,7 @@ mod tests {
 
     fn complete_proof(ed: bool) {
         use std::io::Read;
-        let _ceremony_guard = CeremonySlot::acquire();
+        let _ceremony_guard = CeremonySlot::acquire(outer_mpc::tests::parallel_batches());
         let mut completed = false;
         for _attempt in 0..4 {
             let mut master = [0u8; 32];
@@ -2075,7 +2104,7 @@ mod tests {
     }
 
     fn assert_zkboo_fault_aborts_cleanly(ed: bool, fault: FaultInjection, session_tag: u8) {
-        let _ceremony_guard = CeremonySlot::acquire();
+        let _ceremony_guard = CeremonySlot::acquire(3);
         for seed_try in 0..8u8 {
             let witness = LegacyOwnershipWitness::from_raw_secret([0x31 + seed_try; 32]);
             let kind = if ed {
@@ -2201,7 +2230,7 @@ mod tests {
     }
 
     fn assert_input_substitution_aborts(ed: bool, delta_64bit: bool, session_tag: u8) {
-        let _ceremony_guard = CeremonySlot::acquire();
+        let _ceremony_guard = CeremonySlot::acquire(3);
         let mut verified = false;
         for seed_try in 0..8u8 {
             let witness = LegacyOwnershipWitness::from_raw_secret([0x41 + seed_try; 32]);
