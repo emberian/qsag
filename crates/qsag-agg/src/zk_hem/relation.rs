@@ -287,6 +287,7 @@ impl Shape {
 /// by running the same synthesis on a placeholder assignment.
 pub struct ConstraintSystem {
     values: Vec<F>,
+    record_rows: bool,
     num_public: usize,
     sbox: Vec<(Lc, Lc)>,
     mul: Vec<(Lc, Lc, Lc)>,
@@ -302,10 +303,76 @@ impl ConstraintSystem {
     pub fn new() -> Self {
         Self {
             values: vec![F::ONE],
+            record_rows: true,
             num_public: 0,
             sbox: Vec::new(),
             mul: Vec::new(),
         }
+    }
+
+    /// Re-evaluate a compiled relation's assignment without rebuilding its matrices.
+    /// The resulting assignment must still be checked against the compiled shape.
+    pub(crate) fn witness_only() -> Self {
+        let mut cs = Self::new();
+        cs.record_rows = false;
+        cs
+    }
+
+    pub(crate) fn finish_assignment(mut self, shape: &Shape) -> Option<Vec<F>> {
+        assert!(!self.record_rows);
+        if self.num_public != shape.num_public || self.values.len() != shape.mask_var_base {
+            return None;
+        }
+        let masks = shape.num_vars - self.values.len();
+        qsag_core::wipe::secret_vec_reserve(&mut self.values, masks);
+        self.values.resize(shape.num_vars, F::ZERO);
+        Some(core::mem::take(&mut self.values))
+    }
+
+    pub(crate) fn fork_public_inputs(&self) -> Self {
+        assert_eq!(self.values.len(), self.num_public + 1);
+        Self {
+            values: self.values.clone(),
+            record_rows: self.record_rows,
+            num_public: self.num_public,
+            sbox: Vec::new(),
+            mul: Vec::new(),
+        }
+    }
+
+    /// Append a disjoint circuit with the same public prefix, relocating private
+    /// variables. Preserves the serial allocation/row order for canonical shapes.
+    pub(crate) fn append(&mut self, mut other: Self) {
+        assert_eq!(self.num_public, other.num_public);
+        assert_eq!(self.record_rows, other.record_rows);
+        assert_eq!(
+            &self.values[..=self.num_public],
+            &other.values[..=other.num_public]
+        );
+        let offset = u32::try_from(self.values.len() - self.num_public - 1)
+            .expect("relation variable limit");
+        let relocate = |mut lc: Lc| {
+            for (v, _) in &mut lc.0 {
+                if *v as usize > self.num_public {
+                    *v = v.checked_add(offset).expect("relation variable limit");
+                }
+            }
+            lc
+        };
+        self.sbox.extend(
+            core::mem::take(&mut other.sbox)
+                .into_iter()
+                .map(|(a, c)| (relocate(a), relocate(c))),
+        );
+        self.mul.extend(
+            core::mem::take(&mut other.mul)
+                .into_iter()
+                .map(|(a, b, c)| (relocate(a), relocate(b), relocate(c))),
+        );
+        qsag_core::wipe::secret_vec_extend_from_slice(
+            &mut self.values,
+            &other.values[self.num_public + 1..],
+        );
     }
 
     /// Allocate a public input. All public inputs must be allocated before any other
@@ -322,37 +389,46 @@ impl ConstraintSystem {
 
     /// Allocate a free variable with the given assigned value.
     pub fn alloc(&mut self, value: F) -> Var {
-        self.values.push(value);
+        // Hiding callers allocate witness values here: growth erases the old storage.
+        qsag_core::wipe::secret_vec_push(&mut self.values, value);
         Var((self.values.len() - 1) as u32)
     }
 
     pub fn eval(&self, lc: &Lc) -> F {
-        lc.terms()
-            .iter()
-            .fold(F::ZERO, |acc, &(v, c)| acc + c.const_mul(self.values[v as usize]))
+        lc.terms().iter().fold(F::ZERO, |acc, &(v, c)| {
+            acc + c.const_mul(self.values[v as usize])
+        })
     }
 
     /// Fresh variable `y` with the row `a^7 = y`.
     pub fn sbox7(&mut self, a: &Lc) -> Var {
         let y = self.alloc(poseidon2_sbox7(self.eval(a)));
-        self.sbox.push((a.clone(), y.into()));
+        if self.record_rows {
+            self.sbox.push((a.clone(), y.into()));
+        }
         y
     }
 
     /// Fresh variable `y` with the row `a * b = y`.
     pub fn mul(&mut self, a: &Lc, b: &Lc) -> Var {
         let y = self.alloc(self.eval(a).const_mul(self.eval(b)));
-        self.mul.push((a.clone(), b.clone(), y.into()));
+        if self.record_rows {
+            self.mul.push((a.clone(), b.clone(), y.into()));
+        }
         y
     }
 
     pub fn enforce_mul(&mut self, a: Lc, b: Lc, c: Lc) {
-        self.mul.push((a, b, c));
+        if self.record_rows {
+            self.mul.push((a, b, c));
+        }
     }
 
     /// Row `lc * 1 = 0`.
     pub fn enforce_zero(&mut self, lc: Lc) {
-        self.mul.push((lc, Lc::constant(F::ONE), Lc::zero()));
+        if self.record_rows {
+            self.mul.push((lc, Lc::constant(F::ONE), Lc::zero()));
+        }
     }
 
     pub fn enforce_equal(&mut self, a: &Lc, b: &Lc) {
@@ -361,8 +437,10 @@ impl ConstraintSystem {
 
     /// Row `v * (1 - v) = 0`.
     pub fn enforce_boolean(&mut self, v: &Lc) {
-        self.mul
-            .push((v.clone(), Lc::constant(F::ONE).minus(v), Lc::zero()));
+        if self.record_rows {
+            self.mul
+                .push((v.clone(), Lc::constant(F::ONE).minus(v), Lc::zero()));
+        }
     }
 
     /// `if bit { on_one } else { on_zero }`, one multiplication row. `bit` must be
@@ -381,10 +459,14 @@ impl ConstraintSystem {
     /// power of two. Returns the shape and the assignment, whose masking variables are zero
     /// until the prover overwrites them.
     pub fn finish(mut self) -> (Shape, Vec<F>) {
+        assert!(self.record_rows);
         let mask_var_base = self.values.len();
         let mask: Vec<Var> = (0..MASK_ROWS).map(|_| self.alloc(F::ZERO)).collect();
         let used = self.num_rows();
-        let log_rows = (used + MASK_ROWS).next_power_of_two().trailing_zeros().max(4) as usize;
+        let log_rows = (used + MASK_ROWS)
+            .next_power_of_two()
+            .trailing_zeros()
+            .max(4) as usize;
         let total = 1usize << log_rows;
         let one = Lc::constant(F::ONE);
         let two = Lc::constant(F::TWO);
@@ -438,7 +520,15 @@ impl ConstraintSystem {
             digest: [0; 32],
         };
         shape.digest = shape.compute_digest();
-        (shape, self.values)
+        (shape, core::mem::take(&mut self.values))
+    }
+}
+
+/// The assignment may be a witness; a builder dropped without [`ConstraintSystem::finish`]
+/// erases it.
+impl Drop for ConstraintSystem {
+    fn drop(&mut self) {
+        qsag_asm::volatile_fill(&mut self.values, F::ZERO);
     }
 }
 
@@ -467,8 +557,22 @@ fn layer_matrix(layer: fn(&mut [F; 12])) -> [[F; 12]; 12] {
 /// twelve inputs, then the twelve outputs of the latest full round plus one output per
 /// partial round since. A lane becomes a linear form only where an S-box row needs it.
 pub fn poseidon2_perm(cs: &mut ConstraintSystem, st: &mut [Lc; 12]) {
-    let me = layer_matrix(poseidon2_apply_me);
-    let mi = layer_matrix(poseidon2_apply_mi);
+    #[cfg(feature = "std")]
+    let (me, mi) = {
+        type Matrices = ([[F; 12]; 12], [[F; 12]; 12]);
+        static MATRICES: std::sync::OnceLock<Matrices> = std::sync::OnceLock::new();
+        MATRICES.get_or_init(|| {
+            (
+                layer_matrix(poseidon2_apply_me),
+                layer_matrix(poseidon2_apply_mi),
+            )
+        })
+    };
+    #[cfg(not(feature = "std"))]
+    let (me, mi) = (
+        layer_matrix(poseidon2_apply_me),
+        layer_matrix(poseidon2_apply_mi),
+    );
     let external: Vec<Vec<F>> = me.iter().map(|row| row.to_vec()).collect();
     let form = |basis: &[Lc], coeffs: &[F], constant: F| -> Lc {
         let parts: Vec<(F, &Lc)> = coeffs.iter().copied().zip(basis).collect();
@@ -566,6 +670,25 @@ mod tests {
 
     fn f(x: u64) -> F {
         F::from_u64_reduced(x)
+    }
+
+    #[test]
+    fn canonical_rate6_sponge_matches_accelerator_at_boundaries() {
+        for n in [0, 1, 5, 6, 7, 11, 12, 13, 32] {
+            let words: Vec<u64> = (0..n).map(|i| i as u64 * 7919 + 17).collect();
+            let message: Vec<F> = words.iter().copied().map(F::from_u64_reduced).collect();
+            let native = sponge12_native(&message);
+            assert_eq!(
+                native.map(|x| x.to_canonical_u64()),
+                qsag_accel::poseidon2::sponge12_rate6(&words)
+            );
+            let mut cs = ConstraintSystem::new();
+            let inputs: Vec<Lc> = message.iter().map(|&v| cs.alloc(v).into()).collect();
+            let out = sponge12(&mut cs, &inputs);
+            assert_eq!(out.map(|v| cs.eval(&v)), native);
+            let (shape, assignment) = cs.finish();
+            assert!(shape.is_satisfied(&assignment));
+        }
     }
 
     #[test]
