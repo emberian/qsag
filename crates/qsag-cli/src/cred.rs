@@ -3,11 +3,11 @@
 //!
 //! Subcommands:
 //! - `voprf-keygen` — 5-party `(2, 5)` dealerless verifiable lattice OPRF setup (`PiVoprf`).
-//! - `voprf-eval`   — Blinded client query + 5-server replicated evaluation with durable
-//!                    monotone counter reservation.
+//! - `voprf-eval` — Blinded client query + 5-server replicated evaluation with durable
+//!   monotone counter reservation.
 //! - `mldsa-keygen` — Dealerless `(t, n)` threshold FIPS 204 ML-DSA (`44`/`65`/`87`) setup.
-//! - `mldsa-sign`   — Sealed-`w1` abort-private `(2t - 1)`-of-`n` threshold FIPS 204 signing
-//!                    with crash-atomic [`FsNonceBurnStore`] persistence.
+//! - `mldsa-sign` — Sealed-`w1` abort-private `(2t - 1)`-of-`n` threshold FIPS 204 signing
+//!   with crash-atomic [`FsNonceBurnStore`] persistence.
 //! - `mldsa-verify` — Standard unmodified FIPS 204 `ml_dsa_verify` check.
 
 use std::collections::BTreeMap;
@@ -94,17 +94,13 @@ struct ToprfPhaseSlot {
 
 impl Drop for ToprfPhaseSlot {
     fn drop(&mut self) {
-        for slot in &mut self.private {
-            if let Some(arr) = slot {
-                for buf in arr {
-                    ct_zeroize_bytes(buf);
-                }
-            }
-        }
-        for slot in &mut self.broadcast {
-            if let Some(buf) = slot {
+        for arr in self.private.iter_mut().flatten() {
+            for buf in arr {
                 ct_zeroize_bytes(buf);
             }
+        }
+        for buf in self.broadcast.iter_mut().flatten() {
+            ct_zeroize_bytes(buf);
         }
     }
 }
@@ -613,17 +609,13 @@ impl MpcRoundSlot {
 
 impl Drop for MpcRoundSlot {
     fn drop(&mut self) {
-        for maybe_priv in &mut self.private {
-            if let Some(rows) = maybe_priv {
-                for buf in rows {
-                    ct_zeroize_bytes(buf);
-                }
-            }
-        }
-        for maybe_bcast in &mut self.broadcast {
-            if let Some(buf) = maybe_bcast {
+        for rows in self.private.iter_mut().flatten() {
+            for buf in rows {
                 ct_zeroize_bytes(buf);
             }
+        }
+        for buf in self.broadcast.iter_mut().flatten() {
+            ct_zeroize_bytes(buf);
         }
     }
 }

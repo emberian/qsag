@@ -4,12 +4,12 @@
 //!
 //! Subcommands:
 //! - `commit` — Compute the canonical classical legacy commitment (`btc-p2wpkh`,
-//!              `btc-taproot`, `eth-eoa`, or `ed25519-slip10`) without revealing the key.
-//! - `prove`  — Produce a self-contained zero-knowledge migration proof binding a legacy
-//!              spending key to a target Bech32m post-quantum `QsagAddress`, epoch anchor,
-//!              and replay-preventing nullifier.
+//!   `btc-taproot`, `eth-eoa`, or `ed25519-slip10`) without revealing the key.
+//! - `prove` — Produce a self-contained zero-knowledge migration proof binding a legacy
+//!   spending key to a target Bech32m post-quantum `QsagAddress`, epoch anchor,
+//!   and replay-preventing nullifier.
 //! - `verify` — Verify a zero-knowledge migration proof against its statement, expected
-//!              epoch, and optional expected target address / campaign domain.
+//!   epoch, and optional expected target address / campaign domain.
 
 use qsag_accel::CpuReferenceBackend;
 use qsag_accel::keccak::cshake256_framed_32;
