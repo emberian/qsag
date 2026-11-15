@@ -450,23 +450,33 @@ private theorem collinear_pairs_le_pool (S : List F) (_hS : S.Nodup)
     have hle := nodup_length_le_of_subset hMapNd hSub
     rwa [List.length_map] at hle
 
+/-- A polynomial explanation of this particular candidate, with correlated agreement.
+Unlike a global correlated-agreement premise this retains the accepted polynomial. -/
+@[expose] def HasPolynomialExplanation (x : (F → F) × (F → F)) (D : List F)
+    (d B : Nat) (α β : F) (P : UPoly F) : Prop :=
+  ∃ F_poly G_poly : List F,
+    F_poly.length ≤ d + 1 ∧ G_poly.length ≤ d ∧
+    B ≤ (D.filter (fun z => decide (evalCoeffs F_poly z = x.1 z) &&
+      decide (evalCoeffs G_poly z = x.2 z))).length ∧
+    add (ofList F_poly) (mul (line α β) (ofList G_poly)) = P
+
 /-- **`[CWYZ26]` Lemma 4.4 (`persistent_challenges_per_witness_le`)**:
     For any fixed rational pair `(F_rat, G_rat) ∈ F(X)²`, if `(f, g)` lacks correlated agreement
     `≥ A - 1`, at most `max(|S|, |D|(|D| - 1)/2)` challenges `(α, β) ∈ S × S` yield a degree-`≤ d`
     polynomial `P = F_rat + (α + β X) G_rat` agreeing with the fold on `≥ A` points of `D`. -/
-theorem persistent_challenges_per_witness_le
+theorem exceptional_persistent_challenges_per_witness_le
     (x : (F → F) × (F → F)) (D S : List F) (d A : Nat)
     (hD : D.Nodup) (hS : S.Nodup)
-    (hFar : ¬ HasCorrelatedAgreement d (A - 1) x.1 x.2 D)
     (F_rat G_rat : RatFunc F)
     (pairs : List (F × F)) (hNd : pairs.Nodup) (hPool : ∀ p ∈ pairs, p ∈ prodPool S)
     (hEx : ∀ p ∈ pairs, ∃ P : UPoly F, P.natDeg ≤ d ∧
       A ≤ (D.filter (foldAgreePt x p.1 p.2 P)).length ∧
-      ratFold F_rat G_rat p.1 p.2 = (Frac.of (D := UPoly F)).toFun P) :
+      ratFold F_rat G_rat p.1 p.2 = (Frac.of (D := UPoly F)).toFun P ∧
+      ¬ HasPolynomialExplanation x D d (A - 1) p.1 p.2 P) :
     pairs.length ≤ Nat.max S.length (D.length * (D.length - 1) / 2) := by
   have hPoly : ∀ p ∈ pairs, IsPolyDegLe d (ratFold F_rat G_rat p.1 p.2) := by
     intro p hp
-    obtain ⟨P, hdeg, _, heq⟩ := hEx p hp
+    obtain ⟨P, hdeg, _, heq, _⟩ := hEx p hp
     exact ⟨P, hdeg, heq⟩
   rcases rat_pair_collinear_or_polys d F_rat G_rat pairs hPoly with
     ⟨F_poly, G_poly, hFlen, hGlen, hFeq, hGeq⟩ | ⟨a, b, c, hab, hLine⟩
@@ -475,7 +485,7 @@ theorem persistent_challenges_per_witness_le
         decide (2 ≤ (D.filter (isAccidentalAgreement F_poly G_poly x.1 x.2 p.1 p.2)).length)) := by
       intro p hp
       refine List.mem_filter.mpr ⟨hPool p hp, decide_eq_true ?_⟩
-      obtain ⟨P, _, hAgLen, hPeq⟩ := hEx p hp
+      obtain ⟨P, _, hAgLen, hPeq, hNoExplanation⟩ := hEx p hp
       rw [hFeq, hGeq] at hPeq
       unfold ratFold at hPeq
       rw [← RingHom.map_mul, ← RingHom.map_add] at hPeq
@@ -485,7 +495,7 @@ theorem persistent_challenges_per_witness_le
           decide (evalCoeffs F_poly z = x.1 z) &&
           decide (evalCoeffs G_poly z = x.2 z))).length < A - 1 :=
         Decidable.byContradiction (fun hge =>
-          hFar ⟨F_poly, G_poly, hFlen, hGlen, by omega⟩)
+          hNoExplanation ⟨F_poly, G_poly, hFlen, hGlen, by omega, hPolyEq⟩)
       have hTot := JohnsonBound.filter_length_le_add
         (foldAgreePt x p.1 p.2 P)
         (fun z => decide (evalCoeffs F_poly z = x.1 z) && decide (evalCoeffs G_poly z = x.2 z))
@@ -516,6 +526,25 @@ theorem persistent_challenges_per_witness_le
   · exact Nat.le_trans (collinear_pairs_le_pool S hS pairs hNd hPool a b c hab hLine)
       (Nat.le_max_left S.length _)
 
+/-- Global lack of correlated agreement implies the candidate-specific exceptional bound. -/
+theorem persistent_challenges_per_witness_le
+    (x : (F → F) × (F → F)) (D S : List F) (d A : Nat)
+    (hD : D.Nodup) (hS : S.Nodup)
+    (hFar : ¬ HasCorrelatedAgreement d (A - 1) x.1 x.2 D)
+    (F_rat G_rat : RatFunc F)
+    (pairs : List (F × F)) (hNd : pairs.Nodup) (hPool : ∀ p ∈ pairs, p ∈ prodPool S)
+    (hEx : ∀ p ∈ pairs, ∃ P : UPoly F, P.natDeg ≤ d ∧
+      A ≤ (D.filter (foldAgreePt x p.1 p.2 P)).length ∧
+      ratFold F_rat G_rat p.1 p.2 = (Frac.of (D := UPoly F)).toFun P) :
+    pairs.length ≤ Nat.max S.length (D.length * (D.length - 1) / 2) := by
+  apply exceptional_persistent_challenges_per_witness_le x D S d A hD hS
+    F_rat G_rat pairs hNd hPool
+  intro p hp
+  obtain ⟨P, hd, ha, hr⟩ := hEx p hp
+  refine ⟨P, hd, ha, hr, ?_⟩
+  rintro ⟨Fp, Gp, hF, hG, hAgree, _⟩
+  exact hFar ⟨Fp, Gp, hF, hG, hAgree⟩
+
 /-! ### `[CWYZ26]` Lemma 4.5: Total Persistent Challenge Bound via Johnson Set System -/
 
 private def persValid (x : (F → F) × (F → F)) (D : List F) (d A B : Nat)
@@ -540,22 +569,23 @@ private def persRatPair (α β : F) (P H L : UPoly F) : RatFunc F × RatFunc F :
     `((D.length * (B - (d + 1))) / (B * B - D.length * (d + 1))) * max(|S|, |D|(|D| - 1)/2)`
     challenges `(α, β) ∈ S × S` admit a `B`-persistent degree-`≤ d` candidate with `≥ A`
     agreements on `D`. -/
-theorem persistent_pairs_card_le
+theorem exceptional_persistent_pairs_card_le
     (x : (F → F) × (F → F)) (D S : List F) (d A B : Nat)
     (hD : D.Nodup) (hS : S.Nodup)
     (hDen : D.length * (d + 1) < B * B)
-    (hFar : ¬ HasCorrelatedAgreement d (A - 1) x.1 x.2 D)
     (L : List (F × F)) (hNd : L.Nodup) (hPool : ∀ p ∈ L, p ∈ prodPool S)
     (hPers : ∀ p ∈ L, ∃ P : UPoly F, P.natDeg ≤ d ∧
       A ≤ (D.filter (foldAgreePt x p.1 p.2 P)).length ∧
-      IsPersistent x D d B p.1 p.2 P) :
+      IsPersistent x D d B p.1 p.2 P ∧
+      ¬ HasPolynomialExplanation x D d (A - 1) p.1 p.2 P) :
     L.length ≤ ((D.length * (B - (d + 1))) / (B * B - D.length * (d + 1))) *
       Nat.max S.length (D.length * (D.length - 1) / 2) := by
   have hEx : ∀ p ∈ L, ∃ w : UPoly F × UPoly F × UPoly F,
-      persValid x D d A B p w.1 w.2.1 w.2.2 := by
+      persValid x D d A B p w.1 w.2.1 w.2.2 ∧
+        ¬ HasPolynomialExplanation x D d (A - 1) p.1 p.2 w.1 := by
     intro p hp
-    obtain ⟨P, hPdeg, hPAg, H, Ld, hLne, hLdeg, hHdeg, hBLen⟩ := hPers p hp
-    exact ⟨(P, H, Ld), hPdeg, hPAg, hLne, hLdeg, hHdeg, hBLen⟩
+    obtain ⟨P, hPdeg, hPAg, ⟨H, Ld, hLne, hLdeg, hHdeg, hBLen⟩, hNoExplanation⟩ := hPers p hp
+    exact ⟨(P, H, Ld), ⟨hPdeg, hPAg, hLne, hLdeg, hHdeg, hBLen⟩, hNoExplanation⟩
   obtain ⟨wf, hwf⟩ := list_finite_choice _ (zero, zero, zero) L hEx
   let rpOf : F × F → RatFunc F × RatFunc F := fun p =>
     persRatPair p.1 p.2 (wf p).1 (wf p).2.1 (wf p).2.2
@@ -571,13 +601,13 @@ theorem persistent_pairs_card_le
     decide (w.2.2.eval z ≠ zero) && foldAgreePt x p.1 p.2 w.1 z &&
     decide (w.2.1.eval z = mul (x.2 z) (w.2.2.eval z))
   have hSize : ∀ rp ∈ fam, B ≤ (D.filter (fun z => memSet rp z)).length :=
-    fun rp hrp => (hwf (rep rp) (hrep rp hrp).1).2.2.2.2.2
+    fun rp hrp => (hwf (rep rp) (hrep rp hrp).1).1.2.2.2.2.2
   have hInter : fam.Pairwise (fun rp₀ rp₁ =>
       (D.filter (fun z => memSet rp₀ z && memSet rp₁ z)).length ≤ d + 1) := by
     refine JohnsonBound.pairwise_of_nodup hFamNd (fun rp₀ hrp₀ rp₁ hrp₁ hne => ?_)
     let p₀ := rep rp₀; let p₁ := rep rp₁
-    obtain ⟨hP₀d, _, hL₀ne, hL₀d, hH₀d, _⟩ := hwf p₀ (hrep rp₀ hrp₀).1
-    obtain ⟨hP₁d, _, hL₁ne, hL₁d, hH₁d, _⟩ := hwf p₁ (hrep rp₁ hrp₁).1
+    obtain ⟨hP₀d, _, hL₀ne, hL₀d, hH₀d, _⟩ := (hwf p₀ (hrep rp₀ hrp₀).1).1
+    obtain ⟨hP₁d, _, hL₁ne, hL₁d, hH₁d, _⟩ := (hwf p₁ (hrep rp₁ hrp₁).1).1
     let P₀ := (wf p₀).1; let H₀ := (wf p₀).2.1; let L₀ := (wf p₀).2.2
     let P₁ := (wf p₁).1; let H₁ := (wf p₁).2.1; let L₁ := (wf p₁).2.2
     have hL₀F : (Frac.of (D := UPoly F)).toFun L₀ ≠ zero := fun e =>
@@ -683,12 +713,12 @@ theorem persistent_pairs_card_le
       (L.filter (fun p => decide (rpOf p = rp))).length ≤
         Nat.max S.length (D.length * (D.length - 1) / 2) := by
     intro rp _
-    refine persistent_challenges_per_witness_le x D S d A hD hS hFar rp.1 rp.2
+    refine exceptional_persistent_challenges_per_witness_le x D S d A hD hS rp.1 rp.2
       (L.filter (fun p => decide (rpOf p = rp))) (nodup_filter _ L hNd)
       (fun p hp => hPool p (List.mem_filter.mp hp).1) (fun p hp => ?_)
     obtain ⟨hpL, hrpEqB⟩ := List.mem_filter.mp hp
     have hval := hwf p hpL
-    refine ⟨(wf p).1, hval.1, hval.2.1, ?_⟩
+    refine ⟨(wf p).1, hval.1.1, hval.1.2.1, ?_, hval.2⟩
     rw [← of_decide_eq_true hrpEqB]
     dsimp [rpOf, persRatPair, ratFold]
     constructive_ring
@@ -696,6 +726,25 @@ theorem persistent_pairs_card_le
     (JohnsonBound.mem_dedupFirst_iff (rpOf p) _).mpr (List.mem_map.mpr ⟨p, hp, rfl⟩)
   exact Nat.le_trans (JohnsonBound.count_partition_le rpOf _ L fam hCov hFib)
     (Nat.mul_le_mul_right _ hFamLen)
+
+/-- The original far-word bound is a corollary of the candidate-specific result. -/
+theorem persistent_pairs_card_le
+    (x : (F → F) × (F → F)) (D S : List F) (d A B : Nat)
+    (hD : D.Nodup) (hS : S.Nodup)
+    (hDen : D.length * (d + 1) < B * B)
+    (hFar : ¬ HasCorrelatedAgreement d (A - 1) x.1 x.2 D)
+    (L : List (F × F)) (hNd : L.Nodup) (hPool : ∀ p ∈ L, p ∈ prodPool S)
+    (hPers : ∀ p ∈ L, ∃ P : UPoly F, P.natDeg ≤ d ∧
+      A ≤ (D.filter (foldAgreePt x p.1 p.2 P)).length ∧
+      IsPersistent x D d B p.1 p.2 P) :
+    L.length ≤ ((D.length * (B - (d + 1))) / (B * B - D.length * (d + 1))) *
+      Nat.max S.length (D.length * (D.length - 1) / 2) := by
+  apply exceptional_persistent_pairs_card_le x D S d A B hD hS hDen L hNd hPool
+  intro p hp
+  obtain ⟨P, hd, ha, hpers⟩ := hPers p hp
+  refine ⟨P, hd, ha, hpers, ?_⟩
+  rintro ⟨Fp, Gp, hF, hG, hAgree, _⟩
+  exact hFar ⟨Fp, Gp, hF, hG, hAgree⟩
 
 end Persistent
 

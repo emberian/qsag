@@ -96,7 +96,7 @@ theorem modPoly2Hom_self (E : Poly2 E_fld) (hPrim : IsPrimY E) (hDeg : 1 ≤ E.n
     dsimp only [M, monicFY]
     rw [← LawfulCommRing.mul_assoc]
     have hC : mul (C (liftFY.toFun E).lead) (C (LawfulField.inv (liftFY.toFun E).lead)) = one := by
-      rw [← CHom.map_mul, LawfulField.mul_inv_cancel hLeadNe, CHom.map_one]
+      rw [← CHom_apply, ← CHom_apply, ← CHom.map_mul, LawfulField.mul_inv_cancel hLeadNe, CHom.map_one]
     rw [hC, LawfulCommRing.one_mul]
   change (ModMonic.modQuotHom M).toFun (liftFY.toFun E) = zero
   rw [hEq, RingHom.map_mul, ModMonic.modQuotHom_self_eq_zero M, LawfulCommRing.mul_zero]
@@ -149,7 +149,8 @@ theorem modUnitOrSplit (E : Poly2 E_fld) (hPrim : IsPrimY E) (hDeg : 1 ≤ E.nat
           cases k with | zero => omega | succ k => exact coeffAt_C_succ _ k
         omega
       rw [hX0] at hDegMul
-      have := x.reduced; omega
+      have hReduced : x.rep.natDeg < E.natDeg := x.reduced
+      omega
     have hRep0 : x.rep = zero := by
       rw [hX0_zero, RingHom.map_zero] at hX0
       exact mul_right_cancel' hCdxNe (by rw [LawfulCommRing.zero_mul, LawfulCommRing.mul_comm]; exact hX0)
@@ -210,7 +211,7 @@ theorem d5_xgcd_mod (E : Poly2 E_fld) (hPrim : IsPrimY E) (hDeg : 1 ≤ E.natDeg
           dsimp only [G]
           have h1 : mul (mul (C c_inv) A) (C A.lead) = mul (mul (C A.lead) (C c_inv)) A := by
             constructive_ring
-          rw [h1, ← CHom.map_mul, LawfulCommRing.mul_comm, hInv, CHom.map_one, LawfulCommRing.one_mul]
+          rw [h1, ← CHom_apply, ← CHom_apply, ← CHom.map_mul, LawfulCommRing.mul_comm A.lead c_inv, hInv, CHom.map_one, LawfulCommRing.one_mul]
         have hGNe : G ≠ zero := fun e => hA0 (by rw [hAG, e, LawfulCommRing.zero_mul])
         have hGdeg : G.natDeg = A.natDeg := by
           apply Nat.le_antisymm
@@ -218,6 +219,7 @@ theorem d5_xgcd_mod (E : Poly2 E_fld) (hPrim : IsPrimY E) (hDeg : 1 ≤ E.natDeg
             have hC0 : (C c_inv).natDeg = 0 := by
               apply Nat.le_zero.mp; apply natDeg_le_of_coeffAt; intro k hk
               cases k with | zero => omega | succ k => exact coeffAt_C_succ _ k
+            change G.natDeg ≤ (C c_inv).natDeg + A.natDeg at h1
             omega
           · have h1 := natDeg_mul_le G (C A.lead)
             rw [← hAG] at h1
@@ -233,6 +235,7 @@ theorem d5_xgcd_mod (E : Poly2 E_fld) (hPrim : IsPrimY E) (hDeg : 1 ≤ E.natDeg
     | succ fuel ih =>
       intro A B hLen hA0
       if hB0 : B = zero then
+        subst B
         exact ih A zero (by rw [coeffs_zero]; exact Nat.zero_le _) hA0
       else
         rcases modUnitOrSplit E hPrim hDeg B.lead with hLead0 | ⟨c_inv, hInv⟩ | hSplit
@@ -245,7 +248,7 @@ theorem d5_xgcd_mod (E : Poly2 E_fld) (hPrim : IsPrimY E) (hDeg : 1 ≤ E.natDeg
               | zero => rw [coeffAt_C_zero]; unfold lead; rw [hBdeg0]
               | succ k => rw [coeffAt_C_succ]; exact B.coeffAt_eq_zero_of_natDeg_lt (by omega)
             have hBez1 : add (mul zero A) (mul (C c_inv) B) = one := by
-              rw [LawfulCommRing.zero_mul, LawfulCommRing.zero_add, hBC, ← CHom.map_mul, hInv, CHom.map_one]
+              rw [LawfulCommRing.zero_mul, LawfulCommRing.zero_add, hBC, ← CHom_apply, ← CHom_apply, ← CHom.map_mul, hInv, CHom.map_one]
             exact ⟨one, zero, C c_inv, NontrivialRing.one_ne_zero,
               by rw [natDeg_one, one_eq_C, coeffAt_C_zero], hBez1,
               ⟨A, (LawfulCommRing.one_mul A).symm⟩, ⟨B, (LawfulCommRing.one_mul B).symm⟩⟩
@@ -255,6 +258,8 @@ theorem d5_xgcd_mod (E : Poly2 E_fld) (hPrim : IsPrimY E) (hDeg : 1 ≤ E.natDeg
             obtain ⟨hDiv, hRemLt⟩ := divModLead_spec B B.natDeg c_inv hBpos (Nat.le_refl _) hInvCoeff A
             let Q := (divModLead B B.natDeg c_inv A).1
             let R_rem := (divModLead B B.natDeg c_inv A).2
+            change A = add (mul Q B) R_rem at hDiv
+            change R_rem.natDeg < B.natDeg at hRemLt
             have hRemLen : R_rem.coeffs.length ≤ fuel := by
               if hR0 : R_rem = zero then
                 rw [hR0, coeffs_zero]; exact Nat.zero_le _
@@ -415,7 +420,7 @@ theorem curve_leaf_root_decomp {h_C H₀ : Nat} {C₁ : Poly2 E_fld} {P₀ : UPo
             have hg1_zero : φ.toFun g₁ = zero := by
               dsimp only [g₁]
               rw [map_sylResDeriv φ, RingHom.map_one]
-              exact sylResDeriv_eq_zero_of_common_factor_ge_two hdG2 (by omega) hC1_mod_deg
+              exact sylResDeriv_eq_zero_of_common_factor_ge_two hdG2 (by omega)
                 hP0_mod_deg (Nat.le_refl d_G) hGmon hQC (by omega) hQP
             obtain ⟨u0, v0, c, hc, hCopEq⟩ := hCopG1
             have hApp := congrArg φ.toFun hCopEq
@@ -429,7 +434,7 @@ theorem curve_leaf_root_decomp {h_C H₀ : Nat} {C₁ : Poly2 E_fld} {P₀ : UPo
             have hGlin : G = sub X (C ζ) := by
               apply ext_coeffAt; intro k
               have hSubEq : sub X (C ζ) = add X (C (coeffAt G.coeffs 0)) := by
-                dsimp only [ζ]; rw [LawfulCommRing.sub_eq_add_neg, ← RingHom.map_neg CHom,
+                dsimp only [ζ]; rw [LawfulCommRing.sub_eq_add_neg, ← CHom_apply, ← RingHom.map_neg CHom,
                   CHom_apply, LawfulCommRing.neg_neg]
               rw [hSubEq, coeffAt_add]
               cases k with

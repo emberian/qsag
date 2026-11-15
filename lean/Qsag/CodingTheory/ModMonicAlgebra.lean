@@ -201,7 +201,10 @@ theorem remM_of_lt (M : MonicPoly R) {P : UPoly R} (hP : P.natDeg < M.deg) :
 structure ModMonic (M : MonicPoly R) where
   rep : UPoly R
   reduced : rep.natDeg < M.deg
-  deriving DecidableEq
+
+instance (M : MonicPoly R) : DecidableEq (ModMonic M) := fun a b =>
+  if h : a.rep = b.rep then isTrue (ModMonic.ext h)
+  else isFalse (fun e => h (congrArg ModMonic.rep e))
 
 namespace ModMonic
 
@@ -284,7 +287,12 @@ instance (M : MonicPoly R) : LawfulCommRing (ModMonic M) where
           (mul (mul (quotM M (mul a.rep b.rep)) M.poly) c.rep) := by
       rw [← hEqABC]; constructive_ring
     rw [hRemEq]
-    conv => lhs; lhs; lhs; rhs; rhs; rw [hR]
+    have hR' : remM M (mul a.rep (remM M (mul b.rep c.rep))) =
+        sub (mul a.rep (remM M (mul b.rep c.rep)))
+          (mul (quotM M (mul a.rep (remM M (mul b.rep c.rep)))) M.poly) := by
+      conv => rhs; lhs; rw [hR]
+      constructive_ring
+    conv => lhs; rhs; rw [hR']
     constructive_ring
 
 instance [NontrivialRing R] (M : MonicPoly R) : NontrivialRing (ModMonic M) where
@@ -301,14 +309,16 @@ def modQuotHom (M : MonicPoly R) : RingHom (UPoly R) (ModMonic M) where
     apply ModMonic.ext
     exact remM_of_lt M (by rw [one_eq_C]; exact natDeg_C_lt M one)
   map_add A B := by
-    apply ModMonic.ext; dsimp
+    apply ModMonic.ext
+    change remM M (add A B) = add (remM M A) (remM M B)
     obtain ⟨hA, hAd⟩ := quotM_remM_spec M A
     obtain ⟨hB, hBd⟩ := quotM_remM_spec M B
     refine remM_eq_of_sub_mul M (Q := add (quotM M A) (quotM M B)) ?_ (natDeg_add_lt M hAd hBd)
     conv => lhs; lhs; rw [hA, hB]
     constructive_ring
   map_mul A B := by
-    apply ModMonic.ext; dsimp
+    apply ModMonic.ext
+    change remM M (mul A B) = remM M (mul (remM M A) (remM M B))
     obtain ⟨hA, _⟩ := quotM_remM_spec M A
     obtain ⟨hB, _⟩ := quotM_remM_spec M B
     obtain ⟨hR, hRd⟩ := quotM_remM_spec M (mul (remM M A) (remM M B))
@@ -317,7 +327,12 @@ def modQuotHom (M : MonicPoly R) : RingHom (UPoly R) (ModMonic M) where
           (add (mul (quotM M A) (remM M B)) (mul (remM M A) (quotM M B))))
         (quotM M (mul (remM M A) (remM M B)))) ?_ hRd
     conv => lhs; lhs; rw [hA, hB]
-    conv => lhs; lhs; rhs; rhs; rw [hR]
+    have hR' : remM M (mul (remM M A) (remM M B)) =
+        sub (mul (remM M A) (remM M B))
+          (mul (quotM M (mul (remM M A) (remM M B))) M.poly) := by
+      conv => rhs; lhs; rw [hR]
+      constructive_ring
+    conv => lhs; rhs; rw [hR']
     constructive_ring
 
 def modInl (M : MonicPoly R) : RingHom R (ModMonic M) :=
@@ -345,17 +360,19 @@ theorem eval_mapHom_modInl (M : MonicPoly R) (P : UPoly R) :
   change eval₂ ((modQuotHom M).comp CHom) ((modQuotHom M).toFun X) P = (modQuotHom M).toFun P
   have hIdP : P = eval₂ CHom X P := by
     conv => lhs; rw [← ofList_coeffs P]
+    change ofList P.coeffs = evalCoeffs (P.coeffs.map CHom.toFun) X
     generalize P.coeffs = l
     induction l with
     | nil => rfl
     | cons c cs ih =>
       show ofList (c :: cs) = add (C c) (mul X _)
-      rw [ofList_cons, ← ih]; rfl
+      rw [ofList_cons, ← ih]
   conv => rhs; rw [hIdP]
   exact (hom_eval₂ (modQuotHom M) CHom X P).symm
 
 theorem modQuotHom_self_eq_zero (M : MonicPoly R) : (modQuotHom M).toFun M.poly = zero := by
-  apply ModMonic.ext; dsimp [modQuotHom]
+  apply ModMonic.ext
+  change remM M M.poly = zero
   exact remM_eq_of_sub_mul M (Q := one)
     (by rw [LawfulCommRing.sub_zero, LawfulCommRing.one_mul]) (natDeg_zero_lt M)
 
@@ -369,7 +386,7 @@ end ModMonic
 
 theorem sylResDeriv_eq_zero_of_common_factor_ge_two {m N d_G : Nat}
     {C1 P0 G Q_C Q_P : UPoly R}
-    (hdG : 2 ≤ d_G) (hdGm : d_G ≤ m) (hC1 : C1.natDeg ≤ m) (hP0 : P0.natDeg ≤ N)
+    (hdG : 2 ≤ d_G) (hdGm : d_G ≤ m) (hP0 : P0.natDeg ≤ N)
     (hGdeg : G.natDeg ≤ d_G) (hGmon : coeffAt G.coeffs d_G = one)
     (hC1fac : C1 = mul G Q_C) (hQCdeg : Q_C.natDeg ≤ m - d_G)
     (hP0fac : P0 = mul G Q_P) :
@@ -385,14 +402,16 @@ theorem sylResDeriv_eq_zero_of_common_factor_ge_two {m N d_G : Nat}
   rw [hG1root, hC0_1, LawfulCommRing.zero_add] at hG1div
   let G1 := divXSub G_1 T1
   have hG1_le : G1.natDeg ≤ d_G - 1 := by
-    have := natDeg_mapHom_le φ1 G; omega
+    have hmap : G_1.natDeg ≤ G.natDeg := natDeg_mapHom_le φ1 G
+    change (divXSub G_1 T1).natDeg ≤ d_G - 1
+    omega
   have hG1_mon : coeffAt G1.coeffs (d_G - 1) = one := by
     have hTop : coeffAt G_1.coeffs d_G = one := by
       dsimp only [G_1]; rw [coeffAt_mapHom, hGmon, φ1.map_one]
     have hExpand : mul (sub X (C T1)) G1 = sub (mul X G1) (mul (C T1) G1) := by constructive_ring
     obtain ⟨d', hd'⟩ : ∃ d', d_G = d' + 1 := ⟨d_G - 1, by omega⟩
     rw [hG1div, hExpand, hd', coeffAt_sub, coeffAt_X_mul_succ, coeffAt_C_mul,
-      G1.coeffAt_eq_zero_of_natDeg_lt (by omega), LawfulCommRing.mul_zero,
+      G1.coeffAt_eq_zero_of_natDeg_lt (k := d' + 1) (by omega), LawfulCommRing.mul_zero,
       LawfulCommRing.sub_zero] at hTop
     rwa [show d_G - 1 = d' by omega]
   let C1_1 := (mapHom φ1).toFun C1
@@ -409,7 +428,7 @@ theorem sylResDeriv_eq_zero_of_common_factor_ge_two {m N d_G : Nat}
     rw [RingHom.map_mul, evalHom_apply, hG1root, LawfulCommRing.zero_mul]
   have hG1QC_deg : (mul G1 QC_1).natDeg ≤ m - 1 := by
     have h1 := natDeg_mul_le G1 QC_1
-    have h2 := natDeg_mapHom_le φ1 Q_C
+    have h2 : QC_1.natDeg ≤ Q_C.natDeg := natDeg_mapHom_le φ1 Q_C
     omega
   have hP0_1_deg : P0_1.natDeg ≤ N := Nat.le_trans (natDeg_mapHom_le φ1 P0) hP0
   have hOne_deg : (one : UPoly (ModMonic M1)).natDeg ≤ N := by
@@ -436,7 +455,7 @@ theorem sylResDeriv_eq_zero_of_common_factor_ge_two {m N d_G : Nat}
       rw [hP0fac, RingHom.map_mul]; change ((mapHom φ2).toFun (mul G_1 QP_1)).eval T2 = zero
       rw [hG1div, RingHom.map_mul, RingHom.map_mul]
       change (evalHom T2).toFun _ = zero
-      rw [RingHom.map_mul, RingHom.map_mul, evalHom_apply ((mapHom φ2).toFun G1), hG1_2_root,
+      rw [RingHom.map_mul, RingHom.map_mul, evalHom_apply T2 ((mapHom φ2).toFun G1), hG1_2_root,
         LawfulCommRing.mul_zero, LawfulCommRing.zero_mul]
   apply ModMonic.modInl_inj M1
   apply ModMonic.modInl_inj M2
