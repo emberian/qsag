@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.PallasAndBlsMigration — Zcash Orchard (`Pallas` / `RedPallas`) & Ethereum Beacon (`BLS12-381`) PQ Ownership Migration
+# Qsag.Protocol.Migration.PallasAndBlsMigration — Zcash Orchard (`Pallas` / `RedPallas`) & Ethereum Beacon (`BLS12-381`) PQ Ownership Migration
 
 Constructive (`0 Classical.choice`, `0 native_decide`, `0 sorry`) formalization of:
 1. Exact `Pallas` (`y^2 = x^3 + 5`, `p_pallas`, `q_pallas`, `orchardSpendAuthG`) and `BLS12-381` (`y^2 = x^3 + 4`, `p_bls381`, `r_bls381`, `bls381G1`) parameters matching `pallas.rs` and `bls12_381.rs`.

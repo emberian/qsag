@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.PrattPrimalityCert — Kernel-Checked Pocklington–Pratt Primality Certificates
+# Qsag.Protocol.Migration.PrattPrimalityCert — Kernel-Checked Pocklington–Pratt Primality Certificates
 
 Constructive (`0 sorry`, `0 axiom`, `0 Classical.choice`, `0 native_decide`) primality
 certificate verifier over `Nat` using fueled binary modular exponentiation (`powModFuel`)
@@ -18,9 +18,9 @@ Given a topological chain of `PocklingtonStep` witnesses starting from base prim
    `SECP256K1_FIELD_P = 2^256 - 2^32 - 977` and scalar subgroup order `SECP256K1_ORDER_N`.
 -/
 
-public import Qsag.Goldilocks
-public import Qsag.ActiveMigrationZeroTest
-import all Qsag.ActiveMigrationZeroTest
+public import Qsag.Math.Goldilocks
+public import Qsag.Protocol.Migration.ActiveMigrationZeroTest
+import all Qsag.Protocol.Migration.ActiveMigrationZeroTest
 public import Qsag.Tactic.AssuranceKit
 
 public section

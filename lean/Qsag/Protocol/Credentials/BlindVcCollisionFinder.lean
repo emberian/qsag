@@ -1,8 +1,8 @@
 module
 
-public import Qsag.BlindVcQromSecurity
-import all Qsag.BlindVcQromSecurity
-import all Qsag.ThresholdMlDsaAndToprf
+public import Qsag.Protocol.Credentials.BlindVcQromSecurity
+import all Qsag.Protocol.Credentials.BlindVcQromSecurity
+import all Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
 
 /-!
 Executable collision extraction, rate-6 / capacity-6 6-limb sponge coherence,
