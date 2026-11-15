@@ -12,6 +12,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use qsag_accel::ct::ct_zeroize_bytes;
@@ -19,8 +20,8 @@ use qsag_accel::keccak::cshake256_framed_32;
 use qsag_cred::voprf::{self, CounterStore, PublicKey as ToprfPublicKey, SERVERS as TOPRF_SERVERS};
 use qsag_cred::{
     FsNonceBurnStore, MlDsaLevel, MpcTransport, MpcTransportError, RoundInbox, RoundInfo,
-    ThresholdMlDsaDkgConfig, ThresholdMlDsaError, ThresholdMlDsaSignerShare, ThresholdSignSession,
-    ml_dsa_verify, threshold_mldsa_dkg_party, threshold_sign_mldsa_party,
+    RoundKind, ThresholdMlDsaDkgConfig, ThresholdMlDsaError, ThresholdMlDsaSignerShare,
+    ThresholdSignSession, ml_dsa_verify, threshold_mldsa_dkg_party, threshold_sign_mldsa_party,
 };
 
 use crate::cli::{
@@ -59,8 +60,8 @@ fn ensure_absent(path: &str) -> Result<(), CliError> {
 
 fn load_json_checked(path: &str, expected_format: &str, max_bytes: u64) -> Result<Json, CliError> {
     let bytes = read_bounded_file(path, max_bytes)?;
-    let text =
-        std::str::from_utf8(&bytes.0).map_err(|_| CliError::input(format!("{path} is not UTF-8")))?;
+    let text = std::str::from_utf8(&bytes.0)
+        .map_err(|_| CliError::input(format!("{path} is not UTF-8")))?;
     let json = Json::parse(text)?;
     if json.field_str("format")? != expected_format {
         return Err(CliError::input(format!(
@@ -140,7 +141,11 @@ impl voprf::Transport for LocalToprfEndpoint {
         outgoing: [Vec<u8>; TOPRF_SERVERS],
     ) -> Result<[Vec<u8>; TOPRF_SERVERS], voprf::Error> {
         let key = (phase, false);
-        let mut guard = self.hub.phases.lock().map_err(|_| voprf::Error::Transport)?;
+        let mut guard = self
+            .hub
+            .phases
+            .lock()
+            .map_err(|_| voprf::Error::Transport)?;
         {
             let slot = guard.entry(key).or_default();
             if slot.aborted || slot.private[self.party].is_some() {
@@ -166,7 +171,11 @@ impl voprf::Transport for LocalToprfEndpoint {
                 });
                 return Ok(inbox);
             }
-            guard = self.hub.cv.wait(guard).map_err(|_| voprf::Error::Transport)?;
+            guard = self
+                .hub
+                .cv
+                .wait(guard)
+                .map_err(|_| voprf::Error::Transport)?;
         }
     }
 
@@ -176,7 +185,11 @@ impl voprf::Transport for LocalToprfEndpoint {
         message: Vec<u8>,
     ) -> Result<[Vec<u8>; TOPRF_SERVERS], voprf::Error> {
         let key = (phase, true);
-        let mut guard = self.hub.phases.lock().map_err(|_| voprf::Error::Transport)?;
+        let mut guard = self
+            .hub
+            .phases
+            .lock()
+            .map_err(|_| voprf::Error::Transport)?;
         {
             let slot = guard.entry(key).or_default();
             if slot.aborted || slot.broadcast[self.party].is_some() {
@@ -199,7 +212,11 @@ impl voprf::Transport for LocalToprfEndpoint {
                 });
                 return Ok(inbox);
             }
-            guard = self.hub.cv.wait(guard).map_err(|_| voprf::Error::Transport)?;
+            guard = self
+                .hub
+                .cv
+                .wait(guard)
+                .map_err(|_| voprf::Error::Transport)?;
         }
     }
 }
@@ -219,9 +236,7 @@ impl CounterStore for FsToprfCounterStore {
             "counter key",
         )
         .map_err(|_| voprf::Error::Counter)?;
-        let party = json
-            .field_u64("party")
-            .map_err(|_| voprf::Error::Counter)? as usize;
+        let party = json.field_u64("party").map_err(|_| voprf::Error::Counter)? as usize;
         if key != self.expected_key || party != self.expected_party {
             return Err(voprf::Error::Counter);
         }
@@ -387,7 +402,11 @@ fn voprf_keygen(raw: &[String]) -> Result<(), CliError> {
         ("session_id", Json::hex(&session)),
         ("commitment", Json::hex(&commitment)),
     ]);
-    write_new(&voprf_meta_path(vault_dir), meta.to_pretty().as_bytes(), true)?;
+    write_new(
+        &voprf_meta_path(vault_dir),
+        meta.to_pretty().as_bytes(),
+        true,
+    )?;
 
     let pub_doc = Json::object(vec![
         ("format", Json::str(VOPRF_PUB_FORMAT)),
@@ -438,11 +457,16 @@ fn voprf_eval(raw: &[String]) -> Result<(), CliError> {
     private_dir(vault_dir, false)?;
 
     let input = read_input_arg(&args)?;
-    let meta = load_json_checked(&voprf_meta_path(vault_dir), VOPRF_META_FORMAT, MAX_KEY_FILE_BYTES)?;
+    let meta = load_json_checked(
+        &voprf_meta_path(vault_dir),
+        VOPRF_META_FORMAT,
+        MAX_KEY_FILE_BYTES,
+    )?;
     let pub_json = load_json_checked(public_path, VOPRF_PUB_FORMAT, MAX_KEY_FILE_BYTES)?;
     let session = from_hex_exact::<32>(meta.field_str("session_id")?, "session_id")?;
     let commitment = from_hex_exact::<32>(meta.field_str("commitment")?, "commitment")?;
-    let pub_commitment = from_hex_exact::<32>(pub_json.field_str("commitment")?, "public commitment")?;
+    let pub_commitment =
+        from_hex_exact::<32>(pub_json.field_str("commitment")?, "public commitment")?;
     if commitment != pub_commitment {
         return Err(CliError::verify(
             "public file commitment does not match TOPRF vault",
@@ -622,6 +646,7 @@ impl Drop for MpcRoundSlot {
 
 struct SharedMpcHub {
     parties: usize,
+    aborted: AtomicBool,
     rounds: Mutex<BTreeMap<(u64, u8), MpcRoundSlot>>,
     cv: Condvar,
 }
@@ -630,12 +655,14 @@ impl SharedMpcHub {
     fn new(parties: usize) -> Arc<Self> {
         Arc::new(Self {
             parties,
+            aborted: AtomicBool::new(false),
             rounds: Mutex::new(BTreeMap::new()),
             cv: Condvar::new(),
         })
     }
 
     fn abort_all(&self) {
+        self.aborted.store(true, Ordering::SeqCst);
         if let Ok(mut map) = self.rounds.lock() {
             for slot in map.values_mut() {
                 slot.aborted = true;
@@ -663,6 +690,9 @@ impl MpcTransport for LocalMpcEndpoint {
         }
         let key = (info.index, info.phase);
         let mut guard = self.hub.rounds.lock().map_err(|_| MpcTransportError)?;
+        if self.hub.aborted.load(Ordering::SeqCst) {
+            return Err(MpcTransportError);
+        }
         {
             let slot = guard.entry(key).or_insert_with(|| MpcRoundSlot::new(n));
             if slot.aborted || slot.private[self.me].is_some() {
@@ -705,6 +735,125 @@ impl MpcTransport for LocalMpcEndpoint {
             guard = self.hub.cv.wait(guard).map_err(|_| MpcTransportError)?;
         }
     }
+}
+
+// A local restoration capsule contains only this party's entropy and received
+// enrollment messages. It never contains another party's entropy or inbox.
+// Until the core exposes a direct share codec, replaying this authenticated local
+// transcript rebuilds one share without contacting or reconstructing absent peers.
+const MLDSA_SHARE_FORMAT: &str = "qsag-cred-mldsa-local-share-v1";
+const MLDSA_BUNDLE_LIMIT: u64 = 256 * 1024 * 1024;
+
+fn round_binding(info: RoundInfo, private: &[Vec<u8>], broadcast: &[u8]) -> [u8; 32] {
+    let kind = match info.kind {
+        RoundKind::KeySetup => 0,
+        RoundKind::KeyConfirm => 1,
+        RoundKind::Multiply => 2,
+        RoundKind::VerifyReshare => 3,
+        RoundKind::ViewDigest => 4,
+        RoundKind::Open => 5,
+        RoundKind::Confirm => 6,
+    };
+    let index = info.index.to_le_bytes();
+    let phase_kind = [info.phase, kind];
+    let mut frames = vec![index.as_slice(), phase_kind.as_slice(), broadcast];
+    frames.extend(private.iter().map(Vec::as_slice));
+    cshake256_framed_32(b"QSAG.CLI.TMLDSA.LOCAL_ROUND.V1", &frames)
+}
+
+struct RecordingMpc {
+    net: LocalMpcEndpoint,
+    transcript: ZeroizingBuf,
+}
+
+impl MpcTransport for RecordingMpc {
+    fn exchange(
+        &mut self,
+        info: RoundInfo,
+        private: Vec<Vec<u8>>,
+        broadcast: Vec<u8>,
+    ) -> Result<RoundInbox, MpcTransportError> {
+        let binding = round_binding(info, &private, &broadcast);
+        let inbox = self.net.exchange(info, private, broadcast)?;
+        self.transcript.0.extend_from_slice(&binding);
+        for row in [&inbox.private, &inbox.broadcast] {
+            self.transcript
+                .0
+                .extend_from_slice(&(row.len() as u64).to_le_bytes());
+            for bytes in row {
+                self.transcript
+                    .0
+                    .extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+                self.transcript.0.extend_from_slice(bytes);
+            }
+        }
+        if self.transcript.len() as u64 > MLDSA_BUNDLE_LIMIT / 2 - 4096 {
+            return Err(MpcTransportError);
+        }
+        Ok(inbox)
+    }
+}
+
+struct RestoringMpc<'a> {
+    remaining: &'a [u8],
+    parties: usize,
+}
+
+impl RestoringMpc<'_> {
+    fn take(&mut self, len: usize) -> Result<&[u8], MpcTransportError> {
+        if len > self.remaining.len() {
+            return Err(MpcTransportError);
+        }
+        let (head, tail) = self.remaining.split_at(len);
+        self.remaining = tail;
+        Ok(head)
+    }
+    fn number(&mut self) -> Result<usize, MpcTransportError> {
+        let bytes = self.take(8)?;
+        usize::try_from(u64::from_le_bytes(
+            bytes.try_into().map_err(|_| MpcTransportError)?,
+        ))
+        .map_err(|_| MpcTransportError)
+    }
+    fn row(&mut self, out: &mut Vec<Vec<u8>>) -> Result<(), MpcTransportError> {
+        if self.number()? != self.parties {
+            return Err(MpcTransportError);
+        }
+        for _ in 0..self.parties {
+            let len = self.number()?;
+            out.push(self.take(len)?.to_vec());
+        }
+        Ok(())
+    }
+}
+
+impl MpcTransport for RestoringMpc<'_> {
+    fn exchange(
+        &mut self,
+        info: RoundInfo,
+        mut private: Vec<Vec<u8>>,
+        mut broadcast: Vec<u8>,
+    ) -> Result<RoundInbox, MpcTransportError> {
+        let binding = round_binding(info, &private, &broadcast);
+        for bytes in &mut private {
+            ct_zeroize_bytes(bytes);
+        }
+        ct_zeroize_bytes(&mut broadcast);
+        if self.take(32)? != binding {
+            return Err(MpcTransportError);
+        }
+        let mut inbox = RoundInbox::default();
+        self.row(&mut inbox.private)?;
+        self.row(&mut inbox.broadcast)?;
+        Ok(inbox)
+    }
+}
+
+fn mldsa_share_path(vault_dir: &str, party: usize) -> String {
+    Path::new(vault_dir)
+        .join(format!("mldsa-party-{party}.share"))
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn parse_mldsa_level(spec: Option<&str>) -> Result<(MlDsaLevel, &'static str), CliError> {
@@ -764,38 +913,39 @@ fn map_mldsa_err(err: ThresholdMlDsaError) -> CliError {
 fn run_mldsa_dkg_threads(
     config: &ThresholdMlDsaDkgConfig,
     entropies: &[Secret32],
-) -> Result<Vec<ThresholdMlDsaSignerShare>, CliError> {
+) -> Result<Vec<(ThresholdMlDsaSignerShare, ZeroizingBuf)>, CliError> {
     let n = config.party_ids.len();
     let hub = SharedMpcHub::new(n);
-    let outputs: Vec<Result<ThresholdMlDsaSignerShare, ThresholdMlDsaError>> =
-        std::thread::scope(|s| {
-            let mut handles = Vec::with_capacity(n);
-            for (pos, (&party_id, ent)) in config.party_ids.iter().zip(entropies).enumerate() {
-                let hub_ref = Arc::clone(&hub);
-                let cfg_clone = config.clone();
-                let seed_bytes = ent.0;
-                handles.push(s.spawn(move || {
-                    let mut net = LocalMpcEndpoint {
+    let outputs: Vec<Result<_, ThresholdMlDsaError>> = std::thread::scope(|s| {
+        let mut handles = Vec::with_capacity(n);
+        for (pos, (&party_id, ent)) in config.party_ids.iter().zip(entropies).enumerate() {
+            let hub_ref = Arc::clone(&hub);
+            let cfg_clone = config.clone();
+            let seed_bytes = ent.0;
+            handles.push(s.spawn(move || {
+                let mut net = RecordingMpc {
+                    net: LocalMpcEndpoint {
                         me: pos,
                         hub: Arc::clone(&hub_ref),
-                    };
-                    let res =
-                        threshold_mldsa_dkg_party(&cfg_clone, party_id, &seed_bytes, &mut net);
-                    if res.is_err() {
-                        hub_ref.abort_all();
-                    }
-                    res
-                }));
-            }
-            handles
-                .into_iter()
-                .map(|h| {
-                    h.join().unwrap_or(Err(ThresholdMlDsaError::Mpc(
-                        qsag_cred::MpcError::Transport,
-                    )))
-                })
-                .collect()
-        });
+                    },
+                    transcript: ZeroizingBuf(Vec::new()),
+                };
+                let res = threshold_mldsa_dkg_party(&cfg_clone, party_id, &seed_bytes, &mut net);
+                if res.is_err() {
+                    hub_ref.abort_all();
+                }
+                res.map(|share| (share, net.transcript))
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|h| {
+                h.join().unwrap_or(Err(ThresholdMlDsaError::Mpc(
+                    qsag_cred::MpcError::Transport,
+                )))
+            })
+            .collect()
+    });
     outputs
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
@@ -805,18 +955,37 @@ fn run_mldsa_dkg_threads(
 fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
     let args = Args::parse(
         raw,
-        &["threshold", "parties", "level", "vault-dir", "public-out"],
-        &["deterministic", "json", "help"],
+        &[
+            "threshold",
+            "parties",
+            "level",
+            "vault-dir",
+            "public-out",
+            "passphrase-env",
+            "passphrase-file",
+        ],
+        &["deterministic", "allow-unencrypted", "json", "help"],
     )?;
     if args.flag("help") {
         println!(
-            "qsag cred mldsa-keygen [--threshold <t>] [--parties <n>] [--level <44|65|87>] --vault-dir <dir> --public-out <path> [--deterministic] [--json]"
+            "qsag cred mldsa-keygen [--threshold <t>] [--parties <n>] [--level <44|65|87>] --vault-dir <dir> --public-out <path> [--passphrase-env <VAR> | --passphrase-file <PATH>] [--allow-unencrypted] [--deterministic] [--json]"
         );
         return Ok(());
     }
     args.no_positionals()?;
-    let threshold = args.get_u64("threshold")?.unwrap_or(2) as usize;
-    let parties = args.get_u64("parties")?.unwrap_or(3) as usize;
+    let passphrase = crate::envelope::passphrase(&args)?;
+    if passphrase.is_none() && !args.flag("deterministic") && !args.flag("allow-unencrypted") {
+        return Err(CliError::usage(
+            "custodian enrollment requires --passphrase-env/--passphrase-file (or explicit --allow-unencrypted)",
+        ));
+    }
+    let threshold = usize::try_from(args.get_u64("threshold")?.unwrap_or(2))
+        .map_err(|_| CliError::usage("invalid threshold"))?;
+    let parties = usize::try_from(args.get_u64("parties")?.unwrap_or(3))
+        .map_err(|_| CliError::usage("invalid party count"))?;
+    if parties == 0 || parties > usize::from(u16::MAX) {
+        return Err(CliError::usage("parties must be in 1..=65535"));
+    }
     let (level, level_name) = parse_mldsa_level(args.get("level"))?;
     let vault_dir = args.require("vault-dir")?;
     let public_out = args.require("public-out")?;
@@ -856,13 +1025,12 @@ fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
     }
 
     let shares = run_mldsa_dkg_threads(&dkg_cfg, &entropies)?;
-    let pack = shares[0].verification_pack();
+    let pack = shares[0].0.verification_pack();
     let pk_bytes = pack.pk_bytes.clone();
     let key_id = pack.policy_signing_key_id();
     let issuer_digest = pack.issuer_pk_digest();
 
-    for (idx, ent) in entropies.iter().enumerate() {
-        write_new(&mldsa_seed_path(vault_dir, idx), &ent.0, true)?;
+    for (idx, ((_, transcript), ent)) in shares.iter().zip(&entropies).enumerate() {
         let mac_key = Secret32(if deterministic {
             cshake256_framed_32(
                 b"QSAG.CLI.TMLDSA.DET.BURN_MAC.V1",
@@ -871,13 +1039,44 @@ fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
         } else {
             os_random_32()?
         });
-        write_new(&mldsa_mac_path(vault_dir, idx), &mac_key.0, true)?;
+        let mut payload = ZeroizingBuf(Vec::with_capacity(64 + transcript.len()));
+        payload.0.extend_from_slice(&ent.0);
+        payload.0.extend_from_slice(&mac_key.0);
+        payload.0.extend_from_slice(transcript);
+        let enrollment_nonce = Secret32(os_random_32()?);
+        let mut bundle = Json::object(vec![
+            ("format", Json::str(MLDSA_SHARE_FORMAT)),
+            ("enrollment_nonce", Json::hex(&enrollment_nonce[..16])),
+            ("scheme", Json::str(level_name)),
+            ("party", Json::num(idx)),
+            ("threshold", Json::num(threshold)),
+            ("parties", Json::num(parties)),
+            ("session_id", Json::hex(&session_id)),
+            ("key_id", Json::hex(&key_id)),
+            ("public_key", Json::hex(&pk_bytes)),
+            ("secret_key", Json::hex(&payload)),
+        ]);
+        if let Some(pass) = &passphrase {
+            crate::envelope::seal(&mut bundle, pass)?;
+        }
+        let path = mldsa_share_path(vault_dir, idx);
+        let mut lock = crate::vault::Vault::acquire(&path, true)?;
+        let opened = crate::envelope::open(&bundle, passphrase.as_deref())?;
+        lock.set_key_material(&opened);
+        lock.bind(&mut bundle)?;
+        lock.seal(&mut bundle)?;
+        let encoded = ZeroizingBuf(bundle.to_pretty().into_bytes());
+        if encoded.len() as u64 > MLDSA_BUNDLE_LIMIT {
+            return Err(CliError::input("ML-DSA local share exceeds file bound"));
+        }
+        write_new(&path, &encoded, true)?;
         FsNonceBurnStore::create(mldsa_burn_path(vault_dir, idx), key_id, mac_key.0)
             .map_err(|e| CliError::io("creating threshold ML-DSA nonce burn ledger", e))?;
     }
 
     let meta = Json::object(vec![
         ("format", Json::str(MLDSA_META_FORMAT)),
+        ("share_format", Json::str(MLDSA_SHARE_FORMAT)),
         ("scheme", Json::str(level_name)),
         ("threshold", Json::num(threshold)),
         ("parties", Json::num(parties)),
@@ -886,7 +1085,11 @@ fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
         ("issuer_pk_digest", Json::hex(&issuer_digest)),
         ("public_key", Json::hex(&pk_bytes)),
     ]);
-    write_new(&mldsa_meta_path(vault_dir), meta.to_pretty().as_bytes(), true)?;
+    write_new(
+        &mldsa_meta_path(vault_dir),
+        meta.to_pretty().as_bytes(),
+        true,
+    )?;
 
     let pub_doc = Json::object(vec![
         ("format", Json::str(MLDSA_PUB_FORMAT)),
@@ -910,7 +1113,11 @@ fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-fn parse_party_indices(spec: Option<&str>, parties: usize, default_count: usize) -> Result<Vec<usize>, CliError> {
+fn parse_party_indices(
+    spec: Option<&str>,
+    parties: usize,
+    default_count: usize,
+) -> Result<Vec<usize>, CliError> {
     let Some(spec) = spec else {
         return Ok((0..default_count.min(parties)).collect());
     };
@@ -920,9 +1127,9 @@ fn parse_party_indices(spec: Option<&str>, parties: usize, default_count: usize)
         if trimmed.is_empty() {
             continue;
         }
-        let idx: usize = trimmed
-            .parse()
-            .map_err(|_| CliError::usage("--signers must be comma-separated 0-based custodian indices"))?;
+        let idx: usize = trimmed.parse().map_err(|_| {
+            CliError::usage("--signers must be comma-separated 0-based custodian indices")
+        })?;
         if idx >= parties {
             return Err(CliError::usage(format!(
                 "--signers index {idx} out of range (parties = {parties})"
@@ -950,17 +1157,20 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
             "message",
             "context-hex",
             "out",
+            "passphrase-env",
+            "passphrase-file",
         ],
         &["deterministic", "json", "help"],
     )?;
     if args.flag("help") {
         println!(
-            "qsag cred mldsa-sign --vault-dir <dir> [--signers <i,j,..>] --epoch <n> --in <path|-> [--context-hex <hex>] --out <path> [--deterministic] [--json]"
+            "qsag cred mldsa-sign --vault-dir <dir> [--signers <i,j,..>] --epoch <n> --in <path|-> [--context-hex <hex>] --out <path> [--passphrase-env <VAR> | --passphrase-file <PATH>] [--deterministic] [--json]"
         );
         return Ok(());
     }
     args.no_positionals()?;
     let vault_dir = args.require("vault-dir")?;
+    let passphrase = crate::envelope::passphrase(&args)?;
     let user_epoch = args
         .get_u64("epoch")?
         .ok_or_else(|| CliError::usage("missing required option --epoch <n>"))?;
@@ -977,7 +1187,11 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
         return Err(CliError::usage("--context-hex must be at most 255 bytes"));
     }
 
-    let meta = load_json_checked(&mldsa_meta_path(vault_dir), MLDSA_META_FORMAT, MAX_KEY_FILE_BYTES)?;
+    let meta = load_json_checked(
+        &mldsa_meta_path(vault_dir),
+        MLDSA_META_FORMAT,
+        MAX_KEY_FILE_BYTES,
+    )?;
     let scheme_str = meta.field_str("scheme")?;
     let (level, level_name) = parse_mldsa_level(Some(scheme_str))?;
     let threshold = meta.field_u64("threshold")? as usize;
@@ -986,7 +1200,10 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
     let key_id = from_hex_exact::<32>(meta.field_str("key_id")?, "key_id")?;
     let expected_pk = meta.field_hex("public_key")?;
 
-    let min_quorum = 2 * threshold - 1;
+    let min_quorum = threshold
+        .checked_mul(2)
+        .and_then(|q| q.checked_sub(1))
+        .ok_or_else(|| CliError::input("invalid threshold"))?;
     let signer_indices = parse_party_indices(args.get("signers"), parties, min_quorum)?;
     if signer_indices.len() < min_quorum {
         return Err(CliError::state(format!(
@@ -995,24 +1212,89 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
         )));
     }
 
-    let mut dkg_entropies = Vec::with_capacity(parties);
-    for idx in 0..parties {
-        let raw_seed = read_bounded_file(&mldsa_seed_path(vault_dir, idx), 64)?;
-        if raw_seed.0.len() != 32 {
-            return Err(CliError::input("corrupt ML-DSA custodian seed length"));
-        }
-        let mut s = [0u8; 32];
-        s.copy_from_slice(&raw_seed.0);
-        dkg_entropies.push(Secret32(s));
-    }
-    let party_ids: Vec<u16> = (1..=parties as u16).collect();
     let dkg_cfg = ThresholdMlDsaDkgConfig {
         level,
         threshold,
-        party_ids,
+        party_ids: (1..=u16::try_from(parties)
+            .map_err(|_| CliError::input("invalid party count"))?)
+            .collect(),
         session_id: dkg_session_id,
     };
-    let all_shares = run_mldsa_dkg_threads(&dkg_cfg, &dkg_entropies)?;
+    dkg_cfg.validate().map_err(map_mldsa_err)?;
+    let mut locks = Vec::new();
+    let mut loaded = Vec::new();
+    if meta.get("share_format").is_some() {
+        if meta.field_str("share_format")? != MLDSA_SHARE_FORMAT {
+            return Err(CliError::input("unsupported ML-DSA share format"));
+        }
+        for &idx in &signer_indices {
+            let path = mldsa_share_path(vault_dir, idx);
+            let mut lock = crate::vault::Vault::acquire(&path, false)?;
+            let bundle = load_json_checked(&path, MLDSA_SHARE_FORMAT, MLDSA_BUNDLE_LIMIT)?;
+            let opened = crate::envelope::open(&bundle, passphrase.as_deref())?;
+            lock.set_key_material(&opened);
+            lock.authenticate(&bundle)?;
+            if bundle.field_u64("party")? != idx as u64
+                || bundle.field_u64("threshold")? != threshold as u64
+                || bundle.field_u64("parties")? != parties as u64
+                || bundle.field_str("scheme")? != level_name
+                || bundle.field_hex("session_id")?.0.as_slice() != dkg_session_id
+                || bundle.field_hex("key_id")?.0.as_slice() != key_id
+                || bundle.field_hex("public_key")?.0.as_slice() != expected_pk.0.as_slice()
+            {
+                return Err(CliError::state("ML-DSA share enrollment mismatch"));
+            }
+            let payload = opened.secret_key()?;
+            if payload.len() < 64 {
+                return Err(CliError::input("truncated ML-DSA share"));
+            }
+            let entropy = Secret32(payload[..32].try_into().unwrap());
+            let mac = Secret32(payload[32..64].try_into().unwrap());
+            let mut restore = RestoringMpc {
+                remaining: &payload[64..],
+                parties,
+            };
+            let share =
+                threshold_mldsa_dkg_party(&dkg_cfg, (idx + 1) as u16, &entropy.0, &mut restore)
+                    .map_err(map_mldsa_err)?;
+            if !restore.remaining.is_empty()
+                || share.verification_pack().pk_bytes != expected_pk.0.as_slice()
+                || share.verification_pack().policy_signing_key_id() != key_id
+            {
+                return Err(CliError::state("ML-DSA local share restoration mismatch"));
+            }
+            loaded.push((idx, share, mac));
+            locks.push(lock);
+        }
+    } else {
+        // Existing seed-only vaults retain their original compatibility path.
+        if passphrase.is_some() {
+            return Err(CliError::input("legacy ML-DSA vault is unencrypted"));
+        }
+        let mut entropies = Vec::with_capacity(parties);
+        for idx in 0..parties {
+            let bytes = read_bounded_file(&mldsa_seed_path(vault_dir, idx), 32)?;
+            entropies.push(Secret32(bytes.0.as_slice().try_into().map_err(|_| {
+                CliError::input("corrupt ML-DSA custodian seed length")
+            })?));
+        }
+        for (idx, (share, _)) in run_mldsa_dkg_threads(&dkg_cfg, &entropies)?
+            .into_iter()
+            .enumerate()
+        {
+            if signer_indices.contains(&idx) {
+                let bytes = read_bounded_file(&mldsa_mac_path(vault_dir, idx), 32)?;
+                let mac = Secret32(
+                    bytes
+                        .0
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| CliError::input("corrupt ML-DSA burn MAC key length"))?,
+                );
+                loaded.push((idx, share, mac));
+            }
+        }
+    }
 
     // Filter to selected active signers (sorted ascending by party_id).
     let quorum_ids: Vec<u16> = signer_indices.iter().map(|&idx| (idx + 1) as u16).collect();
@@ -1028,24 +1310,16 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
     let deterministic = args.flag("deterministic");
     let mut selected: Vec<(usize, ThresholdMlDsaSignerShare, Secret32, Secret32)> =
         Vec::with_capacity(signer_indices.len());
-    for (idx, share) in all_shares.into_iter().enumerate() {
-        if signer_indices.contains(&idx) {
-            let raw_mac = read_bounded_file(&mldsa_mac_path(vault_dir, idx), 64)?;
-            if raw_mac.0.len() != 32 {
-                return Err(CliError::input("corrupt ML-DSA burn MAC key length"));
-            }
-            let mut mac = [0u8; 32];
-            mac.copy_from_slice(&raw_mac.0);
-            let sign_ent = if deterministic {
-                cshake256_framed_32(
-                    b"QSAG.CLI.TMLDSA.DET.SIGN_ENT.V1",
-                    &[&sign_session_id, &(idx as u64).to_le_bytes()],
-                )
-            } else {
-                os_random_32()?
-            };
-            selected.push((idx, share, Secret32(mac), Secret32(sign_ent)));
-        }
+    for (idx, share, mac) in loaded {
+        let sign_ent = if deterministic {
+            cshake256_framed_32(
+                b"QSAG.CLI.TMLDSA.DET.SIGN_ENT.V1",
+                &[&sign_session_id, &(idx as u64).to_le_bytes()],
+            )
+        } else {
+            os_random_32()?
+        };
+        selected.push((idx, share, mac, Secret32(sign_ent)));
     }
 
     let hub = SharedMpcHub::new(selected.len());
@@ -1182,7 +1456,9 @@ fn mldsa_verify(raw: &[String]) -> Result<(), CliError> {
     };
 
     if !ml_dsa_verify(level, &pk_bytes, &msg.0, &ctx, &sig_bytes) {
-        return Err(CliError::verify("FIPS 204 ML-DSA signature verification failed"));
+        return Err(CliError::verify(
+            "FIPS 204 ML-DSA signature verification failed",
+        ));
     }
 
     if args.flag("json") {
@@ -1216,5 +1492,88 @@ pub fn run(raw: &[String]) -> Result<(), CliError> {
         other => Err(CliError::usage(format!(
             "unknown cred subcommand '{other}' (expected voprf-keygen, voprf-eval, mldsa-keygen, mldsa-sign, or mldsa-verify)"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod local_share_tests {
+    use super::*;
+
+    #[test]
+    fn enrollment_abort_also_refuses_rounds_not_yet_created() {
+        let hub = SharedMpcHub::new(2);
+        hub.abort_all();
+        let mut endpoint = LocalMpcEndpoint { me: 0, hub };
+        assert!(
+            endpoint
+                .exchange(
+                    RoundInfo {
+                        index: 0,
+                        phase: 0,
+                        kind: RoundKind::KeySetup
+                    },
+                    vec![Vec::new(); 2],
+                    Vec::new(),
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn local_restoration_rejects_wrong_round_and_hostile_lengths() {
+        let info = RoundInfo {
+            index: 7,
+            phase: 2,
+            kind: RoundKind::Confirm,
+        };
+        let private = vec![Vec::new(), vec![3]];
+        let broadcast = vec![4];
+        let binding = round_binding(info, &private, &broadcast);
+        let mut encoded = binding.to_vec();
+        for row in [vec![vec![], vec![5]], vec![vec![6], vec![7]]] {
+            encoded.extend_from_slice(&2u64.to_le_bytes());
+            for bytes in row {
+                encoded.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+                encoded.extend_from_slice(&bytes);
+            }
+        }
+        let mut net = RestoringMpc {
+            remaining: &encoded,
+            parties: 2,
+        };
+        let inbox = net
+            .exchange(info, private.clone(), broadcast.clone())
+            .unwrap();
+        assert_eq!(inbox.private[1], [5]);
+        assert_eq!(inbox.broadcast, [vec![6], vec![7]]);
+        assert!(net.remaining.is_empty());
+        let mut net = RestoringMpc {
+            remaining: &encoded,
+            parties: 2,
+        };
+        assert!(
+            net.exchange(
+                RoundInfo { index: 8, ..info },
+                private.clone(),
+                broadcast.clone()
+            )
+            .is_err()
+        );
+        for len in 0..encoded.len() {
+            let mut net = RestoringMpc {
+                remaining: &encoded[..len],
+                parties: 2,
+            };
+            assert!(
+                net.exchange(info, private.clone(), broadcast.clone())
+                    .is_err()
+            );
+        }
+        encoded[40..48].copy_from_slice(&u64::MAX.to_le_bytes());
+        let mut net = RestoringMpc {
+            remaining: &encoded,
+            parties: 2,
+        };
+        assert!(net.exchange(info, private, broadcast).is_err());
     }
 }
