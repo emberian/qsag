@@ -851,7 +851,10 @@ fn squeeze_target_index(
 /// Eight equal-shape framed cSHAKE messages. Every length and address is public;
 /// the backend packs these states into KeccakState8x on AVX-512 hosts.
 fn framed_hash8<B: AcceleratorBackend, const F: usize>(
-    tag: &[u8], frames: [[&[u8]; F]; 8], out: &mut [[u8; 32]; 8], accel: &B,
+    tag: &[u8],
+    frames: [[&[u8]; F]; 8],
+    out: &mut [[u8; 32]; 8],
+    accel: &B,
 ) {
     const RATE: usize = 136;
     assert!(tag.len() < 32);
@@ -870,7 +873,9 @@ fn framed_hash8<B: AcceleratorBackend, const F: usize>(
             message[cursor..cursor + field.len()].copy_from_slice(field);
             cursor += field.len();
         }
-        if len != 0 { assert_eq!(len, cursor); }
+        if len != 0 {
+            assert_eq!(len, cursor);
+        }
         len = cursor;
         message[cursor] ^= 0x04;
         message[(cursor / RATE + 1) * RATE - 1] ^= 0x80;
@@ -878,19 +883,26 @@ fn framed_hash8<B: AcceleratorBackend, const F: usize>(
     let mut states = [[0u64; 25]; 8];
     for block in 0..=len / RATE {
         for (state, message) in states.iter_mut().zip(&messages) {
-            for (word, bytes) in state.iter_mut().zip(message[block * RATE..][..RATE].chunks_exact(8)) {
-                *word ^= u64::from_le_bytes(bytes.try_into().unwrap());
+            for (word, bytes) in state
+                .iter_mut()
+                .zip(message[block * RATE..][..RATE].as_chunks::<8>().0.iter())
+            {
+                *word ^= u64::from_le_bytes(*bytes);
             }
         }
         accel.batch_keccak_f1600(&mut states);
     }
     for (output, state) in out.iter_mut().zip(&states) {
-        for (bytes, word) in output.chunks_exact_mut(8).zip(state) {
+        for (bytes, word) in output.as_chunks_mut::<8>().0.iter_mut().zip(state) {
             bytes.copy_from_slice(&word.to_le_bytes());
         }
     }
-    for message in &mut messages { ct_zeroize_bytes(message); }
-    for state in &mut states { qsag_accel::ct::ct_zeroize_u64s(state); }
+    for message in &mut messages {
+        ct_zeroize_bytes(message);
+    }
+    for state in &mut states {
+        qsag_accel::ct::ct_zeroize_u64s(state);
+    }
 }
 
 impl FrontierFtsSigningKey {
@@ -931,15 +943,28 @@ impl FrontierFtsSigningKey {
                 let nodes: [usize; 8] = core::array::from_fn(|i| base + i.min(count - 1));
                 let indices = nodes.map(|v| (v as u64).to_be_bytes());
                 if depth == h {
-                    framed_hash8(TAG_LEAF, core::array::from_fn(|i|
-                        [pid.as_slice(), &pk_seed, &indices[i], &sk_seed]), &mut cur, accel);
+                    framed_hash8(
+                        TAG_LEAF,
+                        core::array::from_fn(|i| [pid.as_slice(), &pk_seed, &indices[i], &sk_seed]),
+                        &mut cur,
+                        accel,
+                    );
                 } else {
-                    framed_hash8(TAG_MERGE, core::array::from_fn(|i| {
-                        let v = nodes[i];
-                        [pid.as_slice(), &pk_seed, &indices[i],
-                         &endpoints[2 * v * n..(2 * v + 1) * n],
-                         &endpoints[(2 * v + 1) * n..(2 * v + 2) * n]]
-                    }), &mut cur, accel);
+                    framed_hash8(
+                        TAG_MERGE,
+                        core::array::from_fn(|i| {
+                            let v = nodes[i];
+                            [
+                                pid.as_slice(),
+                                &pk_seed,
+                                &indices[i],
+                                &endpoints[2 * v * n..(2 * v + 1) * n],
+                                &endpoints[(2 * v + 1) * n..(2 * v + 2) * n],
+                            ]
+                        }),
+                        &mut cur,
+                        accel,
+                    );
                 }
                 for step in 0..w {
                     if let Some(ref mut cbuf) = cache {
@@ -951,11 +976,18 @@ impl FrontierFtsSigningKey {
                     if step + 1 < w {
                         let j_be = (step as u64).to_be_bytes();
                         let mut next = [[0u8; 32]; 8];
-                        framed_hash8(TAG_CHAIN, core::array::from_fn(|i|
-                            [pid.as_slice(), &pk_seed, &indices[i], &j_be, &cur[i][..n]]),
-                            &mut next, accel);
+                        framed_hash8(
+                            TAG_CHAIN,
+                            core::array::from_fn(|i| {
+                                [pid.as_slice(), &pk_seed, &indices[i], &j_be, &cur[i][..n]]
+                            }),
+                            &mut next,
+                            accel,
+                        );
                         cur = next;
-                        for lane in &mut next { ct_zeroize_bytes(lane); }
+                        for lane in &mut next {
+                            ct_zeroize_bytes(lane);
+                        }
                     }
                 }
                 for i in 0..count {
@@ -974,7 +1006,9 @@ impl FrontierFtsSigningKey {
             &mut root,
         );
 
-        for lane in &mut cur { ct_zeroize_bytes(lane); }
+        for lane in &mut cur {
+            ct_zeroize_bytes(lane);
+        }
         ct_zeroize_bytes(&mut endpoints);
 
         let pk = FrontierFtsPublicKey {
@@ -1535,3 +1569,34 @@ pub use batch::{
     FrontierVerifyInput, RotatedEpochVerifyInput, verify_frontier_fts_batch,
     verify_rotated_epoch_votes_batch,
 };
+
+#[cfg(test)]
+mod batch_hash_tests {
+    use super::*;
+    #[test]
+    fn eight_lane_hash_matches_scalar_for_every_node_size_and_domain() {
+        let pid = FrontierFtsProfile::Compact1122.pid_bytes();
+        let seed = [73; 32];
+        let indices: [[u8; 8]; 8] = core::array::from_fn(|i| (i as u64).to_be_bytes());
+        for tag in [TAG_LEAF, TAG_MERGE, TAG_CHAIN] {
+            for n in [16, 32] {
+                let frames = core::array::from_fn(|i| {
+                    [
+                        pid.as_slice(),
+                        &seed[..n],
+                        &indices[i],
+                        &seed[..n],
+                        &seed[..n],
+                    ]
+                });
+                let mut actual = [[0; 32]; 8];
+                framed_hash8(tag, frames, &mut actual, &qsag_accel::CpuReferenceBackend);
+                for (fields, output) in frames.iter().zip(actual) {
+                    let mut expected = [0; 32];
+                    cshake256_framed_xof(tag, fields, &mut expected);
+                    assert_eq!(output, expected);
+                }
+            }
+        }
+    }
+}

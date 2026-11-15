@@ -517,11 +517,18 @@ fn pow7_plain(x: u128) -> u128 {
 // commits to both tweaks and the complete round count. V4 constants are not reused.
 fn round_constants(c0: u128, c1: u128) -> [(u128, u128); SPN_ROUNDS] {
     let mut stream = [0u8; SPN_ROUNDS * 32];
-    cshake256_framed_xof(b"QSAG.PSFTS.POW7_ROUNDS.V5",
-        &[&c0.to_le_bytes(), &c1.to_le_bytes(), &(SPN_ROUNDS as u32).to_be_bytes()],
-        &mut stream);
-    core::array::from_fn(|round| bytes32_to_lanes(
-        stream[round * 32..(round + 1) * 32].try_into().unwrap()))
+    cshake256_framed_xof(
+        b"QSAG.PSFTS.POW7_ROUNDS.V5",
+        &[
+            &c0.to_le_bytes(),
+            &c1.to_le_bytes(),
+            &(SPN_ROUNDS as u32).to_be_bytes(),
+        ],
+        &mut stream,
+    );
+    core::array::from_fn(|round| {
+        bytes32_to_lanes(stream[round * 32..(round + 1) * 32].try_into().unwrap())
+    })
 }
 
 fn algebraic_step_plain(input: (u128, u128), c0: u128, c1: u128) -> (u128, u128) {
@@ -625,28 +632,29 @@ fn derive_sum_constrained_offsets(
     }
     let ep_be = epoch.to_be_bytes();
     let ctr_be = counter.to_be_bytes();
-    let mut stream = vec![0u8; params.num_chains * 2];
+    let mut storage = [0u8; 512];
+    let stream = storage.get_mut(..params.num_chains.checked_mul(2)?)?;
     cshake256_framed_xof(
         b"QSAG.PSFTS.HMSG.V2",
         &[pk_seed, &root_bytes, &ep_be, randomizer, &ctr_be, msg],
-        &mut stream,
+        stream,
     );
 
     let w = params.winternitz_w as u16;
     let zone = (65536u32 / (w as u32)) * (w as u32);
-    let mut out = Vec::with_capacity(params.num_chains);
+    let mut out = [0u8; 256];
     let mut sum = 0usize;
-    for chunk in stream.as_chunks::<2>().0.iter() {
+    for (dst, chunk) in out.iter_mut().zip(stream.as_chunks::<2>().0.iter()) {
         let v = u16::from_le_bytes([chunk[0], chunk[1]]) as u32;
         if v >= zone {
             return None;
         }
         let digit = (v % (w as u32)) as u8;
         sum += digit as usize;
-        out.push(digit);
+        *dst = digit;
     }
     if sum == params.target_sum {
-        Some(out)
+        Some(out[..params.num_chains].to_vec())
     } else {
         None
     }
