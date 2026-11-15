@@ -1,8 +1,13 @@
 //! Dealerless distributed MPC subtree staging and proactive share refresh for
 //! quorum-switching `Jorts` (`QS-A` [`CommitteePartitionedJorts`] and `QS-B` [`BftShamirJorts`]).
 //!
-//! Replaces centralized single-seed staging (`stage_committee_partitioned`, `stage_bft_shamir`)
-//! in deployments with active multi-party protocols:
+//! Evaluates share-based MPC staging without a single master seed or reconstruction of
+//! intermediate chain nodes. The orchestration API owns all participant states in one process;
+//! it does not provide separate-host transport or process isolation. Pairwise exchanges assume
+//! authenticated confidential channels when implemented across hosts. Refresh preserves the
+//! existing latch records; it is an in-memory transition, not a crash-atomic storage transaction.
+//!
+//! The implemented operations are:
 //!
 //! 1. **Mode `QS-A` ([`stage_committee_partitioned_dealerless_mpc`]):**
 //!    - All `n` custodians run a 2-round commit-then-open coin toss (`TAG_STAGE_PK_SEED`) to
@@ -15,7 +20,7 @@
 //!      via [`OtMesh`], KOS15 correlated OT extension, 16-round `GF(2^128)` inner-product triple
 //!      sacrifice, post-sacrifice `2 -> 1` combiner, and committed SPDZ `MacCheck`).
 //!    - Secret chain states `y^(0), y^(1), y^(2)` remain strictly `t`-of-`t` XOR-shared inside `C`
-//!      and are never reconstructed on any host; **only** `y^(3)` is opened after `MacCheck`
+//!      and are never reconstructed by staging; **only** `y^(3)` is released after `MacCheck`
 //!      accepts, and all `n` custodians deterministically assemble and cross-verify `pk_root`.
 //!
 //! 2. **Mode `QS-B` ([`stage_bft_shamir_dealerless_mpc`]):**
@@ -24,8 +29,8 @@
 //!      of all `n` custodians' Boolean-verified contributions; no `sk_seed` ever exists).
 //!    - Custodians evaluate `y^(0) -> y^(1) -> y^(2) -> y^(3)` in batched 64-way bitsliced
 //!      `Keccak-f[1600]` over `GF(2^8)` (`TowerGf256`), verify every input bit (`x^2 + x = 0`) and
-//!      every `Chi` multiplication gate via 16 independent HVZK Reed-Solomon degree-`<= 2f`
-//!      zero-constant checks (`< 2^{-128}` soundness) **before** opening `y^(3)`, upgrade and
+//!      every `Chi` multiplication gate via 16 HVZK Reed-Solomon degree-`<= 2f`
+//!      zero-constant checks with challenges expanded from the joint coin **before** opening `y^(3)`, upgrade and
 //!      re-randomize `(y^(0), y^(1), y^(2))` into independent bytewise degree-`(t - 1)` Shamir
 //!      sharings via verified zero-constant polynomials, and open **only** `y^(3)`.
 //!
@@ -44,14 +49,15 @@ use core::fmt;
 use core::hint::black_box;
 
 use qsag_core::belt_latch::DurableWal;
+#[cfg(test)]
+use qsag_core::field::tower::bs_gf256_insert_lane;
 use qsag_core::field::tower::{
-    BitslicedGf256x64, Tower128, TowerGf256, bs_gf256_extract_lane, bs_gf256_insert_lane,
+    BitslicedGf256x64, PublicGf256Matrix, TowerGf256, bs_gf256_extract_lane,
     bs_gf256_mul_planes_ct, eval_poly_gf256, lagrange_weights_zero_gf256, wipe_gf256,
-    wipe_tower128,
 };
 use qsag_core::preprocessing::{OtMesh, PartyPrivateRng, PreprocessError};
 use qsag_core::sponge::keccak::{Cshake256Xof, KECCAK_ROUND_CONSTANTS};
-use qsag_core::wipe::{SecretBuffer, ct_eq_bytes32, wipe_bytes, wipe_bytes32, wipe_u64s, wipe_u128s};
+use qsag_core::wipe::{ct_eq_bytes32, wipe_bytes, wipe_bytes32, wipe_u64s, wipe_u128s};
 
 use crate::hash::{expand, h32};
 use crate::quorum_jorts::{
@@ -63,6 +69,62 @@ use crate::quorum_jorts::{
 
 #[cfg(doc)]
 use crate::quorum_jorts::{BftShamirJorts, CommitteePartitionedJorts};
+
+// Owned staging scratch is erased on success, rejection and unwinding. Keep this
+// implementation local: core's internal temporary-buffer type is not a public API.
+trait SecretWipe: Sized {
+    fn secret_wipe(&mut self);
+    fn wipe_slice(items: &mut [Self]) {
+        for item in items {
+            item.secret_wipe();
+        }
+    }
+}
+macro_rules! secret_word {
+    ($($t:ty),*) => { $(impl SecretWipe for $t {
+        fn secret_wipe(&mut self) {
+            qsag_asm::volatile_fill(core::slice::from_mut(self), 0);
+        }
+        fn wipe_slice(items: &mut [Self]) { qsag_asm::volatile_fill(items, 0); }
+    })* };
+}
+secret_word!(u8, u64, u128);
+impl SecretWipe for TowerGf256 {
+    fn secret_wipe(&mut self) {
+        self.0.secret_wipe();
+    }
+    fn wipe_slice(items: &mut [Self]) {
+        wipe_gf256(items);
+    }
+}
+impl<T: SecretWipe, const N: usize> SecretWipe for [T; N] {
+    fn secret_wipe(&mut self) {
+        T::wipe_slice(self);
+    }
+}
+impl<T: SecretWipe> SecretWipe for Vec<T> {
+    fn secret_wipe(&mut self) {
+        T::wipe_slice(self);
+    }
+}
+struct SecretBuffer<T: SecretWipe>(T);
+impl<T: SecretWipe> core::ops::Deref for SecretBuffer<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+impl<T: SecretWipe> core::ops::DerefMut for SecretBuffer<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.0
+    }
+}
+impl<T: SecretWipe> Drop for SecretBuffer<T> {
+    fn drop(&mut self) {
+        self.0.secret_wipe();
+        black_box(&mut self.0);
+    }
+}
 
 const TAG_PK_SEED_FINAL: &[u8] = b"QSAG.QUORUM.STAGE.PKSEED.FINAL/v1";
 const TAG_COIN_COMMIT: &[u8] = b"QSAG.QUORUM.STAGE.COIN.COMMIT/v1";
@@ -89,7 +151,7 @@ const RAW_CHUNK_BITS: usize = RAW_CHUNK_WORDS * 64;
 const HALVING_ROUNDS: usize = 16;
 /// Usable leak-free `u64` words produced per chunk after `2 -> 1` combiner (`512` words).
 const USABLE_CHUNK_WORDS: usize = RAW_CHUNK_WORDS / 2;
-/// Number of independent `GF(2^8)` HVZK checks (`(2^{-8})^{16} = 2^{-128}` soundness).
+/// Number of independent `GF(2^8)` HVZK checks (a fixed nonzero linear relation survives with probability `2^{-128}`).
 const GF256_CHECK_REPS: usize = 16;
 
 const KECCAK_ROTATION_OFFSETS: [u32; 25] = [
@@ -175,7 +237,10 @@ impl fmt::Display for DealerlessStagingError {
                 )
             }
             Self::ShamirDegreeCheckFailed { phase, dealer } => {
-                write!(f, "Shamir degree check failed in {phase} for dealer {dealer}")
+                write!(
+                    f,
+                    "Shamir degree check failed in {phase} for dealer {dealer}"
+                )
             }
             Self::ZeroConstantCheckFailed { dealer } => {
                 write!(
@@ -196,7 +261,10 @@ impl fmt::Display for DealerlessStagingError {
                 )
             }
             Self::PublicRootMismatch { party } => {
-                write!(f, "global pk_root confirmation mismatch at custodian {party}")
+                write!(
+                    f,
+                    "global pk_root confirmation mismatch at custodian {party}"
+                )
             }
         }
     }
@@ -420,11 +488,15 @@ fn establish_dealerless_pairwise_mac_keys(
 
             let key_ab = h32(
                 TAG_PAIR_KEY,
-                &[session_id, &a_be, &b_be, &com_a, &com_b, &contrib_a, &contrib_b],
+                &[
+                    session_id, &a_be, &b_be, &com_a, &com_b, &contrib_a, &contrib_b,
+                ],
             );
             let key_ba = h32(
                 TAG_PAIR_KEY,
-                &[session_id, &a_be, &b_be, &com_a, &com_b, &contrib_a, &contrib_b],
+                &[
+                    session_id, &a_be, &b_be, &com_a, &com_b, &contrib_a, &contrib_b,
+                ],
             );
             wipe_bytes32(&mut salt_a);
             wipe_bytes32(&mut contrib_a);
@@ -564,7 +636,9 @@ fn bit_mask128(bit: u64) -> u128 {
 
 #[inline]
 fn gf128_mul(a: u128, b: u128) -> u128 {
-    qsag_asm::gf2_128_mul_portable(a, b)
+    // Use the core polynomial-basis kernel, including its CPU feature checks and
+    // portable fallback. The Wiedemann Tower128 encoding is a different field basis.
+    qsag_asm::gf2_128_dot(core::slice::from_ref(&a), core::slice::from_ref(&b))
 }
 
 /// Stream deterministic `u64` words from `SHAKE256` over framed inputs.
@@ -598,8 +672,16 @@ fn transpose_128_cols_to_u128_rows(cols: &[Vec<u64>], words: usize) -> Vec<u128>
             tile[bit_in_u128_half] = [
                 cols[c_lo][w_pair],
                 cols[c_hi][w_pair],
-                if has_second { cols[c_lo][w_pair + 1] } else { 0 },
-                if has_second { cols[c_hi][w_pair + 1] } else { 0 },
+                if has_second {
+                    cols[c_lo][w_pair + 1]
+                } else {
+                    0
+                },
+                if has_second {
+                    cols[c_hi][w_pair + 1]
+                } else {
+                    0
+                },
             ];
         }
         qsag_asm::transpose64x256(&mut tile);
@@ -626,6 +708,12 @@ struct PairwiseSubfieldVole {
     chosen: SecretBuffer<[[u8; 32]; 128]>,
     delta_holder: u128,
     ext_ctr: u64,
+}
+
+impl Drop for PairwiseSubfieldVole {
+    fn drop(&mut self) {
+        self.delta_holder.secret_wipe();
+    }
 }
 
 impl PairwiseSubfieldVole {
@@ -664,12 +752,26 @@ impl PairwiseSubfieldVole {
             let col_le = (col as u64).to_le_bytes();
             expand_u64_stream(
                 TAG_ABIT_COL,
-                &[session_id, &holder_le, &owner_le, &ctr_le, &col_le, &self.seeds0[col]],
+                &[
+                    session_id,
+                    &holder_le,
+                    &owner_le,
+                    &ctr_le,
+                    &col_le,
+                    &self.seeds0[col],
+                ],
                 &mut t0_cols[col],
             );
             expand_u64_stream(
                 TAG_ABIT_COL,
-                &[session_id, &holder_le, &owner_le, &ctr_le, &col_le, &self.seeds1[col]],
+                &[
+                    session_id,
+                    &holder_le,
+                    &owner_le,
+                    &ctr_le,
+                    &col_le,
+                    &self.seeds1[col],
+                ],
                 &mut t1_tmp,
             );
             for w in 0..total_words {
@@ -677,7 +779,14 @@ impl PairwiseSubfieldVole {
             }
             expand_u64_stream(
                 TAG_ABIT_COL,
-                &[session_id, &holder_le, &owner_le, &ctr_le, &col_le, &self.chosen[col]],
+                &[
+                    session_id,
+                    &holder_le,
+                    &owner_le,
+                    &ctr_le,
+                    &col_le,
+                    &self.chosen[col],
+                ],
                 &mut q_cols[col],
             );
             let d_bit = ((black_box(self.delta_holder) >> col) & 1) as u64;
@@ -863,7 +972,8 @@ fn run_committed_spdz_mac_check_words(
     let mut transcript_digest = [0u8; 32];
     xof.squeeze(&mut transcript_digest);
 
-    let chal_seed = coin_toss_public_seed(session_id, "qsa_mac_check", &transcript_digest, party_rngs)?;
+    let chal_seed =
+        coin_toss_public_seed(session_id, "qsa_mac_check", &transcript_digest, party_rngs)?;
     let total_bits = 64 * num_words;
     let mut chi_u64 = vec![0u64; 2 * total_bits];
     expand_u64_stream(TAG_SAC_CHI, &[session_id, &chal_seed], &mut chi_u64);
@@ -962,8 +1072,12 @@ fn run_committed_spdz_mac_check_fields(
     let mut transcript_digest = [0u8; 32];
     xof.squeeze(&mut transcript_digest);
 
-    let chal_seed =
-        coin_toss_public_seed(session_id, "qsa_field_mac_check", &transcript_digest, party_rngs)?;
+    let chal_seed = coin_toss_public_seed(
+        session_id,
+        "qsa_field_mac_check",
+        &transcript_digest,
+        party_rngs,
+    )?;
     let mut chi_u64 = vec![0u64; 2 * count];
     expand_u64_stream(TAG_SAC_CHI, &[session_id, &chal_seed], &mut chi_u64);
     let chis: Vec<u128> = chi_u64
@@ -1353,7 +1467,8 @@ impl CommitteeBeaverReservoir {
         // 4. Active 16-round `GF(2^128)` recursive inner-product sacrifice (`2^16 -> 1`).
         let ctr_bytes = chunk_ctr.to_be_bytes();
         let sac_digest = h32(TAG_SAC_CHI, &[&self.session_id, &ctr_bytes]);
-        let chi_seed = coin_toss_public_seed(&self.session_id, "qsa_sac_init", &sac_digest, party_rngs)?;
+        let chi_seed =
+            coin_toss_public_seed(&self.session_id, "qsa_sac_init", &sac_digest, party_rngs)?;
         let mut chi_u64 = vec![0u64; 2 * RAW_CHUNK_BITS];
         expand_u64_stream(TAG_SAC_CHI, &[&self.session_id, &chi_seed], &mut chi_u64);
         let chis: Vec<u128> = chi_u64
@@ -1457,11 +1572,17 @@ impl CommitteeBeaverReservoir {
                     mac_a_vec[u][j] = mae ^ gf128_mul(r_chal, mao);
                     mac_b_vec[u][j] = gf128_mul(r_chal, mbe) ^ mbo;
                 }
-                a_vec[u].truncate(half);
-                b_vec[u].truncate(half);
-                mac_a_vec[u].truncate(half);
-                mac_b_vec[u].truncate(half);
-                c_cur[u] = h_shares[u][0] ^ gf128_mul(r_chal, c_cur[u]) ^ gf128_mul(r_sq, h_shares[u][1]);
+                for values in [
+                    &mut a_vec[u],
+                    &mut b_vec[u],
+                    &mut mac_a_vec[u],
+                    &mut mac_b_vec[u],
+                ] {
+                    wipe_u128s(&mut values[half..]);
+                    values.truncate(half);
+                }
+                c_cur[u] =
+                    h_shares[u][0] ^ gf128_mul(r_chal, c_cur[u]) ^ gf128_mul(r_sq, h_shares[u][1]);
                 mac_c_cur[u] =
                     h_macs[u][0] ^ gf128_mul(r_chal, mac_c_cur[u]) ^ gf128_mul(r_sq, h_macs[u][1]);
             }
@@ -1487,6 +1608,7 @@ impl CommitteeBeaverReservoir {
             b_final_words[u][1] = (b_vec[u][0] >> 64) as u64;
         }
         for u in 0..m {
+            wipe_u64s(&mut raw_b[u][RAW_CHUNK_WORDS..]);
             raw_b[u].truncate(RAW_CHUNK_WORDS);
         }
 
@@ -1499,7 +1621,12 @@ impl CommitteeBeaverReservoir {
             base_terms[u][3] = gf128_mul(a_mask[u], b_vec[u][0]);
         }
         for ps in &mut pair_states {
-            let prefix = make_crh_prefix(&self.session_id, ps.holder, ps.owner, chunk_ctr ^ (1u64 << 63));
+            let prefix = make_crh_prefix(
+                &self.session_id,
+                ps.holder,
+                ps.owner,
+                chunk_ctr ^ (1u64 << 63),
+            );
             let (s_cm, r_cm) = cot_field_mul_128(
                 &prefix,
                 0,
@@ -1641,8 +1768,12 @@ impl CommitteeBeaverReservoir {
         //    (`(a_0, b_0, c_0)` + `(a_1, b_1, c_1)` -> `d = a_0 ^ a_1`, `a = a_0`, `b = b_0 ^ b_1`,
         //    `c = c_0 ^ c_1 ^ (d & b_1)`), eliminating selective-failure OT choice leakage.
         let perm_digest = h32(TAG_SAC_CHI, &[&self.session_id, &ctr_bytes, b"combine"]);
-        let perm_seed =
-            coin_toss_public_seed(&self.session_id, "qsa_combine_perm", &perm_digest, party_rngs)?;
+        let perm_seed = coin_toss_public_seed(
+            &self.session_id,
+            "qsa_combine_perm",
+            &perm_digest,
+            party_rngs,
+        )?;
         let mut perm_words = vec![0u64; RAW_CHUNK_WORDS];
         expand_u64_stream(TAG_SAC_CHI, &[&perm_seed], &mut perm_words);
         let mut word_perm: Vec<usize> = (0..RAW_CHUNK_WORDS).collect();
@@ -1704,7 +1835,8 @@ impl CommitteeBeaverReservoir {
                 for bit in 0..64 {
                     mb_out[bit] = mac_b[u][w0][bit] ^ mac_b[u][w1][bit];
                     let d_mask = bit_mask128((d >> bit) & 1);
-                    mc_out[bit] = mac_c[u][w0][bit] ^ mac_c[u][w1][bit] ^ (d_mask & mac_b[u][w1][bit]);
+                    mc_out[bit] =
+                        mac_c[u][w0][bit] ^ mac_c[u][w1][bit] ^ (d_mask & mac_b[u][w1][bit]);
                 }
                 self.buf_a[u].push(a_out);
                 self.buf_b[u].push(b_out);
@@ -1804,7 +1936,11 @@ impl CommitteeBeaverReservoir {
                 let mut d_open = 0u64;
                 let mut e_open = 0u64;
                 for p in 0..m {
-                    let not_u_sh = if p == 0 { !b_sh[p][u_idx] } else { b_sh[p][u_idx] };
+                    let not_u_sh = if p == 0 {
+                        !b_sh[p][u_idx]
+                    } else {
+                        b_sh[p][u_idx]
+                    };
                     d_open ^= not_u_sh ^ self.buf_a[p][cur];
                     e_open ^= b_sh[p][v_idx] ^ self.buf_b[p][cur];
                 }
@@ -1912,9 +2048,11 @@ fn stage_single_committee_subtree_mpc(
     }
 
     // Per-member staged share table: `stores_leaves[member_pos][epoch][3 * chain + step]`.
-    let mut stores_leaves: Vec<Vec<Vec<Node>>> = (0..m)
-        .map(|_| vec![vec![[0u8; 32]; LEAF_SHARE_NODES]; num_leaves])
-        .collect();
+    let mut stores_leaves = SecretBuffer(
+        (0..m)
+            .map(|_| vec![vec![[0u8; 32]; LEAF_SHARE_NODES]; num_leaves])
+            .collect::<Vec<Vec<Vec<Node>>>>(),
+    );
     let mut opened_ends: Vec<Vec<Node>> = vec![vec![[0u8; 32]; WOTS_CHAINS]; num_leaves];
 
     for (batch_idx, batch_coords) in coords.chunks(64).enumerate() {
@@ -1938,7 +2076,11 @@ fn stage_single_committee_subtree_mpc(
             }
         }
 
-        let y0_vec: Vec<Vec<u64>> = (0..m).map(|u| y0_planes[u].to_vec()).collect();
+        let y0_vec = SecretBuffer(
+            (0..m)
+                .map(|u| y0_planes[u].to_vec())
+                .collect::<Vec<Vec<u64>>>(),
+        );
         let mut cur_planes_mac = reservoir.authenticate_words(&y0_vec, committee_rngs)?;
         let mut cur_planes_sh = y0_planes;
 
@@ -2039,22 +2181,18 @@ fn stage_single_committee_subtree_mpc(
         }
     }
 
-    let stores = stores_leaves
+    let stores = core::mem::take(&mut stores_leaves.0)
         .into_iter()
         .map(|leaves| CommitteeShareStore::from_parts(committee, leaves))
         .collect();
-    let leaf_ends = leaf_indices
-        .iter()
-        .copied()
-        .zip(opened_ends)
-        .collect();
+    let leaf_ends = leaf_indices.iter().copied().zip(opened_ends).collect();
     Ok((stores, leaf_ends))
 }
 
 /// Dealerless distributed MPC staging for Mode `QS-A` ([`CommitteePartitionedJorts`]).
 ///
 /// Custodians jointly coin-toss `pk_seed` and pairwise channel MAC keys, each `t`-member committee
-/// stages its assigned subtree in strict isolation via authenticated binary `Keccak-f[1600]` MPC
+/// stages its assigned subtree using only that committee's shares via authenticated binary `Keccak-f[1600]` MPC
 /// without ever reconstructing `y^(0), y^(1), y^(2)`, opens **only** `y^(3)`, and cross-verifies
 /// the global Merkle root `pk_root`.
 pub fn stage_committee_partitioned_dealerless_mpc(
@@ -2107,13 +2245,18 @@ fn stage_committee_partitioned_inner(
         leaf_indices: Vec<u64>,
         committee_sid: [u8; 32],
         member_rngs: Vec<PartyPrivateRng>,
-        result: Option<Result<(Vec<CommitteeShareStore>, Vec<(u64, Vec<Node>)>), DealerlessStagingError>>,
+        result: Option<
+            Result<(Vec<CommitteeShareStore>, Vec<(u64, Vec<Node>)>), DealerlessStagingError>,
+        >,
     }
 
     let mut jobs = Vec::with_capacity(layout.committees().len());
     for (committee, members) in layout.committees().iter().enumerate() {
         let c_be = (committee as u64).to_be_bytes();
-        let committee_sid = h32(b"QSAG.QUORUM.QSA.COMMITTEE.SID/v1", &[&session_id, &pk_seed, &c_be]);
+        let committee_sid = h32(
+            b"QSAG.QUORUM.QSA.COMMITTEE.SID/v1",
+            &[&session_id, &pk_seed, &c_be],
+        );
         let leaf_indices: Vec<u64> = (0..layout.leaves_per_committee())
             .map(|epoch| layout.leaf_of(committee, epoch))
             .collect();
@@ -2137,24 +2280,31 @@ fn stage_committee_partitioned_inner(
     }
 
     #[cfg(any(test, feature = "std"))]
-    std::thread::scope(|scope| {
-        for job in &mut jobs {
-            let pk_seed_ref = &pk_seed;
-            #[cfg(test)]
-            let fault_copy = fault;
-            scope.spawn(move || {
-                job.result = Some(stage_single_committee_subtree_mpc(
-                    job.committee,
-                    &job.leaf_indices,
-                    pk_seed_ref,
-                    job.committee_sid,
-                    &mut job.member_rngs,
-                    #[cfg(test)]
-                    fault_copy,
-                ));
-            });
+    for batch in jobs.chunks_mut(4) {
+        std::thread::scope(|scope| {
+            for job in batch.iter_mut() {
+                let pk_seed_ref = &pk_seed;
+                #[cfg(test)]
+                let fault_copy = fault;
+                scope.spawn(move || {
+                    job.result = Some(stage_single_committee_subtree_mpc(
+                        job.committee,
+                        &job.leaf_indices,
+                        pk_seed_ref,
+                        job.committee_sid,
+                        &mut job.member_rngs,
+                        #[cfg(test)]
+                        fault_copy,
+                    ));
+                });
+            }
+        });
+        for job in batch {
+            if let Some(Err(error)) = &job.result {
+                return Err(*error);
+            }
         }
-    });
+    }
 
     #[cfg(not(any(test, feature = "std")))]
     for job in &mut jobs {
@@ -2172,11 +2322,11 @@ fn stage_committee_partitioned_inner(
     let mut stores_by_party: Vec<Vec<CommitteeShareStore>> = (0..n).map(|_| Vec::new()).collect();
     let mut chain_ends = BTreeMap::new();
     for job in jobs {
-        let (stores, ends) = job
-            .result
-            .ok_or(DealerlessStagingError::Quorum(QuorumError::InvalidConfig(
-                "missing committee MPC result",
-            )))??;
+        let (stores, ends) =
+            job.result
+                .ok_or(DealerlessStagingError::Quorum(QuorumError::InvalidConfig(
+                    "missing committee MPC result",
+                )))??;
         for (store, member) in stores.into_iter().zip(job.members) {
             stores_by_party[member].push(store);
         }
@@ -2191,14 +2341,9 @@ fn stage_committee_partitioned_inner(
         .map(|_| QuorumTree::build(pk_seed, height, chain_ends.clone()))
         .collect();
     verify_global_tree_agreement(&session_id, &per_party_trees)?;
-    let tree = Arc::new(
-        per_party_trees
-            .into_iter()
-            .next()
-            .ok_or(DealerlessStagingError::Quorum(QuorumError::InvalidConfig(
-                "empty party set",
-            )))?,
-    );
+    let tree = Arc::new(per_party_trees.into_iter().next().ok_or(
+        DealerlessStagingError::Quorum(QuorumError::InvalidConfig("empty party set")),
+    )?);
 
     let parties = stores_by_party
         .into_iter()
@@ -2241,7 +2386,7 @@ fn share_bs_gf256_degree(
     deg: usize,
     powers: &[Vec<TowerGf256>],
     rng: &mut PartyPrivateRng,
-) -> Vec<BitslicedGf256x64> {
+) -> SecretBuffer<Vec<BitslicedGf256x64>> {
     let n = powers.len();
     let mut coeffs = SecretBuffer(vec![[0u64; 8]; deg]);
     for c in coeffs.iter_mut() {
@@ -2249,10 +2394,10 @@ fn share_bs_gf256_degree(
             *plane = rng.next_u64();
         }
     }
-    let mut shares = vec![*secret; n];
+    let mut shares = SecretBuffer(vec![*secret; n]);
     for (p, p_pows) in powers.iter().enumerate() {
         for k in 0..deg {
-            let term = p_pows[k].scale_planes(&coeffs[k]);
+            let term = PublicGf256Matrix::from_public_scalar(p_pows[k]).scale_planes(&coeffs[k]);
             bs_xor_assign(&mut shares[p], &term);
         }
     }
@@ -2285,7 +2430,7 @@ fn reconstruct_and_verify_bs_degree(
         let target_p = base_len + extra_idx;
         let mut expected = [0u64; 8];
         for (i, &w) in weights.iter().enumerate() {
-            let term = w.scale_planes(&shares[i]);
+            let term = PublicGf256Matrix::from_public_scalar(w).scale_planes(&shares[i]);
             bs_xor_assign(&mut expected, &term);
         }
         let mut diff = 0u64;
@@ -2299,7 +2444,7 @@ fn reconstruct_and_verify_bs_degree(
 
     let mut at_zero = [0u64; 8];
     for (i, &w) in lagrange_zero_base.iter().enumerate() {
-        let term = w.scale_planes(&shares[i]);
+        let term = PublicGf256Matrix::from_public_scalar(w).scale_planes(&shares[i]);
         bs_xor_assign(&mut at_zero, &term);
     }
     Some(at_zero)
@@ -2338,7 +2483,9 @@ fn precompute_rs_check_weights(
 }
 
 /// HVZK dealerless zero-constant degree-`(t - 1)` `TowerGf256` byte-mask ceremony across all `n`
-/// custodians (`Z(0) = 0`, `deg(Z) <= t - 1`, verified with `2^{-128}` soundness).
+/// custodians (`Z(0) = 0`, `deg(Z) <= t - 1`). Each fixed nonzero linear error
+/// has ideal-challenge acceptance probability `2^{-128}`; aggregate protocol
+/// bounds must also account for all dealers, checks and hash/PRG assumptions.
 fn run_verified_zero_constant_shamir_masks(
     cfg: &QuorumConfig,
     num_bytes: usize,
@@ -2347,8 +2494,8 @@ fn run_verified_zero_constant_shamir_masks(
     party_rngs: &mut [PartyPrivateRng],
     #[cfg(test)] fault: Option<StagingFault>,
 ) -> Result<SecretBuffer<Vec<Vec<u8>>>, DealerlessStagingError> {
-    let n = cfg.n;
-    let t = cfg.t;
+    let n = cfg.parties();
+    let t = cfg.threshold();
     let eval_pts: Vec<TowerGf256> = (0..n).map(shamir_point).collect();
 
     // `powers[p][k]` = `x_p^{k + 1}` for `k = 0 .. t - 1` (`deg = 1 .. t - 1`).
@@ -2398,8 +2545,12 @@ fn run_verified_zero_constant_shamir_masks(
                 dealt_shares[d][p][b] = acc;
             }
             for rep in 0..GF256_CHECK_REPS {
-                let poly: Vec<TowerGf256> =
-                    mask_coeffs[d][rep].iter().map(|&c| TowerGf256(c)).collect();
+                let poly = SecretBuffer(
+                    mask_coeffs[d][rep]
+                        .iter()
+                        .map(|&c| TowerGf256(c))
+                        .collect::<Vec<_>>(),
+                );
                 dealt_masks[d][p][rep] = eval_poly_gf256(&poly, eval_pts[p]).0;
             }
         }
@@ -2433,7 +2584,10 @@ fn run_verified_zero_constant_shamir_masks(
         commits.push(d_com);
     }
 
-    let commit_digest = h32(TAG_SHAMIR_COMMIT, &[session_id, phase.as_bytes(), commits.as_flattened()]);
+    let commit_digest = h32(
+        TAG_SHAMIR_COMMIT,
+        &[session_id, phase.as_bytes(), commits.as_flattened()],
+    );
     let chal_seed = coin_toss_public_seed(session_id, phase, &commit_digest, party_rngs)?;
     let mut gamma = vec![0u8; GF256_CHECK_REPS * num_bytes];
     expand(
@@ -2447,7 +2601,7 @@ fn run_verified_zero_constant_shamir_masks(
     for d in 0..n {
         for rep in 0..GF256_CHECK_REPS {
             let g_row = &gamma[rep * num_bytes..(rep + 1) * num_bytes];
-            let mut poly_coeffs = vec![TowerGf256(mask_coeffs[d][rep][0]); t];
+            let mut poly_coeffs = SecretBuffer(vec![TowerGf256(mask_coeffs[d][rep][0]); t]);
             for k in 1..t {
                 poly_coeffs[k] = TowerGf256(mask_coeffs[d][rep][k]);
             }
@@ -2462,9 +2616,6 @@ fn run_verified_zero_constant_shamir_masks(
             }
 
             if black_box(poly_coeffs[0].0) != 0 {
-                for v in &mut dealer_coeffs[d] {
-                    *v = 0;
-                }
                 return Err(DealerlessStagingError::ZeroConstantCheckFailed { dealer: d });
             }
 
@@ -2507,10 +2658,12 @@ fn run_verified_zero_constant_shamir_masks(
 
 /// Dealerless distributed MPC staging for Mode `QS-B` ([`BftShamirJorts`]).
 ///
-/// Custodians jointly coin-toss `pk_seed` and pairwise channel MAC keys, run dealerless `(t, n)`
+/// Custodians jointly coin-toss `pk_seed` and pairwise channel MAC keys, run dealerless degree-`f`
 /// chain-start DKG and 64-way bitsliced `Keccak-f[1600]` MPC without ever reconstructing `sk_seed`
-/// or `(y^(0), y^(1), y^(2))` on any host, re-share `(y^(0), y^(1), y^(2))` into independent
+/// or `(y^(0), y^(1), y^(2))`, re-share `(y^(0), y^(1), y^(2))` into independent
 /// bytewise degree-`(t - 1)` `TowerGf256` polynomials, open **only** `y^(3)`, and cross-verify `pk_root`.
+/// The circuit privacy threshold is `cfg.max_faults()`; final stored shares use
+/// `cfg.threshold()`. These thresholds can differ for non-tight configurations.
 pub fn stage_bft_shamir_dealerless_mpc(
     cfg: QuorumConfig,
     height: u8,
@@ -2534,8 +2687,8 @@ fn stage_bft_shamir_inner(
     party_rngs: &mut [PartyPrivateRng],
     #[cfg(test)] fault: Option<StagingFault>,
 ) -> Result<StagedShamirKeys, DealerlessStagingError> {
-    let n = cfg.n;
-    let f = cfg.f;
+    let n = cfg.parties();
+    let f = cfg.max_faults();
     if party_rngs.len() != n {
         return Err(DealerlessStagingError::PartyCountMismatch {
             expected: n,
@@ -2572,16 +2725,14 @@ fn stage_bft_shamir_inner(
         .collect();
     let powers_f: Vec<Vec<TowerGf256>> = powers_2f.iter().map(|v| v[..f].to_vec()).collect();
 
-    let (zero_w_f, extrap_w_f) = precompute_rs_check_weights(&eval_pts, f).ok_or(
-        DealerlessStagingError::Quorum(QuorumError::InvalidConfig(
-            "Reed-Solomon degree-f check weights unavailable",
-        )),
-    )?;
-    let (zero_w_2f, extrap_w_2f) = precompute_rs_check_weights(&eval_pts, 2 * f).ok_or(
-        DealerlessStagingError::Quorum(QuorumError::InvalidConfig(
-            "Reed-Solomon degree-2f check weights unavailable",
-        )),
-    )?;
+    let (zero_w_f, extrap_w_f) =
+        precompute_rs_check_weights(&eval_pts, f).ok_or(DealerlessStagingError::Quorum(
+            QuorumError::InvalidConfig("Reed-Solomon degree-f check weights unavailable"),
+        ))?;
+    let (zero_w_2f, extrap_w_2f) =
+        precompute_rs_check_weights(&eval_pts, 2 * f).ok_or(DealerlessStagingError::Quorum(
+            QuorumError::InvalidConfig("Reed-Solomon degree-2f check weights unavailable"),
+        ))?;
 
     let num_leaves = 1usize << height;
     let total_chains = num_leaves * WOTS_CHAINS;
@@ -2644,13 +2795,7 @@ fn stage_bft_shamir_inner(
         // via `sum_{bit=0..7} share(bit_b) * X_byte_basis(2^bit)` gives an exact degree-`f` `GF(2^8)`
         // share of the byte `sum_{bit=0..7} bit_b * 2^bit` because `2^bit` (`1 << bit`) is a public
         // `TowerGf256` constant (`TowerGf256(1 << bit)`) and `GF(2^8)` addition is bitwise XOR!
-        record_deg_f_byte_shares(
-            &cur_planes_sh,
-            batch_idx,
-            count,
-            0,
-            &mut party_leaves_deg_f,
-        );
+        record_deg_f_byte_shares(&cur_planes_sh, batch_idx, count, 0, &mut party_leaves_deg_f);
 
         // Collect all `(lhs_deg_f, rhs_deg_f, out_deg_f)` quadratic relations across all 3 steps:
         //   - For `y_d` Booleanity: `y_d * y_d + y_d == 0` (`lhs = y_d, rhs = y_d, out = y_d`)
@@ -2688,8 +2833,8 @@ fn stage_bft_shamir_inner(
             }
 
             let mut b_sh = SecretBuffer(vec![vec![[0u64; 8]; STATE_BITS]; n]);
-            let mut col_sh = vec![[0u64; 8]; 320];
-            let mut d_theta_sh = vec![[0u64; 8]; 320];
+            let mut col_sh = SecretBuffer(vec![[0u64; 8]; 320]);
+            let mut d_theta_sh = SecretBuffer(vec![[0u64; 8]; 320]);
 
             for (rnd_idx, &rc) in KECCAK_ROUND_CONSTANTS.iter().enumerate() {
                 // Linear layer (`Theta + Rho + Pi`).
@@ -2717,8 +2862,10 @@ fn stage_bft_shamir_inner(
                         let rot = rot as usize;
                         for z in 0..64 {
                             let src_z = (z + 64 - rot) & 63;
-                            b_sh[p][target * 64 + z] =
-                                bs_xor(&states_sh[p][source * 64 + src_z], &d_theta_sh[x * 64 + src_z]);
+                            b_sh[p][target * 64 + z] = bs_xor(
+                                &states_sh[p][source * 64 + src_z],
+                                &d_theta_sh[x * 64 + src_z],
+                            );
                         }
                     }
                 }
@@ -2767,9 +2914,11 @@ fn stage_bft_shamir_inner(
                         &zero_w_2f,
                         &extrap_w_2f,
                     )
-                    .ok_or(DealerlessStagingError::MultiplicationCheckFailed {
-                        check_idx: rnd_idx * STATE_BITS + idx,
-                    })?;
+                    .ok_or(
+                        DealerlessStagingError::MultiplicationCheckFailed {
+                            check_idx: rnd_idx * STATE_BITS + idx,
+                        },
+                    )?;
 
                     for p in 0..n {
                         #[allow(unused_mut)]
@@ -2811,13 +2960,71 @@ fn stage_bft_shamir_inner(
             }
         }
 
-        // 3. Active 16-instance Reed-Solomon verification (`< 2^{-128}` soundness) BEFORE opening `y^(3)`!
+        // 3. Active 16-instance Reed-Solomon verification (16 independent field challenges) BEFORE opening `y^(3)`!
         //    Verifies BOTH:
         //      (a) Every relation wire `(lhs, rhs, out)` has degree `<= f`
         //      (b) Every quadratic relation `lhs(0) * rhs(0) + out(0) == 0` holds (`deg <= 2f` & `P(0) == 0`)
         let num_rels = rel_lhs[0].len();
+        // Fix the proof masks before any challenge is sampled. These local polynomial
+        // dealings construct their stated degree and zero-constant invariants; a wire
+        // transport must preserve those same dealing checks at each recipient.
+        let mut check_masks_f = SecretBuffer(vec![vec![[0u64; 8]; n]; GF256_CHECK_REPS]);
+        let mut check_masks_2f = SecretBuffer(vec![vec![[0u64; 8]; n]; GF256_CHECK_REPS]);
+        for rep in 0..GF256_CHECK_REPS {
+            for d in 0..n {
+                let mut m_sec = [0u64; 8];
+                for pl in &mut m_sec {
+                    *pl = party_rngs[d].next_u64();
+                }
+                let mf_sh = share_bs_gf256_degree(&m_sec, f, &powers_f, &mut party_rngs[d]);
+                wipe_u64s(&mut m_sec);
+                let z_sh = share_bs_gf256_degree(&[0u64; 8], 2 * f, &powers_2f, &mut party_rngs[d]);
+                for p in 0..n {
+                    bs_xor_assign(&mut check_masks_f[rep][p], &mf_sh[p]);
+                    bs_xor_assign(&mut check_masks_2f[rep][p], &z_sh[p]);
+                }
+            }
+        }
+
+        // Salted participant commitments bind every relation and proof mask to this
+        // batch. No participant's secret wire is reconstructed to compute its digest.
         let batch_be = (batch_idx as u64).to_be_bytes();
-        let chal_digest = h32(b"QSAG.QUORUM.QSB.BATCH.CHAL/v1", &[&session_id, &pk_seed, &batch_be]);
+        let mut relation_commits = vec![[0u8; 32]; n];
+        for p in 0..n {
+            let mut salt = party_rngs[p].next_bytes32();
+            let mut xof = Cshake256Xof::new_shake256();
+            xof.absorb(b"QSAG.QUORUM.QSB.RELATIONS/v1");
+            xof.absorb(&session_id);
+            xof.absorb(&batch_be);
+            xof.absorb(&(p as u64).to_be_bytes());
+            xof.absorb(&(num_rels as u64).to_be_bytes());
+            xof.absorb(&salt);
+            for rows in [&rel_lhs[p], &rel_rhs[p], &rel_out[p]] {
+                for row in rows {
+                    for word in row {
+                        xof.absorb(&word.to_le_bytes());
+                    }
+                }
+            }
+            for rep in 0..GF256_CHECK_REPS {
+                for row in [&check_masks_f[rep][p], &check_masks_2f[rep][p]] {
+                    for word in row {
+                        xof.absorb(&word.to_le_bytes());
+                    }
+                }
+            }
+            xof.squeeze(&mut relation_commits[p]);
+            wipe_bytes32(&mut salt);
+        }
+        let chal_digest = h32(
+            b"QSAG.QUORUM.QSB.BATCH.CHAL/v1",
+            &[
+                &session_id,
+                &pk_seed,
+                &batch_be,
+                relation_commits.as_flattened(),
+            ],
+        );
         let chal_seed =
             coin_toss_public_seed(&session_id, "qsb_gate_verify", &chal_digest, party_rngs)?;
         let mut weights = vec![0u8; GF256_CHECK_REPS * 3 * num_rels];
@@ -2828,23 +3035,8 @@ fn stage_bft_shamir_inner(
         );
 
         for rep in 0..GF256_CHECK_REPS {
-            // Fresh dealerless degree-`f` mask `M_f(X)` and zero-constant degree-`2f` mask `Z_{2f}(X)`.
-            let mut mask_f = SecretBuffer(vec![[0u64; 8]; n]);
-            let mut z_2f = SecretBuffer(vec![[0u64; 8]; n]);
-            for d in 0..n {
-                let mut m_sec = [0u64; 8];
-                for pl in &mut m_sec {
-                    *pl = party_rngs[d].next_u64();
-                }
-                let mf_sh = share_bs_gf256_degree(&m_sec, f, &powers_f, &mut party_rngs[d]);
-                wipe_u64s(&mut m_sec);
-                let z_sh = share_bs_gf256_degree(&[0u64; 8], 2 * f, &powers_2f, &mut party_rngs[d]);
-                for p in 0..n {
-                    bs_xor_assign(&mut mask_f[p], &mf_sh[p]);
-                    bs_xor_assign(&mut z_2f[p], &z_sh[p]);
-                }
-            }
-
+            let mask_f = &check_masks_f[rep];
+            let z_2f = &check_masks_2f[rep];
             let w_base = rep * 3 * num_rels;
             let mut deg_f_open = vec![[0u64; 8]; n];
             let mut quad_open = vec![[0u64; 8]; n];
@@ -2855,14 +3047,18 @@ fn stage_bft_shamir_inner(
                     let wl = TowerGf256(weights[w_base + 3 * r]);
                     let wr = TowerGf256(weights[w_base + 3 * r + 1]);
                     let wo = TowerGf256(weights[w_base + 3 * r + 2]);
-                    wl.scale_xor_into(&mut lin_acc, &rel_lhs[p][r]);
-                    wr.scale_xor_into(&mut lin_acc, &rel_rhs[p][r]);
-                    wo.scale_xor_into(&mut lin_acc, &rel_out[p][r]);
+                    PublicGf256Matrix::from_public_scalar(wl)
+                        .scale_xor_into(&mut lin_acc, &rel_lhs[p][r]);
+                    PublicGf256Matrix::from_public_scalar(wr)
+                        .scale_xor_into(&mut lin_acc, &rel_rhs[p][r]);
+                    PublicGf256Matrix::from_public_scalar(wo)
+                        .scale_xor_into(&mut lin_acc, &rel_out[p][r]);
 
                     if wo.0 != 0 {
                         let prod = bs_gf256_mul_planes_ct(&rel_lhs[p][r], &rel_rhs[p][r]);
                         let err_2f = bs_xor(&prod, &rel_out[p][r]);
-                        wo.scale_xor_into(&mut quad_acc, &err_2f);
+                        PublicGf256Matrix::from_public_scalar(wo)
+                            .scale_xor_into(&mut quad_acc, &err_2f);
                     }
                 }
                 deg_f_open[p] = lin_acc;
@@ -2902,16 +3098,12 @@ fn stage_bft_shamir_inner(
 
         let mut y3_planes = [0u64; 256];
         for b in 0..256 {
-            let bit_shares: Vec<BitslicedGf256x64> =
-                (0..n).map(|p| cur_planes_sh[p][b]).collect();
-            let rec = reconstruct_and_verify_bs_degree(
-                &bit_shares,
-                f,
-                &eval_pts,
-                &zero_w_f,
-                &extrap_w_f,
-            )
-            .ok_or(DealerlessStagingError::EndpointOpeningDegreeMismatch { batch: batch_idx })?;
+            let bit_shares: Vec<BitslicedGf256x64> = (0..n).map(|p| cur_planes_sh[p][b]).collect();
+            let rec =
+                reconstruct_and_verify_bs_degree(&bit_shares, f, &eval_pts, &zero_w_f, &extrap_w_f)
+                    .ok_or(DealerlessStagingError::EndpointOpeningDegreeMismatch {
+                        batch: batch_idx,
+                    })?;
             // Every valid `y^(3)` bit reconstructs in `{0, 1}` (`planes[1..8] == 0`).
             let mut non_bool = 0u64;
             for pl in &rec[1..] {
@@ -2952,10 +3144,10 @@ fn stage_bft_shamir_inner(
     for (p, p_mac_keys) in mac_keys.into_iter().enumerate() {
         let mut final_leaves = vec![vec![[0u8; 32]; LEAF_SHARE_NODES]; num_leaves];
         for (b_idx, (dst, src)) in final_leaves
-            .as_flattened_mut()
-            .as_flattened_mut()
             .iter_mut()
-            .zip(party_leaves_deg_f[p].as_flattened().as_flattened().iter())
+            .flatten()
+            .flatten()
+            .zip(party_leaves_deg_f[p].iter().flatten().flatten())
             .enumerate()
         {
             *dst = *src ^ zero_masks[p][b_idx];
@@ -2972,14 +3164,9 @@ fn stage_bft_shamir_inner(
         .map(|_| QuorumTree::build(pk_seed, height, chain_ends.clone()))
         .collect();
     verify_global_tree_agreement(&session_id, &per_party_trees)?;
-    let tree = Arc::new(
-        per_party_trees
-            .into_iter()
-            .next()
-            .ok_or(DealerlessStagingError::Quorum(QuorumError::InvalidConfig(
-                "empty party set",
-            )))?,
-    );
+    let tree = Arc::new(per_party_trees.into_iter().next().ok_or(
+        DealerlessStagingError::Quorum(QuorumError::InvalidConfig("empty party set")),
+    )?);
 
     Ok(StagedShamirKeys { cfg, tree, parties })
 }
@@ -3002,7 +3189,8 @@ fn record_deg_f_byte_shares(
             let mut byte_plane = [0u64; 8];
             for bit in 0..8 {
                 let basis = TowerGf256(1u8 << bit);
-                basis.scale_xor_into(&mut byte_plane, &planes_sh[p][8 * byte_idx + bit]);
+                PublicGf256Matrix::from_public_scalar(basis)
+                    .scale_xor_into(&mut byte_plane, &planes_sh[p][8 * byte_idx + bit]);
             }
             for lane in 0..count {
                 let global_chain = batch_idx * 64 + lane;
@@ -3020,14 +3208,40 @@ fn record_deg_f_byte_shares(
 // 5. Proactive Share & Pairwise Channel Key Refresh (`QS-A` & `QS-B`)
 // =============================================================================================
 
-/// XOR `mask` into `leaves` in place using volatile writes so pre-refresh share bytes do not
-/// linger in registers or stack copies, then zeroize `mask`.
+fn validate_leaf_table(
+    leaves: &[Vec<Node>],
+    expected_leaves: usize,
+) -> Result<(), DealerlessStagingError> {
+    if leaves.len() != expected_leaves || leaves.iter().any(|leaf| leaf.len() != LEAF_SHARE_NODES) {
+        return Err(QuorumError::InvalidConfig("refresh share table shape mismatch").into());
+    }
+    Ok(())
+}
+
+/// Check the rotated MAC key table before any custodian state changes, so the commit phase
+/// of a live refresh cannot stop between two custodians.
+fn validate_mac_key_table(keys: &mut [Vec<Node>], n: usize) -> Result<(), DealerlessStagingError> {
+    if keys.len() != n || keys.iter().any(|row| row.len() != n) {
+        for row in keys.iter_mut() {
+            for key in row.iter_mut() {
+                wipe_bytes32(key);
+            }
+        }
+        return Err(QuorumError::InvalidConfig("refresh MAC key table shape mismatch").into());
+    }
+    Ok(())
+}
+
+/// Replace each old share byte in place and erase the consumed mask. This wipes
+/// owned memory, not compiler copies, registers or external snapshots.
 fn apply_and_wipe_leaf_mask_in_place(leaves: &mut [Vec<Node>], mask: &mut [u8]) {
-    let flat_nodes: &mut [Node] = leaves.as_flattened_mut();
-    let flat_bytes: &mut [u8] = flat_nodes.as_flattened_mut();
-    for (dst, &m) in flat_bytes.iter_mut().zip(mask.iter()) {
+    assert_eq!(
+        leaves.iter().map(|l| l.len() * 32).sum::<usize>(),
+        mask.len()
+    );
+    for (dst, &m) in leaves.iter_mut().flatten().flatten().zip(mask.iter()) {
         let updated = black_box(*dst) ^ black_box(m);
-        *dst = black_box(updated);
+        qsag_asm::volatile_fill(core::slice::from_mut(dst), updated);
     }
     qsag_asm::volatile_fill(mask, 0);
     black_box(mask);
@@ -3110,7 +3324,9 @@ fn generate_committee_zero_sum_masks(
             let mut pair_stream = SecretBuffer(vec![0u8; num_bytes]);
             expand(
                 TAG_REFRESH_MASK,
-                &[session_id, &c_be, &u_be, &v_be, &com_u, &com_v, &share_u, &share_v],
+                &[
+                    session_id, &c_be, &u_be, &v_be, &com_u, &com_v, &share_u, &share_v,
+                ],
                 &mut pair_stream,
             );
             wipe_bytes32(&mut salt_u);
@@ -3161,6 +3377,27 @@ fn refresh_committee_shares_inner<W: DurableWal>(
         });
     }
 
+    if *layout != CommitteeLayout::new(layout.t, layout.n, layout.height)? {
+        return Err(QuorumError::InvalidConfig("inconsistent committee layout").into());
+    }
+    let expected_pk = *custodians[0].tree().public_key();
+    for (p, custodian) in custodians.iter_mut().enumerate() {
+        if custodian.party() != p
+            || custodian.layout() != layout
+            || *custodian.tree().public_key() != expected_pk
+        {
+            return Err(QuorumError::InvalidConfig("refresh custodian context mismatch").into());
+        }
+        for (committee, members) in layout.committees().iter().enumerate() {
+            if members.contains(&p) {
+                validate_leaf_table(
+                    custodian.slot_leaves_mut(committee)?,
+                    layout.leaves_per_committee() as usize,
+                )?;
+            }
+        }
+    }
+
     let num_bytes = (layout.leaves_per_committee() as usize) * LEAF_SHARE_NODES * 32;
     let mut all_committee_masks = Vec::with_capacity(layout.committees().len());
     for (committee, members) in layout.committees().iter().enumerate() {
@@ -3185,7 +3422,8 @@ fn refresh_committee_shares_inner<W: DurableWal>(
         all_committee_masks.push(masks);
     }
 
-    let new_mac_keys = establish_dealerless_pairwise_mac_keys(&session_id, party_rngs)?;
+    let mut new_mac_keys = establish_dealerless_pairwise_mac_keys(&session_id, party_rngs)?;
+    validate_mac_key_table(&mut new_mac_keys, n)?;
 
     // Commit changes only after every committee and pairwise ceremony succeeded!
     for ((committee, members), mut masks) in layout
@@ -3218,6 +3456,36 @@ pub fn refresh_staged_committee_keys(
             got: party_rngs.len(),
         });
     }
+    if staged.layout
+        != CommitteeLayout::new(staged.layout.t, staged.layout.n, staged.layout.height)?
+        || staged.tree.public_key().height != staged.layout.height
+    {
+        return Err(QuorumError::InvalidConfig("inconsistent committee layout").into());
+    }
+    for (p, mat) in staged.parties.iter_mut().enumerate() {
+        let expected: Vec<usize> = staged
+            .layout
+            .committees()
+            .iter()
+            .enumerate()
+            .filter_map(|(c, members)| members.contains(&p).then_some(c))
+            .collect();
+        let mut actual: Vec<usize> = mat
+            .stores
+            .iter()
+            .map(CommitteeShareStore::committee)
+            .collect();
+        actual.sort_unstable();
+        if mat.party != p || actual != expected {
+            return Err(QuorumError::InvalidConfig("refresh material membership mismatch").into());
+        }
+        for store in &mut mat.stores {
+            validate_leaf_table(
+                store.leaves_mut(),
+                staged.layout.leaves_per_committee() as usize,
+            )?;
+        }
+    }
     let num_bytes = (staged.layout.leaves_per_committee() as usize) * LEAF_SHARE_NODES * 32;
     let mut all_masks = Vec::with_capacity(staged.layout.committees().len());
     for (committee, members) in staged.layout.committees().iter().enumerate() {
@@ -3242,12 +3510,8 @@ pub fn refresh_staged_committee_keys(
     }
     let new_mac_keys = establish_dealerless_pairwise_mac_keys(&session_id, party_rngs)?;
 
-    for ((committee, members), mut masks) in staged
-        .layout
-        .committees()
-        .iter()
-        .enumerate()
-        .zip(all_masks)
+    for ((committee, members), mut masks) in
+        staged.layout.committees().iter().enumerate().zip(all_masks)
     {
         for (pos, &member) in members.iter().enumerate() {
             if let Some(store) = staged.parties[member]
@@ -3267,7 +3531,9 @@ pub fn refresh_staged_committee_keys(
 
 /// Proactively refresh all live `QS-B` [`ShamirCustodian`] share tables AND pairwise channel MAC
 /// keys in place via HVZK-verified degree-`< t` zero-constant `GF(2^8)` polynomials (`P(0) = 0`),
-/// preserving `pk_root` and `BeltLatch` state while unlinking pre- and post-refresh shares.
+/// preserving `pk_root` and `BeltLatch` state while re-randomizing the stored sharings.
+/// Mobile-adversary secrecy additionally requires erasure and a corruption schedule
+/// that does not expose enough refresh masks to translate shares between epochs.
 pub fn refresh_bft_shamir_shares<W: DurableWal>(
     cfg: &QuorumConfig,
     custodians: &mut [ShamirCustodian<W>],
@@ -3291,12 +3557,22 @@ fn refresh_bft_shamir_shares_inner<W: DurableWal>(
     party_rngs: &mut [PartyPrivateRng],
     #[cfg(test)] fault: Option<StagingFault>,
 ) -> Result<(), DealerlessStagingError> {
-    let n = cfg.n;
+    let n = cfg.parties();
     if custodians.len() != n || party_rngs.len() != n {
         return Err(DealerlessStagingError::PartyCountMismatch {
             expected: n,
             got: custodians.len().min(party_rngs.len()),
         });
+    }
+    let expected_pk = *custodians[0].tree().public_key();
+    for (p, custodian) in custodians.iter_mut().enumerate() {
+        if custodian.party() != p
+            || custodian.config() != cfg
+            || *custodian.tree().public_key() != expected_pk
+        {
+            return Err(QuorumError::InvalidConfig("refresh custodian context mismatch").into());
+        }
+        validate_leaf_table(custodian.leaves_mut(), 1usize << expected_pk.height)?;
     }
     let num_bytes = custodians[0].share_bytes();
     let mut zero_masks = run_verified_zero_constant_shamir_masks(
@@ -3308,10 +3584,15 @@ fn refresh_bft_shamir_shares_inner<W: DurableWal>(
         #[cfg(test)]
         fault,
     )?;
-    let new_mac_keys = establish_dealerless_pairwise_mac_keys(&session_id, party_rngs)?;
+    let mut new_mac_keys = establish_dealerless_pairwise_mac_keys(&session_id, party_rngs)?;
+    validate_mac_key_table(&mut new_mac_keys, n)?;
 
-    for (p, (custodian, keys)) in custodians.iter_mut().zip(new_mac_keys).enumerate() {
+    // Every share table moves to the new sharing before any key is replaced: a partially
+    // applied zero-constant mask would leave no quorum able to reconstruct.
+    for (p, custodian) in custodians.iter_mut().enumerate() {
         apply_and_wipe_leaf_mask_in_place(custodian.leaves_mut(), &mut zero_masks[p]);
+    }
+    for (custodian, keys) in custodians.iter_mut().zip(new_mac_keys) {
         custodian.replace_mac_keys(keys)?;
     }
     Ok(())
@@ -3323,7 +3604,7 @@ pub fn refresh_staged_bft_shamir_keys(
     session_id: [u8; 32],
     party_rngs: &mut [PartyPrivateRng],
 ) -> Result<(), DealerlessStagingError> {
-    let n = staged.cfg.n;
+    let n = staged.cfg.parties();
     if staged.parties.len() != n || party_rngs.len() != n {
         return Err(DealerlessStagingError::PartyCountMismatch {
             expected: n,
@@ -3331,6 +3612,12 @@ pub fn refresh_staged_bft_shamir_keys(
         });
     }
     let num_leaves = 1usize << staged.tree.public_key().height;
+    for (p, mat) in staged.parties.iter_mut().enumerate() {
+        if mat.party != p {
+            return Err(QuorumError::InvalidConfig("refresh material membership mismatch").into());
+        }
+        validate_leaf_table(mat.leaves_mut(), num_leaves)?;
+    }
     let num_bytes = num_leaves * LEAF_SHARE_NODES * 32;
     let mut zero_masks = run_verified_zero_constant_shamir_masks(
         &staged.cfg,
@@ -3358,9 +3645,12 @@ pub fn refresh_staged_bft_shamir_keys(
 mod tests {
     use super::*;
     use crate::quorum_jorts::{
-        BftShamirJorts, CommitteePartitionedJorts, LatchCertificate, chain_step, combine_additive,
-        combine_shamir, quorum_jorts_verify, verify_jorts_signature,
+        BftShamirJorts, CommitteePartitionedJorts, LatchCertificate, QuorumJortsSig, chain_step,
+        combine_additive, combine_shamir, quorum_jorts_verify, verify_jorts_signature,
     };
+    use crate::party_node::{IsolatedJortsParty, IsolatedQuorumParty};
+    use crate::wire_channel::InMemoryWireMesh;
+    use qsag_core::belt_latch::MemoryWal;
 
     fn make_party_rngs(n: usize, tag: u8) -> Vec<PartyPrivateRng> {
         (0..n)
@@ -3375,10 +3665,105 @@ mod tests {
     }
 
     #[test]
+    fn refresh_rejects_misordered_or_mismatched_custodians_before_mutation() {
+        use crate::quorum_jorts::{stage_bft_shamir, stage_committee_partitioned};
+        let cfg = QuorumConfig::tight(2).unwrap();
+        let mut qsb =
+            BftShamirJorts::from_staged(stage_bft_shamir(cfg, 1, &[0x91; 32]).unwrap()).unwrap();
+        let mut rngs = make_party_rngs(cfg.parties(), 0x92);
+        qsb.custodians.swap(0, 1);
+        assert!(
+            refresh_bft_shamir_shares(&cfg, &mut qsb.custodians, [0x93; 32], &mut rngs).is_err()
+        );
+        qsb.custodians.swap(0, 1);
+        let wrong_cfg = QuorumConfig::new(3, 4, 1).unwrap();
+        assert!(
+            refresh_bft_shamir_shares(&wrong_cfg, &mut qsb.custodians, [0x94; 32], &mut rngs)
+                .is_err()
+        );
+        let sig = qsb
+            .sign(&[0, 1, 2], b"unchanged after rejected context")
+            .unwrap();
+        assert!(verify_jorts_signature(
+            qsb.public_key(),
+            b"unchanged after rejected context",
+            &sig
+        ));
+
+        let mut qsa = CommitteePartitionedJorts::from_staged(
+            stage_committee_partitioned(2, 3, 2, &[0x95; 32]).unwrap(),
+        )
+        .unwrap();
+        let mut rngs = make_party_rngs(3, 0x96);
+        qsa.custodians.swap(0, 1);
+        assert!(
+            refresh_committee_shares(&qsa.layout, &mut qsa.custodians, [0x97; 32], &mut rngs)
+                .is_err()
+        );
+        qsa.custodians.swap(0, 1);
+        assert!(matches!(
+            refresh_committee_shares_inner(
+                &qsa.layout,
+                &mut qsa.custodians,
+                [0x98; 32],
+                &mut rngs,
+                Some(StagingFault::CorruptQsARefreshOpen {
+                    committee: 0,
+                    member_pos: 1
+                }),
+            ),
+            Err(DealerlessStagingError::CommitmentMismatch { .. })
+        ));
+        let sig = qsa
+            .sign(&[0, 1], b"unchanged after rejected refresh")
+            .unwrap();
+        assert!(verify_jorts_signature(
+            qsa.public_key(),
+            b"unchanged after rejected refresh",
+            &sig
+        ));
+    }
+
+    #[test]
+    fn staged_refresh_rejects_missing_committee_or_misordered_party() {
+        use crate::quorum_jorts::{stage_bft_shamir, stage_committee_partitioned};
+        let mut qsa = stage_committee_partitioned(2, 3, 2, &[0xa1; 32]).unwrap();
+        let saved = qsa.parties[0].stores.pop().unwrap();
+        let mut rngs = make_party_rngs(3, 0xa2);
+        assert!(refresh_staged_committee_keys(&mut qsa, [0xa3; 32], &mut rngs).is_err());
+        qsa.parties[0].stores.push(saved);
+        refresh_staged_committee_keys(&mut qsa, [0xa4; 32], &mut rngs).unwrap();
+        let mut qsa = CommitteePartitionedJorts::from_staged(qsa).unwrap();
+        let sig = qsa.sign(&[0, 1], b"refreshed staged committee").unwrap();
+        assert!(verify_jorts_signature(
+            qsa.public_key(),
+            b"refreshed staged committee",
+            &sig
+        ));
+
+        let cfg = QuorumConfig::tight(2).unwrap();
+        let mut qsb = stage_bft_shamir(cfg, 1, &[0xa5; 32]).unwrap();
+        let mut rngs = make_party_rngs(cfg.parties(), 0xa6);
+        qsb.parties.swap(0, 1);
+        assert!(refresh_staged_bft_shamir_keys(&mut qsb, [0xa7; 32], &mut rngs).is_err());
+        qsb.parties.swap(0, 1);
+        refresh_staged_bft_shamir_keys(&mut qsb, [0xa8; 32], &mut rngs).unwrap();
+        let mut qsb = BftShamirJorts::from_staged(qsb).unwrap();
+        let sig = qsb.sign(&[0, 1, 2], b"refreshed staged shamir").unwrap();
+        assert!(verify_jorts_signature(
+            qsb.public_key(),
+            b"refreshed staged shamir",
+            &sig
+        ));
+    }
+
+    #[test]
     fn bitsliced_chain_step_matches_scalar_chain_step_bit_for_bit() {
         let mut rngs = make_party_rngs(1, 0x10);
         let pk_seed = rngs[0].next_bytes32();
-        let coords: Vec<(u64, u32)> = (0..64).map(|i| ((i / 16) as u64, (i % 16) as u32)).collect();
+        let coords: Vec<(u64, u32)> = (0..64)
+            .map(|i| ((i / 16) as u64, (i % 16) as u32))
+            .collect();
         let inputs: Vec<Node> = (0..64).map(|_| rngs[0].next_bytes32()).collect();
         let in_planes = pack_nodes_to_256_planes(&inputs);
 
@@ -3411,123 +3796,79 @@ mod tests {
 
     #[test]
     fn dealerless_qs_a_stages_signs_refreshes_and_unlinks_epochs() {
-        let sid = [0x41u8; 32];
         let mut rngs = make_party_rngs(3, 0x21);
-        let staged =
-            stage_committee_partitioned_dealerless_mpc(2, 3, 2, sid, &mut rngs).expect("QS-A MPC");
-        let pk_before = *staged.tree.public_key();
-        let mut qs_a = CommitteePartitionedJorts::from_staged(staged).expect("from_staged");
+        let staged = stage_committee_partitioned_dealerless_mpc(2, 3, 2, [0x41; 32], &mut rngs)
+            .expect("QS-A MPC");
+        let pk = *staged.tree.public_key();
+        let mut qsa = CommitteePartitionedJorts::from_staged(staged).unwrap();
+        let msg = b"committee zero across refresh";
+        let before = qsa.sign(&[0, 1], msg).expect("pre-refresh sign");
+        assert!(verify_jorts_signature(&pk, msg, &before));
 
-        // Sign across all three 2-of-3 committees via the unmodified online BeltLatch ceremony!
-        for (idx, committee_members) in [[0usize, 1], [0, 2], [1, 2]].iter().enumerate() {
-            let msg = alloc::format!("dealerless-qs-a-committee-{idx}");
-            let t0 = std::time::Instant::now();
-            let sig = qs_a.sign(committee_members, msg.as_bytes()).expect("online sign");
-            let elapsed = t0.elapsed();
-            assert!(verify_jorts_signature(&pk_before, msg.as_bytes(), &sig));
-            assert!(quorum_jorts_verify(&pk_before, msg.as_bytes(), &sig));
-            if !cfg!(debug_assertions) {
-                assert!(
-                    elapsed.as_micros() < 1_000,
-                    "online QS-A sign took {} us (>= 1000 us)",
-                    elapsed.as_micros()
-                );
-            }
-        }
-
-        // Stage a height-3 `(2, 3)` tree (`2` leaves per committee) to test cross-epoch refresh
-        // and verify mixing pre-refresh and post-refresh shares fails reconstruction!
-        let mut rngs_h3 = make_party_rngs(3, 0x22);
-        let staged_h3 = stage_committee_partitioned_dealerless_mpc(2, 3, 3, [0x42; 32], &mut rngs_h3)
-            .expect("QS-A height 3");
-        let pk_h3 = *staged_h3.tree.public_key();
-        let mut qs_a_h3 = CommitteePartitionedJorts::from_staged(staged_h3).expect("from_staged");
-
-        // Epoch 0 sign on committee 0 (`{0, 1}`).
-        let sig_ep0 = qs_a_h3.sign(&[0, 1], b"epoch-0-msg").expect("epoch 0");
-        assert!(verify_jorts_signature(&pk_h3, b"epoch-0-msg", &sig_ep0));
-
-        // Capture custodian 0's pre-refresh opening on epoch 1 BEFORE refreshing!
-        let (stale_rec, stale_echo0) = qs_a_h3.custodians[0]
-            .bind_and_echo(0, 1, b"epoch-1-msg")
-            .expect("bind 0");
-        let (_, stale_echo1) = qs_a_h3.custodians[1]
-            .bind_and_echo(0, 1, b"epoch-1-msg")
-            .expect("bind 1");
-        let permit0 = qs_a_h3.custodians[0]
-            .verify_echoes(&stale_rec, &[stale_echo1])
-            .expect("permit 0");
-        let stale_open_0 = qs_a_h3.custodians[0]
-            .open_shares(permit0)
-            .expect("stale open 0");
-        let _ = stale_echo0;
-
-        // Run proactive committee share & MAC key refresh!
+        let old_echo = qsa.custodians[1].echo_for(0, 0).unwrap();
+        let old_permit = qsa.custodians[0].verify_echoes(0, &[old_echo]).unwrap();
+        let stale = qsa.custodians[0].open(&old_permit).unwrap();
         let mut refresh_rngs = make_party_rngs(3, 0x23);
         refresh_committee_shares(
-            &qs_a_h3.layout,
-            &mut qs_a_h3.custodians,
+            &qsa.layout,
+            &mut qsa.custodians,
             [0x99; 32],
             &mut refresh_rngs,
         )
         .expect("refresh QS-A");
-        assert_eq!(*qs_a_h3.public_key(), pk_h3);
-
-        // Fresh post-refresh signing on epoch 1 (`replay` of same bound message at epoch 1) succeeds!
-        let sig_ep1 = qs_a_h3.sign_at(0, 1, b"epoch-1-msg").expect("post-refresh sign");
-        assert!(verify_jorts_signature(&pk_h3, b"epoch-1-msg", &sig_ep1));
-
-        // Obtain custodian 1's post-refresh opening on epoch 1 and mix with custodian 0's stale opening:
-        let (post_rec, post_e0) = qs_a_h3.custodians[0]
-            .bind_and_echo(0, 1, b"epoch-1-msg")
-            .expect("re-echo 0");
-        let (_, _post_e1) = qs_a_h3.custodians[1]
-            .bind_and_echo(0, 1, b"epoch-1-msg")
-            .expect("re-echo 1");
-        let post_permit1 = qs_a_h3.custodians[1]
-            .verify_echoes(&post_rec, &[post_e0])
-            .expect("post permit 1");
-        let fresh_open_1 = qs_a_h3.custodians[1]
-            .open_shares(post_permit1)
-            .expect("fresh open 1");
-
-        let mixed_err = combine_additive(
-            &qs_a_h3.layout,
-            &qs_a_h3.tree,
-            &post_rec,
-            &[stale_open_0, fresh_open_1],
+        assert_eq!(*qsa.public_key(), pk);
+        let after = qsa.sign_at(0, 0, msg).expect("post-refresh replay");
+        assert!(verify_jorts_signature(&pk, msg, &after));
+        assert_eq!(
+            before, after,
+            "refresh preserves the canonical signature bytes"
         );
-        assert!(
-            matches!(mixed_err, Err(QuorumError::ChainVerifyFailed { .. })),
-            "mixing pre-refresh and post-refresh QS-A shares must fail: {mixed_err:?}"
-        );
+
+        let record = qsa.custodians[0].bind(0, 0, msg).unwrap();
+        let echo = qsa.custodians[0].echo_for(0, 1).unwrap();
+        let permit = qsa.custodians[1].verify_echoes(0, &[echo]).unwrap();
+        let fresh = qsa.custodians[1].open(&permit).unwrap();
+        assert!(matches!(
+            combine_additive(&qsa.tree, &record, &[0, 1], &[stale, fresh]),
+            Err(QuorumError::ChainVerifyFailed { .. })
+        ));
+
+        // The other two committees sign previously unused leaves after refresh.
+        for (idx, members) in [[0usize, 2], [1, 2]].iter().enumerate() {
+            let msg = alloc::format!("refreshed-committee-{idx}");
+            let start = std::time::Instant::now();
+            let sig = qsa
+                .sign(members, msg.as_bytes())
+                .expect("post-refresh new signature");
+            std::eprintln!("QS-A online signature: {} us", start.elapsed().as_micros());
+            assert!(verify_jorts_signature(&pk, msg.as_bytes(), &sig));
+            assert!(quorum_jorts_verify(&pk, msg.as_bytes(), &sig));
+        }
     }
 
     #[test]
     fn dealerless_qs_b_stages_signs_switches_quorums_and_refreshes() {
         for t in [2usize, 3] {
             let cfg = QuorumConfig::tight(t).expect("tight config");
-            let mut rngs = make_party_rngs(cfg.n, 0x30 + t as u8);
+            let mut rngs = make_party_rngs(cfg.parties(), 0x30 + t as u8);
             let staged = stage_bft_shamir_dealerless_mpc(cfg, 2, [0x51 + t as u8; 32], &mut rngs)
                 .expect("QS-B MPC");
             let pk = *staged.tree.public_key();
             let mut qs_b = BftShamirJorts::from_staged(staged).expect("from_staged");
 
-            let ackers_0: Vec<usize> = (0..cfg.q).collect();
-            let signers_0: Vec<usize> = (0..cfg.t).collect();
+            let ackers_0: Vec<usize> = (0..cfg.quorum()).collect();
+            let signers_0: Vec<usize> = (0..cfg.threshold()).collect();
             let t0 = std::time::Instant::now();
             let sig0 = qs_b
-                .sign(&ackers_0, &signers_0, b"dealerless-qs-b-epoch-0")
+                .sign_at(&ackers_0, &signers_0, 0, b"dealerless-qs-b-epoch-0")
                 .expect("sign 0");
             let elapsed = t0.elapsed();
-            assert!(verify_jorts_signature(&pk, b"dealerless-qs-b-epoch-0", &sig0));
-            if !cfg!(debug_assertions) {
-                assert!(
-                    elapsed.as_micros() < 1_000,
-                    "online QS-B (t={t}) sign took {} us (>= 1000 us)",
-                    elapsed.as_micros()
-                );
-            }
+            assert!(verify_jorts_signature(
+                &pk,
+                b"dealerless-qs-b-epoch-0",
+                &sig0
+            ));
+            std::eprintln!("QS-B t={t} online signature: {} us", elapsed.as_micros());
 
             // Capture `(t - 1)` pre-refresh openings on leaf 1 BEFORE proactive refresh!
             let mut pre_acks = Vec::new();
@@ -3539,47 +3880,37 @@ mod tests {
             }
             let rec1 = rec_leaf1.expect("record");
             let pre_cert = LatchCertificate::assemble(&rec1, pre_acks);
-            let stale_openings: Vec<_> = (0..(cfg.t - 1))
+            let stale_openings: Vec<_> = (0..(cfg.threshold() - 1))
                 .map(|p| {
                     qs_b.custodians[p]
-                        .open_shares(1, b"epoch-1-refresh", &pre_cert)
+                        .open(1, b"epoch-1-refresh", &pre_cert)
                         .expect("stale open")
                 })
                 .collect();
 
             // Run proactive zero-constant Shamir refresh across all `n` custodians!
-            let mut ref_rngs = make_party_rngs(cfg.n, 0x40 + t as u8);
+            let mut ref_rngs = make_party_rngs(cfg.parties(), 0x40 + t as u8);
             refresh_bft_shamir_shares(&cfg, &mut qs_b.custodians, [0x77; 32], &mut ref_rngs)
                 .expect("refresh QS-B");
             assert_eq!(*qs_b.public_key(), pk);
 
-            // Switch to a different quorum `{n - q .. n}` & signer set `{n - t .. n}` on leaf 2!
-            let ackers_2: Vec<usize> = ((cfg.n - cfg.q)..cfg.n).collect();
-            let signers_2: Vec<usize> = ((cfg.n - cfg.t)..cfg.n).collect();
-            let sig2 = qs_b
-                .sign_at(2, &ackers_2, &signers_2, b"dealerless-qs-b-switched")
-                .expect("switched sign");
-            assert!(verify_jorts_signature(
-                &pk,
-                b"dealerless-qs-b-switched",
-                &sig2
-            ));
-
             // Re-certify leaf 1 under rotated MAC keys: post-refresh `t`-quorum succeeds,
             // whereas `(t - 1)` pre-refresh shares + `1` post-refresh share fails `ChainVerifyFailed`!
             let sig1 = qs_b
-                .sign_at(1, &ackers_0, &signers_0, b"epoch-1-refresh")
+                .sign_at(&ackers_0, &signers_0, 1, b"epoch-1-refresh")
                 .expect("post-refresh leaf 1");
             assert!(verify_jorts_signature(&pk, b"epoch-1-refresh", &sig1));
 
             let mut post_acks = Vec::new();
             for &p in &ackers_0 {
-                let (_, ack) = qs_b.custodians[p].ack(1, b"epoch-1-refresh").expect("re-ack");
+                let (_, ack) = qs_b.custodians[p]
+                    .ack(1, b"epoch-1-refresh")
+                    .expect("re-ack");
                 post_acks.push(ack);
             }
             let post_cert = LatchCertificate::assemble(&rec1, post_acks);
-            let fresh_open_last = qs_b.custodians[cfg.t - 1]
-                .open_shares(1, b"epoch-1-refresh", &post_cert)
+            let fresh_open_last = qs_b.custodians[cfg.threshold() - 1]
+                .open(1, b"epoch-1-refresh", &post_cert)
                 .expect("fresh open");
 
             let mut mixed = stale_openings;
@@ -3589,17 +3920,30 @@ mod tests {
                 matches!(mixed_res, Err(QuorumError::ChainVerifyFailed { .. })),
                 "mixing pre-refresh and post-refresh Shamir shares must fail: {mixed_res:?}"
             );
+
+            // Switch to a different quorum `{n - q .. n}` & signer set `{n - t .. n}` on leaf 2!
+            let ackers_2: Vec<usize> = ((cfg.parties() - cfg.quorum())..cfg.parties()).collect();
+            let signers_2: Vec<usize> =
+                ((cfg.parties() - cfg.threshold())..cfg.parties()).collect();
+            let sig2 = qs_b
+                .sign_at(&ackers_2, &signers_2, 2, b"dealerless-qs-b-switched")
+                .expect("switched sign");
+            assert!(verify_jorts_signature(
+                &pk,
+                b"dealerless-qs-b-switched",
+                &sig2
+            ));
         }
     }
 
     #[test]
-    fn dealerless_staging_and_refresh_reject_all_tampered_openings() {
+    fn dealerless_staging_rejects_pk_seed_opening() {
         // 1. Tampered `pk_seed` Round-2 opening in QS-A.
         let mut rngs = make_party_rngs(3, 0x61);
         let res = stage_committee_partitioned_inner(
             2,
             3,
-            1,
+            2,
             [0x01; 32],
             &mut rngs,
             Some(StagingFault::CorruptPkSeedOpen { party: 1 }),
@@ -3611,28 +3955,32 @@ mod tests {
                 party: 1
             })
         ));
+    }
 
-        // 2. Tampered Beaver AND cross-term in QS-A -> caught by 16-round GF(2^128) sacrifice!
-        let mut rngs = make_party_rngs(3, 0x62);
-        let res = stage_committee_partitioned_inner(
-            2,
-            3,
-            2,
+    #[test]
+    fn dealerless_qsa_rejects_beaver_corruption() {
+        let mut rngs = make_party_rngs(2, 0x62);
+        let result = stage_single_committee_subtree_mpc(
+            0,
+            &[0],
+            &[0x32; 32],
             [0x02; 32],
             &mut rngs,
             Some(StagingFault::CorruptQsABeaverBit { committee: 0 }),
         );
         assert!(matches!(
-            res,
+            result,
             Err(DealerlessStagingError::TripleSacrificeFailed { committee: 0 })
         ));
+    }
 
-        // 3. Tampered `y^(3)` share opening in QS-A -> caught by committed SPDZ `MacCheck`!
-        let mut rngs = make_party_rngs(3, 0x63);
-        let res = stage_committee_partitioned_inner(
-            2,
-            3,
-            2,
+    #[test]
+    fn dealerless_qsa_rejects_endpoint_corruption() {
+        let mut rngs = make_party_rngs(2, 0x63);
+        let res = stage_single_committee_subtree_mpc(
+            1,
+            &[0],
+            &[0x31; 32],
             [0x03; 32],
             &mut rngs,
             Some(StagingFault::CorruptQsAEndpointOpen {
@@ -3644,10 +3992,13 @@ mod tests {
             res,
             Err(DealerlessStagingError::MacCheckFailed { committee: 1, .. })
         ));
+    }
 
+    #[test]
+    fn dealerless_qsb_rejects_input_gate_and_endpoint_corruption() {
         // 4. Non-Boolean `GF(2^8)` DKG input (`y_d not in {0, 1}`) in QS-B -> caught before opening!
         let cfg = QuorumConfig::tight(2).expect("cfg");
-        let mut rngs = make_party_rngs(cfg.n, 0x64);
+        let mut rngs = make_party_rngs(cfg.parties(), 0x64);
         let res = stage_bft_shamir_inner(
             cfg,
             1,
@@ -3661,7 +4012,7 @@ mod tests {
         ));
 
         // 5. Tampered `Chi` gate product in QS-B -> caught before opening `y^(3)`!
-        let mut rngs = make_party_rngs(cfg.n, 0x65);
+        let mut rngs = make_party_rngs(cfg.parties(), 0x65);
         let res = stage_bft_shamir_inner(
             cfg,
             1,
@@ -3675,7 +4026,7 @@ mod tests {
         ));
 
         // 6. Tampered `y^(3)` share opening in QS-B -> caught by Reed-Solomon degree check!
-        let mut rngs = make_party_rngs(cfg.n, 0x66);
+        let mut rngs = make_party_rngs(cfg.parties(), 0x66);
         let res = stage_bft_shamir_inner(
             cfg,
             1,
@@ -3687,14 +4038,18 @@ mod tests {
             res,
             Err(DealerlessStagingError::EndpointOpeningDegreeMismatch { batch: 0 })
         ));
+    }
 
+    #[test]
+    fn dealerless_qsb_rejects_refresh_corruption() {
+        let cfg = QuorumConfig::tight(2).expect("cfg");
         // 7. Tampered proactive refresh polynomials (`P(0) != 0` and `deg >= t`) rejected intact!
-        let mut rngs = make_party_rngs(cfg.n, 0x67);
+        let mut rngs = make_party_rngs(cfg.parties(), 0x67);
         let staged = stage_bft_shamir_dealerless_mpc(cfg, 1, [0x07; 32], &mut rngs).expect("stage");
         let pk = *staged.tree.public_key();
         let mut qs_b = BftShamirJorts::from_staged(staged).expect("from_staged");
 
-        let mut bad_rngs = make_party_rngs(cfg.n, 0x68);
+        let mut bad_rngs = make_party_rngs(cfg.parties(), 0x68);
         let nz_res = refresh_bft_shamir_shares_inner(
             &cfg,
             &mut qs_b.custodians,
@@ -3727,12 +4082,231 @@ mod tests {
 
         // Custodian shares remain completely uncorrupted after aborted refresh attempts!
         let sig = qs_b
-            .sign(&[0, 1, 2], &[0, 1], b"intact-after-rejected-refresh")
+            .sign_at(&[0, 1, 2], &[0, 1], 0, b"intact-after-rejected-refresh")
             .expect("intact sign");
         assert!(verify_jorts_signature(
             &pk,
             b"intact-after-rejected-refresh",
             &sig
         ));
+    }
+
+    /// Run one QS-A wire session: the members of `committee` sign on their own threads over
+    /// a fresh in-memory mesh, the other custodians stay idle. Custodians come back in
+    /// party order.
+    fn wire_sign_committee(
+        custodians: Vec<CommitteeCustodian<MemoryWal>>,
+        members: &[usize],
+        epoch: u64,
+        session: [u8; 32],
+        msg: &[u8],
+    ) -> (Vec<CommitteeCustodian<MemoryWal>>, QuorumJortsSig) {
+        let committee = custodians[0].layout().committee_index(members).unwrap();
+        let (endpoints, _stats) = InMemoryWireMesh::connect(custodians.len(), session);
+        let mut idle = Vec::new();
+        let mut nodes = Vec::new();
+        for (custodian, endpoint) in custodians.into_iter().zip(endpoints) {
+            if members.contains(&custodian.party()) {
+                nodes.push(IsolatedJortsParty::new(custodian, endpoint).unwrap());
+            } else {
+                idle.push((custodian, endpoint));
+            }
+        }
+        // Nodes are returned from their threads so no link closes before every thread joined.
+        let finished: Vec<_> = std::thread::scope(|scope| {
+            let handles: Vec<_> = nodes
+                .into_iter()
+                .map(|mut node| {
+                    scope.spawn(move || {
+                        let result = node.sign(committee, epoch, msg);
+                        (result, node)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let mut signatures = Vec::new();
+        let mut custodians: Vec<_> = idle.into_iter().map(|(custodian, _)| custodian).collect();
+        for (result, node) in finished {
+            signatures.push(result.expect("wire signature"));
+            custodians.push(node.into_parts().0);
+        }
+        custodians.sort_by_key(CommitteeCustodian::party);
+        assert!(signatures.iter().all(|s| *s == signatures[0]));
+        (custodians, signatures.swap_remove(0))
+    }
+
+    /// Dealerless QS-A material drives the isolated wire parties, and a refresh applied
+    /// between wire sessions (including a rejected one) keeps them signing under one key.
+    #[test]
+    fn dealerless_qs_a_material_signs_over_the_wire_across_refresh() {
+        let mut rngs = make_party_rngs(3, 0xb1);
+        let staged = stage_committee_partitioned_dealerless_mpc(2, 3, 2, [0xb2; 32], &mut rngs)
+            .expect("QS-A MPC");
+        let pk = *staged.tree.public_key();
+        let layout = staged.layout.clone();
+        let tree = staged.tree.clone();
+        let custodians: Vec<CommitteeCustodian<MemoryWal>> = staged
+            .parties
+            .into_iter()
+            .map(|material| {
+                let wals = vec![MemoryWal::new(); material.stores.len()];
+                CommitteeCustodian::new(layout.clone(), tree.clone(), material, wals).unwrap()
+            })
+            .collect();
+
+        // Height 2 gives each of the three committees exactly one leaf.
+        let (mut custodians, before) =
+            wire_sign_committee(custodians, &[0, 1], 0, [0xc1; 32], b"wire before refresh");
+        assert!(verify_jorts_signature(&pk, b"wire before refresh", &before));
+
+        // A refresh that aborts leaves shares and channel keys usable over the wire.
+        let mut bad_rngs = make_party_rngs(3, 0xb3);
+        assert!(matches!(
+            refresh_committee_shares_inner(
+                &layout,
+                &mut custodians,
+                [0xc2; 32],
+                &mut bad_rngs,
+                Some(StagingFault::CorruptQsARefreshOpen {
+                    committee: 0,
+                    member_pos: 0
+                }),
+            ),
+            Err(DealerlessStagingError::CommitmentMismatch { .. })
+        ));
+        let (mut custodians, sig) = wire_sign_committee(
+            custodians,
+            &[0, 2],
+            0,
+            [0xc3; 32],
+            b"wire after aborted refresh",
+        );
+        assert!(verify_jorts_signature(&pk, b"wire after aborted refresh", &sig));
+
+        let mut refresh_rngs = make_party_rngs(3, 0xb4);
+        refresh_committee_shares(&layout, &mut custodians, [0xc4; 32], &mut refresh_rngs)
+            .expect("refresh QS-A");
+
+        // Rotated shares and rotated MAC keys sign a leaf that was never opened before.
+        let (custodians, sig) =
+            wire_sign_committee(custodians, &[1, 2], 0, [0xc5; 32], b"wire after refresh");
+        assert!(verify_jorts_signature(&pk, b"wire after refresh", &sig));
+        // The already bound leaf re-opens to the same signature from the rotated shares.
+        let (_custodians, replay) =
+            wire_sign_committee(custodians, &[0, 1], 0, [0xc6; 32], b"wire before refresh");
+        assert_eq!(replay, before);
+    }
+
+    /// Run one QS-B wire session with the custodians in `online`; the rest stay idle.
+    fn wire_sign_quorum(
+        custodians: Vec<ShamirCustodian<MemoryWal>>,
+        online: &[usize],
+        openers: &[usize],
+        leaf: u64,
+        session: [u8; 32],
+        msg: &[u8],
+    ) -> (Vec<ShamirCustodian<MemoryWal>>, QuorumJortsSig) {
+        let (endpoints, _stats) = InMemoryWireMesh::connect(custodians.len(), session);
+        let mut idle = Vec::new();
+        let mut nodes = Vec::new();
+        for (custodian, endpoint) in custodians.into_iter().zip(endpoints) {
+            if online.contains(&custodian.party()) {
+                nodes.push(IsolatedQuorumParty::new(custodian, endpoint).unwrap());
+            } else {
+                idle.push((custodian, endpoint));
+            }
+        }
+        let finished: Vec<_> = std::thread::scope(|scope| {
+            let handles: Vec<_> = nodes
+                .into_iter()
+                .map(|mut node| {
+                    scope.spawn(move || {
+                        let result = node.sign(online, openers, leaf, msg);
+                        (result, node)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let mut signatures = Vec::new();
+        let mut custodians: Vec<_> = idle.into_iter().map(|(custodian, _)| custodian).collect();
+        for (result, node) in finished {
+            let outcome = result.expect("wire signature");
+            assert!(outcome.blamed.is_empty());
+            signatures.push(outcome.signature);
+            custodians.push(node.into_parts().0);
+        }
+        custodians.sort_by_key(ShamirCustodian::party);
+        assert!(signatures.iter().all(|s| *s == signatures[0]));
+        (custodians, signatures.swap_remove(0))
+    }
+
+    /// Dealerless QS-B material drives the isolated wire parties across a rejected and an
+    /// accepted refresh, with a different quorum and opener set afterwards.
+    #[test]
+    fn dealerless_qs_b_material_signs_over_the_wire_across_refresh() {
+        let cfg = QuorumConfig::tight(2).expect("cfg");
+        let n = cfg.parties();
+        let mut rngs = make_party_rngs(n, 0xd1);
+        let staged = stage_bft_shamir_dealerless_mpc(cfg, 2, [0xd2; 32], &mut rngs).expect("QS-B");
+        let pk = *staged.tree.public_key();
+        let tree = staged.tree.clone();
+        let custodians: Vec<ShamirCustodian<MemoryWal>> = staged
+            .parties
+            .into_iter()
+            .map(|material| {
+                ShamirCustodian::new(cfg, tree.clone(), material, MemoryWal::new()).unwrap()
+            })
+            .collect();
+
+        let first: Vec<usize> = (0..cfg.quorum()).collect();
+        let first_openers: Vec<usize> = (0..cfg.threshold()).collect();
+        let (mut custodians, sig) = wire_sign_quorum(
+            custodians,
+            &first,
+            &first_openers,
+            0,
+            [0xe1; 32],
+            b"wire before refresh",
+        );
+        assert!(verify_jorts_signature(&pk, b"wire before refresh", &sig));
+
+        let mut bad_rngs = make_party_rngs(n, 0xd3);
+        assert_eq!(
+            refresh_bft_shamir_shares_inner(
+                &cfg,
+                &mut custodians,
+                [0xe2; 32],
+                &mut bad_rngs,
+                Some(StagingFault::CorruptQsBRefreshNonZeroConstant { dealer: 0 }),
+            ),
+            Err(DealerlessStagingError::ZeroConstantCheckFailed { dealer: 0 })
+        );
+        let (mut custodians, sig) = wire_sign_quorum(
+            custodians,
+            &first,
+            &first_openers,
+            1,
+            [0xe3; 32],
+            b"wire after aborted refresh",
+        );
+        assert!(verify_jorts_signature(&pk, b"wire after aborted refresh", &sig));
+
+        let mut refresh_rngs = make_party_rngs(n, 0xd4);
+        refresh_bft_shamir_shares(&cfg, &mut custodians, [0xe4; 32], &mut refresh_rngs)
+            .expect("refresh QS-B");
+
+        let second: Vec<usize> = ((n - cfg.quorum())..n).collect();
+        let second_openers: Vec<usize> = ((n - cfg.threshold())..n).collect();
+        let (_custodians, sig) = wire_sign_quorum(
+            custodians,
+            &second,
+            &second_openers,
+            2,
+            [0xe5; 32],
+            b"wire after refresh",
+        );
+        assert!(verify_jorts_signature(&pk, b"wire after refresh", &sig));
     }
 }

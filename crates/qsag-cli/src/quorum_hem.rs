@@ -26,6 +26,7 @@ use crate::cli::{
 };
 use crate::codec::{Json, from_hex_exact};
 use crate::quorum::PUBLIC_FORMAT;
+use crate::vault::Vault;
 
 pub const HEM_SCHEME_NAME: &str = "hem-jorts-poseidon2";
 const HEM_META_FORMAT: &str = "qsag-hem-quorum-meta-v1";
@@ -37,6 +38,7 @@ qsag quorum refresh --vault-dir <dir> [--deterministic] [--json]
 Execute proactive share refresh (Π_refresh) across all (t, n) custodians in --vault-dir,
 advancing quorum_epoch and overwriting custodian share files in place while preserving
 the exact 65-byte validator public key and monotone leaf high-water mark.
+--deterministic fixes only the session ID; private ceremony entropy remains fresh.
 ";
 
 pub const HEM_RESHARE_HELP: &str = "\
@@ -45,15 +47,21 @@ qsag quorum reshare --vault-dir <old_dir> [--signers <i,j,..>] --new-threshold <
 Execute dynamic (t, n) -> (t', n') quorum-switching (Π_reshare) using >= t custodians from
 --vault-dir, writing the new (t', n') custodian vault into --out-vault-dir WITHOUT changing
 the 65-byte validator public key, and permanently invalidating/wiping the retired vault.
+--deterministic fixes only the session ID; private ceremony entropy remains fresh.
 ";
 
 // The local vault CLI hosts all custodians, but each protocol stream still needs
 // independent private entropy; deterministic session identifiers are only context.
 fn fresh_party_rngs(n: usize) -> Result<Vec<PartyPrivateRng>, CliError> {
-    (0..n).map(|_| {
-        let seed = Secret32(os_random_32()?);
-        Ok(PartyPrivateRng::from_seed(seed.0, b"QSAG.CLI.HEM.PRIVATE/v1"))
-    }).collect()
+    (0..n)
+        .map(|_| {
+            let seed = Secret32(os_random_32()?);
+            Ok(PartyPrivateRng::from_seed(
+                seed.0,
+                b"QSAG.CLI.HEM.PRIVATE/v1",
+            ))
+        })
+        .collect()
 }
 
 fn meta_path(vault_dir: &str) -> String {
@@ -77,6 +85,34 @@ fn share_path(vault_dir: &str, party: usize) -> String {
         .into_owned()
 }
 
+/// Exclusive hold on a Hem quorum vault, taken before its state is read and kept until the
+/// new state is on disk, so concurrent commands cannot both act on the same leaf or
+/// overwrite each other's shares. The lock file is created with the vault and never
+/// replaced; a vault without it is refused.
+fn lock_vault(vault_dir: &str, create: bool) -> Result<Vault, CliError> {
+    Vault::acquire(&meta_path(vault_dir), create)
+}
+
+fn lock_existing_vault(vault_dir: &str) -> Result<Vault, CliError> {
+    private_dir(vault_dir, false)?;
+    lock_vault(vault_dir, false)
+}
+
+fn lock_path(vault_dir: &str) -> String {
+    format!("{}.vault.lock", meta_path(vault_dir))
+}
+
+/// Refuse a new-vault directory that already holds vault files, before any ceremony runs.
+fn ensure_vault_absent(vault_dir: &str, n: usize) -> Result<(), CliError> {
+    ensure_absent(&meta_path(vault_dir))?;
+    ensure_absent(&directory_path(vault_dir))?;
+    ensure_absent(&lock_path(vault_dir))?;
+    for p in 0..n {
+        ensure_absent(&share_path(vault_dir, p))?;
+    }
+    Ok(())
+}
+
 pub fn is_hem_vault(vault_dir: &str) -> bool {
     Path::new(&meta_path(vault_dir)).exists()
 }
@@ -96,9 +132,9 @@ fn parse_party_list(spec: &str, flag_name: &str, n: usize) -> Result<Vec<usize>,
         if trimmed.is_empty() {
             continue;
         }
-        let idx: usize = trimmed
-            .parse()
-            .map_err(|_| CliError::usage(format!("--{flag_name} must be comma-separated indices")))?;
+        let idx: usize = trimmed.parse().map_err(|_| {
+            CliError::usage(format!("--{flag_name} must be comma-separated indices"))
+        })?;
         if idx >= n {
             return Err(CliError::usage(format!(
                 "--{flag_name} index {idx} out of range (parties = {n})"
@@ -175,6 +211,8 @@ fn write_public_json(
     ])
 }
 
+/// Write the quorum's state. With `create_fresh` the vault and its lock are created here
+/// and the lock is held for the write; otherwise the caller holds the vault's lock.
 fn write_vault_state(
     vault_dir: &str,
     quorum: &HemDynamicShamirQuorum,
@@ -207,11 +245,8 @@ fn write_vault_state(
         private_dir(vault_dir, true)?;
         let mp = meta_path(vault_dir);
         let dp = directory_path(vault_dir);
-        ensure_absent(&mp)?;
-        ensure_absent(&dp)?;
-        for p in 0..n {
-            ensure_absent(&share_path(vault_dir, p))?;
-        }
+        ensure_vault_absent(vault_dir, n)?;
+        let _lock = lock_vault(vault_dir, true)?;
         write_new(&dp, &dir_bytes, false)?;
         for (p, sh) in quorum.custodian_shares().iter().enumerate() {
             let raw = ZeroizingBuf(sh.to_vault_bytes().map_err(map_quorum_err)?);
@@ -229,6 +264,7 @@ fn write_vault_state(
     Ok(())
 }
 
+/// Read the quorum's state. The caller holds the vault's lock.
 fn load_vault_state(vault_dir: &str) -> Result<(HemDynamicShamirQuorum, Secret32), CliError> {
     private_dir(vault_dir, false)?;
     let mp = meta_path(vault_dir);
@@ -391,6 +427,7 @@ pub fn sign(args: &Args) -> Result<(), CliError> {
         .ok_or_else(|| CliError::usage("missing required option --message (or --in)"))?;
     let message = read_input(msg_arg)?;
 
+    let _lock = lock_existing_vault(vault_dir)?;
     let (mut quorum, latch_seed) = load_vault_state(vault_dir)?;
     let (t, n) = quorum.threshold_and_size();
 
@@ -411,9 +448,14 @@ pub fn sign(args: &Args) -> Result<(), CliError> {
         )));
     }
 
-    let (leaf_epoch, sig) = quorum
-        .sign_quorum(&signers, &ackers, &message)
-        .map_err(map_quorum_err)?;
+    let high_water_before = quorum.high_water_leaf();
+    let signed = quorum.sign_quorum(&signers, &ackers, &message);
+    if signed.is_err() && quorum.high_water_leaf() != high_water_before {
+        // The attempt failed after the latch certified its leaf. That leaf is spent:
+        // record it so the next command cannot sign another message with it.
+        write_vault_state(vault_dir, &quorum, &latch_seed.0, false)?;
+    }
+    let (leaf_epoch, sig) = signed.map_err(map_quorum_err)?;
 
     // Persist burned leaf high-water mark to all custodian shares BEFORE releasing signature
     write_vault_state(vault_dir, &quorum, &latch_seed.0, false)?;
@@ -425,7 +467,7 @@ pub fn sign(args: &Args) -> Result<(), CliError> {
         .ok_or_else(|| CliError::verify("quorum public key failed canonical Hem decode"))?;
     let agg_sig =
         ValidatorSignature::from_bytes_canonical(AggSigProfile::JortsPoseidon2, &sig_bytes)
-            .ok_or_else(|| CliError::verify("quorum signature failed canonical Hem decode"))?;
+            .map_err(|_| CliError::verify("quorum signature failed canonical Hem decode"))?;
     if !verify_hem_jorts_signature(&pk, &message, &sig)
         || !verify_individual_signature(&agg_pk, &message, &agg_sig)
     {
@@ -474,6 +516,7 @@ pub fn refresh(raw: &[String]) -> Result<(), CliError> {
     }
     args.no_positionals()?;
     let vault_dir = args.require("vault-dir")?;
+    let _lock = lock_existing_vault(vault_dir)?;
     let (mut quorum, latch_seed) = load_vault_state(vault_dir)?;
     let pk_before = quorum.public_key();
     let sid = if args.flag("deterministic") {
@@ -490,11 +533,16 @@ pub fn refresh(raw: &[String]) -> Result<(), CliError> {
     };
 
     let mut party_rngs = fresh_party_rngs(quorum.threshold_and_size().1)?;
-    quorum.proactive_refresh(sid, &mut party_rngs).map_err(map_quorum_err)?;
+    quorum
+        .proactive_refresh(sid, &mut party_rngs)
+        .map_err(map_quorum_err)?;
     if quorum.public_key() != pk_before {
-        return Err(CliError::verify("proactive refresh mutated validator pubkey"));
+        return Err(CliError::verify(
+            "proactive refresh mutated validator pubkey",
+        ));
     }
-    write_vault_state(vault_dir, &quorum, &latch_seed.0, false)?;
+    let next_latch_seed = Secret32(os_random_32()?);
+    write_vault_state(vault_dir, &quorum, &next_latch_seed.0, false)?;
 
     let (t, n) = quorum.threshold_and_size();
     if args.flag("json") {
@@ -547,7 +595,16 @@ pub fn reshare(raw: &[String]) -> Result<(), CliError> {
     if let Some(pub_out) = args.get("public-out") {
         ensure_absent(pub_out)?;
     }
+    if new_t < 2 || new_t > new_n || new_n > 64 {
+        return Err(CliError::usage(
+            "--new-threshold must be >= 2 and <= --new-parties (<= 64)",
+        ));
+    }
 
+    // The old vault stays locked until it has been retired. The new vault must not
+    // exist yet; its lock is created with it once the ceremony has succeeded.
+    let _old_lock = lock_existing_vault(old_vault_dir)?;
+    ensure_vault_absent(new_vault_dir, new_n)?;
     let (mut quorum, old_latch_seed) = load_vault_state(old_vault_dir)?;
     let (old_t, old_n) = quorum.threshold_and_size();
     let old_signers = match args.get("signers") {
@@ -569,15 +626,19 @@ pub fn reshare(raw: &[String]) -> Result<(), CliError> {
     } else {
         os_random_32()?
     };
-    let new_latch_seed = Secret32(cshake256_framed_32(
-        b"QSAG.CLI.HEM.RESHARE.NEW_LATCH.V1",
-        &[&old_latch_seed.0, &sid],
-    ));
+    let new_latch_seed = Secret32(os_random_32()?);
 
     let mut old_party_rngs = fresh_party_rngs(old_n)?;
     let mut new_party_rngs = fresh_party_rngs(new_n)?;
     quorum
-        .reshare_quorum(sid, &old_signers, new_t, new_n, &mut old_party_rngs, &mut new_party_rngs)
+        .reshare_quorum(
+            sid,
+            &old_signers,
+            new_t,
+            new_n,
+            &mut old_party_rngs,
+            &mut new_party_rngs,
+        )
         .map_err(map_quorum_err)?;
     if quorum.public_key() != pk_before {
         return Err(CliError::verify(
@@ -622,7 +683,12 @@ pub fn reshare(raw: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-pub fn verify(pub_json: &Json, message: &[u8], sig_path: &str, json_flag: bool) -> Result<(), CliError> {
+pub fn verify(
+    pub_json: &Json,
+    message: &[u8],
+    sig_path: &str,
+    json_flag: bool,
+) -> Result<(), CliError> {
     let pk_bytes: [u8; HEM_JORTS_PK_BYTES] = from_hex_exact(
         pub_json.field_str("validator_public_key")?,
         "validator_public_key",
@@ -642,7 +708,7 @@ pub fn verify(pub_json: &Json, message: &[u8], sig_path: &str, json_flag: bool) 
     let sig_bytes = sig_json.field_hex("signature")?;
     let sig = HemJortsSignature::from_bytes_canonical(&sig_bytes)
         .ok_or_else(|| CliError::verify("non-canonical Hem quorum signature"))?;
-    if u64::from(sig.leaf_idx) != sig_json.field_u64("epoch")? {
+    if u64::from(sig.stateful_leaf_idx) != sig_json.field_u64("epoch")? {
         return Err(CliError::verify("quorum signature epoch header mismatch"));
     }
     if !verify_hem_jorts_signature(&pk, message, &sig) {
@@ -653,11 +719,11 @@ pub fn verify(pub_json: &Json, message: &[u8], sig_path: &str, json_flag: bool) 
         let report = Json::object(vec![
             ("valid", Json::Bool(true)),
             ("scheme", Json::str(HEM_SCHEME_NAME)),
-            ("epoch", Json::num(sig.leaf_idx)),
+            ("epoch", Json::num(sig.stateful_leaf_idx)),
         ]);
         print!("{}", report.to_pretty());
     } else {
-        println!("VALID ({HEM_SCHEME_NAME}, epoch {})", sig.leaf_idx);
+        println!("VALID ({HEM_SCHEME_NAME}, epoch {})", sig.stateful_leaf_idx);
     }
     Ok(())
 }
