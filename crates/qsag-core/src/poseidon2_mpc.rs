@@ -51,9 +51,9 @@ use crate::field::goldilocks::{Goldilocks, GoldilocksExt2};
 use crate::keccak_mpc::DkgCachedSubtrees;
 use crate::preprocessing::{
     OtMesh, PartyPrivateRng, PreprocessError, PreprocessedPoseidonPartyVault,
-    commit_and_open_spdz_goldilocks_batch_quorum, open_and_check_degree_goldilocks,
-    run_dealerless_pi_pow7_with_alpha, spdz_authenticate_goldilocks_batch_ext2,
-    spdz_setup_alpha_goldilocks, validate_all_eval_points_goldilocks,
+    commit_and_open_spdz_goldilocks_batch_quorum, run_dealerless_pi_pow7_with_alpha,
+    spdz_authenticate_goldilocks_batch_ext2, spdz_setup_alpha_goldilocks,
+    validate_all_eval_points_goldilocks,
 };
 use crate::sponge::keccak::cshake256_32;
 use crate::sponge::poseidon2::{
@@ -347,6 +347,11 @@ impl Drop for Poseidon2SpdzAuthenticatedKeyShare {
 /// pass committed zero-masked `GoldilocksExt2` `MacCheck` **strictly before** any cut-boundary
 /// digest is opened.
 struct SpdzGoldilocksPendingChecks {
+    opening_tables: Option<(
+        usize,
+        Vec<Goldilocks>,
+        alloc::sync::Arc<crate::preprocessing::GoldilocksOpeningTables>,
+    )>,
     quorum_size: usize,
     shares_per_party: Vec<Vec<Goldilocks>>,
     macs_per_party: Vec<Vec<GoldilocksExt2>>,
@@ -355,10 +360,30 @@ struct SpdzGoldilocksPendingChecks {
 impl SpdzGoldilocksPendingChecks {
     fn new(quorum_size: usize) -> Self {
         Self {
+            opening_tables: None,
             quorum_size,
             shares_per_party: vec![Vec::new(); quorum_size],
             macs_per_party: vec![Vec::new(); quorum_size],
         }
+    }
+
+    fn tables(
+        &mut self,
+        t: usize,
+        points: &[Goldilocks],
+    ) -> Result<alloc::sync::Arc<crate::preprocessing::GoldilocksOpeningTables>, PreprocessError>
+    {
+        if let Some((threshold, cached_points, tables)) = &self.opening_tables
+            && *threshold == t
+            && cached_points == points
+        {
+            return Ok(alloc::sync::Arc::clone(tables));
+        }
+        let tables = alloc::sync::Arc::new(crate::preprocessing::GoldilocksOpeningTables::new(
+            t, points,
+        )?);
+        self.opening_tables = Some((t, points.to_vec(), alloc::sync::Arc::clone(&tables)));
+        Ok(tables)
     }
 
     #[inline]
@@ -551,7 +576,9 @@ fn apply_m4_auth(b: [AuthGlWire; 4]) -> [AuthGlWire; 4] {
 
 fn apply_me_auth(st: &mut [AuthGlWire; 12]) {
     // M4 tensor P3: transpose lanes, apply P3 tensor M4, transpose back.
-    *st = [st[0], st[3], st[6], st[9], st[1], st[4], st[7], st[10], st[2], st[5], st[8], st[11]];
+    *st = [
+        st[0], st[3], st[6], st[9], st[1], st[4], st[7], st[10], st[2], st[5], st[8], st[11],
+    ];
     let y0 = apply_m4_auth([st[0], st[1], st[2], st[3]]);
     let y1 = apply_m4_auth([st[4], st[5], st[6], st[7]]);
     let y2 = apply_m4_auth([st[8], st[9], st[10], st[11]]);
@@ -561,7 +588,9 @@ fn apply_me_auth(st: &mut [AuthGlWire; 12]) {
         st[4 + i] = y1[i].add(s);
         st[8 + i] = y2[i].add(s);
     }
-    *st = [st[0], st[4], st[8], st[1], st[5], st[9], st[2], st[6], st[10], st[3], st[7], st[11]];
+    *st = [
+        st[0], st[4], st[8], st[1], st[5], st[9], st[2], st[6], st[10], st[3], st[7], st[11],
+    ];
 }
 
 fn apply_mi_auth(st: &mut [AuthGlWire; 12]) {
@@ -581,13 +610,12 @@ fn apply_mi_auth(st: &mut [AuthGlWire; 12]) {
 /// Evaluate a batch of $x \mapsto x^7 \bmod p$ S-boxes in 1 communication round across the quorum
 /// using pre-verified [`AuthenticatedPower7Share`]s and Binomial expansion $(y - r)^7$.
 fn eval_sbox7_batch_spdz(
-    t: usize,
-    quorum_pts: &[Goldilocks],
+    tables: &crate::preprocessing::GoldilocksOpeningTables,
     inputs_per_party: &[Vec<AuthGlWire>],
     vaults: &mut [&mut PreprocessedPoseidonPartyVault],
     pending: &mut SpdzGoldilocksPendingChecks,
 ) -> Result<Vec<Vec<AuthGlWire>>, PreprocessError> {
-    let m = quorum_pts.len();
+    let m = inputs_per_party.len();
     let count = inputs_per_party[0].len();
     let mut tuples_p = Vec::with_capacity(m);
     let alphas = SecretBuffer(vaults.iter().map(|v| v.mac_alpha_share).collect::<Vec<_>>());
@@ -612,12 +640,7 @@ fn eval_sbox7_batch_spdz(
         for (buf, wires) in sh_buf.iter_mut().zip(masked_wires.iter()) {
             *buf = wires[k].val;
         }
-        y_opened.push(open_and_check_degree_goldilocks(
-            t,
-            quorum_pts,
-            &sh_buf,
-            "pos2_sbox7_y",
-        )?);
+        y_opened.push(tables.open(&sh_buf, "pos2_sbox7_y")?);
     }
     drop(sh_buf);
 
@@ -677,6 +700,8 @@ fn eval_spdz_poseidon2_perm12_batch(
         }
     }
 
+    let opening_tables = pending.tables(t, quorum_pts)?;
+
     // First 4 external rounds (`tag = 0`)
     for r in 0..POSEIDON2_HALF_EXTERNAL_ROUNDS {
         let mut sbox_in = secret_vecs_with_capacity(m, batch * 12);
@@ -691,7 +716,10 @@ fn eval_spdz_poseidon2_perm12_batch(
             }
         }
         let sbox_out = SecretBuffer(eval_sbox7_batch_spdz(
-            t, quorum_pts, &sbox_in, vaults, pending,
+            &opening_tables,
+            &sbox_in,
+            vaults,
+            pending,
         )?);
         for p in 0..m {
             for b in 0..batch {
@@ -714,7 +742,10 @@ fn eval_spdz_poseidon2_perm12_batch(
             }
         }
         let sbox_out = SecretBuffer(eval_sbox7_batch_spdz(
-            t, quorum_pts, &sbox_in, vaults, pending,
+            &opening_tables,
+            &sbox_in,
+            vaults,
+            pending,
         )?);
         for p in 0..m {
             for b in 0..batch {
@@ -738,7 +769,10 @@ fn eval_spdz_poseidon2_perm12_batch(
             }
         }
         let sbox_out = SecretBuffer(eval_sbox7_batch_spdz(
-            t, quorum_pts, &sbox_in, vaults, pending,
+            &opening_tables,
+            &sbox_in,
+            vaults,
+            pending,
         )?);
         for p in 0..m {
             for b in 0..batch {
@@ -886,18 +920,14 @@ fn eval_spdz_beaver_mul_batch(
 
     pending.record_batch(&de_wires);
 
+    let opening_tables = pending.tables(t, quorum_pts)?;
     let mut de_open = Vec::with_capacity(2 * count);
     let mut sh_buf = SecretBuffer(vec![Goldilocks::ZERO; m]);
     for idx in 0..(2 * count) {
         for (buf, wires) in sh_buf.iter_mut().zip(de_wires.iter()) {
             *buf = wires[idx].val;
         }
-        de_open.push(open_and_check_degree_goldilocks(
-            t,
-            quorum_pts,
-            &sh_buf,
-            "pos2_beaver_de",
-        )?);
+        de_open.push(opening_tables.open(&sh_buf, "pos2_beaver_de")?);
     }
     drop(sh_buf);
 
@@ -940,6 +970,7 @@ fn eval_spdz_canonical_a2b_state4_batch_to_bytes32(
     vaults: &mut [&mut PreprocessedPoseidonPartyVault],
     pending: &mut SpdzGoldilocksPendingChecks,
 ) -> Result<Vec<Vec<[AuthGlWire; 32]>>, PreprocessError> {
+    let opening_tables = pending.tables(t, quorum_pts)?;
     let m = quorum_pts.len();
     let batch = states4_per_party[0].len();
     let num_lanes = 4 * batch;
@@ -977,7 +1008,7 @@ fn eval_spdz_canonical_a2b_state4_batch_to_bytes32(
         for (buf, wires) in sh_buf.iter_mut().zip(z_wires.iter()) {
             *buf = wires[idx].val;
         }
-        let z_f = open_and_check_degree_goldilocks(t, quorum_pts, &sh_buf, "pos2_a2b_z")?;
+        let z_f = opening_tables.open(&sh_buf, "pos2_a2b_z")?;
         z_pub.push(z_f.to_canonical_u64());
     }
     drop(sh_buf);
@@ -1072,7 +1103,10 @@ fn eval_spdz_canonical_a2b_state4_batch_to_bytes32(
             let cb = carry_b_p[p][idx];
             for bit in 0..64 {
                 secret_vec_push(&mut mux_x[p], cb);
-                secret_vec_push(&mut mux_y[p], v_bits_p[p][idx][bit].sub(u_bits_p[p][idx][bit]));
+                secret_vec_push(
+                    &mut mux_y[p],
+                    v_bits_p[p][idx][bit].sub(u_bits_p[p][idx][bit]),
+                );
             }
         }
     }
@@ -3370,10 +3404,8 @@ fn expand_hem_secret_digests_mpc(
 
         let pks: [AuthGlWire; 4] =
             core::array::from_fn(|i| AuthGlWire::public_const(pk_seed[i], alpha_p));
-        let iv = AuthGlWire::public_const(
-            Goldilocks::from_u64_reduced(POSEIDON2_CONST_IV),
-            alpha_p,
-        );
+        let iv =
+            AuthGlWire::public_const(Goldilocks::from_u64_reduced(POSEIDON2_CONST_IV), alpha_p);
         let dom_s = AuthGlWire::public_const(
             Goldilocks::from_u64_reduced(HEM_DOMAIN_SK_SEED_EXPAND),
             alpha_p,
@@ -3383,14 +3415,40 @@ fn expand_hem_secret_digests_mpc(
             alpha_p,
         );
 
-        secret_vec_push(&mut states[p], [
-            ls[0], ls[1], ls[2], ls[3], ls[4], pks[0], pks[1], pks[2], pks[3], dom_s,
-            AuthGlWire::ZERO, iv,
-        ]);
-        secret_vec_push(&mut states[p], [
-            lp[0], lp[1], lp[2], lp[3], lp[4], pks[0], pks[1], pks[2], pks[3], dom_p,
-            AuthGlWire::ZERO, iv,
-        ]);
+        secret_vec_push(
+            &mut states[p],
+            [
+                ls[0],
+                ls[1],
+                ls[2],
+                ls[3],
+                ls[4],
+                pks[0],
+                pks[1],
+                pks[2],
+                pks[3],
+                dom_s,
+                AuthGlWire::ZERO,
+                iv,
+            ],
+        );
+        secret_vec_push(
+            &mut states[p],
+            [
+                lp[0],
+                lp[1],
+                lp[2],
+                lp[3],
+                lp[4],
+                pks[0],
+                pks[1],
+                pks[2],
+                pks[3],
+                dom_p,
+                AuthGlWire::ZERO,
+                iv,
+            ],
+        );
     }
 
     eval_spdz_poseidon2_perm12_batch(t, quorum_pts, &mut states, vaults, pending)?;
@@ -3434,10 +3492,13 @@ fn eval_spdz_hem_compress12_ff_batch(
             let x = in0_per_party[p][k];
             let tw_w: [AuthGlWire; 4] =
                 core::array::from_fn(|i| AuthGlWire::public_const(tw[i], alpha_p));
-            secret_vec_push(&mut states[p], [
-                x[0], x[1], x[2], x[3], pks[0], pks[1], pks[2], pks[3], tw_w[0], tw_w[1], tw_w[2],
-                tw_w[3],
-            ]);
+            secret_vec_push(
+                &mut states[p],
+                [
+                    x[0], x[1], x[2], x[3], pks[0], pks[1], pks[2], pks[3], tw_w[0], tw_w[1],
+                    tw_w[2], tw_w[3],
+                ],
+            );
         }
     }
 
@@ -3447,24 +3508,31 @@ fn eval_spdz_hem_compress12_ff_batch(
     for p in 0..m {
         for k in 0..batch {
             let x = in0_per_party[p][k];
-            secret_vec_push(&mut out[p], [
-                states[p][k][0].add(x[0]).add(AuthGlWire::public_const(
-                    pk_seed[0] * Goldilocks::TWO + tweaks[k][0] * Goldilocks::from_u64_reduced(4),
-                    vaults[p].mac_alpha_share,
-                )),
-                states[p][k][1].add(x[1]).add(AuthGlWire::public_const(
-                    pk_seed[1] * Goldilocks::TWO + tweaks[k][1] * Goldilocks::from_u64_reduced(4),
-                    vaults[p].mac_alpha_share,
-                )),
-                states[p][k][2].add(x[2]).add(AuthGlWire::public_const(
-                    pk_seed[2] * Goldilocks::TWO + tweaks[k][2] * Goldilocks::from_u64_reduced(4),
-                    vaults[p].mac_alpha_share,
-                )),
-                states[p][k][3].add(x[3]).add(AuthGlWire::public_const(
-                    pk_seed[3] * Goldilocks::TWO + tweaks[k][3] * Goldilocks::from_u64_reduced(4),
-                    vaults[p].mac_alpha_share,
-                )),
-            ]);
+            secret_vec_push(
+                &mut out[p],
+                [
+                    states[p][k][0].add(x[0]).add(AuthGlWire::public_const(
+                        pk_seed[0] * Goldilocks::TWO
+                            + tweaks[k][0] * Goldilocks::from_u64_reduced(4),
+                        vaults[p].mac_alpha_share,
+                    )),
+                    states[p][k][1].add(x[1]).add(AuthGlWire::public_const(
+                        pk_seed[1] * Goldilocks::TWO
+                            + tweaks[k][1] * Goldilocks::from_u64_reduced(4),
+                        vaults[p].mac_alpha_share,
+                    )),
+                    states[p][k][2].add(x[2]).add(AuthGlWire::public_const(
+                        pk_seed[2] * Goldilocks::TWO
+                            + tweaks[k][2] * Goldilocks::from_u64_reduced(4),
+                        vaults[p].mac_alpha_share,
+                    )),
+                    states[p][k][3].add(x[3]).add(AuthGlWire::public_const(
+                        pk_seed[3] * Goldilocks::TWO
+                            + tweaks[k][3] * Goldilocks::from_u64_reduced(4),
+                        vaults[p].mac_alpha_share,
+                    )),
+                ],
+            );
         }
     }
     Ok(core::mem::take(&mut out.0))
@@ -3684,25 +3752,6 @@ pub fn derive_hem_jorts_cached_tree_clear(
     })
 }
 
-/// Build the full 64-leaf `Hem`-aggregatable `JortsPoseidon2` public key & leaf cache via
-/// dishonest-majority SPDZ MPC (`0` secret reconstruction, `0` Beaver triples, `0` A2B!).
-pub fn build_distributed_hem_jorts_key_mpc(
-    session_id: [u8; 32],
-    t: usize,
-    key_shares: &mut [&mut Poseidon2SpdzAuthenticatedKeyShare],
-    vaults: &mut [&mut PreprocessedPoseidonPartyVault],
-    party_rngs: &mut [PartyPrivateRng],
-) -> Result<HemJortsCachedTree, Poseidon2MpcError> {
-    build_distributed_hem_jorts_key_mpc_with_active_leaves(
-        session_id,
-        HEM_JORTS_MAX_LEAVES,
-        t,
-        key_shares,
-        vaults,
-        party_rngs,
-    )
-}
-
 /// Build a `Hem`-aggregatable `JortsPoseidon2` public key & height-6 leaf cache in SPDZ MPC with
 /// `active_leaves in 1..=64` active `WOTS+C` leaves and domain-separated unassigned leaves above it.
 pub fn build_distributed_hem_jorts_key_mpc_with_active_leaves(
@@ -3805,8 +3854,7 @@ pub fn build_distributed_hem_jorts_key_mpc_with_active_leaves(
     let mut leaf0_endpoints = Vec::with_capacity(HEM_WOTS_CHAINS);
     for kp in 0..active_leaves {
         let base = kp * HEM_WOTS_CHAINS;
-        let endpoints: [HemDigest4; HEM_WOTS_CHAINS] =
-            core::array::from_fn(|r| opened[base + r]);
+        let endpoints: [HemDigest4; HEM_WOTS_CHAINS] = core::array::from_fn(|r| opened[base + r]);
         if kp == 0 {
             leaf0_endpoints.extend_from_slice(&endpoints);
         }
@@ -3993,11 +4041,8 @@ fn sign_hem_jorts_poseidon2_mpc_core(
     let kp_u32 = kp_usize as u32;
     let m = quorum_pts.len();
 
-    let transcript = crate::sponge::keccak::encode_multi_frame(&[
-        session_id,
-        &epoch.to_le_bytes(),
-        mu_bytes,
-    ]);
+    let transcript =
+        crate::sponge::keccak::encode_multi_frame(&[session_id, &epoch.to_le_bytes(), mu_bytes]);
     for rng in party_rngs.iter_mut() {
         rng.hedge_transcript(&transcript);
     }
@@ -4024,20 +4069,23 @@ fn sign_hem_jorts_poseidon2_mpc_core(
     for p in 0..m {
         let alpha_p = vaults[p].mac_alpha_share;
         let c = |g: Goldilocks| AuthGlWire::public_const(g, alpha_p);
-        secret_vec_push(&mut r_states[p], [
-            sk_prf_p[p][0],
-            sk_prf_p[p][1],
-            sk_prf_p[p][2],
-            sk_prf_p[p][3],
-            c(cache.pk.pk_seed[0]),
-            c(cache.pk.pk_seed[1]),
-            c(cache.pk.pk_seed[2]),
-            c(cache.pk.pk_seed[3]),
-            c(Goldilocks::from_u64_reduced(HEM_DOMAIN_PRF_MSG)),
-            c(Goldilocks::from_u64_reduced(epoch)),
-            c(mu[4]),
-            c(Goldilocks::from_u64_reduced(POSEIDON2_CONST_IV)),
-        ]);
+        secret_vec_push(
+            &mut r_states[p],
+            [
+                sk_prf_p[p][0],
+                sk_prf_p[p][1],
+                sk_prf_p[p][2],
+                sk_prf_p[p][3],
+                c(cache.pk.pk_seed[0]),
+                c(cache.pk.pk_seed[1]),
+                c(cache.pk.pk_seed[2]),
+                c(cache.pk.pk_seed[3]),
+                c(Goldilocks::from_u64_reduced(HEM_DOMAIN_PRF_MSG)),
+                c(Goldilocks::from_u64_reduced(epoch)),
+                c(mu[4]),
+                c(Goldilocks::from_u64_reduced(POSEIDON2_CONST_IV)),
+            ],
+        );
     }
     if let Err(e) =
         eval_spdz_poseidon2_perm12_batch(t, quorum_pts, &mut r_states, vaults, &mut pending1)
@@ -6237,8 +6285,7 @@ mod tests {
 
         let mut cluster = QuorumEpochLatchCluster::new(n, t - 1).unwrap();
         for ks in &mut key_shares {
-            ks.enroll_latch_authority(cluster.authority())
-                .unwrap();
+            ks.enroll_latch_authority(cluster.authority()).unwrap();
         }
         let latch_pk = cache.pk.latch_pq_public_key(cache.dkg_pk_seed);
         let msg0 = b"hem native poseidon2 epoch 0";
@@ -6299,7 +6346,9 @@ mod tests {
         // (`798` pow7 tuples, `0` Beaver triples, `0` A2B masks) without reconstructing secrets!
         let new_t = 3usize;
         let new_n = 4usize;
-        let new_pts: Vec<Goldilocks> = (1..=new_n as u64).map(Goldilocks::from_u64_reduced).collect();
+        let new_pts: Vec<Goldilocks> = (1..=new_n as u64)
+            .map(Goldilocks::from_u64_reduced)
+            .collect();
         let mut old_seed = dkg_seed.0;
         let mut old_prf = dkg_prf.0;
         let mut old_rngs = make_rngs(t, 0xA1);

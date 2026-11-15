@@ -13,9 +13,9 @@
 //!   all `m` shares and checks it against the MACs, so fewer than `t` parties learn nothing
 //!   and any wrong share aborts.
 //! * **Sweep.** Lanes are evaluated 64 at a time, one bitsliced `Keccak-f[1600]` per level:
-//!   one `PRF` level and up to three `F` levels. Each permutation passes the batched
-//!   `MacCheck` over all its Beaver openings before it returns, so by the time
-//!   [`BaggyEngine::barrier`] is reached nothing is unverified.
+//!   one `PRF` level and up to three `F` levels. Beaver MAC checks are queued until
+//!   [`BaggyEngine::barrier`] or an output opening, with an automatic flush after
+//!   two full waves to bound retained tag memory. No output bypasses the check.
 //! * **Openings.** [`BaggyEngine::open_round`] opens exactly the picked `(lane, position)`
 //!   values: the shares of every other lane of a batch are masked to zero before the
 //!   committed opening.
@@ -31,24 +31,27 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::baggy::{
-    BaggyEngine, BaggyError, TAG_BAGGY_OPT_RAND, TAG_BAGGY_R, keyed_mu_frame,
+use crate::baggy::{BaggyEngine, BaggyError, TAG_BAGGY_OPT_RAND, TAG_BAGGY_R, keyed_mu_frame};
+use crate::field::tower::{
+    BitslicedGf256x64, Tower128, TowerGf256, bs_gf256_extract_lane, bs_gf256_insert_lane,
 };
-use crate::field::tower::{BitslicedGf256x64, Tower128, TowerGf256, bs_gf256_extract_lane};
 use crate::keccak_mpc::{
     KeccakMpcError, SpdzAuthenticatedKeyShare, SpdzMacWord, TSW_F_SECRET_OFFSET,
     TSW_PRF_SECRET_OFFSET, TSW_SUITE_MIDSTATE, add_public_u64_to_spdz_word,
-    eval_spdz_keccak_f1600_batch64, tsw_secret32_frame, verify_pending_spdz_mac_batch,
+    eval_spdz_keccak_f1600_batch64, eval_spdz_keccak_f1600_single, tsw_secret32_frame,
+    verify_pending_spdz_mac_batch,
 };
 use crate::preprocessing::{
-    OtMesh, PartyPrivateRng, PreprocessedKeccakPartyVault,
+    KeccakBitTripleShare64, OtMesh, PartyPrivateRng, PreprocessedKeccakPartyVault,
     commit_and_open_spdz_bs_gf256_batch_quorum, run_dealerless_pcg_keccak_vaults_with_alpha,
     validate_all_eval_points_gf256,
 };
 use crate::rss256::Rss256Error;
 use crate::sponge::keccak::SHAKE256_RATE_BYTES;
 use crate::tsw_baggy::{HashAdrs, TAG_PRF, TAG_TH_F};
-use crate::wipe::{SecretVec, secret_vec_push, secret_vecs_with_capacity};
+use crate::wipe::{
+    SecretVec, SecretWipe, secret_vec_push, secret_vec_reserve, secret_vecs_with_capacity,
+};
 use crate::wots_c::LaneSpec;
 
 /// Sponge instances per bitsliced permutation.
@@ -108,7 +111,10 @@ impl SpdzTripleSource for DealerlessPcgTripleSource<'_> {
             .checked_add(1)
             .ok_or(KeccakMpcError::InvalidParameters)?;
         if self.quorum.windows(2).any(|w| w[0] >= w[1])
-            || self.quorum.last().is_none_or(|&p| p >= self.eval_points.len())
+            || self
+                .quorum
+                .last()
+                .is_none_or(|&p| p >= self.eval_points.len())
         {
             return Err(KeccakMpcError::InvalidParameters);
         }
@@ -128,6 +134,89 @@ impl SpdzTripleSource for DealerlessPcgTripleSource<'_> {
             .enumerate()
             .filter(|(p, _)| self.quorum.contains(p))
             .map(|(_, vault)| vault)
+            .collect())
+    }
+}
+
+/// [`SpdzTripleSource`] over vaults generated ahead of signing, so that a permutation costs its
+/// evaluation and MAC check only.
+///
+/// A request moves its triples out and overwrites their slots, so no triple is returned twice
+/// and none outlives its use here. The store is memory only on purpose: a triple restored from
+/// disk after a crash could mask two different wires, and the two openings would reveal their
+/// difference.
+pub struct StagedTripleSource {
+    vaults: Vec<PreprocessedKeccakPartyVault>,
+}
+
+impl StagedTripleSource {
+    /// `vaults`: one per quorum member in quorum order, as a generator returned them, all with
+    /// the same number of unused triple words.
+    pub fn new(vaults: Vec<PreprocessedKeccakPartyVault>) -> Result<Self, KeccakMpcError> {
+        let Some(first) = vaults.first().map(PreprocessedKeccakPartyVault::remaining) else {
+            return Err(KeccakMpcError::InvalidParameters);
+        };
+        if vaults.iter().any(|v| v.poisoned || v.remaining() != first) {
+            return Err(KeccakMpcError::InvalidParameters);
+        }
+        Ok(Self { vaults })
+    }
+
+    /// Unused triple words per party.
+    pub fn remaining_words(&self) -> usize {
+        self.vaults
+            .first()
+            .map_or(0, PreprocessedKeccakPartyVault::remaining)
+    }
+}
+
+impl SpdzTripleSource for StagedTripleSource {
+    fn vaults(
+        &mut self,
+        words: usize,
+    ) -> Result<Vec<PreprocessedKeccakPartyVault>, KeccakMpcError> {
+        if self
+            .vaults
+            .iter()
+            .any(|v| v.poisoned || v.remaining() < words)
+        {
+            return Err(crate::preprocessing::PreprocessError::VaultExhausted {
+                kind: "staged keccak triples",
+            }
+            .into());
+        }
+        Ok(self
+            .vaults
+            .iter_mut()
+            .map(|staged| {
+                let start = staged.cursor;
+                staged.cursor += words;
+                // `replace` leaves zeros behind; a plain move would leave a copy in the buffer.
+                let triples = staged.triples[start..start + words]
+                    .iter_mut()
+                    .map(|slot| {
+                        core::mem::replace(
+                            slot,
+                            KeccakBitTripleShare64 {
+                                a: [0; 8],
+                                b: [0; 8],
+                                c: [0; 8],
+                                a_mac: [[Tower128::ZERO; 64]; 2],
+                                b_mac: [[Tower128::ZERO; 64]; 2],
+                                c_mac: [[Tower128::ZERO; 64]; 2],
+                            },
+                        )
+                    })
+                    .collect();
+                PreprocessedKeccakPartyVault {
+                    party_id: staged.party_id,
+                    eval_point: staged.eval_point,
+                    mac_alpha_lanes: staged.mac_alpha_lanes,
+                    triples,
+                    cursor: 0,
+                    poisoned: false,
+                }
+            })
             .collect())
     }
 }
@@ -161,6 +250,10 @@ pub struct SpdzSweepEngine<'a> {
     /// MAC key shares of the quorum, as the most recent vaults carried them.
     alpha: Option<SecretVec<[Tower128; 2]>>,
     perm_ctr: usize,
+    pending_opened: Vec<BitslicedGf256x64>,
+    pending_macs: SecretVec<Vec<SpdzMacWord>>,
+    #[cfg(test)]
+    verify_each_permutation: bool,
     poisoned: bool,
 }
 
@@ -198,6 +291,10 @@ impl<'a> SpdzSweepEngine<'a> {
             triples,
             alpha: None,
             perm_ctr: 0,
+            pending_opened: Vec::new(),
+            pending_macs: secret_vecs_with_capacity(m, 0),
+            #[cfg(test)]
+            verify_each_permutation: false,
             poisoned: false,
         })
     }
@@ -216,6 +313,39 @@ impl<'a> SpdzSweepEngine<'a> {
         self.poisoned
     }
 
+    /// Check all queued Beaver openings immediately. This is also called by
+    /// `barrier` and every output opening; a failed check permanently poisons
+    /// this engine. Large sweeps flush at a bounded two-permutation buffer.
+    pub fn verify_now(&mut self) -> Result<(), BaggyError> {
+        self.live()?;
+        if self.pending_opened.is_empty() {
+            return Ok(());
+        }
+        let alpha = self
+            .alpha
+            .as_ref()
+            .ok_or_else(|| mpc(KeccakMpcError::InvalidParameters))?;
+        let checked = verify_pending_spdz_mac_batch(
+            &self.session_id,
+            "baggy_spdz_chi",
+            self.t,
+            &self.quorum_pts,
+            &self.pending_opened,
+            &self.pending_macs,
+            alpha,
+            self.party_rngs,
+        );
+        self.pending_opened.clear();
+        for macs in self.pending_macs.iter_mut() {
+            macs.secret_wipe();
+            macs.clear();
+        }
+        match checked {
+            Ok(()) => Ok(()),
+            Err(e) => self.fail(e.into()),
+        }
+    }
+
     fn live(&self) -> Result<(), BaggyError> {
         if self.poisoned {
             return Err(mpc(KeccakMpcError::Poisoned));
@@ -225,6 +355,11 @@ impl<'a> SpdzSweepEngine<'a> {
 
     fn fail<T>(&mut self, e: KeccakMpcError) -> Result<T, BaggyError> {
         self.poisoned = true;
+        self.pending_opened.clear();
+        for macs in self.pending_macs.iter_mut() {
+            macs.secret_wipe();
+            macs.clear();
+        }
         Err(mpc(e))
     }
 
@@ -233,7 +368,10 @@ impl<'a> SpdzSweepEngine<'a> {
         &self,
         alpha: &[[Tower128; 2]],
         frames: &[[u8; SHAKE256_RATE_BYTES]],
-    ) -> (SecretVec<Vec<BitslicedGf256x64>>, SecretVec<Vec<SpdzMacWord>>) {
+    ) -> (
+        SecretVec<Vec<BitslicedGf256x64>>,
+        SecretVec<Vec<SpdzMacWord>>,
+    ) {
         let m = self.quorum_pts.len();
         let mut sh = SecretVec::new(vec![vec![[0u64; 8]; STATE_BITS]; m]);
         let mut mac = SecretVec::new(vec![vec![[[Tower128::ZERO; 64]; 2]; STATE_BITS]; m]);
@@ -257,8 +395,8 @@ impl<'a> SpdzSweepEngine<'a> {
         (sh, mac)
     }
 
-    /// One 64-instance permutation on fresh triples, followed by the batched `MacCheck` of
-    /// every Beaver opening it made. Returns the output digests, still shared.
+    /// Up to 64 instances on fresh triples. Returns shared digests; the queued
+    /// Beaver MACs must pass `verify_now` before any digest is released.
     fn permute(
         &mut self,
         frames: &[[u8; SHAKE256_RATE_BYTES]],
@@ -266,16 +404,25 @@ impl<'a> SpdzSweepEngine<'a> {
     ) -> Result<SharedDigests, BaggyError> {
         self.live()?;
         let m = self.quorum_pts.len();
-        let mut vaults = match self.triples.vaults(TRIPLE_WORDS_PER_PERMUTATION) {
+        let active = frames.len();
+        if active == 0 || active > BATCH {
+            return self.fail(KeccakMpcError::InvalidParameters);
+        }
+        let words = 600 * active;
+        // Bound retained tag memory to two full waves. Sparse waves share the
+        // same barrier without paying for an independent coin per permutation.
+        if self.pending_opened.len() + 2 * words > 4 * TRIPLE_WORDS_PER_PERMUTATION {
+            self.verify_now()?;
+        }
+        let mut vaults = match self.triples.vaults(words) {
             Ok(v) => v,
             Err(e) => return self.fail(e),
         };
         if vaults.len() != m
-            || vaults.iter().zip(&self.quorum_pts).any(|(v, pt)| {
-                v.poisoned
-                    || v.eval_point != *pt
-                    || v.remaining() < TRIPLE_WORDS_PER_PERMUTATION
-            })
+            || vaults
+                .iter()
+                .zip(&self.quorum_pts)
+                .any(|(v, pt)| v.poisoned || v.eval_point != *pt || v.remaining() < words)
         {
             return self.fail(KeccakMpcError::InvalidParameters);
         }
@@ -291,39 +438,79 @@ impl<'a> SpdzSweepEngine<'a> {
         let (mut sh, mut mac) = self.public_states(&alpha, frames);
         absorb(self, &mut sh, &mut mac);
 
-        let mut pending_opened = Vec::new();
-        let mut pending_macs = SecretVec::new(vec![Vec::new(); m]);
+        self.pending_opened.reserve(2 * words);
+        for macs in self.pending_macs.iter_mut() {
+            secret_vec_reserve(macs, 2 * words);
+        }
         let ctr = self.perm_ctr;
         self.perm_ctr += 1;
-        let evaluated = eval_spdz_keccak_f1600_batch64(
-            &self.session_id,
-            ctr,
-            self.t,
-            &self.quorum_pts,
-            &mut sh,
-            &mut mac,
-            &mut vaults,
-            &mut pending_opened,
-            &mut pending_macs,
-            self.party_rngs,
-        )
-        .and_then(|()| {
-            Ok(verify_pending_spdz_mac_batch(
+        let evaluated = if active == BATCH {
+            eval_spdz_keccak_f1600_batch64(
                 &self.session_id,
-                "baggy_spdz_chi",
+                ctr * BATCH,
                 self.t,
                 &self.quorum_pts,
-                &pending_opened,
-                &pending_macs,
-                &alpha,
+                &mut sh,
+                &mut mac,
+                &mut vaults,
+                &mut self.pending_opened,
+                &mut self.pending_macs,
                 self.party_rngs,
-            )?)
-        });
+            )
+        } else {
+            // Pack state bits within a sponge into words. A sparse wave consumes
+            // 600 words per live sponge, rather than 38,400 padded words.
+            (0..active).try_for_each(|instance| {
+                let mut single_sh = SecretVec::new(vec![[[0u64; 8]; 25]; m]);
+                let mut single_mac = SecretVec::new(vec![[[[Tower128::ZERO; 64]; 2]; 25]; m]);
+                for p in 0..m {
+                    for bit in 0..STATE_BITS {
+                        bs_gf256_insert_lane(
+                            &mut single_sh[p][bit / 64],
+                            bit % 64,
+                            bs_gf256_extract_lane(&sh[p][bit], instance),
+                        );
+                        for ml in 0..2 {
+                            single_mac[p][bit / 64][ml][bit % 64] = mac[p][bit][ml][instance];
+                        }
+                    }
+                }
+                eval_spdz_keccak_f1600_single(
+                    &self.session_id,
+                    ctr * BATCH + instance,
+                    self.t,
+                    &self.quorum_pts,
+                    &mut single_sh,
+                    &mut single_mac,
+                    &mut vaults,
+                    &mut self.pending_opened,
+                    &mut self.pending_macs,
+                    self.party_rngs,
+                )?;
+                for p in 0..m {
+                    for bit in 0..DIGEST_BITS {
+                        bs_gf256_insert_lane(
+                            &mut sh[p][bit],
+                            instance,
+                            bs_gf256_extract_lane(&single_sh[p][bit / 64], bit % 64),
+                        );
+                        for ml in 0..2 {
+                            mac[p][bit][ml][instance] = single_mac[p][bit / 64][ml][bit % 64];
+                        }
+                    }
+                }
+                Ok(())
+            })
+        };
         if let Err(e) = evaluated {
             for v in &mut vaults {
                 v.poison_and_wipe();
             }
             return self.fail(e);
+        }
+        #[cfg(test)]
+        if self.verify_each_permutation {
+            self.verify_now()?;
         }
         for party in sh.iter_mut() {
             party.truncate(DIGEST_BITS);
@@ -400,7 +587,7 @@ impl<'a> SpdzSweepEngine<'a> {
         &mut self,
         groups: &[(&SharedDigests, u64)],
     ) -> Result<Vec<Vec<[u8; 32]>>, BaggyError> {
-        self.live()?;
+        self.verify_now()?;
         let Some(alpha) = self.alpha.as_ref().map(|a| SecretVec::new(a.to_vec())) else {
             // Nothing was ever evaluated, so there is nothing to open.
             return self.fail(KeccakMpcError::InvalidParameters);
@@ -521,11 +708,7 @@ impl BaggyEngine for SpdzSweepEngine<'_> {
         Ok(self.open_masked(&[(&r, 1)])?[0][0])
     }
 
-    fn sweep(
-        &mut self,
-        pk_seed: &[u8; 32],
-        lanes: Vec<LaneSpec>,
-    ) -> Result<SpdzSweep, BaggyError> {
+    fn sweep(&mut self, pk_seed: &[u8; 32], lanes: Vec<LaneSpec>) -> Result<SpdzSweep, BaggyError> {
         self.live()?;
         if lanes.is_empty()
             || lanes.windows(2).any(|w| w[0].steps < w[1].steps)
@@ -577,8 +760,7 @@ impl BaggyEngine for SpdzSweepEngine<'_> {
     }
 
     fn barrier(&mut self) -> Result<(), BaggyError> {
-        // Every permutation was verified before it returned.
-        self.live()
+        self.verify_now()
     }
 
     fn open_round(
@@ -622,16 +804,145 @@ impl BaggyEngine for SpdzSweepEngine<'_> {
     }
 }
 
+/// Which engine a `Baggy` committee runs on.
+///
+/// Both engines keep the key private against `t - 1` corrupt custodians and abort on any wrong
+/// share. They differ in who must be online and in what a permutation costs:
+/// [`crate::rss256::Rss256Engine`] needs no preprocessing but all three custodians of a 2-of-3
+/// sharing, while [`SpdzSweepEngine`] runs with any `t` of `n` and pays for authenticated
+/// Beaver triples on every permutation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BaggyRoute {
+    Replicated2of3,
+    AuthenticatedShamir,
+}
+
+impl BaggyRoute {
+    /// The engine for a `t`-of-`n` committee with `online` custodians taking part, or `None`
+    /// if that quorum cannot sign. A 2-of-3 committee is replicated only while all three are
+    /// online: with two, one corrupt participant is half of the parties present, which the
+    /// replicated engine does not tolerate.
+    pub const fn select(t: usize, n: usize, online: usize) -> Option<Self> {
+        if t == 0 || t > n || online < t || online > n {
+            return None;
+        }
+        if t == 2 && n == 3 && online == 3 {
+            Some(Self::Replicated2of3)
+        } else {
+            Some(Self::AuthenticatedShamir)
+        }
+    }
+}
+
+/// A committee engine chosen by [`BaggyRoute`], so one ceremony is written for both.
+pub enum RoutedEngine<'a> {
+    Replicated2of3(alloc::boxed::Box<crate::rss256::Rss256Engine>),
+    AuthenticatedShamir(SpdzSweepEngine<'a>),
+}
+
+/// Shared chain values of one [`RoutedEngine`] sweep.
+pub enum RoutedSweep {
+    Replicated2of3(crate::wots_c::Sweep),
+    AuthenticatedShamir(SpdzSweep),
+}
+
+impl RoutedEngine<'_> {
+    pub const fn route(&self) -> BaggyRoute {
+        match self {
+            Self::Replicated2of3(_) => BaggyRoute::Replicated2of3,
+            Self::AuthenticatedShamir(_) => BaggyRoute::AuthenticatedShamir,
+        }
+    }
+}
+
+impl BaggyEngine for RoutedEngine<'_> {
+    type Sweep = RoutedSweep;
+
+    fn pk_seed(&self) -> [u8; 32] {
+        match self {
+            Self::Replicated2of3(e) => BaggyEngine::pk_seed(&**e),
+            Self::AuthenticatedShamir(e) => e.pk_seed(),
+        }
+    }
+
+    fn session_id(&self) -> &[u8; 32] {
+        match self {
+            Self::Replicated2of3(e) => BaggyEngine::session_id(&**e),
+            Self::AuthenticatedShamir(e) => e.session_id(),
+        }
+    }
+
+    fn key_identity(&self) -> Result<Option<[u8; 32]>, BaggyError> {
+        match self {
+            Self::Replicated2of3(e) => BaggyEngine::key_identity(&**e),
+            Self::AuthenticatedShamir(e) => e.key_identity(),
+        }
+    }
+
+    fn bind_key_identity(&mut self, identity: &[u8; 32]) -> Result<(), BaggyError> {
+        match self {
+            Self::Replicated2of3(e) => BaggyEngine::bind_key_identity(&mut **e, identity),
+            Self::AuthenticatedShamir(e) => e.bind_key_identity(identity),
+        }
+    }
+
+    fn randomiser(&mut self, mu: &[u8; 32]) -> Result<[u8; 32], BaggyError> {
+        match self {
+            Self::Replicated2of3(e) => BaggyEngine::randomiser(&mut **e, mu),
+            Self::AuthenticatedShamir(e) => e.randomiser(mu),
+        }
+    }
+
+    fn sweep(
+        &mut self,
+        pk_seed: &[u8; 32],
+        lanes: Vec<LaneSpec>,
+    ) -> Result<RoutedSweep, BaggyError> {
+        match self {
+            Self::Replicated2of3(e) => {
+                BaggyEngine::sweep(&mut **e, pk_seed, lanes).map(RoutedSweep::Replicated2of3)
+            }
+            Self::AuthenticatedShamir(e) => e
+                .sweep(pk_seed, lanes)
+                .map(RoutedSweep::AuthenticatedShamir),
+        }
+    }
+
+    fn barrier(&mut self) -> Result<(), BaggyError> {
+        match self {
+            Self::Replicated2of3(e) => BaggyEngine::barrier(&mut **e),
+            Self::AuthenticatedShamir(e) => e.barrier(),
+        }
+    }
+
+    fn open_round(
+        &mut self,
+        sweep: &RoutedSweep,
+        picks: &[(usize, u8)],
+    ) -> Result<Vec<[u8; 32]>, BaggyError> {
+        match (self, sweep) {
+            (Self::Replicated2of3(e), RoutedSweep::Replicated2of3(s)) => {
+                BaggyEngine::open_round(&mut **e, s, picks)
+            }
+            (Self::AuthenticatedShamir(e), RoutedSweep::AuthenticatedShamir(s)) => {
+                e.open_round(s, picks)
+            }
+            // A sweep of the other engine holds shares this one cannot open.
+            _ => Err(BaggyError::InvalidParameters),
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
+    extern crate std;
     use super::*;
     use crate::baggy::{
-        BaggyFewTime, BaggyKeyBinding, BaggyParams, MemoryFirstSigned, WaistbandCache,
-        baggy_keygen_mpc, baggy_reference_keygen, baggy_reference_sign, baggy_sign_mpc,
-        baggy_verify,
+        BaggyKeyBinding, BaggyParams, MemoryFirstSigned, WaistbandCache, baggy_keygen_mpc,
+        baggy_reference_keygen, baggy_reference_sign, baggy_sign_mpc, baggy_verify,
     };
-    use crate::pors_fp::PorsFpParams;
     use crate::keccak_mpc::tests::SpdzTestDealer;
+    use crate::pors_fp::PorsFpParams;
     use crate::tsw_baggy::PqSecretKey;
 
     /// Test-only source: a trusted dealer under one MAC key. It stands in for dealerless
@@ -761,24 +1072,21 @@ pub(crate) mod tests {
 
     /// One layer of two leaves over a 16-leaf `PORS+FP` tree: a signature costs 20
     /// permutations (18 for the sweep, 2 for the randomiser), each several seconds here.
-    const TINY_V2: BaggyParams = BaggyParams {
+    const TINY: BaggyParams = BaggyParams {
         subtree_height: 1,
         num_layers: 1,
-        few_time: BaggyFewTime::PorsFp(PorsFpParams {
+        pors: PorsFpParams {
             tree_height: 4,
             reveal: 4,
             max_auth_nodes: 7,
-        }),
-        ..BaggyParams::TEST_SMALL_V2
+        },
+        ..BaggyParams::TEST_SMALL
     };
 
-    /// The same hypertree over two `FORS+C` trees of four leaves (one of them signed).
-    const TINY_V1: BaggyParams = BaggyParams {
-        subtree_height: 1,
-        num_layers: 1,
-        fors_trees: 2,
-        fors_height: 2,
-        ..BaggyParams::TEST_SMALL
+    /// A different root-key binding for the parameter-refusal test.
+    const OTHER_PARAMS: BaggyParams = BaggyParams {
+        num_layers: 2,
+        ..TINY
     };
 
     /// Sign under MPC with the quorum `quorum` of a `t`-of-`n` sharing and compare with the
@@ -819,29 +1127,100 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn baggy_v2_two_of_three_equals_the_reference() {
-        sign_and_compare(&TINY_V2, 2, 3, &[0, 2], 0x31);
+    fn route_is_replicated_only_for_two_of_three_with_everyone_online() {
+        use BaggyRoute::{AuthenticatedShamir, Replicated2of3};
+        assert_eq!(BaggyRoute::select(2, 3, 3), Some(Replicated2of3));
+        for (t, n, online) in [(2, 3, 2), (3, 3, 3), (3, 5, 4), (2, 4, 3)] {
+            assert_eq!(BaggyRoute::select(t, n, online), Some(AuthenticatedShamir));
+        }
+        for (t, n, online) in [(0, 3, 3), (4, 3, 3), (2, 3, 1), (2, 3, 4)] {
+            assert_eq!(BaggyRoute::select(t, n, online), None);
+        }
+    }
+
+    /// The same ceremony code signs on either route, and the two routes cannot open each
+    /// other's sweeps.
+    #[test]
+    fn routed_engines_sign_the_reference_signature_and_reject_foreign_sweeps() {
+        use crate::keccak_mpc::run_dealerless_rss_dkg_2of3;
+        use crate::rss256::Rss256Engine;
+
+        let params = &TINY;
+        let sign = |engine: &mut RoutedEngine<'_>, sk: &PqSecretKey| {
+            let pk = baggy_reference_keygen(params, sk).unwrap();
+            let binding = BaggyKeyBinding::new(params, &pk);
+            engine.bind_key_identity(&binding.identity()).unwrap();
+            let msg = b"routed committee";
+            let sig = baggy_sign_mpc(
+                engine,
+                params,
+                &pk,
+                &binding,
+                &mut WaistbandCache::disabled(),
+                &mut MemoryFirstSigned::new(),
+                msg,
+            )
+            .unwrap();
+            assert_eq!(Some(sig), baggy_reference_sign(params, sk, &pk, msg));
+        };
+
+        let sid = [0x48; 32];
+        let mut dkg_rngs: [PartyPrivateRng; 3] = core::array::from_fn(|p| {
+            PartyPrivateRng::from_seed([0x48 ^ ((p as u8) << 4); 32], b"routed-dkg")
+        });
+        let (rss_keys, _) = run_dealerless_rss_dkg_2of3(sid, 32, &mut dkg_rngs).unwrap();
+        let rss = Rss256Engine::new(sid, rss_keys, dkg_rngs).unwrap();
+        let xor3 = |slots: [&[u8]; 3]| -> [u8; 32] {
+            core::array::from_fn(|i| slots[0][i] ^ slots[1][i] ^ slots[2][i])
+        };
+        let rss_sk = PqSecretKey {
+            sk_seed: xor3(rss.sk_seed_slots()),
+            sk_prf: xor3(rss.sk_prf_slots()),
+            pk_seed: Rss256Engine::pk_seed(&rss),
+        };
+        let mut replicated = RoutedEngine::Replicated2of3(alloc::boxed::Box::new(rss));
+        assert_eq!(Some(replicated.route()), BaggyRoute::select(2, 3, 3));
+        sign(&mut replicated, &rss_sk);
+
+        let mut s = setup(2, 3, &[0, 2], 0x49);
+        let mut shamir = RoutedEngine::AuthenticatedShamir(
+            SpdzSweepEngine::new([0x49; 32], 2, &s.keys, &mut s.rngs, &mut s.source).unwrap(),
+        );
+        assert_eq!(Some(shamir.route()), BaggyRoute::select(2, 3, 2));
+        sign(&mut shamir, &sk());
+
+        let lanes = vec![LaneSpec::pors(0, 0, 0)];
+        let foreign = replicated.sweep(&rss_sk.pk_seed, lanes).unwrap();
+        assert_eq!(
+            shamir.open_round(&foreign, &[(0, 0)]),
+            Err(BaggyError::InvalidParameters)
+        );
     }
 
     #[test]
-    fn baggy_v2_three_of_five_equals_the_reference() {
-        sign_and_compare(&TINY_V2, 3, 5, &[0, 3, 4], 0x32);
+    fn baggy_two_of_three_equals_the_reference() {
+        sign_and_compare(&TINY, 2, 3, &[0, 2], 0x31);
     }
 
     #[test]
-    fn baggy_v2_five_of_seven_equals_the_reference() {
-        sign_and_compare(&TINY_V2, 5, 7, &[0, 1, 3, 5, 6], 0x33);
+    fn baggy_three_of_five_equals_the_reference() {
+        sign_and_compare(&TINY, 3, 5, &[0, 3, 4], 0x32);
     }
 
     #[test]
-    fn baggy_v2_all_of_three_equals_the_reference() {
-        sign_and_compare(&TINY_V2, 3, 3, &[0, 1, 2], 0x34);
+    fn baggy_five_of_seven_equals_the_reference() {
+        sign_and_compare(&TINY, 5, 7, &[0, 1, 3, 5, 6], 0x33);
     }
 
     #[test]
-    fn baggy_v1_three_of_five_with_a_spare_party_equals_the_reference() {
+    fn baggy_all_of_three_equals_the_reference() {
+        sign_and_compare(&TINY, 3, 3, &[0, 1, 2], 0x34);
+    }
+
+    #[test]
+    fn baggy_three_of_five_with_a_spare_party_equals_the_reference() {
         // Four parties of a 3-of-5 sharing: more than the threshold take part.
-        sign_and_compare(&TINY_V1, 3, 5, &[1, 2, 3, 4], 0x35);
+        sign_and_compare(&TINY, 3, 5, &[1, 2, 3, 4], 0x35);
     }
 
     #[test]
@@ -851,12 +1230,12 @@ pub(crate) mod tests {
         let mut engine =
             SpdzSweepEngine::new([0x36; 32], 2, &s.keys, &mut s.rngs, &mut s.source).unwrap();
         let (pk, binding) =
-            baggy_keygen_mpc(&mut engine, &TINY_V2, &mut WaistbandCache::disabled()).unwrap();
-        assert_eq!(Some(pk), baggy_reference_keygen(&TINY_V2, &sk));
+            baggy_keygen_mpc(&mut engine, &TINY, &mut WaistbandCache::disabled()).unwrap();
+        assert_eq!(Some(pk), baggy_reference_keygen(&TINY, &sk));
         assert_eq!(engine.key_identity().unwrap(), Some(binding.identity()));
         // The shares now belong to this key under these parameters only.
         assert!(
-            baggy_keygen_mpc(&mut engine, &TINY_V1, &mut WaistbandCache::disabled()).is_err()
+            baggy_keygen_mpc(&mut engine, &OTHER_PARAMS, &mut WaistbandCache::disabled()).is_err()
         );
     }
 
@@ -941,6 +1320,204 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "full dealerless permutation performance measurement"]
+    fn measurement_dealerless_full_wave() {
+        use crate::dkg::run_dealerless_dkg_seed32_gf256;
+        use crate::field::tower::lagrange_weights_zero_gf256;
+        use crate::keccak_mpc::authenticate_dkg_seed_shares_for_spdz;
+        use crate::preprocessing::{PCG_DEFAULT_TREE_DEPTH, spdz_setup_alpha_gf256};
+        use crate::tsw_baggy::{Cshake256Suite, th_secret_prf};
+
+        let (t, n) = (2usize, 3usize);
+        let pts: Vec<TowerGf256> = (1..=n as u8).map(TowerGf256).collect();
+        let mut rngs: Vec<PartyPrivateRng> = (0..n)
+            .map(|i| PartyPrivateRng::from_seed([0x50 + i as u8; 32], b"spdz-sweep-dealerless"))
+            .collect();
+        let mut mesh = OtMesh::try_establish([0xc0; 32], &mut rngs).unwrap();
+        let (seed_shares, pk_seed) =
+            run_dealerless_dkg_seed32_gf256([0xc1; 32], t, &pts, &mut mesh, &mut rngs).unwrap();
+        let (prf_shares, _) =
+            run_dealerless_dkg_seed32_gf256([0xc2; 32], t, &pts, &mut mesh, &mut rngs).unwrap();
+        let (alpha_c, alpha_sh) = spdz_setup_alpha_gf256(&[0xc3; 32], t, &pts, &mut rngs).unwrap();
+        let keys = authenticate_dkg_seed_shares_for_spdz(
+            &[0xc4; 32],
+            t,
+            &pts,
+            32,
+            pk_seed,
+            &seed_shares,
+            &prf_shares,
+            &alpha_c,
+            &alpha_sh,
+            &mut mesh,
+            &mut rngs,
+        )
+        .unwrap();
+
+        let quorum = [0usize, 1, 2];
+        let weights = lagrange_weights_zero_gf256(&[pts[0], pts[1]]).unwrap();
+        let mut sk_seed = [0u8; 32];
+        for bit in 0..256 {
+            let mut value = TowerGf256::ZERO;
+            for (weight, &p) in weights.iter().zip(&quorum[..t]) {
+                value = value.add(weight.mul(seed_shares[p].bit_shares[bit]));
+            }
+            assert!(value.0 <= 1);
+            sk_seed[bit / 8] |= value.0 << (bit % 8);
+        }
+
+        let mut session_rngs: Vec<PartyPrivateRng> = quorum
+            .iter()
+            .map(|&p| PartyPrivateRng::from_seed([0x60 + p as u8; 32], b"spdz-sweep-session"))
+            .collect();
+        let mut source = DealerlessPcgTripleSource {
+            session_id: [0xc5; 32],
+            t,
+            eval_points: &pts,
+            quorum: &quorum,
+            tree_depth: PCG_DEFAULT_TREE_DEPTH,
+            alpha_contribs: &alpha_c,
+            alpha_shamir: &alpha_sh,
+            ot_mesh: &mut mesh,
+            party_rngs: &mut rngs,
+            requests: 0,
+        };
+        let mut engine =
+            SpdzSweepEngine::new([0xc6; 32], t, &keys, &mut session_rngs, &mut source).unwrap();
+        let lane = LaneSpec::pors(9, 1, 5);
+        let frame = tsw_secret32_frame(TAG_PRF, &pk_seed, &lane.prf);
+        let started = std::time::Instant::now();
+        let digests = engine
+            .permute(&[frame; 64], &mut |engine, sh, mac| {
+                engine.absorb_key(
+                    |k| (&k.sk_seed_words, &k.sk_seed_macs),
+                    TSW_PRF_SECRET_OFFSET,
+                    64,
+                    sh,
+                    mac,
+                );
+            })
+            .unwrap();
+        engine.verify_now().unwrap();
+        let elapsed = started.elapsed();
+        std::eprintln!(
+            "authenticated full 64-lane permutation with dealerless triples: {elapsed:?}"
+        );
+        let opened = engine.open_masked(&[(&digests, u64::MAX)]).unwrap();
+        let expected = th_secret_prf(Cshake256Suite, &pk_seed, &sk_seed, &lane.prf);
+        assert!(opened[0].iter().all(|value| *value == expected));
+    }
+
+    /// Online cost alone: the triples of one full wave are staged before the clock starts.
+    #[test]
+    #[ignore = "online full-wave permutation performance measurement"]
+    fn measurement_online_full_wave_with_staged_triples() {
+        use crate::tsw_baggy::{Cshake256Suite, th_secret_prf};
+
+        for (t, n, quorum) in [(2usize, 3usize, &[0usize, 1][..]), (3, 5, &[0, 2, 4][..])] {
+            let mut s = setup(t, n, quorum, 0x4a);
+            let mut staged =
+                StagedTripleSource::new(s.source.dealer.vaults(TRIPLE_WORDS_PER_PERMUTATION))
+                    .unwrap();
+            let sk = sk();
+            let mut engine =
+                SpdzSweepEngine::new([0x4a; 32], t, &s.keys, &mut s.rngs, &mut staged).unwrap();
+            let lane = LaneSpec::pors(9, 1, 5);
+            let frame = tsw_secret32_frame(TAG_PRF, &sk.pk_seed, &lane.prf);
+            let started = std::time::Instant::now();
+            let digests = engine
+                .permute(&[frame; 64], &mut |engine, sh, mac| {
+                    engine.absorb_key(
+                        |k| (&k.sk_seed_words, &k.sk_seed_macs),
+                        TSW_PRF_SECRET_OFFSET,
+                        64,
+                        sh,
+                        mac,
+                    );
+                })
+                .unwrap();
+            let evaluated = started.elapsed();
+            engine.verify_now().unwrap();
+            let checked = started.elapsed();
+            std::eprintln!(
+                "online {t}-of-{n} 64-lane permutation, staged triples: eval {evaluated:?}, with MAC check {checked:?}"
+            );
+            let opened = engine.open_masked(&[(&digests, u64::MAX)]).unwrap();
+            let expected = th_secret_prf(Cshake256Suite, &sk.pk_seed, &sk.sk_seed, &lane.prf);
+            assert!(opened[0].iter().all(|value| *value == expected));
+        }
+    }
+
+    #[test]
+    fn staged_source_hands_out_each_triple_once_and_then_refuses() {
+        let mut s = setup(2, 3, &[0, 2], 0x4b);
+        let dealt = s.source.dealer.vaults(1200);
+        let at =
+            |k: usize| -> Vec<BitslicedGf256x64> { dealt.iter().map(|v| v.triples[k].a).collect() };
+        let (first, later) = (at(0), at(600));
+        assert_ne!(first, later);
+        let mut staged = StagedTripleSource::new(dealt).unwrap();
+        assert_eq!(staged.remaining_words(), 1200);
+
+        let one = staged.vaults(600).unwrap();
+        assert!(one.iter().all(|v| v.remaining() == 600));
+        assert_eq!(
+            one.iter().map(|v| v.triples[0].a).collect::<Vec<_>>(),
+            first
+        );
+        assert!(staged.vaults.iter().all(|v| {
+            v.triples[..600]
+                .iter()
+                .all(|tr| tr.a == [0; 8] && tr.c_mac == [[Tower128::ZERO; 64]; 2])
+        }));
+        assert!(staged.vaults(601).is_err());
+        assert_eq!(staged.remaining_words(), 600);
+
+        let two = staged.vaults(600).unwrap();
+        assert_eq!(
+            two.iter().map(|v| v.triples[0].a).collect::<Vec<_>>(),
+            later
+        );
+        assert_eq!(staged.remaining_words(), 0);
+        assert!(staged.vaults(1).is_err());
+
+        // The same sweep opens the same value whether its triples were staged or dealt on demand.
+        let lane = || vec![LaneSpec::pors(0, 0, 0)];
+        let seed = s.keys[0].pk_seed;
+        let mut on_demand =
+            SpdzSweepEngine::new([0x4b; 32], 2, &s.keys, &mut s.rngs, &mut s.source).unwrap();
+        let sweep = on_demand.sweep(&seed, lane()).unwrap();
+        let expected = on_demand.open_round(&sweep, &[(0, 0)]).unwrap();
+        let used = on_demand.permutations();
+        drop(on_demand);
+        let mut staged = StagedTripleSource::new(s.source.dealer.vaults(600 * used)).unwrap();
+        let mut engine =
+            SpdzSweepEngine::new([0x4c; 32], 2, &s.keys, &mut s.rngs, &mut staged).unwrap();
+        let sweep = engine.sweep(&seed, lane()).unwrap();
+        assert_eq!(engine.open_round(&sweep, &[(0, 0)]).unwrap(), expected);
+        drop(engine);
+        assert_eq!(staged.remaining_words(), 0);
+    }
+
+    #[test]
+    fn deferred_fault_is_rejected_before_any_cut_and_poison_is_permanent() {
+        let mut s = setup(2, 3, &[0, 1], 0x47);
+        s.source.corrupt_request = Some(0);
+        let seed = s.keys[0].pk_seed;
+        let mut engine =
+            SpdzSweepEngine::new([0x47; 32], 2, &s.keys, &mut s.rngs, &mut s.source).unwrap();
+        let sweep = engine.sweep(&seed, vec![LaneSpec::pors(0, 0, 0)]).unwrap();
+        assert!(!engine.pending_opened.is_empty());
+        assert!(!engine.is_poisoned());
+        assert!(engine.open_round(&sweep, &[(0, 1)]).is_err());
+        assert!(engine.is_poisoned());
+        assert!(engine.pending_opened.is_empty());
+        assert!(engine.pending_macs.iter().all(Vec::is_empty));
+        assert!(engine.verify_now().is_err());
+        assert!(engine.barrier().is_err());
+    }
+
+    #[test]
     fn below_threshold_wrong_shares_and_bad_triples_are_refused() {
         let sk = sk();
         // Fewer parties than the threshold cannot form an engine.
@@ -956,10 +1533,19 @@ pub(crate) mod tests {
         s.keys[1].sk_seed_words[0][0] ^= 1;
         let mut engine =
             SpdzSweepEngine::new([0x42; 32], 3, &s.keys, &mut s.rngs, &mut s.source).unwrap();
-        assert!(engine.sweep(&sk.pk_seed, vec![LaneSpec::pors(0, 0, 0)]).is_err());
+        engine.verify_each_permutation = true;
+        assert!(
+            engine
+                .sweep(&sk.pk_seed, vec![LaneSpec::pors(0, 0, 0)])
+                .is_err()
+        );
         assert!(engine.is_poisoned());
         assert_eq!(engine.permutations(), 1);
-        assert!(engine.sweep(&sk.pk_seed, vec![LaneSpec::pors(0, 0, 1)]).is_err());
+        assert!(
+            engine
+                .sweep(&sk.pk_seed, vec![LaneSpec::pors(0, 0, 1)])
+                .is_err()
+        );
         assert!(engine.randomiser(&[0; 32]).is_err());
         assert!(engine.barrier().is_err());
         assert_eq!(engine.permutations(), 1);
@@ -969,7 +1555,12 @@ pub(crate) mod tests {
         s.source.corrupt_request = Some(1);
         let mut engine =
             SpdzSweepEngine::new([0x43; 32], 2, &s.keys, &mut s.rngs, &mut s.source).unwrap();
-        assert!(engine.sweep(&sk.pk_seed, vec![LaneSpec::pors(0, 0, 0)]).is_err());
+        engine.verify_each_permutation = true;
+        assert!(
+            engine
+                .sweep(&sk.pk_seed, vec![LaneSpec::pors(0, 0, 0)])
+                .is_err()
+        );
         assert!(engine.is_poisoned());
         assert_eq!(engine.permutations(), 2);
 
