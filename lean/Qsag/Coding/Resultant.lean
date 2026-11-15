@@ -3175,3 +3175,1054 @@ theorem modUnitOrSplit (E : Poly2 E_fld) (hPrim : IsPrimY E) (hDeg : 1 ≤ E.nat
   · exact .inr (.inr ⟨E₁, E₂, h1, h2, hd1, hd2, hEq, hTdeg⟩)
 
 /-- Dynamic Euclidean `xgcd` in `(ModMonic (monicFY E ...))[Z]` when `A ≠ 0`. -/
+theorem d5_xgcd_mod (E : Poly2 E_fld) (hPrim : IsPrimY E) (hDeg : 1 ≤ E.natDeg)
+    (A B : UPoly (ModMonic (monicFY E hPrim hDeg))) (hANe : A ≠ zero) :
+    (∃ E₁ E₂ : Poly2 E_fld, IsPrimY E₁ ∧ IsPrimY E₂ ∧ 1 ≤ E₁.natDeg ∧ 1 ≤ E₂.natDeg ∧
+      E = mul E₁ E₂ ∧ tdeg E₁ + tdeg E₂ = tdeg E) ∨
+    ∃ (G U0 V0 : UPoly (ModMonic (monicFY E hPrim hDeg))),
+      G ≠ zero ∧ coeffAt G.coeffs G.natDeg = one ∧
+      add (mul U0 A) (mul V0 B) = G ∧
+      (∃ Q_A, A = mul G Q_A) ∧ (∃ Q_B, B = mul G Q_B) := by
+  let R_E := ModMonic (monicFY E hPrim hDeg)
+  have aux : ∀ (fuel : Nat) (A B : UPoly R_E), B.coeffs.length ≤ fuel → A ≠ zero →
+      (∃ E₁ E₂ : Poly2 E_fld, IsPrimY E₁ ∧ IsPrimY E₂ ∧ 1 ≤ E₁.natDeg ∧ 1 ≤ E₂.natDeg ∧
+        E = mul E₁ E₂ ∧ tdeg E₁ + tdeg E₂ = tdeg E) ∨
+      ∃ (G U0 V0 : UPoly R_E),
+        G ≠ zero ∧ coeffAt G.coeffs G.natDeg = one ∧
+        add (mul U0 A) (mul V0 B) = G ∧
+        (∃ Q_A, A = mul G Q_A) ∧ (∃ Q_B, B = mul G Q_B) := by
+    intro fuel; induction fuel with
+    | zero =>
+      intro A B hLen hA0
+      have hBnil : B.coeffs = [] := List.eq_nil_of_length_eq_zero (Nat.le_zero.mp hLen)
+      have hB0 : B = zero := (eq_zero_iff B).mpr hBnil
+      subst hB0
+      rcases modUnitOrSplit E hPrim hDeg A.lead with hLead0 | ⟨c_inv, hInv⟩ | hSplit
+      · exact absurd hLead0 (lead_ne_zero hA0)
+      · right
+        let G := mul (C c_inv) A
+        have hAG : A = mul G (C A.lead) := by
+          dsimp only [G]
+          have h1 : mul (mul (C c_inv) A) (C A.lead) = mul (mul (C A.lead) (C c_inv)) A := by
+            constructive_ring
+          rw [h1, ← CHom_apply, ← CHom_apply, ← CHom.map_mul, LawfulCommRing.mul_comm A.lead c_inv, hInv, CHom.map_one, LawfulCommRing.one_mul]
+        have hGNe : G ≠ zero := fun e => hA0 (by rw [hAG, e, LawfulCommRing.zero_mul])
+        have hGdeg : G.natDeg = A.natDeg := by
+          apply Nat.le_antisymm
+          · have h1 := natDeg_mul_le (C c_inv) A
+            have hC0 : (C c_inv).natDeg = 0 := by
+              apply Nat.le_zero.mp; apply natDeg_le_of_coeffAt; intro k hk
+              cases k with | zero => omega | succ k => exact coeffAt_C_succ _ k
+            change G.natDeg ≤ (C c_inv).natDeg + A.natDeg at h1
+            omega
+          · have h1 := natDeg_mul_le G (C A.lead)
+            rw [← hAG] at h1
+            have hC0 : (C A.lead).natDeg = 0 := by
+              apply Nat.le_zero.mp; apply natDeg_le_of_coeffAt; intro k hk
+              cases k with | zero => omega | succ k => exact coeffAt_C_succ _ k
+            omega
+        have hGmon : coeffAt G.coeffs G.natDeg = one := by
+          rw [hGdeg]; dsimp only [G]; rw [coeffAt_C_mul]; simpa only [lead_eq] using hInv
+        refine ⟨G, C c_inv, zero, hGNe, hGmon, ?_, ⟨C A.lead, hAG⟩, ⟨zero, (LawfulCommRing.mul_zero G).symm⟩⟩
+        rw [LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
+      · exact .inl hSplit
+    | succ fuel ih =>
+      intro A B hLen hA0
+      if hB0 : B = zero then
+        subst B
+        exact ih A zero (by rw [coeffs_zero]; exact Nat.zero_le _) hA0
+      else
+        rcases modUnitOrSplit E hPrim hDeg B.lead with hLead0 | ⟨c_inv, hInv⟩ | hSplit
+        · exact absurd hLead0 (lead_ne_zero hB0)
+        · if hBdeg0 : B.natDeg = 0 then
+            right
+            have hBC : B = C B.lead := by
+              apply ext_coeffAt; intro k
+              cases k with
+              | zero => rw [coeffAt_C_zero]; rw [lead_eq]; rw [hBdeg0]
+              | succ k => rw [coeffAt_C_succ]; exact B.coeffAt_eq_zero_of_natDeg_lt (by omega)
+            have hBez1 : add (mul zero A) (mul (C c_inv) B) = one := by
+              rw [LawfulCommRing.zero_mul, LawfulCommRing.zero_add, hBC, ← CHom_apply, ← CHom_apply, ← CHom.map_mul, hInv, CHom.map_one]
+            exact ⟨one, zero, C c_inv, NontrivialRing.one_ne_zero,
+              by rw [natDeg_one, one_eq_C, coeffAt_C_zero], hBez1,
+              ⟨A, (LawfulCommRing.one_mul A).symm⟩, ⟨B, (LawfulCommRing.one_mul B).symm⟩⟩
+          else
+            have hBpos : 1 ≤ B.natDeg := by omega
+            have hInvCoeff : mul c_inv (coeffAt B.coeffs B.natDeg) = one := by simpa only [lead_eq] using hInv
+            obtain ⟨hDiv, hRemLt⟩ := divModLead_spec B B.natDeg c_inv hBpos (Nat.le_refl _) hInvCoeff A
+            let Q := (divModLead B B.natDeg c_inv A).1
+            let R_rem := (divModLead B B.natDeg c_inv A).2
+            change A = add (mul Q B) R_rem at hDiv
+            change R_rem.natDeg < B.natDeg at hRemLt
+            have hRemLen : R_rem.coeffs.length ≤ fuel := by
+              if hR0 : R_rem = zero then
+                rw [hR0, coeffs_zero]; exact Nat.zero_le _
+              else
+                have hRne : R_rem.coeffs ≠ [] := fun e => hR0 ((eq_zero_iff R_rem).mpr e)
+                have hPos := List.length_pos_iff.mpr hRne
+                unfold natDeg at hRemLt hBpos
+                omega
+            rcases ih B R_rem hRemLen hB0 with hSplit | ⟨G, U', V', hGNe, hGmon, hBez', ⟨QB, hQB⟩, ⟨QR, hQR⟩⟩
+            · exact .inl hSplit
+            · right
+              refine ⟨G, V', sub U' (mul V' Q), hGNe, hGmon, ?_,
+                ⟨add (mul QB Q) QR, ?_⟩, ⟨QB, hQB⟩⟩
+              · have hSubR : R_rem = sub A (mul Q B) := by
+                  conv => rhs; lhs; rw [hDiv]
+                  constructive_ring
+                rw [← hBez', hSubR]; constructive_ring
+              · conv => lhs; rw [hDiv]
+                conv => lhs; lhs; rhs; rw [hQB]
+                rw [hQR]; constructive_ring
+        · exact .inl hSplit
+  exact aux B.coeffs.length A B (Nat.le_refl _) hANe
+
+/-- Embed `E_fld[U][Z]` (`Poly2 E_fld`) into `(E_fld[U][W])[Z]` (`UPoly (Poly2 E_fld)`), constant in `W`. -/
+def embedUZ : RingHom (Poly2 E_fld) (UPoly (Poly2 E_fld)) :=
+  UPoly.mapHom UPoly.CHom
+
+/-- **Dynamic Curve Leaf Root Decomposition (`curve_leaf_root_decomp`)**:
+    Given `C₁ : Poly2 E_fld` monic in `Z` of degree `h_C ≥ 1`, `P₀ : UPoly (Poly2 E_fld)` with
+    `P₀.natDeg ≤ H₀`, and any `Y`-primitive factor `E : Poly2 E_fld` (`1 ≤ tdeg E`) dividing
+    `sylRes h_C H₀ (embedUZ C₁) P₀`, dynamically decomposes `E` into a list `Es` of `Y`-primitive
+    factors (`1 ≤ E_j.natDeg`, `(Es.map tdeg).sum = tdeg E`, every root `(u, w)` of `E` is a root
+    of some `E_j ∈ Es`) such that on EVERY leaf `E_j ∈ Es`, EITHER `E_j` divides
+    `g₁ := sylResDeriv h_C H₀ (embedUZ C₁) P₀ 1`, OR `CoprimeZ E_j g₁` AND `(C₁, P₀)` has an
+    explicit common root `ζ : ModMonic (monicFY E_j ...)`! -/
+theorem curve_leaf_root_decomp {h_C H₀ : Nat} {C₁ : Poly2 E_fld} {P₀ : UPoly (Poly2 E_fld)}
+    (hC₁deg : C₁.natDeg ≤ h_C) (hC₁mon : coeffAt C₁.coeffs h_C = one)
+    (hP₀deg : P₀.natDeg ≤ H₀) :
+    let R_res := sylRes h_C H₀ (embedUZ.toFun C₁) P₀
+    let g₁ := sylResDeriv h_C H₀ (embedUZ.toFun C₁) P₀ one
+    ∀ (E : Poly2 E_fld), IsPrimY E → 1 ≤ tdeg E → (∃ Q_res, R_res = mul E Q_res) →
+      ∃ Es : List (Poly2 E_fld),
+        (Es.map tdeg).sum = tdeg E ∧
+        (∀ u w, E.eval2 u w = zero → ∃ Ej ∈ Es, Ej.eval2 u w = zero) ∧
+        ∀ Ej ∈ Es, ∃ (hPj : IsPrimY Ej) (hDj : 1 ≤ Ej.natDeg),
+          (∃ Qg, g₁ = mul Ej Qg) ∨
+          (CoprimeZ Ej g₁ ∧
+            ∃ ζ : ModMonic (monicFY Ej hPj hDj),
+              ((mapHom (modPoly2Hom Ej hPj hDj)).toFun (embedUZ.toFun C₁)).eval ζ = zero ∧
+              ((mapHom (modPoly2Hom Ej hPj hDj)).toFun P₀).eval ζ = zero) := by
+  dsimp only
+  let R_res := sylRes h_C H₀ (embedUZ.toFun C₁) P₀
+  let g₁ := sylResDeriv h_C H₀ (embedUZ.toFun C₁) P₀ one
+  have sum_append : ∀ xs ys : List Nat, (xs ++ ys).sum = xs.sum + ys.sum := by
+    intro xs ys; induction xs with
+    | nil => show ys.sum = 0 + ys.sum; omega
+    | cons x tl ih => show x + (tl ++ ys).sum = x + tl.sum + ys.sum; rw [ih]; omega
+  have eval2_mul_eq : ∀ (A B : Poly2 E_fld) (u w : E_fld),
+      (mul A B).eval2 u w = mul (A.eval2 u w) (B.eval2 u w) :=
+    fun A B u w => UPoly.eval₂_mul (UPoly.evalHom u) w A B
+  have aux : ∀ (fuel : Nat) (E : Poly2 E_fld), tdeg E ≤ fuel →
+      IsPrimY E → 1 ≤ tdeg E → (∃ Q_res, R_res = mul E Q_res) →
+      ∃ Es : List (Poly2 E_fld),
+        (Es.map tdeg).sum = tdeg E ∧
+        (∀ u w, E.eval2 u w = zero → ∃ Ej ∈ Es, Ej.eval2 u w = zero) ∧
+        ∀ Ej ∈ Es, ∃ (hPj : IsPrimY Ej) (hDj : 1 ≤ Ej.natDeg),
+          (∃ Qg, g₁ = mul Ej Qg) ∨
+          (CoprimeZ Ej g₁ ∧
+            ∃ ζ : ModMonic (monicFY Ej hPj hDj),
+              ((mapHom (modPoly2Hom Ej hPj hDj)).toFun (embedUZ.toFun C₁)).eval ζ = zero ∧
+              ((mapHom (modPoly2Hom Ej hPj hDj)).toFun P₀).eval ζ = zero) := by
+    intro fuel; induction fuel with
+    | zero => intros E hFuel _ hPos _; exfalso; omega
+    | succ fuel ih =>
+      intro E hFuel hPrim hPos ⟨Q_res, hQres⟩
+      have hEDeg : 1 ≤ E.natDeg := primY_natDeg_pos hPrim hPos
+      have mergeSplit : ∀ (E₁ E₂ : Poly2 E_fld),
+          IsPrimY E₁ → IsPrimY E₂ → 1 ≤ E₁.natDeg → 1 ≤ E₂.natDeg →
+          E = mul E₁ E₂ → tdeg E₁ + tdeg E₂ = tdeg E →
+          ∃ Es : List (Poly2 E_fld),
+            (Es.map tdeg).sum = tdeg E ∧
+            (∀ u w, E.eval2 u w = zero → ∃ Ej ∈ Es, Ej.eval2 u w = zero) ∧
+            ∀ Ej ∈ Es, ∃ (hPj : IsPrimY Ej) (hDj : 1 ≤ Ej.natDeg),
+              (∃ Qg, g₁ = mul Ej Qg) ∨
+              (CoprimeZ Ej g₁ ∧
+                ∃ ζ : ModMonic (monicFY Ej hPj hDj),
+                  ((mapHom (modPoly2Hom Ej hPj hDj)).toFun (embedUZ.toFun C₁)).eval ζ = zero ∧
+                  ((mapHom (modPoly2Hom Ej hPj hDj)).toFun P₀).eval ζ = zero) := by
+        intro E₁ E₂ hP1 hP2 hD1 hD2 hMul hSum
+        have hT1 : 1 ≤ tdeg E₁ := Nat.le_trans hD1 (natDeg_le_tdeg E₁)
+        have hT2 : 1 ≤ tdeg E₂ := Nat.le_trans hD2 (natDeg_le_tdeg E₂)
+        obtain ⟨Es1, hS1, hR1, hL1⟩ := ih E₁ (by omega) hP1 hT1
+          ⟨mul E₂ Q_res, by rw [hQres, hMul, LawfulCommRing.mul_assoc]⟩
+        obtain ⟨Es2, hS2, hR2, hL2⟩ := ih E₂ (by omega) hP2 hT2
+          ⟨mul E₁ Q_res, by rw [hQres, hMul]; constructive_ring⟩
+        refine ⟨Es1 ++ Es2, by rw [List.map_append, sum_append, hS1, hS2, hSum], ?_, ?_⟩
+        · intro u w huw
+          rw [hMul, eval2_mul_eq] at huw
+          rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero huw with h0 | h0
+          · obtain ⟨Ej, hMem, hZ⟩ := hR1 u w h0
+            exact ⟨Ej, List.mem_append_left _ hMem, hZ⟩
+          · obtain ⟨Ej, hMem, hZ⟩ := hR2 u w h0
+            exact ⟨Ej, List.mem_append_right _ hMem, hZ⟩
+        · intro Ej hMem
+          rcases List.mem_append.mp hMem with hM | hM
+          · exact hL1 Ej hM
+          · exact hL2 Ej hM
+      rcases d5_split_prim E g₁ hPrim with ⟨Qg, hQg⟩ | hCopG1 | ⟨E₁, E₂, hP1, hP2, hD1, hD2, hMul, hSum, _⟩
+      · refine ⟨[E], by show tdeg E + 0 = tdeg E; omega, fun u w h => ⟨E, .head _, h⟩, ?_⟩
+        intro Ej hMem; cases hMem with
+        | head => exact ⟨hPrim, hEDeg, .inl ⟨Qg, hQg⟩⟩
+        | tail _ hNil => cases hNil
+      · let φ := modPoly2Hom E hPrim hEDeg
+        let C1_mod := (mapHom φ).toFun (embedUZ.toFun C₁)
+        let P0_mod := (mapHom φ).toFun P₀
+        have hC1_mod_mon : coeffAt C1_mod.coeffs h_C = one := by
+          dsimp only [C1_mod, embedUZ]
+          rw [coeffAt_mapHom, coeffAt_mapHom, hC₁mon, CHom.map_one, φ.map_one]
+        have hC1_mod_deg : C1_mod.natDeg ≤ h_C :=
+          Nat.le_trans (natDeg_mapHom_le φ _) (Nat.le_trans (natDeg_mapHom_le CHom C₁) hC₁deg)
+        have hP0_mod_deg : P0_mod.natDeg ≤ H₀ := Nat.le_trans (natDeg_mapHom_le φ P₀) hP₀deg
+        have hC1_mod_ne : C1_mod ≠ zero := fun e => by
+          rw [e, coeffs_zero, coeffAt_nil] at hC1_mod_mon
+          exact NontrivialRing.one_ne_zero hC1_mod_mon.symm
+        rcases d5_xgcd_mod E hPrim hEDeg C1_mod P0_mod hC1_mod_ne with
+          ⟨E₁, E₂, hP1, hP2, hD1, hD2, hMul, hSum⟩ |
+          ⟨G, U0, V0, hGNe, hGmon, hBez, ⟨Q_C, hQC⟩, ⟨Q_P, hQP⟩⟩
+        · exact mergeSplit E₁ E₂ hP1 hP2 hD1 hD2 hMul hSum
+        · let d_G := G.natDeg
+          have hQCNe : Q_C ≠ zero := fun e => hC1_mod_ne (by rw [hQC, e, LawfulCommRing.mul_zero])
+          have hdG_QC_le : d_G + Q_C.natDeg ≤ h_C := by
+            apply Decidable.byContradiction; intro hNot
+            have hz := C1_mod.coeffAt_eq_zero_of_natDeg_lt (Nat.lt_of_le_of_lt hC1_mod_deg (Nat.lt_of_not_le hNot))
+            rw [hQC, (coeffAt_mul_top G Q_C).2] at hz
+            simp only [lead_eq] at hz; rw [hGmon, LawfulCommRing.one_mul] at hz
+            exact lead_ne_zero hQCNe (by simpa only [lead_eq] using hz)
+          if hdG0 : d_G = 0 then
+            exfalso
+            have hG1 : G = one := by
+              apply ext_coeffAt; intro k
+              cases k with
+              | zero =>
+                have : coeffAt G.coeffs 0 = one := by rw [← hdG0]; exact hGmon
+                rw [this, one_eq_C, coeffAt_C_zero]
+              | succ k =>
+                rw [one_eq_C, coeffAt_C_succ]
+                exact G.coeffAt_eq_zero_of_natDeg_lt (by omega)
+            rw [hG1] at hBez
+            obtain ⟨r_inv, hUnit⟩ := isUnit_sylRes_of_bezout hC1_mod_deg
+              (by rw [hC1_mod_mon, LawfulCommRing.one_mul]) hP0_mod_deg hBez
+            have hRes0 : sylRes h_C H₀ C1_mod P0_mod = zero := by
+              rw [← map_sylRes φ]; change φ.toFun R_res = zero
+              rw [hQres, RingHom.map_mul, modPoly2Hom_self E hPrim hEDeg, LawfulCommRing.zero_mul]
+            rw [hRes0, LawfulCommRing.mul_zero] at hUnit
+            exact NontrivialRing.one_ne_zero hUnit.symm
+          else if hdG2 : 2 ≤ d_G then
+            exfalso
+            have hg1_zero : φ.toFun g₁ = zero := by
+              dsimp only [g₁]
+              rw [map_sylResDeriv φ, RingHom.map_one]
+              exact sylResDeriv_eq_zero_of_common_factor_ge_two hdG2 (by omega)
+                hP0_mod_deg (Nat.le_refl d_G) hGmon hQC (by omega) hQP
+            obtain ⟨u0, v0, c, hc, hCopEq⟩ := hCopG1
+            have hApp := congrArg φ.toFun hCopEq
+            rw [RingHom.map_add, RingHom.map_mul, RingHom.map_mul,
+              modPoly2Hom_self E hPrim hEDeg, hg1_zero, LawfulCommRing.mul_zero,
+              LawfulCommRing.mul_zero, LawfulCommRing.add_zero] at hApp
+            exact modPoly2Hom_C_ne_zero E hPrim hEDeg hc hApp.symm
+          else
+            have hdG1 : d_G = 1 := by omega
+            let ζ := neg (coeffAt G.coeffs 0)
+            have hGlin : G = sub X (C ζ) := by
+              apply ext_coeffAt; intro k
+              have hSubEq : sub X (C ζ) = add X (C (coeffAt G.coeffs 0)) := by
+                dsimp only [ζ]; rw [LawfulCommRing.sub_eq_add_neg, ← CHom_apply, ← RingHom.map_neg CHom,
+                  CHom_apply, LawfulCommRing.neg_neg]
+              rw [hSubEq, coeffAt_add]
+              cases k with
+              | zero =>
+                show coeffAt G.coeffs 0 = add (coeffAt (ofList [zero, one]).coeffs 0) (coeffAt (C _).coeffs 0)
+                rw [coeffAt_ofList, coeffAt_cons_zero, coeffAt_C_zero, LawfulCommRing.zero_add]
+              | succ k =>
+                cases k with
+                | zero =>
+                  have h1 : coeffAt G.coeffs 1 = one := by rw [← hdG1]; exact hGmon
+                  show coeffAt G.coeffs 1 = add (coeffAt (ofList [zero, one]).coeffs 1) (coeffAt (C _).coeffs 1)
+                  rw [h1, coeffAt_ofList, coeffAt_cons_succ, coeffAt_cons_zero, coeffAt_C_succ, LawfulCommRing.add_zero]
+                | succ k =>
+                  rw [G.coeffAt_eq_zero_of_natDeg_lt (by omega), coeffAt_C_succ]
+                  show zero = add (coeffAt (ofList [zero, one]).coeffs (k + 2)) zero
+                  rw [coeffAt_ofList, coeffAt_cons_succ, coeffAt_cons_succ, coeffAt_nil, LawfulCommRing.add_zero]
+            have hLinZ : (sub X (C ζ)).eval ζ = zero := by
+              rw [← evalHom_apply]
+              rw [RingHom.map_sub, evalHom_apply, evalHom_apply, eval_X, eval_C, LawfulCommRing.sub_self]
+            have hC1_root : C1_mod.eval ζ = zero := by
+              rw [hQC, hGlin]; rw [← evalHom_apply]
+              rw [RingHom.map_mul, evalHom_apply, hLinZ, LawfulCommRing.zero_mul]
+            have hP0_root : P0_mod.eval ζ = zero := by
+              rw [hQP, hGlin]; rw [← evalHom_apply]
+              rw [RingHom.map_mul, evalHom_apply, hLinZ, LawfulCommRing.zero_mul]
+            refine ⟨[E], by show tdeg E + 0 = tdeg E; omega, fun u w h => ⟨E, .head _, h⟩, ?_⟩
+            intro Ej hMem; cases hMem with
+            | head => exact ⟨hPrim, hEDeg, .inr ⟨hCopG1, ζ, hC1_root, hP0_root⟩⟩
+            | tail _ hNil => cases hNil
+      · exact mergeSplit E₁ E₂ hP1 hP2 hD1 hD2 hMul hSum
+  intro E hPrim hPos hDiv
+  exact aux (tdeg E) E (Nat.le_refl _) hPrim hPos hDiv
+
+end CurveDecomp
+end SylElim
+
+end Qsag
+
+end
+
+namespace Qsag.Poly2
+theorem coeff2_eq {K : Type} [LawfulField K] [DecidableEq K] (P : Poly2 K) (i j : Nat) :
+    coeff2 P i j = coeffAt (coeffAt P.coeffs j).coeffs i := by unfold coeff2; rfl
+end Qsag.Poly2
+
+namespace Qsag.Poly2
+open CommRingOps UPoly
+variable {F : Type} [LawfulField F] [DecidableEq F]
+theorem eval2_eq (q : Poly2 F) (y z : F) : eval2 q y z = (eval₂Hom (evalHom y) z).toFun q := by unfold eval2; exact (eval₂Hom_apply _ _ _).symm
+theorem eval2_zero (y z : F) : eval2 zero y z = zero := by rw [eval2_eq]; exact (eval₂Hom (evalHom y) z).map_zero
+theorem eval2_mul (a b : Poly2 F) (y z : F) : eval2 (mul a b) y z = mul (eval2 a y z) (eval2 b y z) := by simp only [eval2_eq]; exact (eval₂Hom (evalHom y) z).map_mul a b
+end Qsag.Poly2
+
+public section
+namespace Qsag
+/-! ## §3. Multi-Sheet Space-Curve GCD Decomposition (`ShearedCurveGcd` Refinement) -/
+
+namespace SylElim
+section MultiSheetCurveGcd
+variable {E_fld : Type} [LawfulField E_fld] [DecidableEq E_fld]
+open CommRingOps RoundPoly UPoly Poly2
+
+local instance : NoZeroDivisors E_fld := LawfulField.toNoZeroDivisors E_fld
+
+/-- Affine space evaluation homomorphism `(E_fld[U][W])[Z] → E_fld` at `(u, w, z) ∈ E_fld³`. -/
+def evalSpaceHom (u w z : E_fld) : RingHom (UPoly (Poly2 E_fld)) E_fld :=
+  UPoly.eval₂Hom (UPoly.eval₂Hom (UPoly.evalHom u) w) z
+
+theorem evalSpaceHom_apply (u w z : E_fld) (p : UPoly (Poly2 E_fld)) :
+    (evalSpaceHom u w z).toFun p = eval₂ (eval₂Hom (evalHom u) w) z p := by
+  unfold evalSpaceHom
+  exact eval₂Hom_apply _ _ _
+
+theorem evalSpaceHom_embedUZ (u w z : E_fld) (C₁ : Poly2 E_fld) :
+    (evalSpaceHom u w z).toFun (embedUZ.toFun C₁) = C₁.eval2 u z := by
+  rw [evalSpaceHom_apply]
+  show UPoly.eval₂ (UPoly.eval₂Hom (UPoly.evalHom u) w) z ((UPoly.mapHom UPoly.CHom).toFun C₁) =
+    UPoly.eval₂ (UPoly.evalHom u) z C₁
+  rw [UPoly.eval₂_mapHom]
+  show evalCoeffs (C₁.coeffs.map (((UPoly.eval₂Hom (UPoly.evalHom u) w).comp UPoly.CHom).toFun)) z =
+    evalCoeffs (C₁.coeffs.map (UPoly.evalHom u).toFun) z
+  congr 1
+  refine List.map_congr_left fun c _ => ?_
+  simpa only [RingHom.comp_toFun, CHom_apply, eval₂Hom_apply] using UPoly.eval₂_C (UPoly.evalHom u) w c
+
+theorem evalSpaceHom_CC (u w z : E_fld) (δ : UPoly E_fld) :
+    (evalSpaceHom u w z).toFun (C (C δ)) = δ.eval u := by
+  rw [evalSpaceHom_apply]
+  show UPoly.eval₂ (UPoly.eval₂Hom (UPoly.evalHom u) w) z (C (C δ)) = δ.eval u
+  rw [UPoly.eval₂_C]
+  rw [eval₂Hom_apply]
+  show UPoly.eval₂ (UPoly.evalHom u) w (C δ) = δ.eval u
+  rw [UPoly.eval₂_C, evalHom_apply]
+
+theorem evalSpaceHom_eq_zero_of_map_modPoly2Hom_eq_zero
+    (E : Poly2 E_fld) (hPrim : IsPrimY E) (hDeg : 1 ≤ E.natDeg)
+    (D : UPoly (Poly2 E_fld))
+    (hMap0 : (UPoly.mapHom (modPoly2Hom E hPrim hDeg)).toFun D = zero)
+    (u w z : E_fld) (hEuw : E.eval2 u w = zero) :
+    (evalSpaceHom u w z).toFun D = zero := by
+  rw [evalSpaceHom_apply]
+  show evalCoeffs (D.coeffs.map (UPoly.eval₂Hom (UPoly.evalHom u) w).toFun) z = zero
+  apply UPoly.evalCoeffs_eq_zero_of_coeffAt
+  intro k
+  rw [RingHom.coeffAt_map]
+  have hk0 : (modPoly2Hom E hPrim hDeg).toFun (coeffAt D.coeffs k) = zero := by
+    rw [← coeffAt_mapHom, hMap0, coeffs_zero, coeffAt_nil]
+  obtain ⟨Q_k, hQk⟩ := (modPoly2Hom_eq_zero_iff E hPrim hDeg (coeffAt D.coeffs k)).mp hk0
+  rw [hQk, RingHom.map_mul]
+  simp only [eval₂Hom_apply]
+  show mul (E.eval2 u w) (Q_k.eval2 u w) = zero
+  rw [hEuw, LawfulCommRing.zero_mul]
+
+/-- Clear rational `U`-denominators from a single element of `ModMonic (monicFY E ...)`. -/
+theorem clear_modPoly2_elem (E : Poly2 E_fld) (hPrim : IsPrimY E) (hDeg : 1 ≤ E.natDeg)
+    (x : ModMonic (monicFY E hPrim hDeg)) :
+    ∃ (dx : UPoly E_fld) (X0 : Poly2 E_fld),
+      dx ≠ zero ∧ mul ((modPoly2Hom E hPrim hDeg).toFun (C dx)) x =
+        (modPoly2Hom E hPrim hDeg).toFun X0 := by
+  let M := monicFY E hPrim hDeg
+  obtain ⟨dx, X0, hdx, hX0⟩ := clear_uPoly_ratFunc x.rep
+  refine ⟨dx, X0, hdx, ?_⟩
+  have hxId : (ModMonic.modQuotHom M).toFun x.rep = x := by
+    apply ModMonic.ext; exact remM_of_lt M x.reduced
+  conv => lhs; rhs; rw [← hxId]
+  simp only [modPoly2Hom_apply]
+  change mul ((ModMonic.modQuotHom M).toFun (liftFY.toFun (C dx)))
+      ((ModMonic.modQuotHom M).toFun x.rep) =
+    (ModMonic.modQuotHom M).toFun (liftFY.toFun X0)
+  rw [← RingHom.map_mul, mapHom_C, hX0]
+
+/-- Clear rational `U`-denominators simultaneously across all `Z`-coefficients of `P : UPoly R_E`. -/
+theorem clear_modPoly2_upoly (E : Poly2 E_fld) (hPrim : IsPrimY E) (hDeg : 1 ≤ E.natDeg)
+    (P : UPoly (ModMonic (monicFY E hPrim hDeg))) :
+    ∃ (dP : UPoly E_fld) (P0 : UPoly (Poly2 E_fld)),
+      dP ≠ zero ∧
+      mul (C ((modPoly2Hom E hPrim hDeg).toFun (C dP))) P =
+        (mapHom (modPoly2Hom E hPrim hDeg)).toFun P0 := by
+  let φ := modPoly2Hom E hPrim hDeg
+  have hList : ∀ l : List (ModMonic (monicFY E hPrim hDeg)),
+      ∃ (dL : UPoly E_fld) (L0 : UPoly (Poly2 E_fld)),
+        dL ≠ zero ∧ mul (C (φ.toFun (C dL))) (ofList l) = (mapHom φ).toFun L0 := by
+    intro l; induction l with
+    | nil =>
+      exact ⟨one, zero, NontrivialRing.one_ne_zero, by
+        show mul _ zero = (mapHom φ).toFun zero
+        rw [LawfulCommRing.mul_zero, RingHom.map_zero]⟩
+    | cons x xs ih =>
+      obtain ⟨dx, X0, hdx, hX0⟩ := clear_modPoly2_elem E hPrim hDeg x
+      obtain ⟨dxs, Ps, hdxs, hPs⟩ := ih
+      have hdNe : mul dx dxs ≠ zero := fun h0 => by
+        rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero h0 with h | h
+        · exact hdx h
+        · exact hdxs h
+      refine ⟨mul dx dxs, add (C (mul (C dxs) X0)) (mul X (mul (C (C dx)) Ps)), hdNe, ?_⟩
+      have hCdMul : C (φ.toFun (C (mul dx dxs))) =
+          (mul (C (φ.toFun (C dx))) (C (φ.toFun (C dxs))) : UPoly _) := by
+        rw [← CHom_apply (mul dx dxs), CHom.map_mul, φ.map_mul,
+            ← CHom_apply (φ.toFun _), ← CHom_apply (φ.toFun _), ← CHom.map_mul]
+        simp only [CHom_apply]
+      rw [ofList_cons, hCdMul, RingHom.map_add, mapHom_C, φ.map_mul,
+          RingHom.map_mul, mapHom_X, RingHom.map_mul, mapHom_C, ← hPs]
+      have hFirst : mul (mul (C (φ.toFun (C dx))) (C (φ.toFun (C dxs)))) (C x) =
+          C (mul (φ.toFun (C dxs)) (φ.toFun X0)) := by
+        rw [← CHom_apply (φ.toFun (C dx)), ← CHom_apply (φ.toFun (C dxs)), ← CHom_apply x,
+            ← CHom.map_mul, ← CHom.map_mul, CHom_apply]
+        congr 1
+        calc mul (mul (φ.toFun (C dx)) (φ.toFun (C dxs))) x
+            = mul (φ.toFun (C dxs)) (mul (φ.toFun (C dx)) x) := by constructive_ring
+          _ = mul (φ.toFun (C dxs)) (φ.toFun X0) := by rw [hX0]
+      rw [LawfulCommRing.left_distrib, hFirst]
+      congr 1
+      constructive_ring
+  obtain ⟨dP, P0, hdP, hP0⟩ := hList P.coeffs
+  rw [ofList_coeffs] at hP0
+  exact ⟨dP, P0, hdP, hP0⟩
+
+/-- **Three-Polynomial Space Bezout Finite `u`-Locus Eliminant**:
+    Whenever three space polynomials `(F₁, F₂, F₃)` satisfy a unit Bezout identity in `R_E[Z]`
+    over a `Y`-primitive curve `E(U, W) = 0`, clearing `U`-denominators produces a nonzero
+    univariate eliminant `δ_u ∈ E_fld[U]` (`δ_u ≠ 0`) vanishing at `u` for every affine common
+    space root `(u, w, z) ∈ E_fld³` of `(E, F₁, F₂, F₃)`. -/
+theorem bezout_space_finite_u_locus
+    (E : Poly2 E_fld) (hPrim : IsPrimY E) (hDeg : 1 ≤ E.natDeg)
+    (F₁ F₂ F₃ : UPoly (Poly2 E_fld))
+    (A_c B_c C_c : UPoly (ModMonic (monicFY E hPrim hDeg)))
+    (hBez : add (add (mul A_c ((mapHom (modPoly2Hom E hPrim hDeg)).toFun F₁))
+                     (mul B_c ((mapHom (modPoly2Hom E hPrim hDeg)).toFun F₂)))
+                (mul C_c ((mapHom (modPoly2Hom E hPrim hDeg)).toFun F₃)) = one) :
+    ∃ δ_u : UPoly E_fld,
+      δ_u ≠ zero ∧
+      ∀ u w z : E_fld,
+        E.eval2 u w = zero →
+        (evalSpaceHom u w z).toFun F₁ = zero →
+        (evalSpaceHom u w z).toFun F₂ = zero →
+        (evalSpaceHom u w z).toFun F₃ = zero →
+        δ_u.eval u = zero := by
+  let φ := modPoly2Hom E hPrim hDeg
+  obtain ⟨dA, A0, hdA, hA0⟩ := clear_modPoly2_upoly E hPrim hDeg A_c
+  obtain ⟨dB, B0, hdB, hB0⟩ := clear_modPoly2_upoly E hPrim hDeg B_c
+  obtain ⟨dC, C0, hdC, hC0⟩ := clear_modPoly2_upoly E hPrim hDeg C_c
+  let δ_u : UPoly E_fld := mul (mul dA dB) dC
+  have hδNe : δ_u ≠ zero := fun h0 => by
+    rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero h0 with hAB | hc0
+    · rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero hAB with ha0 | hb0
+      · exact hdA ha0
+      · exact hdB hb0
+    · exact hdC hc0
+  let cA := C (φ.toFun (C dA))
+  let cB := C (φ.toFun (C dB))
+  let cC := C (φ.toFun (C dC))
+  let LHS0 : UPoly (Poly2 E_fld) :=
+    add (add (mul (mul (C (C (mul dB dC))) A0) F₁)
+             (mul (mul (C (C (mul dA dC))) B0) F₂))
+        (mul (mul (C (C (mul dA dB))) C0) F₃)
+  have hMapC : ∀ x y : UPoly E_fld,
+      (mapHom φ).toFun (C (C (mul x y))) = mul (C (φ.toFun (C x))) (C (φ.toFun (C y))) := by
+    intro x y
+    rw [mapHom_C, ← CHom_apply (mul x y), CHom.map_mul, φ.map_mul,
+        ← CHom_apply (φ.toFun _), ← CHom_apply (φ.toFun _), ← CHom.map_mul]
+    simp only [CHom_apply]
+  have hMapδ : (mapHom φ).toFun (C (C δ_u)) = mul (mul cA cB) cC := by
+    dsimp only [δ_u, cA, cB, cC]
+    rw [hMapC (mul dA dB) dC, ← CHom_apply (mul dA dB), CHom.map_mul, φ.map_mul,
+        ← CHom_apply (φ.toFun (C dA)), ← CHom_apply (φ.toFun (C dB)), ← CHom.map_mul]
+    simp only [CHom_apply]
+  have hMapLHS : (mapHom φ).toFun LHS0 = mul (mul cA cB) cC := by
+    dsimp only [LHS0]
+    rw [RingHom.map_add, RingHom.map_add,
+        RingHom.map_mul, RingHom.map_mul, RingHom.map_mul,
+        RingHom.map_mul, RingHom.map_mul, RingHom.map_mul,
+        hMapC dB dC, hMapC dA dC, hMapC dA dB,
+        ← hA0, ← hB0, ← hC0]
+    dsimp only [cA, cB, cC]
+    calc add (add (mul (mul (mul cB cC) (mul cA A_c)) ((mapHom φ).toFun F₁))
+                  (mul (mul (mul cA cC) (mul cB B_c)) ((mapHom φ).toFun F₂)))
+             (mul (mul (mul cA cB) (mul cC C_c)) ((mapHom φ).toFun F₃))
+        = mul (mul (mul cA cB) cC)
+            (add (add (mul A_c ((mapHom φ).toFun F₁))
+                      (mul B_c ((mapHom φ).toFun F₂)))
+                 (mul C_c ((mapHom φ).toFun F₃))) := by constructive_ring
+      _ = mul (mul cA cB) cC := by rw [hBez, LawfulCommRing.mul_one]
+  have hDiff0 : (mapHom φ).toFun (sub LHS0 (C (C δ_u))) = zero := by
+    rw [RingHom.map_sub, hMapLHS, hMapδ, LawfulCommRing.sub_self]
+  refine ⟨δ_u, hδNe, fun u w z hEuw hF1 hF2 hF3 => ?_⟩
+  have hEvalDiff := evalSpaceHom_eq_zero_of_map_modPoly2Hom_eq_zero E hPrim hDeg
+    (sub LHS0 (C (C δ_u))) hDiff0 u w z hEuw
+  rw [RingHom.map_sub, evalSpaceHom_CC] at hEvalDiff
+  have hEvalLHS : (evalSpaceHom u w z).toFun LHS0 = zero := by
+    dsimp only [LHS0]
+    rw [RingHom.map_add, RingHom.map_add,
+        (evalSpaceHom u w z).map_mul _ F₁,
+        (evalSpaceHom u w z).map_mul _ F₂,
+        (evalSpaceHom u w z).map_mul _ F₃,
+        hF1, hF2, hF3,
+        LawfulCommRing.mul_zero, LawfulCommRing.mul_zero, LawfulCommRing.mul_zero,
+        LawfulCommRing.add_zero, LawfulCommRing.add_zero]
+  exact (LawfulCommRing.sub_eq_zero_iff.mp hEvalDiff).symm.trans hEvalLHS
+
+private theorem monic_deg_zero_eq_one {R : Type} [LawfulCommRing R] [DecidableEq R]
+    (G : UPoly R) (hdG0 : G.natDeg = 0) (hGmon : coeffAt G.coeffs G.natDeg = one) :
+    G = one := by
+  apply ext_coeffAt; intro k
+  cases k with
+  | zero =>
+    have h0 : coeffAt G.coeffs 0 = one := by rw [← hdG0]; exact hGmon
+    rw [h0, one_eq_C, coeffAt_C_zero]
+  | succ k =>
+    rw [one_eq_C, coeffAt_C_succ]
+    exact G.coeffAt_eq_zero_of_natDeg_lt (by omega)
+
+private theorem monic_deg_one_eq_X_sub_C {R : Type} [LawfulCommRing R] [DecidableEq R]
+    (G : UPoly R) (hdG1 : G.natDeg = 1) (hGmon : coeffAt G.coeffs G.natDeg = one) :
+    let ζ := neg (coeffAt G.coeffs 0)
+    G = sub X (C ζ) ∧ (sub X (C ζ)).eval ζ = zero := by
+  dsimp only
+  let ζ := neg (coeffAt G.coeffs 0)
+  refine ⟨?_, ?_⟩
+  · apply ext_coeffAt; intro k
+    have hSubEq : sub X (C ζ) = add X (C (coeffAt G.coeffs 0)) := by
+      dsimp only [ζ]
+      rw [LawfulCommRing.sub_eq_add_neg, ← CHom_apply, ← RingHom.map_neg CHom,
+          CHom_apply, LawfulCommRing.neg_neg]
+    rw [hSubEq, coeffAt_add]
+    cases k with
+    | zero =>
+      show coeffAt G.coeffs 0 = add (coeffAt (ofList [zero, one]).coeffs 0) (coeffAt (C _).coeffs 0)
+      rw [coeffAt_ofList, coeffAt_cons_zero, coeffAt_C_zero, LawfulCommRing.zero_add]
+    | succ k =>
+      cases k with
+      | zero =>
+        have h1 : coeffAt G.coeffs 1 = one := by rw [← hdG1]; exact hGmon
+        show coeffAt G.coeffs 1 = add (coeffAt (ofList [zero, one]).coeffs 1) (coeffAt (C _).coeffs 1)
+        rw [h1, coeffAt_ofList, coeffAt_cons_succ, coeffAt_cons_zero, coeffAt_C_succ,
+            LawfulCommRing.add_zero]
+      | succ k =>
+        rw [G.coeffAt_eq_zero_of_natDeg_lt (by omega), coeffAt_C_succ]
+        show zero = add (coeffAt (ofList [zero, one]).coeffs (k + 2)) zero
+        rw [coeffAt_ofList, coeffAt_cons_succ, coeffAt_cons_succ, coeffAt_nil,
+            LawfulCommRing.add_zero]
+  · rw [← evalHom_apply]
+    show (evalHom ζ).toFun (sub X (C ζ)) = zero
+    rw [RingHom.map_sub, evalHom_apply, evalHom_apply, eval_X, eval_C, LawfulCommRing.sub_self]
+
+private theorem monic_eq_of_dvd_same_deg {R : Type} [LawfulCommRing R] [DecidableEq R]
+    [NontrivialRing R]
+    (G K Q : UPoly R) (d : Nat)
+    (hGdeg : G.natDeg ≤ d) (hGmon : coeffAt G.coeffs d = one)
+    (hKdeg : K.natDeg = d) (hKmon : coeffAt K.coeffs K.natDeg = one)
+    (hFac : G = mul K Q) :
+    G = K := by
+  have hGNe : G ≠ zero := fun e => by
+    rw [e, coeffs_zero, coeffAt_nil] at hGmon
+    exact NontrivialRing.one_ne_zero hGmon.symm
+  have hQNe : Q ≠ zero := fun e => hGNe (by rw [hFac, e, LawfulCommRing.mul_zero])
+  have hQdeg0 : Q.natDeg = 0 := by
+    apply Decidable.byContradiction; intro hPos
+    have hz := G.coeffAt_eq_zero_of_natDeg_lt (k := K.natDeg + Q.natDeg) (by omega)
+    rw [hFac, (coeffAt_mul_top K Q).2] at hz
+    simp only [lead_eq] at hz
+    rw [hKmon, LawfulCommRing.one_mul] at hz
+    exact lead_ne_zero hQNe (by simpa only [lead_eq] using hz)
+  have hQC : Q = C (coeffAt Q.coeffs 0) := by
+    apply ext_coeffAt; intro k
+    cases k with
+    | zero => rw [coeffAt_C_zero]
+    | succ k => rw [coeffAt_C_succ]; exact Q.coeffAt_eq_zero_of_natDeg_lt (by omega)
+  have hCoeff1 : coeffAt Q.coeffs 0 = one := by
+    have hTop := hGmon
+    rw [hFac, hQC, LawfulCommRing.mul_comm, coeffAt_C_mul, ← hKdeg, hKmon,
+        LawfulCommRing.mul_one] at hTop
+    exact hTop
+  rw [hFac, hQC, hCoeff1, ← one_eq_C, LawfulCommRing.mul_one]
+
+/-- **Unconditional Multi-Sheet Curve Leaf GCD Decomposition (`curve_leaf_gcd_decomp`)**:
+    Refines `ShearedCurveGcd.curve_leaf_root_decomp` by running `d5_xgcd_mod` unconditionally on
+    every leaf `Ej` (including when `Ej ∣ g₁`!). On EVERY leaf `Ej ∈ Es`:
+    - `Ej` divides `E` (`∃ Q_E, E = mul Ej Q_E`),
+    - `(C₁, P₀)` has an explicit monic `Z`-gcd `Gj : MonicPoly R_{Ej}` of sheet rank `1 ≤ Gj.deg ≤ h_C`
+      with Bezout cofactors and common factorizations,
+    - `ModMonic.modGen Gj : ModMonic Gj` is a universal common `Z`-root of `(C₁, P₀)` over the
+      `Gj.deg`-sheeted curve algebra `ModMonic Gj`,
+    - **Exact Multiplicity Dichotomy**: either `Gj.deg = 1` (single rational sheet `ζ ∈ R_{Ej}`),
+      or `2 ≤ Gj.deg` AND `Ej ∣ g₁` (multi-sheet space curve forces `sylResDeriv` to vanish modulo `Ej`),
+    - In particular, `CoprimeZ Ej g₁ → Gj.deg = 1`. -/
+theorem curve_leaf_gcd_decomp {h_C H₀ : Nat} {C₁ : Poly2 E_fld} {P₀ : UPoly (Poly2 E_fld)}
+    (hC₁deg : C₁.natDeg ≤ h_C) (hC₁mon : coeffAt C₁.coeffs h_C = one)
+    (hP₀deg : P₀.natDeg ≤ H₀) :
+    let R_res := sylRes h_C H₀ (embedUZ.toFun C₁) P₀
+    let g₁ := sylResDeriv h_C H₀ (embedUZ.toFun C₁) P₀ one
+    ∀ (E : Poly2 E_fld), IsPrimY E → 1 ≤ tdeg E → (∃ Q_res, R_res = mul E Q_res) →
+      ∃ Es : List (Poly2 E_fld),
+        (Es.map tdeg).sum = tdeg E ∧
+        (∀ u w, E.eval2 u w = zero → ∃ Ej ∈ Es, Ej.eval2 u w = zero) ∧
+        ∀ Ej ∈ Es, ∃ (hPj : IsPrimY Ej) (hDj : 1 ≤ Ej.natDeg)
+          (Gj : MonicPoly (ModMonic (monicFY Ej hPj hDj))),
+          let φ := modPoly2Hom Ej hPj hDj
+          let C1_mod := (mapHom φ).toFun (embedUZ.toFun C₁)
+          let P0_mod := (mapHom φ).toFun P₀
+          (∃ Q_E, E = mul Ej Q_E) ∧
+          Gj.deg ≤ h_C ∧
+          (∃ U0 V0, add (mul U0 C1_mod) (mul V0 P0_mod) = Gj.poly) ∧
+          (∃ Q_C, C1_mod = mul Gj.poly Q_C) ∧
+          (∃ Q_P, P0_mod = mul Gj.poly Q_P) ∧
+          ((mapHom (ModMonic.modInl Gj)).toFun C1_mod).eval (ModMonic.modGen Gj) = zero ∧
+          ((mapHom (ModMonic.modInl Gj)).toFun P0_mod).eval (ModMonic.modGen Gj) = zero ∧
+          ((Gj.deg = 1 ∧ ∃ ζ : ModMonic (monicFY Ej hPj hDj),
+              Gj.poly = sub X (C ζ) ∧ C1_mod.eval ζ = zero ∧ P0_mod.eval ζ = zero) ∨
+           (2 ≤ Gj.deg ∧ ∃ Qg, g₁ = mul Ej Qg)) ∧
+          (CoprimeZ Ej g₁ → Gj.deg = 1) := by
+  dsimp only
+  let R_res := sylRes h_C H₀ (embedUZ.toFun C₁) P₀
+  let g₁ := sylResDeriv h_C H₀ (embedUZ.toFun C₁) P₀ one
+  have sum_append : ∀ xs ys : List Nat, (xs ++ ys).sum = xs.sum + ys.sum := by
+    intro xs ys; induction xs with
+    | nil => show ys.sum = 0 + ys.sum; omega
+    | cons x tl ih => show x + (tl ++ ys).sum = x + tl.sum + ys.sum; rw [ih]; omega
+  have eval2_mul_eq : ∀ (A B : Poly2 E_fld) (u w : E_fld),
+      (mul A B).eval2 u w = mul (A.eval2 u w) (B.eval2 u w) :=
+    fun A B u w => UPoly.eval₂_mul (UPoly.evalHom u) w A B
+  have aux : ∀ (fuel : Nat) (E : Poly2 E_fld), tdeg E ≤ fuel →
+      IsPrimY E → 1 ≤ tdeg E → (∃ Q_res, R_res = mul E Q_res) →
+      ∃ Es : List (Poly2 E_fld),
+        (Es.map tdeg).sum = tdeg E ∧
+        (∀ u w, E.eval2 u w = zero → ∃ Ej ∈ Es, Ej.eval2 u w = zero) ∧
+        ∀ Ej ∈ Es, ∃ (hPj : IsPrimY Ej) (hDj : 1 ≤ Ej.natDeg)
+          (Gj : MonicPoly (ModMonic (monicFY Ej hPj hDj))),
+          let φ := modPoly2Hom Ej hPj hDj
+          let C1_mod := (mapHom φ).toFun (embedUZ.toFun C₁)
+          let P0_mod := (mapHom φ).toFun P₀
+          (∃ Q_E, E = mul Ej Q_E) ∧
+          Gj.deg ≤ h_C ∧
+          (∃ U0 V0, add (mul U0 C1_mod) (mul V0 P0_mod) = Gj.poly) ∧
+          (∃ Q_C, C1_mod = mul Gj.poly Q_C) ∧
+          (∃ Q_P, P0_mod = mul Gj.poly Q_P) ∧
+          ((mapHom (ModMonic.modInl Gj)).toFun C1_mod).eval (ModMonic.modGen Gj) = zero ∧
+          ((mapHom (ModMonic.modInl Gj)).toFun P0_mod).eval (ModMonic.modGen Gj) = zero ∧
+          ((Gj.deg = 1 ∧ ∃ ζ : ModMonic (monicFY Ej hPj hDj),
+              Gj.poly = sub X (C ζ) ∧ C1_mod.eval ζ = zero ∧ P0_mod.eval ζ = zero) ∨
+           (2 ≤ Gj.deg ∧ ∃ Qg, g₁ = mul Ej Qg)) ∧
+          (CoprimeZ Ej g₁ → Gj.deg = 1) := by
+    intro fuel; induction fuel with
+    | zero => intros E hFuel _ hPos _; exfalso; omega
+    | succ fuel ih =>
+      intro E hFuel hPrim hPos ⟨Q_res, hQres⟩
+      have hEDeg : 1 ≤ E.natDeg := primY_natDeg_pos hPrim hPos
+      let φ := modPoly2Hom E hPrim hEDeg
+      let C1_mod := (mapHom φ).toFun (embedUZ.toFun C₁)
+      let P0_mod := (mapHom φ).toFun P₀
+      have hC1_mod_mon : coeffAt C1_mod.coeffs h_C = one := by
+        dsimp only [C1_mod, embedUZ]
+        rw [coeffAt_mapHom, coeffAt_mapHom, hC₁mon, CHom.map_one, φ.map_one]
+      have hC1_mod_deg : C1_mod.natDeg ≤ h_C :=
+        Nat.le_trans (natDeg_mapHom_le φ _) (Nat.le_trans (natDeg_mapHom_le CHom C₁) hC₁deg)
+      have hP0_mod_deg : P0_mod.natDeg ≤ H₀ := Nat.le_trans (natDeg_mapHom_le φ P₀) hP₀deg
+      have hC1_mod_ne : C1_mod ≠ zero := fun e => by
+        rw [e, coeffs_zero, coeffAt_nil] at hC1_mod_mon
+        exact NontrivialRing.one_ne_zero hC1_mod_mon.symm
+      rcases d5_xgcd_mod E hPrim hEDeg C1_mod P0_mod hC1_mod_ne with
+        ⟨E₁, E₂, hP1, hP2, hD1, hD2, hMul, hSum⟩ |
+        ⟨G, U0, V0, _, hGmon, hBez, ⟨Q_C, hQC⟩, ⟨Q_P, hQP⟩⟩
+      · have hT1 : 1 ≤ tdeg E₁ := Nat.le_trans hD1 (natDeg_le_tdeg E₁)
+        have hT2 : 1 ≤ tdeg E₂ := Nat.le_trans hD2 (natDeg_le_tdeg E₂)
+        obtain ⟨Es1, hS1, hR1, hL1⟩ := ih E₁ (by omega) hP1 hT1
+          ⟨mul E₂ Q_res, by rw [hQres, hMul, LawfulCommRing.mul_assoc]⟩
+        obtain ⟨Es2, hS2, hR2, hL2⟩ := ih E₂ (by omega) hP2 hT2
+          ⟨mul E₁ Q_res, by rw [hQres, hMul]; constructive_ring⟩
+        refine ⟨Es1 ++ Es2, by rw [List.map_append, sum_append, hS1, hS2, hSum], ?_, ?_⟩
+        · intro u w huw
+          rw [hMul, eval2_mul_eq] at huw
+          rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero huw with h0 | h0
+          · obtain ⟨Ej, hMem, hZ⟩ := hR1 u w h0
+            exact ⟨Ej, List.mem_append_left _ hMem, hZ⟩
+          · obtain ⟨Ej, hMem, hZ⟩ := hR2 u w h0
+            exact ⟨Ej, List.mem_append_right _ hMem, hZ⟩
+        · intro Ej hMem
+          rcases List.mem_append.mp hMem with hM | hM
+          · obtain ⟨hPj, hDj, Gj, ⟨QE1, hQE1⟩, hRest⟩ := hL1 Ej hM
+            exact ⟨hPj, hDj, Gj, ⟨mul QE1 E₂, by rw [hMul, hQE1, LawfulCommRing.mul_assoc]⟩, hRest⟩
+          · obtain ⟨hPj, hDj, Gj, ⟨QE2, hQE2⟩, hRest⟩ := hL2 Ej hM
+            exact ⟨hPj, hDj, Gj, ⟨mul E₁ QE2, by rw [hMul, hQE2]; constructive_ring⟩, hRest⟩
+      · let d_G := G.natDeg
+        have hQCNe : Q_C ≠ zero := fun e => hC1_mod_ne (by rw [hQC, e, LawfulCommRing.mul_zero])
+        have hdG_QC_le : d_G + Q_C.natDeg ≤ h_C := by
+          apply Decidable.byContradiction; intro hNot
+          have hz := C1_mod.coeffAt_eq_zero_of_natDeg_lt
+            (Nat.lt_of_le_of_lt hC1_mod_deg (Nat.lt_of_not_le hNot))
+          rw [hQC, (coeffAt_mul_top G Q_C).2] at hz
+          simp only [lead_eq] at hz; rw [hGmon, LawfulCommRing.one_mul] at hz
+          exact lead_ne_zero hQCNe (by simpa only [lead_eq] using hz)
+        if hdG0 : d_G = 0 then
+          exfalso
+          have hG1 := monic_deg_zero_eq_one G hdG0 hGmon
+          rw [hG1] at hBez
+          obtain ⟨r_inv, hUnit⟩ := isUnit_sylRes_of_bezout hC1_mod_deg
+            (by rw [hC1_mod_mon, LawfulCommRing.one_mul]) hP0_mod_deg hBez
+          have hRes0 : sylRes h_C H₀ C1_mod P0_mod = zero := by
+            rw [← map_sylRes φ]; change φ.toFun R_res = zero
+            rw [hQres, RingHom.map_mul, modPoly2Hom_self E hPrim hEDeg, LawfulCommRing.zero_mul]
+          rw [hRes0, LawfulCommRing.mul_zero] at hUnit
+          exact NontrivialRing.one_ne_zero hUnit.symm
+        else
+          have hdGPos : 1 ≤ d_G := by omega
+          let Gj : MonicPoly (ModMonic (monicFY E hPrim hEDeg)) :=
+            ⟨G, d_G, hdGPos, Nat.le_refl d_G, hGmon⟩
+          have hGjRoot : ((mapHom (ModMonic.modInl Gj)).toFun Gj.poly).eval (ModMonic.modGen Gj) = zero :=
+            ModMonic.eval_modGen_eq_zero Gj
+          have hC1Sheet : ((mapHom (ModMonic.modInl Gj)).toFun C1_mod).eval (ModMonic.modGen Gj) = zero := by
+            rw [hQC, RingHom.map_mul]; rw [← evalHom_apply]; show (evalHom (ModMonic.modGen Gj)).toFun _ = zero
+            rw [RingHom.map_mul, evalHom_apply, hGjRoot, LawfulCommRing.zero_mul]
+          have hP0Sheet : ((mapHom (ModMonic.modInl Gj)).toFun P0_mod).eval (ModMonic.modGen Gj) = zero := by
+            rw [hQP, RingHom.map_mul]; rw [← evalHom_apply]; show (evalHom (ModMonic.modGen Gj)).toFun _ = zero
+            rw [RingHom.map_mul, evalHom_apply, hGjRoot, LawfulCommRing.zero_mul]
+          have hDichot :
+              ((Gj.deg = 1 ∧ ∃ ζ : ModMonic (monicFY E hPrim hEDeg),
+                  Gj.poly = sub X (C ζ) ∧ C1_mod.eval ζ = zero ∧ P0_mod.eval ζ = zero) ∨
+               (2 ≤ Gj.deg ∧ ∃ Qg, g₁ = mul E Qg)) ∧
+              (CoprimeZ E g₁ → Gj.deg = 1) := by
+            if hdG2 : 2 ≤ d_G then
+              have hg1_zero : φ.toFun g₁ = zero := by
+                dsimp only [g₁]
+                rw [map_sylResDeriv φ, RingHom.map_one]
+                exact sylResDeriv_eq_zero_of_common_factor_ge_two hdG2 (by omega)
+                  hP0_mod_deg (Nat.le_refl d_G) hGmon hQC (by omega) hQP
+              have hDivG1 : ∃ Qg, g₁ = mul E Qg :=
+                (modPoly2Hom_eq_zero_iff E hPrim hEDeg g₁).mp hg1_zero
+              refine ⟨.inr ⟨hdG2, hDivG1⟩, fun ⟨u0, v0, c, hc, hCopEq⟩ => ?_⟩
+              exfalso
+              have hApp := congrArg φ.toFun hCopEq
+              rw [RingHom.map_add, RingHom.map_mul, RingHom.map_mul,
+                  modPoly2Hom_self E hPrim hEDeg, hg1_zero,
+                  LawfulCommRing.mul_zero, LawfulCommRing.mul_zero, LawfulCommRing.add_zero] at hApp
+              exact modPoly2Hom_C_ne_zero E hPrim hEDeg hc hApp.symm
+            else
+              have hdG1 : d_G = 1 := by omega
+              obtain ⟨hGlin, hLinZ⟩ := monic_deg_one_eq_X_sub_C G hdG1 hGmon
+              let ζ := neg (coeffAt G.coeffs 0)
+              have hC1_root : C1_mod.eval ζ = zero := by
+                rw [hQC, hGlin]; rw [← evalHom_apply]; show (evalHom ζ).toFun _ = zero
+                rw [RingHom.map_mul, evalHom_apply, hLinZ, LawfulCommRing.zero_mul]
+              have hP0_root : P0_mod.eval ζ = zero := by
+                rw [hQP, hGlin]; rw [← evalHom_apply]; show (evalHom ζ).toFun _ = zero
+                rw [RingHom.map_mul, evalHom_apply, hLinZ, LawfulCommRing.zero_mul]
+              exact ⟨.inl ⟨hdG1, ζ, hGlin, hC1_root, hP0_root⟩, fun _ => hdG1⟩
+          refine ⟨[E], by show tdeg E + 0 = tdeg E; omega, fun u w h => ⟨E, .head _, h⟩, ?_⟩
+          intro Ej hMem; cases hMem with
+          | head =>
+            exact ⟨hPrim, hEDeg, Gj, ⟨one, (LawfulCommRing.mul_one E).symm⟩,
+              by show d_G ≤ h_C; omega, ⟨U0, V0, hBez⟩, ⟨Q_C, hQC⟩, ⟨Q_P, hQP⟩,
+              hC1Sheet, hP0Sheet, hDichot.1, hDichot.2⟩
+          | tail _ hNil => cases hNil
+  intro E hPrim hPos hDiv
+  exact aux (tdeg E) E (Nat.le_refl _) hPrim hPos hDiv
+
+/-- **Three-Polynomial Multi-Sheet Fiber Refinement (`curve_three_poly_sheet_decomp`)**:
+    Given `(C₁, P₀)` and ANY third space polynomial `H : UPoly (Poly2 E_fld)` (e.g. a second
+    interpolation constraint or jet derivative), dynamically splits `E` into `Y`-primitive leaves
+    `Ej ∈ Es` so that on EVERY leaf `Ej`, in addition to the common `Z`-gcd `Gj` (`1 ≤ Gj.deg ≤ h_C`)
+    of `(C₁, P₀)`, one of three exhaustive sheet alternatives holds:
+    1. **Disjoint from sheet (`gcd(Gj, H) = 1`)**: `H(ModMonic.modGen Gj)` is invertible in the
+       sheet algebra `ModMonic Gj`, AND an explicit nonzero univariate polynomial `δ_u ∈ E_fld[U]`
+       (`δ_u ≠ 0`) vanishes at `u` for every affine common zero `(u, w, z) ∈ E_fld³` of `(Ej, C₁, P₀, H)`.
+    2. **Strict sheet-rank drop (`1 ≤ Kj.deg < Gj.deg`)**: an explicit monic `Kj : MonicPoly R_{Ej}`
+       with `Kj.deg < Gj.deg` divides `Gj.poly` (hence `C₁` and `P₀`) AND `H_mod`, extracting an
+       explicit base-curve root `ζ ∈ R_{Ej}` of all three `(C₁, P₀, H)` whenever `Kj.deg = 1`
+       (in particular whenever `Gj.deg = 2`, even though `Ej ∣ g₁`!).
+    3. **Full multi-sheet containment (`Kj.deg = Gj.deg`)**: `Gj.poly` divides `H_mod`. -/
+theorem curve_three_poly_sheet_decomp {h_C H₀ : Nat}
+    {C₁ : Poly2 E_fld} {P₀ : UPoly (Poly2 E_fld)} (H : UPoly (Poly2 E_fld))
+    (hC₁deg : C₁.natDeg ≤ h_C) (hC₁mon : coeffAt C₁.coeffs h_C = one)
+    (hP₀deg : P₀.natDeg ≤ H₀) :
+    let R_res := sylRes h_C H₀ (embedUZ.toFun C₁) P₀
+    ∀ (E : Poly2 E_fld), IsPrimY E → 1 ≤ tdeg E → (∃ Q_res, R_res = mul E Q_res) →
+      ∃ Es : List (Poly2 E_fld),
+        (Es.map tdeg).sum = tdeg E ∧
+        (∀ u w, E.eval2 u w = zero → ∃ Ej ∈ Es, Ej.eval2 u w = zero) ∧
+        ∀ Ej ∈ Es, ∃ (hPj : IsPrimY Ej) (hDj : 1 ≤ Ej.natDeg)
+          (Gj : MonicPoly (ModMonic (monicFY Ej hPj hDj))),
+          let φ := modPoly2Hom Ej hPj hDj
+          let C1_mod := (mapHom φ).toFun (embedUZ.toFun C₁)
+          let P0_mod := (mapHom φ).toFun P₀
+          let H_mod := (mapHom φ).toFun H
+          (∃ Q_E, E = mul Ej Q_E) ∧
+          Gj.deg ≤ h_C ∧
+          (∃ Q_C, C1_mod = mul Gj.poly Q_C) ∧
+          (∃ Q_P, P0_mod = mul Gj.poly Q_P) ∧
+          (((∃ h_inv : ModMonic Gj,
+               mul h_inv (((mapHom (ModMonic.modInl Gj)).toFun H_mod).eval (ModMonic.modGen Gj)) = one) ∧
+            (∃ δ_u : UPoly E_fld, δ_u ≠ zero ∧
+               ∀ u w z : E_fld,
+                 Ej.eval2 u w = zero →
+                 C₁.eval2 u z = zero →
+                 (evalSpaceHom u w z).toFun P₀ = zero →
+                 (evalSpaceHom u w z).toFun H = zero →
+                 δ_u.eval u = zero)) ∨
+           (∃ Kj : MonicPoly (ModMonic (monicFY Ej hPj hDj)),
+              Kj.deg < Gj.deg ∧
+              (∃ Q_G, Gj.poly = mul Kj.poly Q_G) ∧
+              (∃ Q_H, H_mod = mul Kj.poly Q_H) ∧
+              (Kj.deg = 1 → ∃ ζ : ModMonic (monicFY Ej hPj hDj),
+                C1_mod.eval ζ = zero ∧ P0_mod.eval ζ = zero ∧ H_mod.eval ζ = zero)) ∨
+           (∃ Q_H, H_mod = mul Gj.poly Q_H)) := by
+  dsimp only
+  let R_res := sylRes h_C H₀ (embedUZ.toFun C₁) P₀
+  have sum_append : ∀ xs ys : List Nat, (xs ++ ys).sum = xs.sum + ys.sum := by
+    intro xs ys; induction xs with
+    | nil => show ys.sum = 0 + ys.sum; omega
+    | cons x tl ih => show x + (tl ++ ys).sum = x + tl.sum + ys.sum; rw [ih]; omega
+  have eval2_mul_eq : ∀ (A B : Poly2 E_fld) (u w : E_fld),
+      (mul A B).eval2 u w = mul (A.eval2 u w) (B.eval2 u w) :=
+    fun A B u w => UPoly.eval₂_mul (UPoly.evalHom u) w A B
+  have aux : ∀ (fuel : Nat) (E : Poly2 E_fld), tdeg E ≤ fuel →
+      IsPrimY E → 1 ≤ tdeg E → (∃ Q_res, R_res = mul E Q_res) →
+      ∃ Es : List (Poly2 E_fld),
+        (Es.map tdeg).sum = tdeg E ∧
+        (∀ u w, E.eval2 u w = zero → ∃ Ej ∈ Es, Ej.eval2 u w = zero) ∧
+        ∀ Ej ∈ Es, ∃ (hPj : IsPrimY Ej) (hDj : 1 ≤ Ej.natDeg)
+          (Gj : MonicPoly (ModMonic (monicFY Ej hPj hDj))),
+          let φ := modPoly2Hom Ej hPj hDj
+          let C1_mod := (mapHom φ).toFun (embedUZ.toFun C₁)
+          let P0_mod := (mapHom φ).toFun P₀
+          let H_mod := (mapHom φ).toFun H
+          (∃ Q_E, E = mul Ej Q_E) ∧
+          Gj.deg ≤ h_C ∧
+          (∃ Q_C, C1_mod = mul Gj.poly Q_C) ∧
+          (∃ Q_P, P0_mod = mul Gj.poly Q_P) ∧
+          (((∃ h_inv : ModMonic Gj,
+               mul h_inv (((mapHom (ModMonic.modInl Gj)).toFun H_mod).eval (ModMonic.modGen Gj)) = one) ∧
+            (∃ δ_u : UPoly E_fld, δ_u ≠ zero ∧
+               ∀ u w z : E_fld,
+                 Ej.eval2 u w = zero →
+                 C₁.eval2 u z = zero →
+                 (evalSpaceHom u w z).toFun P₀ = zero →
+                 (evalSpaceHom u w z).toFun H = zero →
+                 δ_u.eval u = zero)) ∨
+           (∃ Kj : MonicPoly (ModMonic (monicFY Ej hPj hDj)),
+              Kj.deg < Gj.deg ∧
+              (∃ Q_G, Gj.poly = mul Kj.poly Q_G) ∧
+              (∃ Q_H, H_mod = mul Kj.poly Q_H) ∧
+              (Kj.deg = 1 → ∃ ζ : ModMonic (monicFY Ej hPj hDj),
+                C1_mod.eval ζ = zero ∧ P0_mod.eval ζ = zero ∧ H_mod.eval ζ = zero)) ∨
+           (∃ Q_H, H_mod = mul Gj.poly Q_H)) := by
+    intro fuel; induction fuel with
+    | zero => intros E hFuel _ hPos _; exfalso; omega
+    | succ fuel ih =>
+      intro E hFuel hPrim hPos ⟨Q_res, hQres⟩
+      have hEDeg : 1 ≤ E.natDeg := primY_natDeg_pos hPrim hPos
+      have mergeSplit : ∀ (E₁ E₂ : Poly2 E_fld),
+          IsPrimY E₁ → IsPrimY E₂ → 1 ≤ E₁.natDeg → 1 ≤ E₂.natDeg →
+          E = mul E₁ E₂ → tdeg E₁ + tdeg E₂ = tdeg E →
+          ∃ Es : List (Poly2 E_fld),
+            (Es.map tdeg).sum = tdeg E ∧
+            (∀ u w, E.eval2 u w = zero → ∃ Ej ∈ Es, Ej.eval2 u w = zero) ∧
+            ∀ Ej ∈ Es, ∃ (hPj : IsPrimY Ej) (hDj : 1 ≤ Ej.natDeg)
+              (Gj : MonicPoly (ModMonic (monicFY Ej hPj hDj))),
+              let φ := modPoly2Hom Ej hPj hDj
+              let C1_mod := (mapHom φ).toFun (embedUZ.toFun C₁)
+              let P0_mod := (mapHom φ).toFun P₀
+              let H_mod := (mapHom φ).toFun H
+              (∃ Q_E, E = mul Ej Q_E) ∧
+              Gj.deg ≤ h_C ∧
+              (∃ Q_C, C1_mod = mul Gj.poly Q_C) ∧
+              (∃ Q_P, P0_mod = mul Gj.poly Q_P) ∧
+              (((∃ h_inv : ModMonic Gj,
+                   mul h_inv (((mapHom (ModMonic.modInl Gj)).toFun H_mod).eval (ModMonic.modGen Gj)) = one) ∧
+                (∃ δ_u : UPoly E_fld, δ_u ≠ zero ∧
+                   ∀ u w z : E_fld,
+                     Ej.eval2 u w = zero →
+                     C₁.eval2 u z = zero →
+                     (evalSpaceHom u w z).toFun P₀ = zero →
+                     (evalSpaceHom u w z).toFun H = zero →
+                     δ_u.eval u = zero)) ∨
+               (∃ Kj : MonicPoly (ModMonic (monicFY Ej hPj hDj)),
+                  Kj.deg < Gj.deg ∧
+                  (∃ Q_G, Gj.poly = mul Kj.poly Q_G) ∧
+                  (∃ Q_H, H_mod = mul Kj.poly Q_H) ∧
+                  (Kj.deg = 1 → ∃ ζ : ModMonic (monicFY Ej hPj hDj),
+                    C1_mod.eval ζ = zero ∧ P0_mod.eval ζ = zero ∧ H_mod.eval ζ = zero)) ∨
+               (∃ Q_H, H_mod = mul Gj.poly Q_H)) := by
+        intro E₁ E₂ hP1 hP2 hD1 hD2 hMul hSum
+        have hT1 : 1 ≤ tdeg E₁ := Nat.le_trans hD1 (natDeg_le_tdeg E₁)
+        have hT2 : 1 ≤ tdeg E₂ := Nat.le_trans hD2 (natDeg_le_tdeg E₂)
+        obtain ⟨Es1, hS1, hR1, hL1⟩ := ih E₁ (by omega) hP1 hT1
+          ⟨mul E₂ Q_res, by rw [hQres, hMul, LawfulCommRing.mul_assoc]⟩
+        obtain ⟨Es2, hS2, hR2, hL2⟩ := ih E₂ (by omega) hP2 hT2
+          ⟨mul E₁ Q_res, by rw [hQres, hMul]; constructive_ring⟩
+        refine ⟨Es1 ++ Es2, by rw [List.map_append, sum_append, hS1, hS2, hSum], ?_, ?_⟩
+        · intro u w huw
+          rw [hMul, eval2_mul_eq] at huw
+          rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero huw with h0 | h0
+          · obtain ⟨Ej, hMem, hZ⟩ := hR1 u w h0
+            exact ⟨Ej, List.mem_append_left _ hMem, hZ⟩
+          · obtain ⟨Ej, hMem, hZ⟩ := hR2 u w h0
+            exact ⟨Ej, List.mem_append_right _ hMem, hZ⟩
+        · intro Ej hMem
+          rcases List.mem_append.mp hMem with hM | hM
+          · obtain ⟨hPj, hDj, Gj, ⟨QE1, hQE1⟩, hRest⟩ := hL1 Ej hM
+            exact ⟨hPj, hDj, Gj, ⟨mul QE1 E₂, by rw [hMul, hQE1, LawfulCommRing.mul_assoc]⟩, hRest⟩
+          · obtain ⟨hPj, hDj, Gj, ⟨QE2, hQE2⟩, hRest⟩ := hL2 Ej hM
+            exact ⟨hPj, hDj, Gj, ⟨mul E₁ QE2, by rw [hMul, hQE2]; constructive_ring⟩, hRest⟩
+      let φ := modPoly2Hom E hPrim hEDeg
+      let C1_mod := (mapHom φ).toFun (embedUZ.toFun C₁)
+      let P0_mod := (mapHom φ).toFun P₀
+      let H_mod := (mapHom φ).toFun H
+      have hC1_mod_mon : coeffAt C1_mod.coeffs h_C = one := by
+        dsimp only [C1_mod, embedUZ]
+        rw [coeffAt_mapHom, coeffAt_mapHom, hC₁mon, CHom.map_one, φ.map_one]
+      have hC1_mod_deg : C1_mod.natDeg ≤ h_C :=
+        Nat.le_trans (natDeg_mapHom_le φ _) (Nat.le_trans (natDeg_mapHom_le CHom C₁) hC₁deg)
+      have hP0_mod_deg : P0_mod.natDeg ≤ H₀ := Nat.le_trans (natDeg_mapHom_le φ P₀) hP₀deg
+      have hC1_mod_ne : C1_mod ≠ zero := fun e => by
+        rw [e, coeffs_zero, coeffAt_nil] at hC1_mod_mon
+        exact NontrivialRing.one_ne_zero hC1_mod_mon.symm
+      rcases d5_xgcd_mod E hPrim hEDeg C1_mod P0_mod hC1_mod_ne with
+        ⟨E₁, E₂, hP1, hP2, hD1, hD2, hMul, hSum⟩ |
+        ⟨G, U0, V0, hGNe, hGmon, hBez, ⟨Q_C, hQC⟩, ⟨Q_P, hQP⟩⟩
+      · exact mergeSplit E₁ E₂ hP1 hP2 hD1 hD2 hMul hSum
+      · let d_G := G.natDeg
+        have hQCNe : Q_C ≠ zero := fun e => hC1_mod_ne (by rw [hQC, e, LawfulCommRing.mul_zero])
+        have hdG_QC_le : d_G + Q_C.natDeg ≤ h_C := by
+          apply Decidable.byContradiction; intro hNot
+          have hz := C1_mod.coeffAt_eq_zero_of_natDeg_lt
+            (Nat.lt_of_le_of_lt hC1_mod_deg (Nat.lt_of_not_le hNot))
+          rw [hQC, (coeffAt_mul_top G Q_C).2] at hz
+          simp only [lead_eq] at hz; rw [hGmon, LawfulCommRing.one_mul] at hz
+          exact lead_ne_zero hQCNe (by simpa only [lead_eq] using hz)
+        if hdG0 : d_G = 0 then
+          exfalso
+          have hG1 := monic_deg_zero_eq_one G hdG0 hGmon
+          rw [hG1] at hBez
+          obtain ⟨r_inv, hUnit⟩ := isUnit_sylRes_of_bezout hC1_mod_deg
+            (by rw [hC1_mod_mon, LawfulCommRing.one_mul]) hP0_mod_deg hBez
+          have hRes0 : sylRes h_C H₀ C1_mod P0_mod = zero := by
+            rw [← map_sylRes φ]; change φ.toFun R_res = zero
+            rw [hQres, RingHom.map_mul, modPoly2Hom_self E hPrim hEDeg, LawfulCommRing.zero_mul]
+          rw [hRes0, LawfulCommRing.mul_zero] at hUnit
+          exact NontrivialRing.one_ne_zero hUnit.symm
+        else
+          have hdGPos : 1 ≤ d_G := by omega
+          let Gj : MonicPoly (ModMonic (monicFY E hPrim hEDeg)) :=
+            ⟨G, d_G, hdGPos, Nat.le_refl d_G, hGmon⟩
+          rcases d5_xgcd_mod E hPrim hEDeg Gj.poly H_mod hGNe with
+            ⟨E₁, E₂, hP1, hP2, hD1, hD2, hMul, hSum⟩ |
+            ⟨K, UH, VH, _, hKmon, hBezH, ⟨Q_G, hQG⟩, ⟨Q_H, hQH⟩⟩
+          · exact mergeSplit E₁ E₂ hP1 hP2 hD1 hD2 hMul hSum
+          · have hQG' : G = mul K Q_G := hQG
+            have hQGNe : Q_G ≠ zero := fun e => hGNe (by rw [hQG', e, LawfulCommRing.mul_zero])
+            have hKdeg_le : K.natDeg + Q_G.natDeg ≤ d_G := by
+              apply Decidable.byContradiction; intro hNot
+              have hz := G.coeffAt_eq_zero_of_natDeg_lt (k := K.natDeg + Q_G.natDeg) (by omega)
+              rw [hQG', (coeffAt_mul_top K Q_G).2] at hz
+              simp only [lead_eq] at hz; rw [hKmon, LawfulCommRing.one_mul] at hz
+              exact lead_ne_zero hQGNe (by simpa only [lead_eq] using hz)
+            have hLeaf :
+                ((∃ h_inv : ModMonic Gj,
+                    mul h_inv (((mapHom (ModMonic.modInl Gj)).toFun H_mod).eval (ModMonic.modGen Gj)) = one) ∧
+                 (∃ δ_u : UPoly E_fld, δ_u ≠ zero ∧
+                    ∀ u w z : E_fld,
+                      E.eval2 u w = zero →
+                      C₁.eval2 u z = zero →
+                      (evalSpaceHom u w z).toFun P₀ = zero →
+                      (evalSpaceHom u w z).toFun H = zero →
+                      δ_u.eval u = zero)) ∨
+                (∃ Kj : MonicPoly (ModMonic (monicFY E hPrim hEDeg)),
+                   Kj.deg < Gj.deg ∧
+                   (∃ Q_G, Gj.poly = mul Kj.poly Q_G) ∧
+                   (∃ Q_H, H_mod = mul Kj.poly Q_H) ∧
+                   (Kj.deg = 1 → ∃ ζ : ModMonic (monicFY E hPrim hEDeg),
+                     C1_mod.eval ζ = zero ∧ P0_mod.eval ζ = zero ∧ H_mod.eval ζ = zero)) ∨
+                (∃ Q_H, H_mod = mul Gj.poly Q_H) := by
+              if hK0 : K.natDeg = 0 then
+                left
+                have hK1 := monic_deg_zero_eq_one K hK0 hKmon
+                rw [hK1] at hBezH
+                have hUnitSheet : ∃ h_inv : ModMonic Gj,
+                    mul h_inv (((mapHom (ModMonic.modInl Gj)).toFun H_mod).eval (ModMonic.modGen Gj)) = one := by
+                  refine ⟨(ModMonic.modQuotHom Gj).toFun VH, ?_⟩
+                  rw [ModMonic.eval_mapHom_modInl Gj H_mod]
+                  have hApp := congrArg (ModMonic.modQuotHom Gj).toFun hBezH
+                  rw [RingHom.map_add, RingHom.map_mul, RingHom.map_mul,
+                      ModMonic.modQuotHom_self_eq_zero Gj,
+                      LawfulCommRing.mul_zero, LawfulCommRing.zero_add, RingHom.map_one] at hApp
+                  exact hApp
+                have hBez3 : add (add (mul (mul UH U0) C1_mod) (mul (mul UH V0) P0_mod))
+                    (mul VH H_mod) = one := by
+                  have hSubG : Gj.poly = add (mul U0 C1_mod) (mul V0 P0_mod) := hBez.symm
+                  have h1 := hBezH
+                  rw [hSubG] at h1
+                  calc add (add (mul (mul UH U0) C1_mod) (mul (mul UH V0) P0_mod)) (mul VH H_mod)
+                      = add (mul UH (add (mul U0 C1_mod) (mul V0 P0_mod))) (mul VH H_mod) := by
+                        constructive_ring
+                    _ = one := h1
+                obtain ⟨δ_u, hδNe, hδVan⟩ := bezout_space_finite_u_locus E hPrim hEDeg
+                  (embedUZ.toFun C₁) P₀ H (mul UH U0) (mul UH V0) VH hBez3
+                refine ⟨hUnitSheet, δ_u, hδNe, fun u w z hEuw hC1uz hP0uwz hHuwz => ?_⟩
+                exact hδVan u w z hEuw
+                  (by rw [evalSpaceHom_embedUZ]; exact hC1uz) hP0uwz hHuwz
+              else if hKLt : K.natDeg < d_G then
+                right; left
+                let Kj : MonicPoly (ModMonic (monicFY E hPrim hEDeg)) :=
+                  ⟨K, K.natDeg, by omega, Nat.le_refl K.natDeg, hKmon⟩
+                refine ⟨Kj, hKLt, ⟨Q_G, hQG⟩, ⟨Q_H, hQH⟩, fun hK1 => ?_⟩
+                obtain ⟨hKlin, hKlinZ⟩ := monic_deg_one_eq_X_sub_C K hK1 hKmon
+                let ζ := neg (coeffAt K.coeffs 0)
+                have hCRoot : C1_mod.eval ζ = zero := by
+                  rw [hQC, hQG', hKlin]; rw [← evalHom_apply]; show (evalHom ζ).toFun _ = zero
+                  rw [RingHom.map_mul, RingHom.map_mul, evalHom_apply, hKlinZ,
+                      LawfulCommRing.zero_mul, LawfulCommRing.zero_mul]
+                have hPRoot : P0_mod.eval ζ = zero := by
+                  rw [hQP, hQG', hKlin]; rw [← evalHom_apply]; show (evalHom ζ).toFun _ = zero
+                  rw [RingHom.map_mul, RingHom.map_mul, evalHom_apply, hKlinZ,
+                      LawfulCommRing.zero_mul, LawfulCommRing.zero_mul]
+                have hHRoot : H_mod.eval ζ = zero := by
+                  rw [hQH, hKlin]; rw [← evalHom_apply]; show (evalHom ζ).toFun _ = zero
+                  rw [RingHom.map_mul, evalHom_apply, hKlinZ, LawfulCommRing.zero_mul]
+                exact ⟨ζ, hCRoot, hPRoot, hHRoot⟩
+              else
+                right; right
+                have hKEq : K.natDeg = d_G := by omega
+                have hGEqK := monic_eq_of_dvd_same_deg G K Q_G d_G
+                  (Nat.le_refl d_G) hGmon hKEq hKmon hQG
+                exact ⟨Q_H, by rw [hQH]; change mul K Q_H = mul G Q_H; rw [hGEqK]⟩
+            refine ⟨[E], by show tdeg E + 0 = tdeg E; omega, fun u w h => ⟨E, .head _, h⟩, ?_⟩
+            intro Ej hMem; cases hMem with
+            | head =>
+              exact ⟨hPrim, hEDeg, Gj, ⟨one, (LawfulCommRing.mul_one E).symm⟩,
+                by show d_G ≤ h_C; omega, ⟨Q_C, hQC⟩, ⟨Q_P, hQP⟩, hLeaf⟩
+            | tail _ hNil => cases hNil
+  intro E hPrim hPos hDiv
+  exact aux (tdeg E) E (Nat.le_refl _) hPrim hPos hDiv
+
+end MultiSheetCurveGcd
+end SylElim
+
+
+end Qsag
+end
