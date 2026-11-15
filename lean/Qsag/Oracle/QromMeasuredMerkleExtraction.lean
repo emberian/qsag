@@ -24,11 +24,11 @@ bound a coherent-query adversary (see `measured_parity_execution`); for that cas
 missing component is still an extraction experiment with a proved disturbance bound.
 -/
 
-public import Qsag.QromMeasuredQueryExperiment
-import all Qsag.QromMeasuredQueryExperiment
-import all Qsag.QromMerkleOnlineExtraction
-import all Qsag.MultiRoundFsQrom
-import all Qsag.ConcreteSecurityBudget
+public import Qsag.Oracle.QromMeasuredQueryExperiment
+import all Qsag.Oracle.QromMeasuredQueryExperiment
+import all Qsag.Oracle.QromMerkleOnlineExtraction
+import all Qsag.Oracle.MultiRoundFsQrom
+import all Qsag.Oracle.ConcreteSecurityBudget
 
 public section
 namespace Qsag

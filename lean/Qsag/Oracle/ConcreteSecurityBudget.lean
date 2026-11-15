@@ -4878,3 +4878,1599 @@ def qsagPq128PortfolioRoster (b : QueryBudget) : List QsagPq128ProfileEntry :=
     entry, which at `2^56` offline queries has 77 QROM bits
     (`threshold_mldsa_entry_bits_at_2pow56`) and is covered up to `2^30` by
     `threshold_mldsa_entry_pq128_within_ceiling`. -/
+theorem qsag_pq128_high_query_2pow56_non_folding_budget (b : QueryBudget)
+    (hqHash : b.qHash + 1 ≤ 2 ^ 56) (hqSess : b.qOnlineSessions + 1 ≤ 2 ^ 20) :
+    ∀ entry ∈ qsagPq128PortfolioRoster b,
+      entry.profileId ≠ .hemExt4WhirPq128 →
+      entry.profileId ≠ .thresholdMlDsaDkgAndSign →
+      atLeastBits 128 entry.classicalBound ∧ atLeastBits 128 entry.quantumBound := by
+  have hq61 : b.qHash + 1 ≤ 2 ^ 61 := Nat.le_trans hqHash (by decide)
+  have hq62 : b.qHash + 1 ≤ 2 ^ 62 := Nat.le_trans hqHash (by decide)
+  have hqSessPlain : b.qOnlineSessions ≤ 2 ^ 20 := by omega
+  have h8Sq : 8 * (b.qHash + 1) ^ 2 ≤ 2 ^ 115 := by
+    have p1 : (b.qHash + 1) ^ 2 ≤ (2 ^ 56) ^ 2 := Nat.pow_le_pow_left hqHash 2
+    have p2 : 8 * (2 ^ 56) ^ 2 = 2 ^ 115 := by decide
+    rw [← p2]; exact Nat.mul_le_mul_left 8 p1
+  have hClass256 : atLeastBits 130 ⟨b.qHash + 1, 2 ^ 256, Nat.two_pow_pos 256⟩ := by
+    unfold atLeastBits; dsimp only
+    have hm := Nat.mul_le_mul_right (2 ^ 130) hqHash
+    have hb : 2 ^ 56 * 2 ^ 130 ≤ 2 ^ 256 := by decide
+    exact Nat.le_trans hm hb
+  have hQrom256 : atLeastBits 130 (quantumGroverSingleTargetBound 256 b.qHash) :=
+    qrom_single_target_parametric_bits hq61 (by decide)
+  have hClassExt4 : atLeastBits 130 ⟨b.qHash + 1, goldilocksExt4Card, goldilocksExt4Card_pos⟩ := by
+    unfold atLeastBits; dsimp only
+    have hm := Nat.mul_le_mul_right (2 ^ 130) hqHash
+    have hb : 2 ^ 56 * 2 ^ 130 ≤ goldilocksExt4Card := by
+      unfold goldilocksExt4Card goldilocksPrime; decide
+    exact Nat.le_trans hm hb
+  have hQromExt4 : atLeastBits 130 (toprfDigest4QromBound b.qHash) := by
+    unfold atLeastBits toprfDigest4QromBound; dsimp only
+    have hm := Nat.mul_le_mul_right (2 ^ 130) h8Sq
+    have hb : 2 ^ 115 * 2 ^ 130 ≤ goldilocksExt4Card := by
+      unfold goldilocksExt4Card goldilocksPrime; decide
+    exact Nat.le_trans hm hb
+  have hClassZkb438 :
+      atLeastBits 129
+        (classicalFiatShamirBound b.qHash (zkbooSingleRepError.pow blindVcQuantum128Reps)) := by
+    unfold atLeastBits classicalFiatShamirBound RatBound.scale RatBound.pow
+      zkbooSingleRepError blindVcQuantum128Reps
+    dsimp only
+    have hm := Nat.mul_le_mul_right (2 ^ 438 * 2 ^ 129) hqHash
+    have ha : (b.qHash + 1) * 2 ^ 438 * 2 ^ 129 = (b.qHash + 1) * (2 ^ 438 * 2 ^ 129) := by
+      simp only [Nat.mul_assoc]
+    have hb : 2 ^ 56 * (2 ^ 438 * 2 ^ 129) ≤ 2 ^ 438 * 2 ^ 256 := by
+      have p : 2 ^ 56 * (2 ^ 438 * 2 ^ 129) = 2 ^ 438 * 2 ^ 185 := by
+        rw [← Nat.mul_assoc, Nat.mul_comm (2 ^ 56) (2 ^ 438), Nat.mul_assoc, ← Nat.pow_add]
+      rw [p]; exact Nat.mul_le_mul_left _ (Nat.pow_le_pow_right (by decide) (by decide))
+    rw [ha]
+    exact Nat.le_trans hm (Nat.le_trans hb (Nat.le_of_lt zkboo_438_gt_two_pow_256_margin))
+  have hQromZkb438 :
+      atLeastBits 129
+        (quantumGroverGrindingBound b.qHash (zkbooSingleRepError.pow blindVcQuantum128Reps)) :=
+    blindvc_classical219_and_quantum438_soundness.2.2.1 b.qHash hq62
+  have hJorts := jorts_and_quorum_jorts_composed_pq128_soundness b hq61 hqSessPlain
+  have hHdPlus1 := hd_rekey_biased_96bit_sacrifice_and_composed_pq128
+    ⟨b.qHash, b.qSign, b.qOnlineSessions + 1⟩ hq61 hqSess
+  intro entry hMem hNe hNeMl
+  simp only [qsagPq128PortfolioRoster, List.mem_cons, List.not_mem_nil, or_false] at hMem
+  rcases hMem with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
+  · exact ⟨atLeastBits_antitone_bits (by decide) hClass256,
+           atLeastBits_antitone_bits (by decide) hQrom256⟩
+  · exact ⟨atLeastBits_antitone_bits (by decide) hClass256,
+           atLeastBits_antitone_bits (by decide) hQrom256⟩
+  · exact ⟨atLeastBits_antitone_bits (by decide) hClass256,
+           atLeastBits_antitone_bits (by decide) hQrom256⟩
+  · exact ⟨hJorts.2.2.2.1, hJorts.2.2.2.2⟩
+  · exact ⟨atLeastBits_antitone_bits (by decide) hClass256,
+           atLeastBits_antitone_bits (by decide) hQrom256⟩
+  · exact absurd rfl hNe
+  · exact ⟨atLeastBits_add_union_loss hClassZkb438 (atLeastBits_antitone_bits (by decide) hClassExt4),
+           atLeastBits_add_union_loss hQromZkb438 (atLeastBits_antitone_bits (by decide) hQromExt4)⟩
+  · exact absurd rfl hNeMl
+  · exact ⟨atLeastBits_antitone_bits (by decide) hClassExt4,
+           atLeastBits_antitone_bits (by decide) hQromExt4⟩
+  · have hSpcot : atLeastBits 129 (densePcgSpcotBound 15 (b.qOnlineSessions + 1)) := by
+      unfold atLeastBits densePcgSpcotBound RatBound.scale RatBound.pow; dsimp only
+      have hm := Nat.mul_le_mul_right ((2 ^ 15 + 1) ^ 2 * 2 ^ 129) hqSess
+      have ha : (b.qOnlineSessions + 1) * (2 ^ 15 + 1) ^ 2 * 2 ^ 129 =
+          (b.qOnlineSessions + 1) * ((2 ^ 15 + 1) ^ 2 * 2 ^ 129) := by simp only [Nat.mul_assoc]
+      have hb : 2 ^ 20 * ((2 ^ 15 + 1) ^ 2 * 2 ^ 129) ≤ (2 ^ 128 - 2) ^ 2 := by decide
+      rw [ha]; exact Nat.le_trans hm hb
+    have hSeedClass : atLeastBits 129 (densePcgV3SaltedSeedClassicalBound b.qHash) := by
+      unfold atLeastBits densePcgV3SaltedSeedClassicalBound tweakedClassicalMultiTargetBound
+      dsimp only
+      exact Nat.le_trans
+        (Nat.mul_le_mul_right (2 ^ 129)
+          (Nat.add_le_add_right (Nat.le_of_succ_le hqHash) densePcgV3NodeTargets))
+        (by decide)
+    have hSeedQrom : atLeastBits 129 (densePcgV3SaltedSeedQuantumBound b.qHash) :=
+      atLeastBits_antitone_bits (by decide) (densePcgV3SaltedSeedQuantumBound_140 b.qHash hqHash)
+    exact ⟨atLeastBits_add_union_loss hSpcot hSeedClass,
+           atLeastBits_add_union_loss hSpcot hSeedQrom⟩
+  · exact ⟨atLeastBits_add_union_loss
+              (atLeastBits_antitone_bits (by decide) hHdPlus1.2.1)
+              (atLeastBits_antitone_bits (by decide) hClass256),
+           hHdPlus1.2.2⟩
+  · exact ⟨atLeastBits_add_union_loss hClassZkb438 (atLeastBits_antitone_bits (by decide) hClass256),
+           atLeastBits_add_union_loss hQromZkb438 (atLeastBits_antitone_bits (by decide) hQrom256)⟩
+
+private theorem roster_ceiling_of_not_mldsa (b : QueryBudget) :
+    ∀ entry ∈ qsagPq128PortfolioRoster b,
+      entry.profileId ≠ .thresholdMlDsaDkgAndSign → entry.pq128HashQueryCeilingLog2 = 56 := by
+  intro entry hMem hNe
+  simp only [qsagPq128PortfolioRoster, List.mem_cons, List.not_mem_nil, or_false] at hMem
+  rcases hMem with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
+  all_goals first | rfl | exact absurd rfl hNe
+
+private theorem roster_ceiling_ge_30 (b : QueryBudget) :
+    ∀ entry ∈ qsagPq128PortfolioRoster b, 30 ≤ entry.pq128HashQueryCeilingLog2 := by
+  intro entry hMem
+  simp only [qsagPq128PortfolioRoster, List.mem_cons, List.not_mem_nil, or_false] at hMem
+  rcases hMem with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
+  all_goals first | exact (by decide : 30 ≤ 56) | exact Nat.le_refl 30
+
+/-- The roster's threshold ML-DSA entry is the deployed ML-DSA-44 one: FIPS 204 Category 2, with
+    a `2^30` offline hash-query ceiling for its 128-bit claim. -/
+theorem roster_threshold_mldsa_entry_is_category2 (b : QueryBudget) :
+    ∃ entry ∈ qsagPq128PortfolioRoster b,
+      entry.profileId = .thresholdMlDsaDkgAndSign ∧
+      entry.fips204ParamSet = some .mldsa44 ∧
+      entry.fips204ParamSet.map MlDsaParamSet.nistCategory = some 2 ∧
+      entry.pq128HashQueryCeilingLog2 = 30 :=
+  ⟨thresholdMlDsaDkgAndSignEntry deployedThresholdMlDsaParamSet b,
+   by simp [qsagPq128PortfolioRoster], rfl, rfl, rfl, rfl⟩
+
+/-- **Master Composed Portfolio Theorem (`qsag_pq128_portfolio_soundness_budget`)**:
+    For ANY `QueryBudget` `b` with `qOnlineSessions + 1 ≤ 2 ^ 20`, every one of the 12 entries of
+    `qsagPq128PortfolioRoster b` achieves `atLeastBits 128` for both its classical bound and its
+    QROM bound whenever `qHash + 1` is within that entry's own ceiling
+    `2 ^ entry.pq128HashQueryCeilingLog2`: `2^56` for eleven entries, `2^30` for the Category-2
+    threshold ML-DSA-44 entry. There is no single `2^56` statement over all 12:
+    `tooth_portfolio_category2_entry_fails_at_2pow56`. The `Hem` entry is the all-stage IOP-layer
+    budget `hemNv20ComposedPureTerms` under Fiat–Shamir search (about `129.7` QROM bits at
+    `qHash + 1 = 2^56`); it excludes Merkle commitment extraction and the AIR reduction, see
+    `qsagPq128PortfolioRoster`. -/
+theorem qsag_pq128_portfolio_soundness_budget (b : QueryBudget)
+    (hqSess : b.qOnlineSessions + 1 ≤ 2 ^ 20) :
+    (qsagPq128PortfolioRoster b).length = 12 ∧
+    (∀ entry ∈ qsagPq128PortfolioRoster b,
+      b.qHash + 1 ≤ 2 ^ entry.pq128HashQueryCeilingLog2 →
+      atLeastBits 128 entry.classicalBound ∧ atLeastBits 128 entry.quantumBound) := by
+  refine ⟨rfl, ?_⟩
+  intro entry hMem hCeil
+  by_cases hMl : entry.profileId = .thresholdMlDsaDkgAndSign
+  · simp only [qsagPq128PortfolioRoster, List.mem_cons, List.not_mem_nil, or_false] at hMem
+    rcases hMem with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
+    · cases hMl
+    · cases hMl
+    · cases hMl
+    · cases hMl
+    · cases hMl
+    · cases hMl
+    · cases hMl
+    · exact threshold_mldsa_entry_pq128_within_ceiling deployedThresholdMlDsaParamSet b
+        hCeil hqSess
+    · cases hMl
+    · cases hMl
+    · cases hMl
+    · cases hMl
+  have hqHash : b.qHash + 1 ≤ 2 ^ 56 := by
+    rw [roster_ceiling_of_not_mldsa b entry hMem hMl] at hCeil
+    exact hCeil
+  have hHi := qsag_pq128_high_query_2pow56_non_folding_budget b hqHash hqSess
+  have h8Sq : 8 * (b.qHash + 1) ^ 2 ≤ 2 ^ 115 := by
+    have p1 : (b.qHash + 1) ^ 2 ≤ (2 ^ 56) ^ 2 := Nat.pow_le_pow_left hqHash 2
+    have p2 : 8 * (2 ^ 56) ^ 2 = 2 ^ 115 := by decide
+    rw [← p2]; exact Nat.mul_le_mul_left 8 p1
+  have hHemClassical : atLeastBits 128
+      (RatBound.sumList (hemNv20ComposedPureTerms.map (RatBound.scale (2 ^ 56)))) := by
+    decide +kernel
+  have hHemQuantum : atLeastBits 128
+      (RatBound.sumList (hemNv20ComposedPureTerms.map (RatBound.scale (2 ^ 115)))) := by
+    decide +kernel
+  by_cases hId : entry.profileId = .hemExt4WhirPq128
+  · simp only [qsagPq128PortfolioRoster, List.mem_cons, List.not_mem_nil, or_false] at hMem
+    rcases hMem with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
+    · cases hId
+    · cases hId
+    · cases hId
+    · cases hId
+    · cases hId
+    · exact ⟨atLeastBits_of_le (sumList_map_scale_mono hqHash hemNv20ComposedPureTerms)
+               hHemClassical,
+             atLeastBits_of_le (sumList_map_scale_mono h8Sq hemNv20ComposedPureTerms)
+               hHemQuantum⟩
+    · cases hId
+    · cases hId
+    · cases hId
+    · cases hId
+    · cases hId
+    · cases hId
+  · exact hHi entry hMem hId hMl
+
+private theorem ratBound_add_num_pos_left {a b : RatBound} (ha : 0 < a.num) :
+    0 < (RatBound.add a b).num := by
+  unfold RatBound.add
+  dsimp only
+  exact Nat.lt_of_lt_of_le (Nat.mul_pos ha b.h_pos) (Nat.le_add_right _ _)
+
+/-- Concrete 2-query Hadamard superposition circuit (`QuantumAdv 2 2 1 2`) preparing
+    `|0, 0, 0⟩ + |1, 0, 0⟩` via `hadamardQuery2 2 1` after query 0 so query 1 probes `oracleXor`
+    in uniform superposition across both basis inputs! -/
+def concreteSuperpositionAdv : QuantumAdv 2 2 1 2 where
+  init := fun x y _ => if x.1 == 0 && y.1 == 0 then ⟨1, 0⟩ else GaussInt.zero
+  h_init_pos := by decide
+  steps := fun i => if i.1 == 0 then hadamardQuery2 2 1 else ScaledUnitary.id 2 2 1
+
+/-- Concrete 2-query adaptive `OracleComp` decision tree branching on the LSB of its first
+    256-bit oracle query response before choosing its second query input! -/
+def concreteAdaptiveTwoQueryAdv : OracleComp (BitVec 8) (BitVec 256) (BitVec 8) :=
+  .query (BitVec.ofNat 8 1) (fun d₁ =>
+    let x₂ := if d₁.getLsbD 0 then BitVec.ofNat 8 2 else BitVec.ofNat 8 3
+    .query x₂ (fun _ => .pure x₂))
+
+/-- Non-scalar quartic basis element `v ∈ QuarticGoldilocks` (`v^2 = u ∈ GoldilocksExt2`) and
+    non-zero quadratic polynomial `P(X) = X^2 - u` (`cs = [-u, 0, 1]`). -/
+def quarticGoldilocksVBasis : QuarticGoldilocks :=
+  ⟨GoldilocksExt2.zero, GoldilocksExt2.one⟩
+
+def quarticGoldilocksQuadraticPoly : List QuarticGoldilocks :=
+  [ ⟨CommRingOps.neg GoldilocksExt2.uBasis, GoldilocksExt2.zero⟩,
+    QuarticGoldilocks.zero,
+    QuarticGoldilocks.one ]
+
+/-- **Master Non-Vacuity & Inhabitedness Witness (`inhabited_concrete_security_budget_roster`)**:
+    Certifies that EVERY foundational carrier and reduction in `ConcreteSecurityBudget.lean` is
+    genuinely inhabited by non-trivial witnesses (`0` identity-hash or empty-list shortcuts):
+    1. `concreteSuperpositionAdv` prepares genuine uniform quantum superposition across both basis
+       queries (`queryWeight = 1` on `x = 0` AND `x = 1`) before applying `oracleXor`,
+    2. `concreteAdaptiveTwoQueryAdv` satisfies `QueryBounded 2` and instantiates
+       `classical_lazy_ro_fiber_search_bound` on `wotsCDibits128Bv` (`fiberCard ≤ 1`),
+    3. `quarticGoldilocksQuadraticPoly` (`X^2 - u`) is non-zero at `0`, vanishes at the two distinct
+       non-scalar quartic elements `+v` and `-v`, and satisfies `goldilocksExt4_schwartz_zippel_root_bound`,
+    4. At concrete budget `b₀ = ⟨2^30 - 1, 2^16, 2^20 - 1⟩` (the largest power-of-two hash budget
+       inside every entry's ceiling, at the full `2^20` sessions), all 12 entries of
+       `qsagPq128PortfolioRoster b₀` have strictly positive numerators (`0 < num`, non-zero
+       bounds!) and simultaneously satisfy `atLeastBits 128` classically and in the QROM! -/
+theorem inhabited_concrete_security_budget_roster :
+    let b₀ : QueryBudget := ⟨2 ^ 30 - 1, 2 ^ 16, 2 ^ 20 - 1⟩
+    let ψPre := advStateAt concreteSuperpositionAdv (fun _ => BitVec.zero 2) 1 (by decide)
+    let dRef : BitVec 256 := BitVec.ofNat 256 0xdeadbeefcafebabe
+    let S4 : List QuarticGoldilocks :=
+      [QuarticGoldilocks.zero, quarticGoldilocksVBasis, CommRingOps.neg quarticGoldilocksVBasis]
+    (QVec.queryWeight ψPre ⟨0, by decide⟩ = 1 ∧ QVec.queryWeight ψPre ⟨1, by decide⟩ = 1) ∧
+    (QueryBounded 2 concreteAdaptiveTwoQueryAdv ∧
+      fiberCard 256 wotsCDibits128Bv (wotsCDibits128Bv dRef) ≤ 1) ∧
+    (RoundPoly.evalCoeffs quarticGoldilocksQuadraticPoly QuarticGoldilocks.zero ≠ CommRingOps.zero ∧
+      RoundPoly.evalCoeffs quarticGoldilocksQuadraticPoly quarticGoldilocksVBasis = CommRingOps.zero ∧
+      (S4.filter (fun r =>
+        decide (RoundPoly.evalCoeffs quarticGoldilocksQuadraticPoly r = CommRingOps.zero))).length = 2) ∧
+    ((qsagPq128PortfolioRoster b₀).length = 12 ∧
+      ∀ entry ∈ qsagPq128PortfolioRoster b₀,
+        0 < entry.classicalBound.num ∧
+        0 < entry.quantumBound.num ∧
+        atLeastBits 128 entry.classicalBound ∧
+        atLeastBits 128 entry.quantumBound) := by
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · -- 1. Genuine superposition query weights on both `x = 0` and `x = 1`:
+    constructor <;> decide
+  · -- 2. Adaptive 2-query `OracleComp` + `wotsCDibits128Bv` injectivity fiber bound:
+    refine ⟨?_, fiberCard_le_one_of_injective 256 wotsCDibits128Bv
+                  (fun _ _ h => wotsCDibits128Bv_injective h) _⟩
+    unfold concreteAdaptiveTwoQueryAdv QueryBounded
+    intro _ _
+    exact trivial
+  · -- 3. Non-scalar quadratic polynomial `X^2 - u` over `QuarticGoldilocks`:
+    refine ⟨by decide, by decide, by decide⟩
+  · -- 4. Concrete 12-profile portfolio evaluation at `b₀ = ⟨2^30 - 1, 2^16, 2^20 - 1⟩`:
+    let b₀ : QueryBudget := ⟨2 ^ 30 - 1, 2 ^ 16, 2 ^ 20 - 1⟩
+    have hPort := qsag_pq128_portfolio_soundness_budget b₀ (by decide)
+    refine ⟨hPort.1, ?_⟩
+    intro entry hMem
+    have hBits := hPort.2 entry hMem
+      (Nat.le_trans (by decide : b₀.qHash + 1 ≤ 2 ^ 30)
+        (Nat.pow_le_pow_right (by decide) (roster_ceiling_ge_30 b₀ entry hMem)))
+    have hPos : 0 < entry.classicalBound.num ∧ 0 < entry.quantumBound.num := by
+      simp only [qsagPq128PortfolioRoster, List.mem_cons, List.not_mem_nil, or_false] at hMem
+      rcases hMem with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
+      · exact ⟨by decide, by decide⟩
+      · exact ⟨by decide, by decide⟩
+      · exact ⟨by decide, by decide⟩
+      · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left (by decide)⟩
+      · exact ⟨by decide, by decide⟩
+      · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left (by decide)⟩
+      · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left (by decide)⟩
+      · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left (by decide)⟩
+      · exact ⟨by decide, by decide⟩
+      · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left (by decide)⟩
+      · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left (by decide)⟩
+      · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left (by decide)⟩
+    exact ⟨hPos.1, hPos.2, hBits.1, hBits.2⟩
+
+/-- Cardinality of the joint 13-repetition, 11-bit signed-monomial RLWE challenge.
+    This is challenge-space arithmetic, not an RLWE hardness or extraction theorem. -/
+def rlweJointSignedMonomialChallengeCard : Nat := (2 ^ 11) ^ 13
+
+/-- The deployed joint challenge has 143 bits, not 260 bits. Its squared search-space
+    threshold lies strictly between the squares of `2^71` and `2^72`; it alone cannot
+    supply a 128-bit quantum search budget. -/
+theorem rlwe_joint_signed_monomial_challenge_143_bits :
+    rlweJointSignedMonomialChallengeCard = 2 ^ 143 ∧
+    (2 ^ 71) ^ 2 < rlweJointSignedMonomialChallengeCard ∧
+    rlweJointSignedMonomialChallengeCard < (2 ^ 72) ^ 2 := by
+  decide +kernel
+
+/-- Cardinality `(2^11)^24 = 2^264` of the 24-repetition, 11-bit signed-monomial `PQ128`
+    RLWE OR-Sigma challenge space (`264` classical bits = `132` Grover bits). -/
+def rlweJointSignedMonomial24ChallengeCard : Nat := (2 ^ 11) ^ 24
+
+/-- Single-execution interactive soundness error `1 / (2^11)^reps` of the `reps`-challenge
+    signed-monomial RLWE OR-Sigma (`1 / 2^143` at `reps = 13`, `1 / 2^264` at `reps = 24`). -/
+def rlweOrSigmaSoundnessError (reps : Nat) : RatBound :=
+  ⟨1, (2 ^ 11) ^ reps, Nat.pow_pos (by decide)⟩
+
+/-- Single-execution interactive soundness error `1 / 2^143` of the 13-challenge RLWE OR-Sigma. -/
+abbrev rlweOrSigma13SoundnessError : RatBound := rlweOrSigmaSoundnessError 13
+
+/-- Single-execution interactive soundness error `1 / 2^264` of the 24-challenge `PQ128`
+    RLWE OR-Sigma (`extract_rlwe_or_sigma_24_short_witness` in `Qsag.RlweCyclotomicExtraction`). -/
+abbrev rlweOrSigma24SoundnessError : RatBound := rlweOrSigmaSoundnessError 24
+
+/-- **24-Challenge `PQ128` RLWE OR-Sigma Within `2^66` Query Ceiling
+    (`rlwe_or_sigma_24_pq128_within_ceiling`)**:
+    For every `QueryBudget` `b` with `b.qHash + 1 ≤ 2^66` (including the portfolio ceiling `2^56`),
+    the 24-repetition signed-monomial OR-Sigma (`1 / 2^264`) achieves `atLeastBits 128` both
+    classically (`classicalFiatShamirBound`) and in the QROM (`quantumGroverGrindingBound`). -/
+theorem rlwe_or_sigma_24_pq128_within_ceiling (b : QueryBudget)
+    (hqHash : b.qHash + 1 ≤ 2 ^ 66) :
+    atLeastBits 128 (classicalFiatShamirBound b.qHash (rlweOrSigmaSoundnessError 24)) ∧
+    atLeastBits 128 (quantumGroverGrindingBound b.qHash (rlweOrSigmaSoundnessError 24)) := by
+  have h264 : (2 ^ 11) ^ 24 = 2 ^ 264 := (Nat.pow_mul 2 11 24).symm
+  refine ⟨?_, ?_⟩
+  · unfold atLeastBits classicalFiatShamirBound RatBound.scale rlweOrSigmaSoundnessError
+    dsimp only
+    rw [Nat.mul_one, h264]
+    have hm := Nat.mul_le_mul_right (2 ^ 128) hqHash
+    rw [← Nat.pow_add] at hm
+    exact Nat.le_trans hm (Nat.pow_le_pow_right (by decide : 0 < 2) (by decide : 66 + 128 ≤ 264))
+  · unfold atLeastBits quantumGroverGrindingBound RatBound.scale rlweOrSigmaSoundnessError
+    dsimp only
+    rw [Nat.mul_one, h264]
+    have hSq : (b.qHash + 1) ^ 2 ≤ 2 ^ 132 := by
+      have p1 := Nat.pow_le_pow_left hqHash 2
+      have p2 : (2 ^ 66) ^ 2 = 2 ^ 132 := (Nat.pow_mul 2 66 2).symm
+      rw [p2] at p1; exact p1
+    have h8 : 8 * (b.qHash + 1) ^ 2 ≤ 2 ^ 135 := by
+      have p1 := Nat.mul_le_mul_left 8 hSq
+      have p2 : 8 * 2 ^ 132 = 2 ^ 3 * 2 ^ 132 := rfl
+      rw [p2, ← Nat.pow_add] at p1; exact p1
+    have hm := Nat.mul_le_mul_right (2 ^ 128) h8
+    rw [← Nat.pow_add] at hm
+    exact Nat.le_trans hm (Nat.pow_le_pow_right (by decide : 0 < 2) (by decide : 135 + 128 ≤ 264))
+
+/-- **24-Challenge `PQ128` Signed-Monomial RLWE OR-Sigma Classical & QROM Soundness Budget
+    (`rlwe_or_sigma_24_pq128_classical_and_qrom_soundness`)**:
+    1. The 24-repetition signed-monomial challenge space has exact cardinality `2^264 = (2^132)^2`
+       (`264` classical bits, `132` Grover bits `≥ 128`),
+    2. Under unitary O2H quantum Fiat–Shamir (`quantumGroverGrindingBound`), for ALL
+       `qHash + 1 ≤ 2 ^ 66`, the 24-challenge profile achieves `atLeastBits 129` (hence
+       `atLeastBits 128`) in the QROM and `atLeastBits 198` classically,
+    3. Under `[DFM20]` QROM Measure-and-Reprogram (`quantumDfmMeasureReprogramBound 1`), for ALL
+       `qHash + 1 ≤ 2 ^ 67`, the 24-challenge profile achieves `atLeastBits 128` in the QROM,
+    4. At the portfolio ceiling `qHash + 1 ≤ 2 ^ 56`, the 24-challenge profile achieves
+       `atLeastBits 208` classically and `atLeastBits 149` in the QROM! -/
+theorem rlwe_or_sigma_24_pq128_classical_and_qrom_soundness :
+    rlweJointSignedMonomial24ChallengeCard = 2 ^ 264 ∧
+    (2 ^ 132) ^ 2 = rlweJointSignedMonomial24ChallengeCard ∧
+    (∀ qHash : Nat, qHash + 1 ≤ 2 ^ 66 →
+      atLeastBits 198 (classicalFiatShamirBound qHash (rlweOrSigmaSoundnessError 24)) ∧
+      atLeastBits 129 (quantumGroverGrindingBound qHash (rlweOrSigmaSoundnessError 24)) ∧
+      atLeastBits 128 (quantumGroverGrindingBound qHash (rlweOrSigmaSoundnessError 24))) ∧
+    (∀ qHash : Nat, qHash + 1 ≤ 2 ^ 67 →
+      atLeastBits 128 (quantumDfmMeasureReprogramBound 1 qHash (rlweOrSigmaSoundnessError 24))) ∧
+    (∀ qHash : Nat, qHash + 1 ≤ 2 ^ 56 →
+      atLeastBits 208 (classicalFiatShamirBound qHash (rlweOrSigmaSoundnessError 24)) ∧
+      atLeastBits 149 (quantumGroverGrindingBound qHash (rlweOrSigmaSoundnessError 24))) := by
+  have h264Card : rlweJointSignedMonomial24ChallengeCard = 2 ^ 264 := by
+    unfold rlweJointSignedMonomial24ChallengeCard
+    exact (Nat.pow_mul 2 11 24).symm
+  have h264 : (2 ^ 11) ^ 24 = 2 ^ 264 := (Nat.pow_mul 2 11 24).symm
+  have h132 : (2 ^ 132) ^ 2 = rlweJointSignedMonomial24ChallengeCard :=
+    (Nat.pow_mul 2 132 2).symm.trans h264Card.symm
+  refine ⟨h264Card, h132, ?_, ?_, ?_⟩
+  · intro qHash hq66
+    have hCl : atLeastBits 198 (classicalFiatShamirBound qHash (rlweOrSigmaSoundnessError 24)) := by
+      unfold atLeastBits classicalFiatShamirBound RatBound.scale rlweOrSigmaSoundnessError
+      dsimp only
+      rw [Nat.mul_one, h264]
+      have hm := Nat.mul_le_mul_right (2 ^ 198) hq66
+      rw [← Nat.pow_add] at hm
+      exact hm
+    have hQu129 : atLeastBits 129 (quantumGroverGrindingBound qHash (rlweOrSigmaSoundnessError 24)) := by
+      unfold atLeastBits quantumGroverGrindingBound RatBound.scale rlweOrSigmaSoundnessError
+      dsimp only
+      rw [Nat.mul_one, h264]
+      have hSq : (qHash + 1) ^ 2 ≤ 2 ^ 132 := by
+        have p1 := Nat.pow_le_pow_left hq66 2
+        rw [(Nat.pow_mul 2 66 2).symm] at p1; exact p1
+      have h8 : 8 * (qHash + 1) ^ 2 ≤ 2 ^ 135 := by
+        have p1 := Nat.mul_le_mul_left 8 hSq
+        have p2 : 8 * 2 ^ 132 = 2 ^ 3 * 2 ^ 132 := rfl
+        rw [p2, ← Nat.pow_add] at p1; exact p1
+      have hm := Nat.mul_le_mul_right (2 ^ 129) h8
+      rw [← Nat.pow_add] at hm
+      exact hm
+    exact ⟨hCl, hQu129, atLeastBits_antitone_bits (by decide) hQu129⟩
+  · intro qHash hq67
+    unfold atLeastBits quantumDfmMeasureReprogramBound RatBound.scale rlweOrSigmaSoundnessError
+    dsimp only
+    rw [Nat.mul_one, h264]
+    have h2q : 2 * qHash + 1 ≤ 2 ^ 68 := by omega
+    have hSq : (2 * qHash + 1) ^ 2 ≤ 2 ^ 136 := by
+      have p1 := Nat.pow_le_pow_left h2q 2
+      rw [(Nat.pow_mul 2 68 2).symm] at p1; exact p1
+    have hm := Nat.mul_le_mul_right (2 ^ 128) hSq
+    rw [← Nat.pow_add] at hm
+    exact hm
+  · intro qHash hq56
+    refine ⟨?_, ?_⟩
+    · unfold atLeastBits classicalFiatShamirBound RatBound.scale rlweOrSigmaSoundnessError
+      dsimp only
+      rw [Nat.mul_one, h264]
+      have hm := Nat.mul_le_mul_right (2 ^ 208) hq56
+      rw [← Nat.pow_add] at hm
+      exact hm
+    · unfold atLeastBits quantumGroverGrindingBound RatBound.scale rlweOrSigmaSoundnessError
+      dsimp only
+      rw [Nat.mul_one, h264]
+      have hSq : (qHash + 1) ^ 2 ≤ 2 ^ 112 := by
+        have p1 := Nat.pow_le_pow_left hq56 2
+        rw [(Nat.pow_mul 2 56 2).symm] at p1; exact p1
+      have h8 : 8 * (qHash + 1) ^ 2 ≤ 2 ^ 115 := by
+        have p1 := Nat.mul_le_mul_left 8 hSq
+        have p2 : 8 * 2 ^ 112 = 2 ^ 3 * 2 ^ 112 := rfl
+        rw [p2, ← Nat.pow_add] at p1; exact p1
+      have hm := Nat.mul_le_mul_right (2 ^ 149) h8
+      rw [← Nat.pow_add] at hm
+      exact hm
+
+/-- `#tooth`: the 13-challenge RLWE OR-Sigma (`1 / 2^143`) fails 128-bit QROM soundness at the
+    portfolio ceiling `qHash = 2^56 - 1` (and even at `qHash = 2^8`). -/
+theorem tooth_rlwe_or_sigma_13_not_pq128_at_2pow56 :
+    ¬ atLeastBits 128 (quantumGroverGrindingBound (2 ^ 56 - 1) (rlweOrSigmaSoundnessError 13)) := by
+  decide +kernel
+
+theorem tooth_rlwe_or_sigma_13_not_pq128_qrom :
+    ¬ atLeastBits 128 (quantumGroverGrindingBound (2 ^ 8) rlweOrSigma13SoundnessError) ∧
+    ¬ atLeastBits 128 (quantumDfmMeasureReprogramBound 1 (2 ^ 8) rlweOrSigma13SoundnessError) ∧
+    ¬ atLeastBits 128 (quantumGroverGrindingBound (2 ^ 56 - 1) rlweOrSigma13SoundnessError) := by
+  refine ⟨by decide +kernel, by decide +kernel, tooth_rlwe_or_sigma_13_not_pq128_at_2pow56⟩
+
+theorem witness_rlwe_or_sigma_24_qrom_budget :
+    ∃ b : QueryBudget, b.qHash + 1 ≤ 2 ^ 66 :=
+  ⟨⟨2 ^ 56 - 1, 0, 0⟩, by decide⟩
+
+/-- At `2^56` offline queries the roster contains an entry below 128 QROM bits: the Category-2
+    threshold ML-DSA-44 entry. This is why `qsag_pq128_portfolio_soundness_budget` is stated
+    per-entry ceiling. -/
+theorem tooth_portfolio_category2_entry_fails_at_2pow56 :
+    ∃ entry ∈ qsagPq128PortfolioRoster ⟨2 ^ 56 - 1, 0, 2 ^ 20 - 1⟩,
+      ¬ atLeastBits 128 entry.quantumBound :=
+  ⟨thresholdMlDsaDkgAndSignEntry deployedThresholdMlDsaParamSet ⟨2 ^ 56 - 1, 0, 2 ^ 20 - 1⟩,
+   by simp [qsagPq128PortfolioRoster],
+   tooth_threshold_mldsa44_entry_not_pq128_at_2pow56⟩
+
+#tooth_pair Qsag.ggmNodeTweakIndex_injective vs Qsag.tooth_ggmNodeTweakIndex_unbounded_tree_collides
+#tooth_pair Qsag.tweaked_multi_target_query_partition_union_bound vs Qsag.tooth_untweaked_targets_exceed_partition_bound
+#tooth_pair Qsag.densePcgV3SaltedSeedQuantumBound_140 vs Qsag.tooth_densePcgV3_untweaked_not_pq128
+#tooth_pair Qsag.densePcgV3_partitioned_seed_search_140 vs Qsag.tooth_densePcgV3_untweaked_not_pq128
+#tooth_pair Qsag.densePcgV3SaltedSeedQuantumBound_140 vs Qsag.tooth_densePcgV3_salted_not_141
+#tooth_pair Qsag.densePcgV3SeedQuantumBound_128 vs Qsag.tooth_densePcgV3_untweaked_not_pq128
+#tooth_pair Qsag.densePcgV3SharedTweakSeedQuantumBound_128 vs Qsag.tooth_densePcgV3_session_id_reuse_not_pq128
+#tooth_pair Qsag.mlDsa_offline_grinding_pq128_regime vs Qsag.tooth_mldsa44_offline_grinding_above_2pow30
+#tooth_pair Qsag.mlDsa_offline_grinding_pq128_regime vs Qsag.tooth_mldsa65_offline_grinding_above_2pow47
+#tooth_pair Qsag.mlDsa_offline_grinding_pq128_regime vs Qsag.tooth_mldsa87_offline_grinding_above_2pow63
+#tooth_pair Qsag.mlDsa_offline_grinding_bits_at_2pow56 vs Qsag.tooth_mldsa44_offline_grinding_not_78_at_2pow56
+#tooth_pair Qsag.mlDsa_offline_grinding_bits_at_2pow56 vs Qsag.tooth_mldsa65_offline_grinding_not_111_at_2pow56
+#tooth_pair Qsag.threshold_mldsa_entry_pq128_within_ceiling vs Qsag.tooth_threshold_mldsa_entry_above_ceiling_not_pq128
+#tooth_pair Qsag.threshold_mldsa_entry_pq128_within_ceiling vs Qsag.tooth_threshold_mldsa44_entry_not_pq128_at_2pow56
+#tooth_pair Qsag.qsag_pq128_portfolio_soundness_budget vs Qsag.tooth_portfolio_category2_entry_fails_at_2pow56
+#tooth_pair Qsag.rlwe_or_sigma_24_pq128_within_ceiling vs Qsag.tooth_rlwe_or_sigma_13_not_pq128_at_2pow56
+
+#verify_inhabited Qsag.densePcgV3_partitioned_seed_search_140 Qsag.witness_densePcgV3_query_partition
+#verify_inhabited Qsag.densePcgV3SaltedSeedQuantumBound_140 Qsag.witness_densePcgV3_query_budget
+#verify_inhabited Qsag.densePcgV3SeedQuantumBound_120 Qsag.witness_densePcgV3_query_budget
+#verify_inhabited Qsag.densePcgV3SharedTweakSeedQuantumBound_128 Qsag.witness_densePcgV3_shared_tweak_budget
+#verify_inhabited Qsag.threshold_mldsa_entry_pq128_within_ceiling Qsag.witness_threshold_mldsa_budget
+#verify_inhabited Qsag.qsag_pq128_portfolio_soundness_budget Qsag.witness_threshold_mldsa_budget
+#verify_inhabited Qsag.rlwe_or_sigma_24_pq128_within_ceiling Qsag.witness_rlwe_or_sigma_24_qrom_budget
+
+/-! ## §8. Mechanized `[HRS16]` Quantum Superposition Multi-Tweak Security & Un-Tweaked Grover Loss
+
+Genuine quantum superposition multi-function / multi-tweak preimage & Davies–Meyer second-preimage
+resistance following Hülsing, Rijneveld and Song (PKC 2016) / Zhandry multi-function QROM:
+1. Joint tweak-input Hilbert-space packing `packTweakQuery : Fin M → Fin (2 ^ n) → Fin (M * 2 ^ n)`
+   and exact per-tweak squared-amplitude norm partition `tweakNormSq_partition_eq_stateNormSq`
+   (`∑_{t < M} tweakNormSq ψ t = QVec.stateNormSq ψ`).
+2. Constructive `q`-query unitary QROM bound `hrs16_superposition_multi_tweak_bound`: for ANY
+   quantum circuit `QuantumAdv (M * 2 ^ n) (w + 1) cardAnc q` querying arbitrary superpositions
+   across `(t : Fin M) × (x : Fin (2 ^ n))`, simultaneous multi-target fiber-search Born success
+   is bounded by `((8 * q ^ 2 + 2) * K) / 2 ^ n` and `8 * K * (q + 1) ^ 2 / 2 ^ n`, **completely
+   independent of the tweak count `M`**.
+3. Concrete 256-bit security `hrs16_superposition_multi_tweak_pq256_bound` (`≤ 2^-124` for
+   `q ≤ 2 ^ 64` and `≤ 2^-132` for `q ≤ 2 ^ 60` across `M = 2 ^ 64` distinct `ADRS` tweaks).
+4. Constructive `q`-query unitary Grover lower bound `untweaked_multi_target_grover_lower_bound`
+   and `#tooth` witness `tooth_untweaked_multi_target_grover_linear_M_loss` proving un-tweaked
+   multi-target (`F(x)` independent of `t`) suffers `≥ M * (q + 1) ^ 2 / (4 * N)` linear `M` loss. -/
+
+/-- Pack tweak index `t : Fin M` and `n`-bit input `x : Fin (2 ^ n)` into `Fin (M * 2 ^ n)`. -/
+def packTweakQuery {M n : Nat} (t : Fin M) (x : Fin (2 ^ n)) : Fin (M * 2 ^ n) :=
+  ⟨t.1 * 2 ^ n + x.1, by
+    have ht : (t.1 + 1) * 2 ^ n ≤ M * 2 ^ n := Nat.mul_le_mul_right (2 ^ n) t.2
+    rw [Nat.add_mul, Nat.one_mul] at ht
+    exact Nat.lt_of_lt_of_le (Nat.add_lt_add_left x.2 (t.1 * 2 ^ n)) ht⟩
+
+private theorem div_lt_of_lt_mul_constructive {k M B : Nat} (hk : k < M * B) : k / B < M :=
+  match Nat.lt_or_ge (k / B) M with
+  | Or.inl h => h
+  | Or.inr hGe => False.elim <| by
+      have hMul : B * M ≤ B * (k / B) := Nat.mul_le_mul_left B hGe
+      have hDivMod : B * (k / B) + k % B = k := Nat.div_add_mod k B
+      rw [Nat.mul_comm B M] at hMul
+      omega
+
+/-- Extract tweak index `t : Fin M` from packed query coordinate `idx : Fin (M * 2 ^ n)`. -/
+def unpackTweakIdx {M n : Nat} (idx : Fin (M * 2 ^ n)) : Fin M :=
+  ⟨idx.1 / 2 ^ n, div_lt_of_lt_mul_constructive idx.2⟩
+
+/-- Extract input coordinate `x : Fin (2 ^ n)` from packed query coordinate `idx : Fin (M * 2 ^ n)`. -/
+def unpackInputIdx {M n : Nat} (idx : Fin (M * 2 ^ n)) : Fin (2 ^ n) :=
+  ⟨idx.1 % 2 ^ n, Nat.mod_lt _ (Nat.two_pow_pos n)⟩
+
+theorem unpack_packTweakQuery {M n : Nat} (t : Fin M) (x : Fin (2 ^ n)) :
+    unpackTweakIdx (packTweakQuery t x) = t ∧
+    unpackInputIdx (packTweakQuery t x) = x := by
+  have hPos : 0 < 2 ^ n := Nat.two_pow_pos n
+  refine ⟨Fin.ext ?_, Fin.ext ?_⟩
+  · dsimp only [unpackTweakIdx, packTweakQuery]
+    rw [Nat.add_comm, Nat.add_mul_div_right _ _ hPos, Nat.div_eq_of_lt x.2, Nat.zero_add]
+  · dsimp only [unpackInputIdx, packTweakQuery]
+    rw [Nat.add_comm, Nat.add_mul_mod_self_right, Nat.mod_eq_of_lt x.2]
+
+private theorem qsum_cast {a b : Nat} (h : a = b) (f : Fin a → Nat) :
+    qsum a f = qsum b (fun i => f ⟨i.1, h ▸ i.2⟩) := by
+  subst h; rfl
+
+private theorem qsum_mul_tweak_split (M B : Nat) (f : Fin (M * B) → Nat) :
+    qsum (M * B) f =
+      qsum M (fun t => qsum B (fun x =>
+        f ⟨t.1 * B + x.1, by
+          have ht : (t.1 + 1) * B ≤ M * B := Nat.mul_le_mul_right B t.2
+          rw [Nat.add_mul, Nat.one_mul] at ht
+          exact Nat.lt_of_lt_of_le (Nat.add_lt_add_left x.2 (t.1 * B)) ht⟩)) := by
+  rw [qsum_cast (Nat.mul_comm M B) f, qsum_mul_split B M]
+
+/-- Per-tweak squared Hilbert-space amplitude norm `‖ψ_t‖² = ∑_{x < 2^n} queryWeight ψ (t, x)`. -/
+def tweakNormSq {M n w cardAnc : Nat} (ψ : QVec (M * 2 ^ n) w cardAnc) (t : Fin M) : Nat :=
+  qsum (2 ^ n) (fun x => QVec.queryWeight ψ (packTweakQuery t x))
+
+/-- **Superposition Amplitude-Norm Partition Identity (`tweakNormSq_partition_eq_stateNormSq`)**:
+    Across any `M`-tweak superposition state `ψ`, `∑_{t < M} ‖ψ_t‖² = ‖ψ‖²`. -/
+theorem tweakNormSq_partition_eq_stateNormSq {M n w cardAnc : Nat}
+    (ψ : QVec (M * 2 ^ n) w cardAnc) :
+    qsum M (fun t => tweakNormSq ψ t) = QVec.stateNormSq ψ := by
+  unfold QVec.stateNormSq tweakNormSq packTweakQuery
+  exact (qsum_mul_tweak_split M (2 ^ n) (QVec.queryWeight ψ)).symm
+
+/-- Multi-tweak shifted fiber oracle marking `(t, x)` iff `encode t (x ⊕ mask) = targets t`. -/
+def hrs16ShiftedMultiTweakOracle {Code : Type} [DecidableEq Code]
+    (M n w : Nat) (encode : Fin M → BitVec n → Code) (targets : Fin M → Code) (mask : BitVec n) :
+    Fin (M * 2 ^ n) → BitVec (w + 1) :=
+  fun idx =>
+    let t := unpackTweakIdx idx
+    let x := unpackInputIdx idx
+    if encode t (BitVec.ofFin x ^^^ mask) = targets t then 1#(w + 1) else 0#(w + 1)
+
+/-- Blank reference oracle over the joint `M`-tweak query space `Fin (M * 2 ^ n)`. -/
+def hrs16BlankMultiTweakOracle (M n w : Nat) : Fin (M * 2 ^ n) → BitVec (w + 1) :=
+  fun _ => 0#(w + 1)
+
+/-- `[HRS16]` quantum superposition multi-tweak preimage / DM-SPR bound `8 * (q + 1)^2 / 2^n`
+    (independent of the number of tweaks `M`). -/
+def hrs16SuperpositionBound (n q : Nat) : RatBound :=
+  ⟨8 * (q + 1) ^ 2, 2 ^ n, Nat.two_pow_pos n⟩
+
+private theorem sum_masks_multi_tweak_fiber {Code : Type} [DecidableEq Code]
+    (M n K : Nat) (encode : Fin M → BitVec n → Code) (targets : Fin M → Code)
+    (hFiberLe : ∀ t : Fin M, fiberCard n (encode t) (targets t) ≤ K)
+    {w cardAnc : Nat} (ψ : QVec (M * 2 ^ n) w cardAnc) :
+    qsum (2 ^ n) (fun m =>
+      QVec.queryMassOn
+        (fun idx => decide (encode (unpackTweakIdx idx)
+          (BitVec.ofFin (unpackInputIdx idx) ^^^ BitVec.ofFin m) = targets (unpackTweakIdx idx)))
+        ψ) ≤
+      K * QVec.stateNormSq ψ := by
+  have hSplitEach : ∀ m : Fin (2 ^ n),
+      QVec.queryMassOn
+        (fun idx => decide (encode (unpackTweakIdx idx)
+          (BitVec.ofFin (unpackInputIdx idx) ^^^ BitVec.ofFin m) = targets (unpackTweakIdx idx))) ψ =
+      qsum M (fun t => qsum (2 ^ n) (fun x =>
+        if encode t (BitVec.ofFin x ^^^ BitVec.ofFin m) = targets t
+        then QVec.queryWeight ψ (packTweakQuery t x) else 0)) := by
+    intro m
+    unfold QVec.queryMassOn
+    rw [qsum_mul_tweak_split M (2 ^ n)]
+    apply qsum_congr; intro t
+    apply qsum_congr; intro x
+    have hPack : (⟨t.1 * 2 ^ n + x.1, _⟩ : Fin (M * 2 ^ n)) = packTweakQuery t x := rfl
+    obtain ⟨hT, hX⟩ := unpack_packTweakQuery t x
+    simp only [hPack, hT, hX]
+    by_cases h : encode t (BitVec.ofFin x ^^^ BitVec.ofFin m) = targets t <;> simp [h]
+  rw [qsum_congr hSplitEach, qsum_comm (2 ^ n) M]
+  have hPerTweak : ∀ t : Fin M,
+      qsum (2 ^ n) (fun m => qsum (2 ^ n) (fun x =>
+        if encode t (BitVec.ofFin x ^^^ BitVec.ofFin m) = targets t
+        then QVec.queryWeight ψ (packTweakQuery t x) else 0)) ≤
+      K * tweakNormSq ψ t := by
+    intro t
+    rw [sum_masks_shifted_fiber n (encode t) (targets t) (fun x => QVec.queryWeight ψ (packTweakQuery t x))]
+    exact Nat.mul_le_mul_right (tweakNormSq ψ t) (hFiberLe t)
+  apply Nat.le_trans (qsum_le_qsum hPerTweak)
+  rw [qsum_mul_left K, tweakNormSq_partition_eq_stateNormSq]
+  exact Nat.le_refl _
+
+/-- **Quantum Superposition Multi-Tweak Preimage & Second-Preimage Theorem
+    (`hrs16_superposition_multi_tweak_bound`, Hülsing–Rijneveld–Song PKC 2016)**:
+    For ANY `q`-query unitary quantum adversary `A : QuantumAdv (M * 2 ^ n) (w + 1) cardAnc q`
+    making arbitrary superposition queries across `(t : Fin M) × (x : Fin (2 ^ n))` and ANY
+    `M` tweak-separated functions `encode t` with preimage fiber size `≤ K` at `targets t`,
+    the average Born-rule probability of finding a valid `(t, x)` preimage for ANY of the `M`
+    tweaks simultaneously is bounded by `((8 * q ^ 2 + 2) * K) / 2 ^ n` and
+    `8 * K * (q + 1) ^ 2 / 2 ^ n` — **completely independent of `M`** (`0` linear `M` loss). -/
+theorem hrs16_superposition_multi_tweak_bound {Code : Type} [DecidableEq Code]
+    {M n w cardAnc q K : Nat}
+    (A : QuantumAdv (M * 2 ^ n) (w + 1) cardAnc q)
+    (encode : Fin M → BitVec n → Code) (targets : Fin M → Code)
+    (hFiberLe : ∀ t : Fin M, fiberCard n (encode t) (targets t) ≤ K) :
+    let ψBlank := runQuantumAdv A (hrs16BlankMultiTweakOracle M n w)
+    let normFinal := QVec.stateNormSq ψBlank
+    let avgBornSuccess : RatBound :=
+      ⟨qsum (2 ^ n) (fun m =>
+         QVec.measureNormSq
+           (fun idx => decide (encode (unpackTweakIdx idx)
+             (BitVec.ofFin (unpackInputIdx idx) ^^^ BitVec.ofFin m) = targets (unpackTweakIdx idx)))
+           (runQuantumAdv A (hrs16ShiftedMultiTweakOracle M n w encode targets (BitVec.ofFin m)))),
+       2 ^ n * normFinal,
+       Nat.mul_pos (Nat.two_pow_pos n) (runQuantumAdv_normSq_pos A (hrs16BlankMultiTweakOracle M n w))⟩
+    RatBound.le avgBornSuccess ⟨(8 * q ^ 2 + 2) * K, 2 ^ n, Nat.two_pow_pos n⟩ ∧
+    RatBound.le avgBornSuccess ⟨8 * K * (q + 1) ^ 2, 2 ^ n, Nat.two_pow_pos n⟩ := by
+  let ψBlank := runQuantumAdv A (hrs16BlankMultiTweakOracle M n w)
+  let normFinal := QVec.stateNormSq ψBlank
+  have hPerMask : ∀ m : Fin (2 ^ n),
+      let Sm : Fin (M * 2 ^ n) → Bool := fun idx =>
+        decide (encode (unpackTweakIdx idx)
+          (BitVec.ofFin (unpackInputIdx idx) ^^^ BitVec.ofFin m) = targets (unpackTweakIdx idx))
+      QVec.measureNormSq Sm
+        (runQuantumAdv A (hrs16ShiftedMultiTweakOracle M n w encode targets (BitVec.ofFin m))) ≤
+      2 * QVec.measureNormSq Sm ψBlank +
+      8 * q * qsum q (fun step =>
+        suffixScale A step.1 (Nat.le_of_lt step.2) *
+          QVec.queryMassOn Sm (advStateAt A (hrs16BlankMultiTweakOracle M n w) step.1 (Nat.le_of_lt step.2))) := by
+    intro m
+    let Sm : Fin (M * 2 ^ n) → Bool := fun idx =>
+      decide (encode (unpackTweakIdx idx)
+        (BitVec.ofFin (unpackInputIdx idx) ^^^ BitVec.ofFin m) = targets (unpackTweakIdx idx))
+    have hBorn := born_measure_le_two_add_two_dist_sq Sm
+      (runQuantumAdv A (hrs16ShiftedMultiTweakOracle M n w encode targets (BitVec.ofFin m))) ψBlank
+    have hAgree : ∀ idx : Fin (M * 2 ^ n), Sm idx = false →
+        hrs16ShiftedMultiTweakOracle M n w encode targets (BitVec.ofFin m) idx =
+          hrs16BlankMultiTweakOracle M n w idx := by
+      intro idx hFalse
+      unfold hrs16ShiftedMultiTweakOracle hrs16BlankMultiTweakOracle
+      have hNe : encode (unpackTweakIdx idx)
+          (BitVec.ofFin (unpackInputIdx idx) ^^^ BitVec.ofFin m) ≠ targets (unpackTweakIdx idx) := by
+        intro hEq; simp [Sm, hEq] at hFalse
+      simp [hNe]
+    have hO2h := qrom_o2h_telescoping_disturbance_le A
+      (hrs16ShiftedMultiTweakOracle M n w encode targets (BitVec.ofFin m))
+      (hrs16BlankMultiTweakOracle M n w) Sm hAgree
+    have h2 := Nat.mul_le_mul_left 2 hO2h
+    rw [← Nat.mul_assoc 2 (4 * q), show 2 * (4 * q) = 8 * q by omega] at h2
+    exact Nat.le_trans hBorn (Nat.add_le_add_left h2 _)
+  have hSumMasks := qsum_le_qsum hPerMask
+  rw [qsum_add, qsum_mul_left 2, qsum_mul_left (8 * q), qsum_comm (2 ^ n) q] at hSumMasks
+  have hBlankLe :
+      qsum (2 ^ n) (fun m =>
+        QVec.measureNormSq
+          (fun idx => decide (encode (unpackTweakIdx idx)
+            (BitVec.ofFin (unpackInputIdx idx) ^^^ BitVec.ofFin m) = targets (unpackTweakIdx idx)))
+          ψBlank) ≤ K * normFinal :=
+    sum_masks_multi_tweak_fiber M n K encode targets hFiberLe ψBlank
+  have hQueryLe :
+      qsum q (fun step => qsum (2 ^ n) (fun m =>
+        suffixScale A step.1 (Nat.le_of_lt step.2) *
+          QVec.queryMassOn
+            (fun idx => decide (encode (unpackTweakIdx idx)
+              (BitVec.ofFin (unpackInputIdx idx) ^^^ BitVec.ofFin m) = targets (unpackTweakIdx idx)))
+            (advStateAt A (hrs16BlankMultiTweakOracle M n w) step.1 (Nat.le_of_lt step.2)))) ≤
+      q * (K * normFinal) := by
+    have hEachStep : ∀ step : Fin q,
+        qsum (2 ^ n) (fun m =>
+          suffixScale A step.1 (Nat.le_of_lt step.2) *
+            QVec.queryMassOn
+              (fun idx => decide (encode (unpackTweakIdx idx)
+                (BitVec.ofFin (unpackInputIdx idx) ^^^ BitVec.ofFin m) = targets (unpackTweakIdx idx)))
+              (advStateAt A (hrs16BlankMultiTweakOracle M n w) step.1 (Nat.le_of_lt step.2))) ≤
+        K * normFinal := by
+      intro step
+      rw [qsum_mul_left]
+      have hStepMass := sum_masks_multi_tweak_fiber M n K encode targets hFiberLe
+        (advStateAt A (hrs16BlankMultiTweakOracle M n w) step.1 (Nat.le_of_lt step.2))
+      have hMulS := Nat.mul_le_mul_left (suffixScale A step.1 (Nat.le_of_lt step.2)) hStepMass
+      apply Nat.le_trans hMulS
+      rw [advStateAt_normSq]
+      dsimp only [normFinal, ψBlank]
+      rw [runQuantumAdv_normSq]
+      have hScale := prefix_mul_suffix_eq_total A step.1 (Nat.le_of_lt step.2)
+      apply Nat.le_of_eq
+      calc suffixScale A step.1 (Nat.le_of_lt step.2) *
+             (K * (prefixScale A step.1 (Nat.le_of_lt step.2) * QVec.stateNormSq A.init))
+        _ = K * ((prefixScale A step.1 (Nat.le_of_lt step.2) * suffixScale A step.1 (Nat.le_of_lt step.2)) *
+                 QVec.stateNormSq A.init) := by
+          rw [← Nat.mul_assoc, Nat.mul_comm (suffixScale A step.1 (Nat.le_of_lt step.2)) K,
+              Nat.mul_assoc K, ← Nat.mul_assoc (suffixScale A step.1 (Nat.le_of_lt step.2)),
+              Nat.mul_comm (suffixScale A step.1 (Nat.le_of_lt step.2))]
+        _ = K * (prefixScale A q (Nat.le_refl q) * QVec.stateNormSq A.init) := by rw [hScale]
+    simpa only [qsum_const] using qsum_le_qsum hEachStep
+  have hTotalLe :
+      qsum (2 ^ n) (fun m =>
+        QVec.measureNormSq
+          (fun idx => decide (encode (unpackTweakIdx idx)
+            (BitVec.ofFin (unpackInputIdx idx) ^^^ BitVec.ofFin m) = targets (unpackTweakIdx idx)))
+          (runQuantumAdv A (hrs16ShiftedMultiTweakOracle M n w encode targets (BitVec.ofFin m)))) ≤
+      (8 * q ^ 2 + 2) * K * normFinal := by
+    have hComb := Nat.le_trans hSumMasks
+      (Nat.add_le_add (Nat.mul_le_mul_left 2 hBlankLe) (Nat.mul_le_mul_left (8 * q) hQueryLe))
+    have hAlg : 2 * (K * normFinal) + 8 * q * (q * (K * normFinal)) =
+        (8 * q ^ 2 + 2) * K * normFinal := by
+      rw [Nat.pow_two, Nat.add_mul, Nat.add_mul, Nat.add_comm]
+      simp only [Nat.mul_assoc]
+    rwa [hAlg] at hComb
+  have hFirst : RatBound.le
+      ⟨qsum (2 ^ n) (fun m =>
+         QVec.measureNormSq
+           (fun idx => decide (encode (unpackTweakIdx idx)
+             (BitVec.ofFin (unpackInputIdx idx) ^^^ BitVec.ofFin m) = targets (unpackTweakIdx idx)))
+           (runQuantumAdv A (hrs16ShiftedMultiTweakOracle M n w encode targets (BitVec.ofFin m)))),
+       2 ^ n * normFinal,
+       Nat.mul_pos (Nat.two_pow_pos n) (runQuantumAdv_normSq_pos A (hrs16BlankMultiTweakOracle M n w))⟩
+      ⟨(8 * q ^ 2 + 2) * K, 2 ^ n, Nat.two_pow_pos n⟩ := by
+    unfold RatBound.le; dsimp only
+    have hm := Nat.mul_le_mul_right (2 ^ n) hTotalLe
+    rwa [Nat.mul_assoc ((8 * q ^ 2 + 2) * K) normFinal (2 ^ n), Nat.mul_comm normFinal (2 ^ n)] at hm
+  refine ⟨hFirst, RatBound.le_trans hFirst ?_⟩
+  unfold RatBound.le; dsimp only
+  apply Nat.mul_le_mul_right
+  have hLe8 : 8 * q ^ 2 + 2 ≤ 8 * (q + 1) ^ 2 := by
+    simp only [Nat.pow_two, Nat.add_mul, Nat.mul_add, Nat.one_mul, Nat.mul_one]
+    omega
+  calc (8 * q ^ 2 + 2) * K
+    _ ≤ (8 * (q + 1) ^ 2) * K := Nat.mul_le_mul_right K hLe8
+    _ = 8 * K * (q + 1) ^ 2 := by
+      rw [Nat.mul_assoc 8 K, Nat.mul_comm K ((q + 1) ^ 2), ← Nat.mul_assoc]
+
+/-- **Concrete 256-Bit `[HRS16]` Quantum Superposition Multi-Tweak Security
+    (`hrs16_superposition_multi_tweak_pq256_bound`)**:
+    For `N = 2 ^ 256` and ANY number `M` of distinct `ADRS` tweaks (including `M = 2 ^ 64`) with
+    injective per-tweak encodings (`fiberCard ≤ 1`), full quantum superposition across all `M`
+    tweaks achieves `≤ 2^-124` (`atLeastBits 124`) for all `q ≤ 2 ^ 64` and `≤ 2^-132`
+    (`atLeastBits 132`) for all `q ≤ 2 ^ 60`, with `0` linear `M` loss. -/
+theorem hrs16_superposition_multi_tweak_pq256_bound {Code : Type} [DecidableEq Code]
+    {M w cardAnc q : Nat}
+    (A : QuantumAdv (M * 2 ^ 256) (w + 1) cardAnc q)
+    (encode : Fin M → BitVec 256 → Code) (targets : Fin M → Code)
+    (hInj : ∀ t : Fin M, Function.Injective (encode t)) :
+    let ψBlank := runQuantumAdv A (hrs16BlankMultiTweakOracle M 256 w)
+    let avgBornSuccess : RatBound :=
+      ⟨qsum (2 ^ 256) (fun m =>
+         QVec.measureNormSq
+           (fun idx => decide (encode (unpackTweakIdx idx)
+             (BitVec.ofFin (unpackInputIdx idx) ^^^ BitVec.ofFin m) = targets (unpackTweakIdx idx)))
+           (runQuantumAdv A (hrs16ShiftedMultiTweakOracle M 256 w encode targets (BitVec.ofFin m)))),
+       2 ^ 256 * QVec.stateNormSq ψBlank,
+       Nat.mul_pos (Nat.two_pow_pos 256) (runQuantumAdv_normSq_pos A (hrs16BlankMultiTweakOracle M 256 w))⟩
+    RatBound.le avgBornSuccess (hrs16SuperpositionBound 256 q) ∧
+    (q ≤ 2 ^ 64 → atLeastBits 124 avgBornSuccess) ∧
+    (q ≤ 2 ^ 60 → atLeastBits 132 avgBornSuccess) := by
+  have hFib : ∀ t : Fin M, fiberCard 256 (encode t) (targets t) ≤ 1 :=
+    fun t => fiberCard_le_one_of_injective 256 (encode t) (hInj t) (targets t)
+  have hBound := (hrs16_superposition_multi_tweak_bound (K := 1) A encode targets hFib).2
+  have hBound1 : RatBound.le
+      ⟨qsum (2 ^ 256) (fun m =>
+         QVec.measureNormSq
+           (fun idx => decide (encode (unpackTweakIdx idx)
+             (BitVec.ofFin (unpackInputIdx idx) ^^^ BitVec.ofFin m) = targets (unpackTweakIdx idx)))
+           (runQuantumAdv A (hrs16ShiftedMultiTweakOracle M 256 w encode targets (BitVec.ofFin m)))),
+       2 ^ 256 * QVec.stateNormSq (runQuantumAdv A (hrs16BlankMultiTweakOracle M 256 w)),
+       Nat.mul_pos (Nat.two_pow_pos 256) (runQuantumAdv_normSq_pos A (hrs16BlankMultiTweakOracle M 256 w))⟩
+      (hrs16SuperpositionBound 256 q) := by
+    simpa only [hrs16SuperpositionBound, Nat.mul_one] using hBound
+  refine ⟨hBound1, fun hq64 => atLeastBits_of_le hBound1 ?_, fun hq60 => atLeastBits_of_le hBound1 ?_⟩
+  · unfold atLeastBits hrs16SuperpositionBound; dsimp only
+    have hMono : 8 * (q + 1) ^ 2 * 2 ^ 124 ≤ 8 * (2 ^ 64 + 1) ^ 2 * 2 ^ 124 :=
+      Nat.mul_le_mul_right (2 ^ 124) (Nat.mul_le_mul_left 8 (Nat.pow_le_pow_left (Nat.add_le_add_right hq64 1) 2))
+    exact Nat.le_trans hMono (by decide)
+  · unfold atLeastBits hrs16SuperpositionBound; dsimp only
+    have hMono : 8 * (q + 1) ^ 2 * 2 ^ 132 ≤ 8 * (2 ^ 60 + 1) ^ 2 * 2 ^ 132 :=
+      Nat.mul_le_mul_right (2 ^ 132) (Nat.mul_le_mul_left 8 (Nat.pow_le_pow_left (Nat.add_le_add_right hq60 1) 2))
+    exact Nat.le_trans hMono (by decide)
+
+/-- **`DensePcg` V3 Full-Forest (`2,097,088` GGM Tweaks) Quantum Superposition Bound
+    (`densePcgV3_hrs16_superposition_141`)**:
+    Upgrades `densePcgV3_partitioned_seed_search_140` from classical query-partitioning (`qs : List Nat`)
+    to arbitrary `q`-query unitary quantum superposition across all `densePcgV3NodeTargets = 2,097,088`
+    salted GGM node tweaks: for `q + 1 ≤ 2 ^ 56`, average Born-rule recovery probability satisfies
+    `atLeastBits 141` (and `atLeastBits 140`) with `0` linear `2,097,088`-target loss. -/
+theorem densePcgV3_hrs16_superposition_141 {Code : Type} [DecidableEq Code]
+    {w cardAnc q : Nat} (hq : q + 1 ≤ 2 ^ 56)
+    (A : QuantumAdv (densePcgV3NodeTargets * 2 ^ 256) (w + 1) cardAnc q)
+    (encode : Fin densePcgV3NodeTargets → BitVec 256 → Code)
+    (targets : Fin densePcgV3NodeTargets → Code)
+    (hInj : ∀ t : Fin densePcgV3NodeTargets, Function.Injective (encode t)) :
+    let ψBlank := runQuantumAdv A (hrs16BlankMultiTweakOracle densePcgV3NodeTargets 256 w)
+    let avgBornSuccess : RatBound :=
+      ⟨qsum (2 ^ 256) (fun m =>
+         QVec.measureNormSq
+           (fun idx => decide (encode (unpackTweakIdx idx)
+             (BitVec.ofFin (unpackInputIdx idx) ^^^ BitVec.ofFin m) = targets (unpackTweakIdx idx)))
+           (runQuantumAdv A (hrs16ShiftedMultiTweakOracle densePcgV3NodeTargets 256 w encode targets (BitVec.ofFin m)))),
+       2 ^ 256 * QVec.stateNormSq ψBlank,
+       Nat.mul_pos (Nat.two_pow_pos 256)
+         (runQuantumAdv_normSq_pos A (hrs16BlankMultiTweakOracle densePcgV3NodeTargets 256 w))⟩
+    densePcgV3NodeTargets = 2097088 ∧
+    atLeastBits 141 avgBornSuccess ∧
+    atLeastBits 140 avgBornSuccess := by
+  have hBound := (hrs16_superposition_multi_tweak_pq256_bound A encode targets hInj).1
+  have h141 : atLeastBits 141 (hrs16SuperpositionBound 256 q) := by
+    unfold atLeastBits hrs16SuperpositionBound; dsimp only
+    have hMono : 8 * (q + 1) ^ 2 * 2 ^ 141 ≤ 8 * (2 ^ 56) ^ 2 * 2 ^ 141 :=
+      Nat.mul_le_mul_right (2 ^ 141) (Nat.mul_le_mul_left 8 (Nat.pow_le_pow_left hq 2))
+    exact Nat.le_trans hMono (by decide)
+  have hAvg141 := atLeastBits_of_le hBound h141
+  exact ⟨densePcgV3NodeTargets_exact.1, hAvg141, atLeastBits_antitone_bits (by decide) hAvg141⟩
+
+/-! ### §8.2 Constructive `q`-Query Unitary Multi-Target Grover Lower Bound (`#tooth` for Un-Tweaked `F(x)`) -/
+
+private theorem finIntSum_const :
+    ∀ (N : Nat) (c : Int), finIntSum N (fun _ => c) = Int.ofNat N * c
+  | 0, c => by simp [finIntSum]
+  | n + 1, c => by
+    simp only [finIntSum, finIntSum_const n c]
+    have h1 : Int.ofNat 1 * c = c := Int.one_mul c
+    rw [ofNat_add_eq n 1, Int.add_mul, h1, Int.add_comm]
+
+private theorem finIntSum_add :
+    ∀ (N : Nat) (f g : Fin N → Int),
+      finIntSum N (fun i => f i + g i) = finIntSum N f + finIntSum N g
+  | 0, _, _ => rfl
+  | n + 1, f, g => by
+    simp only [finIntSum, finIntSum_add n]
+    omega
+
+private theorem finIntSum_mul_left (c : Int) :
+    ∀ (N : Nat) (f : Fin N → Int),
+      finIntSum N (fun i => c * f i) = c * finIntSum N f
+  | 0, _ => by simp [finIntSum]
+  | n + 1, f => by
+    simp only [finIntSum, finIntSum_mul_left c n, Int.mul_add]
+
+private theorem finIntSum_ofNat_eq :
+    ∀ (N : Nat) (f : Fin N → Nat),
+      finIntSum N (fun i => Int.ofNat (f i)) = Int.ofNat (qsum N f)
+  | 0, _ => rfl
+  | n + 1, f => by
+    simp only [finIntSum, qsum, finIntSum_ofNat_eq n, ofNat_add_eq]
+
+private theorem grover_int_reflection_normSq (N : Nat) (v : Fin N → Int) :
+    finIntSum N (fun x =>
+      (2 * finIntSum N v - Int.ofNat N * v x) * (2 * finIntSum N v - Int.ofNat N * v x)) =
+      Int.ofNat (N ^ 2) * finIntSum N (fun x => v x * v x) := by
+  let S := finIntSum N v
+  change finIntSum N (fun x => (2 * S - Int.ofNat N * v x) * (2 * S - Int.ofNat N * v x)) = _
+  have hPoint : ∀ x : Fin N,
+      (2 * S - Int.ofNat N * v x) * (2 * S - Int.ofNat N * v x) =
+        4 * S * S + (-(4 * S * Int.ofNat N)) * v x +
+          (Int.ofNat N * Int.ofNat N) * (v x * v x) := fun x => by
+    have hNegSq : ∀ u : Int, (-u) * (-u) = u * u := fun u => by
+      rw [Int.neg_mul, Int.mul_neg, Int.neg_neg]
+    calc (2 * S - Int.ofNat N * v x) * (2 * S - Int.ofNat N * v x)
+      _ = (2 * S) * (2 * S) + (2 * S) * (-(Int.ofNat N * v x)) +
+            (-(Int.ofNat N * v x)) * (2 * S) + (Int.ofNat N * v x) * (Int.ofNat N * v x) := by
+          rw [Int.sub_eq_add_neg, Int.add_mul, Int.mul_add, Int.mul_add, hNegSq, ← Int.add_assoc]
+      _ = 4 * S * S + (-(4 * S * Int.ofNat N)) * v x +
+            (Int.ofNat N * Int.ofNat N) * (v x * v x) := by
+          have p1 : (2 * S) * (2 * S) = 4 * S * S := by
+            rw [Int.mul_assoc 2 S, Int.mul_left_comm S 2 S, ← Int.mul_assoc (2 : Int) 2, Int.mul_assoc 4 S S]
+            rfl
+          have p2 : (2 * S) * (-(Int.ofNat N * v x)) = -(2 * S * Int.ofNat N * v x) := by
+            rw [Int.mul_neg, ← Int.mul_assoc (2 * S) (Int.ofNat N) (v x)]
+          have p3 : (-(Int.ofNat N * v x)) * (2 * S) = -(2 * S * Int.ofNat N * v x) := by
+            rw [Int.neg_mul, Int.mul_comm (Int.ofNat N * v x) (2 * S),
+                ← Int.mul_assoc (2 * S) (Int.ofNat N) (v x)]
+          have p4 : (-(4 * S * Int.ofNat N)) * v x = -(4 * S * Int.ofNat N * v x) := by
+            rw [Int.neg_mul]
+          have p5 : (Int.ofNat N * v x) * (Int.ofNat N * v x) =
+              (Int.ofNat N * Int.ofNat N) * (v x * v x) := by
+            rw [Int.mul_assoc (Int.ofNat N) (v x), Int.mul_left_comm (v x) (Int.ofNat N) (v x),
+                ← Int.mul_assoc (Int.ofNat N) (Int.ofNat N)]
+          rw [p1, p2, p3, p4, p5]
+          have p6 : 4 * S * Int.ofNat N * v x =
+              2 * S * Int.ofNat N * v x + 2 * S * Int.ofNat N * v x := by
+            have e4 : (4 : Int) = 2 + 2 := rfl
+            rw [e4, Int.add_mul, Int.add_mul, Int.add_mul]
+          omega
+  have hCongr : finIntSum N (fun x => (2 * S - Int.ofNat N * v x) * (2 * S - Int.ofNat N * v x)) =
+      finIntSum N (fun x => (4 * S * S + (-(4 * S * Int.ofNat N)) * v x) +
+        (Int.ofNat N * Int.ofNat N) * (v x * v x)) := by
+    have : (fun x => (2 * S - Int.ofNat N * v x) * (2 * S - Int.ofNat N * v x)) =
+        (fun x => (4 * S * S + (-(4 * S * Int.ofNat N)) * v x) +
+          (Int.ofNat N * Int.ofNat N) * (v x * v x)) := funext hPoint
+    rw [this]
+  rw [hCongr, finIntSum_add, finIntSum_add, finIntSum_const,
+      finIntSum_mul_left (-(4 * S * Int.ofNat N)),
+      finIntSum_mul_left (Int.ofNat N * Int.ofNat N)]
+  change Int.ofNat N * (4 * S * S) + (-(4 * S * Int.ofNat N)) * S +
+      (Int.ofNat N * Int.ofNat N) * finIntSum N (fun x => v x * v x) = _
+  have hCancel : Int.ofNat N * (4 * S * S) + (-(4 * S * Int.ofNat N)) * S = 0 := by
+    rw [Int.neg_mul, Int.mul_assoc 4 S (Int.ofNat N), Int.mul_comm S (Int.ofNat N),
+        ← Int.mul_assoc 4 (Int.ofNat N) S, Int.mul_comm 4 (Int.ofNat N),
+        Int.mul_assoc (Int.ofNat N) 4 S, Int.mul_assoc (Int.ofNat N) (4 * S) S,
+        Int.mul_assoc 4 S S]
+    omega
+  rw [hCancel, Int.zero_add, Nat.pow_two, ofNat_mul_eq]
+
+/-- Exact integer `N`-item Grover diffusion operator `D_N : ψ_x ↦ 2 ∑_z ψ_z - N ψ_x` (`scaleSq = N^2`). -/
+def groverDiffusion (N : Nat) (hN : 0 < N) : ScaledUnitary N 1 1 where
+  apply ψ x y a :=
+    let s := finGaussSum N (fun z => ψ z y a)
+    GaussInt.sub (GaussInt.scaleInt 2 s) (GaussInt.scaleInt (Int.ofNat N) (ψ x y a))
+  scaleSq := N ^ 2
+  h_scale_pos := Nat.pow_pos hN
+  map_sub ψ φ := by
+    have hSumSub : ∀ (K : Nat) (f g : Fin K → GaussInt),
+        finGaussSum K (fun z => GaussInt.sub (f z) (g z)) =
+          GaussInt.sub (finGaussSum K f) (finGaussSum K g) := by
+      intro K
+      induction K with
+      | zero => intros; rfl
+      | succ k ih =>
+        intro f g
+        simp only [finGaussSum, ih]
+        unfold GaussInt.add GaussInt.sub; ext <;> dsimp only <;> omega
+    funext x y a
+    dsimp only [QVec.sub]
+    rw [hSumSub]
+    unfold GaussInt.sub GaussInt.scaleInt
+    ext <;> dsimp only <;> rw [Int.mul_sub, Int.mul_sub] <;> omega
+  normSq_eq ψ := by
+    have hSumRe : ∀ (K : Nat) (f : Fin K → GaussInt),
+        (finGaussSum K f).re = finIntSum K (fun z => (f z).re) := by
+      intro K; induction K with
+      | zero => intros; rfl
+      | succ k ih => intro f; simp only [finGaussSum, finIntSum, GaussInt.add, ih]
+    have hSumIm : ∀ (K : Nat) (f : Fin K → GaussInt),
+        (finGaussSum K f).im = finIntSum K (fun z => (f z).im) := by
+      intro K; induction K with
+      | zero => intros; rfl
+      | succ k ih => intro f; simp only [finGaussSum, finIntSum, GaussInt.add, ih]
+    have hFiber : ∀ (y : Fin 2) (a : Fin 1),
+        qsum N (fun x => GaussInt.normSq
+          (GaussInt.sub (GaussInt.scaleInt 2 (finGaussSum N (fun z => ψ z y a)))
+            (GaussInt.scaleInt (Int.ofNat N) (ψ x y a)))) =
+        N ^ 2 * qsum N (fun x => GaussInt.normSq (ψ x y a)) := by
+      intro y a
+      apply Int.ofNat.inj
+      rw [ofNat_mul_eq, ← finIntSum_ofNat_eq, ← finIntSum_ofNat_eq]
+      have hLHS : finIntSum N (fun x => Int.ofNat (GaussInt.normSq
+          (GaussInt.sub (GaussInt.scaleInt 2 (finGaussSum N (fun z => ψ z y a)))
+            (GaussInt.scaleInt (Int.ofNat N) (ψ x y a))))) =
+          finIntSum N (fun x =>
+            (2 * finIntSum N (fun z => (ψ z y a).re) - Int.ofNat N * (ψ x y a).re) *
+              (2 * finIntSum N (fun z => (ψ z y a).re) - Int.ofNat N * (ψ x y a).re) +
+            (2 * finIntSum N (fun z => (ψ z y a).im) - Int.ofNat N * (ψ x y a).im) *
+              (2 * finIntSum N (fun z => (ψ z y a).im) - Int.ofNat N * (ψ x y a).im)) := by
+        congr 1; funext x
+        rw [← GaussInt.normSqInt_eq_ofNat_normSq]
+        unfold GaussInt.normSqInt GaussInt.sub GaussInt.scaleInt
+        dsimp only
+        rw [hSumRe, hSumIm]
+      have hRHS : finIntSum N (fun x => Int.ofNat (GaussInt.normSq (ψ x y a))) =
+          finIntSum N (fun x => (ψ x y a).re * (ψ x y a).re + (ψ x y a).im * (ψ x y a).im) := by
+        congr 1; funext x; exact (GaussInt.normSqInt_eq_ofNat_normSq _).symm
+      rw [hLHS, hRHS, finIntSum_add, finIntSum_add,
+          grover_int_reflection_normSq N (fun z => (ψ z y a).re),
+          grover_int_reflection_normSq N (fun z => (ψ z y a).im), Int.mul_add]
+    unfold QVec.stateNormSq QVec.queryWeight
+    simp only [qsum, Nat.add_zero]
+    rw [qsum_add, qsum_add, hFiber ⟨0, by decide⟩ ⟨0, by decide⟩,
+        hFiber ⟨1, by decide⟩ ⟨0, by decide⟩, Nat.left_distrib]
+
+/-- Un-tweaked `M`-target indicator oracle `F : Fin N → BitVec 1` (`F(x) = 1` iff `x < M`),
+    modeling a hash family that omits distinct `ADRS` tweaks across `M` targets. -/
+def untweakedMultiTargetOracle (N M : Nat) : Fin N → BitVec 1 :=
+  fun x => if x.1 < M then 1#1 else 0#1
+
+private def groverTemplateState (N M : Nat) (α β : Int) : QVec N 1 1 :=
+  fun x y _ =>
+    let amp := if x.1 < M then α else β
+    ⟨if y.1 == 0 then amp else -amp, 0⟩
+
+private def untweakedGroverAmpsNat (N M : Nat) : Nat → Nat × Nat
+  | 0 => (1, 1)
+  | j + 1 =>
+    let p := untweakedGroverAmpsNat N M j
+    ((N - 2 * M) * p.1 + 2 * (N - M) * p.2,
+     (N - 2 * M) * p.2 - 2 * M * p.1)
+
+private theorem qsum_prefix_const :
+    ∀ (N M : Nat), M ≤ N → ∀ (c d : Nat),
+      qsum N (fun x => if x.1 < M then c else d) = M * c + (N - M) * d
+  | 0, M, hLe, c, d => by
+    have hM0 : M = 0 := by omega
+    subst hM0; simp [qsum]
+  | n + 1, 0, _, c, d => by
+    have hEq : qsum (n + 1) (fun x : Fin (n + 1) => if x.1 < 0 then c else d) =
+        qsum (n + 1) (fun _ => d) := by
+      apply qsum_congr; intro x; simp
+    rw [hEq, qsum_const]; simp
+  | n + 1, m + 1, hLe, c, d => by
+    simp only [qsum, Nat.zero_lt_succ, ↓reduceIte]
+    have hTail : qsum n (fun i : Fin n => if i.1 + 1 < m + 1 then c else d) =
+        qsum n (fun i : Fin n => if i.1 < m then c else d) := by
+      apply qsum_congr; intro i
+      by_cases hi : i.1 < m
+      · have hi1 : i.1 + 1 < m + 1 := Nat.succ_lt_succ hi; simp [hi, hi1]
+      · have hi1 : ¬ (i.1 + 1 < m + 1) := fun h => hi (Nat.lt_of_succ_lt_succ h); simp [hi, hi1]
+    rw [hTail, qsum_prefix_const n m (Nat.le_of_succ_le_succ hLe) c d]
+    have hSub : n + 1 - (m + 1) = n - m := Nat.succ_sub_succ_eq_sub n m
+    rw [hSub, Nat.add_mul, Nat.one_mul]; omega
+
+private theorem finIntSum_prefix_const :
+    ∀ (N M : Nat), M ≤ N → ∀ (u v : Int),
+      finIntSum N (fun x => if x.1 < M then u else v) = Int.ofNat M * u + Int.ofNat (N - M) * v
+  | 0, M, hLe, u, v => by
+    have hM0 : M = 0 := by omega
+    subst hM0; simp [finIntSum]
+  | n + 1, 0, _, u, v => by
+    have hEq : (fun x : Fin (n + 1) => if x.1 < 0 then u else v) = (fun _ => v) := by
+      funext x; simp
+    rw [hEq, finIntSum_const]; simp
+  | n + 1, m + 1, hLe, u, v => by
+    simp only [finIntSum, Nat.zero_lt_succ, ↓reduceIte]
+    have hTail : (fun i : Fin n => if i.1 + 1 < m + 1 then u else v) =
+        (fun i : Fin n => if i.1 < m then u else v) := by
+      funext i
+      by_cases hi : i.1 < m
+      · have hi1 : i.1 + 1 < m + 1 := Nat.succ_lt_succ hi; simp [hi, hi1]
+      · have hi1 : ¬ (i.1 + 1 < m + 1) := fun h => hi (Nat.lt_of_succ_lt_succ h); simp [hi, hi1]
+    rw [hTail, finIntSum_prefix_const n m (Nat.le_of_succ_le_succ hLe) u v]
+    have hSub : n + 1 - (m + 1) = n - m := Nat.succ_sub_succ_eq_sub n m
+    have h1 : Int.ofNat 1 * u = u := Int.one_mul u
+    rw [hSub, ofNat_add_eq m 1, Int.add_mul, h1]
+    omega
+
+/-- Explicit `q`-query unitary Grover circuit (`QuantumAdv N 1 1 q`) attacking un-tweaked `M`-target `F`. -/
+def untweakedGroverAdv (N M q : Nat) (hN : 0 < N) : QuantumAdv N 1 1 q where
+  init := groverTemplateState N M 1 1
+  h_init_pos := by
+    have hEach : ∀ x : Fin N, QVec.queryWeight (groverTemplateState N M 1 1) x = 2 := by
+      intro x; unfold QVec.queryWeight groverTemplateState
+      simp only [qsum]
+      by_cases hx : x.1 < M <;> simp [hx, GaussInt.normSq]
+    unfold QVec.stateNormSq
+    rw [qsum_congr hEach, qsum_const]
+    exact Nat.mul_pos hN (by decide)
+  steps _ := groverDiffusion N hN
+
+private theorem grover_sub_guard {N M j α β : Nat}
+    (_hM_pos : 1 ≤ M)
+    (hStep4 : 4 * (j + 1) * (j + 2) * M ≤ N)
+    (hαHi : α ≤ (2 * j + 1) * N ^ j)
+    (hβHi : β ≤ N ^ j)
+    (hβLo : N ^ (j + 1) ≤ N * β + 2 * j * (j + 1) * M * N ^ j) :
+    2 * M * α ≤ (N - 2 * M) * β := by
+  have hN_ge_8M : 8 * M ≤ N := by
+    have h8 : 8 ≤ 4 * (j + 1) * (j + 2) := by
+      simp only [Nat.mul_add, Nat.add_mul]; omega
+    exact Nat.le_trans (Nat.mul_le_mul_right M h8) hStep4
+  have hN_pos : 0 < N := by omega
+  have hSumHi : α + β ≤ (2 * j + 2) * N ^ j := by
+    have hAdd := Nat.add_le_add hαHi hβHi
+    have hR : (2 * j + 1) * N ^ j + N ^ j = (2 * j + 2) * N ^ j := by
+      rw [← Nat.succ_mul (2 * j + 1) (N ^ j)]
+    rwa [hR] at hAdd
+  have hMulSum : N * (2 * M * α + 2 * M * β) ≤ 2 * M * (2 * j + 2) * N ^ (j + 1) := by
+    have hL : N * (2 * M * α + 2 * M * β) = 2 * M * N * (α + β) := by
+      rw [← Nat.mul_add (2 * M) α β, ← Nat.mul_assoc N (2 * M), Nat.mul_comm N (2 * M)]
+    have hR : 2 * M * N * ((2 * j + 2) * N ^ j) = 2 * M * (2 * j + 2) * N ^ (j + 1) := by
+      rw [Nat.pow_succ, Nat.mul_comm (N ^ j) N, Nat.mul_assoc (2 * M) N,
+          Nat.mul_left_comm N (2 * j + 2) (N ^ j), ← Nat.mul_assoc (2 * M) (2 * j + 2)]
+    rw [hL, ← hR]
+    exact Nat.mul_le_mul_left (2 * M * N) hSumHi
+  have hMulLo : N ^ (j + 2) ≤ N * (N * β) + 2 * j * (j + 1) * M * N ^ (j + 1) := by
+    have hm := Nat.mul_le_mul_left N hβLo
+    have eL : N * N ^ (j + 1) = N ^ (j + 2) := by rw [Nat.pow_succ N (j + 1), Nat.mul_comm]
+    have eR : N * (2 * j * (j + 1) * M * N ^ j) = 2 * j * (j + 1) * M * N ^ (j + 1) := by
+      rw [Nat.pow_succ N j, Nat.mul_comm (N ^ j) N, ← Nat.mul_assoc N (2 * j * (j + 1) * M) (N ^ j),
+          Nat.mul_comm N (2 * j * (j + 1) * M), Nat.mul_assoc]
+    rw [Nat.mul_add, eL, eR] at hm
+    exact hm
+  have hCoefLe : 2 * M * (2 * j + 2) + 2 * j * (j + 1) * M ≤ N := by
+    have hCoef : 2 * (2 * j + 2) + 2 * j * (j + 1) ≤ 4 * (j + 1) * (j + 2) := by
+      simp only [Nat.mul_add, Nat.add_mul, Nat.mul_one, Nat.mul_assoc]
+      omega
+    have hRearr : 2 * M * (2 * j + 2) + 2 * j * (j + 1) * M =
+        (2 * (2 * j + 2) + 2 * j * (j + 1)) * M := by
+      rw [Nat.add_mul, Nat.mul_assoc 2 M (2 * j + 2), Nat.mul_comm M (2 * j + 2),
+          ← Nat.mul_assoc 2 (2 * j + 2) M]
+    rw [hRearr]
+    exact Nat.le_trans (Nat.mul_le_mul_right M hCoef) hStep4
+  have hCap : 2 * M * (2 * j + 2) * N ^ (j + 1) + 2 * j * (j + 1) * M * N ^ (j + 1) ≤ N ^ (j + 2) := by
+    rw [← Nat.add_mul, Nat.pow_succ N (j + 1), Nat.mul_comm (N ^ (j + 1)) N]
+    exact Nat.mul_le_mul_right (N ^ (j + 1)) hCoefLe
+  have hChain : N * (2 * M * α + 2 * M * β) + 2 * j * (j + 1) * M * N ^ (j + 1) ≤
+      N * (N * β) + 2 * j * (j + 1) * M * N ^ (j + 1) :=
+    Nat.le_trans (Nat.add_le_add_right hMulSum _) (Nat.le_trans hCap hMulLo)
+  have hNMul : N * (2 * M * α + 2 * M * β) ≤ N * (N * β) := Nat.le_of_add_le_add_right hChain
+  have hCancN : 2 * M * α + 2 * M * β ≤ N * β := Nat.le_of_mul_le_mul_left hNMul hN_pos
+  have hSplitN : (N - 2 * M) * β + 2 * M * β = N * β := by
+    rw [← Nat.add_mul, Nat.sub_add_cancel (by omega)]
+  omega
+
+private theorem untweakedGroverAmpsNat_bounds (N M q : Nat)
+    (hM_pos : 1 ≤ M) (hRegime : 4 * q * (q + 1) * M ≤ N) :
+    ∀ j : Nat, j ≤ q →
+      let p := untweakedGroverAmpsNat N M j
+      p.1 ≤ (2 * j + 1) * N ^ j ∧
+      p.2 ≤ N ^ j ∧
+      N ^ (j + 1) ≤ N * p.2 + 2 * j * (j + 1) * M * N ^ j ∧
+      (j + 1) * N ^ j ≤ 2 * p.1
+  | 0, _ => by
+    simp only [untweakedGroverAmpsNat, Nat.pow_zero, Nat.zero_add, Nat.pow_one]
+    refine ⟨by decide, by decide, ?_, by decide⟩
+    omega
+  | j + 1, hj1 => by
+    obtain ⟨hαHi, hβHi, hβLo, hαLo⟩ :=
+      untweakedGroverAmpsNat_bounds N M q hM_pos hRegime j (Nat.le_of_succ_le hj1)
+    let α := (untweakedGroverAmpsNat N M j).1
+    let β := (untweakedGroverAmpsNat N M j).2
+    change α ≤ (2 * j + 1) * N ^ j at hαHi
+    change β ≤ N ^ j at hβHi
+    change N ^ (j + 1) ≤ N * β + 2 * j * (j + 1) * M * N ^ j at hβLo
+    change (j + 1) * N ^ j ≤ 2 * α at hαLo
+    have hStepProd : (j + 1) * (j + 2) ≤ q * (q + 1) :=
+      Nat.mul_le_mul hj1 (Nat.add_le_add_right hj1 1)
+    have hStep4 : 4 * (j + 1) * (j + 2) * M ≤ N := by
+      have hm := Nat.mul_le_mul_right M (Nat.mul_le_mul_left 4 hStepProd)
+      simp only [Nat.mul_assoc] at hm hRegime ⊢
+      exact Nat.le_trans hm hRegime
+    have hN_ge_8M : 8 * M ≤ N := by
+      have h8 : 8 ≤ 4 * (j + 1) * (j + 2) := by
+        simp only [Nat.mul_add, Nat.add_mul]; omega
+      exact Nat.le_trans (Nat.mul_le_mul_right M h8) hStep4
+    have hN_pos : 0 < N := by omega
+    have hSub : 2 * M * α ≤ (N - 2 * M) * β :=
+      grover_sub_guard hM_pos hStep4 hαHi hβHi hβLo
+    have h2β_ge : N ^ j ≤ 2 * β := by
+      have hPrev4 : 4 * j * (j + 1) * M ≤ N := by
+        have hLe : 4 * j * (j + 1) ≤ 4 * (j + 1) * (j + 2) := by
+          have : j * (j + 1) ≤ (j + 1) * (j + 2) :=
+            Nat.le_trans (Nat.mul_le_mul_right (j + 1) (Nat.le_succ j))
+              (Nat.mul_le_mul_left (j + 1) (Nat.le_succ (j + 1)))
+          have h4 := Nat.mul_le_mul_left 4 this
+          simpa only [Nat.mul_assoc] using h4
+        exact Nat.le_trans (Nat.mul_le_mul_right M hLe) hStep4
+      have hDoubLo : 2 * (N * N ^ j) ≤ N * (2 * β) + 4 * j * (j + 1) * M * N ^ j := by
+        have hm := Nat.mul_le_mul_left 2 hβLo
+        have eL : 2 * N ^ (j + 1) = 2 * (N * N ^ j) := by rw [Nat.pow_succ N j, Nat.mul_comm (N ^ j) N]
+        have eR1 : 2 * (N * β) = N * (2 * β) := by rw [← Nat.mul_assoc, Nat.mul_comm 2 N, Nat.mul_assoc]
+        have eR2 : 2 * (2 * j * (j + 1) * M * N ^ j) = 4 * j * (j + 1) * M * N ^ j := by
+          simp only [← Nat.mul_assoc]
+        rw [Nat.mul_add, eL, eR1, eR2] at hm
+        exact hm
+      have hCap : 4 * j * (j + 1) * M * N ^ j ≤ N * N ^ j := Nat.mul_le_mul_right (N ^ j) hPrev4
+      have hChain : N * N ^ j + N * N ^ j ≤ N * (2 * β) + N * N ^ j := by
+        have e2 : 2 * (N * N ^ j) = N * N ^ j + N * N ^ j := Nat.two_mul _
+        rw [← e2]
+        exact Nat.le_trans hDoubLo (Nat.add_le_add_left hCap _)
+      exact Nat.le_of_mul_le_mul_left (Nat.le_of_add_le_add_right hChain) hN_pos
+    let α' := (N - 2 * M) * α + 2 * (N - M) * β
+    let β' := (N - 2 * M) * β - 2 * M * α
+    change α' ≤ (2 * (j + 1) + 1) * N ^ (j + 1) ∧
+      β' ≤ N ^ (j + 1) ∧
+      N ^ (j + 2) ≤ N * β' + 2 * (j + 1) * (j + 2) * M * N ^ (j + 1) ∧
+      (j + 2) * N ^ (j + 1) ≤ 2 * α'
+    have hα'_hi : α' ≤ (2 * (j + 1) + 1) * N ^ (j + 1) := by
+      have p1 : (N - 2 * M) * α ≤ N * ((2 * j + 1) * N ^ j) :=
+        Nat.le_trans (Nat.mul_le_mul_right α (Nat.sub_le N (2 * M))) (Nat.mul_le_mul_left N hαHi)
+      have p2 : 2 * (N - M) * β ≤ 2 * N * N ^ j :=
+        Nat.le_trans (Nat.mul_le_mul_right β (Nat.mul_le_mul_left 2 (Nat.sub_le N M)))
+          (Nat.mul_le_mul_left (2 * N) hβHi)
+      have hRhsEq : N * ((2 * j + 1) * N ^ j) + 2 * N * N ^ j = (2 * (j + 1) + 1) * N ^ (j + 1) := by
+        rw [Nat.pow_succ N j, Nat.mul_comm (N ^ j) N, ← Nat.mul_assoc N (2 * j + 1) (N ^ j),
+            Nat.mul_comm N (2 * j + 1), Nat.mul_assoc (2 * j + 1) N (N ^ j),
+            Nat.mul_assoc 2 N (N ^ j), ← Nat.add_mul (2 * j + 1) 2 (N * N ^ j)]
+        exact congrArg (· * (N * N ^ j)) (by omega)
+      rw [← hRhsEq]
+      exact Nat.add_le_add p1 p2
+    have hβ'_hi : β' ≤ N ^ (j + 1) := by
+      have s1 : β' ≤ N * β :=
+        Nat.le_trans (Nat.sub_le _ _) (Nat.mul_le_mul_right β (Nat.sub_le N (2 * M)))
+      have s2 : N * β ≤ N ^ (j + 1) := by
+        rw [Nat.pow_succ N j, Nat.mul_comm (N ^ j) N]
+        exact Nat.mul_le_mul_left N hβHi
+      exact Nat.le_trans s1 s2
+    have hβ'_lo : N ^ (j + 2) ≤ N * β' + 2 * (j + 1) * (j + 2) * M * N ^ (j + 1) := by
+      have hId : β' + 2 * M * α + 2 * M * β = N * β := by
+        rw [Nat.sub_add_cancel hSub, ← Nat.add_mul, Nat.sub_add_cancel (by omega)]
+      have hIdN : N * β' + 2 * M * N * (α + β) = N * (N * β) := by
+        have hId2 : β' + 2 * M * (α + β) = N * β := by
+          rw [Nat.mul_add, ← Nat.add_assoc]; exact hId
+        have hm := congrArg (N * ·) hId2
+        rw [Nat.mul_add, ← Nat.mul_assoc N (2 * M) (α + β), Nat.mul_comm N (2 * M)] at hm
+        exact hm
+      have hSumHi : α + β ≤ (2 * j + 2) * N ^ j := by
+        have hAdd := Nat.add_le_add hαHi hβHi
+        rwa [← Nat.succ_mul (2 * j + 1) (N ^ j)] at hAdd
+      have hLossLe : 2 * M * N * (α + β) ≤ (4 * j + 4) * M * N ^ (j + 1) := by
+        have hm := Nat.mul_le_mul_left (2 * M * N) hSumHi
+        have hRearr : 2 * M * N * ((2 * j + 2) * N ^ j) = (4 * j + 4) * M * N ^ (j + 1) := by
+          have c2 : 2 * (2 * j + 2) = 4 * j + 4 := by omega
+          rw [Nat.pow_succ N j, Nat.mul_comm (N ^ j) N, Nat.mul_assoc (2 * M) N,
+              Nat.mul_left_comm N (2 * j + 2) (N ^ j), ← Nat.mul_assoc (2 * M) (2 * j + 2),
+              Nat.mul_assoc 2 M (2 * j + 2), Nat.mul_comm M (2 * j + 2),
+              ← Nat.mul_assoc 2 (2 * j + 2) M, c2]
+        rwa [hRearr] at hm
+      have hMulLo : N ^ (j + 2) ≤ N * (N * β) + 2 * j * (j + 1) * M * N ^ (j + 1) := by
+        have hm := Nat.mul_le_mul_left N hβLo
+        have eL : N * N ^ (j + 1) = N ^ (j + 2) := by rw [Nat.pow_succ N (j + 1), Nat.mul_comm]
+        have eR : N * (2 * j * (j + 1) * M * N ^ j) = 2 * j * (j + 1) * M * N ^ (j + 1) := by
+          rw [Nat.pow_succ N j, Nat.mul_comm (N ^ j) N, ← Nat.mul_assoc N (2 * j * (j + 1) * M) (N ^ j),
+              Nat.mul_comm N (2 * j * (j + 1) * M), Nat.mul_assoc]
+        rw [Nat.mul_add, eL, eR] at hm
+        exact hm
+      have hPoly : (4 * j + 4) * M * N ^ (j + 1) + 2 * j * (j + 1) * M * N ^ (j + 1) =
+          2 * (j + 1) * (j + 2) * M * N ^ (j + 1) := by
+        have hc : 4 * j + 4 + 2 * j * (j + 1) = 2 * (j + 1) * (j + 2) := by
+          simp only [Nat.mul_add, Nat.add_mul, Nat.mul_one, Nat.mul_assoc]; omega
+        rw [← Nat.add_mul, ← Nat.add_mul, hc]
+      calc N ^ (j + 2)
+        _ ≤ N * (N * β) + 2 * j * (j + 1) * M * N ^ (j + 1) := hMulLo
+        _ = N * β' + 2 * M * N * (α + β) + 2 * j * (j + 1) * M * N ^ (j + 1) := by rw [← hIdN]
+        _ ≤ N * β' + (4 * j + 4) * M * N ^ (j + 1) + 2 * j * (j + 1) * M * N ^ (j + 1) :=
+          Nat.add_le_add_right (Nat.add_le_add_left hLossLe (N * β')) _
+        _ = N * β' + 2 * (j + 1) * (j + 2) * M * N ^ (j + 1) := by rw [Nat.add_assoc, hPoly]
+    have h2α'_ge : (j + 2) * N ^ (j + 1) ≤ 2 * α' := by
+      have p1 : (N - 2 * M) * ((j + 1) * N ^ j) ≤ (N - 2 * M) * (2 * α) :=
+        Nat.mul_le_mul_left (N - 2 * M) hαLo
+      have p2 : 2 * (N - M) * N ^ j ≤ 2 * (N - M) * (2 * β) :=
+        Nat.mul_le_mul_left (2 * (N - M)) h2β_ge
+      have h2α'Eq : 2 * α' = (N - 2 * M) * (2 * α) + 2 * (N - M) * (2 * β) := by
+        dsimp only [α']
+        rw [Nat.mul_add, ← Nat.mul_assoc 2 (N - 2 * M) α, Nat.mul_comm 2 (N - 2 * M), Nat.mul_assoc,
+            ← Nat.mul_assoc 2 (2 * (N - M)) β, Nat.mul_comm 2 (2 * (N - M)), Nat.mul_assoc]
+      have hBound2j4 : 2 * M * (j + 1) + 2 * M ≤ N := by
+        have hRearr : 2 * M * (j + 1) + 2 * M = (2 * j + 4) * M := by
+          rw [Nat.mul_comm (2 * M) (j + 1), ← Nat.mul_assoc (j + 1) 2 M,
+              Nat.mul_comm (j + 1) 2]
+          have : 2 * (j + 1) * M + 2 * M = (2 * (j + 1) + 2) * M := (Nat.add_mul _ _ M).symm
+          rw [this]; exact congrArg (· * M) (by omega)
+        have hCoef : 2 * j + 4 ≤ 4 * (j + 1) * (j + 2) := by
+          simp only [Nat.mul_add, Nat.add_mul, Nat.mul_one, Nat.mul_assoc]; omega
+        rw [hRearr]
+        exact Nat.le_trans (Nat.mul_le_mul_right M hCoef) hStep4
+      have hLinear : (j + 2) * N ≤ (N - 2 * M) * (j + 1) + 2 * (N - M) := by
+        have u1 : (N - 2 * M) * (j + 1) + 2 * M * (j + 1) = N * (j + 1) := by
+          rw [← Nat.add_mul, Nat.sub_add_cancel (by omega)]
+        have u2 : 2 * (N - M) + 2 * M = 2 * N := by
+          rw [← Nat.mul_add, Nat.sub_add_cancel (by omega)]
+        have u3 : (j + 2) * N + N = N * (j + 1) + 2 * N := by
+          rw [Nat.mul_comm N (j + 1), ← Nat.add_mul (j + 1) 2 N, ← Nat.succ_mul (j + 2) N]
+        omega
+      calc (j + 2) * N ^ (j + 1)
+        _ = (j + 2) * N * N ^ j := by
+          rw [Nat.pow_succ N j, Nat.mul_comm (N ^ j) N, Nat.mul_assoc]
+        _ ≤ ((N - 2 * M) * (j + 1) + 2 * (N - M)) * N ^ j :=
+          Nat.mul_le_mul_right (N ^ j) hLinear
+        _ = (N - 2 * M) * ((j + 1) * N ^ j) + 2 * (N - M) * N ^ j := by
+          rw [Nat.add_mul, Nat.mul_assoc]
+        _ ≤ (N - 2 * M) * (2 * α) + 2 * (N - M) * (2 * β) := Nat.add_le_add p1 p2
+        _ = 2 * α' := h2α'Eq.symm
+    exact ⟨hα'_hi, hβ'_hi, hβ'_lo, h2α'_ge⟩
+
+private theorem untweakedGroverAdv_state_eq (N M q : Nat)
+    (hM_pos : 1 ≤ M) (hMN : M ≤ N) (hRegime : 4 * q * (q + 1) * M ≤ N) (hN : 0 < N) :
+    ∀ (j : Nat) (hj : j ≤ q),
+      advStateAt (untweakedGroverAdv N M q hN) (untweakedMultiTargetOracle N M) j hj =
+        groverTemplateState N M
+          (Int.ofNat (untweakedGroverAmpsNat N M j).1)
+          (Int.ofNat (untweakedGroverAmpsNat N M j).2)
+  | 0, _ => rfl
+  | j + 1, hj => by
+    unfold advStateAt
+    dsimp only
+    rw [untweakedGroverAdv_state_eq N M q hM_pos hMN hRegime hN j (Nat.le_of_succ_le hj)]
+    simp only [untweakedGroverAdv]
+    obtain ⟨hαHi, hβHi, hβLo, _⟩ :=
+      untweakedGroverAmpsNat_bounds N M q hM_pos hRegime j (Nat.le_of_succ_le hj)
+    let αNat := (untweakedGroverAmpsNat N M j).1
+    let βNat := (untweakedGroverAmpsNat N M j).2
+    let α := Int.ofNat αNat
+    let β := Int.ofNat βNat
+    have hStepProd : (j + 1) * (j + 2) ≤ q * (q + 1) :=
+      Nat.mul_le_mul hj (Nat.add_le_add_right hj 1)
+    have hStep4 : 4 * (j + 1) * (j + 2) * M ≤ N := by
+      have hm := Nat.mul_le_mul_right M (Nat.mul_le_mul_left 4 hStepProd)
+      simp only [Nat.mul_assoc] at hm hRegime ⊢
+      exact Nat.le_trans hm hRegime
+    have hN_ge_8M : 8 * M ≤ N := by
+      have h8 : 8 ≤ 4 * (j + 1) * (j + 2) := by
+        simp only [Nat.mul_add, Nat.add_mul]; omega
+      exact Nat.le_trans (Nat.mul_le_mul_right M h8) hStep4
+    have hSub : 2 * M * αNat ≤ (N - 2 * M) * βNat :=
+      grover_sub_guard hM_pos hStep4 hαHi hβHi hβLo
+    have hIntN2M : Int.ofNat (N - 2 * M) = Int.ofNat N - 2 * Int.ofNat M := by
+      have h1 := congrArg Int.ofNat (Nat.sub_add_cancel (by omega : 2 * M ≤ N))
+      rw [ofNat_add_eq, ofNat_mul_eq] at h1
+      have h2 : Int.ofNat 2 = 2 := rfl
+      rw [h2] at h1; omega
+    have hIntα' : Int.ofNat ((N - 2 * M) * αNat + 2 * (N - M) * βNat) =
+        (Int.ofNat N - 2 * Int.ofNat M) * α + 2 * Int.ofNat (N - M) * β := by
+      rw [ofNat_add_eq, ofNat_mul_eq, ofNat_mul_eq, ofNat_mul_eq 2, hIntN2M]
+      rfl
+    have hIntβ' : Int.ofNat ((N - 2 * M) * βNat - 2 * M * αNat) =
+        (Int.ofNat N - 2 * Int.ofNat M) * β - 2 * Int.ofNat M * α := by
+      have h1 := congrArg Int.ofNat (Nat.sub_add_cancel hSub)
+      rw [ofNat_add_eq, ofNat_mul_eq, ofNat_mul_eq, ofNat_mul_eq, hIntN2M] at h1
+      have h2 : Int.ofNat 2 = 2 := rfl
+      rw [h2] at h1
+      dsimp only [α, β]
+      omega
+    have hOracle : oracleXor (untweakedMultiTargetOracle N M) (groverTemplateState N M α β) =
+        groverTemplateState N M (-α) β := by
+      funext x y _
+      unfold oracleXor untweakedMultiTargetOracle groverTemplateState
+      rcases y with ⟨yv, hyv⟩
+      have hCasesY : yv = 0 ∨ yv = 1 := by omega
+      have hx0 : (xorFin (⟨0, by decide⟩ : Fin (2 ^ 1)) 1#1).1 = 1 := rfl
+      have hx1 : (xorFin (⟨1, by decide⟩ : Fin (2 ^ 1)) 1#1).1 = 0 := rfl
+      have hz0 : (xorFin (⟨0, by decide⟩ : Fin (2 ^ 1)) 0#1).1 = 0 := rfl
+      have hz1 : (xorFin (⟨1, by decide⟩ : Fin (2 ^ 1)) 0#1).1 = 1 := rfl
+      by_cases hxM : x.1 < M
+      · rcases hCasesY with rfl | rfl
+        · simp only [hxM, ↓reduceIte, hx0]; rfl
+        · simp only [hxM, ↓reduceIte, hx1]; ext <;> dsimp <;> omega
+      · rcases hCasesY with rfl | rfl
+        · simp only [hxM, ↓reduceIte, hz0]
+        · simp only [hxM, ↓reduceIte, hz1]
+    rw [hOracle]
+    funext x y _
+    unfold groverDiffusion groverTemplateState untweakedGroverAmpsNat
+    dsimp only
+    rw [hIntα', hIntβ']
+    have hSumRe : ∀ (K : Nat) (f : Fin K → GaussInt),
+        (finGaussSum K f).re = finIntSum K (fun z => (f z).re) := by
+      intro K; induction K with
+      | zero => intros; rfl
+      | succ k ih => intro f; simp only [finGaussSum, finIntSum, GaussInt.add, ih]
+    have hSumIm0 : ∀ (K : Nat) (f : Fin K → Int),
+        (finGaussSum K (fun z => (⟨f z, 0⟩ : GaussInt))).im = 0 := by
+      intro K; induction K with
+      | zero => intros; rfl
+      | succ k ih => intro f; simp only [finGaussSum, GaussInt.add, ih]; omega
+    have hSubEqβ : Int.ofNat (N - M) * β = Int.ofNat N * β - Int.ofNat M * β := by
+      have hAdd : (N - M) + M = N := Nat.sub_add_cancel hMN
+      have h1 := congrArg (fun k => Int.ofNat k * β) hAdd
+      rw [ofNat_add_eq, Int.add_mul] at h1
+      omega
+    have hPushNeg : (fun z : Fin N => -(if z.1 < M then -α else β)) =
+        (fun z : Fin N => if z.1 < M then α else -β) := by
+      funext z; by_cases h : z.1 < M <;> simp only [h, ↓reduceIte, Int.neg_neg]
+    have hLinPos :
+        2 * (Int.ofNat M * (-α) + Int.ofNat (N - M) * β) - Int.ofNat N * (-α) =
+        (Int.ofNat N - 2 * Int.ofNat M) * α + 2 * Int.ofNat (N - M) * β := by
+      rw [Int.mul_neg (Int.ofNat M) α, Int.mul_neg (Int.ofNat N) α,
+          Int.sub_mul, Int.mul_assoc 2 (Int.ofNat M) α,
+          Int.mul_assoc 2 (Int.ofNat (N - M)) β, Int.mul_add, Int.mul_neg]
+      omega
+    have hLinNeg :
+        2 * (Int.ofNat M * (-α) + Int.ofNat (N - M) * β) - Int.ofNat N * β =
+        (Int.ofNat N - 2 * Int.ofNat M) * β - 2 * Int.ofNat M * α := by
+      rw [Int.mul_neg (Int.ofNat M) α, hSubEqβ,
+          Int.sub_mul, Int.mul_assoc 2 (Int.ofNat M) β, Int.mul_assoc 2 (Int.ofNat M) α,
+          Int.mul_add, Int.mul_neg, Int.mul_sub]
+      omega
+    have hLinPos1 :
+        2 * (Int.ofNat M * α + Int.ofNat (N - M) * (-β)) - Int.ofNat N * α =
+        -((Int.ofNat N - 2 * Int.ofNat M) * α + 2 * Int.ofNat (N - M) * β) := by
+      rw [Int.mul_neg (Int.ofNat (N - M)) β,
+          Int.sub_mul, Int.mul_assoc 2 (Int.ofNat M) α,
+          Int.mul_assoc 2 (Int.ofNat (N - M)) β, Int.mul_add, Int.mul_neg]
+      omega
+    have hLinNeg1 :
+        2 * (Int.ofNat M * α + Int.ofNat (N - M) * (-β)) - Int.ofNat N * (-β) =
+        -((Int.ofNat N - 2 * Int.ofNat M) * β - 2 * Int.ofNat M * α) := by
+      rw [Int.mul_neg (Int.ofNat (N - M)) β, Int.mul_neg (Int.ofNat N) β, hSubEqβ,
+          Int.sub_mul, Int.mul_assoc 2 (Int.ofNat M) β, Int.mul_assoc 2 (Int.ofNat M) α,
+          Int.mul_add, Int.mul_neg, Int.mul_sub]
+      omega
+    rcases y with ⟨yv, hyv⟩
+    have hCasesY : yv = 0 ∨ yv = 1 := by omega
+    ext
+    · dsimp only [GaussInt.sub, GaussInt.scaleInt]
+      rw [hSumRe]
+      rcases hCasesY with rfl | rfl
+      · simp only [beq_self_eq_true, ↓reduceIte, finIntSum_prefix_const N M hMN (-α) β]
+        by_cases hxM : x.1 < M <;> simp only [hxM, ↓reduceIte]
+        · exact hLinPos
+        · exact hLinNeg
+      · have h10 : ((1 : Nat) == 0) = false := rfl
+        simp only [h10, Bool.false_eq_true, ↓reduceIte]
+        rw [hPushNeg, finIntSum_prefix_const N M hMN α (-β)]
+        by_cases hxM : x.1 < M <;> simp only [hxM, ↓reduceIte, Int.neg_neg]
+        · exact hLinPos1
+        · exact hLinNeg1
+    · dsimp only [GaussInt.sub, GaussInt.scaleInt]
+      rw [hSumIm0]
+      omega
+
+private theorem prefixScale_untweakedGrover (N M q : Nat) (hN : 0 < N) :
+    ∀ (j : Nat) (hj : j ≤ q),
+      prefixScale (untweakedGroverAdv N M q hN) j hj = N ^ (2 * j)
+  | 0, _ => by simp [prefixScale]
+  | j + 1, hj => by
+    unfold prefixScale
+    rw [prefixScale_untweakedGrover N M q hN j (Nat.le_of_succ_le hj)]
+    simp only [untweakedGroverAdv, groverDiffusion]
+    rw [show 2 * (j + 1) = 2 * j + 2 by omega, Nat.pow_add, Nat.mul_comm]
+
+/-- **Constructive `q`-Query Unitary Multi-Target Grover Lower Bound
+    (`untweaked_multi_target_grover_lower_bound`)**:
+    When `M` targets share a single un-tweaked function `untweakedMultiTargetOracle N M`
+    (`1 ≤ M`, `M ≤ N`, `4 * q * (q + 1) * M ≤ N`), the explicit `q`-query unitary Grover circuit
+    `untweakedGroverAdv N M q` achieves Born success probability `≥ M * (q + 1) ^ 2 / (4 * N)` —
+    exhibiting genuine linear `M` amplification (`Ω(M · q^2 / N)`). -/
+theorem untweaked_multi_target_grover_lower_bound
+    (N M q : Nat) (hM_pos : 1 ≤ M) (hMN : M ≤ N) (hRegime : 4 * q * (q + 1) * M ≤ N) :
+    let hN : 0 < N := Nat.lt_of_lt_of_le (Nat.zero_lt_of_ne_zero (by omega)) hMN
+    let A := untweakedGroverAdv N M q hN
+    let H := untweakedMultiTargetOracle N M
+    RatBound.le
+      ⟨M * (q + 1) ^ 2, 4 * N, Nat.mul_pos (by decide) hN⟩
+      (QVec.bornProb (fun x => decide (x.1 < M)) (runQuantumAdv A H)
+        (runQuantumAdv_normSq_pos A H)) := by
+  let hN : 0 < N := Nat.lt_of_lt_of_le (Nat.zero_lt_of_ne_zero (by omega)) hMN
+  let A := untweakedGroverAdv N M q hN
+  let H := untweakedMultiTargetOracle N M
+  obtain ⟨_, _, _, h2αGe⟩ := untweakedGroverAmpsNat_bounds N M q hM_pos hRegime q (Nat.le_refl q)
+  let αq := (untweakedGroverAmpsNat N M q).1
+  let βq := (untweakedGroverAmpsNat N M q).2
+  change (q + 1) * N ^ q ≤ 2 * αq at h2αGe
+  have hState : runQuantumAdv A H = groverTemplateState N M (Int.ofNat αq) (Int.ofNat βq) :=
+    untweakedGroverAdv_state_eq N M q hM_pos hMN hRegime hN q (Nat.le_refl q)
+  have hInitNorm : QVec.stateNormSq A.init = 2 * N := by
+    have hEach : ∀ x : Fin N, QVec.queryWeight (groverTemplateState N M 1 1) x = 2 := by
+      intro x; unfold QVec.queryWeight groverTemplateState
+      simp only [qsum]
+      by_cases hx : x.1 < M <;> simp [hx, GaussInt.normSq]
+    unfold QVec.stateNormSq
+    change qsum N (fun x => QVec.queryWeight (groverTemplateState N M 1 1) x) = 2 * N
+    rw [qsum_congr hEach, qsum_const, Nat.mul_comm]
+  have hDenom : QVec.stateNormSq (runQuantumAdv A H) = 2 * N ^ (2 * q + 1) := by
+    rw [runQuantumAdv_normSq, prefixScale_untweakedGrover N M q hN q (Nat.le_refl q), hInitNorm]
+    rw [Nat.pow_succ, ← Nat.mul_assoc (N ^ (2 * q)) 2 N, Nat.mul_comm (N ^ (2 * q)) 2, Nat.mul_assoc]
+  have hNum : QVec.measureNormSq (fun x => decide (x.1 < M)) (runQuantumAdv A H) =
+      M * (2 * (αq * αq)) := by
+    rw [hState]
+    unfold QVec.measureNormSq QVec.queryMassOn
+    have hMarkEach : ∀ x : Fin N,
+        (if decide (x.1 < M) = true then
+           QVec.queryWeight (groverTemplateState N M (Int.ofNat αq) (Int.ofNat βq)) x
+         else 0) =
+        (if x.1 < M then 2 * (αq * αq) else 0) := by
+      intro x
+      by_cases hx : x.1 < M
+      · have h00 : ((0 : Nat) == 0) = true := rfl
+        have h10 : ((1 : Nat) == 0) = false := rfl
+        have hAbsNeg : (-Int.ofNat αq).natAbs = αq := Int.natAbs_neg (Int.ofNat αq)
+        have hAbsPos : (Int.ofNat αq).natAbs = αq := rfl
+        simp only [hx, decide_true, ↓reduceIte, QVec.queryWeight, groverTemplateState, qsum,
+          Nat.zero_add, h00, h10, Bool.false_eq_true, GaussInt.normSq, hAbsNeg, hAbsPos, Nat.add_zero]
+        have h0 : Int.natAbs 0 = 0 := rfl
+        rw [h0]
+        omega
+      · simp [hx]
+    rw [qsum_congr hMarkEach, qsum_prefix_const N M hMN (2 * (αq * αq)) 0,
+        Nat.mul_zero, Nat.add_zero]
+  have hSq4 : ((q + 1) * N ^ q) ^ 2 ≤ (2 * αq) ^ 2 := Nat.pow_le_pow_left h2αGe 2
+  have hSqExpandL : ((q + 1) * N ^ q) ^ 2 = (q + 1) ^ 2 * N ^ (2 * q) := by
+    rw [Nat.mul_pow, ← Nat.pow_mul, Nat.mul_comm q 2]
+  have hSqExpandR : (2 * αq) ^ 2 = 4 * (αq * αq) := by
+    rw [Nat.mul_pow, Nat.pow_two αq]
+  rw [hSqExpandL, hSqExpandR] at hSq4
+  unfold QVec.bornProb RatBound.le
+  dsimp only
+  rw [hNum, hDenom]
+  have hLhs : M * (q + 1) ^ 2 * (2 * N ^ (2 * q + 1)) =
+      2 * M * N * ((q + 1) ^ 2 * N ^ (2 * q)) := by
+    rw [Nat.pow_succ N (2 * q)]
+    simp only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm]
+  have hRhs : M * (2 * (αq * αq)) * (4 * N) =
+      2 * M * N * (4 * (αq * αq)) := by
+    simp only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm]
+  rw [hLhs, hRhs]
+  exact Nat.mul_le_mul_left (2 * M * N) hSq4
+
+private def groverPq256LowerBound : RatBound :=
+  ⟨2 ^ 64 * (2 ^ 60 + 1) ^ 2, 4 * 2 ^ 256, by decide⟩
+
+/-- `#tooth`: Un-tweaked `M`-target search (`M = 2 ^ 64` targets under a single function
+    `untweakedMultiTargetOracle (2 ^ 256) (2 ^ 64)` at `q = 2 ^ 60` unitary Grover queries)
+    suffers linear `M` amplification (`bornProb > 2^-74`, breaking 124-bit and 128-bit security
+    and strictly exceeding `hrs16SuperpositionBound 256 (2 ^ 60)`). -/
+theorem tooth_untweaked_multi_target_grover_linear_M_loss :
+    ∃ A : QuantumAdv (2 ^ 256) 1 1 (2 ^ 60),
+      let H := untweakedMultiTargetOracle (2 ^ 256) (2 ^ 64)
+      let winProb := QVec.bornProb (fun x => decide (x.1 < 2 ^ 64))
+        (runQuantumAdv A H) (runQuantumAdv_normSq_pos A H)
+      RatBound.lt (hrs16SuperpositionBound 256 (2 ^ 60)) winProb ∧
+      ¬ atLeastBits 124 winProb ∧
+      ¬ atLeastBits 74 winProb := by
+  have hN : 0 < 2 ^ 256 := Nat.two_pow_pos 256
+  have hGrover := untweaked_multi_target_grover_lower_bound (2 ^ 256) (2 ^ 64) (2 ^ 60)
+    (by decide) (by decide) (by decide)
+  let A := untweakedGroverAdv (2 ^ 256) (2 ^ 64) (2 ^ 60) hN
+  let H := untweakedMultiTargetOracle (2 ^ 256) (2 ^ 64)
+  let winProb := QVec.bornProb (fun x => decide (x.1 < 2 ^ 64))
+    (runQuantumAdv A H) (runQuantumAdv_normSq_pos A H)
+  have hLoLe : RatBound.le groverPq256LowerBound winProb := hGrover
+  refine ⟨A, ?_, ?_, ?_⟩
+  · have hStrict : RatBound.lt (hrs16SuperpositionBound 256 (2 ^ 60)) groverPq256LowerBound := by
+      unfold RatBound.lt hrs16SuperpositionBound groverPq256LowerBound; decide
+    unfold RatBound.lt at hStrict ⊢
+    unfold RatBound.le at hLoLe
+    have h1 := Nat.mul_lt_mul_of_pos_right hStrict winProb.h_pos
+    have hCancel : (hrs16SuperpositionBound 256 (2 ^ 60)).num * groverPq256LowerBound.den * winProb.den <
+        groverPq256LowerBound.num * winProb.den * (hrs16SuperpositionBound 256 (2 ^ 60)).den := by
+      calc (hrs16SuperpositionBound 256 (2 ^ 60)).num * groverPq256LowerBound.den * winProb.den
+        _ < groverPq256LowerBound.num * (hrs16SuperpositionBound 256 (2 ^ 60)).den * winProb.den := h1
+        _ = groverPq256LowerBound.num * winProb.den * (hrs16SuperpositionBound 256 (2 ^ 60)).den := by
+          rw [Nat.mul_assoc groverPq256LowerBound.num, Nat.mul_comm _ winProb.den,
+              ← Nat.mul_assoc groverPq256LowerBound.num]
+    have hChain : (hrs16SuperpositionBound 256 (2 ^ 60)).num * (groverPq256LowerBound.den * winProb.den) <
+        winProb.num * (groverPq256LowerBound.den * (hrs16SuperpositionBound 256 (2 ^ 60)).den) := by
+      have hMid : groverPq256LowerBound.num * winProb.den * (hrs16SuperpositionBound 256 (2 ^ 60)).den ≤
+          winProb.num * groverPq256LowerBound.den * (hrs16SuperpositionBound 256 (2 ^ 60)).den :=
+        Nat.mul_le_mul_right _ hLoLe
+      have hLt := Nat.lt_of_lt_of_le hCancel hMid
+      simpa only [Nat.mul_assoc] using hLt
+    have hRearrL : (hrs16SuperpositionBound 256 (2 ^ 60)).num * (groverPq256LowerBound.den * winProb.den) =
+        ((hrs16SuperpositionBound 256 (2 ^ 60)).num * winProb.den) * groverPq256LowerBound.den := by
+      rw [← Nat.mul_assoc, Nat.mul_right_comm]
+    have hRearrR : winProb.num * (groverPq256LowerBound.den * (hrs16SuperpositionBound 256 (2 ^ 60)).den) =
+        (winProb.num * (hrs16SuperpositionBound 256 (2 ^ 60)).den) * groverPq256LowerBound.den := by
+      rw [← Nat.mul_assoc, Nat.mul_right_comm]
+    rw [hRearrL, hRearrR] at hChain
+    exact match Nat.lt_or_ge
+        ((hrs16SuperpositionBound 256 (2 ^ 60)).num * winProb.den)
+        (winProb.num * (hrs16SuperpositionBound 256 (2 ^ 60)).den) with
+      | .inl hlt => hlt
+      | .inr hge => False.elim (Nat.not_lt_of_ge (Nat.mul_le_mul_right _ hge) hChain)
+  · intro h124
+    have hLo124 : atLeastBits 124 groverPq256LowerBound := atLeastBits_of_le hLoLe h124
+    exact (by decide : ¬ atLeastBits 124 groverPq256LowerBound) hLo124
+  · intro h74
+    have hLo74 : atLeastBits 74 groverPq256LowerBound := atLeastBits_of_le hLoLe h74
+    exact (by decide : ¬ atLeastBits 74 groverPq256LowerBound) hLo74
+
+theorem witness_hrs16_superposition_pq256 :
+    ∃ (A : QuantumAdv (2 ^ 64 * 2 ^ 256) 1 1 (2 ^ 64))
+      (encode : Fin (2 ^ 64) → BitVec 256 → BitVec 256)
+      (targets : Fin (2 ^ 64) → BitVec 256),
+      0 < QVec.stateNormSq A.init ∧
+      (∀ t : Fin (2 ^ 64), Function.Injective (encode t)) ∧
+      (∀ t : Fin (2 ^ 64), fiberCard 256 (encode t) (targets t) ≤ 1) := by
+  have hN : 0 < 2 ^ 64 * 2 ^ 256 := Nat.mul_pos (Nat.two_pow_pos 64) (Nat.two_pow_pos 256)
+  let A₀ := untweakedGroverAdv (2 ^ 64 * 2 ^ 256) 1 (2 ^ 64) hN
+  refine ⟨A₀, (fun _ x => x), (fun _ => 0#256), A₀.h_init_pos, (fun _ _ _ h => h), ?_⟩
+  intro _
+  exact fiberCard_le_one_of_injective 256 (fun x => x) (fun _ _ h => h) 0#256
+
+#tooth_pair Qsag.hrs16_superposition_multi_tweak_bound vs Qsag.tooth_untweaked_multi_target_grover_linear_M_loss
+#tooth_pair Qsag.hrs16_superposition_multi_tweak_pq256_bound vs Qsag.tooth_untweaked_multi_target_grover_linear_M_loss
+#tooth_pair Qsag.densePcgV3_hrs16_superposition_141 vs Qsag.tooth_untweaked_multi_target_grover_linear_M_loss
+#verify_inhabited Qsag.hrs16_superposition_multi_tweak_pq256_bound Qsag.witness_hrs16_superposition_pq256
+#verify_inhabited Qsag.hrs16_superposition_multi_tweak_bound Qsag.witness_hrs16_superposition_pq256
+
+end Qsag

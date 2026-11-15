@@ -2383,3 +2383,1093 @@ private theorem sum_dfmEventEnvelope_fiber_eq {cardX w cardAnc q : Nat}
     projected point `xStar = proj x` is doomed and is reprogrammed to a flipping challenge is at
     most **`(2 * Q + 1)^2 * badCard / 2^w`**. The fibers `{x | proj x = xStar}` are disjoint, so
     the bound does NOT pay for the size of the output register. -/
+theorem qrom_unitary_measure_reprogram_rbr_step_projected
+    {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (H : Fin cardX → BitVec w)
+    (proj : Fin cardX → Fin cardX)
+    (isDoomed : Fin cardX → Bool)
+    (flipsToLive : Fin cardX → BitVec w → Bool)
+    (badCard : Nat)
+    (hRbr : ∀ x : Fin cardX, isDoomed x = true →
+      qsum (2 ^ w) (fun j => if flipsToLive x (BitVec.ofFin j) = true then 1 else 0) ≤ badCard) :
+    RatBound.le
+      ⟨qsum cardX (fun xStar =>
+         if isDoomed xStar = true then
+           qsum (2 ^ w) (fun j =>
+             if flipsToLive xStar (BitVec.ofFin j) = true then
+               QVec.queryMassOn (fun x => decide (xStar = proj x))
+                 (runQuantumAdv A (reprogramOracle H xStar (BitVec.ofFin j)))
+             else 0)
+         else 0),
+       2 ^ w * QVec.stateNormSq (runQuantumAdv A H),
+       Nat.mul_pos (Nat.two_pow_pos w) (runQuantumAdv_normSq_pos A H)⟩
+      ⟨(2 * Q + 1) ^ 2 * badCard, 2 ^ w, Nat.two_pow_pos w⟩ := by
+  dsimp only [RatBound.le]
+  let normFinal := QVec.stateNormSq (runQuantumAdv A H)
+  have hPerX :
+      qsum cardX (fun xStar =>
+        if isDoomed xStar = true then
+          qsum (2 ^ w) (fun j =>
+            if flipsToLive xStar (BitVec.ofFin j) = true then
+              QVec.queryMassOn (fun x => decide (xStar = proj x))
+                (runQuantumAdv A (reprogramOracle H xStar (BitVec.ofFin j)))
+            else 0)
+        else 0) ≤
+      qsum cardX (fun xStar =>
+        badCard * ((2 * Q + 1) *
+          dfmEventEnvelope A H xStar (fun x => decide (xStar = proj x)))) := by
+    apply qsum_le_qsum; intro xStar
+    cases hD : isDoomed xStar
+    · simp only [Bool.false_eq_true, ↓reduceIte, Nat.zero_le]
+    · simp only [↓reduceIte]
+      have hIn :
+          qsum (2 ^ w) (fun j =>
+            if flipsToLive xStar (BitVec.ofFin j) = true then
+              QVec.queryMassOn (fun x => decide (xStar = proj x))
+                (runQuantumAdv A (reprogramOracle H xStar (BitVec.ofFin j)))
+            else 0) ≤
+          qsum (2 ^ w) (fun j =>
+            (if flipsToLive xStar (BitVec.ofFin j) = true then 1 else 0) *
+              ((2 * Q + 1) *
+                dfmEventEnvelope A H xStar (fun x => decide (xStar = proj x)))) := by
+        apply qsum_le_qsum; intro j
+        cases flipsToLive xStar (BitVec.ofFin j)
+        · simp only [Bool.false_eq_true, ↓reduceIte, Nat.zero_mul, Nat.le_refl]
+        · simp only [↓reduceIte, Nat.one_mul]
+          exact queryMassOn_reprogram_le_dfmEventEnvelope A H xStar (BitVec.ofFin j) _
+      rw [qsum_mul_right] at hIn
+      exact Nat.le_trans hIn
+        (Nat.mul_le_mul_right _ (hRbr xStar hD))
+  rw [qsum_mul_left badCard, qsum_mul_left (2 * Q + 1),
+      sum_dfmEventEnvelope_fiber_eq] at hPerX
+  have hSqEq : badCard * ((2 * Q + 1) * ((2 * Q + 1) * normFinal)) =
+      (2 * Q + 1) ^ 2 * badCard * normFinal := by
+    rw [Nat.pow_two, ← Nat.mul_assoc (2 * Q + 1) (2 * Q + 1) normFinal,
+        Nat.mul_left_comm badCard ((2 * Q + 1) * (2 * Q + 1)) normFinal,
+        Nat.mul_assoc ((2 * Q + 1) * (2 * Q + 1)) badCard normFinal]
+  rw [hSqEq] at hPerX
+  have hMul2w := Nat.mul_le_mul_right (2 ^ w) hPerX
+  have hRhsEq : (2 * Q + 1) ^ 2 * badCard * normFinal * 2 ^ w =
+      (2 * Q + 1) ^ 2 * badCard * (2 ^ w * normFinal) := by
+    rw [Nat.mul_assoc ((2 * Q + 1) ^ 2 * badCard) normFinal (2 ^ w),
+        Nat.mul_comm normFinal (2 ^ w)]
+  rwa [hRhsEq] at hMul2w
+
+/-- **Unitary Measure-and-Reprogram Single-Round RBR Theorem
+    (`qrom_unitary_measure_reprogram_rbr_step`)**: the special case `proj = id` of
+    `qrom_unitary_measure_reprogram_rbr_step_projected` (the output register IS the reprogrammed
+    query point): the exact Born-rule RBR transition probability is bounded by
+    **`(2 * Q + 1)^2 * badCard / 2^w`**. -/
+theorem qrom_unitary_measure_reprogram_rbr_step
+    {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (H : Fin cardX → BitVec w)
+    (isDoomed : Fin cardX → Bool)
+    (flipsToLive : Fin cardX → BitVec w → Bool)
+    (badCard : Nat)
+    (hRbr : ∀ x : Fin cardX, isDoomed x = true →
+      qsum (2 ^ w) (fun j => if flipsToLive x (BitVec.ofFin j) = true then 1 else 0) ≤ badCard) :
+    let normFinal := QVec.stateNormSq (runQuantumAdv A H)
+    RatBound.le
+      ⟨qsum cardX (fun xStar =>
+         if isDoomed xStar = true then
+           qsum (2 ^ w) (fun j =>
+             if flipsToLive xStar (BitVec.ofFin j) = true then
+               QVec.queryWeight (runQuantumAdv A (reprogramOracle H xStar (BitVec.ofFin j))) xStar
+             else 0)
+         else 0),
+       2 ^ w * normFinal,
+       Nat.mul_pos (Nat.two_pow_pos w) (runQuantumAdv_normSq_pos A H)⟩
+      ⟨(2 * Q + 1) ^ 2 * badCard, 2 ^ w, Nat.two_pow_pos w⟩ := by
+  have h := qrom_unitary_measure_reprogram_rbr_step_projected A H id isDoomed flipsToLive
+    badCard hRbr
+  dsimp only [RatBound.le] at h ⊢
+  refine Nat.le_trans (Nat.mul_le_mul_right _ (Nat.le_of_eq ?_)) h
+  apply qsum_congr; intro xStar
+  cases isDoomed xStar
+  · rfl
+  · simp only [↓reduceIte]
+    apply qsum_congr; intro j
+    cases flipsToLive xStar (BitVec.ofFin j)
+    · rfl
+    · simp only [↓reduceIte]
+      exact (queryMassOn_point_eq _ xStar).symm
+
+/-- **Oracle-Dependent (Adaptive Across Rounds) Measure-and-Reprogram Step
+    (`qrom_adaptive_oracle_dependent_rbr_step`)**:
+    In a multi-round Fiat–Shamir transcript, whether the round-`r` point `xStar` is doomed, and
+    whether its challenge makes it live, depend on the ORACLE (through the challenges of earlier
+    rounds). Both predicates here take the oracle as an argument and are evaluated on the very
+    oracle `H[xStar ↦ ch]` the adversary ran against. The only structural requirement is
+    acyclicity (`hLocal`): doomedness of `xStar` does not read the oracle AT `xStar`. -/
+theorem qrom_adaptive_oracle_dependent_rbr_step
+    {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (H : Fin cardX → BitVec w)
+    (proj : Fin cardX → Fin cardX)
+    (isDoomedAt : (Fin cardX → BitVec w) → Fin cardX → Bool)
+    (isLiveAfter : (Fin cardX → BitVec w) → Fin cardX → Bool)
+    (badCard : Nat)
+    (hLocal : ∀ (x : Fin cardX) (ch : BitVec w),
+      isDoomedAt (reprogramOracle H x ch) x = isDoomedAt H x)
+    (hRbr : ∀ x : Fin cardX, isDoomedAt H x = true →
+      qsum (2 ^ w) (fun j =>
+        if isLiveAfter (reprogramOracle H x (BitVec.ofFin j)) x = true then 1 else 0) ≤ badCard) :
+    RatBound.le
+      ⟨qsum cardX (fun xStar =>
+         qsum (2 ^ w) (fun j =>
+           if (isDoomedAt (reprogramOracle H xStar (BitVec.ofFin j)) xStar &&
+               isLiveAfter (reprogramOracle H xStar (BitVec.ofFin j)) xStar) = true then
+             QVec.queryMassOn (fun x => decide (xStar = proj x))
+               (runQuantumAdv A (reprogramOracle H xStar (BitVec.ofFin j)))
+           else 0)),
+       2 ^ w * QVec.stateNormSq (runQuantumAdv A H),
+       Nat.mul_pos (Nat.two_pow_pos w) (runQuantumAdv_normSq_pos A H)⟩
+      ⟨(2 * Q + 1) ^ 2 * badCard, 2 ^ w, Nat.two_pow_pos w⟩ := by
+  have h := qrom_unitary_measure_reprogram_rbr_step_projected A H proj (isDoomedAt H)
+    (fun x ch => isLiveAfter (reprogramOracle H x ch) x) badCard hRbr
+  dsimp only [RatBound.le] at h ⊢
+  refine Nat.le_trans (Nat.mul_le_mul_right _ (Nat.le_of_eq ?_)) h
+  apply qsum_congr; intro xStar
+  simp only [hLocal]
+  cases isDoomedAt H xStar
+  · simp only [Bool.false_and, Bool.false_eq_true, ↓reduceIte, qsum_const, Nat.mul_zero]
+  · simp only [Bool.true_and, ↓reduceIte]
+
+/-- One Fiat–Shamir round of a transcript-chained multi-round protocol as seen by the QROM
+    reduction against the fixed background oracle `H`: the projection from the adversary's output
+    to this round's query point, the oracle-dependent doomed / live-after predicates, and the
+    round's bad-challenge count with its acyclicity and RBR flip-bound obligations. -/
+structure QromRbrRound (cardX w : Nat) (H : Fin cardX → BitVec w) where
+  proj : Fin cardX → Fin cardX
+  isDoomedAt : (Fin cardX → BitVec w) → Fin cardX → Bool
+  isLiveAfter : (Fin cardX → BitVec w) → Fin cardX → Bool
+  badCard : Nat
+  doomed_local : ∀ (x : Fin cardX) (ch : BitVec w),
+    isDoomedAt (reprogramOracle H x ch) x = isDoomedAt H x
+  flip_bound : ∀ x : Fin cardX, isDoomedAt H x = true →
+    qsum (2 ^ w) (fun j =>
+      if isLiveAfter (reprogramOracle H x (BitVec.ofFin j)) x = true then 1 else 0) ≤ badCard
+
+/-- **Inhabited, oracle-dependent `QromRbrRound`**: over `Fin 2 → BitVec 2`, the round whose
+    point is always doomed and becomes live exactly when the REPROGRAMMED oracle value at that
+    point is zero has `badCard = 1`, attained with equality at every point. -/
+def qromZeroChallengeRound (H : Fin 2 → BitVec 2) : QromRbrRound 2 2 H where
+  proj := id
+  isDoomedAt := fun _ _ => true
+  isLiveAfter := fun O x => decide ((O x).toNat = 0)
+  badCard := 1
+  doomed_local := fun _ _ => rfl
+  flip_bound := fun x _ => by
+    have hEq : ∀ j : Fin (2 ^ 2),
+        decide (((reprogramOracle H x (BitVec.ofFin j)) x).toNat = 0) = decide (j.1 = 0) := by
+      intro j
+      simp only [reprogramOracle, ↓reduceIte, BitVec.toNat_ofFin]
+    rw [qsum_congr (fun j => by rw [hEq j])]
+    decide
+
+/-- Total reprogrammed Born mass of the doomed-to-live flip event of round `rd`. -/
+def qromRoundFlipMass {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q) (H : Fin cardX → BitVec w)
+    (rd : QromRbrRound cardX w H) : Nat :=
+  qsum cardX (fun xStar =>
+    qsum (2 ^ w) (fun j =>
+      if (rd.isDoomedAt (reprogramOracle H xStar (BitVec.ofFin j)) xStar &&
+          rd.isLiveAfter (reprogramOracle H xStar (BitVec.ofFin j)) xStar) = true then
+        QVec.queryMassOn (fun x => decide (xStar = rd.proj x))
+          (runQuantumAdv A (reprogramOracle H xStar (BitVec.ofFin j)))
+      else 0))
+
+/-- **`k`-Round QROM Measure-and-Reprogram Union Theorem
+    (`qrom_multiRound_measure_reprogram_union`)**:
+    For ANY `Q`-query unitary adversary and ANY list of Fiat–Shamir rounds, the summed
+    doomed-to-live flip mass over all rounds is at most
+    **`(2 * Q + 1)^2 * (∑_r badCard_r) / 2^w`**: each round pays `(2 * Q + 1)^2` once (no
+    `(2 * Q + 1)^{2k}` blow-up), derived from the unitary step theorem rather than assumed. -/
+theorem qrom_multiRound_measure_reprogram_union
+    {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (H : Fin cardX → BitVec w) :
+    ∀ (rounds : List (QromRbrRound cardX w H)),
+      RatBound.le
+        ⟨(rounds.map (qromRoundFlipMass A H)).sum,
+         2 ^ w * QVec.stateNormSq (runQuantumAdv A H),
+         Nat.mul_pos (Nat.two_pow_pos w) (runQuantumAdv_normSq_pos A H)⟩
+        ⟨(2 * Q + 1) ^ 2 * (rounds.map (fun rd => rd.badCard)).sum, 2 ^ w, Nat.two_pow_pos w⟩
+  | [] => by
+    show 0 * 2 ^ w ≤ _
+    rw [Nat.zero_mul]
+    exact Nat.zero_le _
+  | rd :: rest => by
+    have ih := qrom_multiRound_measure_reprogram_union A H rest
+    have h1 : qromRoundFlipMass A H rd * 2 ^ w ≤
+        (2 * Q + 1) ^ 2 * rd.badCard * (2 ^ w * QVec.stateNormSq (runQuantumAdv A H)) :=
+      qrom_adaptive_oracle_dependent_rbr_step A H rd.proj rd.isDoomedAt rd.isLiveAfter
+        rd.badCard rd.doomed_local rd.flip_bound
+    have ih' : (rest.map (qromRoundFlipMass A H)).sum * 2 ^ w ≤
+        (2 * Q + 1) ^ 2 * (rest.map (fun rd => rd.badCard)).sum *
+          (2 ^ w * QVec.stateNormSq (runQuantumAdv A H)) := ih
+    show (qromRoundFlipMass A H rd + (rest.map (qromRoundFlipMass A H)).sum) * 2 ^ w ≤
+      (2 * Q + 1) ^ 2 * (rd.badCard + (rest.map (fun rd => rd.badCard)).sum) *
+        (2 ^ w * QVec.stateNormSq (runQuantumAdv A H))
+    rw [Nat.add_mul, Nat.mul_add, Nat.add_mul]
+    exact Nat.add_le_add h1 ih'
+
+/-- Sum over every oracle `Fin n → BitVec w`, with each function occurring once.
+    The recursion is the constructive product enumeration of the finite output alphabet. -/
+def uniformOracleSum (w : Nat) : (n : Nat) → ((Fin n → BitVec w) → Nat) → Nat
+  | 0, f => f Fin.elim0
+  | n + 1, f => qsum (2 ^ w) (fun j =>
+      uniformOracleSum w n (fun H => f (Fin.cases (BitVec.ofFin j) H)))
+
+theorem uniformOracleSum_congr (w : Nat) : ∀ (n : Nat)
+    (f g : (Fin n → BitVec w) → Nat), (∀ H, f H = g H) →
+    uniformOracleSum w n f = uniformOracleSum w n g
+  | 0, _, _, h => h _
+  | n + 1, _, _, h => qsum_congr (fun _ => uniformOracleSum_congr w n _ _ (fun _ => h _))
+
+theorem uniformOracleSum_const (w : Nat) : ∀ (n c : Nat),
+    uniformOracleSum w n (fun _ => c) = (2 ^ w) ^ n * c
+  | 0, c => (Nat.one_mul c).symm
+  | n + 1, c => by
+    simp only [uniformOracleSum, uniformOracleSum_const w n c, qsum_const,
+      Nat.pow_succ, Nat.mul_comm, Nat.mul_left_comm]
+
+theorem uniformOracleSum_mul (w : Nat) : ∀ (n c : Nat)
+    (f : (Fin n → BitVec w) → Nat),
+    uniformOracleSum w n (fun H => c * f H) = c * uniformOracleSum w n f
+  | 0, _, _ => rfl
+  | n + 1, c, f => by
+    simp only [uniformOracleSum, uniformOracleSum_mul w n c, qsum_mul_left]
+
+theorem uniformOracleSum_le (w : Nat) : ∀ (n : Nat)
+    (f g : (Fin n → BitVec w) → Nat), (∀ H, f H ≤ g H) →
+    uniformOracleSum w n f ≤ uniformOracleSum w n g
+  | 0, _, _, h => h _
+  | n + 1, _, _, h => qsum_le_qsum (fun _ => uniformOracleSum_le w n _ _ (fun _ => h _))
+
+theorem uniformOracleSum_qsum (w : Nat) : ∀ (n k : Nat)
+    (f : (Fin n → BitVec w) → Fin k → Nat),
+    uniformOracleSum w n (fun H => qsum k (f H)) =
+      qsum k (fun j => uniformOracleSum w n (fun H => f H j))
+  | 0, _, _ => rfl
+  | n + 1, k, f => by
+    simp only [uniformOracleSum, uniformOracleSum_qsum w n k]
+    exact qsum_comm _ _ _
+
+/-- Replacing one coordinate of a uniformly random oracle by an independent uniform
+    challenge preserves its distribution. This identity applies to arbitrary oracle-dependent
+    payoffs, including the Born mass of an adaptive adversary. No independence of the payoff
+    from the reprogrammed coordinate is required. -/
+theorem uniformOracleSum_resample (w : Nat) : ∀ (n : Nat) (x : Fin n)
+    (f : (Fin n → BitVec w) → Nat),
+    uniformOracleSum w n (fun H => qsum (2 ^ w) (fun j =>
+      f (reprogramOracle H x (BitVec.ofFin j)))) =
+      2 ^ w * uniformOracleSum w n f
+  | 0, x, _ => Fin.elim0 x
+  | n + 1, x, f => by
+    refine Fin.cases ?_ (fun y => ?_) x
+    · have heq : ∀ (a b : BitVec w) (H : Fin n → BitVec w),
+          reprogramOracle (Fin.cases a H) 0 b = Fin.cases b H := by
+        intro a b H
+        funext z
+        refine Fin.cases ?_ (fun i => ?_) z
+        · simp [reprogramOracle]
+        · simp [reprogramOracle, Fin.succ_ne_zero]
+      simp only [uniformOracleSum, heq, uniformOracleSum_qsum]
+      rw [qsum_const]
+    · have heq : ∀ (a b : BitVec w) (H : Fin n → BitVec w),
+          reprogramOracle (Fin.cases a H) y.succ b =
+            Fin.cases a (reprogramOracle H y b) := by
+        intro a b H
+        funext z
+        refine Fin.cases ?_ (fun i => ?_) z
+        · simp [reprogramOracle, Ne.symm (Fin.succ_ne_zero y)]
+        · simp [reprogramOracle, Fin.succ_inj]
+      simp only [uniformOracleSum, heq]
+      rw [← qsum_mul_left]
+      apply qsum_congr
+      intro j
+      exact uniformOracleSum_resample w n y (fun H => f (Fin.cases (BitVec.ofFin j) H))
+
+/-- A round's ordinary (unreprogrammed) success mass, summed over the projected output point. -/
+def qromOrdinaryFlipMass {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q) (H : Fin cardX → BitVec w)
+    (proj : Fin cardX → Fin cardX)
+    (doomed live : (Fin cardX → BitVec w) → Fin cardX → Bool) : Nat :=
+  qsum cardX (fun x => if (doomed H x && live H x) = true then
+    QVec.queryMassOn (fun z => decide (x = proj z)) (runQuantumAdv A H) else 0)
+
+/-- Exact bridge from the per-oracle reprogrammed mass to uniformly averaged ordinary
+    adversary success mass. The factor `2^w` cancels the sampled-challenge denominator. -/
+theorem qrom_uniform_oracle_flip_mass {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (round : (H : Fin cardX → BitVec w) → QromRbrRound cardX w H)
+    (proj : Fin cardX → Fin cardX)
+    (doomed live : (Fin cardX → BitVec w) → Fin cardX → Bool)
+    (hp : ∀ H, (round H).proj = proj)
+    (hd : ∀ H, (round H).isDoomedAt = doomed)
+    (hl : ∀ H, (round H).isLiveAfter = live) :
+    uniformOracleSum w cardX (fun H => qromRoundFlipMass A H (round H)) =
+      2 ^ w * uniformOracleSum w cardX (fun H =>
+        qromOrdinaryFlipMass A H proj doomed live) := by
+  simp only [qromRoundFlipMass, hp, hd, hl, qromOrdinaryFlipMass]
+  rw [uniformOracleSum_qsum, uniformOracleSum_qsum, ← qsum_mul_left]
+  apply qsum_congr
+  intro x
+  exact uniformOracleSum_resample w cardX x (fun H =>
+    if (doomed H x && live H x) = true then
+      QVec.queryMassOn (fun z => decide (x = proj z)) (runQuantumAdv A H) else 0)
+
+/-- Averaged QROM round bound with a uniformly random oracle. The denominator is exactly
+    the number of oracles times the adversary's oracle-independent squared norm. -/
+theorem qrom_uniform_oracle_round_bound {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (round : (H : Fin cardX → BitVec w) → QromRbrRound cardX w H)
+    (proj : Fin cardX → Fin cardX)
+    (doomed live : (Fin cardX → BitVec w) → Fin cardX → Bool)
+    (bad : Nat)
+    (hp : ∀ H, (round H).proj = proj)
+    (hd : ∀ H, (round H).isDoomedAt = doomed)
+    (hl : ∀ H, (round H).isLiveAfter = live)
+    (hb : ∀ H, (round H).badCard = bad) :
+    let norm := prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init
+    RatBound.le
+      ⟨uniformOracleSum w cardX (fun H => qromOrdinaryFlipMass A H proj doomed live),
+        (2 ^ w) ^ cardX * norm,
+        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos w))
+          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      ⟨(2 * Q + 1) ^ 2 * bad, 2 ^ w, Nat.two_pow_pos w⟩ := by
+  have hpoint : ∀ H, qromRoundFlipMass A H (round H) ≤
+      (2 * Q + 1) ^ 2 * bad *
+        (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init) := by
+    intro H
+    have h := qrom_multiRound_measure_reprogram_union A H [round H]
+    change qromRoundFlipMass A H (round H) * 2 ^ w ≤
+      (2 * Q + 1) ^ 2 * (round H).badCard *
+        (2 ^ w * QVec.stateNormSq (runQuantumAdv A H)) at h
+    rw [hb, runQuantumAdv_normSq] at h
+    apply Nat.le_of_mul_le_mul_right (c := 2 ^ w) _ (Nat.two_pow_pos w)
+    simpa only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm] using h
+  have havg := uniformOracleSum_le w cardX _ _ hpoint
+  rw [qrom_uniform_oracle_flip_mass A round proj doomed live hp hd hl,
+    uniformOracleSum_const] at havg
+  dsimp only [RatBound.le]
+  simpa only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm] using havg
+
+/-- Uniform-oracle multi-round union bound. Each round may depend on the entire oracle;
+    only its projection and predicate definitions are fixed across background-oracle choices.
+    The adversary remains fully adaptive, and the reduction pays the quadratic loss once. -/
+theorem qrom_uniform_oracle_multiRound_union {cardX w cardAnc Q k : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (round : Fin k → (H : Fin cardX → BitVec w) → QromRbrRound cardX w H)
+    (proj : Fin k → Fin cardX → Fin cardX)
+    (doomed live : Fin k → (Fin cardX → BitVec w) → Fin cardX → Bool)
+    (bad : Fin k → Nat)
+    (hp : ∀ r H, (round r H).proj = proj r)
+    (hd : ∀ r H, (round r H).isDoomedAt = doomed r)
+    (hl : ∀ r H, (round r H).isLiveAfter = live r)
+    (hb : ∀ r H, (round r H).badCard = bad r) :
+    let norm := prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init
+    RatBound.le
+      ⟨uniformOracleSum w cardX (fun H => qsum k (fun r =>
+          qromOrdinaryFlipMass A H (proj r) (doomed r) (live r))),
+        (2 ^ w) ^ cardX * norm,
+        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos w))
+          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      ⟨(2 * Q + 1) ^ 2 * qsum k bad, 2 ^ w, Nat.two_pow_pos w⟩ := by
+  have h := qsum_le_qsum (fun r => qrom_uniform_oracle_round_bound A (round r)
+    (proj r) (doomed r) (live r) (bad r) (hp r) (hd r) (hl r) (hb r))
+  dsimp only [RatBound.le] at h ⊢
+  rw [uniformOracleSum_qsum]
+  simpa only [qsum_mul_right, qsum_mul_left] using h
+
+/-- Expected adversary success over a uniformly random oracle. A protocol supplies the
+    ordinary round-flip covering property; averaging and measure-and-reprogram then give the
+    same single quadratic loss as the per-oracle union theorem. -/
+theorem qrom_uniform_oracle_success_bound {cardX w cardAnc Q k : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (accept : (Fin cardX → BitVec w) → Fin cardX → Bool)
+    (round : Fin k → (H : Fin cardX → BitVec w) → QromRbrRound cardX w H)
+    (proj : Fin k → Fin cardX → Fin cardX)
+    (doomed live : Fin k → (Fin cardX → BitVec w) → Fin cardX → Bool)
+    (bad : Fin k → Nat)
+    (hp : ∀ r H, (round r H).proj = proj r)
+    (hd : ∀ r H, (round r H).isDoomedAt = doomed r)
+    (hl : ∀ r H, (round r H).isLiveAfter = live r)
+    (hb : ∀ r H, (round r H).badCard = bad r)
+    (hCover : ∀ H, QVec.queryMassOn (accept H) (runQuantumAdv A H) ≤
+      qsum k (fun r => qromOrdinaryFlipMass A H (proj r) (doomed r) (live r))) :
+    let norm := prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init
+    RatBound.le
+      ⟨uniformOracleSum w cardX (fun H => QVec.queryMassOn (accept H) (runQuantumAdv A H)),
+        (2 ^ w) ^ cardX * norm,
+        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos w))
+          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      ⟨(2 * Q + 1) ^ 2 * qsum k bad, 2 ^ w, Nat.two_pow_pos w⟩ := by
+  have h := qrom_uniform_oracle_multiRound_union A round proj doomed live bad hp hd hl hb
+  exact Nat.le_trans (Nat.mul_le_mul_right (2 ^ w)
+    (uniformOracleSum_le w cardX _ _ hCover)) h
+
+/-! ### §3.2 `k`-Round RBR Induction, Online Merkle Extraction & Concrete `Hem` v6 (`k = 5`) -/
+
+/-- Exact `(2 * Q + 1)^2` Measure-and-Reprogram scaling of an interactive RBR round bound `b`. -/
+@[expose] def dfmRoundScale (Q : Nat) (b : RatBound) : RatBound :=
+  RatBound.scale ((2 * Q + 1) ^ 2) b
+
+/-- Recompute a position-tweaked Merkle root from a node digest and its authentication path.
+    `H lvl node` compresses the two children of node `node` at level `lvl`; `idx` is the index
+    of the current node and its parity selects the child slot. -/
+def merkleRootFromPath {D : Type} (H : Nat → Nat → D → D → D) : Nat → Nat → D → List D → D
+  | _, _, cur, [] => cur
+  | lvl, idx, cur, sib :: rest =>
+    merkleRootFromPath H (lvl + 1) (idx / 2)
+      (if idx % 2 = 0 then H lvl (idx / 2) cur sib else H lvl (idx / 2) sib cur) rest
+
+/-- A collision of the tweaked compression function at ONE tree position: two different child
+    pairs with the same digest under the same `(lvl, node)` tweak. -/
+def MerkleTweakCollision {D : Type} (H : Nat → Nat → D → D → D) : Prop :=
+  ∃ (lvl node : Nat) (a b a' b' : D), (a ≠ a' ∨ b ≠ b') ∧ H lvl node a b = H lvl node a' b'
+
+/-- **Collision-or-unique-opening.** Two openings of the same position to the same root either
+    coincide (same leaf digest, same authentication path) or exhibit a same-position collision
+    of the tweaked compression function. This is the classical binding reduction behind the
+    collision term of `qromMerkleOnlineExtractBound`; it is a statement about fixed openings
+    and not the quantum online-extraction game. -/
+theorem merkle_collision_or_unique_opening {D : Type} [DecidableEq D]
+    (H : Nat → Nat → D → D → D) :
+    ∀ (path path' : List D) (lvl idx : Nat) (leaf leaf' : D),
+      path.length = path'.length →
+      merkleRootFromPath H lvl idx leaf path = merkleRootFromPath H lvl idx leaf' path' →
+      (leaf = leaf' ∧ path = path') ∨ MerkleTweakCollision H
+  | [], [], _, _, _, _, _, h => .inl ⟨h, rfl⟩
+  | [], _ :: _, _, _, _, _, hl, _ => absurd hl.symm (Nat.succ_ne_zero _)
+  | _ :: _, [], _, _, _, _, hl, _ => absurd hl (Nat.succ_ne_zero _)
+  | sib :: rest, sib' :: rest', lvl, idx, leaf, leaf', hl, h => by
+    have h' : merkleRootFromPath H (lvl + 1) (idx / 2)
+          (if idx % 2 = 0 then H lvl (idx / 2) leaf sib else H lvl (idx / 2) sib leaf) rest =
+        merkleRootFromPath H (lvl + 1) (idx / 2)
+          (if idx % 2 = 0 then H lvl (idx / 2) leaf' sib' else H lvl (idx / 2) sib' leaf')
+          rest' := h
+    cases merkle_collision_or_unique_opening H rest rest' (lvl + 1) (idx / 2) _ _
+        (Nat.succ.inj hl) h' with
+    | inr hc => exact .inr hc
+    | inl hp =>
+      obtain ⟨hpar, hrest⟩ := hp
+      if hEq : leaf = leaf' ∧ sib = sib' then
+        exact .inl ⟨hEq.1, by rw [hEq.2, hrest]⟩
+      else
+        if hpar0 : idx % 2 = 0 then
+          rw [ite_eq_left hpar0, ite_eq_left hpar0] at hpar
+          refine .inr ?_
+          unfold MerkleTweakCollision
+          exact ⟨lvl, idx / 2, leaf, sib, leaf', sib',
+            if hl1 : leaf = leaf' then .inr (fun hs => hEq ⟨hl1, hs⟩) else .inl hl1, hpar⟩
+        else
+          rw [ite_eq_right hpar0, ite_eq_right hpar0] at hpar
+          refine .inr ?_
+          unfold MerkleTweakCollision
+          exact ⟨lvl, idx / 2, sib, leaf, sib', leaf',
+            if hl1 : leaf = leaf' then .inl (fun hs => hEq ⟨hl1, hs⟩) else .inr hl1, hpar⟩
+
+/-- `#tooth`: a compression function that forgets its right child is not binding, and the
+    theorem's collision branch is the one that fires. -/
+theorem tooth_merkle_right_blind_compression_collides :
+    merkleRootFromPath (fun _ _ (a : Nat) _ => a) 0 0 7 [1] =
+      merkleRootFromPath (fun _ _ (a : Nat) _ => a) 0 0 7 [2] ∧
+    MerkleTweakCollision (fun _ _ (a : Nat) _ => a) := by
+  refine ⟨rfl, ?_⟩
+  unfold MerkleTweakCollision
+  exact ⟨0, 0, 7, 1, 7, 2, .inr (by decide), rfl⟩
+
+/-- Commitment-extraction CHARGE per committed Merkle root over `secBits`-bit digests:
+    the single-target Grover term `8 (Q + 1)^2 / 2^secBits` plus the generic quantum collision
+    term `8 (Q + 1)^3 / 2^secBits` (`quantumBhtCollisionBound`). Position tweaks confine a
+    collision to one tree position (`merkle_collision_or_unique_opening`) but the adversary still
+    chooses both preimages, so the cubic term cannot be dropped. This is a budget term in the
+    shape of `[DFMS21]` / `[CMS19]`; the quantum online-extraction reduction for the deployed
+    tree is NOT mechanized here. At `secBits = 256` the cubic term limits `128`-bit budgets to
+    `Q + 1 ≤ 2^40`. -/
+@[expose] def qromMerkleOnlineExtractBound (numRoots secBits Q : Nat) : RatBound :=
+  RatBound.scale numRoots
+    (RatBound.add (quantumGroverSingleTargetBound secBits Q) (quantumBhtCollisionBound secBits Q))
+
+/-- Multi-round QROM Fiat–Shamir budget in the shape of `[DFMS19]` / `[CMS19]`:
+    1. `k` reprogrammed RBR challenge rounds, `∑_r (2 Q + 1)^2 * rbrBounds[r]`;
+    2. commitment extraction, `qromMerkleOnlineExtractBound`;
+    3. query rounds under Fiat–Shamir search, `∑_j 8 (Q + 1)^2 * queryBounds[j]`
+       (`quantumGroverGrindingBound`): the prover picks the grinding nonce before the queries are
+       derived, so query soundness is a search bound in the oracle budget. `queryBounds` are
+       PURE per-stage query errors; no proof-of-work density is credited on top of the search
+       factor. -/
+@[expose] def multiRoundFsQromCompilerBound
+    (Q numRoots secBits : Nat)
+    (rbrChallengeBounds : List RatBound)
+    (queryStageBounds : List RatBound) : RatBound :=
+  RatBound.add
+    (RatBound.sumList (rbrChallengeBounds.map (dfmRoundScale Q)))
+    (RatBound.add
+      (qromMerkleOnlineExtractBound numRoots secBits Q)
+      (RatBound.sumList (queryStageBounds.map (quantumGroverGrindingBound Q))))
+
+/-- **Constructive `k`-Round QROM RBR Induction Theorem (`rbr_multiRound_qrom_induction`)**:
+    Starting from a doomed initial state (`liveAt 0 ≤ 0`), if each round `idx` satisfies
+    `liveAt (idx + 1) ≤ liveAt idx + (2 * Q + 1)^2 * rbrBounds[idx]`, then after `k` rounds
+    `liveAt k ≤ ∑_{idx < k} (2 * Q + 1)^2 * rbrBounds[idx]`! -/
+theorem rbr_multiRound_qrom_induction
+    (Q : Nat) :
+    ∀ (rbrBounds : List RatBound) (liveAt : Nat → RatBound),
+      RatBound.le (liveAt 0) RatBound.zero →
+      (∀ (idx : Nat) (b : RatBound), rbrBounds[idx]? = some b →
+        RatBound.le (liveAt (idx + 1)) (RatBound.add (liveAt idx) (dfmRoundScale Q b))) →
+      RatBound.le (liveAt rbrBounds.length)
+        (RatBound.sumList (rbrBounds.map (dfmRoundScale Q)))
+  | [], liveAt, h0, _ => h0
+  | b :: rest, liveAt, h0, hStep => by
+    simp only [List.length_cons, List.map_cons, RatBound.sumList]
+    have hFirst : RatBound.le (liveAt 1) (RatBound.add (liveAt 0) (dfmRoundScale Q b)) :=
+      hStep 0 b rfl
+    have hFirstSimp : RatBound.le (liveAt 1) (dfmRoundScale Q b) := by
+      have hAdd0 := RatBound.add_le_add h0 (RatBound.le_refl (dfmRoundScale Q b))
+      have hZeroAdd : RatBound.le (RatBound.add RatBound.zero (dfmRoundScale Q b))
+          (dfmRoundScale Q b) := by
+        unfold RatBound.le RatBound.add RatBound.zero
+        dsimp only
+        rw [Nat.zero_mul, Nat.zero_add, Nat.mul_one, Nat.one_mul]
+        exact Nat.le_refl _
+      exact RatBound.le_trans hFirst (RatBound.le_trans hAdd0 hZeroAdd)
+    have hTail : ∀ (bs : List RatBound) (f : Nat → RatBound),
+        (∀ (idx : Nat) (item : RatBound), bs[idx]? = some item →
+          RatBound.le (f (idx + 1)) (RatBound.add (f idx) (dfmRoundScale Q item))) →
+        RatBound.le (f bs.length)
+          (RatBound.add (f 0) (RatBound.sumList (bs.map (dfmRoundScale Q)))) := by
+      intro bs
+      induction bs with
+      | nil =>
+        intro f _
+        unfold RatBound.le RatBound.add RatBound.sumList RatBound.zero
+        dsimp only [List.map, List.length_nil]
+        rw [Nat.zero_mul, Nat.add_zero, Nat.mul_one, Nat.mul_one]
+        exact Nat.le_refl _
+      | cons hd tl ih =>
+        intro f hf
+        have h1 := hf 0 hd rfl
+        have ihShift := ih (fun i => f (i + 1)) (fun idx item hGet => hf (idx + 1) item hGet)
+        simp only [List.length_cons, List.map_cons, RatBound.sumList]
+        have hStepAdd := RatBound.add_le_add h1
+          (RatBound.le_refl (RatBound.sumList (tl.map (dfmRoundScale Q))))
+        have hAssoc : RatBound.le
+            (RatBound.add (RatBound.add (f 0) (dfmRoundScale Q hd))
+              (RatBound.sumList (tl.map (dfmRoundScale Q))))
+            (RatBound.add (f 0)
+              (RatBound.add (dfmRoundScale Q hd)
+                (RatBound.sumList (tl.map (dfmRoundScale Q))))) := by
+          unfold RatBound.le RatBound.add
+          dsimp only
+          have hEq :
+              ((f 0).num * (dfmRoundScale Q hd).den + (dfmRoundScale Q hd).num * (f 0).den) *
+                (RatBound.sumList (tl.map (dfmRoundScale Q))).den +
+              (RatBound.sumList (tl.map (dfmRoundScale Q))).num *
+                ((f 0).den * (dfmRoundScale Q hd).den) =
+              (f 0).num * ((dfmRoundScale Q hd).den *
+                (RatBound.sumList (tl.map (dfmRoundScale Q))).den) +
+              ((dfmRoundScale Q hd).num * (RatBound.sumList (tl.map (dfmRoundScale Q))).den +
+                (RatBound.sumList (tl.map (dfmRoundScale Q))).num * (dfmRoundScale Q hd).den) *
+                (f 0).den := by
+            rw [Nat.add_mul, Nat.add_mul, Nat.mul_assoc, Nat.add_assoc]
+            congr 1
+            rw [Nat.mul_right_comm ((dfmRoundScale Q hd).num),
+                Nat.mul_comm (f 0).den (dfmRoundScale Q hd).den,
+                ← Nat.mul_assoc]
+          have hDenEq :
+              (f 0).den * (dfmRoundScale Q hd).den *
+                (RatBound.sumList (tl.map (dfmRoundScale Q))).den =
+              (f 0).den * ((dfmRoundScale Q hd).den *
+                (RatBound.sumList (tl.map (dfmRoundScale Q))).den) :=
+            Nat.mul_assoc _ _ _
+          rw [hEq, hDenEq]
+          exact Nat.le_refl _
+        exact RatBound.le_trans ihShift (RatBound.le_trans hStepAdd hAssoc)
+    have hRestBound := hTail rest (fun i => liveAt (i + 1)) (fun idx item hGet => hStep (idx + 1) item hGet)
+    exact RatBound.le_trans hRestBound
+      (RatBound.add_le_add hFirstSimp (RatBound.le_refl _))
+
+/-- Conditional round-0 cascade profile input over `QuarticGoldilocks`, computed from the
+    stage-0 paper numerator and the point-reduction term. This definition does not prove
+    the arbitrary-batch RBR bound; the stronger incidence and cascade composition are
+    required before charging this input to an acceptance event. -/
+def hemV6CascadeRbrBound : RatBound :=
+  match whirAffineStageWitnesses 24 true with
+  | w :: _ =>
+    ⟨15 * (whirAffineStageSimpleNum w / w.sFolds) + 72, goldilocksExt4Card, goldilocksExt4Card_pos⟩
+  | [] => RatBound.one
+
+/-- Conditional RBR paper/profile inputs for `Hem` v6 (`nv = 24`). Their numbers are computed
+    from deployed witness rows, but no RBR event bound is derived by this definition.
+    The stronger incidence constant, the equal-degree three-challenge lift, intermediate
+    fold geometries and arbitrary-batch/stage composition remain obligations. In particular
+    the larger proved sliced binary-fold counts do not justify these inputs. Multiplying
+    these rational inputs by `(2Q+1)^2` is arithmetic until the execution-level reduction
+    supplies its matching RBR bound. -/
+def hemV6FiveRoundRbrBounds : List RatBound :=
+  hemV6CascadeRbrBound ::
+    (whirAffineStageWitnesses 24 true).map whirAffineEqualDegreeCommitFoldBound
+
+/-- The conditional profile inputs evaluate to `(4182, 1644, 824, 489, 792) / p^4` (total `7931 / p^4`). -/
+theorem hemV6FiveRoundRbrBounds_eq_deployed :
+    hemV6FiveRoundRbrBounds.map (fun b => (b.num, b.den)) =
+      [4182, 1644, 824, 489, 792].map (fun n => (n, goldilocksExt4Card)) := by
+  decide +kernel
+
+/-- Pure 4-stage `Hem` v6 coset-query error bounds under default `BciksJohnsonQrom128`, DERIVED
+    from the same deployed `whirAffineStageWitnesses 24 true` rows as the fold bounds: the exact
+    distinct-fiber bound `(A + s_i)_{q_i} / (n)_{q_i}` at each row's own agreement threshold
+    (`whirAffine_deployed_pure_query_bounds`), with no proof-of-work density. -/
+def hemV6BciksJohnsonQueryBounds : List RatBound :=
+  (whirAffineStageWitnesses 24 true).map whirAffinePureQueryBoundOrOne
+
+private theorem hemCompiler_budget_up_to (QMax digestBits : Nat)
+    (hBciksMax : strictlyMoreThanBits 128
+      (multiRoundFsQromCompilerBound QMax 5 digestBits
+        hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds)) :
+    ∀ Q : Nat, Q ≤ QMax →
+      strictlyMoreThanBits 128 (multiRoundFsQromCompilerBound Q 5 digestBits
+        hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) ∧
+      atLeastBits 128 (multiRoundFsQromCompilerBound Q 5 digestBits
+        hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) := by
+  have hMonoScale : ∀ {a b : Nat} (hab : a ≤ b) (r : RatBound),
+      RatBound.le (RatBound.scale a r) (RatBound.scale b r) := by
+    intro a b hab r
+    unfold RatBound.le RatBound.scale
+    dsimp only
+    exact Nat.mul_le_mul_right r.den (Nat.mul_le_mul_right r.num hab)
+  have hScaleMono : ∀ (k : Nat) {a b : RatBound},
+      RatBound.le a b → RatBound.le (RatBound.scale k a) (RatBound.scale k b) := by
+    intro k a b h
+    unfold RatBound.le at h
+    unfold RatBound.le RatBound.scale
+    dsimp only
+    rw [Nat.mul_assoc, Nat.mul_assoc]
+    exact Nat.mul_le_mul_left k h
+  have hMonoSum : ∀ (xs ys : List RatBound) (hLen : xs.length = ys.length),
+      (∀ i : Fin xs.length, RatBound.le (xs.get i) (ys.get ⟨i.1, Nat.lt_of_lt_of_eq i.2 hLen⟩)) →
+      RatBound.le (RatBound.sumList xs) (RatBound.sumList ys) := by
+    intro xs
+    induction xs with
+    | nil =>
+      intro ys hLen _
+      cases ys with
+      | nil => exact RatBound.le_refl _
+      | cons _ _ => exact absurd hLen.symm (Nat.succ_ne_zero _)
+    | cons x xs' ih =>
+      intro ys hLen hPt
+      cases ys with
+      | nil => exact absurd hLen (Nat.succ_ne_zero _)
+      | cons y ys' =>
+        have hLen' : xs'.length = ys'.length := Nat.succ.inj hLen
+        simp only [RatBound.sumList]
+        exact RatBound.add_le_add
+          (hPt ⟨0, Nat.zero_lt_succ _⟩)
+          (ih ys' hLen' (fun i => hPt ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩))
+  have hStrictOfLe : ∀ {b₁ b₂ : RatBound},
+      RatBound.le b₁ b₂ → strictlyMoreThanBits 128 b₂ → strictlyMoreThanBits 128 b₁ := by
+    intro b₁ b₂ hLe hStrict
+    unfold RatBound.le at hLe
+    unfold strictlyMoreThanBits at hStrict ⊢
+    have h1 : b₁.num * 2 ^ 128 * b₂.den ≤ b₂.num * 2 ^ 128 * b₁.den := by
+      have hm := Nat.mul_le_mul_right (2 ^ 128) hLe
+      have e1 : b₁.num * b₂.den * 2 ^ 128 = b₁.num * 2 ^ 128 * b₂.den := by
+        rw [Nat.mul_right_comm]
+      have e2 : b₂.num * b₁.den * 2 ^ 128 = b₂.num * 2 ^ 128 * b₁.den := by
+        rw [Nat.mul_right_comm]
+      rwa [e1, e2] at hm
+    have h2 : b₂.num * 2 ^ 128 * b₁.den < b₂.den * b₁.den :=
+      Nat.mul_lt_mul_of_pos_right hStrict b₁.h_pos
+    have h3 : b₁.num * 2 ^ 128 * b₂.den < b₁.den * b₂.den := by
+      rw [Nat.mul_comm b₁.den b₂.den]
+      exact Nat.lt_of_le_of_lt h1 h2
+    if hLt : b₁.num * 2 ^ 128 < b₁.den then
+      exact hLt
+    else
+      exfalso
+      have hGe := Nat.mul_le_mul_right b₂.den (Nat.le_of_not_lt hLt)
+      exact Nat.not_le_of_gt h3 hGe
+  have hCompilerMono : ∀ {Q : Nat} (hQ : Q ≤ QMax) (qBounds : List RatBound),
+      RatBound.le
+        (multiRoundFsQromCompilerBound Q 5 digestBits hemV6FiveRoundRbrBounds qBounds)
+        (multiRoundFsQromCompilerBound QMax 5 digestBits hemV6FiveRoundRbrBounds qBounds) := by
+    intro Q hQ qBounds
+    unfold multiRoundFsQromCompilerBound
+    have hSqLe : (2 * Q + 1) ^ 2 ≤ (2 * QMax + 1) ^ 2 :=
+      Nat.pow_le_pow_left (by omega) 2
+    have hRbrLe :
+        RatBound.le
+          (RatBound.sumList (hemV6FiveRoundRbrBounds.map (dfmRoundScale Q)))
+          (RatBound.sumList (hemV6FiveRoundRbrBounds.map (dfmRoundScale QMax))) := by
+      apply hMonoSum _ _ (by simp only [List.length_map])
+      intro i
+      simp only [List.get_eq_getElem, List.getElem_map]
+      exact hMonoScale hSqLe _
+    have hGrindLe : 8 * (Q + 1) ^ 2 ≤ 8 * (QMax + 1) ^ 2 :=
+      Nat.mul_le_mul_left 8 (Nat.pow_le_pow_left (by omega) 2)
+    have hQueryLe :
+        RatBound.le
+          (RatBound.sumList (qBounds.map (quantumGroverGrindingBound Q)))
+          (RatBound.sumList (qBounds.map (quantumGroverGrindingBound QMax))) := by
+      apply hMonoSum _ _ (by simp only [List.length_map])
+      intro i
+      simp only [List.get_eq_getElem, List.getElem_map]
+      exact hMonoScale hGrindLe _
+    have hMerkleLe :
+        RatBound.le (qromMerkleOnlineExtractBound 5 digestBits Q)
+          (qromMerkleOnlineExtractBound 5 digestBits QMax) := by
+      unfold qromMerkleOnlineExtractBound
+      apply hScaleMono
+      apply RatBound.add_le_add
+      · unfold RatBound.le quantumGroverSingleTargetBound quantumZhandryMultiTargetBound
+        dsimp only
+        exact Nat.mul_le_mul_right _
+          (Nat.mul_le_mul_left _ (Nat.pow_le_pow_left (by omega) 2))
+      · unfold RatBound.le quantumBhtCollisionBound
+        dsimp only
+        exact Nat.mul_le_mul_right _
+          (Nat.mul_le_mul_left _ (Nat.pow_le_pow_left (by omega) 3))
+    exact RatBound.add_le_add hRbrLe (RatBound.add_le_add hMerkleLe hQueryLe)
+  intro Q hQ
+  have hb := hStrictOfLe (hCompilerMono hQ hemV6BciksJohnsonQueryBounds) hBciksMax
+  exact ⟨hb, Nat.le_of_lt hb⟩
+
+/-- **Multi-round Fiat–Shamir QROM numerical budget (`multiRoundFsQrom_budget_bound`)**.
+    For every oracle budget `Q + 1 ≤ 2^40`, `multiRoundFsQromCompilerBound` at the deployed
+    `num_vars = 24` parameters (five aggregated RBR entries derived from the deployed witness
+    rows, five committed Merkle roots over `256`-bit digests, four query stages) is strictly
+    below `2^-128` for the witness-derived `BciksJohnsonQrom128` query bounds.
+
+    The range is forced by the collision term of commitment extraction: at `Q + 1 = 2^41` the
+    same expression exceeds `2^-128` (`tooth_multiRoundFsQrom_budget_fails_at_2pow41`).
+
+    This is arithmetic about the budget expression. It becomes an acceptance-probability bound
+    for the deployed verifier only together with (a) an `RbrStateFunction` for the `Hem`
+    transcript whose flip bounds are the listed round bounds, which needs `[CWYZ26]`
+    Theorem 4.8 at the Johnson radius, and (b) a quantum extraction reduction for the
+    commitment charge. Neither is proved in this module. -/
+theorem multiRoundFsQrom_budget_bound :
+    hemV6FiveRoundRbrBounds.length = 5 ∧
+    (∀ Q : Nat, Q + 1 ≤ 2 ^ 40 →
+      strictlyMoreThanBits 128
+        (multiRoundFsQromCompilerBound Q 5 256
+          hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) ∧
+      atLeastBits 128
+        (multiRoundFsQromCompilerBound Q 5 256
+          hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds)) := by
+  refine ⟨by decide +kernel, ?_⟩
+  intro Q hQ
+  exact hemCompiler_budget_up_to (2 ^ 40 - 1) 256 (by decide +kernel) Q (by omega)
+
+
+/-- `#tooth`: the oracle-budget range of `multiRoundFsQrom_budget_bound` is not slack. One more
+    bit of budget (`Q + 1 = 2^41`) pushes the same expression above `2^-128`, through the
+    `8 (Q + 1)^3 / 2^256` collision term of commitment extraction. -/
+theorem tooth_multiRoundFsQrom_budget_fails_at_2pow41 :
+    ¬ atLeastBits 128
+      (multiRoundFsQromCompilerBound (2 ^ 41 - 1) 5 256
+        hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) := by
+  decide +kernel
+
+
+/-! ## §4. Fiat–Shamir Ordering `#tooth` Witness (`tooth_unabsorbed_shifted_claim_breaks_rbr`) -/
+
+/-- Expected `[CWYZ26]` §5.1 / `affine.rs:61` folded linear-functional claim
+    `σ' = γ_G + α * (γ_F + θ * γ_G) + β * (c_F + θ * c_G)` over any commutative ring `F`. -/
+def hemFoldClaimUpdate {F : Type} [CommRingOps F] (γ_F γ_G c_F c_G θ α β : F) : F :=
+  CommRingOps.add γ_G
+    (CommRingOps.add
+      (CommRingOps.mul α (CommRingOps.add γ_F (CommRingOps.mul θ γ_G)))
+      (CommRingOps.mul β (CommRingOps.add c_F (CommRingOps.mul θ c_G))))
+
+/-- Explicit cheating shifted-claim calculation when a buggy Fiat–Shamir transcript squeezes
+    `(θ, α, β)` BEFORE absorbing `(c_F, c_G)`: on the committed zero polynomial (`F = [], G = []`,
+    true folded claim `= 0`), chooses `c_G := 0` and `c_F := - β⁻¹ * (γ_G + α * (γ_F + θ * γ_G))`! -/
+def cheatUnabsorbedShiftClaimGen {F : Type} [CommRingOps F] (inv : F → F)
+    (γ_F γ_G θ α β : F) : F × F :=
+  let baseTerm := CommRingOps.add γ_G
+    (CommRingOps.mul α (CommRingOps.add γ_F (CommRingOps.mul θ γ_G)))
+  (CommRingOps.mul (inv β) (CommRingOps.neg baseTerm), CommRingOps.zero)
+
+def cheatUnabsorbedShiftClaim (γ_F γ_G θ α β : QuarticGoldilocks) :
+    QuarticGoldilocks × QuarticGoldilocks :=
+  cheatUnabsorbedShiftClaimGen QuarticGoldilocks.inv γ_F γ_G θ α β
+
+/-- Checks whether an affine fold step from committed zero polynomials `(F = [], G = [])` with
+    claimed `(γ_F, γ_G)` lands in a `live` (`true`) post-fold `StateFunction` state on the zero
+    oracle (`hemFoldClaimUpdate γ_F γ_G c_F c_G θ α β = 0`). -/
+def zeroPolyPostFoldStateLive {F : Type} [CommRingOps F] [DecidableEq F]
+    (γ_F γ_G c_F c_G θ α β : F) : Bool :=
+  decide (hemFoldClaimUpdate γ_F γ_G c_F c_G θ α β = CommRingOps.zero)
+
+private theorem unabsorbed_shift_forgery_prob_one_poly
+    {F : Type} [LawfulCommRing F] [DecidableEq F]
+    (inv : F → F)
+    (hInv : ∀ x : F, x ≠ CommRingOps.zero → CommRingOps.mul x (inv x) = CommRingOps.one)
+    (γ_F γ_G : F) (S_θ S_α S_β : List F)
+    (hθ : 0 < S_θ.length) (hα : 0 < S_α.length) (hβ : 0 < S_β.length)
+    (hNz : ∀ β ∈ S_β, β ≠ CommRingOps.zero) :
+    let totalCard := S_θ.length * (S_α.length * S_β.length)
+    let hitCount :=
+      qsum S_θ.length (fun i =>
+        qsum S_α.length (fun j =>
+          qsum S_β.length (fun k =>
+            let θ := S_θ.get i
+            let α := S_α.get j
+            let β := S_β.get k
+            let (c_F, c_G) := cheatUnabsorbedShiftClaimGen inv γ_F γ_G θ α β
+            if zeroPolyPostFoldStateLive γ_F γ_G c_F c_G θ α β = true then 1 else 0)))
+    hitCount = totalCard ∧
+    RatBound.le RatBound.one
+      ⟨hitCount, totalCard, Nat.mul_pos hθ (Nat.mul_pos hα hβ)⟩ ∧
+    RatBound.le
+      ⟨hitCount, totalCard, Nat.mul_pos hθ (Nat.mul_pos hα hβ)⟩
+      RatBound.one := by
+  dsimp only
+  have hPointZero : ∀ (θ α β : F), β ≠ CommRingOps.zero →
+      let (c_F, c_G) := cheatUnabsorbedShiftClaimGen inv γ_F γ_G θ α β
+      hemFoldClaimUpdate γ_F γ_G c_F c_G θ α β = CommRingOps.zero := by
+    intro θ α β hβNz
+    dsimp only [cheatUnabsorbedShiftClaimGen, hemFoldClaimUpdate]
+    let baseTerm := CommRingOps.add γ_G
+      (CommRingOps.mul α (CommRingOps.add γ_F (CommRingOps.mul θ γ_G)))
+    change CommRingOps.add γ_G
+        (CommRingOps.add
+          (CommRingOps.mul α (CommRingOps.add γ_F (CommRingOps.mul θ γ_G)))
+          (CommRingOps.mul β
+            (CommRingOps.add
+              (CommRingOps.mul (inv β) (CommRingOps.neg baseTerm))
+              (CommRingOps.mul θ CommRingOps.zero)))) = CommRingOps.zero
+    rw [LawfulCommRing.mul_zero, LawfulCommRing.add_zero,
+        ← LawfulCommRing.mul_assoc β (inv β) (CommRingOps.neg baseTerm),
+        hInv β hβNz,
+        LawfulCommRing.one_mul,
+        ← LawfulCommRing.add_assoc γ_G _ (CommRingOps.neg baseTerm)]
+    exact LawfulCommRing.add_right_neg baseTerm
+  have hInnerβ : ∀ (θ α : F),
+      qsum S_β.length (fun k =>
+        let (c_F, c_G) := cheatUnabsorbedShiftClaimGen inv γ_F γ_G θ α (S_β.get k)
+        if zeroPolyPostFoldStateLive γ_F γ_G c_F c_G θ α (S_β.get k) = true then 1 else 0) =
+      S_β.length := by
+    intro θ α
+    have h1 : qsum S_β.length (fun k =>
+        let (c_F, c_G) := cheatUnabsorbedShiftClaimGen inv γ_F γ_G θ α (S_β.get k)
+        if zeroPolyPostFoldStateLive γ_F γ_G c_F c_G θ α (S_β.get k) = true then 1 else 0) =
+        qsum S_β.length (fun _ => 1) := by
+      apply qsum_congr; intro k
+      have hkNz : S_β.get k ≠ CommRingOps.zero := hNz (S_β.get k) (List.get_mem S_β k)
+      have hEq0 := hPointZero θ α (S_β.get k) hkNz
+      dsimp only at hEq0
+      unfold zeroPolyPostFoldStateLive
+      simp only [hEq0, decide_true, ↓reduceIte]
+    rw [h1, qsum_const, Nat.mul_one]
+  have hInnerα : ∀ (θ : F),
+      qsum S_α.length (fun j =>
+        qsum S_β.length (fun k =>
+          let (c_F, c_G) := cheatUnabsorbedShiftClaimGen inv γ_F γ_G θ (S_α.get j) (S_β.get k)
+          if zeroPolyPostFoldStateLive γ_F γ_G c_F c_G θ (S_α.get j) (S_β.get k) = true then 1 else 0)) =
+      S_α.length * S_β.length := by
+    intro θ
+    rw [qsum_congr (fun j => hInnerβ θ (S_α.get j)), qsum_const]
+  have hHitEq :
+      qsum S_θ.length (fun i =>
+        qsum S_α.length (fun j =>
+          qsum S_β.length (fun k =>
+            let (c_F, c_G) := cheatUnabsorbedShiftClaimGen inv γ_F γ_G (S_θ.get i) (S_α.get j) (S_β.get k)
+            if zeroPolyPostFoldStateLive γ_F γ_G c_F c_G (S_θ.get i) (S_α.get j) (S_β.get k) = true
+            then 1 else 0))) =
+      S_θ.length * (S_α.length * S_β.length) := by
+    rw [qsum_congr (fun i => hInnerα (S_θ.get i)), qsum_const]
+  refine ⟨hHitEq, ?_, ?_⟩
+  · unfold RatBound.le RatBound.one; dsimp only; rw [hHitEq, Nat.one_mul, Nat.mul_one]; exact Nat.le_refl _
+  · unfold RatBound.le RatBound.one; dsimp only; rw [hHitEq, Nat.one_mul, Nat.mul_one]; exact Nat.le_refl _
+
+private theorem absorbed_shift_preserves_soundness_poly
+    {F : Type} [LawfulCommRing F] [DecidableEq F]
+    (c_F c_G θ : F) (S : List F) (hPos : 0 < S.length) (hNodup : S.Nodup) :
+    let absorbedHits :=
+      qsum S.length (fun i =>
+        qsum S.length (fun j =>
+          if zeroPolyPostFoldStateLive CommRingOps.one CommRingOps.zero
+               c_F c_G θ (S.get i) (S.get j) = true then 1 else 0))
+    absorbedHits ≤ S.length ∧
+    RatBound.le
+      ⟨absorbedHits, S.length ^ 2, Nat.pow_pos hPos⟩
+      ⟨1, S.length, hPos⟩ := by
+  dsimp only
+  rw [qsum_comm]
+  have hPerBeta : ∀ j : Fin S.length,
+      qsum S.length (fun i =>
+        if zeroPolyPostFoldStateLive CommRingOps.one CommRingOps.zero
+             c_F c_G θ (S.get i) (S.get j) = true then 1 else 0) ≤ 1 := by
+    intro j
+    apply qsum_le_one_of_subsingleton
+    intro i₁ i₂ h₁ h₂
+    have e₁ : hemFoldClaimUpdate CommRingOps.one CommRingOps.zero
+        c_F c_G θ (S.get i₁) (S.get j) = CommRingOps.zero := of_decide_eq_true h₁
+    have e₂ : hemFoldClaimUpdate CommRingOps.one CommRingOps.zero
+        c_F c_G θ (S.get i₂) (S.get j) = CommRingOps.zero := of_decide_eq_true h₂
+    let shiftVal := CommRingOps.mul (S.get j) (CommRingOps.add c_F (CommRingOps.mul θ c_G))
+    have hSimp : ∀ α : F,
+        hemFoldClaimUpdate CommRingOps.one CommRingOps.zero c_F c_G θ α (S.get j) =
+          CommRingOps.add α shiftVal := by
+      intro α
+      unfold hemFoldClaimUpdate
+      rw [LawfulCommRing.zero_add, LawfulCommRing.mul_zero, LawfulCommRing.add_zero,
+          LawfulCommRing.mul_one]
+    rw [hSimp (S.get i₁)] at e₁
+    rw [hSimp (S.get i₂)] at e₂
+    have hEqAlpha : S.get i₁ = S.get i₂ := by
+      have c1 := congrArg (fun u => CommRingOps.add u (CommRingOps.neg shiftVal)) e₁
+      have c2 := congrArg (fun u => CommRingOps.add u (CommRingOps.neg shiftVal)) e₂
+      rw [LawfulCommRing.add_assoc, LawfulCommRing.add_right_neg, LawfulCommRing.add_zero,
+          LawfulCommRing.zero_add] at c1 c2
+      exact c1.trans c2.symm
+    exact nodup_get_inj hNodup hEqAlpha
+  have hHitsLe :
+      qsum S.length (fun j =>
+        qsum S.length (fun i =>
+          if zeroPolyPostFoldStateLive CommRingOps.one CommRingOps.zero
+               c_F c_G θ (S.get i) (S.get j) = true then 1 else 0)) ≤
+      S.length := by
+    have h1 := qsum_le_qsum hPerBeta
+    rw [qsum_const, Nat.mul_one] at h1
+    exact h1
+  refine ⟨hHitsLe, ?_⟩
+  unfold RatBound.le
+  dsimp only
+  rw [Nat.one_mul, Nat.pow_two]
+  exact Nat.mul_le_mul_right S.length hHitsLe
+
+/-- **`#tooth` Unabsorbed Shifted Claim Breaks RBR Soundness With Probability `1`
+    (`tooth_unabsorbed_shifted_claim_breaks_rbr`)**:
+    1. **False Initial Statement is Doomed**: committing the zero oracle over
+       `QuarticGoldilocks` while claiming the non-zero evaluation `σ = 1` is outside the language
+       for EVERY polynomial witness (`hemFalseClaimInstance_invalid`), so the empty transcript is
+       doomed.
+    2. **Buggy Squeeze-Before-Absorb Transcript Flips `false → true` With Exact Probability `1`**:
+       When `(θ, α, β)` is squeezed BEFORE absorbing `(c_F, c_G)`, for EVERY challenge `(θ, α, β)`
+       with `β ≠ 0` (`∀ β ∈ S_β, β ≠ 0`), `cheatUnabsorbedShiftClaim` flips `zeroPolyPostFoldStateLive`
+       to `true` on **100% of challenges** (`hitCount = S_θ.length * S_α.length * S_β.length`,
+       exact `RatBound` probability = `1 / 1 = RatBound.one`!).
+    3. **Deployed `Hem` v6 Absorb-Before-Squeeze Ordering Preserves `≤ 1 / |S|` Soundness**:
+       When `(c_F, c_G)` MUST be absorbed BEFORE squeezing `(α, β)` from any duplicate-free pool
+       `S`, at `(γ_F = 1, γ_G = 0)`, at most `S.length` out of `S.length ^ 2` pairs (`≤ 1 / S.length`)
+       flip `zeroPolyPostFoldStateLive` to `true`! -/
+theorem tooth_unabsorbed_shifted_claim_breaks_rbr :
+    (¬ hemAffineWhirStateFunction hemFalseClaimInstance []) ∧
+    (∀ (γ_F γ_G : QuarticGoldilocks)
+       (S_θ S_α S_β : List QuarticGoldilocks)
+       (hθ : 0 < S_θ.length) (hα : 0 < S_α.length) (hβ : 0 < S_β.length),
+       (∀ β ∈ S_β, β ≠ CommRingOps.zero) →
+      let totalCard := S_θ.length * (S_α.length * S_β.length)
+      let hitCount :=
+        qsum S_θ.length (fun i =>
+          qsum S_α.length (fun j =>
+            qsum S_β.length (fun k =>
+              let θ := S_θ.get i
+              let α := S_α.get j
+              let β := S_β.get k
+              let (c_F, c_G) := cheatUnabsorbedShiftClaim γ_F γ_G θ α β
+              if zeroPolyPostFoldStateLive γ_F γ_G c_F c_G θ α β = true then 1 else 0)))
+      hitCount = totalCard ∧
+      RatBound.le RatBound.one
+        ⟨hitCount, totalCard, Nat.mul_pos hθ (Nat.mul_pos hα hβ)⟩ ∧
+      RatBound.le
+        ⟨hitCount, totalCard, Nat.mul_pos hθ (Nat.mul_pos hα hβ)⟩
+        RatBound.one) ∧
+    (∀ (c_F c_G θ : QuarticGoldilocks) (S : List QuarticGoldilocks)
+       (hPos : 0 < S.length), S.Nodup →
+      let absorbedHits :=
+        qsum S.length (fun i =>
+          qsum S.length (fun j =>
+            if zeroPolyPostFoldStateLive CommRingOps.one CommRingOps.zero
+                 c_F c_G θ (S.get i) (S.get j) = true then 1 else 0))
+      absorbedHits ≤ S.length ∧
+      RatBound.le
+        ⟨absorbedHits, S.length ^ 2, Nat.pow_pos hPos⟩
+        ⟨1, S.length, hPos⟩) := by
+  refine ⟨hemFalseClaimInstance_invalid, ?_, ?_⟩
+  · intro γ_F γ_G S_θ S_α S_β hθ hα hβ hNz
+    exact unabsorbed_shift_forgery_prob_one_poly
+      QuarticGoldilocks.inv
+      (fun _ hx => QuarticGoldilocks.mul_inv_cancel hx)
+      γ_F γ_G S_θ S_α S_β hθ hα hβ hNz
+  · intro c_F c_G θ S hPos hNodup
+    exact absorbed_shift_preserves_soundness_poly c_F c_G θ S hPos hNodup
+
+/-- **Non-Vacuity & Inhabitedness Certificate (`inhabited_multi_round_fs_qrom`)**:
+    Certifies that all concrete schedules, unitary quantum superposition adversaries (`hadamardQuery2`),
+    honest `HemWhirInstance` transcripts, and `multiRoundFsQrom_budget_bound` budgets are
+    strictly inhabited with positive numerators and non-trivial quantum/field witnesses! -/
+theorem inhabited_multi_round_fs_qrom :
+    0 < (multiRoundFsQromCompilerBound (2 ^ 39) 5 256
+           hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds).num ∧
+    (∃ (A : QuantumAdv 2 2 1 1) (H : Fin 2 → BitVec 2),
+      0 < QVec.stateNormSq (runQuantumAdv A H) ∧
+      RatBound.le
+        ⟨qsum 2 (fun xStar =>
+           qsum 4 (fun j =>
+             if decide (j.1 = 0) = true then
+               QVec.queryWeight (runQuantumAdv A (reprogramOracle H xStar (BitVec.ofFin j))) xStar
+             else 0)),
+         4 * QVec.stateNormSq (runQuantumAdv A H),
+         Nat.mul_pos (by decide) (runQuantumAdv_normSq_pos A H)⟩
+        ⟨(2 * 1 + 1) ^ 2 * 1, 4, by decide⟩) := by
+  refine ⟨by decide +kernel, ?_⟩
+  let initVec : QVec 2 2 1 := fun x y _ =>
+    if x.1 == 0 && y.1 == 0 then GaussInt.one else GaussInt.zero
+  have hInitPos : 0 < QVec.stateNormSq initVec := by
+    unfold QVec.stateNormSq QVec.queryWeight initVec GaussInt.normSq GaussInt.one GaussInt.zero
+    decide
+  let A : QuantumAdv 2 2 1 1 :=
+    { init := initVec
+      h_init_pos := hInitPos
+      steps := fun _ => hadamardQuery2 2 1 }
+  let H : Fin 2 → BitVec 2 := fun _ => 0#2
+  refine ⟨A, H, runQuantumAdv_normSq_pos A H, ?_⟩
+  have hStep := qrom_unitary_measure_reprogram_rbr_step A H (fun _ => true)
+    (fun _ bv => decide (bv.toNat = 0)) 1
+    (by
+      intro _ _
+      decide)
+  simpa only [↓reduceIte, BitVec.toNat_ofFin] using hStep
+
+
+/-- Arithmetic repair of the conditional paper/profile expression at `2^56` queries: changing
+    only its digest parameter to 384 makes that expression small enough. This neither
+    discharges the RBR input nor upgrades the larger proved sliced counts. It is not a
+    security claim for either a 256-bit or a 384-bit deployed verifier. -/
+theorem multiRoundFsQrom_budget_384_at_2pow56 (Q : Nat) (hQ : Q ≤ 2 ^ 56) :
+    strictlyMoreThanBits 128 (multiRoundFsQromCompilerBound Q 5 384
+      hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) ∧
+    atLeastBits 128 (multiRoundFsQromCompilerBound Q 5 384
+      hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) :=
+  hemCompiler_budget_up_to (2 ^ 56) 384 (by decide +kernel) Q hQ
+
+/-- Keeping the deployed 256-bit commitment parameter fails the requested budget. -/
+theorem tooth_multiRoundFsQrom_256_at_2pow56 :
+    ¬ atLeastBits 128 (multiRoundFsQromCompilerBound (2 ^ 56) 5 256
+      hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) := by
+  decide +kernel
+
+/-- Nonzero portfolio query budget satisfying the repaired bound. -/
+theorem inhabited_multiRoundFsQrom_384 :
+    ∃ Q : Nat, Q = 2 ^ 56 ∧ Q ≤ 2 ^ 56 ∧
+      atLeastBits 128 (multiRoundFsQromCompilerBound Q 5 384
+        hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) :=
+  ⟨2 ^ 56, rfl, Nat.le_refl _,
+    (multiRoundFsQrom_budget_384_at_2pow56 (2 ^ 56) (Nat.le_refl _)).2⟩
+
+#tooth_pair multiRoundFsQrom_budget_384_at_2pow56 vs tooth_multiRoundFsQrom_256_at_2pow56
+#tooth_pair hemAffineWhir_rbr_completeness_and_doomed_init vs hemFalseClaimInstance_invalid
+#tooth_pair hem_johnson_fold_state_restoration_of_mca vs tooth_deployed_rows_exceed_welch_berlekamp_radius
+#verify_inhabited multiRoundFsQrom_budget_384_at_2pow56 inhabited_multiRoundFsQrom_384
+
+end Qsag

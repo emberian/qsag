@@ -7,11 +7,11 @@ on the adversary's output. Each slot has its own tree level and depth cap. This 
 bound on full Merkle paths, not a proof for the deployed Canopy multiproof decoder.
 The coherent-run corollary requires classical query addresses explicitly.
 -/
-public import Qsag.QromClassicalQueryTransfer
-import all Qsag.QromClassicalQueryTransfer
-import all Qsag.QromMeasuredMerkleExtraction
-import all Qsag.QromMeasuredQueryExperiment
-import all Qsag.MultiRoundFsQrom
+public import Qsag.Oracle.QromClassicalQueryTransfer
+import all Qsag.Oracle.QromClassicalQueryTransfer
+import all Qsag.Oracle.QromMeasuredMerkleExtraction
+import all Qsag.Oracle.QromMeasuredQueryExperiment
+import all Qsag.Oracle.MultiRoundFsQrom
 
 public section
 namespace Qsag

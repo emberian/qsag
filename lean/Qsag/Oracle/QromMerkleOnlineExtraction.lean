@@ -511,3 +511,677 @@ private theorem extractOnlineCanopyLevels_targets {D : Type} [DecidableEq D]
       exact extractOnlineCanopyStep_targets nodeQueries top₀ idxs.length idxs up.1 up.2 act sibs h p hp
 
 /-- `Type`-valued 5-way constructive online extraction outcome for `verifyCanopyMultiproof`. -/
+inductive OnlineCanopyOutcome {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (rootHash : Nat → D → D)
+    (logLeaves : Nat) (commitment : D)
+    (rootQueries : List (RecordedCanopyRootQuery D))
+    (nodeQueries : List (RecordedCanopyNodeQuery D))
+    (leaves : List (Nat × D)) (proof : List D) : Type where
+  | extractedEq
+      (hExt : extractOnlineCanopyOpening commitment rootQueries nodeQueries logLeaves
+        (leaves.map Prod.fst) = some (leaves, proof))
+  | rootCollision (c : CanopyRootCollision rootHash logLeaves)
+  | nodeCollision (c : CanopyNodeCollision nodeHash)
+  | unqueriedRootPreimage
+      (topU : D)
+      (hOut : rootHash logLeaves topU = commitment)
+      (hUnq : ∀ q ∈ rootQueries, ¬(q.logLeaves = logLeaves ∧ q.top = topU))
+  | unqueriedNodePreimage
+      (top₀ : D) (idxU : Nat) (lU rU outU : D)
+      (hRootMem : ∃ rq ∈ rootQueries, rq.logLeaves = logLeaves ∧ rq.top = top₀ ∧ rq.out = commitment)
+      (hOut : nodeHash idxU lU rU = outU)
+      (hMem : outU ∈ top₀ :: canopyNodeChildTargets nodeQueries)
+      (hUnq : ∀ q ∈ nodeQueries, ¬(q.idx = idxU ∧ q.left = lU ∧ q.right = rU))
+
+private inductive StepClassify {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (top₀ : D)
+    (nodeQueries : List (RecordedCanopyNodeQuery D))
+    (fuel : Nat) (active : List (Nat × D)) (sibs : List D)
+    (parents : List (Nat × D)) (remSibs : List D) : Type where
+  | ok (hExt : extractOnlineCanopyStep nodeQueries fuel (active.map Prod.fst) parents remSibs =
+      some (active, sibs))
+  | coll (c : CanopyNodeCollision nodeHash)
+  | unq (idxU : Nat) (lU rU outU : D)
+      (hOut : nodeHash idxU lU rU = outU)
+      (hMem : outU ∈ top₀ :: canopyNodeChildTargets nodeQueries)
+      (hUnq : ∀ q ∈ nodeQueries, ¬(q.idx = idxU ∧ q.left = lU ∧ q.right = rU))
+
+private def classifyCanopyStep {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (top₀ : D)
+    (nodeQueries : List (RecordedCanopyNodeQuery D))
+    (hNodeCons : ∀ q ∈ nodeQueries, nodeHash q.idx q.left q.right = q.out) :
+    (fuel : Nat) → (active : List (Nat × D)) → (sibs : List D) →
+    (parents : List (Nat × D)) → (remSibs : List D) →
+    active.length ≤ fuel →
+    canopyLevelStep nodeHash active sibs = some (parents, remSibs) →
+    (∀ p ∈ parents, p.2 ∈ top₀ :: canopyNodeChildTargets nodeQueries) →
+    StepClassify nodeHash top₀ nodeQueries fuel active sibs parents remSibs
+  | 0, active, sibs, parents, remSibs, hFuel, hStep, _ => by
+    cases active with
+    | nil =>
+      exact .ok (by
+        obtain ⟨hb, ht⟩ := canopyLevelStep_nil nodeHash hStep
+        subst hb; subst ht; rfl)
+    | cons _ _ => exact absurd hFuel (by simp)
+  | fuel + 1, [], sibs, parents, remSibs, _, hStep, _ =>
+    .ok (by
+      obtain ⟨hb, ht⟩ := canopyLevelStep_nil nodeHash hStep
+      subst hb; subst ht; rfl)
+  | fuel + 1, [(u, hu)], [], _, _, _, hStep, _ => False.elim (by cases hStep)
+  | fuel + 1, [(u, hu)], s :: afterS, parents, remSibs, _, hStep, hParTargets => by
+    have hEqStep : parents = [(u >>> 1, canopyParentHash nodeHash u hu s)] ∧ afterS = remSibs := by
+      simp only [canopyLevelStep, Option.some.injEq, Prod.mk.injEq] at hStep
+      exact ⟨hStep.1.symm, hStep.2⟩
+    let pDig := canopyParentHash nodeHash u hu s
+    let lCh := if u &&& 1 = 0 then hu else s
+    let rCh := if u &&& 1 = 0 then s else hu
+    have hHashEq : nodeHash (u >>> 1) lCh rCh = pDig := by
+      dsimp only [pDig, canopyParentHash, lCh, rCh]
+      by_cases hp : u &&& 1 = 0 <;> simp only [hp, ↓reduceIte]
+    have hMemT : pDig ∈ top₀ :: canopyNodeChildTargets nodeQueries :=
+      hParTargets (u >>> 1, pDig) (by rw [hEqStep.1]; exact .head _)
+    let pred := fun q : RecordedCanopyNodeQuery D =>
+      decide (q.idx = u >>> 1) && decide (q.out = pDig)
+    match hF : findFirst pred nodeQueries with
+    | none =>
+      refine .unq (u >>> 1) lCh rCh pDig hHashEq hMemT (fun q hq ⟨hI, hL, hR⟩ => ?_)
+      have hFalse := findFirst_none_spec pred hF q hq
+      have hOut : q.out = pDig := by rw [← hNodeCons q hq, hI, hL, hR, hHashEq]
+      dsimp only [pred] at hFalse
+      simp only [hI, hOut, decide_true, Bool.and_self, Bool.true_eq_false] at hFalse
+    | some q =>
+      rcases findFirst_some_spec pred hF with ⟨hqMem, hqP⟩
+      dsimp only [pred] at hqP
+      simp only [Bool.and_eq_true, decide_eq_true_eq] at hqP
+      if hEq : (q.left, q.right) = (lCh, rCh) then
+        exact .ok (by
+          have hL : q.left = lCh := (Prod.mk.inj hEq).1
+          have hR : q.right = rCh := (Prod.mk.inj hEq).2
+          rw [hEqStep.1, hEqStep.2]
+          show extractOnlineCanopyStep nodeQueries (fuel + 1) [u] [(u >>> 1, pDig)] remSibs =
+            some ([(u, hu)], s :: remSibs)
+          unfold extractOnlineCanopyStep
+          dsimp only [pred] at hF
+          simp only [↓reduceIte, hF]
+          by_cases hp : u &&& 1 = 0 <;>
+            (dsimp only [lCh, rCh] at hL hR; simp only [hp, ↓reduceIte] at hL hR ⊢; rw [hL, hR]))
+      else
+        exact .coll ⟨u >>> 1, q.left, q.right, lCh, rCh, hEq, by
+          rw [← hqP.1, hNodeCons q hqMem, hqP.2, ← hHashEq, hqP.1]⟩
+  | fuel + 1, (u, hu) :: (v, hv) :: tl, sibs, parents, remSibs, hFuel, hStep, hParTargets => by
+    by_cases hv' : v = u ^^^ 1
+    · match hSubOpt : canopyLevelStep nodeHash tl sibs with
+      | none =>
+        exact False.elim (by
+          obtain ⟨_, hSub, _⟩ := canopyLevelStep_pair nodeHash hv' hStep
+          rw [hSubOpt] at hSub; cases hSub)
+      | some (subAct, subRem) =>
+        have hShapePair : subRem = remSibs ∧
+            parents = (u >>> 1, nodeHash (u >>> 1) hu hv) :: subAct := by
+          obtain ⟨act', hSub, hb⟩ := canopyLevelStep_pair nodeHash hv' hStep
+          rw [hSubOpt] at hSub
+          injection hSub with hPr; injection hPr with hA hR
+          subst hA; exact ⟨hR, hb⟩
+        let pDig := nodeHash (u >>> 1) hu hv
+        have hMemT : pDig ∈ top₀ :: canopyNodeChildTargets nodeQueries :=
+          hParTargets (u >>> 1, pDig) (by rw [hShapePair.2]; exact .head _)
+        have hTlFuel : tl.length ≤ fuel := by simp only [List.length_cons] at hFuel; omega
+        let pred := fun q : RecordedCanopyNodeQuery D =>
+          decide (q.idx = u >>> 1) && decide (q.out = pDig)
+        match hF : findFirst pred nodeQueries with
+        | none =>
+          refine .unq (u >>> 1) hu hv pDig rfl hMemT (fun q hq ⟨hI, hL, hR⟩ => ?_)
+          have hFalse := findFirst_none_spec pred hF q hq
+          have hOut : q.out = pDig := by rw [← hNodeCons q hq, hI, hL, hR]
+          dsimp only [pred] at hFalse
+          simp only [hI, hOut, decide_true, Bool.and_self, Bool.true_eq_false] at hFalse
+        | some q =>
+          rcases findFirst_some_spec pred hF with ⟨hqMem, hqP⟩
+          dsimp only [pred] at hqP
+          simp only [Bool.and_eq_true, decide_eq_true_eq] at hqP
+          if hEq : (q.left, q.right) = (hu, hv) then
+            have hSubStep : canopyLevelStep nodeHash tl sibs = some (subAct, remSibs) := by
+              rw [← hShapePair.1]; exact hSubOpt
+            match classifyCanopyStep nodeHash top₀ nodeQueries hNodeCons fuel tl sibs subAct remSibs
+                hTlFuel hSubStep (fun p hp => hParTargets p (by rw [hShapePair.2]; exact .tail _ hp)) with
+            | .coll c => exact .coll c
+            | .unq idxU lU rU outU hO hM hU => exact .unq idxU lU rU outU hO hM hU
+            | .ok hSubExt =>
+              exact .ok (by
+                have hL : q.left = hu := (Prod.mk.inj hEq).1
+                have hR : q.right = hv := (Prod.mk.inj hEq).2
+                rw [hShapePair.2]
+                show extractOnlineCanopyStep nodeQueries (fuel + 1) (u :: v :: tl.map Prod.fst)
+                    ((u >>> 1, pDig) :: subAct) remSibs =
+                  some ((u, hu) :: (v, hv) :: tl, sibs)
+                unfold extractOnlineCanopyStep
+                dsimp only [pred] at hF
+                simp only [↓reduceIte, hv', hF, hSubExt]
+                rw [hL, hR])
+          else
+            exact .coll ⟨u >>> 1, q.left, q.right, hu, hv, hEq, by
+              rw [← hqP.1, hNodeCons q hqMem, hqP.2]; dsimp only [pDig]; rw [hqP.1]⟩
+    · match sibs, hStep with
+      | [], hStepNil =>
+        exact False.elim (by
+          obtain ⟨_, _, _, hs, _, _⟩ := canopyLevelStep_solo nodeHash hv' hStepNil; cases hs)
+      | s :: afterSibs, hStepCons =>
+        match hSubOpt : canopyLevelStep nodeHash ((v, hv) :: tl) afterSibs with
+        | none =>
+          exact False.elim (by
+            obtain ⟨_, _, _, hs, hSub, _⟩ := canopyLevelStep_solo nodeHash hv' hStepCons
+            injection hs with _ hRestEq; subst hRestEq
+            rw [hSubOpt] at hSub; cases hSub)
+        | some (subAct, subRem) =>
+          have hShapeSolo : subRem = remSibs ∧
+              parents = (u >>> 1, canopyParentHash nodeHash u hu s) :: subAct := by
+            obtain ⟨c, rest, act', hs, hSub, hb⟩ := canopyLevelStep_solo nodeHash hv' hStepCons
+            injection hs with hcEq hRestEq; subst hcEq; subst hRestEq
+            rw [hSubOpt] at hSub
+            injection hSub with hPr; injection hPr with hA hR
+            subst hA; exact ⟨hR, hb⟩
+          let pDig := canopyParentHash nodeHash u hu s
+          let lCh := if u &&& 1 = 0 then hu else s
+          let rCh := if u &&& 1 = 0 then s else hu
+          have hHashEq : nodeHash (u >>> 1) lCh rCh = pDig := by
+            dsimp only [pDig, canopyParentHash, lCh, rCh]
+            by_cases hp : u &&& 1 = 0 <;> simp only [hp, ↓reduceIte]
+          have hMemT : pDig ∈ top₀ :: canopyNodeChildTargets nodeQueries :=
+            hParTargets (u >>> 1, pDig) (by rw [hShapeSolo.2]; exact .head _)
+          have hVTlFuel : ((v, hv) :: tl).length ≤ fuel := Nat.le_of_succ_le_succ hFuel
+          let pred := fun q : RecordedCanopyNodeQuery D =>
+            decide (q.idx = u >>> 1) && decide (q.out = pDig)
+          match hF : findFirst pred nodeQueries with
+          | none =>
+            refine .unq (u >>> 1) lCh rCh pDig hHashEq hMemT (fun q hq ⟨hI, hL, hR⟩ => ?_)
+            have hFalse := findFirst_none_spec pred hF q hq
+            have hOut : q.out = pDig := by rw [← hNodeCons q hq, hI, hL, hR, hHashEq]
+            dsimp only [pred] at hFalse
+            simp only [hI, hOut, decide_true, Bool.and_self, Bool.true_eq_false] at hFalse
+          | some q =>
+            rcases findFirst_some_spec pred hF with ⟨hqMem, hqP⟩
+            dsimp only [pred] at hqP
+            simp only [Bool.and_eq_true, decide_eq_true_eq] at hqP
+            if hEq : (q.left, q.right) = (lCh, rCh) then
+              have hSubStep : canopyLevelStep nodeHash ((v, hv) :: tl) afterSibs =
+                  some (subAct, remSibs) := by rw [← hShapeSolo.1]; exact hSubOpt
+              match classifyCanopyStep nodeHash top₀ nodeQueries hNodeCons fuel ((v, hv) :: tl)
+                  afterSibs subAct remSibs hVTlFuel hSubStep
+                  (fun p hp => hParTargets p (by rw [hShapeSolo.2]; exact .tail _ hp)) with
+              | .coll c => exact .coll c
+              | .unq idxU lU rU outU hO hM hU => exact .unq idxU lU rU outU hO hM hU
+              | .ok hSubExt =>
+                exact .ok (by
+                  have hL : q.left = lCh := (Prod.mk.inj hEq).1
+                  have hR : q.right = rCh := (Prod.mk.inj hEq).2
+                  rw [hShapeSolo.2]
+                  show extractOnlineCanopyStep nodeQueries (fuel + 1) (u :: v :: tl.map Prod.fst)
+                      ((u >>> 1, pDig) :: subAct) remSibs =
+                    some ((u, hu) :: (v, hv) :: tl, s :: afterSibs)
+                  unfold extractOnlineCanopyStep
+                  dsimp only [pred] at hF
+                  dsimp only [List.map] at hSubExt
+                  simp only [↓reduceIte, hv', hF, hSubExt]
+                  by_cases hp : u &&& 1 = 0 <;>
+                    (dsimp only [lCh, rCh] at hL hR; simp only [hp, ↓reduceIte] at hL hR ⊢; rw [hL, hR]))
+            else
+              exact .coll ⟨u >>> 1, q.left, q.right, lCh, rCh, hEq, by
+                rw [← hqP.1, hNodeCons q hqMem, hqP.2, ← hHashEq, hqP.1]⟩
+
+private inductive LevelsClassify {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (top₀ : D)
+    (nodeQueries : List (RecordedCanopyNodeQuery D))
+    (d : Nat) (active : List (Nat × D)) (sibs : List D) : Type where
+  | ok (hExt : extractOnlineCanopyLevels nodeQueries d (active.map Prod.fst) [(1, top₀)] [] =
+      some (active, sibs))
+  | coll (c : CanopyNodeCollision nodeHash)
+  | unq (idxU : Nat) (lU rU outU : D)
+      (hOut : nodeHash idxU lU rU = outU)
+      (hMem : outU ∈ top₀ :: canopyNodeChildTargets nodeQueries)
+      (hUnq : ∀ q ∈ nodeQueries, ¬(q.idx = idxU ∧ q.left = lU ∧ q.right = rU))
+
+private def classifyCanopyLevels {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (top₀ : D)
+    (nodeQueries : List (RecordedCanopyNodeQuery D))
+    (hNodeCons : ∀ q ∈ nodeQueries, nodeHash q.idx q.left q.right = q.out) :
+    (d : Nat) → (active : List (Nat × D)) → (sibs : List D) →
+    canopyLevels nodeHash d active sibs = some ([(1, top₀)], []) →
+    LevelsClassify nodeHash top₀ nodeQueries d active sibs
+  | 0, active, sibs, hLvls =>
+    .ok (by
+      simp only [canopyLevels, Option.some.injEq, Prod.mk.injEq] at hLvls
+      rcases hLvls with ⟨rfl, rfl⟩; rfl)
+  | d + 1, active, sibs, hLvls => by
+    match hStep : canopyLevelStep nodeHash active sibs with
+    | none =>
+      exact False.elim (by
+        obtain ⟨_, _, hs, _⟩ := canopyLevels_succ nodeHash hLvls
+        rw [hStep] at hs; cases hs)
+    | some (midAct, midSibs) =>
+      have hRest : canopyLevels nodeHash d midAct midSibs = some ([(1, top₀)], []) := by
+        obtain ⟨m, r, hs, hr⟩ := canopyLevels_succ nodeHash hLvls
+        rw [hStep] at hs; injection hs with hPr; injection hPr with hm hr'
+        subst hm; subst hr'; exact hr
+      have hShape := (canopyLevelStep_shape nodeHash _ active sibs midAct midSibs
+        (Nat.lt_succ_self _) hStep).1
+      match classifyCanopyLevels nodeHash top₀ nodeQueries hNodeCons d midAct midSibs hRest with
+      | .coll c => exact .coll c
+      | .unq idxU lU rU outU hO hM hU => exact .unq idxU lU rU outU hO hM hU
+      | .ok hUpExt =>
+        have hUpTargets := extractOnlineCanopyLevels_targets nodeQueries top₀ d
+          (midAct.map Prod.fst) midAct midSibs hUpExt
+        match classifyCanopyStep nodeHash top₀ nodeQueries hNodeCons active.length active sibs
+            midAct midSibs (Nat.le_refl _) hStep hUpTargets with
+        | .coll c => exact .coll c
+        | .unq idxU lU rU outU hO hM hU => exact .unq idxU lU rU outU hO hM hU
+        | .ok hStepExt =>
+          exact .ok (by
+            show extractOnlineCanopyLevels nodeQueries (d + 1) (active.map Prod.fst) [(1, top₀)] [] =
+              some (active, sibs)
+            unfold extractOnlineCanopyLevels; dsimp only
+            rw [← hShape, hUpExt]; dsimp only
+            rw [List.length_map]; exact hStepExt)
+
+/-- **Constructive `Type`-valued online `CanopyMultiProof` query-table classifier**
+    (`0 Classical.choice`). -/
+def classifyOnlineCanopyOpening {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (rootHash : Nat → D → D)
+    (logLeaves : Nat) (commitment : D)
+    (rootQueries : List (RecordedCanopyRootQuery D))
+    (nodeQueries : List (RecordedCanopyNodeQuery D))
+    (hRootCons : ∀ q ∈ rootQueries, rootHash q.logLeaves q.top = q.out)
+    (hNodeCons : ∀ q ∈ nodeQueries, nodeHash q.idx q.left q.right = q.out)
+    (leaves : List (Nat × D)) (proof : List D)
+    (hAcc : verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves proof = true) :
+    OnlineCanopyOutcome nodeHash rootHash logLeaves commitment rootQueries nodeQueries
+      leaves proof := by
+  match hLvlsOpt : canopyLevels nodeHash logLeaves
+      (leaves.map (fun p => (2 ^ logLeaves + p.1, p.2))) proof with
+  | some ([(uTop, top)], []) =>
+    have hTopSpec : uTop = 1 ∧ rootHash logLeaves top = commitment := by
+      obtain ⟨top', hL, hR⟩ :=
+        canopy_accept_unpack nodeHash rootHash logLeaves commitment leaves proof hAcc
+      rw [hLvlsOpt] at hL
+      injection hL with hPr; injection hPr with hList _
+      injection hList with hHead _; injection hHead with hu ht
+      subst ht; exact ⟨hu, hR⟩
+    let rPred := fun q : RecordedCanopyRootQuery D =>
+      decide (q.logLeaves = logLeaves) && decide (q.out = commitment)
+    match hRF : findFirst rPred rootQueries with
+    | none =>
+      refine .unqueriedRootPreimage top hTopSpec.2 (fun q hq ⟨hLL, hTop⟩ => ?_)
+      have hFalse := findFirst_none_spec rPred hRF q hq
+      have hOut : q.out = commitment := by rw [← hRootCons q hq, hLL, hTop, hTopSpec.2]
+      dsimp only [rPred] at hFalse
+      simp only [hLL, hOut, decide_true, Bool.and_self, Bool.true_eq_false] at hFalse
+    | some rq =>
+      rcases findFirst_some_spec rPred hRF with ⟨hrqMem, hrqP⟩
+      dsimp only [rPred] at hrqP
+      simp only [Bool.and_eq_true, decide_eq_true_eq] at hrqP
+      if hTopEq : rq.top = top then
+        have hLvlsRq : canopyLevels nodeHash logLeaves
+            (leaves.map (fun p => (2 ^ logLeaves + p.1, p.2))) proof = some ([(1, rq.top)], []) := by
+          rw [hTopEq, ← hTopSpec.1]; exact hLvlsOpt
+        match classifyCanopyLevels nodeHash rq.top nodeQueries hNodeCons logLeaves
+            (leaves.map (fun p => (2 ^ logLeaves + p.1, p.2))) proof hLvlsRq with
+        | .coll c => exact .nodeCollision c
+        | .unq idxU lU rU outU hO hM hU =>
+          exact .unqueriedNodePreimage rq.top idxU lU rU outU
+            ⟨rq, hrqMem, hrqP.1, rfl, hrqP.2⟩ hO hM hU
+        | .ok hExtLvls =>
+          exact .extractedEq (by
+            unfold extractOnlineCanopyOpening
+            rw [hRF]; dsimp only
+            rw [map_fst_shift_eq (2 ^ logLeaves) leaves] at hExtLvls
+            rw [hExtLvls]; dsimp only
+            rw [map_snd_shift_eq (2 ^ logLeaves) leaves, zip_fst_snd_eq leaves])
+      else
+        exact .rootCollision ⟨rq.top, top, hTopEq, by
+          have h1 := hRootCons rq hrqMem
+          rw [hrqP.1, hrqP.2] at h1
+          exact h1.trans hTopSpec.2.symm⟩
+  | none =>
+    exact False.elim (by
+      obtain ⟨_, hL, _⟩ :=
+        canopy_accept_unpack nodeHash rootHash logLeaves commitment leaves proof hAcc
+      rw [hL] at hLvlsOpt; cases hLvlsOpt)
+  | some ([], _) =>
+    exact False.elim (by
+      obtain ⟨_, hL, _⟩ :=
+        canopy_accept_unpack nodeHash rootHash logLeaves commitment leaves proof hAcc
+      rw [hL] at hLvlsOpt; injection hLvlsOpt with hp; injection hp with hl _; cases hl)
+  | some (_ :: _ :: _, _) =>
+    exact False.elim (by
+      obtain ⟨_, hL, _⟩ :=
+        canopy_accept_unpack nodeHash rootHash logLeaves commitment leaves proof hAcc
+      rw [hL] at hLvlsOpt; injection hLvlsOpt with hp; injection hp with hl _
+      injection hl with _ htl; cases htl)
+  | some ([_], _ :: _) =>
+    exact False.elim (by
+      obtain ⟨_, hL, _⟩ :=
+        canopy_accept_unpack nodeHash rootHash logLeaves commitment leaves proof hAcc
+      rw [hL] at hLvlsOpt; injection hLvlsOpt with hp; injection hp with _ hr; cases hr)
+
+/-- **Pre-challenge binding of `CanopyMultiProof` online extraction**. -/
+theorem onlineCanopy_preChallenge_unique {D : Type} [DecidableEq D]
+    (commitment : D)
+    (rootQueries : List (RecordedCanopyRootQuery D))
+    (nodeQueries : List (RecordedCanopyNodeQuery D))
+    (logLeaves : Nat) (leaves₁ leaves₂ : List (Nat × D)) (proof₁ proof₂ : List D)
+    (hIdx : leaves₁.map Prod.fst = leaves₂.map Prod.fst)
+    (h₁ : extractOnlineCanopyOpening commitment rootQueries nodeQueries logLeaves
+      (leaves₁.map Prod.fst) = some (leaves₁, proof₁))
+    (h₂ : extractOnlineCanopyOpening commitment rootQueries nodeQueries logLeaves
+      (leaves₂.map Prod.fst) = some (leaves₂, proof₂)) :
+    leaves₁ = leaves₂ ∧ proof₁ = proof₂ := by
+  rw [hIdx] at h₁
+  exact Prod.mk.inj (Option.some.inj (h₁.symm.trans h₂))
+
+
+/-! ## §3. Unitary `QVec` / `GaussInt` Quantum Online-Extraction Reduction (`qromMerkleOnlineExtractBound`) -/
+
+private theorem qsum_ofFin_eq_single (w : Nat) (y : BitVec w) :
+    qsum (2 ^ w) (fun j => if BitVec.ofFin j = y then 1 else 0) = 1 := by
+  have hCongr : qsum (2 ^ w) (fun j => if BitVec.ofFin j = y then 1 else 0) =
+      qsum (2 ^ w) (fun j => if j = y.toFin then 1 else 0) := by
+    apply qsum_congr; intro j
+    by_cases hj : j = y.toFin
+    · subst hj; simp
+    · have hne : BitVec.ofFin j ≠ y := fun he => hj (by rw [← he])
+      simp [hj, hne]
+  rw [hCongr, qsum_eq_indicator]
+
+/-- At most `ts.length` values `j : Fin (2 ^ w)` land inside any target list `ts : List (BitVec w)`. -/
+theorem qsum_ofFin_listHasElem_le_length (w : Nat) :
+    ∀ (ts : List (BitVec w)),
+      qsum (2 ^ w) (fun j => if listHasElem (BitVec.ofFin j) ts = true then 1 else 0) ≤ ts.length
+  | [] => by simp only [listHasElem, Bool.false_eq_true, ↓reduceIte, qsum_const, Nat.mul_zero]; omega
+  | t :: rest => by
+    have ih := qsum_ofFin_listHasElem_le_length w rest
+    have hSplit :
+        qsum (2 ^ w) (fun j => if listHasElem (BitVec.ofFin j) (t :: rest) = true then 1 else 0) ≤
+        qsum (2 ^ w) (fun j =>
+          (if BitVec.ofFin j = t then 1 else 0) +
+          (if listHasElem (BitVec.ofFin j) rest = true then 1 else 0)) := by
+      apply qsum_le_qsum; intro j
+      rw [listHasElem]
+      by_cases hjt : BitVec.ofFin j = t
+      · simp [hjt]
+      · simp [hjt]
+    rw [qsum_add, qsum_ofFin_eq_single w t] at hSplit
+    simp only [List.length_cons]
+    omega
+
+/-- `QromRbrRound` for a coordinate `x = proj z` hashing into a target list of size `≤ T`
+    that is invariant under reprogramming `x`. The definition does not assert that `x` was
+    unqueried, or that the targets were extracted before a protocol challenge. -/
+def qromTargetSetRound {cardX w : Nat} (H : Fin cardX → BitVec w)
+    (proj : Fin cardX → Fin cardX)
+    (targetSet : (Fin cardX → BitVec w) → Fin cardX → List (BitVec w))
+    (T : Nat)
+    (hLocal : ∀ (O : Fin cardX → BitVec w) (x : Fin cardX) (ch : BitVec w),
+      targetSet (reprogramOracle O x ch) x = targetSet O x)
+    (hCard : ∀ (O : Fin cardX → BitVec w) (x : Fin cardX), (targetSet O x).length ≤ T) :
+    QromRbrRound cardX w H where
+  proj := proj
+  isDoomedAt := fun _ _ => true
+  isLiveAfter := fun O x => listHasElem (O x) (targetSet O x)
+  badCard := T
+  doomed_local := fun _ _ => rfl
+  flip_bound := fun x _ => by
+    have hEq : ∀ j : Fin (2 ^ w),
+        listHasElem ((reprogramOracle H x (BitVec.ofFin j)) x)
+          (targetSet (reprogramOracle H x (BitVec.ofFin j)) x) =
+        listHasElem (BitVec.ofFin j) (targetSet H x) := by
+      intro j
+      rw [hLocal H x (BitVec.ofFin j)]
+      simp [reprogramOracle]
+    rw [qsum_congr (fun j => by rw [hEq j])]
+    exact Nat.le_trans (qsum_ofFin_listHasElem_le_length w (targetSet H x)) (hCard H x)
+
+/-- **Unitary `QVec` / `GaussInt` Target-Set Preimage Bound (`qrom_unitary_target_hit_bound`)**. -/
+theorem qrom_unitary_target_hit_bound {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (proj : Fin cardX → Fin cardX)
+    (targetSet : (Fin cardX → BitVec w) → Fin cardX → List (BitVec w))
+    (T : Nat)
+    (hLocal : ∀ (O : Fin cardX → BitVec w) (x : Fin cardX) (ch : BitVec w),
+      targetSet (reprogramOracle O x ch) x = targetSet O x)
+    (hCard : ∀ (O : Fin cardX → BitVec w) (x : Fin cardX), (targetSet O x).length ≤ T) :
+    let norm := prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init
+    let live := fun (O : Fin cardX → BitVec w) (x : Fin cardX) => listHasElem (O x) (targetSet O x)
+    RatBound.le
+      ⟨uniformOracleSum w cardX (fun H =>
+          qromOrdinaryFlipMass A H proj (fun _ _ => true) live),
+        (2 ^ w) ^ cardX * norm,
+        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos w))
+          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      ⟨(2 * Q + 1) ^ 2 * T, 2 ^ w, Nat.two_pow_pos w⟩ :=
+  qrom_uniform_oracle_round_bound A
+    (fun H => qromTargetSetRound H proj targetSet T hLocal hCard)
+    proj (fun _ _ => true) (fun O x => listHasElem (O x) (targetSet O x)) T
+    (fun _ => rfl) (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
+
+private theorem twoQ_plus_one_sq_le_eight_Q_succ_sq (Q : Nat) :
+    (2 * Q + 1) ^ 2 ≤ 8 * (Q + 1) ^ 2 := by
+  have h1 : 2 * Q + 1 ≤ 2 * (Q + 1) := by omega
+  have h2 : (2 * Q + 1) ^ 2 ≤ (2 * (Q + 1)) ^ 2 := Nat.pow_le_pow_left h1 2
+  have h3 : (2 * (Q + 1)) ^ 2 = 4 * (Q + 1) ^ 2 := by rw [Nat.mul_pow]
+  rw [h3] at h2
+  exact Nat.le_trans h2 (Nat.mul_le_mul_right ((Q + 1) ^ 2) (by decide : 4 ≤ 8))
+
+private theorem twoQ_plus_one_cube_le_eight_Q_succ_cube (Q : Nat) :
+    (2 * Q + 1) ^ 2 * (2 * Q + 1) ≤ 8 * (Q + 1) ^ 3 := by
+  have hPow : (2 * Q + 1) ^ 2 * (2 * Q + 1) = (2 * Q + 1) ^ 3 := (Nat.pow_succ (2 * Q + 1) 2).symm
+  have h1 : 2 * Q + 1 ≤ 2 * (Q + 1) := by omega
+  have h2 : (2 * Q + 1) ^ 3 ≤ (2 * (Q + 1)) ^ 3 := Nat.pow_le_pow_left h1 3
+  have h3 : (2 * (Q + 1)) ^ 3 = 8 * (Q + 1) ^ 3 := by rw [Nat.mul_pow]
+  rw [hPow, ← h3]; exact h2
+
+/-- Exact algebraic dominance of `qromMerkleOnlineExtractBound numRoots w Q` over the unitary
+    Measure-and-Reprogram bound `(2Q + 1)^2 * (numRoots * (1 + (2Q + 1))) / 2^w`. -/
+theorem unitary_merkle_raw_le_qromMerkleOnlineExtractBound (numRoots w Q : Nat) :
+    RatBound.le
+      ⟨(2 * Q + 1) ^ 2 * (numRoots * (1 + (2 * Q + 1))), 2 ^ w, Nat.two_pow_pos w⟩
+      (qromMerkleOnlineExtractBound numRoots w Q) := by
+  unfold qromMerkleOnlineExtractBound RatBound.scale RatBound.add
+    quantumGroverSingleTargetBound quantumZhandryMultiTargetBound quantumBhtCollisionBound
+    RatBound.le
+  dsimp only
+  have hPerRoot :
+      (2 * Q + 1) ^ 2 * (1 + (2 * Q + 1)) ≤
+        8 * 1 * (Q + 1) ^ 2 + 8 * (Q + 1) ^ 3 := by
+    rw [Nat.mul_add, Nat.mul_one, show 8 * 1 = 8 from rfl]
+    exact Nat.add_le_add (twoQ_plus_one_sq_le_eight_Q_succ_sq Q)
+      (twoQ_plus_one_cube_le_eight_Q_succ_cube Q)
+  have hScaled :
+      (2 * Q + 1) ^ 2 * (numRoots * (1 + (2 * Q + 1))) ≤
+        numRoots * (8 * 1 * (Q + 1) ^ 2 + 8 * (Q + 1) ^ 3) := by
+    rw [← Nat.mul_assoc, Nat.mul_comm ((2 * Q + 1) ^ 2) numRoots, Nat.mul_assoc]
+    exact Nat.mul_le_mul_left numRoots hPerRoot
+  let S := 8 * 1 * (Q + 1) ^ 2 + 8 * (Q + 1) ^ 3
+  let W := 2 ^ w
+  have hRhsEq :
+      numRoots * (8 * 1 * (Q + 1) ^ 2 * W + 8 * (Q + 1) ^ 3 * W) * W =
+      numRoots * S * (W * W) := by
+    dsimp only [S]
+    rw [← Nat.add_mul (8 * 1 * (Q + 1) ^ 2) (8 * (Q + 1) ^ 3) W,
+        ← Nat.mul_assoc numRoots _ W,
+        Nat.mul_assoc (numRoots * _) W W]
+  change (2 * Q + 1) ^ 2 * (numRoots * (1 + (2 * Q + 1))) * (W * W) ≤
+    numRoots * (8 * 1 * (Q + 1) ^ 2 * W + 8 * (Q + 1) ^ 3 * W) * W
+  rw [hRhsEq]
+  exact Nat.mul_le_mul_right (W * W) hScaled
+
+/-- Conditional target-hit union bound with the arithmetic Merkle extraction budget.
+    `failExtract` is an arbitrary event. A protocol reduction must supply `hCover`, `hLocal`,
+    and `hCard`; this theorem neither constructs a query table nor relates that event to
+    `classifyOnlineMerkleOpening` or `classifyOnlineCanopyOpening`. -/
+theorem qrom_unitary_multiRoot_merkle_extract_bound {cardX w cardAnc Q : Nat}
+    (numRoots : Nat)
+    (A : QuantumAdv cardX w cardAnc Q)
+    (failExtract : (Fin cardX → BitVec w) → Fin cardX → Bool)
+    (proj : Fin (2 * numRoots) → Fin cardX → Fin cardX)
+    (targetSet : Fin (2 * numRoots) → (Fin cardX → BitVec w) → Fin cardX → List (BitVec w))
+    (hLocal : ∀ r O x ch, targetSet r (reprogramOracle O x ch) x = targetSet r O x)
+    (hCard : ∀ r O x,
+      (targetSet r O x).length ≤ (if r.1 % 2 = 0 then 1 else 2 * Q + 1))
+    (hCover : ∀ H, QVec.queryMassOn (failExtract H) (runQuantumAdv A H) ≤
+      qsum (2 * numRoots) (fun r =>
+        qromOrdinaryFlipMass A H (proj r) (fun _ _ => true)
+          (fun O x => listHasElem (O x) (targetSet r O x)))) :
+    let norm := prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init
+    RatBound.le
+      ⟨uniformOracleSum w cardX (fun H => QVec.queryMassOn (failExtract H) (runQuantumAdv A H)),
+        (2 ^ w) ^ cardX * norm,
+        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos w))
+          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      (qromMerkleOnlineExtractBound numRoots w Q) := by
+  let bad : Fin (2 * numRoots) → Nat := fun r => if r.1 % 2 = 0 then 1 else 2 * Q + 1
+  have hUnion := qrom_uniform_oracle_success_bound A failExtract
+    (fun r H => qromTargetSetRound H (proj r) (targetSet r) (bad r) (hLocal r) (hCard r))
+    proj (fun _ _ _ => true) (fun r O x => listHasElem (O x) (targetSet r O x)) bad
+    (fun _ _ => rfl) (fun _ _ => rfl) (fun _ _ => rfl) (fun _ _ => rfl) hCover
+  have hSumBad : ∀ m : Nat,
+      qsum (2 * m) (fun r : Fin (2 * m) => if r.1 % 2 = 0 then 1 else 2 * Q + 1) =
+        m * (1 + (2 * Q + 1)) := by
+    intro m
+    induction m with
+    | zero => simp [qsum]
+    | succ k ih =>
+      let C := 1 + (2 * Q + 1)
+      have hStep2 : ∀ (n : Nat), n = 2 * k →
+          qsum (n + 2) (fun r : Fin (n + 2) => if r.1 % 2 = 0 then 1 else 2 * Q + 1) =
+            C + qsum n (fun r : Fin n => if r.1 % 2 = 0 then 1 else 2 * Q + 1) := by
+        intro n _
+        change qsum ((n + 1) + 1) _ = _
+        simp only [qsum]
+        have h1 : (0 + 1 : Nat) % 2 = 1 := rfl
+        have hMod : ∀ (i : Fin n), (i.1 + 1 + 1) % 2 = i.1 % 2 := fun _ => by omega
+        rw [qsum_congr (fun i => by rw [hMod i])]
+        simp only [h1, Nat.one_ne_zero, ↓reduceIte]
+        dsimp only [C]
+        omega
+      have hEq2 : 2 * (k + 1) = 2 * k + 2 := by omega
+      have hGen : ∀ (N : Nat), N = 2 * k + 2 →
+          qsum N (fun r : Fin N => if r.1 % 2 = 0 then 1 else 2 * Q + 1) =
+            (k + 1) * C := by
+        intro N hN; subst hN
+        rw [hStep2 (2 * k) rfl, Nat.succ_mul k C]
+        change C + qsum (2 * k) (fun r : Fin (2 * k) => if r.1 % 2 = 0 then 1 else 2 * Q + 1) =
+          k * C + C
+        rw [ih]
+        exact Nat.add_comm C (k * C)
+      exact hGen (2 * (k + 1)) hEq2
+  have hBadEq : qsum (2 * numRoots) bad = numRoots * (1 + (2 * Q + 1)) := hSumBad numRoots
+  rw [hBadEq] at hUnion
+  exact RatBound.le_trans hUnion (unitary_merkle_raw_le_qromMerkleOnlineExtractBound numRoots w Q)
+
+/-- Single-root specialization (`numRoots = 1`) of `qrom_unitary_multiRoot_merkle_extract_bound`. -/
+theorem qrom_unitary_single_root_merkle_extract_bound {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (failExtract : (Fin cardX → BitVec w) → Fin cardX → Bool)
+    (proj : Fin 2 → Fin cardX → Fin cardX)
+    (targetSet : Fin 2 → (Fin cardX → BitVec w) → Fin cardX → List (BitVec w))
+    (hLocal : ∀ r O x ch, targetSet r (reprogramOracle O x ch) x = targetSet r O x)
+    (hCard : ∀ r O x, (targetSet r O x).length ≤ (if r.1 % 2 = 0 then 1 else 2 * Q + 1))
+    (hCover : ∀ H, QVec.queryMassOn (failExtract H) (runQuantumAdv A H) ≤
+      qsum 2 (fun r =>
+        qromOrdinaryFlipMass A H (proj r) (fun _ _ => true)
+          (fun O x => listHasElem (O x) (targetSet r O x)))) :
+    let norm := prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init
+    RatBound.le
+      ⟨uniformOracleSum w cardX (fun H => QVec.queryMassOn (failExtract H) (runQuantumAdv A H)),
+        (2 ^ w) ^ cardX * norm,
+        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos w))
+          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      (qromMerkleOnlineExtractBound 1 w Q) :=
+  qrom_unitary_multiRoot_merkle_extract_bound 1 A failExtract proj targetSet hLocal hCard hCover
+
+private def witnessInitVec : QVec 2 2 1 :=
+  fun x y _ => if x.1 = 0 ∧ y.1 = 0 then ⟨1, 0⟩ else GaussInt.zero
+
+private theorem witnessInitVec_pos : 0 < QVec.stateNormSq witnessInitVec := by decide
+
+private def witnessQuantumAdv : QuantumAdv 2 2 1 0 :=
+  { init := witnessInitVec, h_init_pos := witnessInitVec_pos, steps := fun t => Fin.elim0 t }
+
+private def witnessFailExtract (H : Fin 2 → BitVec 2) (x : Fin 2) : Bool :=
+  decide ((H x).toNat = 0)
+
+private def witnessProj (_ : Fin (2 * 1)) (x : Fin 2) : Fin 2 := x
+
+private def witnessTargetSet (_ : Fin (2 * 1)) (_ : Fin 2 → BitVec 2) (_ : Fin 2) :
+    List (BitVec 2) := [0#2]
+
+private theorem witnessCoverProof (H : Fin 2 → BitVec 2) :
+    QVec.queryMassOn (witnessFailExtract H) (runQuantumAdv witnessQuantumAdv H) ≤
+      qsum (2 * 1) (fun r =>
+        qromOrdinaryFlipMass witnessQuantumAdv H (witnessProj r) (fun _ _ => true)
+          (fun O x => listHasElem (O x) (witnessTargetSet r O x))) := by
+  have hPt : ∀ (ψ : QVec 2 2 1) (x : Fin 2),
+      QVec.queryWeight ψ x ≤ QVec.queryMassOn (fun z => decide (x = z)) ψ := by
+    intro ψ ⟨i, hi⟩
+    match i, hi with
+    | 0, _ =>
+      unfold QVec.queryMassOn qsum; dsimp only
+      simp only [decide_true, ↓reduceIte]
+      exact Nat.le_add_right _ _
+    | 1, _ =>
+      unfold QVec.queryMassOn
+      simp only [qsum, Fin.ext_iff, Nat.one_ne_zero, Nat.zero_add, decide_false, decide_true,
+        Bool.false_eq_true, ↓reduceIte]
+      omega
+  have hLe : QVec.queryMassOn (witnessFailExtract H) (runQuantumAdv witnessQuantumAdv H) ≤
+      qromOrdinaryFlipMass witnessQuantumAdv H (witnessProj ⟨0, by omega⟩) (fun _ _ => true)
+        (fun O x => listHasElem (O x) (witnessTargetSet ⟨0, by omega⟩ O x)) := by
+    unfold QVec.queryMassOn qromOrdinaryFlipMass witnessFailExtract witnessProj witnessTargetSet
+    apply qsum_le_qsum; intro x
+    by_cases h0 : (H x).toNat = 0
+    · have hBv : H x = 0#2 := BitVec.eq_of_toNat_eq h0
+      have hElem : listHasElem (H x) [0#2] = true := by rw [hBv]; rfl
+      simp only [h0, decide_true, Bool.true_and, hElem, ↓reduceIte]
+      exact hPt (runQuantumAdv witnessQuantumAdv H) x
+    · simp only [h0, decide_false, Bool.false_eq_true, ↓reduceIte]
+      exact Nat.zero_le _
+  exact Nat.le_trans hLe (Nat.le_add_right _ _)
+
+/-- Inhabitedness of the conditional target-hit premises: zero queries, two-bit answers,
+    and constant singleton targets. This is not an inhabited Merkle extraction execution. -/
+theorem inhabited_qrom_unitary_merkle_extract :
+    ∃ (cardX w cardAnc Q numRoots : Nat)
+      (A : QuantumAdv cardX w cardAnc Q)
+      (failExtract : (Fin cardX → BitVec w) → Fin cardX → Bool)
+      (proj : Fin (2 * numRoots) → Fin cardX → Fin cardX)
+      (targetSet : Fin (2 * numRoots) → (Fin cardX → BitVec w) → Fin cardX → List (BitVec w)),
+      (∀ r O x ch, targetSet r (reprogramOracle O x ch) x = targetSet r O x) ∧
+      (∀ r O x, (targetSet r O x).length ≤ (if r.1 % 2 = 0 then 1 else 2 * Q + 1)) ∧
+      (∀ H, QVec.queryMassOn (failExtract H) (runQuantumAdv A H) ≤
+        qsum (2 * numRoots) (fun r =>
+          qromOrdinaryFlipMass A H (proj r) (fun _ _ => true)
+            (fun O x => listHasElem (O x) (targetSet r O x)))) :=
+  ⟨2, 2, 1, 0, 1, witnessQuantumAdv, witnessFailExtract, witnessProj, witnessTargetSet,
+    (fun _ _ _ _ => rfl),
+    (fun _ _ _ => by unfold witnessTargetSet; simp),
+    witnessCoverProof⟩
+
+#verify_inhabited
+  Qsag.qrom_unitary_multiRoot_merkle_extract_bound
+  Qsag.inhabited_qrom_unitary_merkle_extract
+
+#verify_constructive
+  Qsag.merkleChildTargets_length
+  Qsag.merklePreChallengeTargets_length
+  Qsag.onlineMerkleOutcome_collision_sound
+  Qsag.onlineMerkle_preChallenge_unique
+  Qsag.tooth_onlineMerkle_empty_queries_unqueried_root
+  Qsag.onlineCanopy_preChallenge_unique
+  Qsag.qsum_ofFin_listHasElem_le_length
+  Qsag.qrom_unitary_target_hit_bound
+  Qsag.unitary_merkle_raw_le_qromMerkleOnlineExtractBound
+  Qsag.qrom_unitary_multiRoot_merkle_extract_bound
+  Qsag.qrom_unitary_single_root_merkle_extract_bound
+  Qsag.inhabited_qrom_unitary_merkle_extract
+
+end Qsag
+end

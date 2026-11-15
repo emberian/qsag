@@ -22,12 +22,12 @@ therefore cover adversaries whose queries are observed (classical-query adversar
 quantum local computation), and do not bound arbitrary coherent-query adversaries.
 -/
 
-public import Qsag.QromMerkleOnlineExtraction
-public import Qsag.QromExtractionBoundary
-import all Qsag.QromMerkleOnlineExtraction
-import all Qsag.QromExtractionBoundary
-import all Qsag.MultiRoundFsQrom
-import all Qsag.ConcreteSecurityBudget
+public import Qsag.Oracle.QromMerkleOnlineExtraction
+public import Qsag.Oracle.QromExtractionBoundary
+import all Qsag.Oracle.QromMerkleOnlineExtraction
+import all Qsag.Oracle.QromExtractionBoundary
+import all Qsag.Oracle.MultiRoundFsQrom
+import all Qsag.Oracle.ConcreteSecurityBudget
 
 public section
 namespace Qsag
