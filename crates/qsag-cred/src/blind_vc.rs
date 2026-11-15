@@ -2052,7 +2052,7 @@ fn expand_gamma_weights(gamma_seed: &[u8; 32], rep: u32) -> ([Fp5; SD_GRID_B], [
             limbs[base + 2],
             limbs[base + 3],
             limbs[base + 4],
-        ]));
+        ]);
     }
     let off = SD_GRID_B * 5;
     for (l, slot) in eta.iter_mut().enumerate() {
@@ -2063,7 +2063,7 @@ fn expand_gamma_weights(gamma_seed: &[u8; 32], rep: u32) -> ([Fp5; SD_GRID_B], [
             limbs[base + 2],
             limbs[base + 3],
             limbs[base + 4],
-        ]));
+        ]);
     }
     (theta, eta)
 }
@@ -2799,7 +2799,7 @@ fn unpack_party_ext_masks(
             tape[cur + 2],
             tape[cur + 3],
             tape[cur + 4],
-        ]));
+        ]);
         cur += 5;
     }
     let mut v_pad = [Fp5::ZERO; SD_GRID_L];
@@ -2810,7 +2810,7 @@ fn unpack_party_ext_masks(
             tape[cur + 2],
             tape[cur + 3],
             tape[cur + 4],
-        ]));
+        ]);
         cur += 5;
     }
     let c_pad = Fp5::from_limbs([
@@ -2819,7 +2819,7 @@ fn unpack_party_ext_masks(
         tape[cur + 2],
         tape[cur + 3],
         tape[cur + 4],
-    ]));
+    ]);
     cur += 5;
     let mut poly_mask = [Fp5::ZERO; SD_RPOLY_COEFFS];
     for slot in &mut poly_mask {
@@ -2829,7 +2829,7 @@ fn unpack_party_ext_masks(
             tape[cur + 2],
             tape[cur + 3],
             tape[cur + 4],
-        ]));
+        ]);
         cur += 5;
     }
     debug_assert_eq!(cur, PARTY_EXT_LIMBS);
@@ -5270,10 +5270,10 @@ mod tests {
         assert_eq!(
             actual,
             [
-                "KAT_ISSUANCE",
-                "KAT_ROOT",
-                "KAT_PRES_CLASSICAL_FRESH",
-                "KAT_PRES_QUANTUM_SCOPED",
+                "fecf3f36ce677dcc50d6ac83d91f2d8838efbf04d58571c20d586a35432e5d25",
+                "ac05d706c5c72c17f54a06fbcd0b6fcc3b1bc9b447529ab75a7cb587201d86b1",
+                "d4bfec08995d0f69f759734b211a542e9e590b2aa9faad9f94a50fc6f2381839",
+                "07813ef70176b90e6e06c194853794a20189acba1d2c4bd6eb4c73a1b82e1e7b",
             ]
         );
     }
