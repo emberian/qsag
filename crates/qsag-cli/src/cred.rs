@@ -612,3 +612,618 @@ impl MpcRoundSlot {
 }
 
 impl Drop for MpcRoundSlot {
+    fn drop(&mut self) {
+        for maybe_priv in &mut self.private {
+            if let Some(rows) = maybe_priv {
+                for buf in rows {
+                    ct_zeroize_bytes(buf);
+                }
+            }
+        }
+        for maybe_bcast in &mut self.broadcast {
+            if let Some(buf) = maybe_bcast {
+                ct_zeroize_bytes(buf);
+            }
+        }
+    }
+}
+
+struct SharedMpcHub {
+    parties: usize,
+    rounds: Mutex<BTreeMap<(u64, u8), MpcRoundSlot>>,
+    cv: Condvar,
+}
+
+impl SharedMpcHub {
+    fn new(parties: usize) -> Arc<Self> {
+        Arc::new(Self {
+            parties,
+            rounds: Mutex::new(BTreeMap::new()),
+            cv: Condvar::new(),
+        })
+    }
+
+    fn abort_all(&self) {
+        if let Ok(mut map) = self.rounds.lock() {
+            for slot in map.values_mut() {
+                slot.aborted = true;
+            }
+            self.cv.notify_all();
+        }
+    }
+}
+
+struct LocalMpcEndpoint {
+    me: usize,
+    hub: Arc<SharedMpcHub>,
+}
+
+impl MpcTransport for LocalMpcEndpoint {
+    fn exchange(
+        &mut self,
+        info: RoundInfo,
+        private: Vec<Vec<u8>>,
+        broadcast: Vec<u8>,
+    ) -> Result<RoundInbox, MpcTransportError> {
+        let n = self.hub.parties;
+        if private.len() != n {
+            return Err(MpcTransportError);
+        }
+        let key = (info.index, info.phase);
+        let mut guard = self.hub.rounds.lock().map_err(|_| MpcTransportError)?;
+        {
+            let slot = guard.entry(key).or_insert_with(|| MpcRoundSlot::new(n));
+            if slot.aborted || slot.private[self.me].is_some() {
+                return Err(MpcTransportError);
+            }
+            slot.private[self.me] = Some(private);
+            slot.broadcast[self.me] = Some(broadcast);
+            slot.arrivals += 1;
+            if slot.arrivals == n {
+                self.hub.cv.notify_all();
+            }
+        }
+        loop {
+            let slot = guard.get(&key).ok_or(MpcTransportError)?;
+            if slot.aborted {
+                return Err(MpcTransportError);
+            }
+            if slot.arrivals == n {
+                let mut recv_priv = Vec::with_capacity(n);
+                let mut recv_bcast = Vec::with_capacity(n);
+                for sender in 0..n {
+                    let p = if sender == self.me {
+                        Vec::new()
+                    } else {
+                        slot.private[sender]
+                            .as_ref()
+                            .and_then(|rows| rows.get(self.me))
+                            .cloned()
+                            .unwrap_or_default()
+                    };
+                    let b = slot.broadcast[sender].clone().unwrap_or_default();
+                    recv_priv.push(p);
+                    recv_bcast.push(b);
+                }
+                return Ok(RoundInbox {
+                    private: recv_priv,
+                    broadcast: recv_bcast,
+                });
+            }
+            guard = self.hub.cv.wait(guard).map_err(|_| MpcTransportError)?;
+        }
+    }
+}
+
+fn parse_mldsa_level(spec: Option<&str>) -> Result<(MlDsaLevel, &'static str), CliError> {
+    match spec.unwrap_or("44") {
+        "44" | "ml-dsa-44" => Ok((MlDsaLevel::MlDsa44, "ml-dsa-44")),
+        "65" | "ml-dsa-65" => Ok((MlDsaLevel::MlDsa65, "ml-dsa-65")),
+        "87" | "ml-dsa-87" => Ok((MlDsaLevel::MlDsa87, "ml-dsa-87")),
+        other => Err(CliError::usage(format!(
+            "unsupported --level '{other}' (expected 44, 65, or 87)"
+        ))),
+    }
+}
+
+fn mldsa_meta_path(vault_dir: &str) -> String {
+    Path::new(vault_dir)
+        .join("mldsa-meta.json")
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn mldsa_seed_path(vault_dir: &str, party: usize) -> String {
+    Path::new(vault_dir)
+        .join(format!("mldsa-party-{party}.seed"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn mldsa_mac_path(vault_dir: &str, party: usize) -> String {
+    Path::new(vault_dir)
+        .join(format!("mldsa-burn-{party}.mac"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn mldsa_burn_path(vault_dir: &str, party: usize) -> PathBuf {
+    Path::new(vault_dir).join(format!("mldsa-party-{party}.burn"))
+}
+
+fn map_mldsa_err(err: ThresholdMlDsaError) -> CliError {
+    match err {
+        ThresholdMlDsaError::InvalidThresholdParameters { .. }
+        | ThresholdMlDsaError::InsufficientHonestHolderCoverage { .. }
+        | ThresholdMlDsaError::DuplicateOrUnknownParty { .. }
+        | ThresholdMlDsaError::UnsupportedLevel
+        | ThresholdMlDsaError::ContextTooLong => CliError::usage(format!("{err}")),
+        ThresholdMlDsaError::QuorumTooSmall { have, need } => CliError::state(format!(
+            "signing quorum too small: have {have} custodians, threshold ML-DSA requires >= {need} (2t - 1)"
+        )),
+        ThresholdMlDsaError::NoncePersistenceFailed
+        | ThresholdMlDsaError::RejectionBudgetExhausted { .. } => {
+            CliError::state(format!("threshold ML-DSA nonce/epoch burn refused: {err}"))
+        }
+        other => CliError::verify(format!("threshold ML-DSA ceremony failed: {other}")),
+    }
+}
+
+fn run_mldsa_dkg_threads(
+    config: &ThresholdMlDsaDkgConfig,
+    entropies: &[Secret32],
+) -> Result<Vec<ThresholdMlDsaSignerShare>, CliError> {
+    let n = config.party_ids.len();
+    let hub = SharedMpcHub::new(n);
+    let outputs: Vec<Result<ThresholdMlDsaSignerShare, ThresholdMlDsaError>> =
+        std::thread::scope(|s| {
+            let mut handles = Vec::with_capacity(n);
+            for (pos, (&party_id, ent)) in config.party_ids.iter().zip(entropies).enumerate() {
+                let hub_ref = Arc::clone(&hub);
+                let cfg_clone = config.clone();
+                let seed_bytes = ent.0;
+                handles.push(s.spawn(move || {
+                    let mut net = LocalMpcEndpoint {
+                        me: pos,
+                        hub: Arc::clone(&hub_ref),
+                    };
+                    let res =
+                        threshold_mldsa_dkg_party(&cfg_clone, party_id, &seed_bytes, &mut net);
+                    if res.is_err() {
+                        hub_ref.abort_all();
+                    }
+                    res
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join().unwrap_or(Err(ThresholdMlDsaError::Mpc(
+                        qsag_cred::MpcError::Transport,
+                    )))
+                })
+                .collect()
+        });
+    outputs
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(map_mldsa_err)
+}
+
+fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
+    let args = Args::parse(
+        raw,
+        &["threshold", "parties", "level", "vault-dir", "public-out"],
+        &["deterministic", "json", "help"],
+    )?;
+    if args.flag("help") {
+        println!(
+            "qsag cred mldsa-keygen [--threshold <t>] [--parties <n>] [--level <44|65|87>] --vault-dir <dir> --public-out <path> [--deterministic] [--json]"
+        );
+        return Ok(());
+    }
+    args.no_positionals()?;
+    let threshold = args.get_u64("threshold")?.unwrap_or(2) as usize;
+    let parties = args.get_u64("parties")?.unwrap_or(3) as usize;
+    let (level, level_name) = parse_mldsa_level(args.get("level"))?;
+    let vault_dir = args.require("vault-dir")?;
+    let public_out = args.require("public-out")?;
+    ensure_absent(&mldsa_meta_path(vault_dir))?;
+    ensure_absent(public_out)?;
+    private_dir(vault_dir, true)?;
+
+    let deterministic = args.flag("deterministic");
+    let session_id = if deterministic {
+        cshake256_framed_32(
+            b"QSAG.CLI.TMLDSA.DET.DKG_SESSION.V1",
+            &[level_name.as_bytes(), &[threshold as u8, parties as u8]],
+        )
+    } else {
+        os_random_32()?
+    };
+    let party_ids: Vec<u16> = (1..=parties as u16).collect();
+    let dkg_cfg = ThresholdMlDsaDkgConfig {
+        level,
+        threshold,
+        party_ids,
+        session_id,
+    };
+    dkg_cfg.validate().map_err(map_mldsa_err)?;
+
+    let mut entropies = Vec::with_capacity(parties);
+    for idx in 0..parties {
+        let seed = if deterministic {
+            cshake256_framed_32(
+                b"QSAG.CLI.TMLDSA.DET.DKG_SEED.V1",
+                &[&session_id, &(idx as u64).to_le_bytes()],
+            )
+        } else {
+            os_random_32()?
+        };
+        entropies.push(Secret32(seed));
+    }
+
+    let shares = run_mldsa_dkg_threads(&dkg_cfg, &entropies)?;
+    let pack = shares[0].verification_pack();
+    let pk_bytes = pack.pk_bytes.clone();
+    let key_id = pack.policy_signing_key_id();
+    let issuer_digest = pack.issuer_pk_digest();
+
+    for (idx, ent) in entropies.iter().enumerate() {
+        write_new(&mldsa_seed_path(vault_dir, idx), &ent.0, true)?;
+        let mac_key = Secret32(if deterministic {
+            cshake256_framed_32(
+                b"QSAG.CLI.TMLDSA.DET.BURN_MAC.V1",
+                &[&key_id, &(idx as u64).to_le_bytes()],
+            )
+        } else {
+            os_random_32()?
+        });
+        write_new(&mldsa_mac_path(vault_dir, idx), &mac_key.0, true)?;
+        FsNonceBurnStore::create(mldsa_burn_path(vault_dir, idx), key_id, mac_key.0)
+            .map_err(|e| CliError::io("creating threshold ML-DSA nonce burn ledger", e))?;
+    }
+
+    let meta = Json::object(vec![
+        ("format", Json::str(MLDSA_META_FORMAT)),
+        ("scheme", Json::str(level_name)),
+        ("threshold", Json::num(threshold)),
+        ("parties", Json::num(parties)),
+        ("session_id", Json::hex(&session_id)),
+        ("key_id", Json::hex(&key_id)),
+        ("issuer_pk_digest", Json::hex(&issuer_digest)),
+        ("public_key", Json::hex(&pk_bytes)),
+    ]);
+    write_new(&mldsa_meta_path(vault_dir), meta.to_pretty().as_bytes(), true)?;
+
+    let pub_doc = Json::object(vec![
+        ("format", Json::str(MLDSA_PUB_FORMAT)),
+        ("scheme", Json::str(level_name)),
+        ("threshold", Json::num(threshold)),
+        ("parties", Json::num(parties)),
+        ("signing_quorum", Json::num(2 * threshold - 1)),
+        ("issuer_pk_digest", Json::hex(&issuer_digest)),
+        ("public_key", Json::hex(&pk_bytes)),
+    ]);
+    write_new(public_out, pub_doc.to_pretty().as_bytes(), false)?;
+
+    if args.flag("json") {
+        print!("{}", pub_doc.to_pretty());
+    } else {
+        println!(
+            "generated dealerless ({threshold}, {parties}) {level_name} vault in {vault_dir} (issuer digest {})",
+            to_hex(&issuer_digest)
+        );
+    }
+    Ok(())
+}
+
+fn parse_party_indices(spec: Option<&str>, parties: usize, default_count: usize) -> Result<Vec<usize>, CliError> {
+    let Some(spec) = spec else {
+        return Ok((0..default_count.min(parties)).collect());
+    };
+    let mut out = Vec::new();
+    for item in spec.split(',') {
+        let trimmed = item.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let idx: usize = trimmed
+            .parse()
+            .map_err(|_| CliError::usage("--signers must be comma-separated 0-based custodian indices"))?;
+        if idx >= parties {
+            return Err(CliError::usage(format!(
+                "--signers index {idx} out of range (parties = {parties})"
+            )));
+        }
+        if out.contains(&idx) {
+            return Err(CliError::usage(format!(
+                "duplicate custodian index {idx} in --signers"
+            )));
+        }
+        out.push(idx);
+    }
+    out.sort_unstable();
+    Ok(out)
+}
+
+fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
+    let args = Args::parse(
+        raw,
+        &[
+            "vault-dir",
+            "signers",
+            "epoch",
+            "in",
+            "message",
+            "context-hex",
+            "out",
+        ],
+        &["deterministic", "json", "help"],
+    )?;
+    if args.flag("help") {
+        println!(
+            "qsag cred mldsa-sign --vault-dir <dir> [--signers <i,j,..>] --epoch <n> --in <path|-> [--context-hex <hex>] --out <path> [--deterministic] [--json]"
+        );
+        return Ok(());
+    }
+    args.no_positionals()?;
+    let vault_dir = args.require("vault-dir")?;
+    let user_epoch = args
+        .get_u64("epoch")?
+        .ok_or_else(|| CliError::usage("missing required option --epoch <n>"))?;
+    let out_path = args.require("out")?;
+    ensure_absent(out_path)?;
+    private_dir(vault_dir, false)?;
+
+    let msg = read_input_arg(&args)?;
+    let ctx = match args.get("context-hex") {
+        Some(h) => from_hex(h)?.0,
+        None => Vec::new(),
+    };
+    if ctx.len() > 255 {
+        return Err(CliError::usage("--context-hex must be at most 255 bytes"));
+    }
+
+    let meta = load_json_checked(&mldsa_meta_path(vault_dir), MLDSA_META_FORMAT, MAX_KEY_FILE_BYTES)?;
+    let scheme_str = meta.field_str("scheme")?;
+    let (level, level_name) = parse_mldsa_level(Some(scheme_str))?;
+    let threshold = meta.field_u64("threshold")? as usize;
+    let parties = meta.field_u64("parties")? as usize;
+    let dkg_session_id = from_hex_exact::<32>(meta.field_str("session_id")?, "session_id")?;
+    let key_id = from_hex_exact::<32>(meta.field_str("key_id")?, "key_id")?;
+    let expected_pk = meta.field_hex("public_key")?.0;
+
+    let min_quorum = 2 * threshold - 1;
+    let signer_indices = parse_party_indices(args.get("signers"), parties, min_quorum)?;
+    if signer_indices.len() < min_quorum {
+        return Err(CliError::state(format!(
+            "signing quorum too small: selected {} custodians, need >= {min_quorum} (2t - 1)",
+            signer_indices.len()
+        )));
+    }
+
+    let mut dkg_entropies = Vec::with_capacity(parties);
+    for idx in 0..parties {
+        let raw_seed = read_bounded_file(&mldsa_seed_path(vault_dir, idx), 64)?;
+        if raw_seed.0.len() != 32 {
+            return Err(CliError::input("corrupt ML-DSA custodian seed length"));
+        }
+        let mut s = [0u8; 32];
+        s.copy_from_slice(&raw_seed.0);
+        dkg_entropies.push(Secret32(s));
+    }
+    let party_ids: Vec<u16> = (1..=parties as u16).collect();
+    let dkg_cfg = ThresholdMlDsaDkgConfig {
+        level,
+        threshold,
+        party_ids,
+        session_id: dkg_session_id,
+    };
+    let all_shares = run_mldsa_dkg_threads(&dkg_cfg, &dkg_entropies)?;
+
+    // Filter to selected active signers (sorted ascending by party_id).
+    let quorum_ids: Vec<u16> = signer_indices.iter().map(|&idx| (idx + 1) as u16).collect();
+    let sign_session_id = cshake256_framed_32(
+        b"QSAG.CLI.TMLDSA.SIGN_SESSION.V1",
+        &[&key_id, &user_epoch.to_le_bytes()],
+    );
+    let sign_session = ThresholdSignSession {
+        session_id: sign_session_id,
+        quorum: quorum_ids.clone(),
+    };
+
+    let deterministic = args.flag("deterministic");
+    let mut selected: Vec<(usize, ThresholdMlDsaSignerShare, Secret32, Secret32)> =
+        Vec::with_capacity(signer_indices.len());
+    for (idx, share) in all_shares.into_iter().enumerate() {
+        if signer_indices.contains(&idx) {
+            let raw_mac = read_bounded_file(&mldsa_mac_path(vault_dir, idx), 64)?;
+            if raw_mac.0.len() != 32 {
+                return Err(CliError::input("corrupt ML-DSA burn MAC key length"));
+            }
+            let mut mac = [0u8; 32];
+            mac.copy_from_slice(&raw_mac.0);
+            let sign_ent = if deterministic {
+                cshake256_framed_32(
+                    b"QSAG.CLI.TMLDSA.DET.SIGN_ENT.V1",
+                    &[&sign_session_id, &(idx as u64).to_le_bytes()],
+                )
+            } else {
+                os_random_32()?
+            };
+            selected.push((idx, share, Secret32(mac), Secret32(sign_ent)));
+        }
+    }
+
+    let hub = SharedMpcHub::new(selected.len());
+    let sign_results: Vec<Result<qsag_cred::ThresholdSignOutput, ThresholdMlDsaError>> =
+        std::thread::scope(|s| {
+            let mut handles = Vec::with_capacity(selected.len());
+            let msg_ref = msg.0.as_slice();
+            let ctx_ref = ctx.as_slice();
+            let sess_ref = &sign_session;
+            for (pos, (idx, mut share, mac_key, sign_ent)) in selected.into_iter().enumerate() {
+                let hub_ref = Arc::clone(&hub);
+                let burn_path = mldsa_burn_path(vault_dir, idx);
+                handles.push(s.spawn(move || {
+                    let mut store = FsNonceBurnStore::open(burn_path, key_id, mac_key.0)
+                        .map_err(|_| ThresholdMlDsaError::NoncePersistenceFailed)?;
+                    share.recover_epoch_from_store(&store)?;
+                    let mut net = LocalMpcEndpoint {
+                        me: pos,
+                        hub: Arc::clone(&hub_ref),
+                    };
+                    let res = threshold_sign_mldsa_party(
+                        &mut share,
+                        sess_ref,
+                        msg_ref,
+                        ctx_ref,
+                        &sign_ent.0,
+                        &mut store,
+                        &mut net,
+                    );
+                    if res.is_err() {
+                        hub_ref.abort_all();
+                    }
+                    res
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join().unwrap_or(Err(ThresholdMlDsaError::Mpc(
+                        qsag_cred::MpcError::Transport,
+                    )))
+                })
+                .collect()
+        });
+
+    let mut outputs = Vec::with_capacity(sign_results.len());
+    for res in sign_results {
+        outputs.push(res.map_err(map_mldsa_err)?);
+    }
+    let sig_bytes = outputs[0].signature.clone();
+    let attempts = outputs[0].attempts;
+    for out in &outputs[1..] {
+        if out.signature != sig_bytes {
+            return Err(CliError::verify(
+                "custodians disagreed on assembled FIPS 204 signature",
+            ));
+        }
+    }
+    if !ml_dsa_verify(level, &expected_pk, &msg.0, &ctx, &sig_bytes) {
+        return Err(CliError::verify(
+            "assembled threshold ML-DSA signature failed FIPS 204 self-verification",
+        ));
+    }
+
+    let sig_doc = Json::object(vec![
+        ("format", Json::str(MLDSA_SIG_FORMAT)),
+        ("scheme", Json::str(level_name)),
+        ("epoch", Json::num(user_epoch)),
+        ("attempts", Json::num(attempts)),
+        (
+            "signers",
+            Json::Array(signer_indices.iter().map(|i| Json::num(*i)).collect()),
+        ),
+        ("context", Json::hex(&ctx)),
+        ("signature", Json::hex(&sig_bytes)),
+    ]);
+    write_new(out_path, sig_doc.to_pretty().as_bytes(), false)?;
+
+    if args.flag("json") {
+        let report = Json::object(vec![
+            ("operation", Json::str("cred-mldsa-sign")),
+            ("scheme", Json::str(level_name)),
+            ("epoch", Json::num(user_epoch)),
+            ("attempts", Json::num(attempts)),
+            ("signature_bytes", Json::num(sig_bytes.len())),
+            ("signature_file", Json::str(out_path)),
+        ]);
+        print!("{}", report.to_pretty());
+    } else {
+        println!(
+            "signed {level_name} message at epoch {user_epoch} in {attempts} attempt(s) ({} B) -> {out_path}",
+            sig_bytes.len()
+        );
+    }
+    Ok(())
+}
+
+fn mldsa_verify(raw: &[String]) -> Result<(), CliError> {
+    let args = Args::parse(
+        raw,
+        &["public", "in", "message", "context-hex", "sig"],
+        &["json", "help"],
+    )?;
+    if args.flag("help") {
+        println!(
+            "qsag cred mldsa-verify --public <path> --in <path|-> [--context-hex <hex>] --sig <path> [--json]"
+        );
+        return Ok(());
+    }
+    args.no_positionals()?;
+    let pub_path = args.require("public")?;
+    let sig_path = args.require("sig")?;
+    let msg = read_input_arg(&args)?;
+
+    let pub_json = load_json_checked(pub_path, MLDSA_PUB_FORMAT, MAX_KEY_FILE_BYTES)?;
+    let sig_json = load_json_checked(sig_path, MLDSA_SIG_FORMAT, MAX_SIG_PROOF_BYTES)?;
+    let scheme_name = pub_json.field_str("scheme")?;
+    if sig_json.field_str("scheme")? != scheme_name {
+        return Err(CliError::verify(
+            "signature scheme does not match threshold ML-DSA public key",
+        ));
+    }
+    let (level, _) = parse_mldsa_level(Some(scheme_name))?;
+    let pk_bytes = pub_json.field_hex("public_key")?.0;
+    let sig_bytes = sig_json.field_hex("signature")?.0;
+    let ctx = match args.get("context-hex") {
+        Some(h) => from_hex(h)?.0,
+        None => sig_json
+            .get("context")
+            .and_then(Json::as_str)
+            .map(from_hex)
+            .transpose()?
+            .map(|z| z.0)
+            .unwrap_or_default(),
+    };
+
+    if !ml_dsa_verify(level, &pk_bytes, &msg.0, &ctx, &sig_bytes) {
+        return Err(CliError::verify("FIPS 204 ML-DSA signature verification failed"));
+    }
+
+    if args.flag("json") {
+        let report = Json::object(vec![
+            ("valid", Json::Bool(true)),
+            ("scheme", Json::str(scheme_name)),
+            ("signature_bytes", Json::num(sig_bytes.len())),
+        ]);
+        print!("{}", report.to_pretty());
+    } else {
+        println!("valid ({scheme_name})");
+    }
+    Ok(())
+}
+
+pub fn run(raw: &[String]) -> Result<(), CliError> {
+    let Some((sub, rest)) = raw.split_first() else {
+        print!("{CRED_HELP}");
+        return Err(CliError::usage("cred requires a subcommand (try --help)"));
+    };
+    match sub.as_str() {
+        "--help" | "-h" | "help" => {
+            print!("{CRED_HELP}");
+            Ok(())
+        }
+        "voprf-keygen" => voprf_keygen(rest),
+        "voprf-eval" => voprf_eval(rest),
+        "mldsa-keygen" => mldsa_keygen(rest),
+        "mldsa-sign" => mldsa_sign(rest),
+        "mldsa-verify" => mldsa_verify(rest),
+        other => Err(CliError::usage(format!(
+            "unknown cred subcommand '{other}' (expected voprf-keygen, voprf-eval, mldsa-keygen, mldsa-sign, or mldsa-verify)"
+        ))),
+    }
+}
