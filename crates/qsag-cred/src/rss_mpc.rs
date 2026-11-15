@@ -70,6 +70,8 @@ pub enum RoundKind {
     ViewDigest,
     Open,
     Confirm,
+    /// Dealer-bound private inputs ([`Engine::input_all`]).
+    Input,
 }
 
 /// Public position of a round inside a session.
@@ -606,7 +608,7 @@ pub(crate) type Kx = [u32; EXT_DEGREE];
 pub(crate) const K_ZERO: Kx = [0; EXT_DEGREE];
 pub(crate) const K_ONE: Kx = [1, 0, 0, 0, 0, 0];
 
-fn k_add(a: &Kx, b: &Kx) -> Kx {
+pub(crate) fn k_add(a: &Kx, b: &Kx) -> Kx {
     core::array::from_fn(|i| fq_add(a[i], b[i]))
 }
 
@@ -614,11 +616,11 @@ fn k_sub(a: &Kx, b: &Kx) -> Kx {
     core::array::from_fn(|i| fq_sub(a[i], b[i]))
 }
 
-fn k_scale(a: &Kx, s: u32) -> Kx {
+pub(crate) fn k_scale(a: &Kx, s: u32) -> Kx {
     core::array::from_fn(|i| fq_mul(a[i], s))
 }
 
-fn k_base(s: u32) -> Kx {
+pub(crate) fn k_base(s: u32) -> Kx {
     [s, 0, 0, 0, 0, 0]
 }
 
@@ -686,14 +688,14 @@ fn k_is_zero(a: &Kx) -> bool {
 // Encoding and hashing
 // ---------------------------------------------------------------------------
 
-fn pack(values: &[u32], out: &mut Vec<u8>) {
+pub(crate) fn pack(values: &[u32], out: &mut Vec<u8>) {
     out.reserve(values.len() * 3);
     for &v in values {
         out.extend_from_slice(&v.to_le_bytes()[..3]);
     }
 }
 
-fn unpack(bytes: &[u8], count: usize) -> Option<Vec<u32>> {
+pub(crate) fn unpack(bytes: &[u8], count: usize) -> Option<Vec<u32>> {
     if count.checked_mul(3) != Some(bytes.len()) {
         return None;
     }
@@ -727,19 +729,19 @@ fn unpack_u64(bytes: &[u8], count: usize) -> Option<Vec<u64>> {
 }
 
 /// Keyed pseudorandom stream shared by the holders of one subset.
-struct Prss {
+pub(crate) struct Prss {
     xof: Shake256,
 }
 
 impl Prss {
-    fn new(key: &[u8; 32]) -> Self {
+    pub(crate) fn new(key: &[u8; 32]) -> Self {
         let mut xof = init_cshake256(b"", b"QSAG.RSS.PRSS.V1");
         xof.absorb(key);
         finalize_cshake256(&mut xof, true);
         Self { xof }
     }
 
-    fn elements(&mut self, count: usize) -> Vec<u32> {
+    pub(crate) fn elements(&mut self, count: usize) -> Vec<u32> {
         let mut out = Vec::with_capacity(count);
         let mut buf = [0u8; 408];
         while out.len() < count {
@@ -1497,6 +1499,67 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
             }
             ct_zeroize_u32s(&mut value);
             ct_zeroize_bytes(&mut message);
+            Ok(out)
+        })();
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+
+    /// Dealer-bound inputs. Every party contributes one private vector of the same
+    /// public length; element `d` of the result is a sharing of party `d`'s vector.
+    ///
+    /// Party `d`'s vector is masked by the sum of one fresh pseudorandom vector per
+    /// subset that contains `d`, and the difference is broadcast and added to the
+    /// component of subset 0. The dealer knows every one of those masks; a coalition of
+    /// `t - 1` other parties misses the mask of the one subset disjoint from it, so the
+    /// vector stays hidden. Nobody but `d` can influence sharing `d`: its components
+    /// are fixed by the subset keys and by `d`'s own consistent broadcast. A corrupt
+    /// dealer can only choose which vector it shares.
+    pub fn input_all(&mut self, mine: &[u32]) -> Result<Vec<Sh>, MpcError> {
+        if self.poisoned {
+            return Err(MpcError::Poisoned);
+        }
+        let result = (|| {
+            let len = mine.len();
+            let parties = self.st.parties;
+            let mut out: Vec<Sh> = (0..parties)
+                .map(|_| Sh::zeros(self.comps.len(), len))
+                .collect();
+            let mut difference = SecretBuffer(mine.to_vec());
+            for (dealer, share) in out.iter_mut().enumerate() {
+                for (i, &s) in self.comps.iter().enumerate() {
+                    if !self.st.holds(s, dealer) {
+                        continue;
+                    }
+                    let mask = SecretBuffer(self.streams[i].elements(len));
+                    share.c[i].copy_from_slice(&mask);
+                    if dealer == self.me {
+                        for (slot, &m) in difference.iter_mut().zip(mask.iter()) {
+                            *slot = fq_sub(*slot, m);
+                        }
+                    }
+                }
+            }
+            let mut broadcast = Vec::with_capacity(len * 3);
+            pack(&difference, &mut broadcast);
+            let inbox = self.round(RoundKind::Input, vec![Vec::new(); parties], broadcast)?;
+            for (dealer, share) in out.iter_mut().enumerate() {
+                // Every party parses every broadcast, so all honest parties accept or
+                // reject a malformed one together.
+                let values = if dealer == self.me {
+                    difference.clone()
+                } else {
+                    unpack(&inbox.broadcast[dealer], len)
+                        .ok_or(MpcError::MalformedMessage { from: dealer })?
+                };
+                if self.comps[0] == 0 {
+                    for (slot, &value) in share.c[0].iter_mut().zip(values.iter()) {
+                        *slot = fq_add(*slot, value);
+                    }
+                }
+            }
             Ok(out)
         })();
         if result.is_err() {

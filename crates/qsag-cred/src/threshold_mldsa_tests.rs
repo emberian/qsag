@@ -1343,6 +1343,7 @@ fn durable_nonce_restart_recovers_epoch_and_rejects_both_replay_keys() {
             party_id: 1,
             pack,
             subsets: Vec::new(),
+            shamir: None,
             next_epoch: 0,
         };
         restarted.recover_epoch_from_store(&store).unwrap();
