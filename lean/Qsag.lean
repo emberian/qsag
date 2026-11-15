@@ -16,6 +16,7 @@ public import Qsag.Aggregation
 public import Qsag.Apex
 public import Qsag.BaggyAndRss256Security
 public import Qsag.BinaryTower
+public import Qsag.BlindVcQromSecurity
 public import Qsag.CeremonyAtomicityAndAbort
 public import Qsag.CompiledRlibFixtures
 public import Qsag.ConcreteSecurityBudget
@@ -48,6 +49,7 @@ public import Qsag.MirSpecBridge
 public import Qsag.MirSpecBridgeCore
 public import Qsag.MirSpecBridgeWitnesses
 public import Qsag.MultiRoundFsQrom
+public import Qsag.PallasAndBlsMigration
 public import Qsag.ParallelSeededSpnSecurity
 public import Qsag.Poseidon2
 public import Qsag.Poseidon2AlgebraicAndRecursiveHem
@@ -63,6 +65,7 @@ public import Qsag.SuccinctAggregationIop
 public import Qsag.SydTvTranslationValidation
 public import Qsag.ThresholdApproval
 public import Qsag.ThresholdMlDsaAndToprf
+public import Qsag.ThresholdMlDsaSecurity
 public import Qsag.ThresholdMpc
 public import Qsag.UcGames
 

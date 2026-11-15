@@ -38,13 +38,15 @@ Proved here, constructively:
 * Replacing every key-expanded mask tape by an independent tape costs the number of keys
   times the single-key distinguishing bound (`prss_multi_key_hybrid`).
 
-Not proved here: refinement of the distributed engine (`rss_mpc.rs`) into the
-authenticated per-party share model below; the single-key bound itself, which is the
-pseudorandomness assumption on the tape expansion. `toprfDigestClient204_extract` returns concrete
-collision bytes for the whole digest execution. The credential theorems concern the Lean relation and
-a fixed-challenge hybrid. `verifyBlindVcPresentationTrusted` compares the presentation with
-a verifier-supplied issuer context; how that context is itself authenticated, production
-transcript equivalence, and QROM security are outside this module.
+Companion security modules: `Qsag.ThresholdMlDsaSecurity` proves 3-party `(2, 3)` RSS
+multiplication and repeated-sacrifice refinement (`rss3MulStep_recon`,
+`rss3_repeated_sacrifice_pq256`, `rss_distributed_trace_refines_sacrificedSignStep`),
+multi-attempt sealed-`w₁` abort-transcript zero-knowledge (`threshold_mldsa_abort_transcript_zk`),
+and `ML-DSA-65`/`87` (`PQ128`) parameter bounds (`mlDsa_challenge_entropy_bounds`), while
+`Qsag.BlindVcQromSecurity` proves `438`-repetition `BlindVC` QROM Fiat-Shamir soundness
+(`blindVc_quantum128_qrom_fs_soundness`) and issuer `ML-DSA` root-attestation unforgeability
+(`blindVc_presentation_reduces_to_issuer_mldsa`). The single-key PRF assumption on PRSS tape
+expansion and Rust wire-bytes transcript equivalence remain external to the algebraic model.
 -/
 
 public import Qsag.MlDsa44Parameters

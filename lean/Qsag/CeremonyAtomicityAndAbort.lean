@@ -6823,5 +6823,419 @@ theorem retryJournal_trace_no_attempt_reuse {s t : RetryJournalState}
 
 end RustDurability
 
+/-! ## §5. Post-Round-3 Rushing Selective-Abort Unbiasedness & `QSAG.R_COMMIT/v1` Coin-Tossing
+
+Hardens hedged threshold signing randomness (`CommittedHedgedRandomizer` in
+`crates/qsag-core/src/fips205.rs`) and proves **`post_round3_rushing_abort_unbiased`**:
+1. **Round-1 `QSAG.R_COMMIT/v1` Commitment Binding**: Every custodian commits to its randomizer
+   contribution `R_i` via length-framed `H("QSAG.R_COMMIT/v1" || sid || party_id || len || R_i || salt_i)`
+   prior to Round-2 openings and strictly prior to Round-3 message-dependent share release.
+   Any rushing attempt to alter `R_i` after observing honest shares yields a concrete `HashCollision H`.
+2. **Zero-Bias Coin-Tossed Hedged Randomness + Pre-Round-3 Cut-the-Hash Abort**: Once `rCorrupt`
+   is bound in Round 1, `R = rHonest ^^^ rCorrupt` is uniformly distributed (`fiber = 1` per target
+   `R`, zero bit bias), any pre-open abort scales acceptance rate `p_acc` independently of `R`,
+   and surviving executions match the unbiased uniform-`R` standalone signer (`Δ = 0`).
+3. **Deterministic Threshold PRF Post-Round-3 Rushing Abort Unbiasedness (`Δ = 0`)**: When `R` is
+   uniquely determined prior to Round-3 share release via deterministic PRF (`addrnd = None` or
+   `ParallelSeededSignSession`), even a rushing custodian whose post-Round-3 abort predicate
+   `abortPostRound3 : AdvPreOpenView Q w → BitVec w → Bool` inspects the reconstructed signature
+   can ONLY scale overall acceptance `p_acc`; conditioned on non-abort, the output distribution is
+   pointwise identical (`Δ = 0`) to `singleSign sk msg`.
+4. **`#tooth` Counterexample (`tooth_uncommitted_round3_randomizer_biases_bit`)**: Without a
+   binding Round-1 commitment on `rCorrupt`, a rushing party choosing `rCorrupt(rHonest) := rHonest`
+   forces `lsb(R) = false` on ALL `256 / 256` honest 8-bit inputs (vs `128 / 256` unbiased), biasing
+   a full bit of `R`. -/
+
+/-- Exact 16-byte ASCII domain tag `"QSAG.R_COMMIT/v1"` matching `R_COMMIT_DOMAIN_V1` in
+    `crates/qsag-core/src/fips205.rs`. -/
+def rCommitDomainV1 : List Nat :=
+  [81, 83, 65, 71, 46, 82, 95, 67, 79, 77, 77, 73, 84, 47, 118, 49]
+
+/-- Structured input to a Round-1 `QSAG.R_COMMIT/v1` randomizer commitment of width `rw` bits. -/
+structure HedgedRCommitInput (rw : Nat) where
+  sid : BitVec 256
+  partyId : BitVec 64
+  rShare : BitVec rw
+  openSalt : BitVec 256
+  deriving Repr, DecidableEq
+
+/-- Length-framed preimage encoding `"QSAG.R_COMMIT/v1" || sid || partyId || rw || rShare || openSalt`. -/
+def encodeHedgedRCommitV1 {rw : Nat} (inp : HedgedRCommitInput rw) : List Nat :=
+  rCommitDomainV1 ++ [inp.sid.toNat, inp.partyId.toNat, rw, inp.rShare.toNat, inp.openSalt.toNat]
+
+/-- Evaluate the `QSAG.R_COMMIT/v1` commitment under a 256-bit hash function `H`. -/
+def evalHedgedRCommitV1 {rw : Nat} (H : List Nat → Digest256) (inp : HedgedRCommitInput rw) :
+    Digest256 :=
+  H (encodeHedgedRCommitV1 inp)
+
+/-- Concrete hash collision witness (`x₁ ≠ x₂ ∧ H x₁ = H x₂`). -/
+def RCommitHashCollision (H : List Nat → Digest256) : Prop :=
+  ∃ x₁ x₂ : List Nat, x₁ ≠ x₂ ∧ H x₁ = H x₂
+
+/-- Length-framed `encodeHedgedRCommitV1` is strictly injective across all fields. -/
+theorem encodeHedgedRCommitV1_injective {rw : Nat}
+    {a b : HedgedRCommitInput rw}
+    (hEq : encodeHedgedRCommitV1 a = encodeHedgedRCommitV1 b) : a = b := by
+  unfold encodeHedgedRCommitV1 at hEq
+  have hTail := List.append_cancel_left hEq
+  injection hTail with hSid t1
+  injection t1 with hPid t2
+  injection t2 with _ t3
+  injection t3 with hR t4
+  injection t4 with hSalt _
+  cases a; cases b
+  dsimp only at hSid hPid hR hSalt
+  congr
+  · exact BitVec.eq_of_toNat_eq hSid
+  · exact BitVec.eq_of_toNat_eq hPid
+  · exact BitVec.eq_of_toNat_eq hR
+  · exact BitVec.eq_of_toNat_eq hSalt
+
+/-- **Binding of `QSAG.R_COMMIT/v1`**: any two valid openings matching the same Round-1 commitment
+    digest either agree on every field (`sid`, `partyId`, `rShare`, `openSalt`) or yield an explicit
+    hash collision for `H`. -/
+theorem rCommitV1_binding_or_collision {rw : Nat}
+    (H : List Nat → Digest256) (inp₁ inp₂ : HedgedRCommitInput rw)
+    (hDigest : evalHedgedRCommitV1 H inp₁ = evalHedgedRCommitV1 H inp₂) :
+    inp₁ = inp₂ ∨ RCommitHashCollision H := by
+  by_cases hSame : inp₁ = inp₂
+  · exact Or.inl hSame
+  · refine Or.inr ⟨encodeHedgedRCommitV1 inp₁, encodeHedgedRCommitV1 inp₂, ?_, hDigest⟩
+    intro hEnc
+    exact hSame (encodeHedgedRCommitV1_injective hEnc)
+
+/-- Unbiased uniform randomizer enumeration over `BitVec rw`. -/
+def decodeUniformRand (rw : Nat) : Fin (2 ^ rw) → BitVec rw :=
+  (enumBitVec rw).toFun
+
+/-- Coin-tossed hedged randomizer `R = rHonest ^^^ rCorrupt` indexed by honest share `i : Fin (2 ^ rw)`
+    for a Round-1 committed corrupt share `rCorrupt : BitVec rw`. -/
+def decodeCoinTossRand {rw : Nat} (rCorrupt : BitVec rw) : Fin (2 ^ rw) → BitVec rw :=
+  fun i => (enumBitVec rw).toFun i ^^^ rCorrupt
+
+/-- **Coin-Toss Uniformity Invariance**: for any fixed (Round-1 committed) `rCorrupt : BitVec rw`
+    and any weight `weight : BitVec rw → Nat`, XORing with `rCorrupt` permutes `BitVec rw`
+    bijectively, preserving all finite sums and every bit marginal. -/
+theorem coinTossRand_sum_invariant {rw : Nat} (rCorrupt : BitVec rw)
+    (weight : BitVec rw → Nat) :
+    finSum (2 ^ rw) (fun i => weight (decodeCoinTossRand rCorrupt i)) =
+      finSum (2 ^ rw) (fun i => weight (decodeUniformRand rw i)) := by
+  let enumR := enumBitVec rw
+  let bij := maskBijectionBitVec rw rCorrupt
+  let π : Fin (2 ^ rw) → Fin (2 ^ rw) := fun i => enumR.invFun (bij.toFun (enumR.toFun i))
+  have hInv : ∀ i : Fin (2 ^ rw), π (π i) = i := by
+    intro i
+    dsimp only [π]
+    have hBijInv : ∀ x : BitVec rw, bij.toFun (bij.toFun x) = x := bij.left_inv
+    rw [enumR.right_inv, hBijInv, enumR.left_inv]
+  have hPerm := finSum_perm_invariant π π hInv hInv (fun j => weight (enumR.toFun j))
+  have hCong :
+      finSum (2 ^ rw) (fun i => weight (decodeCoinTossRand rCorrupt i)) =
+      finSum (2 ^ rw) (fun i => weight (enumR.toFun (π i))) := by
+    apply finSum_congr
+    intro i
+    dsimp only [decodeCoinTossRand, π, bij, maskBijectionBitVec]
+    rw [enumR.right_inv, BitVec.xor_comm]
+  exact hCong.trans hPerm
+
+/-- Every target `w`-bit randomizer `targetR` has exact honest-share fiber cardinality `1` under
+    committed coin-tossing `R = rHonest ^^^ rCorrupt`. -/
+theorem coinTossRand_exact_fiber_one {rw : Nat} (rCorrupt targetR : BitVec rw) :
+    finSum (2 ^ rw) (fun i => if decodeCoinTossRand rCorrupt i = targetR then 1 else 0) = 1 := by
+  rw [coinTossRand_sum_invariant rCorrupt (fun r => if r = targetR then 1 else 0)]
+  let iStar := (enumBitVec rw).invFun targetR
+  have hCong :
+      finSum (2 ^ rw) (fun i => if decodeUniformRand rw i = targetR then 1 else 0) =
+      finSum (2 ^ rw) (fun i => if i = iStar then 1 else 0) := by
+    apply finSum_congr
+    intro i
+    dsimp only [decodeUniformRand]
+    by_cases hEq : i = iStar
+    · subst hEq
+      have hR : (enumBitVec rw).toFun ((enumBitVec rw).invFun targetR) = targetR :=
+        (enumBitVec rw).right_inv targetR
+      simp only [iStar, hR, ↓reduceIte]
+    · have hNe : (enumBitVec rw).toFun i ≠ targetR := by
+        intro hv
+        apply hEq
+        have := congrArg (enumBitVec rw).invFun hv
+        simpa [iStar, (enumBitVec rw).left_inv] using this
+      simp only [hEq, hNe, ↓reduceIte]
+  rw [hCong, finSum_eq_indicator]
+
+/-- Post-Round-3 rushing execution when `R` is uniquely fixed prior to Round-3 share opening
+    (e.g., deterministic threshold PRF `addrnd = None` or `ParallelSeededSignSession`):
+    the rushing custodian inspects both its pre-open view and the reconstructed Round-3 signature
+    `singleSign sk msg`, and may selectively abort via arbitrary `abortPostRound3`. -/
+def execDetPostRound3Rushing {SK Msg CorruptIn : Type} {Q w : Nat}
+    (spec : CutTheHashProtocolSpec SK Msg Unit CorruptIn Q w)
+    (sk : SK) (msg : Msg) (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
+    (m : HonestPreOpenMasks Q w)
+    (abortPostRound3 : AdvPreOpenView Q w → BitVec w → Bool) : Option (BitVec w) :=
+  if abortPostRound3
+      (evalPreOpenView spec sk msg () adv hQ m)
+      (spec.yShareHonest sk msg () (corruptContribution adv (evalPreOpenView spec sk msg () adv hQ m)) ^^^
+       spec.yShareCorrupt sk msg () (corruptContribution adv (evalPreOpenView spec sk msg () adv hQ m)))
+  then none
+  else
+    some (spec.yShareHonest sk msg () (corruptContribution adv (evalPreOpenView spec sk msg () adv hQ m)) ^^^
+      spec.yShareCorrupt sk msg () (corruptContribution adv (evalPreOpenView spec sk msg () adv hQ m)))
+
+/-- Total surviving runs under post-Round-3 signature-inspecting selective abort. -/
+def detPostRound3SurviveCount {SK Msg CorruptIn : Type} {Q w : Nat}
+    (spec : CutTheHashProtocolSpec SK Msg Unit CorruptIn Q w)
+    (sk : SK) (msg : Msg) (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
+    (abortPostRound3 : AdvPreOpenView Q w → BitVec w → Bool) : Nat :=
+  finSum (preOpenMaskCard Q w) (fun mIdx =>
+    optSomeIndicator (execDetPostRound3Rushing spec sk msg adv hQ
+      ((enumHonestPreOpenMasks Q w).toFun mIdx) abortPostRound3))
+
+/-- Surviving signature count for `targetSig` under post-Round-3 rushing abort. -/
+def detPostRound3SigCount {SK Msg CorruptIn : Type} {Q w : Nat}
+    (spec : CutTheHashProtocolSpec SK Msg Unit CorruptIn Q w)
+    (sk : SK) (msg : Msg) (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
+    (abortPostRound3 : AdvPreOpenView Q w → BitVec w → Bool)
+    (targetSig : BitVec w) : Nat :=
+  finSum (preOpenMaskCard Q w) (fun mIdx =>
+    if execDetPostRound3Rushing spec sk msg adv hQ
+        ((enumHonestPreOpenMasks Q w).toFun mIdx) abortPostRound3 = some targetSig
+    then 1 else 0)
+
+/-- Cross-multiplied L1 statistical distance numerator comparing surviving post-Round-3 runs against
+    the deterministic standalone signature `spec.finalSignature sk msg ()`. -/
+def detPostRound3StatDistNum {SK Msg CorruptIn : Type} {Q w : Nat}
+    (spec : CutTheHashProtocolSpec SK Msg Unit CorruptIn Q w)
+    (sk : SK) (msg : Msg) (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
+    (abortPostRound3 : AdvPreOpenView Q w → BitVec w → Bool) : Nat :=
+  let survive := detPostRound3SurviveCount spec sk msg adv hQ abortPostRound3
+  finSum (2 ^ w) (fun sIdx =>
+    let sig := (enumBitVec w).toFun sIdx
+    natAbsDiff
+      (detPostRound3SigCount spec sk msg adv hQ abortPostRound3 sig)
+      ((if spec.finalSignature sk msg () = sig then 1 else 0) * survive))
+
+/-- **Post-Round-3 Rushing Selective-Abort Unbiasedness (`post_round3_rushing_abort_unbiased`)**:
+    1. **Round-1 `QSAG.R_COMMIT/v1` Binding**: Any rushing opening `inp'` matching the Round-1
+       commitment `evalHedgedRCommitV1 H inp` satisfies `inp'.rShare = inp.rShare` unless
+       `RCommitHashCollision H`.
+    2. **Hedged Coin-Toss + Cut-the-Hash Zero Bias (`Δ = 0`)**: With `inp.rShare` bound in Round 1,
+       coin-tossed `R = rHonest ^^^ inp.rShare` has exact fiber `1` per `targetR : BitVec rw`,
+       surviving runs factor as `2 ^ rw * viewMaskSurviveCount abortPreOpen` (independent of `R`),
+       and surviving signatures match the **unbiased** uniform-`R` standalone signer (`decodeUniformRand rw`)
+       with `abortConditionedStatDistNum = 0`.
+    3. **Deterministic Pre-Fixed `R` Post-Round-3 Signature-Dependent Abort (`Δ = 0`)**: When `R` is
+       uniquely fixed prior to Round-3 share opening, even an arbitrary post-Round-3 rushing abort
+       predicate `abortPostRound3 : AdvPreOpenView Q w → BitVec w → Bool` inspecting the
+       reconstructed signature scales acceptance rate `survive = viewMaskSurviveCount (fun v => abortPostRound3 v (singleSign sk msg))`
+       while keeping conditional signature distance **identically zero** (`detPostRound3StatDistNum = 0`,
+       and every surviving output equals `spec.finalSignature sk msg ()`). -/
+theorem post_round3_rushing_abort_unbiased
+    {SK Msg CorruptIn : Type} {Q w rw : Nat}
+    (H : List Nat → Digest256)
+    (inp : HedgedRCommitInput rw)
+    (hedgedSpec : CutTheHashProtocolSpec SK Msg (BitVec rw) CorruptIn Q w)
+    (detSpec : CutTheHashProtocolSpec SK Msg Unit CorruptIn Q w)
+    (sk : SK) (msg : Msg)
+    (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
+    (abortPreOpen : AdvPreOpenView Q w → Bool)
+    (hSurviveHedged : NonZeroSurvivingRuns hedgedSpec sk msg (2 ^ rw)
+      (decodeCoinTossRand inp.rShare) adv hQ abortPreOpen)
+    (abortPostRound3 : AdvPreOpenView Q w → BitVec w → Bool) :
+    let totalHedged := totalSurvivingRuns hedgedSpec sk msg (2 ^ rw)
+      (decodeCoinTossRand inp.rShare) adv hQ abortPreOpen
+    (∀ inp' : HedgedRCommitInput rw,
+      evalHedgedRCommitV1 H inp = evalHedgedRCommitV1 H inp' →
+        inp'.rShare = inp.rShare ∨ RCommitHashCollision H) ∧
+    (∀ targetR : BitVec rw,
+      finSum (2 ^ rw) (fun i => if decodeCoinTossRand inp.rShare i = targetR then 1 else 0) = 1) ∧
+    totalHedged = 2 ^ rw * viewMaskSurviveCount abortPreOpen ∧
+    (∀ targetSig : BitVec w,
+      survivingRealSigCount hedgedSpec sk msg (2 ^ rw) (decodeCoinTossRand inp.rShare)
+          adv hQ abortPreOpen targetSig * 2 ^ rw =
+        idealStandaloneSigCount hedgedSpec sk msg (2 ^ rw) (decodeUniformRand rw) targetSig *
+          totalHedged) ∧
+    abortConditionedStatDistNum hedgedSpec sk msg (2 ^ rw) (decodeCoinTossRand inp.rShare)
+        adv hQ abortPreOpen = 0 ∧
+    detPostRound3SurviveCount detSpec sk msg adv hQ abortPostRound3 =
+      viewMaskSurviveCount (fun v => abortPostRound3 v (detSpec.finalSignature sk msg ())) ∧
+    detPostRound3StatDistNum detSpec sk msg adv hQ abortPostRound3 = 0 := by
+  intro totalHedged
+  have hCut := cutTheHash_abort_conditioned_sd_zero hedgedSpec sk msg (2 ^ rw)
+    (decodeCoinTossRand inp.rShare) adv hQ abortPreOpen hSurviveHedged
+  obtain ⟨_, hTotEq, hCrossCoin, hSdZero⟩ := hCut
+  have hBind : ∀ inp' : HedgedRCommitInput rw,
+      evalHedgedRCommitV1 H inp = evalHedgedRCommitV1 H inp' →
+        inp'.rShare = inp.rShare ∨ RCommitHashCollision H := by
+    intro inp' hDig
+    rcases rCommitV1_binding_or_collision H inp inp' hDig with hEq | hColl
+    · exact Or.inl (congrArg HedgedRCommitInput.rShare hEq.symm)
+    · exact Or.inr hColl
+  have hIdealUnbiased : ∀ targetSig : BitVec w,
+      idealStandaloneSigCount hedgedSpec sk msg (2 ^ rw) (decodeCoinTossRand inp.rShare) targetSig =
+        idealStandaloneSigCount hedgedSpec sk msg (2 ^ rw) (decodeUniformRand rw) targetSig := by
+    intro targetSig
+    unfold idealStandaloneSigCount
+    exact coinTossRand_sum_invariant inp.rShare
+      (fun r => if hedgedSpec.finalSignature sk msg r = targetSig then 1 else 0)
+  have hCrossUnbiased : ∀ targetSig : BitVec w,
+      survivingRealSigCount hedgedSpec sk msg (2 ^ rw) (decodeCoinTossRand inp.rShare)
+          adv hQ abortPreOpen targetSig * 2 ^ rw =
+        idealStandaloneSigCount hedgedSpec sk msg (2 ^ rw) (decodeUniformRand rw) targetSig *
+          totalHedged := by
+    intro targetSig
+    rw [← hIdealUnbiased targetSig]
+    exact hCrossCoin targetSig
+  have hDetSurv : detPostRound3SurviveCount detSpec sk msg adv hQ abortPostRound3 =
+      viewMaskSurviveCount (fun v => abortPostRound3 v (detSpec.finalSignature sk msg ())) := by
+    unfold detPostRound3SurviveCount
+    have hCong :
+        finSum (preOpenMaskCard Q w) (fun mIdx =>
+          optSomeIndicator (execDetPostRound3Rushing detSpec sk msg adv hQ
+            ((enumHonestPreOpenMasks Q w).toFun mIdx) abortPostRound3)) =
+        finSum (preOpenMaskCard Q w) (fun mIdx =>
+          if abortPostRound3
+              (evalPreOpenView detSpec sk msg () adv hQ ((enumHonestPreOpenMasks Q w).toFun mIdx))
+              (detSpec.finalSignature sk msg ()) then 0 else 1) := by
+      apply finSum_congr
+      intro mIdx
+      unfold execDetPostRound3Rushing
+      rw [detSpec.reconstruct_eq, optSomeIndicator_ite]
+    rw [hCong]
+    exact preOpenView_sum_invariant detSpec sk msg () adv hQ
+      (fun v => if abortPostRound3 v (detSpec.finalSignature sk msg ()) then 0 else 1)
+  have hDetSig : ∀ targetSig : BitVec w,
+      detPostRound3SigCount detSpec sk msg adv hQ abortPostRound3 targetSig =
+        (if detSpec.finalSignature sk msg () = targetSig then 1 else 0) *
+          detPostRound3SurviveCount detSpec sk msg adv hQ abortPostRound3 := by
+    intro targetSig
+    unfold detPostRound3SigCount detPostRound3SurviveCount
+    by_cases hMatch : detSpec.finalSignature sk msg () = targetSig
+    · simp only [hMatch, ↓reduceIte, Nat.one_mul]
+      apply finSum_congr
+      intro mIdx
+      unfold execDetPostRound3Rushing
+      rw [detSpec.reconstruct_eq, hMatch, indicator_ite_none_some, optSomeIndicator_ite]
+      simp only [↓reduceIte]
+    · simp only [hMatch, ↓reduceIte, Nat.zero_mul]
+      have hZero :
+          finSum (preOpenMaskCard Q w) (fun mIdx =>
+            if execDetPostRound3Rushing detSpec sk msg adv hQ
+                ((enumHonestPreOpenMasks Q w).toFun mIdx) abortPostRound3 = some targetSig
+            then 1 else 0) =
+          finSum (preOpenMaskCard Q w) (fun _ => 0) := by
+        apply finSum_congr
+        intro mIdx
+        unfold execDetPostRound3Rushing
+        rw [detSpec.reconstruct_eq, indicator_ite_none_some]
+        simp only [hMatch, ↓reduceIte]
+        cases abortPostRound3
+          (evalPreOpenView detSpec sk msg () adv hQ ((enumHonestPreOpenMasks Q w).toFun mIdx))
+          (detSpec.finalSignature sk msg ()) <;> rfl
+      rw [hZero, finSum_const, Nat.mul_zero]
+  have hDetSdZero : detPostRound3StatDistNum detSpec sk msg adv hQ abortPostRound3 = 0 := by
+    unfold detPostRound3StatDistNum
+    dsimp only
+    have hAllZ :
+        finSum (2 ^ w) (fun sIdx =>
+          let sig := (enumBitVec w).toFun sIdx
+          natAbsDiff
+            (detPostRound3SigCount detSpec sk msg adv hQ abortPostRound3 sig)
+            ((if detSpec.finalSignature sk msg () = sig then 1 else 0) *
+              detPostRound3SurviveCount detSpec sk msg adv hQ abortPostRound3)) =
+        finSum (2 ^ w) (fun _ => 0) := by
+      apply finSum_congr
+      intro sIdx
+      dsimp only
+      rw [hDetSig ((enumBitVec w).toFun sIdx)]
+      simp [natAbsDiff]
+    rw [hAllZ, finSum_const, Nat.mul_zero]
+  exact ⟨hBind, coinTossRand_exact_fiber_one inp.rShare, hTotEq, hCrossUnbiased, hSdZero,
+    hDetSurv, hDetSdZero⟩
+
+/-- `#tooth`: Without a binding Round-1 `QSAG.R_COMMIT/v1` commitment (`decodeCoinTossRand`), a
+    rushing corrupt party that chooses `rCorrupt : BitVec 4 → BitVec 4` *after* observing the
+    honest share `rHonest` (`rCorrupt rH := rH`) forces the least-significant bit `getLsbD 0` of
+    `R = rHonest ^^^ rCorrupt rHonest` to `false` on **all `16 / 16` honest inputs**, whereas
+    every Round-1 committed `rCommitted : BitVec 4` yields `getLsbD 0 = false` on **exactly
+    `8 / 16` inputs** (a full 1-bit bias of `8 / 16 = 1 / 2`). -/
+theorem tooth_uncommitted_round3_randomizer_biases_bit :
+    ∃ corruptChooseR : BitVec 4 → BitVec 4,
+      finSum (2 ^ 4) (fun i =>
+        let rH := (enumBitVec 4).toFun i
+        if (rH ^^^ corruptChooseR rH).getLsbD 0 = false then 1 else 0) = 16 ∧
+      (∀ rCommitted : BitVec 4,
+        finSum (2 ^ 4) (fun i =>
+          if (decodeCoinTossRand rCommitted i).getLsbD 0 = false then 1 else 0) = 8) := by
+  refine ⟨fun rH => rH, ?_, ?_⟩
+  · have hAllOne :
+        finSum (2 ^ 4) (fun i =>
+          let rH := (enumBitVec 4).toFun i
+          if (rH ^^^ rH).getLsbD 0 = false then 1 else 0) =
+        finSum (2 ^ 4) (fun _ => 1) := by
+      apply finSum_congr
+      intro i
+      dsimp only
+      rw [BitVec.xor_self]
+      rfl
+    rw [hAllOne, finSum_const]
+  · intro rCommitted
+    rw [coinTossRand_sum_invariant rCommitted (fun r => if r.getLsbD 0 = false then 1 else 0)]
+    decide
+
+theorem witness_post_round3_rushing_abort_inhabited :
+    ∃ (H : List Nat → Digest256)
+      (inp : HedgedRCommitInput 2)
+      (hedgedSpec : CutTheHashProtocolSpec (BitVec 2) (BitVec 2) (BitVec 2) (BitVec 2) 1 2)
+      (detSpec : CutTheHashProtocolSpec (BitVec 2) (BitVec 2) Unit (BitVec 2) 1 2)
+      (sk msg : BitVec 2)
+      (adv : RushingCorruptStrategy (BitVec 2) 1 2)
+      (hQ : 0 < 1)
+      (abortPreOpen : AdvPreOpenView 1 2 → Bool),
+      evalHedgedRCommitV1 H inp = 0#256 ∧
+      detSpec.finalSignature sk msg () = sk ^^^ msg ∧
+      NonZeroSurvivingRuns hedgedSpec sk msg (2 ^ 2) (decodeCoinTossRand inp.rShare)
+        adv hQ abortPreOpen := by
+  let hSpec : CutTheHashProtocolSpec (BitVec 2) (BitVec 2) (BitVec 2) (BitVec 2) 1 2 := {
+    wireRingSecret := fun _ _ _ => ⟨0, Nat.zero_lt_one⟩
+    wireXorSecret := fun sk _ _ cIn => sk ^^^ cIn
+    yShareHonest := fun sk msg r cIn => (sk ^^^ msg ^^^ r) ^^^ cIn
+    yShareCorrupt := fun _ _ _ cIn => cIn
+    macShareHonest := fun _ msg _ _ => msg
+    commitHiding := fun y mac => maskBijectionBitVec 2 (y ^^^ mac)
+    finalSignature := fun sk msg r => sk ^^^ msg ^^^ r
+    reconstruct_eq := fun sk msg r cIn => by bv_xor_cancel
+  }
+  let dSpec : CutTheHashProtocolSpec (BitVec 2) (BitVec 2) Unit (BitVec 2) 1 2 := {
+    wireRingSecret := fun _ _ _ => ⟨0, Nat.zero_lt_one⟩
+    wireXorSecret := fun sk _ _ cIn => sk ^^^ cIn
+    yShareHonest := fun sk msg _ cIn => (sk ^^^ msg) ^^^ cIn
+    yShareCorrupt := fun _ _ _ cIn => cIn
+    macShareHonest := fun _ msg _ _ => msg
+    commitHiding := fun y mac => maskBijectionBitVec 2 (y ^^^ mac)
+    finalSignature := fun sk msg _ => sk ^^^ msg
+    reconstruct_eq := fun sk msg _ cIn => by bv_xor_cancel
+  }
+  let inp0 : HedgedRCommitInput 2 := ⟨0#256, 1#64, 1#2, 0#256⟩
+  let adv0 : RushingCorruptStrategy (BitVec 2) 1 2 := RushingCorruptStrategy.const (0#2)
+  refine ⟨(fun _ => 0#256), inp0, hSpec, dSpec, 1#2, 2#2, adv0, Nat.zero_lt_one,
+    (fun _ => false), rfl, rfl, ?_⟩
+  unfold NonZeroSurvivingRuns
+  rw [totalSurvivingRuns_eq]
+  have hMaskPos : 0 < viewMaskSurviveCount (fun (_ : AdvPreOpenView 1 2) => false) := by
+    unfold viewMaskSurviveCount
+    rw [finSum_const]
+    decide
+  exact Nat.mul_pos (Nat.two_pow_pos 2) hMaskPos
+
+#verify_constructive encodeHedgedRCommitV1_injective
+#verify_constructive rCommitV1_binding_or_collision
+#verify_constructive coinTossRand_sum_invariant
+#verify_constructive coinTossRand_exact_fiber_one
+#verify_constructive post_round3_rushing_abort_unbiased
+#verify_constructive tooth_uncommitted_round3_randomizer_biases_bit
+#verify_constructive witness_post_round3_rushing_abort_inhabited
+#tooth_pair post_round3_rushing_abort_unbiased vs tooth_uncommitted_round3_randomizer_biases_bit
+#verify_inhabited post_round3_rushing_abort_unbiased witness_post_round3_rushing_abort_inhabited
+
 end Qsag
 end
