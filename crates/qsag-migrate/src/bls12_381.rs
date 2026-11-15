@@ -1051,3 +1051,1370 @@ impl Drop for BlsNode {
 }
 
 /// Mixed-domain ZKBoo circuit for Ethereum Beacon validator `BLS12-381` ownership.
+pub struct BlsOwnershipCircuit {
+    nodes: Vec<BlsNode>,
+    outputs: Vec<Wire>,
+}
+
+#[derive(Default)]
+struct BlsBuilder {
+    nodes: RefCell<Vec<BlsNode>>,
+    outputs: RefCell<Vec<Wire>>,
+}
+
+impl BlsBuilder {
+    fn push(&self, domain: BlsDom, op: BlsOp, value: Val6) -> Wire {
+        let mut ns = self.nodes.borrow_mut();
+        let w = ns.len();
+        if ns.len() == ns.capacity() {
+            let mut grown = Vec::with_capacity(ns.capacity().saturating_mul(2).max(64));
+            grown.extend(ns.iter().map(|n| BlsNode {
+                domain: n.domain,
+                op: n.op,
+                value: n.value,
+            }));
+            *ns = grown;
+        }
+        ns.push(BlsNode { domain, op, value });
+        w
+    }
+
+    fn finish(self) -> BlsOwnershipCircuit {
+        BlsOwnershipCircuit {
+            nodes: self.nodes.into_inner(),
+            outputs: self.outputs.into_inner(),
+        }
+    }
+
+    fn value(&self, w: Wire) -> Val6 {
+        self.nodes.borrow()[w].value
+    }
+
+    fn domain(&self, w: Wire) -> BlsDom {
+        self.nodes.borrow()[w].domain
+    }
+
+    fn known(&self, w: Wire) -> Option<Val6> {
+        match self.nodes.borrow()[w].op {
+            BlsOp::Constant(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    fn constant(&self, d: BlsDom, x: Val6) -> Wire {
+        self.push(d, BlsOp::Constant(x), x)
+    }
+
+    fn small(&self, d: BlsDom, x: u64) -> Wire {
+        self.constant(d, [x, 0, 0, 0, 0, 0])
+    }
+
+    fn input_bit(&self, bit: u8) -> Wire {
+        self.push(BlsDom::Bit, BlsOp::Input, [u64::from(bit & 1), 0, 0, 0, 0, 0])
+    }
+
+    fn input_fp(&self, x: FpBls381) -> Wire {
+        self.push(BlsDom::BlsFp, BlsOp::Input, x.0)
+    }
+
+    fn add(&self, a: Wire, b: Wire) -> Wire {
+        let d = self.domain(a);
+        assert_eq!(d, self.domain(b));
+        match (self.known(a), self.known(b)) {
+            (Some(x), Some(y)) => self.constant(d, d.add(x, y)),
+            (Some(ZERO6), _) => b,
+            (_, Some(ZERO6)) => a,
+            _ => self.push(d, BlsOp::Add(a, b), d.add(self.value(a), self.value(b))),
+        }
+    }
+
+    fn sub(&self, a: Wire, b: Wire) -> Wire {
+        let d = self.domain(a);
+        assert_eq!(d, self.domain(b));
+        if a == b {
+            return self.constant(d, ZERO6);
+        }
+        match (self.known(a), self.known(b)) {
+            (Some(x), Some(y)) => self.constant(d, d.sub(x, y)),
+            (_, Some(ZERO6)) => a,
+            _ => self.push(d, BlsOp::Sub(a, b), d.sub(self.value(a), self.value(b))),
+        }
+    }
+
+    fn scale_val(&self, a: Wire, c: Val6) -> Wire {
+        let d = self.domain(a);
+        if c == ZERO6 {
+            return self.constant(d, ZERO6);
+        }
+        if c == [1, 0, 0, 0, 0, 0] {
+            return a;
+        }
+        let v = d.mul(self.value(a), c);
+        if self.known(a).is_some() {
+            self.constant(d, v)
+        } else {
+            self.push(d, BlsOp::Scale(a, c), v)
+        }
+    }
+
+    fn scale(&self, a: Wire, c: u64) -> Wire {
+        self.scale_val(a, [c, 0, 0, 0, 0, 0])
+    }
+
+    fn mul(&self, a: Wire, b: Wire) -> Wire {
+        let d = self.domain(a);
+        assert_eq!(d, self.domain(b));
+        match (self.known(a), self.known(b)) {
+            (Some(x), Some(y)) => self.constant(d, d.mul(x, y)),
+            (Some(x), _) => self.scale_val(b, x),
+            (_, Some(y)) => self.scale_val(a, y),
+            _ => self.push(d, BlsOp::Mul(a, b), d.mul(self.value(a), self.value(b))),
+        }
+    }
+
+    fn not(&self, a: Wire) -> Wire {
+        self.add(a, self.small(BlsDom::Bit, 1))
+    }
+
+    fn output(&self, a: Wire) {
+        self.outputs.borrow_mut().push(a);
+    }
+
+    fn equal(&self, a: Wire, b: Wire) {
+        self.output(self.sub(a, b));
+    }
+
+    fn lift(&self, a: Wire, d: BlsDom) -> Wire {
+        assert_eq!(self.domain(a), BlsDom::Bit);
+        let parts: [Wire; 3] = core::array::from_fn(|p| {
+            self.push(
+                d,
+                BlsOp::Lift(a, p),
+                if p == 0 { self.value(a) } else { ZERO6 },
+            )
+        });
+        let xor = |x, y| self.sub(self.add(x, y), self.scale(self.mul(x, y), 2));
+        xor(xor(parts[0], parts[1]), parts[2])
+    }
+
+    fn pack_domain(&self, bits_le: &[Wire], d: BlsDom) -> Wire {
+        bits_le.iter().rev().fold(self.small(d, 0), |a, &b| {
+            self.add(self.scale(a, 2), self.lift(b, d))
+        })
+    }
+
+    fn add_bits(&self, a: &[Wire], b: &[Wire], carry: Wire) -> (Vec<Wire>, Wire) {
+        let mut c = carry;
+        let out = a
+            .iter()
+            .zip(b)
+            .map(|(&x, &y)| {
+                let xc = self.add(x, c);
+                let yc = self.add(y, c);
+                let s = self.add(xc, y);
+                c = self.add(c, self.mul(xc, yc));
+                s
+            })
+            .collect();
+        (out, c)
+    }
+
+    fn constant_bits(&self, limbs: &[u64], width: usize) -> Vec<Wire> {
+        (0..width)
+            .map(|i| self.small(BlsDom::Bit, (limbs[i / 64] >> (i % 64)) & 1))
+            .collect()
+    }
+
+    fn require_canonical(&self, bits: &[Wire], order_limbs: &[u64]) {
+        let comp: Vec<_> = self
+            .constant_bits(order_limbs, bits.len())
+            .into_iter()
+            .map(|b| self.not(b))
+            .collect();
+        let (_, ge) = self.add_bits(bits, &comp, self.small(BlsDom::Bit, 1));
+        self.output(ge);
+    }
+
+    fn require_nonzero(&self, bits: &[Wire]) {
+        let all_zero = bits
+            .iter()
+            .fold(self.small(BlsDom::Bit, 1), |a, &b| self.mul(a, self.not(b)));
+        self.output(all_zero);
+    }
+}
+
+fn bls_rcb_add(c: &BlsBuilder, a: [Wire; 3], b: [Wire; 3]) -> [Wire; 3] {
+    let mut t0 = c.mul(a[0], b[0]);
+    let mut t1 = c.mul(a[1], b[1]);
+    let zz = c.mul(a[2], b[2]);
+    let t2 = c.scale(zz, 12);
+    let t3 = c.sub(c.mul(c.add(a[0], a[1]), c.add(b[0], b[1])), c.add(t0, t1));
+    let t4 = c.sub(c.mul(c.add(a[1], a[2]), c.add(b[1], b[2])), c.add(t1, zz));
+    let cross = c.scale(
+        c.sub(c.mul(c.add(a[0], a[2]), c.add(b[0], b[2])), c.add(t0, zz)),
+        12,
+    );
+    t0 = c.scale(t0, 3);
+    let z = c.add(t1, t2);
+    t1 = c.sub(t1, t2);
+    [
+        c.sub(c.mul(t3, t1), c.mul(t4, cross)),
+        c.add(c.mul(t1, z), c.mul(cross, t0)),
+        c.add(c.mul(z, t4), c.mul(t0, t3)),
+    ]
+}
+
+/// Precompute 64 public 4-bit affine window tables `[v * 16^w] G_1` using a single batch inversion.
+fn bls_g1_window_tables() -> Vec<[[Val6; 3]; 16]> {
+    let mut tables = Vec::with_capacity(64);
+    let mut base = BlsG1Point::GENERATOR;
+    for _ in 0..64 {
+        let mut p = BlsG1Point::IDENTITY;
+        let table: [[Val6; 3]; 16] = core::array::from_fn(|v| {
+            if v != 0 {
+                p = p.complete_add(&base);
+            }
+            [p.x.0, p.y.0, p.z.0]
+        });
+        tables.push(table);
+        for _ in 0..4 {
+            base = base.complete_add(&base);
+        }
+    }
+    let mut prefixes = Vec::with_capacity(64 * 15);
+    let mut prod = FpBls381::ONE;
+    for table in &tables {
+        for p in &table[1..] {
+            prefixes.push(prod);
+            prod = prod * FpBls381(p[2]);
+        }
+    }
+    let mut inv = prod.inv_or_zero();
+    for table in tables.iter_mut().rev() {
+        for p in table[1..].iter_mut().rev() {
+            let z_inv = inv * prefixes.pop().unwrap();
+            inv = inv * FpBls381(p[2]);
+            p[0] = (FpBls381(p[0]) * z_inv).0;
+            p[1] = (FpBls381(p[1]) * z_inv).0;
+            p[2] = FpBls381::ONE.0;
+        }
+    }
+    tables
+}
+
+fn fixed_base_bls_g1_mul(c: &BlsBuilder, bits: &[Wire]) -> [Wire; 3] {
+    let tables = bls_g1_window_tables();
+    let one = c.small(BlsDom::BlsFp, 1);
+    let pairs = |a, b| {
+        let ab = c.mul(a, b);
+        let a_only = c.sub(a, ab);
+        let b_only = c.sub(b, ab);
+        [c.sub(c.sub(one, a_only), b), a_only, b_only, ab]
+    };
+    let mut acc: Option<[Wire; 3]> = None;
+    for (nibble, table) in bits.chunks_exact(4).zip(tables) {
+        let b: [Wire; 4] = core::array::from_fn(|i| c.lift(nibble[i], BlsDom::BlsFp));
+        let lo = pairs(b[0], b[1]);
+        let hi = pairs(b[2], b[3]);
+        let mut sel = [c.small(BlsDom::BlsFp, 0); 16];
+        for j in 0..3 {
+            for i in 0..3 {
+                sel[j * 4 + i] = c.mul(lo[i], hi[j]);
+            }
+            sel[j * 4 + 3] = c.sub(
+                hi[j],
+                c.add(c.add(sel[j * 4], sel[j * 4 + 1]), sel[j * 4 + 2]),
+            );
+        }
+        for i in 0..4 {
+            sel[12 + i] = c.sub(lo[i], c.add(c.add(sel[i], sel[4 + i]), sel[8 + i]));
+        }
+        let pt: [Wire; 3] = core::array::from_fn(|coord| {
+            if coord == 2 {
+                return c.sub(one, sel[0]);
+            }
+            sel.iter()
+                .zip(&table)
+                .fold(c.small(BlsDom::BlsFp, 0), |sum, (&w, p)| {
+                    c.add(sum, c.scale_val(w, p[coord]))
+                })
+        });
+        acc = Some(match acc {
+            None => pt,
+            Some(prev) => bls_rcb_add(c, prev, pt),
+        });
+    }
+    acc.unwrap()
+}
+
+// --- GF(2) single-block SHA-256 for unrevealed `0x00` BLS withdrawal credentials ---
+
+type ShaWord = [Wire; 32];
+
+const SHA256_K: [u32; 64] = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+
+fn sha_word(c: &BlsBuilder, x: u32) -> ShaWord {
+    core::array::from_fn(|i| c.small(BlsDom::Bit, u64::from((x >> i) & 1)))
+}
+
+fn sha_xor(c: &BlsBuilder, a: ShaWord, b: ShaWord) -> ShaWord {
+    core::array::from_fn(|i| c.add(a[i], b[i]))
+}
+
+fn sha_and(c: &BlsBuilder, a: ShaWord, b: ShaWord) -> ShaWord {
+    core::array::from_fn(|i| c.mul(a[i], b[i]))
+}
+
+fn sha_rotr(a: ShaWord, n: usize) -> ShaWord {
+    core::array::from_fn(|i| a[(i + n) % 32])
+}
+
+fn sha_shr(c: &BlsBuilder, a: ShaWord, n: usize) -> ShaWord {
+    core::array::from_fn(|i| {
+        if i + n < 32 {
+            a[i + n]
+        } else {
+            c.small(BlsDom::Bit, 0)
+        }
+    })
+}
+
+fn sha_add(c: &BlsBuilder, a: ShaWord, b: ShaWord) -> ShaWord {
+    let mut carry = c.small(BlsDom::Bit, 0);
+    core::array::from_fn(|i| {
+        let xc = c.add(a[i], carry);
+        let s = c.add(xc, b[i]);
+        if i < 31 {
+            let yc = c.add(b[i], carry);
+            carry = c.add(carry, c.mul(xc, yc));
+        }
+        s
+    })
+}
+
+fn sha_csa(c: &BlsBuilder, x: ShaWord, y: ShaWord, z: ShaWord) -> (ShaWord, ShaWord) {
+    let xy = sha_xor(c, x, y);
+    let s = sha_xor(c, xy, z);
+    let xz = sha_xor(c, x, z);
+    let zero = c.small(BlsDom::Bit, 0);
+    let carry = core::array::from_fn(|i| {
+        if i == 0 {
+            zero
+        } else {
+            c.add(x[i - 1], c.mul(xy[i - 1], xz[i - 1]))
+        }
+    });
+    (s, carry)
+}
+
+fn sha_sum(c: &BlsBuilder, words: &[ShaWord]) -> ShaWord {
+    let mut rows = words.to_vec();
+    while rows.len() > 2 {
+        let mut next = Vec::with_capacity((rows.len() / 3) * 2 + (rows.len() % 3));
+        for triple in rows.chunks_exact(3) {
+            let (s, carry) = sha_csa(c, triple[0], triple[1], triple[2]);
+            next.push(s);
+            next.push(carry);
+        }
+        next.extend_from_slice(&rows[(rows.len() / 3) * 3..]);
+        rows = next;
+    }
+    if rows.len() == 1 {
+        rows[0]
+    } else {
+        sha_add(c, rows[0], rows[1])
+    }
+}
+
+fn sha256_48_bytes(c: &BlsBuilder, msg_384_bits: &[Wire]) -> Vec<Wire> {
+    assert_eq!(msg_384_bits.len(), 384);
+    let mut block = msg_384_bits.to_vec();
+    let mut pad = [0u8; 16];
+    pad[0] = 0x80;
+    pad[8..16].copy_from_slice(&(384u64).to_be_bytes());
+    for &b in &pad {
+        for i in 0..8 {
+            block.push(c.small(BlsDom::Bit, u64::from((b >> i) & 1)));
+        }
+    }
+    assert_eq!(block.len(), 512);
+    let mut w: Vec<ShaWord> = block
+        .chunks_exact(32)
+        .map(|chunk| core::array::from_fn(|i| chunk[(3 - i / 8) * 8 + i % 8]))
+        .collect();
+    while w.len() < 64 {
+        let i = w.len();
+        let s0 = sha_xor(
+            c,
+            sha_xor(c, sha_rotr(w[i - 15], 7), sha_rotr(w[i - 15], 18)),
+            sha_shr(c, w[i - 15], 3),
+        );
+        let s1 = sha_xor(
+            c,
+            sha_xor(c, sha_rotr(w[i - 2], 17), sha_rotr(w[i - 2], 19)),
+            sha_shr(c, w[i - 2], 10),
+        );
+        w.push(sha_sum(c, &[w[i - 16], s0, w[i - 7], s1]));
+    }
+    let iv = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ]
+    .map(|x| sha_word(c, x));
+    let [mut a, mut b, mut cc, mut d, mut e, mut f, mut g, mut h] = iv;
+    for (&k, &ww) in SHA256_K.iter().zip(&w) {
+        let s1 = sha_xor(c, sha_xor(c, sha_rotr(e, 6), sha_rotr(e, 11)), sha_rotr(e, 25));
+        let ch = sha_xor(c, g, sha_and(c, e, sha_xor(c, f, g)));
+        let t1 = sha_sum(c, &[h, s1, ch, sha_word(c, k), ww]);
+        let s0 = sha_xor(c, sha_xor(c, sha_rotr(a, 2), sha_rotr(a, 13)), sha_rotr(a, 22));
+        let maj = sha_xor(c, a, sha_and(c, sha_xor(c, a, b), sha_xor(c, a, cc)));
+        let t2 = sha_add(c, s0, maj);
+        h = g;
+        g = f;
+        f = e;
+        e = sha_add(c, d, t1);
+        d = cc;
+        cc = b;
+        b = a;
+        a = sha_add(c, t1, t2);
+    }
+    let final_words: [ShaWord; 8] = core::array::from_fn(|idx| {
+        let delta = [a, b, cc, d, e, f, g, h][idx];
+        sha_add(c, iv[idx], delta)
+    });
+    final_words
+        .iter()
+        .flat_map(|wd| (0..32).map(move |i| wd[(3 - i / 8) * 8 + i % 8]))
+        .collect()
+}
+
+// --- Poseidon2 Goldilocks nullifier gadget ---
+
+fn big_endian_bits(bits: &[Wire]) -> Vec<Wire> {
+    bits.chunks_exact(8).rev().flatten().copied().collect()
+}
+
+fn poseidon_me(c: &BlsBuilder, st: &mut [Wire; 12]) {
+    let mut ys = *st;
+    for row in ys.chunks_exact_mut(4) {
+        let old: [Wire; 4] = core::array::from_fn(|i| row[i]);
+        let s = old.iter().copied().reduce(|a, b| c.add(a, b)).unwrap();
+        for (i, x) in row.iter_mut().enumerate() {
+            *x = c.add(s, c.add(old[i], c.scale(old[(i + 1) % 4], 2)));
+        }
+    }
+    for (i, x) in st.iter_mut().enumerate() {
+        *x = c.add(ys[i], c.add(c.add(ys[i % 4], ys[i % 4 + 4]), ys[i % 4 + 8]));
+    }
+}
+
+fn poseidon_mi(c: &BlsBuilder, st: &mut [Wire; 12]) {
+    let s = st.iter().copied().reduce(|a, b| c.add(a, b)).unwrap();
+    st[0] = c.sub(s, c.scale(st[0], 2));
+    st[1] = c.add(s, st[1]);
+    for (i, x) in st.iter_mut().enumerate().skip(2) {
+        *x = c.add(s, c.scale(*x, 1 << (i - 1)));
+    }
+}
+
+fn poseidon_sbox(c: &BlsBuilder, x: Wire, rc: u64) -> Wire {
+    let x = c.add(x, c.small(BlsDom::Gold, rc));
+    let x2 = c.mul(x, x);
+    let x3 = c.mul(x2, x);
+    let x4 = c.mul(x2, x2);
+    c.mul(x3, x4)
+}
+
+fn poseidon_perm(c: &BlsBuilder, st: &mut [Wire; 12]) {
+    poseidon_me(c, st);
+    for r in 0..4 {
+        for (i, x) in st.iter_mut().enumerate() {
+            *x = poseidon_sbox(c, *x, poseidon2_const_at(0, r, i as u64));
+        }
+        poseidon_me(c, st);
+    }
+    for r in 0..22 {
+        st[0] = poseidon_sbox(c, st[0], poseidon2_const_at(1, r, 0));
+        poseidon_mi(c, st);
+    }
+    for r in 0..4 {
+        for (i, x) in st.iter_mut().enumerate() {
+            *x = poseidon_sbox(c, *x, poseidon2_const_at(2, r, i as u64));
+        }
+        poseidon_me(c, st);
+    }
+}
+
+fn poseidon_sponge(c: &BlsBuilder, domain: u64, input: &[Wire]) -> [Wire; 4] {
+    let mut st = [c.small(BlsDom::Gold, 0); 12];
+    for (i, v) in [(8, 8), (9, 4), (10, domain), (11, POSEIDON2_CONST_IV)] {
+        st[i] = c.small(BlsDom::Gold, v);
+    }
+    let mut pos = 0;
+    for &x in input {
+        st[pos] = c.add(st[pos], x);
+        pos += 1;
+        if pos == 8 {
+            poseidon_perm(c, &mut st);
+            pos = 0;
+        }
+    }
+    st[pos] = c.add(st[pos], c.small(BlsDom::Gold, 1));
+    st[7] = c.add(st[7], c.small(BlsDom::Gold, 1 << 56));
+    poseidon_perm(c, &mut st);
+    [st[0], st[1], st[2], st[3]]
+}
+
+fn pack56_gold(c: &BlsBuilder, bytes_bits: &[Wire]) -> Vec<Wire> {
+    let mut marked = bytes_bits.to_vec();
+    for &b in &[1u8, 0, 0] {
+        for i in 0..8 {
+            marked.push(c.small(BlsDom::Bit, u64::from((b >> i) & 1)));
+        }
+    }
+    marked
+        .chunks_exact(56)
+        .map(|chunk| {
+            let little: Vec<_> = chunk.chunks_exact(8).rev().flatten().copied().collect();
+            c.pack_domain(&little, BlsDom::Gold)
+        })
+        .collect()
+}
+
+/// Build the mixed-domain ZKBoo circuit for `statement`.
+pub fn build_bls_ownership_circuit(
+    statement: &BlsMigrationStatement,
+    public_affine: Option<(FpBls381, FpBls381)>,
+    sk_le: &[u8; 32],
+) -> BlsOwnershipCircuit {
+    let c = BlsBuilder::default();
+    let sk_bits: Vec<_> = sk_le
+        .iter()
+        .flat_map(|&b| (0..8).map(move |i| (b >> i) & 1))
+        .map(|b| c.input_bit(b))
+        .collect();
+    c.require_canonical(&sk_bits, &BLS_R);
+    c.require_nonzero(&sk_bits);
+
+    let proj = fixed_base_bls_g1_mul(&c, &sk_bits);
+    let z_val = FpBls381(c.value(proj[2]));
+    let z_inv_val = z_val.inv_or_zero();
+    let z_inv = c.input_fp(z_inv_val);
+    c.equal(c.mul(proj[2], z_inv), c.small(BlsDom::BlsFp, 1));
+
+    match (&statement.commitment, public_affine) {
+        (BlsValidatorCommitment::BeaconValidatorPubkey(_), Some((x_pub, y_pub))) => {
+            c.equal(proj[0], c.scale_val(proj[2], x_pub.0));
+            c.equal(proj[1], c.scale_val(proj[2], y_pub.0));
+        }
+        (BlsValidatorCommitment::UnrevealedBls0x00Credential(cred), None) => {
+            let mut x_le = (FpBls381(c.value(proj[0])) * z_inv_val).to_le_bytes();
+            let mut y_le = (FpBls381(c.value(proj[1])) * z_inv_val).to_le_bytes();
+            let x_bits: Vec<_> = x_le
+                .iter()
+                .flat_map(|&b| (0..8).map(move |i| (b >> i) & 1))
+                .map(|b| c.input_bit(b))
+                .collect();
+            let y_bits: Vec<_> = y_le
+                .iter()
+                .flat_map(|&b| (0..8).map(move |i| (b >> i) & 1))
+                .map(|b| c.input_bit(b))
+                .collect();
+            ct_zeroize_bytes(&mut x_le);
+            ct_zeroize_bytes(&mut y_le);
+
+            c.require_canonical(&x_bits, &BLS_P);
+            c.require_canonical(&y_bits, &BLS_P);
+            let x_fp = c.pack_domain(&x_bits, BlsDom::BlsFp);
+            let y_fp = c.pack_domain(&y_bits, BlsDom::BlsFp);
+            c.equal(proj[0], c.mul(x_fp, proj[2]));
+            c.equal(proj[1], c.mul(y_fp, proj[2]));
+
+            // `a_flag = (y >= (p + 1) / 2)`
+            let comp_half: Vec<_> = c
+                .constant_bits(&BLS_P_HALF_CEIL, 384)
+                .into_iter()
+                .map(|b| c.not(b))
+                .collect();
+            let (_, a_flag) = c.add_bits(&y_bits, &comp_half, c.small(BlsDom::Bit, 1));
+
+            // Assemble 48-byte big-endian IETF compressed `G_1` bit stream:
+            // Byte 0: bits `0..=4` = `x_bits[376..=380]`, bit 5 = `a_flag`, bit 6 = `0`, bit 7 = `1`.
+            // Bytes `1..48`: byte `k` = `x_bits[8*(47 - k) .. 8*(47 - k) + 8]`.
+            let mut pk_bits = Vec::with_capacity(384);
+            pk_bits.extend_from_slice(&x_bits[376..381]);
+            pk_bits.push(a_flag);
+            pk_bits.push(c.small(BlsDom::Bit, 0));
+            pk_bits.push(c.small(BlsDom::Bit, 1));
+            for k in 1..48 {
+                let base = 8 * (47 - k);
+                pk_bits.extend_from_slice(&x_bits[base..base + 8]);
+            }
+            let digest_bits = sha256_48_bytes(&c, &pk_bits);
+            for (byte_idx, &expected_byte) in cred[1..32].iter().enumerate() {
+                for bit_idx in 0..8 {
+                    let expected_bit = u64::from((expected_byte >> bit_idx) & 1);
+                    c.equal(
+                        digest_bits[(byte_idx + 1) * 8 + bit_idx],
+                        c.small(BlsDom::Bit, expected_bit),
+                    );
+                }
+            }
+        }
+        _ => unreachable!("commitment mode and public_affine invariant violated"),
+    }
+
+    let mut nul_in = alloc::vec![c.small(BlsDom::Gold, NULLIFIER_TAG_BLS12_381_G1)];
+    nul_in.extend(pack56_gold(&c, &big_endian_bits(&sk_bits)));
+    nul_in.extend(
+        pack_bytes32_to_limbs56(&statement.migration_domain).map(|v| c.small(BlsDom::Gold, v)),
+    );
+    let nul = poseidon_sponge(&c, NULLIFIER_DOMAIN, &nul_in);
+    for (w, expected) in nul.into_iter().zip(statement.migration_nullifier) {
+        c.equal(w, c.small(BlsDom::Gold, expected));
+    }
+    c.finish()
+}
+
+struct BlsTape {
+    sponge: crate::tape_sponge::TapeSponge,
+    bit_buf: u64,
+    bit_rem: u8,
+}
+
+impl Drop for BlsTape {
+    fn drop(&mut self) {
+        qsag_asm::volatile_fill(core::slice::from_mut(&mut self.bit_buf), 0);
+        qsag_asm::volatile_fill(core::slice::from_mut(&mut self.bit_rem), 0);
+    }
+}
+
+impl BlsTape {
+    fn new(seed: &[u8; 32]) -> Self {
+        Self {
+            sponge: crate::tape_sponge::TapeSponge::new(seed),
+            bit_buf: 0,
+            bit_rem: 0,
+        }
+    }
+
+    fn sample(&mut self, d: BlsDom) -> Val6 {
+        match d {
+            BlsDom::Bit => {
+                if self.bit_rem == 0 {
+                    let mut raw = [0u8; 8];
+                    self.sponge.squeeze(&mut raw);
+                    self.bit_buf = u64::from_le_bytes(raw);
+                    self.bit_rem = 64;
+                }
+                let b = self.bit_buf & 1;
+                self.bit_buf >>= 1;
+                self.bit_rem -= 1;
+                [b, 0, 0, 0, 0, 0]
+            }
+            BlsDom::Gold => [self.sponge.gold(), 0, 0, 0, 0, 0],
+            BlsDom::BlsFp => loop {
+                let mut raw = [0u8; 48];
+                self.sponge.squeeze(&mut raw);
+                let mut v = decode6_le(&raw);
+                ct_zeroize_bytes(&mut raw);
+                v[5] &= 0x1fff_ffff_ffff_ffff;
+                if lt6(v, BLS_P) {
+                    return v;
+                }
+            },
+        }
+    }
+}
+
+fn bls_put(out: &mut Vec<u8>, d: BlsDom, v: Val6) {
+    match d {
+        BlsDom::Bit => out.push((v[0] & 1) as u8),
+        BlsDom::Gold => out.extend_from_slice(&v[0].to_le_bytes()),
+        BlsDom::BlsFp => out.extend_from_slice(&encode6_le(v)),
+    }
+}
+
+fn bls_take(input: &mut &[u8], d: BlsDom) -> Result<Val6, MigrateError> {
+    let len = d.byte_len();
+    if input.len() < len {
+        return Err(MigrateError::MalformedProofStructure);
+    }
+    let v = match d {
+        BlsDom::Bit => [u64::from(input[0]), 0, 0, 0, 0, 0],
+        BlsDom::Gold => [
+            u64::from_le_bytes(input[..8].try_into().unwrap()),
+            0,
+            0,
+            0,
+            0,
+            0,
+        ],
+        BlsDom::BlsFp => decode6_le(input[..48].try_into().unwrap()),
+    };
+    *input = &input[len..];
+    if !d.canonical(v) {
+        return Err(MigrateError::MalformedProofStructure);
+    }
+    Ok(v)
+}
+
+fn bls_put_packed(out: &mut Vec<u8>, bit: &mut u8, d: BlsDom, v: Val6) {
+    if d == BlsDom::Bit {
+        if *bit == 0 {
+            out.push(0);
+        }
+        *out.last_mut().unwrap() |= (v[0] as u8 & 1) << *bit;
+        *bit = (*bit + 1) % 8;
+    } else {
+        *bit = 0;
+        bls_put(out, d, v);
+    }
+}
+
+struct BlsPackedReader<'a> {
+    input: &'a [u8],
+    bit: u8,
+}
+
+impl<'a> BlsPackedReader<'a> {
+    fn new(input: &'a [u8]) -> Self {
+        Self { input, bit: 0 }
+    }
+
+    fn align(&mut self) -> Result<(), MigrateError> {
+        if self.bit != 0 {
+            if self.input[0] >> self.bit != 0 {
+                return Err(MigrateError::MalformedProofStructure);
+            }
+            self.input = &self.input[1..];
+            self.bit = 0;
+        }
+        Ok(())
+    }
+
+    fn take(&mut self, d: BlsDom) -> Result<Val6, MigrateError> {
+        if d != BlsDom::Bit {
+            self.align()?;
+            return bls_take(&mut self.input, d);
+        }
+        let byte = self
+            .input
+            .first()
+            .ok_or(MigrateError::MalformedProofStructure)?;
+        let v = [u64::from((byte >> self.bit) & 1), 0, 0, 0, 0, 0];
+        self.bit = (self.bit + 1) % 8;
+        if self.bit == 0 {
+            self.input = &self.input[1..];
+        }
+        Ok(v)
+    }
+
+    fn finish(&mut self) -> Result<(), MigrateError> {
+        self.align()?;
+        if !self.input.is_empty() {
+            return Err(MigrateError::MalformedProofStructure);
+        }
+        Ok(())
+    }
+}
+
+struct BlsWires(Vec<Val6>);
+impl Drop for BlsWires {
+    fn drop(&mut self) {
+        ct_zeroize_u64s(self.0.as_mut_slice().as_flattened_mut());
+    }
+}
+
+#[inline]
+fn bls_local(node: &BlsNode, party: usize, wires: &[Val6]) -> Val6 {
+    let d = node.domain;
+    match node.op {
+        BlsOp::Constant(v) => {
+            if party == 0 {
+                v
+            } else {
+                ZERO6
+            }
+        }
+        BlsOp::Add(a, b) => d.add(wires[a], wires[b]),
+        BlsOp::Sub(a, b) => d.sub(wires[a], wires[b]),
+        BlsOp::Scale(a, v) => d.mul(wires[a], v),
+        BlsOp::Lift(a, owner) => {
+            if party == owner {
+                wires[a]
+            } else {
+                ZERO6
+            }
+        }
+        BlsOp::Input | BlsOp::Mul(_, _) => ZERO6,
+    }
+}
+
+#[inline]
+fn bls_gate(d: BlsDom, a: [Val6; 2], b: [Val6; 2], r: [Val6; 2]) -> Val6 {
+    if d == BlsDom::Bit {
+        return [
+            ((a[0][0] & b[0][0]) ^ (a[0][0] & b[1][0]) ^ (a[1][0] & b[0][0]) ^ r[0][0] ^ r[1][0])
+                & 1,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
+    }
+    d.add(
+        d.add(
+            d.add(d.mul(a[0], b[0]), d.mul(a[0], b[1])),
+            d.mul(a[1], b[0]),
+        ),
+        d.sub(r[0], r[1]),
+    )
+}
+
+fn simulate_bls(c: &BlsOwnershipCircuit, seeds: [[u8; 32]; 3]) -> [PartyView; 3] {
+    let mut tapes = seeds.map(|s| BlsTape::new(&s));
+    let mut views = seeds.map(|seed| PartyView {
+        seed,
+        inputs: Vec::new(),
+        products: Vec::new(),
+        outputs: Vec::new(),
+    });
+    let mut wires: [BlsWires; 3] =
+        core::array::from_fn(|_| BlsWires(Vec::with_capacity(c.nodes.len())));
+    let mut prod_bits = [0u8; 3];
+    for node in &c.nodes {
+        let d = node.domain;
+        let shares = match node.op {
+            BlsOp::Input => {
+                let a = tapes[0].sample(d);
+                let b = tapes[1].sample(d);
+                let s = [a, b, d.sub(node.value, d.add(a, b))];
+                for (view, v) in views.iter_mut().zip(s) {
+                    bls_put(&mut view.inputs, d, v);
+                }
+                s
+            }
+            BlsOp::Mul(a, b) => {
+                let masks = core::array::from_fn::<_, 3, _>(|p| tapes[p].sample(d));
+                let s = core::array::from_fn(|p| {
+                    let n = (p + 1) % 3;
+                    bls_gate(
+                        d,
+                        [wires[p].0[a], wires[n].0[a]],
+                        [wires[p].0[b], wires[n].0[b]],
+                        [masks[p], masks[n]],
+                    )
+                });
+                for ((view, bit), v) in views.iter_mut().zip(&mut prod_bits).zip(s) {
+                    bls_put_packed(&mut view.products, bit, d, v);
+                }
+                s
+            }
+            _ => core::array::from_fn(|p| bls_local(node, p, &wires[p].0)),
+        };
+        for (w, v) in wires.iter_mut().zip(shares) {
+            w.0.push(v);
+        }
+    }
+    for (v, w) in views.iter_mut().zip(&wires) {
+        let mut bit = 0;
+        for &i in &c.outputs {
+            bls_put_packed(&mut v.outputs, &mut bit, c.nodes[i].domain, w.0[i]);
+        }
+    }
+    views
+}
+
+fn replay_bls(
+    c: &BlsOwnershipCircuit,
+    rep: usize,
+    view: &OpenedRepetitionView,
+) -> Result<(), MigrateError> {
+    let e = view.opened_e as usize;
+    let mut tapes = view.pair.each_ref().map(|v| BlsTape::new(&v.seed));
+    let mut inputs = view.pair.each_ref().map(|v| v.inputs.as_slice());
+    let mut products = view.pair.each_ref().map(|v| BlsPackedReader::new(&v.products));
+    let mut wires: [BlsWires; 2] =
+        core::array::from_fn(|_| BlsWires(Vec::with_capacity(c.nodes.len())));
+    for (gate_idx, node) in c.nodes.iter().enumerate() {
+        let d = node.domain;
+        let values = match node.op {
+            BlsOp::Input => {
+                let mut vals = [ZERO6; 2];
+                for (j, slot) in vals.iter_mut().enumerate() {
+                    *slot = bls_take(&mut inputs[j], d)?;
+                    if (e + j) % 3 != 2 && *slot != tapes[j].sample(d) {
+                        return Err(MigrateError::MalformedProofStructure);
+                    }
+                }
+                vals
+            }
+            BlsOp::Mul(a, b) => {
+                let masks = [tapes[0].sample(d), tapes[1].sample(d)];
+                let claimed = products[0].take(d)?;
+                let next = products[1].take(d)?;
+                let actual = bls_gate(
+                    d,
+                    [wires[0].0[a], wires[1].0[a]],
+                    [wires[0].0[b], wires[1].0[b]],
+                    masks,
+                );
+                if claimed != actual {
+                    return Err(MigrateError::OpenedPartyGateFailed {
+                        rep,
+                        gate: gate_idx,
+                    });
+                }
+                [claimed, next]
+            }
+            _ => core::array::from_fn(|j| bls_local(node, (e + j) % 3, &wires[j].0)),
+        };
+        for (w, v) in wires.iter_mut().zip(values) {
+            w.0.push(v);
+        }
+    }
+    for p in &mut products {
+        p.finish()?;
+    }
+    if inputs.iter().any(|s| !s.is_empty()) {
+        return Err(MigrateError::MalformedProofStructure);
+    }
+    let mut outputs = view.pair.each_ref().map(|v| BlsPackedReader::new(&v.outputs));
+    let mut hidden = BlsPackedReader::new(&view.hidden_outputs);
+    for &w in &c.outputs {
+        let d = c.nodes[w].domain;
+        let a = outputs[0].take(d)?;
+        let b = outputs[1].take(d)?;
+        let h = hidden.take(d)?;
+        if a != wires[0].0[w] || b != wires[1].0[w] || d.add(d.add(a, b), h) != ZERO6 {
+            return Err(MigrateError::PublicOutputShareMismatch);
+        }
+    }
+    for out in outputs.iter_mut().chain(core::iter::once(&mut hidden)) {
+        out.finish()?;
+    }
+    Ok(())
+}
+
+fn bls_transcript(
+    statement: &BlsMigrationStatement,
+    root: &[u8; 32],
+) -> InterleavedTranscript {
+    let mut t = InterleavedTranscript::new(
+        b"QSAG.BLS12_381.MIGRATE.V1",
+        &statement.to_transcript_bytes(),
+    );
+    t.absorb(b"VIEWS", root);
+    t
+}
+
+fn bls_seeds(entropy: &[u8; 32], stmt_bytes: &[u8], rep: usize) -> [[u8; 32]; 3] {
+    core::array::from_fn(|p| {
+        cshake256_framed_32(
+            b"QSAG.BLS12_381.SEEDS.V1",
+            &[entropy, stmt_bytes, &(rep as u64).to_le_bytes(), &[p as u8]],
+        )
+    })
+}
+
+/// Prove Ethereum Beacon validator `BLS12-381` ownership in the default epoch campaign domain.
+pub fn prove_bls_migration<B: AcceleratorBackend>(
+    witness: &BlsOwnershipWitness,
+    commitment: BlsValidatorCommitment,
+    validator_index: u64,
+    withdrawal_credentials: [u8; 32],
+    target: QsagAddress,
+    epoch: u64,
+    entropy: [u8; 32],
+    accel: &B,
+) -> Result<(BlsMigrationStatement, MigrationZkProof), MigrateError> {
+    let domain = cshake256_framed_32(b"QSAG.BLS12_381.CAMPAIGN.V1", &[&epoch.to_le_bytes()]);
+    prove_bls_migration_in_domain(
+        witness,
+        BlsMigrationRequest {
+            commitment,
+            validator_index,
+            withdrawal_credentials,
+            target,
+            epoch,
+            domain,
+        },
+        entropy,
+        accel,
+    )
+}
+
+/// Prove Ethereum Beacon validator `BLS12-381` ownership in an explicit campaign domain.
+pub fn prove_bls_migration_in_domain<B: AcceleratorBackend>(
+    witness: &BlsOwnershipWitness,
+    request: BlsMigrationRequest,
+    mut entropy: [u8; 32],
+    accel: &B,
+) -> Result<(BlsMigrationStatement, MigrationZkProof), MigrateError> {
+    let result = (|| {
+        if !witness.matches_commitment(&request.commitment) {
+            return Err(MigrateError::WitnessMismatchWithLegacyCommitment);
+        }
+        let public_affine = match &request.commitment {
+            BlsValidatorCommitment::BeaconValidatorPubkey(pk_48) => {
+                let pt = BlsG1Point::from_validator_pubkey_48(pk_48)
+                    .ok_or(MigrateError::WitnessMismatchWithLegacyCommitment)?;
+                Some(
+                    pt.to_affine()
+                        .ok_or(MigrateError::WitnessMismatchWithLegacyCommitment)?,
+                )
+            }
+            BlsValidatorCommitment::UnrevealedBls0x00Credential(_) => None,
+        };
+        let sk = witness
+            .scalar()
+            .ok_or(MigrateError::WitnessMismatchWithLegacyCommitment)?;
+        let statement = BlsMigrationStatement {
+            commitment: request.commitment,
+            validator_index: request.validator_index,
+            withdrawal_credentials: request.withdrawal_credentials,
+            target_pq_address: request.target,
+            epoch_anchor: request.epoch,
+            migration_domain: request.domain,
+            migration_nullifier: sk.compute_nullifier(&request.domain),
+        };
+        if !statement.credentials_consistent() {
+            return Err(MigrateError::WitnessMismatchWithLegacyCommitment);
+        }
+        let mut sk_le = sk.to_le_bytes();
+        let circuit = build_bls_ownership_circuit(&statement, public_affine, &sk_le);
+        if circuit
+            .outputs
+            .iter()
+            .any(|&w| circuit.nodes[w].value != ZERO6)
+        {
+            ct_zeroize_bytes(&mut sk_le);
+            return Err(MigrateError::WitnessMismatchWithLegacyCommitment);
+        }
+        let stmt_bytes = statement.to_transcript_bytes();
+        entropy = cshake256_framed_32(
+            b"QSAG.BLS12_381.HEDGE.V1",
+            &[&entropy, &sk_le, &stmt_bytes],
+        );
+        ct_zeroize_bytes(&mut sk_le);
+
+        let views = crate::parallel::map(MIT_REPETITIONS, |rep| {
+            simulate_bls(&circuit, bls_seeds(&entropy, &stmt_bytes, rep))
+        });
+        let commitments = crate::batch_hash::commit_views(accel, &views);
+        let mut all_views = Vec::with_capacity(MIT_REPETITIONS);
+        let mut roots = Vec::with_capacity(MIT_REPETITIONS * 32);
+        for (rep, rep_views) in views.into_iter().enumerate() {
+            let commits = core::array::from_fn(|p| commitments[3 * rep + p]);
+            roots.extend_from_slice(&rep_root(
+                rep,
+                &commits,
+                core::array::from_fn(|p| rep_views[p].outputs.as_slice()),
+            ));
+            all_views.push((rep_views, commits));
+        }
+        let root = cshake256_framed_32(b"QSAG.MIGRATE.ROOT.V3", &[&roots]);
+        let mut t = bls_transcript(&statement, &root);
+        let es = challenges(&mut t);
+        let mut repetitions = Vec::with_capacity(MIT_REPETITIONS);
+        for ((mut rep_views, commits), &e) in all_views.into_iter().zip(&es) {
+            let e_idx = e as usize;
+            let hidden = (e_idx + 2) % 3;
+            let hidden_outputs = core::mem::take(&mut rep_views[hidden].outputs);
+            repetitions.push(OpenedRepetitionView {
+                opened_e: e,
+                pair: [
+                    rep_views[e_idx].clone(),
+                    rep_views[(e_idx + 1) % 3].clone(),
+                ],
+                hidden_party_commit: commits[hidden],
+                hidden_outputs,
+            });
+        }
+        Ok((
+            statement,
+            MigrationZkProof {
+                views_merkle_root: root,
+                repetitions,
+            },
+        ))
+    })();
+    ct_zeroize_bytes(&mut entropy);
+    result
+}
+
+/// Verify an Ethereum Beacon validator `BLS12-381` post-quantum ownership migration proof.
+pub fn verify_bls_migration(
+    statement: &BlsMigrationStatement,
+    proof: &MigrationZkProof,
+    expected_domain: &[u8; 32],
+    expected_epoch: u64,
+) -> Result<(), MigrateError> {
+    verify_bls_migration_with_backend(
+        statement,
+        proof,
+        expected_domain,
+        expected_epoch,
+        &qsag_accel::CpuReferenceBackend,
+    )
+}
+
+/// Verify an Ethereum Beacon validator `BLS12-381` migration proof on a selected `AcceleratorBackend`.
+pub fn verify_bls_migration_with_backend<B: AcceleratorBackend>(
+    statement: &BlsMigrationStatement,
+    proof: &MigrationZkProof,
+    expected_domain: &[u8; 32],
+    expected_epoch: u64,
+    accel: &B,
+) -> Result<(), MigrateError> {
+    if &statement.migration_domain != expected_domain || statement.epoch_anchor != expected_epoch {
+        return Err(MigrateError::SessionMismatch);
+    }
+    if !statement.credentials_consistent()
+        || proof.repetitions.len() != MIT_REPETITIONS
+        || statement
+            .migration_nullifier
+            .iter()
+            .any(|&v| v >= GOLDILOCKS_PRIME)
+    {
+        return Err(MigrateError::MalformedProofStructure);
+    }
+    let public_affine = match &statement.commitment {
+        BlsValidatorCommitment::BeaconValidatorPubkey(pk_48) => {
+            let pt = BlsG1Point::from_validator_pubkey_48(pk_48)
+                .ok_or(MigrateError::MalformedProofStructure)?;
+            Some(pt.to_affine().ok_or(MigrateError::MalformedProofStructure)?)
+        }
+        BlsValidatorCommitment::UnrevealedBls0x00Credential(_) => None,
+    };
+
+    let mut t = bls_transcript(statement, &proof.views_merkle_root);
+    let es = challenges(&mut t);
+    if proof
+        .repetitions
+        .iter()
+        .zip(&es)
+        .any(|(v, &e)| v.opened_e != e)
+    {
+        return Err(MigrateError::MalformedProofStructure);
+    }
+    let indexed: Vec<_> = proof
+        .repetitions
+        .iter()
+        .enumerate()
+        .flat_map(|(rep, view)| {
+            let e = view.opened_e as usize;
+            [(rep, e, &view.pair[0]), (rep, (e + 1) % 3, &view.pair[1])]
+        })
+        .collect();
+    let opened_commits = crate::batch_hash::commit_indexed(accel, &indexed);
+    let roots: Vec<u8> = crate::parallel::map(MIT_REPETITIONS, |rep| {
+        let view = &proof.repetitions[rep];
+        let e = view.opened_e as usize;
+        let mut commits = [[0u8; 32]; 3];
+        commits[e] = opened_commits[2 * rep];
+        commits[(e + 1) % 3] = opened_commits[2 * rep + 1];
+        commits[(e + 2) % 3] = view.hidden_party_commit;
+        let mut outs = [&[][..]; 3];
+        outs[e] = &view.pair[0].outputs;
+        outs[(e + 1) % 3] = &view.pair[1].outputs;
+        outs[(e + 2) % 3] = &view.hidden_outputs;
+        rep_root(rep, &commits, outs)
+    })
+    .into_iter()
+    .flatten()
+    .collect();
+    if cshake256_framed_32(b"QSAG.MIGRATE.ROOT.V3", &[&roots]) != proof.views_merkle_root {
+        return Err(MigrateError::ViewsMerkleRootMismatch);
+    }
+    let mut dummy_one = [0u8; 32];
+    dummy_one[0] = 1;
+    let circuit = build_bls_ownership_circuit(statement, public_affine, &dummy_one);
+    for res in crate::parallel::map(MIT_REPETITIONS, |rep| {
+        replay_bls(&circuit, rep, &proof.repetitions[rep])
+    }) {
+        res?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::format;
+    use qsag_accel::CpuReferenceBackend;
+    use qsag_addr::{KeyIdentityKind, WitnessSuiteTag};
+
+    fn sample_beam_pq_dest(tag: &[u8]) -> QsagAddress {
+        QsagAddress::from_pubkey_poseidon2(
+            "qsp",
+            WitnessSuiteTag::MlDsa65,
+            KeyIdentityKind::SingleOrThreshold,
+            tag,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn bls12_381_ietf_g1_constants_codec_and_subgroup_rejection_hold() {
+        // `(p - 1)^2 == 1 (mod p)` (`p^2` wraparound check) & Fermat inversion:
+        let pm1 = FpBls381([
+            BLS_P[0] - 1,
+            BLS_P[1],
+            BLS_P[2],
+            BLS_P[3],
+            BLS_P[4],
+            BLS_P[5],
+        ]);
+        assert_eq!(pm1 * pm1, FpBls381::ONE);
+        assert_eq!(pm1 + FpBls381::ONE, FpBls381::ZERO);
+        assert_eq!(FpBls381::B * FpBls381::B.inv_or_zero(), FpBls381::ONE);
+
+        // Official IETF / Ethereum Beacon `G_1` compressed 48-byte hex vector:
+        let expected_g1_compressed: [u8; 48] = [
+            0x97, 0xf1, 0xd3, 0xa7, 0x31, 0x97, 0xd7, 0x94, 0x26, 0x95, 0x63, 0x8c, 0x4f, 0xa9,
+            0xac, 0x0f, 0xc3, 0x68, 0x8c, 0x4f, 0x97, 0x74, 0xb9, 0x05, 0xa1, 0x4e, 0x3a, 0x3f,
+            0x17, 0x1b, 0xac, 0x58, 0x6c, 0x55, 0xe8, 0x3f, 0xf9, 0x7a, 0x1a, 0xef, 0xfb, 0x3a,
+            0xf0, 0x0a, 0xdb, 0x22, 0xc6, 0xbb,
+        ];
+        assert_eq!(BlsG1Point::GENERATOR.to_compressed_48(), expected_g1_compressed);
+        assert!(BlsG1Point::GENERATOR.is_in_g1_subgroup());
+        assert_eq!(
+            BlsG1Point::from_validator_pubkey_48(&expected_g1_compressed).unwrap(),
+            BlsG1Point::GENERATOR
+        );
+
+        // Identity `0xc000...00` accepted by `from_compressed_48` and rejected by `from_validator_pubkey_48`:
+        let inf = BlsG1Point::IDENTITY.to_compressed_48();
+        assert_eq!(inf[0], 0xc0);
+        assert!(BlsG1Point::from_compressed_48(&inf).unwrap().is_identity());
+        assert!(BlsG1Point::from_validator_pubkey_48(&inf).is_none());
+
+        // `[r - 1] G_1 == -G_1` and `[r] G_1 == O`:
+        let rm1 = FrBls381([BLS_R[0] - 1, BLS_R[1], BLS_R[2], BLS_R[3]]);
+        assert_eq!(
+            BlsG1Point::generator_mul_ct(&rm1),
+            BlsG1Point::GENERATOR.neg_point()
+        );
+
+        // Small-subgroup attack point `(0, 2)` satisfies `2^2 = 0^3 + 4`, has exact torsion order 3,
+        // and MUST be rejected by `is_in_g1_subgroup` and `from_compressed_48` / `from_validator_pubkey_48`!
+        let torsion3 = BlsG1Point {
+            x: FpBls381::ZERO,
+            y: FpBls381([2, 0, 0, 0, 0, 0]),
+            z: FpBls381::ONE,
+        };
+        assert!(torsion3.is_on_curve());
+        assert!(torsion3.scalar_mul_limbs_ct(&[3]).is_identity());
+        assert!(!torsion3.is_in_g1_subgroup());
+        assert!(torsion3.clear_cofactor().is_identity());
+        let torsion3_comp = torsion3.to_compressed_48();
+        assert!(BlsG1Point::from_compressed_48(&torsion3_comp).is_none());
+        assert!(BlsG1Point::from_validator_pubkey_48(&torsion3_comp).is_none());
+    }
+
+    #[test]
+    fn bls12_381_beacon_validator_and_unrevealed_0x00_zk_migration_roundtrip_and_rejections() {
+        let mut sk_be = [0u8; 32];
+        sk_be[30] = 0x13;
+        sk_be[31] = 0x37;
+        let wit = BlsOwnershipWitness::from_secret_scalar_be(sk_be).unwrap();
+        assert!(format!("{wit:?}").contains("<REDACTED>"));
+
+        let backend = CpuReferenceBackend;
+        let domain = [0xab; 32];
+        let epoch = 360_000;
+        let validator_index = 987_654;
+
+        // 1. Active Beacon validator pubkey with EIP-7251 `0x02` compounding `2048 ETH` credentials:
+        let beacon_comm = wit.compute_beacon_commitment().unwrap();
+        let mut creds_0x02 = [0u8; 32];
+        creds_0x02[0] = 0x02;
+        creds_0x02[12..32].copy_from_slice(&[0x44; 20]);
+
+        let req_beacon = BlsMigrationRequest {
+            commitment: beacon_comm,
+            validator_index,
+            withdrawal_credentials: creds_0x02,
+            target: sample_beam_pq_dest(b"eth-beam-chain-jorts-2048eth"),
+            epoch,
+            domain,
+        };
+        let (stmt, mut proof) =
+            prove_bls_migration_in_domain(&wit, req_beacon.clone(), [0x77; 32], &backend).unwrap();
+        assert_eq!(verify_bls_migration(&stmt, &proof, &domain, epoch), Ok(()));
+
+        // Wrong validator secret key rejected:
+        let mut wrong_sk = sk_be;
+        wrong_sk[31] ^= 1;
+        let wrong_wit = BlsOwnershipWitness::from_secret_scalar_be(wrong_sk).unwrap();
+        assert_eq!(
+            prove_bls_migration_in_domain(&wrong_wit, req_beacon, [0x11; 32], &backend),
+            Err(MigrateError::WitnessMismatchWithLegacyCommitment)
+        );
+
+        // Wrong validator pubkey / mutated withdrawal credentials / mutated validator_index rejected:
+        let mut bad_pub_stmt = stmt.clone();
+        bad_pub_stmt.commitment = wrong_wit.compute_beacon_commitment().unwrap();
+        assert!(verify_bls_migration(&bad_pub_stmt, &proof, &domain, epoch).is_err());
+
+        let mut bad_creds_stmt = stmt.clone();
+        bad_creds_stmt.withdrawal_credentials[31] ^= 1;
+        assert!(verify_bls_migration(&bad_creds_stmt, &proof, &domain, epoch).is_err());
+
+        let mut bad_idx_stmt = stmt.clone();
+        bad_idx_stmt.validator_index += 1;
+        assert!(verify_bls_migration(&bad_idx_stmt, &proof, &domain, epoch).is_err());
+
+        // Small-subgroup point `(0, 2)` stuffed into statement commitment rejected:
+        let torsion3 = BlsG1Point {
+            x: FpBls381::ZERO,
+            y: FpBls381([2, 0, 0, 0, 0, 0]),
+            z: FpBls381::ONE,
+        };
+        let mut subgroup_stmt = stmt.clone();
+        subgroup_stmt.commitment =
+            BlsValidatorCommitment::BeaconValidatorPubkey(torsion3.to_compressed_48());
+        assert_eq!(
+            verify_bls_migration(&subgroup_stmt, &proof, &domain, epoch),
+            Err(MigrateError::MalformedProofStructure)
+        );
+
+        // Tampered ZKBoo party view rejected:
+        proof.repetitions[0].pair[0].products[0] ^= 1;
+        assert!(verify_bls_migration(&stmt, &proof, &domain, epoch).is_err());
+        proof.repetitions[0].pair[0].products[0] ^= 1;
+        assert_eq!(verify_bls_migration(&stmt, &proof, &domain, epoch), Ok(()));
+
+        // 2. Unrevealed `0x00` BLS withdrawal credential (`pk_48` never published on-chain!):
+        let unrev_comm = wit.compute_unrevealed_0x00_commitment().unwrap();
+        let BlsValidatorCommitment::UnrevealedBls0x00Credential(cred_0x00) = unrev_comm else {
+            unreachable!()
+        };
+        let req_unrev = BlsMigrationRequest {
+            commitment: unrev_comm,
+            validator_index,
+            withdrawal_credentials: cred_0x00,
+            target: sample_beam_pq_dest(b"eth-unrevealed-0x00-pq-vault"),
+            epoch,
+            domain,
+        };
+        let (stmt_unrev, proof_unrev) =
+            prove_bls_migration_in_domain(&wit, req_unrev, [0x99; 32], &backend).unwrap();
+        assert_eq!(
+            verify_bls_migration(&stmt_unrev, &proof_unrev, &domain, epoch),
+            Ok(())
+        );
+    }
+}

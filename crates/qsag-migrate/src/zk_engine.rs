@@ -528,12 +528,13 @@ pub fn prove_migration_in_domain<B: AcceleratorBackend>(
         for ((mut views, commits), &e) in all_views.into_iter().zip(&es) {
             let e_idx = e as usize;
             let hidden = (e_idx + 2) % 3;
-            let hidden_outputs = core::mem::take(&mut views[hidden].outputs);
+            views.rotate_left(e_idx);
+            let [first, second, mut hidden_view] = views;
             repetitions.push(OpenedRepetitionView {
                 opened_e: e,
-                pair: [views[e_idx].clone(), views[(e_idx + 1) % 3].clone()],
+                pair: [first, second],
                 hidden_party_commit: commits[hidden],
-                hidden_outputs,
+                hidden_outputs: core::mem::take(&mut hidden_view.outputs),
             });
         }
         Ok((
@@ -548,12 +549,24 @@ pub fn prove_migration_in_domain<B: AcceleratorBackend>(
     result
 }
 
+#[cfg(test)]
 fn replay(c: &Circuit, rep: usize, view: &OpenedRepetitionView) -> Result<(), MigrateError> {
+    let mut wires = core::array::from_fn(|_| Wires(alloc::vec![ZERO; c.nodes.len()]));
+    replay_with_scratch(c, rep, view, &mut wires)
+}
+
+/// Every gate overwrites its slot before later gates read it. Keeping the full length
+/// ensures the entire allocation is wiped on drop, including after an early rejection.
+fn replay_with_scratch(
+    c: &Circuit,
+    rep: usize,
+    view: &OpenedRepetitionView,
+    wires: &mut [Wires; 2],
+) -> Result<(), MigrateError> {
     let e = view.opened_e as usize;
     let mut tapes = view.pair.each_ref().map(|v| Tape::new(&v.seed));
     let mut inputs = view.pair.each_ref().map(|v| v.inputs.as_slice());
     let mut products = view.pair.each_ref().map(|v| PackedReader::new(&v.products));
-    let mut wires: [Wires; 2] = core::array::from_fn(|_| Wires(Vec::with_capacity(c.nodes.len())));
     for (gate_index, node) in c.nodes.iter().enumerate() {
         let d = node.domain;
         let values = match node.op {
@@ -588,7 +601,7 @@ fn replay(c: &Circuit, rep: usize, view: &OpenedRepetitionView) -> Result<(), Mi
             _ => core::array::from_fn(|j| local(node, (e + j) % 3, &wires[j].0)),
         };
         for (w, v) in wires.iter_mut().zip(values) {
-            w.0.push(v);
+            w.0[gate_index] = v;
         }
     }
     for product in &mut products {
@@ -690,8 +703,19 @@ pub fn verify_migration_proof_with_backend<B: AcceleratorBackend>(
         return Err(MigrateError::ViewsMerkleRootMismatch);
     }
     let circuit = crate::ownership::build(statement, &[0; 32]);
-    for result in crate::parallel::map(MIT_REPETITIONS, |rep| {
-        replay(&circuit, rep, &proof.repetitions[rep])
+    #[cfg(any(feature = "std", test))]
+    let workers = std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(16);
+    #[cfg(not(any(feature = "std", test)))]
+    let workers = 1;
+    let chunk = MIT_REPETITIONS.div_ceil(workers);
+    for result in crate::parallel::map(workers, |worker| {
+        let mut wires = core::array::from_fn(|_| Wires(alloc::vec![ZERO; circuit.nodes.len()]));
+        for rep in worker * chunk..((worker + 1) * chunk).min(MIT_REPETITIONS) {
+            replay_with_scratch(&circuit, rep, &proof.repetitions[rep], &mut wires)?;
+        }
+        Ok::<(), MigrateError>(())
     }) {
         result?;
     }
@@ -928,6 +952,8 @@ pub(crate) mod tests {
         }
         let circuit = c.finish();
         let views = simulate(&circuit, [[1; 32], [2; 32], [3; 32]]);
+        let mut scratch = core::array::from_fn(|_| Wires(alloc::vec![ZERO; circuit.nodes.len()]));
+        let allocations = [scratch[0].0.as_ptr(), scratch[1].0.as_ptr()];
         for (e, _) in views.iter().enumerate() {
             let opening = OpenedRepetitionView {
                 opened_e: e as u8,
@@ -936,14 +962,76 @@ pub(crate) mod tests {
                 hidden_outputs: views[(e + 2) % 3].outputs.clone(),
             };
             assert_eq!(replay(&circuit, 0, &opening), Ok(()));
+            assert_eq!(
+                replay_with_scratch(&circuit, e, &opening, &mut scratch),
+                Ok(())
+            );
             let mut changed = opening.clone();
             changed.pair[0].products[0] ^= 1;
+            assert!(replay_with_scratch(&circuit, e, &changed, &mut scratch).is_err());
+            assert_eq!(
+                replay_with_scratch(&circuit, e, &opening, &mut scratch),
+                Ok(())
+            );
+            assert_eq!(allocations, [scratch[0].0.as_ptr(), scratch[1].0.as_ptr()]);
             assert!(replay(&circuit, 0, &changed).is_err());
             let mut changed = opening;
             changed.pair[1].products[0] ^= 1;
             assert!(replay(&circuit, 0, &changed).is_err());
         }
     }
+    #[test]
+    #[ignore = "ownership proof throughput benchmark"]
+    fn benchmark_ownership_proof() {
+        let mut key = [0; 32];
+        key[31] = 1;
+        let witness = LegacyOwnershipWitness::from_raw_secret(key);
+        let kind = witness.compute_slip0010_commitment();
+        for _ in 0..3 {
+            let start = std::time::Instant::now();
+            let (statement, proof) = prove_migration_in_domain(
+                &witness,
+                request(kind),
+                [31; 32],
+                &CpuReferenceBackend::new(),
+            )
+            .unwrap();
+            std::eprintln!("migration prove: {:?}", start.elapsed());
+            let start = std::time::Instant::now();
+            verify_migration_proof(
+                &statement,
+                &proof,
+                &statement.migration_domain,
+                statement.epoch_anchor,
+            )
+            .unwrap();
+            std::eprintln!(
+                "migration verify: {:?}; root={:02x?}",
+                start.elapsed(),
+                proof.views_merkle_root
+            );
+            let mut encoded = Vec::new();
+            encoded.extend_from_slice(&proof.views_merkle_root);
+            for view in &proof.repetitions {
+                encoded.push(view.opened_e);
+                for party in &view.pair {
+                    encoded.extend_from_slice(&party.seed);
+                    for field in [&party.inputs, &party.products, &party.outputs] {
+                        encoded.extend_from_slice(&(field.len() as u64).to_le_bytes());
+                        encoded.extend_from_slice(field);
+                    }
+                }
+                encoded.extend_from_slice(&view.hidden_party_commit);
+                encoded.extend_from_slice(&(view.hidden_outputs.len() as u64).to_le_bytes());
+                encoded.extend_from_slice(&view.hidden_outputs);
+            }
+            std::eprintln!(
+                "proof fingerprint={:02x?}",
+                cshake256_framed_32(b"QSAG.TEST.PROOF.PARITY", &[&encoded])
+            );
+        }
+    }
+
     #[test]
     fn complete_ownership_proofs_all_modes_and_tampering() {
         let mut key = [0; 32];

@@ -16,14 +16,27 @@ extern crate alloc;
 #[cfg(any(feature = "std", test))]
 extern crate std;
 
+pub mod bls12_381;
 pub mod ed25519_ct;
 pub mod legacy;
+pub mod pallas;
 pub mod scalar;
 pub use scalar::{ScalarGroup, SpendingScalar};
 pub mod secp256k1_ct;
 pub mod zk_engine;
 
+pub use bls12_381::{
+    BlsG1Point, BlsMigrationRequest, BlsMigrationStatement, BlsOwnershipWitness,
+    BlsValidatorCommitment, FpBls381, FrBls381, compute_bls_0x00_withdrawal_credentials,
+    prove_bls_migration, prove_bls_migration_in_domain, verify_bls_migration,
+    verify_bls_migration_with_backend,
+};
 pub use legacy::{HardenedChainStep, LegacyCommitmentKind, LegacyOwnershipWitness};
+pub use pallas::{
+    FpPallas, FqPallas, PallasCommitmentKind, PallasMigrationRequest, PallasMigrationStatement,
+    PallasOwnershipWitness, PallasPoint, prove_pallas_migration, prove_pallas_migration_in_domain,
+    verify_pallas_migration, verify_pallas_migration_with_backend,
+};
 mod boolean_hash;
 mod circuit;
 pub mod co_zk_mpc;
