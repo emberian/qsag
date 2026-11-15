@@ -41,8 +41,8 @@ pub use linear_module::{
     max_cbd2_linf_norm_after_depth, validate_shamir_eval_points,
 };
 pub use seeds::{
-    CommitteeConfig, CustodianSeeds, CustodianSet, MAX_CUSTODIANS, SeedCeremonyRound1,
-    SeedConfirmation, SeedContributionCommit, SeedPrivateDelivery,
+    CommitteeConfig, CustodianSeeds, CustodianSet, MAX_CUSTODIANS, MAX_SUBSET_SEEDS,
+    SeedCeremonyRound1, SeedConfirmation, SeedContributionCommit, SeedPrivateDelivery,
 };
 
 #[cfg(test)]

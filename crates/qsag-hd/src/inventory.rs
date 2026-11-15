@@ -453,7 +453,7 @@ pub fn verify_inventory_child_proof<B: AcceleratorBackend>(
     accel: &B,
 ) -> Result<(), HdError> {
     const GOLDILOCKS_P: u64 = 0xFFFF_FFFF_0000_0001;
-    if !master_pk.batch_size.is_power_of_two() {
+    if !valid_batch(master_pk.batch_size as usize) {
         return Err(HdError::InvalidBatchSize);
     }
     if proof.child_idx >= master_pk.batch_size {
@@ -542,6 +542,41 @@ mod signature_tests {
     fn committee(t: u16, n: u16) -> CommitteeConfig {
         let members: Vec<_> = (0..n).map(|i| (i, u32::from(i) + 1)).collect();
         CommitteeConfig::new(t, &members, [3; 32]).unwrap()
+    }
+
+    #[test]
+    fn single_leaf_master_key_is_rejected_like_at_commitment() {
+        let accel = qsag_accel::CpuReferenceBackend::new();
+        assert_eq!(
+            commit_inventory_public_keys([5; 32], vec![[9; 32]], &accel).err(),
+            Some(HdError::InvalidBatchSize)
+        );
+        // A self-consistent descriptor whose only leaf is its root.
+        let pk_seed_limbs =
+            poseidon2_hash_limbs(0x5345_4544_3536_5633, &pack_bytes32_to_limbs56(&[5; 32]));
+        let root = hash_inventory_leaf_poseidon2(&pk_seed_limbs, 0, &[9; 32]);
+        let master = InventoryMasterPublicKey {
+            master_root_pk: compute_master_root_pk32(1, &pk_seed_limbs, &root),
+            batch_size: 1,
+            pk_seed_limbs,
+            poseidon2_root_limbs: root,
+        };
+        let proof = InventoryChildProof {
+            child_idx: 0,
+            child_pk: [9; 32],
+            poseidon2_siblings: Vec::new(),
+        };
+        let addr = QsagAddress::from_pubkey_poseidon2(
+            "qsp",
+            WitnessSuiteTag::PiHdCommitInventory,
+            KeyIdentityKind::SingleOrThreshold,
+            &proof.child_pk,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_inventory_child_proof(&master, &proof, &addr, &accel),
+            Err(HdError::InvalidBatchSize)
+        );
     }
 
     #[test]
