@@ -65,10 +65,10 @@
 //! exposed by a failed rekey, so a failed rekey does not retire the family.
 
 use super::*;
+use crate::erase::SecretWords;
 use crate::inventory::RekeyFault;
 use crate::seeds::CustodianSeeds;
 use qsag_accel::ct::ct_eq_bytes;
-use crate::erase::SecretWords;
 use qsag_accel::keccak::{Shake256, commit_mpc_broadcast, finalize_cshake256, init_cshake256};
 
 /// Independent sacrifice repetitions per MAC lane: soundness error `q^-7`.

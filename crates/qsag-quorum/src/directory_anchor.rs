@@ -22,7 +22,9 @@ impl Drop for State {
 }
 fn same_checkpoint(a: Option<LedgerCheckpoint>, b: Option<LedgerCheckpoint>) -> bool {
     match (a, b) {
-        (Some(a), Some(b)) => a.generation == b.generation && qsag_core::wipe::ct_eq_bytes32(&a.tag, &b.tag),
+        (Some(a), Some(b)) => {
+            a.generation == b.generation && qsag_core::wipe::ct_eq_bytes32(&a.tag, &b.tag)
+        }
         (None, None) => true,
         _ => false,
     }
@@ -42,7 +44,10 @@ impl FsDirectoryMonotoneAnchor {
             std::fs::DirBuilder::new().mode(0o700).create(path)?;
         }
         #[cfg(not(unix))]
-        return Err(io::Error::new(io::ErrorKind::Unsupported, "private directories require Unix permissions"));
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "private directories require Unix permissions",
+        ));
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::File::open(parent)?.sync_all()?;
         }
@@ -71,7 +76,9 @@ impl FsDirectoryMonotoneAnchor {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if metadata.permissions().mode() & 0o077 != 0 { return Err(invalid()); }
+            if metadata.permissions().mode() & 0o077 != 0 {
+                return Err(invalid());
+            }
         }
         if !metadata.is_dir() {
             return Err(invalid());
@@ -137,7 +144,9 @@ impl State {
                 tag: bytes[9..41].try_into().map_err(|_| invalid())?,
             };
             if let Some(old) = best {
-                if old.generation == checkpoint.generation && !qsag_core::wipe::ct_eq_bytes32(&old.tag, &checkpoint.tag) {
+                if old.generation == checkpoint.generation
+                    && !qsag_core::wipe::ct_eq_bytes32(&old.tag, &checkpoint.tag)
+                {
                     return Err(invalid());
                 }
                 if old.generation > checkpoint.generation {
@@ -172,7 +181,8 @@ impl ExternalMonotoneAnchor for FsDirectoryMonotoneAnchor {
         state.failed = true;
         if let Some(old) = state.current
             && (checkpoint.generation < old.generation
-                || (checkpoint.generation == old.generation && !qsag_core::wipe::ct_eq_bytes32(&checkpoint.tag, &old.tag)))
+                || (checkpoint.generation == old.generation
+                    && !qsag_core::wipe::ct_eq_bytes32(&checkpoint.tag, &old.tag)))
         {
             return Err(invalid());
         }
@@ -193,12 +203,28 @@ mod tests {
     #[test]
     fn directory_and_records_are_private_and_symlinks_are_rejected() {
         use std::os::unix::fs::{PermissionsExt, symlink};
-        let root = std::env::temp_dir().join(format!("private-anchor-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let root = std::env::temp_dir().join(format!(
+            "private-anchor-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let anchor = FsDirectoryMonotoneAnchor::create_new(&root, [7; 32]).unwrap();
-        assert_eq!(std::fs::metadata(&root).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
         for name in ["slot_a", "slot_b", "slot_a.lock", "slot_b.lock"] {
-            assert_eq!(std::fs::metadata(root.join(name)).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                std::fs::metadata(root.join(name))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
         }
         drop(anchor);
         let link = root.with_extension("link");

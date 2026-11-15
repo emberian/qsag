@@ -71,7 +71,12 @@ fn wipe_text(text: &mut String) {
 
 impl Drop for Args {
     fn drop(&mut self) {
-        for value in self.options.values_mut().chain(&mut self.positional).chain(&mut self.flags) {
+        for value in self
+            .options
+            .values_mut()
+            .chain(&mut self.positional)
+            .chain(&mut self.flags)
+        {
             wipe_text(value);
         }
     }
@@ -421,7 +426,9 @@ fn write_new_with(
         {
             use std::os::unix::fs::MetadataExt;
             if let (Ok(held), Ok(named)) = (file.metadata(), std::fs::symlink_metadata(path))
-                && named.is_file() && held.dev() == named.dev() && held.ino() == named.ino()
+                && named.is_file()
+                && held.dev() == named.dev()
+                && held.ino() == named.ino()
             {
                 let _ = std::fs::remove_file(path);
                 let _ = sync_parent(path);
@@ -467,7 +474,10 @@ mod tests {
     #[test]
     fn failed_partial_write_removes_only_its_own_file() {
         use std::io::Write;
-        let path = std::env::temp_dir().join(format!("partial-file-{}", crate::codec::to_hex(&super::os_random_32().unwrap())));
+        let path = std::env::temp_dir().join(format!(
+            "partial-file-{}",
+            crate::codec::to_hex(&super::os_random_32().unwrap())
+        ));
         let path = path.to_str().unwrap();
         let result = super::write_new_with(path, true, |file| {
             file.write_all(b"partial secret")?;
@@ -482,7 +492,10 @@ mod tests {
     }
     #[test]
     fn malformed_and_duplicate_arguments_wipe_owned_copies() {
-        for items in [vec!["--seed", "private", "--seed=duplicate"], vec!["--seed", "private", "--bad=secret"]] {
+        for items in [
+            vec!["--seed", "private", "--seed=duplicate"],
+            vec!["--seed", "private", "--bad=secret"],
+        ] {
             let raw = SecretArgs(strings(&items));
             WIPED_BUFFERS.with(|events| *events.borrow_mut() = Some(Vec::new()));
             assert!(Args::parse(&raw.0, &["seed"], &[]).is_err());
@@ -497,14 +510,23 @@ mod tests {
     #[test]
     fn secret_file_creation_and_replacement_keep_owner_only_permissions() {
         use std::os::unix::fs::{PermissionsExt, symlink};
-        let root = std::env::temp_dir().join(format!("private-file-{}", crate::codec::to_hex(&os_random_32().unwrap())));
+        let root = std::env::temp_dir().join(format!(
+            "private-file-{}",
+            crate::codec::to_hex(&os_random_32().unwrap())
+        ));
         std::fs::create_dir(&root).unwrap();
         let path = root.join("key");
         let path = path.to_str().unwrap();
         write_new(path, b"first", true).unwrap();
-        assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         replace_secret(path, b"second").unwrap();
-        assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         let link = root.join("link");
         symlink(path, &link).unwrap();
         assert!(write_new(link.to_str().unwrap(), b"overwrite", true).is_err());

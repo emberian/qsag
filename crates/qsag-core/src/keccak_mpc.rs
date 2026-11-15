@@ -2495,7 +2495,9 @@ impl RssSlhMpcCluster {
                 Ok(result) => result,
                 Err(error) => return self.poisoned.fail(error),
             };
-            if self.pending_dzk.len_words() == 0 && result.permutations <= RSS_DZK_FLUSH_PERMUTATIONS {
+            if self.pending_dzk.len_words() == 0
+                && result.permutations <= RSS_DZK_FLUSH_PERMUTATIONS
+            {
                 // Aligned chains already own exactly the next proof's witnesses.
                 // Transfer allocations instead of copying and wiping them twice.
                 core::mem::swap(&mut self.pending_dzk.a, &mut result.relations.a);
@@ -2504,34 +2506,6 @@ impl RssSlhMpcCluster {
                 self.pending_dzk.lane_perms += result.relations.lane_perms;
                 self.batch_ctr = self.batch_ctr.wrapping_add(result.permutations as u64);
                 if result.permutations == RSS_DZK_FLUSH_PERMUTATIONS {
-                    let ctr = self.next_ctr();
-                    if let Err(error) = verify_rss_boolean_triples_bbcggi19(&self.session_id, ctr, &mut self.pending_dzk, &self.mask_session, &mut self.party_rngs) {
-                        return self.poisoned.fail(error);
-                    }
-                }
-            } else {
-            for permutation in 0..result.permutations {
-                self.next_ctr();
-                let start = permutation * RSS_RELATION_WORDS_PER_PERMUTATION;
-                let end = start + RSS_RELATION_WORDS_PER_PERMUTATION;
-                for party in 0..3 {
-                    secret_vec_extend_from_slice(
-                        &mut self.pending_dzk.a[party],
-                        &result.relations.a[party][start..end],
-                    );
-                    secret_vec_extend_from_slice(
-                        &mut self.pending_dzk.b[party],
-                        &result.relations.b[party][start..end],
-                    );
-                    secret_vec_extend_from_slice(
-                        &mut self.pending_dzk.c[party],
-                        &result.relations.c[party][start..end],
-                    );
-                }
-                self.pending_dzk.lane_perms += plan.prf.len() as u64;
-                if self.pending_dzk.len_words()
-                    >= RSS_DZK_FLUSH_PERMUTATIONS * RSS_RELATION_WORDS_PER_PERMUTATION
-                {
                     let ctr = self.next_ctr();
                     if let Err(error) = verify_rss_boolean_triples_bbcggi19(
                         &self.session_id,
@@ -2543,7 +2517,41 @@ impl RssSlhMpcCluster {
                         return self.poisoned.fail(error);
                     }
                 }
-            }
+            } else {
+                for permutation in 0..result.permutations {
+                    self.next_ctr();
+                    let start = permutation * RSS_RELATION_WORDS_PER_PERMUTATION;
+                    let end = start + RSS_RELATION_WORDS_PER_PERMUTATION;
+                    for party in 0..3 {
+                        secret_vec_extend_from_slice(
+                            &mut self.pending_dzk.a[party],
+                            &result.relations.a[party][start..end],
+                        );
+                        secret_vec_extend_from_slice(
+                            &mut self.pending_dzk.b[party],
+                            &result.relations.b[party][start..end],
+                        );
+                        secret_vec_extend_from_slice(
+                            &mut self.pending_dzk.c[party],
+                            &result.relations.c[party][start..end],
+                        );
+                    }
+                    self.pending_dzk.lane_perms += plan.prf.len() as u64;
+                    if self.pending_dzk.len_words()
+                        >= RSS_DZK_FLUSH_PERMUTATIONS * RSS_RELATION_WORDS_PER_PERMUTATION
+                    {
+                        let ctr = self.next_ctr();
+                        if let Err(error) = verify_rss_boolean_triples_bbcggi19(
+                            &self.session_id,
+                            ctr,
+                            &mut self.pending_dzk,
+                            &self.mask_session,
+                            &mut self.party_rngs,
+                        ) {
+                            return self.poisoned.fail(error);
+                        }
+                    }
+                }
             }
             for party in 0..3 {
                 cut.push_party_slices(

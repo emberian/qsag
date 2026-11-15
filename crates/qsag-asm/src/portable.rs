@@ -52,6 +52,14 @@ pub const KECCAK_ROTATION_OFFSETS: [u32; 25] = [
 #[derive(Default)]
 pub struct KeccakState4x(pub [[u64; 4]; 25]);
 
+/// 64-byte aligned 8-way (`512`-bit per lane) `Keccak-f[1600]` state (`8` parallel sponges, or
+/// `512` parallel Boolean Keccak wires when bitsliced).
+/// Intentionally omits `#[derive(PartialEq, Eq)]` so no early-exit comparison symbol is emitted.
+#[derive(Clone, Copy, Debug)]
+#[repr(C, align(64))]
+#[derive(Default)]
+pub struct KeccakState8x(pub [[u64; 8]; 25]);
+
 /// 32-byte aligned 5-lane row of 256-bit registers (`5 × 256 = 1,280` parallel bits) for MPC $\chi$.
 /// Intentionally omits `#[derive(PartialEq, Eq)]` so no early-exit comparison symbol is emitted.
 #[derive(Clone, Copy, Debug)]
@@ -945,6 +953,41 @@ pub fn keccak_f1600_4x_portable(state: &mut KeccakState4x) {
         }
     }
     for row in &mut b {
+        for word in row {
+            unsafe { core::ptr::write_volatile(word, 0) };
+        }
+    }
+    compiler_fence(Ordering::SeqCst);
+}
+
+/// Portable 8-way (`512`-bit per lane) `Keccak-f[1600]` 24-round permutation.
+pub fn keccak_f1600_8x_portable(state: &mut KeccakState8x) {
+    let mut lo = KeccakState4x::default();
+    let mut hi = KeccakState4x::default();
+    for (lane, words) in state.0.iter().enumerate() {
+        lo.0[lane] = [words[0], words[1], words[2], words[3]];
+        hi.0[lane] = [words[4], words[5], words[6], words[7]];
+    }
+    keccak_f1600_4x_portable(&mut lo);
+    keccak_f1600_4x_portable(&mut hi);
+    for (lane, words) in state.0.iter_mut().enumerate() {
+        *words = [
+            lo.0[lane][0],
+            lo.0[lane][1],
+            lo.0[lane][2],
+            lo.0[lane][3],
+            hi.0[lane][0],
+            hi.0[lane][1],
+            hi.0[lane][2],
+            hi.0[lane][3],
+        ];
+    }
+    for row in &mut lo.0 {
+        for word in row {
+            unsafe { core::ptr::write_volatile(word, 0) };
+        }
+    }
+    for row in &mut hi.0 {
         for word in row {
             unsafe { core::ptr::write_volatile(word, 0) };
         }

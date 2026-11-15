@@ -2049,10 +2049,14 @@ pub struct PolicyGuardDkgRound2 {
 struct SecretVec<T: Copy + Default + PartialEq>(Vec<T>);
 impl<T: Copy + Default + PartialEq> core::ops::Deref for SecretVec<T> {
     type Target = Vec<T>;
-    fn deref(&self) -> &Self::Target { &self.0 }
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 impl<T: Copy + Default + PartialEq> core::ops::DerefMut for SecretVec<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
 impl<T: Copy + Default + PartialEq> Drop for SecretVec<T> {
     fn drop(&mut self) {
@@ -2285,7 +2289,8 @@ pub fn finalize_distributed_policy_guard<O: PolicyAuthenticatedOt>(
             keys.push(key);
             ct_zeroize_u128s(&mut key);
         }
-        let mut selected = SecretVec(ot.exchange(g.party_id, o.sender, domain, &alternatives, &choices)?);
+        let mut selected =
+            SecretVec(ot.exchange(g.party_id, o.sender, domain, &alternatives, &choices)?);
         if selected.len() != BDOZ_PREPROC_SLOTS * 256 {
             return Err(PolicyViolation::BarrierBdozMacFailed);
         }
@@ -2298,7 +2303,8 @@ pub fn finalize_distributed_policy_guard<O: PolicyAuthenticatedOt>(
         }
         ct_zeroize_u128s(&mut selected);
         g.preproc_outgoing_macs.push((o.sender, macs));
-        g.preproc_incoming_keys.push((o.sender, core::mem::take(&mut keys.0)));
+        g.preproc_incoming_keys
+            .push((o.sender, core::mem::take(&mut keys.0)));
     }
     Ok(state.first.guard)
 }
@@ -4650,7 +4656,14 @@ mod cleanup_tests {
     use super::*;
     struct FailOt;
     impl PolicyAuthenticatedOt for FailOt {
-        fn exchange(&mut self, _: u16, _: u16, _: [u8; 32], _: &[[u128; 2]], _: &[bool]) -> Result<Vec<u128>, PolicyViolation> {
+        fn exchange(
+            &mut self,
+            _: u16,
+            _: u16,
+            _: [u8; 32],
+            _: &[[u128; 2]],
+            _: &[bool],
+        ) -> Result<Vec<u128>, PolicyViolation> {
             Err(PolicyViolation::BarrierBdozMacFailed)
         }
     }
@@ -4664,6 +4677,13 @@ mod cleanup_tests {
         assert!(finalize_distributed_policy_guard(a, &bo, &mut FailOt).is_err());
         let mut events = OT_WIPES.with(|events| events.borrow_mut().take().unwrap());
         events.sort_unstable();
-        assert_eq!(events, alloc::vec![(BDOZ_PREPROC_SLOTS, true), (BDOZ_PREPROC_SLOTS * 256, true), (BDOZ_PREPROC_SLOTS * 256, true)]);
+        assert_eq!(
+            events,
+            alloc::vec![
+                (BDOZ_PREPROC_SLOTS, true),
+                (BDOZ_PREPROC_SLOTS * 256, true),
+                (BDOZ_PREPROC_SLOTS * 256, true)
+            ]
+        );
     }
 }

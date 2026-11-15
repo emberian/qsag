@@ -247,7 +247,10 @@ pub fn dkg<T: Transport>(
                         b"QSAG.TOPRF.DKG.COMMIT.V1",
                         &[&session, &[dealer as u8, i as u8, j as u8], value],
                     );
-                    if !qsag_accel::ct::ct_eq_bytes(&commitment, &all_commits[dealer][ordinal * 32..(ordinal + 1) * 32]) {
+                    if !qsag_accel::ct::ct_eq_bytes(
+                        &commitment,
+                        &all_commits[dealer][ordinal * 32..(ordinal + 1) * 32],
+                    ) {
                         return Err(Error::BadDelivery { party: dealer });
                     }
                     joint.extend_from_slice(value);
@@ -392,15 +395,15 @@ pub struct Client {
     input_digests: Vec<[u8; 32]>,
 }
 pub fn hash_input(input: &[u8]) -> [u64; 4] {
-    let seed = hash(b"QSAG.TOPRF.INPUT.V1", &[input]);
-    fields(&seed, b"QSAG.TOPRF.INPUT.FIELD.V1", b"", 4)
-        .try_into()
-        .expect("four limbs")
+    let seed = Zeroizing(hash(b"QSAG.TOPRF.INPUT.V1", &[input]));
+    let values = Zeroizing(fields(&seed, b"QSAG.TOPRF.INPUT.FIELD.V1", b"", 4));
+    core::array::from_fn(|i| values[i])
 }
 /// Reference F, useful for test vectors. Custody never reconstructs this key.
 pub fn plaintext(key: &[u64; 4], input: &[u8]) -> [u8; 32] {
     let mut st = Zeroizing([0; 12]);
-    st[..4].copy_from_slice(&hash_input(input));
+    let input = Zeroizing(hash_input(input));
+    st[..4].copy_from_slice(&input[..]);
     st[4] = 1;
     st[7] = 0x544f50524631;
     st[8..].copy_from_slice(key);
@@ -435,7 +438,7 @@ pub fn blind(
     let mut requests = core::array::from_fn(|party| Request {
         context: context.clone(),
         party,
-        inputs: Vec::new(),
+        inputs: Vec::with_capacity(inputs.len()),
         salts: [[0; 32]; 5],
     });
     let random = Zeroizing(fields(
@@ -502,7 +505,9 @@ pub struct Output {
 impl Drop for Output {
     fn drop(&mut self) {
         for item in &mut self.components {
-            for wire in item { ct_zeroize_u64s(wire); }
+            for wire in item {
+                ct_zeroize_u64s(wire);
+            }
         }
     }
 }
@@ -717,8 +722,8 @@ impl Evaluation {
         }
         let digest = hash(b"QSAG.TOPRF.INPUT.BIND.V1", &[input]);
         let mut found = false;
-        let mut matched_output = [0u8; 32];
-        let mut matched_tag = [0u8; 32];
+        let mut matched_output = Zeroizing([0u8; 32]);
+        let mut matched_tag = Zeroizing([0u8; 32]);
         for ((cand_digest, cand_out), cand_tag) in self
             .input_digests
             .iter()
@@ -726,18 +731,21 @@ impl Evaluation {
             .zip(&self.receipt_tags)
         {
             let hit = qsag_accel::ct::ct_eq_bytes(cand_digest, &digest);
-            let _ = qsag_accel::ct::ct_conditional_assign_bytes(hit, &mut matched_output, cand_out);
-            let _ = qsag_accel::ct::ct_conditional_assign_bytes(hit, &mut matched_tag, cand_tag);
+            let _ =
+                qsag_accel::ct::ct_conditional_assign_bytes(hit, &mut matched_output[..], cand_out);
+            let _ =
+                qsag_accel::ct::ct_conditional_assign_bytes(hit, &mut matched_tag[..], cand_tag);
             found |= hit;
         }
         if !found {
             return None;
         }
-        let expected = receipt_key.tag(&key.commitment, &self.context, &digest, &matched_output);
-        if qsag_accel::ct::ct_eq_bytes(&matched_tag, &expected) {
-            Some(matched_output)
+        let expected =
+            Zeroizing(receipt_key.tag(&key.commitment, &self.context, &digest, &matched_output));
+        if qsag_accel::ct::ct_eq_bytes(&matched_tag[..], &expected[..]) {
+            Some(*matched_output)
         } else {
-            ct_zeroize_bytes(&mut matched_output);
+            ct_zeroize_bytes(&mut matched_output[..]);
             None
         }
     }
@@ -774,13 +782,14 @@ impl Evaluation {
         }
         let digest = hash(b"QSAG.TOPRF.INPUT.BIND.V1", &[input]);
         let mut found = false;
-        let mut matched_output = [0u8; 32];
+        let mut matched_output = Zeroizing([0u8; 32]);
         for (cand_digest, cand_out) in self.input_digests.iter().zip(&self.values) {
             let hit = qsag_accel::ct::ct_eq_bytes(cand_digest, &digest);
-            let _ = qsag_accel::ct::ct_conditional_assign_bytes(hit, &mut matched_output, cand_out);
+            let _ =
+                qsag_accel::ct::ct_conditional_assign_bytes(hit, &mut matched_output[..], cand_out);
             found |= hit;
         }
-        found.then_some(matched_output)
+        found.then_some(*matched_output)
     }
 }
 impl Client {
@@ -807,27 +816,23 @@ impl Client {
     /// signature that can be used as a transferable slashing receipt.
     pub fn finalize(self, outputs: [Option<Output>; 5]) -> Result<Evaluation, Error> {
         let mut faulty = Vec::new();
-        let mut values = Vec::new();
+        let mut values = Zeroizing(Vec::with_capacity(self.context.items));
         for item in 0..self.context.items {
             let mut result = Zeroizing([0; 4]);
             for (lane, slot) in result.iter_mut().enumerate() {
                 for component in 0..5 {
-                    let candidates: Vec<_> = outputs
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(party, out)| {
-                            let o = out.as_ref()?;
-                            if party == component
-                                || o.context != self.context
-                                || o.components.len() != self.context.items
-                            {
-                                return None;
-                            }
-                            let value = o.components[item][lane][component];
-                            (value < qsag_accel::goldilocks::GOLDILOCKS_PRIME)
-                                .then_some((party, value))
-                        })
-                        .collect();
+                    let mut candidates = Zeroizing(Vec::with_capacity(SERVERS - 1));
+                    candidates.extend(outputs.iter().enumerate().filter_map(|(party, out)| {
+                        let o = out.as_ref()?;
+                        if party == component
+                            || o.context != self.context
+                            || o.components.len() != self.context.items
+                        {
+                            return None;
+                        }
+                        let value = o.components[item][lane][component];
+                        (value < qsag_accel::goldilocks::GOLDILOCKS_PRIME).then_some((party, value))
+                    }));
                     let correct = majority(&candidates, 3)?;
                     *slot = gl_add(*slot, correct);
                     for party in 0..5 {
@@ -847,7 +852,7 @@ impl Client {
             return Err(Error::InconsistentShares);
         }
         Ok(Evaluation {
-            values,
+            values: values.into_inner(),
             faulty_servers: faulty,
             key: self.context.key,
             input_digests: self.input_digests,
@@ -1003,8 +1008,19 @@ impl Output {
 mod tests {
     #[test]
     fn private_wire_rejects_hostile_lengths_and_noncanonical_shares() {
-        let context = Context { key: [1; 32], session: [2; 32], request: [3; 32], counter: 0, items: 1 };
-        let request = Request { context: context.clone(), party: 0, inputs: vec![[[7; 5]; 4]], salts: [[8; 32]; 5] };
+        let context = Context {
+            key: [1; 32],
+            session: [2; 32],
+            request: [3; 32],
+            counter: 0,
+            items: 1,
+        };
+        let request = Request {
+            context: context.clone(),
+            party: 0,
+            inputs: vec![[[7; 5]; 4]],
+            salts: [[8; 32]; 5],
+        };
         let wire = request.to_wire();
         assert_eq!(wire.len(), 235 + 128);
         assert!(Request::from_wire(&wire).is_ok());
@@ -1013,7 +1029,10 @@ mod tests {
             malformed[72..74].copy_from_slice(&count.to_le_bytes());
             assert!(Request::from_wire(&malformed).is_err());
         }
-        let mut output = Output { context, components: vec![[[9; 5]; 4]] };
+        let mut output = Output {
+            context,
+            components: vec![[[9; 5]; 4]],
+        };
         assert!(core::mem::needs_drop::<Output>());
         assert_eq!(std::format!("{output:?}"), "ToprfOutput(<REDACTED>)");
         let wire = output.to_wire(0).unwrap();

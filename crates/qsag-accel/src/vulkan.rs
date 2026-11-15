@@ -645,6 +645,768 @@ impl VulkanSpirvBackend {
             match self._uninhabited {}
         }
     }
+
+    /// Acquire exclusive ownership of the persistent VRAM prover arena for one proving session.
+    pub fn try_acquire_prover_session(&self) -> Result<(), VulkanError> {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            if !self.secret_slots_audited {
+                return Err(VulkanError::PipelineAuditFailed(
+                    "prover session requires audited Wave32 pipelines",
+                ));
+            }
+            if self
+                .prover_session_in_use
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                return Err(VulkanError::WorkspacePoisoned);
+            }
+            Ok(())
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            match self._uninhabited {}
+        }
+    }
+
+    /// Scrub all prover session VRAM buffers (`vkCmdFillBuffer`) and release session ownership.
+    pub fn release_prover_session(&self) {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            if let Ok(mut guard) = self.engine.lock() {
+                let _ = guard.scrub_prover_session();
+            }
+            self.prover_session_in_use.store(false, Ordering::Release);
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            match self._uninhabited {}
+        }
+    }
+
+    #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+    fn check_prover_session_active(&self) -> Result<(), VulkanError> {
+        if !self.secret_slots_audited {
+            return Err(VulkanError::PipelineAuditFailed(
+                "prover session requires audited Wave32 pipelines",
+            ));
+        }
+        if !self.prover_session_in_use.load(Ordering::Acquire) {
+            return Err(VulkanError::WorkspacePoisoned);
+        }
+        Ok(())
+    }
+
+    /// Upload Round-0 witness polynomials, convert in-place to monomial basis, run 4-coset
+    /// Goldilocks Reed-Solomon LDE + salted Canopy leaf hashing + internal Merkle tree layers
+    /// inside VRAM, and return `top_node` (`nodes[1]`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn prover_whir_commit_round0(
+        &self,
+        polys: &[&[u64]],
+        num_vars: usize,
+        blowup: usize,
+        group_arity: usize,
+        max_stage1_domain_ext4: usize,
+        max_stage1_groups: usize,
+        extra_witness_words: usize,
+    ) -> Result<[u8; 32], VulkanError> {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            self.check_prover_session_active()?;
+            let mut guard = self
+                .engine
+                .lock()
+                .map_err(|_| VulkanError::WorkspacePoisoned)?;
+            let (top_node, subs) = guard.exec_prover_whir_commit_round0(
+                polys,
+                num_vars,
+                blowup,
+                group_arity,
+                max_stage1_domain_ext4,
+                max_stage1_groups,
+                extra_witness_words,
+            )?;
+            self.gpu_submissions.fetch_add(subs, Ordering::Relaxed);
+            Ok(top_node)
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            let _ = (
+                polys,
+                num_vars,
+                blowup,
+                group_arity,
+                max_stage1_domain_ext4,
+                max_stage1_groups,
+                extra_witness_words,
+            );
+            match self._uninhabited {}
+        }
+    }
+
+    /// Expand `eq_table` Kronecker byte tables (`768 * num_polys` `Ext4`s) into `vram_work_a`
+    /// and upload `lambda_pows` (`num_polys` `Ext4`s) for multi-polynomial batch sumcheck.
+    pub fn prover_whir_batch_sumcheck_init(
+        &self,
+        eq_kronecker_768: &[[u64; 4]],
+        lambda_pows: &[[u64; 4]],
+        num_vars: usize,
+    ) -> Result<(), VulkanError> {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            self.check_prover_session_active()?;
+            let mut guard = self
+                .engine
+                .lock()
+                .map_err(|_| VulkanError::WorkspacePoisoned)?;
+            guard.exec_prover_whir_batch_sumcheck_init(eq_kronecker_768, lambda_pows, num_vars)?;
+            self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            let _ = (eq_kronecker_768, lambda_pows, num_vars);
+            match self._uninhabited {}
+        }
+    }
+
+    /// Evaluate `(ev0, ev2)` for one round of multi-polynomial batch point-reduction sumcheck.
+    pub fn prover_whir_batch_sumcheck_eval(
+        &self,
+        round: usize,
+        cur_len: usize,
+        num_polys: usize,
+        src_base: u32,
+    ) -> Result<([u64; 4], [u64; 4]), VulkanError> {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            self.check_prover_session_active()?;
+            let mut guard = self
+                .engine
+                .lock()
+                .map_err(|_| VulkanError::WorkspacePoisoned)?;
+            let out =
+                guard.exec_prover_whir_batch_sumcheck_eval(round, cur_len, num_polys, src_base)?;
+            self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
+            Ok(out)
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            let _ = (round, cur_len, num_polys, src_base);
+            match self._uninhabited {}
+        }
+    }
+
+    /// Fold all `tables` and `kernels` in VRAM for one round of batch point-reduction sumcheck.
+    pub fn prover_whir_batch_sumcheck_fold(
+        &self,
+        round: usize,
+        cur_len: usize,
+        num_polys: usize,
+        src_base: u32,
+        dst_base: u32,
+        chal: [u64; 4],
+    ) -> Result<(), VulkanError> {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            self.check_prover_session_active()?;
+            let mut guard = self
+                .engine
+                .lock()
+                .map_err(|_| VulkanError::WorkspacePoisoned)?;
+            guard.exec_prover_whir_batch_sumcheck_fold(
+                round, cur_len, num_polys, src_base, dst_base, chal,
+            )?;
+            self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            let _ = (round, cur_len, num_polys, src_base, dst_base, chal);
+            match self._uninhabited {}
+        }
+    }
+
+    /// Read back small folded `tables` and `kernels` (`cur_len * num_polys` `Ext4`s) to finish
+    /// the tiny L1 tail of batch point-reduction sumcheck on CPU.
+    pub fn prover_whir_batch_sumcheck_read_tail(
+        &self,
+        cur_len: usize,
+        num_polys: usize,
+        src_base: u32,
+        out_tables: &mut [[u64; 4]],
+        out_kernels: &mut [[u64; 4]],
+    ) -> Result<(), VulkanError> {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            self.check_prover_session_active()?;
+            let mut guard = self
+                .engine
+                .lock()
+                .map_err(|_| VulkanError::WorkspacePoisoned)?;
+            guard.exec_prover_whir_batch_sumcheck_read_tail(
+                cur_len,
+                num_polys,
+                src_base,
+                out_tables,
+                out_kernels,
+            )?;
+            self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            let _ = (cur_len, num_polys, src_base, out_tables, out_kernels);
+            match self._uninhabited {}
+        }
+    }
+
+    /// Expand a 768-entry Kronecker monomial table into `cur_k` (`vram_work_a[0..(1<<num_vars)+2]`),
+    /// and optionally compute `dot_base_ext4` against `vram_mono` for `out_dots.len()` polynomials.
+    pub fn prover_whir_expand_monomial_and_dot(
+        &self,
+        mono_kronecker_768: &[[u64; 4]; 768],
+        num_vars: usize,
+        dot_k_offset: u32,
+        out_dots: &mut [[u64; 4]],
+    ) -> Result<(), VulkanError> {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            self.check_prover_session_active()?;
+            let mut guard = self
+                .engine
+                .lock()
+                .map_err(|_| VulkanError::WorkspacePoisoned)?;
+            guard.exec_prover_whir_expand_monomial_and_dot(
+                mono_kronecker_768,
+                num_vars,
+                dot_k_offset,
+                out_dots,
+            )?;
+            self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            let _ = (mono_kronecker_768, num_vars, dot_k_offset, out_dots);
+            match self._uninhabited {}
+        }
+    }
+
+    /// Construct `cur_coeffs[0..(1<<num_vars)+2]` in `vram_work_b` from `vram_mono` + `weights`
+    /// and evaluate `stage0_ood_evals` at two OOD challenges in a single command buffer.
+    pub fn prover_whir_open_init(
+        &self,
+        num_vars: usize,
+        is_single: bool,
+        weights: &[[[u64; 4]; 2]],
+        z_ood_kronecker_2x768: &[[u64; 4]; 1536],
+    ) -> Result<[[u64; 4]; 2], VulkanError> {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            self.check_prover_session_active()?;
+            let mut guard = self
+                .engine
+                .lock()
+                .map_err(|_| VulkanError::WorkspacePoisoned)?;
+            let evals = guard.exec_prover_whir_open_init(
+                num_vars,
+                is_single,
+                weights,
+                z_ood_kronecker_2x768,
+            )?;
+            self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
+            Ok(evals)
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            let _ = (num_vars, is_single, weights, z_ood_kronecker_2x768);
+            match self._uninhabited {}
+        }
+    }
+
+    /// Accumulate two scaled geometric OOD claims (`xi_0 * z_0^i`, `xi_1 * z_1^i`) into `cur_k`.
+    pub fn prover_whir_add_ood_claims(
+        &self,
+        k_len: usize,
+        k_base: u32,
+        xi_z_kronecker_2x768: &[[u64; 4]; 1536],
+    ) -> Result<(), VulkanError> {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            self.check_prover_session_active()?;
+            let mut guard = self
+                .engine
+                .lock()
+                .map_err(|_| VulkanError::WorkspacePoisoned)?;
+            guard.exec_prover_whir_add_ood_claims(k_len, k_base, xi_z_kronecker_2x768)?;
+            self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            let _ = (k_len, k_base, xi_z_kronecker_2x768);
+            match self._uninhabited {}
+        }
+    }
+
+    /// `prove_fold_in_place` Pass A: reduce `wire[0..3]` over `pairs_ck` pairs.
+    pub fn prover_whir_fold_pass_a(
+        &self,
+        pairs_ck: usize,
+        c_base: u32,
+        k_base: u32,
+    ) -> Result<[[u64; 4]; 3], VulkanError> {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            self.check_prover_session_active()?;
+            let mut guard = self
+                .engine
+                .lock()
+                .map_err(|_| VulkanError::WorkspacePoisoned)?;
+            let wires = guard.exec_prover_whir_fold_pass_a(pairs_ck, c_base, k_base)?;
+            self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
+            Ok(wires)
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            let _ = (pairs_ck, c_base, k_base);
+            match self._uninhabited {}
+        }
+    }
+
+    /// `prove_fold_in_place` Pass B: write folded `k_next` into `k_dst` and reduce `wire[3..5]`.
+    pub fn prover_whir_fold_pass_b(
+        &self,
+        pairs_c: usize,
+        c_base: u32,
+        k_src: u32,
+        k_half: u32,
+        k_dst: u32,
+        phi: [u64; 4],
+    ) -> Result<[[u64; 4]; 2], VulkanError> {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            self.check_prover_session_active()?;
+            let mut guard = self
+                .engine
+                .lock()
+                .map_err(|_| VulkanError::WorkspacePoisoned)?;
+            let wires =
+                guard.exec_prover_whir_fold_pass_b(pairs_c, c_base, k_src, k_half, k_dst, phi)?;
+            self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
+            Ok(wires)
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            let _ = (pairs_c, c_base, k_src, k_half, k_dst, phi);
+            match self._uninhabited {}
+        }
+    }
+
+    /// `prove_fold_in_place` Pass C: fold `cur_coeffs` (`c_src -> c_dst`), optionally normalizing
+    /// both `cur_coeffs` and `cur_k` back to offset `0` at the end of a stage.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prover_whir_fold_pass_c(
+        &self,
+        m: usize,
+        c_src: u32,
+        c_dst: u32,
+        theta: [u64; 4],
+        alpha: [u64; 4],
+        beta: [u64; 4],
+        normalize_to_zero: bool,
+        norm_len: usize,
+    ) -> Result<(), VulkanError> {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            self.check_prover_session_active()?;
+            let mut guard = self
+                .engine
+                .lock()
+                .map_err(|_| VulkanError::WorkspacePoisoned)?;
+            guard.exec_prover_whir_fold_pass_c(
+                m,
+                c_src,
+                c_dst,
+                theta,
+                alpha,
+                beta,
+                normalize_to_zero,
+                norm_len,
+            )?;
+            self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            let _ = (
+                m,
+                c_src,
+                c_dst,
+                theta,
+                alpha,
+                beta,
+                normalize_to_zero,
+                norm_len,
+            );
+            match self._uninhabited {}
+        }
+    }
+
+    /// Commit intermediate stage `stage_idx >= 1` (`cur_coeffs[0..coeff_len]` -> `Ext4` LDE +
+    /// Canopy leaf + internal Merkle tree in ping-pong slot `stage_idx & 1`) and return `top_node`.
+    pub fn prover_whir_commit_stage(
+        &self,
+        stage_idx: usize,
+        coeff_len: usize,
+        domain_len: usize,
+        group_arity: usize,
+    ) -> Result<[u8; 32], VulkanError> {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            self.check_prover_session_active()?;
+            let mut guard = self
+                .engine
+                .lock()
+                .map_err(|_| VulkanError::WorkspacePoisoned)?;
+            let top_node = guard.exec_prover_whir_commit_stage(
+                stage_idx,
+                coeff_len,
+                domain_len,
+                group_arity,
+            )?;
+            self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
+            Ok(top_node)
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            let _ = (stage_idx, coeff_len, domain_len, group_arity);
+            match self._uninhabited {}
+        }
+    }
+
+    /// Evaluate `cur_coeffs[c_base..c_base+coeff_len]` at two OOD challenges in VRAM.
+    pub fn prover_whir_eval_univariate_2(
+        &self,
+        coeff_len: usize,
+        c_base: u32,
+        z_ood_kronecker_2x768: &[[u64; 4]; 1536],
+    ) -> Result<[[u64; 4]; 2], VulkanError> {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            self.check_prover_session_active()?;
+            let mut guard = self
+                .engine
+                .lock()
+                .map_err(|_| VulkanError::WorkspacePoisoned)?;
+            let evals = guard.exec_prover_whir_eval_univariate_2(
+                coeff_len,
+                c_base,
+                z_ood_kronecker_2x768,
+            )?;
+            self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
+            Ok(evals)
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            let _ = (coeff_len, c_base, z_ood_kronecker_2x768);
+            match self._uninhabited {}
+        }
+    }
+
+    /// Gather queried fibers, Round-0 salts (if `stage_idx == 0`), and Steiner Merkle siblings.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prover_whir_gather_queries(
+        &self,
+        stage_idx: usize,
+        group_arity: usize,
+        num_polys: usize,
+        num_groups: usize,
+        q_indices: &[u64],
+        sib_indices: &[u64],
+        out_words: &mut [u64],
+    ) -> Result<(), VulkanError> {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            self.check_prover_session_active()?;
+            let mut guard = self
+                .engine
+                .lock()
+                .map_err(|_| VulkanError::WorkspacePoisoned)?;
+            guard.exec_prover_whir_gather_queries(
+                stage_idx,
+                group_arity,
+                num_polys,
+                num_groups,
+                q_indices,
+                sib_indices,
+                out_words,
+            )?;
+            self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            let _ = (
+                stage_idx,
+                group_arity,
+                num_polys,
+                num_groups,
+                q_indices,
+                sib_indices,
+                out_words,
+            );
+            match self._uninhabited {}
+        }
+    }
+
+    /// Accumulate batched query shift claims into `cur_k[k_base..k_base+k_len]`.
+    pub fn prover_whir_accumulate_shift_claims(
+        &self,
+        k_len: usize,
+        k_base: u32,
+        z_pow_256: &[u64],
+        claims_meta: &[[u64; 8]],
+    ) -> Result<(), VulkanError> {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            self.check_prover_session_active()?;
+            let mut guard = self
+                .engine
+                .lock()
+                .map_err(|_| VulkanError::WorkspacePoisoned)?;
+            guard.exec_prover_whir_accumulate_shift_claims(k_len, k_base, z_pow_256, claims_meta)?;
+            self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            let _ = (k_len, k_base, z_pow_256, claims_meta);
+            match self._uninhabited {}
+        }
+    }
+
+    /// Read back final early-stop univariate coefficients `cur_coeffs[c_base..c_base+out.len()]`.
+    pub fn prover_whir_read_final_coeffs(
+        &self,
+        c_base: u32,
+        out_coeffs: &mut [[u64; 4]],
+    ) -> Result<(), VulkanError> {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            self.check_prover_session_active()?;
+            let mut guard = self
+                .engine
+                .lock()
+                .map_err(|_| VulkanError::WorkspacePoisoned)?;
+            guard.exec_prover_whir_read_final_coeffs(c_base, out_coeffs)?;
+            self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            let _ = (c_base, out_coeffs);
+            match self._uninhabited {}
+        }
+    }
+
+    /// Initialize VRAM AIR row sumcheck for one shard: upload `(eq_tau, eq_not_last, shift_tau)`
+    /// and static `gammas`, and transpose row-major shard witness into column-major `cols_base`.
+    pub fn prover_air_init_shard(
+        &self,
+        witness_word_offset: u32,
+        cols_base_word_offset: u32,
+        total_rows: usize,
+        shift_tables_3m: &[[u64; 4]],
+        static_gammas_ext4: &[[u64; 4]],
+    ) -> Result<(), VulkanError> {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            self.check_prover_session_active()?;
+            let mut guard = self
+                .engine
+                .lock()
+                .map_err(|_| VulkanError::WorkspacePoisoned)?;
+            guard.exec_prover_air_init_shard(
+                witness_word_offset,
+                cols_base_word_offset,
+                total_rows,
+                shift_tables_3m,
+                static_gammas_ext4,
+            )?;
+            self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            let _ = (
+                witness_word_offset,
+                cols_base_word_offset,
+                total_rows,
+                shift_tables_3m,
+                static_gammas_ext4,
+            );
+            match self._uninhabited {}
+        }
+    }
+
+    /// Evaluate degree-8 AIR row-constraint univariate evaluations `[ev_0, ev_2..=ev_8]` for one
+    /// sumcheck round by chaining `AirRowGroupA` and `AirRowGroupB` in a single command buffer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prover_air_eval_round(
+        &self,
+        is_round0_base: bool,
+        cur_m: usize,
+        cur_r: usize,
+        cur_s: usize,
+        folding_signer: bool,
+        col_src: u32,
+        sh_src: u32,
+        dyn_ext4_off: u32,
+        dyn_words: &[u64],
+        signers_off: u32,
+        steps_off: u32,
+        op_hdr_off: u32,
+        op_ent_off: u32,
+        sorted_u64_off: u32,
+    ) -> Result<[[u64; 4]; 8], VulkanError> {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            self.check_prover_session_active()?;
+            let mut guard = self
+                .engine
+                .lock()
+                .map_err(|_| VulkanError::WorkspacePoisoned)?;
+            let evals = guard.exec_prover_air_eval_round(
+                is_round0_base,
+                cur_m,
+                cur_r,
+                cur_s,
+                folding_signer,
+                col_src,
+                sh_src,
+                dyn_ext4_off,
+                dyn_words,
+                signers_off,
+                steps_off,
+                op_hdr_off,
+                op_ent_off,
+                sorted_u64_off,
+            )?;
+            self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
+            Ok(evals)
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            let _ = (
+                is_round0_base,
+                cur_m,
+                cur_r,
+                cur_s,
+                folding_signer,
+                col_src,
+                sh_src,
+                dyn_ext4_off,
+                dyn_words,
+                signers_off,
+                steps_off,
+                op_hdr_off,
+                op_ent_off,
+                sorted_u64_off,
+            );
+            match self._uninhabited {}
+        }
+    }
+
+    /// Fold all 256 AIR trace columns and 3 shift tables in VRAM after squeezing round challenge.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prover_air_fold_round(
+        &self,
+        is_round0_base: bool,
+        cur_m: usize,
+        col_src: u32,
+        col_dst: u32,
+        sh_src: u32,
+        sh_dst: u32,
+        chal: [u64; 4],
+    ) -> Result<(), VulkanError> {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            self.check_prover_session_active()?;
+            let mut guard = self
+                .engine
+                .lock()
+                .map_err(|_| VulkanError::WorkspacePoisoned)?;
+            guard.exec_prover_air_fold_round(
+                is_round0_base,
+                cur_m,
+                col_src,
+                col_dst,
+                sh_src,
+                sh_dst,
+                chal,
+            )?;
+            self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            let _ = (is_round0_base, cur_m, col_src, col_dst, sh_src, sh_dst, chal);
+            match self._uninhabited {}
+        }
+    }
+
+    /// Execute an in-place Goldilocks NTT using the canonical `GOLDILOCKS_ROOT_2_32` subgroup
+    /// generator without allocating or scanning a host twiddle table (`O(log N)` stage roots).
+    pub fn goldilocks_ntt_canonical_inplace(
+        &self,
+        buf: &mut [u64],
+        inverse: bool,
+    ) -> Result<(), AccelError> {
+        check_ntt_log2("NTT input", buf.len())?;
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            secret_slot_gate(self.secret_slots_audited, KernelSlot::GoldilocksNtt)?;
+            let mut guard = self.engine.lock().map_err(|_| AccelError::BackendFailure)?;
+            guard
+                .exec_goldilocks_ntt_canonical(buf, inverse)
+                .map_err(accel_error)?;
+            self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            let _ = inverse;
+            match self._uninhabited {}
+        }
+    }
+
+    /// Read back folded `Ext4` columns (`out_cols.len() == 256 * cur_m`) from `vram_work_a`.
+    pub fn prover_air_read_folded_cols(
+        &self,
+        col_src_ext4: u32,
+        out_cols: &mut [[u64; 4]],
+    ) -> Result<(), VulkanError> {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            self.check_prover_session_active()?;
+            let mut guard = self
+                .engine
+                .lock()
+                .map_err(|_| VulkanError::WorkspacePoisoned)?;
+            guard.exec_prover_air_read_folded_cols(col_src_ext4, out_cols)?;
+            self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            let _ = (col_src_ext4, out_cols);
+            match self._uninhabited {}
+        }
+    }
 }
 
 impl AcceleratorBackend for VulkanSpirvBackend {
@@ -1308,6 +2070,20 @@ mod tests {
             v.pipelines[slot].spilled_vgprs = None;
             variants.push(v);
         }
+        for slot in 0..ProverKernelSlot::COUNT {
+            let mut v = base;
+            v.prover_pipelines[slot].subgroup_size = Some(64);
+            variants.push(v);
+            let mut v = base;
+            v.prover_pipelines[slot].scratch_bytes = None;
+            variants.push(v);
+            let mut v = base;
+            v.prover_pipelines[slot].scratch_bytes = Some(8);
+            variants.push(v);
+            let mut v = base;
+            v.prover_pipelines[slot].spilled_vgprs = None;
+            variants.push(v);
+        }
         let mut digests: std::vec::Vec<[u8; 32]> = variants
             .iter()
             .map(VulkanDeviceInfo::audit_evidence_digest)
@@ -1332,6 +2108,13 @@ mod tests {
                 spilled_sgprs: Some(0),
                 ..PipelineTelemetry::default()
             }; KernelSlot::COUNT],
+            prover_pipelines: [PipelineTelemetry {
+                subgroup_size: Some(32),
+                scratch_bytes: Some(0),
+                spilled_vgprs: Some(0),
+                spilled_sgprs: Some(0),
+                ..PipelineTelemetry::default()
+            }; ProverKernelSlot::COUNT],
             vendor_id: 0x1002,
             device_id: 0x73df,
             driver_version: 1,
@@ -1388,6 +2171,19 @@ mod tests {
                         Err(VulkanError::PipelineAuditFailed(_))
                     ),
                     "slot {slot}, defect {case} passed the audit"
+                );
+            }
+        }
+        for slot in 0..ProverKernelSlot::COUNT {
+            for (case, defect) in defects.iter().enumerate() {
+                let mut bad = good;
+                defect(&mut bad.prover_pipelines[slot]);
+                assert!(
+                    matches!(
+                        bad.secret_slot_audit(),
+                        Err(VulkanError::PipelineAuditFailed(_))
+                    ),
+                    "prover slot {slot}, defect {case} passed the audit"
                 );
             }
         }
