@@ -52,8 +52,7 @@ use crate::preprocessing::{OtMesh, PartyPrivateRng, PreprocessError, run_commit_
 use crate::sponge::keccak::{Cshake256Xof, cshake256_32_multi_frame};
 use crate::wipe::{
     SecretBuffer, ct_eq_bytes32, secret_vec_extend_from_slice, secret_vec_push, wipe_bytes,
-    wipe_bytes32, wipe_tower128_slice,
-    wipe_u16s, wipe_u64s, wipe_u128s,
+    wipe_bytes32, wipe_tower128_slice, wipe_u16s, wipe_u64s, wipe_u128s,
 };
 
 /// Number of regular-noise GGM trees per ordered peer pair (`t = 64`).

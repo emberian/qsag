@@ -1535,7 +1535,7 @@ private theorem dealReshareSubPolys_constSum {R : Type} [LawfulCommRing R] :
   | [], [], [], _, _ => rfl
   | l :: ls, s :: ss, tl :: tls, hSLen, hTLen => by
     simp only [dealReshareSubPolys, List.map_cons, List.foldr_cons, RoundPoly.evalCoeffs,
-      LawfulCommRing.zero_mul, LawfulCommRing.add_zero, ringDot,
+      LawfulCommRing.zero_mul, LawfulCommRing.add_zero, ringDot_consC,
       dealReshareSubPolys_constSum ls ss tls (Nat.succ.inj hSLen) (Nat.succ.inj hTLen)]
 
 /-- **Cleartext-Free Share-to-Share `(t, n) → (t', n')` Resharing Soundness
@@ -1572,8 +1572,9 @@ theorem reshare_from_shares_without_cleartext_recombines_secret
     exact (evalCoeffs_sumSubPolys x' subPolys).symm
   refine ⟨hGLen, hG0, ?_⟩
   unfold lagrangeCombine
-  rw [hNewEq, lagrangeAtZero_evalCoeffs Q_new.lambdas Q_new.pts G tPrime hGLen Q_new.sum_one Q_new.kills_higher]
-  exact hG0
+  rw [hNewEq]
+  exact (lagrangeAtZero_evalCoeffs Q_new.lambdas Q_new.pts G tPrime hGLen Q_new.sum_one
+    Q_new.kills_higher).trans hG0
 
 /-- **`(t' - 1)` Corrupt New-Committee Reshare View Bijection (`reshare_corrupt_view_bijection`)**:
     For ANY `< t'` corrupt new-committee points `corruptNewPts` (`corruptNewPts.length + 1 ≤ t'`,
@@ -1663,15 +1664,6 @@ private theorem mem_filter_iff_local {α : Type} (p : α → Bool) (x : α) :
       · rintro ⟨rfl | hm, hpx⟩
         · exact Or.inl rfl
         · exact Or.inr ⟨hm, hpx⟩
-
-private theorem nodup_filter_bool {α : Type} (p : α → Bool) :
-    ∀ {xs : List α}, xs.Nodup → (xs.filter p).Nodup
-  | [], _ => .nil
-  | _ :: tl, .cons hNot hTl => by
-    simp only [List.filter]
-    cases p _
-    · exact nodup_filter_bool p hTl
-    · exact .cons (fun b hb => hNot b ((mem_filter_iff_local p b tl).mp hb).1) (nodup_filter_bool p hTl)
 
 private theorem filter_eq_pos_of_mem {α : Type} [DecidableEq α] (x : α) :
     ∀ (v : List α), x ∈ v → 1 ≤ (v.filter (fun y => decide (y = x))).length

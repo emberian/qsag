@@ -255,9 +255,9 @@ fn bits<B: Backend>(b: &mut B, value: &B::W, n: usize) -> Vec<B::W> {
         })
         .collect();
     let weighted = |bits: &[B::W]| {
-        bits.iter().enumerate().fold(zero.clone(), |a, (i, bit)| {
-            a.plus(&bit.scale(f(1u64 << i)))
-        })
+        bits.iter()
+            .enumerate()
+            .fold(zero.clone(), |a, (i, bit)| a.plus(&bit.scale(f(1u64 << i))))
     };
     b.equal(value, &weighted(&out));
     if n == 64 {
@@ -1541,10 +1541,7 @@ mod tests {
             poseidon2_perm(&mut self.cs, s);
         }
     }
-    fn forge(
-        forged: &[(usize, F)],
-        run: impl FnOnce(&mut Forger),
-    ) -> (Shape, Vec<F>, Vec<F>) {
+    fn forge(forged: &[(usize, F)], run: impl FnOnce(&mut Forger)) -> (Shape, Vec<F>, Vec<F>) {
         let mut forger = Forger {
             forged: forged.iter().copied().collect(),
             ..Forger::default()
@@ -1701,7 +1698,15 @@ mod tests {
                 .iter()
                 .map(|&v| Ext::alloc(b, v))
                 .collect();
-            merkle(b, 1, &index, &binary, &values, &path, &root.map(Lc::constant));
+            merkle(
+                b,
+                1,
+                &index,
+                &binary,
+                &values,
+                &path,
+                &root.map(Lc::constant),
+            );
         };
         let (shape, z, _) = forge(&[], run);
         assert!(violated(&shape, &z).is_empty());

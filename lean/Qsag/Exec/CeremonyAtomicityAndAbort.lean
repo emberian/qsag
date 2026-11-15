@@ -3937,7 +3937,9 @@ theorem romCommit_blind_count_bound
       ((romIdealAsked adv tape (romViewRing spec sk msg R hQ mr)
         (romViewXor spec adv sk msg R hQ tape mr mx) tagFresh).map spec.blindOf).map
         (enumBitVec bw).invFun)
-      (@List.instDecidableMemOfLawfulBEq (Fin (2 ^ bw)) instBEqOfDecidableEq inferInstance bi _))
+      (@List.instDecidableMemOfLawfulBEq (Fin (2 ^ bw))
+        (@instBEqOfDecidableEq _ (instDecidableEqFin (2 ^ bw)))
+        (@instLawfulBEq _ (instDecidableEqFin (2 ^ bw))) bi _))
     (by
       intro bi hBad
       have hNot := of_decide_eq_false hBad
@@ -3954,14 +3956,6 @@ theorem romCommit_blind_count_bound
     (romIdealAsked_length_le adv tape hQry _ _ _)
   exact ite_decide_eq_ite _ _ _ _
 
-#print axioms askedRo_length_le --TMPAX
-#print axioms runRo_lookup_none --TMPAX
-#print axioms runRo_agree_off --TMPAX
-#print axioms romIdealAsked_length_le --TMPAX
-#print axioms romReal_eq_ideal_of_blind_unqueried --TMPAX
-#print axioms natAbsDiff_qsum_le_const --TMPAX
-#print axioms natAbsDiff_comm --TMPAX
-#print axioms romCommit_blind_count_bound --TMPAX
 /-- Number of honest mask assignments `(ring mask, boolean mask, 2^bw-blind)` on which the real
     adversary output satisfies `D`. -/
 def romRealCount {SK Msg Rand CorruptIn X T St1 St2 Out : Type} {Q w bw : Nat} [DecidableEq X]
