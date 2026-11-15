@@ -1,6 +1,6 @@
 module
 public import Lean
-public import Qsag.IsaCosim
+public import Qsag.Machine.IsaCosim
 public section
 open Lean Qsag
 
