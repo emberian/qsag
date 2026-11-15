@@ -18,7 +18,22 @@ Layer-0 ideal specification for standalone and one-time-epoch-stateful digital s
    of the accepted requests of a trace are strictly increasing, so no epoch signs twice.
 5. `latchedSignerMachine`, the signer that runs `S.sign` behind the same epoch latch, refines the
    ideal machine (`latchedSigner_refines_ideal`).
-6. Existential (`EufCmaForgery`) and strong (`SufCmaForgery`) unforgeability predicates.
+6. Forgery events against the signed log (`EufCmaForgery`, `SufCmaForgery`) and their
+   characterisation over traces: the log of a run is exactly its outputs, so a forgery against
+   the final state is a verifying pair the interface never emitted
+   (`idealSignMachine_eufCmaForgery_iff`, `idealSignMachine_sufCmaForgery_iff`), and no emitted
+   signature is one (`idealSignMachine_trace_outputs_not_forgeries`). The machine does not
+   claim that forgeries are improbable: that is a property of `S`. For the production scheme
+   `Protocol.Signing.ExecEufCmaClosedGame` bounds the forgery probability by the probabilities
+   of three extractor events on the same run; those event probabilities are not bounded by
+   anything proved in this library.
+7. Corruption scope: one signer, honest for the whole run. There is no corruption or
+   key-exposure input, so nothing here speaks about behaviour after a key compromise. The ideal
+   state `IdealSignState PK Sig` has no secret-key component, and the only values the interface
+   returns are of type `Sig`. In the refinement the secret key is a parameter of
+   `latchedSignerMachine`, and every value that machine returns is the output of `S.sign sk` on
+   the admitted request (`latchedSigner_output_is_sign`); what `S.sign` itself reveals about
+   `sk` is a property of the scheme, not of this functionality.
 -/
 
 public import Qsag.Spec.Primitives
@@ -649,6 +664,8 @@ theorem idealSign_rejects_epoch_beyond_window :
 #tooth_pair idealSignMachine_failed_sign_burns_epoch vs idealSign_failed_epoch_not_reusable
 #tooth_pair idealSignMachine_step_some vs idealSign_rejects_epoch_beyond_window
 
+/-! ## Forgery events and the signed log -/
+
 /-- Existential unforgeability under chosen-message attack (`EUF-CMA`) forgery predicate:
     `verify pk msgStar sigStar = true` on a fresh message `msgStar` absent from `signedLog`. -/
 def EufCmaForgery {PK SK Sig : Type}
@@ -671,6 +688,146 @@ theorem EufCmaForgery.toSufCma {PK SK Sig : Type} [DecidableEq Sig]
   refine ⟨fun entry hMem hEq => ?_, h.2⟩
   injection hEq with hMsg _
   exact h.1 entry hMem hMsg
+
+section Forgery
+variable {PK SK Sig : Type} {S : SigScheme PK SK Sig} {pk₀ : PK} {stateful₀ : Bool}
+  {maxWindow : Nat} {oracleSign : SignRequest → Option Sig}
+
+private theorem idealSign_errStep_signedLog (st : IdealSignState PK Sig) (req : SignRequest) :
+    ((idealSignMachine S pk₀ stateful₀ maxWindow oracleSign).errStep st req).signedLog =
+      st.signedLog := by
+  cases hA : epochAdmissible st.statefulEpochs maxWindow st.nextEpoch req.epoch with
+  | false => rw [idealSignMachine_errStep_of_inadmissible hA]
+  | true => rw [idealSignMachine_errStep_of_admissible hA]; rfl
+
+/-- Every output of a trace, and every entry already logged, is in the final signed log. -/
+theorem idealSignMachine_trace_log_complete :
+    ∀ {s₀ s_final : IdealSignState PK Sig} {tr : List (SignRequest × Sig)},
+      (idealSignMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace s₀ tr s_final →
+      (∀ e ∈ s₀.signedLog, e ∈ s_final.signedLog) ∧
+      ∀ p ∈ tr, (p.1.epoch, p.1.message, p.2) ∈ s_final.signedLog
+  | _, _, _, .nil _ => ⟨fun _ h => h, fun _ h => (nomatch h)⟩
+  | s₀, _, _, .accept hStep hRest => by
+    obtain ⟨_, _, _, hEq⟩ := idealSignMachine_step_some hStep
+    obtain ⟨ihOld, ihTr⟩ := idealSignMachine_trace_log_complete hRest
+    rw [hEq] at ihOld
+    refine ⟨fun e he => ihOld e (List.mem_cons_of_mem _ he), fun p hp => ?_⟩
+    rcases List.mem_cons.mp hp with hHead | hTail
+    · rw [hHead]
+      exact ihOld _ (List.mem_cons.mpr (.inl rfl))
+    · exact ihTr p hTail
+  | s₀, _, _, .reject inp _ hRest => by
+    obtain ⟨ihOld, ihTr⟩ := idealSignMachine_trace_log_complete hRest
+    rw [idealSign_errStep_signedLog] at ihOld
+    exact ⟨ihOld, ihTr⟩
+
+/-- Every entry of the final signed log was already logged or is an output of the trace. -/
+theorem idealSignMachine_trace_log_sound :
+    ∀ {s₀ s_final : IdealSignState PK Sig} {tr : List (SignRequest × Sig)},
+      (idealSignMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace s₀ tr s_final →
+      ∀ e ∈ s_final.signedLog,
+        e ∈ s₀.signedLog ∨ ∃ p ∈ tr, e = (p.1.epoch, p.1.message, p.2)
+  | _, _, _, .nil _ => fun _ h => .inl h
+  | s₀, _, _, .accept hStep hRest => fun e he => by
+    obtain ⟨_, _, _, hEq⟩ := idealSignMachine_step_some hStep
+    have ih := idealSignMachine_trace_log_sound hRest e he
+    rw [hEq] at ih
+    rcases ih with hOld | ⟨p, hp, hpe⟩
+    · rcases List.mem_cons.mp hOld with hHead | hTail
+      · exact .inr ⟨_, List.mem_cons.mpr (.inl rfl), hHead⟩
+      · exact .inl hTail
+    · exact .inr ⟨p, List.mem_cons_of_mem _ hp, hpe⟩
+  | s₀, _, _, .reject inp _ hRest => fun e he => by
+    have ih := idealSignMachine_trace_log_sound hRest e he
+    rw [idealSign_errStep_signedLog] at ih
+    exact ih
+
+/-- **`EUF-CMA` forgery against a run.** After a trace from the initial state, a pair is an
+    `EufCmaForgery` against the final state exactly when it verifies under the enrolled key and
+    its message was never the message of an emitted signature. -/
+theorem idealSignMachine_eufCmaForgery_iff
+    {s_final : IdealSignState PK Sig} {tr : List (SignRequest × Sig)}
+    (hTrace : (idealSignMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace
+      (IdealSignState.empty pk₀ stateful₀) tr s_final) (msg : Bytes) (sig : Sig) :
+    EufCmaForgery S s_final msg sig ↔
+      (S.verify pk₀ msg sig = true ∧ ∀ p ∈ tr, p.1.message ≠ msg) := by
+  have hPk : s_final.enrolledPk = pk₀ := (idealSignMachine_trace_key_mode hTrace).1
+  unfold EufCmaForgery
+  rw [hPk]
+  constructor
+  · rintro ⟨hFresh, hV⟩
+    exact ⟨hV, fun p hp =>
+      hFresh _ ((idealSignMachine_trace_log_complete hTrace).2 p hp)⟩
+  · rintro ⟨hV, hFresh⟩
+    refine ⟨fun e he => ?_, hV⟩
+    rcases idealSignMachine_trace_log_sound hTrace e he with hOld | ⟨p, hp, hpe⟩
+    · exact nomatch hOld
+    · rw [hpe]
+      exact hFresh p hp
+
+/-- **`SUF-CMA` forgery against a run.** A pair is a `SufCmaForgery` against the final state
+    exactly when it verifies under the enrolled key and was never emitted. -/
+theorem idealSignMachine_sufCmaForgery_iff [DecidableEq Sig]
+    {s_final : IdealSignState PK Sig} {tr : List (SignRequest × Sig)}
+    (hTrace : (idealSignMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace
+      (IdealSignState.empty pk₀ stateful₀) tr s_final) (msg : Bytes) (sig : Sig) :
+    SufCmaForgery S s_final msg sig ↔
+      (S.verify pk₀ msg sig = true ∧ ∀ p ∈ tr, (p.1.message, p.2) ≠ (msg, sig)) := by
+  have hPk : s_final.enrolledPk = pk₀ := (idealSignMachine_trace_key_mode hTrace).1
+  unfold SufCmaForgery
+  rw [hPk]
+  constructor
+  · rintro ⟨hFresh, hV⟩
+    exact ⟨hV, fun p hp =>
+      hFresh _ ((idealSignMachine_trace_log_complete hTrace).2 p hp)⟩
+  · rintro ⟨hV, hFresh⟩
+    refine ⟨fun e he => ?_, hV⟩
+    rcases idealSignMachine_trace_log_sound hTrace e he with hOld | ⟨p, hp, hpe⟩
+    · exact nomatch hOld
+    · rw [hpe]
+      exact hFresh p hp
+
+/-- **No emitted signature is a forgery**, in either sense, against the state the run ends in. -/
+theorem idealSignMachine_trace_outputs_not_forgeries [DecidableEq Sig]
+    {s_final : IdealSignState PK Sig} {tr : List (SignRequest × Sig)}
+    (hTrace : (idealSignMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace
+      (IdealSignState.empty pk₀ stateful₀) tr s_final) :
+    ∀ p ∈ tr, ¬ EufCmaForgery S s_final p.1.message p.2 ∧
+      ¬ SufCmaForgery S s_final p.1.message p.2 := by
+  intro p hp
+  have hSuf : ¬ SufCmaForgery S s_final p.1.message p.2 := fun h =>
+    ((idealSignMachine_sufCmaForgery_iff hTrace _ _).mp h).2 p hp rfl
+  exact ⟨fun h => hSuf h.toSufCma, hSuf⟩
+
+end Forgery
+
+/-- **The latched signer returns only outputs of `S.sign sk`.** The secret key is a parameter of
+    the machine, not part of its state, and reaches the interface only through `S.sign` on an
+    admitted request. -/
+theorem latchedSigner_output_is_sign {PK SK Sig : Type} (S : SigScheme PK SK Sig) (sk : SK)
+    (stateful₀ : Bool) (maxWindow : Nat) {c c' : LatchedSignerState} {req : SignRequest}
+    {sig : Sig}
+    (h : (latchedSignerMachine S sk stateful₀ maxWindow).step c req = some (c', sig)) :
+    S.sign sk req.epoch req.message = some sig := by
+  have h' : (if epochAdmissible stateful₀ maxWindow c.nextEpoch req.epoch = true then
+      (S.sign sk req.epoch req.message).map
+        (fun sig => ((⟨req.epoch + 1⟩ : LatchedSignerState), sig))
+      else none) = some (c', sig) := h
+  obtain ⟨_, hMap⟩ := signIteSome h'
+  obtain ⟨s, hS, hPair⟩ := signMapSome hMap
+  have hs : s = sig := congrArg Prod.snd hPair
+  exact hs ▸ hS
+
+/-- A pair the signer never emitted and that verifies is a forgery: with the accept-all scheme,
+    after one signature on `[]`, the message `[1]` with the same signature is an `EufCmaForgery`
+    against the reached state. The ideal machine records what was signed; it does not make
+    forgeries impossible. -/
+theorem idealSign_unsigned_message_is_forgery :
+    EufCmaForgery acceptAllSigScheme
+      ((idealSignMachine acceptAllSigScheme () true 8 (fun _ => some ())).runStep
+        (IdealSignState.empty () true) ⟨0, []⟩).1 [1] () := by
+  refine ⟨?_, rfl⟩
+  decide
 
 #verify_constructive
   Qsag.Spec.epochAdmissible_stateful
@@ -701,6 +858,13 @@ theorem EufCmaForgery.toSufCma {PK SK Sig : Type} [DecidableEq Sig]
   Qsag.Spec.idealSign_failed_epoch_not_reusable
   Qsag.Spec.idealSign_rejects_epoch_beyond_window
   Qsag.Spec.EufCmaForgery.toSufCma
+  Qsag.Spec.idealSignMachine_trace_log_complete
+  Qsag.Spec.idealSignMachine_trace_log_sound
+  Qsag.Spec.idealSignMachine_eufCmaForgery_iff
+  Qsag.Spec.idealSignMachine_sufCmaForgery_iff
+  Qsag.Spec.idealSignMachine_trace_outputs_not_forgeries
+  Qsag.Spec.latchedSigner_output_is_sign
+  Qsag.Spec.idealSign_unsigned_message_is_forgery
 
 end Qsag.Spec
 end

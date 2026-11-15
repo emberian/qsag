@@ -20,20 +20,33 @@ hypothesis. Here the experiment is closed:
 * `execEufCmaItsrReduction`, `execEufCmaTcrReduction`, `execEufCmaPreReduction`: the reduction
   games, whose win predicates are the extractor-defined events on the same run.
 * `jorts_baggy_closed_euf_cma`: `Pr[ExecEufCmaGame] ≤ Pr[R_itsr] + (Pr[R_tcr] + Pr[R_pre])`.
-* `ExecEufCmaReductionEmbedding`: the obligation that links the three extractor events to the
-  `ITSR`, `SM-DT-TCR` and `SM-DT-PRE` experiments of a `Spec.HashSigAssumptions` bundle: every
-  coin on which an extractor event fires is a winning coin of the corresponding experiment.
-  It is a hypothesis; no instance is constructed in this module.
-* `jorts_baggy_closed_euf_cma_assumption_bound`: under such an embedding the experiment is
-  bounded by `εItsr + εTcr + εPre`.
-* `jorts_baggy_closed_euf_cma_keygen_hop`: a key-generation game hop. With a
-  `KeyedPrfAssumption` whose real and ideal PRF games have the win predicates of the experiment
-  under two key generators, the real experiment is bounded by the three reductions of the ideal
-  one plus `εPrf`.
+* `ExecEufCmaReductionEmbedding`: the open obligation that turns the three extractor events into
+  wins of adversaries in the `ITSR`, `SM-DT-TCR` and `SM-DT-PRE` experiments of `Spec.Assumptions`.
+  What the structure enforces: the reduction adversaries belong to the adversary classes the
+  hardness hypotheses are stated for; `th` agrees with the suite's tweakable hash call `thCall`
+  under a tweak / argument codec; the challenge seed of the `SM-DT-TCR` and `SM-DT-PRE`
+  experiments is the public seed of the key of the forger's experiment on the same coin, so it
+  is uniform and independent of the reduction adversary's coordinate
+  (`ExecEufCmaReductionEmbedding.tcr_adversary_blind_to_pkSeed`). What it does not enforce: the
+  subset hash `hmsg`, the `ITSR` randomizers and the hidden `SM-DT-PRE` inputs are not tied to
+  the suite or to the run (the production signer derives randomizers and chain secrets with a
+  PRF, and its index derivation depends on the public key), and a reduction adversary's
+  coordinate may hold the secret part of the key. It is a hypothesis; no instance is
+  constructed in this library.
+* `jorts_baggy_closed_euf_cma_assumption_bound`: for an experiment whose key generator reads the
+  challenger coordinate and whose forger reads the adversary coordinate, under such an embedding
+  and the hardness propositions `Spec.ItsrHard`, `Spec.SmDtTcrHard`, `Spec.SmDtPreHard` for the
+  embedding's adversary classes, the forger wins with probability at most `εItsr + εTcr + εPre`.
+  The hardness propositions are false for the unrestricted class
+  (`Spec.smDtPreHard_unrestricted_refuted`), so the classes must exclude exhaustive search; no
+  such class is defined here.
+* `jorts_baggy_closed_euf_cma_keygen_hop`: a key-generation game hop under `Spec.PrfHard` for a
+  distinguisher class containing the simulating distinguisher. Its simulation hypotheses say
+  that the experiment under the real key generator is the real PRF game of an oracle
+  distinguisher, and under the ideal key generator its ideal game.
 
 The hop replaces the key generator only. The signer's internal use of `skPrf` and `skSeed` is not
-idealised: `prodSignQuery` has no oracle-parameterised variant to hop to. The three reduction
-events are those of `ProdCollisionEvents`; their probabilities are bounded by assumption.
+idealised: `prodSignQuery` has no oracle-parameterised variant to hop to.
 -/
 
 public import Qsag.Protocol.Signing.ProdAdaptiveTcrReduction
@@ -42,7 +55,6 @@ public import Qsag.Spec.Assumptions
 import all Qsag.Protocol.Signing.ProdAdaptiveTcrReduction
 import all Qsag.Protocol.Signing.ProdCollisionEvents
 import all Qsag.Protocol.Signing.HypertreeEufCma
-import all Qsag.Spec.GameBound
 import Qsag.Tactic.AssuranceKit
 
 public section
@@ -308,41 +320,153 @@ theorem jorts_baggy_closed_euf_cma {n qHash qSign : Nat} (hPos : 0 < n)
       · exact .inl rfl)
   exact Spec.RatBound.le_trans h1 (Spec.RatBound.add_le_add (Spec.RatBound.le_refl _) h2)
 
-/-- **Reduction embedding (open obligation).** The three extractor events of the closed
-    experiment are realised inside the experiments of the bundle `A`: on every coin where the
-    extractor returns a subset cover, an on-path target collision or a chain preimage, the
-    adversary of the corresponding `Spec` experiment (`A.itsr.adv`, `A.tcr.adv`, `A.pre.adv`,
-    against `A.itsr.hmsg`, `A.tcr.th`, `A.pre.th` with the samplers of `A`) wins. Providing it
-    means exhibiting those three adversaries as simulations of the forger `adv` against the
-    primitives of `suite`. -/
-structure ExecEufCmaReductionEmbedding {n qHash qSign : Nat} (hPos : 0 < n)
-    (suite : TweakableHashSuite) (params : PqHashParams)
-    (hw : params.w = 4 ∨ params.w = 16)
-    (keygen : Fin n → PqSecretKey)
-    (adv : Fin n → SeedWithheldEufCmaAdv qHash qSign)
-    (A : Spec.HashSigAssumptions n) : Prop where
-  itsr : ∀ ω : Fin n, (execEufCmaItsrReduction hPos suite params hw keygen adv).win ω = true →
-    A.itsr.itsrGame.win ω = true
-  tcr : ∀ ω : Fin n, (execEufCmaTcrReduction hPos suite params hw keygen adv).win ω = true →
-    A.tcr.tcrGame.win ω = true
-  pre : ∀ ω : Fin n, (execEufCmaPreReduction hPos suite params hw keygen adv).win ω = true →
-    A.pre.preGame.win ω = true
+/-- **Reduction embedding (open obligation).** Data that realises the three extractor events
+    of the closed experiment as wins in the `ITSR`, `SM-DT-TCR` and `SM-DT-PRE` experiments of the
+    subset hash `hmsg` and the tweakable hash `th`, by adversaries of the classes `𝒜I`, `𝒜T`,
+    `𝒜P`.
 
-/-- Under a reduction embedding into the bundle `A`, the experiment is bounded by
-    `εItsr + εTcr + εPre`. -/
-theorem jorts_baggy_closed_euf_cma_assumption_bound {n qHash qSign : Nat} (hPos : 0 < n)
+    For each experiment the embedding gives a split of the coin space (`πi`, `πt`, `πp`), a
+    challenger sampler on the challenger coordinate with its `UniformOn` law, and a reduction
+    adversary on the adversary coordinate whose programs belong to the class. The laws `itsr`,
+    `tcr`, `pre` say that on every coin where the extractor returns a subset cover, an on-path
+    target collision or a chain preimage, that reduction adversary wins its experiment.
+
+    Enforced ties to the experiment:
+    * `th_suite`: on encoded points `th` is the suite's tweakable hash call `thCall`, so `th`
+      depends on its seed argument exactly as the suite does;
+    * `seed_is_pkSeed`, `sample_seed_is_pkSeed`: the challenge seed of the `SM-DT-TCR` and
+      `SM-DT-PRE` experiments is the public seed of the experiment's key on the same coin. With
+      `seed_uniform` this makes `seedLen` the length of the public seeds the key generator
+      produces, and the public seed independent of the reduction adversary's coordinate.
+
+    Not enforced: `hmsg` is a free parameter (the production index derivation depends on the
+    public key and the hypertree leaf, which the keyless `Spec.ItsrHard` does not express); the
+    `ITSR` randomizers and the hidden `SM-DT-PRE` inputs are not related to the signer's
+    PRF-derived randomizers and chain secrets; a reduction adversary's coordinate may hold the
+    secret seeds of the key. Providing an embedding means writing the three simulations of the
+    forger against the primitives of `suite`; none is constructed in this library. -/
+structure ExecEufCmaReductionEmbedding {n nK nA qHash qSign : Nat} (hPos : 0 < n)
     (suite : TweakableHashSuite) (params : PqHashParams)
     (hw : params.w = 4 ∨ params.w = 16)
-    (keygen : Fin n → PqSecretKey)
-    (adv : Fin n → SeedWithheldEufCmaAdv qHash qSign)
-    (A : Spec.HashSigAssumptions n)
-    (hEmbed : ExecEufCmaReductionEmbedding hPos suite params hw keygen adv A) :
-    Spec.GameBound (ExecEufCmaGame hPos suite params keygen adv).winProb A.totalBound :=
-  A.forger_bound (ExecEufCmaGame hPos suite params keygen adv) (fun ω hWin => by
-    rcases execEufCma_win_classified hPos suite params hw keygen adv ω hWin with h | h | h
-    · exact .inl (hEmbed.itsr ω h)
-    · exact .inr (.inl (hEmbed.tcr ω h))
-    · exact .inr (.inr (hEmbed.pre ω h)))
+    (π : Spec.CoinSplit n nK nA)
+    (keygen : Fin nK → PqSecretKey)
+    (adv : Fin nA → SeedWithheldEufCmaAdv qHash qSign)
+    (𝒜I : Spec.Code Spec.byteOracleIface (Spec.Bytes × Spec.Bytes) → Prop)
+    (𝒜T 𝒜P : Spec.Code Spec.targetIface Spec.TargetBreak → Prop)
+    (hmsg : Spec.Bytes → Spec.Bytes → List Nat)
+    (th : Spec.Bytes → Spec.Bytes → Spec.Bytes → Spec.Bytes)
+    (randLen seedLen inputLen qItsr qTcr qPre : Nat) where
+  nCi : Nat
+  nAi : Nat
+  nCt : Nat
+  nAt : Nat
+  nCp : Nat
+  nAp : Nat
+  πi : Spec.CoinSplit n nCi nAi
+  πt : Spec.CoinSplit n nCt nAt
+  πp : Spec.CoinSplit n nCp nAp
+  rand : Fin nCi → List Spec.Bytes
+  rand_uniform : Spec.UniformOn (Spec.ItsrSampleOk randLen qItsr) rand
+  seed : Fin nCt → Spec.Bytes
+  seed_uniform : Spec.UniformOn (fun s : Spec.Bytes => s.length = seedLen) seed
+  sample : Fin nCp → Spec.Bytes × List Spec.Bytes
+  sample_uniform : Spec.UniformOn (Spec.SmDtPreSampleOk seedLen inputLen qPre) sample
+  /-- Tweak of a role tag and a hash address. -/
+  tweakOf : List UInt8 → HashAdrs → Spec.Bytes
+  /-- Message of an argument list. -/
+  argsOf : List (List UInt8) → Spec.Bytes
+  th_suite : ∀ (role seed : List UInt8) (adrs : HashAdrs) (args : List (List UInt8)),
+    th seed (tweakOf role adrs) (argsOf args) = thCall suite role seed adrs args
+  seed_is_pkSeed : ∀ ω : Fin n, seed (πt.chal ω) = (keygen (π.chal ω)).pkSeed
+  sample_seed_is_pkSeed : ∀ ω : Fin n, (sample (πp.chal ω)).1 = (keygen (π.chal ω)).pkSeed
+  itsrAdv : Fin nAi → Spec.Code Spec.byteOracleIface (Spec.Bytes × Spec.Bytes)
+  tcrAdv : Fin nAt → Spec.Code Spec.targetIface Spec.TargetBreak
+  preAdv : Fin nAp → Spec.Code Spec.targetIface Spec.TargetBreak
+  itsrAdv_mem : ∀ a : Fin nAi, 𝒜I (itsrAdv a)
+  tcrAdv_mem : ∀ a : Fin nAt, 𝒜T (tcrAdv a)
+  preAdv_mem : ∀ a : Fin nAp, 𝒜P (preAdv a)
+  itsr : ∀ ω : Fin n,
+    (execEufCmaItsrReduction hPos suite params hw (fun ω => keygen (π.chal ω))
+      (fun ω => adv (π.advc ω))).win ω = true →
+    (Spec.itsrGame hPos hmsg qItsr (fun ω i => (rand (πi.chal ω)).getD i [])
+      (fun ω => itsrAdv (πi.advc ω))).win ω = true
+  tcr : ∀ ω : Fin n,
+    (execEufCmaTcrReduction hPos suite params hw (fun ω => keygen (π.chal ω))
+      (fun ω => adv (π.advc ω))).win ω = true →
+    (Spec.smDtTcrGame hPos th qTcr (fun ω => seed (πt.chal ω))
+      (fun ω => tcrAdv (πt.advc ω))).win ω = true
+  pre : ∀ ω : Fin n,
+    (execEufCmaPreReduction hPos suite params hw (fun ω => keygen (π.chal ω))
+      (fun ω => adv (π.advc ω))).win ω = true →
+    (Spec.smDtPreGame hPos th qPre (fun ω => (sample (πp.chal ω)).1)
+      (fun ω i => (sample (πp.chal ω)).2.getD i []) (fun ω => preAdv (πp.advc ω))).win ω = true
+
+/-- **The `SM-DT-TCR` reduction adversary is blind to the public seed.** Under an embedding, if
+    two different byte strings of length `seedLen` exist, then no function of the reduction
+    adversary's coordinate equals the public seed of the experiment's key: for every guess and
+    every adversary coin, some coin with that adversary coordinate carries a key whose public
+    seed differs from the guess. -/
+theorem ExecEufCmaReductionEmbedding.tcr_adversary_blind_to_pkSeed
+    {n nK nA qHash qSign : Nat} {hPos : 0 < n}
+    {suite : TweakableHashSuite} {params : PqHashParams}
+    {hw : params.w = 4 ∨ params.w = 16}
+    {π : Spec.CoinSplit n nK nA}
+    {keygen : Fin nK → PqSecretKey}
+    {adv : Fin nA → SeedWithheldEufCmaAdv qHash qSign}
+    {𝒜I : Spec.Code Spec.byteOracleIface (Spec.Bytes × Spec.Bytes) → Prop}
+    {𝒜T 𝒜P : Spec.Code Spec.targetIface Spec.TargetBreak → Prop}
+    {hmsg : Spec.Bytes → Spec.Bytes → List Nat}
+    {th : Spec.Bytes → Spec.Bytes → Spec.Bytes → Spec.Bytes}
+    {randLen seedLen inputLen qItsr qTcr qPre : Nat}
+    (E : ExecEufCmaReductionEmbedding hPos suite params hw π keygen adv 𝒜I 𝒜T 𝒜P hmsg th
+      randLen seedLen inputLen qItsr qTcr qPre)
+    {x y : Spec.Bytes} (hx : x.length = seedLen) (hy : y.length = seedLen) (hxy : x ≠ y)
+    (guess : Fin E.nAt → Spec.Bytes) (a : Fin E.nAt) :
+    ∃ ω : Fin n, E.πt.advc ω = a ∧ (keygen (π.chal ω)).pkSeed ≠ guess (E.πt.advc ω) := by
+  obtain ⟨ω, hA, hNe⟩ :=
+    E.πt.sample_not_adversary_determined E.seed_uniform hx hy hxy guess a
+  exact ⟨ω, hA, fun h => hNe ((E.seed_is_pkSeed ω).trans h)⟩
+
+/-- **EUF-CMA bound from hardness of the primitives.** The experiment draws the key from the
+    challenger coordinate of the coin and the forger from the adversary coordinate. Under a
+    reduction embedding into the experiments of `hmsg` and `th` with reduction adversaries of the
+    classes `𝒜I`, `𝒜T`, `𝒜P`, and under `ITSR` hardness of `hmsg` and `SM-DT-TCR` /
+    `SM-DT-PRE` hardness of `th` against those classes, the forger wins with probability at
+    most `εItsr + εTcr + εPre`.
+
+    The hardness hypotheses are false for the unrestricted classes
+    (`Spec.smDtPreHard_unrestricted_refuted`): the statement has content only for classes that
+    exclude exhaustive search and still contain the embedding's reduction adversaries. -/
+theorem jorts_baggy_closed_euf_cma_assumption_bound {n nK nA qHash qSign : Nat} (hPos : 0 < n)
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16)
+    (π : Spec.CoinSplit n nK nA)
+    (keygen : Fin nK → PqSecretKey)
+    (adv : Fin nA → SeedWithheldEufCmaAdv qHash qSign)
+    {𝒜I : Spec.Code Spec.byteOracleIface (Spec.Bytes × Spec.Bytes) → Prop}
+    {𝒜T 𝒜P : Spec.Code Spec.targetIface Spec.TargetBreak → Prop}
+    {hmsg : Spec.Bytes → Spec.Bytes → List Nat}
+    {th : Spec.Bytes → Spec.Bytes → Spec.Bytes → Spec.Bytes}
+    {randLen seedLen inputLen qItsr qTcr qPre : Nat}
+    (E : ExecEufCmaReductionEmbedding hPos suite params hw π keygen adv 𝒜I 𝒜T 𝒜P hmsg th
+      randLen seedLen inputLen qItsr qTcr qPre)
+    {εItsr εTcr εPre : Spec.RatBound}
+    (hItsr : Spec.ItsrHard 𝒜I hmsg randLen qItsr εItsr)
+    (hTcr : Spec.SmDtTcrHard 𝒜T th seedLen qTcr εTcr)
+    (hPre : Spec.SmDtPreHard 𝒜P th seedLen inputLen qPre εPre) :
+    Spec.GameBound
+      (ExecEufCmaGame hPos suite params (fun ω => keygen (π.chal ω))
+        (fun ω => adv (π.advc ω))).winProb
+      ((εItsr.add εTcr).add εPre) :=
+  Spec.hashSig_forger_bound
+    (ExecEufCmaGame hPos suite params (fun ω => keygen (π.chal ω)) (fun ω => adv (π.advc ω)))
+    hItsr hTcr hPre E.πi E.πt E.πp E.rand E.rand_uniform E.seed E.seed_uniform
+    E.sample E.sample_uniform E.itsrAdv E.itsrAdv_mem E.tcrAdv E.tcrAdv_mem E.preAdv E.preAdv_mem
+    (fun ω hWin => by
+      rcases execEufCma_win_classified hPos suite params hw _ _ ω hWin with h | h | h
+      · exact .inl (E.itsr ω h)
+      · exact .inr (.inl (E.tcr ω h))
+      · exact .inr (.inr (E.pre ω h)))
 
 /-- A game's winning probability is at most another's plus their distinguishing advantage. -/
 theorem winProb_le_add_advDist {n : Nat} (G₁ G₀ : Spec.FinGame n) :
@@ -362,28 +486,44 @@ theorem winProb_le_add_advDist {n : Nat} (G₁ G₀ : Spec.FinGame n) :
   rw [← Nat.add_mul, Nat.mul_assoc]
   exact Nat.mul_le_mul_right _ h
 
-/-- **Key-generation hop.** If the real PRF game of a `KeyedPrfAssumption` (its distinguisher
-    `P.adv` against `P.prf` under `P.key`) has the win predicate of the experiment under
-    `keygenReal`, and its ideal game (against the sampled function `P.rf`) that of the
-    experiment under `keygenIdeal`, the real experiment is bounded by the three reductions of
-    the ideal experiment plus `εPrf`. -/
-theorem jorts_baggy_closed_euf_cma_keygen_hop {n qHash qSign : Nat} (hPos : 0 < n)
+/-- **Key-generation hop under PRF hardness.** Let `D` be an oracle distinguisher on the
+    adversary coordinate of the split `π`, and let the challenger coordinate carry a uniform
+    key and an independent uniform function (`sample`). The simulation hypotheses are:
+    `hReal`, on every coin the experiment under `keygenReal` has the verdict of `D` with oracle
+    access to `prf` under the sampled key; `hIdeal`, the experiment under `keygenIdeal` has the
+    verdict of `D` with oracle access to the sampled function. Then PRF hardness of `prf`
+    against a class `𝒜` containing the programs of `D` bounds the real experiment by the three
+    reductions of the ideal one plus `εPrf`.
+
+    `D` is the experiment with its key derivation replaced by oracle calls; no such `D` is
+    constructed in this library, so `hReal` and `hIdeal` are open obligations. -/
+theorem jorts_baggy_closed_euf_cma_keygen_hop {n nC nA qHash qSign : Nat} (hPos : 0 < n)
     (suite : TweakableHashSuite) (params : PqHashParams)
     (hw : params.w = 4 ∨ params.w = 16)
     (keygenReal keygenIdeal : Fin n → PqSecretKey)
     (adv : Fin n → SeedWithheldEufCmaAdv qHash qSign)
-    (P : Spec.KeyedPrfAssumption n)
-    (hReal : P.realGame = ExecEufCmaGame hPos suite params keygenReal adv)
-    (hIdeal : P.idealGame = ExecEufCmaGame hPos suite params keygenIdeal adv) :
+    (prf : Spec.Bytes → Spec.Bytes → Spec.Bytes) (keyLen inLen outLen qPrf : Nat)
+    {𝒜 : Spec.Code Spec.byteOracleIface Bool → Prop}
+    {εPrf : Spec.RatBound} (hPrf : Spec.PrfHard 𝒜 prf keyLen inLen outLen qPrf εPrf)
+    (π : Spec.CoinSplit n nC nA)
+    (sample : Fin nC → Spec.Bytes × (Spec.Bytes → Spec.Bytes))
+    (hU : Spec.UniformOn (Spec.PrfSampleOk keyLen inLen outLen) sample)
+    (D : Fin nA → Spec.Code Spec.byteOracleIface Bool) (hD : ∀ a : Fin nA, 𝒜 (D a))
+    (hReal : ∀ ω : Fin n, (ExecEufCmaGame hPos suite params keygenReal adv).win ω =
+      (Spec.prfRealGame hPos prf qPrf (fun ω => (sample (π.chal ω)).1)
+        (fun ω => D (π.advc ω))).win ω)
+    (hIdeal : ∀ ω : Fin n, (ExecEufCmaGame hPos suite params keygenIdeal adv).win ω =
+      (Spec.prfIdealGame hPos qPrf (fun ω => (sample (π.chal ω)).2)
+        (fun ω => D (π.advc ω))).win ω) :
     Spec.GameBound (ExecEufCmaGame hPos suite params keygenReal adv).winProb
       (((execEufCmaItsrReduction hPos suite params hw keygenIdeal adv).winProb.add
         ((execEufCmaTcrReduction hPos suite params hw keygenIdeal adv).winProb.add
-          (execEufCmaPreReduction hPos suite params hw keygenIdeal adv).winProb)).add P.εPrf) := by
+          (execEufCmaPreReduction hPos suite params hw keygenIdeal adv).winProb)).add εPrf) := by
   have hAdv : Spec.GameBound
       (Spec.AdvDist (ExecEufCmaGame hPos suite params keygenReal adv)
-        (ExecEufCmaGame hPos suite params keygenIdeal adv)) P.εPrf := by
-    rw [← hReal, ← hIdeal]
-    exact P.advantage_bound
+        (ExecEufCmaGame hPos suite params keygenIdeal adv)) εPrf := by
+    rw [Spec.FinGame.ext_win hReal, Spec.FinGame.ext_win hIdeal]
+    exact hPrf n nC nA hPos π sample hU D hD
   exact Spec.RatBound.le_trans
     (winProb_le_add_advDist (ExecEufCmaGame hPos suite params keygenReal adv)
       (ExecEufCmaGame hPos suite params keygenIdeal adv))
@@ -398,6 +538,7 @@ theorem jorts_baggy_closed_euf_cma_keygen_hop {n qHash qSign : Nat} (hPos : 0 < 
   Qsag.execEufCmaOutcome_oneTime
   Qsag.execEufCmaOutcome_queries_le
   Qsag.jorts_baggy_closed_euf_cma
+  Qsag.ExecEufCmaReductionEmbedding.tcr_adversary_blind_to_pkSeed
   Qsag.jorts_baggy_closed_euf_cma_assumption_bound
   Qsag.winProb_le_add_advDist
   Qsag.jorts_baggy_closed_euf_cma_keygen_hop

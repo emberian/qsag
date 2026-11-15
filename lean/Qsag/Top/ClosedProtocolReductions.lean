@@ -9,8 +9,10 @@ from an execution of the verifier to explicit reduction events, not a tuple of l
    Fiat–Shamir adversary, `Pr[execWhirVerify accepts] ≤ scheduleQromError sched Q +
    Pr[the collision finder outputs a Merkle-hash collision]`. `whirCollisionReduction` turns
    the finder's output into a `Spec.HashCollision` of the underlying byte hash, and
-   `whirCollisionReduction_validBreak` shows that output is a `Spec.ValidBreak`, the break
-   alternative of `Spec.AggregateSoundnessOutcome`.
+   `whirCollisionReduction_validBreak` shows that output is a `Spec.ValidBreak`: a collision of
+   the byte hash. It is a break of `Spec.AggregateSoundnessOutcome` only together with the fact
+   that both inputs are recorded prover queries (`Spec.TranscriptBreak`), which this reduction
+   does not state.
    `deployed_whir_exec_closed_qrom_128` instantiates the `nv = 24` schedule at `Q ≤ 2^40`.
 2. `jorts_baggy_closed_euf_cma`: `Pr[ExecEufCmaGame wins] ≤ Pr[R_itsr] + (Pr[R_tcr] + Pr[R_pre])`
    for the adversary-driven experiment with the epoch latch.
@@ -131,8 +133,9 @@ def whirCollisionReduction {F : Type} [CommRingOps F] [DecidableEq F] {cardX w :
     (Qsag.ClosedFs.execFsCollisionWitness (Qsag.ClosedWhir.whirOracleIop env sched w)
       (Qsag.ClosedFs.framedSetup Hb nodeC leafC) c aux x H o h)
 
-/-- The collision reduction's output is a validated break of the byte hash `Hb`: it discharges
-    the break alternative of `Spec.AggregateSoundnessOutcome` for the commitment hash `Hb`. -/
+/-- The collision reduction's output is a validated break of the byte hash `Hb`
+    (`Spec.ValidBreak`). Membership of its two inputs in a prover's oracle transcript, which
+    `Spec.TranscriptBreak` also requires, is not part of this statement. -/
 theorem whirCollisionReduction_validBreak {F : Type} [CommRingOps F] [DecidableEq F]
     {cardX w : Nat}
     (Hb : Qsag.Spec.Bytes → Qsag.Spec.Bytes)

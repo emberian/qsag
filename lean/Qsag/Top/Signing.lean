@@ -4,13 +4,18 @@ public import Qsag.Machine.Gf128ClmulLoopAgreement
 # Qsag.Top.Signing — End-to-End Composed Post-Quantum Signing Reductions and Refinements
 
 Top-level composition module (zero `import all`) connecting:
-1. Standard-model tweakable-hash `EUF-CMA` collision extraction & target-budget accounting
+1. Tweakable-hash `EUF-CMA` collision extraction & target-budget accounting
    (`ProdCollisionEvents`, `ProdCollisionAccounting`, `ProdCollisionExtraction`) into `Spec.GameBound`
-   through `Spec.event_le_three_reductions`,
+   through `Spec.event_le_three_reductions`: the forger's winning probability is at most the sum
+   of the probabilities of three extractor events on the same run (no reduction of those events
+   to hardness experiments),
 2. Upper-hypertree cache observational equivalence (`SignatureOutputAndCacheLaws`) lifted into a
    constructive `Spec.Refines` (`waistbandCachedMachine ⊑ statelessSignMachine`) witness,
-3. `cSHAKE256` sponge domain separation (`SpongeFramingAndDomainSep`) and polynomial-basis SPN
-   tweakable chain evaluation (`ParallelSeededSpnPolyBasis` + `Math.Gf2Pow128`), and
+3. Encoding separation of the `cSHAKE256` customization tags (`Oracle.Sponge`: the complete
+   padded block sequences absorbed under different `QSAG.*` tags differ; this is a statement
+   about encodings, not about disjoint permutation queries and not a sponge or
+   ideal-permutation security reduction) and polynomial-basis SPN tweakable chain evaluation
+   (`Oracle.Spn` + `Math.Gf2Pow128`), and
 4. Constant-time assembly / translation-validation / speculative-safety guarantees
    (`ElfFunctionalEquiv`, `ConstantTimeIsa`, `SydTvTranslationValidation`, `FaultAndSpeculativeSafety`),
 5. The production signer and verifier as a `Spec.SigScheme` (`productionSigScheme`) and the
@@ -31,6 +36,7 @@ public import Qsag.Protocol.Signing.ProdCollisionAccounting
 public import Qsag.Protocol.Signing.ProdCollisionExtraction
 public import Qsag.Protocol.Signing.ProdAdaptiveTcrReduction
 public import Qsag.Protocol.Signing.ExecEufCmaClosedGame
+public import Qsag.Protocol.Signing.PreprocessingSeedSeparation
 public import Qsag.Protocol.Signing.FrontierCompact1122AndCorduroySecurity
 public import Qsag.Protocol.Credentials.AdvancedMpcAndCreds
 public import Qsag.Protocol.Threshold.BaggyAndRss256Security
@@ -54,7 +60,14 @@ open scoped Qsag.Spec
 
 set_option autoImplicit false
 
-/-! ## 1. Standard-Model `EUF-CMA` Reduction to `ITSR + SM-DT-TCR + SM-DT-PRE` in `Spec.GameBound` -/
+/-! ## 1. Production `EUF-CMA`: the Forger Is Bounded by Three Extractor-Event Probabilities
+
+The three events are the outputs of the collision extractor on the forger's own run
+(`prodItsrEvent`, `prodTcrEvent`, `prodPreEvent`). The hypotheses `hItsr`, `hTcr`, `hPre` bound
+the probabilities of those events. They are not the `ITSR`, `SM-DT-TCR` and `SM-DT-PRE`
+experiments of `Spec.Assumptions`, and nothing in this section reduces an event to one of them;
+that step is the open obligation `ExecEufCmaReductionEmbedding`
+(`Protocol.Signing.ExecEufCmaClosedGame`). -/
 
 /-- **End-to-End Production `EUF-CMA` Concrete `GameBound` (`production_euf_cma_gameBound`)**:
     Composes `ProdCollisionEvents.prodEufCmaWin_classified` and `ProdCollisionAccounting.prodTcrOutput_target_budget`
@@ -170,13 +183,17 @@ theorem waistbandCache_preserves_multiturn_traces
     (statelessReferenceSignMachine suite params sk maxGrind).AdmitsTrace tr :=
   (waistbandCache_refines_stateless suite params sk maxGrind topL hTopL).preserve_admitsTrace hAdmits
 
-/-! ## 3. Sponge Domain Separation, SPN Polynomial-Basis Bridge, and Constant-Time ISA Safety -/
+/-! ## 3. Customization-Tag Encoding Separation, SPN Polynomial-Basis Bridge, and Constant-Time ISA Safety -/
 
-/-- **Sponge Domain Disjointness + Polynomial-Basis SPN + Five-Way `𝔽_{2^{128}}` Agreement
-    (`sponge_and_spn_poly_basis_composition`)**:
-    Connects `SpongeFramingAndDomainSep.qsag_tags_sponge_domains_disjoint`,
-    `ParallelSeededSpnPolyBasis.rustParallelChainStep_eq_tower`, and
-    `Math.gf2Pow128_five_way_mul_agreement` into one unified hash-primitive theorem. -/
+/-- **Customization-Tag Encoding Separation + Polynomial-Basis SPN + Five-Way `𝔽_{2^{128}}`
+    Agreement (`sponge_and_spn_poly_basis_composition`)**:
+    Connects `Qsag.qsag_tags_sponge_domains_disjoint` (`Oracle.Sponge`),
+    `Qsag.rustParallelChainStep_eq_tower` (`Oracle.Spn`), and
+    `Math.gf2Pow128_five_way_mul_agreement`. The first two conjuncts say that the complete
+    padded `cSHAKE256` block sequences absorbed under the `CANOPY.LEAF`, `CANOPY.NODE` and
+    `FS` tags are different for all payloads. They do not say that the permutation queries
+    made while absorbing them are disjoint, and they are not a sponge or ideal-permutation
+    indifferentiability statement. -/
 theorem sponge_and_spn_poly_basis_composition
     (m₁ m₂ : List UInt8)
     (hash32 : List UInt8 → List (List UInt8) → List UInt8)
@@ -266,10 +283,11 @@ theorem adaptive_within_and_compact1122_signing_chain
 set_option exponentiation.threshold 512 in
 /-- **Public-Permutation QROM Isometry, Salted Preprocessing, 48-Round SPN Hull, and Strict x86 Cosim
     (`public_spn_qrom_differential_walsh_and_isa_cosim`)**:
-    Composes `ParallelSeededPublicPermutation` + `ParallelSeededPublicPermutationGame`,
-    `QromPreprocessingGame.freshSalt_node_requests_bound`,
-    `SpnCommittedDifferential.spn48_davies_meyer_committed_pair_collision_atLeast_250_bits`,
-    `SpnWalshHull.walsh_trail_product_below_parseval_floor`, and
+    Composes the public-permutation feed-forward (`Oracle.Spn`) and coherent-query isometry
+    (`Oracle.Qrom`),
+    `PreprocessingGame.freshSalt_node_requests_bound` (`Protocol.Signing.PreprocessingSeedSeparation`),
+    `spn48_davies_meyer_committed_pair_collision_count_le` and
+    `walsh_trail_product_below_parseval_floor` (`Oracle.Spn`), and
     `IsaCosim.run_verified_code_is_strict`. -/
 theorem public_spn_qrom_differential_walsh_and_isa_cosim
     {anc q kSalt : Nat}
@@ -318,7 +336,12 @@ theorem public_spn_qrom_differential_walsh_and_isa_cosim
 /-- The production hash-signature scheme as a `Spec.SigScheme`, at fixed signer randomness
     `optRand` and grind limit `maxGrind`: key derivation `derivePublicKey`, signer
     `prodSignQuery`, verifier `verifyProductionPqHashSig`. Correctness is
-    `prodSignQuery_verifies`. -/
+    `prodSignQuery_verifies`.
+
+    The scheme uses the one value `optRand` for every signature: `Spec.SigScheme.sign` has no
+    randomness argument, so per-request signer randomness is not modelled and the refinement
+    below is stated for each fixed `optRand` (the deterministic variant when `optRand` is the
+    public seed). -/
 @[expose] def productionSigScheme
     (suite : Qsag.TweakableHashSuite) (params : Qsag.PqHashParams)
     (optRand : List UInt8) (maxGrind : Nat) :

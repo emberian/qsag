@@ -26,7 +26,6 @@ public import Qsag.Protocol.Signing.ExecEufCmaClosedGame
 import all Qsag.Protocol.Signing.ExecEufCmaClosedGame
 import all Qsag.Protocol.Signing.ProdAdaptiveTcrReduction
 import all Qsag.Protocol.Signing.HypertreeEufCma
-import all Qsag.Spec.GameBound
 import Qsag.Tactic.AssuranceKit
 
 public section
@@ -77,10 +76,10 @@ theorem execEufCmaGameWith_win_eq {n qHash qSign : Nat} (latchOn : Bool) (hPos :
 
 theorem finGame_one_winCount (G : Spec.FinGame 1) (h : G.win ⟨0, Nat.zero_lt_succ 0⟩ = true) :
     G.winCount = 1 := by
-  unfold Spec.FinGame.winCount Spec.sampleSum
-  dsimp only
-  rw [h]
-  rfl
+  refine G.winCount_of_forall_win (fun ω => ?_)
+  have hω : ω = ⟨0, Nat.zero_lt_succ 0⟩ := Fin.ext (Nat.lt_one_iff.mp ω.2)
+  rw [hω]
+  exact h
 
 /-- The latched experiment has a winning run. -/
 theorem inhabited_execEufCmaGame_win :
