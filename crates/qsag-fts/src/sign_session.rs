@@ -637,7 +637,8 @@ impl<'a> ParallelSeededSignSession<'a> {
                 } else {
                     job.remaining -= 1;
                     job.original = job.state.clone();
-                    let tweak = derive_chain_tweak(&self.pk.pk_seed_bytes, self.epoch, job.chain, job.step);
+                    let tweak =
+                        derive_chain_tweak(&self.pk.pk_seed_bytes, self.epoch, job.chain, job.step);
                     job.constants = round_constants(tweak.0, tweak.1);
                     job.step += 1;
                 }

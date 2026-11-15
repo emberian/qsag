@@ -338,6 +338,9 @@ impl<T: ParallelSeededDkgOt> ParallelSeededDkgProducts for ParallelSeededGilboaP
                 for (&x, pads) in inputs.iter().zip(raw.as_chunks::<{ 128 * 16 }>().0.iter()) {
                     let powers: [u128; 128] = core::array::from_fn(|bit| 1u128 << bit);
                     let mut basis = [0u128; 128];
+                    // OT needs every product separately. The scale kernel retains
+                    // all 128 outputs; a single mul_acc_batch dot product would
+                    // XOR them together and destroy the alternatives.
                     qsag_asm::bitslice::gf2_128_scale_xor(&mut basis, &powers, x);
                     let mut share = 0;
                     for (pad, &term) in pads.as_chunks::<16>().0.iter().zip(&basis) {

@@ -27,16 +27,22 @@ fn pad_batch(
     prefix[0] ^= 6;
     prefix[1] ^= 48;
     prefix[8] ^= 32;
-    for (word, bytes) in prefix[9..13].iter_mut().zip(context.chunks_exact(8)) {
-        *word ^= u64::from_le_bytes(core::array::from_fn(|i| bytes[i]));
+    for (word, bytes) in prefix[9..13]
+        .iter_mut()
+        .zip(context.as_chunks::<8>().0.iter())
+    {
+        *word ^= u64::from_le_bytes(*bytes);
     }
     prefix[13] ^= 2;
     prefix[14] ^= u64::from(sender.swap_bytes()) | (2 << 16);
     prefix[15] ^= (u64::from(receiver.swap_bytes()) << 16) | (8 << 32);
     let mut states = [prefix; 8];
     for lane in 0..8 {
-        for (word, bytes) in states[lane][2..8].iter_mut().zip(raw[lane].chunks_exact(8)) {
-            *word ^= u64::from_le_bytes(core::array::from_fn(|i| bytes[i]));
+        for (word, bytes) in states[lane][2..8]
+            .iter_mut()
+            .zip(raw[lane].as_chunks::<8>().0.iter())
+        {
+            *word ^= u64::from_le_bytes(*bytes);
         }
         // The big-endian index straddles the 136-byte rate boundary at offset 132.
         states[lane][16] ^= (indices[lane] as u64).swap_bytes() << 32;
