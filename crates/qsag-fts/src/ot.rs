@@ -2,6 +2,7 @@
 //! Establish channels using the production `qsag_core::preprocessing` base-OT
 //! round states, over mutually authenticated confidential transports. This
 //! adapter inherits their security bounds; it makes no new QROM security claim.
+use crate::parallel_mpc::{ParallelSeededDkgOtPads, ParallelSeededDkgOtPeer, in_parallel};
 use crate::{ParallelSeededDkgOt, ParallelSeededError};
 use alloc::{collections::BTreeMap, collections::BTreeSet, vec::Vec};
 use qsag_accel::ct::{ct_zeroize_bytes, ct_zeroize_u64s, ct_zeroize_u128s};
@@ -72,10 +73,15 @@ pub enum CommittedOtMessage {
     Challenge(KosOtChallengeMsg),
     Proof(KosOtProofMsg),
     Ciphertexts(Vec<[u128; 2]>),
+    /// Pad-masked field elements of a DKG product; at most `3 * MAX_OTS` of them.
+    Words(Vec<u128>),
 }
 /// Implement using a mutually authenticated channel. Bind endpoint IDs and the
 /// full context to every frame, reject unexpected contexts and bound decoding
 /// allocations before receiving a payload. No clear OT alternatives traverse it.
+///
+/// `send` must queue the message without waiting for the peer to read it: the DKG
+/// flights of [`ParallelSeededDkgOt::random_ots`] send to every peer before reading.
 pub trait AuthenticatedOtWire {
     fn send(
         &mut self,
@@ -94,7 +100,8 @@ pub trait AuthenticatedOtWire {
 /// channels, local randomness, and replay state. Any protocol error poisons it.
 pub struct CommittedCorrelatedOt<W> {
     party: u16,
-    peers: BTreeMap<u16, (OtExtSenderChannel, OtExtReceiverChannel)>,
+    /// Both directional channels to a peer, and the randomness of its DKG flights.
+    peers: BTreeMap<u16, (OtExtSenderChannel, OtExtReceiverChannel, PartyPrivateRng)>,
     used: BTreeSet<(u16, [u8; 32], bool)>,
     rng: PartyPrivateRng,
     wire: W,
@@ -103,7 +110,7 @@ pub struct CommittedCorrelatedOt<W> {
 fn invalid() -> ParallelSeededError {
     ParallelSeededError::InvalidThresholdParameters
 }
-const MAX_OTS: usize = 262_144;
+pub(crate) const MAX_OTS: usize = 262_144;
 impl<W: AuthenticatedOtWire> CommittedCorrelatedOt<W> {
     /// `entropy` must be fresh private CSPRNG output, never pair-shared entropy.
     pub fn new(
@@ -112,16 +119,18 @@ impl<W: AuthenticatedOtWire> CommittedCorrelatedOt<W> {
         mut entropy: [u8; 32],
         wire: W,
     ) -> Result<Self, ParallelSeededError> {
-        let rng = PartyPrivateRng::from_seed(entropy, b"QSAG.CUSTODY.KOS.V1");
+        let mut rng = PartyPrivateRng::from_seed(entropy, b"QSAG.CUSTODY.KOS.V1");
         ct_zeroize_bytes(&mut entropy);
         let mut channels = BTreeMap::new();
         for (peer, sender, receiver) in peers {
+            let flights =
+                PartyPrivateRng::from_seed(rng.next_bytes32(), b"QSAG.CUSTODY.KOS.PEER.V1");
             if peer == party
                 || sender.sender_id != usize::from(party)
                 || sender.receiver_id != usize::from(peer)
                 || receiver.sender_id != usize::from(peer)
                 || receiver.receiver_id != usize::from(party)
-                || channels.insert(peer, (sender, receiver)).is_some()
+                || channels.insert(peer, (sender, receiver, flights)).is_some()
             {
                 return Err(invalid());
             }
@@ -231,8 +240,7 @@ impl<W: AuthenticatedOtWire> CommittedCorrelatedOt<W> {
         self.begin(peer, context, false, count)?;
         let result = (|| {
             if choice_words.len() != count.div_ceil(64)
-                || (!count.is_multiple_of(64)
-                    && choice_words[count / 64] >> (count % 64) != 0)
+                || (!count.is_multiple_of(64) && choice_words[count / 64] >> (count % 64) != 0)
             {
                 return Err(invalid());
             }
@@ -357,7 +365,198 @@ fn chunk_context(context: &[u8; 32], index: usize, total_bits: usize) -> [u8; 32
         ],
     )
 }
+impl<W: AuthenticatedOtWire> CommittedCorrelatedOt<W> {
+    /// The four KOS messages of every session in `peers`, one message kind at a time
+    /// across all peers; the peers' extension work runs side by side. The pads come straight
+    /// from the extension's correlation-robust hash, which already binds the base-OT session,
+    /// the batch and the OT index.
+    fn random_ot_flights(
+        &mut self,
+        context: [u8; 32],
+        peers: &[ParallelSeededDkgOtPeer<'_>],
+    ) -> Result<Vec<ParallelSeededDkgOtPads>, ParallelSeededError> {
+        let wire = &mut self.wire;
+        let mut channels: BTreeMap<u16, _> =
+            self.peers.iter_mut().map(|(&id, c)| (id, c)).collect();
+        let mut sessions = Vec::with_capacity(peers.len());
+        for session in peers {
+            sessions.push((session, channels.remove(&session.peer).ok_or_else(invalid)?));
+        }
+        let started = in_parallel(sessions.iter_mut().collect(), |(session, channel)| {
+            let mut words = SecretBuffer(Vec::with_capacity(session.choices.len() * 2));
+            for &choice in session.choices {
+                words.extend_from_slice(&[choice as u64, (choice >> 64) as u64]);
+            }
+            (!words.is_empty()).then(|| channel.1.round1_send_u_cols(&words, &mut channel.2))
+        });
+        let mut receiving = Vec::with_capacity(peers.len());
+        for (session, started) in peers.iter().zip(started) {
+            receiving.push(match started {
+                Some((pending, columns)) => {
+                    wire.send(session.peer, context, CommittedOtMessage::Columns(columns))?;
+                    Some(pending)
+                }
+                None => None,
+            });
+        }
+        let mut columns = Vec::with_capacity(peers.len());
+        for session in peers {
+            columns.push(if session.send_words == 0 {
+                None
+            } else {
+                match wire.receive(session.peer, context)? {
+                    CommittedOtMessage::Columns(columns)
+                        if columns.u_cols.len() == 128
+                            && columns
+                                .u_cols
+                                .iter()
+                                .all(|c| c.len() == session.send_words * 2 + 4) =>
+                    {
+                        Some(columns)
+                    }
+                    _ => return Err(invalid()),
+                }
+            });
+        }
+        let challenged = in_parallel(
+            sessions.iter_mut().zip(columns).collect(),
+            |((_, channel), columns)| {
+                columns
+                    .map(|columns| channel.0.round2_sample_challenge(&columns, &mut channel.2))
+                    .transpose()
+            },
+        );
+        let mut sending = Vec::with_capacity(peers.len());
+        for (session, challenged) in peers.iter().zip(challenged) {
+            sending.push(match challenged.map_err(|_| invalid())? {
+                Some((pending, challenge)) => {
+                    wire.send(
+                        session.peer,
+                        context,
+                        CommittedOtMessage::Challenge(challenge),
+                    )?;
+                    Some(pending)
+                }
+                None => None,
+            });
+        }
+        let mut challenges = Vec::with_capacity(peers.len());
+        for (session, pending) in peers.iter().zip(receiving) {
+            challenges.push(match pending {
+                Some(pending) => match wire.receive(session.peer, context)? {
+                    CommittedOtMessage::Challenge(challenge) => Some((pending, challenge)),
+                    _ => return Err(invalid()),
+                },
+                None => None,
+            });
+        }
+        let proved = in_parallel(
+            sessions.iter().zip(challenges).collect(),
+            |((_, channel), challenge)| {
+                challenge.map(|(pending, challenge)| {
+                    channel.1.round3_prove_and_finish(pending, &challenge)
+                })
+            },
+        );
+        let mut pads: Vec<_> = peers
+            .iter()
+            .map(|_| ParallelSeededDkgOtPads {
+                sent: Vec::new(),
+                received: Vec::new(),
+            })
+            .collect();
+        for ((session, proved), pads) in peers.iter().zip(proved).zip(&mut pads) {
+            if let Some((proof, received)) = proved {
+                pads.received = received;
+                wire.send(session.peer, context, CommittedOtMessage::Proof(proof))?;
+            }
+        }
+        let mut proofs = Vec::with_capacity(peers.len());
+        for (session, pending) in peers.iter().zip(sending) {
+            proofs.push(match pending {
+                Some(pending) => match wire.receive(session.peer, context)? {
+                    CommittedOtMessage::Proof(proof) => Some((pending, proof)),
+                    _ => return Err(invalid()),
+                },
+                None => None,
+            });
+        }
+        let finished = in_parallel(
+            sessions.iter_mut().zip(proofs).collect(),
+            |((_, channel), proof)| {
+                proof
+                    .map(|(pending, proof)| channel.0.round4_verify_and_finish(pending, &proof))
+                    .transpose()
+            },
+        );
+        for (finished, pads) in finished.into_iter().zip(&mut pads) {
+            if let Some(sent) = finished.map_err(|_| invalid())? {
+                pads.sent = sent;
+            }
+        }
+        Ok(pads)
+    }
+}
 impl<W: AuthenticatedOtWire> ParallelSeededDkgOt for CommittedCorrelatedOt<W> {
+    fn random_ots(
+        &mut self,
+        context: [u8; 32],
+        peers: &[ParallelSeededDkgOtPeer<'_>],
+    ) -> Result<Vec<ParallelSeededDkgOtPads>, ParallelSeededError> {
+        for session in peers {
+            if session.send_words != 0 {
+                self.begin(session.peer, context, true, session.send_words * 128)?;
+            }
+            if !session.choices.is_empty() {
+                self.begin(session.peer, context, false, session.choices.len() * 128)?;
+            }
+        }
+        let result = self.random_ot_flights(context, peers);
+        if result.is_err() {
+            for session in peers {
+                let _ = self
+                    .wire
+                    .send(session.peer, context, CommittedOtMessage::Abort);
+            }
+        }
+        self.failed |= result.is_err();
+        result
+    }
+    fn send_words(
+        &mut self,
+        peer: u16,
+        context: [u8; 32],
+        words: Vec<u128>,
+    ) -> Result<(), ParallelSeededError> {
+        if self.failed || words.len() > 3 * MAX_OTS || !self.peers.contains_key(&peer) {
+            self.failed = true;
+            return Err(invalid());
+        }
+        let result = self
+            .wire
+            .send(peer, context, CommittedOtMessage::Words(words));
+        self.failed |= result.is_err();
+        result
+    }
+    fn receive_words(
+        &mut self,
+        peer: u16,
+        context: [u8; 32],
+        count: usize,
+    ) -> Result<Vec<u128>, ParallelSeededError> {
+        if self.failed || count > 3 * MAX_OTS || !self.peers.contains_key(&peer) {
+            self.failed = true;
+            return Err(invalid());
+        }
+        match self.wire.receive(peer, context) {
+            Ok(CommittedOtMessage::Words(words)) if words.len() == count => Ok(words),
+            _ => {
+                self.failed = true;
+                let _ = self.wire.send(peer, context, CommittedOtMessage::Abort);
+                Err(invalid())
+            }
+        }
+    }
     fn send(
         &mut self,
         peer: u16,
@@ -487,6 +686,55 @@ mod tests {
         }
     }
 
+    /// Random OTs in both directions at once: every received pad is the sender's pad for
+    /// the chosen bit, word messages arrive intact, and a reused context is refused.
+    #[test]
+    fn production_random_ots_deliver_the_chosen_pad_in_both_directions() {
+        let (left, right) = engine_pair();
+        let choices = [
+            [
+                0x8000_0000_0000_0001_0000_0000_0000_0005u128,
+                u128::MAX - 2,
+                0,
+            ],
+            [u128::MAX, 1 << 64, 0x1234_5678_9abc_def0],
+        ];
+        let run = |mut engine: CommittedCorrelatedOt<Wire>, peer: u16, choices: [u128; 3]| {
+            std::thread::spawn(move || {
+                let plan = [ParallelSeededDkgOtPeer {
+                    peer,
+                    send_words: 3,
+                    choices: &choices,
+                }];
+                let mut pads = engine.random_ots([21; 32], &plan).unwrap();
+                engine
+                    .send_words(peer, [22; 32], alloc::vec![u128::from(peer); 5])
+                    .unwrap();
+                let words = engine.receive_words(peer, [22; 32], 5).unwrap();
+                assert_eq!(words, [u128::from(engine.party_id()); 5]);
+                assert!(engine.random_ots([21; 32], &plan).is_err());
+                assert!(
+                    engine.send_words(peer, [23; 32], Vec::new()).is_err(),
+                    "poisoned"
+                );
+                let pads = pads.pop().unwrap();
+                (pads.sent.clone(), pads.received.clone())
+            })
+        };
+        let (left, right) = (run(left, 1, choices[0]), run(right, 0, choices[1]));
+        let (left, right) = (left.join().unwrap(), right.join().unwrap());
+        for ((sent, _), ((_, received), choices)) in
+            [(&left, (&right, choices[1])), (&right, (&left, choices[0]))]
+        {
+            assert_eq!((sent.len(), received.len()), (384, 384));
+            for (i, (pair, pad)) in sent.iter().zip(received).enumerate() {
+                let bit = (choices[i / 128] >> (i % 128)) & 1 == 1;
+                assert_eq!(*pad, if bit { pair.1 } else { pair.0 }, "OT {i}");
+                assert_ne!(pair.0, pair.1);
+            }
+        }
+    }
+
     #[test]
     fn production_base_ot_roundtrip_and_replay_rejection() {
         let (mut left, mut right) = engine_pair();
@@ -604,7 +852,8 @@ mod pad_tests {
                     ]
                 })
                 .collect();
-            let ciphertexts = encrypt_alternatives(&context, sender, receiver, &pads, &alternatives);
+            let ciphertexts =
+                encrypt_alternatives(&context, sender, receiver, &pads, &alternatives);
             assert_eq!(ciphertexts.len(), count);
             for (i, ((cipher, plain), pad)) in
                 ciphertexts.iter().zip(&alternatives).zip(&pads).enumerate()
@@ -627,8 +876,14 @@ mod pad_tests {
                 let chosen_pads: Vec<[u8; 48]> = (0..count)
                     .map(|i| if bit(i) { pads[i].1 } else { pads[i].0 })
                     .collect();
-                let chosen =
-                    decrypt_chosen(&context, sender, receiver, &chosen_pads, &words, &ciphertexts);
+                let chosen = decrypt_chosen(
+                    &context,
+                    sender,
+                    receiver,
+                    &chosen_pads,
+                    &words,
+                    &ciphertexts,
+                );
                 let expected: Vec<u128> = (0..count)
                     .map(|i| alternatives[i][usize::from(bit(i))])
                     .collect();
