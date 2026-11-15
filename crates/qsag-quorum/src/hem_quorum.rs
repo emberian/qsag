@@ -2802,6 +2802,23 @@ impl HemSpdzSeedQuorum {
         if epoch >= self.cache.active_leaves as u64 {
             return Err(HemQuorumError::LeafExhausted);
         }
+        let (mu_bytes, _) = hem_compute_message_mu(&self.cache.pk, msg);
+        let latch_pk = self.cache.pk.latch_pq_public_key(self.cache.dkg_pk_seed);
+
+        // Reject an un-enrolled or invalid durable certificate before advancing `party_rngs`,
+        // establishing Base OTs, or touching any leaf state.
+        if let Some(cert) = durable_cert {
+            let binding =
+                epoch_latch_binding(&latch_pk.pk_seed, &latch_pk.pk_root, epoch, &mu_bytes);
+            let authority = self.durable_latch_authority.as_ref().ok_or(
+                Poseidon2MpcError::LatchCertificateRejected(
+                    qsag_core::dkg::EpochLatchError::CertificateCommitteeMismatch,
+                ),
+            )?;
+            cert.verify_against(authority, self.n, self.t, epoch, &binding)
+                .map_err(Poseidon2MpcError::LatchCertificateRejected)?;
+        }
+
         let pts = canonical_eval_points(self.n);
         let sign_budget = required_hem_jorts_sign_preprocessing_budget_cached();
 
@@ -2845,30 +2862,6 @@ impl HemSpdzSeedQuorum {
             if let Some(authority) = &self.durable_latch_authority {
                 ks.enroll_latch_authority(authority.clone())?;
             }
-        }
-
-        let (mu_bytes, _) = hem_compute_message_mu(&self.cache.pk, msg);
-        let latch_pk = self.cache.pk.latch_pq_public_key(self.cache.dkg_pk_seed);
-
-        // The core signer rejects a certificate it cannot check against an authority
-        // pinned in the key shares. Apply the same public check here, before the latch
-        // cluster certifies, so a certificate that cannot be accepted costs no leaf.
-        if let Some(cert) = durable_cert {
-            let binding =
-                epoch_latch_binding(&latch_pk.pk_seed, &latch_pk.pk_root, epoch, &mu_bytes);
-            let authority = key_shares[0].enrolled_latch_authority().ok_or(
-                Poseidon2MpcError::LatchCertificateRejected(
-                    qsag_core::dkg::EpochLatchError::CertificateCommitteeMismatch,
-                ),
-            )?;
-            cert.verify_against(
-                authority,
-                key_shares[0].committee_size,
-                self.t,
-                epoch,
-                &binding,
-            )
-            .map_err(Poseidon2MpcError::LatchCertificateRejected)?;
         }
 
         // Nothing above has touched the leaf. From here it is spent: the latch quorum
@@ -3771,9 +3764,9 @@ mod tests {
         let mut spdz = HemSpdzSeedQuorum::keygen_dealerless_online_fixture(
             [0xA1; 32],
             2,
-            3,
             4,
-            &mut test_party_rngs(120, 3),
+            4,
+            &mut test_party_rngs(120, 4),
         )
         .unwrap();
         let agg_pk = ValidatorPublicKey::from_bytes_canonical(&spdz.public_key().to_bytes()).unwrap();
@@ -3786,10 +3779,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        let mac_keys: Vec<[u8; 32]> = (0..3)
+        let mac_keys: Vec<[u8; 32]> = (0..4)
             .map(|i| [0x41 + i as u8; 32])
             .collect();
-        let latches: Vec<FsWalEpochLatch> = (0..3)
+        let latches: Vec<FsWalEpochLatch> = (0..4)
             .map(|i| {
                 FsWalEpochLatch::create_new_for_fresh_key(
                     dir.join(format!("custodian-{i}.wal")),
@@ -3801,19 +3794,21 @@ mod tests {
         let mut durable_cluster =
             QuorumEpochLatchCluster::from_durable_latches(1, latches, mac_keys).unwrap();
 
-        let msg0 = b"spdz 2-of-3 subset sign with enrolled durable certificate";
+        let msg0 = b"spdz 2-of-4 subset sign with enrolled durable certificate";
         let binding0 = spdz.epoch_latch_binding(0, msg0);
-        let cert0 = durable_cluster.certify_epoch(&[0, 2], 0, binding0).unwrap();
+        // Under (n=4, t=2, f=1), 2q > n+f = 5 requires q = 3: 2 approvals fail closed, 3 succeed.
+        assert!(durable_cluster.certify_epoch(&[0, 1], 0, binding0).is_err());
+        let cert0 = durable_cluster.certify_epoch(&[0, 1, 3], 0, binding0).unwrap();
 
         // Before enrollment, `Some(&cert0)` fails closed without spending leaf 0.
         assert!(
             spdz.sign_quorum_online_fixture(
                 [0xA2; 32],
-                &[0, 2],
-                &[0, 2],
+                &[0, 3],
+                &[0, 1, 3],
                 Some(&cert0),
                 msg0,
-                &mut test_party_rngs(130, 3),
+                &mut test_party_rngs(130, 4),
             )
             .is_err()
         );
@@ -3825,14 +3820,15 @@ mod tests {
         spdz.enroll_durable_latch_authority(durable_cluster.authority())
             .unwrap();
 
+        // Sign with 2-of-4 signers `[0, 3]` and 3-of-4 latch ackers `[0, 1, 3]` (custodian 2 offline).
         let (ep0, sig0) = spdz
             .sign_quorum_online_fixture(
                 [0xA3; 32],
-                &[0, 2],
-                &[0, 2],
+                &[0, 3],
+                &[0, 1, 3],
                 Some(&cert0),
                 msg0,
-                &mut test_party_rngs(140, 3),
+                &mut test_party_rngs(140, 4),
             )
             .unwrap();
         assert_eq!(ep0, 0);
