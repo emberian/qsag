@@ -4,10 +4,11 @@
 //! adapter inherits their security bounds; it makes no new QROM security claim.
 use crate::{ParallelSeededDkgOt, ParallelSeededError};
 use alloc::{collections::BTreeMap, collections::BTreeSet, vec::Vec};
-use qsag_accel::{ct::ct_zeroize_bytes, keccak::cshake256_framed_32};
+use qsag_accel::ct::{ct_zeroize_bytes, ct_zeroize_u64s, ct_zeroize_u128s};
+use qsag_accel::keccak::cshake256_framed_32;
 use qsag_core::preprocessing::{
     KosOtChallengeMsg, KosOtProofMsg, KosOtUColsMsg, OtExtReceiverChannel, OtExtSenderChannel,
-    PartyPrivateRng,
+    OtPadPair, PartyPrivateRng,
 };
 
 /// Eight pads with the existing six-frame, fixed-width cSHAKE encoding.
@@ -59,7 +60,7 @@ fn pad_batch(
     let result =
         core::array::from_fn(|lane| states[lane][0] as u128 | ((states[lane][1] as u128) << 64));
     for state in &mut states {
-        qsag_accel::ct::ct_zeroize_u64s(state);
+        ct_zeroize_u64s(state);
     }
     result
 }
@@ -185,38 +186,17 @@ impl<W: AuthenticatedOtWire> CommittedCorrelatedOt<W> {
             let mut pads = channel
                 .round4_verify_and_finish(pending, &proof)
                 .map_err(|_| invalid())?;
-            let mut ciphertexts = Vec::with_capacity(alternatives.len());
-            for base in (0..alternatives.len()).step_by(4) {
-                let indices =
-                    core::array::from_fn(|lane| (base + lane / 2).min(alternatives.len() - 1));
-                let mut batch = pad_batch(
-                    &context,
-                    self.party,
-                    peer,
-                    indices,
-                    alternatives.len(),
-                    core::array::from_fn(|lane| {
-                        if lane % 2 == 0 {
-                            &pads[indices[lane]].0
-                        } else {
-                            &pads[indices[lane]].1
-                        }
-                    }),
-                );
-                for lane in 0..(alternatives.len() - base).min(4) {
-                    ciphertexts.push([
-                        alternatives[base + lane][0] ^ batch[2 * lane],
-                        alternatives[base + lane][1] ^ batch[2 * lane + 1],
-                    ]);
-                }
-                qsag_core::wipe::wipe_u128s(&mut batch);
-            }
+            let ciphertexts = (pads.len() == alternatives.len())
+                .then(|| encrypt_alternatives(&context, self.party, peer, &pads, alternatives));
             for (a, b) in &mut pads {
                 ct_zeroize_bytes(a);
                 ct_zeroize_bytes(b);
             }
-            self.wire
-                .send(peer, context, CommittedOtMessage::Ciphertexts(ciphertexts))
+            self.wire.send(
+                peer,
+                context,
+                CommittedOtMessage::Ciphertexts(ciphertexts.ok_or_else(invalid)?),
+            )
         })();
         if result.is_err() {
             let _ = self.wire.send(peer, context, CommittedOtMessage::Abort);
@@ -230,15 +210,33 @@ impl<W: AuthenticatedOtWire> CommittedCorrelatedOt<W> {
         context: [u8; 32],
         choices: &[bool],
     ) -> Result<Vec<u128>, ParallelSeededError> {
-        self.begin(peer, context, false, choices.len())?;
+        let mut words = alloc::vec![0u64; choices.len().div_ceil(64)];
+        for (i, &choice) in choices.iter().enumerate() {
+            words[i / 64] |= u64::from(choice) << (i % 64);
+        }
+        let result = self.receive_packed(peer, context, &words, choices.len());
+        ct_zeroize_u64s(&mut words);
+        result
+    }
+    /// As [`Self::receive_values`], with choice `i` at bit `i % 64` of `choice_words[i / 64]`.
+    /// Bits at and above `count` in the last word must be zero.
+    pub fn receive_packed(
+        &mut self,
+        peer: u16,
+        context: [u8; 32],
+        choice_words: &[u64],
+        count: usize,
+    ) -> Result<Vec<u128>, ParallelSeededError> {
+        self.begin(peer, context, false, count)?;
         let result = (|| {
-            let mut words = alloc::vec![0u64; choices.len().div_ceil(64)];
-            for (i, &choice) in choices.iter().enumerate() {
-                words[i / 64] |= u64::from(choice) << (i % 64);
+            if choice_words.len() != count.div_ceil(64)
+                || (!count.is_multiple_of(64)
+                    && choice_words[count / 64] >> (count % 64) != 0)
+            {
+                return Err(invalid());
             }
             let channel = &mut self.peers.get_mut(&peer).ok_or_else(invalid)?.1;
-            let (pending, columns) = channel.round1_send_u_cols(&words, &mut self.rng);
-            qsag_accel::ct::ct_zeroize_u64s(&mut words);
+            let (pending, columns) = channel.round1_send_u_cols(choice_words, &mut self.rng);
             self.wire
                 .send(peer, context, CommittedOtMessage::Columns(columns))?;
             let CommittedOtMessage::Challenge(challenge) = self.wire.receive(peer, context)? else {
@@ -254,30 +252,17 @@ impl<W: AuthenticatedOtWire> CommittedCorrelatedOt<W> {
                 else {
                     return Err(invalid());
                 };
-                if ciphertexts.len() != choices.len() {
+                if ciphertexts.len() != count || pads.len() != count {
                     return Err(invalid());
                 }
-                let mut output = Vec::with_capacity(choices.len());
-                for base in (0..choices.len()).step_by(8) {
-                    let indices = core::array::from_fn(|lane| (base + lane).min(choices.len() - 1));
-                    let mut batch = pad_batch(
-                        &context,
-                        peer,
-                        self.party,
-                        indices,
-                        choices.len(),
-                        core::array::from_fn(|lane| &pads[indices[lane]]),
-                    );
-                    for (lane, pad) in batch.iter().enumerate().take((choices.len() - base).min(8))
-                    {
-                        let i = base + lane;
-                        let mask = 0u128.wrapping_sub(u128::from(choices[i]));
-                        let selected = (ciphertexts[i][0] & !mask) | (ciphertexts[i][1] & mask);
-                        output.push(selected ^ pad);
-                    }
-                    qsag_core::wipe::wipe_u128s(&mut batch);
-                }
-                Ok(output)
+                Ok(decrypt_chosen(
+                    &context,
+                    peer,
+                    self.party,
+                    &pads,
+                    choice_words,
+                    &ciphertexts,
+                ))
             })();
             for pad in &mut pads {
                 ct_zeroize_bytes(pad);
@@ -290,6 +275,76 @@ impl<W: AuthenticatedOtWire> CommittedCorrelatedOt<W> {
         self.failed |= result.is_err();
         result
     }
+}
+/// One ciphertext pair per OT: each alternative under the pad of its own branch.
+/// Pads are hashed eight at a time, four OTs per batch; a short tail repeats the
+/// last OT in the unused lanes and discards those outputs.
+fn encrypt_alternatives(
+    context: &[u8; 32],
+    sender: u16,
+    receiver: u16,
+    pads: &[OtPadPair],
+    alternatives: &[[u128; 2]],
+) -> Vec<[u128; 2]> {
+    let count = alternatives.len();
+    let mut ciphertexts = Vec::with_capacity(count);
+    for base in (0..count).step_by(4) {
+        let indices = core::array::from_fn(|lane| (base + lane / 2).min(count - 1));
+        let mut batch = pad_batch(
+            context,
+            sender,
+            receiver,
+            indices,
+            count,
+            core::array::from_fn(|lane| {
+                if lane % 2 == 0 {
+                    &pads[indices[lane]].0
+                } else {
+                    &pads[indices[lane]].1
+                }
+            }),
+        );
+        for lane in 0..(count - base).min(4) {
+            ciphertexts.push([
+                alternatives[base + lane][0] ^ batch[2 * lane],
+                alternatives[base + lane][1] ^ batch[2 * lane + 1],
+            ]);
+        }
+        ct_zeroize_u128s(&mut batch);
+    }
+    ciphertexts
+}
+/// The chosen alternative of every OT. Choice `i` is bit `i % 64` of
+/// `choice_words[i / 64]`; selection is by mask, never by index or branch.
+fn decrypt_chosen(
+    context: &[u8; 32],
+    sender: u16,
+    receiver: u16,
+    pads: &[[u8; 48]],
+    choice_words: &[u64],
+    ciphertexts: &[[u128; 2]],
+) -> Vec<u128> {
+    let count = ciphertexts.len();
+    let mut output = Vec::with_capacity(count);
+    for base in (0..count).step_by(8) {
+        let indices = core::array::from_fn(|lane| (base + lane).min(count - 1));
+        let mut batch = pad_batch(
+            context,
+            sender,
+            receiver,
+            indices,
+            count,
+            core::array::from_fn(|lane| &pads[indices[lane]]),
+        );
+        for (lane, pad) in batch.iter().enumerate().take((count - base).min(8)) {
+            let i = base + lane;
+            let mask = 0u128.wrapping_sub(u128::from((choice_words[i / 64] >> (i % 64)) & 1));
+            let selected = (ciphertexts[i][0] & !mask) | (ciphertexts[i][1] & mask);
+            output.push(selected ^ pad);
+        }
+        ct_zeroize_u128s(&mut batch);
+    }
+    output
 }
 fn chunk_context(context: &[u8; 32], index: usize, total_bits: usize) -> [u8; 32] {
     cshake256_framed_32(
@@ -331,21 +386,26 @@ impl<W: AuthenticatedOtWire> ParallelSeededDkgOt for CommittedCorrelatedOt<W> {
             return Err(invalid());
         }
         let mut output = Vec::with_capacity(total);
+        let mut words = alloc::vec![0u64; choices.len().min(MAX_OTS / 128) * 2];
         for (index, chunk) in choices.chunks(MAX_OTS / 128).enumerate() {
-            let mut bits: Vec<bool> = chunk
-                .iter()
-                .flat_map(|word| (0..128).map(move |i| (word >> i) & 1 != 0))
-                .collect();
-            let result = self.receive_values(peer, chunk_context(&context, index, total), &bits);
-            bits.fill(false);
-            core::hint::black_box(&mut bits);
+            let words = &mut words[..chunk.len() * 2];
+            for (pair, &choice) in words.as_chunks_mut::<2>().0.iter_mut().zip(chunk) {
+                *pair = [choice as u64, (choice >> 64) as u64];
+            }
+            let result = self.receive_packed(
+                peer,
+                chunk_context(&context, index, total),
+                words,
+                chunk.len() * 128,
+            );
+            ct_zeroize_u64s(words);
             match result {
                 Ok(mut values) => {
                     output.extend_from_slice(&values);
-                    qsag_accel::ct::ct_zeroize_u128s(&mut values);
+                    ct_zeroize_u128s(&mut values);
                 }
                 Err(error) => {
-                    qsag_accel::ct::ct_zeroize_u128s(&mut output);
+                    ct_zeroize_u128s(&mut output);
                     return Err(error);
                 }
             }
@@ -420,8 +480,14 @@ mod tests {
                 .unwrap();
         let pairs: Vec<_> = (0u128..65).map(|i| [i, 1000 + i]).collect();
         let choices: Vec<_> = (0..65).map(|i| i % 2 == 1).collect();
+        // The Gilboa-facing entry points: 128 OTs per packed choice word, least significant
+        // bit first.
+        let word_pairs: Vec<_> = (0u128..256).map(|i| [i, 1000 + i]).collect();
+        let words = [0x8000_0000_0000_0001_0000_0000_0000_0005u128, u128::MAX - 2];
         let sender = std::thread::spawn(move || {
             left.send_values(1, [7; 32], &pairs).unwrap();
+            ParallelSeededDkgOt::send(&mut left, 1, [8; 32], &word_pairs).unwrap();
+            // A replayed context is refused and poisons the engine.
             assert!(left.send_values(1, [7; 32], &pairs).is_err());
         });
         let values = right.receive_values(0, [7; 32], &choices).unwrap();
@@ -429,6 +495,13 @@ mod tests {
             values,
             (0u128..65)
                 .map(|i| i + if i % 2 == 1 { 1000 } else { 0 })
+                .collect::<Vec<_>>()
+        );
+        let values = ParallelSeededDkgOt::receive(&mut right, 0, [8; 32], &words).unwrap();
+        assert_eq!(
+            values,
+            (0u128..256)
+                .map(|i| i + 1000 * ((words[(i / 128) as usize] >> (i % 128)) & 1))
                 .collect::<Vec<_>>()
         );
         assert!(right.receive_values(0, [7; 32], &choices).is_err());
@@ -472,6 +545,84 @@ mod pad_tests {
             ));
         }
         std::eprintln!("scalar {MAX_OTS} pads: {:?}", start.elapsed());
+    }
+
+    fn reference_pad(
+        context: &[u8; 32],
+        sender: u16,
+        receiver: u16,
+        raw: &[u8; 48],
+        index: usize,
+        count: usize,
+    ) -> u128 {
+        let digest = cshake256_framed_32(
+            b"QSAG.CUSTODY.OT.PAD.V1",
+            &[
+                raw,
+                context,
+                &sender.to_be_bytes(),
+                &receiver.to_be_bytes(),
+                &(index as u64).to_be_bytes(),
+                &(count as u64).to_be_bytes(),
+            ],
+        );
+        u128::from_le_bytes(core::array::from_fn(|i| digest[i]))
+    }
+
+    /// Both batched loops against one-pad-at-a-time hashing, at every length that leaves a
+    /// partial four-OT sender batch, a partial eight-OT receiver batch or a partial choice word.
+    #[test]
+    fn batched_encryption_and_selection_match_the_scalar_reference_at_every_tail() {
+        let context = [0x3c; 32];
+        let (sender, receiver) = (0x0102, 0xfffe);
+        for count in (1..=33).chain([63, 64, 65, 127, 128, 129, 257]) {
+            let pads: Vec<OtPadPair> = (0..count)
+                .map(|i| {
+                    (
+                        core::array::from_fn(|j| (i * 7 + j * 3 + 1) as u8),
+                        core::array::from_fn(|j| (i * 11 + j * 5 + 2) as u8),
+                    )
+                })
+                .collect();
+            let alternatives: Vec<[u128; 2]> = (0..count as u128)
+                .map(|i| {
+                    [
+                        (i + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15_f39c_c060_5ced_c835),
+                        (i + 2).wrapping_mul(0xbf58_476d_1ce4_e5b9_94d0_49bb_1331_11eb),
+                    ]
+                })
+                .collect();
+            let ciphertexts = encrypt_alternatives(&context, sender, receiver, &pads, &alternatives);
+            assert_eq!(ciphertexts.len(), count);
+            for (i, ((cipher, plain), pad)) in
+                ciphertexts.iter().zip(&alternatives).zip(&pads).enumerate()
+            {
+                let expected = [
+                    plain[0] ^ reference_pad(&context, sender, receiver, &pad.0, i, count),
+                    plain[1] ^ reference_pad(&context, sender, receiver, &pad.1, i, count),
+                ];
+                assert_eq!(*cipher, expected, "count {count} index {i}");
+            }
+            // Choice patterns: all zero, all one, alternating, and a dense mix.
+            for pattern in [0u64, u64::MAX, 0xaaaa_aaaa_aaaa_aaaa, 0x9d39_247e_3377_6d41] {
+                let mut words: Vec<u64> = (0..count.div_ceil(64))
+                    .map(|w| pattern.rotate_left(w as u32 * 7))
+                    .collect();
+                if !count.is_multiple_of(64) {
+                    words[count / 64] &= (1u64 << (count % 64)) - 1;
+                }
+                let bit = |i: usize| (words[i / 64] >> (i % 64)) & 1 == 1;
+                let chosen_pads: Vec<[u8; 48]> = (0..count)
+                    .map(|i| if bit(i) { pads[i].1 } else { pads[i].0 })
+                    .collect();
+                let chosen =
+                    decrypt_chosen(&context, sender, receiver, &chosen_pads, &words, &ciphertexts);
+                let expected: Vec<u128> = (0..count)
+                    .map(|i| alternatives[i][usize::from(bit(i))])
+                    .collect();
+                assert_eq!(chosen, expected, "count {count} pattern {pattern:#x}");
+            }
+        }
     }
 
     #[test]

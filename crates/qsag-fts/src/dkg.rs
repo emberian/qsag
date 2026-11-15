@@ -213,8 +213,7 @@ impl ParallelSeededDkgRound1State {
             .collect())
     }
     fn sample(&self, label: &[u8], count: usize) -> SecretValues {
-        let mut raw = vec![0u8; count * 16];
-        cshake256_framed_xof(
+        SecretValues(xof_field_elements(
             b"QSAG.DKG.PRIVATE.V1",
             &[
                 &self.entropy,
@@ -222,17 +221,23 @@ impl ParallelSeededDkgRound1State {
                 &self.party_id.to_be_bytes(),
                 label,
             ],
-            &mut raw,
-        );
-        let values = raw
-            .as_chunks::<16>()
-            .0
-            .iter()
-            .map(|b| u128::from_le_bytes(*b))
-            .collect();
-        ct_zeroize_bytes(&mut raw);
-        SecretValues(values)
+            count,
+        ))
     }
+}
+/// `count` field elements from one framed cSHAKE256 stream, sixteen little-endian bytes each.
+/// The byte stream is wiped: for a private sample it is as secret as the elements.
+fn xof_field_elements(label: &[u8], frames: &[&[u8]], count: usize) -> Vec<u128> {
+    let mut raw = vec![0u8; count * 16];
+    cshake256_framed_xof(label, frames, &mut raw);
+    let values = raw
+        .as_chunks::<16>()
+        .0
+        .iter()
+        .map(|b| u128::from_le_bytes(*b))
+        .collect();
+    ct_zeroize_bytes(&mut raw);
+    values
 }
 fn coin_digest(context: &[u8; 32], id: u16, coin: &[u8; 32]) -> [u8; 32] {
     cshake256_framed_32(b"QSAG.DKG.COMMIT.V1", &[context, &id.to_be_bytes(), coin])
@@ -598,15 +603,6 @@ impl CheckLayout {
     }
 }
 
-fn check_challenges(label: &[u8], frames: &[&[u8]], count: usize) -> Vec<u128> {
-    let mut raw = vec![0u8; count * 16];
-    cshake256_framed_xof(label, frames, &mut raw);
-    raw.as_chunks::<16>()
-        .0
-        .iter()
-        .map(|b| u128::from_le_bytes(*b))
-        .collect()
-}
 fn check_coin_digest(context: &[u8; 32], id: u16, coin: &[u8; 32]) -> [u8; 32] {
     cshake256_framed_32(
         b"QSAG.DKG.CHECK.COIN_COMMIT.V1",
@@ -718,7 +714,7 @@ impl ParallelSeededDkgUnverifiedOutput {
     }
     fn relation_challenges(&self) -> Vec<u128> {
         let [powers, triples] = self.challenge_frames();
-        check_challenges(
+        xof_field_elements(
             b"QSAG.DKG.CHECK.SACRIFICE_T.V1",
             &[&self.context, &self.joint_coin, &powers, &triples],
             self.layout.relation_count(),
@@ -726,7 +722,7 @@ impl ParallelSeededDkgUnverifiedOutput {
     }
     fn fold_weights(&self) -> Vec<u128> {
         let [powers, triples] = self.challenge_frames();
-        check_challenges(
+        xof_field_elements(
             b"QSAG.DKG.CHECK.FOLD_WEIGHTS.V1",
             &[&self.context, &self.joint_coin, &powers, &triples],
             self.layout.output_value_count(),
@@ -866,7 +862,7 @@ impl ParallelSeededDkgUnverifiedOutput {
         let weights = self.fold_weights();
         // The MAC weights depend on every broadcast share, so they are fixed only after the
         // opened values are.
-        let mac_weights = check_challenges(
+        let mac_weights = xof_field_elements(
             b"QSAG.DKG.CHECK.MAC_WEIGHTS.V1",
             &[&self.context, &self.joint_coin, &transcript],
             3 * relations + 1,
@@ -1151,4 +1147,129 @@ pub fn finalize_parallel_seeded_dkg_party<T: ParallelSeededDkgProducts>(
         tags: [0; 2],
         tag_commits: Vec::new(),
     })
+}
+
+#[cfg(test)]
+mod gilboa_tests {
+    extern crate std;
+    use super::*;
+    use qsag_accel::gf2_128::gf2_128_mul_const;
+    use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+
+    type Mailbox = Rc<RefCell<BTreeMap<(u16, u16, [u8; 32]), Vec<[u128; 2]>>>>;
+
+    /// Ideal 1-of-2 OT inside one thread: the sender deposits its pairs and the receiver
+    /// takes exactly the chosen element of each. Checks the adapter's algebra only.
+    struct IdealOt {
+        id: u16,
+        mailbox: Mailbox,
+    }
+    impl ParallelSeededDkgOt for IdealOt {
+        fn send(
+            &mut self,
+            peer: u16,
+            context: [u8; 32],
+            alternatives: &[[u128; 2]],
+        ) -> Result<(), ParallelSeededError> {
+            let fresh = self
+                .mailbox
+                .borrow_mut()
+                .insert((self.id, peer, context), alternatives.to_vec())
+                .is_none();
+            assert!(fresh, "an OT context was used twice");
+            Ok(())
+        }
+        fn receive(
+            &mut self,
+            peer: u16,
+            context: [u8; 32],
+            choices: &[u128],
+        ) -> Result<Vec<u128>, ParallelSeededError> {
+            let alternatives = self
+                .mailbox
+                .borrow_mut()
+                .remove(&(peer, self.id, context))
+                .ok_or(ParallelSeededError::InvalidThresholdParameters)?;
+            assert_eq!(alternatives.len(), choices.len() * 128);
+            Ok(alternatives
+                .iter()
+                .enumerate()
+                .map(|(i, pair)| pair[((choices[i / 128] >> (i % 128)) & 1) as usize])
+                .collect())
+        }
+    }
+
+    fn operands(len: usize, salt: u128) -> Vec<u128> {
+        const EDGES: [u128; 6] = [0, 1, 2, 1 << 127, u128::MAX, 0x87];
+        (0..len)
+            .map(|i| {
+                if i < EDGES.len() && salt % 2 == 0 {
+                    EDGES[i]
+                } else {
+                    (i as u128 + salt).wrapping_mul(0x9e37_79b9_7f4a_7c15_f39c_c060_5ced_c835)
+                        ^ (salt << 64)
+                }
+            })
+            .collect()
+    }
+
+    /// The scale kernel behind the 128 alternatives against the bitwise field reference, at
+    /// every length around the 32-operand OT batch and with operands on the reduction edges.
+    #[test]
+    fn gilboa_shares_sum_to_the_field_product_at_every_batch_tail() {
+        for len in [1usize, 2, 5, 31, 32, 33, 63, 64, 65, 97] {
+            let mailbox = Mailbox::default();
+            let party = |id: u16| {
+                ParallelSeededGilboaProducts::new(
+                    id,
+                    [id as u8 + 40; 32],
+                    IdealOt {
+                        id,
+                        mailbox: mailbox.clone(),
+                    },
+                )
+            };
+            let (mut sender, mut receiver, mut outsider) = (party(3), party(9), party(11));
+            let (x, y) = (operands(len, 6), operands(len, 7));
+            let context = [len as u8; 32];
+            let sent = sender.product_shares(context, 3, 9, &x).unwrap();
+            let received = receiver.product_shares(context, 3, 9, &y).unwrap();
+            assert!(
+                outsider
+                    .product_shares(context, 3, 9, &[])
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!((sent.len(), received.len()), (len, len));
+            for i in 0..len {
+                assert_eq!(
+                    sent[i] ^ received[i],
+                    gf2_128_mul_const(x[i], y[i]),
+                    "length {len} element {i}"
+                );
+            }
+            assert!(
+                mailbox.borrow().is_empty(),
+                "every batch was sent and received"
+            );
+        }
+    }
+
+    #[test]
+    fn gilboa_refuses_degenerate_roles() {
+        let mailbox = Mailbox::default();
+        let mut party = ParallelSeededGilboaProducts::new(
+            1,
+            [1; 32],
+            IdealOt {
+                id: 1,
+                mailbox: mailbox.clone(),
+            },
+        );
+        let invalid = Err(ParallelSeededError::InvalidThresholdParameters);
+        assert_eq!(party.product_shares([0; 32], 1, 1, &[5]), invalid);
+        // A bystander holds no operand for a pair it is not part of.
+        assert_eq!(party.product_shares([0; 32], 2, 3, &[5]), invalid);
+        assert!(mailbox.borrow().is_empty());
+    }
 }
