@@ -948,3 +948,921 @@ private theorem dfmsCellDecompress_comm_decompress (m : Nat) (n : Nat)
       dfmsDecompress_doublePow, dfmsDecompress_bvGaussSum]
 
 /-- `n`-address decompression squared equals amplitude multiplication by `2 ^ (4 * m * n)`. -/
+theorem dfmsDecompress_square (m : Nat) : ∀ (n : Nat) (f : DfmsTable m n → GaussInt)
+    (D : DfmsTable m n),
+    dfmsDecompress m n (dfmsDecompress m n f) D = gaussDoublePow (4 * m * n) (f D)
+  | 0, _, () => by simp [dfmsDecompress, gaussDoublePow]
+  | n + 1, f, (c, D) => by
+    change dfmsCellDecompress m
+      (fun c' => dfmsDecompress m n
+        (fun D' => dfmsCellDecompress m (fun c'' => dfmsDecompress m n (fun D'' => f (c'', D'')) D') c') D) c =
+      gaussDoublePow (4 * m * (n + 1)) (f (c, D))
+    have hComm : (fun c' => dfmsDecompress m n
+        (fun D' => dfmsCellDecompress m (fun c'' => dfmsDecompress m n (fun D'' => f (c'', D'')) D') c') D) =
+      (fun c' => dfmsCellDecompress m
+        (fun c'' => dfmsDecompress m n (dfmsDecompress m n (fun D'' => f (c'', D''))) D) c') := by
+      funext c'
+      exact (dfmsCellDecompress_comm_decompress m n
+        (fun c'' D' => dfmsDecompress m n (fun D'' => f (c'', D'')) D') c' D).symm
+    rw [hComm]
+    have hInner : (fun c'' => dfmsDecompress m n (dfmsDecompress m n (fun D'' => f (c'', D''))) D) =
+        (fun c'' => gaussDoublePow (4 * m * n) (f (c'', D))) := by
+      funext c''; exact dfmsDecompress_square m n _ D
+    rw [hInner]
+    have hPull2 : (fun c' => dfmsCellDecompress m (fun c'' => gaussDoublePow (4 * m * n) (f (c'', D))) c') =
+        (fun c' => gaussDoublePow (4 * m * n) (dfmsCellDecompress m (fun c'' => f (c'', D)) c')) := by
+      funext c'; exact dfmsCellDecompress_doublePow m (4 * m * n) (fun c'' => f (c'', D)) c'
+    rw [hPull2, dfmsCellDecompress_doublePow, dfmsCellDecompress_square, gaussDoublePow_add]
+    have hMul : 4 * m * n + 4 * m = 4 * m * (n + 1) := by rw [Nat.mul_succ]
+    rw [hMul]
+
+/-- Scaled isometry of `n`-address decompression (`4 ^ (2 * m * n)` squared-norm factor). -/
+theorem dfmsDecompress_norm (m : Nat) : ∀ (n : Nat) (f : DfmsTable m n → GaussInt),
+    dfmsTableSum m n (fun D => GaussInt.normSq (dfmsDecompress m n f D)) =
+      4 ^ (2 * m * n) * dfmsTableSum m n (fun D => GaussInt.normSq (f D))
+  | 0, _ => by simp [dfmsTableSum, dfmsDecompress]
+  | n + 1, f => by
+    unfold dfmsTableSum dfmsDecompress
+    have hSwap : dfmsCellSum (2 * m) (fun c =>
+        dfmsTableSum m n (fun D =>
+          GaussInt.normSq (dfmsCellDecompress m (fun c' => dfmsDecompress m n (fun D' => f (c', D')) D) c))) =
+      dfmsTableSum m n (fun D =>
+        dfmsCellSum (2 * m) (fun c =>
+          GaussInt.normSq (dfmsCellDecompress m (fun c' => dfmsDecompress m n (fun D' => f (c', D')) D) c))) := by
+      unfold dfmsCellSum
+      rw [dfmsTableSum_add, dfmsTableSum_qsum]
+    rw [hSwap]
+    have hCell : ∀ D : DfmsTable m n,
+        dfmsCellSum (2 * m) (fun c =>
+          GaussInt.normSq (dfmsCellDecompress m (fun c' => dfmsDecompress m n (fun D' => f (c', D')) D) c)) =
+        4 ^ (2 * m) * dfmsCellSum (2 * m) (fun c' =>
+          GaussInt.normSq (dfmsDecompress m n (fun D' => f (c', D')) D)) :=
+      fun D => dfmsCellDecompress_norm m _
+    rw [dfmsTableSum_congr m n _ _ hCell, dfmsTableSum_mul]
+    have hSwapBack : dfmsTableSum m n (fun D =>
+        dfmsCellSum (2 * m) (fun c' => GaussInt.normSq (dfmsDecompress m n (fun D' => f (c', D')) D))) =
+      dfmsCellSum (2 * m) (fun c' =>
+        dfmsTableSum m n (fun D => GaussInt.normSq (dfmsDecompress m n (fun D' => f (c', D')) D))) := by
+      unfold dfmsCellSum
+      rw [dfmsTableSum_add, dfmsTableSum_qsum]
+    rw [hSwapBack]
+    have hTail : ∀ c' : Option (BitVec (2 * m)),
+        dfmsTableSum m n (fun D => GaussInt.normSq (dfmsDecompress m n (fun D' => f (c', D')) D)) =
+          4 ^ (2 * m * n) * dfmsTableSum m n (fun D => GaussInt.normSq (f (c', D))) :=
+      fun c' => dfmsDecompress_norm m n _
+    rw [dfmsCellSum_congr (2 * m) _ _ hTail, dfmsCellSum_mul, ← Nat.mul_assoc, ← Nat.pow_add]
+    have hExp : 2 * m + 2 * m * n = 2 * m * (n + 1) := by rw [Nat.mul_succ, Nat.add_comm]
+    rw [hExp]
+
+/-- Decompressing the pure `|⊥, …, ⊥⟩` (`dfmsIsAllBot`) state yields `2^(m*n)` on every total
+    oracle table and `0` on every partial (`none`-containing) table! -/
+theorem dfmsDecompress_allBot (m : Nat) : ∀ (n : Nat) (z : GaussInt) (D : DfmsTable m n),
+    dfmsDecompress m n (fun X => if dfmsIsAllBot m n X then z else GaussInt.zero) D =
+      if dfmsIsTotal m n D then gaussDoublePow (m * n) z else GaussInt.zero
+  | 0, z, () => by simp [dfmsDecompress, dfmsIsAllBot, dfmsIsTotal, gaussDoublePow]
+  | n + 1, z, (c, D) => by
+    unfold dfmsDecompress
+    have hInner : (fun c' : Option (BitVec (2 * m)) =>
+        dfmsDecompress m n (fun D' => if dfmsIsAllBot m (n + 1) (c', D') then z else GaussInt.zero) D) =
+      (fun c' => match c' with
+        | none => if dfmsIsTotal m n D then gaussDoublePow (m * n) z else GaussInt.zero
+        | some _ => GaussInt.zero) := by
+      funext c'
+      cases c' with
+      | none =>
+        simp only [dfmsIsAllBot, Option.isNone_none, Bool.true_and]
+        exact dfmsDecompress_allBot m n z D
+      | some _ =>
+        simp only [dfmsIsAllBot, Option.isNone_some, Bool.false_and, Bool.false_eq_true, ↓reduceIte]
+        exact dfmsDecompress_zero m n D
+    rw [hInner]
+    have hSumZero : bvGaussSum (2 * m) (fun _ => GaussInt.zero) = GaussInt.zero := by
+      rw [bvGaussSum_const, gaussDoublePow_zero]
+    cases c with
+    | none =>
+      simp only [dfmsCellDecompress, hSumZero, gaussDoublePow_zero, dfmsIsTotal,
+        Option.isSome_none, Bool.false_and, Bool.false_eq_true, ↓reduceIte]
+    | some y =>
+      simp only [dfmsCellDecompress, hSumZero, gaussDoublePow_zero, dfmsIsTotal,
+        Option.isSome_some, Bool.true_and]
+      have hzSub : GaussInt.zero.sub GaussInt.zero = GaussInt.zero := rfl
+      rw [hzSub]
+      cases dfmsIsTotal m n D
+      · simp only [Bool.false_eq_true, ↓reduceIte, gaussDoublePow_zero]; rfl
+      · simp only [↓reduceIte, gaussDoublePow_add]
+        have hAdd : GaussInt.zero.add (gaussDoublePow (m + m * n) z) = gaussDoublePow (m * (n + 1)) z := by
+          have hm : m + m * n = m * (n + 1) := by rw [Nat.mul_succ, Nat.add_comm]
+          rw [hm]
+          apply GaussInt.ext <;> simp [GaussInt.add, GaussInt.zero]
+        exact hAdd
+
+/-- Joint quantum state over the `DfmsTable m n` (`Option (BitVec (2 * m))`) compressed database
+    and the adversary's `(Fin n, BitVec (2 * m), Fin cardAnc)` registers. -/
+abbrev DfmsState (m n cardAnc : Nat) : Type := DfmsTable m n → QVec n (2 * m) cardAnc
+
+/-- Lift `dfmsDecompress m n` onto `DfmsState m n cardAnc`. -/
+def dfmsDecompressState {m n cardAnc : Nat} (ψ : DfmsState m n cardAnc) : DfmsState m n cardAnc :=
+  fun D x y a => dfmsDecompress m n (fun D' => ψ D' x y a) D
+
+/-- Scale a `DfmsState` by `2 ^ k`. -/
+def doubleDfmsState {m n cardAnc : Nat} (k : Nat) (ψ : DfmsState m n cardAnc) : DfmsState m n cardAnc :=
+  fun D => qvecDoublePow k (ψ D)
+
+/-- Embed a standard random-oracle state `(Fin n → BitVec (2 * m)) → QVec` into `DfmsState`
+    with zero amplitude on partial (`⊥`-containing) tables. -/
+def embedRealOracleState {m n cardAnc : Nat}
+    (ψ : (Fin n → BitVec (2 * m)) → QVec n (2 * m) cardAnc) : DfmsState m n cardAnc :=
+  fun D => if dfmsIsTotal m n D then ψ (dfmsToOracle m n D) else QVec.zero n (2 * m) cardAnc
+
+/-- Initial `|⊥, …, ⊥⟩ ⊗ |init⟩` state in the DFMS compressed-oracle runtime (`0` recorded entries). -/
+def dfmsInitState {m n cardAnc : Nat} (init : QVec n (2 * m) cardAnc) : DfmsState m n cardAnc :=
+  fun D => if dfmsIsAllBot m n D then init else QVec.zero n (2 * m) cardAnc
+
+/-- Coherent `2m`-bit query against a decompressed `DfmsTable` cell (`xorFin y v` on `some v`,
+    identity on `none`). -/
+def dfmsCellXor {m n cardAnc : Nat} (D : DfmsTable m n)
+    (ψ : QVec n (2 * m) cardAnc) : QVec n (2 * m) cardAnc :=
+  fun x y a =>
+    match dfmsEntry n D x with
+    | none => ψ x y a
+    | some v => ψ x (xorFin y v) a
+
+/-- One decompressed query step followed by adversary local unitary `U`. -/
+def dfmsCoherentStep {m n cardAnc : Nat} (U : ScaledUnitary n (2 * m) cardAnc)
+    (ψ : DfmsState m n cardAnc) : DfmsState m n cardAnc :=
+  fun D => U.apply (dfmsCellXor D (ψ D))
+
+/-- Operational DFMS compressed-oracle step (`F ∘ dfmsCoherentStep U ∘ F`, `[DFMS22, Eq. (8)]`). -/
+def dfmsOracleStep {m n cardAnc : Nat} (U : ScaledUnitary n (2 * m) cardAnc)
+    (ψ : DfmsState m n cardAnc) : DfmsState m n cardAnc :=
+  dfmsDecompressState (dfmsCoherentStep U (dfmsDecompressState ψ))
+
+/-- Independent `t`-step DFMS compressed-oracle runtime starting at `|⊥, …, ⊥⟩ ⊗ |A.init⟩`
+    for arbitrary `2m`-bit coherent adversaries (`m = 128 -> w = 256` `Digest256`!). -/
+def dfmsAdvStateAt (m : Nat) {n cardAnc Q : Nat} (A : QuantumAdv n (2 * m) cardAnc Q) :
+    (t : Nat) → t ≤ Q → DfmsState m n cardAnc
+  | 0, _ => dfmsInitState A.init
+  | t + 1, ht => dfmsOracleStep (A.steps ⟨t, ht⟩)
+      (dfmsAdvStateAt m A t (Nat.le_of_succ_le ht))
+
+private theorem dfmsDecompressState_square {m n cardAnc : Nat} (ψ : DfmsState m n cardAnc) :
+    dfmsDecompressState (dfmsDecompressState ψ) = doubleDfmsState (4 * m * n) ψ := by
+  funext D x y a
+  exact dfmsDecompress_square m n _ D
+
+private theorem dfmsDecompressState_double {m n cardAnc : Nat} (k : Nat) (ψ : DfmsState m n cardAnc) :
+    dfmsDecompressState (doubleDfmsState k ψ) = doubleDfmsState k (dfmsDecompressState ψ) := by
+  funext D x y a
+  exact dfmsDecompress_doublePow m n k _ D
+
+private theorem doubleDfmsState_add {m n cardAnc : Nat} (k l : Nat) (ψ : DfmsState m n cardAnc) :
+    doubleDfmsState k (doubleDfmsState l ψ) = doubleDfmsState (k + l) ψ := by
+  funext D x y a
+  exact gaussDoublePow_add k l _
+
+private theorem doubleDfmsState_inj {m n cardAnc : Nat} (k : Nat)
+    {ψ φ : DfmsState m n cardAnc} (h : doubleDfmsState k ψ = doubleDfmsState k φ) : ψ = φ := by
+  funext D x y a
+  exact gaussDoublePow_inj k (congrArg (fun s => s D x y a) h)
+
+private theorem dfmsCoherentStep_double {m n cardAnc : Nat} (U : ScaledUnitary n (2 * m) cardAnc)
+    (k : Nat) (ψ : DfmsState m n cardAnc) :
+    dfmsCoherentStep U (doubleDfmsState k ψ) = doubleDfmsState k (dfmsCoherentStep U ψ) := by
+  funext D
+  have hCell : dfmsCellXor D (qvecDoublePow k (ψ D)) = qvecDoublePow k (dfmsCellXor D (ψ D)) := by
+    funext x y a
+    unfold dfmsCellXor qvecDoublePow
+    dsimp only
+    cases dfmsEntry n D x <;> rfl
+  unfold dfmsCoherentStep doubleDfmsState
+  rw [hCell, U.map_doublePow]
+
+private theorem dfmsToOracle_eq_entry (m : Nat) : ∀ (n : Nat) (D : DfmsTable m n),
+    dfmsIsTotal m n D = true → ∀ x : Fin n, dfmsEntry n D x = some (dfmsToOracle m n D x)
+  | 0, _, _, x => Fin.elim0 x
+  | n + 1, (c, D), hTot, x => by
+    simp only [dfmsIsTotal, Bool.and_eq_true] at hTot
+    cases c with
+    | none => simp at hTot
+    | some v =>
+      refine Fin.cases ?_ (fun j => ?_) x
+      · rfl
+      · exact dfmsToOracle_eq_entry m n D hTot.2 j
+
+private theorem dfmsCoherentStep_embedReal {m n cardAnc : Nat}
+    (U : ScaledUnitary n (2 * m) cardAnc)
+    (ψ : (Fin n → BitVec (2 * m)) → QVec n (2 * m) cardAnc) :
+    dfmsCoherentStep U (embedRealOracleState ψ) =
+      embedRealOracleState (fun H => U.apply (oracleXor H (ψ H))) := by
+  funext D
+  unfold dfmsCoherentStep embedRealOracleState
+  by_cases hTot : dfmsIsTotal m n D = true
+  · simp only [hTot, ↓reduceIte]
+    congr 1
+    funext x y a
+    unfold dfmsCellXor oracleXor
+    rw [dfmsToOracle_eq_entry m n D hTot x]
+  · simp only [hTot, Bool.false_eq_true, ↓reduceIte]
+    have hz : dfmsCellXor D (QVec.zero n (2 * m) cardAnc) = QVec.zero n (2 * m) cardAnc := by
+      funext x y a
+      unfold dfmsCellXor QVec.zero
+      cases dfmsEntry n D x <;> rfl
+    rw [hz, ScaledUnitary.apply_zero]
+
+/-- Scaled isometry of `dfmsDecompressState` on joint `DfmsState` vectors. -/
+theorem dfmsDecompressState_norm {m n cardAnc : Nat} (ψ : DfmsState m n cardAnc) :
+    dfmsTableSum m n (fun D => QVec.stateNormSq (dfmsDecompressState ψ D)) =
+      4 ^ (2 * m * n) * dfmsTableSum m n (fun D => QVec.stateNormSq (ψ D)) := by
+  unfold QVec.stateNormSq QVec.queryWeight dfmsDecompressState
+  simp only [dfmsTableSum_qsum, dfmsDecompress_norm, qsum_mul_left]
+
+/-- Exact state correspondence between the `⊥`-initialized DFMS compressed-oracle runtime
+    `dfmsAdvStateAt m A t ht` and the coherent QROM execution `advStateAt A H t ht` for arbitrary
+    `2m`-bit digests (`m = 128 -> w = 256`!). -/
+theorem dfmsAdvStateAt_eq (m : Nat) {n cardAnc Q : Nat} (A : QuantumAdv n (2 * m) cardAnc Q) :
+    ∀ t (ht : t ≤ Q),
+      doubleDfmsState (3 * m * n) (dfmsAdvStateAt m A t ht) =
+        doubleDfmsState (4 * m * n * t)
+          (dfmsDecompressState (embedRealOracleState (fun H => advStateAt A H t ht)))
+  | 0, _ => by
+    have hBase : dfmsDecompressState (dfmsInitState (m := m) A.init) =
+        doubleDfmsState (m * n) (embedRealOracleState (fun _ => A.init)) := by
+      funext D x y a
+      unfold dfmsDecompressState dfmsInitState doubleDfmsState embedRealOracleState qvecDoublePow QVec.zero
+      have hCond : (fun D' => (if dfmsIsAllBot m n D' = true then A.init else fun _ _ _ => GaussInt.zero) x y a) =
+          (fun D' => if dfmsIsAllBot m n D' = true then A.init x y a else GaussInt.zero) := by
+        funext D'; cases dfmsIsAllBot m n D' <;> rfl
+      rw [hCond, dfmsDecompress_allBot]
+      cases dfmsIsTotal m n D
+      · simp [gaussDoublePow_zero]
+      · simp
+    have hApp := congrArg dfmsDecompressState hBase
+    rw [dfmsDecompressState_square, dfmsDecompressState_double] at hApp
+    have hSplit : 4 * m * n = m * n + 3 * m * n := by
+      calc 4 * m * n
+        _ = (1 + 3) * (m * n) := by rw [Nat.mul_assoc]
+        _ = m * n + 3 * m * n := by rw [Nat.add_mul, Nat.one_mul, ← Nat.mul_assoc]
+    rw [hSplit, ← doubleDfmsState_add] at hApp
+    exact doubleDfmsState_inj (m * n) hApp
+  | t + 1, ht => by
+    have ih := dfmsAdvStateAt_eq m A t (Nat.le_of_succ_le ht)
+    unfold dfmsAdvStateAt dfmsOracleStep
+    have hStep : doubleDfmsState (3 * m * n)
+        (dfmsDecompressState (dfmsCoherentStep (A.steps ⟨t, ht⟩)
+          (dfmsDecompressState (dfmsAdvStateAt m A t (Nat.le_of_succ_le ht))))) =
+      dfmsDecompressState (dfmsCoherentStep (A.steps ⟨t, ht⟩)
+        (dfmsDecompressState (doubleDfmsState (3 * m * n)
+          (dfmsAdvStateAt m A t (Nat.le_of_succ_le ht))))) := by
+      rw [dfmsDecompressState_double, dfmsCoherentStep_double, dfmsDecompressState_double]
+    rw [hStep, ih, dfmsDecompressState_double, dfmsDecompressState_square, doubleDfmsState_add,
+      dfmsCoherentStep_double, dfmsCoherentStep_embedReal, dfmsDecompressState_double]
+    have hExp : 4 * m * n * t + 4 * m * n = 4 * m * n * (t + 1) := by rw [Nat.mul_succ]
+    rw [hExp]
+    rfl
+
+/-- Decoding the final `dfmsAdvStateAt m A Q _` register recovers the exact coherent `2m`-bit
+    random-oracle execution (`0` amplitude on partial tables, `2^(4*m*n*Q + m*n)` scale on total tables). -/
+theorem dfmsAdvStateAt_decode (m : Nat) {n cardAnc Q : Nat}
+    (A : QuantumAdv n (2 * m) cardAnc Q) :
+    dfmsDecompressState (dfmsAdvStateAt m A Q (Nat.le_refl Q)) =
+      doubleDfmsState (4 * m * n * Q + m * n)
+        (embedRealOracleState (fun H => runQuantumAdv A H)) := by
+  have hEq := congrArg dfmsDecompressState (dfmsAdvStateAt_eq m A Q (Nat.le_refl Q))
+  rw [dfmsDecompressState_double (3 * m * n), dfmsDecompressState_double (4 * m * n * Q),
+    dfmsDecompressState_square, doubleDfmsState_add] at hEq
+  have h4 : 4 * m * n = 3 * m * n + m * n := by
+    calc 4 * m * n
+      _ = (3 + 1) * (m * n) := by rw [Nat.mul_assoc]
+      _ = 3 * m * n + m * n := by rw [Nat.add_mul, Nat.one_mul, ← Nat.mul_assoc]
+  have hSplit : 4 * m * n * Q + 4 * m * n = 3 * m * n + (4 * m * n * Q + m * n) := by omega
+  rw [hSplit, ← doubleDfmsState_add] at hEq
+  exact doubleDfmsState_inj (3 * m * n) hEq
+
+/-- Observable event mass evaluated after decoding the `DfmsTable m n` register (`only total
+    tables contribute when the state lies in the real-oracle subspace`). -/
+def dfmsCoherentEventMass {m n cardAnc : Nat}
+    (event : (Fin n → BitVec (2 * m)) → Fin n → Bool) (ψ : DfmsState m n cardAnc) : Nat :=
+  dfmsTableSum m n (fun D => QVec.queryMassOn (event (dfmsToOracle m n D)) (ψ D))
+
+/-- **Exact `2m`-Bit (`w = 256` at `m = 128`) DFMS Compressed-Oracle Observable Equivalence
+    (`dfmsAdv_event_eq`)**:
+    For EVERY `2m`-bit Boolean event of `(H, x)` (with arbitrary coherent superposition queries and
+    zero intermediate measurements), the decoded DFMS `⊥`-database runtime has identical event mass
+    to `uniformOracleSum (2 * m) n` up to the known oracle-independent factor `4 ^ (4*m*n*Q + m*n)`. -/
+theorem dfmsAdv_event_eq (m : Nat) {n cardAnc Q : Nat}
+    (A : QuantumAdv n (2 * m) cardAnc Q)
+    (event : (Fin n → BitVec (2 * m)) → Fin n → Bool) :
+    dfmsCoherentEventMass event (dfmsDecompressState (dfmsAdvStateAt m A Q (Nat.le_refl Q))) =
+      4 ^ (4 * m * n * Q + m * n) *
+        uniformOracleSum (2 * m) n (fun H => QVec.queryMassOn (event H) (runQuantumAdv A H)) := by
+  rw [dfmsAdvStateAt_decode]
+  unfold dfmsCoherentEventMass doubleDfmsState embedRealOracleState
+  have hPoint : ∀ D : DfmsTable m n,
+      QVec.queryMassOn (event (dfmsToOracle m n D))
+        (qvecDoublePow (4 * m * n * Q + m * n)
+          (if dfmsIsTotal m n D then runQuantumAdv A (dfmsToOracle m n D) else QVec.zero n (2 * m) cardAnc)) =
+      4 ^ (4 * m * n * Q + m * n) *
+        (if dfmsIsTotal m n D then
+          QVec.queryMassOn (event (dfmsToOracle m n D)) (runQuantumAdv A (dfmsToOracle m n D))
+        else 0) := by
+    intro D
+    rw [queryMassOn_doublePow]
+    cases dfmsIsTotal m n D
+    · simp [QVec.queryMassOn, QVec.queryWeight, QVec.zero, GaussInt.normSq_zero, qsum_const]
+    · simp
+  rw [dfmsTableSum_congr m n _ _ hPoint, dfmsTableSum_mul,
+    dfmsTableSum_total_eq_uniform m n (fun H => QVec.queryMassOn (event H) (runQuantumAdv A H))]
+
+/-- **Full `256`-Bit (`Digest256`) Authenticated `Hem` Coherent Bridge
+    (`coherent_dfms_hem256_authenticated_event_eq`)**:
+    Specializes `dfmsAdv_event_eq` at **`m = 128` (`2 * 128 = 256` bits!)** directly to the real
+    authenticated `Hem` verifier `verifyHemOpeningBatch L slots inst decode` over `256`-bit Merkle
+    digests (`MerkleAddressLayout n 256`, `MerkleOpeningSlot n 256`, `DfmsDigest256Table n`). -/
+theorem coherent_dfms_hem256_authenticated_event_eq {n cardAnc Q : Nat}
+    (A : QuantumAdv n 256 cardAnc Q)
+    (L : MerkleAddressLayout n 256)
+    (slots : List (MerkleOpeningSlot n 256))
+    (inst : HemWhirInstance QuarticGoldilocks)
+    (decode : Fin n → List (Option (MerkleOpeningValue 256)) → List (HemTranscriptRound QuarticGoldilocks)) :
+    dfmsCoherentEventMass (m := 128) (verifyHemOpeningBatch L slots inst decode)
+      (dfmsDecompressState (dfmsAdvStateAt 128 A Q (Nat.le_refl Q))) =
+      4 ^ (512 * n * Q + 128 * n) *
+        uniformOracleSum 256 n (fun H =>
+          QVec.queryMassOn (verifyHemOpeningBatch L slots inst decode H) (runQuantumAdv A H)) := by
+  exact dfmsAdv_event_eq 128 A (verifyHemOpeningBatch L slots inst decode)
+
+private theorem dfmsDecompress_local {m cardX w cardAnc : Nat}
+    (U : ScaledUnitary cardX w cardAnc) :
+    ∀ (k : Nat) (ψ : DfmsTable m k → QVec cardX w cardAnc) (D : DfmsTable m k),
+      U.apply (fun x y a => dfmsDecompress m k (fun D' => ψ D' x y a) D) =
+        fun x y a => dfmsDecompress m k (fun D' => U.apply (ψ D') x y a) D
+  | 0, _, () => rfl
+  | k + 1, ψ, (c, D) => by
+    have hCell : ∀ (f : Option (BitVec (2 * m)) → QVec cardX w cardAnc) (c0 : Option (BitVec (2 * m))),
+        U.apply (fun x y a => dfmsCellDecompress m (fun c' => f c' x y a) c0) =
+          fun x y a => dfmsCellDecompress m (fun c' => U.apply (f c') x y a) c0 := by
+      intro f c0
+      have hBv : ∀ (h : BitVec (2 * m) → QVec cardX w cardAnc),
+          U.apply (fun x y a => bvGaussSum (2 * m) (fun z => h z x y a)) =
+            fun x y a => bvGaussSum (2 * m) (fun z => U.apply (h z) x y a) := by
+        intro h
+        have hFin : ∀ (N : Nat) (q : Fin N → QVec cardX w cardAnc),
+            U.apply (fun x y a => ⟨intSum N (fun i => (q i x y a).re), intSum N (fun i => (q i x y a).im)⟩) =
+              fun x y a => ⟨intSum N (fun i => (U.apply (q i) x y a).re), intSum N (fun i => (U.apply (q i) x y a).im)⟩ := by
+          intro N
+          induction N with
+          | zero =>
+            intro _
+            exact ScaledUnitary.apply_zero U
+          | succ N ih =>
+            intro q
+            change U.apply (QVec.add (q ⟨0, Nat.zero_lt_succ N⟩)
+              (fun x y a => ⟨intSum N (fun i => (q ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ x y a).re),
+                             intSum N (fun i => (q ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ x y a).im)⟩)) = _
+            rw [U.map_add, ih]
+            rfl
+        exact hFin (2 ^ (2 * m)) (fun i => h (BitVec.ofFin i))
+      cases c0 with
+      | none =>
+        change U.apply (qvecDoublePow m (fun x y a => bvGaussSum (2 * m) (fun z => f (some z) x y a))) = _
+        rw [U.map_doublePow, hBv]
+        rfl
+      | some y0 =>
+        change U.apply (QVec.add
+          (QVec.sub (qvecDoublePow (2 * m) (f (some y0)))
+            (fun x y a => bvGaussSum (2 * m) (fun z => f (some z) x y a)))
+          (qvecDoublePow m (f none))) = _
+        rw [U.map_add, U.map_sub, U.map_doublePow, U.map_doublePow, hBv]
+        rfl
+    unfold dfmsDecompress
+    rw [hCell (fun c' x y a => dfmsDecompress m k (fun D' => ψ (c', D') x y a) D) c]
+    congr 1; funext x; congr 1; funext y; congr 1; funext a
+    congr 1; funext c'
+    dsimp only
+    exact congrArg (fun v => v x y a) (dfmsDecompress_local U k (fun D' => ψ (c', D')) D)
+
+private theorem dfms_mux_zero_of_fiber_zero (m : Nat) :
+    ∀ (n : Nat) (g : DfmsTable m n → Fin (2 ^ (2 * m)) → GaussInt)
+      (D : DfmsTable m n) (x : Fin n) (y : Fin (2 ^ (2 * m))),
+      (∀ (c' : Option (BitVec (2 * m))) (y' : Fin (2 ^ (2 * m))),
+        g (dfmsUpdateAt n D x c') y' = GaussInt.zero) →
+      dfmsDecompress m n (fun D' =>
+        match dfmsEntry n D' x with
+        | none => dfmsDecompress m n (fun D'' => g D'' y) D'
+        | some v => dfmsDecompress m n (fun D'' => g D'' (xorFin y v)) D') D = GaussInt.zero
+  | 0, _, _, x, _, _ => Fin.elim0 x
+  | n + 1, g, (c, D), x, y, hZero => by
+    revert hZero
+    refine Fin.cases ?_ (fun j => ?_) x
+    · intro hZero
+      change dfmsCellDecompress m (fun c' =>
+          dfmsDecompress m n (fun D' =>
+            match dfmsEntry (n + 1) (c', D') ⟨0, Nat.zero_lt_succ n⟩ with
+            | none => dfmsCellDecompress m (fun c'' => dfmsDecompress m n (fun D'' => g (c'', D'') y) D') none
+            | some v => dfmsCellDecompress m (fun c'' => dfmsDecompress m n (fun D'' => g (c'', D'') (xorFin y v)) D') (some v)) D) c =
+        GaussInt.zero
+      have hOuter : (fun c' : Option (BitVec (2 * m)) =>
+          dfmsDecompress m n (fun D' =>
+            match dfmsEntry (n + 1) (c', D') ⟨0, Nat.zero_lt_succ n⟩ with
+            | none => dfmsCellDecompress m (fun c'' => dfmsDecompress m n (fun D'' => g (c'', D'') y) D') none
+            | some v => dfmsCellDecompress m (fun c'' => dfmsDecompress m n (fun D'' => g (c'', D'') (xorFin y v)) D') (some v)) D) =
+          (fun _ => GaussInt.zero) := by
+        funext c'
+        cases c' with
+        | none =>
+          simp only [dfmsEntry]
+          have hComm : (fun D' => dfmsCellDecompress m (fun c'' => dfmsDecompress m n (fun D'' => g (c'', D'') y) D') none) =
+              dfmsDecompress m n (fun D'' => dfmsCellDecompress m (fun c'' => g (c'', D'') y) none) := by
+            funext D'
+            exact dfmsCellDecompress_comm_decompress m n (fun c'' D'' => g (c'', D'') y) none D'
+          rw [hComm, dfmsDecompress_square]
+          have hZ : (fun c'' => g (c'', D) y) = (fun _ => GaussInt.zero) := by
+            funext c''; exact hZero c'' y
+          rw [hZ, dfmsCellDecompress_zero, gaussDoublePow_zero]
+        | some v =>
+          simp only [dfmsEntry]
+          have hComm : (fun D' => dfmsCellDecompress m (fun c'' => dfmsDecompress m n (fun D'' => g (c'', D'') (xorFin y v)) D') (some v)) =
+              dfmsDecompress m n (fun D'' => dfmsCellDecompress m (fun c'' => g (c'', D'') (xorFin y v)) (some v)) := by
+            funext D'
+            exact dfmsCellDecompress_comm_decompress m n (fun c'' D'' => g (c'', D'') (xorFin y v)) (some v) D'
+          rw [hComm, dfmsDecompress_square]
+          have hZ : (fun c'' => g (c'', D) (xorFin y v)) = (fun _ => GaussInt.zero) := by
+            funext c''; exact hZero c'' (xorFin y v)
+          rw [hZ, dfmsCellDecompress_zero, gaussDoublePow_zero]
+      rw [hOuter, dfmsCellDecompress_zero]
+    · intro hZero
+      change dfmsCellDecompress m (fun c' =>
+          dfmsDecompress m n (fun D' =>
+            match dfmsEntry (n + 1) (c', D') j.succ with
+            | none => dfmsCellDecompress m (fun c'' => dfmsDecompress m n (fun D'' => g (c'', D'') y) D') c'
+            | some v => dfmsCellDecompress m (fun c'' => dfmsDecompress m n (fun D'' => g (c'', D'') (xorFin y v)) D') c') D) c =
+        GaussInt.zero
+      have hPull : (fun c' : Option (BitVec (2 * m)) =>
+          dfmsDecompress m n (fun D' =>
+            match dfmsEntry (n + 1) (c', D') j.succ with
+            | none => dfmsCellDecompress m (fun c'' => dfmsDecompress m n (fun D'' => g (c'', D'') y) D') c'
+            | some v => dfmsCellDecompress m (fun c'' => dfmsDecompress m n (fun D'' => g (c'', D'') (xorFin y v)) D') c') D) =
+          dfmsCellDecompress m (fun c'' =>
+            dfmsDecompress m n (fun D' =>
+              match dfmsEntry n D' j with
+              | none => dfmsDecompress m n (fun D'' => g (c'', D'') y) D'
+              | some v => dfmsDecompress m n (fun D'' => g (c'', D'') (xorFin y v)) D') D) := by
+        funext c'
+        have hStep : (fun D' =>
+            match dfmsEntry (n + 1) (c', D') j.succ with
+            | none => dfmsCellDecompress m (fun c'' => dfmsDecompress m n (fun D'' => g (c'', D'') y) D') c'
+            | some v => dfmsCellDecompress m (fun c'' => dfmsDecompress m n (fun D'' => g (c'', D'') (xorFin y v)) D') c') =
+          (fun D' => dfmsCellDecompress m (fun c'' =>
+            match dfmsEntry n D' j with
+            | none => dfmsDecompress m n (fun D'' => g (c'', D'') y) D'
+            | some v => dfmsDecompress m n (fun D'' => g (c'', D'') (xorFin y v)) D') c') := by
+          funext D'
+          change (match dfmsEntry n D' j with
+            | none => dfmsCellDecompress m (fun c'' => dfmsDecompress m n (fun D'' => g (c'', D'') y) D') c'
+            | some v => dfmsCellDecompress m (fun c'' => dfmsDecompress m n (fun D'' => g (c'', D'') (xorFin y v)) D') c') = _
+          cases dfmsEntry n D' j <;> rfl
+        rw [hStep]
+        exact (dfmsCellDecompress_comm_decompress m n _ c' D).symm
+      rw [hPull, dfmsCellDecompress_square]
+      have hTailZero : dfmsDecompress m n (fun D' =>
+          match dfmsEntry n D' j with
+          | none => dfmsDecompress m n (fun D'' => g (c, D'') y) D'
+          | some v => dfmsDecompress m n (fun D'' => g (c, D'') (xorFin y v)) D') D = GaussInt.zero :=
+        dfms_mux_zero_of_fiber_zero m n (fun D'' y' => g (c, D'') y') D j y
+          (fun c' y' => hZero c' y')
+      rw [hTailZero, gaussDoublePow_zero]
+
+/-- **Genuine `2m`-Bit (`w = 256` at `m = 128`) DFMS `⊥`-Database Sparsity Theorem
+    (`dfms_runtime_support`)**:
+    After `t ≤ Q` coherent `2m`-bit queries (`QuantumAdv n (2 * m) cardAnc Q`), the compressed
+    database state `dfmsAdvStateAt m A t ht D` has **identically zero amplitude** on every database
+    `D : DfmsTable m n` with `t < dfmsRecordedCount n D` non-`⊥` recorded digests! -/
+theorem dfms_runtime_support (m : Nat) {n cardAnc Q : Nat}
+    (A : QuantumAdv n (2 * m) cardAnc Q) :
+    ∀ (t : Nat) (ht : t ≤ Q) (D : DfmsTable m n),
+      t < dfmsRecordedCount n D →
+      dfmsAdvStateAt m A t ht D = QVec.zero n (2 * m) cardAnc
+  | 0, _, D, hCount => by
+    unfold dfmsAdvStateAt dfmsInitState
+    have hNotBot : dfmsIsAllBot m n D = false := by
+      clear A
+      induction n with
+      | zero => simp [dfmsRecordedCount] at hCount
+      | succ n ih =>
+        obtain ⟨c, rest⟩ := D
+        cases c with
+        | none =>
+          simp only [dfmsRecordedCount, Option.isSome_none, Bool.false_eq_true, ↓reduceIte,
+            Nat.zero_add] at hCount
+          simp only [dfmsIsAllBot, Option.isNone_none, Bool.true_and, ih rest hCount]
+        | some _ =>
+          simp [dfmsIsAllBot]
+    simp only [hNotBot, Bool.false_eq_true, ↓reduceIte]
+  | t + 1, ht, D, hCount => by
+    let φ := dfmsAdvStateAt m A t (Nat.le_of_succ_le ht)
+    have hPreZero : dfmsDecompressState (fun D' => dfmsCellXor D' (dfmsDecompressState φ D')) D =
+        QVec.zero n (2 * m) cardAnc := by
+      funext x y a
+      apply dfms_mux_zero_of_fiber_zero m n (fun D'' y' => φ D'' x y' a) D x y
+      intro c' y'
+      have hUpd := dfmsRecordedCount_updateAt_le n D x c'
+      have hZeroVec := dfms_runtime_support m A t (Nat.le_of_succ_le ht)
+        (dfmsUpdateAt n D x c') (by omega)
+      exact congrArg (fun v => v x y' a) hZeroVec
+    unfold dfmsAdvStateAt dfmsOracleStep dfmsCoherentStep
+    have hLoc : dfmsDecompressState (fun D' => (A.steps ⟨t, ht⟩).apply (dfmsCellXor D' (dfmsDecompressState φ D'))) D =
+        (A.steps ⟨t, ht⟩).apply (dfmsDecompressState (fun D' => dfmsCellXor D' (dfmsDecompressState φ D')) D) := by
+      exact (dfmsDecompress_local (A.steps ⟨t, ht⟩) n
+        (fun D' => dfmsCellXor D' (dfmsDecompressState φ D')) D).symm
+    change dfmsDecompressState (fun D' => (A.steps ⟨t, ht⟩).apply (dfmsCellXor D' (dfmsDecompressState φ D'))) D = _
+    rw [hLoc, hPreZero, ScaledUnitary.apply_zero]
+
+/-- Terminal measurement of `dfmsRecordedCount` on `DfmsTable m n` (`m = 128 -> w = 256`!) has
+    **identically zero mass** on databases with `> Q` recorded non-`⊥` digests. -/
+theorem dfms_database_overflow_mass_zero (m : Nat) {n cardAnc Q : Nat}
+    (A : QuantumAdv n (2 * m) cardAnc Q) :
+    dfmsTableSum m n (fun D =>
+      if Q < dfmsRecordedCount n D then
+        QVec.stateNormSq (dfmsAdvStateAt m A Q (Nat.le_refl Q) D)
+      else 0) = 0 := by
+  have hPoint : ∀ D : DfmsTable m n,
+      (if Q < dfmsRecordedCount n D then
+        QVec.stateNormSq (dfmsAdvStateAt m A Q (Nat.le_refl Q) D) else 0) = 0 := by
+    intro D
+    by_cases hOver : Q < dfmsRecordedCount n D
+    · rw [ite_eq_left hOver, dfms_runtime_support m A Q (Nat.le_refl Q) D hOver]
+      simp [QVec.stateNormSq, QVec.queryWeight, QVec.zero, GaussInt.normSq_zero, qsum_const]
+    · exact ite_eq_right hOver
+  rw [dfmsTableSum_congr m n _ _ hPoint, dfmsTableSum_zero]
+
+/-- **Multi-Salt / Multi-Domain `2m`-Bit (`w = 256`) DFMS Budget Conservation
+    (`dfms_salted_domain_budget_zero_of_overflow`)**:
+    Across disjoint per-commitment Canopy salts or Fiat–Shamir / Merkle domains
+    (`domainOf : Fin n → Fin cardDom`), any `2m`-bit `QuantumAdv` (`m = 128 -> w = 256`) has
+    **zero amplitude** on databases whose summed non-`⊥` recorded digests exceed `t ≤ Q`! -/
+theorem dfms_salted_domain_budget_zero_of_overflow (m : Nat) {n cardDom cardAnc Q : Nat}
+    (A : QuantumAdv n (2 * m) cardAnc Q)
+    (domainOf : Fin n → Fin cardDom)
+    (t : Nat) (ht : t ≤ Q) (D : DfmsTable m n)
+    (hOverflow : t < qsum cardDom (fun dom => dfmsDomainRecordedCount n domainOf dom D)) :
+    dfmsAdvStateAt m A t ht D = QVec.zero n (2 * m) cardAnc := by
+  rw [dfmsDomainRecordedCount_sum_eq n domainOf D] at hOverflow
+  exact dfms_runtime_support m A t ht D hOverflow
+
+/-- Projective online-extraction filter keeping compressed `DfmsTable m n` branches satisfying `P`
+    (e.g., collision-free / uniquely extractable salted Merkle trees) and zeroing `¬ P`. -/
+def projectDfmsPred {m n cardAnc : Nat} (P : DfmsTable m n → Bool)
+    (ψ : DfmsState m n cardAnc) : DfmsState m n cardAnc :=
+  fun D => if P D then ψ D else QVec.zero n (2 * m) cardAnc
+
+/-- **Quantitative DFMS Projective Online-Extraction Disturbance Bound
+    (`dfms_projective_extraction_disturbance_bound`)**:
+    For ANY compressed database state `ψ : DfmsState m n cardAnc`, ANY database relation
+    `P : DfmsTable m n → Bool` (e.g., collision-free salted Canopy extraction), and ANY verifier
+    event `event` (including `verifyHemOpeningBatch` at `w = 256`), the undisturbed coherent
+    acceptance mass after decompression is bounded by twice the projected/extracted branch's
+    acceptance mass plus `2 * 4^(2*m*n)` times the pre-decompression `¬ P` bad-database mass! -/
+theorem dfms_projective_extraction_disturbance_bound {m n cardAnc : Nat}
+    (P : DfmsTable m n → Bool)
+    (event : (Fin n → BitVec (2 * m)) → Fin n → Bool)
+    (ψ : DfmsState m n cardAnc) :
+    dfmsCoherentEventMass event (dfmsDecompressState ψ) ≤
+      2 * dfmsCoherentEventMass event (dfmsDecompressState (projectDfmsPred P ψ)) +
+      2 * 4 ^ (2 * m * n) *
+        dfmsTableSum m n (fun D => if P D then 0 else QVec.stateNormSq (ψ D)) := by
+  let ψGood := projectDfmsPred P ψ
+  let ψBad : DfmsState m n cardAnc := fun D => if P D then QVec.zero n (2 * m) cardAnc else ψ D
+  have hSplit : ∀ D x y a,
+      dfmsDecompressState ψ D x y a =
+        (dfmsDecompressState ψGood D x y a).add (dfmsDecompressState ψBad D x y a) := by
+    intro D x y a
+    unfold dfmsDecompressState
+    rw [← dfmsDecompress_add]
+    apply congrFun
+    apply dfmsDecompress_congr m n
+    intro D'
+    unfold ψGood ψBad projectDfmsPred QVec.zero
+    cases P D' <;> apply GaussInt.ext <;> simp [GaussInt.add, GaussInt.zero]
+  have hPerTable : ∀ D : DfmsTable m n,
+      QVec.queryMassOn (event (dfmsToOracle m n D)) (dfmsDecompressState ψ D) ≤
+        2 * QVec.queryMassOn (event (dfmsToOracle m n D)) (dfmsDecompressState ψGood D) +
+        2 * QVec.stateNormSq (dfmsDecompressState ψBad D) := by
+    intro D
+    unfold QVec.queryMassOn QVec.stateNormSq
+    rw [← qsum_mul_left, ← qsum_mul_left, ← qsum_add]
+    apply qsum_le_qsum
+    intro x
+    cases event (dfmsToOracle m n D) x
+    · simp
+    · simp only [↓reduceIte]
+      unfold QVec.queryWeight
+      rw [← qsum_mul_left, ← qsum_mul_left, ← qsum_add]
+      apply qsum_le_qsum
+      intro y
+      rw [← qsum_mul_left, ← qsum_mul_left, ← qsum_add]
+      apply qsum_le_qsum
+      intro a
+      rw [hSplit D x y a]
+      exact GaussInt.normSq_add_le _ _
+  have hSumLe : ∀ (k : Nat) (f g : DfmsTable m k → Nat),
+      (∀ D, f D ≤ g D) → dfmsTableSum m k f ≤ dfmsTableSum m k g := by
+    intro k
+    induction k with
+    | zero => intro f g h; exact h ()
+    | succ k ih =>
+      intro f g h
+      unfold dfmsTableSum dfmsCellSum
+      dsimp only
+      have hNone := ih _ _ (fun D => h (none, D))
+      have hSome := qsum_le_qsum (fun j => ih _ _ (fun D => h (some (BitVec.ofFin j), D)))
+      omega
+  have hMain := hSumLe n _ _ hPerTable
+  rw [dfmsTableSum_add, dfmsTableSum_mul, dfmsTableSum_mul, dfmsDecompressState_norm] at hMain
+  have hBadNorm : ∀ D : DfmsTable m n,
+      QVec.stateNormSq (ψBad D) = if P D then 0 else QVec.stateNormSq (ψ D) := by
+    intro D
+    unfold ψBad
+    cases P D
+    · simp
+    · simp [QVec.stateNormSq, QVec.queryWeight, QVec.zero, GaussInt.normSq_zero, qsum_const]
+  rw [dfmsTableSum_congr m n _ _ hBadNorm] at hMain
+  simpa [dfmsCoherentEventMass, Nat.mul_assoc] using hMain
+
+/-- **`256`-Bit `Hem` Online-Extraction Disturbance Corollary (`dfms_hem256_online_extraction_disturbance_bound`)**:
+    Instantiates `dfms_projective_extraction_disturbance_bound` + `coherent_dfms_hem256_authenticated_event_eq`
+    at `m = 128` (`w = 256` `Digest256`!) on `verifyHemOpeningBatch`: coherent 256-bit `Hem`
+    acceptance mass is bounded directly by twice the `P`-projected compressed-database acceptance
+    mass plus `2 * 4^(256 * n)` times the bad compressed-database mass (where every populated `D`
+    additionally obeys `dfmsRecordedCount n D ≤ Q`!). -/
+theorem dfms_hem256_online_extraction_disturbance_bound {n cardAnc Q : Nat}
+    (A : QuantumAdv n 256 cardAnc Q)
+    (P : DfmsDigest256Table n → Bool)
+    (L : MerkleAddressLayout n 256)
+    (slots : List (MerkleOpeningSlot n 256))
+    (inst : HemWhirInstance QuarticGoldilocks)
+    (decode : Fin n → List (Option (MerkleOpeningValue 256)) → List (HemTranscriptRound QuarticGoldilocks)) :
+    4 ^ (512 * n * Q + 128 * n) *
+        uniformOracleSum 256 n (fun H =>
+          QVec.queryMassOn (verifyHemOpeningBatch L slots inst decode H) (runQuantumAdv A H)) ≤
+      2 * dfmsCoherentEventMass (m := 128) (verifyHemOpeningBatch L slots inst decode)
+        (dfmsDecompressState (projectDfmsPred P (dfmsAdvStateAt 128 A Q (Nat.le_refl Q)))) +
+      2 * 4 ^ (256 * n) *
+        dfmsTableSum 128 n (fun D =>
+          if P D then 0
+          else if dfmsRecordedCount n D ≤ Q then
+            QVec.stateNormSq (dfmsAdvStateAt 128 A Q (Nat.le_refl Q) D)
+          else 0) := by
+  rw [← coherent_dfms_hem256_authenticated_event_eq A L slots inst decode]
+  have hBase := dfms_projective_extraction_disturbance_bound P
+    (verifyHemOpeningBatch L slots inst decode) (dfmsAdvStateAt 128 A Q (Nat.le_refl Q))
+  have hTrunc : ∀ D : DfmsDigest256Table n,
+      (if P D then 0 else QVec.stateNormSq (dfmsAdvStateAt 128 A Q (Nat.le_refl Q) D)) =
+      (if P D then 0
+       else if dfmsRecordedCount n D ≤ Q then
+         QVec.stateNormSq (dfmsAdvStateAt 128 A Q (Nat.le_refl Q) D)
+       else 0) := by
+    intro D
+    cases P D
+    · simp only [Bool.false_eq_true, ↓reduceIte]
+      by_cases hLe : dfmsRecordedCount n D ≤ Q
+      · simp [hLe]
+      · have hGt : Q < dfmsRecordedCount n D := by omega
+        rw [ite_eq_right hLe, dfms_runtime_support 128 A Q (Nat.le_refl Q) D hGt]
+        simp [QVec.stateNormSq, QVec.queryWeight, QVec.zero, GaussInt.normSq_zero, qsum_const]
+    · simp
+  have h256 : 2 * 128 * n = 256 * n := by omega
+  rw [dfmsTableSum_congr 128 n _ _ hTrunc, h256] at hBase
+  exact hBase
+
+/-- Concrete `w = 2` (`m = 1`, 2-bit output!) 1-query superposed parity adversary deciding
+    `(H 0).lsb ⊕ (H 1).lsb` across all `16` two-bit 2-address oracles in a single coherent query,
+    using `hadamardQuery2 2 1 : ScaledUnitary 2 2 1`. -/
+def dfmsW2ParityAdv : QuantumAdv 2 2 1 1 where
+  init := fun _ y _ => if y.1 % 2 == 0 then ⟨1, 0⟩ else ⟨-1, 0⟩
+  h_init_pos := by decide
+  steps := fun _ => hadamardQuery2 2 1
+
+/-- Event testing whether output address `x : Fin 2` equals `((H 0).toNat + (H 1).toNat) % 2`. -/
+def dfmsW2ParityEvent (H : Fin 2 → BitVec 2) (x : Fin 2) : Bool :=
+  decide (x.1 = ((H ⟨0, by decide⟩).toNat + (H ⟨1, by decide⟩).toNat) % 2)
+
+/-- Decidable equality on `DfmsTable 1 2` (`25` states: `Option (BitVec 2) × Option (BitVec 2)`). -/
+def dfmsW2TableEq (D₁ D₂ : DfmsTable 1 2) : Bool :=
+  decide (D₁.1 = D₂.1 ∧ D₁.2.1 = D₂.2.1)
+
+/-- Executable `w = 2` (`m = 1`, 2-bit `Option (BitVec 2)` compressed database!) kernel-`decide`
+    witness: after 1 coherent 2-bit query, `dfmsW2ParityAdv` has **0 mass** on `dfmsRecordedCount > 1`,
+    strictly positive mass on recorded `some (y : BitVec 2)` entries, and **100% (`256 / 256`)**
+    undisturbed parity success both in `uniformOracleSum 2 2` and after `dfmsDecompressState`! -/
+theorem dfms_w2_coherent_runtime_witness :
+    uniformOracleSum 2 2 (fun H =>
+      QVec.queryMassOn (dfmsW2ParityEvent H) (runQuantumAdv dfmsW2ParityAdv H)) = 256 ∧
+    quantumExperimentTotal dfmsW2ParityAdv = 256 ∧
+    dfmsTableSum 1 2 (fun D =>
+      if 1 < dfmsRecordedCount 2 D then
+        QVec.stateNormSq (dfmsAdvStateAt 1 dfmsW2ParityAdv 1 (Nat.le_refl 1) D)
+      else 0) = 0 ∧
+    0 < dfmsTableSum 1 2 (fun D =>
+      if dfmsRecordedCount 2 D == 1 then
+        QVec.stateNormSq (dfmsAdvStateAt 1 dfmsW2ParityAdv 1 (Nat.le_refl 1) D)
+      else 0) ∧
+    dfmsCoherentEventMass (m := 1) dfmsW2ParityEvent
+      (dfmsDecompressState (dfmsAdvStateAt 1 dfmsW2ParityAdv 1 (Nat.le_refl 1))) =
+      4 ^ 10 * 256 := by
+  decide +kernel
+
+/-- `#tooth` negative control at `w = 2` (`Option (BitVec 2)`): naively collapsing the `DfmsTable 1 2`
+    database (`projectDfmsPred (dfmsW2TableEq D)`) before decompression destroys coherent cross-address
+    interference and drops `dfmsW2ParityEvent` mass from `4^10 * 256` (`100%`) strictly down to
+    `4^10 * 128` (`50%`), demonstrating why `dfms_projective_extraction_disturbance_bound` is required! -/
+theorem tooth_dfms_w2_raw_database_measurement_disturbs :
+    ∃ measuredMass : Nat,
+      measuredMass = dfmsTableSum 1 2 (fun D =>
+        dfmsCoherentEventMass (m := 1) dfmsW2ParityEvent
+          (dfmsDecompressState
+            (projectDfmsPred (dfmsW2TableEq D)
+              (dfmsAdvStateAt 1 dfmsW2ParityAdv 1 (Nat.le_refl 1))))) ∧
+      measuredMass = 4 ^ 10 * 128 ∧
+      measuredMass ≠ dfmsCoherentEventMass (m := 1) dfmsW2ParityEvent
+        (dfmsDecompressState (dfmsAdvStateAt 1 dfmsW2ParityAdv 1 (Nat.le_refl 1))) :=
+  ⟨4 ^ 10 * 128, by decide +kernel, rfl, by decide +kernel⟩
+
+
+
+/-! ## §2. Adaptive State-Restoration Games & Coherent Joint `(PoW × Challenge)` QROM Reduction -/
+
+/-! ### §2.1 Classical Adaptive State-Restoration Game (`[BCS16; CY24]`) -/
+
+/-- Adaptive `T`-step state-restoration prover over transcript states `State`, prover moves `Move`,
+    and `cardChal`-ary verifier challenges. At each step the prover selects an index into the list
+    of previously reached states (`restoredIdx`), submits a `Move`, and receives a uniform challenge,
+    appending the resulting state to the reachable history. -/
+inductive StateRestorationTree (Move : Type) (cardChal : Nat) : Nat → Type where
+  | halt {T : Nat} : StateRestorationTree Move cardChal T
+  | restore {T : Nat} (restoredIdx : Nat) (mv : Move)
+      (next : Fin cardChal → StateRestorationTree Move cardChal T) :
+      StateRestorationTree Move cardChal (T + 1)
+
+/-- Count of challenge tapes (out of `cardChal ^ T`) on which `tree` ever reaches a state with
+    `isLive s = true`, starting from `history`. -/
+def srWinTapeCount {State Move : Type} {cardChal : Nat}
+    (step : State → Move → Fin cardChal → State)
+    (isLive : State → Bool) :
+    {T : Nat} → StateRestorationTree Move cardChal T → List State → Nat
+  | T, .halt, history =>
+    if history.any isLive then cardChal ^ T else 0
+  | _, .restore idx mv next, history =>
+    qsum cardChal (fun c =>
+      match history[idx]? with
+      | none => srWinTapeCount step isLive (next c) history
+      | some st => srWinTapeCount step isLive (next c) (step st mv c :: history))
+
+private theorem srWinTapeCount_all_live {State Move : Type} {cardChal : Nat}
+    (step : State → Move → Fin cardChal → State)
+    (isLive : State → Bool) :
+    ∀ {T : Nat} (tree : StateRestorationTree Move cardChal T) (history : List State),
+      srWinTapeCount step isLive tree history ≤ cardChal ^ T
+  | T, .halt, history => by
+    unfold srWinTapeCount
+    split
+    · exact Nat.le_refl _
+    · exact Nat.zero_le _
+  | T + 1, .restore idx mv next, history => by
+    unfold srWinTapeCount
+    have hEach : ∀ c : Fin cardChal,
+        (match history[idx]? with
+         | none => srWinTapeCount step isLive (next c) history
+         | some st => srWinTapeCount step isLive (next c) (step st mv c :: history)) ≤
+        cardChal ^ T := by
+      intro c
+      cases history[idx]? with
+      | none => exact srWinTapeCount_all_live step isLive (next c) history
+      | some st => exact srWinTapeCount_all_live step isLive (next c) (step st mv c :: history)
+    have hSum := qsum_le_qsum hEach
+    rw [qsum_const] at hSum
+    have hPowEq : cardChal * cardChal ^ T = cardChal ^ (T + 1) := by
+      rw [Nat.pow_succ, Nat.mul_comm]
+    exact hPowEq ▸ hSum
+
+/-- **Constructive Adaptive State-Restoration Soundness (`classical_state_restoration_tree_bound`)**:
+    Starting from any all-doomed state history (`history.any isLive = false`), if every doomed state
+    `st` and prover move `mv` transitions to a live state on at most `badPerRound` out of `cardChal`
+    challenges, then ANY `T`-step adaptive state-restoration tree succeeds on at most
+    `T * badPerRound * cardChal ^ T` divided by `cardChal` challenge tapes:
+    `srWinTapeCount * cardChal ≤ T * badPerRound * cardChal ^ T`! -/
+theorem classical_state_restoration_tree_bound {State Move : Type} {cardChal : Nat}
+    (step : State → Move → Fin cardChal → State)
+    (isLive : State → Bool)
+    (badPerRound : Nat)
+    (hRbr : ∀ (st : State) (mv : Move), isLive st = false →
+      qsum cardChal (fun c => if isLive (step st mv c) = true then 1 else 0) ≤ badPerRound) :
+    ∀ {T : Nat} (tree : StateRestorationTree Move cardChal T) (history : List State),
+      history.any isLive = false →
+      srWinTapeCount step isLive tree history * cardChal ≤
+        T * badPerRound * cardChal ^ T
+  | T, .halt, history, hDoomed => by
+    simp only [srWinTapeCount, hDoomed, Bool.false_eq_true, ↓reduceIte, Nat.zero_mul, Nat.zero_le]
+  | T + 1, .restore idx mv next, history, hDoomed => by
+    unfold srWinTapeCount
+    cases hLookup : history[idx]? with
+    | none =>
+      have hSub : ∀ c : Fin cardChal,
+          srWinTapeCount step isLive (next c) history * cardChal ≤
+            T * badPerRound * cardChal ^ T :=
+        fun c => classical_state_restoration_tree_bound step isLive badPerRound hRbr (next c) history hDoomed
+      rw [← qsum_mul_right]
+      have hSum := qsum_le_qsum hSub
+      rw [qsum_const] at hSum
+      calc qsum cardChal (fun c => srWinTapeCount step isLive (next c) history * cardChal)
+          ≤ cardChal * (T * badPerRound * cardChal ^ T) := hSum
+        _ = T * badPerRound * (cardChal ^ T * cardChal) := by
+          rw [Nat.mul_comm cardChal _, Nat.mul_assoc]
+        _ ≤ (T + 1) * badPerRound * cardChal ^ (T + 1) := by
+          rw [Nat.pow_succ]
+          exact Nat.mul_le_mul_right _ (Nat.mul_le_mul_right _ (Nat.le_succ T))
+    | some st =>
+      have hStDoomed : isLive st = false := by
+        cases hL : isLive st
+        · rfl
+        · exfalso
+          have hMem : st ∈ history := List.mem_of_getElem? hLookup
+          have hAny : history.any isLive = true := List.any_eq_true.mpr ⟨st, hMem, hL⟩
+          rw [hDoomed] at hAny
+          exact Bool.noConfusion hAny
+      have hPerC : ∀ c : Fin cardChal,
+          srWinTapeCount step isLive (next c) (step st mv c :: history) * cardChal ≤
+            (if isLive (step st mv c) = true then 1 else 0) * cardChal ^ (T + 1) +
+              T * badPerRound * cardChal ^ T := by
+        intro c
+        cases hFlip : isLive (step st mv c)
+        · simp only [Bool.false_eq_true, ↓reduceIte, Nat.zero_mul, Nat.zero_add]
+          have hNextDoomed : (step st mv c :: history).any isLive = false := by
+            simp only [List.any_cons, hFlip, hDoomed, Bool.or_self]
+          exact classical_state_restoration_tree_bound step isLive badPerRound hRbr
+            (next c) (step st mv c :: history) hNextDoomed
+        · simp only [↓reduceIte, Nat.one_mul]
+          have hCap := Nat.mul_le_mul_right cardChal
+            (srWinTapeCount_all_live step isLive (next c) (step st mv c :: history))
+          rw [← Nat.pow_succ] at hCap
+          exact Nat.le_trans hCap (Nat.le_add_right _ _)
+      have hSum := qsum_le_qsum hPerC
+      rw [qsum_mul_right, qsum_add, qsum_mul_right, qsum_const] at hSum
+      have hFlipSum := Nat.mul_le_mul_right (cardChal ^ (T + 1)) (hRbr st mv hStDoomed)
+      have hTailEq : cardChal * (T * badPerRound * cardChal ^ T) =
+          T * badPerRound * cardChal ^ (T + 1) := by
+        rw [Nat.pow_succ, Nat.mul_comm cardChal _, Nat.mul_assoc]
+      calc qsum cardChal (fun c =>
+              srWinTapeCount step isLive (next c) (step st mv c :: history)) * cardChal
+          ≤ qsum cardChal (fun c => if isLive (step st mv c) = true then 1 else 0) *
+              cardChal ^ (T + 1) + cardChal * (T * badPerRound * cardChal ^ T) := hSum
+        _ ≤ badPerRound * cardChal ^ (T + 1) + T * badPerRound * cardChal ^ (T + 1) := by
+          rw [hTailEq]
+          exact Nat.add_le_add_right hFlipSum _
+        _ = (T + 1) * badPerRound * cardChal ^ (T + 1) := by
+          rw [Nat.add_comm T 1, Nat.add_mul, Nat.one_mul, Nat.add_mul]
+
+/-- Rational `RatBound` corollary of `classical_state_restoration_tree_bound` from a doomed initial
+    state `initState`: escape probability is at most `(T * badPerRound) / cardChal`. -/
+theorem classical_state_restoration_soundness {State Move : Type} {cardChalPred T : Nat}
+    (step : State → Move → Fin (cardChalPred + 1) → State)
+    (isLive : State → Bool)
+    (initState : State) (hInitDoomed : isLive initState = false)
+    (badPerRound : Nat)
+    (hRbr : ∀ (st : State) (mv : Move), isLive st = false →
+      qsum (cardChalPred + 1) (fun c => if isLive (step st mv c) = true then 1 else 0) ≤ badPerRound)
+    (tree : StateRestorationTree Move (cardChalPred + 1) T) :
+    RatBound.le
+      ⟨srWinTapeCount step isLive tree [initState], (cardChalPred + 1) ^ T,
+        Nat.pow_pos (Nat.succ_pos cardChalPred)⟩
+      ⟨T * badPerRound, cardChalPred + 1, Nat.succ_pos cardChalPred⟩ := by
+  have hHist : ([initState]).any isLive = false := by
+    simp only [List.any_cons, List.any_nil, hInitDoomed, Bool.or_self]
+  exact classical_state_restoration_tree_bound step isLive badPerRound hRbr tree [initState] hHist
+
+/-- Under classical linear state restoration (`T * ε_RBR`), ANY `184`-bit RBR bound (such as every
+    non-exhaustive stage of `sliced_stage_supported_budget`) maintains `≥ 128` bits of soundness
+    all the way up to `T ≤ 2^56` classical restoration queries (`2^56 * 2^-184 = 2^-128`). -/
+theorem classical_sr_sliced184_sound_at_2pow56
+    (b : RatBound) (hb : atLeastBits 184 b) (T : Nat) (hT : T ≤ 2 ^ 56) :
+    atLeastBits 128 (RatBound.scale T b) := by
+  unfold atLeastBits RatBound.scale at *
+  dsimp only at *
+  have h1 : T * b.num * 2 ^ 128 ≤ 2 ^ 56 * b.num * 2 ^ 128 :=
+    Nat.mul_le_mul_right (2 ^ 128) (Nat.mul_le_mul_right b.num hT)
+  have hPow : 2 ^ 56 * 2 ^ 128 = 2 ^ 184 := by decide
+  have hEq : 2 ^ 56 * b.num * 2 ^ 128 = b.num * 2 ^ 184 := by
+    calc 2 ^ 56 * b.num * 2 ^ 128
+      _ = b.num * (2 ^ 56 * 2 ^ 128) := by
+            rw [Nat.mul_comm (2 ^ 56) b.num, Nat.mul_assoc]
+      _ = b.num * 2 ^ 184 := by rw [hPow]
+  exact Nat.le_trans h1 (Nat.le_trans (Nat.le_of_eq hEq) hb)
+
+
+/-! ### §2.2 Coherent Quantum Joint `(PoW × Challenge)` RBR Reduction (`QuantumAdv`) -/
+
+/-- Extract the low `bPow`-bit PoW digest slice from a combined `(bPow + wChal)`-bit oracle output. -/
+def powSliceOut (bPow wChal : Nat) (out : BitVec (bPow + wChal)) : BitVec bPow :=
+  BitVec.ofNat bPow (out.toNat % 2 ^ bPow)
+
+/-- Extract the high `wChal`-bit Fiat–Shamir challenge slice from a combined `(bPow + wChal)`-bit
+    oracle output. -/
