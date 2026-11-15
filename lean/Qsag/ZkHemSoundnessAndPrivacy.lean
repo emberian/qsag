@@ -1821,6 +1821,7 @@ theorem honest_linear_round {F : Type} [LawfulField F] (f0 f1 : F) (c : Nat → 
   inv := GoldilocksField.GoldilocksExt4.inv
   zero_ne_one := fun h =>
     LawfulField.zero_ne_one (F := Fp2) (congrArg GoldilocksField.GoldilocksExt4.c0 h)
+  inv_zero := QuarticGoldilocks.inv_zero
   mul_inv_cancel := fun {_} ha => (GoldilocksField.GoldilocksExt4.ext4_mul_inv_cancel ha).1
 
 theorem fp4_two_ne_zero : add (one : Fp4) one ≠ zero := fun h =>

@@ -353,10 +353,10 @@ theorem digest_reduction_witness : ∃ a b : BitVec 256,
 
 #verify_constructive bidirectional_bad_count
 #verify_constructive extensions_complete extensions_nodup conditional_extension_density
-  width12_fiber_cardinality unchecked_preimage_tooth
+  width12_fiber_cardinality
 #verify_constructive transcript_witness digest5_collision_reduction digest_reduction_witness
 #verify_constructive raw_inverse raw_inverse_fixed_capacity inverse_feedforward_relation
-  raw_vs_feedforward_tooth identity_collision_tooth forward_extension inverse_extension
+  forward_extension inverse_extension
   checked_preimage_is_transcript_hit preimage_target_count unorderedPairs_count
   collision_candidate_count extensions_count extensions_are_permutations fresh_answer_weight
   forward_fiber_complete inverse_fiber_complete fiber_counts fresh_bad_extensions_bound
@@ -370,7 +370,6 @@ theorem digest_reduction_witness : ∃ a b : BitVec 256,
 #verify_inhabited checked_preimage_is_transcript_hit transcript_witness
 #verify_inhabited digest5_collision_reduction digest_reduction_witness
 #verify_inhabited universal_customization_partition partition_witness
-#tooth_pair inverse_feedforward_relation vs raw_vs_feedforward_tooth
 #tooth_pair digest5_collision_iff vs digest5_modular_pair_tooth
 #tooth_pair universal_customization_partition vs unframed_partition_tooth
 end Qsag.CrossProtocol
