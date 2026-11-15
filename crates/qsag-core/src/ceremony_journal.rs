@@ -3,15 +3,33 @@
 //! it never rolls a reservation back. Disk snapshot rollback is detected when callers retain
 //! [`crate::LedgerCheckpoint`] in an external monotonic anchor and recover via
 //! [`FsCeremonyJournal::open_existing_at_least`].
-use crate::LedgerCheckpoint;
+//!
+//! An anchored journal ([`FsCeremonyJournal::create_new_anchored`]) commits every record
+//! under a single-use anchor ticket:
+//!
+//! 1. reserve: the anchor moves from the journal's checkpoint to a reservation that still
+//!    pins that checkpoint and binds the contender and the ticket context (journal
+//!    identity and the entries being committed). A second contender for the same
+//!    successor is refused here, before it writes anything;
+//! 2. the record is replaced on disk, carrying the reservation and a nonce drawn after
+//!    the ticket was issued;
+//! 3. consume: the anchor settles on that record's checkpoint. Only then is a permit
+//!    issued.
+//!
+//! A crash after 1 leaves the old record and a dead reservation: reopening re-seals the
+//! unchanged entries under a fresh ticket. A crash after 2 leaves the successor on disk
+//! and the reservation it names in the anchor: reopening settles the anchor on it, with
+//! no permit. In both cases the anchor refuses every disk state but those two.
+use crate::durable_ledger::AnchorStanding;
 use crate::sponge::Cshake256Xof;
 use crate::wipe::{ct_eq_bytes32, wipe_bytes32};
+use crate::{LedgerCheckpoint, TicketSeal};
 use core::sync::atomic::{AtomicBool, Ordering};
 use qsag_asm::durable::LockedRecord;
 use std::{io, path::PathBuf};
 
-const JOURNAL_MAGIC: &[u8; 8] = b"QSAGCRJ3";
-const HEADER_LEN: usize = 8 + 32 + 8;
+const JOURNAL_MAGIC: &[u8; 8] = b"QSAGCRJ4";
+const HEADER_LEN: usize = 8 + 32 + 8 + 32 + 32;
 const ENTRY_LEN: usize = 32 + 32 + 8 + 8 + 1 + 8 + 32 + 8 + 8;
 const TAG_LEN: usize = 32;
 
@@ -118,6 +136,8 @@ pub struct FsCeremonyJournal {
     key_id: [u8; 32],
     mac_key: [u8; 32],
     checkpoint: LedgerCheckpoint,
+    /// Seal of the record on disk; its generation is the checkpoint's.
+    seal: TicketSeal,
     entries: Vec<JournalEntry>,
     anchor: Option<Box<dyn crate::ExternalMonotoneAnchor>>,
     failed: AtomicBool,
@@ -194,25 +214,37 @@ impl FsCeremonyJournal {
         Ok(journal)
     }
 
+    /// Open under an independently durable anchor and reconcile with it (see the module
+    /// notes). An unenrolled anchor adopts only an untouched genesis journal, the state
+    /// [`Self::create_new_anchored`] leaves when its anchor advance fails.
     pub fn open_existing_anchored(
         path: impl Into<PathBuf>,
         key_id: [u8; 32],
         mac_key: [u8; 32],
         anchor: Box<dyn crate::ExternalMonotoneAnchor>,
     ) -> io::Result<Self> {
-        let mut journal = match anchor.load()? {
-            Some(minimum) => Self::open_existing_at_least(path, key_id, mac_key, minimum)?,
-            // `create_new_anchored` wrote genesis but its anchor advance failed. No permit can
-            // exist without an anchored commit, so only an empty genesis journal is adopted.
-            None => {
-                let journal = Self::open_existing(path, key_id, mac_key)?;
+        let mut journal = Self::open_existing(path, key_id, mac_key)?;
+        match anchor.reconcile(journal.checkpoint, &journal.seal.reservation)? {
+            AnchorStanding::Settled => {}
+            // No permit can exist without an anchored commit, so only an empty genesis
+            // journal is adopted.
+            AnchorStanding::Unenrolled => {
                 if journal.checkpoint.generation != 1 || !journal.entries.is_empty() {
                     return Err(invalid());
                 }
-                journal
+                crate::durable_ledger::advance_anchor(&*anchor, journal.checkpoint)?;
             }
-        };
-        crate::durable_ledger::advance_anchor(&*anchor, journal.checkpoint)?;
+            AnchorStanding::Reserved(abandoned) => {
+                let (seal, checkpoint) = anchor.commit_with_ticket(
+                    abandoned,
+                    journal.checkpoint,
+                    journal.ticket_context(None),
+                    |seal| journal.write(seal, None),
+                )?;
+                journal.seal = seal;
+                journal.checkpoint = checkpoint;
+            }
+        }
         journal.anchor = Some(anchor);
         Ok(journal)
     }
@@ -230,13 +262,12 @@ impl FsCeremonyJournal {
                 generation: 0,
                 tag: [0; 32],
             },
+            seal: TicketSeal::unanchored(1),
             entries: Vec::new(),
             anchor: None,
             failed: AtomicBool::new(false),
         };
-        let (encoded, checkpoint) = this.encode(1, None);
-        this.record.replace(&encoded)?;
-        this.checkpoint = checkpoint;
+        this.checkpoint = this.write(&this.seal, None)?;
         Ok(this)
     }
 
@@ -257,6 +288,7 @@ impl FsCeremonyJournal {
                 generation: 0,
                 tag: [0; 32],
             },
+            seal: TicketSeal::unanchored(0),
             entries: Vec::new(),
             anchor: None,
             failed: AtomicBool::new(false),
@@ -276,9 +308,9 @@ impl FsCeremonyJournal {
             return Err(invalid());
         }
         let generation = u64::from_be_bytes(bytes[40..48].try_into().map_err(|_| invalid())?);
-        let entry_count = (end - HEADER_LEN) / ENTRY_LEN;
-        let expected_gen = (entry_count as u64).checked_add(1).ok_or_else(invalid)?;
-        if generation == 0 || generation != expected_gen {
+        // Unanchored commits advance the generation by one, ticketed ones by two.
+        let entry_count = ((end - HEADER_LEN) / ENTRY_LEN) as u64;
+        if generation <= entry_count {
             return Err(invalid());
         }
         if generation < min_checkpoint.generation {
@@ -336,6 +368,11 @@ impl FsCeremonyJournal {
             generation,
             tag: stored_tag,
         };
+        this.seal = TicketSeal {
+            generation,
+            reservation: bytes[48..80].try_into().map_err(|_| invalid())?,
+            nonce: bytes[80..112].try_into().map_err(|_| invalid())?,
+        };
         Ok(this)
     }
 
@@ -367,13 +404,9 @@ impl FsCeremonyJournal {
         tag
     }
 
-    fn encode(&self, generation: u64, next: Option<&JournalEntry>) -> (Vec<u8>, LedgerCheckpoint) {
-        let mut bytes = Vec::with_capacity(
-            HEADER_LEN + (self.entries.len() + usize::from(next.is_some())) * ENTRY_LEN + TAG_LEN,
-        );
-        bytes.extend_from_slice(JOURNAL_MAGIC);
-        bytes.extend_from_slice(&self.key_id);
-        bytes.extend_from_slice(&generation.to_be_bytes());
+    fn entry_bytes(&self, next: Option<&JournalEntry>) -> Vec<u8> {
+        let mut bytes =
+            Vec::with_capacity((self.entries.len() + usize::from(next.is_some())) * ENTRY_LEN);
         for e in self.entries.iter().chain(next) {
             bytes.extend_from_slice(&e.ceremony_id);
             bytes.extend_from_slice(&e.epoch_or_codeword);
@@ -392,9 +425,54 @@ impl FsCeremonyJournal {
             bytes.extend_from_slice(&e.context.spend_amount.to_be_bytes());
             bytes.extend_from_slice(&e.context.mpc_nonce_epoch.to_be_bytes());
         }
+        bytes
+    }
+
+    fn encode(
+        &self,
+        seal: &TicketSeal,
+        next: Option<&JournalEntry>,
+    ) -> (Vec<u8>, LedgerCheckpoint) {
+        let entries = self.entry_bytes(next);
+        let mut bytes = Vec::with_capacity(HEADER_LEN + entries.len() + TAG_LEN);
+        bytes.extend_from_slice(JOURNAL_MAGIC);
+        bytes.extend_from_slice(&self.key_id);
+        bytes.extend_from_slice(&seal.generation.to_be_bytes());
+        bytes.extend_from_slice(&seal.reservation);
+        bytes.extend_from_slice(&seal.nonce);
+        bytes.extend_from_slice(&entries);
         let tag = self.tag(&bytes);
         bytes.extend_from_slice(&tag);
-        (bytes, LedgerCheckpoint { generation, tag })
+        (
+            bytes,
+            LedgerCheckpoint {
+                generation: seal.generation,
+                tag,
+            },
+        )
+    }
+
+    /// What an anchor ticket for the record holding the current entries and `next`
+    /// is bound to: this journal's identity and those entries. The record's generation
+    /// is bound by the ticket's epoch, and its MAC cannot be: it covers the ticket.
+    fn ticket_context(&self, next: Option<&JournalEntry>) -> [u8; 32] {
+        let mut xof = Cshake256Xof::new(b"QSAG.CEREMONY.JOURNAL.TICKET/v1");
+        xof.absorb(&self.key_id);
+        xof.absorb(&self.record.lock_seal());
+        xof.absorb(&self.entry_bytes(next));
+        let mut context = [0; 32];
+        xof.squeeze(&mut context);
+        context
+    }
+
+    fn write(
+        &self,
+        seal: &TicketSeal,
+        next: Option<&JournalEntry>,
+    ) -> io::Result<LedgerCheckpoint> {
+        let (bytes, checkpoint) = self.encode(seal, next);
+        self.record.replace(&bytes)?;
+        Ok(checkpoint)
     }
 
     fn validate(
@@ -467,30 +545,40 @@ impl FsCeremonyJournal {
     ) -> io::Result<CeremonyReleasePermit> {
         self.ensure_usable()?;
         self.validate(&r, bound_epoch, is_retry, context)?;
-        let (expected_on_disk, expected_ckpt) = self.encode(self.checkpoint.generation, None);
+        let (expected_on_disk, expected_ckpt) = self.encode(&self.seal, None);
         if expected_ckpt != self.checkpoint || self.read_or_fail()? != expected_on_disk {
             self.failed.store(true, Ordering::SeqCst);
             return Err(invalid());
         }
-        let next_gen = self
-            .checkpoint
-            .generation
-            .checked_add(1)
-            .ok_or_else(invalid)?;
         let entry = JournalEntry::from_reservation(&r, bound_epoch, is_retry, context);
-        let (next_bytes, next_ckpt) = self.encode(next_gen, Some(&entry));
-        if let Err(e) = self.record.replace(&next_bytes) {
+        let committed = match &self.anchor {
+            Some(anchor) => anchor.commit_with_ticket(
+                self.checkpoint,
+                self.checkpoint,
+                self.ticket_context(Some(&entry)),
+                |seal| self.write(seal, Some(&entry)),
+            ),
+            None => self
+                .checkpoint
+                .generation
+                .checked_add(1)
+                .ok_or_else(invalid)
+                .map(TicketSeal::unanchored)
+                .and_then(|seal| Ok((seal, self.write(&seal, Some(&entry))?))),
+        };
+        // A refused reservation, a failed replacement and a refused consumption all
+        // leave this handle's relation to the disk or the anchor unknown.
+        let (seal, checkpoint) = committed.inspect_err(|_| {
             self.failed.store(true, Ordering::SeqCst);
-            return Err(e);
-        }
-        self.advance_anchor_or_fail(next_ckpt)?;
-        self.checkpoint = next_ckpt;
+        })?;
+        self.seal = seal;
+        self.checkpoint = checkpoint;
         self.entries.push(entry);
         Ok(CeremonyReleasePermit {
             reservation: r,
             bound_epoch,
             is_retry,
-            generation: next_gen,
+            generation: checkpoint.generation,
             context,
             seal: self.record.lock_seal(),
         })
@@ -577,7 +665,7 @@ impl FsCeremonyJournal {
         {
             return Err(invalid());
         }
-        let (expected_on_disk, expected_ckpt) = self.encode(self.checkpoint.generation, None);
+        let (expected_on_disk, expected_ckpt) = self.encode(&self.seal, None);
         if expected_ckpt != self.checkpoint || self.read_or_fail()? != expected_on_disk {
             self.failed.store(true, Ordering::SeqCst);
             return Err(invalid());
@@ -612,15 +700,40 @@ impl FsCeremonyJournal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// `(cell, refuse every advance, advances still admitted, frozen reads)`.
+    type TestAnchorState = (
+        Option<LedgerCheckpoint>,
+        bool,
+        Option<u32>,
+        Option<Option<LedgerCheckpoint>>,
+    );
     #[derive(Clone, Default)]
-    struct TestAnchor(std::sync::Arc<std::sync::Mutex<(Option<LedgerCheckpoint>, bool)>>);
+    struct TestAnchor(std::sync::Arc<std::sync::Mutex<TestAnchorState>>);
+    impl TestAnchor {
+        fn cell(&self) -> Option<LedgerCheckpoint> {
+            self.0.lock().unwrap().0
+        }
+        /// Admit `advances` more writes, then refuse: an outage that begins between
+        /// two anchor writes of one commit.
+        fn admit(&self, advances: Option<u32>) {
+            self.0.lock().unwrap().2 = advances;
+        }
+        /// Keep answering `load` with the current cell, as a contender does that read
+        /// before another one wrote.
+        fn freeze_reads(&self) {
+            let mut state = self.0.lock().unwrap();
+            state.3 = Some(state.0);
+        }
+    }
     impl crate::ExternalMonotoneAnchor for TestAnchor {
         fn load(&self) -> io::Result<Option<LedgerCheckpoint>> {
-            Ok(self.0.lock().unwrap().0)
+            let state = self.0.lock().unwrap();
+            Ok(state.3.unwrap_or(state.0))
         }
         fn advance(&self, next: LedgerCheckpoint) -> io::Result<()> {
             let mut state = self.0.lock().unwrap();
             if state.1
+                || state.2 == Some(0)
                 || state.0.is_some_and(|old| {
                     old.generation > next.generation
                         || (old.generation == next.generation && old.tag != next.tag)
@@ -628,9 +741,26 @@ mod tests {
             {
                 return Err(invalid());
             }
+            state.2 = state.2.map(|left| left - 1);
             state.0 = Some(next);
             Ok(())
         }
+    }
+
+    /// A disk-image clone of the record at `src`: the same record and lock nonce in new
+    /// inodes, as a restored volume snapshot presents them.
+    fn clone_disk(src: &std::path::Path, dst: &std::path::Path) {
+        let lock = |path: &std::path::Path| {
+            let mut name = path.as_os_str().to_os_string();
+            name.push(".lock");
+            PathBuf::from(name)
+        };
+        std::fs::copy(src, dst).unwrap();
+        std::fs::copy(lock(src), lock(dst)).unwrap();
+        let mut sidecar = std::fs::read(lock(src)).unwrap();
+        let identity = qsag_asm::durable::file_identity(&std::fs::metadata(lock(dst)).unwrap());
+        sidecar[16..].copy_from_slice(&identity);
+        std::fs::write(lock(dst), &sidecar).unwrap();
     }
 
     #[test]
@@ -818,6 +948,241 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    fn anchored(path: &std::path::Path, anchor: &TestAnchor) -> io::Result<FsCeremonyJournal> {
+        FsCeremonyJournal::open_existing_anchored(path, [1; 32], [2; 32], Box::new(anchor.clone()))
+    }
+
+    #[test]
+    fn a_crash_between_reserve_and_consume_recovers_and_never_rolls_back() {
+        let dir = scratch_dir("journal-ticket-crash");
+        let path = dir.join("journal");
+        let anchor = TestAnchor::default();
+        let mut journal = FsCeremonyJournal::create_new_anchored(
+            &path,
+            [1; 32],
+            [2; 32],
+            Box::new(anchor.clone()),
+        )
+        .unwrap();
+        let permit = journal.persist_before_release(reservation(1)).unwrap();
+        journal.consume_release(permit).unwrap();
+        let first = journal.checkpoint();
+        assert_eq!(anchor.cell(), Some(first));
+        let first_bytes = std::fs::read(&path).unwrap();
+
+        // The process dies holding a ticket, before it replaced the record.
+        drop(journal);
+        let service: &dyn crate::ExternalMonotoneAnchor = &anchor;
+        let dead = service.reserve_ticket(first, first, [0x55; 32]).unwrap();
+        let reserved = anchor.cell().unwrap();
+        assert_ne!(reserved, first);
+        let mut journal = anchored(&path, &anchor).unwrap();
+        // Recovery re-sealed the same entries under a fresh ticket.
+        let resealed = journal.checkpoint();
+        assert_eq!(resealed.generation, reserved.generation + 2);
+        assert_eq!(anchor.cell(), Some(resealed));
+        assert_eq!(journal.last_committed().unwrap().seed_burn_cursor, 1);
+        // The dead ticket is void.
+        assert!(
+            service
+                .consume_ticket(dead, |_| panic!("a void ticket reached its commit"))
+                .is_err()
+        );
+        let permit = journal.persist_before_release(reservation(2)).unwrap();
+        journal.consume_release(permit).unwrap();
+        let second = journal.checkpoint();
+        let second_bytes = std::fs::read(&path).unwrap();
+        drop(journal);
+        std::fs::write(&path, &first_bytes).unwrap();
+        assert!(anchored(&path, &anchor).is_err());
+        std::fs::write(&path, &second_bytes).unwrap();
+
+        // The process dies after replacing the record, before consuming the ticket.
+        let mut journal = anchored(&path, &anchor).unwrap();
+        assert_eq!(journal.checkpoint(), second);
+        anchor.admit(Some(1));
+        assert!(journal.persist_before_release(reservation(3)).is_err());
+        assert!(journal.is_failed());
+        assert_eq!(journal.checkpoint(), second);
+        anchor.admit(None);
+        drop(journal);
+        let third_bytes = std::fs::read(&path).unwrap();
+        assert_ne!(third_bytes, second_bytes);
+        assert_ne!(anchor.cell(), Some(second));
+        // Reopening settles the anchor on the durable successor. No permit exists for
+        // it, so its resources are burned and its codeword is retried, not re-reserved.
+        let mut journal = anchored(&path, &anchor).unwrap();
+        let third = journal.checkpoint();
+        assert_eq!(third.generation, second.generation + 2);
+        assert_eq!(anchor.cell(), Some(third));
+        assert_eq!(journal.last_committed().unwrap().seed_burn_cursor, 3);
+        assert!(journal.persist_before_release(reservation(3)).is_err());
+        let retry = CeremonyReservation {
+            ceremony_id: [4; 32],
+            seed_burn_cursor: 4,
+            hedge_generation: 4,
+            ..reservation(3)
+        };
+        let permit = journal.commit_retry_attempt(retry).unwrap();
+        assert_eq!(journal.consume_release(permit).unwrap().seed_burn_cursor, 4);
+        drop(journal);
+        for stale in [&first_bytes, &second_bytes, &third_bytes] {
+            std::fs::write(&path, stale).unwrap();
+            assert!(anchored(&path, &anchor).is_err());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn two_handles_contending_for_one_successor_cannot_both_commit() {
+        let dir = scratch_dir("journal-contend");
+        let (path_a, path_b, path_c) = (dir.join("a"), dir.join("b"), dir.join("c"));
+        let anchor = TestAnchor::default();
+        let mut a = FsCeremonyJournal::create_new_anchored(
+            &path_a,
+            [1; 32],
+            [2; 32],
+            Box::new(anchor.clone()),
+        )
+        .unwrap();
+        let permit = a.persist_before_release(reservation(1)).unwrap();
+        a.consume_release(permit).unwrap();
+        // Two clones of the disk at rest hold the anchored checkpoint and open.
+        clone_disk(&path_a, &path_b);
+        clone_disk(&path_a, &path_c);
+        let mut b = anchored(&path_b, &anchor).unwrap();
+        // `c` talks to the same anchor through reads that stopped here.
+        let stale_reader = TestAnchor::default();
+        stale_reader.0.lock().unwrap().0 = anchor.cell();
+        stale_reader.freeze_reads();
+        let mut c = anchored(&path_c, &stale_reader).unwrap();
+        assert_eq!(
+            (b.checkpoint(), c.checkpoint()),
+            (a.checkpoint(), a.checkpoint())
+        );
+
+        let permit = a.persist_before_release(reservation(2)).unwrap();
+        let committed = anchor.cell();
+        assert_eq!(committed, Some(a.checkpoint()));
+        // The second contender is refused at its reservation and writes nothing.
+        let before = std::fs::read(&path_b).unwrap();
+        assert!(b.persist_before_release(reservation(2)).is_err());
+        assert!(b.is_failed());
+        assert_eq!(std::fs::read(&path_b).unwrap(), before);
+        assert_eq!(anchor.cell(), committed);
+        // A contender that read the anchor before the winner wrote passes its own
+        // comparison; the anchor itself refuses its reservation.
+        stale_reader.0.lock().unwrap().0 = committed;
+        assert_eq!(
+            crate::ExternalMonotoneAnchor::load(&stale_reader).unwrap(),
+            Some(c.checkpoint())
+        );
+        assert!(c.persist_before_release(reservation(2)).is_err());
+        assert!(c.is_failed());
+        assert_eq!(std::fs::read(&path_c).unwrap(), before);
+        assert_eq!(stale_reader.cell(), committed);
+        // The winner releases; the losers stay fenced after a reopen.
+        assert_eq!(a.consume_release(permit).unwrap(), reservation(2));
+        drop((b, c));
+        assert!(anchored(&path_b, &anchor).is_err());
+        assert!(anchored(&path_c, &anchor).is_err());
+        drop(a);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn only_one_clone_recovers_an_abandoned_reservation() {
+        let dir = scratch_dir("journal-recover-once");
+        let (path_a, path_b) = (dir.join("a"), dir.join("b"));
+        let anchor = TestAnchor::default();
+        let a = FsCeremonyJournal::create_new_anchored(
+            &path_a,
+            [1; 32],
+            [2; 32],
+            Box::new(anchor.clone()),
+        )
+        .unwrap();
+        let genesis = a.checkpoint();
+        drop(a);
+        let service: &dyn crate::ExternalMonotoneAnchor = &anchor;
+        let _abandoned = service
+            .reserve_ticket(genesis, genesis, [0x55; 32])
+            .unwrap();
+        clone_disk(&path_a, &path_b);
+        let a = anchored(&path_a, &anchor).unwrap();
+        assert_eq!(anchor.cell(), Some(a.checkpoint()));
+        assert!(anchored(&path_b, &anchor).is_err());
+        assert_eq!(anchor.cell(), Some(a.checkpoint()));
+        drop(a);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_belt_log_commits_under_tickets_and_recovers_from_both_crash_points() {
+        use crate::belt_latch::{BeltLatchState, DurableWal, FsBeltWal};
+        let dir = scratch_dir("belt-ticket");
+        let (path, clone) = (dir.join("belt"), dir.join("clone"));
+        let anchor = TestAnchor::default();
+        let open = |path: &std::path::Path| {
+            FsBeltWal::open_existing_anchored(path, [3; 32], Box::new(anchor.clone()))
+        };
+        let state = |next_epoch| BeltLatchState {
+            next_epoch,
+            in_flight: None,
+        };
+        let mut wal =
+            FsBeltWal::provision_genesis_anchored(&path, [3; 32], Box::new(anchor.clone()))
+                .unwrap();
+        let genesis = wal.checkpoint();
+        wal.sync_persist(&state(1)).unwrap();
+        let first = wal.checkpoint();
+        assert_eq!(first.generation, genesis.generation + 2);
+        assert_eq!(anchor.cell(), Some(first));
+        let first_bytes = std::fs::read(&path).unwrap();
+        clone_disk(&path, &clone);
+        let mut contender = open(&clone).unwrap();
+
+        // Crash after the reservation: the unchanged state is re-sealed.
+        drop(wal);
+        let service: &dyn crate::ExternalMonotoneAnchor = &anchor;
+        let dead = service.reserve_ticket(first, first, [0x55; 32]).unwrap();
+        let reserved = anchor.cell().unwrap();
+        // The cloned log cannot commit a successor of the reserved checkpoint.
+        assert!(contender.sync_persist(&state(2)).is_err());
+        assert!(contender.is_failed());
+        drop(contender);
+        let mut wal = open(&path).unwrap();
+        let resealed = wal.checkpoint();
+        assert_eq!(resealed.generation, reserved.generation + 2);
+        assert_eq!(anchor.cell(), Some(resealed));
+        assert_eq!(wal.load().unwrap(), Some(state(1)));
+        assert!(
+            service
+                .consume_ticket(dead, |_| panic!("a void ticket reached its commit"))
+                .is_err()
+        );
+        assert!(open(&clone).is_err());
+
+        // Crash after the replacement: the anchor settles on the durable successor.
+        anchor.admit(Some(1));
+        assert!(wal.sync_persist(&state(2)).is_err());
+        assert!(wal.is_failed());
+        anchor.admit(None);
+        drop(wal);
+        assert_ne!(anchor.cell(), Some(resealed));
+        let wal = open(&path).unwrap();
+        assert_eq!(wal.checkpoint().generation, resealed.generation + 2);
+        assert_eq!(anchor.cell(), Some(wal.checkpoint()));
+        assert_eq!(wal.load().unwrap(), Some(state(2)));
+        drop(wal);
+        let latest = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &first_bytes).unwrap();
+        assert!(open(&path).is_err());
+        std::fs::write(&path, &latest).unwrap();
+        open(&path).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn a_crash_after_the_reservation_is_recovered_through_the_committed_cursors() {
         let dir = scratch_dir("journal-cursor");
@@ -963,7 +1328,8 @@ mod tests {
                 .seed_burn_cursor,
             2
         );
-        anchor.0.lock().unwrap().1 = true;
+        // The anchor admits the reservation and is gone before the consumption.
+        anchor.admit(Some(1));
         assert!(
             journal
                 .persist_with_context(
@@ -978,7 +1344,7 @@ mod tests {
                 .is_err()
         );
         drop(journal);
-        anchor.0.lock().unwrap().1 = false;
+        anchor.admit(None);
         // The durable successor is recoverable after anchor failure, but the old snapshot is not.
         let journal = FsCeremonyJournal::open_existing_anchored(
             &path,
@@ -987,6 +1353,8 @@ mod tests {
             Box::new(anchor.clone()),
         )
         .unwrap();
+        assert_eq!(journal.last_committed().unwrap().seed_burn_cursor, 3);
+        assert_eq!(anchor.cell(), Some(journal.checkpoint()));
         drop(journal);
         let latest = std::fs::read(&path).unwrap();
         std::fs::write(&path, snapshot).unwrap();

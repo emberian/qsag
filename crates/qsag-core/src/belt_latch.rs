@@ -69,7 +69,11 @@ pub const MAX_TARGET_SUM_DIGITS: usize = qsag_verified::BELT_LATCH_MAX_DIGITS as
 const TAG_ECHO_KEY: &[u8] = b"QSAG.BELT.ECHO.KEY/v1";
 const TAG_ECHO_MAC: &[u8] = b"QSAG.BELT.ECHO.MAC/v1";
 #[cfg(feature = "std")]
-const TAG_WAL_MAC: &[u8] = b"QSAG.BELT.LATCH.WAL.MAC/v2";
+const TAG_WAL_MAC: &[u8] = b"QSAG.BELT.LATCH.WAL.MAC/v3";
+#[cfg(feature = "std")]
+const TAG_WAL_TICKET: &[u8] = b"QSAG.BELT.LATCH.WAL.TICKET/v1";
+#[cfg(feature = "std")]
+const WAL_HEADER_LEN: usize = 8 + 32 + 32;
 
 /// The durable binding of one epoch.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -266,10 +270,12 @@ impl DurableWal for MemoryWal {
 /// File-backed [`DurableWal`]: exclusive process lock, write to a temporary file, `fsync`,
 /// atomic rename, directory `fsync`.
 ///
-/// The stored record is `generation.to_be_bytes() || BeltLatchState::to_bytes() || tag`, where
-/// `tag` is a `cSHAKE256` MAC over `(wal_key, lock_seal, generation, state_bytes)` under a
-/// secret `wal_key` the signer keeps apart from the log. Genesis and recovery are separate
-/// entry points:
+/// The stored record is `generation.to_be_bytes() || reservation || nonce ||
+/// BeltLatchState::to_bytes() || tag`, where `tag` is a `cSHAKE256` MAC over
+/// `(wal_key, lock_seal, generation, reservation, nonce, state_bytes)` under a secret
+/// `wal_key` the signer keeps apart from the log. `reservation` and `nonce` are the
+/// [`crate::TicketSeal`] of the anchor ticket the record was committed under, all zero
+/// without an anchor. Genesis and recovery are separate entry points:
 ///
 /// * [`FsBeltWal::provision_genesis`] is for a newly enrolled key. It refuses a path whose
 ///   log or lock sidecar already exists, and durably writes an authenticated epoch-0 record
@@ -280,14 +286,24 @@ impl DurableWal for MemoryWal {
 ///   sidecar, or a record that fails the MAC is an error; nothing here ever falls back to
 ///   epoch 0, so [`DurableWal::load`] never returns `Ok(None)` for this type.
 ///
-/// A failed replacement or a refused anchor advance fails the handle permanently, including
-/// for a latch recovered from it through [`BeltLatch::into_wal`]: a log whose relation to its
-/// anchor is unknown must be reopened from disk against the anchor.
+/// An anchored log commits every record under a single-use anchor ticket: it reserves the
+/// successor of its checkpoint (a second contender is refused there, before writing),
+/// replaces the record, then consumes the ticket, which settles the anchor on the new
+/// record's checkpoint. Reopening after a crash in between either re-seals the unchanged
+/// state under a fresh ticket (the record was not yet replaced) or settles the anchor on
+/// the replaced record; the anchor refuses every other disk state.
+///
+/// A failed replacement, a refused reservation or a refused consumption fails the handle
+/// permanently, including for a latch recovered from it through [`BeltLatch::into_wal`]:
+/// a log whose relation to its anchor is unknown must be reopened from disk against the
+/// anchor.
 #[cfg(feature = "std")]
 pub struct FsBeltWal {
     record: qsag_asm::durable::LockedRecord,
     wal_key: [u8; 32],
     checkpoint: crate::durable_ledger::LedgerCheckpoint,
+    /// Reservation the record found at open was committed under.
+    reservation: [u8; 32],
     anchor: Option<alloc::boxed::Box<dyn crate::ExternalMonotoneAnchor>>,
     release: core::cell::RefCell<Option<(crate::ceremony_journal::CeremonyReservation, u64)>>,
     failed: core::cell::Cell<Option<WalError>>,
@@ -333,27 +349,40 @@ impl FsBeltWal {
         Ok(())
     }
 
-    /// Open under an independently durable anchor, catching up a committed successor
-    /// before returning. An unenrolled anchor adopts only an untouched genesis log, the state
+    /// Open under an independently durable anchor and reconcile with it (see the type
+    /// notes). An unenrolled anchor adopts only an untouched genesis log, the state
     /// [`Self::provision_genesis_anchored`] leaves when its anchor advance fails.
     pub fn open_existing_anchored(
         path: impl Into<std::path::PathBuf>,
         wal_key: [u8; 32],
         anchor: alloc::boxed::Box<dyn crate::ExternalMonotoneAnchor>,
     ) -> std::io::Result<Self> {
-        let mut wal = match anchor.load()? {
-            Some(minimum) => Self::open_existing_at_least(path, wal_key, minimum)?,
-            None => {
-                let wal = Self::open_existing(path, wal_key)?;
-                let genesis = wal.checkpoint.generation == 1
-                    && wal.load().ok().flatten() == Some(BeltLatchState::default());
-                if !genesis {
+        use crate::durable_ledger::AnchorStanding;
+        let mut wal = Self::open_existing(path, wal_key)?;
+        let state = wal
+            .load()
+            .ok()
+            .flatten()
+            .ok_or_else(|| std::io::Error::other("belt latch log unreadable"))?;
+        match anchor.reconcile(wal.checkpoint, &wal.reservation)? {
+            AnchorStanding::Settled => {}
+            AnchorStanding::Unenrolled => {
+                if wal.checkpoint.generation != 1 || state != BeltLatchState::default() {
                     return Err(std::io::Error::other("missing belt anchor"));
                 }
-                wal
+                crate::durable_ledger::advance_anchor(&*anchor, wal.checkpoint)?;
             }
-        };
-        crate::durable_ledger::advance_anchor(&*anchor, wal.checkpoint)?;
+            AnchorStanding::Reserved(abandoned) => {
+                let (seal, checkpoint) = anchor.commit_with_ticket(
+                    abandoned,
+                    wal.checkpoint,
+                    wal.ticket_context(&state),
+                    |seal| wal.write(seal, &state),
+                )?;
+                wal.reservation = seal.reservation;
+                wal.checkpoint = checkpoint;
+            }
+        }
         wal.anchor = Some(anchor);
         Ok(wal)
     }
@@ -393,65 +422,96 @@ impl FsBeltWal {
     fn tag(
         wal_key: &[u8; 32],
         lock_seal: &[u8; 8],
-        generation: u64,
+        seal: &crate::TicketSeal,
         state_bytes: &[u8],
     ) -> [u8; 32] {
         cshake256_32_multi_frame(
             TAG_WAL_MAC,
-            &[wal_key, lock_seal, &generation.to_be_bytes(), state_bytes],
+            &[
+                wal_key,
+                lock_seal,
+                &seal.generation.to_be_bytes(),
+                &seal.reservation,
+                &seal.nonce,
+                state_bytes,
+            ],
         )
     }
 
     fn seal(
         &self,
-        generation: u64,
+        seal: &crate::TicketSeal,
         state: &BeltLatchState,
     ) -> (Vec<u8>, crate::durable_ledger::LedgerCheckpoint) {
         let state_bytes = state.to_bytes();
-        let tag = Self::tag(
-            &self.wal_key,
-            &self.record.lock_seal(),
-            generation,
-            &state_bytes,
-        );
-        let mut out = Vec::with_capacity(8 + state_bytes.len() + 32);
-        out.extend_from_slice(&generation.to_be_bytes());
+        let tag = Self::tag(&self.wal_key, &self.record.lock_seal(), seal, &state_bytes);
+        let mut out = Vec::with_capacity(WAL_HEADER_LEN + state_bytes.len() + 32);
+        out.extend_from_slice(&seal.generation.to_be_bytes());
+        out.extend_from_slice(&seal.reservation);
+        out.extend_from_slice(&seal.nonce);
         out.extend_from_slice(&state_bytes);
         out.extend_from_slice(&tag);
         (
             out,
-            crate::durable_ledger::LedgerCheckpoint { generation, tag },
+            crate::durable_ledger::LedgerCheckpoint {
+                generation: seal.generation,
+                tag,
+            },
         )
     }
 
     fn unseal(
         &self,
         raw: &[u8],
-    ) -> Option<(crate::durable_ledger::LedgerCheckpoint, BeltLatchState)> {
-        if raw.len() < 8 + 32 {
-            return None;
-        }
+    ) -> Option<(
+        crate::durable_ledger::LedgerCheckpoint,
+        crate::TicketSeal,
+        BeltLatchState,
+    )> {
         let (body, tag_slice) = raw.split_at_checked(raw.len().checked_sub(32)?)?;
+        let (header, state_bytes) = body.split_at_checked(WAL_HEADER_LEN)?;
         let tag: [u8; 32] = tag_slice.try_into().ok()?;
-        let generation = u64::from_be_bytes(body[..8].try_into().ok()?);
-        if generation == 0 {
+        let seal = crate::TicketSeal {
+            generation: u64::from_be_bytes(header[..8].try_into().ok()?),
+            reservation: header[8..40].try_into().ok()?,
+            nonce: header[40..].try_into().ok()?,
+        };
+        if seal.generation == 0 {
             return None;
         }
-        let state_bytes = &body[8..];
-        let want = Self::tag(
-            &self.wal_key,
-            &self.record.lock_seal(),
-            generation,
-            state_bytes,
-        );
+        let want = Self::tag(&self.wal_key, &self.record.lock_seal(), &seal, state_bytes);
         if !ct_eq_bytes32(&want, &tag) {
             return None;
         }
         let state = BeltLatchState::from_bytes(state_bytes)?;
         Some((
-            crate::durable_ledger::LedgerCheckpoint { generation, tag },
+            crate::durable_ledger::LedgerCheckpoint {
+                generation: seal.generation,
+                tag,
+            },
+            seal,
             state,
         ))
+    }
+
+    /// What an anchor ticket for the record holding `state` is bound to: this log's
+    /// identity and that state. The record's generation is bound by the ticket's epoch,
+    /// and its MAC cannot be: it covers the ticket.
+    fn ticket_context(&self, state: &BeltLatchState) -> [u8; 32] {
+        cshake256_32_multi_frame(
+            TAG_WAL_TICKET,
+            &[&self.record.lock_seal(), &state.to_bytes()],
+        )
+    }
+
+    fn write(
+        &self,
+        seal: &crate::TicketSeal,
+        state: &BeltLatchState,
+    ) -> std::io::Result<crate::durable_ledger::LedgerCheckpoint> {
+        let (encoded, checkpoint) = self.seal(seal, state);
+        self.record.replace(&encoded)?;
+        Ok(checkpoint)
     }
 
     /// Provision the log of a newly enrolled key at `path` and write its authenticated
@@ -467,13 +527,15 @@ impl FsBeltWal {
                 generation: 0,
                 tag: [0; 32],
             },
+            reservation: [0; 32],
             anchor: None,
             release: core::cell::RefCell::new(None),
             failed: core::cell::Cell::new(None),
         };
-        let (encoded, ckpt) = wal.seal(1, &BeltLatchState::default());
-        wal.record.replace(&encoded)?;
-        wal.checkpoint = ckpt;
+        wal.checkpoint = wal.write(
+            &crate::TicketSeal::unanchored(1),
+            &BeltLatchState::default(),
+        )?;
         Ok(wal)
     }
 
@@ -492,12 +554,13 @@ impl FsBeltWal {
                 generation: 0,
                 tag: [0; 32],
             },
+            reservation: [0; 32],
             anchor: None,
             release: core::cell::RefCell::new(None),
             failed: core::cell::Cell::new(None),
         };
         let raw = wal.record.read()?;
-        let Some((ckpt, _)) = wal.unseal(&raw) else {
+        let Some((ckpt, seal, _)) = wal.unseal(&raw) else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "belt latch log failed authentication",
@@ -513,6 +576,7 @@ impl FsBeltWal {
             ));
         }
         wal.checkpoint = ckpt;
+        wal.reservation = seal.reservation;
         Ok(wal)
     }
 
@@ -559,7 +623,7 @@ impl DurableWal for FsBeltWal {
             self.failed.set(Some(WalError::Io));
             WalError::Io
         })?;
-        let (on_disk_ckpt, _) = self.unseal(&current_raw).ok_or_else(|| {
+        let (on_disk_ckpt, _, _) = self.unseal(&current_raw).ok_or_else(|| {
             self.failed.set(Some(WalError::Corrupt));
             WalError::Corrupt
         })?;
@@ -569,18 +633,30 @@ impl DurableWal for FsBeltWal {
             self.failed.set(Some(WalError::Corrupt));
             return Err(WalError::Corrupt);
         }
-        let next_gen = self
-            .checkpoint
-            .generation
-            .checked_add(1)
-            .ok_or(WalError::Corrupt)?;
-        let (encoded, next_ckpt) = self.seal(next_gen, state);
-        if self.record.replace(&encoded).is_err() {
+        let committed = match &self.anchor {
+            Some(anchor) => anchor
+                .commit_with_ticket(
+                    self.checkpoint,
+                    self.checkpoint,
+                    self.ticket_context(state),
+                    |seal| self.write(seal, state),
+                )
+                .map(|(_, checkpoint)| checkpoint),
+            None => {
+                let next_gen = self
+                    .checkpoint
+                    .generation
+                    .checked_add(1)
+                    .ok_or(WalError::Corrupt)?;
+                self.write(&crate::TicketSeal::unanchored(next_gen), state)
+            }
+        };
+        // A refused reservation, a failed replacement and a refused consumption all
+        // leave this handle's relation to the disk or the anchor unknown.
+        self.checkpoint = committed.map_err(|_| {
             self.failed.set(Some(WalError::Io));
-            return Err(WalError::Io);
-        }
-        self.advance_anchor_or_fail(next_ckpt)?;
-        self.checkpoint = next_ckpt;
+            WalError::Io
+        })?;
         Ok(())
     }
 
@@ -590,7 +666,7 @@ impl DurableWal for FsBeltWal {
         }
         match self.record.read() {
             Ok(raw) => {
-                let (ckpt, state) = self.unseal(&raw).ok_or_else(|| {
+                let (ckpt, _, state) = self.unseal(&raw).ok_or_else(|| {
                     self.failed.set(Some(WalError::Corrupt));
                     WalError::Corrupt
                 })?;

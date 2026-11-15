@@ -69,7 +69,10 @@ impl core::fmt::Display for AntiRollbackError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::RollbackOrForkDetected(msg) => {
-                write!(f, "anti-rollback halt (rollback or VM fork detected): {msg}")
+                write!(
+                    f,
+                    "anti-rollback halt (rollback or VM fork detected): {msg}"
+                )
             }
             Self::Tpm2ResponseError(rc) => {
                 write!(f, "TPM 2.0 command failed with response code 0x{rc:08x}")
@@ -260,7 +263,10 @@ fn read_bounded_sysfs_id(path: &Path) -> Result<Option<[u8; 16]>, AntiRollbackEr
     }
     let mut f = match OpenOptions::new().read(true).open(path) {
         Ok(f) => f,
-        Err(e) if e.kind() == io::ErrorKind::NotFound || e.kind() == io::ErrorKind::PermissionDenied => {
+        Err(e)
+            if e.kind() == io::ErrorKind::NotFound
+                || e.kind() == io::ErrorKind::PermissionDenied =>
+        {
             return Ok(None);
         }
         Err(e) => return Err(AntiRollbackError::Io(e.kind())),
@@ -640,7 +646,8 @@ impl<S: VmGenSource> HypervisorGenerationAnchor<S> {
 
 impl<S: VmGenSource> ExternalMonotoneAnchor for HypervisorGenerationAnchor<S> {
     fn load(&self) -> io::Result<Option<LedgerCheckpoint>> {
-        self.load_checked().map_err(AntiRollbackError::into_io_error)
+        self.load_checked()
+            .map_err(AntiRollbackError::into_io_error)
     }
 
     fn advance(&self, checkpoint: LedgerCheckpoint) -> io::Result<()> {
@@ -771,11 +778,12 @@ fn parse_tpm2_response_header(rsp: &[u8]) -> Result<(u16, usize), AntiRollbackEr
         ));
     }
     let param_size = u32::from_be_bytes([rsp[10], rsp[11], rsp[12], rsp[13]]) as usize;
-    let auth_offset = 14usize
-        .checked_add(param_size)
-        .ok_or(AntiRollbackError::ProtocolFramingError(
-            "TPM2 parameterSize arithmetic overflow",
-        ))?;
+    let auth_offset =
+        14usize
+            .checked_add(param_size)
+            .ok_or(AntiRollbackError::ProtocolFramingError(
+                "TPM2 parameterSize arithmetic overflow",
+            ))?;
     if auth_offset + 5 > rsp.len() {
         return Err(AntiRollbackError::ProtocolFramingError(
             "TPM2 parameterSize overruns response auth area",
@@ -786,7 +794,9 @@ fn parse_tpm2_response_header(rsp: &[u8]) -> Result<(u16, usize), AntiRollbackEr
     let nonce_len = u16::from_be_bytes([auth[0], auth[1]]) as usize;
     let attr_pos = 2usize
         .checked_add(nonce_len)
-        .ok_or(AntiRollbackError::ProtocolFramingError("TPM2 nonceTPM overflow"))?;
+        .ok_or(AntiRollbackError::ProtocolFramingError(
+            "TPM2 nonceTPM overflow",
+        ))?;
     if attr_pos + 3 > auth.len() {
         return Err(AntiRollbackError::ProtocolFramingError(
             "TPM2 auth response truncated before hmac size",
@@ -1014,7 +1024,8 @@ impl<T: Tpm2Transport> Tpm2NvMonotoneAnchor<T> {
 
     /// Read the live 64-bit counter directly from the TPM 2.0 NV index via `TPM2_NV_Read`.
     pub fn read_hardware_counter(&self) -> Result<u64, AntiRollbackError> {
-        let mut cmd = marshal_tpm2_nv_read_u64_cmd(self.auth_handle, self.nv_index, self.auth_slice())?;
+        let mut cmd =
+            marshal_tpm2_nv_read_u64_cmd(self.auth_handle, self.nv_index, self.auth_slice())?;
         let rsp_res = self.transport.transmit(&cmd);
         wipe_bytes(&mut cmd);
         let rsp = rsp_res?;
@@ -1022,7 +1033,8 @@ impl<T: Tpm2Transport> Tpm2NvMonotoneAnchor<T> {
     }
 
     fn increment_hardware_counter(&self) -> Result<(), AntiRollbackError> {
-        let mut cmd = marshal_tpm2_nv_increment_cmd(self.auth_handle, self.nv_index, self.auth_slice())?;
+        let mut cmd =
+            marshal_tpm2_nv_increment_cmd(self.auth_handle, self.nv_index, self.auth_slice())?;
         let rsp_res = self.transport.transmit(&cmd);
         wipe_bytes(&mut cmd);
         let rsp = rsp_res?;
@@ -1186,11 +1198,12 @@ impl<T: Tpm2Transport> Tpm2NvMonotoneAnchor<T> {
                     return Ok(());
                 }
 
-                let next_hw = active_hw
-                    .checked_add(1)
-                    .ok_or(AntiRollbackError::ProtocolFramingError(
-                        "TPM2 64-bit NV counter exhausted",
-                    ))?;
+                let next_hw =
+                    active_hw
+                        .checked_add(1)
+                        .ok_or(AntiRollbackError::ProtocolFramingError(
+                            "TPM2 64-bit NV counter exhausted",
+                        ))?;
 
                 // Phase 1: Stage pending `(next_hw, checkpoint)` to durable disk BEFORE
                 // incrementing the irreversible TPM2 NV counter.
@@ -1223,11 +1236,12 @@ impl<T: Tpm2Transport> Tpm2NvMonotoneAnchor<T> {
                 // First provisioning: increment TPM2 NV counter once from `live_hw -> live_hw + 1`
                 // so a deleted/re-created seal directory cannot silently re-adopt `live_hw` after
                 // signing under a previous seal!
-                let next_hw = live_hw
-                    .checked_add(1)
-                    .ok_or(AntiRollbackError::ProtocolFramingError(
-                        "TPM2 64-bit NV counter exhausted",
-                    ))?;
+                let next_hw =
+                    live_hw
+                        .checked_add(1)
+                        .ok_or(AntiRollbackError::ProtocolFramingError(
+                            "TPM2 64-bit NV counter exhausted",
+                        ))?;
                 self.increment_hardware_counter()?;
                 let after_hw = self.read_hardware_counter()?;
                 if after_hw != next_hw {
@@ -1250,7 +1264,8 @@ impl<T: Tpm2Transport> Tpm2NvMonotoneAnchor<T> {
 
 impl<T: Tpm2Transport> ExternalMonotoneAnchor for Tpm2NvMonotoneAnchor<T> {
     fn load(&self) -> io::Result<Option<LedgerCheckpoint>> {
-        self.load_checked().map_err(AntiRollbackError::into_io_error)
+        self.load_checked()
+            .map_err(AntiRollbackError::into_io_error)
     }
 
     fn advance(&self, checkpoint: LedgerCheckpoint) -> io::Result<()> {
