@@ -1,8 +1,8 @@
 module
 
-public import Qsag.InteractiveServiceContext
-public import Qsag.RssProductionProfile
-import all Qsag.InteractiveUcEngine
+public import Qsag.Exec.InteractiveServiceContext
+public import Qsag.Exec.RssProductionProfile
+import all Qsag.Exec.InteractiveUcEngine
 
 public section
 namespace Qsag.ThresholdIdealService

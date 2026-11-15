@@ -3846,3 +3846,1188 @@ theorem concurrent_hybrid_simulation_reduces_to_per_session
     concurrent sessions leaks the exact secret XOR `w₁ ^^^ w₂` with probability `16 / 16 = 1`,
     whereas independent session masks satisfy `(w₁ ^^^ m₁) ^^^ (w₂ ^^^ m₂) = w₁ ^^^ w₂` on only
     `16 / 256` (`1 / 16`) mask pairs. -/
+theorem tooth_concurrent_reused_session_id_breaks_isolation :
+    ∃ (w₁ w₂ : BitVec 4),
+      w₁ ≠ w₂ ∧
+      finSum 16 (fun m : Fin 16 =>
+        let mask := BitVec.ofNat 4 m.val
+        if ((w₁ ^^^ mask) ^^^ (w₂ ^^^ mask)) == (w₁ ^^^ w₂) then 1 else 0) = 16 ∧
+      finSum 256 (fun mm : Fin 256 =>
+        let m₁ := BitVec.ofNat 4 (mm.val / 16)
+        let m₂ := BitVec.ofNat 4 (mm.val % 16)
+        if ((w₁ ^^^ m₁) ^^^ (w₂ ^^^ m₂)) == (w₁ ^^^ w₂) then 1 else 0) = 16 := by
+  refine ⟨1#4, 2#4, by decide, ?_, ?_⟩
+  · decide +kernel
+  · decide +kernel
+
+theorem witness_concurrent_hybrid_inhabited :
+    ∃ (proto : InteractiveThresholdProtocol Unit Unit Unit Unit Unit Unit)
+      (idealSignOracle : SessionScheduleReq → ByteArray)
+      (sim : BlackBoxUcSimulator Unit Unit Unit Unit Unit)
+      (cl : RealClusterState Unit Unit) (icl : IdealClusterState Unit),
+      cl.tsig = icl.tsig ∧ cl.honestWal = icl.honestWal ∧
+      cl.maskSessionCursor = icl.maskSessionCursor ∧
+      Nonempty (PerSessionRoundSimSpec proto idealSignOracle sim
+        cl.tsig.pk cl.tsig.corruptParties cl.honestShares 1 1 0) := by
+  let proto : InteractiveThresholdProtocol Unit Unit Unit Unit Unit Unit :=
+    { pkDigestOf := fun _ => List.replicate 32 0
+      msgDigestOf := fun req => req.msg
+      honestRound1 := fun _ _ _ _ _ _ => ([], ())
+      verifyRound1 := fun _ _ _ _ _ => .inr ()
+      honestRound2 := fun _ _ _ _ _ _ => ([], ())
+      preCutBarrier := fun _ _ _ _ _ => .inr ()
+      honestRound3 := fun _ _ _ _ _ _ => ([], ())
+      finalizeCutOpen := fun _ _ _ _ _ => .inr (packWire [1]) }
+  let sim : BlackBoxUcSimulator Unit Unit Unit Unit Unit :=
+    { pkDigestOf := fun _ => List.replicate 32 0
+      msgDigestOf := fun req => req.msg
+      simRound1 := fun _ _ _ _ _ => ([], ())
+      simVerifyRound1 := fun _ _ _ _ _ => .inr ()
+      simRound2 := fun _ _ _ _ _ => ([], ())
+      simPreCutBarrier := fun _ _ _ _ _ => .inr ()
+      simRound3 := fun _ _ _ _ _ _ => ([], ())
+      simFinalizeCut := fun _ _ _ _ _ _ => .inr (packWire [1]) }
+  let tsig0 : IdealTsigState Unit (List UInt8) := ⟨(), 1, 1, [], [], []⟩
+  let wal0 := initWalLatchState (List.replicate 32 0)
+  refine ⟨proto, fun _ => packWire [1], sim, ⟨tsig0, wal0, 0, fun _ => some ()⟩,
+    ⟨tsig0, wal0, 0⟩, rfl, rfl, rfl, ⟨?_⟩⟩
+  exact
+    { hPadPos := Nat.zero_lt_one
+      hCheckPos := Nat.zero_lt_one
+      realTapeOf := fun _ _ => ()
+      simTapeOf := fun _ _ => ()
+      hSimTapeIndep := fun _ _ _ => rfl
+      padBij := { toFun := id, invFun := id, left_inv := fun _ => rfl, right_inv := fun _ => rfl }
+      RelR1 := fun _ _ _ _ _ => True
+      RelR2 := fun _ _ _ _ _ => True
+      RelR3 := fun _ _ _ _ _ => True
+      badCheck := fun _ _ _ _ => false
+      hPkDigest := rfl
+      hMsgDigest := rfl
+      hRound1 := fun _ _ _ _ => ⟨rfl, trivial⟩
+      hVerify1 := fun _ _ _ _ _ _ _ _ => .inr ⟨(), (), rfl, rfl, trivial⟩
+      hRound2 := fun _ _ _ _ _ _ => ⟨rfl, trivial⟩
+      hPreCut := fun _ _ _ _ _ _ _ _ _ => .inr ⟨(), (), rfl, rfl, trivial⟩
+      hRound3 := fun _ _ _ _ _ _ => ⟨rfl, trivial⟩
+      hFinalize := fun _ _ _ _ _ _ _ _ => rfl
+      hBadCheckBound := fun _ _ _ => by simp [finSum] }
+
+/-- Small pre-cut observer used to test the concurrent theorem's independent
+    per-slot tape construction. Both sessions have distinct IDs and valid epochs. -/
+def concurrentTapeProbeProtocol :
+    InteractiveThresholdProtocol Unit Unit (Fin 2) Unit Unit Unit where
+  pkDigestOf := fun _ => List.replicate 32 0
+  msgDigestOf := encodeUcSigningRequest
+  honestRound1 := fun _ _ _ _ _ tape => ([(0, packWire [UInt8.ofNat tape.val])], ())
+  verifyRound1 := fun _ _ _ _ _ => .inr ()
+  honestRound2 := fun _ _ _ _ _ _ => ([], ())
+  preCutBarrier := fun _ _ _ _ _ => .inr ()
+  honestRound3 := fun _ _ _ _ _ _ => ([], ())
+  finalizeCutOpen := fun _ _ _ _ _ => .inr (packWire [1])
+
+def concurrentTapeProbeAdversary : ConcurrentUcAdversary (Nat × List ByteArray) where
+  chooseNextStep := fun st =>
+    (.startRound1 ⟨st.1, st.1, [1], [], [0]⟩, (st.1 + 1, st.2))
+  rushRound1 := fun st _ wires => (fun _ => packWire [], (st.1, st.2 ++ wires.map Prod.snd))
+  rushRound2 := fun st _ _ => (fun _ => packWire [], st)
+  rushRound3 := fun st _ _ => (fun _ => packWire [], st)
+  observeOutcome := fun st _ _ => st
+
+def concurrentTapeProbeInitial : RealClusterState Unit Unit :=
+  ⟨⟨(), 1, 1, [], [], []⟩, initWalLatchState (List.replicate 32 0), 0, fun _ => some ()⟩
+
+def concurrentTapeProbeEqual (tr : ExecTranscript (Nat × List ByteArray)) : Bool :=
+  decide (tr.finalAdvState.2 = [packWire [0], packWire [0]] ∨
+    tr.finalAdvState.2 = [packWire [1], packWire [1]])
+
+/-- Replacing the theorem's independent tape vector by one reused coordinate
+    changes an actual concurrent pre-cut view: equality occurs on 2/2 reused
+    tapes and 2/4 independent tapes. Unique session IDs alone do not make tapes
+    independent. Both starts allocate successfully; this is not an all-abort test. -/
+theorem concurrentTapeProbe_two_live_sessions :
+    (ConcurrentProtocolExec concurrentTapeProbeProtocol concurrentTapeProbeAdversary
+      2 2 (fun _ => (0 : Fin 2)) concurrentTapeProbeInitial (0, [])).1.maskSessionCursor = 2 := by rfl
+
+theorem tooth_concurrent_shared_tapes_change_view :
+    finSum 2 (fun m => if concurrentTapeProbeEqual
+      (ConcurrentProtocolExec concurrentTapeProbeProtocol concurrentTapeProbeAdversary
+        2 2 (fun _ => m) concurrentTapeProbeInitial (0, [])).2 then 1 else 0) * 4 ≠
+    finSum 4 (fun mm => if concurrentTapeProbeEqual
+      (ConcurrentProtocolExec concurrentTapeProbeProtocol concurrentTapeProbeAdversary
+        2 2 (fun j => if j.val = 0 then ⟨mm.val / 2, by omega⟩
+          else ⟨mm.val % 2, Nat.mod_lt _ (by decide)⟩)
+        concurrentTapeProbeInitial (0, [])).2 then 1 else 0) * 2 := by
+  decide +kernel
+
+#tooth_pair Qsag.concurrent_hybrid_simulation_reduces_to_per_session vs Qsag.tooth_concurrent_shared_tapes_change_view
+#verify_constructive tooth_concurrent_reused_session_id_breaks_isolation
+  concurrentTapeProbe_two_live_sessions
+
+#verify_inhabited Qsag.concurrent_hybrid_simulation_reduces_to_per_session Qsag.witness_concurrent_hybrid_inhabited
+
+/-! ## 8. Active Shamir Threshold-to-Ideal `ε`-Emulation & Unconditional Production Forgery Transfer -/
+
+/-- Pack a `Goldilocks` element into an 8-byte little-endian wire `ByteArray`. -/
+def packGoldilocksWire (g : Goldilocks) : ByteArray :=
+  packWire ((List.range 8).map (fun i => UInt8.ofNat ((g.val >>> (8 * i)) % 256)))
+
+/-- Constructively decode a bounded 64-bit little-endian limb mod `goldilocksPrime` from 8 bytes. -/
+def decodeGoldilocksLimb (bs : List UInt8) : Goldilocks :=
+  let raw := (List.range 8).foldl
+    (fun acc i => acc + (bs.getD i 0).toNat * (256 ^ i)) 0
+  Goldilocks.ofNat raw
+
+/-- Constructively unpack claimed degree-`< t` sacrificial Shamir polynomial coefficients and
+    `numCheckPts` evaluation shares from `corrR2` wire messages. -/
+def unpackSacrificialShamir (t numCheckPts : Nat) (corrR2 : List (Nat × ByteArray)) :
+    List Goldilocks × List Goldilocks :=
+  let flat := match corrR2 with
+    | [] => []
+    | (_, w) :: _ => unpackWire w
+  let coeffs := (List.range t).map (fun i => decodeGoldilocksLimb ((flat.drop (8 * i)).take 8))
+  let base := 8 * t
+  let shares := (List.range numCheckPts).map
+    (fun i => decodeGoldilocksLimb ((flat.drop (base + 8 * i)).take 8))
+  (coeffs, shares)
+
+/-- Constructively unpack up to `maxGates` active SPDZ gate deviations `(deltaD, sigmaSum)`
+    from the Round-2 corrupt wire transcript (`24` bytes per gate after header). -/
+def unpackSpdzGates (maxGates : Nat) (corrR2 : List (Nat × ByteArray)) :
+    List (Goldilocks × GoldilocksExt2) :=
+  let flat := match corrR2 with
+    | _ :: (_, w) :: _ => unpackWire w
+    | [(_, w)] => (unpackWire w).drop 256
+    | [] => []
+  let avail := Nat.min maxGates (flat.length / 24)
+  (List.range avail).map (fun k =>
+    let chunk := flat.drop (24 * k)
+    let d := decodeGoldilocksLimb (chunk.take 8)
+    let s0 := decodeGoldilocksLimb ((chunk.drop 8).take 8)
+    let s1 := decodeGoldilocksLimb ((chunk.drop 16).take 8)
+    (d, ⟨s0, s1⟩))
+
+theorem unpackSpdzGates_length_le (maxGates : Nat) (corrR2 : List (Nat × ByteArray)) :
+    (unpackSpdzGates maxGates corrR2).length ≤ maxGates := by
+  unfold unpackSpdzGates
+  dsimp only
+  rw [List.length_map, List.length_range]
+  exact Nat.min_le_left _ _
+
+/-- **Concrete Active Shamir + Poseidon2 `GoldilocksExt2` SPDZ MAC Threshold Protocol
+    (`activeShamirThresholdProtocol`)**:
+    - Round 1: emits corrupt parties' `< t` Shamir pad shares over `Goldilocks`;
+    - Round 2: broadcasts masked secret opening `wSecret + P(0)` (`0` dependence on MAC key `alpha`);
+    - `preCutBarrier`: enforces degree-`< t` sacrificial polynomial consistency
+      (`verifyShamirPolyConsistent`) AND the `GoldilocksExt2` SPDZ MAC barrier strictly before Round 3;
+    - Round 3: evaluates `productionThresholdSignOracle` only after `preCutBarrier` passes. -/
+def activeShamirThresholdProtocol
+    (t : Nat) (corruptPts checkPts : List Goldilocks) (maxGates : Nat)
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (pkSeed : List UInt8)
+    (grindLimit : Nat) (ser : Option PqHashSig → ByteArray) :
+    InteractiveThresholdProtocol PqPublicKey Goldilocks
+      (ShamirPadPoly Goldilocks t × GoldilocksExt2)
+      (ShamirPadPoly Goldilocks t × GoldilocksExt2)
+      (ShamirPadPoly Goldilocks t × GoldilocksExt2)
+      Unit :=
+  { pkDigestOf := ucPqPublicKeyDigest
+    msgDigestOf := encodeUcSigningRequest
+    honestRound1 := fun _ corruptParties _ _ _ (padPoly, alpha) =>
+      let wires := (corruptParties.zip corruptPts).map
+        (fun cx => (cx.1, packGoldilocksWire (RoundPoly.evalCoeffs padPoly.1 cx.2)))
+      (wires, (padPoly, alpha))
+    verifyRound1 := fun _ _ st1 _ corrR1 =>
+      if corrR1.all (fun cw => decide (cw.2.size == 32)) then .inr st1
+      else .inl (.round1CommitMismatch 0, false)
+    honestRound2 := fun _ _ _ (padPoly, alpha) honestShares _ =>
+      let wSec := (honestShares 0).getD Goldilocks.zero
+      let masked := CommRingOps.add wSec (RoundPoly.evalCoeffs padPoly.1 Goldilocks.zero)
+      ([(0, packGoldilocksWire masked)], (padPoly, alpha))
+    preCutBarrier := fun _ _ (_, alpha) _ corrR2 =>
+      let (claimedPoly, claimedShares) := unpackSacrificialShamir t checkPts.length corrR2
+      let gates := unpackSpdzGates maxGates corrR2
+      let polyOk := verifyShamirPolyConsistent t claimedPoly checkPts claimedShares
+      let macOk := gates.all (fun g =>
+        decide (g.1 = Goldilocks.zero) || spdzGatePinsAlpha alpha g.1 g.2)
+      if polyOk && macOk then .inr () else .inl .activeConsistencyFailed
+    honestRound3 := fun _ _ req () _ _ =>
+      let sigBytes := productionThresholdSignOracle suite params o pkSeed grindLimit ser req
+      ([(0, sigBytes)], ())
+    finalizeCutOpen := fun _ req () _ corrR3 =>
+      let sigBytes := productionThresholdSignOracle suite params o pkSeed grindLimit ser req
+      if corrR3.all (fun cw => decide (cw.2.size > 0)) then .inr sigBytes
+      else .inl (.cutOpenMismatch 0) }
+
+/-- **Strictly `sk`-Free & `alpha`-Free Black-Box UC Simulator (`activeShamirBlackBoxSimulator`)**:
+    Simulates Round 1 and Round 2 from a uniform degree-`< t` Shamir pad polynomial `simPoly`
+    (with `0` secret key and `0` MAC key!), rejects any nonzero gate deviation at `simPreCutBarrier`,
+    and programs Round 3 directly from `idealSigBytes ← idealSignOracle req`. -/
+def activeShamirBlackBoxSimulator
+    (t : Nat) (corruptPts checkPts : List Goldilocks) (maxGates : Nat) :
+    BlackBoxUcSimulator PqPublicKey
+      (ShamirPadPoly Goldilocks t)
+      (ShamirPadPoly Goldilocks t)
+      (ShamirPadPoly Goldilocks t)
+      Unit :=
+  { pkDigestOf := ucPqPublicKeyDigest
+    msgDigestOf := encodeUcSigningRequest
+    simRound1 := fun _ corruptParties _ _ simPoly =>
+      let wires := (corruptParties.zip corruptPts).map
+        (fun cx => (cx.1, packGoldilocksWire (RoundPoly.evalCoeffs simPoly.1 cx.2)))
+      (wires, simPoly)
+    simVerifyRound1 := fun _ _ simPoly _ corrR1 =>
+      if corrR1.all (fun cw => decide (cw.2.size == 32)) then .inr simPoly
+      else .inl (.round1CommitMismatch 0, false)
+    simRound2 := fun _ _ _ simPoly _ =>
+      let masked := CommRingOps.add Goldilocks.zero (RoundPoly.evalCoeffs simPoly.1 Goldilocks.zero)
+      ([(0, packGoldilocksWire masked)], simPoly)
+    simPreCutBarrier := fun _ _ _ _ corrR2 =>
+      let (claimedPoly, claimedShares) := unpackSacrificialShamir t checkPts.length corrR2
+      let gates := unpackSpdzGates maxGates corrR2
+      let polyOk := verifyShamirPolyConsistent t claimedPoly checkPts claimedShares
+      let macOk := gates.all (fun g => decide (g.1 = Goldilocks.zero))
+      if polyOk && macOk then .inr () else .inl .activeConsistencyFailed
+    simRound3 := fun _ _ _ () idealSigBytes _ =>
+      ([(0, idealSigBytes)], ())
+    simFinalizeCut := fun _ _ () idealSigBytes _ corrR3 =>
+      if corrR3.all (fun cw => decide (cw.2.size > 0)) then .inr idealSigBytes
+      else .inl (.cutOpenMismatch 0) }
+
+private theorem mem_zip_snd {α β : Type} {x : α} {y : β} :
+    ∀ {xs : List α} {ys : List β}, (x, y) ∈ List.zip xs ys → y ∈ ys
+  | [], _, h => by cases h
+  | _ :: _, [], h => by cases h
+  | _ :: as, _ :: bs, h => by
+    rcases List.mem_cons.mp h with he | hr
+    · injection he with _ hy; subst hy; exact .head _
+    · exact .tail _ (mem_zip_snd hr)
+
+/-- Conjugate `shamir_rebalanceEquiv` across `enumShamirPadPolyGoldilocks t`. -/
+def activeShamirPadIdxBij (t : Nat) (corruptPts : List Goldilocks) (wSec : Goldilocks)
+    (hCard : corruptPts.length + 1 ≤ t) :
+    SimpleEquiv (Fin (ucPow goldilocksPrime t)) (Fin (ucPow goldilocksPrime t)) :=
+  let enum := enumShamirPadPolyGoldilocks t
+  let reb := shamir_rebalanceEquiv Goldilocks.inv t corruptPts wSec hCard
+  { toFun := fun idx => enum.invFun (reb.toFun (enum.toFun idx))
+    invFun := fun idx => enum.invFun (reb.invFun (enum.toFun idx))
+    left_inv := fun idx => by
+      rw [enum.right_inv, reb.left_inv, enum.left_inv]
+    right_inv := fun idx => by
+      rw [enum.right_inv, reb.right_inv, enum.left_inv] }
+
+/-- **Active Shamir Roundwise Per-Session Simulation Proof (`activeShamir_perSessionRoundSimSpec`)**:
+    Constructively discharges `PerSessionRoundSimSpec` for `(activeShamirThresholdProtocol,
+    activeShamirBlackBoxSimulator)` with bad-check slice bound `≤ maxGates / goldilocksExt2Card`. -/
+def activeShamir_perSessionRoundSimSpec
+    (t : Nat) (corruptPts checkPts : List Goldilocks) (maxGates : Nat)
+    (hCard : corruptPts.length + 1 ≤ t)
+    (hNonZero : ∀ c ∈ corruptPts, c ≠ Goldilocks.zero)
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (pkSeed : List UInt8)
+    (grindLimit : Nat) (ser : Option PqHashSig → ByteArray)
+    (pk : PqPublicKey) (corruptParties : List Nat)
+    (honestShares : Nat → Option Goldilocks) :
+    PerSessionRoundSimSpec
+      (activeShamirThresholdProtocol t corruptPts checkPts maxGates suite params o pkSeed grindLimit ser)
+      (productionThresholdSignOracle suite params o pkSeed grindLimit ser)
+      (activeShamirBlackBoxSimulator t corruptPts checkPts maxGates)
+      pk corruptParties honestShares
+      (ucPow goldilocksPrime t) goldilocksExt2Card maxGates :=
+  let wSec := (honestShares 0).getD Goldilocks.zero
+  let enumP := enumShamirPadPolyGoldilocks t
+  let reb := shamir_rebalanceEquiv Goldilocks.inv t corruptPts wSec hCard
+  let padBij := activeShamirPadIdxBij t corruptPts wSec hCard
+  have hToPadBij : ∀ p, enumP.toFun (padBij.toFun p) = reb.toFun (enumP.toFun p) :=
+    fun p => enumP.right_inv (reb.toFun (enumP.toFun p))
+  { hPadPos := ucPow_pos goldilocksPrime_pos t
+    hCheckPos := goldilocksExt2Card_pos
+    realTapeOf := fun p c => (enumP.toFun p, enumGoldilocksExt2.toFun c)
+    simTapeOf := fun p _ => enumP.toFun p
+    hSimTapeIndep := fun _ _ _ => rfl
+    padBij := padBij
+    RelR1 := fun p c _ r1 s1 =>
+      r1 = (enumP.toFun p, enumGoldilocksExt2.toFun c) ∧ s1 = reb.toFun (enumP.toFun p)
+    RelR2 := fun p c _ r2 s2 =>
+      r2 = (enumP.toFun p, enumGoldilocksExt2.toFun c) ∧ s2 = reb.toFun (enumP.toFun p)
+    RelR3 := fun _ _ _ _ _ => True
+    badCheck := fun _ _ corrR2 c =>
+      anyGatePinsAlpha (enumGoldilocksExt2.toFun c) (unpackSpdzGates maxGates corrR2)
+    hPkDigest := rfl
+    hMsgDigest := rfl
+    hRound1 := fun _ _ p c => by
+      dsimp only [activeShamirThresholdProtocol, activeShamirBlackBoxSimulator]
+      rw [hToPadBij p]
+      obtain ⟨_, hCorrEq⟩ := pad_bijection_masked_openings_uniform
+        Goldilocks.inv (fun _ hx => Goldilocks.mul_inv_cancel hx)
+        t corruptPts wSec hCard hNonZero (enumP.toFun p)
+      refine ⟨?_, rfl, rfl⟩
+      apply List.map_congr_left
+      intro cx hMem
+      have hXcMem : cx.2 ∈ corruptPts := mem_zip_snd hMem
+      rw [hCorrEq cx.2 hXcMem]
+    hVerify1 := fun p c _ r1 s1 _ corrR1 ⟨hr1, hs1⟩ => by
+      dsimp only [activeShamirThresholdProtocol, activeShamirBlackBoxSimulator]
+      cases corrR1.all (fun cw => decide (cw.2.size == 32))
+      · exact .inl ⟨(.round1CommitMismatch 0, false), rfl, rfl⟩
+      · exact .inr ⟨r1, s1, rfl, rfl, hr1, hs1⟩
+    hRound2 := fun p c _ r2 s2 ⟨hr2, hs2⟩ => by
+      subst hr2 hs2
+      dsimp only [activeShamirThresholdProtocol, activeShamirBlackBoxSimulator]
+      obtain ⟨hZeroEq, _⟩ := pad_bijection_masked_openings_uniform
+        Goldilocks.inv (fun _ hx => Goldilocks.mul_inv_cancel hx)
+        t corruptPts wSec hCard hNonZero (enumP.toFun p)
+      refine ⟨?_, rfl, rfl⟩
+      change [(0, packGoldilocksWire (CommRingOps.add wSec (RoundPoly.evalCoeffs (enumP.toFun p).1 CommRingOps.zero)))] =
+        [(0, packGoldilocksWire (CommRingOps.add CommRingOps.zero (RoundPoly.evalCoeffs (reb.toFun (enumP.toFun p)).1 CommRingOps.zero)))]
+      rw [hZeroEq]
+    hPreCut := fun p c _ r2 s2 _ corrR2 ⟨hr2, _⟩ hBadF => by
+      subst hr2
+      dsimp only [activeShamirThresholdProtocol, activeShamirBlackBoxSimulator]
+      let alpha := enumGoldilocksExt2.toFun c
+      let gates := unpackSpdzGates maxGates corrR2
+      have hGatesEq :
+          gates.all (fun g => decide (g.1 = Goldilocks.zero) || spdzGatePinsAlpha alpha g.1 g.2) =
+          gates.all (fun g => decide (g.1 = Goldilocks.zero)) := by
+        have hNoPin : ∀ g ∈ gates, spdzGatePinsAlpha alpha g.1 g.2 = false := by
+          intro g hg
+          cases hPin : spdzGatePinsAlpha alpha g.1 g.2
+          · rfl
+          · exfalso
+            have hAnyT : anyGatePinsAlpha alpha gates = true :=
+              List.any_eq_true.mpr ⟨g, hg, hPin⟩
+            rw [hAnyT] at hBadF
+            cases hBadF
+        have hAllCong : ∀ (l : List (Goldilocks × GoldilocksExt2)),
+            (∀ g ∈ l, spdzGatePinsAlpha alpha g.1 g.2 = false) →
+            l.all (fun g => decide (g.1 = Goldilocks.zero) || spdzGatePinsAlpha alpha g.1 g.2) =
+              l.all (fun g => decide (g.1 = Goldilocks.zero)) := by
+          intro l
+          induction l with
+          | nil => intro _; rfl
+          | cons hd tl ih =>
+            intro hNP
+            simp only [List.all_cons, hNP hd (.head _), Bool.or_false,
+              ih (fun g hg => hNP g (.tail _ hg))]
+        exact hAllCong gates hNoPin
+      have hGatesExpanded :
+          (unpackSpdzGates maxGates corrR2).all
+            (fun g => decide (g.1 = Goldilocks.zero) || spdzGatePinsAlpha (enumGoldilocksExt2.toFun c) g.1 g.2) =
+          (unpackSpdzGates maxGates corrR2).all (fun g => decide (g.1 = Goldilocks.zero)) := hGatesEq
+      rw [hGatesExpanded]
+      cases (verifyShamirPolyConsistent t (unpackSacrificialShamir t checkPts.length corrR2).1
+              checkPts (unpackSacrificialShamir t checkPts.length corrR2).2 &&
+            (unpackSpdzGates maxGates corrR2).all (fun g => decide (g.1 = Goldilocks.zero)))
+      · exact .inl ⟨.activeConsistencyFailed, rfl, rfl⟩
+      · exact .inr ⟨(), (), rfl, rfl, trivial⟩
+    hRound3 := fun _ _ _ _ _ _ => ⟨rfl, trivial⟩
+    hFinalize := fun _ _ _ _ _ _ corrR3 _ => by
+      dsimp only [activeShamirThresholdProtocol, activeShamirBlackBoxSimulator,
+        BlackBoxUcSimulator.finalizeIdealCut]
+      cases corrR3.all (fun cw => decide (cw.2.size > 0)) <;> rfl
+    hBadCheckBound := fun _ _ corrR2 =>
+      Nat.le_trans (spdzGateStream_pin_count_le (unpackSpdzGates maxGates corrR2))
+        (unpackSpdzGates_length_le maxGates corrR2) }
+
+/-- **Active Shamir Concurrent Multi-Session UC `ε`-Emulation (`active_shamir_concurrent_uc_emulation`)**:
+    Across **ANY** `numSteps`-step arbitrarily interleaved concurrent execution of up to `Q_s`
+    sessions (`ConcurrentProtocolExec` vs `ConcurrentIdealExec`), `activeShamirThresholdProtocol`
+    emulates `activeShamirBlackBoxSimulator` within statistical distance
+    `≤ (Q_s * maxGates) / goldilocksExt2Card` (`< Q_s * maxGates / 2^126`)! -/
+theorem active_shamir_concurrent_uc_emulation
+    {AdvState : Type}
+    (t : Nat) (corruptPts checkPts : List Goldilocks) (maxGates : Nat)
+    (hCard : corruptPts.length + 1 ≤ t)
+    (hNonZero : ∀ c ∈ corruptPts, c ≠ Goldilocks.zero)
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (pkSeed : List UInt8)
+    (grindLimit : Nat) (ser : Option PqHashSig → ByteArray)
+    (A : ConcurrentUcAdversary AdvState) (Q_s numSteps : Nat)
+    (cl : RealClusterState PqPublicKey Goldilocks)
+    (icl : IdealClusterState PqPublicKey) (advSt : AdvState)
+    (hTsig : cl.tsig = icl.tsig) (hWal : cl.honestWal = icl.honestWal)
+    (hCur : cl.maskSessionCursor = icl.maskSessionCursor)
+    (D : ExecTranscript AdvState → Bool) :
+    let proto := activeShamirThresholdProtocol t corruptPts checkPts maxGates suite params o pkSeed grindLimit ser
+    let oracle := productionThresholdSignOracle suite params o pkSeed grindLimit ser
+    let sim := activeShamirBlackBoxSimulator t corruptPts checkPts maxGates
+    let cardS := ucPow goldilocksPrime t * goldilocksExt2Card
+    let hCardS : 0 < cardS := Nat.mul_pos (ucPow_pos goldilocksPrime_pos t) goldilocksExt2Card_pos
+    let cardAll := ucPow cardS Q_s
+    let enumVec := finPowVecEquiv hCardS Q_s
+    let mkReal := fun (v : Fin Q_s → Fin cardS) (j : Fin Q_s) =>
+      ((enumShamirPadPolyGoldilocks t).toFun (ucSplitLeft goldilocksExt2Card_pos (v j)),
+       enumGoldilocksExt2.toFun (ucSplitRight goldilocksExt2Card_pos (v j)))
+    let mkSim := fun (v : Fin Q_s → Fin cardS) (j : Fin Q_s) =>
+      (enumShamirPadPolyGoldilocks t).toFun (ucSplitLeft goldilocksExt2Card_pos (v j))
+    let realView := fun ω : Fin cardAll =>
+      (ConcurrentProtocolExec proto A Q_s numSteps (mkReal (enumVec.toFun ω)) cl advSt).2
+    let idealView := fun ω : Fin cardAll =>
+      (ConcurrentIdealExec oracle sim A Q_s numSteps (mkSim (enumVec.toFun ω)) icl advSt).2
+    2 ^ 126 < goldilocksExt2Card ∧
+    ratLe (rationalAcceptDiff cardAll realView cardAll idealView D)
+          (Q_s * maxGates, goldilocksExt2Card) := by
+  intro proto oracle sim cardS hCardS cardAll enumVec mkReal mkSim realView idealView
+  refine ⟨goldilocksExt2Card_gt_two_pow_126, ?_⟩
+  exact concurrent_hybrid_simulation_reduces_to_per_session
+    proto oracle sim A Q_s numSteps cl icl advSt hTsig hWal hCur
+    (activeShamir_perSessionRoundSimSpec t corruptPts checkPts maxGates hCard hNonZero
+      suite params o pkSeed grindLimit ser cl.tsig.pk cl.tsig.corruptParties cl.honestShares) D
+
+/-- Lift a sequential `UcRushingAdversary AdvState` into a `ConcurrentUcAdversary` that runs `Q_s`
+    sessions (`sessionId := curSid`, `curSid = 0, 1, ..., Q_s - 1`) in 3 steps per session. -/
+private structure SeqHybridState (PK ShareT : Type) (AdvState : Type) where
+  cl       : RealClusterState PK ShareT
+  advSt    : AdvState
+  sessions : List SessionWireRecord
+
+/-- Sequential `h`-hybrid over `Q_s` sessions: sessions `< h` execute `execIdealSession`,
+    sessions `≥ h` execute `execRealSession`. -/
+def SequentialHybridExec
+    {PK ShareT SessionTape R1St R2St R3St SimTape SimR1 SimR2 SimR3 AdvState : Type}
+    (h : Nat)
+    (proto : InteractiveThresholdProtocol PK ShareT SessionTape R1St R2St R3St)
+    (idealSignOracle : SessionScheduleReq → ByteArray)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (A : UcRushingAdversary AdvState) :
+    (rem base : Nat) → (Nat → SessionTape) → (Nat → SimTape) →
+    RealClusterState PK ShareT → AdvState → ExecTranscript AdvState
+  | 0, _, _, _, _, advSt => ⟨advSt, []⟩
+  | s + 1, base, realTapes, simTapes, cl, advSt =>
+    if base < h then
+      let icl : IdealClusterState PK := ⟨cl.tsig, cl.honestWal, cl.maskSessionCursor⟩
+      let (icl1, adv1, rec1) := execIdealSession idealSignOracle sim A icl advSt (simTapes 0)
+      let shares1 := if icl1.honestWal.poisoned && !cl.honestWal.poisoned then (fun _ => none) else cl.honestShares
+      let cl1 : RealClusterState PK ShareT := ⟨icl1.tsig, icl1.honestWal, icl1.maskSessionCursor, shares1⟩
+      let trRest := SequentialHybridExec h proto idealSignOracle sim A s (base + 1)
+        (fun i => realTapes (i + 1)) (fun i => simTapes (i + 1)) cl1 adv1
+      ⟨trRest.finalAdvState, rec1 :: trRest.sessions⟩
+    else
+      let (cl1, adv1, rec1) := execRealSession proto A cl advSt (realTapes 0)
+      let trRest := SequentialHybridExec h proto idealSignOracle sim A s (base + 1)
+        (fun i => realTapes (i + 1)) (fun i => simTapes (i + 1)) cl1 adv1
+      ⟨trRest.finalAdvState, rec1 :: trRest.sessions⟩
+
+private theorem sequentialHybridExec_zero_eq_real
+    {PK ShareT SessionTape R1St R2St R3St SimTape SimR1 SimR2 SimR3 AdvState : Type}
+    (proto : InteractiveThresholdProtocol PK ShareT SessionTape R1St R2St R3St)
+    (idealSignOracle : SessionScheduleReq → ByteArray)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (A : UcRushingAdversary AdvState) :
+    ∀ (s base : Nat) (realTapes : Nat → SessionTape) (simTapes : Nat → SimTape)
+      (cl : RealClusterState PK ShareT) (advSt : AdvState),
+      SequentialHybridExec 0 proto idealSignOracle sim A s base realTapes simTapes cl advSt =
+        (RealProtocolExec proto A s realTapes cl advSt).2
+  | 0, _, _, _, _, _ => rfl
+  | s + 1, base, realTapes, simTapes, cl, advSt => by
+    unfold SequentialHybridExec
+    simp only [Nat.not_lt_zero, ↓reduceIte, RealProtocolExec]
+    rw [sequentialHybridExec_zero_eq_real proto idealSignOracle sim A s (base + 1)]
+
+private theorem sequentialHybridExec_top_eq_ideal
+    {PK ShareT SessionTape R1St R2St R3St SimTape SimR1 SimR2 SimR3 AdvState : Type}
+    (proto : InteractiveThresholdProtocol PK ShareT SessionTape R1St R2St R3St)
+    (idealSignOracle : SessionScheduleReq → ByteArray)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (A : UcRushingAdversary AdvState) :
+    ∀ (s base h : Nat) (realTapes : Nat → SessionTape) (simTapes : Nat → SimTape)
+      (cl : RealClusterState PK ShareT) (icl : IdealClusterState PK) (advSt : AdvState),
+      base + s ≤ h →
+      cl.tsig = icl.tsig → cl.honestWal = icl.honestWal →
+      cl.maskSessionCursor = icl.maskSessionCursor →
+      SequentialHybridExec h proto idealSignOracle sim A s base realTapes simTapes cl advSt =
+        (IdealFunctionalityExec idealSignOracle sim A s simTapes icl advSt).2
+  | 0, _, _, _, _, _, _, _, _, _, _, _ => rfl
+  | s + 1, base, h, realTapes, simTapes, cl, icl, advSt, hLe, hTs, hW, hC => by
+    have hLt : base < h := by omega
+    unfold SequentialHybridExec
+    simp only [hLt, ↓reduceIte, IdealFunctionalityExec]
+    have hIclEq : (⟨cl.tsig, cl.honestWal, cl.maskSessionCursor⟩ : IdealClusterState PK) = icl := by
+      cases icl; simp only [IdealClusterState.mk.injEq]; exact ⟨hTs, hW, hC⟩
+    rw [hIclEq]
+    rcases execIdealSession idealSignOracle sim A icl advSt (simTapes 0) with ⟨icl1, adv1, rec1⟩
+    dsimp only
+    rw [sequentialHybridExec_top_eq_ideal proto idealSignOracle sim A s (base + 1) h
+      _ _ _ icl1 adv1 (by omega) rfl rfl rfl]
+
+/-- **Unconditional Concurrent Production Forgery Transfer (`uc_active_shamir_concurrent_forgery_transfer`)**:
+    Combines `active_shamir_concurrent_uc_emulation` (`0` unproved Shamir emulation premise!),
+    `productionThresholdSignOracle_eq`, `forgery_count_transfer`, and `productionForgeryBreak_of_wins`
+    across `numSteps` arbitrarily interleaved concurrent rounds of up to `Q_s` live sessions! -/
+theorem uc_active_shamir_concurrent_forgery_transfer
+    {AdvState : Type}
+    (t : Nat) (corruptPts checkPts : List Goldilocks) (maxGates : Nat)
+    (hCard : corruptPts.length + 1 ≤ t)
+    (hNonZero : ∀ c ∈ corruptPts, c ≠ Goldilocks.zero)
+    (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (o : ProductionPqHashMpcOracles) (hm : o.MatchesKey suite sk)
+    (grindLimit : Nat) (ser : Option PqHashSig → ByteArray)
+    (hw : params.w = 4 ∨ params.w = 16) (hStateless : params.statefulJorts = false)
+    (A : ConcurrentUcAdversary AdvState) (Q_s numSteps : Nat)
+    (cl : RealClusterState PqPublicKey Goldilocks)
+    (icl : IdealClusterState PqPublicKey) (advSt : AdvState)
+    (hTsig : cl.tsig = icl.tsig) (hWal : cl.honestWal = icl.honestWal)
+    (hCur : cl.maskSessionCursor = icl.maskSessionCursor)
+    (forgeOut : ExecTranscript AdvState → List UInt8 × PqHashSig) :
+    let proto := activeShamirThresholdProtocol t corruptPts checkPts maxGates suite params o sk.pkSeed grindLimit ser
+    let oracle := productionThresholdSignOracle suite params o sk.pkSeed grindLimit ser
+    let sim := activeShamirBlackBoxSimulator t corruptPts checkPts maxGates
+    let win := productionForgeryWins suite params (derivePublicKey suite params sk) forgeOut
+    let cardS := ucPow goldilocksPrime t * goldilocksExt2Card
+    let hCardS : 0 < cardS := Nat.mul_pos (ucPow_pos goldilocksPrime_pos t) goldilocksExt2Card_pos
+    let cardAll := ucPow cardS Q_s
+    let enumVec := finPowVecEquiv hCardS Q_s
+    let mkReal := fun (v : Fin Q_s → Fin cardS) (j : Fin Q_s) =>
+      ((enumShamirPadPolyGoldilocks t).toFun (ucSplitLeft goldilocksExt2Card_pos (v j)),
+       enumGoldilocksExt2.toFun (ucSplitRight goldilocksExt2Card_pos (v j)))
+    let mkSim := fun (v : Fin Q_s → Fin cardS) (j : Fin Q_s) =>
+      (enumShamirPadPolyGoldilocks t).toFun (ucSplitLeft goldilocksExt2Card_pos (v j))
+    let realView := fun ω : Fin cardAll =>
+      (ConcurrentProtocolExec proto A Q_s numSteps (mkReal (enumVec.toFun ω)) cl advSt).2
+    let idealView := fun ω : Fin cardAll =>
+      (ConcurrentIdealExec oracle sim A Q_s numSteps (mkSim (enumVec.toFun ω)) icl advSt).2
+    let eps : Nat × Nat := (Q_s * maxGates, goldilocksExt2Card)
+    2 ^ 126 < goldilocksExt2Card ∧
+    (oracle = fun req => ser (evalProductionStatelessSign suite params sk req.msg req.optRand grindLimit)) ∧
+    distAcceptCount cardAll realView win * eps.2 ≤
+      distAcceptCount cardAll idealView win * eps.2 + eps.1 * cardAll ∧
+    (∀ ω : Fin cardAll, win (idealView ω) = true →
+      ProductionTranscriptBreak suite params sk grindLimit forgeOut (idealView ω)) := by
+  intro proto oracle sim win cardS hCardS cardAll enumVec mkReal mkSim realView idealView eps
+  obtain ⟨hFieldGt, hUc⟩ := active_shamir_concurrent_uc_emulation
+    t corruptPts checkPts maxGates hCard hNonZero suite params o sk.pkSeed grindLimit ser
+    A Q_s numSteps cl icl advSt hTsig hWal hCur win
+  exact ⟨hFieldGt,
+    productionThresholdSignOracle_eq suite params o sk hm grindLimit ser,
+    forgery_count_transfer cardAll realView idealView win eps hUc,
+    fun ω hW => productionForgeryBreak_of_wins suite params sk grindLimit hw hStateless
+      forgeOut (idealView ω) hW⟩
+
+/-- Embed any sequential `UcRushingAdversary AdvState` into a `ConcurrentUcAdversary` that schedules
+    each session `0, 1, ..., Q_s - 1` sequentially through Round 1 → Round 2 → Round 3, allowing
+    sequential `RealProtocolExec` / `IdealFunctionalityExec` to inherit the concurrent Shamir bound
+    or run via `SequentialHybridExec`. -/
+private def seqSessionObsPreCut
+    {PK ShareT SessionTape R1St R2St R3St SimTape SimR1 SimR2 SimR3 AdvState : Type}
+    (proto : InteractiveThresholdProtocol PK ShareT SessionTape R1St R2St R3St)
+    (idealSignOracle : SessionScheduleReq → ByteArray)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (A : UcRushingAdversary AdvState) :
+    (idxVal : Nat) → (Nat → SimTape) → SessionTape →
+    RealClusterState PK ShareT → AdvState →
+    Option (SessionScheduleReq × List (Nat × ByteArray) × List (Nat × ByteArray))
+  | 0, _, tape0, cl, advSt =>
+    let (req, advSt1) := A.scheduleSession advSt
+    if !(validThresholdApproval cl.tsig req.honestApprovers) then none
+    else
+      match walPreSignStep cl.honestWal (proto.pkDigestOf cl.tsig.pk) req.reqEpoch (proto.msgDigestOf req) with
+      | .ok _ (.authorizedFresh _) =>
+        let cursorUsed := cl.maskSessionCursor
+        let (honR1, r1St) :=
+          proto.honestRound1 cl.tsig.pk cl.tsig.corruptParties req cursorUsed cl.honestShares tape0
+        let (corrR1Fn, advSt2) := A.rushRound1 advSt1 honR1
+        let corrR1 := cl.tsig.corruptParties.map (fun c => (c, corrR1Fn c))
+        match proto.verifyRound1 cl.tsig.pk req r1St honR1 corrR1 with
+        | .inl _ => none
+        | .inr r2Init =>
+          let (honR2, _) :=
+            proto.honestRound2 cl.tsig.pk cl.tsig.corruptParties req r2Init cl.honestShares tape0
+          let (corrR2Fn, _) := A.rushRound2 advSt2 honR2
+          let corrR2 := cl.tsig.corruptParties.map (fun c => (c, corrR2Fn c))
+          some (req, honR2, corrR2)
+      | _ => none
+  | k + 1, simTapes, tapeIdx, cl, advSt =>
+    let icl : IdealClusterState PK := ⟨cl.tsig, cl.honestWal, cl.maskSessionCursor⟩
+    let (icl1, adv1, _) := execIdealSession idealSignOracle sim A icl advSt (simTapes 0)
+    let shares1 := if icl1.honestWal.poisoned && !cl.honestWal.poisoned then (fun _ => none) else cl.honestShares
+    let cl1 : RealClusterState PK ShareT := ⟨icl1.tsig, icl1.honestWal, icl1.maskSessionCursor, shares1⟩
+    seqSessionObsPreCut proto idealSignOracle sim A k (fun i => simTapes (i + 1)) tapeIdx cl1 adv1
+
+/-- **Sequential Multi-Session Reduction (`perSessionRoundSim_sequential_bound`)**:
+    Proves the `hUc` premise of `uc_production_threshold_forgery_transfer` on `RealProtocolExec`
+    vs `IdealFunctionalityExec` whenever `(proto, sim)` satisfies `PerSessionRoundSimSpec` (and
+    on unpoisoned execution before an active fault, `honestShares` remains `cl.honestShares`). -/
+theorem perSessionRoundSim_sequential_bound
+    {PK ShareT SessionTape R1St R2St R3St SimTape SimR1 SimR2 SimR3 AdvState : Type}
+    (proto : InteractiveThresholdProtocol PK ShareT SessionTape R1St R2St R3St)
+    (idealSignOracle : SessionScheduleReq → ByteArray)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (A : UcRushingAdversary AdvState) (Q_s : Nat)
+    (cl : RealClusterState PK ShareT) (icl : IdealClusterState PK) (advSt : AdvState)
+    (hTsig : cl.tsig = icl.tsig) (hWal : cl.honestWal = icl.honestWal)
+    (hCur : cl.maskSessionCursor = icl.maskSessionCursor)
+    {cardPad cardCheck epsCheck : Nat}
+    (spec : PerSessionRoundSimSpec proto idealSignOracle sim
+      cl.tsig.pk cl.tsig.corruptParties cl.honestShares cardPad cardCheck epsCheck)
+    (D : ExecTranscript AdvState → Bool) :
+    let cardS := cardPad * cardCheck
+    let hCardS : 0 < cardS := Nat.mul_pos spec.hPadPos spec.hCheckPos
+    let cardAll := ucPow cardS Q_s
+    let enumVec := finPowVecEquiv hCardS Q_s
+    let defaultReal := spec.realTapeOf ⟨0, spec.hPadPos⟩ ⟨0, spec.hCheckPos⟩
+    let defaultSim := spec.simTapeOf ⟨0, spec.hPadPos⟩ ⟨0, spec.hCheckPos⟩
+    let mkRealSeq := fun (v : Fin Q_s → Fin cardS) (i : Nat) =>
+      if hi : i < Q_s then
+        spec.realTapeOf (ucSplitLeft spec.hCheckPos (v ⟨i, hi⟩)) (ucSplitRight spec.hCheckPos (v ⟨i, hi⟩))
+      else defaultReal
+    let mkSimSeq := fun (v : Fin Q_s → Fin cardS) (i : Nat) =>
+      if hi : i < Q_s then
+        spec.simTapeOf (ucSplitLeft spec.hCheckPos (v ⟨i, hi⟩)) (ucSplitRight spec.hCheckPos (v ⟨i, hi⟩))
+      else defaultSim
+    let realView := fun ω : Fin cardAll =>
+      (RealProtocolExec proto A Q_s (mkRealSeq (enumVec.toFun ω)) cl advSt).2
+    let idealView := fun ω : Fin cardAll =>
+      (IdealFunctionalityExec idealSignOracle sim A Q_s (mkSimSeq (enumVec.toFun ω)) icl advSt).2
+    ratLe (rationalAcceptDiff cardAll realView cardAll idealView D)
+          (Q_s * epsCheck, cardCheck) := by
+  intro cardS hCardS cardAll enumVec defaultReal defaultSim mkRealSeq mkSimSeq realView idealView
+  let c0 : Fin cardCheck := ⟨0, spec.hCheckPos⟩
+  let bijCoord : SimpleEquiv (Fin cardS) (Fin cardS) := liftPadCheckEquiv spec.hCheckPos spec.padBij
+  let hybrids : (h : Nat) → h ≤ Q_s → (Fin Q_s → Fin cardS) → ExecTranscript AdvState :=
+    fun h _ v => SequentialHybridExec h proto idealSignOracle sim A Q_s 0 (mkRealSeq v) (mkSimSeq v) cl advSt
+  let bad : Fin Q_s → (Fin Q_s → Fin cardS) → Bool := fun idx v =>
+    let p := ucSplitLeft spec.hCheckPos (v idx)
+    let c := ucSplitRight spec.hCheckPos (v idx)
+    let v0 := updateFinVec v idx (ucPairFin p c0)
+    match seqSessionObsPreCut proto idealSignOracle sim A idx.val (mkSimSeq v0)
+            (spec.realTapeOf p c0) cl advSt with
+    | none => false
+    | some (req, h2, c2) => spec.badCheck req h2 c2 c
+  have hBadSlice : ∀ (idx : Fin Q_s) (v : Fin Q_s → Fin cardS),
+      finSum cardS (fun x => if bad idx (updateFinVec v idx x) then 1 else 0) ≤
+        cardPad * epsCheck := by
+    intro idx v
+    change finSum (cardPad * cardCheck) _ ≤ _
+    rw [finSum_ucPairFin]
+    have hInner : ∀ p : Fin cardPad,
+        finSum cardCheck (fun c => if bad idx (updateFinVec v idx (ucPairFin p c)) then 1 else 0) ≤
+          epsCheck := by
+      intro p
+      let v0 := updateFinVec v idx (ucPairFin p c0)
+      have hSame : ∀ c : Fin cardCheck,
+          bad idx (updateFinVec v idx (ucPairFin p c)) =
+            match seqSessionObsPreCut proto idealSignOracle sim A idx.val (mkSimSeq v0)
+                    (spec.realTapeOf p c0) cl advSt with
+            | none => false
+            | some (req, h2, c2) => spec.badCheck req h2 c2 c := by
+        intro c
+        dsimp only [bad]
+        rw [updateFinVec_same, ucSplitLeft_pair spec.hCheckPos,
+            ucSplitRight_pair spec.hCheckPos, updateFinVec_twice]
+      rw [finSum_congr (fun c => by rw [hSame c])]
+      cases seqSessionObsPreCut proto idealSignOracle sim A idx.val (mkSimSeq v0)
+              (spec.realTapeOf p c0) cl advSt with
+      | none => simp only [Bool.false_eq_true, ↓reduceIte, finSum_const]; omega
+      | some args => rcases args with ⟨req, h2, c2⟩; exact spec.hBadCheckBound req h2 c2
+    exact Nat.le_trans (finSum_le_finSum hInner) (by rw [finSum_const]; exact Nat.le_refl _)
+  have hIdealPres : ∀ (simTape : SimTape) (clIn : RealClusterState PK ShareT) (aIn : AdvState),
+      clIn.tsig.pk = cl.tsig.pk → clIn.tsig.corruptParties = cl.tsig.corruptParties →
+      (clIn.honestWal.poisoned = false → clIn.honestShares = cl.honestShares) →
+      let (icl1, _, _) := execIdealSession idealSignOracle sim A ⟨clIn.tsig, clIn.honestWal, clIn.maskSessionCursor⟩ aIn simTape
+      let shares1 := if icl1.honestWal.poisoned && !clIn.honestWal.poisoned then (fun _ => none) else clIn.honestShares
+      icl1.tsig.pk = cl.tsig.pk ∧ icl1.tsig.corruptParties = cl.tsig.corruptParties ∧
+      (icl1.honestWal.poisoned = false → shares1 = cl.honestShares) := by
+    intro simTape clIn aIn hPk hCorr hSh
+    have hSub : ∀ (icl0 : IdealClusterState PK),
+        let (icl1, _, _) := execIdealSession idealSignOracle sim A icl0 aIn simTape
+        icl1.tsig.pk = icl0.tsig.pk ∧ icl1.tsig.corruptParties = icl0.tsig.corruptParties ∧
+        (icl0.honestWal.poisoned = true → icl1.honestWal.poisoned = true) := by
+      intro icl0
+      unfold execIdealSession poisonIdealCluster walQuarantine walCommitAuthorized
+      dsimp only
+      cases validThresholdApproval icl0.tsig (A.scheduleSession aIn).1.honestApprovers
+      · exact ⟨rfl, rfl, id⟩
+      · simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+        cases hWP : walPreSignStep icl0.honestWal _ _ _ with
+        | err wal' _ =>
+          have hP : icl0.honestWal.poisoned = true → wal'.poisoned = true := by
+            intro hp; unfold walPreSignStep at hWP; simp [hp] at hWP; obtain ⟨rfl, _⟩ := hWP; exact hp
+          exact ⟨rfl, rfl, hP⟩
+        | ok wal' auth =>
+          have hNotP : icl0.honestWal.poisoned = false := by
+            cases hp : icl0.honestWal.poisoned
+            · rfl
+            · unfold walPreSignStep at hWP; simp [hp] at hWP
+          cases auth with
+          | replayCached _ => exact ⟨rfl, rfl, fun hp => by rw [hNotP] at hp; cases hp⟩
+          | authorizedFresh _ =>
+            dsimp only
+            cases sim.simVerifyRound1 _ _ _ _ _ with
+            | inl p1 =>
+              rcases p1 with ⟨_, b⟩
+              cases b
+              · exact ⟨rfl, rfl, fun hp => by rw [hNotP] at hp; cases hp⟩
+              · exact ⟨rfl, rfl, fun _ => rfl⟩
+            | inr _ =>
+              dsimp only
+              cases sim.simPreCutBarrier _ _ _ _ _ with
+              | inl _ => exact ⟨rfl, rfl, fun _ => rfl⟩
+              | inr _ =>
+                dsimp only
+                cases sim.finalizeIdealCut _ _ _ _ _ _ with
+                | inl _ => exact ⟨rfl, rfl, fun _ => rfl⟩
+                | inr _ => exact ⟨rfl, rfl, fun hp => by rw [hNotP] at hp; cases hp⟩
+    obtain ⟨hP1, hC1, hMono⟩ := hSub ⟨clIn.tsig, clIn.honestWal, clIn.maskSessionCursor⟩
+    refine ⟨hP1.trans hPk, hC1.trans hCorr, ?_⟩
+    intro hNotP1
+    have hNotP0 : clIn.honestWal.poisoned = false := by
+      cases hp0 : clIn.honestWal.poisoned
+      · rfl
+      · have := hMono hp0; rw [hNotP1] at this; cases this
+    simp [hNotP1, hSh hNotP0]
+  have hRealTailCongr : ∀ (rem base : Nat) (rt1 rt2 : Nat → SessionTape)
+      (st1 st2 : Nat → SimTape) (clIn : RealClusterState PK ShareT) (aIn : AdvState),
+      (∀ i, rt1 i = rt2 i) →
+      SequentialHybridExec base proto idealSignOracle sim A rem base rt1 st1 clIn aIn =
+        SequentialHybridExec base proto idealSignOracle sim A rem base rt2 st2 clIn aIn := by
+    intro rem
+    induction rem with
+    | zero => intros; rfl
+    | succ r ih =>
+      intro base rt1 rt2 st1 st2 clIn aIn hRtEq
+      have hTailEq : ∀ (m h : Nat) (x1 x2 : Nat → SessionTape) (y1 y2 : Nat → SimTape)
+          (cI : RealClusterState PK ShareT) (aI : AdvState),
+          h ≤ m → (∀ i, x1 i = x2 i) →
+          SequentialHybridExec h proto idealSignOracle sim A r m x1 y1 cI aI =
+            SequentialHybridExec h proto idealSignOracle sim A r m x2 y2 cI aI := by
+        clear ih base rt1 rt2 st1 st2 clIn aIn hRtEq
+        induction r with
+        | zero => intros; rfl
+        | succ r' ihr =>
+          intro m h x1 x2 y1 y2 cI aI hLe hxEq
+          have hNotLt : ¬ (m < h) := by omega
+          unfold SequentialHybridExec
+          simp only [hNotLt, ↓reduceIte, hxEq 0]
+          rcases execRealSession proto A cI aI (x2 0) with ⟨c1, a1, rec1⟩
+          dsimp only
+          rw [ihr (m + 1) h (fun i => x1 (i + 1)) (fun i => x2 (i + 1))
+            (fun i => y1 (i + 1)) (fun i => y2 (i + 1)) c1 a1 (by omega) (fun i => hxEq (i + 1))]
+      have hNotLt0 : ¬ (base < base) := Nat.lt_irrefl _
+      unfold SequentialHybridExec
+      simp only [hNotLt0, ↓reduceIte, hRtEq 0]
+      rcases execRealSession proto A clIn aIn (rt2 0) with ⟨c1, a1, rec1⟩
+      dsimp only
+      rw [hTailEq (base + 1) base (fun i => rt1 (i + 1)) (fun i => rt2 (i + 1))
+        (fun i => st1 (i + 1)) (fun i => st2 (i + 1)) c1 a1 (Nat.le_succ base) (fun i => hRtEq (i + 1))]
+  have hAgree : ∀ (idx : Fin Q_s) (v : Fin Q_s → Fin cardS),
+      bad idx v = false →
+      hybrids idx.val (Nat.le_of_lt idx.isLt) v =
+        hybrids (idx.val + 1) idx.isLt (updateFinVec v idx (bijCoord.toFun (v idx))) := by
+    intro idx v hBadF
+    let p := ucSplitLeft spec.hCheckPos (v idx)
+    let c := ucSplitRight spec.hCheckPos (v idx)
+    let v0 := updateFinVec v idx (ucPairFin p c0)
+    let v1 := updateFinVec v idx (bijCoord.toFun (v idx))
+    have hPivotStep : ∀ (k rem base : Nat)
+        (rtR rtS : Nat → SessionTape) (st0 stR stS : Nat → SimTape)
+        (clIn : RealClusterState PK ShareT) (aIn : AdvState),
+        base + k = idx.val →
+        rem = Q_s - base →
+        idx.val < Q_s →
+        clIn.tsig.pk = cl.tsig.pk →
+        clIn.tsig.corruptParties = cl.tsig.corruptParties →
+        (clIn.honestWal.poisoned = false → clIn.honestShares = cl.honestShares) →
+        (∀ i < k, st0 i = stR i ∧ stR i = stS i) →
+        rtR k = spec.realTapeOf p c →
+        stS k = spec.simTapeOf (spec.padBij.toFun p) c →
+        (∀ i > k, rtR i = rtS i) →
+        (match seqSessionObsPreCut proto idealSignOracle sim A k st0 (spec.realTapeOf p c0) clIn aIn with
+         | none => false
+         | some (rq, h2, c2) => spec.badCheck rq h2 c2 c) = false →
+        SequentialHybridExec idx.val proto idealSignOracle sim A rem base rtR stR clIn aIn =
+          SequentialHybridExec (idx.val + 1) proto idealSignOracle sim A rem base rtS stS clIn aIn := by
+      intro k
+      induction k with
+      | zero =>
+        intro rem base rtR rtS st0 stR stS clIn aIn hBaseEq hRemEq hIdxLtQ hPk hCorr hSh _ hRtRk hStSk hAfter hObsF
+        have hBaseIdx : base = idx.val := by omega
+        subst hBaseIdx
+        obtain ⟨r, hrEq⟩ : ∃ r, rem = r + 1 := ⟨Q_s - idx.val - 1, by omega⟩
+        rw [hrEq]
+        unfold SequentialHybridExec
+        have hNotLt0 : ¬ (idx.val < idx.val) := Nat.lt_irrefl _
+        have hLt1 : idx.val < idx.val + 1 := Nat.lt_succ_self _
+        simp only [hNotLt0, hLt1, ↓reduceIte]
+        have hSameTail : ∀ (cOut : RealClusterState PK ShareT) (aOut : AdvState),
+            SequentialHybridExec idx.val proto idealSignOracle sim A r (idx.val + 1)
+              (fun i => rtR (i + 1)) (fun i => stR (i + 1)) cOut aOut =
+            SequentialHybridExec (idx.val + 1) proto idealSignOracle sim A r (idx.val + 1)
+              (fun i => rtS (i + 1)) (fun i => stS (i + 1)) cOut aOut := by
+          intro cOut aOut
+          have hEq1 := hRealTailCongr r (idx.val + 1) (fun i => rtR (i + 1)) (fun i => rtS (i + 1))
+            (fun i => stR (i + 1)) (fun i => stS (i + 1)) cOut aOut
+            (fun i => hAfter (i + 1) (Nat.zero_lt_succ i))
+          have hStepDown : ∀ (rem' m : Nat) (x : Nat → SessionTape) (y : Nat → SimTape)
+              (cI : RealClusterState PK ShareT) (aI : AdvState),
+              idx.val + 1 ≤ m →
+              SequentialHybridExec idx.val proto idealSignOracle sim A rem' m x y cI aI =
+                SequentialHybridExec (idx.val + 1) proto idealSignOracle sim A rem' m x y cI aI := by
+            intro rem'
+            induction rem' with
+            | zero => intros; rfl
+            | succ r' ihr =>
+              intro m x y cI aI hLeM
+              have hN1 : ¬ (m < idx.val) := by omega
+              have hN2 : ¬ (m < idx.val + 1) := by omega
+              unfold SequentialHybridExec
+              simp only [hN1, hN2, ↓reduceIte]
+              rcases execRealSession proto A cI aI (x 0) with ⟨c1, a1, rec1⟩
+              dsimp only
+              rw [ihr (m + 1) (fun i => x (i + 1)) (fun i => y (i + 1)) c1 a1 (by omega)]
+          rw [hStepDown r (idx.val + 1) (fun i => rtR (i + 1)) (fun i => stR (i + 1)) cOut aOut (Nat.le_refl _), hEq1]
+        have hWalStateEq : ∀ (stW : WalLatchState) (pkD : List UInt8) (epW : Nat) (mdW : List UInt8),
+            (∀ st' r, walPreSignStep stW pkD epW mdW = .err st' r → st' = stW) ∧
+            (∀ st' a, walPreSignStep stW pkD epW mdW = .ok st' a → st' = stW) := by
+          intro stW pkD epW mdW
+          generalize hO : walPreSignStep stW pkD epW mdW = o
+          have hErr : ∀ r, o = .err stW r →
+              ((∀ st' r', o = .err st' r' → st' = stW) ∧ (∀ st' a, o = .ok st' a → st' = stW)) := by
+            intro r hE
+            subst hE
+            exact ⟨fun _ _ h => by injection h with h1 _; exact h1.symm, fun _ _ h => by cases h⟩
+          have hOk : ∀ a, o = .ok stW a →
+              ((∀ st' r', o = .err st' r' → st' = stW) ∧ (∀ st' a', o = .ok st' a' → st' = stW)) := by
+            intro a hE
+            subst hE
+            exact ⟨fun _ _ h => (by cases h), fun _ _ h => by injection h with h1 _; exact h1.symm⟩
+          unfold walPreSignStep at hO
+          split at hO
+          · exact hErr _ hO.symm
+          · split at hO
+            · exact hErr _ hO.symm
+            · split at hO
+              · split at hO
+                · exact hOk _ hO.symm
+                · split at hO
+                  · exact hOk _ hO.symm
+                  · exact hErr _ hO.symm
+              · split at hO
+                · exact hOk _ hO.symm
+                · exact hErr _ hO.symm
+        have hOneSession :
+            execRealSession proto A clIn aIn (spec.realTapeOf p c) =
+              let (icl1, adv1, rec1) :=
+                execIdealSession idealSignOracle sim A ⟨clIn.tsig, clIn.honestWal, clIn.maskSessionCursor⟩ aIn
+                  (spec.simTapeOf (spec.padBij.toFun p) c)
+              let shares1 := if icl1.honestWal.poisoned && !clIn.honestWal.poisoned then (fun _ => none) else clIn.honestShares
+              (⟨icl1.tsig, icl1.honestWal, icl1.maskSessionCursor, shares1⟩, adv1, rec1) := by
+          unfold seqSessionObsPreCut at hObsF
+          unfold execRealSession execIdealSession
+          dsimp only at hObsF ⊢
+          cases hQuo : validThresholdApproval clIn.tsig (A.scheduleSession aIn).1.honestApprovers
+          · simp only [Bool.not_false, ↓reduceIte]
+            cases clIn.honestWal.poisoned <;> rfl
+          · simp only [hQuo, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hObsF ⊢
+            have hPkDigE : proto.pkDigestOf clIn.tsig.pk = sim.pkDigestOf clIn.tsig.pk := by
+              rw [hPk]; exact spec.hPkDigest
+            rw [← hPkDigE, ← spec.hMsgDigest]
+            cases hWS : walPreSignStep clIn.honestWal (proto.pkDigestOf clIn.tsig.pk)
+                (A.scheduleSession aIn).1.reqEpoch (proto.msgDigestOf (A.scheduleSession aIn).1) with
+            | err wal' rej =>
+              have hEqW := (hWalStateEq _ _ _ _).1 wal' rej hWS
+              subst hEqW
+              cases clIn.honestWal.poisoned <;> rfl
+            | ok wal' auth =>
+              rw [hWS] at hObsF
+              have hEqW := (hWalStateEq _ _ _ _).2 wal' auth hWS
+              subst hEqW
+              have hNotPois : clIn.honestWal.poisoned = false := by
+                cases hp : clIn.honestWal.poisoned
+                · rfl
+                · unfold walPreSignStep at hWS; simp [hp] at hWS
+              have hSharesEq : clIn.honestShares = cl.honestShares := hSh hNotPois
+              cases auth with
+              | replayCached sigC =>
+                dsimp only
+                simp [hNotPois]
+              | authorizedFresh ep =>
+                dsimp only at hObsF ⊢
+                rw [hPk, hCorr, hSharesEq] at hObsF ⊢
+                generalize (A.scheduleSession aIn).1 = req at hObsF ⊢
+                have hSimC0Eq : spec.simTapeOf (spec.padBij.toFun p) c0 =
+                    spec.simTapeOf (spec.padBij.toFun p) c := spec.hSimTapeIndep _ _ _
+                have hR1_0 := spec.hRound1 req clIn.maskSessionCursor p c0
+                have hR1_c := spec.hRound1 req clIn.maskSessionCursor p c
+                rw [hSimC0Eq] at hR1_0
+                rcases hPR0 : proto.honestRound1 cl.tsig.pk cl.tsig.corruptParties req clIn.maskSessionCursor cl.honestShares (spec.realTapeOf p c0) with ⟨w0, r1_0⟩
+                rcases hPRc : proto.honestRound1 cl.tsig.pk cl.tsig.corruptParties req clIn.maskSessionCursor cl.honestShares (spec.realTapeOf p c) with ⟨wc, r1_c⟩
+                rcases hPS  : sim.simRound1 cl.tsig.pk cl.tsig.corruptParties req clIn.maskSessionCursor (spec.simTapeOf (spec.padBij.toFun p) c) with ⟨wS, s1⟩
+                rw [hPR0, hPS] at hR1_0
+                rw [hPRc, hPS] at hR1_c
+                obtain ⟨hW0Eq, hRel1_0⟩ := hR1_0
+                obtain ⟨hWcEq, hRel1_c⟩ := hR1_c
+                subst hW0Eq
+                subst wc
+                simp only [hPR0, hPRc, hPS] at hObsF ⊢
+                rcases spec.hVerify1 p c0 req r1_0 s1 w0
+                    (cl.tsig.corruptParties.map (fun c' => (c', (A.rushRound1 (A.scheduleSession aIn).2 w0).1 c'))) hRel1_0 with
+                  ⟨err0, hV1_0, hVS_0⟩ | ⟨r2_0, s2_0, hV1_0, hVS_0, hRel2_0⟩
+                · rcases spec.hVerify1 p c req r1_c s1 w0
+                      (cl.tsig.corruptParties.map (fun c' => (c', (A.rushRound1 (A.scheduleSession aIn).2 w0).1 c'))) hRel1_c with
+                    ⟨errc, hV1_c, hVS_c⟩ | ⟨_, _, _, hVS_c, _⟩
+                  · have hErrEq : errc = err0 := by rw [hVS_0] at hVS_c; exact (PSum.inl.inj hVS_c).symm
+                    subst errc
+                    simp only [hV1_c, hVS_0]
+                    rcases err0 with ⟨r1Err, doPoison⟩
+                    cases doPoison
+                    · dsimp only [poisonIdealCluster]
+                      simp [hNotPois]
+                    · dsimp only [poisonRealCluster, poisonIdealCluster, walQuarantine]
+                      simp [hNotPois]
+                  · rw [hVS_0] at hVS_c; cases hVS_c
+                · rcases spec.hVerify1 p c req r1_c s1 w0
+                      (cl.tsig.corruptParties.map (fun c' => (c', (A.rushRound1 (A.scheduleSession aIn).2 w0).1 c'))) hRel1_c with
+                    ⟨_, _, hVS_c⟩ | ⟨r2_c, s2_c, hV1_c, hVS_c, hRel2_c⟩
+                  · rw [hVS_0] at hVS_c; cases hVS_c
+                  · have hS2Eq : s2_c = s2_0 := by rw [hVS_0] at hVS_c; exact (PSum.inr.inj hVS_c).symm
+                    subst s2_c
+                    simp only [hV1_0] at hObsF
+                    simp only [hV1_c, hVS_0]
+                    have hR2_0 := spec.hRound2 p c0 req r2_0 s2_0 hRel2_0
+                    have hR2_c := spec.hRound2 p c req r2_c s2_0 hRel2_c
+                    rw [hSimC0Eq] at hR2_0
+                    rcases hPR2_0 : proto.honestRound2 cl.tsig.pk cl.tsig.corruptParties req r2_0 cl.honestShares (spec.realTapeOf p c0) with ⟨w2_0, r2'_0⟩
+                    rcases hPR2_c : proto.honestRound2 cl.tsig.pk cl.tsig.corruptParties req r2_c cl.honestShares (spec.realTapeOf p c) with ⟨w2_c, r2'_c⟩
+                    rcases hPS2   : sim.simRound2 cl.tsig.pk cl.tsig.corruptParties req s2_0 (spec.simTapeOf (spec.padBij.toFun p) c) with ⟨w2_S, s2'⟩
+                    rw [hPR2_0, hPS2] at hR2_0
+                    rw [hPR2_c, hPS2] at hR2_c
+                    obtain ⟨hW2_0, _⟩ := hR2_0
+                    obtain ⟨hW2_c, hRel2'_c⟩ := hR2_c
+                    subst hW2_0
+                    subst w2_c
+                    simp only [hPR2_0, hPR2_c, hPS2] at hObsF ⊢
+                    rcases spec.hPreCut p c req r2'_c s2' w2_0 _ hRel2'_c hObsF with
+                      ⟨errB, hPCR, hPCS⟩ | ⟨r3Init, s3Init, hPCR, hPCS, hRel3⟩
+                    · simp only [hPCR, hPCS]
+                      dsimp only [poisonRealCluster, poisonIdealCluster, walQuarantine]
+                      simp [hNotPois]
+                    · simp only [hPCR, hPCS]
+                      have hR3Spec := spec.hRound3 p c req r3Init s3Init hRel3
+                      rcases hPR3 : proto.honestRound3 cl.tsig.pk cl.tsig.corruptParties req r3Init cl.honestShares (spec.realTapeOf p c) with ⟨w3_R, r3'⟩
+                      rcases hPS3 : sim.simRound3 cl.tsig.pk cl.tsig.corruptParties req s3Init (idealSignOracle req) (spec.simTapeOf (spec.padBij.toFun p) c) with ⟨w3_S, s3'⟩
+                      rw [hPR3, hPS3] at hR3Spec
+                      obtain ⟨hW3Eq, hRel3'⟩ := hR3Spec
+                      subst hW3Eq
+                      simp only [hPR3, hPS3]
+                      have hFinEq := fun c3 => spec.hFinalize p c req r3' s3' w3_R c3 hRel3'
+                      simp only [hFinEq]
+                      cases sim.finalizeIdealCut cl.tsig.pk req s3' (idealSignOracle req) w3_R _ with
+                      | inl cutErr =>
+                        dsimp only [poisonRealCluster, poisonIdealCluster, walQuarantine]
+                        simp [hNotPois]
+                      | inr outSig =>
+                        dsimp only [walCommitAuthorized]
+                        simp [hNotPois]
+        rw [hRtRk, hStSk, hOneSession]
+        rcases execIdealSession idealSignOracle sim A ⟨clIn.tsig, clIn.honestWal, clIn.maskSessionCursor⟩ aIn (spec.simTapeOf (spec.padBij.toFun p) c) with ⟨icl1, adv1, rec1⟩
+        dsimp only
+        rw [hSameTail]
+      | succ k ih =>
+        intro rem base rtR rtS st0 stR stS clIn aIn hBaseEq hRemEq hIdxLtQ hPk hCorr hSh hBefore hRtRk hStSk hAfter hObsF
+        obtain ⟨r, hrEq⟩ : ∃ r, rem = r + 1 := ⟨Q_s - base - 1, by omega⟩
+        rw [hrEq]
+        have hBaseLt0 : base < idx.val := by omega
+        have hBaseLt1 : base < idx.val + 1 := by omega
+        unfold SequentialHybridExec
+        simp only [hBaseLt0, hBaseLt1, ↓reduceIte]
+        obtain ⟨hSt0R, hStRS⟩ := hBefore 0 (Nat.zero_lt_succ k)
+        unfold seqSessionObsPreCut at hObsF
+        rw [hSt0R, hStRS] at hObsF
+        rw [hStRS]
+        have hPres := hIdealPres (stS 0) clIn aIn hPk hCorr hSh
+        dsimp only at hPres hObsF ⊢
+        rcases hStepI : execIdealSession idealSignOracle sim A ⟨clIn.tsig, clIn.honestWal, clIn.maskSessionCursor⟩ aIn (stS 0) with ⟨icl1, adv1, rec1⟩
+        simp only [hStepI] at hObsF hPres
+        obtain ⟨hPk1, hCorr1, hSh1⟩ := hPres
+        dsimp only at hObsF ⊢
+        rw [ih r (base + 1) (fun i => rtR (i + 1)) (fun i => rtS (i + 1))
+          (fun i => st0 (i + 1)) (fun i => stR (i + 1)) (fun i => stS (i + 1))
+          _ adv1 (by omega) (by omega) hIdxLtQ hPk1 hCorr1 hSh1
+          (fun i hi => hBefore (i + 1) (Nat.succ_lt_succ hi))
+          hRtRk hStSk (fun i hi => hAfter (i + 1) (Nat.succ_lt_succ hi)) hObsF]
+    apply hPivotStep idx.val Q_s 0 (mkRealSeq v) (mkRealSeq v1) (mkSimSeq v0) (mkSimSeq v) (mkSimSeq v1)
+      cl advSt (Nat.zero_add _) (Nat.sub_zero _).symm idx.isLt rfl rfl (fun _ => rfl)
+    · intro i hi
+      have hiQ : i < Q_s := Nat.lt_trans hi idx.isLt
+      have hNe : (⟨i, hiQ⟩ : Fin Q_s) ≠ idx := fun he => by
+        have hv := congrArg Fin.val he; dsimp only at hv; omega
+      dsimp only [mkSimSeq, v0, v1]
+      simp only [hiQ, ↓reduceDIte]
+      rw [updateFinVec_other v idx ⟨i, hiQ⟩ _ hNe, updateFinVec_other v idx ⟨i, hiQ⟩ _ hNe]
+      exact ⟨rfl, rfl⟩
+    · dsimp only [mkRealSeq]
+      simp only [idx.isLt, ↓reduceDIte]
+      rfl
+    · dsimp only [mkSimSeq, v1, bijCoord, liftPadCheckEquiv]
+      simp only [idx.isLt, ↓reduceDIte, updateFinVec_same,
+        ucSplitLeft_pair spec.hCheckPos, ucSplitRight_pair spec.hCheckPos]
+      rfl
+    · intro i hi
+      dsimp only [mkRealSeq, v1]
+      by_cases hiQ : i < Q_s
+      · have hNe : (⟨i, hiQ⟩ : Fin Q_s) ≠ idx := fun he => by
+          have hv := congrArg Fin.val he; dsimp only at hv; omega
+        simp only [hiQ, ↓reduceDIte, updateFinVec_other v idx ⟨i, hiQ⟩ _ hNe]
+      · simp only [hiQ, ↓reduceDIte]
+    · exact hBadF
+  have hMain := concurrent_product_hybrid_bound hCardS hybrids
+    (fun _ _ => bijCoord) (fun _ _ _ _ => rfl) bad (cardPad * epsCheck) hAgree hBadSlice D
+  dsimp only at hMain
+  have hZeroEq : distAcceptCount cardAll realView D =
+      finSum cardAll (fun ω => if D (hybrids 0 (Nat.zero_le Q_s) (enumVec.toFun ω)) then 1 else 0) := by
+    apply finSum_congr
+    intro ω
+    exact congrArg (fun t => if D t then 1 else 0)
+      (sequentialHybridExec_zero_eq_real proto idealSignOracle sim A Q_s 0
+        (mkRealSeq (enumVec.toFun ω)) (mkSimSeq (enumVec.toFun ω)) cl advSt).symm
+  have hTopEq : distAcceptCount cardAll idealView D =
+      finSum cardAll (fun ω => if D (hybrids Q_s (Nat.le_refl Q_s) (enumVec.toFun ω)) then 1 else 0) := by
+    apply finSum_congr
+    intro ω
+    exact congrArg (fun t => if D t then 1 else 0)
+      (sequentialHybridExec_top_eq_ideal proto idealSignOracle sim A Q_s 0 Q_s
+        (mkRealSeq (enumVec.toFun ω)) (mkSimSeq (enumVec.toFun ω)) cl icl advSt
+        (by omega) hTsig hWal hCur).symm
+  rw [← hZeroEq, ← hTopEq] at hMain
+  have hAllPos : 0 < cardAll := ucPow_pos hCardS Q_s
+  let diff := natAbsDiff (distAcceptCount cardAll realView D) (distAcceptCount cardAll idealView D)
+  have hScaled : cardPad * (diff * cardCheck) ≤ cardPad * ((Q_s * epsCheck) * cardAll) := by
+    have hL : cardPad * (diff * cardCheck) = diff * cardS := by dsimp only [cardS]; ac_rfl
+    have hR : cardPad * ((Q_s * epsCheck) * cardAll) = (Q_s * (cardPad * epsCheck)) * cardAll := by ac_rfl
+    rw [hL, hR]; exact hMain
+  have hCanceled : diff * cardCheck ≤ (Q_s * epsCheck) * cardAll :=
+    Nat.le_of_mul_le_mul_left hScaled spec.hPadPos
+  unfold ratLe rationalAcceptDiff
+  refine ⟨Nat.mul_pos hAllPos hAllPos, spec.hCheckPos, ?_⟩
+  rw [natAbsDiff_mul_right]
+  have hRearrL : diff * cardAll * cardCheck = diff * cardCheck * cardAll := by ac_rfl
+  have hRearrR : Q_s * epsCheck * (cardAll * cardAll) = (Q_s * epsCheck) * cardAll * cardAll := by ac_rfl
+  rw [hRearrL, hRearrR]
+  exact Nat.mul_le_mul_right cardAll hCanceled
+
+/-- **Unconditional Production Threshold Forgery Transfer (`uc_active_shamir_production_forgery_transfer`)**:
+    Instantiates `uc_production_threshold_forgery_transfer` with `activeShamirThresholdProtocol`
+    and `activeShamirBlackBoxSimulator`, **discharging the Shamir `hUc` emulation premise
+    unconditionally** via `perSessionRoundSim_sequential_bound` and `activeShamir_perSessionRoundSimSpec`! -/
+theorem uc_active_shamir_production_forgery_transfer
+    {AdvState : Type}
+    (t : Nat) (corruptPts checkPts : List Goldilocks) (maxGates : Nat)
+    (hCard : corruptPts.length + 1 ≤ t)
+    (hNonZero : ∀ c ∈ corruptPts, c ≠ Goldilocks.zero)
+    (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (o : ProductionPqHashMpcOracles) (hm : o.MatchesKey suite sk)
+    (grindLimit : Nat) (ser : Option PqHashSig → ByteArray)
+    (hw : params.w = 4 ∨ params.w = 16) (hStateless : params.statefulJorts = false)
+    (A : UcRushingAdversary AdvState) (Q_s : Nat)
+    (cl : RealClusterState PqPublicKey Goldilocks)
+    (icl : IdealClusterState PqPublicKey) (advSt : AdvState)
+    (hTsig : cl.tsig = icl.tsig) (hWal : cl.honestWal = icl.honestWal)
+    (hCur : cl.maskSessionCursor = icl.maskSessionCursor)
+    (forgeOut : ExecTranscript AdvState → List UInt8 × PqHashSig) :
+    let proto := activeShamirThresholdProtocol t corruptPts checkPts maxGates suite params o sk.pkSeed grindLimit ser
+    let oracle := productionThresholdSignOracle suite params o sk.pkSeed grindLimit ser
+    let sim := activeShamirBlackBoxSimulator t corruptPts checkPts maxGates
+    let spec := activeShamir_perSessionRoundSimSpec t corruptPts checkPts maxGates hCard hNonZero
+      suite params o sk.pkSeed grindLimit ser cl.tsig.pk cl.tsig.corruptParties cl.honestShares
+    let cardS := ucPow goldilocksPrime t * goldilocksExt2Card
+    let hCardS : 0 < cardS := Nat.mul_pos (ucPow_pos goldilocksPrime_pos t) goldilocksExt2Card_pos
+    let cardAll := ucPow cardS Q_s
+    let enumVec := finPowVecEquiv hCardS Q_s
+    let defaultReal := spec.realTapeOf ⟨0, spec.hPadPos⟩ ⟨0, spec.hCheckPos⟩
+    let defaultSim := spec.simTapeOf ⟨0, spec.hPadPos⟩ ⟨0, spec.hCheckPos⟩
+    let realTapes := fun (ω : Fin cardAll) (i : Nat) =>
+      if hi : i < Q_s then
+        spec.realTapeOf (ucSplitLeft spec.hCheckPos ((enumVec.toFun ω) ⟨i, hi⟩))
+          (ucSplitRight spec.hCheckPos ((enumVec.toFun ω) ⟨i, hi⟩))
+      else defaultReal
+    let simTapes := fun (ω : Fin cardAll) (i : Nat) =>
+      if hi : i < Q_s then
+        spec.simTapeOf (ucSplitLeft spec.hCheckPos ((enumVec.toFun ω) ⟨i, hi⟩))
+          (ucSplitRight spec.hCheckPos ((enumVec.toFun ω) ⟨i, hi⟩))
+      else defaultSim
+    let win := productionForgeryWins suite params (derivePublicKey suite params sk) forgeOut
+    let realView := fun ω : Fin cardAll => (RealProtocolExec proto A Q_s (realTapes ω) cl advSt).2
+    let idealView := fun ω : Fin cardAll => (IdealFunctionalityExec oracle sim A Q_s (simTapes ω) icl advSt).2
+    let eps : Nat × Nat := (Q_s * maxGates, goldilocksExt2Card)
+    2 ^ 126 < goldilocksExt2Card ∧
+    (oracle = fun req => ser (evalProductionStatelessSign suite params sk req.msg req.optRand grindLimit)) ∧
+    distAcceptCount cardAll realView win * eps.2 ≤
+      distAcceptCount cardAll idealView win * eps.2 + eps.1 * cardAll ∧
+    (∀ ω : Fin cardAll, win (idealView ω) = true →
+      ProductionTranscriptBreak suite params sk grindLimit forgeOut (idealView ω)) := by
+  intro proto oracle sim spec cardS hCardS cardAll enumVec defaultReal defaultSim realTapes simTapes win realView idealView eps
+  have hUc := perSessionRoundSim_sequential_bound proto oracle sim A Q_s cl icl advSt
+    hTsig hWal hCur spec win
+  exact ⟨goldilocksExt2Card_gt_two_pow_126,
+    uc_production_threshold_forgery_transfer suite params sk o hm grindLimit ser
+      hw hStateless proto sim A Q_s cardAll realTapes simTapes cl icl advSt forgeOut eps hUc⟩
+
+theorem witness_active_shamir_emulation_inhabited
+    (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (pkSeed : List UInt8)
+    (grindLimit : Nat) (ser : Option PqHashSig → ByteArray) (pk : PqPublicKey) :
+    ∃ (_A : ConcurrentUcAdversary (Nat × List ByteArray))
+      (suite : TweakableHashSuite) (t : Nat) (corruptPts : List Goldilocks)
+      (cl : RealClusterState PqPublicKey Goldilocks) (icl : IdealClusterState PqPublicKey),
+      corruptPts.length + 1 ≤ t ∧
+      (∀ c ∈ corruptPts, c ≠ Goldilocks.zero) ∧
+      cl.tsig = icl.tsig ∧ cl.honestWal = icl.honestWal ∧
+      cl.maskSessionCursor = icl.maskSessionCursor ∧
+      Nonempty (PerSessionRoundSimSpec
+        (activeShamirThresholdProtocol t corruptPts [] 0 suite params o pkSeed grindLimit ser)
+        (productionThresholdSignOracle suite params o pkSeed grindLimit ser)
+        (activeShamirBlackBoxSimulator t corruptPts [] 0)
+        cl.tsig.pk cl.tsig.corruptParties cl.honestShares
+        (ucPow goldilocksPrime t) goldilocksExt2Card 0) := by
+  have hn : ∀ c ∈ [Goldilocks.one], c ≠ Goldilocks.zero := by
+    intro c hc
+    rw [List.mem_singleton.mp hc]
+    decide +kernel
+  let tsig : IdealTsigState PqPublicKey (List UInt8) := ⟨pk, 3, 2, [1], [], []⟩
+  let wal := initWalLatchState (ucPqPublicKeyDigest pk)
+  refine ⟨concurrentTapeProbeAdversary, cshake256Suite, 2, [Goldilocks.one], ⟨tsig, wal, 0, fun _ => some Goldilocks.one⟩,
+    ⟨tsig, wal, 0⟩, by decide, hn, rfl, rfl, rfl, ⟨?_⟩⟩
+  exact activeShamir_perSessionRoundSimSpec 2 [Goldilocks.one] [] 0 (by decide) hn
+    cshake256Suite params o pkSeed grindLimit ser pk [1] (fun _ => some Goldilocks.one)
+
+/-- At a corrupt evaluation point zero, the actual round-1 pad opening and
+    round-2 masked opening reveal a nonzero secret. For the zero-secret simulator
+    those two wires coincide for every simulator pad. This directly tests the
+    emulation theorem's `hNonZero` premise while retaining its cardinality bound. -/
+def activeShamirZeroPad : ShamirPadPoly Goldilocks 2 :=
+  ⟨[Goldilocks.zero, Goldilocks.zero], rfl⟩
+
+theorem tooth_active_shamir_zero_point_breaks_simulation
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (pkSeed : List UInt8)
+    (grindLimit : Nat) (ser : Option PqHashSig → ByteArray)
+    (pk : PqPublicKey) (req : SessionScheduleReq) :
+    ¬ ∃ q : ShamirPadPoly Goldilocks 2,
+      ((activeShamirThresholdProtocol 2 [Goldilocks.zero] [] 0
+        suite params o pkSeed grindLimit ser).honestRound1 pk [0] req 0
+        (fun _ => some Goldilocks.one) (activeShamirZeroPad, GoldilocksExt2.zero)).1 =
+        ((activeShamirBlackBoxSimulator 2 [Goldilocks.zero] [] 0).simRound1 pk [0] req 0 q).1 ∧
+      ((activeShamirThresholdProtocol 2 [Goldilocks.zero] [] 0
+        suite params o pkSeed grindLimit ser).honestRound2 pk [0] req
+        (activeShamirZeroPad, GoldilocksExt2.zero) (fun _ => some Goldilocks.one)
+        (activeShamirZeroPad, GoldilocksExt2.zero)).1 =
+        ((activeShamirBlackBoxSimulator 2 [Goldilocks.zero] [] 0).simRound2 pk [0] req q q).1 := by
+  rintro ⟨q, h1, h2⟩
+  dsimp only [activeShamirThresholdProtocol, activeShamirBlackBoxSimulator,
+    List.zip, List.map, Option.getD] at h1 h2
+  have hz : CommRingOps.add Goldilocks.zero (RoundPoly.evalCoeffs q.1 Goldilocks.zero) =
+      RoundPoly.evalCoeffs q.1 Goldilocks.zero := LawfulCommRing.zero_add _
+  rw [hz] at h2
+  have hSame := h2.trans h1.symm
+  have hDifferent :
+      ([(0, packGoldilocksWire (CommRingOps.add Goldilocks.one
+        (RoundPoly.evalCoeffs activeShamirZeroPad.1 Goldilocks.zero)))] : List (Nat × ByteArray)) ≠
+      [(0, packGoldilocksWire (RoundPoly.evalCoeffs activeShamirZeroPad.1 Goldilocks.zero))] := by
+    decide +kernel
+  exact hDifferent hSame
+
+#tooth_pair Qsag.active_shamir_concurrent_uc_emulation vs Qsag.tooth_active_shamir_zero_point_breaks_simulation
+
+#verify_inhabited Qsag.active_shamir_concurrent_uc_emulation Qsag.witness_active_shamir_emulation_inhabited
+
+end Qsag
+end

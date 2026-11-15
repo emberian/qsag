@@ -5434,3 +5434,1808 @@ theorem lin_joint_transcript_secret_independent {J I : Type} (pub : LinCommitIns
   refine ⟨fun j => hBack' (linRealZ sec y) hSim j, hAcc', hZ, fun i => ?_⟩
   rw [(hFwd' _).2 hAcc' i, hZ, (hFwd y).2 hAcc i]
 
+/-! ### The Ring Instance: `t ≡ A·s₁ + s₂` Gives the Key Relation -/
+
+/-- The ML-DSA instance over `ℤ[X]/(X^n + 1)` for a challenge `c`: `W y = A·y`, `ct = c·t`. -/
+def mldsaRingInstance {k l n : Nat} (A : Fin k → Fin l → Fin n → Int)
+    (t : Fin k → Fin n → Int) (c : Fin n → Int) :
+    LinCommitInstance (Fin l × Fin n) (Fin k × Fin n) where
+  W := fun y i => ringMatVec A (fun j m => y (j, m)) i.1 i.2
+  W_add := fun u v i => ringMatVec_add A (fun j m => u (j, m)) (fun j m => v (j, m)) i.1 i.2
+  ct := fun i => polyMul c (t i.1) i.2
+
+/-- The shifts `c·s₁`, `c·s₂` computed in the ring. -/
+def mldsaRingShift {k l n : Nat} (c : Fin n → Int) (s1 : Fin l → Fin n → Int)
+    (s2 : Fin k → Fin n → Int) : LinSecretShift (Fin l × Fin n) (Fin k × Fin n) where
+  cs1 := fun j => polyMul c (s1 j.1) j.2
+  cs2 := fun i => polyMul c (s2 i.1) i.2
+
+/-- **ML-DSA-44 Key Relation in `ℤ_q[X]/(X^256 + 1)` (`mldsa44_ring_key_relation`)**: for a
+    public key `t ≡ A·s₁ + s₂ (mod q)` with `‖s₁‖∞, ‖s₂‖∞ ≤ η = 2` and a challenge `c ∈ B_39`,
+    the shifts `c·s₁`, `c·s₂` are `β`-bounded and `c·t ≡ A·(c·s₁) + c·s₂ (mod q)`. Nothing about
+    `c·s₁`, `c·s₂`, `c·t` is assumed. -/
+theorem mldsa44_ring_key_relation {k l : Nat} (A : Fin k → Fin l → Fin 256 → Int)
+    (s1 : Fin l → Fin 256 → Int) (s2 t : Fin k → Fin 256 → Int) (c : Fin 256 → Int)
+    (hBall : InChallengeBall 39 c)
+    (hS1 : ∀ j, PolyBound 2 (s1 j)) (hS2 : ∀ r, PolyBound 2 (s2 r))
+    (hT : ∀ r m, (8380417 : Int) ∣ t r m - (ringMatVec A s1 r m + s2 r m)) :
+    LinKeyRelation (mldsaRingInstance A t c) (mldsaRingShift c s1 s2) := by
+  refine ⟨fun j => ?_, fun i => ?_, fun i => ?_⟩
+  · exact (inMldsaSecretBound_iff_natAbs_le mldsa44Beta _).mpr
+      (mldsa44_challenge_times_secret_le_beta hBall (hS1 j.1) j.2)
+  · exact (inMldsaSecretBound_iff_natAbs_le mldsa44Beta _).mpr
+      (mldsa44_challenge_times_secret_le_beta hBall (hS2 i.1) i.2)
+  · obtain ⟨r, m⟩ := i
+    have hW : (mldsaRingInstance A t c).W (mldsaRingShift c s1 s2).cs1 (r, m) =
+        polyMul c (ringMatVec A s1 r) m :=
+      congrFun (ringMatVec_challenge_comm A c s1 r) m
+    have hSum : polyMul c (ringMatVec A s1 r) m + polyMul c (s2 r) m =
+        polyMul c (fun m' => ringMatVec A s1 r m' + s2 r m') m :=
+      (congrFun (polyMul_add_right c (ringMatVec A s1 r) (s2 r)) m).symm
+    have hDvd := polyMul_sub_dvd c (t r) (fun m' => ringMatVec A s1 r m' + s2 r m') 8380417
+      (hT r) m
+    show polyMul c (t r) m % 8380417 =
+      ((mldsaRingInstance A t c).W (mldsaRingShift c s1 s2).cs1 (r, m) +
+        polyMul c (s2 r) m) % 8380417
+    rw [hW, hSum]
+    exact emod_eq_of_dvd_sub hDvd
+
+/-- **Ring-Level Joint Transcript Simulation (`mldsa44_ring_joint_transcript_simulation`)**: the
+    statement of `mldsa44_joint_transcript_simulation` for the actual scheme: masks, secrets and
+    public key are vectors over `ℤ_q[X]/(X^256 + 1)`, the challenge is any element of `B_39`. -/
+theorem mldsa44_ring_joint_transcript_simulation {k l : Nat}
+    (A : Fin k → Fin l → Fin 256 → Int)
+    (s1 : Fin l → Fin 256 → Int) (s2 t : Fin k → Fin 256 → Int) (c : Fin 256 → Int)
+    (hBall : InChallengeBall 39 c)
+    (hS1 : ∀ j, PolyBound 2 (s1 j)) (hS2 : ∀ r, PolyBound 2 (s2 r))
+    (hT : ∀ r m, (8380417 : Int) ∣ t r m - (ringMatVec A s1 r m + s2 r m)) :
+    (∀ y : Fin l × Fin 256 → Int,
+      (linRealAccept (mldsaRingInstance A t c) (mldsaRingShift c s1 s2) y ↔
+        linSimAccept (mldsaRingInstance A t c) (linRealZ (mldsaRingShift c s1 s2) y)) ∧
+      (linRealAccept (mldsaRingInstance A t c) (mldsaRingShift c s1 s2) y →
+        ∀ i, linRealW1 (mldsaRingInstance A t c) y i =
+          linSimW1 (mldsaRingInstance A t c) (linRealZ (mldsaRingShift c s1 s2) y) i)) ∧
+    (∀ z : Fin l × Fin 256 → Int, linSimAccept (mldsaRingInstance A t c) z →
+      ∀ j, inMldsaMaskInterval mldsa44Gamma1 (z j - (mldsaRingShift c s1 s2).cs1 j)) :=
+  lin_joint_transcript_simulation _ _ (mldsa44_ring_key_relation A s1 s2 t c hBall hS1 hS2 hT)
+
+/-! ### Rejected Attempts: the Published `w₁` of an Abort Is Distributed Independently of the Secret -/
+
+/-- Counting through a bijection between two decidable subsets of two enumerated spaces. -/
+theorem finSum_subset_bij {n m : Nat} (P : Fin n → Bool) (Q : Fin m → Bool)
+    (f : Fin n → Fin m) (g : Fin m → Fin n)
+    (hf : ∀ i, P i = true → Q (f i) = true ∧ g (f i) = i)
+    (hg : ∀ j, Q j = true → P (g j) = true ∧ f (g j) = j) :
+    finSum n (fun i => if P i then 1 else 0) = finSum m (fun j => if Q j then 1 else 0) := by
+  have h1 : finSum n (fun i => if P i then 1 else 0) =
+      finSum n (fun i => finSum m (fun j => if j = f i then (if P i then 1 else 0) else 0)) :=
+    finSum_congr (fun i => (finSum_ite_eq (f i) (fun _ => if P i then 1 else 0)).symm)
+  have h2 : ∀ j : Fin m, finSum n (fun i => if j = f i then (if P i then 1 else 0) else 0) =
+      (if Q j then 1 else 0) := by
+    intro j
+    cases hQ : Q j with
+    | true =>
+      obtain ⟨hPg, hfg⟩ := hg j hQ
+      have h3 : finSum n (fun i => if j = f i then (if P i then 1 else 0) else 0) =
+          finSum n (fun i => if i = g j then 1 else 0) := by
+        apply finSum_congr
+        intro i
+        by_cases hi : i = g j
+        · rw [hi, hfg, hPg]
+          simp
+        · by_cases hj : j = f i
+          · cases hP : P i with
+            | true => exact absurd (by rw [hj]; exact (hf i hP).2.symm) hi
+            | false => simp [hi]
+          · simp [hj, hi]
+      rw [h3, finSum_eq_indicator]
+      simp
+    | false =>
+      have h3 : finSum n (fun i => if j = f i then (if P i then 1 else 0) else 0) =
+          finSum n (fun _ => 0) := by
+        apply finSum_congr
+        intro i
+        by_cases hj : j = f i
+        · cases hP : P i with
+          | true =>
+            have hQf := (hf i hP).1
+            rw [← hj, hQ] at hQf
+            cases hQf
+          | false => simp
+        · simp [hj]
+      rw [h3, finSum_const]
+      simp
+  rw [h1, finSum_comm]
+  exact finSum_congr h2
+
+/-- The mask box `(-γ₁, γ₁)^J`. -/
+abbrev LinMaskBox (J : Type) :=
+  { y : J → Int // ∀ j, inMldsaMaskInterval mldsa44Gamma1 (y j) }
+
+/-- Index of the mask `y_i + c·s₁ - c·s₁'` (the mask that produces, under the second secret, the
+    response the first secret produces from `y_i`), when it lies in the box. -/
+def linReindex {J I : Type} {N : Nat} (enumY : SimpleEquiv (Fin N) (LinMaskBox J))
+    [inst : ∀ y : J → Int, Decidable (∀ j, inMldsaMaskInterval mldsa44Gamma1 (y j))]
+    (a b : LinSecretShift J I) (i : Fin N) : Fin N :=
+  if h : ∀ j, inMldsaMaskInterval mldsa44Gamma1 ((enumY.toFun i).1 j + a.cs1 j - b.cs1 j) then
+    enumY.invFun ⟨fun j => (enumY.toFun i).1 j + a.cs1 j - b.cs1 j, h⟩
+  else i
+
+theorem linReindex_spec {J I : Type} {N : Nat} (pub : LinCommitInstance J I)
+    (a b : LinSecretShift J I) (hKa : LinKeyRelation pub a) (hKb : LinKeyRelation pub b)
+    (enumY : SimpleEquiv (Fin N) (LinMaskBox J))
+    [inst : ∀ y : J → Int, Decidable (∀ j, inMldsaMaskInterval mldsa44Gamma1 (y j))]
+    (i : Fin N) (hAcc : linRealAccept pub a (enumY.toFun i).1) :
+    linRealAccept pub b (enumY.toFun (linReindex enumY a b i)).1 ∧
+    linRealW1 pub (enumY.toFun (linReindex enumY a b i)).1 = linRealW1 pub (enumY.toFun i).1 ∧
+    linRealZ b (enumY.toFun (linReindex enumY a b i)).1 = linRealZ a (enumY.toFun i).1 ∧
+    linReindex enumY b a (linReindex enumY a b i) = i := by
+  obtain ⟨hBox, hAcc', hZ, hW⟩ :=
+    lin_joint_transcript_secret_independent pub a b hKa hKb (enumY.toFun i).1 hAcc
+  have hr : linReindex enumY a b i =
+      enumY.invFun ⟨fun j => (enumY.toFun i).1 j + a.cs1 j - b.cs1 j, hBox⟩ := dite_eq_left hBox
+  have hy : (enumY.toFun (linReindex enumY a b i)).1 =
+      fun j => (enumY.toFun i).1 j + a.cs1 j - b.cs1 j := by
+    rw [hr, enumY.right_inv]
+  have hBox2 : ∀ j, inMldsaMaskInterval mldsa44Gamma1
+      ((enumY.toFun (linReindex enumY a b i)).1 j + b.cs1 j - a.cs1 j) := by
+    intro j
+    have h1 := congrFun hy j
+    have h2 := (enumY.toFun i).2 j
+    rw [show (enumY.toFun (linReindex enumY a b i)).1 j + b.cs1 j - a.cs1 j =
+      (enumY.toFun i).1 j by omega]
+    exact h2
+  refine ⟨by rw [hy]; exact hAcc', by rw [hy]; exact funext hW, by rw [hy]; exact hZ, ?_⟩
+  have hBack : linReindex enumY b a (linReindex enumY a b i) =
+      enumY.invFun ⟨fun j => (enumY.toFun (linReindex enumY a b i)).1 j + b.cs1 j - a.cs1 j,
+        hBox2⟩ := dite_eq_left hBox2
+  have hSub : (⟨fun j => (enumY.toFun (linReindex enumY a b i)).1 j + b.cs1 j - a.cs1 j,
+      hBox2⟩ : LinMaskBox J) = enumY.toFun i := by
+    apply Subtype.ext
+    funext j
+    have h1 := congrFun hy j
+    show (enumY.toFun (linReindex enumY a b i)).1 j + b.cs1 j - a.cs1 j = (enumY.toFun i).1 j
+    omega
+  rw [hBack, hSub, enumY.left_inv]
+
+/-- **Accepted attempts**: for every event `D` on `(w₁, z)`, the number of masks that are
+    accepted and whose transcript satisfies `D` is the same under any two secrets consistent with
+    the public data. -/
+theorem lin_accepted_transcript_count_secret_independent {J I : Type} {N : Nat}
+    (pub : LinCommitInstance J I) (sec sec' : LinSecretShift J I)
+    (hKey : LinKeyRelation pub sec) (hKey' : LinKeyRelation pub sec')
+    (enumY : SimpleEquiv (Fin N) (LinMaskBox J))
+    [inst : ∀ y : J → Int, Decidable (∀ j, inMldsaMaskInterval mldsa44Gamma1 (y j))]
+    [DecidablePred (linRealAccept pub sec)] [DecidablePred (linRealAccept pub sec')]
+    (D : (I → Int) → (J → Int) → Bool) :
+    finSum N (fun i =>
+      if decide (linRealAccept pub sec (enumY.toFun i).1) &&
+          D (linRealW1 pub (enumY.toFun i).1) (linRealZ sec (enumY.toFun i).1) then 1 else 0) =
+    finSum N (fun i =>
+      if decide (linRealAccept pub sec' (enumY.toFun i).1) &&
+          D (linRealW1 pub (enumY.toFun i).1) (linRealZ sec' (enumY.toFun i).1) then 1 else 0) := by
+  refine finSum_subset_bij _ _ (linReindex enumY sec sec') (linReindex enumY sec' sec) ?_ ?_
+  · intro i hP
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hP
+    obtain ⟨hA, hW, hZ, hBack⟩ := linReindex_spec pub sec sec' hKey hKey' enumY i hP.1
+    refine ⟨?_, hBack⟩
+    simp only [Bool.and_eq_true, decide_eq_true_eq]
+    exact ⟨hA, by rw [hW, hZ]; exact hP.2⟩
+  · intro i hP
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hP
+    obtain ⟨hA, hW, hZ, hBack⟩ := linReindex_spec pub sec' sec hKey' hKey enumY i hP.1
+    refine ⟨?_, hBack⟩
+    simp only [Bool.and_eq_true, decide_eq_true_eq]
+    exact ⟨hA, by rw [hW, hZ]; exact hP.2⟩
+
+private theorem finSum_split_bool {n : Nat} (p q : Fin n → Bool) :
+    finSum n (fun i => if p i then 1 else 0) =
+      finSum n (fun i => if q i && p i then 1 else 0) +
+      finSum n (fun i => if !q i && p i then 1 else 0) := by
+  rw [← finSum_add]
+  apply finSum_congr
+  intro i
+  cases q i <;> cases p i <;> rfl
+
+/-- **Rejected attempts (`lin_rejected_commitment_count_secret_independent`)**: an aborted
+    attempt publishes `w₁ = HighBits(A·y)` and nothing else. For every event `D` on `w₁`, the
+    number of masks that are REJECTED and whose `w₁` satisfies `D` is the same under any two
+    secrets consistent with the public data: it is the number of all masks with `D(w₁)` minus the
+    accepted ones, and both terms are secret-independent. -/
+theorem lin_rejected_commitment_count_secret_independent {J I : Type} {N : Nat}
+    (pub : LinCommitInstance J I) (sec sec' : LinSecretShift J I)
+    (hKey : LinKeyRelation pub sec) (hKey' : LinKeyRelation pub sec')
+    (enumY : SimpleEquiv (Fin N) (LinMaskBox J))
+    [inst : ∀ y : J → Int, Decidable (∀ j, inMldsaMaskInterval mldsa44Gamma1 (y j))]
+    [DecidablePred (linRealAccept pub sec)] [DecidablePred (linRealAccept pub sec')]
+    (D : (I → Int) → Bool) :
+    finSum N (fun i =>
+      if !decide (linRealAccept pub sec (enumY.toFun i).1) &&
+          D (linRealW1 pub (enumY.toFun i).1) then 1 else 0) =
+    finSum N (fun i =>
+      if !decide (linRealAccept pub sec' (enumY.toFun i).1) &&
+          D (linRealW1 pub (enumY.toFun i).1) then 1 else 0) := by
+  have hAcc := lin_accepted_transcript_count_secret_independent pub sec sec' hKey hKey' enumY
+    (fun w _ => D w)
+  have hS := finSum_split_bool (fun i => D (linRealW1 pub (enumY.toFun i).1))
+    (fun i => decide (linRealAccept pub sec (enumY.toFun i).1))
+  have hS' := finSum_split_bool (fun i => D (linRealW1 pub (enumY.toFun i).1))
+    (fun i => decide (linRealAccept pub sec' (enumY.toFun i).1))
+  omega
+
+/-! ### `c = H(μ, w₁)` in the Random-Oracle Model: Reprogramming Bound Per Attempt -/
+
+theorem roLookup_none_of_not_mem {X T : Type} [DecidableEq X] :
+    ∀ (log : List (X × T)) (x : X), x ∉ log.map Prod.fst → roLookup log x = none
+  | [], _, _ => rfl
+  | (k, v) :: rest, x, h => by
+    have hx : x ≠ k := fun e => h (by
+      show x ∈ k :: rest.map Prod.fst
+      rw [e]
+      exact List.mem_cons_self)
+    have hr : x ∉ rest.map Prod.fst := fun e => h (by
+      show x ∈ k :: rest.map Prod.fst
+      exact List.mem_cons_of_mem _ e)
+    simp only [roLookup, hx, ↓reduceIte]
+    exact roLookup_none_of_not_mem rest x hr
+
+/-- Commitment min-entropy as a count: every commitment value has at most `M` of the `N` masks
+    as preimages (min-entropy `log₂(N / M)`). For ML-DSA this is a property of the public matrix
+    `A` (the fibres of `y ↦ HighBits(A·y)`); it is a hypothesis here, not derived. -/
+def CommitFiberBound {N : Nat} {X : Type} [DecidableEq X] (cp : Fin N → X) (M : Nat) : Prop :=
+  ∀ x, finSum N (fun i => if cp i = x then 1 else 0) ≤ M
+
+/-- Masks whose commitment point lies in a given key set. -/
+theorem finSum_fiber_mem_le {N : Nat} {X : Type} [DecidableEq X] (cp : Fin N → X) (M : Nat)
+    (hFib : CommitFiberBound cp M) :
+    ∀ keys : List X, finSum N (fun i => if cp i ∈ keys then 1 else 0) ≤ keys.length * M
+  | [] => by
+    have h0 : finSum N (fun i => if cp i ∈ ([] : List X) then 1 else 0) = finSum N (fun _ => 0) :=
+      finSum_congr (fun _ => by simp)
+    rw [h0, finSum_const]
+    simp
+  | a :: keys => by
+    have hPoint : ∀ i : Fin N, (if cp i ∈ a :: keys then 1 else 0) ≤
+        (if cp i = a then 1 else 0) + (if cp i ∈ keys then 1 else 0) := by
+      intro i
+      by_cases hia : cp i = a
+      · simp [hia]
+      · by_cases his : cp i ∈ keys <;> simp [hia, his]
+    have hLe := finSum_le_finSum hPoint
+    rw [finSum_add] at hLe
+    have ih := finSum_fiber_mem_le cp M hFib keys
+    have ha := hFib a
+    simp only [List.length_cons, Nat.succ_mul]
+    omega
+
+/-- One signing attempt with mask index `i` in the REAL lazily sampled oracle: the challenge is
+    the oracle's value at the commitment point `cp i = (μ, w₁)`: the logged value if the point
+    was already queried (by the adversary or an earlier attempt), the fresh `c` otherwise. -/
+def roAttemptReal {N : Nat} {X Ch Out : Type} [DecidableEq X] (cp : Fin N → X)
+    (outcome : Fin N → Ch → Out) (log : List (X × Ch)) (i : Fin N) (c : Ch) :
+    Out × List (X × Ch) :=
+  match roLookup log (cp i) with
+  | some c' => (outcome i c', log)
+  | none => (outcome i c, (cp i, c) :: log)
+
+/-- The same attempt with the oracle REPROGRAMMED: the challenge is always the fresh `c`, and
+    `H(μ, w₁) := c` overrides any earlier value. Here `c` is independent of the mask. -/
+def roAttemptProg {N : Nat} {X Ch Out : Type} (cp : Fin N → X)
+    (outcome : Fin N → Ch → Out) (log : List (X × Ch)) (i : Fin N) (c : Ch) :
+    Out × List (X × Ch) :=
+  (outcome i c, (cp i, c) :: log)
+
+theorem roAttempt_real_eq_prog_of_fresh {N : Nat} {X Ch Out : Type} [DecidableEq X]
+    (cp : Fin N → X) (outcome : Fin N → Ch → Out) (log : List (X × Ch)) (i : Fin N) (c : Ch)
+    (h : roLookup log (cp i) = none) :
+    roAttemptReal cp outcome log i c = roAttemptProg cp outcome log i c := by
+  unfold roAttemptReal roAttemptProg
+  rw [h]
+
+/-- **Reprogramming bound for one attempt (`roAttempt_reprogramming_bound`)**: against ANY prior
+    oracle log (all queries of the adversary and of earlier attempts), for every event `D` on the
+    attempt's output and resulting oracle state,
+
+      `| #real(D) - #programmed(D) |  ≤  |log| · M`
+
+    over the `N` masks, where `M` bounds the number of masks sharing a commitment. Dividing by
+    `N`: statistical distance at most `|log| · 2^(-α)` for commitment min-entropy `α`. -/
+theorem roAttempt_reprogramming_bound {N : Nat} {X Ch Out : Type} [DecidableEq X]
+    (cp : Fin N → X) (outcome : Fin N → Ch → Out) (M : Nat)
+    (hFib : CommitFiberBound cp M)
+    (log : List (X × Ch)) (c : Ch) (D : Out × List (X × Ch) → Bool) :
+    natAbsDiff
+      (finSum N (fun i => if D (roAttemptReal cp outcome log i c) then 1 else 0))
+      (finSum N (fun i => if D (roAttemptProg cp outcome log i c) then 1 else 0)) ≤
+      log.length * M := by
+  have hDiff := finSum_indicator_diff_le
+    (fun i : Fin N => D (roAttemptReal cp outcome log i c))
+    (fun i => D (roAttemptProg cp outcome log i c))
+    (fun i => decide (cp i ∈ log.map Prod.fst))
+    (fun i hBad => congrArg D (roAttempt_real_eq_prog_of_fresh cp outcome log i c
+      (roLookup_none_of_not_mem log (cp i) (of_decide_eq_false hBad))))
+  have hCount := finSum_fiber_mem_le cp M hFib (log.map Prod.fst)
+  rw [List.length_map] at hCount
+  refine Nat.le_trans hDiff (Nat.le_trans (Nat.le_of_eq (finSum_congr (fun i => ?_))) hCount)
+  simp only [decide_eq_true_eq]
+
+/-! ### Multi-Attempt Signing: Union Bound Over Attempts and Interleaved Adversary Queries -/
+
+/-- Sum over all `k`-tuples of mask indices. -/
+def tupleSum (N : Nat) : (k : Nat) → (List (Fin N) → Nat) → Nat
+  | 0, F => F []
+  | k + 1, F => finSum N (fun i => tupleSum N k (fun is => F (i :: is)))
+
+theorem tupleSum_indicator_le (N : Nat) : ∀ (k : Nat) (p : List (Fin N) → Bool),
+    tupleSum N k (fun is => if p is then 1 else 0) ≤ N ^ k
+  | 0, p => by
+    show (if p [] then 1 else 0) ≤ 1
+    cases p [] <;> decide
+  | k + 1, p => by
+    have h : ∀ i : Fin N, tupleSum N k (fun is => if p (i :: is) then 1 else 0) ≤ N ^ k :=
+      fun i => tupleSum_indicator_le N k (fun is => p (i :: is))
+    have hLe := finSum_le_finSum h
+    rw [finSum_const] at hLe
+    rw [Nat.pow_succ, Nat.mul_comm]
+    exact hLe
+
+/-- A run of signing attempts. After each attempt the adversary sees every transcript so far and
+    extends the oracle log by its own queries (`advStep`). -/
+def signAttemptLoop {N : Nat} {X Ch Out : Type}
+    (attempt : List (X × Ch) → Fin N → Ch → Out × List (X × Ch))
+    (advStep : List Out → List (X × Ch) → List (X × Ch)) :
+    List (X × Ch) → List Out → List (Fin N) → List Ch → List Out
+  | log, acc, i :: is, c :: cs =>
+    signAttemptLoop attempt advStep
+      (advStep (acc ++ [(attempt log i c).1]) (attempt log i c).2)
+      (acc ++ [(attempt log i c).1]) is cs
+  | _, acc, [], _ => acc
+  | _, acc, _ :: _, [] => acc
+
+/-- Total oracle-log exposure of `k` attempts starting from a log of size `ℓ`, when the adversary
+    adds at most `qH` queries after each attempt: `Σ_{a<k} (ℓ + a·(qH + 1))`. -/
+def reprogCollisionBudget (qH : Nat) : Nat → Nat → Nat
+  | 0, _ => 0
+  | k + 1, ℓ => ℓ + reprogCollisionBudget qH k (ℓ + 1 + qH)
+
+/-- The continuation count after a first attempt with result `r`. -/
+def loopTailCount {N : Nat} {X Ch Out : Type}
+    (attempt : List (X × Ch) → Fin N → Ch → Out × List (X × Ch))
+    (advStep : List Out → List (X × Ch) → List (X × Ch)) (D : List Out → Bool)
+    (k : Nat) (cs : List Ch) (acc : List Out) (r : Out × List (X × Ch)) : Nat :=
+  tupleSum N k (fun is =>
+    if D (signAttemptLoop attempt advStep (advStep (acc ++ [r.1]) r.2) (acc ++ [r.1]) is cs)
+    then 1 else 0)
+
+private theorem natAbsDiff_le_of_le {a b c : Nat} (ha : a ≤ c) (hb : b ≤ c) :
+    natAbsDiff a b ≤ c := by
+  unfold natAbsDiff
+  split <;> omega
+
+private theorem natAbsDiff_self (a : Nat) : natAbsDiff a a = 0 := by
+  unfold natAbsDiff
+  split <;> omega
+
+/-- **Multi-attempt ROM reprogramming bound (`multiAttempt_reprogramming_bound`)**: for `k`
+    signing attempts with independent uniform masks, fresh challenges `cs`, and an adversary that
+    adaptively adds at most `qH` oracle queries after each attempt, every event `D` on the list
+    of transcripts satisfies
+
+      `| #real(D) - #programmed(D) | · N  ≤  M · (Σ_{a<k} (ℓ + a·(qH+1))) · N^k`
+
+    over the `N^k` mask tuples: statistical distance at most
+    `(Σ_a |log_a|) · M / N`, the sum over attempts of the per-attempt collision probability. -/
+theorem multiAttempt_reprogramming_bound {N : Nat} {X Ch Out : Type} [DecidableEq X]
+    (cp : Fin N → X) (outcome : Fin N → Ch → Out) (M : Nat)
+    (hFib : CommitFiberBound cp M)
+    (advStep : List Out → List (X × Ch) → List (X × Ch)) (qH : Nat)
+    (hAdv : ∀ ts log, (advStep ts log).length ≤ log.length + qH) (D : List Out → Bool) :
+    ∀ (k : Nat) (cs : List Ch) (log : List (X × Ch)) (acc : List Out) (ℓ : Nat),
+      log.length ≤ ℓ →
+      natAbsDiff
+        (tupleSum N k (fun is =>
+          if D (signAttemptLoop (roAttemptReal cp outcome) advStep log acc is cs) then 1 else 0))
+        (tupleSum N k (fun is =>
+          if D (signAttemptLoop (roAttemptProg cp outcome) advStep log acc is cs) then 1 else 0))
+        * N ≤ M * reprogCollisionBudget qH k ℓ * N ^ k
+  | 0, cs, log, acc, ℓ, _ => by
+    have hEq : ∀ att : List (X × Ch) → Fin N → Ch → Out × List (X × Ch),
+        tupleSum N 0 (fun is =>
+          if D (signAttemptLoop att advStep log acc is cs) then 1 else 0) =
+        (if D acc then 1 else 0) := by
+      intro att
+      show (if D (signAttemptLoop att advStep log acc [] cs) then 1 else 0) = _
+      cases cs <;> rfl
+    rw [hEq, hEq, natAbsDiff_self]
+    simp
+  | k + 1, [], log, acc, ℓ, _ => by
+    have hEq : ∀ att : List (X × Ch) → Fin N → Ch → Out × List (X × Ch),
+        tupleSum N (k + 1) (fun is =>
+          if D (signAttemptLoop att advStep log acc is []) then 1 else 0) =
+        tupleSum N (k + 1) (fun _ => if D acc then 1 else 0) := by
+      intro att
+      show finSum N (fun i => tupleSum N k (fun is =>
+        if D (signAttemptLoop att advStep log acc (i :: is) []) then 1 else 0)) = _
+      rfl
+    rw [hEq, hEq, natAbsDiff_self]
+    simp
+  | k + 1, c :: cs, log, acc, ℓ, hLen => by
+    have hUnf : ∀ att : List (X × Ch) → Fin N → Ch → Out × List (X × Ch),
+        tupleSum N (k + 1) (fun is =>
+          if D (signAttemptLoop att advStep log acc is (c :: cs)) then 1 else 0) =
+        finSum N (fun i => loopTailCount att advStep D k cs acc (att log i c)) :=
+      fun _ => rfl
+    rw [hUnf, hUnf]
+    have hPer : ∀ i : Fin N,
+        natAbsDiff
+          (loopTailCount (roAttemptReal cp outcome) advStep D k cs acc
+            (roAttemptReal cp outcome log i c))
+          (loopTailCount (roAttemptProg cp outcome) advStep D k cs acc
+            (roAttemptProg cp outcome log i c)) * N ≤
+        (if cp i ∈ log.map Prod.fst then 1 else 0) * (N ^ k * N) +
+          M * reprogCollisionBudget qH k (ℓ + 1 + qH) * N ^ k := by
+      intro i
+      by_cases hMem : cp i ∈ log.map Prod.fst
+      · rw [ite_eq_left hMem, Nat.one_mul]
+        have ha : loopTailCount (roAttemptReal cp outcome) advStep D k cs acc
+            (roAttemptReal cp outcome log i c) ≤ N ^ k := tupleSum_indicator_le N k _
+        have hb : loopTailCount (roAttemptProg cp outcome) advStep D k cs acc
+            (roAttemptProg cp outcome log i c) ≤ N ^ k := tupleSum_indicator_le N k _
+        exact Nat.le_trans (Nat.mul_le_mul_right N (natAbsDiff_le_of_le ha hb))
+          (Nat.le_add_right _ _)
+      · rw [ite_eq_right hMem, Nat.zero_mul, Nat.zero_add]
+        rw [roAttempt_real_eq_prog_of_fresh cp outcome log i c
+          (roLookup_none_of_not_mem log (cp i) hMem)]
+        exact multiAttempt_reprogramming_bound cp outcome M hFib advStep qH hAdv D k cs
+          (advStep (acc ++ [(roAttemptProg cp outcome log i c).1])
+            (roAttemptProg cp outcome log i c).2)
+          (acc ++ [(roAttemptProg cp outcome log i c).1]) (ℓ + 1 + qH)
+          (Nat.le_trans (hAdv _ _) (by
+            show ((cp i, c) :: log).length + qH ≤ ℓ + 1 + qH
+            simp only [List.length_cons]
+            omega))
+    have h1 : natAbsDiff
+        (finSum N (fun i => loopTailCount (roAttemptReal cp outcome) advStep D k cs acc
+          (roAttemptReal cp outcome log i c)))
+        (finSum N (fun i => loopTailCount (roAttemptProg cp outcome) advStep D k cs acc
+          (roAttemptProg cp outcome log i c))) * N ≤
+        finSum N (fun i => natAbsDiff
+          (loopTailCount (roAttemptReal cp outcome) advStep D k cs acc
+            (roAttemptReal cp outcome log i c))
+          (loopTailCount (roAttemptProg cp outcome) advStep D k cs acc
+            (roAttemptProg cp outcome log i c)) * N) := by
+      rw [finSum_mul_right]
+      exact Nat.mul_le_mul_right _ (natAbsDiff_finSum_le _ _)
+    have h2' : finSum N (fun i =>
+        (if cp i ∈ log.map Prod.fst then 1 else 0) * (N ^ k * N) +
+          M * reprogCollisionBudget qH k (ℓ + 1 + qH) * N ^ k) =
+        finSum N (fun i => if cp i ∈ log.map Prod.fst then 1 else 0) * (N ^ k * N) +
+          N * (M * reprogCollisionBudget qH k (ℓ + 1 + qH) * N ^ k) := by
+      rw [finSum_add, finSum_mul_right, finSum_const]
+    have h2 := Nat.le_trans (finSum_le_finSum hPer) (Nat.le_of_eq h2')
+    have hS := finSum_fiber_mem_le cp M hFib (log.map Prod.fst)
+    rw [List.length_map] at hS
+    have hS' : finSum N (fun i => if cp i ∈ log.map Prod.fst then 1 else 0) ≤ ℓ * M :=
+      Nat.le_trans hS (Nat.mul_le_mul_right M hLen)
+    have e3 := Nat.mul_le_mul_right (N ^ k * N) hS'
+    have e1 : N * (M * reprogCollisionBudget qH k (ℓ + 1 + qH) * N ^ k) =
+        M * reprogCollisionBudget qH k (ℓ + 1 + qH) * (N ^ k * N) := by ac_rfl
+    have e2 : M * (ℓ + reprogCollisionBudget qH k (ℓ + 1 + qH)) * (N ^ k * N) =
+        ℓ * M * (N ^ k * N) +
+          M * reprogCollisionBudget qH k (ℓ + 1 + qH) * (N ^ k * N) := by
+      rw [Nat.mul_add, Nat.add_mul, Nat.mul_comm M ℓ]
+    show _ ≤ M * (ℓ + reprogCollisionBudget qH k (ℓ + 1 + qH)) * N ^ (k + 1)
+    rw [Nat.pow_succ]
+    omega
+
+/-! ### `#tooth` and Inhabitedness Witnesses for §2b and §3b -/
+
+/-- The hypotheses of the hiding bound are inhabited: a framed 256-bit blind and a one-query
+    adversary. -/
+theorem witness_rom_commit_hiding_inhabited :
+    ∃ (spec : CutTheHashRomSpec Unit Unit Unit Unit (BitVec 8 × BitVec 8 × BitVec 256) 2 8 256)
+      (adv : RushingRoAdversary Unit (BitVec 8 × BitVec 8 × BitVec 256) (BitVec 256)
+        Unit Unit Bool 2 8),
+      spec.BlindFramed ∧ adv.QueryBound 0 0 1 :=
+  ⟨{ wireRingSecret := fun _ _ _ => ⟨0, Nat.zero_lt_succ 1⟩
+     wireXorSecret := fun _ _ _ _ => 0
+     yShareHonest := fun _ _ _ _ => 0
+     macShareHonest := fun _ _ _ _ => 0
+     commitPoint := fun y mac b => (y, mac, b)
+     blindOf := fun x => x.2.2 },
+   { reactToRingOpen := fun _ => .done ((), ())
+     reactToAllOpens := fun _ _ => .done ((), ())
+     decideAbort := fun _ t => .ask (0, 0, 0) (fun a => .done (a == t)) },
+   fun _ _ _ => rfl, fun _ => True.intro, fun _ _ => True.intro, fun _ _ _ => True.intro⟩
+
+private def toothRomSpec : CutTheHashRomSpec Unit Unit Unit Unit (BitVec 1 × BitVec 1) 1 1 1 where
+  wireRingSecret := fun _ _ _ => ⟨0, Nat.zero_lt_succ 0⟩
+  wireXorSecret := fun _ _ _ _ => 0
+  yShareHonest := fun _ _ _ _ => 1
+  macShareHonest := fun _ _ _ _ => 0
+  commitPoint := fun y mac _ => (y, mac)
+  blindOf := fun _ => 0
+
+private def toothRomAdv :
+    RushingRoAdversary Unit (BitVec 1 × BitVec 1) Bool Unit Unit Bool 1 1 where
+  reactToRingOpen := fun _ => .done ((), ())
+  reactToAllOpens := fun _ _ => .done ((), ())
+  decideAbort := fun _ t => .ask (1, 0) (fun a => .done (a == t))
+
+/-- **`#tooth` (`tooth_rom_commit_without_framed_blind_exceeds_bound`)**: hash only `y ‖ mac`,
+    leaving the blind out of the oracle input. One query at the guessed `(y, mac)` then equals
+    the tag in EVERY real execution and in no simulated one: the gap is the whole sample space
+    (`4`), above the `Q · 2^w · q_RO = 2` allowed by the bound. -/
+theorem tooth_rom_commit_without_framed_blind_exceeds_bound :
+    ∃ (spec : CutTheHashRomSpec Unit Unit Unit Unit (BitVec 1 × BitVec 1) 1 1 1)
+      (adv : RushingRoAdversary Unit (BitVec 1 × BitVec 1) Bool Unit Unit Bool 1 1)
+      (tape : Nat → Bool) (tagFresh : Bool),
+      adv.QueryBound 0 0 1 ∧
+      1 * (2 ^ 1 * (0 + 0 + 1)) <
+        natAbsDiff
+          (romRealCount spec adv () () () (Nat.zero_lt_succ 0) tape (fun out => out) tagFresh)
+          (2 ^ 1 * romIdealCount adv tape (fun out => out) tagFresh) :=
+  ⟨toothRomSpec, toothRomAdv, fun _ => true, false,
+   ⟨fun _ => True.intro, fun _ _ => True.intro, fun _ _ _ => True.intro⟩, by decide⟩
+
+theorem l1Norm_prefix_ones : ∀ (n t : Nat), t ≤ n →
+    l1Norm n (fun i : Fin n => if i.val < t then (1 : Int) else 0) = t
+  | 0, t, h => by
+    have ht : t = 0 := by omega
+    subst ht
+    rfl
+  | n + 1, 0, _ => by
+    show finSum (n + 1) (fun j : Fin (n + 1) => ((if j.val < 0 then (1 : Int) else 0)).natAbs) = 0
+    have hz : finSum (n + 1)
+        (fun j : Fin (n + 1) => ((if j.val < 0 then (1 : Int) else 0)).natAbs) =
+        finSum (n + 1) (fun _ => 0) := finSum_congr (fun j => by simp)
+    rw [hz, finSum_const, Nat.mul_zero]
+  | n + 1, t + 1, h => by
+    have ih : finSum n (fun j : Fin n => ((if j.val < t then (1 : Int) else 0)).natAbs) = t :=
+      l1Norm_prefix_ones n t (by omega)
+    have hc : finSum n (fun j : Fin n => ((if j.val + 1 < t + 1 then (1 : Int) else 0)).natAbs) =
+        finSum n (fun j : Fin n => ((if j.val < t then (1 : Int) else 0)).natAbs) :=
+      finSum_congr (fun j => by simp)
+    have h0 : ((if (0 : Nat) < t + 1 then (1 : Int) else 0)).natAbs = 1 := by simp
+    show ((if (0 : Nat) < t + 1 then (1 : Int) else 0)).natAbs +
+      finSum n (fun j : Fin n => ((if j.val + 1 < t + 1 then (1 : Int) else 0)).natAbs) = t + 1
+    rw [h0, hc, ih]
+    omega
+
+/-- `B_39` is inhabited in degree `256`. -/
+theorem witness_mldsa44_challenge_ball_inhabited :
+    ∃ c : Fin 256 → Int, InChallengeBall 39 c :=
+  ⟨fun i => if i.val < 39 then 1 else 0,
+   fun i => by by_cases h : i.val < 39 <;> simp [h],
+   l1Norm_prefix_ones 256 39 (by decide)⟩
+
+/-- **`#tooth` (`tooth_challenge_bound_is_attained`)**: `‖c‖₁ · ‖s‖∞` cannot be lowered. A
+    ternary challenge of weight `2` times a secret with `‖s‖∞ = η = 2` has a coefficient of
+    absolute value exactly `4 = ‖c‖₁ · η`, so a bound one below it fails; a challenge heavier
+    than `τ` therefore breaks `β = τ · η`. -/
+theorem tooth_challenge_bound_is_attained :
+    ∃ (c s : Fin 2 → Int),
+      (∀ i, c i = -1 ∨ c i = 0 ∨ c i = 1) ∧ PolyBound 2 s ∧
+      ¬ PolyBound (l1Norm 2 c * 2 - 1) (polyMul c s) :=
+  ⟨fun _ => 1, fun _ => 2, fun _ => Or.inr (Or.inr rfl),
+   fun _ => by show (2 : Int).natAbs ≤ 2; decide,
+   fun h => absurd (h ⟨1, by decide⟩) (by decide)⟩
+
+/-- A key relation exists (so the simulation theorems are not vacuous). -/
+theorem witness_lin_key_relation_inhabited :
+    ∃ (pub : LinCommitInstance Unit Unit) (sec : LinSecretShift Unit Unit),
+      LinKeyRelation pub sec :=
+  ⟨{ W := fun _ _ => 0, W_add := fun _ _ _ => rfl, ct := fun _ => 0 },
+   { cs1 := fun _ => 0, cs2 := fun _ => 0 },
+   fun _ => (inMldsaSecretBound_iff_natAbs_le mldsa44Beta 0).mpr (Nat.zero_le _),
+   fun _ => (inMldsaSecretBound_iff_natAbs_le mldsa44Beta 0).mpr (Nat.zero_le _),
+   fun _ => rfl⟩
+
+/-- A commitment map with one mask per commitment value satisfies `CommitFiberBound _ 1`. -/
+theorem witness_commit_fiber_bound_inhabited :
+    ∃ (cp : Fin 2 → Fin 2), CommitFiberBound cp 1 :=
+  ⟨fun i => i, fun x => Nat.le_of_eq (finSum_eq_indicator 2 x)⟩
+
+/-- **`#tooth` (`tooth_reprogramming_needs_commitment_entropy`)**: if every mask yields the same
+    commitment (zero min-entropy) and the adversary has queried it, the real and reprogrammed
+    attempts differ on EVERY mask: the gap `2` exceeds `|log| · 1`, so the per-attempt bound is
+    false with `M` understated. -/
+theorem tooth_reprogramming_needs_commitment_entropy :
+    ∃ (cp : Fin 2 → Unit) (outcome : Fin 2 → Bool → Bool) (log : List (Unit × Bool)) (c : Bool)
+      (D : Bool × List (Unit × Bool) → Bool),
+      log.length * 1 <
+        natAbsDiff
+          (finSum 2 (fun i => if D (roAttemptReal cp outcome log i c) then 1 else 0))
+          (finSum 2 (fun i => if D (roAttemptProg cp outcome log i c) then 1 else 0)) :=
+  ⟨fun _ => (), fun _ c => c, [((), true)], false, fun r => r.1, by decide⟩
+
+/-- The ML-DSA transcript of one attempt under challenge `c`: the published `w₁`, and `z` when
+    both rejection checks pass. A rejected attempt publishes `w₁` alone. -/
+def linAttemptOutcome {Ch J I : Type} (pubOf : Ch → LinCommitInstance J I)
+    (secOf : Ch → LinSecretShift J I)
+    [∀ c y, Decidable (linRealAccept (pubOf c) (secOf c) y)]
+    (y : J → Int) (c : Ch) : (I → Int) × Option (J → Int) :=
+  (linRealW1 (pubOf c) y,
+   if linRealAccept (pubOf c) (secOf c) y then some (linRealZ (secOf c) y) else none)
+
+/-- **ML-DSA attempt with `c = H(μ, w₁)` (`mldsa_attempt_rom_reprogramming_bound`)**: the
+    per-attempt reprogramming bound instantiated at the ML-DSA transcript. `encPoint` encodes
+    `(μ, w₁)` as an oracle input; `M` bounds the number of masks sharing a `w₁`. -/
+theorem mldsa_attempt_rom_reprogramming_bound {Ch J I X : Type} {N : Nat} [DecidableEq X]
+    (pubOf : Ch → LinCommitInstance J I) (secOf : Ch → LinSecretShift J I)
+    [∀ c y, Decidable (linRealAccept (pubOf c) (secOf c) y)]
+    (enumY : SimpleEquiv (Fin N) (LinMaskBox J)) (encPoint : Fin N → X) (M : Nat)
+    (hFib : CommitFiberBound encPoint M)
+    (log : List (X × Ch)) (c : Ch)
+    (D : ((I → Int) × Option (J → Int)) × List (X × Ch) → Bool) :
+    natAbsDiff
+      (finSum N (fun i => if D (roAttemptReal encPoint
+        (fun i c => linAttemptOutcome pubOf secOf (enumY.toFun i).1 c) log i c) then 1 else 0))
+      (finSum N (fun i => if D (roAttemptProg encPoint
+        (fun i c => linAttemptOutcome pubOf secOf (enumY.toFun i).1 c) log i c) then 1 else 0)) ≤
+      log.length * M :=
+  roAttempt_reprogramming_bound encPoint _ M hFib log c D
+
+/-! ## §4. Mechanical Constructive, `#tooth_pair` & `#verify_inhabited` Gates -/
+
+#verify_constructive
+  walRecoverable_eq_isSome
+  no_preproc_batch_reused_on_wire
+  no_leaf_double_sign_on_wire
+  wire_spend_le_policy_cap
+  ceremony_multi_ledger_crash_interleaving_safe
+  failed_closed_host_stays_closed
+  tooth_release_before_durable_burn_reuses_leaf
+  tooth_release_before_checkpoint_rolls_back_leaf
+  witness_multi_ledger_crash_trace_inhabited
+  witness_torn_checkpointed_leaf_fails_closed
+  subModFinQ_involutive
+  preOpenView_exact_fiber_one
+  cutTheHash_abort_conditioned_sd_zero
+  tooth_early_open_before_mac_barrier_skews_distribution
+  tooth_unblinded_commit_skews_distribution
+  witness_cutTheHash_selective_abort_inhabited
+  mldsa_rejection_valid_output_uniform_in_box
+  mldsa44_rejection_valid_output_uniform_in_box
+  tooth_mldsa_unclipped_z_leaks_secret_shift
+  witness_mldsa44_secret_bound_inhabited
+  mldsa44HighBits_congr
+  mldsa44LowBits_congr
+  mldsa44_highBits_shift_invariant
+  mldsa44_low_range_test_iff
+  intDot_add
+  mldsa_commit_shift_congr
+  mldsa44_joint_transcript_simulation
+  mldsa44JointTranscriptEquiv_preserves_transcript
+  mldsa44_joint_transcript_secret_independent
+  tooth_mldsa44_low_bits_margin_omitted_leaks_s2
+  witness_mldsa44_joint_accept_inhabited
+
+#verify_constructive whole_device_rollback_below_anchor_fails_closed
+#verify_constructive posixRefines_recover
+#verify_constructive posixRefines_slot_write
+#verify_constructive posix_crash_during_slot_write_refines
+#verify_constructive posix_media_damage_refines
+#verify_constructive posix_device_restore_below_anchor_fails_closed
+#verify_constructive witness_policy_window_rotation_crash_mid_step
+#verify_constructive witness_posix_slot_write_crash_inhabited
+#verify_constructive askedRo_length_le
+#verify_constructive runRo_lookup_none
+#verify_constructive runRo_agree_off
+#verify_constructive romReal_eq_ideal_of_blind_unqueried
+#verify_constructive romCommit_blind_count_bound
+#verify_constructive cutTheHash_rom_commit_hiding_sd_bound
+#verify_constructive cutTheHash_rom_view_secret_independent
+#verify_constructive cutTheHash_rom_commit_hiding_sd_bound_256
+#verify_constructive witness_rom_commit_hiding_inhabited
+#verify_constructive tooth_rom_commit_without_framed_blind_exceeds_bound
+#verify_constructive intDot_swap
+#verify_constructive intDot_natAbs_le
+#verify_constructive polyMul_comm_action
+#verify_constructive polyMul_one
+#verify_constructive polyMul_comm
+#verify_constructive polyMul_assoc
+#verify_constructive polyMul_bound
+#verify_constructive polyMul_sub_dvd
+#verify_constructive mldsa44_challenge_times_secret_le_beta
+#verify_constructive ringMatVec_challenge_comm
+#verify_constructive lin_joint_transcript_simulation
+#verify_constructive lin_joint_transcript_secret_independent
+#verify_constructive mldsa44_ring_key_relation
+#verify_constructive mldsa44_ring_joint_transcript_simulation
+#verify_constructive finSum_subset_bij
+#verify_constructive lin_accepted_transcript_count_secret_independent
+#verify_constructive lin_rejected_commitment_count_secret_independent
+#verify_constructive roAttempt_reprogramming_bound
+#verify_constructive multiAttempt_reprogramming_bound
+#verify_constructive mldsa_attempt_rom_reprogramming_bound
+#verify_constructive witness_mldsa44_challenge_ball_inhabited
+#verify_constructive tooth_challenge_bound_is_attained
+#verify_constructive witness_lin_key_relation_inhabited
+#verify_constructive witness_commit_fiber_bound_inhabited
+#verify_constructive tooth_reprogramming_needs_commitment_entropy
+
+#tooth_pair cutTheHash_rom_commit_hiding_sd_bound vs tooth_rom_commit_without_framed_blind_exceeds_bound
+#tooth_pair cutTheHash_rom_commit_hiding_sd_bound_256 vs tooth_rom_commit_without_framed_blind_exceeds_bound
+#tooth_pair polyMul_bound vs tooth_challenge_bound_is_attained
+#tooth_pair mldsa44_challenge_times_secret_le_beta vs tooth_challenge_bound_is_attained
+#tooth_pair roAttempt_reprogramming_bound vs tooth_reprogramming_needs_commitment_entropy
+#tooth_pair multiAttempt_reprogramming_bound vs tooth_reprogramming_needs_commitment_entropy
+#tooth_pair no_leaf_double_sign_on_wire vs tooth_release_before_durable_burn_reuses_leaf
+#tooth_pair no_leaf_double_sign_on_wire vs tooth_release_before_checkpoint_rolls_back_leaf
+#tooth_pair ceremony_multi_ledger_crash_interleaving_safe vs tooth_release_before_durable_burn_reuses_leaf
+#tooth_pair ceremony_multi_ledger_crash_interleaving_safe vs tooth_release_before_checkpoint_rolls_back_leaf
+#tooth_pair cutTheHash_abort_conditioned_sd_zero vs tooth_early_open_before_mac_barrier_skews_distribution
+#tooth_pair cutTheHash_abort_conditioned_sd_zero vs tooth_unblinded_commit_skews_distribution
+#tooth_pair mldsa_rejection_valid_output_uniform_in_box vs tooth_mldsa_unclipped_z_leaks_secret_shift
+#tooth_pair mldsa44_rejection_valid_output_uniform_in_box vs tooth_mldsa_unclipped_z_leaks_secret_shift
+#tooth_pair mldsa44_joint_transcript_simulation vs tooth_mldsa44_low_bits_margin_omitted_leaks_s2
+#tooth_pair mldsa44_joint_transcript_secret_independent vs tooth_mldsa44_low_bits_margin_omitted_leaks_s2
+
+/-- A nonempty ring instance supplies all secret bounds and the public-key equation. -/
+theorem witness_mldsa44_ring_premises :
+    ∃ (A : Fin 1 → Fin 1 → Fin 256 → Int)
+      (s1 s2 t : Fin 1 → Fin 256 → Int) (c : Fin 256 → Int),
+      InChallengeBall 39 c ∧ (∀ j, PolyBound 2 (s1 j)) ∧
+      (∀ r, PolyBound 2 (s2 r)) ∧
+      (∀ r m, (8380417 : Int) ∣ t r m - (ringMatVec A s1 r m + s2 r m)) := by
+  refine ⟨fun _ _ _ => 0, fun _ _ => 0, fun _ _ => 0, fun _ _ => 0,
+    (fun i => if i.val < 39 then 1 else 0),
+    ⟨(fun i => by by_cases h : i.val < 39 <;> simp [h]),
+      l1Norm_prefix_ones 256 39 (by decide)⟩,
+    fun _ _ => Nat.zero_le 2, fun _ _ => Nat.zero_le 2, ?_⟩
+  intro r m
+  simp only [ringMatVec, polyMul_zero_right, intDot_zero, Int.add_zero, Int.sub_zero]
+  exact ⟨0, rfl⟩
+
+/-- Enumeration of the full one-coordinate mask interval. -/
+def unitLinMaskEnum : SimpleEquiv (Fin (mldsaMaskIntervalCard mldsa44Gamma1)) (LinMaskBox Unit) where
+  toFun i := ⟨fun _ => decodeMldsaMask mldsa44Gamma1 i,
+    fun _ => (encode_decodeMldsaMask (by decide) i).1⟩
+  invFun y := encodeMldsaMask (by decide) (y.1 ()) (y.2 ())
+  left_inv i := (encode_decodeMldsaMask (by decide) i).2
+  right_inv y := by
+    apply Subtype.ext
+    funext u
+    cases u
+    exact decode_encodeMldsaMask (by decide) _ _
+
+theorem witness_lin_enumerated_key_relation :
+    ∃ (pub : LinCommitInstance Unit Unit) (sec : LinSecretShift Unit Unit)
+      (_enumY : SimpleEquiv (Fin (mldsaMaskIntervalCard mldsa44Gamma1)) (LinMaskBox Unit)),
+      LinKeyRelation pub sec := by
+  obtain ⟨pub, sec, h⟩ := witness_lin_key_relation_inhabited
+  exact ⟨pub, sec, unitLinMaskEnum, h⟩
+
+/-- A dead host has a valid continuation starting from that same dead state. -/
+theorem witness_failed_closed_continuation :
+    ∃ s : MultiLedgerHostState, HostFailedClosed s ∧ ValidMultiLedgerTrace s [] s := by
+  obtain ⟨_, s, _, hd, _, _⟩ := witness_torn_checkpointed_leaf_fails_closed
+  exact ⟨s, hd, .nil s⟩
+
+/-- Joint witness includes the adaptive query-budget condition. -/
+theorem witness_multi_attempt_budget :
+    ∃ (cp : Fin 2 → Fin 2) (adv : List Unit → List (Fin 2 × Unit) → List (Fin 2 × Unit)),
+      CommitFiberBound cp 1 ∧ ∀ ts log, (adv ts log).length ≤ log.length + 0 := by
+  obtain ⟨cp, hcp⟩ := witness_commit_fiber_bound_inhabited
+  exact ⟨cp, fun _ log => log, hcp, fun _ _ => Nat.le_refl _⟩
+
+local instance unitForallDecidable (p : Unit → Prop) [DecidablePred p] : Decidable (∀ u, p u) :=
+  if h : p () then .isTrue (fun u => by cases u; exact h)
+  else .isFalse (fun hall => h (hall ()))
+
+local instance unitLinAcceptDecidable (pub : LinCommitInstance Unit Unit)
+    (sec : LinSecretShift Unit Unit) : DecidablePred (linRealAccept pub sec) := by
+  intro y
+  exact inferInstanceAs (Decidable
+    ((∀ j : Unit, inMldsaSafeBox mldsa44Gamma1 mldsa44Beta (y j + sec.cs1 j)) ∧
+     (∀ i : Unit, mldsa44LowBitsOk (mldsa44LowBits (pub.W y i - sec.cs2 i)))))
+
+#verify_inhabited ceremony_multi_ledger_crash_interleaving_safe witness_multi_ledger_crash_trace_inhabited
+#verify_inhabited posix_crash_during_slot_write_refines witness_posix_slot_write_crash_inhabited
+#verify_inhabited cutTheHash_rom_commit_hiding_sd_bound witness_rom_commit_hiding_inhabited
+#verify_inhabited mldsa44_ring_key_relation witness_mldsa44_ring_premises
+#verify_inhabited mldsa44_ring_joint_transcript_simulation witness_mldsa44_ring_premises
+#verify_inhabited lin_joint_transcript_simulation witness_lin_key_relation_inhabited
+#verify_inhabited lin_rejected_commitment_count_secret_independent witness_lin_enumerated_key_relation
+#verify_inhabited roAttempt_reprogramming_bound witness_commit_fiber_bound_inhabited
+#verify_inhabited multiAttempt_reprogramming_bound witness_multi_attempt_budget
+#verify_inhabited failed_closed_host_stays_closed witness_failed_closed_continuation
+set_option maxRecDepth 65536 in
+#verify_inhabited cutTheHash_abort_conditioned_sd_zero witness_cutTheHash_selective_abort_inhabited
+#verify_inhabited mldsa_rejection_valid_output_uniform_in_box witness_mldsa44_secret_bound_inhabited
+#verify_inhabited mldsa44_rejection_valid_output_uniform_in_box witness_mldsa44_secret_bound_inhabited
+#verify_inhabited mldsa44_joint_transcript_simulation witness_mldsa44_joint_accept_inhabited
+#verify_inhabited mldsa44_joint_transcript_secret_independent witness_mldsa44_joint_accept_inhabited
+
+
+/-! ## §4. Implemented reservation authority and separately supplied external CAS
+
+The earlier five-ledger and unified-resource models are conditional specifications. The
+Rust v2 journal stores reservations plus epoch/retry metadata; it does not allocate a policy
+budget or an MPC nonce slot. `JournalStep` models its fresh-unbound subprotocol only.
+The retry-aware validator and binding-preservation results retain repeated identical bindings. Capabilities are transition-owned:
+constructing a Lean record is never evidence that a Rust permit was issued or consumed.
+The external service below is an additional deployment contract, not code implemented by
+`LedgerCheckpoint`. It must be authenticated, linearizable, and outside disk rollback.
+`anchoredJournal_released_resources_unique`: with it, released tickets never share a
+codeword/leaf epoch or a ceremony id, under arbitrary replacement of the local disk.
+In `JournalStep` and `RetryJournalStep` the field `entries` IS the durable history: a crash
+never shortens it. That is the acknowledged-write contract stated above, and whole-disk
+rollback is outside it; only the anchored machine survives rollback.
+-/
+namespace RustDurability
+
+/-- Newest journal entry is last, exactly as in the Rust Vec. -/
+structure JournalState where
+  keyId : Bytes
+  lockSeal : Bytes
+  entries : List Reservation
+  staged : Option Reservation := none
+  permit : Option Reservation := none
+  pc : ReplacePc := .done
+  poisoned : Bool := false
+  released : List Reservation := []
+  deriving Repr, DecidableEq
+
+/-- Crash cuts after temp fsync may publish the staged complete replacement. Earlier cuts
+retain the prior record or fail closed. This is an explicit filesystem contract: it excludes
+silent rollback of acknowledged directory syncs. Arbitrary accepted corrupt bytes instead
+require the candidate-specific MAC bad event; neither case is a universal POSIX guarantee. -/
+def mayPublishAfterCrash (pc : ReplacePc) : Prop :=
+  pc = .checkAfter ∨ pc = .rename ∨ pc = .syncParent ∨ pc = .done
+
+/-- Successful syscall order, including both identity/type checks. A failed check takes
+`ioError`; the environment cannot select `advance` unless that syscall succeeded. -/
+def nextReplacePc : ReplacePc → ReplacePc
+  | .checkBefore => .checkTypes
+  | .checkTypes => .createTemp
+  | .createTemp => .writeMagic
+  | .writeMagic => .writeSeal
+  | .writeSeal => .writePayload
+  | .writePayload => .syncTemp
+  | .syncTemp => .checkAfter
+  | .checkAfter => .rename
+  | .rename => .syncParent
+  | .syncParent => .done
+  | .done => .done
+  | .poisoned => .poisoned
+
+/-- Owned permit lifecycle. `readMatches` is the concrete current-record check performed at
+consume; its bytes are supplied by the filesystem read, not by a caller-created receipt.
+Crashes occur at every program counter, including between each write and sync. -/
+inductive JournalStep (macKey : Bytes) : JournalState → JournalState → Prop where
+  | begin (s : JournalState) (r : Reservation)
+      (healthy : s.poisoned = false) (idle : s.staged = none)
+      (wf : r.WellFormed) (valid : reservationValid s.keyId s.entries r = true) :
+      JournalStep macKey s { s with staged := some r, permit := none, pc := .checkBefore }
+  | advance (s : JournalState) (r : Reservation)
+      (healthy : s.poisoned = false) (staged : s.staged = some r) :
+      JournalStep macKey s { s with pc := nextReplacePc s.pc }
+  | committed (s : JournalState) (r : Reservation)
+      (healthy : s.poisoned = false) (staged : s.staged = some r) (synced : s.pc = .done)
+      (valid : reservationValid s.keyId s.entries r = true) :
+      JournalStep macKey s { s with entries := s.entries ++ [r], staged := none, permit := some r }
+  | consume (s : JournalState) (r : Reservation) (readBack : Bytes)
+      (healthy : s.poisoned = false) (owned : s.permit = some r)
+      (current : s.entries.getLast? = some r)
+      (readMatches : readBack = ceremonyBytes macKey s.lockSeal s.keyId s.entries) :
+      JournalStep macKey s { s with permit := none, released := s.released ++ [r] }
+  | ioError (s : JournalState) :
+      JournalStep macKey s { s with poisoned := true, pc := .poisoned, permit := none }
+  | crash (s : JournalState) :
+      JournalStep macKey s { s with staged := none, permit := none, pc := .done }
+  | crashPublishes (s : JournalState) (r : Reservation)
+      (staged : s.staged = some r) (cut : mayPublishAfterCrash s.pc)
+      (valid : reservationValid s.keyId s.entries r = true) :
+      JournalStep macKey s { s with entries := s.entries ++ [r], staged := none, permit := none, pc := .done }
+  | reopen (s : JournalState) (readBack : Bytes)
+      (readMatches : readBack = ceremonyBytes macKey s.lockSeal s.keyId s.entries) :
+      JournalStep macKey s { s with poisoned := false, staged := none, permit := none, pc := .done }
+
+/-- Lost permits burn resources; they never delete entries. No output constructor grants
+release authority. These invariants concern reachable executions, not arbitrary Lean values. -/
+def JournalInv (s : JournalState) : Prop :=
+  (s.released.map (·.ceremonyId)).Nodup ∧
+  (s.released.map (·.epochOrCodeword)).Nodup ∧
+  (∀ r ∈ s.released, r ∈ s.entries) ∧
+  (∀ r, s.permit = some r → r ∈ s.entries ∧
+    ∀ e ∈ s.released, e.ceremonyId ≠ r.ceremonyId ∧ e.epochOrCodeword ≠ r.epochOrCodeword)
+
+private theorem journal_nodup_snoc {α : Type} {xs : List α} {x : α}
+    (hNodup : xs.Nodup) (hFresh : ∀ y ∈ xs, y ≠ x) : (xs ++ [x]).Nodup := by
+  induction xs with
+  | nil => simp [List.Nodup]
+  | cons a rest ih =>
+    rw [List.cons_append, List.Nodup, List.pairwise_cons] at *
+    refine ⟨?_, ih hNodup.2 (fun y hy => hFresh y (by simp [hy]))⟩
+    intro y hy
+    rcases List.mem_append.mp hy with h | h
+    · exact hNodup.1 y h
+    · obtain rfl := List.mem_singleton.mp h
+      exact hFresh a (by simp)
+
+private theorem released_snoc_nodup (rs : List Reservation) (r : Reservation)
+    (field : Reservation → Bytes) (h : (rs.map field).Nodup)
+    (fresh : ∀ e ∈ rs, field e ≠ field r) : ((rs ++ [r]).map field).Nodup := by
+  rw [List.map_append]
+  apply journal_nodup_snoc h
+  intro v hv
+  obtain ⟨e, he, rfl⟩ := List.mem_map.mp hv
+  exact fresh e he
+
+theorem journalStep_preserves (key : Bytes) {s t : JournalState}
+    (step : JournalStep key s t) (inv : JournalInv s) : JournalInv t := by
+  obtain ⟨hId, hEpoch, hMem, hPermit⟩ := inv
+  cases step with
+  | begin r healthy idle wf valid =>
+    exact ⟨hId, hEpoch, hMem, by intro r h; simp at h⟩
+  | advance r healthy staged => exact ⟨hId, hEpoch, hMem, hPermit⟩
+  | committed r healthy staged synced valid =>
+    refine ⟨hId, hEpoch, ?_, ?_⟩
+    · intro e he; exact List.mem_append_left _ (hMem e he)
+    · intro e he
+      have eq : r = e := Option.some.inj he
+      subst e
+      exact ⟨List.mem_append_right _ (List.mem_singleton_self _),
+        fun e he => reservationValid_fresh valid e (hMem e he)⟩
+  | consume r readBack healthy owned current readMatches =>
+    obtain ⟨hr, hf⟩ := hPermit r owned
+    refine ⟨released_snoc_nodup _ _ _ hId (fun e he => (hf e he).1),
+      released_snoc_nodup _ _ _ hEpoch (fun e he => (hf e he).2), ?_, ?_⟩
+    · intro e he
+      rcases List.mem_append.mp he with he | he
+      · exact hMem e he
+      · obtain rfl := List.mem_singleton.mp he; exact hr
+    · intro e he; simp at he
+  | ioError => exact ⟨hId, hEpoch, hMem, by intro r h; simp at h⟩
+  | crash => exact ⟨hId, hEpoch, hMem, by intro r h; simp at h⟩
+  | crashPublishes r staged cut valid =>
+    exact ⟨hId, hEpoch, fun e he => List.mem_append_left _ (hMem e he),
+      by intro r h; simp at h⟩
+  | reopen readBack readMatches =>
+    exact ⟨hId, hEpoch, hMem, by intro r h; simp at h⟩
+
+inductive JournalRun (key : Bytes) : JournalState → JournalState → Prop where
+  | refl (s) : JournalRun key s s
+  | next {s t u} : JournalRun key s t → JournalStep key t u → JournalRun key s u
+
+def initialJournal (keyId lockSeal : Bytes) : JournalState :=
+  { keyId, lockSeal, entries := [] }
+
+/-- Non-reuse covers mid-reservation crashes and poisoned handles. Successful recovery is
+conditional on the explicit storage contract above; malformed recovery is refusal. -/
+theorem journal_trace_no_reuse (key keyId lockSeal : Bytes) {s : JournalState}
+    (run : JournalRun key (initialJournal keyId lockSeal) s) : JournalInv s := by
+  have init : JournalInv (initialJournal keyId lockSeal) := by
+    simp [JournalInv, initialJournal]
+  induction run with
+  | refl => exact init
+  | next run step ih => exact journalStep_preserves key step ih
+
+/-- Receipt with evidence of actual issuance in a reachable state. It conveys no linearity
+by itself; only `JournalStep.consume`, which clears `permit`, authorizes an output. -/
+structure IssuedReceipt (key keyId lockSeal : Bytes) (s : JournalState) where
+  reservation : Reservation
+  reachable : JournalRun key (initialJournal keyId lockSeal) s
+  issued : s.permit = some reservation
+
+theorem issuedReceipt_is_durable (key keyId lockSeal : Bytes) (s : JournalState)
+    (receipt : IssuedReceipt key keyId lockSeal s) : receipt.reservation ∈ s.entries :=
+  (journal_trace_no_reuse key keyId lockSeal receipt.reachable).2.2.2 _ receipt.issued |>.1
+
+theorem consumed_permit_cannot_replay (s : JournalState) (r : Reservation) :
+    ({ s with permit := none, released := s.released ++ [r] } : JournalState).permit ≠ some r := by
+  simp
+
+/-- A real external authority must serialize contenders; equal checkpoint comparisons do not.
+Key scoping is explicit. Tickets bind both the reservation context and the contender identity. -/
+structure AnchorTicket where
+  epoch : Nat
+  owner : Nat
+  context : Reservation
+  deriving Repr, DecidableEq
+
+structure AnchorService where
+  keyId : Bytes
+  nextEpoch : Nat
+  tickets : List AnchorTicket := []
+  spent : List Nat := []
+  deriving Repr, DecidableEq
+
+/-- Linearizable authenticated compare-and-advance, durable in an independent failure domain.
+This is the additional external service contract a deployment must supply. -/
+def anchorCAS (s : AnchorService) (expected owner : Nat) (r : Reservation) :
+    AnchorService × Option AnchorTicket :=
+  if expected = s.nextEpoch ∧ r.keyId = s.keyId ∧
+      reservationValid s.keyId (s.tickets.map (·.context)) r = true then
+    let t : AnchorTicket := ⟨expected, owner, r⟩
+    ({ s with nextEpoch := expected + 1, tickets := s.tickets ++ [t] }, some t)
+  else (s, none)
+
+theorem anchorCAS_success {s s' : AnchorService} {expected owner : Nat}
+    {r : Reservation} {t : AnchorTicket} (h : anchorCAS s expected owner r = (s', some t)) :
+    s'.nextEpoch = s.nextEpoch + 1 ∧ t.epoch = s.nextEpoch ∧
+    t.owner = owner ∧ t.context = r ∧ r.keyId = s.keyId := by
+  unfold anchorCAS at h
+  split at h
+  · next hg => cases h; simp [hg.1, hg.2.1]
+  · cases h
+
+/-- Two disk clones with the same observed generation cannot both reserve it, even when
+both possess valid local MACs and the same checkpoint. -/
+theorem anchorCAS_fences_clone {s s' : AnchorService} {expected owner : Nat}
+    {r : Reservation} {t : AnchorTicket} (h : anchorCAS s expected owner r = (s', some t))
+    (otherOwner : Nat) (otherContext : Reservation) :
+    (anchorCAS s' expected otherOwner otherContext).2 = none := by
+  have hs := anchorCAS_success h
+  have he : expected = s.nextEpoch := by
+    unfold anchorCAS at h
+    split at h
+    · next hg => exact hg.1
+    · cases h
+  have hn : expected ≠ s'.nextEpoch := by omega
+  simp [anchorCAS, hn]
+
+/-- Consuming the server ticket fences even a clone of client memory made after issuance.
+A deployment that only advances on reserve but copies live permits across clones lacks this
+protection. Consumption must itself be authenticated and durably linearized by the service. -/
+def anchorConsume (s : AnchorService) (ticket : AnchorTicket) : Option AnchorService :=
+  if ticket ∈ s.tickets ∧ ticket.epoch ∉ s.spent then
+    some { s with spent := ticket.epoch :: s.spent }
+  else none
+
+theorem anchorConsume_preserves_next {s s' : AnchorService} {ticket : AnchorTicket}
+    (h : anchorConsume s ticket = some s') : s'.nextEpoch = s.nextEpoch := by
+  unfold anchorConsume at h
+  split at h
+  · cases h; rfl
+  · cases h
+
+theorem anchorConsume_once {s s' : AnchorService} {ticket : AnchorTicket}
+    (h : anchorConsume s ticket = some s') : anchorConsume s' ticket = none := by
+  unfold anchorConsume at h
+  split at h
+  · cases h; simp [anchorConsume]
+  · cases h
+
+/-- The CAS history check rejects reuse of the reserved resource, even with a fresh serial. -/
+theorem anchorCAS_no_duplicate_context {s s' : AnchorService} {expected owner : Nat}
+    {r : Reservation} {t : AnchorTicket} (h : anchorCAS s expected owner r = (s', some t)) :
+    ∀ old ∈ s.tickets, old.context.ceremonyId ≠ r.ceremonyId ∧
+      old.context.epochOrCodeword ≠ r.epochOrCodeword := by
+  unfold anchorCAS at h
+  split at h
+  · next hg =>
+    intro old ho
+    exact reservationValid_fresh hg.2.2 _ (List.mem_map.mpr ⟨old, ho, rfl⟩)
+  · cases h
+
+theorem anchorCAS_tickets {s s' : AnchorService} {expected owner : Nat}
+    {r : Reservation} {t : AnchorTicket} (h : anchorCAS s expected owner r = (s', some t)) :
+    s'.tickets = s.tickets ++ [t] := by
+  unfold anchorCAS at h
+  split at h
+  · cases h; rfl
+  · cases h
+
+theorem anchorConsume_tickets {s s' : AnchorService} {ticket : AnchorTicket}
+    (h : anchorConsume s ticket = some s') : s'.tickets = s.tickets := by
+  unfold anchorConsume at h
+  split at h
+  · cases h; rfl
+  · cases h
+
+private theorem nodup_map_of_injOn {α β γ : Type} (f : α → β) (g : α → γ) :
+    ∀ xs : List α, (xs.map g).Nodup →
+      (∀ a ∈ xs, ∀ b ∈ xs, f a = f b → a = b) → (xs.map f).Nodup
+  | [], _, _ => List.nodup_nil
+  | a :: rest, hg, hInj => by
+    rw [List.map_cons, List.Nodup, List.pairwise_cons] at hg ⊢
+    refine ⟨?_, nodup_map_of_injOn f g rest hg.2
+      (fun x hx y hy => hInj x (List.mem_cons_of_mem _ hx) y (List.mem_cons_of_mem _ hy))⟩
+    intro y hy hEq
+    obtain ⟨b, hb, rfl⟩ := List.mem_map.mp hy
+    have hab : a = b := hInj a (List.mem_cons_self ..) b (List.mem_cons_of_mem _ hb) hEq
+    exact hg.1 (g b) (List.mem_map_of_mem hb) (by rw [hab])
+
+/-- Local stages are rollbackable; the external service is not. No ticket is issued by a disk
+restore, a crash, a local write, or a caller-created output record. -/
+structure AnchoredJournal where
+  service : AnchorService
+  localBytes : Bytes
+  localDurable : Option Reservation := none
+  staged : Option Reservation := none
+  pending : Option AnchorTicket := none
+  released : List AnchorTicket := []
+
+inductive AnchoredJournalStep : AnchoredJournal → AnchoredJournal → Prop where
+  | stage (s : AnchoredJournal) (r : Reservation) :
+      AnchoredJournalStep s { s with staged := some r, pending := none, localDurable := none }
+  | localCommit (s : AnchoredJournal) (bytes : Bytes) (r : Reservation)
+      (staged : s.staged = some r) :
+      AnchoredJournalStep s { s with localBytes := bytes, localDurable := some r }
+  | reserve (s : AnchoredJournal) (r : Reservation) (owner expected : Nat)
+      (service : AnchorService) (ticket : AnchorTicket)
+      (staged : s.staged = some r) (durable : s.localDurable = some r)
+      (cas : anchorCAS s.service expected owner r = (service, some ticket)) :
+      AnchoredJournalStep s { s with service, pending := some ticket, staged := none }
+  | release (s : AnchoredJournal) (t : AnchorTicket) (service : AnchorService)
+      (owned : s.pending = some t) (durable : s.localDurable = some t.context)
+      (consumed : anchorConsume s.service t = some service) :
+      AnchoredJournalStep s { s with service, pending := none, released := s.released ++ [t] }
+  | crash (s : AnchoredJournal) :
+      AnchoredJournalStep s { s with staged := none, pending := none }
+  | restoreDisk (s : AnchoredJournal) (bytes : Bytes) :
+      AnchoredJournalStep s { s with localBytes := bytes, localDurable := none }
+
+/-- Ticket serials are released at most once, and everything released or pending is a ticket
+the service actually issued; the service never issued two tickets for one codeword/leaf or one
+ceremony id. -/
+def AnchoredJournalInv (s : AnchoredJournal) : Prop :=
+  (s.released.map (·.epoch)).Nodup ∧
+  (∀ t ∈ s.released, t.epoch < s.service.nextEpoch) ∧
+  (∀ t, s.pending = some t → t.epoch < s.service.nextEpoch ∧
+    ∀ u ∈ s.released, u.epoch ≠ t.epoch) ∧
+  (s.service.tickets.map (·.context.epochOrCodeword)).Nodup ∧
+  (s.service.tickets.map (·.context.ceremonyId)).Nodup ∧
+  (∀ t ∈ s.released, t ∈ s.service.tickets) ∧
+  (∀ t, s.pending = some t → t ∈ s.service.tickets)
+
+theorem anchoredJournalStep_preserves {s t : AnchoredJournal}
+    (step : AnchoredJournalStep s t) (inv : AnchoredJournalInv s) : AnchoredJournalInv t := by
+  obtain ⟨hn, hl, hp, hCw, hCid, hRel, hPend⟩ := inv
+  cases step with
+  | stage r => exact ⟨hn, hl, by intro t h; simp at h, hCw, hCid, hRel, by intro t h; simp at h⟩
+  | localCommit bytes r staged => exact ⟨hn, hl, hp, hCw, hCid, hRel, hPend⟩
+  | restoreDisk bytes => exact ⟨hn, hl, hp, hCw, hCid, hRel, hPend⟩
+  | crash => exact ⟨hn, hl, by intro t h; simp at h, hCw, hCid, hRel, by intro t h; simp at h⟩
+  | reserve r owner expected service ticket staged durable cas =>
+    obtain ⟨hs, ht, _, hCtx, _⟩ := anchorCAS_success cas
+    have hT := anchorCAS_tickets cas
+    have hFresh := anchorCAS_no_duplicate_context cas
+    refine ⟨hn, ?_, ?_, ?_, ?_, ?_, ?_⟩
+    · intro t hm; have := hl t hm; dsimp; omega
+    · intro t he
+      have heq := Option.some.inj he
+      subst t
+      refine ⟨by dsimp; omega, ?_⟩
+      intro u hu; have := hl u hu; omega
+    · dsimp only
+      rw [hT, List.map_append]
+      apply journal_nodup_snoc hCw
+      intro v hv
+      obtain ⟨old, ho, rfl⟩ := List.mem_map.mp hv
+      show old.context.epochOrCodeword ≠ ticket.context.epochOrCodeword
+      rw [hCtx]
+      exact (hFresh old ho).2
+    · dsimp only
+      rw [hT, List.map_append]
+      apply journal_nodup_snoc hCid
+      intro v hv
+      obtain ⟨old, ho, rfl⟩ := List.mem_map.mp hv
+      show old.context.ceremonyId ≠ ticket.context.ceremonyId
+      rw [hCtx]
+      exact (hFresh old ho).1
+    · intro t hm
+      dsimp only
+      rw [hT]
+      exact List.mem_append_left _ (hRel t hm)
+    · intro t he
+      have heq := Option.some.inj he
+      subst t
+      dsimp only
+      rw [hT]
+      exact List.mem_append_right _ (List.mem_singleton_self _)
+  | release t service owned durable consumed =>
+    have hepoch := anchorConsume_preserves_next consumed
+    have hT := anchorConsume_tickets consumed
+    obtain ⟨ht, hf⟩ := hp t owned
+    refine ⟨?_, ?_, by intro u h; simp at h, ?_, ?_, ?_, by intro u h; simp at h⟩
+    · rw [List.map_append]
+      apply journal_nodup_snoc hn
+      intro e he
+      obtain ⟨u, hu, rfl⟩ := List.mem_map.mp he
+      exact hf u hu
+    · intro u hu
+      rcases List.mem_append.mp hu with hu | hu
+      · dsimp; rw [hepoch]; exact hl u hu
+      · obtain rfl := List.mem_singleton.mp hu; dsimp; rw [hepoch]; exact ht
+    · dsimp only; rw [hT]; exact hCw
+    · dsimp only; rw [hT]; exact hCid
+    · intro u hu
+      dsimp only
+      rw [hT]
+      rcases List.mem_append.mp hu with hu | hu
+      · exact hRel u hu
+      · obtain rfl := List.mem_singleton.mp hu; exact hPend _ owned
+
+/-- **Anchored release never reuses a resource**: the released tickets carry pairwise distinct
+codewords/leaf epochs and pairwise distinct ceremony ids, whatever happened to the local disk
+(`restoreDisk` replaces it by arbitrary bytes at any time). -/
+theorem anchoredJournal_released_resources_unique {s : AnchoredJournal}
+    (inv : AnchoredJournalInv s) :
+    (s.released.map (·.context.epochOrCodeword)).Nodup ∧
+    (s.released.map (·.context.ceremonyId)).Nodup := by
+  obtain ⟨hn, _, _, hCw, hCid, hRel, _⟩ := inv
+  exact ⟨nodup_map_of_injOn _ (·.epoch) s.released hn
+      (fun a ha b hb h => eq_of_mem_of_map_nodup hCw (hRel a ha) (hRel b hb) h),
+    nodup_map_of_injOn _ (·.epoch) s.released hn
+      (fun a ha b hb h => eq_of_mem_of_map_nodup hCid (hRel a ha) (hRel b hb) h)⟩
+
+theorem anchoredJournal_initial_inv (keyId localBytes : Bytes) (nextEpoch : Nat) :
+    AnchoredJournalInv { service := { keyId, nextEpoch }, localBytes } :=
+  ⟨List.nodup_nil, fun _ h => (by cases h), fun _ h => (by cases h), List.nodup_nil,
+    List.nodup_nil, fun _ h => (by cases h), fun _ h => (by cases h)⟩
+
+inductive AnchoredJournalRun : AnchoredJournal → AnchoredJournal → Prop where
+  | refl (s) : AnchoredJournalRun s s
+  | next {s t u} : AnchoredJournalRun s t → AnchoredJournalStep t u → AnchoredJournalRun s u
+
+theorem anchoredJournal_trace_no_reuse {s t : AnchoredJournal}
+    (run : AnchoredJournalRun s t) (inv : AnchoredJournalInv s) : AnchoredJournalInv t := by
+  induction run with
+  | refl => exact inv
+  | next run step ih => exact anchoredJournalStep_preserves step ih
+
+private def advancePc : Nat → ReplacePc → ReplacePc
+  | 0, pc => pc
+  | n+1, pc => nextReplacePc (advancePc n pc)
+
+private theorem advanceJournal (key : Bytes) (s : JournalState) (r : Reservation)
+    (healthy : s.poisoned = false) (staged : s.staged = some r) (n : Nat) :
+    JournalRun key s { s with pc := advancePc n s.pc } := by
+  induction n with
+  | zero => simpa [advancePc] using JournalRun.refl (key := key) s
+  | succ n ih =>
+    exact JournalRun.next ih (JournalStep.advance _ r healthy staged)
+
+private theorem journalRun_trans {key : Bytes} {s t u : JournalState}
+    (a : JournalRun key s t) (b : JournalRun key t u) : JournalRun key s u := by
+  induction b with
+  | refl => exact a
+  | next run step ih => exact JournalRun.next ih step
+
+/-- Non-vacuity: an actual ten-syscall reservation path issues a permit and releases exactly
+one reservation. The MAC is the concrete cSHAKE encoder in the read-back guard. The proof
+never substitutes an insecure test MAC or assumes a forged receipt. -/
+theorem journal_successful_release (key keyId lockSeal : Bytes) (r : Reservation)
+    (wf : r.WellFormed) (valid : reservationValid keyId [] r = true) :
+    ∃ s, JournalRun key (initialJournal keyId lockSeal) s ∧ s.released = [r] := by
+  let start := initialJournal keyId lockSeal
+  let staging : JournalState := { start with staged := some r, permit := none, pc := .checkBefore }
+  have hbegin : JournalRun key start staging :=
+    JournalRun.next (.refl _) (.begin start r rfl rfl wf valid)
+  have hsync := advanceJournal key staging r rfl rfl 10
+  let synced : JournalState := { staging with pc := .done }
+  have hd : JournalRun key staging synced := by
+    simpa only [advancePc, nextReplacePc, staging] using hsync
+  let committed : JournalState := { synced with entries := [r], staged := none, permit := some r }
+  have hc : JournalRun key start committed :=
+    JournalRun.next (journalRun_trans hbegin hd) (.committed synced r rfl rfl rfl valid)
+  let released : JournalState := { committed with permit := none, released := [r] }
+  refine ⟨released, ?_, rfl⟩
+  exact JournalRun.next hc (.consume committed r
+    (ceremonyBytes key lockSeal keyId [r]) rfl rfl rfl rfl)
+
+theorem witness_real_cshake_journal_release :
+    let keyId : Bytes := List.replicate 32 4
+    let r : Reservation := ⟨List.replicate 32 1, keyId, List.replicate 32 2, 1, 1⟩
+    ∃ s, JournalRun (List.replicate 32 5)
+      (initialJournal keyId (List.replicate 8 6)) s ∧ s.released = [r] := by
+  dsimp only
+  apply journal_successful_release
+  · exact reservation_fixture_wellFormed
+  · change reservationValid (List.replicate 32 4) [] _ = true
+    exact reservationValid_empty_self ⟨List.replicate 32 1, List.replicate 32 4, List.replicate 32 2, 1, 1⟩
+
+/-- Full v3 attempt machine, including explicit retries. Unlike the fresh-only machine,
+codeword repetitions are legal; the theorem tracks fresh attempt identities and durable history. -/
+structure RetryJournalState where
+  keyId : Bytes
+  macKey : Bytes := []
+  lockSeal : Bytes := []
+  entries : List JournalEntry := []
+  staged : Option JournalEntry := none
+  permit : Option JournalEntry := none
+  pc : ReplacePc := .done
+  poisoned : Bool := false
+  released : List JournalEntry := []
+
+inductive RetryJournalStep : RetryJournalState → RetryJournalState → Prop where
+  | begin (s : RetryJournalState) (e : JournalEntry)
+      (healthy : s.poisoned = false) (idle : s.staged = none)
+      (valid : journalEntryValid s.keyId s.entries e = true) :
+      RetryJournalStep s { s with staged := some e, permit := none, pc := .checkBefore }
+  | advance (s : RetryJournalState) (e : JournalEntry)
+      (healthy : s.poisoned = false) (staged : s.staged = some e) :
+      RetryJournalStep s { s with pc := nextReplacePc s.pc }
+  | committed (s : RetryJournalState) (e : JournalEntry)
+      (healthy : s.poisoned = false) (staged : s.staged = some e) (synced : s.pc = .done)
+      (valid : journalEntryValid s.keyId s.entries e = true) :
+      RetryJournalStep s { s with entries := s.entries ++ [e], staged := none, permit := some e }
+  | consume (s : RetryJournalState) (e : JournalEntry) (readBack : Bytes) (expected : CeremonyContext)
+      (healthy : s.poisoned = false) (owned : s.permit = some e)
+      (current : s.entries.getLast? = some e)
+      (verified : verifyCurrentPermitWithContext s.macKey s.lockSeal s.keyId s.entries
+        ⟨s.entries.length + 1, ceremonyTag s.macKey s.lockSeal (ceremonyBodyV3 s.keyId s.entries)⟩
+        readBack ⟨e, s.entries.length + 1, s.lockSeal⟩ expected = true) :
+      RetryJournalStep s { s with permit := none, released := s.released ++ [e] }
+  | ioError (s : RetryJournalState) :
+      RetryJournalStep s { s with poisoned := true, pc := .poisoned, permit := none }
+  | crash (s : RetryJournalState) :
+      RetryJournalStep s { s with staged := none, permit := none, pc := .done }
+  | crashPublishes (s : RetryJournalState) (e : JournalEntry)
+      (staged : s.staged = some e) (cut : mayPublishAfterCrash s.pc)
+      (valid : journalEntryValid s.keyId s.entries e = true) :
+      RetryJournalStep s { s with entries := s.entries ++ [e], staged := none, permit := none, pc := .done }
+  | reopen (s : RetryJournalState) (readBack : Bytes)
+      (verified : openCeremonyBytesV3 s.macKey s.lockSeal s.keyId readBack
+        ⟨s.entries.length + 1, ceremonyTag s.macKey s.lockSeal (ceremonyBodyV3 s.keyId s.entries)⟩
+        = some (s.entries.length + 1, s.entries)) :
+      RetryJournalStep s { s with poisoned := false, staged := none, permit := none, pc := .done }
+
+def RetryJournalInv (s : RetryJournalState) : Prop :=
+  (s.released.map (·.reservation.ceremonyId)).Nodup ∧
+  (∀ e ∈ s.released, e ∈ s.entries) ∧
+  (∀ e, s.permit = some e → e ∈ s.entries ∧
+    ∀ old ∈ s.released, old.reservation.ceremonyId ≠ e.reservation.ceremonyId)
+
+theorem retryJournalStep_preserves {s t : RetryJournalState}
+    (step : RetryJournalStep s t) (inv : RetryJournalInv s) : RetryJournalInv t := by
+  obtain ⟨hn, hm, hp⟩ := inv
+  cases step with
+  | begin e healthy idle valid => exact ⟨hn, hm, by intro e h; simp at h⟩
+  | advance e healthy staged => exact ⟨hn, hm, hp⟩
+  | committed e healthy staged synced valid =>
+    refine ⟨hn, fun old ho => List.mem_append_left _ (hm old ho), ?_⟩
+    intro r he
+    obtain rfl := Option.some.inj he
+    exact ⟨List.mem_append_right _ (List.mem_singleton_self _),
+      fun old ho => journalEntryValid_fresh_attempt valid old (hm old ho)⟩
+  | consume e readBack expected healthy owned current verified =>
+    obtain ⟨he, hf⟩ := hp e owned
+    refine ⟨?_, ?_, by intro e h; simp at h⟩
+    · rw [List.map_append]
+      apply journal_nodup_snoc hn
+      intro x hx
+      obtain ⟨old, ho, rfl⟩ := List.mem_map.mp hx
+      exact hf old ho
+    · intro old ho
+      rcases List.mem_append.mp ho with ho | ho
+      · exact hm old ho
+      · obtain rfl := List.mem_singleton.mp ho; exact he
+  | ioError => exact ⟨hn, hm, by intro e h; simp at h⟩
+  | crash => exact ⟨hn, hm, by intro e h; simp at h⟩
+  | crashPublishes e staged cut valid =>
+    exact ⟨hn, fun old ho => List.mem_append_left _ (hm old ho), by intro e h; simp at h⟩
+  | reopen readBack verified => exact ⟨hn, hm, by intro e h; simp at h⟩
+
+inductive RetryJournalRun : RetryJournalState → RetryJournalState → Prop where
+  | refl (s) : RetryJournalRun s s
+  | next {s t u} : RetryJournalRun s t → RetryJournalStep t u → RetryJournalRun s u
+
+theorem retryJournal_trace_no_attempt_reuse {s t : RetryJournalState}
+    (run : RetryJournalRun s t) (inv : RetryJournalInv s) : RetryJournalInv t := by
+  induction run with
+  | refl => exact inv
+  | next run step ih => exact retryJournalStep_preserves step ih
+
+end RustDurability
+
+/-! ## §5. Post-Round-3 Rushing Selective-Abort Unbiasedness & `QSAG.R_COMMIT/v1` Coin-Tossing
+
+Hardens hedged threshold signing randomness (`CommittedHedgedRandomizer` in
+`crates/qsag-core/src/fips205.rs`) and proves **`post_round3_rushing_abort_unbiased`**:
+1. **Round-1 `QSAG.R_COMMIT/v1` Commitment Binding**: Every custodian commits to its randomizer
+   contribution `R_i` via length-framed `H("QSAG.R_COMMIT/v1" || sid || party_id || len || R_i || salt_i)`
+   prior to Round-2 openings and strictly prior to Round-3 message-dependent share release.
+   Any rushing attempt to alter `R_i` after observing honest shares yields a concrete `HashCollision H`.
+2. **Zero-Bias Coin-Tossed Hedged Randomness + Pre-Round-3 Cut-the-Hash Abort**: Once `rCorrupt`
+   is bound in Round 1, `R = rHonest ^^^ rCorrupt` is uniformly distributed (`fiber = 1` per target
+   `R`, zero bit bias), any pre-open abort scales acceptance rate `p_acc` independently of `R`,
+   and surviving executions match the unbiased uniform-`R` standalone signer (`Δ = 0`).
+3. **Deterministic Threshold PRF Post-Round-3 Rushing Abort Unbiasedness (`Δ = 0`)**: When `R` is
+   uniquely determined prior to Round-3 share release via deterministic PRF (`addrnd = None` or
+   `ParallelSeededSignSession`), even a rushing custodian whose post-Round-3 abort predicate
+   `abortPostRound3 : AdvPreOpenView Q w → BitVec w → Bool` inspects the reconstructed signature
+   can ONLY scale overall acceptance `p_acc`; conditioned on non-abort, the output distribution is
+   pointwise identical (`Δ = 0`) to `singleSign sk msg`.
+4. **`#tooth` Counterexample (`tooth_uncommitted_round3_randomizer_biases_bit`)**: Without a
+   binding Round-1 commitment on `rCorrupt`, a rushing party choosing `rCorrupt(rHonest) := rHonest`
+   forces `lsb(R) = false` on ALL `256 / 256` honest 8-bit inputs (vs `128 / 256` unbiased), biasing
+   a full bit of `R`. -/
+
+/-- Exact 16-byte ASCII domain tag `"QSAG.R_COMMIT/v1"` matching `R_COMMIT_DOMAIN_V1` in
+    `crates/qsag-core/src/fips205.rs`. -/
+def rCommitDomainV1 : List Nat :=
+  [81, 83, 65, 71, 46, 82, 95, 67, 79, 77, 77, 73, 84, 47, 118, 49]
+
+/-- Structured input to a Round-1 `QSAG.R_COMMIT/v1` randomizer commitment of width `rw` bits. -/
+structure HedgedRCommitInput (rw : Nat) where
+  sid : BitVec 256
+  partyId : BitVec 64
+  rShare : BitVec rw
+  openSalt : BitVec 256
+  deriving Repr, DecidableEq
+
+/-- Length-framed preimage encoding `"QSAG.R_COMMIT/v1" || sid || partyId || rw || rShare || openSalt`. -/
+def encodeHedgedRCommitV1 {rw : Nat} (inp : HedgedRCommitInput rw) : List Nat :=
+  rCommitDomainV1 ++ [inp.sid.toNat, inp.partyId.toNat, rw, inp.rShare.toNat, inp.openSalt.toNat]
+
+/-- Evaluate the `QSAG.R_COMMIT/v1` commitment under a 256-bit hash function `H`. -/
+def evalHedgedRCommitV1 {rw : Nat} (H : List Nat → Digest256) (inp : HedgedRCommitInput rw) :
+    Digest256 :=
+  H (encodeHedgedRCommitV1 inp)
+
+/-- Concrete hash collision witness (`x₁ ≠ x₂ ∧ H x₁ = H x₂`). -/
+def RCommitHashCollision (H : List Nat → Digest256) : Prop :=
+  ∃ x₁ x₂ : List Nat, x₁ ≠ x₂ ∧ H x₁ = H x₂
+
+/-- Length-framed `encodeHedgedRCommitV1` is strictly injective across all fields. -/
+theorem encodeHedgedRCommitV1_injective {rw : Nat}
+    {a b : HedgedRCommitInput rw}
+    (hEq : encodeHedgedRCommitV1 a = encodeHedgedRCommitV1 b) : a = b := by
+  unfold encodeHedgedRCommitV1 at hEq
+  have hTail := List.append_cancel_left hEq
+  injection hTail with hSid t1
+  injection t1 with hPid t2
+  injection t2 with _ t3
+  injection t3 with hR t4
+  injection t4 with hSalt _
+  cases a; cases b
+  dsimp only at hSid hPid hR hSalt
+  congr
+  · exact BitVec.eq_of_toNat_eq hSid
+  · exact BitVec.eq_of_toNat_eq hPid
+  · exact BitVec.eq_of_toNat_eq hR
+  · exact BitVec.eq_of_toNat_eq hSalt
+
+/-- **Binding of `QSAG.R_COMMIT/v1`**: any two valid openings matching the same Round-1 commitment
+    digest either agree on every field (`sid`, `partyId`, `rShare`, `openSalt`) or yield an explicit
+    hash collision for `H`. -/
+theorem rCommitV1_binding_or_collision {rw : Nat}
+    (H : List Nat → Digest256) (inp₁ inp₂ : HedgedRCommitInput rw)
+    (hDigest : evalHedgedRCommitV1 H inp₁ = evalHedgedRCommitV1 H inp₂) :
+    inp₁ = inp₂ ∨ RCommitHashCollision H := by
+  by_cases hSame : inp₁ = inp₂
+  · exact Or.inl hSame
+  · refine Or.inr ⟨encodeHedgedRCommitV1 inp₁, encodeHedgedRCommitV1 inp₂, ?_, hDigest⟩
+    intro hEnc
+    exact hSame (encodeHedgedRCommitV1_injective hEnc)
+
+/-- Unbiased uniform randomizer enumeration over `BitVec rw`. -/
+def decodeUniformRand (rw : Nat) : Fin (2 ^ rw) → BitVec rw :=
+  (enumBitVec rw).toFun
+
+/-- Coin-tossed hedged randomizer `R = rHonest ^^^ rCorrupt` indexed by honest share `i : Fin (2 ^ rw)`
+    for a Round-1 committed corrupt share `rCorrupt : BitVec rw`. -/
+def decodeCoinTossRand {rw : Nat} (rCorrupt : BitVec rw) : Fin (2 ^ rw) → BitVec rw :=
+  fun i => (enumBitVec rw).toFun i ^^^ rCorrupt
+
+/-- **Coin-Toss Uniformity Invariance**: for any fixed (Round-1 committed) `rCorrupt : BitVec rw`
+    and any weight `weight : BitVec rw → Nat`, XORing with `rCorrupt` permutes `BitVec rw`
+    bijectively, preserving all finite sums and every bit marginal. -/
+theorem coinTossRand_sum_invariant {rw : Nat} (rCorrupt : BitVec rw)
+    (weight : BitVec rw → Nat) :
+    finSum (2 ^ rw) (fun i => weight (decodeCoinTossRand rCorrupt i)) =
+      finSum (2 ^ rw) (fun i => weight (decodeUniformRand rw i)) := by
+  let enumR := enumBitVec rw
+  let bij := maskBijectionBitVec rw rCorrupt
+  let π : Fin (2 ^ rw) → Fin (2 ^ rw) := fun i => enumR.invFun (bij.toFun (enumR.toFun i))
+  have hInv : ∀ i : Fin (2 ^ rw), π (π i) = i := by
+    intro i
+    dsimp only [π]
+    have hBijInv : ∀ x : BitVec rw, bij.toFun (bij.toFun x) = x := bij.left_inv
+    rw [enumR.right_inv, hBijInv, enumR.left_inv]
+  have hPerm := finSum_perm_invariant π π hInv hInv (fun j => weight (enumR.toFun j))
+  have hCong :
+      finSum (2 ^ rw) (fun i => weight (decodeCoinTossRand rCorrupt i)) =
+      finSum (2 ^ rw) (fun i => weight (enumR.toFun (π i))) := by
+    apply finSum_congr
+    intro i
+    dsimp only [decodeCoinTossRand, π, bij, maskBijectionBitVec]
+    rw [enumR.right_inv, BitVec.xor_comm]
+  exact hCong.trans hPerm
+
+/-- Every target `w`-bit randomizer `targetR` has exact honest-share fiber cardinality `1` under
+    committed coin-tossing `R = rHonest ^^^ rCorrupt`. -/
+theorem coinTossRand_exact_fiber_one {rw : Nat} (rCorrupt targetR : BitVec rw) :
+    finSum (2 ^ rw) (fun i => if decodeCoinTossRand rCorrupt i = targetR then 1 else 0) = 1 := by
+  rw [coinTossRand_sum_invariant rCorrupt (fun r => if r = targetR then 1 else 0)]
+  let iStar := (enumBitVec rw).invFun targetR
+  have hCong :
+      finSum (2 ^ rw) (fun i => if decodeUniformRand rw i = targetR then 1 else 0) =
+      finSum (2 ^ rw) (fun i => if i = iStar then 1 else 0) := by
+    apply finSum_congr
+    intro i
+    dsimp only [decodeUniformRand]
+    by_cases hEq : i = iStar
+    · subst hEq
+      have hR : (enumBitVec rw).toFun ((enumBitVec rw).invFun targetR) = targetR :=
+        (enumBitVec rw).right_inv targetR
+      simp only [iStar, hR, ↓reduceIte]
+    · have hNe : (enumBitVec rw).toFun i ≠ targetR := by
+        intro hv
+        apply hEq
+        have := congrArg (enumBitVec rw).invFun hv
+        simpa [iStar, (enumBitVec rw).left_inv] using this
+      simp only [hEq, hNe, ↓reduceIte]
+  rw [hCong, finSum_eq_indicator]
+
+/-- Post-Round-3 rushing execution when `R` is uniquely fixed prior to Round-3 share opening
+    (e.g., deterministic threshold PRF `addrnd = None` or `ParallelSeededSignSession`):
+    the rushing custodian inspects both its pre-open view and the reconstructed Round-3 signature
+    `singleSign sk msg`, and may selectively abort via arbitrary `abortPostRound3`. -/
+def execDetPostRound3Rushing {SK Msg CorruptIn : Type} {Q w : Nat}
+    (spec : CutTheHashProtocolSpec SK Msg Unit CorruptIn Q w)
+    (sk : SK) (msg : Msg) (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
+    (m : HonestPreOpenMasks Q w)
+    (abortPostRound3 : AdvPreOpenView Q w → BitVec w → Bool) : Option (BitVec w) :=
+  if abortPostRound3
+      (evalPreOpenView spec sk msg () adv hQ m)
+      (spec.yShareHonest sk msg () (corruptContribution adv (evalPreOpenView spec sk msg () adv hQ m)) ^^^
+       spec.yShareCorrupt sk msg () (corruptContribution adv (evalPreOpenView spec sk msg () adv hQ m)))
+  then none
+  else
+    some (spec.yShareHonest sk msg () (corruptContribution adv (evalPreOpenView spec sk msg () adv hQ m)) ^^^
+      spec.yShareCorrupt sk msg () (corruptContribution adv (evalPreOpenView spec sk msg () adv hQ m)))
+
+/-- Total surviving runs under post-Round-3 signature-inspecting selective abort. -/
+def detPostRound3SurviveCount {SK Msg CorruptIn : Type} {Q w : Nat}
+    (spec : CutTheHashProtocolSpec SK Msg Unit CorruptIn Q w)
+    (sk : SK) (msg : Msg) (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
+    (abortPostRound3 : AdvPreOpenView Q w → BitVec w → Bool) : Nat :=
+  finSum (preOpenMaskCard Q w) (fun mIdx =>
+    optSomeIndicator (execDetPostRound3Rushing spec sk msg adv hQ
+      ((enumHonestPreOpenMasks Q w).toFun mIdx) abortPostRound3))
+
+/-- Surviving signature count for `targetSig` under post-Round-3 rushing abort. -/
+def detPostRound3SigCount {SK Msg CorruptIn : Type} {Q w : Nat}
+    (spec : CutTheHashProtocolSpec SK Msg Unit CorruptIn Q w)
+    (sk : SK) (msg : Msg) (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
+    (abortPostRound3 : AdvPreOpenView Q w → BitVec w → Bool)
+    (targetSig : BitVec w) : Nat :=
+  finSum (preOpenMaskCard Q w) (fun mIdx =>
+    if execDetPostRound3Rushing spec sk msg adv hQ
+        ((enumHonestPreOpenMasks Q w).toFun mIdx) abortPostRound3 = some targetSig
+    then 1 else 0)
+
+/-- Cross-multiplied L1 statistical distance numerator comparing surviving post-Round-3 runs against
+    the deterministic standalone signature `spec.finalSignature sk msg ()`. -/
+def detPostRound3StatDistNum {SK Msg CorruptIn : Type} {Q w : Nat}
+    (spec : CutTheHashProtocolSpec SK Msg Unit CorruptIn Q w)
+    (sk : SK) (msg : Msg) (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
+    (abortPostRound3 : AdvPreOpenView Q w → BitVec w → Bool) : Nat :=
+  let survive := detPostRound3SurviveCount spec sk msg adv hQ abortPostRound3
+  finSum (2 ^ w) (fun sIdx =>
+    let sig := (enumBitVec w).toFun sIdx
+    natAbsDiff
+      (detPostRound3SigCount spec sk msg adv hQ abortPostRound3 sig)
+      ((if spec.finalSignature sk msg () = sig then 1 else 0) * survive))
+
+/-- **Post-Round-3 Rushing Selective-Abort Unbiasedness (`post_round3_rushing_abort_unbiased`)**:
+    1. **Round-1 `QSAG.R_COMMIT/v1` Binding**: Any rushing opening `inp'` matching the Round-1
+       commitment `evalHedgedRCommitV1 H inp` satisfies `inp'.rShare = inp.rShare` unless
+       `RCommitHashCollision H`.
+    2. **Hedged Coin-Toss + Cut-the-Hash Zero Bias (`Δ = 0`)**: With `inp.rShare` bound in Round 1,
+       coin-tossed `R = rHonest ^^^ inp.rShare` has exact fiber `1` per `targetR : BitVec rw`,
+       surviving runs factor as `2 ^ rw * viewMaskSurviveCount abortPreOpen` (independent of `R`),
+       and surviving signatures match the **unbiased** uniform-`R` standalone signer (`decodeUniformRand rw`)
+       with `abortConditionedStatDistNum = 0`.
+    3. **Deterministic Pre-Fixed `R` Post-Round-3 Signature-Dependent Abort (`Δ = 0`)**: When `R` is
+       uniquely fixed prior to Round-3 share opening, even an arbitrary post-Round-3 rushing abort
+       predicate `abortPostRound3 : AdvPreOpenView Q w → BitVec w → Bool` inspecting the
+       reconstructed signature scales acceptance rate `survive = viewMaskSurviveCount (fun v => abortPostRound3 v (singleSign sk msg))`
+       while keeping conditional signature distance **identically zero** (`detPostRound3StatDistNum = 0`,
+       and every surviving output equals `spec.finalSignature sk msg ()`). -/
+theorem post_round3_rushing_abort_unbiased
+    {SK Msg CorruptIn : Type} {Q w rw : Nat}
+    (H : List Nat → Digest256)
+    (inp : HedgedRCommitInput rw)
+    (hedgedSpec : CutTheHashProtocolSpec SK Msg (BitVec rw) CorruptIn Q w)
+    (detSpec : CutTheHashProtocolSpec SK Msg Unit CorruptIn Q w)
+    (sk : SK) (msg : Msg)
+    (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
+    (abortPreOpen : AdvPreOpenView Q w → Bool)
+    (hSurviveHedged : NonZeroSurvivingRuns hedgedSpec sk msg (2 ^ rw)
+      (decodeCoinTossRand inp.rShare) adv hQ abortPreOpen)
+    (abortPostRound3 : AdvPreOpenView Q w → BitVec w → Bool) :
+    let totalHedged := totalSurvivingRuns hedgedSpec sk msg (2 ^ rw)
+      (decodeCoinTossRand inp.rShare) adv hQ abortPreOpen
+    (∀ inp' : HedgedRCommitInput rw,
+      evalHedgedRCommitV1 H inp = evalHedgedRCommitV1 H inp' →
+        inp'.rShare = inp.rShare ∨ RCommitHashCollision H) ∧
+    (∀ targetR : BitVec rw,
+      finSum (2 ^ rw) (fun i => if decodeCoinTossRand inp.rShare i = targetR then 1 else 0) = 1) ∧
+    totalHedged = 2 ^ rw * viewMaskSurviveCount abortPreOpen ∧
+    (∀ targetSig : BitVec w,
+      survivingRealSigCount hedgedSpec sk msg (2 ^ rw) (decodeCoinTossRand inp.rShare)
+          adv hQ abortPreOpen targetSig * 2 ^ rw =
+        idealStandaloneSigCount hedgedSpec sk msg (2 ^ rw) (decodeUniformRand rw) targetSig *
+          totalHedged) ∧
+    abortConditionedStatDistNum hedgedSpec sk msg (2 ^ rw) (decodeCoinTossRand inp.rShare)
+        adv hQ abortPreOpen = 0 ∧
+    detPostRound3SurviveCount detSpec sk msg adv hQ abortPostRound3 =
+      viewMaskSurviveCount (fun v => abortPostRound3 v (detSpec.finalSignature sk msg ())) ∧
+    detPostRound3StatDistNum detSpec sk msg adv hQ abortPostRound3 = 0 := by
+  intro totalHedged
+  have hCut := cutTheHash_abort_conditioned_sd_zero hedgedSpec sk msg (2 ^ rw)
+    (decodeCoinTossRand inp.rShare) adv hQ abortPreOpen hSurviveHedged
+  obtain ⟨_, hTotEq, hCrossCoin, hSdZero⟩ := hCut
+  have hBind : ∀ inp' : HedgedRCommitInput rw,
+      evalHedgedRCommitV1 H inp = evalHedgedRCommitV1 H inp' →
+        inp'.rShare = inp.rShare ∨ RCommitHashCollision H := by
+    intro inp' hDig
+    rcases rCommitV1_binding_or_collision H inp inp' hDig with hEq | hColl
+    · exact Or.inl (congrArg HedgedRCommitInput.rShare hEq.symm)
+    · exact Or.inr hColl
+  have hIdealUnbiased : ∀ targetSig : BitVec w,
+      idealStandaloneSigCount hedgedSpec sk msg (2 ^ rw) (decodeCoinTossRand inp.rShare) targetSig =
+        idealStandaloneSigCount hedgedSpec sk msg (2 ^ rw) (decodeUniformRand rw) targetSig := by
+    intro targetSig
+    unfold idealStandaloneSigCount
+    exact coinTossRand_sum_invariant inp.rShare
+      (fun r => if hedgedSpec.finalSignature sk msg r = targetSig then 1 else 0)
+  have hCrossUnbiased : ∀ targetSig : BitVec w,
+      survivingRealSigCount hedgedSpec sk msg (2 ^ rw) (decodeCoinTossRand inp.rShare)
+          adv hQ abortPreOpen targetSig * 2 ^ rw =
+        idealStandaloneSigCount hedgedSpec sk msg (2 ^ rw) (decodeUniformRand rw) targetSig *
+          totalHedged := by
+    intro targetSig
+    rw [← hIdealUnbiased targetSig]
+    exact hCrossCoin targetSig
+  have hDetSurv : detPostRound3SurviveCount detSpec sk msg adv hQ abortPostRound3 =
+      viewMaskSurviveCount (fun v => abortPostRound3 v (detSpec.finalSignature sk msg ())) := by
+    unfold detPostRound3SurviveCount
+    have hCong :
+        finSum (preOpenMaskCard Q w) (fun mIdx =>
+          optSomeIndicator (execDetPostRound3Rushing detSpec sk msg adv hQ
+            ((enumHonestPreOpenMasks Q w).toFun mIdx) abortPostRound3)) =
+        finSum (preOpenMaskCard Q w) (fun mIdx =>
+          if abortPostRound3
+              (evalPreOpenView detSpec sk msg () adv hQ ((enumHonestPreOpenMasks Q w).toFun mIdx))
+              (detSpec.finalSignature sk msg ()) then 0 else 1) := by
+      apply finSum_congr
+      intro mIdx
+      unfold execDetPostRound3Rushing
+      rw [detSpec.reconstruct_eq, optSomeIndicator_ite]
+    rw [hCong]
+    exact preOpenView_sum_invariant detSpec sk msg () adv hQ
+      (fun v => if abortPostRound3 v (detSpec.finalSignature sk msg ()) then 0 else 1)
+  have hDetSig : ∀ targetSig : BitVec w,
+      detPostRound3SigCount detSpec sk msg adv hQ abortPostRound3 targetSig =
+        (if detSpec.finalSignature sk msg () = targetSig then 1 else 0) *
+          detPostRound3SurviveCount detSpec sk msg adv hQ abortPostRound3 := by
+    intro targetSig
+    unfold detPostRound3SigCount detPostRound3SurviveCount
+    by_cases hMatch : detSpec.finalSignature sk msg () = targetSig
+    · simp only [hMatch, ↓reduceIte, Nat.one_mul]
+      apply finSum_congr
+      intro mIdx
+      unfold execDetPostRound3Rushing
+      rw [detSpec.reconstruct_eq, hMatch, indicator_ite_none_some, optSomeIndicator_ite]
+      simp only [↓reduceIte]
+    · simp only [hMatch, ↓reduceIte, Nat.zero_mul]
+      have hZero :
+          finSum (preOpenMaskCard Q w) (fun mIdx =>
+            if execDetPostRound3Rushing detSpec sk msg adv hQ
+                ((enumHonestPreOpenMasks Q w).toFun mIdx) abortPostRound3 = some targetSig
+            then 1 else 0) =
+          finSum (preOpenMaskCard Q w) (fun _ => 0) := by
+        apply finSum_congr
+        intro mIdx
+        unfold execDetPostRound3Rushing
+        rw [detSpec.reconstruct_eq, indicator_ite_none_some]
+        simp only [hMatch, ↓reduceIte]
+        cases abortPostRound3
+          (evalPreOpenView detSpec sk msg () adv hQ ((enumHonestPreOpenMasks Q w).toFun mIdx))
+          (detSpec.finalSignature sk msg ()) <;> rfl
+      rw [hZero, finSum_const, Nat.mul_zero]
+  have hDetSdZero : detPostRound3StatDistNum detSpec sk msg adv hQ abortPostRound3 = 0 := by
+    unfold detPostRound3StatDistNum
+    dsimp only
+    have hAllZ :
+        finSum (2 ^ w) (fun sIdx =>
+          let sig := (enumBitVec w).toFun sIdx
+          natAbsDiff
+            (detPostRound3SigCount detSpec sk msg adv hQ abortPostRound3 sig)
+            ((if detSpec.finalSignature sk msg () = sig then 1 else 0) *
+              detPostRound3SurviveCount detSpec sk msg adv hQ abortPostRound3)) =
+        finSum (2 ^ w) (fun _ => 0) := by
+      apply finSum_congr
+      intro sIdx
+      dsimp only
+      rw [hDetSig ((enumBitVec w).toFun sIdx)]
+      simp [natAbsDiff]
+    rw [hAllZ, finSum_const, Nat.mul_zero]
+  exact ⟨hBind, coinTossRand_exact_fiber_one inp.rShare, hTotEq, hCrossUnbiased, hSdZero,
+    hDetSurv, hDetSdZero⟩
+
+/-- `#tooth`: Without a binding Round-1 `QSAG.R_COMMIT/v1` commitment (`decodeCoinTossRand`), a
+    rushing corrupt party that chooses `rCorrupt : BitVec 4 → BitVec 4` *after* observing the
+    honest share `rHonest` (`rCorrupt rH := rH`) forces the least-significant bit `getLsbD 0` of
+    `R = rHonest ^^^ rCorrupt rHonest` to `false` on **all `16 / 16` honest inputs**, whereas
+    every Round-1 committed `rCommitted : BitVec 4` yields `getLsbD 0 = false` on **exactly
+    `8 / 16` inputs** (a full 1-bit bias of `8 / 16 = 1 / 2`). -/
+theorem tooth_uncommitted_round3_randomizer_biases_bit :
+    ∃ corruptChooseR : BitVec 4 → BitVec 4,
+      finSum (2 ^ 4) (fun i =>
+        let rH := (enumBitVec 4).toFun i
+        if (rH ^^^ corruptChooseR rH).getLsbD 0 = false then 1 else 0) = 16 ∧
+      (∀ rCommitted : BitVec 4,
+        finSum (2 ^ 4) (fun i =>
+          if (decodeCoinTossRand rCommitted i).getLsbD 0 = false then 1 else 0) = 8) := by
+  refine ⟨fun rH => rH, ?_, ?_⟩
+  · have hAllOne :
+        finSum (2 ^ 4) (fun i =>
+          let rH := (enumBitVec 4).toFun i
+          if (rH ^^^ rH).getLsbD 0 = false then 1 else 0) =
+        finSum (2 ^ 4) (fun _ => 1) := by
+      apply finSum_congr
+      intro i
+      dsimp only
+      rw [BitVec.xor_self]
+      rfl
+    rw [hAllOne, finSum_const]
+  · intro rCommitted
+    rw [coinTossRand_sum_invariant rCommitted (fun r => if r.getLsbD 0 = false then 1 else 0)]
+    decide
+
+theorem witness_post_round3_rushing_abort_inhabited :
+    ∃ (H : List Nat → Digest256)
+      (inp : HedgedRCommitInput 2)
+      (hedgedSpec : CutTheHashProtocolSpec (BitVec 2) (BitVec 2) (BitVec 2) (BitVec 2) 1 2)
+      (detSpec : CutTheHashProtocolSpec (BitVec 2) (BitVec 2) Unit (BitVec 2) 1 2)
+      (sk msg : BitVec 2)
+      (adv : RushingCorruptStrategy (BitVec 2) 1 2)
+      (hQ : 0 < 1)
+      (abortPreOpen : AdvPreOpenView 1 2 → Bool),
+      evalHedgedRCommitV1 H inp = 0#256 ∧
+      detSpec.finalSignature sk msg () = sk ^^^ msg ∧
+      NonZeroSurvivingRuns hedgedSpec sk msg (2 ^ 2) (decodeCoinTossRand inp.rShare)
+        adv hQ abortPreOpen := by
+  let hSpec : CutTheHashProtocolSpec (BitVec 2) (BitVec 2) (BitVec 2) (BitVec 2) 1 2 := {
+    wireRingSecret := fun _ _ _ => ⟨0, Nat.zero_lt_one⟩
+    wireXorSecret := fun sk _ _ cIn => sk ^^^ cIn
+    yShareHonest := fun sk msg r cIn => (sk ^^^ msg ^^^ r) ^^^ cIn
+    yShareCorrupt := fun _ _ _ cIn => cIn
+    macShareHonest := fun _ msg _ _ => msg
+    commitHiding := fun y mac => maskBijectionBitVec 2 (y ^^^ mac)
+    finalSignature := fun sk msg r => sk ^^^ msg ^^^ r
+    reconstruct_eq := fun sk msg r cIn => by bv_xor_cancel
+  }
+  let dSpec : CutTheHashProtocolSpec (BitVec 2) (BitVec 2) Unit (BitVec 2) 1 2 := {
+    wireRingSecret := fun _ _ _ => ⟨0, Nat.zero_lt_one⟩
+    wireXorSecret := fun sk _ _ cIn => sk ^^^ cIn
+    yShareHonest := fun sk msg _ cIn => (sk ^^^ msg) ^^^ cIn
+    yShareCorrupt := fun _ _ _ cIn => cIn
+    macShareHonest := fun _ msg _ _ => msg
+    commitHiding := fun y mac => maskBijectionBitVec 2 (y ^^^ mac)
+    finalSignature := fun sk msg _ => sk ^^^ msg
+    reconstruct_eq := fun sk msg _ cIn => by bv_xor_cancel
+  }
+  let inp0 : HedgedRCommitInput 2 := ⟨0#256, 1#64, 1#2, 0#256⟩
+  let adv0 : RushingCorruptStrategy (BitVec 2) 1 2 := RushingCorruptStrategy.const (0#2)
+  refine ⟨(fun _ => 0#256), inp0, hSpec, dSpec, 1#2, 2#2, adv0, Nat.zero_lt_one,
+    (fun _ => false), rfl, rfl, ?_⟩
+  unfold NonZeroSurvivingRuns
+  rw [totalSurvivingRuns_eq]
+  have hMaskPos : 0 < viewMaskSurviveCount (fun (_ : AdvPreOpenView 1 2) => false) := by
+    unfold viewMaskSurviveCount
+    rw [finSum_const]
+    decide
+  exact Nat.mul_pos (Nat.two_pow_pos 2) hMaskPos
+
+#verify_constructive encodeHedgedRCommitV1_injective
+#verify_constructive rCommitV1_binding_or_collision
+#verify_constructive coinTossRand_sum_invariant
+#verify_constructive coinTossRand_exact_fiber_one
+#verify_constructive post_round3_rushing_abort_unbiased
+#verify_constructive tooth_uncommitted_round3_randomizer_biases_bit
+#verify_constructive witness_post_round3_rushing_abort_inhabited
+#tooth_pair post_round3_rushing_abort_unbiased vs tooth_uncommitted_round3_randomizer_biases_bit
+#verify_inhabited post_round3_rushing_abort_unbiased witness_post_round3_rushing_abort_inhabited
+
+end Qsag
+end
