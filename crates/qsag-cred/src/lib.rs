@@ -10,11 +10,11 @@ extern crate std;
 pub mod blind_vc;
 pub mod fips204_ntt;
 pub mod rss_mpc;
-mod secret_buffer;
 pub mod threshold_mldsa;
 mod toprf_engine;
 pub mod transport;
 pub mod voprf;
+pub mod voprf_spdz;
 pub use fips204_ntt::{
     MLDSA_D, MLDSA_N, MLDSA_Q, MlDsaLevel, MlDsaParams, MlDsaSigningKey, Poly256,
     ml_dsa_keygen_from_seed, ml_dsa_sign_deterministic, ml_dsa_verify, pk_decode, pk_encode,

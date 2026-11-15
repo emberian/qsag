@@ -61,12 +61,14 @@ use qsag_accel::{
     poseidon2::poseidon2_perm12,
 };
 // Transport implementations own messages moved into exchange and must wipe them.
-use crate::secret_buffer::SecretBuffer as Zeroizing;
+use qsag_core::wipe::SecretBuffer as Zeroizing;
 #[cfg(test)]
-use crate::secret_buffer::Wipe;
+use qsag_core::wipe::SecretWipe;
 
 pub const SERVERS: usize = 5;
 pub const MAX_BATCH: usize = 64;
+/// Domain limb of the keyed sponge (`"TOPRF1"`), shared by every backend.
+pub(crate) const SPONGE_DOMAIN: u64 = 0x544f50524631;
 /// Maximum forward step permitted per monotone counter reservation (`counter = u64::MAX` is
 /// unconditionally rejected so no single request can exhaust the 64-bit counter space).
 pub const MAX_COUNTER_WINDOW: u64 = 64;
@@ -80,6 +82,10 @@ pub enum Error {
     Context,
     Counter,
     Quota,
+    /// An SPDZ MAC check failed: a share, a MAC or an opened value was altered.
+    MacCheck,
+    /// Dealerless preprocessing (oblivious transfer, sacrifice or degree check) aborted.
+    Preprocessing,
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -292,6 +298,29 @@ pub fn dkg<T: Transport>(
         last_counter: None,
     })
 }
+/// Counter admission shared by every backend: reject `u64::MAX` and jumps beyond
+/// [`MAX_COUNTER_WINDOW`] before any network round or durable mutation, so one
+/// uncorroborated packet cannot exhaust the monotone counter space. The durable
+/// watermark is recovered first (also on the first request after a custody
+/// reload); local burns are retained even if a faulty store regresses.
+pub(crate) fn admit_counter(
+    last_counter: &mut Option<u64>,
+    store: &dyn CounterStore,
+    counter: u64,
+) -> Result<(), Error> {
+    if counter == u64::MAX {
+        return Err(Error::Counter);
+    }
+    *last_counter = (*last_counter).max(store.high_water()?);
+    match *last_counter {
+        Some(last) => match counter.checked_sub(last) {
+            Some(delta) if (1..=MAX_COUNTER_WINDOW).contains(&delta) => Ok(()),
+            _ => Err(Error::Counter),
+        },
+        None if counter >= MAX_COUNTER_WINDOW => Err(Error::Counter),
+        None => Ok(()),
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Context {
     key: [u8; 32],
@@ -331,13 +360,13 @@ impl Context {
     pub const fn request(&self) -> &[u8; 32] {
         &self.request
     }
-    fn digest(&self) -> [u8; 32] {
+    pub(crate) fn digest(&self) -> [u8; 32] {
         hash(
             b"QSAG.TOPRF.REQUEST.CONTEXT.V1",
             &[&self.base_digest(), &self.request],
         )
     }
-    fn base_digest(&self) -> [u8; 32] {
+    pub(crate) fn base_digest(&self) -> [u8; 32] {
         hash(
             b"QSAG.TOPRF.EVAL.V1",
             &[
@@ -394,6 +423,10 @@ pub struct Client {
     context: Context,
     input_digests: Vec<[u8; 32]>,
 }
+/// Public binding of one evaluated input inside an [`Evaluation`].
+pub(crate) fn input_binding(input: &[u8]) -> [u8; 32] {
+    hash(b"QSAG.TOPRF.INPUT.BIND.V1", &[input])
+}
 pub fn hash_input(input: &[u8]) -> [u64; 4] {
     let seed = Zeroizing(hash(b"QSAG.TOPRF.INPUT.V1", &[input]));
     let values = Zeroizing(fields(&seed, b"QSAG.TOPRF.INPUT.FIELD.V1", b"", 4));
@@ -405,12 +438,12 @@ pub fn plaintext(key: &[u64; 4], input: &[u8]) -> [u8; 32] {
     let input = Zeroizing(hash_input(input));
     st[..4].copy_from_slice(&input[..]);
     st[4] = 1;
-    st[7] = 0x544f50524631;
+    st[7] = SPONGE_DOMAIN;
     st[8..].copy_from_slice(key);
     poseidon2_perm12(&mut st);
     finish(&st[..4])
 }
-fn finish(output: &[u64]) -> [u8; 32] {
+pub(crate) fn finish(output: &[u64]) -> [u8; 32] {
     let mut bytes = Zeroizing(Vec::with_capacity(output.len() * 8));
     for &v in output {
         engine::put(&mut bytes, v)
@@ -486,10 +519,7 @@ pub fn blind(
     Ok((
         Client {
             context,
-            input_digests: inputs
-                .iter()
-                .map(|input| hash(b"QSAG.TOPRF.INPUT.BIND.V1", &[input]))
-                .collect(),
+            input_digests: inputs.iter().map(|input| input_binding(input)).collect(),
         },
         requests,
     ))
@@ -626,23 +656,7 @@ impl Server {
         // Reject `u64::MAX` and unbounded counter jumps BEFORE any network broadcast or durable
         // counter mutation so a single uncorroborated `counter = u64::MAX` packet cannot brick
         // the server's monotone high-water mark!
-        if request.context.counter == u64::MAX {
-            return Err(Error::Counter);
-        }
-        // Recover before applying the window, including the first request after
-        // custody reload. Retain local burns even if a faulty store regresses.
-        self.last_counter = self.last_counter.max(store.high_water()?);
-        match self.last_counter {
-            Some(last) => match request.context.counter.checked_sub(last) {
-                Some(delta) if (1..=MAX_COUNTER_WINDOW).contains(&delta) => {}
-                _ => return Err(Error::Counter),
-            },
-            None => {
-                if request.context.counter >= MAX_COUNTER_WINDOW {
-                    return Err(Error::Counter);
-                }
-            }
-        }
+        admit_counter(&mut self.last_counter, store, request.context.counter)?;
         let context = request.context.digest();
         let agreement =
             transport.broadcast(hash(b"QSAG.TOPRF.START.V1", &[&context]), context.to_vec())?;
@@ -692,7 +706,7 @@ impl Server {
             st[..4].copy_from_slice(input);
             st[8..].copy_from_slice(&self.key_share);
             engine::public(&mut st[4], self.party, 1);
-            engine::public(&mut st[7], self.party, 0x544f50524631);
+            engine::public(&mut st[7], self.party, SPONGE_DOMAIN);
         }
         let result = engine::Engine {
             party: self.party,
@@ -782,6 +796,29 @@ impl Drop for IssuanceReceiptKey {
     }
 }
 impl Evaluation {
+    /// Assemble a client result from a backend's verified outputs.
+    pub(crate) fn from_verified(
+        values: Vec<[u8; 32]>,
+        input_digests: Vec<[u8; 32]>,
+        context: Context,
+    ) -> Self {
+        Self {
+            values,
+            faulty_servers: Vec::new(),
+            key: context.key,
+            input_digests,
+            context,
+            receipt_tags: Vec::new(),
+        }
+    }
+    pub(crate) fn attach_receipts(&mut self, receipt_key: &IssuanceReceiptKey) {
+        self.receipt_tags = self
+            .input_digests
+            .iter()
+            .zip(&self.values)
+            .map(|(input, output)| receipt_key.tag(&self.key, &self.context, input, output))
+            .collect();
+    }
     pub fn context(&self) -> &Context {
         &self.context
     }
@@ -801,7 +838,7 @@ impl Evaluation {
         {
             return None;
         }
-        let digest = hash(b"QSAG.TOPRF.INPUT.BIND.V1", &[input]);
+        let digest = input_binding(input);
         let mut found = false;
         let mut matched_output = Zeroizing([0u8; 32]);
         let mut matched_tag = Zeroizing([0u8; 32]);
@@ -861,7 +898,7 @@ impl Evaluation {
         {
             return None;
         }
-        let digest = hash(b"QSAG.TOPRF.INPUT.BIND.V1", &[input]);
+        let digest = input_binding(input);
         let mut found = false;
         let mut matched_output = Zeroizing([0u8; 32]);
         for (cand_digest, cand_out) in self.input_digests.iter().zip(&self.values) {
@@ -882,14 +919,7 @@ impl Client {
         receipt_key: &IssuanceReceiptKey,
     ) -> Result<Evaluation, Error> {
         let mut evaluation = self.finalize(outputs)?;
-        evaluation.receipt_tags = evaluation
-            .input_digests
-            .iter()
-            .zip(&evaluation.values)
-            .map(|(input, output)| {
-                receipt_key.tag(&evaluation.key, &evaluation.context, input, output)
-            })
-            .collect();
+        evaluation.attach_receipts(receipt_key);
         Ok(evaluation)
     }
     /// Array indices MUST come from authenticated channel identities. Up to one
@@ -1520,7 +1550,7 @@ mod tests {
     #[test]
     fn recursive_wipe_clears_nested_buffers() {
         let mut secret = Zeroizing(vec![[[7u64; 5]; 4]; 2]);
-        secret.0.wipe();
+        secret.0.secret_wipe();
         assert!(secret.iter().flatten().flatten().all(|x| *x == 0));
     }
 

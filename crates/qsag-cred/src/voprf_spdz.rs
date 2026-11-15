@@ -720,3 +720,627 @@ fn linear(state: &mut [Wire; 12], external: bool) {
 }
 
 /// An online evaluation among one quorum, between tuple generation and release.
+pub struct SpdzSession {
+    threshold: usize,
+    sid: [u8; 32],
+    binding: [u8; 32],
+    key_commitment: [u8; 32],
+    session: [u8; 32],
+    counter: u64,
+    items: usize,
+    parties: Vec<usize>,
+    points: Vec<Goldilocks>,
+    rngs: Vec<PartyPrivateRng>,
+    vaults: Vec<PreprocessedPoseidonPartyVault>,
+    key: Vec<[Wire; LANES]>,
+    masks: Vec<Vec<Wire>>,
+}
+impl fmt::Debug for SpdzSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SpdzToprfSession(<REDACTED>)")
+    }
+}
+impl Drop for SpdzSession {
+    fn drop(&mut self) {
+        self.key.secret_wipe();
+        self.masks.secret_wipe();
+    }
+}
+
+impl SpdzSession {
+    fn alphas(&self) -> SecretBuffer<Vec<GoldilocksExt2>> {
+        SecretBuffer(self.vaults.iter().map(|vault| vault.mac_alpha_share).collect())
+    }
+
+    /// Open a batch of wires under the SPDZ MAC check.
+    fn checked_open(
+        &mut self,
+        phase: &'static str,
+        shares: &[Vec<Goldilocks>],
+        macs: &[Vec<GoldilocksExt2>],
+    ) -> Result<Vec<Goldilocks>, Error> {
+        let alphas = self.alphas();
+        commit_and_open_spdz_goldilocks_batch_quorum(
+            &self.sid,
+            phase,
+            self.threshold,
+            &self.points,
+            shares,
+            macs,
+            &alphas,
+            &mut self.rngs,
+        )
+        .map_err(preprocess_error)
+    }
+
+    fn checked_open_wires(
+        &mut self,
+        phase: &'static str,
+        wires: &[Vec<Wire>],
+    ) -> Result<Vec<Goldilocks>, Error> {
+        let mut pending = Pending::new(wires.len());
+        pending.record(wires);
+        self.checked_open(phase, &pending.shares, &pending.macs)
+    }
+
+    /// Start an evaluation among `quorum` (ascending party order, at least `t`
+    /// servers of one enrollment). `stores[i]` and `entropy[i]` belong to
+    /// `quorum[i]`. Every server admits and durably burns `counter` before any
+    /// key-dependent step; an aborted session never returns it.
+    pub fn begin(
+        quorum: &mut [&mut SpdzServer],
+        stores: &mut [&mut dyn CounterStore],
+        session: [u8; 32],
+        counter: u64,
+        items: usize,
+        entropy: &[[u8; 32]],
+    ) -> Result<(Self, Vec<SpdzGrant>), Error> {
+        let m = quorum.len();
+        let Some(first) = quorum.first() else {
+            return Err(Error::UnsupportedThreshold);
+        };
+        let public = first.public.clone();
+        let threshold = public.config.threshold;
+        let parties: Vec<usize> = quorum.iter().map(|server| server.party).collect();
+        if m < threshold || parties.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(Error::UnsupportedThreshold);
+        }
+        if stores.len() != m || entropy.len() != m {
+            return Err(Error::Encoding);
+        }
+        if quorum.iter().any(|server| server.public != public) {
+            return Err(Error::Context);
+        }
+        if items == 0 || items > MAX_BATCH {
+            return Err(Error::Quota);
+        }
+        let key_commitment = public.public_key().commitment();
+        for (server, store) in quorum.iter_mut().zip(stores.iter()) {
+            admit_counter(&mut server.last_counter, &**store, counter)?;
+        }
+        for (server, store) in quorum.iter_mut().zip(stores.iter_mut()) {
+            store.reserve(&key_commitment, server.party, counter, items)?;
+            server.last_counter = Some(counter);
+        }
+
+        let binding = grant_binding(&key_commitment, &session, counter, items, &parties);
+        let sid = hash(b"QSAG.TOPRF.SPDZ.SESSION.V1", &[&binding]);
+        // Hedge each server's session randomness with its long-term share.
+        let hedged: SecretBuffer<Vec<[u8; 32]>> = SecretBuffer(
+            quorum
+                .iter()
+                .zip(entropy)
+                .map(|(server, seed)| {
+                    let custody = SecretBuffer(server.to_secret_bytes());
+                    hash(b"QSAG.TOPRF.SPDZ.ENTROPY.V1", &[seed, &custody[..]])
+                })
+                .collect(),
+        );
+        let mut rngs = party_rngs(b"QSAG.TOPRF.SPDZ.RNG.V1", &sid, &hedged);
+        let points = eval_points(&parties);
+        let weights = lagrange_weights_zero_goldilocks(&points).ok_or(Error::Encoding)?;
+        // Lagrange-rescaled shares are additive contributions to `alpha` on this quorum.
+        let alpha_shares: SecretBuffer<Vec<GoldilocksExt2>> =
+            SecretBuffer(quorum.iter().map(|server| server.alpha).collect());
+        let alpha_contribs: SecretBuffer<Vec<GoldilocksExt2>> = SecretBuffer(
+            alpha_shares
+                .iter()
+                .zip(&weights)
+                .map(|(share, &weight)| share.mul_base(weight))
+                .collect(),
+        );
+        let mut mesh = OtMesh::try_establish(sid, &mut rngs).map_err(preprocess_error)?;
+
+        let mut this = Self {
+            threshold,
+            sid,
+            binding,
+            key_commitment,
+            session,
+            counter,
+            items,
+            parties,
+            points,
+            rngs,
+            vaults: Vec::new(),
+            key: quorum.iter().map(|server| server.key).collect(),
+            masks: Vec::new(),
+        };
+
+        // Check the stored key shares against their MACs before the long step: each
+        // limb is opened under a fresh authenticated mask.
+        let check_sid = hash(b"QSAG.TOPRF.SPDZ.KEYCHECK.V1", &[&sid]);
+        this.vaults = run_dealerless_pi_pow7_with_alpha(
+            check_sid,
+            threshold,
+            &this.points,
+            0,
+            LANES,
+            0,
+            &alpha_contribs,
+            &alpha_shares,
+            &mut mesh,
+            &mut this.rngs,
+        )
+        .map_err(preprocess_error)?;
+        let mut blinded = SecretBuffer(vec![Vec::with_capacity(LANES); m]);
+        for ((wires, vault), key) in blinded.iter_mut().zip(&mut this.vaults).zip(&this.key) {
+            let triples = vault.reserve_beaver(LANES).map_err(preprocess_error)?;
+            for (limb, triple) in key.iter().zip(triples) {
+                wires.push(limb.add(Wire {
+                    val: triple.a,
+                    mac: triple.a_mac,
+                }));
+            }
+        }
+        this.checked_open_wires("toprf_spdz_key_share", &blinded)?;
+
+        this.vaults = run_dealerless_pi_pow7_with_alpha(
+            sid,
+            threshold,
+            &this.points,
+            SBOXES_PER_ITEM * items,
+            MASKS_PER_ITEM * items,
+            0,
+            &alpha_contribs,
+            &alpha_shares,
+            &mut mesh,
+            &mut this.rngs,
+        )
+        .map_err(preprocess_error)?;
+        let mut grants = Vec::with_capacity(m);
+        for (index, vault) in this.vaults.iter_mut().enumerate() {
+            let triples = vault
+                .reserve_beaver(MASKS_PER_ITEM * items)
+                .map_err(preprocess_error)?;
+            this.masks.push(
+                triples
+                    .iter()
+                    .map(|triple| Wire {
+                        val: triple.a,
+                        mac: triple.a_mac,
+                    })
+                    .collect(),
+            );
+            grants.push(SpdzGrant {
+                party: this.parties[index],
+                binding,
+                triples: triples
+                    .iter()
+                    .map(|triple| [triple.a, triple.b, triple.c])
+                    .collect(),
+            });
+        }
+        Ok((this, grants))
+    }
+
+    /// One layer of `x -> x^7` in a single opening round: open `y = x + r` for a
+    /// fresh tuple and expand `(y - r)^7` on the authenticated powers of `r`.
+    fn sbox(&mut self, inputs: &[Vec<Wire>], pending: &mut Pending) -> Result<Vec<Vec<Wire>>, Error> {
+        let m = inputs.len();
+        let count = inputs[0].len();
+        let alphas = self.alphas();
+        let mut tuples = Vec::with_capacity(m);
+        let mut masked = SecretBuffer(vec![Vec::with_capacity(count); m]);
+        for ((vault, wires), out) in self.vaults.iter_mut().zip(inputs).zip(masked.iter_mut()) {
+            let reserved = vault.reserve_pow7(count).map_err(preprocess_error)?;
+            for (wire, tuple) in wires.iter().zip(reserved) {
+                out.push(wire.add(Wire {
+                    val: tuple.r_pows[0],
+                    mac: tuple.r_macs[0],
+                }));
+            }
+            tuples.push(reserved);
+        }
+        pending.record(&masked);
+        let mut shares = SecretBuffer(vec![Goldilocks::ZERO; m]);
+        let mut out = SecretBuffer(vec![Vec::with_capacity(count); m]);
+        let binomial = [7u64, 21, 35, 35, 21, 7, 1].map(Goldilocks::from_u64_reduced);
+        for gate in 0..count {
+            for (share, wires) in shares.iter_mut().zip(masked.iter()) {
+                *share = wires[gate].val;
+            }
+            let y = open_and_check_degree_goldilocks(
+                self.threshold,
+                &self.points,
+                &shares,
+                "toprf_spdz_sbox",
+            )
+            .map_err(preprocess_error)?;
+            // powers[k] = y^(6 - k)
+            let mut powers = [Goldilocks::ONE; 7];
+            for k in (0..6).rev() {
+                powers[k] = powers[k + 1] * y;
+            }
+            for (party, wires) in out.iter_mut().enumerate() {
+                let tuple = &tuples[party][gate];
+                // (y - r)^7 = y^7 + sum_k (-1)^(k+1) C(7, k+1) y^(6-k) r^(k+1)
+                let mut acc = Wire::public(powers[0] * y, alphas[party]);
+                for k in 0..7 {
+                    let term = Wire {
+                        val: tuple.r_pows[k],
+                        mac: tuple.r_macs[k],
+                    }
+                    .scale(binomial[k] * powers[k]);
+                    acc = if k % 2 == 0 { acc.sub(term) } else { acc.add(term) };
+                }
+                wires.push(acc);
+            }
+        }
+        Ok(out.into_inner())
+    }
+
+    fn permute(&mut self, states: &mut [Vec<[Wire; 12]>], pending: &mut Pending) -> Result<(), Error> {
+        let alphas = self.alphas();
+        for state in states.iter_mut().flatten() {
+            linear(state, true);
+        }
+        let rounds = [
+            (0, POSEIDON2_HALF_EXTERNAL_ROUNDS),
+            (1, POSEIDON2_INTERNAL_ROUNDS),
+            (2, POSEIDON2_HALF_EXTERNAL_ROUNDS),
+        ];
+        for (tag, count) in rounds {
+            let width = if tag == 1 { 1 } else { 12 };
+            for round in 0..count {
+                let inputs: SecretBuffer<Vec<Vec<Wire>>> = SecretBuffer(
+                    states
+                        .iter()
+                        .zip(alphas.iter())
+                        .map(|(party, &alpha)| {
+                            party
+                                .iter()
+                                .flat_map(|state| {
+                                    (0..width).map(move |lane| {
+                                        state[lane].add(Wire::public(
+                                            poseidon2_const_at(tag, round, lane as u64),
+                                            alpha,
+                                        ))
+                                    })
+                                })
+                                .collect()
+                        })
+                        .collect(),
+                );
+                let outputs = SecretBuffer(self.sbox(&inputs, pending)?);
+                for (party, wires) in states.iter_mut().zip(outputs.iter()) {
+                    for (state, chunk) in party.iter_mut().zip(wires.chunks_exact(width)) {
+                        state[..width].copy_from_slice(chunk);
+                        linear(state, tag != 1);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Evaluate the client's request and return every server's reply. Nothing is
+    /// returned unless every opening of the session passed its MAC check.
+    pub fn evaluate(mut self, request: &SpdzRequest) -> Result<Vec<SpdzOutput>, Error> {
+        let context = &request.context;
+        if !ct_eq_bytes(context.key(), &self.key_commitment)
+            || context.session() != &self.session
+            || context.counter() != self.counter
+            || context.items() != self.items
+            || request.differences.len() != self.items
+            || !ct_eq_bytes(
+                context.request(),
+                &request_digest(&self.binding, &request.differences),
+            )
+        {
+            return Err(Error::Context);
+        }
+        let m = self.parties.len();
+        let alphas = self.alphas();
+        let mut differences = Vec::with_capacity(self.items);
+        for item in &request.differences {
+            let mut lanes = [[Goldilocks::ZERO; 2]; LANES];
+            for (lane, pair) in lanes.iter_mut().zip(item) {
+                for (value, &raw) in lane.iter_mut().zip(pair) {
+                    *value = Goldilocks::from_canonical(raw).map_err(|_| Error::Encoding)?;
+                }
+            }
+            differences.push(lanes);
+        }
+
+        // Both maskings of every input limb must describe the same value.
+        let masks = SecretBuffer(core::mem::take(&mut self.masks));
+        let input = |party: usize, item: usize, lane: usize, copy: usize| {
+            masks[party][mask_index(item, false, lane, copy)]
+                .add(Wire::public(differences[item][lane][copy], alphas[party]))
+        };
+        let bound: SecretBuffer<Vec<Vec<Wire>>> = SecretBuffer(
+            (0..m)
+                .map(|party| {
+                    (0..self.items)
+                        .flat_map(|item| (0..LANES).map(move |lane| (item, lane)))
+                        .map(|(item, lane)| input(party, item, lane, 0).sub(input(party, item, lane, 1)))
+                        .collect()
+                })
+                .collect(),
+        );
+        let opened = self.checked_open_wires("toprf_spdz_input_bind", &bound)?;
+        if opened.iter().any(|value| *value != Goldilocks::ZERO) {
+            return Err(Error::InconsistentShares);
+        }
+
+        let mut states: SecretBuffer<Vec<Vec<[Wire; 12]>>> = SecretBuffer(
+            (0..m)
+                .map(|party| {
+                    (0..self.items)
+                        .map(|item| {
+                            let mut state = [Wire::ZERO; 12];
+                            for lane in 0..LANES {
+                                state[lane] = input(party, item, lane, 0);
+                                state[8 + lane] = self.key[party][lane];
+                            }
+                            state[4] = Wire::public(Goldilocks::ONE, alphas[party]);
+                            state[7] = Wire::public(
+                                Goldilocks::from_u64_reduced(crate::voprf::SPONGE_DOMAIN),
+                                alphas[party],
+                            );
+                            state
+                        })
+                        .collect()
+                })
+                .collect(),
+        );
+        let mut pending = Pending::new(m);
+        self.permute(&mut states, &mut pending)?;
+        // Every S-box opening is authenticated before any output share is opened.
+        let shares = SecretBuffer(core::mem::take(&mut pending.shares));
+        let macs = SecretBuffer(core::mem::take(&mut pending.macs));
+        drop(SecretBuffer(self.checked_open(
+            "toprf_spdz_circuit",
+            &shares,
+            &macs,
+        )?));
+
+        let outputs: SecretBuffer<Vec<Vec<Wire>>> = SecretBuffer(
+            (0..m)
+                .map(|party| {
+                    (0..self.items)
+                        .flat_map(|item| (0..LANES).flat_map(move |lane| (0..2).map(move |copy| (item, lane, copy))))
+                        .map(|(item, lane, copy)| {
+                            states[party][item][lane]
+                                .add(masks[party][mask_index(item, true, lane, copy)])
+                        })
+                        .collect()
+                })
+                .collect(),
+        );
+        let opened = self.checked_open_wires("toprf_spdz_output", &outputs)?;
+        let masked: Vec<[[u64; 2]; LANES]> = opened
+            .chunks_exact(2 * LANES)
+            .map(|item| {
+                core::array::from_fn(|lane| {
+                    core::array::from_fn(|copy| item[2 * lane + copy].to_canonical_u64())
+                })
+            })
+            .collect();
+        Ok(self
+            .parties
+            .iter()
+            .map(|&party| SpdzOutput {
+                party,
+                context: context.clone(),
+                masked: masked.clone(),
+            })
+            .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::voprf::plaintext;
+
+    struct Store(Option<u64>);
+    impl CounterStore for Store {
+        fn high_water(&self) -> Result<Option<u64>, Error> {
+            Ok(self.0)
+        }
+        fn reserve(&mut self, _: &[u8; 32], _: usize, counter: u64, _: usize) -> Result<(), Error> {
+            if self.0.is_some_and(|last| counter <= last) {
+                return Err(Error::Counter);
+            }
+            self.0 = Some(counter);
+            Ok(())
+        }
+    }
+
+    fn entropy(count: usize, tag: u8) -> Vec<[u8; 32]> {
+        (0..count)
+            .map(|i| core::array::from_fn(|b| tag ^ (i as u8).wrapping_mul(31) ^ b as u8))
+            .collect()
+    }
+
+    /// Test-only reconstruction of the key from `t` shares.
+    fn reconstruct(servers: &[&SpdzServer]) -> [u64; 4] {
+        let parties: Vec<usize> = servers.iter().map(|s| s.party).collect();
+        let weights = lagrange_weights_zero_goldilocks(&eval_points(&parties)).unwrap();
+        core::array::from_fn(|lane| {
+            servers
+                .iter()
+                .zip(&weights)
+                .fold(Goldilocks::ZERO, |acc, (s, &w)| acc + s.key[lane].val * w)
+                .to_canonical_u64()
+        })
+    }
+
+    fn begin(
+        quorum: &mut [&mut SpdzServer],
+        stores: &mut [Store],
+        counter: u64,
+        items: usize,
+        tag: u8,
+    ) -> Result<(SpdzSession, Vec<SpdzGrant>), Error> {
+        let seeds = entropy(quorum.len(), tag);
+        let mut stores: Vec<&mut dyn CounterStore> =
+            stores.iter_mut().map(|s| s as &mut dyn CounterStore).collect();
+        SpdzSession::begin(quorum, &mut stores, [9; 32], counter, items, &seeds)
+    }
+
+    #[test]
+    fn committee_shapes() {
+        assert!(SpdzConfig::new(2, 2).is_ok());
+        assert!(SpdzConfig::new(64, 64).is_ok());
+        assert!(SpdzConfig::new(33, 64).is_ok());
+        for (t, n) in [(1, 5), (0, 0), (6, 5), (2, 65)] {
+            assert_eq!(SpdzConfig::new(t, n), Err(Error::UnsupportedThreshold));
+        }
+    }
+
+    #[test]
+    fn exactly_t_servers_evaluate_and_tampering_is_rejected() {
+        let config = SpdzConfig::new(3, 5).unwrap();
+        let mut servers = spdz_dkg(config, [1; 32], &entropy(5, 0x11)).unwrap();
+        let public = servers[0].public().clone();
+        let key = reconstruct(&[&servers[0], &servers[1], &servers[2]]);
+        assert_eq!(key, reconstruct(&[&servers[1], &servers[3], &servers[4]]));
+
+        // Custody round trip, and a share that does not match the enrolled record.
+        let bytes = servers[4].to_secret_bytes();
+        let restored = SpdzServer::from_secret_bytes(&bytes, &public, 4).unwrap();
+        assert_eq!(restored.to_secret_bytes(), bytes);
+        assert_eq!(
+            SpdzServer::from_secret_bytes(&bytes, &public, 3).unwrap_err(),
+            Error::Context
+        );
+        let mut forged = bytes.clone();
+        forged[70] ^= 1;
+        assert_eq!(
+            SpdzServer::from_secret_bytes(&forged, &public, 4).unwrap_err(),
+            Error::Context
+        );
+        assert_eq!(SpdzPublic::from_bytes(&public.to_bytes()).unwrap(), public);
+
+        // Two servers are below the threshold, whichever two.
+        let mut stores = [Store(None), Store(None), Store(None)];
+        {
+            let (a, rest) = servers.split_at_mut(1);
+            let mut pair = [&mut a[0], &mut rest[2]];
+            assert_eq!(
+                begin(&mut pair, &mut stores[..2], 0, 1, 0x20).unwrap_err(),
+                Error::UnsupportedThreshold
+            );
+        }
+
+        // A stored share altered without its MAC aborts before tuple generation.
+        let honest = servers[3].key[2];
+        servers[3].key[2].val += Goldilocks::ONE;
+        {
+            let mut it = servers.iter_mut();
+            let (s0, _, _, s3, s4) = (
+                it.next().unwrap(),
+                it.next().unwrap(),
+                it.next().unwrap(),
+                it.next().unwrap(),
+                it.next().unwrap(),
+            );
+            let mut quorum = [s0, s3, s4];
+            assert_eq!(
+                begin(&mut quorum, &mut stores, 0, 1, 0x21).unwrap_err(),
+                Error::MacCheck
+            );
+        }
+        servers[3].key[2] = honest;
+        // The aborted session burned counter 0 at every server it reached.
+        assert!(stores.iter().all(|s| s.0 == Some(0)));
+
+        // Servers 0, 3, 4 evaluate; 1 and 2 are absent.
+        let inputs: [&[u8]; 1] = [b"correct horse"];
+        let (session, mut grants) = {
+            let mut it = servers.iter_mut();
+            let (s0, _, _, s3, s4) = (
+                it.next().unwrap(),
+                it.next().unwrap(),
+                it.next().unwrap(),
+                it.next().unwrap(),
+                it.next().unwrap(),
+            );
+            let mut quorum = [s0, s3, s4];
+            assert_eq!(
+                begin(&mut quorum, &mut stores, 0, 1, 0x22).unwrap_err(),
+                Error::Counter
+            );
+            begin(&mut quorum, &mut stores, 1, 1, 0x23).unwrap()
+        };
+        // A server that lies to the client about a mask share is caught by the client.
+        let honest = grants[1].triples[5][0];
+        grants[1].triples[5][0] += Goldilocks::ONE;
+        assert_eq!(
+            spdz_blind(&public, &inputs, [9; 32], 1, &grants).unwrap_err(),
+            Error::InconsistentShares
+        );
+        grants[1].triples[5][0] = honest;
+        let (client, request) = spdz_blind(&public, &inputs, [9; 32], 1, &grants).unwrap();
+        let outputs = session.evaluate(&request).unwrap();
+
+        // Replies that disagree, or a missing reply, are refused.
+        let mut altered = outputs.clone();
+        altered[2].masked[0][1][0] ^= 1;
+        let (probe, _) = spdz_blind(&public, &inputs, [9; 32], 1, &grants).unwrap();
+        assert_eq!(probe.finalize(&altered).unwrap_err(), Error::InconsistentShares);
+        let (probe, _) = spdz_blind(&public, &inputs, [9; 32], 1, &grants).unwrap();
+        assert_eq!(
+            probe.finalize(&outputs[..2]).unwrap_err(),
+            Error::UnsupportedThreshold
+        );
+
+        let evaluation = client.finalize(&outputs).unwrap();
+        assert_eq!(evaluation.values(), &[plaintext(&key, inputs[0])]);
+        assert_eq!(
+            evaluation.value_for(&public.public_key(), inputs[0]),
+            Some(plaintext(&key, inputs[0]))
+        );
+    }
+
+    #[test]
+    fn altered_session_state_fails_the_mac_check_before_release() {
+        let config = SpdzConfig::new(2, 3).unwrap();
+        let mut servers = spdz_dkg(config, [2; 32], &entropy(3, 0x31)).unwrap();
+        let public = servers[0].public().clone();
+        let inputs: [&[u8]; 1] = [b"input"];
+        let mut stores = [Store(None), Store(None)];
+        let (mut session, grants) = {
+            let (a, rest) = servers.split_at_mut(1);
+            let mut quorum = [&mut a[0], &mut rest[1]];
+            begin(&mut quorum, &mut stores, 0, 1, 0x32).unwrap()
+        };
+        let (_, request) = spdz_blind(&public, &inputs, [9; 32], 0, &grants).unwrap();
+        // One server uses a different key share inside the session.
+        session.key[1][0].val += Goldilocks::ONE;
+        assert_eq!(session.evaluate(&request).unwrap_err(), Error::MacCheck);
+
+        // A request whose masked input was altered in transit does not bind.
+        let (session, grants) = {
+            let (a, rest) = servers.split_at_mut(1);
+            let mut quorum = [&mut a[0], &mut rest[1]];
+            begin(&mut quorum, &mut stores, 1, 1, 0x33).unwrap()
+        };
+        let (_, mut request) = spdz_blind(&public, &inputs, [9; 32], 1, &grants).unwrap();
+        request.differences[0][0][0] ^= 1;
+        assert_eq!(session.evaluate(&request).unwrap_err(), Error::Context);
+    }
+}
