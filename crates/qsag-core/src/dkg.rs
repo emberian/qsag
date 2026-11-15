@@ -4186,6 +4186,68 @@ mod tests {
         check_goldilocks_dkg(3, 4, 4, 5);
     }
 
+    #[test]
+    fn goldilocks_nonprefix_booleanity_quorum_uses_its_own_points() {
+        let sid = [0xE4; 32];
+        let t = 3;
+        let pts: Vec<_> = [2, 5, 9, 17]
+            .into_iter()
+            .map(Goldilocks::from_u64_reduced)
+            .collect();
+        let mut rngs = make_rngs(4, 0xE5);
+        let mut mesh = OtMesh::try_establish(sid, &mut rngs).unwrap();
+        // Nonzero, unequal polynomial coefficients make wrong interpolation indices
+        // observable. Every constant term is a bit, but local shares need not be bits.
+        let mut shares = vec![[Goldilocks::ZERO; 256]; 4];
+        for bit in 0..256 {
+            let poly = [
+                Goldilocks::from_u64_reduced((bit % 2) as u64),
+                Goldilocks::from_u64_reduced(bit as u64 + 11),
+                Goldilocks::from_u64_reduced(bit as u64 + 23),
+            ];
+            for (p, &x) in pts.iter().enumerate() {
+                shares[p][bit] = eval_poly_goldilocks(&poly, x);
+            }
+        }
+        spdz_verify_seed256_boolean_goldilocks_with_quorum(
+            &sid,
+            t,
+            &[3, 0, 2],
+            &pts,
+            &mut mesh,
+            &shares,
+            &mut rngs,
+        )
+        .unwrap();
+        assert!(
+            spdz_verify_seed256_boolean_goldilocks_with_quorum(
+                &sid,
+                t,
+                &[3, 3, 2],
+                &pts,
+                &mut mesh,
+                &shares,
+                &mut rngs
+            )
+            .is_err()
+        );
+        for row in &mut shares {
+            row[77] += Goldilocks::from_u64_reduced(2);
+        }
+        assert_eq!(
+            spdz_verify_seed256_boolean_goldilocks_with_quorum(
+                &sid,
+                t,
+                &[3, 0, 2],
+                &pts,
+                &mut mesh,
+                &shares,
+                &mut rngs
+            ),
+            Err(DkgError::NonBooleanSeedDetected)
+        );
+    }
+
     fn check_goldilocks_dkg(old_t: usize, old_n: usize, new_t: usize, new_n: usize) {
         let sid = [0x44; 32];
         // Both default and soak profiles retain dishonest-majority thresholds.
