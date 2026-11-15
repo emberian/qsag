@@ -21,8 +21,8 @@ use alloc::{vec, vec::Vec};
 
 pub const FOLD_COLUMNS: usize = 64;
 pub const FOLD_RESIDUALS: usize = 55;
-/// Deliberately bounded experimental component (64 * 4096 = 2^18 cells).
-pub const MAX_FOLD_ROWS: usize = 4096;
+/// Maximum rows in one `DuetFoldProof` (`64 * MAX_FOLD_ROWS <= 2^MAX_PCS_NUM_VARS` cells).
+pub const MAX_FOLD_ROWS: usize = 1usize << (crate::pcs::MAX_PCS_NUM_VARS - 6);
 
 /// Inputs must be authenticated by a surrounding verifier. This type is not evidence.
 /// In particular, inverse/domain consistency of `inv_two`, `inv_two_x`, and `x_sq`
@@ -185,10 +185,11 @@ fn absorb(t: &mut FiatShamirTranscript<InstanceBound>, label: &[u8], xs: &[E]) {
 }
 fn fold<const N: usize>(table: &mut Vec<[E; N]>, r: E) {
     let h = table.len() / 2;
-    for i in 0..h {
-        for j in 0..N {
-            let d = table[i + h][j] - table[i][j];
-            table[i][j] += r * d;
+    let (lo, hi) = table.split_at_mut(h);
+    for (dst, src) in lo.iter_mut().zip(&hi[..h]) {
+        for (d_val, &s_val) in dst.iter_mut().zip(src.iter()) {
+            let d = s_val - *d_val;
+            *d_val += r * d;
         }
     }
     table.truncate(h);
@@ -330,14 +331,16 @@ pub fn verify_duet_folds(
 }
 
 #[cfg(all(test, feature = "std"))]
-std::thread_local! { static CAPTURE: core::cell::RefCell<Option<Vec<DuetFoldStatement>>> = const { core::cell::RefCell::new(None) }; }
+static CAPTURE_SESSION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[cfg(all(test, feature = "std"))]
+static CAPTURE: std::sync::Mutex<Option<Vec<DuetFoldStatement>>> = std::sync::Mutex::new(None);
 #[cfg(all(test, feature = "std"))]
 pub(crate) fn capture_gate(s: &DuetFoldStatement) {
-    CAPTURE.with(|c| {
-        if let Some(rows) = c.borrow_mut().as_mut() {
-            rows.push(s.clone());
-        }
-    });
+    if let Ok(mut guard) = CAPTURE.lock()
+        && let Some(rows) = guard.as_mut()
+    {
+        rows.push(s.clone());
+    }
 }
 
 #[cfg(test)]
@@ -447,9 +450,18 @@ mod tests {
         let mode = SigningMode::SharedMessage(msg);
         let child =
             aggregate_signatures(&[key.pk], &bitmap, &mode, &[signature], [92; 32]).unwrap();
-        CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
-        assert!(verify_aggregate(&[key.pk], &mode, &child));
-        let gates = CAPTURE.with(|c| c.borrow_mut().take().unwrap());
+        let gates = {
+            let _session = CAPTURE_SESSION_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *CAPTURE.lock().unwrap_or_else(|e| e.into_inner()) = Some(Vec::new());
+            assert!(verify_aggregate(&[key.pk], &mode, &child));
+            CAPTURE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+                .unwrap()
+        };
         assert!(!gates.is_empty());
         assert!(gates.len() <= MAX_FOLD_ROWS);
         let context = crate::sponge::cshake256_32(b"QSAG.TEST.CHILD", &child.to_bytes());

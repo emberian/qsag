@@ -210,16 +210,7 @@ pub fn vulkan_execution_counts() -> Option<(u64, u64, u64)> {
 }
 
 fn lightweight_words_commitment(domain: &[u8], words: &[u64]) -> [u8; 32] {
-    let n = words.len();
-    let mut frame = [0u8; 40];
-    frame[0..8].copy_from_slice(&(n as u64).to_le_bytes());
-    if n > 0 {
-        frame[8..16].copy_from_slice(&words[0].to_le_bytes());
-        frame[16..24].copy_from_slice(&words[n / 3].to_le_bytes());
-        frame[24..32].copy_from_slice(&words[(2 * n) / 3].to_le_bytes());
-        frame[32..40].copy_from_slice(&words[n - 1].to_le_bytes());
-    }
-    crate::sponge::cshake256_32(domain, &frame)
+    digest_words_with_domain(domain, words)
 }
 
 /// Transactional adapter: never publish a partial GPU result after a driver/receipt failure.
@@ -281,8 +272,7 @@ pub(crate) fn ntt(values: &mut [Goldilocks]) -> bool {
 
 /// Fixed-size leaves and an ordered, length-bound root; distinct from the accelerator's
 /// sequential NTT digest domains. Four independent leaf sponges use the existing SIMD kernel.
-#[cfg(test)]
-fn digest_words(words: &[u64]) -> [u8; 32] {
+fn digest_words_with_domain(root_domain: &[u8], words: &[u64]) -> [u8; 32] {
     use crate::sponge::{cshake256_32, cshake256_from_midstate_32_x4, cshake256_static_midstate};
     const WORDS: usize = 4096;
     const MID: [u64; 25] = cshake256_static_midstate(b"QSAG.HEM.NTT.WORDS.LEAF/v1");
@@ -320,7 +310,12 @@ fn digest_words(words: &[u64]) -> [u8; 32] {
     for part in hashes {
         frame.extend_from_slice(&part);
     }
-    cshake256_32(b"QSAG.HEM.NTT.WORDS.ROOT/v1", &frame)
+    cshake256_32(root_domain, &frame)
+}
+
+#[cfg(test)]
+fn digest_words(words: &[u64]) -> [u8; 32] {
+    digest_words_with_domain(b"QSAG.HEM.NTT.WORDS.ROOT/v1", words)
 }
 
 pub(crate) fn encode(coeffs: &[Goldilocks], domain_len: usize) -> Option<Vec<Goldilocks>> {
