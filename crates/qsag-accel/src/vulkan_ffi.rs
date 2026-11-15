@@ -883,6 +883,7 @@ struct GpuBuffer {
     buffer: VkBuffer,
     memory: VkDeviceMemory,
     capacity: u64,
+    used: u64,
     mapped: *mut u8,
 }
 
@@ -892,6 +893,7 @@ impl Default for GpuBuffer {
             buffer: 0,
             memory: 0,
             capacity: 0,
+            used: 0,
             mapped: null_mut(),
         }
     }
@@ -2660,6 +2662,7 @@ impl RawVulkanEngine {
             buffer,
             memory,
             capacity: cap,
+            used: 0,
             mapped,
         })
     }
@@ -3066,21 +3069,38 @@ impl RawVulkanEngine {
             if self.cmd_buf.is_null() || !self.prover.initialized {
                 return Ok(());
             }
+            let span = |b: &GpuBuffer| (b.buffer, b.used.min(b.capacity) & !7);
+            let ranges = [
+                span(&self.prover.vram_witness),
+                span(&self.prover.vram_mono),
+                span(&self.prover.vram_cw0),
+                span(&self.prover.vram_tree0),
+                span(&self.prover.vram_work_a),
+                span(&self.prover.vram_work_b),
+                span(&self.prover.vram_cw_stage),
+                span(&self.prover.vram_tree_stage),
+                span(&self.prover.vram_aux_in),
+                span(&self.prover.vram_aux_b),
+                span(&self.prover.vram_partials),
+            ];
+            if ranges.iter().all(|&(_, bytes)| bytes == 0) {
+                return Ok(());
+            }
             self.begin_cmd()?;
-            self.cmd_scrub_vram(&[
-                (self.prover.vram_witness.buffer, self.prover.vram_witness.capacity),
-                (self.prover.vram_mono.buffer, self.prover.vram_mono.capacity),
-                (self.prover.vram_cw0.buffer, self.prover.vram_cw0.capacity),
-                (self.prover.vram_tree0.buffer, self.prover.vram_tree0.capacity),
-                (self.prover.vram_work_a.buffer, self.prover.vram_work_a.capacity),
-                (self.prover.vram_work_b.buffer, self.prover.vram_work_b.capacity),
-                (self.prover.vram_cw_stage.buffer, self.prover.vram_cw_stage.capacity),
-                (self.prover.vram_tree_stage.buffer, self.prover.vram_tree_stage.capacity),
-                (self.prover.vram_aux_in.buffer, self.prover.vram_aux_in.capacity),
-                (self.prover.vram_aux_b.buffer, self.prover.vram_aux_b.capacity),
-                (self.prover.vram_partials.buffer, self.prover.vram_partials.capacity),
-            ]);
-            self.submit_and_wait()
+            self.cmd_scrub_vram(&ranges);
+            self.submit_and_wait()?;
+            self.prover.vram_witness.used = 0;
+            self.prover.vram_mono.used = 0;
+            self.prover.vram_cw0.used = 0;
+            self.prover.vram_tree0.used = 0;
+            self.prover.vram_work_a.used = 0;
+            self.prover.vram_work_b.used = 0;
+            self.prover.vram_cw_stage.used = 0;
+            self.prover.vram_tree_stage.used = 0;
+            self.prover.vram_aux_in.used = 0;
+            self.prover.vram_aux_b.used = 0;
+            self.prover.vram_partials.used = 0;
+            Ok(())
         }
     }
 
@@ -4517,19 +4537,24 @@ impl RawVulkanEngine {
                 buffer: cur.buffer,
                 memory: cur.memory,
                 capacity: cur.capacity,
+                used: cur.used,
                 mapped: cur.mapped,
             }
         };
-        if let Some(tgt) = self.plan_vram_growth(&cur_snap, req)? {
+        let grew = if let Some(tgt) = self.plan_vram_growth(&cur_snap, req)? {
             let new_buf = unsafe { self.alloc_gpu_buffer(tgt, false)? };
             let mut old = core::mem::replace(slot_offset(&mut self.prover), new_buf);
             unsafe {
                 self.destroy_gpu_buffer(&mut old);
             }
-            Ok(true)
+            true
         } else {
-            Ok(false)
-        }
+            false
+        };
+        let slot = slot_offset(&mut self.prover);
+        let aligned_req = req.saturating_add(7) & !7;
+        slot.used = slot.used.max(aligned_req).min(slot.capacity);
+        Ok(grew)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5114,7 +5139,38 @@ impl RawVulkanEngine {
                             aux5: 0,
                         },
                     );
-                    for stage in 10..=(num_vars as u32) {
+                    let mut stage = 10u32;
+                    let top_stage = num_vars as u32;
+                    while stage + 2 <= top_stage && stage + 2 <= 24 {
+                        self.cmd_barrier(
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            VK_ACCESS_SHADER_WRITE_BIT,
+                            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                        );
+                        self.dispatch_whir_lde_1d(
+                            kp.pipeline_layout,
+                            (c_len >> 9) as u32,
+                            batch_c,
+                            1,
+                            WhirLdePushConsts {
+                                scalar0: 0,
+                                scalar1: 0,
+                                scalar2: 0,
+                                scalar3: 0,
+                                mode: 15,
+                                len: c_len as u32,
+                                aux0: stage,
+                                aux1: 0,
+                                aux2: 0,
+                                aux3: 0,
+                                aux4: batch_c,
+                                aux5: 0,
+                            },
+                        );
+                        stage += 3;
+                    }
+                    while stage <= top_stage {
                         let w_hi = if stage > 24 {
                             goldilocks_primitive_root(stage).map_err(VulkanError::Accel)?
                         } else {
@@ -5146,6 +5202,7 @@ impl RawVulkanEngine {
                                 aux5: 0,
                             },
                         );
+                        stage += 1;
                     }
                     self.cmd_barrier(
                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -6535,7 +6592,37 @@ impl RawVulkanEngine {
                         aux5: 0,
                     },
                 );
-                for stage in 10..=log_d {
+                let mut stage = 10u32;
+                while stage + 2 <= log_d && stage + 2 <= 24 {
+                    engine.cmd_barrier(
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                    );
+                    engine.dispatch_whir_lde_1d(
+                        kp.pipeline_layout,
+                        (domain_len >> 9) as u32,
+                        1,
+                        1,
+                        WhirLdePushConsts {
+                            scalar0: 0,
+                            scalar1: 0,
+                            scalar2: 0,
+                            scalar3: 0,
+                            mode: 16,
+                            len: domain_len as u32,
+                            aux0: stage,
+                            aux1: 0,
+                            aux2: cw_base,
+                            aux3: 0,
+                            aux4: 0,
+                            aux5: 0,
+                        },
+                    );
+                    stage += 3;
+                }
+                while stage <= log_d {
                     let w_hi = if stage > 24 {
                         goldilocks_primitive_root(stage).map_err(VulkanError::Accel)?
                     } else {
@@ -6567,6 +6654,7 @@ impl RawVulkanEngine {
                             aux5: 0,
                         },
                     );
+                    stage += 1;
                 }
 
                 // 3. Canopy `Ext4` leaf hashing + internal Merkle layers.
@@ -7557,26 +7645,54 @@ impl RawVulkanEngine {
         col_src_ext4: u32,
         out_cols: &mut [[u64; 4]],
     ) -> Result<(), VulkanError> {
+        self.exec_prover_air_read_tail(col_src_ext4, 0, out_cols, &mut [])
+    }
+
+    pub(crate) fn exec_prover_air_read_tail(
+        &mut self,
+        col_src_ext4: u32,
+        sh_src_ext4: u32,
+        out_cols: &mut [[u64; 4]],
+        out_shifts: &mut [[u64; 4]],
+    ) -> Result<(), VulkanError> {
         self.run_prover_job(|engine| {
-            let bytes = (out_cols.len() as u64) * 32;
-            if bytes == 0 {
+            let col_bytes = (out_cols.len() as u64) * 32;
+            let sh_bytes = (out_shifts.len() as u64) * 32;
+            let total_bytes = col_bytes + sh_bytes;
+            if total_bytes == 0 {
                 return Ok(());
             }
             unsafe {
-                engine.reserve_job_staging(bytes)?;
+                engine.reserve_job_staging(total_bytes)?;
                 engine.begin_cmd()?;
-                let cp = VkBufferCopy {
-                    src_offset: (col_src_ext4 as u64) * 32,
-                    dst_offset: 0,
-                    size: bytes,
-                };
-                (engine.fns.cmd_copy_buffer)(
-                    engine.cmd_buf,
-                    engine.prover.vram_work_a.buffer,
-                    engine.staging.buffer,
-                    1,
-                    &cp,
-                );
+                if col_bytes > 0 {
+                    let cp = VkBufferCopy {
+                        src_offset: (col_src_ext4 as u64) * 32,
+                        dst_offset: 0,
+                        size: col_bytes,
+                    };
+                    (engine.fns.cmd_copy_buffer)(
+                        engine.cmd_buf,
+                        engine.prover.vram_work_a.buffer,
+                        engine.staging.buffer,
+                        1,
+                        &cp,
+                    );
+                }
+                if sh_bytes > 0 {
+                    let cs = VkBufferCopy {
+                        src_offset: (sh_src_ext4 as u64) * 32,
+                        dst_offset: col_bytes,
+                        size: sh_bytes,
+                    };
+                    (engine.fns.cmd_copy_buffer)(
+                        engine.cmd_buf,
+                        engine.prover.vram_aux_b.buffer,
+                        engine.staging.buffer,
+                        1,
+                        &cs,
+                    );
+                }
                 engine.cmd_barrier(
                     VK_PIPELINE_STAGE_TRANSFER_BIT,
                     VK_PIPELINE_STAGE_HOST_BIT,
@@ -7584,11 +7700,20 @@ impl RawVulkanEngine {
                     VK_ACCESS_HOST_READ_BIT,
                 );
                 engine.submit_and_wait()?;
-                let flat = core::slice::from_raw_parts_mut(
-                    out_cols.as_mut_ptr().cast::<u64>(),
-                    out_cols.len() * 4,
-                );
-                engine.read_staging_u64s(0, flat);
+                if col_bytes > 0 {
+                    let flat = core::slice::from_raw_parts_mut(
+                        out_cols.as_mut_ptr().cast::<u64>(),
+                        out_cols.len() * 4,
+                    );
+                    engine.read_staging_u64s(0, flat);
+                }
+                if sh_bytes > 0 {
+                    let flat_sh = core::slice::from_raw_parts_mut(
+                        out_shifts.as_mut_ptr().cast::<u64>(),
+                        out_shifts.len() * 4,
+                    );
+                    engine.read_staging_u64s(col_bytes as usize, flat_sh);
+                }
                 Ok(())
             }
         })

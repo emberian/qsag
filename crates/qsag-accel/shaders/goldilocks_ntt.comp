@@ -36,6 +36,7 @@ const uint64_t GL_EPS = 0xFFFFFFFFul;
 // RADV/ACO fuses the two planes of a limb pair into `ds_read2st64_b32`/`ds_write2st64_b32`
 // (second offset 512 words), so one instruction touches each of those words twice over.
 shared uint s_lds[2][512];
+shared uint s_tw[2][256];
 uint lds_index(uint i) { return i ^ (((i >> 5u) & 1u) * 31u); }
 uint64_t lds_load(uint i) {
     uint a = lds_index(i);
@@ -45,6 +46,15 @@ void lds_store(uint i, uint64_t v) {
     uint a = lds_index(i);
     s_lds[0][a] = uint(v);
     s_lds[1][a] = uint(v >> 32u);
+}
+uint64_t tw_load(uint i) {
+    uint a = lds_index(i);
+    return uint64_t(s_tw[0][a]) | (uint64_t(s_tw[1][a]) << 32u);
+}
+void tw_store(uint i, uint64_t v) {
+    uint a = lds_index(i);
+    s_tw[0][a] = uint(v);
+    s_tw[1][a] = uint(v >> 32u);
 }
 
 uint64_t fp_reduce_u64(uint64_t x) {
@@ -141,20 +151,15 @@ void main() {
         uint base = wg * 512u;
         lds_store(lid, buf.words[base + lid]);
         lds_store(lid + 256u, buf.words[base + lid + 256u]);
+        tw_store(lid, fp_pow_u32(pc.w_step, lid));
         barrier();
-
-        uint64_t w_roots[10];
-        w_roots[9] = pc.w_step;
-        for (int s = 8; s >= 1; --s) {
-            w_roots[s] = fp_sq(w_roots[s + 1]);
-        }
 
         for (uint s = 1u; s <= 9u; ++s) {
             uint half_len = 1u << (s - 1u);
             uint j    = lid & (half_len - 1u);
             uint idx0 = ((lid >> (s - 1u)) << s) + j;
             uint idx1 = idx0 + half_len;
-            uint64_t w = fp_pow_u32(w_roots[s], j);
+            uint64_t w = tw_load(j << (9u - s));
             uint64_t u = lds_load(idx0);
             uint64_t v = fp_mul(lds_load(idx1), w);
             lds_store(idx0, fp_add(u, v));
@@ -174,9 +179,14 @@ void main() {
         uint half_len = 1u << (s - 1u);
 
         if (half_len >= 256u) {
-            if (lid == 0u) {
+            if (lid < 16u) {
+                tw_store(lid, fp_pow_u32(pc.w_step, lid));
+            } else if (lid < 32u) {
+                uint hi = lid - 16u;
+                tw_store(16u + hi, fp_pow_u32(pc.w_step, hi << 4u));
+            } else if (lid == 32u) {
                 uint j_base = (wg * 256u) & (half_len - 1u);
-                lds_store(0, fp_pow_u32(pc.w_step, j_base));
+                lds_store(0u, fp_pow_u32(pc.w_step, j_base));
             }
             barrier();
             if (gid < half_n) {
@@ -184,7 +194,8 @@ void main() {
                 uint j     = gid & (half_len - 1u);
                 uint idx0  = (block << s) + j;
                 uint idx1  = idx0 + half_len;
-                uint64_t w = fp_mul(lds_load(0), fp_pow_u32(pc.w_step, lid));
+                uint64_t w_lid = fp_mul(tw_load(lid & 15u), tw_load(16u + (lid >> 4u)));
+                uint64_t w = fp_mul(lds_load(0u), w_lid);
                 uint64_t u = buf.words[idx0];
                 uint64_t v = fp_mul(buf.words[idx1], w);
                 buf.words[idx0] = fp_add(u, v);

@@ -1038,7 +1038,7 @@ theorem decodeInstRaw_encode (i : SpirvInst) :
     decodeInstRaw (encodeInstRaw i) = .ok i := by
   cases i with
   | opVariable ty res sc init =>
-    cases init <;> simp [encodeInstRaw, decodeInstRaw, SpirvStorageClass.ofWord?_toWord]
+    cases sc <;> cases init <;> rfl
   | _ => rfl
 
 def encodeParamRaw (p : UInt32 × UInt32) : RawSpirvInst := ⟨55, [p.1, p.2]⟩
@@ -3946,7 +3946,7 @@ theorem tooth_swapped_spirv_or_xor_corrupts_word_and_alu :
     evalLanePureInst twoWaveReductionEnv sampleMem sampleRegs (.opBitwiseXor 8 2 3 4) = .ok (2, .vU32 2) ∧
     evalLanePureInst twoWaveReductionEnv sampleMem sampleRegs (.opBitwiseOr 8 2 3 4) ≠
       evalLanePureInst twoWaveReductionEnv sampleMem sampleRegs (.opBitwiseXor 8 2 3 4) := by
-  refine ⟨by decide, by decide, rfl, rfl, by decide⟩
+  refine ⟨nofun, nofun, rfl, rfl, nofun⟩
 
 #tooth_pair spirv_normative_bitwise_and_comparison_decode vs tooth_swapped_spirv_or_xor_corrupts_word_and_alu
 
