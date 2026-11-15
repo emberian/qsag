@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.BinaryTower — Wiedemann Binary Tower $\mathcal{T}_0 \subset \cdots \subset \mathcal{T}_8$
+# Qsag.Math.BinaryTower — Wiedemann Binary Tower $\mathcal{T}_0 \subset \cdots \subset \mathcal{T}_8$
 
 Self-contained Lean 4.35 binary tower field hierarchy (`Init` + `Qsag.Goldilocks` + `Qsag.Keccak`):
 1. Wiedemann recursive quadratic tower $\mathcal{T}_0 = \mathbb{F}_2$,
@@ -15,8 +15,8 @@ Self-contained Lean 4.35 binary tower field hierarchy (`Init` + `Qsag.Goldilocks
    (`ghashDiff_roots_bound`, `packTowerLenBlock_injective`).
 -/
 
-public import Qsag.Goldilocks
-public import Qsag.Keccak
+public import Qsag.Math.Goldilocks
+public import Qsag.Oracle.Keccak
 
 public section
 namespace Qsag

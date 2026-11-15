@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.Tower128PolyBasisIso — `psiTower128ToPoly` is a field isomorphism onto Rust's GF(2^128)
+# Qsag.Math.Tower128PolyBasisIso — `psiTower128ToPoly` is a field isomorphism onto Rust's GF(2^128)
 
 `ParallelSeededSpnSecurity` proves its S-box, branch-number and active-box results over the
 Wiedemann tower `Tower128`, while `crates/qsag-fts/src/parallel_mpc.rs` computes with
@@ -24,10 +24,10 @@ Scope: this relates Lean models. The Rust loop model is a transcription; no MIR 
 refinement of `gf2_128_mul` is claimed here.
 -/
 
-public import Qsag.ParallelSeededSpnSecurity
-import all Qsag.ParallelSeededSpnSecurity
-public import Qsag.ActiveMigrationZeroTest
-import all Qsag.ActiveMigrationZeroTest
+public import Qsag.Oracle.ParallelSeededSpnSecurity
+import all Qsag.Oracle.ParallelSeededSpnSecurity
+public import Qsag.Protocol.Migration.ActiveMigrationZeroTest
+import all Qsag.Protocol.Migration.ActiveMigrationZeroTest
 
 public section
 namespace Qsag
