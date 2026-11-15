@@ -16,10 +16,14 @@ import all Qsag.Spec.Parameters
 import all Qsag.Spec.Primitives
 import all Qsag.Spec.Refines
 import all Qsag.Math.Algebra
+import all Qsag.Math.CoeffPoly
+import all Qsag.Math.Counting
 import all Qsag.Math.EllipticCurves
 import all Qsag.Math.Gf2Pow128
 import all Qsag.Math.Goldilocks
+import all Qsag.Math.HasseHensel
 import all Qsag.Math.Lattices
+import all Qsag.Math.PolyRing
 import all Qsag.Math.Primality
 import all Qsag.Math.QuarticExt4
 import all Qsag.Math.Tactic.CommRing
@@ -252,10 +256,14 @@ run_cmd do
     `Qsag.Spec.Primitives,
     `Qsag.Spec.Refines,
     `Qsag.Math.Algebra,
+    `Qsag.Math.CoeffPoly,
+    `Qsag.Math.Counting,
     `Qsag.Math.EllipticCurves,
     `Qsag.Math.Gf2Pow128,
     `Qsag.Math.Goldilocks,
+    `Qsag.Math.HasseHensel,
     `Qsag.Math.Lattices,
+    `Qsag.Math.PolyRing,
     `Qsag.Math.Primality,
     `Qsag.Math.QuarticExt4,
     `Qsag.Coding.AffineProximity,

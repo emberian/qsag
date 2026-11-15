@@ -33,10 +33,14 @@ public import Qsag.Spec.Refines
 
 -- Qsag/Math
 public import Qsag.Math.Algebra
+public import Qsag.Math.CoeffPoly
+public import Qsag.Math.Counting
 public import Qsag.Math.EllipticCurves
 public import Qsag.Math.Gf2Pow128
 public import Qsag.Math.Goldilocks
+public import Qsag.Math.HasseHensel
 public import Qsag.Math.Lattices
+public import Qsag.Math.PolyRing
 public import Qsag.Math.Primality
 public import Qsag.Math.QuarticExt4
 
