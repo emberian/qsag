@@ -6,13 +6,18 @@ public import Qsag.Machine.Gf128ClmulLoopAgreement
 Top-level composition module (zero `import all`) connecting:
 1. Standard-model tweakable-hash `EUF-CMA` collision extraction & target-budget accounting
    (`ProdCollisionEvents`, `ProdCollisionAccounting`, `ProdCollisionExtraction`) into `Spec.GameBound`
-   and `Spec.HashSigAssumptions`,
+   through `Spec.event_le_three_reductions`,
 2. Upper-hypertree cache observational equivalence (`SignatureOutputAndCacheLaws`) lifted into a
    constructive `Spec.Refines` (`waistbandCachedMachine ⊑ statelessSignMachine`) witness,
 3. `cSHAKE256` sponge domain separation (`SpongeFramingAndDomainSep`) and polynomial-basis SPN
    tweakable chain evaluation (`ParallelSeededSpnPolyBasis` + `Math.Gf2Pow128`), and
 4. Constant-time assembly / translation-validation / speculative-safety guarantees
-   (`ElfFunctionalEquiv`, `ConstantTimeIsa`, `SydTvTranslationValidation`, `FaultAndSpeculativeSafety`).
+   (`ElfFunctionalEquiv`, `ConstantTimeIsa`, `SydTvTranslationValidation`, `FaultAndSpeculativeSafety`),
+5. The production signer and verifier as a `Spec.SigScheme` (`productionSigScheme`) and the
+   refinement of the epoch-latched production signer into `Spec.idealSignMachine`
+   (`productionLatchedSigner_refines_idealSign`): every emitted signature is accepted by
+   `verifyProductionPqHashSig` under the derived public key, epochs are strictly increasing in
+   stateful mode, and a failed signing consumes its epoch.
 -/
 
 public import Qsag.Spec.Primitives
@@ -25,6 +30,7 @@ public import Qsag.Protocol.Signing.ProdCollisionEvents
 public import Qsag.Protocol.Signing.ProdCollisionAccounting
 public import Qsag.Protocol.Signing.ProdCollisionExtraction
 public import Qsag.Protocol.Signing.ProdAdaptiveTcrReduction
+public import Qsag.Protocol.Signing.ExecEufCmaClosedGame
 public import Qsag.Protocol.Signing.FrontierCompact1122AndCorduroySecurity
 public import Qsag.Protocol.Credentials.AdvancedMpcAndCreds
 public import Qsag.Protocol.Threshold.BaggyAndRss256Security
@@ -52,8 +58,9 @@ set_option autoImplicit false
 
 /-- **End-to-End Production `EUF-CMA` Concrete `GameBound` (`production_euf_cma_gameBound`)**:
     Composes `ProdCollisionEvents.prodEufCmaWin_classified` and `ProdCollisionAccounting.prodTcrOutput_target_budget`
-    with `Spec.HashSigAssumptions.forger_bound` over any finite coin space `Fin n`:
-    1. Bounds `forgerGame.winProb ≤ A.totalBound` (`εItsr + εTcr + εPre`) in canonical `Spec.RatBound`, and
+    with `Spec.event_le_three_reductions` over any finite coin space `Fin n`:
+    1. Bounds `forgerGame.winProb ≤ εItsr + εTcr + εPre` in canonical `Spec.RatBound`, where the
+       three `ε` bound the probabilities of the three extractor events on the same run, and
     2. Certifies that whenever `prodTcrOutput` extracts a target-collision pair `(t, forged)` on tape `ω`,
        `t` belongs to the explicit `prodPathTargets` candidate set of size `≤ prodPathTargetCount` and
        passes `prodTcrCheck = true`! -/
@@ -87,13 +94,13 @@ theorem production_euf_cma_gameBound {n : Nat}
             (game ω).msgStar (game ω).sigStar)).length ≤
           Qsag.prodPathTargetCount params (game ω).queries.length)) := by
   intro forgerGame
-  let assumptions : Qsag.Spec.HashSigAssumptions n :=
-    { itsr := ⟨0, εItsr, Qsag.Spec.FinGame.mk hPos (fun ω => Qsag.prodItsrEvent suite params hw (game ω) (hOneTime ω)), hItsr⟩
-      tcr  := ⟨0, εTcr,  Qsag.Spec.FinGame.mk hPos (fun ω => Qsag.prodTcrEvent suite params hw (game ω) (hOneTime ω)), hTcr⟩
-      pre  := ⟨0, εPre,  Qsag.Spec.FinGame.mk hPos (fun ω => Qsag.prodPreEvent suite params hw (game ω) (hOneTime ω)), hPre⟩ }
-  have hBound : Qsag.Spec.GameBound forgerGame.winProb assumptions.totalBound :=
-    assumptions.forger_bound forgerGame
-    (fun ω hWin => Qsag.prodEufCmaWin_classified suite params hw (game ω) (hOneTime ω) hWin)
+  have hBound : Qsag.Spec.GameBound forgerGame.winProb ((εItsr.add εTcr).add εPre) :=
+    Qsag.Spec.event_le_three_reductions forgerGame
+      (Qsag.Spec.FinGame.mk hPos (fun ω => Qsag.prodItsrEvent suite params hw (game ω) (hOneTime ω)))
+      (Qsag.Spec.FinGame.mk hPos (fun ω => Qsag.prodTcrEvent suite params hw (game ω) (hOneTime ω)))
+      (Qsag.Spec.FinGame.mk hPos (fun ω => Qsag.prodPreEvent suite params hw (game ω) (hOneTime ω)))
+      (fun ω hWin => Qsag.prodEufCmaWin_classified suite params hw (game ω) (hOneTime ω) hWin)
+      hItsr hTcr hPre
   refine ⟨hBound, ?_⟩
   intro ω t forged hOut
   obtain ⟨_, hLenLe, hChk⟩ :=
@@ -306,8 +313,59 @@ theorem public_spn_qrom_differential_walsh_and_isa_cosim
           Qsag.walsh_trail_product_below_parseval_floor,
           IsaCosim.run_verified_code_is_strict fuel code x86St flags decodedProg hDec⟩⟩
 
+/-! ## 6. The Epoch-Latched Production Signer Refines `Spec.idealSignMachine` -/
+
+/-- The production hash-signature scheme as a `Spec.SigScheme`, at fixed signer randomness
+    `optRand` and grind limit `maxGrind`: key derivation `derivePublicKey`, signer
+    `prodSignQuery`, verifier `verifyProductionPqHashSig`. Correctness is
+    `prodSignQuery_verifies`. -/
+@[expose] def productionSigScheme
+    (suite : Qsag.TweakableHashSuite) (params : Qsag.PqHashParams)
+    (optRand : List UInt8) (maxGrind : Nat) :
+    Qsag.Spec.SigScheme Qsag.PqPublicKey Qsag.PqSecretKey Qsag.PqHashSig where
+  derivePk := Qsag.derivePublicKey suite params
+  sign sk ep msg := Qsag.prodSignQuery suite params sk ⟨msg, optRand, ep, maxGrind⟩
+  verify := Qsag.verifyProductionPqHashSig suite params
+  correct sk ep msg sig h :=
+    Qsag.prodSignQuery_verifies suite params sk ⟨msg, optRand, ep, maxGrind⟩ sig h
+
+/-- **The epoch-latched production signer refines the ideal signing machine.** The concrete
+    machine runs `prodSignQuery` behind the latch `nextEpoch ≤ epoch ≤ nextEpoch + maxWindow`
+    (all epochs when `stateful = false`) and moves the latch to `epoch + 1` on every admitted
+    request. The ideal machine emits a candidate only when `verifyProductionPqHashSig` accepts
+    it under `derivePublicKey suite params sk`. Accept/reject behaviour, outputs and epoch
+    consumption on failure agree. -/
+def productionLatchedSigner_refines_idealSign
+    (suite : Qsag.TweakableHashSuite) (params : Qsag.PqHashParams)
+    (optRand : List UInt8) (maxGrind : Nat) (sk : Qsag.PqSecretKey)
+    (stateful : Bool) (maxWindow : Nat) :
+    Qsag.Spec.latchedSignerMachine (productionSigScheme suite params optRand maxGrind) sk
+        stateful maxWindow ⊑
+      Qsag.Spec.idealSignMachine (productionSigScheme suite params optRand maxGrind)
+        ((productionSigScheme suite params optRand maxGrind).derivePk sk) stateful maxWindow
+        (fun req => (productionSigScheme suite params optRand maxGrind).sign sk req.epoch
+          req.message) :=
+  Qsag.Spec.latchedSigner_refines_ideal (productionSigScheme suite params optRand maxGrind) sk
+    stateful maxWindow
+
+/-- Every initialized trace of the stateful latched production signer consists of signatures
+    accepted by `verifyProductionPqHashSig` under the derived public key, at strictly increasing
+    epochs. -/
+theorem productionLatchedSigner_trace_safe
+    (suite : Qsag.TweakableHashSuite) (params : Qsag.PqHashParams)
+    (optRand : List UInt8) (maxGrind : Nat) (sk : Qsag.PqSecretKey) (maxWindow : Nat)
+    {tr : List (Qsag.Spec.SignRequest × Qsag.PqHashSig)}
+    (hAdmits : (Qsag.Spec.latchedSignerMachine (productionSigScheme suite params optRand maxGrind)
+      sk true maxWindow).AdmitsTrace tr) :
+    (∀ p ∈ tr, Qsag.verifyProductionPqHashSig suite params (Qsag.derivePublicKey suite params sk)
+      p.1.message p.2 = true) ∧
+    tr.Pairwise (fun a b => a.1.epoch < b.1.epoch) :=
+  Qsag.Spec.latchedSigner_trace_safe (productionSigScheme suite params optRand maxGrind) sk
+    maxWindow hAdmits
+
 #verify_constructive
   Qsag.Top.production_euf_cma_gameBound
+  Qsag.Top.productionLatchedSigner_trace_safe
   Qsag.Top.waistbandCache_preserves_multiturn_traces
   Qsag.Top.sponge_and_spn_poly_basis_composition
   Qsag.Top.isa_zeroize_and_ret_ct_composition

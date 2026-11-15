@@ -12,17 +12,24 @@ hypothesis. Here the experiment is closed:
   log entry); an admitted request moves the latch to `epoch + 1` whether or not signing succeeds.
 * `evalLatchedAdaptiveTree_oneTime`: the log of the latched oracle has strictly increasing
   epochs, hence is one-time. This is the fact `prodEufCmaWin_classified` needs.
+* `prodSignQuery_verifies`: a signature returned by `prodSignQuery` is accepted by
+  `verifyProductionPqHashSig` under the derived public key.
 * `ExecEufCmaGame`: the `FinGame n` whose sample point selects the key (`keygen ω`) and the
   adversary (`adv ω`), and whose win predicate is `prodEufCmaWin`: the executable verifier
   `verifyProductionPqHashSig` accepts and the message was not answered by the signer.
 * `execEufCmaItsrReduction`, `execEufCmaTcrReduction`, `execEufCmaPreReduction`: the reduction
   games, whose win predicates are the extractor-defined events on the same run.
 * `jorts_baggy_closed_euf_cma`: `Pr[ExecEufCmaGame] ≤ Pr[R_itsr] + (Pr[R_tcr] + Pr[R_pre])`.
-* `jorts_baggy_closed_euf_cma_assumption_bound`: with `HashSigAssumptions` whose games are those
-  reductions, the bound is `εItsr + εTcr + εPre`.
+* `ExecEufCmaReductionEmbedding`: the obligation that links the three extractor events to the
+  `ITSR`, `SM-DT-TCR` and `SM-DT-PRE` experiments of a `Spec.HashSigAssumptions` bundle: every
+  coin on which an extractor event fires is a winning coin of the corresponding experiment.
+  It is a hypothesis; no instance is constructed in this module.
+* `jorts_baggy_closed_euf_cma_assumption_bound`: under such an embedding the experiment is
+  bounded by `εItsr + εTcr + εPre`.
 * `jorts_baggy_closed_euf_cma_keygen_hop`: a key-generation game hop. With a
-  `KeyedPrfAssumption` whose real and ideal games are the experiment under two key generators,
-  the real experiment is bounded by the three reductions of the ideal one plus `εPrf`.
+  `KeyedPrfAssumption` whose real and ideal PRF games have the win predicates of the experiment
+  under two key generators, the real experiment is bounded by the three reductions of the ideal
+  one plus `εPrf`.
 
 The hop replaces the key generator only. The signer's internal use of `skPrf` and `skSeed` is not
 idealised: `prodSignQuery` has no oracle-parameterised variant to hop to. The three reduction
@@ -153,6 +160,22 @@ theorem evalLatchedAdaptiveTree_log_length {α : Type} (latchOn : Bool)
       exact Nat.le_trans
         (evalLatchedAdaptiveTree_log_length latchOn rawHash sign (next none) lo (h none))
         (Nat.le_succ _)
+
+/-- A signature returned by the production signer is accepted by the production verifier under
+    the derived public key. -/
+theorem prodSignQuery_verifies (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (q : ProdSigningQuery) (sig : PqHashSig)
+    (h : prodSignQuery suite params sk q = some sig) :
+    verifyProductionPqHashSig suite params (derivePublicKey suite params sk) q.message sig =
+      true := by
+  unfold prodSignQuery at h
+  cases hSt : params.statefulJorts
+  · rw [hSt] at h
+    simp only [Bool.false_eq_true, ↓reduceIte] at h
+    exact verifyProductionPqHashSig_evalProductionStatelessSign suite params sk _ _ _ sig h
+  · rw [hSt] at h
+    simp only [↓reduceIte] at h
+    exact verifyProductionPqHashSig_evalProductionStatefulSign suite params sk _ _ _ _ sig h
 
 /-! ## §2. The closed experiment and its reduction games -/
 
@@ -285,7 +308,27 @@ theorem jorts_baggy_closed_euf_cma {n qHash qSign : Nat} (hPos : 0 < n)
       · exact .inl rfl)
   exact Spec.RatBound.le_trans h1 (Spec.RatBound.add_le_add (Spec.RatBound.le_refl _) h2)
 
-/-- With assumption locales whose games are the three reductions, the experiment is bounded by
+/-- **Reduction embedding (open obligation).** The three extractor events of the closed
+    experiment are realised inside the experiments of the bundle `A`: on every coin where the
+    extractor returns a subset cover, an on-path target collision or a chain preimage, the
+    adversary of the corresponding `Spec` experiment (`A.itsr.adv`, `A.tcr.adv`, `A.pre.adv`,
+    against `A.itsr.hmsg`, `A.tcr.th`, `A.pre.th` with the samplers of `A`) wins. Providing it
+    means exhibiting those three adversaries as simulations of the forger `adv` against the
+    primitives of `suite`. -/
+structure ExecEufCmaReductionEmbedding {n qHash qSign : Nat} (hPos : 0 < n)
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16)
+    (keygen : Fin n → PqSecretKey)
+    (adv : Fin n → SeedWithheldEufCmaAdv qHash qSign)
+    (A : Spec.HashSigAssumptions n) : Prop where
+  itsr : ∀ ω : Fin n, (execEufCmaItsrReduction hPos suite params hw keygen adv).win ω = true →
+    A.itsr.itsrGame.win ω = true
+  tcr : ∀ ω : Fin n, (execEufCmaTcrReduction hPos suite params hw keygen adv).win ω = true →
+    A.tcr.tcrGame.win ω = true
+  pre : ∀ ω : Fin n, (execEufCmaPreReduction hPos suite params hw keygen adv).win ω = true →
+    A.pre.preGame.win ω = true
+
+/-- Under a reduction embedding into the bundle `A`, the experiment is bounded by
     `εItsr + εTcr + εPre`. -/
 theorem jorts_baggy_closed_euf_cma_assumption_bound {n qHash qSign : Nat} (hPos : 0 < n)
     (suite : TweakableHashSuite) (params : PqHashParams)
@@ -293,13 +336,13 @@ theorem jorts_baggy_closed_euf_cma_assumption_bound {n qHash qSign : Nat} (hPos 
     (keygen : Fin n → PqSecretKey)
     (adv : Fin n → SeedWithheldEufCmaAdv qHash qSign)
     (A : Spec.HashSigAssumptions n)
-    (hItsr : A.itsr.itsrGame = execEufCmaItsrReduction hPos suite params hw keygen adv)
-    (hTcr : A.tcr.tcrGame = execEufCmaTcrReduction hPos suite params hw keygen adv)
-    (hPre : A.pre.preGame = execEufCmaPreReduction hPos suite params hw keygen adv) :
+    (hEmbed : ExecEufCmaReductionEmbedding hPos suite params hw keygen adv A) :
     Spec.GameBound (ExecEufCmaGame hPos suite params keygen adv).winProb A.totalBound :=
   A.forger_bound (ExecEufCmaGame hPos suite params keygen adv) (fun ω hWin => by
-    rw [hItsr, hTcr, hPre]
-    exact execEufCma_win_classified hPos suite params hw keygen adv ω hWin)
+    rcases execEufCma_win_classified hPos suite params hw keygen adv ω hWin with h | h | h
+    · exact .inl (hEmbed.itsr ω h)
+    · exact .inr (.inl (hEmbed.tcr ω h))
+    · exact .inr (.inr (hEmbed.pre ω h)))
 
 /-- A game's winning probability is at most another's plus their distinguishing advantage. -/
 theorem winProb_le_add_advDist {n : Nat} (G₁ G₀ : Spec.FinGame n) :
@@ -319,9 +362,11 @@ theorem winProb_le_add_advDist {n : Nat} (G₁ G₀ : Spec.FinGame n) :
   rw [← Nat.add_mul, Nat.mul_assoc]
   exact Nat.mul_le_mul_right _ h
 
-/-- **Key-generation hop.** If a `KeyedPrfAssumption` has the experiment under `keygenReal` as
-    its real game and under `keygenIdeal` as its ideal game, the real experiment is bounded by
-    the three reductions of the ideal experiment plus `εPrf`. -/
+/-- **Key-generation hop.** If the real PRF game of a `KeyedPrfAssumption` (its distinguisher
+    `P.adv` against `P.prf` under `P.key`) has the win predicate of the experiment under
+    `keygenReal`, and its ideal game (against the sampled function `P.rf`) that of the
+    experiment under `keygenIdeal`, the real experiment is bounded by the three reductions of
+    the ideal experiment plus `εPrf`. -/
 theorem jorts_baggy_closed_euf_cma_keygen_hop {n qHash qSign : Nat} (hPos : 0 < n)
     (suite : TweakableHashSuite) (params : PqHashParams)
     (hw : params.w = 4 ∨ params.w = 16)
@@ -338,7 +383,7 @@ theorem jorts_baggy_closed_euf_cma_keygen_hop {n qHash qSign : Nat} (hPos : 0 < 
       (Spec.AdvDist (ExecEufCmaGame hPos suite params keygenReal adv)
         (ExecEufCmaGame hPos suite params keygenIdeal adv)) P.εPrf := by
     rw [← hReal, ← hIdeal]
-    exact P.bound
+    exact P.advantage_bound
   exact Spec.RatBound.le_trans
     (winProb_le_add_advDist (ExecEufCmaGame hPos suite params keygenReal adv)
       (ExecEufCmaGame hPos suite params keygenIdeal adv))
@@ -349,6 +394,7 @@ theorem jorts_baggy_closed_euf_cma_keygen_hop {n qHash qSign : Nat} (hPos : 0 < 
   Qsag.evalLatchedAdaptiveTree_log_increasing
   Qsag.evalLatchedAdaptiveTree_oneTime
   Qsag.evalLatchedAdaptiveTree_log_length
+  Qsag.prodSignQuery_verifies
   Qsag.execEufCmaOutcome_oneTime
   Qsag.execEufCmaOutcome_queries_le
   Qsag.jorts_baggy_closed_euf_cma
