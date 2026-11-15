@@ -70,8 +70,48 @@ pub const DENSE_PCG_NUM_BOOL_TRIPLES: usize = DENSE_PCG_NUM_WORDS * 64;
 /// Number of full-field $\mathbb{F}_{2^{128}}$ (`Tower128`) VOLE companions per peer (`64`).
 pub const DENSE_PCG_NUM_VOLE128: usize = 64;
 
-/// Strict upper bound on canonical wire seed byte length for every party count (`36 KiB = 36,864` bytes).
+/// Canonical wire seed upper bound for a 2-party (`1`-peer) seed (`36 KiB = 36,864` bytes).
+/// For general `N`-party committees (`2 <= N <= 256`), use [`max_wire_seed_bytes`].
 pub const DENSE_PCG_MAX_SEED_BYTES: usize = 36 * 1024;
+
+/// Maximum party count accepted for canonical dense PCG wire seeds (`256`).
+pub const DENSE_PCG_MAX_PARTIES: usize = 256;
+
+/// Exact canonical wire byte length of a [`DensePcgPartySeed`] for `(num_parties, tree_depth)`,
+/// returning `None` if `num_parties` is outside `2..=DENSE_PCG_MAX_PARTIES` or exceeds `MAX_FRAME_BUDGET`.
+#[inline]
+pub const fn max_wire_seed_bytes(num_parties: usize, tree_depth: PcgTreeDepth) -> Option<usize> {
+    if num_parties < 2 || num_parties > DENSE_PCG_MAX_PARTIES {
+        return None;
+    }
+    let d = tree_depth.depth();
+    let peer_bytes = 2
+        + 32
+        + 2 * DENSE_PCG_NUM_TREES
+        + 32 * d * DENSE_PCG_NUM_TREES
+        + 16 * DENSE_PCG_NUM_TREES
+        + 32
+        + 16 * SPCOT_CHECK_REPS
+        + 32;
+    let c_fix_bytes = if num_parties == 2 {
+        0
+    } else {
+        DENSE_PCG_NUM_WORDS * 8
+    };
+    let Some(peers_total) = (num_parties - 1).checked_mul(peer_bytes) else {
+        return None;
+    };
+    let Some(total) = 64usize.checked_add(peers_total) else {
+        return None;
+    };
+    let Some(total) = total.checked_add(c_fix_bytes) else {
+        return None;
+    };
+    if total > crate::preprocessing::MAX_FRAME_BUDGET {
+        return None;
+    }
+    Some(total)
+}
 
 /// Version 3 uses 256-bit GGM nodes and two SPCOT mask MACs per peer.
 const DENSE_PCG_WIRE_MAGIC: &[u8; 8] = b"QSAGDPC3";
@@ -1797,7 +1837,10 @@ impl DensePcgPartySeed {
         {
             return Err(PreprocessError::PcgInvalidWireSeed);
         }
-        if bytes.len() > DENSE_PCG_MAX_SEED_BYTES {
+        let Some(expected_wire_bytes) = max_wire_seed_bytes(num_parties, tree_depth) else {
+            return Err(PreprocessError::PcgInvalidWireSeed);
+        };
+        if bytes.len() != expected_wire_bytes {
             return Err(PreprocessError::PcgInvalidWireSeed);
         }
 
@@ -3401,6 +3444,16 @@ mod tests {
         bytes[45] = 1;
         bytes[61..63].copy_from_slice(&2u16.to_le_bytes());
         assert!(DensePcgPartySeed::from_wire_bytes(&bytes).is_err());
+
+        let exact_3p = max_wire_seed_bytes(3, PcgTreeDepth::Depth14).unwrap();
+        let mut over_3p = vec![0u8; exact_3p + 1];
+        over_3p[..8].copy_from_slice(DENSE_PCG_WIRE_MAGIC);
+        over_3p[42..44].copy_from_slice(&3u16.to_le_bytes());
+        over_3p[44] = 14;
+        over_3p[45] = 1;
+        over_3p[61..63].copy_from_slice(&2u16.to_le_bytes());
+        assert!(DensePcgPartySeed::from_wire_bytes(&over_3p).is_err());
+        assert!(max_wire_seed_bytes(257, PcgTreeDepth::Depth14).is_none());
     }
 
     #[test]
@@ -3881,8 +3934,16 @@ mod tests {
             .map(|s| {
                 let bytes = s.to_wire_bytes();
                 assert!(bytes.len() > DENSE_PCG_MAX_SEED_BYTES);
-                assert!(DensePcgPartySeed::from_wire_bytes(&bytes).is_err());
-                s.expand_local(&mut burns).expect("3-party local expand")
+                assert_eq!(
+                    Some(bytes.len()),
+                    max_wire_seed_bytes(3, PcgTreeDepth::Depth14)
+                );
+                let mut oversized = bytes.clone();
+                oversized.push(0);
+                assert!(DensePcgPartySeed::from_wire_bytes(&oversized).is_err());
+                let decoded = DensePcgPartySeed::from_wire_bytes(&bytes)
+                    .expect("3-party wire seed round-trip");
+                decoded.expand_local(&mut burns).expect("3-party local expand")
             })
             .collect();
 

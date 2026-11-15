@@ -2131,6 +2131,9 @@ pub fn verify_goldilocks_seed_dealing(
 
 /// SPDZ-MAC-authenticated Booleanity (`b_m^2 - b_m == 0`) + global `0..n` degree-`< t` verification
 /// for 256 `Goldilocks` bit shares, including dishonest-majority committees.
+/// Selects a jointly coin-tossed `t`-party active interpolation quorum from `0..n` so no fixed
+/// `0..t` prefix is hardcoded; callers with an explicit active subset may invoke
+/// [`spdz_verify_seed256_boolean_goldilocks_with_quorum`].
 /// Each authenticated residual is checked for zero without probabilistic batching.
 /// Failure has no bit index; malicious-input abort transcripts are not claimed
 /// to be zero knowledge.
@@ -2153,16 +2156,68 @@ pub fn spdz_verify_seed256_boolean_goldilocks(
         return Err(DkgError::InvalidQuorum { t, n });
     }
     validate_all_eval_points_goldilocks(eval_points)?;
+    let quorum_coin =
+        run_commit_and_open_coin(session_id, b"GL_DKG_BOOL_QUORUM", session_id, party_rngs)?;
+    let mut active_quorum: Vec<usize> = (0..n).collect();
+    let mut perm_rng = PartyPrivateRng::from_seed(quorum_coin, b"GL_DKG_BOOL_QPERM");
+    for i in (1..n).rev() {
+        let j = (perm_rng.next_u64() as usize) % (i + 1);
+        active_quorum.swap(i, j);
+    }
+    active_quorum.truncate(t);
+    active_quorum.sort_unstable();
+    spdz_verify_seed256_boolean_goldilocks_with_quorum(
+        session_id,
+        t,
+        &active_quorum,
+        eval_points,
+        ot_mesh,
+        bit_shares_per_party,
+        party_rngs,
+    )
+}
 
-    let lambdas_0 = lagrange_weights_zero_goldilocks(&eval_points[..t])
+/// SPDZ-MAC-authenticated Booleanity (`b_m^2 - b_m == 0`) + global `0..n` degree-`< t` verification
+/// for 256 `Goldilocks` bit shares using the explicit `t`-custodian `active_quorum` evaluation points.
+pub fn spdz_verify_seed256_boolean_goldilocks_with_quorum(
+    session_id: &[u8; 32],
+    t: usize,
+    active_quorum: &[usize],
+    eval_points: &[Goldilocks],
+    ot_mesh: &mut OtMesh,
+    bit_shares_per_party: &[[Goldilocks; 256]],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<(), DkgError> {
+    let n = eval_points.len();
+    if t == 0
+        || t > n
+        || n < 2
+        || active_quorum.len() != t
+        || ot_mesh.n != n
+        || bit_shares_per_party.len() != n
+        || party_rngs.len() != n
+    {
+        return Err(DkgError::InvalidQuorum { t, n });
+    }
+    for (slot, &party) in active_quorum.iter().enumerate() {
+        if party >= n || active_quorum[..slot].contains(&party) {
+            return Err(DkgError::InvalidQuorum { t, n });
+        }
+    }
+    validate_all_eval_points_goldilocks(eval_points)?;
+
+    let quorum_eval_points: Vec<Goldilocks> =
+        active_quorum.iter().map(|&q| eval_points[q]).collect();
+    let lambdas_0 = lagrange_weights_zero_goldilocks(&quorum_eval_points)
         .ok_or(DkgError::InvalidEvaluationPoints)?;
 
-    // Convert `0..t` shares to additive shares `u_add[i][m]` (`0` for `i >= t`), compute `bsq = b^2`
-    // and MASCOT companion products `comp_w0, comp_w1` via LHL-amplified `pairwise_gilboa_ole_goldilocks` (`< 2^{-129}`)!
+    // Convert `active_quorum` shares to additive shares `u_add[i][m]` (`0` outside `active_quorum`),
+    // compute `bsq = b^2` and MASCOT companion products `comp_w0, comp_w1` via LHL-amplified
+    // `pairwise_gilboa_ole_goldilocks` (`< 2^{-129}`)!
     let mut u_add = SecretBuffer(vec![vec![Goldilocks::ZERO; 256]; n]);
-    for q in 0..t {
+    for (slot, &party) in active_quorum.iter().enumerate() {
         for m in 0..256 {
-            u_add[q][m] = lambdas_0[q] * bit_shares_per_party[q][m];
+            u_add[party][m] = lambdas_0[slot] * bit_shares_per_party[party][m];
         }
     }
     let bsq_add = SecretBuffer(pairwise_gilboa_ole_goldilocks(
