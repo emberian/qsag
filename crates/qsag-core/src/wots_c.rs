@@ -28,8 +28,8 @@ use crate::rss256::{
 };
 use crate::sponge::keccak::SHAKE256_RATE_BYTES;
 use crate::tsw_baggy::{
-    AdrsKind, Cshake256Suite, HashAdrs, PqSecretKey, TAG_PRF, TAG_TH_F, th_node_h, th_tweak_tl,
-    wots_chain_steps, wots_secret_base,
+    AdrsKind, Cshake256Suite, HashAdrs, PqSecretKey, TAG_PRF, TAG_TH_F, merkle_levels_in,
+    th_tweak_tl, wots_chain_steps, wots_secret_base,
 };
 
 /// Winternitz parameter.
@@ -265,10 +265,7 @@ pub fn wots_c_reference_leaf(
     wots_c_leaf(&sk.pk_seed, layer, tree, key_pair, &ends)
 }
 
-/// Every level of a Merkle tree, leaves first, using the node addressing of
-/// [`crate::tsw_baggy::walk_merkle_auth_path`] (`chain_idx` = height of the node,
-/// `hash_step` = `base_node_idx << (height - node height)` plus its index in the level).
-/// `key_pair` is the FORS key pair for a FORS tree and `0` for a hypertree subtree.
+/// [`crate::tsw_baggy::merkle_levels_in`] under the `cSHAKE256` suite.
 pub fn merkle_levels(
     pk_seed: &[u8; 32],
     layer: u32,
@@ -278,33 +275,16 @@ pub fn merkle_levels(
     leaves: &[[u8; 32]],
     base_node_idx: usize,
 ) -> Vec<Vec<[u8; 32]>> {
-    debug_assert!(leaves.len().is_power_of_two());
-    let height = leaves.len().trailing_zeros() as usize;
-    let mut levels = Vec::with_capacity(height + 1);
-    levels.push(leaves.to_vec());
-    for h in 1..=height {
-        let prev = &levels[h - 1];
-        let offset = base_node_idx << (height - h);
-        let next: Vec<[u8; 32]> = prev
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .enumerate()
-            .map(|(i, pair)| {
-                let adrs = HashAdrs {
-                    layer,
-                    tree,
-                    kind,
-                    key_pair,
-                    chain_idx: h as u32,
-                    hash_step: (offset + i) as u32,
-                };
-                th_node_h(Cshake256Suite, pk_seed, &adrs, &pair[0], &pair[1])
-            })
-            .collect();
-        levels.push(next);
-    }
-    levels
+    merkle_levels_in(
+        Cshake256Suite,
+        pk_seed,
+        layer,
+        tree,
+        kind,
+        key_pair,
+        leaves,
+        base_node_idx,
+    )
 }
 
 /// Root-first authentication path of leaf `idx` from [`merkle_levels`].
@@ -370,6 +350,16 @@ impl LaneSpec {
                 chain_idx: fors_tree,
                 hash_step: leaf,
             },
+            steps: 1,
+            step_indexed: false,
+        }
+    }
+
+    /// One `PORS+FP` leaf: position 0 is the secret, position 1 its leaf hash.
+    pub const fn pors(tree: u64, key_pair: u32, leaf: u32) -> Self {
+        Self {
+            prf: crate::pors_fp::pors_prf_adrs(tree, key_pair, leaf),
+            f: crate::pors_fp::pors_leaf_adrs(tree, key_pair, leaf),
             steps: 1,
             step_indexed: false,
         }

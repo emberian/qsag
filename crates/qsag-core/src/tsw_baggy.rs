@@ -1379,36 +1379,67 @@ pub fn build_merkle_auth_path_from_leaves<S: TweakableHashSuite>(
     local_idx: usize,
 ) -> ([u8; 32], Vec<[u8; 32]>) {
     debug_assert_eq!(leaves.len(), 1usize << height);
-    let mut cur_level = leaves.to_vec();
-    let mut path = Vec::with_capacity(height);
-    let mut idx_in_sub = local_idx;
-    for h_step in 1..=height {
-        let sib_idx = idx_in_sub ^ 1;
-        path.push(cur_level[sib_idx]);
-        let next_len = cur_level.len() / 2;
-        let level_node_offset = base_node_idx << (height - h_step);
-        let mut next_level = Vec::with_capacity(next_len);
-        for pair_idx in 0..next_len {
-            let adrs = HashAdrs {
-                layer,
-                tree,
-                kind: node_kind,
-                key_pair,
-                chain_idx: h_step as u32,
-                hash_step: (level_node_offset + pair_idx) as u32,
-            };
-            next_level.push(th_node_h(
-                suite,
-                pk_seed,
-                &adrs,
-                &cur_level[2 * pair_idx],
-                &cur_level[2 * pair_idx + 1],
-            ));
-        }
-        cur_level = next_level;
-        idx_in_sub >>= 1;
+    let levels = merkle_levels_in(
+        suite,
+        pk_seed,
+        layer,
+        tree,
+        node_kind,
+        key_pair,
+        leaves,
+        base_node_idx,
+    );
+    let path = (0..height)
+        .map(|h| levels[h][(local_idx >> h) ^ 1])
+        .collect();
+    (levels[height][0], path)
+}
+
+/// Every level of a Merkle tree over `leaves` (a power of two), leaves first. This is the one
+/// tree builder of the hash-based suites: a node of height `h` has `chain_idx = h` and
+/// `hash_step = (base_node_idx << (height - h)) + index in its level`, the addressing
+/// [`walk_merkle_auth_path`] verifies. `key_pair` is the few-time key pair for a FORS or PORS
+/// tree and `0` for a hypertree subtree.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Same explicit address fields as the other tree functions"
+)]
+pub fn merkle_levels_in<S: TweakableHashSuite>(
+    suite: S,
+    pk_seed: &[u8; 32],
+    layer: u32,
+    tree: u64,
+    node_kind: AdrsKind,
+    key_pair: u32,
+    leaves: &[[u8; 32]],
+    base_node_idx: usize,
+) -> Vec<Vec<[u8; 32]>> {
+    debug_assert!(leaves.len().is_power_of_two());
+    let height = leaves.len().trailing_zeros() as usize;
+    let mut levels = Vec::with_capacity(height + 1);
+    levels.push(leaves.to_vec());
+    for h in 1..=height {
+        let offset = base_node_idx << (height - h);
+        let next: Vec<[u8; 32]> = levels[h - 1]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .enumerate()
+            .map(|(i, pair)| {
+                let adrs = HashAdrs {
+                    layer,
+                    tree,
+                    kind: node_kind,
+                    key_pair,
+                    chain_idx: h as u32,
+                    hash_step: (offset + i) as u32,
+                };
+                th_node_h(suite, pk_seed, &adrs, &pair[0], &pair[1])
+            })
+            .collect();
+        levels.push(next);
     }
-    (cur_level[0], path)
+    levels
 }
 
 /// Top-down `build_merkle_from_leaves_topdown`.
