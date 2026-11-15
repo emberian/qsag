@@ -11,8 +11,9 @@ end-to-end active security of the Rust preprocessing protocol.
    cofactor/isometric lifts. The relaxed relation is not itself a short-RLWE hardness assumption.
    Fixed-point `Q192` Gaussian rejection-sampling rounding, `K`-attempt HVZK simulation, abort
    marginal secret-independence, and dense expand-accumulate dual-LPN piling-up / ISD bounds are
-   established by `q192_gaussian_hvzk_statistical_distance` and
-   `pcg_dense_depth15_prange_and_stern_dumer_pq128`.
+   conditional on the finite-weight premises of `q192_gaussian_hvzk_statistical_distance`
+   and the cost model of `pcg_dense_depth15_prange_and_stern_dumer_pq128`. The production
+   Gaussian distribution and balanced dual-test hypotheses are not instantiated here.
 3. **Real Bitwise-AND KOS OT Extension + `128 × 384` `GF(2)` Leftover Hash Lemma (`[P0-05]` Closure)**:
    - Exact 128-bit bitwise correlation `q_l = t_l ^^^ (x_l &&& Delta)` over `BitVec 128` (`Tower128Exec`).
    - `kos_bitwise_selective_failure_exact`: fault mask `e : BitVec 128` of Hamming weight `w` passes row

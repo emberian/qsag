@@ -5,6 +5,15 @@ module
 Constructive rational probability, fixed-point rounding, and coding-theoretic work-factor bounds
 for the 24-repetition Ring-LWE OR-Sigma proof (`RLWE_ZKPOK_REPS = 24`) and dense expand-accumulate
 dual-LPN Pseudorandom Correlation Generator (`PcgTreeDepth.Depth15`):
+The probability lemmas below are conditional finite-weight identities. No production
+`Q192GaussianSamplerParams` instance, vector sampler refinement, `hUlp` certificate, or
+Gaussian tail/normalization bound is supplied here. The abort theorem assumes the two
+small single-trial L1 bounds. The linear-test result applies only to the supplied balanced
+block weights. Generated rows do not satisfy that premise: `Qsag.DensePcgProductionTaps`
+evaluates the tap generator and finds one-row biases near `2^-117` and `2^-89`, and
+`Qsag.DensePcgTapLinearTests` replaces the premise by an exact per-row formula and a
+second-moment bound over uniform taps. ISD bounds concern the stated Prange/Stern–Dumer
+cost formulas, not all decoding algorithms.
 1. Fixed-point `Q192` discrete Gaussian rejection-sampling law (`acceptProbExact_safe_cancels_shift`),
    `≤ 2^-190` rounding perturbation (`q192_acceptProb_rounding_le_two_neg_190`), `K`-attempt +
    conditional HVZK simulation (`q192_gaussian_hvzk_statistical_distance`), and `< 2^-128` abort
