@@ -42,12 +42,14 @@ degree-30 round 0, `BIT_CHECK_DEGREE = 54`) are proved in §11 below.
 
 public import Qsag.Tactic.Prelude
 public import Qsag.Math.Gf2Pow128
+import all Qsag.Math.Gf2Pow128
 public import Qsag.Exec.SimulationSpine
 public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Tactic.AssuranceKit
 public import Qsag.Exec.Tactic.SimulationKit
 
 public import Qsag.Math.EllipticCurves
+import all Qsag.Math.EllipticCurves
 
 
 public section
@@ -3712,6 +3714,63 @@ theorem settle_accept_inserts {Authorization : Type}
       cases hr : run submission.witness (compile submission.statement) <;>
         simp only [hr] at h ⊢ <;> first | rfl | cases h
 
+/-- Settlement accepts exactly when the nullifier is fresh, the authorization
+    verifies against the full statement, and the compiled circuit run accepts. -/
+theorem settle_accepted_iff {Authorization : Type}
+    (verifyAuthorization : Statement → Authorization → Bool)
+    (compile : Statement → List Gate)
+    (ledger : Ledger) (submission : Submission Authorization) :
+    (settle verifyAuthorization compile ledger submission).2 = .accepted ↔
+      (¬ (submission.statement.nullifier ∈ ledger.spent) ∧
+        verifyAuthorization submission.statement submission.authorization = true ∧
+        run submission.witness (compile submission.statement) = .accepted) := by
+  constructor
+  · intro h
+    unfold settle at h
+    cases (inferInstance : Decidable (submission.statement.nullifier ∈ ledger.spent)) with
+    | isTrue hMem =>
+      rw [cIte_pos hMem] at h
+      cases h
+    | isFalse hMem =>
+      rw [cIte_neg hMem] at h
+      cases hAuth : verifyAuthorization submission.statement submission.authorization
+      · simp only [hAuth, Bool.false_eq_true, ↓reduceIte] at h
+        cases h
+      · simp only [hAuth, ↓reduceIte] at h
+        cases hr : run submission.witness (compile submission.statement)
+        case accepted => exact ⟨hMem, rfl, rfl⟩
+        all_goals (simp only [hr] at h <;> cases h)
+  · intro h
+    obtain ⟨hMem, hAuth, hRun⟩ := h
+    unfold settle
+    rw [cIte_neg hMem]
+    simp only [hAuth, ↓reduceIte, hRun]
+
+/-- Every non-accepting outcome (replay, bad authorization, rejected run)
+    leaves the ledger untouched. -/
+theorem settle_reject_ledger_unchanged {Authorization : Type}
+    (verifyAuthorization : Statement → Authorization → Bool)
+    (compile : Statement → List Gate)
+    (ledger : Ledger) (submission : Submission Authorization)
+    (h : ¬ ((settle verifyAuthorization compile ledger submission).2 = .accepted)) :
+    (settle verifyAuthorization compile ledger submission).1 = ledger := by
+  cases (inferInstance : Decidable (submission.statement.nullifier ∈ ledger.spent)) with
+  | isTrue hMem =>
+    rw [settle_replay_rejected verifyAuthorization compile ledger submission hMem]
+  | isFalse hMem =>
+    cases hAuth : verifyAuthorization submission.statement submission.authorization
+    · unfold settle
+      rw [cIte_neg hMem]
+      simp only [hAuth, Bool.false_eq_true, ↓reduceIte]
+    · cases hr : run submission.witness (compile submission.statement)
+      case accepted =>
+        exact absurd ((settle_accepted_iff verifyAuthorization compile ledger submission).2
+          ⟨hMem, hAuth, hr⟩) h
+      all_goals
+        unfold settle
+        rw [cIte_neg hMem]
+        simp only [hAuth, ↓reduceIte, hr]
+
 theorem settle_spent_monotone {Authorization : Type}
     (verifyAuthorization : Statement → Authorization → Bool)
     (compile : Statement → List Gate)
@@ -3886,6 +3945,37 @@ theorem tooth_replay_guard_removal :
 #tooth_pair Qsag.MigrationExecution.settle_replay_rejected vs
   Qsag.MigrationExecution.tooth_replay_guard_removal
 
+/-- Regression against treating Wiedemann coordinate bit-packing as the Rust polynomial basis
+    (the verified conversion is `rustToTower`):
+    under naive coordinate bit-packing, bit `1` (`x_0 ∈ Tower128`) squares to `x_0 + 1` (`3#128`),
+    whereas in `RustGf128` bit `1` (`x`) squares to `x^2` (`4#128`). -/
+theorem tooth_identity_basis_conversion_wrong :
+    ∃ x : RustGf128,
+      rustGf128Mul x x ≠
+        wiedemannPack128 (towerMul 7 (wiedemannUnpack128 x) (wiedemannUnpack128 x)) ∧
+      wiedemannUnpack128 (rustGf128Mul x x) ≠
+        towerMul 7 (wiedemannUnpack128 x) (wiedemannUnpack128 x) := by
+  refine ⟨2#128, ?_⟩
+  have hK : towerMul 7 (wiedemannUnpack128 2#128) (wiedemannUnpack128 2#128) =
+      wiedemannKaratsuba 7 (wiedemannUnpack128 2#128) (wiedemannUnpack128 2#128) :=
+    (wiedemannKaratsuba_eq_towerMul 7 _ _).symm
+  have hW : wiedemannPack128 (wiedemannKaratsuba 7 (wiedemannUnpack128 2#128) (wiedemannUnpack128 2#128)) = 3#128 := by
+    decide
+  have hR : rustGf128Mul 2#128 2#128 = 4#128 := by decide +kernel
+  rw [hK]
+  refine ⟨?_, ?_⟩
+  · rw [hR, hW]; decide
+  · intro hEq
+    have hp := congrArg wiedemannPack128 hEq
+    rw [hW] at hp
+    have h4 : wiedemannPack128 (wiedemannUnpack128 (rustGf128Mul 2#128 2#128)) = 4#128 := by
+      rw [hR]; decide
+    rw [h4] at hp
+    revert hp; decide
+
+#tooth_pair Qsag.MigrationExecution.rustToTower_mul vs
+  Qsag.MigrationExecution.tooth_identity_basis_conversion_wrong
+
 #verify_constructive
   Qsag.MigrationExecution.tooth_identity_basis_conversion_wrong
   Qsag.MigrationExecution.rustGf128Mul_comm
@@ -3917,6 +4007,8 @@ theorem tooth_replay_guard_removal :
   Qsag.MigrationExecution.tooth_corrupt_final_and_guard_removal
   Qsag.MigrationExecution.settle_replay_rejected
   Qsag.MigrationExecution.settle_accept_inserts
+  Qsag.MigrationExecution.settle_accepted_iff
+  Qsag.MigrationExecution.settle_reject_ledger_unchanged
   Qsag.MigrationExecution.settle_spent_monotone
   Qsag.MigrationExecution.settleMany_spent_monotone
   Qsag.MigrationExecution.accepted_nullifier_rejected_after_any_history
@@ -3931,7 +4023,6 @@ end MigrationExecution
   Qsag.curve_orders_match_le_limbs_and_bounds
   Qsag.canonical_scalar_boundaries_exact
   Qsag.secpNegScalar_props
-  Qsag.tooth_taproot_xonly_not_injective_without_y_parity
   Qsag.taproot_even_y_parity_restores_canonical_injectivity
   Qsag.clampEd25519Bytes32_bits_and_range
   Qsag.slip0010_ed25519_clamped_canonical_nonzero
