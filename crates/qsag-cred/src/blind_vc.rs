@@ -24,9 +24,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use qsag_accel::ct::{ct_eq_bytes, ct_zeroize_bytes, ct_zeroize_u64s};
-use qsag_accel::goldilocks::{
-    GOLDILOCKS_PRIME, gl_add, gl_is_canonical, gl_mul, gl_reduce_u64, gl_reduce128, gl_sub,
-};
+use qsag_accel::goldilocks::{gl_add, gl_is_canonical, gl_mul, gl_reduce_u64, gl_sub};
 use qsag_accel::keccak::{
     InterleavedTranscript, Shake256, commit_mpc_broadcast, cshake256_framed_32,
 };
@@ -34,6 +32,8 @@ use qsag_accel::poseidon2::{
     POSEIDON2_CONST_IV, POSEIDON2_HALF_EXTERNAL_ROUNDS, POSEIDON2_INTERNAL_ROUNDS,
     poseidon2_apply_me, poseidon2_apply_mi, poseidon2_const_at, poseidon2_perm12,
 };
+
+use qsag_core::field::goldilocks::{GOLDILOCKS_EPSILON, Goldilocks};
 
 use crate::fips204_ntt::{MlDsaLevel, MlDsaSigningKey, ml_dsa_sign_deterministic, ml_dsa_verify};
 use crate::voprf::{Evaluation, PublicKey};
@@ -117,7 +117,8 @@ impl Drop for ZeroizingU64Vec {
     }
 }
 
-/// Sample `count` unbiased canonical Goldilocks field elements (`< GOLDILOCKS_PRIME`) from `Shake256`.
+/// Sample `count` unbiased canonical Goldilocks field elements from `Shake256`, rejecting every
+/// word the strict core lift [`Goldilocks::from_le_bytes_canonical`] refuses.
 fn sample_canonical_gl_vec(
     domain: &[u8],
     seed: &[u8; 32],
@@ -136,10 +137,10 @@ fn sample_canonical_gl_vec(
         sp.squeeze(&mut buf);
         let mut pos = 0usize;
         while pos + 8 <= buf.len() && out.0.len() < count {
-            let cand = u64::from_le_bytes(buf[pos..pos + 8].try_into().unwrap());
+            let cand = Goldilocks::from_le_bytes_canonical(buf[pos..pos + 8].try_into().unwrap());
             pos += 8;
-            if cand < GOLDILOCKS_PRIME {
-                out.0.push(cand);
+            if let Ok(limb) = cand {
+                out.0.push(limb.to_canonical_u64());
             }
         }
     }
@@ -1572,105 +1573,107 @@ fn presentation_scope(
 // Serret's theorem guarantees T^5 - 3 is irreducible over GF(p), giving an exact
 // 320-bit extension field of order p^5 > 2^319.999999998.
 
+// Base-field arithmetic is the canonical `qsag_core` [`Goldilocks`] (`const_add`, `const_sub`,
+// `const_mul`: branchless and inlined, the same class as the portable kernels used elsewhere in
+// this file). `qsag_core` has no quintic extension, so only the degree-5 structure lives here.
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct Fp5([u64; 5]);
+struct Fp5([Goldilocks; 5]);
 
 impl Fp5 {
-    const ZERO: Self = Self([0; 5]);
-    const ONE: Self = Self([1, 0, 0, 0, 0]);
+    const ZERO: Self = Self([Goldilocks::ZERO; 5]);
+    const ONE: Self = Self([
+        Goldilocks::ONE,
+        Goldilocks::ZERO,
+        Goldilocks::ZERO,
+        Goldilocks::ZERO,
+        Goldilocks::ZERO,
+    ]);
 
+    /// Strict lift of five wire limbs: `None` if any limb lies in the alias band `[p, 2^64)`.
     #[inline]
-    fn is_zero(self) -> bool {
-        (self.0[0] | self.0[1] | self.0[2] | self.0[3] | self.0[4]) == 0
+    fn from_canonical_limbs(limbs: [u64; 5]) -> Option<Self> {
+        let mut out = [Goldilocks::ZERO; 5];
+        for (slot, limb) in out.iter_mut().zip(limbs) {
+            *slot = Goldilocks::from_canonical(limb).ok()?;
+        }
+        Some(Self(out))
+    }
+
+    /// Branchless lift of limbs that are canonical by construction (rejection-sampled tapes,
+    /// already validated wire limbs); the identity on every canonical limb.
+    #[inline]
+    fn from_limbs(limbs: [u64; 5]) -> Self {
+        Self(limbs.map(Goldilocks::from_u64_reduced))
     }
 
     #[inline]
-    fn is_canonical(self) -> bool {
-        gl_is_canonical(self.0[0])
-            && gl_is_canonical(self.0[1])
-            && gl_is_canonical(self.0[2])
-            && gl_is_canonical(self.0[3])
-            && gl_is_canonical(self.0[4])
+    fn to_limbs(self) -> [u64; 5] {
+        self.0.map(Goldilocks::to_canonical_u64)
+    }
+
+    /// Canonical limbs widened for lazy `u128` accumulation.
+    #[inline]
+    fn to_wide_limbs(self) -> [u128; 5] {
+        self.0.map(|limb| limb.to_canonical_u64() as u128)
+    }
+
+    #[inline]
+    fn is_zero(self) -> bool {
+        let l = self.to_limbs();
+        (l[0] | l[1] | l[2] | l[3] | l[4]) == 0
     }
 
     #[inline]
     fn add(self, rhs: Self) -> Self {
-        Self([
-            gl_add(self.0[0], rhs.0[0]),
-            gl_add(self.0[1], rhs.0[1]),
-            gl_add(self.0[2], rhs.0[2]),
-            gl_add(self.0[3], rhs.0[3]),
-            gl_add(self.0[4], rhs.0[4]),
-        ])
+        Self(core::array::from_fn(|i| self.0[i].const_add(rhs.0[i])))
     }
 
     #[inline]
     fn sub(self, rhs: Self) -> Self {
-        Self([
-            gl_sub(self.0[0], rhs.0[0]),
-            gl_sub(self.0[1], rhs.0[1]),
-            gl_sub(self.0[2], rhs.0[2]),
-            gl_sub(self.0[3], rhs.0[3]),
-            gl_sub(self.0[4], rhs.0[4]),
-        ])
+        Self(core::array::from_fn(|i| self.0[i].const_sub(rhs.0[i])))
     }
 
+    /// Scale by a base-field scalar given as a raw word (reduced modulo `p`).
     #[inline]
     fn scale_fp(self, s: u64) -> Self {
-        Self([
-            gl_mul(self.0[0], s),
-            gl_mul(self.0[1], s),
-            gl_mul(self.0[2], s),
-            gl_mul(self.0[3], s),
-            gl_mul(self.0[4], s),
-        ])
+        let s = Goldilocks::from_u64_reduced(s);
+        Self(self.0.map(|limb| limb.const_mul(s)))
     }
 
+    /// Multiply by the non-residue `3` of `T^5 - 3`.
     #[inline]
-    fn mul_by_3(v: u64) -> u64 {
-        let v2 = gl_add(v, v);
-        gl_add(v2, v)
+    fn mul_by_3(v: Goldilocks) -> Goldilocks {
+        v.const_add(v).const_add(v)
     }
 
     #[inline]
     fn mul(self, rhs: Self) -> Self {
         let a = self.0;
         let b = rhs.0;
+        let m = |i: usize, j: usize| a[i].const_mul(b[j]);
 
-        let t0_hi = gl_add(
-            gl_add(gl_mul(a[1], b[4]), gl_mul(a[2], b[3])),
-            gl_add(gl_mul(a[3], b[2]), gl_mul(a[4], b[1])),
-        );
-        let c0 = gl_add(gl_mul(a[0], b[0]), Self::mul_by_3(t0_hi));
+        let t0_hi = m(1, 4)
+            .const_add(m(2, 3))
+            .const_add(m(3, 2).const_add(m(4, 1)));
+        let c0 = m(0, 0).const_add(Self::mul_by_3(t0_hi));
 
-        let t1_lo = gl_add(gl_mul(a[0], b[1]), gl_mul(a[1], b[0]));
-        let t1_hi = gl_add(
-            gl_add(gl_mul(a[2], b[4]), gl_mul(a[3], b[3])),
-            gl_mul(a[4], b[2]),
-        );
-        let c1 = gl_add(t1_lo, Self::mul_by_3(t1_hi));
+        let t1_lo = m(0, 1).const_add(m(1, 0));
+        let t1_hi = m(2, 4).const_add(m(3, 3)).const_add(m(4, 2));
+        let c1 = t1_lo.const_add(Self::mul_by_3(t1_hi));
 
-        let t2_lo = gl_add(
-            gl_add(gl_mul(a[0], b[2]), gl_mul(a[1], b[1])),
-            gl_mul(a[2], b[0]),
-        );
-        let t2_hi = gl_add(gl_mul(a[3], b[4]), gl_mul(a[4], b[3]));
-        let c2 = gl_add(t2_lo, Self::mul_by_3(t2_hi));
+        let t2_lo = m(0, 2).const_add(m(1, 1)).const_add(m(2, 0));
+        let t2_hi = m(3, 4).const_add(m(4, 3));
+        let c2 = t2_lo.const_add(Self::mul_by_3(t2_hi));
 
-        let t3_lo = gl_add(
-            gl_add(gl_mul(a[0], b[3]), gl_mul(a[1], b[2])),
-            gl_add(gl_mul(a[2], b[1]), gl_mul(a[3], b[0])),
-        );
-        let t3_hi = gl_mul(a[4], b[4]);
-        let c3 = gl_add(t3_lo, Self::mul_by_3(t3_hi));
+        let t3_lo = m(0, 3)
+            .const_add(m(1, 2))
+            .const_add(m(2, 1).const_add(m(3, 0)));
+        let c3 = t3_lo.const_add(Self::mul_by_3(m(4, 4)));
 
-        let c4 = gl_add(
-            gl_add(gl_mul(a[0], b[4]), gl_mul(a[1], b[3])),
-            gl_add(
-                gl_add(gl_mul(a[2], b[2]), gl_mul(a[3], b[1])),
-                gl_mul(a[4], b[0]),
-            ),
-        );
+        let c4 = m(0, 4)
+            .const_add(m(1, 3))
+            .const_add(m(2, 2).const_add(m(3, 1)).const_add(m(4, 0)));
 
         Self([c0, c1, c2, c3, c4])
     }
@@ -1678,8 +1681,8 @@ impl Fp5 {
     #[inline]
     fn to_le_bytes(self) -> [u8; 40] {
         let mut out = [0u8; 40];
-        for (i, &limb) in self.0.iter().enumerate() {
-            out[i * 8..(i + 1) * 8].copy_from_slice(&limb.to_le_bytes());
+        for (chunk, limb) in out.chunks_exact_mut(8).zip(self.0) {
+            chunk.copy_from_slice(&limb.to_le_bytes());
         }
         out
     }
@@ -1898,7 +1901,7 @@ impl Shake256PartyBatch8 {
         salts
     }
 
-    /// Squeeze `count` canonical Goldilocks field elements (`< GOLDILOCKS_PRIME`) into each
+    /// Squeeze `count` canonical Goldilocks field elements (strict core lift) into each
     /// active lane's destination buffer (`active_mask[inst] == false` skips inactive lanes).
     fn squeeze_canonical_gl(
         &mut self,
@@ -1925,10 +1928,10 @@ impl Shake256PartyBatch8 {
                     continue;
                 }
                 while self.word_pos[inst] < 17 {
-                    let cand = self.state.0[self.word_pos[inst]][inst];
+                    let cand = Goldilocks::from_canonical(self.state.0[self.word_pos[inst]][inst]);
                     self.word_pos[inst] += 1;
-                    if cand < GOLDILOCKS_PRIME {
-                        outs[inst].push(cand);
+                    if let Ok(limb) = cand {
+                        outs[inst].push(limb.to_canonical_u64());
                         if outs[inst].len() == count {
                             done[inst] = true;
                             break;
@@ -2043,24 +2046,24 @@ fn expand_gamma_weights(gamma_seed: &[u8; 32], rep: u32) -> ([Fp5; SD_GRID_B], [
     let mut eta = [Fp5::ZERO; SD_GRID_L];
     for (b, slot) in theta.iter_mut().enumerate() {
         let base = b * 5;
-        *slot = Fp5([
+        *slot = Fp5::from_limbs([
             limbs[base],
             limbs[base + 1],
             limbs[base + 2],
             limbs[base + 3],
             limbs[base + 4],
-        ]);
+        ]));
     }
     let off = SD_GRID_B * 5;
     for (l, slot) in eta.iter_mut().enumerate() {
         let base = off + l * 5;
-        *slot = Fp5([
+        *slot = Fp5::from_limbs([
             limbs[base],
             limbs[base + 1],
             limbs[base + 2],
             limbs[base + 3],
             limbs[base + 4],
-        ]);
+        ]));
     }
     (theta, eta)
 }
@@ -2078,7 +2081,7 @@ fn squeeze_nonzero_eval_points(tr: &mut InterleavedTranscript, tau: usize) -> Ve
             5,
         );
         counter += 1;
-        let pt = Fp5([limbs[0], limbs[1], limbs[2], limbs[3], limbs[4]]);
+        let pt = Fp5::from_limbs([limbs[0], limbs[1], limbs[2], limbs[3], limbs[4]]);
         if !pt.is_zero() {
             out.push(pt);
         }
@@ -2619,13 +2622,13 @@ fn eval_r_poly_without_b(
         .iter()
         .zip(&r_powers[..SD_GRID_B])
     {
-        acc = acc.add(Fp5(*coeff).mul(pow));
+        acc = acc.add(Fp5::from_limbs(*coeff).mul(pow));
     }
     for (coeff, &pow) in r_poly_without_b[SD_GRID_B..SD_RPOLY_COEFFS]
         .iter()
         .zip(&r_powers[SD_GRID_B + 1..=SD_RPOLY_COEFFS])
     {
-        acc = acc.add(Fp5(*coeff).mul(pow));
+        acc = acc.add(Fp5::from_limbs(*coeff).mul(pow));
     }
     acc
 }
@@ -2663,9 +2666,10 @@ impl EvalTables {
 }
 
 #[inline]
-fn gl_reduce_split_u192(lo: u128, hi: u128) -> u64 {
-    // Exact modulo p = 2^64 - 2^32 + 1 since 2^64 === 0xffff_ffff (mod p).
-    gl_add(gl_reduce128(lo), gl_mul(gl_reduce128(hi), 0xffff_ffff))
+fn gl_reduce_split_u192(lo: u128, hi: u128) -> Goldilocks {
+    // Exact modulo p = 2^64 - 2^32 + 1 since 2^64 === 2^32 - 1 (mod p).
+    const TWO_64: Goldilocks = Goldilocks::from_u64_reduced(GOLDILOCKS_EPSILON);
+    Goldilocks::reduce128(lo).const_add(Goldilocks::reduce128(hi).const_mul(TWO_64))
 }
 
 #[inline]
@@ -2706,9 +2710,9 @@ fn eval_party_polynomial_shares(
 
     for b in 0..SD_GRID_B {
         let row_off = b * SD_GRID_L;
-        let wx = tables.theta_r_pow[b].0.map(|v| v as u128);
-        let wy = tables.r_powers[SD_GRID_B - 1 - b].0.map(|v| v as u128);
-        let wz = tables.theta[b].0.map(|v| v as u128);
+        let wx = tables.theta_r_pow[b].to_wide_limbs();
+        let wy = tables.r_powers[SD_GRID_B - 1 - b].to_wide_limbs();
+        let wz = tables.theta[b].to_wide_limbs();
         for l in 0..SD_GRID_L {
             let idx = row_off + l;
             let xv = x_grid[idx] as u128;
@@ -2789,43 +2793,43 @@ fn unpack_party_ext_masks(
     let mut cur = 0usize;
     let mut u_pad = [Fp5::ZERO; SD_GRID_L];
     for slot in &mut u_pad {
-        *slot = Fp5([
+        *slot = Fp5::from_limbs([
             tape[cur],
             tape[cur + 1],
             tape[cur + 2],
             tape[cur + 3],
             tape[cur + 4],
-        ]);
+        ]));
         cur += 5;
     }
     let mut v_pad = [Fp5::ZERO; SD_GRID_L];
     for slot in &mut v_pad {
-        *slot = Fp5([
+        *slot = Fp5::from_limbs([
             tape[cur],
             tape[cur + 1],
             tape[cur + 2],
             tape[cur + 3],
             tape[cur + 4],
-        ]);
+        ]));
         cur += 5;
     }
-    let c_pad = Fp5([
+    let c_pad = Fp5::from_limbs([
         tape[cur],
         tape[cur + 1],
         tape[cur + 2],
         tape[cur + 3],
         tape[cur + 4],
-    ]);
+    ]));
     cur += 5;
     let mut poly_mask = [Fp5::ZERO; SD_RPOLY_COEFFS];
     for slot in &mut poly_mask {
-        *slot = Fp5([
+        *slot = Fp5::from_limbs([
             tape[cur],
             tape[cur + 1],
             tape[cur + 2],
             tape[cur + 3],
             tape[cur + 4],
-        ]);
+        ]));
         cur += 5;
     }
     debug_assert_eq!(cur, PARTY_EXT_LIMBS);
@@ -3311,7 +3315,7 @@ pub fn prove_selective_disclosure_with_profile(
         }
         let delta_c = c_plain.sub(c_pad_sum);
 
-        let aux_digest = digest_limbo_aux(&delta_w, &delta_z, &delta_c.0);
+        let aux_digest = digest_limbo_aux(&delta_w, &delta_z, &delta_c.to_limbs());
         com_1[VC_SD_LIMBO_PARTIES - 1] = commit_limbo_party_r1(
             &presentation_nonce,
             rep_u32,
@@ -3380,7 +3384,7 @@ pub fn prove_selective_disclosure_with_profile(
                 if pj.is_zero() {
                     continue;
                 }
-                let pj_u128 = pj.0.map(|v| v as u128);
+                let pj_u128 = pj.to_wide_limbs();
                 // Degrees k in 0..B have scalar GF(p) coefficients y_{B-1-k, l}
                 for (k, &yv) in y_col.iter().enumerate() {
                     if yv != 0 {
@@ -3416,13 +3420,13 @@ pub fn prove_selective_disclosure_with_profile(
 
         let mut r_poly_without_b = Vec::with_capacity(SD_RPOLY_COEFFS);
         for (&pf, &ms) in poly_full[..SD_GRID_B].iter().zip(&r1.m_sum[..SD_GRID_B]) {
-            r_poly_without_b.push(pf.add(ms).0);
+            r_poly_without_b.push(pf.add(ms).to_limbs());
         }
         for (&pf, &ms) in poly_full[SD_GRID_B + 1..=SD_RPOLY_COEFFS]
             .iter()
             .zip(&r1.m_sum[SD_GRID_B..SD_RPOLY_COEFFS])
         {
-            r_poly_without_b.push(pf.add(ms).0);
+            r_poly_without_b.push(pf.add(ms).to_limbs());
         }
         (theta, eta, r_poly_without_b)
     });
@@ -3561,8 +3565,8 @@ pub fn prove_selective_disclosure_with_profile(
         let _ = (r_poly_without_b, sigma_sum);
 
         R2bRepOut {
-            alpha: alpha_sum.iter().map(|v| v.0).collect(),
-            beta: beta_sum.iter().map(|v| v.0).collect(),
+            alpha: alpha_sum.iter().map(|v| v.to_limbs()).collect(),
+            beta: beta_sum.iter().map(|v| v.to_limbs()).collect(),
             h_online,
         }
     });
@@ -3600,7 +3604,7 @@ pub fn prove_selective_disclosure_with_profile(
             Some(LimboPartyAux {
                 delta_w: r1.delta_w.0.clone(),
                 delta_z: r1.delta_z.0.clone(),
-                delta_c: r1.delta_c.0,
+                delta_c: r1.delta_c.to_limbs(),
             })
         };
         opened_reps.push(OpenedLimboRepetition {
@@ -3729,7 +3733,7 @@ pub fn verify_presentation_with_profile(
             (Some(aux), false) => {
                 if aux.delta_w.len() != expected_num_secret_wires
                     || aux.delta_z.len() != SD_TOTAL_GATES
-                    || !Fp5(aux.delta_c).is_canonical()
+                    || Fp5::from_canonical_limbs(aux.delta_c).is_none()
                     || aux.delta_w.iter().any(|&v| !gl_is_canonical(v))
                     || aux.delta_z.iter().any(|&v| !gl_is_canonical(v))
                 {
@@ -3750,7 +3754,7 @@ pub fn verify_presentation_with_profile(
             .chain(o.alpha.iter())
             .chain(o.beta.iter())
         {
-            if !Fp5(*arr).is_canonical() {
+            if Fp5::from_canonical_limbs(*arr).is_none() {
                 return false;
             }
         }
@@ -3911,7 +3915,7 @@ pub fn verify_presentation_with_profile(
                     for ((dst, &zr), &dz) in z_buf.0.iter_mut().zip(z_raw).zip(&aux.delta_z) {
                         *dst = gl_add(zr, dz);
                     }
-                    c_p = c_p.add(Fp5(aux.delta_c));
+                    c_p = c_p.add(Fp5::from_limbs(aux.delta_c));
                     eval_sd_party_shares(
                         p,
                         expected_arity,
@@ -3967,8 +3971,8 @@ pub fn verify_presentation_with_profile(
         let mut beta_hidden = [Fp5::ZERO; SD_GRID_L];
         let mut prod_at_r = Fp5::ZERO;
         for l in 0..SD_GRID_L {
-            let a_l = Fp5(o.alpha[l]);
-            let b_l = Fp5(o.beta[l]);
+            let a_l = Fp5::from_limbs(o.alpha[l]);
+            let b_l = Fp5::from_limbs(o.beta[l]);
             alpha_hidden[l] = a_l.sub(open_alpha_sum[l]);
             beta_hidden[l] = b_l.sub(open_beta_sum[l]);
             prod_at_r = prod_at_r.add(a_l.mul(b_l));
@@ -4087,7 +4091,7 @@ impl SelectiveDisclosurePresentation {
                 (Some(aux), false) => {
                     if aux.delta_w.len() != num_secret_wires
                         || aux.delta_z.len() != SD_TOTAL_GATES
-                        || !Fp5(aux.delta_c).is_canonical()
+                        || Fp5::from_canonical_limbs(aux.delta_c).is_none()
                         || aux.delta_w.iter().any(|&v| !gl_is_canonical(v))
                         || aux.delta_z.iter().any(|&v| !gl_is_canonical(v))
                     {
@@ -4103,7 +4107,7 @@ impl SelectiveDisclosurePresentation {
                 .chain(o.alpha.iter())
                 .chain(o.beta.iter())
             {
-                if !Fp5(*arr).is_canonical() {
+                if Fp5::from_canonical_limbs(*arr).is_none() {
                     return Err(BlindVcError::SelectiveDisclosureProofInvalid);
                 }
             }
@@ -4374,18 +4378,7 @@ impl core::error::Error for BlindVcError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn gl_pow(mut base: u64, mut exp: u64) -> u64 {
-        let mut acc = 1u64;
-        while exp > 0 {
-            if exp & 1 == 1 {
-                acc = gl_mul(acc, base);
-            }
-            base = gl_mul(base, base);
-            exp >>= 1;
-        }
-        acc
-    }
+    use qsag_core::field::goldilocks::GOLDILOCKS_PRIME;
 
     fn fp5_pow_u64(mut base: Fp5, mut exp: u64) -> Fp5 {
         let mut acc = Fp5::ONE;
@@ -4403,24 +4396,24 @@ mod tests {
     fn fp5_irreducibility_and_field_axioms() {
         // Serret's criterion: 5 | (p - 1) and 3^((p - 1) / 5) != 1 (mod p).
         assert_eq!((GOLDILOCKS_PRIME - 1) % 5, 0);
-        let z5 = gl_pow(3, (GOLDILOCKS_PRIME - 1) / 5);
-        assert_ne!(z5, 1);
-        assert_eq!(gl_pow(z5, 5), 1);
+        let z5 = Goldilocks::from_u64_reduced(3).pow((GOLDILOCKS_PRIME - 1) / 5);
+        assert_ne!(z5, Goldilocks::ONE);
+        assert_eq!(z5.pow(5), Goldilocks::ONE);
 
         // T^5 == 3 in GF(p)[T]/(T^5 - 3).
-        let t = Fp5([0, 1, 0, 0, 0]);
-        assert_eq!(fp5_pow_u64(t, 5), Fp5([3, 0, 0, 0, 0]));
+        let t = Fp5::from_limbs([0, 1, 0, 0, 0]);
+        assert_eq!(fp5_pow_u64(t, 5), Fp5::from_limbs([3, 0, 0, 0, 0]));
 
         // Frobenius endomorphism: a^(p^5) == a for non-trivial element a.
-        let a = Fp5([
+        let a = Fp5::from_limbs([
             0x1234_5678_9ABC_DEF0,
             GOLDILOCKS_PRIME - 17,
             42,
             0xDEAD_BEEF_CAFE_BABE % GOLDILOCKS_PRIME,
             7,
         ]);
-        let b = Fp5([99, 1, GOLDILOCKS_PRIME - 3, 888_888, 55]);
-        let c = Fp5([7, 8, 9, 10, 11]);
+        let b = Fp5::from_limbs([99, 1, GOLDILOCKS_PRIME - 3, 888_888, 55]);
+        let c = Fp5::from_limbs([7, 8, 9, 10, 11]);
         assert_eq!(a.mul(b), b.mul(a));
         assert_eq!(a.mul(b).mul(c), a.mul(b.mul(c)));
         assert_eq!(a.mul(b.add(c)), a.mul(b).add(a.mul(c)));
@@ -5123,6 +5116,676 @@ mod tests {
                     profile,
                 ));
             }
+        }
+    }
+
+    fn kat_hex(digest: &[u8; 32]) -> std::string::String {
+        digest.iter().map(|b| std::format!("{b:02x}")).collect()
+    }
+
+    fn kat_absorb_u64s(sp: &mut Shake256, xs: &[u64]) {
+        sp.absorb(&(xs.len() as u64).to_le_bytes());
+        for x in xs {
+            sp.absorb(&x.to_le_bytes());
+        }
+    }
+
+    fn kat_issuance_digest(req: &BlindIssuanceRequest) -> [u8; 32] {
+        let mut sp = Shake256::new();
+        sp.absorb(&req.issuer_pk_digest);
+        sp.absorb(&req.issuer_epoch.to_le_bytes());
+        kat_absorb_u64s(&mut sp, &req.issuer_attested_attrs);
+        sp.absorb(&req.session_id);
+        sp.absorb(&req.schema_id.to_le_bytes());
+        kat_absorb_u64s(&mut sp, &req.attr_commit);
+        sp.absorb(&(req.opened_reps.len() as u64).to_le_bytes());
+        for o in &req.opened_reps {
+            sp.absorb(&[o.e]);
+            sp.absorb(&o.unopened_commitment);
+            sp.absorb(&o.salt_e);
+            sp.absorb(&o.salt_e1);
+            kat_absorb_u64s(&mut sp, &o.in_shares_e);
+            kat_absorb_u64s(&mut sp, &o.in_shares_e1);
+            sp.absorb(&o.tape_seed_e);
+            sp.absorb(&o.tape_seed_e1);
+            kat_absorb_u64s(&mut sp, &o.gate_outs_e);
+            kat_absorb_u64s(&mut sp, &o.gate_outs_e1);
+            for row in &o.final_outs_all3 {
+                kat_absorb_u64s(&mut sp, row);
+            }
+            sp.absorb(&(o.num_active_final_outs as u64).to_le_bytes());
+        }
+        sp.finalize(0x1F);
+        let mut out = [0u8; 32];
+        sp.squeeze(&mut out);
+        out
+    }
+
+    fn kat_bytes_digest(bytes: &[u8]) -> [u8; 32] {
+        let mut sp = Shake256::new();
+        sp.absorb(bytes);
+        sp.finalize(0x1F);
+        let mut out = [0u8; 32];
+        sp.squeeze(&mut out);
+        out
+    }
+
+    /// Wire-compatibility pin: a fixed-seed issuance request and fixed-seed presentations under
+    /// both profiles and both presentation modes must keep these exact bytes.
+    #[test]
+    fn fixed_seed_issuance_and_presentation_bytes_known_answer() {
+        let attrs = [840u64, 1994, 3, 9910, 2030, 0, 77];
+        let oprf_pk = PublicKey::test_key();
+        let (req, holder) = holder_prepare_blind_issuance_with_profile(
+            42,
+            &attrs,
+            oprf_pk.commitment(),
+            7,
+            [0x11; 32],
+            [0x22; 32],
+            ZkSoundnessProfile::Classical128,
+        )
+        .unwrap();
+        assert!(verify_blind_issuance_request_with_profile(
+            &req,
+            &attrs,
+            42,
+            ZkSoundnessProfile::Classical128,
+        ));
+
+        let mut accumulator = IssuerCredentialAccumulator::new(oprf_pk.clone(), 7);
+        accumulator.enroll([1, 2, 3, 4, 5, 6]).unwrap();
+        let index = accumulator.enroll(req.attr_commit).unwrap();
+        accumulator.enroll([9; 6]).unwrap();
+        let (issuer_mldsa_pk, issuer_mldsa_sk) =
+            crate::fips204_ntt::ml_dsa_keygen_from_seed(MlDsaLevel::MlDsa44, &[0x55; 32]);
+        let root_attestation = accumulator
+            .attest_root_deterministic(
+                MlDsaLevel::MlDsa44,
+                &issuer_mldsa_sk,
+                issuer_mldsa_pk.clone(),
+            )
+            .unwrap();
+        let cred = BlindVerifiableCredential {
+            issuer_epoch: 7,
+            schema_id: 42,
+            attr_commit: req.attr_commit,
+            issuance_token: [0; 32],
+            accumulator_leaf_index: index,
+        };
+
+        let mut actual = std::vec![
+            kat_hex(&kat_issuance_digest(&req)),
+            kat_hex(&kat_bytes_digest(
+                &accumulator
+                    .root()
+                    .iter()
+                    .flat_map(|limb| limb.to_le_bytes())
+                    .collect::<Vec<u8>>(),
+            )),
+        ];
+        for (profile, mode, challenge_byte) in [
+            (
+                ZkSoundnessProfile::Classical128,
+                PresentationMode::UnlinkableFresh,
+                0x73u8,
+            ),
+            (
+                ZkSoundnessProfile::Quantum128,
+                PresentationMode::ScopedPseudonym([0x5A; 32]),
+                0x74u8,
+            ),
+        ] {
+            let pres = prove_selective_disclosure_with_profile(
+                &cred,
+                &holder,
+                &accumulator.membership_witness(index).unwrap(),
+                &[0, 2, 6],
+                PresentationRequest {
+                    verifier_scope: b"kat-scope",
+                    verifier_challenge: &[challenge_byte; 32],
+                    mode,
+                },
+                [0x42; 32],
+                profile,
+            )
+            .unwrap();
+            let wire = pres.to_compact_wire_bytes().unwrap();
+            let decoded = SelectiveDisclosurePresentation::from_compact_wire_bytes(&wire).unwrap();
+            assert!(verify_presentation_with_profile(
+                &decoded,
+                &root_attestation,
+                &issuer_mldsa_pk,
+                &oprf_pk,
+                b"kat-scope",
+                &[challenge_byte; 32],
+                mode,
+                42,
+                attrs.len(),
+                profile,
+            ));
+            actual.push(kat_hex(&kat_bytes_digest(&wire)));
+        }
+        std::println!("BVC_KAT {actual:?}");
+        assert_eq!(
+            actual,
+            [
+                "KAT_ISSUANCE",
+                "KAT_ROOT",
+                "KAT_PRES_CLASSICAL_FRESH",
+                "KAT_PRES_QUANTUM_SCOPED",
+            ]
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // Independent reference of the canonical Poseidon2-12 profile. Nothing below
+    // calls `qsag_accel::poseidon2`: field arithmetic is `u128 % p`, the linear
+    // layers are explicit 12x12 matrices built from their definitions, and the
+    // round constants are re-derived from the `POS2_GL1` generator.
+    // ------------------------------------------------------------------------
+
+    const REF_P: u128 = 0xFFFF_FFFF_0000_0001;
+    type RefMat = [[u64; 12]; 12];
+
+    fn ref_add(a: u64, b: u64) -> u64 {
+        ((a as u128 + b as u128) % REF_P) as u64
+    }
+
+    fn ref_mul(a: u64, b: u64) -> u64 {
+        ((a as u128 * b as u128) % REF_P) as u64
+    }
+
+    /// `M_E = M_4 (x) P_3`: entry `(3i + a, 3j + b) = M_4[i][j] * P_3[a][b]` with
+    /// `M_4 = circ(2, 3, 1, 1)` and `P_3 = circ(2, 1, 1)`.
+    fn ref_dense_me() -> RefMat {
+        const M4: [[u64; 4]; 4] = [[2, 3, 1, 1], [1, 2, 3, 1], [1, 1, 2, 3], [3, 1, 1, 2]];
+        const P3: [[u64; 3]; 3] = [[2, 1, 1], [1, 2, 1], [1, 1, 2]];
+        let mut m = [[0u64; 12]; 12];
+        for i in 0..4 {
+            for a in 0..3 {
+                for j in 0..4 {
+                    for b in 0..3 {
+                        m[3 * i + a][3 * j + b] = M4[i][j] * P3[a][b];
+                    }
+                }
+            }
+        }
+        m
+    }
+
+    /// The superseded external matrix `P_3 (x) M_4`: entry `(4a + i, 4b + j)`.
+    fn ref_dense_me_superseded() -> RefMat {
+        let canonical = ref_dense_me();
+        let mut m = [[0u64; 12]; 12];
+        for i in 0..4 {
+            for a in 0..3 {
+                for j in 0..4 {
+                    for b in 0..3 {
+                        m[4 * a + i][4 * b + j] = canonical[3 * i + a][3 * j + b];
+                    }
+                }
+            }
+        }
+        m
+    }
+
+    /// `M_I = J + diag(-64, 1, 2, 4, ..., 1024)`.
+    fn ref_dense_mi() -> RefMat {
+        let mut m = [[1u64; 12]; 12];
+        m[0][0] = ref_add(1, (REF_P - 64) as u64);
+        for (k, row) in m.iter_mut().enumerate().skip(1) {
+            row[k] = 1 + (1u64 << (k - 1));
+        }
+        m
+    }
+
+    fn ref_mat_vec(m: &RefMat, v: &[u64; 12]) -> [u64; 12] {
+        core::array::from_fn(|i| {
+            (0..12).fold(0u64, |acc, j| ref_add(acc, ref_mul(m[i][j], v[j] % REF_P as u64)))
+        })
+    }
+
+    fn ref_mix13(x: u64) -> u64 {
+        let z0 = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let z1 = (z0 ^ (z0 >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        let z2 = (z1 ^ (z1 >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z2 ^ (z2 >> 31)
+    }
+
+    fn ref_round_constant(tag: u64, round: u64, lane: u64) -> u64 {
+        const IV: u64 = u64::from_be_bytes(*b"POS2_GL1");
+        (ref_mix13(ref_mix13(ref_mix13(IV ^ tag) ^ round) ^ lane) as u128 % REF_P) as u64
+    }
+
+    fn ref_pow7(x: u64) -> u64 {
+        let x2 = ref_mul(x, x);
+        let x4 = ref_mul(x2, x2);
+        ref_mul(ref_mul(x4, x2), x)
+    }
+
+    /// Initial `M_E`; 4 full rounds (tag 0); 22 partial rounds (tag 1, lane 0); 4 full rounds (tag 2).
+    fn ref_perm12(st: &mut [u64; 12]) {
+        let (me, mi) = (ref_dense_me(), ref_dense_mi());
+        *st = ref_mat_vec(&me, st);
+        for tag in [0u64, 1, 2] {
+            let rounds = if tag == 1 { 22 } else { 4 };
+            for r in 0..rounds {
+                if tag == 1 {
+                    st[0] = ref_pow7(ref_add(st[0], ref_round_constant(1, r, 0)));
+                    *st = ref_mat_vec(&mi, st);
+                } else {
+                    for (lane, x) in st.iter_mut().enumerate() {
+                        *x = ref_pow7(ref_add(*x, ref_round_constant(tag, r, lane as u64)));
+                    }
+                    *st = ref_mat_vec(&me, st);
+                }
+            }
+        }
+    }
+
+    /// Rate-6, capacity-6 sponge of this module over the reference permutation.
+    fn ref_sponge12(message: &[u64]) -> [u64; 12] {
+        let mut state = [0u64; 12];
+        for chunk in message.chunks(6) {
+            for (lane, &value) in state.iter_mut().zip(chunk) {
+                *lane = ref_add(*lane, value);
+            }
+            if chunk.len() < 6 {
+                state[chunk.len()] = ref_add(state[chunk.len()], 1);
+            }
+            ref_perm12(&mut state);
+        }
+        if message.len().is_multiple_of(6) {
+            state[0] = ref_add(state[0], 1);
+            ref_perm12(&mut state);
+        }
+        state
+    }
+
+    struct TestRng(u64);
+
+    impl TestRng {
+        fn next_field(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0xA076_1D64_78BD_642F);
+            (ref_mix13(self.0) as u128 % REF_P) as u64
+        }
+
+        fn state(&mut self) -> [u64; 12] {
+            core::array::from_fn(|_| self.next_field())
+        }
+    }
+
+    const GATES_PER_RAW_PERM12: usize = GATES_PER_PERM12 / 3;
+
+    fn poseidon2_test_states() -> Vec<[u64; 12]> {
+        let max = (REF_P - 1) as u64;
+        let mut states = vec![
+            [0u64; 12],
+            [max; 12],
+            core::array::from_fn(|i| i as u64),
+            core::array::from_fn(|i| if i.is_multiple_of(2) { max } else { 1 }),
+        ];
+        for lane in 0..12 {
+            states.push(core::array::from_fn(|i| u64::from(i == lane)));
+        }
+        let mut rng = TestRng(0x5EED_0001);
+        for _ in 0..24 {
+            states.push(rng.state());
+        }
+        states
+    }
+
+    #[test]
+    fn poseidon2_reference_permutation_reproduces_the_canonical_kat() {
+        let mut st: [u64; 12] = core::array::from_fn(|i| i as u64);
+        ref_perm12(&mut st);
+        assert_eq!(
+            st,
+            [
+                13782584570844608145,
+                13136387643152332171,
+                7171133015474200819,
+                7643370872200861694,
+                14144755201299840503,
+                16470027036684692562,
+                1748465969625202405,
+                1718729118078964347,
+                6141020819996733037,
+                16322330185628708898,
+                11650380702735067362,
+                2734959974607798415,
+            ]
+        );
+        // The superseded profile is a different function, so every comparison below can fail.
+        assert_ne!(ref_dense_me(), ref_dense_me_superseded());
+    }
+
+    #[test]
+    fn circuit_linear_layers_equal_the_dense_canonical_matrices() {
+        let (me, mi) = (ref_dense_me(), ref_dense_mi());
+        let superseded = ref_dense_me_superseded();
+        let mut rng = TestRng(0x5EED_0002);
+
+        // Exact matrices of the shared kernels, column by column.
+        let mut saw_superseded_difference = false;
+        for j in 0..12 {
+            let unit: [u64; 12] = core::array::from_fn(|i| u64::from(i == j));
+            let (mut e_col, mut i_col) = (unit, unit);
+            poseidon2_apply_me(&mut e_col);
+            poseidon2_apply_mi(&mut i_col);
+            for row in 0..12 {
+                assert_eq!(e_col[row], me[row][j], "M_E[{row}][{j}]");
+                assert_eq!(i_col[row], mi[row][j], "M_I[{row}][{j}]");
+                saw_superseded_difference |= e_col[row] != superseded[row][j];
+            }
+        }
+        assert!(saw_superseded_difference);
+
+        // The per-share wrappers of both ZKBoo tapes act as the same matrix on every share slot.
+        for _ in 0..32 {
+            let slots: [[u64; 12]; 3] = core::array::from_fn(|_| rng.state());
+            let st3: [[u64; 3]; 12] = core::array::from_fn(|lane| [0, 1, 2].map(|m| slots[m][lane]));
+            let st2: [[u64; 2]; 12] = core::array::from_fn(|lane| [0, 1].map(|m| slots[m][lane]));
+
+            let (mut e3, mut i3, mut e2, mut i2) = (st3, st3, st2, st2);
+            apply_me_3(&mut e3);
+            apply_mi_3(&mut i3);
+            apply_me_2(&mut e2);
+            apply_mi_2(&mut i2);
+            for (m, slot) in slots.iter().enumerate() {
+                let want_e = ref_mat_vec(&me, slot);
+                let want_i = ref_mat_vec(&mi, slot);
+                for lane in 0..12 {
+                    assert_eq!(e3[lane][m], want_e[lane]);
+                    assert_eq!(i3[lane][m], want_i[lane]);
+                    if m < 2 {
+                        assert_eq!(e2[lane][m], want_e[lane]);
+                        assert_eq!(i2[lane][m], want_i[lane]);
+                    }
+                }
+            }
+
+            // Plaintext and N-party engines call the shared kernels directly on one share.
+            let (mut e1, mut i1) = (slots[0], slots[0]);
+            poseidon2_apply_me(&mut e1);
+            poseidon2_apply_mi(&mut i1);
+            assert_eq!(e1, ref_mat_vec(&me, &slots[0]));
+            assert_eq!(i1, ref_mat_vec(&mi, &slots[0]));
+        }
+    }
+
+    /// Run one raw permutation (`sponge == false`, `input.len() == 12`) or one sponge call of
+    /// every in-circuit engine on `input`; returns the reconstructed 12-lane outputs of the
+    /// plaintext recorder, the 3-party ZKBoo tapes and the N-party share evaluator.
+    fn run_all_circuit_engines(input: &[u64], sponge: bool, rng: &mut TestRng) -> [[u64; 12]; 3] {
+        let gates = if sponge {
+            (input.len() / 6 + 1) * GATES_PER_RAW_PERM12
+        } else {
+            GATES_PER_RAW_PERM12
+        };
+
+        // Plaintext gate recorder (selective-disclosure prover trace).
+        let mut rec = PlaintextGateRecorder::new();
+        let mut plain = input.to_vec();
+        if sponge {
+            rec.perm12(&mut plain);
+        } else {
+            rec.raw_perm12((&mut plain[..]).try_into().unwrap());
+        }
+        assert_eq!(rec.x.len(), gates);
+        let plain_out: [u64; 12] = plain[..12].try_into().unwrap();
+
+        // 3-party ZKBoo prover, then the verifier replay of each opened pair of views.
+        let tape_seeds: [[u8; 32]; 3] = core::array::from_fn(|m| [0xA0 + m as u8; 32]);
+        let shares: Vec<[u64; 3]> = input
+            .iter()
+            .map(|&v| split_secret_3(v, rng.next_field(), rng.next_field()))
+            .collect();
+        let mut prover = ZkBooProverTape::new(&tape_seeds, gates);
+        let mut prover_st = shares.clone();
+        if sponge {
+            prover.perm12(&mut prover_st);
+        } else {
+            prover.raw_perm12((&mut prover_st[..]).try_into().unwrap());
+        }
+        assert_eq!(prover.gate_cursor, gates);
+        let zkboo_out: [u64; 12] =
+            core::array::from_fn(|lane| prover_st[lane].iter().fold(0, |acc, &s| gl_add(acc, s)));
+        for e in 0..3 {
+            let e1 = (e + 1) % 3;
+            let mut verifier = ZkBooVerifierTape::new(
+                e,
+                &tape_seeds[e],
+                &tape_seeds[e1],
+                &prover.out[e],
+                &prover.out[e1],
+                gates,
+            );
+            let mut verifier_st: Vec<[u64; 2]> = shares.iter().map(|s| [s[e], s[e1]]).collect();
+            if sponge {
+                verifier.perm12(&mut verifier_st);
+            } else {
+                verifier.raw_perm12((&mut verifier_st[..]).try_into().unwrap());
+            }
+            assert!(verifier.ok, "opened views {e},{e1} replay");
+            assert_eq!(verifier.gate_cursor, gates);
+            for lane in 0..12 {
+                assert_eq!(verifier_st[lane], [prover_st[lane][e], prover_st[lane][e1]]);
+            }
+        }
+
+        // N-party additive-share evaluator (selective-disclosure parties), N = 5.
+        const PARTIES: usize = 5;
+        let mut share_sum = [0u64; 12];
+        let mut x_sum = vec![0u64; gates];
+        let mut y_sum = vec![0u64; gates];
+        let mut in_rest = vec![0u64; input.len()];
+        let mut z_rest = vec![0u64; gates];
+        for party in 0..PARTIES {
+            let last = party == PARTIES - 1;
+            let mut st: Vec<u64> = (0..input.len())
+                .map(|k| {
+                    if last {
+                        gl_sub(input[k], in_rest[k])
+                    } else {
+                        let s = rng.next_field();
+                        in_rest[k] = gl_add(in_rest[k], s);
+                        s
+                    }
+                })
+                .collect();
+            let z_shares: Vec<u64> = (0..gates)
+                .map(|g| {
+                    if last {
+                        gl_sub(rec.z[g], z_rest[g])
+                    } else {
+                        let s = rng.next_field();
+                        z_rest[g] = gl_add(z_rest[g], s);
+                        s
+                    }
+                })
+                .collect();
+            let (mut x_out, mut y_out, mut z_out) =
+                (vec![0u64; gates], vec![0u64; gates], vec![0u64; gates]);
+            let mut ev = LinearShareEvaluator {
+                is_party_zero: party == 0,
+                z_shares: &z_shares,
+                gate_cursor: 0,
+                x_out: &mut x_out,
+                y_out: &mut y_out,
+                z_out: &mut z_out,
+            };
+            if sponge {
+                ev.perm12(&mut st);
+            } else {
+                ev.raw_perm12((&mut st[..]).try_into().unwrap());
+            }
+            assert_eq!(ev.gate_cursor, gates);
+            for lane in 0..12 {
+                share_sum[lane] = gl_add(share_sum[lane], st[lane]);
+            }
+            for g in 0..gates {
+                x_sum[g] = gl_add(x_sum[g], x_out[g]);
+                y_sum[g] = gl_add(y_sum[g], y_out[g]);
+            }
+        }
+        // The parties' multiplication inputs reconstruct the plaintext trace gate by gate.
+        assert_eq!(x_sum, rec.x);
+        assert_eq!(y_sum, rec.y);
+
+        [plain_out, zkboo_out, share_sum]
+    }
+
+    #[test]
+    fn in_circuit_poseidon2_perm12_matches_canonical_permutation() {
+        let mut rng = TestRng(0x5EED_0003);
+        for state in poseidon2_test_states() {
+            let mut reference = state;
+            ref_perm12(&mut reference);
+            let mut canonical = state;
+            poseidon2_perm12(&mut canonical);
+            assert_eq!(canonical, reference, "accel permutation vs dense reference");
+
+            for (engine, out) in run_all_circuit_engines(&state, false, &mut rng)
+                .iter()
+                .enumerate()
+            {
+                assert_eq!(*out, canonical, "engine {engine} on {state:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn in_circuit_sponge_and_clear_commitments_match_reference_sponge() {
+        let mut rng = TestRng(0x5EED_0004);
+        for len in [12usize, 13, 16, 17, 18, 39] {
+            let message: Vec<u64> = (0..len).map(|_| rng.next_field()).collect();
+            let reference = ref_sponge12(&message);
+            let mut clear = message.clone();
+            sponge12(&mut clear);
+            assert_eq!(clear[..12], reference, "clear sponge, len {len}");
+            for (engine, out) in run_all_circuit_engines(&message, true, &mut rng)
+                .iter()
+                .enumerate()
+            {
+                assert_eq!(*out, reference, "engine {engine}, len {len}");
+            }
+        }
+
+        // Clear commitment layouts over the reference sponge.
+        let reduce = |x: u64| (x as u128 % REF_P) as u64;
+        let (schema_id, epoch) = (0x0123_4567_89AB_CDEFu64, 0xFEDC_BA98_7654_3210u64);
+        let blind = [rng.next_field(), rng.next_field(), rng.next_field(), rng.next_field()];
+        for arity in [1usize, 6, 7, MAX_VC_ATTRS] {
+            let attrs: Vec<u64> = (0..arity).map(|_| rng.next_field()).collect();
+            for tag in [VC_ATTR_COMMIT_TAG, VC_PRES_COMMIT_TAG] {
+                let mut message = attrs.clone();
+                message.resize(arity.max(6), 0);
+                message.extend_from_slice(&blind);
+                message.extend_from_slice(&[
+                    schema_id & 0xffff_ffff,
+                    ref_add(schema_id >> 32, reduce(tag)),
+                    arity as u64,
+                ]);
+                assert_eq!(
+                    compute_vc_poseidon2_commit(schema_id, &attrs, &blind, tag).unwrap(),
+                    ref_sponge12(&message)[..6],
+                );
+            }
+        }
+
+        let scope = [rng.next_field(), rng.next_field(), rng.next_field(), rng.next_field()];
+        let mut message = blind.to_vec();
+        message.extend_from_slice(&scope);
+        message.extend_from_slice(&[
+            0,
+            0,
+            schema_id & 0xffff_ffff,
+            ref_add(schema_id >> 32, reduce(VC_SCOPE_TAG_DOM)),
+        ]);
+        assert_eq!(
+            compute_vc_scope_tag(schema_id, &blind, &scope),
+            ref_sponge12(&message)[..6],
+        );
+
+        let left: [u64; 6] = core::array::from_fn(|_| rng.next_field());
+        let right: [u64; 6] = core::array::from_fn(|_| rng.next_field());
+        let mut message = left.to_vec();
+        message.extend_from_slice(&right);
+        message.extend_from_slice(&[
+            epoch & 0xffff_ffff,
+            9,
+            reduce(VC_MERKLE_NODE_TAG),
+            ref_add(epoch >> 32, reduce(u64::from_be_bytes(*b"POS2_GL1"))),
+        ]);
+        assert_eq!(
+            merkle_hash_pair(&left, &right, epoch, 9),
+            ref_sponge12(&message)[..6],
+        );
+    }
+
+    #[test]
+    fn fp5_arithmetic_matches_schoolbook_reference() {
+        fn ref_fp5_mul(a: [u64; 5], b: [u64; 5]) -> [u64; 5] {
+            let mut wide = [0u64; 9];
+            for i in 0..5 {
+                for j in 0..5 {
+                    wide[i + j] = ref_add(wide[i + j], ref_mul(a[i], b[j]));
+                }
+            }
+            // T^5 = 3.
+            core::array::from_fn(|k| {
+                if k < 4 {
+                    ref_add(wide[k], ref_mul(3, wide[k + 5]))
+                } else {
+                    wide[k]
+                }
+            })
+        }
+
+        let max = (REF_P - 1) as u64;
+        let mut rng = TestRng(0x5EED_0005);
+        let mut elems = vec![[0u64; 5], [1, 0, 0, 0, 0], [max; 5], [0, 0, 0, 0, max]];
+        for _ in 0..24 {
+            elems.push(core::array::from_fn(|_| rng.next_field()));
+        }
+        for &a in &elems {
+            let fa = Fp5::from_limbs(a);
+            assert_eq!(fa.to_limbs(), a);
+            assert_eq!(Fp5::from_canonical_limbs(a), Some(fa));
+            assert_eq!(fa.is_zero(), a == [0; 5]);
+            let bytes: Vec<u8> = a.iter().flat_map(|limb| limb.to_le_bytes()).collect();
+            assert_eq!(fa.to_le_bytes()[..], bytes[..]);
+            let scalar = rng.next_field();
+            assert_eq!(fa.scale_fp(scalar).to_limbs(), a.map(|limb| ref_mul(limb, scalar)));
+            for &b in &elems {
+                let fb = Fp5::from_limbs(b);
+                assert_eq!(fa.mul(fb).to_limbs(), ref_fp5_mul(a, b));
+                assert_eq!(
+                    fa.add(fb).to_limbs(),
+                    core::array::from_fn(|i| ref_add(a[i], b[i]))
+                );
+                assert_eq!(
+                    fa.sub(fb).to_limbs(),
+                    core::array::from_fn(|i| ref_add(a[i], (REF_P as u64) - b[i]))
+                );
+            }
+        }
+        // The alias band is rejected limb by limb, and wide reduction agrees with `u128 % p`.
+        for k in 0..5 {
+            for bad in [REF_P as u64, u64::MAX] {
+                let alias: [u64; 5] = core::array::from_fn(|i| if i == k { bad } else { 7 });
+                assert_eq!(Fp5::from_canonical_limbs(alias), None);
+            }
+        }
+        for _ in 0..64 {
+            let lo = ((rng.next_field() as u128) << 64) | ref_mix13(rng.0) as u128;
+            let hi = ((rng.next_field() as u128) << 64) | ref_mix13(!rng.0) as u128;
+            // lo + 2^64 * hi (mod p), reduced limb-wise in u128 without overflow.
+            let two_64 = (1u128 << 64) % REF_P;
+            let want = ((lo % REF_P) + ((hi % REF_P) * two_64) % REF_P) % REF_P;
+            assert_eq!(gl_reduce_split_u192(lo, hi).to_canonical_u64() as u128, want);
         }
     }
 }

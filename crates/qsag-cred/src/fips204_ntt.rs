@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 
 use qsag_accel::ct::{ct_eq_bytes, ct_lt_u64, ct_select_u64, ct_zeroize_u32s};
 use qsag_accel::keccak::{Shake128, Shake256};
+use qsag_core::wipe::SecretBytes;
 
 /// FIPS 204 prime modulus $q = 8\_380\_417 = 2^{23} - 2^{13} + 1$.
 pub const MLDSA_Q: u32 = 8_380_417;
@@ -971,12 +972,6 @@ impl core::fmt::Debug for MlDsaSigningKey {
     }
 }
 
-struct SecretBytes<const N: usize>([u8; N]);
-impl<const N: usize> Drop for SecretBytes<N> {
-    fn drop(&mut self) {
-        qsag_accel::ct::ct_zeroize_bytes(&mut self.0);
-    }
-}
 struct SecretPolys(Vec<Poly256>);
 impl Drop for SecretPolys {
     fn drop(&mut self) {
@@ -1008,7 +1003,7 @@ fn expand_secret_poly(seed: &[u8; 64], nonce: u16, eta: u32) -> Poly256 {
     xof.finalize(0x1f);
     let mut poly = Poly256::zero();
     let mut filled = 0;
-    let mut byte = SecretBytes([0; 1]);
+    let mut byte = SecretBytes::new([0; 1]);
     while filled < MLDSA_N {
         xof.squeeze(&mut byte.0);
         for nibble in [byte.0[0] & 15, byte.0[0] >> 4] {
@@ -1078,7 +1073,7 @@ fn expand_secret_polys_batch(seed: &[u8; 64], total_polys: usize, eta: u32) -> V
             for slot in filled.iter_mut().skip(count) {
                 *slot = MLDSA_N;
             }
-            let mut buf = SecretBytes([0u8; 136]);
+            let mut buf = SecretBytes::new([0u8; 136]);
             while filled.iter().any(|&f| f < MLDSA_N) {
                 qsag_asm::keccak_f1600_x8(&mut state);
                 for lane in 0..count {
@@ -1113,7 +1108,7 @@ fn expand_secret_polys_batch(seed: &[u8; 64], total_polys: usize, eta: u32) -> V
             for slot in filled.iter_mut().skip(count) {
                 *slot = MLDSA_N;
             }
-            let mut buf = SecretBytes([0u8; 136]);
+            let mut buf = SecretBytes::new([0u8; 136]);
             while filled.iter().any(|&f| f < MLDSA_N) {
                 qsag_asm::keccak_f1600_x4(&mut state);
                 for lane in 0..count {
@@ -1143,7 +1138,7 @@ fn expand_secret_polys_batch(seed: &[u8; 64], total_polys: usize, eta: u32) -> V
 /// Deterministic seeded FIPS 204 key generation. The caller supplies an unpredictable seed.
 pub fn ml_dsa_keygen_from_seed(level: MlDsaLevel, seed: &[u8; 32]) -> (Vec<u8>, MlDsaSigningKey) {
     let params = level.params();
-    let mut expanded = SecretBytes([0; 128]);
+    let mut expanded = SecretBytes::new([0; 128]);
     let mut xof = Shake256::new();
     xof.absorb(seed);
     xof.absorb(&[params.k as u8, params.ell as u8]);
@@ -1151,9 +1146,9 @@ pub fn ml_dsa_keygen_from_seed(level: MlDsaLevel, seed: &[u8; 32]) -> (Vec<u8>, 
     xof.squeeze(&mut expanded.0);
     let mut rho = [0; 32];
     rho.copy_from_slice(&expanded.0[..32]);
-    let mut private_seed = SecretBytes([0; 64]);
+    let mut private_seed = SecretBytes::new([0; 64]);
     private_seed.0.copy_from_slice(&expanded.0[32..96]);
-    let mut key = SecretBytes([0; 32]);
+    let mut key = SecretBytes::new([0; 32]);
     key.0.copy_from_slice(&expanded.0[96..]);
     let mut all_secret =
         expand_secret_polys_batch(&private_seed.0, params.ell + params.k, params.eta);
@@ -1230,7 +1225,7 @@ pub(crate) fn signing_key_from_secret_for_test(
         MlDsaSigningKey {
             level,
             rho,
-            key: SecretBytes([0x5A; 32]),
+            key: SecretBytes::new([0x5A; 32]),
             public_key,
             s1,
             s2,
@@ -1245,7 +1240,7 @@ fn expand_signing_mask(params: &MlDsaParams, seed: &[u8; 64], nonce: u16) -> Pol
     xof.absorb(seed);
     xof.absorb(&nonce.to_le_bytes());
     xof.finalize(0x1f);
-    let mut bytes = SecretBytes([0; 640]);
+    let mut bytes = SecretBytes::new([0; 640]);
     xof.squeeze(&mut bytes.0[..params.z_poly_bytes]);
     unpack_z_poly(params, &bytes.0[..params.z_poly_bytes])
 }
@@ -1275,7 +1270,7 @@ fn expand_signing_masks_batch(
                 state.0[8][lane] = (nonce as u64) | (0x1Fu64 << 16);
                 state.0[16][lane] = 1u64 << 63;
             }
-            let mut bufs: [SecretBytes<680>; 8] = core::array::from_fn(|_| SecretBytes([0u8; 680]));
+            let mut bufs: [SecretBytes<680>; 8] = core::array::from_fn(|_| SecretBytes::new([0u8; 680]));
             for blk in 0..5 {
                 qsag_asm::keccak_f1600_x8(&mut state);
                 let blk_off = blk * 136;
@@ -1301,7 +1296,7 @@ fn expand_signing_masks_batch(
                 state.0[8][lane] = (nonce as u64) | (0x1Fu64 << 16);
                 state.0[16][lane] = 1u64 << 63;
             }
-            let mut bufs: [SecretBytes<680>; 4] = core::array::from_fn(|_| SecretBytes([0u8; 680]));
+            let mut bufs: [SecretBytes<680>; 4] = core::array::from_fn(|_| SecretBytes::new([0u8; 680]));
             for blk in 0..5 {
                 qsag_asm::keccak_f1600_x4(&mut state);
                 let blk_off = blk * 136;
@@ -1329,7 +1324,7 @@ fn expand_signing_masks_batch(
 pub fn ml_dsa_sign_deterministic(sk: &MlDsaSigningKey, msg: &[u8], ctx: &[u8]) -> Option<Vec<u8>> {
     let params = sk.level.params();
     let mu = compute_fips204_mu(&sk.public_key, msg, ctx)?;
-    let mut mask_seed = SecretBytes([0; 64]);
+    let mut mask_seed = SecretBytes::new([0; 64]);
     let mut xof = Shake256::new();
     xof.absorb(&sk.key.0);
     xof.absorb(&[0; 32]);
