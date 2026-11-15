@@ -124,6 +124,7 @@ run_cmd do
     `Qsag.Apex,
     `Qsag.BaggyAndRss256Security,
     `Qsag.BinaryTower,
+    `Qsag.BlindVcQromSecurity,
     `Qsag.CeremonyAtomicityAndAbort,
     `Qsag.CompiledRlibFixtures,
     `Qsag.ConcreteSecurityBudget,
@@ -172,6 +173,7 @@ run_cmd do
     `Qsag.SydTvTranslationValidation,
     `Qsag.ThresholdApproval,
     `Qsag.ThresholdMlDsaAndToprf,
+    `Qsag.ThresholdMlDsaSecurity,
     `Qsag.ThresholdMpc,
     `Qsag.UcGames
   ]
