@@ -463,6 +463,7 @@ impl Cshake256Xof {
 
 /// Squeeze equal-length `u64` streams from eight independent single-block `cSHAKE256` inputs
 /// sharing `midstate` (`inputs[i].len() < SHAKE256_RATE_BYTES`).
+#[cfg(test)]
 pub(crate) fn cshake256_8x_squeeze_u64s(
     midstate: &[u64; 25],
     inputs: [&[u8]; 8],

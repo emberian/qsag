@@ -172,12 +172,21 @@ impl<const RATE: usize> KeccakSponge<RATE> {
                 keccak_f1600(&mut self.state);
                 self.pos = 0;
             }
-            let take = (RATE - self.pos).min(out.len());
-            for (i, slot) in out.iter_mut().enumerate().take(take) {
-                *slot = self.read_byte(self.pos + i);
+            if self.pos == 0 && out.len() >= RATE {
+                let (chunks, _) = out[..RATE].as_chunks_mut::<8>();
+                for (slot, &lane) in chunks.iter_mut().zip(self.state.iter()) {
+                    *slot = lane.to_le_bytes();
+                }
+                self.pos = RATE;
+                out = &mut out[RATE..];
+            } else {
+                let take = (RATE - self.pos).min(out.len());
+                for (i, slot) in out.iter_mut().enumerate().take(take) {
+                    *slot = self.read_byte(self.pos + i);
+                }
+                self.pos += take;
+                out = &mut out[take..];
             }
-            self.pos += take;
-            out = &mut out[take..];
         }
     }
 }

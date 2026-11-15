@@ -7,11 +7,10 @@ use crate::ct::ct_select_u128;
 /// Irreducible pentanomial $x^{128} + x^7 + x^2 + x + 1$ (`0x87` low reduction polynomial).
 pub const GF2_128_POLY_LO: u128 = 0x87;
 
-/// Constant-time branchless multiplication in $\mathbb{F}_2[x]/(x^{128} + x^7 + x^2 + x + 1)$.
-/// Performs a fixed 128-iteration shift-and-mask loop with zero secret-indexed lookup tables
-/// and zero secret-dependent branches.
+/// Constant-time branchless multiplication in $\mathbb{F}_2[x]/(x^{128} + x^7 + x^2 + x + 1)$
+/// usable in `const` evaluation contexts (`0` lookup tables, `0` secret-dependent branches).
 #[inline]
-pub const fn gf2_128_mul(mut a: u128, mut b: u128) -> u128 {
+pub const fn gf2_128_mul_const(mut a: u128, mut b: u128) -> u128 {
     let mut acc = 0u128;
     let mut step = 0u32;
     while step < 128 {
@@ -26,10 +25,22 @@ pub const fn gf2_128_mul(mut a: u128, mut b: u128) -> u128 {
     acc
 }
 
+/// Constant-time multiplication in $\mathbb{F}_2[x]/(x^{128} + x^7 + x^2 + x + 1)$.
+/// Dispatches through certified carry-less `PCLMULQDQ` / `VPCLMULQDQ` / `PMULL` kernels in
+/// `qsag_asm` (with `PSTATE.DIT` guard on `aarch64` and branchless portable fallback).
+#[inline]
+pub fn gf2_128_mul(a: u128, b: u128) -> u128 {
+    let mut acc = [0u64; 2];
+    let lhs = [[a as u64, (a >> 64) as u64]];
+    let rhs = [[b as u64, (b >> 64) as u64]];
+    qsag_asm::gf2_128_mul_acc_batch(&mut acc, &lhs, &rhs);
+    u128::from(acc[0]) | (u128::from(acc[1]) << 64)
+}
+
 /// Constant-time squaring in $\mathbb{F}_2[x]/(x^{128} + x^7 + x^2 + x + 1)$.
 #[inline]
 pub const fn gf2_128_sq(a: u128) -> u128 {
-    gf2_128_mul(a, a)
+    gf2_128_mul_const(a, a)
 }
 
 #[inline]
@@ -47,18 +58,18 @@ const fn gf2_128_exp_pow2(mut x: u128, mut k: u32) -> u128 {
 pub const fn gf2_128_inv_or_zero(a: u128) -> u128 {
     // 2^128 - 2 = 2 * (2^127 - 1).
     let x1 = a;
-    let x2 = gf2_128_mul(gf2_128_sq(x1), x1); // a^{2^2 - 1}
-    let x4 = gf2_128_mul(gf2_128_exp_pow2(x2, 2), x2); // a^{2^4 - 1}
-    let x8 = gf2_128_mul(gf2_128_exp_pow2(x4, 4), x4); // a^{2^8 - 1}
-    let x16 = gf2_128_mul(gf2_128_exp_pow2(x8, 8), x8); // a^{2^16 - 1}
-    let x32 = gf2_128_mul(gf2_128_exp_pow2(x16, 16), x16); // a^{2^32 - 1}
-    let x64 = gf2_128_mul(gf2_128_exp_pow2(x32, 32), x32); // a^{2^64 - 1}
-    let x96 = gf2_128_mul(gf2_128_exp_pow2(x64, 32), x32);
-    let x112 = gf2_128_mul(gf2_128_exp_pow2(x96, 16), x16);
-    let x120 = gf2_128_mul(gf2_128_exp_pow2(x112, 8), x8);
-    let x124 = gf2_128_mul(gf2_128_exp_pow2(x120, 4), x4);
-    let x126 = gf2_128_mul(gf2_128_exp_pow2(x124, 2), x2);
-    let x127 = gf2_128_mul(gf2_128_sq(x126), x1); // a^{2^127 - 1}
+    let x2 = gf2_128_mul_const(gf2_128_sq(x1), x1); // a^{2^2 - 1}
+    let x4 = gf2_128_mul_const(gf2_128_exp_pow2(x2, 2), x2); // a^{2^4 - 1}
+    let x8 = gf2_128_mul_const(gf2_128_exp_pow2(x4, 4), x4); // a^{2^8 - 1}
+    let x16 = gf2_128_mul_const(gf2_128_exp_pow2(x8, 8), x8); // a^{2^16 - 1}
+    let x32 = gf2_128_mul_const(gf2_128_exp_pow2(x16, 16), x16); // a^{2^32 - 1}
+    let x64 = gf2_128_mul_const(gf2_128_exp_pow2(x32, 32), x32); // a^{2^64 - 1}
+    let x96 = gf2_128_mul_const(gf2_128_exp_pow2(x64, 32), x32);
+    let x112 = gf2_128_mul_const(gf2_128_exp_pow2(x96, 16), x16);
+    let x120 = gf2_128_mul_const(gf2_128_exp_pow2(x112, 8), x8);
+    let x124 = gf2_128_mul_const(gf2_128_exp_pow2(x120, 4), x4);
+    let x126 = gf2_128_mul_const(gf2_128_exp_pow2(x124, 2), x2);
+    let x127 = gf2_128_mul_const(gf2_128_sq(x126), x1); // a^{2^127 - 1}
     gf2_128_sq(x127) // a^{2^128 - 2}
 }
 
@@ -117,12 +128,34 @@ pub fn bdoz_gf2_128_batch_dot_cpu(
             actual: weights.len(),
         });
     }
-    let mut lane0 = 0u128;
-    let mut lane1 = 0u128;
-    for (&(s0, s1), &(w0, w1)) in shares.iter().zip(weights.iter()) {
-        lane0 ^= gf2_128_mul(s0, w0);
-        lane1 ^= gf2_128_mul(s1, w1);
+    const CHUNK: usize = 256;
+    let mut acc0 = [0u64; 2];
+    let mut acc1 = [0u64; 2];
+    let mut s0_buf = [[0u64; 2]; CHUNK];
+    let mut s1_buf = [[0u64; 2]; CHUNK];
+    let mut w0_buf = [[0u64; 2]; CHUNK];
+    let mut w1_buf = [[0u64; 2]; CHUNK];
+    for (s_chunk, w_chunk) in shares.chunks(CHUNK).zip(weights.chunks(CHUNK)) {
+        let n = s_chunk.len();
+        for i in 0..n {
+            let (s0, s1) = s_chunk[i];
+            let (w0, w1) = w_chunk[i];
+            s0_buf[i] = [s0 as u64, (s0 >> 64) as u64];
+            s1_buf[i] = [s1 as u64, (s1 >> 64) as u64];
+            w0_buf[i] = [w0 as u64, (w0 >> 64) as u64];
+            w1_buf[i] = [w1 as u64, (w1 >> 64) as u64];
+        }
+        qsag_asm::gf2_128_mul_acc_batch(&mut acc0, &s0_buf[..n], &w0_buf[..n]);
+        qsag_asm::gf2_128_mul_acc_batch(&mut acc1, &s1_buf[..n], &w1_buf[..n]);
     }
+    qsag_asm::volatile_fill(&mut s0_buf, [0u64; 2]);
+    qsag_asm::volatile_fill(&mut s1_buf, [0u64; 2]);
+    qsag_asm::volatile_fill(&mut w0_buf, [0u64; 2]);
+    qsag_asm::volatile_fill(&mut w1_buf, [0u64; 2]);
+    let lane0 = u128::from(acc0[0]) | (u128::from(acc0[1]) << 64);
+    let lane1 = u128::from(acc1[0]) | (u128::from(acc1[1]) << 64);
+    qsag_asm::volatile_fill(&mut acc0, 0);
+    qsag_asm::volatile_fill(&mut acc1, 0);
     Ok((lane0, lane1))
 }
 
@@ -156,10 +189,9 @@ mod basis_tests {
                 let b = 1u128 << j;
                 let pb = PolyGf2_128::from(WiedemannTower128(b));
                 let product = tower_mul_bits(7, a, b);
-                assert_eq!(
-                    PolyGf2_128::from(WiedemannTower128(product)).0,
-                    gf2_128_mul(pa.0, pb.0)
-                );
+                let hw = gf2_128_mul(pa.0, pb.0);
+                assert_eq!(hw, gf2_128_mul_const(pa.0, pb.0));
+                assert_eq!(PolyGf2_128::from(WiedemannTower128(product)).0, hw);
             }
         }
     }

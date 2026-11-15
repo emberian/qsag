@@ -72,6 +72,7 @@ pub fn sha256_compress_blocks(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
 }
 
 /// Branchless portable FIPS 180-4 `SHA-256` block compressor with volatile scratch wipe.
+#[allow(clippy::chunks_exact_to_as_chunks)]
 pub fn sha256_compress_blocks_portable(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
     let mut w = [0u32; 64];
     for block in blocks {

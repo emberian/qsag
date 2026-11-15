@@ -116,6 +116,7 @@ pub fn pack_256x200_bitslice(
 }
 
 /// [`pack_256x200_bitslice`] on an explicit backend.
+#[allow(clippy::chunks_exact_to_as_chunks)]
 pub fn pack_256x200_bitslice_with_backend(
     states: &[[u8; KECCAK_STATE_BYTES]; BITSLICE_LANES],
     planes: &mut [BitPlane256; KECCAK_STATE_BITS],
@@ -149,6 +150,7 @@ pub fn unpack_256x200_bitslice(
 }
 
 /// [`unpack_256x200_bitslice`] on an explicit backend. The transpose scratch is wiped.
+#[allow(clippy::chunks_exact_to_as_chunks)]
 pub fn unpack_256x200_bitslice_with_backend(
     planes: &[BitPlane256; KECCAK_STATE_BITS],
     states: &mut [[u8; KECCAK_STATE_BYTES]; BITSLICE_LANES],
@@ -1123,6 +1125,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::chunks_exact_to_as_chunks)]
     fn pack_and_unpack_256x200_match_the_bit_definition_and_round_trip() {
         let mut rng = TestStream(0xD1B5_4A32_D192_ED03);
         let mut states = Box::new([[0u8; KECCAK_STATE_BYTES]; BITSLICE_LANES]);
