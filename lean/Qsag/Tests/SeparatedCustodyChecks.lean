@@ -1,11 +1,11 @@
 module
-public import Qsag.SeparatedCustodyPolicy
-import all Qsag.SeparatedCustodySpine
-import all Qsag.CompleteMediationBoundary
-import all Qsag.SeparatedCustodyCore
-import all Qsag.HashSigs
-import all Qsag.MaliciousSecurity
-import all Qsag.SeparatedCustodyPolicy
+public import Qsag.Custody.SeparatedCustodyPolicy
+import all Qsag.Custody.SeparatedCustodySpine
+import all Qsag.Custody.CompleteMediationBoundary
+import all Qsag.Custody.SeparatedCustodyCore
+import all Qsag.Protocol.Signing.HashSigs
+import all Qsag.Protocol.Threshold.MaliciousSecurity
+import all Qsag.Custody.SeparatedCustodyPolicy
 import Qsag.Tactic.AssuranceKit
 public section
 namespace Qsag.Custody.Checks

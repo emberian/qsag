@@ -1,10 +1,10 @@
 module
-public import Qsag.SeparatedCustodyRelease
-public import Qsag.SeparatedCustodyHistoryChecks
-import all Qsag.SeparatedCustodyRelease
-import all Qsag.SeparatedCustodyHistoryChecks
-import all Qsag.SeparatedCustodyHistory
-import all Qsag.SeparatedCustodyChecks
+public import Qsag.Custody.SeparatedCustodyRelease
+public import Qsag.Tests.SeparatedCustodyHistoryChecks
+import all Qsag.Custody.SeparatedCustodyRelease
+import all Qsag.Tests.SeparatedCustodyHistoryChecks
+import all Qsag.Custody.SeparatedCustodyHistory
+import all Qsag.Tests.SeparatedCustodyChecks
 public section
 namespace Qsag.Custody.ReleaseChecks
 set_option autoImplicit false

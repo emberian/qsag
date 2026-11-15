@@ -1,12 +1,12 @@
 module
-public import Qsag.SeparatedCustodyUcResource
-public import Qsag.SeparatedCustodyChecks
-public import Qsag.RssProductionProfileChecks
-import all Qsag.SeparatedCustodyUcResource
-import all Qsag.SeparatedCustodyRequestHistory
-import all Qsag.SeparatedCustodyRequestPolicy
-import all Qsag.SeparatedCustodyChecks
-import all Qsag.RssProductionProfileChecks
+public import Qsag.Custody.SeparatedCustodyUcResource
+public import Qsag.Tests.SeparatedCustodyChecks
+public import Qsag.Tests.RssProductionProfileChecks
+import all Qsag.Custody.SeparatedCustodyUcResource
+import all Qsag.Custody.SeparatedCustodyRequestHistory
+import all Qsag.Custody.SeparatedCustodyRequestPolicy
+import all Qsag.Tests.SeparatedCustodyChecks
+import all Qsag.Tests.RssProductionProfileChecks
 public section
 namespace Qsag.Custody.RequestPolicy.Checks
 set_option autoImplicit false

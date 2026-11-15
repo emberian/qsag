@@ -1,10 +1,10 @@
 module
-public import Qsag.SeparatedCustodyHistory
-public import Qsag.SeparatedCustodyChecks
-import all Qsag.SeparatedCustodyHistory
-import all Qsag.SeparatedCustodyPolicy
-import all Qsag.SeparatedCustodyCore
-import all Qsag.SeparatedCustodyChecks
+public import Qsag.Custody.SeparatedCustodyHistory
+public import Qsag.Tests.SeparatedCustodyChecks
+import all Qsag.Custody.SeparatedCustodyHistory
+import all Qsag.Custody.SeparatedCustodyPolicy
+import all Qsag.Custody.SeparatedCustodyCore
+import all Qsag.Tests.SeparatedCustodyChecks
 public section
 namespace Qsag.Custody.HistoryChecks
 set_option autoImplicit false
