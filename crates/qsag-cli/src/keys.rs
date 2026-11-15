@@ -35,7 +35,7 @@ pub fn derive(seed: &[u8; 32], label: &[u8]) -> [u8; 32] {
 }
 
 pub fn derive_secret(seed: &[u8; 32], label: &[u8]) -> Secret32 {
-    Secret32(derive(seed, label))
+    Secret32::new(derive(seed, label))
 }
 
 pub fn load_json(path: &str, format: &str) -> Result<Json, CliError> {
@@ -510,8 +510,22 @@ The secret file is created with owner-only permissions.
   --policy-ledger-dir <dir>  enroll the key against this custody policy ledger: it will then
                         sign only an intent that ledger releases (not for agg-jorts-poseidon2);
                         with --policy-anchor-dir / --policy-passphrase-* as the ledger requires
+  --ephemeral-unanchored  allow disposable stateful keys without rollback protection
   --json                print the public key file contents to standard output as well
 ";
+
+/// A stateful key is used with an external anchor, or its rollback protection is waived
+/// by name. Stateless SLH-DSA keys need neither.
+pub(crate) fn require_stateful_anchor(
+    scheme: Scheme,
+    anchor: Option<&crate::anchor::AnchorConfig>,
+    ephemeral_unanchored: bool,
+) -> Result<(), CliError> {
+    if matches!(scheme, Scheme::Slh(_)) && !(anchor.is_some() && ephemeral_unanchored) {
+        return Ok(());
+    }
+    crate::anchor::require_anchor_or_waiver(anchor.is_some(), ephemeral_unanchored, "anchor-dir")
+}
 
 pub fn keygen(raw: &[String]) -> Result<(), CliError> {
     let args = Args::parse(
@@ -542,6 +556,7 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
             "fast-demo",
             "accept-trusted-dealer-demo",
             "allow-single-disk-anchor",
+            "ephemeral-unanchored",
             "policy-allow-single-disk-anchor",
         ],
     )?;
@@ -559,6 +574,11 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
         ));
     }
     let anchor_cfg = crate::anchor::AnchorConfig::from_args(&args)?;
+    require_stateful_anchor(
+        scheme,
+        anchor_cfg.as_ref(),
+        args.flag("ephemeral-unanchored"),
+    )?;
     if matches!(scheme, Scheme::Slh(_)) && anchor_cfg.is_some() {
         return Err(CliError::usage(
             "--anchor-dir applies only to stateful schemes",
@@ -584,7 +604,7 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
     let mut vault = crate::vault::Vault::acquire(secret_out, !(force && existing))?;
     if force && existing {
         let old = load_json(secret_out, SECRET_FORMAT)?;
-        let opened = crate::envelope::open(&old, passphrase.as_deref())?;
+        let opened = crate::envelope::open(&old, passphrase.as_deref().map(Vec::as_slice))?;
         vault.set_key_material(&opened);
         vault.authenticate(&old)?;
         if !matches!(scheme_of(&old)?, Scheme::Slh(_)) {
@@ -592,7 +612,7 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
         }
     }
     let hrp = args.get("hrp").unwrap_or("qsp");
-    let seed = Secret32(match args.get("seed-file") {
+    let seed = Secret32::new(match args.get("seed-file") {
         Some(path) => {
             let text = read_bounded_file(path, MAX_KEY_FILE_BYTES)?;
             from_hex_exact(
@@ -602,10 +622,10 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
         }
         None => os_random_32()?,
     });
-    let entropy = Secret32(os_random_32()?);
+    let entropy = Secret32::new(os_random_32()?);
     let nonce = &entropy[..16];
     let seed = if !matches!(scheme, Scheme::Slh(_)) && !args.flag("deterministic-test-only") {
-        Secret32(cshake256_framed_32(
+        Secret32::new(cshake256_framed_32(
             b"QSAG.CLI.ENROLL.V1",
             &[&seed[..], nonce],
         ))
@@ -631,7 +651,7 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
         Scheme::Slh(params) => {
             let (sk, pk) = slh_keygen_from_seed(&params, &seed[..])
                 .map_err(|e| CliError::usage(e.to_string()))?;
-            let raw_key = ZeroizingBuf(sk.to_bytes());
+            let raw_key = ZeroizingBuf::new(sk.to_bytes());
             secret.push(("secret_key", Json::hex(&raw_key.0)));
             public.push((
                 "spki_der",
@@ -787,7 +807,7 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
     }
     vault.bind(&mut secret)?;
     vault.prepare(&mut secret)?;
-    let encoded = ZeroizingBuf(secret.to_pretty().into_bytes());
+    let encoded = ZeroizingBuf::new(secret.to_pretty().into_bytes());
     if force && existing {
         crate::cli::replace_secret(public_out, public.to_pretty().as_bytes())?;
         vault.seal(&mut secret)?;
@@ -817,6 +837,8 @@ Stateful schemes persist their advanced state before the signature is written.
   --passphrase-env <VAR> / --passphrase-file <PATH>  unlock sealed secret material
   --accept-trusted-dealer-demo  acknowledge local single-seed threshold demo custody
   --anchor-dir <dir>  verify and advance external monotone anchor before releasing signature
+                      (stateful schemes require it unless --ephemeral-unanchored is given)
+  --ephemeral-unanchored  sign with a disposable stateful key enrolled without an anchor
   --vault-dir <dir>   explicit local custody directory verified disjoint from --anchor-dir
   --allow-single-disk-anchor  permit --anchor-dir on the same filesystem device (distinct inode)
   --policy-id-hex <hex>  32-byte policy identifier committed into CeremonyContext
@@ -920,6 +942,7 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
             "help",
             "accept-trusted-dealer-demo",
             "allow-single-disk-anchor",
+            "ephemeral-unanchored",
             "policy-allow-single-disk-anchor",
             "policy-retry",
         ],
@@ -955,6 +978,11 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
     let mut vault = crate::vault::Vault::acquire(secret_path, false)?;
     let mut secret = load_json(secret_path, SECRET_FORMAT)?;
     let scheme = scheme_of(&secret)?;
+    require_stateful_anchor(
+        scheme,
+        anchor_cfg.as_ref(),
+        args.flag("ephemeral-unanchored"),
+    )?;
     require_dealer_acceptance(scheme, &args)?;
     if matches!(scheme, Scheme::Slh(_)) && (anchor_cfg.is_some() || has_context_flags) {
         return Err(CliError::usage(
@@ -962,7 +990,7 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
         ));
     }
     let passphrase = crate::envelope::passphrase(&args)?;
-    let opened = crate::envelope::open(&secret, passphrase.as_deref())?;
+    let opened = crate::envelope::open(&secret, passphrase.as_deref().map(Vec::as_slice))?;
     vault.set_key_material(&opened);
     vault.authenticate(&secret)?;
     crate::policy_ledger::enforce_key_pin(&secret, gate.as_ref())?;
@@ -1009,7 +1037,7 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
     let fresh = if args.flag("deterministic") {
         None
     } else {
-        Some(Secret32(os_random_32()?))
+        Some(Secret32::new(os_random_32()?))
     };
     let mut extra: Vec<(&str, Json)> = Vec::new();
     if has_context_flags {
@@ -1022,7 +1050,7 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
             let sk = SlhSecretKey::from_bytes_for_params(&params, opened.secret_key()?)
                 .map_err(|e| CliError::input(format!("secret key: {e}")))?;
             let hedged = fresh.as_ref().map(|entropy| {
-                let mut out = Secret32([0u8; 32]);
+                let mut out = Secret32::new([0u8; 32]);
                 cshake256_framed_xof(
                     b"QSAG.CLI.SLH.HEDGE.V1",
                     &[
@@ -1038,7 +1066,7 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
             });
             let opt_rand = hedged.as_ref().map(|h| &h.0[..params.n]);
             release(&sk.public_key().to_bytes(), &ctx, None, &mut extra)?;
-            let mut candidate = ZeroizingBuf(
+            let mut candidate = ZeroizingBuf::new(
                 slh_sign(&params, &message, &ctx, &sk, opt_rand)
                     .map_err(|e| CliError::usage(format!("signing failed: {e}")))?,
             );
@@ -1047,7 +1075,7 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
             {
                 *slot ^= mask;
             }
-            let reference = ZeroizingBuf(
+            let reference = ZeroizingBuf::new(
                 slh_sign(&params, &message, &ctx, &sk, opt_rand)
                     .map_err(|e| CliError::usage(format!("signing failed: {e}")))?,
             );
@@ -1067,7 +1095,7 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
             if key.uses_remaining() == 0 {
                 return Err(exhausted(FrontierFtsError::UseBudgetExhausted));
             }
-            let mut hedged = Secret32([0u8; 32]);
+            let mut hedged = Secret32::new([0u8; 32]);
             if let Some(entropy) = &fresh {
                 cshake256_framed_xof(
                     b"QSAG.CLI.FRONTIER.HEDGE.V1",
@@ -1087,9 +1115,12 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
             // can not be opened or does not belong to this key must leave the seed
             // burn ledger and the vault counter exactly as they were.
             let burn_mac = derive_secret(&seed, b"burn journal mac");
-            let wal =
-                FsWalFtsEpochLatch::open(burn_journal_path(secret_path), key.wal_key(), burn_mac.0)
-                    .map_err(|e| CliError::io("recovering frontier use journal", e))?;
+            let wal = FsWalFtsEpochLatch::open_existing(
+                burn_journal_path(secret_path),
+                key.wal_key(),
+                burn_mac.0,
+            )
+            .map_err(|e| CliError::io("recovering frontier use journal", e))?;
             let wal_key = key.wal_key();
             key = key.attach_wal(Box::new(wal)).map_err(exhausted)?;
             if key.uses_remaining() == 0 {
@@ -1129,7 +1160,7 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
             let dp = FrontierDpTable::build(profile);
             let sig = key.sign(&dp, &message, &hedged.0).map_err(exhausted)?;
             extra.push(("uses_remaining", Json::num(key.uses_remaining())));
-            let mut bytes = ZeroizingBuf(sig.to_bytes(profile));
+            let mut bytes = ZeroizingBuf::new(sig.to_bytes(profile));
             if let Some((idx, mask)) = fault_byte
                 && let Some(slot) = bytes.0.get_mut(idx)
             {
@@ -1159,7 +1190,7 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
             }
             let cached_tree = load_cached_threshold_tree(&secret, params)?;
             let burn_mac = derive_secret(&seed, b"burn journal mac");
-            let mut session = Secret32([0u8; 32]);
+            let mut session = Secret32::new([0u8; 32]);
             match &fresh {
                 Some(entropy) => cshake256_framed_xof(
                     b"QSAG.CLI.SESSION.HEDGE.V1",
@@ -1175,7 +1206,7 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
             }
             let (mut setup, mut journal) = if let Some((cached_pk, cached_layers)) = cached_tree {
                 let pk_seed_bytes = cached_pk.pk_seed_bytes;
-                let journal = FsWalFtsEpochLatch::open(
+                let journal = FsWalFtsEpochLatch::open_existing(
                     burn_journal_path(secret_path),
                     pk_seed_bytes,
                     burn_mac.0,
@@ -1224,7 +1255,7 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
                 (setup, journal)
             } else {
                 let setup = threshold_setup(&seed, parties, params, None)?;
-                let journal = FsWalFtsEpochLatch::open(
+                let journal = FsWalFtsEpochLatch::open_existing(
                     burn_journal_path(secret_path),
                     setup.pk.pk_seed_bytes,
                     burn_mac.0,
@@ -1277,7 +1308,7 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
                     other => CliError::usage(format!("threshold signing failed: {other:?}")),
                 })?;
             extra.push(("epoch", Json::num(epoch)));
-            let mut bytes = ZeroizingBuf(sig.to_bytes());
+            let mut bytes = ZeroizingBuf::new(sig.to_bytes());
             if let Some((idx, mask)) = fault_byte
                 && let Some(slot) = bytes.0.get_mut(idx)
             {
@@ -1434,6 +1465,19 @@ pub fn public_key_of(path: &str) -> Result<(Scheme, Vec<u8>), CliError> {
 #[cfg(test)]
 mod vault_tests {
     use super::*;
+    fn ephemeral(raw: &[String]) -> Vec<String> {
+        let mut args = raw.to_vec();
+        if !args.iter().any(|arg| arg == "--anchor-dir") {
+            args.push("--ephemeral-unanchored".into());
+        }
+        args
+    }
+    fn keygen(raw: &[String]) -> Result<(), CliError> {
+        super::keygen(&ephemeral(raw))
+    }
+    fn sign(raw: &[String]) -> Result<(), CliError> {
+        super::sign(&ephemeral(raw))
+    }
 
     #[test]
     fn interrupted_reservation_fails_closed() {
@@ -1445,7 +1489,7 @@ mod vault_tests {
         let path = |s: &str| dir.join(s).to_str().unwrap().to_owned();
         keygen(&[
             "--scheme".into(),
-            "fts-frontier-514".into(),
+            "fts-compact-1122".into(),
             "--secret-out".into(),
             path("sk"),
             "--public-out".into(),
@@ -1489,7 +1533,7 @@ mod vault_tests {
         std::fs::write(path("msg"), b"signed after the outage").unwrap();
         keygen(&[
             "--scheme".into(),
-            "fts-frontier-514".into(),
+            "fts-compact-1122".into(),
             "--secret-out".into(),
             path("sk"),
             "--public-out".into(),
@@ -1552,9 +1596,9 @@ mod vault_tests {
     }
 
     /// A crash after the seed burn and before the vault counter moved leaves the ledger one
-    /// use ahead of the vault. That use is spent without a signature; the next one is not lost.
+    /// use ahead of the vault. Restoring that vault cannot restore signing authority.
     #[test]
-    fn interrupted_seed_burn_costs_one_use_and_keeps_the_rest() {
+    fn interrupted_seed_burn_blocks_reuse_of_the_single_use_key() {
         let dir = std::env::temp_dir().join(format!(
             "qsag-interrupted-burn-{}",
             crate::codec::to_hex(&os_random_32().unwrap())
@@ -1564,7 +1608,7 @@ mod vault_tests {
         std::fs::write(path("msg"), b"second use").unwrap();
         keygen(&[
             "--scheme".into(),
-            "fts-frontier-770".into(),
+            "fts-frontier-2338".into(),
             "--secret-out".into(),
             path("sk"),
             "--public-out".into(),
@@ -1599,36 +1643,22 @@ mod vault_tests {
         std::fs::write(path("sk.vault.lock"), &vault_before[1]).unwrap();
         assert_eq!(uses(), 0);
 
-        // Use 0 can not be signed again: its seed is burned. The counter catches up instead.
-        let error = sign(&command("sig0-again")).unwrap_err();
-        assert!(
-            error
-                .message
-                .contains("use 0 was spent by an interrupted signing attempt"),
-            "{error}"
-        );
-        assert!(error.message.contains("1 of 2 uses remain"), "{error}");
-        assert!(!dir.join("sig0-again").exists());
-        assert_eq!(uses(), 1);
-
-        // The second use signs, verifies, and exhausts the key.
-        sign(&command("sig1")).unwrap();
-        assert_eq!(uses(), 2);
-        assert_ne!(
-            std::fs::read(path("sig0")).unwrap(),
-            std::fs::read(path("sig1")).unwrap()
-        );
+        // The durable burn remains authoritative for a single-use profile, even
+        // though the vault snapshot claims that the key is fresh.
+        for output in ["sig0-again", "sig1"] {
+            let error = sign(&command(output)).unwrap_err();
+            assert!(error.message.contains("UseBudgetExhausted"), "{error}");
+            assert!(!dir.join(output).exists());
+        }
         verify(&[
             "--public".into(),
             path("pk"),
             "--in".into(),
             path("msg"),
             "--sig".into(),
-            path("sig1"),
+            path("sig0"),
         ])
         .unwrap();
-        let error = sign(&command("sig2")).unwrap_err();
-        assert!(error.message.contains("UseBudgetExhausted"), "{error}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1644,7 +1674,7 @@ mod vault_tests {
         std::fs::write(path("msg"), b"concurrent signing").unwrap();
         keygen(&[
             "--scheme".into(),
-            "fts-frontier-514".into(),
+            "fts-compact-1122".into(),
             "--secret-out".into(),
             path("sk"),
             "--public-out".into(),
@@ -1698,6 +1728,24 @@ fn require_dealer_acceptance(scheme: Scheme, args: &Args) -> Result<(), CliError
 #[cfg(test)]
 mod custody_tests {
     use super::*;
+    fn ephemeral_sign_inner(raw: &[String], fault: Option<(usize, u8)>) -> Result<(), CliError> {
+        super::sign_inner(&ephemeral(raw), fault)
+    }
+
+    fn ephemeral(raw: &[String]) -> Vec<String> {
+        let mut args = raw.to_vec();
+        if !args.iter().any(|arg| arg == "--anchor-dir") {
+            args.push("--ephemeral-unanchored".into());
+        }
+        args
+    }
+    fn keygen(raw: &[String]) -> Result<(), CliError> {
+        super::keygen(&ephemeral(raw))
+    }
+    fn sign(raw: &[String]) -> Result<(), CliError> {
+        super::sign(&ephemeral(raw))
+    }
+
     #[test]
     fn interrupted_burn_and_ceremony_recover_and_ratchet_threshold_vault() {
         for point in ["after_seed_burn", "after_ceremony"] {
@@ -1788,7 +1836,7 @@ mod custody_tests {
         std::fs::write(path("msg"), b"sealed custody").unwrap();
         keygen(&[
             "--scheme".into(),
-            "fts-frontier-514".into(),
+            "fts-compact-1122".into(),
             "--secret-out".into(),
             path("sk"),
             "--public-out".into(),
@@ -1944,7 +1992,7 @@ mod custody_tests {
             path("slh.pk"),
         ])
         .unwrap();
-        let slh_err = sign_inner(
+        let slh_err = ephemeral_sign_inner(
             &[
                 "--secret".into(),
                 path("slh.sk"),
@@ -1986,14 +2034,14 @@ mod custody_tests {
         // 2. Frontier FTS: faulted signature never touches disk, while the use slot stays burned.
         keygen(&[
             "--scheme".into(),
-            "fts-frontier-514".into(),
+            "fts-compact-1122".into(),
             "--secret-out".into(),
             path("fr.sk"),
             "--public-out".into(),
             path("fr.pk"),
         ])
         .unwrap();
-        let fr_err = sign_inner(
+        let fr_err = ephemeral_sign_inner(
             &[
                 "--secret".into(),
                 path("fr.sk"),
@@ -2038,7 +2086,7 @@ mod custody_tests {
             "2".into(),
             "--accept-trusted-dealer-demo".into(),
         ];
-        let th_err = sign_inner(&th_args, Some((40, 0x80))).unwrap_err();
+        let th_err = ephemeral_sign_inner(&th_args, Some((40, 0x80))).unwrap_err();
         assert_eq!(th_err.code, 2);
         assert!(!dir.join("th.sig").exists());
         assert_eq!(sign(&th_args).unwrap_err().code, 4);
@@ -2301,5 +2349,29 @@ mod custody_tests {
         }
 
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod anchor_default_tests {
+    use super::*;
+    #[test]
+    fn stateful_keygen_requires_explicit_custody_choice() {
+        for name in ["fts-compact-1122", "fts-threshold", "agg-jorts-poseidon2"] {
+            assert!(require_stateful_anchor(Scheme::by_name(name).unwrap(), None, false).is_err());
+            assert!(require_stateful_anchor(Scheme::by_name(name).unwrap(), None, true).is_ok());
+        }
+        let error = keygen(&["--scheme".into(), "fts-compact-1122".into()]).unwrap_err();
+        assert!(error.message.contains("--ephemeral-unanchored"));
+        // Naming an anchor and waiving it at once is refused for every scheme.
+        let anchor = crate::anchor::AnchorConfig {
+            anchor_dir: "anchor".into(),
+            vault_dir: None,
+            allow_single_disk: false,
+        };
+        for name in ["fts-compact-1122", "slh-dsa-shake-128s"] {
+            let scheme = Scheme::by_name(name).unwrap();
+            assert!(require_stateful_anchor(scheme, Some(&anchor), true).is_err());
+        }
     }
 }

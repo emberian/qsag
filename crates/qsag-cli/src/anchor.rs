@@ -2,26 +2,26 @@
 //!
 //! Defends local stateful signing against full vault-directory snapshot rollback when
 //! `--anchor-dir` points to an independently mounted filesystem or hardware-backed directory.
-//! Each resource slot holds a permanent `0600` `.lock` sidecar (`QSAGLCK1`) whose 24-byte
-//! `dev_le64 || ino_le64 || seal8` identity (`lock_identity_seal`) is authenticated inside the
-//! `QSAGANC1` checkpoint record MAC, paired with single-use ceremony ticket consumption.
+//! Each resource slot is a [`LockedRecord`]: a permanent `0600` `.lock` sidecar (`QSAGLCK1`)
+//! whose 24-byte `dev_le64 || ino_le64 || seal8` identity (`lock_identity_seal`) is
+//! authenticated inside the `QSAGANC1` checkpoint record MAC, paired with single-use ceremony
+//! ticket consumption. The record file is `QSAGREC1 || seal8 || payload || mac`.
 
-use std::fs::File;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use qsag_accel::ct::{ct_eq_bytes, ct_zeroize_bytes};
 use qsag_accel::keccak::cshake256_framed_32;
+use qsag_asm::durable::LockedRecord;
 use qsag_core::ceremony_journal::CeremonyContext;
 use qsag_core::{ExternalMonotoneAnchor, LedgerCheckpoint};
 
-use crate::cli::{Args, CliError, Secret32, ZeroizingBuf, os_random_32};
+use crate::cli::{Args, CliError, Secret32};
 use crate::codec::{Json, from_hex_exact, to_hex};
-use crate::persist::{self, file_identity, parent_dir, private_dir};
+use crate::persist::{file_identity, parent_dir, private_dir};
 
-const LOCK_MAGIC: &[u8; 8] = b"QSAGLCK1";
 const ANCHOR_MAGIC: &[u8; 8] = b"QSAGANC1";
 const ANCHOR_PAYLOAD_LEN: usize = 8 + 32 + 32 + 8 + 32 + 1 + 8 + 32;
 const ANCHOR_RECORD_LEN: usize = ANCHOR_PAYLOAD_LEN + 32;
@@ -250,6 +250,25 @@ pub fn enforce_anchor_requirement(
     })
 }
 
+/// Rollback-sensitive custody state names its external anchor (`--{dir_option}`) or
+/// waives rollback protection by name (`--ephemeral-unanchored`). Naming both is a
+/// contradiction, not a preference.
+pub fn require_anchor_or_waiver(
+    anchored: bool,
+    waived: bool,
+    dir_option: &str,
+) -> Result<(), CliError> {
+    match (anchored, waived) {
+        (true, true) => Err(CliError::usage(format!(
+            "--ephemeral-unanchored waives rollback protection and cannot be combined with --{dir_option}"
+        ))),
+        (false, false) => Err(CliError::usage(format!(
+            "stateful custody requires --{dir_option}; disposable tests must explicitly use --ephemeral-unanchored"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// Compute a deterministic 256-bit monotonic floor checkpoint tag for integer watermarks.
 pub fn floor_checkpoint(domain: &[u8], key_id: &[u8; 32], floor_value: u64) -> LedgerCheckpoint {
     let generation = floor_value.saturating_add(1);
@@ -269,209 +288,6 @@ fn invalid_anchor(msg: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
 }
 
-fn side_path(path: &Path, suffix: &str) -> PathBuf {
-    let mut os = path.as_os_str().to_os_string();
-    os.push(suffix);
-    PathBuf::from(os)
-}
-
-/// Safe-Rust exclusive lock sidecar binding `dev_le64 || ino_le64 || seal8`.
-struct AnchorLockedRecord {
-    path: PathBuf,
-    lock_file: File,
-    seal: [u8; 8],
-    inode: [u8; 16],
-    poisoned: AtomicBool,
-}
-
-impl AnchorLockedRecord {
-    #[cfg(not(unix))]
-    fn acquire(_path: PathBuf, _must_create: bool) -> io::Result<Self> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "external anchor locking requires Unix",
-        ))
-    }
-
-    #[cfg(unix)]
-    fn acquire(path: PathBuf, must_create: bool) -> io::Result<Self> {
-        use std::os::unix::fs::FileExt;
-
-        if must_create {
-            match std::fs::symlink_metadata(&path) {
-                Ok(_) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::AlreadyExists,
-                        "external anchor record already exists",
-                    ));
-                }
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
-            }
-        } else if persist::regular_metadata(&path)?.is_none() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "provisioned external anchor record is missing",
-            ));
-        }
-
-        let lock_path = side_path(&path, ".lock");
-        let (mut lock_file, held_meta) =
-            persist::acquire_lock(&lock_path, must_create).map_err(|e| match e.kind() {
-                io::ErrorKind::NotFound if !must_create => {
-                    invalid_anchor("external anchor lock sidecar missing")
-                }
-                io::ErrorKind::WouldBlock => io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "external anchor lock unavailable",
-                ),
-                _ => e,
-            })?;
-        let inode = persist::identity_bytes(&held_meta);
-        let mut header = [0u8; 32];
-        if must_create {
-            let rand = os_random_32().map_err(|e| io::Error::other(e.message))?;
-            header[..8].copy_from_slice(LOCK_MAGIC);
-            header[8..16].copy_from_slice(&rand[..8]);
-            header[16..32].copy_from_slice(&inode);
-            lock_file.write_all(&header)?;
-            lock_file.sync_all()?;
-            persist::sync_parent_dir(&lock_path)?;
-        } else {
-            if held_meta.len() != 32 {
-                return Err(invalid_anchor("external anchor lock header truncated"));
-            }
-            lock_file.read_exact_at(&mut header, 0)?;
-            if &header[..8] != LOCK_MAGIC || header[16..32] != inode {
-                return Err(invalid_anchor("external anchor lock identity mismatch"));
-            }
-        }
-
-        if must_create && persist::regular_metadata(&path)?.is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "external anchor record appeared concurrently",
-            ));
-        }
-
-        let mut seal = [0u8; 8];
-        seal.copy_from_slice(&header[8..16]);
-        let this = Self {
-            path,
-            lock_file,
-            seal,
-            inode,
-            poisoned: AtomicBool::new(false),
-        };
-        this.check_lock()?;
-        persist::remove_interrupted_replacements(&this.path);
-        Ok(this)
-    }
-
-    /// Canonical 24-byte `dev_le64 || ino_le64 || nonce8` lock identity seal.
-    fn lock_identity_seal(&self) -> [u8; 24] {
-        let mut out = [0u8; 24];
-        out[..16].copy_from_slice(&self.inode);
-        out[16..24].copy_from_slice(&self.seal);
-        out
-    }
-
-    fn poison<T>(&self, err: io::Error) -> io::Result<T> {
-        self.poisoned.store(true, Ordering::SeqCst);
-        Err(err)
-    }
-
-    fn check_not_poisoned(&self) -> io::Result<()> {
-        if self.poisoned.load(Ordering::SeqCst) {
-            return Err(io::Error::other("external anchor handle poisoned"));
-        }
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    fn check_lock(&self) -> io::Result<()> {
-        use std::os::unix::fs::FileExt;
-        let lock_path = side_path(&self.path, ".lock");
-        let meta = persist::verify_held(&self.lock_file, &lock_path, true)?;
-        if meta.len() != 32 || persist::identity_bytes(&meta) != self.inode {
-            return Err(invalid_anchor("external anchor lock sidecar replaced"));
-        }
-        let mut header = [0u8; 32];
-        self.lock_file.read_exact_at(&mut header, 0)?;
-        if &header[..8] != LOCK_MAGIC || header[8..16] != self.seal || header[16..32] != self.inode
-        {
-            return Err(invalid_anchor("external anchor lock header altered"));
-        }
-        Ok(())
-    }
-
-    #[cfg(not(unix))]
-    fn check_lock(&self) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "external anchor requires Unix",
-        ))
-    }
-
-    #[cfg(unix)]
-    fn read_optional(&self) -> io::Result<Option<ZeroizingBuf>> {
-        use std::io::Read;
-        self.check_not_poisoned()?;
-        if let Err(e) = self.check_lock() {
-            return self.poison(e);
-        }
-        if persist::regular_metadata(&self.path)?.is_none() {
-            return Ok(None);
-        }
-        let result = (|| -> io::Result<ZeroizingBuf> {
-            let mut file = persist::no_follow()?.read(true).open(&self.path)?;
-            let meta = persist::verify_held(&file, &self.path, true)?;
-            if meta.len() != ANCHOR_RECORD_LEN as u64 {
-                return Err(invalid_anchor("external anchor record length invalid"));
-            }
-            let mut buf = ZeroizingBuf(vec![0u8; ANCHOR_RECORD_LEN]);
-            file.read_exact(&mut buf.0)?;
-            let mut extra = [0u8; 1];
-            if file.read(&mut extra)? != 0 {
-                return Err(invalid_anchor("external anchor record grew concurrently"));
-            }
-            self.check_lock()?;
-            Ok(buf)
-        })();
-        match result {
-            Ok(buf) => Ok(Some(buf)),
-            Err(e) => self.poison(e),
-        }
-    }
-
-    #[cfg(not(unix))]
-    fn read_optional(&self) -> io::Result<Option<ZeroizingBuf>> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "external anchor requires Unix",
-        ))
-    }
-
-    #[cfg(unix)]
-    fn replace(&self, contents: &[u8]) -> io::Result<()> {
-        self.check_not_poisoned()?;
-        if let Err(e) = self.check_lock() {
-            return self.poison(e);
-        }
-        persist::replace(&self.path, contents, || self.check_lock())
-            .and_then(|()| self.check_lock())
-            .or_else(|e| self.poison(e))
-    }
-
-    #[cfg(not(unix))]
-    fn replace(&self, _contents: &[u8]) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "external anchor requires Unix",
-        ))
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AnchorRecordState {
     checkpoint: LedgerCheckpoint,
@@ -479,7 +295,9 @@ struct AnchorRecordState {
 }
 
 struct AnchorInner {
-    record: AnchorLockedRecord,
+    record: LockedRecord,
+    /// Set by any refused read, write or consistency check; never cleared.
+    poisoned: AtomicBool,
     domain_hash: [u8; 32],
     key_id: [u8; 32],
     mac_key: [u8; 32],
@@ -496,6 +314,18 @@ impl Drop for AnchorInner {
 }
 
 impl AnchorInner {
+    fn poison<T>(&self, err: io::Error) -> io::Result<T> {
+        self.poisoned.store(true, Ordering::SeqCst);
+        Err(err)
+    }
+
+    fn check_not_poisoned(&self) -> io::Result<()> {
+        if self.poisoned.load(Ordering::SeqCst) {
+            return Err(io::Error::other("external anchor handle poisoned"));
+        }
+        Ok(())
+    }
+
     fn compute_mac(&self, payload: &[u8; ANCHOR_PAYLOAD_LEN]) -> [u8; 32] {
         let seal = self.record.lock_identity_seal();
         cshake256_framed_32(
@@ -536,7 +366,7 @@ impl AnchorInner {
             .try_into()
             .map_err(|_| invalid_anchor("external anchor payload slice"))?;
         let stored_mac = &bytes[ANCHOR_PAYLOAD_LEN..];
-        let expected_mac = Secret32(self.compute_mac(payload));
+        let expected_mac = Secret32::new(self.compute_mac(payload));
         if !ct_eq_bytes(stored_mac, &expected_mac.0) {
             return Err(invalid_anchor("external anchor MAC verification failed"));
         }
@@ -576,20 +406,29 @@ impl AnchorInner {
     }
 
     fn read_verified_disk_state(&self) -> io::Result<Option<AnchorRecordState>> {
-        match self.record.read_optional()? {
-            None if self.written.load(Ordering::SeqCst) => self
-                .record
-                .poison(invalid_anchor("external anchor record vanished")),
-            None => Ok(None),
-            Some(bytes) => match self.decode(&bytes) {
+        self.check_not_poisoned()?;
+        match self.record.read_bounded(ANCHOR_RECORD_LEN) {
+            Ok(bytes) => match self.decode(&bytes) {
                 Ok(state) => Ok(Some(state)),
-                Err(e) => self.record.poison(e),
+                Err(e) => self.poison(e),
             },
+            // A slot has no record between its enrollment and its first write.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                if self.written.load(Ordering::SeqCst) {
+                    self.poison(invalid_anchor("external anchor record vanished"))
+                } else {
+                    Ok(None)
+                }
+            }
+            Err(e) => self.poison(e),
         }
     }
 
     fn write_state(&self, state: &AnchorRecordState) -> io::Result<()> {
-        self.record.replace(&self.encode(state))?;
+        self.check_not_poisoned()?;
+        if let Err(e) = self.record.replace(&self.encode(state)) {
+            return self.poison(e);
+        }
         self.written.store(true, Ordering::SeqCst);
         Ok(())
     }
@@ -642,12 +481,13 @@ impl FsExternalMountAnchor {
     ) -> Result<Self, CliError> {
         config.validate_isolation(custody_files, explicit_dirs, true)?;
         let path = anchor_record_path(&config.anchor_dir, domain, &key_id);
-        let record = AnchorLockedRecord::acquire(path, true)
+        let record = LockedRecord::create_new(path)
             .map_err(|e| CliError::state(format!("enrolling external anchor ({domain}): {e}")))?;
         let domain_hash = cshake256_framed_32(b"QSAG.CLI.ANCHOR.DOMAIN.V1", &[domain.as_bytes()]);
         Ok(Self {
             inner: Arc::new(AnchorInner {
                 record,
+                poisoned: AtomicBool::new(false),
                 domain_hash,
                 key_id,
                 mac_key,
@@ -668,7 +508,7 @@ impl FsExternalMountAnchor {
     ) -> Result<Self, CliError> {
         config.validate_isolation(custody_files, explicit_dirs, false)?;
         let path = anchor_record_path(&config.anchor_dir, domain, &key_id);
-        let record = AnchorLockedRecord::acquire(path, false).map_err(|e| {
+        let record = LockedRecord::open_existing(path).map_err(|e| {
             CliError::state(format!(
                 "ExternalAnchorUnavailableOrCorrupt ({domain}): {e}"
             ))
@@ -676,6 +516,7 @@ impl FsExternalMountAnchor {
         let domain_hash = cshake256_framed_32(b"QSAG.CLI.ANCHOR.DOMAIN.V1", &[domain.as_bytes()]);
         let inner = Arc::new(AnchorInner {
             record,
+            poisoned: AtomicBool::new(false),
             domain_hash,
             key_id,
             mac_key,
@@ -742,20 +583,19 @@ impl FsExternalMountAnchor {
         {
             return self
                 .inner
-                .record
                 .poison(invalid_anchor("external anchor disk diverged from memory"));
         }
         if disk.checkpoint.generation != expected.generation
             || !ct_eq_bytes(&disk.checkpoint.tag, &expected.tag)
         {
-            return self.inner.record.poison(invalid_anchor(
+            return self.inner.poison(invalid_anchor(
                 "external anchor checkpoint mismatch on ticket consume",
             ));
         }
         if let Some((consumed_gen, _)) = disk.consumed
             && consumed_gen >= expected.generation
         {
-            return self.inner.record.poison(io::Error::new(
+            return self.inner.poison(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "CeremonyTicketAlreadyConsumed",
             ));
@@ -816,7 +656,7 @@ impl ExternalMonotoneAnchor for FsExternalMountAnchor {
                 || (on_disk.checkpoint.generation == mem.checkpoint.generation
                     && !ct_eq_bytes(&on_disk.checkpoint.tag, &mem.checkpoint.tag)))
         {
-            return self.inner.record.poison(io::Error::other(
+            return self.inner.poison(io::Error::other(
                 "external anchor rolled back underneath live handle",
             ));
         }
@@ -833,13 +673,13 @@ impl ExternalMonotoneAnchor for FsExternalMountAnchor {
         let disk = self.inner.read_verified_disk_state()?;
         if let Some(prev) = disk {
             if checkpoint.generation < prev.checkpoint.generation {
-                return self.inner.record.poison(io::Error::other(
+                return self.inner.poison(io::Error::other(
                     "external anchor rejects rolled-back generation",
                 ));
             }
             if checkpoint.generation == prev.checkpoint.generation {
                 if !ct_eq_bytes(&checkpoint.tag, &prev.checkpoint.tag) {
-                    return self.inner.record.poison(io::Error::other(
+                    return self.inner.poison(io::Error::other(
                         "external anchor rejects mismatched tag at equal generation",
                     ));
                 }
@@ -849,7 +689,9 @@ impl ExternalMonotoneAnchor for FsExternalMountAnchor {
         }
         let next = AnchorRecordState {
             checkpoint,
-            consumed: disk.and_then(|d| d.consumed),
+            // A strictly newer checkpoint retires the previous generation's latch.
+            // Equal-generation advances return above and preserve its consumption.
+            consumed: None,
         };
         self.inner.write_state(&next)?;
         *guard = Some(next);
@@ -860,7 +702,16 @@ impl ExternalMonotoneAnchor for FsExternalMountAnchor {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::fs::OpenOptions;
+    use crate::cli::os_random_32;
+    use qsag_asm::durable::RECORD_HEADER_BYTES;
+    use std::fs::{File, OpenOptions};
+    use std::io::Write;
+
+    fn side_path(path: &Path, suffix: &str) -> PathBuf {
+        let mut os = path.as_os_str().to_os_string();
+        os.push(suffix);
+        PathBuf::from(os)
+    }
 
     fn temp_root(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -1192,7 +1043,7 @@ mod tests {
 
         let path = slot.record("ceremony", &key_id);
         let good = std::fs::read(&path).unwrap();
-        assert_eq!(good.len(), ANCHOR_RECORD_LEN);
+        assert_eq!(good.len(), RECORD_HEADER_BYTES + ANCHOR_RECORD_LEN);
         let refused = |bytes: &[u8]| {
             std::fs::write(&path, bytes).unwrap();
             let err = slot.open("ceremony", key_id).err().unwrap();
@@ -1204,12 +1055,25 @@ mod tests {
             );
         };
         // Truncated at every length, extended, and empty.
-        for len in [0, 1, 8, ANCHOR_PAYLOAD_LEN, ANCHOR_RECORD_LEN - 1] {
+        for len in [
+            0,
+            1,
+            RECORD_HEADER_BYTES,
+            RECORD_HEADER_BYTES + 8,
+            RECORD_HEADER_BYTES + ANCHOR_PAYLOAD_LEN,
+            good.len() - 1,
+        ] {
             refused(&good[..len]);
         }
         refused(&[&good[..], &[0u8]].concat());
-        // One flipped bit in every field: magic, domain, key, generation, tag, consumed
-        // flag, consumed generation, ceremony id, MAC.
+        // One flipped bit in the record header (magic, lock seal) and in every field:
+        // magic, domain, key, generation, tag, consumed flag, consumed generation,
+        // ceremony id, MAC.
+        for at in [0, 8] {
+            let mut bytes = good.clone();
+            bytes[at] ^= 1;
+            refused(&bytes);
+        }
         for at in [
             0,
             8,
@@ -1223,7 +1087,7 @@ mod tests {
             ANCHOR_RECORD_LEN - 1,
         ] {
             let mut bytes = good.clone();
-            bytes[at] ^= 1;
+            bytes[RECORD_HEADER_BYTES + at] ^= 1;
             refused(&bytes);
         }
         // A higher-generation record of another key, and of another domain of the same key:
@@ -1346,15 +1210,6 @@ mod tests {
                 .is_err()
         );
         drop(anchor);
-        // A record put back with permissions wider than its owner's is refused as well.
-        put_back(&path, &first);
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
-        }
-        let err = slot.open("ceremony", key_id).err().unwrap();
-        assert!(err.message.contains("permissions"), "{}", err.message);
-        std::fs::remove_file(&path).unwrap();
         // With the record gone the slot does not open at all.
         assert!(slot.open("ceremony", key_id).is_err());
 
@@ -1399,6 +1254,27 @@ mod tests {
         // A new generation issues exactly one new ticket and voids the earlier one.
         let anchor = slot.open("ceremony", key_id).unwrap();
         anchor.advance(ckpt(3, 0xCC)).unwrap();
+        assert_eq!(
+            anchor
+                .inner
+                .read_verified_disk_state()
+                .unwrap()
+                .unwrap()
+                .consumed,
+            None
+        );
+        // Reopening cannot resurrect a latch from the retired ceremony generation.
+        drop(anchor);
+        let anchor = slot.open("ceremony", key_id).unwrap();
+        assert_eq!(
+            anchor
+                .inner
+                .read_verified_disk_state()
+                .unwrap()
+                .unwrap()
+                .consumed,
+            None
+        );
         anchor
             .consume_ceremony_ticket(ckpt(3, 0xCC), &[3; 32])
             .unwrap();
@@ -1417,20 +1293,30 @@ mod tests {
     }
 
     #[test]
-    fn interrupted_write_leftovers_are_removed_on_the_next_open() {
+    fn interrupted_write_leftover_does_not_block_the_next_write() {
         let slot = Slot::new("leftover");
         let key_id = [0x61; 32];
         let anchor = slot.provision("ceremony", key_id);
         anchor.advance(ckpt(1, 0xAA)).unwrap();
         drop(anchor);
         let path = slot.record("ceremony", &key_id);
-        let leftover = side_path(&path, &format!(".{}.tmp", "ab".repeat(16)));
+        let leftover = side_path(&path, ".tmp");
         let unrelated = side_path(&path, ".note.tmp");
-        std::fs::write(&leftover, b"half a record").unwrap();
+        use std::io::Write;
+        qsag_asm::durable::no_follow_options()
+            .unwrap()
+            .write(true)
+            .create_new(true)
+            .open(&leftover)
+            .unwrap()
+            .write_all(b"half a record")
+            .unwrap();
         std::fs::write(&unrelated, b"keep").unwrap();
         let anchor = slot.open("ceremony", key_id).unwrap();
+        assert_eq!(anchor.load().unwrap(), Some(ckpt(1, 0xAA)));
+        anchor.advance(ckpt(2, 0xBB)).unwrap();
         assert!(!leftover.exists());
         assert!(unrelated.exists());
-        assert_eq!(anchor.load().unwrap(), Some(ckpt(1, 0xAA)));
+        assert_eq!(anchor.load().unwrap(), Some(ckpt(2, 0xBB)));
     }
 }

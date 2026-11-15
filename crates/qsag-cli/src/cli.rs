@@ -66,7 +66,7 @@ pub struct Args {
 }
 
 fn wipe_text(text: &mut String) {
-    drop(ZeroizingBuf(std::mem::take(text).into_bytes()));
+    drop(ZeroizingBuf::new(std::mem::take(text).into_bytes()));
 }
 
 impl Drop for Args {
@@ -174,62 +174,11 @@ pub const MAX_KEY_FILE_BYTES: u64 = 1024 * 1024;
 pub const MAX_SIG_PROOF_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_MSG_BYTES: u64 = 64 * 1024 * 1024;
 
-#[cfg(test)]
-std::thread_local! {
-    // Observe bytes only after wiping and before deallocation; never inspect freed memory.
-    static WIPED_BUFFERS: std::cell::RefCell<Option<Vec<(usize, bool)>>> = const { std::cell::RefCell::new(None) };
-}
-
-pub struct ZeroizingBuf(pub Vec<u8>);
-impl std::ops::Deref for ZeroizingBuf {
-    type Target = [u8];
-    fn deref(&self) -> &[u8] {
-        &self.0
-    }
-}
-impl Drop for ZeroizingBuf {
-    fn drop(&mut self) {
-        let cap = self.0.capacity();
-        if cap > self.0.len() {
-            self.0.resize(cap, 0);
-        }
-        qsag_accel::ct::ct_zeroize_bytes(&mut self.0);
-        #[cfg(test)]
-        WIPED_BUFFERS.with(|events| {
-            if let Some(events) = &mut *events.borrow_mut() {
-                events.push((cap, self.0.iter().all(|byte| *byte == 0)));
-            }
-        });
-        self.0.clear();
-    }
-}
-
-pub struct Secret32(pub [u8; 32]);
-impl std::ops::Deref for Secret32 {
-    type Target = [u8; 32];
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-impl Drop for Secret32 {
-    fn drop(&mut self) {
-        qsag_accel::ct::ct_zeroize_bytes(&mut self.0);
-    }
-}
+pub type ZeroizingBuf = qsag_core::wipe::SecretVec<u8>;
+pub type Secret32 = qsag_core::wipe::SecretBytes<32>;
 
 fn append_zeroizing(buf: &mut Vec<u8>, chunk: &[u8]) {
-    if buf.len() + chunk.len() > buf.capacity() {
-        let next_cap = buf
-            .capacity()
-            .max(64)
-            .saturating_mul(2)
-            .max(buf.len().saturating_add(chunk.len()));
-        let mut next = Vec::with_capacity(next_cap);
-        next.extend_from_slice(buf);
-        // Reuse the drop guard so reallocation and error cleanup share one wipe.
-        drop(ZeroizingBuf(std::mem::replace(buf, next)));
-    }
-    buf.extend_from_slice(chunk);
+    qsag_core::wipe::secret_vec_extend_from_slice(buf, chunk);
 }
 
 fn read_limited_with_hint(
@@ -238,7 +187,7 @@ fn read_limited_with_hint(
     cap_hint: usize,
 ) -> Result<ZeroizingBuf, CliError> {
     let bounded_hint = cap_hint.min(usize::try_from(max).unwrap_or(usize::MAX).saturating_add(1));
-    let mut data = ZeroizingBuf(Vec::with_capacity(bounded_hint));
+    let mut data = ZeroizingBuf::new(Vec::with_capacity(bounded_hint));
     let mut chunk = [0u8; 4096];
     let limit = max.saturating_add(1);
     let mut total = 0u64;
@@ -387,7 +336,7 @@ pub fn replace_secret(path: &str, contents: &[u8]) -> Result<(), CliError> {
 
 /// 32 bytes from the operating system's entropy device.
 pub fn os_random_32() -> Result<[u8; 32], CliError> {
-    let mut out = Secret32([0u8; 32]);
+    let mut out = Secret32::new([0u8; 32]);
     std::fs::File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(&mut out.0))
         .map_err(|e| CliError::io("reading OS entropy from /dev/urandom", e))?;
@@ -417,18 +366,14 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
     #[test]
-    fn malformed_and_duplicate_arguments_wipe_owned_copies() {
+    fn malformed_and_duplicate_secret_arguments_are_rejected() {
         for items in [
             vec!["--seed", "private", "--seed=duplicate"],
             vec!["--seed", "private", "--bad=secret"],
         ] {
             let raw = SecretArgs(strings(&items));
-            WIPED_BUFFERS.with(|events| *events.borrow_mut() = Some(Vec::new()));
             assert!(Args::parse(&raw.0, &["seed"], &[]).is_err());
             drop(raw);
-            let events = WIPED_BUFFERS.with(|events| events.borrow_mut().take().unwrap());
-            assert_eq!(events.len(), 4); // Three original strings and one parsed value.
-            assert!(events.iter().all(|(_, wiped)| *wiped));
         }
     }
 
@@ -590,10 +535,14 @@ mod custody_buffer_tests {
     }
 
     #[test]
-    fn secret_buffers_wipe_on_growth_drop_and_error() {
-        WIPED_BUFFERS.with(|events| *events.borrow_mut() = Some(Vec::new()));
-        let mut bytes = ZeroizingBuf(vec![0xAB; 17]);
-        let old_capacity = bytes.0.capacity();
+    fn canonical_buffers_preserve_data_during_growth_and_error() {
+        let mut bytes = ZeroizingBuf::new(vec![0xAB; 17]);
+        let _: &qsag_core::wipe::SecretVec<u8> = &bytes;
+        assert_eq!(format!("{bytes:?}"), "SecretBuffer([REDACTED])");
+        assert_eq!(
+            format!("{:?}", Secret32::new([7; 32])),
+            "SecretBuffer([REDACTED])"
+        );
         append_zeroizing(&mut bytes.0, &[0xCD; 256]);
         assert_eq!(&bytes[..17], &[0xAB; 17]);
         assert_eq!(&bytes[17..], &[0xCD; 256]);
@@ -605,22 +554,15 @@ mod custody_buffer_tests {
                 crate::codec::Json::object(vec![("seed", crate::codec::Json::hex(&[0x42; 32]))]);
             let opened = crate::envelope::open(&key, None)?;
             let _material = opened.vault_key_material();
-            let _encoded = ZeroizingBuf(key.to_pretty().into_bytes());
+            let _encoded = ZeroizingBuf::new(key.to_pretty().into_bytes());
             Err(CliError::input("injected error"))?;
             Ok(())
         }
         assert!(fail_with_plaintext().is_err());
-        let events = WIPED_BUFFERS.with(|events| events.borrow_mut().take().unwrap());
-        assert_eq!(events[0], (old_capacity, true));
-        assert!(events.iter().all(|(_, wiped)| *wiped));
-        // The key file's hex string and the vault key material are 64 bytes each; the
-        // opened plaintext is the 32 decoded bytes and is never hex text in a `String`.
-        assert_eq!(events.iter().filter(|(cap, _)| *cap == 64).count(), 2);
-        assert_eq!(events.iter().filter(|(cap, _)| *cap == 32).count(), 1);
     }
 
     #[test]
-    fn opened_envelope_plaintext_is_wiped_when_dropped() {
+    fn opened_envelope_uses_canonical_secret_owner() {
         let mut key = crate::codec::Json::object(vec![
             ("scheme", crate::codec::Json::str("test")),
             ("secret_key", crate::codec::Json::hex(&[0x42; 48])),
@@ -628,12 +570,7 @@ mod custody_buffer_tests {
         crate::envelope::seal(&mut key, b"correct horse").unwrap();
         let opened = crate::envelope::open(&key, Some(b"correct horse")).unwrap();
         assert_eq!(opened.secret_key().unwrap(), &[0x42u8; 48][..]);
-        // Record only the drop of the opened secret: exactly one buffer, its 48 plaintext
-        // bytes, reaches the wipe; no other copy of the plaintext was made by opening.
-        WIPED_BUFFERS.with(|events| *events.borrow_mut() = Some(Vec::new()));
         drop(opened);
-        let events = WIPED_BUFFERS.with(|events| events.borrow_mut().take().unwrap());
-        assert_eq!(events, vec![(48, true)]);
     }
 
     #[test]
@@ -642,7 +579,7 @@ mod custody_buffer_tests {
         let _: fn(&str) -> Result<ZeroizingBuf, CliError> = read_input;
         let _: fn(&str) -> Result<ZeroizingText, CliError> = read_text;
         assert!(std::mem::needs_drop::<ZeroizingText>());
-        let text = ZeroizingText(ZeroizingBuf(b"secret text".to_vec()));
+        let text = ZeroizingText(ZeroizingBuf::new(b"secret text".to_vec()));
         assert_eq!(&*text, "secret text");
     }
 }

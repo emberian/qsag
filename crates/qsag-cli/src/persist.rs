@@ -30,15 +30,6 @@ pub fn file_identity(meta: &Metadata) -> (u64, u64) {
     }
 }
 
-/// Canonical `dev_le64 || ino_le64`, the form bound into lock headers and MACs.
-pub fn identity_bytes(meta: &Metadata) -> [u8; 16] {
-    let (dev, ino) = file_identity(meta);
-    let mut out = [0u8; 16];
-    out[..8].copy_from_slice(&dev.to_le_bytes());
-    out[8..].copy_from_slice(&ino.to_le_bytes());
-    out
-}
-
 fn owner_only(meta: &Metadata) -> bool {
     #[cfg(unix)]
     {
@@ -158,11 +149,6 @@ impl Created {
     }
 }
 
-const TEMPORARY_NONCE_HEX: usize = 64;
-/// Nonce length of the temporaries written by external-anchor records before both writers
-/// shared [`replace`]. A leftover of that form is still recognized.
-const LEGACY_TEMPORARY_NONCE_HEX: usize = 32;
-
 fn side_path(path: &Path, suffix: &str) -> PathBuf {
     let mut os = path.as_os_str().to_os_string();
     os.push(suffix);
@@ -187,33 +173,6 @@ pub fn replace(
         let _ = std::fs::remove_file(&tmp);
     }
     result
-}
-
-/// Unlink the temporary files that interrupted [`replace`] calls on `path` left behind.
-/// The caller holds the exclusive lock of `path`, so no live writer owns one. Best effort:
-/// a leftover is inert.
-pub fn remove_interrupted_replacements(path: &Path) {
-    let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else {
-        return;
-    };
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let file_name = entry.file_name();
-        let stale = file_name
-            .to_str()
-            .and_then(|n| n.strip_prefix(name))
-            .and_then(|n| n.strip_prefix('.'))
-            .and_then(|n| n.strip_suffix(".tmp"))
-            .is_some_and(|hex| {
-                matches!(hex.len(), TEMPORARY_NONCE_HEX | LEGACY_TEMPORARY_NONCE_HEX)
-                    && hex.bytes().all(|b| b.is_ascii_hexdigit())
-            });
-        if stale && entry.file_type().is_ok_and(|t| t.is_file()) {
-            let _ = std::fs::remove_file(entry.path());
-        }
-    }
 }
 
 /// Open the owner-only lock file at `path` and take its exclusive OS lock, waiting up to
@@ -309,7 +268,7 @@ pub fn authenticated_bytes(json: &Json, excluded: &[&str]) -> ZeroizingBuf {
     if let Json::Object(fields) = &mut covered {
         fields.retain(|(name, _)| !excluded.contains(&name.as_str()));
     }
-    ZeroizingBuf(covered.to_pretty().into_bytes())
+    ZeroizingBuf::new(covered.to_pretty().into_bytes())
 }
 
 #[cfg(all(test, unix))]
@@ -356,16 +315,6 @@ mod tests {
         assert!(refused.is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"new contents");
         assert_eq!(names(&dir), ["record"]);
-
-        // Leftovers of both temporary name forms are removed; other files are kept.
-        let long = side_path(&path, &format!(".{}.tmp", "ab".repeat(32)));
-        let legacy = side_path(&path, &format!(".{}.tmp", "cd".repeat(16)));
-        let unrelated = side_path(&path, ".note.tmp");
-        for leftover in [&long, &legacy, &unrelated] {
-            std::fs::write(leftover, b"half").unwrap();
-        }
-        remove_interrupted_replacements(&path);
-        assert_eq!(names(&dir), ["record", "record.note.tmp"]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
