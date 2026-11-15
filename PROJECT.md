@@ -98,3 +98,31 @@ Remaining C-06 publication inputs: recover the historical GPU and durable-quorum
 The post-convergence run explicitly enabled and passed the production base-OT roundtrip/replay test. Dense-PCG depth-14/15 checks also passed; the full-height FIPS 205 threshold/KAT/distributed-TSW soak passed in 42.99 seconds. The three-party MASCOT soak did not finish within its 900-second bound (exit 124); it is not a passing result. These test results do not close the unvalidated dense-code security assumption.
 
 Final post-convergence workspace acceptance: 608 tests passed, zero failed and 12 ignored across 33 suites; formatting, no-default-feature checking and clippy with warnings denied pass. The ignored three-party MASCOT soak was separately attempted and timed out; ignored tests are not silently counted as successes.
+
+## Compiled-kernel freshness and SIMD verification
+
+Codex, 2026-11-14: fresh Rust 1.99.1 release archives pass the current
+kernel-byte freshness gate for 19/19 x86-64 and 9/9 AArch64 assembly symbols,
+with zero changed, removed or unpinned symbols. The five separate SIMD proof
+fixtures also match. The requested certificate modules and `ElfFixtureVerify`
+build successfully; the fault/speculation audit checks 1,534 declarations with
+zero rejected axioms. One-byte mutation and forged-provenance controls reject.
+
+Strict compiled-code audits pass 92 x86-64 and 65 AArch64 crypto symbols,
+including public dispatch wrappers. The broader assembly audit also passes
+Linux ELF, Windows COFF and Apple Mach-O checks. Eight mandatory-feature SIMD
+differential tests pass on Zen 5 hardware and Intel SDE; QEMU 10 and 11 fail the
+AVX-512 capability probe and are not counted as successful execution. CI now
+requires the new SIMD symbols and runs the verified SDE fallback.
+
+Remaining integration evidence: the separate linked ThinLTO CLI audit did not
+run because its attempted build hit two type errors in `poseidon2_mpc.rs`.
+Concurrent source edits have since corrected those expressions; a fresh linked
+build and audit still need to establish that gate. A whole-library Lean policy
+check also reported missing aggregate imports for seven newly added modules:
+`CodingTheory.BivariateFactorSplit`, `CodingTheory.BivariateGauss`,
+`CodingTheory.JohnsonSetSystem`, `CodingTheory.PersistentPairsBound`,
+`PrattPrimalityCert`, `Rss256TernaryRound`, and `Rss256TwoPassProductProof`.
+These are separate from the passing scoped certificate build. The exact source
+hashes and all successful and failed attempts are retained in the external
+verification record; this entry does not claim workspace-wide CI acceptance.
