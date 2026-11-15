@@ -163,6 +163,8 @@ const KECCAK_ROTATION_OFFSETS: [u32; 25] = [
 /// Errors surfaced during dealerless distributed MPC staging or proactive share refresh.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DealerlessStagingError {
+    /// A protected output sink rejected a staged share.
+    OutputRejected,
     /// Underlying quorum parameter or custodian error.
     Quorum(QuorumError),
     /// Underlying Ring-LWE Base-OT or KOS15 preprocessing error.
@@ -210,6 +212,7 @@ impl From<PreprocessError> for DealerlessStagingError {
 impl fmt::Display for DealerlessStagingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::OutputRejected => f.write_str("staging output sink rejected a share"),
             Self::Quorum(e) => write!(f, "quorum error: {e}"),
             Self::Preprocess(e) => write!(f, "preprocessing error: {e}"),
             Self::PartyCountMismatch { expected, got } => {
@@ -2032,6 +2035,53 @@ fn stage_single_committee_subtree_mpc(
     committee_rngs: &mut [PartyPrivateRng],
     #[cfg(test)] fault: Option<StagingFault>,
 ) -> StagedCommitteeSubtreeOutcome {
+    let mut stores_leaves = SecretBuffer(
+        (0..committee_rngs.len())
+            .map(|_| vec![vec![[0u8; 32]; LEAF_SHARE_NODES]; leaf_indices.len()])
+            .collect::<Vec<Vec<Vec<Node>>>>(),
+    );
+    let leaf_ends = stage_single_committee_into(
+        committee,
+        StagingSlice {
+            leaves: leaf_indices,
+            chains: 0..WOTS_CHAINS,
+        },
+        pk_seed,
+        committee_sid,
+        committee_rngs,
+        &mut |party, epoch, position, share| {
+            stores_leaves[party][epoch][position] = *share;
+            Ok(())
+        },
+        #[cfg(test)]
+        fault,
+    )?;
+    let stores = core::mem::take(&mut stores_leaves.0)
+        .into_iter()
+        .map(|leaves| CommitteeShareStore::from_parts(committee, leaves))
+        .collect();
+    Ok((stores, leaf_ends))
+}
+
+struct StagingSlice<'a> {
+    leaves: &'a [u64],
+    chains: core::ops::Range<usize>,
+}
+
+/// Shared authenticated MPC implementation. The caller chooses the destination;
+/// volatile minting writes directly to locked pages rather than a heap share table.
+/// Outputs are tentative until the endpoint MAC checks all succeed.
+fn stage_single_committee_into(
+    committee: usize,
+    slice: StagingSlice<'_>,
+    pk_seed: &Node,
+    committee_sid: [u8; 32],
+    committee_rngs: &mut [PartyPrivateRng],
+    sink: &mut impl FnMut(usize, usize, usize, &Node) -> Result<(), DealerlessStagingError>,
+    #[cfg(test)] fault: Option<StagingFault>,
+) -> Result<Vec<(u64, Vec<Node>)>, DealerlessStagingError> {
+    let leaf_indices = slice.leaves;
+    let chains_per_leaf = slice.chains.len();
     let m = committee_rngs.len();
     #[cfg(test)]
     let inject_beaver_fault = matches!(
@@ -2048,20 +2098,14 @@ fn stage_single_committee_subtree_mpc(
     )?;
 
     let num_leaves = leaf_indices.len();
-    let total_chains = num_leaves * WOTS_CHAINS;
+    let total_chains = num_leaves * chains_per_leaf;
     let mut coords = Vec::with_capacity(total_chains);
     for &leaf in leaf_indices {
-        for chain in 0..(WOTS_CHAINS as u32) {
+        for chain in slice.chains.start as u32..slice.chains.end as u32 {
             coords.push((leaf, chain));
         }
     }
 
-    // Per-member staged share table: `stores_leaves[member_pos][epoch][3 * chain + step]`.
-    let mut stores_leaves = SecretBuffer(
-        (0..m)
-            .map(|_| vec![vec![[0u8; 32]; LEAF_SHARE_NODES]; num_leaves])
-            .collect::<Vec<Vec<Vec<Node>>>>(),
-    );
     let mut opened_ends: Vec<Vec<Node>> = vec![vec![[0u8; 32]; WOTS_CHAINS]; num_leaves];
 
     for (batch_idx, batch_coords) in coords.chunks(64).enumerate() {
@@ -2075,9 +2119,9 @@ fn stage_single_committee_subtree_mpc(
                 let share = committee_rngs[u].next_bytes32();
                 local_y0[c_idx] = share;
                 let global_chain = batch_idx * 64 + c_idx;
-                let epoch = global_chain / WOTS_CHAINS;
-                let chain = global_chain % WOTS_CHAINS;
-                stores_leaves[u][epoch][3 * chain] = share;
+                let epoch = global_chain / chains_per_leaf;
+                let chain = slice.chains.start + global_chain % chains_per_leaf;
+                sink(u, epoch, 3 * chain, &share)?;
             }
             y0_planes[u] = pack_nodes_to_256_planes(&local_y0);
             for n_ref in local_y0.iter_mut() {
@@ -2139,9 +2183,9 @@ fn stage_single_committee_subtree_mpc(
                     let mut unpacked = unpack_256_planes_to_nodes(&cur_planes_sh[u], count);
                     for (c_idx, node_sh) in unpacked.iter().enumerate() {
                         let global_chain = batch_idx * 64 + c_idx;
-                        let epoch = global_chain / WOTS_CHAINS;
-                        let chain = global_chain % WOTS_CHAINS;
-                        stores_leaves[u][epoch][3 * chain + next_step_slot] = *node_sh;
+                        let epoch = global_chain / chains_per_leaf;
+                        let chain = slice.chains.start + global_chain % chains_per_leaf;
+                        sink(u, epoch, 3 * chain + next_step_slot, node_sh)?;
                     }
                     for n_ref in &mut unpacked {
                         wipe_bytes32(n_ref);
@@ -2184,18 +2228,95 @@ fn stage_single_committee_subtree_mpc(
         let batch_ends = unpack_256_planes_to_nodes(&y3_opened_planes, count);
         for (c_idx, end_node) in batch_ends.into_iter().enumerate() {
             let global_chain = batch_idx * 64 + c_idx;
-            let epoch = global_chain / WOTS_CHAINS;
-            let chain = global_chain % WOTS_CHAINS;
+            let epoch = global_chain / chains_per_leaf;
+            let chain = slice.chains.start + global_chain % chains_per_leaf;
             opened_ends[epoch][chain] = end_node;
         }
     }
 
-    let stores = core::mem::take(&mut stores_leaves.0)
-        .into_iter()
-        .map(|leaves| CommitteeShareStore::from_parts(committee, leaves))
+    Ok(leaf_indices.iter().copied().zip(opened_ends).collect())
+}
+
+/// Volatile caller supplies a protected sink and fresh per-party randomness.
+/// Unlike committee layout staging, this evaluates only the requested subset.
+#[cfg(all(
+    any(test, feature = "std"),
+    target_os = "linux",
+    target_pointer_width = "64"
+))]
+pub(crate) fn stage_volatile_subset_into(
+    leaves: &[u64],
+    pk_seed: &Node,
+    session: Node,
+    rngs: &mut [PartyPrivateRng],
+    sink: &mut (impl FnMut(usize, usize, usize, &Node) -> Result<(), DealerlessStagingError> + Send),
+) -> Result<Vec<(u64, Vec<Node>)>, DealerlessStagingError> {
+    // Two independent 64-chain sessions: disjoint secret coordinates, independent
+    // per-party private randomness, distinct public transcript domains. Both MAC
+    // barriers must succeed before any descriptor can be certified.
+    let mut jobs = Vec::with_capacity(2);
+    for half in 0..2 {
+        let sid = h32(
+            b"QSAG.VOLATILE.MINT.HALF/v1",
+            &[&session, &(half as u64).to_be_bytes()],
+        );
+        let private: Vec<_> = rngs
+            .iter_mut()
+            .map(|rng| {
+                let mut seed = rng.next_bytes32();
+                let private = PartyPrivateRng::from_seed(seed, b"QSAG.VOLATILE.MINT.HALF.RNG/v1");
+                wipe_bytes(&mut seed);
+                private
+            })
+            .collect();
+        jobs.push((half, sid, private));
+    }
+    let sink = std::sync::Mutex::new(sink);
+    let parts = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for (half, sid, mut private) in jobs {
+            let sink = &sink;
+            handles.push(scope.spawn(move || {
+                stage_single_committee_into(
+                    0,
+                    StagingSlice {
+                        leaves,
+                        chains: half * 64..(half + 1) * 64,
+                    },
+                    pk_seed,
+                    sid,
+                    &mut private,
+                    &mut |party, epoch, position, share| {
+                        (sink
+                            .lock()
+                            .map_err(|_| DealerlessStagingError::OutputRejected)?)(
+                            party, epoch, position, share,
+                        )
+                    },
+                    #[cfg(test)]
+                    None,
+                )
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .map_err(|_| DealerlessStagingError::OutputRejected)?
+            })
+            .collect::<Result<Vec<_>, _>>()
+    })?;
+    let mut ends: Vec<_> = leaves
+        .iter()
+        .map(|&leaf| (leaf, vec![[0; 32]; WOTS_CHAINS]))
         .collect();
-    let leaf_ends = leaf_indices.iter().copied().zip(opened_ends).collect();
-    Ok((stores, leaf_ends))
+    for (half, part) in parts.into_iter().enumerate() {
+        for ((_, dest), (_, source)) in ends.iter_mut().zip(part) {
+            dest[half * 64..(half + 1) * 64].copy_from_slice(&source[half * 64..(half + 1) * 64]);
+        }
+    }
+    Ok(ends)
 }
 
 /// Dealerless distributed MPC staging for Mode `QS-A` ([`CommitteePartitionedJorts`]).
@@ -2887,8 +3008,7 @@ fn stage_bft_shamir_inner(
                             *pl = dealer_rng.next_u64();
                         }
                         let sh_f = share_bs_gf256_degree(&sec, f, &powers_f, dealer_rng);
-                        let sh_2f =
-                            share_bs_gf256_degree(&sec, 2 * f, &powers_2f, dealer_rng);
+                        let sh_2f = share_bs_gf256_degree(&sec, 2 * f, &powers_2f, dealer_rng);
                         wipe_u64s(&mut sec);
                         for p in 0..n {
                             bs_xor_assign(&mut r_f[p][idx], &sh_f[p]);
@@ -3651,11 +3771,11 @@ pub fn refresh_staged_bft_shamir_keys(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::party_node::{IsolatedJortsParty, IsolatedQuorumParty};
     use crate::quorum_jorts::{
         BftShamirJorts, CommitteePartitionedJorts, LatchCertificate, QuorumJortsSig, chain_step,
         combine_additive, combine_shamir, quorum_jorts_verify, verify_jorts_signature,
     };
-    use crate::party_node::{IsolatedJortsParty, IsolatedQuorumParty};
     use crate::wire_channel::InMemoryWireMesh;
     use qsag_core::belt_latch::MemoryWal;
 
@@ -4189,7 +4309,11 @@ mod tests {
             [0xc3; 32],
             b"wire after aborted refresh",
         );
-        assert!(verify_jorts_signature(&pk, b"wire after aborted refresh", &sig));
+        assert!(verify_jorts_signature(
+            &pk,
+            b"wire after aborted refresh",
+            &sig
+        ));
 
         let mut refresh_rngs = make_party_rngs(3, 0xb4);
         refresh_committee_shares(&layout, &mut custodians, [0xc4; 32], &mut refresh_rngs)
@@ -4298,7 +4422,11 @@ mod tests {
             [0xe3; 32],
             b"wire after aborted refresh",
         );
-        assert!(verify_jorts_signature(&pk, b"wire after aborted refresh", &sig));
+        assert!(verify_jorts_signature(
+            &pk,
+            b"wire after aborted refresh",
+            &sig
+        ));
 
         let mut refresh_rngs = make_party_rngs(n, 0xd4);
         refresh_bft_shamir_shares(&cfg, &mut custodians, [0xe4; 32], &mut refresh_rngs)

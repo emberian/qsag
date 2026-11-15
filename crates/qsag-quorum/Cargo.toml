@@ -11,6 +11,7 @@ qsag-verified = { path = "../../aeneas/qsag-verified", default-features = false 
 # Workspace crates only; no external dependencies.
 qsag-core = { path = "../qsag-core", default-features = false }
 qsag-asm = { path = "../qsag-asm", default-features = false }
+qsag-fts = { path = "../qsag-fts", default-features = false, features = ["alloc"] }
 
 [features]
 default = []
@@ -22,5 +23,6 @@ name = "quorum_threaded_bench"
 required-features = ["std", "testing-ephemeral"]
 
 [dev-dependencies]
+qsag-accel = { path = "../qsag-accel", default-features = false }
 qsag-core = { path = "../qsag-core", features = ["testing-ephemeral"] }
 qsag-agg = { path = "../qsag-agg", features = ["std"] }
