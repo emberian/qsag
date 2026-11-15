@@ -104,7 +104,7 @@ impl<const RATE: usize> Drop for KeccakSponge<RATE> {
 impl<const RATE: usize> KeccakSponge<RATE> {
     /// Rejects an invalid `RATE` when the sponge type is instantiated (a build error, not a
     /// runtime panic).
-    const RATE_IS_VALID: () = assert!(RATE > 0 && RATE < 200 && RATE % 8 == 0);
+    const RATE_IS_VALID: () = assert!(RATE > 0 && RATE < 200 && RATE.is_multiple_of(8));
 
     pub const fn new() -> Self {
         let () = Self::RATE_IS_VALID;
@@ -133,9 +133,9 @@ impl<const RATE: usize> KeccakSponge<RATE> {
         assert!(!self.squeezing, "cannot absorb after squeezing");
         while !input.is_empty() {
             if self.pos == 0 && input.len() >= RATE {
-                for (lane, bytes) in self.state.iter_mut().zip(input[..RATE].chunks_exact(8)) {
-                    let mut chunk = [0u8; 8];
-                    chunk.copy_from_slice(bytes);
+                let (chunks, _) = input[..RATE].as_chunks::<8>();
+                for (lane, bytes) in self.state.iter_mut().zip(chunks) {
+                    let mut chunk = *bytes;
                     *lane ^= u64::from_le_bytes(chunk);
                     ct_zeroize_bytes(&mut chunk);
                 }

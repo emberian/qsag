@@ -527,7 +527,7 @@ mod internal_matrix_tests {
             return false;
         }
         for q in [2usize, 3, 5, 7, 11] {
-            if n % q != 0 {
+            if !n.is_multiple_of(q) {
                 continue;
             }
             let mut h = orbit[n / q - 1];
