@@ -1,9 +1,9 @@
 module
-import all Qsag.RssParticipantGateWeights
-import all Qsag.RssParticipantGateField
-import all Qsag.RssParticipantGateChecks
-import all Qsag.ActiveMigrationZeroTest
-import all Qsag.BinaryTower
+import all Qsag.Exec.RssParticipantGateWeights
+import all Qsag.Exec.RssParticipantGateField
+import all Qsag.Exec.RssParticipantGateChecks
+import all Qsag.Protocol.Migration.ActiveMigrationZeroTest
+import all Qsag.Math.BinaryTower
 public section
 open Qsag Qsag.RssParticipant Qsag.RssParticipant.GateChecks Qsag.MigrationExecution
 

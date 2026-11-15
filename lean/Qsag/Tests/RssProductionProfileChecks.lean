@@ -1,8 +1,8 @@
 module
-public import Qsag.RssProductionProfile
-import all Qsag.RssProductionProfile
-import all Qsag.HashSigs
-import all Qsag.ThresholdMpc
+public import Qsag.Exec.RssProductionProfile
+import all Qsag.Exec.RssProductionProfile
+import all Qsag.Protocol.Signing.HashSigs
+import all Qsag.Protocol.Threshold.ThresholdMpc
 import Qsag.Tactic.AssuranceKit
 
 /-! Executable construction checks, not a hardness benchmark. Full-width production

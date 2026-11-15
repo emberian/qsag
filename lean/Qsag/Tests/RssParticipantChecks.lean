@@ -1,9 +1,9 @@
 module
-public import Qsag.RssParticipantNetwork
-public import Qsag.RssParticipantSponge
-import all Qsag.RssParticipantNetwork
-import all Qsag.RssParticipantSponge
-import all Qsag.ThresholdMpc
+public import Qsag.Exec.RssParticipantNetwork
+public import Qsag.Exec.RssParticipantSponge
+import all Qsag.Exec.RssParticipantNetwork
+import all Qsag.Exec.RssParticipantSponge
+import all Qsag.Protocol.Threshold.ThresholdMpc
 import Qsag.Tactic.AssuranceKit
 
 /-! Executable nonzero participant executions and hostile transcript regressions.

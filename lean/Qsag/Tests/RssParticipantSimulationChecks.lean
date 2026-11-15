@@ -1,11 +1,11 @@
 module
-public import Qsag.RssParticipantPassiveSimulation
-public import Qsag.RssParticipantChecks
-import all Qsag.RssParticipantPassiveSimulation
-import all Qsag.RssParticipantLocalSimulation
-import all Qsag.RssParticipantChecks
-import all Qsag.RssParticipantMachine
-import all Qsag.ThresholdMpc
+public import Qsag.Exec.RssParticipantPassiveSimulation
+public import Qsag.Tests.RssParticipantChecks
+import all Qsag.Exec.RssParticipantPassiveSimulation
+import all Qsag.Exec.RssParticipantLocalSimulation
+import all Qsag.Tests.RssParticipantChecks
+import all Qsag.Exec.RssParticipantMachine
+import all Qsag.Protocol.Threshold.ThresholdMpc
 import Qsag.Tactic.AssuranceKit
 
 /-! Nonzero finite-prefix simulation check and a correlated-mask boundary witness.

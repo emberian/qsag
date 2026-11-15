@@ -1,15 +1,15 @@
 module
-public import Qsag.RssSigningExecution
-public import Qsag.RssSigningEnrollment
-public import Qsag.RssProductionProfileChecks
-import all Qsag.RssSigningExecution
-import all Qsag.RssSigningEnrollment
-import all Qsag.RssSigningBackend
-import all Qsag.RssSigningMachine
-import all Qsag.RssSigningControl
-import all Qsag.RssSigningProgram
-import all Qsag.RssProductionProfileChecks
-import all Qsag.HashSigs
+public import Qsag.Exec.RssSigningExecution
+public import Qsag.Exec.RssSigningEnrollment
+public import Qsag.Tests.RssProductionProfileChecks
+import all Qsag.Exec.RssSigningExecution
+import all Qsag.Exec.RssSigningEnrollment
+import all Qsag.Exec.RssSigningBackend
+import all Qsag.Exec.RssSigningMachine
+import all Qsag.Exec.RssSigningControl
+import all Qsag.Exec.RssSigningProgram
+import all Qsag.Tests.RssProductionProfileChecks
+import all Qsag.Protocol.Signing.HashSigs
 import Qsag.Tactic.AssuranceKit
 
 /-! Actual demand-driven participant executions and controller regressions.

@@ -1,12 +1,12 @@
 module
-public import Qsag.RssSigningTreeCache
-public import Qsag.RssSigningChecks
-import all Qsag.RssSigningTreeCache
-import all Qsag.RssSigningBatches
-import all Qsag.RssSigningChecks
-import all Qsag.RssSigningEnrollment
-import all Qsag.ThresholdMpc
-import all Qsag.HashSigs
+public import Qsag.Exec.RssSigningTreeCache
+public import Qsag.Tests.RssSigningChecks
+import all Qsag.Exec.RssSigningTreeCache
+import all Qsag.Exec.RssSigningBatches
+import all Qsag.Tests.RssSigningChecks
+import all Qsag.Exec.RssSigningEnrollment
+import all Qsag.Protocol.Threshold.ThresholdMpc
+import all Qsag.Protocol.Signing.HashSigs
 import Qsag.Tactic.AssuranceKit
 
 /-! Full-width grouped subtree execution with actual participant cSHAKE and

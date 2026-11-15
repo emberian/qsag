@@ -1,10 +1,10 @@
 module
-public import Qsag.RssSigningBatches
-public import Qsag.RssSigningChecks
-import all Qsag.RssSigningBatches
-import all Qsag.RssSigningChecks
-import all Qsag.RssSigningBackend
-import all Qsag.RssSigningProgram
+public import Qsag.Exec.RssSigningBatches
+public import Qsag.Tests.RssSigningChecks
+import all Qsag.Exec.RssSigningBatches
+import all Qsag.Tests.RssSigningChecks
+import all Qsag.Exec.RssSigningBackend
+import all Qsag.Exec.RssSigningProgram
 import Qsag.Tactic.AssuranceKit
 
 /-! Actual grouped query producer checks. The candidate observation is external
