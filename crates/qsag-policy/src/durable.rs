@@ -924,6 +924,137 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "std")]
+    fn temp_record(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(std::format!(
+            "{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[cfg(feature = "std")]
+    fn remove_record(path: &std::path::Path) {
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(std::format!("{}.lock", path.display())).unwrap();
+    }
+
+    /// The checkpoint and the fence are replaced by write-to-temporary, sync, rename: a
+    /// crash while the next generation is being written tears only `<record>.tmp`, never
+    /// the committed record. Recovery reads the committed generation and the next persist
+    /// discards the torn temporary.
+    #[cfg(feature = "std")]
+    #[test]
+    fn torn_checkpoint_write_recovers_the_committed_generation() {
+        let path = temp_record("policy-torn-tmp");
+        let tmp = std::path::PathBuf::from(std::format!("{}.tmp", path.display()));
+        let mut guards = trusted_dealer_setup_for_testing([3; 32], &[1, 2]);
+        let mut disk = FsPolicyDurableLedger::create_new(&path, [8; 32], &guards[0]).unwrap();
+        guards[0]
+            .record_approved_intent(100, 4, [5; 32], [6; 32])
+            .unwrap();
+        disk.sync_persist(&guards[0]).unwrap();
+        let generation = disk.generation();
+        drop(disk);
+        let committed = std::fs::read(&path).unwrap();
+
+        // Crash mid-write of the following checkpoint, at several torn lengths.
+        for torn_len in [0usize, 1, 16, 17, committed.len() / 2, committed.len() - 1] {
+            let mut torn = committed[..torn_len].to_vec();
+            for (i, byte) in torn.iter_mut().enumerate().skip(torn_len / 2) {
+                *byte ^= 0xa5 ^ i as u8;
+            }
+            std::fs::write(&tmp, &torn).unwrap();
+            let mut restarted = trusted_dealer_setup_for_testing([3; 32], &[1, 2]);
+            let mut disk =
+                FsPolicyDurableLedger::open_existing(&path, [8; 32], &mut restarted[0], generation)
+                    .unwrap();
+            assert_eq!(disk.generation(), generation);
+            assert!(restarted[0].is_nonce_burned(&[5; 32]));
+            assert_eq!(restarted[0].accumulated_window_spend(), 4);
+            assert_eq!(std::fs::read(&path).unwrap(), committed);
+            // The next persist replaces the torn temporary and advances the generation.
+            disk.sync_persist(&restarted[0]).unwrap();
+            assert_eq!(disk.generation(), generation + 1);
+            assert!(!tmp.exists());
+            drop(disk);
+            let mut again = trusted_dealer_setup_for_testing([3; 32], &[1, 2]);
+            FsPolicyDurableLedger::open_existing(&path, [8; 32], &mut again[0], generation + 1)
+                .unwrap();
+            assert!(again[0].is_nonce_burned(&[5; 32]));
+            std::fs::write(&path, &committed).unwrap();
+        }
+
+        // The committed record has no second copy: damage to it fails closed and is never
+        // read as an older or empty state.
+        for index in [0usize, 8, 16, committed.len() / 2, committed.len() - 1] {
+            let mut corrupt = committed.clone();
+            corrupt[index] ^= 1;
+            std::fs::write(&path, &corrupt).unwrap();
+            let mut restarted = trusted_dealer_setup_for_testing([3; 32], &[1, 2]);
+            assert!(
+                FsPolicyDurableLedger::open_existing(&path, [8; 32], &mut restarted[0], 0).is_err(),
+                "byte {index}"
+            );
+            assert!(!restarted[0].is_nonce_burned(&[5; 32]));
+        }
+        for torn_len in [0usize, 15, 16, committed.len() - 1] {
+            std::fs::write(&path, &committed[..torn_len]).unwrap();
+            let mut restarted = trusted_dealer_setup_for_testing([3; 32], &[1, 2]);
+            assert!(
+                FsPolicyDurableLedger::open_existing(&path, [8; 32], &mut restarted[0], 0).is_err(),
+                "length {torn_len}"
+            );
+        }
+        remove_record(&path);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn torn_fence_write_recovers_the_committed_generation() {
+        let path = temp_record("policy-torn-fence");
+        let tmp = std::path::PathBuf::from(std::format!("{}.tmp", path.display()));
+        let mut fence = FsPolicyGenerationFence::create_new(&path, [9; 32], 3).unwrap();
+        fence.ratchet_to(7).unwrap();
+        drop(fence);
+        let committed = std::fs::read(&path).unwrap();
+        // 16-byte record header, then `generation_be(8) || mac(32)`.
+        assert_eq!(committed.len(), 16 + 40);
+
+        for torn_len in [0usize, 1, 16, 24, committed.len() - 1] {
+            std::fs::write(&tmp, &committed[..torn_len]).unwrap();
+            let mut fence = FsPolicyGenerationFence::open_existing(&path, [9; 32]).unwrap();
+            assert_eq!(fence.generation(), 7);
+            assert!(fence.ratchet_to(6).is_err());
+            drop(fence);
+            let mut fence = FsPolicyGenerationFence::open_existing(&path, [9; 32]).unwrap();
+            fence.ratchet_to(8).unwrap();
+            assert!(!tmp.exists());
+            drop(fence);
+            assert_eq!(
+                FsPolicyGenerationFence::open_existing(&path, [9; 32])
+                    .unwrap()
+                    .generation(),
+                8
+            );
+            std::fs::write(&path, &committed).unwrap();
+        }
+        // A damaged fence is refused; it is never read as a lower generation.
+        for index in [0usize, 8, 16, 23, 24, committed.len() - 1] {
+            let mut corrupt = committed.clone();
+            corrupt[index] ^= 1;
+            std::fs::write(&path, &corrupt).unwrap();
+            assert!(
+                FsPolicyGenerationFence::open_existing(&path, [9; 32]).is_err(),
+                "byte {index}"
+            );
+        }
+        remove_record(&path);
+    }
+
     #[test]
     fn authenticated_malformed_snapshots_are_atomic_and_poison_is_durable() {
         let key = [0x42; 32];

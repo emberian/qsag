@@ -1,15 +1,23 @@
 //! Authenticated append-only burn journal with descriptor-lifetime locking.
-//! V4 binds both the genesis MAC and dual A/B high-water-mark header slots to the
-//! data inode; copied, legacy, or tail-truncated journals fail closed even before an
-//! external monotonic anchor is consulted. Keep the directory private and pair with an
+//! The genesis MAC and both A/B high-water-mark slots are bound to the data inode;
+//! copied, legacy, or tail-truncated journals fail closed even before an external
+//! monotonic anchor is consulted. Keep the directory private and pair with an
 //! external hardware/hypervisor monotonic anchor (`Tpm2NvMonotoneAnchor`,
 //! `HypervisorGenerationAnchor`) to defeat full-file or whole-VM snapshot rollback.
+//!
+//! `QSBURN05` layout, in 4096-byte pages: page 0 holds the genesis prefix
+//! (`magic || key || genesis || genesis MAC`), page 1 holds slot A, page 2 holds slot B,
+//! and the records follow from page 3. Each slot owns its page, so a torn sector or
+//! page write damages at most one of them and recovery repairs it from the other
+//! (`TwoSlotHwm`). The rest of each header page is zero and is not read back.
+//! `QSBURN04` kept both slots and the genesis prefix inside one 512-byte sector; those
+//! journals are refused.
 use alloc::boxed::Box;
 use qsag_accel::ct::{RedactedSecret, ct_eq_bytes, ct_zeroize_bytes};
 use qsag_accel::keccak::cshake256_framed_32;
 use qsag_asm::durable::{
-    ChainHead, CounterOrder, HWM_SLOT_BYTES, TwoSlotHwm, file_dev_ino, no_follow_options,
-    sync_parent_dir, write_at_exact,
+    ChainHead, CounterOrder, HWM_PAGE_BYTES, HWM_SLOT_BYTES, TwoSlotHwm, file_dev_ino,
+    no_follow_options, sync_parent_dir, write_at_exact,
 };
 use qsag_core::{ExternalMonotoneAnchor, LedgerCheckpoint};
 use std::collections::BTreeSet;
@@ -17,12 +25,16 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-const MAGIC: &[u8; 8] = b"QSBURN04";
+const MAGIC: &[u8; 8] = b"QSBURN05";
 const GENESIS_PREFIX_LEN: usize = 104;
+const PAGE_LEN: usize = HWM_PAGE_BYTES as usize;
 const HWM_SLOT_LEN: usize = HWM_SLOT_BYTES;
-const HWM_SLOT_A_OFFSET: usize = GENESIS_PREFIX_LEN;
-const HWM_SLOT_B_OFFSET: usize = GENESIS_PREFIX_LEN + HWM_SLOT_LEN;
-const HEADER_LEN: usize = GENESIS_PREFIX_LEN + 2 * HWM_SLOT_LEN; // 264 bytes
+/// First of the two consecutive slot pages (page 0 is the genesis prefix).
+const HWM_FIRST_PAGE: u32 = 1;
+const HWM_SLOT_A_OFFSET: usize = PAGE_LEN;
+const HWM_SLOT_B_OFFSET: usize = 2 * PAGE_LEN;
+const HEADER_LEN: usize = 3 * PAGE_LEN;
+const _: () = assert!(GENESIS_PREFIX_LEN <= PAGE_LEN && HWM_SLOT_LEN <= PAGE_LEN);
 const RECORD_LEN: usize = 42;
 /// Defensive upper bound (64 MiB) checked via `fstat` prior to buffer allocation.
 pub const MAX_JOURNAL_BYTES: u64 = 64 * 1024 * 1024;
@@ -59,7 +71,7 @@ fn private_file(path: &Path) -> io::Result<OpenOptions> {
 }
 
 /// `dev_be64 || ino_be64` of the held descriptor. The big-endian layout is bound
-/// into the genesis and high-water-mark MACs of the `QSBURN04` format.
+/// into the genesis and high-water-mark MACs of the journal format.
 fn file_identity(file: &File) -> io::Result<[u8; 16]> {
     let metadata = file.metadata()?;
     if !metadata.is_file() {
@@ -167,15 +179,12 @@ impl DurableBurnJournal {
                 ],
             )
         };
-        f(
-            &TwoSlotHwm {
-                offset_a: HWM_SLOT_A_OFFSET as u64,
-                offset_b: HWM_SLOT_B_OFFSET as u64,
-                order: CounterOrder::Big,
-                mac: &mac,
-            },
-            &self.file,
-        )
+        let hwm = TwoSlotHwm::paged(HWM_FIRST_PAGE, CounterOrder::Big, &mac);
+        debug_assert_eq!(
+            (hwm.offset_a, hwm.offset_b),
+            (HWM_SLOT_A_OFFSET as u64, HWM_SLOT_B_OFFSET as u64)
+        );
+        f(&hwm, &self.file)
     }
 
     fn load_guarded(
@@ -228,15 +237,17 @@ impl DurableBurnJournal {
                 &[journal.mac_key.expose(), &identity, &header],
             );
             header.extend_from_slice(&journal.last_tag);
+            debug_assert_eq!(header.len(), GENESIS_PREFIX_LEN);
             let (slot_a, slot_b) = journal.with_hwm(|hwm, _| {
                 (
                     hwm.encode(0, 0, &journal.last_tag),
                     hwm.encode(1, 0, &journal.last_tag),
                 )
             });
-            header.extend_from_slice(&slot_a);
-            header.extend_from_slice(&slot_b);
-            debug_assert_eq!(header.len(), HEADER_LEN);
+            // One write of all three header pages, zero filled: no page is left sparse.
+            header.resize(HEADER_LEN, 0);
+            header[HWM_SLOT_A_OFFSET..HWM_SLOT_A_OFFSET + HWM_SLOT_LEN].copy_from_slice(&slot_a);
+            header[HWM_SLOT_B_OFFSET..HWM_SLOT_B_OFFSET + HWM_SLOT_LEN].copy_from_slice(&slot_b);
             write_at_exact(&journal.file, 0, &header)?;
             journal.file.sync_all()?;
             sync_parent_dir(path)?;
@@ -279,14 +290,14 @@ impl DurableBurnJournal {
                 }
                 journal.last_tag = tag;
             }
-            // Rejects tail truncation and unexplained gaps; heals the two crash states
-            // (record synced before slot A, slot A synced before slot B).
+            // Rejects tail truncation and unexplained gaps; heals the crash states (record
+            // synced before slot A, slot A synced before slot B, one slot torn mid-write).
             journal
                 .with_hwm(|hwm, file| {
                     hwm.recover(
                         file,
-                        &bytes[HWM_SLOT_A_OFFSET..HWM_SLOT_B_OFFSET],
-                        &bytes[HWM_SLOT_B_OFFSET..HEADER_LEN],
+                        &bytes[HWM_SLOT_A_OFFSET..HWM_SLOT_A_OFFSET + HWM_SLOT_LEN],
+                        &bytes[HWM_SLOT_B_OFFSET..HWM_SLOT_B_OFFSET + HWM_SLOT_LEN],
                         &ChainHead {
                             len: journal.entries.len() as u64,
                             tip: &journal.last_tag,
@@ -589,20 +600,23 @@ mod tests {
             fs::write(&path, &original[..len]).unwrap();
             assert!(DurableBurnJournal::open(&path, [1; 32], [2; 32]).is_err());
         }
-        for index in [
-            8,
-            40,
-            72,
-            HWM_SLOT_A_OFFSET,
-            HWM_SLOT_B_OFFSET,
-            HEADER_LEN,
-            original.len() - 1,
-        ] {
+        for index in [8, 40, 72, HEADER_LEN, original.len() - 1] {
             let mut corrupt = original.clone();
             corrupt[index] ^= 1;
             fs::write(&path, corrupt).unwrap();
             assert!(DurableBurnJournal::open(&path, [1; 32], [2; 32]).is_err());
         }
+        // Damage to both slots at once leaves nothing to recover from.
+        let mut corrupt = original.clone();
+        corrupt[HWM_SLOT_A_OFFSET] ^= 1;
+        corrupt[HWM_SLOT_B_OFFSET] ^= 1;
+        fs::write(&path, corrupt).unwrap();
+        assert!(DurableBurnJournal::open(&path, [1; 32], [2; 32]).is_err());
+        // The previous single-sector layout is refused outright.
+        let mut legacy = original.clone();
+        legacy[..8].copy_from_slice(b"QSBURN04");
+        fs::write(&path, legacy).unwrap();
+        assert!(DurableBurnJournal::open(&path, [1; 32], [2; 32]).is_err());
         fs::write(&path, &original).unwrap();
         #[cfg(unix)]
         {
@@ -654,5 +668,172 @@ mod tests {
             .unwrap();
         assert!(DurableBurnJournal::open_existing(&path, [5; 32], [6; 32]).is_err());
         std::fs::remove_file(&path).unwrap();
+    }
+
+    fn temp_journal(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(std::format!(
+            "{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    /// Overwrite `len` bytes at `offset` with pseudo-random bytes, as a torn write would.
+    fn tear(path: &Path, offset: usize, len: usize, seed: u64) {
+        let mut x = seed | 1;
+        let junk: std::vec::Vec<u8> = (0..len)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x as u8
+            })
+            .collect();
+        let file = OpenOptions::new().write(true).open(path).unwrap();
+        write_at_exact(&file, offset as u64, &junk).unwrap();
+    }
+
+    #[test]
+    fn header_and_each_slot_own_a_page() {
+        assert_eq!(
+            (HWM_SLOT_A_OFFSET, HWM_SLOT_B_OFFSET, HEADER_LEN),
+            (4096, 8192, 12288)
+        );
+        let path = temp_journal("burn-layout");
+        let mut journal = DurableBurnJournal::create(&path, [1; 32], [2; 32]).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().len(), HEADER_LEN as u64);
+        journal.reserve(&[1; 32], 0, 0).unwrap();
+        drop(journal);
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(bytes.len(), HEADER_LEN + RECORD_LEN);
+        assert_eq!(&bytes[..8], MAGIC);
+        // Everything in the header pages outside the prefix and the two slots is zero.
+        for (start, end) in [
+            (GENESIS_PREFIX_LEN, HWM_SLOT_A_OFFSET),
+            (HWM_SLOT_A_OFFSET + HWM_SLOT_LEN, HWM_SLOT_B_OFFSET),
+            (HWM_SLOT_B_OFFSET + HWM_SLOT_LEN, HEADER_LEN),
+        ] {
+            assert!(bytes[start..end].iter().all(|&b| b == 0), "{start}..{end}");
+        }
+        assert!(bytes[HWM_SLOT_A_OFFSET..HWM_SLOT_A_OFFSET + HWM_SLOT_LEN].iter().any(|&b| b != 0));
+        assert!(bytes[HWM_SLOT_B_OFFSET..HWM_SLOT_B_OFFSET + HWM_SLOT_LEN].iter().any(|&b| b != 0));
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn torn_slot_b_recovers_the_committed_mark_and_is_repaired() {
+        let path = temp_journal("burn-torn-b");
+        let mut journal = DurableBurnJournal::create(&path, [1; 32], [2; 32]).unwrap();
+        journal.reserve(&[1; 32], 0, 0).unwrap();
+        journal.reserve(&[1; 32], 0, 1).unwrap();
+        let checkpoint = journal.checkpoint();
+        drop(journal);
+        let committed = fs::read(&path).unwrap();
+        for (seed, len) in [(1u64, 1usize), (2, 17), (3, HWM_SLOT_LEN), (4, PAGE_LEN)] {
+            tear(&path, HWM_SLOT_B_OFFSET, len, seed);
+            assert_ne!(fs::read(&path).unwrap(), committed);
+            let journal =
+                DurableBurnJournal::open_at_least(&path, [1; 32], [2; 32], checkpoint).unwrap();
+            assert_eq!(journal.checkpoint().generation, 2);
+            assert!(journal.checkpoint().tag == checkpoint.tag);
+            drop(journal);
+            let repaired = fs::read(&path).unwrap();
+            assert_eq!(
+                repaired[HWM_SLOT_B_OFFSET..HWM_SLOT_B_OFFSET + HWM_SLOT_LEN],
+                committed[HWM_SLOT_B_OFFSET..HWM_SLOT_B_OFFSET + HWM_SLOT_LEN]
+            );
+            assert_eq!(repaired[..HWM_SLOT_B_OFFSET], committed[..HWM_SLOT_B_OFFSET]);
+            assert_eq!(repaired[HEADER_LEN..], committed[HEADER_LEN..]);
+            fs::write(&path, &committed).unwrap();
+        }
+        // The repaired journal still burns and still refuses a replayed leaf.
+        tear(&path, HWM_SLOT_B_OFFSET, HWM_SLOT_LEN, 9);
+        let mut journal = DurableBurnJournal::open(&path, [1; 32], [2; 32]).unwrap();
+        assert!(journal.reserve(&[1; 32], 0, 1).is_err());
+        drop(journal);
+        let mut journal = DurableBurnJournal::open(&path, [1; 32], [2; 32]).unwrap();
+        journal.reserve(&[1; 32], 0, 2).unwrap();
+        assert_eq!(journal.checkpoint().generation, 3);
+        drop(journal);
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn torn_slot_a_recovers_from_slot_b_and_is_repaired() {
+        let path = temp_journal("burn-torn-a");
+        let mut journal = DurableBurnJournal::create(&path, [1; 32], [2; 32]).unwrap();
+        journal.reserve(&[1; 32], 0, 0).unwrap();
+        let before = fs::read(&path).unwrap();
+        let checkpoint_before = journal.checkpoint();
+        journal.reserve(&[1; 32], 0, 1).unwrap();
+        let checkpoint = journal.checkpoint();
+        drop(journal);
+        let committed = fs::read(&path).unwrap();
+
+        // Slot A damaged in the steady state: slot B carries the committed mark.
+        tear(&path, HWM_SLOT_A_OFFSET, PAGE_LEN, 11);
+        let journal =
+            DurableBurnJournal::open_at_least(&path, [1; 32], [2; 32], checkpoint).unwrap();
+        assert_eq!(journal.checkpoint().generation, 2);
+        drop(journal);
+        let repaired = fs::read(&path).unwrap();
+        assert_eq!(
+            repaired[HWM_SLOT_A_OFFSET..HWM_SLOT_A_OFFSET + HWM_SLOT_LEN],
+            committed[HWM_SLOT_A_OFFSET..HWM_SLOT_A_OFFSET + HWM_SLOT_LEN]
+        );
+        assert_eq!(repaired[HWM_SLOT_B_OFFSET..], committed[HWM_SLOT_B_OFFSET..]);
+
+        // Crash in the middle of the first slot write of the second burn: the record is
+        // synced, slot A is torn, slot B still holds the mark from before the burn. The
+        // synced record is kept (the leaf stays burned) and both slots end on it.
+        let mut crashed = before.clone();
+        crashed.extend_from_slice(&committed[HEADER_LEN + RECORD_LEN..]);
+        fs::write(&path, &crashed).unwrap();
+        tear(&path, HWM_SLOT_A_OFFSET, HWM_SLOT_LEN, 12);
+        let mut journal =
+            DurableBurnJournal::open_at_least(&path, [1; 32], [2; 32], checkpoint_before).unwrap();
+        assert_eq!(journal.checkpoint().generation, 2);
+        assert!(journal.checkpoint().tag == checkpoint.tag);
+        assert!(journal.reserve(&[1; 32], 0, 1).is_err());
+        drop(journal);
+        let healed = fs::read(&path).unwrap();
+        assert_eq!(
+            healed[HWM_SLOT_A_OFFSET..HWM_SLOT_A_OFFSET + HWM_SLOT_LEN],
+            committed[HWM_SLOT_A_OFFSET..HWM_SLOT_A_OFFSET + HWM_SLOT_LEN]
+        );
+        assert_eq!(
+            healed[HWM_SLOT_B_OFFSET..HWM_SLOT_B_OFFSET + HWM_SLOT_LEN],
+            committed[HWM_SLOT_B_OFFSET..HWM_SLOT_B_OFFSET + HWM_SLOT_LEN]
+        );
+
+        // A torn slot never excuses a truncated chain.
+        fs::write(&path, &committed[..HEADER_LEN + RECORD_LEN]).unwrap();
+        tear(&path, HWM_SLOT_A_OFFSET, HWM_SLOT_LEN, 13);
+        assert!(DurableBurnJournal::open(&path, [1; 32], [2; 32]).is_err());
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn both_slots_torn_fails_closed_without_writing() {
+        let path = temp_journal("burn-torn-both");
+        let mut journal = DurableBurnJournal::create(&path, [1; 32], [2; 32]).unwrap();
+        journal.reserve(&[1; 32], 0, 0).unwrap();
+        drop(journal);
+        tear(&path, HWM_SLOT_A_OFFSET, HWM_SLOT_LEN, 21);
+        tear(&path, HWM_SLOT_B_OFFSET, HWM_SLOT_LEN, 22);
+        let damaged = fs::read(&path).unwrap();
+        assert!(DurableBurnJournal::open(&path, [1; 32], [2; 32]).is_err());
+        assert!(DurableBurnJournal::open_existing(&path, [1; 32], [2; 32]).is_err());
+        assert_eq!(fs::read(&path).unwrap(), damaged);
+        // Two slot pages that were never written are no better.
+        let mut blank = damaged.clone();
+        blank[HWM_SLOT_A_OFFSET..HEADER_LEN].fill(0);
+        fs::write(&path, &blank).unwrap();
+        assert!(DurableBurnJournal::open(&path, [1; 32], [2; 32]).is_err());
+        assert_eq!(fs::read(&path).unwrap(), blank);
+        fs::remove_file(&path).unwrap();
     }
 }
