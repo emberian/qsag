@@ -12,7 +12,7 @@
 
 use qsag_agg::sig::digest4_to_bytes;
 use qsag_agg::{
-    AggSigProfile, FsWalEpochSink, QsagAggregateProof, SignerBitmap, SigningMode, ValidatorKeypair,
+    AggSigProfile, FsWalEpochSink, HemAggregatedProof, SignerBitmap, SigningMode, ValidatorKeypair,
     ValidatorPublicKey, ValidatorSignature, aggregate_signatures, merge_aggregates,
     verify_aggregate, verify_individual_signature,
 };
@@ -81,7 +81,7 @@ fn main() {
     let merged =
         merge_aggregates(&committee, &mode, &proof_a, &proof_b).expect("disjoint signer sets");
     let wire = merged.to_bytes();
-    let decoded = QsagAggregateProof::from_bytes_canonical(&wire).expect("canonical proof");
+    let decoded = HemAggregatedProof::from_bytes_canonical(&wire).expect("canonical proof");
     assert_eq!(decoded.num_signers(), 8);
     let started = std::time::Instant::now();
     assert!(verify_aggregate(&committee, &mode, &decoded));

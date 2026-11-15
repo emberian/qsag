@@ -83,9 +83,8 @@ const MAX_PROOF_WIRE_BYTES: u64 = {
 const MAX_PROOF_ENVELOPE_BYTES: u64 = 4096;
 /// Largest proof file `verify` reads and `prove` writes: the wire payload in hex plus the
 /// envelope (about 223 MiB; files written today are 116 to 144 MB).
-const MAX_MIGRATION_PROOF_FILE_BYTES: u64 = checked(
-    checked(MAX_PROOF_WIRE_BYTES.checked_mul(2)).checked_add(MAX_PROOF_ENVELOPE_BYTES),
-);
+const MAX_MIGRATION_PROOF_FILE_BYTES: u64 =
+    checked(checked(MAX_PROOF_WIRE_BYTES.checked_mul(2)).checked_add(MAX_PROOF_ENVELOPE_BYTES));
 // The wire payload must be addressable on the host before it is decoded into memory.
 const _: () = assert!(MAX_MIGRATION_PROOF_FILE_BYTES <= usize::MAX as u64);
 
@@ -115,7 +114,7 @@ fn parse_domain(spec: Option<&str>) -> Result<[u8; 32], CliError> {
 fn read_legacy_secret_32(path: &str) -> Result<Secret32, CliError> {
     let raw = read_bounded_file(path, MAX_KEY_FILE_BYTES)?;
     if raw.0.len() == 32 {
-        let mut out = Secret32([0u8; 32]);
+        let mut out = Secret32::new([0u8; 32]);
         out.0.copy_from_slice(&raw.0);
         return Ok(out);
     }
@@ -131,7 +130,7 @@ fn read_legacy_secret_32(path: &str) -> Result<Secret32, CliError> {
         if seed_buf.0.len() != 32 {
             return Err(CliError::input("JSON legacy key \"seed\" must be 32 bytes"));
         }
-        let mut out = Secret32([0u8; 32]);
+        let mut out = Secret32::new([0u8; 32]);
         out.0.copy_from_slice(&seed_buf.0);
         return Ok(out);
     }
@@ -143,7 +142,7 @@ fn read_legacy_secret_32(path: &str) -> Result<Secret32, CliError> {
             decoded.0.len()
         )));
     }
-    let mut out = Secret32([0u8; 32]);
+    let mut out = Secret32::new([0u8; 32]);
     out.0.copy_from_slice(&decoded.0);
     Ok(out)
 }
@@ -156,15 +155,21 @@ fn compute_legacy_commitment(
         "btc-p2wpkh" | "bitcoin-hash160" => witness
             .compute_bitcoin_hash160()
             .map(|k| (k, "btc-p2wpkh"))
-            .ok_or_else(|| CliError::input("legacy secret is not a valid nonzero secp256k1 scalar")),
+            .ok_or_else(|| {
+                CliError::input("legacy secret is not a valid nonzero secp256k1 scalar")
+            }),
         "btc-taproot" | "bitcoin-taproot" => witness
             .compute_taproot_tweaked_xonly()
             .map(|k| (k, "btc-taproot"))
-            .ok_or_else(|| CliError::input("legacy secret is not a valid nonzero secp256k1 scalar")),
+            .ok_or_else(|| {
+                CliError::input("legacy secret is not a valid nonzero secp256k1 scalar")
+            }),
         "eth-eoa" | "ethereum-keccak20" => witness
             .compute_ethereum_keccak20()
             .map(|k| (k, "eth-eoa"))
-            .ok_or_else(|| CliError::input("legacy secret is not a valid nonzero secp256k1 scalar")),
+            .ok_or_else(|| {
+                CliError::input("legacy secret is not a valid nonzero secp256k1 scalar")
+            }),
         "ed25519-slip10" | "slip0010-ed25519" => {
             Ok((witness.compute_slip0010_commitment(), "ed25519-slip10"))
         }
@@ -189,9 +194,12 @@ fn decode_legacy_kind(kind_name: &str, hex_value: &str) -> Result<LegacyCommitme
             hex_value,
             "btc-p2wpkh commitment",
         )?)),
-        "btc-taproot" => Ok(LegacyCommitmentKind::BitcoinTaprootXOnly(
-            from_hex_exact::<32>(hex_value, "btc-taproot commitment")?,
-        )),
+        "btc-taproot" => Ok(LegacyCommitmentKind::BitcoinTaprootXOnly(from_hex_exact::<
+            32,
+        >(
+            hex_value,
+            "btc-taproot commitment",
+        )?)),
         "eth-eoa" => Ok(LegacyCommitmentKind::EthereumKeccak20(
             from_hex_exact::<20>(hex_value, "eth-eoa commitment")?,
         )),
@@ -235,7 +243,9 @@ fn put_u32_framed(out: &mut Vec<u8>, slice: &[u8], max_len: usize) -> Result<(),
 
 fn take_exact<'a>(cursor: &mut &'a [u8], len: usize) -> Result<&'a [u8], CliError> {
     if cursor.len() < len {
-        return Err(CliError::verify("truncated migration ZK proof wire payload"));
+        return Err(CliError::verify(
+            "truncated migration ZK proof wire payload",
+        ));
     }
     let (head, tail) = cursor.split_at(len);
     *cursor = tail;
@@ -249,7 +259,9 @@ fn take_u32_framed(cursor: &mut &[u8], max_len: usize) -> Result<Vec<u8>, CliErr
     let len = usize::try_from(u32::from_le_bytes(len_bytes.try_into().unwrap_or([0; 4])))
         .map_err(|_| CliError::verify("oversized repetition field in migration proof"))?;
     if len > max_len {
-        return Err(CliError::verify("oversized repetition field in migration proof"));
+        return Err(CliError::verify(
+            "oversized repetition field in migration proof",
+        ));
     }
     Ok(take_exact(cursor, len)?.to_vec())
 }
@@ -292,7 +304,9 @@ fn encode_zk_proof_wire(proof: &MigrationZkProof) -> Result<Vec<u8>, CliError> {
 
 fn decode_zk_proof_wire(bytes: &[u8]) -> Result<MigrationZkProof, CliError> {
     if !u64::try_from(bytes.len()).is_ok_and(|len| len <= MAX_PROOF_WIRE_BYTES) {
-        return Err(CliError::verify("oversized migration ZK proof wire payload"));
+        return Err(CliError::verify(
+            "oversized migration ZK proof wire payload",
+        ));
     }
     let mut cur = bytes;
     let magic = take_exact(&mut cur, 8)?;
@@ -340,9 +354,10 @@ fn map_migrate_err(err: MigrateError) -> CliError {
         | MigrateError::InvalidSharingParameters => {
             CliError::input(format!("migration witness error: {err:?}"))
         }
-        MigrateError::EntropyUnavailable => {
-            CliError::new(crate::cli::exit::IO, "entropy unavailable for migration proof")
-        }
+        MigrateError::EntropyUnavailable => CliError::new(
+            crate::cli::exit::IO,
+            "entropy unavailable for migration proof",
+        ),
         other => CliError::verify(format!("migration ZK proof verification failed: {other:?}")),
     }
 }
@@ -401,7 +416,14 @@ fn commit(raw: &[String]) -> Result<(), CliError> {
 fn prove(raw: &[String]) -> Result<(), CliError> {
     let args = Args::parse(
         raw,
-        &["kind", "legacy-secret", "target", "epoch", "domain-hex", "out"],
+        &[
+            "kind",
+            "legacy-secret",
+            "target",
+            "epoch",
+            "domain-hex",
+            "out",
+        ],
         &["deterministic", "json", "help"],
     )?;
     if args.flag("help") {
@@ -432,7 +454,7 @@ fn prove(raw: &[String]) -> Result<(), CliError> {
     let (legacy_kind, canonical_kind) = compute_legacy_commitment(&witness, kind_arg)?;
     let (_, commitment_bytes) = encode_legacy_kind(&legacy_kind);
 
-    let entropy = Secret32(if args.flag("deterministic") {
+    let entropy = Secret32::new(if args.flag("deterministic") {
         cshake256_framed_32(
             b"QSAG.CLI.MIGRATE.DET.ENTROPY.V1",
             &[
@@ -509,7 +531,13 @@ fn prove(raw: &[String]) -> Result<(), CliError> {
 fn verify(raw: &[String]) -> Result<(), CliError> {
     let args = Args::parse(
         raw,
-        &["proof", "target", "epoch", "domain-hex", "legacy-commitment"],
+        &[
+            "proof",
+            "target",
+            "epoch",
+            "domain-hex",
+            "legacy-commitment",
+        ],
         &["json", "help"],
     )?;
     if args.flag("help") {
@@ -525,7 +553,11 @@ fn verify(raw: &[String]) -> Result<(), CliError> {
         .map_err(|_| CliError::verify("migration proof file is not valid UTF-8"))?;
     let json = Json::parse(text)
         .map_err(|e| CliError::verify(format!("malformed migration proof JSON: {e}")))?;
-    if json.field_str("format").map_err(|e| CliError::verify(e.message))? != MIGRATE_PROOF_FORMAT {
+    if json
+        .field_str("format")
+        .map_err(|e| CliError::verify(e.message))?
+        != MIGRATE_PROOF_FORMAT
+    {
         return Err(CliError::verify(format!(
             "{proof_path} is not a {MIGRATE_PROOF_FORMAT} file"
         )));
@@ -599,10 +631,12 @@ fn verify(raw: &[String]) -> Result<(), CliError> {
     if !u64::try_from(wire_hex.len())
         .is_ok_and(|len| len <= checked(MAX_PROOF_WIRE_BYTES.checked_mul(2)))
     {
-        return Err(CliError::verify("oversized migration ZK proof wire payload"));
+        return Err(CliError::verify(
+            "oversized migration ZK proof wire payload",
+        ));
     }
-    let wire_bytes = from_hex(wire_hex)
-        .map_err(|e| CliError::verify(format!("invalid zk_proof hex: {e}")))?;
+    let wire_bytes =
+        from_hex(wire_hex).map_err(|e| CliError::verify(format!("invalid zk_proof hex: {e}")))?;
     let zk_proof = decode_zk_proof_wire(&wire_bytes.0)?;
 
     let header_root = from_hex_exact::<32>(
@@ -651,7 +685,9 @@ fn verify(raw: &[String]) -> Result<(), CliError> {
 pub fn run(raw: &[String]) -> Result<(), CliError> {
     let Some((sub, rest)) = raw.split_first() else {
         print!("{MIGRATE_HELP}");
-        return Err(CliError::usage("migrate requires a subcommand (try --help)"));
+        return Err(CliError::usage(
+            "migrate requires a subcommand (try --help)",
+        ));
     };
     match sub.as_str() {
         "--help" | "-h" | "help" => {

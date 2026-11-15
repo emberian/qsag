@@ -51,8 +51,8 @@ mod linux {
         AuthenticatedWaistband, MintPlan, PendingCouponBatch,
     };
     use qsag_quorum::volatile_coupon::{
-        BaggyV2Sig, CertifiedCoupon, CouponError, CouponPool, InitiatorKey, LockedBytes,
-        ProtectedMintProcess, SHARE_BYTES, SignRequest, baggy_v2_verify, combine,
+        BaggySig, CertifiedCoupon, CouponError, CouponPool, InitiatorKey, LockedBytes,
+        ProtectedMintProcess, SHARE_BYTES, SignRequest, baggy_verify, combine,
     };
 
     use super::COUPON_HELP;
@@ -85,7 +85,7 @@ it certifies coupons in every later session and nothing about it is updated on d
 
   --vault-dir <dir>     private 0700 directory for coupon-root-party-{0,1,2}.sk
   --public-out <path>   destination for the root public key JSON
-  --params <name>       sha3-128f (FORS+C, default) or sha3-128f-v2 (PORS+FP)
+  --params <name>       sha3-128f (PORS+FP, default)
   --passphrase-env <VAR> / --passphrase-file <PATH>  seal each party seed
   --json                emit the public key JSON to stdout
 ";
@@ -150,9 +150,8 @@ signature stops verifying when its coupon expires.
     fn params_by_name(name: &str) -> Result<BaggyParams, CliError> {
         match name {
             "sha3-128f" => Ok(BaggyParams::SHA3_128F),
-            "sha3-128f-v2" => Ok(BaggyParams::SHA3_128F_V2),
             other => Err(CliError::usage(format!(
-                "unknown coupon root parameters '{other}' (expected sha3-128f or sha3-128f-v2)"
+                "unknown coupon root parameters '{other}' (expected sha3-128f)"
             ))),
         }
     }
@@ -256,9 +255,9 @@ signature stops verifying when its coupon expires.
         let _protection = protect()?;
         let dkg_session_id = os_random_32()?;
         let seeds = [
-            Secret32(os_random_32()?),
-            Secret32(os_random_32()?),
-            Secret32(os_random_32()?),
+            Secret32::new(os_random_32()?),
+            Secret32::new(os_random_32()?),
+            Secret32::new(os_random_32()?),
         ];
         let (mut engine, pk_seed) = root_engine(dkg_session_id, &seeds)?;
         let (pk, _binding) =
@@ -282,7 +281,7 @@ signature stops verifying when its coupon expires.
             if let Some(pass) = &passphrase {
                 crate::envelope::seal(&mut secret, pass)?;
             }
-            let encoded = ZeroizingBuf(secret.to_pretty().into_bytes());
+            let encoded = ZeroizingBuf::new(secret.to_pretty().into_bytes());
             write_new(path, &encoded.0, true)?;
         }
         let public = public_json(params_name, &pk);
@@ -309,7 +308,11 @@ signature stops verifying when its coupon expires.
     fn load_root(vault_dir: &str, passphrase: Option<&[u8]>) -> Result<Root, CliError> {
         private_dir(vault_dir, false)?;
         let mut header: Option<(String, [u8; 32], BaggyPublicKey)> = None;
-        let mut seeds = [Secret32([0; 32]), Secret32([0; 32]), Secret32([0; 32])];
+        let mut seeds = [
+            Secret32::new([0; 32]),
+            Secret32::new([0; 32]),
+            Secret32::new([0; 32]),
+        ];
         for (party, seed) in seeds.iter_mut().enumerate() {
             let path = party_path(vault_dir, party);
             let text = read_text(&path)?;
@@ -461,7 +464,7 @@ signature stops verifying when its coupon expires.
             let signature = combine(coupon, &sign_request, &openings)
                 .map_err(|e| coupon_error("combining the openings", e))?;
             drop(openings);
-            if !baggy_v2_verify(&self.parent, &self.params, &message, &signature) {
+            if !baggy_verify(&self.parent, &self.params, &message, &signature) {
                 return Err(
                     CliError::state("the combined coupon signature does not verify").into(),
                 );
@@ -550,7 +553,7 @@ signature stops verifying when its coupon expires.
         // Before any seed is read: lock every mapping and disable core dumps for good.
         let protection = protect()?;
         let started = Instant::now();
-        let root = load_root(vault_dir, passphrase.as_deref())?;
+        let root = load_root(vault_dir, passphrase.as_deref().map(Vec::as_slice))?;
         let (mut engine, _) = root_engine(root.dkg_session_id, &root.seeds)?;
         let (parent, binding) =
             baggy_keygen_mpc(&mut engine, &root.params, &mut WaistbandCache::disabled()).map_err(
@@ -737,12 +740,12 @@ signature stops verifying when its coupon expires.
             ));
         }
         let wire = sig_json.field_hex("signature")?;
-        let signature = BaggyV2Sig::from_wire_bytes(&parent, &params, &wire).map_err(|e| {
+        let signature = BaggySig::from_wire_bytes(&parent, &params, &wire).map_err(|e| {
             CliError::verify(format!(
                 "coupon signature is not one this root key certified ({e})"
             ))
         })?;
-        if !baggy_v2_verify(&parent, &params, &message, &signature) {
+        if !baggy_verify(&parent, &params, &message, &signature) {
             return Err(CliError::verify(
                 "coupon signature verification failed (wrong message, or the coupon expired)",
             ));

@@ -27,7 +27,10 @@ pub use bech32m::{
     bech32m_encode_5bit, convert_bits,
 };
 
-/// Address commitment hash version tag (`witness_version` 5-bit leader in BIP-350 style).
+/// Address wire discriminator (`witness_version`, a BIP-350-style 5-bit leader).
+/// Each value selects a commitment hash profile; it is independent of the framing
+/// version of that hash's domain. V2 selects canonical hardened Poseidon2-12.
+/// `QSAGADR2` is its stable domain discriminator, not a Poseidon round-constant version.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum AddressVersion {

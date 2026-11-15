@@ -413,9 +413,7 @@ fn core_checks(report: &mut Report, kat: &Json) -> Result<(), CliError> {
 
 fn fts_checks(report: &mut Report) {
     for (profile, bytes) in [
-        (FrontierFtsProfile::Compact514, 514),
-        (FrontierFtsProfile::Compact770, 770),
-        (FrontierFtsProfile::Compact1314, 1314),
+        (FrontierFtsProfile::Compact1122, 1122),
         (FrontierFtsProfile::Full256Bit, 2338),
     ] {
         report.check(

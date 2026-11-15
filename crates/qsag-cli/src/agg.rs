@@ -3,7 +3,7 @@
 use qsag_accel::keccak::cshake256_framed_32;
 use qsag_agg::sig::digest4_to_bytes;
 use qsag_agg::{
-    AggSigProfile, FsWalEpochSink, QsagAggregateProof, SignerBitmap, SigningMode, ValidatorKeypair,
+    AggSigProfile, FsWalEpochSink, HemAggregatedProof, SignerBitmap, SigningMode, ValidatorKeypair,
     ValidatorPublicKey, ValidatorSignature, aggregate_signatures, compute_committee_root,
     merge_aggregates, verify_aggregate, verify_individual_signature,
 };
@@ -43,7 +43,7 @@ pub fn enroll_committee(seed: &[u8; 32], validators: u32, wal_dir: &str) -> Resu
     crate::cli::private_dir(wal_dir, true)?;
     for index in 0..validators {
         let root = digest4_to_bytes(&validator(seed, index).pk.pk_root);
-        let mac = Secret32(wal_mac_key(seed, index));
+        let mac = Secret32::new(wal_mac_key(seed, index));
         FsWalEpochSink::create_new_for_fresh_key(wal_path(wal_dir, index), &root, mac.0).map_err(
             |e| {
                 CliError::state(format!(
@@ -259,13 +259,13 @@ fn resolve_signature_authors(
         .unzip())
 }
 
-fn load_proof(path: &str) -> Result<QsagAggregateProof, CliError> {
+fn load_proof(path: &str) -> Result<HemAggregatedProof, CliError> {
     let file = load_json(path, PROOF_FORMAT)?;
-    QsagAggregateProof::from_bytes_canonical(&file.field_hex("proof")?)
+    HemAggregatedProof::from_bytes_canonical(&file.field_hex("proof")?)
         .map_err(|e| CliError::verify(format!("{path}: malformed aggregate proof: {e:?}")))
 }
 
-fn proof_file(committee: &[ValidatorPublicKey], proof: &QsagAggregateProof) -> Json {
+fn proof_file(committee: &[ValidatorPublicKey], proof: &HemAggregatedProof) -> Json {
     let bytes = proof.to_bytes();
     let signers = proof.bitmap().active_indices();
     Json::object(vec![
@@ -307,6 +307,7 @@ Third form: committee-vault demo signing + aggregation backed by per-validator F
   --deterministic     derive the proof blinding seed from the inputs instead of OS entropy
   --anchor-dir <dir>  verify and advance external monotone anchors before releasing proof
   --vault-dir <dir>   explicit local custody directory verified disjoint from --anchor-dir
+  --ephemeral-unanchored  allow disposable committee signing without rollback protection
   --allow-single-disk-anchor  permit --anchor-dir on the same filesystem device (distinct inode)
   --policy-id-hex <hex>  32-byte policy identifier committed into CeremonyContext
   --spend-amount <n>  spend amount committed into CeremonyContext (default: 0)
@@ -335,7 +336,13 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
             "policy-id-hex",
             "spend-amount",
         ],
-        &["deterministic", "json", "help", "allow-single-disk-anchor"],
+        &[
+            "deterministic",
+            "json",
+            "help",
+            "allow-single-disk-anchor",
+            "ephemeral-unanchored",
+        ],
     )?;
     if args.flag("help") {
         print!("{AGGREGATE_HELP}");
@@ -478,11 +485,16 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
             .map_err(|e| CliError::verify(format!("aggregation failed: {e:?}")))?;
         (committee, proof)
     } else {
+        crate::keys::require_stateful_anchor(
+            Scheme::AggCommittee,
+            anchor_cfg.as_ref(),
+            args.flag("ephemeral-unanchored"),
+        )?;
         let secret_path = args.require("secret")?;
         let mut vault = crate::vault::Vault::acquire(secret_path, false)?;
         let mut secret = load_json(secret_path, SECRET_FORMAT)?;
         let passphrase = crate::envelope::passphrase(&args)?;
-        let opened = crate::envelope::open(&secret, passphrase.as_deref())?;
+        let opened = crate::envelope::open(&secret, passphrase.as_deref().map(Vec::as_slice))?;
         vault.set_key_material(&opened);
         vault.authenticate(&secret)?;
         if scheme_of(&secret)? != Scheme::AggCommittee {
@@ -568,7 +580,7 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
                     "validator {index} can not sign at epoch {epoch}: {what}"
                 ))
             };
-            let mac = Secret32(wal_mac_key(&seed, index as u32));
+            let mac = Secret32::new(wal_mac_key(&seed, index as u32));
             let (wal, recovered) =
                 FsWalEpochSink::open_or_recover(wal_path(wal_dir, index as u32), &root, mac.0)
                     .map_err(|e| {

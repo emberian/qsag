@@ -149,7 +149,7 @@ fn run_dealerless_seed_ceremony(
 
     let mut bundles = Vec::with_capacity(members.len());
     for (index, inbox) in inboxes.iter().enumerate() {
-        let mut bytes = ZeroizingBuf(b"QSAGHDL1".to_vec());
+        let mut bytes = ZeroizingBuf::new(b"QSAGHDL1".to_vec());
         bytes.0.extend_from_slice(&entropies[index].0);
         for commit in &commits {
             bytes.0.extend_from_slice(&commit.party_id.to_be_bytes());
@@ -258,7 +258,7 @@ fn restore_custodian(
     if &r.take::<8>()? != b"QSAGHDL1" {
         return Err(CliError::input("invalid HD custody magic"));
     }
-    let entropy = Secret32(r.take()?);
+    let entropy = Secret32::new(r.take()?);
     let mut commits = Vec::with_capacity(config.members().len());
     for _ in config.members() {
         commits.push(SeedContributionCommit {
@@ -427,7 +427,7 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
         } else {
             os_random_32()?
         };
-        entropies.push(Secret32(seed));
+        entropies.push(Secret32::new(seed));
     }
 
     let (custodian_seeds, bundles) = run_dealerless_seed_ceremony(&config, &entropies)?;
@@ -461,7 +461,7 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
         if let Some(pass) = &passphrase {
             crate::envelope::seal(&mut doc, pass)?;
         }
-        let encoded = ZeroizingBuf(doc.to_pretty().into_bytes());
+        let encoded = ZeroizingBuf::new(doc.to_pretty().into_bytes());
         write_new(&hd_share_path(vault_dir, idx), &encoded, true)?;
     }
 
@@ -774,7 +774,7 @@ fn recover(raw: &[String]) -> Result<(), CliError> {
                     "HD custody bundle does not match enrollment",
                 ));
             }
-            let opened = crate::envelope::open(&doc, passphrase.as_deref())?;
+            let opened = crate::envelope::open(&doc, passphrase.as_deref().map(Vec::as_slice))?;
             selected.push(restore_custodian(
                 &config,
                 idx as u16,
@@ -787,7 +787,7 @@ fn recover(raw: &[String]) -> Result<(), CliError> {
         let mut entropies = Vec::with_capacity(parties);
         for idx in 0..parties {
             let raw = read_bounded_file(&hd_seed_path(vault_dir, idx), 32)?;
-            entropies.push(Secret32(
+            entropies.push(Secret32::new(
                 raw.0
                     .as_slice()
                     .try_into()
@@ -812,7 +812,7 @@ fn recover(raw: &[String]) -> Result<(), CliError> {
         slh_keygen_from_seed(&Fips205Params::SLH_DSA_SHAKE_128F, recovered_seed.expose()).map_err(
             |_| CliError::verify("SLH-DSA-SHAKE-128f keygen from recovered seed failed"),
         )?;
-    let sk_bytes = crate::cli::ZeroizingBuf(sk.to_bytes());
+    let sk_bytes = crate::cli::ZeroizingBuf::new(sk.to_bytes());
     let sk_hex = to_hex_zeroizing(&sk_bytes.0);
     let sk_hex_str = std::str::from_utf8(&sk_hex.0)
         .map_err(|_| CliError::input("internal hex encoding error"))?;
@@ -824,7 +824,7 @@ fn recover(raw: &[String]) -> Result<(), CliError> {
     // `enrollment_nonce` (`vault::tag` refuses a secret file without one), so recovering the same
     // child twice yields two enrollments whose lock files are not interchangeable. The nonce is
     // not mixed into the key: an SLH-DSA child is fully determined by the recovered seed.
-    let enrollment_entropy = Secret32(os_random_32()?);
+    let enrollment_entropy = Secret32::new(os_random_32()?);
     let mut secret_doc = Json::object(vec![
         ("format", Json::str(SECRET_FORMAT)),
         ("scheme", Json::str("slh-dsa-shake-128f")),
@@ -841,7 +841,7 @@ fn recover(raw: &[String]) -> Result<(), CliError> {
     }
     vault.bind(&mut secret_doc)?;
     vault.prepare(&mut secret_doc)?;
-    let encoded_secret = crate::cli::ZeroizingBuf(secret_doc.to_pretty().into_bytes());
+    let encoded_secret = crate::cli::ZeroizingBuf::new(secret_doc.to_pretty().into_bytes());
     vault.seal(&mut secret_doc)?;
     write_new(secret_out, &encoded_secret.0, true)?;
 

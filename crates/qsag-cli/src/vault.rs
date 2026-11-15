@@ -77,9 +77,12 @@ impl Vault {
                 return Err(corrupt());
             }
         }
-        let expected = crate::cli::Secret32(tag(secret, self.key_material.as_deref())?);
+        let expected = crate::cli::Secret32::new(tag(
+            secret,
+            self.key_material.as_deref().map(Vec::as_slice),
+        )?);
         let recorded = secret.field_hex("state_mac").map_err(|_| corrupt())?;
-        let mut companion = crate::cli::Secret32([0u8; 32]);
+        let mut companion = crate::cli::Secret32::new([0u8; 32]);
         if self.file.metadata().map_err(|_| corrupt())?.len() != 32 {
             return Err(corrupt());
         }
@@ -98,14 +101,20 @@ impl Vault {
 
     pub fn prepare(&self, secret: &mut Json) -> Result<(), CliError> {
         self.check_path()?;
-        let mac = crate::cli::Secret32(tag(secret, self.key_material.as_deref())?);
+        let mac = crate::cli::Secret32::new(tag(
+            secret,
+            self.key_material.as_deref().map(Vec::as_slice),
+        )?);
         set(secret, "state_mac", Json::hex(&mac.0));
         Ok(())
     }
 
     pub fn seal(&mut self, secret: &mut Json) -> Result<(), CliError> {
         self.check_path()?;
-        let mac = crate::cli::Secret32(tag(secret, self.key_material.as_deref())?);
+        let mac = crate::cli::Secret32::new(tag(
+            secret,
+            self.key_material.as_deref().map(Vec::as_slice),
+        )?);
         set(secret, "state_mac", Json::hex(&mac.0));
         self.file
             .seek(SeekFrom::Start(0))
@@ -122,7 +131,7 @@ impl Vault {
             .ok_or_else(corrupt)?;
         set(secret, "uses_completed", Json::num(used));
         self.seal(secret)?;
-        let bytes = ZeroizingBuf(secret.to_pretty().into_bytes());
+        let bytes = ZeroizingBuf::new(secret.to_pretty().into_bytes());
         replace_secret(path, &bytes.0)?;
         self.check_path()
     }

@@ -4,7 +4,8 @@
 //! cargo run --release -p qsag-cli --example few_time_signatures
 //! ```
 //!
-//! 1. `FrontierSumFts`: a 1,058-byte signature, the two-use budget, and a wire round trip.
+//! 1. `FrontierSumFts`: a 2,338-byte `Full256Bit` signature (`Compact1122` is 1,122 bytes),
+//!    the two-use budget, and a wire round trip.
 //! 2. `ParallelSeededFts`: three parties sign under one public key without reconstructing it,
 //!    with a durable burn journal that refuses to spend an epoch twice, even after a restart.
 
@@ -120,7 +121,7 @@ fn main() {
     )
     .expect("valid parameters");
     let mut journal =
-        FsWalFtsEpochLatch::open(&journal_path, public_key.pk_seed_bytes, journal_key)
+        FsWalFtsEpochLatch::open_existing(&journal_path, public_key.pk_seed_bytes, journal_key)
             .expect("authentic burn journal");
     assert_eq!(
         restarted
