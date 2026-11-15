@@ -10,9 +10,9 @@ use qsag_accel::keccak::cshake256_framed_32;
 use qsag_core::{ExternalMonotoneAnchor, LedgerCheckpoint};
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom};
 #[cfg(not(unix))]
 use std::io::Write;
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const MAGIC: &[u8; 8] = b"QSBURN04";
@@ -190,7 +190,12 @@ impl DurableBurnJournal {
         Self::open_existing(path, key, mac_key)
     }
 
-    fn encode_hwm_slot(&self, slot_idx: u8, generation: u64, tip_tag: &[u8; 32]) -> [u8; HWM_SLOT_LEN] {
+    fn encode_hwm_slot(
+        &self,
+        slot_idx: u8,
+        generation: u64,
+        tip_tag: &[u8; 32],
+    ) -> [u8; HWM_SLOT_LEN] {
         let mut slot = [0u8; HWM_SLOT_LEN];
         let gen_be = generation.to_be_bytes();
         slot[..8].copy_from_slice(&gen_be);
@@ -386,7 +391,10 @@ impl DurableBurnJournal {
                 }
             } else {
                 // `actual_gen == hwm_gen + 1`: crash occurred after full record sync, before Slot A sync.
-                if !ct_eq_bytes(&prev_tag, &hwm_tip) || gen_a != gen_b || !ct_eq_bytes(&tip_a, &tip_b) {
+                if !ct_eq_bytes(&prev_tag, &hwm_tip)
+                    || gen_a != gen_b
+                    || !ct_eq_bytes(&tip_a, &tip_b)
+                {
                     return Err(invalid());
                 }
                 let tip = journal.last_tag;

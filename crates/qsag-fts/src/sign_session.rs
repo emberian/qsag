@@ -47,7 +47,7 @@ enum Phase {
 struct Job {
     state: [AuthWire128; 2],
     original: [AuthWire128; 2],
-    tweak: (u128, u128),
+    constants: [(u128, u128); SPN_ROUNDS],
     chain: u16,
     remaining: usize,
     step: u8,
@@ -180,7 +180,7 @@ impl<'a> ParallelSeededSignSession<'a> {
         state.jobs.push(Job {
             state: original.clone(),
             original,
-            tweak,
+            constants: round_constants(tweak.0, tweak.1),
             chain: 0,
             remaining: 0,
             step: 0,
@@ -544,10 +544,11 @@ impl<'a> ParallelSeededSignSession<'a> {
                     val_sh: self.share.sk_seed_lanes[lane],
                     mac: self.share.sk_seed_macs[lane],
                 });
+                let tweak = derive_seed_tweak(&self.pk.pk_seed_bytes, self.epoch, chain as u16);
                 Job {
                     state: original.clone(),
                     original,
-                    tweak: derive_seed_tweak(&self.pk.pk_seed_bytes, self.epoch, chain as u16),
+                    constants: round_constants(tweak.0, tweak.1),
                     chain: chain as u16,
                     remaining: target as usize,
                     step: 0,
@@ -569,7 +570,7 @@ impl<'a> ParallelSeededSignSession<'a> {
             1
         };
         for job in self.jobs.iter_mut().filter(|j| !j.done) {
-            let rc = round_constants(job.tweak.0, job.tweak.1, self.spn_round);
+            let rc = job.constants[self.spn_round];
             for (lane, wire) in job.state.iter_mut().enumerate() {
                 *wire = auth_add_pub_const(
                     party,
@@ -636,8 +637,8 @@ impl<'a> ParallelSeededSignSession<'a> {
                 } else {
                     job.remaining -= 1;
                     job.original = job.state.clone();
-                    job.tweak =
-                        derive_chain_tweak(&self.pk.pk_seed_bytes, self.epoch, job.chain, job.step);
+                    let tweak = derive_chain_tweak(&self.pk.pk_seed_bytes, self.epoch, job.chain, job.step);
+                    job.constants = round_constants(tweak.0, tweak.1);
                     job.step += 1;
                 }
             }
