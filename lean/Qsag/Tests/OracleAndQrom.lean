@@ -640,3 +640,666 @@ theorem canopyToy_relaxed_accepts_extra_sibling :
 /-- Non-vacuity witness for §3: the honest toy opening is accepted, carries exactly
     `steinerSiblingCount` siblings, and every other opening of the same indices against the same
     commitment is rejected or exhibits a collision of the toy hashes. -/
+theorem inhabited_canopy_multiproof_binding :
+    verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+      canopyToyLeaves canopyToyProof = true ∧
+    canopyToyProof.length = steinerSiblingCount 3 (canopyToyLeaves.map Prod.fst) ∧
+    (∀ (leaves' : List (Nat × Nat)) (proof' : List Nat),
+      leaves'.map Prod.fst = canopyToyLeaves.map Prod.fst →
+      (leaves', proof') ≠ (canopyToyLeaves, canopyToyProof) →
+      verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+        leaves' proof' = false ∨
+      (∃ top₁ top₂ : Nat, top₁ ≠ top₂ ∧ canopyToyRootHash 3 top₁ = canopyToyRootHash 3 top₂) ∨
+      (∃ (i l r l' r' : Nat), (l, r) ≠ (l', r') ∧
+        canopyToyNodeHash i l r = canopyToyNodeHash i l' r')) :=
+  ⟨canopyToy_honest_accepted,
+   verifyCanopyMultiproof_exact_sibling_count canopyToyNodeHash canopyToyRootHash 3
+     canopyToyCommitment canopyToyLeaves canopyToyProof canopyToy_honest_accepted,
+   fun leaves' proof' hIdx hNe =>
+     verifyCanopyMultiproof_tamper_rejected_or_collision canopyToyNodeHash canopyToyRootHash 3
+       canopyToyCommitment canopyToyLeaves leaves' canopyToyProof proof'
+       canopyToy_honest_accepted hIdx hNe⟩
+
+
+/-- `#tooth` witness: with an empty pre-challenge query table (`queries = []`), a depth-1 opening
+    cannot be online-extracted (`extractOnlineMerkleOpening = none`). -/
+theorem tooth_onlineMerkle_empty_queries_unqueried_root :
+    ¬ ∃ lp : Nat × List Nat,
+      extractOnlineMerkleOpening 10 ([] : List (RecordedMerkleQuery Nat)) 0 1 0 = some lp := by
+  rintro ⟨_, h⟩
+  unfold extractOnlineMerkleOpening findFirst at h
+  cases h
+
+
+
+
+private def witnessInitVec : QVec 2 2 1 :=
+  fun x y _ => if x.1 = 0 ∧ y.1 = 0 then ⟨1, 0⟩ else GaussInt.zero
+
+private theorem witnessInitVec_pos : 0 < QVec.stateNormSq witnessInitVec := by decide
+
+private def witnessQuantumAdv : QuantumAdv 2 2 1 0 :=
+  { init := witnessInitVec, h_init_pos := witnessInitVec_pos, steps := fun t => Fin.elim0 t }
+
+private def witnessFailExtract (H : Fin 2 → BitVec 2) (x : Fin 2) : Bool :=
+  decide ((H x).toNat = 0)
+
+private def witnessProj (_ : Fin (2 * 1)) (x : Fin 2) : Fin 2 := x
+
+private def witnessTargetSet (_ : Fin (2 * 1)) (_ : Fin 2 → BitVec 2) (_ : Fin 2) :
+    List (BitVec 2) := [0#2]
+
+private theorem witnessCoverProof (H : Fin 2 → BitVec 2) :
+    QVec.queryMassOn (witnessFailExtract H) (runQuantumAdv witnessQuantumAdv H) ≤
+      qsum (2 * 1) (fun r =>
+        qromOrdinaryFlipMass witnessQuantumAdv H (witnessProj r) (fun _ _ => true)
+          (fun O x => listHasElem (O x) (witnessTargetSet r O x))) := by
+  have hPt : ∀ (ψ : QVec 2 2 1) (x : Fin 2),
+      QVec.queryWeight ψ x ≤ QVec.queryMassOn (fun z => decide (x = z)) ψ := by
+    intro ψ ⟨i, hi⟩
+    match i, hi with
+    | 0, _ =>
+      unfold QVec.queryMassOn qsum; dsimp only
+      simp only [decide_true, ↓reduceIte]
+      exact Nat.le_add_right _ _
+    | 1, _ =>
+      unfold QVec.queryMassOn
+      simp only [qsum, Fin.ext_iff, Nat.one_ne_zero, Nat.zero_add, decide_false, decide_true,
+        Bool.false_eq_true, ↓reduceIte]
+      omega
+  have hLe : QVec.queryMassOn (witnessFailExtract H) (runQuantumAdv witnessQuantumAdv H) ≤
+      qromOrdinaryFlipMass witnessQuantumAdv H (witnessProj ⟨0, by omega⟩) (fun _ _ => true)
+        (fun O x => listHasElem (O x) (witnessTargetSet ⟨0, by omega⟩ O x)) := by
+    unfold QVec.queryMassOn qromOrdinaryFlipMass witnessFailExtract witnessProj witnessTargetSet
+    apply qsum_le_qsum; intro x
+    by_cases h0 : (H x).toNat = 0
+    · have hBv : H x = 0#2 := BitVec.eq_of_toNat_eq h0
+      have hElem : listHasElem (H x) [0#2] = true := by rw [hBv]; rfl
+      simp only [h0, decide_true, Bool.true_and, hElem, ↓reduceIte]
+      exact hPt (runQuantumAdv witnessQuantumAdv H) x
+    · simp only [h0, decide_false, Bool.false_eq_true, ↓reduceIte]
+      exact Nat.zero_le _
+  exact Nat.le_trans hLe (Nat.le_add_right _ _)
+
+/-- Inhabitedness of the conditional target-hit premises: zero queries, two-bit answers,
+    and constant singleton targets. This is not an inhabited Merkle extraction execution. -/
+theorem inhabited_qrom_unitary_merkle_extract :
+    ∃ (cardX w cardAnc Q numRoots : Nat)
+      (A : QuantumAdv cardX w cardAnc Q)
+      (failExtract : (Fin cardX → BitVec w) → Fin cardX → Bool)
+      (proj : Fin (2 * numRoots) → Fin cardX → Fin cardX)
+      (targetSet : Fin (2 * numRoots) → (Fin cardX → BitVec w) → Fin cardX → List (BitVec w)),
+      (∀ r O x ch, targetSet r (reprogramOracle O x ch) x = targetSet r O x) ∧
+      (∀ r O x, (targetSet r O x).length ≤ (if r.1 % 2 = 0 then 1 else 2 * Q + 1)) ∧
+      (∀ H, QVec.queryMassOn (failExtract H) (runQuantumAdv A H) ≤
+        qsum (2 * numRoots) (fun r =>
+          qromOrdinaryFlipMass A H (proj r) (fun _ _ => true)
+            (fun O x => listHasElem (O x) (targetSet r O x)))) :=
+  ⟨2, 2, 1, 0, 1, witnessQuantumAdv, witnessFailExtract, witnessProj, witnessTargetSet,
+    (fun _ _ _ _ => rfl),
+    (fun _ _ _ => by unfold witnessTargetSet; simp),
+    witnessCoverProof⟩
+
+
+
+
+/-- A singleton adaptive target can contain the answer being tested. -/
+def qromSelfTarget (H : Fin 1 → BitVec 1) (x : Fin 1) : List (BitVec 1) := [H x]
+
+/-- Small target cardinality is insufficient: this event always succeeds, but changing its
+    tested oracle coordinate changes its target list and violates `hLocal`. -/
+theorem tooth_qrom_self_target_not_local :
+    (∀ (H : Fin 1 → BitVec 1) (x : Fin 1),
+      (qromSelfTarget H x).length = 1 ∧ listHasElem (H x) (qromSelfTarget H x) = true) ∧
+    ¬ (∀ (H : Fin 1 → BitVec 1) (x : Fin 1) (ch : BitVec 1),
+      qromSelfTarget (reprogramOracle H x ch) x = qromSelfTarget H x) := by
+  constructor
+  · intro H x
+    simp [qromSelfTarget, listHasElem]
+  · intro h
+    have h01 := h (fun _ => 0#1) 0 1#1
+    have hne : qromSelfTarget (reprogramOracle (fun _ : Fin 1 => 0#1) 0 1#1) 0 ≠
+        qromSelfTarget (fun _ : Fin 1 => 0#1) 0 := by decide
+    exact hne h01
+
+/-- Uniform query register, phase-kickback response, and a blank record register. -/
+def qromParityInit : QVec 2 1 2 := fun _ y a =>
+  if a.val = 0 then (if y.val = 0 then ⟨1, 0⟩ else ⟨-1, 0⟩) else GaussInt.zero
+
+/-- The two input addresses have different oracle answers. -/
+def qromParityOracle (x : Fin 2) : BitVec 1 := BitVec.ofFin x
+
+/-- One coherent oracle call followed by a query-register Hadamard. -/
+def qromParityAdv : QuantumAdv 2 1 2 1 where
+  init := qromParityInit
+  h_init_pos := by decide
+  steps := fun _ => hadamardQuery2 1 2
+
+/-- The same initial state after copying the query address to an orthogonal record.
+    This is the controlled-X copy on a blank ancilla, before the oracle call. -/
+def qromRecordedParityInit : QVec 2 1 2 := fun x y a =>
+  if a = x then (if y.val = 0 then ⟨1, 0⟩ else ⟨-1, 0⟩) else GaussInt.zero
+
+def qromRecordedParityAdv : QuantumAdv 2 1 2 1 where
+  init := qromRecordedParityInit
+  h_init_pos := by decide
+  steps := fun _ => hadamardQuery2 1 2
+
+/-- A classical record of the queried address destroys interference even for one query.
+    Both final states have squared norm eight. The coherent circuit outputs one with
+    probability one; retaining the address record changes that probability to one half.
+    An online extractor therefore needs a proved disturbance/simulation bound, not just a
+    consistent classical query list handed to `classifyOnlineMerkleOpening`. -/
+theorem tooth_qrom_query_record_changes_born_probability :
+    QVec.stateNormSq (runQuantumAdv qromParityAdv qromParityOracle) = 8 ∧
+    QVec.stateNormSq (runQuantumAdv qromRecordedParityAdv qromParityOracle) = 8 ∧
+    QVec.queryMassOn (fun x : Fin 2 => decide (x.val = 1))
+      (runQuantumAdv qromParityAdv qromParityOracle) = 8 ∧
+    QVec.queryMassOn (fun x : Fin 2 => decide (x.val = 1))
+      (runQuantumAdv qromRecordedParityAdv qromParityOracle) = 4 := by
+  decide
+
+
+/-! ## Executed example: the experiment is not the coherent run -/
+
+/-- On the one-query parity circuit of `QromExtractionBoundary`, the coherent run puts mass
+    8 of 8 on output one, while the measured experiment puts 4 of 8 there (two branches of
+    mass 4 each). The bounds in this module are statements about the second number. -/
+theorem measured_parity_execution :
+    QVec.queryMassOn (fun x : Fin 2 => decide (x.val = 1))
+      (runQuantumAdv qromParityAdv qromParityOracle) = 8 ∧
+    sumLogs 2 1 (fun xs => QVec.queryMassOn (fun x : Fin 2 => decide (x.val = 1))
+      (measuredStateAt qromParityAdv qromParityOracle 1 (Nat.le_refl 1) xs)) = 4 ∧
+    sumLogs 2 1 (fun xs => QVec.stateNormSq
+      (measuredStateAt qromParityAdv qromParityOracle 1 (Nat.le_refl 1) xs)) = 8 := by
+  decide
+
+
+
+end Qsag
+
+namespace Qsag
+/-- Nonvacuity control in the QUANTUM game: the identity primitive makes the mode
+constant, so every online adversary wins for every challenge. This does not describe
+the actual SPN; it rules out deriving mode hardness from permutation laws alone. -/
+theorem identityPublicPermutation_quantum_preimage_mass {anc q : Nat}
+    (adversary : PublicSpnPreimageAdversary anc q) (challenge : PublicSpnState) :
+    publicSpnPreimageMass identityPublicPermutation adversary challenge =
+      QVec.stateNormSq (publicSpnPreimageFinalState identityPublicPermutation adversary challenge) := by
+  unfold publicSpnPreimageMass QVec.stateNormSq QVec.queryWeight
+  simp only [publicSpnFeedForward, identityPublicPermutation, id_eq, BitVec.xor_self, ↓reduceIte]
+
+
+end Qsag
+
+public section
+set_option exponentiation.threshold 8192
+namespace Qsag
+open RoundPoly
+/-- `x ↦ x ^ 3` identifies `ω₃ ≠ 1` with `1`, because `3 ∣ p - 1`. -/
+theorem tooth_d3_not_permutation_on_goldilocks :
+    goldilocksOmega3 ≠ Goldilocks.one ∧ goldilocksOmega3 ≠ Goldilocks.zero ∧
+    goldilocksPow goldilocksOmega3 3 = goldilocksPow Goldilocks.one 3 ∧
+    3 ∣ goldilocksPrime - 1 := by
+  refine ⟨gold_ne_of_val_ne (by decide), gold_ne_of_val_ne (by decide), ?_,
+    ⟨6148914689804861440, by decide⟩⟩
+  apply Goldilocks.ext
+  rw [goldilocksPow_val, goldilocksPow_val]
+  decide
+
+
+/-- `x ↦ x ^ 5` identifies `ω₅ ≠ 1` with `1`, because `5 ∣ p - 1`. -/
+theorem tooth_d5_not_permutation_on_goldilocks :
+    goldilocksOmega5 ≠ Goldilocks.one ∧ goldilocksOmega5 ≠ Goldilocks.zero ∧
+    goldilocksPow goldilocksOmega5 5 = goldilocksPow Goldilocks.one 5 ∧
+    5 ∣ goldilocksPrime - 1 := by
+  refine ⟨gold_ne_of_val_ne (by decide), gold_ne_of_val_ne (by decide), ?_,
+    ⟨3689348813882916864, by decide⟩⟩
+  apply Goldilocks.ext
+  rw [goldilocksPow_val, goldilocksPow_val]
+  decide
+
+
+/-- The univariate degree alone stays below `2 ^ 85`: `7 ^ 30 > 2 ^ 128` is false, and `46`
+    rounds would be the least count with `7 ^ r ≥ 2 ^ 128`. What exceeds `2 ^ 128` at `30` rounds
+    is the square `(7 ^ 30) ^ 2`. -/
+theorem tooth_univariate_degree_alone_below_two_pow_128 :
+    7 ^ (8 + 22) < 2 ^ 85 ∧ 7 ^ 45 < 2 ^ 128 ∧ 2 ^ 128 ≤ 7 ^ 46 ∧
+    2 ^ 128 < (7 ^ (8 + 22)) ^ 2 := by decide
+
+
+theorem tooth_poseidon2_margin_fails_at_rp17 : ¬ Poseidon2InterpolationMargin 16 8 17 :=
+  fun h => by
+    have := poseidon2_interpolation_margin_needs_26 16 8 17 (by decide) h
+    omega
+
+
+
+
+/-- `#tooth` **Merz–Rodríguez García (`2026/306`) `(X, -X, 0)` Subspace & Partial Feed-Forward Vulnerability**:
+    1. On standard `applyME = P_3 ⊗ M_4 = circ(2 M_4, M_4, M_4)`, the entire 4-dimensional subspace
+       `⟨X, -X, 0⟩` maps to `⟨M_4 X, -M_4 X, 0⟩`, leaving the sponge capacity block `b2 = 0` untouched!
+    2. Across a full round `sboxState12 (state12Add (applyME ⟨U0 + X, -X, U2⟩) C)` under the two linear
+       antisymmetry conditions `(applyME ⟨U0, 0, U2⟩).b0 + C.b0 = -((applyME ⟨U0, 0, U2⟩).b1 + C.b1)`,
+       oddness of `sbox7` preserves `(X^(1), -X^(1))` in blocks `0, 1` while keeping block `b2` independent of `X`!
+    3. Partial feed-forward `(perm st).b0 + st.b0` (`poseidon2_compress12_ff` in `sponge.rs`) and naive
+       uniform sum `st.b0 + st.b1 + st.b2` leave `(0, X, -X)` canceled in the feed-forward term. -/
+theorem tooth_poseidon2_me_std_admits_x_neg_x_subspace_skip (X U0 U2 : Lane4)
+    (C : Poseidon2State12)
+    (hAnti : lane4Add (applyME ⟨U0, lane4Zero, U2⟩).b0 C.b0 =
+             lane4Neg (lane4Add (applyME ⟨U0, lane4Zero, U2⟩).b1 C.b1)) :
+    applyME ⟨X, lane4Neg X, lane4Zero⟩ = ⟨applyM4 X, lane4Neg (applyM4 X), lane4Zero⟩ ∧
+    let afterSbox := sboxState12 (state12Add (applyME ⟨lane4Add U0 X, lane4Neg X, U2⟩) C)
+    afterSbox.b1 = lane4Neg afterSbox.b0 ∧
+    afterSbox.b2 = sboxLane4 (lane4Add (applyME ⟨U0, lane4Zero, U2⟩).b2 C.b2) ∧
+    (⟨U0, X, lane4Neg X⟩ : Poseidon2State12).b0 = U0 ∧
+    lane4Add (lane4Add U0 X) (lane4Neg X) = U0 := by
+  have hLinSub : applyME ⟨X, lane4Neg X, lane4Zero⟩ =
+      ⟨applyM4 X, lane4Neg (applyM4 X), lane4Zero⟩ := by
+    unfold applyME lane4Neg applyM4 lane4Add lane4Sub lane4Sum lane4Zero
+    apply Poseidon2State12.ext <;> apply Lane4.ext <;> gold_cring
+  have hDecomp : ⟨lane4Add U0 X, lane4Neg X, U2⟩ =
+      state12Add ⟨U0, lane4Zero, U2⟩ ⟨X, lane4Neg X, lane4Zero⟩ := by
+    unfold state12Add lane4Add lane4Neg lane4Sub lane4Zero
+    apply Poseidon2State12.ext <;> apply Lane4.ext <;> gold_cring
+  refine ⟨hLinSub, ?_, ?_, rfl, ?_⟩
+  · rw [hDecomp, applyME_add, hLinSub]
+    unfold state12Add sboxState12 sboxLane4
+    dsimp only
+    have hHelper : ∀ (M0 M1 A C0 C1 : Lane4),
+        lane4Add M0 C0 = lane4Neg (lane4Add M1 C1) →
+        lane4Add (lane4Add M1 (lane4Neg A)) C1 = lane4Neg (lane4Add (lane4Add M0 A) C0) := by
+      intro M0 M1 A C0 C1 hEq
+      have h0 := congrArg Lane4.x0 hEq
+      have h1 := congrArg Lane4.x1 hEq
+      have h2 := congrArg Lane4.x2 hEq
+      have h3 := congrArg Lane4.x3 hEq
+      unfold lane4Add lane4Neg lane4Sub lane4Zero at h0 h1 h2 h3 ⊢
+      dsimp only at h0 h1 h2 h3 ⊢
+      have hInv : ∀ a : Goldilocks, Goldilocks.sub Goldilocks.zero (Goldilocks.sub Goldilocks.zero a) = a :=
+        fun _ => by gold_cring
+      apply Lane4.ext
+      · have hL : Goldilocks.add (Goldilocks.add M1.x0 (Goldilocks.sub Goldilocks.zero A.x0)) C1.x0 =
+            Goldilocks.sub (Goldilocks.add M1.x0 C1.x0) A.x0 := by gold_cring
+        have rhsEq : Goldilocks.sub Goldilocks.zero (Goldilocks.add (Goldilocks.add M0.x0 A.x0) C0.x0) =
+            Goldilocks.sub (Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x0 C0.x0)) A.x0 := by gold_cring
+        have hFlip : Goldilocks.add M1.x0 C1.x0 = Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x0 C0.x0) := by
+          have := congrArg (Goldilocks.sub Goldilocks.zero) h0
+          rw [hInv] at this
+          exact this.symm
+        rw [hL, rhsEq, hFlip]
+      · have hL : Goldilocks.add (Goldilocks.add M1.x1 (Goldilocks.sub Goldilocks.zero A.x1)) C1.x1 =
+            Goldilocks.sub (Goldilocks.add M1.x1 C1.x1) A.x1 := by gold_cring
+        have rhsEq : Goldilocks.sub Goldilocks.zero (Goldilocks.add (Goldilocks.add M0.x1 A.x1) C0.x1) =
+            Goldilocks.sub (Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x1 C0.x1)) A.x1 := by gold_cring
+        have hFlip : Goldilocks.add M1.x1 C1.x1 = Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x1 C0.x1) := by
+          have := congrArg (Goldilocks.sub Goldilocks.zero) h1
+          rw [hInv] at this
+          exact this.symm
+        rw [hL, rhsEq, hFlip]
+      · have hL : Goldilocks.add (Goldilocks.add M1.x2 (Goldilocks.sub Goldilocks.zero A.x2)) C1.x2 =
+            Goldilocks.sub (Goldilocks.add M1.x2 C1.x2) A.x2 := by gold_cring
+        have rhsEq : Goldilocks.sub Goldilocks.zero (Goldilocks.add (Goldilocks.add M0.x2 A.x2) C0.x2) =
+            Goldilocks.sub (Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x2 C0.x2)) A.x2 := by gold_cring
+        have hFlip : Goldilocks.add M1.x2 C1.x2 = Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x2 C0.x2) := by
+          have := congrArg (Goldilocks.sub Goldilocks.zero) h2
+          rw [hInv] at this
+          exact this.symm
+        rw [hL, rhsEq, hFlip]
+      · have hL : Goldilocks.add (Goldilocks.add M1.x3 (Goldilocks.sub Goldilocks.zero A.x3)) C1.x3 =
+            Goldilocks.sub (Goldilocks.add M1.x3 C1.x3) A.x3 := by gold_cring
+        have rhsEq : Goldilocks.sub Goldilocks.zero (Goldilocks.add (Goldilocks.add M0.x3 A.x3) C0.x3) =
+            Goldilocks.sub (Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x3 C0.x3)) A.x3 := by gold_cring
+        have hFlip : Goldilocks.add M1.x3 C1.x3 = Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x3 C0.x3) := by
+          have := congrArg (Goldilocks.sub Goldilocks.zero) h3
+          rw [hInv] at this
+          exact this.symm
+        rw [hL, rhsEq, hFlip]
+    have hSumAnti := hHelper (applyME ⟨U0, lane4Zero, U2⟩).b0 (applyME ⟨U0, lane4Zero, U2⟩).b1
+      (applyM4 X) C.b0 C.b1 hAnti
+    rw [hSumAnti]
+    unfold lane4Neg lane4Sub lane4Zero
+    dsimp only
+    exact Lane4.ext (sbox7_odd _) (sbox7_odd _) (sbox7_odd _) (sbox7_odd _)
+  · rw [hDecomp, applyME_add, hLinSub]
+    unfold state12Add sboxState12
+    dsimp only
+    have hAddZ : ∀ a : Lane4, lane4Add a lane4Zero = a := fun a => by
+      unfold lane4Add lane4Zero; apply Lane4.ext <;> exact LawfulCommRing.add_zero _
+    rw [hAddZ]
+  · unfold lane4Add lane4Neg lane4Sub lane4Zero
+    apply Lane4.ext <;> gold_cring
+
+
+/-- `#tooth` **Current `V[0] = -2` Internal Matrix Has Rational 1D Eigenspaces Over Goldilocks**:
+    Exhibits an explicit nonzero 12-lane Goldilocks vector `miRationalEigvec0 ≠ 0` satisfying
+    `applyMI miRationalEigvec0 = λ₀ · miRationalEigvec0` (`λ₀ = 8914261387277420341`), confirming
+    that `diag(-2, 1, 2, ..., 1024) + 1·1ᵀ` has reducible characteristic polynomial over `𝔽_p`. -/
+theorem tooth_current_mi_has_rational_eigenvector :
+    miRationalEigvec0 ≠ state12Zero ∧
+    applyMI miRationalEigvec0 =
+      state12Scale (Goldilocks.ofNat 8914261387277420341) miRationalEigvec0 := by decide
+
+
+/-- `#tooth` **Reduced-Round `(R_F = 4, R_P = 10)` & Single-Initial-Round GSR Failure (`tooth_reduced_poseidon2_fails_cico_and_gsr`)**:
+    1. At `(R_F = 4, R_P = 10)` (`14` rounds), univariate degree `7^14 < goldilocksPrime` and half-full +
+       partial Bézout degree `7^(12 * (4 / 2) + 10) = 7^34 < 2^128` both fail!
+    2. If initial full rounds were reduced from `R_F0 = 4` to `R_F0 = 1` (`2026/1692` GSR premise),
+       univariate CICO-1 degree drops to `7^(22 + 4 - 12 + 2) = 7^16 < goldilocksPrime`! -/
+theorem tooth_reduced_poseidon2_fails_cico_and_gsr :
+    7 ^ (4 + 10) < goldilocksPrime ∧
+    7 ^ (12 * (4 / 2) + 10) < 2 ^ 128 ∧
+    7 ^ (22 + 4 - 12 + 2) < goldilocksPrime := by decide
+
+
+theorem witness_poseidon2_margin : ∃ t rF rP, Poseidon2InterpolationMargin t rF rP :=
+  ⟨12, 8, 22, poseidon2_interpolation_margin_width12⟩
+
+
+end Qsag
+end
+
+public section
+set_option exponentiation.threshold 8192
+namespace Qsag
+
+set_option autoImplicit false
+
+def toyMerkleEncode (u v : BitVec 1) : Fin 4 :=
+  ⟨2 * u.toFin.val + v.toFin.val, by have := u.toFin.isLt; have := v.toFin.isLt; omega⟩
+
+def toyMerkleDecode (x : Fin 4) : Nat × Nat × BitVec 1 × BitVec 1 :=
+  (0, 0, BitVec.ofNat 1 (x.val / 2), BitVec.ofNat 1 (x.val % 2))
+
+def toyMerkleLayout : MerkleAddressLayout 4 1 where
+  encode := fun _ _ u v => toyMerkleEncode u v
+  decode := fun x => some (toyMerkleDecode x)
+  levels := 1
+  nodes := 1
+  decode_sound := by
+    intro x l n u v h
+    have h' := Option.some.inj h
+    have hu : BitVec.ofNat 1 (x.val / 2) = u := congrArg (fun τ => τ.2.2.1) h'
+    have hv : BitVec.ofNat 1 (x.val % 2) = v := congrArg (fun τ => τ.2.2.2) h'
+    rw [← hu, ← hv]
+    clear h h' hu hv
+    revert x
+    decide
+  decode_encode := by
+    intro l n u v hl hn
+    have hl0 : l = 0 := by omega
+    have hn0 : n = 0 := by omega
+    subst hl0 hn0
+    cases u with | ofFin fu =>
+    cases v with | ofFin fv =>
+    revert fu fv
+    decide
+
+/-- Basis state at query address `x₀`, zero response register. -/
+def toyBasisInit (x₀ : Fin 4) : QVec 4 1 1 := fun x y _ =>
+  if x = x₀ ∧ y.val = 0 then ⟨1, 0⟩ else GaussInt.zero
+
+def toyQueryAdv (x₀ : Fin 4) (h : 0 < QVec.stateNormSq (toyBasisInit x₀)) : QuantumAdv 4 1 1 1 where
+  init := toyBasisInit x₀
+  h_init_pos := h
+  steps := fun _ => ScaledUnitary.id 4 1 1
+
+/-- Every output claims: root `0`, index `0`, leaf `0`, sibling `1`. The verifier therefore
+    evaluates the oracle at address `2 * 0 + 1 = 1`. -/
+def toyOpening (_ : Fin 4) : MerkleOpeningReadout 1 := ⟨0#1, 0, 0#1, [1#1]⟩
+
+/-- Acceptance without the extraction comparison. -/
+def toyAccepted (H : Fin 4 → BitVec 1) (o : Fin 4) : Bool :=
+  decide (merkleRootFromPath (toyMerkleLayout.hash H) 0 (toyOpening o).idx (toyOpening o).leaf
+    (toyOpening o).path = (toyOpening o).rt)
+
+theorem toy_measured_merkle_execution :
+    let honest := toyQueryAdv ⟨1, by decide⟩ (by decide)
+    let guesser := toyQueryAdv ⟨0, by decide⟩ (by decide)
+    -- both are accepted on 8 of the 16 oracles
+    uniformOracleSum 1 4 (fun H => sumLogs 4 1 (fun xs =>
+      QVec.queryMassOn (toyAccepted H) (measuredStateAt honest H 1 (Nat.le_refl 1) xs))) = 8 ∧
+    uniformOracleSum 1 4 (fun H => sumLogs 4 1 (fun xs =>
+      QVec.queryMassOn (toyAccepted H) (measuredStateAt guesser H 1 (Nat.le_refl 1) xs))) = 8 ∧
+    -- the honest log always yields the opening; the other log never does
+    uniformOracleSum 1 4 (fun H => sumLogs 4 1 (fun xs =>
+      QVec.queryMassOn (measuredMerkleFailure toyMerkleLayout 0 1 toyOpening H xs)
+        (measuredStateAt honest H 1 (Nat.le_refl 1) xs))) = 0 ∧
+    uniformOracleSum 1 4 (fun H => sumLogs 4 1 (fun xs =>
+      QVec.queryMassOn (measuredMerkleFailure toyMerkleLayout 0 1 toyOpening H xs)
+        (measuredStateAt guesser H 1 (Nat.le_refl 1) xs))) = 8 ∧
+    (2 ^ 1) ^ 4 * (prefixScale guesser 1 (Nat.le_refl 1) * QVec.stateNormSq guesser.init) = 16 := by
+  decide +kernel
+
+/-- The toy adversaries are classical-address adversaries, so `ClassicalQueryAddresses` is
+    satisfiable and the transfer theorem applies to them. -/
+theorem toyQueryAdv_classical (x₀ : Fin 4) (h : 0 < QVec.stateNormSq (toyBasisInit x₀)) :
+    ClassicalQueryAddresses (toyQueryAdv x₀ h) (fun _ _ => x₀) := by
+  intro H t ht x y a hx
+  have ht0 : t = 0 := by omega
+  subst ht0
+  show (if x = x₀ ∧ y.val = 0 then (⟨1, 0⟩ : GaussInt) else GaussInt.zero) = GaussInt.zero
+  exact ite_eq_right (fun hh => hx hh.1)
+
+/-- The coherent run of the non-querying-the-right-address adversary, with its own address
+    log `[0]`, has failure mass 8 of 16: the value the measured experiment gave, as the
+    transfer theorem states, and within the general bound `(1 * 4 + 0) / 2`. -/
+theorem toy_classical_run_execution :
+    let guesser := toyQueryAdv ⟨0, by decide⟩ (by decide)
+    uniformOracleSum 1 4 (fun H =>
+      QVec.queryMassOn (measuredMerkleFailure toyMerkleLayout 0 1 toyOpening H
+          (classicalQueryLog (fun _ _ => (⟨0, by decide⟩ : Fin 4)) H 1))
+        (runQuantumAdv guesser H)) = 8 ∧
+    2 ^ 1 * 8 ≤ (1 * (3 * 1 + 1) + triangleSum 1) *
+      ((2 ^ 1) ^ 4 * (prefixScale guesser 1 (Nat.le_refl 1) * QVec.stateNormSq guesser.init)) := by
+  decide +kernel
+
+#verify_constructive
+  Qsag.toy_measured_merkle_execution
+  Qsag.toyQueryAdv_classical
+  Qsag.toy_classical_run_execution
+
+end Qsag
+end
+
+public section
+set_option exponentiation.threshold 8192
+namespace Qsag.CrossProtocol
+open CommRingOps LawfulCommRing
+/-- Explicit permutation: raw inversion succeeds, adding the recovered input fails. -/
+theorem raw_vs_feedforward_tooth :
+    ∃ p : SimpleEquiv (State Goldilocks) (State Goldilocks),
+      rawTrunc p (p.invFun (one, zero, zero)) = one ∧
+      jiveCompress (fun _ => zero) p (p.invFun (one, zero, zero)) ≠ one := by
+  refine ⟨SimpleEquiv.refl _, rfl, ?_⟩
+  decide
+
+
+/-- Feed-forward does not guarantee security for every fixed permutation. -/
+theorem identity_collision_tooth :
+    ∃ x y : State Goldilocks, x ≠ y ∧
+      jiveCompress (fun _ => zero) (SimpleEquiv.refl _) x =
+      jiveCompress (fun _ => zero) (SimpleEquiv.refl _) y := by
+  exact ⟨(zero, zero, zero), (zero, one, zero), by decide, rfl⟩
+
+
+/-- A zero-query guess can succeed; verification must extend the charged transcript. -/
+theorem unchecked_preimage_tooth : ∃ x : State Goldilocks,
+    jiveCompress (fun _ => zero) (SimpleEquiv.refl _) x = zero ∧
+    ¬ ∃ y, (x, y) ∈ ([] : List (State Goldilocks × State Goldilocks)) := by
+  exact ⟨(zero, zero, zero), by decide, by intro ⟨_, h⟩; cases h⟩
+
+
+end Qsag.CrossProtocol
+end
+
+public section
+set_option exponentiation.threshold 8192
+namespace Qsag.PreprocessingGame
+/-- Two advice bits choose one of three pairs; no online oracle call is made. -/
+def storedCollisionAdvice (H : Fin 3 → BitVec 1) : BitVec 2 :=
+  if H 0 = H 1 then 0 else if H 0 = H 2 then 1 else 2
+
+def storedCollisionPair (advice : BitVec 2) : Fin 3 × Fin 3 :=
+  if advice = 0 then (0, 1) else if advice = 1 then (0, 2) else (1, 2)
+
+def storedCollision : ClassicalAdvice 3 1 1 2 0 (Fin 3 × Fin 3) where
+  preprocess := storedCollisionAdvice
+  online := fun advice _ => .done (storedCollisionPair advice)
+
+/-- A real zero-online-query strategy wins on EVERY oracle in this finite family.
+This is an inhabited counterexample to unsalted collision hardness with free preprocessing. -/
+theorem storedCollision_wins (H : Fin 3 → BitVec 1) :
+    collisionWin H (storedCollision.run H 0).1 = true := by
+  have hpigeon : ∀ a b c : BitVec 1, a = b ∨ a = c ∨ b = c := by decide
+  have hp := hpigeon (H 0) (H 1) (H 2)
+  by_cases h01 : H 0 = H 1
+  · simp [ClassicalAdvice.run, storedCollision, storedCollisionAdvice,
+      Program.run, storedCollisionPair, collisionWin, h01]
+  · by_cases h02 : H 0 = H 2
+    · have h21 : H 2 ≠ H 1 := by intro he; exact h01 (h02.trans he)
+      simp [ClassicalAdvice.run, storedCollision, storedCollisionAdvice,
+        Program.run, storedCollisionPair, collisionWin, h02, h21]
+    · have h12 : H 1 = H 2 := hp.resolve_left h01 |>.resolve_left h02
+      simp [ClassicalAdvice.run, storedCollision, storedCollisionAdvice,
+        Program.run, storedCollisionPair, collisionWin, h02, h12]
+
+theorem storedCollision_count :
+    adviceWinCount storedCollision (fun H _ pair => collisionWin H pair) = 8 := by
+  have hEach : ∀ H : Fin 3 → BitVec 1, qsum 1 (fun salt =>
+      if collisionWin H (storedCollision.run H salt).1 then 1 else 0) = 1 := by
+    intro H
+    have hTerms : ∀ salt : Fin 1,
+        (if collisionWin H (storedCollision.run H salt).1 then 1 else 0) = 1 := by
+      intro salt
+      have hs : salt = (0 : Fin 1) := Fin.ext (by omega)
+      rw [hs, storedCollision_wins]
+      rfl
+    rw [qsum_congr hTerms, qsum_const]
+  unfold adviceWinCount
+  rw [uniformOracleSum_congr 1 3 _ _ hEach, uniformOracleSum_const]
+
+
+end Qsag.PreprocessingGame
+end
+
+public section
+set_option exponentiation.threshold 8192
+namespace Qsag.PreprocessingGame
+set_option autoImplicit false
+
+/-- With advice fixed independently of H, each chosen pair collides on 4 of 8 oracles. -/
+theorem fixedAdvice_collision_count (a : BitVec 2) :
+    fixedAdviceWinCount storedCollision.online (fun H _ pair => collisionWin H pair) a = 4 := by
+  cases a with | ofFin a =>
+  revert a
+  decide +kernel
+
+/-- A witness that the oracle-dependent preprocessing really changes the experiment:
+8 successes with two bits of advice versus 4 for every fixed advice, and zero online calls. -/
+theorem storedCollision_execution :
+    adviceWinCount storedCollision (fun H _ pair => collisionWin H pair) = 8 ∧
+    fixedAdviceWinCount storedCollision.online (fun H _ pair => collisionWin H pair) 0 = 4 ∧
+    ∀ H : Fin 3 → BitVec 1, (storedCollision.run H 0).2 = 0 := by
+  refine ⟨storedCollision_count, fixedAdvice_collision_count 0, ?_⟩
+  intro H
+  rfl
+
+/-- Two disjoint three-address slices of the same six-address oracle. -/
+def saltSlice (H : Fin 6 → BitVec 1) (s : Fin 2) : Fin 3 → BitVec 1 :=
+  fun x => H ⟨s.val * 3 + x.val, by have := s.isLt; have := x.isLt; omega⟩
+
+/-- A single stored entry for salt zero, created without knowing the challenge salt. -/
+def oneSaltTable (H : Fin 6 → BitVec 1) : List (Fin 2 × (Fin 3 × Fin 3)) :=
+  [(0, storedCollisionPair (storedCollisionAdvice (saltSlice H 0)))]
+
+/-- The same one-entry capacity used after learning the challenge: intentionally NOT
+an instance of the chronology in ClassicalAdvice, because preprocessing receives s. -/
+def challengeAwareTable (H : Fin 6 → BitVec 1) (s : Fin 2) :
+    List (Fin 2 × (Fin 3 × Fin 3)) :=
+  [(s, storedCollisionPair (storedCollisionAdvice (saltSlice H s)))]
+
+/-- Fresh uniform salt: exactly 64 successful oracle/salt pairs out of 64*2.
+The entry-count bound is attained. Challenge-dependent preprocessing: 128/128 despite
+still storing just one entry. Thus moving salt disclosure before preprocessing invalidates
+applying the fixed-table entries/K bound to the whole two-stage experiment. -/
+theorem freshSalt_chronology_execution :
+    uniformOracleSum 1 6 (fun H => qsum 2
+      (tableWin (fun s pair => collisionWin (saltSlice H s) pair) (oneSaltTable H))) = 64 ∧
+    uniformOracleSum 1 6 (fun H => qsum 2 (fun s =>
+      tableWin (fun t pair => collisionWin (saltSlice H t) pair) (challengeAwareTable H s) s)) = 128 ∧
+    (2 ^ 1) ^ 6 * 2 = 128 := by
+  decide +kernel
+
+/-- Reuses the general proved theorem, not only an executed enumeration. -/
+theorem oneSaltTable_bound :
+    uniformOracleSum 1 6 (fun H => qsum 2
+      (tableWin (fun s pair => collisionWin (saltSlice H s) pair) (oneSaltTable H))) ≤ 64 := by
+  exact freshSalt_preprocessed_table_bound oneSaltTable
+    (fun H s pair => collisionWin (saltSlice H s) pair) 1 (fun _ => Nat.le_refl 1)
+
+/-- Actual adaptive online queries are charged, even when an address is repeated. -/
+def twiceQuery (x : Fin 3) : Program (Fin 3) (BitVec 1) (BitVec 1) 2 :=
+  .query x fun _ => .query x fun y => .done y
+
+theorem twiceQuery_execution (H : Fin 3 → BitVec 1) (x : Fin 3) :
+    (twiceQuery x).run H = (H x, 2) := by
+  unfold twiceQuery Program.run
+  rfl
+
+#verify_constructive
+  Qsag.PreprocessingGame.fixedAdvice_collision_count
+  Qsag.PreprocessingGame.storedCollision_execution
+  Qsag.PreprocessingGame.freshSalt_chronology_execution
+  Qsag.PreprocessingGame.oneSaltTable_bound
+  Qsag.PreprocessingGame.twiceQuery_execution
+end Qsag.PreprocessingGame
+end
+
+public section
+set_option exponentiation.threshold 8192
+namespace Qsag
+def paritySuccess (H : Fin 2 → BitVec 1) (x : Fin 2) : Bool :=
+  decide (x.val = (H 0 ^^^ H 1).toNat)
+
+/-- A genuine superposition query: both addresses have positive initial mass. All four
+    oracles are included. The coherent runtime preserves perfect parity success and has
+    Fourier support exactly on one-entry labels after one call. -/
+theorem coherent_parity_runtime_execution :
+    QVec.queryWeight qromParityAdv.init 0 = 2 ∧ QVec.queryWeight qromParityAdv.init 1 = 2 ∧
+    uniformOracleSum 1 2 (fun H => QVec.queryMassOn (paritySuccess H) (runQuantumAdv qromParityAdv H)) = 32 ∧
+    coherentTableEventMass paritySuccess
+      (fourierOracleState (fourierAdvStateAt qromParityAdv 1 (Nat.le_refl 1))) = 8192 ∧
+    oracleTableSum 2 (fun d => if tableWeight 2 d = 1 then
+      QVec.stateNormSq (fourierAdvStateAt qromParityAdv 1 (Nat.le_refl 1) d) else 0) = 2048 ∧
+    oracleTableSum 2 (fun d => if 1 < tableWeight 2 d then
+      QVec.stateNormSq (fourierAdvStateAt qromParityAdv 1 (Nat.le_refl 1) d) else 0) = 0 := by
+  decide +kernel
+
+/-- Measuring the Fourier label before decoding changes oracle/output correlations. The
+    coherent success mass 8192 falls to 4096 while total mass stays 8192. This refutes treating
+    the Q-entry support invariant as a nondisturbing classical answer-table extractor. -/
+theorem tooth_fourier_database_measurement_disturbs :
+    oracleTableSum 2 (fun d => coherentTableEventMass paritySuccess
+      (fourierOracleState (projectFourierLabel d (fourierAdvStateAt qromParityAdv 1 (Nat.le_refl 1))))) = 4096 ∧
+    oracleTableSum 2 (fun d => coherentTableEventMass (fun _ _ => true)
+      (fourierOracleState (projectFourierLabel d (fourierAdvStateAt qromParityAdv 1 (Nat.le_refl 1))))) = 8192 ∧
+    uniformOracleSum 1 2 (fun H => sumLogs 2 1 (fun xs =>
+      QVec.queryMassOn (paritySuccess H) (measuredStateAt qromParityAdv H 1 (Nat.le_refl 1) xs))) = 16 := by
+  decide +kernel
+
+
+end Qsag
+end
+
+public section
+namespace Qsag
+open MigrationExecution
+theorem towerToRust_differs_from_psi_on_mds_constant :
+    towerToRust 7 gf128MdsATower ≠ gf128MdsAPolyBits ∧
+    psiTower128ToPoly gf128MdsATower = gf128MdsAPolyBits := by
+  refine ⟨?_, gf128_mds_constants_certified.1⟩
+  decide +kernel
+
+end Qsag
+end
