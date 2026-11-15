@@ -43,13 +43,14 @@ pub(crate) fn hash(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
 }
 pub(crate) fn fields(seed: &[u8; 32], domain: &[u8], context: &[u8], n: usize) -> Vec<u64> {
     let mut xof = Shake256::new();
-    xof.absorb(&hash(domain, &[seed, context]));
+    let key = SecretBuffer(hash(domain, &[seed, context]));
+    xof.absorb(&key[..]);
     xof.finalize(0x1f);
     let mut out = Vec::with_capacity(n);
     while out.len() < n {
-        let mut b = [0; 8];
-        xof.squeeze(&mut b);
-        let v = u64::from_le_bytes(b);
+        let mut b = SecretBuffer([0; 8]);
+        xof.squeeze(&mut b[..]);
+        let v = u64::from_le_bytes(*b);
         if v < GOLDILOCKS_PRIME {
             out.push(v);
         }
@@ -83,13 +84,13 @@ pub(crate) fn majority(values: &[(usize, u64)], needed: usize) -> Result<u64, Er
 }
 pub(crate) fn linear(st: &mut [Wire; 12], me: bool) {
     for component in 0..SERVERS {
-        let mut column: [u64; 12] = core::array::from_fn(|lane| st[lane][component]);
+        let mut column = SecretBuffer(core::array::from_fn::<_, 12, _>(|lane| st[lane][component]));
         if me {
             poseidon2_apply_me(&mut column)
         } else {
             poseidon2_apply_mi(&mut column)
         }
-        for (wire, value) in st.iter_mut().zip(column) {
+        for (wire, value) in st.iter_mut().zip(column.iter().copied()) {
             wire[component] = value;
         }
     }
@@ -117,7 +118,7 @@ pub(crate) fn digest_holder(i: usize, j: usize, gates: usize) -> Option<usize> {
     (gates > DIGEST_THRESHOLD).then(|| holders(i, j)[(i + j) % 3])
 }
 fn group_digest(context: &[u8; 32], layer: u64, i: usize, j: usize, values: &[u64]) -> [u8; 32] {
-    let mut payload = Vec::with_capacity(values.len() * 8);
+    let mut payload = SecretBuffer(Vec::with_capacity(values.len() * 8));
     for &v in values {
         put(&mut payload, v)
     }
@@ -145,9 +146,10 @@ pub(crate) fn decode_group(
     incoming: &[Vec<u8>; SERVERS],
 ) -> Result<Vec<u64>, Error> {
     let digest_sender = digest_holder(recipient, j, gates);
+    let mut replicas: [Option<Vec<u64>>; 3] = [None, None, None];
     let mut vectors: Vec<(usize, Vec<u64>)> = Vec::with_capacity(3);
     let mut digest: Option<&[u8]> = None;
-    for sender in holders(recipient, j) {
+    for (slot, sender) in holders(recipient, j).into_iter().enumerate() {
         let message = &incoming[sender];
         let mut offset = 0;
         let mut expected = 0;
@@ -176,33 +178,49 @@ pub(crate) fn decode_group(
             }
         }
         if values.len() == gates {
-            vectors.push((sender, values));
+            if digest_sender.is_none() {
+                replicas[slot] = Some(values);
+            } else {
+                vectors.push((sender, values));
+            }
         } else {
             ct_zeroize_u64s(&mut values);
         }
     }
     if digest_sender.is_none() {
         let mut out = Vec::with_capacity(gates);
+        let mut decode_err = None;
         for gate in 0..gates {
-            let candidates: Vec<(usize, u64)> = vectors
-                .iter()
-                .map(|(sender, v)| (*sender, v[gate]))
-                .collect();
-            out.push(majority(&candidates, 2)?);
+            let s0 = replicas[0].as_ref().map_or(u64::MAX, |v| v[gate]);
+            let s1 = replicas[1].as_ref().map_or(u64::MAX, |v| v[gate]);
+            let s2 = replicas[2].as_ref().map_or(u64::MAX, |v| v[gate]);
+            match qsag_verified::toprf_majority_of_3_goldilocks(s0, s1, s2) {
+                Some((agreed, _faulty_idx)) => out.push(agreed),
+                None => {
+                    decode_err = Some(Error::InconsistentShares);
+                    break;
+                }
+            }
         }
-        for (_, v) in &mut vectors {
-            ct_zeroize_u64s(v)
+        for v in replicas.iter_mut().flatten() {
+            ct_zeroize_u64s(v);
+        }
+        if let Some(err) = decode_err {
+            ct_zeroize_u64s(&mut out);
+            return Err(err);
         }
         return Ok(out);
     }
-    let agree = vectors.len() == 2 && vectors[0].1 == vectors[1].1;
+    let agree = vectors.len() == 2
+        && qsag_accel::ct::ct_eq_mask_u64(
+            vectors[0].1.iter().zip(&vectors[1].1).fold(0u64, |diff, (a, b)| diff | (a ^ b)), 0) != 0;
     let chosen = if agree {
         Some(0)
     } else {
         digest.and_then(|d| {
             vectors
                 .iter()
-                .position(|(_, v)| group_digest(context, layer, recipient, j, v) == d)
+                .position(|(_, v)| qsag_accel::ct::ct_eq_bytes(&group_digest(context, layer, recipient, j, v), d))
         })
     };
     let mut result = Err(Error::InconsistentShares);
@@ -297,7 +315,8 @@ impl<T: Transport> Engine<'_, T> {
             if j == me {
                 continue;
             }
-            let mut masked = SecretBuffer(decode_group(&self.context, layer, me, j, gates, &incoming)?);
+            let mut masked =
+                SecretBuffer(decode_group(&self.context, layer, me, j, gates, &incoming)?);
             for (z, &v) in out.iter_mut().zip(masked.iter()) {
                 z[j] = gl_add(z[j], v);
             }
