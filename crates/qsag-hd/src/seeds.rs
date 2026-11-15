@@ -24,7 +24,7 @@
 //! tweaks, inventory child seeds) are pseudorandom functions of these seeds, so
 //! they are consistent by construction and need no further private messages.
 
-use crate::erase::{SecretBytes, ct_zeroize_bytes};
+use qsag_asm::wipe::{SecretBuffer, SecretBytes, wipe};
 use alloc::vec::Vec;
 
 use qsag_accel::ct::{RedactedSecret, ct_eq_bytes};
@@ -246,8 +246,8 @@ pub struct SeedOpening {
 
 impl Drop for SeedOpening {
     fn drop(&mut self) {
-        ct_zeroize_bytes(&mut self.contribution);
-        ct_zeroize_bytes(&mut self.salt);
+        wipe(&mut self.contribution);
+        wipe(&mut self.salt);
     }
 }
 
@@ -316,7 +316,7 @@ impl SeedCeremonyRound1 {
         mut private_entropy: [u8; 32],
     ) -> Result<(Self, SeedContributionCommit), HdError> {
         let entropy = RedactedSecret::new(private_entropy);
-        ct_zeroize_bytes(&mut private_entropy);
+        wipe(&mut private_entropy);
         let position = config
             .position(party_id)
             .ok_or(HdError::InvalidThresholdParameters)?;
@@ -495,17 +495,16 @@ impl SeedCeremonyRound2 {
                 }
                 frames.push(RedactedSecret::new(opening.contribution));
             }
-            let mut joined = SecretBytes(Vec::with_capacity(frames.len() * 32));
+            let mut joined = SecretBuffer(Vec::with_capacity(frames.len() * 32));
             for frame in &mut frames {
-                joined.0.extend_from_slice(frame.expose());
-                ct_zeroize_bytes(frame.expose_mut());
+                joined.extend_from_slice(frame.expose());
+                wipe(frame.expose_mut());
             }
-            let seed = cshake256_framed_32(
+            let seed = SecretBytes::<32>::new(cshake256_framed_32(
                 b"QSAG.HD.SEEDS.KEY.V2",
-                &[&self.transcript, &own.subset.to_be_bytes(), &joined.0],
-            );
-            ct_zeroize_bytes(&mut joined.0);
-            seeds.push((own.subset, RedactedSecret::new(seed)));
+                &[&self.transcript, &own.subset.to_be_bytes(), &joined],
+            ));
+            seeds.push((own.subset, RedactedSecret::new(*seed)));
         }
         let seeds = CustodianSeeds {
             ceremony: cshake256_framed_32(b"QSAG.HD.SEEDS.CEREMONY.V2", &[&self.transcript]),
@@ -562,7 +561,7 @@ pub struct CustodianSeeds {
 impl Drop for CustodianSeeds {
     fn drop(&mut self) {
         for (_, seed) in &mut self.seeds {
-            ct_zeroize_bytes(seed.expose_mut());
+            wipe(seed.expose_mut());
         }
     }
 }
@@ -614,7 +613,7 @@ impl CustodianSeeds {
         subset: CustodianSet,
         domain: &[u8],
         context: &[&[u8]],
-    ) -> Option<[u8; 32]> {
+    ) -> Option<SecretBytes<32>> {
         let seed = &self.seeds[self
             .seeds
             .binary_search_by_key(&subset, |entry| entry.0)
@@ -626,7 +625,7 @@ impl CustodianSeeds {
         frames.push(&self.ceremony);
         frames.push(&subset_bytes);
         frames.extend_from_slice(context);
-        Some(cshake256_framed_32(domain, &frames))
+        Some(SecretBytes::new(cshake256_framed_32(domain, &frames)))
     }
 
     /// Streaming PRF output under the seed of `subset`.
@@ -636,10 +635,9 @@ impl CustodianSeeds {
         domain: &[u8],
         context: &[&[u8]],
     ) -> Option<Shake256> {
-        let mut key = self.prf32(subset, domain, context)?;
+        let key = self.prf32(subset, domain, context)?;
         let mut sponge = init_cshake256(b"", b"QSAG.HD.SEEDS.STREAM.V2");
-        sponge.absorb(&key);
-        ct_zeroize_bytes(&mut key);
+        sponge.absorb(&key[..]);
         finalize_cshake256(&mut sponge, true);
         Some(sponge)
     }
@@ -648,21 +646,28 @@ impl CustodianSeeds {
     /// `t - 1` custodians that excludes both: it hashes every subset seed held by
     /// both, and one of those subsets avoids any such coalition when `t >= 2`.
     /// Returns `None` for `t = 1`, where every custodian holds every seed.
-    pub(crate) fn pairwise_key(&self, other: usize, domain: &[u8]) -> Option<[u8; 32]> {
+    pub(crate) fn pairwise_key(&self, other: usize, domain: &[u8]) -> Option<SecretBytes<32>> {
         if self.config.threshold < 2 || other == self.position {
             return None;
         }
         let low = (self.position.min(other) as u16).to_be_bytes();
         let high = (self.position.max(other) as u16).to_be_bytes();
-        let mut joined = SecretBytes(Vec::with_capacity(self.seeds.len() * 32));
+        let mut joined = SecretBuffer(Vec::with_capacity(self.seeds.len() * 32));
         for (subset, seed) in &self.seeds {
             if subset.contains(other) {
-                joined.0.extend_from_slice(seed.expose());
+                joined.extend_from_slice(seed.expose());
             }
         }
-        let key = cshake256_framed_32(domain, &[&joined.0, &self.ceremony, &low, &high]);
-        ct_zeroize_bytes(&mut joined.0);
-        Some(key)
+        Some(SecretBytes::new(cshake256_framed_32(
+            domain,
+            &[&joined, &self.ceremony, &low, &high],
+        )))
+    }
+
+    /// PRF output as plain bytes, for equality assertions.
+    #[cfg(test)]
+    pub(crate) fn prf32_bytes(&self, subset: CustodianSet, domain: &[u8]) -> Option<[u8; 32]> {
+        self.prf32(subset, domain, &[]).map(|key| *key)
     }
 
     /// Test-only construction from explicit seeds, used to couple two worlds
@@ -755,11 +760,11 @@ mod tests {
         assert_eq!(cfg.subsets(), [CustodianSet([u64::MAX; 4])]);
         let seeds = run_seed_ceremony(&cfg, 0x40);
         let set = cfg.subsets()[0];
-        let expected = seeds[0].prf32(set, b"wide-committee", &[]);
+        let expected = seeds[0].prf32_bytes(set, b"wide-committee");
         assert!(
             seeds
                 .iter()
-                .all(|s| s.prf32(set, b"wide-committee", &[]) == expected)
+                .all(|s| s.prf32_bytes(set, b"wide-committee") == expected)
         );
     }
 
@@ -826,15 +831,16 @@ mod tests {
         for subset in cfg.subsets() {
             let held: Vec<_> = seeds
                 .iter()
-                .filter_map(|s| s.prf32(subset, b"wide", &[]))
+                .filter_map(|s| s.prf32_bytes(subset, b"wide"))
                 .collect();
             assert_eq!(held.len(), 64);
             assert!(held.windows(2).all(|w| w[0] == w[1]));
         }
         for (a, b) in [(0, 64), (63, 64), (1, 2)] {
-            let key = seeds[a].pairwise_key(b, b"wide-pair").unwrap();
-            assert_eq!(seeds[b].pairwise_key(a, b"wide-pair"), Some(key));
-            assert_ne!(seeds[a].pairwise_key((b + 1) % 65, b"wide-pair"), Some(key));
+            let pair = |a: usize, b: usize| seeds[a].pairwise_key(b, b"wide-pair").map(|k| *k);
+            let key = pair(a, b).unwrap();
+            assert_eq!(pair(b, a), Some(key));
+            assert_ne!(pair(a, (b + 1) % 65), Some(key));
         }
     }
 
@@ -893,7 +899,7 @@ mod tests {
             for subset in config.subsets() {
                 let held: Vec<_> = seeds
                     .iter()
-                    .filter_map(|s| s.prf32(subset, b"test", &[]))
+                    .filter_map(|s| s.prf32_bytes(subset, b"test"))
                     .collect();
                 assert_eq!(held.len(), usize::from(n - t + 1));
                 assert!(held.windows(2).all(|w| w[0] == w[1]));
@@ -913,8 +919,8 @@ mod tests {
             let subset = config.subsets()[0];
             let holder = subset.trailing_zeros() as usize;
             assert_ne!(
-                seeds[holder].prf32(subset, b"test", &[]),
-                other[holder].prf32(subset, b"test", &[])
+                seeds[holder].prf32_bytes(subset, b"test"),
+                other[holder].prf32_bytes(subset, b"test")
             );
         }
     }

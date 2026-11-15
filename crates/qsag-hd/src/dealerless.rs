@@ -67,7 +67,6 @@
 //! custodian can stop further use of a parent, never learn or forge under it.
 
 use super::*;
-use crate::erase::SecretWords;
 use crate::inventory::RekeyFault;
 use crate::seeds::CustodianSeeds;
 use crate::seeds::CustodianSet;
@@ -125,7 +124,7 @@ impl FieldStream {
 
 impl Drop for FieldStream {
     fn drop(&mut self) {
-        ct_zeroize_bytes(&mut self.block);
+        wipe(&mut self.block);
     }
 }
 
@@ -339,9 +338,9 @@ struct ParentAuth {
 
 impl Drop for ParentAuth {
     fn drop(&mut self) {
-        ct_zeroize_u32s(&mut self.s);
-        ct_zeroize_u32s(&mut self.macs);
-        ct_zeroize_u32s(&mut self.alpha);
+        wipe(&mut self.s);
+        wipe(&mut self.macs);
+        wipe(&mut self.alpha);
     }
 }
 
@@ -406,10 +405,10 @@ impl Drop for Core {
                 let _ = journal.poison();
             }
         }
-        ct_zeroize_bytes(&mut self.coin_seed);
-        ct_zeroize_bytes(&mut self.coin_salt);
-        ct_zeroize_bytes(&mut self.zero_salt);
-        ct_zeroize_u32s(&mut self.alpha);
+        wipe(&mut self.coin_seed);
+        wipe(&mut self.coin_salt);
+        wipe(&mut self.zero_salt);
+        wipe(&mut self.alpha);
         for secret in [
             &mut self.s,
             &mut self.b,
@@ -420,7 +419,7 @@ impl Drop for Core {
             &mut self.combined_parent_macs,
             &mut self.zero_shares,
         ] {
-            ct_zeroize_u32s(secret);
+            wipe(secret);
         }
     }
 }
@@ -518,11 +517,11 @@ impl<'a> RekeyRound1<'a> {
         mut private_entropy: [u8; 32],
     ) -> Result<(Self, RekeyHello), HdError> {
         if !request.hardened && request.index & (1 << 31) != 0 {
-            ct_zeroize_bytes(&mut private_entropy);
+            wipe(&mut private_entropy);
             return Err(HdError::HardenedDerivationRequired);
         }
         let entropy = RedactedSecret::new(private_entropy);
-        ct_zeroize_bytes(&mut private_entropy);
+        wipe(&mut private_entropy);
         let config = seeds.config();
         let members = config.members().to_vec();
         let position = seeds.position();
@@ -538,7 +537,7 @@ impl<'a> RekeyRound1<'a> {
                     b"QSAG.HD.DEALERLESS.SEED_A.V1",
                     &[&ceremony, &index_bytes],
                 );
-                let root_cc = cshake256_framed_32(
+                let root_cc = RedactedSecret::new(cshake256_framed_32(
                     b"QSAG.HD.DEALERLESS.ROOT_CC.V2",
                     &[
                         request
@@ -547,7 +546,7 @@ impl<'a> RekeyRound1<'a> {
                         &ceremony,
                         &index_bytes,
                     ],
-                );
+                ));
                 (
                     Lineage {
                         additive: false,
@@ -567,7 +566,7 @@ impl<'a> RekeyRound1<'a> {
                     cshake256_framed_32(b"QSAG.HD.DEALERLESS.ROOT.V1", &[&ceremony, &seed_a]),
                     alloc::vec![0u32; COEFFS],
                     None,
-                    RedactedSecret::new(root_cc),
+                    root_cc,
                 )
             }
             Some((share, expected)) => {
@@ -688,13 +687,12 @@ impl<'a> RekeyRound1<'a> {
         let (chain_code, public_chain_code) = if hardened_tweak {
             // Replicated threshold PRF: one short tweak for each held subset seed.
             for subset in seeds.held_subsets() {
-                let mut tweak_seed = seeds
+                let tweak_seed = seeds
                     .prf32(subset, b"QSAG.HD.TPRF.TWEAK.V1", &[&derivation])
                     .ok_or(HdError::InvalidThresholdParameters)?;
                 let tweak: [RingPoly; MODULE_SECRET_L] = core::array::from_fn(|j| {
-                    RingPoly::sample_cbd2_ct(b"QSAG.HD.TPRF.R_POLY.V1", &tweak_seed, j as u32)
+                    RingPoly::sample_cbd2_ct(b"QSAG.HD.TPRF.R_POLY.V1", &tweak_seed[..], j as u32)
                 });
-                ct_zeroize_bytes(&mut tweak_seed);
                 let weight = subset_poly_at(&xs, subset, own_x);
                 for (j, poly) in tweak.iter().enumerate() {
                     for (c, &coefficient) in poly.coeffs.iter().enumerate() {
@@ -708,7 +706,7 @@ impl<'a> RekeyRound1<'a> {
                 let public = (!request.hardened).then_some(*parent_cc.expose());
                 (parent_cc, public)
             } else {
-                let cc = cshake256_framed_32(
+                let cc = RedactedSecret::new(cshake256_framed_32(
                     b"QSAG.HD.HARDENED_CC.V2",
                     &[
                         chain_code_key.expose(),
@@ -716,8 +714,8 @@ impl<'a> RekeyRound1<'a> {
                         &parent_digest,
                         &index_bytes,
                     ],
-                );
-                (RedactedSecret::new(cc), None)
+                ));
+                (cc, None)
             }
         } else {
             let (tweak, next_cc) =
@@ -736,7 +734,7 @@ impl<'a> RekeyRound1<'a> {
             }
             let delta = lineage.matrix.relation(&tweak);
             child_t = Some(core::array::from_fn(|row| parent_t[row].add(&delta[row])));
-            (RedactedSecret::new(next_cc), Some(next_cc))
+            (RedactedSecret::new(*next_cc), Some(*next_cc))
         };
 
         let request_digest = cshake256_framed_32(
@@ -758,12 +756,12 @@ impl<'a> RekeyRound1<'a> {
             state_bytes.extend(auth.macs.iter().flat_map(|v| v.to_le_bytes()));
         }
         let mut state_binding = cshake256_framed_32(b"QSAG.HD.REKEY.STATE.V1", &[&state_bytes]);
-        ct_zeroize_bytes(&mut state_bytes);
+        wipe(&mut state_bytes);
         let local = RedactedSecret::new(cshake256_framed_32(
             b"QSAG.HD.REKEY.LOCAL.V1",
             &[entropy.expose(), &request_digest, &state_binding],
         ));
-        ct_zeroize_bytes(&mut state_binding);
+        wipe(&mut state_binding);
         let secret = |domain: &[u8]| cshake256_framed_32(domain, &[local.expose()]);
         let coin_seed = secret(b"QSAG.HD.REKEY.COIN.V1");
         let coin_salt = secret(b"QSAG.HD.REKEY.COIN_SALT.V1");
@@ -910,7 +908,7 @@ impl<'a> RekeyRound1<'a> {
         core.b = alloc::vec![0; REPS];
         core.b_parent = alloc::vec![0; if has_parent { REPS } else { 0 }];
         core.mask_shares = alloc::vec![0; products];
-        let mut wide_masks = SecretWords(alloc::vec![0u32; products]);
+        let mut wide_masks = SecretBuffer(alloc::vec![0u32; products]);
         for subset in seeds.held_subsets() {
             let weight = subset_poly_at(&xs, subset, own_x);
             let stream = |domain: &[u8]| {
@@ -953,7 +951,6 @@ impl<'a> RekeyRound1<'a> {
         for (value, mask) in values.iter_mut().zip(wide_masks.iter()) {
             *value = mod_q_add(*value, *mask);
         }
-        ct_zeroize_u32s(&mut wide_masks);
         let message = RekeyProducts {
             party_id: core.party_id,
             values,
@@ -982,8 +979,8 @@ impl RekeyRound2 {
         transcript.squeeze(&mut core.products_digest);
 
         let plan = OpenPlan::new(&core.xs(), 2 * (usize::from(core.threshold) - 1));
-        let mut column = SecretWords(alloc::vec![0u32; products.len()]);
-        let mut macs = SecretWords(Vec::with_capacity(count));
+        let mut column = SecretBuffer(alloc::vec![0u32; products.len()]);
+        let mut macs = SecretBuffer(Vec::with_capacity(count));
         for (index, &mask) in core.mask_shares.iter().enumerate() {
             for (slot, message) in column.iter_mut().zip(products) {
                 *slot = message.values[index];
@@ -1070,7 +1067,7 @@ impl RekeyRound4 {
             canonical(&message.values, count)?;
         }
         let plan = OpenPlan::new(&core.xs(), usize::from(core.threshold) - 1);
-        let mut column = SecretWords(alloc::vec![0u32; masked.len()]);
+        let mut column = SecretBuffer(alloc::vec![0u32; masked.len()]);
         let mut rho = Vec::with_capacity(count);
         for index in 0..count {
             for (slot, message) in column.iter_mut().zip(masked) {
@@ -1206,7 +1203,7 @@ impl RekeyRound6 {
             }
         }
         let plan = OpenPlan::new(&core.xs(), usize::from(core.threshold) - 1);
-        let mut column = SecretWords(alloc::vec![0u32; openings.len()]);
+        let mut column = SecretBuffer(alloc::vec![0u32; openings.len()]);
         for index in 0..count {
             for (slot, opening) in column.iter_mut().zip(openings) {
                 *slot = opening.values[index];
@@ -2263,6 +2260,41 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn dealerless_keys_and_masks_are_pinned() {
+        let config = committee(2, 3);
+        let seeds = run_seed_ceremony(&config, 0x33);
+        let (root_pk, root) = honest(&seeds, None, 0, false, 1);
+        let (soft_pk, _) = honest(&seeds, Some((&root, &root_pk)), 3, false, 2);
+        let (root_pk, root) = honest(&seeds, None, 0, false, 1);
+        let (hard_pk, _) = honest(&seeds, Some((&root, &root_pk)), 3, true, 2);
+        let projection = AuthorizedHdProjection::PublicRelationCoefficient {
+            row: 2,
+            coefficient: 41,
+        };
+        let mask = dealerless_opening_mask(&seeds[1], config.members(), [6; 32], projection)
+            .unwrap()
+            .test_value();
+        let digest = |pk: &LinearModuleXPub| hash_t_vec(&pk.seed_a, &pk.t_vec);
+        let pinned = cshake256_framed_32(
+            b"QSAG.HD.TEST.PIN",
+            &[
+                &seeds[0].ceremony_digest(),
+                &digest(&root_pk),
+                &root_pk.chain_code.unwrap(),
+                &digest(&soft_pk),
+                &soft_pk.chain_code.unwrap(),
+                &digest(&hard_pk),
+                &mask.to_be_bytes(),
+            ],
+        );
+        assert_eq!(pinned, PINNED_DEALERLESS_DIGEST, "{pinned:?}");
+    }
+    const PINNED_DEALERLESS_DIGEST: [u8; 32] = [
+        215, 123, 87, 236, 184, 105, 194, 91, 72, 31, 153, 241, 54, 126, 189, 139, 59, 32, 144, 5,
+        218, 188, 74, 46, 138, 48, 88, 179, 146, 78, 80, 123,
+    ];
 
     #[test]
     fn buffered_field_stream_matches_consecutive_wide_draws() {

@@ -130,7 +130,7 @@ impl Drop for InventoryPartyShareVault {
     fn drop(&mut self) {
         for child in &mut self.children {
             for (_, seed) in child {
-                crate::erase::ct_zeroize_bytes(seed.expose_mut());
+                qsag_asm::wipe::wipe(seed.expose_mut());
             }
         }
     }
@@ -214,7 +214,7 @@ pub fn derive_inventory_vault(
                             b"QSAG.HD.INV.TPRF.CHILD.V1",
                             &[&pk_seed_bytes, &idx.to_be_bytes()],
                         )
-                        .map(|component| (subset, RedactedSecret::new(component)))
+                        .map(|component| (subset, RedactedSecret::new(*component)))
                         .ok_or(HdError::InvalidThresholdParameters)
                 })
                 .collect::<Result<Vec<_>, _>>()

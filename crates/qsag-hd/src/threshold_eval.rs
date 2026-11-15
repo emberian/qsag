@@ -67,11 +67,11 @@ impl EvalState<'_> {
 }
 impl Drop for EvalState<'_> {
     fn drop(&mut self) {
-        ct_zeroize_u32s(core::slice::from_mut(&mut self.value));
-        ct_zeroize_u32s(&mut self.gamma);
-        ct_zeroize_u32s(&mut self.alpha);
-        ct_zeroize_bytes(&mut self.value_salt);
-        ct_zeroize_bytes(&mut self.mac_salt);
+        wipe(core::slice::from_mut(&mut self.value));
+        wipe(&mut self.gamma);
+        wipe(&mut self.alpha);
+        wipe(&mut self.value_salt);
+        wipe(&mut self.mac_salt);
         if !self.complete {
             self.share.poison();
         }
@@ -244,7 +244,7 @@ impl<'a> HdThresholdEvalRound1Commit<'a> {
         mut private_entropy: [u8; 32],
     ) -> Result<Self, HdError> {
         let entropy = RedactedSecret::new(private_entropy);
-        ct_zeroize_bytes(&mut private_entropy);
+        wipe(&mut private_entropy);
         share.require_poison_journal()?;
         let (threshold, own_x) = match share.scheme {
             ShareScheme::Shamir {
@@ -544,7 +544,7 @@ impl HdThresholdEvalRound3VerifyMac<'_> {
             .as_mut()
             .ok_or(HdError::MacCheckFailed)
             .and_then(|gates| gates.verify(peers, &peer_sums));
-        ct_zeroize_u32s(&mut peer_sums);
+        wipe(&mut peer_sums);
         accepted?;
         let value = self.0.opened_value.ok_or(HdError::MacCheckFailed)?;
         if self.0.disclosure_started.get()
@@ -561,8 +561,8 @@ impl HdThresholdEvalRound3VerifyMac<'_> {
 
 impl Drop for HdEvalMacOpening {
     fn drop(&mut self) {
-        ct_zeroize_u32s(&mut self.tags);
-        ct_zeroize_bytes(&mut self.salt);
+        wipe(&mut self.tags);
+        wipe(&mut self.salt);
     }
 }
 
@@ -582,7 +582,7 @@ impl OpeningMask {
 }
 impl Drop for OpeningMask {
     fn drop(&mut self) {
-        ct_zeroize_u32s(core::slice::from_mut(&mut self.value));
+        wipe(core::slice::from_mut(&mut self.value));
     }
 }
 
@@ -627,23 +627,22 @@ pub fn dealerless_opening_mask(
         let other = config
             .position(id)
             .ok_or(HdError::InvalidThresholdParameters)?;
-        let Some(mut key) = seeds.pairwise_key(other, b"QSAG.HD.OPENING_ZERO.PAIR.V1") else {
+        let Some(key) = seeds.pairwise_key(other, b"QSAG.HD.OPENING_ZERO.PAIR.V1") else {
             continue;
         };
-        let mut wide = [0u8; 24];
+        let mut wide = SecretBuffer([0u8; 24]);
         cshake256_framed_xof(
             b"QSAG.HD.OPENING_ZERO.DEALERLESS.V1",
-            &[&key, &session, &context],
-            &mut wide,
+            &[&key[..], &session, &context],
+            &mut wide[..],
         );
-        ct_zeroize_bytes(&mut key);
-        let term = reduce_wide_mod_q(&wide);
-        ct_zeroize_bytes(&mut wide);
+        let mut term = reduce_wide_mod_q(&wide[..]);
         value = if own < other {
             mod_q_add(value, term)
         } else {
             mod_q_sub(value, term)
         };
+        wipe(&mut term);
     }
     Ok(OpeningMask {
         party_id,
@@ -662,7 +661,7 @@ pub(crate) fn trusted_dealer_opening_masks(
     mut fresh_entropy: [u8; 32],
 ) -> Result<Vec<OpeningMask>, HdError> {
     let entropy = RedactedSecret::new(fresh_entropy);
-    ct_zeroize_bytes(&mut fresh_entropy);
+    wipe(&mut fresh_entropy);
     if roster.is_empty() || roster.windows(2).any(|w| w[0].0 >= w[1].0) {
         return Err(HdError::InvalidThresholdParameters);
     }
@@ -707,7 +706,7 @@ pub(crate) fn trusted_dealer_opening_masks(
             }
         })
         .collect();
-    ct_zeroize_u32s(&mut coeffs);
+    wipe(&mut coeffs);
     Ok(masks)
 }
 
