@@ -40,7 +40,7 @@ pub const PUBLIC_FORMAT: &str = "qsag-quorum-public-v1";
 const TREE_FORMAT: &str = "qsag-quorum-tree-v1";
 const SIG_FORMAT: &str = "qsag-quorum-signature-v1";
 const SCHEME_NAME: &str = "jorts-2of3-sha3";
-const MAX_CLI_TREE_HEIGHT: u64 = 8;
+const MAX_CLI_TREE_HEIGHT: u64 = 30;
 
 const QUORUM_HELP: &str = "\
 qsag quorum <keygen|sign|refresh|reshare|verify> [options]
@@ -65,7 +65,7 @@ Run a dealerless 2-of-3 RSS key generation ceremony with zero central secret rec
 
   --vault-dir <dir>             private 0700 directory for party-{0,1,2}.{sk,belt,ceremony}
   --public-out <path>           destination for the quorum public key JSON
-  --tree-height <1..=8>         Merkle tree height (default: 3, capacity = 2^height signatures)
+  --tree-height <1..=30>         Merkle tree height (default: 3, capacity = 2^height signatures)
   --anchor-dir <dir>            enroll per-party external monotone anchors in <dir>
   --allow-single-disk-anchor    permit --anchor-dir on the same filesystem device as --vault-dir
   --passphrase-env <VAR> / --passphrase-file <PATH>  seal each party secret share
