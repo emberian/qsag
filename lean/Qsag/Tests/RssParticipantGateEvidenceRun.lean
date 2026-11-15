@@ -47,7 +47,7 @@ private def editFirstGate (r : RoundEvidence) (edit : GateRecord → GateRecord)
 private def require (b : Bool) (message : String) : IO Unit := do
   unless b do throw (IO.userError message)
 
-def main : IO Unit := do
+def Qsag.RssParticipant.GateChecks.runGateEvidenceChecks : IO Unit := do
   let answer := RssSigning.queryRun ⟨[81, 83, 65, 71]⟩ material 9
     (.wotsChain 0 0 0 1 2) tape
   let some gates := extractAnswer answer | throw (IO.userError "honest evidence extraction failed")
@@ -90,3 +90,5 @@ def main : IO Unit := do
   IO.println s!"Grouped extraction: two actual tree leaves, three cSHAKE calls, {groupedGates.length} word gates and distinct invocation labels passed"
   IO.println s!"Exact gate extraction: {answer.evidence.length} actual cSHAKE calls, {gates.length} indexed word gates; honest relations, table capacity, tampered product retention, replica mismatch, and authenticated wrong-value rejection passed"
 end
+
+#eval Qsag.RssParticipant.GateChecks.runGateEvidenceChecks

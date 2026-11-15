@@ -15,9 +15,9 @@
 //! * Every kernel requires the evidence in [`VulkanDeviceInfo::secret_slot_audit`].
 //!   Both constructors reject missing Wave32, scratch, or spill telemetry; dispatch gates
 //!   reject an unaudited slot before any input reaches the device.
-//! * The infallible `batch_keccak_f1600` / `batch_poseidon2_perm12` answer from the CPU
-//!   reference when the device fails. Each such call increments
-//!   [`VulkanSpirvBackend::cpu_fallback_count`].
+//! * GPU execution is strict by default: fallible/pinned methods return errors and legacy
+//!   infallible batch methods panic on failure. Only explicitly named `*_with_cpu_fallback`
+//!   methods permit CPU execution; they return the failure reason and record telemetry.
 //! * A job's inputs are wiped from host staging memory on every exit once the device is known
 //!   idle. After `VK_ERROR_DEVICE_LOST` that cannot be known: the backend refuses all further
 //!   jobs and the failed job's inputs stay in staging memory and VRAM until the process exits.
@@ -306,6 +306,23 @@ impl core::fmt::Debug for VulkanDeviceInfo {
     }
 }
 
+/// Execution location of an explicitly fallback-enabled batch. CPU results carry the original
+/// GPU failure and must never be attributed to a SPIR-V kernel pin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use = "inspect whether execution used the GPU or the CPU fallback"]
+pub enum BatchExecution {
+    Gpu,
+    CpuFallback { error: VulkanError },
+}
+
+/// Most recent explicit CPU fallback. The count is cumulative across both batch slots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CpuFallbackEvent {
+    pub count: u64,
+    pub slot: KernelSlot,
+    pub error: VulkanError,
+}
+
 /// Hardware discrete GPU compute backend executing certified 64-bit SPIR-V shaders in `DEVICE_LOCAL`
 /// GDDR6 / Infinity Cache VRAM (`KernelTargetArch::SpirV15`).
 pub struct VulkanSpirvBackend {
@@ -321,6 +338,8 @@ pub struct VulkanSpirvBackend {
     gpu_submissions: AtomicU64,
     #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
     cpu_fallbacks: AtomicU64,
+    #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+    last_cpu_fallback: std::sync::Mutex<Option<CpuFallbackEvent>>,
     #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
     prover_session_in_use: AtomicBool,
     /// `info.secret_slot_audit().is_ok()`, fixed at construction.
@@ -374,18 +393,28 @@ const fn secret_slot_gate(audited: bool, slot: KernelSlot) -> Result<(), AccelEr
     }
 }
 
-/// Run `gpu` on `states`; if it fails, count the fallback and run `cpu` instead.
-/// A failed GPU job has not written `states` (results are copied back only on success).
+/// A failed GPU job has not written `states`: FFI copies back only after successful submission.
+/// No callback runs under the telemetry lock, so panic in a caller cannot poison it.
 #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
-fn gpu_or_counted_cpu_fallback<S: ?Sized>(
+fn gpu_or_explicit_cpu_fallback<S: ?Sized>(
     fallbacks: &AtomicU64,
+    last: &std::sync::Mutex<Option<CpuFallbackEvent>>,
+    slot: KernelSlot,
     states: &mut S,
     gpu: impl FnOnce(&mut S) -> Result<(), VulkanError>,
     cpu: impl FnOnce(&mut S),
-) {
-    if gpu(states).is_err() {
-        fallbacks.fetch_add(1, Ordering::Relaxed);
-        cpu(states);
+) -> BatchExecution {
+    match gpu(states) {
+        Ok(()) => BatchExecution::Gpu,
+        Err(error) => {
+            cpu(states);
+            let mut event = last
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let count = fallbacks.fetch_add(1, Ordering::Relaxed) + 1;
+            *event = Some(CpuFallbackEvent { count, slot, error });
+            BatchExecution::CpuFallback { error }
+        }
     }
 }
 
@@ -420,6 +449,7 @@ impl VulkanSpirvBackend {
                 engine: std::sync::Mutex::new(engine),
                 gpu_submissions: AtomicU64::new(0),
                 cpu_fallbacks: AtomicU64::new(0),
+                last_cpu_fallback: std::sync::Mutex::new(None),
                 prover_session_in_use: AtomicBool::new(false),
                 secret_slots_audited: info.secret_slot_audit().is_ok(),
             })
@@ -454,8 +484,7 @@ impl VulkanSpirvBackend {
         }
     }
 
-    /// Number of infallible `batch_keccak_f1600` / `batch_poseidon2_perm12` calls that the
-    /// device failed and the CPU reference answered instead.
+    /// Number of explicitly fallback-enabled calls answered by the CPU after GPU failure.
     pub fn cpu_fallback_count(&self) -> u64 {
         #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
         {
@@ -463,6 +492,66 @@ impl VulkanSpirvBackend {
         }
         #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
         {
+            match self._uninhabited {}
+        }
+    }
+
+    /// Latest explicit fallback, including the affected kernel and original GPU error.
+    pub fn last_cpu_fallback(&self) -> Option<CpuFallbackEvent> {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            *self
+                .last_cpu_fallback
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            match self._uninhabited {}
+        }
+    }
+
+    /// Explicitly allow CPU Keccak execution if the GPU fails. Inspect the returned location
+    /// and error; use the pinned method instead when GPU execution is required.
+    pub fn batch_keccak_f1600_with_cpu_fallback(&self, states: &mut [[u64; 25]]) -> BatchExecution {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            gpu_or_explicit_cpu_fallback(
+                &self.cpu_fallbacks,
+                &self.last_cpu_fallback,
+                KernelSlot::BatchKeccakF1600,
+                states,
+                |s| self.try_batch_keccak_f1600(s),
+                |s| CpuReferenceBackend.batch_keccak_f1600(s),
+            )
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            let _ = states;
+            match self._uninhabited {}
+        }
+    }
+
+    /// Explicitly allow CPU Poseidon2 execution if the GPU fails. The returned error and
+    /// [`Self::last_cpu_fallback`] identify the fallback; this method issues no GPU receipt.
+    pub fn batch_poseidon2_perm12_with_cpu_fallback(
+        &self,
+        states: &mut [[u64; 12]],
+    ) -> BatchExecution {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            gpu_or_explicit_cpu_fallback(
+                &self.cpu_fallbacks,
+                &self.last_cpu_fallback,
+                KernelSlot::BatchPoseidon2Perm12,
+                states,
+                |s| self.try_batch_poseidon2_perm12(s),
+                |s| CpuReferenceBackend.batch_poseidon2_perm12(s),
+            )
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            let _ = states;
             match self._uninhabited {}
         }
     }
@@ -1503,20 +1592,9 @@ impl AcceleratorBackend for VulkanSpirvBackend {
     }
 
     fn batch_keccak_f1600(&self, states: &mut [[u64; 25]]) {
-        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
-        {
-            gpu_or_counted_cpu_fallback(
-                &self.cpu_fallbacks,
-                states,
-                |s| self.try_batch_keccak_f1600(s),
-                |s| CpuReferenceBackend.batch_keccak_f1600(s),
-            );
-        }
-        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
-        {
-            let _ = states;
-            match self._uninhabited {}
-        }
+        self.try_batch_keccak_f1600(states).expect(
+            "strict Vulkan batch execution failed; use try_batch_keccak_f1600 to handle errors",
+        );
     }
 
     fn try_batch_keccak_f1600_pinned(
@@ -1536,20 +1614,9 @@ impl AcceleratorBackend for VulkanSpirvBackend {
     }
 
     fn batch_poseidon2_perm12(&self, states: &mut [[u64; 12]]) {
-        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
-        {
-            gpu_or_counted_cpu_fallback(
-                &self.cpu_fallbacks,
-                states,
-                |s| self.try_batch_poseidon2_perm12(s),
-                |s| CpuReferenceBackend.batch_poseidon2_perm12(s),
-            );
-        }
-        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
-        {
-            let _ = states;
-            match self._uninhabited {}
-        }
+        self.try_batch_poseidon2_perm12(states).expect(
+            "strict Vulkan batch execution failed; use try_batch_poseidon2_perm12 to handle errors",
+        );
     }
 
     fn try_batch_poseidon2_perm12_pinned(
@@ -2271,16 +2338,20 @@ mod tests {
 
     #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
     #[test]
-    fn device_failure_on_the_infallible_path_is_counted_and_answered_by_the_cpu() {
+    fn explicit_cpu_fallback_reports_success_and_original_error() {
         let fallbacks = AtomicU64::new(0);
+        let last = std::sync::Mutex::new(None);
+        let slot = KernelSlot::BatchKeccakF1600;
         let input = [[0x0123_4567_89AB_CDEFu64; 25]; 3];
         let mut expected = input;
         CpuReferenceBackend.batch_keccak_f1600(&mut expected);
 
         // Device succeeds: the CPU closure never runs and nothing is counted.
         let mut states = input;
-        gpu_or_counted_cpu_fallback(
+        let outcome = gpu_or_explicit_cpu_fallback(
             &fallbacks,
+            &last,
+            slot,
             &mut states[..],
             |s| {
                 CpuReferenceBackend.batch_keccak_f1600(s);
@@ -2290,18 +2361,36 @@ mod tests {
         );
         assert_eq!(states, expected);
         assert_eq!(fallbacks.load(Ordering::Relaxed), 0);
+        assert_eq!(outcome, BatchExecution::Gpu);
+        assert_eq!(*last.lock().unwrap(), None);
 
         // Device fails: one count per call, CPU result returned.
         for calls in 1..=3u64 {
             let mut states = input;
-            gpu_or_counted_cpu_fallback(
+            let outcome = gpu_or_explicit_cpu_fallback(
                 &fallbacks,
+                &last,
+                slot,
                 &mut states[..],
                 |_| Err(VulkanError::WorkspacePoisoned),
                 |s| CpuReferenceBackend.batch_keccak_f1600(s),
             );
             assert_eq!(states, expected);
             assert_eq!(fallbacks.load(Ordering::Relaxed), calls);
+            assert_eq!(
+                outcome,
+                BatchExecution::CpuFallback {
+                    error: VulkanError::WorkspacePoisoned
+                }
+            );
+            assert_eq!(
+                *last.lock().unwrap(),
+                Some(CpuFallbackEvent {
+                    count: calls,
+                    slot,
+                    error: VulkanError::WorkspacePoisoned,
+                })
+            );
         }
     }
 
@@ -2345,14 +2434,59 @@ mod tests {
             Err(AccelError::LengthMismatch { .. })
         ));
 
-        // A device failure on the infallible path is visible through the trait.
+        // Strict paths fail closed without changing inputs or counting a CPU fallback.
         assert_eq!(AcceleratorBackend::cpu_fallback_count(&gpu), 0);
         let mut states = [[9u64; 25]; 2];
         let mut expected = states;
         CpuReferenceBackend.batch_keccak_f1600(&mut expected);
-        gpu.batch_keccak_f1600(&mut states);
+        let original = states;
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                gpu.batch_keccak_f1600(&mut states);
+            }))
+            .is_err()
+        );
+        assert_eq!(states, original);
+        assert!(gpu.try_batch_keccak_f1600_pinned(&mut states).is_err());
+        assert_eq!(gpu.cpu_fallback_count(), 0);
+        let outcome = gpu.batch_keccak_f1600_with_cpu_fallback(&mut states);
+        assert!(matches!(outcome, BatchExecution::CpuFallback { .. }));
         assert_eq!(states, expected);
         assert_eq!(gpu.cpu_fallback_count(), 1);
+        assert_eq!(gpu.gpu_submission_count(), 0);
+
+        let mut poseidon = [[u64::MAX; 12]; 3];
+        let original = poseidon;
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                gpu.batch_poseidon2_perm12(&mut poseidon);
+            }))
+            .is_err()
+        );
+        assert!(
+            gpu.try_batch_poseidon2_perm12_pinned(&mut poseidon)
+                .is_err()
+        );
+        assert_eq!(poseidon, original);
+        assert_eq!(gpu.cpu_fallback_count(), 1);
+        let mut expected = original;
+        CpuReferenceBackend.batch_poseidon2_perm12(&mut expected);
+        let error = VulkanError::Accel(AccelError::SecretSlotUnaudited {
+            slot: KernelSlot::BatchPoseidon2Perm12,
+        });
+        assert_eq!(
+            gpu.batch_poseidon2_perm12_with_cpu_fallback(&mut poseidon),
+            BatchExecution::CpuFallback { error }
+        );
+        assert_eq!(poseidon, expected);
+        assert_eq!(
+            gpu.last_cpu_fallback(),
+            Some(CpuFallbackEvent {
+                count: 2,
+                slot: KernelSlot::BatchPoseidon2Perm12,
+                error,
+            })
+        );
         assert_eq!(gpu.gpu_submission_count(), 0);
     }
 

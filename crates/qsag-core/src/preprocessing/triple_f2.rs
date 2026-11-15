@@ -50,6 +50,8 @@ use crate::sponge::keccak::{Cshake256WordStream4, cshake256_static_midstate};
 /// Two MAC lanes of one correlated-OT row or of one authenticated value.
 type Row = [u128; 2];
 type PairRows = ([Vec<u128>; 2], [Vec<u128>; 2]);
+type PairBootstrapOutcome =
+    Result<(PairExtension, [Vec<u128>; 2], [Vec<u128>; 2]), PreprocessError>;
 type ShamirTamper<'a> =
     dyn FnMut(&mut [Vec<BitslicedGf256x64>], &mut [Vec<[[Tower128; 64]; 2]>]) + 'a;
 type ProductTamper<'a> = dyn FnMut(usize, &mut [u64]) + 'a;
@@ -283,29 +285,67 @@ fn extend_pair(
         let mut q_b = vec![0u64; words];
         stream_words_pair(
             &ABIT_COL_MID,
-            &[session_id, &holder_le, &owner_le, &col_a_le, &job.seeds0[col_a]],
+            &[
+                session_id,
+                &holder_le,
+                &owner_le,
+                &col_a_le,
+                &job.seeds0[col_a],
+            ],
             &mut t0_a,
-            &[session_id, &holder_le, &owner_le, &col_a_le, &job.seeds1[col_a]],
+            &[
+                session_id,
+                &holder_le,
+                &owner_le,
+                &col_a_le,
+                &job.seeds1[col_a],
+            ],
             &mut t1_a,
         );
         stream_words_pair(
             &ABIT_COL_MID,
-            &[session_id, &holder_le, &owner_le, &col_b_le, &job.seeds0[col_b]],
+            &[
+                session_id,
+                &holder_le,
+                &owner_le,
+                &col_b_le,
+                &job.seeds0[col_b],
+            ],
             &mut t0_b,
-            &[session_id, &holder_le, &owner_le, &col_b_le, &job.seeds1[col_b]],
+            &[
+                session_id,
+                &holder_le,
+                &owner_le,
+                &col_b_le,
+                &job.seeds1[col_b],
+            ],
             &mut t1_b,
         );
         stream_words_pair(
             &ABIT_COL_MID,
-            &[session_id, &holder_le, &owner_le, &col_a_le, &job.chosen[col_a]],
+            &[
+                session_id,
+                &holder_le,
+                &owner_le,
+                &col_a_le,
+                &job.chosen[col_a],
+            ],
             &mut q_a,
-            &[session_id, &holder_le, &owner_le, &col_b_le, &job.chosen[col_b]],
+            &[
+                session_id,
+                &holder_le,
+                &owner_le,
+                &col_b_le,
+                &job.chosen[col_b],
+            ],
             &mut q_b,
         );
-        let mask_a =
-            0u64.wrapping_sub(black_box(((delta[col_a / 128] >> (col_a % 128)) & 1) as u64));
-        let mask_b =
-            0u64.wrapping_sub(black_box(((delta[col_b / 128] >> (col_b % 128)) & 1) as u64));
+        let mask_a = 0u64.wrapping_sub(black_box(
+            ((delta[col_a / 128] >> (col_a % 128)) & 1) as u64,
+        ));
+        let mask_b = 0u64.wrapping_sub(black_box(
+            ((delta[col_b / 128] >> (col_b % 128)) & 1) as u64,
+        ));
         for w in 0..words {
             q_a[w] ^= mask_a & (t0_a[w] ^ t1_a[w] ^ rho[w]);
             q_b[w] ^= mask_b & (t0_b[w] ^ t1_b[w] ^ rho[w]);
@@ -403,7 +443,7 @@ impl DeltaCotPool {
             chi_seed: [u8; 32],
             s_chan: Option<crate::preprocessing::OtExtSenderChannel>,
             r_chan: Option<crate::preprocessing::OtExtReceiverChannel>,
-            outcome: Option<Result<(PairExtension, [Vec<u128>; 2], [Vec<u128>; 2]), PreprocessError>>,
+            outcome: Option<PairBootstrapOutcome>,
         }
         let mut boot_jobs = Vec::with_capacity(n * (n - 1));
         for holder in 0..n {
@@ -462,8 +502,9 @@ impl DeltaCotPool {
         par_for_each(&mut boot_jobs, |bjob| {
             let s_chan = bjob.s_chan.as_mut().expect("sender channel taken");
             let r_chan = bjob.r_chan.as_mut().expect("receiver channel taken");
-            let mut run = || -> Result<(PairExtension, [Vec<u128>; 2], [Vec<u128>; 2]), PreprocessError> {
-                let (r_pend, u_msg) = r_chan.round1_send_u_cols_with_sac(&bjob.choice, bjob.sac_words);
+            let mut run = || -> PairBootstrapOutcome {
+                let (r_pend, u_msg) =
+                    r_chan.round1_send_u_cols_with_sac(&bjob.choice, bjob.sac_words);
                 let (s_pend, chal_msg) =
                     s_chan.round2_sample_challenge_with_chi(&u_msg, bjob.kos_chi_seed)?;
                 let (proof_msg, recv) = r_chan.round3_prove_and_finish(r_pend, &chal_msg);
@@ -644,9 +685,14 @@ impl DeltaCotPool {
                 if holder == owner {
                     continue;
                 }
-                let mut t_lanes: [Vec<u128>; 2] = [Vec::with_capacity(rows), Vec::with_capacity(rows)];
-                let mut q_lanes: [Vec<u128>; 2] = [Vec::with_capacity(rows), Vec::with_capacity(rows)];
-                for (lane, vaults) in [&mut *vaults_lane0, &mut *vaults_lane1].into_iter().enumerate() {
+                let mut t_lanes: [Vec<u128>; 2] =
+                    [Vec::with_capacity(rows), Vec::with_capacity(rows)];
+                let mut q_lanes: [Vec<u128>; 2] =
+                    [Vec::with_capacity(rows), Vec::with_capacity(rows)];
+                for (lane, vaults) in [&mut *vaults_lane0, &mut *vaults_lane1]
+                    .into_iter()
+                    .enumerate()
+                {
                     let (mut x_words, mut macs) =
                         vaults[owner].take_subfield_vole_recv_words(holder, words)?;
                     let mut keys = vaults[holder].take_subfield_vole_send_words(owner, words)?;
@@ -1643,8 +1689,10 @@ fn recursive_sacrifice(
         let pairs = len / 2;
         // `h[inst][party] = [h0, h1]` with `h0 = <a_even, b_odd>`, `h1 = <a_odd, b_even>`.
         let mut h = SecretBuffer([vec![[0u128; 2]; n], vec![[0u128; 2]; n]]);
-        let mut halves: SecretBuffer<Vec<Vec<[Vec<u128>; 4]>>> =
-            SecretBuffer(vec![vec![[Vec::new(), Vec::new(), Vec::new(), Vec::new()]; n], vec![[Vec::new(), Vec::new(), Vec::new(), Vec::new()]; n]]);
+        let mut halves: SecretBuffer<Vec<Vec<[Vec<u128>; 4]>>> = SecretBuffer(vec![
+            vec![[Vec::new(), Vec::new(), Vec::new(), Vec::new()]; n],
+            vec![[Vec::new(), Vec::new(), Vec::new(), Vec::new()]; n],
+        ]);
         {
             struct SplitSlot {
                 inst: usize,
@@ -2005,7 +2053,8 @@ pub(super) fn run_pi_triple_f2(
         }
     }
     let zero = vec![0u64; raw_triples];
-    let (mac_a, mac_b, mac_c) = compute_mac_triples_parallel(&pool, n, nbits, [off_a, off_b, off_c], [&zero, &zero, &d_c]);
+    let (mac_a, mac_b, mac_c) =
+        compute_mac_triples_parallel(&pool, n, nbits, [off_a, off_b, off_c], [&zero, &zero, &d_c]);
 
     finish_pi_triple_f2_from_authenticated_raw(
         session_id,
@@ -2143,7 +2192,8 @@ pub(super) fn run_silent_pi_triple_f2(
         }
     }
     let zero = vec![0u64; raw_triples];
-    let (mac_a, mac_b, mac_c) = compute_mac_triples_parallel(&pool, n, nbits, [off_a, off_b, off_c], [&d_a, &zero, &d_c]);
+    let (mac_a, mac_b, mac_c) =
+        compute_mac_triples_parallel(&pool, n, nbits, [off_a, off_b, off_c], [&d_a, &zero, &d_c]);
 
     finish_pi_triple_f2_from_authenticated_raw(
         session_id,

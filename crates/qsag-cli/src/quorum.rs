@@ -40,7 +40,7 @@ pub const PUBLIC_FORMAT: &str = "qsag-quorum-public-v1";
 const TREE_FORMAT: &str = "qsag-quorum-tree-v1";
 const SIG_FORMAT: &str = "qsag-quorum-signature-v1";
 const SCHEME_NAME: &str = "jorts-2of3-sha3";
-const MAX_CLI_TREE_HEIGHT: u64 = 30;
+const MAX_CLI_TREE_HEIGHT: u64 = 20;
 
 const QUORUM_HELP: &str = "\
 qsag quorum <keygen|sign|refresh|reshare|verify> [options]

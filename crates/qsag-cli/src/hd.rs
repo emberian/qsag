@@ -372,9 +372,9 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
     let threshold = args.get_u64("threshold")?.unwrap_or(2) as usize;
     let parties = args.get_u64("parties")?.unwrap_or(3) as usize;
     let batch_size = args.get_u64("count")?.unwrap_or(16) as usize;
-    if !batch_size.is_power_of_two() || batch_size < 2 || batch_size > u32::MAX as usize {
+    if !batch_size.is_power_of_two() || batch_size < 2 || batch_size > 65_536 {
         return Err(CliError::usage(
-            "--count must be a power of two representable as a u32",
+            "--count must be a power of two between 2 and 65536",
         ));
     }
     if (batch_size as u64)

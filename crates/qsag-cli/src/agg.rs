@@ -1,5 +1,6 @@
 //! `aggregate` and `verify-agg`: succinct K-to-1 aggregation of committee signatures.
 
+use std::collections::HashMap;
 use qsag_accel::keccak::cshake256_framed_32;
 use qsag_agg::sig::digest4_to_bytes;
 use qsag_agg::{
@@ -187,17 +188,25 @@ pub fn load_public_validators(spec: &str) -> Result<Vec<ValidatorPublicKey>, Cli
 
 /// Load a standalone `JortsPoseidon2` signature from raw canonical bytes or a JSON signature file
 /// (`qsag-quorum-signature-v1` / `qsag-signature-v1`).
-pub fn load_validator_signature(path: &str) -> Result<ValidatorSignature, CliError> {
+fn load_validator_signature(path: &str) -> Result<(ValidatorSignature, Option<ValidatorPublicKey>), CliError> {
     let raw = read_bounded_file(path, MAX_SIG_PROOF_BYTES)?;
     if raw.0.len() == AggSigProfile::JortsPoseidon2.raw_signature_bytes() {
         return ValidatorSignature::from_bytes_canonical(AggSigProfile::JortsPoseidon2, &raw.0)
+            .map(|sig| (sig, None))
             .map_err(|_| CliError::verify(format!("{path}: non-canonical JortsPoseidon2 sig")));
     }
     let text = std::str::from_utf8(&raw.0)
         .map_err(|_| CliError::input(format!("{path} is not UTF-8")))?;
     let json = Json::parse(text)?;
+    let author = match json.get("validator_public_key").and_then(Json::as_str) {
+        Some(hex) => Some(ValidatorPublicKey::from_bytes_canonical(
+            &from_hex_exact::<65>(hex, "validator_public_key")?
+        ).ok_or_else(|| CliError::input("non-canonical signature author key"))?),
+        None => None,
+    };
     let sig_bytes = json.field_hex("signature")?;
     ValidatorSignature::from_bytes_canonical(AggSigProfile::JortsPoseidon2, &sig_bytes)
+        .map(|sig| (sig, author))
         .map_err(|_| CliError::verify(format!("{path}: non-canonical JortsPoseidon2 signature")))
 }
 
@@ -375,40 +384,41 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
                     "--signers count must match --sigs count",
                 ));
             }
-            for (&idx, sig) in indices.iter().zip(&loaded_sigs) {
-                if !verify_individual_signature(&committee[idx], &message, sig) {
+            for (&idx, (sig, author)) in indices.iter().zip(&loaded_sigs) {
+                if author.is_some_and(|pk| pk != committee[idx])
+                    || !verify_individual_signature(&committee[idx], &message, sig) {
                     return Err(CliError::verify(format!(
                         "signature for validator {idx} failed individual verification"
                     )));
                 }
             }
-            (indices, loaded_sigs)
+            (indices, loaded_sigs.into_iter().map(|(sig, _)| sig).collect())
         } else {
-            let mut matched: Vec<(usize, ValidatorSignature)> =
-                Vec::with_capacity(loaded_sigs.len());
-            for (pos, sig) in loaded_sigs.into_iter().enumerate() {
-                let mut found = None;
-                for (idx, pk) in committee.iter().enumerate() {
-                    if matched.iter().any(|(used, _)| *used == idx) {
-                        continue;
-                    }
-                    if verify_individual_signature(pk, &message, &sig) {
-                        found = Some(idx);
-                        break;
-                    }
+            let mut authors = HashMap::with_capacity(committee.len());
+            for (idx, pk) in committee.iter().enumerate() {
+                if authors.insert(*pk, idx).is_some() {
+                    return Err(CliError::usage("committee contains duplicate public keys"));
                 }
-                let idx = found.ok_or_else(|| {
-                    CliError::verify(format!(
-                        "signature {} ({}) does not verify against any remaining public key",
-                        pos, sig_paths[pos]
-                    ))
-                })?;
-                matched.push((idx, sig));
             }
-            matched.sort_by_key(|(idx, _)| *idx);
-            let indices: Vec<usize> = matched.iter().map(|(i, _)| *i).collect();
-            let sigs: Vec<ValidatorSignature> = matched.into_iter().map(|(_, s)| s).collect();
-            (indices, sigs)
+            let mut ordered = vec![None; committee.len()];
+            for (pos, (sig, author)) in loaded_sigs.into_iter().enumerate() {
+                let author = author.ok_or_else(|| CliError::usage(format!(
+                    "{} has no validator_public_key metadata; supply --signers for raw or legacy signatures",
+                    sig_paths[pos]
+                )))?;
+                let idx = *authors.get(&author).ok_or_else(|| CliError::verify(format!(
+                    "{} identifies a public key outside the committee", sig_paths[pos]
+                )))?;
+                if ordered[idx].is_some() {
+                    return Err(CliError::verify(format!("duplicate signature author {idx}")));
+                }
+                if !verify_individual_signature(&committee[idx], &message, &sig) {
+                    return Err(CliError::verify(format!("signature for validator {idx} failed individual verification")));
+                }
+                ordered[idx] = Some(sig);
+            }
+            ordered.into_iter().enumerate().filter_map(|(idx, sig)| sig.map(|sig| (idx, sig))).unzip()
+
         };
 
         let bitmap = SignerBitmap::from_active_indices(size, &signers)

@@ -128,6 +128,29 @@ pub fn bdoz_gf2_128_batch_dot_cpu(
             actual: weights.len(),
         });
     }
+    #[cfg(feature = "std")]
+    {
+        let workers = crate::cpu_workers(shares.len(), 16_384);
+        if workers > 1 {
+            let chunk_len = shares.len().div_ceil(workers);
+            return Ok(std::thread::scope(|scope| {
+                let handles: std::vec::Vec<_> = shares
+                    .chunks(chunk_len)
+                    .zip(weights.chunks(chunk_len))
+                    .map(|(s, w)| scope.spawn(move || bdoz_dot_chunk(s, w)))
+                    .collect();
+                handles.into_iter().fold((0, 0), |acc, handle| {
+                    let partial = handle.join().expect("BDOZ worker panicked");
+                    (acc.0 ^ partial.0, acc.1 ^ partial.1)
+                })
+            }));
+        }
+    }
+    Ok(bdoz_dot_chunk(shares, weights))
+}
+
+// Each worker batches through the carry-less SIMD dispatcher and wipes its packing buffers.
+fn bdoz_dot_chunk(shares: &[(u128, u128)], weights: &[(u128, u128)]) -> (u128, u128) {
     const CHUNK: usize = 256;
     let mut acc0 = [0u64; 2];
     let mut acc1 = [0u64; 2];
@@ -156,7 +179,7 @@ pub fn bdoz_gf2_128_batch_dot_cpu(
     let lane1 = u128::from(acc1[0]) | (u128::from(acc1[1]) << 64);
     qsag_asm::volatile_fill(&mut acc0, 0);
     qsag_asm::volatile_fill(&mut acc1, 0);
-    Ok((lane0, lane1))
+    (lane0, lane1)
 }
 
 /// Element in the polynomial basis with modulus x^128 + x^7 + x^2 + x + 1.

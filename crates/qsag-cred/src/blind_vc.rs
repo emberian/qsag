@@ -18,6 +18,7 @@
 //! The OPRF protects its input against one server, not against a caller that
 //! separately discloses the same input through an issuance request.
 //!
+use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
@@ -38,7 +39,7 @@ use crate::fips204_ntt::{MlDsaLevel, MlDsaSigningKey, ml_dsa_sign_deterministic,
 use crate::voprf::{Evaluation, PublicKey};
 
 /// Maximum canonical Goldilocks field attributes per `PiBlindVc` credential.
-pub const MAX_VC_ATTRS: usize = 6;
+pub const MAX_VC_ATTRS: usize = 32;
 /// Poseidon2 Merkle accumulator depth ($2^{20}$ credentials per epoch).
 pub const VC_ACCUMULATOR_DEPTH: usize = 20;
 /// Default repetitions: 438, targeting 128-bit Grover challenge-grinding soundness.
@@ -146,7 +147,7 @@ fn sample_canonical_gl_vec(
     out
 }
 
-fn sponge12<const N: usize>(message: &mut [u64; N]) {
+fn sponge12(message: &mut [u64]) {
     let mut state = [0; 12];
     for chunk in message.chunks(6) {
         for (lane, &value) in state.iter_mut().zip(chunk) {
@@ -157,7 +158,7 @@ fn sponge12<const N: usize>(message: &mut [u64; N]) {
         }
         poseidon2_perm12(&mut state);
     }
-    if N.is_multiple_of(6) {
+    if message.len().is_multiple_of(6) {
         state[0] = gl_add(state[0], 1);
         poseidon2_perm12(&mut state);
     }
@@ -185,22 +186,15 @@ pub fn compute_vc_poseidon2_commit(
         }
         padded[index] = value;
     }
-    let attrs = padded;
-    let mut st = [
-        attrs[0],
-        attrs[1],
-        attrs[2],
-        attrs[3],
-        attrs[4],
-        attrs[5],
-        blind_limbs[0],
-        blind_limbs[1],
-        blind_limbs[2],
-        blind_limbs[3],
-        (schema_id & 0xffff_ffff),
+    // Keep the original six-slot padding for small credentials. Larger schemas
+    // absorb every attribute into the same rate-six, capacity-six sponge.
+    let mut st = padded[..attrs.len().max(6)].to_vec();
+    st.extend_from_slice(blind_limbs);
+    st.extend_from_slice(&[
+        schema_id & 0xffff_ffff,
         gl_add(schema_id >> 32, gl_reduce_u64(domain_tag)),
         arity,
-    ];
+    ]);
     sponge12(&mut st);
     let out = [st[0], st[1], st[2], st[3], st[4], st[5]];
     ct_zeroize_u64s(&mut st);
@@ -342,7 +336,7 @@ impl ZkBooProverTape {
         self.mul_gate(x4, x3)
     }
 
-    fn perm12<const N: usize>(&mut self, message: &mut [[u64; 3]; N]) {
+    fn perm12(&mut self, message: &mut [[u64; 3]]) {
         let mut state = [[0; 3]; 12];
         for chunk in message.chunks(6) {
             for (wire, value) in state.iter_mut().zip(chunk) {
@@ -355,7 +349,7 @@ impl ZkBooProverTape {
             }
             self.raw_perm12(&mut state);
         }
-        if N.is_multiple_of(6) {
+        if message.len().is_multiple_of(6) {
             state[0][0] = gl_add(state[0][0], 1);
             self.raw_perm12(&mut state);
         }
@@ -458,7 +452,7 @@ impl<'a> ZkBooVerifierTape<'a> {
         self.mul_gate(x4, x3)
     }
 
-    fn perm12<const N: usize>(&mut self, message: &mut [[u64; 2]; N]) {
+    fn perm12(&mut self, message: &mut [[u64; 2]]) {
         let mut state = [[0; 2]; 12];
         for chunk in message.chunks(6) {
             for (wire, value) in state.iter_mut().zip(chunk) {
@@ -471,7 +465,7 @@ impl<'a> ZkBooVerifierTape<'a> {
             }
             self.raw_perm12(&mut state);
         }
-        if N.is_multiple_of(6) {
+        if message.len().is_multiple_of(6) {
             state[0] = self.add_const(state[0], 1);
             self.raw_perm12(&mut state);
         }
@@ -762,7 +756,10 @@ pub fn holder_prepare_blind_issuance_with_profile(
         VC_ATTR_COMMIT_TAG,
     )?;
 
-    // Build the selected ZKBoo repetitions over the 10 secret inputs `(attrs[0..6], holder_blind[0..4])`:
+    let attr_slots = issuer_attested_attrs.len().max(6);
+    let input_wires = attr_slots + 4;
+    let issuance_gates = attribute_commitment_gates(attr_slots);
+    // Public attribute slots followed by four private holder-blind limbs.
     let mut inst_bytes = Vec::with_capacity(72);
     inst_bytes.extend_from_slice(&session_id);
     inst_bytes.extend_from_slice(&schema_id.to_le_bytes());
@@ -788,18 +785,9 @@ pub fn holder_prepare_blind_issuance_with_profile(
         tr.absorb(b"VC_SOUNDNESS_PROFILE", b"Quantum128:438");
     }
 
-    let secret_wires = ZeroizingU64Vec(vec![
-        attrs[0],
-        attrs[1],
-        attrs[2],
-        attrs[3],
-        attrs[4],
-        attrs[5],
-        holder_blind[0],
-        holder_blind[1],
-        holder_blind[2],
-        holder_blind[3],
-    ]);
+    let mut secret_wires = ZeroizingU64Vec(attrs[..attr_slots].to_vec());
+    secret_wires.0.extend_from_slice(&holder_blind);
+
 
     struct RepData {
         commits: [[u8; 32]; 3],
@@ -841,14 +829,14 @@ pub fn holder_prepare_blind_issuance_with_profile(
             b"QSAG.VC.ISS_IN_SH.V1",
             hedged_zk_seed.expose(),
             &share_ctx,
-            20,
+            2 * input_wires,
         );
-        let mut in0 = Vec::with_capacity(10);
-        let mut in1 = Vec::with_capacity(10);
-        let mut in2 = Vec::with_capacity(10);
-        let mut wire_3 = [[0u64; 3]; 10];
+        let mut in0 = Vec::with_capacity(input_wires);
+        let mut in1 = Vec::with_capacity(input_wires);
+        let mut in2 = Vec::with_capacity(input_wires);
+        let mut wire_3 = vec![[0u64; 3]; input_wires];
         for (w, wire) in wire_3.iter_mut().enumerate() {
-            let s = if w < MAX_VC_ATTRS {
+            let s = if w < attr_slots {
                 [secret_wires[w], 0, 0]
             } else {
                 split_secret_3(secret_wires[w], in_rand[2 * w], in_rand[2 * w + 1])
@@ -884,26 +872,13 @@ pub fn holder_prepare_blind_issuance_with_profile(
             )
         });
 
-        let mut prover = ZkBooProverTape::new(&tape_seeds, GATES_PER_PERM12);
-        let mut st: [[u64; 3]; 13] = [
-            wire_3[0],
-            wire_3[1],
-            wire_3[2],
-            wire_3[3],
-            wire_3[4],
-            wire_3[5],
-            wire_3[6],
-            wire_3[7],
-            wire_3[8],
-            wire_3[9],
-            [(schema_id & 0xffff_ffff), 0, 0],
-            [
-                gl_add(schema_id >> 32, gl_reduce_u64(VC_ATTR_COMMIT_TAG)),
-                0,
-                0,
-            ],
+        let mut prover = ZkBooProverTape::new(&tape_seeds, issuance_gates);
+        let mut st = wire_3;
+        st.extend_from_slice(&[
+            [schema_id & 0xffff_ffff, 0, 0],
+            [gl_add(schema_id >> 32, gl_reduce_u64(VC_ATTR_COMMIT_TAG)), 0, 0],
             [issuer_attested_attrs.len() as u64, 0, 0],
-        ];
+        ]);
         prover.perm12(&mut st);
 
         let mut final_outs = [[0u64; 3]; VC_FINAL_OUTPUTS];
@@ -1049,20 +1024,23 @@ pub fn verify_blind_issuance_request_with_profile(
 
     let mut round1_bundle = Vec::with_capacity(profile.repetitions() * 192);
 
+    let attr_slots = issuer_attested_attrs.len().max(6);
+    let input_wires = attr_slots + 4;
+    let issuance_gates = attribute_commitment_gates(attr_slots);
     for (rep, o) in req.opened_reps.iter().enumerate() {
         let e = o.e as usize;
         if e >= 3
             || o.num_active_final_outs != 6
             || o.final_outs_all3[6..].iter().flatten().any(|&v| v != 0)
-            || o.in_shares_e.len() != 10
-            || o.in_shares_e1.len() != 10
+            || o.in_shares_e.len() != input_wires
+            || o.in_shares_e1.len() != input_wires
         {
             return false;
         }
         let e1 = (e + 1) % 3;
         let e2 = (e + 2) % 3;
 
-        for index in 0..MAX_VC_ATTRS {
+        for index in 0..attr_slots {
             let value = issuer_attested_attrs.get(index).copied().unwrap_or(0);
             if o.in_shares_e[index] != if e == 0 { value } else { 0 }
                 || o.in_shares_e1[index] != if e1 == 0 { value } else { 0 }
@@ -1087,28 +1065,15 @@ pub fn verify_blind_issuance_request_with_profile(
             &o.tape_seed_e1,
             &o.gate_outs_e,
             &o.gate_outs_e1,
-            GATES_PER_PERM12,
+            issuance_gates,
         );
-        let wire_2: [[u64; 2]; 10] =
-            core::array::from_fn(|w| [o.in_shares_e[w], o.in_shares_e1[w]]);
-        let mut st: [[u64; 2]; 13] = [
-            wire_2[0],
-            wire_2[1],
-            wire_2[2],
-            wire_2[3],
-            wire_2[4],
-            wire_2[5],
-            wire_2[6],
-            wire_2[7],
-            wire_2[8],
-            wire_2[9],
+        let mut st: Vec<[u64; 2]> = o.in_shares_e.iter().zip(&o.in_shares_e1)
+            .map(|(&a, &b)| [a, b]).collect();
+        st.extend_from_slice(&[
             verifier.add_const([0, 0], req.schema_id & 0xffff_ffff),
-            verifier.add_const(
-                [0, 0],
-                gl_add(req.schema_id >> 32, gl_reduce_u64(VC_ATTR_COMMIT_TAG)),
-            ),
+            verifier.add_const([0, 0], gl_add(req.schema_id >> 32, gl_reduce_u64(VC_ATTR_COMMIT_TAG))),
             verifier.add_const([0, 0], issuer_attested_attrs.len() as u64),
-        ];
+        ]);
         verifier.perm12(&mut st);
         if !verifier.ok {
             return false;
@@ -1298,8 +1263,10 @@ pub struct IssuerCredentialAccumulator {
     pub issuer_epoch: u64,
     leaves: Vec<[u64; 6]>,
     enrolled_tokens: Vec<Option<[u8; 32]>>,
-    consumed_sessions: Vec<[u8; 32]>,
-    empty_leaf: [u64; 6],
+    consumed_sessions: BTreeSet<[u8; 32]>,
+    issued_tokens: BTreeSet<([u64; 6], [u8; 32])>,
+    layers: Vec<Vec<[u64; 6]>>,
+    empty: Vec<[u64; 6]>,
 }
 
 impl IssuerCredentialAccumulator {
@@ -1314,13 +1281,19 @@ impl IssuerCredentialAccumulator {
             0,
             0,
         ];
+        let mut empty = vec![empty_leaf];
+        for level in 0..VC_ACCUMULATOR_DEPTH {
+            empty.push(merkle_hash_pair(&empty[level], &empty[level], issuer_epoch, level as u32));
+        }
         Self {
             oprf_key,
             issuer_epoch,
             leaves: Vec::new(),
             enrolled_tokens: Vec::new(),
-            consumed_sessions: Vec::new(),
-            empty_leaf,
+            consumed_sessions: BTreeSet::new(),
+            issued_tokens: BTreeSet::new(),
+            layers: vec![Vec::new(); VC_ACCUMULATOR_DEPTH + 1],
+            empty,
         }
     }
 
@@ -1331,6 +1304,7 @@ impl IssuerCredentialAccumulator {
         }
         let idx = self.leaves.len();
         self.leaves.push(attr_commit);
+        self.append_merkle_leaf(attr_commit);
         self.enrolled_tokens.push(None);
         Ok(idx)
     }
@@ -1341,16 +1315,9 @@ impl IssuerCredentialAccumulator {
         attr_commit: [u64; 6],
         issuance_token: [u8; 32],
     ) -> Result<usize, BlindVcError> {
-        let mut duplicate = false;
-        for prior_session in &self.consumed_sessions {
-            duplicate |= ct_eq_bytes(prior_session, &session_id);
-        }
-        for (prior_leaf, prior_tok) in self.leaves.iter().zip(&self.enrolled_tokens) {
-            if let Some(tok) = prior_tok {
-                duplicate |= (*prior_leaf == attr_commit) & ct_eq_bytes(tok, &issuance_token);
-            }
-        }
-        if duplicate {
+        if self.consumed_sessions.contains(&session_id)
+            || self.issued_tokens.contains(&(attr_commit, issuance_token))
+        {
             return Err(BlindVcError::InvalidOprfEvaluation);
         }
         if self.leaves.len() >= Self::CAPACITY {
@@ -1358,8 +1325,10 @@ impl IssuerCredentialAccumulator {
         }
         let idx = self.leaves.len();
         self.leaves.push(attr_commit);
+        self.append_merkle_leaf(attr_commit);
         self.enrolled_tokens.push(Some(issuance_token));
-        self.consumed_sessions.push(session_id);
+        self.consumed_sessions.insert(session_id);
+        self.issued_tokens.insert((attr_commit, issuance_token));
         Ok(idx)
     }
 
@@ -1417,39 +1386,34 @@ impl IssuerCredentialAccumulator {
         })
     }
 
-    fn sparse_layers(&self) -> (Vec<Vec<[u64; 6]>>, Vec<[u64; 6]>) {
-        let mut layers = vec![self.leaves.clone()];
-        let mut empty = vec![self.empty_leaf];
+    // Only the new leaf's ancestors change. Cached layers also serve historical
+    // membership paths without rebuilding or cloning the complete tree.
+    fn append_merkle_leaf(&mut self, leaf: [u64; 6]) {
+        let mut index = self.layers[0].len();
+        self.layers[0].push(leaf);
         for level in 0..VC_ACCUMULATOR_DEPTH {
-            let nodes = &layers[level];
-            let next = nodes
-                .chunks(2)
-                .map(|pair| {
-                    merkle_hash_pair(
-                        &pair[0],
-                        pair.get(1).unwrap_or(&empty[level]),
-                        self.issuer_epoch,
-                        level as u32,
-                    )
-                })
-                .collect();
-            empty.push(merkle_hash_pair(
-                &empty[level],
-                &empty[level],
+            let nodes = &self.layers[level];
+            let parent = merkle_hash_pair(
+                &nodes[index & !1],
+                nodes.get((index & !1) + 1).unwrap_or(&self.empty[level]),
                 self.issuer_epoch,
                 level as u32,
-            ));
-            layers.push(next);
+            );
+            index >>= 1;
+            let next = &mut self.layers[level + 1];
+            if index == next.len() {
+                next.push(parent);
+            } else {
+                next[index] = parent;
+            }
         }
-        (layers, empty)
     }
 
     pub fn root(&self) -> [u64; 6] {
-        let (layers, empty) = self.sparse_layers();
-        layers[VC_ACCUMULATOR_DEPTH]
+        self.layers[VC_ACCUMULATOR_DEPTH]
             .first()
             .copied()
-            .unwrap_or(empty[VC_ACCUMULATOR_DEPTH])
+            .unwrap_or(self.empty[VC_ACCUMULATOR_DEPTH])
     }
 
     pub fn membership_witness(
@@ -1473,12 +1437,11 @@ impl IssuerCredentialAccumulator {
         if leaf_index >= self.leaves.len() {
             return Err(BlindVcError::InvalidAccumulatorLeafIndex);
         }
-        let (layers, empty) = self.sparse_layers();
         Ok(core::array::from_fn(|level| {
-            layers[level]
+            self.layers[level]
                 .get((leaf_index >> level) ^ 1)
                 .copied()
-                .unwrap_or(empty[level])
+                .unwrap_or(self.empty[level])
         }))
     }
 }
@@ -1707,13 +1670,18 @@ impl Fp5 {
 // N=256 GGM Seed Tree & 8-Way SIMD Shake256 Party Tape Engine
 // ============================================================================
 
-const SD_NUM_PERMS: usize = 3 + VC_ACCUMULATOR_DEPTH; // Attribute, Merkle path, presentation, scope.
+const fn attribute_commitment_gates(slots: usize) -> usize {
+    // Explicit padding consumes an additional permutation for exact rate multiples.
+    ((slots + 7) / 6 + 1) * (GATES_PER_PERM12 / 3)
+}
+const SD_NUM_PERMS: usize = 1 + VC_ACCUMULATOR_DEPTH; // Merkle path and scope.
 const SD_MERKLE_MUX_GATES: usize = VC_ACCUMULATOR_DEPTH * (1 + 6); // One Boolean check and six limb swaps per level.
-const SD_TOTAL_GATES: usize = SD_NUM_PERMS * GATES_PER_PERM12 + SD_MERKLE_MUX_GATES; // 32,708
-const SD_CHECKED_GATES: usize = SD_TOTAL_GATES + VC_FINAL_OUTPUTS; // 32,708 + 38 = 32,746
-const SD_GRID_B: usize = 181;
-const SD_GRID_L: usize = 181; // 181 * 181 = 32,761 >= 32,746
-const SD_RPOLY_COEFFS: usize = 2 * SD_GRID_B; // 362 coefficients (degrees 0..=2B except B)
+const SD_TOTAL_GATES: usize = SD_NUM_PERMS * GATES_PER_PERM12
+    + 2 * attribute_commitment_gates(MAX_VC_ATTRS) + SD_MERKLE_MUX_GATES;
+const SD_CHECKED_GATES: usize = SD_TOTAL_GATES + VC_FINAL_OUTPUTS;
+const SD_GRID_B: usize = 192;
+const SD_GRID_L: usize = 192;
+const SD_RPOLY_COEFFS: usize = 2 * SD_GRID_B; // Degrees 0..=2B except B.
 
 const _: () = assert!(SD_GRID_B * SD_GRID_L >= SD_CHECKED_GATES);
 
@@ -2142,7 +2110,7 @@ impl PlaintextGateRecorder {
         self.mul_gate(x4, x3)
     }
 
-    fn perm12<const N: usize>(&mut self, message: &mut [u64; N]) {
+    fn perm12(&mut self, message: &mut [u64]) {
         let mut state = [0u64; 12];
         for chunk in message.chunks(6) {
             for (wire, &value) in state.iter_mut().zip(chunk) {
@@ -2153,7 +2121,7 @@ impl PlaintextGateRecorder {
             }
             self.raw_perm12(&mut state);
         }
-        if N.is_multiple_of(6) {
+        if message.len().is_multiple_of(6) {
             state[0] = gl_add(state[0], 1);
             self.raw_perm12(&mut state);
         }
@@ -2232,21 +2200,9 @@ fn eval_sd_plaintext_circuit(
     });
     debug_assert_eq!(cursor, secret_vals.len());
 
-    let mut st_attr: [u64; 13] = [
-        attr_wires[0],
-        attr_wires[1],
-        attr_wires[2],
-        attr_wires[3],
-        attr_wires[4],
-        attr_wires[5],
-        hb_wires[0],
-        hb_wires[1],
-        hb_wires[2],
-        hb_wires[3],
-        schema_id & 0xffff_ffff,
-        gl_add(schema_id >> 32, gl_reduce_u64(VC_ATTR_COMMIT_TAG)),
-        arity as u64,
-    ];
+    let mut st_attr = attr_wires[..arity.max(6)].to_vec();
+    st_attr.extend_from_slice(&hb_wires);
+    st_attr.extend_from_slice(&[schema_id & 0xffff_ffff, gl_add(schema_id >> 32, gl_reduce_u64(VC_ATTR_COMMIT_TAG)), arity as u64]);
     rec.perm12(&mut st_attr);
     let mut cur_node: [u64; 6] = core::array::from_fn(|j| st_attr[j]);
     ct_zeroize_u64s(&mut st_attr);
@@ -2289,21 +2245,9 @@ fn eval_sd_plaintext_circuit(
         ct_zeroize_u64s(&mut st_mk);
     }
 
-    let mut st_pres: [u64; 13] = [
-        attr_wires[0],
-        attr_wires[1],
-        attr_wires[2],
-        attr_wires[3],
-        attr_wires[4],
-        attr_wires[5],
-        pb_wires[0],
-        pb_wires[1],
-        pb_wires[2],
-        pb_wires[3],
-        schema_id & 0xffff_ffff,
-        gl_add(schema_id >> 32, gl_reduce_u64(VC_PRES_COMMIT_TAG)),
-        arity as u64,
-    ];
+    let mut st_pres = attr_wires[..arity.max(6)].to_vec();
+    st_pres.extend_from_slice(&pb_wires);
+    st_pres.extend_from_slice(&[schema_id & 0xffff_ffff, gl_add(schema_id >> 32, gl_reduce_u64(VC_PRES_COMMIT_TAG)), arity as u64]);
     rec.perm12(&mut st_pres);
 
     let mut st_sc: [u64; 12] = [
@@ -2321,7 +2265,10 @@ fn eval_sd_plaintext_circuit(
         gl_add(schema_id >> 32, gl_reduce_u64(VC_SCOPE_TAG_DOM)),
     ];
     rec.perm12(&mut st_sc);
-    debug_assert_eq!(rec.x.len(), SD_TOTAL_GATES);
+    debug_assert_eq!(rec.x.len(), SD_TOTAL_GATES - 2 * (attribute_commitment_gates(MAX_VC_ATTRS) - attribute_commitment_gates(arity.max(6))));
+    rec.x.resize(SD_TOTAL_GATES, 0);
+    rec.y.resize(SD_TOTAL_GATES, 0);
+    rec.z.resize(SD_TOTAL_GATES, 0);
 
     let mut final_outs = [0u64; VC_FINAL_OUTPUTS];
     final_outs[0..6].copy_from_slice(&cur_node);
@@ -2335,7 +2282,7 @@ fn eval_sd_plaintext_circuit(
     debug_assert_eq!(&final_outs, expected_final_outs);
 
     // Append 38 public output-wire consistency gates `1 * final_outs[j] = expected_final_outs[j]`,
-    // then pad to `SD_GRID_B * SD_GRID_L = 32,761` with `0 * 0 = 0`.
+    // then pad to `SD_GRID_B * SD_GRID_L = 36,864` with `0 * 0 = 0`.
     for j in 0..VC_FINAL_OUTPUTS {
         rec.x.push(1);
         rec.y.push(final_outs[j]);
@@ -2392,7 +2339,7 @@ impl<'a> LinearShareEvaluator<'a> {
         self.mul_gate(x4, x3)
     }
 
-    fn perm12<const N: usize>(&mut self, message: &mut [u64; N]) {
+    fn perm12(&mut self, message: &mut [u64]) {
         let mut state = [0u64; 12];
         for chunk in message.chunks(6) {
             for (wire, &value) in state.iter_mut().zip(chunk) {
@@ -2403,7 +2350,7 @@ impl<'a> LinearShareEvaluator<'a> {
             }
             self.raw_perm12(&mut state);
         }
-        if N.is_multiple_of(6) {
+        if message.len().is_multiple_of(6) {
             state[0] = self.add_const(state[0], 1);
             self.raw_perm12(&mut state);
         }
@@ -2511,21 +2458,9 @@ fn eval_sd_party_shares(
     });
     debug_assert_eq!(cursor, w_shares.len());
 
-    let mut st_attr: [u64; 13] = [
-        attr_wires[0],
-        attr_wires[1],
-        attr_wires[2],
-        attr_wires[3],
-        attr_wires[4],
-        attr_wires[5],
-        hb_wires[0],
-        hb_wires[1],
-        hb_wires[2],
-        hb_wires[3],
-        ev.const_share(schema_id & 0xffff_ffff),
-        ev.const_share(gl_add(schema_id >> 32, gl_reduce_u64(VC_ATTR_COMMIT_TAG))),
-        ev.const_share(arity as u64),
-    ];
+    let mut st_attr = attr_wires[..arity.max(6)].to_vec();
+    st_attr.extend_from_slice(&hb_wires);
+    st_attr.extend_from_slice(&[ev.const_share(schema_id & 0xffff_ffff), ev.const_share(gl_add(schema_id >> 32, gl_reduce_u64(VC_ATTR_COMMIT_TAG))), ev.const_share(arity as u64)]);
     ev.perm12(&mut st_attr);
     let mut cur_node: [u64; 6] = core::array::from_fn(|j| st_attr[j]);
 
@@ -2570,21 +2505,9 @@ fn eval_sd_party_shares(
         cur_node = core::array::from_fn(|j| st_mk[j]);
     }
 
-    let mut st_pres: [u64; 13] = [
-        attr_wires[0],
-        attr_wires[1],
-        attr_wires[2],
-        attr_wires[3],
-        attr_wires[4],
-        attr_wires[5],
-        pb_wires[0],
-        pb_wires[1],
-        pb_wires[2],
-        pb_wires[3],
-        ev.const_share(schema_id & 0xffff_ffff),
-        ev.const_share(gl_add(schema_id >> 32, gl_reduce_u64(VC_PRES_COMMIT_TAG))),
-        ev.const_share(arity as u64),
-    ];
+    let mut st_pres = attr_wires[..arity.max(6)].to_vec();
+    st_pres.extend_from_slice(&pb_wires);
+    st_pres.extend_from_slice(&[ev.const_share(schema_id & 0xffff_ffff), ev.const_share(gl_add(schema_id >> 32, gl_reduce_u64(VC_PRES_COMMIT_TAG))), ev.const_share(arity as u64)]);
     ev.perm12(&mut st_pres);
 
     let mut st_sc: [u64; 12] = [
@@ -2602,7 +2525,12 @@ fn eval_sd_party_shares(
         ev.const_share(gl_add(schema_id >> 32, gl_reduce_u64(VC_SCOPE_TAG_DOM))),
     ];
     ev.perm12(&mut st_sc);
-    debug_assert_eq!(ev.gate_cursor, SD_TOTAL_GATES);
+    debug_assert_eq!(ev.gate_cursor, SD_TOTAL_GATES - 2 * (attribute_commitment_gates(MAX_VC_ATTRS) - attribute_commitment_gates(arity.max(6))));
+    for g in ev.gate_cursor..SD_TOTAL_GATES {
+        ev.x_out[g] = 0;
+        ev.y_out[g] = 0;
+        ev.z_out[g] = z_shares[g];
+    }
 
     let mut final_outs = [0u64; VC_FINAL_OUTPUTS];
     final_outs[0..6].copy_from_slice(&cur_node);
@@ -2702,7 +2630,7 @@ fn reduce_fp5_split(lo: &[u128; 5], hi: &[u128; 5]) -> Fp5 {
 
 /// Evaluate one party's polynomial shares `(alpha^(i), beta^(i), sigma^(i))` at `r` using
 /// lazy 192-bit `(lo, hi)` scalar-in-GF(p) accumulation across rows `b in 0..B` (`0` modular
-/// reductions inside the 32,761-gate loop).
+/// reductions inside the 36,864-gate loop).
 #[expect(
     clippy::too_many_arguments,
     reason = "Flat tape slice and precomputed folding/evaluation tables avoid extra heap copies"
@@ -2791,12 +2719,12 @@ fn eval_party_polynomial_shares(
 }
 
 /// Tape layout squeezed from `Shake256PartyBatch8` (after the 4-word `salt_1` prefix):
-/// - `u_pad`: `SD_GRID_L * 5` (`905` limbs)
-/// - `v_pad`: `SD_GRID_L * 5` (`905` limbs)
+/// - `u_pad`: `SD_GRID_L * 5` (`960` limbs)
+/// - `v_pad`: `SD_GRID_L * 5` (`960` limbs)
 /// - `c_pad`: `5` limbs
 /// - `poly_mask`: `SD_RPOLY_COEFFS * 5` (`1,810` limbs)
 /// - `w_mask`: `num_secret_wires` limbs
-/// - `z_mask`: `SD_TOTAL_GATES` (`32,708` limbs)
+/// - `z_mask`: `SD_TOTAL_GATES` (`36,484` limbs)
 const PARTY_EXT_LIMBS: usize = (SD_GRID_L + SD_GRID_L + 1 + SD_RPOLY_COEFFS) * 5; // 3,625
 
 fn unpack_party_ext_masks(
@@ -4034,7 +3962,7 @@ pub fn verify_presentation_with_profile(
 // Canonical Sub-15 MiB Wire Serialization (`to_compact_wire_bytes` / `from_compact_wire_bytes`)
 // ============================================================================
 
-const SD_COMPACT_WIRE_MAGIC: &[u8; 24] = b"QSAG.BVC.SD.LIMBO256.V1\0";
+const SD_COMPACT_WIRE_MAGIC: &[u8; 24] = b"QSAG.BVC.SD.LIMBO256.V2\0";
 
 impl SelectiveDisclosurePresentation {
     /// Serialize this [`SelectiveDisclosurePresentation`] to its canonical wire format

@@ -6,8 +6,11 @@
 //! that gap means proving, inside an outer relation, every check a child verifier performs.
 //!
 //! This module measures the largest fixed part of that work on real proof objects: the
-//! `cSHAKE256` Merkle-Canopy authentication of each WHIR opening. Counts are derived only from
+//! Merkle-Canopy authentication of each WHIR opening. Counts are derived only from
 //! public wire fields and the schedule, so they can be recomputed for any proof.
+//! [`whir_opening_merkle_census`] counts the cSHAKE backend;
+//! [`poseidon2_opening_merkle_census`] counts the Poseidon2 backend, including leaf framing,
+//! per-tree key derivation and root binding. Neither counts transcript or arithmetic work.
 //!
 //! What is counted, per Merkle tree with `k` opened leaves and `S` Steiner siblings:
 //! * leaf hashes: `k` evaluations of `cSHAKE256` over the canonical leaf frame, each costing
@@ -86,8 +89,8 @@ impl MerkleHashCensus {
     }
 
     /// Permutation count if the same trees used a width-12, rate-8 algebraic sponge for leaves
-    /// and a two-to-one compression for nodes. No such commitment mode exists in this crate;
-    /// the figure sizes that alternative in rows of the existing one-permutation-per-row AIR.
+    /// and a two-to-one compression for nodes. This historical estimate omits framing and
+    /// tree-key derivation; use [`poseidon2_opening_merkle_census`] for actual Poseidon2 proofs.
     pub fn algebraic_rate8_permutations(&self) -> Option<usize> {
         self.leaf_rate8_blocks
             .checked_add(self.internal_node_permutations)?
@@ -101,12 +104,18 @@ impl MerkleHashCensus {
             merkle_trees: self.merkle_trees.checked_add(other.merkle_trees)?,
             opened_leaves: self.opened_leaves.checked_add(other.opened_leaves)?,
             leaf_field_limbs: self.leaf_field_limbs.checked_add(other.leaf_field_limbs)?,
-            leaf_permutations: self.leaf_permutations.checked_add(other.leaf_permutations)?,
+            leaf_permutations: self
+                .leaf_permutations
+                .checked_add(other.leaf_permutations)?,
             internal_node_permutations: self
                 .internal_node_permutations
                 .checked_add(other.internal_node_permutations)?,
-            root_permutations: self.root_permutations.checked_add(other.root_permutations)?,
-            leaf_rate8_blocks: self.leaf_rate8_blocks.checked_add(other.leaf_rate8_blocks)?,
+            root_permutations: self
+                .root_permutations
+                .checked_add(other.root_permutations)?,
+            leaf_rate8_blocks: self
+                .leaf_rate8_blocks
+                .checked_add(other.leaf_rate8_blocks)?,
         })
     }
 
@@ -145,13 +154,16 @@ impl MerkleHashCensus {
 
 /// Census of one WHIR opening against `stage0_commitment` under `schedule`.
 ///
-/// Returns `None` when the proof's shape does not match the schedule. This is a shape check
+/// Returns `None` for Poseidon2 or when the proof's shape does not match the schedule. This is a shape check
 /// only: it neither verifies the opening nor samples the query indices.
 pub fn whir_opening_merkle_census(
     schedule: &WhirSchedule,
     stage0_commitment: &CanopyCommitment,
     proof: &HemWhirOpeningProof,
 ) -> Option<MerkleHashCensus> {
+    if schedule.regime.uses_poseidon2_canopy() {
+        return None;
+    }
     let (st0, later) = schedule.stages.split_first()?;
     if later.len() != proof.folded_layers.len() || st0.step_vars == 0 || st0.step_vars > 6 {
         return None;
@@ -202,6 +214,146 @@ pub fn whir_opening_merkle_census(
         )?;
     }
     Some(census)
+}
+
+/// Exact number of width-12 Poseidon2 permutations used for Merkle authentication only.
+/// This is a work count, not an execution proof or a measurement of a recursive circuit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Poseidon2MerkleCensus {
+    pub merkle_trees: usize,
+    pub opened_leaves: usize,
+    pub leaf_permutations: usize,
+    pub internal_node_permutations: usize,
+    pub tree_key_permutations: usize,
+    pub root_permutations: usize,
+}
+
+impl Poseidon2MerkleCensus {
+    pub fn checked_add(&self, other: &Self) -> Option<Self> {
+        Some(Self {
+            merkle_trees: self.merkle_trees.checked_add(other.merkle_trees)?,
+            opened_leaves: self.opened_leaves.checked_add(other.opened_leaves)?,
+            leaf_permutations: self
+                .leaf_permutations
+                .checked_add(other.leaf_permutations)?,
+            internal_node_permutations: self
+                .internal_node_permutations
+                .checked_add(other.internal_node_permutations)?,
+            tree_key_permutations: self
+                .tree_key_permutations
+                .checked_add(other.tree_key_permutations)?,
+            root_permutations: self
+                .root_permutations
+                .checked_add(other.root_permutations)?,
+        })
+    }
+
+    pub fn permutations(&self) -> Option<usize> {
+        self.leaf_permutations
+            .checked_add(self.internal_node_permutations)?
+            .checked_add(self.tree_key_permutations)?
+            .checked_add(self.root_permutations)
+    }
+
+    fn add_tree(
+        &mut self,
+        commitment: &CanopyCommitment,
+        leaves: usize,
+        input_limbs: usize,
+        proof: &CanopyMultiProof,
+    ) -> Option<()> {
+        if leaves == 0 || commitment.log_leaves > 28 || leaves > 1usize << commitment.log_leaves {
+            return None;
+        }
+        let internal = leaves
+            .checked_add(proof.auth_siblings.len())?
+            .checked_sub(1)?;
+        if internal >= 1usize << commitment.log_leaves {
+            return None;
+        }
+        // poseidon2_sponge_hash_limbs prepends domain and length (two limbs).
+        let leaf_perms = leaves.checked_mul(input_limbs.checked_add(2)?.div_ceil(8))?;
+        self.merkle_trees = self.merkle_trees.checked_add(1)?;
+        self.opened_leaves = self.opened_leaves.checked_add(leaves)?;
+        self.leaf_permutations = self.leaf_permutations.checked_add(leaf_perms)?;
+        self.internal_node_permutations = self.internal_node_permutations.checked_add(internal)?;
+        // Tree key: domain, length, stage, depth. Root: those four plus the four digest limbs.
+        self.tree_key_permutations = self.tree_key_permutations.checked_add(1)?;
+        self.root_permutations = self.root_permutations.checked_add(1)?;
+        Some(())
+    }
+}
+
+/// Count actual Poseidon2 Merkle verification work; reject cSHAKE schedules and malformed
+/// fiber shapes. Authentication and Fiat-Shamir challenges must still be checked separately.
+pub fn poseidon2_opening_merkle_census(
+    schedule: &WhirSchedule,
+    stage0_commitment: &CanopyCommitment,
+    proof: &HemWhirOpeningProof,
+) -> Option<Poseidon2MerkleCensus> {
+    if !schedule.regime.uses_poseidon2_canopy() {
+        return None;
+    }
+    let (stage0, later) = schedule.stages.split_first()?;
+    if later.len() != proof.folded_layers.len() || !(1..=6).contains(&stage0.step_vars) {
+        return None;
+    }
+    let leaves = proof.round0_salts.len();
+    if leaves == 0 || !proof.round0_vals.len().is_multiple_of(leaves) {
+        return None;
+    }
+    let limbs = proof.round0_vals.len() / leaves;
+    let arity = 1usize << stage0.step_vars;
+    if !limbs.is_multiple_of(arity) || !(1..=crate::pcs::MAX_BATCH_POLYS).contains(&(limbs / arity))
+    {
+        return None;
+    }
+    let mut census = Poseidon2MerkleCensus::default();
+    // The 16-byte salt is encoded as three canonical limbs before the base-field values.
+    census.add_tree(
+        stage0_commitment,
+        leaves,
+        limbs.checked_add(3)?,
+        &proof.round0_multiproof,
+    )?;
+    for (spec, layer) in later.iter().zip(&proof.folded_layers) {
+        if !(1..=6).contains(&spec.step_vars) {
+            return None;
+        }
+        let arity = 1usize << spec.step_vars;
+        if layer.opened_vals.is_empty() || !layer.opened_vals.len().is_multiple_of(arity) {
+            return None;
+        }
+        census.add_tree(
+            &layer.commitment,
+            layer.opened_vals.len() / arity,
+            4 * arity,
+            &layer.multiproof,
+        )?;
+    }
+    Some(census)
+}
+
+/// Merkle work in every child opening of a Poseidon2 aggregate, including all fan-in leaves.
+pub fn poseidon2_aggregate_merkle_census(
+    proof: &HemAggregatedProof,
+) -> Option<Poseidon2MerkleCensus> {
+    fn visit(node: &MergeNode, depth: usize) -> Option<Poseidon2MerkleCensus> {
+        if depth == 0 {
+            return None;
+        }
+        match node {
+            MergeNode::Leaf(batch) => poseidon2_opening_merkle_census(
+                &batch.schedule,
+                &batch.witness_comm,
+                &batch.pcs_opening.opening,
+            ),
+            MergeNode::Branch { left, right, .. } => {
+                visit(left, depth - 1)?.checked_add(&visit(right, depth - 1)?)
+            }
+        }
+    }
+    visit(&proof.root, crate::MAX_MERGE_TREE_DEPTH)
 }
 
 /// Census of one shard batch: its single batched WHIR opening.
@@ -275,7 +427,8 @@ mod tests {
                     continue;
                 }
                 let proof = tree.open_multi_with_leaf_fn(&indices, leaf);
-                let opened: Vec<(usize, [u8; 32])> = indices.iter().map(|&i| (i, leaf(i))).collect();
+                let opened: Vec<(usize, [u8; 32])> =
+                    indices.iter().map(|&i| (i, leaf(i))).collect();
                 assert!(verify_canopy_multiproof(&commitment, &opened, &proof));
 
                 let mut ancestors = BTreeSet::new();
@@ -323,14 +476,65 @@ mod tests {
         let proof = tree.open_multi_with_leaf_fn(&[1], leaf);
         let mut census = MerkleHashCensus::default();
         // No opened leaf, or more opened leaves than the tree holds, is not a valid opening.
-        assert!(census.add_tree(&tree.commitment(), 0, 69, 4, &proof).is_none());
-        assert!(census.add_tree(&tree.commitment(), 5, 69, 4, &proof).is_none());
+        assert!(
+            census
+                .add_tree(&tree.commitment(), 0, 69, 4, &proof)
+                .is_none()
+        );
+        assert!(
+            census
+                .add_tree(&tree.commitment(), 5, 69, 4, &proof)
+                .is_none()
+        );
         // A 135-byte frame fits one block; 136 bytes forces a second for the padding.
-        census.add_tree(&tree.commitment(), 1, 135, 9, &proof).unwrap();
+        census
+            .add_tree(&tree.commitment(), 1, 135, 9, &proof)
+            .unwrap();
         assert_eq!(census.leaf_permutations, 1);
         assert_eq!(census.leaf_rate8_blocks, 2);
-        census.add_tree(&tree.commitment(), 1, 136, 8, &proof).unwrap();
+        census
+            .add_tree(&tree.commitment(), 1, 136, 8, &proof)
+            .unwrap();
         assert_eq!(census.leaf_permutations, 3);
         assert_eq!(census.leaf_rate8_blocks, 3);
+    }
+
+    #[test]
+    fn poseidon2_census_counts_framing_and_rejects_the_other_backend() {
+        use crate::field::{Goldilocks, GoldilocksExt4};
+        use crate::pcs::{WhirSecurityRegime, whir_commit_owned_with_schedule, whir_open};
+        use crate::sponge::FiatShamirTranscript;
+        use alloc::vec;
+        let schedule = WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128.schedule(8);
+        let table: Vec<_> = (0..256).map(Goldilocks::from_u64_reduced).collect();
+        let point = vec![GoldilocksExt4::V; 8];
+        let value = crate::field::mle_eval_base_at_ext4(&table, &point);
+        let (comm, state) = whir_commit_owned_with_schedule(table, &[9; 32], &schedule);
+        let mut transcript = FiatShamirTranscript::new()
+            .bind_relation(b"CENSUS", b"", &schedule)
+            .bind_instance(&[b"framing"]);
+        let proof = whir_open(&state, &point, value, &mut transcript);
+        let census = poseidon2_opening_merkle_census(&schedule, &comm, &proof).unwrap();
+        let r0_leaves = proof.round0_salts.len();
+        let r0_arity = 1usize << schedule.stages[0].step_vars;
+        let mut leaf_perms = r0_leaves * (5 + r0_arity).div_ceil(8);
+        let mut internal = r0_leaves + proof.round0_multiproof.auth_siblings.len() - 1;
+        for (stage, layer) in schedule.stages[1..].iter().zip(&proof.folded_layers) {
+            let arity = 1usize << stage.step_vars;
+            let leaves = layer.opened_vals.len() / arity;
+            leaf_perms += leaves * (2 + 4 * arity).div_ceil(8);
+            internal += leaves + layer.multiproof.auth_siblings.len() - 1;
+        }
+        assert_eq!(census.leaf_permutations, leaf_perms);
+        assert_eq!(
+            census.permutations(),
+            Some(leaf_perms + internal + 2 * schedule.stages.len())
+        );
+        assert!(whir_opening_merkle_census(&schedule, &comm, &proof).is_none());
+        let other = WhirSecurityRegime::Cdhz25ZeroPowQrom128.schedule(8);
+        assert!(poseidon2_opening_merkle_census(&other, &comm, &proof).is_none());
+        let mut malformed = proof.clone();
+        malformed.round0_vals.pop();
+        assert!(poseidon2_opening_merkle_census(&schedule, &comm, &malformed).is_none());
     }
 }

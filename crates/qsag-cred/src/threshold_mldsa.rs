@@ -83,8 +83,9 @@ use qsag_accel::keccak::{KECCAK_RC, Shake256, cshake256_framed_32};
 use qsag_policy::AuthorizedSignReleaseToken;
 use qsag_verified::{MlDsaBarrierChecks, MlDsaReleaseGate};
 
-/// Maximum distinct custodian identifiers (the RSS holder sets are dynamically sized).
-pub const MAX_THRESHOLD_MLDSA_PARTIES: usize = crate::rss_mpc::MAX_MPC_PARTIES;
+/// Enrollment identifier limit. The current RSS backend additionally enforces
+/// `rss_mpc::MAX_MPC_PARTIES`; a polynomial-sharing backend is needed above it.
+pub const MAX_THRESHOLD_MLDSA_PARTIES: usize = 64;
 /// Attempts per signing session before `RejectionBudgetExhausted`.
 pub const DEFAULT_MAX_REJECTION_ATTEMPTS: u32 = 256;
 
@@ -1547,19 +1548,20 @@ fn apply_response_stream_cipher(
     xof.absorb(context);
     xof.absorb(&attempt.to_be_bytes());
     xof.finalize(0x1f);
-    let mut block = [0u8; 16];
+    // A bounded batch preserves the exact XOF byte stream, including between
+    // components, while avoiding a squeeze call for every coefficient.
+    let mut stream = [0u8; 16 * 128];
     for component in &mut response.c {
-        for coeff in component.iter_mut() {
-            xof.squeeze(&mut block);
-            let mask = stream_word_mod_q(&block);
-            *coeff = if encrypt {
-                fq_add(*coeff, mask)
-            } else {
-                fq_sub(*coeff, mask)
-            };
+        for coeffs in component.chunks_mut(128) {
+            let bytes = &mut stream[..16 * coeffs.len()];
+            xof.squeeze(bytes);
+            for (coeff, block) in coeffs.iter_mut().zip(bytes.as_chunks::<16>().0) {
+                let mask = stream_word_mod_q(block);
+                *coeff = if encrypt { fq_add(*coeff, mask) } else { fq_sub(*coeff, mask) };
+            }
         }
     }
-    ct_zeroize_bytes(&mut block);
+    ct_zeroize_bytes(&mut stream);
 }
 
 /// Seals the pending `z` shares under a per-attempt XOF stream cipher whose only

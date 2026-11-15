@@ -369,7 +369,7 @@ pub fn check_goldilocks_twiddles(n: usize, twiddles: &[u64]) -> Result<(), Accel
 }
 
 #[inline]
-fn bit_reverse_permute(buf: &mut [u64]) {
+fn bit_reverse_permute<T>(buf: &mut [T]) {
     let n = buf.len();
     if n <= 1 {
         return;
@@ -380,6 +380,129 @@ fn bit_reverse_permute(buf: &mut [u64]) {
         if i < rev {
             buf.swap(i, rev);
         }
+    }
+}
+
+// Fuse extension coordinates so both share twiddles, bit reversal and thread scheduling.
+// No transpose or coefficient-sized scratch allocation is needed.
+trait NttValue: Copy + Send {
+    fn reduce(&mut self);
+    fn scale(&mut self, w: u64);
+    fn butterfly(lo: &mut Self, hi: &mut Self, w: u64);
+}
+
+impl NttValue for u64 {
+    #[inline]
+    fn reduce(&mut self) {
+        *self = gl_reduce_u64(*self);
+    }
+    #[inline]
+    fn scale(&mut self, w: u64) {
+        *self = gl_mul(*self, w);
+    }
+    #[inline]
+    fn butterfly(lo: &mut Self, hi: &mut Self, w: u64) {
+        let u = *lo;
+        let v = gl_mul(*hi, w);
+        *lo = gl_add(u, v);
+        *hi = gl_sub(u, v);
+    }
+}
+
+impl NttValue for [u64; 2] {
+    #[inline]
+    fn reduce(&mut self) {
+        self.iter_mut().for_each(NttValue::reduce);
+    }
+    #[inline]
+    fn scale(&mut self, w: u64) {
+        self.iter_mut().for_each(|x| x.scale(w));
+    }
+    #[inline]
+    fn butterfly(lo: &mut Self, hi: &mut Self, w: u64) {
+        u64::butterfly(&mut lo[0], &mut hi[0], w);
+        u64::butterfly(&mut lo[1], &mut hi[1], w);
+    }
+}
+
+// Four independent products expose instruction-level/vector parallelism. Powers advance by
+// w^4, removing the scalar w *= root dependency between adjacent butterflies.
+#[inline]
+fn butterflies<T: NttValue>(
+    lo: &mut [T],
+    hi: &mut [T],
+    mut weights: impl FnMut(usize, usize) -> [u64; 4],
+) {
+    let (lo_blocks, lo_tail) = lo.as_chunks_mut::<4>();
+    let (hi_blocks, hi_tail) = hi.as_chunks_mut::<4>();
+    for (i, (lo, hi)) in lo_blocks.iter_mut().zip(hi_blocks).enumerate() {
+        let w = weights(i * 4, 4);
+        for lane in 0..4 {
+            T::butterfly(&mut lo[lane], &mut hi[lane], w[lane]);
+        }
+    }
+    if !lo_tail.is_empty() {
+        let w = weights(lo_blocks.len() * 4, lo_tail.len());
+        for lane in 0..lo_tail.len() {
+            T::butterfly(&mut lo_tail[lane], &mut hi_tail[lane], w[lane]);
+        }
+    }
+}
+
+fn ntt_stage<T: NttValue>(
+    buf: &mut [T],
+    len: usize,
+    run: impl Fn(&mut [T], &mut [T], usize) + Sync,
+) {
+    let half = len / 2;
+    #[cfg(feature = "std")]
+    {
+        let workers = crate::cpu_workers(buf.len(), 32_768);
+        if workers > 1 {
+            let blocks = buf.len() / len;
+            std::thread::scope(|scope| {
+                if blocks >= workers {
+                    // Group early-stage blocks to amortize thread startup.
+                    for group in buf.chunks_mut(blocks.div_ceil(workers) * len) {
+                        let run = &run;
+                        scope.spawn(move || {
+                            for block in group.chunks_mut(len) {
+                                let (lo, hi) = block.split_at_mut(half);
+                                run(lo, hi, 0);
+                            }
+                        });
+                    }
+                } else {
+                    // Split within butterflies too: the final stage has only one block.
+                    let chunk_len = half.div_ceil(workers / blocks);
+                    for block in buf.chunks_mut(len) {
+                        let (lo, hi) = block.split_at_mut(half);
+                        for (i, (lo, hi)) in lo
+                            .chunks_mut(chunk_len)
+                            .zip(hi.chunks_mut(chunk_len))
+                            .enumerate()
+                        {
+                            let run = &run;
+                            scope.spawn(move || run(lo, hi, i * chunk_len));
+                        }
+                    }
+                }
+            });
+            return;
+        }
+    }
+    for block in buf.chunks_mut(len) {
+        let (lo, hi) = block.split_at_mut(half);
+        run(lo, hi, 0);
+    }
+}
+
+fn normalize_ntt<T: NttValue>(buf: &mut [T], inverse: bool) {
+    if inverse {
+        let inv_n = gl_inv_or_zero(buf.len() as u64);
+        crate::cpu_chunks_mut(buf, 32_768, |_, chunk| {
+            chunk.iter_mut().for_each(|x| x.scale(inv_n));
+        });
     }
 }
 
@@ -404,169 +527,77 @@ pub fn goldilocks_ntt_cpu(
             actual: twiddles.len(),
         });
     }
-    for slot in buf.iter_mut() {
-        *slot = gl_reduce_u64(*slot);
-    }
+    crate::cpu_chunks_mut(buf, 32_768, |_, chunk| {
+        chunk.iter_mut().for_each(NttValue::reduce);
+    });
     if n == 1 {
         return Ok(());
     }
-
     bit_reverse_permute(buf);
-
-    let mut len = 2usize;
-    while len <= n {
-        let half = len / 2;
+    for stage in 1..=n.trailing_zeros() {
+        let len = 1usize << stage;
         let step = n / len;
-        let mut start = 0usize;
-        while start < n {
-            for j in 0..half {
-                let tw_idx = j * step;
-                let w = if !inverse {
-                    gl_reduce_u64(twiddles[tw_idx])
-                } else if tw_idx == 0 {
-                    1u64
-                } else {
-                    gl_reduce_u64(twiddles[n / 2 - tw_idx])
-                };
-                // Note: for inverse, `omega^{-k} = -omega^{n/2 - k}` because `omega^{n/2} = -1`!
-                let w_eff = if inverse && tw_idx != 0 { gl_neg(w) } else { w };
-                let u = buf[start + j];
-                let v = gl_mul(buf[start + j + half], w_eff);
-                buf[start + j] = gl_add(u, v);
-                buf[start + j + half] = gl_sub(u, v);
-            }
-            start += len;
-        }
-        len <<= 1;
+        ntt_stage(buf, len, |lo, hi, offset| {
+            butterflies(lo, hi, |j, lanes| {
+                let mut w = [1; 4];
+                for (lane, w) in w.iter_mut().enumerate().take(lanes) {
+                    let idx = (offset + j + lane) * step;
+                    *w = if inverse && idx != 0 {
+                        gl_neg(twiddles[n / 2 - idx])
+                    } else {
+                        gl_reduce_u64(twiddles[idx])
+                    };
+                }
+                w
+            });
+        });
     }
-
-    if inverse {
-        let inv_n = gl_inv_or_zero(n as u64);
-        for slot in buf.iter_mut() {
-            *slot = gl_mul(*slot, inv_n);
-        }
-    }
+    normalize_ntt(buf, inverse);
     Ok(())
 }
 
 /// Allocation-free in-place radix-2 NTT (`inverse == false`) / inverse NTT (`inverse == true`)
-/// computing stage roots directly from [`goldilocks_primitive_root`] (`0` heap allocations).
+/// computing stage roots directly from [`goldilocks_primitive_root`]. No transform scratch
+/// allocation; large `std` jobs use scoped workers, while `no_std` stays allocation-free.
 pub fn goldilocks_ntt_alloc_free(buf: &mut [u64], inverse: bool) -> Result<(), AccelError> {
-    let n = buf.len();
-    let log2_n = ntt_log2_len("NTT buffer", n)?;
-    for slot in buf.iter_mut() {
-        *slot = gl_reduce_u64(*slot);
-    }
-    if n == 1 {
-        return Ok(());
-    }
+    ntt_alloc_free(buf, inverse)
+}
+
+fn ntt_alloc_free<T: NttValue>(buf: &mut [T], inverse: bool) -> Result<(), AccelError> {
+    let log2_n = ntt_log2_len("NTT buffer", buf.len())?;
+    crate::cpu_chunks_mut(buf, 32_768, |_, chunk| {
+        chunk.iter_mut().for_each(NttValue::reduce);
+    });
     bit_reverse_permute(buf);
-
-    let mut stage_log2 = 1u32;
-    while stage_log2 <= log2_n {
-        let len = 1usize << stage_log2;
-        let half = len / 2;
-        let w_root = goldilocks_primitive_root(stage_log2)?;
-        let w_step = if inverse {
-            gl_inv_or_zero(w_root)
-        } else {
-            w_root
-        };
-        let mut start = 0usize;
-        while start < n {
-            let mut w = 1u64;
-            for j in 0..half {
-                let u = buf[start + j];
-                let v = gl_mul(buf[start + j + half], w);
-                buf[start + j] = gl_add(u, v);
-                buf[start + j + half] = gl_sub(u, v);
-                w = gl_mul(w, w_step);
+    for stage in 1..=log2_n {
+        let root = goldilocks_primitive_root(stage)?;
+        let root = if inverse { gl_inv_or_zero(root) } else { root };
+        let root2 = gl_sq(root);
+        let initial = [1, root, root2, gl_mul(root2, root)];
+        let stride = gl_sq(root2);
+        ntt_stage(buf, 1usize << stage, |lo, hi, offset| {
+            let mut w = initial;
+            if offset != 0 {
+                let first = gl_pow_pub(root, offset as u64);
+                for x in &mut w {
+                    *x = gl_mul(*x, first);
+                }
             }
-            start += len;
-        }
-        stage_log2 += 1;
-    }
-
-    if inverse {
-        let inv_n = gl_inv_or_zero(n as u64);
-        for slot in buf.iter_mut() {
-            *slot = gl_mul(*slot, inv_n);
-        }
-    }
-    Ok(())
-}
-
-#[inline]
-fn bit_reverse_permute_ext2_coord(out: &mut [[u64; 2]], len: usize, coord: usize) {
-    if len <= 1 {
-        return;
-    }
-    let shift = usize::BITS - len.trailing_zeros();
-    for i in 0..len {
-        let rev = i.reverse_bits() >> shift;
-        if i < rev {
-            let tmp = out[i][coord];
-            out[i][coord] = out[rev][coord];
-            out[rev][coord] = tmp;
-        }
-    }
-}
-
-fn ntt_ext2_coord_in_slice(
-    out: &mut [[u64; 2]],
-    len: usize,
-    coord: usize,
-    inverse: bool,
-) -> Result<(), AccelError> {
-    let log2_n = ntt_log2_len("ext2 NTT length", len)?;
-    if out.len() < len {
-        return Err(AccelError::LengthMismatch {
-            what: "ext2 NTT buffer",
-            expected: len,
-            actual: out.len(),
+            butterflies(lo, hi, |j, _| {
+                if j != 0 {
+                    for x in &mut w {
+                        *x = gl_mul(*x, stride);
+                    }
+                }
+                w
+            });
         });
     }
-    for item in out.iter_mut().take(len) {
-        item[coord] = gl_reduce_u64(item[coord]);
-    }
-    if len == 1 {
-        return Ok(());
-    }
-    bit_reverse_permute_ext2_coord(out, len, coord);
-    let mut stage_log2 = 1u32;
-    while stage_log2 <= log2_n {
-        let slen = 1usize << stage_log2;
-        let half = slen / 2;
-        let w_root = goldilocks_primitive_root(stage_log2)?;
-        let w_step = if inverse {
-            gl_inv_or_zero(w_root)
-        } else {
-            w_root
-        };
-        let mut start = 0usize;
-        while start < len {
-            let mut w = 1u64;
-            for j in 0..half {
-                let u = out[start + j][coord];
-                let v = gl_mul(out[start + j + half][coord], w);
-                out[start + j][coord] = gl_add(u, v);
-                out[start + j + half][coord] = gl_sub(u, v);
-                w = gl_mul(w, w_step);
-            }
-            start += slen;
-        }
-        stage_log2 += 1;
-    }
-    if inverse {
-        let inv_n = gl_inv_or_zero(len as u64);
-        for item in out.iter_mut().take(len) {
-            item[coord] = gl_mul(item[coord], inv_n);
-        }
-    }
+    normalize_ntt(buf, inverse);
     Ok(())
 }
 
-/// Zero-allocation `#![no_std]` shifted-coset Reed-Solomon Low-Degree Extension (LDE) over $\mathbb{F}_{p^2}$:
+/// Scratch-free (zero-allocation without `std`) shifted-coset Reed-Solomon Low-Degree Extension (LDE) over $\mathbb{F}_{p^2}$:
 /// Given `evals` of length $N = 2^k$ representing polynomial $P(X) \in \mathbb{F}_{p^2}[X]_{< N}$
 /// evaluated on $\{1, \omega_N, \dots, \omega_N^{N-1}\}$, computes `out` of length $M = N \cdot \text{blowup}$
 /// containing $P(\text{shift} \cdot \omega_M^i)$ for $i \in [0, M)$ directly inside `out`!
@@ -602,19 +633,18 @@ pub fn coset_lde_ext2_cpu(
     }
 
     // 1. Inverse NTT of length N in-place inside `out[0..n]`.
-    ntt_ext2_coord_in_slice(out, n, 0, true)?;
-    ntt_ext2_coord_in_slice(out, n, 1, true)?;
+    ntt_alloc_free(&mut out[..n], true)?;
 
     // 2. Multiply monomial coefficients c_j by shift^j.
     let shift_c = gl_reduce_u64(shift);
-    let mut shift_pow = 1u64;
-    for item in out.iter_mut().take(n) {
-        item[0] = gl_mul(item[0], shift_pow);
-        item[1] = gl_mul(item[1], shift_pow);
-        shift_pow = gl_mul(shift_pow, shift_c);
-    }
+    crate::cpu_chunks_mut(&mut out[..n], 32_768, |offset, chunk| {
+        let mut shift_pow = gl_pow_pub(shift_c, offset as u64);
+        for item in chunk {
+            item.scale(shift_pow);
+            shift_pow = gl_mul(shift_pow, shift_c);
+        }
+    });
 
     // 3. Forward NTT of length M = N * blowup across all of `out[0..m]`.
-    ntt_ext2_coord_in_slice(out, m, 0, false)?;
-    ntt_ext2_coord_in_slice(out, m, 1, false)
+    ntt_alloc_free(out, false)
 }

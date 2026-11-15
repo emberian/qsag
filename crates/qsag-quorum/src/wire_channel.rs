@@ -579,10 +579,10 @@ impl<T: WireTransport> WireTransport for MacSealedWireChannel<T> {
         let raw = match self.transport.recv_authenticated_envelope(peer, round) {
             Ok(raw) => raw,
             Err(err) => {
-                if err.is_fatal_link_error() {
-                    if let Some(failed) = self.failed_links.get_mut(peer) {
-                        *failed = true;
-                    }
+                if err.is_fatal_link_error()
+                    && let Some(failed) = self.failed_links.get_mut(peer)
+                {
+                    *failed = true;
                 }
                 return Err(err);
             }
@@ -590,10 +590,10 @@ impl<T: WireTransport> WireTransport for MacSealedWireChannel<T> {
         match self.open(peer, round, &raw) {
             Ok(payload) => Ok(payload),
             Err(err) => {
-                if err.is_fatal_link_error() {
-                    if let Some(failed) = self.failed_links.get_mut(peer) {
-                        *failed = true;
-                    }
+                if err.is_fatal_link_error()
+                    && let Some(failed) = self.failed_links.get_mut(peer)
+                {
+                    *failed = true;
                 }
                 Err(err)
             }
@@ -692,10 +692,10 @@ impl<T: WireTransport> WireTransport for ConfidentialWireChannel<T> {
         match self.inner.recv_frame(peer, round) {
             Ok(payload) => Ok(payload),
             Err(err) => {
-                if err.is_fatal_link_error() {
-                    if let Some(failed) = self.failed_links.get_mut(peer) {
-                        *failed = true;
-                    }
+                if err.is_fatal_link_error()
+                    && let Some(failed) = self.failed_links.get_mut(peer)
+                {
+                    *failed = true;
                 }
                 Err(err)
             }

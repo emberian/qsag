@@ -41,6 +41,45 @@ use keccak::cshake256_framed_32;
 use poseidon2::{merkle_layer_poseidon2_at_cpu, poseidon2_hash_framed_limbs4, poseidon2_perm12};
 use sha2::sha256;
 
+// Sizes and scheduling depend only on public lengths, never on field values.
+fn cpu_workers(len: usize, min_chunk: usize) -> usize {
+    #[cfg(feature = "std")]
+    {
+        if len / min_chunk < 2 {
+            return 1;
+        }
+        std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(len / min_chunk)
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        let _ = (len, min_chunk);
+        1
+    }
+}
+
+fn cpu_chunks_mut<T: Send>(
+    items: &mut [T],
+    min_chunk: usize,
+    run: impl Fn(usize, &mut [T]) + Sync,
+) {
+    let workers = cpu_workers(items.len(), min_chunk);
+    #[cfg(feature = "std")]
+    if workers > 1 {
+        let chunk_len = items.len().div_ceil(workers);
+        std::thread::scope(|scope| {
+            for (i, chunk) in items.chunks_mut(chunk_len).enumerate() {
+                let run = &run;
+                scope.spawn(move || run(i * chunk_len, chunk));
+            }
+        });
+        return;
+    }
+    let _ = workers;
+    run(0, items);
+}
+
 /// Shape or parameter error reported by a kernel instead of panicking on caller-supplied slices.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AccelError {
@@ -545,10 +584,9 @@ pub trait AcceleratorBackend: Send + Sync {
     /// Certified kernel pin for `slot`.
     fn kernel_pin(&self, slot: KernelSlot) -> CertifiedKernelPin;
 
-    /// Number of infallible batch calls ([`Self::batch_keccak_f1600`],
-    /// [`Self::batch_poseidon2_perm12`]) that this backend answered with the CPU reference
-    /// because its own kernel failed. A caller that times or reports hardware execution through
-    /// the infallible methods reads this before and after; the `_pinned` variants never fall back.
+    /// Number of explicitly fallback-enabled calls answered by the CPU reference after
+    /// hardware failure. Pinned calls never fall back. Vulkan's legacy infallible methods
+    /// panic on failure; its `*_with_cpu_fallback` methods return per-call outcomes.
     fn cpu_fallback_count(&self) -> u64 {
         0
     }
@@ -839,20 +877,28 @@ impl<const MAX_PROFILES: usize> VerifiedKernelDigestRegistry<MAX_PROFILES> {
         reg
     }
 
-    /// Compatibility constructor. No GPU artifacts are implicitly trusted unless registered via
-    /// [`Self::with_cpu_and_spirv_pins`] or [`Self::register_measured_profile`].
+    /// Approve the CPU reference metadata and the compiled canonical SPIR-V module digests.
+    /// This is deterministic even without a Vulkan device. Probe availability separately with
+    /// [`VulkanSpirvBackend::try_new`], which reports loader, device, and audit errors explicitly.
+    ///
+    /// # Panics
+    /// Panics if `MAX_PROFILES < 2`; never silently returns a CPU-only registry.
     pub fn with_cpu_and_canonical_gpu_pins() -> Self {
-        Self::with_cpu_reference_pins()
+        Self::with_cpu_and_spirv_pins()
     }
 
     /// Registry pre-populated with both the portable CPU reference profile and the deterministic
     /// embedded `KernelTargetArch::SpirV15` compute shader pins (`MAX_PROFILES >= 2`).
+    ///
+    /// # Panics
+    /// Panics if fewer than two profiles fit in this registry.
     pub fn with_cpu_and_spirv_pins() -> Self {
         let mut reg = Self::with_cpu_reference_pins();
-        let _ = reg.register_arch_pins(
+        reg.register_arch_pins(
             KernelTargetArch::SpirV15,
             spirv_kernels::canonical_spirv_pins(),
-        );
+        )
+        .expect("CPU and SPIR-V registry requires at least two profiles");
         reg
     }
 

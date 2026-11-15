@@ -8,6 +8,8 @@
 //!   polynomial basis).
 //! * [`Pad`], [`pad_map`], [`pad_inv`]: four base-field pad cells against one `Ext4`
 //!   evaluation (`padMap`, `padInv`, `quartic_primitive_pad_bijection`).
+//! * [`CornerPadBasis`]: a separately checked full-rank basis for four multilinear
+//!   corners. Primitivity of either coordinate alone does not certify this basis.
 //! * [`LibraMask`], [`libra_prove`], [`libra_verify`], [`libra_sim`]: separable sumcheck
 //!   mask (`libraReal`, `libraSim`, `libra_real_eq_sim`).
 //! * [`blend`], [`unblend`], [`companion_check`], [`libra_check`]: companion word and the
@@ -202,6 +204,87 @@ pub fn pad_inv(z: PrimitiveChallenge, v: E) -> Pad {
     let r0 = alpha.c0 + r2 * n.c0 + r3 * w.c0;
     let r1 = beta.c0 - r2 * t.c0 - r3 * s.c0;
     Pad([r0, r1, r2, r3])
+}
+
+/// Four multilinear corner weights, certified to span the quartic field over the base
+/// field. The monomial weights `{1, a, b, ab}` and the Boolean-corner weights
+/// `{(1-a)(1-b), a(1-b), (1-a)b, ab}` differ by an invertible base-field matrix.
+/// This checks the actual corner matrix, rather than applying the univariate pad theorem
+/// to an arbitrary pair of sumcheck coordinates (handoff Note 5).
+///
+/// Branches in construction depend only on the public challenges. Applying the cached
+/// inverse to a secret value uses fixed-length field arithmetic.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CornerPadBasis {
+    weights: [E; 4],
+    inverse: [[Goldilocks; 4]; 4],
+}
+
+impl CornerPadBasis {
+    /// Reject exactly the pairs whose four corner weights have base-field rank below four.
+    pub fn new(a: E, b: E) -> Option<Self> {
+        let weights = [
+            (E::ONE - a) * (E::ONE - b),
+            a * (E::ONE - b),
+            (E::ONE - a) * b,
+            a * b,
+        ];
+        let columns = weights.map(E::to_limbs);
+        let mut matrix: [[Goldilocks; 8]; 4] = core::array::from_fn(|row| {
+            core::array::from_fn(|col| {
+                if col < 4 {
+                    columns[col][row]
+                } else if col - 4 == row {
+                    Goldilocks::ONE
+                } else {
+                    Goldilocks::ZERO
+                }
+            })
+        });
+        for col in 0..4 {
+            let pivot = (col..4).find(|&row| !matrix[row][col].is_zero())?;
+            matrix.swap(col, pivot);
+            let scale = matrix[col][col].inv();
+            for cell in &mut matrix[col] {
+                *cell *= scale;
+            }
+            let pivot_row = matrix[col];
+            for (row, cells) in matrix.iter_mut().enumerate() {
+                if row != col {
+                    let factor = cells[col];
+                    for (cell, pivot_cell) in cells.iter_mut().zip(pivot_row) {
+                        *cell -= factor * pivot_cell;
+                    }
+                }
+            }
+        }
+        let inverse = core::array::from_fn(|row| core::array::from_fn(|col| matrix[row][col + 4]));
+        Some(Self { weights, inverse })
+    }
+
+    pub fn weights(&self) -> &[E; 4] {
+        &self.weights
+    }
+
+    /// Evaluate four independent base-field cells at the certified corner weights.
+    pub fn apply(&self, pad: &Pad) -> E {
+        self.weights
+            .iter()
+            .zip(pad.0)
+            .fold(E::ZERO, |sum, (&w, r)| sum + w.mul_base(r))
+    }
+
+    /// Unique base-field pad producing `value`.
+    pub fn invert(&self, value: E) -> Pad {
+        let limbs = value.to_limbs();
+        Pad(self.inverse.map(|row| {
+            row.iter()
+                .zip(limbs)
+                .fold(Goldilocks::ZERO, |sum, (&coefficient, limb)| {
+                    sum + coefficient * limb
+                })
+        }))
+    }
 }
 
 // ============================================================================
@@ -474,8 +557,12 @@ pub fn companion_check(ev_b: E, b: E, ev_c: E, sigma: E, gamma: E) -> bool {
 
 /// One binary fold of a coefficient vector, `f_even + alpha f_odd` (`foldCoeffs`).
 pub fn fold_coeffs(alpha: E, f: &[E]) -> Vec<E> {
-    assert!(f.len() % 2 == 0);
-    f.chunks_exact(2).map(|p| p[0] + alpha * p[1]).collect()
+    assert!(f.len().is_multiple_of(2));
+    f.as_chunks::<2>()
+        .0
+        .iter()
+        .map(|p| p[0] + alpha * p[1])
+        .collect()
 }
 
 // ============================================================================
@@ -617,6 +704,57 @@ mod tests {
     }
 
     #[test]
+    fn primitive_coordinates_can_have_rank_deficient_corner_pads() {
+        let a = E::V;
+        for b in [a, a + E::ONE, -a] {
+            assert!(PrimitiveChallenge::new(a).is_some());
+            assert!(PrimitiveChallenge::new(b).is_some());
+            assert!(CornerPadBasis::new(a, b).is_none());
+        }
+        let u = E::from_ext2(GoldilocksExt2::new(Goldilocks::ZERO, Goldilocks::ONE));
+        assert!(CornerPadBasis::new(u, u + E::ONE).is_none());
+        // One coordinate may be quadratic: {1, v, u, vu} is still a basis.
+        assert!(CornerPadBasis::new(a, u).is_some());
+    }
+
+    #[test]
+    fn full_rank_corner_pads_invert_actual_multilinear_evaluations() {
+        let mut s = stream(14);
+        for _ in 0..200 {
+            let a = s.next_ext4();
+            let b = s.next_ext4();
+            let basis = CornerPadBasis::new(a, b).unwrap();
+            let pad = Pad::from_stream(&mut s);
+            let value = basis.apply(&pad);
+            let cells = pad.0.map(E::from_base);
+            assert_eq!(value, crate::field::mle_eval_ext4(&cells, &[a, b]));
+            assert_eq!(basis.invert(value), pad);
+            let target = s.next_ext4();
+            assert_eq!(basis.apply(&basis.invert(target)), target);
+        }
+    }
+
+    /// Full rank for each individual observation does not imply joint hiding when the
+    /// same four coins are reused. This is the missing premise in applying the component
+    /// pad theorem to two OOD values or to OOD plus terminal observations.
+    #[test]
+    fn four_pads_do_not_hide_two_joint_quartic_observations() {
+        let z = PrimitiveChallenge::new(E::V).unwrap();
+        let other = PrimitiveChallenge::new(E::V + E::ONE).unwrap();
+        let mut s = stream(15);
+        for _ in 0..100 {
+            let coins = Pad::from_stream(&mut s);
+            let first = pad_map(z.get(), &coins);
+            let second = pad_map(other.get(), &coins);
+            // Distinguishes witness offsets (0,0) from (0,1) for every pad, despite
+            // each marginal observation having a bijective four-cell pad map.
+            let predicted = pad_map(other.get(), &pad_inv(z, first));
+            assert_eq!(predicted, second);
+            assert_ne!(predicted, second + E::ONE);
+        }
+    }
+
+    #[test]
     fn squeezed_challenges_are_primitive_and_reproducible() {
         let mut prover = transcript(3);
         let mut verifier = transcript(3);
@@ -713,14 +851,25 @@ mod tests {
         let b: Vec<E> = (0..len).map(|_| E::from_base(s.next_base())).collect();
         let c: Vec<E> = (0..len).map(|_| s.next_ext4()).collect();
         let t: Vec<E> = (0..len).map(|_| s.next_ext4()).collect();
-        let dot = |u: &[E]| u.iter().zip(&t).map(|(&a, &w)| a * w).fold(E::ZERO, |a, b| a + b);
+        let dot = |u: &[E]| {
+            u.iter()
+                .zip(&t)
+                .map(|(&a, &w)| a * w)
+                .fold(E::ZERO, |a, b| a + b)
+        };
         let gamma = nonzero(&mut s);
 
         let u = blend(gamma.get(), &b, &c);
         assert_eq!(unblend(gamma, &b, &u), c);
         let fresh: Vec<E> = (0..len).map(|_| s.next_ext4()).collect();
         assert_eq!(blend(gamma.get(), &b, &unblend(gamma, &b, &fresh)), fresh);
-        assert!(companion_check(dot(&b), dot(&b), dot(&c), dot(&c), gamma.get()));
+        assert!(companion_check(
+            dot(&b),
+            dot(&b),
+            dot(&c),
+            dot(&c),
+            gamma.get()
+        ));
         assert_eq!(
             dot(&u),
             (E::ONE - gamma.get()) * dot(&b) + gamma.get() * dot(&c)
@@ -729,7 +878,11 @@ mod tests {
         let alpha = s.next_ext4();
         assert_eq!(
             fold_coeffs(alpha, &u),
-            blend(gamma.get(), &fold_coeffs(alpha, &b), &fold_coeffs(alpha, &c))
+            blend(
+                gamma.get(),
+                &fold_coeffs(alpha, &b),
+                &fold_coeffs(alpha, &c)
+            )
         );
     }
 
@@ -803,6 +956,9 @@ mod tests {
         let zs: Vec<Goldilocks> = (0..1000).map(|_| c.next_base()).collect();
         assert_eq!(xs, ys);
         assert_ne!(xs, zs);
-        assert!(xs.iter().all(|x| x.to_canonical_u64() < crate::field::GOLDILOCKS_PRIME));
+        assert!(
+            xs.iter()
+                .all(|x| x.to_canonical_u64() < crate::field::GOLDILOCKS_PRIME)
+        );
     }
 }

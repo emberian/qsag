@@ -1,16 +1,18 @@
 //! Volatile all-of-subset coupon custody and authenticated commit-before-open.
 //!
-//! This is the online custody layer, using the existing 256-bit, 128-chain WOTS+C
-//! primitive. It is **not** a PORS+FP/Compact1122 implementation or a Baggy-v2 mint.
-//! The concrete certificate adapter verifies existing Baggy certificates. Minting
-//! must supply independently randomized all-of-S MPC chain shares directly into
-//! locked memory; feeding persistent/reconstructible shares defeats rollback safety.
+//! Uses the existing 256-bit, 128-chain WOTS+C primitive. [`mint`] runs the
+//! dealerless binary-SPDZ chain sweep directly into locked slots and independently
+//! rerandomizes each retained state. Its Baggy adapter certifies descriptors under
+//! the existing FORS+C root, with an authenticated RAM-only Waistband option.
+//! [`compact_hop`] supplies real Compact1122 indexed one-time capability bundles.
 //!
 //! Linux private anonymous mappings are locked, excluded from core dumps, wiped on
 //! fork, and zeroized before unmapping. Failure of any OS protection fails closed.
 //! PID binding also rejects fork-inherited handles. Live hypervisor RAM snapshots,
 //! hibernation, privileged memory reads, and restored entropy sources are excluded.
-//! There is no disk serialization, WAL, write, or remint path in this module.
+//! Coupon opening and combination have no disk serialization, WAL or write path.
+//! Minting has no deterministic remint input. Compact1122 keys separately retain
+//! the durability requirements of the existing FTS implementation.
 //!
 //! The local transition implements `consume` in
 //! `lean/Qsag/VolatileCouponAndCapabilitySecurity.lean`: authenticate and validate,
@@ -20,14 +22,11 @@
 //! Fixed minting subsets require *every* member, irrespective of the parent t-of-n
 //! configuration. Changing subsets requires minting a different coupon.
 //!
-//! Integration status: the local cache MAC authenticates a coupon descriptor. It
-//! does not replace `qsag_core::baggy::WaistbandCache` or its `FirstSignedLedger`.
-//! Full disk-stateless Baggy v2 still requires a concrete PORS+FP certificate
-//! backend, authenticated root-cache derivation, and a dealerless mint whose
-//! secret intermediates and outputs remain protected from persistence. The tests
-//! use a trusted dealer only to construct independent all-of-S input shares; that
-//! helper is not an implementation of the missing production mint. The indexed
-//! Merkle bundle below authenticates hop keys; it is not Compact1122 signing.
+//! Integration boundary: certificates are ordinary BaggySig values, but the online
+//! output is a certificate-plus-coupon envelope verified by this module, not a raw
+//! BaggySig over the online message. The root MPC engine is still 2-of-3 RSS and
+//! FORS+C. Arbitrary-threshold stateless root MPC and PORS+FP remain unimplemented;
+//! arbitrary fixed coupon subsets do not imply either property for the root.
 
 use crate::quorum_jorts::{WOTS_CHAINS, WOTS_STEPS, chain_walk, digits_at};
 use qsag_core::baggy::{BaggyParams, BaggyPublicKey, BaggySig, baggy_verify};
@@ -35,6 +34,9 @@ use qsag_core::sponge::keccak::Cshake256Xof;
 use qsag_core::wipe::{ct_eq_bytes32, wipe_bytes};
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+pub mod compact_hop;
+pub mod mint;
 
 type Node = [u8; 32];
 /// Locked bytes required for one all-of-S share table.
@@ -55,6 +57,7 @@ pub enum CouponError {
     MissingOrSpent,
     InvalidOpenings,
     Clock,
+    Staging,
 }
 impl core::fmt::Display for CouponError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -84,6 +87,47 @@ mod memory {
         fn madvise(addr: *mut c_void, len: usize, advice: c_int) -> c_int;
         fn munmap(addr: *mut c_void, len: usize) -> c_int;
         fn sysconf(name: c_int) -> c_long;
+        fn mlockall(flags: c_int) -> c_int;
+        fn prctl(option: c_int, ...) -> c_int;
+    }
+
+    /// Process-wide protection for the existing heap/stack MPC engine. Call in a
+    /// dedicated mint worker BEFORE creating its secret RNGs or loading key shares.
+    /// This permanently disables core dumps and locks current and future mappings;
+    /// it is intentionally not undone on Drop. Insufficient RLIMIT_MEMLOCK fails
+    /// closed. Allocation beyond that limit can abort the worker.
+    ///
+    /// Do not fork a worker while MPC scratch exists: only the final LockedBytes
+    /// slots have WIPEONFORK. Forked handles cannot invoke minting. Privileged RAM
+    /// snapshots and code that bypasses this API remain outside the threat model.
+    pub struct ProtectedMintProcess {
+        pid: u32,
+    }
+    impl ProtectedMintProcess {
+        pub fn enable() -> Result<Self, CouponError> {
+            // PR_SET_DUMPABLE=4, MCL_CURRENT|MCL_FUTURE=3. Never put keys into the
+            // worker until both calls have succeeded.
+            if unsafe { prctl(4, 0 as c_long, 0 as c_long, 0 as c_long, 0 as c_long) } != 0
+                || unsafe { mlockall(3) } != 0
+            {
+                return Err(CouponError::MemoryProtection);
+            }
+            Ok(Self {
+                pid: std::process::id(),
+            })
+        }
+        pub(super) fn check(&self) -> Result<(), CouponError> {
+            if self.pid != std::process::id() {
+                return Err(CouponError::Forked);
+            }
+            // Reassert locking in case other application code called munlockall.
+            if unsafe { prctl(3, 0 as c_long, 0 as c_long, 0 as c_long, 0 as c_long) } != 0
+                || unsafe { mlockall(3) } != 0
+            {
+                return Err(CouponError::MemoryProtection);
+            }
+            Ok(())
+        }
     }
     /// Owned secret storage. No Clone, Debug contents, serialization, or raw-pointer API.
     pub struct LockedBytes {
@@ -199,7 +243,7 @@ mod memory {
         }
     }
 }
-pub use memory::LockedBytes;
+pub use memory::{LockedBytes, ProtectedMintProcess};
 
 fn framed(xof: &mut Cshake256Xof, value: &[u8]) {
     xof.absorb(&(value.len() as u64).to_be_bytes());
@@ -720,7 +764,7 @@ impl HopBundle {
             let mut next = Vec::new();
             next.try_reserve_exact(width / 2)
                 .map_err(|_| CouponError::InvalidParameters)?;
-            for pair in previous.chunks_exact(2) {
+            for pair in previous.as_chunks::<2>().0 {
                 next.push(hop_node(&pair[0], &pair[1]));
             }
             levels.push(next);
@@ -784,7 +828,7 @@ mod tests {
     use qsag_core::baggy::{baggy_reference_keygen, baggy_reference_sign};
     use qsag_core::tsw_baggy::PqSecretKey;
 
-    fn key() -> InitiatorKey {
+    pub(super) fn key() -> InitiatorKey {
         let mut bytes = LockedBytes::new(32).unwrap();
         bytes.as_mut_slice().unwrap().fill(0x57);
         InitiatorKey::from_locked(bytes).unwrap()
@@ -850,7 +894,7 @@ mod tests {
             .collect();
         (certified, pools)
     }
-    fn request(coupon: &CertifiedCoupon, message: &[u8]) -> SignRequest {
+    pub(super) fn request(coupon: &CertifiedCoupon, message: &[u8]) -> SignRequest {
         let d = coupon.descriptor();
         let ctr = grind(&SignRequest::message_hash(&d.id().unwrap(), message))
             .unwrap()
@@ -1094,14 +1138,11 @@ mod tests {
         let mut in_mapping = false;
         let mut flags = None;
         for line in smaps.lines() {
-            if let Some(range) = line.split_whitespace().next() {
-                if let Some((a, b)) = range.split_once('-') {
-                    if let (Ok(a), Ok(b)) =
-                        (usize::from_str_radix(a, 16), usize::from_str_radix(b, 16))
-                    {
-                        in_mapping = a <= addr && addr < b;
-                    }
-                }
+            if let Some(range) = line.split_whitespace().next()
+                && let Some((a, b)) = range.split_once('-')
+                && let (Ok(a), Ok(b)) = (usize::from_str_radix(a, 16), usize::from_str_radix(b, 16))
+            {
+                in_mapping = a <= addr && addr < b;
             }
             if in_mapping && line.starts_with("VmFlags:") {
                 flags = Some(line);

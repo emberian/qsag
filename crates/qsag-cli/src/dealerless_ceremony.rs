@@ -535,6 +535,18 @@ mod tests {
     use qsag_policy::PolicyAuthenticatedOt;
 
     #[test]
+    fn power_budget_accepts_production_single_tree_height() {
+        // Guard against reintroducing the old height-four CLI cap. This checks
+        // the budget only: it does not pretend an eager single tree is a hypertree.
+        assert!(
+            DealerlessThresholdFtsSetup::required_power_count(
+                &ParallelSeededParams::CUSTODY_H10_W5,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn production_ot_policy_exchange_and_gilboa_product() {
         let endpoints = ot_endpoints(&[0, 1], [41; 32]).unwrap();
         let outputs = thread::scope(|scope| {

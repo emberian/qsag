@@ -91,19 +91,19 @@ theorem HashSignAdv.Within.mono {Out : Type} {qh₁ qh₂ qs₁ qs₂ : Nat} {m 
     | zero => cases h
     | succ _ =>
       cases qh₂ with
-      | zero => omega
+      | zero => exact absurd hh (Nat.not_succ_le_zero _)
       | succ _ =>
         intro y
-        exact ih y (h y) (by omega) hs
+        exact ih y (h y) (Nat.le_of_succ_le_succ hh) hs
   | querySign _ _ ih =>
     cases qs₁ with
     | zero => cases h
     | succ _ =>
       cases qs₂ with
-      | zero => omega
+      | zero => exact absurd hs (Nat.not_succ_le_zero _)
       | succ _ =>
         intro s
-        exact ih s (h s) hh (by omega)
+        exact ih s (h s) hh (Nat.le_of_succ_le_succ hs)
 
 theorem HashSignAdv.Within.bind {α β : Type} {qh₁ qh₂ qs₁ qs₂ : Nat}
     {m : HashSignAdv α} {f : α → HashSignAdv β}
@@ -111,7 +111,7 @@ theorem HashSignAdv.Within.bind {α β : Type} {qh₁ qh₂ qs₁ qs₂ : Nat}
     (m.bind f).Within (qh₁ + qh₂) (qs₁ + qs₂) := by
   induction m generalizing qh₁ qs₁ with
   | done a =>
-    exact (hf a).mono (by omega) (by omega)
+    exact (hf a).mono (Nat.le_add_left _ _) (Nat.le_add_left _ _)
   | queryHash _ _ ih =>
     cases qh₁ with
     | zero => cases hm
