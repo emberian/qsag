@@ -884,10 +884,200 @@ pub fn poseidon2_apply_mi_ext4(st: &mut [GoldilocksExt4; 12]) {
     st[11] = st[11].shl_small::<10>() + s;
 }
 
+/// Raw-word kernel of [`poseidon2_perm12`].
+///
+/// Between layers a lane is any `u64` representative modulo `p`. Each linear layer is
+/// accumulated exactly in `u128` (every accumulator stays below `2^75`) together with the next
+/// round constants and reduced once per lane; only the final state is canonicalized. The
+/// layer-by-layer functions above remain the readable definition, and the tests compare this
+/// kernel against them and against the `qsag-core` specification.
+mod perm_kernel {
+    use super::{POSEIDON2_RC_EXT0, POSEIDON2_RC_EXT2, POSEIDON2_RC_INT};
+    use crate::field::GOLDILOCKS_PRIME;
+
+    const EPS: u64 = 0xFFFF_FFFF;
+    const ZERO_RC: [u64; 12] = [0; 12];
+
+    const fn words(rc: &[crate::field::Goldilocks; 12]) -> [u64; 12] {
+        let mut out = [0u64; 12];
+        let mut i = 0;
+        while i < 12 {
+            out[i] = rc[i].to_canonical_u64();
+            i += 1;
+        }
+        out
+    }
+
+    const RC_EXT0: [[u64; 12]; 4] = [
+        words(&POSEIDON2_RC_EXT0[0]),
+        words(&POSEIDON2_RC_EXT0[1]),
+        words(&POSEIDON2_RC_EXT0[2]),
+        words(&POSEIDON2_RC_EXT0[3]),
+    ];
+    const RC_EXT2: [[u64; 12]; 4] = [
+        words(&POSEIDON2_RC_EXT2[0]),
+        words(&POSEIDON2_RC_EXT2[1]),
+        words(&POSEIDON2_RC_EXT2[2]),
+        words(&POSEIDON2_RC_EXT2[3]),
+    ];
+    const RC_INT: [u64; 22] = {
+        let mut out = [0u64; 22];
+        let mut i = 0;
+        while i < 22 {
+            out[i] = POSEIDON2_RC_INT[i].to_canonical_u64();
+            i += 1;
+        }
+        out
+    };
+
+    /// `x mod p` as some `u64` representative, for `x < 2^96`
+    /// (`2^64 = 2^32 - 1 (mod p)`; a carry out of the fold leaves room for one more `EPS`).
+    #[inline(always)]
+    pub(super) const fn reduce_wide(x: u128) -> u64 {
+        let lo = x as u64;
+        let hi = (x >> 64) as u64;
+        debug_assert!(hi <= EPS);
+        let (s, carry) = lo.overflowing_add(hi * EPS);
+        s.wrapping_add(EPS & 0u64.wrapping_sub(carry as u64))
+    }
+
+    /// `a * b mod p` as some `u64` representative, for arbitrary `u64` representatives
+    /// (`2^96 = -1 (mod p)`).
+    #[inline(always)]
+    const fn mul(a: u64, b: u64) -> u64 {
+        let x = (a as u128) * (b as u128);
+        let lo = x as u64;
+        let hi = (x >> 64) as u64;
+        let (t0, borrow) = lo.overflowing_sub(hi >> 32);
+        let t0 = t0.wrapping_sub(EPS & 0u64.wrapping_sub(borrow as u64));
+        let (r, carry) = t0.overflowing_add((hi & EPS) * EPS);
+        r.wrapping_add(EPS & 0u64.wrapping_sub(carry as u64))
+    }
+
+    #[inline(always)]
+    const fn sbox7(x: u64) -> u64 {
+        let x2 = mul(x, x);
+        let x3 = mul(x2, x);
+        let x4 = mul(x2, x2);
+        mul(x3, x4)
+    }
+
+    /// `circ(2, 3, 1, 1)` on one block, exact in `u128` (coefficient sum 7).
+    #[inline(always)]
+    const fn m4(b0: u64, b1: u64, b2: u64, b3: u64) -> [u128; 4] {
+        let (b0, b1, b2, b3) = (b0 as u128, b1 as u128, b2 as u128, b3 as u128);
+        let t01 = b0 + b1;
+        let t23 = b2 + b3;
+        let t0123 = t01 + t23;
+        let t01123 = t0123 + b1;
+        let t01233 = t0123 + b3;
+        [
+            t01123 + t01,
+            t01123 + (b2 << 1),
+            t01233 + t23,
+            t01233 + (b0 << 1),
+        ]
+    }
+
+    /// `M_E = M_4 (x) P_3` in the flattened lane order, plus `rc` (coefficient sum 28).
+    #[inline(always)]
+    const fn external_layer(st: &[u64; 12], rc: &[u64; 12]) -> [u64; 12] {
+        let y0 = m4(st[0], st[3], st[6], st[9]);
+        let y1 = m4(st[1], st[4], st[7], st[10]);
+        let y2 = m4(st[2], st[5], st[8], st[11]);
+        let mut out = [0u64; 12];
+        let mut i = 0;
+        while i < 4 {
+            let s = y0[i] + y1[i] + y2[i];
+            out[3 * i] = reduce_wide(y0[i] + s + rc[3 * i] as u128);
+            out[3 * i + 1] = reduce_wide(y1[i] + s + rc[3 * i + 1] as u128);
+            out[3 * i + 2] = reduce_wide(y2[i] + s + rc[3 * i + 2] as u128);
+            i += 1;
+        }
+        out
+    }
+
+    /// `M_I = J + diag(-64, 1, 2, 4, ..., 1024)`, plus `rc0` on lane 0.
+    #[inline(always)]
+    const fn internal_layer(st: &[u64; 12], rc0: u64) -> [u64; 12] {
+        let mut s = 0u128;
+        let mut i = 0;
+        while i < 12 {
+            s += st[i] as u128;
+            i += 1;
+        }
+        let mut out = [0u64; 12];
+        // `-64 x = 64 (2p - x) (mod p)`, and `x <= 2^64 - 1 < 2p`.
+        let neg = ((2 * GOLDILOCKS_PRIME as u128) - st[0] as u128) << 6;
+        out[0] = reduce_wide(s + neg + rc0 as u128);
+        out[1] = reduce_wide(s + st[1] as u128);
+        let mut i = 2;
+        while i < 12 {
+            out[i] = reduce_wide(s + ((st[i] as u128) << (i - 1)));
+            i += 1;
+        }
+        out
+    }
+
+    #[inline(always)]
+    pub(super) const fn permute(input: &[u64; 12]) -> [u64; 12] {
+        let mut st = external_layer(input, &RC_EXT0[0]);
+        let mut r = 0;
+        while r < 4 {
+            let mut i = 0;
+            while i < 12 {
+                st[i] = sbox7(st[i]);
+                i += 1;
+            }
+            st = if r < 3 {
+                external_layer(&st, &RC_EXT0[r + 1])
+            } else {
+                let mut rc = ZERO_RC;
+                rc[0] = RC_INT[0];
+                external_layer(&st, &rc)
+            };
+            r += 1;
+        }
+        let mut r = 0;
+        while r < 22 {
+            st[0] = sbox7(st[0]);
+            if r < 21 {
+                st = internal_layer(&st, RC_INT[r + 1]);
+            } else {
+                st = internal_layer(&st, 0);
+                let mut i = 0;
+                while i < 12 {
+                    st[i] = reduce_wide(st[i] as u128 + RC_EXT2[0][i] as u128);
+                    i += 1;
+                }
+            }
+            r += 1;
+        }
+        let mut r = 0;
+        while r < 4 {
+            let mut i = 0;
+            while i < 12 {
+                st[i] = sbox7(st[i]);
+                i += 1;
+            }
+            st = external_layer(&st, if r < 3 { &RC_EXT2[r + 1] } else { &ZERO_RC });
+            r += 1;
+        }
+        st
+    }
+}
+
 /// Full 30-round Width-12 `Poseidon2` permutation (`4` ext + `22` int + `4` ext),
 /// matching `lean/Qsag/Poseidon2.lean` and `qsag-core` bit-for-bit.
 #[inline]
 pub fn poseidon2_perm12(st: &mut [Goldilocks; 12]) {
+    let out = perm_kernel::permute(&st.map(Goldilocks::to_canonical_u64));
+    *st = out.map(Goldilocks::from_u64_reduced);
+}
+
+/// The same permutation composed from the individual layers; the reference for the kernel.
+#[cfg(test)]
+fn poseidon2_perm12_layered(st: &mut [Goldilocks; 12]) {
     poseidon2_apply_me(st);
     for round_consts in &POSEIDON2_RC_EXT0 {
         for (x, &rc) in st.iter_mut().zip(round_consts) {
@@ -996,13 +1186,17 @@ pub fn poseidon2_compress12_ff(
         in0[0], in0[1], in0[2], in0[3], in1[0], in1[1], in1[2], in1[3], tweak[0], tweak[1],
         tweak[2], tweak[3],
     ];
-    poseidon2_perm12(&mut st);
-    let out = [
-        st[0] + in0[0] + in1[0] * Goldilocks::TWO + tweak[0] * Goldilocks::from_u64_reduced(4),
-        st[1] + in0[1] + in1[1] * Goldilocks::TWO + tweak[1] * Goldilocks::from_u64_reduced(4),
-        st[2] + in0[2] + in1[2] * Goldilocks::TWO + tweak[2] * Goldilocks::from_u64_reduced(4),
-        st[3] + in0[3] + in1[3] * Goldilocks::TWO + tweak[3] * Goldilocks::from_u64_reduced(4),
-    ];
+    let mut perm = perm_kernel::permute(&st.map(Goldilocks::to_canonical_u64));
+    // `perm.b0 + in0 + 2 in1 + 4 tweak`, exact in `u128` (below `2^67`) and reduced once.
+    let out: [Goldilocks; 4] = core::array::from_fn(|i| {
+        Goldilocks::from_u64_reduced(perm_kernel::reduce_wide(
+            perm[i] as u128
+                + in0[i].to_canonical_u64() as u128
+                + ((in1[i].to_canonical_u64() as u128) << 1)
+                + ((tweak[i].to_canonical_u64() as u128) << 2),
+        ))
+    });
+    qsag_asm::volatile_fill(&mut perm, 0u64);
     qsag_asm::volatile_fill(&mut st, Goldilocks::ZERO);
     qsag_asm::volatile_fill(&mut in0, Goldilocks::ZERO);
     out
@@ -1103,32 +1297,41 @@ pub fn poseidon2_sponge_hash_limbs(
     init_cap: [Goldilocks; 4],
     limbs: &[Goldilocks],
 ) -> [Goldilocks; 4] {
-    let mut st = [Goldilocks::ZERO; 12];
-    st[8] = init_cap[0];
-    st[9] = init_cap[1];
-    st[10] = init_cap[2];
-    st[11] = init_cap[3];
-
-    let total = 2 + limbs.len();
-    let blocks = total.div_ceil(8);
-    for blk in 0..blocks {
-        let base = 8 * blk;
-        for (lane, st_lane) in st[..8].iter_mut().enumerate() {
-            let idx = base + lane;
-            let val = if idx == 0 {
-                Goldilocks::from_u64_reduced(domain_tag)
-            } else if idx == 1 {
-                Goldilocks::from_u64_reduced(limbs.len() as u64)
-            } else if idx - 2 < limbs.len() {
-                limbs[idx - 2]
-            } else {
-                Goldilocks::ZERO
-            };
-            *st_lane += val;
-        }
-        poseidon2_perm12(&mut st);
+    // Raw-word sponge: lanes stay arbitrary `u64` representatives between blocks and are
+    // canonicalized once at the end.
+    let mut st = [0u64; 12];
+    for (dst, cap) in st[8..].iter_mut().zip(init_cap) {
+        *dst = cap.to_canonical_u64();
     }
-    [st[0], st[1], st[2], st[3]]
+    let absorb = |st: &mut [u64; 12], block: &[u64; 8]| {
+        for (lane, &val) in st[..8].iter_mut().zip(block) {
+            *lane = perm_kernel::reduce_wide(*lane as u128 + val as u128);
+        }
+        *st = perm_kernel::permute(st);
+    };
+
+    // First block: the two-limb frame header followed by up to six payload limbs.
+    let mut block = [0u64; 8];
+    block[0] = Goldilocks::from_u64_reduced(domain_tag).to_canonical_u64();
+    block[1] = Goldilocks::from_u64_reduced(limbs.len() as u64).to_canonical_u64();
+    let head = limbs.len().min(6);
+    for (dst, limb) in block[2..2 + head].iter_mut().zip(limbs) {
+        *dst = limb.to_canonical_u64();
+    }
+    absorb(&mut st, &block);
+
+    let (full, tail) = limbs[head..].as_chunks::<8>();
+    for chunk in full {
+        absorb(&mut st, &chunk.map(Goldilocks::to_canonical_u64));
+    }
+    if !tail.is_empty() {
+        let mut block = [0u64; 8];
+        for (dst, limb) in block.iter_mut().zip(tail) {
+            *dst = limb.to_canonical_u64();
+        }
+        absorb(&mut st, &block);
+    }
+    core::array::from_fn(|i| Goldilocks::from_u64_reduced(st[i]))
 }
 
 /// Derive the per-tree salted capacity key `tree_key` binding a 256-bit `4`-limb `tree_salt`
@@ -1700,6 +1903,66 @@ mod internal_matrix_tests {
             reference_perm12(&mut reference);
             assert_eq!(state.map(|x| x.to_canonical_u64()), reference);
         }
+    }
+
+    #[test]
+    fn permutation_matches_the_qsag_core_specification() {
+        for seed in [0u64, 1, 0xFFFF_FFFF_0000_0000, 0x1234_5678_9ABC_DEF0] {
+            let mut state: [Goldilocks; 12] = core::array::from_fn(|i| {
+                Goldilocks::from_u64_reduced(seed.wrapping_mul(i as u64 + 1).wrapping_add(i as u64))
+            });
+            let mut spec = state;
+            let mut layered = state;
+            poseidon2_perm12(&mut state);
+            qsag_core::sponge::poseidon2_perm12(&mut spec);
+            poseidon2_perm12_layered(&mut layered);
+            assert_eq!(state, spec);
+            assert_eq!(state, layered);
+        }
+    }
+
+    /// Lanes at the top of the canonical range and long iteration chains exercise every
+    /// carry and borrow path of the raw-word kernel.
+    #[test]
+    fn permutation_kernel_matches_layers_on_extreme_and_iterated_states() {
+        let top = crate::field::GOLDILOCKS_PRIME - 1;
+        let mut states: Vec<[Goldilocks; 12]> = vec![
+            [Goldilocks::from_u64_reduced(top); 12],
+            core::array::from_fn(|i| Goldilocks::from_u64_reduced(top - i as u64)),
+            core::array::from_fn(|i| Goldilocks::from_u64_reduced(0xFFFF_FFFF << (i % 2 * 32))),
+            core::array::from_fn(|i| Goldilocks::from_u64_reduced(u64::from(i == 0) * top)),
+        ];
+        let mut chain = [Goldilocks::ZERO; 12];
+        for _ in 0..2_000 {
+            poseidon2_perm12(&mut chain);
+            states.push(chain);
+        }
+        for mut state in states {
+            let mut layered = state;
+            poseidon2_perm12(&mut state);
+            poseidon2_perm12_layered(&mut layered);
+            assert_eq!(state, layered);
+        }
+    }
+
+    #[test]
+    #[ignore = "timing probe: run with --ignored --nocapture"]
+    fn bench_poseidon2_perm12() {
+        const N: u32 = 1_000_000;
+        let init: [Goldilocks; 12] =
+            core::array::from_fn(|i| Goldilocks::from_u64_reduced(i as u64 + 1));
+        let time = |f: &dyn Fn(&mut [Goldilocks; 12])| {
+            let mut st = init;
+            let t = std::time::Instant::now();
+            for _ in 0..N {
+                f(&mut st);
+            }
+            (t.elapsed().as_nanos() as f64 / f64::from(N), st)
+        };
+        let (agg_ns, a) = time(&|st| poseidon2_perm12(st));
+        let (core_ns, c) = time(&|st| qsag_core::sponge::poseidon2_perm12(st));
+        assert_eq!(a, c);
+        std::println!("PERM12 agg_ns={agg_ns:.1} core_ns={core_ns:.1}");
     }
 
     #[test]
