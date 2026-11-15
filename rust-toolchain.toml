@@ -1,3 +1,4 @@
+# Reproducible release compiler; workspace rust-version uses this verified baseline.
 [toolchain]
 channel = "1.99.1"
 profile = "minimal"
