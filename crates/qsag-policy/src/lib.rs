@@ -11,10 +11,10 @@ extern crate std;
 
 pub mod durable;
 pub mod macaroon;
-pub use macaroon::SpongeMacaroon;
 pub use durable::PolicyGuardError;
 #[cfg(feature = "std")]
 pub use durable::{FsPolicyDurableLedger, FsPolicyGenerationFence};
+pub use macaroon::SpongeMacaroon;
 
 use alloc::vec::Vec;
 use core::cell::Cell;
@@ -543,8 +543,13 @@ impl PolicySignerGuardShare {
     /// Set the bounded replay history capacity without discarding any burned identifiers.
     /// Persist a checkpoint after changing this operational limit.
     pub fn set_replay_capacity(&mut self, capacity: usize) -> Result<(), PolicyViolation> {
-        if capacity == 0 || capacity > MAX_POLICY_CAPACITY
-            || capacity < self.burned_intent_nonces.len().max(self.burned_sessions.len())
+        if capacity == 0
+            || capacity > MAX_POLICY_CAPACITY
+            || capacity
+                < self
+                    .burned_intent_nonces
+                    .len()
+                    .max(self.burned_sessions.len())
         {
             return Err(PolicyViolation::ReplayWindowExhausted);
         }
@@ -958,8 +963,11 @@ impl PolicySignerGuardShare {
         self.consumed_peer_slots
             .iter()
             .find(|(p, _)| *p == peer_id)
-            .is_none_or(|(_, words)| words.get(peer_slot / 64)
-                .is_none_or(|mask| ((mask >> (peer_slot % 64)) & 1) != 0))
+            .is_none_or(|(_, words)| {
+                words
+                    .get(peer_slot / 64)
+                    .is_none_or(|mask| ((mask >> (peer_slot % 64)) & 1) != 0)
+            })
     }
 
     fn retire_own_slot(&mut self, slot: usize) {
@@ -974,7 +982,10 @@ impl PolicySignerGuardShare {
     }
 
     fn retire_peer_slot(&mut self, peer_id: u16, peer_slot: usize) {
-        if let Some((_, words)) = self.consumed_peer_slots.iter_mut().find(|(p, _)| *p == peer_id)
+        if let Some((_, words)) = self
+            .consumed_peer_slots
+            .iter_mut()
+            .find(|(p, _)| *p == peer_id)
             && let Some(mask) = words.get_mut(peer_slot / 64)
         {
             *mask |= 1u64 << (peer_slot % 64);
@@ -1393,8 +1404,13 @@ impl SharedWindowSpendLedger {
     /// Set the bounded replay history capacity without discarding any burned identifiers.
     /// Persist a checkpoint after changing this operational limit.
     pub fn set_replay_capacity(&mut self, capacity: usize) -> Result<(), PolicyViolation> {
-        if capacity == 0 || capacity > MAX_POLICY_CAPACITY
-            || capacity < self.burned_intent_nonces.len().max(self.burned_sessions.len())
+        if capacity == 0
+            || capacity > MAX_POLICY_CAPACITY
+            || capacity
+                < self
+                    .burned_intent_nonces
+                    .len()
+                    .max(self.burned_sessions.len())
         {
             return Err(PolicyViolation::ReplayWindowExhausted);
         }
@@ -2211,9 +2227,19 @@ impl<W: qsag_fts::ot::AuthenticatedOtWire> PolicyAuthenticatedOt
         }
         let failed = |_| PolicyViolation::BarrierBdozMacFailed;
         let mut result = SecretVec(Vec::with_capacity(choices.len()));
-        for (index, (pairs, bits)) in alternatives.chunks(65_536).zip(choices.chunks(65_536)).enumerate() {
-            let context = cshake256_framed_32(b"QSAG.POLICY.OT.CHUNK.V1",
-                &[&domain, &(index as u64).to_be_bytes(), &(choices.len() as u64).to_be_bytes()]);
+        for (index, (pairs, bits)) in alternatives
+            .chunks(65_536)
+            .zip(choices.chunks(65_536))
+            .enumerate()
+        {
+            let context = cshake256_framed_32(
+                b"QSAG.POLICY.OT.CHUNK.V1",
+                &[
+                    &domain,
+                    &(index as u64).to_be_bytes(),
+                    &(choices.len() as u64).to_be_bytes(),
+                ],
+            );
             let values = if local_party < peer {
                 self.send_values(peer, context, pairs).map_err(failed)?;
                 self.receive_values(peer, context, bits).map_err(failed)?
@@ -2331,8 +2357,14 @@ impl PolicyGuardDkgRound1 {
             ct_zeroize_bytes(&mut entropy);
             return Err(PolicyViolation::IntentBindingMismatch);
         }
-        let digest =
-            cshake256_framed_32(b"QSAG.POLICY.DKG.V1", &[&setup_id, &policy_ids_bytes(&ids), &(preprocessing_slots as u64).to_be_bytes()]);
+        let digest = cshake256_framed_32(
+            b"QSAG.POLICY.DKG.V1",
+            &[
+                &setup_id,
+                &policy_ids_bytes(&ids),
+                &(preprocessing_slots as u64).to_be_bytes(),
+            ],
+        );
         let mut local = cshake256_framed_32(
             b"QSAG.POLICY.DKG.LOCAL.V1",
             &[&entropy, &digest, &party_id.to_be_bytes()],
@@ -2495,49 +2527,67 @@ pub fn finalize_distributed_policy_guard<O: PolicyAuthenticatedOt>(
             o.sender,
             cshake256_framed_32(b"QSAG.POLICY.DKG.ZERO.V1", &[&domain, lo_seed, hi_seed]),
         ));
-        g.consumed_peer_slots.push((o.sender, alloc::vec![0u64; g.preproc_r.len().div_ceil(64)]));
-        let mut alternatives = SecretVec(Vec::with_capacity(g.preproc_r.len() * 256));
-        let mut choices = SecretVec(Vec::with_capacity(g.preproc_r.len() * 256));
+        g.consumed_peer_slots
+            .push((o.sender, alloc::vec![0u64; g.preproc_r.len().div_ceil(64)]));
         let mut keys = SecretVec(Vec::with_capacity(g.preproc_r.len()));
-        for slot in 0..g.preproc_r.len() {
-            let mut slot_alpha = g.incoming_slot_alpha(o.sender, slot);
-            let mut key = [0u128; 2];
-            for (lane, key_lane) in key.iter_mut().enumerate() {
-                for bit in 0..128 {
-                    let mut raw = cshake256_framed_32(
-                        b"QSAG.POLICY.DKG.OT_PAD.V1",
-                        &[
-                            &g.local_salt_seed,
-                            &domain,
-                            &(slot as u64).to_be_bytes(),
-                            &[lane as u8, bit as u8],
-                        ],
-                    );
-                    let pad = policy_pair(raw)[0];
-                    ct_zeroize_bytes(&mut raw);
-                    alternatives.push([pad, pad ^ gf2_128_mul(slot_alpha[lane], 1u128 << bit)]);
-                    choices.push(((g.preproc_r[slot][lane] >> bit) & 1) != 0);
-                    *key_lane ^= pad;
+        let mut macs = SecretVec(Vec::with_capacity(g.preproc_r.len()));
+        // Bound scratch buffers independently of the caller's durable pool capacity.
+        for start in (0..g.preproc_r.len()).step_by(256) {
+            let end = (start + 256).min(g.preproc_r.len());
+            let domain = if g.preproc_r.len() <= 256 {
+                domain
+            } else {
+                cshake256_framed_32(
+                    b"QSAG.POLICY.DKG.POOL_BATCH.V1",
+                    &[
+                        &domain,
+                        &(start as u64).to_be_bytes(),
+                        &(g.preproc_r.len() as u64).to_be_bytes(),
+                    ],
+                )
+            };
+            let mut alternatives = SecretVec(Vec::with_capacity((end - start) * 256));
+            let mut choices = SecretVec(Vec::with_capacity((end - start) * 256));
+            for slot in start..end {
+                let mut slot_alpha = g.incoming_slot_alpha(o.sender, slot);
+                let mut key = [0u128; 2];
+                for (lane, key_lane) in key.iter_mut().enumerate() {
+                    for bit in 0..128 {
+                        let mut raw = cshake256_framed_32(
+                            b"QSAG.POLICY.DKG.OT_PAD.V1",
+                            &[
+                                &g.local_salt_seed,
+                                &domain,
+                                &(slot as u64).to_be_bytes(),
+                                &[lane as u8, bit as u8],
+                            ],
+                        );
+                        let pad = policy_pair(raw)[0];
+                        ct_zeroize_bytes(&mut raw);
+                        alternatives.push([pad, pad ^ gf2_128_mul(slot_alpha[lane], 1u128 << bit)]);
+                        choices.push(((g.preproc_r[slot][lane] >> bit) & 1) != 0);
+                        *key_lane ^= pad;
+                    }
                 }
+                ct_zeroize_u128s(&mut slot_alpha);
+                keys.push(key);
+                ct_zeroize_u128s(&mut key);
             }
-            ct_zeroize_u128s(&mut slot_alpha);
-            keys.push(key);
-            ct_zeroize_u128s(&mut key);
+            let mut selected =
+                SecretVec(ot.exchange(g.party_id, o.sender, domain, &alternatives, &choices)?);
+            if selected.len() != (end - start) * 256 {
+                return Err(PolicyViolation::BarrierBdozMacFailed);
+            }
+            for chunk in selected.as_chunks::<256>().0 {
+                macs.push([
+                    chunk[..128].iter().fold(0, |a, b| a ^ b),
+                    chunk[128..].iter().fold(0, |a, b| a ^ b),
+                ]);
+            }
+            ct_zeroize_u128s(&mut selected);
         }
-        let mut selected =
-            SecretVec(ot.exchange(g.party_id, o.sender, domain, &alternatives, &choices)?);
-        if selected.len() != g.preproc_r.len() * 256 {
-            return Err(PolicyViolation::BarrierBdozMacFailed);
-        }
-        let mut macs = Vec::with_capacity(g.preproc_r.len());
-        for chunk in selected.as_chunks::<256>().0 {
-            macs.push([
-                chunk[..128].iter().fold(0, |a, b| a ^ b),
-                chunk[128..].iter().fold(0, |a, b| a ^ b),
-            ]);
-        }
-        ct_zeroize_u128s(&mut selected);
-        g.preproc_outgoing_macs.push((o.sender, macs));
+        g.preproc_outgoing_macs
+            .push((o.sender, core::mem::take(&mut macs.0)));
         g.preproc_incoming_keys
             .push((o.sender, core::mem::take(&mut keys.0)));
     }
@@ -3424,19 +3474,31 @@ mod tests {
         let guard = &mut guards[0];
         guard.set_replay_capacity(600).unwrap();
         for i in 0u64..600 {
-            let mut nonce = [0; 32]; nonce[..8].copy_from_slice(&i.to_be_bytes());
-            guard.record_approved_intent(u128::MAX, i as u128, nonce, nonce).unwrap();
+            let mut nonce = [0; 32];
+            nonce[..8].copy_from_slice(&i.to_be_bytes());
+            guard
+                .record_approved_intent(u128::MAX, i as u128, nonce, nonce)
+                .unwrap();
         }
         let snapshot = guard.export_durable_checkpoint(&[7; 32], 600);
         let mut restored = raw_test_guards([9; 32], &[1, 2]);
-        restored[0].restore_from_durable_checkpoint(&snapshot, &[7; 32], 600).unwrap();
+        restored[0]
+            .restore_from_durable_checkpoint(&snapshot, &[7; 32], 600)
+            .unwrap();
         assert_eq!(restored[0].replay_capacity, 600);
-        assert_eq!(restored[0].export_durable_checkpoint(&[7; 32], 600), snapshot);
-        assert_eq!(restored[0].record_approved_intent(u128::MAX, 601, [255; 32], [255; 32]),
-            Err(PolicyViolation::ReplayWindowExhausted));
+        assert_eq!(
+            restored[0].export_durable_checkpoint(&[7; 32], 600),
+            snapshot
+        );
+        assert_eq!(
+            restored[0].record_approved_intent(u128::MAX, 601, [255; 32], [255; 32]),
+            Err(PolicyViolation::ReplayWindowExhausted)
+        );
         assert!(restored[0].set_replay_capacity(599).is_err());
         restored[0].set_replay_capacity(601).unwrap();
-        restored[0].record_approved_intent(u128::MAX, 601, [255; 32], [255; 32]).unwrap();
+        restored[0]
+            .record_approved_intent(u128::MAX, 601, [255; 32], [255; 32])
+            .unwrap();
     }
 
     #[test]
@@ -3855,8 +3917,10 @@ mod tests {
     }
 
     // Ideal OT functionality for algebra tests only; production uses a secure OT provider.
+    #[derive(Default)]
     struct IdealPolicyOt {
         peers: Vec<(u16, [u128; 2], [u8; 32])>,
+        slot_cursors: Vec<(u16, u16, usize)>,
     }
     impl Drop for IdealPolicyOt {
         fn drop(&mut self) {
@@ -3883,9 +3947,22 @@ mod tests {
                 .find(|(id, _, _)| *id == local_party)
                 .unwrap();
             let (_, alpha, seed) = self.peers.iter().find(|(id, _, _)| *id == peer).unwrap();
+            let cursor = match self
+                .slot_cursors
+                .iter()
+                .position(|(a, b, _)| *a == local_party && *b == peer)
+            {
+                Some(index) => index,
+                None => {
+                    self.slot_cursors.push((local_party, peer, 0));
+                    self.slot_cursors.len() - 1
+                }
+            };
+            let start = self.slot_cursors[cursor].2;
+            self.slot_cursors[cursor].2 += alternatives.len() / 256;
             let mut selected = Vec::new();
             for (i, choice) in choices.iter().enumerate() {
-                let slot = i / 256;
+                let slot = start + i / 256;
                 let lane = i % 256 / 128;
                 let bit = i % 128;
                 let local_slot_alpha = derive_peer_slot_alpha(local_alpha, peer, slot);
@@ -3921,10 +3998,16 @@ mod tests {
         let all_ids = [0, 1, 2, 4];
         let mut first = Vec::new();
         let mut commits = Vec::new();
-        let mut ot = IdealPolicyOt { peers: Vec::new() };
+        let mut ot = IdealPolicyOt::default();
         for id in all_ids {
-            let (state, messages) =
-                PolicyGuardDkgRound1::new_with_capacity(id, &all_ids, [20; 32], [id as u8; 32], 130).unwrap();
+            let (state, messages) = PolicyGuardDkgRound1::new_with_capacity(
+                id,
+                &all_ids,
+                [20; 32],
+                [id as u8; 32],
+                300,
+            )
+            .unwrap();
             ot.peers.push((
                 id,
                 state.guard.bdoz_alpha_share,
@@ -3959,7 +4042,7 @@ mod tests {
                 if g.party_id == peer.party_id {
                     continue;
                 }
-                for slot in 0..130 {
+                for slot in 0..300 {
                     let m = g.outgoing_mac(peer.party_id, slot).unwrap();
                     let k = peer.incoming_key(g.party_id, slot).unwrap();
                     let peer_alpha = peer.incoming_slot_alpha(g.party_id, slot);
@@ -4002,7 +4085,7 @@ mod tests {
                 let (a, _) = a.round2_open_seeds(&cb).unwrap();
                 let (_, mut ob) = b.round2_open_seeds(&ca).unwrap();
                 ob[0].seed[0] ^= 1;
-                let mut ot = IdealPolicyOt { peers: Vec::new() };
+                let mut ot = IdealPolicyOt::default();
                 assert!(matches!(
                     finalize_distributed_policy_guard(a, &ob, &mut ot),
                     Err(PolicyViolation::BarrierCommitmentMismatch { party_id: 4 })
@@ -4937,6 +5020,7 @@ mod cleanup_tests {
         assert_eq!(
             events,
             alloc::vec![
+                (0, true),
                 (BDOZ_PREPROC_SLOTS, true),
                 (BDOZ_PREPROC_SLOTS * 256, true),
                 (BDOZ_PREPROC_SLOTS * 256, true)
