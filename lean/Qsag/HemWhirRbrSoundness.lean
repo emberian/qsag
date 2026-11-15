@@ -1850,7 +1850,10 @@ theorem hemAffineWhir_state_restoration_soundness
 /-! ## §3. Conditional QROM event accounting -/
 
 /-- Conditional probability accounting for the transcript checker. The supplied RBR/query
-    bounds and acceptance cover are obligations, not consequences proved here. `outTr` is
+    bounds and acceptance cover are obligations, not consequences proved here. In particular,
+    `hRbrBound` uses the paper/profile inputs `hemV6FiveRoundRbrBounds`, whose stronger
+    incidence constant and equal-degree/multistage lift are not furnished by the larger
+    proved sliced binary-fold counts. `outTr` is
     unrestricted and does not encode a Fiat–Shamir transcript derivation. This lemma is useful
     only after an execution-specific reduction establishes all three event bounds and cover. -/
 theorem hemAffineWhir_qrom_acceptance_bound_of_event_bounds

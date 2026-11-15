@@ -2995,28 +2995,28 @@ theorem rbr_multiRound_qrom_induction
     exact RatBound.le_trans hRestBound
       (RatBound.add_le_add hFirstSimp (RatBound.le_refl _))
 
-/-- Round-0 batch RBR bound over `QuarticGoldilocks`, DERIVED from the deployed `nv = 24` stage-0
-    witness: at most `MAX_BATCH_POLYS - 1 = 15` asymmetric-cascade affine combinations, each at
-    the stage-0 per-fold `[CWYZ26]` numerator `ℓ + 2 ℓ₀ + 1`, plus the `72 / p^4` `Ext4`
-    point-reduction sumcheck. -/
+/-- Conditional round-0 cascade profile input over `QuarticGoldilocks`, computed from the
+    stage-0 paper numerator and the point-reduction term. This definition does not prove
+    the arbitrary-batch RBR bound; the stronger incidence and cascade composition are
+    required before charging this input to an acceptance event. -/
 def hemV6CascadeRbrBound : RatBound :=
   match whirAffineStageWitnesses 24 true with
   | w :: _ =>
     ⟨15 * (whirAffineStageSimpleNum w / w.sFolds) + 72, goldilocksExt4Card, goldilocksExt4Card_pos⟩
   | [] => RatBound.one
 
-/-- RBR challenge-round error bounds for `Hem` v6 (`nv = 24`) over `QuarticGoldilocks`
-    (`q = goldilocksExt4Card = p^4`), DERIVED from the deployed witnesses rather than literals:
-    the round-0 cascade bound followed by, for each of the `4` WHIR stages, the `[CWYZ26]`
-    Theorem 4.8 + 5.1 bound `whirAffineEqualDegreeCommitFoldBound` of the deployed
-    `whirAffineStageWitnesses 24 true` row. Each stage entry is the SUM over that stage's `s_i`
-    fold rounds (`s_i (ℓ + 2 ℓ₀ + 1) / p^4`); the per-round Measure-and-Reprogram factor
-    `(2 Q + 1)^2` is linear, so scaling the aggregate equals summing the scaled rounds. -/
+/-- Conditional RBR paper/profile inputs for `Hem` v6 (`nv = 24`). Their numbers are computed
+    from deployed witness rows, but no RBR event bound is derived by this definition.
+    The stronger incidence constant, the equal-degree three-challenge lift, intermediate
+    fold geometries and arbitrary-batch/stage composition remain obligations. In particular
+    the larger proved sliced binary-fold counts do not justify these inputs. Multiplying
+    these rational inputs by `(2Q+1)^2` is arithmetic until the execution-level reduction
+    supplies its matching RBR bound. -/
 def hemV6FiveRoundRbrBounds : List RatBound :=
   hemV6CascadeRbrBound ::
     (whirAffineStageWitnesses 24 true).map whirAffineEqualDegreeCommitFoldBound
 
-/-- The derived round bounds evaluate to `(4182, 1644, 824, 489, 792) / p^4` (total `7931 / p^4`). -/
+/-- The conditional profile inputs evaluate to `(4182, 1644, 824, 489, 792) / p^4` (total `7931 / p^4`). -/
 theorem hemV6FiveRoundRbrBounds_eq_deployed :
     hemV6FiveRoundRbrBounds.map (fun b => (b.num, b.den)) =
       [4182, 1644, 824, 489, 792].map (fun n => (n, goldilocksExt4Card)) := by
@@ -3442,9 +3442,10 @@ theorem inhabited_multi_round_fs_qrom :
   simpa only [↓reduceIte, BitVec.toNat_ofFin] using hStep
 
 
-/-- Arithmetic repair for a portfolio budget of `2^56` oracle queries: 384-bit commitment
-    digests suffice with the same field and query schedule. This changes the commitment
-    parameter; it is not a security claim for the deployed 256-bit Merkle implementation. -/
+/-- Arithmetic repair of the conditional paper/profile expression at `2^56` queries: changing
+    only its digest parameter to 384 makes that expression small enough. This neither
+    discharges the RBR input nor upgrades the larger proved sliced counts. It is not a
+    security claim for either a 256-bit or a 384-bit deployed verifier. -/
 theorem multiRoundFsQrom_budget_384_at_2pow56 (Q : Nat) (hQ : Q ≤ 2 ^ 56) :
     strictlyMoreThanBits 128 (multiRoundFsQromCompilerBound Q 5 384
       hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) ∧
