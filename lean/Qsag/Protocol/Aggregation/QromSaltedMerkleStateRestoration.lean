@@ -1866,3 +1866,938 @@ def powSliceOut (bPow wChal : Nat) (out : BitVec (bPow + wChal)) : BitVec bPow :
 
 /-- Extract the high `wChal`-bit Fiat–Shamir challenge slice from a combined `(bPow + wChal)`-bit
     oracle output. -/
+def chalSliceOut (bPow wChal : Nat) (out : BitVec (bPow + wChal)) : BitVec wChal :=
+  BitVec.ofNat wChal (out.toNat / 2 ^ bPow)
+
+private theorem qsum_cast_nat {a b : Nat} (h : a = b) (g : Nat → Nat) :
+    qsum a (fun j => g j.1) = qsum b (fun j => g j.1) := by
+  cases h
+  rfl
+
+/-- **Exact Product-Slice Bad-Output Count (`jointPowChal_badCard_le`)**:
+    When a verifier gate requires BOTH `powPass (powSliceOut bPow wChal out) = true` (at most
+    `powGoodCard` passing `bPow`-bit tags) AND `chalBad (chalSliceOut bPow wChal out) = true`
+    (at most `rbrBadCard` bad `wChal`-bit challenges), at most `powGoodCard * rbrBadCard` out of
+    `2 ^ (bPow + wChal)` combined outputs satisfy both conditions simultaneously. -/
+theorem jointPowChal_badCard_le (bPow wChal : Nat)
+    (powPass : BitVec bPow → Bool) (chalBad : BitVec wChal → Bool)
+    (powGoodCard rbrBadCard : Nat)
+    (hPow : qsum (2 ^ bPow) (fun r => if powPass (BitVec.ofFin r) = true then 1 else 0) ≤ powGoodCard)
+    (hChal : qsum (2 ^ wChal) (fun q => if chalBad (BitVec.ofFin q) = true then 1 else 0) ≤ rbrBadCard) :
+    qsum (2 ^ (bPow + wChal)) (fun j =>
+      if (powPass (powSliceOut bPow wChal (BitVec.ofFin j)) &&
+          chalBad (chalSliceOut bPow wChal (BitVec.ofFin j))) = true then 1 else 0) ≤
+      powGoodCard * rbrBadCard := by
+  have hPowEq : 2 ^ (bPow + wChal) = 2 ^ bPow * 2 ^ wChal := Nat.pow_add 2 bPow wChal
+  let g : Nat → Nat := fun k =>
+    if (powPass (BitVec.ofNat bPow (k % 2 ^ bPow)) &&
+        chalBad (BitVec.ofNat wChal (k / 2 ^ bPow))) = true then 1 else 0
+  have hCast : qsum (2 ^ (bPow + wChal)) (fun j =>
+      if (powPass (powSliceOut bPow wChal (BitVec.ofFin j)) &&
+          chalBad (chalSliceOut bPow wChal (BitVec.ofFin j))) = true then 1 else 0) =
+      qsum (2 ^ bPow * 2 ^ wChal) (fun j => g j.1) := by
+    have hEqFn : ∀ (j : Fin (2 ^ (bPow + wChal))),
+        (if (powPass (powSliceOut bPow wChal (BitVec.ofFin j)) &&
+             chalBad (chalSliceOut bPow wChal (BitVec.ofFin j))) = true then 1 else 0) = g j.1 := by
+      intro j
+      unfold powSliceOut chalSliceOut g
+      simp only [BitVec.toNat_ofFin]
+    rw [qsum_congr hEqFn]
+    exact qsum_cast_nat hPowEq g
+  rw [hCast, qsum_mul_split (2 ^ bPow) (2 ^ wChal)]
+  have hFactor : ∀ q : Fin (2 ^ wChal),
+      qsum (2 ^ bPow) (fun r => g (q.1 * 2 ^ bPow + r.1)) =
+        (if chalBad (BitVec.ofFin q) = true then 1 else 0) *
+          qsum (2 ^ bPow) (fun r => if powPass (BitVec.ofFin r) = true then 1 else 0) := by
+    intro q
+    have hPos : 0 < 2 ^ bPow := Nat.two_pow_pos bPow
+    have hInner : ∀ r : Fin (2 ^ bPow),
+        g (q.1 * 2 ^ bPow + r.1) =
+          (if chalBad (BitVec.ofFin q) = true then 1 else 0) *
+            (if powPass (BitVec.ofFin r) = true then 1 else 0) := by
+      intro r
+      unfold g
+      have hMod : (q.1 * 2 ^ bPow + r.1) % 2 ^ bPow = r.1 := by
+        rw [Nat.add_comm, Nat.add_mul_mod_self_right, Nat.mod_eq_of_lt r.2]
+      have hDiv : (q.1 * 2 ^ bPow + r.1) / 2 ^ bPow = q.1 := by
+        rw [Nat.add_comm, Nat.add_mul_div_right _ _ hPos, Nat.div_eq_of_lt r.2, Nat.zero_add]
+      have hBvR : BitVec.ofNat bPow r.1 = BitVec.ofFin r := by
+        apply BitVec.eq_of_toNat_eq
+        simp
+      have hBvQ : BitVec.ofNat wChal q.1 = BitVec.ofFin q := by
+        apply BitVec.eq_of_toNat_eq
+        simp
+      rw [hMod, hDiv, hBvR, hBvQ]
+      cases powPass (BitVec.ofFin r) <;> cases chalBad (BitVec.ofFin q) <;> simp
+    rw [qsum_congr hInner, ← qsum_mul_left]
+  rw [qsum_congr hFactor, qsum_mul_right]
+  rw [Nat.mul_comm powGoodCard rbrBadCard]
+  exact Nat.mul_le_mul hChal hPow
+
+/-- Canonical `bPow`-bit all-zero proof-of-work gate (`verify_pcs_pow` in `pcs.rs`):
+    passes on **exactly 1** out of `2 ^ bPow` values (`powGoodCard = 1`). -/
+def canonicalZeroPowGate (bPow : Nat) (tag : BitVec bPow) : Bool :=
+  decide (tag = 0#bPow)
+
+theorem canonicalZeroPowGate_card (bPow : Nat) :
+    qsum (2 ^ bPow) (fun r => if canonicalZeroPowGate bPow (BitVec.ofFin r) = true then 1 else 0) = 1 := by
+  unfold canonicalZeroPowGate
+  have hCongr : ∀ r : Fin (2 ^ bPow),
+      (if decide (BitVec.ofFin r = 0#bPow) = true then 1 else 0) =
+      (if r = ⟨0, Nat.two_pow_pos bPow⟩ then 1 else 0) := by
+    intro r
+    by_cases hr : r = ⟨0, Nat.two_pow_pos bPow⟩
+    · subst hr; simp
+    · have hBvNe : BitVec.ofFin r ≠ 0#bPow := by
+        intro he
+        apply hr
+        apply Fin.ext
+        have hNat := congrArg BitVec.toNat he
+        simpa only [BitVec.toNat_ofFin, BitVec.toNat_ofNat, Nat.zero_mod] using hNat
+      simp [hr, hBvNe]
+  rw [qsum_congr hCongr, qsum_ite_eq]
+
+/-- Specification of a Fiat–Shamir round equipped with an absorbed pre-squeeze `bPow`-bit PoW gate
+    over `H : Fin cardX → BitVec (bPow + wChal)`. -/
+structure QromJointPowRbrSpec (cardX bPow wChal : Nat) where
+  proj : Fin cardX → Fin cardX
+  isDoomedAt : (Fin cardX → BitVec (bPow + wChal)) → Fin cardX → Bool
+  chalFlip : (Fin cardX → BitVec (bPow + wChal)) → Fin cardX → BitVec wChal → Bool
+  rbrBadCard : Nat
+  doomed_local : ∀ H x ch, isDoomedAt (reprogramOracle H x ch) x = isDoomedAt H x
+  chalFlip_local : ∀ H x ch c, chalFlip (reprogramOracle H x ch) x c = chalFlip H x c
+  rbr_bound : ∀ H x, isDoomedAt H x = true →
+    qsum (2 ^ wChal) (fun q => if chalFlip H x (BitVec.ofFin q) = true then 1 else 0) ≤ rbrBadCard
+
+/-- Post-round liveness predicate requiring BOTH `canonicalZeroPowGate` on the PoW slice AND
+    `chalFlip` on the challenge slice of `H x`. -/
+def QromJointPowRbrSpec.isLiveAfter {cardX bPow wChal : Nat}
+    (spec : QromJointPowRbrSpec cardX bPow wChal)
+    (H : Fin cardX → BitVec (bPow + wChal)) (x : Fin cardX) : Bool :=
+  canonicalZeroPowGate bPow (powSliceOut bPow wChal (H x)) &&
+    spec.chalFlip H x (chalSliceOut bPow wChal (H x))
+
+/-- Every `QromJointPowRbrSpec` induces a genuine `QromRbrRound` with `badCard = spec.rbrBadCard`
+    over `2 ^ (bPow + wChal)` — mechanically amplifying RBR soundness by `1 / 2 ^ bPow`! -/
+def QromJointPowRbrSpec.toQromRbrRound {cardX bPow wChal : Nat}
+    (spec : QromJointPowRbrSpec cardX bPow wChal)
+    (H : Fin cardX → BitVec (bPow + wChal)) :
+    QromRbrRound cardX (bPow + wChal) H where
+  proj := spec.proj
+  isDoomedAt := spec.isDoomedAt
+  isLiveAfter := spec.isLiveAfter
+  badCard := spec.rbrBadCard
+  doomed_local := spec.doomed_local H
+  flip_bound := by
+    intro x hDoomed
+    have hSimp : ∀ j : Fin (2 ^ (bPow + wChal)),
+        spec.isLiveAfter (reprogramOracle H x (BitVec.ofFin j)) x =
+          (canonicalZeroPowGate bPow (powSliceOut bPow wChal (BitVec.ofFin j)) &&
+           spec.chalFlip H x (chalSliceOut bPow wChal (BitVec.ofFin j))) := by
+      intro j
+      unfold QromJointPowRbrSpec.isLiveAfter
+      rw [spec.chalFlip_local H x (BitVec.ofFin j)]
+      simp only [reprogramOracle, ↓reduceIte]
+    have hCongr :
+        qsum (2 ^ (bPow + wChal)) (fun j =>
+          if spec.isLiveAfter (reprogramOracle H x (BitVec.ofFin j)) x = true then 1 else 0) =
+        qsum (2 ^ (bPow + wChal)) (fun j =>
+          if (canonicalZeroPowGate bPow (powSliceOut bPow wChal (BitVec.ofFin j)) &&
+              spec.chalFlip H x (chalSliceOut bPow wChal (BitVec.ofFin j))) = true then 1 else 0) :=
+      qsum_congr (fun j => by rw [hSimp j])
+    rw [hCongr, ← Nat.one_mul spec.rbrBadCard]
+    exact jointPowChal_badCard_le bPow wChal
+      (canonicalZeroPowGate bPow) (spec.chalFlip H x) 1 spec.rbrBadCard
+      (Nat.le_of_eq (canonicalZeroPowGate_card bPow))
+      (spec.rbr_bound H x hDoomed)
+
+/-- **Unitary Multi-Round Joint `(PoW × Challenge)` QROM Soundness Theorem
+    (`qrom_joint_pow_multiRound_success_bound`)**:
+    For ANY `Q`-query coherent unitary adversary `A : QuantumAdv cardX (bPow + wChal) cardAnc Q`
+    and ANY `k` Fiat–Shamir rounds whose verifier checks `canonicalZeroPowGate` before squeezing
+    challenges (`QromJointPowRbrSpec`), the uniform-oracle expected acceptance probability is at most
+    `((2 * Q + 1)^2 * ∑_r rbrBadCard_r) / (2^bPow * 2^wChal)` — derived from unitary amplitudes and
+    oracle resampling with zero hardcoded bit multiplication! -/
+theorem qrom_joint_pow_multiRound_success_bound
+    {cardX bPow wChal cardAnc Q k : Nat}
+    (A : QuantumAdv cardX (bPow + wChal) cardAnc Q)
+    (accept : (Fin cardX → BitVec (bPow + wChal)) → Fin cardX → Bool)
+    (specs : Fin k → QromJointPowRbrSpec cardX bPow wChal)
+    (hCover : ∀ H, QVec.queryMassOn (accept H) (runQuantumAdv A H) ≤
+      qsum k (fun r => qromOrdinaryFlipMass A H (specs r).proj
+        (specs r).isDoomedAt (specs r).isLiveAfter)) :
+    let norm := prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init
+    RatBound.le
+      ⟨uniformOracleSum (bPow + wChal) cardX
+        (fun H => QVec.queryMassOn (accept H) (runQuantumAdv A H)),
+        (2 ^ (bPow + wChal)) ^ cardX * norm,
+        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos (bPow + wChal)))
+          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      ⟨(2 * Q + 1) ^ 2 * qsum k (fun r => (specs r).rbrBadCard),
+        2 ^ bPow * 2 ^ wChal,
+        Nat.mul_pos (Nat.two_pow_pos bPow) (Nat.two_pow_pos wChal)⟩ := by
+  have hMain := qrom_uniform_oracle_success_bound A accept
+    (fun r H => (specs r).toQromRbrRound H)
+    (fun r => (specs r).proj)
+    (fun r => (specs r).isDoomedAt)
+    (fun r => (specs r).isLiveAfter)
+    (fun r => (specs r).rbrBadCard)
+    (fun _ _ => rfl) (fun _ _ => rfl) (fun _ _ => rfl) (fun _ _ => rfl)
+    hCover
+  have hDen : 2 ^ (bPow + wChal) = 2 ^ bPow * 2 ^ wChal := Nat.pow_add 2 bPow wChal
+  dsimp only [RatBound.le] at hMain ⊢
+  rw [← hDen]
+  exact hMain
+
+/-- Buggy post-squeeze PoW checker: squeezes `chal` from `H_chal` BEFORE absorbing the grinding
+    nonce, so `nonce : Fin numNonces` only searches `H_pow nonce = 0#bPow` without changing `chal`! -/
+def buggyPostSqueezePowAccept {wChal bPow numNonces : Nat}
+    (chalBad : BitVec wChal → Bool)
+    (chal : BitVec wChal)
+    (H_pow : Fin numNonces → BitVec bPow) : Bool :=
+  chalBad chal && (List.finRange numNonces).any (fun n => canonicalZeroPowGate bPow (H_pow n))
+
+/-- `#tooth`: if a protocol squeezes its challenge BEFORE absorbing the PoW nonce, even on a `1`-bit
+    PoW (`bPow = 1`) with `2` candidate nonces (`numNonces = 2`) and `chalBad = (chal == 0#1)`,
+    the winning `(chal, H_pow)` count is `3` out of `8` (`3/8 > 1/4 = (1/2) * (1/2)`), strictly
+    violating the `1 / (2^bPow * 2^wChal)` absorbed-PoW bound! -/
+theorem tooth_post_squeeze_pow_forfeits_reduction :
+    ∃ winCount : Nat,
+      winCount = qsum 2 (fun c =>
+        uniformOracleSum 1 2 (fun H_pow =>
+          if buggyPostSqueezePowAccept (bPow := 1) (numNonces := 2)
+               (fun ch => decide (ch = 0#1)) (BitVec.ofFin c) H_pow = true then 1 else 0)) ∧
+      winCount = 3 ∧
+      ¬ RatBound.le ⟨winCount, 2 * (2 ^ 1) ^ 2, by decide⟩ ⟨1, 2 ^ 1 * 2 ^ 1, by decide⟩ :=
+  ⟨3, by decide +kernel, rfl, by decide +kernel⟩
+
+
+/-! ### §2.3 End-to-End Composition Over `verifyHemOpeningBatch` (`HemExtractedOpeningBridge`) -/
+
+/-- **End-to-End Authenticated `Hem` Opening + Extracted-Transcript Multi-Round Bound
+    (`measured_hem_qrom_bcs_end_to_end_bound`)**:
+    Combines `measured_hem_acceptance_from_extracted` on `verifyHemOpeningBatch` (calling the real
+    `verifyHemAffineWhir` checker on `HemWhirInstance QuarticGoldilocks`) with any round-flip cover
+    of `verifyHemAffineWhir` on the online-extracted Merkle values `extractedOpeningValues`:
+    total verifier acceptance mass decomposes into the summed extracted round-escape masses plus
+    `batchMerkleCost Q slots * quantumExperimentTotal A`. -/
+theorem measured_hem_qrom_bcs_end_to_end_bound {cardX w cardAnc Q k : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (L : MerkleAddressLayout cardX w)
+    (slots : List (MerkleOpeningSlot cardX w))
+    (hLevels : ∀ s ∈ slots, s.level + s.depth ≤ L.levels)
+    (inst : HemWhirInstance QuarticGoldilocks)
+    (decode : Fin cardX → List (Option (MerkleOpeningValue w)) →
+      List (HemTranscriptRound QuarticGoldilocks))
+    (roundEscape : Fin k → (Fin cardX → BitVec w) → List (Fin cardX) → Fin cardX → Bool)
+    (hExtractedCover : ∀ H xs x,
+      verifyHemAffineWhir inst (decode x (extractedOpeningValues L slots H xs x)) = true →
+      (List.finRange k).any (fun r => roundEscape r H xs x) = true) :
+    2 ^ w * measuredEventMass A (fun H _ x => verifyHemOpeningBatch L slots inst decode H x) ≤
+      2 ^ w * qsum k (fun r => measuredEventMass A (roundEscape r)) +
+      batchMerkleCost Q slots * quantumExperimentTotal A := by
+  have hBase := measured_hem_acceptance_from_extracted A L slots hLevels inst decode
+  have hMono := measuredEventMass_mono A
+    (fun H xs x => verifyHemAffineWhir inst (decode x (extractedOpeningValues L slots H xs x)))
+    (fun H xs x => (List.finRange k).any (fun r => roundEscape r H xs x))
+    hExtractedCover
+  have hAnyUnion : ∀ (rs : List (Fin k)),
+      measuredEventMass A (fun H xs x => rs.any (fun r => roundEscape r H xs x)) ≤
+        (rs.map (fun r => measuredEventMass A (roundEscape r))).sum := by
+    intro rs
+    induction rs with
+    | nil =>
+      unfold measuredEventMass
+      have hz : ∀ H : Fin cardX → BitVec w,
+          sumLogs cardX Q (fun xs => QVec.queryMassOn (fun _ => false)
+            (measuredStateAt A H Q (Nat.le_refl Q) xs)) = 0 := by
+        intro H
+        have hp : ∀ xs, QVec.queryMassOn (fun _ => false)
+            (measuredStateAt A H Q (Nat.le_refl Q) xs) = 0 := by
+          intro xs; simp [QVec.queryMassOn, qsum_const]
+        rw [show (fun xs => QVec.queryMassOn (fun _ => false)
+          (measuredStateAt A H Q (Nat.le_refl Q) xs)) = fun _ => 0 * 0 from funext hp]
+        rw [sumLogs_mul, Nat.zero_mul]
+      change uniformOracleSum w cardX (fun H => sumLogs cardX Q (fun xs =>
+        QVec.queryMassOn (fun _ => false) (measuredStateAt A H Q (Nat.le_refl Q) xs))) ≤ 0
+      rw [uniformOracleSum_congr w cardX _ _ hz, uniformOracleSum_const, Nat.mul_zero]
+      exact Nat.le_refl 0
+    | cons hd tl ih =>
+      simp only [List.any_cons, List.map_cons, List.sum_cons]
+      exact Nat.le_trans (measuredEventMass_union_le A (roundEscape hd) _)
+        (Nat.add_le_add_left ih _)
+  have hFinSum : ∀ (n : Nat) (f : Fin n → Nat),
+      ((List.finRange n).map f).sum = qsum n f := by
+    intro n
+    induction n with
+    | zero => intro _; rfl
+    | succ n ih =>
+      intro f
+      simp only [List.finRange_succ, List.map_cons, List.sum_cons, List.map_map]
+      exact congrArg (f ⟨0, Nat.zero_lt_succ n⟩ + ·) (ih (fun i => f i.succ))
+  have hExtLe : measuredEventMass A
+      (fun H xs x => verifyHemAffineWhir inst (decode x (extractedOpeningValues L slots H xs x))) ≤
+      qsum k (fun r => measuredEventMass A (roundEscape r)) := by
+    rw [← hFinSum k (fun r => measuredEventMass A (roundEscape r))]
+    exact Nat.le_trans hMono (hAnyUnion (List.finRange k))
+  exact Nat.le_trans hBase (Nat.add_le_add_right (Nat.mul_le_mul_left (2 ^ w) hExtLe) _)
+
+
+/-! ## §3. Exact `[CDHZ25, ePrint 2025/2166]` Post-Quantum State-Restoration + Salted Merkle Bounds -/
+
+/-- Exact `2^{-bPow}` scaling of a `RatBound` derived from `QromJointPowRbrSpec.toQromRbrRound`:
+    absorbing the grinding nonce prior to squeezing the round challenge multiplies the denominator
+    by `2 ^ bPow` (`powGoodCard = 1` out of `2 ^ bPow`). -/
+@[expose] def powDivBound (bPow : Nat) (b : RatBound) : RatBound :=
+  ⟨b.num, 2 ^ bPow * b.den, Nat.mul_pos (Nat.two_pow_pos bPow) b.h_pos⟩
+
+/-- Unitary joint-PoW multi-round Fiat–Shamir QROM compiler bound (`powScaledFsQromCompilerBound`),
+    upgrading `multiRoundFsQromCompilerBound` with the proved `1 / 2^stagePowBits` joint `(PoW × Query)`
+    denominator of `qrom_joint_pow_multiRound_success_bound`:
+    1. `k` RBR folding rounds scaled by `(2 * Q + 1)^2` (`dfmRoundScale Q`);
+    2. salted commitment extraction `qromMerkleOnlineExtractBound numRoots secBits Q`;
+    3. `j` stage query rounds scaled by `8 * (Q + 1)^2 / 2^stagePowBits`. -/
+@[expose] def powScaledFsQromCompilerBound
+    (Q numRoots secBits stagePowBits : Nat)
+    (rbrChallengeBounds : List RatBound)
+    (queryStageBounds : List RatBound) : RatBound :=
+  RatBound.add
+    (RatBound.sumList (rbrChallengeBounds.map (dfmRoundScale Q)))
+    (RatBound.add
+      (qromMerkleOnlineExtractBound numRoots secBits Q)
+      (RatBound.sumList (queryStageBounds.map (fun b =>
+        quantumGroverGrindingBound Q (powDivBound stagePowBits b)))))
+
+/-- Classical state-restoration BCS compiler bound (`[BCS16; CY24]`):
+    linear `(T + numRounds)` state-restoration factor (`classical_state_restoration_soundness`)
+    plus classical birthday collision `numRoots * (T + 1)^2 / 2^secBits`. -/
+@[expose] def classicalStateRestorationBcsBound
+    (T numRoots secBits stagePowBits : Nat)
+    (rbrChallengeBounds : List RatBound)
+    (queryStageBounds : List RatBound) : RatBound :=
+  let numRounds := rbrChallengeBounds.length + queryStageBounds.length
+  let totalRbr := RatBound.add
+    (RatBound.sumList rbrChallengeBounds)
+    (RatBound.sumList (queryStageBounds.map (powDivBound stagePowBits)))
+  let classicalColl : RatBound :=
+    ⟨numRoots * (T + 1) ^ 2, 2 ^ secBits, Nat.two_pow_pos secBits⟩
+  RatBound.add (RatBound.scale (T + numRounds) totalRbr) classicalColl
+
+/-- `[CDHZ25]` Theorem 6.9 post-quantum state-restoration factor:
+    `80 * (t + k + 1) * (wFs + k) * ε_RBR`. -/
+def cdhzPqsrBound (t wFs k : Nat) (rbrSum : RatBound) : RatBound :=
+  RatBound.scale (80 * (t + k + 1) * (wFs + k)) rbrSum
+
+/-- `[CDHZ25]` Theorem 8.3 salted Merkle offline extraction bound (`n_y = 0` SNARG, Remark 11.5):
+    `(160 * wVc * tOff^2 + 16 * qV * logMaxLeaf) / 2^secBits`. -/
+def cdhzSaltedMerkleOfflineBound (tOff wVc qV logMaxLeaf secBits : Nat) : RatBound :=
+  ⟨160 * wVc * tOff ^ 2 + 16 * qV * logMaxLeaf, 2 ^ secBits, Nat.two_pow_pos secBits⟩
+
+/-- `[CDHZ25]` Theorem 8.3 salted Merkle online extraction bound:
+    `240 * wVc * tOn^2 / 2^secBits`. -/
+def cdhzSaltedMerkleOnlineBound (tOn wVc secBits : Nat) : RatBound :=
+  ⟨240 * wVc * tOn ^ 2, 2 ^ secBits, Nat.two_pow_pos secBits⟩
+
+/-- `[CDHZ25]` Theorem 8.3 salted Merkle commitment well-spreadness term:
+    `240 * (t + 1) / 2^secBits`. -/
+def cdhzSaltedMerkleComBound (t secBits : Nat) : RatBound :=
+  ⟨240 * (t + 1), 2 ^ secBits, Nat.two_pow_pos secBits⟩
+
+/-- `[CDHZ25]` Theorem A.1 / Theorem 11.3 composed QROM BCS SNARG soundness bound at a specific
+    Fourier query partition `(wFs, wVc)` (`wFs + wVc ≤ Q`):
+    `4 * ε_SR(Q, wFs) + 4 * κ_offline(2Q + 1, wVc) + 4 * κ_online(Q + 1 + qV + k, wVc) + 2 * qV^2 * κ_com(Q)`. -/
+def cdhzSnargPartitionBound
+    (Q wFs wVc qV logMaxLeaf secBits stagePowBits : Nat)
+    (rbrChallengeBounds : List RatBound)
+    (queryStageBounds : List RatBound) : RatBound :=
+  let k := rbrChallengeBounds.length + queryStageBounds.length
+  let rbrSum := RatBound.add
+    (RatBound.sumList rbrChallengeBounds)
+    (RatBound.sumList (queryStageBounds.map (powDivBound stagePowBits)))
+  let sr4 := RatBound.scale 4 (cdhzPqsrBound Q wFs k rbrSum)
+  let off4 := RatBound.scale 4 (cdhzSaltedMerkleOfflineBound (2 * Q + 1) wVc qV logMaxLeaf secBits)
+  let on4 := RatBound.scale 4 (cdhzSaltedMerkleOnlineBound (Q + 1 + qV + k) wVc secBits)
+  let comTerm := RatBound.scale (2 * qV ^ 2) (cdhzSaltedMerkleComBound Q secBits)
+  RatBound.add sr4 (RatBound.add off4 (RatBound.add on4 comTerm))
+
+/-- Upper-envelope `[CDHZ25]` SNARG soundness bound dominating ALL query splits `wFs + wVc ≤ Q`
+    simultaneously by setting `wFs = Q` and `wVc = Q` (`cdhzSnargPartitionBound_le_envelope`). -/
+@[expose] def cdhzSnargEnvelopeBound
+    (Q qV logMaxLeaf secBits stagePowBits : Nat)
+    (rbrChallengeBounds : List RatBound)
+    (queryStageBounds : List RatBound) : RatBound :=
+  cdhzSnargPartitionBound Q Q Q qV logMaxLeaf secBits stagePowBits
+    rbrChallengeBounds queryStageBounds
+
+/-- `[CDHZ25]` `320×` PQSR factor (`4 * 80 * (Q + k + 1) * (Q + k)`) composed with VCVio / BHT
+    salted Merkle online extraction (`qromMerkleOnlineExtractBound`). -/
+def cdhz320BhtCompilerBound
+    (Q numRoots secBits stagePowBits : Nat)
+    (rbrChallengeBounds : List RatBound)
+    (queryStageBounds : List RatBound) : RatBound :=
+  let k := rbrChallengeBounds.length + queryStageBounds.length
+  let rbrSum := RatBound.add
+    (RatBound.sumList rbrChallengeBounds)
+    (RatBound.sumList (queryStageBounds.map (powDivBound stagePowBits)))
+  RatBound.add
+    (RatBound.scale (4 * (80 * (Q + k + 1) * (Q + k))) rbrSum)
+    (qromMerkleOnlineExtractBound numRoots secBits Q)
+
+private theorem scale_mono_left {a b : Nat} (hab : a ≤ b) (r : RatBound) :
+    RatBound.le (RatBound.scale a r) (RatBound.scale b r) := by
+  unfold RatBound.le RatBound.scale
+  dsimp only
+  exact Nat.mul_le_mul_right r.den (Nat.mul_le_mul_right r.num hab)
+
+private theorem scale_mono_right (c : Nat) {r₁ r₂ : RatBound} (h : RatBound.le r₁ r₂) :
+    RatBound.le (RatBound.scale c r₁) (RatBound.scale c r₂) := by
+  unfold RatBound.le at h
+  unfold RatBound.le RatBound.scale
+  dsimp only
+  rw [Nat.mul_assoc, Nat.mul_assoc]
+  exact Nat.mul_le_mul_left c h
+
+/-- Every valid `[CDHZ25]` Theorem A.1 query partition `wFs + wVc ≤ Q` is bounded above by
+    `cdhzSnargEnvelopeBound`. -/
+theorem cdhzSnargPartitionBound_le_envelope
+    (Q wFs wVc qV logMaxLeaf secBits stagePowBits : Nat)
+    (hPart : wFs + wVc ≤ Q)
+    (rbrChallengeBounds : List RatBound)
+    (queryStageBounds : List RatBound) :
+    RatBound.le
+      (cdhzSnargPartitionBound Q wFs wVc qV logMaxLeaf secBits stagePowBits
+        rbrChallengeBounds queryStageBounds)
+      (cdhzSnargEnvelopeBound Q qV logMaxLeaf secBits stagePowBits
+        rbrChallengeBounds queryStageBounds) := by
+  have hwFs : wFs ≤ Q := by omega
+  have hwVc : wVc ≤ Q := by omega
+  unfold cdhzSnargEnvelopeBound cdhzSnargPartitionBound
+  dsimp only
+  apply RatBound.add_le_add
+  · apply scale_mono_right 4
+    unfold cdhzPqsrBound
+    apply scale_mono_left
+    exact Nat.mul_le_mul_left _ (by omega)
+  · apply RatBound.add_le_add
+    · apply scale_mono_right 4
+      unfold RatBound.le cdhzSaltedMerkleOfflineBound
+      dsimp only
+      apply Nat.mul_le_mul_right
+      apply Nat.add_le_add_right
+      exact Nat.mul_le_mul_right _ (Nat.mul_le_mul_left 160 hwVc)
+    · apply RatBound.add_le_add
+      · apply scale_mono_right 4
+        unfold RatBound.le cdhzSaltedMerkleOnlineBound
+        dsimp only
+        apply Nat.mul_le_mul_right
+        exact Nat.mul_le_mul_right _ (Nat.mul_le_mul_left 240 hwVc)
+      · exact RatBound.le_refl _
+
+
+/-! ## §4. Proved Cheaper `Hem` WHIR Parameter Schedules Across `nv ∈ 2..=24` -/
+
+/-- Proved `Hem` WHIR QROM schedule regimes derived from the joint-PoW QROM reduction (`§2.2`)
+    and `[CDHZ25]` post-quantum state-restoration + salted Merkle extraction (`§3`):
+    - `unitaryPow16`: `q = (200, 101, 69, 52)` + 16-bit PoW (`422` total queries, `-22.1%` vs `542`)
+      certified for `Q + 1 ≤ 2^40` under unitary `(2Q + 1)^2` / `8(Q + 1)^2` QROM + BHT Merkle;
+    - `cdhzPow16At2pow38`: `q = (202, 102, 70, 52)` + 16-bit PoW (`426` queries, `-21.4%`)
+      certified for `Q ≤ 2^38` under `[CDHZ25]` raw Theorem 6.9 (`80×`) + Theorem 8.3 (`160/240`) constants;
+    - `cdhz320Pow16At2pow40`: `q = (206, 104, 71, 53)` + 16-bit PoW (`434` queries, `-19.9%`)
+      certified for `Q + 1 ≤ 2^40` under `[CDHZ25]` `320×` PQSR + VCVio / BHT Merkle;
+    - `unitaryZeroPow`: `q = (216, 109, 74, 56)` + 0-bit PoW (`455` queries, `-16.1%`, zero PoW grinding!)
+      certified for `Q + 1 ≤ 2^40`. -/
+inductive HemOptimizedQromSchedule where
+  | unitaryPow16
+  | cdhzPow16At2pow38
+  | cdhz320Pow16At2pow40
+  | unitaryZeroPow
+  deriving DecidableEq, Repr
+
+/-- Stage query count `q_j` for blowup `2 ^ logBlowup` (`logBlowup ∈ {2, 4, 6, 8}`) under each
+    proved cheaper `Hem` QROM schedule. -/
+def HemOptimizedQromSchedule.minQueries (sched : HemOptimizedQromSchedule) (logBlowup : Nat) : Nat :=
+  match sched with
+  | .unitaryPow16 =>
+    if logBlowup ≤ 2 then 200 else if logBlowup ≤ 4 then 101 else if logBlowup ≤ 6 then 69 else 52
+  | .cdhzPow16At2pow38 =>
+    if logBlowup ≤ 2 then 202 else if logBlowup ≤ 4 then 102 else if logBlowup ≤ 6 then 70 else 52
+  | .cdhz320Pow16At2pow40 =>
+    if logBlowup ≤ 2 then 206 else if logBlowup ≤ 4 then 104 else if logBlowup ≤ 6 then 71 else 53
+  | .unitaryZeroPow =>
+    if logBlowup ≤ 2 then 216 else if logBlowup ≤ 4 then 109 else if logBlowup ≤ 6 then 74 else 56
+
+/-- Stage PoW grinding bits `bPow` paired with each proved schedule. -/
+def HemOptimizedQromSchedule.powBits : HemOptimizedQromSchedule → Nat
+  | .unitaryPow16 => 16
+  | .cdhzPow16At2pow38 => 16
+  | .cdhz320Pow16At2pow40 => 16
+  | .unitaryZeroPow => 0
+
+/-- Pure distinct-fiber query target bits certified on every non-exhaustive stage of `nv ∈ 2..=24`
+    for each schedule (`198`, `200`, `204`, `214`). -/
+def HemOptimizedQromSchedule.pureQueryTargetBits : HemOptimizedQromSchedule → Nat
+  | .unitaryPow16 => 198
+  | .cdhzPow16At2pow38 => 200
+  | .cdhz320Pow16At2pow40 => 204
+  | .unitaryZeroPow => 214
+
+/-- Universal 49-row `[CWYZ26]` Johnson witness table `(num_vars, stage, A, m, D)` covering ALL
+    four cheaper schedules simultaneously across EVERY `num_vars ∈ 2..=24`.
+    Every row for `num_vars ∈ 18..=24` (`K = 4..128` shard sizes and recursive hierarchy levels)
+    is **verbatim identical** to `hemJohnsonQromWitnessTable` (`affine_schedule.rs::WITNESSES`)! -/
+def hemOptimizedQromWitnessTable : List (Nat × Nat × Nat × Nat × Nat) :=
+  [ (7, 1, 98, 1, 25),
+    (8, 1, 98, 1, 25),
+    (9, 0, 196, 1, 22),
+    (9, 1, 108, 1, 11),
+    (10, 0, 310, 2, 27),
+    (10, 1, 107, 1, 10),
+    (11, 0, 309, 2, 26),
+    (11, 1, 107, 1, 10),
+    (12, 0, 563, 8, 139),
+    (12, 1, 299, 8, 116),
+    (12, 2, 168, 16, 258),
+    (13, 0, 1077, 16, 291),
+    (13, 1, 562, 32, 667),
+    (13, 2, 167, 32, 528),
+    (14, 0, 2108, 32, 687),
+    (14, 1, 1088, 32, 799),
+    (14, 2, 305, 64, 1374),
+    (15, 0, 4170, 64, 1823),
+    (15, 1, 1087, 64, 1753),
+    (15, 2, 305, 64, 1374),
+    (16, 0, 8294, 128, 5439),
+    (16, 1, 2137, 64, 2392),
+    (16, 2, 580, 64, 1921),
+    (17, 0, 8293, 128, 5375),
+    (17, 1, 2137, 64, 2392),
+    (17, 2, 304, 64, 1342),
+    (18, 0, 16531, 128, 7295),
+    (18, 1, 4229, 64, 3418),
+    (18, 2, 579, 64, 1890),
+    (19, 0, 33003, 128, 10879),
+    (19, 1, 8413, 64, 5471),
+    (19, 2, 1124, 32, 1305),
+    (20, 0, 65948, 128, 18111),
+    (20, 1, 16782, 32, 3286),
+    (20, 2, 2215, 32, 2149),
+    (21, 0, 65947, 128, 18047),
+    (21, 1, 16782, 32, 3286),
+    (21, 2, 2215, 32, 2149),
+    (22, 0, 131836, 128, 32511),
+    (22, 1, 16781, 32, 3270),
+    (22, 2, 2215, 32, 2149),
+    (23, 0, 263614, 64, 14494),
+    (23, 1, 33518, 32, 5870),
+    (23, 2, 8759, 16, 2733),
+    (23, 3, 2254, 32, 2672),
+    (24, 0, 527170, 64, 27164),
+    (24, 1, 66992, 32, 11069),
+    (24, 2, 17484, 16, 5228),
+    (24, 3, 4482, 16, 2067) ]
+
+def hemOptimizedQromTableRow (nv stage : Nat) : Option (Nat × Nat × Nat × Nat × Nat) :=
+  hemOptimizedQromWitnessTable.find? (fun r => r.1 == nv && r.2.1 == stage)
+
+def hemOptimizedStageExhaustive (sched : HemOptimizedQromSchedule) (g : HemStageGeom) : Bool :=
+  decide (g.n ≤ sched.minQueries g.logBlowup)
+
+def hemOptimizedStageWitness (sched : HemOptimizedQromSchedule) (nv : Nat) (g : HemStageGeom) :
+    Option WhirAffineWitness :=
+  (hemOptimizedQromTableRow nv g.stageIdx).map (fun r =>
+    { n := g.n, d := g.d, sFolds := g.stepVars, A := r.2.2.1, B := r.2.2.1 - 1,
+      m := r.2.2.2.1, D := r.2.2.2.2,
+      queries := sched.minQueries g.logBlowup,
+      queryTargetBits := sched.pureQueryTargetBits })
+
+def hemOptimizedStageCovered (sched : HemOptimizedQromSchedule) (q nv : Nat) (g : HemStageGeom) : Bool :=
+  if hemOptimizedStageExhaustive sched g = true then
+    (hemOptimizedQromTableRow nv g.stageIdx).isNone
+  else
+    match hemOptimizedStageWitness sched nv g with
+    | none => false
+    | some w => checkWhirAffineWitness w q && decide (whirAffineStageSimpleNum w + 1 < 1900)
+
+/-- Stage witnesses for `nv` under `sched` (non-exhaustive stages). -/
+def hemOptimizedStageWitnesses (sched : HemOptimizedQromSchedule) (nv : Nat) :
+    List WhirAffineWitness :=
+  (hemStageGeoms nv).filterMap (fun g =>
+    if hemOptimizedStageExhaustive sched g = true then none else hemOptimizedStageWitness sched nv g)
+
+/-- Pure distinct-fiber query error list `(A + s_i)_{q_i} / (n)_{q_i}` for `nv` under `sched`. -/
+def hemOptimizedQueryBounds (sched : HemOptimizedQromSchedule) (nv : Nat) : List RatBound :=
+  (hemOptimizedStageWitnesses sched nv).map whirAffinePureQueryBoundOrOne
+
+/-- **Universal Coverage Certificate Across All Four Cheaper Schedules (`nv ∈ 2..=24`)**:
+    1. Every canonical stage of every `nv ∈ 2..=24` passes `checkWhirAffineWitness` at `q = p^4`
+       under ALL FOUR schedules (`unitaryPow16`, `cdhzPow16At2pow38`, `cdhz320Pow16At2pow40`,
+       `unitaryZeroPow`), with folding numerator `< 1900`;
+    2. For all deployed `nv ∈ 18..=24`, `hemOptimizedQromTableRow` coincides identically with
+       `hemJohnsonQromTableRow` (`affine_schedule.rs::WITNESSES`)! -/
+theorem hemOptimizedSchedule_covers_all_canonical_stages :
+    (∀ (sched : HemOptimizedQromSchedule) (nv : Nat), 2 ≤ nv → nv ≤ 24 →
+      ∀ g ∈ hemStageGeoms nv,
+        hemOptimizedStageCovered sched (goldilocksPrime ^ 4) nv g = true) ∧
+    (∀ nv : Nat, 18 ≤ nv → nv ≤ 24 → ∀ s : Nat, s < 4 →
+      hemOptimizedQromTableRow nv s = hemJohnsonQromTableRow nv s) := by
+  have hU16 : ((List.range 23).all fun i =>
+      (hemStageGeoms (i + 2)).all
+        (hemOptimizedStageCovered .unitaryPow16 (goldilocksPrime ^ 4) (i + 2))) = true := by
+    decide +kernel
+  have hC38 : ((List.range 23).all fun i =>
+      (hemStageGeoms (i + 2)).all
+        (hemOptimizedStageCovered .cdhzPow16At2pow38 (goldilocksPrime ^ 4) (i + 2))) = true := by
+    decide +kernel
+  have hC40 : ((List.range 23).all fun i =>
+      (hemStageGeoms (i + 2)).all
+        (hemOptimizedStageCovered .cdhz320Pow16At2pow40 (goldilocksPrime ^ 4) (i + 2))) = true := by
+    decide +kernel
+  have hZ0 : ((List.range 23).all fun i =>
+      (hemStageGeoms (i + 2)).all
+        (hemOptimizedStageCovered .unitaryZeroPow (goldilocksPrime ^ 4) (i + 2))) = true := by
+    decide +kernel
+  have hParity : ((List.range 7).all fun i =>
+      (List.range 4).all fun s =>
+        decide (hemOptimizedQromTableRow (i + 18) s = hemJohnsonQromTableRow (i + 18) s)) = true := by
+    decide +kernel
+  refine ⟨?_, ?_⟩
+  · intro sched nv h2 h24 g hg
+    have hEq : nv - 2 + 2 = nv := by omega
+    cases sched with
+    | unitaryPow16 =>
+      have h1 := List.all_eq_true.mp hU16 (nv - 2) (List.mem_range.mpr (by omega))
+      rw [hEq] at h1; exact List.all_eq_true.mp h1 g hg
+    | cdhzPow16At2pow38 =>
+      have h1 := List.all_eq_true.mp hC38 (nv - 2) (List.mem_range.mpr (by omega))
+      rw [hEq] at h1; exact List.all_eq_true.mp h1 g hg
+    | cdhz320Pow16At2pow40 =>
+      have h1 := List.all_eq_true.mp hC40 (nv - 2) (List.mem_range.mpr (by omega))
+      rw [hEq] at h1; exact List.all_eq_true.mp h1 g hg
+    | unitaryZeroPow =>
+      have h1 := List.all_eq_true.mp hZ0 (nv - 2) (List.mem_range.mpr (by omega))
+      rw [hEq] at h1; exact List.all_eq_true.mp h1 g hg
+  · intro nv h18 h24 s hs
+    have h1 := List.all_eq_true.mp hParity (nv - 18) (List.mem_range.mpr (by omega))
+    have hEq : nv - 18 + 18 = nv := by omega
+    rw [hEq] at h1
+    exact of_decide_eq_true (List.all_eq_true.mp h1 s (List.mem_range.mpr hs))
+
+private theorem sumList_mono_pt {xs ys : List RatBound} (hLen : xs.length = ys.length)
+    (hPt : ∀ i : Fin xs.length, RatBound.le (xs.get i) (ys.get ⟨i.1, Nat.lt_of_lt_of_eq i.2 hLen⟩)) :
+    RatBound.le (RatBound.sumList xs) (RatBound.sumList ys) := by
+  induction xs generalizing ys with
+  | nil =>
+    cases ys with
+    | nil => exact RatBound.le_refl _
+    | cons _ _ => exact absurd hLen.symm (Nat.succ_ne_zero _)
+  | cons x xs' ih =>
+    cases ys with
+    | nil => exact absurd hLen (Nat.succ_ne_zero _)
+    | cons y ys' =>
+      exact RatBound.add_le_add (hPt ⟨0, Nat.zero_lt_succ _⟩)
+        (ih (Nat.succ.inj hLen) (fun i => hPt ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩))
+
+private theorem strictlyMoreThanBits_of_le {b : Nat} {r₁ r₂ : RatBound}
+    (hLe : RatBound.le r₁ r₂) (hStrict : strictlyMoreThanBits b r₂) :
+    strictlyMoreThanBits b r₁ := by
+  unfold RatBound.le at hLe
+  unfold strictlyMoreThanBits at hStrict ⊢
+  have h1 : r₁.num * 2 ^ b * r₂.den ≤ r₂.num * 2 ^ b * r₁.den := by
+    have hm := Nat.mul_le_mul_right (2 ^ b) hLe
+    have e1 : r₁.num * r₂.den * 2 ^ b = r₁.num * 2 ^ b * r₂.den := by rw [Nat.mul_right_comm]
+    have e2 : r₂.num * r₁.den * 2 ^ b = r₂.num * 2 ^ b * r₁.den := by rw [Nat.mul_right_comm]
+    rwa [e1, e2] at hm
+  have h2 : r₂.num * 2 ^ b * r₁.den < r₂.den * r₁.den :=
+    Nat.mul_lt_mul_of_pos_right hStrict r₁.h_pos
+  have h3 : r₁.num * 2 ^ b * r₂.den < r₁.den * r₂.den := by
+    rw [Nat.mul_comm r₁.den r₂.den]
+    exact Nat.lt_of_le_of_lt h1 h2
+  if hLt : r₁.num * 2 ^ b < r₁.den then
+    exact hLt
+  else
+    exfalso
+    exact Nat.not_le_of_gt h3 (Nat.mul_le_mul_right r₂.den (Nat.le_of_not_lt hLt))
+
+private theorem powScaledFsQromCompilerBound_mono_Q {Q QMax : Nat} (hQ : Q ≤ QMax)
+    (numRoots secBits stagePowBits : Nat)
+    (rbrBounds queryBounds : List RatBound) :
+    RatBound.le
+      (powScaledFsQromCompilerBound Q numRoots secBits stagePowBits rbrBounds queryBounds)
+      (powScaledFsQromCompilerBound QMax numRoots secBits stagePowBits rbrBounds queryBounds) := by
+  unfold powScaledFsQromCompilerBound
+  have hSq : (2 * Q + 1) ^ 2 ≤ (2 * QMax + 1) ^ 2 := Nat.pow_le_pow_left (by omega) 2
+  have hGr : 8 * (Q + 1) ^ 2 ≤ 8 * (QMax + 1) ^ 2 :=
+    Nat.mul_le_mul_left 8 (Nat.pow_le_pow_left (by omega) 2)
+  apply RatBound.add_le_add
+  · apply sumList_mono_pt (by simp)
+    intro i; simp only [List.get_eq_getElem, List.getElem_map]
+    exact scale_mono_left hSq _
+  · apply RatBound.add_le_add
+    · unfold qromMerkleOnlineExtractBound
+      apply scale_mono_right numRoots
+      apply RatBound.add_le_add
+      · unfold RatBound.le quantumGroverSingleTargetBound quantumZhandryMultiTargetBound
+        dsimp only
+        exact Nat.mul_le_mul_right _ (Nat.mul_le_mul_left _ (Nat.pow_le_pow_left (by omega) 2))
+      · unfold RatBound.le quantumBhtCollisionBound
+        dsimp only
+        exact Nat.mul_le_mul_right _ (Nat.mul_le_mul_left _ (Nat.pow_le_pow_left (by omega) 3))
+    · apply sumList_mono_pt (by simp)
+      intro i; simp only [List.get_eq_getElem, List.getElem_map]
+      exact scale_mono_left hGr _
+
+private theorem cdhzSnargEnvelopeBound_mono_Q {Q QMax : Nat} (hQ : Q ≤ QMax)
+    (qV logMaxLeaf secBits stagePowBits : Nat)
+    (rbrBounds queryBounds : List RatBound) :
+    RatBound.le
+      (cdhzSnargEnvelopeBound Q qV logMaxLeaf secBits stagePowBits rbrBounds queryBounds)
+      (cdhzSnargEnvelopeBound QMax qV logMaxLeaf secBits stagePowBits rbrBounds queryBounds) := by
+  unfold cdhzSnargEnvelopeBound cdhzSnargPartitionBound
+  dsimp only
+  apply RatBound.add_le_add
+  · apply scale_mono_right 4
+    unfold cdhzPqsrBound
+    apply scale_mono_left
+    exact Nat.mul_le_mul (Nat.mul_le_mul_left 80 (by omega)) (by omega)
+  · apply RatBound.add_le_add
+    · apply scale_mono_right 4
+      unfold RatBound.le cdhzSaltedMerkleOfflineBound
+      dsimp only
+      apply Nat.mul_le_mul_right
+      apply Nat.add_le_add_right
+      exact Nat.mul_le_mul (Nat.mul_le_mul_left 160 hQ) (Nat.pow_le_pow_left (by omega) 2)
+    · apply RatBound.add_le_add
+      · apply scale_mono_right 4
+        unfold RatBound.le cdhzSaltedMerkleOnlineBound
+        dsimp only
+        apply Nat.mul_le_mul_right
+        exact Nat.mul_le_mul (Nat.mul_le_mul_left 240 hQ) (Nat.pow_le_pow_left (by omega) 2)
+      · apply scale_mono_right (2 * qV ^ 2)
+        unfold RatBound.le cdhzSaltedMerkleComBound
+        dsimp only
+        exact Nat.mul_le_mul_right _ (Nat.mul_le_mul_left 240 (by omega))
+
+private theorem cdhz320BhtCompilerBound_mono_Q {Q QMax : Nat} (hQ : Q ≤ QMax)
+    (numRoots secBits stagePowBits : Nat)
+    (rbrBounds queryBounds : List RatBound) :
+    RatBound.le
+      (cdhz320BhtCompilerBound Q numRoots secBits stagePowBits rbrBounds queryBounds)
+      (cdhz320BhtCompilerBound QMax numRoots secBits stagePowBits rbrBounds queryBounds) := by
+  unfold cdhz320BhtCompilerBound
+  dsimp only
+  apply RatBound.add_le_add
+  · apply scale_mono_left
+    apply Nat.mul_le_mul_left 4
+    exact Nat.mul_le_mul (Nat.mul_le_mul_left 80 (by omega)) (by omega)
+  · unfold qromMerkleOnlineExtractBound
+    apply scale_mono_right numRoots
+    apply RatBound.add_le_add
+    · unfold RatBound.le quantumGroverSingleTargetBound quantumZhandryMultiTargetBound
+      dsimp only
+      exact Nat.mul_le_mul_right _ (Nat.mul_le_mul_left _ (Nat.pow_le_pow_left (by omega) 2))
+    · unfold RatBound.le quantumBhtCollisionBound
+      dsimp only
+      exact Nat.mul_le_mul_right _ (Nat.mul_le_mul_left _ (Nat.pow_le_pow_left (by omega) 3))
+
+/-- **Schedule 1 Soundness (`hemNv24_unitaryPow16_sound_up_to_2pow40`)**:
+    `q = (200, 101, 69, 52)` + 16-bit PoW (`422` total openings, saving `120` openings = `-22.1%`
+    vs `BciksJohnsonQrom128`'s `542`) achieves `< 2^-128` QROM security at `nv = 24` (`K = 128`
+    validators) for all `Q + 1 ≤ 2^40`! -/
+theorem hemNv24_unitaryPow16_sound_up_to_2pow40 (Q : Nat) (hQ : Q + 1 ≤ 2 ^ 40) :
+    strictlyMoreThanBits 128
+      (powScaledFsQromCompilerBound Q 5 256 16
+        hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .unitaryPow16 24)) ∧
+    atLeastBits 128
+      (powScaledFsQromCompilerBound Q 5 256 16
+        hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .unitaryPow16 24)) := by
+  have hTop : strictlyMoreThanBits 128
+      (powScaledFsQromCompilerBound (2 ^ 40 - 1) 5 256 16
+        hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .unitaryPow16 24)) := by
+    decide +kernel
+  have hLe := powScaledFsQromCompilerBound_mono_Q (Q := Q) (QMax := 2 ^ 40 - 1) (by omega) 5 256 16
+    hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .unitaryPow16 24)
+  have hStrict := strictlyMoreThanBits_of_le hLe hTop
+  exact ⟨hStrict, Nat.le_of_lt hStrict⟩
+
+/-- **Schedule 2 Soundness (`hemNv24_cdhz_sound_up_to_2pow38`)**:
+    `q = (202, 102, 70, 52)` + 16-bit PoW (`426` total openings) achieves `< 2^-128` QROM BCS
+    SNARG security across ALL query partitions `wFs + wVc ≤ Q` under `[CDHZ25]` Theorem A.1 +
+    Theorem 6.9 + Theorem 8.3's raw constants (`80`, `160`, `240`) for all `Q ≤ 2^38`! -/
+theorem hemNv24_cdhz_sound_up_to_2pow38 (Q wFs wVc : Nat)
+    (hQ : Q ≤ 2 ^ 38) (hPart : wFs + wVc ≤ Q) :
+    strictlyMoreThanBits 128
+      (cdhzSnargPartitionBound Q wFs wVc 426 20 256 16
+        hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .cdhzPow16At2pow38 24)) ∧
+    atLeastBits 128
+      (cdhzSnargPartitionBound Q wFs wVc 426 20 256 16
+        hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .cdhzPow16At2pow38 24)) := by
+  have hTop : strictlyMoreThanBits 128
+      (cdhzSnargEnvelopeBound (2 ^ 38) 426 20 256 16
+        hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .cdhzPow16At2pow38 24)) := by
+    decide +kernel
+  have hPartLe := cdhzSnargPartitionBound_le_envelope Q wFs wVc 426 20 256 16 hPart
+    hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .cdhzPow16At2pow38 24)
+  have hEnvLe := cdhzSnargEnvelopeBound_mono_Q hQ 426 20 256 16
+    hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .cdhzPow16At2pow38 24)
+  have hStrict := strictlyMoreThanBits_of_le (RatBound.le_trans hPartLe hEnvLe) hTop
+  exact ⟨hStrict, Nat.le_of_lt hStrict⟩
+
+/-- **Schedule 3 Soundness (`hemNv24_cdhz320_sound_up_to_2pow40`)**:
+    `q = (206, 104, 71, 53)` + 16-bit PoW (`434` total openings) achieves `< 2^-128` QROM security
+    under `[CDHZ25]`'s `320×` PQSR constant + BHT salted Merkle extraction for all `Q + 1 ≤ 2^40`! -/
+theorem hemNv24_cdhz320_sound_up_to_2pow40 (Q : Nat) (hQ : Q + 1 ≤ 2 ^ 40) :
+    strictlyMoreThanBits 128
+      (cdhz320BhtCompilerBound Q 5 256 16
+        hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .cdhz320Pow16At2pow40 24)) ∧
+    atLeastBits 128
+      (cdhz320BhtCompilerBound Q 5 256 16
+        hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .cdhz320Pow16At2pow40 24)) := by
+  have hTop : strictlyMoreThanBits 128
+      (cdhz320BhtCompilerBound (2 ^ 40 - 1) 5 256 16
+        hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .cdhz320Pow16At2pow40 24)) := by
+    decide +kernel
+  have hLe := cdhz320BhtCompilerBound_mono_Q (Q := Q) (QMax := 2 ^ 40 - 1) (by omega) 5 256 16
+    hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .cdhz320Pow16At2pow40 24)
+  have hStrict := strictlyMoreThanBits_of_le hLe hTop
+  exact ⟨hStrict, Nat.le_of_lt hStrict⟩
+
+/-- **Schedule 4 Soundness (`hemNv24_unitaryZeroPow_sound_up_to_2pow40`)**:
+    `q = (216, 109, 74, 56)` + **0-bit PoW** (`455` openings, eliminating 100% of PoW grinding!)
+    achieves `< 2^-128` QROM security for all `Q + 1 ≤ 2^40`! -/
+theorem hemNv24_unitaryZeroPow_sound_up_to_2pow40 (Q : Nat) (hQ : Q + 1 ≤ 2 ^ 40) :
+    strictlyMoreThanBits 128
+      (powScaledFsQromCompilerBound Q 5 256 0
+        hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .unitaryZeroPow 24)) ∧
+    atLeastBits 128
+      (powScaledFsQromCompilerBound Q 5 256 0
+        hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .unitaryZeroPow 24)) := by
+  have hTop : strictlyMoreThanBits 128
+      (powScaledFsQromCompilerBound (2 ^ 40 - 1) 5 256 0
+        hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .unitaryZeroPow 24)) := by
+    decide +kernel
+  have hLe := powScaledFsQromCompilerBound_mono_Q (Q := Q) (QMax := 2 ^ 40 - 1) (by omega) 5 256 0
+    hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .unitaryZeroPow 24)
+  have hStrict := strictlyMoreThanBits_of_le hLe hTop
+  exact ⟨hStrict, Nat.le_of_lt hStrict⟩
+
+
+/-! ## §5. `#tooth` Mutation-Sensitivity Refutations & Inhabitedness Certificates -/
+
+/-- Under-provisioned query schedule `q = (156, 79, 54, 41)` at `nv = 24`: sized as if QROM state
+    restoration scaled linearly `(Q + k) * ε` rather than quadratically `(2Q + 1)^2 * ε`. -/
+def hemNv24LinearSrFallacyQueryBounds : List RatBound :=
+  (whirAffineStageWitnesses 24 true).zipWith
+    (fun w q => whirAffinePureQueryBoundOrOne { w with queries := q })
+    [156, 79, 54, 41]
+
+/-- **`#tooth` Quadratic-vs-Linear State-Restoration Exponent Separation
+    (`tooth_linear_sr_query_schedule_unsound_in_qrom`)**:
+    `q = (156, 79, 54, 41)` + 16-bit PoW **passes** `< 2^-128` under classical linear state
+    restoration at `T = 2^40 - 1`, yet **strictly fails** (`¬ atLeastBits 128` & `exceedsBitBudget 128`)
+    QROM soundness at `Q = 2^40 - 1` because quantum salt/nonce search scales quadratically! -/
+theorem tooth_linear_sr_query_schedule_unsound_in_qrom :
+    ∃ Q : Nat, Q = 2 ^ 40 - 1 ∧
+      ¬ atLeastBits 128
+        (powScaledFsQromCompilerBound Q 5 256 16
+          hemV6FiveRoundRbrBounds hemNv24LinearSrFallacyQueryBounds) ∧
+      exceedsBitBudget 128
+        (powScaledFsQromCompilerBound Q 5 256 16
+          hemV6FiveRoundRbrBounds hemNv24LinearSrFallacyQueryBounds) ∧
+      strictlyMoreThanBits 128
+        (classicalStateRestorationBcsBound Q 5 256 16
+          hemV6FiveRoundRbrBounds hemNv24LinearSrFallacyQueryBounds) :=
+  ⟨2 ^ 40 - 1, rfl, by decide +kernel⟩
+
+/-- `#tooth`: `[CDHZ25]`'s raw Theorem 8.3 cubic Merkle constant (`4 * 160 * Q * (2Q+1)^2 / 2^256`)
+    crosses `2^-128` at `Q = 2^39`, certifying tightness of the `Q ≤ 2^38` budget in
+    `hemNv24_cdhz_sound_up_to_2pow38`! -/
+theorem tooth_cdhz_raw_merkle_fails_at_2pow39 :
+    ¬ atLeastBits 128
+      (cdhzSnargPartitionBound (2 ^ 39) (2 ^ 38) (2 ^ 38) 426 20 256 16
+        hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .cdhzPow16At2pow38 24)) := by
+  decide +kernel
+
+/-- Inhabitedness witness for `hemNv24_unitaryPow16_sound_up_to_2pow40` at full `Q = 2^40 - 1`
+    budget (`Q + 1 = 2^40`). -/
+theorem inhabited_hemNv24_unitaryPow16_at_2pow40 :
+    ∃ Q : Nat, Q = 2 ^ 40 - 1 ∧ Q + 1 ≤ 2 ^ 40 ∧
+      atLeastBits 128
+        (powScaledFsQromCompilerBound Q 5 256 16
+          hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .unitaryPow16 24)) :=
+  ⟨2 ^ 40 - 1, rfl, by decide,
+    (hemNv24_unitaryPow16_sound_up_to_2pow40 (2 ^ 40 - 1) (by decide)).2⟩
+
+/-- Inhabitedness witness for `hemNv24_cdhz_sound_up_to_2pow38` at `Q = 2^38` with non-trivial
+    balanced Fourier query split `wFs = 2^37`, `wVc = 2^37`. -/
+theorem inhabited_hemNv24_cdhz_at_2pow38 :
+    ∃ (Q wFs wVc : Nat), Q = 2 ^ 38 ∧ wFs = 2 ^ 37 ∧ wVc = 2 ^ 37 ∧
+      Q ≤ 2 ^ 38 ∧ wFs + wVc ≤ Q ∧
+      atLeastBits 128
+        (cdhzSnargPartitionBound Q wFs wVc 426 20 256 16
+          hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .cdhzPow16At2pow38 24)) :=
+  ⟨2 ^ 38, 2 ^ 37, 2 ^ 37, rfl, rfl, rfl, Nat.le_refl _, by decide,
+    (hemNv24_cdhz_sound_up_to_2pow38 (2 ^ 38) (2 ^ 37) (2 ^ 37) (Nat.le_refl _) (by decide)).2⟩
+
+/-- Inhabitedness witness for `hemNv24_unitaryZeroPow_sound_up_to_2pow40` at `Q = 2^40 - 1`. -/
+theorem inhabited_hemNv24_unitaryZeroPow_at_2pow40 :
+    ∃ Q : Nat, Q = 2 ^ 40 - 1 ∧ Q + 1 ≤ 2 ^ 40 ∧
+      atLeastBits 128
+        (powScaledFsQromCompilerBound Q 5 256 0
+          hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .unitaryZeroPow 24)) :=
+  ⟨2 ^ 40 - 1, rfl, by decide,
+    (hemNv24_unitaryZeroPow_sound_up_to_2pow40 (2 ^ 40 - 1) (by decide)).2⟩
+
+#verify_constructive
+  Qsag.saltedCanopy_cross_salt_disjoint
+  Qsag.saltedCanopy_fresh_salt_preprocessed_bound
+  Qsag.tooth_unsalted_canopy_preprocessed_collision
+  Qsag.domainTableWeight_le_tableWeight
+  Qsag.domainTableWeight_sum_eq_tableWeight
+  Qsag.coherent_salted_domain_budget_zero_of_overflow
+  Qsag.coherent_salted_oracle_execution_bridge
+  Qsag.dfmsCellDecompress_square
+  Qsag.dfmsCellDecompress_norm
+  Qsag.dfmsDecompress_square
+  Qsag.dfmsDecompress_norm
+  Qsag.dfmsDecompress_allBot
+  Qsag.dfmsDecompressState_norm
+  Qsag.dfmsAdvStateAt_eq
+  Qsag.dfmsAdvStateAt_decode
+  Qsag.dfmsAdv_event_eq
+  Qsag.coherent_dfms_hem256_authenticated_event_eq
+  Qsag.dfms_runtime_support
+  Qsag.dfms_database_overflow_mass_zero
+  Qsag.dfms_salted_domain_budget_zero_of_overflow
+  Qsag.dfms_projective_extraction_disturbance_bound
+  Qsag.dfms_hem256_online_extraction_disturbance_bound
+  Qsag.dfms_w2_coherent_runtime_witness
+  Qsag.tooth_dfms_w2_raw_database_measurement_disturbs
+  Qsag.classical_state_restoration_tree_bound
+  Qsag.classical_state_restoration_soundness
+  Qsag.classical_sr_sliced184_sound_at_2pow56
+  Qsag.jointPowChal_badCard_le
+  Qsag.canonicalZeroPowGate_card
+  Qsag.qrom_joint_pow_multiRound_success_bound
+  Qsag.tooth_post_squeeze_pow_forfeits_reduction
+  Qsag.measured_hem_qrom_bcs_end_to_end_bound
+  Qsag.cdhzSnargPartitionBound_le_envelope
+  Qsag.hemOptimizedSchedule_covers_all_canonical_stages
+  Qsag.hemNv24_unitaryPow16_sound_up_to_2pow40
+  Qsag.hemNv24_cdhz_sound_up_to_2pow38
+  Qsag.hemNv24_cdhz320_sound_up_to_2pow40
+  Qsag.hemNv24_unitaryZeroPow_sound_up_to_2pow40
+  Qsag.tooth_linear_sr_query_schedule_unsound_in_qrom
+  Qsag.tooth_cdhz_raw_merkle_fails_at_2pow39
+
+#tooth_pair saltedCanopy_fresh_salt_preprocessed_bound vs tooth_unsalted_canopy_preprocessed_collision
+#tooth_pair dfms_projective_extraction_disturbance_bound vs tooth_dfms_w2_raw_database_measurement_disturbs
+#tooth_pair qrom_joint_pow_multiRound_success_bound vs tooth_post_squeeze_pow_forfeits_reduction
+#tooth_pair hemNv24_unitaryPow16_sound_up_to_2pow40 vs tooth_linear_sr_query_schedule_unsound_in_qrom
+#tooth_pair hemNv24_cdhz_sound_up_to_2pow38 vs tooth_cdhz_raw_merkle_fails_at_2pow39
+
+#verify_inhabited hemNv24_unitaryPow16_sound_up_to_2pow40 inhabited_hemNv24_unitaryPow16_at_2pow40
+#verify_inhabited hemNv24_cdhz_sound_up_to_2pow38 inhabited_hemNv24_cdhz_at_2pow38
+#verify_inhabited hemNv24_unitaryZeroPow_sound_up_to_2pow40 inhabited_hemNv24_unitaryZeroPow_at_2pow40
+
+end Qsag
+end
