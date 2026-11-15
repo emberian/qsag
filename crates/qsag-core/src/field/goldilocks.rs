@@ -660,7 +660,10 @@ mod tests {
         let p = GOLDILOCKS_PRIME as u128;
         for &ar in &vals {
             let a = Goldilocks::from_canonical(ar).unwrap();
-            assert_eq!(a.mul_by_7().to_canonical_u64(), ((ar as u128 * 7) % p) as u64);
+            assert_eq!(
+                a.mul_by_7().to_canonical_u64(),
+                ((ar as u128 * 7) % p) as u64
+            );
             for hi in [0u64, 1, 6, (1 << 32) - 1] {
                 assert_eq!(
                     Goldilocks::reduce96(ar, hi).to_canonical_u64(),

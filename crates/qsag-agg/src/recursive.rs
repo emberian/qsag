@@ -3459,10 +3459,16 @@ mod tests {
         // A shard cannot borrow another shard's opening.
         let mut bad = aggregate.clone();
         let (a, b) = (bad.claims[0].clone(), bad.claims[1].clone());
-        (bad.claims[0].commitment, bad.claims[0].point, bad.claims[0].value) =
-            (b.commitment, b.point, b.value);
-        (bad.claims[1].commitment, bad.claims[1].point, bad.claims[1].value) =
-            (a.commitment, a.point, a.value);
+        (
+            bad.claims[0].commitment,
+            bad.claims[0].point,
+            bad.claims[0].value,
+        ) = (b.commitment, b.point, b.value);
+        (
+            bad.claims[1].commitment,
+            bad.claims[1].point,
+            bad.claims[1].value,
+        ) = (a.commitment, a.point, a.value);
         assert!(!check(&policies, epoch, msg, 8, &bad));
 
         // The prover refuses an opening made under another shard's header.

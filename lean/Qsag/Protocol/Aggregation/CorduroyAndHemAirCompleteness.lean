@@ -560,15 +560,18 @@ def corduroyAbsorbBlocks (eng : CorduroyPermEngine) (st : Poseidon2State12) (bs 
   termination_by structural bs
 
 /-- Engine-parametric tweakable width-12 `Poseidon2` sponge evaluation (`capacity = 4`, `digest = 4` Goldilocks limbs):
-    - Single-block chain/leaf steps (`.wotsStep`, `.forsLeaf`) execute Jive feed-forward
-      `lane4Add (eng.perm ⟨val, pkSeed, cap⟩).b0 val` (`sig.rs:poseidon2_compress12_ff`);
+    - Single-block chain/leaf steps (`.wotsStep`, `.forsLeaf`) execute the weighted Jive feed-forward
+      `(eng.perm ⟨val, pkSeed, cap⟩).b0 + val + 2·pkSeed + 4·cap`
+      (`sponge.rs:poseidon2_compress12_ff`, `poseidon2CompressWeighted` at `poseidon2Perm12`);
     - Multi-block / tree / `T_ℓ` / `H_msg` calls initialize capacity with `adrs` + length framing,
       absorb all `Lane4` blocks at rate `8`, and domain-squeeze `.b0 : Lane4`. -/
 def corduroySpongeEvalWith (eng : CorduroyPermEngine) (pkSeed : Lane4) (adrs : CorduroyAdrs) (blocks : List Lane4) : Lane4 :=
   let cap := corduroyEncodeAdrsCap adrs
   match adrs.kind, blocks with
-  | .wotsStep, [val] => lane4Add (eng.perm ⟨val, pkSeed, cap⟩).b0 val
-  | .forsLeaf, [val] => lane4Add (eng.perm ⟨val, pkSeed, cap⟩).b0 val
+  | .wotsStep, [val] =>
+    lane4Add (eng.perm ⟨val, pkSeed, cap⟩).b0 (poseidon2WeightedFeedForward ⟨val, pkSeed, cap⟩)
+  | .forsLeaf, [val] =>
+    lane4Add (eng.perm ⟨val, pkSeed, cap⟩).b0 (poseidon2WeightedFeedForward ⟨val, pkSeed, cap⟩)
   | _, _ =>
     let lenMeta : Lane4 := ⟨Goldilocks.ofNat blocks.length, corduroyPoseidon2Iv, Goldilocks.zero, Goldilocks.zero⟩
     let initSt := eng.perm ⟨pkSeed, lenMeta, cap⟩
@@ -584,12 +587,16 @@ def corduroySpongeEval (pkSeed : Lane4) (adrs : CorduroyAdrs) (blocks : List Lan
 
 theorem corduroySpongeEvalWith_jive_wots (eng : CorduroyPermEngine) (pkSeed : Lane4) (l tr kp c s : Nat) (val : Lane4) :
     corduroySpongeEvalWith eng pkSeed ⟨.wotsStep, l, tr, kp, c, s, 0⟩ [val] =
-      lane4Add (eng.perm ⟨val, pkSeed, corduroyEncodeAdrsCap ⟨.wotsStep, l, tr, kp, c, s, 0⟩⟩).b0 val := by
+      lane4Add (eng.perm ⟨val, pkSeed, corduroyEncodeAdrsCap ⟨.wotsStep, l, tr, kp, c, s, 0⟩⟩).b0
+        (poseidon2WeightedFeedForward
+          ⟨val, pkSeed, corduroyEncodeAdrsCap ⟨.wotsStep, l, tr, kp, c, s, 0⟩⟩) := by
   unfold corduroySpongeEvalWith; rfl
 
 theorem corduroySpongeEvalWith_jive_fors (eng : CorduroyPermEngine) (pkSeed : Lane4) (lg j idx : Nat) (val : Lane4) :
     corduroySpongeEvalWith eng pkSeed ⟨.forsLeaf, 0, lg, idx, j, 0, 0⟩ [val] =
-      lane4Add (eng.perm ⟨val, pkSeed, corduroyEncodeAdrsCap ⟨.forsLeaf, 0, lg, idx, j, 0, 0⟩⟩).b0 val := by
+      lane4Add (eng.perm ⟨val, pkSeed, corduroyEncodeAdrsCap ⟨.forsLeaf, 0, lg, idx, j, 0, 0⟩⟩).b0
+        (poseidon2WeightedFeedForward
+          ⟨val, pkSeed, corduroyEncodeAdrsCap ⟨.forsLeaf, 0, lg, idx, j, 0, 0⟩⟩) := by
   unfold corduroySpongeEvalWith; rfl
 
 attribute [local irreducible] corduroySpongeEvalWith
@@ -1747,7 +1754,36 @@ def mpcCorduroyPrfMsgWith (mr : CorduroyMpcPermRunner) (lambdas : List Goldilock
     | none => none
     | some out1Sh => some (lagrangeCombineLane4 lambdas (out1Sh.map (·.b0)))
 
-/-- Share-level Jive feed-forward step `[val] -> [F(pkSeed, adrs, val)]` keeping chain links secret-shared! -/
+/-- Public part `2·pkSeed + 4·cap` of the weighted Jive feed-forward: both the second rate block and
+    the tweak are public in a chain/leaf step, so parties add it as a public constant. -/
+def corduroyJivePublicOffset (pkSeed cap : Lane4) : Lane4 :=
+  lane4Add (lane4Scale (Goldilocks.ofNat 2) pkSeed) (lane4Scale (Goldilocks.ofNat 4) cap)
+
+private theorem lane4Add_jive_assoc (p v k c : Lane4) :
+    lane4Add (lane4Add p v) (lane4Add k c) = lane4Add p (lane4Add (lane4Add v k) c) := by
+  rcases p with ⟨p0, p1, p2, p3⟩
+  rcases v with ⟨v0, v1, v2, v3⟩
+  rcases k with ⟨k0, k1, k2, k3⟩
+  rcases c with ⟨c0, c1, c2, c3⟩
+  have h : ∀ p v k c : Goldilocks,
+      Goldilocks.add (Goldilocks.add p v) (Goldilocks.add k c) =
+        Goldilocks.add p (Goldilocks.add (Goldilocks.add v k) c) := fun p v k c =>
+    (LawfulCommRing.add_assoc p v (Goldilocks.add k c)).trans
+      (congrArg (Goldilocks.add p) (LawfulCommRing.add_assoc v k c).symm)
+  unfold lane4Add
+  dsimp only
+  rw [h p0 v0 k0 c0, h p1 v1 k1 c1, h p2 v2 k2 c2, h p3 v3 k3 c3]
+
+/-- The share-level value `(perm.b0 + val) + (2·pkSeed + 4·cap)` is the weighted feed-forward output. -/
+private theorem corduroyJive_offset_eq (p val pkSeed cap : Lane4) :
+    lane4Add (lane4Add p val) (corduroyJivePublicOffset pkSeed cap) =
+      lane4Add p (poseidon2WeightedFeedForward ⟨val, pkSeed, cap⟩) := by
+  unfold corduroyJivePublicOffset poseidon2WeightedFeedForward
+  exact lane4Add_jive_assoc p val _ _
+
+/-- Share-level weighted Jive feed-forward step `[val] -> [F(pkSeed, adrs, val)]` keeping chain links
+    secret-shared: shares of `perm.b0 + val` plus the public constant `2·pkSeed + 4·cap`
+    (`eval_spdz_hem_compress12_ff_batch` in `poseidon2_mpc.rs`). -/
 def mpcCorduroySharedJiveStepWith (mr : CorduroyMpcPermRunner) (lambdas : List Goldilocks)
     (pkSeed : Lane4) (adrs : CorduroyAdrs) (valSh : List Lane4) (prep : Poseidon2CallPrep) : Option (List Lane4) :=
   let n := lambdas.length
@@ -1755,7 +1791,9 @@ def mpcCorduroySharedJiveStepWith (mr : CorduroyMpcPermRunner) (lambdas : List G
   let stSh := zipState12Shares valSh (List.replicate n pkSeed) (List.replicate n cap)
   match mr.runPerm lambdas stSh prep with
   | none => none
-  | some permSh => some (zipAddLane4Shares (permSh.map (·.b0)) valSh)
+  | some permSh =>
+    some (zipAddLane4Shares (zipAddLane4Shares (permSh.map (·.b0)) valSh)
+      (List.replicate n (corduroyJivePublicOffset pkSeed cap)))
 
 def mpcCorduroySharedChainIterWith (mr : CorduroyMpcPermRunner) (lambdas : List Goldilocks) (pkSeed : Lane4)
     (layer treeIdx kpIdx chainIdx startStep steps : Nat)
@@ -2052,7 +2090,8 @@ private theorem mpcCorduroySharedJiveStepWith_eq (eng : CorduroyPermEngine) (mr 
       mpcCorduroySharedJiveStepWith mr lambdas pkSeed adrs valSh prep = some nextSh ∧
       nextSh.length = lambdas.length ∧
       lagrangeCombineLane4 lambdas nextSh =
-        lane4Add (eng.perm ⟨val, pkSeed, corduroyEncodeAdrsCap adrs⟩).b0 val := by
+        lane4Add (eng.perm ⟨val, pkSeed, corduroyEncodeAdrsCap adrs⟩).b0
+          (poseidon2WeightedFeedForward ⟨val, pkSeed, corduroyEncodeAdrsCap adrs⟩) := by
   let n := lambdas.length
   let cap := corduroyEncodeAdrsCap adrs
   let stSh := zipState12Shares valSh (List.replicate n pkSeed) (List.replicate n cap)
@@ -2064,17 +2103,23 @@ private theorem mpcCorduroySharedJiveStepWith_eq (eng : CorduroyPermEngine) (mr 
         hValComb, lagrangeCombineLane4_replicate_public lambdas hSumOne pkSeed,
         lagrangeCombineLane4_replicate_public lambdas hSumOne cap]
   rw [hStComb] at hPermComb
-  obtain ⟨hNextLen, hNextComb⟩ := zipAddLane4Shares_spec lambdas (permSh.map (·.b0)) valSh
+  obtain ⟨hSumLen, hSumComb⟩ := zipAddLane4Shares_spec lambdas (permSh.map (·.b0)) valSh
     (by simp [hPermLen]) hValLen
+  obtain ⟨hNextLen, hNextComb⟩ := zipAddLane4Shares_spec lambdas
+    (zipAddLane4Shares (permSh.map (·.b0)) valSh)
+    (List.replicate n (corduroyJivePublicOffset pkSeed cap)) hSumLen List.length_replicate
   have hProj := lagrangeCombineState12_proj lambdas permSh
   rw [hPermComb] at hProj
   have hb0 : lagrangeCombineLane4 lambdas (permSh.map (·.b0)) =
       (eng.perm ⟨val, pkSeed, cap⟩).b0 := (congrArg Poseidon2State12.b0 hProj).symm
-  refine ⟨zipAddLane4Shares (permSh.map (·.b0)) valSh, ?_, hNextLen, ?_⟩
+  refine ⟨zipAddLane4Shares (zipAddLane4Shares (permSh.map (·.b0)) valSh)
+    (List.replicate n (corduroyJivePublicOffset pkSeed cap)), ?_, hNextLen, ?_⟩
   · unfold mpcCorduroySharedJiveStepWith
     dsimp only [n, cap, stSh]
     rw [hRun]
-  · rw [hNextComb, hb0, hValComb]
+  · rw [hNextComb, hSumComb, hb0, hValComb,
+      lagrangeCombineLane4_replicate_public lambdas hSumOne (corduroyJivePublicOffset pkSeed cap)]
+    exact corduroyJive_offset_eq _ val pkSeed cap
 
 private theorem mpcCorduroySharedChainIterWith_eq (eng : CorduroyPermEngine) (mr : CorduroyMpcPermRunner)
     (lambdas : List Goldilocks) (hSim : CorduroyMpcSimulates mr eng lambdas)
@@ -2097,7 +2142,9 @@ private theorem mpcCorduroySharedChainIterWith_eq (eng : CorduroyPermEngine) (mr
         (wotsStepAdrs layer treeIdx kpIdx chainIdx startStep) valSh val hLen hComb
         (stepPrep startStep) (hPrep startStep)
     have hStepEq : lane4Add (eng.perm ⟨val, pkSeed,
-        corduroyEncodeAdrsCap (wotsStepAdrs layer treeIdx kpIdx chainIdx startStep)⟩).b0 val =
+        corduroyEncodeAdrsCap (wotsStepAdrs layer treeIdx kpIdx chainIdx startStep)⟩).b0
+        (poseidon2WeightedFeedForward ⟨val, pkSeed,
+          corduroyEncodeAdrsCap (wotsStepAdrs layer treeIdx kpIdx chainIdx startStep)⟩) =
         corduroyWotsStepWith eng pkSeed layer treeIdx kpIdx chainIdx startStep val := by
       rw [corduroyWotsStepWith_eq]
       exact (corduroySpongeEvalWith_jive_wots eng pkSeed layer treeIdx kpIdx chainIdx startStep val).symm

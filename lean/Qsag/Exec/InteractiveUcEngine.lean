@@ -45,6 +45,7 @@ public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Protocol.Threshold.ThresholdApproval
 public import Qsag.Protocol.Threshold.ThresholdMpc
 public import Qsag.Protocol.Threshold.IdealTsig
+import all Qsag.Math.Algebra
 import all Qsag.Protocol.Aggregation.UcGames
 import all Qsag.Protocol.Threshold.ThresholdMpc
 
@@ -974,12 +975,6 @@ theorem realProtocolExec_approvedMsgs_provenance
   (natAbsDiff (distAcceptCount card₁ exec₁ D * card₂)
               (distAcceptCount card₂ exec₂ D * card₁),
    card₁ * card₂)
-
-private theorem qsum_mul_right : ∀ (n c : Nat) (f : Fin n → Nat),
-    qsum n (fun i => f i * c) = qsum n f * c
-  | 0, _, _ => by simp [qsum]
-  | n + 1, c, f => by
-    simp only [qsum, qsum_mul_right n c, Nat.add_mul]
 
 private theorem qsum_swap : ∀ (m n : Nat) (g : Fin m → Fin n → Nat),
     qsum m (fun i => qsum n (fun j => g i j)) =

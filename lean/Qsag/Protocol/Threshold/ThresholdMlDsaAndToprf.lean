@@ -62,6 +62,8 @@ public import Qsag.Tactic.AssuranceKit
 import all Qsag.Protocol.Credentials.AdvancedMpcAndCreds
 import all Qsag.Coding.Cwyz26
 import all Qsag.Math.Goldilocks
+import all Qsag.Math.Lattices
+import all Qsag.Math.Primality
 
 public section
 namespace Qsag
@@ -10670,10 +10672,8 @@ private theorem mldsaZeta_pow_ne_of_lt {i j : Nat} (hij : i < j) (hj : j < 512) 
   have hOne : Fq204.pow mldsaZeta (j - i) = Fq204.one := by
     rw [← Fq204.one_mul (Fq204.pow mldsaZeta (j - i)), ← hInv, Fq204.mul_assoc, ← Fq204.pow_add,
       Nat.add_sub_of_le (Nat.le_of_lt hij), ← hEq, hInv]
-  have hVal : 1753 ^ (j - i) % mldsaQ = 1 := by
-    have h := congrArg Fq204.val hOne
-    rw [Fq204.pow_val] at h
-    exact h
+  have hVal : 1753 ^ (j - i) % mldsaQ = 1 :=
+    (Fq204.pow_val mldsaZeta (j - i)).symm.trans (congrArg Fq204.val hOne)
   have hChk : ((j - i) == 0 || 1753 ^ (j - i) % mldsaQ != 1) = true :=
     List.all_eq_true.mp mldsaZeta_pow_ne_one_check (j - i)
       (List.mem_range.mpr (Nat.lt_of_le_of_lt (Nat.sub_le j i) hj))
