@@ -473,6 +473,128 @@ impl LockedRecord {
     }
 }
 
+/// Size of one high-water-mark slot: `counter(8) || tip(32) || mac(32) || zero(8)`.
+pub const HWM_SLOT_BYTES: usize = 80;
+
+/// Byte order of the slot counter. It is part of each journal's persisted format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CounterOrder {
+    Big,
+    Little,
+}
+
+/// Authenticates one slot: `(slot index, encoded counter, chain tip, reserved bytes)`.
+/// The caller's closure supplies the key, domain tag and every journal-specific binding.
+pub type HwmSlotMac<'a> = &'a dyn Fn(u8, &[u8; 8], &[u8; 32], &[u8; 8]) -> [u8; 32];
+
+/// The hash chain as read back from disk, after every record MAC verified.
+pub struct ChainHead<'a> {
+    /// Number of committed records the chain holds.
+    pub len: u64,
+    /// Tag of the last record (the genesis tag when `len == 0`).
+    pub tip: &'a [u8; 32],
+    /// Tag of the record before it (the genesis tag when `len <= 1`).
+    pub previous_tip: &'a [u8; 32],
+}
+
+/// Two authenticated high-water-mark slots guarding an append-only hash chain
+/// against tail truncation.
+///
+/// A commit appends and syncs the record first, then writes and syncs slot A, then
+/// slot B. A valid file therefore has `A == B` (steady state) or `A == B + 1` (crash
+/// between the two slot syncs), and the chain holds `A` or `A + 1` records (crash
+/// after the record sync, before slot A). Anything else, including a chain shorter
+/// than `A`, is rejected; the two crash states are healed forward.
+pub struct TwoSlotHwm<'a> {
+    pub offset_a: u64,
+    pub offset_b: u64,
+    pub order: CounterOrder,
+    pub mac: HwmSlotMac<'a>,
+}
+
+impl TwoSlotHwm<'_> {
+    fn counter_bytes(&self, counter: u64) -> [u8; 8] {
+        match self.order {
+            CounterOrder::Big => counter.to_be_bytes(),
+            CounterOrder::Little => counter.to_le_bytes(),
+        }
+    }
+
+    pub fn encode(&self, slot: u8, counter: u64, tip: &[u8; 32]) -> [u8; HWM_SLOT_BYTES] {
+        let counter = self.counter_bytes(counter);
+        let mut out = [0u8; HWM_SLOT_BYTES];
+        out[..8].copy_from_slice(&counter);
+        out[8..40].copy_from_slice(tip);
+        out[40..72].copy_from_slice(&(self.mac)(slot, &counter, tip, &[0u8; 8]));
+        out
+    }
+
+    /// Authenticate one slot and return its `(counter, tip)`.
+    pub fn verify(&self, slot: u8, raw: &[u8]) -> io::Result<(u64, [u8; 32])> {
+        let raw: &[u8; HWM_SLOT_BYTES] = raw.try_into().map_err(|_| invalid())?;
+        let counter: [u8; 8] = raw[..8].try_into().map_err(|_| invalid())?;
+        let tip: [u8; 32] = raw[8..40].try_into().map_err(|_| invalid())?;
+        let stored: [u8; 32] = raw[40..72].try_into().map_err(|_| invalid())?;
+        let reserved: [u8; 8] = raw[72..].try_into().map_err(|_| invalid())?;
+        if reserved != [0u8; 8]
+            || !crate::ct_eq_32(&(self.mac)(slot, &counter, &tip, &reserved), &stored)
+        {
+            return Err(invalid());
+        }
+        let counter = match self.order {
+            CounterOrder::Big => u64::from_be_bytes(counter),
+            CounterOrder::Little => u64::from_le_bytes(counter),
+        };
+        Ok((counter, tip))
+    }
+
+    /// Record `counter` records ending at `tip`: slot A, sync, slot B, sync. Call
+    /// only after the record itself is synced.
+    pub fn commit(&self, file: &File, counter: u64, tip: &[u8; 32]) -> io::Result<()> {
+        write_at_exact(file, self.offset_a, &self.encode(0, counter, tip))?;
+        file.sync_all()?;
+        write_at_exact(file, self.offset_b, &self.encode(1, counter, tip))?;
+        file.sync_all()
+    }
+
+    /// Reconcile both stored slots with the chain found on disk, healing the two
+    /// legal crash states. Returns an error, without writing, for every other state.
+    pub fn recover(
+        &self,
+        file: &File,
+        raw_a: &[u8],
+        raw_b: &[u8],
+        head: &ChainHead<'_>,
+    ) -> io::Result<()> {
+        let (a, tip_a) = self.verify(0, raw_a)?;
+        let (b, tip_b) = self.verify(1, raw_b)?;
+        if a < b || a - b > 1 {
+            return Err(invalid());
+        }
+        if head.len == a {
+            if !crate::ct_eq_32(head.tip, &tip_a) {
+                return Err(invalid());
+            }
+            if b != a || !crate::ct_eq_32(&tip_b, &tip_a) {
+                write_at_exact(file, self.offset_b, &self.encode(1, a, head.tip))?;
+                file.sync_all()?;
+            }
+            Ok(())
+        } else if a.checked_add(1) == Some(head.len) {
+            // The record reached the disk; neither slot was advanced yet.
+            if a != b
+                || !crate::ct_eq_32(&tip_a, &tip_b)
+                || !crate::ct_eq_32(head.previous_tip, &tip_a)
+            {
+                return Err(invalid());
+            }
+            self.commit(file, head.len, head.tip)
+        } else {
+            Err(invalid())
+        }
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -737,5 +859,153 @@ mod tests {
             record.read().unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    #[test]
+    fn nofollow_flag_table_fails_closed_on_unknown_targets() {
+        assert_eq!(
+            open_nofollow_nonblock_flags("linux", "x86_64"),
+            Some(0x20000 | 0x800)
+        );
+        assert_eq!(
+            open_nofollow_nonblock_flags("linux", "aarch64"),
+            Some(0x8000 | 0x800)
+        );
+        assert_eq!(
+            open_nofollow_nonblock_flags("linux", "mips64"),
+            Some(0x20000 | 0x80)
+        );
+        assert_eq!(
+            open_nofollow_nonblock_flags("linux", "sparc64"),
+            Some(0x20000 | 0x4000)
+        );
+        assert_eq!(open_nofollow_nonblock_flags("macos", "aarch64"), Some(0x104));
+        assert_eq!(open_nofollow_nonblock_flags("linux", "alpha"), None);
+        assert_eq!(open_nofollow_nonblock_flags("freebsd", "x86_64"), None);
+    }
+
+    #[test]
+    fn lock_inode_is_the_held_descriptor_identity() {
+        let temp = Temp::new();
+        let path = temp.record();
+        let record = LockedRecord::create_new(&path).unwrap();
+        record.replace(b"payload").unwrap();
+        let named = fs::symlink_metadata(side_path(&path, ".lock")).unwrap();
+        assert_eq!(record.lock_inode(), file_identity(&named));
+        assert_eq!(record.lock_identity_seal()[..16], record.lock_inode());
+    }
+
+    /// A keyless stand-in for the caller's MAC: binds every input so a slot moved to
+    /// the other index, or edited anywhere, stops verifying.
+    fn toy_mac(slot: u8, counter: &[u8; 8], tip: &[u8; 32], reserved: &[u8; 8]) -> [u8; 32] {
+        let mut out = [0x5au8; 32];
+        for (i, b) in counter.iter().chain(tip).chain(reserved).enumerate() {
+            out[i % 32] = out[i % 32].rotate_left(3) ^ b ^ (i as u8) ^ slot.wrapping_mul(0x9d);
+        }
+        out
+    }
+
+    struct HwmFile {
+        _temp: Temp,
+        file: File,
+    }
+    impl HwmFile {
+        fn new() -> Self {
+            let temp = Temp::new();
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(temp.record())
+                .unwrap();
+            file.set_len(2 * HWM_SLOT_BYTES as u64).unwrap();
+            Self { _temp: temp, file }
+        }
+        fn slots(&self) -> ([u8; HWM_SLOT_BYTES], [u8; HWM_SLOT_BYTES]) {
+            use std::os::unix::fs::FileExt;
+            let mut a = [0u8; HWM_SLOT_BYTES];
+            let mut b = [0u8; HWM_SLOT_BYTES];
+            self.file.read_exact_at(&mut a, 0).unwrap();
+            self.file.read_exact_at(&mut b, HWM_SLOT_BYTES as u64).unwrap();
+            (a, b)
+        }
+    }
+
+    #[test]
+    fn two_slot_hwm_heals_only_the_two_crash_states() {
+        for order in [CounterOrder::Big, CounterOrder::Little] {
+            let hwm = TwoSlotHwm {
+                offset_a: 0,
+                offset_b: HWM_SLOT_BYTES as u64,
+                order,
+                mac: &toy_mac,
+            };
+            let tips: [[u8; 32]; 4] = core::array::from_fn(|i| [i as u8 + 1; 32]);
+            let head = |len: usize| ChainHead {
+                len: len as u64,
+                tip: &tips[len],
+                previous_tip: &tips[len.saturating_sub(1)],
+            };
+            let disk = HwmFile::new();
+
+            // Steady state round trip; the counter is stored in the declared order.
+            hwm.commit(&disk.file, 2, &tips[2]).unwrap();
+            let (a, b) = disk.slots();
+            assert_eq!(hwm.verify(0, &a).unwrap(), (2, tips[2]));
+            assert_eq!(hwm.verify(1, &b).unwrap(), (2, tips[2]));
+            let stored = match order {
+                CounterOrder::Big => 2u64.to_be_bytes(),
+                CounterOrder::Little => 2u64.to_le_bytes(),
+            };
+            assert_eq!(a[..8], stored);
+            hwm.recover(&disk.file, &a, &b, &head(2)).unwrap();
+            assert_eq!(disk.slots(), (a, b), "steady state is not rewritten");
+
+            // A slot is bound to its index, its length and every byte.
+            assert!(hwm.verify(1, &a).is_err());
+            assert!(hwm.verify(0, &a[..79]).is_err());
+            for i in 0..HWM_SLOT_BYTES {
+                let mut bad = a;
+                bad[i] ^= 1;
+                assert!(hwm.verify(0, &bad).is_err(), "byte {i}");
+            }
+
+            // Tail truncation and a foreign tip are refused without writing.
+            assert!(hwm.recover(&disk.file, &a, &b, &head(1)).is_err());
+            assert!(hwm.recover(&disk.file, &a, &b, &head(0)).is_err());
+            let foreign = ChainHead {
+                len: 2,
+                tip: &tips[3],
+                previous_tip: &tips[1],
+            };
+            assert!(hwm.recover(&disk.file, &a, &b, &foreign).is_err());
+            // Two records beyond the mark cannot come from one interrupted commit.
+            hwm.commit(&disk.file, 1, &tips[1]).unwrap();
+            let (a1, b1) = disk.slots();
+            assert!(hwm.recover(&disk.file, &a1, &b1, &head(3)).is_err());
+            assert_eq!(disk.slots(), (a1, b1));
+
+            // Crash after the record sync, before slot A: both slots advance.
+            hwm.recover(&disk.file, &a1, &b1, &head(2)).unwrap();
+            assert_eq!(disk.slots(), (a, b));
+            // ...but only onto the record that extends the marked tip.
+            hwm.commit(&disk.file, 1, &tips[1]).unwrap();
+            let wrong_parent = ChainHead {
+                len: 2,
+                tip: &tips[2],
+                previous_tip: &tips[3],
+            };
+            assert!(hwm.recover(&disk.file, &a1, &b1, &wrong_parent).is_err());
+
+            // Crash between the slot syncs (A ahead by one): slot B is healed.
+            hwm.recover(&disk.file, &a, &b1, &head(2)).unwrap();
+            assert_eq!(disk.slots().1, b);
+            // With A ahead, a chain one past A is not a legal crash state.
+            assert!(hwm.recover(&disk.file, &a, &b1, &head(3)).is_err());
+            // B ahead of A, or A ahead by two, never happens.
+            assert!(hwm.recover(&disk.file, &a1, &b, &head(2)).is_err());
+            let a3 = hwm.encode(0, 3, &tips[3]);
+            assert!(hwm.recover(&disk.file, &a3, &b1, &head(3)).is_err());
+        }
     }
 }
