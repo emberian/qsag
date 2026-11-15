@@ -1,8 +1,8 @@
 module
 import all QsagVerified.Funs
 public import QsagVerified.Proofs.Sponge
-public import Qsag.Keccak
-import all Qsag.Keccak
+public import Qsag.Oracle.Keccak
+import all Qsag.Oracle.Keccak
 
 /-!
 The universal theorem here covers the extracted 24-round permutation. The phase laws

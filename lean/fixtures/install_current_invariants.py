@@ -28,7 +28,7 @@ def install(proposals):
         return "".join(definitions) + match[1] + "\n  " + " ".join(body.split()) + "\n\n"
     pattern = r"(def qsag_asm_\w+_currentInv : PcMap \w+ :=)\n(.*?)(?=\n\ndef |\Z)"
     emitted = re.sub(pattern, compress, proposals, flags=re.S)
-    slices = (ROOT / "lean/Qsag/ElfFixtureSlices.lean").read_text()
+    slices = (ROOT / "lean/Qsag/Machine/ElfFixtureSlices.lean").read_text()
     for prefix, kind, expected in [("currentX86", "x86", 19), ("currentAarch64", "arm", 9)]:
         part = slices.split(f"def {prefix}ExtractedSlices")[1].split("]\n\n")[0]
         names = re.findall(r'name := "([^"]+)"', part)
@@ -36,7 +36,7 @@ def install(proposals):
             raise ValueError(f"missing or unexpected {prefix} certificate inventory")
         emitted += f"def {prefix}InvCerts : List InvCert := [\n"
         emitted += ",\n".join(f"  .{kind} {name}_currentInv" for name in names) + "\n]\n\n"
-    path = ROOT / "lean/Qsag/ElfInvCerts.lean"
+    path = ROOT / "lean/Qsag/Machine/ElfInvCerts.lean"
     old = path.read_text()
     if old.count(MARKER) != 1:
         raise ValueError("missing or ambiguous current-certificate boundary")

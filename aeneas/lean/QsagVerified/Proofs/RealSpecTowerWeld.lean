@@ -1,8 +1,8 @@
 module
 import all QsagVerified.Funs
 public import QsagVerified.Proofs.TowerBdoz
-public import Qsag.BinaryTower
-import all Qsag.BinaryTower
+public import Qsag.Math.BinaryTower
+import all Qsag.Math.BinaryTower
 
 /-!
 # Binary-tower weld between the Aeneas extraction and `Qsag.BinaryTower`

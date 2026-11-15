@@ -1,4 +1,4 @@
-"""Turn the output of tools/GenInvCerts.lean into Qsag/ElfInvCerts.lean.
+"""Turn the output of tools/GenInvCerts.lean into Qsag/Machine/ElfInvCerts.lean.
 The certificates are untrusted proposals; Lean checks each one in ElfFixtureVerify.
 
   lake env lean tools/GenInvCerts.lean | python3 tools/generate_inv_certs.py
@@ -24,7 +24,7 @@ assert len(certs['x86']) == 16 and len(certs['aarch64']) == 7, {k: len(v) for k,
 out = '''module
 /- Invariant certificates proposed by tools/GenInvCerts.lean (untrusted fixpoint inference run
 outside the kernel). Each one is checked against its symbol's decoded bytes in ElfFixtureVerify. -/
-public import Qsag.ElfBinaryVerify
+public import Qsag.Machine.ElfBinaryVerify
 public section
 namespace Qsag
 set_option autoImplicit false
@@ -37,4 +37,4 @@ for arch, ty, ctor in [('x86', 'X86AbsState', 'x86'), ('aarch64', 'Arm64AbsState
     items = ', '.join(f'.{ctor} {arch}InvCert{i:02d}' for i in range(len(certs[arch])))
     out += f'def {arch}InvCerts : List InvCert :=\n  [{items}]\n\n'
 out += 'end Qsag\n'
-(root / 'Qsag/ElfInvCerts.lean').write_text(out)
+(root / 'Qsag/Machine/ElfInvCerts.lean').write_text(out)

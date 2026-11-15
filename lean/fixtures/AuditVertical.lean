@@ -13,7 +13,7 @@ import all Qsag.Machine.IsaCosim
 open Lean Elab Command
 elab "#auditVertical" : command => do
   let env := (← getEnv).setExporting false
-  let targets : List Name := [`Qsag.CompiledRlibFixtures, `Qsag.ElfFixtureSlices, `Qsag.ElfInvCerts, `Qsag.ElfParse, `Qsag.McRefine, `Qsag.ElfBinaryVerify, `Qsag.ElfFixtureVerify, `Qsag.ElfFunctionalEquiv, `Qsag.SydTvTranslationValidation, `Qsag.IsaCosim]
+  let targets : List Name := [`Qsag.Machine.CompiledRlibFixtures, `Qsag.Machine.ElfFixtureSlices, `Qsag.Machine.ElfInvCerts, `Qsag.Machine.ElfParse, `Qsag.Machine.McRefine, `Qsag.Machine.ElfBinaryVerify, `Qsag.Machine.ElfFixtureVerify, `Qsag.Machine.ElfFunctionalEquiv, `Qsag.Machine.SydTvTranslationValidation, `Qsag.Machine.IsaCosim]
   let negative ← withEnv env <| Lean.collectAxioms ``Classical.choice
   unless negative.contains ``Classical.choice do
     throwError "Axiom audit negative control failed"

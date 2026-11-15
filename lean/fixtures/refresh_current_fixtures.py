@@ -22,8 +22,8 @@ def main():
     ap.add_argument("--x86-rlib", type=Path, required=True)
     ap.add_argument("--aarch64-rlib", type=Path, required=True)
     args = ap.parse_args()
-    fixture = ROOT / "lean/Qsag/CompiledRlibFixtures.lean"
-    slices = ROOT / "lean/Qsag/ElfFixtureSlices.lean"
+    fixture = ROOT / "lean/Qsag/Machine/CompiledRlibFixtures.lean"
+    slices = ROOT / "lean/Qsag/Machine/ElfFixtureSlices.lean"
     source = fixture.read_text()
     start = source.index("/-- Fresh Linux source build;")
     source = source[:start]

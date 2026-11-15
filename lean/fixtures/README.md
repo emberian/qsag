@@ -18,12 +18,12 @@ python3 lean/fixtures/refresh_current_fixtures.py \
   --x86-rlib target/ct-audit/x86_64-unknown-linux-gnu/release/libqsag_asm.rlib \
   --aarch64-rlib target/ct-audit/aarch64-unknown-linux-gnu/release/libqsag_asm.rlib
 cd lean
-lake build --wfail Qsag.ElfBinaryVerify
+lake build --wfail Qsag.Machine.ElfBinaryVerify
 task_tmpdir=$(mktemp -d)
 lake env lean --run fixtures/GenerateCurrentInvs.lean "$task_tmpdir/proposals.inc"
 python3 fixtures/install_current_invariants.py "$task_tmpdir/proposals.inc"
 rm -rf "$task_tmpdir"
-lake build --wfail Qsag.ElfFixtureVerify Qsag.McRefine Qsag.ElfFunctionalEquiv
+lake build --wfail Qsag.Machine.ElfFixtureVerify Qsag.Machine.McRefine Qsag.Machine.ElfFunctionalEquiv
 lake env lean fixtures/AuditVertical.lean
 ```
 
@@ -36,7 +36,7 @@ Freshness selection is explicit:
 
 ```sh
 python3 scripts/audit_elf_ct.py \
-  --check-fixtures lean/Qsag/CompiledRlibFixtures.lean \
+  --check-fixtures lean/Qsag/Machine/CompiledRlibFixtures.lean \
   --fixture-generation current --fixture-binding object \
   --fixture-x86-rlib target/ct-audit/x86_64-unknown-linux-gnu/release/libqsag_asm.rlib \
   --fixture-aarch64-rlib target/ct-audit/aarch64-unknown-linux-gnu/release/libqsag_asm.rlib

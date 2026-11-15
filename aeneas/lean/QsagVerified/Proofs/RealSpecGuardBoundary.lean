@@ -7,8 +7,8 @@ import all QsagVerified.Proofs.CredAndHdGuards
 public import QsagVerified.Proofs.RealSpecFieldWeld
 public import QsagVerified.Proofs.BeltLatchKernel
 import all QsagVerified.Proofs.BeltLatchKernel
-public import Qsag.MirSpecBridge
-import all Qsag.MirSpecBridgeCore
+public import Qsag.Exec.MirSpecBridge
+import all Qsag.Exec.MirSpecBridgeCore
 import Qsag.Tactic.AssuranceKit
 
 /-!
