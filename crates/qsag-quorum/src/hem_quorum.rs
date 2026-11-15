@@ -62,7 +62,7 @@ use qsag_core::preprocessing::{
 use qsag_core::sponge::keccak::{cshake256_32, encode_multi_frame};
 use qsag_core::sponge::poseidon2::{POSEIDON2_CONST_IV, poseidon2_hash32};
 use qsag_core::tsw_baggy::MonotonicEpochLatch;
-use qsag_core::wipe::{ct_eq_bytes32, wipe_bytes32, wipe_ext2, wipe_goldilocks};
+use qsag_core::wipe::{ct_eq_bytes32, wipe_bytes, wipe_bytes32, wipe_ext2, wipe_goldilocks};
 
 use crate::hash::{mac32, mac32_verify};
 
@@ -72,12 +72,53 @@ const HEM_QSB_CHALLENGE_TAG: &[u8] = b"QSAG.HEM.QSB.CHAL/v1";
 const HEM_PUB_DIR_MAGIC: &[u8; 8] = b"QSAGHDIR";
 const HEM_CUSTODIAN_SHARE_MAGIC: &[u8; 8] = b"QSAGHSHR";
 
+// A session identifier is public protocol context, never key material. Each
+// custodian supplies its own evolving private RNG; deriving an operation stream
+// consumes fresh entropy even if a caller retries with the same session ID.
+fn private_operation_rng(
+    session_id: &[u8; 32],
+    domain: &[u8],
+    party: usize,
+    private_rng: &mut PartyPrivateRng,
+) -> PartyPrivateRng {
+    let mut frame = [0u8; 72];
+    frame[..32].copy_from_slice(session_id);
+    frame[32..40].copy_from_slice(&(party as u64).to_le_bytes());
+    private_rng.fill_bytes(&mut frame[40..]);
+    let mut seed = cshake256_32(domain, &frame);
+    wipe_bytes(&mut frame);
+    let stream = PartyPrivateRng::from_seed(seed, domain);
+    wipe_bytes32(&mut seed);
+    stream
+}
+
+fn private_operation_rngs(
+    session_id: &[u8; 32],
+    domain: &[u8],
+    private_rngs: &mut [PartyPrivateRng],
+) -> Vec<PartyPrivateRng> {
+    private_rngs.iter_mut().enumerate()
+        .map(|(party, rng)| private_operation_rng(session_id, domain, party, rng))
+        .collect()
+}
+
+fn check_randomness_count(rngs: &[PartyPrivateRng], expected: usize) -> Result<(), HemQuorumError> {
+    if rngs.len() != expected {
+        return Err(HemQuorumError::InvalidRandomnessCount { expected, got: rngs.len() });
+    }
+    Ok(())
+}
+
 /// Errors returned by `Hem`-compatible quorum signing, proactive refresh, or dynamic resharing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HemQuorumError {
     InvalidQuorum {
         t: usize,
         n: usize,
+    },
+    InvalidRandomnessCount {
+        expected: usize,
+        got: usize,
     },
     InvalidActiveLeaves {
         active_leaves: usize,
@@ -1570,13 +1611,22 @@ impl HemDynamicShamirQuorum {
     /// all unspent leaf shares, MAC shares, and `alpha_share`, verifies Round-1 commitments,
     /// HVZK degree `< t`, and SPDZ `MacCheck`, bumps `quorum_epoch`, and preserves the exact
     /// 65-byte validator public key.
-    pub fn proactive_refresh(&mut self, session_id: [u8; 32]) -> Result<(), HemQuorumError> {
+    /// `party_rngs` contains one independently seeded, private, evolving RNG per current
+    /// custodian, in roster order. Session IDs alone provide no secret entropy.
+    pub fn proactive_refresh(
+        &mut self, session_id: [u8; 32], party_rngs: &mut [PartyPrivateRng],
+    ) -> Result<(), HemQuorumError> {
+        check_randomness_count(party_rngs, self.n)?;
         let all_parties: Vec<usize> = (0..self.n).collect();
+        let mut old_rngs = private_operation_rngs(&session_id, b"QSAG.HEM.QSB.REFRESH.OLD/v2", party_rngs);
+        let mut new_rngs = private_operation_rngs(&session_id, b"QSAG.HEM.QSB.REFRESH.NEW/v2", party_rngs);
         self.reshare_quorum_with_fault(
             session_id,
             &all_parties[..self.t],
             self.t,
             self.n,
+            &mut old_rngs,
+            &mut new_rngs,
             ReshareFaultInjection::None,
         )
     }
@@ -1584,34 +1634,46 @@ impl HemDynamicShamirQuorum {
     /// Dynamic `(t, n) -> (t', n')` quorum-switching (`Π_reshare`): transitions custody from
     /// `old_quorum_indices` (`>= t` custodians) to a fresh `(new_t, new_n)` threshold and roster
     /// WITHOUT changing the validator's 65-byte [`HemJortsPublicKey`].
+    /// Supply independently seeded private RNGs for every old and new custodian in roster
+    /// order (lengths `self.n` and `new_n`); no public or common reconstruction seed.
+    #[expect(clippy::too_many_arguments, reason = "explicit independent old/new custodian randomness")]
     pub fn reshare_quorum(
         &mut self,
         session_id: [u8; 32],
         old_quorum_indices: &[usize],
         new_t: usize,
         new_n: usize,
+        old_party_rngs: &mut [PartyPrivateRng],
+        new_party_rngs: &mut [PartyPrivateRng],
     ) -> Result<(), HemQuorumError> {
         self.reshare_quorum_with_fault(
             session_id,
             old_quorum_indices,
             new_t,
             new_n,
+            old_party_rngs,
+            new_party_rngs,
             ReshareFaultInjection::None,
         )
     }
 
     /// Fault-injectable entry point for adversarial verification of `Π_reshare` / `Π_refresh`.
+    #[expect(clippy::too_many_arguments, reason = "explicit private custodian randomness and protocol inputs")]
     pub fn reshare_quorum_with_fault(
         &mut self,
         session_id: [u8; 32],
         old_quorum_indices: &[usize],
         new_t: usize,
         new_n: usize,
+        old_party_rngs: &mut [PartyPrivateRng],
+        new_party_rngs: &mut [PartyPrivateRng],
         fault: ReshareFaultInjection,
     ) -> Result<(), HemQuorumError> {
         if new_t < 2 || new_t > new_n || new_n > 64 {
             return Err(HemQuorumError::InvalidQuorum { t: new_t, n: new_n });
         }
+        check_randomness_count(old_party_rngs, self.n)?;
+        check_randomness_count(new_party_rngs, new_n)?;
         validate_party_subset(old_quorum_indices, self.t, self.n)?;
         let active_old = &old_quorum_indices[..self.t];
         for &p in active_old {
@@ -1649,15 +1711,9 @@ impl HemDynamicShamirQuorum {
 
         for (d_slot, &old_p) in active_old.iter().enumerate() {
             let lam = lambdas[d_slot];
-            let seed = cshake256_32(
-                b"QSAG.HEM.QSB.DEALER.RNG/v1",
-                &encode_multi_frame(&[
-                    &session_id,
-                    &self.quorum_epoch.to_le_bytes(),
-                    &(old_p as u32).to_le_bytes(),
-                ]),
+            let mut d_rng = private_operation_rng(
+                &session_id, b"QSAG.HEM.QSB.DEALER/v2", old_p, &mut old_party_rngs[old_p],
             );
-            let mut d_rng = PartyPrivateRng::from_seed(seed, b"QSAG.HEM.QSB.DEALER.STREAM/v1");
 
             // Preserve `alpha` across reshare (`sum_i lam_i * alpha_share_i == alpha`) with fresh polynomial
             let weighted_alpha = self.shares[old_p].alpha_share.mul_base(lam);
@@ -1785,35 +1841,9 @@ impl HemDynamicShamirQuorum {
         // Checks `\sum_k gamma_k * (alpha * val'_k - mac'_k) == 0` via zero-masked Shamir opening
         // AND checks `leaf[high_water_leaf]` / `prf_commits[high_water_leaf]` if unspent leaves remain!
         if total_scalars > 0 {
-            // Publicly open nothing secret: combine random linear combination with zero-share mask!
-            // First verify via `commit_and_open_spdz_goldilocks_batch_quorum` on the unspent leaf's
-            // public `y^(3)` endpoint or a zero-value check wire, AND verify constant-term integrity
-            // by checking the random linear combination `sigma_j = sum_k rho_k * mac'_k - alpha_j * V`
-            // after masking `V` with a dealerless random authenticated wire? Wait: even simpler and
-            // 100% zero-knowledge!
-            // If `unspent_leaves > 0`, let's check BOTH:
-            // 1) Every unspent leaf's `prf_commit[kp]` & `endpoints[kp]`? No, opening `prf` or `y^(0..2)`
-            //    would reveal them! Instead, how does SPDZ verify `[val'_k], [mac'_k]` WITHOUT opening
-            //    `val'_k`? Generate ONE random shared mask `(r_val, r_mac = alpha * r_val)` from the
-            //    old quorum during Round 1, open `U = r_val + sum_k beta_k * val'_k` (`1` scalar,
-            //    completely masked by `r_val`!), and check that `r_mac + sum_k beta_k * mac'_k - alpha * U == 0`!
-            let mut mask_v_new = vec![Goldilocks::ZERO; new_n];
-            let mut mask_m_new = vec![GoldilocksExt2::ZERO; new_n];
-            for (d_slot, &old_p) in active_old.iter().enumerate() {
-                let lam = lambdas[d_slot];
-                // Each old party contributes `lam_i * leaf_vals[hw][0]`? No — that's not independent!
-                // Wait: in Round 1, old party `old_p` holds `alpha_share_i` (not `alpha`), so to mask
-                // without OLE we can run `commit_and_open_spdz_goldilocks_batch_quorum` on a zero wire
-                // OR run `OtMesh` Gilboa OLE, OR notice:
-                // Let's run `OtMesh::establish_ring_lwe_dealerless`? Wait: Ring-LWE OLE for ONE scalar
-                // `r` across `new_n` parties is ONLY `1` scalar (`< 2 ms`!) OR even faster:
-                // Let's check! How long does `spdz_authenticate_goldilocks_batch_ext2` for `1` scalar take?
-                // Wait: in `spdz_authenticate_goldilocks_batch_ext2`, `alpha_contribs` are additive!
-                // Look at `alpha_shares` on `new_pts`: each new party `j` can convert its Shamir share
-                // `new_alpha_shares[j]` on `0..new_t` into an additive share `alpha_add[j] = mu_j * new_alpha_shares[j]`!
-                let _ = (lam, old_p, &mut mask_v_new, &mut mask_m_new);
-            }
-
+            // Authenticate a fresh private random mask, then open only the masked
+            // linear combination. Public transcript challenges select the combination;
+            // they must never determine the mask or its authentication randomness.
             let check_quorum = new_t;
             let check_pts = &new_pts[..check_quorum];
             let check_lambdas = lagrange_weights_zero_goldilocks(check_pts)
@@ -1822,17 +1852,9 @@ impl HemDynamicShamirQuorum {
                 .map(|j| new_alpha_shares[j].mul_base(check_lambdas[j]))
                 .collect();
 
-            let mut check_rngs: Vec<PartyPrivateRng> = (0..check_quorum)
-                .map(|j| {
-                    PartyPrivateRng::from_seed(
-                        cshake256_32(
-                            b"QSAG.HEM.QSB.MACCHK.RNG/v1",
-                            &encode_multi_frame(&[&session_id, &(j as u32).to_le_bytes()]),
-                        ),
-                        b"QSAG.HEM.QSB.MACCHK.STREAM/v1",
-                    )
-                })
-                .collect();
+            let mut check_rngs = private_operation_rngs(
+                &session_id, b"QSAG.HEM.QSB.MACCHK/v2", &mut new_party_rngs[..check_quorum],
+            );
             let mut mesh = OtMesh::establish(
                 cshake256_32(b"QSAG.HEM.QSB.MACCHK.OT/v1", &session_id),
                 &mut check_rngs,
@@ -1936,21 +1958,9 @@ impl HemDynamicShamirQuorum {
         }
         wipe_ext2(&mut new_alpha_shares);
 
-        let mut latch_rngs: Vec<PartyPrivateRng> = (0..new_n)
-            .map(|j| {
-                PartyPrivateRng::from_seed(
-                    cshake256_32(
-                        b"QSAG.HEM.QSB.NEW.LATCH/v1",
-                        &encode_multi_frame(&[
-                            &session_id,
-                            &next_quorum_epoch.to_le_bytes(),
-                            &(j as u32).to_le_bytes(),
-                        ]),
-                    ),
-                    b"QSAG.HEM.QSB.NEW.LATCH.STREAM/v1",
-                )
-            })
-            .collect();
+        let mut latch_rngs = private_operation_rngs(
+            &session_id, b"QSAG.HEM.QSB.NEW.LATCH/v2", new_party_rngs,
+        );
         let new_cluster =
             HemEpochLatchCluster::establish(new_n, new_t, hw as u64, &mut latch_rngs)?;
 
@@ -2143,13 +2153,16 @@ impl fmt::Debug for HemSpdzSeedQuorum {
 
 impl HemSpdzSeedQuorum {
     /// Run a 100% dealerless Goldilocks DKG + native `[Goldilocks; 4]` SPDZ MPC key generation.
+    /// Each custodian supplies its own independently seeded private RNG in roster order.
+    /// `session_id` is public context and must never be used as the entropy source.
     pub fn keygen_dealerless(
         session_id: [u8; 32],
         t: usize,
         n: usize,
         active_leaves: usize,
+        party_rngs: &mut [PartyPrivateRng],
     ) -> Result<Self, HemQuorumError> {
-        Self::keygen_inner(session_id, t, n, active_leaves, false)
+        Self::keygen_inner(session_id, t, n, active_leaves, party_rngs, false)
     }
 
     /// Online-protocol test constructor: runs real dealerless Goldilocks DKG, Gilboa byte-share
@@ -2160,8 +2173,9 @@ impl HemSpdzSeedQuorum {
         t: usize,
         n: usize,
         active_leaves: usize,
+        party_rngs: &mut [PartyPrivateRng],
     ) -> Result<Self, HemQuorumError> {
-        Self::keygen_inner(session_id, t, n, active_leaves, true)
+        Self::keygen_inner(session_id, t, n, active_leaves, party_rngs, true)
     }
 
     fn keygen_inner(
@@ -2169,24 +2183,16 @@ impl HemSpdzSeedQuorum {
         t: usize,
         n: usize,
         active_leaves: usize,
+        party_rngs: &mut [PartyPrivateRng],
         online_fixture: bool,
     ) -> Result<Self, HemQuorumError> {
         if t < 2 || t > n || n > 16 {
             return Err(HemQuorumError::InvalidQuorum { t, n });
         }
+        check_randomness_count(party_rngs, n)?;
         let budget = required_hem_jorts_keygen_preprocessing_budget(active_leaves)?;
         let pts = canonical_eval_points(n);
-        let mut rngs: Vec<PartyPrivateRng> = (0..n)
-            .map(|p| {
-                PartyPrivateRng::from_seed(
-                    cshake256_32(
-                        b"QSAG.HEM.SPDZ.RNG/v1",
-                        &encode_multi_frame(&[&session_id, &(p as u32).to_le_bytes()]),
-                    ),
-                    b"QSAG.HEM.SPDZ.RNG.STREAM/v1",
-                )
-            })
-            .collect();
+        let mut rngs = private_operation_rngs(&session_id, b"QSAG.HEM.SPDZ.KEYGEN/v2", party_rngs);
         let mut mesh = OtMesh::establish(
             cshake256_32(b"QSAG.HEM.SPDZ.OT/v1", &session_id),
             &mut rngs,
@@ -2268,19 +2274,14 @@ impl HemSpdzSeedQuorum {
     }
 
     /// Proactive bit-level refresh (`run_dealerless_refresh_seed32_goldilocks`) preserving `pk`.
-    pub fn proactive_refresh(&mut self, session_id: [u8; 32]) -> Result<(), HemQuorumError> {
+    /// `party_rngs` contains one independently seeded, private, evolving RNG per current
+    /// custodian, in roster order. Session IDs alone provide no secret entropy.
+    pub fn proactive_refresh(
+        &mut self, session_id: [u8; 32], party_rngs: &mut [PartyPrivateRng],
+    ) -> Result<(), HemQuorumError> {
         let pts = canonical_eval_points(self.n);
-        let mut rngs: Vec<PartyPrivateRng> = (0..self.n)
-            .map(|p| {
-                PartyPrivateRng::from_seed(
-                    cshake256_32(
-                        b"QSAG.HEM.SPDZ.REF.RNG/v1",
-                        &encode_multi_frame(&[&session_id, &(p as u32).to_le_bytes()]),
-                    ),
-                    b"QSAG.HEM.SPDZ.REF.STREAM/v1",
-                )
-            })
-            .collect();
+        check_randomness_count(party_rngs, self.n)?;
+        let mut rngs = private_operation_rngs(&session_id, b"QSAG.HEM.SPDZ.REFRESH/v2", party_rngs);
         run_dealerless_refresh_seed32_goldilocks(
             cshake256_32(b"QSAG.HEM.SPDZ.REF.SEED/v1", &session_id),
             self.t,
@@ -2301,64 +2302,59 @@ impl HemSpdzSeedQuorum {
 
     /// Dynamic `(t, n) -> (new_t, new_n)` seed resharing (`run_dealerless_reshare_seed32_goldilocks`)
     /// verified in SPDZ MPC via `verify_reshared_hem_jorts_key_mpc` without reconstructing secrets!
+    /// Supply independently seeded private RNGs for every old and new custodian in roster
+    /// order (lengths `self.n` and `new_n`); no public or common reconstruction seed.
+    #[expect(clippy::too_many_arguments, reason = "explicit independent old/new custodian randomness")]
     pub fn reshare_quorum(
         &mut self,
         session_id: [u8; 32],
         old_quorum_indices: &[usize],
         new_t: usize,
         new_n: usize,
+        old_party_rngs: &mut [PartyPrivateRng],
+        new_party_rngs: &mut [PartyPrivateRng],
     ) -> Result<(), HemQuorumError> {
-        self.reshare_quorum_inner(session_id, old_quorum_indices, new_t, new_n, false)
+        self.reshare_quorum_inner(session_id, old_quorum_indices, new_t, new_n, old_party_rngs, new_party_rngs, false)
     }
 
     #[cfg(any(test, feature = "testing-ephemeral"))]
+    #[expect(clippy::too_many_arguments, reason = "explicit private custodian randomness and protocol inputs")]
     pub fn reshare_quorum_online_fixture(
         &mut self,
         session_id: [u8; 32],
         old_quorum_indices: &[usize],
         new_t: usize,
         new_n: usize,
+        old_party_rngs: &mut [PartyPrivateRng],
+        new_party_rngs: &mut [PartyPrivateRng],
     ) -> Result<(), HemQuorumError> {
-        self.reshare_quorum_inner(session_id, old_quorum_indices, new_t, new_n, true)
+        self.reshare_quorum_inner(session_id, old_quorum_indices, new_t, new_n, old_party_rngs, new_party_rngs, true)
     }
 
+    #[expect(clippy::too_many_arguments, reason = "explicit private custodian randomness and protocol inputs")]
     fn reshare_quorum_inner(
         &mut self,
         session_id: [u8; 32],
         old_quorum_indices: &[usize],
         new_t: usize,
         new_n: usize,
+        old_party_rngs: &mut [PartyPrivateRng],
+        new_party_rngs: &mut [PartyPrivateRng],
         online_fixture: bool,
     ) -> Result<(), HemQuorumError> {
         if new_t < 2 || new_t > new_n || new_n > 16 {
             return Err(HemQuorumError::InvalidQuorum { t: new_t, n: new_n });
         }
+        check_randomness_count(old_party_rngs, self.n)?;
+        check_randomness_count(new_party_rngs, new_n)?;
         validate_party_subset(old_quorum_indices, self.t, self.n)?;
         let active_old = &old_quorum_indices[..self.t];
         let new_pts = canonical_eval_points(new_n);
 
-        let mut old_rngs: Vec<PartyPrivateRng> = (0..self.t)
-            .map(|i| {
-                PartyPrivateRng::from_seed(
-                    cshake256_32(
-                        b"QSAG.HEM.SPDZ.RESHARE.OLD/v1",
-                        &encode_multi_frame(&[&session_id, &(i as u32).to_le_bytes()]),
-                    ),
-                    b"QSAG.HEM.SPDZ.RESHARE.OLD.STREAM/v1",
-                )
-            })
-            .collect();
-        let mut new_rngs: Vec<PartyPrivateRng> = (0..new_n)
-            .map(|j| {
-                PartyPrivateRng::from_seed(
-                    cshake256_32(
-                        b"QSAG.HEM.SPDZ.RESHARE.NEW/v1",
-                        &encode_multi_frame(&[&session_id, &(j as u32).to_le_bytes()]),
-                    ),
-                    b"QSAG.HEM.SPDZ.RESHARE.NEW.STREAM/v1",
-                )
-            })
-            .collect();
+        let mut old_rngs: Vec<PartyPrivateRng> = active_old.iter().map(|&p| {
+            private_operation_rng(&session_id, b"QSAG.HEM.SPDZ.RESHARE.OLD/v2", p, &mut old_party_rngs[p])
+        }).collect();
+        let mut new_rngs = private_operation_rngs(&session_id, b"QSAG.HEM.SPDZ.RESHARE.NEW/v2", new_party_rngs);
         let mut new_mesh = OtMesh::establish(
             cshake256_32(b"QSAG.HEM.SPDZ.RESHARE.OT/v1", &session_id),
             &mut new_rngs,
@@ -2381,17 +2377,7 @@ impl HemSpdzSeedQuorum {
         )?;
 
         let verify_budget = required_hem_jorts_reshare_verify_preprocessing_budget();
-        let mut v_rngs: Vec<PartyPrivateRng> = (0..new_n)
-            .map(|j| {
-                PartyPrivateRng::from_seed(
-                    cshake256_32(
-                        b"QSAG.HEM.SPDZ.RESHARE.VRNG/v1",
-                        &encode_multi_frame(&[&session_id, &(j as u32).to_le_bytes()]),
-                    ),
-                    b"QSAG.HEM.SPDZ.RESHARE.VRNG.STREAM/v1",
-                )
-            })
-            .collect();
+        let mut v_rngs = private_operation_rngs(&session_id, b"QSAG.HEM.SPDZ.RESHARE.VERIFY/v2", new_party_rngs);
         let mut v_mesh = OtMesh::establish(
             cshake256_32(b"QSAG.HEM.SPDZ.RESHARE.VOT/v1", &session_id),
             &mut v_rngs,
@@ -2469,7 +2455,8 @@ impl HemSpdzSeedQuorum {
 
     /// Sign `msg` in native `[Goldilocks; 4]` SPDZ MPC (`0` intermediate A2B!) across
     /// `signer_indices` (`== n` when `durable_cert` is `None`, or `>= t` with a durable
-    /// [`EpochLatchCertificate`]).
+    /// [`EpochLatchCertificate`]). Supply private RNGs in full roster order.
+    #[expect(clippy::too_many_arguments, reason = "explicit private custodian randomness and protocol inputs")]
     pub fn sign_quorum(
         &mut self,
         session_id: [u8; 32],
@@ -2477,11 +2464,13 @@ impl HemSpdzSeedQuorum {
         latch_ackers: &[usize],
         durable_cert: Option<&EpochLatchCertificate>,
         msg: &[u8],
+        party_rngs: &mut [PartyPrivateRng],
     ) -> Result<(u64, HemJortsSignature), HemQuorumError> {
-        self.sign_quorum_inner(session_id, signer_indices, latch_ackers, durable_cert, msg, false)
+        self.sign_quorum_inner(session_id, signer_indices, latch_ackers, durable_cert, msg, party_rngs, false)
     }
 
     #[cfg(any(test, feature = "testing-ephemeral"))]
+    #[expect(clippy::too_many_arguments, reason = "explicit private custodian randomness and protocol inputs")]
     pub fn sign_quorum_online_fixture(
         &mut self,
         session_id: [u8; 32],
@@ -2489,10 +2478,12 @@ impl HemSpdzSeedQuorum {
         latch_ackers: &[usize],
         durable_cert: Option<&EpochLatchCertificate>,
         msg: &[u8],
+        party_rngs: &mut [PartyPrivateRng],
     ) -> Result<(u64, HemJortsSignature), HemQuorumError> {
-        self.sign_quorum_inner(session_id, signer_indices, latch_ackers, durable_cert, msg, true)
+        self.sign_quorum_inner(session_id, signer_indices, latch_ackers, durable_cert, msg, party_rngs, true)
     }
 
+    #[expect(clippy::too_many_arguments, reason = "explicit private custodian randomness and protocol inputs")]
     fn sign_quorum_inner(
         &mut self,
         session_id: [u8; 32],
@@ -2500,8 +2491,10 @@ impl HemSpdzSeedQuorum {
         latch_ackers: &[usize],
         durable_cert: Option<&EpochLatchCertificate>,
         msg: &[u8],
+        party_rngs: &mut [PartyPrivateRng],
         online_fixture: bool,
     ) -> Result<(u64, HemJortsSignature), HemQuorumError> {
+        check_randomness_count(party_rngs, self.n)?;
         let min_signers = if durable_cert.is_some() {
             self.t
         } else {
@@ -2512,17 +2505,7 @@ impl HemSpdzSeedQuorum {
         let pts = canonical_eval_points(self.n);
         let sign_budget = required_hem_jorts_sign_preprocessing_budget_cached();
 
-        let mut rngs: Vec<PartyPrivateRng> = (0..self.n)
-            .map(|p| {
-                PartyPrivateRng::from_seed(
-                    cshake256_32(
-                        b"QSAG.HEM.SPDZ.SIGN.RNG/v1",
-                        &encode_multi_frame(&[&session_id, &(p as u32).to_le_bytes()]),
-                    ),
-                    b"QSAG.HEM.SPDZ.SIGN.STREAM/v1",
-                )
-            })
-            .collect();
+        let mut rngs = private_operation_rngs(&session_id, b"QSAG.HEM.SPDZ.SIGN/v2", party_rngs);
         let mut mesh = OtMesh::establish(
             cshake256_32(b"QSAG.HEM.SPDZ.SIGN.OT/v1", &session_id),
             &mut rngs,
@@ -2621,6 +2604,13 @@ impl HemSpdzSeedQuorum {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_party_rngs(seed: u8, n: usize) -> Vec<PartyPrivateRng> {
+        (0..n).map(|p| PartyPrivateRng::from_seed(
+            [seed.wrapping_add(p as u8); 32], b"HEM.TEST.PRIVATE.RNG/v1",
+        )).collect()
+    }
+
     use qsag_agg::{
         AggSigProfile, EpochWalSink, HemAggConfig, HemAggregator, SigError, SignerBitmap,
         SigningMode, ValidatorKeypair, ValidatorPublicKey, ValidatorSignature, WhirSecurityRegime,
@@ -2653,6 +2643,73 @@ mod tests {
     }
 
     #[test]
+    fn reshare_public_session_replay_cannot_recover_secret_from_one_recipient() {
+        let sid = [0x43; 32];
+        let mut quorum = HemDynamicShamirQuorum::stage([0x41; 32], 2, 3, 1).unwrap();
+        let original_pk = quorum.public_key();
+        let old_points = canonical_eval_points(2);
+        let weights = lagrange_weights_zero_goldilocks(&old_points).unwrap();
+        let secret = weights[0] * quorum.shares[0].leaf_vals[0][0]
+            + weights[1] * quorum.shares[1].leaf_vals[0][0];
+
+        // Exact pre-fix attack: the session, epoch and dealer index disclosed every
+        // polynomial coefficient. One recipient could subtract all dealer masks
+        // from its aggregate share and learn the secret without reaching threshold.
+        let new_points = canonical_eval_points(5);
+        let mut public_mask = Goldilocks::ZERO;
+        let mut vulnerable_recipient = Goldilocks::ZERO;
+        for party in 0..2 {
+            let seed = cshake256_32(b"QSAG.HEM.QSB.DEALER.RNG/v1", &encode_multi_frame(&[
+                &sid, &0u64.to_le_bytes(), &(party as u32).to_le_bytes(),
+            ]));
+            let mut replay = PartyPrivateRng::from_seed(seed, b"QSAG.HEM.QSB.DEALER.STREAM/v1");
+            let _ = shamir_share_ext2(3, &new_points, GoldilocksExt2::ZERO, &mut replay);
+            let mask_secret = replay.next_ext2();
+            let _ = shamir_share_ext2(3, &new_points, mask_secret, &mut replay);
+            let mask = shamir_share_goldilocks(3, &new_points, Goldilocks::ZERO, &mut replay)[0];
+            public_mask += mask;
+            vulnerable_recipient += weights[party] * quorum.shares[party].leaf_vals[0][0] + mask;
+        }
+        assert_eq!(vulnerable_recipient - public_mask, secret);
+
+        let before = quorum.shares[0].to_vault_bytes().unwrap();
+        assert!(matches!(quorum.reshare_quorum(sid, &[0, 1], 3, 5,
+            &mut test_party_rngs(1, 2), &mut test_party_rngs(5, 5)),
+            Err(HemQuorumError::InvalidRandomnessCount { expected: 3, got: 2 })));
+        assert_eq!(quorum.shares[0].to_vault_bytes().unwrap(), before);
+        assert_eq!(quorum.quorum_epoch(), 0);
+
+        quorum.reshare_quorum(sid, &[0, 1], 3, 5,
+            &mut test_party_rngs(1, 3), &mut test_party_rngs(5, 5)).unwrap();
+        assert_ne!(quorum.shares[0].leaf_vals[0][0] - public_mask, secret);
+        let new_weights = lagrange_weights_zero_goldilocks(&new_points[..3]).unwrap();
+        let recovered = (0..3).fold(Goldilocks::ZERO, |sum, p|
+            sum + new_weights[p] * quorum.shares[p].leaf_vals[0][0]);
+        assert_eq!(recovered, secret);
+        assert_eq!(quorum.public_key(), original_pk);
+
+        // Same public transcript, distinct private entropy: different shares,
+        // same enrolled key. Refresh also preserves the threshold secret.
+        let first_share = quorum.shares[0].leaf_vals[0][0];
+        quorum.proactive_refresh(sid, &mut test_party_rngs(11, 5)).unwrap();
+        assert_ne!(quorum.shares[0].leaf_vals[0][0], first_share);
+        let refreshed = (0..3).fold(Goldilocks::ZERO, |sum, p|
+            sum + new_weights[p] * quorum.shares[p].leaf_vals[0][0]);
+        assert_eq!(refreshed, secret);
+        assert_eq!(quorum.public_key(), original_pk);
+    }
+
+    #[test]
+    fn dealerless_keygen_public_session_is_not_key_entropy() {
+        let sid = [0x39; 32];
+        let a = HemSpdzSeedQuorum::keygen_dealerless_online_fixture(sid, 2, 2, 1,
+            &mut test_party_rngs(1, 2)).unwrap();
+        let b = HemSpdzSeedQuorum::keygen_dealerless_online_fixture(sid, 2, 2, 1,
+            &mut test_party_rngs(7, 2)).unwrap();
+        assert_ne!(a.public_key(), b.public_key());
+    }
+
+    #[test]
     fn e2e_dynamic_quorum_switch_2of3_to_3of5_aggregates_in_hem_bciks_qrom128() {
         // 1. Validator 0: QS-B Dynamic Shamir Quorum starts at (2, 3), signs Epoch 0,
         //    switches via Π_reshare to (3, 5) WITHOUT changing its 65B ValidatorPublicKey,
@@ -2678,14 +2735,14 @@ mod tests {
         ));
 
         // Switch (2, 3) -> (3, 5) via Π_reshare and verify pubkey invariance!
-        qsb.reshare_quorum([0x22; 32], &[1, 2], 3, 5).unwrap();
+        qsb.reshare_quorum([0x22; 32], &[1, 2], 3, 5, &mut test_party_rngs(1, 3), &mut test_party_rngs(4, 5)).unwrap();
         assert_eq!(qsb.public_key(), pk0_initial);
         assert_eq!(qsb.threshold_and_size(), (3, 5));
         assert_eq!(qsb.quorum_epoch(), 1);
         assert_eq!(qsb.high_water_leaf(), 1);
 
         // Proactive refresh Π_refresh on (3, 5) -> pubkey still bit-for-bit identical!
-        qsb.proactive_refresh([0x33; 32]).unwrap();
+        qsb.proactive_refresh([0x33; 32], &mut test_party_rngs(10, 5)).unwrap();
         assert_eq!(qsb.public_key(), pk0_initial);
         assert_eq!(qsb.quorum_epoch(), 2);
 
@@ -2779,6 +2836,8 @@ mod tests {
                 &[0, 1],
                 3,
                 5,
+                &mut test_party_rngs(20, 3),
+                &mut test_party_rngs(30, 5),
                 ReshareFaultInjection::TamperInTransit {
                     dealer: 1,
                     recipient: 3,
@@ -2797,6 +2856,8 @@ mod tests {
                 &[0, 1],
                 3,
                 5,
+                &mut test_party_rngs(20, 3),
+                &mut test_party_rngs(30, 5),
                 ReshareFaultInjection::CorruptPolynomialDegree { dealer: 0 },
             ),
             Err(HemQuorumError::DegreeCheckFailed { dealer: 0 })
@@ -2809,13 +2870,15 @@ mod tests {
                 &[0, 1],
                 3,
                 5,
+                &mut test_party_rngs(20, 3),
+                &mut test_party_rngs(30, 5),
                 ReshareFaultInjection::ShiftConstantTerm { dealer: 1 },
             ),
             Err(HemQuorumError::ReshareMacCheckFailed)
         ));
 
         // Genuine reshare (2, 3) -> (3, 5) succeeds!
-        qsb.reshare_quorum([0x85; 32], &[0, 2], 3, 5).unwrap();
+        qsb.reshare_quorum([0x85; 32], &[0, 2], 3, 5, &mut test_party_rngs(40, 3), &mut test_party_rngs(50, 5)).unwrap();
         assert_eq!(qsb.quorum_epoch(), 1);
         assert_eq!(qsb.high_water_leaf(), 1);
 
@@ -2830,7 +2893,7 @@ mod tests {
             &qsb.custodian_shares()[0].to_vault_bytes().unwrap(),
         )
         .unwrap();
-        qsb.proactive_refresh([0x86; 32]).unwrap();
+        qsb.proactive_refresh([0x86; 32], &mut test_party_rngs(60, 5)).unwrap();
         assert_eq!(qsb.quorum_epoch(), 2);
 
         // Mint a genuine Epoch-2 latch certificate for leaf 1 to test detached share attacks
@@ -2914,12 +2977,12 @@ mod tests {
     fn e2e_dealerless_spdz_seed_quorum_sign_reshare_and_hem_aggregate() {
         // 100% dealerless Goldilocks DKG -> Gilboa byte auth -> SPDZ MPC leaf keygen (`active_leaves = 2`)
         let mut spdz =
-            HemSpdzSeedQuorum::keygen_dealerless_online_fixture([0x91; 32], 2, 2, 2).unwrap();
+            HemSpdzSeedQuorum::keygen_dealerless_online_fixture([0x91; 32], 2, 2, 2, &mut test_party_rngs(70, 2)).unwrap();
         let pk_initial = spdz.public_key();
         let agg_pk = ValidatorPublicKey::from_bytes_canonical(&pk_initial.to_bytes()).unwrap();
 
         let (ep0, sig0) = spdz
-            .sign_quorum_online_fixture([0x92; 32], &[0, 1], &[0, 1], None, b"spdz epoch 0")
+            .sign_quorum_online_fixture([0x92; 32], &[0, 1], &[0, 1], None, b"spdz epoch 0", &mut test_party_rngs(80, 2))
             .unwrap();
         assert_eq!(ep0, 0);
         let agg_sig0 = ValidatorSignature::from_bytes_canonical(
@@ -2930,14 +2993,14 @@ mod tests {
         assert!(verify_individual_signature(&agg_pk, b"spdz epoch 0", &agg_sig0));
 
         // Dynamic `(2, 2) -> (2, 3)` seed reshare verified in SPDZ MPC without reconstructing secrets!
-        spdz.reshare_quorum_online_fixture([0x93; 32], &[0, 1], 2, 3)
+        spdz.reshare_quorum_online_fixture([0x93; 32], &[0, 1], 2, 3, &mut test_party_rngs(90, 2), &mut test_party_rngs(100, 3))
             .unwrap();
         assert_eq!(spdz.public_key(), pk_initial);
         assert_eq!(spdz.quorum_epoch(), 1);
 
         let msg1 = b"spdz epoch 1 after (2,2)->(2,3) reshare";
         let (ep1, sig1) = spdz
-            .sign_quorum_online_fixture([0x94; 32], &[0, 1, 2], &[0, 1, 2], None, msg1)
+            .sign_quorum_online_fixture([0x94; 32], &[0, 1, 2], &[0, 1, 2], None, msg1, &mut test_party_rngs(110, 3))
             .unwrap();
         assert_eq!(ep1, 1);
         let agg_sig1 = ValidatorSignature::from_bytes_canonical(

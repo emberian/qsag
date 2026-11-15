@@ -52,10 +52,13 @@ pub use recursive::{
     HIERARCHICAL_HEM_WIRE_MAGIC, HierarchicalHemAggregate, MAX_HIERARCHY_SHARDS,
     OuterHemChainProof, PreparedPolicyRegistry, SUCCINCT_HIERARCHICAL_HEM_WIRE_MAGIC,
     ShardHemBatch, ShardHemPolicy, ShardHemSummary, ShardHemWitness,
-    SuccinctHierarchicalHemAggregate, checked_sum_usize, compress_verified_hierarchical_hem,
+    SuccinctHierarchicalHemAggregate, VerifiedHierarchicalHemEvidence,
+    check_hierarchical_hem_commitment, check_hierarchical_hem_commitment_with_regime,
+    checked_sum_usize, compress_verified_hierarchical_hem,
     compute_framed_message_digest, compute_policy_registry_root, encode_policy_registry,
     hierarchical_hem_message, prove_hierarchical_hem, prove_succinct_hierarchical_hem,
-    verify_hierarchical_hem, verify_hierarchical_hem_prepared, verify_succinct_hierarchical_hem,
+    verify_hierarchical_hem, verify_hierarchical_hem_evidence, verify_hierarchical_hem_prepared,
+    verify_succinct_hierarchical_hem,
     verify_succinct_hierarchical_hem_with_regime,
 };
 pub mod sig;

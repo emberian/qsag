@@ -13,6 +13,7 @@ use qsag_accel::keccak::cshake256_framed_32;
 use qsag_agg::{
     AggSigProfile, ValidatorPublicKey, ValidatorSignature, verify_individual_signature,
 };
+use qsag_core::preprocessing::PartyPrivateRng;
 use qsag_quorum::hem_quorum::{
     HEM_JORTS_MAX_LEAVES, HEM_JORTS_PK_BYTES, HEM_JORTS_SIG_BYTES, HemDynamicShamirQuorum,
     HemJortsPublicKey, HemJortsSignature, HemQuorumError, HemQuorumPublicDirectory,
@@ -45,6 +46,15 @@ Execute dynamic (t, n) -> (t', n') quorum-switching (Π_reshare) using >= t cust
 --vault-dir, writing the new (t', n') custodian vault into --out-vault-dir WITHOUT changing
 the 65-byte validator public key, and permanently invalidating/wiping the retired vault.
 ";
+
+// The local vault CLI hosts all custodians, but each protocol stream still needs
+// independent private entropy; deterministic session identifiers are only context.
+fn fresh_party_rngs(n: usize) -> Result<Vec<PartyPrivateRng>, CliError> {
+    (0..n).map(|_| {
+        let seed = Secret32(os_random_32()?);
+        Ok(PartyPrivateRng::from_seed(seed.0, b"QSAG.CLI.HEM.PRIVATE/v1"))
+    }).collect()
+}
 
 fn meta_path(vault_dir: &str) -> String {
     Path::new(vault_dir)
@@ -479,7 +489,8 @@ pub fn refresh(raw: &[String]) -> Result<(), CliError> {
         os_random_32()?
     };
 
-    quorum.proactive_refresh(sid).map_err(map_quorum_err)?;
+    let mut party_rngs = fresh_party_rngs(quorum.threshold_and_size().1)?;
+    quorum.proactive_refresh(sid, &mut party_rngs).map_err(map_quorum_err)?;
     if quorum.public_key() != pk_before {
         return Err(CliError::verify("proactive refresh mutated validator pubkey"));
     }
@@ -563,8 +574,10 @@ pub fn reshare(raw: &[String]) -> Result<(), CliError> {
         &[&old_latch_seed.0, &sid],
     ));
 
+    let mut old_party_rngs = fresh_party_rngs(old_n)?;
+    let mut new_party_rngs = fresh_party_rngs(new_n)?;
     quorum
-        .reshare_quorum(sid, &old_signers, new_t, new_n)
+        .reshare_quorum(sid, &old_signers, new_t, new_n, &mut old_party_rngs, &mut new_party_rngs)
         .map_err(map_quorum_err)?;
     if quorum.public_key() != pk_before {
         return Err(CliError::verify(

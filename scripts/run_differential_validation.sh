@@ -8,12 +8,14 @@
 #   ./scripts/run_differential_validation.sh                # Run full differential proptest + Lean spec-oracle suite
 #   ./scripts/run_differential_validation.sh --regen-lean   # Regenerate Lean 4 spec-oracle vectors via `lake` first
 #   ./scripts/run_differential_validation.sh --fuzz [secs]  # Also run coverage-guided libFuzzer campaign (default 15s/target)
+#   ./scripts/run_differential_validation.sh --fuzz-only [secs] # Resume just the fuzz campaign
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REGEN_LEAN=0
 RUN_FUZZ=0
+RUN_TESTS=1
 FUZZ_SECS=15
 
 while [[ $# -gt 0 ]]; do
@@ -22,7 +24,8 @@ while [[ $# -gt 0 ]]; do
             REGEN_LEAN=1
             shift
             ;;
-        --fuzz)
+        --fuzz|--fuzz-only)
+            if [[ "$1" == --fuzz-only ]]; then RUN_TESTS=0; fi
             RUN_FUZZ=1
             if [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]]; then
                 FUZZ_SECS="$2"
@@ -37,6 +40,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ "$RUN_FUZZ" -eq 1 && "$FUZZ_SECS" -eq 0 ]]; then
+    echo "Fuzz duration must be positive (libFuzzer treats zero as unlimited)." >&2
+    exit 2
+fi
 
 if [[ "$REGEN_LEAN" -eq 1 ]]; then
     echo "==> Regenerating Lean 4 executable specification vectors..."
@@ -54,25 +62,33 @@ if [[ "$REGEN_LEAN" -eq 1 ]]; then
     )
 fi
 
-echo "==> Running external differential validation & property-based test suite..."
-(
-    cd "${REPO_ROOT}/validation"
-    cargo test --release -- --nocapture
-)
+if [[ "$RUN_TESTS" -eq 1 ]]; then
+    echo "==> Running external differential validation & property-based test suite..."
+    (
+        cd "${REPO_ROOT}/validation"
+        cargo test --release --locked -- --nocapture
+    )
+fi
 
 if [[ "$RUN_FUZZ" -eq 1 ]]; then
     echo "==> Running coverage-guided libFuzzer campaign (${FUZZ_SECS}s per target)..."
-    HOST_TRIPLE="$(rustc -vV | awk '/^host:/ { print $2 }')"
     SANCOV_RUSTFLAGS="--cfg fuzzing -Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-inline-8bit-counters -Cllvm-args=-sanitizer-coverage-pc-table -Cllvm-args=-sanitizer-coverage-trace-compares"
     (
         cd "${REPO_ROOT}/fuzz"
-        RUSTFLAGS="${SANCOV_RUSTFLAGS}" cargo +nightly build --release --target "${HOST_TRIPLE}"
+        # These LLVM coverage flags work with the repository's pinned stable compiler.
+        # Use the same toolchain for host detection and compilation; an unrelated
+        # installed nightly can predate our dependencies' minimum Rust version.
+        HOST_TRIPLE="$(rustc -vV | awk '/^host:/ { print $2 }')"
+        RUSTFLAGS="${SANCOV_RUSTFLAGS}" cargo build --release --locked --target "${HOST_TRIPLE}"
         for target in fuzz_whir_agg_verify fuzz_fips205_and_fts_decode fuzz_diff_hashes_and_ntt; do
             echo "--- Fuzzing ${target} (${FUZZ_SECS}s) ---"
             CORPUS_DIR="${REPO_ROOT}/fuzz/corpus/${target}"
-            mkdir -p "${CORPUS_DIR}"
+            ARTIFACT_DIR="${REPO_ROOT}/fuzz/artifacts/${target}"
+            mkdir -p "${CORPUS_DIR}" "${ARTIFACT_DIR}"
             "./target/${HOST_TRIPLE}/release/${target}" "${CORPUS_DIR}" \
                 -max_total_time="${FUZZ_SECS}" \
+                -max_len=65536 -timeout=20 -rss_limit_mb=4096 \
+                -artifact_prefix="${ARTIFACT_DIR}/" \
                 -print_final_stats=1
         done
     )
