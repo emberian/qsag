@@ -1764,3 +1764,1732 @@ theorem transcriptSweepOpeningCount_eq_domainQueryCost {arith : RowArithmetizati
     across any list `trs` of accepted shard certificates and prover commitment transcripts, the
     total number of verified coset-sweep Merkle duet openings equals
     `hierarchyTranscriptQueryCost dom trs.length` (`= trs.length * domainTranscriptQueryCost dom`). -/
+theorem hierarchySweepOpeningCount_eq_queryCost {arith : RowArithmetization}
+    {dom : WhirDomain} {epochFloor msg : List UInt8} :
+    ∀ (trs : List (ShardProverTranscript arith dom)),
+      (∀ t ∈ trs, verifyHemShard arith dom epochFloor msg t.shard = true ∧
+        verifyCommittedTableTranscript dom t.shard.proof t.transcript = true) →
+      hierarchySweepOpeningCount trs = hierarchyTranscriptQueryCost dom trs.length
+  | [], _ => by simp [hierarchySweepOpeningCount, hierarchyTranscriptQueryCost]
+  | t :: rest, h => by
+    have ht := h t (List.mem_cons_self ..)
+    have hHead := transcriptSweepOpeningCount_eq_domainQueryCost ht.1 ht.2
+    have ih := hierarchySweepOpeningCount_eq_queryCost rest
+      (fun t' ht' => h t' (List.mem_cons_of_mem _ ht'))
+    change transcriptSweepOpeningCount t.transcript + hierarchySweepOpeningCount rest =
+      hierarchyTranscriptQueryCost dom (rest.length + 1)
+    rw [hHead, ih, hierarchyTranscriptQueryCost, hierarchyTranscriptQueryCost,
+        Nat.add_one_mul, Nat.add_comm]
+
+/-- Shard-by-shard transcript conversion into `HemShardEnv`, preserving shards and reconstructed views. -/
+def extractShardEnvsFromTranscripts (arith : RowArithmetization) (dom : WhirDomain) :
+    (trs : List (ShardProverTranscript arith dom)) →
+    (∀ t ∈ trs, verifyCommittedTableTranscript dom t.shard.proof t.transcript = true) →
+    PSum { envs : List (HemShardEnv arith dom) //
+        envs.map (·.shard) = trs.map (·.shard) ∧
+        envs.length = trs.length ∧
+        ∀ (i : Nat) (he : i < envs.length) (ht : i < trs.length),
+          (envs[i]'he).shard = (trs[i]'ht).shard ∧
+          (envs[i]'he).view = reconstructSuccinctView dom (trs[i]'ht).transcript }
+      (Fin trs.length × HashCollisionWitness pcsMerkleHash)
+  | [], _ => .inl ⟨[], rfl, rfl, fun _ h => absurd h (Nat.not_lt_zero _)⟩
+  | t :: ts, hTrs =>
+    have ht0 := hTrs t (List.mem_cons_self ..)
+    match hExt0 : extractShardEnvFromTranscript arith dom t ht0 with
+    | .inr col => .inr ⟨⟨0, Nat.succ_pos _⟩, col⟩
+    | .inl env0 =>
+      have hEq0 := extractShardEnvFromTranscript_inl_eq hExt0
+      match extractShardEnvsFromTranscripts arith dom ts
+          (fun t' ht' => hTrs t' (List.mem_cons_of_mem _ ht')) with
+      | .inr ⟨⟨j, hj⟩, col⟩ => .inr ⟨⟨j + 1, Nat.succ_lt_succ hj⟩, col⟩
+      | .inl ⟨envsRest, hMap, hLen, hIdx⟩ =>
+        .inl ⟨env0 :: envsRest, by
+          refine ⟨by simp [hEq0.1, hMap], congrArg Nat.succ hLen, ?_⟩
+          intro i he ht
+          cases i with
+          | zero => exact hEq0
+          | succ k =>
+            exact hIdx k (Nat.lt_of_succ_lt_succ he) (Nat.lt_of_succ_lt_succ ht)⟩
+
+/-- Unified break outcome for transcript-grounded hierarchical extraction. -/
+@[expose] def HemTranscriptHierarchyBreak (H : Hash) (arith : RowArithmetization)
+    (dom : WhirDomain) (trs : List (ShardProverTranscript arith dom)) : Type :=
+  PSum (HashCollisionWitness H)
+    (Σ j : Fin trs.length,
+      HemShardBreak arith dom (trs.get j).shard.proof
+        (reconstructSuccinctView dom (trs.get j).transcript))
+
+/-- **Transcript-Grounded Two-Layer Hierarchical Extractor (`extractHierarchicalHemFromTranscripts`,
+    `0 Classical.choice`)**:
+    Composes `extractShardEnvFromTranscript` with `extractHierarchicalHemQuorums` so hierarchical
+    extraction is grounded directly in prover commitment-opening transcripts (`CommittedTableTranscript`)
+    rather than externally assumed `StagesBound` proofs. -/
+def extractHierarchicalHemFromTranscripts (H : Hash) (arith : RowArithmetization)
+    (dom : WhirDomain) (registryDigest epochFloor msg : List UInt8)
+    (registry : List ShardRegistration)
+    (hReg : H (encodeRegistry registry) = registryDigest)
+    (trs : List (ShardProverTranscript arith dom))
+    (hTrs : ∀ t ∈ trs, verifyCommittedTableTranscript dom t.shard.proof t.transcript = true)
+    (hAccept : verifyHierarchicalHem H arith dom registryDigest epochFloor msg
+      (trs.map (·.shard)) = true) :
+    PSum (HierarchicalQuorumWitness epochFloor msg registry (trs.map (·.shard)))
+      (HemTranscriptHierarchyBreak H arith dom trs) :=
+  match extractShardEnvsFromTranscripts arith dom trs hTrs with
+  | .inr ⟨j, merkleCol⟩ => .inr (.inr ⟨j, .inr (.inl merkleCol)⟩)
+  | .inl ⟨envs, hShards, hLen, hIdx⟩ =>
+    have hAccEnvs : verifyHierarchicalHem H arith dom registryDigest epochFloor msg
+        (envs.map (·.shard)) = true := by
+      rwa [hShards]
+    match extractHierarchicalHemQuorums H arith dom registryDigest epochFloor msg registry hReg
+        envs hAccEnvs with
+    | .inl w =>
+      .inl ⟨w.sigs, hShards ▸ w.slots_eq, hShards ▸ w.weight_eq, hShards ▸ w.registry_eq⟩
+    | .inr (.inl rootCol) => .inr (.inl rootCol)
+    | .inr (.inr ⟨j, brk⟩) =>
+      let j' : Fin trs.length := ⟨j.val, hLen ▸ j.isLt⟩
+      have hPair := hIdx j.val j.isLt j'.isLt
+      have hProofEq : (envs.get j).shard.proof = (trs.get j').shard.proof :=
+        congrArg HemShardProof.proof hPair.1
+      have hViewEq : (envs.get j).view = reconstructSuccinctView dom (trs.get j').transcript :=
+        hPair.2
+      .inr (.inr ⟨j', by rw [← hProofEq, ← hViewEq]; exact brk⟩)
+
+theorem recursive_hem_transcript_knowledge_soundness (H : Hash) (arith : RowArithmetization)
+    (dom : WhirDomain) (registryDigest epochFloor msg : List UInt8)
+    (registry : List ShardRegistration) (hReg : H (encodeRegistry registry) = registryDigest)
+    (trs : List (ShardProverTranscript arith dom))
+    (hTrs : ∀ t ∈ trs, verifyCommittedTableTranscript dom t.shard.proof t.transcript = true)
+    (hAccept : verifyHierarchicalHem H arith dom registryDigest epochFloor msg
+      (trs.map (·.shard)) = true) :
+    (∃ sigs : List (ExtractedQuorumSig epochFloor msg),
+      sigs.map (·.slot) = hierarchicalActiveSlots (trs.map (·.shard)) ∧
+      sigs.length = hierarchicalClaimedWeight (trs.map (·.shard)) ∧
+      hierarchicalThresholdSum (trs.map (·.shard)) = registryThresholdSum registry ∧
+      registryThresholdSum registry ≤ sigs.length ∧
+      (sigs.map (·.slot.pk)).Nodup ∧
+      (∀ r ∈ registry, r.WellFormed = true) ∧
+      (trs.map (·.shard)).map HemShardProof.registration = registry) ∧
+      hierarchySweepOpeningCount trs = hierarchyTranscriptQueryCost dom trs.length ∨
+    Nonempty (HemTranscriptHierarchyBreak H arith dom trs) := by
+  have hF := verifyHierarchicalHem_facts hAccept
+  match extractHierarchicalHemFromTranscripts H arith dom registryDigest epochFloor msg registry
+      hReg trs hTrs hAccept with
+  | .inr brk => exact .inr ⟨brk⟩
+  | .inl w =>
+    have hSumEq :
+        hierarchicalThresholdSum (trs.map (·.shard)) = registryThresholdSum registry := by
+      rw [hierarchicalThresholdSum_eq_registryThresholdSum, w.registry_eq]
+    have hCost : hierarchySweepOpeningCount trs = hierarchyTranscriptQueryCost dom trs.length :=
+      hierarchySweepOpeningCount_eq_queryCost trs (fun t ht =>
+        ⟨hF.2.2.2 t.shard (List.mem_map.mpr ⟨t, ht, rfl⟩), hTrs t ht⟩)
+    refine .inl ⟨⟨w.sigs, w.slots_eq, w.weight_eq, hSumEq, ?_, ?_, ?_, w.registry_eq⟩, hCost⟩
+    · rw [w.weight_eq, ← hSumEq]
+      exact hierarchicalThresholdSum_le_claimedWeight _ hF.2.2.2
+    · have hMap : w.sigs.map (·.slot.pk) = (w.sigs.map (·.slot)).map HemSlot.pk := by
+        rw [List.map_map]; rfl
+      rw [hMap, w.slots_eq]
+      exact (hierarchicalActiveSlots_pk_sublist _).nodup hF.2.2.1
+    · intro r hr
+      rw [← w.registry_eq] at hr
+      obtain ⟨s, hsMem, rfl⟩ := List.mem_map.mp hr
+      exact verifyHemShard_wellFormed (hF.2.2.2 s hsMem)
+
+/-! ### Union bound `ε_hier ≤ ε_root + Σ_j ε_shard(j)` over a finite coin space -/
+
+def countTrue {Ω : Type} (p : Ω → Bool) : List Ω → Nat
+  | [] => 0
+  | ω :: rest => (if p ω then 1 else 0) + countTrue p rest
+
+def sumOver : Nat → (Nat → Nat) → Nat
+  | 0, _ => 0
+  | m + 1, f => sumOver m f + f m
+
+private theorem sumOver_add (m : Nat) (f g : Nat → Nat) :
+    sumOver m (fun j => f j + g j) = sumOver m f + sumOver m g := by
+  induction m with
+  | zero => rfl
+  | succ m ih =>
+    simp only [sumOver, ih]
+    omega
+
+private theorem le_sumOver_of_lt (m : Nat) (f : Nat → Nat) (j : Nat) (hj : j < m) :
+    f j ≤ sumOver m f := by
+  induction m with
+  | zero => omega
+  | succ m ih =>
+    simp only [sumOver]
+    rcases Nat.lt_succ_iff_lt_or_eq.mp hj with hlt | rfl
+    · have := ih hlt
+      omega
+    · omega
+
+/-- Counting union bound: if every bad outcome of the hierarchy is a root-bad outcome or a
+    shard-bad outcome for some `j < m`, the bad counts add up accordingly. Dividing by
+    `coins.length` gives `ε_hier ≤ ε_root + Σ_{j < m} ε_shard(j)`. -/
+theorem countTrue_union_bound {Ω : Type} (coins : List Ω) (m : Nat)
+    (hierBad rootBad : Ω → Bool) (shardBad : Nat → Ω → Bool)
+    (hCover : ∀ ω, hierBad ω = true →
+      rootBad ω = true ∨ ∃ j, j < m ∧ shardBad j ω = true) :
+    countTrue hierBad coins ≤
+      countTrue rootBad coins + sumOver m (fun j => countTrue (shardBad j) coins) := by
+  induction coins with
+  | nil => exact Nat.zero_le _
+  | cons ω rest ih =>
+    have hs : sumOver m (fun j => countTrue (shardBad j) (ω :: rest)) =
+        sumOver m (fun j => if shardBad j ω then 1 else 0) +
+        sumOver m (fun j => countTrue (shardBad j) rest) := by
+      rw [← sumOver_add]
+      rfl
+    have hstep : (if hierBad ω then 1 else 0) ≤
+        (if rootBad ω then 1 else 0) + sumOver m (fun j => if shardBad j ω then 1 else 0) := by
+      cases hb : hierBad ω with
+      | false => exact Nat.zero_le _
+      | true =>
+        rcases hCover ω hb with hr | ⟨j, hj, hsj⟩
+        · rw [hr]
+          exact Nat.le_add_right _ _
+        · have hle : (if shardBad j ω then 1 else 0) ≤
+              sumOver m (fun j => if shardBad j ω then 1 else 0) :=
+            le_sumOver_of_lt m (fun j => if shardBad j ω then 1 else 0) j hj
+          rw [hsj] at hle
+          exact Nat.le_trans hle (Nat.le_add_left _ _)
+    rw [hs]
+    simp only [countTrue]
+    omega
+
+/-- **Composed soundness error of the two-layer hierarchy
+    (`hierarchical_hem_soundness_error_bound`)**: over a finite coin space, let `hierBad` mark
+    coins where the root verifier accepts against the authenticated `registryDigest ω =
+    H (encodeRegistry (registry ω))` although no `HierarchicalQuorumWitness` exists, let `rootBad`
+    mark every coin whose run yields a concrete `HashCollisionWitness H`, and let `shardBad j` mark
+    every coin whose run contains a single-layer break at shard `j`. Then
+    `#hierBad ≤ #rootBad + Σ_{j < m} #shardBad j`. -/
+theorem hierarchical_hem_soundness_error_bound {Ω : Type} (coins : List Ω) (m : Nat)
+    (H : Hash) (arith : RowArithmetization) (dom : WhirDomain)
+    (registryDigest epochFloor msg : Ω → List UInt8)
+    (registry : Ω → List ShardRegistration)
+    (envs : Ω → List (HemShardEnv arith dom))
+    (hLen : ∀ ω, (envs ω).length ≤ m)
+    (hierBad rootBad : Ω → Bool) (shardBad : Nat → Ω → Bool)
+    (hHier : ∀ ω, hierBad ω = true →
+      verifyHierarchicalHem H arith dom (registryDigest ω) (epochFloor ω) (msg ω)
+        ((envs ω).map (·.shard)) = true ∧
+      (HierarchicalQuorumWitness (epochFloor ω) (msg ω) (registry ω)
+        ((envs ω).map (·.shard)) → False))
+    (hRegAuth : ∀ ω, hierBad ω = true → H (encodeRegistry (registry ω)) = registryDigest ω)
+    (hRoot : ∀ ω, HashCollisionWitness H → rootBad ω = true)
+    (hShard : ∀ ω (j : Fin (envs ω).length),
+      HemShardBreak arith dom ((envs ω).get j).shard.proof ((envs ω).get j).view →
+      shardBad j.val ω = true) :
+    countTrue hierBad coins ≤
+      countTrue rootBad coins + sumOver m (fun j => countTrue (shardBad j) coins) := by
+  apply countTrue_union_bound
+  intro ω hb
+  obtain ⟨hAcc, hNo⟩ := hHier ω hb
+  have hF := verifyHierarchicalHem_facts hAcc
+  if hEq : ((envs ω).map (·.shard)).map HemShardProof.registration = registry ω then
+    match extractShardList arith dom (epochFloor ω) (msg ω) (envs ω)
+        (fun e he => hF.2.2.2 e.shard (List.mem_map.mpr ⟨e, he, rfl⟩)) with
+    | .inl ⟨sigs, hSlots, hWeight⟩ => exact (hNo ⟨sigs, hSlots, hWeight, hEq⟩).elim
+    | .inr ⟨j, brk⟩ =>
+      exact .inr ⟨j.val, Nat.lt_of_lt_of_le j.isLt (hLen ω), hShard ω j brk⟩
+  else
+    exact .inl (hRoot ω (registryCollision H hF.1 (hRegAuth ω hb) hEq))
+
+/-- Transcript-grounded finite-coin union bound composing `extractHierarchicalHemFromTranscripts`
+    with `countTrue_union_bound`. -/
+theorem hierarchical_hem_transcript_soundness_error_bound {Ω : Type} (coins : List Ω) (m : Nat)
+    (H : Hash) (arith : RowArithmetization) (dom : WhirDomain)
+    (registryDigest epochFloor msg : Ω → List UInt8)
+    (registry : Ω → List ShardRegistration)
+    (trs : Ω → List (ShardProverTranscript arith dom))
+    (hLen : ∀ ω, (trs ω).length ≤ m)
+    (hierBad rootBad : Ω → Bool) (shardBad : Nat → Ω → Bool)
+    (hHier : ∀ ω, hierBad ω = true →
+      verifyHierarchicalHem H arith dom (registryDigest ω) (epochFloor ω) (msg ω)
+        ((trs ω).map (·.shard)) = true ∧
+      (∀ t ∈ trs ω, verifyCommittedTableTranscript dom t.shard.proof t.transcript = true) ∧
+      (HierarchicalQuorumWitness (epochFloor ω) (msg ω) (registry ω)
+        ((trs ω).map (·.shard)) → False))
+    (hRegAuth : ∀ ω, hierBad ω = true → H (encodeRegistry (registry ω)) = registryDigest ω)
+    (hRoot : ∀ ω, HashCollisionWitness H → rootBad ω = true)
+    (hShard : ∀ ω (j : Fin (trs ω).length),
+      HemShardBreak arith dom ((trs ω).get j).shard.proof
+        (reconstructSuccinctView dom ((trs ω).get j).transcript) →
+      shardBad j.val ω = true) :
+    countTrue hierBad coins ≤
+      countTrue rootBad coins + sumOver m (fun j => countTrue (shardBad j) coins) := by
+  apply countTrue_union_bound
+  intro ω hb
+  obtain ⟨hAcc, hTrs, hNo⟩ := hHier ω hb
+  match extractHierarchicalHemFromTranscripts H arith dom (registryDigest ω) (epochFloor ω)
+      (msg ω) (registry ω) (hRegAuth ω hb) (trs ω) hTrs hAcc with
+  | .inl w => exact (hNo w).elim
+  | .inr (.inl col) => exact .inl (hRoot ω col)
+  | .inr (.inr ⟨j, brk⟩) =>
+    exact .inr ⟨j.val, Nat.lt_of_lt_of_le j.isLt (hLen ω), hShard ω j brk⟩
+
+/-! ### `#tooth`: lowered shard threshold & unscoped shard replay refutations -/
+
+/-- Constructive forged-threshold refutation (`0 Classical.choice`): if any shard `i` presents a
+    threshold strictly below its registered threshold `(shards[i]).threshold < (registry[i]).threshold`
+    under `registryDigest = H (encodeRegistry registry)`, then `verifyHemHierarchyAgainstRegistry`
+    unconditionally rejects and either `verifyHierarchicalHem` rejects or `registryCollision`
+    constructively extracts a `HashCollisionWitness H`. -/
+def forgedLowerThreshold_rejected_or_collision (H : Hash)
+    (arith : RowArithmetization) (dom : WhirDomain)
+    (registryDigest epochFloor msg : List UInt8)
+    (registry : List ShardRegistration)
+    (hReg : H (encodeRegistry registry) = registryDigest)
+    (shards : List HemShardProof)
+    (i : Nat) (hiS : i < shards.length) (hiR : i < registry.length)
+    (hLower : (shards[i]'hiS).threshold < (registry[i]'hiR).threshold) :
+    PSum
+      (PLift (verifyHierarchicalHem H arith dom registryDigest epochFloor msg shards = false ∧
+        verifyHemHierarchyAgainstRegistry arith dom registry epochFloor msg shards = false))
+      (HashCollisionWitness H) :=
+  have hNe : shards.map HemShardProof.registration ≠ registry := fun hEq => by
+    have hAt : (shards.map HemShardProof.registration)[i]? = registry[i]? :=
+      congrArg (·[i]?) hEq
+    rw [List.getElem?_map, List.getElem?_eq_getElem hiS, List.getElem?_eq_getElem hiR,
+        Option.map_some, Option.some.injEq] at hAt
+    have hThr : (shards[i]'hiS).threshold = (registry[i]'hiR).threshold :=
+      congrArg ShardRegistration.threshold hAt
+    omega
+  have hDirectFalse :
+      verifyHemHierarchyAgainstRegistry arith dom registry epochFloor msg shards = false := by
+    unfold verifyHemHierarchyAgainstRegistry
+    simp [decide_eq_false hNe]
+  if hAcc : verifyHierarchicalHem H arith dom registryDigest epochFloor msg shards = true then
+    .inr (registryCollision H (verifyHierarchicalHem_facts hAcc).1 hReg hNe)
+  else
+    .inl ⟨Bool.eq_false_iff.mpr hAcc, hDirectFalse⟩
+
+/-- Root verifier with the shard-id and committee-disjointness checks removed. -/
+def verifyHierarchicalHemUnscoped (arith : RowArithmetization) (dom : WhirDomain)
+    (shards : List HemShardProof) : Bool :=
+  shards.all fun s =>
+    decide (1 ≤ s.threshold) &&
+    decide (s.threshold ≤ s.inst.committee.length) &&
+    decide (s.threshold ≤ bitmapPopcountSpec s.proof.agg.bitmap) &&
+    verifySuccinctAggregate arith dom s.inst s.proof s.fs
+
+private theorem hierarchicalClaimedWeight_replicate (s : HemShardProof) :
+    ∀ m : Nat, hierarchicalClaimedWeight (List.replicate m s) =
+      m * bitmapPopcountSpec s.proof.agg.bitmap
+  | 0 => by simp [hierarchicalClaimedWeight]
+  | m + 1 => by
+    simp only [List.replicate_succ, hierarchicalClaimedWeight,
+      hierarchicalClaimedWeight_replicate s m, Nat.succ_mul]
+    omega
+
+private theorem hierarchicalActiveSlots_replicate (s : HemShardProof) :
+    ∀ (m : Nat) (q : HemSlot), q ∈ hierarchicalActiveSlots (List.replicate m s) →
+      q ∈ shardActiveSlots s
+  | 0, _, h => by simp [hierarchicalActiveSlots] at h
+  | m + 1, q, h => by
+    simp only [List.replicate_succ, hierarchicalActiveSlots, List.mem_append] at h
+    rcases h with h | h
+    · exact h
+    · exact hierarchicalActiveSlots_replicate s m q h
+
+private theorem hierarchicalShardIds_replicate (s : HemShardProof) :
+    ∀ m : Nat, hierarchicalShardIds (List.replicate m s) = List.replicate m s.shardId
+  | 0 => rfl
+  | m + 1 => by
+    simp only [List.replicate_succ, hierarchicalShardIds, hierarchicalShardIds_replicate s m]
+
+/-- **Replay multiplication without shard scoping**: any shard certificate accepted by
+    `verifyHemShard`, repeated `m ≥ 2` times, passes the unscoped root check with claimed weight
+    `m` times the shard's weight and `m` times its threshold, although every active slot is one
+    of the single shard's slots. `verifyHierarchicalHem` rejects the same list. -/
+theorem tooth_unscoped_shard_id_allows_quorum_replay_multiplication (H : Hash)
+    (arith : RowArithmetization) (dom : WhirDomain) (registryDigest epochFloor msg : List UInt8)
+    (s : HemShardProof) (m : Nat) (hm : 2 ≤ m)
+    (hs : verifyHemShard arith dom epochFloor msg s = true) :
+    verifyHierarchicalHemUnscoped arith dom (List.replicate m s) = true ∧
+    hierarchicalClaimedWeight (List.replicate m s) = m * bitmapPopcountSpec s.proof.agg.bitmap ∧
+    m * s.threshold ≤ hierarchicalClaimedWeight (List.replicate m s) ∧
+    (∀ q ∈ hierarchicalActiveSlots (List.replicate m s), q ∈ shardActiveSlots s) ∧
+    verifyHierarchicalHem H arith dom registryDigest epochFloor msg (List.replicate m s)
+      = false := by
+  have hF := verifyHemShard_facts hs
+  refine ⟨?_, hierarchicalClaimedWeight_replicate s m, ?_,
+    hierarchicalActiveSlots_replicate s m, ?_⟩
+  · unfold verifyHierarchicalHemUnscoped
+    rw [List.all_eq_true]
+    intro x hx
+    rw [List.eq_of_mem_replicate hx]
+    simp only [Bool.and_eq_true, decide_eq_true_eq]
+    exact ⟨⟨⟨hF.2.1, hF.2.2.1⟩, hF.2.2.2.1⟩, hF.2.2.2.2⟩
+  · rw [hierarchicalClaimedWeight_replicate]
+    exact Nat.mul_le_mul_left m hF.2.2.2.1
+  · apply Bool.eq_false_iff.mpr
+    intro hAcc
+    have hNodup := (verifyHierarchicalHem_facts hAcc).2.1
+    rw [hierarchicalShardIds_replicate] at hNodup
+    obtain ⟨k, rfl⟩ : ∃ k, m = k + 2 := ⟨m - 2, by omega⟩
+    simp [List.replicate_succ] at hNodup
+
+
+/-! ## 5. Deployed width-12 inverses and exact four-lane diffusion -/
+
+/-- The deployed external linear layer, on the actual three-block state. -/
+abbrev poseidon2ExternalLinear12 := applyME
+
+/-- The deployed internal linear layer, including its nonuniform diagonal. -/
+abbrev poseidon2InternalLinear12 := applyMI
+
+theorem poseidon2ExternalLinear12_two_sided_inverse (x : Poseidon2State12) :
+    applyMEInv (poseidon2ExternalLinear12 x) = x ∧
+    poseidon2ExternalLinear12 (applyMEInv x) = x :=
+  ⟨applyMEInv_applyME x, applyME_applyMEInv x⟩
+
+theorem poseidon2InternalLinear12_two_sided_inverse (x : Poseidon2State12) :
+    applyMIInv (poseidon2InternalLinear12 x) = x ∧
+    poseidon2InternalLinear12 (applyMIInv x) = x :=
+  ⟨applyMIInv_applyMI x, applyMI_applyMIInv x⟩
+
+theorem poseidon2_full_round_two_sided_inverse (rc x : Poseidon2State12) :
+    externalRoundInv rc (externalRound rc x) = x ∧
+    externalRound rc (externalRoundInv rc x) = x :=
+  ⟨externalRoundInv_externalRound rc x, externalRound_externalRoundInv rc x⟩
+
+theorem poseidon2_partial_round_two_sided_inverse (rc : Goldilocks) (x : Poseidon2State12) :
+    internalRoundInv rc (internalRound rc x) = x ∧
+    internalRound rc (internalRoundInv rc x) = x :=
+  ⟨internalRoundInv_internalRound rc x, internalRound_internalRoundInv rc x⟩
+
+theorem poseidon2_deployed_permutation_injective (x y : Poseidon2State12) :
+    poseidon2Perm12 x = poseidon2Perm12 y ↔ x = y :=
+  (poseidon2Perm12_bijective x y).2.2.1
+
+/-- Number of nonzero coordinates; this counts field elements, not bits. -/
+def laneWeight4 (x : Lane4) : Nat :=
+  (if x.x0 = Goldilocks.zero then 0 else 1) +
+  (if x.x1 = Goldilocks.zero then 0 else 1) +
+  (if x.x2 = Goldilocks.zero then 0 else 1) +
+  (if x.x3 = Goldilocks.zero then 0 else 1)
+
+private theorem minor_scalar_cancel (d : Int) (hd : goldOfInt d ≠ Goldilocks.zero)
+    (x : Goldilocks) (h : Goldilocks.mul (goldOfInt d) x = Goldilocks.zero) :
+    x = Goldilocks.zero := by
+  rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero h with h | h
+  · exact False.elim (hd h)
+  · exact h
+
+/-- Cofactor certificates below cover every equally sized set of input columns and output rows.
+    Each certificate recovers one supported input coordinate from the selected zero outputs.
+    The determinants are small nonzero integers, hence units in the Goldilocks field. -/
+private theorem m4_minor_0_0 (x : Lane4)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (2)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-3)) x.x1)) (Goldilocks.mul (goldOfInt (-1)) x.x2)) (Goldilocks.mul (goldOfInt (-1)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx1, hx2, hx3, hy0] at he
+  apply minor_scalar_cancel (2) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_0_1 (x : Lane4)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (1)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x1) (Goldilocks.mul (goldOfInt (-2)) x.x1)) (Goldilocks.mul (goldOfInt (-3)) x.x2)) (Goldilocks.mul (goldOfInt (-1)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx1, hx2, hx3, hy1] at he
+  apply minor_scalar_cancel (1) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_0_2 (x : Lane4)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (1)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x2) (Goldilocks.mul (goldOfInt (-1)) x.x1)) (Goldilocks.mul (goldOfInt (-2)) x.x2)) (Goldilocks.mul (goldOfInt (-3)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx1, hx2, hx3, hy2] at he
+  apply minor_scalar_cancel (1) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_0_3 (x : Lane4)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (3)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x3) (Goldilocks.mul (goldOfInt (-1)) x.x1)) (Goldilocks.mul (goldOfInt (-1)) x.x2)) (Goldilocks.mul (goldOfInt (-2)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx1, hx2, hx3, hy3] at he
+  apply minor_scalar_cancel (3) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_1_0 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    : x.x1 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (3)) x.x1) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-2)) x.x0)) (Goldilocks.mul (goldOfInt (-1)) x.x2)) (Goldilocks.mul (goldOfInt (-1)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx2, hx3, hy0] at he
+  apply minor_scalar_cancel (3) (by decide) x.x1
+  exact he.trans (by decide)
+
+private theorem m4_minor_1_1 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    : x.x1 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (2)) x.x1) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x1) (Goldilocks.mul (goldOfInt (-1)) x.x0)) (Goldilocks.mul (goldOfInt (-3)) x.x2)) (Goldilocks.mul (goldOfInt (-1)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx2, hx3, hy1] at he
+  apply minor_scalar_cancel (2) (by decide) x.x1
+  exact he.trans (by decide)
+
+private theorem m4_minor_1_2 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    : x.x1 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (1)) x.x1) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x2) (Goldilocks.mul (goldOfInt (-1)) x.x0)) (Goldilocks.mul (goldOfInt (-2)) x.x2)) (Goldilocks.mul (goldOfInt (-3)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx2, hx3, hy2] at he
+  apply minor_scalar_cancel (1) (by decide) x.x1
+  exact he.trans (by decide)
+
+private theorem m4_minor_1_3 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x1 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (1)) x.x1) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x3) (Goldilocks.mul (goldOfInt (-3)) x.x0)) (Goldilocks.mul (goldOfInt (-1)) x.x2)) (Goldilocks.mul (goldOfInt (-2)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx2, hx3, hy3] at he
+  apply minor_scalar_cancel (1) (by decide) x.x1
+  exact he.trans (by decide)
+
+private theorem m4_minor_2_0 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    : x.x2 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (1)) x.x2) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-2)) x.x0)) (Goldilocks.mul (goldOfInt (-3)) x.x1)) (Goldilocks.mul (goldOfInt (-1)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx1, hx3, hy0] at he
+  apply minor_scalar_cancel (1) (by decide) x.x2
+  exact he.trans (by decide)
+
+private theorem m4_minor_2_1 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    : x.x2 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (3)) x.x2) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x1) (Goldilocks.mul (goldOfInt (-1)) x.x0)) (Goldilocks.mul (goldOfInt (-2)) x.x1)) (Goldilocks.mul (goldOfInt (-1)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx1, hx3, hy1] at he
+  apply minor_scalar_cancel (3) (by decide) x.x2
+  exact he.trans (by decide)
+
+private theorem m4_minor_2_2 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    : x.x2 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (2)) x.x2) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x2) (Goldilocks.mul (goldOfInt (-1)) x.x0)) (Goldilocks.mul (goldOfInt (-1)) x.x1)) (Goldilocks.mul (goldOfInt (-3)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx1, hx3, hy2] at he
+  apply minor_scalar_cancel (2) (by decide) x.x2
+  exact he.trans (by decide)
+
+private theorem m4_minor_2_3 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x2 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (1)) x.x2) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x3) (Goldilocks.mul (goldOfInt (-3)) x.x0)) (Goldilocks.mul (goldOfInt (-1)) x.x1)) (Goldilocks.mul (goldOfInt (-2)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx1, hx3, hy3] at he
+  apply minor_scalar_cancel (1) (by decide) x.x2
+  exact he.trans (by decide)
+
+private theorem m4_minor_3_0 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    : x.x3 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (1)) x.x3) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-2)) x.x0)) (Goldilocks.mul (goldOfInt (-3)) x.x1)) (Goldilocks.mul (goldOfInt (-1)) x.x2)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx1, hx2, hy0] at he
+  apply minor_scalar_cancel (1) (by decide) x.x3
+  exact he.trans (by decide)
+
+private theorem m4_minor_3_1 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    : x.x3 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (1)) x.x3) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x1) (Goldilocks.mul (goldOfInt (-1)) x.x0)) (Goldilocks.mul (goldOfInt (-2)) x.x1)) (Goldilocks.mul (goldOfInt (-3)) x.x2)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx1, hx2, hy1] at he
+  apply minor_scalar_cancel (1) (by decide) x.x3
+  exact he.trans (by decide)
+
+private theorem m4_minor_3_2 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    : x.x3 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (3)) x.x3) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x2) (Goldilocks.mul (goldOfInt (-1)) x.x0)) (Goldilocks.mul (goldOfInt (-1)) x.x1)) (Goldilocks.mul (goldOfInt (-2)) x.x2)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx1, hx2, hy2] at he
+  apply minor_scalar_cancel (3) (by decide) x.x3
+  exact he.trans (by decide)
+
+private theorem m4_minor_3_3 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x3 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (2)) x.x3) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x3) (Goldilocks.mul (goldOfInt (-3)) x.x0)) (Goldilocks.mul (goldOfInt (-1)) x.x1)) (Goldilocks.mul (goldOfInt (-1)) x.x2)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx1, hx2, hy3] at he
+  apply minor_scalar_cancel (2) (by decide) x.x3
+  exact he.trans (by decide)
+
+private theorem m4_minor_01_01 (x : Lane4)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (1)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (2)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-3)) (applyM4 x).x1)) (Goldilocks.mul (goldOfInt (7)) x.x2)) (Goldilocks.mul (goldOfInt (1)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx2, hx3, hy0, hy1] at he
+  apply minor_scalar_cancel (1) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_01_02 (x : Lane4)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (-1)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-3)) (applyM4 x).x2)) (Goldilocks.mul (goldOfInt (5)) x.x2)) (Goldilocks.mul (goldOfInt (8)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx2, hx3, hy0, hy2] at he
+  apply minor_scalar_cancel (-1) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_01_03 (x : Lane4)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (-7)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-3)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (2)) x.x2)) (Goldilocks.mul (goldOfInt (5)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx2, hx3, hy0, hy3] at he
+  apply minor_scalar_cancel (-7) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_01_12 (x : Lane4)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (-1)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x1) (Goldilocks.mul (goldOfInt (-2)) (applyM4 x).x2)) (Goldilocks.mul (goldOfInt (1)) x.x2)) (Goldilocks.mul (goldOfInt (5)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx2, hx3, hy1, hy2] at he
+  apply minor_scalar_cancel (-1) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_01_13 (x : Lane4)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (-5)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x1) (Goldilocks.mul (goldOfInt (-2)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (-1)) x.x2)) (Goldilocks.mul (goldOfInt (3)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx2, hx3, hy1, hy3] at he
+  apply minor_scalar_cancel (-5) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_01_23 (x : Lane4)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (-2)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x2) (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (-1)) x.x2)) (Goldilocks.mul (goldOfInt (-1)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx2, hx3, hy2, hy3] at he
+  apply minor_scalar_cancel (-2) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_02_01 (x : Lane4)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (5)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (3)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x1)) (Goldilocks.mul (goldOfInt (-7)) x.x1)) (Goldilocks.mul (goldOfInt (-2)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx1, hx3, hy0, hy1] at he
+  apply minor_scalar_cancel (5) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_02_02 (x : Lane4)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (3)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (2)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x2)) (Goldilocks.mul (goldOfInt (-5)) x.x1)) (Goldilocks.mul (goldOfInt (1)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx1, hx3, hy0, hy2] at he
+  apply minor_scalar_cancel (3) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_02_03 (x : Lane4)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (-1)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (-2)) x.x1)) (Goldilocks.mul (goldOfInt (1)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx1, hx3, hy0, hy3] at he
+  apply minor_scalar_cancel (-1) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_02_12 (x : Lane4)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (-1)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (2)) (applyM4 x).x1) (Goldilocks.mul (goldOfInt (-3)) (applyM4 x).x2)) (Goldilocks.mul (goldOfInt (-1)) x.x1)) (Goldilocks.mul (goldOfInt (7)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx1, hx3, hy1, hy2] at he
+  apply minor_scalar_cancel (-1) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_02_13 (x : Lane4)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (-8)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x1) (Goldilocks.mul (goldOfInt (-3)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (1)) x.x1)) (Goldilocks.mul (goldOfInt (5)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx1, hx3, hy1, hy3] at he
+  apply minor_scalar_cancel (-8) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_02_23 (x : Lane4)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (-5)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x2) (Goldilocks.mul (goldOfInt (-2)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (1)) x.x1)) (Goldilocks.mul (goldOfInt (1)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx1, hx3, hy2, hy3] at he
+  apply minor_scalar_cancel (-5) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_03_01 (x : Lane4)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (1)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x1)) (Goldilocks.mul (goldOfInt (-1)) x.x1)) (Goldilocks.mul (goldOfInt (2)) x.x2)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx1, hx2, hy0, hy1] at he
+  apply minor_scalar_cancel (1) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_03_02 (x : Lane4)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (5)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (3)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x2)) (Goldilocks.mul (goldOfInt (-8)) x.x1)) (Goldilocks.mul (goldOfInt (-1)) x.x2)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx1, hx2, hy0, hy2] at he
+  apply minor_scalar_cancel (5) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_03_03 (x : Lane4)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (1)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (2)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (-5)) x.x1)) (Goldilocks.mul (goldOfInt (-1)) x.x2)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx1, hx2, hy0, hy3] at he
+  apply minor_scalar_cancel (1) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_03_12 (x : Lane4)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (2)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (3)) (applyM4 x).x1) (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x2)) (Goldilocks.mul (goldOfInt (-5)) x.x1)) (Goldilocks.mul (goldOfInt (-7)) x.x2)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx1, hx2, hy1, hy2] at he
+  apply minor_scalar_cancel (2) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_03_13 (x : Lane4)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (-1)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (2)) (applyM4 x).x1) (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (-3)) x.x1)) (Goldilocks.mul (goldOfInt (-5)) x.x2)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx1, hx2, hy1, hy3] at he
+  apply minor_scalar_cancel (-1) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_03_23 (x : Lane4)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (-7)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (2)) (applyM4 x).x2) (Goldilocks.mul (goldOfInt (-3)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (1)) x.x1)) (Goldilocks.mul (goldOfInt (-1)) x.x2)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx1, hx2, hy2, hy3] at he
+  apply minor_scalar_cancel (-7) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_12_01 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    : x.x1 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (7)) x.x1) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (3)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x1)) (Goldilocks.mul (goldOfInt (-5)) x.x0)) (Goldilocks.mul (goldOfInt (-2)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx3, hy0, hy1] at he
+  apply minor_scalar_cancel (7) (by decide) x.x1
+  exact he.trans (by decide)
+
+private theorem m4_minor_12_02 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    : x.x1 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (5)) x.x1) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (2)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x2)) (Goldilocks.mul (goldOfInt (-3)) x.x0)) (Goldilocks.mul (goldOfInt (1)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx3, hy0, hy2] at he
+  apply minor_scalar_cancel (5) (by decide) x.x1
+  exact he.trans (by decide)
+
+private theorem m4_minor_12_03 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x1 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (2)) x.x1) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (1)) x.x0)) (Goldilocks.mul (goldOfInt (1)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx3, hy0, hy3] at he
+  apply minor_scalar_cancel (2) (by decide) x.x1
+  exact he.trans (by decide)
+
+private theorem m4_minor_12_12 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    : x.x1 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (1)) x.x1) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (2)) (applyM4 x).x1) (Goldilocks.mul (goldOfInt (-3)) (applyM4 x).x2)) (Goldilocks.mul (goldOfInt (1)) x.x0)) (Goldilocks.mul (goldOfInt (7)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx3, hy1, hy2] at he
+  apply minor_scalar_cancel (1) (by decide) x.x1
+  exact he.trans (by decide)
+
+private theorem m4_minor_12_13 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x1 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (-1)) x.x1) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x1) (Goldilocks.mul (goldOfInt (-3)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (8)) x.x0)) (Goldilocks.mul (goldOfInt (5)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx3, hy1, hy3] at he
+  apply minor_scalar_cancel (-1) (by decide) x.x1
+  exact he.trans (by decide)
+
+private theorem m4_minor_12_23 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x1 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (-1)) x.x1) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x2) (Goldilocks.mul (goldOfInt (-2)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (5)) x.x0)) (Goldilocks.mul (goldOfInt (1)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx3, hy2, hy3] at he
+  apply minor_scalar_cancel (-1) (by decide) x.x1
+  exact he.trans (by decide)
+
+private theorem m4_minor_13_01 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    : x.x1 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (1)) x.x1) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x1)) (Goldilocks.mul (goldOfInt (-1)) x.x0)) (Goldilocks.mul (goldOfInt (2)) x.x2)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx2, hy0, hy1] at he
+  apply minor_scalar_cancel (1) (by decide) x.x1
+  exact he.trans (by decide)
+
+private theorem m4_minor_13_02 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    : x.x1 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (8)) x.x1) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (3)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x2)) (Goldilocks.mul (goldOfInt (-5)) x.x0)) (Goldilocks.mul (goldOfInt (-1)) x.x2)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx2, hy0, hy2] at he
+  apply minor_scalar_cancel (8) (by decide) x.x1
+  exact he.trans (by decide)
+
+private theorem m4_minor_13_03 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x1 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (5)) x.x1) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (2)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (-1)) x.x0)) (Goldilocks.mul (goldOfInt (-1)) x.x2)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx2, hy0, hy3] at he
+  apply minor_scalar_cancel (5) (by decide) x.x1
+  exact he.trans (by decide)
+
+private theorem m4_minor_13_12 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    : x.x1 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (5)) x.x1) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (3)) (applyM4 x).x1) (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x2)) (Goldilocks.mul (goldOfInt (-2)) x.x0)) (Goldilocks.mul (goldOfInt (-7)) x.x2)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx2, hy1, hy2] at he
+  apply minor_scalar_cancel (5) (by decide) x.x1
+  exact he.trans (by decide)
+
+private theorem m4_minor_13_13 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x1 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (3)) x.x1) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (2)) (applyM4 x).x1) (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (1)) x.x0)) (Goldilocks.mul (goldOfInt (-5)) x.x2)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx2, hy1, hy3] at he
+  apply minor_scalar_cancel (3) (by decide) x.x1
+  exact he.trans (by decide)
+
+private theorem m4_minor_13_23 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x1 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (-1)) x.x1) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (2)) (applyM4 x).x2) (Goldilocks.mul (goldOfInt (-3)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (7)) x.x0)) (Goldilocks.mul (goldOfInt (-1)) x.x2)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx2, hy2, hy3] at he
+  apply minor_scalar_cancel (-1) (by decide) x.x1
+  exact he.trans (by decide)
+
+private theorem m4_minor_23_01 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    : x.x2 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (-2)) x.x2) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x1)) (Goldilocks.mul (goldOfInt (-1)) x.x0)) (Goldilocks.mul (goldOfInt (-1)) x.x1)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx1, hy0, hy1] at he
+  apply minor_scalar_cancel (-2) (by decide) x.x2
+  exact he.trans (by decide)
+
+private theorem m4_minor_23_02 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    : x.x2 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (1)) x.x2) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (3)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x2)) (Goldilocks.mul (goldOfInt (-5)) x.x0)) (Goldilocks.mul (goldOfInt (-8)) x.x1)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx1, hy0, hy2] at he
+  apply minor_scalar_cancel (1) (by decide) x.x2
+  exact he.trans (by decide)
+
+private theorem m4_minor_23_03 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x2 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (1)) x.x2) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (2)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (-1)) x.x0)) (Goldilocks.mul (goldOfInt (-5)) x.x1)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx1, hy0, hy3] at he
+  apply minor_scalar_cancel (1) (by decide) x.x2
+  exact he.trans (by decide)
+
+private theorem m4_minor_23_12 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    : x.x2 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (7)) x.x2) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (3)) (applyM4 x).x1) (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x2)) (Goldilocks.mul (goldOfInt (-2)) x.x0)) (Goldilocks.mul (goldOfInt (-5)) x.x1)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx1, hy1, hy2] at he
+  apply minor_scalar_cancel (7) (by decide) x.x2
+  exact he.trans (by decide)
+
+private theorem m4_minor_23_13 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x2 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (5)) x.x2) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (2)) (applyM4 x).x1) (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (1)) x.x0)) (Goldilocks.mul (goldOfInt (-3)) x.x1)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx1, hy1, hy3] at he
+  apply minor_scalar_cancel (5) (by decide) x.x2
+  exact he.trans (by decide)
+
+private theorem m4_minor_23_23 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x2 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (1)) x.x2) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (2)) (applyM4 x).x2) (Goldilocks.mul (goldOfInt (-3)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (7)) x.x0)) (Goldilocks.mul (goldOfInt (1)) x.x1)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hx1, hy2, hy3] at he
+  apply minor_scalar_cancel (1) (by decide) x.x2
+  exact he.trans (by decide)
+
+private theorem m4_minor_012_012 (x : Lane4)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (4)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-5)) (applyM4 x).x1)) (Goldilocks.mul (goldOfInt (7)) (applyM4 x).x2)) (Goldilocks.mul (goldOfInt (-17)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx3, hy0, hy1, hy2] at he
+  apply minor_scalar_cancel (4) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_012_013 (x : Lane4)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (17)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-2)) (applyM4 x).x1)) (Goldilocks.mul (goldOfInt (7)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (-11)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx3, hy0, hy1, hy3] at he
+  apply minor_scalar_cancel (17) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_012_023 (x : Lane4)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (11)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-2)) (applyM4 x).x2)) (Goldilocks.mul (goldOfInt (5)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (-3)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx3, hy0, hy2, hy3] at he
+  apply minor_scalar_cancel (11) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_012_123 (x : Lane4)
+    (hx3 : x.x3 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (3)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x1) (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x2)) (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (-4)) x.x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx3, hy1, hy2, hy3] at he
+  apply minor_scalar_cancel (3) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_013_012 (x : Lane4)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (3)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (5)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-8)) (applyM4 x).x1)) (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x2)) (Goldilocks.mul (goldOfInt (17)) x.x2)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx2, hy0, hy1, hy2] at he
+  apply minor_scalar_cancel (3) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_013_013 (x : Lane4)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (4)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (3)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-5)) (applyM4 x).x1)) (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (11)) x.x2)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx2, hy0, hy1, hy3] at he
+  apply minor_scalar_cancel (4) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_013_023 (x : Lane4)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (17)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-5)) (applyM4 x).x2)) (Goldilocks.mul (goldOfInt (8)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (3)) x.x2)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx2, hy0, hy2, hy3] at he
+  apply minor_scalar_cancel (17) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_013_123 (x : Lane4)
+    (hx2 : x.x2 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (11)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x1) (Goldilocks.mul (goldOfInt (-3)) (applyM4 x).x2)) (Goldilocks.mul (goldOfInt (5)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (4)) x.x2)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx2, hy1, hy2, hy3] at he
+  apply minor_scalar_cancel (11) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_023_012 (x : Lane4)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (11)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (7)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x1)) (Goldilocks.mul (goldOfInt (-2)) (applyM4 x).x2)) (Goldilocks.mul (goldOfInt (-17)) x.x1)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx1, hy0, hy1, hy2] at he
+  apply minor_scalar_cancel (11) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_023_013 (x : Lane4)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (3)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (5)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x1)) (Goldilocks.mul (goldOfInt (-2)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (-11)) x.x1)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx1, hy0, hy1, hy3] at he
+  apply minor_scalar_cancel (3) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_023_023 (x : Lane4)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (4)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x2)) (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (-3)) x.x1)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx1, hy0, hy2, hy3] at he
+  apply minor_scalar_cancel (4) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_023_123 (x : Lane4)
+    (hx1 : x.x1 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (17)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x1) (Goldilocks.mul (goldOfInt (-5)) (applyM4 x).x2)) (Goldilocks.mul (goldOfInt (7)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (-4)) x.x1)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx1, hy1, hy2, hy3] at he
+  apply minor_scalar_cancel (17) (by decide) x.x0
+  exact he.trans (by decide)
+
+private theorem m4_minor_123_012 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    : x.x1 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (17)) x.x1) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (7)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x1)) (Goldilocks.mul (goldOfInt (-2)) (applyM4 x).x2)) (Goldilocks.mul (goldOfInt (-11)) x.x0)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hy0, hy1, hy2] at he
+  apply minor_scalar_cancel (17) (by decide) x.x1
+  exact he.trans (by decide)
+
+private theorem m4_minor_123_013 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x1 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (11)) x.x1) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (5)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x1)) (Goldilocks.mul (goldOfInt (-2)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (-3)) x.x0)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hy0, hy1, hy3] at he
+  apply minor_scalar_cancel (11) (by decide) x.x1
+  exact he.trans (by decide)
+
+private theorem m4_minor_123_023 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x1 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (3)) x.x1) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-1)) (applyM4 x).x2)) (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (-4)) x.x0)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hy0, hy2, hy3] at he
+  apply minor_scalar_cancel (3) (by decide) x.x1
+  exact he.trans (by decide)
+
+private theorem m4_minor_123_123 (x : Lane4)
+    (hx0 : x.x0 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x1 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (4)) x.x1) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (1)) (applyM4 x).x1) (Goldilocks.mul (goldOfInt (-5)) (applyM4 x).x2)) (Goldilocks.mul (goldOfInt (7)) (applyM4 x).x3)) (Goldilocks.mul (goldOfInt (-17)) x.x0)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hx0, hy1, hy2, hy3] at he
+  apply minor_scalar_cancel (4) (by decide) x.x1
+  exact he.trans (by decide)
+
+private theorem m4_minor_0123_0123 (x : Lane4)
+    (hy0 : (applyM4 x).x0 = Goldilocks.zero)
+    (hy1 : (applyM4 x).x1 = Goldilocks.zero)
+    (hy2 : (applyM4 x).x2 = Goldilocks.zero)
+    (hy3 : (applyM4 x).x3 = Goldilocks.zero)
+    : x.x0 = Goldilocks.zero := by
+  have he : (Goldilocks.mul (goldOfInt (-35)) x.x0) =
+      (Goldilocks.add (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt (4)) (applyM4 x).x0) (Goldilocks.mul (goldOfInt (-3)) (applyM4 x).x1)) (Goldilocks.mul (goldOfInt (11)) (applyM4 x).x2)) (Goldilocks.mul (goldOfInt (-17)) (applyM4 x).x3)) := by
+    unfold applyM4 lane4Sum
+    dsimp only
+    rw [← goldOfInt_nat x.x0, ← goldOfInt_nat x.x1,
+      ← goldOfInt_nat x.x2, ← goldOfInt_nat x.x3]
+    simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]
+    congr 1
+    omega
+  rw [hy0, hy1, hy2, hy3] at he
+  apply minor_scalar_cancel (-35) (by decide) x.x0
+  exact he.trans (by decide)
+
+/-- Any nonzero input has input/output support sum at least five. -/
