@@ -422,3 +422,55 @@ transposes. The two independent instances, challenge domains, sacrifice, and pre
 verification barrier are retained. Sixteen-gate initial blocks and 32,768-gate
 flushes reduce the degree bound to 54 and bound per-engine scratch memory. Projection scratch retains high-water-mark wiping; contiguous limb buffers
 are reused across flushes and owned by the same wipe-on-drop engine scratch.
+
+## General threshold custody (trusted preprocessing)
+
+`CoZkCustodianShare::new_shamir` accepts any `2 <= t <= n <= 64` and an
+explicit sorted quorum of at least `t` distinct zero-based party identities.
+Shares encode each normalized scalar byte as a degree-at-most-`t-1` polynomial
+over GF(256), with AES modulus `X^8 + X^4 + X^3 + X + 1` and evaluation point
+`party + 1`. Lagrange weights at zero convert each local share into an XOR
+contribution; no process reconstructs the witness. Subsets and supersets of the
+threshold work without renumbering the roster. `new_additive` accepts n-of-n
+XOR shares of the same bytes (not shares modulo the spending-scalar order).
+All selected participants must remain online; abort does not trigger a quorum
+change. A new quorum needs a new ceremony and fresh preprocessing.
+
+This path is **semi-honest MPC with a trusted offline preprocessing dealer**.
+For Shamir custody, privacy requires fewer than `t` colluding custodians;
+for additive custody it requires fewer than `n`. It is not an extension of
+the active 1-of-3 RSS security theorem. The original
+`new` constructor retains its RSS algorithm and active verification barriers.
+Do not use the general backend where online custodians may deviate from the
+protocol. Pairwise MACs authenticate messages but do not authenticate shared
+wire values or certify a dealer's triples. The ordinary final ZKBoo verifier
+still checks every returned proof, but this does not establish active privacy
+of the distributed computation. Malicious-secure general preprocessing and
+MAC-authenticated online wires remain future work.
+
+`threshold_mpc::TrustedDealer` implements independent Boolean and prime-field
+Beaver triple generation without accepting witness material. Each output row
+belongs only to the corresponding position in `ThresholdConfig::quorum()`.
+Distribute those rows over confidential channels, erase dealer entropy and
+state before online execution, and implement the transport's consuming
+`take_boolean_triples` / `take_field_triples` methods. Each triple is used once,
+including across aborts and forks. Each batch substream requires a separate
+preprocessing supply. Missing preprocessing fails closed with
+`MissingPreprocessing`; no witness-opening fallback exists. The dealer and
+its seed must never be accessible to an online custodian. A dealer colluding
+with any party that observes mask openings can recover secret wires.
+
+The engine uses dynamic all-to-all authenticated channels in sorted quorum
+order (excluding self), binds `(t,n,quorum)` into the session MAC domain, and
+uses packed Boolean Beaver multiplication and additive field Beaver
+multiplication for the selected quorum. The three inner ZKBoo virtual parties,
+438 repetitions, Fiat-Shamir transcript, view encoding, and verifier are
+unchanged. Field/Boolean conversions operate on individual local components
+inside MPC and never open the represented value. Private tape contributions
+are independent per custodian and combined through additive sharing.
+
+The new backend is a correctness-oriented general path: conversion and
+communication cost grow with the active quorum. The active RSS backend
+remains the optimized 2-of-3 path. In `std` builds the BLS fixed-base tables
+are cached process-wide with `OnceLock`; no-std builds retain allocation-based
+synthesis because `std::sync::OnceLock` is unavailable.
