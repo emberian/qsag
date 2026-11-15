@@ -35,6 +35,7 @@ public import Qsag.Oracle.Poseidon2
 public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Protocol.Threshold.ThresholdApproval
 public import Qsag.Protocol.Threshold.MaliciousSecurity
+import all Qsag.Math.Algebra
 
 public section
 namespace Qsag

@@ -1556,7 +1556,7 @@ theorem lagrangeCombine_zipAdd {R : Type} [LawfulCommRing R] :
   | l :: ls, x :: xs, y :: ys, h => by
     have ih := lagrangeCombine_zipAdd ls xs ys (Nat.succ.inj h)
     simp only [lagrangeCombine] at ih
-    simp only [List.zipWith_cons_cons, lagrangeCombine, ringDot]
+    simp only [List.zipWith_cons_cons, lagrangeCombine, ringDot_consC]
     rw [LawfulCommRing.left_distrib, ih, LawfulCommRing.add_add_add_comm]
 
 theorem lagrangeCombine_zipSub {R : Type} [LawfulCommRing R] :
@@ -1574,7 +1574,7 @@ theorem lagrangeCombine_zipSub {R : Type} [LawfulCommRing R] :
           LawfulCommRing.add_right_neg, LawfulCommRing.add_right_neg, LawfulCommRing.add_zero]
     have ih := lagrangeCombine_zipSub ls xs ys (Nat.succ.inj h)
     simp only [lagrangeCombine] at ih
-    simp only [List.zipWith_cons_cons, lagrangeCombine, ringDot]
+    simp only [List.zipWith_cons_cons, lagrangeCombine, ringDot_consC]
     rw [LawfulCommRing.mul_sub, ih]
     simp only [LawfulCommRing.sub_eq_add_neg, hNegAdd, LawfulCommRing.add_add_add_comm]
 
@@ -1587,7 +1587,7 @@ theorem lagrangeCombine_scale {R : Type} [LawfulCommRing R] (c : R) :
   | l :: ls, x :: xs => by
     have ih := lagrangeCombine_scale c ls xs
     simp only [lagrangeCombine] at ih
-    simp only [List.map_cons, lagrangeCombine, ringDot]
+    simp only [List.map_cons, lagrangeCombine, ringDot_consC]
     rw [ih, LawfulCommRing.left_distrib,
         ← LawfulCommRing.mul_assoc, ← LawfulCommRing.mul_assoc, LawfulCommRing.mul_comm l c]
 
@@ -2244,7 +2244,7 @@ private theorem ringDot_replicate_right {R : Type} [LawfulCommRing R] :
       ringDot ls (List.replicate ls.length c) = CommRingOps.mul (ringListSum ls) c
   | [], _ => by simp [ringDot, ringListSum, LawfulCommRing.zero_mul]
   | l :: ls, c => by
-    simp only [List.length_cons, List.replicate_succ, ringDot, ringListSum,
+    simp only [List.length_cons, List.replicate_succ, ringDot_consC, ringListSum,
       ringDot_replicate_right ls c, LawfulCommRing.right_distrib]
 
 private theorem lagrangeCombine_add_public
@@ -3631,7 +3631,8 @@ theorem shamirReconstructBytes_quorum {R : Type} [LawfulCommRing R] (decode : R 
   apply List.map_congr_left
   intro c hc
   simp only [Function.comp]
-  rw [lagrangeAtZero_evalCoeffs Q.lambdas Q.pts c t (hDeg c hc) Q.sum_one Q.kills_higher]
+  exact congrArg decode
+    (lagrangeAtZero_evalCoeffs Q.lambdas Q.pts c t (hDeg c hc) Q.sum_one Q.kills_higher)
 
 /-- A correct threshold signing run for the key `(skSeed, skPrf, pkSeed)`: cut-boundary oracles
     together with the proof that they evaluate that key. Constructors below build runs from the
@@ -4029,8 +4030,8 @@ private theorem idealShamirBitDecompRef_valid
   | cons b rest ih =>
     refine ⟨by simp [hPtsLen], ?_, ih⟩
     unfold lagrangeCombine
-    rw [lagrangeAtZero_evalCoeffs Q.lambdas Q.pts [Goldilocks.ofNat b.toNat, maskSlope] 2
-          (Nat.le_refl 2) Q.sum_one Q.kills_higher]
+    refine Eq.trans (lagrangeAtZero_evalCoeffs Q.lambdas Q.pts [Goldilocks.ofNat b.toNat, maskSlope] 2
+          (Nat.le_refl 2) Q.sum_one Q.kills_higher) ?_
     simp [RoundPoly.evalCoeffs, LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
 
 /-- **Pure-Shamir Share-Level `Poseidon2` Threshold Signing Witness (`shamir_poseidon2_threshold_sig_witness`)**:
@@ -4988,39 +4989,85 @@ theorem AuthShamirState12.combine_shares {ls keys s} (hs : AuthShamirState12.Val
   · exact lagrangeCombineLane4_zip ls _ _ _ _ hs.2.1.1.1 hs.2.1.2.1.1 hs.2.1.2.2.1.1 hs.2.1.2.2.2.1
   · exact lagrangeCombineLane4_zip ls _ _ _ _ hs.2.2.1.1 hs.2.2.2.1.1 hs.2.2.2.2.1.1 hs.2.2.2.2.2.1
 
-def AuthShamirState12.applyME (s : AuthShamirState12) : AuthShamirState12 :=
+/-- Wire-level lane transposition `poseidon2Transpose4x3` (a relabelling of the twelve wires). -/
+def AuthShamirState12.transpose4x3 (s : AuthShamirState12) : AuthShamirState12 :=
+  ⟨⟨s.b0.x0, s.b0.x3, s.b1.x2, s.b2.x1⟩,
+   ⟨s.b0.x1, s.b1.x0, s.b1.x3, s.b2.x2⟩,
+   ⟨s.b0.x2, s.b1.x1, s.b2.x0, s.b2.x3⟩⟩
+
+/-- Wire-level lane transposition `poseidon2Transpose3x4`, inverse of `transpose4x3`. -/
+def AuthShamirState12.transpose3x4 (s : AuthShamirState12) : AuthShamirState12 :=
+  ⟨⟨s.b0.x0, s.b1.x0, s.b2.x0, s.b0.x1⟩,
+   ⟨s.b1.x1, s.b2.x1, s.b0.x2, s.b1.x2⟩,
+   ⟨s.b2.x2, s.b0.x3, s.b1.x3, s.b2.x3⟩⟩
+
+/-- Block-circulant `P_3 ⊗ M_4` on authenticated wires (the inner step of the external layer). -/
+def AuthShamirState12.applyMEStd (s : AuthShamirState12) : AuthShamirState12 :=
   let y0 := s.b0.applyM4
   let y1 := s.b1.applyM4
   let y2 := s.b2.applyM4
   let total := (y0.add y1).add y2
   ⟨y0.add total, y1.add total, y2.add total⟩
 
-theorem AuthShamirState12.Valid.applyME {ls keys s} (hs : AuthShamirState12.Valid ls keys s) :
-    s.applyME.Valid ls keys := by
+/-- External linear layer `M_4 ⊗ P_3` on authenticated wires: transpose, `P_3 ⊗ M_4`, transpose
+    back (`apply_me_auth` in `crates/qsag-core/src/poseidon2_mpc.rs`). -/
+def AuthShamirState12.applyME (s : AuthShamirState12) : AuthShamirState12 :=
+  s.transpose4x3.applyMEStd.transpose3x4
+
+theorem AuthShamirState12.Valid.transpose4x3 {ls keys s} (hs : AuthShamirState12.Valid ls keys s) :
+    s.transpose4x3.Valid ls keys :=
+  ⟨⟨hs.1.1, hs.1.2.2.2, hs.2.1.2.2.1, hs.2.2.2.1⟩,
+   ⟨hs.1.2.1, hs.2.1.1, hs.2.1.2.2.2, hs.2.2.2.2.1⟩,
+   ⟨hs.1.2.2.1, hs.2.1.2.1, hs.2.2.1, hs.2.2.2.2.2⟩⟩
+
+theorem AuthShamirState12.Valid.transpose3x4 {ls keys s} (hs : AuthShamirState12.Valid ls keys s) :
+    s.transpose3x4.Valid ls keys :=
+  ⟨⟨hs.1.1, hs.2.1.1, hs.2.2.1, hs.1.2.1⟩,
+   ⟨hs.2.1.2.1, hs.2.2.2.1, hs.1.2.2.1, hs.2.1.2.2.1⟩,
+   ⟨hs.2.2.2.2.1, hs.1.2.2.2, hs.2.1.2.2.2, hs.2.2.2.2.2⟩⟩
+
+theorem AuthShamirState12.Valid.applyMEStd {ls keys s} (hs : AuthShamirState12.Valid ls keys s) :
+    s.applyMEStd.Valid ls keys := by
   have h0 := hs.1.applyM4
   have h1 := hs.2.1.applyM4
   have h2 := hs.2.2.applyM4
   have ht := (h0.add h1).add h2
   exact ⟨h0.add ht, h1.add ht, h2.add ht⟩
 
-theorem AuthShamirState12.value_applyME {ls keys s} (hs : AuthShamirState12.Valid ls keys s) :
-    s.applyME.value ls = Qsag.applyME (s.value ls) := by
+theorem AuthShamirState12.Valid.applyME {ls keys s} (hs : AuthShamirState12.Valid ls keys s) :
+    s.applyME.Valid ls keys :=
+  hs.transpose4x3.applyMEStd.transpose3x4
+
+theorem AuthShamirState12.value_transpose4x3 (ls : List Goldilocks) (s : AuthShamirState12) :
+    s.transpose4x3.value ls = poseidon2Transpose4x3 (s.value ls) := by rfl
+
+theorem AuthShamirState12.value_transpose3x4 (ls : List Goldilocks) (s : AuthShamirState12) :
+    s.transpose3x4.value ls = poseidon2Transpose3x4 (s.value ls) := by rfl
+
+theorem AuthShamirState12.value_applyMEStd {ls keys s} (hs : AuthShamirState12.Valid ls keys s) :
+    s.applyMEStd.value ls = Qsag.applyMEStd (s.value ls) := by
   have h0 := hs.1.applyM4
   have h1 := hs.2.1.applyM4
   have h2 := hs.2.2.applyM4
   have ht := (h0.add h1).add h2
-  simp only [AuthShamirState12.applyME, AuthShamirState12.value,
+  simp only [AuthShamirState12.applyMEStd, AuthShamirState12.value,
     AuthShamirLane4.value_add h0 ht, AuthShamirLane4.value_add h1 ht,
     AuthShamirLane4.value_add h2 ht, AuthShamirLane4.value_add (h0.add h1) h2,
     AuthShamirLane4.value_add h0 h1, AuthShamirLane4.value_applyM4 hs.1,
-    AuthShamirLane4.value_applyM4 hs.2.1, AuthShamirLane4.value_applyM4 hs.2.2, Qsag.applyME]
+    AuthShamirLane4.value_applyM4 hs.2.1, AuthShamirLane4.value_applyM4 hs.2.2, Qsag.applyMEStd]
+
+theorem AuthShamirState12.value_applyME {ls keys s} (hs : AuthShamirState12.Valid ls keys s) :
+    s.applyME.value ls = Qsag.applyME (s.value ls) := by
+  rw [AuthShamirState12.applyME, AuthShamirState12.value_transpose3x4,
+    AuthShamirState12.value_applyMEStd hs.transpose4x3, AuthShamirState12.value_transpose4x3]
+  rfl
 
 def AuthShamirState12.sum (s : AuthShamirState12) : AuthShamirWire :=
   (s.b0.sum.add s.b1.sum).add s.b2.sum
 
 def AuthShamirState12.applyMI (s : AuthShamirState12) : AuthShamirState12 :=
   let total := s.sum
-  ⟨⟨(s.b0.x0.scale (goldOfInt (-2))).add total, s.b0.x1.add total, (s.b0.x2.scale (goldOfInt (2))).add total, (s.b0.x3.scale (goldOfInt (4))).add total⟩,
+  ⟨⟨(s.b0.x0.scale (goldOfInt (-64))).add total, s.b0.x1.add total, (s.b0.x2.scale (goldOfInt (2))).add total, (s.b0.x3.scale (goldOfInt (4))).add total⟩,
    ⟨(s.b1.x0.scale (goldOfInt (8))).add total, (s.b1.x1.scale (goldOfInt (16))).add total, (s.b1.x2.scale (goldOfInt (32))).add total, (s.b1.x3.scale (goldOfInt (64))).add total⟩,
    ⟨(s.b2.x0.scale (goldOfInt (128))).add total, (s.b2.x1.scale (goldOfInt (256))).add total, (s.b2.x2.scale (goldOfInt (512))).add total, (s.b2.x3.scale (goldOfInt (1024))).add total⟩⟩
 
@@ -5056,7 +5103,7 @@ theorem AuthShamirState12.value_sum {ls keys s} (hs : AuthShamirState12.Valid ls
 theorem AuthShamirState12.value_applyMI {ls keys s} (hs : AuthShamirState12.Valid ls keys s) :
     s.applyMI.value ls = Qsag.applyMI (s.value ls) := by
   apply Poseidon2State12.ext <;> apply Lane4.ext
-  · change ((s.b0.x0.scale (goldOfInt (-2))).add s.sum).value ls = _
+  · change ((s.b0.x0.scale (goldOfInt (-64))).add s.sum).value ls = _
     rw [AuthShamirWire.value_add (hs.1.1.scale _) hs.sum, AuthShamirWire.value_scale, AuthShamirState12.value_sum hs]
     rfl
   · change (s.b0.x1.add s.sum).value ls = _
@@ -5376,20 +5423,54 @@ private theorem AuthShamirState12.projections {ls keys s} (hs : AuthShamirState1
     ((AuthShamirLane4.shares_length hs.1).trans (AuthShamirLane4.shares_length hs.2.1).symm)
     ((AuthShamirLane4.shares_length hs.1).trans (AuthShamirLane4.shares_length hs.2.2).symm)
 
-theorem AuthShamirState12.shares_applyME {ls keys s}
+theorem AuthShamirState12.shares_transpose4x3 {ls keys s}
     (hs : AuthShamirState12.Valid ls keys s) :
-    (s.applyME).shares = s.shares.map Qsag.applyME := by
+    (s.transpose4x3).shares = s.shares.map poseidon2Transpose4x3 := by
   obtain ⟨hb0, hb1, hb2⟩ := AuthShamirState12.projections hs
   obtain ⟨h00, h01, h02, h03⟩ := AuthShamirLane4.projections hs.1
   obtain ⟨h10, h11, h12, h13⟩ := AuthShamirLane4.projections hs.2.1
   obtain ⟨h20, h21, h22, h23⟩ := AuthShamirLane4.projections hs.2.2
-  simp only [AuthShamirState12.applyME, AuthShamirState12.shares,
+  simp only [AuthShamirState12.transpose4x3, AuthShamirState12.shares, AuthShamirLane4.shares]
+  rw [← h00, ← h01, ← h02, ← h03, ← h10, ← h11, ← h12, ← h13, ← h20, ← h21, ← h22, ← h23, ← hb0, ← hb1, ← hb2]
+  simp only [List.map_map, zipLane4Shares_maps, zipState12Shares_maps]
+  rfl
+
+theorem AuthShamirState12.shares_transpose3x4 {ls keys s}
+    (hs : AuthShamirState12.Valid ls keys s) :
+    (s.transpose3x4).shares = s.shares.map poseidon2Transpose3x4 := by
+  obtain ⟨hb0, hb1, hb2⟩ := AuthShamirState12.projections hs
+  obtain ⟨h00, h01, h02, h03⟩ := AuthShamirLane4.projections hs.1
+  obtain ⟨h10, h11, h12, h13⟩ := AuthShamirLane4.projections hs.2.1
+  obtain ⟨h20, h21, h22, h23⟩ := AuthShamirLane4.projections hs.2.2
+  simp only [AuthShamirState12.transpose3x4, AuthShamirState12.shares, AuthShamirLane4.shares]
+  rw [← h00, ← h01, ← h02, ← h03, ← h10, ← h11, ← h12, ← h13, ← h20, ← h21, ← h22, ← h23, ← hb0, ← hb1, ← hb2]
+  simp only [List.map_map, zipLane4Shares_maps, zipState12Shares_maps]
+  rfl
+
+theorem AuthShamirState12.shares_applyMEStd {ls keys s}
+    (hs : AuthShamirState12.Valid ls keys s) :
+    (s.applyMEStd).shares = s.shares.map Qsag.applyMEStd := by
+  obtain ⟨hb0, hb1, hb2⟩ := AuthShamirState12.projections hs
+  obtain ⟨h00, h01, h02, h03⟩ := AuthShamirLane4.projections hs.1
+  obtain ⟨h10, h11, h12, h13⟩ := AuthShamirLane4.projections hs.2.1
+  obtain ⟨h20, h21, h22, h23⟩ := AuthShamirLane4.projections hs.2.2
+  simp only [AuthShamirState12.applyMEStd, AuthShamirState12.shares,
     AuthShamirLane4.shares, AuthShamirLane4.applyM4,
     AuthShamirLane4.sum, AuthShamirLane4.add, AuthShamirWire.add, AuthShamirWire.scale]
   rw [← h00, ← h01, ← h02, ← h03, ← h10, ← h11, ← h12, ← h13, ← h20, ← h21, ← h22, ← h23, ← hb0, ← hb1, ← hb2]
   simp only [shareScale, List.map_map, ringListZipAdd_maps,
     zipLane4Shares_maps, zipState12Shares_maps]
   rfl
+
+theorem AuthShamirState12.shares_applyME {ls keys s}
+    (hs : AuthShamirState12.Valid ls keys s) :
+    (s.applyME).shares = s.shares.map Qsag.applyME := by
+  rw [AuthShamirState12.applyME,
+    AuthShamirState12.shares_transpose3x4 hs.transpose4x3.applyMEStd,
+    AuthShamirState12.shares_applyMEStd hs.transpose4x3,
+    AuthShamirState12.shares_transpose4x3 hs, List.map_map, List.map_map]
+  rfl
+
 theorem AuthShamirState12.shares_applyMI {ls keys s}
     (hs : AuthShamirState12.Valid ls keys s) :
     (s.applyMI).shares = s.shares.map Qsag.applyMI := by
