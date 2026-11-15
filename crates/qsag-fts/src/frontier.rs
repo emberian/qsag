@@ -9,8 +9,8 @@
 //!    `U384` primitives exefrontiere in straight-line constant time.
 //! 3. Mandatory `SK.prf`-derived per-signature randomizer `R` + monotonic `UseBudgetLatch`
 //!    preventing deterministic 2-message reuse or unbounded `q >= 3` over-signing.
-//! 4. Full 256-bit message digest pre-binding across all profiles, with exact `514 B`, `770 B`,
-//!    `1,122 B`, `1,314 B`, and `Full256Bit` (`2,338 B`) wire profiles.
+//! 4. Full 256-bit message digest pre-binding with 32-byte nodes: `Compact1122`
+//!    (`1,122 B`) and `Full256Bit` (`2,338 B`) wire profiles.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -37,15 +37,6 @@ const TAG_HMSG: &[u8] = b"QSAG.FTS.HMSG.V1";
 /// Parameter profiles for `FrontierSumFts`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FrontierFtsProfile {
-    /// 16-byte nodes cap generic preimage strength at 128 classical / 64 Grover bits.
-    /// Ultra-compact `514 B` 1-use signature (`h=14, w=5, L=31, S=62, n=16, r=128, s=16`, `M` fits in `u128`!).
-    Compact514,
-    /// 16-byte nodes: 64-bit generic Grover preimage ceiling (not 128-bit PQ).
-    /// Compact `770 B` signature (`h=15, w=5, L=47, S=118, n=16, r=190, s=16`, >80-bit 2-use security).
-    Compact770,
-    /// 16-byte nodes: 64-bit generic Grover preimage ceiling (not 128-bit PQ).
-    /// High-resilience `1,314 B` signature (`h=15, w=5, L=81, S=162, n=16, r=335, s=16`, 128-bit 2-use).
-    Compact1314,
     /// Single-use 1,122-byte profile: 34 chain values, a 32-byte randomizer and a 2-byte counter.
     /// `(h=8, w=96, L=34, S=1615, n=32, r=256)` gives `M > 2^263`.
     /// Fits a 1,232-byte payload with a 96-byte vote header (1,218 bytes total).
@@ -77,36 +68,6 @@ pub struct FrontierFtsParams {
 impl FrontierFtsProfile {
     pub const fn params(self) -> FrontierFtsParams {
         match self {
-            Self::Compact514 => FrontierFtsParams {
-                node_bytes: 16,
-                tree_height: 14,
-                winternitz_w: 5,
-                frontier_len: 31,
-                target_sum: 62,
-                index_bits: 128,
-                counter_bits: 16,
-                max_safe_uses: 1,
-            },
-            Self::Compact770 => FrontierFtsParams {
-                node_bytes: 16,
-                tree_height: 15,
-                winternitz_w: 5,
-                frontier_len: 47,
-                target_sum: 118,
-                index_bits: 190,
-                counter_bits: 16,
-                max_safe_uses: 2,
-            },
-            Self::Compact1314 => FrontierFtsParams {
-                node_bytes: 16,
-                tree_height: 15,
-                winternitz_w: 5,
-                frontier_len: 81,
-                target_sum: 162,
-                index_bits: 335,
-                counter_bits: 16,
-                max_safe_uses: 2,
-            },
             Self::Compact1122 => FrontierFtsParams {
                 node_bytes: 32,
                 tree_height: 8,
@@ -274,7 +235,7 @@ impl FrontierDpTable {
         }
     }
 
-    /// Return `Some(total_cardinality as u128)` when `M < 2^128` (e.g. `Compact514`, `Fast256Test`).
+    /// Return `Some(total_cardinality as u128)` when `M < 2^128` (e.g. `Fast256Test`).
     pub fn total_cardinality_u128(&self) -> Option<u128> {
         if self.total_cardinality.0[2] == 0
             && self.total_cardinality.0[3] == 0
@@ -1073,6 +1034,12 @@ impl FrontierFtsSigningKey {
 
     /// Sign `msg` using mandatory `SK.prf`-derived randomized `R`, 256-bit message pre-binding,
     /// and strict monotonic use-budget enforcement (`uses_completed < max_uses`).
+    /// `opt_hedging_nonce` is a length-framed input alongside the secret PRF key,
+    /// profile, public key, use sequence and message digest under `TAG_RAND`.
+    /// Supply fresh caller/OS CSPRNG entropy for randomized hedging. A stuck or
+    /// all-zero caller RNG falls back to secret-keyed deterministic randomness;
+    /// this no_std API does not obtain OS entropy itself. Hedging does not replace
+    /// durable use accounting or make a reused one-time signing key safe.
     pub fn sign(
         &mut self,
         dp: &FrontierDpTable,
@@ -1440,6 +1407,48 @@ mod rank_domain_tests {
     use super::*;
 
     #[test]
+    fn hedged_randomizer_binds_secret_entropy_message_and_use_sequence() {
+        use qsag_accel::CpuReferenceBackend;
+        let profile = FrontierFtsProfile::Full256Bit;
+        let dp = FrontierDpTable::build(profile);
+        let make = |prf| {
+            FrontierFtsSigningKey::keygen(
+                profile,
+                [1; 32],
+                prf,
+                [3; 32],
+                true,
+                &CpuReferenceBackend,
+            )
+        };
+        let mut original = make([2; 32]);
+        let first = original.sign(&dp, b"hedged message", &[0; 32]).unwrap();
+        verify_frontier_fts(&original.pk, &dp, b"hedged message", &first).unwrap();
+        // A failed/stuck external RNG leaves a deterministic secret-keyed PRF.
+        let repeated = make([2; 32])
+            .sign(&dp, b"hedged message", &[0; 32])
+            .unwrap();
+        assert_eq!(first.randomizer, repeated.randomizer);
+        let fresh = make([2; 32])
+            .sign(&dp, b"hedged message", &[9; 32])
+            .unwrap();
+        let secret = make([8; 32])
+            .sign(&dp, b"hedged message", &[0; 32])
+            .unwrap();
+        let message = make([2; 32])
+            .sign(&dp, b"another message", &[0; 32])
+            .unwrap();
+        for changed in [fresh, secret, message] {
+            assert_ne!(first.randomizer, changed.randomizer);
+        }
+        assert_eq!(original.uses_remaining(), 0);
+        assert!(matches!(
+            original.sign(&dp, b"third", &[0; 32]),
+            Err(FrontierFtsError::UseBudgetExhausted)
+        ));
+    }
+
+    #[test]
     fn full_digest_domain_is_injective_and_constant_sum() {
         let profile = FrontierFtsProfile::Full256Bit;
         let dp = FrontierDpTable::build(profile);
@@ -1481,7 +1490,7 @@ mod rank_domain_tests {
     fn verify_before_release_blocks_chain_randomizer_and_grind_counter_faults() {
         use qsag_accel::CpuReferenceBackend;
 
-        let profile = FrontierFtsProfile::Compact514;
+        let profile = FrontierFtsProfile::Compact1122;
         let dp = FrontierDpTable::build(profile);
         let msg = b"frontier fault-grafting regression";
         let hedge = [0x42u8; 32];
@@ -1570,7 +1579,9 @@ pub use batch::{
 mod batch_hash_tests {
     use super::*;
     use core::sync::atomic::{AtomicUsize, Ordering};
-    use qsag_accel::{AccelError, CertifiedKernelPin, CpuReferenceBackend, KernelSlot, KernelTargetArch};
+    use qsag_accel::{
+        AccelError, CertifiedKernelPin, CpuReferenceBackend, KernelSlot, KernelTargetArch,
+    };
 
     /// Counts every state or operand the backend is handed.
     #[derive(Default)]
@@ -1658,7 +1669,10 @@ mod batch_hash_tests {
             } else {
                 let end = |child: usize| (child * w + w - 1) * n;
                 let (left, right) = (end(2 * v), end(2 * v + 1));
-                let (l, r) = (chains[left..left + n].to_vec(), chains[right..right + n].to_vec());
+                let (l, r) = (
+                    chains[left..left + n].to_vec(),
+                    chains[right..right + n].to_vec(),
+                );
                 fts_merge(&pid, &pk_seed, v as u32, &l, &r, &mut cur[..n]);
             }
             for step in 0..w {
@@ -1676,7 +1690,10 @@ mod batch_hash_tests {
         let end = |child: usize| &chains[(child * w + w - 1) * n..][..n];
         fts_merge(&pid, &pk_seed, 1, end(2), end(3), &mut root);
         assert_eq!(key.pk.root, root);
-        assert_eq!((key.sk_seed.expose(), key.sk_prf.expose()), (&sk_seed, &sk_prf));
+        assert_eq!(
+            (key.sk_seed.expose(), key.sk_prf.expose()),
+            (&sk_seed, &sk_prf)
+        );
     }
 
     #[test]

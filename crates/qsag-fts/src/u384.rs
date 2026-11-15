@@ -1,6 +1,5 @@
 //! Constant-time fixed-width 384-bit unsigned integer (`U384`, six `u64` little-endian limbs)
-//! supporting DP combinatorics up to 384 bits (covering 128-bit `Compact514`, 190-bit `Compact770`,
-//! and 335-bit `Compact1314` without heap allocation or data-dependent branches).
+//! supporting DP combinatorics up to 384 bits without heap allocation or data-dependent branches.
 
 use qsag_accel::ct::{ct_eq_u64, ct_select_u64};
 

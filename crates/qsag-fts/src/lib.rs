@@ -34,6 +34,10 @@ pub use parallel_mpc::{
     ParallelSeededSignature, ParallelSeededThresholdSetup, assemble_parallel_seeded_public_key,
     finalize_parallel_seeded_dkg_party, verify_parallel_seeded_fts,
 };
+pub use parallel_mpc::{
+    ParallelSeededDkgOtPads, ParallelSeededDkgOtPeer, ParallelSeededDkgRefillState,
+    ParallelSeededDkgRefillUnverified, ParallelSeededDkgReservoir,
+};
 pub use u384::U384;
 
 #[cfg(feature = "std")]
@@ -174,27 +178,13 @@ mod tests {
 
     #[test]
     fn test_compact_profile_exact_signature_sizes_and_dp_bijection() {
-        assert_eq!(FrontierFtsProfile::Compact514.signature_bytes(), 514);
-        assert_eq!(FrontierFtsProfile::Compact770.signature_bytes(), 770);
-        assert_eq!(FrontierFtsProfile::Compact1314.signature_bytes(), 1314);
+        assert_eq!(FrontierFtsProfile::Compact1122.signature_bytes(), 1122);
         assert_eq!(FrontierFtsProfile::Full256Bit.signature_bytes(), 2338);
-
-        // Compact514 DP fits inside u128 (< 2^128), while Compact770 and Compact1314 fit in U384!
-        let dp514 = FrontierDpTable::build(FrontierFtsProfile::Compact514);
-        assert!(dp514.total_cardinality_u128().is_some());
-        assert!(dp514.total_cardinality.public_bit_len() >= 118);
-        assert!(dp514.total_cardinality.public_bit_len() <= 128);
-
-        let dp770 = FrontierDpTable::build(FrontierFtsProfile::Compact770);
-        assert!(dp770.total_cardinality.public_bit_len() >= 175);
-        assert!(dp770.total_cardinality.public_bit_len() <= 190);
-
-        let dp1314 = FrontierDpTable::build(FrontierFtsProfile::Compact1314);
-        assert!(dp1314.total_cardinality.public_bit_len() >= 315);
-        assert!(dp1314.total_cardinality.public_bit_len() <= 335);
-
-        // Verify rank(unrank(r)) == r across sample points of Compact514, Compact770, and Compact1314!
-        for dp in [&dp514, &dp770, &dp1314] {
+        let compact = FrontierDpTable::build(FrontierFtsProfile::Compact1122);
+        let full = FrontierDpTable::build(FrontierFtsProfile::Full256Bit);
+        for dp in [&compact, &full] {
+            assert!(dp.total_cardinality.public_bit_len() >= 256);
+            assert_eq!(dp.params.node_bytes, 32);
             let max_minus_1 = dp.total_cardinality.overflowing_sub(U384::ONE).0;
             let mid = dp.total_cardinality.ct_divmod(U384::from_u64(3)).0;
             for sample in [
@@ -219,13 +209,10 @@ mod tests {
     }
 
     #[test]
-    fn test_frontier_sum_fts_sign_verify_cached_uncached_and_2use_latch() {
+    fn test_frontier_sum_fts_sign_verify_cached_uncached_and_single_use_latch() {
         let accel = CpuReferenceBackend::new();
         assert_eq!(FrontierFtsProfile::Full256Bit.params().max_safe_uses, 1);
-        assert_eq!(FrontierFtsProfile::Compact514.params().max_safe_uses, 1);
         assert_eq!(FrontierFtsProfile::Fast256Test.params().max_safe_uses, 1);
-        assert_eq!(FrontierFtsProfile::Compact770.params().max_safe_uses, 2);
-        assert_eq!(FrontierFtsProfile::Compact1314.params().max_safe_uses, 2);
 
         let dp = FrontierDpTable::build(FrontierFtsProfile::Full256Bit);
         let sk_seed = [0x11u8; 32];
@@ -301,34 +288,14 @@ mod tests {
             sk_fast.sign(&dp_fast, msg2, &hedge),
             Err(FrontierFtsError::UseBudgetExhausted)
         );
-
-        // Compact770 (`h=15, L=47, S=118`) supports 2 uses (>80-bit 2-use security) and latches on the 3rd!
-        let dp770 = FrontierDpTable::build(FrontierFtsProfile::Compact770);
-        let mut sk770 = FrontierFtsSigningKey::keygen(
-            FrontierFtsProfile::Compact770,
-            sk_seed,
-            sk_prf,
-            pk_seed,
-            true,
-            &accel,
-        );
-        let sig770_1 = sk770.sign(&dp770, msg1, &hedge).unwrap();
-        let sig770_2 = sk770.sign(&dp770, msg2, &hedge).unwrap();
-        verify_frontier_fts(&sk770.pk, &dp770, msg1, &sig770_1).unwrap();
-        verify_frontier_fts(&sk770.pk, &dp770, msg2, &sig770_2).unwrap();
-        assert_ne!(sig770_1.randomizer, sig770_2.randomizer);
-        assert_eq!(
-            sk770.sign(&dp770, b"third message", &hedge),
-            Err(FrontierFtsError::UseBudgetExhausted)
-        );
     }
 
     #[test]
-    fn test_compact_514_byte_profile_end_to_end_sign_and_verify() {
+    fn test_compact_1122_byte_profile_end_to_end_sign_and_verify() {
         let accel = CpuReferenceBackend::new();
-        let dp = FrontierDpTable::build(FrontierFtsProfile::Compact514);
+        let dp = FrontierDpTable::build(FrontierFtsProfile::Compact1122);
         let mut sk = FrontierFtsSigningKey::keygen(
-            FrontierFtsProfile::Compact514,
+            FrontierFtsProfile::Compact1122,
             [0xA1; 32],
             [0xB2; 32],
             [0xC3; 32],
@@ -336,17 +303,17 @@ mod tests {
             &accel,
         );
         let sig = sk
-            .sign(&dp, b"compact 514-byte post-quantum fts", &[0xD4; 32])
+            .sign(&dp, b"compact 1122-byte post-quantum fts", &[0xD4; 32])
             .unwrap();
-        let raw = sig.to_bytes(FrontierFtsProfile::Compact514);
-        assert_eq!(raw.len(), 514);
+        let raw = sig.to_bytes(FrontierFtsProfile::Compact1122);
+        assert_eq!(raw.len(), 1122);
         let parsed =
-            FrontierFtsSignature::from_bytes(FrontierFtsProfile::Compact514, &raw).unwrap();
-        verify_frontier_fts(&sk.pk, &dp, b"compact 514-byte post-quantum fts", &parsed).unwrap();
+            FrontierFtsSignature::from_bytes(FrontierFtsProfile::Compact1122, &raw).unwrap();
+        verify_frontier_fts(&sk.pk, &dp, b"compact 1122-byte post-quantum fts", &parsed).unwrap();
 
-        // Compact514 is strictly 1-use: a second signature attempt MUST return `Err`!
+        // Compact1122 is strictly 1-use: a second signature attempt MUST return `Err`!
         assert_eq!(
-            sk.sign(&dp, b"second attempt on compact514", &[0xE5; 32]),
+            sk.sign(&dp, b"second attempt on compact1122", &[0xE5; 32]),
             Err(FrontierFtsError::UseBudgetExhausted)
         );
     }
@@ -423,8 +390,8 @@ mod distributed_tests {
     use alloc::{vec, vec::Vec};
     use qsag_accel::ct::ct_zeroize_bytes;
     use qsag_accel::keccak::cshake256_framed_xof;
-    use qsag_asm::wipe::{SecretBuffer, SecretVec};
     use qsag_accel::{CpuReferenceBackend, gf2_128::gf2_128_mul};
+    use qsag_asm::wipe::{SecretBuffer, SecretVec};
     use std::sync::mpsc::{self, Receiver, Sender};
     use std::thread;
 
@@ -572,12 +539,30 @@ mod distributed_tests {
         power_count: usize,
         wrap: impl Fn(AssistedProducts) -> B,
     ) -> Vec<ParallelSeededDkgUnverifiedOutput> {
+        setup_with_backends(
+            power_count,
+            networks().into_iter().map(wrap).collect(),
+            &[],
+            &[],
+        )
+    }
+    /// As [`unverified_setup`] over any backends. Party 2 authenticates `value[index] + delta`
+    /// for every `(index, delta)` in `faults`, consistently toward every peer, and shifts its
+    /// shares of the first products by `product_faults` before deriving `a^6` and `a^7`.
+    fn setup_with_backends<B: ParallelSeededDkgProducts + Send>(
+        power_count: usize,
+        backends: Vec<B>,
+        faults: &[(usize, u128)],
+        product_faults: &[(usize, u128)],
+    ) -> Vec<ParallelSeededDkgUnverifiedOutput> {
         let mut states: Vec<_> = (0..3)
             .map(|id| {
                 ParallelSeededDkgRound1State::begin(config(power_count), id, [id as u8 + 13; 32])
                     .unwrap()
             })
             .collect();
+        states[2].value_faults = faults.to_vec();
+        states[2].product_faults = product_faults.to_vec();
         let commits: Vec<_> = states
             .iter()
             .map(ParallelSeededDkgRound1State::commitment)
@@ -593,7 +578,6 @@ mod distributed_tests {
                 inboxes[package.recipient as usize].push(package);
             }
         }
-        let backends: Vec<B> = networks().into_iter().map(wrap).collect();
         thread::scope(|scope| {
             let handles: Vec<_> = states
                 .into_iter()
@@ -646,12 +630,13 @@ mod distributed_tests {
         /// Report a different additive share than the product returned.
         OutputShare,
     }
-    /// Malicious participant: follows the protocol except for one pairwise product,
-    /// counted over the products in which it is an endpoint.
+    /// Malicious participant: follows the protocol except for one element of one pairwise
+    /// product, counted over the products in which it is an endpoint.
     struct CheatingProducts {
         inner: AssistedProducts,
         endpoint_calls: usize,
-        cheat: Option<(usize, Cheat)>,
+        /// `(endpoint call, element, kind)`; the element index wraps at the operand length.
+        cheat: Option<(usize, usize, Cheat)>,
     }
     impl ParallelSeededDkgProducts for CheatingProducts {
         fn party_id(&self) -> u16 {
@@ -672,17 +657,17 @@ mod distributed_tests {
             let call = self.endpoint_calls;
             self.endpoint_calls += 1;
             match self.cheat {
-                Some((at, Cheat::Operand)) if at == call => {
+                Some((at, element, Cheat::Operand)) if at == call => {
                     let mut altered = operand.to_vec();
-                    altered[0] ^= 1;
+                    altered[element % operand.len()] ^= 1;
                     self.inner
                         .product_shares(context, sender, receiver, &altered)
                 }
-                Some((at, Cheat::OutputShare)) if at == call => {
+                Some((at, element, Cheat::OutputShare)) if at == call => {
                     let mut share = self
                         .inner
                         .product_shares(context, sender, receiver, operand)?;
-                    share[0] ^= 1;
+                    share[element % operand.len()] ^= 1;
                     Ok(share)
                 }
                 _ => self
@@ -691,7 +676,9 @@ mod distributed_tests {
             }
         }
     }
-    fn setup_with_cheater(cheat: Option<(usize, Cheat)>) -> Vec<ParallelSeededDkgUnverifiedOutput> {
+    fn setup_with_cheater(
+        cheat: Option<(usize, usize, Cheat)>,
+    ) -> Vec<ParallelSeededDkgUnverifiedOutput> {
         unverified_setup(2, |inner| {
             let cheat = if inner.id == 2 { cheat } else { None };
             CheatingProducts {
@@ -701,9 +688,222 @@ mod distributed_tests {
             }
         })
     }
-    // Each party is an endpoint of four pairwise products per multiplication, in this order:
-    // a^3 (calls 0..4), a^5 (4..8), a^7 (8..12), Beaver u*v (12..16), MAC lane 0 (16..20),
-    // MAC lane 1 (20..24).
+    // Each party is an endpoint of four pairwise products per multiplication, the first two
+    // as receiver and the last two as sender, in this order: `(a^2, a^4, u) * a` (calls 0..4,
+    // three sender operands per tuple), `a^6 * a` (4..8), Beaver `u*v` (8..12, absent without
+    // output triples), MAC lane 0 and MAC lane 1 (four calls each).
+    fn refill_reservoirs(
+        reservoirs: Vec<ParallelSeededDkgReservoir>,
+        count: usize,
+        cheat: Option<(usize, usize, Cheat)>,
+    ) -> Vec<Result<ParallelSeededDkgReservoir, ParallelSeededError>> {
+        let mut states: Vec<_> = reservoirs
+            .into_iter()
+            .enumerate()
+            .map(|(id, r)| {
+                r.into_refill([71; 32], count, 0, [id as u8 + 17; 32])
+                    .unwrap()
+            })
+            .collect();
+        let commits: Vec<_> = states.iter().map(|s| s.commitment()).collect();
+        let opens: Vec<_> = states
+            .iter_mut()
+            .map(|s| s.open(&commits).unwrap())
+            .collect();
+        let mut inboxes: Vec<Vec<_>> = (0..3).map(|_| Vec::new()).collect();
+        for state in &mut states {
+            for package in state.private_packages().unwrap() {
+                inboxes[package.recipient as usize].push(package);
+            }
+        }
+        let mut pending: Vec<_> = thread::scope(|scope| {
+            let handles: Vec<_> = states
+                .into_iter()
+                .zip(inboxes)
+                .zip(networks())
+                .map(|((state, packages), inner)| {
+                    let opens = &opens;
+                    scope.spawn(move || {
+                        let local_cheat = if inner.id == 2 { cheat } else { None };
+                        let mut backend = CheatingProducts {
+                            inner,
+                            endpoint_calls: 0,
+                            cheat: local_cheat,
+                        };
+                        state.finalize(opens, packages, &mut backend).unwrap()
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let commits: Vec<_> = pending.iter().map(|p| p.check_commitment()).collect();
+        let coins: Vec<_> = pending
+            .iter_mut()
+            .map(|p| p.reveal_check_coin(&commits).unwrap())
+            .collect();
+        let masked: Vec<_> = pending
+            .iter_mut()
+            .map(|p| p.masked_shares(&coins).unwrap())
+            .collect();
+        let commits: Vec<_> = pending
+            .iter_mut()
+            .map(|p| p.tag_commitment(&masked).unwrap())
+            .collect();
+        let tags: Vec<_> = pending
+            .iter_mut()
+            .map(|p| p.open_tags(&commits).unwrap())
+            .collect();
+        pending.into_iter().map(|p| p.activate(&tags)).collect()
+    }
+
+    #[test]
+    fn dkg_reservoir_streams_leaves_and_preserves_burns() {
+        let mut reservoirs: Vec<_> = distributed_setup(384)
+            .into_iter()
+            .map(|o| ParallelSeededDkgReservoir::new(o).unwrap())
+            .collect();
+        let seed = reservoirs[0].pk_seed_bytes();
+        let mut previous_masks: Vec<_> =
+            reservoirs.iter().map(|r| r.first_mask_for_test()).collect();
+        let mut leaves = Vec::new();
+        for epoch in 0..4 {
+            if epoch != 0 {
+                reservoirs = refill_reservoirs(reservoirs, 384, None)
+                    .into_iter()
+                    .map(Result::unwrap)
+                    .collect();
+            }
+            let masks: Vec<_> = reservoirs.iter().map(|r| r.first_mask_for_test()).collect();
+            if epoch != 0 {
+                // The helper intentionally repeats session and entropy. The
+                // reservoir generation must still produce fresh masks.
+                assert_ne!(masks, previous_masks);
+            }
+            previous_masks = masks;
+            assert!(
+                reservoirs
+                    .iter()
+                    .all(|r| r.pk_seed_bytes() == seed && r.remaining_powers() == 384)
+            );
+            let mut sessions: Vec<_> = reservoirs
+                .iter_mut()
+                .map(|r| {
+                    ParallelSeededSignSession::begin_leaf_preparation(
+                        r.share_mut(),
+                        epoch,
+                        [epoch as u8 + 1; 32],
+                        &[0, 1, 2],
+                    )
+                    .unwrap()
+                })
+                .collect();
+            match drive(&mut sessions) {
+                ParallelSeededSignResult::Leaf { digest, .. } => leaves.push(digest),
+                _ => panic!("expected leaf"),
+            }
+            drop(sessions);
+            assert!(reservoirs.iter().all(|r| r.remaining_powers() == 0));
+        }
+        let (pk, layers) =
+            assemble_parallel_seeded_public_key(config(384).params, seed, &leaves).unwrap();
+        reservoirs = refill_reservoirs(reservoirs, 384, None)
+            .into_iter()
+            .map(Result::unwrap)
+            .collect();
+        let siblings = [layers[0][1], layers[1][1]];
+        let mut burns = InMemoryBurnLog::default();
+        let request = ParallelSeededSignRequest {
+            pk: &pk,
+            epoch: 0,
+            msg: b"streamed key",
+            session_id: [44; 32],
+            roster: &[0, 1, 2],
+            siblings: &siblings,
+        };
+        let mut sessions: Vec<_> = reservoirs
+            .iter_mut()
+            .map(|r| ParallelSeededSignSession::begin(r.share_mut(), &request, &mut burns).unwrap())
+            .collect();
+        let ParallelSeededSignResult::Signature(sig) = drive(&mut sessions) else {
+            panic!("expected signature")
+        };
+        verify_parallel_seeded_fts(&pk, request.msg, &sig, &CpuReferenceBackend).unwrap();
+        drop(sessions);
+        reservoirs = refill_reservoirs(reservoirs, 384, None)
+            .into_iter()
+            .map(Result::unwrap)
+            .collect();
+        for r in &mut reservoirs {
+            assert!(matches!(
+                ParallelSeededSignSession::begin(r.share_mut(), &request, &mut burns),
+                Err(ParallelSeededError::EpochUseBudgetExhausted)
+            ));
+        }
+    }
+
+    #[test]
+    fn dkg_reservoir_rejects_key_substitution_and_oversized_batches() {
+        let mut reservoirs: Vec<_> = distributed_setup(2)
+            .into_iter()
+            .map(|o| ParallelSeededDkgReservoir::new(o).unwrap())
+            .collect();
+        reservoirs[2].corrupt_seed_for_test();
+        assert!(
+            refill_reservoirs(reservoirs, 2, None)
+                .iter()
+                .all(|r| matches!(r, Err(ParallelSeededError::BdozMacCheckFailed)))
+        );
+        for count in [0, parallel_mpc::DEFAULT_BEAVER_TRIPLE_POOL + 1, usize::MAX] {
+            let output = distributed_setup(2).remove(0);
+            assert!(
+                ParallelSeededDkgReservoir::new(output)
+                    .unwrap()
+                    .into_refill([1; 32], count, 0, [2; 32])
+                    .is_err()
+            );
+        }
+        for height in [3, 5, 8, 10] {
+            let params = ParallelSeededParams {
+                tree_height: height,
+                ..ParallelSeededParams::CUSTODY_H10_W5
+            };
+            assert_eq!(params.leaf_preparation_power_count(), 32_640);
+            assert_eq!(params.signing_power_count(), 19_680);
+            let config = ParallelSeededDkgConfig {
+                params,
+                roster: vec![0, 1, 2],
+                session: [1; 32],
+                power_count: params.leaf_preparation_power_count(),
+                beaver_count: 0,
+            };
+            assert!(ParallelSeededDkgRound1State::begin(config, 0, [2; 32]).is_ok());
+        }
+    }
+
+    #[test]
+    fn dkg_reservoir_refill_detects_products_and_both_mac_lane_cheating() {
+        // A refill carries no output triples: two product calls, then the two MAC lanes.
+        for call in 0..16 {
+            for cheat in [Cheat::Operand, Cheat::OutputShare] {
+                let reservoirs = distributed_setup(2)
+                    .into_iter()
+                    .map(|o| ParallelSeededDkgReservoir::new(o).unwrap())
+                    .collect();
+                assert!(
+                    refill_reservoirs(reservoirs, 2, Some((call, call, cheat)))
+                        .iter()
+                        .all(|r| matches!(r, Err(ParallelSeededError::BdozMacCheckFailed))),
+                    "{cheat:?} in refill endpoint product {call}"
+                );
+            }
+        }
+    }
+
+    fn all_abort(results: &[Result<ParallelSeededDkgOutput, ParallelSeededError>]) -> bool {
+        results
+            .iter()
+            .all(|r| matches!(r, Err(ParallelSeededError::BdozMacCheckFailed)))
+    }
     #[test]
     fn dkg_consistency_check_catches_every_inconsistent_share_injection() {
         assert!(
@@ -711,16 +911,167 @@ mod distributed_tests {
                 .iter()
                 .all(Result::is_ok)
         );
-        for call in [0, 3, 5, 10, 12, 15, 16, 19, 21, 23] {
-            for cheat in [Cheat::Operand, Cheat::OutputShare] {
-                let results = consistency_check(setup_with_cheater(Some((call, cheat))));
+        // Twenty endpoint products with two power tuples and two output triples. Elements 0..3
+        // reach each of the three products that share a tuple's OTs; 5 and 20 land in the
+        // second tuple, the triples and, in the MAC lanes, the sacrificial values.
+        for call in 0..20 {
+            for element in [0, 1, 2, 5, 20] {
+                for cheat in [Cheat::Operand, Cheat::OutputShare] {
+                    let results =
+                        consistency_check(setup_with_cheater(Some((call, element, cheat))));
+                    assert!(
+                        all_abort(&results),
+                        "{cheat:?} at element {element} of endpoint product {call} must abort \
+                         every party before activation"
+                    );
+                }
+            }
+        }
+    }
+    /// A party that authenticates one wrong value, consistently toward every peer, breaks a
+    /// relation rather than a MAC. Every value except its own key shares and the fold mask
+    /// is pinned by a relation, so every such deviation must abort.
+    #[test]
+    fn dkg_consistency_check_pins_every_authenticated_value_to_its_relation() {
+        // Four key lanes, 2 x 7 powers, 4 x 3 triple values, 2 x 2 sacrificial values, the
+        // square-mask pair, the fold mask.
+        let fold_mask = 4 + 14 + 12 + 4 + 2;
+        let run = |faults: &[(usize, u128)]| {
+            consistency_check(setup_with_backends(2, networks(), faults, &[]))
+        };
+        assert!(
+            run(&[(fold_mask, 1)]).iter().all(Result::is_ok),
+            "a mask is any value"
+        );
+        assert!(
+            run(&[(0, 1), (3, 1 << 90)]).iter().all(Result::is_ok),
+            "so is a key share"
+        );
+        // (r + 1)^2 = r^2 + 1 is another valid square-mask pair.
+        assert!(
+            run(&[(fold_mask - 2, 1), (fold_mask - 1, 1)])
+                .iter()
+                .all(Result::is_ok)
+        );
+        for index in 4..fold_mask {
+            for delta in [1, 1 << 127] {
                 assert!(
-                    results
-                        .iter()
-                        .all(|r| matches!(r, Err(ParallelSeededError::BdozMacCheckFailed))),
-                    "{cheat:?} in endpoint product {call} must abort every party before activation"
+                    all_abort(&run(&[(index, delta)])),
+                    "value {index} is not pinned"
                 );
             }
+        }
+        // Deviations that keep one relation true and break the next one.
+        let (a, a2, a3, a4, a6) = (4, 5, 6, 7, 9);
+        let (sacrifice, product) = (4 + 14 + 12, 4 + 14 + 12 + 1);
+        for faults in [
+            // (a + 1)^2 = a^2 + 1: the square holds, the products with `a` do not.
+            vec![(a, 1), (a2, 1)],
+            // (a^2 + 1)^2 = a^4 + 1: the second square holds, the first does not.
+            vec![(a2, 1), (a4, 1)],
+            vec![(a3, 1), (a6, 1)],
+            // An error in a product together with one in the sacrificial product.
+            vec![(a3, 1), (product, 1)],
+            vec![(a3, 1), (sacrifice, 1)],
+            vec![(sacrifice, 1), (product, 1)],
+            // An error in a square together with one in the square mask's image.
+            vec![(a2, 1), (fold_mask - 1, 1)],
+            vec![(fold_mask - 2, 1), (fold_mask - 1, 2)],
+        ] {
+            assert!(all_abort(&run(&faults)), "{faults:?} survives the check");
+        }
+    }
+    /// A wrong product carried forward consistently: the party shifts its share of `a^3`
+    /// (or `a^5`) and of the sacrificial product `u*a` by the same amount, then derives `a^6`
+    /// and `a^7` from the shifted cube. The squares and the last product then hold, and the
+    /// two errors cancel in the checked sum unless every product has a challenge weight.
+    #[test]
+    fn dkg_consistency_check_weights_every_product_against_the_sacrificial_one() {
+        let run = |product_faults: &[(usize, u128)]| {
+            consistency_check(setup_with_backends(2, networks(), &[], product_faults))
+        };
+        assert!(run(&[]).iter().all(Result::is_ok));
+        // Shares 0..3 of tuple 0 are `a^3`, `a^5`, `u*a`; tuple 1 follows.
+        for delta in [1, 1 << 64, u128::MAX] {
+            for faults in [
+                vec![(0, delta), (2, delta)],
+                vec![(1, delta), (2, delta)],
+                // Equal errors in two products cancel under equal weights.
+                vec![(0, delta), (1, delta)],
+                vec![(0, delta), (1, delta), (2, delta)],
+                vec![(3, delta), (4, delta), (5, delta)],
+                vec![(0, delta)],
+                vec![(5, delta)],
+            ] {
+                assert!(all_abort(&run(&faults)), "{faults:?} survives the check");
+            }
+        }
+    }
+    /// The Gilboa adapter's random-OT and fixed-key paths under the full ceremony, and a
+    /// sender that puts a different operand into its correction words than into its shares.
+    #[test]
+    fn dkg_over_gilboa_products_passes_and_catches_altered_correction_words() {
+        use parallel_mpc::ideal_ot::{IdealOt, Mailbox, Tamper};
+        // Party 2 sends to its two peers in turn: the first tuple flight (sends 0 and 1), the
+        // seventh-power flight (2, 3), the triples (4, 5), then one block per MAC lane.
+        fn shift_first_factor(words: &mut [u128]) {
+            // `a^2 + 1` for tuple 0: bit `i` carries the operand times `z^i`.
+            for (bit, word) in words.iter_mut().step_by(3).take(128).enumerate() {
+                *word ^= 1 << bit;
+            }
+        }
+        fn shift_sacrificial_factor(words: &mut [u128]) {
+            for (bit, word) in words.iter_mut().skip(2).step_by(3).take(128).enumerate() {
+                *word ^= 1 << bit;
+            }
+        }
+        fn shift_first_value(words: &mut [u128]) {
+            // Row `i` of a block holds stream `i` for every value; shift value 0 in all rows.
+            let count = words.len() / 128;
+            for word in words.iter_mut().step_by(count) {
+                *word ^= 1;
+            }
+        }
+        fn shift_last_value(words: &mut [u128]) {
+            let count = words.len() / 128;
+            for word in words.iter_mut().skip(count - 1).step_by(count) {
+                *word ^= 1 << 77;
+            }
+        }
+        let run = |tamper: Option<Tamper>| {
+            let mailbox = Mailbox::default();
+            let backends = (0..3u16)
+                .map(|id| {
+                    let mut ot = IdealOt::new(id, &mailbox);
+                    ot.tamper = tamper.filter(|_| id == 2);
+                    ParallelSeededGilboaProducts::new(id, [id as u8 + 60; 32], ot)
+                })
+                .collect();
+            let results = consistency_check(setup_with_backends(3, backends, &[], &[]));
+            assert!(mailbox.is_empty());
+            results
+        };
+        let honest = run(None);
+        let seed = honest[0].as_ref().unwrap().pk_seed_bytes;
+        assert!(honest.iter().all(|o| {
+            let o = o.as_ref().unwrap();
+            o.pk_seed_bytes == seed && o.beaver_triples.len() == 2 && !o.share.is_poisoned()
+        }));
+        let tampers: [Tamper; 8] = [
+            (0, shift_first_factor),
+            (1, shift_sacrificial_factor),
+            (2, shift_first_factor),
+            (5, shift_first_factor),
+            (6, shift_first_value),
+            (7, shift_last_value),
+            (8, shift_last_value),
+            (9, shift_first_value),
+        ];
+        for (send, alter) in tampers {
+            assert!(
+                all_abort(&run(Some((send, alter)))),
+                "altered send {send} survives"
+            );
         }
     }
     #[test]
@@ -802,6 +1153,49 @@ mod distributed_tests {
             pending.next().unwrap().activate(&tags),
             Err(ParallelSeededError::CommitmentMismatch { party_id: 2 })
         ));
+    }
+    /// Every opening is bound to authenticated values before the challenges exist: a party
+    /// that moves one of its broadcast shares afterwards leaves MAC tags that do not cancel.
+    #[test]
+    fn dkg_consistency_check_binds_every_opened_value_to_its_mac() {
+        let alterations: [fn(&mut ParallelSeededDkgCheckShares); 6] = [
+            // Two output triples come first in `rho`, then the two power tuples.
+            |s| s.rho[1] ^= 1,
+            |s| s.rho[2] ^= 1,
+            |s| s.rho[3] ^= 1 << 100,
+            |s| s.sigma[0] ^= 1,
+            |s| s.square ^= 1,
+            |s| s.masked ^= 1,
+        ];
+        for (index, alter) in alterations.into_iter().enumerate() {
+            let mut pending = setup_with_cheater(None);
+            let commits: Vec<_> = pending.iter().map(|p| p.check_commitment()).collect();
+            let coins: Vec<_> = pending
+                .iter_mut()
+                .map(|p| p.reveal_check_coin(&commits).unwrap())
+                .collect();
+            let shares: Vec<_> = pending
+                .iter_mut()
+                .map(|p| p.masked_shares(&coins).unwrap())
+                .collect();
+            let mut shifted = shares.clone();
+            alter(&mut shifted[2]);
+            // Party 2 computes its tag from what it really holds; the others see its shift.
+            let tag_commits: Vec<_> = pending
+                .iter_mut()
+                .enumerate()
+                .map(|(i, p)| {
+                    p.tag_commitment(if i == 2 { &shares } else { &shifted })
+                        .unwrap()
+                })
+                .collect();
+            let tags: Vec<_> = pending
+                .iter_mut()
+                .map(|p| p.open_tags(&tag_commits).unwrap())
+                .collect();
+            let results: Vec<_> = pending.into_iter().map(|p| p.activate(&tags)).collect();
+            assert!(all_abort(&results), "alteration {index} survives");
+        }
     }
     #[test]
     fn dkg_output_is_not_released_before_the_check_completes() {

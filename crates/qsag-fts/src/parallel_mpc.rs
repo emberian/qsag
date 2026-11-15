@@ -53,6 +53,17 @@ impl ParallelSeededParams {
         target_sum: 8,
     };
 
+    /// Single-use power tuples needed to prepare one public leaf. Independent
+    /// of tree height, so a driver can refill one bounded batch between leaves.
+    pub const fn leaf_preparation_power_count(&self) -> usize {
+        2 * SPN_ROUNDS * self.num_chains * self.winternitz_w
+    }
+
+    /// Single-use power tuples reserved for one signing attempt.
+    pub const fn signing_power_count(&self) -> usize {
+        2 * SPN_ROUNDS * (1 + self.num_chains + self.target_sum)
+    }
+
     /// Nonlinear communication depth for a batched schedule, including intermediate and output MAC barriers.
     /// Serial local evaluation is not a distributed scheduler. Tree height is absent.
     pub const fn secret_mpc_depth(&self) -> usize {
@@ -141,8 +152,6 @@ impl AuthenticatedPowerShare {
         }
     }
 }
-/// Historical name retained for callers that store preprocessing allocations.
-pub type AuthenticatedBeaverTriple = AuthenticatedPowerShare;
 
 /// Authenticated share of an $\mathbb{F}_{2^{128}}$ wire (`val_sh`) + 2-lane BDOZ MAC (`mac[0..2]`).
 #[derive(Clone)]
@@ -223,7 +232,7 @@ pub struct ParallelSeededPartyShare {
     bdoz_alpha_share: [u128; 2],
     local_salt_seed: [u8; 32],
     pairwise_zero_seeds: Vec<(u16, [u8; 32])>,
-    beaver_pool: Vec<AuthenticatedBeaverTriple>,
+    beaver_pool: Vec<AuthenticatedPowerShare>,
     beaver_cursor: usize,
     epoch_uses: Vec<u8>,
     poisoned: bool,
@@ -917,7 +926,7 @@ impl ParallelSeededThresholdSetup {
         // Four signing attempts, bounded by the public resource limit.
         let pool_size = (2 * SPN_ROUNDS * (1 + params.num_chains + params.target_sum) * 4)
             .min(DEFAULT_BEAVER_TRIPLE_POOL);
-        let mut party_pools: Vec<Vec<AuthenticatedBeaverTriple>> = (0..num_parties)
+        let mut party_pools: Vec<Vec<AuthenticatedPowerShare>> = (0..num_parties)
             .map(|_| Vec::with_capacity(pool_size))
             .collect();
         let mut raw_ab = vec![0u8; pool_size * 32];
@@ -1646,6 +1655,10 @@ pub use sign_session::*;
 #[path = "dkg.rs"]
 mod dkg;
 pub use dkg::*;
+
+#[path = "reservoir.rs"]
+mod reservoir;
+pub use reservoir::*;
 
 #[cfg(test)]
 mod power_auth_tests {
