@@ -291,6 +291,18 @@ theorem honest_quorum_intersection {n t f : Nat} (q r corrupt : Fin n → Bool)
     change cardinal q + cardinal r ≤ n * 1 + cardinal corrupt at le
     omega
 
+/-- Pairwise honest intersections suffice for global nonce uniqueness, even though they
+do not suffice for a global cumulative sum. Local uniqueness comes from ledger_trace_safety. -/
+theorem intersecting_nonce_distinct {n K t f : Nat} (q : Fin K → Fin n → Bool)
+    (corrupt : Fin n → Bool) (nonce : Fin K → Nat) (sizes : ∀ a, t ≤ cardinal (q a))
+    (hf : cardinal corrupt ≤ f) (overlap : n + f < 2 * t)
+    (localUnique : ∀ j, corrupt j = false → ∀ a b, a ≠ b →
+      q a j = true → q b j = true → nonce a ≠ nonce b) :
+    ∀ a b, a ≠ b → nonce a ≠ nonce b := by
+  intro a b hab
+  obtain ⟨j, ha, hb, hc⟩ := honest_quorum_intersection (q a) (q b) corrupt (sizes a) (sizes b) hf overlap
+  exact localUnique j hc a b hab ha hb
+
 structure QuorumTierRule where
   cap : Nat
   need : Nat
@@ -425,6 +437,26 @@ def advanceWindow (authenticated : Bool) (old next : Nat) : Option Ledger :=
 theorem authenticated_window_required (old next : Nat) : advanceWindow false old next = none := by
   unfold advanceWindow; rfl
 
+structure WindowAdvanceAuthorization where
+  nextEpoch : Nat
+  mac : Nat
+def advanceAuthorized (mac : Nat → Nat → Nat → Nat) (policy old : Nat)
+    (a : WindowAdvanceAuthorization) : Option Ledger :=
+  advanceWindow (decide (a.mac = mac policy old a.nextEpoch)) old a.nextEpoch
+
+/-- The MAC oracle closes over the provisioned secret key, and binds policy plus both epochs.
+Only a successful authenticated strict advance can reset the accounting state. -/
+theorem authorized_window_binding (mac : Nat → Nat → Nat → Nat) (policy old : Nat)
+    (a : WindowAdvanceAuthorization) (s : Ledger) (h : advanceAuthorized mac policy old a = some s) :
+    a.mac = mac policy old a.nextEpoch ∧ old < a.nextEpoch ∧ s = ⟨0, [], []⟩ := by
+  unfold advanceAuthorized advanceWindow at h
+  split at h
+  · rename_i hc
+    have hc' : a.mac = mac policy old a.nextEpoch ∧ old < a.nextEpoch := by
+      simpa only [Bool.and_eq_true, decide_eq_true_eq] using hc
+    exact ⟨hc'.1, hc'.2, (Option.some.inj h).symm⟩
+  · cases h
+
 def exampleIntent (nonce window : Nat) : TransactionIntent := ⟨7, 60, 0, nonce, nonce, window⟩
 theorem unauthenticated_window_reset_attack :
     ∃ a b : TransactionIntent, advanceWindow false 0 1 = none ∧
@@ -548,10 +580,12 @@ private theorem window_shift (f : Nat → Nat) : ∀ w u,
       f (u + 1) + windowSum f w u
   | 0, _ => by simp [windowSum]
   | 1, 0 => by simp [windowSum]
-  | m + 2, 0 => by have hn : ¬ m + 2 ≤ 1 := by omega; simp [windowSum, hn]
+  | m + 2, 0 => by
+    have hn : ¬ m + 2 ≤ 1 := by omega
+    simp [windowSum, hn]
   | m + 1, v + 1 => by
     have ih := window_shift f m v
-    have hc : (m + 1 ≤ v + 2) ↔ (m ≤ v + 1) := by omega
+    have hc : (m + 1 ≤ v + 2) ↔ (m ≤ v + 1) := by constructor <;> intro h <;> omega
     have hs : v + 2 - (m + 1) = v + 1 - m := by omega
     unfold windowSum
     simp only [Nat.succ_ne_zero, ↓reduceIte, Nat.add_sub_cancel]
@@ -583,6 +617,9 @@ private theorem scan_spec (f : Nat → Nat) (w : Nat) (xs : List Nat) :
         omega
     simp only [windowScan, he, List.ofFn_succ, Fin.val_zero, Nat.add_zero]
     congr 1
+    suffices h : windowScan xs ys.tail (windowSum f w start) =
+        List.ofFn (fun i : Fin xs.length => windowSum f w (start + 1 + i.val)) by
+      simpa only [Fin.val_succ, Nat.add_assoc, Nat.add_comm 1] using h
     apply ih (start + 1) (windowSum f w start) ys.tail
     · intro i hi
       simpa [Nat.add_assoc, Nat.add_comm 1 i] using hx (i + 1) (by simpa using Nat.succ_lt_succ hi)
@@ -594,7 +631,7 @@ private theorem scan_spec (f : Nat → Nat) (w : Nat) (xs : List Nat) :
 private theorem delayed_get (xs : List Nat) : ∀ w i,
     (List.replicate w 0 ++ xs).getD i 0 = if w ≤ i then xs.getD (i - w) 0 else 0
   | 0, _ => by simp
-  | w + 1, 0 => by simp
+  | w + 1, 0 => by simp [List.replicate_succ]
   | w + 1, i + 1 => by
     simpa only [List.replicate_succ, List.cons_append, List.getD_cons_succ,
       Nat.add_le_add_iff_right, Nat.add_sub_add_right] using delayed_get xs w i
@@ -605,12 +642,13 @@ theorem decoration_row_recurrence (w S k : Nat) :
     let prev := decorationRow w S k
     decorationRow w S (k + 1) =
       List.ofFn (fun i : Fin prev.length => windowSum (fun u => prev.getD u 0) w i.val) := by
-  dsimp only
-  unfold decorationRow
-  apply scan_spec (fun u => (decorationRow w S k).getD u 0) w _ 0 0 _
-  · intro i _; rfl
-  · intro i _; exact delayed_get _ w i
-  · rfl
+  change windowScan (decorationRow w S k) (List.replicate w 0 ++ decorationRow w S k) 0 = _
+  have h := scan_spec (fun u => (decorationRow w S k).getD u 0) w (decorationRow w S k)
+    0 0 (List.replicate w 0 ++ decorationRow w S k)
+    (by intro i _; simp only [Nat.zero_add])
+    (by intro i _; simpa only [Nat.zero_add] using delayed_get (decorationRow w S k) w i)
+    rfl
+  simpa only [Nat.zero_add] using h
 
 set_option maxRecDepth 100000 in
 set_option maxHeartbeats 12000000 in
@@ -683,6 +721,7 @@ theorem threshold_inhabited : ∃ (n t f w : Nat) (p : TransactionPolicy)
   intro j _ _
   unfold ValidRelease PolicyAccepts LedgerStep examplePolicy exampleIntent projected
   refine ⟨rfl, ⟨by decide, by decide, ⟨⟨100, 2⟩, rfl, by decide⟩⟩, ?_⟩
+  dsimp only
   decide
 
 theorem ledger_inhabited : ∃ cap w s final is, LedgerTrace cap w s is final ∧ s.spent ≤ cap := by
@@ -694,9 +733,31 @@ theorem incomparable_inhabited : ∃ a b : Fin 2 → Nat, finSum 2 a = finSum 2 
   refine ⟨smallVector 0 2, smallVector 2 0, rfl, ?_⟩
   intro h; have h0 := congrFun h 0; contradiction
 
+theorem spending_inhabited : ∃ (n t f w : Nat) (p : TransactionPolicy) (H : TransactionIntent → Nat)
+    (is : List TransactionIntent) (corrupt : Fin n → Bool) (q : TransactionIntent → Fin n → Bool)
+    (before after : TransactionIntent → Fin n → Ledger)
+    (tokens : TransactionIntent → Fin n → AuthorizedSignReleaseToken) (final : Ledger),
+    cardinal corrupt ≤ f ∧ f < t ∧ (∀ i ∈ is, cardinal (q i) = t) ∧
+    (∀ i ∈ is, ∀ j, q i j = true → corrupt j = false →
+      ValidRelease H p t w i (before i j) (after i j) (tokens i j)) ∧
+    LedgerTrace p.maxWindowSpend w ⟨0, [], []⟩ is final := by
+  refine ⟨2, 2, 0, 0, examplePolicy, fun i => i.nonce, [exampleIntent 1 0],
+    fun _ => false, fun _ _ => true, fun _ _ => ⟨0, [], []⟩,
+    fun i _ => burn ⟨0, [], []⟩ i, fun i _ => minted (fun i => i.nonce) examplePolicy i,
+    burn ⟨0, [], []⟩ (exampleIntent 1 0), ?_⟩
+  refine ⟨by unfold cardinal; decide, by decide, ?_, ?_, ?_⟩
+  · intro i _; unfold cardinal; rfl
+  · intro i hi j _ _
+    have he := List.mem_singleton.mp hi; subst i
+    unfold ValidRelease PolicyAccepts LedgerStep examplePolicy exampleIntent projected
+    refine ⟨rfl, ⟨by decide, by decide, ⟨⟨100, 2⟩, rfl, by decide⟩⟩, ?_⟩
+    dsimp only; decide
+  · exact .cons (by unfold LedgerStep examplePolicy exampleIntent projected; decide) (.nil _)
+
 #verify_constructive frame64_prefix_injective transcript_bytes_injective identity_binding address_binding
   fresh_transcript dual_key_euf_cma rogue_partner_resistance naive_rogue_rebinding
   robust_min_bound total_component_break hybrid_advantage_bound honest_in_quorum honest_quorum_intersection
+  intersecting_nonce_distinct authorized_window_binding
   token_binding threshold_policy_composition ledger_trace_safety threshold_spending_safety
   authenticated_window_required unauthenticated_window_reset_attack pairwise_intersection_not_global_accounting
   all_fips_profiles all_frontier_profiles decoration_row_recurrence wide_code_domains security_regime_separation
@@ -704,6 +765,7 @@ theorem incomparable_inhabited : ∃ a b : Fin 2 → Nat, finSum 2 a = finSum 2 
 #verify_inhabited dual_key_euf_cma hybrid_inhabited
 #verify_inhabited threshold_policy_composition threshold_inhabited
 #verify_inhabited ledger_trace_safety ledger_inhabited
+#verify_inhabited threshold_spending_safety spending_inhabited
 #verify_inhabited one_use_incomparable incomparable_inhabited
 #tooth_pair rogue_partner_resistance vs naive_rogue_rebinding
 #tooth_pair authenticated_window_required vs unauthenticated_window_reset_attack

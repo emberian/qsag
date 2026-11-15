@@ -1398,11 +1398,28 @@ theorem tooth_caching_bottom_layer_breaks_wots_one_time :
       hWfP.2.2.1, ne_eq, not_true_eq_false, show 0 < 2 ^ (1 * 1) from by decide, decide_true,
       hWfP.2.1, List.isEmpty_nil]
     simp only [verifyHypertreeLayers, Nat.zero_mod, Nat.zero_div]
-    change (if !(checkTargetSum 4 128 192 (extractBaseWDigits 4 128
-              (thHashMsg bottomReuseSuite [] pk0.pkSeed pk0.pkRoot
-                (thPreHash bottomReuseSuite pk0.pkSeed pk0.pkRoot [0xE3]) 0 0 0 0))) then none else _) = _
-    -- Unfold the match on `verifyHypertreeLayers` cleanly:
-    revert hVer3 2>/dev/null || skip
-  sorry
+    change (let hm := thHashMsg bottomReuseSuite [] pk0.pkSeed pk0.pkRoot
+      (thPreHash bottomReuseSuite pk0.pkSeed pk0.pkRoot [0xE3]) 0 0 0 0; _) = true
+    dsimp only
+    rw [hDigEq3, hDValid.2.2]
+    have hLen : forgedChains3.length = 128 := by
+      simp [forgedChains3, forgeWotsFromTwoSigs]
+    simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte, hLen, ne_eq, not_true_eq_false]
+    have hRecover := forgeWotsFromTwoSigs_recovers_pk bottomReuseSuite wotsSingleLayerParams
+      sk0 0 0 0 d1 d2 d3 hDValid.2.2 hDCover
+    change (match walkMerkleAuthPath bottomReuseSuite [] 0 0 .tree 1 0 0
+        (recoverWotsPkFromSig bottomReuseSuite wotsSingleLayerParams [] 0 0 0 d3 forgedChains3)
+        path0 with | none => false | some r => _) = true
+    rw [hRecover]
+    have hWalk := walkMerkleAuthPath_buildMerkleAuthPath bottomReuseSuite [] 0 0 .tree
+      (computeWotsPk bottomReuseSuite wotsSingleLayerParams sk0 0 0) 1 0 0 (by decide)
+    simp only [Nat.zero_mul, Nat.zero_add] at hWalk
+    rw [hWalk]
+    simp only [verifyHypertreeLayers, derivePublicKey, hWfP.2.2.1, Nat.sub_self, decide_true]
+    rfl
+  exact ⟨[0xE1], [0xE2], [0xE3], pk0, sig1, sig2, forgedSig3,
+    rfl, rfl, rfl, by decide, by decide, rfl, hEv1, hEv2,
+    verifyPqHashSig_evalSingleLayerAtCounter _ _ _ _ _ _ _ hEv1,
+    verifyPqHashSig_evalSingleLayerAtCounter _ _ _ _ _ _ _ hEv2, hVer3⟩
 end Qsag
 end
