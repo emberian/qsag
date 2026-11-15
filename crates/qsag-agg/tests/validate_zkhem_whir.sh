@@ -13,6 +13,9 @@ filters=(
     zk_hem::protocol::tests
     zk_hem::blind_vc::tests
     zk_hem::multisig::tests
+    zk_hem::recursive_whir::tests
+    pcs::affine_schedule::
+    pcs::pcs_unit_tests::explicit_classical_pcs_works_without_authorizing_aggregates
     recursion_census::tests
     recursive_fold::tests
     pcs::pcs_unit_tests::security_regimes_roundtrip_and_query_budgets

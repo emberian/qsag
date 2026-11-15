@@ -1092,3 +1092,1019 @@ fn dot(a: &[E], b: &[E]) -> E {
 /// the recursion transcript. The returned commitment is part of the opening statement.
 /// This PCS mode is binding but not independently hiding; keep child witnesses private
 /// when using the zero-knowledge merge.
+pub fn prove_for_recursion(
+    params: &FixedPathWhirParams,
+    shard_header: [u8; 32],
+    evaluations: &[F],
+    point: &[E],
+) -> Result<(ChildWhirStatement, FixedPathWhirProof), RecursiveWhirError> {
+    let nv = params
+        .num_vars()
+        .ok_or(RecursiveWhirError::InvalidParameters)?;
+    if point.len() != nv || evaluations.len() != 1usize << nv {
+        return Err(RecursiveWhirError::InvalidParameters);
+    }
+    let mut base = hypercube_to_monomial_coeffs(evaluations);
+    let mut coeffs = SecretExts(Vec::with_capacity(base.len() + 2));
+    coeffs.0.extend(base.iter().copied().map(E::from_base));
+    qsag_asm::volatile_fill(&mut base, F::ZERO);
+    coeffs.0.extend([E::ZERO; 2]);
+    let mut kernel = dense_point(point);
+    let mut claim = dot(&coeffs.0, &kernel);
+    let spec = params.schedule.stages[0];
+    let mut oracle = Oracle::new(&coeffs.0, spec.blowup, 1 << spec.step_vars, 0);
+    let statement = ChildWhirStatement {
+        shard_header,
+        commitment: oracle.root(),
+        point: point.to_vec(),
+        value: claim,
+    };
+    let mut proof = params.placeholder();
+    proof.stage_roots[0] = oracle.root();
+    let mut b = Native::default();
+    let mut tr = start(&mut b, params, &statement.words());
+    tr.absorb(&mut b, 3, &oracle.root());
+    let mut cursor = 0;
+    let mut scratch_c = SecretExts(Vec::new());
+    let mut scratch_k = Vec::new();
+    let zs = [tr.ext(&mut b, 4).value(&b), tr.ext(&mut b, 4).value(&b)];
+    let evals = zs.map(|z| crate::field::eval_univariate_ext4(&coeffs.0, z));
+    proof.ood_evals[0] = evals;
+    tr.absorb_exts(&mut b, 5, &evals.map(Ext::constant));
+    for (z, e) in zs.into_iter().zip(evals) {
+        let weight = tr.ext(&mut b, 6).value(&b);
+        claim += weight * e;
+        add_geometric(&mut kernel, weight, z);
+    }
+    for (stage, spec) in params.schedule.stages.iter().enumerate() {
+        let mut chals = Vec::with_capacity(spec.step_vars);
+        for _ in 0..spec.step_vars {
+            let mut wire = [E::ZERO; 5];
+            for (c, k) in coeffs
+                .0
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .zip(kernel.as_chunks::<2>().0.iter())
+            {
+                wire[0] += c[0] * k[0];
+                wire[1] += c[0] * k[1];
+                wire[2] += c[1] * k[0];
+            }
+            tr.absorb_exts(
+                &mut b,
+                10,
+                &wire[..3]
+                    .iter()
+                    .copied()
+                    .map(Ext::constant)
+                    .collect::<Vec<_>>(),
+            );
+            let phi = tr.ext(&mut b, 11);
+            crate::pcs::affine::fold_kernel_into(&kernel, phi.value(&b), &mut scratch_k);
+            core::mem::swap(&mut kernel, &mut scratch_k);
+            for (i, c) in coeffs.0.as_chunks::<2>().0.iter().enumerate() {
+                wire[3] += c[0] * kernel[i + 1];
+                wire[4] += c[1] * kernel[i + 1];
+            }
+            tr.absorb_exts(
+                &mut b,
+                12,
+                &wire[3..]
+                    .iter()
+                    .copied()
+                    .map(Ext::constant)
+                    .collect::<Vec<_>>(),
+            );
+            let nonce = grind(&tr, params.schedule.regime.pow_bits());
+            pow(&mut b, &mut tr, nonce, params.schedule.regime.pow_bits());
+            let chal = [tr.ext(&mut b, 13), tr.ext(&mut b, 14), tr.ext(&mut b, 15)];
+            claim = bridge(
+                &mut b,
+                &wire.map(Ext::constant),
+                &Ext::constant(claim),
+                &phi,
+                &chal,
+            )
+            .value(&b);
+            let chal_values = core::array::from_fn(|i| chal[i].value(&b));
+            crate::pcs::affine::fold_coeffs_into(&coeffs.0, chal_values, &mut scratch_c.0);
+            // Erase the old table before the scratch buffer can shrink on another round.
+            qsag_asm::volatile_fill(&mut coeffs.0, E::ZERO);
+            core::mem::swap(&mut coeffs.0, &mut scratch_c.0);
+            debug_assert_eq!(dot(&coeffs.0, &kernel), claim);
+            proof.fold_polys[cursor] = wire;
+            proof.fold_nonces[cursor] = nonce;
+            chals.push(chal);
+            cursor += 1;
+        }
+        let last = stage + 1 == params.schedule.stages.len();
+        let mut next_ood = None;
+        let next = if last {
+            proof.final_coeffs.clone_from(&coeffs.0);
+            tr.absorb_exts(
+                &mut b,
+                21,
+                &coeffs
+                    .0
+                    .iter()
+                    .copied()
+                    .map(Ext::constant)
+                    .collect::<Vec<_>>(),
+            );
+            None
+        } else {
+            let spec = params.schedule.stages[stage + 1];
+            let next = Oracle::new(&coeffs.0, spec.blowup, 1 << spec.step_vars, stage + 1);
+            proof.stage_roots[stage + 1] = next.root();
+            tr.absorb(&mut b, 3, &next.root());
+            let zs = [tr.ext(&mut b, 4).value(&b), tr.ext(&mut b, 4).value(&b)];
+            let ood = zs.map(|z| crate::field::eval_univariate_ext4(&coeffs.0, z));
+            proof.ood_evals[stage + 1] = ood;
+            tr.absorb_exts(&mut b, 5, &ood.map(Ext::constant));
+            next_ood = Some((zs, ood));
+            Some(next)
+        };
+        let nonce = grind(&tr, params.schedule.regime.pow_bits());
+        proof.query_nonces[stage] = nonce;
+        pow(&mut b, &mut tr, nonce, params.schedule.regime.pow_bits());
+        let groups = oracle.codeword.len() / oracle.arity;
+        let count = groups.min(spec.num_queries);
+        let mut shifted = Vec::with_capacity(count);
+        let mut sampler = QuerySampler { swaps: Vec::new() };
+        for q in 0..count {
+            let (index, binary) = sampler.next(&mut b, &mut tr, groups, count, q);
+            let query = oracle.query(index.to_canonical_u64() as usize);
+            let values: Vec<_> = query.values.iter().copied().map(Ext::constant).collect();
+            let x = coset_point(
+                &mut b,
+                &binary,
+                oracle.codeword.len().trailing_zeros() as usize,
+            );
+            shifted.push(fold_fiber(&mut b, &values, x, &chals, stage == 0));
+            proof.queries[stage][q] = query;
+        }
+        if let Some(next) = next {
+            let values: Vec<_> = shifted.iter().map(|(_, e)| e.clone()).collect();
+            tr.absorb_exts(&mut b, 22, &values);
+            let (zs, ood) = next_ood.expect("nonterminal stage OOD pins");
+            for (z, e) in zs.into_iter().zip(ood) {
+                let weight = tr.ext(&mut b, 6).value(&b);
+                claim += weight * e;
+                add_geometric(&mut kernel, weight, z);
+            }
+            let gamma = tr.ext(&mut b, 23).value(&b);
+            let mut weight = gamma;
+            for (z, e) in shifted {
+                claim += weight * e.value(&b);
+                add_geometric(&mut kernel, weight, E::from_base(z));
+                weight *= gamma;
+            }
+            oracle = next;
+        }
+    }
+    debug_assert!(!b.failed);
+    Ok((statement, proof))
+}
+
+/// Largest fan-in of one merge relation.
+pub const MAX_MERGE_CHILDREN: usize = 16;
+const MERGE_LABEL: &[u8] = b"QSAG.FIXED.WHIR.MERGE/v1";
+
+/// One outer proof and one merged digest for any number of children and any child path
+/// counts. The child statements are verifier inputs, not hidden assertions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SuccinctChildWhirMerge {
+    pub merged_root: Digest,
+    pub proof: ZkHemProof,
+}
+impl SuccinctChildWhirMerge {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = b"QSAGFWZ1".to_vec();
+        for x in self.merged_root {
+            out.extend_from_slice(&x.to_le_bytes());
+        }
+        out.extend(self.proof.to_bytes());
+        out
+    }
+    pub fn from_bytes(
+        bytes: &[u8],
+        relation: &ChildWhirMergeRelation,
+        regime: WhirSecurityRegime,
+    ) -> Option<Self> {
+        if bytes.get(..8)? != b"QSAGFWZ1" {
+            return None;
+        }
+        let mut root = [F::ZERO; 4];
+        for (i, v) in root.iter_mut().enumerate() {
+            let word = u64::from_le_bytes(bytes.get(8 + 8 * i..16 + 8 * i)?.try_into().ok()?);
+            if word >= crate::field::GOLDILOCKS_PRIME {
+                return None;
+            }
+            *v = f(word);
+        }
+        let proof = ZkHemProof::from_bytes(bytes.get(40..)?, &relation.shape, regime)?;
+        Some(Self {
+            merged_root: root,
+            proof,
+        })
+    }
+}
+fn statement_words(children: &[ChildWhirStatement]) -> Vec<F> {
+    children
+        .iter()
+        .flat_map(ChildWhirStatement::words)
+        .collect()
+}
+// The frame length in the sponge capacity separates fan-ins and statement sizes.
+fn merged_gadget<B: Backend>(b: &mut B, public: &[B::W]) -> [B::W; 4] {
+    let mut tr = Transcript::new();
+    tr.absorb(b, MERGE, public);
+    core::array::from_fn(|i| tr.state[i].clone())
+}
+/// Digest of the ordered child statements (shard header, commitment, point and value each).
+pub fn merged_child_whir_root(children: &[ChildWhirStatement]) -> Digest {
+    merged_gadget(&mut Native::default(), &statement_words(children))
+}
+
+/// Counts exclude padding and the twelve masking rows added by the outer protocol.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChildWhirRelationStats {
+    pub sbox_rows: usize,
+    pub multiplication_rows: usize,
+    pub padded_rows: usize,
+    pub variables: usize,
+}
+#[derive(Clone, Debug)]
+pub struct ChildWhirMergeRelation {
+    params: FixedPathWhirParams,
+    children: usize,
+    shape: Shape,
+    stats: ChildWhirRelationStats,
+}
+impl ChildWhirMergeRelation {
+    /// Two-child relation.
+    pub fn new(params: FixedPathWhirParams) -> Result<Self, RecursiveWhirError> {
+        Self::with_children(params, 2)
+    }
+    /// Relation verifying `children` openings that share one verifier geometry.
+    pub fn with_children(
+        params: FixedPathWhirParams,
+        children: usize,
+    ) -> Result<Self, RecursiveWhirError> {
+        let nv = params
+            .num_vars()
+            .ok_or(RecursiveWhirError::InvalidParameters)?;
+        if !(1..=MAX_MERGE_CHILDREN).contains(&children) {
+            return Err(RecursiveWhirError::InvalidParameters);
+        }
+        let statements = vec![
+            ChildWhirStatement {
+                shard_header: [0; 32],
+                commitment: [F::ZERO; 4],
+                point: vec![E::ZERO; nv],
+                value: E::ZERO,
+            };
+            children
+        ];
+        let proofs = vec![params.placeholder(); children];
+        let (shape, mut z, used) = synthesize_merge(&params, &statements, &proofs, [F::ZERO; 4]);
+        qsag_asm::volatile_fill(&mut z, F::ZERO);
+        let stats = ChildWhirRelationStats {
+            sbox_rows: shape.num_sbox,
+            multiplication_rows: used - shape.num_sbox,
+            padded_rows: shape.num_rows(),
+            variables: shape.num_vars,
+        };
+        Ok(Self {
+            params,
+            children,
+            shape,
+            stats,
+        })
+    }
+    pub fn shape(&self) -> &Shape {
+        &self.shape
+    }
+    pub fn stats(&self) -> ChildWhirRelationStats {
+        self.stats
+    }
+    pub fn params(&self) -> &FixedPathWhirParams {
+        &self.params
+    }
+    pub fn num_children(&self) -> usize {
+        self.children
+    }
+}
+fn synthesize_merge(
+    params: &FixedPathWhirParams,
+    children: &[ChildWhirStatement],
+    proofs: &[FixedPathWhirProof],
+    root: Digest,
+) -> (Shape, Vec<F>, usize) {
+    let mut cs = ConstraintSystem::new();
+    let words = statement_words(children);
+    let public: Vec<Lc> = words.iter().map(|&x| cs.public_input(x).into()).collect();
+    let merged: [Lc; 4] = root.map(|x| cs.public_input(x).into());
+    for (statement, proof) in public.chunks(words.len() / children.len()).zip(proofs) {
+        verify_gadget(&mut cs, params, statement, proof);
+    }
+    let digest = merged_gadget(&mut cs, &public);
+    for i in 0..4 {
+        cs.enforce_equal(&merged[i], &digest[i]);
+    }
+    let used = cs.num_rows();
+    let (shape, z) = cs.finish();
+    (shape, z, used)
+}
+
+/// Prove every child's complete fixed-path WHIR verification inside one committed outer
+/// relation. No native-verification Boolean is trusted or inserted as a witness.
+pub fn prove_succinct_children_whir_merge(
+    relation: &ChildWhirMergeRelation,
+    children: &[ChildWhirStatement],
+    proofs: &[FixedPathWhirProof],
+    regime: WhirSecurityRegime,
+    seed: &[u8; 32],
+) -> Result<SuccinctChildWhirMerge, RecursiveWhirError> {
+    if !regime.meets_qrom_128_floor()
+        || children.len() != relation.children
+        || proofs.len() != relation.children
+    {
+        return Err(RecursiveWhirError::InvalidParameters);
+    }
+    if !children
+        .iter()
+        .zip(proofs)
+        .all(|(c, p)| relation.params.well_formed(c, p))
+    {
+        return Err(RecursiveWhirError::MalformedProof);
+    }
+    let merged_root = merged_child_whir_root(children);
+    let (shape, z, _) = synthesize_merge(&relation.params, children, proofs, merged_root);
+    if shape != relation.shape {
+        return Err(RecursiveWhirError::InvalidParameters);
+    }
+    drop(shape);
+    let proof = protocol::prove(&relation.shape, z, MERGE_LABEL, regime, seed)
+        .map_err(RecursiveWhirError::ZkHem)?;
+    Ok(SuccinctChildWhirMerge { merged_root, proof })
+}
+
+/// Verify using only the public child headers/opening statements and the one parent proof.
+pub fn verify_succinct_children_whir_merge(
+    relation: &ChildWhirMergeRelation,
+    children: &[ChildWhirStatement],
+    regime: WhirSecurityRegime,
+    parent: &SuccinctChildWhirMerge,
+) -> bool {
+    if !regime.meets_qrom_128_floor()
+        || children.len() != relation.children
+        || children
+            .iter()
+            .any(|c| Some(c.point.len()) != relation.params.num_vars())
+        || parent.merged_root != merged_child_whir_root(children)
+    {
+        return false;
+    }
+    let mut public = statement_words(children);
+    public.extend(parent.merged_root);
+    protocol::verify(&relation.shape, &public, MERGE_LABEL, regime, &parent.proof)
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+    const REGIME: WhirSecurityRegime = WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128;
+    fn sample(i: usize) -> E {
+        E::from_limbs(core::array::from_fn(
+            |j| f((19 + i * 7919 + j * 313) as u64),
+        ))
+    }
+    fn child(params: &FixedPathWhirParams, tag: u8) -> (ChildWhirStatement, FixedPathWhirProof) {
+        let nv = params.num_vars().unwrap();
+        let values: Vec<_> = (0..1 << nv)
+            .map(|i| f((i * i + usize::from(tag) * 7919 + 11) as u64))
+            .collect();
+        let point: Vec<_> = (0..nv).map(|i| sample(i + usize::from(tag))).collect();
+        let out = prove_for_recursion(params, [tag; 32], &values, &point).unwrap();
+        assert_eq!(
+            out.0.value,
+            crate::field::mle_eval_base_at_ext4(&values, &point)
+        );
+        out
+    }
+    fn relation_for_child(
+        params: &FixedPathWhirParams,
+        child: &ChildWhirStatement,
+        proof: &FixedPathWhirProof,
+    ) -> (Shape, Vec<F>) {
+        let mut cs = ConstraintSystem::new();
+        let public: Vec<Lc> = child
+            .words()
+            .into_iter()
+            .map(|x| cs.public_input(x).into())
+            .collect();
+        verify_gadget(&mut cs, params, &public, proof);
+        cs.finish()
+    }
+
+    /// Witness-crafting backend: chosen allocations take forged values and every later
+    /// wire is derived from them, so only rows that bind a forged wire can fail.
+    #[derive(Default)]
+    struct Forger {
+        cs: ConstraintSystem,
+        allocated: Vec<F>,
+        forged: alloc::collections::BTreeMap<usize, F>,
+    }
+    impl Backend for Forger {
+        type W = Lc;
+        fn alloc(&mut self, v: F) -> Lc {
+            let v = *self.forged.get(&self.allocated.len()).unwrap_or(&v);
+            self.allocated.push(v);
+            self.cs.alloc(v).into()
+        }
+        fn value(&self, v: &Lc) -> F {
+            self.cs.eval(v)
+        }
+        fn mul(&mut self, a: &Lc, b: &Lc) -> Lc {
+            self.cs.mul(a, b).into()
+        }
+        fn equal(&mut self, a: &Lc, b: &Lc) {
+            self.cs.enforce_equal(a, b);
+        }
+        fn product(&mut self, a: &Lc, b: &Lc, c: &Lc) {
+            self.cs.enforce_mul(a.clone(), b.clone(), c.clone());
+        }
+        fn perm(&mut self, s: &mut [Lc; 12]) {
+            poseidon2_perm(&mut self.cs, s);
+        }
+    }
+    fn forge(
+        forged: &[(usize, F)],
+        run: impl FnOnce(&mut Forger),
+    ) -> (Shape, Vec<F>, Vec<F>) {
+        let mut forger = Forger {
+            forged: forged.iter().copied().collect(),
+            ..Forger::default()
+        };
+        run(&mut forger);
+        let (shape, z) = forger.cs.finish();
+        (shape, z, forger.allocated)
+    }
+    fn violated(shape: &Shape, z: &[F]) -> Vec<usize> {
+        (0..shape.num_rows())
+            .filter(|&i| {
+                let a = shape.a.row_dot(i, z);
+                let c = shape.c.row_dot(i, z);
+                if i < shape.num_sbox {
+                    crate::sponge::poseidon2_sbox7(a) != c
+                } else {
+                    a.const_mul(shape.b.row_dot(i, z)) != c
+                }
+            })
+            .collect()
+    }
+    #[test]
+    fn ext4_tower_arithmetic_matches_native_and_constrains_outputs() {
+        for i in 0..12 {
+            let mut cs = ConstraintSystem::new();
+            let a = Ext::alloc(&mut cs, sample(i));
+            let c = Ext::alloc(&mut cs, sample(i + 17));
+            let mul = a.mul(&mut cs, &c);
+            assert_eq!(mul.value(&cs), sample(i) * sample(i + 17));
+            assert_eq!(a.add(&c).value(&cs), sample(i) + sample(i + 17));
+            let output = mul.0[0].terms()[0].0 as usize;
+            let (shape, mut z) = cs.finish();
+            assert!(shape.is_satisfied(&z));
+            z[output] += F::ONE;
+            assert!(!shape.is_satisfied(&z));
+        }
+    }
+    #[test]
+    fn fixed_path_native_handles_rate_escalation_and_both_pow_profiles() {
+        for (regime, nv) in [
+            (REGIME, 2),
+            (REGIME, 7),
+            (REGIME, 12),
+            (WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128, 2),
+        ] {
+            let params = FixedPathWhirParams::new(regime, nv).unwrap();
+            let (statement, proof) = child(&params, 5);
+            assert!(verify_fixed_path(&params, &statement, &proof), "nv={nv}");
+            let wire = proof.to_bytes();
+            assert_eq!(
+                FixedPathWhirProof::from_bytes(&wire, &params),
+                Some(proof.clone())
+            );
+            let mut trailing = wire.clone();
+            trailing.push(0);
+            assert!(FixedPathWhirProof::from_bytes(&trailing, &params).is_none());
+            assert!(FixedPathWhirProof::from_bytes(&wire[..wire.len() - 1], &params).is_none());
+            let mut alias = wire;
+            alias[8..16].copy_from_slice(&crate::field::GOLDILOCKS_PRIME.to_le_bytes());
+            assert!(FixedPathWhirProof::from_bytes(&alias, &params).is_none());
+            let mut bad = proof.clone();
+            bad.query_nonces[0][0] ^= 1;
+            assert!(!verify_fixed_path(&params, &statement, &bad));
+            let mut bad = proof.clone();
+            bad.final_coeffs[0] += E::V;
+            assert!(!verify_fixed_path(&params, &statement, &bad));
+            if proof.stage_roots.len() > 1 {
+                let mut bad = proof.clone();
+                bad.stage_roots[1][2] += F::ONE;
+                assert!(!verify_fixed_path(&params, &statement, &bad));
+                let mut bad = proof.clone();
+                bad.ood_evals[1][0] += E::ONE;
+                assert!(!verify_fixed_path(&params, &statement, &bad));
+            }
+        }
+    }
+    #[test]
+    fn fixed_path_relation_has_no_witness_dependent_topology() {
+        let params = FixedPathWhirParams::new(REGIME, 7).unwrap();
+        let (a, pa) = child(&params, 1);
+        let (b, pb) = child(&params, 2);
+        let (shape, za) = relation_for_child(&params, &a, &pa);
+        assert!(shape.is_satisfied(&za));
+        let (other, zb) = relation_for_child(&params, &b, &pb);
+        assert_eq!(shape, other);
+        assert!(shape.is_satisfied(&zb));
+        // Actual queried indices differ, including partial Fisher-Yates replacements.
+        assert_ne!(pa.queries, pb.queries);
+    }
+    #[test]
+    fn pow_and_canonical_bits_are_enforced_in_relation() {
+        let mut native = Native::default();
+        let mut tr = Transcript::new();
+        tr.absorb(&mut native, 77, &[f(123)]);
+        let nonce = grind(&tr, 16);
+        let mut cs = ConstraintSystem::new();
+        let mut circuit = Transcript::new();
+        circuit.absorb(&mut cs, 77, &[Lc::constant(f(123))]);
+        pow(&mut cs, &mut circuit, nonce, 16);
+        let (shape, z) = cs.finish();
+        assert!(shape.is_satisfied(&z));
+        let mut wrong = nonce;
+        wrong[0] ^= 1;
+        // Select a nonce whose PoW is actually invalid (valid nonces are not unique).
+        loop {
+            let mut b = Native::default();
+            let mut check = tr.clone();
+            pow(&mut b, &mut check, wrong, 16);
+            if b.failed {
+                break;
+            }
+            wrong[0] = wrong[0].wrapping_add(1);
+        }
+        let mut cs = ConstraintSystem::new();
+        let mut circuit = Transcript::new();
+        circuit.absorb(&mut cs, 77, &[Lc::constant(f(123))]);
+        pow(&mut cs, &mut circuit, wrong, 16);
+        let (other, z) = cs.finish();
+        assert_eq!(shape, other);
+        assert!(!shape.is_satisfied(&z));
+    }
+
+    #[test]
+    fn forged_bit_two_violates_booleanity() {
+        // 2 = 0b10. The forgery (bit0, bit1) = (2, 0) keeps the weighted sum intact.
+        let run = |b: &mut Forger| {
+            let input = b.alloc(f(2));
+            bits(b, &input, 8);
+        };
+        let (shape, z, _) = forge(&[], run);
+        assert!(violated(&shape, &z).is_empty());
+        let (other, z, _) = forge(&[(1, f(2)), (2, F::ZERO)], run);
+        assert_eq!(shape, other);
+        assert_eq!(violated(&shape, &z), [0]);
+
+        // The same forged direction bit inside a Merkle path.
+        let values = [sample(1), sample(2)].map(Ext::constant);
+        let path = [[f(11), f(12), f(13), f(14)], [f(21), f(22), f(23), f(24)]];
+        let mut native = Native::default();
+        let index = f(2);
+        let binary = bits(&mut native, &index, 2);
+        let mut root = leaf(&mut native, 1, &index, &values);
+        for (level, (bit, sibling)) in binary.iter().zip(&path).enumerate() {
+            root = if *bit == F::ZERO {
+                compress(&mut native, &root, sibling, 1, level)
+            } else {
+                compress(&mut native, sibling, &root, 1, level)
+            };
+        }
+        let run = |b: &mut Forger| {
+            let index = b.alloc(f(2));
+            let binary = bits(b, &index, 2);
+            let values: Vec<_> = [sample(1), sample(2)]
+                .iter()
+                .map(|&v| Ext::alloc(b, v))
+                .collect();
+            merkle(b, 1, &index, &binary, &values, &path, &root.map(Lc::constant));
+        };
+        let (shape, z, _) = forge(&[], run);
+        assert!(violated(&shape, &z).is_empty());
+        let (other, z, _) = forge(&[(1, f(2)), (2, F::ZERO)], run);
+        assert_eq!(shape, other);
+        let rows = violated(&shape, &z);
+        // The first multiplication row is bit zero's booleanity check.
+        assert!(rows.contains(&shape.num_sbox));
+    }
+
+    #[test]
+    fn forged_noncanonical_limb_cannot_spoof_pow_bits() {
+        // w = 2^16 - 1 fails a 16-bit PoW, but w + p = 2^64 - 2^32 + 2^16 fits in 64 bits
+        // and has sixteen trailing zeros.
+        let word = (1u64 << 16) - 1;
+        let alias = u128::from(word) + u128::from(crate::field::GOLDILOCKS_PRIME);
+        assert!(alias < 1u128 << 64 && alias.trailing_zeros() == 16);
+        let run = |b: &mut Forger| {
+            let input = b.alloc(f(word));
+            low_bits_zero(b, &input, 16);
+        };
+        let (shape, z, _) = forge(&[], run);
+        // Honest decomposition: exactly the sixteen low-bit rows fail.
+        assert_eq!(violated(&shape, &z).len(), 16);
+        let forged: Vec<_> = (0..64)
+            .map(|t| (1 + t, f(((alias >> t) & 1) as u64)))
+            .collect();
+        let (other, z, _) = forge(&forged, run);
+        assert_eq!(shape, other);
+        // Booleanity, the weighted sum modulo p and the low-bit rows all hold for the
+        // alias. Only the canonical-range row (64 Boolean rows, the sum row and the 31
+        // rows of the high-bit product precede it) rejects.
+        assert_eq!(violated(&shape, &z), [64 + 1 + 31]);
+    }
+
+    #[test]
+    fn forged_challenge_wire_and_header_limb_break_the_relation() {
+        let params = FixedPathWhirParams::new(REGIME, 2).unwrap();
+        let (statement, proof) = child(&params, 3);
+        // Replay the transcript natively up to the first fold challenge.
+        let mut b = Native::default();
+        let mut tr = start(&mut b, &params, &statement.words());
+        tr.absorb(&mut b, 3, &statement.commitment);
+        let _ = [tr.ext(&mut b, 4), tr.ext(&mut b, 4)];
+        tr.absorb_exts(&mut b, 5, &proof.ood_evals[0].map(Ext::constant));
+        let _ = [tr.ext(&mut b, 6), tr.ext(&mut b, 6)];
+        tr.absorb_exts(&mut b, 10, &proof.fold_polys[0].map(Ext::constant)[..3]);
+        let phi = tr.ext(&mut b, 11).value(&b).to_limbs();
+
+        let words = statement.words();
+        let run = |b: &mut Forger| {
+            let public: Vec<Lc> = words.iter().map(|&x| b.cs.public_input(x).into()).collect();
+            verify_gadget(b, &params, &public, &proof);
+        };
+        let (shape, z, allocated) = forge(&[], run);
+        assert!(violated(&shape, &z).is_empty());
+        // The challenge is a pinned transcript lane, hence one of the allocations.
+        let at = allocated
+            .windows(4)
+            .position(|w| w == phi)
+            .expect("fold challenge is a transcript wire");
+        // A prover that picks its own challenge and derives everything after it honestly.
+        let (other, z, _) = forge(&[(at, phi[0] + F::ONE)], run);
+        assert_eq!(shape, other);
+        let rows = violated(&shape, &z);
+        assert!(!rows.is_empty() && rows.iter().all(|&row| row >= shape.num_sbox));
+
+        // Public header limbs: a changed limb and an out-of-range alias both reject.
+        let (shape, z) = relation_for_child(&params, &statement, &proof);
+        let mut bad = z.clone();
+        bad[1] += F::ONE;
+        assert!(!shape.is_satisfied(&bad));
+        let mut cs = ConstraintSystem::new();
+        let mut aliased = statement.words();
+        aliased[0] += f(1 << 32);
+        let public: Vec<Lc> = aliased
+            .into_iter()
+            .map(|x| cs.public_input(x).into())
+            .collect();
+        verify_gadget(&mut cs, &params, &public, &proof);
+        let (other, z) = cs.finish();
+        assert_eq!(shape, other);
+        // Thirty-two Boolean rows of limb zero, then its weighted-sum row.
+        assert!(violated(&shape, &z).contains(&(shape.num_sbox + 32)));
+    }
+
+    #[test]
+    fn shuffle_is_distinct_and_modulo_constraints_exclude_aliases() {
+        let mut cs = ConstraintSystem::new();
+        let input: Lc = cs.alloc(f(crate::field::GOLDILOCKS_PRIME - 1)).into();
+        let r = remainder(&mut cs, &input, 127);
+        assert_eq!(
+            cs.eval(&r).to_canonical_u64(),
+            (crate::field::GOLDILOCKS_PRIME - 1) % 127
+        );
+        let (shape, mut z) = cs.finish();
+        assert!(shape.is_satisfied(&z));
+        // Alter the allocated quotient, retaining the claimed remainder.
+        z[2] += F::ONE;
+        assert!(!shape.is_satisfied(&z));
+        for groups in [128, 256, 1024] {
+            let mut b = Native::default();
+            let mut tr = Transcript::new();
+            let mut sampler = QuerySampler { swaps: Vec::new() };
+            let count = 109;
+            let mut selected = alloc::collections::BTreeSet::new();
+            for q in 0..count {
+                let (index, _) = sampler.next(&mut b, &mut tr, groups, count, q);
+                assert!(selected.insert(index.to_canonical_u64()));
+                assert!(index.to_canonical_u64() < groups as u64);
+            }
+            assert!(!b.failed);
+        }
+    }
+    #[test]
+    fn merkle_and_recomputed_fake_sumcheck_claim_fail_inside_relation() {
+        let params = FixedPathWhirParams::new(REGIME, 2).unwrap();
+        let (statement, proof) = child(&params, 3);
+        let (shape, z) = relation_for_child(&params, &statement, &proof);
+        assert!(shape.is_satisfied(&z));
+        for kind in 0..4 {
+            let mut bad = proof.clone();
+            match kind {
+                0 => bad.queries[0][0].values[0] += E::ONE,
+                1 => bad.queries[0][0].siblings[0][0] += F::ONE,
+                2 => bad.fold_polys[0][2] += E::V,
+                _ => bad.final_coeffs[1] += E::ONE,
+            }
+            assert!(!verify_fixed_path(&params, &statement, &bad));
+            let (other, z) = relation_for_child(&params, &statement, &bad);
+            assert_eq!(shape, other);
+            assert!(!shape.is_satisfied(&z), "tamper kind={kind}");
+        }
+
+        // Solve the affine bridge for a fake input claim after changing a polynomial.
+        // Keeping the original challenges can make the final algebraic equation true,
+        // but the altered claim is part of Fiat-Shamir, so the real replay must reject.
+        let mut b = Native::default();
+        let mut tr = start(&mut b, &params, &statement.words());
+        tr.absorb(&mut b, 3, &statement.commitment);
+        let zs = [tr.ext(&mut b, 4), tr.ext(&mut b, 4)];
+        let ood = proof.ood_evals[0].map(Ext::constant);
+        tr.absorb_exts(&mut b, 5, &ood);
+        let mut ood_sum = E::ZERO;
+        let mut kernels = vec![Kernel::initial(
+            statement.point.iter().copied().map(Ext::constant).collect(),
+        )];
+        for (z, e) in zs.into_iter().zip(&ood) {
+            let weight = tr.ext(&mut b, 6);
+            ood_sum += weight.value(&b) * e.value(&b);
+            kernels.push(geometric(&mut b, 0, weight, z, 2));
+        }
+        let wire = proof.fold_polys[0].map(Ext::constant);
+        tr.absorb_exts(&mut b, 10, &wire[..3]);
+        let phi = tr.ext(&mut b, 11);
+        tr.absorb_exts(&mut b, 12, &wire[3..]);
+        pow(&mut b, &mut tr, proof.fold_nonces[0], 0);
+        let chals = [tr.ext(&mut b, 13), tr.ext(&mut b, 14), tr.ext(&mut b, 15)];
+        let coeffs: Vec<_> = proof
+            .final_coeffs
+            .iter()
+            .copied()
+            .map(Ext::constant)
+            .collect();
+        let target = terminal(&mut b, &coeffs, core::slice::from_ref(&phi), &kernels).value(&b);
+        let mut fake = proof.clone();
+        fake.fold_polys[0][0] += E::ONE;
+        let fw = fake.fold_polys[0].map(Ext::constant);
+        let zero = bridge(&mut b, &fw, &Ext::zero(), &phi, &chals).value(&b);
+        let one = bridge(&mut b, &fw, &Ext::one(), &phi, &chals).value(&b);
+        let fake_claim = (target - zero) * (one - zero).inv() - ood_sum;
+        assert_ne!(fake_claim, statement.value);
+        let mut altered = statement;
+        altered.value = fake_claim;
+        assert!(!verify_fixed_path(&params, &altered, &fake));
+        let (other, z) = relation_for_child(&params, &altered, &fake);
+        assert_eq!(shape, other);
+        assert!(!shape.is_satisfied(&z));
+    }
+    #[test]
+    fn succinct_merge_public_binding_for_two_and_four_children() {
+        measure_children(2, 2);
+        measure_children(2, 4);
+    }
+
+    #[test]
+    #[ignore = "explicit release benchmark: three-stage 4096-cell child oracles"]
+    fn two_child_multistage_release_benchmark() {
+        measure_children(12, 2);
+    }
+
+    #[test]
+    #[ignore = "explicit release benchmark: four 4096-cell children, parent below their sum"]
+    fn four_child_multistage_compression_benchmark() {
+        let (parent, children) = measure_children(12, 4);
+        assert!(parent < children, "parent={parent} children={children}");
+    }
+
+    /// Returns `(parent bytes, summed child proof bytes)`.
+    fn measure_children(nv: usize, arity: usize) -> (usize, usize) {
+        let params = FixedPathWhirParams::new(REGIME, nv).unwrap();
+        let start = Instant::now();
+        let (children, proofs): (Vec<_>, Vec<_>) =
+            (0..arity).map(|i| child(&params, 7 + i as u8)).unzip();
+        let child_time = start.elapsed();
+        let child_bytes: usize = proofs.iter().map(|p| p.to_bytes().len()).sum();
+        let setup = Instant::now();
+        let relation = ChildWhirMergeRelation::with_children(params, arity).unwrap();
+        let setup_time = setup.elapsed();
+        assert_eq!(relation.num_children(), arity);
+        let start = Instant::now();
+        let parent =
+            prove_succinct_children_whir_merge(&relation, &children, &proofs, REGIME, &[42; 32])
+                .unwrap();
+        let prove_time = start.elapsed();
+        let bytes = parent.to_bytes();
+        // Precisely the magic, merged digest and ONE committed outer proof.
+        assert_eq!(bytes.len(), 40 + parent.proof.to_bytes().len());
+        let decoded = SuccinctChildWhirMerge::from_bytes(&bytes, &relation, REGIME).unwrap();
+        let start = Instant::now();
+        assert!(verify_succinct_children_whir_merge(
+            &relation, &children, REGIME, &decoded
+        ));
+        let verify_time = start.elapsed();
+        assert_eq!(parent, decoded);
+        std::println!(
+            "FIXED_PATH_MERGE child_nv={nv} arity={arity} sbox_rows={} multiplication_rows={} padded_rows={} variables={} parent_bytes={} children_bytes={child_bytes} children_prove_ms={:.3} setup_ms={:.3} prove_ms={:.3} verify_ms={:.3}",
+            relation.stats.sbox_rows,
+            relation.stats.multiplication_rows,
+            relation.stats.padded_rows,
+            relation.stats.variables,
+            bytes.len(),
+            child_time.as_secs_f64() * 1000.,
+            setup_time.as_secs_f64() * 1000.,
+            prove_time.as_secs_f64() * 1000.,
+            verify_time.as_secs_f64() * 1000.
+        );
+
+        let mut bad_children = children.clone();
+        bad_children[arity - 1].shard_header[0] ^= 1;
+        assert!(!verify_succinct_children_whir_merge(
+            &relation,
+            &bad_children,
+            REGIME,
+            &parent
+        ));
+        let mut rerooted = parent.clone();
+        rerooted.merged_root = merged_child_whir_root(&bad_children);
+        // Even recomputing the public root cannot bypass the relation's public-cell checks.
+        assert!(!verify_succinct_children_whir_merge(
+            &relation,
+            &bad_children,
+            REGIME,
+            &rerooted
+        ));
+        // Order and count of the children are part of the statement.
+        let mut swapped = children.clone();
+        swapped.swap(0, 1);
+        assert!(!verify_succinct_children_whir_merge(
+            &relation, &swapped, REGIME, &parent
+        ));
+        assert!(!verify_succinct_children_whir_merge(
+            &relation,
+            &children[..arity - 1],
+            REGIME,
+            &parent
+        ));
+        assert_eq!(
+            prove_succinct_children_whir_merge(
+                &relation,
+                &children[..arity - 1],
+                &proofs[..arity - 1],
+                REGIME,
+                &[42; 32]
+            ),
+            Err(RecursiveWhirError::InvalidParameters)
+        );
+        let mut bad = parent.clone();
+        bad.proof.row_rounds[0][0] += E::ONE;
+        assert!(!verify_succinct_children_whir_merge(
+            &relation, &children, REGIME, &bad
+        ));
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(SuccinctChildWhirMerge::from_bytes(&trailing, &relation, REGIME).is_none());
+        assert!(
+            SuccinctChildWhirMerge::from_bytes(&bytes[..bytes.len() - 1], &relation, REGIME)
+                .is_none()
+        );
+        assert!(!verify_succinct_children_whir_merge(
+            &relation,
+            &children,
+            WhirSecurityRegime::BciksJohnsonClassical128,
+            &parent
+        ));
+        (bytes.len(), child_bytes)
+    }
+}
+
+impl FixedPathWhirProof {
+    /// Fixed-width field encoding. Lengths come exclusively from the externally pinned
+    /// parameters; there are no prover-supplied vector lengths or query indices.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = b"QSAGFWP1".to_vec();
+        for root in &self.stage_roots {
+            for x in root {
+                out.extend_from_slice(&x.to_le_bytes());
+            }
+        }
+        for e in self
+            .ood_evals
+            .iter()
+            .flatten()
+            .chain(self.fold_polys.iter().flatten())
+        {
+            out.extend_from_slice(&e.to_le_bytes());
+        }
+        for n in self.fold_nonces.iter().chain(&self.query_nonces) {
+            for limb in n {
+                out.extend_from_slice(&limb.to_le_bytes());
+            }
+        }
+        for queries in &self.queries {
+            for q in queries {
+                for e in &q.values {
+                    out.extend_from_slice(&e.to_le_bytes());
+                }
+                for d in &q.siblings {
+                    for x in d {
+                        out.extend_from_slice(&x.to_le_bytes());
+                    }
+                }
+            }
+        }
+        for e in &self.final_coeffs {
+            out.extend_from_slice(&e.to_le_bytes());
+        }
+        out
+    }
+
+    /// Strict canonical parsing with a size check before allocating any proof vectors.
+    pub fn from_bytes(bytes: &[u8], params: &FixedPathWhirParams) -> Option<Self> {
+        let nv = params.num_vars()?;
+        let stages = params.schedule.stages.len();
+        let rounds = nv - params.schedule.early_stop_vars;
+        let mut size = 8 + stages * 32 + stages * 64 + rounds * 160 + (rounds + stages) * 8;
+        for (arity, groups, count) in params.geometries() {
+            size += count * (arity + groups.trailing_zeros() as usize) * 32;
+        }
+        size += ((1usize << params.schedule.early_stop_vars) + 2) * 32;
+        if bytes.len() != size || bytes.get(..8)? != b"QSAGFWP1" {
+            return None;
+        }
+        struct Reader<'a>(&'a [u8]);
+        impl Reader<'_> {
+            fn word<const N: usize>(&mut self) -> Option<[u8; N]> {
+                let (head, tail) = self.0.split_at_checked(N)?;
+                self.0 = tail;
+                head.try_into().ok()
+            }
+            fn base(&mut self) -> Option<F> {
+                let w = u64::from_le_bytes(self.word()?);
+                (w < crate::field::GOLDILOCKS_PRIME).then(|| f(w))
+            }
+            fn ext(&mut self) -> Option<E> {
+                E::from_le_bytes_canonical(self.word()?)
+            }
+        }
+        let mut r = Reader(&bytes[8..]);
+        let mut proof = params.placeholder();
+        for root in &mut proof.stage_roots {
+            for x in root {
+                *x = r.base()?;
+            }
+        }
+        for e in proof
+            .ood_evals
+            .iter_mut()
+            .flatten()
+            .chain(proof.fold_polys.iter_mut().flatten())
+        {
+            *e = r.ext()?;
+        }
+        for n in proof.fold_nonces.iter_mut().chain(&mut proof.query_nonces) {
+            for limb in n {
+                *limb = u32::from_le_bytes(r.word()?);
+            }
+        }
+        for queries in &mut proof.queries {
+            for q in queries {
+                for e in &mut q.values {
+                    *e = r.ext()?;
+                }
+                for d in &mut q.siblings {
+                    for x in d {
+                        *x = r.base()?;
+                    }
+                }
+            }
+        }
+        for e in &mut proof.final_coeffs {
+            *e = r.ext()?;
+        }
+        r.0.is_empty().then_some(proof)
+    }
+}
