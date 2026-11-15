@@ -539,8 +539,8 @@ pub(crate) unsafe fn gf2_128_mul_acc_avx512_evex(
 
 /// 512-bit `VPCLMULQDQ` elementwise scale-XOR `dst[i] ^= src[i] * scalar` in
 /// `GF(2)[x]/(x^128 + x^7 + x^2 + x + 1)` (`4 x 128`-bit = 64 B per iter).
-/// Caller guarantees `quads >= 1`.
-#[target_feature(enable = "avx512f,avx512dq,avx512vl,vpclmulqdq")]
+/// Caller guarantees `quads >= 1`. The 512-bit `vpslldq`/`vpsrldq` byte shifts are `AVX512BW`.
+#[target_feature(enable = "avx512f,avx512bw,avx512dq,avx512vl,vpclmulqdq")]
 pub(crate) unsafe fn poly_scale_xor_avx512_evex(
     dst64: *mut u8,
     src64: *const u8,
@@ -607,5 +607,76 @@ pub(crate) unsafe fn poly_scale_xor_avx512_evex(
             out("zmm8") _, out("zmm9") _, out("zmm10") _,
             options(nostack),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::cpuid::SimdBackend;
+    use crate::portable::{self, KeccakState4x};
+
+    const X86_BACKENDS: [SimdBackend; 4] = [
+        SimdBackend::Portable,
+        SimdBackend::X86Avx2Pclmul,
+        SimdBackend::X86Avx2GfniVpclmul,
+        SimdBackend::X86Avx512GfniVpclmul,
+    ];
+
+    fn stream(seed: u64) -> impl FnMut() -> u64 {
+        let mut s = seed;
+        move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        }
+    }
+
+    /// Every pair count crosses the 16-pair packing chunk and the odd-pair 256-bit tail.
+    #[test]
+    fn bdoz_mac_matches_portable_at_every_length_and_chunk_boundary() {
+        let mut next = stream(0xBD02_0512);
+        let mut word = || u128::from(next()) | (u128::from(next()) << 64);
+        let lhs: [[u128; 2]; 50] = core::array::from_fn(|i| match i {
+            0 => [u128::MAX, u128::MAX],
+            1 => [1u128 << 127, 1],
+            _ => [word(), word()],
+        });
+        let rhs: [[u128; 2]; 50] = core::array::from_fn(|i| match i {
+            0 => [u128::MAX, u128::MAX],
+            _ => [word(), word()],
+        });
+        for len in 0..=50 {
+            let poly = portable::tower128_bdoz_2lane_poly_mac_portable(&lhs[..len], &rhs[..len]);
+            let t7 = portable::tower128_bdoz_2lane_mac_portable(&lhs[..len], &rhs[..len]);
+            for backend in X86_BACKENDS {
+                let (l, r) = (&lhs[..len], &rhs[..len]);
+                let got = crate::tower128_bdoz_2lane_poly_mac_with_backend(l, r, backend);
+                assert_eq!(got, poly, "poly len={len} {backend:?}");
+                let got = crate::tower128_bdoz_2lane_mac_with_backend(l, r, backend);
+                assert_eq!(got, t7, "t7 len={len} {backend:?}");
+            }
+        }
+    }
+
+    /// Batches of `1..=19` states on every explicit backend, including the zero-padded
+    /// 8-way block for `5..=7` trailing states.
+    #[test]
+    fn keccak_batch_matches_single_state_portable_on_every_backend_and_length() {
+        let mut next = stream(0x1600_8888);
+        let input: [[u64; 25]; 19] = core::array::from_fn(|_| core::array::from_fn(|_| next()));
+        let expected: [[u64; 25]; 19] = core::array::from_fn(|i| {
+            let mut one = KeccakState4x(core::array::from_fn(|j| [input[i][j]; 4]));
+            portable::keccak_f1600_4x_portable(&mut one);
+            core::array::from_fn(|j| one.0[j][0])
+        });
+        for backend in X86_BACKENDS {
+            for len in 0..=19 {
+                let mut states = input;
+                crate::keccak_f1600_batch_with_backend(&mut states[..len], backend);
+                assert_eq!(&states[..len], &expected[..len], "len={len} {backend:?}");
+                assert_eq!(&states[len..], &input[len..], "tail touched len={len} {backend:?}");
+            }
+        }
     }
 }

@@ -206,6 +206,8 @@ pub fn probe_capabilities() -> CpuCapabilities {
 }
 
 /// Fast internal register-only capability bitmask query (`0` stack `sret` materialization).
+/// Only the `x86_64` / `aarch64` kernel dispatchers consume the raw bitmask.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[inline]
 pub(crate) fn probe_capabilities_bits() -> u32 {
     let fast = CACHED_CAPS.load(Ordering::Relaxed);
@@ -215,6 +217,7 @@ pub(crate) fn probe_capabilities_bits() -> u32 {
     probe_capabilities_bits_slow()
 }
 
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[cold]
 fn probe_capabilities_bits_slow() -> u32 {
     encode_caps(probe_capabilities_slow())

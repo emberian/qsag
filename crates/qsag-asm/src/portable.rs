@@ -1151,6 +1151,33 @@ pub const fn goldilocks_mul_ct_portable(a: u64, b: u64) -> u64 {
     goldilocks_reduce128_ct_portable((a as u128) * (b as u128))
 }
 
+/// Runtime multiplication with opaque correction masks. Keep the const evaluator
+/// above for constant expressions; this path prevents LLVM from replacing mask
+/// arithmetic with secret-dependent selections in the compiled dispatcher.
+#[inline]
+pub fn goldilocks_mul_ct_runtime(a: u64, b: u64) -> u64 {
+    let product = (a as u128) * (b as u128);
+    let lo = product as u64;
+    let hi = (product >> 64) as u64;
+    let upper = hi >> 32;
+    // Arithmetic carry/borrow identities avoid condition-code selections on
+    // AArch64 too. Opaque results keep LLVM from recognizing a Boolean select.
+    let t1 = black_box(lo.wrapping_sub(upper));
+    let borrow = ((!lo & upper) | (!(lo ^ upper) & t1)) >> 63;
+    let mask1 = black_box(0u64.wrapping_sub(borrow));
+    let u1 = t1.wrapping_sub(mask1 & GOLDILOCKS_EPSILON);
+    let limb = hi & GOLDILOCKS_EPSILON;
+    let folded = (limb << 32).wrapping_sub(limb);
+    let t2 = black_box(u1.wrapping_add(folded));
+    let carry = ((u1 & folded) | ((u1 | folded) & !t2)) >> 63;
+    let mask2 = black_box(0u64.wrapping_sub(carry));
+    let u2 = t2.wrapping_add(mask2 & GOLDILOCKS_EPSILON);
+    let t3 = black_box(u2.wrapping_add(GOLDILOCKS_EPSILON));
+    let canonical_carry = ((u2 & GOLDILOCKS_EPSILON) | ((u2 | GOLDILOCKS_EPSILON) & !t3)) >> 63;
+    let mask3 = black_box(0u64.wrapping_sub(canonical_carry));
+    u2.wrapping_add(mask3 & GOLDILOCKS_EPSILON)
+}
+
 /// Branchless Goldilocks Poseidon2 S-box $x^7 \bmod p$ exact for ALL `x in [0, u64::MAX]`.
 #[inline]
 pub const fn goldilocks_pow7_ct_portable(x: u64) -> u64 {
