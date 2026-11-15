@@ -2017,3 +2017,1014 @@ theorem degFn_degYZ : DegFn (degYZ (F := K)) := degFn_wdeg degFn_natDeg 1
 theorem degFn_deg11d (d : Nat) : DegFn (deg11d (F := K) d) :=
   degFn_wdeg (degFn_wdeg degFn_natDeg 1) d
 
+theorem degYZ_C3 (x : K) : degYZ (C3 x) = 0 :=
+  Nat.le_zero.mp (Nat.le_trans (wdeg_C_le _ _ _) (Nat.le_of_eq (natDeg_C_eq _)))
+
+theorem deg11d_C3 (d : Nat) (x : K) : deg11d d (C3 x) = 0 :=
+  Nat.le_zero.mp (Nat.le_trans (wdeg_C_le _ _ _)
+    (Nat.le_trans (wdeg_C_le _ _ _) (Nat.le_of_eq (natDeg_C_eq _))))
+
+theorem deg11d_one (d : Nat) : deg11d d (one : Poly3 K) = 0 := deg11d_C3 d one
+
+/-- Evaluation at a point: innermost variable `x`, then `y`, then `z`. -/
+def ptHom (x y z : K) : RingHom (Poly3 K) K := eval₂Hom (eval₂Hom (evalHom x) y) z
+
+/-- `Q(x, y, z)`. -/
+def eval3 (Q : Poly3 K) (x y z : K) : K := (ptHom x y z).toFun Q
+
+/-- The jet ring is `K[Y][V][Z]`; these are its variables `Y` and `V` (and `Z = X`). -/
+def jetY : Poly3 K := C (C X)
+def jetV : Poly3 K := C X
+
+/-- `X ↦ t₀ + W`, into `K[Y][V][Z][W]`. -/
+def liftX (t₀ : K) : RingHom (UPoly K) (UPoly (Poly3 K)) :=
+  eval₂Hom (CHom.comp c3Hom) (add (C (C3 t₀)) X)
+
+/-- `X ↦ t₀ + W`, `Y ↦ Y + V·W`. -/
+def liftXY (t₀ : K) : RingHom (UPoly (UPoly K)) (UPoly (Poly3 K)) :=
+  eval₂Hom (liftX t₀) (add (C jetY) (mul (C jetV) X))
+
+/-- `G(W, U) = R(t₀ + W, Y + V·W, Z + U) ∈ K[Y][V][Z][W][U]`. -/
+def henselG (R : Poly3 K) (t₀ : K) : UPoly (UPoly (Poly3 K)) :=
+  eval₂ (CHom.comp (liftXY t₀)) (add (C (C X)) X) R
+
+/-- **The cleared numerator `N_j(Y, V, Z)`** of `[CWYZ26]` Lemma 3.11. -/
+def henselNum (R : Poly3 K) (t₀ : K) (j : Nat) : Poly3 K := Hensel.num (henselG R t₀) j
+
+/-- The separant `S(Y, V, Z) = ∂_Z R(t₀, Y, Z)`. -/
+def henselSep (R : Poly3 K) (t₀ : K) : Poly3 K := Hensel.sep (henselG R t₀)
+
+theorem natDeg_X_le : (X : UPoly K).natDeg ≤ 1 := by
+  have := trimPoly_length_le [(zero : K), one]
+  show (trimPoly [(zero : K), one]).length - 1 ≤ 1
+  simp only [List.length_cons, List.length_nil] at this; omega
+
+theorem deg11d_X_le : deg11d 1 (X : Poly3 K) ≤ 1 := by
+  have h := wdeg_X_le (R := UPoly (UPoly K)) (fun q => q.wdeg natDeg 1) 1
+  have h1 : (one : UPoly (UPoly K)).wdeg natDeg 1 = 0 :=
+    Nat.le_zero.mp (Nat.le_trans (wdeg_C_le natDeg 1 (one : UPoly K)) (Nat.le_of_eq natDeg_one))
+  show (X : Poly3 K).wdeg (fun q => q.wdeg natDeg 1) 1 ≤ 1
+  have h' : (X : Poly3 K).wdeg (fun q => q.wdeg natDeg 1) 1 ≤
+      (one : UPoly (UPoly K)).wdeg natDeg 1 + 1 := h
+  omega
+
+theorem deg11d_jetY_le : deg11d 1 (jetY (K := K)) ≤ 1 :=
+  Nat.le_trans (wdeg_C_le _ _ _) (Nat.le_trans (wdeg_C_le _ _ _) natDeg_X_le)
+
+theorem deg11d_jetV_le : deg11d 1 (jetV (K := K)) ≤ 1 := by
+  have h := wdeg_X_le (R := UPoly K) natDeg 1
+  rw [natDeg_one] at h
+  exact Nat.le_trans (wdeg_C_le _ _ _) h
+
+/-- Coefficient bound for `G`: `deg_{Y,V,Z} [W^a U^b] G + b ≤ deg_{Y,Z} R`. -/
+theorem henselG_coeff_le (R : Poly3 K) (t₀ : K) (a b : Nat)
+    (hne : coeffAt (coeffAt (henselG R t₀).coeffs b).coeffs a ≠ zero) :
+    deg11d 1 (coeffAt (coeffAt (henselG R t₀).coeffs b).coeffs a) + b ≤ R.degYZ := by
+  have hδ := degFn_deg11d (K := K) 1
+  have hw1 : DegFn (fun q : UPoly (Poly3 K) => q.wdeg (deg11d 1) 0) := degFn_wdeg hδ 0
+  have hΩ : DegFn (fun G : UPoly (UPoly (Poly3 K)) => G.wdeg (fun q => q.wdeg (deg11d 1) 0) 1) :=
+    degFn_wdeg hw1 1
+  have hXw : (X : UPoly (Poly3 K)).wdeg (deg11d 1) 0 ≤ 0 := by
+    have := wdeg_X_le (R := Poly3 K) (deg11d 1) 0
+    rw [deg11d_one] at this; exact this
+  have hx : ∀ x : UPoly K, ((liftX t₀).toFun x).wdeg (deg11d 1) 0 ≤ 0 := by
+    intro x
+    have hs : (add (C (C3 t₀)) (X : UPoly (Poly3 K))).wdeg (deg11d 1) 0 ≤ 0 := by
+      have h1 := hw1.add_le (C (C3 t₀)) X
+      have h2 : (C (C3 t₀) : UPoly (Poly3 K)).wdeg (deg11d 1) 0 ≤ deg11d 1 (C3 t₀) :=
+        wdeg_C_le _ _ _
+      rw [deg11d_C3] at h2
+      have h1' : (add (C (C3 t₀)) (X : UPoly (Poly3 K))).wdeg (deg11d 1) 0 ≤
+        max ((C (C3 t₀) : UPoly (Poly3 K)).wdeg (deg11d 1) 0)
+          ((X : UPoly (Poly3 K)).wdeg (deg11d 1) 0) := h1
+      omega
+    have h := degFn_eval₂_le hw1 (CHom.comp c3Hom) (fun _ => 0) (fun a => by
+      have h2 : (C (C3 a) : UPoly (Poly3 K)).wdeg (deg11d 1) 0 ≤ deg11d 1 (C3 a) :=
+        wdeg_C_le _ _ _
+      rw [deg11d_C3] at h2; exact h2) (add (C (C3 t₀)) X) 0 hs x
+    have h0 : x.wdeg (fun _ => 0) 0 ≤ 0 := wdeg_le _ _ _ 0 (fun k _ => by
+      show 0 + 0 * k ≤ 0; omega)
+    exact Nat.le_trans h h0
+  have hy : ∀ c : UPoly (UPoly K), ((liftXY t₀).toFun c).wdeg (deg11d 1) 0 ≤ c.natDeg := by
+    intro c
+    have hs : (add (C jetY) (mul (C jetV) (X : UPoly (Poly3 K)))).wdeg (deg11d 1) 0 ≤ 1 := by
+      have h1 := hw1.add_le (C (jetY (K := K))) (mul (C jetV) X)
+      have h2 := hw1.mul_le (C (jetV (K := K))) X
+      have h3 : (C jetY : UPoly (Poly3 K)).wdeg (deg11d 1) 0 ≤ deg11d 1 (jetY (K := K)) :=
+        wdeg_C_le _ _ _
+      have h4 : (C jetV : UPoly (Poly3 K)).wdeg (deg11d 1) 0 ≤ deg11d 1 (jetV (K := K)) :=
+        wdeg_C_le _ _ _
+      have h5 := deg11d_jetY_le (K := K)
+      have h6 := deg11d_jetV_le (K := K)
+      have h1' : (add (C jetY) (mul (C jetV) (X : UPoly (Poly3 K)))).wdeg (deg11d 1) 0 ≤
+        max ((C jetY : UPoly (Poly3 K)).wdeg (deg11d 1) 0)
+          ((mul (C jetV) (X : UPoly (Poly3 K))).wdeg (deg11d 1) 0) := h1
+      have h2' : (mul (C jetV) (X : UPoly (Poly3 K))).wdeg (deg11d 1) 0 ≤
+        (C jetV : UPoly (Poly3 K)).wdeg (deg11d 1) 0 + (X : UPoly (Poly3 K)).wdeg (deg11d 1) 0 :=
+        h2
+      omega
+    have h := degFn_eval₂_le hw1 (liftX t₀) (fun _ => 0) hx _ 1 hs c
+    have h0 : c.wdeg (fun _ => 0) 1 ≤ c.natDeg := wdeg_le _ _ _ _ (fun k hk => by
+      have : k ≤ c.natDeg := Nat.le_of_not_lt (fun hlt => hk (c.coeffAt_eq_zero_of_natDeg_lt hlt))
+      show 0 + 1 * k ≤ c.natDeg; omega)
+    exact Nat.le_trans h h0
+  have hG : (henselG R t₀).wdeg (fun q => q.wdeg (deg11d 1) 0) 1 ≤ R.wdeg natDeg 1 := by
+    have hs : (add (C (C (X : Poly3 K))) (X : UPoly (UPoly (Poly3 K)))).wdeg
+        (fun q => q.wdeg (deg11d 1) 0) 1 ≤ 1 := by
+      have h1 := hΩ.add_le (C (C (X : Poly3 K))) X
+      have h2 : (C (C (X : Poly3 K)) : UPoly (UPoly (Poly3 K))).wdeg
+          (fun q => q.wdeg (deg11d 1) 0) 1 ≤ (C (X : Poly3 K) : UPoly (Poly3 K)).wdeg (deg11d 1) 0 :=
+        wdeg_C_le _ _ _
+      have h3 : (C (X : Poly3 K) : UPoly (Poly3 K)).wdeg (deg11d 1) 0 ≤ deg11d 1 (X : Poly3 K) :=
+        wdeg_C_le _ _ _
+      have h4 := deg11d_X_le (K := K)
+      have h5 := wdeg_X_le (R := UPoly (Poly3 K)) (fun q => q.wdeg (deg11d 1) 0) 1
+      have h6 : (one : UPoly (Poly3 K)).wdeg (deg11d 1) 0 ≤ deg11d 1 (one : Poly3 K) :=
+        wdeg_C_le _ _ _
+      rw [deg11d_one] at h6
+      have h5' : (X : UPoly (UPoly (Poly3 K))).wdeg (fun q => q.wdeg (deg11d 1) 0) 1 ≤
+        (one : UPoly (Poly3 K)).wdeg (deg11d 1) 0 + 1 := h5
+      have h1' : (add (C (C (X : Poly3 K))) (X : UPoly (UPoly (Poly3 K)))).wdeg
+          (fun q => q.wdeg (deg11d 1) 0) 1 ≤
+        max ((C (C (X : Poly3 K)) : UPoly (UPoly (Poly3 K))).wdeg (fun q => q.wdeg (deg11d 1) 0) 1)
+          ((X : UPoly (UPoly (Poly3 K))).wdeg (fun q => q.wdeg (deg11d 1) 0) 1) := h1
+      omega
+    exact degFn_eval₂_le hΩ (CHom.comp (liftXY t₀)) natDeg (fun c =>
+      Nat.le_trans (wdeg_C_le _ _ _) (hy c)) _ 1 hs R
+  have hq : coeffAt (henselG R t₀).coeffs b ≠ zero := fun e => hne (by
+    rw [e, coeffs_zero, coeffAt_nil])
+  have h1 := le_wdeg (fun q : UPoly (Poly3 K) => q.wdeg (deg11d 1) 0) 1 (henselG R t₀) b hq
+  have h2 := le_wdeg (deg11d (F := K) 1) 0 (coeffAt (henselG R t₀).coeffs b) a hne
+  have h1' : (coeffAt (henselG R t₀).coeffs b).wdeg (deg11d 1) 0 + 1 * b ≤
+    (henselG R t₀).wdeg (fun q => q.wdeg (deg11d 1) 0) 1 := h1
+  have hG' : (henselG R t₀).wdeg (fun q => q.wdeg (deg11d 1) 0) 1 ≤ R.degYZ := hG
+  omega
+
+/-- **`[CWYZ26]` Lemma 3.11, degree bound**: `deg_{Y,V,Z} N_j ≤ 1 + (2j - 1)(h - 1)` for
+    `j ≥ 1`, where `h ≥ deg_{Y,Z} R`. -/
+theorem deg_henselNum_le (R : Poly3 K) (t₀ : K) (h j : Nat) (hR : R.degYZ ≤ h) (hh : 1 ≤ h)
+    (hj : 1 ≤ j) : deg11d 1 (henselNum R t₀ j) ≤ 1 + (2 * j - 1) * (h - 1) :=
+  Hensel.delta_num_le (degFn_deg11d 1) (deg11d_one 1) (h - 1) _ (fun a b hne => by
+    have := henselG_coeff_le R t₀ a b hne; omega) j hj
+
+theorem deg_henselSep_le (R : Poly3 K) (t₀ : K) (h : Nat) (hR : R.degYZ ≤ h) :
+    deg11d 1 (henselSep R t₀) ≤ h - 1 := by
+  if hz : henselSep R t₀ = zero then
+    rw [hz, (degFn_deg11d (K := K) 1).zero]; exact Nat.zero_le _
+  else
+    have := henselG_coeff_le R t₀ 0 1 hz
+    show deg11d 1 (coeffAt (coeffAt (henselG R t₀).coeffs 1).coeffs 0) ≤ h - 1
+    omega
+
+/-! ### Specialization at a point of `K³` -/
+
+/-- `X ↦ t₀ + W`, `Y ↦ y + v·W`, into `K[W]`. -/
+def jetHom (t₀ y v : K) : RingHom (UPoly (UPoly K)) (UPoly K) :=
+  eval₂Hom (taylorShift t₀) (add (C y) (mul (C v) X))
+
+theorem ptHom_C3 (y v z a : K) : (ptHom y v z).toFun (C3 a) = a := by
+  show eval₂ (eval₂Hom (evalHom y) v) z (C (C (C a))) = a
+  rw [eval₂_C]
+  show eval₂ (evalHom y) v (C (C a)) = a
+  rw [eval₂_C]; exact eval_C a y
+
+theorem ptHom_jetY (y v z : K) : (ptHom y v z).toFun jetY = y := by
+  show eval₂ (eval₂Hom (evalHom y) v) z (C (C X)) = y
+  rw [eval₂_C]
+  show eval₂ (evalHom y) v (C X) = y
+  rw [eval₂_C]; exact eval_X y
+
+theorem ptHom_jetV (y v z : K) : (ptHom y v z).toFun jetV = v := by
+  show eval₂ (eval₂Hom (evalHom y) v) z (C X) = v
+  rw [eval₂_C]; exact eval₂_X _ _
+
+theorem ptHom_X (y v z : K) : (ptHom y v z).toFun X = z := eval₂_X _ _
+
+theorem map_liftX (t₀ y v z : K) (x : UPoly K) :
+    (mapHom (ptHom y v z)).toFun ((liftX t₀).toFun x) = (taylorShift t₀).toFun x := by
+  refine hom_ext ((mapHom (ptHom y v z)).comp (liftX t₀)) (taylorShift t₀) (fun a => ?_) ?_ x
+  · show (mapHom (ptHom y v z)).toFun (eval₂ (CHom.comp c3Hom) (add (C (C3 t₀)) X) (C a)) =
+      (taylorShift t₀).toFun (C a)
+    rw [eval₂_C, taylorShift_C]
+    show (mapHom (ptHom y v z)).toFun (C (C3 a)) = C a
+    rw [mapHom_C, ptHom_C3]
+  · show (mapHom (ptHom y v z)).toFun (eval₂ (CHom.comp c3Hom) (add (C (C3 t₀)) X) X) =
+      (taylorShift t₀).toFun X
+    rw [eval₂_X, taylorShift_X, RingHom.map_add, mapHom_C, mapHom_X, ptHom_C3]
+
+theorem map_liftXY (t₀ y v z : K) (c : UPoly (UPoly K)) :
+    (mapHom (ptHom y v z)).toFun ((liftXY t₀).toFun c) = (jetHom t₀ y v).toFun c := by
+  refine hom_ext ((mapHom (ptHom y v z)).comp (liftXY t₀)) (jetHom t₀ y v) (fun a => ?_) ?_ c
+  · show (mapHom (ptHom y v z)).toFun (eval₂ (liftX t₀) (add (C jetY) (mul (C jetV) X)) (C a)) =
+      eval₂ (taylorShift t₀) (add (C y) (mul (C v) X)) (C a)
+    rw [eval₂_C, eval₂_C]; exact map_liftX t₀ y v z a
+  · show (mapHom (ptHom y v z)).toFun (eval₂ (liftX t₀) (add (C jetY) (mul (C jetV) X)) X) =
+      eval₂ (taylorShift t₀) (add (C y) (mul (C v) X)) X
+    rw [eval₂_X, eval₂_X, RingHom.map_add, RingHom.map_mul, mapHom_C, mapHom_C, mapHom_X,
+      ptHom_jetY, ptHom_jetV]
+
+/-- The specialization of `G` at `(y, v, z)` is `R(t₀ + W, y + v·W, z + U)`. -/
+theorem map_henselG (R : Poly3 K) (t₀ y v z : K) :
+    (mapHom (mapHom (ptHom y v z))).toFun (henselG R t₀) =
+      eval₂ (CHom.comp (jetHom t₀ y v)) (add (C (C z)) X) R := by
+  show (mapHom (mapHom (ptHom y v z))).toFun
+    (eval₂ (CHom.comp (liftXY t₀)) (add (C (C X)) X) R) = _
+  rw [hom_eval₂, RingHom.map_add, mapHom_C, mapHom_C, mapHom_X, ptHom_X]
+  exact eval₂_congr _ _ (fun c => by
+    show (mapHom (mapHom (ptHom y v z))).toFun (C ((liftXY t₀).toFun c)) =
+      C ((jetHom t₀ y v).toFun c)
+    rw [mapHom_C, map_liftXY]) _ R
+
+/-- The `U^k` coefficient of the specialized `G` is the `k`-th Hasse derivative of `R`. -/
+theorem coeffAt_jet (R : Poly3 K) (t₀ y v z : K) (k : Nat) :
+    coeffAt (eval₂ (CHom.comp (jetHom t₀ y v)) (add (C (C z)) X) R).coeffs k =
+      eval₂ (jetHom t₀ y v) (C z) (hasseZ k R) := by
+  show _ = eval₂ (jetHom t₀ y v) (C z) (hasse k R)
+  rw [eval₂_hasse]
+  have := coeffAt_shift_list (C z) (R.coeffs.map (jetHom t₀ y v).toFun) k
+  rw [List.map_map] at this
+  exact this
+
+theorem eval_zero_jet (t₀ y v z : K) (Q : Poly3 K) :
+    (eval₂ (jetHom t₀ y v) (C z) Q).eval zero = eval3 Q t₀ y z := by
+  show (evalHom zero).toFun (eval₂ (jetHom t₀ y v) (C z) Q) = eval₂ (eval₂Hom (evalHom t₀) y) z Q
+  rw [hom_eval₂, evalHom_apply, eval_C]
+  refine eval₂_congr _ _ (fun c => ?_) _ Q
+  refine hom_ext ((evalHom zero).comp (jetHom t₀ y v)) (eval₂Hom (evalHom t₀) y) (fun a => ?_) ?_ c
+  · show (eval₂ (taylorShift t₀) (add (C y) (mul (C v) X)) (C a)).eval zero =
+      eval₂ (evalHom t₀) y (C a)
+    rw [eval₂_C, eval₂_C, eval_taylorShift, LawfulCommRing.add_zero]; rfl
+  · show (eval₂ (taylorShift t₀) (add (C y) (mul (C v) X)) X).eval zero = eval₂ (evalHom t₀) y X
+    rw [eval₂_X, eval₂_X]
+    show (evalHom zero).toFun (add (C y) (mul (C v) X)) = y
+    rw [RingHom.map_add, RingHom.map_mul, evalHom_apply, evalHom_apply, evalHom_apply, eval_C,
+      eval_C, eval_X, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+
+theorem sep_map_henselG (R : Poly3 K) (t₀ y v z : K) :
+    Hensel.sep ((mapHom (mapHom (ptHom y v z))).toFun (henselG R t₀)) =
+      eval3 (hasseZ 1 R) t₀ y z := by
+  show coeffAt (coeffAt ((mapHom (mapHom (ptHom y v z))).toFun (henselG R t₀)).coeffs 1).coeffs 0
+    = _
+  rw [map_henselG, coeffAt_jet, ← eval_zero_eq, eval_zero_jet]
+
+theorem res_map_henselG (R : Poly3 K) (t₀ y v z : K) :
+    Hensel.res ((mapHom (mapHom (ptHom y v z))).toFun (henselG R t₀)) = eval3 R t₀ y z := by
+  show coeffAt (coeffAt ((mapHom (mapHom (ptHom y v z))).toFun (henselG R t₀)).coeffs 0).coeffs 0
+    = _
+  rw [map_henselG, coeffAt_jet, ← eval_zero_eq, eval_zero_jet]
+  show eval3 (hasse 0 R) t₀ y z = _
+  rw [hasse_zero]
+
+theorem ptHom_henselSep (R : Poly3 K) (t₀ y v z : K) :
+    (ptHom y v z).toFun (henselSep R t₀) = eval3 (hasseZ 1 R) t₀ y z :=
+  (Hensel.map_sep _ _).trans (sep_map_henselG R t₀ y v z)
+
+theorem eval_jet (R : Poly3 K) (t₀ y v z : K) (e : UPoly K) :
+    (eval₂ (CHom.comp (jetHom t₀ y v)) (add (C (C z)) X) R).eval e =
+      eval₂ (jetHom t₀ y v) (add (C z) e) R := by
+  show (evalHom e).toFun (eval₂ (CHom.comp (jetHom t₀ y v)) (add (C (C z)) X) R) = _
+  rw [hom_eval₂, RingHom.map_add, evalHom_apply, evalHom_apply, eval_C, eval_X]
+  exact eval₂_congr _ _ (fun c => eval_C ((jetHom t₀ y v).toFun c) e) _ R
+
+/-- **`[CWYZ26]` Lemma 3.11.** Let `(y, v, z) ∈ K³` with `R(t₀, y, z) = 0` and separant
+    `s = ∂_Z R(t₀, y, z) ≠ 0`. Every `e` with `e(0) = 0` and
+    `R(t₀ + W, y + v·W, z + e(W)) ≡ 0 (mod W^(n+1))` has coefficients
+    `e_j = N_j(y, v, z) / s^(2j-1)` for `j ≤ n`, stated as `s·N_j(y, v, z) = (s²)^j·e_j`. -/
+theorem henselNum_spec (R : Poly3 K) (t₀ y v z : K) (e : UPoly K) (n : Nat)
+    (he0 : e.eval zero = zero) (hroot : eval3 R t₀ y z = zero)
+    (hsep : eval3 (hasseZ 1 R) t₀ y z ≠ zero)
+    (hsol : ∀ k, k ≤ n → coeffAt (eval₂ (jetHom t₀ y v) (add (C z) e) R).coeffs k = zero) :
+    ∀ j, j ≤ n → mul (eval3 (hasseZ 1 R) t₀ y z) ((ptHom y v z).toFun (henselNum R t₀ j)) =
+      mul (CRing.npow (mul (eval3 (hasseZ 1 R) t₀ y z) (eval3 (hasseZ 1 R) t₀ y z)) j)
+        (coeffAt e.coeffs j) := by
+  intro j hj
+  have key := Hensel.num_spec ((mapHom (mapHom (ptHom y v z))).toFun (henselG R t₀)) e n he0
+    (by rw [res_map_henselG]; exact hroot) (by rw [sep_map_henselG]; exact hsep)
+    (fun k hk => by rw [map_henselG, eval_jet]; exact hsol k hk) j hj
+  rw [sep_map_henselG, ← Hensel.map_num] at key
+  exact key
+
+/-! ### Reconstruction from the jet (`[CWYZ26]` Claim 4.9) -/
+
+/-- Cleared coefficient of `W^j` in the reconstruction of a root from its jet:
+    `S^(2d-1)·[W^j] P(t₀ + W)` as a polynomial in `(Y, V, Z)`. -/
+def reconCoeff (R : Poly3 K) (t₀ : K) (d : Nat) : Nat → Poly3 K
+  | 0 => mul (CRing.npow (henselSep R t₀) (2 * d - 1)) X
+  | j + 1 => mul (CRing.npow (henselSep R t₀) (2 * d - 2 * (j + 1))) (henselNum R t₀ (j + 1))
+
+theorem recon_arith (d h m n : Nat) (hd : 1 ≤ d) (hh : 1 ≤ h) (hmn : m + n ≤ 2 * d - 1) :
+    m * (h - 1) + (1 + n * (h - 1)) ≤ 2 * d * h := by
+  obtain ⟨h', rfl⟩ : ∃ h', h = h' + 1 := ⟨h - 1, by omega⟩
+  show m * h' + (1 + n * h') ≤ 2 * d * (h' + 1)
+  have e1 : (m + n) * h' = m * h' + n * h' := Nat.add_mul m n h'
+  have e2 : (m + n) * h' ≤ 2 * d * h' := Nat.mul_le_mul_right h' (by omega)
+  have e3 : 2 * d * (h' + 1) = 2 * d * h' + 2 * d := Nat.mul_succ (2 * d) h'
+  omega
+
+/-- **`[CWYZ26]` Claim 4.9, degree of the reconstruction map**: every cleared coefficient has
+    `(Y, V, Z)`-degree at most `2·d·h`. -/
+theorem deg_reconCoeff_le (R : Poly3 K) (t₀ : K) (d h j : Nat) (hR : R.degYZ ≤ h) (hh : 1 ≤ h)
+    (hd : 1 ≤ d) (hj : j ≤ d) : deg11d 1 (reconCoeff R t₀ d j) ≤ 2 * d * h := by
+  have hδ := degFn_deg11d (K := K) 1
+  have hS := deg_henselSep_le R t₀ h hR
+  cases j with
+  | zero =>
+    have h1 := hδ.mul_le (CRing.npow (henselSep R t₀) (2 * d - 1)) X
+    have h2 := degFn_npow_le hδ (deg11d_one 1) _ _ hS (2 * d - 1)
+    have h3 := deg11d_X_le (K := K)
+    have h4 := recon_arith d h (2 * d - 1) 0 hd hh (by omega)
+    show deg11d 1 (mul (CRing.npow (henselSep R t₀) (2 * d - 1)) X) ≤ 2 * d * h
+    rw [Nat.zero_mul] at h4
+    omega
+  | succ j =>
+    have h1 := hδ.mul_le (CRing.npow (henselSep R t₀) (2 * d - 2 * (j + 1)))
+      (henselNum R t₀ (j + 1))
+    have h2 := degFn_npow_le hδ (deg11d_one 1) _ _ hS (2 * d - 2 * (j + 1))
+    have h3 := deg_henselNum_le R t₀ h (j + 1) hR hh (by omega)
+    have h4 := recon_arith d h (2 * d - 2 * (j + 1)) (2 * (j + 1) - 1) hd hh (by omega)
+    show deg11d 1 (mul (CRing.npow (henselSep R t₀) (2 * d - 2 * (j + 1)))
+      (henselNum R t₀ (j + 1))) ≤ 2 * d * h
+    omega
+
+/-- **`[CWYZ26]` Claim 4.9, reconstruction identity.** Under the hypotheses of
+    `henselNum_spec` with `n = d`, the cleared coefficients evaluate to
+    `s^(2d-1)·[W^j](z + e(W))` for every `j ≤ d`: the root `z + e(W)` is recovered from the
+    jet `(y, v, z)` by polynomials of degree at most `2·d·h` over the common denominator
+    `s^(2d-1)`. -/
+theorem reconCoeff_spec (R : Poly3 K) (t₀ y v z : K) (e : UPoly K) (d : Nat) (hd : 1 ≤ d)
+    (he0 : e.eval zero = zero) (hroot : eval3 R t₀ y z = zero)
+    (hsep : eval3 (hasseZ 1 R) t₀ y z ≠ zero)
+    (hsol : ∀ k, k ≤ d → coeffAt (eval₂ (jetHom t₀ y v) (add (C z) e) R).coeffs k = zero) :
+    ∀ j, j ≤ d → (ptHom y v z).toFun (reconCoeff R t₀ d j) =
+      mul (CRing.npow (eval3 (hasseZ 1 R) t₀ y z) (2 * d - 1)) (coeffAt (add (C z) e).coeffs j) := by
+  intro j hj
+  have hS := ptHom_henselSep R t₀ y v z
+  cases j with
+  | zero =>
+    show (ptHom y v z).toFun (mul (CRing.npow (henselSep R t₀) (2 * d - 1)) X) = _
+    rw [RingHom.map_mul, RingHom.map_npow, hS, ptHom_X, coeffAt_add, coeffAt_C_zero,
+      ← eval_zero_eq, he0, LawfulCommRing.add_zero]
+  | succ j =>
+    have key := henselNum_spec R t₀ y v z e d he0 hroot hsep hsol (j + 1) hj
+    show (ptHom y v z).toFun (mul (CRing.npow (henselSep R t₀) (2 * d - 2 * (j + 1)))
+      (henselNum R t₀ (j + 1))) = _
+    rw [RingHom.map_mul, RingHom.map_npow, hS, coeffAt_add, coeffAt_C_succ,
+      LawfulCommRing.zero_add]
+    generalize eval3 (hasseZ 1 R) t₀ y z = s at hsep key ⊢
+    generalize (ptHom y v z).toFun (henselNum R t₀ (j + 1)) = N at key ⊢
+    generalize coeffAt e.coeffs (j + 1) = c at key ⊢
+    have e1 : 2 * d - 1 + 1 = (2 * d - 2 * (j + 1)) + 2 * (j + 1) := by omega
+    have h1 : mul s (mul (CRing.npow s (2 * d - 2 * (j + 1))) N) =
+        mul s (mul (CRing.npow s (2 * d - 1)) c) := by
+      have h2 : mul s (mul (CRing.npow s (2 * d - 1)) c) = mul (CRing.npow s (2 * d - 1 + 1)) c := by
+        show _ = mul (mul (CRing.npow s (2 * d - 1)) s) c
+        generalize CRing.npow s (2 * d - 1) = p
+        constructive_ring
+      rw [h2, e1, CRing.npow_add, ← npow_mul_self, LawfulCommRing.mul_assoc, ← key]
+      generalize CRing.npow s (2 * d - 2 * (j + 1)) = p
+      constructive_ring
+    have h3 := congrArg (mul (LawfulField.inv s)) h1
+    rwa [← LawfulCommRing.mul_assoc (LawfulField.inv s) s,
+      ← LawfulCommRing.mul_assoc (LawfulField.inv s) s, LawfulField.inv_mul_cancel hsep,
+      LawfulCommRing.one_mul, LawfulCommRing.one_mul] at h3
+
+end Poly3
+
+/-! ## Witnesses -/
+
+end Qsag
+
+end
+
+namespace Qsag
+theorem gsUniHasseBasis_mul_eq_monomial {F : Type} [LawfulCommRing F]
+    (r s : Nat) (a b : F) (i j : Nat) :
+    CommRingOps.mul (gsUniHasseBasis s b j) (gsUniHasseBasis r a i) =
+      gsHasseMonomial (i,j) (r,s) (a,b) := by
+  unfold gsUniHasseBasis gsHasseMonomial
+  dsimp only
+  rw [gsNat_mul, LawfulCommRing.mul_comm (gsNat (gsChoose i r)) (gsNat (gsChoose j s)),
+    LawfulCommRing.mul_comm (gsPow a (i-r)) (gsPow b (j-s))]
+  exact gs_mul_mul_mul_comm _ _ _ _
+end Qsag
+
+namespace Qsag
+open CommRingOps RoundPoly UPoly
+/-! ## Triangular index sets -/
+
+/-- `Σ_{j<n} f j`. -/
+@[expose] def sumTo (f : Nat → Nat) : Nat → Nat
+  | 0 => 0
+  | n + 1 => sumTo f n + f n
+
+theorem sumTo_add (f : Nat → Nat) (n : Nat) :
+    ∀ m, sumTo f (n + m) = sumTo f n + sumTo (fun j => f (n + j)) m
+  | 0 => rfl
+  | m + 1 => by
+    show sumTo f (n + m) + f (n + m) = sumTo f n + (sumTo (fun j => f (n + j)) m + f (n + m))
+    rw [sumTo_add f n m]; omega
+
+theorem sumTo_le (f g : Nat → Nat) (d : Nat) :
+    ∀ n, (∀ j, j < n → f j ≤ g j + d) → sumTo f n ≤ sumTo g n + n * d
+  | 0, _ => by show 0 ≤ 0 + 0 * d; omega
+  | n + 1, h => by
+    have ih := sumTo_le f g d n (fun j hj => h j (by omega))
+    have := h n (by omega)
+    show sumTo f n + f n ≤ sumTo g n + g n + (n + 1) * d
+    rw [Nat.succ_mul]; omega
+
+theorem sumTo_succ (f : Nat → Nat) : ∀ n, sumTo f (n + 1) = f 0 + sumTo (fun j => f (j + 1)) n
+  | 0 => by show 0 + f 0 = f 0 + 0; omega
+  | n + 1 => by
+    show sumTo f (n + 1) + f (n + 1) = f 0 + (sumTo (fun j => f (j + 1)) n + f (n + 1))
+    rw [sumTo_succ f n]; omega
+
+/-- Index pairs `(i, j)` with `j < n` and `i < f j`. -/
+def rows (f : Nat → Nat) : Nat → List (Nat × Nat)
+  | 0 => []
+  | n + 1 => rows f n ++ (List.range (f n)).map (fun i => (i, n))
+
+theorem length_rows (f : Nat → Nat) : ∀ n, (rows f n).length = sumTo f n
+  | 0 => rfl
+  | n + 1 => by
+    show (rows f n ++ _).length = sumTo f n + f n
+    rw [List.length_append, List.length_map, List.length_range, length_rows f n]
+
+theorem mem_rows (f : Nat → Nat) (i j : Nat) : ∀ n, (i, j) ∈ rows f n ↔ j < n ∧ i < f j
+  | 0 => by
+    constructor
+    · intro h; cases h
+    · intro h; omega
+  | n + 1 => by
+    show (i, j) ∈ rows f n ++ _ ↔ _
+    rw [List.mem_append, mem_rows f i j n, List.mem_map]
+    constructor
+    · rintro (⟨h1, h2⟩ | ⟨i', hi', he⟩)
+      · exact ⟨by omega, h2⟩
+      · cases he; exact ⟨by omega, List.mem_range.mp hi'⟩
+    · rintro ⟨h1, h2⟩
+      if h : j < n then exact .inl ⟨h, h2⟩
+      else
+        have hj : j = n := by omega
+        subst hj; exact .inr ⟨i, List.mem_range.mpr h2, rfl⟩
+
+/-- `List.range` has no duplicates (the core lemma is not choice-free). -/
+private theorem nodup_range' : ∀ k, (List.range k).Nodup
+  | 0 => by rw [List.range_zero]; exact .nil
+  | k + 1 => by
+    rw [List.range_succ, List.nodup_append]
+    exact ⟨nodup_range' k, List.pairwise_singleton _ _, fun a ha b hb e => by
+      have := List.mem_range.mp ha
+      have := List.mem_singleton.mp hb
+      omega⟩
+
+theorem nodup_rows (f : Nat → Nat) : ∀ n, (rows f n).Nodup
+  | 0 => .nil
+  | n + 1 => by
+    show (rows f n ++ _).Nodup
+    rw [List.nodup_append]
+    refine ⟨nodup_rows f n, ?_, ?_⟩
+    · exact List.pairwise_map.mpr
+        (List.Pairwise.imp (fun h e => h (congrArg Prod.fst e)) (nodup_range' _))
+    · intro p hp q hq e
+      subst e
+      obtain ⟨i, j⟩ := p
+      have h1 := ((mem_rows f i j n).mp hp).1
+      obtain ⟨i', _, he⟩ := List.mem_map.mp hq
+      cases he
+      omega
+
+
+namespace Poly3
+variable {F : Type} [LawfulField F] [DecidableEq F]
+/-- Coefficient of `X^i Y^t Z^j`. -/
+def coeff3 (Q : Poly3 F) (i t j : Nat) : F :=
+  coeffAt (coeffAt (coeffAt Q.coeffs j).coeffs t).coeffs i
+
+/-- `F`-linear functionals on `F[X][Y][Z]`. -/
+structure IsLin (ℓ : Poly3 F → F) : Prop where
+  map_add : ∀ a b, ℓ (add a b) = add (ℓ a) (ℓ b)
+  map_zero : ℓ zero = zero
+  map_smul : ∀ x a, ℓ (mul (C3 x) a) = mul x (ℓ a)
+
+theorem isLin_coeff3 (i t j : Nat) : IsLin (fun Q : Poly3 F => coeff3 Q i t j) where
+  map_add a b := by
+    show coeffAt (coeffAt (coeffAt (add a b).coeffs j).coeffs t).coeffs i = _
+    rw [coeffAt_add, coeffAt_add, coeffAt_add]; rfl
+  map_zero := by
+    show coeffAt (coeffAt (coeffAt (zero : Poly3 F).coeffs j).coeffs t).coeffs i = zero
+    rw [coeffs_zero, coeffAt_nil, coeffs_zero, coeffAt_nil, coeffs_zero, coeffAt_nil]
+  map_smul x a := by
+    show coeffAt (coeffAt (coeffAt (mul (C (C (C x))) a).coeffs j).coeffs t).coeffs i = _
+    rw [coeffAt_C_mul, coeffAt_C_mul, coeffAt_C_mul]; rfl
+
+/-- `Σ_k x_k · g_k`. -/
+def comb : List F → List (Poly3 F) → Poly3 F
+  | x :: xs, g :: gs => add (mul (C3 x) g) (comb xs gs)
+  | [], _ => zero
+  | _ :: _, [] => zero
+
+theorem lin_comb {ℓ : Poly3 F → F} (h : IsLin ℓ) : ∀ (xs : List F) (gs : List (Poly3 F)),
+    ℓ (comb xs gs) = dotVec (gs.map ℓ) xs
+  | [], gs => by
+    show ℓ zero = _
+    rw [h.map_zero]; cases gs <;> rfl
+  | _ :: _, [] => h.map_zero
+  | x :: xs, g :: gs => by
+    show ℓ (add (mul (C3 x) g) (comb xs gs)) = add (mul (ℓ g) x) (dotVec (gs.map ℓ) xs)
+    rw [h.map_add, h.map_smul, lin_comb h xs gs, LawfulCommRing.mul_comm]
+
+theorem degFn_comb_le {δ : Poly3 F → Nat} (hδ : DegFn δ) (hC : ∀ x : F, δ (C3 x) = 0)
+    (B : Nat) : ∀ (xs : List F) (gs : List (Poly3 F)), (∀ g ∈ gs, δ g ≤ B) →
+      δ (comb xs gs) ≤ B
+  | [], _, _ => by show δ zero ≤ B; rw [hδ.zero]; exact Nat.zero_le _
+  | _ :: _, [], _ => by show δ zero ≤ B; rw [hδ.zero]; exact Nat.zero_le _
+  | x :: xs, g :: gs, h => by
+    show δ (add (mul (C3 x) g) (comb xs gs)) ≤ B
+    have h1 := hδ.add_le (mul (C3 x) g) (comb xs gs)
+    have h2 := hδ.mul_le (C3 x) g
+    have h3 := h g (.head _)
+    have h4 := degFn_comb_le hδ hC B xs gs (fun g' hg' => h g' (.tail _ hg'))
+    rw [hC x] at h2
+    omega
+
+/-- `b₀ + b₁ Y ∈ F[X][Y]`. -/
+def yLine (b₀ b₁ : F) : UPoly (UPoly F) := ofList [C b₀, C b₁]
+
+theorem natDeg_yLine_le (b₀ b₁ : F) : (yLine b₀ b₁).natDeg ≤ 1 := by
+  have := trimPoly_length_le [C b₀, C b₁]
+  show (trimPoly [C b₀, C b₁]).length - 1 ≤ 1
+  simp only [List.length_cons, List.length_nil] at this; omega
+
+/-- `Q(X, Y, Z) ↦ Q(z + X, Y, b₀ + b₁Y + Z)`. -/
+def shiftHom (z b₀ b₁ : F) : RingHom (Poly3 F) (Poly3 F) :=
+  (taylorShift (yLine b₀ b₁)).comp (mapHom (mapHom (taylorShift z)))
+
+theorem shiftHom_C3 (z b₀ b₁ x : F) : (shiftHom z b₀ b₁).toFun (C3 x) = C3 x := by
+  show (taylorShift (yLine b₀ b₁)).toFun
+    ((mapHom (mapHom (taylorShift z))).toFun (C (C (C x)))) = C (C (C x))
+  rw [mapHom_C, mapHom_C, taylorShift_C, taylorShift_C]
+
+theorem degYZ_shiftHom_le (z b₀ b₁ : F) (Q : Poly3 F) :
+    ((shiftHom z b₀ b₁).toFun Q).degYZ ≤ Q.degYZ := by
+  have hX : (X : Poly3 F).wdeg natDeg 1 ≤ 1 := by
+    have := wdeg_X_le (R := UPoly (UPoly F)) natDeg 1
+    rw [natDeg_one] at this; omega
+  have hs : (add (C (yLine b₀ b₁)) (X : Poly3 F)).wdeg natDeg 1 ≤ 1 := by
+    have h1 := (degFn_degYZ (K := F)).add_le (C (yLine b₀ b₁)) X
+    have h2 : (C (yLine b₀ b₁) : Poly3 F).wdeg natDeg 1 ≤ (yLine b₀ b₁).natDeg :=
+      wdeg_C_le natDeg 1 _
+    have h3 := natDeg_yLine_le b₀ b₁
+    have h1' : (add (C (yLine b₀ b₁)) (X : Poly3 F)).wdeg natDeg 1 ≤
+        max ((C (yLine b₀ b₁) : Poly3 F).wdeg natDeg 1) ((X : Poly3 F).wdeg natDeg 1) := h1
+    omega
+  have hb := degFn_eval₂_le (degFn_degYZ (K := F)) CHom natDeg (fun c => wdeg_C_le natDeg 1 c)
+    (add (C (yLine b₀ b₁)) X) 1 hs ((mapHom (mapHom (taylorShift z))).toFun Q)
+  exact Nat.le_trans hb (wdeg_mapHom_mapHom_le (taylorShift z) Q)
+
+/-- The constraint functional: the coefficient of `X^r Y^t Z^s` in the shifted polynomial. -/
+def cons (z b₀ b₁ : F) (r t s : Nat) (Q : Poly3 F) : F :=
+  coeff3 ((shiftHom z b₀ b₁).toFun Q) r t s
+
+theorem isLin_cons (z b₀ b₁ : F) (r t s : Nat) : IsLin (cons z b₀ b₁ r t s) where
+  map_add a b := by
+    show coeff3 ((shiftHom z b₀ b₁).toFun (add a b)) r t s = _
+    rw [RingHom.map_add]; exact (isLin_coeff3 r t s).map_add _ _
+  map_zero := by
+    show coeff3 ((shiftHom z b₀ b₁).toFun zero) r t s = _
+    rw [RingHom.map_zero]; exact (isLin_coeff3 r t s).map_zero
+  map_smul x a := by
+    show coeff3 ((shiftHom z b₀ b₁).toFun (mul (C3 x) a)) r t s = _
+    rw [RingHom.map_mul, shiftHom_C3]; exact (isLin_coeff3 r t s).map_smul _ _
+
+/-- `Q(X, Y, Z) ↦ Q(X - z, α + βX, Zv)`. -/
+def unshiftHom (z α β : F) (Zv : UPoly F) : RingHom (Poly3 F) (UPoly F) :=
+  eval₂Hom (eval₂Hom (taylorShift (neg z)) (line α β)) Zv
+
+/-- Undoing the shift along the line: `Q(z + (X - z), α + βX, b₀ + b₁(α + βX) + Zv)` with
+    `Zv = P - b₀ - b₁(α + βX)` is `Q(X, α + βX, P)`. -/
+theorem unshift_shift (z b₀ b₁ α β : F) (P : UPoly F) (Q : Poly3 F) :
+    (unshiftHom z α β (sub P (add (C b₀) (mul (line α β) (C b₁))))).toFun
+      ((shiftHom z b₀ b₁).toFun Q) = evalAffineLine Q α β P := by
+  let Zv : UPoly F := sub P (add (C b₀) (mul (line α β) (C b₁)))
+  let mid : RingHom (UPoly (UPoly F)) (UPoly F) := eval₂Hom (taylorShift (neg z)) (line α β)
+  have hmid : ∀ c : UPoly (UPoly F),
+      mid.toFun ((mapHom (taylorShift z)).toFun c) = (evalHom (line α β)).toFun c := by
+    intro c
+    refine hom_ext (mid.comp (mapHom (taylorShift z))) (evalHom (line α β)) (fun a => ?_) ?_ c
+    · show mid.toFun ((mapHom (taylorShift z)).toFun (C a)) = (C a).eval (line α β)
+      rw [mapHom_C, eval_C]
+      show eval₂ (taylorShift (neg z)) (line α β) (C ((taylorShift z).toFun a)) = a
+      rw [eval₂_C, taylorShift_neg_cancel]
+    · show mid.toFun ((mapHom (taylorShift z)).toFun X) = (X : UPoly (UPoly F)).eval (line α β)
+      rw [mapHom_X, eval_X]
+      exact eval₂_X _ _
+  refine hom_ext ((unshiftHom z α β Zv).comp (shiftHom z b₀ b₁)) (affineLineHom α β P)
+    (fun c => ?_) ?_ Q
+  · show eval₂ mid Zv ((taylorShift (yLine b₀ b₁)).toFun
+      ((mapHom (mapHom (taylorShift z))).toFun (C c))) = eval₂ (evalHom (line α β)) P (C c)
+    rw [mapHom_C, taylorShift_C, eval₂_C, eval₂_C]
+    exact hmid c
+  · show eval₂ mid Zv ((taylorShift (yLine b₀ b₁)).toFun
+      ((mapHom (mapHom (taylorShift z))).toFun X)) = eval₂ (evalHom (line α β)) P X
+    rw [mapHom_X, taylorShift_X, eval₂_X]
+    show (eval₂Hom mid Zv).toFun (add (C (yLine b₀ b₁)) X) = P
+    rw [RingHom.map_add]
+    show add (eval₂ mid Zv (C (yLine b₀ b₁))) (eval₂ mid Zv X) = P
+    rw [eval₂_C, eval₂_X]
+    have hy : mid.toFun (yLine b₀ b₁) =
+        add (C b₀) (mul (line α β) (add (C b₁) (mul (line α β) zero))) := by
+      show eval₂ (taylorShift (neg z)) (line α β) (ofList [C b₀, C b₁]) = _
+      rw [eval₂_ofList]
+      show add ((taylorShift (neg z)).toFun (C b₀)) (mul (line α β)
+        (add ((taylorShift (neg z)).toFun (C b₁)) (mul (line α β) zero))) = _
+      rw [taylorShift_C, taylorShift_C]
+    rw [hy]
+    show add _ (sub P (add (C b₀) (mul (line α β) (C b₁)))) = P
+    constructive_ring
+
+theorem eval_line (α β z : F) : (line α β).eval z = add α (mul β z) := by
+  rw [eval_eq]
+  show evalCoeffs (trimPoly [α, β]) z = _
+  rw [evalCoeffs_trimPoly]
+  show add α (mul z (add β (mul z zero))) = _
+  constructive_ring
+
+/-- A polynomial vanishing at `z` is a multiple of `X - z`. -/
+theorem exists_mul_of_eval_eq_zero (p : UPoly F) (z : F) (h : p.eval z = zero) :
+    ∃ w, p = mul (add (C (neg z)) X) w := by
+  have h0 : coeffAt ((taylorShift z).toFun p).coeffs 0 = zero := by
+    rw [← eval_zero_eq, eval_taylorShift, LawfulCommRing.add_zero, h]
+  have hsplit := eq_C_add_X_mul ((taylorShift z).toFun p)
+  rw [h0] at hsplit
+  refine ⟨(taylorShift (neg z)).toFun (shiftDown ((taylorShift z).toFun p)), ?_⟩
+  have := congrArg (taylorShift (neg z)).toFun hsplit
+  rw [taylorShift_neg_cancel, RingHom.map_add, RingHom.map_mul, taylorShift_C, taylorShift_X,
+    ← CHom_apply, CHom.map_zero, LawfulCommRing.zero_add] at this
+  exact this
+
+/-- **Multiplicity gives divisibility** (the substitution step of `[CWYZ26]` Lemma 4.2).
+    If `Q` satisfies the order-`m` constraints at `z` for the values `b₀ = f z`, `b₁ = g z`,
+    and `P(z) = b₀ + (α + βz)·b₁`, then `(X - z)^m` divides `Q(X, α + βX, P(X))`. -/
+theorem inPow_affine_of_cons (Q : Poly3 F) (z b₀ b₁ α β : F) (P : UPoly F) (m : Nat)
+    (hcons : ∀ r t s, r + s < m → cons z b₀ b₁ r t s Q = zero)
+    (hagree : P.eval z = add b₀ (mul (add α (mul β z)) b₁)) :
+    InPow (add (C (neg z)) X) m (evalAffineLine Q α β P) := by
+  have hZ : (sub P (add (C b₀) (mul (line α β) (C b₁)))).eval z = zero := by
+    show (evalHom z).toFun (sub P (add (C b₀) (mul (line α β) (C b₁)))) = zero
+    rw [RingHom.map_sub, RingHom.map_add, RingHom.map_mul, evalHom_apply, evalHom_apply,
+      evalHom_apply, evalHom_apply, eval_C, eval_C, eval_line, hagree]
+    constructive_ring
+  obtain ⟨w, hw⟩ := exists_mul_of_eval_eq_zero _ z hZ
+  rw [← unshift_shift z b₀ b₁ α β P Q, hw]
+  show InPow _ m (evalCoeffs (((shiftHom z b₀ b₁).toFun Q).coeffs.map
+    (eval₂Hom (taylorShift (neg z)) (line α β)).toFun) (mul (add (C (neg z)) X) w))
+  apply InPow.evalCoeffs_graded
+  intro s
+  rw [RingHom.coeffAt_map]
+  show InPow _ (m - s) (evalCoeffs ((coeffAt ((shiftHom z b₀ b₁).toFun Q).coeffs s).coeffs.map
+    (taylorShift (neg z)).toFun) (line α β))
+  apply InPow.evalCoeffs_all
+  intro t
+  rw [RingHom.coeffAt_map]
+  show InPow _ (m - s) (evalCoeffs
+    ((coeffAt (coeffAt ((shiftHom z b₀ b₁).toFun Q).coeffs s).coeffs t).coeffs.map
+      (CHom (R := F)).toFun) (add (C (neg z)) X))
+  apply InPow.evalCoeffs_low
+  intro r hr
+  exact hcons r t s (by omega)
+
+/-! ## Enough agreement forces the specialization to vanish -/
+
+/-- The same polynomial in the subtype presentation used by the bivariate decoder. -/
+def toGs (p : UPoly F) : GsUniPoly F := ⟨p.coeffs, p.trimmed⟩
+
+theorem toGs_mul (a b : UPoly F) : toGs (mul a b) = mul (toGs a) (toGs b) := by rfl
+
+theorem toGs_npow (u : UPoly F) : ∀ k : Nat, toGs (CRing.npow u k) = gsPow (toGs u) k
+  | 0 => rfl
+  | k + 1 => by
+    show toGs (mul (CRing.npow u k) u) = mul (toGs u) (gsPow (toGs u) k)
+    rw [toGs_mul, toGs_npow u k, LawfulCommRing.mul_comm]
+
+theorem toGs_linear (z : F) : toGs (add (C (neg z)) X) = gsLinear z := by
+  have e : add (C (neg z)) X = (⟨[neg z, one], gsLinear_trimmed z⟩ : UPoly F) := by
+    apply ext_coeffAt
+    intro k
+    rw [coeffAt_add]
+    have eX : coeffAt (X : UPoly F).coeffs k = coeffAt [zero, one] k := coeffAt_ofList _ k
+    rw [eX]
+    cases k with
+    | zero => rw [coeffAt_C_zero]; exact LawfulCommRing.add_zero _
+    | succ k =>
+      rw [coeffAt_C_succ, LawfulCommRing.zero_add]
+      cases k <;> rfl
+  rw [e]; rfl
+
+/-- Triples `(i, t, j)` with `j < n`, `t + j ≤ Dy` and `i + d·j < Wx`. -/
+def triples (d Wx Dy : Nat) : Nat → List (Nat × Nat × Nat)
+  | 0 => []
+  | n + 1 => triples d Wx Dy n ++
+      (rows (fun _ => Wx - d * n) (Dy + 1 - n)).map (fun p => (p.1, p.2, n))
+
+/-- `Σ_{j<n} (Dy + 1 - j)·(Wx - d·j)`, as an iterated sum. -/
+def triCount (d Wx Dy n : Nat) : Nat :=
+  sumTo (fun j => sumTo (fun _ => Wx - d * j) (Dy + 1 - j)) n
+
+theorem sumTo_const (c : Nat) : ∀ n, sumTo (fun _ => c) n = n * c
+  | 0 => (Nat.zero_mul c).symm
+  | n + 1 => by
+    show sumTo (fun _ => c) n + c = (n + 1) * c
+    rw [sumTo_const c n, Nat.succ_mul]
+
+theorem sumTo_congr (f g : Nat → Nat) : ∀ n, (∀ j, j < n → f j = g j) → sumTo f n = sumTo g n
+  | 0, _ => rfl
+  | n + 1, h => by
+    show sumTo f n + f n = sumTo g n + g n
+    rw [sumTo_congr f g n (fun j hj => h j (Nat.lt_succ_of_lt hj)), h n (Nat.lt_succ_self n)]
+
+/-- The count in closed form: `Σ_{j<n} (Dy + 1 - j)·(Wx - d·j)`. -/
+theorem triCount_eq (d Wx Dy n : Nat) :
+    triCount d Wx Dy n = sumTo (fun j => (Dy + 1 - j) * (Wx - d * j)) n :=
+  sumTo_congr _ _ n (fun _ _ => sumTo_const _ _)
+
+theorem triCount_zero_width (d Dy : Nat) : ∀ n, triCount d 0 Dy n = 0
+  | 0 => rfl
+  | n + 1 => by
+    show triCount d 0 Dy n + sumTo (fun _ => 0 - d * n) (Dy + 1 - n) = 0
+    rw [triCount_zero_width d Dy n, sumTo_const, Nat.zero_sub, Nat.mul_zero]
+
+theorem length_triples (d Wx Dy : Nat) : ∀ n, (triples d Wx Dy n).length = triCount d Wx Dy n
+  | 0 => rfl
+  | n + 1 => by
+    show (triples d Wx Dy n ++ _).length =
+      triCount d Wx Dy n + sumTo (fun _ => Wx - d * n) (Dy + 1 - n)
+    rw [List.length_append, List.length_map, length_rows, length_triples d Wx Dy n]
+
+theorem mem_triples (d Wx Dy i t j : Nat) : ∀ n,
+    (i, t, j) ∈ triples d Wx Dy n ↔ j < n ∧ t < Dy + 1 - j ∧ i < Wx - d * j
+  | 0 => by
+    constructor
+    · intro h; cases h
+    · intro h; exact absurd h.1 (Nat.not_lt_zero j)
+  | n + 1 => by
+    show (i, t, j) ∈ triples d Wx Dy n ++ _ ↔ _
+    rw [List.mem_append, mem_triples d Wx Dy i t j n, List.mem_map]
+    constructor
+    · rintro (⟨h1, h2⟩ | ⟨p, hp, he⟩)
+      · exact ⟨Nat.lt_succ_of_lt h1, h2⟩
+      · obtain ⟨i', t'⟩ := p
+        cases he
+        exact ⟨Nat.lt_succ_self _, (mem_rows _ _ _ _).mp hp⟩
+    · rintro ⟨h1, h2⟩
+      if h : j < n then exact .inl ⟨h, h2⟩
+      else
+        have hj : j = n := by omega
+        subst hj
+        exact .inr ⟨(i, t), (mem_rows _ _ _ _).mpr h2, rfl⟩
+
+theorem nodup_triples (d Wx Dy : Nat) : ∀ n, (triples d Wx Dy n).Nodup
+  | 0 => .nil
+  | n + 1 => by
+    show (triples d Wx Dy n ++ _).Nodup
+    rw [List.nodup_append]
+    refine ⟨nodup_triples d Wx Dy n, ?_, ?_⟩
+    · exact List.pairwise_map.mpr (List.Pairwise.imp (fun h e => h (by
+        obtain ⟨e1, e2⟩ := Prod.mk.inj e
+        exact Prod.ext e1 (Prod.mk.inj e2).1)) (nodup_rows _ _))
+    · intro p hp q hq e
+      subst e
+      obtain ⟨i, t, j⟩ := p
+      have h1 := ((mem_triples d Wx Dy i t j n).mp hp).1
+      obtain ⟨p', _, he⟩ := List.mem_map.mp hq
+      cases he
+      omega
+
+
+end Poly3
+end Qsag
+
+namespace Qsag
+@[simp] theorem rows_zero (f : Nat → Nat) : rows f 0 = [] := by rfl
+namespace UPoly
+theorem inPow_iff {R : Type} [LawfulCommRing R] [DecidableEq R] (x : UPoly R) (n : Nat) (p : UPoly R) :
+    InPow x n p ↔ ∃ q, p = CommRingOps.mul (CRing.npow x n) q := by rfl
+end UPoly
+namespace Poly3
+theorem toGs_eq {F : Type} [LawfulField F] [DecidableEq F] (p : UPoly F) : toGs p = p := by rfl
+end Poly3
+end Qsag
+
+namespace Qsag.Poly3
+variable {F : Type} [LawfulField F] [DecidableEq F]
+theorem coeff3_eq (Q : Poly3 F) (i t j : Nat) : coeff3 Q i t j =
+    coeffAt (coeffAt (coeffAt Q.coeffs j).coeffs t).coeffs i := by unfold coeff3; rfl
+theorem cons_eq (z b₀ b₁ : F) (r t s : Nat) (Q : Poly3 F) :
+    cons z b₀ b₁ r t s Q = coeff3 ((shiftHom z b₀ b₁).toFun Q) r t s := by unfold cons; rfl
+end Qsag.Poly3
+
+namespace Qsag
+open CommRingOps
+/-- Nonvanishing of a natural number is reflected by ring homomorphisms. -/
+theorem natCast_ne_zero_of_hom {R S : Type} [LawfulCommRing R] [LawfulCommRing S]
+    (φ : RingHom R S) (k : Nat) (h : (CRing.natCast k : S) ≠ zero) :
+    (CRing.natCast k : R) ≠ zero := fun e => h (by
+  rw [← RingHom.map_natCast φ k, e, φ.map_zero])
+
+/-- Nonvanishing of a natural number is preserved by injective ring homomorphisms. -/
+theorem natCast_ne_zero_of_injective_hom {R S : Type} [LawfulCommRing R] [LawfulCommRing S]
+    (φ : RingHom R S) (hinj : ∀ x, φ.toFun x = zero → x = zero) (k : Nat)
+    (h : (CRing.natCast k : R) ≠ zero) : (CRing.natCast k : S) ≠ zero := fun e =>
+  h (hinj _ ((RingHom.map_natCast φ k).trans e))
+
+
+end Qsag
+
+namespace Qsag
+open CommRingOps RoundPoly UPoly
+/-! ## The jet of a root at the generic point (`[CWYZ26]` Claim 4.9, covering part) -/
+
+namespace UPoly
+
+theorem mapHom_shift2 {R S : Type} [LawfulCommRing R] [DecidableEq R] [LawfulCommRing S]
+    [DecidableEq S] (φ : RingHom R S) (p : UPoly R) :
+    (mapHom (mapHom φ)).toFun ((shift2 (R := R)).toFun p) =
+      (shift2 (R := S)).toFun ((mapHom φ).toFun p) := by
+  refine hom_ext ((mapHom (mapHom φ)).comp shift2) (shift2.comp (mapHom φ)) (fun c => ?_) ?_ p
+  · show (mapHom (mapHom φ)).toFun (eval₂ (CHom.comp CHom) (add (C X) X) (C c)) =
+      eval₂ (CHom.comp CHom) (add (C X) X) ((mapHom φ).toFun (C c))
+    rw [eval₂_C, mapHom_C, eval₂_C]
+    show (mapHom (mapHom φ)).toFun (C (C c)) = C (C (φ.toFun c))
+    rw [mapHom_C, mapHom_C]
+  · show (mapHom (mapHom φ)).toFun (eval₂ (CHom.comp CHom) (add (C X) X) X) =
+      eval₂ (CHom.comp CHom) (add (C X) X) ((mapHom φ).toFun X)
+    rw [eval₂_X, mapHom_X, eval₂_X, RingHom.map_add, mapHom_C, mapHom_X, mapHom_X]
+
+/-- Hasse derivatives commute with base change of the coefficients. -/
+theorem mapHom_hasse {R S : Type} [LawfulCommRing R] [DecidableEq R] [LawfulCommRing S]
+    [DecidableEq S] (φ : RingHom R S) (k : Nat) (p : UPoly R) :
+    (mapHom φ).toFun (hasse k p) = hasse k ((mapHom φ).toFun p) := by
+  rw [hasse_eq_coeff, hasse_eq_coeff, ← mapHom_shift2, coeffAt_mapHom]
+
+end UPoly
+
+namespace Poly3
+section Generic
+variable {F : Type} [LawfulField F] [DecidableEq F]
+open UPoly
+
+/-- Scalars into `F(T₀)`. -/
+def scalK : RingHom F (RatFunc F) := (Frac.of (D := UPoly F)).comp CHom
+
+/-- The generic point `T₀ ∈ F(T₀)`. -/
+def genPt : RatFunc F := (Frac.of (D := UPoly F)).toFun X
+
+/-- Base change `F[X][Y][Z] → F(T₀)[X][Y][Z]`. -/
+def baseK : RingHom (Poly3 F) (Poly3 (RatFunc F)) := mapHom (mapHom (mapHom scalK))
+
+/-- The root series of `P` at the generic point: `P(T₀ + W) - P(T₀)`. -/
+def genSeries (P : UPoly F) : UPoly (RatFunc F) :=
+  sub ((taylorShift genPt).toFun ((mapHom scalK).toFun P)) (C ((Frac.of (D := UPoly F)).toFun P))
+
+/-- Evaluating a polynomial at the generic point is the embedding `F[X] → F(T₀)`. -/
+theorem eval_gen (c : UPoly F) :
+    ((mapHom (scalK (F := F))).toFun c).eval genPt = (Frac.of (D := UPoly F)).toFun c := by
+  show eval₂ (RingHom.id _) genPt ((mapHom scalK).toFun c) = _
+  rw [eval₂_mapHom]
+  have h := hom_eval₂ (Frac.of (D := UPoly F)) CHom X c
+  have e : eval₂ (CHom (R := F)) X c = c := evalCoeffs_C_X c
+  rw [e] at h
+  exact (eval₂_congr _ _ (fun _ => rfl) _ c).trans h.symm
+
+theorem eval₂_gen (y₀ : UPoly F) (q : UPoly (UPoly F)) :
+    eval₂ (evalHom genPt) ((Frac.of (D := UPoly F)).toFun y₀) ((mapHom (mapHom scalK)).toFun q) =
+      (Frac.of (D := UPoly F)).toFun (q.eval y₀) := by
+  rw [eval₂_mapHom]
+  show _ = (Frac.of (D := UPoly F)).toFun (eval₂ (RingHom.id _) y₀ q)
+  rw [hom_eval₂]
+  exact eval₂_congr _ _ (fun c => eval_gen c) _ q
+
+theorem eval3_gen (R : Poly3 F) (y₀ P : UPoly F) :
+    eval3 (baseK.toFun R) genPt ((Frac.of (D := UPoly F)).toFun y₀)
+      ((Frac.of (D := UPoly F)).toFun P) =
+      (Frac.of (D := UPoly F)).toFun (eval₂ (evalHom y₀) P R) := by
+  show eval₂ (eval₂Hom (evalHom genPt) ((Frac.of (D := UPoly F)).toFun y₀))
+    ((Frac.of (D := UPoly F)).toFun P) ((mapHom (mapHom (mapHom scalK))).toFun R) = _
+  rw [eval₂_mapHom, hom_eval₂]
+  exact eval₂_congr _ _ (fun q => eval₂_gen y₀ q) _ R
+
+theorem jet_gen (α β : F) (q : UPoly (UPoly F)) :
+    (jetHom genPt ((Frac.of (D := UPoly F)).toFun (line α β)) (scalK.toFun β)).toFun
+      ((mapHom (mapHom scalK)).toFun q) =
+      (taylorShift genPt).toFun ((mapHom scalK).toFun (q.eval (line α β))) := by
+  have e1 : line α β = add (C α) (mul X (C β)) := ofList_cons α [β]
+  have hL : (taylorShift genPt).toFun ((mapHom (scalK (F := F))).toFun (line α β)) =
+      add (C (scalK.toFun α)) (mul (add (C genPt) X) (C (scalK.toFun β))) := by
+    rw [e1, RingHom.map_add, RingHom.map_mul, mapHom_C, mapHom_C, mapHom_X, RingHom.map_add,
+      RingHom.map_mul, taylorShift_C, taylorShift_C, taylorShift_X]
+  have hR : (C ((Frac.of (D := UPoly F)).toFun (line α β)) : UPoly (RatFunc F)) =
+      add (C (scalK.toFun α)) (mul (C genPt) (C (scalK.toFun β))) := by
+    rw [e1, RingHom.map_add, RingHom.map_mul]
+    exact ((CHom (R := RatFunc F)).map_add _ _).trans
+      (congrArg (add _) ((CHom (R := RatFunc F)).map_mul _ _))
+  have hline : (taylorShift genPt).toFun ((mapHom (scalK (F := F))).toFun (line α β)) =
+      add (C ((Frac.of (D := UPoly F)).toFun (line α β))) (mul (C (scalK.toFun β)) X) := by
+    rw [hL, hR]; constructive_ring
+  show eval₂ (taylorShift genPt) _ ((mapHom (mapHom scalK)).toFun q) =
+    (taylorShift genPt).toFun ((mapHom scalK).toFun (eval₂ (RingHom.id _) (line α β) q))
+  rw [eval₂_mapHom, hom_eval₂, hom_eval₂, hline]
+  exact eval₂_congr _ _ (fun _ => rfl) _ q
+
+/-- The hypotheses of `henselNum_spec` hold for every simple root on a line, at the generic
+    point of `F(T₀)`: the jet is `(y, v, z) = (α + βT₀, β, P(T₀))` and the series is
+    `P(T₀ + W) - P(T₀)`, to every order. -/
+theorem jet_hyps (R : Poly3 F) (α β : F) (P : UPoly F) (hroot : evalAffineLine R α β P = zero)
+    (hsep : evalAffineLine (hasseZ 1 R) α β P ≠ zero) :
+    (genSeries P).eval zero = zero ∧
+    eval3 (baseK.toFun R) genPt ((Frac.of (D := UPoly F)).toFun (line α β))
+      ((Frac.of (D := UPoly F)).toFun P) = zero ∧
+    eval3 (hasseZ 1 (baseK.toFun R)) genPt ((Frac.of (D := UPoly F)).toFun (line α β))
+      ((Frac.of (D := UPoly F)).toFun P) =
+        (Frac.of (D := UPoly F)).toFun (evalAffineLine (hasseZ 1 R) α β P) ∧
+    (Frac.of (D := UPoly F)).toFun (evalAffineLine (hasseZ 1 R) α β P) ≠ zero ∧
+    eval₂ (jetHom genPt ((Frac.of (D := UPoly F)).toFun (line α β)) (scalK.toFun β))
+      (add (C ((Frac.of (D := UPoly F)).toFun P)) (genSeries P)) (baseK.toFun R) = zero := by
+  refine ⟨?_, ?_, ?_, ?_, ?_⟩
+  · show (evalHom zero).toFun (sub ((taylorShift genPt).toFun ((mapHom scalK).toFun P))
+      (C ((Frac.of (D := UPoly F)).toFun P))) = zero
+    rw [RingHom.map_sub, evalHom_apply, evalHom_apply, eval_taylorShift, LawfulCommRing.add_zero,
+      eval_gen, eval_C, LawfulCommRing.sub_self]
+  · rw [eval3_gen]
+    show (Frac.of (D := UPoly F)).toFun (evalAffineLine R α β P) = zero
+    rw [hroot, RingHom.map_zero]
+  · have e : hasseZ 1 (baseK.toFun R) = baseK.toFun (hasseZ 1 R) :=
+      (mapHom_hasse (mapHom (mapHom (scalK (F := F)))) 1 R).symm
+    rw [e, eval3_gen]; rfl
+  · exact fun e => hsep (Frac.of_injective (e.trans (Frac.of (D := UPoly F)).map_zero.symm))
+  · have hadd : add (C ((Frac.of (D := UPoly F)).toFun P)) (genSeries P) =
+        (taylorShift genPt).toFun ((mapHom scalK).toFun P) := by
+      show add _ (sub _ _) = _
+      constructive_ring
+    rw [hadd]
+    show eval₂ _ _ ((mapHom (mapHom (mapHom scalK))).toFun R) = zero
+    rw [eval₂_mapHom]
+    have h := hom_eval₂ ((taylorShift genPt).comp (mapHom (scalK (F := F))))
+      (evalHom (line α β)) P R
+    have h0 : eval₂ (evalHom (line α β)) P R = zero := hroot
+    rw [h0, RingHom.map_zero] at h
+    exact (eval₂_congr _ _ (fun q => jet_gen α β q) _ R).trans h.symm
+
+/-- **`[CWYZ26]` Claim 4.9, covering part.** Let `P` be a simple root of `R` on the line
+    `Y = α + βX`. At the jet `(y, v, z) = (α + βT₀, β, P(T₀)) ∈ F(T₀)³`, the cleared
+    reconstruction coefficients evaluate to `s^(2d-1)` times the Taylor coefficients of `P` at
+    `T₀`, for `j ≤ d`, where `s = ∂_Z R(T₀, y, z) ≠ 0`. So the triple `(α, β, P)` is the image
+    of its jet under a map with numerators of degree at most `2·d·h` (`deg_reconCoeff_le`) on
+    the surface `R(T₀, Y, Z) = 0`. -/
+theorem jet_cover (R : Poly3 F) (α β : F) (P : UPoly F) (d : Nat) (hd : 1 ≤ d)
+    (hroot : evalAffineLine R α β P = zero)
+    (hsep : evalAffineLine (hasseZ 1 R) α β P ≠ zero) (j : Nat) (hj : j ≤ d) :
+    (ptHom ((Frac.of (D := UPoly F)).toFun (line α β)) (scalK.toFun β)
+      ((Frac.of (D := UPoly F)).toFun P)).toFun (reconCoeff (baseK.toFun R) genPt d j) =
+      mul (CRing.npow ((Frac.of (D := UPoly F)).toFun (evalAffineLine (hasseZ 1 R) α β P))
+        (2 * d - 1))
+        (coeffAt ((taylorShift genPt).toFun ((mapHom scalK).toFun P)).coeffs j) := by
+  obtain ⟨h1, h2, h3, h4, h5⟩ := jet_hyps R α β P hroot hsep
+  have key := reconCoeff_spec (baseK.toFun R) genPt _ (scalK.toFun β) _ (genSeries P) d hd h1 h2
+    (by rw [h3]; exact h4) (fun k _ => by rw [h5, coeffs_zero, coeffAt_nil]) j hj
+  have hadd : add (C ((Frac.of (D := UPoly F)).toFun P)) (genSeries P) =
+      (taylorShift genPt).toFun ((mapHom scalK).toFun P) := by
+    show add _ (sub _ _) = _
+    constructive_ring
+  rw [h3, hadd] at key
+  exact key
+
+end Generic
+end Poly3
+
+
+section
+variable {F : Type} [LawfulField F] [DecidableEq F]
+theorem eval_ofList (l : List F) (z : F) : (ofList l).eval z = evalCoeffs l z := by
+  rw [eval_eq]
+  show evalCoeffs (trimPoly l) z = _
+  rw [evalCoeffs_trimPoly]
+
+theorem natDeg_ofList_le (l : List F) : (ofList l).natDeg ≤ l.length - 1 := by
+  have := trimPoly_length_le l
+  show (trimPoly l).length - 1 ≤ l.length - 1
+  omega
+
+end
+end Qsag
+
+namespace Qsag
+open CommRingOps
+namespace Poly3
+variable {F : Type} [LawfulField F] [DecidableEq F]
+theorem scalK_apply (x : F) : (scalK (F := F)).toFun x = (Frac.of (D := UPoly F)).toFun (UPoly.C x) := by unfold scalK; rfl
+theorem baseK_apply (q : Poly3 F) : (baseK (F := F)).toFun q = (UPoly.mapHom (UPoly.mapHom (UPoly.mapHom scalK))).toFun q := by unfold baseK; rfl
+theorem genPt_eq : (genPt : RatFunc F) = (Frac.of (D := UPoly F)).toFun UPoly.X := by unfold genPt; rfl
+theorem ptHom_apply (x y z : F) (q : Poly3 F) : (ptHom x y z).toFun q = UPoly.eval₂ (UPoly.eval₂Hom (UPoly.evalHom x) y) z q := by unfold ptHom; rfl
+theorem evalAffineLine_zero (α β : F) (p : UPoly F) : evalAffineLine zero α β p = zero := (affineLineHom α β p).map_zero
+end Poly3
+end Qsag
