@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.CodingTheory.PersistentPairsBound — `[CWYZ26]` Lemmas 4.4 & 4.5 + Linear Persistence Lemma
+# Qsag.Coding.PersistentPairsBound — `[CWYZ26]` Lemmas 4.4 & 4.5 + Linear Persistence Lemma
 
 Proves `IsPersistent`, `nonpersistent_common_agree_le` (`c ≤ B` for Claim 4.8),
 `persistent_challenges_per_witness_le` (Lemma 4.4), and `persistent_pairs_card_le` (Lemma 4.5).
@@ -9,14 +9,14 @@ explanations; they do not require the whole received word to lack correlated agr
 Nonempty instances and countermodels are in `PersistentPairsBoundTests`.
 -/
 
-public import Qsag.CodingTheory.JohnsonSetSystem
-public import Qsag.CodingTheory.AffineIncidenceBound
-import all Qsag.CodingTheory.PolyMv3
-import all Qsag.CodingTheory.DynamicGcdSplit
-import all Qsag.CodingTheory.SimpleRootStratification
-import all Qsag.CodingTheory.AffineIncidenceBound
-import all Qsag.AffineProximityGaps
-import all Qsag.Goldilocks
+public import Qsag.Coding.JohnsonSetSystem
+public import Qsag.Coding.AffineIncidenceBound
+import all Qsag.Coding.PolyMv3
+import all Qsag.Coding.DynamicGcdSplit
+import all Qsag.Coding.SimpleRootStratification
+import all Qsag.Coding.AffineIncidenceBound
+import all Qsag.Coding.AffineProximityGaps
+import all Qsag.Math.Goldilocks
 
 public section
 namespace Qsag

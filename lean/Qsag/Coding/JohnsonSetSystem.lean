@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.CodingTheory.JohnsonSetSystem — Constructive Integer Johnson Bound (`[CWYZ26]` Lemma 3.2)
+# Qsag.Coding.JohnsonSetSystem — Constructive Integer Johnson Bound (`[CWYZ26]` Lemma 3.2)
 
 Proves the finite set-system Johnson bound (`[MS77, Ch. 17, Theorem 3]` / `[CWYZ26]` Lemma 3.2)
 entirely in `Nat` (`0` rational numbers, `0` `Classical.choice`):

@@ -9,19 +9,19 @@ contained coordinates; double counting controls all remaining incidences.
 
 The surface-to-curve projection and its multiple-root components are not proved here.
 -/
-public import Qsag.CodingTheory.PlaneBezoutResultant
-public import Qsag.CodingTheory.PersistentPairsBound
-public import Qsag.CodingTheory.BivariateFactorSplit
-import all Qsag.CodingTheory.PlaneBezoutResultant
-import all Qsag.CodingTheory.PersistentPairsBound
-import all Qsag.CodingTheory.JohnsonSetSystem
-import all Qsag.CodingTheory.PolyMv3
-import all Qsag.CodingTheory.SylvesterResultant
-import all Qsag.Goldilocks
-import all Qsag.AffineProximityGaps
-import all Qsag.CodingTheory.DynamicGcdSplit
-import all Qsag.CodingTheory.BivariateGauss
-import all Qsag.CodingTheory.BivariateFactorSplit
+public import Qsag.Coding.PlaneBezoutResultant
+public import Qsag.Coding.PersistentPairsBound
+public import Qsag.Coding.BivariateFactorSplit
+import all Qsag.Coding.PlaneBezoutResultant
+import all Qsag.Coding.PersistentPairsBound
+import all Qsag.Coding.JohnsonSetSystem
+import all Qsag.Coding.PolyMv3
+import all Qsag.Coding.SylvesterResultant
+import all Qsag.Math.Goldilocks
+import all Qsag.Coding.AffineProximityGaps
+import all Qsag.Coding.DynamicGcdSplit
+import all Qsag.Coding.BivariateGauss
+import all Qsag.Coding.BivariateFactorSplit
 
 public section
 namespace Qsag

@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.CodingTheory.SlicedJetIncidence — the non-excluded count, one challenge slope at a time
+# Qsag.Coding.SlicedJetIncidence — the non-excluded count, one challenge slope at a time
 
 `[CWYZ26]` Claim 4.9 sends a simple root `(α, β, P)` of `R` to its jet
 `(y, v, z) = (α + βT₀, β, P(T₀))` on the surface `R(T₀, Y, Z) = 0` in `F(T₀)³`, and Claim 4.8
@@ -28,22 +28,22 @@ independent of `|S|`: the slope is enumerated instead of being eliminated by the
 incidence round. The characteristic hypothesis is that of `simple_root_of_hasse`.
 -/
 
-public import Qsag.CodingTheory.NonpersistentIncidenceBound
-public import Qsag.CodingTheory.AffineIncidenceBound
-import all Qsag.CodingTheory.NonpersistentIncidenceBound
-import all Qsag.CodingTheory.PersistentPairsBound
-import all Qsag.CodingTheory.JohnsonSetSystem
-import all Qsag.CodingTheory.PolyMv3
-import all Qsag.CodingTheory.SylvesterResultant
-import all Qsag.CodingTheory.DynamicGcdSplit
-import all Qsag.CodingTheory.HenselNumerators
-import all Qsag.CodingTheory.UniversalHenselLift
-import all Qsag.CodingTheory.SimpleRootStratification
-import all Qsag.CodingTheory.AffineIncidenceBound
-import all Qsag.CodingTheory.BivariateGauss
-import all Qsag.CodingTheory.BivariateFactorSplit
-import all Qsag.AffineProximityGaps
-import all Qsag.Goldilocks
+public import Qsag.Coding.NonpersistentIncidenceBound
+public import Qsag.Coding.AffineIncidenceBound
+import all Qsag.Coding.NonpersistentIncidenceBound
+import all Qsag.Coding.PersistentPairsBound
+import all Qsag.Coding.JohnsonSetSystem
+import all Qsag.Coding.PolyMv3
+import all Qsag.Coding.SylvesterResultant
+import all Qsag.Coding.DynamicGcdSplit
+import all Qsag.Coding.HenselNumerators
+import all Qsag.Coding.UniversalHenselLift
+import all Qsag.Coding.SimpleRootStratification
+import all Qsag.Coding.AffineIncidenceBound
+import all Qsag.Coding.BivariateGauss
+import all Qsag.Coding.BivariateFactorSplit
+import all Qsag.Coding.AffineProximityGaps
+import all Qsag.Math.Goldilocks
 
 public section
 namespace Qsag

@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.CodingTheory.AffineIncidenceBound — what can and cannot be counted per line
+# Qsag.Coding.AffineIncidenceBound — what can and cannot be counted per line
 
 * `Poly3.roots_on_line_card_le`: on a non-excluded line `Y = α + βX`, an explainer `Q` has at
   most `deg_Z Q` roots `P` with `Q(X, α + βX, P(X)) = 0`. This is the univariate root count
@@ -23,16 +23,16 @@ image of the reconstruction map). Neither is proved here; `roots_on_line_card_le
 bound it, because it fixes the challenge.
 -/
 
-public import Qsag.CodingTheory.SimpleRootStratification
-public import Qsag.AffineProximityGaps
-import all Qsag.CodingTheory.PolyMv3
-import all Qsag.CodingTheory.SylvesterResultant
-import all Qsag.CodingTheory.DynamicGcdSplit
-import all Qsag.CodingTheory.HenselNumerators
-import all Qsag.CodingTheory.UniversalHenselLift
-import all Qsag.CodingTheory.SimpleRootStratification
-import all Qsag.AffineProximityGaps
-import all Qsag.Goldilocks
+public import Qsag.Coding.SimpleRootStratification
+public import Qsag.Coding.AffineProximityGaps
+import all Qsag.Coding.PolyMv3
+import all Qsag.Coding.SylvesterResultant
+import all Qsag.Coding.DynamicGcdSplit
+import all Qsag.Coding.HenselNumerators
+import all Qsag.Coding.UniversalHenselLift
+import all Qsag.Coding.SimpleRootStratification
+import all Qsag.Coding.AffineProximityGaps
+import all Qsag.Math.Goldilocks
 
 public section
 namespace Qsag
