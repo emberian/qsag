@@ -366,7 +366,7 @@ pub(crate) unsafe fn gf256_shamir_mac_avx512_gfni(
 /// 512-bit `VPCLMULQDQ` 2-lane BDOZ MAC inner product processing 2 pairs (`4 x 128`-bit = 64 B)
 /// per iteration and XOR-accumulating into `[out32 + 0..32]`. Caller guarantees `blocks64 >= 1`.
 #[target_feature(enable = "avx512f,avx512dq,avx512vl,vpclmulqdq")]
-pub(crate) unsafe fn tower128_bdoz_mac_avx512_vpclmul(
+pub(crate) unsafe fn tower128_bdoz_mac_avx512_evex(
     out32: *mut u8,
     lhs64: *const u8,
     rhs64: *const u8,
@@ -451,7 +451,7 @@ pub(crate) unsafe fn tower128_bdoz_mac_avx512_vpclmul(
 /// 512-bit `VPCLMULQDQ` batched `GF(2^128)` multiply-accumulate (`4 x 128`-bit = 64 B per iter)
 /// XORing the reduced sum into `[acc16]`. Caller guarantees `quads >= 1`.
 #[target_feature(enable = "avx512f,avx512dq,avx512vl,vpclmulqdq")]
-pub(crate) unsafe fn gf2_128_mul_acc_avx512_vpclmul(
+pub(crate) unsafe fn gf2_128_mul_acc_avx512_evex(
     acc16: *mut u8,
     a64: *const u8,
     b64: *const u8,
@@ -541,16 +541,19 @@ pub(crate) unsafe fn gf2_128_mul_acc_avx512_vpclmul(
 /// `GF(2)[x]/(x^128 + x^7 + x^2 + x + 1)` (`4 x 128`-bit = 64 B per iter).
 /// Caller guarantees `quads >= 1`.
 #[target_feature(enable = "avx512f,avx512dq,avx512vl,vpclmulqdq")]
-pub(crate) unsafe fn poly_scale_xor_avx512_vpclmul(
+pub(crate) unsafe fn poly_scale_xor_avx512_evex(
     dst64: *mut u8,
     src64: *const u8,
-    scalar16: *const u8,
+    scalar_lo: u64,
+    scalar_hi: u64,
     quads: usize,
 ) {
     // SAFETY: caller verified `caps.avx512 && caps.vpclmulqdq` and `quads * 64` valid bytes.
     unsafe {
         core::arch::asm!(
-            "vbroadcasti32x4 zmm5, xmmword ptr [{scalar}]",
+            "vmovq xmm5, {slo}",
+            "vpinsrq xmm5, xmm5, {shi}, 1",
+            "vshufi64x2 zmm5, zmm5, zmm5, 0x00",
             "vpshufd zmm9, zmm5, 0x4e",
             "vpxorq zmm9, zmm9, zmm5",
             "mov {poly:e}, 0x87",
@@ -595,7 +598,8 @@ pub(crate) unsafe fn poly_scale_xor_avx512_vpclmul(
             "vzeroupper",
             dst = inout(reg) dst64 => _,
             src = inout(reg) src64 => _,
-            scalar = in(reg) scalar16,
+            slo = in(reg) scalar_lo,
+            shi = in(reg) scalar_hi,
             inout("rcx") quads => _,
             poly = out(reg) _,
             out("zmm0") _, out("zmm1") _, out("zmm2") _, out("zmm3") _,

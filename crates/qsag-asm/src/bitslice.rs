@@ -81,7 +81,9 @@ pub fn transpose64x256_with_backend(rows: &mut [BitPlane256; 64], backend: SimdB
         let caps = cpuid::probe_capabilities();
         if matches!(
             backend,
-            SimdBackend::X86Avx2Pclmul | SimdBackend::X86Avx2GfniVpclmul
+            SimdBackend::X86Avx2Pclmul
+                | SimdBackend::X86Avx2GfniVpclmul
+                | SimdBackend::X86Avx512GfniVpclmul
         ) && caps.avx2
         {
             // SAFETY: `rows` is 64 * 32 writable bytes and the CPU supports AVX2.
@@ -253,12 +255,41 @@ pub fn gf2_128_scale_xor_with_backend(
     }
     #[cfg(target_arch = "x86_64")]
     {
-        let caps = cpuid::probe_capabilities();
+        let cap_bits = cpuid::probe_capabilities_bits();
+        const AVX512_VPCLMUL_MASK: u32 =
+            cpuid::CAP_AVX512 | cpuid::CAP_VPCLMULQDQ | cpuid::CAP_PCLMULQDQ;
+        if backend == SimdBackend::X86Avx512GfniVpclmul
+            && (cap_bits & AVX512_VPCLMUL_MASK) == AVX512_VPCLMUL_MASK
+        {
+            let quads = dst.len() / 4;
+            let rem = dst.len() % 4;
+            let slo = scalar as u64;
+            let shi = (scalar >> 64) as u64;
+            // SAFETY: `caps.avx512 && caps.vpclmulqdq && caps.pclmulqdq` verified; slices are
+            // equal-length and non-overlapping.
+            unsafe {
+                if quads > 0 {
+                    crate::avx512::poly_scale_xor_avx512_evex(
+                        dst.as_mut_ptr().cast::<u8>(),
+                        src.as_ptr().cast::<u8>(),
+                        slo,
+                        shi,
+                        quads,
+                    );
+                }
+                if rem > 0 {
+                    poly_scale_xor_x86(&mut dst[4 * quads..], &src[4 * quads..], &scalar);
+                }
+            }
+            return;
+        }
+        const AVX2_PCLMUL_MASK: u32 = cpuid::CAP_AVX2 | cpuid::CAP_PCLMULQDQ;
         if matches!(
             backend,
-            SimdBackend::X86Avx2Pclmul | SimdBackend::X86Avx2GfniVpclmul
-        ) && caps.avx2
-            && caps.pclmulqdq
+            SimdBackend::X86Avx2Pclmul
+                | SimdBackend::X86Avx2GfniVpclmul
+                | SimdBackend::X86Avx512GfniVpclmul
+        ) && (cap_bits & AVX2_PCLMUL_MASK) == AVX2_PCLMUL_MASK
         {
             // SAFETY: AVX OS state and PCLMUL are checked. The nonempty slices
             // have equal lengths and cannot overlap; unaligned loads are used.
@@ -445,7 +476,9 @@ pub fn gf2_64x128_clmul_acc_with_backend(
         let caps = cpuid::probe_capabilities();
         if matches!(
             backend,
-            SimdBackend::X86Avx2Pclmul | SimdBackend::X86Avx2GfniVpclmul
+            SimdBackend::X86Avx2Pclmul
+                | SimdBackend::X86Avx2GfniVpclmul
+                | SimdBackend::X86Avx512GfniVpclmul
         ) && caps.avx2
             && caps.pclmulqdq
         {
@@ -506,6 +539,7 @@ pub const XOR_COMBINE_NIBBLES: usize = 16;
 pub type XorCombinePattern = [[u8; XOR_COMBINE_NIBBLES]; XOR_COMBINE_PLANES];
 
 /// Portable [`gf2_xor_combine_planes`].
+#[cfg_attr(target_arch = "x86_64", inline(never))]
 pub fn gf2_xor_combine_planes_portable(
     rows: &[BitPlane256; 64],
     pattern: &XorCombinePattern,
@@ -562,7 +596,9 @@ pub fn gf2_xor_combine_planes_with_backend(
         let caps = cpuid::probe_capabilities();
         if matches!(
             backend,
-            SimdBackend::X86Avx2Pclmul | SimdBackend::X86Avx2GfniVpclmul
+            SimdBackend::X86Avx2Pclmul
+                | SimdBackend::X86Avx2GfniVpclmul
+                | SimdBackend::X86Avx512GfniVpclmul
         ) && caps.avx2
         {
             // SAFETY: the CPU and the OS support AVX2.
@@ -577,6 +613,7 @@ pub fn gf2_xor_combine_planes_with_backend(
 /// One 256-bit register per row and per table entry: a combination costs sixteen
 /// `vpxor ymm, ymm, [table]` for all four columns together.
 #[cfg(target_arch = "x86_64")]
+#[inline(never)]
 #[target_feature(enable = "avx2")]
 unsafe fn xor_combine_planes_avx2(
     rows: &[BitPlane256; 64],
@@ -636,7 +673,44 @@ fn gf2_128_mul_acc_batch_with_caps(
         let acc_ptr = acc.as_mut_ptr().cast::<u8>();
         let a_ptr = a.as_ptr().cast::<u8>();
         let b_ptr = b.as_ptr().cast::<u8>();
-        if backend == SimdBackend::X86Avx2GfniVpclmul && vpclmul_batch_supported(caps) {
+        if backend == SimdBackend::X86Avx512GfniVpclmul
+            && caps.avx512
+            && vpclmul_batch_supported(caps)
+        {
+            let quads = a.len() / 4;
+            let rem = a.len() % 4;
+            let rem_pairs = rem / 2;
+            // SAFETY: `caps.avx512 && vpclmul_batch_supported(caps)` verified; `a` and `b` hold
+            // `4 * quads + 2 * rem_pairs + (rem % 2)` 16-byte elements.
+            unsafe {
+                if quads > 0 {
+                    crate::avx512::gf2_128_mul_acc_avx512_evex(acc_ptr, a_ptr, b_ptr, quads);
+                }
+                if rem_pairs > 0 {
+                    x86::qsag_asm_gf2_128_mul_acc_vpclmul(
+                        acc_ptr,
+                        a_ptr.add(64 * quads),
+                        b_ptr.add(64 * quads),
+                        rem_pairs,
+                    );
+                }
+                if rem % 2 == 1 {
+                    let off = 64 * quads + 32 * rem_pairs;
+                    x86::qsag_asm_gf2_128_mul_acc_pclmul(
+                        acc_ptr,
+                        a_ptr.add(off),
+                        b_ptr.add(off),
+                        1,
+                    );
+                }
+            }
+            return;
+        }
+        if matches!(
+            backend,
+            SimdBackend::X86Avx2GfniVpclmul | SimdBackend::X86Avx512GfniVpclmul
+        ) && vpclmul_batch_supported(caps)
+        {
             let pairs = a.len() / 2;
             // SAFETY: both inputs hold `2 * pairs` (plus at most one) 16-byte elements, `acc`
             // is 16 writable bytes, and the CPU supports AVX2 with VPCLMULQDQ.
@@ -657,7 +731,9 @@ fn gf2_128_mul_acc_batch_with_caps(
         }
         if matches!(
             backend,
-            SimdBackend::X86Avx2Pclmul | SimdBackend::X86Avx2GfniVpclmul
+            SimdBackend::X86Avx2Pclmul
+                | SimdBackend::X86Avx2GfniVpclmul
+                | SimdBackend::X86Avx512GfniVpclmul
         ) && caps.avx2
             && caps.pclmulqdq
         {
@@ -1009,10 +1085,11 @@ mod tests {
         }
     }
 
-    const BACKENDS: [SimdBackend; 4] = [
+    const BACKENDS: [SimdBackend; 5] = [
         SimdBackend::Portable,
         SimdBackend::X86Avx2Pclmul,
         SimdBackend::X86Avx2GfniVpclmul,
+        SimdBackend::X86Avx512GfniVpclmul,
         SimdBackend::Aarch64NeonSha3Pmull,
     ];
 

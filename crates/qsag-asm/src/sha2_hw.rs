@@ -23,6 +23,20 @@ static SHA256_HW_CONSTS: Sha256HwConsts = Sha256HwConsts {
     bswap: [3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12],
 };
 
+/// Compress all full `64`-byte blocks at the front of `data` into `state` without copying,
+/// returning the `< 64`-byte trailing remainder slice.
+#[inline]
+pub fn sha256_compress_bytes<'a>(state: &mut [u32; 8], data: &'a [u8]) -> &'a [u8] {
+    let full_blocks = data.len() / 64;
+    if full_blocks > 0 {
+        // SAFETY: `[u8; 64]` has size 64 and alignment 1, and `full_blocks * 64 <= data.len()`.
+        let blocks =
+            unsafe { core::slice::from_raw_parts(data.as_ptr().cast::<[u8; 64]>(), full_blocks) };
+        sha256_compress_blocks(state, blocks);
+    }
+    &data[full_blocks * 64..]
+}
+
 /// Compress `blocks` (`64` bytes each) into FIPS 180-4 `SHA-256` `state`, dispatching to
 /// hardware `SHA-NI` (`x86_64`) or `FEAT_SHA256` (`aarch64`) when supported.
 #[inline]
@@ -32,9 +46,8 @@ pub fn sha256_compress_blocks(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
     }
     #[cfg(target_arch = "x86_64")]
     {
-        if crate::cpuid::probe_capabilities().sha_ni {
-            // SAFETY: `probe_capabilities().sha_ni` verified `SSSE3 + SSE4.1 + SHA-NI`, and
-            // `blocks` is non-empty.
+        if (crate::cpuid::probe_capabilities_bits() & crate::cpuid::CAP_SHA_NI) != 0 {
+            // SAFETY: `CAP_SHA_NI` verified `SSSE3 + SSE4.1 + SHA-NI`, and `blocks` is non-empty.
             unsafe {
                 sha256_compress_blocks_shani(state, blocks);
             }
@@ -43,10 +56,11 @@ pub fn sha256_compress_blocks(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
     }
     #[cfg(target_arch = "aarch64")]
     {
-        let caps = crate::cpuid::probe_capabilities();
-        if caps.aarch64_neon && caps.aarch64_sha2 {
+        let cap_bits = crate::cpuid::probe_capabilities_bits();
+        const A64_SHA2_MASK: u32 = crate::cpuid::CAP_A64_NEON | crate::cpuid::CAP_A64_SHA2;
+        if (cap_bits & A64_SHA2_MASK) == A64_SHA2_MASK {
             let _dit_guard = crate::cpuid::ensure_aarch64_dit_enabled();
-            // SAFETY: `probe_capabilities()` verified runtime `NEON + FEAT_SHA256`, and
+            // SAFETY: `probe_capabilities_bits()` verified runtime `NEON + FEAT_SHA256`, and
             // `blocks` is non-empty.
             unsafe {
                 sha256_compress_blocks_aarch64_sha2(state, blocks);
