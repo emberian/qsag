@@ -17,7 +17,7 @@ structure OutputValid (profile : RssProduction.Profile) (s : ResourceState) : Pr
   returned : ∀ e ∈ s.returned, RssProduction.partialOutput profile e.1 = .ok e.2
 
 theorem initial_output_valid (profile : RssProduction.Profile) (d : Deployment) :
-    OutputValid profile (resourceInitial profile d) := by
+    OutputValid profile (resourceInitial d) := by
   constructor <;> intro e he <;> cases he
 
 theorem step_output_valid (profile : RssProduction.Profile) (d : Deployment)
@@ -80,14 +80,14 @@ and arbitrary host wire bytes cannot be converted into a successful API output. 
 theorem returned_production_sound (profile : RssProduction.Profile) (d : Deployment)
     (corrupt : List Nat) (cs : List ResourceCommand) (req : SessionScheduleReq)
     (bytes : List UInt8)
-    (he : (req, bytes) ∈ (resourceRun profile d corrupt (resourceInitial profile d) cs).returned) :
+    (he : (req, bytes) ∈ (resourceRun profile d corrupt (resourceInitial d) cs).returned) :
     ∃ sig, RssProduction.sharedSign profile req = some sig ∧
       encodeProductionSigWire profile.params sig = .ok bytes ∧
       decodeProductionSigWire profile.params bytes = .ok sig ∧
       bytes.length = profile.params.wireSigBytes ∧
       verifyProductionPqHashSig cshake256Suite profile.params (RssProduction.enrolledKey profile)
         (RssProduction.payload profile req) sig = true := by
-  have hv := run_output_valid profile d corrupt (resourceInitial profile d) cs
+  have hv := run_output_valid profile d corrupt (resourceInitial d) cs
     (initial_output_valid profile d)
   have ho : RssProduction.partialOutput profile req = .ok bytes := hv.returned (req, bytes) he
   exact RssProduction.partialOutput_sound profile req bytes ho

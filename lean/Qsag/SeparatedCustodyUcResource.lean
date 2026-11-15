@@ -175,8 +175,8 @@ structure ResourceState where
   poisoned : Bool := false
   failures : List (SessionScheduleReq × RssProduction.Failure) := []
 
-def resourceInitial (profile : RssProduction.Profile) (d : Deployment) : ResourceState :=
-  { history := historyInitial profile d }
+def resourceInitial (d : Deployment) : ResourceState :=
+  { history := historyInitial d }
 
 /-- Authenticated generation commit is the storage hybrid's operation. A lost
 activation after commit consumes the leaf/session but never invokes production. -/
@@ -328,7 +328,7 @@ structure Accounted (s : ResourceState) : Prop where
   observed : ∀ e ∈ s.observed, ∃ r ∈ s.durable.reserved, r.request = e.1
 
 theorem initial_accounted (profile : RssProduction.Profile) (d : Deployment) :
-    Accounted (resourceInitial profile d) := by
+    Accounted (resourceInitial d) := by
   constructor <;> intro x hx <;> cases hx
 
 theorem start_accounted (profile : RssProduction.Profile) (d : Deployment)
@@ -404,8 +404,8 @@ theorem run_accounted (profile : RssProduction.Profile) (d : Deployment)
 
 theorem every_observed_wire_has_burn (profile : RssProduction.Profile) (d : Deployment)
     (corrupt : List Nat) (cs : List ResourceCommand) (e : SessionScheduleReq × List UInt8)
-    (he : e ∈ (resourceRun profile d corrupt (resourceInitial profile d) cs).observed) :
-    ∃ r ∈ (resourceRun profile d corrupt (resourceInitial profile d) cs).durable.reserved,
+    (he : e ∈ (resourceRun profile d corrupt (resourceInitial d) cs).observed) :
+    ∃ r ∈ (resourceRun profile d corrupt (resourceInitial d) cs).durable.reserved,
       r.request = e.1 :=
   (run_accounted profile d corrupt _ cs (initial_accounted profile d)).observed e he
 

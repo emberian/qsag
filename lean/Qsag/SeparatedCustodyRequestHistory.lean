@@ -23,7 +23,7 @@ structure HistoryState where
   calls : List InputRecord := []
   shared : SharedHistory
 
-def historyInitial (profile : RssProduction.Profile) (d : Deployment) : HistoryState :=
+def historyInitial (d : Deployment) : HistoryState :=
   ⟨fun i => ⟨{ d.policies i with party := i }, initial⟩, [],
     ⟨{ capacity := d.capacity }, []⟩⟩
 
@@ -64,7 +64,7 @@ structure Generated (profile : RssProduction.Profile) (d : Deployment) (s : Hist
       e.output = (sign d.signer (d.keys i) i r).map (fun sig => ⟨i, r, sig⟩)
   shared : SharedSafe d.capacity s.shared
 
-theorem historyInitial_generated (profile : RssProduction.Profile) (d : Deployment) : Generated profile d (historyInitial profile d) := by
+theorem historyInitial_generated (profile : RssProduction.Profile) (d : Deployment) : Generated profile d (historyInitial d) := by
   refine ⟨(fun i => initial_safe (d.rounds i) (d.caps i)), (fun _ => rfl), ?_, ?_⟩
   · intro i r hm; cases hm
   · exact ⟨rfl, rfl, rfl, .nil, Nat.zero_le _⟩
@@ -144,7 +144,7 @@ theorem historyRun_generated (profile : RssProduction.Profile) (d : Deployment) 
   | cons c cs ih => exact ih _ (historyStep_generated profile d s c h)
 
 def generatedHistory (profile : RssProduction.Profile) (d : Deployment) (cs : List HistoryCommand) : HistoryState :=
-  historyRun profile d (historyInitial profile d) cs
+  historyRun profile d (historyInitial d) cs
 
 theorem generatedHistory_valid (profile : RssProduction.Profile) (d : Deployment) (cs : List HistoryCommand) :
     Generated profile d (generatedHistory profile d cs) :=

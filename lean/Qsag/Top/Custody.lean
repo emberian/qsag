@@ -299,10 +299,10 @@ theorem threshold_durable_feedback_and_resource_burn_chain
     (corrupt : List Nat) (cmds : List Qsag.Custody.RequestPolicy.ResourceCommand)
     (obsPair : Qsag.SessionScheduleReq × List UInt8)
     (hObs : obsPair ∈ (Qsag.Custody.RequestPolicy.resourceRun profile d corrupt
-      (Qsag.Custody.RequestPolicy.resourceInitial profile d) cmds).observed)
+      (Qsag.Custody.RequestPolicy.resourceInitial d) cmds).observed)
     (retReq : Qsag.SessionScheduleReq) (retBytes : List UInt8)
     (hRet : (retReq, retBytes) ∈ (Qsag.Custody.RequestPolicy.resourceRun profile d corrupt
-      (Qsag.Custody.RequestPolicy.resourceInitial profile d) cmds).returned) :
+      (Qsag.Custody.RequestPolicy.resourceInitial d) cmds).returned) :
     Qsag.InteractiveService.PrefixEquivalent
       (Qsag.ThresholdIdealDurableService.shared c)
       (Qsag.ThresholdIdealDurableService.ideal c)
@@ -315,7 +315,7 @@ theorem threshold_durable_feedback_and_resource_burn_chain
     (Qsag.ThresholdIdealDurableService.stepWith c compute sDur .crash).1.nextLeaf = sDur.nextLeaf ∧
     Qsag.ThresholdIdealService.authorized c sSvc reqAuth = true ∧
     (∃ r ∈ (Qsag.Custody.RequestPolicy.resourceRun profile d corrupt
-        (Qsag.Custody.RequestPolicy.resourceInitial profile d) cmds).durable.reserved,
+        (Qsag.Custody.RequestPolicy.resourceInitial d) cmds).durable.reserved,
       r.request = obsPair.1) ∧
     (∃ sig, Qsag.RssProduction.sharedSign profile retReq = some sig ∧
       Qsag.decodeProductionSigWire profile.params retBytes = .ok sig) := by

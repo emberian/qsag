@@ -39,7 +39,7 @@ def constructionCheck : IO Unit := do
   let cs := hist.calls.filterMap (fun e => e.output)
   unless decide (cs.length = 2) && gate profile deployment [] hist input cs do
     throw (IO.userError "contextual production approval quorum failed")
-  let s : ResourceState := { resourceInitial profile deployment with history := hist }
+  let s : ResourceState := { resourceInitial deployment with history := hist }
   let started := start profile deployment [] s input cs true
   unless decide (started.durable.nextLeaf = 1 ∧ started.active = [request] ∧
       started.history.shared.coordinator.spent = 3) do
