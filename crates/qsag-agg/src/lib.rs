@@ -316,13 +316,14 @@ pub use pcs::{
 };
 pub use sig::{
     AggSigProfile, CORDUROY_MAX_STATELESS_SIGS_PER_KEY, Digest4, Digest5, EpochWalSink, SigError,
-    SignerBitmap, SigningMode, StatefulEpochLatch, StatelessBudgetWalSink, ValidatorKeypair,
+    SignerBitmap, SigningMode, StatelessBudgetWalSink, ValidatorKeypair,
     ValidatorPublicKey, ValidatorSignature, bytes32_to_limbs56, compute_committee_root,
     limbs56_to_bytes32_canonical, validate_unique_active_committee, verify_individual_signature,
     verify_signature_batch,
 };
 #[cfg(feature = "std")]
 pub use sig::{FsStatelessBudgetWal, FsWalEpochSink};
+pub use qsag_core::tsw_baggy::{EpochLatchError, MonotonicEpochLatch, StatefulEpochLatch};
 pub use sponge::{FiatShamirTranscript, InstanceBound, RelationBound, Unbound};
 
 /// Canonical 8-byte wire header for [`HemAggregatedProof`] (`v6`: affine monomial `GoldilocksExt4` WHIR).
@@ -1328,25 +1329,25 @@ mod tests {
         let emul = ea * eb;
         assert_eq!(emul.c0.to_canonical_u64(), 18303635595367899322);
         assert_eq!(emul.c1.to_canonical_u64(), 878009080216790377);
-        let einv = ea.inv();
+        let einv = ea.inv().unwrap();
         assert_eq!(einv.c0.to_canonical_u64(), 16277753096187779739);
         assert_eq!(einv.c1.to_canonical_u64(), 5492336065856852107);
 
         let mut p_zero = [Goldilocks::ZERO; 12];
         poseidon2_perm12(&mut p_zero);
         let expected_zero: [u64; 12] = [
-            444626622888223479,
-            10486189390627733761,
-            5399253379101132897,
-            5052010181030417489,
-            6267397916963039069,
-            9245911245446346418,
-            9661705423445490201,
-            787089484585814203,
-            14953692268052641311,
-            11458212182116269477,
-            16934754160153525625,
-            6948793053817514326,
+            17528629447354354351,
+            5014055130248055117,
+            10679077121839038553,
+            431078547345611051,
+            7807009921345120310,
+            2413869689279715014,
+            11875300792986830377,
+            1872634884137602556,
+            15069512080271275672,
+            14253608580209913153,
+            14550618143248480092,
+            107036164978639472,
         ];
         for i in 0..12 {
             assert_eq!(p_zero[i].to_canonical_u64(), expected_zero[i]);
@@ -1357,18 +1358,18 @@ mod tests {
             core::array::from_fn(|i| Goldilocks::from_u64_reduced(i as u64));
         poseidon2_perm12(&mut p_seq);
         let expected_seq: [u64; 12] = [
-            12427618818045938679,
-            15603055080602884714,
-            13440107678219667309,
-            8886947539732114456,
-            14710374340000099479,
-            10111918623281920586,
-            1604190142837255372,
-            14400339433171367428,
-            13181657164602338457,
-            12801330883977696413,
-            8886499513080244401,
-            2541968083255470153,
+            13782584570844608145,
+            13136387643152332171,
+            7171133015474200819,
+            7643370872200861694,
+            14144755201299840503,
+            16470027036684692562,
+            1748465969625202405,
+            1718729118078964347,
+            6141020819996733037,
+            16322330185628708898,
+            11650380702735067362,
+            2734959974607798415,
         ];
         for i in 0..12 {
             assert_eq!(p_seq[i].to_canonical_u64(), expected_seq[i]);
@@ -1376,19 +1377,19 @@ mod tests {
 
         assert_eq!(
             to_hex(&poseidon2_hash32(&[])),
-            "8abe72c9ab75f5a5736f2adb77ab0a4cbaadb680d1456cdca9ef7582512b5a41"
+            "b6a8416a0036177c167477c74bfdca917b0d73c8ba8fcf42a2a1c609dc25b0a2"
         );
         assert_eq!(
             to_hex(&poseidon2_hash32(&[0x00])),
-            "e98bb6735948157ef5953e781afe6ad16f6099fb8dcfba644aae5763552b7530"
+            "744f0f5f11f8caf02d7ec0b559c1b9a162a7c726d68d04166122df851003aa68"
         );
         assert_eq!(
             to_hex(&poseidon2_hash32(&[0x01, 0x02, 0x03])),
-            "c4b4b1aad81585f83e952a2785115170903bd15d5f1a6e70eddb327880678eca"
+            "954faba00031a63ccc79f1476682181123a272f9c2fe782e126ffe1b6a51b2e3"
         );
         assert_eq!(
             to_hex(&poseidon2_hash32(b"qsag-poseidon2-kat")),
-            "b921262f79e02934abe3aa2fb8141a6ed0dc8cae6195540fcfb5b3e62d0dd457"
+            "e49c8c937c0a64c5676aa807fec4fab7d482111a028beb0fdb2ec1ee9432ece5"
         );
 
         let mut abc_digest = [0u8; 32];

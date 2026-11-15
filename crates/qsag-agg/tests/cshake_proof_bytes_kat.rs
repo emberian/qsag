@@ -143,10 +143,11 @@ fn default_config_aggregate_bytes() {
     assert_eq!(digest(&bytes), AGG_K4_DIGEST);
 }
 
-// Measured on the tree at commit 17168b8 (before any non-default regime existed).
+// PCS vectors retain the original default regime. The aggregate vector below
+// additionally pins the canonical Poseidon2 signature/trace profile.
 const SINGLE_NV12_LEN: usize = 97_891;
 const SINGLE_NV12_DIGEST: &str = "0670fbfdd9348c47af1da8c486db306e11c17a8430a9bf09052d179e4dd9730e";
 const BATCH_NV16_LEN: usize = 243_011;
 const BATCH_NV16_DIGEST: &str = "665403b05f370b337bc95db3f6e5990a4217f9e9a72dddc19f64fa155603e13e";
-const AGG_K4_LEN: usize = 270_656;
-const AGG_K4_DIGEST: &str = "d2872230c8b17a97fd974de397b2202c5b59a6007a250ab20a2ae69bf2723f56";
+const AGG_K4_LEN: usize = 270_272;
+const AGG_K4_DIGEST: &str = "b6ccae6c28d0d14a8d3f49cfb3b4aee9762605a863dbef46880a556f7868fca2";

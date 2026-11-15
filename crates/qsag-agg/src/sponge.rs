@@ -7,7 +7,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
-use crate::field::{Goldilocks, GoldilocksExt4};
+use crate::field::{Goldilocks, GoldilocksExt4, GoldilocksOps as _};
 
 // ============================================================================
 // 1. Self-Delimiting LEB128 Multi-Field Framing (`encode_multi_frame`)
@@ -771,6 +771,8 @@ fn apply_m4_base(b: [Goldilocks; 4]) -> [Goldilocks; 4] {
 
 #[inline(always)]
 pub fn poseidon2_apply_me(st: &mut [Goldilocks; 12]) {
+    // M4 tensor P3: transpose lanes, apply P3 tensor M4, transpose back.
+    *st = [st[0], st[3], st[6], st[9], st[1], st[4], st[7], st[10], st[2], st[5], st[8], st[11]];
     let y0 = apply_m4_base([st[0], st[1], st[2], st[3]]);
     let y1 = apply_m4_base([st[4], st[5], st[6], st[7]]);
     let y2 = apply_m4_base([st[8], st[9], st[10], st[11]]);
@@ -790,15 +792,16 @@ pub fn poseidon2_apply_me(st: &mut [Goldilocks; 12]) {
     st[9] = y2[1] + s1;
     st[10] = y2[2] + s2;
     st[11] = y2[3] + s3;
+    *st = [st[0], st[4], st[8], st[1], st[5], st[9], st[2], st[6], st[10], st[3], st[7], st[11]];
 }
 
 /// Unrolled internal diffusion `M_I = I + diag(-3, 0, 1, 3, ..., 1023) + 1*1^T` (`0` muls:
-/// diagonal entries on lanes `0..12` are `-2, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024`).
+/// diagonal entries on lanes `0..12` are `-64, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024`).
 #[inline(always)]
 pub fn poseidon2_apply_mi(st: &mut [Goldilocks; 12]) {
     let s = (((st[0] + st[1]) + (st[2] + st[3])) + ((st[4] + st[5]) + (st[6] + st[7])))
         + ((st[8] + st[9]) + (st[10] + st[11]));
-    st[0] = s - st[0].shl_small::<1>();
+    st[0] = s - st[0].shl_small::<6>();
     st[1] += s;
     st[2] = st[2].shl_small::<1>() + s;
     st[3] = st[3].shl_small::<2>() + s;
@@ -838,6 +841,8 @@ fn apply_m4_ext4(b: [GoldilocksExt4; 4]) -> [GoldilocksExt4; 4] {
 
 #[inline(always)]
 pub fn poseidon2_apply_me_ext4(st: &mut [GoldilocksExt4; 12]) {
+    // M4 tensor P3: transpose lanes, apply P3 tensor M4, transpose back.
+    *st = [st[0], st[3], st[6], st[9], st[1], st[4], st[7], st[10], st[2], st[5], st[8], st[11]];
     let y0 = apply_m4_ext4([st[0], st[1], st[2], st[3]]);
     let y1 = apply_m4_ext4([st[4], st[5], st[6], st[7]]);
     let y2 = apply_m4_ext4([st[8], st[9], st[10], st[11]]);
@@ -857,6 +862,7 @@ pub fn poseidon2_apply_me_ext4(st: &mut [GoldilocksExt4; 12]) {
     st[9] = y2[1] + s1;
     st[10] = y2[2] + s2;
     st[11] = y2[3] + s3;
+    *st = [st[0], st[4], st[8], st[1], st[5], st[9], st[2], st[6], st[10], st[3], st[7], st[11]];
 }
 
 /// Unrolled internal diffusion over `GoldilocksExt4` (`0` muls: shift/add power-of-two diagonal).
@@ -864,7 +870,7 @@ pub fn poseidon2_apply_me_ext4(st: &mut [GoldilocksExt4; 12]) {
 pub fn poseidon2_apply_mi_ext4(st: &mut [GoldilocksExt4; 12]) {
     let s = (((st[0] + st[1]) + (st[2] + st[3])) + ((st[4] + st[5]) + (st[6] + st[7])))
         + ((st[8] + st[9]) + (st[10] + st[11]));
-    st[0] = s - st[0].shl_small::<1>();
+    st[0] = s - st[0].shl_small::<6>();
     st[1] += s;
     st[2] = st[2].shl_small::<1>() + s;
     st[3] = st[3].shl_small::<2>() + s;
@@ -978,7 +984,7 @@ pub fn poseidon2_hash32(msg: &[u8]) -> [u8; 32] {
 }
 
 /// Algebraic 256-bit (4-limb) compression `H_comp(left4, right4, tweak4) -> [Goldilocks; 4]`:
-/// runs `poseidon2_perm12([left4, right4, tweak4])` with Jive/feed-forward `+ left4` so the
+/// runs `poseidon2_perm12([left4, right4, tweak4])` with weighted Jive feed-forward `+ left4 + 2*right4 + 4*tweak4` so the
 /// compression function is non-invertible even though `poseidon2_perm12` is a permutation!
 #[inline]
 pub fn poseidon2_compress12_ff(
@@ -992,10 +998,10 @@ pub fn poseidon2_compress12_ff(
     ];
     poseidon2_perm12(&mut st);
     let out = [
-        st[0] + in0[0],
-        st[1] + in0[1],
-        st[2] + in0[2],
-        st[3] + in0[3],
+        st[0] + in0[0] + in1[0] * Goldilocks::TWO + tweak[0] * Goldilocks::from_u64_reduced(4),
+        st[1] + in0[1] + in1[1] * Goldilocks::TWO + tweak[1] * Goldilocks::from_u64_reduced(4),
+        st[2] + in0[2] + in1[2] * Goldilocks::TWO + tweak[2] * Goldilocks::from_u64_reduced(4),
+        st[3] + in0[3] + in1[3] * Goldilocks::TWO + tweak[3] * Goldilocks::from_u64_reduced(4),
     ];
     qsag_asm::volatile_fill(&mut st, Goldilocks::ZERO);
     qsag_asm::volatile_fill(&mut in0, Goldilocks::ZERO);
@@ -1059,7 +1065,7 @@ pub fn bytes32_to_limbs4_le_canonical(bytes: &[u8; 32]) -> Option<[Goldilocks; 4
     for (i, dst) in out.iter_mut().enumerate() {
         let mut word = [0u8; 8];
         word.copy_from_slice(&bytes[8 * i..8 * (i + 1)]);
-        *dst = Goldilocks::from_le_bytes_canonical(word)?;
+        *dst = Goldilocks::from_le_bytes_canonical(word).ok()?;
     }
     Some(out)
 }
@@ -1190,12 +1196,10 @@ pub fn poseidon2_canopy_root(
 // 4. Typestate Fenzi Instance-Bound Fiat–Shamir Transcript
 // ============================================================================
 
-/// Transcript phase before binding protocol relation (`squeeze` NOT available).
-pub struct Unbound;
-/// Transcript phase after binding relation, before binding public instance (`squeeze` NOT available).
-pub struct RelationBound;
-/// Transcript phase after binding BOTH relation and full public instance (`squeeze` enabled!).
-pub struct InstanceBound;
+// The phase markers are the sealed `qsag-core` typestate: `Unbound` (nothing bound),
+// `RelationBound` (relation bound, instance pending) and `InstanceBound` (both bound; only this
+// phase can absorb prover messages and squeeze challenges).
+pub use qsag_core::sponge::{InstanceBound, RelationBound, TranscriptPhase, Unbound};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TranscriptBackend {
@@ -1212,7 +1216,7 @@ enum TranscriptBackend {
 /// Supports both `cSHAKE256` (default, bit-identical for byte-hash WHIR regimes) and algebraic
 /// Width-12 Rate-8 `Poseidon2` (selected automatically by `bind_relation` when
 /// `schedule.regime.uses_poseidon2_canopy()` is `true`, enabling native in-circuit verification).
-pub struct FiatShamirTranscript<P> {
+pub struct FiatShamirTranscript<P: TranscriptPhase> {
     chain_digest: [u8; 32],
     backend: TranscriptBackend,
     pow_bits: u32,
@@ -1220,7 +1224,7 @@ pub struct FiatShamirTranscript<P> {
     _phase: PhantomData<P>,
 }
 
-impl<P> Clone for FiatShamirTranscript<P> {
+impl<P: TranscriptPhase> Clone for FiatShamirTranscript<P> {
     #[inline]
     fn clone(&self) -> Self {
         Self {
@@ -1758,6 +1762,31 @@ mod internal_matrix_tests {
                 cshake256_pow_u64_single(&POW_MIDSTATE, &chal, 100 + k),
                 exp_u64
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod canonical_compression_tests {
+    use super::*;
+    #[test]
+    fn weighted_jive_kat() {
+        let st: [Goldilocks; 12] = core::array::from_fn(|i| Goldilocks::from_u64_reduced(i as u64));
+        let out = poseidon2_compress12_ff(st[..4].try_into().unwrap(), st[4..8].try_into().unwrap(), st[8..].try_into().unwrap());
+        assert_eq!(out.map(|x| x.to_canonical_u64()), [13782584570844608185, 13136387643152332218, 7171133015474200873, 7643370872200861755]);
+    }
+    #[test]
+    fn external_layer_matches_dense_kronecker_matrix_in_base_and_ext4() {
+        let m4 = [[2,3,1,1],[1,2,3,1],[1,1,2,3],[3,1,1,2]];
+        for j in 0..12 {
+            let mut st = [Goldilocks::ZERO; 12]; st[j] = Goldilocks::ONE;
+            let mut ext = [GoldilocksExt4::ZERO; 12];
+            ext[j] = GoldilocksExt4::from_limbs([Goldilocks::ONE; 4]);
+            poseidon2_apply_me(&mut st); poseidon2_apply_me_ext4(&mut ext);
+            for i in 0..12 {
+                let entry = Goldilocks::from_u64_reduced(m4[i/3][j/3] * if i%3 == j%3 {2} else {1});
+                assert_eq!(st[i], entry); assert_eq!(ext[i].to_limbs(), [entry; 4]);
+            }
         }
     }
 }

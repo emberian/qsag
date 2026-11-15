@@ -7,7 +7,8 @@ use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::field::Goldilocks;
+use crate::field::{Goldilocks, GoldilocksOps as _};
+use qsag_core::tsw_baggy::{EpochLatchError, MonotonicEpochLatch, StatefulEpochLatch as _};
 use crate::sponge::{
     POSEIDON2_CONST_IV, cshake256_32, encode_multi_frame, poseidon2_compress12_ff,
     poseidon2_hash32, poseidon2_perm12,
@@ -161,7 +162,7 @@ pub fn digest4_from_bytes_canonical(bytes: &[u8; 32]) -> Option<Digest4> {
     for i in 0..4 {
         let mut limb = [0u8; 8];
         limb.copy_from_slice(&bytes[8 * i..8 * (i + 1)]);
-        out[i] = Goldilocks::from_le_bytes_canonical(limb)?;
+        out[i] = Goldilocks::from_le_bytes_canonical(limb).ok()?;
     }
     Some(out)
 }
@@ -1306,44 +1307,14 @@ impl StatelessBudgetWalSink for FsStatelessBudgetWal {
     }
 }
 
-/// Non-cloneable stateful `EpochLatch` (`[P0-04]`): enforces monotonic epoch progression and
-/// idempotent crash-retry on `(epoch, mu_bytes)` while strictly forbidding `Clone` fork hazards!
-#[derive(Default, PartialEq, Eq)]
-pub struct StatefulEpochLatch {
-    next_unused_epoch: u32,
-    last_latched: Option<(u32, [u8; 32], Digest4)>,
-}
-
-impl core::fmt::Debug for StatefulEpochLatch {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("StatefulEpochLatch")
-            .field("next_unused_epoch", &self.next_unused_epoch)
-            .field("has_latched_epoch", &self.last_latched.is_some())
-            .finish()
-    }
-}
-
-impl StatefulEpochLatch {
-    pub const fn new() -> Self {
-        Self {
-            next_unused_epoch: 0,
-            last_latched: None,
-        }
-    }
-
-    pub fn next_unused_epoch(&self) -> u32 {
-        self.next_unused_epoch
-    }
-}
-
 /// Non-cloneable validator keypair with redacted `Debug`, `Drop` zeroization, integrated
-/// `StatefulEpochLatch`, and stateless `CORDUROY_MAX_STATELESS_SIGS_PER_KEY` counter (`[P0-04]`).
+/// `qsag-core` `MonotonicEpochLatch`, and stateless `CORDUROY_MAX_STATELESS_SIGS_PER_KEY` counter (`[P0-04]`).
 pub struct ValidatorKeypair {
     sk_seed: Digest4,
     sk_prf: Digest4,
     pub pk: ValidatorPublicKey,
     top_subtree_leaves: Vec<Digest4>,
-    latch: StatefulEpochLatch,
+    latch: MonotonicEpochLatch,
     stateless_sigs_issued: u64,
 }
 
@@ -1353,7 +1324,7 @@ impl core::fmt::Debug for ValidatorKeypair {
             .field("pk", &self.pk)
             .field("sk_seed", &"[REDACTED]")
             .field("sk_prf", &"[REDACTED]")
-            .field("next_unused_epoch", &self.latch.next_unused_epoch)
+            .field("next_unused_epoch", &self.latch.next_epoch())
             .field("stateless_sigs_issued", &self.stateless_sigs_issued)
             .finish()
     }
@@ -1363,10 +1334,6 @@ impl Drop for ValidatorKeypair {
     fn drop(&mut self) {
         qsag_asm::volatile_fill(&mut self.sk_seed, Goldilocks::ZERO);
         qsag_asm::volatile_fill(&mut self.sk_prf, Goldilocks::ZERO);
-        if let Some((_, ref mut mu_b, ref mut r_b)) = self.latch.last_latched {
-            qsag_asm::volatile_fill(mu_b, 0);
-            qsag_asm::volatile_fill(r_b, Goldilocks::ZERO);
-        }
     }
 }
 
@@ -1424,14 +1391,15 @@ impl ValidatorKeypair {
                 pk_root,
             },
             top_subtree_leaves,
-            latch: StatefulEpochLatch::new(),
+            latch: MonotonicEpochLatch::new(0),
             stateless_sigs_issued: 0,
         }
     }
 
     #[inline]
     pub fn next_unused_epoch(&self) -> u32 {
-        self.latch.next_unused_epoch
+        // `sign_stateful` bounds every reserved epoch by `2^JORTS_XMSS_HEIGHT <= u32::MAX`.
+        self.latch.next_epoch() as u32
     }
 
     #[inline]
@@ -1446,23 +1414,23 @@ impl ValidatorKeypair {
         latched_epoch: u32,
         mu_bytes: [u8; 32],
     ) -> Result<(), SigError> {
+        let recovered_next = u64::from(next_unused_epoch);
         if next_unused_epoch == 0
-            || next_unused_epoch < self.latch.next_unused_epoch
-            || (next_unused_epoch == self.latch.next_unused_epoch
+            || recovered_next < self.latch.next_epoch()
+            || (recovered_next == self.latch.next_epoch()
                 && self
                     .latch
-                    .last_latched
-                    .as_ref()
-                    .is_some_and(|(ep, mu, _)| *ep != latched_epoch || *mu != mu_bytes))
+                    .in_flight()
+                    .is_some_and(|(ep, mu)| ep != u64::from(latched_epoch) || mu != mu_bytes))
             || latched_epoch >= next_unused_epoch
             || (next_unused_epoch as usize) > (1usize << JORTS_XMSS_HEIGHT)
         {
             return Err(SigError::WalPersistenceFailed);
         }
-        let mu = bytes32_to_limbs56(&mu_bytes);
-        let r = self.derive_deterministic_r_rand(mu, latched_epoch as u64);
-        self.latch.next_unused_epoch = next_unused_epoch;
-        self.latch.last_latched = Some((latched_epoch, mu_bytes, r));
+        self.latch = MonotonicEpochLatch::from_recovered_wal(
+            recovered_next,
+            Some((u64::from(latched_epoch), mu_bytes)),
+        );
         Ok(())
     }
 
@@ -1640,14 +1608,16 @@ impl ValidatorKeypair {
             return Err(SigError::EpochOutOfBounds);
         }
         let (mu_bytes, mu) = compute_message_mu(&self.pk, msg);
-        if let Some((prev, prev_mu, _)) = self.latch.last_latched {
-            if epoch == prev && prev_mu != mu_bytes {
-                return Err(SigError::EpochReuseDifferentMessage);
-            }
-            if epoch != prev && epoch < self.latch.next_unused_epoch {
-                return Err(SigError::EpochMonotonicityViolation);
-            }
-        }
+        // Refuse before touching the WAL: a different message at the in-flight epoch, or an
+        // epoch the latch has already moved past.
+        let latch_err = |e: EpochLatchError| match e {
+            EpochLatchError::EquivocationRefused => SigError::EpochReuseDifferentMessage,
+            EpochLatchError::StaleEpoch => SigError::EpochMonotonicityViolation,
+            _ => SigError::EpochOutOfBounds,
+        };
+        self.latch
+            .check_reserve_epoch_at(u64::from(epoch), JORTS_XMSS_HEIGHT, &mu_bytes)
+            .map_err(latch_err)?;
         if let Some(sink) = wal {
             sink.persist_latched_epoch(
                 &digest4_to_bytes(&self.pk.pk_root),
@@ -1656,29 +1626,12 @@ impl ValidatorKeypair {
                 &mu_bytes,
             )?;
         }
-        let r_rand = if let Some((prev_ep, prev_mu, cached_r)) = self.latch.last_latched {
-            if epoch == prev_ep {
-                if mu_bytes == prev_mu {
-                    cached_r
-                } else {
-                    return Err(SigError::EpochReuseDifferentMessage);
-                }
-            } else if epoch < self.latch.next_unused_epoch {
-                return Err(SigError::EpochMonotonicityViolation);
-            } else {
-                let next_ep = epoch + 1;
-                let r = self.derive_deterministic_r_rand(mu, epoch as u64);
-                self.latch.next_unused_epoch = next_ep;
-                self.latch.last_latched = Some((epoch, mu_bytes, r));
-                r
-            }
-        } else {
-            let next_ep = epoch + 1;
-            let r = self.derive_deterministic_r_rand(mu, epoch as u64);
-            self.latch.next_unused_epoch = next_ep;
-            self.latch.last_latched = Some((epoch, mu_bytes, r));
-            r
-        };
+        self.latch
+            .reserve_epoch_at(u64::from(epoch), JORTS_XMSS_HEIGHT, &mu_bytes)
+            .map_err(latch_err)?;
+        // `r_rand` is a deterministic function of `(sk_prf, mu, epoch)`, so an idempotent retry
+        // of the in-flight `(epoch, mu)` recomputes the identical value.
+        let r_rand = self.derive_deterministic_r_rand(mu, u64::from(epoch));
 
         let mut tsw_ctr = 0u32;
         let digits = loop {
