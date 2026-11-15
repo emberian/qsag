@@ -274,34 +274,44 @@ impl<T: Transport> Engine<'_, T> {
             }
         }
         let mut output: [Vec<u64>; 25] = core::array::from_fn(|_| Vec::new());
+        struct MaskBatch([[u64; 25]; 8]);
+        impl Drop for MaskBatch {
+            fn drop(&mut self) {
+                ct_zeroize_u64s(self.0.as_flattened_mut());
+            }
+        }
         for batch in pairs.chunks_exact(8) {
-            let mut states = SecretBuffer([initial; 8]);
-            for (state, &(i, j)) in states.iter_mut().zip(batch) {
-                let mut block = SecretBuffer([0u8; 136]);
-                block[..8].copy_from_slice(&2u64.to_le_bytes());
-                block[8..16].copy_from_slice(&32u64.to_le_bytes());
-                block[16..48].copy_from_slice(&self.seeds[subset(i, i)]);
-                block[48..56].copy_from_slice(&42u64.to_le_bytes());
-                block[56..88].copy_from_slice(&self.context);
-                block[88..96].copy_from_slice(&self.layer.to_le_bytes());
-                block[96..98].copy_from_slice(&[i as u8, j as u8]);
-                block[98] = 0x04;
-                block[135] = 0x80;
-                for (word, bytes) in state.iter_mut().zip(block.chunks_exact(8)) {
+            let mut states = MaskBatch([initial; 8]);
+            for (state, &(i, j)) in states.0.iter_mut().zip(batch) {
+                // Two frames: seed[32], context[32] || layer[8] || pair[2].
+                // All 98 framed bytes and the 0x04 suffix fit one rate block.
+                state[0] ^= 2;
+                state[1] ^= 32;
+                for (word, bytes) in state[2..6].iter_mut().zip(self.seeds[subset(i, i)].chunks_exact(8)) {
                     *word ^= u64::from_le_bytes(core::array::from_fn(|b| bytes[b]));
                 }
+                state[6] ^= 42;
+                for (word, bytes) in state[7..11].iter_mut().zip(self.context.chunks_exact(8)) {
+                    *word ^= u64::from_le_bytes(core::array::from_fn(|b| bytes[b]));
+                }
+                state[11] ^= self.layer;
+                state[12] ^= (i as u64) | ((j as u64) << 8) | (4 << 16);
+                state[16] ^= 1 << 63;
                 output[i * SERVERS + j] = Vec::with_capacity(gates);
             }
-            qsag_asm::keccak_f1600_batch(&mut states[..]);
+            qsag_asm::keccak_f1600_batch(&mut states.0[..]);
             // SHAKE256 absorbs the 32-byte framed-hash key, with the original 0x1f suffix.
-            for state in states.iter_mut() {
+            for state in states.0.iter_mut() {
                 state[4..].fill(0);
                 state[4] = 0x1f;
                 state[16] = 0x8000_0000_0000_0000;
             }
-            while batch.iter().any(|&(i, j)| output[i * SERVERS + j].len() < gates) {
-                qsag_asm::keccak_f1600_batch(&mut states[..]);
-                for (state, &(i, j)) in states.iter().zip(batch) {
+            while batch
+                .iter()
+                .any(|&(i, j)| output[i * SERVERS + j].len() < gates)
+            {
+                qsag_asm::keccak_f1600_batch(&mut states.0[..]);
+                for (state, &(i, j)) in states.0.iter().zip(batch) {
                     let values = &mut output[i * SERVERS + j];
                     for &v in &state[..17] {
                         if values.len() < gates && v < GOLDILOCKS_PRIME {
@@ -316,7 +326,8 @@ impl<T: Transport> Engine<'_, T> {
 
     #[cfg(test)]
     fn masks(&self, i: usize, j: usize, gates: usize) -> Vec<u64> {
-        core::mem::take(&mut self.mask_vectors(gates)[i * SERVERS + j])
+        let mut vectors = SecretBuffer(self.mask_vectors(gates));
+        core::mem::take(&mut vectors[i * SERVERS + j])
     }
     fn multiply(&mut self, xs: &[Wire], ys: &[Wire]) -> Result<Vec<Wire>, Error> {
         if xs.len() != ys.len() {
@@ -442,6 +453,92 @@ impl<T: Transport> Engine<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct NoTransport;
+    impl Transport for NoTransport {
+        fn exchange(&mut self, _: [u8; 32], _: [Vec<u8>; 5]) -> Result<[Vec<u8>; 5], Error> {
+            Err(Error::Transport)
+        }
+        fn broadcast(&mut self, _: [u8; 32], _: Vec<u8>) -> Result<[Vec<u8>; 5], Error> {
+            Err(Error::Transport)
+        }
+    }
+
+    #[test]
+    fn batched_masks_match_scalar_streams_at_rate_boundaries() {
+        let seeds = core::array::from_fn(|i| core::array::from_fn(|j| (i * 37 + j) as u8));
+        for party in 0..SERVERS {
+            for layer in [0, 1, u64::MAX] {
+                let engine = Engine {
+                    party,
+                    seeds: &seeds,
+                    context: [0xa7; 32],
+                    layer,
+                    transport: &mut NoTransport,
+                };
+                for gates in [0, 1, 16, 17, 18, 34, 35, 257] {
+                    let actual = SecretBuffer(engine.mask_vectors(gates));
+                    for i in 0..SERVERS {
+                        for j in 0..SERVERS {
+                            if i == party || i == j {
+                                assert!(actual[i * SERVERS + j].is_empty());
+                                continue;
+                            }
+                            let mut context = Vec::from(engine.context);
+                            context.extend_from_slice(&layer.to_le_bytes());
+                            context.extend_from_slice(&[i as u8, j as u8]);
+                            let expected = SecretBuffer(fields(
+                                &seeds[subset(i, i)],
+                                b"QSAG.TOPRF.RESHARE.V2",
+                                &context,
+                                gates,
+                            ));
+                            assert_eq!(actual[i * SERVERS + j], expected.0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "mask throughput benchmark"]
+    fn benchmark_mask_vectors() {
+        let seeds = [[0x31; 32]; 25];
+        let engine = Engine {
+            party: 4,
+            seeds: &seeds,
+            context: [0x62; 32],
+            layer: 17,
+            transport: &mut NoTransport,
+        };
+        for gates in [1, 12, 128] {
+            let start = std::time::Instant::now();
+            for _ in 0..2000 {
+                let masks = SecretBuffer(engine.mask_vectors(gates));
+                core::hint::black_box(&masks);
+            }
+            std::eprintln!("batched masks gates={gates}: {:?}", start.elapsed());
+            let start = std::time::Instant::now();
+            for _ in 0..2000 {
+                for i in 0..4 {
+                    for j in (0..5).filter(|&j| j != i) {
+                        let mut context = Vec::from(engine.context);
+                        context.extend_from_slice(&engine.layer.to_le_bytes());
+                        context.extend_from_slice(&[i as u8, j as u8]);
+                        let masks = SecretBuffer(fields(
+                            &seeds[subset(i, i)],
+                            b"QSAG.TOPRF.RESHARE.V2",
+                            &context,
+                            gates,
+                        ));
+                        core::hint::black_box(&masks);
+                    }
+                }
+            }
+            std::eprintln!("scalar masks gates={gates}: {:?}", start.elapsed());
+        }
+    }
+
     fn honest(recipient: usize, gates: usize, value: impl Fn(usize, usize) -> u64) -> [Vec<u8>; 5] {
         let context = [7; 32];
         core::array::from_fn(|sender| {

@@ -70,6 +70,12 @@ mod durable_ledger;
 #[cfg(feature = "std")]
 pub use durable_ledger::{ExternalMonotoneAnchor, LedgerCheckpoint};
 
+/// Hardware (`TPM 2.0` NV counter) and hypervisor (`ACPI VMGENID` / `boot_id` / inode)
+/// anti-rollback and fork-detection anchors.
+#[cfg(feature = "std")]
+#[forbid(unsafe_code)]
+pub mod anti_rollback;
+
 /// Atomic per-key ceremony resource journal.
 #[cfg(feature = "std")]
 pub mod ceremony_journal;

@@ -841,3 +841,861 @@ pub trait Tpm2Transport: Send + Sync {
 
 /// Character-device transport speaking directly to `/dev/tpmrm0` (the kernel-managed TPM 2.0
 /// resource manager, which isolates transient objects and serializes device access per open fd).
+pub struct DevTpmRm0 {
+    dev: Mutex<File>,
+}
+
+impl DevTpmRm0 {
+    /// Default Linux kernel TPM 2.0 resource-manager device node.
+    pub const DEFAULT_DEVICE_PATH: &'static str = "/dev/tpmrm0";
+
+    /// Open `/dev/tpmrm0` for synchronous command/response exchange.
+    pub fn open_default() -> Result<Self, AntiRollbackError> {
+        Self::open_path(Self::DEFAULT_DEVICE_PATH)
+    }
+
+    /// Open an explicit TPM resource-manager character device path.
+    pub fn open_path(path: impl AsRef<Path>) -> Result<Self, AntiRollbackError> {
+        let meta = fs::symlink_metadata(path.as_ref())?;
+        if meta.file_type().is_symlink() {
+            return Err(AntiRollbackError::ProtocolFramingError(
+                "refusing symlinked TPM2 device path",
+            ));
+        }
+        let file = OpenOptions::new().read(true).write(true).open(path)?;
+        Ok(Self {
+            dev: Mutex::new(file),
+        })
+    }
+}
+
+impl Tpm2Transport for DevTpmRm0 {
+    fn transmit(&self, command: &[u8]) -> Result<Vec<u8>, AntiRollbackError> {
+        let mut guard = self
+            .dev
+            .lock()
+            .map_err(|_| AntiRollbackError::Io(io::ErrorKind::Other))?;
+        guard.write_all(command)?;
+        // Linux `/dev/tpmrm0` delivers the complete response in a single `read()` call.
+        let mut rsp = vec![0u8; MAX_TPM2_RSP_BYTES];
+        let n = loop {
+            match guard.read(&mut rsp) {
+                Ok(n) => break n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(AntiRollbackError::Io(e.kind())),
+            }
+        };
+        if n < 10 {
+            return Err(AntiRollbackError::ProtocolFramingError(
+                "short read from /dev/tpmrm0 (< 10-byte TPM2 header)",
+            ));
+        }
+        rsp.truncate(n);
+        Ok(rsp)
+    }
+}
+
+const TPM_ANCHOR_MAGIC: &[u8; 8] = b"QSTPMNV1";
+const TPM_ANCHOR_RECORD_LEN: usize = 152;
+// Layout (152 bytes):
+//   [0..8]     magic "QSTPMNV1"
+//   [8..12]    nv_index (u32 BE)
+//   [12..16]   auth_handle (u32 BE)
+//   [16..24]   committed_hw_counter (u64 LE)
+//   [24..32]   committed_generation (u64 LE)
+//   [32..64]   committed_tag ([u8; 32])
+//   [64]       has_pending (0 or 1)
+//   [65..72]   reserved ([0u8; 7])
+//   [72..80]   pending_hw_counter (u64 LE)
+//   [80..88]   pending_generation (u64 LE)
+//   [88..120]  pending_tag ([u8; 32])
+//   [120..152] CSHAKE256 MAC ([u8; 32])
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TpmSealedState {
+    committed_hw: u64,
+    committed_cp: LedgerCheckpoint,
+    pending: Option<(u64, LedgerCheckpoint)>,
+}
+
+/// Hardware-backed [`ExternalMonotoneAnchor`] binding [`LedgerCheckpoint`] progression to a
+/// 64-bit TPM 2.0 `TPM_NT_COUNTER` NVRAM index over `/dev/tpmrm0`.
+///
+/// ### Two-Phase Crash-Safe & Zero-Slack Anti-Rollback Protocol
+/// 1. Before issuing `TPM2_NV_Increment`, [`Tpm2NvMonotoneAnchor::advance_checked`] stages
+///    `pending = (hw_counter + 1, next_checkpoint)` in the MAC-authenticated [`LockedRecord`].
+/// 2. It transmits `TPM2_NV_Increment` (`0x0000_0134`) followed by `TPM2_NV_Read` (`0x0000_014E`),
+///    verifying the hardware counter advanced to `hw_counter + 1`.
+/// 3. It finalizes `committed = (hw_counter + 1, next_checkpoint), pending = None`.
+///
+/// On recovery (`load_checked`), the live hardware counter read via `TPM2_NV_Read` MUST match
+/// either `committed.hw_counter` or `pending.hw_counter`. Any disk snapshot restore that rewinds
+/// the local record behind the hardware TPM2 counter (`hw_counter > max(committed, pending)`)
+/// immediately halts with [`AntiRollbackError::RollbackOrForkDetected`].
+pub struct Tpm2NvMonotoneAnchor<T: Tpm2Transport = DevTpmRm0> {
+    transport: T,
+    record: LockedRecord,
+    nv_index: u32,
+    auth_handle: u32,
+    auth_value: [u8; MAX_TPM2_AUTH_BYTES],
+    auth_len: usize,
+    mac_key: [u8; 32],
+}
+
+impl<T: Tpm2Transport> Drop for Tpm2NvMonotoneAnchor<T> {
+    fn drop(&mut self) {
+        wipe_bytes(&mut self.auth_value);
+        wipe_bytes32(&mut self.mac_key);
+    }
+}
+
+impl Tpm2NvMonotoneAnchor<DevTpmRm0> {
+    /// Open `/dev/tpmrm0` and bind `nv_index` (using index-self password authorization) to the
+    /// local sealed state file at `seal_path`.
+    pub fn open_dev_tpmrm0(
+        seal_path: impl Into<PathBuf>,
+        nv_index: u32,
+        nv_password: &[u8],
+        mac_key: [u8; 32],
+    ) -> Result<Self, AntiRollbackError> {
+        let dev = DevTpmRm0::open_default()?;
+        Self::open_with_transport(dev, seal_path, nv_index, nv_index, nv_password, mac_key)
+    }
+}
+
+impl<T: Tpm2Transport> Tpm2NvMonotoneAnchor<T> {
+    /// Construct a [`Tpm2NvMonotoneAnchor`] over any [`Tpm2Transport`] (e.g. [`DevTpmRm0`] or
+    /// deterministic mock hardware in unit tests).
+    pub fn open_with_transport(
+        transport: T,
+        seal_path: impl Into<PathBuf>,
+        auth_handle: u32,
+        nv_index: u32,
+        nv_password: &[u8],
+        mac_key: [u8; 32],
+    ) -> Result<Self, AntiRollbackError> {
+        let key_guard = SecretBuffer(mac_key);
+        if !is_valid_tpm2_nv_index(nv_index) {
+            return Err(AntiRollbackError::ProtocolFramingError(
+                "nv_index handle outside TPM_HT_NV_INDEX (0x01000000..=0x01FFFFFF)",
+            ));
+        }
+        if nv_password.len() > MAX_TPM2_AUTH_BYTES {
+            return Err(AntiRollbackError::ProtocolFramingError(
+                "TPM2 password authorization exceeds 64-byte TPM2B_AUTH limit",
+            ));
+        }
+        let mut auth_buf = SecretBuffer([0u8; MAX_TPM2_AUTH_BYTES]);
+        auth_buf[..nv_password.len()].copy_from_slice(nv_password);
+
+        let record = LockedRecord::acquire(seal_path)?;
+        let owned_key = *key_guard;
+        let owned_auth = *auth_buf;
+        drop(key_guard);
+        drop(auth_buf);
+
+        let this = Self {
+            transport,
+            record,
+            nv_index,
+            auth_handle,
+            auth_value: owned_auth,
+            auth_len: nv_password.len(),
+            mac_key: owned_key,
+        };
+        // Immediately verify hardware counter vs local sealed state on open!
+        let _ = this.load_checked()?;
+        Ok(this)
+    }
+
+    fn auth_slice(&self) -> &[u8] {
+        &self.auth_value[..self.auth_len]
+    }
+
+    /// Read the live 64-bit counter directly from the TPM 2.0 NV index via `TPM2_NV_Read`.
+    pub fn read_hardware_counter(&self) -> Result<u64, AntiRollbackError> {
+        let mut cmd = marshal_tpm2_nv_read_u64_cmd(self.auth_handle, self.nv_index, self.auth_slice())?;
+        let rsp_res = self.transport.transmit(&cmd);
+        wipe_bytes(&mut cmd);
+        let rsp = rsp_res?;
+        parse_tpm2_nv_read_u64_rsp(&rsp)
+    }
+
+    fn increment_hardware_counter(&self) -> Result<(), AntiRollbackError> {
+        let mut cmd = marshal_tpm2_nv_increment_cmd(self.auth_handle, self.nv_index, self.auth_slice())?;
+        let rsp_res = self.transport.transmit(&cmd);
+        wipe_bytes(&mut cmd);
+        let rsp = rsp_res?;
+        parse_tpm2_nv_increment_rsp(&rsp)
+    }
+
+    fn compute_mac(&self, body_without_mac: &[u8]) -> [u8; 32] {
+        let mut xof = Cshake256Xof::new(b"QSAG.TPM2.ANCHOR.MAC/v1");
+        xof.absorb(&self.mac_key);
+        xof.absorb(&self.record.lock_seal());
+        xof.absorb(&self.nv_index.to_be_bytes());
+        xof.absorb(&self.auth_handle.to_be_bytes());
+        xof.absorb(&(body_without_mac.len() as u64).to_le_bytes());
+        xof.absorb(body_without_mac);
+        let mut out = [0u8; 32];
+        xof.squeeze(&mut out);
+        out
+    }
+
+    fn encode_state(&self, st: &TpmSealedState) -> [u8; TPM_ANCHOR_RECORD_LEN] {
+        let mut buf = [0u8; TPM_ANCHOR_RECORD_LEN];
+        buf[..8].copy_from_slice(TPM_ANCHOR_MAGIC);
+        buf[8..12].copy_from_slice(&self.nv_index.to_be_bytes());
+        buf[12..16].copy_from_slice(&self.auth_handle.to_be_bytes());
+        buf[16..24].copy_from_slice(&st.committed_hw.to_le_bytes());
+        buf[24..32].copy_from_slice(&st.committed_cp.generation.to_le_bytes());
+        buf[32..64].copy_from_slice(&st.committed_cp.tag);
+        if let Some((pend_hw, pend_cp)) = st.pending {
+            buf[64] = 1;
+            buf[72..80].copy_from_slice(&pend_hw.to_le_bytes());
+            buf[80..88].copy_from_slice(&pend_cp.generation.to_le_bytes());
+            buf[88..120].copy_from_slice(&pend_cp.tag);
+        }
+        let mac = self.compute_mac(&buf[..120]);
+        buf[120..152].copy_from_slice(&mac);
+        buf
+    }
+
+    fn decode_state(&self, raw: &[u8]) -> Result<TpmSealedState, AntiRollbackError> {
+        if raw.len() != TPM_ANCHOR_RECORD_LEN || &raw[..8] != TPM_ANCHOR_MAGIC {
+            return Err(AntiRollbackError::AuthenticationFailed);
+        }
+        let expected_mac = self.compute_mac(&raw[..120]);
+        let stored_mac: [u8; 32] = raw[120..152]
+            .try_into()
+            .map_err(|_| AntiRollbackError::AuthenticationFailed)?;
+        if !ct_eq_bytes32(&stored_mac, &expected_mac) {
+            return Err(AntiRollbackError::AuthenticationFailed);
+        }
+        let nv_idx = u32::from_be_bytes(raw[8..12].try_into().unwrap());
+        let auth_hdl = u32::from_be_bytes(raw[12..16].try_into().unwrap());
+        if nv_idx != self.nv_index || auth_hdl != self.auth_handle {
+            return Err(AntiRollbackError::AuthenticationFailed);
+        }
+        if raw[65..72] != [0u8; 7] {
+            return Err(AntiRollbackError::AuthenticationFailed);
+        }
+        let committed_hw = u64::from_le_bytes(raw[16..24].try_into().unwrap());
+        let committed_gen = u64::from_le_bytes(raw[24..32].try_into().unwrap());
+        let committed_tag: [u8; 32] = raw[32..64].try_into().unwrap();
+        let pending = match raw[64] {
+            0 => {
+                if raw[72..120] != [0u8; 48] {
+                    return Err(AntiRollbackError::AuthenticationFailed);
+                }
+                None
+            }
+            1 => {
+                let pend_hw = u64::from_le_bytes(raw[72..80].try_into().unwrap());
+                let pend_gen = u64::from_le_bytes(raw[80..88].try_into().unwrap());
+                let pend_tag: [u8; 32] = raw[88..120].try_into().unwrap();
+                if pend_hw != committed_hw.saturating_add(1) || pend_gen <= committed_gen {
+                    return Err(AntiRollbackError::AuthenticationFailed);
+                }
+                Some((
+                    pend_hw,
+                    LedgerCheckpoint {
+                        generation: pend_gen,
+                        tag: pend_tag,
+                    },
+                ))
+            }
+            _ => return Err(AntiRollbackError::AuthenticationFailed),
+        };
+        Ok(TpmSealedState {
+            committed_hw,
+            committed_cp: LedgerCheckpoint {
+                generation: committed_gen,
+                tag: committed_tag,
+            },
+            pending,
+        })
+    }
+
+    fn reconcile_with_hardware(
+        &self,
+        st: TpmSealedState,
+        live_hw: u64,
+    ) -> Result<(u64, LedgerCheckpoint), AntiRollbackError> {
+        if live_hw == st.committed_hw {
+            return Ok((st.committed_hw, st.committed_cp));
+        }
+        if let Some((pend_hw, pend_cp)) = st.pending
+            && live_hw == pend_hw
+        {
+            return Ok((pend_hw, pend_cp));
+        }
+        if live_hw > st.committed_hw {
+            return Err(AntiRollbackError::RollbackOrForkDetected(
+                "local custody state lags TPM2 NV monotonic counter (disk rollback detected)",
+            ));
+        }
+        Err(AntiRollbackError::RollbackOrForkDetected(
+            "TPM2 NV counter regressed below sealed baseline (NVRAM reset or wrong TPM)",
+        ))
+    }
+
+    /// Authenticate local sealed state against the live TPM 2.0 hardware NV counter.
+    pub fn load_checked(&self) -> Result<Option<LedgerCheckpoint>, AntiRollbackError> {
+        let live_hw = self.read_hardware_counter()?;
+        let raw = match self.record.read_bounded(TPM_ANCHOR_RECORD_LEN) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound && self.record.is_fresh() => {
+                return Ok(None);
+            }
+            Err(e) => return Err(AntiRollbackError::Io(e.kind())),
+        };
+        let st = self.decode_state(&raw)?;
+        let (_hw, cp) = self.reconcile_with_hardware(st, live_hw)?;
+        Ok(Some(cp))
+    }
+
+    /// Atomically increment the TPM 2.0 hardware NV counter and seal `checkpoint`.
+    pub fn advance_checked(&self, checkpoint: LedgerCheckpoint) -> Result<(), AntiRollbackError> {
+        let live_hw = self.read_hardware_counter()?;
+        match self.record.read_bounded(TPM_ANCHOR_RECORD_LEN) {
+            Ok(raw) => {
+                let st = self.decode_state(&raw)?;
+                let (active_hw, active_cp) = self.reconcile_with_hardware(st, live_hw)?;
+                if checkpoint.generation < active_cp.generation {
+                    return Err(AntiRollbackError::RollbackOrForkDetected(
+                        "checkpoint generation regressed below TPM2-sealed generation",
+                    ));
+                }
+                if checkpoint.generation == active_cp.generation {
+                    if !ct_eq_bytes32(&checkpoint.tag, &active_cp.tag) {
+                        return Err(AntiRollbackError::RollbackOrForkDetected(
+                            "divergent checkpoint tag at equal TPM2 generation",
+                        ));
+                    }
+                    // If `active_cp` came from a crash-interrupted `pending` slot whose TPM2
+                    // increment already succeeded, finalize it cleanly without re-incrementing.
+                    if st.pending.is_some() && active_hw != st.committed_hw {
+                        let finalized = TpmSealedState {
+                            committed_hw: active_hw,
+                            committed_cp: active_cp,
+                            pending: None,
+                        };
+                        self.record.replace(&self.encode_state(&finalized))?;
+                    }
+                    return Ok(());
+                }
+
+                let next_hw = active_hw
+                    .checked_add(1)
+                    .ok_or(AntiRollbackError::ProtocolFramingError(
+                        "TPM2 64-bit NV counter exhausted",
+                    ))?;
+
+                // Phase 1: Stage pending `(next_hw, checkpoint)` to durable disk BEFORE
+                // incrementing the irreversible TPM2 NV counter.
+                let staged = TpmSealedState {
+                    committed_hw: active_hw,
+                    committed_cp: active_cp,
+                    pending: Some((next_hw, checkpoint)),
+                };
+                self.record.replace(&self.encode_state(&staged))?;
+
+                // Phase 2: Increment hardware TPM2 NV counter and read-back verify `next_hw`.
+                self.increment_hardware_counter()?;
+                let after_hw = self.read_hardware_counter()?;
+                if after_hw != next_hw {
+                    return Err(AntiRollbackError::RollbackOrForkDetected(
+                        "concurrent or out-of-band TPM2 NV counter mutation during commit",
+                    ));
+                }
+
+                // Phase 3: Finalize `committed = (next_hw, checkpoint), pending = None`.
+                let finalized = TpmSealedState {
+                    committed_hw: next_hw,
+                    committed_cp: checkpoint,
+                    pending: None,
+                };
+                self.record.replace(&self.encode_state(&finalized))?;
+                Ok(())
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound && self.record.is_fresh() => {
+                // First provisioning: increment TPM2 NV counter once from `live_hw -> live_hw + 1`
+                // so a deleted/re-created seal directory cannot silently re-adopt `live_hw` after
+                // signing under a previous seal!
+                let next_hw = live_hw
+                    .checked_add(1)
+                    .ok_or(AntiRollbackError::ProtocolFramingError(
+                        "TPM2 64-bit NV counter exhausted",
+                    ))?;
+                self.increment_hardware_counter()?;
+                let after_hw = self.read_hardware_counter()?;
+                if after_hw != next_hw {
+                    return Err(AntiRollbackError::RollbackOrForkDetected(
+                        "unexpected TPM2 NV counter jump during initial anchor provisioning",
+                    ));
+                }
+                let initial = TpmSealedState {
+                    committed_hw: next_hw,
+                    committed_cp: checkpoint,
+                    pending: None,
+                };
+                self.record.replace(&self.encode_state(&initial))?;
+                Ok(())
+            }
+            Err(e) => Err(AntiRollbackError::Io(e.kind())),
+        }
+    }
+}
+
+impl<T: Tpm2Transport> ExternalMonotoneAnchor for Tpm2NvMonotoneAnchor<T> {
+    fn load(&self) -> io::Result<Option<LedgerCheckpoint>> {
+        self.load_checked().map_err(AntiRollbackError::into_io_error)
+    }
+
+    fn advance(&self, checkpoint: LedgerCheckpoint) -> io::Result<()> {
+        self.advance_checked(checkpoint)
+            .map_err(AntiRollbackError::into_io_error)
+    }
+}
+
+/// Composite [`ExternalMonotoneAnchor`] chaining two independent rollback/fork barriers
+/// (typically [`HypervisorGenerationAnchor`] for instant VM/volume fork detection plus
+/// [`Tpm2NvMonotoneAnchor`] for hardware NVRAM counter monotonicity).
+pub struct CompositeAntiRollbackAnchor<A: ExternalMonotoneAnchor, B: ExternalMonotoneAnchor> {
+    primary: A,
+    secondary: B,
+}
+
+impl<A: ExternalMonotoneAnchor, B: ExternalMonotoneAnchor> CompositeAntiRollbackAnchor<A, B> {
+    pub const fn new(primary: A, secondary: B) -> Self {
+        Self { primary, secondary }
+    }
+}
+
+impl<A: ExternalMonotoneAnchor, B: ExternalMonotoneAnchor> ExternalMonotoneAnchor
+    for CompositeAntiRollbackAnchor<A, B>
+{
+    fn load(&self) -> io::Result<Option<LedgerCheckpoint>> {
+        let a = self.primary.load()?;
+        let b = self.secondary.load()?;
+        match (a, b) {
+            (None, None) => Ok(None),
+            (Some(cp), None) | (None, Some(cp)) => Ok(Some(cp)),
+            (Some(cp_a), Some(cp_b)) => {
+                if cp_a.generation == cp_b.generation {
+                    if !ct_eq_bytes32(&cp_a.tag, &cp_b.tag) {
+                        return Err(AntiRollbackError::RollbackOrForkDetected(
+                            "composite anchors disagree on checkpoint tag at equal generation",
+                        )
+                        .into_io_error());
+                    }
+                    Ok(Some(cp_a))
+                } else if cp_a.generation > cp_b.generation {
+                    Ok(Some(cp_a))
+                } else {
+                    Ok(Some(cp_b))
+                }
+            }
+        }
+    }
+
+    fn advance(&self, checkpoint: LedgerCheckpoint) -> io::Result<()> {
+        self.primary.advance(checkpoint)?;
+        self.secondary.advance(checkpoint)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let dir = std::env::temp_dir().join(std::format!(
+                "qsag-antirollback-{tag}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Deterministic in-memory TPM 2.0 NV counter emulator validating every incoming command's
+    /// exact big-endian header, commandCode, handles, and `TPM_RS_PW` authorization framing.
+    #[derive(Clone)]
+    struct MockTpm2Device {
+        state: Arc<Mutex<MockTpmState>>,
+    }
+
+    struct MockTpmState {
+        nv_index: u32,
+        expected_auth: Vec<u8>,
+        counter: u64,
+        forced_rc: Option<u32>,
+        recorded_cmds: Vec<Vec<u8>>,
+    }
+
+    impl MockTpm2Device {
+        fn new(nv_index: u32, auth: &[u8], initial_counter: u64) -> Self {
+            Self {
+                state: Arc::new(Mutex::new(MockTpmState {
+                    nv_index,
+                    expected_auth: auth.to_vec(),
+                    counter: initial_counter,
+                    forced_rc: None,
+                    recorded_cmds: Vec::new(),
+                })),
+            }
+        }
+
+        fn counter(&self) -> u64 {
+            self.state.lock().unwrap().counter
+        }
+
+        fn bump_out_of_band(&self, delta: u64) {
+            self.state.lock().unwrap().counter += delta;
+        }
+
+        fn set_forced_rc(&self, rc: Option<u32>) {
+            self.state.lock().unwrap().forced_rc = rc;
+        }
+    }
+
+    fn build_session_rsp(params: &[u8]) -> Vec<u8> {
+        // 10B header + 4B paramSize + params + 5B minimal TPMS_AUTH_RESPONSE (nonce=0, attr=1, hmac=0)
+        let total_len = (10 + 4 + params.len() + 5) as u32;
+        let mut rsp = Vec::with_capacity(total_len as usize);
+        rsp.extend_from_slice(&TPM_ST_SESSIONS.to_be_bytes());
+        rsp.extend_from_slice(&total_len.to_be_bytes());
+        rsp.extend_from_slice(&TPM_RC_SUCCESS.to_be_bytes());
+        rsp.extend_from_slice(&(params.len() as u32).to_be_bytes());
+        rsp.extend_from_slice(params);
+        rsp.extend_from_slice(&0u16.to_be_bytes()); // nonceTPM.size = 0
+        rsp.push(0x01); // continueSession = 1
+        rsp.extend_from_slice(&0u16.to_be_bytes()); // hmac.size = 0
+        rsp
+    }
+
+    impl Tpm2Transport for MockTpm2Device {
+        fn transmit(&self, cmd: &[u8]) -> Result<Vec<u8>, AntiRollbackError> {
+            let mut st = self.state.lock().unwrap();
+            st.recorded_cmds.push(cmd.to_vec());
+            if let Some(rc) = st.forced_rc {
+                let mut err_rsp = Vec::with_capacity(10);
+                err_rsp.extend_from_slice(&TPM_ST_NO_SESSIONS.to_be_bytes());
+                err_rsp.extend_from_slice(&10u32.to_be_bytes());
+                err_rsp.extend_from_slice(&rc.to_be_bytes());
+                return Ok(err_rsp);
+            }
+            assert!(cmd.len() >= 27, "command shorter than session frame");
+            let tag = u16::from_be_bytes([cmd[0], cmd[1]]);
+            let sz = u32::from_be_bytes([cmd[2], cmd[3], cmd[4], cmd[5]]) as usize;
+            let cc = u32::from_be_bytes([cmd[6], cmd[7], cmd[8], cmd[9]]);
+            assert_eq!(tag, TPM_ST_SESSIONS);
+            assert_eq!(sz, cmd.len());
+            let _auth_handle = u32::from_be_bytes([cmd[10], cmd[11], cmd[12], cmd[13]]);
+            let nv_idx = u32::from_be_bytes([cmd[14], cmd[15], cmd[16], cmd[17]]);
+            assert_eq!(nv_idx, st.nv_index);
+            let auth_size = u32::from_be_bytes([cmd[18], cmd[19], cmd[20], cmd[21]]) as usize;
+            let session_handle = u32::from_be_bytes([cmd[22], cmd[23], cmd[24], cmd[25]]);
+            assert_eq!(session_handle, TPM_RS_PW);
+            let nonce_sz = u16::from_be_bytes([cmd[26], cmd[27]]) as usize;
+            assert_eq!(nonce_sz, 0);
+            assert_eq!(cmd[28], 0x01);
+            let hmac_sz = u16::from_be_bytes([cmd[29], cmd[30]]) as usize;
+            assert_eq!(auth_size, 9 + hmac_sz);
+            assert_eq!(&cmd[31..31 + hmac_sz], st.expected_auth.as_slice());
+
+            let params = &cmd[31 + hmac_sz..];
+            match cc {
+                TPM_CC_NV_INCREMENT => {
+                    assert!(params.is_empty());
+                    st.counter = st.counter.checked_add(1).unwrap();
+                    Ok(build_session_rsp(&[]))
+                }
+                TPM_CC_NV_READ => {
+                    assert_eq!(params, &[0x00, 0x08, 0x00, 0x00]);
+                    let mut out_params = [0u8; 10];
+                    out_params[..2].copy_from_slice(&8u16.to_be_bytes());
+                    out_params[2..10].copy_from_slice(&st.counter.to_be_bytes());
+                    Ok(build_session_rsp(&out_params))
+                }
+                other => panic!("unexpected TPM_CC 0x{other:08x}"),
+            }
+        }
+    }
+
+    #[test]
+    fn tpm2_packet_marshaling_matches_normative_big_endian_wire_bytes() {
+        let inc = marshal_tpm2_nv_increment_cmd(0x0150_0007, 0x0150_0007, b"").unwrap();
+        assert_eq!(
+            inc,
+            vec![
+                0x80, 0x02, // TPM_ST_SESSIONS
+                0x00, 0x00, 0x00, 0x1F, // commandSize = 31
+                0x00, 0x00, 0x01, 0x34, // TPM_CC_NV_Increment (0x00000134)
+                0x01, 0x50, 0x00, 0x07, // authHandle
+                0x01, 0x50, 0x00, 0x07, // nvIndex
+                0x00, 0x00, 0x00, 0x09, // authorizationSize = 9
+                0x40, 0x00, 0x00, 0x09, // TPM_RS_PW (0x40000009)
+                0x00, 0x00, // nonce.size = 0
+                0x01, // sessionAttributes = continueSession
+                0x00, 0x00, // hmac.size = 0
+            ]
+        );
+
+        let rd = marshal_tpm2_nv_read_u64_cmd(TPM_RH_OWNER, 0x0150_0007, b"pw").unwrap();
+        assert_eq!(
+            rd,
+            vec![
+                0x80, 0x02, // TPM_ST_SESSIONS
+                0x00, 0x00, 0x00, 0x25, // commandSize = 37
+                0x00, 0x00, 0x01, 0x4E, // TPM_CC_NV_Read (0x0000014E)
+                0x40, 0x00, 0x00, 0x01, // authHandle = TPM_RH_OWNER
+                0x01, 0x50, 0x00, 0x07, // nvIndex
+                0x00, 0x00, 0x00, 0x0B, // authorizationSize = 11
+                0x40, 0x00, 0x00, 0x09, // TPM_RS_PW
+                0x00, 0x00, // nonce.size = 0
+                0x01, // continueSession
+                0x00, 0x02, b'p', b'w', // TPM2B_AUTH = "pw"
+                0x00, 0x08, // size = 8
+                0x00, 0x00, // offset = 0
+            ]
+        );
+
+        // Non-NV handle must fail closed.
+        assert!(matches!(
+            marshal_tpm2_nv_increment_cmd(0x8100_0001, 0x8100_0001, b""),
+            Err(AntiRollbackError::ProtocolFramingError(_))
+        ));
+    }
+
+    #[test]
+    fn tpm2_nv_anchor_detects_disk_snapshot_rollback_and_recovers_pending_crash() {
+        let tmp = TempDir::new("tpm2");
+        let seal_path = tmp.0.join("tpm_anchor");
+        let nv_index = 0x0150_0042;
+        let mac_key = [0x5Au8; 32];
+        let tpm = MockTpm2Device::new(nv_index, b"custody-pw", 100);
+
+        let anchor = Tpm2NvMonotoneAnchor::open_with_transport(
+            tpm.clone(),
+            &seal_path,
+            nv_index,
+            nv_index,
+            b"custody-pw",
+            mac_key,
+        )
+        .unwrap();
+        assert_eq!(anchor.load_checked().unwrap(), None);
+
+        let cp1 = LedgerCheckpoint {
+            generation: 1,
+            tag: [0x11; 32],
+        };
+        let cp2 = LedgerCheckpoint {
+            generation: 2,
+            tag: [0x22; 32],
+        };
+        anchor.advance_checked(cp1).unwrap();
+        assert_eq!(tpm.counter(), 101);
+        assert_eq!(anchor.load_checked().unwrap(), Some(cp1));
+
+        // Snapshot the on-disk seal record at generation 1 (hardware counter = 101).
+        let disk_snapshot_bytes = fs::read(&seal_path).unwrap();
+
+        // Advance to generation 2 (hardware counter -> 102).
+        anchor.advance_checked(cp2).unwrap();
+        assert_eq!(tpm.counter(), 102);
+        assert_eq!(anchor.load_checked().unwrap(), Some(cp2));
+        drop(anchor);
+
+        // Simulate attacker restoring disk snapshot back to generation 1 while hardware TPM2
+        // remains at 102: reopen MUST immediately halt with RollbackOrForkDetected!
+        fs::write(&seal_path, &disk_snapshot_bytes).unwrap();
+        let reopened = Tpm2NvMonotoneAnchor::open_with_transport(
+            tpm.clone(),
+            &seal_path,
+            nv_index,
+            nv_index,
+            b"custody-pw",
+            mac_key,
+        );
+        assert!(matches!(
+            reopened,
+            Err(AntiRollbackError::RollbackOrForkDetected(_))
+        ));
+
+        // Simulate crash mid-commit: stage `pending = (103, cp3)` in a fresh anchor, bump TPM2
+        // to 103, and verify recovery promotes `cp3` cleanly without bricking!
+        let seal_path2 = tmp.0.join("tpm_anchor_crash");
+        let anchor2 = Tpm2NvMonotoneAnchor::open_with_transport(
+            tpm.clone(),
+            &seal_path2,
+            nv_index,
+            nv_index,
+            b"custody-pw",
+            mac_key,
+        )
+        .unwrap();
+        anchor2.advance_checked(cp2).unwrap();
+        assert_eq!(tpm.counter(), 103);
+        let cp3 = LedgerCheckpoint {
+            generation: 3,
+            tag: [0x33; 32],
+        };
+        let staged = TpmSealedState {
+            committed_hw: 103,
+            committed_cp: cp2,
+            pending: Some((104, cp3)),
+        };
+        anchor2
+            .record
+            .replace(&anchor2.encode_state(&staged))
+            .unwrap();
+        tpm.bump_out_of_band(1); // hardware counter = 104 (TPM2_NV_Increment succeeded right before power loss)
+        drop(anchor2);
+
+        let recovered = Tpm2NvMonotoneAnchor::open_with_transport(
+            tpm.clone(),
+            &seal_path2,
+            nv_index,
+            nv_index,
+            b"custody-pw",
+            mac_key,
+        )
+        .unwrap();
+        assert_eq!(recovered.load_checked().unwrap(), Some(cp3));
+
+        // TPM2 hardware error response propagates typed `Tpm2ResponseError`.
+        tpm.set_forced_rc(Some(0x0000_014A));
+        assert_eq!(
+            recovered.load_checked(),
+            Err(AntiRollbackError::Tpm2ResponseError(0x0000_014A))
+        );
+    }
+
+    #[derive(Clone)]
+    struct MockVmGenSource {
+        snap: Arc<Mutex<VmGenSnapshot>>,
+    }
+
+    impl VmGenSource for MockVmGenSource {
+        fn sample(&self, _guarded_target: &Path) -> Result<VmGenSnapshot, AntiRollbackError> {
+            Ok(*self.snap.lock().unwrap())
+        }
+    }
+
+    #[test]
+    fn vmgenid_anchor_halts_on_snapshot_fork_volume_clone_and_pinned_boot_drift() {
+        let tmp = TempDir::new("vmgen");
+        let wal_file = tmp.0.join("fts.wal");
+        fs::write(&wal_file, b"header").unwrap();
+        let anchor_file = tmp.0.join("vmgen.anchor");
+
+        let initial_snap = VmGenSnapshot {
+            vmgenid: Some(*b"0123456789abcdef"),
+            boot_id: Some(*b"boot-session-001"),
+            target_dev: 2049,
+            target_ino: 99123,
+            target_ctime_sec: 1_700_000_000,
+        };
+        let src = MockVmGenSource {
+            snap: Arc::new(Mutex::new(initial_snap)),
+        };
+        let anchor = HypervisorGenerationAnchor::open_or_create_with_source(
+            &anchor_file,
+            &wal_file,
+            [0x77; 32],
+            VmGenPolicy::STRICT_HYPERVISOR,
+            src.clone(),
+        )
+        .unwrap();
+
+        let cp1 = LedgerCheckpoint {
+            generation: 1,
+            tag: [0xAB; 32],
+        };
+        anchor.advance_checked(cp1).unwrap();
+        assert_eq!(anchor.load_checked().unwrap(), Some(cp1));
+
+        // 1. Normal guest reboot: `boot_id` rotates, `vmgenid` and `(dev, ino)` stay identical.
+        src.snap.lock().unwrap().boot_id = Some(*b"boot-session-002");
+        assert_eq!(anchor.load_checked().unwrap(), Some(cp1));
+
+        // 2. Hypervisor VM snapshot restore / live fork: `vmgenid` changes by 1 bit -> HALT!
+        src.snap.lock().unwrap().vmgenid = Some(*b"0123456789abcdee");
+        assert!(matches!(
+            anchor.load_checked(),
+            Err(AntiRollbackError::RollbackOrForkDetected(_))
+        ));
+        assert!(matches!(
+            anchor.advance_checked(LedgerCheckpoint {
+                generation: 2,
+                tag: [0xCD; 32],
+            }),
+            Err(AntiRollbackError::RollbackOrForkDetected(_))
+        ));
+
+        // Restore valid vmgenid, then simulate EBS volume clone / file copy (`target_ino` changes) -> HALT!
+        src.snap.lock().unwrap().vmgenid = Some(*b"0123456789abcdef");
+        assert_eq!(anchor.load_checked().unwrap(), Some(cp1));
+        src.snap.lock().unwrap().target_ino = 99124;
+        assert!(matches!(
+            anchor.load_checked(),
+            Err(AntiRollbackError::RollbackOrForkDetected(_))
+        ));
+
+        // 3. Pinned boot session (container fork guard): `boot_id` change halts even without VMGENID.
+        let pinned_anchor_file = tmp.0.join("pinned.anchor");
+        let container_src = MockVmGenSource {
+            snap: Arc::new(Mutex::new(VmGenSnapshot {
+                vmgenid: None,
+                boot_id: Some(*b"container-boot-1"),
+                target_dev: 50,
+                target_ino: 777,
+                target_ctime_sec: 1_700_000_100,
+            })),
+        };
+        let pinned = HypervisorGenerationAnchor::open_or_create_with_source(
+            &pinned_anchor_file,
+            &wal_file,
+            [0x88; 32],
+            VmGenPolicy::PINNED_BOOT_SESSION,
+            container_src.clone(),
+        )
+        .unwrap();
+        pinned.advance_checked(cp1).unwrap();
+        container_src.snap.lock().unwrap().boot_id = Some(*b"container-boot-2");
+        assert!(matches!(
+            pinned.load_checked(),
+            Err(AntiRollbackError::RollbackOrForkDetected(_))
+        ));
+    }
+
+    #[test]
+    fn parse_id128_accepts_uuid_text_and_raw_16_bytes() {
+        let uuid = b"f47ac10b-58cc-4372-a567-0e02b2c3d479\n";
+        let parsed = parse_id128_bytes(uuid).unwrap();
+        assert_eq!(
+            parsed,
+            [
+                0xf4, 0x7a, 0xc1, 0x0b, 0x58, 0xcc, 0x43, 0x72, 0xa5, 0x67, 0x0e, 0x02, 0xb2, 0xc3,
+                0xd4, 0x79
+            ]
+        );
+        assert_eq!(parse_id128_bytes(&parsed).unwrap(), parsed);
+        assert!(parse_id128_bytes(b"short").is_err());
+    }
+}
