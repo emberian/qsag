@@ -22,18 +22,18 @@ crash-resilient durable release, and an upper-hypertree reduction with an explic
    derivation reduction and primitive game bounds.
 -/
 
-public import Qsag.Math.Constructive
+public import Qsag.Tactic.Prelude
 public import Qsag.Math.Goldilocks
-public import Qsag.Math.BinaryTower
-public import Qsag.Oracle.UcGames
+public import Qsag.Math.Gf2Pow128
+public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Exec.SimulationSpine
 public import Qsag.Protocol.Threshold.MaliciousSecurity
 public import Qsag.Exec.InteractiveUcEngine
 public import Qsag.Protocol.Threshold.RssSlhFullSecurity
 public import Qsag.Protocol.Threshold.Rss256TwoPassProductProof
 
-import all Qsag.Oracle.UcGames
-import all Qsag.Math.BinaryTower
+import all Qsag.Protocol.Aggregation.UcGames
+import all Qsag.Math.Gf2Pow128
 import all Qsag.Protocol.Threshold.MaliciousSecurity
 import all Qsag.Exec.InteractiveUcEngine
 import all Qsag.Protocol.Threshold.RssSlhFullSecurity
@@ -178,7 +178,7 @@ theorem wotsCDibits128_msb_sanity :
 /-- Valid 256-bit `WOTS+C` codeword (`w = 4, v = 128, S = 192`). -/
 structure WotsC256Digits where
   digits : Fin 128 → Fin 4
-  sum_eq : finSum 128 (fun i => (digits i).val) = 192
+  sum_eq : qsum 128 (fun i => (digits i).val) = 192
 
 theorem WotsC256Digits.ext {d₁ d₂ : WotsC256Digits}
     (h : ∀ i : Fin 128, d₁.digits i = d₂.digits i) : d₁ = d₂ := by
@@ -213,12 +213,12 @@ instance constructiveWotsC256DigitsDecEq : DecidableEq WotsC256Digits :=
     | .inr hAll => .isTrue (WotsC256Digits.ext hAll)
 
 /-- Sum of 128 base-4 digits (`0 Classical.choice`). Sealed `[irreducible]` after `wotsC256DigitSum_eq`
-    so `whnf` never unfolds the 128-term `finSum` during elaboration or kernel `Decidable` synthesis! -/
+    so `whnf` never unfolds the 128-term `qsum` during elaboration or kernel `Decidable` synthesis! -/
 def wotsC256DigitSum (f : Fin 128 → Fin 4) : Nat :=
-  finSum 128 (fun i => (f i).val)
+  qsum 128 (fun i => (f i).val)
 
 theorem wotsC256DigitSum_eq (f : Fin 128 → Fin 4) :
-    wotsC256DigitSum f = finSum 128 (fun i => (f i).val) := by
+    wotsC256DigitSum f = qsum 128 (fun i => (f i).val) := by
   unfold wotsC256DigitSum
   exact Eq.refl _
 
@@ -246,7 +246,7 @@ theorem wotsC256DecodeValidDigest_some_digits {dig : BitVec 256} {d : WotsC256Di
     cases h
 
 theorem wotsC256DecodeValidDigest_of_sum_ne {dig : BitVec 256}
-    (hNe : finSum 128 (fun i => (wotsC256DigitOfDigest dig i).val) ≠ 192) :
+    (hNe : qsum 128 (fun i => (wotsC256DigitOfDigest dig i).val) ≠ 192) :
     wotsC256DecodeValidDigest dig = none := by
   unfold wotsC256DecodeValidDigest
   dsimp only
@@ -353,25 +353,25 @@ private theorem add_eq_of_le_parts {a b c d : Nat}
   rw [hdc0, Nat.add_zero] at hd
   exact ⟨hb.symm, hd.symm⟩
 
-private theorem finSum_eq_of_le_pointwise_eq :
+private theorem qsum_eq_of_le_pointwise_eq :
     ∀ (n : Nat) (f g : Fin n → Nat),
       (∀ i : Fin n, f i ≤ g i) →
-      finSum n f = finSum n g →
+      qsum n f = qsum n g →
       ∀ i : Fin n, f i = g i
   | 0, _, _, _, _, i => Fin.elim0 i
   | n + 1, f, g, hLe, hSum, i => by
-    simp only [finSum] at hSum
+    simp only [qsum] at hSum
     let i0 : Fin (n + 1) := ⟨0, Nat.zero_lt_succ n⟩
     let f' : Fin n → Nat := fun j => f ⟨j.val + 1, Nat.succ_lt_succ j.isLt⟩
     let g' : Fin n → Nat := fun j => g ⟨j.val + 1, Nat.succ_lt_succ j.isLt⟩
     have hLe0 : f i0 ≤ g i0 := hLe i0
-    have hLeRest : finSum n f' ≤ finSum n g' :=
-      finSum_le_finSum (fun j => hLe ⟨j.val + 1, Nat.succ_lt_succ j.isLt⟩)
+    have hLeRest : qsum n f' ≤ qsum n g' :=
+      qsum_le_qsum (fun j => hLe ⟨j.val + 1, Nat.succ_lt_succ j.isLt⟩)
     obtain ⟨hEq0, hEqRest⟩ := add_eq_of_le_parts hLe0 hLeRest hSum
     match i with
     | ⟨0, _⟩ => exact hEq0
     | ⟨k + 1, hk⟩ =>
-      exact finSum_eq_of_le_pointwise_eq n f' g'
+      exact qsum_eq_of_le_pointwise_eq n f' g'
         (fun j => hLe ⟨j.val + 1, Nat.succ_lt_succ j.isLt⟩) hEqRest ⟨k, Nat.lt_of_succ_lt_succ hk⟩
 
 /-- **Constructive 256-Bit `WOTS+C` Strict-Drop Index Extractor (`extractStrictDropIdx`)**:
@@ -384,9 +384,9 @@ def extractStrictDropIdx (d d' : WotsC256Digits) (hNe : d ≠ d') :
   | none =>
     False.elim <| by
       have hLe := findStrictDropAux_none_le 128 _ _ hSearch
-      have hEqSum : finSum 128 (fun i => (d.digits i).val) = finSum 128 (fun i => (d'.digits i).val) :=
+      have hEqSum : qsum 128 (fun i => (d.digits i).val) = qsum 128 (fun i => (d'.digits i).val) :=
         d.sum_eq.trans d'.sum_eq.symm
-      have hPt := finSum_eq_of_le_pointwise_eq 128 _ _ hLe hEqSum
+      have hPt := qsum_eq_of_le_pointwise_eq 128 _ _ hLe hEqSum
       exact hNe (WotsC256Digits.ext (fun i => Fin.ext (hPt i)))
 
 /-- **Bidirectional Strict Incomparability of 256-Bit `WOTS+C` (`wotsC256_strict_incomparability`)**:
@@ -769,18 +769,18 @@ theorem tooth_wotsc_without_target_sum_forges
     rw [hSameEnds, hHonestTl, beq_self_eq_true]
   · unfold wotsC256Verify
     have hSum193 :
-        finSum 128 (fun j => (wotsC256DigitOfDigest (suite.thDigest pkSeed adrs msg' ctr') j).val) = 193 := by
+        qsum 128 (fun j => (wotsC256DigitOfDigest (suite.thDigest pkSeed adrs msg' ctr') j).val) = 193 := by
       have hCongr :
-          finSum 128 (fun j => (wotsC256DigitOfDigest (suite.thDigest pkSeed adrs msg' ctr') j).val) =
-          finSum 128 (fun j => (d.digits j).val + (if j = i then 1 else 0)) := by
-        apply finSum_congr
+          qsum 128 (fun j => (wotsC256DigitOfDigest (suite.thDigest pkSeed adrs msg' ctr') j).val) =
+          qsum 128 (fun j => (d.digits j).val + (if j = i then 1 else 0)) := by
+        apply qsum_congr
         intro j
         rw [hSteppedDigest j]
         if hj : j = i then
           subst hj; simp
         else
           simp [hj]
-      rw [hCongr, finSum_add, d.sum_eq, finSum_eq_indicator 128 i]
+      rw [hCongr, qsum_add, d.sum_eq, qsum_eq_indicator 128 i]
     have hDecNone : wotsC256DecodeValidDigest (suite.thDigest pkSeed adrs msg' ctr') = none :=
       wotsC256DecodeValidDigest_of_sum_ne (by rw [hSum193]; decide)
     rw [hDecNone]
@@ -1350,15 +1350,15 @@ theorem rss256_one_corrupt_perfect_view_privacy
   have hCountEq : distAcceptCount padCard realExec D = distAcceptCount padCard simExec D := by
     unfold distAcceptCount
     calc
-      finSum padCard (fun ω => if D (realExec ω) then 1 else 0) =
-        finSum padCard (fun ω => if D (simExec (bij.toFun ω)) then 1 else 0) :=
-          finSum_congr (fun ω => by rw [hPointwise ω])
-      _ = finSum padCard (fun ω => if D (simExec ω) then 1 else 0) :=
-          finSum_equiv_eq bij (fun ω => if D (simExec ω) then 1 else 0)
+      qsum padCard (fun ω => if D (realExec ω) then 1 else 0) =
+        qsum padCard (fun ω => if D (simExec (bij.toFun ω)) then 1 else 0) :=
+          qsum_congr (fun ω => by rw [hPointwise ω])
+      _ = qsum padCard (fun ω => if D (simExec ω) then 1 else 0) :=
+          qsum_equiv_eq bij (fun ω => if D (simExec ω) then 1 else 0)
   have hBad := bad_event_fundamental_lemma padCard hCardPos realExec simExec bij
     (fun _ => false) (fun ω _ => hPointwise ω) D
-  have hZeroBad : finSum padCard (fun _ : Fin padCard => if false then 1 else 0) = 0 := by
-    simp [finSum_const]
+  have hZeroBad : qsum padCard (fun _ : Fin padCard => if false then 1 else 0) = 0 := by
+    simp [qsum_const]
   have hRatDiff : ratLe (rationalAcceptDiff padCard realExec padCard simExec D) (0, 1) := by
     obtain ⟨_, _, hR⟩ := hBad
     rw [hZeroBad] at hR
@@ -1390,11 +1390,11 @@ theorem tooth_off_by_one_prg_map_leaks_and_wire
      let xB : RssPlane256Share := { s0 := 0#256, s1 := 0#256, s2 := 0#256 }
      let yFixed : RssPlane256Share := { s0 := BitVec.allOnes 256, s1 := 0#256, s2 := 0#256 }
      xA.s0 = xB.s0 ∧ xA.s2 = xB.s2 ∧
-     finSum (2 ^ 256) (fun ω =>
+     qsum (2 ^ 256) (fun ω =>
        if p0CancelNaivePads
             (rss256AndWireNaiveOffByOne xA yFixed prg0 prg1 (BitVec.ofFin ω)).s0
             xA.s0 yFixed.s0 prg0 prg1 == BitVec.allOnes 256 then 1 else 0) = 2 ^ 256 ∧
-     finSum (2 ^ 256) (fun ω =>
+     qsum (2 ^ 256) (fun ω =>
        if p0CancelNaivePads
             (rss256AndWireNaiveOffByOne xB yFixed prg0 prg1 (BitVec.ofFin ω)).s0
             xB.s0 yFixed.s0 prg0 prg1 == BitVec.allOnes 256 then 1 else 0) = 0) := by
@@ -1420,24 +1420,24 @@ theorem tooth_off_by_one_prg_map_leaks_and_wire
         cases (BitVec.allOnes 256).getLsbD i <;>
         cases prg0.getLsbD i <;> cases prg1.getLsbD i <;> rfl
     refine ⟨rfl, rfl, ?_, ?_⟩
-    · have h1 : finSum (2 ^ 256) (fun ω =>
+    · have h1 : qsum (2 ^ 256) (fun ω =>
           if p0CancelNaivePads
                (rss256AndWireNaiveOffByOne { s0 := 0#256, s1 := BitVec.allOnes 256, s2 := 0#256 }
                  { s0 := BitVec.allOnes 256, s1 := 0#256, s2 := 0#256 } prg0 prg1 (BitVec.ofFin ω)).s0
                0#256 (BitVec.allOnes 256) prg0 prg1 == BitVec.allOnes 256 then 1 else 0) =
-          finSum (2 ^ 256) (fun _ => 1) := by
-        apply finSum_congr
+          qsum (2 ^ 256) (fun _ => 1) := by
+        apply qsum_congr
         intro ω
         rw [hExtractEq { s0 := 0#256, s1 := BitVec.allOnes 256, s2 := 0#256 } (BitVec.ofFin ω)]
         simp
-      rw [h1, finSum_const, Nat.mul_one]
-    · have h0 : finSum (2 ^ 256) (fun ω =>
+      rw [h1, qsum_const, Nat.mul_one]
+    · have h0 : qsum (2 ^ 256) (fun ω =>
           if p0CancelNaivePads
                (rss256AndWireNaiveOffByOne { s0 := 0#256, s1 := 0#256, s2 := 0#256 }
                  { s0 := BitVec.allOnes 256, s1 := 0#256, s2 := 0#256 } prg0 prg1 (BitVec.ofFin ω)).s0
                0#256 (BitVec.allOnes 256) prg0 prg1 == BitVec.allOnes 256 then 1 else 0) =
-          finSum (2 ^ 256) (fun _ => 0) := by
-        apply finSum_congr
+          qsum (2 ^ 256) (fun _ => 0) := by
+        apply qsum_congr
         intro ω
         rw [hExtractEq { s0 := 0#256, s1 := 0#256, s2 := 0#256 } (BitVec.ofFin ω)]
         dsimp only
@@ -1449,12 +1449,12 @@ theorem tooth_off_by_one_prg_map_leaks_and_wire
           cases hb
         rw [hNeOnes]
         rfl
-      rw [h0, finSum_const, Nat.mul_zero]
+      rw [h0, qsum_const, Nat.mul_zero]
 
-private theorem finSum_mul_right_nat : ∀ (n c : Nat) (f : Fin n → Nat),
-    finSum n (fun i => f i * c) = finSum n f * c
-  | 0, _, _ => by simp [finSum]
-  | n + 1, c, f => by simp only [finSum, finSum_mul_right_nat n c, Nat.add_mul]
+private theorem qsum_mul_right_nat : ∀ (n c : Nat) (f : Fin n → Nat),
+    qsum n (fun i => f i * c) = qsum n f * c
+  | 0, _, _ => by simp [qsum]
+  | n + 1, c, f => by simp only [qsum, qsum_mul_right_nat n c, Nat.add_mul]
 
 /-- A full recorded AND gate, with three replicated-share components per wire. -/
 structure Rss256RecordedGate where
@@ -1512,13 +1512,13 @@ theorem rss256PivotCheck_eq (delta : Tower128) (rest : List Tower128)
     The designated erroneous coordinate may be placed first in the batch. -/
 theorem rss256_independent_gate_weight_soundness (delta : Tower128)
     (rest : List Tower128) (coins : Nat → Tower128) (hdelta : delta ≠ towerZero 7) :
-    ratLe (finSum (2^128) (fun r =>
+    ratLe (qsum (2^128) (fun r =>
       if rss256PivotCheck delta rest coins (unpackTower 7 (BitVec.ofFin r)) == towerZero 7
       then 1 else 0), 2^128) (1, 2^128) := by
-  have hCount : finSum (2^128) (fun r =>
+  have hCount : qsum (2^128) (fun r =>
       if rss256PivotCheck delta rest coins (unpackTower 7 (BitVec.ofFin r)) == towerZero 7
       then 1 else 0) ≤ 1 := by
-    apply finSum_indicator_le_one_of_unique
+    apply qsum_indicator_le_one_of_unique
     intro i j hi hj
     have hi' := eq_of_beq hi
     have hj' := eq_of_beq hj
@@ -1547,11 +1547,11 @@ def rss256Pass1Check (gates : List Rss256RecordedGate) (coins : Nat → Tower128
     zero has weight chi, so the degree bound is the coefficient-list length. -/
 theorem rss256_polynomial_gate_weight_soundness (deg : Nat) (errors : List Tower128)
     (hLen : errors.length ≤ deg) (hNz : ∃ e ∈ errors, e ≠ towerZero 7) :
-    ratLe (finSum (2^128) (fun r =>
+    ratLe (qsum (2^128) (fun r =>
       if batchDeviationPoly errors (unpackTower 7 (BitVec.ofFin r)) == towerZero 7
       then 1 else 0), 2^128) (deg, 2^128) := by
   exact ⟨Nat.two_pow_pos 128, Nat.two_pow_pos 128,
-    Nat.mul_le_mul_right (2^128) (tower128_roots_finSum_le deg errors hLen hNz)⟩
+    Nat.mul_le_mul_right (2^128) (tower128_roots_qsum_le deg errors hLen hNz)⟩
 
 /-- A false bit of a reconstructed gate becomes an actual nonzero coefficient. -/
 theorem rss256_recorded_fault_nonzero (gates : List Rss256RecordedGate)
@@ -1569,7 +1569,7 @@ theorem rss256_recorded_fault_nonzero (gates : List Rss256RecordedGate)
 theorem rss256_recorded_gate_polynomial_soundness (gates : List Rss256RecordedGate)
     (g : Rss256RecordedGate) (hg : g ∈ gates) (lane : Fin 256)
     (hFault : g.error.getLsbD lane.val = true) :
-    ratLe (finSum (2^128) (fun r =>
+    ratLe (qsum (2^128) (fun r =>
       if batchDeviationPoly (rss256GateErrors gates)
         (unpackTower 7 (BitVec.ofFin r)) == towerZero 7 then 1 else 0), 2^128)
       ((rss256GateErrors gates).length, 2^128) :=
@@ -1590,7 +1590,7 @@ def rss256Pass1At (gates : List Rss256RecordedGate) (coins : Rss256ChallengeFami
     The bound is conditional on the preceding transcript, including earlier rounds. -/
 theorem rss256_folding_round_soundness (deg : Nat) (errors : List Tower128)
     (hLen : errors.length ≤ deg) (hNz : ∃ e ∈ errors, e ≠ towerZero 7) :
-    ratLe (finSum (2^128) (fun r =>
+    ratLe (qsum (2^128) (fun r =>
       if batchDeviationPoly errors (unpackTower 7 (BitVec.ofFin r)) == towerZero 7
       then 1 else 0), 2^128) (deg, 2^128) :=
   rss256_polynomial_gate_weight_soundness deg errors hLen hNz
@@ -1621,24 +1621,24 @@ theorem rss256_post_wave_two_challenge_bgin19_soundness
     (deg : Nat) (waveCoeffs : List Tower128)
     (hDeg : waveCoeffs.length ≤ 2 * deg)
     (hNonzero : ∃ c ∈ waveCoeffs, c ≠ towerZero 7) :
-    let acceptCount := finSum ((2 ^ 128) * (2 ^ 128))
+    let acceptCount := qsum ((2 ^ 128) * (2 ^ 128))
       (fun ω => if postWaveTwoChallengeAccepts waveCoeffs ω then 1 else 0)
     acceptCount ≤ (2 * deg) ^ 2 ∧
     ratLe (acceptCount, (2 ^ 128) ^ 2) ((2 * deg) ^ 2, (2 ^ 128) ^ 2) := by
   intro acceptCount
   let pass1 : Fin (2 ^ 128) → Bool :=
     fun r => batchDeviationPoly waveCoeffs (unpackTower 7 (BitVec.ofFin r)) == towerZero 7
-  have hSingle : finSum (2 ^ 128) (fun r => if pass1 r then 1 else 0) ≤ 2 * deg :=
-    tower128_roots_finSum_le (2 * deg) waveCoeffs hDeg hNonzero
+  have hSingle : qsum (2 ^ 128) (fun r => if pass1 r then 1 else 0) ≤ 2 * deg :=
+    tower128_roots_qsum_le (2 * deg) waveCoeffs hDeg hNonzero
   have hFactor :
       acceptCount =
-      (finSum (2 ^ 128) (fun r => if pass1 r then 1 else 0)) *
-      (finSum (2 ^ 128) (fun r => if pass1 r then 1 else 0)) := by
+      (qsum (2 ^ 128) (fun r => if pass1 r then 1 else 0)) *
+      (qsum (2 ^ 128) (fun r => if pass1 r then 1 else 0)) := by
     dsimp only [acceptCount]
-    rw [finSum_prod_eq (2 ^ 128) (2 ^ 128)]
+    rw [qsum_prod_eq (2 ^ 128) (2 ^ 128)]
     have hInner : ∀ r1 : Fin (2 ^ 128),
-        finSum (2 ^ 128) (fun r2 => if postWaveTwoChallengeAccepts waveCoeffs (pairFin r1 r2) then 1 else 0) =
-        (if pass1 r1 then 1 else 0) * finSum (2 ^ 128) (fun r2 => if pass1 r2 then 1 else 0) := by
+        qsum (2 ^ 128) (fun r2 => if postWaveTwoChallengeAccepts waveCoeffs (pairFin r1 r2) then 1 else 0) =
+        (if pass1 r1 then 1 else 0) * qsum (2 ^ 128) (fun r2 => if pass1 r2 then 1 else 0) := by
       intro r1
       have hPt : ∀ r2 : Fin (2 ^ 128),
           (if postWaveTwoChallengeAccepts waveCoeffs (pairFin r1 r2) then 1 else 0) =
@@ -1648,8 +1648,8 @@ theorem rss256_post_wave_two_challenge_bgin19_soundness
         rw [splitFinLeft_pairFin (Nat.two_pow_pos 128), splitFinRight_pairFin (Nat.two_pow_pos 128)]
         change (if pass1 r1 && pass1 r2 then 1 else 0) = (if pass1 r1 then 1 else 0) * (if pass1 r2 then 1 else 0)
         cases pass1 r1 <;> cases pass1 r2 <;> rfl
-      rw [finSum_congr hPt, finSum_mul_left]
-    rw [finSum_congr hInner, finSum_mul_right_nat]
+      rw [qsum_congr hPt, qsum_mul_left]
+    rw [qsum_congr hInner, qsum_mul_right_nat]
   have hSqLe : acceptCount ≤ (2 * deg) ^ 2 := by
     rw [hFactor, Nat.pow_two]
     exact Nat.mul_le_mul hSingle hSingle
@@ -1675,14 +1675,14 @@ theorem tooth_pre_wave_challenge_kernel_bypass :
     (∀ chi : Tower128,
       (∃ e ∈ preWaveKernelFaultPair chi, e ≠ towerZero 7) ∧
       batchDeviationPoly (preWaveKernelFaultPair chi) chi = towerZero 7) ∧
-    finSum (2 ^ 128) (fun r =>
+    qsum (2 ^ 128) (fun r =>
       let chi := unpackTower 7 (BitVec.ofFin r)
       if batchDeviationPoly (preWaveKernelFaultPair chi) chi == towerZero 7 then 1 else 0) = 2 ^ 128 ∧
     (∀ chi1 chi2 : Tower128,
       (∃ e ∈ preWaveTwoChallengeKernelFault chi1 chi2, e ≠ towerZero 7) ∧
       batchDeviationPoly (preWaveTwoChallengeKernelFault chi1 chi2) chi1 = towerZero 7 ∧
       batchDeviationPoly (preWaveTwoChallengeKernelFault chi1 chi2) chi2 = towerZero 7) ∧
-    finSum ((2 ^ 128) * (2 ^ 128)) (fun ω =>
+    qsum ((2 ^ 128) * (2 ^ 128)) (fun ω =>
       let chi1 := unpackTower 7 (BitVec.ofFin (splitFinLeft (Nat.two_pow_pos 128) ω))
       let chi2 := unpackTower 7 (BitVec.ofFin (splitFinRight (Nat.two_pow_pos 128) ω))
       if postWaveTwoChallengeAccepts (preWaveTwoChallengeKernelFault chi1 chi2) ω then 1 else 0) =
@@ -1725,25 +1725,25 @@ theorem tooth_pre_wave_challenge_kernel_bypass :
   refine ⟨?_, ?_, ?_, ?_⟩
   · intro chi
     exact ⟨⟨towerOne 7, .tail _ (.head _), towerOne_ne_zero 7⟩, hOneEv chi⟩
-  · have hAll1 : finSum (2 ^ 128) (fun r =>
+  · have hAll1 : qsum (2 ^ 128) (fun r =>
         let chi := unpackTower 7 (BitVec.ofFin r)
         if batchDeviationPoly (preWaveKernelFaultPair chi) chi == towerZero 7 then 1 else 0) =
-        finSum (2 ^ 128) (fun _ => 1) := by
-      apply finSum_congr
+        qsum (2 ^ 128) (fun _ => 1) := by
+      apply qsum_congr
       intro r
       dsimp only
       rw [hOneEv (unpackTower 7 (BitVec.ofFin r))]
       simp only [beq_self_eq_true, ↓reduceIte]
-    rw [hAll1, finSum_const, Nat.mul_one]
+    rw [hAll1, qsum_const, Nat.mul_one]
   · intro chi1 chi2
     exact ⟨⟨towerOne 7, .tail _ (.tail _ (.head _)), towerOne_ne_zero 7⟩,
            hTwoEv1 chi1 chi2, hTwoEv2 chi1 chi2⟩
-  · have hAll2 : finSum ((2 ^ 128) * (2 ^ 128)) (fun ω =>
+  · have hAll2 : qsum ((2 ^ 128) * (2 ^ 128)) (fun ω =>
         let chi1 := unpackTower 7 (BitVec.ofFin (splitFinLeft (Nat.two_pow_pos 128) ω))
         let chi2 := unpackTower 7 (BitVec.ofFin (splitFinRight (Nat.two_pow_pos 128) ω))
         if postWaveTwoChallengeAccepts (preWaveTwoChallengeKernelFault chi1 chi2) ω then 1 else 0) =
-        finSum ((2 ^ 128) * (2 ^ 128)) (fun _ => 1) := by
-      apply finSum_congr
+        qsum ((2 ^ 128) * (2 ^ 128)) (fun _ => 1) := by
+      apply qsum_congr
       intro ω
       have hAcc := hTwoAccept
         (unpackTower 7 (BitVec.ofFin (splitFinLeft (Nat.two_pow_pos 128) ω)))
@@ -1752,7 +1752,7 @@ theorem tooth_pre_wave_challenge_kernel_bypass :
       dsimp only
       rw [hAcc]
       rfl
-    rw [hAll2, finSum_const, Nat.mul_one]
+    rw [hAll2, qsum_const, Nat.mul_one]
 
 /-- Boolean barrier abstraction used only for the historical sticky-poison counterexample.
     Operational inputs are defined by `Rss256EngineOp` below. -/
@@ -3856,7 +3856,7 @@ theorem inhabited_rss256_privacy_soundness_and_poison :
       w.Valid ∧
       waveCoeffs.length ≤ 2 * 2 ∧
       (∃ c ∈ waveCoeffs, c ≠ towerZero 7) ∧
-      ratLe (finSum ((2 ^ 128) * (2 ^ 128))
+      ratLe (qsum ((2 ^ 128) * (2 ^ 128))
         (fun ω => if postWaveTwoChallengeAccepts waveCoeffs ω then 1 else 0), (2 ^ 128) ^ 2)
         ((2 * 2) ^ 2, (2 ^ 128) ^ 2) ∧
       (rss256BarrierTrace rss256BarrierStep Rss256BarrierState.init ops).2 = [0xABCD#256] ∧
@@ -4534,7 +4534,7 @@ theorem rss256_checked_inline_integrity (w : Rss256InlineWave) (a b : Tower128)
 polynomial. It does not claim a tensor/folding transcript refinement. -/
 theorem rss256_packed_batch_roots (gates : List Rss256RecordedGate)
     (hn : ∃ e ∈ rss256PackedGateErrors gates, e ≠ towerZero 7) :
-    ratLe (finSum (2^128) (fun r =>
+    ratLe (qsum (2^128) (fun r =>
       if batchDeviationPoly (rss256PackedGateErrors gates)
         (unpackTower 7 (BitVec.ofFin r)) == towerZero 7 then 1 else 0), 2^128)
       ((rss256PackedGateErrors gates).length, 2^128) :=

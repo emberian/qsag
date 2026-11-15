@@ -37,15 +37,15 @@ The callbacks receive the complete honest-share map; party-network refinement is
    and the `ThresholdMpc` production signing oracle, with an explicit emulation premise.
 -/
 
-public import Qsag.Math.Constructive
+public import Qsag.Tactic.Prelude
 public import Qsag.Math.Goldilocks
-public import Qsag.Math.BinaryTower
+public import Qsag.Math.Gf2Pow128
 public import Qsag.Oracle.Keccak
-public import Qsag.Oracle.UcGames
+public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Protocol.Threshold.ThresholdApproval
 public import Qsag.Protocol.Threshold.ThresholdMpc
 public import Qsag.Protocol.Threshold.IdealTsig
-import all Qsag.Oracle.UcGames
+import all Qsag.Protocol.Aggregation.UcGames
 import all Qsag.Protocol.Threshold.ThresholdMpc
 
 import Qsag.Tactic.AssuranceKit
@@ -959,7 +959,7 @@ theorem realProtocolExec_approvedMsgs_provenance
 /-- Exact acceptance count of distinguisher `D : View → Bool` over finite random-tape space `Fin card`. -/
 @[expose] def distAcceptCount {View : Type} (card : Nat)
     (exec : Fin card → View) (D : View → Bool) : Nat :=
-  finSum card (fun ω => if D (exec ω) then 1 else 0)
+  qsum card (fun ω => if D (exec ω) then 1 else 0)
 
 /-- Exact cross-denominator rational addition `a.1 / a.2 + b.1 / b.2 = (a.1*b.2 + b.1*a.2) / (a.2*b.2)`. -/
 @[expose] def ratAdd (a b : Nat × Nat) : Nat × Nat :=
@@ -975,57 +975,57 @@ theorem realProtocolExec_approvedMsgs_provenance
               (distAcceptCount card₂ exec₂ D * card₁),
    card₁ * card₂)
 
-private theorem finSum_mul_right : ∀ (n c : Nat) (f : Fin n → Nat),
-    finSum n (fun i => f i * c) = finSum n f * c
-  | 0, _, _ => by simp [finSum]
+private theorem qsum_mul_right : ∀ (n c : Nat) (f : Fin n → Nat),
+    qsum n (fun i => f i * c) = qsum n f * c
+  | 0, _, _ => by simp [qsum]
   | n + 1, c, f => by
-    simp only [finSum, finSum_mul_right n c, Nat.add_mul]
+    simp only [qsum, qsum_mul_right n c, Nat.add_mul]
 
-private theorem finSum_swap : ∀ (m n : Nat) (g : Fin m → Fin n → Nat),
-    finSum m (fun i => finSum n (fun j => g i j)) =
-      finSum n (fun j => finSum m (fun i => g i j))
+private theorem qsum_swap : ∀ (m n : Nat) (g : Fin m → Fin n → Nat),
+    qsum m (fun i => qsum n (fun j => g i j)) =
+      qsum n (fun j => qsum m (fun i => g i j))
   | 0, n, _ => by
-    simp only [finSum]
-    have h0 : finSum n (fun _ => 0) = 0 := by rw [finSum_const]; omega
+    simp only [qsum]
+    have h0 : qsum n (fun _ => 0) = 0 := by rw [qsum_const]; omega
     exact h0.symm
   | m + 1, n, g => by
-    simp only [finSum]
-    rw [finSum_swap m n (fun i j => g ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ j), ← finSum_add]
+    simp only [qsum]
+    rw [qsum_swap m n (fun i j => g ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ j), ← qsum_add]
 
-private theorem finSum_point_decomp (n : Nat) (f : Fin n → Nat) (x : Fin n) :
-    finSum n (fun j => (if j = x then 1 else 0) * f j) = f x := by
+private theorem qsum_point_decomp (n : Nat) (f : Fin n → Nat) (x : Fin n) :
+    qsum n (fun j => (if j = x then 1 else 0) * f j) = f x := by
   have hCongr :
-      finSum n (fun j => (if j = x then 1 else 0) * f j) =
-      finSum n (fun j => (if j = x then 1 else 0) * f x) := by
-    apply finSum_congr
+      qsum n (fun j => (if j = x then 1 else 0) * f j) =
+      qsum n (fun j => (if j = x then 1 else 0) * f x) := by
+    apply qsum_congr
     intro j
     by_cases hj : j = x
     · subst hj; rfl
     · simp [hj]
-  rw [hCongr, finSum_mul_right, finSum_eq_indicator, Nat.one_mul]
+  rw [hCongr, qsum_mul_right, qsum_eq_indicator, Nat.one_mul]
 
-/-- **Constructive Measure-Preserving Bijection Invariance (`finSum_equiv_eq`)**:
+/-- **Constructive Measure-Preserving Bijection Invariance (`qsum_equiv_eq`)**:
     Any `SimpleEquiv (Fin n) (Fin n)` preserves exact finite sums with `0 Classical.choice`. -/
-theorem finSum_equiv_eq {n : Nat} (bij : SimpleEquiv (Fin n) (Fin n)) (f : Fin n → Nat) :
-    finSum n (fun ω => f (bij.toFun ω)) = finSum n f := by
+theorem qsum_equiv_eq {n : Nat} (bij : SimpleEquiv (Fin n) (Fin n)) (f : Fin n → Nat) :
+    qsum n (fun ω => f (bij.toFun ω)) = qsum n f := by
   have hExpand :
-      finSum n (fun ω => f (bij.toFun ω)) =
-      finSum n (fun ω => finSum n (fun j => (if j = bij.toFun ω then 1 else 0) * f j)) :=
-    finSum_congr (fun ω => (finSum_point_decomp n f (bij.toFun ω)).symm)
-  rw [hExpand, finSum_swap]
-  apply finSum_congr
+      qsum n (fun ω => f (bij.toFun ω)) =
+      qsum n (fun ω => qsum n (fun j => (if j = bij.toFun ω then 1 else 0) * f j)) :=
+    qsum_congr (fun ω => (qsum_point_decomp n f (bij.toFun ω)).symm)
+  rw [hExpand, qsum_swap]
+  apply qsum_congr
   intro j
   have hSwapCond :
-      finSum n (fun ω => (if j = bij.toFun ω then 1 else 0) * f j) =
-      finSum n (fun ω => (if ω = bij.invFun j then 1 else 0) * f j) := by
-    apply finSum_congr
+      qsum n (fun ω => (if j = bij.toFun ω then 1 else 0) * f j) =
+      qsum n (fun ω => (if ω = bij.invFun j then 1 else 0) * f j) := by
+    apply qsum_congr
     intro ω
     by_cases h1 : j = bij.toFun ω
     · have h2 : ω = bij.invFun j := by rw [h1, bij.left_inv]
       rw [ite_eq_left h1, ite_eq_left h2]
     · have h2 : ω ≠ bij.invFun j := fun he => h1 (by rw [he, bij.right_inv])
       rw [ite_eq_right h1, ite_eq_right h2]
-  rw [hSwapCond, finSum_mul_right, finSum_eq_indicator, Nat.one_mul]
+  rw [hSwapCond, qsum_mul_right, qsum_eq_indicator, Nat.one_mul]
 
 /-- **Combinator 1: Fundamental Lemma of Game-Playing with Measure-Preserving Bijection
     (`bad_event_fundamental_lemma`)**:
@@ -1042,7 +1042,7 @@ theorem bad_event_fundamental_lemma {View : Type}
     (bad : Fin card → Bool)
     (hAgreeUnlessBad : ∀ ω : Fin card, bad ω = false → realExec ω = idealExec (bij.toFun ω))
     (D : View → Bool) :
-    let badCount := finSum card (fun ω => if bad ω then 1 else 0)
+    let badCount := qsum card (fun ω => if bad ω then 1 else 0)
     let advCount := natAbsDiff (distAcceptCount card realExec D) (distAcceptCount card idealExec D)
     advCount ≤ badCount ∧
     ratLe (advCount, card) (badCount, card) ∧
@@ -1050,13 +1050,13 @@ theorem bad_event_fundamental_lemma {View : Type}
   intro badCount advCount
   have hBijEq :
       distAcceptCount card idealExec D =
-      finSum card (fun ω => if D (idealExec (bij.toFun ω)) then 1 else 0) := by
+      qsum card (fun ω => if D (idealExec (bij.toFun ω)) then 1 else 0) := by
     unfold distAcceptCount
-    exact (finSum_equiv_eq bij (fun ω => if D (idealExec ω) then 1 else 0)).symm
+    exact (qsum_equiv_eq bij (fun ω => if D (idealExec ω) then 1 else 0)).symm
   have hLe : advCount ≤ badCount := by
     dsimp only [advCount, badCount]
     rw [hBijEq]
-    exact finSum_indicator_diff_le
+    exact qsum_indicator_diff_le
       (fun ω => D (realExec ω))
       (fun ω => D (idealExec (bij.toFun ω)))
       bad
@@ -1084,22 +1084,22 @@ theorem bad_event_fundamental_lemma {View : Type}
   rw [Nat.mul_assoc]
   exact Nat.mul_le_mul_right (card * card) hLe
 
-private theorem finSum_snoc : ∀ (k : Nat) (g : Nat → Nat),
-    finSum (k + 1) (fun i => g i.1) = finSum k (fun i => g i.1) + g k
-  | 0, g => by simp [finSum]
+private theorem qsum_snoc : ∀ (k : Nat) (g : Nat → Nat),
+    qsum (k + 1) (fun i => g i.1) = qsum k (fun i => g i.1) + g k
+  | 0, g => by simp [qsum]
   | k + 1, g => by
-    conv => lhs; rw [finSum]
+    conv => lhs; rw [qsum]
     dsimp only
-    rw [finSum_snoc k (fun j => g (j + 1))]
-    conv => rhs; rw [finSum]
+    rw [qsum_snoc k (fun j => g (j + 1))]
+    conv => rhs; rw [qsum]
     dsimp only
     omega
 
 /-- **Combinator 2: Multi-Session Hybrid-Argument Telescope (`hybrid_multi_session_le`)**:
     Given `Q_s + 1` hybrid games `hybrids 0, ..., hybrids Q_s` over `Fin card` (`0 < card`),
     where each adjacent session hop `i → i + 1` has distinguishing count bounded by `hopBound i`:
-    1. Total advantage between `hybrids 0` and `hybrids Q_s` is `≤ finSum Q_s hopBound`;
-    2. `ratLe` holds against `(finSum Q_s hopBound, card)`; and
+    1. Total advantage between `hybrids 0` and `hybrids Q_s` is `≤ qsum Q_s hopBound`;
+    2. `ratLe` holds against `(qsum Q_s hopBound, card)`; and
     3. Under any per-session cap `∀ i, hopBound i ≤ eps`, `ratLe` holds against `(Q_s * eps, card)`. -/
 theorem hybrid_multi_session_le {View : Type}
     (card Q_s : Nat) (hCardPos : 0 < card)
@@ -1111,16 +1111,16 @@ theorem hybrid_multi_session_le {View : Type}
                  (distAcceptCount card (hybrids (idx.val + 1) idx.isLt) D) ≤ hopBound idx) :
     let totalAdv := natAbsDiff (distAcceptCount card (hybrids 0 (Nat.zero_le Q_s)) D)
                                (distAcceptCount card (hybrids Q_s (Nat.le_refl Q_s)) D)
-    totalAdv ≤ finSum Q_s hopBound ∧
-    ratLe (totalAdv, card) (finSum Q_s hopBound, card) ∧
+    totalAdv ≤ qsum Q_s hopBound ∧
+    ratLe (totalAdv, card) (qsum Q_s hopBound, card) ∧
     (∀ eps : Nat, (∀ idx : Fin Q_s, hopBound idx ≤ eps) →
       ratLe (totalAdv, card) (Q_s * eps, card)) := by
   let g : Nat → Nat := fun i => if h : i < Q_s then hopBound ⟨i, h⟩ else 0
   have hFinEq : ∀ (m : Nat) (hm : m ≤ Q_s),
-      finSum m (fun i => hopBound ⟨i.val, Nat.lt_of_lt_of_le i.isLt hm⟩) =
-      finSum m (fun i => g i.val) := by
+      qsum m (fun i => hopBound ⟨i.val, Nat.lt_of_lt_of_le i.isLt hm⟩) =
+      qsum m (fun i => g i.val) := by
     intro m hm
-    apply finSum_congr
+    apply qsum_congr
     intro i
     have hi : i.val < Q_s := Nat.lt_of_lt_of_le i.isLt hm
     simp [g, hi]
@@ -1128,12 +1128,12 @@ theorem hybrid_multi_session_le {View : Type}
       ∀ (k : Nat) (hk : k ≤ Q_s),
         natAbsDiff (distAcceptCount card (hybrids 0 (Nat.zero_le Q_s)) D)
                    (distAcceptCount card (hybrids k hk) D) ≤
-          finSum k (fun i => hopBound ⟨i.val, Nat.lt_of_lt_of_le i.isLt hk⟩) := by
+          qsum k (fun i => hopBound ⟨i.val, Nat.lt_of_lt_of_le i.isLt hk⟩) := by
     intro k
     induction k with
     | zero =>
       intro _
-      simp [finSum, natAbsDiff]
+      simp [qsum, natAbsDiff]
     | succ k ih =>
       intro hkSucc
       have hkLt : k < Q_s := hkSucc
@@ -1146,15 +1146,15 @@ theorem hybrid_multi_session_le {View : Type}
         (distAcceptCount card (hybrids k hkLe) D)
         (distAcceptCount card (hybrids (k + 1) hkSucc) D)
       have hGk : g k = hopBound ⟨k, hkLt⟩ := by simp [g, hkLt]
-      rw [hFinEq (k + 1) hkSucc, finSum_snoc k g, ← hFinEq k hkLe, hGk]
+      rw [hFinEq (k + 1) hkSucc, qsum_snoc k g, ← hFinEq k hkLe, hGk]
       omega
   intro totalAdv
-  have hMain : totalAdv ≤ finSum Q_s hopBound := hTel Q_s (Nat.le_refl Q_s)
+  have hMain : totalAdv ≤ qsum Q_s hopBound := hTel Q_s (Nat.le_refl Q_s)
   refine ⟨hMain, ⟨hCardPos, hCardPos, Nat.mul_le_mul_right card hMain⟩, ?_⟩
   intro eps hCap
-  have hLeConst : finSum Q_s hopBound ≤ Q_s * eps := by
-    rw [← finSum_const Q_s eps]
-    exact finSum_le_finSum hCap
+  have hLeConst : qsum Q_s hopBound ≤ Q_s * eps := by
+    rw [← qsum_const Q_s eps]
+    exact qsum_le_qsum hCap
   exact ⟨hCardPos, hCardPos, Nat.mul_le_mul_right card (Nat.le_trans hMain hLeConst)⟩
 
 theorem ratLe_trans {a b c : Nat × Nat} (h1 : ratLe a b) (h2 : ratLe b c) : ratLe a c := by
@@ -1291,7 +1291,7 @@ theorem inhabited_interactive_uc_combinators :
     | 3 => rfl
     | n + 4 => omega
   have hMain := (bad_event_fundamental_lemma 4 (by decide) realE idealE bij bad hAgree id).2.2
-  have hBadCount : finSum 4 (fun ω : Fin 4 => if bad ω then 1 else 0) = 1 := rfl
+  have hBadCount : qsum 4 (fun ω : Fin 4 => if bad ω then 1 else 0) = 1 := rfl
   have hNe0 : bij.toFun ⟨0, by decide⟩ ≠ ⟨0, by decide⟩ := by
     intro hEq
     have hVal : (bij.toFun ⟨0, by decide⟩).val = 0 := congrArg Fin.val hEq
@@ -1464,9 +1464,9 @@ theorem forgery_count_le_of_ideal_never_wins {View : Type} (card : Nat)
   have hT := forgery_count_transfer card realExec idealExec win eps hUc
   have hZero : distAcceptCount card idealExec win = 0 := by
     unfold distAcceptCount
-    have hC : finSum card (fun ω => if win (idealExec ω) then 1 else 0) = finSum card (fun _ => 0) :=
-      finSum_congr (fun ω => by rw [hNever ω]; rfl)
-    rw [hC, finSum_const, Nat.mul_zero]
+    have hC : qsum card (fun ω => if win (idealExec ω) then 1 else 0) = qsum card (fun _ => 0) :=
+      qsum_congr (fun ω => by rw [hNever ω]; rfl)
+    rw [hC, qsum_const, Nat.mul_zero]
   rw [hZero, Nat.zero_mul, Nat.zero_add] at hT
   exact hT
 
@@ -2953,7 +2953,7 @@ structure PerSessionRoundSimSpec
     proto.finalizeCutOpen pk req r3 h3 c3 =
       sim.finalizeIdealCut pk req s3 (idealSignOracle req) h3 c3
   hBadCheckBound : ∀ req h2 c2,
-    finSum cardCheck (fun c => if badCheck req h2 c2 c then 1 else 0) ≤ epsCheck
+    qsum cardCheck (fun c => if badCheck req h2 c2 c then 1 else 0) ≤ epsCheck
 
 /-- Lift `padBij` on `Fin cardPad` while keeping `Fin cardCheck` fixed. -/
 def liftPadCheckEquiv {cardPad cardCheck : Nat} (hCheck : 0 < cardCheck)
@@ -3068,13 +3068,13 @@ theorem concurrent_hybrid_simulation_reduces_to_per_session
     | none => false
     | some (req, h2, c2) => spec.badCheck req h2 c2 c
   have hBadSlice : ∀ (idx : Fin Q_s) (v : Fin Q_s → Fin cardS),
-      finSum cardS (fun x => if bad idx (updateFinVec v idx x) then 1 else 0) ≤
+      qsum cardS (fun x => if bad idx (updateFinVec v idx x) then 1 else 0) ≤
         cardPad * epsCheck := by
     intro idx v
-    change finSum (cardPad * cardCheck) _ ≤ _
-    rw [finSum_ucPairFin]
+    change qsum (cardPad * cardCheck) _ ≤ _
+    rw [qsum_ucPairFin]
     have hInner : ∀ p : Fin cardPad,
-        finSum cardCheck (fun c => if bad idx (updateFinVec v idx (ucPairFin p c)) then 1 else 0) ≤
+        qsum cardCheck (fun c => if bad idx (updateFinVec v idx (ucPairFin p c)) then 1 else 0) ≤
           epsCheck := by
       intro p
       let v0 := updateFinVec v idx (ucPairFin p c0)
@@ -3090,15 +3090,15 @@ theorem concurrent_hybrid_simulation_reduces_to_per_session
         dsimp only [bad]
         rw [updateFinVec_same, ucSplitLeft_pair spec.hCheckPos,
             ucSplitRight_pair spec.hCheckPos, updateFinVec_twice]
-      rw [finSum_congr (fun c => by rw [hSameBad c])]
+      rw [qsum_congr (fun c => by rw [hSameBad c])]
       cases obsConcurrentSlotPreCut eng0 A idx numSteps stInit advSt with
       | none =>
-        simp only [Bool.false_eq_true, ↓reduceIte, finSum_const]
+        simp only [Bool.false_eq_true, ↓reduceIte, qsum_const]
         omega
       | some args =>
         rcases args with ⟨req, h2, c2⟩
         exact spec.hBadCheckBound req h2 c2
-    exact Nat.le_trans (finSum_le_finSum hInner) (by rw [finSum_const]; exact Nat.le_refl _)
+    exact Nat.le_trans (qsum_le_qsum hInner) (by rw [qsum_const]; exact Nat.le_refl _)
   have hAgree : ∀ (idx : Fin Q_s) (v : Fin Q_s → Fin cardS),
       bad idx v = false →
       hybrids idx.val (Nat.le_of_lt idx.isLt) v =
@@ -3803,15 +3803,15 @@ theorem concurrent_hybrid_simulation_reduces_to_per_session
     (fun _ _ => bijCoord) (fun _ _ _ _ => rfl) bad (cardPad * epsCheck) hAgree hBadSlice D
   dsimp only at hMain
   have hZeroEq : distAcceptCount cardAll realView D =
-      finSum cardAll (fun ω => if D (hybrids 0 (Nat.zero_le Q_s) (enumVec.toFun ω)) then 1 else 0) := by
-    apply finSum_congr
+      qsum cardAll (fun ω => if D (hybrids 0 (Nat.zero_le Q_s) (enumVec.toFun ω)) then 1 else 0) := by
+    apply qsum_congr
     intro ω
     exact congrArg (fun t => if D t then 1 else 0)
       (concurrentProtocolExec_eq_hybrid_zero proto idealSignOracle sim A Q_s numSteps
         (mkReal (enumVec.toFun ω)) (mkSim (enumVec.toFun ω)) cl advSt)
   have hTopEq : distAcceptCount cardAll idealView D =
-      finSum cardAll (fun ω => if D (hybrids Q_s (Nat.le_refl Q_s) (enumVec.toFun ω)) then 1 else 0) := by
-    apply finSum_congr
+      qsum cardAll (fun ω => if D (hybrids Q_s (Nat.le_refl Q_s) (enumVec.toFun ω)) then 1 else 0) := by
+    apply qsum_congr
     intro ω
     have hPkIcl : proto.pkDigestOf icl.tsig.pk = sim.pkDigestOf icl.tsig.pk := by
       rw [← hTsig]; exact spec.hPkDigest
@@ -3849,10 +3849,10 @@ theorem concurrent_hybrid_simulation_reduces_to_per_session
 theorem tooth_concurrent_reused_session_id_breaks_isolation :
     ∃ (w₁ w₂ : BitVec 4),
       w₁ ≠ w₂ ∧
-      finSum 16 (fun m : Fin 16 =>
+      qsum 16 (fun m : Fin 16 =>
         let mask := BitVec.ofNat 4 m.val
         if ((w₁ ^^^ mask) ^^^ (w₂ ^^^ mask)) == (w₁ ^^^ w₂) then 1 else 0) = 16 ∧
-      finSum 256 (fun mm : Fin 256 =>
+      qsum 256 (fun mm : Fin 256 =>
         let m₁ := BitVec.ofNat 4 (mm.val / 16)
         let m₂ := BitVec.ofNat 4 (mm.val % 16)
         if ((w₁ ^^^ m₁) ^^^ (w₂ ^^^ m₂)) == (w₁ ^^^ w₂) then 1 else 0) = 16 := by
@@ -3910,7 +3910,7 @@ theorem witness_concurrent_hybrid_inhabited :
       hPreCut := fun _ _ _ _ _ _ _ _ _ => .inr ⟨(), (), rfl, rfl, trivial⟩
       hRound3 := fun _ _ _ _ _ _ => ⟨rfl, trivial⟩
       hFinalize := fun _ _ _ _ _ _ _ _ => rfl
-      hBadCheckBound := fun _ _ _ => by simp [finSum] }
+      hBadCheckBound := fun _ _ _ => by simp [qsum] }
 
 /-- Small pre-cut observer used to test the concurrent theorem's independent
     per-slot tape construction. Both sessions have distinct IDs and valid epochs. -/
@@ -3949,10 +3949,10 @@ theorem concurrentTapeProbe_two_live_sessions :
       2 2 (fun _ => (0 : Fin 2)) concurrentTapeProbeInitial (0, [])).1.maskSessionCursor = 2 := by rfl
 
 theorem tooth_concurrent_shared_tapes_change_view :
-    finSum 2 (fun m => if concurrentTapeProbeEqual
+    qsum 2 (fun m => if concurrentTapeProbeEqual
       (ConcurrentProtocolExec concurrentTapeProbeProtocol concurrentTapeProbeAdversary
         2 2 (fun _ => m) concurrentTapeProbeInitial (0, [])).2 then 1 else 0) * 4 ≠
-    finSum 4 (fun mm => if concurrentTapeProbeEqual
+    qsum 4 (fun mm => if concurrentTapeProbeEqual
       (ConcurrentProtocolExec concurrentTapeProbeProtocol concurrentTapeProbeAdversary
         2 2 (fun j => if j.val = 0 then ⟨mm.val / 2, by omega⟩
           else ⟨mm.val % 2, Nat.mod_lt _ (by decide)⟩)
@@ -4493,13 +4493,13 @@ theorem perSessionRoundSim_sequential_bound
     | none => false
     | some (req, h2, c2) => spec.badCheck req h2 c2 c
   have hBadSlice : ∀ (idx : Fin Q_s) (v : Fin Q_s → Fin cardS),
-      finSum cardS (fun x => if bad idx (updateFinVec v idx x) then 1 else 0) ≤
+      qsum cardS (fun x => if bad idx (updateFinVec v idx x) then 1 else 0) ≤
         cardPad * epsCheck := by
     intro idx v
-    change finSum (cardPad * cardCheck) _ ≤ _
-    rw [finSum_ucPairFin]
+    change qsum (cardPad * cardCheck) _ ≤ _
+    rw [qsum_ucPairFin]
     have hInner : ∀ p : Fin cardPad,
-        finSum cardCheck (fun c => if bad idx (updateFinVec v idx (ucPairFin p c)) then 1 else 0) ≤
+        qsum cardCheck (fun c => if bad idx (updateFinVec v idx (ucPairFin p c)) then 1 else 0) ≤
           epsCheck := by
       intro p
       let v0 := updateFinVec v idx (ucPairFin p c0)
@@ -4513,12 +4513,12 @@ theorem perSessionRoundSim_sequential_bound
         dsimp only [bad]
         rw [updateFinVec_same, ucSplitLeft_pair spec.hCheckPos,
             ucSplitRight_pair spec.hCheckPos, updateFinVec_twice]
-      rw [finSum_congr (fun c => by rw [hSame c])]
+      rw [qsum_congr (fun c => by rw [hSame c])]
       cases seqSessionObsPreCut proto idealSignOracle sim A idx.val (mkSimSeq v0)
               (spec.realTapeOf p c0) cl advSt with
-      | none => simp only [Bool.false_eq_true, ↓reduceIte, finSum_const]; omega
+      | none => simp only [Bool.false_eq_true, ↓reduceIte, qsum_const]; omega
       | some args => rcases args with ⟨req, h2, c2⟩; exact spec.hBadCheckBound req h2 c2
-    exact Nat.le_trans (finSum_le_finSum hInner) (by rw [finSum_const]; exact Nat.le_refl _)
+    exact Nat.le_trans (qsum_le_qsum hInner) (by rw [qsum_const]; exact Nat.le_refl _)
   have hIdealPres : ∀ (simTape : SimTape) (clIn : RealClusterState PK ShareT) (aIn : AdvState),
       clIn.tsig.pk = cl.tsig.pk → clIn.tsig.corruptParties = cl.tsig.corruptParties →
       (clIn.honestWal.poisoned = false → clIn.honestShares = cl.honestShares) →
@@ -4873,15 +4873,15 @@ theorem perSessionRoundSim_sequential_bound
     (fun _ _ => bijCoord) (fun _ _ _ _ => rfl) bad (cardPad * epsCheck) hAgree hBadSlice D
   dsimp only at hMain
   have hZeroEq : distAcceptCount cardAll realView D =
-      finSum cardAll (fun ω => if D (hybrids 0 (Nat.zero_le Q_s) (enumVec.toFun ω)) then 1 else 0) := by
-    apply finSum_congr
+      qsum cardAll (fun ω => if D (hybrids 0 (Nat.zero_le Q_s) (enumVec.toFun ω)) then 1 else 0) := by
+    apply qsum_congr
     intro ω
     exact congrArg (fun t => if D t then 1 else 0)
       (sequentialHybridExec_zero_eq_real proto idealSignOracle sim A Q_s 0
         (mkRealSeq (enumVec.toFun ω)) (mkSimSeq (enumVec.toFun ω)) cl advSt).symm
   have hTopEq : distAcceptCount cardAll idealView D =
-      finSum cardAll (fun ω => if D (hybrids Q_s (Nat.le_refl Q_s) (enumVec.toFun ω)) then 1 else 0) := by
-    apply finSum_congr
+      qsum cardAll (fun ω => if D (hybrids Q_s (Nat.le_refl Q_s) (enumVec.toFun ω)) then 1 else 0) := by
+    apply qsum_congr
     intro ω
     exact congrArg (fun t => if D t then 1 else 0)
       (sequentialHybridExec_top_eq_ideal proto idealSignOracle sim A Q_s 0 Q_s

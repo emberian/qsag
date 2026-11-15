@@ -81,20 +81,20 @@ Constructive (`0 Classical.choice`) Lean 4.35 formalization closing:
 -/
 
 public import Qsag.Protocol.Threshold.MlDsa44Parameters
-public import Qsag.Math.Digest256
-public import Qsag.Math.Constructive
+public import Qsag.Spec.Encoding
+public import Qsag.Tactic.Prelude
 public import Qsag.Exec.SimulationSpine
 public import Qsag.Math.Goldilocks
-public import Qsag.Math.BinaryTower
-public import Qsag.Oracle.UcGames
+public import Qsag.Math.Gf2Pow128
+public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Exec.PosixCrashWal
 public import Qsag.Tactic.AssuranceKit
 
-import all Qsag.Math.Constructive
+import all Qsag.Tactic.Prelude
 import all Qsag.Exec.SimulationSpine
 import all Qsag.Math.Goldilocks
-import all Qsag.Math.BinaryTower
-import all Qsag.Oracle.UcGames
+import all Qsag.Math.Gf2Pow128
+import all Qsag.Protocol.Aggregation.UcGames
 
 public section
 namespace Qsag
@@ -2968,7 +2968,7 @@ def enumAdvPreOpenViews (Q w : Nat) :
 
 /-- Secret-independent count of pre-`OPEN` views accepted (`abortPred v = false`) by the adversary. -/
 def viewMaskSurviveCount {Q w : Nat} (abortPred : AdvPreOpenView Q w → Bool) : Nat :=
-  finSum (preOpenMaskCard Q w) (fun idx =>
+  qsum (preOpenMaskCard Q w) (fun idx =>
     if abortPred ((enumAdvPreOpenViews Q w).toFun idx) then 0 else 1)
 
 /-- Standalone FIPS 205 / Baggy / Jorts / QS-B signature output count over randomizer space `Fin cardR`. -/
@@ -2976,7 +2976,7 @@ def idealStandaloneSigCount {SK Msg Rand CorruptIn : Type} {Q w : Nat}
     (spec : CutTheHashProtocolSpec SK Msg Rand CorruptIn Q w)
     (sk : SK) (msg : Msg) (cardR : Nat) (decodeRand : Fin cardR → Rand)
     (targetSig : BitVec w) : Nat :=
-  finSum cardR (fun rIdx =>
+  qsum cardR (fun rIdx =>
     if spec.finalSignature sk msg (decodeRand rIdx) = targetSig then 1 else 0)
 
 /-- Surviving emitted signature count for `targetSig` under selective abort `abortPred`. -/
@@ -2985,8 +2985,8 @@ def survivingRealSigCount {SK Msg Rand CorruptIn : Type} {Q w : Nat}
     (sk : SK) (msg : Msg) (cardR : Nat) (decodeRand : Fin cardR → Rand)
     (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
     (abortPred : AdvPreOpenView Q w → Bool) (targetSig : BitVec w) : Nat :=
-  finSum cardR (fun rIdx =>
-    finSum (preOpenMaskCard Q w) (fun mIdx =>
+  qsum cardR (fun rIdx =>
+    qsum (preOpenMaskCard Q w) (fun mIdx =>
       if execCutTheHashWithBarrier spec sk msg (decodeRand rIdx) adv hQ
           ((enumHonestPreOpenMasks Q w).toFun mIdx) abortPred = some targetSig then 1 else 0))
 
@@ -3001,8 +3001,8 @@ def totalSurvivingRuns {SK Msg Rand CorruptIn : Type} {Q w : Nat}
     (sk : SK) (msg : Msg) (cardR : Nat) (decodeRand : Fin cardR → Rand)
     (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
     (abortPred : AdvPreOpenView Q w → Bool) : Nat :=
-  finSum cardR (fun rIdx =>
-    finSum (preOpenMaskCard Q w) (fun mIdx =>
+  qsum cardR (fun rIdx =>
+    qsum (preOpenMaskCard Q w) (fun mIdx =>
       optSomeIndicator (execCutTheHashWithBarrier spec sk msg (decodeRand rIdx) adv hQ
         ((enumHonestPreOpenMasks Q w).toFun mIdx) abortPred)))
 
@@ -3015,21 +3015,21 @@ def abortConditionedStatDistNum {SK Msg Rand CorruptIn : Type} {Q w : Nat}
     (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
     (abortPred : AdvPreOpenView Q w → Bool) : Nat :=
   let totalSurv := totalSurvivingRuns spec sk msg cardR decodeRand adv hQ abortPred
-  finSum (2 ^ w) (fun sIdx =>
+  qsum (2 ^ w) (fun sIdx =>
     let sig := (enumBitVec w).toFun sIdx
     natAbsDiff
       (survivingRealSigCount spec sk msg cardR decodeRand adv hQ abortPred sig * cardR)
       (idealStandaloneSigCount spec sk msg cardR decodeRand sig * totalSurv))
 
-private theorem finSum_mul_right {n : Nat} (f : Fin n → Nat) (c : Nat) :
-    finSum n (fun i => f i * c) = finSum n f * c := by
-  have h1 : finSum n (fun i => f i * c) = finSum n (fun i => c * f i) :=
-    finSum_congr (fun i => Nat.mul_comm (f i) c)
-  rw [h1, finSum_mul_left, Nat.mul_comm]
+private theorem qsum_mul_right {n : Nat} (f : Fin n → Nat) (c : Nat) :
+    qsum n (fun i => f i * c) = qsum n f * c := by
+  have h1 : qsum n (fun i => f i * c) = qsum n (fun i => c * f i) :=
+    qsum_congr (fun i => Nat.mul_comm (f i) c)
+  rw [h1, qsum_mul_left, Nat.mul_comm]
 
-private theorem finSum_two (f : Fin 2 → Nat) :
-    finSum 2 f = f ⟨0, Nat.zero_lt_succ 1⟩ + f ⟨1, Nat.succ_lt_succ (Nat.zero_lt_succ 0)⟩ := by
-  simp [finSum]
+private theorem qsum_two (f : Fin 2 → Nat) :
+    qsum 2 f = f ⟨0, Nat.zero_lt_succ 1⟩ + f ⟨1, Nat.succ_lt_succ (Nat.zero_lt_succ 0)⟩ := by
+  simp [qsum]
 
 private theorem natAbsDiff_zero_left (n : Nat) : natAbsDiff 0 n = n := by
   simp [natAbsDiff]
@@ -3053,9 +3053,9 @@ private theorem preOpenView_sum_invariant {SK Msg Rand CorruptIn : Type} {Q w : 
     (spec : CutTheHashProtocolSpec SK Msg Rand CorruptIn Q w)
     (sk : SK) (msg : Msg) (R : Rand) (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
     (weight : AdvPreOpenView Q w → Nat) :
-    finSum (preOpenMaskCard Q w) (fun mIdx =>
+    qsum (preOpenMaskCard Q w) (fun mIdx =>
       weight (evalPreOpenView spec sk msg R adv hQ ((enumHonestPreOpenMasks Q w).toFun mIdx))) =
-    finSum (preOpenMaskCard Q w) (fun vIdx =>
+    qsum (preOpenMaskCard Q w) (fun vIdx =>
       weight ((enumAdvPreOpenViews Q w).toFun vIdx)) := by
   let bij := maskBijection spec sk msg R adv hQ
   let enumM := enumHonestPreOpenMasks Q w
@@ -3064,15 +3064,15 @@ private theorem preOpenView_sum_invariant {SK Msg Rand CorruptIn : Type} {Q w : 
     fun mIdx => enumV.invFun (bij.toFun (enumM.toFun mIdx))
   let πinv : Fin (preOpenMaskCard Q w) → Fin (preOpenMaskCard Q w) :=
     fun vIdx => enumM.invFun (bij.invFun (enumV.toFun vIdx))
-  have hPerm := finSum_perm_invariant π πinv
+  have hPerm := qsum_perm_invariant π πinv
     (fun i => by simp [π, πinv, enumV.right_inv, bij.left_inv, enumM.left_inv])
     (fun j => by simp [π, πinv, enumM.right_inv, bij.right_inv, enumV.left_inv])
     (fun vIdx => weight (enumV.toFun vIdx))
   have hCong :
-      finSum (preOpenMaskCard Q w) (fun mIdx =>
+      qsum (preOpenMaskCard Q w) (fun mIdx =>
         weight (evalPreOpenView spec sk msg R adv hQ (enumM.toFun mIdx))) =
-      finSum (preOpenMaskCard Q w) (fun i => weight (enumV.toFun (π i))) := by
-    apply finSum_congr
+      qsum (preOpenMaskCard Q w) (fun i => weight (enumV.toFun (π i))) := by
+    apply qsum_congr
     intro i
     dsimp only [π, bij, maskBijection]
     rw [enumV.right_inv]
@@ -3087,16 +3087,16 @@ theorem preOpenView_exact_fiber_one {SK Msg Rand CorruptIn : Type} {Q w : Nat}
     (spec : CutTheHashProtocolSpec SK Msg Rand CorruptIn Q w)
     (sk : SK) (msg : Msg) (R : Rand) (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
     (targetView : AdvPreOpenView Q w) :
-    finSum (preOpenMaskCard Q w) (fun mIdx =>
+    qsum (preOpenMaskCard Q w) (fun mIdx =>
       if evalPreOpenView spec sk msg R adv hQ ((enumHonestPreOpenMasks Q w).toFun mIdx) = targetView
       then 1 else 0) = 1 := by
   rw [preOpenView_sum_invariant spec sk msg R adv hQ (fun v => if v = targetView then 1 else 0)]
   let enumV := enumAdvPreOpenViews Q w
   let iStar := enumV.invFun targetView
   have hCongr :
-      finSum (preOpenMaskCard Q w) (fun vIdx => if enumV.toFun vIdx = targetView then 1 else 0) =
-      finSum (preOpenMaskCard Q w) (fun vIdx => if vIdx = iStar then 1 else 0) := by
-    apply finSum_congr
+      qsum (preOpenMaskCard Q w) (fun vIdx => if enumV.toFun vIdx = targetView then 1 else 0) =
+      qsum (preOpenMaskCard Q w) (fun vIdx => if vIdx = iStar then 1 else 0) := by
+    apply qsum_congr
     intro vIdx
     by_cases hEq : vIdx = iStar
     · subst hEq
@@ -3107,7 +3107,7 @@ theorem preOpenView_exact_fiber_one {SK Msg Rand CorruptIn : Type} {Q w : Nat}
         have := congrArg enumV.invFun hv
         simpa [iStar, enumV.left_inv] using this
       simp [hEq, hNeV]
-  rw [hCongr, finSum_eq_indicator]
+  rw [hCongr, qsum_eq_indicator]
 
 /-- Total surviving executions factor unconditionally as `cardR * viewMaskSurviveCount abortPred`. -/
 theorem totalSurvivingRuns_eq {SK Msg Rand CorruptIn : Type} {Q w : Nat}
@@ -3118,18 +3118,18 @@ theorem totalSurvivingRuns_eq {SK Msg Rand CorruptIn : Type} {Q w : Nat}
     totalSurvivingRuns spec sk msg cardR decodeRand adv hQ abortPred =
       cardR * viewMaskSurviveCount abortPred := by
   have hInnerSurv : ∀ rIdx : Fin cardR,
-      finSum (preOpenMaskCard Q w) (fun mIdx =>
+      qsum (preOpenMaskCard Q w) (fun mIdx =>
         optSomeIndicator (execCutTheHashWithBarrier spec sk msg (decodeRand rIdx) adv hQ
           ((enumHonestPreOpenMasks Q w).toFun mIdx) abortPred)) = viewMaskSurviveCount abortPred := by
     intro rIdx
     have hPoint :
-        finSum (preOpenMaskCard Q w) (fun mIdx =>
+        qsum (preOpenMaskCard Q w) (fun mIdx =>
           optSomeIndicator (execCutTheHashWithBarrier spec sk msg (decodeRand rIdx) adv hQ
             ((enumHonestPreOpenMasks Q w).toFun mIdx) abortPred)) =
-        finSum (preOpenMaskCard Q w) (fun mIdx =>
+        qsum (preOpenMaskCard Q w) (fun mIdx =>
           if abortPred (evalPreOpenView spec sk msg (decodeRand rIdx) adv hQ
               ((enumHonestPreOpenMasks Q w).toFun mIdx)) then 0 else 1) := by
-      apply finSum_congr
+      apply qsum_congr
       intro mIdx
       unfold execCutTheHashWithBarrier
       exact optSomeIndicator_ite _ _
@@ -3137,7 +3137,7 @@ theorem totalSurvivingRuns_eq {SK Msg Rand CorruptIn : Type} {Q w : Nat}
     exact preOpenView_sum_invariant spec sk msg (decodeRand rIdx) adv hQ
       (fun v => if abortPred v then 0 else 1)
   unfold totalSurvivingRuns
-  rw [finSum_congr hInnerSurv, finSum_const]
+  rw [qsum_congr hInnerSurv, qsum_const]
 
 /-- Positive survival-count precondition (`0 < totalSurvivingRuns ...`) for selective-abort
     conditioning. -/
@@ -3194,7 +3194,7 @@ theorem cutTheHash_abort_conditioned_sd_zero {SK Msg Rand CorruptIn : Type} {Q w
     intro targetSig
     unfold survivingRealSigCount
     have hPerR : ∀ rIdx : Fin cardR,
-        finSum (preOpenMaskCard Q w) (fun mIdx =>
+        qsum (preOpenMaskCard Q w) (fun mIdx =>
           if execCutTheHashWithBarrier spec sk msg (decodeRand rIdx) adv hQ
               ((enumHonestPreOpenMasks Q w).toFun mIdx) abortPred = some targetSig then 1 else 0) =
         (if spec.finalSignature sk msg (decodeRand rIdx) = targetSig then 1 else 0) *
@@ -3204,13 +3204,13 @@ theorem cutTheHash_abort_conditioned_sd_zero {SK Msg Rand CorruptIn : Type} {Q w
       by_cases hMatch : spec.finalSignature sk msg (decodeRand rIdx) = targetSig
       · simp only [hMatch, ↓reduceIte, Nat.one_mul]
         have hEqSurv :
-            finSum (preOpenMaskCard Q w) (fun mIdx =>
+            qsum (preOpenMaskCard Q w) (fun mIdx =>
               if execCutTheHashWithBarrier spec sk msg (decodeRand rIdx) adv hQ
                   ((enumHonestPreOpenMasks Q w).toFun mIdx) abortPred = some targetSig then 1 else 0) =
-            finSum (preOpenMaskCard Q w) (fun mIdx =>
+            qsum (preOpenMaskCard Q w) (fun mIdx =>
               if abortPred (evalPreOpenView spec sk msg (decodeRand rIdx) adv hQ
                   ((enumHonestPreOpenMasks Q w).toFun mIdx)) then 0 else 1) := by
-          apply finSum_congr
+          apply qsum_congr
           intro mIdx
           unfold execCutTheHashWithBarrier
           rw [hRec, hMatch, indicator_ite_none_some]
@@ -3220,18 +3220,18 @@ theorem cutTheHash_abort_conditioned_sd_zero {SK Msg Rand CorruptIn : Type} {Q w
           (fun v => if abortPred v then 0 else 1)
       · simp only [hMatch, ↓reduceIte, Nat.zero_mul]
         have hZero :
-            finSum (preOpenMaskCard Q w) (fun mIdx =>
+            qsum (preOpenMaskCard Q w) (fun mIdx =>
               if execCutTheHashWithBarrier spec sk msg (decodeRand rIdx) adv hQ
                   ((enumHonestPreOpenMasks Q w).toFun mIdx) abortPred = some targetSig then 1 else 0) =
-            finSum (preOpenMaskCard Q w) (fun _ => 0) := by
-          apply finSum_congr
+            qsum (preOpenMaskCard Q w) (fun _ => 0) := by
+          apply qsum_congr
           intro mIdx
           unfold execCutTheHashWithBarrier
           rw [hRec, indicator_ite_none_some]
           simp only [hMatch, ↓reduceIte]
           cases abortPred (evalPreOpenView spec sk msg (decodeRand rIdx) adv hQ ((enumHonestPreOpenMasks Q w).toFun mIdx)) <;> rfl
-        rw [hZero, finSum_const, Nat.mul_zero]
-    rw [finSum_congr hPerR, finSum_mul_right]
+        rw [hZero, qsum_const, Nat.mul_zero]
+    rw [qsum_congr hPerR, qsum_mul_right]
     rfl
   have hCrossEq : ∀ targetSig : BitVec w,
       survivingRealSigCount spec sk msg cardR decodeRand adv hQ abortPred targetSig * cardR =
@@ -3243,18 +3243,18 @@ theorem cutTheHash_abort_conditioned_sd_zero {SK Msg Rand CorruptIn : Type} {Q w
   unfold abortConditionedStatDistNum
   dsimp only
   have hAllZero :
-      finSum (2 ^ w) (fun sIdx =>
+      qsum (2 ^ w) (fun sIdx =>
         let sig := (enumBitVec w).toFun sIdx
         natAbsDiff
           (survivingRealSigCount spec sk msg cardR decodeRand adv hQ abortPred sig * cardR)
           (idealStandaloneSigCount spec sk msg cardR decodeRand sig * totalSurvive)) =
-      finSum (2 ^ w) (fun _ => 0) := by
-    apply finSum_congr
+      qsum (2 ^ w) (fun _ => 0) := by
+    apply qsum_congr
     intro sIdx
     dsimp only
     rw [hCrossEq ((enumBitVec w).toFun sIdx)]
     simp [natAbsDiff]
-  rw [hAllZero, finSum_const, Nat.mul_zero]
+  rw [hAllZero, qsum_const, Nat.mul_zero]
 
 /-! ### Leaky Pre-`OPEN` Protocols & `#tooth` Distribution-Skew Witnesses -/
 
@@ -3303,8 +3303,8 @@ def leakyTotalSurvivingRuns {SK Msg Rand CorruptIn : Type} {Q w : Nat}
     (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
     (leak : SK → Msg → Rand → CorruptIn → BitVec w)
     (leakyAbortPred : LeakyPreOpenView Q w → Bool) : Nat :=
-  finSum cardR (fun rIdx =>
-    finSum (preOpenMaskCard Q w) (fun mIdx =>
+  qsum cardR (fun rIdx =>
+    qsum (preOpenMaskCard Q w) (fun mIdx =>
       optSomeIndicator (execLeakyPreOpen spec sk msg (decodeRand rIdx) adv hQ
         ((enumHonestPreOpenMasks Q w).toFun mIdx) leak leakyAbortPred)))
 
@@ -3315,8 +3315,8 @@ def leakySurvivingSigCount {SK Msg Rand CorruptIn : Type} {Q w : Nat}
     (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
     (leak : SK → Msg → Rand → CorruptIn → BitVec w)
     (leakyAbortPred : LeakyPreOpenView Q w → Bool) (targetSig : BitVec w) : Nat :=
-  finSum cardR (fun rIdx =>
-    finSum (preOpenMaskCard Q w) (fun mIdx =>
+  qsum cardR (fun rIdx =>
+    qsum (preOpenMaskCard Q w) (fun mIdx =>
       if execLeakyPreOpen spec sk msg (decodeRand rIdx) adv hQ
           ((enumHonestPreOpenMasks Q w).toFun mIdx) leak leakyAbortPred = some targetSig
       then 1 else 0))
@@ -3416,87 +3416,87 @@ private theorem toyLeakySkew (Q : Nat) (hQ : 0 < Q)
   have hCardPos : 0 < preOpenMaskCard Q 8 :=
     Nat.mul_pos (Nat.mul_pos hQ (Nat.two_pow_pos 8)) (Nat.two_pow_pos 8)
   have hSurv0 :
-      finSum (preOpenMaskCard Q 8) (fun mIdx =>
+      qsum (preOpenMaskCard Q 8) (fun mIdx =>
         optSomeIndicator (execLeakyPreOpen (toyCutSpec Q hQ) concreteSk0 concreteMsg0
           fin2Zero (toyConstAdv Q) hQ ((enumHonestPreOpenMasks Q 8).toFun mIdx) leak pred)) =
       preOpenMaskCard Q 8 := by
     have hCong :
-        finSum (preOpenMaskCard Q 8) (fun mIdx =>
+        qsum (preOpenMaskCard Q 8) (fun mIdx =>
           optSomeIndicator (execLeakyPreOpen (toyCutSpec Q hQ) concreteSk0 concreteMsg0
             fin2Zero (toyConstAdv Q) hQ ((enumHonestPreOpenMasks Q 8).toFun mIdx) leak pred)) =
-        finSum (preOpenMaskCard Q 8) (fun _ => 1) := by
-      apply finSum_congr
+        qsum (preOpenMaskCard Q 8) (fun _ => 1) := by
+      apply qsum_congr
       intro mIdx
       rw [h0]
       rfl
-    rw [hCong, finSum_const, Nat.mul_one]
+    rw [hCong, qsum_const, Nat.mul_one]
   have hSurv1 :
-      finSum (preOpenMaskCard Q 8) (fun mIdx =>
+      qsum (preOpenMaskCard Q 8) (fun mIdx =>
         optSomeIndicator (execLeakyPreOpen (toyCutSpec Q hQ) concreteSk0 concreteMsg0
           fin2One (toyConstAdv Q) hQ ((enumHonestPreOpenMasks Q 8).toFun mIdx) leak pred)) = 0 := by
     have hCong :
-        finSum (preOpenMaskCard Q 8) (fun mIdx =>
+        qsum (preOpenMaskCard Q 8) (fun mIdx =>
           optSomeIndicator (execLeakyPreOpen (toyCutSpec Q hQ) concreteSk0 concreteMsg0
             fin2One (toyConstAdv Q) hQ ((enumHonestPreOpenMasks Q 8).toFun mIdx) leak pred)) =
-        finSum (preOpenMaskCard Q 8) (fun _ => 0) := by
-      apply finSum_congr
+        qsum (preOpenMaskCard Q 8) (fun _ => 0) := by
+      apply qsum_congr
       intro mIdx
       rw [h1]
       rfl
-    rw [hCong, finSum_const, Nat.mul_zero]
+    rw [hCong, qsum_const, Nat.mul_zero]
   have hTotal :
       leakyTotalSurvivingRuns (toyCutSpec Q hQ) concreteSk0 concreteMsg0 2 id (toyConstAdv Q) hQ
         leak pred = preOpenMaskCard Q 8 := by
     unfold leakyTotalSurvivingRuns
-    rw [finSum_two]
+    rw [qsum_two]
     dsimp only [id]
     rw [hSurv0, hSurv1, Nat.add_zero]
   have hNoneNeOne :
       (if (none : Option (BitVec 8)) = some (BitVec.ofNat 8 1) then 1 else 0) = 0 := rfl
   have hOdd0 :
-      finSum (preOpenMaskCard Q 8) (fun mIdx =>
+      qsum (preOpenMaskCard Q 8) (fun mIdx =>
         if execLeakyPreOpen (toyCutSpec Q hQ) concreteSk0 concreteMsg0 fin2Zero (toyConstAdv Q)
             hQ ((enumHonestPreOpenMasks Q 8).toFun mIdx) leak pred = some (BitVec.ofNat 8 1)
         then 1 else 0) = 0 := by
     have hCong :
-        finSum (preOpenMaskCard Q 8) (fun mIdx =>
+        qsum (preOpenMaskCard Q 8) (fun mIdx =>
           if execLeakyPreOpen (toyCutSpec Q hQ) concreteSk0 concreteMsg0 fin2Zero (toyConstAdv Q)
               hQ ((enumHonestPreOpenMasks Q 8).toFun mIdx) leak pred = some (BitVec.ofNat 8 1)
           then 1 else 0) =
-        finSum (preOpenMaskCard Q 8) (fun _ => 0) := by
-      apply finSum_congr
+        qsum (preOpenMaskCard Q 8) (fun _ => 0) := by
+      apply qsum_congr
       intro mIdx
       rw [h0]
       exact toySomeZero_ne_someOne
-    rw [hCong, finSum_const, Nat.mul_zero]
+    rw [hCong, qsum_const, Nat.mul_zero]
   have hOdd1 :
-      finSum (preOpenMaskCard Q 8) (fun mIdx =>
+      qsum (preOpenMaskCard Q 8) (fun mIdx =>
         if execLeakyPreOpen (toyCutSpec Q hQ) concreteSk0 concreteMsg0 fin2One (toyConstAdv Q)
             hQ ((enumHonestPreOpenMasks Q 8).toFun mIdx) leak pred = some (BitVec.ofNat 8 1)
         then 1 else 0) = 0 := by
     have hCong :
-        finSum (preOpenMaskCard Q 8) (fun mIdx =>
+        qsum (preOpenMaskCard Q 8) (fun mIdx =>
           if execLeakyPreOpen (toyCutSpec Q hQ) concreteSk0 concreteMsg0 fin2One (toyConstAdv Q)
               hQ ((enumHonestPreOpenMasks Q 8).toFun mIdx) leak pred = some (BitVec.ofNat 8 1)
           then 1 else 0) =
-        finSum (preOpenMaskCard Q 8) (fun _ => 0) := by
-      apply finSum_congr
+        qsum (preOpenMaskCard Q 8) (fun _ => 0) := by
+      apply qsum_congr
       intro mIdx
       rw [h1]
       exact hNoneNeOne
-    rw [hCong, finSum_const, Nat.mul_zero]
+    rw [hCong, qsum_const, Nat.mul_zero]
   have hLeakyOdd :
       leakySurvivingSigCount (toyCutSpec Q hQ) concreteSk0 concreteMsg0 2 id (toyConstAdv Q) hQ
         leak pred (BitVec.ofNat 8 1) = 0 := by
     unfold leakySurvivingSigCount
-    rw [finSum_two]
+    rw [qsum_two]
     dsimp only [id]
     rw [hOdd0, hOdd1]
   have hIdealOdd :
       idealStandaloneSigCount (toyCutSpec Q hQ) concreteSk0 concreteMsg0 2 id
         (BitVec.ofNat 8 1) = 1 := by
     unfold idealStandaloneSigCount
-    rw [finSum_two]
+    rw [qsum_two]
     exact toyIdealOdd_closed
   rw [hTotal, hLeakyOdd, hIdealOdd, Nat.zero_mul, Nat.one_mul, natAbsDiff_zero_left]
   exact ⟨hCardPos, hCardPos⟩
@@ -3586,8 +3586,8 @@ theorem witness_cutTheHash_selective_abort_inhabited :
         exact Nat.le_refl 1
       · simp only [hv, ↓reduceIte]
         exact Nat.zero_le _
-    have hLe := finSum_le_finSum hGe
-    rwa [finSum_eq_indicator] at hLe
+    have hLe := qsum_le_qsum hGe
+    rwa [qsum_eq_indicator] at hLe
   omega
 
 
@@ -3885,11 +3885,11 @@ theorem romReal_eq_ideal_of_blind_unqueried
   intro x hx
   simp only [roLookup, hx, ↓reduceIte]
 
-private theorem natAbsDiff_finSum_le_const {n : Nat} (f g : Fin n → Nat) (c : Nat)
+private theorem natAbsDiff_qsum_le_const {n : Nat} (f g : Fin n → Nat) (c : Nat)
     (h : ∀ i, natAbsDiff (f i) (g i) ≤ c) :
-    natAbsDiff (finSum n f) (finSum n g) ≤ n * c :=
-  Nat.le_trans (natAbsDiff_finSum_le f g)
-    (Nat.le_trans (finSum_le_finSum h) (Nat.le_of_eq (finSum_const n c)))
+    natAbsDiff (qsum n f) (qsum n g) ≤ n * c :=
+  Nat.le_trans (natAbsDiff_qsum_le f g)
+    (Nat.le_trans (qsum_le_qsum h) (Nat.le_of_eq (qsum_const n c)))
 
 private theorem natAbsDiff_comm (a b : Nat) : natAbsDiff a b = natAbsDiff b a := by
   unfold natAbsDiff
@@ -3906,7 +3906,7 @@ theorem romCommit_blind_count_bound
     (sk : SK) (msg : Msg) (R : Rand) (hQ : 0 < Q) (tape : Nat → T) (D : Out → Bool)
     (tagFresh : T) (mr : Fin Q) (mx : BitVec w) :
     natAbsDiff
-      (finSum (2 ^ bw) (fun bi =>
+      (qsum (2 ^ bw) (fun bi =>
         if D (romRealRun spec adv sk msg R hQ tape mr mx ((enumBitVec bw).toFun bi) tagFresh)
         then 1 else 0))
       (2 ^ bw *
@@ -3916,12 +3916,12 @@ theorem romCommit_blind_count_bound
   have hConst : 2 ^ bw *
       (if D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr)
           (romViewXor spec adv sk msg R hQ tape mr mx) tagFresh) then 1 else 0) =
-      finSum (2 ^ bw) (fun _ =>
+      qsum (2 ^ bw) (fun _ =>
         if D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr)
           (romViewXor spec adv sk msg R hQ tape mr mx) tagFresh) then 1 else 0) :=
-    (finSum_const _ _).symm
+    (qsum_const _ _).symm
   rw [hConst]
-  have hDiff := finSum_indicator_diff_le
+  have hDiff := qsum_indicator_diff_le
     (fun bi : Fin (2 ^ bw) =>
       D (romRealRun spec adv sk msg R hQ tape mr mx ((enumBitVec bw).toFun bi) tagFresh))
     (fun _ => D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr)
@@ -3937,12 +3937,12 @@ theorem romCommit_blind_count_bound
         mr mx _ tagFresh
         (fun hMem => hNot (List.mem_map.mpr ⟨_, hMem, (enumBitVec bw).left_inv bi⟩))))
   refine Nat.le_trans hDiff ?_
-  have hCount := finSum_mem_list_le (2 ^ bw)
+  have hCount := qsum_mem_list_le (2 ^ bw)
     (((romIdealAsked adv tape (romViewRing spec sk msg R hQ mr)
       (romViewXor spec adv sk msg R hQ tape mr mx) tagFresh).map spec.blindOf).map
       (enumBitVec bw).invFun)
   rw [List.length_map, List.length_map] at hCount
-  refine Nat.le_trans (Nat.le_trans (Nat.le_of_eq (finSum_congr (fun bi => ?_))) hCount)
+  refine Nat.le_trans (Nat.le_trans (Nat.le_of_eq (qsum_congr (fun bi => ?_))) hCount)
     (romIdealAsked_length_le adv tape hQry _ _ _)
   simp only [decide_eq_true_eq]
 
@@ -3953,7 +3953,7 @@ def romRealCount {SK Msg Rand CorruptIn X T St1 St2 Out : Type} {Q w bw : Nat} [
     (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w)
     (sk : SK) (msg : Msg) (R : Rand) (hQ : 0 < Q) (tape : Nat → T) (D : Out → Bool)
     (tagFresh : T) : Nat :=
-  finSum Q (fun mr => finSum (2 ^ w) (fun xi => finSum (2 ^ bw) (fun bi =>
+  qsum Q (fun mr => qsum (2 ^ w) (fun xi => qsum (2 ^ bw) (fun bi =>
     if D (romRealRun spec adv sk msg R hQ tape mr ((enumBitVec w).toFun xi)
       ((enumBitVec bw).toFun bi) tagFresh) then 1 else 0)))
 
@@ -3962,7 +3962,7 @@ def romRealCount {SK Msg Rand CorruptIn X T St1 St2 Out : Type} {Q w bw : Nat} [
 def romIdealCount {CorruptIn X T St1 St2 Out : Type} {Q w : Nat} [DecidableEq X]
     (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w) (tape : Nat → T) (D : Out → Bool)
     (tagFresh : T) : Nat :=
-  finSum Q (fun d1 => finSum (2 ^ w) (fun xi =>
+  qsum Q (fun d1 => qsum (2 ^ w) (fun xi =>
     if D (romIdealRun adv tape d1 ((enumBitVec w).toFun xi) tagFresh) then 1 else 0))
 
 /-- **Random-Oracle Commitment Hiding With Rushing Selective Abort
@@ -3987,46 +3987,46 @@ theorem cutTheHash_rom_commit_hiding_sd_bound
     natAbsDiff (romRealCount spec adv sk msg R hQ tape D tagFresh)
       (2 ^ bw * romIdealCount adv tape D tagFresh) ≤ Q * (2 ^ w * (q1 + q2 + q3)) := by
   have hStep : natAbsDiff
-      (finSum Q (fun mr => finSum (2 ^ w) (fun xi => finSum (2 ^ bw) (fun bi =>
+      (qsum Q (fun mr => qsum (2 ^ w) (fun xi => qsum (2 ^ bw) (fun bi =>
         if D (romRealRun spec adv sk msg R hQ tape mr ((enumBitVec w).toFun xi)
           ((enumBitVec bw).toFun bi) tagFresh) then 1 else 0))))
-      (finSum Q (fun mr => finSum (2 ^ w) (fun xi => 2 ^ bw *
+      (qsum Q (fun mr => qsum (2 ^ w) (fun xi => 2 ^ bw *
         (if D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr)
           (romViewXor spec adv sk msg R hQ tape mr ((enumBitVec w).toFun xi)) tagFresh)
          then 1 else 0)))) ≤ Q * (2 ^ w * (q1 + q2 + q3)) :=
-    natAbsDiff_finSum_le_const _ _ _ (fun mr =>
-      natAbsDiff_finSum_le_const _ _ _ (fun xi =>
+    natAbsDiff_qsum_le_const _ _ _ (fun mr =>
+      natAbsDiff_qsum_le_const _ _ _ (fun xi =>
         romCommit_blind_count_bound spec hFramed adv hQry sk msg R hQ tape D tagFresh mr
           ((enumBitVec w).toFun xi)))
   have hInner : ∀ mr : Fin Q,
-      finSum (2 ^ w) (fun xi => 2 ^ bw *
+      qsum (2 ^ w) (fun xi => 2 ^ bw *
         (if D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr)
           (romViewXor spec adv sk msg R hQ tape mr ((enumBitVec w).toFun xi)) tagFresh)
          then 1 else 0)) =
-      2 ^ bw * finSum (2 ^ w) (fun xi =>
+      2 ^ bw * qsum (2 ^ w) (fun xi =>
         if D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr) ((enumBitVec w).toFun xi)
           tagFresh) then 1 else 0) := by
     intro mr
-    rw [finSum_mul_left]
+    rw [qsum_mul_left]
     exact congrArg (fun s => 2 ^ bw * s)
-      (finSum_bijection_invariant (enumBitVec w)
+      (qsum_bijection_invariant (enumBitVec w)
         (maskBijectionBitVec w (romXorPad spec adv sk msg R hQ tape mr))
         (fun d2 => if D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr) d2 tagFresh)
           then 1 else 0))
-  have hOuter : finSum Q (fun mr => finSum (2 ^ w) (fun xi =>
+  have hOuter : qsum Q (fun mr => qsum (2 ^ w) (fun xi =>
         if D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr) ((enumBitVec w).toFun xi)
           tagFresh) then 1 else 0)) = romIdealCount adv tape D tagFresh :=
-    finSum_perm_invariant
+    qsum_perm_invariant
       (fun mr => subModFinQ Q hQ (spec.wireRingSecret sk msg R) mr)
       (fun d => subModFinQ Q hQ (spec.wireRingSecret sk msg R) d)
       (fun i => subModFinQ_involutive Q hQ _ i) (fun j => subModFinQ_involutive Q hQ _ j)
-      (fun d1 => finSum (2 ^ w) (fun xi =>
+      (fun d1 => qsum (2 ^ w) (fun xi =>
         if D (romIdealRun adv tape d1 ((enumBitVec w).toFun xi) tagFresh) then 1 else 0))
-  have hMid : finSum Q (fun mr => finSum (2 ^ w) (fun xi => 2 ^ bw *
+  have hMid : qsum Q (fun mr => qsum (2 ^ w) (fun xi => 2 ^ bw *
         (if D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr)
           (romViewXor spec adv sk msg R hQ tape mr ((enumBitVec w).toFun xi)) tagFresh)
          then 1 else 0))) = 2 ^ bw * romIdealCount adv tape D tagFresh := by
-    rw [finSum_congr hInner, finSum_mul_left, hOuter]
+    rw [qsum_congr hInner, qsum_mul_left, hOuter]
   rw [← hMid]
   exact hStep
 
@@ -4200,13 +4200,13 @@ theorem inMldsaSafeBoxBool_eq_false_iff (gamma1 beta : Nat) (z : Int) :
 /-- Surviving mask preimage multiplicity for `zTarget` when `y` ranges uniformly over
     `[-gamma1 + 1, gamma1 - 1]` and outputs `z = y + c_s1` conditioned on `z ∈ SafeBox`. -/
 def mldsaSurvivingPreimageCount (gamma1 beta : Nat) (c_s1 zTarget : Int) : Nat :=
-  finSum (mldsaMaskIntervalCard gamma1) (fun i =>
+  qsum (mldsaMaskIntervalCard gamma1) (fun i =>
     let z := decodeMldsaMask gamma1 i + c_s1
     if inMldsaSafeBoxBool gamma1 beta z && intEqBool z zTarget then 1 else 0)
 
 /-- Total number of masks `y ∈ [-gamma1 + 1, gamma1 - 1]` surviving `y + c_s1 ∈ SafeBox`. -/
 def mldsaTotalSurvivingMasks (gamma1 beta : Nat) (c_s1 : Int) : Nat :=
-  finSum (mldsaMaskIntervalCard gamma1) (fun i =>
+  qsum (mldsaMaskIntervalCard gamma1) (fun i =>
     if inMldsaSafeBoxBool gamma1 beta (decodeMldsaMask gamma1 i + c_s1) then 1 else 0)
 
 /-- Explicit `SimpleEquiv` bijection between the safe output box `Fin (2*(gamma1 - beta) - 1)`
@@ -4288,11 +4288,11 @@ theorem mldsa_rejection_valid_output_uniform_in_box
     let iStar := encodeMldsaMask hGammaPos (zTarget - cs) hyStar
     have hDecStar := decode_encodeMldsaMask hGammaPos (zTarget - cs) hyStar
     have hCong :
-        finSum (mldsaMaskIntervalCard gamma1) (fun i =>
+        qsum (mldsaMaskIntervalCard gamma1) (fun i =>
           if inMldsaSafeBoxBool gamma1 beta (decodeMldsaMask gamma1 i + cs) &&
               intEqBool (decodeMldsaMask gamma1 i + cs) zTarget then 1 else 0) =
-        finSum (mldsaMaskIntervalCard gamma1) (fun i => if i = iStar then 1 else 0) := by
-      apply finSum_congr
+        qsum (mldsaMaskIntervalCard gamma1) (fun i => if i = iStar then 1 else 0) := by
+      apply qsum_congr
       intro i
       by_cases hEq : i = iStar
       · subst hEq
@@ -4318,18 +4318,18 @@ theorem mldsa_rejection_valid_output_uniform_in_box
         rw [hBeqF, Bool.and_false]
         simp only [hEq, ↓reduceIte]
         rfl
-    rw [hCong, finSum_eq_indicator]
+    rw [hCong, qsum_eq_indicator]
   have hOutsideGen : ∀ (cs : Int) (zOutside : Int),
       ¬ inMldsaSafeBox gamma1 beta zOutside →
       mldsaSurvivingPreimageCount gamma1 beta cs zOutside = 0 := by
     intro cs zOutside hzNot
     unfold mldsaSurvivingPreimageCount
     have hCong :
-        finSum (mldsaMaskIntervalCard gamma1) (fun i =>
+        qsum (mldsaMaskIntervalCard gamma1) (fun i =>
           if inMldsaSafeBoxBool gamma1 beta (decodeMldsaMask gamma1 i + cs) &&
               intEqBool (decodeMldsaMask gamma1 i + cs) zOutside then 1 else 0) =
-        finSum (mldsaMaskIntervalCard gamma1) (fun _ => 0) := by
-      apply finSum_congr
+        qsum (mldsaMaskIntervalCard gamma1) (fun _ => 0) := by
+      apply qsum_congr
       intro i
       match Int.decEq (decodeMldsaMask gamma1 i + cs) zOutside with
       | isTrue hEqZ =>
@@ -4341,41 +4341,41 @@ theorem mldsa_rejection_valid_output_uniform_in_box
         have hBeqF : intEqBool (decodeMldsaMask gamma1 i + cs) zOutside = false := intEqBool_false hNeZ
         rw [hBeqF, Bool.and_false]
         rfl
-    rw [hCong, finSum_const, Nat.mul_zero]
+    rw [hCong, qsum_const, Nat.mul_zero]
   have hInside := hInsideGen c_s1 hSecret
   have hOutside := hOutsideGen c_s1
   have hTotal : mldsaTotalSurvivingMasks gamma1 beta c_s1 = mldsaSafeBoxCard gamma1 beta := by
     unfold mldsaTotalSurvivingMasks
     have hExpand :
-        finSum (mldsaMaskIntervalCard gamma1) (fun i =>
+        qsum (mldsaMaskIntervalCard gamma1) (fun i =>
           if inMldsaSafeBoxBool gamma1 beta (decodeMldsaMask gamma1 i + c_s1) then 1 else 0) =
-        finSum (mldsaMaskIntervalCard gamma1) (fun i =>
-          finSum (mldsaSafeBoxCard gamma1 beta) (fun j =>
+        qsum (mldsaMaskIntervalCard gamma1) (fun i =>
+          qsum (mldsaSafeBoxCard gamma1 beta) (fun j =>
             if inMldsaSafeBoxBool gamma1 beta (decodeMldsaMask gamma1 i + c_s1) &&
                 intEqBool (decodeMldsaMask gamma1 i + c_s1) (decodeMldsaSafeBox gamma1 beta j) then 1 else 0)) := by
-      apply finSum_congr
+      apply qsum_congr
       intro i
       let z := decodeMldsaMask gamma1 i + c_s1
       change (if inMldsaSafeBoxBool gamma1 beta z then 1 else 0) =
-        finSum (mldsaSafeBoxCard gamma1 beta) (fun j =>
+        qsum (mldsaSafeBoxCard gamma1 beta) (fun j =>
           if inMldsaSafeBoxBool gamma1 beta z && intEqBool z (decodeMldsaSafeBox gamma1 beta j) then 1 else 0)
       cases hSafeB : inMldsaSafeBoxBool gamma1 beta z
       · have hZero :
-            finSum (mldsaSafeBoxCard gamma1 beta) (fun j =>
+            qsum (mldsaSafeBoxCard gamma1 beta) (fun j =>
               if false && intEqBool z (decodeMldsaSafeBox gamma1 beta j) then 1 else 0) =
-            finSum (mldsaSafeBoxCard gamma1 beta) (fun _ => 0) :=
-          finSum_congr (fun _ => rfl)
-        rw [hZero, finSum_const, Nat.mul_zero]
+            qsum (mldsaSafeBoxCard gamma1 beta) (fun _ => 0) :=
+          qsum_congr (fun _ => rfl)
+        rw [hZero, qsum_const, Nat.mul_zero]
         rfl
       · have hz : inMldsaSafeBox gamma1 beta z :=
           (inMldsaSafeBoxBool_eq_true_iff gamma1 beta z).mp hSafeB
         let jStar := encodeMldsaSafeBox hLt z hz
         have hDecJ := decode_encodeMldsaSafeBox hLt z hz
         have hInner :
-            finSum (mldsaSafeBoxCard gamma1 beta) (fun j =>
+            qsum (mldsaSafeBoxCard gamma1 beta) (fun j =>
               if true && intEqBool z (decodeMldsaSafeBox gamma1 beta j) then 1 else 0) =
-            finSum (mldsaSafeBoxCard gamma1 beta) (fun j => if j = jStar then 1 else 0) := by
-          apply finSum_congr
+            qsum (mldsaSafeBoxCard gamma1 beta) (fun j => if j = jStar then 1 else 0) := by
+          apply qsum_congr
           intro j
           by_cases hj : j = jStar
           · subst hj
@@ -4398,19 +4398,19 @@ theorem mldsa_rejection_valid_output_uniform_in_box
             rw [hBeqF]
             simp only [Bool.true_and, hj, ↓reduceIte]
             rfl
-        rw [hInner, finSum_eq_indicator]
+        rw [hInner, qsum_eq_indicator]
         rfl
-    rw [hExpand, finSum_comm]
+    rw [hExpand, qsum_comm]
     have hInnerOne :
-        finSum (mldsaSafeBoxCard gamma1 beta) (fun j =>
-          finSum (mldsaMaskIntervalCard gamma1) (fun i =>
+        qsum (mldsaSafeBoxCard gamma1 beta) (fun j =>
+          qsum (mldsaMaskIntervalCard gamma1) (fun i =>
             if inMldsaSafeBoxBool gamma1 beta (decodeMldsaMask gamma1 i + c_s1) &&
                 intEqBool (decodeMldsaMask gamma1 i + c_s1) (decodeMldsaSafeBox gamma1 beta j) then 1 else 0)) =
-        finSum (mldsaSafeBoxCard gamma1 beta) (fun _ => 1) := by
-      apply finSum_congr
+        qsum (mldsaSafeBoxCard gamma1 beta) (fun _ => 1) := by
+      apply qsum_congr
       intro j
       exact hInside (decodeMldsaSafeBox gamma1 beta j) (encode_decodeMldsaSafeBox hLt j).1
-    rw [hInnerOne, finSum_const, Nat.mul_one]
+    rw [hInnerOne, qsum_const, Nat.mul_one]
   refine ⟨hInside, hOutside, hTotal, ?_⟩
   intro c_s1' hSecret' z
   cases hSafeB : inMldsaSafeBoxBool gamma1 beta z
@@ -4464,7 +4464,7 @@ def mldsaVecSurvivingMaskEquiv {dim gamma1 beta : Nat} (hLt : beta < gamma1)
 /-- Unclipped preimage multiplicity when a broken signer omits the `< gamma1 - beta` rejection
     check and outputs `z = y + c_s1` directly. -/
 def mldsaUnclippedPreimageCount (gamma1 : Nat) (c_s1 zTarget : Int) : Nat :=
-  finSum (mldsaMaskIntervalCard gamma1) (fun i =>
+  qsum (mldsaMaskIntervalCard gamma1) (fun i =>
     if intEqBool (decodeMldsaMask gamma1 i + c_s1) zTarget then 1 else 0)
 
 /-- Deployed `ML-DSA-44` (`gamma1 = 131072, beta = 78`) boundary leakage equality without the
@@ -4486,10 +4486,10 @@ theorem tooth_mldsa44_unclipped_boundary_counts :
     let iMax := encodeMldsaMask hPos ((mldsa44Gamma1 : Int) - 1) hyMax
     have hDecMax := decode_encodeMldsaMask hPos ((mldsa44Gamma1 : Int) - 1) hyMax
     have hCong :
-        finSum (mldsaMaskIntervalCard mldsa44Gamma1) (fun i =>
+        qsum (mldsaMaskIntervalCard mldsa44Gamma1) (fun i =>
           if intEqBool (decodeMldsaMask mldsa44Gamma1 i + 1) (mldsa44Gamma1 : Int) then 1 else 0) =
-        finSum (mldsaMaskIntervalCard mldsa44Gamma1) (fun i => if i = iMax then 1 else 0) := by
-      apply finSum_congr
+        qsum (mldsaMaskIntervalCard mldsa44Gamma1) (fun i => if i = iMax then 1 else 0) := by
+      apply qsum_congr
       intro i
       by_cases hEq : i = iMax
       · subst hEq
@@ -4514,14 +4514,14 @@ theorem tooth_mldsa44_unclipped_boundary_counts :
         rw [hBeqF]
         simp only [hEq, ↓reduceIte]
         rfl
-    rw [hCong, finSum_eq_indicator]
+    rw [hCong, qsum_eq_indicator]
   have hZero : mldsaUnclippedPreimageCount mldsa44Gamma1 0 (mldsa44Gamma1 : Int) = 0 := by
     unfold mldsaUnclippedPreimageCount
     have hCong :
-        finSum (mldsaMaskIntervalCard mldsa44Gamma1) (fun i =>
+        qsum (mldsaMaskIntervalCard mldsa44Gamma1) (fun i =>
           if intEqBool (decodeMldsaMask mldsa44Gamma1 i + 0) (mldsa44Gamma1 : Int) then 1 else 0) =
-        finSum (mldsaMaskIntervalCard mldsa44Gamma1) (fun _ => 0) := by
-      apply finSum_congr
+        qsum (mldsaMaskIntervalCard mldsa44Gamma1) (fun _ => 0) := by
+      apply qsum_congr
       intro i
       have hiBound := (encode_decodeMldsaMask hPos i).1
       have hNe : decodeMldsaMask mldsa44Gamma1 i + 0 ≠ (mldsa44Gamma1 : Int) := by
@@ -4531,7 +4531,7 @@ theorem tooth_mldsa44_unclipped_boundary_counts :
         intEqBool_false hNe
       rw [hBeqF]
       rfl
-    rw [hCong, finSum_const, Nat.mul_zero]
+    rw [hCong, qsum_const, Nat.mul_zero]
   refine ⟨hB1, hB0, hOne, hZero, ?_⟩
   rw [hOne, hZero]
   decide
@@ -4998,7 +4998,7 @@ theorem intDot_swap : ∀ (n m : Nat) (a : Fin n → Int) (c : Fin m → Int)
     rw [h1, h2, ih]
 
 /-- `‖a‖₁`. -/
-def l1Norm (n : Nat) (a : Fin n → Int) : Nat := finSum n (fun j => (a j).natAbs)
+def l1Norm (n : Nat) (a : Fin n → Int) : Nat := qsum n (fun j => (a j).natAbs)
 
 theorem intDot_natAbs_le : ∀ (n : Nat) (a u : Fin n → Int) (B : Nat),
     (∀ j, (u j).natAbs ≤ B) → (intDot n a u).natAbs ≤ l1Norm n a * B
@@ -5502,23 +5502,23 @@ theorem mldsa44_ring_joint_transcript_simulation {k l : Nat}
 /-! ### Rejected Attempts: the Published `w₁` of an Abort Is Distributed Independently of the Secret -/
 
 /-- Counting through a bijection between two decidable subsets of two enumerated spaces. -/
-theorem finSum_subset_bij {n m : Nat} (P : Fin n → Bool) (Q : Fin m → Bool)
+theorem qsum_subset_bij {n m : Nat} (P : Fin n → Bool) (Q : Fin m → Bool)
     (f : Fin n → Fin m) (g : Fin m → Fin n)
     (hf : ∀ i, P i = true → Q (f i) = true ∧ g (f i) = i)
     (hg : ∀ j, Q j = true → P (g j) = true ∧ f (g j) = j) :
-    finSum n (fun i => if P i then 1 else 0) = finSum m (fun j => if Q j then 1 else 0) := by
-  have h1 : finSum n (fun i => if P i then 1 else 0) =
-      finSum n (fun i => finSum m (fun j => if j = f i then (if P i then 1 else 0) else 0)) :=
-    finSum_congr (fun i => (finSum_ite_eq (f i) (fun _ => if P i then 1 else 0)).symm)
-  have h2 : ∀ j : Fin m, finSum n (fun i => if j = f i then (if P i then 1 else 0) else 0) =
+    qsum n (fun i => if P i then 1 else 0) = qsum m (fun j => if Q j then 1 else 0) := by
+  have h1 : qsum n (fun i => if P i then 1 else 0) =
+      qsum n (fun i => qsum m (fun j => if j = f i then (if P i then 1 else 0) else 0)) :=
+    qsum_congr (fun i => (qsum_ite_eq _ (f i) (if P i then 1 else 0)).symm)
+  have h2 : ∀ j : Fin m, qsum n (fun i => if j = f i then (if P i then 1 else 0) else 0) =
       (if Q j then 1 else 0) := by
     intro j
     cases hQ : Q j with
     | true =>
       obtain ⟨hPg, hfg⟩ := hg j hQ
-      have h3 : finSum n (fun i => if j = f i then (if P i then 1 else 0) else 0) =
-          finSum n (fun i => if i = g j then 1 else 0) := by
-        apply finSum_congr
+      have h3 : qsum n (fun i => if j = f i then (if P i then 1 else 0) else 0) =
+          qsum n (fun i => if i = g j then 1 else 0) := by
+        apply qsum_congr
         intro i
         by_cases hi : i = g j
         · rw [hi, hfg, hPg]
@@ -5528,12 +5528,12 @@ theorem finSum_subset_bij {n m : Nat} (P : Fin n → Bool) (Q : Fin m → Bool)
             | true => exact absurd (by rw [hj]; exact (hf i hP).2.symm) hi
             | false => simp [hi]
           · simp [hj, hi]
-      rw [h3, finSum_eq_indicator]
+      rw [h3, qsum_eq_indicator]
       simp
     | false =>
-      have h3 : finSum n (fun i => if j = f i then (if P i then 1 else 0) else 0) =
-          finSum n (fun _ => 0) := by
-        apply finSum_congr
+      have h3 : qsum n (fun i => if j = f i then (if P i then 1 else 0) else 0) =
+          qsum n (fun _ => 0) := by
+        apply qsum_congr
         intro i
         by_cases hj : j = f i
         · cases hP : P i with
@@ -5543,10 +5543,10 @@ theorem finSum_subset_bij {n m : Nat} (P : Fin n → Bool) (Q : Fin m → Bool)
             cases hQf
           | false => simp
         · simp [hj]
-      rw [h3, finSum_const]
+      rw [h3, qsum_const]
       simp
-  rw [h1, finSum_comm]
-  exact finSum_congr h2
+  rw [h1, qsum_comm]
+  exact qsum_congr h2
 
 /-- The mask box `(-γ₁, γ₁)^J`. -/
 abbrev LinMaskBox (J : Type) :=
@@ -5608,13 +5608,13 @@ theorem lin_accepted_transcript_count_secret_independent {J I : Type} {N : Nat}
     [inst : ∀ y : J → Int, Decidable (∀ j, inMldsaMaskInterval mldsa44Gamma1 (y j))]
     [DecidablePred (linRealAccept pub sec)] [DecidablePred (linRealAccept pub sec')]
     (D : (I → Int) → (J → Int) → Bool) :
-    finSum N (fun i =>
+    qsum N (fun i =>
       if decide (linRealAccept pub sec (enumY.toFun i).1) &&
           D (linRealW1 pub (enumY.toFun i).1) (linRealZ sec (enumY.toFun i).1) then 1 else 0) =
-    finSum N (fun i =>
+    qsum N (fun i =>
       if decide (linRealAccept pub sec' (enumY.toFun i).1) &&
           D (linRealW1 pub (enumY.toFun i).1) (linRealZ sec' (enumY.toFun i).1) then 1 else 0) := by
-  refine finSum_subset_bij _ _ (linReindex enumY sec sec') (linReindex enumY sec' sec) ?_ ?_
+  refine qsum_subset_bij _ _ (linReindex enumY sec sec') (linReindex enumY sec' sec) ?_ ?_
   · intro i hP
     simp only [Bool.and_eq_true, decide_eq_true_eq] at hP
     obtain ⟨hA, hW, hZ, hBack⟩ := linReindex_spec pub sec sec' hKey hKey' enumY i hP.1
@@ -5628,12 +5628,12 @@ theorem lin_accepted_transcript_count_secret_independent {J I : Type} {N : Nat}
     simp only [Bool.and_eq_true, decide_eq_true_eq]
     exact ⟨hA, by rw [hW, hZ]; exact hP.2⟩
 
-private theorem finSum_split_bool {n : Nat} (p q : Fin n → Bool) :
-    finSum n (fun i => if p i then 1 else 0) =
-      finSum n (fun i => if q i && p i then 1 else 0) +
-      finSum n (fun i => if !q i && p i then 1 else 0) := by
-  rw [← finSum_add]
-  apply finSum_congr
+private theorem qsum_split_bool {n : Nat} (p q : Fin n → Bool) :
+    qsum n (fun i => if p i then 1 else 0) =
+      qsum n (fun i => if q i && p i then 1 else 0) +
+      qsum n (fun i => if !q i && p i then 1 else 0) := by
+  rw [← qsum_add]
+  apply qsum_congr
   intro i
   cases q i <;> cases p i <;> rfl
 
@@ -5649,17 +5649,17 @@ theorem lin_rejected_commitment_count_secret_independent {J I : Type} {N : Nat}
     [inst : ∀ y : J → Int, Decidable (∀ j, inMldsaMaskInterval mldsa44Gamma1 (y j))]
     [DecidablePred (linRealAccept pub sec)] [DecidablePred (linRealAccept pub sec')]
     (D : (I → Int) → Bool) :
-    finSum N (fun i =>
+    qsum N (fun i =>
       if !decide (linRealAccept pub sec (enumY.toFun i).1) &&
           D (linRealW1 pub (enumY.toFun i).1) then 1 else 0) =
-    finSum N (fun i =>
+    qsum N (fun i =>
       if !decide (linRealAccept pub sec' (enumY.toFun i).1) &&
           D (linRealW1 pub (enumY.toFun i).1) then 1 else 0) := by
   have hAcc := lin_accepted_transcript_count_secret_independent pub sec sec' hKey hKey' enumY
     (fun w _ => D w)
-  have hS := finSum_split_bool (fun i => D (linRealW1 pub (enumY.toFun i).1))
+  have hS := qsum_split_bool (fun i => D (linRealW1 pub (enumY.toFun i).1))
     (fun i => decide (linRealAccept pub sec (enumY.toFun i).1))
-  have hS' := finSum_split_bool (fun i => D (linRealW1 pub (enumY.toFun i).1))
+  have hS' := qsum_split_bool (fun i => D (linRealW1 pub (enumY.toFun i).1))
     (fun i => decide (linRealAccept pub sec' (enumY.toFun i).1))
   omega
 
@@ -5683,16 +5683,16 @@ theorem roLookup_none_of_not_mem {X T : Type} [DecidableEq X] :
     as preimages (min-entropy `log₂(N / M)`). For ML-DSA this is a property of the public matrix
     `A` (the fibres of `y ↦ HighBits(A·y)`); it is a hypothesis here, not derived. -/
 def CommitFiberBound {N : Nat} {X : Type} [DecidableEq X] (cp : Fin N → X) (M : Nat) : Prop :=
-  ∀ x, finSum N (fun i => if cp i = x then 1 else 0) ≤ M
+  ∀ x, qsum N (fun i => if cp i = x then 1 else 0) ≤ M
 
 /-- Masks whose commitment point lies in a given key set. -/
-theorem finSum_fiber_mem_le {N : Nat} {X : Type} [DecidableEq X] (cp : Fin N → X) (M : Nat)
+theorem qsum_fiber_mem_le {N : Nat} {X : Type} [DecidableEq X] (cp : Fin N → X) (M : Nat)
     (hFib : CommitFiberBound cp M) :
-    ∀ keys : List X, finSum N (fun i => if cp i ∈ keys then 1 else 0) ≤ keys.length * M
+    ∀ keys : List X, qsum N (fun i => if cp i ∈ keys then 1 else 0) ≤ keys.length * M
   | [] => by
-    have h0 : finSum N (fun i => if cp i ∈ ([] : List X) then 1 else 0) = finSum N (fun _ => 0) :=
-      finSum_congr (fun _ => by simp)
-    rw [h0, finSum_const]
+    have h0 : qsum N (fun i => if cp i ∈ ([] : List X) then 1 else 0) = qsum N (fun _ => 0) :=
+      qsum_congr (fun _ => by simp)
+    rw [h0, qsum_const]
     simp
   | a :: keys => by
     have hPoint : ∀ i : Fin N, (if cp i ∈ a :: keys then 1 else 0) ≤
@@ -5701,9 +5701,9 @@ theorem finSum_fiber_mem_le {N : Nat} {X : Type} [DecidableEq X] (cp : Fin N →
       by_cases hia : cp i = a
       · simp [hia]
       · by_cases his : cp i ∈ keys <;> simp [hia, his]
-    have hLe := finSum_le_finSum hPoint
-    rw [finSum_add] at hLe
-    have ih := finSum_fiber_mem_le cp M hFib keys
+    have hLe := qsum_le_qsum hPoint
+    rw [qsum_add] at hLe
+    have ih := qsum_fiber_mem_le cp M hFib keys
     have ha := hFib a
     simp only [List.length_cons, Nat.succ_mul]
     omega
@@ -5745,18 +5745,18 @@ theorem roAttempt_reprogramming_bound {N : Nat} {X Ch Out : Type} [DecidableEq X
     (hFib : CommitFiberBound cp M)
     (log : List (X × Ch)) (c : Ch) (D : Out × List (X × Ch) → Bool) :
     natAbsDiff
-      (finSum N (fun i => if D (roAttemptReal cp outcome log i c) then 1 else 0))
-      (finSum N (fun i => if D (roAttemptProg cp outcome log i c) then 1 else 0)) ≤
+      (qsum N (fun i => if D (roAttemptReal cp outcome log i c) then 1 else 0))
+      (qsum N (fun i => if D (roAttemptProg cp outcome log i c) then 1 else 0)) ≤
       log.length * M := by
-  have hDiff := finSum_indicator_diff_le
+  have hDiff := qsum_indicator_diff_le
     (fun i : Fin N => D (roAttemptReal cp outcome log i c))
     (fun i => D (roAttemptProg cp outcome log i c))
     (fun i => decide (cp i ∈ log.map Prod.fst))
     (fun i hBad => congrArg D (roAttempt_real_eq_prog_of_fresh cp outcome log i c
       (roLookup_none_of_not_mem log (cp i) (of_decide_eq_false hBad))))
-  have hCount := finSum_fiber_mem_le cp M hFib (log.map Prod.fst)
+  have hCount := qsum_fiber_mem_le cp M hFib (log.map Prod.fst)
   rw [List.length_map] at hCount
-  refine Nat.le_trans hDiff (Nat.le_trans (Nat.le_of_eq (finSum_congr (fun i => ?_))) hCount)
+  refine Nat.le_trans hDiff (Nat.le_trans (Nat.le_of_eq (qsum_congr (fun i => ?_))) hCount)
   simp only [decide_eq_true_eq]
 
 /-! ### Multi-Attempt Signing: Union Bound Over Attempts and Interleaved Adversary Queries -/
@@ -5764,7 +5764,7 @@ theorem roAttempt_reprogramming_bound {N : Nat} {X Ch Out : Type} [DecidableEq X
 /-- Sum over all `k`-tuples of mask indices. -/
 def tupleSum (N : Nat) : (k : Nat) → (List (Fin N) → Nat) → Nat
   | 0, F => F []
-  | k + 1, F => finSum N (fun i => tupleSum N k (fun is => F (i :: is)))
+  | k + 1, F => qsum N (fun i => tupleSum N k (fun is => F (i :: is)))
 
 theorem tupleSum_indicator_le (N : Nat) : ∀ (k : Nat) (p : List (Fin N) → Bool),
     tupleSum N k (fun is => if p is then 1 else 0) ≤ N ^ k
@@ -5774,8 +5774,8 @@ theorem tupleSum_indicator_le (N : Nat) : ∀ (k : Nat) (p : List (Fin N) → Bo
   | k + 1, p => by
     have h : ∀ i : Fin N, tupleSum N k (fun is => if p (i :: is) then 1 else 0) ≤ N ^ k :=
       fun i => tupleSum_indicator_le N k (fun is => p (i :: is))
-    have hLe := finSum_le_finSum h
-    rw [finSum_const] at hLe
+    have hLe := qsum_le_qsum h
+    rw [qsum_const] at hLe
     rw [Nat.pow_succ, Nat.mul_comm]
     exact hLe
 
@@ -5854,7 +5854,7 @@ theorem multiAttempt_reprogramming_bound {N : Nat} {X Ch Out : Type} [DecidableE
           if D (signAttemptLoop att advStep log acc is []) then 1 else 0) =
         tupleSum N (k + 1) (fun _ => if D acc then 1 else 0) := by
       intro att
-      show finSum N (fun i => tupleSum N k (fun is =>
+      show qsum N (fun i => tupleSum N k (fun is =>
         if D (signAttemptLoop att advStep log acc (i :: is) []) then 1 else 0)) = _
       rfl
     rw [hEq, hEq, natAbsDiff_self]
@@ -5863,7 +5863,7 @@ theorem multiAttempt_reprogramming_bound {N : Nat} {X Ch Out : Type} [DecidableE
     have hUnf : ∀ att : List (X × Ch) → Fin N → Ch → Out × List (X × Ch),
         tupleSum N (k + 1) (fun is =>
           if D (signAttemptLoop att advStep log acc is (c :: cs)) then 1 else 0) =
-        finSum N (fun i => loopTailCount att advStep D k cs acc (att log i c)) :=
+        qsum N (fun i => loopTailCount att advStep D k cs acc (att log i c)) :=
       fun _ => rfl
     rw [hUnf, hUnf]
     have hPer : ∀ i : Fin N,
@@ -5895,27 +5895,27 @@ theorem multiAttempt_reprogramming_bound {N : Nat} {X Ch Out : Type} [DecidableE
             simp only [List.length_cons]
             omega))
     have h1 : natAbsDiff
-        (finSum N (fun i => loopTailCount (roAttemptReal cp outcome) advStep D k cs acc
+        (qsum N (fun i => loopTailCount (roAttemptReal cp outcome) advStep D k cs acc
           (roAttemptReal cp outcome log i c)))
-        (finSum N (fun i => loopTailCount (roAttemptProg cp outcome) advStep D k cs acc
+        (qsum N (fun i => loopTailCount (roAttemptProg cp outcome) advStep D k cs acc
           (roAttemptProg cp outcome log i c))) * N ≤
-        finSum N (fun i => natAbsDiff
+        qsum N (fun i => natAbsDiff
           (loopTailCount (roAttemptReal cp outcome) advStep D k cs acc
             (roAttemptReal cp outcome log i c))
           (loopTailCount (roAttemptProg cp outcome) advStep D k cs acc
             (roAttemptProg cp outcome log i c)) * N) := by
-      rw [finSum_mul_right]
-      exact Nat.mul_le_mul_right _ (natAbsDiff_finSum_le _ _)
-    have h2' : finSum N (fun i =>
+      rw [qsum_mul_right]
+      exact Nat.mul_le_mul_right _ (natAbsDiff_qsum_le _ _)
+    have h2' : qsum N (fun i =>
         (if cp i ∈ log.map Prod.fst then 1 else 0) * (N ^ k * N) +
           M * reprogCollisionBudget qH k (ℓ + 1 + qH) * N ^ k) =
-        finSum N (fun i => if cp i ∈ log.map Prod.fst then 1 else 0) * (N ^ k * N) +
+        qsum N (fun i => if cp i ∈ log.map Prod.fst then 1 else 0) * (N ^ k * N) +
           N * (M * reprogCollisionBudget qH k (ℓ + 1 + qH) * N ^ k) := by
-      rw [finSum_add, finSum_mul_right, finSum_const]
-    have h2 := Nat.le_trans (finSum_le_finSum hPer) (Nat.le_of_eq h2')
-    have hS := finSum_fiber_mem_le cp M hFib (log.map Prod.fst)
+      rw [qsum_add, qsum_mul_right, qsum_const]
+    have h2 := Nat.le_trans (qsum_le_qsum hPer) (Nat.le_of_eq h2')
+    have hS := qsum_fiber_mem_le cp M hFib (log.map Prod.fst)
     rw [List.length_map] at hS
-    have hS' : finSum N (fun i => if cp i ∈ log.map Prod.fst then 1 else 0) ≤ ℓ * M :=
+    have hS' : qsum N (fun i => if cp i ∈ log.map Prod.fst then 1 else 0) ≤ ℓ * M :=
       Nat.le_trans hS (Nat.mul_le_mul_right M hLen)
     have e3 := Nat.mul_le_mul_right (N ^ k * N) hS'
     have e1 : N * (M * reprogCollisionBudget qH k (ℓ + 1 + qH) * N ^ k) =
@@ -5985,20 +5985,20 @@ theorem l1Norm_prefix_ones : ∀ (n t : Nat), t ≤ n →
     subst ht
     rfl
   | n + 1, 0, _ => by
-    show finSum (n + 1) (fun j : Fin (n + 1) => ((if j.val < 0 then (1 : Int) else 0)).natAbs) = 0
-    have hz : finSum (n + 1)
+    show qsum (n + 1) (fun j : Fin (n + 1) => ((if j.val < 0 then (1 : Int) else 0)).natAbs) = 0
+    have hz : qsum (n + 1)
         (fun j : Fin (n + 1) => ((if j.val < 0 then (1 : Int) else 0)).natAbs) =
-        finSum (n + 1) (fun _ => 0) := finSum_congr (fun j => by simp)
-    rw [hz, finSum_const, Nat.mul_zero]
+        qsum (n + 1) (fun _ => 0) := qsum_congr (fun j => by simp)
+    rw [hz, qsum_const, Nat.mul_zero]
   | n + 1, t + 1, h => by
-    have ih : finSum n (fun j : Fin n => ((if j.val < t then (1 : Int) else 0)).natAbs) = t :=
+    have ih : qsum n (fun j : Fin n => ((if j.val < t then (1 : Int) else 0)).natAbs) = t :=
       l1Norm_prefix_ones n t (by omega)
-    have hc : finSum n (fun j : Fin n => ((if j.val + 1 < t + 1 then (1 : Int) else 0)).natAbs) =
-        finSum n (fun j : Fin n => ((if j.val < t then (1 : Int) else 0)).natAbs) :=
-      finSum_congr (fun j => by simp)
+    have hc : qsum n (fun j : Fin n => ((if j.val + 1 < t + 1 then (1 : Int) else 0)).natAbs) =
+        qsum n (fun j : Fin n => ((if j.val < t then (1 : Int) else 0)).natAbs) :=
+      qsum_congr (fun j => by simp)
     have h0 : ((if (0 : Nat) < t + 1 then (1 : Int) else 0)).natAbs = 1 := by simp
     show ((if (0 : Nat) < t + 1 then (1 : Int) else 0)).natAbs +
-      finSum n (fun j : Fin n => ((if j.val + 1 < t + 1 then (1 : Int) else 0)).natAbs) = t + 1
+      qsum n (fun j : Fin n => ((if j.val + 1 < t + 1 then (1 : Int) else 0)).natAbs) = t + 1
     rw [h0, hc, ih]
     omega
 
@@ -6034,7 +6034,7 @@ theorem witness_lin_key_relation_inhabited :
 /-- A commitment map with one mask per commitment value satisfies `CommitFiberBound _ 1`. -/
 theorem witness_commit_fiber_bound_inhabited :
     ∃ (cp : Fin 2 → Fin 2), CommitFiberBound cp 1 :=
-  ⟨fun i => i, fun x => Nat.le_of_eq (finSum_eq_indicator 2 x)⟩
+  ⟨fun i => i, fun x => Nat.le_of_eq (qsum_eq_indicator 2 x)⟩
 
 /-- **`#tooth` (`tooth_reprogramming_needs_commitment_entropy`)**: if every mask yields the same
     commitment (zero min-entropy) and the adversary has queried it, the real and reprogrammed
@@ -6045,8 +6045,8 @@ theorem tooth_reprogramming_needs_commitment_entropy :
       (D : Bool × List (Unit × Bool) → Bool),
       log.length * 1 <
         natAbsDiff
-          (finSum 2 (fun i => if D (roAttemptReal cp outcome log i c) then 1 else 0))
-          (finSum 2 (fun i => if D (roAttemptProg cp outcome log i c) then 1 else 0)) :=
+          (qsum 2 (fun i => if D (roAttemptReal cp outcome log i c) then 1 else 0))
+          (qsum 2 (fun i => if D (roAttemptProg cp outcome log i c) then 1 else 0)) :=
   ⟨fun _ => (), fun _ c => c, [((), true)], false, fun r => r.1, by decide⟩
 
 /-- The ML-DSA transcript of one attempt under challenge `c`: the published `w₁`, and `z` when
@@ -6069,9 +6069,9 @@ theorem mldsa_attempt_rom_reprogramming_bound {Ch J I X : Type} {N : Nat} [Decid
     (log : List (X × Ch)) (c : Ch)
     (D : ((I → Int) × Option (J → Int)) × List (X × Ch) → Bool) :
     natAbsDiff
-      (finSum N (fun i => if D (roAttemptReal encPoint
+      (qsum N (fun i => if D (roAttemptReal encPoint
         (fun i c => linAttemptOutcome pubOf secOf (enumY.toFun i).1 c) log i c) then 1 else 0))
-      (finSum N (fun i => if D (roAttemptProg encPoint
+      (qsum N (fun i => if D (roAttemptProg encPoint
         (fun i c => linAttemptOutcome pubOf secOf (enumY.toFun i).1 c) log i c) then 1 else 0)) ≤
       log.length * M :=
   roAttempt_reprogramming_bound encPoint _ M hFib log c D
@@ -6143,7 +6143,7 @@ theorem mldsa_attempt_rom_reprogramming_bound {Ch J I X : Type} {N : Nat} [Decid
 #verify_constructive lin_joint_transcript_secret_independent
 #verify_constructive mldsa44_ring_key_relation
 #verify_constructive mldsa44_ring_joint_transcript_simulation
-#verify_constructive finSum_subset_bij
+#verify_constructive qsum_subset_bij
 #verify_constructive lin_accepted_transcript_count_secret_independent
 #verify_constructive lin_rejected_commitment_count_secret_independent
 #verify_constructive roAttempt_reprogramming_bound
@@ -6918,8 +6918,8 @@ def decodeCoinTossRand {rw : Nat} (rCorrupt : BitVec rw) : Fin (2 ^ rw) → BitV
     bijectively, preserving all finite sums and every bit marginal. -/
 theorem coinTossRand_sum_invariant {rw : Nat} (rCorrupt : BitVec rw)
     (weight : BitVec rw → Nat) :
-    finSum (2 ^ rw) (fun i => weight (decodeCoinTossRand rCorrupt i)) =
-      finSum (2 ^ rw) (fun i => weight (decodeUniformRand rw i)) := by
+    qsum (2 ^ rw) (fun i => weight (decodeCoinTossRand rCorrupt i)) =
+      qsum (2 ^ rw) (fun i => weight (decodeUniformRand rw i)) := by
   let enumR := enumBitVec rw
   let bij := maskBijectionBitVec rw rCorrupt
   let π : Fin (2 ^ rw) → Fin (2 ^ rw) := fun i => enumR.invFun (bij.toFun (enumR.toFun i))
@@ -6928,11 +6928,11 @@ theorem coinTossRand_sum_invariant {rw : Nat} (rCorrupt : BitVec rw)
     dsimp only [π]
     have hBijInv : ∀ x : BitVec rw, bij.toFun (bij.toFun x) = x := bij.left_inv
     rw [enumR.right_inv, hBijInv, enumR.left_inv]
-  have hPerm := finSum_perm_invariant π π hInv hInv (fun j => weight (enumR.toFun j))
+  have hPerm := qsum_perm_invariant π π hInv hInv (fun j => weight (enumR.toFun j))
   have hCong :
-      finSum (2 ^ rw) (fun i => weight (decodeCoinTossRand rCorrupt i)) =
-      finSum (2 ^ rw) (fun i => weight (enumR.toFun (π i))) := by
-    apply finSum_congr
+      qsum (2 ^ rw) (fun i => weight (decodeCoinTossRand rCorrupt i)) =
+      qsum (2 ^ rw) (fun i => weight (enumR.toFun (π i))) := by
+    apply qsum_congr
     intro i
     dsimp only [decodeCoinTossRand, π, bij, maskBijectionBitVec]
     rw [enumR.right_inv, BitVec.xor_comm]
@@ -6941,13 +6941,13 @@ theorem coinTossRand_sum_invariant {rw : Nat} (rCorrupt : BitVec rw)
 /-- Every target `w`-bit randomizer `targetR` has exact honest-share fiber cardinality `1` under
     committed coin-tossing `R = rHonest ^^^ rCorrupt`. -/
 theorem coinTossRand_exact_fiber_one {rw : Nat} (rCorrupt targetR : BitVec rw) :
-    finSum (2 ^ rw) (fun i => if decodeCoinTossRand rCorrupt i = targetR then 1 else 0) = 1 := by
+    qsum (2 ^ rw) (fun i => if decodeCoinTossRand rCorrupt i = targetR then 1 else 0) = 1 := by
   rw [coinTossRand_sum_invariant rCorrupt (fun r => if r = targetR then 1 else 0)]
   let iStar := (enumBitVec rw).invFun targetR
   have hCong :
-      finSum (2 ^ rw) (fun i => if decodeUniformRand rw i = targetR then 1 else 0) =
-      finSum (2 ^ rw) (fun i => if i = iStar then 1 else 0) := by
-    apply finSum_congr
+      qsum (2 ^ rw) (fun i => if decodeUniformRand rw i = targetR then 1 else 0) =
+      qsum (2 ^ rw) (fun i => if i = iStar then 1 else 0) := by
+    apply qsum_congr
     intro i
     dsimp only [decodeUniformRand]
     by_cases hEq : i = iStar
@@ -6961,7 +6961,7 @@ theorem coinTossRand_exact_fiber_one {rw : Nat} (rCorrupt targetR : BitVec rw) :
         have := congrArg (enumBitVec rw).invFun hv
         simpa [iStar, (enumBitVec rw).left_inv] using this
       simp only [hEq, hNe, ↓reduceIte]
-  rw [hCong, finSum_eq_indicator]
+  rw [hCong, qsum_eq_indicator]
 
 /-- Post-Round-3 rushing execution when `R` is uniquely fixed prior to Round-3 share opening
     (e.g., deterministic threshold PRF `addrnd = None` or `ParallelSeededSignSession`):
@@ -6986,7 +6986,7 @@ def detPostRound3SurviveCount {SK Msg CorruptIn : Type} {Q w : Nat}
     (spec : CutTheHashProtocolSpec SK Msg Unit CorruptIn Q w)
     (sk : SK) (msg : Msg) (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
     (abortPostRound3 : AdvPreOpenView Q w → BitVec w → Bool) : Nat :=
-  finSum (preOpenMaskCard Q w) (fun mIdx =>
+  qsum (preOpenMaskCard Q w) (fun mIdx =>
     optSomeIndicator (execDetPostRound3Rushing spec sk msg adv hQ
       ((enumHonestPreOpenMasks Q w).toFun mIdx) abortPostRound3))
 
@@ -6996,7 +6996,7 @@ def detPostRound3SigCount {SK Msg CorruptIn : Type} {Q w : Nat}
     (sk : SK) (msg : Msg) (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
     (abortPostRound3 : AdvPreOpenView Q w → BitVec w → Bool)
     (targetSig : BitVec w) : Nat :=
-  finSum (preOpenMaskCard Q w) (fun mIdx =>
+  qsum (preOpenMaskCard Q w) (fun mIdx =>
     if execDetPostRound3Rushing spec sk msg adv hQ
         ((enumHonestPreOpenMasks Q w).toFun mIdx) abortPostRound3 = some targetSig
     then 1 else 0)
@@ -7008,7 +7008,7 @@ def detPostRound3StatDistNum {SK Msg CorruptIn : Type} {Q w : Nat}
     (sk : SK) (msg : Msg) (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
     (abortPostRound3 : AdvPreOpenView Q w → BitVec w → Bool) : Nat :=
   let survive := detPostRound3SurviveCount spec sk msg adv hQ abortPostRound3
-  finSum (2 ^ w) (fun sIdx =>
+  qsum (2 ^ w) (fun sIdx =>
     let sig := (enumBitVec w).toFun sIdx
     natAbsDiff
       (detPostRound3SigCount spec sk msg adv hQ abortPostRound3 sig)
@@ -7047,7 +7047,7 @@ theorem post_round3_rushing_abort_unbiased
       evalHedgedRCommitV1 H inp = evalHedgedRCommitV1 H inp' →
         inp'.rShare = inp.rShare ∨ RCommitHashCollision H) ∧
     (∀ targetR : BitVec rw,
-      finSum (2 ^ rw) (fun i => if decodeCoinTossRand inp.rShare i = targetR then 1 else 0) = 1) ∧
+      qsum (2 ^ rw) (fun i => if decodeCoinTossRand inp.rShare i = targetR then 1 else 0) = 1) ∧
     totalHedged = 2 ^ rw * viewMaskSurviveCount abortPreOpen ∧
     (∀ targetSig : BitVec w,
       survivingRealSigCount hedgedSpec sk msg (2 ^ rw) (decodeCoinTossRand inp.rShare)
@@ -7089,14 +7089,14 @@ theorem post_round3_rushing_abort_unbiased
       viewMaskSurviveCount (fun v => abortPostRound3 v (detSpec.finalSignature sk msg ())) := by
     unfold detPostRound3SurviveCount
     have hCong :
-        finSum (preOpenMaskCard Q w) (fun mIdx =>
+        qsum (preOpenMaskCard Q w) (fun mIdx =>
           optSomeIndicator (execDetPostRound3Rushing detSpec sk msg adv hQ
             ((enumHonestPreOpenMasks Q w).toFun mIdx) abortPostRound3)) =
-        finSum (preOpenMaskCard Q w) (fun mIdx =>
+        qsum (preOpenMaskCard Q w) (fun mIdx =>
           if abortPostRound3
               (evalPreOpenView detSpec sk msg () adv hQ ((enumHonestPreOpenMasks Q w).toFun mIdx))
               (detSpec.finalSignature sk msg ()) then 0 else 1) := by
-      apply finSum_congr
+      apply qsum_congr
       intro mIdx
       unfold execDetPostRound3Rushing
       rw [detSpec.reconstruct_eq, optSomeIndicator_ite]
@@ -7111,19 +7111,19 @@ theorem post_round3_rushing_abort_unbiased
     unfold detPostRound3SigCount detPostRound3SurviveCount
     by_cases hMatch : detSpec.finalSignature sk msg () = targetSig
     · simp only [hMatch, ↓reduceIte, Nat.one_mul]
-      apply finSum_congr
+      apply qsum_congr
       intro mIdx
       unfold execDetPostRound3Rushing
       rw [detSpec.reconstruct_eq, hMatch, indicator_ite_none_some, optSomeIndicator_ite]
       simp only [↓reduceIte]
     · simp only [hMatch, ↓reduceIte, Nat.zero_mul]
       have hZero :
-          finSum (preOpenMaskCard Q w) (fun mIdx =>
+          qsum (preOpenMaskCard Q w) (fun mIdx =>
             if execDetPostRound3Rushing detSpec sk msg adv hQ
                 ((enumHonestPreOpenMasks Q w).toFun mIdx) abortPostRound3 = some targetSig
             then 1 else 0) =
-          finSum (preOpenMaskCard Q w) (fun _ => 0) := by
-        apply finSum_congr
+          qsum (preOpenMaskCard Q w) (fun _ => 0) := by
+        apply qsum_congr
         intro mIdx
         unfold execDetPostRound3Rushing
         rw [detSpec.reconstruct_eq, indicator_ite_none_some]
@@ -7131,24 +7131,24 @@ theorem post_round3_rushing_abort_unbiased
         cases abortPostRound3
           (evalPreOpenView detSpec sk msg () adv hQ ((enumHonestPreOpenMasks Q w).toFun mIdx))
           (detSpec.finalSignature sk msg ()) <;> rfl
-      rw [hZero, finSum_const, Nat.mul_zero]
+      rw [hZero, qsum_const, Nat.mul_zero]
   have hDetSdZero : detPostRound3StatDistNum detSpec sk msg adv hQ abortPostRound3 = 0 := by
     unfold detPostRound3StatDistNum
     dsimp only
     have hAllZ :
-        finSum (2 ^ w) (fun sIdx =>
+        qsum (2 ^ w) (fun sIdx =>
           let sig := (enumBitVec w).toFun sIdx
           natAbsDiff
             (detPostRound3SigCount detSpec sk msg adv hQ abortPostRound3 sig)
             ((if detSpec.finalSignature sk msg () = sig then 1 else 0) *
               detPostRound3SurviveCount detSpec sk msg adv hQ abortPostRound3)) =
-        finSum (2 ^ w) (fun _ => 0) := by
-      apply finSum_congr
+        qsum (2 ^ w) (fun _ => 0) := by
+      apply qsum_congr
       intro sIdx
       dsimp only
       rw [hDetSig ((enumBitVec w).toFun sIdx)]
       simp [natAbsDiff]
-    rw [hAllZ, finSum_const, Nat.mul_zero]
+    rw [hAllZ, qsum_const, Nat.mul_zero]
   exact ⟨hBind, coinTossRand_exact_fiber_one inp.rShare, hTotEq, hCrossUnbiased, hSdZero,
     hDetSurv, hDetSdZero⟩
 
@@ -7160,24 +7160,24 @@ theorem post_round3_rushing_abort_unbiased
     `8 / 16` inputs** (a full 1-bit bias of `8 / 16 = 1 / 2`). -/
 theorem tooth_uncommitted_round3_randomizer_biases_bit :
     ∃ corruptChooseR : BitVec 4 → BitVec 4,
-      finSum (2 ^ 4) (fun i =>
+      qsum (2 ^ 4) (fun i =>
         let rH := (enumBitVec 4).toFun i
         if (rH ^^^ corruptChooseR rH).getLsbD 0 = false then 1 else 0) = 16 ∧
       (∀ rCommitted : BitVec 4,
-        finSum (2 ^ 4) (fun i =>
+        qsum (2 ^ 4) (fun i =>
           if (decodeCoinTossRand rCommitted i).getLsbD 0 = false then 1 else 0) = 8) := by
   refine ⟨fun rH => rH, ?_, ?_⟩
   · have hAllOne :
-        finSum (2 ^ 4) (fun i =>
+        qsum (2 ^ 4) (fun i =>
           let rH := (enumBitVec 4).toFun i
           if (rH ^^^ rH).getLsbD 0 = false then 1 else 0) =
-        finSum (2 ^ 4) (fun _ => 1) := by
-      apply finSum_congr
+        qsum (2 ^ 4) (fun _ => 1) := by
+      apply qsum_congr
       intro i
       dsimp only
       rw [BitVec.xor_self]
       rfl
-    rw [hAllOne, finSum_const]
+    rw [hAllOne, qsum_const]
   · intro rCommitted
     rw [coinTossRand_sum_invariant rCommitted (fun r => if r.getLsbD 0 = false then 1 else 0)]
     decide
@@ -7223,7 +7223,7 @@ theorem witness_post_round3_rushing_abort_inhabited :
   rw [totalSurvivingRuns_eq]
   have hMaskPos : 0 < viewMaskSurviveCount (fun (_ : AdvPreOpenView 1 2) => false) := by
     unfold viewMaskSurviveCount
-    rw [finSum_const]
+    rw [qsum_const]
     decide
   exact Nat.mul_pos (Nat.two_pow_pos 2) hMaskPos
 
