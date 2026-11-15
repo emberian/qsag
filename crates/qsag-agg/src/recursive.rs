@@ -407,7 +407,7 @@ impl FramedShardBuf {
     }
 }
 
-fn build_shard_commitment_frame(s: &ShardHemBatch) -> FramedShardBuf {
+fn write_shard_commitment_frame_into(s: &ShardHemBatch, buf: &mut Vec<u8>) -> usize {
     let shard_id_le = s.shard_id.to_le_bytes();
     let min_q_le = s.minimum_quorums.to_le_bytes();
     let epoch_le = s.epoch_floor.to_le_bytes();
@@ -426,13 +426,20 @@ fn build_shard_commitment_frame(s: &ShardHemBatch) -> FramedShardBuf {
         header.extend_from_slice(field);
     }
     let reserve = header.len() + 10;
-    let mut buf = Vec::with_capacity(reserve + 524_288);
+    buf.clear();
+    buf.reserve(reserve + 524_288);
     buf.resize(reserve, 0u8);
-    s.proof.push_wire_bytes(&mut buf);
+    s.proof.push_wire_bytes(buf);
     let proof_len = buf.len() - reserve;
     push_leb128(&mut header, proof_len);
     let start = reserve - header.len();
     buf[start..reserve].copy_from_slice(&header);
+    start
+}
+
+fn build_shard_commitment_frame(s: &ShardHemBatch) -> FramedShardBuf {
+    let mut buf = Vec::new();
+    let start = write_shard_commitment_frame_into(s, &mut buf);
     FramedShardBuf { buf, start }
 }
 
@@ -441,15 +448,37 @@ fn build_shard_commitment_frame(s: &ShardHemBatch) -> FramedShardBuf {
 /// including the full canonical proof bytes.
 fn shard_commitment_digest(s: &ShardHemBatch) -> [u8; 32] {
     let _phase = crate::profile::span("hierarchy_shard_digest");
-    let frame = build_shard_commitment_frame(s);
-    cshake256_from_midstate_32(&HIERARCHY_SHARD_MIDSTATE, frame.as_slice())
+    #[cfg(feature = "std")]
+    {
+        static SCRATCH_POOL: std::sync::Mutex<Vec<Vec<u8>>> = std::sync::Mutex::new(Vec::new());
+        let mut buf = SCRATCH_POOL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop()
+            .unwrap_or_default();
+        let start = write_shard_commitment_frame_into(s, &mut buf);
+        let digest = cshake256_from_midstate_32(&HIERARCHY_SHARD_MIDSTATE, &buf[start..]);
+        let mut pool = SCRATCH_POOL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if pool.len() < 16 {
+            buf.clear();
+            pool.push(buf);
+        }
+        digest
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        let frame = build_shard_commitment_frame(s);
+        cshake256_from_midstate_32(&HIERARCHY_SHARD_MIDSTATE, frame.as_slice())
+    }
 }
 
 fn shard_commitment_digests_seq(shards: &[ShardHemBatch]) -> Vec<[u8; 32]> {
     let _phase = crate::profile::span("hierarchy_shard_digest");
     let mut out = Vec::with_capacity(shards.len());
-    let mut chunks = shards.chunks_exact(4);
-    for quad in &mut chunks {
+    let (chunks, rem) = shards.as_chunks::<4>();
+    for quad in chunks {
         let f0 = build_shard_commitment_frame(&quad[0]);
         let f1 = build_shard_commitment_frame(&quad[1]);
         let f2 = build_shard_commitment_frame(&quad[2]);
@@ -460,7 +489,7 @@ fn shard_commitment_digests_seq(shards: &[ShardHemBatch]) -> Vec<[u8; 32]> {
         );
         out.extend_from_slice(&d4);
     }
-    for s in chunks.remainder() {
+    for s in rem {
         let f = build_shard_commitment_frame(s);
         out.push(cshake256_from_midstate_32(
             &HIERARCHY_SHARD_MIDSTATE,

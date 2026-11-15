@@ -2,23 +2,13 @@ module
 /-
 # Qsag.Rss256TwoPassProductProof — 2-Pass Masked Cross-Product & Barrier Soundness
 
-Constructive (`0 Classical.choice`, `0 sorry`) mechanization of the final `tau`-masked cross-product
-opening check and adaptive 1-pass (`ROUND1`) + 2-pass (`ROUND1` + `ROUND2`) `product_proof` barrier
-composition in `crates/qsag-core/src/rss256.rs` (`lines 45-81, 2441-2636`):
-
-1. **Final `tau`-Masked Cross-Product Check & 1-Corrupt Opening Privacy (`finalMaskedCrossCheck_complete`,
-   `finalMaskedOpen_privacy_equiv`, `finalMaskedCrossCheck_false_bad_coins_le_two`)**:
-   Verifiers exchange `(r1x + tau * xf_p, r1y + tau * yf_p)` and `(r2x + tau * xf_q, r2y + tau * yf_q)`
-   masked by slot-key pads the receiving verifier lacks (`SimpleEquiv` one-time-pad bijection), while
-   any false final claim has nonzero `tau^2` residual and survives on at most `2` values of `tau ∈ S`.
-2. **Full Adaptive 1-Pass (`ROUND1`) & 2-Pass (`ROUND1` + `ROUND2`) Barrier Soundness & 8-Wave Bound
-   (`singlePass_false_batch_accepting_coins_bound`, `rss256_two_pass_product_proof_sound`,
-   `rss256_eight_wave_barrier_concrete_bound`)**:
-   Across `R` folding rounds (`b_r ≤ 4`), one pass accepts a false batch on at most
-   `(B + 16 + 8 * R) * |S|^(C - 1)` out of `|S|^C` coin vectors, and two independent passes accept on
-   at most `((B + 16 + 8 * R) * |S|^(C - 1))^2` out of `|S|^(2 * C)`. At the 8-wave barrier
-   (`B = 614,400`, `R = 6`, `|S| = 2^128`), single-pass soundness is `< 2^-108` and 2-pass barrier
-   soundness is `< 2^-217` (`rss256.rs:76-77`).
+Constructive (`0 Classical.choice`, `0 sorry`) mechanization of `tau`-masked cross-product opening
+(`finalMaskedCrossCheck_complete`, `finalMaskedOpen_privacy_equiv`,
+`finalMaskedCrossCheck_false_bad_coins_le_two`), `b`-variate ternary Frobenius-basis root counting
+(`nextClaim_false_bad_coins_le`), and adaptive 1-pass (`ROUND1`) + 2-pass (`ROUND1` + `ROUND2`)
+`product_proof` barrier soundness (`singlePass_false_batch_accepting_coins_bound`,
+`rss256_two_pass_product_proof_sound`, `rss256_eight_wave_barrier_concrete_bound`) matching
+`crates/qsag-core/src/rss256.rs:45-81, 2441-2636` (`< 2^-217` at `B = 614,400, R = 6`).
 -/
 
 public import Qsag.Rss256TernaryRound
@@ -51,23 +41,16 @@ structure FinalCrossShares where
   c1_1 : Tower128
   c1_2 : Tower128
 
-/-- `V1`'s masked opening `[r1x + tau * xfp, r1y + tau * yfp, c0_1 + tau * c1_1 + tau^2 * claim1]`
-    (`rss256.rs:2606-2610`). -/
+/-- `V1` and `V2` masked openings (`rss256.rs:2606-2615`). -/
 def finalMaskedOpenV1 (m : FinalMasks) (sh : FinalCrossShares)
     (xfp yfp claim1 tau : Tower128) : Tower128 × Tower128 × Tower128 :=
-  (towerAdd 7 m.r1x (towerMul 7 tau xfp),
-   towerAdd 7 m.r1y (towerMul 7 tau yfp),
-   towerAdd 7 (towerAdd 7 sh.c0_1 (towerMul 7 tau sh.c1_1))
-              (towerMul 7 (towerMul 7 tau tau) claim1))
+  (towerAdd 7 m.r1x (towerMul 7 tau xfp), towerAdd 7 m.r1y (towerMul 7 tau yfp),
+   towerAdd 7 (towerAdd 7 sh.c0_1 (towerMul 7 tau sh.c1_1)) (towerMul 7 (towerMul 7 tau tau) claim1))
 
-/-- `V2`'s masked opening `[r2x + tau * xfq, r2y + tau * yfq, c0_2 + tau * c1_2 + tau^2 * claim2]`
-    (`rss256.rs:2611-2615`). -/
 def finalMaskedOpenV2 (m : FinalMasks) (sh : FinalCrossShares)
     (xfq yfq claim2 tau : Tower128) : Tower128 × Tower128 × Tower128 :=
-  (towerAdd 7 m.r2x (towerMul 7 tau xfq),
-   towerAdd 7 m.r2y (towerMul 7 tau yfq),
-   towerAdd 7 (towerAdd 7 sh.c0_2 (towerMul 7 tau sh.c1_2))
-              (towerMul 7 (towerMul 7 tau tau) claim2))
+  (towerAdd 7 m.r2x (towerMul 7 tau xfq), towerAdd 7 m.r2y (towerMul 7 tau yfq),
+   towerAdd 7 (towerAdd 7 sh.c0_2 (towerMul 7 tau sh.c1_2)) (towerMul 7 (towerMul 7 tau tau) claim2))
 
 /-- Exact verifier check `from_v1[0] * from_v2[1] + from_v2[0] * from_v1[1] == from_v1[2] + from_v2[2]`
     (`rss256.rs:2621-2626`). -/
@@ -115,23 +98,19 @@ theorem finalMaskedCrossCheck_iff_evalCoeffs_zero (m : FinalMasks) (sh : FinalCr
   have hXor := (towerAdd_eq_zero_iff_eq lhs rhs).symm
   have hDiff : towerAdd 7 lhs rhs =
       RoundPoly.evalCoeffs (finalMaskedResidualCoeffs m sh xfp yfq xfq yfp claim1 claim2) tau := by
-    dsimp only [lhs, rhs, v1, v2, finalMaskedOpenV1, finalMaskedOpenV2,
-      finalMaskedResidualCoeffs, RoundPoly.evalCoeffs]
-    simp only [towerMul_zero, towerAdd_zero, towerAdd_mul_distrib, towerMul_add_distrib]
-    have hMul1 : towerMul 7 m.r1x (towerMul 7 tau yfq) = towerMul 7 tau (towerMul 7 m.r1x yfq) := by ac_rfl
-    have hMul2 : towerMul 7 (towerMul 7 tau xfp) m.r2y = towerMul 7 tau (towerMul 7 xfp m.r2y) := by ac_rfl
-    have hMul3 : towerMul 7 (towerMul 7 tau xfp) (towerMul 7 tau yfq) =
-        towerMul 7 tau (towerMul 7 tau (towerMul 7 xfp yfq)) := by ac_rfl
-    have hMul4 : towerMul 7 m.r2x (towerMul 7 tau yfp) = towerMul 7 tau (towerMul 7 m.r2x yfp) := by ac_rfl
-    have hMul5 : towerMul 7 (towerMul 7 tau xfq) m.r1y = towerMul 7 tau (towerMul 7 xfq m.r1y) := by ac_rfl
-    have hMul6 : towerMul 7 (towerMul 7 tau xfq) (towerMul 7 tau yfp) =
-        towerMul 7 tau (towerMul 7 tau (towerMul 7 xfq yfp)) := by ac_rfl
-    have hMul7 : towerMul 7 (towerMul 7 tau tau) claim1 =
-        towerMul 7 tau (towerMul 7 tau claim1) := by ac_rfl
-    have hMul8 : towerMul 7 (towerMul 7 tau tau) claim2 =
-        towerMul 7 tau (towerMul 7 tau claim2) := by ac_rfl
-    rw [hMul1, hMul2, hMul3, hMul4, hMul5, hMul6, hMul7, hMul8]
-    simp only [towerMul_add_distrib]
+    dsimp only [lhs, rhs, v1, v2, finalMaskedOpenV1, finalMaskedOpenV2, finalMaskedResidualCoeffs]
+    rw [evalCoeffs3_eq]
+    simp only [towerAdd_mul_distrib, towerMul_add_distrib]
+    rw [show towerMul 7 m.r1x (towerMul 7 tau yfq) = towerMul 7 tau (towerMul 7 m.r1x yfq) by ac_rfl,
+        show towerMul 7 (towerMul 7 tau xfp) m.r2y = towerMul 7 tau (towerMul 7 xfp m.r2y) by ac_rfl,
+        show towerMul 7 (towerMul 7 tau xfp) (towerMul 7 tau yfq) =
+          towerMul 7 tau (towerMul 7 tau (towerMul 7 xfp yfq)) by ac_rfl,
+        show towerMul 7 m.r2x (towerMul 7 tau yfp) = towerMul 7 tau (towerMul 7 m.r2x yfp) by ac_rfl,
+        show towerMul 7 (towerMul 7 tau xfq) m.r1y = towerMul 7 tau (towerMul 7 xfq m.r1y) by ac_rfl,
+        show towerMul 7 (towerMul 7 tau xfq) (towerMul 7 tau yfp) =
+          towerMul 7 tau (towerMul 7 tau (towerMul 7 xfq yfp)) by ac_rfl,
+        show towerMul 7 (towerMul 7 tau tau) claim1 = towerMul 7 tau (towerMul 7 tau claim1) by ac_rfl,
+        show towerMul 7 (towerMul 7 tau tau) claim2 = towerMul 7 tau (towerMul 7 tau claim2) by ac_rfl]
     ac_rfl
   rw [hDec, hXor, hDiff]
 
@@ -148,25 +127,15 @@ theorem finalMaskedCrossCheck_complete (m : FinalMasks) (sh : FinalCrossShares)
     finalMaskedCrossCheck m sh xfp yfq xfq yfp claim1 claim2 tau = true := by
   rw [finalMaskedCrossCheck_iff_evalCoeffs_zero]
   unfold finalMaskedResidualCoeffs
-  dsimp only [RoundPoly.evalCoeffs]
-  rw [hC0, hC1, hClaim]
-  simp only [towerAdd_self_zero, towerMul_zero, towerAdd_zero]
+  rw [evalCoeffs3_eq, hC0, hC1, hClaim]
+  simp only [towerAdd_self_zero, towerMul_zero]
 
-/-- **1-Corrupt Verifier Opening Privacy (`finalMaskedOpen_privacy_equiv`)**:
-    For any secret folded values `(xf, yf)` and public `tau`, the mask-to-opening map
-    `(rx, ry) ↦ (rx + tau * xf, ry + tau * yf)` is an explicit involutive `SimpleEquiv` bijection on
-    `Tower128 × Tower128`, so a corrupt verifier lacking the other slot's mask key sees a uniform
-    independent pair! -/
 def finalMaskedOpen_privacy_equiv (xf yf tau : Tower128) :
     SimpleEquiv (Tower128 × Tower128) (Tower128 × Tower128) where
   toFun r := (towerAdd 7 r.1 (towerMul 7 tau xf), towerAdd 7 r.2 (towerMul 7 tau yf))
   invFun o := (towerAdd 7 o.1 (towerMul 7 tau xf), towerAdd 7 o.2 (towerMul 7 tau yf))
-  left_inv r := by
-    cases r
-    simp only [towerAdd_assoc, towerAdd_self_zero, towerAdd_zero]
-  right_inv o := by
-    cases o
-    simp only [towerAdd_assoc, towerAdd_self_zero, towerAdd_zero]
+  left_inv r := by cases r; simp only [towerAdd_assoc, towerAdd_self_zero, towerAdd_zero]
+  right_inv o := by cases o; simp only [towerAdd_assoc, towerAdd_self_zero, towerAdd_zero]
 
 theorem finalMaskedCrossCheck_false_bad_coins_le_two (m : FinalMasks) (sh : FinalCrossShares)
     (xfp yfq xfq yfp claim1 claim2 : Tower128)
@@ -192,21 +161,155 @@ theorem finalMaskedCrossCheck_false_bad_coins_le_two (m : FinalMasks) (sh : Fina
       (fun tau => decide (RoundPoly.evalCoeffs
         (finalMaskedResidualCoeffs m sh xfp yfq xfq yfp claim1 claim2) tau = towerZero 7)) := by
     funext tau
-    by_cases hOk : finalMaskedCrossCheck m sh xfp yfq xfq yfp claim1 claim2 tau = true
-    · rw [hOk, decide_eq_true ((finalMaskedCrossCheck_iff_evalCoeffs_zero m sh
-        xfp yfq xfq yfp claim1 claim2 tau).mp hOk)]
-    · have hF : finalMaskedCrossCheck m sh xfp yfq xfq yfp claim1 claim2 tau = false := by
-        cases h : finalMaskedCrossCheck m sh xfp yfq xfq yfp claim1 claim2 tau
-        · rfl
-        · exact absurd h hOk
-      rw [hF]
-      have hNz : RoundPoly.evalCoeffs
-          (finalMaskedResidualCoeffs m sh xfp yfq xfq yfp claim1 claim2) tau ≠ towerZero 7 :=
-        fun hZ => hOk ((finalMaskedCrossCheck_iff_evalCoeffs_zero m sh
-          xfp yfq xfq yfp claim1 claim2 tau).mpr hZ)
-      rw [decide_eq_false hNz]
+    apply Bool.eq_iff_iff.mpr
+    rw [decide_eq_true_eq]
+    exact finalMaskedCrossCheck_iff_evalCoeffs_zero m sh xfp yfq xfq yfp claim1 claim2 tau
   rw [hPred]
   exact hQ
+
+/-! ## 1b. Inductive `b`-Variate Ternary Round Schwartz–Zippel Root Bound -/
+
+def ternaryBadBound (cardS : Nat) : Nat → Nat
+  | 0 => 0
+  | b + 1 => ternaryBadBound cardS b * cardS + 2 * cardS ^ b
+
+theorem ternaryBadBound_mul_eq (cardS b : Nat) :
+    ternaryBadBound cardS b * cardS = 2 * b * cardS ^ b := by
+  induction b with
+  | zero => simp only [ternaryBadBound, Nat.zero_mul, Nat.mul_zero]
+  | succ b ih =>
+    simp only [ternaryBadBound, Nat.add_mul]
+    rw [ih, Nat.mul_assoc (2 * b), ← Nat.pow_succ, Nat.mul_assoc 2 (cardS ^ b) cardS,
+        ← Nat.pow_succ, ← Nat.add_mul]
+    have h2 : 2 * b + 2 = 2 * (b + 1) := by omega
+    rw [h2]
+
+theorem ternary_quad_coeffs_nonzero (e0 e1 e2 : Tower128)
+    (h : e0 ≠ towerZero 7 ∨ e1 ≠ towerZero 7 ∨ e2 ≠ towerZero 7) :
+    e0 ≠ towerZero 7 ∨ towerAdd 7 (towerAdd 7 e0 e1) e2 ≠ towerZero 7 ∨ e2 ≠ towerZero 7 := by
+  by_cases h0 : e0 = towerZero 7
+  · by_cases h2 : e2 = towerZero 7
+    · right; left
+      rcases h with h | h | h
+      · exact absurd h0 h
+      · rw [h0, h2, towerZero_add, towerAdd_zero]; exact h
+      · exact absurd h2 h
+    · exact Or.inr (Or.inr h2)
+  · exact Or.inl h0
+
+theorem ternaryEval_roots_le (S : List Tower128) (hS : S.Nodup) :
+    ∀ (b : Nat) (t : TernaryTab b), t ≠ zeroTab b →
+      ((challengeTuples S b).filter (fun gs => decide (ternaryEval gs t = towerZero 7))).length ≤
+        ternaryBadBound S.length b := by
+  intro b
+  induction b with
+  | zero =>
+    intro t hNe
+    cases t with | leaf tv =>
+    have hTvNe : tv ≠ towerZero 7 := fun h => hNe (by rw [h]; rfl)
+    have hF : decide (ternaryEval ChallengeTuple.nil (.leaf tv) = towerZero 7) = false :=
+      decide_eq_false_iff_not.mpr hTvNe
+    unfold challengeTuples List.filter ternaryBadBound
+    rw [hF]
+    exact Nat.le_refl 0
+  | succ b ih =>
+    intro t hNe
+    cases t with | branch t0 t1 t2 =>
+    have hPick : ∃ tStar : TernaryTab b, tStar ≠ zeroTab b ∧
+        ∀ rest : ChallengeTuple b, ternaryEval rest tStar ≠ towerZero 7 →
+          ternaryEval rest t0 ≠ towerZero 7 ∨
+          ternaryEval rest t1 ≠ towerZero 7 ∨
+          ternaryEval rest t2 ≠ towerZero 7 := by
+      by_cases ht0 : t0 = zeroTab b
+      · by_cases ht1 : t1 = zeroTab b
+        · refine ⟨t2, fun ht2 => hNe (by rw [ht0, ht1, ht2]; rfl), fun _ h => Or.inr (Or.inr h)⟩
+        · exact ⟨t1, ht1, fun _ h => Or.inr (Or.inl h)⟩
+      · exact ⟨t0, ht0, fun _ h => Or.inl h⟩
+    rcases hPick with ⟨tStar, htStar, hImp⟩
+    unfold challengeTuples ternaryBadBound
+    rw [filter_flatMap_len]
+    have hSplit := sum_map_le_split
+      (fun rest => decide (ternaryEval rest tStar = towerZero 7))
+      (fun rest => ((S.map (fun g => ChallengeTuple.cons g rest)).filter
+        (fun gs => decide (ternaryEval gs (.branch t0 t1 t2) = towerZero 7))).length)
+      S.length 2
+      (fun rest _ => by
+        rw [filter_map_len (fun g => ChallengeTuple.cons g rest) _ S]
+        exact List.length_filter_le _ S)
+      (fun rest hGood => by
+        rw [filter_map_len (fun g => ChallengeTuple.cons g rest) _ S]
+        have hPred : (fun g => decide (ternaryEval (.cons g rest) (.branch t0 t1 t2) = towerZero 7)) =
+            (fun g => decide (RoundPoly.evalCoeffs
+              [ternaryEval rest t0,
+               towerAdd 7 (towerAdd 7 (ternaryEval rest t0) (ternaryEval rest t1)) (ternaryEval rest t2),
+               ternaryEval rest t2] g = towerZero 7)) := by
+          funext g
+          exact decide_eq_decide_of_iff (by rw [ternaryEval_step_eq_evalCoeffs])
+        rw [hPred]
+        exact quadratic_roots_le_two_tower128 _ _ _ S hS
+          (ternary_quad_coeffs_nonzero _ _ _ (hImp rest (decide_eq_false_iff_not.mp hGood))))
+      (challengeTuples S b)
+    rw [challengeTuples_length, Nat.mul_comm (S.length ^ b) 2] at hSplit
+    exact Nat.le_trans hSplit (Nat.add_le_add_right (Nat.mul_le_mul_right S.length (ih tStar htStar)) _)
+
+theorem nextClaim_false_bad_coins_le (b : Nat) (claim : Tower128)
+    (w : BoolWeights b) (hw0 : zeroCornerBool w = towerOne 7)
+    (sProver sTrue : TernaryTab b) (hFalse : claim ≠ weightedBoolSum w sTrue)
+    (S : List Tower128) (hS : S.Nodup) :
+    ((challengeTuples S b).filter (fun gs =>
+      decide (nextClaim b claim w sProver gs = ternaryEval gs sTrue))).length ≤
+      ternaryBadBound S.length b := by
+  let d := diffTab (lockZeroCorner claim w sProver) sTrue
+  have hdNe : d ≠ zeroTab b := by
+    intro hdZ
+    have hSum := congrArg (weightedBoolSum w) ((diffTab_eq_zero_iff _ _).mp hdZ)
+    rw [lockZeroCorner_weightedBoolSum claim w sProver hw0] at hSum
+    exact hFalse hSum
+  have hPred : (fun gs => decide (nextClaim b claim w sProver gs = ternaryEval gs sTrue)) =
+      (fun gs => decide (ternaryEval gs d = towerZero 7)) := by
+    funext gs
+    exact decide_eq_decide_of_iff (by
+      dsimp only [nextClaim, d]
+      rw [ternaryEval_diffTab, towerAdd_eq_zero_iff_eq])
+  rw [hPred]
+  exact ternaryEval_roots_le S hS b d hdNe
+
+def nextClaimUnlocked (b : Nat) (_claim : Tower128) (_w : BoolWeights b)
+    (s : TernaryTab b) (gammas : ChallengeTuple b) : Tower128 :=
+  ternaryEval gammas s
+
+theorem tooth_nextClaim_unlocked_s0_forges_all (b : Nat) (S : List Tower128) :
+    ∃ (claim : Tower128) (w : BoolWeights b) (sTrue : TernaryTab b),
+      zeroCornerBool w = towerOne 7 ∧
+      claim ≠ weightedBoolSum w sTrue ∧
+      ((challengeTuples S b).filter (fun gs =>
+        decide (nextClaimUnlocked b claim w sTrue gs = ternaryEval gs sTrue))).length =
+        S.length ^ b := by
+  refine ⟨towerOne 7, unitBoolWeights b, zeroTab b, zeroCorner_unitBoolWeights b, ?_, ?_⟩
+  · rw [weightedBoolSum_zeroTab]; decide
+  · have hAll : ∀ gs ∈ challengeTuples S b,
+        decide (nextClaimUnlocked b (towerOne 7) (unitBoolWeights b) (zeroTab b) gs =
+          ternaryEval gs (zeroTab b)) = true :=
+      fun _ _ => decide_eq_true_iff.mpr rfl
+    rw [List.filter_eq_self.mpr hAll, challengeTuples_length]
+
+#tooth_pair
+  Qsag.Rss256ProductProof.nextClaim_false_bad_coins_le
+  vs
+  Qsag.Rss256ProductProof.tooth_nextClaim_unlocked_s0_forges_all
+
+theorem ternaryBadBound_scale_le {L cardS b e : Nat} (h : L ≤ ternaryBadBound cardS b) :
+    L * cardS ^ (e + 1) ≤ 2 * b * cardS ^ (b + e) := by
+  calc L * cardS ^ (e + 1)
+      ≤ ternaryBadBound cardS b * cardS ^ (e + 1) := Nat.mul_le_mul_right _ h
+    _ = (ternaryBadBound cardS b * cardS) * cardS ^ e := by
+        rw [Nat.pow_succ, Nat.mul_comm (cardS ^ e) cardS, Nat.mul_assoc]
+    _ = 2 * b * cardS ^ (b + e) := by
+        rw [ternaryBadBound_mul_eq, Nat.mul_assoc (2 * b), ← Nat.pow_add]
+
+theorem scale_pow_add (k cardS b e : Nat) :
+    cardS ^ b * (k * cardS ^ e) = k * cardS ^ (b + e) := by
+  rw [← Nat.mul_assoc, Nat.mul_comm (cardS ^ b) k, Nat.mul_assoc, ← Nat.pow_add]
 
 /-! ## 2. Full Adaptive 1-Pass (`ROUND1`) & 2-Pass (`ROUND1` + `ROUND2`) Product Proof Composition -/
 
@@ -241,7 +344,7 @@ theorem foldAndTauCoinSpace_length (S : List Tower128) (rs : List Nat) :
     simp only [foldAndTauCoinSpace, List.length_map, List.sum_nil, Nat.zero_add, Nat.pow_one]
   | cons b rs ih =>
     rw [foldAndTauCoinSpace, flatMap_map_len, challengeTuples_length, ih,
-        List.sum_cons, Nat.add_assoc, Nat.pow_add]
+        List.sum_cons, Nat.add_assoc, ← Nat.pow_add]
 
 /-- Adaptive prover strategy across `foldBits` folding rounds + final `(c0, c1)` shares. -/
 inductive FoldAndTauProver : List Nat → Type where
@@ -315,64 +418,53 @@ theorem foldAndTau_false_claim_bad_coins_le (S : List Tower128) (hS : S.Nodup) (
           (foldAndTauCoinSpace S rs)]
         have hNeNext : nextClaim b claim (unitBoolWeights b) sProver gs ≠
             vecCross (foldVec (tailBits rs) b gs xp) (foldVec (tailBits rs) b gs yq)
-                     (foldVec (tailBits rs) b gs xq) (foldVec (tailBits rs) b gs yp) := by
-          rw [← ternaryEval_honestRoundTab_eq]
-          exact of_decide_eq_false hGood
+                     (foldVec (tailBits rs) b gs xq) (foldVec (tailBits rs) b gs yp) :=
+          fun hEq => decide_eq_false_iff_not.mp hGood
+            (hEq.trans (ternaryEval_honestRoundTab_eq (tailBits rs) b gs xp yq xq yp).symm)
         exact ih (nextClaim b claim (unitBoolWeights b) sProver gs)
           (foldVec (tailBits rs) b gs xp) (foldVec (tailBits rs) b gs yq)
           (foldVec (tailBits rs) b gs xq) (foldVec (tailBits rs) b gs yp)
           masks (nextP gs) hNeNext)
       (challengeTuples S b)
-    rw [challengeTuples_length] at hSplit
-    have hTerm1 : ((challengeTuples S b).filter (fun gs =>
-        decide (nextClaim b claim (unitBoolWeights b) sProver gs = ternaryEval gs sTrue))).length *
-        S.length ^ (rs.sum + 1) ≤ 2 * b * S.length ^ (b + rs.sum) := by
-      let L := ((challengeTuples S b).filter (fun gs =>
-        decide (nextClaim b claim (unitBoolWeights b) sProver gs = ternaryEval gs sTrue))).length
-      calc L * S.length ^ (rs.sum + 1)
-          ≤ ternaryBadBound S.length b * S.length ^ (rs.sum + 1) :=
-            Nat.mul_le_mul_right _ hRoundBad
-        _ = ternaryBadBound S.length b * (S.length * S.length ^ rs.sum) := by
-            rw [Nat.pow_succ, Nat.mul_comm (S.length ^ rs.sum) S.length]
-        _ = (ternaryBadBound S.length b * S.length) * S.length ^ rs.sum := by
-            rw [Nat.mul_assoc]
-        _ = 2 * b * S.length ^ (b + rs.sum) := by
-            rw [ternaryBadBound_mul_eq, Nat.mul_assoc (2 * b), ← Nat.pow_add]
-    have hTerm2 : S.length ^ b * ((2 * rs.sum + 2) * S.length ^ rs.sum) =
-        (2 * rs.sum + 2) * S.length ^ (b + rs.sum) := by
-      rw [← Nat.mul_assoc, Nat.mul_comm (S.length ^ b) (2 * rs.sum + 2),
-          Nat.mul_assoc, ← Nat.pow_add]
+    rw [challengeTuples_length, scale_pow_add] at hSplit
+    have hTerm1 := ternaryBadBound_scale_le (e := rs.sum) hRoundBad
     have hTotal : 2 * b * S.length ^ (b + rs.sum) + (2 * rs.sum + 2) * S.length ^ (b + rs.sum) =
         (2 * (b :: rs).sum + 2) * S.length ^ (b :: rs).sum := by
       simp only [List.sum_cons, ← Nat.add_mul]
       have hLin : 2 * b + (2 * rs.sum + 2) = 2 * (b + rs.sum) + 2 := by omega
       rw [hLin]
-    exact Nat.le_trans hSplit (hTotal ▸ Nat.add_le_add hTerm1 (Nat.le_of_eq hTerm2))
+    exact Nat.le_trans hSplit (hTotal ▸ Nat.add_le_add_right hTerm1 _)
 
-/-- Full single-pass coin vector: `(chi, tensorGammas, foldAndTauCoins)` (`9 + sum foldBits` coins). -/
-abbrev PassCoins (foldBits : List Nat) :=
-  Tower128 × ChallengeTuple TENSOR_BITS × FoldAndTauCoins foldBits
+/-- Parametric `tBits` single-pass coin vector, prover, and batch (`tBits = TENSOR_BITS = 7`). -/
+abbrev PassCoinsG (tBits : Nat) (foldBits : List Nat) :=
+  Tower128 × ChallengeTuple tBits × FoldAndTauCoins foldBits
 
-def passCoinSpace (S : List Tower128) (foldBits : List Nat) : List (PassCoins foldBits) :=
+abbrev PassCoins (foldBits : List Nat) := PassCoinsG TENSOR_BITS foldBits
+
+def passCoinSpaceG (tBits : Nat) (S : List Tower128) (foldBits : List Nat) :
+    List (PassCoinsG tBits foldBits) :=
   S.flatMap (fun chi =>
-    (challengeTuples S TENSOR_BITS).flatMap (fun gTensor =>
+    (challengeTuples S tBits).flatMap (fun gTensor =>
       (foldAndTauCoinSpace S foldBits).map (fun ft => (chi, gTensor, ft))))
 
-theorem passCoinSpace_length (S : List Tower128) (foldBits : List Nat) :
-    (passCoinSpace S foldBits).length = S.length ^ (TENSOR_BITS + foldBits.sum + 2) := by
-  unfold passCoinSpace
+abbrev passCoinSpace (S : List Tower128) (foldBits : List Nat) : List (PassCoins foldBits) :=
+  passCoinSpaceG TENSOR_BITS S foldBits
+
+theorem passCoinSpaceG_length (tBits : Nat) (S : List Tower128) (foldBits : List Nat) :
+    (passCoinSpaceG tBits S foldBits).length = S.length ^ (tBits + foldBits.sum + 2) := by
+  unfold passCoinSpaceG
   have hInner : ∀ chi : Tower128,
-      ((challengeTuples S TENSOR_BITS).flatMap (fun gTensor =>
+      ((challengeTuples S tBits).flatMap (fun gTensor =>
         (foldAndTauCoinSpace S foldBits).map (fun ft => (chi, gTensor, ft)))).length =
-      S.length ^ (TENSOR_BITS + foldBits.sum + 1) := by
+      S.length ^ (tBits + foldBits.sum + 1) := by
     intro chi
     rw [flatMap_map_len, challengeTuples_length, foldAndTauCoinSpace_length,
         ← Nat.pow_add, Nat.add_assoc]
   have hOuter : ∀ xs : List Tower128,
       (xs.flatMap (fun chi =>
-        (challengeTuples S TENSOR_BITS).flatMap (fun gTensor =>
+        (challengeTuples S tBits).flatMap (fun gTensor =>
           (foldAndTauCoinSpace S foldBits).map (fun ft => (chi, gTensor, ft))))).length =
-      xs.length * S.length ^ (TENSOR_BITS + foldBits.sum + 1) := by
+      xs.length * S.length ^ (tBits + foldBits.sum + 1) := by
     intro xs
     induction xs with
     | nil => simp only [List.flatMap_nil, List.length_nil, Nat.zero_mul]
@@ -381,60 +473,159 @@ theorem passCoinSpace_length (S : List Tower128) (foldBits : List Nat) :
         List.length_cons, Nat.add_mul, Nat.one_mul, Nat.add_comm]
   rw [hOuter S, Nat.mul_comm, ← Nat.pow_succ]
 
-/-- Adaptive single-pass prover: after `chi`, chooses `tensorTab : TernaryTab 7`, and after
-    `gTensor : ChallengeTuple 7`, runs `FoldAndTauProver foldBits`. -/
-structure PassProver (foldBits : List Nat) where
-  tensorTab : Tower128 → TernaryTab TENSOR_BITS
-  afterTensor : Tower128 → ChallengeTuple TENSOR_BITS → FoldAndTauProver foldBits
+theorem passCoinSpace_length (S : List Tower128) (foldBits : List Nat) :
+    (passCoinSpace S foldBits).length = S.length ^ (TENSOR_BITS + foldBits.sum + 2) :=
+  passCoinSpaceG_length TENSOR_BITS S foldBits
 
-/-- Full recorded gate batch for one proof `p` over `foldBits`:
-    - `gateErrorBlocks` (`≤ B` 128-bit half-plane error blocks),
-    - `xp, yq, xq, yp` (`chi`-dependent bound vectors of shape `Vec128 (tailBits foldBits + 7)`),
-    - `initialClaim chi` (`claim1[p] + claim2[p]` from `linear_terms`), linked to the true weighted
-      sum by `initialClaim chi + trueCrossSum chi = RoundPoly.evalCoeffs gateErrorBlocks chi`! -/
-structure RecordedPassBatch (foldBits : List Nat) where
+structure PassProverG (tBits : Nat) (foldBits : List Nat) where
+  tensorTab : Tower128 → TernaryTab tBits
+  afterTensor : Tower128 → ChallengeTuple tBits → FoldAndTauProver foldBits
+
+abbrev PassProver (foldBits : List Nat) := PassProverG TENSOR_BITS foldBits
+
+structure RecordedPassBatchG (tBits : Nat) (foldBits : List Nat) where
   gateErrorBlocks : List Tower128
-  xp : Tower128 → Vec128 (tailBits foldBits + TENSOR_BITS)
-  yq : Tower128 → Vec128 (tailBits foldBits + TENSOR_BITS)
-  xq : Tower128 → Vec128 (tailBits foldBits + TENSOR_BITS)
-  yp : Tower128 → Vec128 (tailBits foldBits + TENSOR_BITS)
+  xp : Tower128 → Vec128 (tailBits foldBits + tBits)
+  yq : Tower128 → Vec128 (tailBits foldBits + tBits)
+  xq : Tower128 → Vec128 (tailBits foldBits + tBits)
+  yp : Tower128 → Vec128 (tailBits foldBits + tBits)
   initialClaim : Tower128 → Tower128
   masks : Tower128 → FinalMasks
   claim_defect_eq : ∀ chi : Tower128,
     towerAdd 7 (initialClaim chi)
-      (weightedBoolSum (chiBoolWeights chi TENSOR_BITS)
-        (honestRoundTab (tailBits foldBits) TENSOR_BITS
-          (xp chi) (yq chi) (xq chi) (yp chi))) =
+      (weightedBoolSum (chiBoolWeights chi tBits)
+        (honestRoundTab (tailBits foldBits) tBits (xp chi) (yq chi) (xq chi) (yp chi))) =
     RoundPoly.evalCoeffs gateErrorBlocks chi
 
-@[expose] def singlePassAccepts (foldBits : List Nat) (batch : RecordedPassBatch foldBits)
-    (prover : PassProver foldBits) (coins : PassCoins foldBits) : Bool :=
+abbrev RecordedPassBatch (foldBits : List Nat) := RecordedPassBatchG TENSOR_BITS foldBits
+
+def singlePassAcceptsG (tBits : Nat) (foldBits : List Nat) (batch : RecordedPassBatchG tBits foldBits)
+    (prover : PassProverG tBits foldBits) (coins : PassCoinsG tBits foldBits) : Bool :=
   let (chi, gTensor, ftCoins) := coins
-  let claimAfterTensor := nextClaim TENSOR_BITS (batch.initialClaim chi)
-    (chiBoolWeights chi TENSOR_BITS) (prover.tensorTab chi) gTensor
-  foldAndTauAccepts foldBits claimAfterTensor
-    (foldVec (tailBits foldBits) TENSOR_BITS gTensor (batch.xp chi))
-    (foldVec (tailBits foldBits) TENSOR_BITS gTensor (batch.yq chi))
-    (foldVec (tailBits foldBits) TENSOR_BITS gTensor (batch.xq chi))
-    (foldVec (tailBits foldBits) TENSOR_BITS gTensor (batch.yp chi))
+  foldAndTauAccepts foldBits
+    (nextClaim tBits (batch.initialClaim chi)
+      (chiBoolWeights chi tBits) (prover.tensorTab chi) gTensor)
+    (foldVec (tailBits foldBits) tBits gTensor (batch.xp chi))
+    (foldVec (tailBits foldBits) tBits gTensor (batch.yq chi))
+    (foldVec (tailBits foldBits) tBits gTensor (batch.xq chi))
+    (foldVec (tailBits foldBits) tBits gTensor (batch.yp chi))
     (batch.masks chi) (prover.afterTensor chi gTensor) ftCoins
 
-theorem foldBits_sum_le_four_mul (rs : List Nat)
-    (h : ∀ b ∈ rs, b ≤ FOLD_BITS) : 2 * rs.sum ≤ 8 * rs.length := by
+@[expose] abbrev singlePassAccepts (foldBits : List Nat) (batch : RecordedPassBatch foldBits)
+    (prover : PassProver foldBits) (coins : PassCoins foldBits) : Bool :=
+  singlePassAcceptsG TENSOR_BITS foldBits batch prover coins
+
+theorem foldBits_sum_le_four_mul (rs : List Nat) (h : ∀ b ∈ rs, b ≤ FOLD_BITS) :
+    2 * rs.sum ≤ 8 * rs.length := by
   induction rs with
   | nil => exact Nat.le_refl 0
   | cons b rs ih =>
     have hb : b ≤ 4 := h b (.head _)
     have hSub := ih (fun x hx => h x (.tail _ hx))
-    simp only [List.sum_cons, List.length_cons]
-    omega
+    simp only [List.sum_cons, List.length_cons]; omega
 
-/-- **Single-Pass (`ROUND1`) Adaptive Soundness (`singlePass_false_batch_accepting_coins_bound`)**:
-    Matching `rss256.rs:73-75` (`(B + 2 * 7 + 8 * R + 2) / 2^128`), for ANY false gate batch of
-    `≤ B` half-plane blocks (`1 ≤ B ≤ |S|`), folding schedule `foldBits` with `b_r ≤ 4`
-    (`R = foldBits.length`), and adaptive `PassProver foldBits`, at most
-    `(B + 16 + 8 * R) * |S|^(TENSOR_BITS + foldBits.sum + 1)` out of
-    `|S|^(TENSOR_BITS + foldBits.sum + 2)` pass coin vectors accept! -/
+theorem singlePassG_false_batch_accepting_coins_bound
+    (tBits B : Nat) (foldBits : List Nat) (batch : RecordedPassBatchG tBits foldBits)
+    (prover : PassProverG tBits foldBits) (S : List Tower128) (hS : S.Nodup)
+    (hBPos : 1 ≤ B) (hBLen : batch.gateErrorBlocks.length ≤ B) (hDom : B ≤ S.length)
+    (hArity : ∀ b ∈ foldBits, b ≤ FOLD_BITS)
+    (hFault : ∃ e ∈ batch.gateErrorBlocks, e ≠ towerZero 7) :
+    ((passCoinSpaceG tBits S foldBits).filter (singlePassAcceptsG tBits foldBits batch prover)).length ≤
+      (B + (2 * tBits + 2) + 8 * foldBits.length) * S.length ^ (tBits + foldBits.sum + 1) := by
+  let E := tBits + foldBits.sum + 1
+  have hInnerBound : ∀ chi : Tower128,
+      RoundPoly.evalCoeffs batch.gateErrorBlocks chi ≠ towerZero 7 →
+      (((challengeTuples S tBits).flatMap (fun gTensor =>
+        (foldAndTauCoinSpace S foldBits).map (fun ft => (chi, gTensor, ft)))).filter
+        (singlePassAcceptsG tBits foldBits batch prover)).length ≤
+      (2 * tBits + (2 * foldBits.sum + 2)) * S.length ^ (tBits + foldBits.sum) := by
+    intro chi hChiNz
+    rw [filter_flatMap_len]
+    let sTrue := honestRoundTab (tailBits foldBits) tBits
+      (batch.xp chi) (batch.yq chi) (batch.xq chi) (batch.yp chi)
+    have hClaimFalse : batch.initialClaim chi ≠
+        weightedBoolSum (chiBoolWeights chi tBits) sTrue := by
+      intro hEq
+      have hDef := batch.claim_defect_eq chi
+      dsimp only [sTrue] at hEq
+      rw [hEq, towerAdd_self_zero] at hDef
+      exact hChiNz hDef.symm
+    have hTensorBad := nextClaim_false_bad_coins_le tBits (batch.initialClaim chi)
+      (chiBoolWeights chi tBits) (zeroCorner_chiBoolWeights chi tBits)
+      (prover.tensorTab chi) sTrue hClaimFalse S hS
+    have hSplitT := sum_map_le_split
+      (fun gTensor => decide (nextClaim tBits (batch.initialClaim chi)
+        (chiBoolWeights chi tBits) (prover.tensorTab chi) gTensor =
+        ternaryEval gTensor sTrue))
+      (fun gTensor => (((foldAndTauCoinSpace S foldBits).map (fun ft => (chi, gTensor, ft))).filter
+        (singlePassAcceptsG tBits foldBits batch prover)).length)
+      (S.length ^ (foldBits.sum + 1)) ((2 * foldBits.sum + 2) * S.length ^ foldBits.sum)
+      (fun gTensor _ => by
+        rw [filter_map_len (fun ft => (chi, gTensor, ft))
+          (singlePassAcceptsG tBits foldBits batch prover) (foldAndTauCoinSpace S foldBits),
+          ← foldAndTauCoinSpace_length S foldBits]
+        exact List.length_filter_le _ _)
+      (fun gTensor hGood => by
+        rw [filter_map_len (fun ft => (chi, gTensor, ft))
+          (singlePassAcceptsG tBits foldBits batch prover) (foldAndTauCoinSpace S foldBits)]
+        have hNeNext : nextClaim tBits (batch.initialClaim chi)
+            (chiBoolWeights chi tBits) (prover.tensorTab chi) gTensor ≠
+            vecCross
+              (foldVec (tailBits foldBits) tBits gTensor (batch.xp chi))
+              (foldVec (tailBits foldBits) tBits gTensor (batch.yq chi))
+              (foldVec (tailBits foldBits) tBits gTensor (batch.xq chi))
+              (foldVec (tailBits foldBits) tBits gTensor (batch.yp chi)) :=
+          fun hEq => decide_eq_false_iff_not.mp hGood
+            (hEq.trans (ternaryEval_honestRoundTab_eq (tailBits foldBits) tBits gTensor
+              (batch.xp chi) (batch.yq chi) (batch.xq chi) (batch.yp chi)).symm)
+        exact foldAndTau_false_claim_bad_coins_le S hS foldBits _ _ _ _ _
+          (batch.masks chi) (prover.afterTensor chi gTensor) hNeNext)
+      (challengeTuples S tBits)
+    rw [challengeTuples_length, scale_pow_add] at hSplitT
+    have hT1 := ternaryBadBound_scale_le (e := foldBits.sum) hTensorBad
+    have hCombine : 2 * tBits * S.length ^ (tBits + foldBits.sum) +
+        (2 * foldBits.sum + 2) * S.length ^ (tBits + foldBits.sum) =
+        (2 * tBits + (2 * foldBits.sum + 2)) * S.length ^ (tBits + foldBits.sum) :=
+      (Nat.add_mul _ _ _).symm
+    exact Nat.le_trans hSplitT (hCombine ▸ Nat.add_le_add_right hT1 _)
+  unfold passCoinSpaceG
+  rw [filter_flatMap_len]
+  have hChiBad := passBatching_false_bad_coins_le B batch.gateErrorBlocks S hS hBPos hBLen hDom hFault
+  have hInnerFullLen : ∀ chi : Tower128,
+      ((challengeTuples S tBits).flatMap (fun gTensor =>
+        (foldAndTauCoinSpace S foldBits).map (fun ft => (chi, gTensor, ft)))).length = S.length ^ E := by
+    intro chi
+    rw [flatMap_map_len, challengeTuples_length, foldAndTauCoinSpace_length,
+        ← Nat.pow_add, ← Nat.add_assoc]
+  have hSplitChi := sum_map_le_split
+    (fun chi => decide (RoundPoly.evalCoeffs batch.gateErrorBlocks chi = towerZero 7))
+    (fun chi => (((challengeTuples S tBits).flatMap (fun gTensor =>
+      (foldAndTauCoinSpace S foldBits).map (fun ft => (chi, gTensor, ft)))).filter
+      (singlePassAcceptsG tBits foldBits batch prover)).length)
+    (S.length ^ E) ((2 * tBits + (2 * foldBits.sum + 2)) * S.length ^ (tBits + foldBits.sum))
+    (fun chi _ => by rw [← hInnerFullLen chi]; exact List.length_filter_le _ _)
+    (fun chi hGood => hInnerBound chi (decide_eq_false_iff_not.mp hGood))
+    S
+  have hC1 : (S.filter (fun chi =>
+      decide (RoundPoly.evalCoeffs batch.gateErrorBlocks chi = towerZero 7))).length * S.length ^ E ≤
+      B * S.length ^ E := Nat.mul_le_mul_right (S.length ^ E) hChiBad
+  have hC2 : S.length * ((2 * tBits + (2 * foldBits.sum + 2)) * S.length ^ (tBits + foldBits.sum)) ≤
+      ((2 * tBits + 2) + 8 * foldBits.length) * S.length ^ E := by
+    have hSwap : S.length * ((2 * tBits + (2 * foldBits.sum + 2)) * S.length ^ (tBits + foldBits.sum)) =
+        (2 * tBits + (2 * foldBits.sum + 2)) * S.length ^ E := by
+      dsimp only [E]
+      rw [← Nat.mul_assoc, Nat.mul_comm S.length, Nat.mul_assoc, Nat.mul_comm S.length, ← Nat.pow_succ]
+    rw [hSwap]
+    have hCoef : 2 * tBits + (2 * foldBits.sum + 2) ≤ (2 * tBits + 2) + 8 * foldBits.length := by
+      have hF := foldBits_sum_le_four_mul foldBits hArity; omega
+    exact Nat.mul_le_mul_right (S.length ^ E) hCoef
+  have hAddE : B * S.length ^ E + ((2 * tBits + 2) + 8 * foldBits.length) * S.length ^ E =
+      (B + (2 * tBits + 2) + 8 * foldBits.length) * S.length ^ E := by
+    rw [← Nat.add_mul, ← Nat.add_assoc]
+  exact Nat.le_trans hSplitChi (hAddE ▸ Nat.add_le_add hC1 hC2)
+
+/-- **Single-Pass (`ROUND1`) Adaptive Soundness (`singlePass_false_batch_accepting_coins_bound`)**
+    (`rss256.rs:73-75`). -/
 theorem singlePass_false_batch_accepting_coins_bound
     (B : Nat) (foldBits : List Nat) (batch : RecordedPassBatch foldBits)
     (prover : PassProver foldBits) (S : List Tower128) (hS : S.Nodup)
@@ -442,123 +633,9 @@ theorem singlePass_false_batch_accepting_coins_bound
     (hArity : ∀ b ∈ foldBits, b ≤ FOLD_BITS)
     (hFault : ∃ e ∈ batch.gateErrorBlocks, e ≠ towerZero 7) :
     ((passCoinSpace S foldBits).filter (singlePassAccepts foldBits batch prover)).length ≤
-      (B + 16 + 8 * foldBits.length) * S.length ^ (TENSOR_BITS + foldBits.sum + 1) := by
-  let E := TENSOR_BITS + foldBits.sum + 1
-  have hInnerBound : ∀ chi : Tower128,
-      RoundPoly.evalCoeffs batch.gateErrorBlocks chi ≠ towerZero 7 →
-      (((challengeTuples S TENSOR_BITS).flatMap (fun gTensor =>
-        (foldAndTauCoinSpace S foldBits).map (fun ft => (chi, gTensor, ft)))).filter
-        (singlePassAccepts foldBits batch prover)).length ≤
-      (14 + 2 * foldBits.sum + 2) * S.length ^ (TENSOR_BITS + foldBits.sum) := by
-    intro chi hChiNz
-    rw [filter_flatMap_len]
-    let sTrue := honestRoundTab (tailBits foldBits) TENSOR_BITS
-      (batch.xp chi) (batch.yq chi) (batch.xq chi) (batch.yp chi)
-    have hClaimFalse : batch.initialClaim chi ≠
-        weightedBoolSum (chiBoolWeights chi TENSOR_BITS) sTrue := by
-      intro hEq
-      have hDef := batch.claim_defect_eq chi
-      dsimp only [sTrue] at hEq
-      rw [hEq, towerAdd_self_zero] at hDef
-      exact hChiNz hDef.symm
-    have hTensorBad := nextClaim_false_bad_coins_le TENSOR_BITS (batch.initialClaim chi)
-      (chiBoolWeights chi TENSOR_BITS) (zeroCorner_chiBoolWeights chi TENSOR_BITS)
-      (prover.tensorTab chi) sTrue hClaimFalse S hS
-    have hSplitT := sum_map_le_split
-      (fun gTensor => decide (nextClaim TENSOR_BITS (batch.initialClaim chi)
-        (chiBoolWeights chi TENSOR_BITS) (prover.tensorTab chi) gTensor =
-        ternaryEval gTensor sTrue))
-      (fun gTensor => (((foldAndTauCoinSpace S foldBits).map (fun ft => (chi, gTensor, ft))).filter
-        (singlePassAccepts foldBits batch prover)).length)
-      (S.length ^ (foldBits.sum + 1)) ((2 * foldBits.sum + 2) * S.length ^ foldBits.sum)
-      (fun gTensor _ => by
-        rw [filter_map_len (fun ft => (chi, gTensor, ft))
-          (singlePassAccepts foldBits batch prover) (foldAndTauCoinSpace S foldBits),
-          ← foldAndTauCoinSpace_length S foldBits]
-        exact List.length_filter_le _ _)
-      (fun gTensor hGood => by
-        rw [filter_map_len (fun ft => (chi, gTensor, ft))
-          (singlePassAccepts foldBits batch prover) (foldAndTauCoinSpace S foldBits)]
-        have hNeNext : nextClaim TENSOR_BITS (batch.initialClaim chi)
-            (chiBoolWeights chi TENSOR_BITS) (prover.tensorTab chi) gTensor ≠
-            vecCross
-              (foldVec (tailBits foldBits) TENSOR_BITS gTensor (batch.xp chi))
-              (foldVec (tailBits foldBits) TENSOR_BITS gTensor (batch.yq chi))
-              (foldVec (tailBits foldBits) TENSOR_BITS gTensor (batch.xq chi))
-              (foldVec (tailBits foldBits) TENSOR_BITS gTensor (batch.yp chi)) := by
-          rw [← ternaryEval_honestRoundTab_eq]
-          exact of_decide_eq_false hGood
-        exact foldAndTau_false_claim_bad_coins_le S hS foldBits _ _ _ _ _
-          (batch.masks chi) (prover.afterTensor chi gTensor) hNeNext)
-      (challengeTuples S TENSOR_BITS)
-    rw [challengeTuples_length] at hSplitT
-    have hT1 : ((challengeTuples S TENSOR_BITS).filter (fun gTensor =>
-        decide (nextClaim TENSOR_BITS (batch.initialClaim chi)
-          (chiBoolWeights chi TENSOR_BITS) (prover.tensorTab chi) gTensor =
-          ternaryEval gTensor sTrue))).length *
-        S.length ^ (foldBits.sum + 1) ≤ 14 * S.length ^ (TENSOR_BITS + foldBits.sum) := by
-      let LT := ((challengeTuples S TENSOR_BITS).filter (fun gTensor =>
-        decide (nextClaim TENSOR_BITS (batch.initialClaim chi)
-          (chiBoolWeights chi TENSOR_BITS) (prover.tensorTab chi) gTensor =
-          ternaryEval gTensor sTrue))).length
-      have hTwoT : 2 * TENSOR_BITS = 14 := rfl
-      calc LT * S.length ^ (foldBits.sum + 1)
-          ≤ ternaryBadBound S.length TENSOR_BITS * S.length ^ (foldBits.sum + 1) :=
-            Nat.mul_le_mul_right _ hTensorBad
-        _ = ternaryBadBound S.length TENSOR_BITS * (S.length * S.length ^ foldBits.sum) := by
-            rw [Nat.pow_succ, Nat.mul_comm (S.length ^ foldBits.sum) S.length]
-        _ = (ternaryBadBound S.length TENSOR_BITS * S.length) * S.length ^ foldBits.sum := by
-            rw [Nat.mul_assoc]
-        _ = 14 * S.length ^ (TENSOR_BITS + foldBits.sum) := by
-            rw [ternaryBadBound_mul_eq, hTwoT, Nat.mul_assoc 14, ← Nat.pow_add]
-    have hT2 : S.length ^ TENSOR_BITS * ((2 * foldBits.sum + 2) * S.length ^ foldBits.sum) =
-        (2 * foldBits.sum + 2) * S.length ^ (TENSOR_BITS + foldBits.sum) := by
-      rw [← Nat.mul_assoc, Nat.mul_comm (S.length ^ TENSOR_BITS) (2 * foldBits.sum + 2),
-          Nat.mul_assoc, ← Nat.pow_add]
-    have hCombine : 14 * S.length ^ (TENSOR_BITS + foldBits.sum) +
-        (2 * foldBits.sum + 2) * S.length ^ (TENSOR_BITS + foldBits.sum) =
-        (14 + 2 * foldBits.sum + 2) * S.length ^ (TENSOR_BITS + foldBits.sum) := by
-      rw [← Nat.add_mul, Nat.add_assoc]
-    exact Nat.le_trans hSplitT (hCombine ▸ Nat.add_le_add hT1 (Nat.le_of_eq hT2))
-  unfold passCoinSpace
-  rw [filter_flatMap_len]
-  have hChiBad := passBatching_false_bad_coins_le B batch.gateErrorBlocks S hS hBPos hBLen hDom hFault
-  have hInnerFullLen : ∀ chi : Tower128,
-      ((challengeTuples S TENSOR_BITS).flatMap (fun gTensor =>
-        (foldAndTauCoinSpace S foldBits).map (fun ft => (chi, gTensor, ft)))).length = S.length ^ E := by
-    intro chi
-    rw [flatMap_map_len, challengeTuples_length, foldAndTauCoinSpace_length,
-        ← Nat.pow_add, ← Nat.add_assoc]
-  have hSplitChi := sum_map_le_split
-    (fun chi => decide (RoundPoly.evalCoeffs batch.gateErrorBlocks chi = towerZero 7))
-    (fun chi => (((challengeTuples S TENSOR_BITS).flatMap (fun gTensor =>
-      (foldAndTauCoinSpace S foldBits).map (fun ft => (chi, gTensor, ft)))).filter
-      (singlePassAccepts foldBits batch prover)).length)
-    (S.length ^ E) ((14 + 2 * foldBits.sum + 2) * S.length ^ (TENSOR_BITS + foldBits.sum))
-    (fun chi _ => by
-      rw [← hInnerFullLen chi]
-      exact List.length_filter_le _ _)
-    (fun chi hGood => hInnerBound chi (of_decide_eq_false hGood))
-    S
-  have hC1 : (S.filter (fun chi =>
-      decide (RoundPoly.evalCoeffs batch.gateErrorBlocks chi = towerZero 7))).length * S.length ^ E ≤
-      B * S.length ^ E := Nat.mul_le_mul_right (S.length ^ E) hChiBad
-  have hC2 : S.length * ((14 + 2 * foldBits.sum + 2) * S.length ^ (TENSOR_BITS + foldBits.sum)) ≤
-      (16 + 8 * foldBits.length) * S.length ^ E := by
-    have hSwap : S.length * ((14 + 2 * foldBits.sum + 2) * S.length ^ (TENSOR_BITS + foldBits.sum)) =
-        (14 + 2 * foldBits.sum + 2) * S.length ^ E := by
-      dsimp only [E]
-      rw [← Nat.mul_assoc, Nat.mul_comm S.length (14 + 2 * foldBits.sum + 2),
-          Nat.mul_assoc, Nat.mul_comm S.length, ← Nat.pow_succ]
-    rw [hSwap]
-    have hCoef : 14 + 2 * foldBits.sum + 2 ≤ 16 + 8 * foldBits.length := by
-      have hF := foldBits_sum_le_four_mul foldBits hArity
-      omega
-    exact Nat.mul_le_mul_right (S.length ^ E) hCoef
-  have hAddE : B * S.length ^ E + (16 + 8 * foldBits.length) * S.length ^ E =
-      (B + 16 + 8 * foldBits.length) * S.length ^ E := by
-    rw [← Nat.add_mul, ← Nat.add_assoc]
-  exact Nat.le_trans hSplitChi (hAddE ▸ Nat.add_le_add hC1 hC2)
+      (B + 16 + 8 * foldBits.length) * S.length ^ (TENSOR_BITS + foldBits.sum + 1) :=
+  singlePassG_false_batch_accepting_coins_bound TENSOR_BITS B foldBits batch prover
+    S hS hBPos hBLen hDom hArity hFault
 
 /-- Full 2-pass (`ROUND1` + `ROUND2`, `pass ∈ {0, 1}`) adaptive prover (`rss256.rs:2441-2628`),
     even allowing `pass 1`'s adaptive prover strategy to depend on the entire `pass 0` coin transcript! -/
@@ -666,57 +743,38 @@ theorem honestRoundTab_vecZero (m b : Nat) :
   induction b with
   | zero =>
     dsimp only [honestRoundTab, btreeTernaryExpand, ttreeMap4, zeroTab, vecCross]
-    rw [vecDot_zero, towerAdd_self_zero]
+    rw [vecDot_zero (m + 0), towerAdd_self_zero]
   | succ b ih =>
     dsimp only [vecZero, honestRoundTab, btreeTernaryExpand, ttreeMap4, zeroTab]
     change TTree.branch
       (honestRoundTab m b (vecZero (m + b)) (vecZero (m + b)) (vecZero (m + b)) (vecZero (m + b)))
       (honestRoundTab m b (vecZero (m + b)) (vecZero (m + b)) (vecZero (m + b)) (vecZero (m + b)))
       (honestRoundTab m b
-        (vecAdd (vecZero (m + b)) (vecZero (m + b)))
-        (vecAdd (vecZero (m + b)) (vecZero (m + b)))
-        (vecAdd (vecZero (m + b)) (vecZero (m + b)))
-        (vecAdd (vecZero (m + b)) (vecZero (m + b)))) =
+        (vecAdd (vecZero (m + b)) (vecZero (m + b))) (vecAdd (vecZero (m + b)) (vecZero (m + b)))
+        (vecAdd (vecZero (m + b)) (vecZero (m + b))) (vecAdd (vecZero (m + b)) (vecZero (m + b)))) =
       TTree.branch (zeroTab b) (zeroTab b) (zeroTab b)
     rw [vecAdd_zero, ih]
 
 theorem inhabited_rss256_two_pass_product_proof :
     ∃ (B : Nat) (foldBits : List Nat) (batch : RecordedPassBatch foldBits)
-      (prover : TwoPassProver foldBits) (S : List Tower128),
-      S.Nodup ∧
-      1 ≤ B ∧
-      batch.gateErrorBlocks.length ≤ B ∧
-      B ≤ S.length ∧
-      (∀ b ∈ foldBits, b ≤ FOLD_BITS) ∧
-      (∃ e ∈ batch.gateErrorBlocks, e ≠ towerZero 7) := by
-  let foldBits : List Nat := [2, 2, 4, 4, 4, 4]
+      (_prover : TwoPassProver foldBits) (S : List Tower128),
+      S.Nodup ∧ 1 ≤ B ∧ batch.gateErrorBlocks.length ≤ B ∧ B ≤ S.length ∧
+      (∀ b ∈ foldBits, b ≤ FOLD_BITS) ∧ (∃ e ∈ batch.gateErrorBlocks, e ≠ towerZero 7) := by
+  let foldBits : List Nat := []
   let zVec : Vec128 (tailBits foldBits + TENSOR_BITS) := vecZero (tailBits foldBits + TENSOR_BITS)
   let batch : RecordedPassBatch foldBits :=
-    { gateErrorBlocks := [towerOne 7]
-      xp := fun _ => zVec
-      yq := fun _ => zVec
-      xq := fun _ => zVec
-      yp := fun _ => zVec
-      initialClaim := fun _ => towerOne 7
-      masks := fun _ => ⟨towerZero 7, towerZero 7, towerZero 7, towerZero 7⟩
+    { gateErrorBlocks := [towerOne 7], xp := fun _ => zVec, yq := fun _ => zVec,
+      xq := fun _ => zVec, yp := fun _ => zVec, initialClaim := fun _ => towerOne 7,
+      masks := fun _ => ⟨towerZero 7, towerZero 7, towerZero 7, towerZero 7⟩,
       claim_defect_eq := fun chi => by
-        dsimp only [zVec]
-        rw [honestRoundTab_vecZero, weightedBoolSum_zeroTab, towerAdd_zero]
+        rw [honestRoundTab_vecZero (tailBits foldBits) TENSOR_BITS,
+            weightedBoolSum_zeroTab, towerAdd_zero]
         show towerOne 7 = towerAdd 7 (towerOne 7) (towerMul 7 chi (towerZero 7))
         rw [towerMul_zero, towerAdd_zero] }
   let p0 : PassProver foldBits := ⟨fun _ => zeroTab TENSOR_BITS, fun _ _ => zeroFoldProver foldBits⟩
   refine ⟨1, foldBits, batch, ⟨p0, fun _ => p0⟩, [towerZero 7, towerOne 7], ?_,
-    Nat.le_refl 1, Nat.le_refl 1, by decide, ?_, ⟨towerOne 7, .head _, by decide⟩⟩
-  · decide
-  · intro b hb
-    rcases hb with _ | ⟨_, _ | ⟨_, _ | ⟨_, _ | ⟨_, _ | ⟨_, _ | hNil⟩⟩⟩⟩⟩
-    · decide
-    · decide
-    · decide
-    · decide
-    · decide
-    · decide
-    · cases hNil
+    Nat.le_refl 1, Nat.le_refl 1, by decide, by decide, ⟨towerOne 7, .head _, by decide⟩⟩
+  decide
 
 #verify_inhabited
   Qsag.Rss256ProductProof.rss256_two_pass_product_proof_sound
@@ -726,6 +784,10 @@ theorem inhabited_rss256_two_pass_product_proof :
   Qsag.Rss256ProductProof.finalMaskedCrossCheck_complete
   Qsag.Rss256ProductProof.finalMaskedOpen_privacy_equiv
   Qsag.Rss256ProductProof.finalMaskedCrossCheck_false_bad_coins_le_two
+  Qsag.Rss256ProductProof.ternaryBadBound_mul_eq
+  Qsag.Rss256ProductProof.ternaryEval_roots_le
+  Qsag.Rss256ProductProof.nextClaim_false_bad_coins_le
+  Qsag.Rss256ProductProof.tooth_nextClaim_unlocked_s0_forges_all
   Qsag.Rss256ProductProof.singlePass_false_batch_accepting_coins_bound
   Qsag.Rss256ProductProof.rss256_two_pass_product_proof_sound
   Qsag.Rss256ProductProof.rss256_eight_wave_barrier_concrete_bound

@@ -14,6 +14,11 @@
 use crate::tower::ct_eq_bytes32;
 
 /// Proof that one opening round was accepted by its guard. Neither `Clone` nor `Copy`.
+///
+/// ```compile_fail
+/// use qsag_verified::OpeningReleasePermit;
+/// let forged = OpeningReleasePermit { session_id: [0; 32], round_id: 0, openings: 1 };
+/// ```
 pub struct OpeningReleasePermit {
     session_id: [u8; 32],
     round_id: u64,

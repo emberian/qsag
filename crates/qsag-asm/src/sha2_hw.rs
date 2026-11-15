@@ -431,3 +431,61 @@ pub(crate) unsafe fn sha256_compress_blocks_aarch64_sha2(
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const IV: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+
+    #[test]
+    fn compress_bytes_matches_portable_on_misaligned_inputs_of_every_length() {
+        let mut buf = [0u8; 4 + 64 * 5 + 63];
+        let mut x = 0x5EED_u32;
+        for b in buf.iter_mut() {
+            x = x.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            *b = (x >> 16) as u8;
+        }
+        for off in 0..4 {
+            for len in 0..=(64 * 5 + 63) {
+                let data = &buf[off..off + len];
+                let mut st_hw = IV;
+                let rest = sha256_compress_bytes(&mut st_hw, data);
+                assert_eq!(rest.len(), len % 64, "off={off} len={len}");
+                assert_eq!(rest, &data[len - len % 64..]);
+                let blocks: [[u8; 64]; 5] = core::array::from_fn(|i| {
+                    let mut blk = [0u8; 64];
+                    if 64 * (i + 1) <= len {
+                        blk.copy_from_slice(&data[64 * i..64 * (i + 1)]);
+                    }
+                    blk
+                });
+                let mut st_port = IV;
+                sha256_compress_blocks_portable(&mut st_port, &blocks[..len / 64]);
+                assert_eq!(st_hw, st_port, "off={off} len={len}");
+            }
+        }
+    }
+
+    #[test]
+    fn two_block_nist_vector_through_the_dispatched_compressor() {
+        // FIPS 180-4 example: "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq".
+        let msg = b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+        let mut padded = [0u8; 128];
+        padded[..msg.len()].copy_from_slice(msg);
+        padded[msg.len()] = 0x80;
+        padded[120..].copy_from_slice(&((msg.len() as u64) * 8).to_be_bytes());
+        let mut st = IV;
+        assert!(sha256_compress_bytes(&mut st, &padded).is_empty());
+        assert_eq!(
+            st,
+            [
+                0x248d6a61, 0xd20638b8, 0xe5c02693, 0x0c3e6039, 0xa33ce459, 0x64ff2167, 0xf6ecedd4,
+                0x19db06c1,
+            ]
+        );
+    }
+}

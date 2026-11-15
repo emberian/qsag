@@ -3,6 +3,7 @@ name = "qsag-quorum"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 description = "Generalized (t, n) quorum-switching Jorts protocols and isolated per-party wire-framed MPC nodes."
 
 [dependencies]
@@ -22,3 +23,4 @@ required-features = ["std", "testing-ephemeral"]
 
 [dev-dependencies]
 qsag-core = { path = "../qsag-core", features = ["testing-ephemeral"] }
+qsag-agg = { path = "../qsag-agg", features = ["std"] }

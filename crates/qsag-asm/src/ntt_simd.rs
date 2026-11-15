@@ -1075,3 +1075,111 @@ mod x86_simd {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const Q: u64 = MLDSA_Q as u64;
+
+    fn pow_mod(mut base: u64, mut exp: u64) -> u64 {
+        let mut acc = 1u64;
+        base %= Q;
+        while exp > 0 {
+            if exp & 1 == 1 {
+                acc = acc * base % Q;
+            }
+            base = base * base % Q;
+            exp >>= 1;
+        }
+        acc
+    }
+
+    /// FIPS 204 section 7.5 definition: `NTT(w)[i] = w(zeta^(2 * BitRev8(i) + 1))`.
+    fn ntt_by_definition(a: &[u32; MLDSA_N]) -> [u32; MLDSA_N] {
+        core::array::from_fn(|i| {
+            let x = pow_mod(MLDSA_ZETA as u64, 2 * bitrev8(i as u8) as u64 + 1);
+            let mut acc = 0u64;
+            let mut xp = 1u64;
+            for &c in a {
+                acc = (acc + c as u64 * xp) % Q;
+                xp = xp * x % Q;
+            }
+            acc as u32
+        })
+    }
+
+    fn backends() -> [SimdBackend; 4] {
+        [
+            SimdBackend::Portable,
+            SimdBackend::X86Avx2Pclmul,
+            SimdBackend::X86Avx512GfniVpclmul,
+            SimdBackend::Aarch64NeonSha3Pmull,
+        ]
+    }
+
+    /// Inputs that drive the lazy (unreduced) butterfly sums to their extremes: all-`q-1` makes
+    /// every `InvNTT` sum path reach `64 (q - 1)` before the `len = 32` reduction.
+    fn extreme_inputs() -> [[u32; MLDSA_N]; 9] {
+        let qm1 = MLDSA_Q - 1;
+        let mut state = 0x2018_0039_8380_417u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        [
+            [0; MLDSA_N],
+            [qm1; MLDSA_N],
+            core::array::from_fn(|i| if i % 2 == 0 { qm1 } else { 0 }),
+            core::array::from_fn(|i| if i < 128 { qm1 } else { 0 }),
+            core::array::from_fn(|i| if i == 255 { qm1 } else { 0 }),
+            core::array::from_fn(|i| if i == 0 { 1 } else { 0 }),
+            core::array::from_fn(|i| (MLDSA_Q / 2 + (i as u32 & 1)) % MLDSA_Q),
+            core::array::from_fn(|_| if next() & 1 == 0 { qm1 } else { 1 }),
+            core::array::from_fn(|_| (next() % Q) as u32),
+        ]
+    }
+
+    #[test]
+    fn forward_ntt_matches_fips204_definition_on_extreme_inputs_for_every_backend() {
+        for (n, input) in extreme_inputs().iter().enumerate() {
+            let expected = ntt_by_definition(input);
+            for backend in backends() {
+                let mut got = *input;
+                mldsa_ntt_with_backend(&mut got, backend);
+                assert_eq!(got, expected, "input #{n} backend={backend:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn inverse_ntt_inverts_the_definition_on_extreme_inputs_for_every_backend() {
+        for (n, input) in extreme_inputs().iter().enumerate() {
+            // `input` is read as an NTT-domain vector: maximal lazy growth in `InvNTT`.
+            for backend in backends() {
+                let mut time = *input;
+                mldsa_inv_ntt_with_backend(&mut time, backend);
+                assert!(time.iter().all(|&c| c < MLDSA_Q), "non-canonical #{n} {backend:?}");
+                assert_eq!(ntt_by_definition(&time), *input, "input #{n} backend={backend:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn pointwise_mul_is_canonical_product_on_extreme_inputs_for_every_backend() {
+        let inputs = extreme_inputs();
+        for lhs in &inputs {
+            for rhs in &inputs {
+                let expected: [u32; MLDSA_N] =
+                    core::array::from_fn(|i| (lhs[i] as u64 * rhs[i] as u64 % Q) as u32);
+                for backend in backends() {
+                    let mut got = [0xFFFF_FFFFu32; MLDSA_N];
+                    mldsa_pointwise_mul_with_backend(&mut got, lhs, rhs, backend);
+                    assert_eq!(got, expected, "backend={backend:?}");
+                }
+            }
+        }
+    }
+}

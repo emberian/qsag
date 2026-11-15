@@ -1023,7 +1023,7 @@ pub fn goldilocks_mul_ct_with_backend(a: u64, b: u64, backend: SimdBackend) -> u
         }
     }
     let _ = backend;
-    portable::goldilocks_mul_ct_portable(a, b)
+    portable::goldilocks_mul_ct_runtime(a, b)
 }
 
 /// Zero-branch constant-time Goldilocks modular addition `(a + b) mod p` (`[0, u64::MAX]^2`).

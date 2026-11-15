@@ -1393,6 +1393,18 @@ impl VulkanSpirvBackend {
         col_src_ext4: u32,
         out_cols: &mut [[u64; 4]],
     ) -> Result<(), VulkanError> {
+        self.prover_air_read_tail(col_src_ext4, 0, out_cols, &mut [])
+    }
+
+    /// Read back folded `Ext4` columns (`256 * cur_m`) and shift tables (`3 * cur_m`) in one DMA
+    /// to complete the L2/L3-cache-resident merged-opcode tail of AIR row sumcheck on CPU.
+    pub fn prover_air_read_tail(
+        &self,
+        col_src_ext4: u32,
+        sh_src_ext4: u32,
+        out_cols: &mut [[u64; 4]],
+        out_shifts: &mut [[u64; 4]],
+    ) -> Result<(), VulkanError> {
         #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
         {
             self.check_prover_session_active()?;
@@ -1400,13 +1412,13 @@ impl VulkanSpirvBackend {
                 .engine
                 .lock()
                 .map_err(|_| VulkanError::WorkspacePoisoned)?;
-            guard.exec_prover_air_read_folded_cols(col_src_ext4, out_cols)?;
+            guard.exec_prover_air_read_tail(col_src_ext4, sh_src_ext4, out_cols, out_shifts)?;
             self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
         #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
         {
-            let _ = (col_src_ext4, out_cols);
+            let _ = (col_src_ext4, sh_src_ext4, out_cols, out_shifts);
             match self._uninhabited {}
         }
     }

@@ -20,7 +20,10 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
-rust-version = "1.85"
+authors = ["ember arlynx <ember@lunar.town>"]
+repository = "https://github.com/emberian/qsag"
+# Verified compiler baseline; rust-toolchain.toml pins the same release.
+rust-version = "1.99.1"
 
 [profile.dev]
 opt-level = 1

@@ -52,12 +52,19 @@ impl Drop for SpendingScalar {
 }
 impl SpendingScalar {
     pub fn from_le_bytes(mut bytes: [u8; 32], group: ScalarGroup) -> Option<Self> {
-        let limbs = decode(&bytes);
+        let mut candidate = Self {
+            bytes: [0u8; 32],
+            group,
+        };
+        candidate.bytes.copy_from_slice(&bytes);
+        ct_zeroize_bytes(&mut bytes);
+        let mut limbs = decode(&candidate.bytes);
         let valid = less(limbs, group.order()) & (limbs.iter().fold(0, |a, &b| a | b) != 0);
+        ct_zeroize_u64s(&mut limbs);
         if valid {
-            Some(Self { bytes, group })
+            Some(candidate)
         } else {
-            ct_zeroize_bytes(&mut bytes);
+            drop(candidate);
             None
         }
     }

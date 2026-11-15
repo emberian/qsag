@@ -303,8 +303,11 @@ impl ShardBatchProof {
         pos += 1;
         let count_bytes = bytes.get(pos..pos.checked_add(4 * num_shards)?)?;
         let shard_signer_counts: Vec<u32> = count_bytes
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .copied()
+            .map(u32::from_le_bytes)
             .collect();
         pos += 4 * num_shards;
         let shape = batch_shape(profile, &shard_signer_counts, bitmap.count_ones())?;
@@ -624,6 +627,29 @@ fn resolve_batch_statement(
         let (_, mu) = compute_message_mu(&pk, msg);
         ShardSigner { pk, mu }
     };
+
+    #[cfg(feature = "std")]
+    if let SigningMode::SharedMessage(shared) = mode
+        && active_indices.len() >= 16
+        && crate::parallel_workers() > 1
+    {
+        let active_pks: alloc::sync::Arc<[ValidatorPublicKey]> = active_indices
+            .iter()
+            .map(|&idx| pks[idx])
+            .collect::<Vec<_>>()
+            .into();
+        let msg_arc: alloc::sync::Arc<[u8]> = (*shared).into();
+        let signers = crate::pool::map_indices(active_pks.len(), 8, move |pos| {
+            let pk = active_pks[pos];
+            let (_, mu) = compute_message_mu(&pk, &msg_arc);
+            ShardSigner { pk, mu }
+        });
+        return Some(BatchStatement {
+            shape,
+            signers,
+            signing_mode_digest,
+        });
+    }
 
     let signers = active_indices
         .iter()

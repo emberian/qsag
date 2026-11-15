@@ -34,6 +34,13 @@ open UPoly
 
 local instance : NoZeroDivisors E := LawfulField.toNoZeroDivisors E
 
+private theorem uPoly_natDeg_C {R : Type} [LawfulCommRing R] [DecidableEq R] (c : R) :
+    (C c : UPoly R).natDeg = 0 :=
+  Nat.le_zero.mp (natDeg_le_of_coeffAt _ 0 (fun k hk => by
+    cases k with
+    | zero => omega
+    | succ k => exact coeffAt_C_succ c k))
+
 /-! ## Clearing `E(Y)`-denominators and `Y`-primitive D5 splitting -/
 
 abbrev liftFY : RingHom (Poly2 E) (UPoly (RatFunc E)) := UPoly.mapHom (Frac.of (D := UPoly E))
@@ -119,7 +126,7 @@ private theorem primY_assoc_of_scalar_eq {A B : Poly2 E} (hA : IsPrimY A) (hB : 
     rw [coeffAt_C_mul, coeffAt_C_mul] at hk
     have h1 : coeffAt B.coeffs k = mul (add (mul u0 c') (mul v0 d')) (coeffAt B.coeffs k) := by
       rw [huv1, LawfulCommRing.one_mul]
-    rw [h1]
+    conv => lhs; rw [h1]
     have h2 : mul (add (mul u0 c') (mul v0 d')) (coeffAt B.coeffs k) =
         add (mul (mul c' u0) (coeffAt B.coeffs k)) (mul v0 (mul d' (coeffAt B.coeffs k))) := by
       constructive_ring
@@ -130,7 +137,7 @@ private theorem primY_assoc_of_scalar_eq {A B : Poly2 E} (hA : IsPrimY A) (hB : 
     rw [coeffAt_C_mul, coeffAt_C_mul] at hk
     have h1 : coeffAt A.coeffs k = mul (add (mul u0 c') (mul v0 d')) (coeffAt A.coeffs k) := by
       rw [huv1, LawfulCommRing.one_mul]
-    rw [h1]
+    conv => lhs; rw [h1]
     have h2 : mul (add (mul u0 c') (mul v0 d')) (coeffAt A.coeffs k) =
         add (mul u0 (mul c' (coeffAt A.coeffs k))) (mul (mul d' v0) (coeffAt A.coeffs k)) := by
       constructive_ring
@@ -155,7 +162,7 @@ private theorem primY_assoc_of_scalar_eq {A B : Poly2 E} (hA : IsPrimY A) (hB : 
   apply mul_right_cancel' (Poly2.C_ne_zero hc'Ne)
   have hL : mul A (C c') = mul (C c') A := LawfulCommRing.mul_comm _ _
   have hR : mul (mul (C (C e)) B) (C c') = mul (C (mul c' (C e))) B := by
-    rw [← C_mul_eq]; constructive_ring
+    rw [← C_mul_eq c' (C e)]; constructive_ring
   rw [hL, hR, hc'd', hEq']
 
 /-- **Gauss divisibility descent (`primY_dvd_of_dvd_FY`)**: if `P` is `Y`-primitive and divides
@@ -183,20 +190,22 @@ theorem primY_dvd_of_dvd_FY {P G : Poly2 E} (hP : IsPrimY P)
     have hScalar : mul (C (mul d (contY G))) (primY G) =
         mul (C (contY T0)) (mul P (primY T0)) := by
       have h1 : mul (C (mul d (contY G))) (primY G) = mul (C d) (mul (C (contY G)) (primY G)) := by
-        rw [← C_mul_eq, LawfulCommRing.mul_assoc]
-      have h2 : mul (C (contY T0)) (mul P (primY T0)) = mul P (mul (C (contY T0)) (primY T0)) := by
+        rw [← C_mul_eq d (contY G), LawfulCommRing.mul_assoc]
+      have h2 : mul P (mul (C (contY T0)) (primY T0)) = mul (C (contY T0)) (mul P (primY T0)) := by
         constructive_ring
-      rw [h1, ← hGdecomp, hEqP, ← h2, ← hTdecomp]
+      rw [h1, ← hGdecomp, hEqP]
+      conv => lhs; rw [hTdecomp]
+      exact h2
     obtain ⟨e, _, heEq, _⟩ := primY_assoc_of_scalar_eq hGp (isPrimY_mul hP hTp)
       (mul_ne_zero' hd hcG) hcT hScalar
     refine ⟨mul (C (contY G)) (mul (C (C e)) (primY T0)), ?_⟩
-    rw [hGdecomp, heEq]; constructive_ring
+    conv => lhs; rw [hGdecomp]
+    rw [heEq]; constructive_ring
 
 /-- **Primitive D5 splitting step (`d5_split_prim`)**: testing `G : Poly2 E` against a `Y`-primitive
-    modulus `P : Poly2 E` (`1 ≤ P.natDeg`) either finds `Q` with `G = mul P Q`, certifies
-    `CoprimeZ P G`, or splits `P = mul P₁ P₂` into two `Y`-primitive positive-`Z`-degree factors
-    with `G = mul P₁ Q`. -/
-theorem d5_split_prim (P G : Poly2 E) (hP : IsPrimY P) (_hPdeg : 1 ≤ P.natDeg) :
+    modulus `P : Poly2 E` either finds `Q` with `G = mul P Q`, certifies `CoprimeZ P G`, or splits
+    `P = mul P₁ P₂` into two `Y`-primitive positive-`Z`-degree factors with `G = mul P₁ Q`. -/
+theorem d5_split_prim (P G : Poly2 E) (hP : IsPrimY P) :
     (∃ Q : Poly2 E, G = mul P Q) ∨ CoprimeZ P G ∨
       ∃ P₁ P₂ : Poly2 E, IsPrimY P₁ ∧ IsPrimY P₂ ∧ 1 ≤ P₁.natDeg ∧ 1 ≤ P₂.natDeg ∧
         P = mul P₁ P₂ ∧ tdeg P₁ + tdeg P₂ = tdeg P ∧ (∃ Q : Poly2 E, G = mul P₁ Q) := by
@@ -252,7 +261,9 @@ theorem d5_split_prim (P G : Poly2 E) (hP : IsPrimY P) (_hPdeg : 1 ≤ P.natDeg)
       LawfulCommRing.sub_eq_zero_iff.mp (liftFY_inj _ (by rw [RingHom.map_sub, hEqFY, LawfulCommRing.sub_self]))
     have hScalar : mul (C (mul dg dq)) P =
         mul (C (mul (contY G0) (contY Q0))) (mul (primY G0) (primY Q0)) := by
-      rw [hEqP, hG0d, hQ0d, ← C_mul_eq]; constructive_ring
+      rw [hEqP]
+      conv => lhs; rw [hG0d]; rw [hQ0d]
+      rw [← C_mul_eq (contY G0) (contY Q0)]; constructive_ring
     obtain ⟨e, heNe, heEq, _⟩ := primY_assoc_of_scalar_eq hP (isPrimY_mul hG0p hQ0p)
       (mul_ne_zero' hdg hdq) (mul_ne_zero' hcG0 hcQ0) hScalar
     let P₁ := mul (C (C e)) (primY G0)
@@ -279,7 +290,7 @@ theorem d5_split_prim (P G : Poly2 E) (hP : IsPrimY P) (_hPdeg : 1 ≤ P.natDeg)
       change (liftFY.toFun G0).natDeg = G0.natDeg at hd2
       rw [← hG0, UPoly.natDeg_mul hCdg
         (fun e0 => by rw [e0] at hgPos; exact Nat.not_succ_le_zero 0 hgPos),
-        natDeg_C_eq_zero, Nat.zero_add] at hd2
+        uPoly_natDeg_C, Nat.zero_add] at hd2
       omega
     have hP₂deg : 1 ≤ P₂.natDeg := by
       dsimp [P₂]; rw [hQ0deg]
@@ -287,7 +298,7 @@ theorem d5_split_prim (P G : Poly2 E) (hP : IsPrimY P) (_hPdeg : 1 ≤ P.natDeg)
       change (liftFY.toFun Q0).natDeg = Q0.natDeg at hd2
       rw [← hQ0, UPoly.natDeg_mul hCdq
         (fun e0 => by rw [e0] at hqPos; exact Nat.not_succ_le_zero 0 hqPos),
-        natDeg_C_eq_zero, Nat.zero_add] at hd2
+        uPoly_natDeg_C, Nat.zero_add] at hd2
       omega
     have hPMul : P = mul P₁ P₂ := by
       rw [heEq]; dsimp [P₁, P₂]; exact (LawfulCommRing.mul_assoc _ _ _).symm
@@ -302,93 +313,112 @@ theorem d5_split_prim (P G : Poly2 E) (hP : IsPrimY P) (_hPdeg : 1 ≤ P.natDeg)
       have hP₁FY : liftFY.toFun P₁ = mul (C se) (liftFY.toFun (primY G0)) := by
         dsimp [P₁, se]; rw [RingHom.map_mul, mapHom_C]
       have hG0FY : mul (C sd) g = mul (C s0) (liftFY.toFun (primY G0)) := by
-        dsimp [sd, s0]; rw [hG0, hG0d, RingHom.map_mul, mapHom_C]
+        change mul (C ((Frac.of (D := UPoly E)).toFun dg)) g = _
+        rw [hG0]
+        conv => lhs; rw [hG0d]
+        rw [RingHom.map_mul, mapHom_C]
       have hgRel : g = mul (liftFY.toFun P₁) (C (mul (LawfulField.inv sd) (mul s0 (LawfulField.inv se)))) := by
         apply mul_right_cancel' hCdg
         have hL : mul g (C sd) = mul (C sd) g := LawfulCommRing.mul_comm _ _
-        rw [hL, hG0FY, hP₁FY, ← C_mul_eq]
+        change mul g (C sd) = mul (mul (liftFY.toFun P₁) _) (C sd)
+        rw [hL, hG0FY, hP₁FY]
         have hSc : mul se (mul (mul (LawfulField.inv sd) (mul s0 (LawfulField.inv se))) sd) = s0 := by
           have : mul se (mul (mul (LawfulField.inv sd) (mul s0 (LawfulField.inv se))) sd) =
               mul (mul se (LawfulField.inv se)) (mul (mul sd (LawfulField.inv sd)) s0) := by
             constructive_ring
           rw [this, LawfulField.mul_inv_cancel hseNe, LawfulField.mul_inv_cancel hsdNe,
             LawfulCommRing.one_mul, LawfulCommRing.one_mul]
-        have hAssoc : mul (mul (C se) (liftFY.toFun (primY G0)))
-            (mul (C (mul (LawfulField.inv sd) (mul s0 (LawfulField.inv se)))) (C sd)) =
+        have hAssoc : mul (mul (mul (C se) (liftFY.toFun (primY G0)))
+            (C (mul (LawfulField.inv sd) (mul s0 (LawfulField.inv se))))) (C sd) =
             mul (C (mul se (mul (mul (LawfulField.inv sd) (mul s0 (LawfulField.inv se))) sd)))
               (liftFY.toFun (primY G0)) := by
-          rw [C_mul_eq, ← C_mul_eq se]; constructive_ring
-        rw [LawfulCommRing.mul_assoc, hAssoc, hSc]
+          rw [LawfulCommRing.mul_assoc,
+            C_mul_eq (mul (LawfulField.inv sd) (mul s0 (LawfulField.inv se))) sd,
+            ← C_mul_eq se]
+          constructive_ring
+        rw [hAssoc, hSc]
       rw [ht, hgRel, LawfulCommRing.mul_assoc]
     exact .inr (.inr ⟨P₁, P₂, hP₁Prim, hQ0p, hP₁deg, hP₂deg, hPMul,
       (tdeg_mul hP₁Ne hQ0p.1).symm.trans (congrArg tdeg hPMul.symm), hP₁DvdG⟩)
 
 /-! ## Iterated factor refinement against a list of test polynomials -/
 
+private theorem nat_sum_append : ∀ xs ys : List Nat, (xs ++ ys).sum = xs.sum + ys.sum
+  | [], ys => by show ys.sum = 0 + ys.sum; rw [Nat.zero_add]
+  | x :: tl, ys => by
+    show x + (tl ++ ys).sum = (x + tl.sum) + ys.sum
+    rw [nat_sum_append tl ys, Nat.add_assoc]
+
+private theorem mem_append_or {α : Type} {x : α} :
+    ∀ {xs ys : List α}, x ∈ xs ++ ys → x ∈ xs ∨ x ∈ ys
+  | [], _, h => .inr h
+  | _ :: _, _, .head _ => .inl (.head _)
+  | _ :: tl, _, .tail _ h => (mem_append_or h).elim (fun hx => .inl (.tail _ hx)) .inr
+
+private theorem dvd_prodList_of_mem {F : Poly2 E} :
+    ∀ Fs : List (Poly2 E), F ∈ Fs → ∃ R, UPoly.prodList Fs = mul F R
+  | [], hm => nomatch hm
+  | _ :: Xtl, .head _ => ⟨UPoly.prodList Xtl, rfl⟩
+  | X :: Xtl, .tail _ hmtl => by
+    obtain ⟨R, hR⟩ := dvd_prodList_of_mem Xtl hmtl
+    exact ⟨mul X R, by show mul X (UPoly.prodList Xtl) = _; rw [hR]; constructive_ring⟩
+
+private theorem prodList_append :
+    ∀ xs ys : List (Poly2 E),
+      UPoly.prodList (xs ++ ys) = mul (UPoly.prodList xs) (UPoly.prodList ys)
+  | [], ys => by show UPoly.prodList ys = mul one (UPoly.prodList ys); rw [LawfulCommRing.one_mul]
+  | x :: xtl, ys => by
+    show mul x (UPoly.prodList (xtl ++ ys)) = mul (mul x (UPoly.prodList xtl)) (UPoly.prodList ys)
+    rw [prodList_append xtl ys, LawfulCommRing.mul_assoc]
+
 private theorem split_single_against_list :
-    ∀ (Gs : List (Poly2 E)) (fuel : Nat) (P : Poly2 E),
+    ∀ (fuel : Nat) (Gs0 : List (Poly2 E)) (P : Poly2 E),
       P.natDeg ≤ fuel → IsPrimY P → 1 ≤ P.natDeg →
       ∃ Ps : List (Poly2 E),
         P = UPoly.prodList Ps ∧
         (Ps.map tdeg).sum = tdeg P ∧
         (∀ F ∈ Ps, IsPrimY F ∧ 1 ≤ F.natDeg) ∧
-        (∀ F ∈ Ps, ∀ G ∈ Gs, (∃ Q, G = mul F Q) ∨ CoprimeZ F G)
-  | [], _, P, _, hP, hDeg =>
-    ⟨[P], (LawfulCommRing.mul_one P).symm, by simp,
-      fun F hF => by rw [List.mem_singleton.mp hF]; exact ⟨hP, hDeg⟩,
-      fun _ _ _ hG => nomatch hG⟩
-  | _ :: _, 0, P, hFuel, _, hDeg => absurd (Nat.le_trans hDeg hFuel) (Nat.not_succ_le_zero 0)
-  | G :: tl, fuel + 1, P, hFuel, hP, hDeg => by
-    rcases d5_split_prim P G hP hDeg with ⟨Q, hQ⟩ | hCop |
-      ⟨P₁, P₂, hP₁, hP₂, hDeg₁, hDeg₂, hMul, hTdeg, _⟩
-    · obtain ⟨Ps, hProd, hSum, hValid, hTl⟩ :=
-        split_single_against_list tl (fuel + 1) P hFuel hP hDeg
-      refine ⟨Ps, hProd, hSum, hValid, fun F hF G' hG' => ?_⟩
-      rcases List.mem_cons.mp hG' with rfl | hGtl
-      · have hFdivP : ∀ Fs : List (Poly2 E), F ∈ Fs → ∃ R, UPoly.prodList Fs = mul F R := by
-          intro Fs; induction Fs with
-          | nil => intro hm; nomatch hm
-          | cons X Xtl ih =>
-            intro hm; rcases List.mem_cons.mp hm with rfl | hmtl
-            · exact ⟨UPoly.prodList Xtl, rfl⟩
-            · obtain ⟨R, hR⟩ := ih hmtl
-              exact ⟨mul X R, by show mul X (UPoly.prodList Xtl) = _; rw [hR]; constructive_ring⟩
-        obtain ⟨R, hR⟩ := hFdivP Ps hF
-        exact .inl ⟨mul R Q, by rw [hQ, hProd, hR, LawfulCommRing.mul_assoc]⟩
-      · exact hTl F hF G' hGtl
-    · obtain ⟨Ps, hProd, hSum, hValid, hTl⟩ :=
-        split_single_against_list tl (fuel + 1) P hFuel hP hDeg
-      refine ⟨Ps, hProd, hSum, hValid, fun F hF G' hG' => ?_⟩
-      rcases List.mem_cons.mp hG' with rfl | hGtl
-      · obtain ⟨u0, v0, c, hc, hbez⟩ := hCop
-        have hFdivP : ∀ Fs : List (Poly2 E), F ∈ Fs → ∃ R, UPoly.prodList Fs = mul F R := by
-          intro Fs; induction Fs with
-          | nil => intro hm; nomatch hm
-          | cons X Xtl ih =>
-            intro hm; rcases List.mem_cons.mp hm with rfl | hmtl
-            · exact ⟨UPoly.prodList Xtl, rfl⟩
-            · obtain ⟨R, hR⟩ := ih hmtl
-              exact ⟨mul X R, by show mul X (UPoly.prodList Xtl) = _; rw [hR]; constructive_ring⟩
-        obtain ⟨R, hR⟩ := hFdivP Ps hF
-        exact .inr ⟨mul u0 R, v0, c, hc, by rw [← hbez, hProd, hR]; constructive_ring⟩
-      · exact hTl F hF G' hGtl
-    · have hDegSum : P.natDeg = P₁.natDeg + P₂.natDeg := by
-        rw [hMul]; exact UPoly.natDeg_mul hP₁.1 hP₂.1
-      obtain ⟨Ps₁, hProd₁, hSum₁, hValid₁, hAll₁⟩ :=
-        split_single_against_list (G :: tl) fuel P₁ (by omega) hP₁ hDeg₁
-      obtain ⟨Ps₂, hProd₂, hSum₂, hValid₂, hAll₂⟩ :=
-        split_single_against_list (G :: tl) fuel P₂ (by omega) hP₂ hDeg₂
-      have hProdApp : ∀ xs ys : List (Poly2 E),
-          UPoly.prodList (xs ++ ys) = mul (UPoly.prodList xs) (UPoly.prodList ys) := by
-        intro xs ys; induction xs with
-        | nil => show UPoly.prodList ys = mul one (UPoly.prodList ys); rw [LawfulCommRing.one_mul]
-        | cons x xtl ih =>
-          show mul x (UPoly.prodList (xtl ++ ys)) = mul (mul x (UPoly.prodList xtl)) (UPoly.prodList ys)
-          rw [ih, LawfulCommRing.mul_assoc]
-      refine ⟨Ps₁ ++ Ps₂, by rw [hMul, hProd₁, hProd₂, ← hProdApp],
-        by rw [List.map_append, List.sum_append, hSum₁, hSum₂, hTdeg],
-        fun F hF => (List.mem_append.mp hF).elim (hValid₁ F) (hValid₂ F),
-        fun F hF => (List.mem_append.mp hF).elim (hAll₁ F) (hAll₂ F)⟩
+        (∀ F ∈ Ps, ∀ G ∈ Gs0, (∃ Q, G = mul F Q) ∨ CoprimeZ F G) := by
+  intro fuel
+  induction fuel with
+  | zero =>
+    intro _ P hFuel _ hDeg
+    exact absurd (Nat.le_trans hDeg hFuel) (Nat.not_succ_le_zero 0)
+  | succ fuel ihFuel =>
+    intro Gs0 P hFuel hP hDeg
+    induction Gs0 with
+    | nil =>
+      exact ⟨[P], (LawfulCommRing.mul_one P).symm, Nat.add_zero (tdeg P),
+        (fun (F : Poly2 E) (hF : F ∈ [P]) => by
+          have hEq : F = P := List.mem_singleton.mp hF
+          rw [hEq]; exact ⟨hP, hDeg⟩),
+        fun _ _ _ hG => False.elim (List.not_mem_nil hG)⟩
+    | cons G tl ihTl =>
+      rcases d5_split_prim P G hP with ⟨Q, hQ⟩ | hCop |
+        ⟨P₁, P₂, hP₁, hP₂, hDeg₁, hDeg₂, hMul, hTdeg, _⟩
+      · obtain ⟨Ps, hProd, hSum, hValid, hTl⟩ := ihTl
+        refine ⟨Ps, hProd, hSum, hValid, fun F hF G' hG' => ?_⟩
+        rcases List.mem_cons.mp hG' with hEq | hGtl
+        · obtain ⟨R, hR⟩ := dvd_prodList_of_mem Ps hF
+          exact .inl ⟨mul R Q, by rw [hEq, hQ, hProd, hR, LawfulCommRing.mul_assoc]⟩
+        · exact hTl F hF G' hGtl
+      · obtain ⟨Ps, hProd, hSum, hValid, hTl⟩ := ihTl
+        refine ⟨Ps, hProd, hSum, hValid, fun F hF G' hG' => ?_⟩
+        rcases List.mem_cons.mp hG' with hEq | hGtl
+        · obtain ⟨u0, v0, c, hc, hbez⟩ := hCop
+          obtain ⟨R, hR⟩ := dvd_prodList_of_mem Ps hF
+          exact .inr ⟨mul u0 R, v0, c, hc, by rw [hEq, ← hbez, hProd, hR]; constructive_ring⟩
+        · exact hTl F hF G' hGtl
+      · have hDegSum : P.natDeg = P₁.natDeg + P₂.natDeg := by
+          rw [hMul]; exact UPoly.natDeg_mul hP₁.1 hP₂.1
+        obtain ⟨Ps₁, hProd₁, hSum₁, hValid₁, hAll₁⟩ :=
+          ihFuel (G :: tl) P₁ (by omega) hP₁ hDeg₁
+        obtain ⟨Ps₂, hProd₂, hSum₂, hValid₂, hAll₂⟩ :=
+          ihFuel (G :: tl) P₂ (by omega) hP₂ hDeg₂
+        refine ⟨Ps₁ ++ Ps₂, by rw [hMul, hProd₁, hProd₂, ← prodList_append],
+          by rw [List.map_append, nat_sum_append, hSum₁, hSum₂, hTdeg],
+          fun F hF => (mem_append_or hF).elim (hValid₁ F) (hValid₂ F),
+          fun F hF => (mem_append_or hF).elim (hAll₁ F) (hAll₂ F)⟩
 
 /-- **Iterated `Y`-primitive factor refinement (`splitAgainstList`)**. -/
 theorem splitAgainstList (P : Poly2 E) (Gs : List (Poly2 E)) (hP : IsPrimY P) (hDeg : 1 ≤ P.natDeg) :
@@ -397,7 +427,7 @@ theorem splitAgainstList (P : Poly2 E) (Gs : List (Poly2 E)) (hP : IsPrimY P) (h
       (Ps.map tdeg).sum = tdeg P ∧
       (∀ F ∈ Ps, IsPrimY F ∧ 1 ≤ F.natDeg) ∧
       (∀ F ∈ Ps, ∀ G ∈ Gs, (∃ Q, G = mul F Q) ∨ CoprimeZ F G) :=
-  split_single_against_list Gs P.natDeg P (Nat.le_refl _) hP hDeg
+  split_single_against_list P.natDeg Gs P (Nat.le_refl _) hP hDeg
 
 /-! ## Variable swap `(V, Z) ↔ (Z, V)` and coprimality from one `V`-coefficient -/
 
@@ -425,25 +455,37 @@ theorem c2_swapVZ (A : Poly2 E) (j k : Nat) :
     | cons q tl ih =>
       intro j k
       show c2 (add (innerHom.toFun q) (mul (C X) (evalCoeffs _ (C X)))) j k = _
-      rw [c2_add, c2_innerHom_eval q.coeffs j k]
+      have hq : c2 (innerHom.toFun q) j k = if j = 0 then coeffAt q.coeffs k else zero :=
+        c2_innerHom_eval q.coeffs j k
+      rw [c2_add, hq]
       cases j with
       | zero =>
         rw [c2_CX_mul_zero, LawfulCommRing.add_zero]
         rfl
       | succ j =>
         rw [c2_CX_mul_succ, ih j k]
-        simp [LawfulCommRing.zero_add]
+        simp only [Nat.succ_ne_zero, ↓reduceIte, LawfulCommRing.zero_add, coeffAt_cons_succ]
   exact h A.coeffs j k
 
 private theorem swapVZ_constZ (p : UPoly E) :
     swapVZ.toFun ((UPoly.mapHom CHom).toFun p) = C p := by
-  unfold swapVZ
-  show eval₂ innerHom (C X) ((UPoly.mapHom CHom).toFun p) = C p
-  rw [eval₂_mapHom]
-  have hComp : ∀ e : E, (innerHom.comp (CHom (R := E))).toFun e = (CHom.comp CHom).toFun e :=
-    fun e => eval₂_C (CHom.comp CHom) X e
-  rw [eval₂_congr _ _ hComp (C X) p, ← hom_eval₂ CHom CHom X p, evalCoeffs_C_X]
-  rfl
+  have h : ∀ cs : List E,
+      swapVZ.toFun (ofList (cs.map (CHom (R := E)).toFun)) = C (ofList cs) := by
+    intro cs; induction cs with
+    | nil =>
+      show swapVZ.toFun zero = C zero
+      rw [RingHom.map_zero, C_zero_eq]
+    | cons c tl ih =>
+      rw [List.map_cons, ofList_cons, ofList_cons, RingHom.map_add, RingHom.map_mul, ih]
+      have hX : swapVZ.toFun (X : Poly2 E) = C X := eval₂_X innerHom (C X)
+      have hC : swapVZ.toFun (C (C c) : Poly2 E) = C (C c) := by
+        show eval₂ innerHom (C X) (C (C c)) = C (C c)
+        rw [eval₂_C]
+        exact eval₂_C (CHom.comp CHom) X c
+      change add (swapVZ.toFun (C (C c))) (mul (swapVZ.toFun X) (C (ofList tl))) = _
+      rw [hC, hX, C_mul_eq]
+      exact (CHom.map_add (C c) (mul X (ofList tl))).symm
+  rw [mapHom_apply, h, ofList_coeffs]
 
 /-- If `p ∈ E[Z]` (`1 ≤ p.natDeg`) is coprime in `E[Z]` to at least one `V`-coefficient `vCoeff A k₀`
     of `A(V, Z) ∈ (E[V])[Z]`, then `mapHom CHom p` is `CoprimeZ` to `A` in `Poly2 E`. -/
@@ -461,11 +503,14 @@ theorem coprimeZ_const_of_vCoeff (p : UPoly E) (A : Poly2 E) (hpDeg : 1 ≤ p.na
     obtain ⟨q, hq⟩ := hg p.natDeg
     dsimp [P] at hq
     rw [coeffAt_mapHom, CHom_apply] at hq
-    have hClNe : (C p.lead : UPoly E) ≠ zero := fun e => lead_ne_zero hpNe (hCHomInj p.lead e)
+    let ld := coeffAt p.coeffs p.natDeg
+    change C ld = mul g q at hq
+    have hldNe : ld ≠ zero := lead_ne_zero hpNe
+    have hClNe : (C ld : UPoly E) ≠ zero := fun e => hldNe (hCHomInj ld e)
     have hg0 : g ≠ zero := fun e => hClNe (by rw [hq, e, LawfulCommRing.zero_mul])
     have hq0 : q ≠ zero := fun e => hClNe (by rw [hq, e, LawfulCommRing.mul_zero])
     have hd := UPoly.natDeg_mul hg0 hq0
-    rw [← hq, natDeg_C_eq_zero] at hd; omega⟩
+    rw [← hq, uPoly_natDeg_C] at hd; omega⟩
   have hNoCommonConstFactor : ∀ g1 : UPoly E, 1 ≤ g1.natDeg →
       (∃ q1, p = mul g1 q1) → (∃ Q : Poly2 E, A = mul ((UPoly.mapHom CHom).toFun g1) Q) → False := by
     rintro g1 hg1Deg ⟨q1, hq1⟩ ⟨Q, hQ⟩
@@ -481,7 +526,7 @@ theorem coprimeZ_const_of_vCoeff (p : UPoly E) (A : Poly2 E) (hpDeg : 1 ≤ p.na
       NontrivialRing.one_ne_zero (by rw [← hUnit, e, LawfulCommRing.mul_zero])
     have hd := UPoly.natDeg_mul hg1Ne hwNe
     rw [hUnit, natDeg_one] at hd; omega
-  rcases d5_split_prim P A hPPrim (by omega) with ⟨Q, hQ⟩ | hCop |
+  rcases d5_split_prim P A hPPrim with ⟨Q, hQ⟩ | hCop |
     ⟨P₁, P₂, _, _, hDeg₁, _, hMul, _, hP₁DvdA⟩
   · exact absurd ⟨Q, hQ⟩ (hNoCommonConstFactor p hpDeg ⟨one, (LawfulCommRing.mul_one p).symm⟩)
   · exact hCop
@@ -542,15 +587,17 @@ open UPoly Poly2
 /-- Witness that `coprimeZ_const_of_vCoeff` is inhabited: `p(Z) = Z` and `A(V, Z) = V + Z`
     have `vCoeff A 1 = 1`, certifying `CoprimeZ (mapHom CHom X) (C X + X)`. -/
 theorem inhabited_coprimeZ_const_of_vCoeff :
-    ∃ (p : UPoly Goldilocks) (A : Poly2 Goldilocks),
-      1 ≤ p.natDeg ∧ vCoeff A 1 = one ∧ CoprimeZ ((UPoly.mapHom CHom).toFun p) A := by
+    ∃ (p : UPoly Goldilocks) (A : Poly2 Goldilocks) (k₀ : Nat) (u0 v0 : UPoly Goldilocks),
+      1 ≤ p.natDeg ∧
+      add (mul u0 p) (mul v0 (vCoeff A k₀)) = one ∧
+      CoprimeZ ((UPoly.mapHom CHom).toFun p) A := by
   let p : UPoly Goldilocks := X
   let A : Poly2 Goldilocks := add (C X) X
   have hp : 1 ≤ p.natDeg := by decide +kernel
   have hv1 : vCoeff A 1 = one := by decide +kernel
   have hbez : add (mul zero p) (mul one (vCoeff A 1)) = one := by
     rw [hv1, LawfulCommRing.zero_mul, LawfulCommRing.zero_add, LawfulCommRing.mul_one]
-  exact ⟨p, A, hp, hv1, coprimeZ_const_of_vCoeff p A hp 1 zero one hbez⟩
+  exact ⟨p, A, 1, zero, one, hp, hbez, coprimeZ_const_of_vCoeff p A hp 1 zero one hbez⟩
 
 /-- `#tooth`: without a coprime `V`-coefficient, `coprimeZ_const_of_vCoeff`'s conclusion fails:
     for `p(Z) = Z` and `A(V, Z) = V · Z` (`vCoeff A 1 = Z`, sharing root `0` with `p`),

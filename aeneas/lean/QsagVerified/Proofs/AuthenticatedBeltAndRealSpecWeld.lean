@@ -188,53 +188,9 @@ def extractedRssCutMachine :
     decisions, and equal post-states on both accepted and rejected steps. The relation is a
     function, so the simulation is lockstep. -/
 def extractedRssCut_forwardSim_mirRssCut :
-    Qsag.ForwardSim extractedRssCutMachine (comapInputs Qsag.mirRssCutMachine rssCutInputAbs) where
-  Rel c a := a = rssCutStateAbs c
-  sim_ok {c c' a inp out} hRel hStepC := by
-    subst hRel
-    have h := rssCut_extracted_step_refines c inp
-    dsimp only [extractedRssCutMachine, extractedPartyMachine, comapInputs] at hStepC ⊢
-    cases hf : rss_cut_session.RssCutGateSession.step c inp with
-    | ok p =>
-      rcases p with ⟨m1, r⟩
-      cases r with
-      | Ok o =>
-        rw [hf] at h hStepC
-        dsimp only at h hStepC
-        simp only [Option.some.injEq, Prod.mk.injEq] at hStepC
-        obtain ⟨rfl, rfl⟩ := hStepC
-        rw [h]
-        exact ⟨rfl, rfl⟩
-      | Err e =>
-        rw [hf] at hStepC
-        simp at hStepC
-    | fail e =>
-      rw [hf] at hStepC
-      simp at hStepC
-    | div =>
-      rw [hf] at hStepC
-      simp at hStepC
-  sim_err {c a inp} hRel hNoneC := by
-    subst hRel
-    have h := rssCut_extracted_step_refines c inp
-    dsimp only [extractedRssCutMachine, extractedPartyMachine, comapInputs] at hNoneC ⊢
-    cases hf : rss_cut_session.RssCutGateSession.step c inp with
-    | ok p =>
-      rcases p with ⟨m1, r⟩
-      cases r with
-      | Ok o =>
-        rw [hf] at hNoneC
-        simp at hNoneC
-      | Err e =>
-        rw [hf] at h
-        dsimp only at h
-        exact ⟨h.1, h.2⟩
-    | fail e =>
-      rw [hf] at h
-      exact False.elim h
-    | div =>
-      rw [hf] at h
-      exact False.elim h
+    Qsag.ForwardSim extractedRssCutMachine (comapInputs Qsag.mirRssCutMachine rssCutInputAbs) :=
+  ExtractedStepRefines.forwardSim (A := Qsag.mirRssCutMachine) (absSt := rssCutStateAbs)
+    (absIn := rssCutInputAbs) rssCut_extracted_step_refines
 
 /-- Any trace predicate that holds on every valid trace of the spec machine
     `Qsag.mirRssCutMachine` (read through the input encoding) holds on every multi-turn trace of the

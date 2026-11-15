@@ -71,7 +71,7 @@ const PALLAS_S_MINUS_1_HALF: [u64; 4] = [
     0x0000_0000_2000_0000,
 ];
 const PALLAS_ROOT_OF_UNITY: [u64; 4] = [
-    0xbda_d6fa_bd87_ea32f,
+    0xbdad_6fab_d87e_a32f,
     0xea32_2bf2_b7bb_7584,
     0x3621_2083_0561_f81a,
     0x2bce_74de_ac30_ebda,
@@ -473,7 +473,7 @@ impl FqPallas {
 }
 
 /// Homogeneous projective point `(X : Y : Z)` on Pallas `y^2 = x^3 + 5` (`O = (0 : 1 : 0)`).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PallasPoint {
     pub x: FpPallas,
     pub y: FpPallas,

@@ -2727,10 +2727,10 @@ theorem decoded_kernel_speculative_ni (bytes : List UInt8) (contract : FuncContr
 /-- The fixture index is checked against the symbol name below; absent symbols are not
     represented by an empty default stream in any theorem. -/
 def fixtureSpecBytes (i : Nat) : List UInt8 :=
-  ((x86ExtractedSlices[i]?).map (·.code)).getD []
+  ((currentX86ExtractedSlices[i]?).map (·.code)).getD []
 
 def fixtureSpecContract (i : Nat) : FuncContract :=
-  (x86SymbolContracts[i]?).getD (mkContract "missing" [] [] [])
+  (currentX86SymbolContracts[i]?).getD (mkContract "missing" [] [] [])
 
 def fixtureSpecProgram (i : Nat) : List (DecodedInstr Qsag.X86Instr) :=
   (decodeX86Stream (fixtureSpecBytes i)).getD []
@@ -2738,7 +2738,7 @@ def fixtureSpecProgram (i : Nat) : List (DecodedInstr Qsag.X86Instr) :=
 set_option maxRecDepth 65536 in
 set_option maxHeartbeats 8000000 in
  theorem ct_eq_32_rlib_speculation_certificate :
-    (x86ExtractedSlices[13]?).map (·.name) = some "qsag_asm_ct_eq_32_x86_64" ∧
+    (currentX86ExtractedSlices[13]?).map (·.name) = some "qsag_asm_ct_eq_32_x86_64" ∧
     decodeX86Stream (fixtureSpecBytes 13) = some (fixtureSpecProgram 13) ∧
     binaryNoConditionalBranches (fixtureSpecProgram 13) = true ∧
     checkX86ThreeWayNI (fixtureSpecBytes 13) (fixtureSpecContract 13) = true := by
@@ -2747,7 +2747,7 @@ set_option maxHeartbeats 8000000 in
 set_option maxRecDepth 65536 in
 set_option maxHeartbeats 8000000 in
  theorem goldilocks_mul_rlib_speculation_certificate :
-    (x86ExtractedSlices[8]?).map (·.name) = some "qsag_asm_goldilocks_mul_ct_x86_64" ∧
+    (currentX86ExtractedSlices[8]?).map (·.name) = some "qsag_asm_goldilocks_mul_ct_x86_64" ∧
     decodeX86Stream (fixtureSpecBytes 8) = some (fixtureSpecProgram 8) ∧
     binaryNoConditionalBranches (fixtureSpecProgram 8) = true ∧
     checkX86ThreeWayNI (fixtureSpecBytes 8) (fixtureSpecContract 8) = true := by

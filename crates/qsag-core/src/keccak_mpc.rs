@@ -2017,6 +2017,8 @@ pub struct RssSlhMpcCluster {
     pub party_rngs: [PartyPrivateRng; 3],
     batch_ctr: u64,
     pending_dzk: RssPendingDzkTriples,
+    /// Wiped witness allocations retained across independent chunk groups.
+    chunk_scratch: Vec<RssPendingDzkTriples>,
     pub(crate) mask_session: RssMaskSession,
     /// Set by the first failed verification, coin flip, opening commitment or replica check
     /// of this cluster. Nothing resets it; see [`RssSlhMpcCluster::is_poisoned`].
@@ -2033,6 +2035,8 @@ impl fmt::Debug for RssSlhMpcCluster {
     }
 }
 
+// This interval is part of the transcript: each flush consumes a counter and verifier coins.
+// Increasing it preserves final FIPS bytes but changes subsequent secret shares and proofs.
 const RSS_DZK_FLUSH_PERMUTATIONS: usize = 16;
 const RSS_RELATION_WORDS_PER_PERMUTATION: usize = 24 * 1600;
 
@@ -2214,6 +2218,7 @@ impl RssSlhMpcCluster {
             party_rngs,
             batch_ctr: 0,
             pending_dzk: RssPendingDzkTriples::new(),
+            chunk_scratch: Vec::new(),
             mask_session,
             poisoned: RssPoisonLatch::new(),
         })
@@ -2403,22 +2408,32 @@ impl RssSlhMpcCluster {
                 start
             })
             .collect();
+        let mut scratch = core::mem::take(&mut self.chunk_scratch);
+        scratch.resize_with(plans.len(), RssPendingDzkTriples::new);
         let session = &self.session_id;
         let keys = &self.keys;
         let mask_session = &self.mask_session;
         let initial_ctr = self.batch_ctr;
-        let evaluate = |index: usize| -> Result<RssChunkResult, KeccakMpcError> {
+        let evaluate = |index: usize,
+                        mut relations: RssPendingDzkTriples|
+         -> Result<RssChunkResult, KeccakMpcError> {
             let plan = &plans[index];
             let batch_len = plan.prf.len();
             let n_bits = 8 * keys[0].key_len;
-            let mut relations = RssPendingDzkTriples::new();
-            // Reserve once: growing these secret vectors would copy and wipe every
-            // prior witness allocation on each capacity doubling.
+            relations.lane_perms = 0;
+            // Scratch contains no live witnesses. Reserve once and retain the allocations
+            // across groups, avoiding both capacity doublings and repeated large allocations.
             let permutations = 1 + plan.steps.iter().filter(|(_, mask)| *mask != 0).count();
             let words = permutations * RSS_RELATION_WORDS_PER_PERMUTATION;
-            relations.a = core::array::from_fn(|_| Vec::with_capacity(words));
-            relations.b = core::array::from_fn(|_| Vec::with_capacity(words));
-            relations.c = core::array::from_fn(|_| Vec::with_capacity(words));
+            for buffer in relations
+                .a
+                .iter_mut()
+                .chain(&mut relations.b)
+                .chain(&mut relations.c)
+            {
+                debug_assert!(buffer.is_empty());
+                buffer.reserve_exact(words);
+            }
             let mut ordinal = starts[index];
             let mut permute = |prim: &mut [[u64; 1600]; 3], sec: &mut [[u64; 1600]; 3]| {
                 let ctr = initial_ctr.wrapping_add(ordinal as u64).wrapping_add(
@@ -2474,11 +2489,16 @@ impl RssSlhMpcCluster {
                 .min(12);
             let chunk_size = plans.len().div_ceil(workers).max(1);
             std::thread::scope(|scope| {
-                for (chunk, slots) in results.chunks_mut(chunk_size).enumerate() {
+                for (chunk, (slots, buffers)) in results
+                    .chunks_mut(chunk_size)
+                    .zip(scratch.chunks_mut(chunk_size))
+                    .enumerate()
+                {
                     let evaluate = &evaluate;
                     scope.spawn(move || {
-                        for (offset, slot) in slots.iter_mut().enumerate() {
-                            *slot = Some(evaluate(chunk * chunk_size + offset));
+                        for (offset, (slot, buffer)) in slots.iter_mut().zip(buffers).enumerate() {
+                            let relations = core::mem::replace(buffer, RssPendingDzkTriples::new());
+                            *slot = Some(evaluate(chunk * chunk_size + offset, relations));
                         }
                     });
                 }
@@ -2489,7 +2509,11 @@ impl RssSlhMpcCluster {
                 .collect::<Vec<_>>()
         };
         #[cfg(not(feature = "std"))]
-        let results = (0..plans.len()).map(evaluate).collect::<Vec<_>>();
+        let results = scratch
+            .into_iter()
+            .enumerate()
+            .map(|(index, relations)| evaluate(index, relations))
+            .collect::<Vec<_>>();
         for (plan, result) in plans.iter().zip(results) {
             let mut result = match result {
                 Ok(result) => result,
@@ -2560,6 +2584,8 @@ impl RssSlhMpcCluster {
                     &result.sec[party][..8 * self.keys[0].key_len],
                 );
             }
+            result.relations.clear_and_wipe();
+            self.chunk_scratch.push(result.relations);
         }
         Ok(())
     }
@@ -6729,7 +6755,11 @@ mod tests {
 
         let msg = b"distributed-threshold-slh-dsa-128f";
         let ctx = b"qsag-mpc-ctx";
+        #[cfg(feature = "std")]
+        let sign_start = std::time::Instant::now();
         let mpc_sig = slh_sign_mpc(&p128f, &mut cluster, msg, ctx, &mpc_pk, None).unwrap();
+        #[cfg(feature = "std")]
+        std::eprintln!("SLH-DSA-SHAKE-128f MPC sign: {:?}", sign_start.elapsed());
         let ref_sig = crate::fips205::slh_sign(&p128f, msg, ctx, &ref_sk, None).unwrap();
         assert_eq!(mpc_sig.len(), 17_088);
         // Deterministic (`addrnd = None`) MPC signature MUST be 100% BIT-FOR-BIT IDENTICAL to FIPS 205!

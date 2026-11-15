@@ -1,6 +1,6 @@
 # QSAG assurance and deployment boundary
 
-Certificates cover historical pinned archives: the current build matches 0/16 certified x86-64 kernels and 6/7 AArch64 kernels; five current kernels lack certificates. This is a failed freshness gate, not production machine-code certification.
+The compiled-kernel freshness gate passes: fresh Rust 1.99.1 release archives match all **19 x86-64 and 9 AArch64 certified assembly kernels**, with zero changed, missing or unpinned kernels. The corresponding Lean certificate checks pass. This covers the named kernel bytes and their explicit ISA contracts; complete linked-program certification remains separate.
 
 The integrated main-library axiom audit checks **59,257 declarations, including 28,744 kernel theorem declarations, across 57 modules**, with **0 rejected axioms**. This includes private and compiler-generated declarations and 277 pure assurance-infrastructure declarations; 131 compile-time tactic declarations are excluded. Counts describe the checked definitions and premises, not complete production refinement. The combined extracted-MIR and custody audit checks **5,318 declarations / 2,093 theorems / 44 contributing modules**; the WHIR audit checks **1,558 / 718 / 7**. Both report **0 rejected axioms**. Sandboxed six-kernel challenge replay passes 107 main theorems and 65 MIR theorems plus 17 definitions.
 
@@ -52,7 +52,7 @@ The modeled pre-open selective-abort theorem in `CeremonyAtomicityAndAbort.lean`
 
 ## Hardware and trusted computing base
 
-`SydTvTranslationValidation.lean` supplies five looping-kernel refinement certificates; `SimdBinaryEquiv.lean` covers decoded carryless multiply and transpose fixtures. The pinned ELF inventory is 23 symbols / 1,298 decoded instructions (999 x86-64, 299 AArch64). `SpirvSimtGpuEquiv.lean` proves codec roundtrip, race-conditioned multi-wave confluence and modeled SIMT leakage properties. Exact runtime SPIR-V 1.5 shader words still need a functional bridge to that modeled subset; driver telemetry and keyed receipts are distinct evidence.
+`SydTvTranslationValidation.lean` supplies five looping-kernel refinement certificates; `SimdBinaryEquiv.lean` covers decoded carryless multiply and transpose fixtures. The current certified ELF inventory is 28 symbols / 3,355 decoded instructions (1,935 x86-64, 1,420 AArch64); the 23-symbol historical generation is retained separately. `SpirvSimtGpuEquiv.lean` proves codec roundtrip, race-conditioned multi-wave confluence and modeled SIMT leakage properties. Exact runtime SPIR-V 1.5 shader words still need a functional bridge to that modeled subset; driver telemetry and keyed receipts are distinct evidence.
 
 ISA observations cover specified PC, memory-address and variable-latency events under x86_64 DOIT and aarch64 **PSTATE.DIT** assumptions. Capability enumeration is not proof that the operating mode is enabled. Scratch zero-on-exit covers named registers and frame locations; preserved caller registers, compiler copies, old allocations, OS context saves, speculation, SMT effects and physical faults require separate treatment. `vzeroupper` is not full vector erasure; a call is not a scrub operation.
 

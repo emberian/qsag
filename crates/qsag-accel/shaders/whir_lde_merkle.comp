@@ -81,6 +81,17 @@ void lds_u64_store(uint i, uint64_t v) {
     s_lds[1][a] = uint(v >> 32u);
 }
 
+uint64_t lds_tw_load(uint i) {
+    uint a = lds_index(i);
+    return uint64_t(s_lds[2][a]) | (uint64_t(s_lds[3][a]) << 32u);
+}
+
+void lds_tw_store(uint i, uint64_t v) {
+    uint a = lds_index(i);
+    s_lds[2][a] = uint(v);
+    s_lds[3][a] = uint(v >> 32u);
+}
+
 u64vec4 lds_ext4_load(uint i) {
     uint a = lds_index(i);
     return u64vec4(
@@ -391,13 +402,13 @@ void main() {
     }
 
     if (pc.mode == 2u) {
-        // 4-coset base-field shifted bit-reverse copy (`b0 -> b1`).
+        // 4-coset base-field shifted bit-reverse copy (`b0 -> b1`) with coalesced destination writes.
         uint coset_y = gl_WorkGroupID.y;
         if (coset_y >= pc.aux4) {
             return;
         }
-        uint i = pc.aux3 + gl_GlobalInvocationID.x;
-        if (i >= pc.len) {
+        uint dst_i = pc.aux3 + gl_GlobalInvocationID.x;
+        if (dst_i >= pc.len) {
             return;
         }
         uint log_c = pc.aux0;
@@ -407,14 +418,14 @@ void main() {
                      : (coset_y == 1u) ? pc.scalar1
                      : (coset_y == 2u) ? pc.scalar2
                                        : pc.scalar3;
-        uint64_t c_val = b0.words[poly_idx * poly_stride + i];
-        uint rev = (log_c == 0u) ? 0u : (bitfieldReverse(i) >> (32u - log_c));
-        b1.words[coset_y * pc.len + rev] = fp_mul(c_val, fp_pow_u32(s_r, i));
+        uint src_i = (log_c == 0u) ? 0u : (bitfieldReverse(dst_i) >> (32u - log_c));
+        uint64_t c_val = b0.words[poly_idx * poly_stride + src_i];
+        b1.words[coset_y * pc.len + dst_i] = fp_mul(c_val, fp_pow_u32(s_r, src_i));
         return;
     }
 
     if (pc.mode == 3u) {
-        // 4-coset fused <=9-stage LDS base-field NTT (`b1` in-place, twiddles in `b3`).
+        // 4-coset fused <=9-stage LDS base-field NTT (`b1` in-place, twiddles preloaded into `s_lds[2..3]`).
         uint coset_y = gl_WorkGroupID.y;
         uint len = pc.len;
         uint log_c = pc.aux0;
@@ -427,6 +438,7 @@ void main() {
         if (active_wg && lid < half_blk) {
             lds_u64_store(lid, b1.words[base + lid]);
             lds_u64_store(lid + half_blk, b1.words[base + lid + half_blk]);
+            lds_tw_store(lid, b3.words[lid << (24u - stages)]);
         }
         barrier();
 
@@ -435,7 +447,7 @@ void main() {
                 uint half_m = 1u << (s - 1u);
                 uint j = lid & (half_m - 1u);
                 uint k = (lid >> (s - 1u)) << s;
-                uint64_t tw = b3.words[j << (24u - s)];
+                uint64_t tw = lds_tw_load(j << (stages - s));
                 uint64_t u = lds_u64_load(k + j);
                 uint64_t v = fp_mul(lds_u64_load(k + j + half_m), tw);
                 lds_u64_store(k + j, fp_add(u, v));
@@ -748,6 +760,97 @@ void main() {
         uint gid = pc.aux3 + gl_GlobalInvocationID.x;
         if (gid < pc.len) {
             b3.words[gid] = fp_pow_u32(pc.scalar0, gid);
+        }
+        return;
+    }
+
+    if (pc.mode == 15u) {
+        // 4-coset 3-stage fused radix-8 LDS base-field NTT (`stages s0..=s0+2`, `10 <= s0 <= 22`).
+        uint s0 = pc.aux0;
+        uint d_stride = 1u << (s0 - 1u);
+        uint tiles_shift = s0 - 7u;
+        uint tiles_mask = (1u << tiles_shift) - 1u;
+        uint wg_id = pc.aux3 + gl_WorkGroupID.x;
+        bool in_bounds = (gl_WorkGroupID.y < pc.aux4) && (wg_id < (pc.len >> 9u));
+        uint octet = wg_id >> tiles_shift;
+        uint tile = wg_id & tiles_mask;
+        uint col = lid & 63u;
+        uint leg_lo = lid >> 6u;
+        uint j_base = (tile << 6u) + col;
+        uint g_base = gl_WorkGroupID.y * pc.len + (octet << (s0 + 2u)) + j_base;
+
+        if (in_bounds) {
+            lds_u64_store((leg_lo << 6u) + col, b1.words[g_base + leg_lo * d_stride]);
+            lds_u64_store(((leg_lo + 4u) << 6u) + col, b1.words[g_base + (leg_lo + 4u) * d_stride]);
+        }
+        barrier();
+
+        for (uint t = 0u; t < 3u; ++t) {
+            if (in_bounds) {
+                uint low_mask = (1u << t) - 1u;
+                uint r0 = ((leg_lo >> t) << (t + 1u)) | (leg_lo & low_mask);
+                uint r1 = r0 + (1u << t);
+                uint j_full = (r0 & low_mask) * d_stride + j_base;
+                uint64_t tw = b3.words[j_full << (24u - (s0 + t))];
+                uint idx0 = (r0 << 6u) + col;
+                uint idx1 = (r1 << 6u) + col;
+                uint64_t u = lds_u64_load(idx0);
+                uint64_t v = fp_mul(lds_u64_load(idx1), tw);
+                lds_u64_store(idx0, fp_add(u, v));
+                lds_u64_store(idx1, fp_sub(u, v));
+            }
+            barrier();
+        }
+
+        if (in_bounds) {
+            b1.words[g_base + leg_lo * d_stride] = lds_u64_load((leg_lo << 6u) + col);
+            b1.words[g_base + (leg_lo + 4u) * d_stride] = lds_u64_load(((leg_lo + 4u) << 6u) + col);
+        }
+        return;
+    }
+
+    if (pc.mode == 16u) {
+        // 3-stage fused radix-8 LDS `Ext4` NTT (`stages s0..=s0+2`, `10 <= s0 <= 22`).
+        uint s0 = pc.aux0;
+        uint dst_base = pc.aux2;
+        uint d_stride = 1u << (s0 - 1u);
+        uint tiles_shift = s0 - 7u;
+        uint tiles_mask = (1u << tiles_shift) - 1u;
+        uint wg_id = pc.aux3 + gl_WorkGroupID.x;
+        bool in_bounds = wg_id < (pc.len >> 9u);
+        uint octet = wg_id >> tiles_shift;
+        uint tile = wg_id & tiles_mask;
+        uint col = lid & 63u;
+        uint leg_lo = lid >> 6u;
+        uint j_base = (tile << 6u) + col;
+        uint g_base = dst_base + (octet << (s0 + 2u)) + j_base;
+
+        if (in_bounds) {
+            lds_ext4_store((leg_lo << 6u) + col, load_ext4_b1(g_base + leg_lo * d_stride));
+            lds_ext4_store(((leg_lo + 4u) << 6u) + col, load_ext4_b1(g_base + (leg_lo + 4u) * d_stride));
+        }
+        barrier();
+
+        for (uint t = 0u; t < 3u; ++t) {
+            if (in_bounds) {
+                uint low_mask = (1u << t) - 1u;
+                uint r0 = ((leg_lo >> t) << (t + 1u)) | (leg_lo & low_mask);
+                uint r1 = r0 + (1u << t);
+                uint j_full = (r0 & low_mask) * d_stride + j_base;
+                uint64_t tw = b3.words[j_full << (24u - (s0 + t))];
+                uint idx0 = (r0 << 6u) + col;
+                uint idx1 = (r1 << 6u) + col;
+                u64vec4 u = lds_ext4_load(idx0);
+                u64vec4 v = fp4_mul_base(lds_ext4_load(idx1), tw);
+                lds_ext4_store(idx0, fp4_add(u, v));
+                lds_ext4_store(idx1, fp4_sub(u, v));
+            }
+            barrier();
+        }
+
+        if (in_bounds) {
+            store_ext4_b1(g_base + leg_lo * d_stride, lds_ext4_load((leg_lo << 6u) + col));
+            store_ext4_b1(g_base + (leg_lo + 4u) * d_stride, lds_ext4_load(((leg_lo + 4u) << 6u) + col));
         }
         return;
     }

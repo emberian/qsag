@@ -3,7 +3,7 @@ name = "qsag-cred"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-rust-version = "1.89"
+rust-version.workspace = true
 description = "Threshold PQ Verifiable Credentials, 2-Round Lattice VOPRF, Unlinkable Selective Disclosure, & Dealerless Standard-Verifier FIPS 204 Threshold ML-DSA"
 
 [dependencies]

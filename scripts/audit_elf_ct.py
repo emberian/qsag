@@ -970,7 +970,7 @@ def legacy_main() -> int:
     expected_x86_set = set(EXPECTED_X86_SYMBOLS) | set(EXPECTED_X86_BITSLICE_SYMBOLS)
     for arch_name, arch_funcs in archives_to_scan:
         for sym, ins in sorted(arch_funcs.items()):
-            if sym in expected_x86_set or is_rust_non_crypto_helper(sym):
+            if sym in expected_x86_set or not is_rust_crypto_symbol(sym):
                 continue
             if not ins:
                 continue
@@ -1107,6 +1107,40 @@ RUST_MODULES = ('qsag_hd::linear_module::', 'qsag_asm::ct::',
                 'qsag_asm::sha2_hw::', 'qsag_asm::ntt_simd::')
 
 
+# Required out-of-line SIMD entrypoints in the release qsag-asm archive. A
+# namespace-only check could otherwise pass after one kernel disappeared.
+REQUIRED_SIMD_SYMBOLS = {
+    62: tuple('qsag_asm::' + name for name in (
+        'avx512::keccak_f1600_avx512_8x', 'avx512::poly_scale_xor_avx512_evex',
+        'avx512::gf2_128_mul_acc_avx512_evex', 'avx512::gf256_shamir_mac_avx512_gfni',
+        'avx512::gf256_shamir_mul_avx512_gfni', 'avx512::tower128_bdoz_mac_avx512_evex',
+        'gf256_simd::gf256_shamir_mul_vpshufb_avx2',
+        'gf256_simd::gf256_shamir_mac_vpshufb_avx2_x1',
+        'gf256_simd::gf256_shamir_mac_4vpshufb_avx2_x2',
+        'sha2_hw::sha256_compress_blocks_shani',
+        'ntt_simd::x86_simd::mldsa_ntt_avx2', 'ntt_simd::x86_simd::mldsa_ntt_avx512',
+        'ntt_simd::x86_simd::mldsa_inv_ntt_avx2', 'ntt_simd::x86_simd::mldsa_inv_ntt_avx512',
+        'ntt_simd::x86_simd::mldsa_pointwise_mul_avx2',
+        'ntt_simd::x86_simd::mldsa_pointwise_mul_avx512')),
+    183: ('qsag_asm::sha2_hw::sha256_compress_blocks_aarch64_sha2',),
+}
+
+
+def missing_simd_symbols(audited, machine):
+    return [symbol for symbol in REQUIRED_SIMD_SYMBOLS[machine] if symbol not in audited]
+
+
+def is_rust_crypto_symbol(symbol):
+    # Storage, CPU discovery, formatting and allocation are outside the kernel
+    # ABI. Include root-level dispatch wrappers as well as nested SIMD modules.
+    if is_rust_non_crypto_helper(symbol) or 'qsag_asm::durable::' in symbol:
+        return False
+    if re.search(r'::(?:tests|[A-Za-z0-9_]+_tests)::', symbol):
+        return False
+    return ('qsag_asm::' in symbol or any(module in symbol for module in RUST_MODULES)
+            or 'gf2_128_mul_acc_batch' in symbol)
+
+
 def elf_header(data):
     if len(data) < 20 or data[:4] != b'\x7fELF' or data[4] != 2 or data[5] not in (1, 2):
         raise ValueError('expected ELF64 artifact')
@@ -1174,8 +1208,17 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
                                      'wiedemann_', 'clmul', 'tower_mul', 'tower_scale')))
     taint = ({f'x{i}' for i in range(8)} if arm else
              {'rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9'}) if scalar else set()
+    # The final backend argument is public, even when field operands are secret.
+    if symbol.endswith('::goldilocks_mul_ct_with_backend'):
+        taint.discard('x2' if arm else 'rdx')
+    elif symbol.endswith('::goldilocks_pow7_ct_with_backend'):
+        taint.discard('x1' if arm else 'rsi')
     taint.update(f'v{i}' for i in range(32))
     stack = {}
+    if not arm and symbol.endswith('::gf256_shamir_mul_with_backend'):
+        # Three slice descriptors occupy the six argument registers; backend is
+        # the seventh SysV argument, a public byte at entry rsp + 8.
+        stack['rsp', 8] = False
     if not arm and symbol.endswith('::gf2_128_scale_xor_with_backend'):
         # Seven-argument SysV signature: backend is the first stack argument;
         # the two scalar field limbs in r8/r9 are secret.
@@ -1292,13 +1335,15 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
                 branch_secret = secret(parts[0]) if parts else True
             if conditional(mnemonic) and (strict or scalar) and branch_secret:
                 fail('secret-tainted conditional branch')
-            if (mnemonic.startswith('cmov') or mnemonic in AARCH64_CSEL_MNEMONICS) and (flags or any(secret(p) for p in parts)):
+            selection_sources = parts[1:] if arm else parts
+            if (mnemonic.startswith('cmov') or mnemonic in AARCH64_CSEL_MNEMONICS) and (
+                    flags or any(secret(p) for p in selection_sources)):
                 fail('secret-tainted conditional selection')
             variable = (mnemonic in X86_BMI2_VAR_SHIFT_MNEMONICS | AARCH64_VAR_SHIFT_MNEMONICS or
                         mnemonic in X86_SHIFT_MNEMONICS | {'lsl', 'lsr', 'asr', 'ror'})
             if variable and len(parts) >= 2 and secret(parts[-1]):
                 fail('secret-tainted variable shift')
-            if mnemonic in ('cmp', 'test', 'tst', 'cmn', 'ucomisd', 'comisd'):
+            if mnemonic in ('cmp', 'test', 'bt', 'tst', 'cmn', 'ucomisd', 'comisd'):
                 flags = any(secret(p) for p in parts)
                 continue
             if not arm and mnemonic in ('mul', 'imul') and len(parts) == 1:
@@ -1370,7 +1415,8 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
                 value = bool(regs(','.join(sources)) & taint)
             else:
                 value = any(secret(p) for p in sources)
-                if not arm and not move and not mnemonic.startswith('v'):
+                if not arm and not move and not mnemonic.startswith('v') and not (
+                        mnemonic == 'imul' and len(parts) == 3):
                     value |= secret(parts[0])
             zero = (mnemonic in ('xor', 'sub', 'pxor', 'xorps', 'xorpd') and len(parts) == 2 and parts[0] == parts[1]) or (
                 mnemonic in ('vpxor', 'vxorps', 'vxorpd', 'eor', 'sub') and len(parts) == 3 and parts[1] == parts[2])
@@ -1389,7 +1435,12 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
                 is_public_pointer = (
                     public_symbol
                     or (move and sources and reg(sources[0]) in public_pointer)
-                    or (not value and dst in public_pointer and mnemonic in ('add', 'sub', 'inc', 'dec'))
+                    or (not arm and not value and dst in public_pointer
+                        and mnemonic in ('add', 'sub', 'inc', 'dec'))
+                    # AArch64 arithmetic has a separate source and destination. Preserve
+                    # public-buffer provenance only from its base, with a public offset.
+                    or (arm and not value and mnemonic in ('add', 'sub')
+                        and sources and reg(sources[0]) in public_pointer)
                     or (mnemonic == 'lea' and not value and bool(regs(','.join(sources)) & public_pointer))
                 )
                 public_pointer.discard(dst)
@@ -1530,10 +1581,47 @@ def self_tests():
                            [('add', 'rsi, 16'), ('movzx', 'eax, byte ptr [rsi]'),
                             ('and', 'eax, 15'), ('mov', 'rbx, [rdx + rax*8]')], True, 62)
     count += 5
+    # Three-operand IMUL overwrites its destination; two-operand IMUL reads it.
+    prefix = [('mov', 'rax, [rdi]')]
+    sink = [('mov', 'r8, [rsi + rax]')]
+    assert not rust_errors('buffer_probe', prefix + [('imul', 'rax, rcx, 200')] + sink, True, 62)
+    assert rust_errors('buffer_probe', prefix + [('imul', 'rax, rcx')] + sink, True, 62)
+    assert rust_errors('buffer_probe', prefix + [('imul', 'r8, rax, 200'),
+        ('mov', 'r9, [rsi + r8]')], True, 62)
+    assert is_rust_crypto_symbol('qsag_asm::keccak_f1600_batch_with_backend')
+    assert not is_rust_crypto_symbol('<qsag_asm::durable::LockedRecord>::replace')
+    assert not is_rust_crypto_symbol('<alloc::vec::Vec<u8>>::resize')
+    # AArch64 CSEL overwrites its destination; a secret old destination is not
+    # an operand. Secret condition flags and source registers remain rejected.
+    assert not rust_errors('buffer_probe', [('ldr', 'x3, [x0]'), ('cmp', 'x1, x2'),
+        ('csel', 'x3, x1, x2, lo')], True, 183)
+    assert rust_errors('buffer_probe', [('ldr', 'x3, [x0]'), ('cmp', 'x3, x2'),
+        ('csel', 'x4, x1, x2, lo')], True, 183)
+    assert rust_errors('buffer_probe', [('ldr', 'x3, [x0]'), ('cmp', 'x1, x2'),
+        ('csel', 'x4, x3, x2, lo')], True, 183)
+    for machine, names in REQUIRED_SIMD_SYMBOLS.items():
+        assert not missing_simd_symbols(names, machine)
+        assert missing_simd_symbols(names[1:], machine) == [names[0]]
+        count += 2
+    count += 9
+    pattern_symbol = 'qsag_asm::bitslice::gf2_xor_combine_planes_portable'
+    # A public selector pointer copied to a new AArch64 register remains public.
+    for arithmetic in ('add', 'sub'):
+        prefix = [('mov', 'x20, x1'), (arithmetic, 'x6, x20, #7')]
+        lookup = [('ldurb', 'w21, [x6, #-7]'), ('and', 'x21, x21, #15'),
+                  ('add', 'x22, x2, x21, lsl #5'), ('ldp', 'q0, q1, [x22]')]
+        assert not rust_errors(pattern_symbol, prefix + lookup, True, 183)
+        # Secret row contents used as an offset must still be rejected.
+        assert rust_errors(pattern_symbol, [('ldr', 'x7, [x0]'),
+            (arithmetic, 'x6, x1, x7')] + lookup, True, 183)
+        # A destination's old public provenance cannot bless a different base.
+        assert rust_errors(pattern_symbol, [('mov', 'x6, x1'),
+            (arithmetic, 'x6, x0, #7')] + lookup, True, 183)
+        count += 3
     return count
 
 
-def audit(path, objdump, strict, require_bitslice, require_namespaces=()):
+def audit(path, objdump, strict, require_bitslice, require_namespaces=(), require_simd=False):
     data = path.read_bytes()
     native_members = []
     if data.startswith(b'!<arch>\n'):
@@ -1586,7 +1674,7 @@ def audit(path, objdump, strict, require_bitslice, require_namespaces=()):
         if base in expected or base.startswith('qsag_bitslice_'):
             check = kernel_audit.audit_x86_symbol if machine == 62 else kernel_audit.audit_aarch64_symbol
             errors.extend(check(symbol, instructions))
-        elif any(module in symbol for module in RUST_MODULES) or 'gf2_128_mul_acc_batch' in symbol:
+        elif is_rust_crypto_symbol(symbol):
             if machine == 62:
                 errors.extend(kernel_audit.audit_compiled_rust_x86_symbol(symbol, instructions, strict))
             else:
@@ -1603,6 +1691,9 @@ def audit(path, objdump, strict, require_bitslice, require_namespaces=()):
     for module in require_namespaces:
         if not any(module in symbol for symbol in audited):
             errors.append(f'missing required Rust namespace: {module}')
+    if require_simd:
+        errors.extend(f'missing required SIMD kernel: {symbol}'
+                      for symbol in missing_simd_symbols(audited, machine))
     if not audited:
         errors.append('no matching native symbols; use strip=none and retain the kernel call sites')
     print(f'{path}: ELF type={kind}, machine={machine}; audited {len(audited)} symbols')
@@ -1730,6 +1821,8 @@ def main():
                         help='require every bitslice assembly kernel for the input architecture (default: enabled)')
     parser.add_argument('--require-namespace', action='append', default=[], choices=RUST_MODULES,
                         help='require this compiled Rust namespace; repeat for each required surface')
+    parser.add_argument('--require-simd', action='store_true',
+                        help='require every registered SIMD entrypoint for this architecture')
     parser.add_argument('--strict-rust-branches', action='store_true')
     parser.add_argument('--self-test', action='store_true')
     parser.add_argument('--check-fixtures', type=Path)
@@ -1770,7 +1863,7 @@ def main():
         try:
             if name in args.elf_bin and elf_header(Path(name).read_bytes())[0] not in (2, 3):
                 raise ValueError('--elf-bin requires a linked ET_EXEC or ET_DYN image')
-            success = audit(Path(name).resolve(), args.llvm_objdump, args.strict_rust_branches, args.require_bitslice, args.require_namespace) and success
+            success = audit(Path(name).resolve(), args.llvm_objdump, args.strict_rust_branches, args.require_bitslice, args.require_namespace, args.require_simd) and success
         except (ValueError, OSError, subprocess.CalledProcessError) as error:
             print(f'{name}: FAIL: {error}', file=sys.stderr)
             success = False

@@ -40,3 +40,7 @@ ledger/
 paper/*.pdf
 __pycache__/
 **/__pycache__/
+
+# Python bytecode and freshly extracted native fixtures
+*.py[cod]
+/lean/fixtures/current-elf/

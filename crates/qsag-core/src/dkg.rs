@@ -358,8 +358,15 @@ impl ShamirPoseidonSeedShare {
         }))
         .ok()?;
         let invalidated = bytes[20] != 0;
-        let mut bit_shares = [Goldilocks::ZERO; 256];
-        for (i, bit_shares_i_item) in bit_shares[..256].iter_mut().enumerate() {
+        let mut out = Self {
+            party_id,
+            generation,
+            eval_point,
+            bit_shares: [Goldilocks::ZERO; 256],
+            byte_shares: [Goldilocks::ZERO; 32],
+            invalidated,
+        };
+        for (i, bit_shares_i_item) in out.bit_shares[..256].iter_mut().enumerate() {
             let off = 21 + 8 * i;
             *bit_shares_i_item =
                 Goldilocks::from_be_bytes_canonical(core::array::from_fn(|array_index| {
@@ -367,8 +374,7 @@ impl ShamirPoseidonSeedShare {
                 }))
                 .ok()?;
         }
-        let mut byte_shares = [Goldilocks::ZERO; 32];
-        for (i, byte_shares_i_item) in byte_shares[..32].iter_mut().enumerate() {
+        for (i, byte_shares_i_item) in out.byte_shares[..32].iter_mut().enumerate() {
             let off = 21 + 2048 + 8 * i;
             *byte_shares_i_item =
                 Goldilocks::from_be_bytes_canonical(core::array::from_fn(|array_index| {
@@ -376,14 +382,7 @@ impl ShamirPoseidonSeedShare {
                 }))
                 .ok()?;
         }
-        Some(Self {
-            party_id,
-            generation,
-            eval_point,
-            bit_shares,
-            byte_shares,
-            invalidated,
-        })
+        Some(out)
     }
 }
 
@@ -673,19 +672,35 @@ impl GoldilocksDealerRound1Commit {
         ),
         DkgError,
     > {
+        let pending = GoldilocksDealerPendingSecret {
+            dealer_idx,
+            f_coeffs,
+            m_coeffs,
+            pk_seed_contrib,
+            pk_seed_salt,
+        };
         let n = pts.len();
-        if t == 0 || f_coeffs.len() > t || m_coeffs.len() > t || n < t || salts.len() != n {
+        if t == 0
+            || pending.f_coeffs.len() > t
+            || pending.m_coeffs.len() > t
+            || n < t
+            || salts.len() != n
+        {
             return Err(DkgError::InvalidQuorum { t, n });
         }
         validate_all_eval_points_goldilocks(pts)?;
 
-        let pk_seed_commitment =
-            dkg_commit_pk_seed(session_id, dealer_idx, &pk_seed_salt, &pk_seed_contrib);
+        let pk_seed_commitment = dkg_commit_pk_seed(
+            session_id,
+            dealer_idx,
+            &pending.pk_seed_salt,
+            &pending.pk_seed_contrib,
+        );
         let mut share_commitments = Vec::with_capacity(n);
         let mut private_packets = Vec::with_capacity(n);
         for j in 0..n {
-            let fj = eval_poly_goldilocks(&f_coeffs, pts[j]);
-            let mj = eval_poly_ext2_at_base(&m_coeffs, pts[j]);
+            let fj = eval_poly_goldilocks(&pending.f_coeffs, pts[j]);
+            let mj = eval_poly_ext2_at_base(&pending.m_coeffs, pts[j]);
             let pkt = DkgPrivateSharePacket {
                 recv_idx: j,
                 f_share: fj,
@@ -705,13 +720,7 @@ impl GoldilocksDealerRound1Commit {
                 pk_seed_commitment,
                 share_commitments,
             },
-            GoldilocksDealerPendingSecret {
-                dealer_idx,
-                f_coeffs,
-                m_coeffs,
-                pk_seed_contrib,
-                pk_seed_salt,
-            },
+            pending,
             private_packets,
         ))
     }
@@ -1090,19 +1099,17 @@ pub fn deal_gf256_seed_round1(
     let mut share_commitments = Vec::with_capacity(n);
     let mut packets = Vec::with_capacity(n);
     for (j, pts_j_item) in pts[..n].iter().enumerate() {
-        let mut f_shares = [TowerGf256::ZERO; 256];
-        let mut m_shares = [Tower128::ZERO; 256];
-        for b in 0..256 {
-            f_shares[b] = eval_poly_gf256(&f_polys[b], *pts_j_item);
-            m_shares[b] = eval_poly_tower128_at_gf256(&m_polys[b], *pts_j_item);
-        }
         let salt = rng.next_bytes32();
-        let pkt = Gf256SeedPrivatePacket {
+        let mut pkt = Gf256SeedPrivatePacket {
             recv_idx: j,
-            f_shares,
-            m_shares,
+            f_shares: [TowerGf256::ZERO; 256],
+            m_shares: [Tower128::ZERO; 256],
             salt,
         };
+        for b in 0..256 {
+            pkt.f_shares[b] = eval_poly_gf256(&f_polys[b], *pts_j_item);
+            pkt.m_shares[b] = eval_poly_tower128_at_gf256(&m_polys[b], *pts_j_item);
+        }
         let mut raw = pkt.encode_bytes();
         let comm = dkg_commit_share(dealer_idx as u32, j as u32, &salt, &raw);
         wipe_bytes(&mut raw);
@@ -1976,19 +1983,17 @@ pub fn deal_goldilocks_seed_round1(
     let mut share_commitments = Vec::with_capacity(n);
     let mut packets = Vec::with_capacity(n);
     for (j, pts_j_item) in pts[..n].iter().enumerate() {
-        let mut f_shares = [Goldilocks::ZERO; 256];
-        let mut m_shares = [GoldilocksExt2::ZERO; 256];
-        for b in 0..256 {
-            f_shares[b] = eval_poly_goldilocks(&f_polys[b], *pts_j_item);
-            m_shares[b] = eval_poly_ext2_at_base(&m_polys[b], *pts_j_item);
-        }
         let salt = rng.next_bytes32();
-        let pkt = GoldilocksSeedPrivatePacket {
+        let mut pkt = GoldilocksSeedPrivatePacket {
             recv_idx: j,
-            f_shares,
-            m_shares,
+            f_shares: [Goldilocks::ZERO; 256],
+            m_shares: [GoldilocksExt2::ZERO; 256],
             salt,
         };
+        for b in 0..256 {
+            pkt.f_shares[b] = eval_poly_goldilocks(&f_polys[b], *pts_j_item);
+            pkt.m_shares[b] = eval_poly_ext2_at_base(&m_polys[b], *pts_j_item);
+        }
         let mut raw = pkt.encode_bytes();
         let comm = dkg_commit_share(dealer_idx as u32, j as u32, &salt, &raw);
         wipe_bytes(&mut raw);
