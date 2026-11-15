@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.ElfFixtureVerify — certificates for the compiled `qsag-asm` archives
+# Qsag.Machine.ElfFixtureVerify — certificates for the compiled `qsag-asm` archives
 
 Fixture-specific half of the binary verification: everything here is about the two compiled
 historical and current archives in `Qsag.CompiledRlibFixtures`.
@@ -12,11 +12,11 @@ historical and current archives in `Qsag.CompiledRlibFixtures`.
 4. Mutation teeth on the real compiled bytes.
 -/
 
-public import Qsag.ElfBinaryVerify
-public import Qsag.ElfInvCerts
-import all Qsag.ElfParse
-import all Qsag.ElfBinaryVerify
-import all Qsag.ElfInvCerts
+public import Qsag.Machine.ElfBinaryVerify
+public import Qsag.Machine.ElfInvCerts
+import all Qsag.Machine.ElfParse
+import all Qsag.Machine.ElfBinaryVerify
+import all Qsag.Machine.ElfInvCerts
 
 import Qsag.Tactic.AssuranceKit
 public section

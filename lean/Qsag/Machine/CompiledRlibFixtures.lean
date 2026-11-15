@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.CompiledRlibFixtures — Real `rustc --release` `.rlib` / `ELF64` Machine-Code Fixtures
+# Qsag.Machine.CompiledRlibFixtures — Real `rustc --release` `.rlib` / `ELF64` Machine-Code Fixtures
 
 Auto-generated deterministically by `scripts/extract_rlib_elf.py` from real `cargo build -p qsag-asm --release`
 artifacts (workspace release profile with LTO disabled, `--target x86_64-unknown-linux-gnu` and
