@@ -20,6 +20,9 @@ public import Qsag.Spec.IdealAggregate
 public import Qsag.Math.QuarticExt4
 public import Qsag.CodingTheory.Cwyz26JohnsonCertificate
 public import Qsag.CodingTheory.Cwyz26DeployedStages
+public import Qsag.CorduroyAndHemAirCompleteness
+public import Qsag.Poseidon2AlgebraicAndRecursiveHem
+public import Qsag.CrossProtocolAndDualOracleComposition
 public import Qsag.HemVerifierAcceptance
 public import Qsag.HemPointReductionSoundness
 public import Qsag.HemFoldDecompositionBridge
@@ -27,7 +30,9 @@ public import Qsag.HemExtractedOpeningBridge
 public import Qsag.QromBatchMerkleExtraction
 public import Qsag.QromCoherentMerkleBridge
 public import Qsag.QromFourierSupport
+public import Qsag.QromSaltedMerkleStateRestoration
 public import Qsag.ComposedQsAgAndMergeSecurity
+public import Qsag.CompositionInstances
 public import Qsag.HemSlicedFoldBudget
 public import Qsag.SpirvSimtGpuEquiv
 import Qsag.Tactic.AssuranceKit
@@ -60,7 +65,7 @@ theorem aggExt4_cwyz26_fold_and_point_reduction
     (rest : Qsag.Aggregation.GoldilocksExt4 × Qsag.Aggregation.GoldilocksExt4 →
       List (Qsag.HemTranscriptRound Qsag.Aggregation.GoldilocksExt4))
     (hD : D.Nodup) (hS : S.Nodup)
-    (hCount : D.length * Qsag.triCount 1 m Dy m < Qsag.triCount d Wx Dy (Dy + 1))
+    (hCount : D.length * Qsag.Poly3.triCount 1 m Dy m < Qsag.Poly3.triCount d Wx Dy (Dy + 1))
     (hd : 1 ≤ d) (hDy : 1 ≤ Dy) (hB : d + 1 ≤ B) (hDen : D.length * (d + 1) < B * B)
     (hAB : B < A)
     (hChar : ∀ k, 1 ≤ k → k ≤ Dy →
@@ -166,7 +171,7 @@ theorem qrom_hem_opening_and_invalid_coordinate_chain
     (hDom : inst.initDomainPts.Nodup)
     (hEnough : inst.initDegBound + 1 ≤ inst.initMinAgree)
     (hInvalid : ¬ Qsag.HemStatementValid inst)
-    (hDec : decode x (Qsag.claimedOpeningValues slots x) =
+    (hDec : decode x (Qsag.extractedOpeningValues L slots H xs x) =
       .cascade shifts weights decoded :: rest)
     (hBatchOk : Qsag.verifyHemOpeningBatch L slots inst decode H x = true)
     (hNoFail : Qsag.batchMerkleFailure L slots H xs x = false) :
@@ -192,7 +197,7 @@ theorem qrom_hem_opening_and_invalid_coordinate_chain
   have hCoherent := Qsag.coherent_hem_authenticated_event_eq ABit LBit slotsBit inst decodeBit
   obtain ⟨i, hiLt, hNoWit, _⟩ := Qsag.hem_extracted_invalid_coordinate
     L slots inst decode H xs x shifts weights decoded rest
-    hDom hEnough hInvalid hDec hBatchOk hNoFail
+    hDom hEnough hInvalid hBatchOk hNoFail hDec
   exact ⟨hMass, hFourier, hCoherent, i, hiLt, hNoWit⟩
 
 /-! ## 4. Hierarchical Merge-Tree Quorum Soundness & SIMT GPU Non-Interference -/
@@ -227,11 +232,45 @@ theorem aggregate_merge_and_simt_gpu_noninterference
          hWt, hLeaves,
          Qsag.decoded_spirv_words_simt_ct_noninterference hCt cfg subvecIdx fuel hMem⟩
 
+/-! ## 5. Multifold `[CWYZ26]` + Salted-Merkle DFMS QROM State Restoration + Committee Boundary -/
+
+/-- **Multifold `HEM` `nv = 24` Salted-Merkle QROM State-Restoration & Committee Extraction Chain
+    (`multifold_salted_qrom_and_committee_boundary_chain`)**:
+    Composes `HemSlicedFoldBudget.dfm184_budget_at_2pow27`,
+    `QromSaltedMerkleStateRestoration` (`hemNv24_unitaryPow16_sound_up_to_2pow40`,
+    `dfms_database_overflow_mass_zero`), and `CompositionInstances.committee_trace_boundary`
+    into canonical `Spec.RatBound` guarantees! -/
+theorem multifold_salted_qrom_and_committee_boundary_chain
+    {n cardAnc : Nat}
+    (Q_pow : Nat) (hQPow : Q_pow + 1 ≤ 2 ^ 40)
+    (Q_dfm : Nat) (hQDfm : Q_dfm + 1 ≤ 2 ^ 27)
+    (bStage : Qsag.RatBound) (hb184 : Qsag.atLeastBits 184 bStage)
+    (ADfms : Qsag.QuantumAdv n 256 cardAnc Q_pow) :
+    (Qsag.Spec.RatBound.ofBudget
+      (Qsag.powScaledFsQromCompilerBound Q_pow 5 256 16
+        Qsag.hemV6FiveRoundRbrBounds
+        (Qsag.hemOptimizedQueryBounds .unitaryPow16 24))).atLeastBits 128 ∧
+    (Qsag.Spec.RatBound.ofBudget (Qsag.dfmRoundScale Q_dfm bStage)).atLeastBits 128 ∧
+    Qsag.dfmsTableSum 128 n (fun D => if Q_pow < Qsag.dfmsRecordedCount n D then
+      Qsag.QVec.stateNormSq (Qsag.dfmsAdvStateAt 128 ADfms Q_pow (Nat.le_refl Q_pow) D) else 0) = 0 ∧
+    Qsag.Composed.ExtractionBoundary
+      Qsag.compactAuditGeom
+      Qsag.CompositionInstances.custodyOf
+      Qsag.CompositionInstances.sharedVerify
+      (fun _ => False) := by
+  obtain ⟨_, hPow128⟩ := Qsag.hemNv24_unitaryPow16_sound_up_to_2pow40 Q_pow hQPow
+  have hDfm128 := Qsag.dfm184_budget_at_2pow27 bStage hb184 Q_dfm hQDfm
+  exact ⟨(Qsag.Spec.RatBound.ofBudget_atLeastBits_iff 128 _).mpr hPow128,
+         (Qsag.Spec.RatBound.ofBudget_atLeastBits_iff 128 _).mpr hDfm128,
+         Qsag.dfms_database_overflow_mass_zero 128 ADfms,
+         Qsag.CompositionInstances.committee_trace_boundary⟩
+
 #verify_constructive
   Qsag.Top.aggExt4_cwyz26_fold_and_point_reduction
   Qsag.Top.deployed_hem_stage_budget_and_aggExt4_transport
   Qsag.Top.qrom_hem_opening_and_invalid_coordinate_chain
   Qsag.Top.aggregate_merge_and_simt_gpu_noninterference
+  Qsag.Top.multifold_salted_qrom_and_committee_boundary_chain
 
 end Qsag.Top
 end
