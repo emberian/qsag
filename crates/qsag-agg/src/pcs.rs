@@ -50,8 +50,9 @@ use crate::field::{
 };
 use crate::sponge::{
     CANOPY_MIDSTATE, FiatShamirTranscript, InstanceBound, POW_MIDSTATE,
-    cshake256_from_midstate_16_x4, cshake256_from_midstate_32, cshake256_from_midstate_32_x4,
-    cshake256_from_midstate_into, cshake256_pow_u64_single, cshake256_pow_u64_x4,
+    cshake256_from_midstate_16_x4, cshake256_from_midstate_16_x8, cshake256_from_midstate_32,
+    cshake256_from_midstate_32_x4, cshake256_from_midstate_32_x8, cshake256_from_midstate_into,
+    cshake256_pow_u64_single, cshake256_pow_u64_x8,
 };
 
 /// Default Stage-0 Reed–Solomon blowup factor ($1/\rho_0 = 4$ at $K = 8, 16, 32$).
@@ -718,6 +719,264 @@ impl MerkleCanopyTree {
         }
     }
 
+    /// Build a 1-indexed `MerkleCanopyTree` using 8-way SIMD leaf hashing (`leaf_fn_x8(base_leaf)`
+    /// hashes `base_leaf .. base_leaf + 8`) and 8-way SIMD internal node hashing
+    /// (`hash_merkle_internal_x8`), folding 16-leaf micro-subtrees in `3 × x8 + 1 × x4` vector calls.
+    pub fn build_from_fn_x8<F8>(num_leaves: usize, leaf_fn_x8: F8) -> Self
+    where
+        F8: Fn(usize) -> [[u8; 32]; 8] + Sync,
+    {
+        let n = num_leaves;
+        assert!(n.is_power_of_two() && n >= 8);
+        let log_leaves = n.trailing_zeros() as usize;
+
+        if n < 256 {
+            let mut nodes = vec![[0u8; 32]; 2 * n];
+            for bl in (0..n).step_by(8) {
+                let h8 = leaf_fn_x8(bl);
+                nodes[n + bl..n + bl + 8].copy_from_slice(&h8);
+            }
+            for depth in (3..log_leaves).rev() {
+                let half = 1usize << depth;
+                for idx in (half..2 * half).step_by(8) {
+                    let p8 = hash_merkle_internal_x8(
+                        idx as u32,
+                        [
+                            &nodes[2 * idx],
+                            &nodes[2 * idx + 2],
+                            &nodes[2 * idx + 4],
+                            &nodes[2 * idx + 6],
+                            &nodes[2 * idx + 8],
+                            &nodes[2 * idx + 10],
+                            &nodes[2 * idx + 12],
+                            &nodes[2 * idx + 14],
+                        ],
+                        [
+                            &nodes[2 * idx + 1],
+                            &nodes[2 * idx + 3],
+                            &nodes[2 * idx + 5],
+                            &nodes[2 * idx + 7],
+                            &nodes[2 * idx + 9],
+                            &nodes[2 * idx + 11],
+                            &nodes[2 * idx + 13],
+                            &nodes[2 * idx + 15],
+                        ],
+                    );
+                    nodes[idx..idx + 8].copy_from_slice(&p8);
+                }
+            }
+            if n >= 8 {
+                let p4 = hash_merkle_internal_x4(
+                    4,
+                    [&nodes[8], &nodes[10], &nodes[12], &nodes[14]],
+                    [&nodes[9], &nodes[11], &nodes[13], &nodes[15]],
+                );
+                nodes[4..8].copy_from_slice(&p4);
+            }
+            for idx in [3usize, 2, 1] {
+                nodes[idx] = hash_merkle_internal(idx as u32, &nodes[2 * idx], &nodes[2 * idx + 1]);
+            }
+            let root = hash_tree_root(log_leaves as u8, &nodes[1]);
+            return Self {
+                log_leaves,
+                is_compact: false,
+                nodes,
+                root,
+            };
+        }
+
+        let q = n / 4;
+        let s16 = n / 16;
+        let mut nodes = vec![[0u8; 32]; n / 2];
+
+        let fold_16_leaves = |m: usize| -> [[u8; 32]; 4] {
+            let bl = 16 * m;
+            let k_base = (q + 4 * m) as u32;
+            let l0 = leaf_fn_x8(bl);
+            let l1 = leaf_fn_x8(bl + 8);
+            let p8 = hash_merkle_internal_x8(
+                2 * k_base,
+                [
+                    &l0[0], &l0[2], &l0[4], &l0[6], &l1[0], &l1[2], &l1[4], &l1[6],
+                ],
+                [
+                    &l0[1], &l0[3], &l0[5], &l0[7], &l1[1], &l1[3], &l1[5], &l1[7],
+                ],
+            );
+            hash_merkle_internal_x4(
+                k_base,
+                [&p8[0], &p8[2], &p8[4], &p8[6]],
+                [&p8[1], &p8[3], &p8[5], &p8[7]],
+            )
+        };
+
+        #[cfg(feature = "std")]
+        if s16 >= 4 {
+            let workers = crate::parallel_pow2_workers(s16);
+            if workers > 1 {
+                let m_chunk = s16 / workers;
+                {
+                    let quarter_slice = &mut nodes[q..2 * q];
+                    let fold_ref = &fold_16_leaves;
+                    std::thread::scope(|scope| {
+                        for (t_idx, sub) in quarter_slice.chunks_mut(4 * m_chunk).enumerate() {
+                            let base_m = t_idx * m_chunk;
+                            crate::spawn_bounded(scope, move || {
+                                for (off, dst4) in sub.as_chunks_mut::<4>().0.iter_mut().enumerate()
+                                {
+                                    *dst4 = fold_ref(base_m + off);
+                                }
+                            });
+                        }
+                    });
+                }
+                for depth in (3..=(log_leaves - 3)).rev() {
+                    let half = 1usize << depth;
+                    if half >= 256 {
+                        let p_workers = crate::parallel_pow2_workers(half / 8);
+                        let (upper, children) = nodes[..4 * half].split_at_mut(2 * half);
+                        let parents = &mut upper[half..2 * half];
+                        let p_chunk = half / p_workers;
+                        std::thread::scope(|scope| {
+                            for (t_idx, (p_sub, c_sub)) in parents
+                                .chunks_mut(p_chunk)
+                                .zip(children.chunks(2 * p_chunk))
+                                .enumerate()
+                            {
+                                let base_node = half + t_idx * p_chunk;
+                                crate::spawn_bounded(scope, move || {
+                                    for (g, dst8) in
+                                        p_sub.as_chunks_mut::<8>().0.iter_mut().enumerate()
+                                    {
+                                        let c = 16 * g;
+                                        let out8 = hash_merkle_internal_x8(
+                                            (base_node + 8 * g) as u32,
+                                            [
+                                                &c_sub[c],
+                                                &c_sub[c + 2],
+                                                &c_sub[c + 4],
+                                                &c_sub[c + 6],
+                                                &c_sub[c + 8],
+                                                &c_sub[c + 10],
+                                                &c_sub[c + 12],
+                                                &c_sub[c + 14],
+                                            ],
+                                            [
+                                                &c_sub[c + 1],
+                                                &c_sub[c + 3],
+                                                &c_sub[c + 5],
+                                                &c_sub[c + 7],
+                                                &c_sub[c + 9],
+                                                &c_sub[c + 11],
+                                                &c_sub[c + 13],
+                                                &c_sub[c + 15],
+                                            ],
+                                        );
+                                        dst8.copy_from_slice(&out8);
+                                    }
+                                });
+                            }
+                        });
+                    } else {
+                        for idx in (half..2 * half).step_by(8) {
+                            let out8 = hash_merkle_internal_x8(
+                                idx as u32,
+                                [
+                                    &nodes[2 * idx],
+                                    &nodes[2 * idx + 2],
+                                    &nodes[2 * idx + 4],
+                                    &nodes[2 * idx + 6],
+                                    &nodes[2 * idx + 8],
+                                    &nodes[2 * idx + 10],
+                                    &nodes[2 * idx + 12],
+                                    &nodes[2 * idx + 14],
+                                ],
+                                [
+                                    &nodes[2 * idx + 1],
+                                    &nodes[2 * idx + 3],
+                                    &nodes[2 * idx + 5],
+                                    &nodes[2 * idx + 7],
+                                    &nodes[2 * idx + 9],
+                                    &nodes[2 * idx + 11],
+                                    &nodes[2 * idx + 13],
+                                    &nodes[2 * idx + 15],
+                                ],
+                            );
+                            nodes[idx..idx + 8].copy_from_slice(&out8);
+                        }
+                    }
+                }
+                let out4 = hash_merkle_internal_x4(
+                    4,
+                    [&nodes[8], &nodes[10], &nodes[12], &nodes[14]],
+                    [&nodes[9], &nodes[11], &nodes[13], &nodes[15]],
+                );
+                nodes[4..8].copy_from_slice(&out4);
+                for idx in [3usize, 2, 1] {
+                    nodes[idx] =
+                        hash_merkle_internal(idx as u32, &nodes[2 * idx], &nodes[2 * idx + 1]);
+                }
+                let root = hash_tree_root(log_leaves as u8, &nodes[1]);
+                return Self {
+                    log_leaves,
+                    is_compact: true,
+                    nodes,
+                    root,
+                };
+            }
+        }
+
+        for m in 0..s16 {
+            let out4 = fold_16_leaves(m);
+            nodes[q + 4 * m..q + 4 * (m + 1)].copy_from_slice(&out4);
+        }
+        for depth in (3..=(log_leaves - 3)).rev() {
+            let half = 1usize << depth;
+            for idx in (half..2 * half).step_by(8) {
+                let out8 = hash_merkle_internal_x8(
+                    idx as u32,
+                    [
+                        &nodes[2 * idx],
+                        &nodes[2 * idx + 2],
+                        &nodes[2 * idx + 4],
+                        &nodes[2 * idx + 6],
+                        &nodes[2 * idx + 8],
+                        &nodes[2 * idx + 10],
+                        &nodes[2 * idx + 12],
+                        &nodes[2 * idx + 14],
+                    ],
+                    [
+                        &nodes[2 * idx + 1],
+                        &nodes[2 * idx + 3],
+                        &nodes[2 * idx + 5],
+                        &nodes[2 * idx + 7],
+                        &nodes[2 * idx + 9],
+                        &nodes[2 * idx + 11],
+                        &nodes[2 * idx + 13],
+                        &nodes[2 * idx + 15],
+                    ],
+                );
+                nodes[idx..idx + 8].copy_from_slice(&out8);
+            }
+        }
+        let out4 = hash_merkle_internal_x4(
+            4,
+            [&nodes[8], &nodes[10], &nodes[12], &nodes[14]],
+            [&nodes[9], &nodes[11], &nodes[13], &nodes[15]],
+        );
+        nodes[4..8].copy_from_slice(&out4);
+        for idx in [3usize, 2, 1] {
+            nodes[idx] = hash_merkle_internal(idx as u32, &nodes[2 * idx], &nodes[2 * idx + 1]);
+        }
+        let root = hash_tree_root(log_leaves as u8, &nodes[1]);
+        Self {
+            log_leaves,
+            is_compact: true,
+            nodes,
+            root,
+        }
+    }
+
     pub fn commitment(&self) -> CanopyCommitment {
         CanopyCommitment {
             root: self.root,
@@ -807,13 +1066,12 @@ pub fn verify_canopy_multiproof(
         let mut write = 0usize;
         let mut k = 0usize;
         while k < active.len() {
-            let mut parents = [0u32; 4];
-            let mut lefts = [[0u8; 32]; 4];
-            let mut rights = [[0u8; 32]; 4];
+            let mut parents = [0u32; 8];
+            let mut lefts = [[0u8; 32]; 8];
+            let mut rights = [[0u8; 32]; 8];
             let mut lanes = 0;
-            // Read a batch before overwriting the in-place frontier. Each parent consumes
-            // at least one input, so the write cursor never overtakes unread nodes.
-            while lanes < 4 && k < active.len() {
+            // Read up to 8 frontier parent steps before overwriting the in-place frontier.
+            while lanes < 8 && k < active.len() {
                 let (u, hu) = active[k];
                 let sib = u ^ 1;
                 let hsib = if k + 1 < active.len() && active[k + 1].0 == sib {
@@ -837,13 +1095,24 @@ pub fn verify_canopy_multiproof(
                 rights[lanes] = pair.right;
                 lanes += 1;
             }
-            if lanes == 4 {
-                let hashes = hash_merkle_nodes_x4(parents, lefts.each_ref(), rights.each_ref());
-                for lane in 0..4 {
+            if lanes == 8 {
+                let hashes = hash_merkle_nodes_x8(parents, lefts.each_ref(), rights.each_ref());
+                for lane in 0..8 {
                     active[write + lane] = (parents[lane] as usize, hashes[lane]);
                 }
             } else {
-                for lane in 0..lanes {
+                let mut done = 0usize;
+                if lanes >= 4 {
+                    let p4 = [parents[0], parents[1], parents[2], parents[3]];
+                    let l4 = [&lefts[0], &lefts[1], &lefts[2], &lefts[3]];
+                    let r4 = [&rights[0], &rights[1], &rights[2], &rights[3]];
+                    let hashes = hash_merkle_nodes_x4(p4, l4, r4);
+                    for lane in 0..4 {
+                        active[write + lane] = (parents[lane] as usize, hashes[lane]);
+                    }
+                    done = 4;
+                }
+                for lane in done..lanes {
                     active[write + lane] = (
                         parents[lane] as usize,
                         hash_merkle_internal(parents[lane], &lefts[lane], &rights[lane]),
@@ -915,6 +1184,38 @@ fn hash_merkle_nodes_x4(
     cshake256_from_midstate_32_x4(&CANOPY_MIDSTATE, [&bufs[0], &bufs[1], &bufs[2], &bufs[3]])
 }
 
+/// 8-way SIMD internal node hash (`8` consecutive parent indices `base_node_idx .. base_node_idx + 8`
+/// in ONE `keccak_f1600_x8` permutation from [`CANOPY_MIDSTATE`]).
+#[inline]
+fn hash_merkle_internal_x8(
+    base_node_idx: u32,
+    lefts: [&[u8; 32]; 8],
+    rights: [&[u8; 32]; 8],
+) -> [[u8; 32]; 8] {
+    hash_merkle_nodes_x8(
+        core::array::from_fn(|k| base_node_idx + k as u32),
+        lefts,
+        rights,
+    )
+}
+
+/// Hash eight arbitrary frontier positions simultaneously from [`CANOPY_MIDSTATE`].
+#[inline]
+fn hash_merkle_nodes_x8(
+    indices: [u32; 8],
+    lefts: [&[u8; 32]; 8],
+    rights: [&[u8; 32]; 8],
+) -> [[u8; 32]; 8] {
+    let mut bufs = [[0u8; 69]; 8];
+    for k in 0..8 {
+        bufs[k][0] = TAG_MERKLE_INTERNAL;
+        bufs[k][1..5].copy_from_slice(&indices[k].to_le_bytes());
+        bufs[k][5..37].copy_from_slice(lefts[k]);
+        bufs[k][37..69].copy_from_slice(rights[k]);
+    }
+    cshake256_from_midstate_32_x8(&CANOPY_MIDSTATE, bufs.each_ref().map(|b| b.as_slice()))
+}
+
 /// Commitment digest of a tree: its top node bound to `log_leaves` (`34` bytes, `1` Keccak block).
 #[inline]
 fn hash_tree_root(log_leaves: u8, top_node: &[u8; 32]) -> [u8; 32] {
@@ -947,6 +1248,18 @@ fn derive_round0_salt_x4(salt_seed: &[u8; 32], base_group: u32) -> [[u8; 16]; 4]
         buf[33..37].copy_from_slice(&(base_group + k as u32).to_le_bytes());
     }
     cshake256_from_midstate_16_x4(&CANOPY_MIDSTATE, [&bufs[0], &bufs[1], &bufs[2], &bufs[3]])
+}
+
+/// 8-way SIMD Round-0 salt derivation for fibers `base_group .. base_group + 8`.
+#[inline]
+fn derive_round0_salt_x8(salt_seed: &[u8; 32], base_group: u32) -> [[u8; 16]; 8] {
+    let mut bufs = [[0u8; 37]; 8];
+    for (k, buf) in bufs.iter_mut().enumerate() {
+        buf[0] = TAG_ROUND0_SALT;
+        buf[1..33].copy_from_slice(salt_seed);
+        buf[33..37].copy_from_slice(&(base_group + k as u32).to_le_bytes());
+    }
+    cshake256_from_midstate_16_x8(&CANOPY_MIDSTATE, bufs.each_ref().map(|b| b.as_slice()))
 }
 
 /// Zero-alloc single-polynomial Round-0 salted leaf hash (`arity` in `{2, 4, 8, 16, 32, 64}`).
@@ -1266,6 +1579,127 @@ fn hash_ext4_group_x4(
             &bufs[3][..used],
         ],
     )
+}
+
+/// 8-way SIMD Round-0 salted leaf hash for 8 consecutive fibers `base_g .. base_g + 8`.
+fn round0_leaf_hash_x8(
+    codewords: &[Vec<Goldilocks>],
+    salt_seed: &[u8; 32],
+    base_g: usize,
+    num_groups: usize,
+    arity: usize,
+) -> [[u8; 32]; 8] {
+    let salts = derive_round0_salt_x8(salt_seed, base_g as u32);
+    if let [codeword] = codewords {
+        let used = 22 + 8 * arity;
+        let mut bufs = [[0u8; 22 + 8 * MAX_FIBER_ARITY]; 8];
+        for lane in 0..8 {
+            let g = base_g + lane;
+            bufs[lane][0] = TAG_ROUND0_SINGLE;
+            bufs[lane][1] = arity as u8;
+            bufs[lane][2..6].copy_from_slice(&(g as u32).to_le_bytes());
+            bufs[lane][6..22].copy_from_slice(&salts[lane]);
+            for k in 0..arity {
+                let v = codeword[g + k * num_groups];
+                bufs[lane][22 + 8 * k..22 + 8 * (k + 1)].copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        return cshake256_from_midstate_32_x8(
+            &CANOPY_MIDSTATE,
+            bufs.each_ref().map(|b| &b[..used]),
+        );
+    }
+
+    let num_polys = codewords.len();
+    let total_vals = num_polys * arity;
+    let used = 23 + 8 * total_vals;
+    if total_vals <= 128 {
+        let mut bufs = [[0u8; 23 + 8 * 128]; 8];
+        for lane in 0..8 {
+            let g = base_g + lane;
+            bufs[lane][0] = TAG_ROUND0_BATCH;
+            bufs[lane][1] = arity as u8;
+            bufs[lane][2] = num_polys as u8;
+            bufs[lane][3..7].copy_from_slice(&(g as u32).to_le_bytes());
+            bufs[lane][7..23].copy_from_slice(&salts[lane]);
+            let mut pos = 23usize;
+            for cw in codewords {
+                for k in 0..arity {
+                    bufs[lane][pos..pos + 8].copy_from_slice(&cw[g + k * num_groups].to_le_bytes());
+                    pos += 8;
+                }
+            }
+        }
+        return cshake256_from_midstate_32_x8(
+            &CANOPY_MIDSTATE,
+            bufs.each_ref().map(|b| &b[..used]),
+        );
+    }
+
+    let mut bufs: Vec<Vec<u8>> = (0..8).map(|_| vec![0u8; used]).collect();
+    for lane in 0..8 {
+        let g = base_g + lane;
+        bufs[lane][0] = TAG_ROUND0_BATCH;
+        bufs[lane][1] = arity as u8;
+        bufs[lane][2] = num_polys as u8;
+        bufs[lane][3..7].copy_from_slice(&(g as u32).to_le_bytes());
+        bufs[lane][7..23].copy_from_slice(&salts[lane]);
+        let mut pos = 23usize;
+        for cw in codewords {
+            for k in 0..arity {
+                bufs[lane][pos..pos + 8].copy_from_slice(&cw[g + k * num_groups].to_le_bytes());
+                pos += 8;
+            }
+        }
+    }
+    cshake256_from_midstate_32_x8(
+        &CANOPY_MIDSTATE,
+        [
+            &bufs[0], &bufs[1], &bufs[2], &bufs[3], &bufs[4], &bufs[5], &bufs[6], &bufs[7],
+        ],
+    )
+}
+
+/// 8-way SIMD Stage `>= 1` `GoldilocksExt4` coset fiber leaf hash for `base_g .. base_g + 8`.
+fn hash_ext4_group_x8(
+    stage_idx: u8,
+    codeword: &[GoldilocksExt4],
+    base_g: usize,
+    num_groups: usize,
+    arity: usize,
+) -> [[u8; 32]; 8] {
+    let used = 7 + 32 * arity;
+    if arity <= 16 {
+        let mut bufs = [[0u8; 7 + 32 * 16]; 8];
+        for (lane, buf) in bufs.iter_mut().enumerate() {
+            let g = base_g + lane;
+            buf[0] = TAG_EXT4_STAGE_LEAF;
+            buf[1] = stage_idx;
+            buf[2] = arity as u8;
+            buf[3..7].copy_from_slice(&(g as u32).to_le_bytes());
+            for k in 0..arity {
+                let b = codeword[g + k * num_groups].to_le_bytes();
+                buf[7 + 32 * k..7 + 32 * (k + 1)].copy_from_slice(&b);
+            }
+        }
+        return cshake256_from_midstate_32_x8(
+            &CANOPY_MIDSTATE,
+            bufs.each_ref().map(|b| &b[..used]),
+        );
+    }
+    let mut bufs = [[0u8; 7 + 32 * MAX_FIBER_ARITY]; 8];
+    for (lane, buf) in bufs.iter_mut().enumerate() {
+        let g = base_g + lane;
+        buf[0] = TAG_EXT4_STAGE_LEAF;
+        buf[1] = stage_idx;
+        buf[2] = arity as u8;
+        buf[3..7].copy_from_slice(&(g as u32).to_le_bytes());
+        for k in 0..arity {
+            let b = codeword[g + k * num_groups].to_le_bytes();
+            buf[7 + 32 * k..7 + 32 * (k + 1)].copy_from_slice(&b);
+        }
+    }
+    cshake256_from_midstate_32_x8(&CANOPY_MIDSTATE, bufs.each_ref().map(|b| &b[..used]))
 }
 
 // ============================================================================
@@ -2527,9 +2961,15 @@ fn build_cpu_round0(
     let domain_len = codewords_0[0].len();
     let num_groups = domain_len / group_arity_0;
 
-    let tree_0 = MerkleCanopyTree::build_from_fn_x4(num_groups, |base_g| {
-        round0_leaf_hash_x4(&codewords_0, salt_seed, base_g, num_groups, group_arity_0)
-    });
+    let tree_0 = if num_groups >= 8 {
+        MerkleCanopyTree::build_from_fn_x8(num_groups, |base_g| {
+            round0_leaf_hash_x8(&codewords_0, salt_seed, base_g, num_groups, group_arity_0)
+        })
+    } else {
+        MerkleCanopyTree::build_from_fn_x4(num_groups, |base_g| {
+            round0_leaf_hash_x4(&codewords_0, salt_seed, base_g, num_groups, group_arity_0)
+        })
+    };
     (codewords_0, tree_0)
 }
 
@@ -2943,9 +3383,15 @@ fn whir_open_core(
             let cw_next = encode_overflow(&cur_coeffs, next_spec.blowup);
             let num_groups_next = cw_next.len() / next_arity;
             let next_stage_u8 = (stage_idx + 1) as u8;
-            let tree_next = MerkleCanopyTree::build_from_fn_x4(num_groups_next, |base_g| {
-                hash_ext4_group_x4(next_stage_u8, &cw_next, base_g, num_groups_next, next_arity)
-            });
+            let tree_next = if num_groups_next >= 8 {
+                MerkleCanopyTree::build_from_fn_x8(num_groups_next, |base_g| {
+                    hash_ext4_group_x8(next_stage_u8, &cw_next, base_g, num_groups_next, next_arity)
+                })
+            } else {
+                MerkleCanopyTree::build_from_fn_x4(num_groups_next, |base_g| {
+                    hash_ext4_group_x4(next_stage_u8, &cw_next, base_g, num_groups_next, next_arity)
+                })
+            };
             let comm_next = tree_next.commitment();
             transcript.absorb(b"WHIR_NEXT_COMMIT", &comm_next.to_bytes());
 
@@ -4893,7 +5339,7 @@ fn verify_and_fold_ext4_stage_fibers(
 // ============================================================================
 
 /// Deterministically find the minimum `nonce: u64` whose `POW_MIDSTATE` digest has at least
-/// `PCS_POW_BITS` low zero bits, scanning in 4-way SIMD (`cshake256_pow_u64_x4`) across 8 threads.
+/// `PCS_POW_BITS` low zero bits, scanning in 8-way SIMD (`cshake256_pow_u64_x8`) across worker threads.
 fn grind_pcs_pow(transcript: &FiatShamirTranscript<InstanceBound>) -> u64 {
     let _phase = crate::profile::span("grind_pcs_pow");
     if PCS_POW_BITS == 0 {
@@ -4906,7 +5352,7 @@ fn grind_pcs_pow(transcript: &FiatShamirTranscript<InstanceBound>) -> u64 {
     {
         use core::sync::atomic::{AtomicU64, Ordering};
         let threads = crate::parallel_workers() as u64;
-        const PER_THREAD: u64 = 4_096; // 1,024 `x4` calls per thread
+        const PER_THREAD: u64 = 4_096; // 512 `x8` calls per thread
         let window: u64 = threads * PER_THREAD;
 
         let mut win_base = 0u64;
@@ -4918,12 +5364,12 @@ fn grind_pcs_pow(transcript: &FiatShamirTranscript<InstanceBound>) -> u64 {
                     let start = win_base + t * PER_THREAD;
 
                     crate::spawn_bounded(scope, move || {
-                        for offset in (0..PER_THREAD).step_by(4) {
+                        for offset in (0..PER_THREAD).step_by(8) {
                             let n = start + offset;
                             if n >= best_ref.load(Ordering::Relaxed) {
                                 break;
                             }
-                            let words = cshake256_pow_u64_x4(&POW_MIDSTATE, &chal, n);
+                            let words = cshake256_pow_u64_x8(&POW_MIDSTATE, &chal, n);
                             for (lane, &w) in words.iter().enumerate() {
                                 if (w & mask) == 0 {
                                     let hit = n + lane as u64;
@@ -4950,13 +5396,13 @@ fn grind_pcs_pow(transcript: &FiatShamirTranscript<InstanceBound>) -> u64 {
     {
         let mut n = 0u64;
         loop {
-            let words = cshake256_pow_u64_x4(&POW_MIDSTATE, &chal, n);
+            let words = cshake256_pow_u64_x8(&POW_MIDSTATE, &chal, n);
             for (lane, &w) in words.iter().enumerate() {
                 if (w & mask) == 0 {
                     return n + lane as u64;
                 }
             }
-            n = match n.checked_add(4) {
+            n = match n.checked_add(8) {
                 Some(next) => next,
                 None => panic!("PoW nonce space exhausted"),
             };
@@ -5276,6 +5722,9 @@ mod pcs_unit_tests {
         let t_x4 = MerkleCanopyTree::build_from_fn_x4(n, |bl| {
             hash_merkle_internal_x4(bl as u32, [&[0x11; 32]; 4], [&[0x22; 32]; 4])
         });
+        let t_x8 = MerkleCanopyTree::build_from_fn_x8(n, |bl| {
+            hash_merkle_internal_x8(bl as u32, [&[0x11; 32]; 8], [&[0x22; 32]; 8])
+        });
         let mut ref_nodes = vec![[0u8; 32]; 2 * n];
         for i in 0..n {
             ref_nodes[n + i] = leaf_scalar(i);
@@ -5286,6 +5735,8 @@ mod pcs_unit_tests {
         }
         let ref_root = hash_tree_root(n.trailing_zeros() as u8, &ref_nodes[1]);
         assert_eq!(t_x4.root, ref_root);
+        assert_eq!(t_x8.root, ref_root);
+        assert_eq!(t_x8.nodes, t_x4.nodes);
 
         let q = [0usize, 1, 7, 64, 65, 255, 510, 511];
         let mp = t_x4.open_multi_with_leaf_fn(&q, leaf_scalar);

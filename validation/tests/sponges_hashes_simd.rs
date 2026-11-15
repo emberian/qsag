@@ -491,3 +491,148 @@ fn cshake256_exact_rate_boundary_129_and_265_nist_sp800_185_compliance() {
         );
     }
 }
+
+/// Differential validation and Role-1 throughput comparison of 8-way AVX-512 `cshake256_from_midstate_32_x8`,
+/// `cshake256_from_midstate_16_x8`, and `cshake256_pow_u64_x8` against 4-way `x4`, scalar midstate,
+/// and independent NIST SP 800-185 §3.3 `cSHAKE256` across equal-length and mixed-length batches,
+/// plus side-by-side timing against hardware `SHA-NI` and `blake3` on Role-1 WHIR payload sizes.
+#[test]
+fn cshake256_midstate_x8_pow_x8_and_role1_fast_hash_comparison() {
+    use qsag_agg::sponge::{
+        CANOPY_CUSTOM, CANOPY_MIDSTATE, POW_CUSTOM, POW_MIDSTATE, cshake256_from_midstate_16_x8,
+        cshake256_from_midstate_32, cshake256_from_midstate_32_x4, cshake256_from_midstate_32_x8,
+        cshake256_pow_u64_x4, cshake256_pow_u64_x8,
+    };
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    let mut arena = vec![0u8; 2500 * 8];
+    for (i, b) in arena.iter_mut().enumerate() {
+        *b = ((i.wrapping_mul(197).wrapping_add(31)) ^ (i >> 6)) as u8;
+    }
+
+    // 1. Equal-length 8-lane batches across every WHIR Canopy & rate boundary
+    for &len in &[0usize, 1, 37, 40, 69, 135, 136, 137, 271, 272, 273, 534, 2071] {
+        let inputs: [&[u8]; 8] = core::array::from_fn(|k| &arena[k * 2200..k * 2200 + len]);
+        let got_x8 = cshake256_from_midstate_32_x8(&CANOPY_MIDSTATE, inputs);
+        let got_16_x8 = cshake256_from_midstate_16_x8(&CANOPY_MIDSTATE, inputs);
+        let got_lo_x4 = cshake256_from_midstate_32_x4(
+            &CANOPY_MIDSTATE,
+            [inputs[0], inputs[1], inputs[2], inputs[3]],
+        );
+        let got_hi_x4 = cshake256_from_midstate_32_x4(
+            &CANOPY_MIDSTATE,
+            [inputs[4], inputs[5], inputs[6], inputs[7]],
+        );
+
+        for k in 0..8 {
+            let exp_ref = cshake256_nist_sp800_185_ref(b"", CANOPY_CUSTOM, inputs[k], 32);
+            let exp_scalar = cshake256_from_midstate_32(&CANOPY_MIDSTATE, inputs[k]);
+            assert_eq!(exp_scalar.as_slice(), exp_ref.as_slice());
+            assert_eq!(got_x8[k], exp_scalar, "x8 mismatch at len={len} lane={k}");
+            assert_eq!(got_16_x8[k].as_slice(), &exp_scalar[..16]);
+            if k < 4 {
+                assert_eq!(got_lo_x4[k], exp_scalar);
+            } else {
+                assert_eq!(got_hi_x4[k - 4], exp_scalar);
+            }
+        }
+    }
+
+    // 2. Mixed-length 8-lane fallback path (spans 0..=3 rate blocks simultaneously)
+    let mixed_lens = [0usize, 37, 69, 135, 136, 137, 534, 2071];
+    let mixed_inputs: [&[u8]; 8] =
+        core::array::from_fn(|k| &arena[k * 2200..k * 2200 + mixed_lens[k]]);
+    let mixed_got = cshake256_from_midstate_32_x8(&CANOPY_MIDSTATE, mixed_inputs);
+    for k in 0..8 {
+        let exp = cshake256_nist_sp800_185_ref(b"", CANOPY_CUSTOM, mixed_inputs[k], 32);
+        assert_eq!(mixed_got[k].as_slice(), exp.as_slice(), "mixed lane={k}");
+    }
+
+    // 3. Register-only 8-way PoW kernel (`cshake256_pow_u64_x8`) vs `x4` and NIST SP 800-185 reference
+    for &base_nonce in &[0u64, 1, 7, 0xFFFF_FFFC, u64::MAX - 3] {
+        let mut chal = [0u8; 32];
+        for (i, b) in chal.iter_mut().enumerate() {
+            *b = (base_nonce as u8).wrapping_add((i * 29 + 3) as u8);
+        }
+        let words8 = cshake256_pow_u64_x8(&POW_MIDSTATE, &chal, base_nonce);
+        let words4_lo = cshake256_pow_u64_x4(&POW_MIDSTATE, &chal, base_nonce);
+        let words4_hi = cshake256_pow_u64_x4(&POW_MIDSTATE, &chal, base_nonce.wrapping_add(4));
+        assert_eq!(&words8[0..4], &words4_lo[..]);
+        assert_eq!(&words8[4..8], &words4_hi[..]);
+        for (k, &word) in words8.iter().enumerate() {
+            let mut pre = [0u8; 40];
+            pre[..32].copy_from_slice(&chal);
+            pre[32..40].copy_from_slice(&base_nonce.wrapping_add(k as u64).to_le_bytes());
+            let exp_pow = cshake256_nist_sp800_185_ref(b"", POW_CUSTOM, &pre, 8);
+            assert_eq!(word, u64::from_le_bytes(exp_pow.try_into().unwrap()));
+        }
+    }
+
+    // 4. Role-1 WHIR payload micro-benchmark (`69 B` internal node, `534 B` single leaf, `2071 B` batch leaf)
+    for &(label, payload_len, batches_of_8) in &[
+        ("canopy_node_69B", 69usize, 2_000usize),
+        ("whir_leaf_single_534B", 534usize, 1_000usize),
+        ("whir_leaf_batch_2071B", 2071usize, 400usize),
+    ] {
+        let in8: [&[u8]; 8] = core::array::from_fn(|k| &arena[k * 2200..k * 2200 + payload_len]);
+        let total_hashes = batches_of_8 * 8;
+
+        let t0 = Instant::now();
+        let mut acc = 0u8;
+        for _ in 0..batches_of_8 {
+            for lane in &in8 {
+                acc ^= cshake256_from_midstate_32(&CANOPY_MIDSTATE, black_box(*lane))[0];
+            }
+        }
+        let ns_scalar = t0.elapsed().as_nanos() as f64 / total_hashes as f64;
+        black_box(acc);
+
+        let t1 = Instant::now();
+        for _ in 0..batches_of_8 {
+            let lo = cshake256_from_midstate_32_x4(
+                &CANOPY_MIDSTATE,
+                black_box([in8[0], in8[1], in8[2], in8[3]]),
+            );
+            let hi = cshake256_from_midstate_32_x4(
+                &CANOPY_MIDSTATE,
+                black_box([in8[4], in8[5], in8[6], in8[7]]),
+            );
+            acc ^= lo[0][0] ^ hi[0][0];
+        }
+        let ns_x4 = t1.elapsed().as_nanos() as f64 / total_hashes as f64;
+        black_box(acc);
+
+        let t2 = Instant::now();
+        for _ in 0..batches_of_8 {
+            let out8 = cshake256_from_midstate_32_x8(&CANOPY_MIDSTATE, black_box(in8));
+            acc ^= out8[0][0] ^ out8[7][0];
+        }
+        let ns_x8 = t2.elapsed().as_nanos() as f64 / total_hashes as f64;
+        black_box(acc);
+
+        let t3 = Instant::now();
+        for _ in 0..batches_of_8 {
+            for lane in &in8 {
+                acc ^= accel_sha256(black_box(*lane))[0];
+            }
+        }
+        let ns_shani = t3.elapsed().as_nanos() as f64 / total_hashes as f64;
+        black_box(acc);
+
+        let t4 = Instant::now();
+        for _ in 0..batches_of_8 {
+            for lane in &in8 {
+                acc ^= blake3::hash(black_box(*lane)).as_bytes()[0];
+            }
+        }
+        let ns_blake3 = t4.elapsed().as_nanos() as f64 / total_hashes as f64;
+        black_box(acc);
+
+        println!(
+            "[Role-1 {label}] scalar_cshake={ns_scalar:.1}ns/op | x4_cshake={ns_x4:.1}ns/op ({:.2}x) | x8_cshake={ns_x8:.1}ns/op ({:.2}x) | sha256_ni={ns_shani:.1}ns/op | blake3={ns_blake3:.1}ns/op",
+            ns_scalar / ns_x4.max(0.1),
+            ns_scalar / ns_x8.max(0.1),
+        );
+    }
+}
