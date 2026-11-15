@@ -1,10 +1,10 @@
 module
-public import Qsag.SeparatedCustodyRelease
-public import Qsag.RssProductionProfile
-import all Qsag.SeparatedCustodyPolicy
-import all Qsag.CompleteMediationBoundary
-import all Qsag.SeparatedCustodyCore
-import all Qsag.RssProductionProfile
+public import Qsag.Custody.SeparatedCustodyRelease
+public import Qsag.Exec.RssProductionProfile
+import all Qsag.Custody.SeparatedCustodyPolicy
+import all Qsag.Custody.CompleteMediationBoundary
+import all Qsag.Custody.SeparatedCustodyCore
+import all Qsag.Exec.RssProductionProfile
 import Qsag.Tactic.AssuranceKit
 
 /-! Contextual approval is an explicit participant input. Initiator authentication

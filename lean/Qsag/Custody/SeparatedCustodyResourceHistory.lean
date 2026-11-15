@@ -1,7 +1,7 @@
 module
-public import Qsag.SeparatedCustodyUcResource
-import all Qsag.SeparatedCustodyUcResource
-import all Qsag.SeparatedCustodyRequestHistory
+public import Qsag.Custody.SeparatedCustodyUcResource
+import all Qsag.Custody.SeparatedCustodyUcResource
+import all Qsag.Custody.SeparatedCustodyRequestHistory
 import Qsag.Tactic.AssuranceKit
 public section
 namespace Qsag.Custody.RequestPolicy

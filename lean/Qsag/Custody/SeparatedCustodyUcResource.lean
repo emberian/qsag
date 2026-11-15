@@ -1,11 +1,11 @@
 module
-public import Qsag.SeparatedCustodyRequestHistory
-public import Qsag.SeparatedCustodyUcBridge
-import all Qsag.SeparatedCustodyRequestHistory
-import all Qsag.SeparatedCustodyUcBridge
-import all Qsag.SeparatedCustodySpine
-import all Qsag.SeparatedCustodyCore
-import all Qsag.RssProductionProfile
+public import Qsag.Custody.SeparatedCustodyRequestHistory
+public import Qsag.Custody.SeparatedCustodyUcBridge
+import all Qsag.Custody.SeparatedCustodyRequestHistory
+import all Qsag.Custody.SeparatedCustodyUcBridge
+import all Qsag.Custody.SeparatedCustodySpine
+import all Qsag.Custody.SeparatedCustodyCore
+import all Qsag.Exec.RssProductionProfile
 import Qsag.Tactic.AssuranceKit
 
 /-! Executable authenticated request gate and a generation-commit storage hybrid.
@@ -327,7 +327,7 @@ structure Accounted (s : ResourceState) : Prop where
   active : ∀ req ∈ s.active, ∃ r ∈ s.durable.reserved, r.request = req
   observed : ∀ e ∈ s.observed, ∃ r ∈ s.durable.reserved, r.request = e.1
 
-theorem initial_accounted (profile : RssProduction.Profile) (d : Deployment) :
+theorem initial_accounted (d : Deployment) :
     Accounted (resourceInitial d) := by
   constructor <;> intro x hx <;> cases hx
 
@@ -407,7 +407,7 @@ theorem every_observed_wire_has_burn (profile : RssProduction.Profile) (d : Depl
     (he : e ∈ (resourceRun profile d corrupt (resourceInitial d) cs).observed) :
     ∃ r ∈ (resourceRun profile d corrupt (resourceInitial d) cs).durable.reserved,
       r.request = e.1 :=
-  (run_accounted profile d corrupt _ cs (initial_accounted profile d)).observed e he
+  (run_accounted profile d corrupt _ cs (initial_accounted d)).observed e he
 
 end Qsag.Custody.RequestPolicy
 end

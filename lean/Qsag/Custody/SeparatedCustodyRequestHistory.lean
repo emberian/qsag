@@ -1,12 +1,12 @@
 module
-public import Qsag.SeparatedCustodyRequestPolicy
-public import Qsag.SeparatedCustodyHistory
-import all Qsag.SeparatedCustodyRequestPolicy
-import all Qsag.SeparatedCustodyHistory
-import all Qsag.SeparatedCustodySpine
-import all Qsag.SeparatedCustodyCore
-import all Qsag.CompleteMediationBoundary
-import all Qsag.HypertreeEufCma
+public import Qsag.Custody.SeparatedCustodyRequestPolicy
+public import Qsag.Custody.SeparatedCustodyHistory
+import all Qsag.Custody.SeparatedCustodyRequestPolicy
+import all Qsag.Custody.SeparatedCustodyHistory
+import all Qsag.Custody.SeparatedCustodySpine
+import all Qsag.Custody.SeparatedCustodyCore
+import all Qsag.Custody.CompleteMediationBoundary
+import all Qsag.Protocol.Signing.HypertreeEufCma
 import Qsag.Tactic.AssuranceKit
 public section
 namespace Qsag.Custody.RequestPolicy
