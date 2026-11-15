@@ -780,3 +780,903 @@ private theorem one_le_pow_of_pos {a : Nat} (ha : 1 ≤ a) : ∀ k : Nat, 1 ≤ 
     exact Nat.le_trans (one_le_pow_of_pos ha k) (Nat.le_mul_of_pos_right _ ha)
 
 /-- **Fermat's Little Theorem (`IsPrimeNat.pow_sub_one_mod`)**. -/
+theorem IsPrimeNat.pow_sub_one_mod {q a : Nat} (hq : IsPrimeNat q) (hna : ¬ (q ∣ a)) :
+    (a ^ (q - 1)) % q = 1 := by
+  let L := posRange (q - 1)
+  let f := fun i : Nat => (a * i) % q
+  have hMem : ∀ x ∈ L.map f, x ∈ L := by
+    intro x hx
+    obtain ⟨i, hi, rfl⟩ := List.mem_map.1 hx
+    obtain ⟨hi1, hi2⟩ := mem_posRange_iff.1 hi
+    have hni : ¬ (q ∣ i) := fun hd => by
+      have hle := Nat.le_of_dvd (by omega) hd
+      have hq2 := hq.1
+      omega
+    have hnai : ¬ (q ∣ a * i) := fun hd => hni (hq.dvd_mul (Nat.mul_comm a i ▸ hd) hna)
+    have hmodPos : 0 < (a * i) % q := by
+      if hz : (a * i) % q = 0 then
+        exact False.elim (hnai (Nat.dvd_of_mod_eq_zero hz))
+      else omega
+    have hmodLt : (a * i) % q < q := Nat.mod_lt _ (by have := hq.1; omega)
+    dsimp only [f]
+    exact mem_posRange_iff.2 ⟨hmodPos, by omega⟩
+  have hInjOn : ∀ i j : Nat, i ∈ L → j ∈ L → f i = f j → i = j := by
+    intro i j hi hj hij
+    obtain ⟨hi1, hi2⟩ := mem_posRange_iff.1 hi
+    obtain ⟨hj1, hj2⟩ := mem_posRange_iff.1 hj
+    have hq2 := hq.1
+    if hijLe : i ≤ j then
+      have hdvd : q ∣ a * (j - i) := by
+        have hmul : a * j - a * i = a * (j - i) := (Nat.mul_sub a j i).symm
+        rw [← hmul]
+        exact sub_dvd_of_mod_eq (Nat.mul_le_mul_left a hijLe) hij.symm
+      have hdvdDiff : q ∣ (j - i) := hq.dvd_mul hdvd hna
+      if hdiff0 : j - i = 0 then omega
+      else
+        have hle := Nat.le_of_dvd (by omega) hdvdDiff
+        omega
+    else
+      have hjiLe : j ≤ i := by omega
+      have hdvd : q ∣ a * (i - j) := by
+        have hmul : a * i - a * j = a * (i - j) := (Nat.mul_sub a i j).symm
+        rw [← hmul]
+        exact sub_dvd_of_mod_eq (Nat.mul_le_mul_left a hjiLe) hij
+      have hdvdDiff : q ∣ (i - j) := hq.dvd_mul hdvd hna
+      if hdiff0 : i - j = 0 then omega
+      else
+        have hle := Nat.le_of_dvd (by omega) hdvdDiff
+        omega
+  have hNodupMap : (L.map f).Nodup := by
+    have hsubNd : ∀ {xs : List Nat}, xs.Nodup → (∀ z ∈ xs, z ∈ L) → (xs.map f).Nodup := by
+      intro xs hnd hxs
+      induction hnd with
+      | nil => exact .nil
+      | @cons x rest hrel hndRest ih =>
+        refine .cons (fun b hb heq => ?_) (ih (fun z hz => hxs z (.tail _ hz)))
+        obtain ⟨y, hy, rfl⟩ := List.mem_map.1 hb
+        have hxy := hInjOn x y (hxs x (.head _)) (hxs y (.tail _ hy)) heq
+        exact hrel y hy hxy
+    exact hsubNd (posRange_nodup (q - 1)) (fun z hz => hz)
+  have hProdEq : listProd (L.map f) = listProd L :=
+    listProd_eq_of_nodup_subset hNodupMap (posRange_nodup (q - 1)) (by simp) hMem
+  have hModEq : (a ^ (q - 1) * listProd L) % q = (listProd L) % q := by
+    rw [← listProd_map_mul_mod a q (q - 1), hProdEq]
+  have haPos : 1 ≤ a := by
+    if ha0 : a = 0 then subst ha0; exact False.elim (hna (Nat.dvd_zero q))
+    else omega
+  have hpowPos : 1 ≤ a ^ (q - 1) := one_le_pow_of_pos haPos (q - 1)
+  have hdvdMul : q ∣ (a ^ (q - 1) - 1) * listProd L := by
+    have hsub : a ^ (q - 1) * listProd L - listProd L = (a ^ (q - 1) - 1) * listProd L := by
+      rw [Nat.sub_mul, Nat.one_mul]
+    rw [← hsub]
+    exact sub_dvd_of_mod_eq (Nat.le_mul_of_pos_left _ hpowPos) hModEq
+  have hnotF : ¬ (q ∣ listProd L) :=
+    not_dvd_listProd_posRange hq (by have := hq.1; omega)
+  have hdvdPow : q ∣ (a ^ (q - 1) - 1) :=
+    hq.dvd_mul (Nat.mul_comm (a ^ (q - 1) - 1) (listProd L) ▸ hdvdMul) hnotF
+  obtain ⟨k, hk⟩ := hdvdPow
+  have hEq : a ^ (q - 1) = q * k + 1 := by omega
+  rw [hEq, Nat.mul_add_mod, Nat.mod_eq_of_lt hq.1]
+
+private theorem pow_mod_eq_one_of_eq_one {a q : Nat} (hq : 2 ≤ q) (ha : a % q = 1) :
+    ∀ k : Nat, (a ^ k) % q = 1
+  | 0 => Nat.mod_eq_of_lt hq
+  | k + 1 => by
+    rw [Nat.pow_succ, Nat.mul_mod, pow_mod_eq_one_of_eq_one hq ha k, ha]
+    exact Nat.mod_eq_of_lt hq
+
+private theorem pow_gcd_mod_eq_one {a q : Nat} (hq : 2 ≤ q) :
+    ∀ (m n : Nat), (a ^ m) % q = 1 → (a ^ n) % q = 1 → (a ^ (Nat.gcd m n)) % q = 1
+  | 0, n, _, hn => by simpa [Nat.gcd_zero_left] using hn
+  | m + 1, n, hm, hn => by
+    have hdiv : (m + 1) * (n / (m + 1)) + n % (m + 1) = n := Nat.div_add_mod n (m + 1)
+    have hrem : (a ^ (n % (m + 1))) % q = 1 := by
+      have hn' : (a ^ ((m + 1) * (n / (m + 1)) + n % (m + 1))) % q = 1 := hdiv.symm ▸ hn
+      rw [Nat.pow_add, Nat.pow_mul, Nat.mul_mod,
+          pow_mod_eq_one_of_eq_one hq hm (n / (m + 1)), Nat.one_mul, Nat.mod_mod] at hn'
+      exact hn'
+    rw [Nat.gcd_rec (m + 1) n]
+    exact pow_gcd_mod_eq_one hq (n % (m + 1)) (m + 1) hrem hm
+termination_by m _ => m
+decreasing_by exact Nat.mod_lt n (Nat.succ_pos m)
+
+private theorem dvd_of_two_pow_dvd_mul_odd :
+    ∀ (k g c : Nat), c % 2 = 1 → 2 ^ k ∣ g * c → 2 ^ k ∣ g
+  | 0, g, _, _, _ => Nat.one_dvd g
+  | k + 1, g, c, hodd, hdvd => by
+    have h2prime : IsPrimeNat 2 := ⟨by decide, fun d hd => by
+      have hpos : 0 < d := Nat.pos_of_dvd_of_pos hd (by decide)
+      have hle : d ≤ 2 := Nat.le_of_dvd (by decide) hd
+      omega⟩
+    have hnc : ¬ (2 ∣ c) := fun hc => by obtain ⟨t, rfl⟩ := hc; omega
+    have h2dvd : 2 ∣ g * c := by
+      rw [Nat.pow_succ] at hdvd
+      exact Nat.dvd_trans (Nat.dvd_mul_left 2 (2 ^ k)) hdvd
+    obtain ⟨g', rfl⟩ := h2prime.dvd_mul (Nat.mul_comm g c ▸ h2dvd) hnc
+    have hdvd' : 2 ^ k ∣ g' * c := by
+      rw [Nat.pow_succ, Nat.mul_comm (2 ^ k) 2, Nat.mul_assoc 2 g' c] at hdvd
+      exact Nat.dvd_of_mul_dvd_mul_left (by decide) hdvd
+    rw [Nat.pow_succ, Nat.mul_comm (2 ^ k) 2]
+    exact Nat.mul_dvd_mul_left 2 (dvd_of_two_pow_dvd_mul_odd k g' c hodd hdvd')
+
+private theorem goldilocksEuler_modPow_abstract (e : Nat)
+    (hLt : e < 2 ^ 64)
+    (hEval : modPowFuel 64 7 e goldilocksPrime = goldilocksPrime - 1) :
+    (7 ^ e) % goldilocksPrime = goldilocksPrime - 1 := by
+  rw [← modPowFuel_eq_pow_mod 64 7 e goldilocksPrime hLt]
+  exact hEval
+
+/-- Euler witness `7 ^ ((p - 1) / 2) ≡ -1 (mod p)` via verified 64-step modular exponentiation. -/
+private theorem goldilocksEuler_modPow :
+    ∀ u : Unit, u = () →
+      (7 ^ ((goldilocksPrime - 1) / 2)) % goldilocksPrime = goldilocksPrime - 1 :=
+  fun _ _ => goldilocksEuler_modPow_abstract ((goldilocksPrime - 1) / 2) (by decide) (by decide)
+
+/-- Proth-style divisor argument with the modulus and the half-exponent abstract: the kernel never
+    meets a closed power with a 63-bit exponent while checking it. -/
+private theorem dvd_cases_of_euler_certificate (p half : Nat)
+    (hpPos : 1 ≤ p) (hpLt : p < (2 ^ 32) * (2 ^ 32)) (hodd : p % 2 = 1)
+    (hrem : p % 3 ≠ 0 ∧ p % 5 ≠ 0 ∧ p % 7 ≠ 0)
+    (hEuler : 7 ^ half % p = p - 1) (h2half : p - 1 = 2 * half)
+    (h2pow32 : 2 ^ 32 ∣ (p - 1)) (d : Nat) (hd : d ∣ p) :
+    d = 1 ∨ d = p := by
+  if hd1 : d = 1 then exact .inl hd1
+  else if hdp : d = p then exact .inr hdp
+  else
+    exfalso
+    obtain ⟨e, he⟩ := hd
+    have hdPos : 2 ≤ d := by
+      if hd0 : d = 0 then subst hd0; rw [Nat.zero_mul] at he; omega
+      else omega
+    have hePos : 2 ≤ e := by
+      if he0 : e = 0 then subst he0; rw [Nat.mul_zero] at he; omega
+      else if he1 : e = 1 then subst he1; rw [Nat.mul_one] at he; exact False.elim (hdp he.symm)
+      else omega
+    let m := if d ≤ e then d else e
+    have hm2 : 2 ≤ m := by dsimp [m]; split <;> omega
+    have hmDvd : m ∣ p := by
+      dsimp [m]; split
+      · exact ⟨e, he⟩
+      · exact ⟨d, Nat.mul_comm d e ▸ he⟩
+    have hmSq : m * m ≤ p := by
+      dsimp [m]; split
+      · rename_i hle; rw [he]; exact Nat.mul_le_mul_left d hle
+      · rename_i hgt; rw [he, Nat.mul_comm d e]; exact Nat.mul_le_mul_left e (by omega)
+    obtain ⟨q, hqDef⟩ : ∃ q, minDivisor m = q := ⟨minDivisor m, rfl⟩
+    obtain ⟨hqPrime, hqDvdM, hqLeM⟩ := minDivisor_isPrime hm2
+    rw [hqDef] at hqPrime hqDvdM hqLeM
+    have hqDvdP : q ∣ p := Nat.dvd_trans hqDvdM hmDvd
+    have hqSq : q * q < (2 ^ 32) * (2 ^ 32) := by
+      exact Nat.lt_of_le_of_lt (Nat.le_trans (Nat.mul_le_mul hqLeM hqLeM) hmSq) hpLt
+    have hqLt32 : q < 2 ^ 32 := by
+      if hge : 2 ^ 32 ≤ q then
+        have hsqGe := Nat.mul_le_mul hge hge
+        omega
+      else omega
+    have hqGe3 : 3 ≤ q := by
+      have hq2 := hqPrime.1
+      if hqEq2 : q = 2 then
+        obtain ⟨k, hk⟩ := hqDvdP
+        rw [hqEq2] at hk
+        omega
+      else omega
+    have hqNotDvd7 : ¬ (q ∣ 7) := by
+      intro hd7
+      have hle7 : q ≤ 7 := Nat.le_of_dvd (by decide) hd7
+      obtain ⟨k, hk⟩ := hqDvdP
+      have hcases : q = 3 ∨ q = 4 ∨ q = 5 ∨ q = 6 ∨ q = 7 := by omega
+      rcases hcases with rfl | rfl | rfl | rfl | rfl
+      · exact hrem.1 (by omega)
+      · rcases hqPrime.2 2 ⟨2, rfl⟩ with h | h <;> omega
+      · exact hrem.2.1 (by omega)
+      · rcases hqPrime.2 2 ⟨3, rfl⟩ with h | h <;> omega
+      · exact hrem.2.2 (by omega)
+    have hHalfPlusOneDvdP : p ∣ (7 ^ half + 1) := by
+      have hdiv := Nat.div_add_mod (7 ^ half) p
+      rw [hEuler] at hdiv
+      refine ⟨(7 ^ half) / p + 1, ?_⟩
+      rw [Nat.mul_add, Nat.mul_one]
+      omega
+    have hHalfPlusOneDvdQ : q ∣ (7 ^ half + 1) := Nat.dvd_trans hqDvdP hHalfPlusOneDvdP
+    have hHalfModQ : (7 ^ half) % q = q - 1 := by
+      obtain ⟨t, ht⟩ := hHalfPlusOneDvdQ
+      have htPos : 1 ≤ t := by
+        if ht0 : t = 0 then
+          rw [ht0, Nat.mul_zero] at ht
+          exact False.elim (Nat.succ_ne_zero (7 ^ half) ht)
+        else omega
+      have hEq : 7 ^ half = q * (t - 1) + (q - 1) := by
+        rw [Nat.mul_sub, Nat.mul_one]
+        have hq1 : q ≤ q * t := by
+          have h := Nat.mul_le_mul_left q htPos
+          rwa [Nat.mul_one] at h
+        omega
+      rw [hEq, Nat.mul_add_mod, Nat.mod_eq_of_lt (by omega)]
+    have hPm1ModQ : (7 ^ (p - 1)) % q = 1 := by
+      rw [h2half, pow_two_mul, Nat.mul_mod, hHalfModQ]
+      obtain ⟨q2, hq2Eq⟩ : ∃ q2, q = q2 + 3 := ⟨q - 3, by omega⟩
+      have hsq : (q - 1) * (q - 1) = q * (q - 2) + 1 := by
+        rw [hq2Eq]
+        have ha : q2 + 3 - 1 = q2 + 2 := by omega
+        have hb : q2 + 3 - 2 = q2 + 1 := by omega
+        rw [ha, hb]
+        simp only [Nat.mul_add, Nat.add_mul]
+        omega
+      rw [hsq, Nat.mul_add_mod, Nat.mod_eq_of_lt hqPrime.1]
+    have hQm1ModQ : (7 ^ (q - 1)) % q = 1 := hqPrime.pow_sub_one_mod hqNotDvd7
+    obtain ⟨g, hgDef⟩ : ∃ g, Nat.gcd (p - 1) (q - 1) = g := ⟨_, rfl⟩
+    have hgPow : (7 ^ g) % q = 1 := by
+      rw [← hgDef]
+      exact pow_gcd_mod_eq_one hqPrime.1 (p - 1) (q - 1) hPm1ModQ hQm1ModQ
+    have hgNotDvdHalf : ¬ (g ∣ half) := by
+      rintro ⟨u, hu⟩
+      have h1 : (7 ^ half) % q = 1 := by
+        rw [hu, Nat.pow_mul]
+        exact pow_mod_eq_one_of_eq_one hqPrime.1 hgPow u
+      rw [hHalfModQ] at h1
+      omega
+    obtain ⟨c, hc⟩ := hgDef ▸ Nat.gcd_dvd_left (p - 1) (q - 1)
+    have hcOdd : c % 2 = 1 := by
+      if hce : c % 2 = 0 then
+        obtain ⟨c', hc'⟩ : ∃ c', c = 2 * c' := ⟨c / 2, by omega⟩
+        have hmul : 2 * half = 2 * (g * c') := by
+          rw [← h2half, hc, hc', ← Nat.mul_assoc, Nat.mul_comm g 2, Nat.mul_assoc]
+        have hhalfEq : half = g * c' := by omega
+        exact False.elim (hgNotDvdHalf ⟨c', hhalfEq⟩)
+      else omega
+    have h2pow32DvdPm1 : 2 ^ 32 ∣ (p - 1) := h2pow32
+    rw [hc] at h2pow32DvdPm1
+    have h2pow32DvdG : 2 ^ 32 ∣ g := dvd_of_two_pow_dvd_mul_odd 32 g c hcOdd h2pow32DvdPm1
+    have h2pow32DvdQm1 : 2 ^ 32 ∣ (q - 1) :=
+      Nat.dvd_trans h2pow32DvdG (hgDef ▸ Nat.gcd_dvd_right (p - 1) (q - 1))
+    have hge : 2 ^ 32 ≤ q - 1 := Nat.le_of_dvd (by omega) h2pow32DvdQm1
+    omega
+
+/-- **Zero-Axiom Proth Primality Theorem for `goldilocksPrime` ($p = 2^{64} - 2^{32} + 1$)**. -/
+theorem goldilocksPrime_dvd_cases (d : Nat) (hd : d ∣ goldilocksPrime) :
+    d = 1 ∨ d = goldilocksPrime :=
+  dvd_cases_of_euler_certificate goldilocksPrime ((goldilocksPrime - 1) / 2)
+    (by decide) (by decide) (by decide) (by decide) (goldilocksEuler_modPow () rfl) (by decide)
+    ⟨2 ^ 32 - 1, by decide⟩ d hd
+
+theorem goldilocksPrime_isPrime (u : Unit) : IsPrimeNat goldilocksPrime :=
+  ⟨by decide, fun _ => (let _ := u; goldilocksPrime_dvd_cases _)⟩
+
+/-- Constructive field inverse in `Goldilocks` via $a^{p-2} \bmod p$ (`inv 0 = 0`). -/
+def Goldilocks.inv (a : Goldilocks) : Goldilocks :=
+  if a.val = 0 then Goldilocks.zero
+  else Goldilocks.ofNat (modPowFuel 64 a.val (goldilocksPrime - 2) goldilocksPrime)
+
+theorem Goldilocks.mul_inv_cancel {a : Goldilocks} (ha : a ≠ Goldilocks.zero) :
+    CommRingOps.mul a (Goldilocks.inv a) = CommRingOps.one := by
+  have hvalNe : a.val ≠ 0 := fun h => ha (Goldilocks.ext h)
+  have hnotDvd : ¬ (goldilocksPrime ∣ a.val) := fun hd => by
+    have hle := Nat.le_of_dvd (by omega) hd
+    have hlt := a.isLt
+    omega
+  apply Goldilocks.ext
+  change (Goldilocks.mul a (Goldilocks.inv a)).val = 1
+  rw [Goldilocks.mul_val]
+  unfold Goldilocks.inv
+  simp only [hvalNe, ↓reduceIte, Goldilocks.ofNat]
+  rw [modPowFuel_eq_pow_mod 64 a.val (goldilocksPrime - 2) goldilocksPrime (by decide),
+      Nat.mod_mod, Nat.mul_mod, Nat.mod_mod, ← Nat.mul_mod, Nat.mul_comm a.val,
+      ← Nat.pow_succ, show (goldilocksPrime - 2).succ = goldilocksPrime - 1 by decide]
+  exact (goldilocksPrime_isPrime ()).pow_sub_one_mod hnotDvd
+
+instance : NoZeroDivisors Goldilocks where
+  eq_zero_or_eq_zero_of_mul_eq_zero {a b} h := by
+    if ha : a = Goldilocks.zero then
+      exact .inl ha
+    else
+      right
+      have hmul := congrArg (CommRingOps.mul (Goldilocks.inv a)) h
+      rw [LawfulCommRing.mul_zero, ← LawfulCommRing.mul_assoc,
+          LawfulCommRing.mul_comm (Goldilocks.inv a) a,
+          Goldilocks.mul_inv_cancel ha, LawfulCommRing.one_mul] at hmul
+      exact hmul
+
+/-! ## 6. Quadratic Extension `GoldilocksExt2` ($\mathbb{F}_{p^2} = \mathbb{F}_p[u]/(u^2 - 7)$) -/
+
+structure GoldilocksExt2 where
+  c0 : Goldilocks
+  c1 : Goldilocks
+  deriving DecidableEq, Repr
+
+namespace GoldilocksExt2
+
+def nonResidue : Goldilocks := ⟨7, by decide⟩
+
+theorem ext {x y : GoldilocksExt2} (h0 : x.c0 = y.c0) (h1 : x.c1 = y.c1) : x = y := by
+  cases x; cases y; simp only at h0 h1; subst h0 h1; rfl
+
+def ofBase (a : Goldilocks) : GoldilocksExt2 := ⟨a, CommRingOps.zero⟩
+def zero : GoldilocksExt2 := ⟨CommRingOps.zero, CommRingOps.zero⟩
+def one : GoldilocksExt2 := ⟨CommRingOps.one, CommRingOps.zero⟩
+def uBasis : GoldilocksExt2 := ⟨CommRingOps.zero, CommRingOps.one⟩
+
+instance : Inhabited GoldilocksExt2 := ⟨zero⟩
+
+@[simp] theorem ofBase_c0 (a : Goldilocks) : (ofBase a).c0 = a := by unfold ofBase; rfl
+@[simp] theorem ofBase_c1 (a : Goldilocks) : (ofBase a).c1 = CommRingOps.zero := by unfold ofBase; rfl
+
+def add (x y : GoldilocksExt2) : GoldilocksExt2 :=
+  ⟨CommRingOps.add x.c0 y.c0, CommRingOps.add x.c1 y.c1⟩
+
+def neg (x : GoldilocksExt2) : GoldilocksExt2 :=
+  ⟨CommRingOps.neg x.c0, CommRingOps.neg x.c1⟩
+
+def sub (x y : GoldilocksExt2) : GoldilocksExt2 :=
+  ⟨CommRingOps.sub x.c0 y.c0, CommRingOps.sub x.c1 y.c1⟩
+
+def mul (x y : GoldilocksExt2) : GoldilocksExt2 :=
+  ⟨CommRingOps.add (CommRingOps.mul x.c0 y.c0)
+      (CommRingOps.mul nonResidue (CommRingOps.mul x.c1 y.c1)),
+   CommRingOps.add (CommRingOps.mul x.c0 y.c1) (CommRingOps.mul x.c1 y.c0)⟩
+
+instance : CommRingOps GoldilocksExt2 where
+  zero := zero
+  one := one
+  add := add
+  mul := mul
+  neg := neg
+  sub := sub
+
+instance : LawfulCommRing GoldilocksExt2 where
+  add_assoc x y z := by
+    apply ext
+    · exact LawfulCommRing.add_assoc x.c0 y.c0 z.c0
+    · exact LawfulCommRing.add_assoc x.c1 y.c1 z.c1
+  add_comm x y := by
+    apply ext
+    · exact LawfulCommRing.add_comm x.c0 y.c0
+    · exact LawfulCommRing.add_comm x.c1 y.c1
+  zero_add x := by
+    apply ext
+    · exact LawfulCommRing.zero_add x.c0
+    · exact LawfulCommRing.zero_add x.c1
+  add_zero x := by
+    apply ext
+    · exact LawfulCommRing.add_zero x.c0
+    · exact LawfulCommRing.add_zero x.c1
+  add_left_neg x := by
+    apply ext
+    · exact LawfulCommRing.add_left_neg x.c0
+    · exact LawfulCommRing.add_left_neg x.c1
+  sub_eq_add_neg x y := by
+    apply ext
+    · exact LawfulCommRing.sub_eq_add_neg x.c0 y.c0
+    · exact LawfulCommRing.sub_eq_add_neg x.c1 y.c1
+  mul_comm x y := by
+    apply ext
+    · change CommRingOps.add (CommRingOps.mul x.c0 y.c0)
+          (CommRingOps.mul nonResidue (CommRingOps.mul x.c1 y.c1)) =
+        CommRingOps.add (CommRingOps.mul y.c0 x.c0)
+          (CommRingOps.mul nonResidue (CommRingOps.mul y.c1 x.c1))
+      rw [LawfulCommRing.mul_comm x.c0 y.c0, LawfulCommRing.mul_comm x.c1 y.c1]
+    · change CommRingOps.add (CommRingOps.mul x.c0 y.c1) (CommRingOps.mul x.c1 y.c0) =
+        CommRingOps.add (CommRingOps.mul y.c0 x.c1) (CommRingOps.mul y.c1 x.c0)
+      rw [LawfulCommRing.mul_comm x.c0 y.c1, LawfulCommRing.mul_comm x.c1 y.c0,
+          LawfulCommRing.add_comm]
+  one_mul x := by
+    apply ext
+    · change CommRingOps.add (CommRingOps.mul CommRingOps.one x.c0)
+          (CommRingOps.mul nonResidue (CommRingOps.mul CommRingOps.zero x.c1)) = x.c0
+      rw [LawfulCommRing.one_mul, LawfulCommRing.zero_mul, LawfulCommRing.mul_zero,
+          LawfulCommRing.add_zero]
+    · change CommRingOps.add (CommRingOps.mul CommRingOps.one x.c1)
+          (CommRingOps.mul CommRingOps.zero x.c0) = x.c1
+      rw [LawfulCommRing.one_mul, LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
+  mul_one x := by
+    apply ext
+    · change CommRingOps.add (CommRingOps.mul x.c0 CommRingOps.one)
+          (CommRingOps.mul nonResidue (CommRingOps.mul x.c1 CommRingOps.zero)) = x.c0
+      rw [LawfulCommRing.mul_one, LawfulCommRing.mul_zero, LawfulCommRing.mul_zero,
+          LawfulCommRing.add_zero]
+    · change CommRingOps.add (CommRingOps.mul x.c0 CommRingOps.zero)
+          (CommRingOps.mul x.c1 CommRingOps.one) = x.c1
+      rw [LawfulCommRing.mul_zero, LawfulCommRing.mul_one, LawfulCommRing.zero_add]
+  left_distrib x y z := by
+    apply ext
+    · change CommRingOps.add (CommRingOps.mul x.c0 (CommRingOps.add y.c0 z.c0))
+          (CommRingOps.mul nonResidue (CommRingOps.mul x.c1 (CommRingOps.add y.c1 z.c1))) = _
+      rw [LawfulCommRing.left_distrib, LawfulCommRing.left_distrib, LawfulCommRing.left_distrib,
+          LawfulCommRing.add_add_add_comm]
+      rfl
+    · change CommRingOps.add (CommRingOps.mul x.c0 (CommRingOps.add y.c1 z.c1))
+          (CommRingOps.mul x.c1 (CommRingOps.add y.c0 z.c0)) = _
+      rw [LawfulCommRing.left_distrib, LawfulCommRing.left_distrib,
+          LawfulCommRing.add_add_add_comm]
+      rfl
+  right_distrib x y z := by
+    apply ext
+    · change CommRingOps.add (CommRingOps.mul (CommRingOps.add x.c0 y.c0) z.c0)
+          (CommRingOps.mul nonResidue (CommRingOps.mul (CommRingOps.add x.c1 y.c1) z.c1)) = _
+      rw [LawfulCommRing.right_distrib, LawfulCommRing.right_distrib, LawfulCommRing.left_distrib,
+          LawfulCommRing.add_add_add_comm]
+      rfl
+    · change CommRingOps.add (CommRingOps.mul (CommRingOps.add x.c0 y.c0) z.c1)
+          (CommRingOps.mul (CommRingOps.add x.c1 y.c1) z.c0) = _
+      rw [LawfulCommRing.right_distrib, LawfulCommRing.right_distrib,
+          LawfulCommRing.add_add_add_comm]
+      rfl
+  mul_assoc x y z := by
+    apply ext
+    · change CommRingOps.add
+          (CommRingOps.mul
+            (CommRingOps.add (CommRingOps.mul x.c0 y.c0)
+              (CommRingOps.mul nonResidue (CommRingOps.mul x.c1 y.c1))) z.c0)
+          (CommRingOps.mul nonResidue
+            (CommRingOps.mul
+              (CommRingOps.add (CommRingOps.mul x.c0 y.c1) (CommRingOps.mul x.c1 y.c0)) z.c1)) =
+        CommRingOps.add
+          (CommRingOps.mul x.c0
+            (CommRingOps.add (CommRingOps.mul y.c0 z.c0)
+              (CommRingOps.mul nonResidue (CommRingOps.mul y.c1 z.c1))))
+          (CommRingOps.mul nonResidue
+            (CommRingOps.mul x.c1
+              (CommRingOps.add (CommRingOps.mul y.c0 z.c1) (CommRingOps.mul y.c1 z.c0))))
+      rw [LawfulCommRing.right_distrib, LawfulCommRing.right_distrib,
+          LawfulCommRing.left_distrib, LawfulCommRing.left_distrib,
+          LawfulCommRing.left_distrib, LawfulCommRing.left_distrib]
+      have t1 : CommRingOps.mul (CommRingOps.mul x.c0 y.c0) z.c0 =
+          CommRingOps.mul x.c0 (CommRingOps.mul y.c0 z.c0) :=
+        LawfulCommRing.mul_assoc _ _ _
+      have t2 : CommRingOps.mul (CommRingOps.mul nonResidue (CommRingOps.mul x.c1 y.c1)) z.c0 =
+          CommRingOps.mul nonResidue (CommRingOps.mul x.c1 (CommRingOps.mul y.c1 z.c0)) := by
+        rw [LawfulCommRing.mul_assoc, LawfulCommRing.mul_assoc]
+      have t3 : CommRingOps.mul nonResidue (CommRingOps.mul (CommRingOps.mul x.c0 y.c1) z.c1) =
+          CommRingOps.mul x.c0 (CommRingOps.mul nonResidue (CommRingOps.mul y.c1 z.c1)) := by
+        rw [LawfulCommRing.mul_assoc x.c0 y.c1 z.c1,
+            ← LawfulCommRing.mul_assoc nonResidue x.c0 _,
+            LawfulCommRing.mul_comm nonResidue x.c0,
+            LawfulCommRing.mul_assoc]
+      have t4 : CommRingOps.mul nonResidue (CommRingOps.mul (CommRingOps.mul x.c1 y.c0) z.c1) =
+          CommRingOps.mul nonResidue (CommRingOps.mul x.c1 (CommRingOps.mul y.c0 z.c1)) := by
+        rw [LawfulCommRing.mul_assoc]
+      rw [t1, t2, t3, t4, LawfulCommRing.add_add_add_comm]
+      congr 1
+      exact LawfulCommRing.add_comm _ _
+    · change CommRingOps.add
+          (CommRingOps.mul
+            (CommRingOps.add (CommRingOps.mul x.c0 y.c0)
+              (CommRingOps.mul nonResidue (CommRingOps.mul x.c1 y.c1))) z.c1)
+          (CommRingOps.mul
+            (CommRingOps.add (CommRingOps.mul x.c0 y.c1) (CommRingOps.mul x.c1 y.c0)) z.c0) =
+        CommRingOps.add
+          (CommRingOps.mul x.c0
+            (CommRingOps.add (CommRingOps.mul y.c0 z.c1) (CommRingOps.mul y.c1 z.c0)))
+          (CommRingOps.mul x.c1
+            (CommRingOps.add (CommRingOps.mul y.c0 z.c0)
+              (CommRingOps.mul nonResidue (CommRingOps.mul y.c1 z.c1))))
+      rw [LawfulCommRing.right_distrib, LawfulCommRing.right_distrib,
+          LawfulCommRing.left_distrib, LawfulCommRing.left_distrib]
+      have s1 : CommRingOps.mul (CommRingOps.mul x.c0 y.c0) z.c1 =
+          CommRingOps.mul x.c0 (CommRingOps.mul y.c0 z.c1) :=
+        LawfulCommRing.mul_assoc _ _ _
+      have s2 : CommRingOps.mul (CommRingOps.mul nonResidue (CommRingOps.mul x.c1 y.c1)) z.c1 =
+          CommRingOps.mul x.c1 (CommRingOps.mul nonResidue (CommRingOps.mul y.c1 z.c1)) := by
+        rw [LawfulCommRing.mul_assoc nonResidue _ z.c1,
+            LawfulCommRing.mul_assoc x.c1 y.c1 z.c1,
+            ← LawfulCommRing.mul_assoc nonResidue x.c1 _,
+            LawfulCommRing.mul_comm nonResidue x.c1,
+            LawfulCommRing.mul_assoc]
+      have s3 : CommRingOps.mul (CommRingOps.mul x.c0 y.c1) z.c0 =
+          CommRingOps.mul x.c0 (CommRingOps.mul y.c1 z.c0) :=
+        LawfulCommRing.mul_assoc _ _ _
+      have s4 : CommRingOps.mul (CommRingOps.mul x.c1 y.c0) z.c0 =
+          CommRingOps.mul x.c1 (CommRingOps.mul y.c0 z.c0) :=
+        LawfulCommRing.mul_assoc _ _ _
+      rw [s1, s2, s3, s4, LawfulCommRing.add_add_add_comm]
+      congr 1
+      exact LawfulCommRing.add_comm _ _
+
+private theorem pow_mod_congr {x y m : Nat} (h : x % m = y % m) :
+    ∀ k : Nat, (x ^ k) % m = (y ^ k) % m
+  | 0 => rfl
+  | k + 1 => by
+    rw [Nat.pow_succ, Nat.pow_succ, Nat.mul_mod, pow_mod_congr h k, h, ← Nat.mul_mod]
+
+/-- **Quadratic Non-Residue Theorem (`GoldilocksExt2.nonResidue_not_square`)**:
+    $7$ has no square root in `Goldilocks`, so $u^2 - 7$ is irreducible over $\mathbb{F}_p$. -/
+theorem nonResidue_not_square (y : Goldilocks) :
+    CommRingOps.mul y y ≠ nonResidue := by
+  intro hsq
+  have hval : (y.val * y.val) % goldilocksPrime = 7 := by
+    have hv := congrArg Goldilocks.val hsq
+    rw [show CommRingOps.mul y y = Goldilocks.mul y y from rfl, Goldilocks.mul_val] at hv
+    exact hv
+  let half := (goldilocksPrime - 1) / 2
+  have hy2 : (y.val ^ 2) % goldilocksPrime = 7 % goldilocksPrime := by
+    have h2 : y.val ^ 2 = y.val * y.val := by simp [Nat.pow_succ]
+    rw [h2, hval]
+    decide
+  have hpowEq : ((y.val ^ 2) ^ half) % goldilocksPrime = (7 ^ half) % goldilocksPrime :=
+    pow_mod_congr hy2 half
+  rw [← Nat.pow_mul] at hpowEq
+  have h2half : 2 * half = goldilocksPrime - 1 := by decide
+  rw [h2half] at hpowEq
+  have hyNe : y.val ≠ 0 := by
+    intro hy0
+    rw [hy0] at hval
+    cases hval
+  have hnotDvd : ¬ (goldilocksPrime ∣ y.val) := fun hd => by
+    have hle := Nat.le_of_dvd (by omega) hd
+    have hlt := y.isLt
+    omega
+  have hflt := (goldilocksPrime_isPrime ()).pow_sub_one_mod hnotDvd
+  have heuler := goldilocksEuler_modPow () rfl
+  rw [hflt, heuler] at hpowEq
+  revert hpowEq
+  decide
+
+def norm (z : GoldilocksExt2) : Goldilocks :=
+  CommRingOps.sub (CommRingOps.mul z.c0 z.c0)
+    (CommRingOps.mul nonResidue (CommRingOps.mul z.c1 z.c1))
+
+theorem norm_ne_zero {z : GoldilocksExt2} (hz : z ≠ zero) :
+    norm z ≠ Goldilocks.zero := by
+  intro hnorm
+  change CommRingOps.sub (CommRingOps.mul z.c0 z.c0)
+      (CommRingOps.mul nonResidue (CommRingOps.mul z.c1 z.c1)) =
+      CommRingOps.zero at hnorm
+  have hEq : CommRingOps.mul z.c0 z.c0 =
+      CommRingOps.mul nonResidue (CommRingOps.mul z.c1 z.c1) :=
+    LawfulCommRing.sub_eq_zero_iff.mp hnorm
+  if hc1 : z.c1 = Goldilocks.zero then
+    have hrhs : CommRingOps.mul nonResidue (CommRingOps.mul z.c1 z.c1) =
+        Goldilocks.zero := by
+      rw [hc1]
+      change CommRingOps.mul nonResidue
+        (CommRingOps.mul CommRingOps.zero CommRingOps.zero) = CommRingOps.zero
+      rw [LawfulCommRing.mul_zero, LawfulCommRing.mul_zero]
+    rw [hrhs] at hEq
+    rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero hEq with hc0 | hc0 <;>
+      exact hz (ext hc0 hc1)
+  else
+    let q := CommRingOps.mul z.c0 (Goldilocks.inv z.c1)
+    have hqSq : CommRingOps.mul q q = nonResidue := by
+      dsimp only [q]
+      have hassoc : CommRingOps.mul (CommRingOps.mul z.c0 (Goldilocks.inv z.c1))
+          (CommRingOps.mul z.c0 (Goldilocks.inv z.c1)) =
+          CommRingOps.mul (CommRingOps.mul z.c0 z.c0)
+            (CommRingOps.mul (Goldilocks.inv z.c1) (Goldilocks.inv z.c1)) := by
+        rw [LawfulCommRing.mul_assoc z.c0 (Goldilocks.inv z.c1) _,
+            ← LawfulCommRing.mul_assoc (Goldilocks.inv z.c1) z.c0 _,
+            LawfulCommRing.mul_comm (Goldilocks.inv z.c1) z.c0,
+            LawfulCommRing.mul_assoc z.c0 (Goldilocks.inv z.c1) _,
+            ← LawfulCommRing.mul_assoc z.c0 z.c0 _]
+      rw [hassoc, hEq, LawfulCommRing.mul_assoc nonResidue]
+      have hcancel : CommRingOps.mul (CommRingOps.mul z.c1 z.c1)
+          (CommRingOps.mul (Goldilocks.inv z.c1) (Goldilocks.inv z.c1)) = CommRingOps.one := by
+        rw [LawfulCommRing.mul_assoc z.c1 z.c1 _,
+            ← LawfulCommRing.mul_assoc z.c1 (Goldilocks.inv z.c1) _,
+            Goldilocks.mul_inv_cancel hc1, LawfulCommRing.one_mul,
+            Goldilocks.mul_inv_cancel hc1]
+      rw [hcancel, LawfulCommRing.mul_one]
+    exact nonResidue_not_square q hqSq
+
+def inv (z : GoldilocksExt2) : GoldilocksExt2 :=
+  let invN := Goldilocks.inv (norm z)
+  ⟨CommRingOps.mul z.c0 invN, CommRingOps.neg (CommRingOps.mul z.c1 invN)⟩
+
+theorem mul_inv_cancel {z : GoldilocksExt2} (hz : z ≠ zero) :
+    CommRingOps.mul z (inv z) = CommRingOps.one := by
+  have hnormNe := norm_ne_zero hz
+  let invN := Goldilocks.inv (norm z)
+  apply ext
+  · change CommRingOps.add
+        (CommRingOps.mul z.c0 (CommRingOps.mul z.c0 invN))
+        (CommRingOps.mul nonResidue
+          (CommRingOps.mul z.c1 (CommRingOps.neg (CommRingOps.mul z.c1 invN)))) =
+      CommRingOps.one
+    rw [← LawfulCommRing.mul_assoc z.c0 z.c0 invN,
+        LawfulCommRing.mul_neg z.c1, LawfulCommRing.mul_neg nonResidue,
+        ← LawfulCommRing.mul_assoc z.c1 z.c1 invN,
+        ← LawfulCommRing.mul_assoc nonResidue _ invN,
+        ← LawfulCommRing.sub_eq_add_neg,
+        ← LawfulCommRing.sub_mul]
+    exact Goldilocks.mul_inv_cancel hnormNe
+  · change CommRingOps.add
+        (CommRingOps.mul z.c0 (CommRingOps.neg (CommRingOps.mul z.c1 invN)))
+        (CommRingOps.mul z.c1 (CommRingOps.mul z.c0 invN)) =
+      CommRingOps.zero
+    rw [LawfulCommRing.mul_neg,
+        ← LawfulCommRing.mul_assoc z.c0 z.c1 invN,
+        ← LawfulCommRing.mul_assoc z.c1 z.c0 invN,
+        LawfulCommRing.mul_comm z.c1 z.c0,
+        LawfulCommRing.add_left_neg]
+
+theorem ofBase_injective {a b : Goldilocks} (h : ofBase a = ofBase b) : a = b :=
+  congrArg c0 h
+
+theorem ofBase_add (a b : Goldilocks) :
+    ofBase (CommRingOps.add a b) = CommRingOps.add (ofBase a) (ofBase b) := by
+  apply ext
+  · rfl
+  · exact (LawfulCommRing.add_zero _).symm
+
+theorem ofBase_sub (a b : Goldilocks) :
+    ofBase (CommRingOps.sub a b) = CommRingOps.sub (ofBase a) (ofBase b) := by
+  apply ext
+  · rfl
+  · exact (LawfulCommRing.sub_self _).symm
+
+theorem ofBase_mul (a b : Goldilocks) :
+    ofBase (CommRingOps.mul a b) = CommRingOps.mul (ofBase a) (ofBase b) := by
+  apply ext
+  · change CommRingOps.mul a b =
+      CommRingOps.add (CommRingOps.mul a b)
+        (CommRingOps.mul nonResidue (CommRingOps.mul CommRingOps.zero CommRingOps.zero))
+    rw [LawfulCommRing.mul_zero, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+  · change CommRingOps.zero =
+      CommRingOps.add (CommRingOps.mul a CommRingOps.zero) (CommRingOps.mul CommRingOps.zero b)
+    rw [LawfulCommRing.mul_zero, LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
+
+end GoldilocksExt2
+
+instance : NoZeroDivisors GoldilocksExt2 where
+  eq_zero_or_eq_zero_of_mul_eq_zero {a b} h := by
+    if ha : a = GoldilocksExt2.zero then
+      exact .inl ha
+    else
+      right
+      have hmul := congrArg (CommRingOps.mul (GoldilocksExt2.inv a)) h
+      rw [LawfulCommRing.mul_zero, ← LawfulCommRing.mul_assoc,
+          LawfulCommRing.mul_comm (GoldilocksExt2.inv a) a,
+          GoldilocksExt2.mul_inv_cancel ha, LawfulCommRing.one_mul] at hmul
+      exact hmul
+
+/-- Challenge space lower bound: $|\mathbb{F}_{p^2}| = p^2 > 2^{127}$. -/
+theorem goldilocksExt2_card_gt_two_pow_126 (k : Nat) (hk : k ≤ 127) :
+    2 ^ k < goldilocksPrime ^ 2 := by
+  have hpow : 2 ^ k ≤ 2 ^ 127 := Nat.pow_le_pow_right (by decide) hk
+  have hlt : 2 ^ 127 < goldilocksPrime ^ 2 := by decide
+  exact Nat.lt_of_le_of_lt hpow hlt
+
+/-! ## 7. Univariate Polynomials (`RoundPoly R`) & Factor-Theorem Root Bound -/
+
+structure RoundPoly (R : Type) where
+  coeffs : List R
+  deriving DecidableEq, Repr
+
+namespace RoundPoly
+
+@[expose] def evalCoeffs {R : Type} [CommRingOps R] : List R → R → R
+  | [], _ => CommRingOps.zero
+  | c :: cs, x => CommRingOps.add c (CommRingOps.mul x (evalCoeffs cs x))
+
+@[simp] theorem evalCoeffs_nil {R : Type} [CommRingOps R] (x : R) :
+    evalCoeffs ([] : List R) x = CommRingOps.zero := rfl
+
+@[simp] theorem evalCoeffs_cons {R : Type} [CommRingOps R] (c : R) (cs : List R) (x : R) :
+    evalCoeffs (c :: cs) x = CommRingOps.add c (CommRingOps.mul x (evalCoeffs cs x)) := rfl
+
+def eval {R : Type} [CommRingOps R] (p : RoundPoly R) (x : R) : R :=
+  evalCoeffs p.coeffs x
+
+def subCoeffs {R : Type} [CommRingOps R] : List R → List R → List R
+  | [], [] => []
+  | c :: cs, [] => c :: subCoeffs cs []
+  | [], d :: ds => CommRingOps.neg d :: subCoeffs [] ds
+  | c :: cs, d :: ds => CommRingOps.sub c d :: subCoeffs cs ds
+
+theorem subCoeffs_length :
+    ∀ {R : Type} [CommRingOps R] (cs ds : List R),
+      (subCoeffs cs ds).length = Nat.max cs.length ds.length
+  | _, _, [], [] => by simp [subCoeffs]
+  | _, _, _ :: cs, [] => by simp [subCoeffs, subCoeffs_length cs []]
+  | _, _, [], _ :: ds => by simp [subCoeffs, subCoeffs_length [] ds]
+  | _, _, _ :: cs, _ :: ds => by
+    simp [subCoeffs, subCoeffs_length cs ds, Nat.succ_max_succ]
+
+theorem evalCoeffs_sub {R : Type} [LawfulCommRing R] :
+    ∀ (cs ds : List R) (x : R),
+      evalCoeffs (subCoeffs cs ds) x = CommRingOps.sub (evalCoeffs cs x) (evalCoeffs ds x)
+  | [], [], _ => by
+    simp [subCoeffs, evalCoeffs, LawfulCommRing.sub_self]
+  | c :: cs, [], x => by
+    simp only [subCoeffs, evalCoeffs, evalCoeffs_sub cs [] x]
+    rw [LawfulCommRing.sub_zero, LawfulCommRing.sub_zero]
+  | [], d :: ds, x => by
+    simp only [subCoeffs, evalCoeffs, evalCoeffs_sub [] ds x]
+    rw [LawfulCommRing.sub_eq_add_neg CommRingOps.zero (evalCoeffs ds x),
+        LawfulCommRing.zero_add, LawfulCommRing.mul_neg,
+        LawfulCommRing.sub_eq_add_neg CommRingOps.zero _,
+        LawfulCommRing.zero_add]
+    apply LawfulCommRing.add_left_cancel
+      (a := CommRingOps.add d (CommRingOps.mul x (evalCoeffs ds x)))
+    rw [LawfulCommRing.add_right_neg,
+        LawfulCommRing.add_add_add_comm,
+        LawfulCommRing.add_right_neg,
+        LawfulCommRing.add_right_neg,
+        LawfulCommRing.add_zero]
+  | c :: cs, d :: ds, x => by
+    simp only [subCoeffs, evalCoeffs, evalCoeffs_sub cs ds x]
+    rw [LawfulCommRing.mul_sub]
+    apply LawfulCommRing.add_left_cancel
+      (a := CommRingOps.add d (CommRingOps.mul x (evalCoeffs ds x)))
+    rw [LawfulCommRing.add_sub_cancel_left]
+    rw [LawfulCommRing.add_add_add_comm,
+        LawfulCommRing.add_sub_cancel_left,
+        LawfulCommRing.add_sub_cancel_left]
+
+/-- Monic synthetic linear division quotient `(p(X) - p(r)) / (X - r)`. -/
+def quotLinear {R : Type} [CommRingOps R] : List R → R → List R
+  | [], _ => []
+  | [_], _ => []
+  | _ :: c₁ :: cs, r => evalCoeffs (c₁ :: cs) r :: quotLinear (c₁ :: cs) r
+
+theorem quotLinear_length {R : Type} [CommRingOps R] :
+    ∀ (cs : List R) (r : R), (quotLinear cs r).length = cs.length - 1
+  | [], _ => rfl
+  | [_], _ => rfl
+  | _ :: c₁ :: cs, r => by
+    simp only [quotLinear, List.length_cons, quotLinear_length (c₁ :: cs) r]
+    simp
+
+/-- **Factor Theorem Identity (`evalCoeffs_eq_mul_quotLinear_add`)**:
+    $p(x) = (x - r) \cdot q(x) + p(r)$ in every `LawfulCommRing R`. -/
+theorem evalCoeffs_eq_mul_quotLinear_add {R : Type} [LawfulCommRing R] :
+    ∀ (cs : List R) (r x : R),
+      evalCoeffs cs x =
+        CommRingOps.add
+          (CommRingOps.mul (CommRingOps.sub x r) (evalCoeffs (quotLinear cs r) x))
+          (evalCoeffs cs r)
+  | [], r, x => by
+    simp [quotLinear, evalCoeffs, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+  | [c₀], r, x => by
+    simp [quotLinear, evalCoeffs, LawfulCommRing.mul_zero, LawfulCommRing.zero_add]
+  | c₀ :: c₁ :: cs, r, x => by
+    let tl := c₁ :: cs
+    have ih := evalCoeffs_eq_mul_quotLinear_add tl r x
+    change CommRingOps.add c₀ (CommRingOps.mul x (evalCoeffs tl x)) =
+      CommRingOps.add
+        (CommRingOps.mul (CommRingOps.sub x r)
+          (CommRingOps.add (evalCoeffs tl r) (CommRingOps.mul x (evalCoeffs (quotLinear tl r) x))))
+        (CommRingOps.add c₀ (CommRingOps.mul r (evalCoeffs tl r)))
+    rw [ih]
+    rw [LawfulCommRing.left_distrib x,
+        LawfulCommRing.left_distrib (CommRingOps.sub x r),
+        LawfulCommRing.sub_mul x r (evalCoeffs tl r)]
+    have hcommX : CommRingOps.mul (CommRingOps.sub x r)
+        (CommRingOps.mul x (evalCoeffs (quotLinear tl r) x)) =
+        CommRingOps.mul x
+          (CommRingOps.mul (CommRingOps.sub x r) (evalCoeffs (quotLinear tl r) x)) := by
+      rw [← LawfulCommRing.mul_assoc, LawfulCommRing.mul_comm (CommRingOps.sub x r) x,
+          LawfulCommRing.mul_assoc]
+    rw [hcommX]
+    apply LawfulCommRing.add_left_cancel (a := CommRingOps.mul r (evalCoeffs tl r))
+    let A := CommRingOps.mul r (evalCoeffs tl r)
+    let B := CommRingOps.mul x (evalCoeffs tl r)
+    let C := CommRingOps.mul x (CommRingOps.mul (CommRingOps.sub x r) (evalCoeffs (quotLinear tl r) x))
+    change CommRingOps.add A (CommRingOps.add c₀ (CommRingOps.add C B)) =
+      CommRingOps.add A (CommRingOps.add (CommRingOps.add (CommRingOps.sub B A) C) (CommRingOps.add c₀ A))
+    rw [← LawfulCommRing.add_assoc A (CommRingOps.add (CommRingOps.sub B A) C) (CommRingOps.add c₀ A),
+        ← LawfulCommRing.add_assoc A (CommRingOps.sub B A) C,
+        LawfulCommRing.add_sub_cancel_left A B]
+    rw [LawfulCommRing.add_comm C B,
+        LawfulCommRing.add_comm c₀ A,
+        ← LawfulCommRing.add_assoc A c₀ (CommRingOps.add B C),
+        LawfulCommRing.add_comm A c₀,
+        LawfulCommRing.add_assoc c₀ A (CommRingOps.add B C),
+        ← LawfulCommRing.add_assoc c₀ A (CommRingOps.add B C),
+        LawfulCommRing.add_comm (CommRingOps.add c₀ A) (CommRingOps.add B C)]
+
+private theorem mem_of_mem_filter_local {α : Type} {p : α → Bool} {x : α} :
+    ∀ {l : List α}, x ∈ l.filter p → x ∈ l
+  | [], h => by cases h
+  | _ :: _, h => by
+    simp only [List.filter] at h
+    split at h
+    · cases h with
+      | head => exact .head _
+      | tail _ hm => exact .tail _ (mem_of_mem_filter_local hm)
+    · exact .tail _ (mem_of_mem_filter_local h)
+
+private theorem pred_of_mem_filter_local {α : Type} {p : α → Bool} {x : α} :
+    ∀ {l : List α}, x ∈ l.filter p → p x = true
+  | [], h => by cases h
+  | _ :: _, h => by
+    simp only [List.filter] at h
+    split at h
+    · rename_i hpx
+      cases h with
+      | head => exact hpx
+      | tail _ hm => exact pred_of_mem_filter_local hm
+    · exact pred_of_mem_filter_local h
+
+private theorem nodup_filter_local {α : Type} (p : α → Bool) :
+    ∀ {l : List α}, l.Nodup → (l.filter p).Nodup
+  | [], _ => .nil
+  | _ :: _, .cons hrel htail => by
+    simp only [List.filter]
+    split
+    · exact .cons (fun b hb => hrel b (mem_of_mem_filter_local hb)) (nodup_filter_local p htail)
+    · exact nodup_filter_local p htail
+
+private theorem filter_eq_self_of_forall {α : Type} {p : α → Bool} :
+    ∀ {xs : List α}, (∀ x ∈ xs, p x = true) → xs.filter p = xs
+  | [], _ => rfl
+  | y :: ys, h => by
+    have hy := h y (.head _)
+    simp only [List.filter, hy]
+    exact congrArg (y :: ·) (filter_eq_self_of_forall (fun z hz => h z (.tail _ hz)))
+
+/-- **Lagrange / Factor-Theorem Root-Counting Bound (`roots_nodup_length_le`)**:
+    Over every `LawfulCommRing R` without zero divisors, any non-zero polynomial of formal
+    degree $\le d$ has at most `d` roots in any duplicate-free list `S : List R`. -/
+theorem roots_nodup_length_le
+    {R : Type} [LawfulCommRing R] [DecidableEq R] [NoZeroDivisors R] :
+    ∀ (d : Nat) (cs : List R) (S : List R),
+      S.Nodup →
+      cs.length ≤ d + 1 →
+      (∃ x₀ : R, evalCoeffs cs x₀ ≠ CommRingOps.zero) →
+      (S.filter (fun r => decide (evalCoeffs cs r = CommRingOps.zero))).length ≤ d
+  | 0, cs, S, _, hlen, ⟨x₀, hx₀⟩ => by
+    have hempty : S.filter (fun r => decide (evalCoeffs cs r = CommRingOps.zero)) = [] := by
+      cases hfilt : S.filter (fun r => decide (evalCoeffs cs r = CommRingOps.zero)) with
+      | nil => rfl
+      | cons r rs =>
+        exfalso
+        have hpred := pred_of_mem_filter_local (p := fun r => decide (evalCoeffs cs r = CommRingOps.zero))
+          (l := S) (x := r) (by rw [hfilt]; exact .head _)
+        rw [decide_eq_true_eq] at hpred
+        cases cs with
+        | nil => exact hx₀ rfl
+        | cons c₀ tl =>
+          cases tl with
+          | nil =>
+            simp only [evalCoeffs, LawfulCommRing.mul_zero, LawfulCommRing.add_zero] at hpred hx₀
+            exact hx₀ hpred
+          | cons _ _ =>
+            simp only [List.length_cons] at hlen
+            omega
+    rw [hempty]
+    exact Nat.le_refl 0
+  | d + 1, cs, S, hNodup, hlen, ⟨x₀, hx₀⟩ => by
+    have hndRoots : (S.filter (fun r => decide (evalCoeffs cs r = CommRingOps.zero))).Nodup :=
+      nodup_filter_local _ hNodup
+    cases hRoots : S.filter (fun r => decide (evalCoeffs cs r = CommRingOps.zero)) with
+    | nil => simp
+    | cons r rest =>
+      rw [hRoots] at hndRoots
+      cases hndRoots with
+      | cons hNotMem hndRest =>
+        have hrRoot : evalCoeffs cs r = CommRingOps.zero := by
+          have hp := pred_of_mem_filter_local
+            (p := fun r => decide (evalCoeffs cs r = CommRingOps.zero))
+            (l := S) (x := r) (by rw [hRoots]; exact .head _)
+          exact of_decide_eq_true hp
+        let qcs := quotLinear cs r
+        have hqLen : qcs.length ≤ d + 1 := by
+          dsimp [qcs]; rw [quotLinear_length]; omega
+        have hqNonzero : ∃ x₁ : R, evalCoeffs qcs x₁ ≠ CommRingOps.zero := by
+          refine ⟨x₀, fun hq0 => hx₀ ?_⟩
+          rw [evalCoeffs_eq_mul_quotLinear_add cs r x₀, hq0, hrRoot,
+              LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+        have hSubRest : ∀ y ∈ rest, decide (evalCoeffs qcs y = CommRingOps.zero) = true := by
+          intro y hy
+          have hyInFilt : y ∈ S.filter (fun r => decide (evalCoeffs cs r = CommRingOps.zero)) := by
+            rw [hRoots]; exact .tail _ hy
+          have hyRoot : evalCoeffs cs y = CommRingOps.zero :=
+            of_decide_eq_true
+              (pred_of_mem_filter_local (p := fun r => decide (evalCoeffs cs r = CommRingOps.zero)) hyInFilt)
+          have hyNeR : y ≠ r := fun heq => hNotMem y hy heq.symm
+          have hSubNe : CommRingOps.sub y r ≠ CommRingOps.zero :=
+            fun hsub0 => hyNeR (LawfulCommRing.sub_eq_zero_iff.mp hsub0)
+          have hfac := evalCoeffs_eq_mul_quotLinear_add cs r y
+          rw [hyRoot, hrRoot, LawfulCommRing.add_zero] at hfac
+          rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero hfac.symm with hbad | hqy0
+          · exact False.elim (hSubNe hbad)
+          · exact decide_eq_true hqy0
+        have hRestEq : rest.filter (fun y => decide (evalCoeffs qcs y = CommRingOps.zero)) = rest :=
+          filter_eq_self_of_forall hSubRest
+        have ih := roots_nodup_length_le d qcs rest hndRest hqLen hqNonzero
+        rw [hRestEq] at ih
+        simp only [List.length_cons]
+        omega
+
+end RoundPoly
+end Qsag
+end

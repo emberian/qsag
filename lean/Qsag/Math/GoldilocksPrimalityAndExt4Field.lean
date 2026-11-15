@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.GoldilocksPrimalityAndExt4Field — Constructive Primality, Universal Inversion & Quartic Field
+# Qsag.Math.GoldilocksPrimalityAndExt4Field — Constructive Primality, Universal Inversion & Quartic Field
 
 Self-contained Lean 4.35 algebraic foundation closing universal primality, inversion, and quartic
 irreducibility obligations over `Qsag.Goldilocks` (`0 sorry`, `0 Classical.choice`, `0 native_decide`):
@@ -13,8 +13,8 @@ irreducibility obligations over `Qsag.Goldilocks` (`0 sorry`, `0 Classical.choic
    Division (`v_pow4_sub_seven_irreducible`, `ext4_mul_inv_cancel`, `towerToPoly_mul_hom`)**.
 -/
 
-public import Qsag.Goldilocks
-import all Qsag.Goldilocks
+public import Qsag.Math.Goldilocks
+import all Qsag.Math.Goldilocks
 import Qsag.Tactic.AssuranceKit
 
 public section

@@ -14,9 +14,9 @@ with Wiedemann's binary tower `Tower128`:
 -/
 
 public import Qsag.Math.QuarticExt4
-public import Qsag.Gf128ClmulLoopAgreement
-import all Qsag.BinaryTower
-import all Qsag.Tower128PolyBasisIso
+public import Qsag.Machine.Gf128ClmulLoopAgreement
+import all Qsag.Math.BinaryTower
+import all Qsag.Math.Tower128PolyBasisIso
 import Qsag.Tactic.AssuranceKit
 
 public section
