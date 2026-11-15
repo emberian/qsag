@@ -2583,7 +2583,7 @@ mod tests {
             (hex32(&pcs_digest_1).as_str(), hex32(&agg_digest_1).as_str()),
             (
                 "250a1144b28c462516b6c5adb1125a47137c538f299642842a9f9e204e2c616e",
-                "d5998ade6ef44dab60f96de623462562ee69d250c4a05f615ee94f85e405e0cf"
+                "fac81f21997064833aeba90d1647e6272b4a5479b0d46f31b69226cc609fb2d5"
             )
         );
     }

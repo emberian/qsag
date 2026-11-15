@@ -86,7 +86,7 @@ impl Layout {
     pub fn new(shape: &Shape, regime: WhirSecurityRegime) -> Option<Self> {
         (4..=MAX_PCS_NUM_VARS).find_map(|log_cells| {
             let cells = 1usize << log_cells;
-            let masks = (shape.log_rows * 4 << ROW_MASK_BITS) + (log_cells * 4 << COL_MASK_BITS);
+            let masks = ((shape.log_rows * 4) << ROW_MASK_BITS) + ((log_cells * 4) << COL_MASK_BITS);
             let mask_cells = masks.next_power_of_two();
             let schedule = regime.schedule(log_cells);
             let st0 = schedule.stages[0];
@@ -109,7 +109,7 @@ impl Layout {
 
     #[inline]
     fn col_mask_block(&self, log_rows: usize, round: usize, limb: usize) -> usize {
-        (log_rows * 4 << ROW_MASK_BITS) + ((round * 4 + limb) << COL_MASK_BITS)
+        ((log_rows * 4) << ROW_MASK_BITS) + ((round * 4 + limb) << COL_MASK_BITS)
     }
 }
 
@@ -931,8 +931,9 @@ mod tests {
         let regime = REGIMES[0];
         let proof = prove(&shape, z, b"s", regime, &[3; 32]).unwrap();
         assert!(verify(&shape, &[], b"s", regime, &proof));
+        type Mutation = fn(&mut ZkHemProof, &dyn Fn(&mut E));
         let bump = |x: &mut E| *x += E::ONE;
-        let mutations: Vec<fn(&mut ZkHemProof, &dyn Fn(&mut E))> = vec![
+        let mutations: Vec<Mutation> = vec![
             |p, b| b(&mut p.row_mask_sum),
             |p, b| b(&mut p.row_rounds[0][3]),
             |p, b| b(&mut p.row_rounds.last_mut().unwrap()[9]),
