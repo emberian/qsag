@@ -1,11 +1,11 @@
 module
-public import Qsag.RssParticipantMachine
-public import Qsag.Rss256TernaryRound
-import all Qsag.RssParticipantMachine
-import all Qsag.RssParticipantKeccak
-import all Qsag.ThresholdMpc
-import all Qsag.Rss256TernaryRound
-import all Qsag.BinaryTower
+public import Qsag.Exec.RssParticipantMachine
+public import Qsag.Protocol.Threshold.Rss256TernaryRound
+import all Qsag.Exec.RssParticipantMachine
+import all Qsag.Exec.RssParticipantKeccak
+import all Qsag.Protocol.Threshold.ThresholdMpc
+import all Qsag.Protocol.Threshold.Rss256TernaryRound
+import all Qsag.Math.BinaryTower
 import Qsag.Tactic.AssuranceKit
 
 /-!

@@ -1,7 +1,7 @@
 module
-public import Qsag.RssParticipantKeccak
-import all Qsag.RssParticipantKeccak
-import all Qsag.ThresholdMpc
+public import Qsag.Exec.RssParticipantKeccak
+import all Qsag.Exec.RssParticipantKeccak
+import all Qsag.Protocol.Threshold.ThresholdMpc
 import Qsag.Tactic.AssuranceKit
 
 /-!

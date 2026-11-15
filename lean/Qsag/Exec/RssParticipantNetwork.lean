@@ -1,6 +1,6 @@
 module
-public import Qsag.RssParticipantMachine
-import all Qsag.RssParticipantMachine
+public import Qsag.Exec.RssParticipantMachine
+import all Qsag.Exec.RssParticipantMachine
 import Qsag.Tactic.AssuranceKit
 
 /-!

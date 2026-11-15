@@ -1,6 +1,6 @@
 module
-public import Qsag.ThresholdMpc
-import all Qsag.ThresholdMpc
+public import Qsag.Protocol.Threshold.ThresholdMpc
+import all Qsag.Protocol.Threshold.ThresholdMpc
 import Qsag.Tactic.AssuranceKit
 
 /-!

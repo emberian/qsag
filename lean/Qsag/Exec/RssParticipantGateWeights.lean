@@ -1,9 +1,9 @@
 module
-public import Qsag.RssParticipantGateField
-import all Qsag.RssParticipantGateField
-import all Qsag.RssParticipantGateChecks
-import all Qsag.Rss256TernaryRound
-import all Qsag.BinaryTower
+public import Qsag.Exec.RssParticipantGateField
+import all Qsag.Exec.RssParticipantGateField
+import all Qsag.Exec.RssParticipantGateChecks
+import all Qsag.Protocol.Threshold.Rss256TernaryRound
+import all Qsag.Math.BinaryTower
 import Qsag.Tactic.AssuranceKit
 
 /-! Multilinear monomial weighting used by `keccak_mpc.rs`, where each binary

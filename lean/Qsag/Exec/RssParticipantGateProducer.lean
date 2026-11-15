@@ -1,12 +1,12 @@
 module
-public import Qsag.RssParticipantGateEvidence
-import all Qsag.RssParticipantGateEvidence
-import all Qsag.RssParticipantMachine
-import all Qsag.RssParticipantKeccak
-import all Qsag.RssParticipantSponge
-import all Qsag.RssSigningBackend
-import all Qsag.RssSigningHashCalls
-import all Qsag.ThresholdMpc
+public import Qsag.Exec.RssParticipantGateEvidence
+import all Qsag.Exec.RssParticipantGateEvidence
+import all Qsag.Exec.RssParticipantMachine
+import all Qsag.Exec.RssParticipantKeccak
+import all Qsag.Exec.RssParticipantSponge
+import all Qsag.Exec.RssSigningBackend
+import all Qsag.Exec.RssSigningHashCalls
+import all Qsag.Protocol.Threshold.ThresholdMpc
 import Qsag.Tactic.AssuranceKit
 
 /-! Preservation of checked extraction through the actual honest participant

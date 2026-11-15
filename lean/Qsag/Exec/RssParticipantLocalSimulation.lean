@@ -1,9 +1,9 @@
 module
-public import Qsag.RssParticipantMachine
-import all Qsag.RssParticipantMachine
-import all Qsag.RssParticipantKeccak
-import all Qsag.ThresholdMpc
-import all Qsag.UcGames
+public import Qsag.Exec.RssParticipantMachine
+import all Qsag.Exec.RssParticipantMachine
+import all Qsag.Exec.RssParticipantKeccak
+import all Qsag.Protocol.Threshold.ThresholdMpc
+import all Qsag.Oracle.UcGames
 import Qsag.Tactic.AssuranceKit
 
 /-!

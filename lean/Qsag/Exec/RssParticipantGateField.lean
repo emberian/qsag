@@ -1,11 +1,11 @@
 module
-public import Qsag.RssParticipantGateChecks
-public import Qsag.Tower128PolyBasisIso
-import all Qsag.RssParticipantGateChecks
-import all Qsag.Tower128PolyBasisIso
-import all Qsag.ActiveMigrationZeroTest
-import all Qsag.BinaryTower
-import all Qsag.Rss256TernaryRound
+public import Qsag.Exec.RssParticipantGateChecks
+public import Qsag.Math.Tower128PolyBasisIso
+import all Qsag.Exec.RssParticipantGateChecks
+import all Qsag.Math.Tower128PolyBasisIso
+import all Qsag.Protocol.Migration.ActiveMigrationZeroTest
+import all Qsag.Math.BinaryTower
+import all Qsag.Protocol.Threshold.Rss256TernaryRound
 import Qsag.Tactic.AssuranceKit
 
 /-! Polynomial-basis adapter for the actual `keccak_mpc.rs` final product check.

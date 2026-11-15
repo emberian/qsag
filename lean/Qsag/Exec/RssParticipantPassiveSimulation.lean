@@ -1,9 +1,9 @@
 module
-public import Qsag.RssParticipantLocalSimulation
-import all Qsag.RssParticipantLocalSimulation
-import all Qsag.RssParticipantMachine
-import all Qsag.RssParticipantKeccak
-import all Qsag.UcGames
+public import Qsag.Exec.RssParticipantLocalSimulation
+import all Qsag.Exec.RssParticipantLocalSimulation
+import all Qsag.Exec.RssParticipantMachine
+import all Qsag.Exec.RssParticipantKeccak
+import all Qsag.Oracle.UcGames
 import Qsag.Tactic.AssuranceKit
 
 /-!
