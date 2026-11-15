@@ -1,14 +1,13 @@
 module
+public import Qsag.Protocol.Aggregation.QromSaltedMerkleStateRestoration
 /- Executed, nonconstant decoder consuming openings and the actual Hem checker. -/
 public import Qsag.Protocol.Aggregation.HemExtractedOpeningBridge
-public import Qsag.Tests.QromMeasuredMerkleExtractionTests
+public import Qsag.Tests.OracleAndQrom
 import all Qsag.Protocol.Aggregation.HemExtractedOpeningBridge
-import all Qsag.Oracle.QromBatchMerkleExtraction
-import all Qsag.Tests.QromMeasuredMerkleExtractionTests
-import all Qsag.Oracle.QromMeasuredMerkleExtraction
-import all Qsag.Oracle.QromMeasuredQueryExperiment
+import all Qsag.Oracle.Qrom
+import all Qsag.Tests.OracleAndQrom
 import all Qsag.Protocol.Aggregation.HemVerifierAcceptance
-import all Qsag.Oracle.MultiRoundFsQrom
+import all Qsag.Protocol.Aggregation.MultiRoundFsQrom
 
 public section
 namespace Qsag
@@ -74,5 +73,65 @@ theorem toy_hem_substitution_bound_instance :
   Qsag.toy_batch_duplicate_execution
   Qsag.toy_hem_substitution_bound_instance
   Qsag.toyHemInstance_invalid
+end Qsag
+end
+
+public section
+namespace Qsag
+/-- Explicit unsalted (`cardSalt = 1`) 4-address finite Canopy instance showing why omitting
+    per-commitment salts enables a 0-online-query collision attack under 2 bits of offline advice. -/
+def unsaltedFourAddressCanopy : SaltedCanopyLayout 1 4 1 where
+  encode := fun _ _ _ u v =>
+    ⟨u.toNat * 2 + v.toNat, by
+      have hu := u.isLt
+      have hv := v.isLt
+      omega⟩
+  decode := fun x =>
+    some (0, 0, 0, BitVec.ofNat 1 (x.1 / 2), BitVec.ofNat 1 (x.1 % 2))
+  levels := 1
+  nodes := 1
+  decode_sound := by
+    intro x s l n u v h
+    injection h with hEq
+    rcases hEq with ⟨_, _, _, rfl, rfl⟩
+    apply Fin.ext
+    dsimp
+    have hx := x.isLt
+    have h1 : (BitVec.ofNat 1 (x.1 / 2)).toNat = x.1 / 2 := by
+      rw [BitVec.toNat_ofNat]; omega
+    have h2 : (BitVec.ofNat 1 (x.1 % 2)).toNat = x.1 % 2 := by
+      rw [BitVec.toNat_ofNat]; omega
+    rw [h1, h2]
+    omega
+  decode_encode := by
+    intro s l n u v hl hn
+    have hs : s = 0 := Fin.ext (by omega)
+    have hl0 : l = 0 := by omega
+    have hn0 : n = 0 := by omega
+    subst hs hl0 hn0
+    dsimp
+    have hu := u.isLt
+    have hv := v.isLt
+    have hU : BitVec.ofNat 1 ((u.toNat * 2 + v.toNat) / 2) = u := by
+      apply BitVec.eq_of_toNat_eq
+      rw [BitVec.toNat_ofNat]; omega
+    have hV : BitVec.ofNat 1 ((u.toNat * 2 + v.toNat) % 2) = v := by
+      apply BitVec.eq_of_toNat_eq
+      rw [BitVec.toNat_ofNat]; omega
+    rw [hU, hV]
+
+/-- `#tooth`: without fresh salting (`cardSalt = 1`), 2 bits of offline advice find an explicit
+    oracle collision in 0 online queries on 100% (`8 / 8`) of 1-bit 3-address oracles. -/
+theorem tooth_unsalted_canopy_preprocessed_collision :
+    ∃ (A : PreprocessingGame.ClassicalAdvice 3 1 1 2 0 (Fin 3 × Fin 3)),
+      PreprocessingGame.adviceWinCount A
+        (fun H _ pair => PreprocessingGame.collisionWin H pair) = (2 ^ 1) ^ 3 ∧
+      (∀ H : Fin 3 → BitVec 1, (A.run H 0).2 = 0) ∧
+      unsaltedFourAddressCanopy.levels = 1 :=
+  ⟨PreprocessingGame.storedCollision, PreprocessingGame.storedCollision_count,
+   fun _ => rfl, rfl⟩
+
+
+#tooth_pair saltedCanopy_fresh_salt_preprocessed_bound vs tooth_unsalted_canopy_preprocessed_collision
 end Qsag
 end

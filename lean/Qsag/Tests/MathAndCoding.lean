@@ -1850,3 +1850,947 @@ theorem inhabited_curve_leaf_root_decomp :
     by decide +kernel, by decide +kernel⟩
 
 /-- Applying the decomposition to `Res_Z(Z,W)` produces an actual common-root leaf. -/
+theorem inhabited_curve_common_root :
+    ∃ (E : Poly2 Goldilocks) (hP : IsPrimY E) (hD : 1 ≤ E.natDeg)
+      (ζ : ModMonic (monicFY E hP hD)),
+      ((mapHom (modPoly2Hom E hP hD)).toFun (embedUZ.toFun (X : Poly2 Goldilocks))).eval ζ = zero ∧
+      ((mapHom (modPoly2Hom E hP hD)).toFun (C (X : Poly2 Goldilocks))).eval ζ = zero := by
+  obtain ⟨Es, _, hCover, hLeaves⟩ :=
+    curve_leaf_root_decomp (h_C := 1) (H₀ := 0) (C₁ := (X : Poly2 Goldilocks))
+      (P₀ := C X) (by decide +kernel) (by decide +kernel) (by decide +kernel)
+      X (isPrimY_monic_deg1_loc zero) (by decide +kernel) ⟨one, by decide +kernel⟩
+  obtain ⟨E, hMem, _⟩ := hCover zero zero (by decide +kernel)
+  obtain ⟨hP, hD, hDiv | hRoot⟩ := hLeaves E hMem
+  · obtain ⟨Q, hQ⟩ := hDiv
+    have hDeriv : sylResDeriv 1 0 (embedUZ.toFun (X : Poly2 Goldilocks)) (C X) one = one :=
+      by decide +kernel
+    rw [hDeriv] at hQ
+    have hQne : Q ≠ zero := fun e => NontrivialRing.one_ne_zero (by rw [hQ, e, LawfulCommRing.mul_zero])
+    have hDegree := UPoly.natDeg_mul hP.1 hQne
+    rw [← hQ, natDeg_one] at hDegree
+    exfalso
+    omega
+  · obtain ⟨ζ, hC, hP₀⟩ := hRoot.2
+    exact ⟨E, hP, hD, ζ, hC, hP₀⟩
+
+/-- Without resultant divisibility, `C₁=Z`, `P₀=1`, and the curve `W=0` cannot
+have the asserted decomposition: neither a derivative-divisor leaf nor a common root exists. -/
+theorem tooth_curve_leaf_root_decomp_needs_divisibility :
+    ∃ (C₁ E : Poly2 Goldilocks) (P₀ : UPoly (Poly2 Goldilocks)),
+      C₁.natDeg ≤ 1 ∧ coeffAt C₁.coeffs 1 = one ∧ P₀.natDeg ≤ 0 ∧
+      IsPrimY E ∧ 1 ≤ tdeg E ∧
+      ¬ ∃ Es : List (Poly2 Goldilocks),
+        (Es.map tdeg).sum = tdeg E ∧
+        (∀ u w, E.eval2 u w = zero → ∃ Ej ∈ Es, Ej.eval2 u w = zero) ∧
+        ∀ Ej ∈ Es, ∃ (hPj : IsPrimY Ej) (hDj : 1 ≤ Ej.natDeg),
+          (∃ Qg, sylResDeriv 1 0 (embedUZ.toFun C₁) P₀ one = mul Ej Qg) ∨
+          (CoprimeZ Ej (sylResDeriv 1 0 (embedUZ.toFun C₁) P₀ one) ∧
+            ∃ ζ : ModMonic (monicFY Ej hPj hDj),
+              ((mapHom (modPoly2Hom Ej hPj hDj)).toFun (embedUZ.toFun C₁)).eval ζ = zero ∧
+              ((mapHom (modPoly2Hom Ej hPj hDj)).toFun P₀).eval ζ = zero) := by
+  refine ⟨X, X, one, by decide +kernel, by decide +kernel, by decide +kernel,
+    isPrimY_monic_deg1_loc zero, by decide +kernel, ?_⟩
+  rintro ⟨Es, _, hCover, hLeaves⟩
+  obtain ⟨E, hMem, _⟩ := hCover zero zero (by decide +kernel)
+  obtain ⟨hP, hD, hDiv | hRoot⟩ := hLeaves E hMem
+  · obtain ⟨Q, hQ⟩ := hDiv
+    have hDeriv : sylResDeriv 1 0 (embedUZ.toFun (X : Poly2 Goldilocks)) one one = one :=
+      by decide +kernel
+    rw [hDeriv] at hQ
+    have hQne : Q ≠ zero := fun e => NontrivialRing.one_ne_zero (by rw [hQ, e, LawfulCommRing.mul_zero])
+    have hDegree := UPoly.natDeg_mul hP.1 hQne
+    rw [← hQ, natDeg_one] at hDegree
+    omega
+  · obtain ⟨ζ, _, hP₀⟩ := hRoot.2
+    rw [RingHom.map_one, one_eq_C, eval_C] at hP₀
+    exact NontrivialRing.one_ne_zero hP₀
+
+#verify_constructive SylElim.modPoly2Hom_eq_zero_iff SylElim.modPoly2Hom_unit_of_coprimeZ SylElim.curve_pullback_dvd_iff
+#verify_constructive SylElim.primY_natDeg_pos SylElim.modUnitOrSplit SylElim.d5_xgcd_mod SylElim.curve_leaf_root_decomp
+#verify_constructive inhabited_primY_natDeg_pos tooth_natDeg_pos_needs_primY
+#tooth_pair SylElim.primY_natDeg_pos vs tooth_natDeg_pos_needs_primY
+#verify_inhabited SylElim.primY_natDeg_pos inhabited_primY_natDeg_pos
+#verify_constructive inhabited_curve_leaf_root_decomp inhabited_curve_common_root
+#verify_inhabited SylElim.curve_leaf_root_decomp inhabited_curve_leaf_root_decomp
+#verify_constructive tooth_curve_leaf_root_decomp_needs_divisibility
+#tooth_pair SylElim.curve_leaf_root_decomp vs tooth_curve_leaf_root_decomp_needs_divisibility
+
+end ShearedCurveGcdTests
+
+end Qsag
+end
+
+public section
+namespace Qsag
+open CommRingOps RoundPoly UPoly
+namespace ModMonicAlgebraTests
+open UPoly SylElim
+
+def g (n : Nat) : Goldilocks := Goldilocks.ofNat n
+
+/-- Double common factor `G = X² - 1` (`d_G = 2`) dividing `C1 = G` and `P0 = G`:
+    `sylResDeriv 2 2 G G 1 = 0`. -/
+theorem inhabited_sylResDeriv_eq_zero_of_common_factor_ge_two :
+    ∃ (m N d_G : Nat) (C1 P0 G Q_C Q_P : UPoly Goldilocks),
+      2 ≤ d_G ∧ d_G ≤ m ∧ C1.natDeg ≤ m ∧ P0.natDeg ≤ N ∧
+      G.natDeg ≤ d_G ∧ coeffAt G.coeffs d_G = one ∧
+      C1 = mul G Q_C ∧ Q_C.natDeg ≤ m - d_G ∧ P0 = mul G Q_P ∧
+      sylResDeriv m N C1 P0 one = zero :=
+  let G : UPoly Goldilocks := ofList [neg (g 1), g 0, g 1]
+  ⟨2, 2, 2, mul G one, mul G one, G, one, one,
+    by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
+    by decide +kernel, by decide +kernel, rfl, by decide +kernel, rfl, by decide +kernel⟩
+
+/-- `#tooth`: dropping `2 ≤ d_G` (`d_G = 1`, simple common factor `G = X - 3` of `C1 = (X - 3)(X - 5)`
+    and `P0 = X - 3`) makes `sylResDeriv 2 1 C1 P0 1 = -2 ≠ 0`! -/
+theorem tooth_sylResDeriv_nonzero_for_deg_one_gcd :
+    ∃ (m N d_G : Nat) (C1 P0 G Q_C Q_P : UPoly Goldilocks),
+      1 ≤ d_G ∧ d_G ≤ m ∧ C1.natDeg ≤ m ∧ P0.natDeg ≤ N ∧
+      G.natDeg ≤ d_G ∧ coeffAt G.coeffs d_G = one ∧
+      C1 = mul G Q_C ∧ Q_C.natDeg ≤ m - d_G ∧ P0 = mul G Q_P ∧
+      sylResDeriv m N C1 P0 one ≠ zero :=
+  let G : UPoly Goldilocks := ofList [neg (g 3), g 1]
+  let QC : UPoly Goldilocks := ofList [neg (g 5), g 1]
+  ⟨2, 1, 1, mul G QC, mul G one, G, QC, one,
+    by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
+    by decide +kernel, by decide +kernel, rfl, by decide +kernel, rfl, by decide +kernel⟩
+
+/-- A simple common root has nonzero derivative resultant and is uniquely recovered. -/
+theorem inhabited_common_root_unique :
+    ∃ (m N : Nat) (C1 P0 : UPoly Goldilocks) (z z' : Goldilocks),
+      1 ≤ m ∧ 1 ≤ N ∧ C1.natDeg ≤ m ∧ P0.natDeg ≤ N ∧
+      C1.eval z = zero ∧ P0.eval z = zero ∧ C1.eval z' = zero ∧ P0.eval z' = zero ∧
+      sylResDeriv m N C1 P0 one ≠ zero ∧ z = z' := by
+  refine ⟨1, 1, ofList [neg (g 1), g 1], ofList [neg (g 1), g 1], g 1, g 1,
+    by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
+    by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
+    by decide +kernel, rfl⟩
+
+/-- Without the derivative condition, even a squarefree first polynomial has two common roots. -/
+theorem tooth_common_root_unique_needs_derivative :
+    ∃ (m N : Nat) (C1 P0 : UPoly Goldilocks) (z z' : Goldilocks),
+      1 ≤ m ∧ 1 ≤ N ∧ C1.natDeg ≤ m ∧ P0.natDeg ≤ N ∧
+      C1.eval z = zero ∧ P0.eval z = zero ∧ C1.eval z' = zero ∧ P0.eval z' = zero ∧
+      z ≠ z' := by
+  refine ⟨2, 1, ofList [neg (g 1), g 0, g 1], zero, g 1, neg (g 1),
+    by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
+    by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
+    by decide +kernel⟩
+
+#verify_constructive inhabited_common_root_unique tooth_common_root_unique_needs_derivative
+#verify_inhabited SylElim.common_root_unique_of_sylResDeriv_ne_zero inhabited_common_root_unique
+#tooth_pair SylElim.common_root_unique_of_sylResDeriv_ne_zero vs tooth_common_root_unique_needs_derivative
+
+#verify_constructive SylElim.homEvalCoeffs_mul SylElim.map_homEvalCoeffs SylElim.homEvalCoeffs_map_root SylElim.homEvalCoeffs_map_zero_iff SylElim.degFn_homEvalCoeffs_le
+#verify_constructive SylElim.degFn_homEvalCoeffs_poly_le
+#verify_constructive SylElim.sylResDeriv_X_common_root SylElim.sylResDeriv_X_mapped_common_root SylElim.homEvalCoeffs_resultant_root
+#verify_constructive SylElim.common_root_unique_of_sylResDeriv_ne_zero
+#verify_constructive SylElim.wdeg_divModLead_rem_le SylElim.ModMonic.eval_modGen_eq_zero
+#verify_constructive SylElim.sylResDeriv_eq_zero_of_common_factor_ge_two
+#verify_constructive inhabited_sylResDeriv_eq_zero_of_common_factor_ge_two tooth_sylResDeriv_nonzero_for_deg_one_gcd
+#tooth_pair SylElim.sylResDeriv_eq_zero_of_common_factor_ge_two vs tooth_sylResDeriv_nonzero_for_deg_one_gcd
+#verify_inhabited SylElim.sylResDeriv_eq_zero_of_common_factor_ge_two inhabited_sylResDeriv_eq_zero_of_common_factor_ge_two
+
+end ModMonicAlgebraTests
+
+end Qsag
+end
+
+public section
+namespace Qsag
+open CommRingOps RoundPoly UPoly
+
+
+
+end Qsag
+end
+
+public section
+namespace Qsag
+open CommRingOps RoundPoly UPoly
+namespace BivariateFactorSplitTests
+open UPoly Poly2
+
+/-- Witness that `coprimeZ_const_of_vCoeff` is inhabited: `p(Z) = Z` and `A(V, Z) = V + Z`
+    have `vCoeff A 1 = 1`, certifying `CoprimeZ (mapHom CHom X) (C X + X)`. -/
+theorem inhabited_coprimeZ_const_of_vCoeff :
+    ∃ (p : UPoly Goldilocks) (A : Poly2 Goldilocks) (k₀ : Nat) (u0 v0 : UPoly Goldilocks),
+      1 ≤ p.natDeg ∧
+      add (mul u0 p) (mul v0 (vCoeff A k₀)) = one ∧
+      CoprimeZ ((UPoly.mapHom CHom).toFun p) A := by
+  let p : UPoly Goldilocks := X
+  let A : Poly2 Goldilocks := add (C X) X
+  have hp : 1 ≤ p.natDeg := by decide +kernel
+  have hv1 : vCoeff A 1 = one := by decide +kernel
+  have hbez : add (mul zero p) (mul one (vCoeff A 1)) = one := by
+    rw [hv1, LawfulCommRing.zero_mul, LawfulCommRing.zero_add, LawfulCommRing.mul_one]
+  exact ⟨p, A, 1, zero, one, hp, hbez, coprimeZ_const_of_vCoeff p A hp 1 zero one hbez⟩
+
+/-- `#tooth`: without a coprime `V`-coefficient, `coprimeZ_const_of_vCoeff`'s conclusion fails:
+    for `p(Z) = Z` and `A(V, Z) = V · Z` (`vCoeff A 1 = Z`, sharing root `0` with `p`),
+    `CoprimeZ (mapHom CHom p) A` is false because `(0, 0)` is a common zero at `c(0) = 0`?
+    Even stronger: in `RatFunc Goldilocks[Z]`, `Z` divides both `Z` and `V · Z`! -/
+theorem tooth_coprimeZ_needs_coprime_vCoeff :
+    ∃ (p : UPoly Goldilocks) (A : Poly2 Goldilocks),
+      1 ≤ p.natDeg ∧ vCoeff A 1 ≠ zero ∧ ¬ CoprimeZ ((UPoly.mapHom CHom).toFun p) A := by
+  let p : UPoly Goldilocks := X
+  let A : Poly2 Goldilocks := mul (C X) X
+  refine ⟨p, A, by decide +kernel, by decide +kernel, ?_⟩
+  rintro ⟨U, V, c, hc, hbez⟩
+  have hPZ : (UPoly.mapHom CHom).toFun p = (X : Poly2 Goldilocks) := by decide +kernel
+  rw [hPZ] at hbez
+  have h0 := congrArg (fun Q : Poly2 Goldilocks => coeffAt Q.coeffs 0) hbez
+  have hUX : coeffAt (mul U X).coeffs 0 = zero := by
+    rw [LawfulCommRing.mul_comm, coeffAt_X_mul_zero]
+  have hVA : coeffAt (mul V A).coeffs 0 = zero := by
+    dsimp [A]
+    have : mul V (mul (C X) X) = mul X (mul V (C X)) := by constructive_ring
+    rw [this, coeffAt_X_mul_zero]
+  rw [coeffAt_add, hUX, hVA, LawfulCommRing.add_zero, coeffAt_C_zero] at h0
+  exact hc h0.symm
+
+#verify_constructive Poly2.primY_dvd_of_dvd_FY Poly2.d5_split_prim
+#verify_constructive Poly2.splitAgainstList Poly2.coprimeZ_const_of_vCoeff
+#verify_constructive inhabited_coprimeZ_const_of_vCoeff tooth_coprimeZ_needs_coprime_vCoeff
+#tooth_pair Poly2.coprimeZ_const_of_vCoeff vs tooth_coprimeZ_needs_coprime_vCoeff
+#verify_inhabited Poly2.coprimeZ_const_of_vCoeff inhabited_coprimeZ_const_of_vCoeff
+
+end BivariateFactorSplitTests
+
+
+end Qsag
+end
+
+public section
+namespace Qsag
+open CommRingOps RoundPoly UPoly
+namespace Poly2.Tests
+open Poly2
+
+def g (n : Nat) : Goldilocks := Goldilocks.ofNat n
+
+/-- `A = Z² - Y` and `B = Z - 1`, meeting only at `(1, 1)`. -/
+def pA : Poly2 Goldilocks := ofList [ofList [g 0, neg (g 1)], zero, one]
+def pB : Poly2 Goldilocks := ofList [ofList [neg (g 1)], one]
+
+/-- `Z - Y`, which shares the whole diagonal with itself. -/
+def pDiag : Poly2 Goldilocks := ofList [ofList [g 0, neg (g 1)], one]
+
+/-- The computed eliminant of `Z² - Y` and `Z - 1` is a nonzero linear polynomial vanishing
+    at `Y = 1`: the Gaussian solve, the Bézout identity and the degree budget all execute. -/
+theorem resZ_parabola_line :
+    resZ pA pB ≠ zero ∧ (resZ pA pB).natDeg = 1 ∧ (resZ pA pB).eval (g 1) = zero ∧
+      add (mul (eliminant pA pB).1 pA) (mul (eliminant pA pB).2.1 pB) = C (resZ pA pB) := by
+  decide +kernel
+
+/-- The hypotheses of `common_roots_card_le_mul_deg` are jointly satisfiable:
+    `1·A - (Z + 1)·B = 1 - Y` certifies coprimality and `(1, 1)` is a common zero. -/
+theorem inhabited_common_roots :
+    ∃ (A B : Poly2 Goldilocks) (pts : List (Goldilocks × Goldilocks)),
+      1 ≤ A.natDeg ∧ B ≠ zero ∧ CoprimeZ A B ∧ (pts.map Prod.fst).Nodup ∧
+      (∀ p ∈ pts, A.eval2 p.1 p.2 = zero ∧ B.eval2 p.1 p.2 = zero) ∧ pts.length = 1 :=
+  ⟨pA, pB, [(g 1, g 1)], by decide, by decide,
+    ⟨one, ofList [ofList [neg (g 1)], ofList [neg (g 1)]], ofList [g 1, neg (g 1)],
+      by decide, by decide +kernel⟩, by decide, by decide, rfl⟩
+
+/-- Without coprimality the bound fails: `Z - Y` and itself share two points with distinct
+    ordinates, more than `1 · 1`. -/
+theorem tooth_common_roots_needs_coprime :
+    ∃ (A B : Poly2 Goldilocks) (pts : List (Goldilocks × Goldilocks)),
+      1 ≤ A.natDeg ∧ B ≠ zero ∧ (pts.map Prod.fst).Nodup ∧
+      (∀ p ∈ pts, A.eval2 p.1 p.2 = zero ∧ B.eval2 p.1 p.2 = zero) ∧
+      ¬ pts.length ≤ tdeg A * tdeg B :=
+  ⟨pDiag, pDiag, [(g 0, g 0), (g 1, g 1)], by decide, by decide, by decide, by decide,
+    by decide⟩
+
+#verify_constructive eliminant_bezout natDeg_resZ_le resZ_ne_zero_iff eval_resZ_eq_zero
+#verify_constructive common_roots_card_le_mul_deg resZ_parabola_line
+#tooth_pair common_roots_card_le_mul_deg vs tooth_common_roots_needs_coprime
+#verify_inhabited common_roots_card_le_mul_deg inhabited_common_roots
+
+end Poly2.Tests
+
+
+end Qsag
+end
+
+public section
+namespace Qsag
+open CommRingOps RoundPoly UPoly
+namespace PlaneBezoutTests
+open Poly2
+private theorem primitive_of_monic (A : Poly2 Goldilocks) (k : Nat)
+    (hk : coeffAt A.coeffs k = one) : IsPrimY A := by
+  refine ⟨fun he => NontrivialRing.one_ne_zero (by
+    rw [← hk, he, coeffs_zero, coeffAt_nil]), fun g hg => ?_⟩
+  obtain ⟨q, hq⟩ := hg k
+  rw [hk] at hq
+  have hg0 : g ≠ zero := fun e => NontrivialRing.one_ne_zero (by
+    rw [hq, e, LawfulCommRing.zero_mul])
+  have hq0 : q ≠ zero := fun e => NontrivialRing.one_ne_zero (by
+    rw [hq, e, LawfulCommRing.mul_zero])
+  have hd := UPoly.natDeg_mul hg0 hq0
+  rw [← hq, natDeg_one] at hd
+  omega
+
+/-- Two intersections sharing their first coordinate: the new theorem applies where
+`common_roots_card_le_mul_deg`'s distinct-projection premise does not. -/
+theorem inhabited_primitive_common_roots :
+    ∃ (A B : Poly2 Goldilocks) (pts : List (Goldilocks × Goldilocks)),
+      IsPrimY A ∧ 1 ≤ A.natDeg ∧ B ≠ zero ∧ CoprimeZ A B ∧ pts.Nodup ∧
+      (∀ p ∈ pts, A.eval2 p.1 p.2 = zero ∧ B.eval2 p.1 p.2 = zero) ∧
+      pts.length = 2 ∧ ¬ (pts.map Prod.fst).Nodup := by
+  let A : Poly2 Goldilocks := ofList [zero, neg one, one]
+  let B : Poly2 Goldilocks := C X
+  refine ⟨A, B, [(zero, zero), (zero, one)],
+    primitive_of_monic A 2 (by decide +kernel), by decide +kernel,
+    by decide +kernel, ?_, by decide +kernel, by decide +kernel, rfl, by decide +kernel⟩
+  refine ⟨zero, one, X, by decide +kernel, ?_⟩
+  rw [LawfulCommRing.zero_mul, LawfulCommRing.one_mul, LawfulCommRing.zero_add]
+
+/-- Vertical common components show why coprimality over the rational-function field
+alone cannot bound finite plane intersections. -/
+theorem tooth_common_roots_needs_primitive :
+    ∃ (A B : Poly2 Goldilocks) (pts : List (Goldilocks × Goldilocks)),
+      1 ≤ A.natDeg ∧ B ≠ zero ∧ CoprimeZ A B ∧ pts.Nodup ∧
+      (∀ p ∈ pts, A.eval2 p.1 p.2 = zero ∧ B.eval2 p.1 p.2 = zero) ∧
+      ¬ pts.length ≤ tdeg A * tdeg B * A.natDeg := by
+  let A : Poly2 Goldilocks := ofList [zero, X]
+  let B : Poly2 Goldilocks := C X
+  refine ⟨A, B, [(zero, zero), (zero, one), (zero, Goldilocks.ofNat 2)],
+    by decide +kernel, by decide +kernel, ?_, by decide +kernel,
+    by decide +kernel, by decide +kernel⟩
+  refine ⟨zero, one, X, by decide +kernel, ?_⟩
+  rw [LawfulCommRing.zero_mul, LawfulCommRing.one_mul, LawfulCommRing.zero_add]
+
+#verify_constructive inhabited_primitive_common_roots tooth_common_roots_needs_primitive
+#verify_inhabited primitive_common_roots_card_le inhabited_primitive_common_roots
+#tooth_pair primitive_common_roots_card_le vs tooth_common_roots_needs_primitive
+end PlaneBezoutTests
+
+end Qsag
+end
+
+public section
+namespace Qsag
+open CommRingOps RoundPoly UPoly
+namespace SylvesterEliminationTests
+open UPoly SylElim
+
+def g (n : Nat) : Goldilocks := Goldilocks.ofNat n
+
+/-- `(X - 3)(X - 5)` and `F = X + 2`, `ζ = 3`:
+    `sylRes 2 1 ((X - 3)(X - 5)) (X + 2) = F(3) * sylRes 1 1 (X - 5) (X + 2) = 5 * 7 = 35`. -/
+theorem inhabited_sylRes_mul_X_sub :
+    ∃ (m' N : Nat) (ζ : Goldilocks) (Q F : UPoly Goldilocks),
+      Q.natDeg ≤ m' ∧ F.natDeg ≤ N ∧
+      sylRes (m' + 1) N (mul (sub X (C ζ)) Q) F = g 35 :=
+  ⟨1, 1, g 3, ofList [neg (g 5), g 1], ofList [g 2, g 1],
+    by decide +kernel, by decide +kernel, by
+      rw [sylRes_mul_X_sub 1 1 (g 3) _ _ (by decide +kernel) (by decide +kernel)]
+      decide +kernel⟩
+
+/-- `#tooth`: dropping `B.eval ζ = 0` invalidates `sylRes_eq_zero_of_common_root`
+    (`A = X - 3`, `B = X - 5`, `ζ = 3` gives `sylRes 1 1 A B = -2 ≠ 0`). -/
+theorem tooth_sylRes_needs_both_roots :
+    ∃ (m N : Nat) (A B : UPoly Goldilocks) (ζ : Goldilocks),
+      1 ≤ m ∧ A.natDeg ≤ m ∧ B.natDeg ≤ N ∧ A.eval ζ = zero ∧
+      sylRes m N A B ≠ zero :=
+  ⟨1, 1, ofList [neg (g 3), g 1], ofList [neg (g 5), g 1], g 3,
+    by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel⟩
+
+#verify_constructive SylElim.sylRes_mul_X_sub SylElim.sylRes_eq_zero_of_common_root
+#verify_constructive SylElim.divModLead_spec SylElim.isUnit_sylRes_of_bezout SylElim.degFn_sylRes_le
+#verify_constructive inhabited_sylRes_mul_X_sub tooth_sylRes_needs_both_roots
+#tooth_pair SylElim.sylRes_eq_zero_of_common_root vs tooth_sylRes_needs_both_roots
+#verify_inhabited SylElim.sylRes_mul_X_sub inhabited_sylRes_mul_X_sub
+
+end SylvesterEliminationTests
+
+end Qsag
+end
+
+public section
+namespace Qsag
+open CommRingOps RoundPoly UPoly
+namespace Poly3.HenselTests
+open UPoly Poly3
+
+def g (n : Nat) : Goldilocks := Goldilocks.ofNat n
+
+/-- `R = Z² - Y`: on the line `Y = 1` the root `P = 1` has separant `2 ≠ 0`. -/
+def rPar : Poly3 Goldilocks := ofList [ofList [zero, neg one], zero, one]
+
+/-- `R = Z² - X²`, with the two roots `±X` crossing at `X = 0`. -/
+def rCross : Poly3 Goldilocks := ofList [ofList [ofList [g 0, g 0, neg (g 1)]], zero, one]
+
+/-- The hypotheses of `root_unique_of_jet` are jointly satisfiable. -/
+theorem inhabited_root_unique_of_jet :
+    ∃ (R : Poly3 Goldilocks) (α β t₀ : Goldilocks) (P P' : UPoly Goldilocks),
+      evalAffineLine R α β P = zero ∧ evalAffineLine R α β P' = zero ∧
+      P.eval t₀ = P'.eval t₀ ∧
+      ((hasseZ 1 R).evalAffineLine α β (C (P.eval t₀))).eval t₀ ≠ zero :=
+  ⟨rPar, g 1, g 0, g 0, one, one, (by decide +kernel), (by decide +kernel), rfl,
+    (by decide +kernel)⟩
+
+/-- The separant condition is needed: `X` and `-X` are distinct roots of `Z² - X²` with the
+    same value at `t₀ = 0`, where the separant `2Z` vanishes. -/
+theorem tooth_root_unique_needs_separant :
+    ∃ (R : Poly3 Goldilocks) (α β t₀ : Goldilocks) (P P' : UPoly Goldilocks),
+      evalAffineLine R α β P = zero ∧ evalAffineLine R α β P' = zero ∧
+      P.eval t₀ = P'.eval t₀ ∧ P ≠ P' :=
+  ⟨rCross, g 0, g 0, g 0, ofList [g 0, g 1], ofList [g 0, neg (g 1)], (by decide +kernel),
+    (by decide +kernel), (by decide +kernel), (by decide +kernel)⟩
+
+/-- For `R = Z² - Y` the first numerator is `N₁ = V` and the separant is `2Z`:
+    `c₁ = V / (2Z)`, the derivative of `√Y` along `Y + V·W`. -/
+theorem henselNum_parabola :
+    henselNum rPar (g 0) 1 = jetV ∧ henselSep rPar (g 0) = mul (C3 (g 2)) X := by
+  decide +kernel
+
+/-- The hypotheses of `henselNum_spec` hold together: `R = Z² - Y` at the jet
+    `(y, v, z) = (1, 1, 1)` with the first-order root `e = W/2` of `(1 + e)² = 1 + W`. -/
+theorem inhabited_henselNum_spec :
+    ∃ (R : Poly3 Goldilocks) (t₀ y v z : Goldilocks) (e : UPoly Goldilocks) (n : Nat),
+      e.eval zero = zero ∧ eval3 R t₀ y z = zero ∧ eval3 (hasseZ 1 R) t₀ y z ≠ zero ∧
+      (∀ k, k ≤ n → coeffAt (eval₂ (jetHom t₀ y v) (add (C z) e) R).coeffs k = zero) :=
+  ⟨rPar, g 0, g 1, g 1, g 1, ofList [g 0, LawfulField.inv (g 2)], 1, by decide +kernel,
+    by decide +kernel, by decide +kernel, fun k hk => by
+      have hk' : k = 0 ∨ k = 1 := by omega
+      rcases hk' with rfl | rfl <;> decide +kernel⟩
+
+/-- The separant hypothesis of `henselNum_spec` is needed: `R = Z² - X²` at the origin has
+    the root `e = W` with vanishing separant, and its first numerator `0` does not see it. -/
+theorem tooth_henselNum_needs_separant :
+    ∃ (R : Poly3 Goldilocks) (t₀ y v z : Goldilocks) (e : UPoly Goldilocks),
+      e.eval zero = zero ∧ eval3 R t₀ y z = zero ∧
+      eval₂ (jetHom t₀ y v) (add (C z) e) R = zero ∧
+      (ptHom y v z).toFun (henselNum R t₀ 1) ≠ coeffAt e.coeffs 1 :=
+  ⟨rCross, g 0, g 0, g 0, g 0, X, by decide +kernel, by decide +kernel, by decide +kernel,
+    by decide +kernel⟩
+
+#verify_constructive henselNum_spec deg_henselNum_le reconCoeff_spec deg_reconCoeff_le
+#verify_constructive henselNum_parabola tooth_henselNum_needs_separant
+#tooth_pair henselNum_spec vs tooth_henselNum_needs_separant
+#verify_inhabited henselNum_spec inhabited_henselNum_spec
+#verify_constructive UPoly.trunc_cancel UPoly.hensel_unique UPoly.taylorShift_neg_cancel
+#verify_constructive root_unique_of_jet
+#tooth_pair root_unique_of_jet vs tooth_root_unique_needs_separant
+#verify_inhabited root_unique_of_jet inhabited_root_unique_of_jet
+
+end Poly3.HenselTests
+
+
+end Qsag
+end
+
+public section
+namespace Qsag
+open CommRingOps RoundPoly UPoly
+namespace JohnsonBoundTests
+open JohnsonBound
+
+/-- Witness that `johnson_set_system_card_le` is inhabited and tight: `3` subsets of `{0, 1, 2}`
+    of size `B = 2` intersecting in `t = 1` point achieve `johnsonBound 3 2 1 = 3`. -/
+theorem inhabited_johnson_set_system :
+    ∃ (D : List Nat) (fam : List (List Nat)) (mem : List Nat → Nat → Bool) (B t : Nat),
+      D.Nodup ∧
+      (∀ s ∈ fam, B ≤ (D.filter (fun z => mem s z)).length) ∧
+      fam.Pairwise (fun s₁ s₂ => (D.filter (fun z => mem s₁ z && mem s₂ z)).length ≤ t) ∧
+      D.length * t < B * B ∧
+      fam.length = 3 ∧
+      fam.length = johnsonBound D.length B t :=
+  ⟨[0, 1, 2], [[0, 1], [1, 2], [0, 2]], fun s z => elemBool z s, 2, 1,
+    by decide, by decide, by decide, by decide, rfl, by decide⟩
+
+/-- `#tooth`: without the Johnson denominator hypothesis `D.length * t < B * B`, the bound fails:
+    at `D = [0, 1, 2, 3]`, `B = 2`, `t = 1` (`4 * 1 = 2 * 2`), `6` pairs of size `2` exist while
+    `johnsonBound 4 2 1 = 0` fails to bound `6`. -/
+theorem tooth_johnson_needs_pos_denom :
+    ∃ (D : List Nat) (fam : List (List Nat)) (mem : List Nat → Nat → Bool) (B t : Nat),
+      D.Nodup ∧
+      (∀ s ∈ fam, B ≤ (D.filter (fun z => mem s z)).length) ∧
+      fam.Pairwise (fun s₁ s₂ => (D.filter (fun z => mem s₁ z && mem s₂ z)).length ≤ t) ∧
+      ¬ (fam.length ≤ johnsonBound D.length B t) :=
+  ⟨[0, 1, 2, 3], [[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]], fun s z => elemBool z s, 2, 1,
+    by decide, by decide, by decide, by decide⟩
+
+#verify_constructive JohnsonBound.nat_cauchy_schwarz JohnsonBound.count_partition_le
+#verify_constructive JohnsonBound.johnson_set_system_mul_le JohnsonBound.johnson_set_system_card_le
+#verify_constructive inhabited_johnson_set_system tooth_johnson_needs_pos_denom
+#tooth_pair JohnsonBound.johnson_set_system_card_le vs tooth_johnson_needs_pos_denom
+#verify_inhabited JohnsonBound.johnson_set_system_card_le inhabited_johnson_set_system
+
+end JohnsonBoundTests
+
+
+end Qsag
+end
+
+public section
+namespace Qsag
+open CommRingOps RoundPoly UPoly
+namespace Poly3.ExplainerTests
+open UPoly Poly3
+
+def g (n : Nat) : Goldilocks := Goldilocks.ofNat n
+
+/-- The count hypothesis is satisfiable: two points, multiplicity one, `Dy = 1`, `Wx = 2`
+    give `5` unknowns against `4` equations. -/
+theorem inhabited_explainer :
+    ∃ (f g' : Goldilocks → Goldilocks) (Dm : List Goldilocks) (m d Wx Dy : Nat),
+      Dm.length * triCount 1 m Dy m < triCount d Wx Dy (Dy + 1) ∧
+      explainer f g' Dm m d Wx Dy ≠ zero :=
+  ⟨fun _ => g 0, fun _ => g 1, [g 0, g 1], 1, 1, 2, 1, by decide,
+    (explainer_spec _ _ _ 1 1 2 1 (by decide)).1⟩
+
+/-- `Q = Z - Y` meets the order-one constraint at `z = 0` for `f(0) = 0`, `g(0) = 1`. -/
+def qTooth : Poly3 Goldilocks := ofList [ofList [zero, neg one], one]
+
+/-- The degree hypothesis of `evalAffineLine_eq_zero_of_agree` is needed: `Q = Z - Y`
+    satisfies the constraint at the single point `0` and `P = X` agrees with the fold there
+    (`α = β = 0`), yet `Q(X, 0, X) = X ≠ 0`; here `deg_{1,1,1} Q = 1 = m·|zs|`. -/
+theorem tooth_agree_needs_degree :
+    ∃ (Q : Poly3 Goldilocks) (f g' : Goldilocks → Goldilocks) (α β : Goldilocks)
+      (P : UPoly Goldilocks) (zs : List Goldilocks), zs.Nodup ∧
+      (∀ z ∈ zs, ∀ r t s, r + s < 1 → cons z (f z) (g' z) r t s Q = zero) ∧
+      (∀ z ∈ zs, P.eval z = add (f z) (mul (add α (mul β z)) (g' z))) ∧ P.natDeg ≤ 1 ∧
+      evalAffineLine Q α β P ≠ zero := by
+  refine ⟨qTooth, fun _ => g 0, fun _ => g 1, g 0, g 0, X, [g 0], by decide, ?_, ?_,
+    by decide, by decide +kernel⟩
+  · intro z hz r t s hrs
+    rw [List.mem_singleton.mp hz]
+    obtain ⟨rfl, rfl⟩ : r = 0 ∧ s = 0 := ⟨by omega, by omega⟩
+    have e : (shiftHom (g 0) (g 0) (g 1)).toFun qTooth = X := by decide +kernel
+    show coeffAt (coeffAt (coeffAt ((shiftHom (g 0) (g 0) (g 1)).toFun qTooth).coeffs 0).coeffs
+      t).coeffs 0 = zero
+    rw [e]
+    show coeffAt (coeffAt (zero : UPoly (UPoly Goldilocks)).coeffs t).coeffs 0 = zero
+    rw [coeffs_zero, coeffAt_nil, coeffs_zero, coeffAt_nil]
+  · intro z hz
+    rw [List.mem_singleton.mp hz]
+    decide +kernel
+
+#verify_constructive exists_trivariate_affine_explainer explainer_spec explainer_vanishes
+#verify_constructive evalAffineLine_eq_zero_of_agree inPow_affine_of_cons unshift_shift
+#verify_constructive tooth_agree_needs_degree inhabited_explainer
+#tooth_pair evalAffineLine_eq_zero_of_agree vs tooth_agree_needs_degree
+#verify_inhabited exists_trivariate_affine_explainer inhabited_explainer
+
+end Poly3.ExplainerTests
+
+
+end Qsag
+end
+
+public section
+namespace Qsag
+open CommRingOps RoundPoly UPoly
+namespace Hensel.Tests
+open UPoly Hensel
+
+def g (n : Nat) : Goldilocks := Goldilocks.ofNat n
+
+/-- `G(W, U) = (1 + U)² - (1 + W)`: the root series is `√(1 + W) - 1 = W/2 - W²/8 + …`. -/
+def gSqrt : UPoly (UPoly Goldilocks) :=
+  ofList [ofList [g 0, neg (g 1)], ofList [g 2], ofList [g 1]]
+
+/-- The numerators of `√(1 + W) - 1`: `N₁ = 1`, `N₂ = -1`, with separant `2`, so
+    `c₁ = 1/2` and `c₂ = -1/2³`. -/
+theorem num_sqrt : sep gSqrt = g 2 ∧ num gSqrt 1 = g 1 ∧ num gSqrt 2 = neg (g 1) := by
+  decide +kernel
+
+/-- The hypotheses of `num_spec` hold for `G = (1 + U)² - (1 + W)` and the truncation
+    `e = W/2` of its root, to first order. -/
+theorem inhabited_num_spec :
+    ∃ (G : UPoly (UPoly Goldilocks)) (e : UPoly Goldilocks) (n : Nat), e.eval zero = zero ∧
+      res G = zero ∧ sep G ≠ zero ∧
+      (∀ k, k ≤ n → coeffAt (G.eval e).coeffs k = zero) :=
+  ⟨gSqrt, ofList [g 0, LawfulField.inv (g 2)], 1, by decide +kernel, by decide +kernel,
+    by decide +kernel, fun k hk => by
+      have hk' : k = 0 ∨ k = 1 := by omega
+      rcases hk' with rfl | rfl <;> decide +kernel⟩
+
+/-- The separant hypothesis is needed: `G = U² - W²` has the root `e = W` with residue and
+    separant both zero, and the conclusion `s·N₁ = s²·e₁` degenerates to `0 = 0` while the
+    numerator carries no information: `N₁ = 0 ≠ e₁`. -/
+theorem tooth_num_needs_separant :
+    ∃ (G : UPoly (UPoly Goldilocks)) (e : UPoly Goldilocks), res G = zero ∧
+      coeffAt e.coeffs 0 = zero ∧ G.eval e = zero ∧ num G 1 ≠ coeffAt e.coeffs 1 :=
+  ⟨ofList [ofList [g 0, g 0, neg (g 1)], zero, one], X, by decide +kernel, by decide +kernel,
+    by decide +kernel, by decide +kernel⟩
+
+#verify_constructive Hensel.num_spec Hensel.delta_num_le Hensel.phi_contract Hensel.evG_eq
+#verify_constructive Hensel.map_num num_sqrt tooth_num_needs_separant
+#tooth_pair Hensel.num_spec vs tooth_num_needs_separant
+#verify_inhabited Hensel.num_spec inhabited_num_spec
+
+end Hensel.Tests
+
+
+end Qsag
+end
+
+public section
+namespace Qsag
+open CommRingOps RoundPoly UPoly
+namespace Poly3.SplitTests
+open UPoly Poly3
+
+def g (n : Nat) : Goldilocks := Goldilocks.ofNat n
+
+/-- `R = Z² - Y`. -/
+def rPar : Poly3 Goldilocks := ofList [ofList [zero, neg one], zero, one]
+
+/-- `C = Y - (3 + 5X)`, vanishing exactly on the line `(α, β) = (3, 5)`. -/
+def cLine : UPoly (UPoly Goldilocks) := ofList [neg (line (g 3) (g 5)), one]
+
+/-- `2·R - Z·∂_Z R = -2Y` certifies that `Z² - Y` is squarefree in `Z`. -/
+theorem sqFactor_rPar : SqFactor rPar :=
+  SqFactor.of_cert (by decide) (ofList [ofList [ofList [g 2]]]) (ofList [zero, neg one])
+    (ofList [zero, ofList [neg (g 2)]]) (by decide) (by decide +kernel)
+
+/-- The hypotheses of `excluded_pairs_card_le` hold together, with a genuinely excluded pair. -/
+theorem inhabited_excluded_pairs :
+    ∃ (Cc : UPoly (UPoly Goldilocks)) (Rs : List (Poly3 Goldilocks)) (D : Nat)
+      (E : List (Goldilocks × Goldilocks)), Cc ≠ zero ∧ (∀ R ∈ Rs, SqFactor R) ∧
+      Cc.natDeg + (Rs.map degYZ).sum ≤ D ∧ E.Nodup ∧
+      (∀ p ∈ E, Excluded Cc Rs p.1 p.2) ∧ E.length = 1 :=
+  ⟨cLine, [rPar], 3, [(g 3, g 5)], (by decide),
+    (fun R hR => by rw [List.mem_singleton.mp hR]; exact sqFactor_rPar), (by decide),
+    (by decide),
+    (fun p hp => by rw [List.mem_singleton.mp hp]; exact Or.inl (by decide +kernel)), rfl⟩
+
+/-- The content must be nonzero: with `C = 0` every pair is excluded, so no bound holds. -/
+theorem tooth_excluded_needs_content :
+    ∃ (Rs : List (Poly3 Goldilocks)) (D : Nat) (E : List (Goldilocks × Goldilocks)),
+      (∀ R ∈ Rs, SqFactor R) ∧
+      (zero : UPoly (UPoly Goldilocks)).natDeg + (Rs.map degYZ).sum ≤ D ∧ E.Nodup ∧
+      (∀ p ∈ E, Excluded zero Rs p.1 p.2) ∧ ¬ E.length ≤ D ^ 2 :=
+  ⟨[], 0, [(g 0, g 0), (g 1, g 1)], (fun _ h => by cases h), (by decide), (by decide),
+    (fun _ _ => Or.inl (UPoly.eval₂_zero _ _)), (by decide)⟩
+
+/-- A root on a non-excluded line: on `Y = 1` the factor `Z² - 1` has the simple root
+    `P = 1`. The separant eliminant is computed over `F(X)` by the kernel. -/
+theorem inhabited_simple_root :
+    ∃ (Cc : UPoly (UPoly Goldilocks)) (Rs : List (Poly3 Goldilocks))
+      (e : Poly3 Goldilocks → Nat) (α β : Goldilocks) (P : UPoly Goldilocks),
+      (∀ R ∈ Rs, SqFactor R) ∧ ¬ Excluded Cc Rs α β ∧
+      evalAffineLine (factored Cc Rs e) α β P = zero :=
+  ⟨one, [rPar], fun _ => 1, g 1, g 0, ofList [g 1],
+    (fun R hR => by rw [List.mem_singleton.mp hR]; exact sqFactor_rPar),
+    (by show ¬ (_ ∨ ∃ R ∈ [rPar], _); decide +kernel), (by decide +kernel)⟩
+
+#verify_constructive excluded_pairs_card_le simple_root_of_not_excluded sepElim_ne_zero
+#verify_constructive natDeg_sepElim_le sqFactor_rPar Frac.of_injective UPoly.d5_split
+#tooth_pair excluded_pairs_card_le vs tooth_excluded_needs_content
+#verify_inhabited excluded_pairs_card_le inhabited_excluded_pairs
+#verify_inhabited simple_root_of_not_excluded inhabited_simple_root
+
+end Poly3.SplitTests
+
+
+end Qsag
+end
+
+public section
+namespace Qsag
+open CommRingOps RoundPoly UPoly
+namespace SylvesterDerivTests
+open UPoly SylElim
+
+def g (n : Nat) : Goldilocks := Goldilocks.ofNat n
+
+/-- Common root `ζ = 3` of `C1 = (X - 3)(X - 5)` (`ofList [15, -8, 1]`) and `P0 = X - 3`, `B = X + 2`:
+    `sylResDeriv 2 1 C1 P0 B = B(3) * sylResDeriv 2 1 C1 P0 1 = 5 * (-2)`. -/
+theorem inhabited_sylResDeriv_common_root :
+    ∃ (m N : Nat) (C1 P0 B : UPoly Goldilocks) (ζ : Goldilocks),
+      1 ≤ m ∧ C1.natDeg ≤ m ∧ P0.natDeg ≤ N ∧ B.natDeg ≤ N ∧
+      C1.eval ζ = zero ∧ P0.eval ζ = zero ∧
+      sylResDeriv m N C1 P0 B ≠ zero :=
+  ⟨2, 1, ofList [g 15, neg (g 8), g 1], ofList [neg (g 3), g 1], ofList [g 2, g 1], g 3,
+    by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
+    by decide +kernel, by decide +kernel, by decide +kernel⟩
+
+/-- `#tooth`: dropping `P0.eval ζ = 0` invalidates `sylResDeriv_common_root`
+    (`C1 = (X - 3)(X - 5)`, `P0 = X - 7`, `B = X`, `ζ = 3`). -/
+theorem tooth_sylResDeriv_needs_P0_root :
+    ∃ (m N : Nat) (C1 P0 B : UPoly Goldilocks) (ζ : Goldilocks),
+      1 ≤ m ∧ C1.natDeg ≤ m ∧ P0.natDeg ≤ N ∧ B.natDeg ≤ N ∧ C1.eval ζ = zero ∧
+      sylResDeriv m N C1 P0 B ≠ mul (B.eval ζ) (sylResDeriv m N C1 P0 one) :=
+  ⟨2, 1, ofList [g 15, neg (g 8), g 1], ofList [neg (g 7), g 1], X, g 3,
+    by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
+    by decide +kernel, by decide +kernel⟩
+
+#verify_constructive SylElim.sylResDeriv_of_factor SylElim.sylResDeriv_common_root SylElim.degFn_sylResDeriv_le
+#verify_constructive inhabited_sylResDeriv_common_root tooth_sylResDeriv_needs_P0_root
+#tooth_pair SylElim.sylResDeriv_common_root vs tooth_sylResDeriv_needs_P0_root
+#verify_inhabited SylElim.sylResDeriv_common_root inhabited_sylResDeriv_common_root
+
+end SylvesterDerivTests
+
+end Qsag
+end
+
+public section
+namespace Qsag
+open CommRingOps RoundPoly UPoly
+namespace Poly3.StratTests
+open UPoly Poly3
+
+def g (n : Nat) : Goldilocks := Goldilocks.ofNat n
+
+/-- `Q = (Z - X)²`, with the double root `P = X` on every line. -/
+def qDouble : Poly3 Goldilocks :=
+  ofList [ofList [ofList [g 0, g 0, g 1]], ofList [ofList [g 0, neg (g 2)]], one]
+
+/-- `Q = Z·(Y - X)`, which vanishes identically on the line `Y = X`. -/
+def qLine : Poly3 Goldilocks := ofList [zero, ofList [ofList [g 0, neg (g 1)], one]]
+
+/-- The hypotheses of `simple_root_of_hasse` hold together for the double root of `(Z - X)²`. -/
+theorem inhabited_simple_root_of_hasse :
+    ∃ (Q : Poly3 Goldilocks) (α β : Goldilocks) (P : UPoly Goldilocks),
+      (∀ k, 1 ≤ k → k ≤ Q.degZ → (CRing.natCast k : Goldilocks) ≠ zero) ∧
+      lineSpec Q α β ≠ zero ∧ evalAffineLine Q α β P = zero :=
+  ⟨qDouble, g 3, g 5, X, fun k h1 h2 => by
+      have hk : k = 1 ∨ k = 2 := by
+        have : qDouble.degZ = 2 := by decide +kernel
+        omega
+      rcases hk with rfl | rfl <;> decide +kernel,
+    by decide +kernel, by decide +kernel⟩
+
+/-- The double root is found at multiplicity two: `∂_Z Q = 2(Z - X)` vanishes at `P = X` and
+    its derivative `2` does not. -/
+theorem double_root_stratum :
+    evalAffineLine (hasseZ 1 qDouble) (g 3) (g 5) X = zero ∧
+      evalAffineLine (hasseZ 1 (hasseZ 1 qDouble)) (g 3) (g 5) X ≠ zero := by
+  decide +kernel
+
+/-- The non-vanishing hypothesis is needed: `Q = Z·(Y - X)` has every `P` as a root on the
+    line `Y = X`, and none of them is a simple root of a Hasse derivative of `Q`. -/
+theorem tooth_simple_root_needs_nonvanishing :
+    ∃ (Q : Poly3 Goldilocks) (α β : Goldilocks) (P : UPoly Goldilocks),
+      evalAffineLine Q α β P = zero ∧
+      ¬ ∃ μ, 1 ≤ μ ∧ μ ≤ Q.degZ ∧ evalAffineLine (hasseZ (μ - 1) Q) α β P = zero ∧
+        evalAffineLine (hasseZ 1 (hasseZ (μ - 1) Q)) α β P ≠ zero :=
+  ⟨qLine, g 0, g 1, X, by decide +kernel, fun ⟨μ, h1, h2, _, h4⟩ => by
+    have hd : qLine.degZ = 1 := by decide +kernel
+    rw [hd] at h2
+    have hμ : μ = 1 := Nat.le_antisymm h2 h1
+    subst hμ
+    exact h4 (by decide +kernel)⟩
+
+#verify_constructive simple_root_of_hasse exists_multiplicity lineSpec_zero_card_le
+#verify_constructive UPoly.hasse_one_hasse double_root_stratum
+#verify_constructive tooth_simple_root_needs_nonvanishing
+#tooth_pair simple_root_of_hasse vs tooth_simple_root_needs_nonvanishing
+#verify_inhabited simple_root_of_hasse inhabited_simple_root_of_hasse
+
+end Poly3.StratTests
+
+
+end Qsag
+end
+
+public section
+namespace Qsag.Cwyz26EqualDegreeAndMultiFoldTests
+open CommRingOps RoundPoly UPoly Poly2 SylElim
+private theorem isPrimY_W : IsPrimY (X : Poly2 Goldilocks) := by
+  refine ⟨by decide +kernel, fun f hf => ?_⟩
+  obtain ⟨q, hq⟩ := hf 1
+  have h1 : coeffAt (X : Poly2 Goldilocks).coeffs 1 = one := by decide +kernel
+  rw [h1] at hq
+  have hf0 : f ≠ zero := fun e => NontrivialRing.one_ne_zero (by rw [hq, e, LawfulCommRing.zero_mul])
+  have hq0 : q ≠ zero := fun e => NontrivialRing.one_ne_zero (by rw [hq, e, LawfulCommRing.mul_zero])
+  have hd := UPoly.natDeg_mul hf0 hq0
+  rw [← hq, natDeg_one] at hd; omega
+
+/-- Joint inhabitedness witness for `SylElim.curve_leaf_gcd_decomp` on the smooth 2-sheet cylinder
+    `C₁ = Z² - 1`, `P₀ = W` (`C X`), `E = W` (`X`). -/
+theorem inhabited_curve_leaf_gcd_decomp :
+    ∃ (h_C H₀ : Nat) (C₁ E : Poly2 Goldilocks) (P₀ : UPoly (Poly2 Goldilocks)),
+      C₁.natDeg ≤ h_C ∧ coeffAt C₁.coeffs h_C = one ∧ P₀.natDeg ≤ H₀ ∧
+      IsPrimY E ∧ 1 ≤ tdeg E ∧
+      (∃ Q_res, sylRes h_C H₀ (embedUZ.toFun C₁) P₀ = mul E Q_res) ∧
+      sylRes h_C H₀ (embedUZ.toFun C₁) P₀ ≠ zero :=
+  let C₁ : Poly2 Goldilocks := ofList [neg one, zero, one]
+  ⟨2, 1, C₁, X, C X,
+    by decide +kernel, by decide +kernel, by decide +kernel,
+    isPrimY_W, by decide +kernel, ⟨X, by decide +kernel⟩, by decide +kernel⟩
+
+/-- `#tooth`: even when `C₁ = Z² - 1` is monic AND separable in `Z` (`sylRes 2 1 C₁ (hasse 1 C₁) ≠ 0`),
+    over `E = W` (`P₀ = W`) BOTH sheets `Z = ±1` vanish simultaneously, forcing `Gj.deg = 2` and
+    `Ej ∣ g₁` in `curve_leaf_gcd_decomp` (proving constructively that the `Ej ∣ g₁` multi-sheet
+    branch is algebraically realizable for smooth separable `C₁`!). -/
+theorem tooth_multisheet_smooth_cylinder_divides_g1 :
+    ∃ (C₁ : Poly2 Goldilocks) (P₀ : UPoly (Poly2 Goldilocks))
+      (Ej : Poly2 Goldilocks) (hPj : IsPrimY Ej) (hDj : 1 ≤ Ej.natDeg)
+      (Gj : MonicPoly (ModMonic (monicFY Ej hPj hDj))),
+      sylRes 2 1 C₁ (UPoly.hasse 1 C₁) ≠ zero ∧
+      Gj.deg = 2 ∧
+      ∃ Qg, sylResDeriv 2 1 (embedUZ.toFun C₁) P₀ one = mul Ej Qg := by
+  let C₁ : Poly2 Goldilocks := ofList [neg one, zero, one]
+  let P₀ : UPoly (Poly2 Goldilocks) := C X
+  obtain ⟨Es, _, hCover, hLeaves⟩ :=
+    SylElim.curve_leaf_gcd_decomp (h_C := 2) (H₀ := 1) (C₁ := C₁) (P₀ := P₀)
+      (by decide +kernel) (by decide +kernel) (by decide +kernel)
+      X isPrimY_W (by decide +kernel) ⟨X, by decide +kernel⟩
+  obtain ⟨Ej, hMem, _⟩ := hCover zero zero (by decide +kernel)
+  obtain ⟨hPj, hDj, Gj, ⟨QE, hXE⟩, hDegLe2, ⟨U0, V0, hBez⟩, _, _, _, _, hDichot, _⟩ :=
+    hLeaves Ej hMem
+  rcases hDichot with ⟨hDeg1, _⟩ | ⟨hDeg2, hDivG1⟩
+  · exfalso
+    let φ := modPoly2Hom Ej hPj hDj
+    have hX0 : φ.toFun X = zero := (modPoly2Hom_eq_zero_iff Ej hPj hDj X).mpr ⟨QE, hXE⟩
+    have hP0_0 : (mapHom φ).toFun P₀ = zero := by
+      dsimp only [P₀]; rw [mapHom_C, hX0]; exact CHom.map_zero
+    rw [hP0_0, LawfulCommRing.mul_zero, LawfulCommRing.add_zero] at hBez
+    let C1_mod := (mapHom φ).toFun (embedUZ.toFun C₁)
+    have hC1_deg : C1_mod.natDeg ≤ 2 :=
+      Nat.le_trans (natDeg_mapHom_le φ _)
+        (Nat.le_trans (natDeg_mapHom_le CHom C₁) (by decide +kernel))
+    have hC1_mon : coeffAt C1_mod.coeffs 2 = one := by
+      dsimp only [C1_mod, embedUZ]
+      have hTop : coeffAt C₁.coeffs 2 = one := by decide +kernel
+      rw [coeffAt_mapHom, coeffAt_mapHom, hTop, CHom.map_one, φ.map_one]
+    let M_C1 : MonicPoly (ModMonic (monicFY Ej hPj hDj)) := ⟨C1_mod, 2, by decide, hC1_deg, hC1_mon⟩
+    have hLt2 : (mul U0 M_C1.poly).natDeg < M_C1.deg := by
+      change (mul U0 C1_mod).natDeg < 2
+      rw [hBez]
+      exact Nat.lt_of_le_of_lt Gj.natDeg_le (by omega)
+    have hU0 := eq_zero_of_mul_monic_lt M_C1 hLt2
+    rw [hU0, LawfulCommRing.zero_mul] at hBez
+    have h10 : (one : ModMonic (monicFY Ej hPj hDj)) = zero := by
+      rw [← Gj.coeff_deg, ← hBez, coeffs_zero, coeffAt_nil]
+    exact NontrivialRing.one_ne_zero h10
+  · exact ⟨C₁, P₀, Ej, hPj, hDj, Gj, by decide +kernel, by omega, hDivG1⟩
+
+/-- Joint inhabitedness witness for `SylElim.curve_three_poly_sheet_decomp` (`C₁ = Z² - 1`,
+    `P₀ = W`, `H = Z`, `E = W`). -/
+theorem inhabited_curve_three_poly_sheet_decomp :
+    ∃ (h_C H₀ : Nat) (C₁ E : Poly2 Goldilocks) (P₀ H : UPoly (Poly2 Goldilocks)),
+      C₁.natDeg ≤ h_C ∧ coeffAt C₁.coeffs h_C = one ∧ P₀.natDeg ≤ H₀ ∧ H.natDeg ≤ 1 ∧
+      IsPrimY E ∧ 1 ≤ tdeg E ∧
+      (∃ Q_res, sylRes h_C H₀ (embedUZ.toFun C₁) P₀ = mul E Q_res) :=
+  let C₁ : Poly2 Goldilocks := ofList [neg one, zero, one]
+  ⟨2, 1, C₁, X, C X, X,
+    by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
+    isPrimY_W, by decide +kernel, ⟨X, by decide +kernel⟩⟩
+
+/-- `#tooth`: without resultant divisibility (`E ∤ sylRes`), `curve_three_poly_sheet_decomp` fails
+    on `C₁ = Z`, `P₀ = 1`, `H = Z`, `E = W`: no leaf can have a positive-degree common `Z`-gcd `Gj`. -/
+theorem tooth_three_poly_sheet_needs_divisibility :
+    ∃ (C₁ E : Poly2 Goldilocks) (P₀ H : UPoly (Poly2 Goldilocks)),
+      C₁.natDeg ≤ 1 ∧ coeffAt C₁.coeffs 1 = one ∧ P₀.natDeg ≤ 0 ∧ H.natDeg ≤ 1 ∧
+      IsPrimY E ∧ 1 ≤ tdeg E ∧
+      ¬ ∃ Es : List (Poly2 Goldilocks),
+        (Es.map tdeg).sum = tdeg E ∧
+        (∀ u w, E.eval2 u w = zero → ∃ Ej ∈ Es, Ej.eval2 u w = zero) ∧
+        ∀ Ej ∈ Es, ∃ (hPj : IsPrimY Ej) (hDj : 1 ≤ Ej.natDeg)
+          (Gj : MonicPoly (ModMonic (monicFY Ej hPj hDj))),
+          (∃ Q_P, ((mapHom (modPoly2Hom Ej hPj hDj)).toFun P₀) = mul Gj.poly Q_P) := by
+  refine ⟨X, X, one, X, by decide +kernel, by decide +kernel, by decide +kernel,
+    by decide +kernel, isPrimY_W, by decide +kernel, ?_⟩
+  rintro ⟨Es, _, hCover, hLeaves⟩
+  obtain ⟨Ej, hMem, _⟩ := hCover zero zero (by decide +kernel)
+  obtain ⟨hPj, hDj, Gj, ⟨QP, hQP⟩⟩ := hLeaves Ej hMem
+  rw [RingHom.map_one] at hQP
+  have hQPNe : QP ≠ zero := fun e => NontrivialRing.one_ne_zero (by rw [hQP, e, LawfulCommRing.mul_zero])
+  have hz : coeffAt (one : UPoly (ModMonic (monicFY Ej hPj hDj))).coeffs (Gj.deg + QP.natDeg) = zero := by
+    have hd1 : (one : UPoly (ModMonic (monicFY Ej hPj hDj))).natDeg = 0 := natDeg_one
+    have hPos : 1 ≤ Gj.deg := Gj.deg_pos
+    exact UPoly.coeffAt_eq_zero_of_natDeg_lt _ (by omega)
+  have hGjDegEq : Gj.poly.natDeg = Gj.deg := by
+    apply Nat.le_antisymm Gj.natDeg_le
+    apply Decidable.byContradiction; intro hNot
+    have hc := Gj.poly.coeffAt_eq_zero_of_natDeg_lt (Nat.lt_of_not_le hNot)
+    rw [Gj.coeff_deg] at hc
+    exact NontrivialRing.one_ne_zero hc
+  rw [hQP, ← hGjDegEq, (coeffAt_mul_top Gj.poly QP).2] at hz
+  unfold lead at hz
+  rw [hGjDegEq, Gj.coeff_deg, LawfulCommRing.one_mul] at hz
+  exact lead_ne_zero hQPNe hz
+
+
+end Qsag.Cwyz26EqualDegreeAndMultiFoldTests
+end
+
+public section
+namespace Qsag
+open CommRingOps RoundPoly UPoly Poly3
+namespace JohnsonCertTests
+
+def q (n : Nat) : QuarticGoldilocks :=
+  ⟨⟨Goldilocks.ofNat n, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩⟩
+
+def dom11 : List QuarticGoldilocks :=
+  [q 0, q 1, q 2, q 3, q 4, q 5, q 6, q 7, q 8, q 9, q 10]
+
+/-- The hypotheses of `hemCwyz26JohnsonCert_sliced` hold together, with the decomposition
+    parameters `(d, A) = (1, 8)` on `|D| = 11` outside the regime `2|D| + d + 1 < 3A`. -/
+theorem inhabited_johnsonCert_sliced :
+    ∃ (S domPts : List QuarticGoldilocks) (d₀ A₀ B m Wx Dy m_gs listG : Nat),
+      domPts.Nodup ∧ S.Nodup ∧
+      domPts.length * triCount 1 m Dy m < triCount (d₀ + 1) Wx Dy (Dy + 1) ∧
+      Wx + Dy ≤ m * (A₀ + 1) ∧ d₀ + 1 + 1 ≤ B ∧ d₀ + 2 ≤ A₀ ∧ A₀ + 1 ≤ domPts.length ∧
+      domPts.length * (d₀ + 1 + 1) < B * B ∧ B < A₀ + 1 ∧ 1 ≤ Dy ∧ Dy < goldilocksPrime ∧
+      domPts.length * (m_gs * (m_gs + 1) / 2) < gsMonomialCount (m_gs * A₀) d₀ listG ∧
+      ¬ 2 * domPts.length + (d₀ + 1) + 1 < 3 * (A₀ + 1) :=
+  ⟨dom11, dom11, 0, 7, 5, 2, 12, 4, 1, 1, by decide, by decide, by decide, by decide,
+    by decide, by decide, by decide, by decide, by decide, by decide, by decide, by decide,
+    by decide⟩
+
+
+end JohnsonCertTests
+
+namespace DeployedStageTests
+open JohnsonCertTests
+
+/-- A passing parameter set on an actual domain: `|D| = 11`, `d = 1`, `A = 8`, `B = 5`. -/
+theorem inhabited_slicedParamsOk :
+    ∃ (n d A B m Dy : Nat) (D S : List QuarticGoldilocks),
+      slicedParamsOk n d A B m Dy = true ∧ D.Nodup ∧ S.Nodup ∧ D.length = n :=
+  ⟨11, 1, 8, 5, 2, 4, dom11, dom11, by decide +kernel, by decide, by decide, rfl⟩
+
+/-- The check refuses a persistence threshold at the agreement threshold (`B = A`), and one
+    below the Johnson radius (`n·(d + 1) ≥ B²`), on the deployed `(9, 1)` geometry. -/
+theorem tooth_slicedParamsOk_rejects :
+    slicedParamsOk 256 18 127 127 1 20 = false ∧ slicedParamsOk 256 18 127 69 1 20 = false ∧
+      slicedParamsOk 256 18 127 70 1 20 = true := by
+  decide +kernel
+
+#verify_constructive sumTo_le_of_le slicedParamsOk_sound
+#verify_constructive sliced_stage_table_covers_every_canonical_stage sliced_stage_decomp_bound
+#verify_constructive sliced_rest_exceeds_simple_budget
+#verify_constructive inhabited_slicedParamsOk tooth_slicedParamsOk_rejects
+#verify_inhabited slicedParamsOk_sound inhabited_slicedParamsOk
+
+end DeployedStageTests
+
+
+end Qsag
+end
+
+public section
+namespace Qsag.MigrationExecution
+set_option maxRecDepth 4096 in
+theorem rust_gf128_basis_kats :
+    rustGf128Mul 2#128 2#128 = 4#128 ∧
+    rustGf128Mul (BitVec.ofNat 128 (2^127)) 2#128 = 0x87#128 ∧
+    rustGf128OfLimbs 0 1 = BitVec.ofNat 128 (2^64) := by
+  decide +kernel
+
+end Qsag.MigrationExecution
+namespace Qsag
+open MigrationExecution
+theorem tooth_packTower_is_not_the_poly_basis :
+    psiTower128ToPoly (unpackTower 7 2#128) ≠ 2#128 ∧
+    mulExec 7 2#128 2#128 = 3#128 ∧ rustGf128Mul 2#128 2#128 = 4#128 := by
+  refine ⟨?_, ?_, rust_gf128_basis_kats.1⟩
+  · have h : psiTower128ToPoly (unpackTower 7 2#128) =
+        0x295ac0b1f4731af9676aac9fa4b20b08#128 := by decide +kernel
+    rw [h]; decide
+  · decide +kernel
+
+end Qsag
+end

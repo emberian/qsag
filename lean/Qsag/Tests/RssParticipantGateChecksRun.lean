@@ -3,7 +3,7 @@ import all Qsag.Exec.RssParticipantGateWeights
 import all Qsag.Exec.RssParticipantGateField
 import all Qsag.Exec.RssParticipantGateChecks
 import all Qsag.Protocol.Migration.ActiveMigrationZeroTest
-import all Qsag.Math.BinaryTower
+import all Qsag.Math.Gf2Pow128
 public section
 open Qsag Qsag.RssParticipant Qsag.RssParticipant.GateChecks Qsag.MigrationExecution
 
