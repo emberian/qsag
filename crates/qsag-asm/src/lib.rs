@@ -55,6 +55,8 @@ pub mod x86_64_asm;
 
 #[cfg(target_arch = "aarch64")]
 pub mod aarch64_asm;
+#[cfg(target_arch = "aarch64")]
+pub mod aarch64_simd;
 
 pub use bitslice::{
     BITSLICE_LANES, BitPlane256, KECCAK_STATE_BITS, KECCAK_STATE_BYTES, XorCombinePattern,
@@ -211,6 +213,20 @@ pub fn keccak_chi_mpc_row256_with_backend(
             return;
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if backend == SimdBackend::Aarch64NeonSha3Pmull && cpuid::probe_capabilities().aarch64_neon
+        {
+            // SAFETY: `probe_capabilities().aarch64_neon` verified NEON; `keccak_chi_mpc_row256_neon`
+            // acquires a scoped `FEAT_DIT` guard and wipes volatile NEON scratch registers.
+            unsafe {
+                aarch64_simd::keccak_chi_mpc_row256_neon(out, s0, s1, r_mask);
+            }
+            return;
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    let _dit_guard = cpuid::ensure_aarch64_dit_enabled();
     let _ = backend;
     portable::keccak_chi_mpc_4x_portable(out, s0, s1, r_mask);
 }
@@ -367,6 +383,20 @@ pub fn gf256_shamir_mul_with_backend(dst: &mut [u8], a: &[u8], b: &[u8], backend
         }
     }
 
+    #[cfg(target_arch = "aarch64")]
+    {
+        let caps = cpuid::probe_capabilities();
+        if backend == SimdBackend::Aarch64NeonSha3Pmull && caps.aarch64_neon && caps.aarch64_pmull {
+            // SAFETY: `caps.aarch64_neon && caps.aarch64_pmull` verified runtime NEON + PMULL,
+            // and `dst.len() == a.len() == b.len()` was asserted above.
+            unsafe {
+                aarch64_simd::gf256_shamir_mul_pmull_neon(dst, a, b);
+            }
+            return;
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    let _dit_guard = cpuid::ensure_aarch64_dit_enabled();
     let _ = backend;
     portable::gf256_shamir_mul_portable(dst, a, b);
 }
@@ -531,6 +561,20 @@ pub fn gf256_shamir_mac_with_backend(
         }
     }
 
+    #[cfg(target_arch = "aarch64")]
+    {
+        let caps = cpuid::probe_capabilities();
+        if backend == SimdBackend::Aarch64NeonSha3Pmull && caps.aarch64_neon && caps.aarch64_pmull {
+            // SAFETY: `caps.aarch64_neon && caps.aarch64_pmull` verified runtime NEON + PMULL,
+            // and `acc.len() == shares.len()` was asserted above.
+            unsafe {
+                aarch64_simd::gf256_shamir_mac_pmull_neon(acc, shares, scalar);
+            }
+            return;
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    let _dit_guard = cpuid::ensure_aarch64_dit_enabled();
     let _ = backend;
     portable::gf256_shamir_mac_portable(acc, shares, scalar);
 }
@@ -1321,6 +1365,17 @@ mod tests {
         let mut out0_port = KeccakRow256::default();
         portable::keccak_chi_mpc_4x_portable(&mut out0_port, &b0, &b1, &r0);
         assert_eq!(out0.0, out0_port.0);
+        for backend in [
+            SimdBackend::Portable,
+            SimdBackend::X86Avx2Pclmul,
+            SimdBackend::X86Avx2GfniVpclmul,
+            SimdBackend::X86Avx512GfniVpclmul,
+            SimdBackend::Aarch64NeonSha3Pmull,
+        ] {
+            let mut out_backend = KeccakRow256::default();
+            keccak_chi_mpc_row256_with_backend(&mut out_backend, &b0, &b1, &r0, backend);
+            assert_eq!(out_backend.0, out0_port.0, "backend={backend:?}");
+        }
 
         // Verify exact reconstruction across all 5 * 256 = 1,280 Boolean Chi gates!
         for x in 0..5 {
@@ -1631,6 +1686,7 @@ mod tests {
                 SimdBackend::X86Avx2Pclmul,
                 SimdBackend::X86Avx2GfniVpclmul,
                 SimdBackend::X86Avx512GfniVpclmul,
+                SimdBackend::Aarch64NeonSha3Pmull,
             ] {
                 let mut a_simd = a;
                 let mut b_simd = b;

@@ -2,12 +2,12 @@
 //! `FEAT_SHA256`), with branchless portable fallback and explicit SIMD register zeroization.
 
 #[repr(C, align(16))]
-struct Sha256HwConsts {
-    k: [u32; 64],
+pub(crate) struct Sha256HwConsts {
+    pub(crate) k: [u32; 64],
     bswap: [u8; 16],
 }
 
-static SHA256_HW_CONSTS: Sha256HwConsts = Sha256HwConsts {
+pub(crate) static SHA256_HW_CONSTS: Sha256HwConsts = Sha256HwConsts {
     k: [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
         0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,

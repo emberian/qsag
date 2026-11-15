@@ -675,7 +675,11 @@ mod tests {
                 let mut states = input;
                 crate::keccak_f1600_batch_with_backend(&mut states[..len], backend);
                 assert_eq!(&states[..len], &expected[..len], "len={len} {backend:?}");
-                assert_eq!(&states[len..], &input[len..], "tail touched len={len} {backend:?}");
+                assert_eq!(
+                    &states[len..],
+                    &input[len..],
+                    "tail touched len={len} {backend:?}"
+                );
             }
         }
     }
