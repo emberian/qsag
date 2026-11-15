@@ -2,6 +2,7 @@
 //! under a `32 B` Poseidon2 + SHAKE256 Merkle/Vector-Commitment master public key (`0` online MPC rounds).
 //! Child seeds are a dealerless replicated threshold PRF over the custodians' subset seeds.
 
+use crate::seeds::CustodianSet;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
@@ -122,7 +123,7 @@ pub struct InventoryChildProof {
 pub struct InventoryPartyShareVault {
     party_id: u16,
     config_digest: [u8; 32],
-    children: Vec<Vec<(u16, RedactedSecret<32>)>>,
+    children: Vec<Vec<(CustodianSet, RedactedSecret<32>)>>,
 }
 
 impl Drop for InventoryPartyShareVault {
@@ -201,7 +202,7 @@ pub fn derive_inventory_vault(
     if !valid_batch(batch_size) {
         return Err(HdError::InvalidBatchSize);
     }
-    let subsets: Vec<u16> = seeds.held_subsets().collect();
+    let subsets: Vec<CustodianSet> = seeds.held_subsets().collect();
     let children = (0..batch_size as u32)
         .map(|idx| {
             subsets
@@ -261,7 +262,7 @@ fn reconstruct_child_seed_with_min_holders(
         let mut holders = 0usize;
         for vault in vaults {
             let components = vault.child_components(child_idx)?;
-            let Some((_, component)) = components.iter().find(|entry| entry.0 == subset) else {
+            let Some((_, component)) = components.binary_search_by_key(&subset, |entry| entry.0).ok().map(|i| &components[i]) else {
                 continue;
             };
             holders += 1;
@@ -432,7 +433,7 @@ impl InventoryPartyShareVault {
     pub fn child_components(
         &self,
         child_idx: u32,
-    ) -> Result<&[(u16, RedactedSecret<32>)], HdError> {
+    ) -> Result<&[(CustodianSet, RedactedSecret<32>)], HdError> {
         self.children
             .get(child_idx as usize)
             .map(Vec::as_slice)
@@ -645,9 +646,9 @@ mod signature_tests {
             (0..3u16)
                 .map(|id| {
                     CustodianSeeds::from_explicit_seeds(&config, id, [8; 32], |subset| {
-                        let mut seed = [subset as u8; 32];
+                        let mut seed = [subset.to_be_bytes()[31]; 32];
                         // Subset 0b110 excludes custodian 0.
-                        if flip && subset == 0b110 {
+                        if flip && subset == CustodianSet::from(0b110) {
                             seed[31] ^= 1;
                         }
                         seed
@@ -699,7 +700,7 @@ mod signature_tests {
         // ... and, where the faulty custodian is a subset's only present holder,
         // by the enrolled public key.
         let alone = 1 - other;
-        let solo = vaults[2].children[3][0].0 >> alone & 1 == 0;
+        let solo = !vaults[2].children[3][0].0.contains(alone);
         let result =
             recover_child_signing_seed(&config, &[&vaults[alone], &vaults[2]], 3, Some(&pk));
         if solo {

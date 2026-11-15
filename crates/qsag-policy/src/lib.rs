@@ -10,6 +10,8 @@ extern crate alloc;
 extern crate std;
 
 pub mod durable;
+pub mod macaroon;
+pub use macaroon::SpongeMacaroon;
 pub use durable::PolicyGuardError;
 #[cfg(feature = "std")]
 pub use durable::{FsPolicyDurableLedger, FsPolicyGenerationFence};
@@ -42,7 +44,10 @@ use qsag_addr::{QsagAddress, WitnessSuiteTag};
 pub const BDOZ_PREPROC_SLOTS: usize = 64;
 
 /// Bounded capacity of the durable per-window burned intent-nonce & session-ID rings.
-pub const MAX_BURNED_INTENT_NONCES: usize = 256;
+pub const MAX_BURNED_INTENT_NONCES: usize = 65_536;
+
+/// Resource limits are local configuration, never silent replay eviction.
+pub const MAX_POLICY_CAPACITY: usize = 1_048_576;
 
 /// Pairwise cryptographic authenticator binding `initiator_party` to an approver's guard share.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -458,13 +463,14 @@ pub struct PolicySignerGuardShare {
     preproc_r: Vec<[u128; 2]>,
     preproc_outgoing_macs: Vec<(u16, Vec<[u128; 2]>)>,
     preproc_incoming_keys: Vec<(u16, Vec<[u128; 2]>)>,
-    consumed_peer_slots: Vec<(u16, u64)>,
+    consumed_peer_slots: Vec<(u16, Vec<u64>)>,
     next_slot: Cell<usize>,
     poisoned: bool,
     enrolled_party_id: u16,
     active_phase: Option<(usize, u8)>,
     current_window_id: u64,
     accumulated_window_spend: u128,
+    replay_capacity: usize,
     burned_intent_nonces: Vec<[u8; 32]>,
     burned_nonce_cursor: usize,
     min_nonce_watermark: Option<[u8; 32]>,
@@ -534,6 +540,18 @@ fn derive_peer_slot_alpha(alpha_root: &[u128; 2], peer_id: u16, peer_slot: usize
 }
 
 impl PolicySignerGuardShare {
+    /// Set the bounded replay history capacity without discarding any burned identifiers.
+    /// Persist a checkpoint after changing this operational limit.
+    pub fn set_replay_capacity(&mut self, capacity: usize) -> Result<(), PolicyViolation> {
+        if capacity == 0 || capacity > MAX_POLICY_CAPACITY
+            || capacity < self.burned_intent_nonces.len().max(self.burned_sessions.len())
+        {
+            return Err(PolicyViolation::ReplayWindowExhausted);
+        }
+        self.replay_capacity = capacity;
+        Ok(())
+    }
+
     /// Trusted provisioning, before using the guard: pin an application policy ID
     /// and its authority key. The ID must uniquely identify the policy/ledger.
     /// Cannot replace an authority or enable resets after spending has started.
@@ -605,7 +623,7 @@ impl PolicySignerGuardShare {
 
     /// Roll the guard into a strictly newer velocity window (`next_window_id > current_window_id`),
     /// resetting spend and replay sets. Every intent binds its window ID; old-window
-    /// intents remain invalid after rotation. Each window admits at most 256 intents.
+    /// intents remain invalid after rotation. Each window admits the configured number of retained intents.
     pub fn advance_velocity_window(
         &mut self,
         authorization: &WindowAdvanceAuthorization,
@@ -793,8 +811,8 @@ impl PolicySignerGuardShare {
         if self.is_nonce_burned(&intent.nonce) || self.is_session_burned(session_id) {
             return Err(PolicyViolation::DuplicateIntentNonce);
         }
-        if self.burned_intent_nonces.len() >= MAX_BURNED_INTENT_NONCES
-            || self.burned_sessions.len() >= MAX_BURNED_INTENT_NONCES
+        if self.burned_intent_nonces.len() >= self.replay_capacity
+            || self.burned_sessions.len() >= self.replay_capacity
         {
             return Err(PolicyViolation::ReplayWindowExhausted);
         }
@@ -853,8 +871,8 @@ impl PolicySignerGuardShare {
         if self.is_nonce_burned(&nonce) || self.is_session_burned(&session_id) {
             return Err(PolicyViolation::DuplicateIntentNonce);
         }
-        if self.burned_intent_nonces.len() >= MAX_BURNED_INTENT_NONCES
-            || self.burned_sessions.len() >= MAX_BURNED_INTENT_NONCES
+        if self.burned_intent_nonces.len() >= self.replay_capacity
+            || self.burned_sessions.len() >= self.replay_capacity
         {
             return Err(PolicyViolation::ReplayWindowExhausted);
         }
@@ -889,16 +907,15 @@ impl PolicySignerGuardShare {
             (&mut self.burned_intent_nonces, nonce),
             (&mut self.burned_sessions, session_id),
         ] {
-            values.push(value);
-            values.sort_unstable();
-            values.dedup();
+            let index = values.binary_search(&value).unwrap_or_else(|i| i);
+            values.insert(index, value);
         }
         Ok(())
     }
 
     /// Ratchet the monotone replay watermarks (`nonce_floor`, `session_floor`) forward,
     /// permanently burning every nonce `<= nonce_floor` and session `<= session_floor`
-    /// while reclaiming explicit 256-slot replay-set entries at or below those floors.
+    /// while reclaiming explicit replay-set entries at or below those floors.
     ///
     /// Random nonces strictly above `nonce_floor` remain explicitly retained and are NEVER
     /// evicted. Attempting to regress either watermark fails with `IntentBindingMismatch`.
@@ -935,13 +952,14 @@ impl PolicySignerGuardShare {
     }
 
     fn is_peer_slot_consumed(&self, peer_id: u16, peer_slot: usize) -> bool {
-        if peer_slot >= 64 {
+        if peer_slot >= self.preproc_r.len() {
             return true;
         }
         self.consumed_peer_slots
             .iter()
             .find(|(p, _)| *p == peer_id)
-            .is_some_and(|(_, mask)| ((mask >> peer_slot) & 1) != 0)
+            .is_none_or(|(_, words)| words.get(peer_slot / 64)
+                .is_none_or(|mask| ((mask >> (peer_slot % 64)) & 1) != 0))
     }
 
     fn retire_own_slot(&mut self, slot: usize) {
@@ -956,16 +974,10 @@ impl PolicySignerGuardShare {
     }
 
     fn retire_peer_slot(&mut self, peer_id: u16, peer_slot: usize) {
-        if peer_slot < 64 {
-            if let Some((_, mask)) = self
-                .consumed_peer_slots
-                .iter_mut()
-                .find(|(p, _)| *p == peer_id)
-            {
-                *mask |= 1u64 << peer_slot;
-            } else {
-                self.consumed_peer_slots.push((peer_id, 1u64 << peer_slot));
-            }
+        if let Some((_, words)) = self.consumed_peer_slots.iter_mut().find(|(p, _)| *p == peer_id)
+            && let Some(mask) = words.get_mut(peer_slot / 64)
+        {
+            *mask |= 1u64 << (peer_slot % 64);
         }
         for (p, vec_k) in &mut self.preproc_incoming_keys {
             if *p == peer_id
@@ -1146,7 +1158,7 @@ pub fn trusted_dealer_setup_for_testing(
             let hi = pid_i.max(pid_j).to_be_bytes();
             let z_seed = cshake256_framed_32(b"QSAG.POLICY.PAIR_ZSEED.V2", &[&ent, &lo, &hi]);
             pairwise_zero_seeds.push((pid_j, z_seed));
-            consumed_peer_slots.push((pid_j, 0u64));
+            consumed_peer_slots.push((pid_j, alloc::vec![0u64; BDOZ_PREPROC_SLOTS.div_ceil(64)]));
 
             let pj_be = pid_j.to_be_bytes();
             // Outgoing tags `M_{i -> j, s} = K_{j <- i, s} ^ (\alpha_{j <- i, s} * r_{i, s})`
@@ -1202,6 +1214,7 @@ pub fn trusted_dealer_setup_for_testing(
             active_phase: None,
             current_window_id: 0,
             accumulated_window_spend: 0,
+            replay_capacity: MAX_BURNED_INTENT_NONCES,
             burned_intent_nonces: Vec::new(),
             burned_nonce_cursor: 0,
             min_nonce_watermark: None,
@@ -1368,6 +1381,7 @@ pub struct SharedWindowSpendLedger {
     failed: bool,
     current_window_id: u64,
     accumulated_window_spend: u128,
+    replay_capacity: usize,
     burned_intent_nonces: Vec<[u8; 32]>,
     min_nonce_watermark: Option<[u8; 32]>,
     burned_sessions: Vec<[u8; 32]>,
@@ -1376,6 +1390,18 @@ pub struct SharedWindowSpendLedger {
 }
 
 impl SharedWindowSpendLedger {
+    /// Set the bounded replay history capacity without discarding any burned identifiers.
+    /// Persist a checkpoint after changing this operational limit.
+    pub fn set_replay_capacity(&mut self, capacity: usize) -> Result<(), PolicyViolation> {
+        if capacity == 0 || capacity > MAX_POLICY_CAPACITY
+            || capacity < self.burned_intent_nonces.len().max(self.burned_sessions.len())
+        {
+            return Err(PolicyViolation::ReplayWindowExhausted);
+        }
+        self.replay_capacity = capacity;
+        Ok(())
+    }
+
     pub fn new(policy: &TransactionPolicy, initial_window_id: u64) -> Self {
         Self {
             policy_digest: policy.canonical_digest(),
@@ -1389,6 +1415,7 @@ impl SharedWindowSpendLedger {
             failed: false,
             current_window_id: initial_window_id,
             accumulated_window_spend: 0,
+            replay_capacity: MAX_BURNED_INTENT_NONCES,
             burned_intent_nonces: Vec::new(),
             min_nonce_watermark: None,
             burned_sessions: Vec::new(),
@@ -1503,8 +1530,8 @@ impl SharedWindowSpendLedger {
         if self.is_nonce_burned(&intent.nonce) || self.is_session_burned(session_id) {
             return Err(PolicyViolation::DuplicateIntentNonce);
         }
-        if self.burned_intent_nonces.len() >= MAX_BURNED_INTENT_NONCES
-            || self.burned_sessions.len() >= MAX_BURNED_INTENT_NONCES
+        if self.burned_intent_nonces.len() >= self.replay_capacity
+            || self.burned_sessions.len() >= self.replay_capacity
         {
             return Err(PolicyViolation::ReplayWindowExhausted);
         }
@@ -1536,8 +1563,8 @@ impl SharedWindowSpendLedger {
         if self.is_nonce_burned(&nonce) || self.is_session_burned(&session_id) {
             return Err(PolicyViolation::DuplicateIntentNonce);
         }
-        if self.burned_intent_nonces.len() >= MAX_BURNED_INTENT_NONCES
-            || self.burned_sessions.len() >= MAX_BURNED_INTENT_NONCES
+        if self.burned_intent_nonces.len() >= self.replay_capacity
+            || self.burned_sessions.len() >= self.replay_capacity
         {
             return Err(PolicyViolation::ReplayWindowExhausted);
         }
@@ -1570,9 +1597,8 @@ impl SharedWindowSpendLedger {
             (&mut self.burned_intent_nonces, nonce),
             (&mut self.burned_sessions, session_id),
         ] {
-            values.push(value);
-            values.sort_unstable();
-            values.dedup();
+            let index = values.binary_search(&value).unwrap_or_else(|i| i);
+            values.insert(index, value);
         }
         Ok(())
     }
@@ -2184,16 +2210,22 @@ impl<W: qsag_fts::ot::AuthenticatedOtWire> PolicyAuthenticatedOt
             return Err(PolicyViolation::IntentBindingMismatch);
         }
         let failed = |_| PolicyViolation::BarrierBdozMacFailed;
-        if local_party < peer {
-            self.send_values(peer, domain, alternatives)
-                .map_err(failed)?;
-            self.receive_values(peer, domain, choices).map_err(failed)
-        } else {
-            let values = self.receive_values(peer, domain, choices).map_err(failed)?;
-            self.send_values(peer, domain, alternatives)
-                .map_err(failed)?;
-            Ok(values)
+        let mut result = SecretVec(Vec::with_capacity(choices.len()));
+        for (index, (pairs, bits)) in alternatives.chunks(65_536).zip(choices.chunks(65_536)).enumerate() {
+            let context = cshake256_framed_32(b"QSAG.POLICY.OT.CHUNK.V1",
+                &[&domain, &(index as u64).to_be_bytes(), &(choices.len() as u64).to_be_bytes()]);
+            let values = if local_party < peer {
+                self.send_values(peer, context, pairs).map_err(failed)?;
+                self.receive_values(peer, context, bits).map_err(failed)?
+            } else {
+                let values = self.receive_values(peer, context, bits).map_err(failed)?;
+                self.send_values(peer, context, pairs).map_err(failed)?;
+                values
+            };
+            let values = SecretVec(values);
+            result.extend_from_slice(&values);
         }
+        Ok(core::mem::take(&mut result.0))
     }
 }
 
@@ -2276,8 +2308,23 @@ impl PolicyGuardDkgRound1 {
         party_id: u16,
         party_ids: &[u16],
         setup_id: [u8; 32],
-        mut entropy: [u8; 32],
+        entropy: [u8; 32],
     ) -> Result<(Self, Vec<PolicyGuardSeedCommitMsg>), PolicyViolation> {
+        Self::new_with_capacity(party_id, party_ids, setup_id, entropy, BDOZ_PREPROC_SLOTS)
+    }
+
+    /// Provision a caller-sized pool. The capacity is committed into the ceremony transcript.
+    pub fn new_with_capacity(
+        party_id: u16,
+        party_ids: &[u16],
+        setup_id: [u8; 32],
+        mut entropy: [u8; 32],
+        preprocessing_slots: usize,
+    ) -> Result<(Self, Vec<PolicyGuardSeedCommitMsg>), PolicyViolation> {
+        if preprocessing_slots == 0 || preprocessing_slots > MAX_POLICY_CAPACITY {
+            ct_zeroize_bytes(&mut entropy);
+            return Err(PolicyViolation::BarrierPreprocExhausted);
+        }
         let mut ids = party_ids.to_vec();
         ids.sort_unstable();
         if ids.len() < 2 || !ids.contains(&party_id) || ids.windows(2).any(|w| w[0] == w[1]) {
@@ -2285,7 +2332,7 @@ impl PolicyGuardDkgRound1 {
             return Err(PolicyViolation::IntentBindingMismatch);
         }
         let digest =
-            cshake256_framed_32(b"QSAG.POLICY.DKG.V1", &[&setup_id, &policy_ids_bytes(&ids)]);
+            cshake256_framed_32(b"QSAG.POLICY.DKG.V1", &[&setup_id, &policy_ids_bytes(&ids), &(preprocessing_slots as u64).to_be_bytes()]);
         let mut local = cshake256_framed_32(
             b"QSAG.POLICY.DKG.LOCAL.V1",
             &[&entropy, &digest, &party_id.to_be_bytes()],
@@ -2307,13 +2354,14 @@ impl PolicyGuardDkgRound1 {
             velocity_generation: 0,
             local_salt_seed: local,
             pairwise_zero_seeds: Vec::with_capacity(ids.len() - 1),
-            preproc_r: Vec::with_capacity(BDOZ_PREPROC_SLOTS),
+            preproc_r: Vec::with_capacity(preprocessing_slots),
             preproc_outgoing_macs: Vec::with_capacity(ids.len() - 1),
             preproc_incoming_keys: Vec::with_capacity(ids.len() - 1),
             consumed_peer_slots: Vec::new(),
             next_slot: Cell::new(0),
             current_window_id: 0,
             accumulated_window_spend: 0,
+            replay_capacity: MAX_BURNED_INTENT_NONCES,
             burned_intent_nonces: Vec::new(),
             burned_nonce_cursor: 0,
             min_nonce_watermark: None,
@@ -2323,7 +2371,7 @@ impl PolicyGuardDkgRound1 {
             require_authenticated_initiator: true,
         };
         ct_zeroize_bytes(&mut local);
-        for slot in 0..BDOZ_PREPROC_SLOTS {
+        for slot in 0..preprocessing_slots {
             guard.preproc_r.push(policy_pair(cshake256_framed_32(
                 b"QSAG.POLICY.DKG.R.V1",
                 &[&guard.local_salt_seed, &(slot as u64).to_be_bytes()],
@@ -2447,11 +2495,11 @@ pub fn finalize_distributed_policy_guard<O: PolicyAuthenticatedOt>(
             o.sender,
             cshake256_framed_32(b"QSAG.POLICY.DKG.ZERO.V1", &[&domain, lo_seed, hi_seed]),
         ));
-        g.consumed_peer_slots.push((o.sender, 0u64));
-        let mut alternatives = SecretVec(Vec::with_capacity(BDOZ_PREPROC_SLOTS * 256));
-        let mut choices = SecretVec(Vec::with_capacity(BDOZ_PREPROC_SLOTS * 256));
-        let mut keys = SecretVec(Vec::with_capacity(BDOZ_PREPROC_SLOTS));
-        for slot in 0..BDOZ_PREPROC_SLOTS {
+        g.consumed_peer_slots.push((o.sender, alloc::vec![0u64; g.preproc_r.len().div_ceil(64)]));
+        let mut alternatives = SecretVec(Vec::with_capacity(g.preproc_r.len() * 256));
+        let mut choices = SecretVec(Vec::with_capacity(g.preproc_r.len() * 256));
+        let mut keys = SecretVec(Vec::with_capacity(g.preproc_r.len()));
+        for slot in 0..g.preproc_r.len() {
             let mut slot_alpha = g.incoming_slot_alpha(o.sender, slot);
             let mut key = [0u128; 2];
             for (lane, key_lane) in key.iter_mut().enumerate() {
@@ -2478,10 +2526,10 @@ pub fn finalize_distributed_policy_guard<O: PolicyAuthenticatedOt>(
         }
         let mut selected =
             SecretVec(ot.exchange(g.party_id, o.sender, domain, &alternatives, &choices)?);
-        if selected.len() != BDOZ_PREPROC_SLOTS * 256 {
+        if selected.len() != g.preproc_r.len() * 256 {
             return Err(PolicyViolation::BarrierBdozMacFailed);
         }
-        let mut macs = Vec::with_capacity(BDOZ_PREPROC_SLOTS);
+        let mut macs = Vec::with_capacity(g.preproc_r.len());
         for chunk in selected.as_chunks::<256>().0 {
             macs.push([
                 chunk[..128].iter().fold(0, |a, b| a ^ b),

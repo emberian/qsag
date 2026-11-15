@@ -24,6 +24,7 @@ public import Qsag.ProdCollisionEvents
 public import Qsag.ProdCollisionAccounting
 public import Qsag.ProdCollisionExtraction
 public import Qsag.ProdAdaptiveTcrReduction
+public import Qsag.FrontierCompact1122AndCorduroySecurity
 public import Qsag.AdvancedMpcAndCreds
 public import Qsag.BaggyAndRss256Security
 public import Qsag.HybridAddrPolicyAndFullPresetSecurity
@@ -81,12 +82,13 @@ theorem production_euf_cma_gameBound {n : Nat}
     Qsag.Spec.GameBound forgerGame.winProb ((εItsr.add εTcr).add εPre) ∧
     (∀ (ω : Fin n) (t : Qsag.ProdTargetIdx) (forged : List UInt8),
       Qsag.prodTcrOutput suite params hw (game ω) (hOneTime ω) = some (t, forged) →
-      (prodPathTargets params (Qsag.productionSigningLog suite params (game ω).sk (game ω).queries)
-        (game ω).sigStar.leafGlobalIdx
-        (Qsag.prodSigForsIdxs suite params (Qsag.derivePublicKey suite params (game ω).sk)
-          (game ω).msgStar (game ω).sigStar)).length ≤
-        Qsag.prodPathTargetCount params (game ω).queries.length ∧
-      Qsag.prodTcrCheck suite params (game ω).sk (game ω).sigStar.leafGlobalIdx t forged = true) := by
+      Qsag.prodTcrCheck suite params (game ω).sk (game ω).sigStar.leafGlobalIdx t forged = true ∧
+      (params.statefulJorts = false →
+        (prodPathTargets params (Qsag.productionSigningLog suite params (game ω).sk (game ω).queries)
+          (game ω).sigStar.leafGlobalIdx
+          (Qsag.prodSigForsIdxs suite params (Qsag.derivePublicKey suite params (game ω).sk)
+            (game ω).msgStar (game ω).sigStar)).length ≤
+          Qsag.prodPathTargetCount params (game ω).queries.length)) := by
   intro forgerGame
   let assumptions : Qsag.Spec.HashSigAssumptions n :=
     { itsr := ⟨0, εItsr, Qsag.Spec.FinGame.mk hPos (fun ω => Qsag.prodItsrEvent suite params hw (game ω) (hOneTime ω)), hItsr⟩
@@ -94,12 +96,12 @@ theorem production_euf_cma_gameBound {n : Nat}
       pre  := ⟨0, εPre,  Qsag.Spec.FinGame.mk hPos (fun ω => Qsag.prodPreEvent suite params hw (game ω) (hOneTime ω)), hPre⟩ }
   have hBound : Qsag.Spec.GameBound forgerGame.winProb assumptions.totalBound :=
     assumptions.forger_bound forgerGame
-      (fun ω hWin => Qsag.prodEufCmaWin_classified suite params hw (game ω) (hOneTime ω) hWin)
+    (fun ω hWin => Qsag.prodEufCmaWin_classified suite params hw (game ω) (hOneTime ω) hWin)
   refine ⟨hBound, ?_⟩
   intro ω t forged hOut
   obtain ⟨_, hLenLe, hChk⟩ :=
     Qsag.prodTcrOutput_target_budget suite params hw (game ω) (hOneTime ω) t forged hOut
-  exact ⟨hLenLe, hChk⟩
+  exact ⟨hChk, fun _ => hLenLe⟩
 
 /-! ## 2. Upper-Hypertree Cache Refinement (`waistbandCachedMachine ⊑ statelessSignMachine`) -/
 
@@ -233,6 +235,7 @@ theorem adaptive_within_and_compact1122_signing_chain
     (hCoinHonest : ∀ e ∈ coinEntries, e.opened = e.share) :
     ((Qsag.evalProdAdaptiveTree rawHash signOracle prog).2.1.length ≤ qh ∧
      (Qsag.evalProdAdaptiveTree rawHash signOracle prog).2.2.length ≤ qs_max ∧
+     Qsag.corduroyCustody128Params.productionWellFormed = true ∧
      Qsag.prodPathTargetCount Qsag.corduroyCustody128Params (2 ^ 12) = 35690) ∧
     (Qsag.IsPrefixFreeAntichain antichain.paths ∧
      ((Qsag.HybridSecurity.frontierParams fProf).len + 1) *
@@ -245,10 +248,11 @@ theorem adaptive_within_and_compact1122_signing_chain
        some (Qsag.productionCoinDerive coinCtx
          (Qsag.ProductionCoinReduction.combinedShares coinEntries 0))) := by
   have hTree := Qsag.evalProdAdaptiveTree_budgets rawHash signOracle hDual
+  obtain ⟨_, _, hCordWf, _⟩ := Qsag.corduroy_real_profiles_audit
   obtain ⟨hCordPool, _⟩ := Qsag.corduroyCustody128_target_pool_budget
   have hPf := Qsag.frontierAntichain_paths_prefixFree antichain
   obtain ⟨hWire, _⟩ := Qsag.HybridSecurity.all_frontier_profiles fProf
-  exact ⟨⟨hTree.1, hTree.2, hCordPool⟩,
+  exact ⟨⟨hTree.1, hTree.2, hCordWf, hCordPool⟩,
          ⟨hPf, hWire⟩,
          ⟨Qsag.ProductionCoinReduction.program_bound coinCtx coinEntries,
           Qsag.ProductionCoinReduction.honest_concrete coinCtx coinEntries hCoinHonest⟩⟩

@@ -959,6 +959,68 @@ impl RlwePoly {
         Self(coeffs)
     }
 
+    /// 8-way SIMD (`KeccakState8x`) CRS polynomial expansion producing bit-for-bit identical
+    /// polynomials to 8 calls to [`Self::from_crs_xof`].
+    fn from_crs_xof_batch8(
+        session_id: &[u8; 32],
+        sender: usize,
+        receiver: usize,
+        ot_indices: [u32; 8],
+        slot: u8,
+    ) -> [Self; 8] {
+        const RLWE_CRS_V1_MID: [u64; 25] =
+            crate::sponge::keccak::cshake256_static_midstate(b"QSAG.OT.RLWE.CRS/v1");
+        const INITIAL_WORDS: usize = 28 * crate::sponge::keccak::SHAKE256_RATE_LANES;
+
+        let mut hdrs = [[0u8; 53]; 8];
+        let s_be = (sender as u64).to_be_bytes();
+        let r_be = (receiver as u64).to_be_bytes();
+        for (lane, hdr) in hdrs.iter_mut().enumerate() {
+            hdr[0..32].copy_from_slice(session_id);
+            hdr[32..40].copy_from_slice(&s_be);
+            hdr[40..48].copy_from_slice(&r_be);
+            hdr[48..52].copy_from_slice(&ot_indices[lane].to_be_bytes());
+            hdr[52] = slot;
+        }
+        let inputs: [&[u8]; 8] = core::array::from_fn(|i| &hdrs[i][..]);
+        let mut w0 = [0u64; INITIAL_WORDS];
+        let mut w1 = [0u64; INITIAL_WORDS];
+        let mut w2 = [0u64; INITIAL_WORDS];
+        let mut w3 = [0u64; INITIAL_WORDS];
+        let mut w4 = [0u64; INITIAL_WORDS];
+        let mut w5 = [0u64; INITIAL_WORDS];
+        let mut w6 = [0u64; INITIAL_WORDS];
+        let mut w7 = [0u64; INITIAL_WORDS];
+        {
+            let mut outs: [&mut [u64]; 8] = [
+                &mut w0, &mut w1, &mut w2, &mut w3, &mut w4, &mut w5, &mut w6, &mut w7,
+            ];
+            crate::sponge::keccak::cshake256_8x_squeeze_u64s(&RLWE_CRS_V1_MID, inputs, &mut outs);
+        }
+        let raw_lanes = [&w0, &w1, &w2, &w3, &w4, &w5, &w6, &w7];
+        core::array::from_fn(|lane| {
+            let mut coeffs = [0u16; RLWE_N];
+            let mut idx = 0usize;
+            'words: for &word in raw_lanes[lane].iter() {
+                for shift in [0u32, 16, 32, 48] {
+                    if idx == RLWE_N {
+                        break 'words;
+                    }
+                    let val = ((word >> shift) & 0xFFFF) as u16;
+                    if val < 3 * RLWE_Q {
+                        coeffs[idx] = rlwe_barrett_rem_u32(u32::from(val));
+                        idx += 1;
+                    }
+                }
+            }
+            if idx == RLWE_N {
+                Self(coeffs)
+            } else {
+                Self::from_crs_xof(session_id, sender, receiver, ot_indices[lane], slot)
+            }
+        })
+    }
+
     /// Deterministically expand CRS polynomial `(a_crs` or `t_crs[ot_idx])` bound to `crs_coin`.
     pub fn from_crs_xof_with_coin(
         crs_coin: &[u8; 32],
@@ -1096,6 +1158,7 @@ pub struct RlweReceiverZkPok {
 
 /// Realize 11-bit signed-monomial challenge `u` (`deg = u & 0x3ff`, `sign = (u >> 10) & 1`) in $R_q$
 /// in constant time (`false -> +X^deg`, `true -> -X^deg`, matching `SignedMonomialChal.ofFinIndex`).
+#[cfg(test)]
 #[inline]
 fn poly_from_chal11(u: u32) -> RlwePoly {
     let deg = (u & 0x3FF) as usize;
@@ -1778,11 +1841,10 @@ impl RlweReceiverZkPok {
                     break (zs, ze);
                 }
             };
-            let d_poly = poly_from_chal11(u_fake);
             let w_fake = signed_box_to_rlwe_poly(&zs_fake)
                 .mul_ntt(a_ntt)
                 .add(&signed_box_to_rlwe_poly(&ze_fake))
-                .sub(&y_fake.mul_negacyclic(&d_poly));
+                .sub(&mul_chal11_public(&y_fake, u_fake));
             u_fakes[rep] = u_fake;
             zs_fakes[rep] = zs_fake;
             ze_fakes[rep] = ze_fake;
@@ -2788,12 +2850,12 @@ pub struct BaseOtRound4Msg {
 
 /// Isolated single-party Round-1 state for the OT-Ext Sender (Base-OT Receiver).
 pub struct BaseOtExtSenderRound1 {
-    crs_coin: [u8; 32],
     session_id: [u8; 32],
     ext_sender_id: usize,
     ext_receiver_id: usize,
     c_tilde_words: [u64; RLWE_BASE_OT_WORDS],
     sec_states: Vec<RlweOtReceiverSecret>,
+    cached_crs: Vec<(RlwePolyNtt, RlwePoly)>,
 }
 
 impl Drop for BaseOtExtSenderRound1 {
@@ -2951,6 +3013,10 @@ impl Drop for ActiveMeshWorkerGuard {
 }
 
 impl BaseOtExtSenderRound1 {
+    #[expect(
+        clippy::type_complexity,
+        reason = "Internal packed Base-OT block return tuple bundling secrets, pk0s, proof, and cached CRS"
+    )]
     fn build_packed_block(
         crs_coin: &[u8; 32],
         session_id: &[u8; 32],
@@ -2959,7 +3025,12 @@ impl BaseOtExtSenderRound1 {
         blk: usize,
         c_tilde_words: &[u64; RLWE_BASE_OT_WORDS],
         rng: &mut PartyPrivateRng,
-    ) -> (Vec<RlweOtReceiverSecret>, Vec<RlwePoly>, RlweReceiverZkPok) {
+    ) -> (
+        Vec<RlweOtReceiverSecret>,
+        Vec<RlwePoly>,
+        RlweReceiverZkPok,
+        Vec<(RlwePolyNtt, RlwePoly)>,
+    ) {
         let m0 = blk * RLWE_BASE_OT_SLOTS_PER_BLOCK;
         let mixed_sid = crs_mixed_session_id(crs_coin, session_id);
         let (mut s_blk, mut e0) = loop {
@@ -2972,13 +3043,22 @@ impl BaseOtExtSenderRound1 {
             wipe_u16s(&mut e.0);
         };
         let mut s_blk_ntt = s_blk.to_ntt();
-        let a0_ntt =
-            RlwePoly::from_crs_xof(&mixed_sid, ext_receiver_id, ext_sender_id, m0 as u32, 0)
-                .to_ntt();
-        let t0 = RlwePoly::from_crs_xof(&mixed_sid, ext_receiver_id, ext_sender_id, m0 as u32, 1);
+        let mut crs_pairs = Vec::with_capacity(RLWE_BASE_OT_SLOTS_PER_BLOCK);
+        for grp in 0..(RLWE_BASE_OT_SLOTS_PER_BLOCK / 8) {
+            let base = (m0 + 8 * grp) as u32;
+            let idxs = core::array::from_fn(|k| base + k as u32);
+            let a_batch =
+                RlwePoly::from_crs_xof_batch8(&mixed_sid, ext_receiver_id, ext_sender_id, idxs, 0);
+            let t_batch =
+                RlwePoly::from_crs_xof_batch8(&mixed_sid, ext_receiver_id, ext_sender_id, idxs, 1);
+            for (a_m, t_m) in a_batch.into_iter().zip(t_batch) {
+                crs_pairs.push((a_m.to_ntt(), t_m));
+            }
+        }
+        let (a0_ntt, t0) = &crs_pairs[0];
         let bit0 = ((c_tilde_words[m0 / 64] >> (m0 % 64)) & 1) == 1;
-        let rlwe0 = s_blk.mul_ntt(&a0_ntt).add(&e0);
-        let shifted0 = rlwe0.sub(&t0);
+        let rlwe0 = a0_ntt.pointwise_mul_from_ntt(&s_blk_ntt).add(&e0);
+        let shifted0 = rlwe0.sub(t0);
         let pk0_0 = RlwePoly::ct_select(bit0, &shifted0, &rlwe0);
         let pok = RlweReceiverZkPok::prove_ct(
             crs_coin,
@@ -2986,8 +3066,8 @@ impl BaseOtExtSenderRound1 {
             ext_receiver_id,
             ext_sender_id,
             m0 as u32,
-            &a0_ntt,
-            &t0,
+            a0_ntt,
+            t0,
             &pk0_0,
             &s_blk,
             &e0,
@@ -3010,17 +3090,13 @@ impl BaseOtExtSenderRound1 {
         });
         pk0s.push(pk0_0);
 
-        for slot in 1..RLWE_BASE_OT_SLOTS_PER_BLOCK {
+        for (slot, (a_ntt_m, t_m)) in crs_pairs.iter().enumerate().skip(1) {
             let m = m0 + slot;
             let bit_m = ((c_tilde_words[m / 64] >> (m % 64)) & 1) == 1;
-            let a_m =
-                RlwePoly::from_crs_xof(&mixed_sid, ext_receiver_id, ext_sender_id, m as u32, 0);
-            let t_m =
-                RlwePoly::from_crs_xof(&mixed_sid, ext_receiver_id, ext_sender_id, m as u32, 1);
             let mut e_m = RlwePoly::sample_ternary_eta1(rng);
-            let rlwe_m = a_m.mul_ntt(&s_blk_ntt).add(&e_m);
+            let rlwe_m = a_ntt_m.pointwise_mul_from_ntt(&s_blk_ntt).add(&e_m);
             wipe_u16s(&mut e_m.0);
-            let shifted_m = rlwe_m.sub(&t_m);
+            let shifted_m = rlwe_m.sub(t_m);
             let pk0_m = RlwePoly::ct_select(bit_m, &shifted_m, &rlwe_m);
             secs.push(RlweOtReceiverSecret {
                 crs_coin: *crs_coin,
@@ -3036,7 +3112,7 @@ impl BaseOtExtSenderRound1 {
         }
         wipe_u16s(&mut s_blk_ntt.0);
         wipe_u16s(&mut s_blk.0);
-        (secs, pk0s, pok)
+        (secs, pk0s, pok, crs_pairs)
     }
 
     /// Step 1 (`OT-Ext Sender` local) bound to a jointly committed CRS coin `crs_coin`.
@@ -3054,6 +3130,7 @@ impl BaseOtExtSenderRound1 {
         let mut sec_states = Vec::with_capacity(RLWE_BASE_OT_COUNT);
         let mut pk0s = Vec::with_capacity(RLWE_BASE_OT_COUNT);
         let mut block_poks = Vec::with_capacity(RLWE_BASE_OT_BLOCKS);
+        let mut cached_crs = Vec::with_capacity(RLWE_BASE_OT_COUNT);
 
         #[cfg(any(test, feature = "std"))]
         {
@@ -3074,7 +3151,7 @@ impl BaseOtExtSenderRound1 {
             let budget = BaseProofWorkers::acquire(requested);
             if budget.count <= 1 {
                 for (blk, rng) in &mut jobs {
-                    let (secs, pks, pok) = Self::build_packed_block(
+                    let (secs, pks, pok, crs) = Self::build_packed_block(
                         &crs_coin,
                         &session_id,
                         ext_sender_id,
@@ -3086,6 +3163,7 @@ impl BaseOtExtSenderRound1 {
                     sec_states.extend(secs);
                     pk0s.extend(pks);
                     block_poks.push(pok);
+                    cached_crs.extend(crs);
                 }
             } else {
                 let chunk_size = jobs.len().div_ceil(budget.count);
@@ -3117,16 +3195,17 @@ impl BaseOtExtSenderRound1 {
                         .flat_map(|h| h.join().expect("base proof worker failed"))
                         .collect::<Vec<_>>()
                 });
-                for (secs, pks, pok) in results {
+                for (secs, pks, pok, crs) in results {
                     sec_states.extend(secs);
                     pk0s.extend(pks);
                     block_poks.push(pok);
+                    cached_crs.extend(crs);
                 }
             }
         }
         #[cfg(not(any(test, feature = "std")))]
         for blk in 0..RLWE_BASE_OT_BLOCKS {
-            let (secs, pks, pok) = Self::build_packed_block(
+            let (secs, pks, pok, crs) = Self::build_packed_block(
                 &crs_coin,
                 &session_id,
                 ext_sender_id,
@@ -3138,6 +3217,7 @@ impl BaseOtExtSenderRound1 {
             sec_states.extend(secs);
             pk0s.extend(pks);
             block_poks.push(pok);
+            cached_crs.extend(crs);
         }
         (
             Self {
@@ -3147,6 +3227,7 @@ impl BaseOtExtSenderRound1 {
                 ext_receiver_id,
                 c_tilde_words,
                 sec_states,
+                cached_crs,
             },
             BaseOtRound1Msg { pk0s, block_poks },
         )
@@ -3191,34 +3272,21 @@ impl BaseOtExtSenderRound1 {
                 ot_idx: 0,
             });
         }
-        let mixed_sid = crs_mixed_session_id(&self.crs_coin, &self.session_id);
+        let cached_crs = core::mem::take(&mut self.cached_crs);
         let mut base_seeds = SecretBuffer(vec![[0u8; 32]; RLWE_BASE_OT_COUNT]);
         let mut results = (0..RLWE_BASE_OT_COUNT)
             .map(|_| (SecretBuffer([0u8; 32]), Ok(0u8)))
             .collect::<Vec<_>>();
         parallel_slots(&mut results, |m, result| {
             result.1 = (|| {
-                let a_ntt = RlwePoly::from_crs_xof(
-                    &mixed_sid,
-                    self.ext_receiver_id,
-                    self.ext_sender_id,
-                    m as u32,
-                    0,
-                )
-                .to_ntt();
-                let t_crs = RlwePoly::from_crs_xof(
-                    &mixed_sid,
-                    self.ext_receiver_id,
-                    self.ext_sender_id,
-                    m as u32,
-                    1,
-                );
+                let (a_ntt, t_crs) = &cached_crs[m];
                 let (seed_m, ok_m) =
-                    rlwe_ot_decrypt_ct_mask(&self.sec_states[m], &a_ntt, &t_crs, &msg2.resps[m])?;
+                    rlwe_ot_decrypt_ct_mask(&self.sec_states[m], a_ntt, t_crs, &msg2.resps[m])?;
                 *result.0 = seed_m;
                 Ok::<_, PreprocessError>(ok_m)
             })();
         });
+        drop(cached_crs);
         let mut all_ok = 1u8;
         for (m, result) in results.into_iter().enumerate() {
             let (seed, ok) = result;
@@ -3333,44 +3401,49 @@ impl BaseOtExtReceiverRound2 {
                 .collect::<Vec<_>>(),
         );
         let mut results = (0..RLWE_BASE_OT_COUNT).map(|_| None).collect::<Vec<_>>();
-        parallel_slots(&mut results, |m, result| {
-            let pk0 = &msg1.pk0s[m];
-            let [mut s0, mut s1, mut rho0, mut rho1] = seeds[m];
-            let a_ntt =
-                RlwePoly::from_crs_xof(&mixed_sid, ext_receiver_id, ext_sender_id, m as u32, 0)
-                    .to_ntt();
-            let t_crs =
-                RlwePoly::from_crs_xof(&mixed_sid, ext_receiver_id, ext_sender_id, m as u32, 1);
-            let pk1 = pk0.add(&t_crs);
-            let (u0, v0) = rlwe_fo_encrypt_branch(
-                &crs_coin,
-                &session_id,
-                ext_receiver_id,
-                ext_sender_id,
-                m as u32,
-                0,
-                &a_ntt,
-                pk0,
-                &s0,
-                &rho0,
-            );
-            let (u1, v1) = rlwe_fo_encrypt_branch(
-                &crs_coin,
-                &session_id,
-                ext_receiver_id,
-                ext_sender_id,
-                m as u32,
-                1,
-                &a_ntt,
-                &pk1,
-                &s1,
-                &rho1,
-            );
-            wipe_bytes32(&mut rho0);
-            wipe_bytes32(&mut rho1);
-            wipe_bytes32(&mut s0);
-            wipe_bytes32(&mut s1);
-            *result = Some(RlweOtSenderMsg { u0, v0, u1, v1 });
+        parallel_slots(&mut results.chunks_mut(8).collect::<Vec<_>>(), |grp, chunk| {
+            let base_m = 8 * grp;
+            let idxs = core::array::from_fn(|k| (base_m + k) as u32);
+            let a_batch =
+                RlwePoly::from_crs_xof_batch8(&mixed_sid, ext_receiver_id, ext_sender_id, idxs, 0);
+            let t_batch =
+                RlwePoly::from_crs_xof_batch8(&mixed_sid, ext_receiver_id, ext_sender_id, idxs, 1);
+            for (k, result) in chunk.iter_mut().enumerate() {
+                let m = base_m + k;
+                let pk0 = &msg1.pk0s[m];
+                let [mut s0, mut s1, mut rho0, mut rho1] = seeds[m];
+                let a_ntt = a_batch[k].to_ntt();
+                let pk1 = pk0.add(&t_batch[k]);
+                let (u0, v0) = rlwe_fo_encrypt_branch(
+                    &crs_coin,
+                    &session_id,
+                    ext_receiver_id,
+                    ext_sender_id,
+                    m as u32,
+                    0,
+                    &a_ntt,
+                    pk0,
+                    &s0,
+                    &rho0,
+                );
+                let (u1, v1) = rlwe_fo_encrypt_branch(
+                    &crs_coin,
+                    &session_id,
+                    ext_receiver_id,
+                    ext_sender_id,
+                    m as u32,
+                    1,
+                    &a_ntt,
+                    &pk1,
+                    &s1,
+                    &rho1,
+                );
+                wipe_bytes32(&mut rho0);
+                wipe_bytes32(&mut rho1);
+                wipe_bytes32(&mut s0);
+                wipe_bytes32(&mut s1);
+                *result = Some(RlweOtSenderMsg { u0, v0, u1, v1 });
+            }
         });
         let mut base_seed_pairs = Vec::with_capacity(RLWE_BASE_OT_COUNT);
         for seed in seeds.iter_mut() {
@@ -3850,32 +3923,29 @@ impl Drop for KosOtSenderPending {
 }
 
 #[inline]
-fn expand_prg_column_u64s(
+fn expand_prg_columns_8x_u64s(
     session_id: &[u8; 32],
     batch_ctr: u64,
-    col_idx: usize,
-    seed: &[u8; 32],
+    base_col_idx: usize,
+    seeds: [&[u8; 32]; 8],
     num_words: usize,
-) -> Vec<u64> {
-    let mut xof = Cshake256Xof::new(b"QSAG.OT.EXT.COL/v2");
-    xof.absorb(session_id);
-    xof.absorb(&batch_ctr.to_be_bytes());
-    xof.absorb(&(col_idx as u64).to_be_bytes());
-    xof.absorb(seed);
-    let mut raw = vec![0u8; 8 * num_words];
-    xof.squeeze(&mut raw);
-    let mut words = Vec::with_capacity(num_words);
-    #[expect(
-        clippy::chunks_exact_to_as_chunks,
-        reason = "Keep the workspace Rust 1.85 minimum; slice as_chunks requires a newer compiler"
-    )]
-    for chunk in raw.chunks_exact(8) {
-        words.push(u64::from_le_bytes([
-            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-        ]));
+) -> [Vec<u64>; 8] {
+    const OT_EXT_COL_V2_MID: [u64; 25] =
+        crate::sponge::keccak::cshake256_static_midstate(b"QSAG.OT.EXT.COL/v2");
+    let mut hdrs = SecretBuffer([[0u8; 80]; 8]);
+    let b_be = batch_ctr.to_be_bytes();
+    for lane in 0..8 {
+        hdrs[lane][0..32].copy_from_slice(session_id);
+        hdrs[lane][32..40].copy_from_slice(&b_be);
+        hdrs[lane][40..48].copy_from_slice(&((base_col_idx + lane) as u64).to_be_bytes());
+        hdrs[lane][48..80].copy_from_slice(seeds[lane]);
     }
-    wipe_bytes(&mut raw);
-    words
+    let mut out: [Vec<u64>; 8] = core::array::from_fn(|_| vec![0u64; num_words]);
+    let [o0, o1, o2, o3, o4, o5, o6, o7] = &mut out;
+    let inputs: [&[u8]; 8] = core::array::from_fn(|i| &hdrs[i][..]);
+    let mut outs: [&mut [u64]; 8] = [o0, o1, o2, o3, o4, o5, o6, o7];
+    crate::sponge::keccak::cshake256_8x_squeeze_u64s(&OT_EXT_COL_V2_MID, inputs, &mut outs);
+    out
 }
 
 /// Transpose 128 bit-columns of `num_words` `u64`s into `64 * num_words` `u128` rows.
@@ -4183,6 +4253,24 @@ impl OtExtReceiverChannel {
             self.batch_ctr < u64::MAX,
             "OtExtReceiverChannel batch counter exhausted"
         );
+        let sac_words = [
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+        ];
+        self.round1_send_u_cols_with_sac(choice_words, sac_words)
+    }
+
+    pub(super) fn round1_send_u_cols_with_sac(
+        &mut self,
+        choice_words: &[u64],
+        sac_words: [u64; 4],
+    ) -> (KosOtReceiverPending, KosOtUColsMsg) {
+        assert!(
+            self.batch_ctr < u64::MAX,
+            "OtExtReceiverChannel batch counter exhausted"
+        );
         let payload_words = choice_words.len();
         let padded_words = payload_words + 4; // +256 sacrificial OTs masking x_kos & t_kos
         let batch_ctr = self.batch_ctr;
@@ -4190,12 +4278,31 @@ impl OtExtReceiverChannel {
 
         let mut full_choices = Vec::with_capacity(padded_words);
         full_choices.extend_from_slice(choice_words);
-        for _ in 0..4 {
-            full_choices.push(rng.next_u64());
-        }
+        full_choices.extend_from_slice(&sac_words);
 
         let mut t0_cols = vec![Vec::new(); 128];
         let mut u_cols = vec![Vec::new(); 128];
+        let fill_group8 = |sid: &[u8; 32],
+                           pairs: &[([u8; 32], [u8; 32]); 128],
+                           choices_ref: &[u64],
+                           base_i: usize,
+                           t0_sub: &mut [Vec<u64>],
+                           u_sub: &mut [Vec<u64>]| {
+            let s0_refs: [&[u8; 32]; 8] = core::array::from_fn(|k| &pairs[base_i + k].0);
+            let s1_refs: [&[u8; 32]; 8] = core::array::from_fn(|k| &pairs[base_i + k].1);
+            let t0_batch = expand_prg_columns_8x_u64s(sid, batch_ctr, base_i, s0_refs, padded_words);
+            let mut t1_batch =
+                expand_prg_columns_8x_u64s(sid, batch_ctr, base_i, s1_refs, padded_words);
+            for (k, (t0, t1)) in t0_batch.into_iter().zip(&mut t1_batch).enumerate() {
+                let mut u = Vec::with_capacity(padded_words);
+                for w in 0..padded_words {
+                    u.push(t0[w] ^ t1[w] ^ choices_ref[w]);
+                }
+                wipe_u64s(t1);
+                t0_sub[k] = t0;
+                u_sub[k] = u;
+            }
+        };
         #[cfg(any(test, feature = "std"))]
         if padded_words >= 64 {
             let sid = &self.session_id;
@@ -4209,83 +4316,42 @@ impl OtExtReceiverChannel {
                 {
                     let base_i = 16 * c_idx;
                     scope.spawn(move || {
-                        for (off, (t0_dst, u_dst)) in
-                            t0_sub.iter_mut().zip(u_sub.iter_mut()).enumerate()
-                        {
-                            let i = base_i + off;
-                            let t0 = expand_prg_column_u64s(
-                                sid,
-                                batch_ctr,
-                                i,
-                                &pairs[i].0,
-                                padded_words,
-                            );
-                            let mut t1 = expand_prg_column_u64s(
-                                sid,
-                                batch_ctr,
-                                i,
-                                &pairs[i].1,
-                                padded_words,
-                            );
-                            let mut u = Vec::with_capacity(padded_words);
-                            for w in 0..padded_words {
-                                u.push(t0[w] ^ t1[w] ^ choices_ref[w]);
-                            }
-                            wipe_u64s(&mut t1);
-                            *t0_dst = t0;
-                            *u_dst = u;
-                        }
+                        fill_group8(sid, pairs, choices_ref, base_i, &mut t0_sub[..8], &mut u_sub[..8]);
+                        fill_group8(
+                            sid,
+                            pairs,
+                            choices_ref,
+                            base_i + 8,
+                            &mut t0_sub[8..16],
+                            &mut u_sub[8..16],
+                        );
                     });
                 }
             });
         } else {
-            for i in 0..128 {
-                let t0 = expand_prg_column_u64s(
+            for grp in 0..16 {
+                let base_i = 8 * grp;
+                fill_group8(
                     &self.session_id,
-                    batch_ctr,
-                    i,
-                    &self.combined_seed_pairs[i].0,
-                    padded_words,
+                    &self.combined_seed_pairs,
+                    &full_choices,
+                    base_i,
+                    &mut t0_cols[base_i..base_i + 8],
+                    &mut u_cols[base_i..base_i + 8],
                 );
-                let mut t1 = expand_prg_column_u64s(
-                    &self.session_id,
-                    batch_ctr,
-                    i,
-                    &self.combined_seed_pairs[i].1,
-                    padded_words,
-                );
-                let mut u = Vec::with_capacity(padded_words);
-                for w in 0..padded_words {
-                    u.push(t0[w] ^ t1[w] ^ full_choices[w]);
-                }
-                wipe_u64s(&mut t1);
-                t0_cols[i] = t0;
-                u_cols[i] = u;
             }
         }
         #[cfg(not(any(test, feature = "std")))]
-        for i in 0..128 {
-            let t0 = expand_prg_column_u64s(
+        for grp in 0..16 {
+            let base_i = 8 * grp;
+            fill_group8(
                 &self.session_id,
-                batch_ctr,
-                i,
-                &self.combined_seed_pairs[i].0,
-                padded_words,
+                &self.combined_seed_pairs,
+                &full_choices,
+                base_i,
+                &mut t0_cols[base_i..base_i + 8],
+                &mut u_cols[base_i..base_i + 8],
             );
-            let mut t1 = expand_prg_column_u64s(
-                &self.session_id,
-                batch_ctr,
-                i,
-                &self.combined_seed_pairs[i].1,
-                padded_words,
-            );
-            let mut u = Vec::with_capacity(padded_words);
-            for w in 0..padded_words {
-                u.push(t0[w] ^ t1[w] ^ full_choices[w]);
-            }
-            wipe_u64s(&mut t1);
-            t0_cols[i] = t0;
-            u_cols[i] = u;
         }
 
         let t_rows = transpose_cols128_to_rows(&t0_cols, padded_words);
@@ -4394,8 +4460,92 @@ impl OtExtSenderChannel {
         let payload_words = padded_words - 4;
         let batch_ctr = self.batch_ctr;
         self.batch_ctr += 1;
+        let chi_seed = sender_rng.next_bytes32();
+        self.round2_sample_challenge_with_chi_inner(
+            batch_ctr,
+            payload_words,
+            padded_words,
+            u_msg,
+            chi_seed,
+        )
+    }
+
+    pub(super) fn round2_sample_challenge_with_chi(
+        &mut self,
+        u_msg: &KosOtUColsMsg,
+        chi_seed: [u8; 32],
+    ) -> Result<(KosOtSenderPending, KosOtChallengeMsg), PreprocessError> {
+        if self.poisoned {
+            return Err(PreprocessError::ChannelPoisoned {
+                sender_id: self.sender_id,
+                receiver_id: self.receiver_id,
+            });
+        }
+        if self.batch_ctr == u64::MAX {
+            self.poison_and_wipe();
+            return Err(PreprocessError::ChannelPoisoned {
+                sender_id: self.sender_id,
+                receiver_id: self.receiver_id,
+            });
+        }
+        if u_msg.u_cols.len() != 128 {
+            self.poison_and_wipe();
+            return Err(PreprocessError::KosOtCheckFailed {
+                sender_id: self.sender_id,
+                receiver_id: self.receiver_id,
+            });
+        }
+        let padded_words = u_msg.u_cols[0].len();
+        if padded_words < 4
+            || validate_frame_count(padded_words, 128 * 8, MAX_FRAME_BUDGET).is_err()
+            || u_msg.u_cols.iter().any(|c| c.len() != padded_words)
+        {
+            self.poison_and_wipe();
+            return Err(PreprocessError::KosOtCheckFailed {
+                sender_id: self.sender_id,
+                receiver_id: self.receiver_id,
+            });
+        }
+        let payload_words = padded_words - 4;
+        let batch_ctr = self.batch_ctr;
+        self.batch_ctr += 1;
+        self.round2_sample_challenge_with_chi_inner(
+            batch_ctr,
+            payload_words,
+            padded_words,
+            u_msg,
+            chi_seed,
+        )
+    }
+
+    fn round2_sample_challenge_with_chi_inner(
+        &mut self,
+        batch_ctr: u64,
+        payload_words: usize,
+        padded_words: usize,
+        u_msg: &KosOtUColsMsg,
+        chi_seed: [u8; 32],
+    ) -> Result<(KosOtSenderPending, KosOtChallengeMsg), PreprocessError> {
 
         let mut q_cols = vec![Vec::new(); 128];
+        let fill_q_group8 = |sid: &[u8; 32],
+                             seeds: &[[u8; 32]; 128],
+                             delta: u128,
+                             u_cols_ref: &[Vec<u64>],
+                             base_i: usize,
+                             q_sub: &mut [Vec<u64>]| {
+            let s_refs: [&[u8; 32]; 8] = core::array::from_fn(|k| &seeds[base_i + k]);
+            let t_batch = expand_prg_columns_8x_u64s(sid, batch_ctr, base_i, s_refs, padded_words);
+            for (k, mut ti) in t_batch.into_iter().enumerate() {
+                let i = base_i + k;
+                let di_bit = ((delta >> i) & 1) as u64;
+                let di_mask = 0u64.wrapping_sub(black_box(di_bit));
+                for (w, ti_w_item) in ti[..padded_words].iter_mut().enumerate() {
+                    *ti_w_item ^= di_mask & u_cols_ref[i][w];
+                }
+                q_sub[k] = ti;
+            }
+        };
         #[cfg(any(test, feature = "std"))]
         if padded_words >= 64 {
             let sid = &self.session_id;
@@ -4406,52 +4556,42 @@ impl OtExtSenderChannel {
                 for (c_idx, q_sub) in q_cols.chunks_mut(16).enumerate() {
                     let base_i = 16 * c_idx;
                     scope.spawn(move || {
-                        for (off, q_dst) in q_sub.iter_mut().enumerate() {
-                            let i = base_i + off;
-                            let mut ti =
-                                expand_prg_column_u64s(sid, batch_ctr, i, &seeds[i], padded_words);
-                            let di_bit = ((delta >> i) & 1) as u64;
-                            let di_mask = 0u64.wrapping_sub(black_box(di_bit));
-                            for (w, ti_w_item) in ti[..padded_words].iter_mut().enumerate() {
-                                *ti_w_item ^= di_mask & u_cols_ref[i][w];
-                            }
-                            *q_dst = ti;
-                        }
+                        fill_q_group8(sid, seeds, delta, u_cols_ref, base_i, &mut q_sub[..8]);
+                        fill_q_group8(
+                            sid,
+                            seeds,
+                            delta,
+                            u_cols_ref,
+                            base_i + 8,
+                            &mut q_sub[8..16],
+                        );
                     });
                 }
             });
         } else {
-            for (i, q_col) in q_cols.iter_mut().enumerate() {
-                let mut ti = expand_prg_column_u64s(
+            for grp in 0..16 {
+                let base_i = 8 * grp;
+                fill_q_group8(
                     &self.session_id,
-                    batch_ctr,
-                    i,
-                    &self.combined_seeds[i],
-                    padded_words,
+                    &self.combined_seeds,
+                    self.delta,
+                    &u_msg.u_cols,
+                    base_i,
+                    &mut q_cols[base_i..base_i + 8],
                 );
-                let di_bit = ((self.delta >> i) & 1) as u64;
-                let di_mask = 0u64.wrapping_sub(black_box(di_bit));
-                for (w, ti_w_item) in ti[..padded_words].iter_mut().enumerate() {
-                    *ti_w_item ^= di_mask & u_msg.u_cols[i][w];
-                }
-                *q_col = ti;
             }
         }
         #[cfg(not(any(test, feature = "std")))]
-        for (i, q_col) in q_cols.iter_mut().enumerate() {
-            let mut ti = expand_prg_column_u64s(
+        for grp in 0..16 {
+            let base_i = 8 * grp;
+            fill_q_group8(
                 &self.session_id,
-                batch_ctr,
-                i,
-                &self.combined_seeds[i],
-                padded_words,
+                &self.combined_seeds,
+                self.delta,
+                &u_msg.u_cols,
+                base_i,
+                &mut q_cols[base_i..base_i + 8],
             );
-            let di_bit = ((self.delta >> i) & 1) as u64;
-            let di_mask = 0u64.wrapping_sub(black_box(di_bit));
-            for (w, ti_w_item) in ti[..padded_words].iter_mut().enumerate() {
-                *ti_w_item ^= di_mask & u_msg.u_cols[i][w];
-            }
-            *q_col = ti;
         }
 
         let q_rows = transpose_cols128_to_rows(&q_cols, padded_words);
@@ -4466,7 +4606,6 @@ impl OtExtSenderChannel {
             batch_ctr,
             &u_msg.u_cols,
         );
-        let chi_seed = sender_rng.next_bytes32();
         Ok((
             KosOtSenderPending {
                 batch_ctr,

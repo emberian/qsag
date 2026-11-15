@@ -5,6 +5,11 @@ public import Qsag.SeparatedCustodyCollision
 public import Qsag.ProdHashGameReductions
 public import Qsag.ThresholdMpc
 public import Qsag.SimulationSpine
+import all Qsag.Keccak
+import all Qsag.JortsBeltLatchAndQuorumSwitching
+import all Qsag.SimulationSpine
+import all Qsag.ThresholdMpc
+import all Qsag.MaliciousSecurity
 import all Qsag.CompleteMediationBoundary
 import all Qsag.SeparatedCustodyCore
 import all Qsag.SeparatedCustodySpine
@@ -85,14 +90,28 @@ set_option maxRecDepth 4096
 
 /-! ## §1. Single-Validator `QuorumPublicKey` Merkle Enrolment, Verification & Collision Extraction -/
 
-/-- Canonical domain-framed intent byte payload reusing `SeparatedCustodyCore`'s injective
-    LEB128 multi-frame encoding at validator slot `0`. -/
+/-- Canonical domain-framed intent byte payload encoding all 5 fields of `Custody.Intent`
+    (`session`, `round`, `leaf`, `spend`, `message`) via `encodeMultiFrame` + `leb128` with an
+    explicit byte-literal domain tag (zero `@[extern]` `String.toUTF8` calls for pure kernel
+    reducibility). -/
 def intentCanonicalPayload (r : Custody.Intent) : List UInt8 :=
-  Custody.payload 0 r
+  encodeMultiFrame
+    [[0x51, 0x53, 0x41, 0x47, 0x2e, 0x53, 0x48, 0x41, 0x4d, 0x49, 0x52],
+     leb128 r.session, leb128 r.round, leb128 r.leaf, leb128 r.spend, r.message]
 
 theorem intentCanonicalPayload_injective {r₁ r₂ : Custody.Intent}
-    (h : intentCanonicalPayload r₁ = intentCanonicalPayload r₂) : r₁ = r₂ :=
-  (Custody.payload_injective h).2
+    (h : intentCanonicalPayload r₁ = intentCanonicalPayload r₂) : r₁ = r₂ := by
+  have hf := encodeMultiFrame_injective h
+  simp only [List.cons.injEq] at hf
+  have hLeb : ∀ {a b : Nat}, leb128 a = leb128 b → a = b := fun {a b} hEq =>
+    (leb128_prefix_inj (show leb128 a ++ [] = leb128 b ++ [] by simpa using hEq)).1
+  have hs := hLeb hf.2.1
+  have hr := hLeb hf.2.2.1
+  have hl := hLeb hf.2.2.2.1
+  have hv := hLeb hf.2.2.2.2.1
+  have hm := hf.2.2.2.2.2.1
+  cases r₁; cases r₂
+  simp_all only
 
 /-- Public WOTS+C chain endpoints (`3` steps from `quorumStageChainSk`) across `L` chains for
     scheduled leaf `leaf` under `masterSeed`. -/
@@ -163,6 +182,7 @@ theorem quorumWalkMerklePath_authPath (H : List UInt8 → Digest256) (pkSeed : D
     simp [quorumWalkMerklePath, quorumAuthPath]
   | rem + 1, level, idx => by
     unfold quorumAuthPath quorumWalkMerklePath
+    dsimp only
     have hParent :
         (if idx % 2 = 0 then
           quorumMerkleNodeHash H pkSeed (UInt8.ofNat level) (UInt64.ofNat (idx / 2))
@@ -174,18 +194,19 @@ theorem quorumWalkMerklePath_authPath (H : List UInt8 → Digest256) (pkSeed : D
             (quorumTreeNode H pkSeed leafFn level idx)) =
         quorumTreeNode H pkSeed leafFn (level + 1) (idx / 2) := by
       by_cases hEven : idx % 2 = 0
-      · simp only [hEven, ↓reduceIte, quorumTreeNode]
+      · simp only [hEven, ↓reduceIte]
+        conv => rhs; unfold quorumTreeNode
         have hL : idx = 2 * (idx / 2) := by omega
-        have hR : idx + 1 = 2 * (idx / 2) + 1 := by omega
-        rw [← hL, ← hR]
-      · simp only [hEven, ↓reduceIte, quorumTreeNode]
+        rw [← hL]
+      · simp only [hEven, ↓reduceIte]
+        conv => rhs; unfold quorumTreeNode
         have hL : idx - 1 = 2 * (idx / 2) := by omega
-        have hR : idx = 2 * (idx / 2) + 1 := by omega
-        rw [← hL, ← hR]
+        have hR : idx - 1 + 1 = idx := by omega
+        rw [← hL, hR]
     rw [hParent, quorumWalkMerklePath_authPath H pkSeed leafFn rem (level + 1) (idx / 2)]
     have hLvl : level + 1 + rem = level + (rem + 1) := by omega
     have hDiv : idx / 2 / 2 ^ rem = idx / 2 ^ (rem + 1) := by
-      rw [Nat.div_div_eq_div_mul, ← Nat.pow_add, Nat.add_comm 1 rem]
+      rw [Nat.div_div_eq_div_mul, Nat.pow_succ, Nat.mul_comm]
     rw [hLvl, hDiv]
 
 /-- Enrolled single-validator `QuorumPublicKey` of tree height `height` over `L` chains. -/
@@ -250,7 +271,8 @@ private theorem uint8_ofNat_toNat_of_lt {h : Nat} (hLt : h < 256) :
 private theorem uint64_ofNat_toNat_self (x : UInt64) :
     UInt64.ofNat x.toNat = x := by
   apply UInt64.eq_of_toBitVec_eq
-  exact BitVec.ofNat_toNat
+  change BitVec.ofNat 64 x.toBitVec.toNat = x.toBitVec
+  rw [BitVec.ofNat_toNat, BitVec.setWidth_eq]
 
 theorem quorumSigChainEnds_reference (L : Nat) (H : List UInt8 → Digest256)
     (masterSeed : Digest256) (gLeaf : UInt64) (counter : UInt32)
@@ -259,35 +281,26 @@ theorem quorumSigChainEnds_reference (L : Nat) (H : List UInt8 → Digest256)
     quorumSigChainEnds L H (quorumStagePkSeed H masterSeed) gLeaf digits
       (quorumJortsReferenceSign H masterSeed gLeaf counter digits authPath).nodes =
     quorumHonestChainEnds L H masterSeed gLeaf := by
+  subst hDigLen
   unfold quorumSigChainEnds quorumHonestChainEnds quorumJortsReferenceSign
   dsimp only
-  have hMapEq :
-      (List.finRange digits.length).map (fun idx =>
-        wotsChainIter (quorumChainStep H (quorumStagePkSeed H masterSeed) gLeaf) idx.1 0
-          (digits[idx.1]'(idx.2)).val
-          (quorumStageChainSk H masterSeed gLeaf (UInt32.ofNat idx.1))) =
-      (List.finRange L).map (fun idx =>
-        wotsChainIter (quorumChainStep H (quorumStagePkSeed H masterSeed) gLeaf) idx.1 0
-          (digits.getD idx.1 ⟨0, by decide⟩).val
-          (quorumStageChainSk H masterSeed gLeaf (UInt32.ofNat idx.1))) := by
-    subst hDigLen
-    apply List.map_congr_left
-    intro idx _
-    rw [list_getD_eq_getElem_local digits _ idx.2]
-  rw [hMapEq]
   apply List.map_congr_left
   intro idx _
-  have hLenNodes :
-      ((List.finRange L).map (fun j : Fin L =>
-        wotsChainIter (quorumChainStep H (quorumStagePkSeed H masterSeed) gLeaf) j.1 0
-          (digits.getD j.1 ⟨0, by decide⟩).val
-          (quorumStageChainSk H masterSeed gLeaf (UInt32.ofNat j.1)))).length = L := by
-    simp
-  rw [list_getD_eq_getElem_local _ 0#256 (hLenNodes ▸ idx.2)]
-  simp only [List.getElem_map, List.getElem_finRange, Fin.eta]
-  let d := digits.getD idx.1 ⟨0, by decide⟩
-  have hdLe : d.val ≤ 3 := by have := d.isLt; omega
-  have hAdd : d.val + (3 - d.val) = 3 := by omega
+  let refNodes := (List.finRange digits.length).map (fun j : Fin digits.length =>
+    wotsChainIter (quorumChainStep H (quorumStagePkSeed H masterSeed) gLeaf) j.1 0
+      (digits[j.1]'(j.2)).val
+      (quorumStageChainSk H masterSeed gLeaf (UInt32.ofNat j.1)))
+  have hkRef : idx.1 < refNodes.length := by simp [refNodes, idx.2]
+  change wotsChainIter (quorumChainStep H (quorumStagePkSeed H masterSeed) gLeaf) idx.1
+      (digits.getD idx.1 ⟨0, by decide⟩).val (3 - (digits.getD idx.1 ⟨0, by decide⟩).val)
+      (refNodes.getD idx.1 0#256) =
+    wotsChainIter (quorumChainStep H (quorumStagePkSeed H masterSeed) gLeaf) idx.1 0 3
+      (quorumStageChainSk H masterSeed gLeaf (UInt32.ofNat idx.1))
+  rw [list_getD_eq_getElem_local refNodes 0#256 hkRef,
+      list_getD_eq_getElem_local digits _ idx.2]
+  simp only [refNodes, List.getElem_map, List.getElem_finRange, Fin.cast_mk]
+  let d := digits[idx.1]'(idx.2)
+  have hAdd : d.val + (3 - d.val) = 3 := by have := d.isLt; omega
   have hComp := wotsChainIter_add (quorumChainStep H (quorumStagePkSeed H masterSeed) gLeaf)
     idx.1 0 d.val (3 - d.val) (quorumStageChainSk H masterSeed gLeaf (UInt32.ofNat idx.1))
   simp only [Nat.zero_add, hAdd] at hComp
@@ -314,13 +327,14 @@ theorem quorumJortsReferenceSign_verifies (L targetSum height : Nat)
     verifyQuorumJortsSigAt L targetSum H pk digitsOf msg
       (quorumJortsReferenceSign H masterSeed gLeaf counter digits authPath) = true := by
   intro pk digits authPath
+  have hDigLen' : digits.length = L := hDigLen
   have hPkH : pk.height.toNat = height := uint8_ofNat_toNat_of_lt hHeightLt
   have hPkS : pk.pkSeed = quorumStagePkSeed H masterSeed := rfl
   have hPathLen : authPath.length = height :=
     quorumAuthPath_length H pk.pkSeed (quorumHonestLeafDigest L H masterSeed) height 0 gLeaf.toNat
   have hNodesLen :
       (quorumJortsReferenceSign H masterSeed gLeaf counter digits authPath).nodes.length = L := by
-    simp [quorumJortsReferenceSign, hDigLen]
+    simp [quorumJortsReferenceSign, hDigLen']
   unfold verifyQuorumJortsSigAt
   dsimp only [quorumJortsReferenceSign]
   rw [hPkH]
@@ -343,7 +357,7 @@ theorem quorumJortsReferenceSign_verifies (L targetSum height : Nat)
       unfold quorumTreeNode quorumHonestLeafDigest
       rw [uint64_ofNat_toNat_self, hPkS]
     rw [hLeafNode, quorumWalkMerklePath_authPath]
-    simp [Nat.zero_add, Nat.div_eq_of_lt hLeafLt, pk, deriveQuorumValidatorPublicKey, hPkS]
+    simp [Nat.zero_add, Nat.div_eq_of_lt hLeafLt, pk, deriveQuorumValidatorPublicKey]
   have hLeafCheck : decide (gLeaf.toNat < 2 ^ height) = true := decide_eq_true hLeafLt
   have hPathCheck : decide (authPath.length = height) = true := decide_eq_true hPathLen
   have hNodesCheck :
@@ -375,7 +389,63 @@ theorem quorumJortsReferenceSign_verifies (L targetSum height : Nat)
 
 /-! ### Constructive `PSum` Collision Extractors for Chain, Leaf & Merkle Verification -/
 
-private theorem pow256_8_gt_64_local : 64 < 256 ^ 8 := by decide
+private theorem pow256_8_gt_64_local : 64 < 256 ^ 8 :=
+  calc 64 < 256 ^ 1 := by decide
+    _ ≤ 256 ^ 8 := Nat.pow_le_pow_right (by decide) (by decide)
+
+private theorem quorumEncodeFramed3_injective
+    (domain : ByteArray) (hd : domain.data.toList.length < 256 ^ 8)
+    {a₁ b₁ c₁ a₂ b₂ c₂ : List UInt8}
+    (ha₁ : a₁.length < 256 ^ 8) (hb₁ : b₁.length < 256 ^ 8) (hc₁ : c₁.length < 256 ^ 8)
+    (ha₂ : a₂.length < 256 ^ 8) (hb₂ : b₂.length < 256 ^ 8) (hc₂ : c₂.length < 256 ^ 8)
+    (hEq : quorumEncodeFramed domain [a₁, b₁, c₁] =
+           quorumEncodeFramed domain [a₂, b₂, c₂]) :
+    a₁ = a₂ ∧ b₁ = b₂ ∧ c₁ = c₂ := by
+  simp only [quorumEncodeFramed, quorumFrameFields] at hEq
+  obtain ⟨_, r1⟩ := quorumFrameField_prefix_inj hd hd hEq
+  obtain ⟨ea, r2⟩ := quorumFrameField_prefix_inj ha₁ ha₂ r1
+  obtain ⟨eb, r3⟩ := quorumFrameField_prefix_inj hb₁ hb₂ r2
+  obtain ⟨ec, _⟩ := quorumFrameField_prefix_inj hc₁ hc₂ r3
+  exact ⟨ea, eb, ec⟩
+
+private theorem quorumEncodeFramed5_injective
+    (domain : ByteArray) (hd : domain.data.toList.length < 256 ^ 8)
+    {a₁ b₁ c₁ d₁ e₁ a₂ b₂ c₂ d₂ e₂ : List UInt8}
+    (ha₁ : a₁.length < 256 ^ 8) (hb₁ : b₁.length < 256 ^ 8) (hc₁ : c₁.length < 256 ^ 8)
+    (hd₁ : d₁.length < 256 ^ 8) (he₁ : e₁.length < 256 ^ 8)
+    (ha₂ : a₂.length < 256 ^ 8) (hb₂ : b₂.length < 256 ^ 8) (hc₂ : c₂.length < 256 ^ 8)
+    (hd₂ : d₂.length < 256 ^ 8) (he₂ : e₂.length < 256 ^ 8)
+    (hEq : quorumEncodeFramed domain [a₁, b₁, c₁, d₁, e₁] =
+           quorumEncodeFramed domain [a₂, b₂, c₂, d₂, e₂]) :
+    a₁ = a₂ ∧ b₁ = b₂ ∧ c₁ = c₂ ∧ d₁ = d₂ ∧ e₁ = e₂ := by
+  simp only [quorumEncodeFramed, quorumFrameFields] at hEq
+  obtain ⟨_, r1⟩ := quorumFrameField_prefix_inj hd hd hEq
+  obtain ⟨ea, r2⟩ := quorumFrameField_prefix_inj ha₁ ha₂ r1
+  obtain ⟨eb, r3⟩ := quorumFrameField_prefix_inj hb₁ hb₂ r2
+  obtain ⟨ec, r4⟩ := quorumFrameField_prefix_inj hc₁ hc₂ r3
+  obtain ⟨ed, r5⟩ := quorumFrameField_prefix_inj hd₁ hd₂ r4
+  obtain ⟨ee, _⟩ := quorumFrameField_prefix_inj he₁ he₂ r5
+  exact ⟨ea, eb, ec, ed, ee⟩
+
+private theorem quorumChainPreimage_ne
+    (pkSeed : Digest256) (adrs : List UInt8) (nodeA nodeB : Digest256)
+    (hAdrs : adrs.length = 16) (hNe : nodeA ≠ nodeB) :
+    quorumEncodeFramed quorumChainTag [encodeDigest256 pkSeed, adrs, encodeDigest256 nodeA] ≠
+      quorumEncodeFramed quorumChainTag [encodeDigest256 pkSeed, adrs, encodeDigest256 nodeB] := by
+  intro hEq
+  have hTagLt : quorumChainTag.data.toList.length < 256 ^ 8 :=
+    Nat.lt_trans (by decide : quorumChainTag.data.toList.length < 64) pow256_8_gt_64_local
+  have hLen32 : ∀ d, (encodeDigest256 d).length < 256 ^ 8 := fun d => by
+    rw [encodeDigest256_length]
+    exact Nat.lt_trans (by decide : 32 < 64) pow256_8_gt_64_local
+  have hAdrsLt : adrs.length < 256 ^ 8 := by
+    rw [hAdrs]
+    exact Nat.lt_trans (by decide : 16 < 64) pow256_8_gt_64_local
+  obtain ⟨_, _, hNodeEnc⟩ :=
+    quorumEncodeFramed3_injective quorumChainTag hTagLt
+      (hLen32 pkSeed) hAdrsLt (hLen32 nodeA)
+      (hLen32 pkSeed) hAdrsLt (hLen32 nodeB) hEq
+  exact hNe (encodeDigest256_injective hNodeEnc)
 
 /-- Convert any `WotsChainCollisionWitness (quorumChainStep H pkSeed leaf) 4` into an explicit
     framed byte-level `HashCollision256 H` (`0 Classical.choice`). -/
@@ -383,46 +453,18 @@ def wotsChainCollision_to_hashCollision256 (H : List UInt8 → Digest256)
     (pkSeed : Digest256) (leaf : UInt64)
     (w : WotsChainCollisionWitness (quorumChainStep H pkSeed leaf) 4) :
     HashCollision256 H :=
-  let adrs := encodeNatBeBytes 8 leaf.toNat ++ encodeNatBeBytes 4 w.chainIdx ++
-    encodeNatBeBytes 4 w.stepPos
-  let preA := quorumEncodeFramed quorumChainTag
-    [encodeDigest256 pkSeed, adrs, encodeDigest256 w.nodeA]
-  let preB := quorumEncodeFramed quorumChainTag
-    [encodeDigest256 pkSeed, adrs, encodeDigest256 w.nodeB]
-  { x := preA
-    y := preB
-    ne := by
-      intro hEq
-      have hTagLt : quorumChainTag.data.toList.length < 256 ^ 8 :=
-        Nat.lt_trans (by decide : quorumChainTag.data.toList.length < 64) pow256_8_gt_64_local
-      have hLen32 : ∀ d, (encodeDigest256 d).length < 256 ^ 8 := fun d => by
-        rw [encodeDigest256_length]
-        exact Nat.lt_trans (by decide : 32 < 64) pow256_8_gt_64_local
-      have hAdrsLt : adrs.length < 256 ^ 8 := by
-        simp only [adrs, List.length_append, encodeNatBeBytes_length]
-        exact Nat.lt_trans (by decide : 16 < 64) pow256_8_gt_64_local
-      have hBx : ∀ z ∈ [encodeDigest256 pkSeed, adrs, encodeDigest256 w.nodeA], z.length < 256 ^ 8 := by
-        intro z hz
-        rcases List.mem_cons.mp hz with rfl | h1
-        · exact hLen32 _
-        · rcases List.mem_cons.mp h1 with rfl | h2
-          · exact hAdrsLt
-          · rcases List.mem_cons.mp h2 with rfl | h3
-            · exact hLen32 _
-            · cases h3
-      have hBy : ∀ z ∈ [encodeDigest256 pkSeed, adrs, encodeDigest256 w.nodeB], z.length < 256 ^ 8 := by
-        intro z hz
-        rcases List.mem_cons.mp hz with rfl | h1
-        · exact hLen32 _
-        · rcases List.mem_cons.mp h1 with rfl | h2
-          · exact hAdrsLt
-          · rcases List.mem_cons.mp h2 with rfl | h3
-            · exact hLen32 _
-            · cases h3
-      have hListEq := quorumEncodeFramed_same_arity_injective quorumChainTag hTagLt rfl hBx hBy hEq
-      simp only [List.cons.injEq, and_true] at hListEq
-      exact w.nodes_ne (encodeDigest256_injective hListEq.2.2)
-    hash_eq := w.step_eq }
+  { preA := quorumEncodeFramed quorumChainTag
+      [encodeDigest256 pkSeed,
+       encodeNatBeBytes 8 leaf.toNat ++ encodeNatBeBytes 4 w.chainIdx ++ encodeNatBeBytes 4 w.stepPos,
+       encodeDigest256 w.nodeA]
+    preB := quorumEncodeFramed quorumChainTag
+      [encodeDigest256 pkSeed,
+       encodeNatBeBytes 8 leaf.toNat ++ encodeNatBeBytes 4 w.chainIdx ++ encodeNatBeBytes 4 w.stepPos,
+       encodeDigest256 w.nodeB]
+    distinct := quorumChainPreimage_ne pkSeed
+      (encodeNatBeBytes 8 leaf.toNat ++ encodeNatBeBytes 4 w.chainIdx ++ encodeNatBeBytes 4 w.stepPos)
+      w.nodeA w.nodeB (by simp [encodeNatBeBytes_length]) w.nodes_ne
+    same_digest := w.step_eq }
 
 private theorem flatMap_encodeDigest256_injective :
     ∀ {xs ys : List Digest256},
@@ -438,6 +480,40 @@ private theorem flatMap_encodeDigest256_injective :
     obtain ⟨hHead, hTail⟩ := List.append_inj hEq h32
     rw [encodeDigest256_injective hHead, flatMap_encodeDigest256_injective hLen hTail]
 
+private theorem quorumLeafPreimage_ne
+    (pkSeed : Digest256) (leaf : UInt64) (ends₁ ends₂ : List Digest256)
+    (hLenEq : ends₁.length = ends₂.length)
+    (hLenBound : 32 * ends₁.length < 256 ^ 8)
+    (hNe : ends₁ ≠ ends₂) :
+    quorumEncodeFramed quorumLeafTag
+      [encodeDigest256 pkSeed, encodeNatBeBytes 8 leaf.toNat, ends₁.flatMap encodeDigest256] ≠
+    quorumEncodeFramed quorumLeafTag
+      [encodeDigest256 pkSeed, encodeNatBeBytes 8 leaf.toNat, ends₂.flatMap encodeDigest256] := by
+  intro hPreEq
+  have hFlatLen : ∀ zs : List Digest256, (zs.flatMap encodeDigest256).length = 32 * zs.length := by
+    intro zs
+    induction zs with
+    | nil => simp
+    | cons z rest ih =>
+      simp only [List.flatMap_cons, List.length_append, encodeDigest256_length, ih, List.length_cons]
+      omega
+  have hTagLt : quorumLeafTag.data.toList.length < 256 ^ 8 :=
+    Nat.lt_trans (by decide : quorumLeafTag.data.toList.length < 64) pow256_8_gt_64_local
+  have h32 : (encodeDigest256 pkSeed).length < 256 ^ 8 := by
+    rw [encodeDigest256_length]
+    exact Nat.lt_trans (by decide : 32 < 64) pow256_8_gt_64_local
+  have h8 : (encodeNatBeBytes 8 leaf.toNat).length < 256 ^ 8 := by
+    rw [encodeNatBeBytes_length]
+    exact Nat.lt_trans (by decide : 8 < 64) pow256_8_gt_64_local
+  have hFl1 : (ends₁.flatMap encodeDigest256).length < 256 ^ 8 := by
+    rw [hFlatLen]; exact hLenBound
+  have hFl2 : (ends₂.flatMap encodeDigest256).length < 256 ^ 8 := by
+    rw [hFlatLen, ← hLenEq]; exact hLenBound
+  obtain ⟨_, _, hEndsEnc⟩ :=
+    quorumEncodeFramed3_injective quorumLeafTag hTagLt
+      h32 h8 hFl1 h32 h8 hFl2 hPreEq
+  exact hNe (flatMap_encodeDigest256_injective hLenEq hEndsEnc)
+
 /-- Constructive leaf-hash collision extractor when `ends₁ ≠ ends₂` of equal length `L < 2^56`
     hash to the same `quorumLeafHash`. -/
 def extractQuorumLeafHashCollision (H : List UInt8 → Digest256)
@@ -447,58 +523,41 @@ def extractQuorumLeafHashCollision (H : List UInt8 → Digest256)
     (hNe : ends₁ ≠ ends₂)
     (hHash : quorumLeafHash H pkSeed leaf ends₁ = quorumLeafHash H pkSeed leaf ends₂) :
     HashCollision256 H :=
-  let pre₁ := quorumEncodeFramed quorumLeafTag
-    [encodeDigest256 pkSeed, encodeNatBeBytes 8 leaf.toNat, ends₁.flatMap encodeDigest256]
-  let pre₂ := quorumEncodeFramed quorumLeafTag
-    [encodeDigest256 pkSeed, encodeNatBeBytes 8 leaf.toNat, ends₂.flatMap encodeDigest256]
-  { x := pre₁
-    y := pre₂
-    ne := by
-      intro hPreEq
-      have hFlatLen : ∀ zs : List Digest256, (zs.flatMap encodeDigest256).length = 32 * zs.length := by
-        intro zs
-        induction zs with
-        | nil => simp
-        | cons z rest ih =>
-          simp only [List.flatMap_cons, List.length_append, encodeDigest256_length, ih,
-            List.length_cons]
-          omega
-      have hTagLt : quorumLeafTag.data.toList.length < 256 ^ 8 :=
-        Nat.lt_trans (by decide : quorumLeafTag.data.toList.length < 64) pow256_8_gt_64_local
-      have h32 : (encodeDigest256 pkSeed).length < 256 ^ 8 := by
-        rw [encodeDigest256_length]
-        exact Nat.lt_trans (by decide : 32 < 64) pow256_8_gt_64_local
-      have h8 : (encodeNatBeBytes 8 leaf.toNat).length < 256 ^ 8 := by
-        rw [encodeNatBeBytes_length]
-        exact Nat.lt_trans (by decide : 8 < 64) pow256_8_gt_64_local
-      have hFl1 : (ends₁.flatMap encodeDigest256).length < 256 ^ 8 := by
-        rw [hFlatLen]; exact hLenBound
-      have hFl2 : (ends₂.flatMap encodeDigest256).length < 256 ^ 8 := by
-        rw [hFlatLen, ← hLenEq]; exact hLenBound
-      have hBx : ∀ z ∈ [encodeDigest256 pkSeed, encodeNatBeBytes 8 leaf.toNat,
-          ends₁.flatMap encodeDigest256], z.length < 256 ^ 8 := by
-        intro z hz
-        rcases List.mem_cons.mp hz with rfl | h1
-        · exact h32
-        · rcases List.mem_cons.mp h1 with rfl | h2
-          · exact h8
-          · rcases List.mem_cons.mp h2 with rfl | h3
-            · exact hFl1
-            · cases h3
-      have hBy : ∀ z ∈ [encodeDigest256 pkSeed, encodeNatBeBytes 8 leaf.toNat,
-          ends₂.flatMap encodeDigest256], z.length < 256 ^ 8 := by
-        intro z hz
-        rcases List.mem_cons.mp hz with rfl | h1
-        · exact h32
-        · rcases List.mem_cons.mp h1 with rfl | h2
-          · exact h8
-          · rcases List.mem_cons.mp h2 with rfl | h3
-            · exact hFl2
-            · cases h3
-      have hListEq := quorumEncodeFramed_same_arity_injective quorumLeafTag hTagLt rfl hBx hBy hPreEq
-      simp only [List.cons.injEq, and_true] at hListEq
-      exact hNe (flatMap_encodeDigest256_injective hLenEq hListEq.2.2)
-    hash_eq := hHash }
+  { preA := quorumEncodeFramed quorumLeafTag
+      [encodeDigest256 pkSeed, encodeNatBeBytes 8 leaf.toNat, ends₁.flatMap encodeDigest256]
+    preB := quorumEncodeFramed quorumLeafTag
+      [encodeDigest256 pkSeed, encodeNatBeBytes 8 leaf.toNat, ends₂.flatMap encodeDigest256]
+    distinct := quorumLeafPreimage_ne pkSeed leaf ends₁ ends₂ hLenEq hLenBound hNe
+    same_digest := hHash }
+
+private theorem quorumNodePreimage_ne
+    (pkSeed : Digest256) (lvl : UInt8) (idx : UInt64)
+    (l₁ r₁ l₂ r₂ : Digest256)
+    (hNe : l₁ ≠ l₂ ∨ r₁ ≠ r₂) :
+    quorumEncodeFramed quorumNodeTag
+      [encodeDigest256 pkSeed, [lvl], encodeNatBeBytes 8 idx.toNat,
+       encodeDigest256 l₁, encodeDigest256 r₁] ≠
+    quorumEncodeFramed quorumNodeTag
+      [encodeDigest256 pkSeed, [lvl], encodeNatBeBytes 8 idx.toNat,
+       encodeDigest256 l₂, encodeDigest256 r₂] := by
+  intro hPreEq
+  have hTagLt : quorumNodeTag.data.toList.length < 256 ^ 8 :=
+    Nat.lt_trans (by decide : quorumNodeTag.data.toList.length < 64) pow256_8_gt_64_local
+  have h32 : ∀ d, (encodeDigest256 d).length < 256 ^ 8 := fun d => by
+    rw [encodeDigest256_length]
+    exact Nat.lt_trans (by decide : 32 < 64) pow256_8_gt_64_local
+  have h1 : ([lvl] : List UInt8).length < 256 ^ 8 :=
+    Nat.lt_trans (by decide : 1 < 64) pow256_8_gt_64_local
+  have h8 : (encodeNatBeBytes 8 idx.toNat).length < 256 ^ 8 := by
+    rw [encodeNatBeBytes_length]
+    exact Nat.lt_trans (by decide : 8 < 64) pow256_8_gt_64_local
+  obtain ⟨_, _, _, hL_enc, hR_enc⟩ :=
+    quorumEncodeFramed5_injective quorumNodeTag hTagLt
+      (h32 pkSeed) h1 h8 (h32 l₁) (h32 r₁)
+      (h32 pkSeed) h1 h8 (h32 l₂) (h32 r₂) hPreEq
+  rcases hNe with hL | hR
+  · exact hL (encodeDigest256_injective hL_enc)
+  · exact hR (encodeDigest256_injective hR_enc)
 
 /-- Constructive internal Merkle node collision extractor (`(l₁, r₁) ≠ (l₂, r₂)`). -/
 def extractQuorumNodeHashCollision (H : List UInt8 → Digest256)
@@ -508,48 +567,14 @@ def extractQuorumNodeHashCollision (H : List UInt8 → Digest256)
     (hHash : quorumMerkleNodeHash H pkSeed lvl idx l₁ r₁ =
              quorumMerkleNodeHash H pkSeed lvl idx l₂ r₂) :
     HashCollision256 H :=
-  let pre₁ := quorumEncodeFramed quorumNodeTag
-    [encodeDigest256 pkSeed, [lvl], encodeNatBeBytes 8 idx.toNat,
-     encodeDigest256 l₁, encodeDigest256 r₁]
-  let pre₂ := quorumEncodeFramed quorumNodeTag
-    [encodeDigest256 pkSeed, [lvl], encodeNatBeBytes 8 idx.toNat,
-     encodeDigest256 l₂, encodeDigest256 r₂]
-  { x := pre₁
-    y := pre₂
-    ne := by
-      intro hPreEq
-      have hTagLt : quorumNodeTag.data.toList.length < 256 ^ 8 :=
-        Nat.lt_trans (by decide : quorumNodeTag.data.toList.length < 64) pow256_8_gt_64_local
-      have h32 : ∀ d, (encodeDigest256 d).length < 256 ^ 8 := fun d => by
-        rw [encodeDigest256_length]
-        exact Nat.lt_trans (by decide : 32 < 64) pow256_8_gt_64_local
-      have h1 : ([lvl] : List UInt8).length < 256 ^ 8 :=
-        Nat.lt_trans (by decide : 1 < 64) pow256_8_gt_64_local
-      have h8 : (encodeNatBeBytes 8 idx.toNat).length < 256 ^ 8 := by
-        rw [encodeNatBeBytes_length]
-        exact Nat.lt_trans (by decide : 8 < 64) pow256_8_gt_64_local
-      have hBound : ∀ (a b : Digest256) (z : List UInt8),
-          z ∈ [encodeDigest256 pkSeed, [lvl], encodeNatBeBytes 8 idx.toNat,
-               encodeDigest256 a, encodeDigest256 b] → z.length < 256 ^ 8 := by
-        intro a b z hz
-        rcases List.mem_cons.mp hz with rfl | hA
-        · exact h32 _
-        · rcases List.mem_cons.mp hA with rfl | hB
-          · exact h1
-          · rcases List.mem_cons.mp hB with rfl | hC
-            · exact h8
-            · rcases List.mem_cons.mp hC with rfl | hD
-              · exact h32 _
-              · rcases List.mem_cons.mp hD with rfl | hE
-                · exact h32 _
-                · cases hE
-      have hListEq := quorumEncodeFramed_same_arity_injective quorumNodeTag hTagLt rfl
-        (hBound l₁ r₁) (hBound l₂ r₂) hPreEq
-      simp only [List.cons.injEq, and_true] at hListEq
-      rcases hNe with hL | hR
-      · exact hL (encodeDigest256_injective hListEq.2.2.2.1)
-      · exact hR (encodeDigest256_injective hListEq.2.2.2.2)
-    hash_eq := hHash }
+  { preA := quorumEncodeFramed quorumNodeTag
+      [encodeDigest256 pkSeed, [lvl], encodeNatBeBytes 8 idx.toNat,
+       encodeDigest256 l₁, encodeDigest256 r₁]
+    preB := quorumEncodeFramed quorumNodeTag
+      [encodeDigest256 pkSeed, [lvl], encodeNatBeBytes 8 idx.toNat,
+       encodeDigest256 l₂, encodeDigest256 r₂]
+    distinct := quorumNodePreimage_ne pkSeed lvl idx l₁ r₁ l₂ r₂ hNe
+    same_digest := hHash }
 
 /-- Constructive Merkle path collision extractor (`0 Classical.choice`):
     Whenever `cur ≠ quorumTreeNode H pkSeed leafFn level idx` walks `path` (`path.length = rem`)
@@ -607,7 +632,7 @@ def extractQuorumMerkleWalkCollision (H : List UInt8 → Digest256) (pkSeed : Di
           have hLvl : level + (rest.length + 1) = level + 1 + rest.length := by omega
           have hDiv : idx / 2 ^ (rest.length + 1) = parentIdx / 2 ^ rest.length := by
             dsimp only [parentIdx]
-            rw [Nat.div_div_eq_div_mul, ← Nat.pow_add, Nat.add_comm 1 rest.length]
+            rw [Nat.div_div_eq_div_mul, Nat.pow_succ, Nat.mul_comm]
           rw [hLvl, hDiv] at hW
           exact hW)
 
@@ -849,20 +874,20 @@ theorem releaseShamirShareFromVault_replay_rejected {n L d : Nat}
     (releaseShamirShareFromVault H masterSeed polyTape evalPt party anchor
       (releaseShamirShareFromVault H masterSeed polyTape evalPt party anchor v r counter₁ digits₁).1
       r counter₂ digits₂).2 = none := by
-  have hActNone :
-      (releaseShamirShareFromVault H masterSeed polyTape evalPt party anchor v r
-        counter₁ digits₁).1.active = none := by
-    unfold releaseShamirShareFromVault at hRel ⊢
-    split at hRel
-    · cases hRel
-    · split at hRel
-      · rename_i hP hA
-        simp [hP, hA]
-      · cases hRel
+  generalize hV1 : (releaseShamirShareFromVault H masterSeed polyTape evalPt party anchor v r
+    counter₁ digits₁) = res₁ at hRel ⊢
+  have hActNone : res₁.1.active = none := by
+    dsimp only [releaseShamirShareFromVault] at hV1
+    split at hV1
+    · rw [← hV1] at hRel; cases hRel
+    · split at hV1
+      · rw [← hV1]
+      · rw [← hV1] at hRel; cases hRel
   unfold releaseShamirShareFromVault
   split
   · rfl
-  · simp [hActNone]
+  · have hNotSome : ¬(res₁.1.active = some r) := by rw [hActNone]; intro h; cases h
+    simp only [hNotSome, ↓reduceIte]
 
 /-- Certified `BeltLatch` mint check binding `BeltLatchRecord` to `Custody.Burn`:
     requires `b.intent.leaf < 2 ^ 64`, `rec.epoch = UInt64.ofNat b.intent.leaf`,
@@ -1001,26 +1026,27 @@ def shamirCustodianLockstepSim {n L d : Nat}
         · simp only [hPois, ↓reduceIte]
           have hMintPois : Custody.mint policy cap anchor s.vault b =
               { s.vault with poisoned := true, active := none } := by
-            unfold Custody.mint; simp [hPois]
+            unfold Custody.mint; simp only [hPois, ↓reduceIte]
           rw [hMintPois]
-          exact ⟨hMintPois ▸ Custody.mint_safe policy cap anchor s.vault b hInv, rfl, rfl⟩
+          exact ⟨hMintPois ▸ Custody.mint_safe policy cap anchor s.vault b hInv, trivial, rfl⟩
         · have hPoisF : (s.vault.poisoned || decide (s.vault.durable.anchor ≠ anchor)) = false :=
             Bool.not_eq_true _ |>.mp hPois
           simp only [hPoisF, Bool.false_eq_true, ↓reduceIte]
           by_cases hGuard : Custody.mintGuard policy cap s.vault b = true
           · simp only [hGuard, ↓reduceIte]
-            exact ⟨Custody.mint_safe policy cap anchor s.vault b hInv, rfl⟩
+            exact ⟨Custody.mint_safe policy cap anchor s.vault b hInv, trivial⟩
           · have hGuardF : Custody.mintGuard policy cap s.vault b = false :=
               Bool.not_eq_true _ |>.mp hGuard
             simp only [hGuardF, Bool.false_eq_true, ↓reduceIte]
             have hMintNoop : Custody.mint policy cap anchor s.vault b = s.vault := by
-              unfold Custody.mint; simp [hPoisF, hGuardF]
+              unfold Custody.mint
+              simp only [hPoisF, hGuardF, Bool.false_eq_true, ↓reduceIte]
             rw [hMintNoop]
-            exact ⟨hInv, rfl, rfl⟩
+            exact ⟨hInv, trivial, rfl⟩
       · have hCertF : checkLatchCertifiedBurn H MAC macKeys q party s.latchNode Q rec echoes b = false :=
           Bool.not_eq_true _ |>.mp hCert
         simp only [hCertF, Bool.false_eq_true, ↓reduceIte]
-        exact ⟨hInv, rfl, rfl⟩
+        exact ⟨hInv, trivial, trivial⟩
     | releaseShare anchor r counter digits =>
       unfold shamirCustodianMachine abstractMediationVaultMachine PartyMachine.ofOutcome
       dsimp only
@@ -1471,9 +1497,12 @@ theorem stepShamirCustody_preserves_inv {n L d : Nat}
           · cases hOut
           · split at hOut
             · rename_i hNP hAct
+              have hNPF : ((st.vaults p).poisoned || decide ((st.vaults p).durable.anchor ≠ anchor)) = false :=
+                Bool.not_eq_true _ |>.mp hNP
               injection hOut with hOpEq
               rw [← hOpEq]
-              simp [hNP, hAct, computeShamirCustodianOpening]
+              simp only [hNPF, Bool.false_eq_true, ↓reduceIte, hAct, computeShamirCustodianOpening]
+              exact ⟨hAct, trivial, trivial, trivial, trivial⟩
             · cases hOut
         refine ⟨hInv.beltSync, ?_, ?_, ?_, ?_, hInv.combinedVerified⟩
         · intro i
@@ -1482,7 +1511,7 @@ theorem stepShamirCustody_preserves_inv {n L d : Nat}
           · simp only [hip, ↓reduceIte]; exact hInv.vaultSafe i
         · intro i hiHon b' hb'
           by_cases hip : i = p
-          · subst hip; simp only [↓reduceIte, hResBurn] at hb'
+          · subst hip; simp only [↓reduceIte] at hb'; rw [hResBurn] at hb'
             exact hInv.burnedCertified i hiHon b' hb'
           · simp only [hip, ↓reduceIte] at hb'
             exact hInv.burnedCertified i hiHon b' hb'
@@ -1490,13 +1519,15 @@ theorem stepShamirCustody_preserves_inv {n L d : Nat}
           rcases List.mem_cons.mp hop' with rfl | hOldOp
           · refine ⟨hRelUnpack.2.2.1 ▸ hHon, ?_, hRelUnpack.2.2.2.1.symm ▸ hRelUnpack.2.2.2.2⟩
             rw [hRelUnpack.2.2.1, hRelUnpack.2.2.2.1]
-            simp only [↓reduceIte, hRelUnpack.2.1]
+            simp only [↓reduceIte]
+            rw [hRelUnpack.2.1]
             exact .head _
           · obtain ⟨hOpHon, hAtt, hEp⟩ := hInv.shareReleaseProvenance op' hOldOp
             refine ⟨hOpHon, ?_, hEp⟩
             by_cases hopp : op'.party = p
             · rw [hopp] at hAtt ⊢
-              simp only [↓reduceIte, hRelUnpack.2.1]
+              simp only [↓reduceIte]
+              rw [hRelUnpack.2.1]
               exact .tail _ hAtt
             · simp only [hopp, ↓reduceIte]; exact hAtt
         · simp only [List.map_cons, List.nodup_cons]
@@ -1525,7 +1556,7 @@ theorem stepShamirCustody_preserves_inv {n L d : Nat}
           · simp only [hip, ↓reduceIte]; exact hInv.vaultSafe i
         · intro i hiHon b' hb'
           by_cases hip : i = p
-          · subst hip; simp only [↓reduceIte, hResBurn] at hb'
+          · subst hip; simp only [↓reduceIte] at hb'; rw [hResBurn] at hb'
             exact hInv.burnedCertified i hiHon b' hb'
           · simp only [hip, ↓reduceIte] at hb'
             exact hInv.burnedCertified i hiHon b' hb'
@@ -1539,6 +1570,7 @@ theorem stepShamirCustody_preserves_inv {n L d : Nat}
           · simp only [hopp, ↓reduceIte]; exact hAtt
   | combineSig leafChainPk lambdas r counter submitted authPath =>
     unfold stepShamirCustody
+    dsimp only
     cases hComb : combinePreSteppedShamirValidatorSig L dep.targetSum dep.H dep.validatorPk
         dep.digitsOf leafChainPk lambdas r counter submitted authPath with
     | none => exact hInv
@@ -1566,6 +1598,7 @@ theorem stepShamirCustody_preserves_inv {n L d : Nat}
       · exact hInv.combinedVerified entry hOld
   | forgetVault p =>
     unfold stepShamirCustody
+    dsimp only
     by_cases hCorr : dep.Corrupt.mem p = true
     · simp only [hCorr, ↓reduceIte]; exact hInv
     · have hHon : dep.Corrupt.mem p = false := Bool.not_eq_true _ |>.mp hCorr
@@ -1591,38 +1624,44 @@ theorem stepShamirCustody_preserves_inv {n L d : Nat}
         · simp [hopp, hAtt]
   | crashAndRecoverCustodian p =>
     unfold stepShamirCustody
+    dsimp only
     refine ⟨?_, ?_, ?_, ?_, hInv.shareReleasesNodupPartyIntent, hInv.combinedVerified⟩
     · rw [runBeltNetworkTrace_append, ← hInv.beltSync]
     · intro i
-      by_cases hCond : (decide (i = p) && !dep.Corrupt.mem p) = true
-      · rcases Bool.and_eq_true_iff.mp hCond with ⟨hipB, hNP⟩
-        have hip : i = p := of_decide_eq_true hipB
-        subst hip
-        simp only [↓reduceIte, hNP, Bool.true_and]
-        exact Custody.forget_safe _ _ _ (hInv.vaultSafe i)
-      · have hCondF : (decide (i = p) && !dep.Corrupt.mem p) = false :=
-          Bool.not_eq_true _ |>.mp hCond
-        by_cases hip : i = p
-        · subst hip
-          have hNPF : (!dep.Corrupt.mem i) = false := by simpa [hip] using hCondF
-          simp only [↓reduceIte, hNPF, Bool.true_and, Bool.false_eq_true]
-          exact hInv.vaultSafe i
-        · simp only [hip, decide_false, Bool.false_and, Bool.false_eq_true, ↓reduceIte]
-          exact hInv.vaultSafe i
-    · intro i hiHon b' hb'
+      dsimp only
       by_cases hip : i = p
       · subst hip
-        simp only [↓reduceIte, hiHon, Bool.not_false, Bool.true_and, Custody.forget] at hb'
+        have hDecT : decide (i = i) = true := decide_eq_true rfl
+        cases hC : dep.Corrupt.mem i
+        · simp only [hDecT, Bool.not_false, Bool.and_self, ↓reduceIte]
+          exact Custody.forget_safe _ _ _ (hInv.vaultSafe i)
+        · simp only [hDecT, Bool.not_true, Bool.and_false, Bool.false_eq_true, ↓reduceIte]
+          exact hInv.vaultSafe i
+      · have hDecF : decide (i = p) = false := decide_eq_false hip
+        simp only [hDecF, Bool.false_and, Bool.false_eq_true, ↓reduceIte]
+        exact hInv.vaultSafe i
+    · intro i hiHon b' hb'
+      dsimp only at hb'
+      by_cases hip : i = p
+      · subst hip
+        have hDecT : decide (i = i) = true := decide_eq_true rfl
+        simp only [hDecT, hiHon, Bool.not_false, Bool.and_self, ↓reduceIte, Custody.forget] at hb'
         exact hInv.burnedCertified i hiHon b' hb'
-      · simp only [hip, decide_false, Bool.false_and, Bool.false_eq_true, ↓reduceIte] at hb'
+      · have hDecF : decide (i = p) = false := decide_eq_false hip
+        simp only [hDecF, Bool.false_and, Bool.false_eq_true, ↓reduceIte] at hb'
         exact hInv.burnedCertified i hiHon b' hb'
     · intro op hop
       obtain ⟨hOpHon, hAtt, hEp⟩ := hInv.shareReleaseProvenance op hop
+      dsimp only
       refine ⟨hOpHon, ?_, hEp⟩
       by_cases hopp : op.party = p
       · rw [hopp] at hOpHon hAtt ⊢
-        simp [hOpHon, Custody.forget, hAtt]
-      · simp [hopp, hAtt]
+        have hDecT : decide (p = p) = true := decide_eq_true rfl
+        simp only [hDecT, hOpHon, Bool.not_false, Bool.and_self, ↓reduceIte, Custody.forget]
+        exact hAtt
+      · have hDecF : decide (op.party = p) = false := decide_eq_false hopp
+        simp only [hDecF, Bool.false_and, Bool.false_eq_true, ↓reduceIte]
+        exact hAtt
 
 theorem runShamirCustodyTrace_inv {n L d : Nat}
     (dep : ShamirValidatorDeployment n L d)
@@ -1631,12 +1670,13 @@ theorem runShamirCustodyTrace_inv {n L d : Nat}
       (runShamirCustodyTrace dep
         (ShamirCustodyNetworkState.init n L dep.height dep.maxWindow) trace) := by
   have hInit : ShamirCustodyNetworkInv dep
-      (ShamirCustodyNetworkState.init n L dep.height dep.maxWindow) := by
-    refine ⟨rfl, fun p => Custody.initial_safe (dep.policies p) (dep.caps p),
-      fun _ _ _ h => by cases h,
-      fun _ h => by cases h,
-      .nil,
-      fun _ h => by cases h⟩
+      (ShamirCustodyNetworkState.init n L dep.height dep.maxWindow) :=
+    { beltSync := rfl
+      vaultSafe := fun p => Custody.initial_safe (dep.policies p) (dep.caps p)
+      burnedCertified := fun _ _ _ h => by cases h
+      shareReleaseProvenance := fun _ h => by cases h
+      shareReleasesNodupPartyIntent := by simp
+      combinedVerified := fun _ h => by cases h }
   generalize ShamirCustodyNetworkState.init n L dep.height dep.maxWindow = st₀ at hInit
   induction trace generalizing st₀ with
   | nil => exact hInit
@@ -1699,9 +1739,10 @@ theorem shamir_custody_epoch_non_equivocation {n L d : Nat}
     obtain ⟨_, hAtt₂, _⟩ := hInv.shareReleaseProvenance op₂ hMem₂
     rw [← hSameParty] at hAtt₂
     have hSafe := hInv.vaultSafe op₁.party
-    obtain ⟨b₁, hb₁, rfl⟩ := hSafe.attemptedBurned op₁.intent hAtt₁
-    obtain ⟨b₂, hb₂, rfl⟩ := hSafe.attemptedBurned op₂.intent hAtt₂
-    exact hSafe.uniqueLeaf b₁ hb₁ b₂ hb₂ hSameLeaf
+    obtain ⟨b₁, hb₁, hb₁Eq⟩ := hSafe.attemptedBurned op₁.intent hAtt₁
+    obtain ⟨b₂, hb₂, hb₂Eq⟩ := hSafe.attemptedBurned op₂.intent hAtt₂
+    rw [← hb₁Eq, ← hb₂Eq]
+    exact hSafe.uniqueLeaf b₁ hb₁ b₂ hb₂ (by rw [hb₁Eq, hb₂Eq]; exact hSameLeaf)
   · -- Part 2: Global (q, t) epoch non-equivocation across S₁ and S₂
     intro S₁ S₂ r₁ r₂ hCard₁ hCard₂ hRel₁ hRel₂ hSameLeaf
     have hDiff₁ : 0 < maskCard (maskDiff S₁ dep.Corrupt) := by
@@ -2032,14 +2073,19 @@ theorem shamir_custody_combined_sig_verifies_or_collision {n L d : Nat}
         quorumJortsReferenceSign dep.H dep.masterSeed gLeaf counter digits authPath := by
       unfold quorumJortsReferenceSign
       congr 1
-      have hL : digits.length = L := hDigLen
-      subst hL
-      apply List.map_congr_left
-      intro idx _
-      dsimp only [digitsFn, pk, ShamirValidatorDeployment.validatorPk, deriveQuorumValidatorPublicKey]
-      rw [list_getD_eq_getElem_local digits _ idx.2]
-    rw [hSigEq, hRefVer]
-    exact ⟨rfl, hRefVer⟩
+      apply List.ext_getElem
+      · simp [hDigLen]
+      · intro k hk1 hk2
+        simp only [List.getElem_map, List.getElem_finRange]
+        dsimp only [digitsFn, pk, ShamirValidatorDeployment.validatorPk, deriveQuorumValidatorPublicKey]
+        rw [list_getD_eq_getElem_local digits _ (by simp at hk1; omega)]
+        simp
+    have hRefVer' :
+        verifyQuorumJortsSigAt L dep.targetSum dep.H pk dep.digitsOf (intentCanonicalPayload r)
+          (quorumJortsReferenceSign dep.H dep.masterSeed gLeaf counter digits authPath) = true :=
+      hRefVer
+    rw [hSigEq, hRefVer']
+    exact ⟨rfl, rfl⟩
   refine ⟨hHonestCombine, ?_, ?_⟩
   · -- Part 2: Quorum invariance across (parties₁, lambdas₁) and (parties₂, lambdas₂)
     intro p₁ p₂ l₁ l₂ r counter _ _ _ _ _ _ _ _ hLag₁ hLag₂ hLH hL64 hCtr hDL hS
@@ -2093,42 +2139,42 @@ theorem shamir_custody_single_validator_pq_bridge {n L d : Nat}
     -- (1) Threshold MPC signing matches single-validator reference & verifies under validatorPqPk:
     (∀ (r : Custody.Intent),
       mpcEvalProductionStatefulSign cfg.suite cfg.params o validatorSk.pkSeed
-        (intentCanonicalPayload r) cfg.randomness r.leaf cfg.grindLimit =
+        (Custody.payload 0 r) cfg.randomness r.leaf cfg.grindLimit =
       evalProductionStatefulSign cfg.suite cfg.params validatorSk
-        (intentCanonicalPayload r) cfg.randomness r.leaf cfg.grindLimit ∧
+        (Custody.payload 0 r) cfg.randomness r.leaf cfg.grindLimit ∧
       (∀ sig, mpcEvalProductionStatefulSign cfg.suite cfg.params o validatorSk.pkSeed
-          (intentCanonicalPayload r) cfg.randomness r.leaf cfg.grindLimit = some sig →
+          (Custody.payload 0 r) cfg.randomness r.leaf cfg.grindLimit = some sig →
         verifyProductionPqHashSig cfg.suite cfg.params validatorPqPk
-          (intentCanonicalPayload r) sig = true)) ∧
+          (Custody.payload 0 r) sig = true)) ∧
     -- (2) Any signature verifying under single validatorPqPk without t-of-n honest release
     --     constructively extracts a ProdTcrWitness or ProdPreimageBreak:
     (∀ (S : CustodiansMask n) (rStar : Custody.Intent) (sigStar : PqHashSig),
       dep.t ≤ maskCard S →
       verifyProductionPqHashSig cfg.suite cfg.params validatorPqPk
-        (intentCanonicalPayload rStar) sigStar = true →
+        (Custody.payload 0 rStar) sigStar = true →
       ∃ h : Fin n, S.mem h = true ∧ dep.Corrupt.mem h = false ∧
         (Custody.BurnedApproval (dep.policies h) (st.vaults h) rStar ∨
          (rStar ∉ (st.vaults h).attempted ∧
           prodEufCmaWin cfg.suite cfg.params
             ⟨validatorSk, Custody.queries cfg 0 (st.vaults h),
-             intentCanonicalPayload rStar, sigStar⟩ = true ∧
+             Custody.payload 0 rStar, sigStar⟩ = true ∧
           (Nonempty (ProdTcrWitness cfg.suite cfg.params validatorSk
              (Custody.signingLog cfg validatorSk 0 (st.vaults h))
-             (intentCanonicalPayload rStar) sigStar) ∨
+             (Custody.payload 0 rStar) sigStar) ∨
            ProdPreimageBreak cfg.suite cfg.params validatorSk
              (Custody.signingLog cfg validatorSk 0 (st.vaults h))
-             (intentCanonicalPayload rStar) sigStar)))) := by
+             (Custody.payload 0 rStar) sigStar)))) := by
   intro st validatorPqPk
   have hInv := runShamirCustodyTrace_inv dep trace
   refine ⟨?_, ?_⟩
   · intro r
     have hEq := thresholdProductionStatefulSign_eq_evalProductionStatefulSign
-      cfg.suite cfg.params o validatorSk hMatch (intentCanonicalPayload r)
+      cfg.suite cfg.params o validatorSk hMatch (Custody.payload 0 r)
       cfg.randomness r.leaf cfg.grindLimit
     refine ⟨hEq, fun sig hSome => ?_⟩
     rw [hEq] at hSome
     exact verifyProductionPqHashSig_evalProductionStatefulSign cfg.suite cfg.params
-      validatorSk (intentCanonicalPayload r) cfg.randomness r.leaf cfg.grindLimit sig hSome
+      validatorSk (Custody.payload 0 r) cfg.randomness r.leaf cfg.grindLimit sig hSome
   · intro S rStar sigStar hCardS hVer
     have hDiffPos : 0 < maskCard (maskDiff S dep.Corrupt) := by
       have hGe := maskCard_diff_ge S dep.Corrupt; omega
@@ -2142,11 +2188,11 @@ theorem shamir_custody_single_validator_pq_bridge {n L d : Nat}
     · right
       have hWin : prodEufCmaWin cfg.suite cfg.params
           ⟨validatorSk, Custody.queries cfg 0 (st.vaults h),
-           intentCanonicalPayload rStar, sigStar⟩ = true :=
+           Custody.payload 0 rStar, sigStar⟩ = true :=
         Custody.accepted_fresh_certificate_wins cfg validatorSk 0 (st.vaults h) rStar sigStar
           hAtt hVer
       have hWit := production_stateful_forgery_witness cfg.suite cfg.params validatorSk
-        (Custody.queries cfg 0 (st.vaults h)) (intentCanonicalPayload rStar) sigStar hw hst
+        (Custody.queries cfg 0 (st.vaults h)) (Custody.payload 0 rStar) sigStar hw hst
         (Custody.queries_one_time cfg 0 (dep.policies h) (dep.caps h) (st.vaults h) hSafeH)
         (Custody.log_fresh_of_not_attempted cfg validatorSk 0 (st.vaults h) rStar hAtt) hVer
       exact ⟨hAtt, hWin, hWit⟩
@@ -2174,14 +2220,21 @@ theorem shamirPts4_lagrange01 (c₀ : TowerElem 7) (tail : ShamirPadPoly (TowerE
     exercising `BeltLatch` bind + pairwise MAC echo + `3`-of-`4` quorum certification +
     `Custody.Vault` mint + `2`-of-`4` pre-stepped Shamir share release + combiner verification. -/
 def toyShamirPolicy (r : Custody.Intent) : Custody.RoundPolicy where
-  keys _ _ := ⟨0, fun _ => (0, 0)⟩
+  keys _ _ :=
+    { alpha0 := towerZero 7
+      alpha1 := towerZero 7
+      localK := fun _ => (towerZero 7, towerZero 7) }
   roster := [0]
   digest _ := Custody.roundCommitment r
 
 def toyShamirOpening (r : Custody.Intent) : Custody.RoundOpening :=
   { session := r.session
     round := r.round
-    opening := { partyId := 0, shareX := 0, macTag := 0 } }
+    opening :=
+      { partyId := 0
+        shareX := towerZero 7
+        mac0 := towerZero 7
+        mac1 := towerZero 7 } }
 
 theorem toyShamirPolicy_checkRound (r : Custody.Intent) :
     Custody.checkRound (toyShamirPolicy r) r (Custody.roundCommitment r)
@@ -2189,16 +2242,75 @@ theorem toyShamirPolicy_checkRound (r : Custody.Intent) :
   unfold Custody.checkRound toyShamirPolicy toyShamirOpening Custody.roundCommitment
   have hLen : (cshake256Bytes Custody.roundDomain (Custody.payload 0 r)).length = 32 :=
     cshake256Bytes_length _ _
-  have hMac : verifyBdozPairMac ⟨0, fun _ => (0, 0)⟩ ⟨0, 0, 0⟩ = true := by decide +kernel
+  have hMac : verifyBdozPairMac
+      { alpha0 := towerZero 7, alpha1 := towerZero 7, localK := fun _ => (towerZero 7, towerZero 7) }
+      { partyId := 0, shareX := towerZero 7, mac0 := towerZero 7, mac1 := towerZero 7 } = true := by
+    decide +kernel
   simp [hLen, hMac]
+
+private theorem two_pow_64_pos_local : 0 < 2 ^ 64 :=
+  calc 0 < 2 ^ 0 := by decide
+    _ ≤ 2 ^ 64 := Nat.pow_le_pow_right (by decide) (by decide)
+
+private theorem beltLatchBindStep_init22_epoch0 (rec : BeltLatchRecord) (hEp : rec.epoch = 0) :
+    beltLatchBindStep (BeltLatchNodeState.init 2 2) rec =
+      .accepted { BeltLatchNodeState.init 2 2 with
+        nextEpoch := 1, inFlight := some rec,
+        disk := .persisted { nextEpoch := 1, inFlight := some rec } } .fresh := by
+  have hEpNat : rec.epoch.toNat = 0 := by rw [hEp]; rfl
+  dsimp only [beltLatchBindStep, BeltLatchNodeState.init]
+  simp [hEpNat]
+
+private theorem checkLatchCertifiedBurn_finRange {n : Nat}
+    (H : List UInt8 → Digest256)
+    (MAC : Digest256 → List UInt8 → Digest256)
+    (mk : Fin n → Fin n → Digest256)
+    (q : Nat) (v : Fin n) (Q : CustodiansMask n)
+    (rec : BeltLatchRecord) (b : Custody.Burn)
+    (hQ : q ≤ maskCard Q)
+    (hLeaf0 : b.intent.leaf = 0)
+    (hRecEp : rec.epoch = 0)
+    (hRecMd : rec.msgDigest = H (intentCanonicalPayload b.intent)) :
+    checkLatchCertifiedBurn H MAC mk q v
+      { BeltLatchNodeState.init 2 2 with
+        nextEpoch := 1, inFlight := some rec,
+        disk := .persisted { nextEpoch := 1, inFlight := some rec } }
+      Q rec
+      ((List.finRange n).map (fun s =>
+        { sender := s, receiver := v, record := rec,
+          binding := beltRecordBinding H rec,
+          macTag := computeBeltEchoMac MAC (mk s v) s v rec })) b = true := by
+  have hVerQ : verifyQuorumEchoCertificate H MAC mk q v Q rec
+      ((List.finRange n).map (fun s =>
+        { sender := s, receiver := v, record := rec,
+          binding := beltRecordBinding H rec,
+          macTag := computeBeltEchoMac MAC (mk s v) s v rec })) = true := by
+    unfold verifyQuorumEchoCertificate
+    rw [Bool.and_eq_true_iff]
+    refine ⟨decide_eq_true hQ, List.all_eq_true.mpr ?_⟩
+    intro s _
+    cases hQs : Q.mem s
+    · simp
+    · simp only [Bool.not_true, Bool.false_or]
+      apply List.any_eq_true.mpr
+      refine ⟨{ sender := s, receiver := v, record := rec,
+                binding := beltRecordBinding H rec,
+                macTag := computeBeltEchoMac MAC (mk s v) s v rec },
+              List.mem_map.mpr ⟨s, List.mem_finRange s, rfl⟩, ?_⟩
+      unfold verifyAuthenticatedBeltEcho
+      simp
+  unfold checkLatchCertifiedBurn
+  have h2_64 : b.intent.leaf < 2 ^ 64 := by rw [hLeaf0]; exact two_pow_64_pos_local
+  have hEpEq : rec.epoch = UInt64.ofNat b.intent.leaf := by rw [hRecEp, hLeaf0]; rfl
+  simp [BeltLatchNodeState.init, h2_64, hEpEq, hRecMd, hVerQ]
 
 def toyShamirIntent : Custody.Intent :=
   { session := 1, round := 0, leaf := 0, spend := 10, message := [0x42] }
 
 def toyShamirDeployment : ShamirValidatorDeployment 4 1 1 where
-  H bs := BitVec.ofNat 256 (bs.foldl (fun acc b => acc + b.toNat + 1) 7)
-  MAC k bs := k ^^^ BitVec.ofNat 256 bs.length
-  macKeys i j := BitVec.ofNat 256 (16 * i.val + j.val + 1)
+  H bs := if 0x20 ∈ bs then 1#256 else 0#256
+  MAC k _ := k
+  macKeys i j := if i.val = j.val then 1#256 else 0#256
   Corrupt := ⟨fun i => decide (i.val = 3)⟩
   t := 2
   f := 1
@@ -2206,7 +2318,7 @@ def toyShamirDeployment : ShamirValidatorDeployment 4 1 1 where
   height := 2
   maxWindow := 2
   targetSum := 2
-  masterSeed := 0x1234#256
+  masterSeed := 0#256
   digitsOf _ := [⟨2, by decide⟩]
   evalPts := shamirPts4
   polyTape _ _ _ := (⟨[towerOne 7], rfl⟩, ⟨[towerX 7], rfl⟩)
@@ -2246,7 +2358,7 @@ theorem witness_shamir_custody_nonvacuous :
       digest := Custody.roundCommitment toyShamirIntent
       openings := [toyShamirOpening toyShamirIntent] }
   let echoesFor (v : Fin 4) : List (AuthenticatedBeltEcho 4) :=
-    [p0, p1, p2].map (fun s =>
+    (List.finRange 4).map (fun s =>
       { sender := s
         receiver := v
         record := rec₀
@@ -2286,20 +2398,34 @@ theorem witness_shamir_custody_nonvacuous :
       { BeltLatchNodeState.init 2 2 with
         nextEpoch := 1, inFlight := some rec₀,
         disk := .persisted { nextEpoch := 1, inFlight := some rec₀ } }
-      Q3 rec₀ (echoesFor p0) burn₀ = true := by decide +kernel
+      Q3 rec₀ (echoesFor p0) burn₀ = true :=
+    checkLatchCertifiedBurn_finRange dep.H dep.MAC dep.macKeys dep.q p0 Q3 rec₀ burn₀
+      (by decide +kernel) rfl rfl rfl
   have hCert1 : checkLatchCertifiedBurn dep.H dep.MAC dep.macKeys dep.q p1
       { BeltLatchNodeState.init 2 2 with
         nextEpoch := 1, inFlight := some rec₀,
         disk := .persisted { nextEpoch := 1, inFlight := some rec₀ } }
-      Q3 rec₀ (echoesFor p1) burn₀ = true := by decide +kernel
+      Q3 rec₀ (echoesFor p1) burn₀ = true :=
+    checkLatchCertifiedBurn_finRange dep.H dep.MAC dep.macKeys dep.q p1 Q3 rec₀ burn₀
+      (by decide +kernel) rfl rfl rfl
   have hMG : Custody.mintGuard (toyShamirPolicy toyShamirIntent) 100 Custody.initial burn₀ = true := by
     unfold Custody.mintGuard
     rw [toyShamirPolicy_checkRound, Bool.and_true]
     decide +kernel
+  have h2_16 : 0 < 2 ^ 16 := by decide
   have hComb := (shamir_custody_combined_sig_verifies_or_collision dep
-    (by decide : dep.height < 256) (by decide : 32 * 1 < 256 ^ 8)).1
+    (by decide : dep.height < 256)
+    (Nat.lt_trans (by decide : 32 * 1 < 64) pow256_8_gt_64_local)).1
     [p0, p1] lambdas toyShamirIntent 0 shamirPts4_lagrange01
-    (by decide) (by decide) (by decide) rfl rfl
+    (by decide) two_pow_64_pos_local h2_16 rfl rfl
+  have hBind0 : beltLatchBindStep (BeltLatchNodeState.init 2 2) rec₀ =
+      .accepted { BeltLatchNodeState.init 2 2 with
+        nextEpoch := 1, inFlight := some rec₀,
+        disk := .persisted { nextEpoch := 1, inFlight := some rec₀ } } .fresh :=
+    beltLatchBindStep_init22_epoch0 rec₀ rfl
+  have hC0 : dep.Corrupt.mem p0 = false := rfl
+  have hC1 : dep.Corrupt.mem p1 = false := rfl
+  have hC2 : dep.Corrupt.mem p2 = false := rfl
   have hSt :
       st.honestShareReleases.map (fun op => (op.party, op.intent)) =
         [(p1, toyShamirIntent), (p0, toyShamirIntent)] ∧
@@ -2308,23 +2434,9 @@ theorem witness_shamir_custody_nonvacuous :
           quorumJortsReferenceSign dep.H dep.masterSeed 0 0 [⟨2, by decide⟩] authPath)] := by
     dsimp only [st, trace, runShamirCustodyTrace, stepShamirCustody,
       ShamirCustodyNetworkState.init, stepBeltNetwork, BeltLatchNetworkState.init]
-    have hBind0 : beltLatchBindStep (BeltLatchNodeState.init 2 2) rec₀ =
-        .accepted { BeltLatchNodeState.init 2 2 with
-          nextEpoch := 1, inFlight := some rec₀,
-          disk := .persisted { nextEpoch := 1, inFlight := some rec₀ } } .fresh := by decide +kernel
-    simp only [hBind0]
-    have hC0 : dep.Corrupt.mem p0 = false := rfl
-    have hC1 : dep.Corrupt.mem p1 = false := rfl
-    have hC2 : dep.Corrupt.mem p2 = false := rfl
-    simp only [hC0, hC1, hC2, Bool.false_eq_true, ↓reduceIte, beltLatchEmitEcho,
-      hCert0, hCert1, hMG]
-    dsimp only [Custody.initial, Custody.mint]
-    simp only [Bool.not_false, decide_true, Bool.true_and, Bool.false_or,
-      ne_eq, not_true_eq_false, decide_false, Bool.false_eq_true, ↓reduceIte, hMG,
-      releaseShamirShareFromVault]
-    dsimp only
-    rw [hComb.1]
-    simp
+    simp [p0, p1, p2, hC0, hC1, hC2, hBind0, beltLatchEmitEcho, hCert0, hCert1,
+      Custody.initial, Custody.mint, hMG, releaseShamirShareFromVault, hComb.1]
+  obtain ⟨hRelLen, hCombEq⟩ := hSt
   refine ⟨?_, ?_, ?_⟩
   · intro p hpS hpHon
     have hp01 : p = p0 ∨ p = p1 := by
@@ -2334,24 +2446,16 @@ theorem witness_shamir_custody_nonvacuous :
       rcases hCases with rfl | rfl
       · exact .inl rfl
       · exact .inr rfl
-    have hRelLen := hSt.1
-    cases hList : st.honestShareReleases with
-    | nil => rw [hList] at hRelLen; cases hRelLen
-    | cons opA restA =>
-      cases restA with
-      | nil => rw [hList] at hRelLen; cases hRelLen
-      | cons opB restB =>
-        cases restB with
-        | cons _ _ => rw [hList] at hRelLen; cases hRelLen
-        | nil =>
-          rw [hList] at hRelLen
-          simp only [List.map_cons, List.map_nil, List.cons.injEq, Prod.mk.injEq, and_true] at hRelLen
-          rcases hp01 with rfl | rfl
-          · exact ⟨opB, .tail _ (.head _), hRelLen.2.1, hRelLen.2.2⟩
-          · exact ⟨opA, .head _, hRelLen.1.1, hRelLen.1.2⟩
-  · rw [hSt.2]; rfl
+    have hMemMap : (p, toyShamirIntent) ∈ st.honestShareReleases.map (fun op => (op.party, op.intent)) := by
+      rw [hRelLen]
+      rcases hp01 with rfl | rfl
+      · exact .tail _ (.head _)
+      · exact .head _
+    obtain ⟨op, hOpMem, hPair⟩ := List.mem_map.mp hMemMap
+    exact ⟨op, hOpMem, (Prod.mk.inj hPair).1, (Prod.mk.inj hPair).2⟩
+  · rw [hCombEq]; rfl
   · intro entry hMem
-    rw [hSt.2] at hMem
+    rw [hCombEq] at hMem
     rcases List.mem_singleton.mp hMem with rfl
     exact hComb.2
 
@@ -2391,7 +2495,6 @@ theorem tooth_under_quorum_latch_allows_shamir_equivocation :
       policies := polByParty }
   let p0 : Fin 4 := ⟨0, by decide⟩
   let p1 : Fin 4 := ⟨1, by decide⟩
-  let p3 : Fin 4 := ⟨3, by decide⟩
   let S₁ : CustodiansMask 4 := ⟨fun i => decide (i.val = 0 ∨ i.val = 3)⟩
   let S₂ : CustodiansMask 4 := ⟨fun i => decide (i.val = 1 ∨ i.val = 3)⟩
   let rec₁ : BeltLatchRecord :=
@@ -2403,12 +2506,12 @@ theorem tooth_under_quorum_latch_allows_shamir_equivocation :
   let burn₂ : Custody.Burn :=
     { intent := r₂, digest := Custody.roundCommitment r₂, openings := [toyShamirOpening r₂] }
   let echoes₁ : List (AuthenticatedBeltEcho 4) :=
-    [p0, p3].map (fun s =>
+    (List.finRange 4).map (fun s =>
       { sender := s, receiver := p0, record := rec₁,
         binding := beltRecordBinding dep.H rec₁,
         macTag := computeBeltEchoMac dep.MAC (dep.macKeys s p0) s p0 rec₁ })
   let echoes₂ : List (AuthenticatedBeltEcho 4) :=
-    [p1, p3].map (fun s =>
+    (List.finRange 4).map (fun s =>
       { sender := s, receiver := p1, record := rec₂,
         binding := beltRecordBinding dep.H rec₂,
         macTag := computeBeltEchoMac dep.MAC (dep.macKeys s p1) s p1 rec₂ })
@@ -2425,121 +2528,83 @@ theorem tooth_under_quorum_latch_allows_shamir_equivocation :
     by decide +kernel, rfl, rfl, rfl, by decide +kernel, by decide +kernel,
     by decide +kernel, by decide +kernel, rfl, rfl, by decide +kernel, ?_⟩
   dsimp only
-  refine ⟨by decide +kernel, ?_, ?_⟩
-  · have hCert0 : checkLatchCertifiedBurn dep.H dep.MAC dep.macKeys dep.q p0
-        { BeltLatchNodeState.init 2 2 with
-          nextEpoch := 1, inFlight := some rec₁,
-          disk := .persisted { nextEpoch := 1, inFlight := some rec₁ } }
-        S₁ rec₁ echoes₁ burn₁ = true := by decide +kernel
-    have hCert1 : checkLatchCertifiedBurn dep.H dep.MAC dep.macKeys dep.q p1
-        { BeltLatchNodeState.init 2 2 with
-          nextEpoch := 1, inFlight := some rec₂,
-          disk := .persisted { nextEpoch := 1, inFlight := some rec₂ } }
-        S₂ rec₂ echoes₂ burn₂ = true := by decide +kernel
-    have hMG1 : Custody.mintGuard (toyShamirPolicy r₁) 100 Custody.initial burn₁ = true := by
-      unfold Custody.mintGuard
-      rw [toyShamirPolicy_checkRound, Bool.and_true]; decide +kernel
-    have hMG2 : Custody.mintGuard (toyShamirPolicy r₂) 100 Custody.initial burn₂ = true := by
-      unfold Custody.mintGuard
-      rw [toyShamirPolicy_checkRound, Bool.and_true]; decide +kernel
-    let st := runShamirCustodyTrace dep (ShamirCustodyNetworkState.init 4 1 dep.height dep.maxWindow) trace
-    have hRelPairs : st.honestShareReleases.map (fun op => (op.party, op.intent)) =
-        [(p1, r₂), (p0, r₁)] := by
-      dsimp only [st, trace, runShamirCustodyTrace, stepShamirCustody,
-        ShamirCustodyNetworkState.init, stepBeltNetwork, BeltLatchNetworkState.init]
-      have hB1 : beltLatchBindStep (BeltLatchNodeState.init 2 2) rec₁ =
-          .accepted { BeltLatchNodeState.init 2 2 with
-            nextEpoch := 1, inFlight := some rec₁,
-            disk := .persisted { nextEpoch := 1, inFlight := some rec₁ } } .fresh := by decide +kernel
-      have hB2 : beltLatchBindStep (BeltLatchNodeState.init 2 2) rec₂ =
-          .accepted { BeltLatchNodeState.init 2 2 with
-            nextEpoch := 1, inFlight := some rec₂,
-            disk := .persisted { nextEpoch := 1, inFlight := some rec₂ } } .fresh := by decide +kernel
-      have hC0 : dep.Corrupt.mem p0 = false := rfl
-      have hC1 : dep.Corrupt.mem p1 = false := rfl
-      simp only [hC0, hC1, Bool.false_eq_true, ↓reduceIte, hB1, hB2, beltLatchEmitEcho,
-        hCert0, hCert1]
-      dsimp only [dep, polByParty, Custody.initial, Custody.mint]
-      simp only [Bool.not_false, decide_true, Bool.true_and, Bool.false_or,
-        ne_eq, not_true_eq_false, decide_false, Bool.false_eq_true, ↓reduceIte, hMG1, hMG2,
-        releaseShamirShareFromVault]
-      rfl
-    intro p hpS₁ hpHon
+  have hDigNe : dep.H (intentCanonicalPayload r₁) ≠ dep.H (intentCanonicalPayload r₂) := by
+    have hMem1 : decide ((0x20 : UInt8) ∈ intentCanonicalPayload r₁) = false := by decide +kernel
+    have hMem2 : decide ((0x20 : UInt8) ∈ intentCanonicalPayload r₂) = true := by decide +kernel
+    have h1 : dep.H (intentCanonicalPayload r₁) = 0#256 := by
+      dsimp only [dep, toyShamirDeployment]
+      rw [ite_eq_right_iff]
+      intro hIn; exact absurd (decide_eq_true hIn) (by rw [hMem1]; decide)
+    have h2 : dep.H (intentCanonicalPayload r₂) = 1#256 := by
+      dsimp only [dep, toyShamirDeployment]
+      rw [ite_eq_left_iff]
+      intro hNotIn; exact absurd (of_decide_eq_true hMem2) hNotIn
+    rw [h1, h2]
+    intro hEq
+    have hNat := congrArg BitVec.toNat hEq
+    simp at hNat
+  have hCert0 : checkLatchCertifiedBurn dep.H dep.MAC dep.macKeys dep.q p0
+      { BeltLatchNodeState.init 2 2 with
+        nextEpoch := 1, inFlight := some rec₁,
+        disk := .persisted { nextEpoch := 1, inFlight := some rec₁ } }
+      S₁ rec₁ echoes₁ burn₁ = true :=
+    checkLatchCertifiedBurn_finRange dep.H dep.MAC dep.macKeys dep.q p0 S₁ rec₁ burn₁
+      (by decide +kernel) rfl rfl rfl
+  have hCert1 : checkLatchCertifiedBurn dep.H dep.MAC dep.macKeys dep.q p1
+      { BeltLatchNodeState.init 2 2 with
+        nextEpoch := 1, inFlight := some rec₂,
+        disk := .persisted { nextEpoch := 1, inFlight := some rec₂ } }
+      S₂ rec₂ echoes₂ burn₂ = true :=
+    checkLatchCertifiedBurn_finRange dep.H dep.MAC dep.macKeys dep.q p1 S₂ rec₂ burn₂
+      (by decide +kernel) rfl rfl rfl
+  have hMG1 : Custody.mintGuard (toyShamirPolicy r₁) 100 Custody.initial burn₁ = true := by
+    unfold Custody.mintGuard
+    rw [toyShamirPolicy_checkRound, Bool.and_true]; decide +kernel
+  have hMG2 : Custody.mintGuard (toyShamirPolicy r₂) 100 Custody.initial burn₂ = true := by
+    unfold Custody.mintGuard
+    rw [toyShamirPolicy_checkRound, Bool.and_true]; decide +kernel
+  let st := runShamirCustodyTrace dep (ShamirCustodyNetworkState.init 4 1 dep.height dep.maxWindow) trace
+  have hB1 : beltLatchBindStep (BeltLatchNodeState.init 2 2) rec₁ =
+      .accepted { BeltLatchNodeState.init 2 2 with
+        nextEpoch := 1, inFlight := some rec₁,
+        disk := .persisted { nextEpoch := 1, inFlight := some rec₁ } } .fresh :=
+    beltLatchBindStep_init22_epoch0 rec₁ rfl
+  have hB2 : beltLatchBindStep (BeltLatchNodeState.init 2 2) rec₂ =
+      .accepted { BeltLatchNodeState.init 2 2 with
+        nextEpoch := 1, inFlight := some rec₂,
+        disk := .persisted { nextEpoch := 1, inFlight := some rec₂ } } .fresh :=
+    beltLatchBindStep_init22_epoch0 rec₂ rfl
+  have hC0 : dep.Corrupt.mem p0 = false := rfl
+  have hC1 : dep.Corrupt.mem p1 = false := rfl
+  have hRelPairs : st.honestShareReleases.map (fun op => (op.party, op.intent)) =
+      [(p1, r₂), (p0, r₁)] := by
+    dsimp only [st, trace, runShamirCustodyTrace, stepShamirCustody,
+      ShamirCustodyNetworkState.init, stepBeltNetwork, BeltLatchNetworkState.init]
+    simp [p0, p1, hC0, hC1, hB1, hB2, beltLatchEmitEcho, hCert0, hCert1,
+      dep, polByParty, Custody.initial, Custody.mint, hMG1, hMG2, releaseShamirShareFromVault]
+  refine ⟨hDigNe, ?_, ?_⟩
+  · intro p hpS₁ hpHon
     have hpEq0 : p = p0 := by
       rcases p with ⟨val, isLt⟩
       rcases of_decide_eq_true hpS₁ with rfl | rfl
       · rfl
       · cases hpHon
     subst hpEq0
-    cases hL : st.honestShareReleases with
-    | nil => rw [hL] at hRelPairs; cases hRelPairs
-    | cons a rest =>
-      cases rest with
-      | nil => rw [hL] at hRelPairs; cases hRelPairs
-      | cons b rest2 =>
-        cases rest2 with
-        | cons _ _ => rw [hL] at hRelPairs; cases hRelPairs
-        | nil =>
-          rw [hL] at hRelPairs
-          simp only [List.map_cons, List.map_nil, List.cons.injEq, Prod.mk.injEq, and_true] at hRelPairs
-          exact ⟨b, .tail _ (.head _), hRelPairs.2.1, hRelPairs.2.2⟩
-  · have hCert0 : checkLatchCertifiedBurn dep.H dep.MAC dep.macKeys dep.q p0
-        { BeltLatchNodeState.init 2 2 with
-          nextEpoch := 1, inFlight := some rec₁,
-          disk := .persisted { nextEpoch := 1, inFlight := some rec₁ } }
-        S₁ rec₁ echoes₁ burn₁ = true := by decide +kernel
-    have hCert1 : checkLatchCertifiedBurn dep.H dep.MAC dep.macKeys dep.q p1
-        { BeltLatchNodeState.init 2 2 with
-          nextEpoch := 1, inFlight := some rec₂,
-          disk := .persisted { nextEpoch := 1, inFlight := some rec₂ } }
-        S₂ rec₂ echoes₂ burn₂ = true := by decide +kernel
-    have hMG1 : Custody.mintGuard (toyShamirPolicy r₁) 100 Custody.initial burn₁ = true := by
-      unfold Custody.mintGuard
-      rw [toyShamirPolicy_checkRound, Bool.and_true]; decide +kernel
-    have hMG2 : Custody.mintGuard (toyShamirPolicy r₂) 100 Custody.initial burn₂ = true := by
-      unfold Custody.mintGuard
-      rw [toyShamirPolicy_checkRound, Bool.and_true]; decide +kernel
-    let st := runShamirCustodyTrace dep (ShamirCustodyNetworkState.init 4 1 dep.height dep.maxWindow) trace
-    have hRelPairs : st.honestShareReleases.map (fun op => (op.party, op.intent)) =
-        [(p1, r₂), (p0, r₁)] := by
-      dsimp only [st, trace, runShamirCustodyTrace, stepShamirCustody,
-        ShamirCustodyNetworkState.init, stepBeltNetwork, BeltLatchNetworkState.init]
-      have hB1 : beltLatchBindStep (BeltLatchNodeState.init 2 2) rec₁ =
-          .accepted { BeltLatchNodeState.init 2 2 with
-            nextEpoch := 1, inFlight := some rec₁,
-            disk := .persisted { nextEpoch := 1, inFlight := some rec₁ } } .fresh := by decide +kernel
-      have hB2 : beltLatchBindStep (BeltLatchNodeState.init 2 2) rec₂ =
-          .accepted { BeltLatchNodeState.init 2 2 with
-            nextEpoch := 1, inFlight := some rec₂,
-            disk := .persisted { nextEpoch := 1, inFlight := some rec₂ } } .fresh := by decide +kernel
-      have hC0 : dep.Corrupt.mem p0 = false := rfl
-      have hC1 : dep.Corrupt.mem p1 = false := rfl
-      simp only [hC0, hC1, Bool.false_eq_true, ↓reduceIte, hB1, hB2, beltLatchEmitEcho,
-        hCert0, hCert1]
-      dsimp only [dep, polByParty, Custody.initial, Custody.mint]
-      simp only [Bool.not_false, decide_true, Bool.true_and, Bool.false_or,
-        ne_eq, not_true_eq_false, decide_false, Bool.false_eq_true, ↓reduceIte, hMG1, hMG2,
-        releaseShamirShareFromVault]
-      rfl
-    intro p hpS₂ hpHon
+    have hMemMap : (p0, r₁) ∈ st.honestShareReleases.map (fun op => (op.party, op.intent)) := by
+      rw [hRelPairs]; exact .tail _ (.head _)
+    obtain ⟨op, hOpMem, hPair⟩ := List.mem_map.mp hMemMap
+    exact ⟨op, hOpMem, (Prod.mk.inj hPair).1, (Prod.mk.inj hPair).2⟩
+  · intro p hpS₂ hpHon
     have hpEq1 : p = p1 := by
       rcases p with ⟨val, isLt⟩
       rcases of_decide_eq_true hpS₂ with rfl | rfl
       · rfl
       · cases hpHon
     subst hpEq1
-    cases hL : st.honestShareReleases with
-    | nil => rw [hL] at hRelPairs; cases hRelPairs
-    | cons a rest =>
-      cases rest with
-      | nil => rw [hL] at hRelPairs; cases hRelPairs
-      | cons b rest2 =>
-        cases rest2 with
-        | cons _ _ => rw [hL] at hRelPairs; cases hRelPairs
-        | nil =>
-          rw [hL] at hRelPairs
-          simp only [List.map_cons, List.map_nil, List.cons.injEq, Prod.mk.injEq, and_true] at hRelPairs
-          exact ⟨a, .head _, hRelPairs.1.1, hRelPairs.1.2⟩
+    have hMemMap : (p1, r₂) ∈ st.honestShareReleases.map (fun op => (op.party, op.intent)) := by
+      rw [hRelPairs]; exact .head _
+    obtain ⟨op, hOpMem, hPair⟩ := List.mem_map.mp hMemMap
+    exact ⟨op, hOpMem, (Prod.mk.inj hPair).1, (Prod.mk.inj hPair).2⟩
 
 /-- **`#tooth` Mutation 2 (`tooth_unverified_lagrange_corrupt_share_forges_node`):**
     Omitting the MAC-free WOTS+C endpoint self-verification check in Lagrange combination allows
@@ -2565,7 +2630,7 @@ theorem tooth_unverified_lagrange_corrupt_share_forges_node :
       exact towerAdd_self_zero 7 (towerOne 7)
     dsimp only [lambdas, lagrange2WeightsTower, ringDot, s₁_corrupt, CommRingOps.add,
       CommRingOps.mul, CommRingOps.zero] at hSub
-    simp only [towerMul_zero, towerAdd_zero] at hSub
+    simp only [towerAdd_zero] at hSub
     rw [towerMul_add_distrib] at hSub
     have hCancel : ∀ (a b c : TowerElem 7),
         towerAdd 7 (towerAdd 7 a (towerAdd 7 b c)) (towerAdd 7 a b) = c := fun a b c => by
@@ -2593,12 +2658,56 @@ theorem tooth_unverified_lagrange_corrupt_share_forges_node :
   · exact hLam₁Nz h1
   · exact hx₁Nz h2
 
+/-- Propositional soundness wrapper around `verifyQuorumJortsSigAt_extract_reference_or_collision`
+    for constructive kernel auditing (`#verify_constructive`). -/
+theorem verifyQuorumJortsSigAt_extract_sound (L targetSum height : Nat)
+    (hHeightLt : height < 256) (hChainBound : 32 * L < 256 ^ 8)
+    (H : List UInt8 → Digest256) (masterSeed : Digest256)
+    (digitsOf : Digest256 → List (Fin 4))
+    (msg : List UInt8) (sig : QuorumJortsSig)
+    (hAcc : verifyQuorumJortsSigAt L targetSum H
+      (deriveQuorumValidatorPublicKey L height H masterSeed) digitsOf msg sig = true) :
+    let pk := deriveQuorumValidatorPublicKey L height H masterSeed
+    let digits := digitsOf (quorumCounterDigest H (quorumMessageHash H pk sig.leaf msg) sig.counter)
+    sig.nodes = (quorumJortsReferenceSign H masterSeed sig.leaf sig.counter digits sig.authPath).nodes ∨
+      Nonempty (WotsChainCollisionWitness (quorumChainStep H pk.pkSeed sig.leaf) 4) ∨
+      Nonempty (HashCollision256 H) := by
+  intro pk digits
+  cases verifyQuorumJortsSigAt_extract_reference_or_collision L targetSum height
+      hHeightLt hChainBound H masterSeed digitsOf msg sig hAcc with
+  | inl hEq => exact .inl hEq
+  | inr hCol =>
+    cases hCol with
+    | inl w => exact .inr (.inl ⟨w⟩)
+    | inr c => exact .inr (.inr ⟨c⟩)
+
+/-- Propositional trace-preservation wrapper around `shamirCustodianForwardSim`
+    for constructive kernel auditing (`#verify_constructive`). -/
+theorem shamirCustodianForwardSim_preserves_traces {n L d : Nat}
+    (H : List UInt8 → Digest256)
+    (MAC : Digest256 → List UInt8 → Digest256)
+    (macKeys : Fin n → Fin n → Digest256)
+    (masterSeed : Digest256)
+    (polyTape : UInt64 → PreSteppedDigest256ShamirTape d L)
+    (evalPt : TowerElem 7) (party : Fin n)
+    (q : Nat) (policy : Custody.RoundPolicy) (cap : Nat)
+    (s s' : ShamirCustodianLocalState)
+    (tr : List (ShamirVaultMachineInput n L × ShamirVaultMachineOutput n L))
+    (hSafe : Custody.Safe policy cap s.vault)
+    (hTr : (shamirCustodianMachine H MAC macKeys masterSeed polyTape evalPt party q policy cap).ValidTrace
+      s tr s') :
+    ∃ a', (abstractMediationVaultMachine H MAC macKeys masterSeed polyTape evalPt party q policy cap).ValidTrace
+      (s.latchNode, s.vault) tr a' := by
+  obtain ⟨a', hTrA, _⟩ := (shamirCustodianForwardSim H MAC macKeys masterSeed polyTape evalPt
+    party q policy cap).lift_validTrace (a₀ := (s.latchNode, s.vault)) ⟨hSafe, rfl⟩ hTr
+  exact ⟨a', hTrA⟩
+
 end Qsag
 end
 
 set_option maxRecDepth 4096
-#verify_constructive Qsag.verifyQuorumJortsSigAt_extract_reference_or_collision
-#verify_constructive Qsag.shamirCustodianForwardSim
+#verify_constructive Qsag.verifyQuorumJortsSigAt_extract_sound
+#verify_constructive Qsag.shamirCustodianForwardSim_preserves_traces
 #verify_constructive Qsag.shamir_custody_epoch_non_equivocation
 #verify_constructive Qsag.shamir_custody_combined_sig_verifies_or_collision
 #verify_constructive Qsag.shamir_custody_single_validator_pq_bridge

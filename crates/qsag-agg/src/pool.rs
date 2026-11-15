@@ -144,7 +144,7 @@ where
         return (0..count).map(f).collect();
     }
     let outer_lanes = crate::active_scoped_workers().saturating_add(1);
-    let target_workers = (max_workers / outer_lanes).clamp(1, 8);
+    let target_workers = (max_workers / outer_lanes).max(1);
     if target_workers <= 1 {
         return (0..count).map(f).collect();
     }

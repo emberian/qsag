@@ -4,125 +4,100 @@
 //! with zero `test-dealer` feature dependencies while remaining deterministic from explicit
 //! ceremony seeds when restoring durable checkpoints or running known-answer checks.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
-use qsag_accel::ct::{ct_zeroize_bytes, ct_zeroize_u128s};
-use qsag_accel::gf2_128::gf2_128_mul;
-use qsag_accel::keccak::{cshake256_framed_32, finalize_cshake256, init_cshake256};
+use qsag_accel::ct::ct_zeroize_bytes;
+use qsag_accel::keccak::cshake256_framed_32;
+use qsag_core::preprocessing::{PartyPrivateRng, try_establish_rlwe_ot_ext_channel};
+use qsag_fts::ot::{AuthenticatedOtWire, CommittedCorrelatedOt, CommittedOtMessage};
 use qsag_fts::{
     LeafBurnPersistence, ParallelSeededDkgConfig, ParallelSeededDkgOutput,
-    ParallelSeededDkgProducts, ParallelSeededDkgRound1State, ParallelSeededDkgSharePackage,
+    ParallelSeededGilboaProducts, ParallelSeededDkgRound1State, ParallelSeededDkgSharePackage,
     ParallelSeededError, ParallelSeededMerkleLayers, ParallelSeededParams,
     ParallelSeededPublicKey, ParallelSeededSignRequest,
     ParallelSeededSignResult, ParallelSeededSignSession, ParallelSeededSignature,
     assemble_parallel_seeded_public_key, finalize_parallel_seeded_dkg_party,
 };
 use qsag_policy::{
-    PolicyAuthenticatedOt, PolicyGuardDkgRound1, PolicySignerGuardShare, PolicyViolation,
+    PolicyGuardDkgRound1, PolicySignerGuardShare, PolicyViolation,
     finalize_distributed_policy_guard,
 };
 
-struct ZeroizePairs(Vec<[u128; 2]>);
+/// Channels are allocated by the coordinator and moved exclusively to their endpoints.
+/// Only public OT protocol messages and encrypted alternatives cross these channels.
+struct LocalOtWire {
+    tx: BTreeMap<u16, Sender<([u8; 32], CommittedOtMessage)>>,
+    rx: BTreeMap<u16, Receiver<([u8; 32], CommittedOtMessage)>>,
+}
 
-impl Drop for ZeroizePairs {
-    fn drop(&mut self) {
-        for pair in &mut self.0 {
-            ct_zeroize_u128s(pair);
+impl AuthenticatedOtWire for LocalOtWire {
+    fn send(&mut self, peer: u16, context: [u8; 32], message: CommittedOtMessage)
+        -> Result<(), ParallelSeededError>
+    {
+        self.tx.get(&peer).ok_or(ParallelSeededError::InvalidThresholdParameters)?
+            .send((context, message)).map_err(|_| ParallelSeededError::BdozMacCheckFailed)
+    }
+
+    fn receive(&mut self, peer: u16, context: [u8; 32])
+        -> Result<CommittedOtMessage, ParallelSeededError>
+    {
+        let (actual, message) = self.rx.get(&peer)
+            .ok_or(ParallelSeededError::InvalidThresholdParameters)?
+            .recv_timeout(std::time::Duration::from_secs(120))
+            .map_err(|_| ParallelSeededError::BdozMacCheckFailed)?;
+        if actual != context {
+            return Err(ParallelSeededError::BdozMacCheckFailed);
         }
+        Ok(message)
     }
 }
 
-struct ZeroizeU128s(Vec<u128>);
-
-impl Drop for ZeroizeU128s {
-    fn drop(&mut self) {
-        ct_zeroize_u128s(&mut self.0);
+/// Bootstrap real, direction-specific base OT using independently sampled local entropy.
+/// The session binds the roster; party handles never receive another party's RNG or pads.
+fn ot_endpoints(parties: &[u16], session: [u8; 32])
+    -> Result<Vec<CommittedCorrelatedOt<LocalOtWire>>, ParallelSeededError>
+{
+    if parties.len() < 2 || parties.windows(2).any(|w| w[0] >= w[1]) {
+        return Err(ParallelSeededError::InvalidThresholdParameters);
     }
-}
-
-struct PolicyOtFrame {
-    sender: u16,
-    recipient: u16,
-    domain: [u8; 32],
-    alternatives: ZeroizePairs,
-}
-
-struct ScopedPolicyOt {
-    party_id: u16,
-    tx: Vec<(u16, Sender<PolicyOtFrame>)>,
-    rx: Vec<(u16, Receiver<PolicyOtFrame>)>,
-    seen: BTreeSet<(u16, [u8; 32])>,
-}
-
-impl PolicyAuthenticatedOt for ScopedPolicyOt {
-    fn exchange(
-        &mut self,
-        local_party: u16,
-        peer: u16,
-        domain: [u8; 32],
-        alternatives: &[[u128; 2]],
-        choices: &[bool],
-    ) -> Result<Vec<u128>, PolicyViolation> {
-        if local_party != self.party_id
-            || local_party == peer
-            || alternatives.len() != choices.len()
-            || !self.seen.insert((peer, domain))
-        {
-            return Err(PolicyViolation::IntentBindingMismatch);
+    let mut wires: Vec<_> = parties.iter().map(|_| LocalOtWire {
+        tx: BTreeMap::new(), rx: BTreeMap::new(),
+    }).collect();
+    let n = parties.len();
+    let mut senders: Vec<Vec<_>> = (0..n).map(|_| (0..n).map(|_| None).collect()).collect();
+    let mut receivers: Vec<Vec<_>> = (0..n).map(|_| (0..n).map(|_| None).collect()).collect();
+    for (i, &sender) in parties.iter().enumerate() {
+        for (j, &receiver) in parties.iter().enumerate() {
+            if i == j { continue; }
+            let mut srng = PartyPrivateRng::from_os_rng(b"QSAG.CLI.OT.SENDER.V1")
+                .map_err(|_| ParallelSeededError::BdozMacCheckFailed)?;
+            let mut rrng = PartyPrivateRng::from_os_rng(b"QSAG.CLI.OT.RECEIVER.V1")
+                .map_err(|_| ParallelSeededError::BdozMacCheckFailed)?;
+            let (s, r) = try_establish_rlwe_ot_ext_channel(session, usize::from(sender),
+                usize::from(receiver), &mut srng, &mut rrng)
+                .map_err(|_| ParallelSeededError::BdozMacCheckFailed)?;
+            senders[i][j] = Some(s);
+            receivers[j][i] = Some(r);
+            let (tx, rx) = mpsc::channel();
+            wires[i].tx.insert(receiver, tx);
+            wires[j].rx.insert(sender, rx);
         }
-        let tx = self
-            .tx
-            .iter()
-            .find(|(id, _)| *id == peer)
-            .map(|(_, ch)| ch)
-            .ok_or(PolicyViolation::IntentBindingMismatch)?;
-        let rx = self
-            .rx
-            .iter()
-            .find(|(id, _)| *id == peer)
-            .map(|(_, ch)| ch)
-            .ok_or(PolicyViolation::IntentBindingMismatch)?;
-
-        let outbound = PolicyOtFrame {
-            sender: local_party,
-            recipient: peer,
-            domain,
-            alternatives: ZeroizePairs(alternatives.to_vec()),
-        };
-
-        let incoming = if local_party < peer {
-            tx.send(outbound)
-                .map_err(|_| PolicyViolation::BarrierBdozMacFailed)?;
-            rx.recv()
-                .map_err(|_| PolicyViolation::BarrierBdozMacFailed)?
-        } else {
-            let inc = rx
-                .recv()
-                .map_err(|_| PolicyViolation::BarrierBdozMacFailed)?;
-            tx.send(outbound)
-                .map_err(|_| PolicyViolation::BarrierBdozMacFailed)?;
-            inc
-        };
-
-        if incoming.sender != peer
-            || incoming.recipient != local_party
-            || incoming.domain != domain
-            || incoming.alternatives.0.len() != choices.len()
-        {
-            return Err(PolicyViolation::IntentBindingMismatch);
-        }
-        let selected: Vec<u128> = incoming
-            .alternatives
-            .0
-            .iter()
-            .zip(choices.iter())
-            .map(|(pair, &bit)| pair[usize::from(bit)])
-            .collect();
-        drop(incoming);
-        Ok(selected)
     }
+    let mut result = Vec::with_capacity(n);
+    for (i, wire) in wires.into_iter().enumerate() {
+        let mut peers = Vec::with_capacity(n - 1);
+        for (j, &peer) in parties.iter().enumerate() {
+            if i == j { continue; }
+            peers.push((peer,
+                senders[i][j].take().ok_or(ParallelSeededError::InvalidThresholdParameters)?,
+                receivers[i][j].take().ok_or(ParallelSeededError::InvalidThresholdParameters)?));
+        }
+        let entropy = crate::cli::os_random_32().map_err(|_| ParallelSeededError::BdozMacCheckFailed)?;
+        result.push(CommittedCorrelatedOt::new(parties[i], peers, entropy, wire)?);
+    }
+    Ok(result)
 }
 
 /// Provision `PolicySignerGuardShare`s via the 3-round distributed `PolicyGuardDkgRound1`
@@ -164,40 +139,21 @@ pub fn provision_distributed_policy_guards(
     }
 
     let n = parties.len();
-    let mut tx_grid: Vec<Vec<(u16, Sender<PolicyOtFrame>)>> =
-        (0..n).map(|_| Vec::with_capacity(n.saturating_sub(1))).collect();
-    let mut rx_grid: Vec<Vec<(u16, Receiver<PolicyOtFrame>)>> =
-        (0..n).map(|_| Vec::with_capacity(n.saturating_sub(1))).collect();
-    for i in 0..n {
-        for j in 0..n {
-            if i == j {
-                continue;
-            }
-            let (tx, rx) = mpsc::channel();
-            tx_grid[i].push((parties[j], tx));
-            rx_grid[j].push((parties[i], rx));
-        }
-    }
+    let endpoints = ot_endpoints(parties, setup_id)
+        .map_err(|_| PolicyViolation::BarrierBdozMacFailed)?;
 
     let opens_ref = &opens;
     thread::scope(|scope| {
         let handles: Vec<_> = round2_states
             .into_iter()
-            .zip(tx_grid)
-            .zip(rx_grid)
-            .map(|(((id, st2), tx), rx)| {
+            .zip(endpoints)
+            .map(|((id, st2), mut ot)| {
                 scope.spawn(move || {
                     let incoming: Vec<_> = opens_ref
                         .iter()
                         .filter(|o| o.recipient == id)
                         .cloned()
                         .collect();
-                    let mut ot = ScopedPolicyOt {
-                        party_id: id,
-                        tx,
-                        rx,
-                        seen: BTreeSet::new(),
-                    };
                     finalize_distributed_policy_guard(st2, &incoming, &mut ot)
                 })
             })
@@ -214,183 +170,6 @@ pub fn provision_distributed_policy_guards(
     })
 }
 
-struct MaskedProductPacket {
-    context: [u8; 32],
-    values: ZeroizeU128s,
-}
-
-struct PairwiseBeaverProductChannel {
-    party_id: u16,
-    pad_secret: [u8; 32],
-    tx: Vec<Option<Sender<MaskedProductPacket>>>,
-    rx: Vec<Option<Receiver<MaskedProductPacket>>>,
-    seen: BTreeSet<(u16, u16, [u8; 32])>,
-}
-
-impl Drop for PairwiseBeaverProductChannel {
-    fn drop(&mut self) {
-        ct_zeroize_bytes(&mut self.pad_secret);
-    }
-}
-
-impl PairwiseBeaverProductChannel {
-    fn send_packet(
-        &self,
-        peer: u16,
-        context: [u8; 32],
-        values: Vec<u128>,
-    ) -> Result<(), ParallelSeededError> {
-        let sender = self
-            .tx
-            .get(usize::from(peer))
-            .and_then(Option::as_ref)
-            .ok_or(ParallelSeededError::InvalidThresholdParameters)?;
-        sender
-            .send(MaskedProductPacket {
-                context,
-                values: ZeroizeU128s(values),
-            })
-            .map_err(|_| ParallelSeededError::BdozMacCheckFailed)
-    }
-
-    fn recv_packet(
-        &self,
-        peer: u16,
-        expected_context: [u8; 32],
-        expected_len: usize,
-    ) -> Result<ZeroizeU128s, ParallelSeededError> {
-        let receiver = self
-            .rx
-            .get(usize::from(peer))
-            .and_then(Option::as_ref)
-            .ok_or(ParallelSeededError::InvalidThresholdParameters)?;
-        let pkt = receiver
-            .recv()
-            .map_err(|_| ParallelSeededError::BdozMacCheckFailed)?;
-        if pkt.context != expected_context || pkt.values.0.len() != expected_len {
-            return Err(ParallelSeededError::BdozMacCheckFailed);
-        }
-        Ok(pkt.values)
-    }
-}
-
-impl ParallelSeededDkgProducts for PairwiseBeaverProductChannel {
-    fn party_id(&self) -> u16 {
-        self.party_id
-    }
-
-    fn product_shares(
-        &mut self,
-        context: [u8; 32],
-        sender: u16,
-        receiver: u16,
-        operand: &[u128],
-    ) -> Result<Vec<u128>, ParallelSeededError> {
-        if sender == receiver {
-            return Err(ParallelSeededError::InvalidThresholdParameters);
-        }
-        if self.party_id != sender && self.party_id != receiver {
-            if !operand.is_empty() {
-                return Err(ParallelSeededError::InvalidThresholdParameters);
-            }
-            return Ok(Vec::new());
-        }
-        if !self.seen.insert((sender, receiver, context)) {
-            return Err(ParallelSeededError::BdozMacCheckFailed);
-        }
-        let count = operand.len();
-        if count == 0 {
-            return Ok(Vec::new());
-        }
-
-        // Derive correlated Beaver triples `(a_i, b_i, c_i = a_i * b_i)` isolated to `(sender, receiver, context)`
-        // so only one-time-masked `x_i ^ a_i` and `y_i ^ b_i` ever cross the party channel, followed by the
-        // 5-round BDOZ consistency check in `ParallelSeededDkgUnverifiedOutput::activate`.
-        // Stream `cSHAKE256` in L1-resident chunks matching `cshake256_framed_xof` bit-for-bit.
-        let sender_be = sender.to_be_bytes();
-        let receiver_be = receiver.to_be_bytes();
-        let count_be = (count as u64).to_be_bytes();
-        let frames: [&[u8]; 5] = [
-            &self.pad_secret,
-            &context,
-            &sender_be,
-            &receiver_be,
-            &count_be,
-        ];
-        let mut sp = init_cshake256(b"", b"QSAG.CLI.DKG.BEAVER.CORR.V1");
-        sp.absorb(&(frames.len() as u64).to_le_bytes());
-        for frame in &frames {
-            sp.absorb(&(frame.len() as u64).to_le_bytes());
-            sp.absorb(frame);
-        }
-        finalize_cshake256(&mut sp, true);
-
-        const TRIPLE_CHUNK: usize = 256;
-        let mut chunk_buf = [0u8; TRIPLE_CHUNK * 48];
-        let mut my_mask = ZeroizeU128s(Vec::with_capacity(count));
-        let mut my_pad = ZeroizeU128s(Vec::with_capacity(count));
-        let mut remaining = count;
-        while remaining > 0 {
-            let take = remaining.min(TRIPLE_CHUNK);
-            let slice = &mut chunk_buf[..take * 48];
-            sp.squeeze(slice);
-            for chunk in slice.as_chunks::<48>().0 {
-                let mut a_bytes = [0u8; 16];
-                let mut b_bytes = [0u8; 16];
-                let mut r_bytes = [0u8; 16];
-                a_bytes.copy_from_slice(&chunk[..16]);
-                b_bytes.copy_from_slice(&chunk[16..32]);
-                r_bytes.copy_from_slice(&chunk[32..48]);
-                let a = u128::from_le_bytes(a_bytes);
-                let b = u128::from_le_bytes(b_bytes);
-                let r = u128::from_le_bytes(r_bytes);
-                if self.party_id == sender {
-                    my_mask.0.push(a);
-                    my_pad.0.push(r);
-                } else {
-                    my_mask.0.push(b);
-                    my_pad.0.push(gf2_128_mul(a, b) ^ r);
-                }
-            }
-            remaining -= take;
-        }
-        ct_zeroize_bytes(&mut chunk_buf);
-
-        let peer = if self.party_id == sender {
-            receiver
-        } else {
-            sender
-        };
-        let masked_local: Vec<u128> = operand
-            .iter()
-            .zip(my_mask.0.iter())
-            .map(|(&x, &m)| x ^ m)
-            .collect();
-
-        let masked_remote = if self.party_id < peer {
-            self.send_packet(peer, context, masked_local)?;
-            self.recv_packet(peer, context, count)?
-        } else {
-            let inc = self.recv_packet(peer, context, count)?;
-            self.send_packet(peer, context, masked_local)?;
-            inc
-        };
-
-        let mut out = Vec::with_capacity(count);
-        for (((&op_i, &mask_i), &pad_i), &rem_i) in operand
-            .iter()
-            .zip(my_mask.0.iter())
-            .zip(my_pad.0.iter())
-            .zip(masked_remote.0.iter())
-            .take(count)
-        {
-            let factor = if self.party_id == sender { op_i } else { mask_i };
-            out.push(pad_i ^ gf2_128_mul(factor, rem_i));
-        }
-        Ok(out)
-    }
-}
-
 /// Dealerless `ParallelSeededFts` threshold ceremony + distributed `ParallelSeededSignSession` driver.
 pub struct DealerlessThresholdFtsSetup {
     pub pk: ParallelSeededPublicKey,
@@ -403,19 +182,18 @@ pub struct DealerlessThresholdFtsSetup {
 
 impl DealerlessThresholdFtsSetup {
     /// Compute the deterministic authenticated power-tuple budget required for `params`:
-    /// `2^h` leaf preparations plus `2^h` epoch signatures (`<= 1_048_576` for `tree_height <= 4`).
+    /// `2^h` leaf preparations plus `2^h` epoch signatures. The underlying single-tree
+    /// protocol still materializes these tuples; callers must budget memory accordingly.
     pub fn required_power_count(params: &ParallelSeededParams) -> Result<usize, ParallelSeededError> {
         params.validate()?;
-        if params.tree_height > 4 {
-            return Err(ParallelSeededError::InvalidThresholdParameters);
-        }
-        let leaves = 1usize << params.tree_height;
+        let leaves = 1usize.checked_shl(params.tree_height as u32)
+            .ok_or(ParallelSeededError::InvalidThresholdParameters)?;
         let per_leaf = 2 * 48 * params.num_chains * params.winternitz_w;
         let per_sign = 2 * 48 * (1 + params.num_chains + params.target_sum);
         let total = leaves
             .checked_mul(per_leaf.saturating_add(per_sign))
             .ok_or(ParallelSeededError::InvalidThresholdParameters)?;
-        if total == 0 || total > 1_048_576 {
+        if total == 0 {
             return Err(ParallelSeededError::InvalidThresholdParameters);
         }
         Ok(total)
@@ -430,7 +208,7 @@ impl DealerlessThresholdFtsSetup {
         mut ceremony_seed: [u8; 32],
         cached_tree: Option<(ParallelSeededPublicKey, ParallelSeededMerkleLayers)>,
     ) -> Result<Self, ParallelSeededError> {
-        if !(2..=16).contains(&parties) {
+        if parties < 2 || parties > usize::from(u16::MAX) {
             ct_zeroize_bytes(&mut ceremony_seed);
             return Err(ParallelSeededError::InvalidThresholdParameters);
         }
@@ -443,8 +221,6 @@ impl DealerlessThresholdFtsSetup {
         };
         let roster: Vec<u16> = (0..parties as u16).collect();
         let dkg_session = cshake256_framed_32(b"QSAG.CLI.FTS.DKG.SESSION.V1", &[&ceremony_seed]);
-        let beaver_corr_secret =
-            cshake256_framed_32(b"QSAG.CLI.FTS.DKG.BEAVER_CORR.V1", &[&ceremony_seed]);
 
         let config = ParallelSeededDkgConfig {
             params,
@@ -489,33 +265,13 @@ impl DealerlessThresholdFtsSetup {
             }
         }
 
-        let mut tx_grid: Vec<Vec<Option<Sender<MaskedProductPacket>>>> =
-            (0..parties).map(|_| (0..parties).map(|_| None).collect()).collect();
-        let mut rx_grid: Vec<Vec<Option<Receiver<MaskedProductPacket>>>> =
-            (0..parties).map(|_| (0..parties).map(|_| None).collect()).collect();
-        for s in 0..parties {
-            for r in 0..parties {
-                if s == r {
-                    continue;
-                }
-                let (tx, rx) = mpsc::channel();
-                tx_grid[s][r] = Some(tx);
-                rx_grid[r][s] = Some(rx);
-            }
-        }
-
-        let backends: Vec<PairwiseBeaverProductChannel> = tx_grid
-            .into_iter()
-            .zip(rx_grid)
-            .enumerate()
-            .map(|(id, (tx, rx))| PairwiseBeaverProductChannel {
-                party_id: id as u16,
-                pad_secret: beaver_corr_secret,
-                tx,
-                rx,
-                seen: BTreeSet::new(),
-            })
-            .collect();
+        let backends = ot_endpoints(&roster, dkg_session)?.into_iter()
+            .zip(&roster)
+            .map(|(ot, &id)| {
+                let entropy = crate::cli::os_random_32()
+                    .map_err(|_| ParallelSeededError::BdozMacCheckFailed)?;
+                Ok(ParallelSeededGilboaProducts::new(id, entropy, ot))
+            }).collect::<Result<Vec<_>, ParallelSeededError>>()?;
 
         let openings_ref = &openings;
         let mut pending = thread::scope(|scope| -> Result<Vec<_>, ParallelSeededError> {

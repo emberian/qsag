@@ -20,6 +20,7 @@ public import Qsag.Spec.IdealAggregate
 public import Qsag.Math.QuarticExt4
 public import Qsag.CodingTheory.Cwyz26JohnsonCertificate
 public import Qsag.CodingTheory.Cwyz26DeployedStages
+public import Qsag.CodingTheory.Cwyz26EqualDegreeAndMultiFold
 public import Qsag.CorduroyAndHemAirCompleteness
 public import Qsag.Poseidon2AlgebraicAndRecursiveHem
 public import Qsag.CrossProtocolAndDualOracleComposition
@@ -234,36 +235,88 @@ theorem aggregate_merge_and_simt_gpu_noninterference
 
 /-! ## 5. Multifold `[CWYZ26]` + Salted-Merkle DFMS QROM State Restoration + Committee Boundary -/
 
-/-- **Multifold `HEM` `nv = 24` Salted-Merkle QROM State-Restoration & Committee Extraction Chain
+/-- **Multifold `HEM` `nv = 24` Salted-Merkle QROM State-Restoration & Deployed Committee Quorum Reduction
     (`multifold_salted_qrom_and_committee_boundary_chain`)**:
-    Composes `HemSlicedFoldBudget.dfm184_budget_at_2pow27`,
-    `QromSaltedMerkleStateRestoration` (`hemNv24_unitaryPow16_sound_up_to_2pow40`,
-    `dfms_database_overflow_mass_zero`), and `CompositionInstances.committee_trace_boundary`
-    into canonical `Spec.RatBound` guarantees! -/
+    Composes `HemSlicedFoldBudget.dfm184_budget_at_2pow27`, `Cwyz26EqualDegreeAndMultiFold.sliced_multifold_stage_supported_budget`,
+    `QromSaltedMerkleStateRestoration` (`hemNv24_unitaryPow16_sound_up_to_2pow40`, `dfms_database_overflow_mass_zero`),
+    and `CompositionInstances.boundary_of_hem_opening_batch` + `Composed.merged_quorum_reduction`
+    parameterized over deployed `xmssPoseidon2Geom` / `corduroyPoseidon2Geom` (`wotsChains = 128`) and
+    any non-vacuous QROM/IOP opening-batch failure predicate `bad : Shard nVal → Prop`! -/
 theorem multifold_salted_qrom_and_committee_boundary_chain
-    {n cardAnc : Nat}
+    {n cardAnc nVal cardX w : Nat}
     (Q_pow : Nat) (hQPow : Q_pow + 1 ≤ 2 ^ 40)
     (Q_dfm : Nat) (hQDfm : Q_dfm + 1 ≤ 2 ^ 27)
+    (nvMf : Nat) (h2Mf : 2 ≤ nvMf) (h24Mf : nvMf ≤ 24)
+    (gMf : Qsag.HemStageGeom) (hgMf : gMf ∈ Qsag.hemStageGeoms nvMf)
+    (hneMf : Qsag.hemJohnsonQromStageExhaustive gMf = false)
     (bStage : Qsag.RatBound) (hb184 : Qsag.atLeastBits 184 bStage)
-    (ADfms : Qsag.QuantumAdv n 256 cardAnc Q_pow) :
+    (ADfms : Qsag.QuantumAdv n 256 cardAnc Q_pow)
+    (geom : Qsag.AggSigGeometry)
+    (hDeployedGeom : geom = Qsag.xmssPoseidon2Geom ∨ geom = Qsag.corduroyPoseidon2Geom)
+    (custody : Fin nVal → Qsag.Composed.Custody)
+    (bad : Qsag.Composed.Shard nVal → Prop)
+    (L : Qsag.MerkleAddressLayout cardX w)
+    (slots : List (Qsag.MerkleOpeningSlot cardX w))
+    (hemInst : Qsag.Composed.Shard nVal → Qsag.HemWhirInstance Qsag.QuarticGoldilocks)
+    (decode : Qsag.Composed.Shard nVal → Fin cardX → List (Option (Qsag.MerkleOpeningValue w)) →
+      List (Qsag.HemTranscriptRound Qsag.QuarticGoldilocks))
+    (oracleOf : Qsag.Composed.Shard nVal → Fin cardX → BitVec w)
+    (outOf : Qsag.Composed.Shard nVal → Fin cardX)
+    (modeOk : Qsag.Composed.Shard nVal → Bool)
+    (stmt : Qsag.Composed.Shard nVal → Qsag.AggArithPublicStmt)
+    (slot : Fin nVal → Nat)
+    (hHemSound : ∀ s,
+      Qsag.verifyHemOpeningBatch L slots (hemInst s) (decode s) (oracleOf s) (outOf s) = true →
+      modeOk s = true →
+      bad s ∨ Qsag.HemStatementValid (hemInst s))
+    (hHemToTrace : ∀ s, Qsag.HemStatementValid (hemInst s) → modeOk s = true →
+      ∃ tr, Qsag.traceSatisfiesAllConstraints (stmt s) tr = true)
+    (hBinds : ∀ s, modeOk s = true → (stmt s).geom = geom ∧
+      ∀ v : Fin nVal, s.bitmap.getLsbD v.val = true →
+        (stmt s).committeePks[slot v]? = some (custody v).state.pk ∧
+        (stmt s).msg = s.header.mode.message v.val) :
+    let hemVerifyShard := fun s =>
+      Qsag.verifyHemOpeningBatch L slots (hemInst s) (decode s) (oracleOf s) (outOf s) && modeOk s
+    geom.wellFormed = true ∧
     (Qsag.Spec.RatBound.ofBudget
       (Qsag.powScaledFsQromCompilerBound Q_pow 5 256 16
         Qsag.hemV6FiveRoundRbrBounds
         (Qsag.hemOptimizedQueryBounds .unitaryPow16 24))).atLeastBits 128 ∧
+    (∃ (r : Nat × Nat × Nat × Nat × Nat) (wRow : Nat × Nat × Nat × Nat),
+      Qsag.hemJohnsonQromTableRow nvMf gMf.stageIdx = some r ∧
+      Qsag.slicedStageRow nvMf gMf.stageIdx = some wRow ∧
+      (Qsag.Spec.RatBound.ofBudget (Qsag.slicedMultiFoldStageBound gMf r wRow)).atLeastBits 175) ∧
     (Qsag.Spec.RatBound.ofBudget (Qsag.dfmRoundScale Q_dfm bStage)).atLeastBits 128 ∧
     Qsag.dfmsTableSum 128 n (fun D => if Q_pow < Qsag.dfmsRecordedCount n D then
       Qsag.QVec.stateNormSq (Qsag.dfmsAdvStateAt 128 ADfms Q_pow (Nat.le_refl Q_pow) D) else 0) = 0 ∧
-    Qsag.Composed.ExtractionBoundary
-      Qsag.compactAuditGeom
-      Qsag.CompositionInstances.custodyOf
-      Qsag.CompositionInstances.sharedVerify
-      (fun _ => False) := by
+    Qsag.Composed.ExtractionBoundary geom custody hemVerifyShard bad ∧
+    (∀ (rootHdr : Qsag.Composed.Header) (tree : Qsag.Composed.MergeTree nVal) (v : Fin nVal),
+      Qsag.Composed.checkTree rootHdr hemVerifyShard 16 tree = true →
+      tree.bitmap.getLsbD v.val = true →
+      (∃ s ∈ tree.leaves, bad s) ∨
+      Qsag.Composed.QuorumForgery geom (custody v) (rootHdr.mode.message v.val) ∨
+      Qsag.Composed.quorumParticipated (custody v) (rootHdr.mode.message v.val) = true) := by
+  intro hemVerifyShard
+  have hGeomWf : geom.wellFormed = true := by
+    rcases hDeployedGeom with rfl | rfl
+    · exact Qsag.deployedAggGeometries_wellFormed.1
+    · exact Qsag.deployedAggGeometries_wellFormed.2.1
   obtain ⟨_, hPow128⟩ := Qsag.hemNv24_unitaryPow16_sound_up_to_2pow40 Q_pow hQPow
+  obtain ⟨rMf, wMf, hrMf, hwMf, _, _, _, hb175, _, _⟩ :=
+    Qsag.sliced_multifold_stage_supported_budget nvMf h2Mf h24Mf gMf hgMf hneMf
   have hDfm128 := Qsag.dfm184_budget_at_2pow27 bStage hb184 Q_dfm hQDfm
-  exact ⟨(Qsag.Spec.RatBound.ofBudget_atLeastBits_iff 128 _).mpr hPow128,
+  have hBnd : Qsag.Composed.ExtractionBoundary geom custody hemVerifyShard bad :=
+    Qsag.CompositionInstances.boundary_of_hem_opening_batch geom custody bad L slots
+      hemInst decode oracleOf outOf modeOk stmt slot hHemSound hHemToTrace hBinds
+  exact ⟨hGeomWf,
+         (Qsag.Spec.RatBound.ofBudget_atLeastBits_iff 128 _).mpr hPow128,
+         ⟨rMf, wMf, hrMf, hwMf, (Qsag.Spec.RatBound.ofBudget_atLeastBits_iff 175 _).mpr hb175⟩,
          (Qsag.Spec.RatBound.ofBudget_atLeastBits_iff 128 _).mpr hDfm128,
          Qsag.dfms_database_overflow_mass_zero 128 ADfms,
-         Qsag.CompositionInstances.committee_trace_boundary⟩
+         hBnd,
+         fun rootHdr tree v hTree hAct =>
+           Qsag.Composed.merged_quorum_reduction geom custody hemVerifyShard bad hBnd
+             rootHdr tree hTree v hAct⟩
 
 #verify_constructive
   Qsag.Top.aggExt4_cwyz26_fold_and_point_reduction

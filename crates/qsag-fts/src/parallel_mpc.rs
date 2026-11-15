@@ -513,21 +513,20 @@ fn pow7_plain(x: u128) -> u128 {
     gf2_128_mul(gf2_128_mul(x, x2), x4)
 }
 
-fn round_constants(c0: u128, c1: u128, round: usize) -> (u128, u128) {
-    bytes32_to_lanes(&cshake256_framed_32(
-        b"QSAG.PSFTS.POW7_ROUND.V4",
-        &[
-            &c0.to_le_bytes(),
-            &c1.to_le_bytes(),
-            &(round as u32).to_be_bytes(),
-        ],
-    ))
+// V5 changes the compression function deliberately: one domain-separated stream
+// commits to both tweaks and the complete round count. V4 constants are not reused.
+fn round_constants(c0: u128, c1: u128) -> [(u128, u128); SPN_ROUNDS] {
+    let mut stream = [0u8; SPN_ROUNDS * 32];
+    cshake256_framed_xof(b"QSAG.PSFTS.POW7_ROUNDS.V5",
+        &[&c0.to_le_bytes(), &c1.to_le_bytes(), &(SPN_ROUNDS as u32).to_be_bytes()],
+        &mut stream);
+    core::array::from_fn(|round| bytes32_to_lanes(
+        stream[round * 32..(round + 1) * 32].try_into().unwrap()))
 }
 
 fn algebraic_step_plain(input: (u128, u128), c0: u128, c1: u128) -> (u128, u128) {
     let mut state = input;
-    for round in 0..SPN_ROUNDS {
-        let rc = round_constants(c0, c1, round);
+    for rc in round_constants(c0, c1) {
         let x = state.0 ^ rc.0;
         let y = state.1 ^ rc.1;
         let x7 = pow7_plain(x);
@@ -755,8 +754,7 @@ fn mpc_algebraic_step(
 ) -> Result<(Vec<AuthWire128>, Vec<AuthWire128>), ParallelSeededError> {
     let mut state0 = in0.to_vec();
     let mut state1 = in1.to_vec();
-    for round in 0..SPN_ROUNDS {
-        let rc = round_constants(c0, c1, round);
+    for rc in round_constants(c0, c1) {
         for (p, ((x, y), sh)) in state0
             .iter_mut()
             .zip(&mut state1)

@@ -336,17 +336,16 @@ impl<T: ParallelSeededDkgOt> ParallelSeededDkgProducts for ParallelSeededGilboaP
                 cshake256_framed_xof(b"QSAG.DKG.OT.PADS.V1", &[&self.entropy, &context], &mut raw);
                 let mut alternatives = Vec::with_capacity(inputs.len() * 128);
                 for (&x, pads) in inputs.iter().zip(raw.as_chunks::<{ 128 * 16 }>().0.iter()) {
-                    let mut basis = x;
+                    let powers: [u128; 128] = core::array::from_fn(|bit| 1u128 << bit);
+                    let mut basis = [0u128; 128];
+                    qsag_asm::gf2_128_scale_xor(&mut basis, &powers, x);
                     let mut share = 0;
-                    for pad in pads.as_chunks::<16>().0.iter() {
+                    for (pad, &term) in pads.as_chunks::<16>().0.iter().zip(&basis) {
                         let r = u128::from_le_bytes(*pad);
                         share ^= r;
-                        alternatives.push([r, r ^ basis]);
-                        // Multiply by the polynomial basis element in constant time.
-                        basis = (basis << 1)
-                            ^ (qsag_accel::gf2_128::GF2_128_POLY_LO
-                                & 0u128.wrapping_sub(basis >> 127));
+                        alternatives.push([r, r ^ term]);
                     }
+                    ct_zeroize_u128s(&mut basis);
                     shares.0.push(share);
                 }
                 ct_zeroize_bytes(&mut raw);

@@ -64,6 +64,7 @@
 //! adversary chose) and the corrupt custodians' own shares. No MAC key is
 //! exposed by a failed rekey, so a failed rekey does not retire the family.
 
+use crate::seeds::CustodianSet;
 use super::*;
 use crate::erase::SecretWords;
 use crate::inventory::RekeyFault;
@@ -97,11 +98,11 @@ fn field_from_stream(sponge: &mut Shake256) -> u32 {
 }
 
 /// `f_A(x) = prod over positions j outside A of (x_j - x) / x_j`.
-fn subset_poly_at(xs: &[u32], subset: u16, x: u32) -> u32 {
+fn subset_poly_at(xs: &[u32], subset: CustodianSet, x: u32) -> u32 {
     let mut numerator = 1;
     let mut denominator = 1;
     for (j, &xj) in xs.iter().enumerate() {
-        if subset >> j & 1 == 0 {
+        if !subset.contains(j) {
             numerator = mod_q_mul(numerator, mod_q_sub(xj, x));
             denominator = mod_q_mul(denominator, xj);
         }
@@ -172,25 +173,21 @@ impl OpenPlan {
 /// Exact 23-bit little-endian packing of canonical field elements.
 pub fn pack_field_elements(values: &[u32]) -> Vec<u8> {
     let mut out = alloc::vec![0u8; (values.len() * 23).div_ceil(8)];
-    for (i, &value) in values.iter().enumerate() {
-        for bit in 0..23 {
-            out[(i * 23 + bit) / 8] |= (((value >> bit) & 1) as u8) << ((i * 23 + bit) % 8);
-        }
-    }
+    pack_coefficients(values, &mut out);
     out
 }
 
 /// Inverse of [`pack_field_elements`]. Rejects a wrong length, a non-canonical
 /// residue and nonzero padding bits.
 pub fn unpack_field_elements(bytes: &[u8], count: usize) -> Result<Vec<u32>, HdError> {
-    if bytes.len() != (count * 23).div_ceil(8) {
+    let bits = count.checked_mul(23).ok_or(HdError::RekeyAborted(RekeyFault::MalformedMessage))?;
+    if bytes.len() != bits.div_ceil(8) {
         return abort(RekeyFault::MalformedMessage);
     }
-    let bit = |index: usize| u32::from((bytes[index / 8] >> (index % 8)) & 1);
-    let values: Vec<u32> = (0..count)
-        .map(|i| (0..23).fold(0, |acc, b| acc | bit(i * 23 + b) << b))
-        .collect();
-    if values.iter().any(|&v| v >= MODULE_Q) || (count * 23..bytes.len() * 8).any(|i| bit(i) != 0) {
+    let mut values = alloc::vec![0; count];
+    unpack_coefficients(bytes, &mut values);
+    if values.iter().any(|&v| v >= MODULE_Q)
+        || (bits % 8 != 0 && bytes.last().is_some_and(|b| b >> (bits % 8) != 0)) {
         return abort(RekeyFault::MalformedMessage);
     }
     Ok(values)
@@ -204,7 +201,7 @@ pub struct RekeyHello {
     pub coin_commitment: [u8; 32],
     /// `(subset, A*tau_1 + tau_2)` for every subset of the sender; empty for a
     /// non-hardened child, whose tweak is public.
-    pub public_shares: Vec<(u16, [RingPoly; MODULE_K])>,
+    pub public_shares: Vec<(CustodianSet, [RingPoly; MODULE_K])>,
 }
 
 /// Round 2 broadcast: masked degree `2t - 2` product shares.
@@ -2000,12 +1997,12 @@ mod tests {
         // Two worlds that differ only in the seed of the subset excluding
         // custodian 0. Custodian 0 is the whole coalition for t = 2.
         let config = committee(2, 3);
-        let missing = 0b110u16;
+        let missing = CustodianSet::from(0b110);
         let world = |flip: bool| -> Vec<CustodianSeeds> {
             (0..3u16)
                 .map(|id| {
                     CustodianSeeds::from_explicit_seeds(&config, id, [0x77; 32], |subset| {
-                        let mut seed = [subset as u8 ^ 0x3C; 32];
+                        let mut seed = [subset.to_be_bytes()[31] ^ 0x3C; 32];
                         if flip && subset == missing {
                             seed[0] ^= 0x80;
                         }

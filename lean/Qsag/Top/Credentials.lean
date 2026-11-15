@@ -10,8 +10,9 @@ Top-level composition module (zero `import all`) connecting:
 3. Threshold FIPS-204 `ML-DSA` rejection-sampling plateau shift-invariance, degree-6 extension
    (`𝔽_{q^6}`) repeated sacrifice soundness, and multi-key PRSS hybrid bounds
    (`ThresholdMlDsaSecurity`, `ThresholdMlDsaAndToprf`), and
-4. `BlindVc` Fiat–Shamir rewound-transcript collision extraction (`BlindVcCollisionFinder`) paired
-   with ideal selective-disclosure credential soundness (`Spec.IdealCred`).
+4. `PiBlindVc` Fiat–Shamir rewound-transcript collision extraction (`BlindVcCollisionFinder`) paired
+   with ideal selective-disclosure soundness and undisclosed-attribute privacy (`Spec.IdealCred`,
+   `Spec.pqCredentialProfile`: `N = 256`, `33` repetitions over `GF(p^5)`).
 -/
 
 public import Qsag.Spec.Primitives
@@ -109,17 +110,20 @@ theorem threshold_mldsa_hvzk_sacrifice_and_prss_chain
   have hPrss := Qsag.prss_multi_key_hybrid real ideal m D ε hPrf
   exact ⟨hPlat, hSac, hPow, hPrss⟩
 
-/-! ## 4. `BlindVc` Fiat–Shamir Collision Extraction Paired With `Spec.IdealCred` Presentation Soundness -/
+/-! ## 4. `PiBlindVc` Selective-Disclosure Soundness & Fiat–Shamir Collision Extraction -/
 
-/-- **Anonymous Credential Presentation Soundness & Fiat–Shamir Collision Extraction
+/-- **Anonymous Credential Selective-Disclosure Soundness, Privacy, & Fiat–Shamir Extraction
     (`blindVc_presentation_and_collision_extraction_chain`)**:
-    Composes `Spec.idealCredMachine_presentation_sound` with `BlindVcCollisionFinder.blindVc_fs_collisionFinder_mass_bound`
+    Composes `Spec.idealCredMachine_presentation_sound` (accumulator-pinned, anti-replay, hidden-witness
+    selective disclosure with `N = 256` parties and `33` repetitions over `GF(p^5)` in
+    `Spec.pqCredentialProfile`) with `BlindVcCollisionFinder.blindVc_fs_collisionFinder_mass_bound`
     and `vcRewoundCollisionFinder_honest`. -/
 theorem blindVc_presentation_and_collision_extraction_chain
     {Attr : Type} [DecidableEq Attr]
-    (pk₀ : Qsag.Spec.Bytes) (st st' : Qsag.Spec.IdealCredState Attr)
-    (stmtCred : Qsag.Spec.CredentialStatement Attr) (witnessAttrs : List Attr)
-    (hPresOk : (Qsag.Spec.idealCredMachine pk₀).step st (.verifyPresentation stmtCred witnessAttrs) =
+    (pk₀ : Qsag.Spec.Bytes) (root₀ : Qsag.Spec.Digest256)
+    (st st' : Qsag.Spec.IdealCredState Attr)
+    (credId : Nat) (stmtCred : Qsag.Spec.CredentialStatement Attr)
+    (hPresOk : (Qsag.Spec.idealCredMachine pk₀ root₀).step st (.present credId stmtCred) =
       some (st', .presentationVerdict true))
     {cardX k : Nat}
     (H : List UInt8 → List UInt8) (hHLen : ∀ m, (H m).length < 256 ^ 8)
@@ -129,8 +133,13 @@ theorem blindVc_presentation_and_collision_extraction_chain
     (O : Fin cardX → BitVec (64 * k)) (seeds : List (Fin cardX))
     (weight : Fin cardX → Nat)
     (nonce : Qsag.Vec UInt8 32) (idx : Nat) (tr : Qsag.BlindVcRepTriple) :
-    (witnessAttrs ∈ st.mintedCredentials ∧
-      Qsag.Spec.CredentialMatchesAttributes stmtCred witnessAttrs = true) ∧
+    (stmtCred.challengeNonce ∉ st.usedChallenges ∧
+      Qsag.Spec.DisclosedIndicesValid stmtCred = true ∧
+      ∃ attrs, st.enrolledCredentials[credId]? = some attrs ∧
+        Qsag.Spec.CredentialMatchesAttributes stmtCred attrs = true) ∧
+    (Qsag.Spec.pqCredentialProfile.sdLimboParties = 256 ∧
+      Qsag.Spec.pqCredentialProfile.sdRepsQuantum = 33 ∧
+      Qsag.Spec.pqCredentialProfile.sdExtDegree = 5) ∧
     (seeds.map (fun x => if Qsag.blindVcFsUnfilteredLiveAfter H prgExpand stmtAt msgAt O x
       then weight x else 0)).sum ≤
       (seeds.map (fun x => if (Qsag.blindVcTableCollisionFinder H hHLen (stmtAt x) (msgAt x)).isSome
@@ -141,9 +150,11 @@ theorem blindVc_presentation_and_collision_extraction_chain
       (Qsag.openBlindVcRep H nonce idx tr 0)
       (Qsag.openBlindVcRep H nonce idx tr 1)
       (Qsag.openBlindVcRep H nonce idx tr 2)).isSome = false := by
-  obtain ⟨_, _, hMinted, hMatch⟩ :=
-    Qsag.Spec.idealCredMachine_presentation_sound pk₀ st st' stmtCred witnessAttrs hPresOk
-  exact ⟨⟨hMinted, hMatch⟩,
+  obtain ⟨_, _, hFresh, _, hIdxOk, hEnrolled⟩ :=
+    Qsag.Spec.idealCredMachine_presentation_sound pk₀ root₀ st st' credId stmtCred hPresOk
+  obtain ⟨_, _, hLimbo, hExt5, hReps33, _⟩ := Qsag.Spec.pqCredentialProfile_soundness_params
+  exact ⟨⟨hFresh, hIdxOk, hEnrolled⟩,
+         ⟨hLimbo, hReps33, hExt5⟩,
          Qsag.blindVc_fs_collisionFinder_mass_bound H hHLen prgExpand stmtAt msgAt O seeds weight,
          Qsag.vcRewoundCollisionFinder_honest H hHLen nonce idx tr⟩
 
