@@ -709,3 +709,745 @@ def lagrangeToAdditiveShare {F : Type} [LawfulField F] [DecidableEq F]
   CommRingOps.mul (lagrangeWeightAtZero S xi) si
 
 /-- Sum of a list of field/ring elements. -/
+def ringListSum {R : Type} [CommRingOps R] : List R → R
+  | [] => CommRingOps.zero
+  | x :: xs => CommRingOps.add x (ringListSum xs)
+
+private theorem eval_lagrangeBasis_zero {F : Type} [LawfulField F] (xi : F) :
+    ∀ (others : List F),
+      RoundPoly.evalCoeffs (lagrangeBasisFromOthers xi others) CommRingOps.zero =
+        lagrangeScalarFromOthers xi others
+  | [] => by
+    simp [lagrangeBasisFromOthers, lagrangeScalarFromOthers, RoundPoly.evalCoeffs_cons,
+          RoundPoly.evalCoeffs_nil, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+  | xj :: rest => by
+    simp only [lagrangeBasisFromOthers, lagrangeScalarFromOthers, evalCoeffs_mulLinear,
+               LawfulCommRing.mul_zero, LawfulCommRing.add_zero, eval_lagrangeBasis_zero xi rest]
+
+private theorem eval_lagrangeBasis_self {F : Type} [LawfulField F] (xi : F) :
+    ∀ (others : List F), (∀ xj ∈ others, xi ≠ xj) →
+      RoundPoly.evalCoeffs (lagrangeBasisFromOthers xi others) xi = CommRingOps.one
+  | [], _ => by
+    simp [lagrangeBasisFromOthers, RoundPoly.evalCoeffs_cons, RoundPoly.evalCoeffs_nil,
+          LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+  | xj :: rest, hNe => by
+    have hNeHead : xi ≠ xj := hNe xj (.head rest)
+    have hDiffNe : CommRingOps.sub xi xj ≠ CommRingOps.zero := fun h0 =>
+      hNeHead (LawfulCommRing.sub_eq_zero_iff.mp h0)
+    simp only [lagrangeBasisFromOthers, evalCoeffs_mulLinear,
+               eval_lagrangeBasis_self xi rest (fun y hy => hNe y (.tail xj hy)),
+               LawfulCommRing.mul_one]
+    have hFactor : CommRingOps.add
+        (CommRingOps.mul (CommRingOps.neg xj) (LawfulField.inv (CommRingOps.sub xi xj)))
+        (CommRingOps.mul (LawfulField.inv (CommRingOps.sub xi xj)) xi) =
+        CommRingOps.mul (CommRingOps.sub xi xj) (LawfulField.inv (CommRingOps.sub xi xj)) := by
+      constructive_ring
+    rw [hFactor, LawfulField.mul_inv_cancel hDiffNe]
+
+private theorem eval_lagrangeBasis_other {F : Type} [LawfulField F] (xi xk : F) :
+    ∀ (others : List F), xk ∈ others →
+      RoundPoly.evalCoeffs (lagrangeBasisFromOthers xi others) xk = CommRingOps.zero
+  | [], hMem => by cases hMem
+  | xj :: rest, hMem => by
+    simp only [lagrangeBasisFromOthers, evalCoeffs_mulLinear]
+    rcases List.mem_cons.mp hMem with rfl | hTail
+    · have hFactor0 : CommRingOps.add
+          (CommRingOps.mul (CommRingOps.neg xk) (LawfulField.inv (CommRingOps.sub xi xk)))
+          (CommRingOps.mul (LawfulField.inv (CommRingOps.sub xi xk)) xk) = CommRingOps.zero := by
+        constructive_ring
+      rw [hFactor0, LawfulCommRing.zero_mul]
+    · rw [eval_lagrangeBasis_other xi xk rest hTail, LawfulCommRing.mul_zero]
+
+/-- Variable-length polynomial addition. -/
+private def polyAddVarPt {R : Type} [CommRingOps R] : List R → List R → List R
+  | [], q => q
+  | p, [] => p
+  | a :: ps, b :: qs => CommRingOps.add a b :: polyAddVarPt ps qs
+
+private theorem polyAddVarPt_length_le {R : Type} [CommRingOps R] :
+    ∀ (p q : List R) (m : Nat), p.length ≤ m → q.length ≤ m → (polyAddVarPt p q).length ≤ m
+  | [], q, m, _, hq => hq
+  | p, [], m, hp, _ => hp
+  | _ :: ps, _ :: qs, 0, hp, _ => by simp at hp
+  | _ :: ps, _ :: qs, k + 1, hp, hq => by
+    simp only [polyAddVarPt, List.length_cons] at hp hq ⊢
+    exact Nat.succ_le_succ (polyAddVarPt_length_le ps qs k (by omega) (by omega))
+
+private theorem evalCoeffs_polyAddVarPt {R : Type} [LawfulCommRing R] :
+    ∀ (p q : List R) (x : R),
+      RoundPoly.evalCoeffs (polyAddVarPt p q) x =
+        CommRingOps.add (RoundPoly.evalCoeffs p x) (RoundPoly.evalCoeffs q x)
+  | [], q, x => by simp [polyAddVarPt, RoundPoly.evalCoeffs_nil, LawfulCommRing.zero_add]
+  | p, [], x => by
+    cases p <;> simp [polyAddVarPt, RoundPoly.evalCoeffs_nil, LawfulCommRing.add_zero]
+  | a :: ps, b :: qs, x => by
+    simp only [polyAddVarPt, RoundPoly.evalCoeffs_cons, evalCoeffs_polyAddVarPt ps qs x]
+    constructive_ring
+
+private def polyScalePt {R : Type} [CommRingOps R] (c : R) : List R → List R
+  | [] => []
+  | a :: as => CommRingOps.mul c a :: polyScalePt c as
+
+private theorem polyScalePt_length {R : Type} [CommRingOps R] (c : R) :
+    ∀ (p : List R), (polyScalePt c p).length = p.length
+  | [] => rfl
+  | _ :: as => congrArg Nat.succ (polyScalePt_length c as)
+
+private theorem evalCoeffs_polyScalePt {R : Type} [LawfulCommRing R] (c : R) :
+    ∀ (p : List R) (x : R),
+      RoundPoly.evalCoeffs (polyScalePt c p) x = CommRingOps.mul c (RoundPoly.evalCoeffs p x)
+  | [], _ => by simp [polyScalePt, RoundPoly.evalCoeffs_nil, LawfulCommRing.mul_zero]
+  | a :: as, x => by
+    simp only [polyScalePt, RoundPoly.evalCoeffs_cons, evalCoeffs_polyScalePt c as x]
+    constructive_ring
+
+/-- Lagrange interpolation polynomial `∑_{xi ∈ pts} f(xi) · L_{i, S}(X)`. -/
+private def lagrangeInterpAux {F : Type} [LawfulField F] [DecidableEq F]
+    (S : List F) (f : F → F) : List F → List F
+  | [] => []
+  | xi :: rest =>
+    let basis := lagrangeBasisFromOthers xi (S.filter (fun xj => decide (xj ≠ xi)))
+    polyAddVarPt (polyScalePt (f xi) basis) (lagrangeInterpAux S f rest)
+
+private theorem filter_ne_self_length_lt {α : Type} [DecidableEq α] :
+    ∀ {S : List α} {x : α}, x ∈ S → (S.filter (fun y => decide (y ≠ x))).length + 1 ≤ S.length
+  | [], _, hMem => by cases hMem
+  | hd :: tl, x, hMem => by
+    simp only [List.filter_cons, List.length_cons]
+    if hEq : hd = x then
+      subst hEq
+      have hDec : decide (hd ≠ hd) = false := decide_eq_false (fun h => h rfl)
+      rw [hDec]; simp only [Bool.false_eq_true, ↓reduceIte]
+      exact Nat.add_le_add_right (List.length_filter_le _ tl) 1
+    else
+      rcases List.mem_cons.mp hMem with rfl | hTl
+      · exact False.elim (hEq rfl)
+      · rw [decide_eq_true hEq]; simp only [↓reduceIte, List.length_cons]
+        have ih := filter_ne_self_length_lt hTl
+        omega
+
+private theorem lagrangeInterpAux_length_le {F : Type} [LawfulField F] [DecidableEq F]
+    (S : List F) (f : F → F) :
+    ∀ (pts : List F), (∀ x ∈ pts, x ∈ S) → (lagrangeInterpAux S f pts).length ≤ S.length
+  | [], _ => Nat.zero_le _
+  | xi :: rest, hSub => by
+    simp only [lagrangeInterpAux]
+    apply polyAddVarPt_length_le
+    · rw [polyScalePt_length]
+      exact Nat.le_trans (lagrangeBasisFromOthers_length_le xi _)
+        (filter_ne_self_length_lt (hSub xi (.head rest)))
+    · exact lagrangeInterpAux_length_le S f rest (fun y hy => hSub y (.tail xi hy))
+
+private theorem evalCoeffs_lagrangeInterpAux_zero {F : Type} [LawfulField F] [DecidableEq F]
+    (S : List F) (f : F → F) :
+    ∀ (pts : List F),
+      RoundPoly.evalCoeffs (lagrangeInterpAux S f pts) CommRingOps.zero =
+        ringListSum (pts.map (fun xi => lagrangeToAdditiveShare S xi (f xi)))
+  | [] => by simp [lagrangeInterpAux, ringListSum, RoundPoly.evalCoeffs_nil]
+  | xi :: rest => by
+    simp only [lagrangeInterpAux, List.map_cons, ringListSum,
+               evalCoeffs_polyAddVarPt, evalCoeffs_polyScalePt,
+               eval_lagrangeBasis_zero, evalCoeffs_lagrangeInterpAux_zero S f rest]
+    unfold lagrangeToAdditiveShare lagrangeWeightAtZero
+    rw [LawfulCommRing.mul_comm (f xi)]
+
+private theorem evalCoeffs_lagrangeInterpAux_at_mem {F : Type} [LawfulField F] [DecidableEq F]
+    (S : List F) (f : F → F) :
+    ∀ (pts : List F), pts.Nodup → (∀ x ∈ pts, x ∈ S) →
+      ∀ xk ∈ S,
+        RoundPoly.evalCoeffs (lagrangeInterpAux S f pts) xk =
+          if xk ∈ pts then f xk else CommRingOps.zero
+  | [], _, _, _, _ => by simp [lagrangeInterpAux, RoundPoly.evalCoeffs_nil]
+  | xi :: rest, hNd, hSub, xk, hxkS => by
+    obtain ⟨hNotInRest, hRestNd⟩ := List.nodup_cons.mp hNd
+    simp only [lagrangeInterpAux, evalCoeffs_polyAddVarPt, evalCoeffs_polyScalePt,
+               evalCoeffs_lagrangeInterpAux_at_mem S f rest hRestNd (fun y hy => hSub y (.tail xi hy)) xk hxkS]
+    if hEq : xk = xi then
+      subst hEq
+      have hBasis1 : RoundPoly.evalCoeffs
+          (lagrangeBasisFromOthers xk (S.filter (fun xj => decide (xj ≠ xk)))) xk =
+          CommRingOps.one := by
+        apply eval_lagrangeBasis_self
+        intro xj hxj
+        exact Ne.symm (of_decide_eq_true (List.mem_filter.mp hxj).2)
+      rw [hBasis1, LawfulCommRing.mul_one]
+      simp [hNotInRest, LawfulCommRing.add_zero]
+    else
+      have hBasis0 : RoundPoly.evalCoeffs
+          (lagrangeBasisFromOthers xi (S.filter (fun xj => decide (xj ≠ xi)))) xk =
+          CommRingOps.zero := by
+        apply eval_lagrangeBasis_other
+        exact List.mem_filter.mpr ⟨hxkS, decide_eq_true hEq⟩
+      rw [hBasis0, LawfulCommRing.mul_zero, LawfulCommRing.zero_add]
+      simp [List.mem_cons, hEq]
+
+/-- **Polymorphic Lagrange-to-Additive Secret Reconstruction (`lagrange_to_additive_reconstructs_poly`)**:
+    Over ANY `[LawfulField F] [DecidableEq F]`, for ANY `t` distinct evaluation points `S : List F`
+    (`S.Nodup`, `S.length = t`, `1 ≤ t`) and ANY degree-`< t` Shamir polynomial `coeffs : List F`
+    (`coeffs.length ≤ t`), summing the locally converted additive shares `λ_{i, S} · P(x_i)` recovers
+    `P(0) = coeffs.headD 0`! -/
+theorem lagrange_to_additive_reconstructs_poly {F : Type} [LawfulField F] [DecidableEq F]
+    (t : Nat) (ht : 1 ≤ t) (S : List F) (hNd : S.Nodup) (hSLen : S.length = t)
+    (coeffs : List F) (hDeg : coeffs.length ≤ t) :
+    ringListSum (S.map (fun xi => lagrangeToAdditiveShare S xi (RoundPoly.evalCoeffs coeffs xi))) =
+      RoundPoly.evalCoeffs coeffs CommRingOps.zero := by
+  let interp := lagrangeInterpAux S (RoundPoly.evalCoeffs coeffs) S
+  have hInterpLen : interp.length ≤ t := by
+    rw [← hSLen]
+    exact lagrangeInterpAux_length_le S _ S (fun _ h => h)
+  have hInterp0 : RoundPoly.evalCoeffs interp CommRingOps.zero =
+      ringListSum (S.map (fun xi => lagrangeToAdditiveShare S xi (RoundPoly.evalCoeffs coeffs xi))) :=
+    evalCoeffs_lagrangeInterpAux_zero S (RoundPoly.evalCoeffs coeffs) S
+  rw [← hInterp0]
+  let diff := polyAddVarPt interp (polyScalePt (CommRingOps.neg CommRingOps.one) coeffs)
+  have hDiffLen : diff.length ≤ t := by
+    apply polyAddVarPt_length_le interp _ t hInterpLen
+    rw [polyScalePt_length]; exact hDeg
+  have hVanish : ∀ xk ∈ S, RoundPoly.evalCoeffs diff xk = CommRingOps.zero := by
+    intro xk hxk
+    dsimp only [diff]
+    rw [evalCoeffs_polyAddVarPt, evalCoeffs_polyScalePt,
+        evalCoeffs_lagrangeInterpAux_at_mem S (RoundPoly.evalCoeffs coeffs) S hNd (fun _ h => h) xk hxk]
+    simp only [hxk, ↓reduceIte]
+    constructive_ring
+  if hEq0 : RoundPoly.evalCoeffs interp CommRingOps.zero = RoundPoly.evalCoeffs coeffs CommRingOps.zero then
+    exact hEq0
+  else
+    exfalso
+    have hDiffNz0 : RoundPoly.evalCoeffs diff CommRingOps.zero ≠ CommRingOps.zero := by
+      dsimp only [diff]
+      rw [evalCoeffs_polyAddVarPt, evalCoeffs_polyScalePt]
+      intro h0
+      apply hEq0
+      have hSub : CommRingOps.sub (RoundPoly.evalCoeffs interp CommRingOps.zero)
+          (RoundPoly.evalCoeffs coeffs CommRingOps.zero) = CommRingOps.zero := by
+        calc CommRingOps.sub (RoundPoly.evalCoeffs interp CommRingOps.zero)
+              (RoundPoly.evalCoeffs coeffs CommRingOps.zero)
+            = CommRingOps.add (RoundPoly.evalCoeffs interp CommRingOps.zero)
+                (CommRingOps.mul (CommRingOps.neg CommRingOps.one)
+                  (RoundPoly.evalCoeffs coeffs CommRingOps.zero)) := by constructive_ring
+          _ = CommRingOps.zero := h0
+      exact LawfulCommRing.sub_eq_zero_iff.mp hSub
+    cases t with
+    | zero => omega
+    | succ d =>
+      have hFilt : S.filter (fun r => decide (RoundPoly.evalCoeffs diff r = CommRingOps.zero)) = S :=
+        List.filter_eq_self.mpr (fun xk hxk => decide_eq_true (hVanish xk hxk))
+      have hRoots := RoundPoly.roots_nodup_length_le d diff S hNd hDiffLen ⟨CommRingOps.zero, hDiffNz0⟩
+      rw [hFilt, hSLen] at hRoots
+      omega
+
+/-- **Parametric `(t, n)` (`2 ≤ t ≤ n`) Lagrange-to-Additive Co-ZK Conversion Over `ZMod q`
+    (`lagrange_to_additive_reconstructs_sk`)**:
+    Over ANY prime field `ZMod q` (`[FactPrime q]`), for ANY `(t, n)` (`2 ≤ t ≤ n`), ANY `t`-subset
+    `S : List (ZMod q)` of distinct nonzero evaluation points (`S.Nodup`, `S.length = t`), and ANY
+    secret `sk : ZMod q` with `(t - 1)` random Shamir masking coefficients `randCoeffs`,
+    `∑_{x_i ∈ S} (λ_{i, S} · s_i) = sk`! -/
+theorem lagrange_to_additive_reconstructs_sk (q t n : Nat) [FactPrime q]
+    (ht2 : 2 ≤ t) (_htn : t ≤ n)
+    (S : List (ZMod q)) (hNd : S.Nodup) (hSLen : S.length = t)
+    (_hNonZero : ∀ x ∈ S, x ≠ CommRingOps.zero)
+    (sk : ZMod q) (randCoeffs : List (ZMod q)) (hRandLen : randCoeffs.length ≤ t - 1) :
+    let coeffs := sk :: randCoeffs
+    ringListSum (S.map (fun xi => lagrangeToAdditiveShare S xi (RoundPoly.evalCoeffs coeffs xi))) =
+      sk := by
+  intro coeffs
+  have hDeg : coeffs.length ≤ t := by
+    simp only [coeffs, List.length_cons]; omega
+  rw [lagrange_to_additive_reconstructs_poly t (by omega) S hNd hSLen coeffs hDeg]
+  simp [coeffs, RoundPoly.evalCoeffs_cons, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+
+/-- Concrete `67`-of-`100` (`t = 67, n = 100`) Lagrange-to-additive reconstruction witness over
+    `ZMod 257`: evaluation points `x_1 = 1, ..., x_67 = 67` in a `100`-custodian committee! -/
+theorem inhabited_lagrange_67_of_100 :
+    let S67 : List (ZMod 257) := (List.range 67).map (fun i => ZMod.ofNat 257 (i + 1))
+    let sk : ZMod 257 := ZMod.ofNat 257 42
+    let rand66 : List (ZMod 257) := (List.range 66).map (fun i => ZMod.ofNat 257 (i + 3))
+    S67.length = 67 ∧ S67.Nodup ∧ (∀ x ∈ S67, x ≠ CommRingOps.zero) ∧
+    ringListSum (S67.map (fun xi =>
+      lagrangeToAdditiveShare S67 xi (RoundPoly.evalCoeffs (sk :: rand66) xi))) = sk := by
+  decide +kernel
+
+/-- Extract tail coefficients of a `ShamirPadPoly` of length `d + 1` as `{ r : List F // r.length = d }`. -/
+def shamirTailEquiv {F : Type} [LawfulField F] (d : Nat)
+    (corruptPts : List F) (sk1 sk2 : F)
+    (hCard : corruptPts.length ≤ d) :
+    SimpleEquiv { r : List F // r.length = d } { r : List F // r.length = d } := by
+  -- Use `shamir_rebalanceEquiv` on `(0 :: r)` with shift `deltaSk := sk1 - sk2`:
+  -- Wait: `(sk1 :: r)(x) = sk1 + x * R(x)`. We want `sk2 + x * R'(x) = sk1 + x * R(x)` for `x ∈ corruptPts`!
+  -- Look at `shamir_rebalanceEquiv`: `Q = P + deltaSk * vanishCorruptUnit0(t = d + 1, corruptPts)` where
+  -- `vanishCorruptUnit0` has constant term `1` at `0` and vanishes on `corruptPts`!
+  -- Wait: if `P = sk1 :: r` (`P(0) = sk1`), then `P_shifted := P + (sk2 - sk1) * vanishCorruptUnit0`:
+  -- `P_shifted(0) = sk1 + (sk2 - sk1) * 1 = sk2`, so `P_shifted = sk2 :: r'`, AND for all `xc ∈ corruptPts`,
+  -- `P_shifted(xc) = P(xc) + 0 = P(xc)`!!
+  let shift := CommRingOps.sub sk2 sk1
+  let v := vanishCorruptUnit0 LawfulField.inv (d + 1) corruptPts
+  let delta := polyScale shift v
+  have hvLen : v.length = d + 1 := by
+    unfold vanishCorruptUnit0; dsimp only
+    rw [List.length_append, List.length_replicate, vanishCorruptRaw_length]; omega
+  have hDeltaTailLen : delta.tail.length = d := by
+    rw [List.length_tail, polyScale_length, hvLen]; omega
+  exact {
+    toFun := fun ⟨r, hr⟩ =>
+      ⟨polyAddFixed r delta.tail, by rw [polyAddFixed_length r delta.tail (hr.trans hDeltaTailLen.symm), hr]⟩
+    invFun := fun ⟨q, hq⟩ =>
+      ⟨polySubFixed q delta.tail, by rw [polySubFixed_length q delta.tail (hq.trans hDeltaTailLen.symm), hq]⟩
+    left_inv := fun ⟨r, hr⟩ =>
+      Subtype.ext (polySub_polyAdd_cancel r delta.tail (hr.trans hDeltaTailLen.symm))
+    right_inv := fun ⟨q, hq⟩ =>
+      Subtype.ext (polyAdd_polySub_cancel q delta.tail (hq.trans hDeltaTailLen.symm))
+  }
+
+/-- **`(t - 1)`-Corruption Shamir & Additive-Share Zero-Knowledge Over `ZMod q`
+    (`shamir_t_minus_1_shares_independent_of_sk`)**:
+    For ANY `2 ≤ t ≤ n`, ANY `corruptPts : List (ZMod q)` of size `≤ t - 1` (`∀ c ∈ corruptPts, c ≠ 0`),
+    and ANY two candidate secrets `sk1, sk2 : ZMod q`:
+    1. `shamirTailEquiv` is a constructive `SimpleEquiv` on `(ZMod q)^(t - 1)` mapping `r ↦ r'` such
+       that `evalCoeffs (sk2 :: r') xc = evalCoeffs (sk1 :: r) xc` AND converted additive shares
+       `lagrangeToAdditiveShare S xc` agree **identically** at every `xc ∈ corruptPts`!
+    2. Over ANY finite enumeration `SimpleEquiv (Fin Card) { r : List (ZMod q) // r.length = t - 1 }`,
+       EVERY distinguisher `D` observing all corrupt Shamir + additive shares has **exact advantage `0`**! -/
+theorem shamir_t_minus_1_shares_independent_of_sk (q t n : Nat) [FactPrime q]
+    (ht2 : 2 ≤ t) (_htn : t ≤ n)
+    (S corruptPts : List (ZMod q))
+    (hCard : corruptPts.length ≤ t - 1)
+    (hNz : ∀ c ∈ corruptPts, c ≠ CommRingOps.zero)
+    (sk1 sk2 : ZMod q) :
+    let d := t - 1
+    let bij := shamirTailEquiv d corruptPts sk1 sk2 hCard
+    (∀ (r : { l : List (ZMod q) // l.length = d }) (xc : ZMod q),
+      xc ∈ corruptPts →
+      RoundPoly.evalCoeffs (sk2 :: (bij.toFun r).1) xc =
+        RoundPoly.evalCoeffs (sk1 :: r.1) xc ∧
+      lagrangeToAdditiveShare S xc (RoundPoly.evalCoeffs (sk2 :: (bij.toFun r).1) xc) =
+        lagrangeToAdditiveShare S xc (RoundPoly.evalCoeffs (sk1 :: r.1) xc)) ∧
+    (∀ (Card : Nat) (enum : SimpleEquiv (Fin Card) { l : List (ZMod q) // l.length = d })
+       (D : List (ZMod q × ZMod q) → Bool),
+      finSum Card (fun k =>
+        let r := (enum.toFun k).1
+        let view := corruptPts.map (fun xc =>
+          let s := RoundPoly.evalCoeffs (sk1 :: r) xc
+          (s, lagrangeToAdditiveShare S xc s))
+        if D view then 1 else 0) =
+      finSum Card (fun k =>
+        let r := (enum.toFun k).1
+        let view := corruptPts.map (fun xc =>
+          let s := RoundPoly.evalCoeffs (sk2 :: r) xc
+          (s, lagrangeToAdditiveShare S xc s))
+        if D view then 1 else 0)) := by
+  let d := t - 1
+  have hCardSucc : corruptPts.length + 1 ≤ d + 1 := by omega
+  obtain ⟨hvLen, hv0, hvCorr⟩ :=
+    vanishCorruptUnit0_props (R := ZMod q) LawfulField.inv
+      (fun _ hx => LawfulField.mul_inv_cancel hx) hCardSucc hNz
+  let shift := CommRingOps.sub sk2 sk1
+  let v := vanishCorruptUnit0 (R := ZMod q) LawfulField.inv (d + 1) corruptPts
+  let delta := polyScale shift v
+  have hDeltaCons : delta = shift :: delta.tail := by
+    cases hDel : delta with
+    | nil =>
+      have hLen : delta.length = d + 1 := by rw [polyScale_length, hvLen]
+      rw [hDel] at hLen; simp at hLen
+    | cons d0 ds =>
+      have hAt0 : RoundPoly.evalCoeffs delta CommRingOps.zero = shift := by
+        dsimp only [delta]
+        rw [evalCoeffs_scale, hv0, LawfulCommRing.mul_one]
+      rw [hDel, RoundPoly.evalCoeffs_cons, LawfulCommRing.mul_zero, LawfulCommRing.add_zero] at hAt0
+      subst hAt0; rfl
+  have hPt : ∀ (r : { l : List (ZMod q) // l.length = d }) (xc : ZMod q),
+      xc ∈ corruptPts →
+      RoundPoly.evalCoeffs (sk2 :: ((shamirTailEquiv d corruptPts sk1 sk2 hCard).toFun r).1) xc =
+        RoundPoly.evalCoeffs (sk1 :: r.1) xc := by
+    intro r xc hxc
+    have hHead : CommRingOps.add sk1 shift = sk2 := by
+      dsimp only [shift]; constructive_ring
+    have hPolyEq : sk2 :: ((shamirTailEquiv d corruptPts sk1 sk2 hCard).toFun r).1 =
+        polyAddFixed (sk1 :: r.1) delta := by
+      rw [hDeltaCons, ← hHead]
+      rfl
+    have hEqLen : (sk1 :: r.1).length = delta.length := by
+      simp [r.2, delta, polyScale_length, hvLen]
+    rw [hPolyEq, evalCoeffs_addFixed (sk1 :: r.1) delta xc hEqLen]
+    dsimp only [delta]
+    rw [evalCoeffs_scale, hvCorr xc hxc, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+  refine ⟨fun r xc hxc => ⟨hPt r xc hxc, by rw [hPt r xc hxc]⟩, ?_⟩
+  intro Card enum D
+  let bij := shamirTailEquiv d corruptPts sk1 sk2 hCard
+  have hInv := finSum_bijection_invariant enum bij (fun r =>
+    let view := corruptPts.map (fun xc =>
+      let s := RoundPoly.evalCoeffs (sk2 :: r.1) xc
+      (s, lagrangeToAdditiveShare S xc s))
+    if D view then 1 else 0)
+  rw [← hInv]
+  apply finSum_congr
+  intro k
+  have hMapEq : corruptPts.map (fun xc =>
+      let s := RoundPoly.evalCoeffs (sk2 :: (bij.toFun (enum.toFun k)).1) xc
+      (s, lagrangeToAdditiveShare S xc s)) =
+    corruptPts.map (fun xc =>
+      let s := RoundPoly.evalCoeffs (sk1 :: (enum.toFun k).1) xc
+      (s, lagrangeToAdditiveShare S xc s)) := by
+    apply List.map_congr_left
+    intro xc hxc
+    rw [hPt (enum.toFun k) xc hxc]
+  rw [hMapEq]
+
+/-- **`#tooth` (`tooth_t_minus_1_shares_cannot_forge_or_reconstruct`)**:
+    With only `t - 1` shares `corruptPts` (`corruptPts.length = t - 1`, `2 ≤ t`, `∀ c ∈ corruptPts, c ≠ 0`),
+    for EVERY secret `sk : ZMod q`, EVERY distinct alternative `sk' ≠ sk`, and EVERY nonzero VOPRF
+    input `blindedInput ≠ 0`, there is an explicit valid degree-`< t` Shamir polynomial `sk' :: r'`
+    matching ALL `t - 1` shares of `sk :: r` at `corruptPts` while evaluating to `sk' ≠ sk` at `0` AND
+    producing a strictly distinct VOPRF value `sk' * blindedInput ≠ sk * blindedInput`! -/
+theorem tooth_t_minus_1_shares_cannot_forge_or_reconstruct (q t : Nat) [FactPrime q]
+    (ht2 : 2 ≤ t) (corruptPts : List (ZMod q))
+    (hLen : corruptPts.length = t - 1)
+    (hNz : ∀ c ∈ corruptPts, c ≠ CommRingOps.zero)
+    (sk sk' blindedInput : ZMod q) (hSkNe : sk' ≠ sk) (hInNe : blindedInput ≠ CommRingOps.zero)
+    (r : { l : List (ZMod q) // l.length = t - 1 }) :
+    ∃ r' : { l : List (ZMod q) // l.length = t - 1 },
+      (∀ xc ∈ corruptPts,
+        RoundPoly.evalCoeffs (sk' :: r'.1) xc = RoundPoly.evalCoeffs (sk :: r.1) xc) ∧
+      RoundPoly.evalCoeffs (sk' :: r'.1) CommRingOps.zero ≠
+        RoundPoly.evalCoeffs (sk :: r.1) CommRingOps.zero ∧
+      CommRingOps.mul sk' blindedInput ≠ CommRingOps.mul sk blindedInput := by
+  let bij := shamirTailEquiv (t - 1) corruptPts sk sk' (Nat.le_of_eq hLen)
+  refine ⟨bij.toFun r, ?_, ?_, ?_⟩
+  · intro xc hxc
+    exact ((shamir_t_minus_1_shares_independent_of_sk q t t ht2 (Nat.le_refl t)
+      corruptPts corruptPts (Nat.le_of_eq hLen) hNz sk sk').1 r xc hxc).1
+  · simp only [RoundPoly.evalCoeffs_cons, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+    exact hSkNe
+  · intro hMulEq
+    have hCancel := congrArg (fun u => CommRingOps.mul u (LawfulField.inv blindedInput)) hMulEq
+    dsimp only at hCancel
+    rw [LawfulCommRing.mul_assoc, LawfulCommRing.mul_assoc,
+        LawfulField.mul_inv_cancel hInNe, LawfulCommRing.mul_one, LawfulCommRing.mul_one] at hCancel
+    exact hSkNe hCancel
+
+/-- Authenticated partial Threshold VOPRF evaluation `(y_i, mac_i)` under BDOZ/SPDZ active DZK MAC:
+    honest party `i ∈ S` with converted additive share `a_i = λ_{i, S} · s_i` and share MAC
+    `macShare_i = alpha * a_i + mask_i` outputs `(y_i := a_i * x_blind, mac_i := macShare_i * x_blind)`. -/
+structure AuthenticatedPartialVoprf (q : Nat) where
+  partialEval : ZMod q
+  dzkMac : ZMod q
+  deriving DecidableEq, Repr
+
+/-- Honest local Threshold VOPRF + active DZK MAC evaluator on converted additive share `a_i`. -/
+def evalHonestPartialVoprf {q : Nat} [FactPrime q]
+    (ai macShareI blindedInput : ZMod q) : AuthenticatedPartialVoprf q :=
+  { partialEval := CommRingOps.mul ai blindedInput
+    dzkMac := CommRingOps.mul macShareI blindedInput }
+
+/-- Unauthenticated Threshold VOPRF combiner (sums `partialEval` without checking DZK MACs). -/
+def unauthenticatedVoprfCombine {q : Nat} [FactPrime q]
+    (evals : List (AuthenticatedPartialVoprf q)) : ZMod q :=
+  ringListSum (evals.map (·.partialEval))
+
+/-- **Active DZK MAC Threshold VOPRF Combiner & Verifier (`verifyThresholdVoprfActiveDzk`)**:
+    Verifies the global BDOZ/SPDZ linear MAC equation `∑ mac_i = alpha * (∑ y_i) + (∑ mask_i) * x_blind`
+    before releasing `y := ∑ y_i`! -/
+def verifyThresholdVoprfActiveDzk {q : Nat} [FactPrime q]
+    (alpha maskSum blindedInput : ZMod q)
+    (evals : List (AuthenticatedPartialVoprf q)) : Option (ZMod q) :=
+  let ySum := ringListSum (evals.map (·.partialEval))
+  let macSum := ringListSum (evals.map (·.dzkMac))
+  let expectedMac := CommRingOps.add (CommRingOps.mul alpha ySum)
+                       (CommRingOps.mul maskSum blindedInput)
+  if decide (macSum = expectedMac) then some ySum else none
+
+private theorem ringListSum_map_mul_right {R : Type} [LawfulCommRing R] (c : R) :
+    ∀ (xs : List R),
+      ringListSum (xs.map (fun a => CommRingOps.mul a c)) = CommRingOps.mul (ringListSum xs) c
+  | [] => by simp [ringListSum, LawfulCommRing.zero_mul]
+  | x :: xs => by
+    simp only [List.map_cons, ringListSum, ringListSum_map_mul_right c xs]
+    constructive_ring
+
+private theorem ringListSum_map_add {R : Type} [LawfulCommRing R] {α : Type} (f g : α → R) :
+    ∀ (xs : List α),
+      ringListSum (xs.map (fun x => CommRingOps.add (f x) (g x))) =
+        CommRingOps.add (ringListSum (xs.map f)) (ringListSum (xs.map g))
+  | [] => by simp [ringListSum, LawfulCommRing.add_zero]
+  | x :: xs => by
+    simp only [List.map_cons, ringListSum, ringListSum_map_add f g xs]
+    constructive_ring
+
+private theorem ringListSum_map_mul_left {R : Type} [LawfulCommRing R] (c : R) :
+    ∀ (xs : List R),
+      ringListSum (xs.map (fun a => CommRingOps.mul c a)) = CommRingOps.mul c (ringListSum xs)
+  | [] => by simp [ringListSum, LawfulCommRing.mul_zero]
+  | x :: xs => by
+    simp only [List.map_cons, ringListSum, ringListSum_map_mul_left c xs]
+    constructive_ring
+
+/-- **Threshold VOPRF Completeness & Active DZK MAC Soundness (`threshold_voprf_active_dzk_sound`)**:
+    1. **End-to-End Honest Reconstruction (`2 ≤ t ≤ n`)**: Converting any `t` Shamir shares `S` via
+       `lagrangeToAdditiveShare` and evaluating `evalHonestPartialVoprf` under BDOZ/SPDZ share MACs
+       `macShare_i = alpha * a_i + mask_i` is **accepted** by `verifyThresholdVoprfActiveDzk` and outputs
+       the exact secret VOPRF evaluation `some (sk * blindedInput)`!
+    2. **`1 / q` Active Tamper Rejection**: If an adversary tampers partial evaluations to `tampered`
+       whose summed evaluation `y' = ∑ y'_i` differs from `sk * blindedInput` (`y' ≠ sk * blindedInput`),
+       then across ALL `q` possible global MAC keys `alpha : Fin q`, at most **1** key (`≤ 1` out of `q`)
+       allows `verifyThresholdVoprfActiveDzk` to accept! -/
+theorem threshold_voprf_active_dzk_sound (q t n : Nat) [FactPrime q]
+    (ht2 : 2 ≤ t) (htn : t ≤ n)
+    (S : List (ZMod q)) (hNd : S.Nodup) (hSLen : S.length = t)
+    (hNz : ∀ x ∈ S, x ≠ CommRingOps.zero)
+    (sk blindedInput : ZMod q) (randCoeffs : List (ZMod q)) (hRandLen : randCoeffs.length ≤ t - 1)
+    (maskOf : ZMod q → ZMod q) :
+    let coeffs := sk :: randCoeffs
+    let maskSum := ringListSum (S.map maskOf)
+    -- (1) Honest completeness & exact VOPRF reconstruction:
+    (∀ alpha : ZMod q,
+      let honestEvals := S.map (fun xi =>
+        let ai := lagrangeToAdditiveShare S xi (RoundPoly.evalCoeffs coeffs xi)
+        let macShareI := CommRingOps.add (CommRingOps.mul alpha ai) (maskOf xi)
+        evalHonestPartialVoprf ai macShareI blindedInput)
+      verifyThresholdVoprfActiveDzk alpha maskSum blindedInput honestEvals =
+        some (CommRingOps.mul sk blindedInput)) ∧
+    -- (2) Active tamper soundness (<= 1 accepting MAC key out of all q keys in ZMod q):
+    (∀ tampered : List (AuthenticatedPartialVoprf q),
+      let yTampered := ringListSum (tampered.map (·.partialEval))
+      yTampered ≠ CommRingOps.mul sk blindedInput →
+      -- Even for ANY fixed forged MAC sum `macTampered` relative to honest `(yHonest, macHonest)`
+      -- with additive errors `(Δy ≠ 0, Δmac)`, `Δmac = alpha * Δy` holds for at most 1 `alpha`!
+      ∀ deltaMac : ZMod q,
+        let honestMacBase := CommRingOps.mul maskSum blindedInput
+        -- Specifically, if the adversary shifts `macSum` from `alpha * (sk * x) + maskSum * x` by `deltaMac`
+        -- (an alpha-independent additive forgery offset, as in standard BDOZ/SPDZ!), at most 1 `alpha` accepts:
+        finSum q (fun k =>
+          let alphaK : ZMod q := ⟨k.val, k.isLt⟩
+          let forgedMacSum := CommRingOps.add
+            (CommRingOps.add (CommRingOps.mul alphaK (CommRingOps.mul sk blindedInput)) honestMacBase)
+            deltaMac
+          let expected := CommRingOps.add (CommRingOps.mul alphaK yTampered) honestMacBase
+          if forgedMacSum = expected then 1 else 0) ≤ 1) := by
+  intro coeffs maskSum
+  have hSkRec := lagrange_to_additive_reconstructs_sk q t n ht2 htn S hNd hSLen hNz sk randCoeffs hRandLen
+  refine ⟨?_, ?_⟩
+  · intro alpha honestEvals
+    unfold verifyThresholdVoprfActiveDzk
+    have hYSum : ringListSum (honestEvals.map (·.partialEval)) = CommRingOps.mul sk blindedInput := by
+      dsimp only [honestEvals, evalHonestPartialVoprf]
+      rw [List.map_map]
+      change ringListSum ((S.map (fun xi => lagrangeToAdditiveShare S xi (RoundPoly.evalCoeffs coeffs xi))).map
+        (fun ai => CommRingOps.mul ai blindedInput)) = _
+      rw [ringListSum_map_mul_right, hSkRec]
+    have hMacSum : ringListSum (honestEvals.map (·.dzkMac)) =
+        CommRingOps.add (CommRingOps.mul alpha (CommRingOps.mul sk blindedInput))
+          (CommRingOps.mul maskSum blindedInput) := by
+      dsimp only [honestEvals, evalHonestPartialVoprf]
+      rw [List.map_map]
+      have hDist : S.map ((fun x => x.dzkMac) ∘ fun xi =>
+          let ai := lagrangeToAdditiveShare S xi (RoundPoly.evalCoeffs coeffs xi)
+          { partialEval := CommRingOps.mul ai blindedInput
+            dzkMac := CommRingOps.mul (CommRingOps.add (CommRingOps.mul alpha ai) (maskOf xi)) blindedInput :
+              AuthenticatedPartialVoprf q }) =
+        S.map (fun xi =>
+          let ai := lagrangeToAdditiveShare S xi (RoundPoly.evalCoeffs coeffs xi)
+          CommRingOps.add (CommRingOps.mul alpha (CommRingOps.mul ai blindedInput))
+            (CommRingOps.mul (maskOf xi) blindedInput)) := by
+        apply List.map_congr_left
+        intro xi _
+        dsimp only [Function.comp]
+        constructive_ring
+      rw [hDist, ringListSum_map_add]
+      have hPart1 : ringListSum (S.map (fun xi =>
+          CommRingOps.mul alpha (CommRingOps.mul (lagrangeToAdditiveShare S xi (RoundPoly.evalCoeffs coeffs xi)) blindedInput))) =
+          CommRingOps.mul alpha (CommRingOps.mul sk blindedInput) := by
+        have hM1 : S.map (fun xi =>
+            CommRingOps.mul alpha (CommRingOps.mul (lagrangeToAdditiveShare S xi (RoundPoly.evalCoeffs coeffs xi)) blindedInput)) =
+          (S.map (fun xi => CommRingOps.mul (lagrangeToAdditiveShare S xi (RoundPoly.evalCoeffs coeffs xi)) blindedInput)).map
+            (fun y => CommRingOps.mul alpha y) := by rw [List.map_map]; rfl
+        rw [hM1, ringListSum_map_mul_left, ← List.map_map,
+            show (fun x => CommRingOps.mul (lagrangeToAdditiveShare S x (RoundPoly.evalCoeffs coeffs x)) blindedInput) =
+              ((fun ai => CommRingOps.mul ai blindedInput) ∘ (fun x => lagrangeToAdditiveShare S x (RoundPoly.evalCoeffs coeffs x))) from rfl,
+            ← List.map_map, ringListSum_map_mul_right, hSkRec]
+      have hPart2 : ringListSum (S.map (fun xi => CommRingOps.mul (maskOf xi) blindedInput)) =
+          CommRingOps.mul maskSum blindedInput := by
+        dsimp only [maskSum]
+        have hM2 : S.map (fun xi => CommRingOps.mul (maskOf xi) blindedInput) =
+            (S.map maskOf).map (fun m => CommRingOps.mul m blindedInput) := by rw [List.map_map]; rfl
+        rw [hM2, ringListSum_map_mul_right]
+      rw [hPart1, hPart2]
+    dsimp only
+    rw [hYSum, hMacSum, decide_eq_true rfl]
+    rfl
+  · intro tampered hYNe deltaMac
+    let yTampered := ringListSum (tampered.map (·.partialEval))
+    let deltaY := CommRingOps.sub yTampered (CommRingOps.mul sk blindedInput)
+    have hDeltaYNe : deltaY ≠ CommRingOps.zero := fun h0 =>
+      hYNe (LawfulCommRing.sub_eq_zero_iff.mp h0)
+    let uniqueAlpha := CommRingOps.mul deltaMac (LawfulField.inv deltaY)
+    let uniqueFin : Fin q := ⟨uniqueAlpha.val, uniqueAlpha.isLt⟩
+    have hLeInd : ∀ k : Fin q,
+        (let alphaK : ZMod q := ⟨k.val, k.isLt⟩
+         let honestMacBase := CommRingOps.mul maskSum blindedInput
+         let forgedMacSum := CommRingOps.add
+           (CommRingOps.add (CommRingOps.mul alphaK (CommRingOps.mul sk blindedInput)) honestMacBase)
+           deltaMac
+         let expected := CommRingOps.add (CommRingOps.mul alphaK yTampered) honestMacBase
+         if forgedMacSum = expected then 1 else 0) ≤
+        (if k = uniqueFin then 1 else 0) := by
+      intro k
+      dsimp only
+      split
+      · next hEq =>
+        have hAlg : CommRingOps.mul (⟨k.val, k.isLt⟩ : ZMod q) deltaY = deltaMac := by
+          dsimp only [deltaY]
+          calc CommRingOps.mul (⟨k.val, k.isLt⟩ : ZMod q)
+                (CommRingOps.sub yTampered (CommRingOps.mul sk blindedInput))
+              = CommRingOps.sub
+                  (CommRingOps.add (CommRingOps.mul (⟨k.val, k.isLt⟩ : ZMod q) yTampered)
+                    (CommRingOps.mul maskSum blindedInput))
+                  (CommRingOps.add (CommRingOps.mul (⟨k.val, k.isLt⟩ : ZMod q) (CommRingOps.mul sk blindedInput))
+                    (CommRingOps.mul maskSum blindedInput)) := by constructive_ring
+            _ = CommRingOps.sub
+                  (CommRingOps.add
+                    (CommRingOps.add (CommRingOps.mul (⟨k.val, k.isLt⟩ : ZMod q) (CommRingOps.mul sk blindedInput))
+                      (CommRingOps.mul maskSum blindedInput))
+                    deltaMac)
+                  (CommRingOps.add (CommRingOps.mul (⟨k.val, k.isLt⟩ : ZMod q) (CommRingOps.mul sk blindedInput))
+                    (CommRingOps.mul maskSum blindedInput)) := by rw [← hEq]
+            _ = deltaMac := by constructive_ring
+        have hAlphaEq : (⟨k.val, k.isLt⟩ : ZMod q) = uniqueAlpha := by
+          dsimp only [uniqueAlpha]
+          rw [← hAlg, LawfulCommRing.mul_assoc, LawfulField.mul_inv_cancel hDeltaYNe, LawfulCommRing.mul_one]
+        have hkEq : k = uniqueFin := Fin.ext (congrArg ZMod.val hAlphaEq)
+        rw [hkEq]; simp
+      · exact Nat.zero_le _
+    exact Nat.le_trans (finSum_le_finSum hLeInd) (Nat.le_of_eq (finSum_eq_indicator q uniqueFin))
+
+/-- **`#tooth` (`tooth_unauthenticated_partial_eval_corrupts_voprf`)**:
+    Without active DZK MAC verification (`unauthenticatedVoprfCombine`), a single corrupted party at
+    the head of `honestEvals` adding ANY nonzero bias `delta ≠ 0` (`ZMod q`) shifts the combined
+    VOPRF output to `yHonest + delta ≠ yHonest` unconditionally, whereas `verifyThresholdVoprfActiveDzk`
+    rejects (`= none`) for every `alpha ≠ 0` when `dzkMac` is unauthenticated (`+ 0`)! -/
+theorem tooth_unauthenticated_partial_eval_corrupts_voprf (q : Nat) [FactPrime q]
+    (alpha maskSum blindedInput delta : ZMod q)
+    (hAlphaNe : alpha ≠ CommRingOps.zero) (hDeltaNe : delta ≠ CommRingOps.zero)
+    (e0 : AuthenticatedPartialVoprf q) (rest : List (AuthenticatedPartialVoprf q))
+    (hHonestOk : verifyThresholdVoprfActiveDzk alpha maskSum blindedInput (e0 :: rest) =
+      some (unauthenticatedVoprfCombine (e0 :: rest))) :
+    let tampered := { e0 with partialEval := CommRingOps.add e0.partialEval delta } :: rest
+    unauthenticatedVoprfCombine tampered =
+      CommRingOps.add (unauthenticatedVoprfCombine (e0 :: rest)) delta ∧
+    unauthenticatedVoprfCombine tampered ≠ unauthenticatedVoprfCombine (e0 :: rest) ∧
+    verifyThresholdVoprfActiveDzk alpha maskSum blindedInput tampered = none := by
+  intro tampered
+  have hShift : unauthenticatedVoprfCombine tampered =
+      CommRingOps.add (unauthenticatedVoprfCombine (e0 :: rest)) delta := by
+    unfold unauthenticatedVoprfCombine
+    dsimp only [tampered, List.map_cons, ringListSum]
+    constructive_ring
+  have hNe : CommRingOps.add (unauthenticatedVoprfCombine (e0 :: rest)) delta ≠
+      unauthenticatedVoprfCombine (e0 :: rest) := by
+    intro hEq
+    apply hDeltaNe
+    have hSub : CommRingOps.sub
+        (CommRingOps.add (unauthenticatedVoprfCombine (e0 :: rest)) delta)
+        (unauthenticatedVoprfCombine (e0 :: rest)) = CommRingOps.zero := by
+      rw [hEq]; exact LawfulCommRing.sub_self _
+    have hId : CommRingOps.sub
+        (CommRingOps.add (unauthenticatedVoprfCombine (e0 :: rest)) delta)
+        (unauthenticatedVoprfCombine (e0 :: rest)) = delta := by constructive_ring
+    rwa [hId] at hSub
+  refine ⟨hShift, hShift ▸ hNe, ?_⟩
+  unfold verifyThresholdVoprfActiveDzk at hHonestOk ⊢
+  dsimp only at hHonestOk ⊢
+  have hMacSame : ringListSum (tampered.map (·.dzkMac)) =
+      ringListSum ((e0 :: rest).map (·.dzkMac)) := rfl
+  rw [hMacSame]
+  change (if decide (ringListSum ((e0 :: rest).map (·.dzkMac)) =
+      CommRingOps.add (CommRingOps.mul alpha (unauthenticatedVoprfCombine tampered))
+        (CommRingOps.mul maskSum blindedInput)) then _ else none) = none
+  rw [hShift]
+  split at hHonestOk
+  · next hMacHonDec =>
+    have hMacHon := of_decide_eq_true hMacHonDec
+    change (if decide (ringListSum ((e0 :: rest).map (·.dzkMac)) =
+        CommRingOps.add (CommRingOps.mul alpha
+          (CommRingOps.add (ringListSum ((e0 :: rest).map (·.partialEval))) delta))
+          (CommRingOps.mul maskSum blindedInput)) then _ else none) = none
+    rw [hMacHon]
+    have hNeMac : CommRingOps.add (CommRingOps.mul alpha (ringListSum ((e0 :: rest).map (·.partialEval))))
+          (CommRingOps.mul maskSum blindedInput) ≠
+        CommRingOps.add (CommRingOps.mul alpha
+          (CommRingOps.add (ringListSum ((e0 :: rest).map (·.partialEval))) delta))
+          (CommRingOps.mul maskSum blindedInput) := by
+      intro hEqMac
+      have hProd0 : CommRingOps.mul alpha delta = CommRingOps.zero := by
+        calc CommRingOps.mul alpha delta
+            = CommRingOps.sub
+                (CommRingOps.add (CommRingOps.mul alpha
+                  (CommRingOps.add (ringListSum ((e0 :: rest).map (·.partialEval))) delta))
+                  (CommRingOps.mul maskSum blindedInput))
+                (CommRingOps.add (CommRingOps.mul alpha (ringListSum ((e0 :: rest).map (·.partialEval))))
+                  (CommRingOps.mul maskSum blindedInput)) := by constructive_ring
+          _ = CommRingOps.zero := by rw [← hEqMac]; exact LawfulCommRing.sub_self _
+      have hCanc := congrArg (fun u => CommRingOps.mul (LawfulField.inv alpha) u) hProd0
+      dsimp only at hCanc
+      rw [← LawfulCommRing.mul_assoc, LawfulCommRing.mul_comm (LawfulField.inv alpha) alpha,
+          LawfulField.mul_inv_cancel hAlphaNe, LawfulCommRing.one_mul,
+          LawfulCommRing.mul_zero] at hCanc
+      exact hDeltaNe hCanc
+    rw [decide_eq_false hNeMac]
+    rfl
+  · cases hHonestOk
+
+
+/-! ## §3. Inhabitedness Witnesses & Constructive Assurance Gates -/
+
+theorem inhabited_prp_striped_feistel :
+    ∃ (C B h : Nat) (hCap : C * B ≤ 2 ^ h) (piK : SimpleEquiv (Fin (2 ^ h)) (Fin (2 ^ h)))
+      (c1 c2 : Fin C) (s1 s2 : Fin B),
+      c1 ≠ c2 ∧
+      prpStripedLeafIndex hCap piK c1 s1 ≠ prpStripedLeafIndex hCap piK c2 s2 := by
+  let rfs : List (BitVec 4 → BitVec 4) := [fun x => x + 3#4, fun x => x ^^^ 0xA#4, fun x => x + 7#4]
+  let piK := feistelFinEquiv 4 rfs
+  have hCap : 10 * 16 ≤ 2 ^ (2 * 4) := by decide
+  let c1 : Fin 10 := ⟨0, by decide⟩
+  let c2 : Fin 10 := ⟨1, by decide⟩
+  let s : Fin 16 := ⟨5, by decide⟩
+  refine ⟨10, 16, 8, hCap, piK, c1, c2, s, s, by decide, ?_⟩
+  exact (prp_striped_qsa_zero_leaf_reuse.1 hCap piK c1 c2 s s).2 (by decide)
+
+theorem inhabited_lagrange_to_additive_reconstructs_sk :
+    ∃ (q t n : Nat) (_hp : FactPrime q),
+      2 ≤ t ∧ t ≤ n ∧
+      ∃ (S : List (ZMod q)) (sk : ZMod q) (randCoeffs : List (ZMod q)),
+        S.Nodup ∧ S.length = t ∧ (∀ x ∈ S, x ≠ CommRingOps.zero) ∧ randCoeffs.length ≤ t - 1 :=
+  ⟨257, 3, 5, inferInstance, by decide, by decide,
+    [ZMod.ofNat 257 1, ZMod.ofNat 257 2, ZMod.ofNat 257 3],
+    ZMod.ofNat 257 99, [ZMod.ofNat 257 7, ZMod.ofNat 257 13],
+    by decide, rfl, by decide, by decide⟩
+
+#verify_constructive
+  Qsag.feistelStepInv_feistelStep
+  Qsag.feistelStep_feistelStepInv
+  Qsag.feistelRoundsInv_feistelRounds
+  Qsag.feistelRounds_feistelRoundsInv
+  Qsag.joinFinFeistel_splitFinFeistel
+  Qsag.splitFinFeistel_joinFinFeistel
+  Qsag.prp_striped_qsa_zero_leaf_reuse
+  Qsag.prp_striped_qsa_committee_unlinkability
+  Qsag.tooth_contiguous_qsa_reveals_committee_id
+  Qsag.ZMod.mul_inv_cancel
+  Qsag.lagrange_to_additive_reconstructs_poly
+  Qsag.lagrange_to_additive_reconstructs_sk
+  Qsag.inhabited_lagrange_67_of_100
+  Qsag.shamir_t_minus_1_shares_independent_of_sk
+  Qsag.tooth_t_minus_1_shares_cannot_forge_or_reconstruct
+  Qsag.threshold_voprf_active_dzk_sound
+  Qsag.tooth_unauthenticated_partial_eval_corrupts_voprf
+  Qsag.inhabited_prp_striped_feistel
+  Qsag.inhabited_lagrange_to_additive_reconstructs_sk
+
+#tooth_pair Qsag.prp_striped_qsa_committee_unlinkability vs Qsag.tooth_contiguous_qsa_reveals_committee_id
+#tooth_pair Qsag.lagrange_to_additive_reconstructs_sk vs Qsag.tooth_t_minus_1_shares_cannot_forge_or_reconstruct
+#tooth_pair Qsag.shamir_t_minus_1_shares_independent_of_sk vs Qsag.tooth_t_minus_1_shares_cannot_forge_or_reconstruct
+#tooth_pair Qsag.threshold_voprf_active_dzk_sound vs Qsag.tooth_unauthenticated_partial_eval_corrupts_voprf
+
+end Qsag
+end
