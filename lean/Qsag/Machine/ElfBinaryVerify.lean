@@ -24,7 +24,7 @@ Pure Lean 4.35 binary verification engine (`0 sorry`, `0` custom axioms, `0 nati
 
 public import Qsag.Math.Goldilocks
 public import Qsag.Oracle.Keccak
-public import Qsag.Math.BinaryTower
+public import Qsag.Math.Gf2Pow128
 public import Qsag.Machine.CompiledRlibFixtures
 public import Qsag.Machine.ElfFixtureSlices
 public import Qsag.Machine.ElfParse
