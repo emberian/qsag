@@ -707,7 +707,8 @@ def DecomposesViaCorrelatedPair {F : Type} [CommRingOps F] [DecidableEq F]
       (polyAddVar F_poly
         (polyAddVar (polyScaleVar α G_poly) (polyScaleVar β (shiftPoly G_poly))))
 
-/-- **`[CWYZ26]` Theorem 5.1 Claim-Preserving Fold Decomposition Bound (`AffineFoldDecompBound`)**:
+/-- Selected-polynomial decomposition bound for one binary affine fold. This is a
+    component needed by the equal-degree three-challenge lift, not that full lift:
     At most `bad` challenges `(α, β) ∈ prodPool S` admit a degree-`≤ d` polynomial `P` agreeing
     with `f + (α + β X) g` on `≥ A` points of `D` that does NOT decompose as `F + (α + β X) G`
     for a `(d, A - 1)` correlated-agreement pair `(F, G)` of `(f, g)`. -/
@@ -929,7 +930,8 @@ private theorem filter_any_length_le {α β : Type} (items : List α) (pred : α
     simp only [List.length_cons, Nat.succ_mul]
     omega
 
-/-- **`[CWYZ26]` Theorem 5.1 Eq. `(5.7)` Claim-Carrying Fold Flip Bound (`claimFold_bad_pairs_bound`)**:
+/-- Binary claim-carrying fold flip bound from `hDecomp`. The theta-mixing step of the
+    equal-degree three-challenge combiner is not included in this theorem:
     Over `[LawfulField F] [DecidableEq F]`, if `(g, e_g)` has NO degree-`≤ d` witness at agreement
     `A` on `D` (`D.Nodup`, `d + 2 ≤ A`), then for ANY word `f`, running claim `e_f`, and absorbed
     shift `s_g`, the number of challenges `ch ∈ prodPool S` (`S.Nodup`) yielding a post-fold
