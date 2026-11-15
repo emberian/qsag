@@ -22,6 +22,7 @@ use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
+use qsag_asm::wipe::{SecretBuffer, SecretWipe};
 
 use qsag_accel::ct::{ct_eq_bytes, ct_zeroize_bytes, ct_zeroize_u64s};
 use qsag_accel::goldilocks::{gl_add, gl_is_canonical, gl_mul, gl_reduce_u64, gl_sub};
@@ -102,21 +103,6 @@ pub enum BlindVcError {
     SelectiveDisclosureProofInvalid,
 }
 
-struct ZeroizingU64Vec(Vec<u64>);
-
-impl core::ops::Deref for ZeroizingU64Vec {
-    type Target = [u64];
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl Drop for ZeroizingU64Vec {
-    fn drop(&mut self) {
-        ct_zeroize_u64s(&mut self.0);
-    }
-}
-
 /// Sample `count` unbiased canonical Goldilocks field elements from `Shake256`, rejecting every
 /// word the strict core lift [`Goldilocks::from_le_bytes_canonical`] refuses.
 fn sample_canonical_gl_vec(
@@ -124,14 +110,14 @@ fn sample_canonical_gl_vec(
     seed: &[u8; 32],
     extra: &[u8],
     count: usize,
-) -> ZeroizingU64Vec {
+) -> SecretBuffer<Vec<u64>> {
     let mut sp = Shake256::new();
     sp.absorb(domain);
     sp.absorb(seed);
     sp.absorb(extra);
     sp.finalize(0x1F);
 
-    let mut out = ZeroizingU64Vec(Vec::with_capacity(count));
+    let mut out = SecretBuffer(Vec::with_capacity(count));
     let mut buf = [0u8; 136];
     while out.0.len() < count {
         sp.squeeze(&mut buf);
@@ -283,7 +269,7 @@ fn encode_issuance_message(
 // ============================================================================
 
 struct ZkBooProverTape {
-    r: [ZeroizingU64Vec; 3],
+    r: [SecretBuffer<Vec<u64>>; 3],
     out: [Vec<u64>; 3],
     gate_cursor: usize,
 }
@@ -384,8 +370,8 @@ impl ZkBooProverTape {
 struct ZkBooVerifierTape<'a> {
     e: usize,
     e1: usize,
-    r_e: ZeroizingU64Vec,
-    r_e1: ZeroizingU64Vec,
+    r_e: SecretBuffer<Vec<u64>>,
+    r_e1: SecretBuffer<Vec<u64>>,
     out_e: &'a [u64],
     out_e1: &'a [u64],
     gate_cursor: usize,
@@ -743,7 +729,7 @@ pub fn holder_prepare_blind_issuance_with_profile(
     let blind_vec =
         sample_canonical_gl_vec(b"QSAG.VC.HOLDER_BLIND.V1", ent.expose(), &blind_ctx, 4);
     let mut holder_blind =
-        ZeroizingU64Vec(vec![blind_vec[0], blind_vec[1], blind_vec[2], blind_vec[3]]);
+        SecretBuffer(vec![blind_vec[0], blind_vec[1], blind_vec[2], blind_vec[3]]);
     drop(blind_vec);
     let holder_blind_arr = [
         holder_blind[0],
@@ -787,8 +773,8 @@ pub fn holder_prepare_blind_issuance_with_profile(
         tr.absorb(b"VC_SOUNDNESS_PROFILE", b"Quantum128:438");
     }
 
-    let mut secret_wires = ZeroizingU64Vec(attrs[..attr_slots].to_vec());
-    secret_wires.0.extend_from_slice(&holder_blind);
+    let mut secret_wires = SecretBuffer(attrs[..attr_slots].to_vec());
+    secret_wires.extend_wiping(&holder_blind);
 
     struct RepData {
         commits: [[u8; 32]; 3],
@@ -1579,6 +1565,11 @@ fn presentation_scope(
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Fp5([Goldilocks; 5]);
+impl SecretWipe for Fp5 {
+    fn secret_wipe(&mut self) {
+        self.0.secret_wipe();
+    }
+}
 
 impl Fp5 {
     const ZERO: Self = Self([Goldilocks::ZERO; 5]);
@@ -1738,22 +1729,12 @@ fn ggm_expand_children(
     (left, right)
 }
 
-struct ZeroizingGgmTree([[u8; 32]; 2 * VC_SD_LIMBO_PARTIES]);
-
-impl Drop for ZeroizingGgmTree {
-    fn drop(&mut self) {
-        for node in &mut self.0 {
-            ct_zeroize_bytes(node);
-        }
-    }
-}
-
 fn expand_ggm_tree_256(
     root_seed: &[u8; 32],
     presentation_nonce: &[u8; 32],
     rep: u32,
-) -> ZeroizingGgmTree {
-    let mut tree = ZeroizingGgmTree([[0u8; 32]; 2 * VC_SD_LIMBO_PARTIES]);
+) -> SecretBuffer<[[u8; 32]; 2 * VC_SD_LIMBO_PARTIES]> {
+    let mut tree = SecretBuffer([[0u8; 32]; 2 * VC_SD_LIMBO_PARTIES]);
     tree.0[1] = *root_seed;
     for depth in 0..VC_SD_GGM_DEPTH {
         let level_start = 1usize << depth;
@@ -1775,7 +1756,10 @@ fn expand_ggm_tree_256(
     tree
 }
 
-fn extract_ggm_copath(tree: &ZeroizingGgmTree, hidden_party: u8) -> [[u8; 32]; VC_SD_GGM_DEPTH] {
+fn extract_ggm_copath(
+    tree: &SecretBuffer<[[u8; 32]; 2 * VC_SD_LIMBO_PARTIES]>,
+    hidden_party: u8,
+) -> [[u8; 32]; VC_SD_GGM_DEPTH] {
     let leaf_pos = VC_SD_LIMBO_PARTIES + (hidden_party as usize);
     core::array::from_fn(|step| tree.0[(leaf_pos >> step) ^ 1])
 }
@@ -1786,7 +1770,7 @@ fn reconstruct_ggm_leaves_256(
     presentation_nonce: &[u8; 32],
     rep: u32,
 ) -> [[u8; 32]; VC_SD_LIMBO_PARTIES] {
-    let mut tree = ZeroizingGgmTree([[0u8; 32]; 2 * VC_SD_LIMBO_PARTIES]);
+    let mut tree = SecretBuffer([[0u8; 32]; 2 * VC_SD_LIMBO_PARTIES]);
     let mut known = [false; 2 * VC_SD_LIMBO_PARTIES];
     let leaf_pos = VC_SD_LIMBO_PARTIES + (hidden_party as usize);
 
@@ -2095,9 +2079,9 @@ fn squeeze_nonzero_eval_points(tr: &mut InterleavedTranscript, tau: usize) -> Ve
 // ============================================================================
 
 struct SdPlaintextCircuitTrace {
-    x: ZeroizingU64Vec,
-    y: ZeroizingU64Vec,
-    z: ZeroizingU64Vec,
+    x: SecretBuffer<Vec<u64>>,
+    y: SecretBuffer<Vec<u64>>,
+    z: SecretBuffer<Vec<u64>>,
     final_outs: [u64; VC_FINAL_OUTPUTS],
 }
 
@@ -2329,9 +2313,9 @@ fn eval_sd_plaintext_circuit(
     rec.z.resize(SD_GRID_B * SD_GRID_L, 0);
 
     SdPlaintextCircuitTrace {
-        x: ZeroizingU64Vec(rec.x),
-        y: ZeroizingU64Vec(rec.y),
-        z: ZeroizingU64Vec(rec.z),
+        x: SecretBuffer(rec.x),
+        y: SecretBuffer(rec.y),
+        z: SecretBuffer(rec.z),
         final_outs,
     }
 }
@@ -3147,7 +3131,7 @@ pub fn prove_selective_disclosure_with_profile(
         .map(|&idx| (idx, holder_secret.attrs[idx]))
         .collect();
 
-    let mut secret_vals = ZeroizingU64Vec(Vec::with_capacity(
+    let mut secret_vals = SecretBuffer(Vec::with_capacity(
         MAX_VC_ATTRS + 8 + 7 * VC_ACCUMULATOR_DEPTH,
     ));
     for (attr_i, &attr_val) in holder_secret.attrs[..holder_secret.arity]
@@ -3222,10 +3206,10 @@ pub fn prove_selective_disclosure_with_profile(
     let total_party_limbs = PARTY_EXT_LIMBS + num_secret_wires + SD_TOTAL_GATES;
 
     struct R1RepState {
-        ggm_tree: ZeroizingGgmTree,
+        ggm_tree: SecretBuffer<[[u8; 32]; 2 * VC_SD_LIMBO_PARTIES]>,
         com_1: [[u8; 32]; VC_SD_LIMBO_PARTIES],
-        delta_w: ZeroizingU64Vec,
-        delta_z: ZeroizingU64Vec,
+        delta_w: SecretBuffer<Vec<u64>>,
+        delta_z: SecretBuffer<Vec<u64>>,
         delta_c: Fp5,
         u_sum: [Fp5; SD_GRID_L],
         v_sum: [Fp5; SD_GRID_L],
@@ -3233,11 +3217,21 @@ pub fn prove_selective_disclosure_with_profile(
         m_sum: [Fp5; SD_RPOLY_COEFFS],
     }
 
+    impl Drop for R1RepState {
+        fn drop(&mut self) {
+            self.delta_c.secret_wipe();
+            self.u_sum.secret_wipe();
+            self.v_sum.secret_wipe();
+            self.c_plain.secret_wipe();
+            self.m_sum.secret_wipe();
+        }
+    }
+
     // Round 1 (parallel across repetitions): expand GGM trees, stream 8-party SIMD tapes,
     // accumulate mask sums, compute Party 255 `aux`, and commit all 256 parties.
-    let r1_reps: Vec<R1RepState> = parallel_map_indexed(tau, |rep| {
+    let r1_reps: Vec<alloc::boxed::Box<R1RepState>> = parallel_map_indexed(tau, |rep| {
         let rep_u32 = rep as u32;
-        let root_seed = cshake256_framed_32(
+        let root_seed = SecretBuffer(cshake256_framed_32(
             b"QSAG.VC.SD_GGM_ROOT.V1",
             &[
                 &statement_digest,
@@ -3245,35 +3239,39 @@ pub fn prove_selective_disclosure_with_profile(
                 &presentation_nonce,
                 &rep_u32.to_le_bytes(),
             ],
-        );
+        ));
         let ggm_tree = expand_ggm_tree_256(&root_seed, &presentation_nonce, rep_u32);
 
-        let mut u_sum = [Fp5::ZERO; SD_GRID_L];
-        let mut v_sum = [Fp5::ZERO; SD_GRID_L];
-        let mut c_pad_sum = Fp5::ZERO;
-        let mut m_sum = [Fp5::ZERO; SD_RPOLY_COEFFS];
-        let mut w_mask_sum = ZeroizingU64Vec(vec![0u64; num_secret_wires]);
-        let mut z_mask_sum = ZeroizingU64Vec(vec![0u64; SD_TOTAL_GATES]);
+        let mut u_sum = SecretBuffer([Fp5::ZERO; SD_GRID_L]);
+        let mut v_sum = SecretBuffer([Fp5::ZERO; SD_GRID_L]);
+        let mut c_pad_sum = SecretBuffer(Fp5::ZERO);
+        let mut m_sum = SecretBuffer([Fp5::ZERO; SD_RPOLY_COEFFS]);
+        let mut w_mask_sum = SecretBuffer(vec![0u64; num_secret_wires]);
+        let mut z_mask_sum = SecretBuffer(vec![0u64; SD_TOTAL_GATES]);
         let mut com_1 = [[0u8; 32]; VC_SD_LIMBO_PARTIES];
         let mut salt_255 = [0u8; 32];
 
-        let mut batch_tapes: [Vec<u64>; 8] = core::array::from_fn(|_| Vec::new());
+        let mut batch_tapes = SecretBuffer(core::array::from_fn::<_, 8, _>(|_| {
+            Vec::<u64>::with_capacity(total_party_limbs)
+        }));
         for batch in 0..(VC_SD_LIMBO_PARTIES / 8) {
             let base_p = batch * 8;
-            let seeds_8: [[u8; 32]; 8] =
-                core::array::from_fn(|lane| ggm_tree.0[VC_SD_LIMBO_PARTIES + base_p + lane]);
+            let seeds_8 = SecretBuffer(core::array::from_fn::<_, 8, _>(|lane| {
+                ggm_tree.0[VC_SD_LIMBO_PARTIES + base_p + lane]
+            }));
             let mut prg = Shake256PartyBatch8::new(&presentation_nonce, rep_u32, base_p, &seeds_8);
             let salts = prg.extract_salts_1();
             prg.squeeze_canonical_gl([true; 8], &mut batch_tapes, total_party_limbs);
 
             for (lane, tape) in batch_tapes.iter_mut().enumerate() {
                 let p = base_p + lane;
-                let (u_p, v_p, c_p, m_p) = unpack_party_ext_masks(&tape[..PARTY_EXT_LIMBS]);
+                let party_masks = SecretBuffer(unpack_party_ext_masks(&tape[..PARTY_EXT_LIMBS]));
+                let (u_p, v_p, c_p, m_p) = &*party_masks;
                 for l in 0..SD_GRID_L {
                     u_sum[l] = u_sum[l].add(u_p[l]);
                     v_sum[l] = v_sum[l].add(v_p[l]);
                 }
-                c_pad_sum = c_pad_sum.add(c_p);
+                *c_pad_sum = c_pad_sum.add(*c_p);
                 for d in 0..SD_RPOLY_COEFFS {
                     m_sum[d] = m_sum[d].add(m_p[d]);
                 }
@@ -3301,19 +3299,19 @@ pub fn prove_selective_disclosure_with_profile(
             }
         }
 
-        let mut delta_w = ZeroizingU64Vec(Vec::with_capacity(num_secret_wires));
+        let mut delta_w = SecretBuffer(Vec::with_capacity(num_secret_wires));
         for k in 0..num_secret_wires {
             delta_w.0.push(gl_sub(secret_vals[k], w_mask_sum[k]));
         }
-        let mut delta_z = ZeroizingU64Vec(Vec::with_capacity(SD_TOTAL_GATES));
+        let mut delta_z = SecretBuffer(Vec::with_capacity(SD_TOTAL_GATES));
         for g in 0..SD_TOTAL_GATES {
             delta_z.0.push(gl_sub(trace.z[g], z_mask_sum[g]));
         }
-        let mut c_plain = Fp5::ZERO;
+        let mut c_plain = SecretBuffer(Fp5::ZERO);
         for l in 0..SD_GRID_L {
-            c_plain = c_plain.add(u_sum[l].mul(v_sum[l]));
+            *c_plain = c_plain.add(u_sum[l].mul(v_sum[l]));
         }
-        let delta_c = c_plain.sub(c_pad_sum);
+        let delta_c = c_plain.sub(*c_pad_sum);
 
         let aux_digest = digest_limbo_aux(&delta_w, &delta_z, &delta_c.to_limbs());
         com_1[VC_SD_LIMBO_PARTIES - 1] = commit_limbo_party_r1(
@@ -3326,17 +3324,17 @@ pub fn prove_selective_disclosure_with_profile(
         );
         ct_zeroize_bytes(&mut salt_255);
 
-        R1RepState {
+        alloc::boxed::Box::new(R1RepState {
             ggm_tree,
             com_1,
             delta_w,
             delta_z,
             delta_c,
-            u_sum,
-            v_sum,
-            c_plain,
-            m_sum,
-        }
+            u_sum: *u_sum,
+            v_sum: *v_sum,
+            c_plain: *c_plain,
+            m_sum: *m_sum,
+        })
     });
 
     ct_zeroize_bytes(&mut hedged_zk_seed);
@@ -3474,8 +3472,8 @@ pub fn prove_selective_disclosure_with_profile(
         let x_arr: &mut [u64; SD_GRID_B * SD_GRID_L] = x_grid.as_mut_slice().try_into().unwrap();
         let y_arr: &mut [u64; SD_GRID_B * SD_GRID_L] = y_grid.as_mut_slice().try_into().unwrap();
         let z_arr: &mut [u64; SD_GRID_B * SD_GRID_L] = z_grid.as_mut_slice().try_into().unwrap();
-        let mut w_buf = ZeroizingU64Vec(vec![0u64; num_secret_wires]);
-        let mut z_buf = ZeroizingU64Vec(vec![0u64; SD_TOTAL_GATES]);
+        let mut w_buf = SecretBuffer(vec![0u64; num_secret_wires]);
+        let mut z_buf = SecretBuffer(vec![0u64; SD_TOTAL_GATES]);
 
         for batch in 0..(VC_SD_LIMBO_PARTIES / 8) {
             let base_p = batch * 8;
@@ -3886,8 +3884,8 @@ pub fn verify_presentation_with_profile(
         let x_arr: &mut [u64; SD_GRID_B * SD_GRID_L] = x_grid.as_mut_slice().try_into().unwrap();
         let y_arr: &mut [u64; SD_GRID_B * SD_GRID_L] = y_grid.as_mut_slice().try_into().unwrap();
         let z_arr: &mut [u64; SD_GRID_B * SD_GRID_L] = z_grid.as_mut_slice().try_into().unwrap();
-        let mut w_buf = ZeroizingU64Vec(vec![0u64; expected_num_secret_wires]);
-        let mut z_buf = ZeroizingU64Vec(vec![0u64; SD_TOTAL_GATES]);
+        let mut w_buf = SecretBuffer(vec![0u64; expected_num_secret_wires]);
+        let mut z_buf = SecretBuffer(vec![0u64; SD_TOTAL_GATES]);
 
         for batch in 0..(VC_SD_LIMBO_PARTIES / 8) {
             let base_p = batch * 8;
@@ -5342,7 +5340,9 @@ mod tests {
 
     fn ref_mat_vec(m: &RefMat, v: &[u64; 12]) -> [u64; 12] {
         core::array::from_fn(|i| {
-            (0..12).fold(0u64, |acc, j| ref_add(acc, ref_mul(m[i][j], v[j] % REF_P as u64)))
+            (0..12).fold(0u64, |acc, j| {
+                ref_add(acc, ref_mul(m[i][j], v[j] % REF_P as u64))
+            })
         })
     }
 
@@ -5485,7 +5485,8 @@ mod tests {
         // The per-share wrappers of both ZKBoo tapes act as the same matrix on every share slot.
         for _ in 0..32 {
             let slots: [[u64; 12]; 3] = core::array::from_fn(|_| rng.state());
-            let st3: [[u64; 3]; 12] = core::array::from_fn(|lane| [0, 1, 2].map(|m| slots[m][lane]));
+            let st3: [[u64; 3]; 12] =
+                core::array::from_fn(|lane| [0, 1, 2].map(|m| slots[m][lane]));
             let st2: [[u64; 2]; 12] = core::array::from_fn(|lane| [0, 1].map(|m| slots[m][lane]));
 
             let (mut e3, mut i3, mut e2, mut i2) = (st3, st3, st2, st2);
@@ -5676,7 +5677,12 @@ mod tests {
         // Clear commitment layouts over the reference sponge.
         let reduce = |x: u64| (x as u128 % REF_P) as u64;
         let (schema_id, epoch) = (0x0123_4567_89AB_CDEFu64, 0xFEDC_BA98_7654_3210u64);
-        let blind = [rng.next_field(), rng.next_field(), rng.next_field(), rng.next_field()];
+        let blind = [
+            rng.next_field(),
+            rng.next_field(),
+            rng.next_field(),
+            rng.next_field(),
+        ];
         for arity in [1usize, 6, 7, MAX_VC_ATTRS] {
             let attrs: Vec<u64> = (0..arity).map(|_| rng.next_field()).collect();
             for tag in [VC_ATTR_COMMIT_TAG, VC_PRES_COMMIT_TAG] {
@@ -5695,7 +5701,12 @@ mod tests {
             }
         }
 
-        let scope = [rng.next_field(), rng.next_field(), rng.next_field(), rng.next_field()];
+        let scope = [
+            rng.next_field(),
+            rng.next_field(),
+            rng.next_field(),
+            rng.next_field(),
+        ];
         let mut message = blind.to_vec();
         message.extend_from_slice(&scope);
         message.extend_from_slice(&[
@@ -5758,7 +5769,10 @@ mod tests {
             let bytes: Vec<u8> = a.iter().flat_map(|limb| limb.to_le_bytes()).collect();
             assert_eq!(fa.to_le_bytes()[..], bytes[..]);
             let scalar = rng.next_field();
-            assert_eq!(fa.scale_fp(scalar).to_limbs(), a.map(|limb| ref_mul(limb, scalar)));
+            assert_eq!(
+                fa.scale_fp(scalar).to_limbs(),
+                a.map(|limb| ref_mul(limb, scalar))
+            );
             for &b in &elems {
                 let fb = Fp5::from_limbs(b);
                 assert_eq!(fa.mul(fb).to_limbs(), ref_fp5_mul(a, b));
@@ -5785,7 +5799,10 @@ mod tests {
             // lo + 2^64 * hi (mod p), reduced limb-wise in u128 without overflow.
             let two_64 = (1u128 << 64) % REF_P;
             let want = ((lo % REF_P) + ((hi % REF_P) * two_64) % REF_P) % REF_P;
-            assert_eq!(gl_reduce_split_u192(lo, hi).to_canonical_u64() as u128, want);
+            assert_eq!(
+                gl_reduce_split_u192(lo, hi).to_canonical_u64() as u128,
+                want
+            );
         }
     }
 }

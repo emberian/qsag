@@ -13,7 +13,6 @@ pub mod rss_mpc;
 pub mod threshold_mldsa;
 pub mod threshold_mldsa_shamir;
 mod toprf_engine;
-pub mod transport;
 pub mod voprf;
 pub mod voprf_spdz;
 pub use fips204_ntt::{
