@@ -48,8 +48,8 @@ use qsag_accel::keccak::{Shake256, cshake256_framed_32, finalize_cshake256, init
 
 const Q64: u64 = MLDSA_Q as u64;
 
-/// Maximum distinct u16 custodian identities; holder sets have no machine-word cap.
-pub const MAX_MPC_PARTIES: usize = u16::MAX as usize + 1;
+/// RSS enumerates C(n, t-1) subsets; bound the combinatorial allocation.
+pub const MAX_MPC_PARTIES: usize = 16;
 /// Degree of the verification extension field `F_q[X] / (X^6 - 7)`.
 pub const EXT_DEGREE: usize = 6;
 /// `7` is neither a square nor a cube modulo `q`, and `6 | q - 1`, so
@@ -571,50 +571,8 @@ impl BinSh {
 // ---------------------------------------------------------------------------
 
 #[inline]
-fn bmul32(x: u32, y: u32) -> u64 {
-    const M32: u64 = 0x1111_1111;
-    const M64: u64 = 0x1111_1111_1111_1111;
-    let a0 = (x as u64) & M32;
-    let a1 = ((x >> 1) as u64) & M32;
-    let a2 = ((x >> 2) as u64) & M32;
-    let a3 = ((x >> 3) as u64) & M32;
-    let b0 = (y as u64) & M32;
-    let b1 = ((y >> 1) as u64) & M32;
-    let b2 = ((y >> 2) as u64) & M32;
-    let b3 = ((y >> 3) as u64) & M32;
-    let p0 = ((a0 * b0) & M64) ^ ((((a1 * b3) ^ (a2 * b2) ^ (a3 * b1)) & M64) << 4);
-    let p1 = (((a0 * b1) ^ (a1 * b0)) & M64) ^ ((((a2 * b3) ^ (a3 * b2)) & M64) << 4);
-    let p2 = (((a0 * b2) ^ (a1 * b1) ^ (a2 * b0)) & M64) ^ (((a3 * b3) & M64) << 4);
-    let p3 = ((a0 * b3) ^ (a1 * b2) ^ (a2 * b1) ^ (a3 * b0)) & M64;
-    p0 | (p1 << 1) | (p2 << 2) | (p3 << 3)
-}
-
-#[inline]
-fn bmul64(x: u64, y: u64) -> u128 {
-    let xl = x as u32;
-    let xh = (x >> 32) as u32;
-    let yl = y as u32;
-    let yh = (y >> 32) as u32;
-    let lo = bmul32(xl, yl) as u128;
-    let hi = bmul32(xh, yh) as u128;
-    let mid = (bmul32(xl ^ xh, yl ^ yh) as u128) ^ lo ^ hi;
-    lo ^ (mid << 32) ^ (hi << 64)
-}
-
-#[inline]
 pub(crate) fn gf128_mul(a: u128, b: u128) -> u128 {
-    let al = a as u64;
-    let ah = (a >> 64) as u64;
-    let bl = b as u64;
-    let bh = (b >> 64) as u64;
-    let c0 = bmul64(al, bl);
-    let c2 = bmul64(ah, bh);
-    let c1 = bmul64(al ^ ah, bl ^ bh) ^ c0 ^ c2;
-    let lo = c0 ^ (c1 << 64);
-    let hi = c2 ^ (c1 >> 64);
-    let r0 = hi ^ (hi << 1) ^ (hi << 2) ^ (hi << 7);
-    let r1 = (hi >> 127) ^ (hi >> 126) ^ (hi >> 121);
-    lo ^ r0 ^ r1 ^ (r1 << 1) ^ (r1 << 2) ^ (r1 << 7)
+    qsag_asm::bitslice::gf2_128_dot(&[a], &[b])
 }
 
 #[inline]
@@ -1786,25 +1744,27 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
         stride: usize,
     ) -> u128 {
         let mut acc = 0u128;
+        // Gather only strided/multi-component inputs, then dispatch a complete
+        // dot product to the SIMD backend instead of detecting it per term.
+        let mut left = SecretBuffer(Vec::new());
+        let mut right = SecretBuffer(Vec::new());
         for (i, others) in self.plan.iter().enumerate() {
-            match others.as_slice() {
-                [] => {}
-                [only] => {
-                    let right = &y[*only];
-                    for k in (offset..x[i].len()).step_by(stride) {
-                        acc ^= gf128_mul(x[i][k], right[k]);
-                    }
-                }
-                many => {
-                    for k in (offset..x[i].len()).step_by(stride) {
-                        let mut sum = y[many[0]][k];
-                        for &j in &many[1..] {
-                            sum ^= y[j][k];
-                        }
-                        acc ^= gf128_mul(x[i][k], sum);
-                    }
-                }
+            if others.is_empty() {
+                continue;
             }
+            if others.len() == 1 && stride == 1 {
+                acc ^= qsag_asm::bitslice::gf2_128_dot(&x[i][offset..], &y[others[0]][offset..]);
+                continue;
+            }
+            left.clear();
+            right.clear();
+            for k in (offset..x[i].len()).step_by(stride) {
+                left.push(x[i][k]);
+                right.push(others.iter().fold(0, |sum, &j| sum ^ y[j][k]));
+            }
+            acc ^= qsag_asm::bitslice::gf2_128_dot(&left, &right);
+            left.wipe();
+            right.wipe();
         }
         acc
     }

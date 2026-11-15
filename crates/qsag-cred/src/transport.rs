@@ -45,9 +45,15 @@ pub fn verify_transport_message(
     let Some((_, pk)) = matches.next() else {
         return false;
     };
+    let level = match pk.len() {
+        1312 => MlDsaLevel::MlDsa44,
+        1952 => MlDsaLevel::MlDsa65,
+        2592 => MlDsaLevel::MlDsa87,
+        _ => return false,
+    };
     matches.next().is_none()
         && ml_dsa_verify(
-            MlDsaLevel::MlDsa44,
+            level,
             pk,
             bytes,
             b"QSAG.TRANSPORT.V1",
