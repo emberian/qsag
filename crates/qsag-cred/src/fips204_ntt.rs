@@ -344,14 +344,148 @@ impl Poly256 {
     }
 }
 
-/// FIPS 204 `ExpandA(rho)` (`Algorithm 32`): returns `k x ell` matrix $\hat{\mathbf{A}}$ in NTT domain.
-pub fn expand_a_ntt(params: &MlDsaParams, rho: &[u8; 32]) -> Vec<Vec<Poly256>> {
-    let mut mat = Vec::with_capacity(params.k);
-    for i in 0..params.k {
-        let mut row = Vec::with_capacity(params.ell);
-        for j in 0..params.ell {
-            row.push(Poly256::rej_ntt_shake128(rho, j as u8, i as u8));
+#[inline]
+fn pack_u64_words_32(bytes: &[u8; 32]) -> [u64; 4] {
+    core::array::from_fn(|w| {
+        u64::from_le_bytes([
+            bytes[8 * w],
+            bytes[8 * w + 1],
+            bytes[8 * w + 2],
+            bytes[8 * w + 3],
+            bytes[8 * w + 4],
+            bytes[8 * w + 5],
+            bytes[8 * w + 6],
+            bytes[8 * w + 7],
+        ])
+    })
+}
+
+#[inline]
+fn pack_u64_words_64(bytes: &[u8; 64]) -> [u64; 8] {
+    core::array::from_fn(|w| {
+        u64::from_le_bytes([
+            bytes[8 * w],
+            bytes[8 * w + 1],
+            bytes[8 * w + 2],
+            bytes[8 * w + 3],
+            bytes[8 * w + 4],
+            bytes[8 * w + 5],
+            bytes[8 * w + 6],
+            bytes[8 * w + 7],
+        ])
+    })
+}
+
+#[inline]
+fn rej_ntt_ingest_block(buf: &[u8; 168], coeffs: &mut [u32; MLDSA_N], filled: &mut usize) {
+    let mut pos = 0usize;
+    while pos + 3 <= 168 && *filled < MLDSA_N {
+        let cand = u32::from_le_bytes([buf[pos], buf[pos + 1], buf[pos + 2], 0]) & 0x7F_FFFF;
+        pos += 3;
+        if cand < MLDSA_Q {
+            coeffs[*filled] = cand;
+            *filled += 1;
         }
+    }
+}
+
+/// FIPS 204 `ExpandA(rho)` (`Algorithm 32`): returns `k x ell` matrix $\hat{\mathbf{A}}$ in NTT domain,
+/// evaluating up to 8 independent `SHAKE128` (`rate = 168 B`) rejection streams in lockstep.
+#[allow(clippy::needless_range_loop)]
+pub fn expand_a_ntt(params: &MlDsaParams, rho: &[u8; 32]) -> Vec<Vec<Poly256>> {
+    let total = params.k.saturating_mul(params.ell);
+    if total == 0 || total > 64 {
+        let mut mat = Vec::with_capacity(params.k);
+        for i in 0..params.k {
+            let mut row = Vec::with_capacity(params.ell);
+            for j in 0..params.ell {
+                row.push(Poly256::rej_ntt_shake128(rho, j as u8, i as u8));
+            }
+            mat.push(row);
+        }
+        return mat;
+    }
+
+    let mut coords = [(0u8, 0u8); 64];
+    let mut idx = 0usize;
+    for i in 0..params.k {
+        for j in 0..params.ell {
+            coords[idx] = (i as u8, j as u8);
+            idx += 1;
+        }
+    }
+
+    let rho_w = pack_u64_words_32(rho);
+    let mut flat = Vec::with_capacity(total);
+
+    for base in (0..total).step_by(8) {
+        let count = (total - base).min(8);
+        if count > 4 {
+            let mut state = qsag_asm::KeccakState8x::default();
+            for w in 0..4 {
+                state.0[w] = [rho_w[w]; 8];
+            }
+            for lane in 0..count {
+                let (row_i, col_j) = coords[base + lane];
+                state.0[4][lane] = (col_j as u64) | ((row_i as u64) << 8) | (0x1Fu64 << 16);
+                state.0[20][lane] = 1u64 << 63;
+            }
+            let mut polys: [Poly256; 8] = core::array::from_fn(|_| Poly256::zero());
+            let mut filled = [0usize; 8];
+            for slot in filled.iter_mut().skip(count) {
+                *slot = MLDSA_N;
+            }
+            let mut buf = [0u8; 168];
+            while filled.iter().any(|&f| f < MLDSA_N) {
+                qsag_asm::keccak_f1600_x8(&mut state);
+                for lane in 0..count {
+                    if filled[lane] < MLDSA_N {
+                        for w in 0..21 {
+                            buf[8 * w..8 * w + 8].copy_from_slice(&state.0[w][lane].to_le_bytes());
+                        }
+                        rej_ntt_ingest_block(&buf, &mut polys[lane].coeffs, &mut filled[lane]);
+                    }
+                }
+            }
+            qsag_asm::volatile_fill(&mut state.0, [0; 8]);
+            flat.extend(polys.into_iter().take(count));
+        } else {
+            let mut state = qsag_asm::KeccakState4x::default();
+            for w in 0..4 {
+                state.0[w] = [rho_w[w]; 4];
+            }
+            for lane in 0..count {
+                let (row_i, col_j) = coords[base + lane];
+                state.0[4][lane] = (col_j as u64) | ((row_i as u64) << 8) | (0x1Fu64 << 16);
+                state.0[20][lane] = 1u64 << 63;
+            }
+            let mut polys: [Poly256; 4] = core::array::from_fn(|_| Poly256::zero());
+            let mut filled = [0usize; 4];
+            for slot in filled.iter_mut().skip(count) {
+                *slot = MLDSA_N;
+            }
+            let mut buf = [0u8; 168];
+            while filled.iter().any(|&f| f < MLDSA_N) {
+                qsag_asm::keccak_f1600_x4(&mut state);
+                for lane in 0..count {
+                    if filled[lane] < MLDSA_N {
+                        for w in 0..21 {
+                            buf[8 * w..8 * w + 8].copy_from_slice(&state.0[w][lane].to_le_bytes());
+                        }
+                        rej_ntt_ingest_block(&buf, &mut polys[lane].coeffs, &mut filled[lane]);
+                    }
+                }
+            }
+            qsag_asm::volatile_fill(&mut state.0, [0; 4]);
+            flat.extend(polys.into_iter().take(count));
+        }
+    }
+
+    let mut it = flat.into_iter();
+    let mut mat = Vec::with_capacity(params.k);
+    for _ in 0..params.k {
+        let mut row = Vec::with_capacity(params.ell);
+        row.extend((&mut it).take(params.ell));
         mat.push(row);
     }
     mat
@@ -866,6 +1000,7 @@ impl Drop for MlDsaSigningKey {
     }
 }
 
+#[cfg(test)]
 fn expand_secret_poly(seed: &[u8; 64], nonce: u16, eta: u32) -> Poly256 {
     let mut xof = Shake256::new();
     xof.absorb(seed);
@@ -893,6 +1028,118 @@ fn expand_secret_poly(seed: &[u8; 64], nonce: u16, eta: u32) -> Poly256 {
     poly
 }
 
+#[inline]
+fn rej_eta_ingest_block(
+    buf: &[u8; 136],
+    eta: u32,
+    coeffs: &mut [u32; MLDSA_N],
+    filled: &mut usize,
+) {
+    for &b in buf {
+        if *filled >= MLDSA_N {
+            break;
+        }
+        for nibble in [b & 15, b >> 4] {
+            if eta == 2 {
+                if let Some(sampled) = qsag_verified::mldsa44_sample_eta2_nibble_mod_q(nibble)
+                    && *filled < MLDSA_N
+                {
+                    coeffs[*filled] = sampled;
+                    *filled += 1;
+                }
+            } else if nibble < 9 && *filled < MLDSA_N {
+                coeffs[*filled] = fq_sub(eta, nibble as u32);
+                *filled += 1;
+            }
+        }
+    }
+}
+
+/// FIPS 204 `ExpandS` (`Algorithm 33`) batch sampler across `total_polys` (`ell + k`) `SHAKE256` streams.
+#[allow(clippy::needless_range_loop)]
+fn expand_secret_polys_batch(seed: &[u8; 64], total_polys: usize, eta: u32) -> Vec<Poly256> {
+    let mut seed_w = pack_u64_words_64(seed);
+    let mut out = Vec::with_capacity(total_polys);
+
+    for base in (0..total_polys).step_by(8) {
+        let count = (total_polys - base).min(8);
+        if count > 4 {
+            let mut state = qsag_asm::KeccakState8x::default();
+            for w in 0..8 {
+                state.0[w] = [seed_w[w]; 8];
+            }
+            for lane in 0..count {
+                let nonce = (base + lane) as u16;
+                state.0[8][lane] = (nonce as u64) | (0x1Fu64 << 16);
+                state.0[16][lane] = 1u64 << 63;
+            }
+            let mut polys: [Poly256; 8] = core::array::from_fn(|_| Poly256::zero());
+            let mut filled = [0usize; 8];
+            for slot in filled.iter_mut().skip(count) {
+                *slot = MLDSA_N;
+            }
+            let mut buf = SecretBytes([0u8; 136]);
+            while filled.iter().any(|&f| f < MLDSA_N) {
+                qsag_asm::keccak_f1600_x8(&mut state);
+                for lane in 0..count {
+                    if filled[lane] < MLDSA_N {
+                        for w in 0..17 {
+                            buf.0[8 * w..8 * w + 8]
+                                .copy_from_slice(&state.0[w][lane].to_le_bytes());
+                        }
+                        rej_eta_ingest_block(
+                            &buf.0,
+                            eta,
+                            &mut polys[lane].coeffs,
+                            &mut filled[lane],
+                        );
+                    }
+                }
+            }
+            qsag_asm::volatile_fill(&mut state.0, [0; 8]);
+            out.extend(polys.into_iter().take(count));
+        } else {
+            let mut state = qsag_asm::KeccakState4x::default();
+            for w in 0..8 {
+                state.0[w] = [seed_w[w]; 4];
+            }
+            for lane in 0..count {
+                let nonce = (base + lane) as u16;
+                state.0[8][lane] = (nonce as u64) | (0x1Fu64 << 16);
+                state.0[16][lane] = 1u64 << 63;
+            }
+            let mut polys: [Poly256; 4] = core::array::from_fn(|_| Poly256::zero());
+            let mut filled = [0usize; 4];
+            for slot in filled.iter_mut().skip(count) {
+                *slot = MLDSA_N;
+            }
+            let mut buf = SecretBytes([0u8; 136]);
+            while filled.iter().any(|&f| f < MLDSA_N) {
+                qsag_asm::keccak_f1600_x4(&mut state);
+                for lane in 0..count {
+                    if filled[lane] < MLDSA_N {
+                        for w in 0..17 {
+                            buf.0[8 * w..8 * w + 8]
+                                .copy_from_slice(&state.0[w][lane].to_le_bytes());
+                        }
+                        rej_eta_ingest_block(
+                            &buf.0,
+                            eta,
+                            &mut polys[lane].coeffs,
+                            &mut filled[lane],
+                        );
+                    }
+                }
+            }
+            qsag_asm::volatile_fill(&mut state.0, [0; 4]);
+            out.extend(polys.into_iter().take(count));
+        }
+    }
+
+    qsag_asm::volatile_fill(&mut seed_w, 0);
+    out
+}
+
 /// Deterministic seeded FIPS 204 key generation. The caller supplies an unpredictable seed.
 pub fn ml_dsa_keygen_from_seed(level: MlDsaLevel, seed: &[u8; 32]) -> (Vec<u8>, MlDsaSigningKey) {
     let params = level.params();
@@ -908,18 +1155,10 @@ pub fn ml_dsa_keygen_from_seed(level: MlDsaLevel, seed: &[u8; 32]) -> (Vec<u8>, 
     private_seed.0.copy_from_slice(&expanded.0[32..96]);
     let mut key = SecretBytes([0; 32]);
     key.0.copy_from_slice(&expanded.0[96..]);
-    let mut s1 = SecretPolys(
-        (0..params.ell)
-            .map(|index| expand_secret_poly(&private_seed.0, index as u16, params.eta))
-            .collect(),
-    );
-    let mut s2 = SecretPolys(
-        (0..params.k)
-            .map(|index| {
-                expand_secret_poly(&private_seed.0, (params.ell + index) as u16, params.eta)
-            })
-            .collect(),
-    );
+    let mut all_secret =
+        expand_secret_polys_batch(&private_seed.0, params.ell + params.k, params.eta);
+    let mut s2 = SecretPolys(all_secret.split_off(params.ell));
+    let mut s1 = SecretPolys(all_secret);
     for poly in s1.0.iter_mut().chain(&mut s2.0) {
         poly.ntt();
     }
@@ -1000,6 +1239,7 @@ pub(crate) fn signing_key_from_secret_for_test(
     )
 }
 
+#[cfg(test)]
 fn expand_signing_mask(params: &MlDsaParams, seed: &[u8; 64], nonce: u16) -> Poly256 {
     let mut xof = Shake256::new();
     xof.absorb(seed);
@@ -1008,6 +1248,80 @@ fn expand_signing_mask(params: &MlDsaParams, seed: &[u8; 64], nonce: u16) -> Pol
     let mut bytes = SecretBytes([0; 640]);
     xof.squeeze(&mut bytes.0[..params.z_poly_bytes]);
     unpack_z_poly(params, &bytes.0[..params.z_poly_bytes])
+}
+
+/// FIPS 204 `ExpandMask` (`Algorithm 34`) batch expander across `params.ell` `SHAKE256` streams
+/// (`5` blocks = `680 >= 640 >= 576` bytes squeezed in lockstep per batch).
+#[allow(clippy::needless_range_loop)]
+fn expand_signing_masks_batch(
+    params: &MlDsaParams,
+    seed: &[u8; 64],
+    start_nonce: u16,
+) -> Vec<Poly256> {
+    debug_assert!(params.z_poly_bytes <= 680);
+    let mut seed_w = pack_u64_words_64(seed);
+    let total = params.ell;
+    let mut out = Vec::with_capacity(total);
+
+    for base in (0..total).step_by(8) {
+        let count = (total - base).min(8);
+        if count > 4 {
+            let mut state = qsag_asm::KeccakState8x::default();
+            for w in 0..8 {
+                state.0[w] = [seed_w[w]; 8];
+            }
+            for lane in 0..count {
+                let nonce = start_nonce + ((base + lane) as u16);
+                state.0[8][lane] = (nonce as u64) | (0x1Fu64 << 16);
+                state.0[16][lane] = 1u64 << 63;
+            }
+            let mut bufs: [SecretBytes<680>; 8] = core::array::from_fn(|_| SecretBytes([0u8; 680]));
+            for blk in 0..5 {
+                qsag_asm::keccak_f1600_x8(&mut state);
+                let blk_off = blk * 136;
+                for lane in 0..count {
+                    for w in 0..17 {
+                        let off = blk_off + 8 * w;
+                        bufs[lane].0[off..off + 8]
+                            .copy_from_slice(&state.0[w][lane].to_le_bytes());
+                    }
+                }
+            }
+            qsag_asm::volatile_fill(&mut state.0, [0; 8]);
+            for buf in bufs.iter().take(count) {
+                out.push(unpack_z_poly(params, &buf.0[..params.z_poly_bytes]));
+            }
+        } else {
+            let mut state = qsag_asm::KeccakState4x::default();
+            for w in 0..8 {
+                state.0[w] = [seed_w[w]; 4];
+            }
+            for lane in 0..count {
+                let nonce = start_nonce + ((base + lane) as u16);
+                state.0[8][lane] = (nonce as u64) | (0x1Fu64 << 16);
+                state.0[16][lane] = 1u64 << 63;
+            }
+            let mut bufs: [SecretBytes<680>; 4] = core::array::from_fn(|_| SecretBytes([0u8; 680]));
+            for blk in 0..5 {
+                qsag_asm::keccak_f1600_x4(&mut state);
+                let blk_off = blk * 136;
+                for lane in 0..count {
+                    for w in 0..17 {
+                        let off = blk_off + 8 * w;
+                        bufs[lane].0[off..off + 8]
+                            .copy_from_slice(&state.0[w][lane].to_le_bytes());
+                    }
+                }
+            }
+            qsag_asm::volatile_fill(&mut state.0, [0; 4]);
+            for buf in bufs.iter().take(count) {
+                out.push(unpack_z_poly(params, &buf.0[..params.z_poly_bytes]));
+            }
+        }
+    }
+
+    qsag_asm::volatile_fill(&mut seed_w, 0);
+    out
 }
 
 /// Deterministic FIPS 204 signing, using the all-zero optional randomness string.
@@ -1026,11 +1340,7 @@ pub fn ml_dsa_sign_deterministic(sk: &MlDsaSigningKey, msg: &[u8], ctx: &[u8]) -
     let mut nonce = 0u16;
     loop {
         let next = nonce.checked_add(params.ell as u16)?;
-        let y = SecretPolys(
-            (nonce..next)
-                .map(|index| expand_signing_mask(&params, &mask_seed.0, index))
-                .collect(),
-        );
+        let y = SecretPolys(expand_signing_masks_batch(&params, &mask_seed.0, nonce));
         nonce = next;
         let mut y_hat = SecretPolys(y.0.clone());
         for poly in &mut y_hat.0 {
@@ -1391,6 +1701,52 @@ mod nist_signature_vectors {
             let mut got_inv = got_pw;
             got_inv.inv_ntt();
             assert_eq!(got_inv.coeffs, ref_inv.coeffs, "inv_ntt at {trial}");
+        }
+    }
+
+    #[test]
+    fn batch_expand_a_s_mask_match_scalar_across_all_levels() {
+        for level in [
+            MlDsaLevel::MlDsa44,
+            MlDsaLevel::MlDsa65,
+            MlDsaLevel::MlDsa87,
+        ] {
+            let params = level.params();
+            let mut rho = [0u8; 32];
+            for (i, b) in rho.iter_mut().enumerate() {
+                *b = (0x4Bu8).wrapping_add((i as u8).wrapping_mul(17));
+            }
+            let got_a = expand_a_ntt(&params, &rho);
+            assert_eq!(got_a.len(), params.k);
+            for (i, row) in got_a.iter().enumerate() {
+                assert_eq!(row.len(), params.ell);
+                for (j, poly) in row.iter().enumerate() {
+                    let exp = Poly256::rej_ntt_shake128(&rho, j as u8, i as u8);
+                    assert_eq!(poly.coeffs, exp.coeffs, "ExpandA mismatch at {level:?} ({i},{j})");
+                }
+            }
+
+            let mut seed64 = [0u8; 64];
+            for (i, b) in seed64.iter_mut().enumerate() {
+                *b = (0x9Du8).wrapping_add((i as u8).wrapping_mul(29));
+            }
+            let got_s = expand_secret_polys_batch(&seed64, params.ell + params.k, params.eta);
+            assert_eq!(got_s.len(), params.ell + params.k);
+            for (idx, poly) in got_s.iter().enumerate() {
+                let exp = expand_secret_poly(&seed64, idx as u16, params.eta);
+                assert_eq!(poly.coeffs, exp.coeffs, "ExpandS mismatch at {level:?} idx={idx}");
+            }
+
+            let start_nonce = 21u16;
+            let got_y = expand_signing_masks_batch(&params, &seed64, start_nonce);
+            assert_eq!(got_y.len(), params.ell);
+            for (idx, poly) in got_y.iter().enumerate() {
+                let exp = expand_signing_mask(&params, &seed64, start_nonce + (idx as u16));
+                assert_eq!(
+                    poly.coeffs, exp.coeffs,
+                    "ExpandMask mismatch at {level:?} idx={idx}"
+                );
+            }
         }
     }
 }
