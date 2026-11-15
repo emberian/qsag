@@ -16,12 +16,19 @@
 
 extern crate alloc;
 
+pub mod dealerless_staging;
 pub mod dzk;
 pub mod hash;
 pub mod hem_quorum;
 pub mod party_node;
 pub mod quorum_jorts;
 pub mod wire_channel;
+
+pub use dealerless_staging::{
+    DealerlessStagingError, refresh_bft_shamir_shares, refresh_committee_shares,
+    stage_bft_shamir_dealerless_mpc, stage_committee_partitioned_dealerless_mpc,
+};
+pub use quorum_jorts::verify_jorts_signature;
 
 pub use hem_quorum::{
     HemCommitteePartitionedQuorum, HemDynamicShamirQuorum, HemJortsPublicKey, HemJortsSignature,

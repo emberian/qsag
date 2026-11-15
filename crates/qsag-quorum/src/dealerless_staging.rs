@@ -3016,3 +3016,723 @@ fn record_deg_f_byte_shares(
     }
 }
 
+// =============================================================================================
+// 5. Proactive Share & Pairwise Channel Key Refresh (`QS-A` & `QS-B`)
+// =============================================================================================
+
+/// XOR `mask` into `leaves` in place using volatile writes so pre-refresh share bytes do not
+/// linger in registers or stack copies, then zeroize `mask`.
+fn apply_and_wipe_leaf_mask_in_place(leaves: &mut [Vec<Node>], mask: &mut [u8]) {
+    let flat_nodes: &mut [Node] = leaves.as_flattened_mut();
+    let flat_bytes: &mut [u8] = flat_nodes.as_flattened_mut();
+    for (dst, &m) in flat_bytes.iter_mut().zip(mask.iter()) {
+        let updated = black_box(*dst) ^ black_box(m);
+        *dst = black_box(updated);
+    }
+    qsag_asm::volatile_fill(mask, 0);
+    black_box(mask);
+}
+
+/// Generate committee-isolated, algebraically zero-sum `t`-of-`t` XOR masks (`bigoplus_{u in C} Delta_u = 0`)
+/// via 2-round pairwise commit-then-open seed agreement among members of `C`.
+fn generate_committee_zero_sum_masks(
+    committee: usize,
+    m: usize,
+    num_bytes: usize,
+    session_id: &[u8; 32],
+    member_rngs: &mut [PartyPrivateRng],
+    #[cfg(test)] fault: Option<StagingFault>,
+) -> Result<SecretBuffer<Vec<Vec<u8>>>, DealerlessStagingError> {
+    let mut masks = SecretBuffer(vec![vec![0u8; num_bytes]; m]);
+    let c_be = (committee as u64).to_be_bytes();
+
+    for u in 0..m {
+        for v in (u + 1)..m {
+            let u_be = (u as u64).to_be_bytes();
+            let v_be = (v as u64).to_be_bytes();
+            let mut salt_u = member_rngs[u].next_bytes32();
+            let mut share_u = member_rngs[u].next_bytes32();
+            let mut salt_v = member_rngs[v].next_bytes32();
+            let mut share_v = member_rngs[v].next_bytes32();
+
+            let com_u = h32(
+                TAG_REFRESH_PAIR,
+                &[session_id, &c_be, &u_be, &v_be, &salt_u, &share_u],
+            );
+            let com_v = h32(
+                TAG_REFRESH_PAIR,
+                &[session_id, &c_be, &v_be, &u_be, &salt_v, &share_v],
+            );
+
+            #[cfg(test)]
+            if let Some(StagingFault::CorruptQsARefreshOpen {
+                committee: fc,
+                member_pos,
+            }) = fault
+                && fc == committee
+            {
+                if member_pos == u {
+                    share_u[0] ^= 0x01;
+                } else if member_pos == v {
+                    share_v[0] ^= 0x01;
+                }
+            }
+
+            let exp_u = h32(
+                TAG_REFRESH_PAIR,
+                &[session_id, &c_be, &u_be, &v_be, &salt_u, &share_u],
+            );
+            let exp_v = h32(
+                TAG_REFRESH_PAIR,
+                &[session_id, &c_be, &v_be, &u_be, &salt_v, &share_v],
+            );
+            if !ct_eq_bytes32(&com_u, &exp_u) {
+                wipe_bytes32(&mut salt_u);
+                wipe_bytes32(&mut share_u);
+                wipe_bytes32(&mut salt_v);
+                wipe_bytes32(&mut share_v);
+                return Err(DealerlessStagingError::CommitmentMismatch {
+                    phase: "refresh_committee_pair",
+                    party: u,
+                });
+            }
+            if !ct_eq_bytes32(&com_v, &exp_v) {
+                wipe_bytes32(&mut salt_u);
+                wipe_bytes32(&mut share_u);
+                wipe_bytes32(&mut salt_v);
+                wipe_bytes32(&mut share_v);
+                return Err(DealerlessStagingError::CommitmentMismatch {
+                    phase: "refresh_committee_pair",
+                    party: v,
+                });
+            }
+
+            let mut pair_stream = SecretBuffer(vec![0u8; num_bytes]);
+            expand(
+                TAG_REFRESH_MASK,
+                &[session_id, &c_be, &u_be, &v_be, &com_u, &com_v, &share_u, &share_v],
+                &mut pair_stream,
+            );
+            wipe_bytes32(&mut salt_u);
+            wipe_bytes32(&mut share_u);
+            wipe_bytes32(&mut salt_v);
+            wipe_bytes32(&mut share_v);
+
+            for b in 0..num_bytes {
+                masks[u][b] ^= pair_stream[b];
+                masks[v][b] ^= pair_stream[b];
+            }
+            wipe_bytes(&mut pair_stream);
+        }
+    }
+    Ok(masks)
+}
+
+/// Proactively refresh all live `QS-A` [`CommitteeCustodian`] share stores AND pairwise channel
+/// MAC keys in place across epochs without changing `pk_root` or resetting `BeltLatch` state.
+pub fn refresh_committee_shares<W: DurableWal>(
+    layout: &CommitteeLayout,
+    custodians: &mut [CommitteeCustodian<W>],
+    session_id: [u8; 32],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<(), DealerlessStagingError> {
+    refresh_committee_shares_inner(
+        layout,
+        custodians,
+        session_id,
+        party_rngs,
+        #[cfg(test)]
+        None,
+    )
+}
+
+fn refresh_committee_shares_inner<W: DurableWal>(
+    layout: &CommitteeLayout,
+    custodians: &mut [CommitteeCustodian<W>],
+    session_id: [u8; 32],
+    party_rngs: &mut [PartyPrivateRng],
+    #[cfg(test)] fault: Option<StagingFault>,
+) -> Result<(), DealerlessStagingError> {
+    let n = layout.n;
+    if custodians.len() != n || party_rngs.len() != n {
+        return Err(DealerlessStagingError::PartyCountMismatch {
+            expected: n,
+            got: custodians.len().min(party_rngs.len()),
+        });
+    }
+
+    let num_bytes = (layout.leaves_per_committee() as usize) * LEAF_SHARE_NODES * 32;
+    let mut all_committee_masks = Vec::with_capacity(layout.committees().len());
+    for (committee, members) in layout.committees().iter().enumerate() {
+        let mut sub_rngs: Vec<PartyPrivateRng> = members
+            .iter()
+            .map(|&member| {
+                let mut s = party_rngs[member].next_bytes32();
+                let r = PartyPrivateRng::from_seed(s, b"QSAG.QUORUM.REFRESH.QSA.SUB/v1");
+                wipe_bytes32(&mut s);
+                r
+            })
+            .collect();
+        let masks = generate_committee_zero_sum_masks(
+            committee,
+            members.len(),
+            num_bytes,
+            &session_id,
+            &mut sub_rngs,
+            #[cfg(test)]
+            fault,
+        )?;
+        all_committee_masks.push(masks);
+    }
+
+    let new_mac_keys = establish_dealerless_pairwise_mac_keys(&session_id, party_rngs)?;
+
+    // Commit changes only after every committee and pairwise ceremony succeeded!
+    for ((committee, members), mut masks) in layout
+        .committees()
+        .iter()
+        .enumerate()
+        .zip(all_committee_masks)
+    {
+        for (pos, &member) in members.iter().enumerate() {
+            let leaves = custodians[member].slot_leaves_mut(committee)?;
+            apply_and_wipe_leaf_mask_in_place(leaves, &mut masks[pos]);
+        }
+    }
+    for (custodian, keys) in custodians.iter_mut().zip(new_mac_keys) {
+        custodian.replace_mac_keys(keys)?;
+    }
+    Ok(())
+}
+
+/// Proactively refresh pre-instantiation [`StagedCommitteeKeys`] in place.
+pub fn refresh_staged_committee_keys(
+    staged: &mut StagedCommitteeKeys,
+    session_id: [u8; 32],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<(), DealerlessStagingError> {
+    let n = staged.layout.n;
+    if staged.parties.len() != n || party_rngs.len() != n {
+        return Err(DealerlessStagingError::PartyCountMismatch {
+            expected: n,
+            got: party_rngs.len(),
+        });
+    }
+    let num_bytes = (staged.layout.leaves_per_committee() as usize) * LEAF_SHARE_NODES * 32;
+    let mut all_masks = Vec::with_capacity(staged.layout.committees().len());
+    for (committee, members) in staged.layout.committees().iter().enumerate() {
+        let mut sub_rngs: Vec<PartyPrivateRng> = members
+            .iter()
+            .map(|&member| {
+                let mut s = party_rngs[member].next_bytes32();
+                let r = PartyPrivateRng::from_seed(s, b"QSAG.QUORUM.REFRESH.QSA.MAT/v1");
+                wipe_bytes32(&mut s);
+                r
+            })
+            .collect();
+        all_masks.push(generate_committee_zero_sum_masks(
+            committee,
+            members.len(),
+            num_bytes,
+            &session_id,
+            &mut sub_rngs,
+            #[cfg(test)]
+            None,
+        )?);
+    }
+    let new_mac_keys = establish_dealerless_pairwise_mac_keys(&session_id, party_rngs)?;
+
+    for ((committee, members), mut masks) in staged
+        .layout
+        .committees()
+        .iter()
+        .enumerate()
+        .zip(all_masks)
+    {
+        for (pos, &member) in members.iter().enumerate() {
+            if let Some(store) = staged.parties[member]
+                .stores
+                .iter_mut()
+                .find(|s| s.committee() == committee)
+            {
+                apply_and_wipe_leaf_mask_in_place(store.leaves_mut(), &mut masks[pos]);
+            }
+        }
+    }
+    for (mat, keys) in staged.parties.iter_mut().zip(new_mac_keys) {
+        mat.replace_mac_keys(keys);
+    }
+    Ok(())
+}
+
+/// Proactively refresh all live `QS-B` [`ShamirCustodian`] share tables AND pairwise channel MAC
+/// keys in place via HVZK-verified degree-`< t` zero-constant `GF(2^8)` polynomials (`P(0) = 0`),
+/// preserving `pk_root` and `BeltLatch` state while unlinking pre- and post-refresh shares.
+pub fn refresh_bft_shamir_shares<W: DurableWal>(
+    cfg: &QuorumConfig,
+    custodians: &mut [ShamirCustodian<W>],
+    session_id: [u8; 32],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<(), DealerlessStagingError> {
+    refresh_bft_shamir_shares_inner(
+        cfg,
+        custodians,
+        session_id,
+        party_rngs,
+        #[cfg(test)]
+        None,
+    )
+}
+
+fn refresh_bft_shamir_shares_inner<W: DurableWal>(
+    cfg: &QuorumConfig,
+    custodians: &mut [ShamirCustodian<W>],
+    session_id: [u8; 32],
+    party_rngs: &mut [PartyPrivateRng],
+    #[cfg(test)] fault: Option<StagingFault>,
+) -> Result<(), DealerlessStagingError> {
+    let n = cfg.n;
+    if custodians.len() != n || party_rngs.len() != n {
+        return Err(DealerlessStagingError::PartyCountMismatch {
+            expected: n,
+            got: custodians.len().min(party_rngs.len()),
+        });
+    }
+    let num_bytes = custodians[0].share_bytes();
+    let mut zero_masks = run_verified_zero_constant_shamir_masks(
+        cfg,
+        num_bytes,
+        "qsb_proactive_refresh",
+        &session_id,
+        party_rngs,
+        #[cfg(test)]
+        fault,
+    )?;
+    let new_mac_keys = establish_dealerless_pairwise_mac_keys(&session_id, party_rngs)?;
+
+    for (p, (custodian, keys)) in custodians.iter_mut().zip(new_mac_keys).enumerate() {
+        apply_and_wipe_leaf_mask_in_place(custodian.leaves_mut(), &mut zero_masks[p]);
+        custodian.replace_mac_keys(keys)?;
+    }
+    Ok(())
+}
+
+/// Proactively refresh pre-instantiation [`StagedShamirKeys`] in place.
+pub fn refresh_staged_bft_shamir_keys(
+    staged: &mut StagedShamirKeys,
+    session_id: [u8; 32],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<(), DealerlessStagingError> {
+    let n = staged.cfg.n;
+    if staged.parties.len() != n || party_rngs.len() != n {
+        return Err(DealerlessStagingError::PartyCountMismatch {
+            expected: n,
+            got: party_rngs.len(),
+        });
+    }
+    let num_leaves = 1usize << staged.tree.public_key().height;
+    let num_bytes = num_leaves * LEAF_SHARE_NODES * 32;
+    let mut zero_masks = run_verified_zero_constant_shamir_masks(
+        &staged.cfg,
+        num_bytes,
+        "qsb_proactive_refresh_mat",
+        &session_id,
+        party_rngs,
+        #[cfg(test)]
+        None,
+    )?;
+    let new_mac_keys = establish_dealerless_pairwise_mac_keys(&session_id, party_rngs)?;
+
+    for (p, (mat, keys)) in staged.parties.iter_mut().zip(new_mac_keys).enumerate() {
+        apply_and_wipe_leaf_mask_in_place(mat.leaves_mut(), &mut zero_masks[p]);
+        mat.replace_mac_keys(keys);
+    }
+    Ok(())
+}
+
+// =============================================================================================
+// 6. Comprehensive Unit, Adversarial Fault-Rejection & Online Timing Tests
+// =============================================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::quorum_jorts::{
+        BftShamirJorts, CommitteePartitionedJorts, LatchCertificate, chain_step, combine_additive,
+        combine_shamir, quorum_jorts_verify, verify_jorts_signature,
+    };
+
+    fn make_party_rngs(n: usize, tag: u8) -> Vec<PartyPrivateRng> {
+        (0..n)
+            .map(|p| {
+                let mut seed = [0u8; 32];
+                seed[0] = tag;
+                seed[1] = p as u8;
+                seed[2] = 0xC7;
+                PartyPrivateRng::from_seed(seed, b"QSAG.QUORUM.DEALERLESS.TEST/v1")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn bitsliced_chain_step_matches_scalar_chain_step_bit_for_bit() {
+        let mut rngs = make_party_rngs(1, 0x10);
+        let pk_seed = rngs[0].next_bytes32();
+        let coords: Vec<(u64, u32)> = (0..64).map(|i| ((i / 16) as u64, (i % 16) as u32)).collect();
+        let inputs: Vec<Node> = (0..64).map(|_| rngs[0].next_bytes32()).collect();
+        let in_planes = pack_nodes_to_256_planes(&inputs);
+
+        for step in 0..3u32 {
+            let mut state = build_chain_step_public_planes(&pk_seed, &coords, step);
+            for b in 0..256 {
+                state[CHAIN_INPUT_BIT_OFFSET + b] ^= in_planes[b];
+            }
+            // Permute each of the 64 lanes with reference Keccak to verify framing geometry.
+            let mut out_planes = [0u64; 256];
+            for lane in 0..64 {
+                let mut words = [0u64; 25];
+                for bit in 0..1600 {
+                    let b = (state[bit] >> lane) & 1;
+                    words[bit / 64] |= b << (bit % 64);
+                }
+                qsag_core::sponge::keccak::keccak_f1600(&mut words);
+                for bit in 0..256 {
+                    let b = (words[bit / 64] >> (bit % 64)) & 1;
+                    out_planes[bit] |= b << lane;
+                }
+            }
+            let got = unpack_256_planes_to_nodes(&out_planes, 64);
+            for (lane, &(leaf, chain)) in coords.iter().enumerate() {
+                let expected = chain_step(&pk_seed, leaf, chain, step, &inputs[lane]);
+                assert_eq!(got[lane], expected, "mismatch at step {step} lane {lane}");
+            }
+        }
+    }
+
+    #[test]
+    fn dealerless_qs_a_stages_signs_refreshes_and_unlinks_epochs() {
+        let sid = [0x41u8; 32];
+        let mut rngs = make_party_rngs(3, 0x21);
+        let staged =
+            stage_committee_partitioned_dealerless_mpc(2, 3, 2, sid, &mut rngs).expect("QS-A MPC");
+        let pk_before = *staged.tree.public_key();
+        let mut qs_a = CommitteePartitionedJorts::from_staged(staged).expect("from_staged");
+
+        // Sign across all three 2-of-3 committees via the unmodified online BeltLatch ceremony!
+        for (idx, committee_members) in [[0usize, 1], [0, 2], [1, 2]].iter().enumerate() {
+            let msg = alloc::format!("dealerless-qs-a-committee-{idx}");
+            let t0 = std::time::Instant::now();
+            let sig = qs_a.sign(committee_members, msg.as_bytes()).expect("online sign");
+            let elapsed = t0.elapsed();
+            assert!(verify_jorts_signature(&pk_before, msg.as_bytes(), &sig));
+            assert!(quorum_jorts_verify(&pk_before, msg.as_bytes(), &sig));
+            if !cfg!(debug_assertions) {
+                assert!(
+                    elapsed.as_micros() < 1_000,
+                    "online QS-A sign took {} us (>= 1000 us)",
+                    elapsed.as_micros()
+                );
+            }
+        }
+
+        // Stage a height-3 `(2, 3)` tree (`2` leaves per committee) to test cross-epoch refresh
+        // and verify mixing pre-refresh and post-refresh shares fails reconstruction!
+        let mut rngs_h3 = make_party_rngs(3, 0x22);
+        let staged_h3 = stage_committee_partitioned_dealerless_mpc(2, 3, 3, [0x42; 32], &mut rngs_h3)
+            .expect("QS-A height 3");
+        let pk_h3 = *staged_h3.tree.public_key();
+        let mut qs_a_h3 = CommitteePartitionedJorts::from_staged(staged_h3).expect("from_staged");
+
+        // Epoch 0 sign on committee 0 (`{0, 1}`).
+        let sig_ep0 = qs_a_h3.sign(&[0, 1], b"epoch-0-msg").expect("epoch 0");
+        assert!(verify_jorts_signature(&pk_h3, b"epoch-0-msg", &sig_ep0));
+
+        // Capture custodian 0's pre-refresh opening on epoch 1 BEFORE refreshing!
+        let (stale_rec, stale_echo0) = qs_a_h3.custodians[0]
+            .bind_and_echo(0, 1, b"epoch-1-msg")
+            .expect("bind 0");
+        let (_, stale_echo1) = qs_a_h3.custodians[1]
+            .bind_and_echo(0, 1, b"epoch-1-msg")
+            .expect("bind 1");
+        let permit0 = qs_a_h3.custodians[0]
+            .verify_echoes(&stale_rec, &[stale_echo1])
+            .expect("permit 0");
+        let stale_open_0 = qs_a_h3.custodians[0]
+            .open_shares(permit0)
+            .expect("stale open 0");
+        let _ = stale_echo0;
+
+        // Run proactive committee share & MAC key refresh!
+        let mut refresh_rngs = make_party_rngs(3, 0x23);
+        refresh_committee_shares(
+            &qs_a_h3.layout,
+            &mut qs_a_h3.custodians,
+            [0x99; 32],
+            &mut refresh_rngs,
+        )
+        .expect("refresh QS-A");
+        assert_eq!(*qs_a_h3.public_key(), pk_h3);
+
+        // Fresh post-refresh signing on epoch 1 (`replay` of same bound message at epoch 1) succeeds!
+        let sig_ep1 = qs_a_h3.sign_at(0, 1, b"epoch-1-msg").expect("post-refresh sign");
+        assert!(verify_jorts_signature(&pk_h3, b"epoch-1-msg", &sig_ep1));
+
+        // Obtain custodian 1's post-refresh opening on epoch 1 and mix with custodian 0's stale opening:
+        let (post_rec, post_e0) = qs_a_h3.custodians[0]
+            .bind_and_echo(0, 1, b"epoch-1-msg")
+            .expect("re-echo 0");
+        let (_, _post_e1) = qs_a_h3.custodians[1]
+            .bind_and_echo(0, 1, b"epoch-1-msg")
+            .expect("re-echo 1");
+        let post_permit1 = qs_a_h3.custodians[1]
+            .verify_echoes(&post_rec, &[post_e0])
+            .expect("post permit 1");
+        let fresh_open_1 = qs_a_h3.custodians[1]
+            .open_shares(post_permit1)
+            .expect("fresh open 1");
+
+        let mixed_err = combine_additive(
+            &qs_a_h3.layout,
+            &qs_a_h3.tree,
+            &post_rec,
+            &[stale_open_0, fresh_open_1],
+        );
+        assert!(
+            matches!(mixed_err, Err(QuorumError::ChainVerifyFailed { .. })),
+            "mixing pre-refresh and post-refresh QS-A shares must fail: {mixed_err:?}"
+        );
+    }
+
+    #[test]
+    fn dealerless_qs_b_stages_signs_switches_quorums_and_refreshes() {
+        for t in [2usize, 3] {
+            let cfg = QuorumConfig::tight(t).expect("tight config");
+            let mut rngs = make_party_rngs(cfg.n, 0x30 + t as u8);
+            let staged = stage_bft_shamir_dealerless_mpc(cfg, 2, [0x51 + t as u8; 32], &mut rngs)
+                .expect("QS-B MPC");
+            let pk = *staged.tree.public_key();
+            let mut qs_b = BftShamirJorts::from_staged(staged).expect("from_staged");
+
+            let ackers_0: Vec<usize> = (0..cfg.q).collect();
+            let signers_0: Vec<usize> = (0..cfg.t).collect();
+            let t0 = std::time::Instant::now();
+            let sig0 = qs_b
+                .sign(&ackers_0, &signers_0, b"dealerless-qs-b-epoch-0")
+                .expect("sign 0");
+            let elapsed = t0.elapsed();
+            assert!(verify_jorts_signature(&pk, b"dealerless-qs-b-epoch-0", &sig0));
+            if !cfg!(debug_assertions) {
+                assert!(
+                    elapsed.as_micros() < 1_000,
+                    "online QS-B (t={t}) sign took {} us (>= 1000 us)",
+                    elapsed.as_micros()
+                );
+            }
+
+            // Capture `(t - 1)` pre-refresh openings on leaf 1 BEFORE proactive refresh!
+            let mut pre_acks = Vec::new();
+            let mut rec_leaf1 = None;
+            for &p in &ackers_0 {
+                let (rec, ack) = qs_b.custodians[p].ack(1, b"epoch-1-refresh").expect("ack");
+                rec_leaf1 = Some(rec);
+                pre_acks.push(ack);
+            }
+            let rec1 = rec_leaf1.expect("record");
+            let pre_cert = LatchCertificate::assemble(&rec1, pre_acks);
+            let stale_openings: Vec<_> = (0..(cfg.t - 1))
+                .map(|p| {
+                    qs_b.custodians[p]
+                        .open_shares(1, b"epoch-1-refresh", &pre_cert)
+                        .expect("stale open")
+                })
+                .collect();
+
+            // Run proactive zero-constant Shamir refresh across all `n` custodians!
+            let mut ref_rngs = make_party_rngs(cfg.n, 0x40 + t as u8);
+            refresh_bft_shamir_shares(&cfg, &mut qs_b.custodians, [0x77; 32], &mut ref_rngs)
+                .expect("refresh QS-B");
+            assert_eq!(*qs_b.public_key(), pk);
+
+            // Switch to a different quorum `{n - q .. n}` & signer set `{n - t .. n}` on leaf 2!
+            let ackers_2: Vec<usize> = ((cfg.n - cfg.q)..cfg.n).collect();
+            let signers_2: Vec<usize> = ((cfg.n - cfg.t)..cfg.n).collect();
+            let sig2 = qs_b
+                .sign_at(2, &ackers_2, &signers_2, b"dealerless-qs-b-switched")
+                .expect("switched sign");
+            assert!(verify_jorts_signature(
+                &pk,
+                b"dealerless-qs-b-switched",
+                &sig2
+            ));
+
+            // Re-certify leaf 1 under rotated MAC keys: post-refresh `t`-quorum succeeds,
+            // whereas `(t - 1)` pre-refresh shares + `1` post-refresh share fails `ChainVerifyFailed`!
+            let sig1 = qs_b
+                .sign_at(1, &ackers_0, &signers_0, b"epoch-1-refresh")
+                .expect("post-refresh leaf 1");
+            assert!(verify_jorts_signature(&pk, b"epoch-1-refresh", &sig1));
+
+            let mut post_acks = Vec::new();
+            for &p in &ackers_0 {
+                let (_, ack) = qs_b.custodians[p].ack(1, b"epoch-1-refresh").expect("re-ack");
+                post_acks.push(ack);
+            }
+            let post_cert = LatchCertificate::assemble(&rec1, post_acks);
+            let fresh_open_last = qs_b.custodians[cfg.t - 1]
+                .open_shares(1, b"epoch-1-refresh", &post_cert)
+                .expect("fresh open");
+
+            let mut mixed = stale_openings;
+            mixed.push(fresh_open_last);
+            let mixed_res = combine_shamir(&cfg, &qs_b.tree, &rec1, &mixed);
+            assert!(
+                matches!(mixed_res, Err(QuorumError::ChainVerifyFailed { .. })),
+                "mixing pre-refresh and post-refresh Shamir shares must fail: {mixed_res:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dealerless_staging_and_refresh_reject_all_tampered_openings() {
+        // 1. Tampered `pk_seed` Round-2 opening in QS-A.
+        let mut rngs = make_party_rngs(3, 0x61);
+        let res = stage_committee_partitioned_inner(
+            2,
+            3,
+            1,
+            [0x01; 32],
+            &mut rngs,
+            Some(StagingFault::CorruptPkSeedOpen { party: 1 }),
+        );
+        assert!(matches!(
+            res,
+            Err(DealerlessStagingError::CommitmentMismatch {
+                phase: "pk_seed",
+                party: 1
+            })
+        ));
+
+        // 2. Tampered Beaver AND cross-term in QS-A -> caught by 16-round GF(2^128) sacrifice!
+        let mut rngs = make_party_rngs(3, 0x62);
+        let res = stage_committee_partitioned_inner(
+            2,
+            3,
+            2,
+            [0x02; 32],
+            &mut rngs,
+            Some(StagingFault::CorruptQsABeaverBit { committee: 0 }),
+        );
+        assert!(matches!(
+            res,
+            Err(DealerlessStagingError::TripleSacrificeFailed { committee: 0 })
+        ));
+
+        // 3. Tampered `y^(3)` share opening in QS-A -> caught by committed SPDZ `MacCheck`!
+        let mut rngs = make_party_rngs(3, 0x63);
+        let res = stage_committee_partitioned_inner(
+            2,
+            3,
+            2,
+            [0x03; 32],
+            &mut rngs,
+            Some(StagingFault::CorruptQsAEndpointOpen {
+                committee: 1,
+                member_pos: 1,
+            }),
+        );
+        assert!(matches!(
+            res,
+            Err(DealerlessStagingError::MacCheckFailed { committee: 1, .. })
+        ));
+
+        // 4. Non-Boolean `GF(2^8)` DKG input (`y_d not in {0, 1}`) in QS-B -> caught before opening!
+        let cfg = QuorumConfig::tight(2).expect("cfg");
+        let mut rngs = make_party_rngs(cfg.n, 0x64);
+        let res = stage_bft_shamir_inner(
+            cfg,
+            1,
+            [0x04; 32],
+            &mut rngs,
+            Some(StagingFault::CorruptQsBNonBooleanInput { dealer: 2 }),
+        );
+        assert!(matches!(
+            res,
+            Err(DealerlessStagingError::MultiplicationCheckFailed { .. })
+        ));
+
+        // 5. Tampered `Chi` gate product in QS-B -> caught before opening `y^(3)`!
+        let mut rngs = make_party_rngs(cfg.n, 0x65);
+        let res = stage_bft_shamir_inner(
+            cfg,
+            1,
+            [0x05; 32],
+            &mut rngs,
+            Some(StagingFault::CorruptQsBGateProduct { party: 0 }),
+        );
+        assert!(matches!(
+            res,
+            Err(DealerlessStagingError::MultiplicationCheckFailed { .. })
+        ));
+
+        // 6. Tampered `y^(3)` share opening in QS-B -> caught by Reed-Solomon degree check!
+        let mut rngs = make_party_rngs(cfg.n, 0x66);
+        let res = stage_bft_shamir_inner(
+            cfg,
+            1,
+            [0x06; 32],
+            &mut rngs,
+            Some(StagingFault::CorruptQsBEndpointOpen { party: 3 }),
+        );
+        assert!(matches!(
+            res,
+            Err(DealerlessStagingError::EndpointOpeningDegreeMismatch { batch: 0 })
+        ));
+
+        // 7. Tampered proactive refresh polynomials (`P(0) != 0` and `deg >= t`) rejected intact!
+        let mut rngs = make_party_rngs(cfg.n, 0x67);
+        let staged = stage_bft_shamir_dealerless_mpc(cfg, 1, [0x07; 32], &mut rngs).expect("stage");
+        let pk = *staged.tree.public_key();
+        let mut qs_b = BftShamirJorts::from_staged(staged).expect("from_staged");
+
+        let mut bad_rngs = make_party_rngs(cfg.n, 0x68);
+        let nz_res = refresh_bft_shamir_shares_inner(
+            &cfg,
+            &mut qs_b.custodians,
+            [0x08; 32],
+            &mut bad_rngs,
+            Some(StagingFault::CorruptQsBRefreshNonZeroConstant { dealer: 1 }),
+        );
+        assert_eq!(
+            nz_res,
+            Err(DealerlessStagingError::ZeroConstantCheckFailed { dealer: 1 })
+        );
+
+        let hd_res = refresh_bft_shamir_shares_inner(
+            &cfg,
+            &mut qs_b.custodians,
+            [0x09; 32],
+            &mut bad_rngs,
+            Some(StagingFault::CorruptQsBRefreshHighDegree {
+                dealer: 2,
+                target_party: 0,
+            }),
+        );
+        assert_eq!(
+            hd_res,
+            Err(DealerlessStagingError::ShamirDegreeCheckFailed {
+                phase: "qsb_proactive_refresh",
+                dealer: 2,
+            })
+        );
+
+        // Custodian shares remain completely uncorrupted after aborted refresh attempts!
+        let sig = qs_b
+            .sign(&[0, 1, 2], &[0, 1], b"intact-after-rejected-refresh")
+            .expect("intact sign");
+        assert!(verify_jorts_signature(
+            &pk,
+            b"intact-after-rejected-refresh",
+            &sig
+        ));
+    }
+}
