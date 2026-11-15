@@ -40,7 +40,7 @@
 //! on opened values, so all honest parties execute the same rounds.
 
 use crate::fips204_ntt::{MLDSA_Q, fq_add, fq_inv_or_zero, fq_mul, fq_sub};
-use crate::secret_buffer::{SecretBuffer, Wipe};
+use qsag_core::wipe::{SecretBuffer, SecretWipe};
 use alloc::vec;
 use alloc::vec::Vec;
 use qsag_accel::ct::{ct_eq_bytes, ct_zeroize_bytes, ct_zeroize_u32s};
@@ -1763,8 +1763,8 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
                 right.push(others.iter().fold(0, |sum, &j| sum ^ y[j][k]));
             }
             acc ^= qsag_asm::bitslice::gf2_128_dot(&left, &right);
-            left.wipe();
-            right.wipe();
+            left.secret_wipe();
+            right.secret_wipe();
         }
         acc
     }
@@ -1979,10 +1979,10 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
                 }
                 bz[i] = next;
                 let next_x = eval_groups_gf128(&bx[i], &basis, groups);
-                bx[i].wipe();
+                bx[i].secret_wipe();
                 bx[i] = next_x;
                 let next_y = eval_groups_gf128(&by[i], &basis, groups);
-                by[i].wipe();
+                by[i].secret_wipe();
                 by[i] = next_y;
             }
             mask_coefficient = gf128_mul(mask_coefficient, basis[0]);
@@ -2111,10 +2111,10 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
                         }
                         z[i] = next;
                         let next = fold_groups(&x[i], &basis, groups);
-                        x[i].wipe();
+                        x[i].secret_wipe();
                         x[i] = next;
                         let next = fold_groups(&y[i], &basis, groups);
-                        y[i].wipe();
+                        y[i].secret_wipe();
                         y[i] = next;
                     }
                     mask_coefficient = k_mul(&mask_coefficient, &basis[0]);

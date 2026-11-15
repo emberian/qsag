@@ -24,7 +24,7 @@
 //! The recipient accepts a received vector only if it equals the other vector
 //! or matches that digest. Two of the three contributions are honest, so an
 //! accepted vector is the honest one unless the hash collides.
-use crate::secret_buffer::SecretBuffer;
+use qsag_core::wipe::SecretBuffer;
 use crate::voprf::{Error, SERVERS, Transport};
 use alloc::{vec, vec::Vec};
 use qsag_accel::{
