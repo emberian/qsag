@@ -8,6 +8,7 @@ public import Qsag.Protocol.Aggregation.Poseidon2AlgebraicAndRecursiveHem
 import all Qsag.Oracle.Poseidon2
 import all Qsag.Protocol.Aggregation.Poseidon2AlgebraicAndRecursiveHem
 import Qsag.Tactic.AssuranceKit
+import Qsag.Math.Tactic.MaskBijection
 
 public section
 set_option maxRecDepth 4096

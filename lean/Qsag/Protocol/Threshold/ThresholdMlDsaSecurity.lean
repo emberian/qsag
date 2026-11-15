@@ -32,6 +32,7 @@ distribution.
 
 public import Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
 public import Qsag.Tactic.AssuranceKit
+public import Qsag.Math.Tactic.MaskBijection
 import all Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
 import all Qsag.Protocol.Aggregation.UcGames
 import all Qsag.Protocol.Credentials.AdvancedMpcAndCreds

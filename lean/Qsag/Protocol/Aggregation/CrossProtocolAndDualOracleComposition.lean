@@ -20,6 +20,7 @@ import all Qsag.Oracle.Poseidon2
 import all Qsag.Protocol.Signing.Fips205
 import all Qsag.Oracle.Sponge
 import Qsag.Tactic.AssuranceKit
+import Qsag.Math.Tactic.MaskBijection
 
 public section
 namespace Qsag.CrossProtocol

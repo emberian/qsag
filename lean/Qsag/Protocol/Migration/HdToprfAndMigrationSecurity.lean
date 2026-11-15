@@ -58,6 +58,7 @@ public import Qsag.Math.Goldilocks
 public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Custody.CustodySuiteFull
 public import Qsag.Tactic.AssuranceKit
+public import Qsag.Math.Tactic.MaskBijection
 public import Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
 import all Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
 import all Qsag.Oracle.Keccak
