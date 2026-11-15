@@ -476,6 +476,25 @@ pub fn gf2_64x128_clmul_acc_with_backend(
     #[cfg(target_arch = "x86_64")]
     {
         let caps = cpuid::probe_capabilities();
+        if backend == SimdBackend::X86Avx512GfniVpclmul
+            && caps.avx512
+            && caps.avx2
+            && caps.vpclmulqdq
+            && caps.pclmulqdq
+        {
+            let end = words.len() / 4 * 4;
+            // SAFETY: feature checks above; each batch reads four words and writes
+            // four pairs, with scalar cleanup for the remaining zero to three words.
+            unsafe {
+                if end != 0 {
+                    clmul_64x128_acc_zmm(&mut acc[..end], &words[..end], &scalar);
+                }
+                if end != words.len() {
+                    clmul_64x128_acc_x86(&mut acc[end..], &words[end..], &scalar);
+                }
+            }
+            return;
+        }
         if matches!(
             backend,
             SimdBackend::X86Avx2Pclmul
@@ -526,6 +545,53 @@ unsafe fn clmul_64x128_acc_x86(acc: &mut [[u128; 2]], words: &[u64], scalar: &u1
             count = inout(reg) words.len() => _,
             scalar = in(reg) scalar,
             out("xmm0") _, out("xmm1") _, out("xmm4") _, out("xmm5") _,
+            options(nostack),
+        );
+    }
+}
+
+/// Four independent carryless products in ZMM lanes, retaining the public ABI
+/// of adjacent low/high 128-bit polynomial accumulators.
+#[cfg(target_arch = "x86_64")]
+unsafe fn clmul_64x128_acc_zmm(acc: &mut [[u128; 2]], words: &[u64], scalar: &u128) {
+    const DUP: [u64; 8] = [0, 0, 1, 1, 2, 2, 3, 3];
+    const LOW: [u64; 8] = [0, 1, 8, 9, 2, 3, 10, 11];
+    const HIGH: [u64; 8] = [4, 5, 12, 13, 6, 7, 14, 15];
+    // SAFETY: caller validates AVX-512, VPCLMUL, nonzero length divisible by four,
+    // and matching slice lengths. All touched SIMD registers are explicitly wiped.
+    unsafe {
+        core::arch::asm!(
+            "vbroadcasti32x4 zmm5, xmmword ptr [{scalar}]",
+            "vmovdqu64 zmm6, [{dup}]",
+            "vmovdqu64 zmm7, [{low}]",
+            "vmovdqu64 zmm8, [{high}]",
+            "2:",
+            "vmovdqu ymm0, ymmword ptr [{words}]",
+            "vpermq zmm0, zmm6, zmm0",
+            "vpclmulqdq zmm1, zmm0, zmm5, 0x00",
+            "vpclmulqdq zmm2, zmm0, zmm5, 0x10",
+            "vmovdqa64 zmm3, zmm7",
+            "vmovdqa64 zmm4, zmm8",
+            "vpermi2q zmm3, zmm1, zmm2",
+            "vpermi2q zmm4, zmm1, zmm2",
+            "vpxorq zmm3, zmm3, zmmword ptr [{acc}]",
+            "vpxorq zmm4, zmm4, zmmword ptr [{acc} + 64]",
+            "vmovdqu64 zmmword ptr [{acc}], zmm3",
+            "vmovdqu64 zmmword ptr [{acc} + 64], zmm4",
+            "add {words}, 32",
+            "add {acc}, 128",
+            "dec {count}",
+            "jnz 2b",
+            "vpxorq zmm0, zmm0, zmm0", "vpxorq zmm1, zmm1, zmm1",
+            "vpxorq zmm2, zmm2, zmm2", "vpxorq zmm3, zmm3, zmm3",
+            "vpxorq zmm4, zmm4, zmm4", "vpxorq zmm5, zmm5, zmm5",
+            "vpxorq zmm6, zmm6, zmm6", "vpxorq zmm7, zmm7, zmm7",
+            "vpxorq zmm8, zmm8, zmm8", "vzeroupper",
+            words = inout(reg) words.as_ptr() => _, acc = inout(reg) acc.as_mut_ptr() => _,
+            count = inout(reg) words.len() / 4 => _, scalar = in(reg) scalar,
+            dup = in(reg) DUP.as_ptr(), low = in(reg) LOW.as_ptr(), high = in(reg) HIGH.as_ptr(),
+            out("zmm0") _, out("zmm1") _, out("zmm2") _, out("zmm3") _, out("zmm4") _,
+            out("zmm5") _, out("zmm6") _, out("zmm7") _, out("zmm8") _,
             options(nostack),
         );
     }
