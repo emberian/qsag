@@ -37,7 +37,7 @@ pub use vulkan::{
 use ct::{RedactedSecret, ct_eq_bytes_mask, ct_eq_mask_u64};
 use gf2_128::bdoz_gf2_128_batch_dot_cpu;
 use goldilocks::{coset_lde_ext2_cpu, gl_reduce_u64, goldilocks_ntt_cpu};
-use keccak::{cshake256_framed_32, keccak_f1600};
+use keccak::cshake256_framed_32;
 use poseidon2::{merkle_layer_poseidon2_at_cpu, poseidon2_hash_framed_limbs4, poseidon2_perm12};
 use sha2::sha256;
 
@@ -742,9 +742,7 @@ impl AcceleratorBackend for CpuReferenceBackend {
     }
 
     fn batch_keccak_f1600(&self, states: &mut [[u64; 25]]) {
-        for st in states.iter_mut() {
-            keccak_f1600(st);
-        }
+        qsag_asm::keccak_f1600_batch(states);
     }
 
     fn batch_poseidon2_perm12(&self, states: &mut [[u64; 12]]) {

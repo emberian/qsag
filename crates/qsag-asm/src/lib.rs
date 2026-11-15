@@ -42,8 +42,14 @@ extern crate std;
 
 pub mod bitslice;
 pub mod cpuid;
+pub mod ntt_simd;
 pub mod portable;
+pub mod sha2_hw;
 
+#[cfg(target_arch = "x86_64")]
+mod avx512;
+#[cfg(target_arch = "x86_64")]
+mod gf256_simd;
 #[cfg(target_arch = "x86_64")]
 pub mod x86_64_asm;
 
@@ -62,15 +68,69 @@ pub use cpuid::{
     CpuCapabilities, DitRequirement, HardwareDitGuard, HardwareDitStatus, HardwareDitUnavailable,
     SimdBackend, detect_backend, enable_hardware_dit, probe_capabilities,
 };
+pub use ntt_simd::{
+    mldsa_inv_ntt, mldsa_inv_ntt_with_backend, mldsa_ntt, mldsa_ntt_with_backend,
+    mldsa_pointwise_mul, mldsa_pointwise_mul_with_backend,
+};
 pub use portable::{
     GFNI_MAT_POLY_TO_T3, GFNI_MAT_T3_TO_POLY, GOLDILOCKS_EPSILON, GOLDILOCKS_PRIME,
-    KECCAK_ROTATION_OFFSETS, KECCAK_ROUND_CONSTANTS, KeccakRow256, KeccakState4x, POLY_TO_T7_BASIS,
-    T7_TO_POLY_BASIS, TOWER128_POLY_GENERATORS, poly128_to_tower128_ct, tower128_to_poly128_ct,
+    KECCAK_ROTATION_OFFSETS, KECCAK_ROUND_CONSTANTS, KeccakRow256, KeccakState4x, KeccakState8x,
+    POLY_TO_T7_BASIS, T7_TO_POLY_BASIS, TOWER128_POLY_GENERATORS, poly128_to_tower128_ct,
+    tower128_to_poly128_ct,
+};
+pub use sha2_hw::{
+    sha256_compress_blocks, sha256_compress_blocks_portable, sha256_compress_bytes,
 };
 
 // ============================================================================
 // Safe Runtime-Dispatched & Explicit-Backend Entrypoints
 // ============================================================================
+
+/// Execute 24-round `Keccak-f[1600]` across 8 parallel 1600-bit states (`512` bits per lane).
+#[inline]
+pub fn keccak_f1600_x8(state: &mut KeccakState8x) {
+    keccak_f1600_x8_with_backend(state, detect_backend());
+}
+
+/// Execute `keccak_f1600_x8` on a specific [`SimdBackend`] (falling back safely if unsupported).
+pub fn keccak_f1600_x8_with_backend(state: &mut KeccakState8x, backend: SimdBackend) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if backend == SimdBackend::X86Avx512GfniVpclmul && cpuid::probe_capabilities().avx512 {
+            // SAFETY: `probe_capabilities().avx512` verified `AVX512F + AVX512VL` and OS ZMM save.
+            unsafe {
+                avx512::keccak_f1600_avx512_8x(state);
+            }
+            return;
+        }
+    }
+    if backend != SimdBackend::Portable {
+        let mut lo = KeccakState4x::default();
+        let mut hi = KeccakState4x::default();
+        for (lane, words) in state.0.iter().enumerate() {
+            lo.0[lane] = [words[0], words[1], words[2], words[3]];
+            hi.0[lane] = [words[4], words[5], words[6], words[7]];
+        }
+        keccak_f1600_x4_with_backend(&mut lo, backend);
+        keccak_f1600_x4_with_backend(&mut hi, backend);
+        for (lane, words) in state.0.iter_mut().enumerate() {
+            *words = [
+                lo.0[lane][0],
+                lo.0[lane][1],
+                lo.0[lane][2],
+                lo.0[lane][3],
+                hi.0[lane][0],
+                hi.0[lane][1],
+                hi.0[lane][2],
+                hi.0[lane][3],
+            ];
+        }
+        volatile_fill(&mut lo.0, [0; 4]);
+        volatile_fill(&mut hi.0, [0; 4]);
+        return;
+    }
+    portable::keccak_f1600_8x_portable(state);
+}
 
 /// Execute 24-round `Keccak-f[1600]` across 4 parallel 1600-bit states (`256` bits per lane).
 #[inline]
@@ -84,7 +144,9 @@ pub fn keccak_f1600_x4_with_backend(state: &mut KeccakState4x, backend: SimdBack
     {
         if matches!(
             backend,
-            SimdBackend::X86Avx2Pclmul | SimdBackend::X86Avx2GfniVpclmul
+            SimdBackend::X86Avx2Pclmul
+                | SimdBackend::X86Avx2GfniVpclmul
+                | SimdBackend::X86Avx512GfniVpclmul
         ) && cpuid::probe_capabilities().avx2
         {
             // SAFETY: `probe_capabilities().avx2` verified both CPUID AVX2 and OS XCR0 YMM save.
@@ -139,7 +201,9 @@ pub fn keccak_chi_mpc_row256_with_backend(
     {
         if matches!(
             backend,
-            SimdBackend::X86Avx2Pclmul | SimdBackend::X86Avx2GfniVpclmul
+            SimdBackend::X86Avx2Pclmul
+                | SimdBackend::X86Avx2GfniVpclmul
+                | SimdBackend::X86Avx512GfniVpclmul
         ) && cpuid::probe_capabilities().avx2
         {
             // SAFETY: `avx2` + OS YMM verified; pointers derive from valid `&KeccakRow256` refs.
@@ -171,10 +235,64 @@ pub fn gf256_shamir_mul_with_backend(dst: &mut [u8], a: &[u8], b: &[u8], backend
     #[cfg(target_arch = "x86_64")]
     {
         let caps = cpuid::probe_capabilities();
+        if backend == SimdBackend::X86Avx512GfniVpclmul && caps.avx512 && caps.gfni {
+            let blocks64 = dst.len() / 64;
+            let rem64 = dst.len() % 64;
+            if blocks64 > 0 {
+                // SAFETY: `caps.avx512 && caps.gfni` verified; `blocks64 * 64 <= dst.len()`.
+                unsafe {
+                    avx512::gf256_shamir_mul_avx512_gfni(
+                        dst.as_mut_ptr(),
+                        a.as_ptr(),
+                        b.as_ptr(),
+                        blocks64,
+                    );
+                }
+            }
+            if rem64 >= 32 {
+                let off = blocks64 * 64;
+                unsafe {
+                    x86_64_asm::qsag_asm_gf256_shamir_mul_gfni(
+                        dst[off..].as_mut_ptr(),
+                        a[off..].as_ptr(),
+                        b[off..].as_ptr(),
+                        1,
+                    );
+                }
+            }
+            let rem32 = dst.len() % 32;
+            if rem32 > 0 {
+                let off = dst.len() - rem32;
+                let mut ta = [0u8; 32];
+                let mut tb = [0u8; 32];
+                let mut td = [0u8; 32];
+                ta[..rem32].copy_from_slice(&a[off..]);
+                tb[..rem32].copy_from_slice(&b[off..]);
+                unsafe {
+                    x86_64_asm::qsag_asm_gf256_shamir_mul_gfni(
+                        td.as_mut_ptr(),
+                        ta.as_ptr(),
+                        tb.as_ptr(),
+                        1,
+                    );
+                }
+                dst[off..].copy_from_slice(&td[..rem32]);
+                ct_memzero(&mut ta);
+                ct_memzero(&mut tb);
+                ct_memzero(&mut td);
+            }
+            return;
+        }
+
         let blocks = dst.len() / 32;
         let rem = dst.len() % 32;
 
-        if backend == SimdBackend::X86Avx2GfniVpclmul && caps.avx2 && caps.gfni {
+        if matches!(
+            backend,
+            SimdBackend::X86Avx2GfniVpclmul | SimdBackend::X86Avx512GfniVpclmul
+        ) && caps.avx2
+            && caps.gfni
+        {
             if blocks > 0 {
                 // SAFETY: `avx2` + `gfni` verified; `blocks * 32 <= dst.len()`.
                 unsafe {
@@ -211,18 +329,19 @@ pub fn gf256_shamir_mul_with_backend(dst: &mut [u8], a: &[u8], b: &[u8], backend
 
         if matches!(
             backend,
-            SimdBackend::X86Avx2Pclmul | SimdBackend::X86Avx2GfniVpclmul
+            SimdBackend::X86Avx2Pclmul
+                | SimdBackend::X86Avx2GfniVpclmul
+                | SimdBackend::X86Avx512GfniVpclmul
         ) && caps.avx2
         {
             if blocks > 0 {
-                // SAFETY: `avx2` verified; `AVX2_GF256_ISO_LUTS` is 32-byte aligned static rodata.
+                // SAFETY: `avx2` verified; register-only split-nibble `vpshufb` in `T_3`.
                 unsafe {
-                    x86_64_asm::qsag_asm_gf256_shamir_mul_avx2(
+                    gf256_simd::gf256_shamir_mul_vpshufb_avx2(
                         dst.as_mut_ptr(),
                         a.as_ptr(),
                         b.as_ptr(),
                         blocks,
-                        &x86_64_asm::AVX2_GF256_ISO_LUTS,
                     );
                 }
             }
@@ -234,12 +353,11 @@ pub fn gf256_shamir_mul_with_backend(dst: &mut [u8], a: &[u8], b: &[u8], backend
                 ta[..rem].copy_from_slice(&a[off..]);
                 tb[..rem].copy_from_slice(&b[off..]);
                 unsafe {
-                    x86_64_asm::qsag_asm_gf256_shamir_mul_avx2(
+                    gf256_simd::gf256_shamir_mul_vpshufb_avx2(
                         td.as_mut_ptr(),
                         ta.as_ptr(),
                         tb.as_ptr(),
                         1,
-                        &x86_64_asm::AVX2_GF256_ISO_LUTS,
                     );
                 }
                 dst[off..].copy_from_slice(&td[..rem]);
@@ -277,10 +395,61 @@ pub fn gf256_shamir_mac_with_backend(
     #[cfg(target_arch = "x86_64")]
     {
         let caps = cpuid::probe_capabilities();
+        if backend == SimdBackend::X86Avx512GfniVpclmul && caps.avx512 && caps.gfni {
+            let blocks64 = acc.len() / 64;
+            let rem64 = acc.len() % 64;
+            if blocks64 > 0 {
+                unsafe {
+                    avx512::gf256_shamir_mac_avx512_gfni(
+                        acc.as_mut_ptr(),
+                        shares.as_ptr(),
+                        scalar as u32,
+                        blocks64,
+                    );
+                }
+            }
+            if rem64 >= 32 {
+                let off = blocks64 * 64;
+                unsafe {
+                    x86_64_asm::qsag_asm_gf256_shamir_mac_gfni(
+                        acc[off..].as_mut_ptr(),
+                        shares[off..].as_ptr(),
+                        scalar as u32,
+                        1,
+                    );
+                }
+            }
+            let rem32 = acc.len() % 32;
+            if rem32 > 0 {
+                let off = acc.len() - rem32;
+                let mut ts = [0u8; 32];
+                let mut ta = [0u8; 32];
+                ts[..rem32].copy_from_slice(&shares[off..]);
+                ta[..rem32].copy_from_slice(&acc[off..]);
+                unsafe {
+                    x86_64_asm::qsag_asm_gf256_shamir_mac_gfni(
+                        ta.as_mut_ptr(),
+                        ts.as_ptr(),
+                        scalar as u32,
+                        1,
+                    );
+                }
+                acc[off..].copy_from_slice(&ta[..rem32]);
+                ct_memzero(&mut ts);
+                ct_memzero(&mut ta);
+            }
+            return;
+        }
+
         let blocks = acc.len() / 32;
         let rem = acc.len() % 32;
 
-        if backend == SimdBackend::X86Avx2GfniVpclmul && caps.avx2 && caps.gfni {
+        if matches!(
+            backend,
+            SimdBackend::X86Avx2GfniVpclmul | SimdBackend::X86Avx512GfniVpclmul
+        ) && caps.avx2
+            && caps.gfni
+        {
             if blocks > 0 {
                 unsafe {
                     x86_64_asm::qsag_asm_gf256_shamir_mac_gfni(
@@ -314,17 +483,133 @@ pub fn gf256_shamir_mac_with_backend(
 
         if matches!(
             backend,
-            SimdBackend::X86Avx2Pclmul | SimdBackend::X86Avx2GfniVpclmul
+            SimdBackend::X86Avx2Pclmul
+                | SimdBackend::X86Avx2GfniVpclmul
+                | SimdBackend::X86Avx512GfniVpclmul
         ) && caps.avx2
         {
+            let blocks64 = acc.len() / 64;
+            let rem64 = acc.len() % 64;
+            if blocks64 > 0 {
+                unsafe {
+                    gf256_simd::gf256_shamir_mac_4vpshufb_avx2_x2(
+                        acc.as_mut_ptr(),
+                        shares.as_ptr(),
+                        scalar as u32,
+                        blocks64,
+                    );
+                }
+            }
+            if rem64 >= 32 {
+                let off = blocks64 * 64;
+                unsafe {
+                    gf256_simd::gf256_shamir_mac_vpshufb_avx2_x1(
+                        acc[off..].as_mut_ptr(),
+                        shares[off..].as_ptr(),
+                        scalar as u32,
+                        1,
+                    );
+                }
+            }
+            if rem > 0 {
+                let off = blocks * 32;
+                let mut ts = [0u8; 32];
+                let mut ta = [0u8; 32];
+                ts[..rem].copy_from_slice(&shares[off..]);
+                ta[..rem].copy_from_slice(&acc[off..]);
+                unsafe {
+                    gf256_simd::gf256_shamir_mac_vpshufb_avx2_x1(
+                        ta.as_mut_ptr(),
+                        ts.as_ptr(),
+                        scalar as u32,
+                        1,
+                    );
+                }
+                acc[off..].copy_from_slice(&ta[..rem]);
+                ct_memzero(&mut ts);
+                ct_memzero(&mut ta);
+            }
+            return;
+        }
+    }
+
+    let _ = backend;
+    portable::gf256_shamir_mac_portable(acc, shares, scalar);
+}
+
+/// Certified assembly `AVX2` Russian-peasant `GF(256)` Shamir multiplication (`qsag_asm_gf256_shamir_mul_avx2`,
+/// falling back to [`portable::gf256_shamir_mul_portable`] when `AVX2` is unavailable).
+pub fn gf256_shamir_mul_avx2_russian_peasant(dst: &mut [u8], a: &[u8], b: &[u8]) {
+    assert_eq!(dst.len(), a.len());
+    assert_eq!(dst.len(), b.len());
+    if dst.is_empty() {
+        return;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if cpuid::probe_capabilities().avx2 {
+            let blocks = dst.len() / 32;
+            let rem = dst.len() % 32;
             if blocks > 0 {
+                // SAFETY: `avx2` verified; `blocks * 32 <= dst.len()`.
+                unsafe {
+                    x86_64_asm::qsag_asm_gf256_shamir_mul_avx2(
+                        dst.as_mut_ptr(),
+                        a.as_ptr(),
+                        b.as_ptr(),
+                        blocks,
+                        &raw const x86_64_asm::AVX2_GF256_ISO_LUTS,
+                    );
+                }
+            }
+            if rem > 0 {
+                let off = blocks * 32;
+                let mut ta = [0u8; 32];
+                let mut tb = [0u8; 32];
+                let mut td = [0u8; 32];
+                ta[..rem].copy_from_slice(&a[off..]);
+                tb[..rem].copy_from_slice(&b[off..]);
+                unsafe {
+                    x86_64_asm::qsag_asm_gf256_shamir_mul_avx2(
+                        td.as_mut_ptr(),
+                        ta.as_ptr(),
+                        tb.as_ptr(),
+                        1,
+                        &raw const x86_64_asm::AVX2_GF256_ISO_LUTS,
+                    );
+                }
+                dst[off..].copy_from_slice(&td[..rem]);
+                ct_memzero(&mut ta);
+                ct_memzero(&mut tb);
+                ct_memzero(&mut td);
+            }
+            return;
+        }
+    }
+    portable::gf256_shamir_mul_portable(dst, a, b);
+}
+
+/// Certified assembly `AVX2` Russian-peasant `GF(256)` Shamir MAC (`qsag_asm_gf256_shamir_mac_avx2`,
+/// falling back to [`portable::gf256_shamir_mac_portable`] when `AVX2` is unavailable).
+pub fn gf256_shamir_mac_avx2_russian_peasant(acc: &mut [u8], shares: &[u8], scalar: u8) {
+    assert_eq!(acc.len(), shares.len());
+    if acc.is_empty() {
+        return;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if cpuid::probe_capabilities().avx2 {
+            let blocks = acc.len() / 32;
+            let rem = acc.len() % 32;
+            if blocks > 0 {
+                // SAFETY: `avx2` verified; `blocks * 32 <= acc.len()`.
                 unsafe {
                     x86_64_asm::qsag_asm_gf256_shamir_mac_avx2(
                         acc.as_mut_ptr(),
                         shares.as_ptr(),
                         scalar as u32,
                         blocks,
-                        &x86_64_asm::AVX2_GF256_ISO_LUTS,
+                        &raw const x86_64_asm::AVX2_GF256_ISO_LUTS,
                     );
                 }
             }
@@ -340,7 +625,7 @@ pub fn gf256_shamir_mac_with_backend(
                         ts.as_ptr(),
                         scalar as u32,
                         1,
-                        &x86_64_asm::AVX2_GF256_ISO_LUTS,
+                        &raw const x86_64_asm::AVX2_GF256_ISO_LUTS,
                     );
                 }
                 acc[off..].copy_from_slice(&ta[..rem]);
@@ -350,8 +635,6 @@ pub fn gf256_shamir_mac_with_backend(
             return;
         }
     }
-
-    let _ = backend;
     portable::gf256_shamir_mac_portable(acc, shares, scalar);
 }
 
@@ -378,7 +661,66 @@ pub fn tower128_bdoz_2lane_poly_mac_with_backend(
         let caps = cpuid::probe_capabilities();
         // Pack little-endian bytes explicitly on small stack chunks (`16` pairs = 512 B) so
         // arbitrary host `u128` alignment/endianness is 100% platform-invariant.
-        if backend == SimdBackend::X86Avx2GfniVpclmul && caps.avx2 && caps.vpclmulqdq {
+        if backend == SimdBackend::X86Avx512GfniVpclmul && caps.avx512 && caps.vpclmulqdq {
+            let mut total0 = 0u128;
+            let mut total1 = 0u128;
+            let mut lbuf = [0u8; 32 * 16];
+            let mut rbuf = [0u8; 32 * 16];
+            let mut obuf = [0u8; 32];
+            let mut b0 = [0u8; 16];
+            let mut b1 = [0u8; 16];
+            for (lc, rc) in lhs_pairs.chunks(16).zip(rhs_pairs.chunks(16)) {
+                let n = lc.len();
+                for i in 0..n {
+                    lbuf[32 * i..32 * i + 16].copy_from_slice(&lc[i][0].to_le_bytes());
+                    lbuf[32 * i + 16..32 * i + 32].copy_from_slice(&lc[i][1].to_le_bytes());
+                    rbuf[32 * i..32 * i + 16].copy_from_slice(&rc[i][0].to_le_bytes());
+                    rbuf[32 * i + 16..32 * i + 32].copy_from_slice(&rc[i][1].to_le_bytes());
+                }
+                let blocks64 = n / 2;
+                obuf = [0u8; 32];
+                unsafe {
+                    if blocks64 > 0 {
+                        avx512::tower128_bdoz_mac_avx512_evex(
+                            obuf.as_mut_ptr(),
+                            lbuf.as_ptr(),
+                            rbuf.as_ptr(),
+                            blocks64,
+                        );
+                        b0.copy_from_slice(&obuf[0..16]);
+                        b1.copy_from_slice(&obuf[16..32]);
+                        total0 ^= u128::from_le_bytes(b0);
+                        total1 ^= u128::from_le_bytes(b1);
+                    }
+                    if n % 2 == 1 {
+                        let off = 64 * blocks64;
+                        x86_64_asm::qsag_asm_tower128_bdoz_mac_vpclmul(
+                            obuf.as_mut_ptr(),
+                            lbuf[off..].as_ptr(),
+                            rbuf[off..].as_ptr(),
+                            1,
+                        );
+                        b0.copy_from_slice(&obuf[0..16]);
+                        b1.copy_from_slice(&obuf[16..32]);
+                        total0 ^= u128::from_le_bytes(b0);
+                        total1 ^= u128::from_le_bytes(b1);
+                    }
+                }
+            }
+            ct_memzero(&mut b0);
+            ct_memzero(&mut b1);
+            ct_memzero(&mut lbuf);
+            ct_memzero(&mut rbuf);
+            ct_memzero(&mut obuf);
+            return [total0, total1];
+        }
+
+        if matches!(
+            backend,
+            SimdBackend::X86Avx2GfniVpclmul | SimdBackend::X86Avx512GfniVpclmul
+        ) && caps.avx2
+            && caps.vpclmulqdq
+        {
             let mut total0 = 0u128;
             let mut total1 = 0u128;
             let mut lbuf = [0u8; 32 * 16];
@@ -417,7 +759,9 @@ pub fn tower128_bdoz_2lane_poly_mac_with_backend(
 
         if matches!(
             backend,
-            SimdBackend::X86Avx2Pclmul | SimdBackend::X86Avx2GfniVpclmul
+            SimdBackend::X86Avx2Pclmul
+                | SimdBackend::X86Avx2GfniVpclmul
+                | SimdBackend::X86Avx512GfniVpclmul
         ) && caps.avx2
             && caps.pclmulqdq
         {
@@ -665,7 +1009,9 @@ pub fn goldilocks_mul_ct_with_backend(a: u64, b: u64, backend: SimdBackend) -> u
     {
         if matches!(
             backend,
-            SimdBackend::X86Avx2Pclmul | SimdBackend::X86Avx2GfniVpclmul
+            SimdBackend::X86Avx2Pclmul
+                | SimdBackend::X86Avx2GfniVpclmul
+                | SimdBackend::X86Avx512GfniVpclmul
         ) && cpuid::probe_capabilities().bmi2
         {
             return unsafe { x86_64_asm::qsag_asm_goldilocks_mul_ct_x86_64(a, b) };
@@ -722,7 +1068,9 @@ pub fn goldilocks_pow7_ct_with_backend(x: u64, backend: SimdBackend) -> u64 {
     {
         if matches!(
             backend,
-            SimdBackend::X86Avx2Pclmul | SimdBackend::X86Avx2GfniVpclmul
+            SimdBackend::X86Avx2Pclmul
+                | SimdBackend::X86Avx2GfniVpclmul
+                | SimdBackend::X86Avx512GfniVpclmul
         ) && cpuid::probe_capabilities().bmi2
         {
             return unsafe { x86_64_asm::qsag_asm_goldilocks_pow7_ct_x86_64(x) };
@@ -994,11 +1342,12 @@ mod tests {
     #[test]
     fn exhaustive_65536_gf256_wiedemann_t3_mul_and_mac_across_all_backends() {
         // Test ALL 256 * 256 = 65,536 pairs (a, b) in chunks + odd tail lengths across
-        // Portable, X86Avx2Pclmul, and X86Avx2GfniVpclmul!
+        // Portable, X86Avx2Pclmul, X86Avx2GfniVpclmul, and X86Avx512GfniVpclmul!
         let mut a_all = [0u8; 512];
         let mut b_all = [0u8; 512];
         let mut exp_all = [0u8; 512];
         let mut out_gfni = [0u8; 512];
+        let mut out_avx512 = [0u8; 512];
         let mut out_avx2 = [0u8; 512];
 
         for chunk_base in (0..65536usize).step_by(512) {
@@ -1022,19 +1371,27 @@ mod tests {
                 &b_all,
                 SimdBackend::X86Avx2GfniVpclmul,
             );
+            gf256_shamir_mul_with_backend(
+                &mut out_avx512,
+                &a_all,
+                &b_all,
+                SimdBackend::X86Avx512GfniVpclmul,
+            );
             assert_eq!(out_avx2, exp_all);
             assert_eq!(out_gfni, exp_all);
+            assert_eq!(out_avx512, exp_all);
         }
 
-        // Also test all 256 scalars on non-multiple-of-32 length (77 bytes) for Shamir MAC!
-        let mut shares = [0u8; 77];
+        // Also test all 256 scalars on non-multiple-of-64 length (141 bytes) for Shamir MAC!
+        let mut shares = [0u8; 141];
         for (i, share) in shares.iter_mut().enumerate() {
             *share = (i as u8).wrapping_mul(37).wrapping_add(13);
         }
         for scalar in 0..=255u8 {
-            let mut acc_port = [0x5Au8; 77];
-            let mut acc_avx2 = [0x5Au8; 77];
-            let mut acc_gfni = [0x5Au8; 77];
+            let mut acc_port = [0x5Au8; 141];
+            let mut acc_avx2 = [0x5Au8; 141];
+            let mut acc_gfni = [0x5Au8; 141];
+            let mut acc_avx512 = [0x5Au8; 141];
             gf256_shamir_mac_with_backend(&mut acc_port, &shares, scalar, SimdBackend::Portable);
             gf256_shamir_mac_with_backend(
                 &mut acc_avx2,
@@ -1048,26 +1405,34 @@ mod tests {
                 scalar,
                 SimdBackend::X86Avx2GfniVpclmul,
             );
+            gf256_shamir_mac_with_backend(
+                &mut acc_avx512,
+                &shares,
+                scalar,
+                SimdBackend::X86Avx512GfniVpclmul,
+            );
             assert_eq!(acc_avx2, acc_port);
             assert_eq!(acc_gfni, acc_port);
+            assert_eq!(acc_avx512, acc_port);
         }
     }
 
     #[test]
     fn gf256_every_simd_tail_matches_portable_and_preserves_sentinels() {
         let mut rng = KeccakTestStream::new(0x7115);
-        let a: [u8; 65] = core::array::from_fn(|_| rng.next_u64() as u8);
-        let b: [u8; 65] = core::array::from_fn(|_| rng.next_u64() as u8);
-        for len in 0..=65 {
-            let mut expected = [0xa5; 67];
+        let a: [u8; 131] = core::array::from_fn(|_| rng.next_u64() as u8);
+        let b: [u8; 131] = core::array::from_fn(|_| rng.next_u64() as u8);
+        for len in 0..=131 {
+            let mut expected = [0xa5; 133];
             portable::gf256_shamir_mul_portable(&mut expected[1..1 + len], &a[..len], &b[..len]);
             for backend in [
                 SimdBackend::Portable,
                 SimdBackend::X86Avx2Pclmul,
                 SimdBackend::X86Avx2GfniVpclmul,
+                SimdBackend::X86Avx512GfniVpclmul,
                 SimdBackend::Aarch64NeonSha3Pmull,
             ] {
-                let mut actual = [0xa5; 67];
+                let mut actual = [0xa5; 133];
                 gf256_shamir_mul_with_backend(
                     &mut actual[1..1 + len],
                     &a[..len],
@@ -1076,7 +1441,7 @@ mod tests {
                 );
                 assert_eq!(actual, expected, "len={len} backend={backend:?}");
                 for scalar in [0, 1, 0x80, 0xff] {
-                    let mut expected = [0xa5; 67];
+                    let mut expected = [0xa5; 133];
                     let mut actual = expected;
                     portable::gf256_shamir_mac_portable(
                         &mut expected[1..1 + len],
@@ -1099,19 +1464,45 @@ mod tests {
     }
 
     #[test]
-    fn keccak_batch_tails_match_independent_portable_states() {
-        for len in 0..=9 {
-            let mut states = [[0u64; 25]; 9];
+    fn keccak_x8_and_batch_tails_match_independent_portable_states() {
+        let mut rng = KeccakTestStream::new(0x8888_1600_5120_ABCD);
+        let mut init8 = KeccakState8x::default();
+        for lane in 0..25 {
+            for inst in 0..8 {
+                init8.0[lane][inst] = rng.next_u64();
+            }
+        }
+        let mut exp8 = KeccakState8x(init8.0);
+        portable::keccak_f1600_8x_portable(&mut exp8);
+
+        for backend in [
+            SimdBackend::Portable,
+            SimdBackend::X86Avx2Pclmul,
+            SimdBackend::X86Avx2GfniVpclmul,
+            SimdBackend::X86Avx512GfniVpclmul,
+            SimdBackend::Aarch64NeonSha3Pmull,
+        ] {
+            let mut got8 = KeccakState8x(init8.0);
+            keccak_f1600_x8_with_backend(&mut got8, backend);
+            assert_eq!(got8.0, exp8.0, "keccak_f1600_x8 mismatch on {backend:?}");
+        }
+
+        for len in 0..=19 {
+            let mut states = [[0u64; 25]; 19];
             let mut expected = states;
             for i in 0..len {
-                let input = core::array::from_fn(|j| (25 * i + j) as u64);
+                let input = core::array::from_fn(|j| {
+                    ((25 * i + j) as u64)
+                        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                        .rotate_left((j % 63) as u32)
+                });
                 states[i] = input;
                 let mut single = KeccakState4x(core::array::from_fn(|j| [input[j]; 4]));
                 portable::keccak_f1600_4x_portable(&mut single);
                 expected[i] = core::array::from_fn(|j| single.0[j][0]);
             }
             keccak_f1600_batch(&mut states[..len]);
-            assert_eq!(states, expected);
+            assert_eq!(states, expected, "batch len={len}");
         }
     }
 
@@ -1134,16 +1525,142 @@ mod tests {
             tower128_bdoz_2lane_poly_mac_with_backend(&lhs, &rhs, SimdBackend::X86Avx2Pclmul);
         let poly_vpclmul =
             tower128_bdoz_2lane_poly_mac_with_backend(&lhs, &rhs, SimdBackend::X86Avx2GfniVpclmul);
+        let poly_avx512 = tower128_bdoz_2lane_poly_mac_with_backend(
+            &lhs,
+            &rhs,
+            SimdBackend::X86Avx512GfniVpclmul,
+        );
         assert_eq!(poly_pclmul, poly_port);
         assert_eq!(poly_vpclmul, poly_port);
+        assert_eq!(poly_avx512, poly_port);
 
         let t7_port = tower128_bdoz_2lane_mac_with_backend(&lhs, &rhs, SimdBackend::Portable);
         let t7_pclmul =
             tower128_bdoz_2lane_mac_with_backend(&lhs, &rhs, SimdBackend::X86Avx2Pclmul);
         let t7_vpclmul =
             tower128_bdoz_2lane_mac_with_backend(&lhs, &rhs, SimdBackend::X86Avx2GfniVpclmul);
+        let t7_avx512 =
+            tower128_bdoz_2lane_mac_with_backend(&lhs, &rhs, SimdBackend::X86Avx512GfniVpclmul);
         assert_eq!(t7_pclmul, t7_port);
         assert_eq!(t7_vpclmul, t7_port);
+        assert_eq!(t7_avx512, t7_port);
+    }
+
+    #[test]
+    fn sha256_hw_compress_matches_portable_and_nist_vectors() {
+        const IV: [u32; 8] = [
+            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+            0x5be0cd19,
+        ];
+        // NIST "abc" single-block vector
+        let mut block_abc = [0u8; 64];
+        block_abc[0] = b'a';
+        block_abc[1] = b'b';
+        block_abc[2] = b'c';
+        block_abc[3] = 0x80;
+        block_abc[63] = 24;
+        let mut st_hw = IV;
+        let mut st_port = IV;
+        sha256_compress_blocks(&mut st_hw, core::slice::from_ref(&block_abc));
+        sha256_compress_blocks_portable(&mut st_port, core::slice::from_ref(&block_abc));
+        assert_eq!(st_hw, st_port);
+        assert_eq!(
+            st_hw,
+            [
+                0xba7816bf, 0x8f01cfea, 0x414140de, 0x5dae2223, 0xb00361a3, 0x96177a9c, 0xb410ff61,
+                0xf20015ad,
+            ]
+        );
+
+        // 17-block pseudorandom stream parity
+        let mut rng = KeccakTestStream::new(0x5A25_6000_DEAD_C0DE);
+        let mut blocks = [[0u8; 64]; 17];
+        for blk in &mut blocks {
+            for chunk in blk.chunks_exact_mut(8) {
+                chunk.copy_from_slice(&rng.next_u64().to_le_bytes());
+            }
+        }
+        let mut st_hw = IV;
+        let mut st_port = IV;
+        sha256_compress_blocks(&mut st_hw, &blocks);
+        sha256_compress_blocks_portable(&mut st_port, &blocks);
+        assert_eq!(st_hw, st_port);
+    }
+
+    #[test]
+    fn seiler_mldsa_ntt_inv_ntt_and_negacyclic_convolution_parity() {
+        const Q: u64 = 8_380_417;
+        let mut rng = KeccakTestStream::new(0x8380_4170_2018_0039);
+        for trial in 0..64 {
+            let mut a = [0u32; 256];
+            let mut b = [0u32; 256];
+            for i in 0..256 {
+                a[i] = (rng.next_u64() % Q) as u32;
+                b[i] = (rng.next_u64() % Q) as u32;
+            }
+            if trial == 0 {
+                a[0] = 0;
+                a[1] = (Q - 1) as u32;
+                b[0] = (Q - 1) as u32;
+                b[255] = (Q - 1) as u32;
+            }
+
+            // Schoolbook negacyclic convolution mod (x^256 + 1, q)
+            let mut expected_conv = [0u32; 256];
+            for i in 0..256 {
+                for j in 0..256 {
+                    let prod = ((a[i] as u64) * (b[j] as u64)) % Q;
+                    if i + j < 256 {
+                        expected_conv[i + j] =
+                            (((expected_conv[i + j] as u64) + prod) % Q) as u32;
+                    } else {
+                        let k = i + j - 256;
+                        expected_conv[k] =
+                            (((expected_conv[k] as u64) + Q - prod) % Q) as u32;
+                    }
+                }
+            }
+
+            let mut a_port = a;
+            let mut b_port = b;
+            mldsa_ntt_with_backend(&mut a_port, SimdBackend::Portable);
+            mldsa_ntt_with_backend(&mut b_port, SimdBackend::Portable);
+            let mut c_port = [0u32; 256];
+            mldsa_pointwise_mul_with_backend(&mut c_port, &a_port, &b_port, SimdBackend::Portable);
+            let mut conv_port = c_port;
+            mldsa_inv_ntt_with_backend(&mut conv_port, SimdBackend::Portable);
+            assert_eq!(conv_port, expected_conv);
+
+            for backend in [
+                SimdBackend::X86Avx2Pclmul,
+                SimdBackend::X86Avx2GfniVpclmul,
+                SimdBackend::X86Avx512GfniVpclmul,
+            ] {
+                let mut a_simd = a;
+                let mut b_simd = b;
+                mldsa_ntt_with_backend(&mut a_simd, backend);
+                mldsa_ntt_with_backend(&mut b_simd, backend);
+                assert_eq!(a_simd, a_port, "ntt mismatch on {backend:?} trial={trial}");
+                assert_eq!(b_simd, b_port, "ntt mismatch on {backend:?} trial={trial}");
+
+                let mut c_simd = [0u32; 256];
+                mldsa_pointwise_mul_with_backend(&mut c_simd, &a_simd, &b_simd, backend);
+                assert_eq!(
+                    c_simd, c_port,
+                    "pointwise_mul mismatch on {backend:?} trial={trial}"
+                );
+
+                mldsa_inv_ntt_with_backend(&mut c_simd, backend);
+                assert_eq!(
+                    c_simd, expected_conv,
+                    "inv_ntt mismatch on {backend:?} trial={trial}"
+                );
+
+                let mut roundtrip = a_simd;
+                mldsa_inv_ntt_with_backend(&mut roundtrip, backend);
+                assert_eq!(roundtrip, a, "roundtrip mismatch on {backend:?}");
+            }
+        }
     }
 
     #[test]
@@ -1236,10 +1753,37 @@ pub fn volatile_fill<T: Copy>(buf: &mut [T], value: T) {
 #[cfg(feature = "std")]
 pub mod durable;
 
-/// Permute independent states in four-state SIMD blocks, including a padded tail.
+/// Permute independent states in eight-state (`AVX-512`) or four-state SIMD blocks,
+/// including a padded tail with explicit volatile scratch zeroization.
+#[inline]
 pub fn keccak_f1600_batch(states: &mut [[u64; 25]]) {
-    let backend = detect_backend();
-    for block in states.chunks_mut(4) {
+    keccak_f1600_batch_with_backend(states, detect_backend());
+}
+
+/// Execute [`keccak_f1600_batch`] on an explicit [`SimdBackend`].
+pub fn keccak_f1600_batch_with_backend(states: &mut [[u64; 25]], backend: SimdBackend) {
+    let mut rest = states;
+    if backend == SimdBackend::X86Avx512GfniVpclmul {
+        while rest.len() > 4 {
+            let take = rest.len().min(8);
+            let (block, next) = rest.split_at_mut(take);
+            rest = next;
+            let mut packed8 = KeccakState8x::default();
+            for (i, state) in block.iter().enumerate() {
+                for (lane, value) in state.iter().enumerate() {
+                    packed8.0[lane][i] = *value;
+                }
+            }
+            keccak_f1600_x8_with_backend(&mut packed8, backend);
+            for (i, state) in block.iter_mut().enumerate() {
+                for (lane, value) in state.iter_mut().enumerate() {
+                    *value = packed8.0[lane][i];
+                }
+            }
+            volatile_fill(&mut packed8.0, [0; 8]);
+        }
+    }
+    for block in rest.chunks_mut(4) {
         let mut packed = KeccakState4x::default();
         for (i, state) in block.iter().enumerate() {
             for (lane, value) in state.iter().enumerate() {

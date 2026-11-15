@@ -639,17 +639,21 @@ def extract_x86_global_asm_for_target(rs_path: Path, target_flavor: str) -> str:
     return "\n".join(out_lines) + "\n"
 
 
-def extract_elf_disasm_and_rodata_syms(archive_or_obj: Path) -> tuple[str, list[str]]:
+def extract_elf_disasm_and_rodata_syms(
+    archive_or_obj: Path, llvm_objdump: str | None = None
+) -> tuple[str, list[str]]:
     disasm_chunks: list[str] = []
     symtab_lines: list[str] = []
+    dis_cmd = (
+        [llvm_objdump, "-dr", "-C", "--x86-asm-syntax=intel"]
+        if llvm_objdump
+        else ["objdump", "-dr", "-C", "-M", "intel"]
+    )
+    sym_tool = llvm_objdump or "objdump"
     if archive_or_obj.read_bytes()[:4] == b"\x7fELF":
-        disasm_chunks.append(
-            subprocess.check_output(
-                ["objdump", "-d", "-C", "-M", "intel", str(archive_or_obj)], text=True
-            )
-        )
+        disasm_chunks.append(subprocess.check_output([*dis_cmd, str(archive_or_obj)], text=True))
         symtab_lines.extend(
-            subprocess.check_output(["objdump", "-t", str(archive_or_obj)], text=True).splitlines()
+            subprocess.check_output([sym_tool, "-t", str(archive_or_obj)], text=True).splitlines()
         )
     else:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -657,12 +661,10 @@ def extract_elf_disasm_and_rodata_syms(archive_or_obj: Path) -> tuple[str, list[
             for member in sorted(Path(tmpdir).iterdir()):
                 if member.is_file() and member.read_bytes()[:4] == b"\x7fELF":
                     disasm_chunks.append(
-                        subprocess.check_output(
-                            ["objdump", "-d", "-C", "-M", "intel", str(member)], text=True
-                        )
+                        subprocess.check_output([*dis_cmd, str(member)], text=True)
                     )
                     symtab_lines.extend(
-                        subprocess.check_output(["objdump", "-t", str(member)], text=True).splitlines()
+                        subprocess.check_output([sym_tool, "-t", str(member)], text=True).splitlines()
                     )
     return "\n".join(disasm_chunks), symtab_lines
 
@@ -897,7 +899,7 @@ def legacy_main() -> int:
     args.llvm_objdump = args.llvm_objdump or shutil.which("llvm-objdump-19") or shutil.which("llvm-objdump")
 
     rlib_path = Path(args.rlib).resolve()
-    out, symtab_lines = extract_elf_disasm_and_rodata_syms(rlib_path)
+    out, symtab_lines = extract_elf_disasm_and_rodata_syms(rlib_path, args.llvm_objdump)
     funcs = parse_objdump_functions(out)
 
     all_errors: list[str] = []
@@ -962,10 +964,10 @@ def legacy_main() -> int:
     archives_to_scan = [(rlib_path.name, funcs)]
     for extra in args.extra_rlib:
         ep = Path(extra).resolve()
-        e_out, _ = extract_elf_disasm_and_rodata_syms(ep)
+        e_out, _ = extract_elf_disasm_and_rodata_syms(ep, args.llvm_objdump)
         archives_to_scan.append((ep.name, parse_objdump_functions(e_out)))
 
-    expected_x86_set = set(EXPECTED_X86_SYMBOLS)
+    expected_x86_set = set(EXPECTED_X86_SYMBOLS) | set(EXPECTED_X86_BITSLICE_SYMBOLS)
     for arch_name, arch_funcs in archives_to_scan:
         for sym, ins in sorted(arch_funcs.items()):
             if sym in expected_x86_set or is_rust_non_crypto_helper(sym):
@@ -1100,7 +1102,9 @@ BITSLICE = {
 }
 RUST_MODULES = ('qsag_hd::linear_module::', 'qsag_asm::ct::',
                 'qsag_core::rss256::', 'qsag_core::wots_c::', 'qsag_quorum::dzk::',
-                'qsag_asm::bitslice::', 'qsag_asm::portable::')
+                'qsag_asm::bitslice::', 'qsag_asm::portable::',
+                'qsag_asm::avx512::', 'qsag_asm::gf256_simd::',
+                'qsag_asm::sha2_hw::', 'qsag_asm::ntt_simd::')
 
 
 def elf_header(data):
@@ -1164,9 +1168,10 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
             if name in operand:
                 return size
         return 32 if 'ymm' in operand else 16 if 'xmm' in operand else 8
-    scalar = is_branchless_portable_primitive(symbol) or any(
+    is_clmul64_acc = 'gf2_64x128_clmul_acc' in symbol or '::clmul_64x128_acc_' in symbol
+    scalar = (not is_clmul64_acc) and (is_branchless_portable_primitive(symbol) or any(
         name in symbol for name in ('ct_reduce_mod_q_', '::mod_q_', 'goldilocks_',
-                                     'wiedemann_', 'clmul', 'tower_mul', 'tower_scale'))
+                                     'wiedemann_', 'clmul', 'tower_mul', 'tower_scale')))
     taint = ({f'x{i}' for i in range(8)} if arm else
              {'rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9'}) if scalar else set()
     taint.update(f'v{i}' for i in range(32))
@@ -1176,7 +1181,17 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
         # the two scalar field limbs in r8/r9 are secret.
         taint.update(('r8', 'r9'))
         stack['rsp', 8] = False
+    if 'gf2_64x128_clmul_acc' in symbol:
+        # `(acc: &mut [[u128; 2]], words: &[u64], scalar: u128[, backend: SimdBackend])`:
+        # `acc` and `words` are public slice descriptors (contents secret); `scalar` limbs are secret.
+        taint.update(('x4', 'x5') if arm else ('r8', 'r9'))
+        if not arm and symbol.endswith('_with_backend'):
+            stack['rsp', 8] = False
     public_pointer = set()
+    if any(name in symbol for name in ('::gf2_xor_combine_planes', '::xor_combine_planes_avx2')):
+        # Documented `bitslice.rs` contract: `rows` (`rdi`/`x0`) is secret; `pattern` (`rsi`/`x1`)
+        # is the public subset-XOR nibble selector matrix.
+        public_pointer.add('x1' if arm else 'rsi')
     flags = True
     errors = []
     addresses = getattr(instructions, 'addresses', [])
@@ -1213,7 +1228,8 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
                 else:
                     errors.append(f'{symbol}[{i}]: unresolved conditional target')
             elif mnemonic in ('jmp', 'jmpq', 'b'):
-                successors = [positions[target]] if target in positions else []
+                reloc_jmp = getattr(instructions, 'relocations', {}).get(i, '')
+                successors = [positions[target]] if (not reloc_jmp and target in positions) else []
             elif mnemonic in ('ret', 'retq'):
                 successors = []
         # Preserve spill identities when the stack pointer moves. Unknown stack
@@ -1232,12 +1248,16 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
             stack = {(base, offset - delta if base == stack_base else offset): value
                      for (base, offset), value in stack.items()}
         try:
-            if mnemonic in ('nop', 'nopl', 'nopw', 'endbr64'):
+            if mnemonic in ('nop', 'nopl', 'nopw', 'endbr64') or (
+                    mnemonic == 'data16' and 'nop' in operands.lower()):
                 continue
             op = operands.lower()
             parts = [p.strip() for p in re.split(r',\s*(?![^\[]*\])', op)] if op else []
             relocation = getattr(instructions, 'relocations', {}).get(i, '')
-            public_symbol = any(n in relocation for n in ('qsag_asm::cpuid::CACHED_', 'qsag_asm::cpuid::BACKEND', '.LCPI', '.rodata.'))
+            public_symbol = any(n in relocation for n in (
+                'qsag_asm::cpuid::CACHED_', 'qsag_asm::cpuid::BACKEND', '.LCPI', '.rodata.',
+                'T7_TO_POLY_SELECTORS', 'NTT_TABLES', 'T3_VPSHUFB_CONSTS',
+                'SHA256_HW_CONSTS', 'AVX2_GF256_ISO_LUTS'))
             size = width(op if not arm else (parts[0] if parts else ''), mnemonic)
             def store_stack(mem, value, length=size, extra=0):
                 key = stack_key(mem)
@@ -1253,7 +1273,9 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
                         if key:
                             base, offset = key
                             return any(stack.get((base, offset + byte), True) for byte in range(size))
-                        return not (public_symbol or (regs(mem) and regs(mem) <= public_pointer))
+                        mem_regs = regs(mem)
+                        is_pub_deref = bool(mem_regs & public_pointer) and not (mem_regs & taint)
+                        return not (public_symbol or is_pub_deref)
                     return any(loaded(mem) for mem in memory)
                 return bool(regs(value) & taint)
             def fail(reason):
@@ -1302,28 +1324,33 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
             if not parts or conditional(mnemonic) or mnemonic in ('ret', 'jmp', 'b', 'nop', 'push'):
                 continue
             if mnemonic in ('call', 'callq', 'bl', 'blr'):
+                if any(p in relocation for p in ('panicking::', 'assert_failed', 'panic_bounds_check',
+                                                 'slice_end_index_len_fail', 'slice_start_index_len_fail')):
+                    successors = []
+                    continue
                 if 'qsag_asm::cpuid::probe_capabilities' in relocation:
-                    # The concrete Rust return ABI writes fourteen public capability bytes
-                    # through rdi (SysV) or x8 (AAPCS indirect result).
-                    target = 'x8' if arm else 'rdi'
-                    for j in range(i - 1, -1, -1):
-                        m, operand = instructions[j]
-                        operands_j = [p.strip().lower() for p in operand.split(',')]
-                        if not operands_j or reg(operands_j[0]) != target:
-                            continue
-                        if m == 'mov' and len(operands_j) == 2 and reg(operands_j[1]):
-                            if operands_j[1] in ('sp', 'rsp', 'x29', 'rbp'):
-                                store_stack(operands_j[1], False, 14)
-                                break
-                            target = reg(operands_j[1])
-                            continue
-                        if m == 'lea':
-                            for mem in re.findall(r'\[([^\]]+)\]', operand.lower()):
-                                store_stack(mem, False, 14)
-                        elif arm and m in ('add', 'sub') and len(operands_j) == 3:
-                            displacement = operands_j[2].lstrip('#')
-                            store_stack(operands_j[1] + ('-' if m == 'sub' else '+') + displacement, False, 14)
-                        break
+                    # The concrete Rust return ABI writes seventeen public capability bytes
+                    # through rdi (SysV) or x8 (AAPCS indirect result), or u32 bits in eax/w0.
+                    if 'probe_capabilities_bits' not in relocation:
+                        target = 'x8' if arm else 'rdi'
+                        for j in range(i - 1, -1, -1):
+                            m, operand = instructions[j]
+                            operands_j = [p.strip().lower() for p in operand.split(',')]
+                            if not operands_j or reg(operands_j[0]) != target:
+                                continue
+                            if m == 'mov' and len(operands_j) == 2 and reg(operands_j[1]):
+                                if operands_j[1] in ('sp', 'rsp', 'x29', 'rbp'):
+                                    store_stack(operands_j[1], False, 17)
+                                    break
+                                target = reg(operands_j[1])
+                                continue
+                            if m == 'lea':
+                                for mem in re.findall(r'\[([^\]]+)\]', operand.lower()):
+                                    store_stack(mem, False, 17)
+                            elif arm and m in ('add', 'sub') and len(operands_j) == 3:
+                                displacement = operands_j[2].lstrip('#')
+                                store_stack(operands_j[1] + ('-' if m == 'sub' else '+') + displacement, False, 17)
+                            break
                     taint.difference_update(('x0', 'x1') if arm else ('rax', 'rdx'))
                     continue
                 # Unknown return values must not become public by accident.
@@ -1359,7 +1386,12 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
                     or mnemonic in ('adc', 'adcs', 'sbb', 'sbc', 'sbcs')):
                 value |= flags
             if dst:
-                is_public_pointer = public_symbol or (move and sources and reg(sources[0]) in public_pointer)
+                is_public_pointer = (
+                    public_symbol
+                    or (move and sources and reg(sources[0]) in public_pointer)
+                    or (not value and dst in public_pointer and mnemonic in ('add', 'sub', 'inc', 'dec'))
+                    or (mnemonic == 'lea' and not value and bool(regs(','.join(sources)) & public_pointer))
+                )
                 public_pointer.discard(dst)
                 if is_public_pointer:
                     public_pointer.add(dst)
@@ -1482,6 +1514,22 @@ def self_tests():
                   (instruction, 'ecx, 0'), ('mov', 'rax, [rdi+rcx]')]
         assert rust_errors('buffer_probe', stream, True, 62)
         count += 1
+    # #tooth: `gf2_64x128_clmul_acc` must reject branches/addresses on secret `scalar` (`r8`/`r9`)
+    # or secret `words` (`[rdx]`), while permitting public slice length loop on `rsi`/`rcx`.
+    assert rust_errors('qsag_asm::bitslice::gf2_64x128_clmul_acc_portable',
+                       [('test', 'r8, r8'), ('jne', '0x20')], True, 62)
+    assert rust_errors('qsag_asm::bitslice::gf2_64x128_clmul_acc_portable',
+                       [('mov', 'rax, [rdx]'), ('mov', 'rbx, [rdi + rax*8]')], True, 62)
+    # #tooth: `gf2_xor_combine_planes` must still reject branches/addresses on secret `rows` (`[rdi]`)
+    # or secret-offset indexing into `pattern` (`rsi + secret`), while permitting public offsets.
+    assert rust_errors('qsag_asm::bitslice::gf2_xor_combine_planes_portable',
+                       [('mov', 'rax, [rdi]'), ('mov', 'rbx, [rdx + rax*8]')], True, 62)
+    assert rust_errors('qsag_asm::bitslice::gf2_xor_combine_planes_portable',
+                       [('mov', 'rax, [rdi]'), ('lea', 'r10, [rsi + rax]'), ('movzx', 'ebx, byte ptr [r10]')], True, 62)
+    assert not rust_errors('qsag_asm::bitslice::gf2_xor_combine_planes_portable',
+                           [('add', 'rsi, 16'), ('movzx', 'eax, byte ptr [rsi]'),
+                            ('and', 'eax, 15'), ('mov', 'rbx, [rdx + rax*8]')], True, 62)
+    count += 5
     return count
 
 

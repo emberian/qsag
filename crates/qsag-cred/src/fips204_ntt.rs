@@ -241,17 +241,27 @@ impl Poly256 {
         Self { coeffs: out }
     }
 
-    /// Pointwise multiplication in the NTT domain (`Algorithm 45`).
+    /// Pointwise multiplication in the NTT domain (`Algorithm 45`, SIMD-accelerated via Seiler signed Montgomery).
     pub fn pointwise_mul(&self, rhs: &Self) -> Self {
         let mut out = [0u32; MLDSA_N];
-        for (out, (&left, &right)) in out.iter_mut().zip(self.coeffs.iter().zip(&rhs.coeffs)) {
-            *out = fq_mul(left, right);
-        }
+        qsag_asm::mldsa_pointwise_mul(&mut out, &self.coeffs, &rhs.coeffs);
         Self { coeffs: out }
     }
 
-    /// Exact FIPS 204 Algorithm 41 forward `NTT` (Cooley-Tukey in-place, `0` secret branches).
+    /// Exact FIPS 204 Algorithm 41 forward `NTT` (Cooley-Tukey in-place, `0` secret branches,
+    /// dispatched to constant-time `AVX2` / `AVX-512` Seiler signed-Montgomery SIMD when available).
     pub fn ntt(&mut self) {
+        qsag_asm::mldsa_ntt(&mut self.coeffs);
+    }
+
+    /// Exact FIPS 204 Algorithm 42 inverse `NTT^{-1}` (Gentleman-Sande in-place, `0` secret branches,
+    /// dispatched to constant-time `AVX2` / `AVX-512` Seiler signed-Montgomery SIMD when available).
+    pub fn inv_ntt(&mut self) {
+        qsag_asm::mldsa_inv_ntt(&mut self.coeffs);
+    }
+
+    /// Portable scalar reference forward `NTT` (`Algorithm 41`) using `FIPS204_ZETAS`.
+    pub fn ntt_scalar_ref(&mut self) {
         let mut m = 0usize;
         let mut len = 128usize;
         while len >= 1 {
@@ -270,8 +280,8 @@ impl Poly256 {
         }
     }
 
-    /// Exact FIPS 204 Algorithm 42 inverse `NTT^{-1}` (Gentleman-Sande in-place, `0` secret branches).
-    pub fn inv_ntt(&mut self) {
+    /// Portable scalar reference inverse `NTT^{-1}` (`Algorithm 42`) using `FIPS204_ZETAS` and `MLDSA_INV_256`.
+    pub fn inv_ntt_scalar_ref(&mut self) {
         let mut m = 256usize;
         let mut len = 1usize;
         while len < MLDSA_N {
@@ -1301,6 +1311,86 @@ mod nist_signature_vectors {
                     38, 48, 56, 195, 136, 165, 126, 133, 61, 8, 222, 22, 112, 86, 56
                 ]
             );
+        }
+    }
+
+    #[test]
+    fn seiler_simd_ntt_matches_scalar_zetas_over_1000_random_polynomials() {
+        let mut xof = Shake256::new();
+        xof.absorb(b"qsag-cred-seiler-1000-random-polys-fips204-ntt-kat");
+        xof.finalize(0x1f);
+
+        for trial in 0..1000usize {
+            let mut raw = [0u8; 1024];
+            xof.squeeze(&mut raw);
+            let mut a = Poly256::zero();
+            for i in 0..MLDSA_N {
+                a.coeffs[i] = u32::from_le_bytes([
+                    raw[4 * i],
+                    raw[4 * i + 1],
+                    raw[4 * i + 2],
+                    raw[4 * i + 3],
+                ]) % MLDSA_Q;
+            }
+            if trial == 0 {
+                a.coeffs = [0u32; MLDSA_N];
+            } else if trial == 1 {
+                a.coeffs = [MLDSA_Q - 1; MLDSA_N];
+            } else if trial == 2 {
+                for (idx, slot) in a.coeffs.iter_mut().enumerate() {
+                    *slot = if idx % 2 == 0 { 0 } else { MLDSA_Q - 1 };
+                }
+            }
+
+            let mut ref_ntt = a.clone();
+            ref_ntt.ntt_scalar_ref();
+
+            let mut disp_ntt = a.clone();
+            disp_ntt.ntt();
+            assert_eq!(disp_ntt.coeffs, ref_ntt.coeffs, "ntt mismatch at {trial}");
+
+            for backend in [
+                qsag_asm::SimdBackend::Portable,
+                qsag_asm::SimdBackend::X86Avx2Pclmul,
+                qsag_asm::SimdBackend::X86Avx512GfniVpclmul,
+            ] {
+                let mut simd_coeffs = a.coeffs;
+                qsag_asm::mldsa_ntt_with_backend(&mut simd_coeffs, backend);
+                assert_eq!(
+                    simd_coeffs, ref_ntt.coeffs,
+                    "mldsa_ntt mismatch on {backend:?} at {trial}"
+                );
+                qsag_asm::mldsa_inv_ntt_with_backend(&mut simd_coeffs, backend);
+                assert_eq!(
+                    simd_coeffs, a.coeffs,
+                    "mldsa_inv_ntt roundtrip mismatch on {backend:?} at {trial}"
+                );
+            }
+
+            // Also verify pointwise_mul + inv_ntt against scalar reference on arbitrary NTT inputs
+            let mut raw_b = [0u8; 1024];
+            xof.squeeze(&mut raw_b);
+            let mut b_ntt = Poly256::zero();
+            for i in 0..MLDSA_N {
+                b_ntt.coeffs[i] = u32::from_le_bytes([
+                    raw_b[4 * i],
+                    raw_b[4 * i + 1],
+                    raw_b[4 * i + 2],
+                    raw_b[4 * i + 3],
+                ]) % MLDSA_Q;
+            }
+            let mut ref_pw = Poly256::zero();
+            for i in 0..MLDSA_N {
+                ref_pw.coeffs[i] = fq_mul(ref_ntt.coeffs[i], b_ntt.coeffs[i]);
+            }
+            let got_pw = ref_ntt.pointwise_mul(&b_ntt);
+            assert_eq!(got_pw.coeffs, ref_pw.coeffs, "pointwise_mul at {trial}");
+
+            let mut ref_inv = ref_pw.clone();
+            ref_inv.inv_ntt_scalar_ref();
+            let mut got_inv = got_pw;
+            got_inv.inv_ntt();
+            assert_eq!(got_inv.coeffs, ref_inv.coeffs, "inv_ntt at {trial}");
         }
     }
 }
