@@ -60,9 +60,9 @@ const POLICY_REVISION: u64 = 1;
 const DEFAULT_INTENT_TTL_SECS: u64 = 86_400;
 /// How far an intent timestamp may run ahead of the local clock.
 const CLOCK_SKEW_SECS: u64 = 60;
-const MAX_PARTIES: usize = u16::MAX as usize;
+const MAX_PARTIES: usize = 64;
 const MAX_ALLOWLIST: usize = 1024;
-const MAX_TIERS: usize = u16::MAX as usize;
+const MAX_TIERS: usize = 64;
 const STATE_PROPOSED: &str = "proposed";
 const STATE_RELEASED: &str = "released";
 /// Field of a secret key file that pins the key to one policy ledger.

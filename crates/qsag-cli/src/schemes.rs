@@ -23,11 +23,12 @@ pub enum Scheme {
     AggCommittee,
 }
 
-const FRONTIER: [(&str, FrontierFtsProfile); 4] = [
+const FRONTIER: [(&str, FrontierFtsProfile); 5] = [
     ("fts-frontier-514", FrontierFtsProfile::Compact514),
     ("fts-frontier-770", FrontierFtsProfile::Compact770),
     ("fts-frontier-1314", FrontierFtsProfile::Compact1314),
-    ("fts-frontier-1058", FrontierFtsProfile::Full256Bit),
+    ("fts-compact-1122", FrontierFtsProfile::Compact1122),
+    ("fts-frontier-2338", FrontierFtsProfile::Full256Bit),
 ];
 
 impl Scheme {
@@ -59,6 +60,10 @@ impl Scheme {
     }
 
     pub fn by_name(name: &str) -> Result<Scheme, CliError> {
+        // Historical misnomer: this profile has always emitted 2,338 bytes.
+        if name.eq_ignore_ascii_case("fts-frontier-1058") {
+            return Ok(Scheme::Frontier(FrontierFtsProfile::Full256Bit));
+        }
         Scheme::all()
             .into_iter()
             .find(|s| s.name() == name.to_ascii_lowercase())
