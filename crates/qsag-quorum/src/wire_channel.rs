@@ -192,6 +192,17 @@ pub trait WireTransport {
         from_party: usize,
         expected_round_tag: u32,
     ) -> Result<Vec<u8>, TransportError>;
+
+    /// Receive a transport envelope whose payload has its own authenticated routing,
+    /// round and sequence header. Unauthenticated outer sequence counters must not
+    /// advance before that payload is authenticated. Built-in meshes bypass their
+    /// outer sequencer here; transports with already-authenticated sequencing may
+    /// delegate to `recv_frame`. This is not a replacement for `recv_frame` on plain links.
+    fn recv_authenticated_envelope(
+        &mut self,
+        from_party: usize,
+        expected_round_tag: u32,
+    ) -> Result<Vec<u8>, TransportError>;
 }
 
 /// Per-link sequence state of one party. Turns payloads into frames and checks received
@@ -256,6 +267,25 @@ impl FrameSequencer {
         )?;
         self.send_seq[to] = next;
         Ok(frame)
+    }
+
+    // The inner MAC layer owns replay/round protection. Validating an unauthenticated
+    // outer sequence here would let one injected packet desynchronize that layer.
+    #[cfg(any(test, feature = "std"))]
+    fn open_authenticated_envelope(
+        &self,
+        from: usize,
+        raw: &[u8],
+    ) -> Result<Vec<u8>, TransportError> {
+        self.check_peer(from)?;
+        let (header, payload) = decode_frame(raw)?;
+        if header.session_id != self.session_id {
+            return Err(TransportError::SessionMismatch);
+        }
+        if usize::from(header.from) != from || usize::from(header.to) != self.party {
+            return Err(TransportError::RouteMismatch);
+        }
+        Ok(payload.to_vec())
     }
 
     /// Check a frame that arrived on the link from `from` and return its payload. The
@@ -510,6 +540,14 @@ impl<T: WireTransport> MacSealedWireChannel<T> {
 }
 
 impl<T: WireTransport> WireTransport for MacSealedWireChannel<T> {
+    fn recv_authenticated_envelope(
+        &mut self,
+        peer: usize,
+        round: u32,
+    ) -> Result<Vec<u8>, TransportError> {
+        self.recv_frame(peer, round)
+    }
+
     fn party(&self) -> usize {
         self.sequencer.party()
     }
@@ -538,7 +576,7 @@ impl<T: WireTransport> WireTransport for MacSealedWireChannel<T> {
         if self.failed_links.get(peer) == Some(&true) {
             return Err(TransportError::Closed { peer });
         }
-        let raw = match self.transport.recv_frame(peer, round) {
+        let raw = match self.transport.recv_authenticated_envelope(peer, round) {
             Ok(raw) => raw,
             Err(err) => {
                 if err.is_fatal_link_error() {
@@ -615,6 +653,14 @@ impl<T: WireTransport> ConfidentialWireChannel<T> {
 }
 
 impl<T: WireTransport> WireTransport for ConfidentialWireChannel<T> {
+    fn recv_authenticated_envelope(
+        &mut self,
+        peer: usize,
+        round: u32,
+    ) -> Result<Vec<u8>, TransportError> {
+        self.recv_frame(peer, round)
+    }
+
     fn party(&self) -> usize {
         self.inner.party()
     }
@@ -796,6 +842,18 @@ mod mesh {
     }
 
     impl InMemoryEndpoint {
+        fn recv_packet(&mut self, from_party: usize) -> Result<Vec<u8>, TransportError> {
+            let rx = self
+                .rx
+                .get(from_party)
+                .and_then(Option::as_ref)
+                .ok_or(TransportError::UnknownPeer { peer: from_party })?;
+            rx.recv_timeout(self.timeout).map_err(|e| match e {
+                RecvTimeoutError::Timeout => TransportError::Timeout { peer: from_party },
+                RecvTimeoutError::Disconnected => TransportError::Closed { peer: from_party },
+            })
+        }
+
         /// How long [`WireTransport::recv_frame`] waits for a silent peer.
         pub fn set_timeout(&mut self, timeout: Duration) {
             self.timeout = timeout;
@@ -858,16 +916,17 @@ mod mesh {
             from_party: usize,
             expected_round_tag: u32,
         ) -> Result<Vec<u8>, TransportError> {
-            let rx = self
-                .rx
-                .get(from_party)
-                .and_then(Option::as_ref)
-                .ok_or(TransportError::UnknownPeer { peer: from_party })?;
-            let raw = rx.recv_timeout(self.timeout).map_err(|e| match e {
-                RecvTimeoutError::Timeout => TransportError::Timeout { peer: from_party },
-                RecvTimeoutError::Disconnected => TransportError::Closed { peer: from_party },
-            })?;
+            let raw = self.recv_packet(from_party)?;
             self.seq.open(from_party, expected_round_tag, &raw)
+        }
+
+        fn recv_authenticated_envelope(
+            &mut self,
+            from_party: usize,
+            _round: u32,
+        ) -> Result<Vec<u8>, TransportError> {
+            let raw = self.recv_packet(from_party)?;
+            self.seq.open_authenticated_envelope(from_party, &raw)
         }
     }
 
@@ -983,6 +1042,28 @@ mod mesh {
     }
 
     impl TcpEndpoint {
+        fn recv_packet(&mut self, from_party: usize) -> Result<Vec<u8>, TransportError> {
+            let stream = self
+                .streams
+                .get_mut(from_party)
+                .and_then(Option::as_mut)
+                .ok_or(TransportError::UnknownPeer { peer: from_party })?;
+            let raw = match self.receiving[from_party].read(stream, from_party) {
+                Ok(raw) => raw,
+                Err(err) => {
+                    // An invalid length/magic loses the TCP frame boundary. There is no
+                    // safe resynchronization marker in this codec, so close only this
+                    // malformed stream. A partial read deadline must retain all bytes.
+                    if err.is_fatal_link_error() || err == TransportError::Malformed {
+                        self.streams[from_party] = None;
+                        self.receiving[from_party] = PartialFrame::default();
+                    }
+                    return Err(err);
+                }
+            };
+            Ok(raw)
+        }
+
         /// How long [`WireTransport::recv_frame`] waits for a silent peer.
         pub fn set_timeout(&mut self, timeout: Duration) -> std::io::Result<()> {
             for stream in self.streams.iter().flatten() {
@@ -1039,25 +1120,17 @@ mod mesh {
             from_party: usize,
             expected_round_tag: u32,
         ) -> Result<Vec<u8>, TransportError> {
-            let stream = self
-                .streams
-                .get_mut(from_party)
-                .and_then(Option::as_mut)
-                .ok_or(TransportError::UnknownPeer { peer: from_party })?;
-            let raw = match self.receiving[from_party].read(stream, from_party) {
-                Ok(raw) => raw,
-                Err(err) => {
-                    // An invalid length/magic loses the TCP frame boundary. There is no
-                    // safe resynchronization marker in this codec, so close only this
-                    // malformed stream. A partial read deadline must retain all bytes.
-                    if err.is_fatal_link_error() || err == TransportError::Malformed {
-                        self.streams[from_party] = None;
-                        self.receiving[from_party] = PartialFrame::default();
-                    }
-                    return Err(err);
-                }
-            };
+            let raw = self.recv_packet(from_party)?;
             self.seq.open(from_party, expected_round_tag, &raw)
+        }
+
+        fn recv_authenticated_envelope(
+            &mut self,
+            from_party: usize,
+            _round: u32,
+        ) -> Result<Vec<u8>, TransportError> {
+            let raw = self.recv_packet(from_party)?;
+            self.seq.open_authenticated_envelope(from_party, &raw)
         }
     }
     #[cfg(test)]
@@ -1067,17 +1140,34 @@ mod mesh {
         #[test]
         fn partial_header_and_payload_survive_multiple_deadlines() {
             let (mut ep, _) = TcpWireMesh::with_timeout(Duration::from_millis(10))
-                .loopback(2, [9; 32]).unwrap();
+                .loopback(2, [9; 32])
+                .unwrap();
             let frame = ep[0].seq.seal(1, 7, b"partial payload").unwrap();
-            ep[0].streams[1].as_mut().unwrap().write_all(&frame[..11]).unwrap();
-            assert_eq!(ep[1].recv_frame(0, 7), Err(TransportError::Timeout { peer: 0 }));
+            ep[0].streams[1]
+                .as_mut()
+                .unwrap()
+                .write_all(&frame[..11])
+                .unwrap();
+            assert_eq!(
+                ep[1].recv_frame(0, 7),
+                Err(TransportError::Timeout { peer: 0 })
+            );
             assert_eq!(ep[1].receiving[0].filled, 11);
-            ep[0].streams[1].as_mut().unwrap()
-                .write_all(&frame[11..FRAME_HEADER_BYTES + 3]).unwrap();
-            assert_eq!(ep[1].recv_frame(0, 7), Err(TransportError::Timeout { peer: 0 }));
+            ep[0].streams[1]
+                .as_mut()
+                .unwrap()
+                .write_all(&frame[11..FRAME_HEADER_BYTES + 3])
+                .unwrap();
+            assert_eq!(
+                ep[1].recv_frame(0, 7),
+                Err(TransportError::Timeout { peer: 0 })
+            );
             assert_eq!(ep[1].receiving[0].filled, FRAME_HEADER_BYTES + 3);
-            ep[0].streams[1].as_mut().unwrap()
-                .write_all(&frame[FRAME_HEADER_BYTES + 3..]).unwrap();
+            ep[0].streams[1]
+                .as_mut()
+                .unwrap()
+                .write_all(&frame[FRAME_HEADER_BYTES + 3..])
+                .unwrap();
             assert_eq!(ep[1].recv_frame(0, 7).unwrap(), b"partial payload");
             ep[0].send_frame(1, 8, b"next frame").unwrap();
             assert_eq!(ep[1].recv_frame(0, 8).unwrap(), b"next frame");
@@ -1114,7 +1204,7 @@ mod mesh {
             );
             assert_eq!(
                 endpoints[0].recv_frame(1, 0),
-                Err(TransportError::Timeout { peer: 1 })
+                Err(TransportError::Closed { peer: 1 })
             );
         }
     }
@@ -1338,12 +1428,35 @@ mod authenticated_tests {
         let alice = endpoints.pop().unwrap();
         let mut alice = ConfidentialWireChannel::new(alice, [2; 32], vec![[3; 32]; 2]).unwrap();
         let mut bob = ConfidentialWireChannel::new(bob, [2; 32], vec![[3; 32]; 2]).unwrap();
-        assert_eq!(bob.recv_frame(0, 7), Err(TransportError::Timeout { peer: 0 }));
-        let valid = alice.inner.seal(1, 7, b"retry authenticated packet").unwrap();
+        assert_eq!(
+            bob.recv_frame(0, 7),
+            Err(TransportError::Timeout { peer: 0 })
+        );
+        let valid = alice
+            .inner
+            .seal(1, 7, b"retry authenticated packet")
+            .unwrap();
         let mut invalid = valid.clone();
         *invalid.last_mut().unwrap() ^= 1;
-        alice.inner.transport.send_frame(1, 7, &invalid).unwrap();
-        assert_eq!(bob.recv_frame(0, 7), Err(TransportError::AuthenticationFailed));
+        // Inject without advancing the honest sender's outer sequence. The old
+        // double sequencer accepted this envelope, then permanently rejected the
+        // real sequence-0 packet even though its inner MAC was valid.
+        let injected = encode_frame(
+            &FrameHeader {
+                session_id: [0x39; 32],
+                from: 0,
+                to: 1,
+                round_tag: 7,
+                seq: 0,
+            },
+            &invalid,
+        )
+        .unwrap();
+        alice.inner.transport.send_raw(1, injected).unwrap();
+        assert_eq!(
+            bob.recv_frame(0, 7),
+            Err(TransportError::AuthenticationFailed)
+        );
         // Transport retransmission retains the authenticated packet's sequence/key.
         alice.inner.transport.send_frame(1, 7, &valid).unwrap();
         assert_eq!(bob.recv_frame(0, 7).unwrap(), b"retry authenticated packet");
