@@ -515,3 +515,1473 @@ impl Transcript {
 
 // ============================================================================
 // Ceremony state
+// ============================================================================
+
+/// Base correlation of one ordered pair, indexed by choice bit.
+struct Pair {
+    /// Owner side: the streams of both pads.
+    send: Vec<[Prg; 2]>,
+    /// Holder side: the stream of the pad its key bit selected.
+    receive: Vec<Prg>,
+}
+
+/// Partially opened field values and values claimed to be zero, awaiting one
+/// batch MAC check.
+struct FieldQueue {
+    values: Vec<Value>,
+    /// `macs[p][entry]`.
+    macs: Vec<SecretVec<Value>>,
+    /// The owner whose inputs alone make up the entry, if any.
+    owners: Vec<Option<usize>>,
+}
+impl FieldQueue {
+    fn new(parties: usize) -> Self {
+        Self {
+            values: Vec::new(),
+            macs: (0..parties).map(|_| SecretVec::new()).collect(),
+            owners: Vec::new(),
+        }
+    }
+}
+
+struct BooleanQueue {
+    values: Vec<u128>,
+    macs: Vec<SecretVec<u128>>,
+    owners: Vec<Option<usize>>,
+}
+impl BooleanQueue {
+    fn new(parties: usize) -> Self {
+        Self {
+            values: Vec::new(),
+            macs: (0..parties).map(|_| SecretVec::new()).collect(),
+            owners: Vec::new(),
+        }
+    }
+}
+
+/// Bit offsets of every owner's Boolean candidates: per field the retained
+/// bits followed by [`CROSS_REPS`] parity masks, then the mask of the input
+/// check, then the mask of the key-consistency check.
+struct Layout {
+    retained: [usize; 3],
+    at: [usize; 3],
+    input_mask: usize,
+    key_mask: usize,
+    total: usize,
+}
+impl Layout {
+    fn new(demand: &Demand) -> Self {
+        let mut at = [0; 3];
+        let mut retained = [0; 3];
+        let mut next = 0;
+        for i in 0..3 {
+            at[i] = next;
+            retained[i] = 64 * demand.dabits[i];
+            if retained[i] != 0 {
+                next += retained[i] + CROSS_REPS;
+            }
+        }
+        Self {
+            retained,
+            at,
+            input_mask: next,
+            key_mask: next + MASK_BITS,
+            total: next + 2 * MASK_BITS,
+        }
+    }
+}
+
+/// Every owner's Boolean candidates and all parties' MAC shares of them.
+struct Candidates {
+    /// `bits[o]`: owner `o`'s candidate words.
+    bits: Vec<SecretVec<u64>>,
+    /// `macs[o][p][bit]`: party `p`'s MAC share of owner `o`'s candidate.
+    macs: Vec<Vec<SecretVec<u128>>>,
+}
+
+/// `shares[o][p][item]`: party `p`'s share of owner `o`'s authenticated item.
+type OwnerShares = Vec<Vec<SecretVec<Share>>>;
+
+struct Ceremony<'a> {
+    session: [u8; 32],
+    parties: usize,
+    mesh: &'a mut OtMesh,
+    rngs: &'a mut [PartyPrivateRng],
+    fault: &'a mut dyn FnMut(Fault<'_>),
+    transcript: Transcript,
+    coins: u64,
+    boolean_keys: SecretVec<u128>,
+    field_keys: SecretVec<[Value; 3]>,
+    /// `[o][h]`: the keys `h` committed to in its base OTs with `o`.
+    pair_boolean_keys: Vec<SecretVec<u128>>,
+    pair_field_keys: Vec<SecretVec<[Value; 3]>>,
+    pairs: Vec<Vec<Option<Pair>>>,
+}
+
+impl<'a> Ceremony<'a> {
+    fn new(
+        session: [u8; 32],
+        mesh: &'a mut OtMesh,
+        rngs: &'a mut [PartyPrivateRng],
+        fault: &'a mut dyn FnMut(Fault<'_>),
+    ) -> Result<Self, Abort> {
+        let parties = rngs.len();
+        if !(2..=64).contains(&parties) || mesh.n != parties {
+            return Err(Abort::Config);
+        }
+        Ok(Self {
+            transcript: Transcript::new(&session),
+            session,
+            parties,
+            mesh,
+            rngs,
+            fault,
+            coins: 0,
+            boolean_keys: SecretVec::new(),
+            field_keys: SecretVec::new(),
+            pair_boolean_keys: Vec::new(),
+            pair_field_keys: Vec::new(),
+            pairs: Vec::new(),
+        })
+    }
+
+    /// Jointly random public coin over the transcript so far, as a challenge
+    /// stream.
+    fn coin(&mut self, label: &[u8]) -> Result<Challenges, Abort> {
+        let digest = self.transcript.digest();
+        let mut phase = label.to_vec();
+        phase.extend_from_slice(&self.coins.to_le_bytes());
+        self.coins += 1;
+        let coin = run_commit_and_open_coin(&self.session, &phase, &digest, self.rngs)
+            .map_err(|_| Check::Coin)?;
+        self.transcript.label(b"coin");
+        self.transcript.bytes(&coin);
+        Ok(Challenges(xof(
+            b"QSAG.MIGRATE.PREP.CHALLENGE.V1",
+            &[&self.session, &phase, &coin],
+        )))
+    }
+
+    /// Every party commits to its payload; after all commitments are sent the
+    /// payloads are opened and compared with them.
+    fn commit_then_open(&mut self, label: &[u8], payloads: &[SecretVec<u64>]) -> Result<(), Abort> {
+        let commitment = |session: &[u8; 32], party: usize, payload: &[u64], nonce: &[u8; 32]| {
+            let mut bytes: SecretVec<u8> = payload.iter().flat_map(|w| w.to_le_bytes()).collect();
+            let digest = cshake256_framed_32(
+                b"QSAG.MIGRATE.PREP.COMMIT.V1",
+                &[session, label, &[party as u8], &bytes, nonce],
+            );
+            bytes.clear();
+            digest
+        };
+        let mut nonces: SecretVec<[u8; 32]> = SecretVec::with_capacity(payloads.len());
+        let mut commitments = Vec::with_capacity(payloads.len());
+        self.transcript.label(label);
+        for (party, payload) in payloads.iter().enumerate() {
+            let nonce = self.rngs[party].next_bytes32();
+            let digest = commitment(&self.session, party, payload, &nonce);
+            self.transcript.bytes(&digest);
+            nonces.push(nonce);
+            commitments.push(digest);
+        }
+        for (party, payload) in payloads.iter().enumerate() {
+            if commitment(&self.session, party, payload, &nonces[party]) != commitments[party] {
+                return Err(Check::Commitment.into());
+            }
+            for word in payload.iter() {
+                self.transcript.bytes(&word.to_le_bytes());
+            }
+        }
+        Ok(())
+    }
+
+    fn sample(&mut self, party: usize, d: Domain) -> Value {
+        let rng = &mut self.rngs[party];
+        element_from(d, |bytes| rng.fill_bytes(bytes))
+    }
+
+    /// The key share `party` uses in a check of material that `owner` alone
+    /// input (`None`: material combined over the owners).
+    fn field_key_for(&self, field: ThresholdField, owner: Option<usize>, party: usize) -> Value {
+        match owner {
+            Some(owner) if owner != party => self.pair_field_keys[owner][party][field.index()],
+            _ => self.field_keys[party][field.index()],
+        }
+    }
+    fn boolean_key_for(&self, owner: Option<usize>, party: usize) -> u128 {
+        match owner {
+            Some(owner) if owner != party => self.pair_boolean_keys[owner][party],
+            _ => self.boolean_keys[party],
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // Keys and base correlation
+    // ------------------------------------------------------------------------
+
+    /// Every party samples its field key shares (two for Goldilocks).
+    fn sample_field_keys(&mut self) {
+        for party in 0..self.parties {
+            let mut keys = [ZERO; 3];
+            for field in ThresholdField::ALL {
+                let d = field.domain();
+                for key in 0..key_count(d) {
+                    let value = self.sample(party, d);
+                    set_part(d, &mut keys[field.index()], key, value);
+                }
+            }
+            self.field_keys.push(keys);
+        }
+    }
+
+    /// One batch of random OTs per ordered pair, the holder receiving on the
+    /// bits of its key shares. The holder cannot use another key for a single
+    /// value later: its pads are fixed here.
+    fn establish_pairs(&mut self) -> Result<(), Abort> {
+        let parties = self.parties;
+        for owner in 0..parties {
+            let mut boolean_keys = SecretVec::with_capacity(parties);
+            let mut field_keys = SecretVec::with_capacity(parties);
+            let mut row = Vec::with_capacity(parties);
+            for holder in 0..parties {
+                let mut boolean = self.boolean_keys[holder];
+                let mut fields = self.field_keys[holder];
+                if holder == owner {
+                    boolean_keys.push(boolean);
+                    field_keys.push(fields);
+                    row.push(None);
+                    continue;
+                }
+                (self.fault)(Fault::BooleanKey {
+                    owner,
+                    holder,
+                    key: &mut boolean,
+                });
+                for field in ThresholdField::ALL {
+                    (self.fault)(Fault::FieldKey {
+                        field,
+                        owner,
+                        holder,
+                        key: &mut fields[field.index()],
+                    });
+                }
+                let mut choices: SecretVec<u64> = SecretVec::with_capacity(BASE_WORDS);
+                choices.extend_from_slice(&fields[0][..2]);
+                choices.extend_from_slice(&fields[1]);
+                choices.extend_from_slice(&fields[2]);
+                choices.extend_from_slice(&[boolean as u64, (boolean >> 64) as u64]);
+                let (send, receive) = self
+                    .mesh
+                    .run_correlated_ot_words(owner, holder, &choices, self.rngs)
+                    .map_err(|_| Check::Ot)?;
+                let session = &self.session;
+                row.push(Some(Pair {
+                    send: send
+                        .iter()
+                        .enumerate()
+                        .map(|(index, (zero, one))| {
+                            [
+                                Prg::new(session, owner, holder, index, zero),
+                                Prg::new(session, owner, holder, index, one),
+                            ]
+                        })
+                        .collect(),
+                    receive: receive
+                        .iter()
+                        .enumerate()
+                        .map(|(index, pad)| Prg::new(session, owner, holder, index, pad))
+                        .collect(),
+                }));
+                boolean_keys.push(boolean);
+                field_keys.push(fields);
+            }
+            self.pair_boolean_keys.push(boolean_keys);
+            self.pair_field_keys.push(field_keys);
+            self.pairs.push(row);
+        }
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------------
+    // Field authentication
+    // ------------------------------------------------------------------------
+
+    /// COPE extension of `inputs` between `owner` and `holder` under key
+    /// `key`. Returns `(T, Q)` with `Q[k] = T[k] + key_h · inputs[k]`: `T` is
+    /// the owner's, `Q` the holder's.
+    fn cope(
+        &mut self,
+        field: ThresholdField,
+        owner: usize,
+        holder: usize,
+        key: usize,
+        inputs: &[Value],
+    ) -> (SecretVec<Value>, SecretVec<Value>) {
+        let d = field.domain();
+        let count = inputs.len();
+        let base = field_base(field, key);
+        let key_bits = part(d, self.pair_field_keys[owner][holder][field.index()], key);
+        let Self {
+            pairs,
+            fault,
+            transcript,
+            ..
+        } = self;
+        let pair = pairs[owner][holder].as_mut().unwrap();
+        let zeros = || SecretVec::from(vec![ZERO; count]);
+        let (mut t, mut q) = (zeros(), zeros());
+        let (mut zero, mut one, mut chosen, mut encoded) = (zeros(), zeros(), zeros(), zeros());
+        transcript.label(b"cope");
+        for bit in (0..d.width()).rev() {
+            pair.send[base + bit][0].elements(d, &mut zero);
+            pair.send[base + bit][1].elements(d, &mut one);
+            pair.receive[base + bit].elements(d, &mut chosen);
+            encoded.copy_from_slice(inputs);
+            fault(Fault::CopeInput {
+                field,
+                owner,
+                holder,
+                key,
+                bit,
+                values: &mut encoded,
+            });
+            let select = 0u64.wrapping_sub((key_bits[bit / 64] >> (bit % 64)) & 1);
+            for k in 0..count {
+                // Owner to holder.
+                let correction = d.add(d.sub(zero[k], one[k]), encoded[k]);
+                transcript.element(d, &correction);
+                let received = d.add(chosen[k], correction.map(|limb| limb & select));
+                t[k] = d.add(d.add(t[k], t[k]), zero[k]);
+                q[k] = d.add(d.add(q[k], q[k]), received);
+            }
+        }
+        (t, q)
+    }
+
+    /// Every owner authenticates its `inputs[o]` (equal lengths) towards all
+    /// other parties; the items in `bits` are also proved to be 0 or 1.
+    ///
+    /// Party `p`'s MAC share of owner `o`'s item is `Q` from the pair
+    /// `(o, p)`, and `o`'s own is `key_o · x − Σ_h T_h`.
+    ///
+    /// **Input check** (MASCOT Section 4). Each owner appends uniformly
+    /// random mask items. After all corrections are sent a coin fixes `r`;
+    /// the owner opens `y = Σ r_k x_k + mask` and every party commits to and
+    /// then opens `σ_p = Σ r_k m_k + m_mask − key_p · y`; the `σ_p` must sum
+    /// to zero. For Goldilocks this runs twice with independent `r` and
+    /// masks, each instance under both keys.
+    ///
+    /// If the owner encoded different values under different key bits of an
+    /// honest holder, the holder's share is off by `Σ_l 2^l · bit_l · e_l`
+    /// with `e_l` fixed by the corrections; the sum of the `σ` is that error
+    /// (combined by `r`) plus what the owner adds without knowing the key
+    /// bits. Either the combined `e_l` vanish for the bits where they could
+    /// matter (probability at most `1/|F|` per instance over `r`), or the
+    /// check passes exactly when the holder's key lies in a set `S` that the
+    /// adversary fixed in advance, which happens with probability `|S|/|F|`.
+    /// So a failed check tells the adversary that the key is outside `S`
+    /// (and the ceremony's keys are then discarded), and a passed check that
+    /// it is inside: guessing `c` key bits succeeds with probability `2^-c`
+    /// and leaves a later forgery probability of `2^c/|F|`, the product
+    /// staying at `1/|F|` per key. Nothing about any shared value is
+    /// revealed either way: `y` is masked, and whether the check passes
+    /// depends on key bits only. A holder cannot choose its key per value
+    /// (its pads are fixed), and a wrong MAC share of the holder changes the
+    /// sum of the `σ` by a nonzero amount it cannot cancel without the
+    /// owner's pads.
+    fn authenticate(
+        &mut self,
+        field: ThresholdField,
+        inputs: &[SecretVec<Value>],
+        bits: Range<usize>,
+    ) -> Result<OwnerShares, Abort> {
+        let d = field.domain();
+        let parties = self.parties;
+        let keys = key_count(d);
+        let count = inputs[0].len();
+        let bit_masks = if bits.is_empty() {
+            0
+        } else {
+            (parties - 1) * keys
+        };
+        let masked = count + bit_masks;
+        let total = masked + keys;
+
+        let mut values: Vec<SecretVec<Value>> = Vec::with_capacity(parties);
+        let mut macs: Vec<Vec<SecretVec<Value>>> = Vec::with_capacity(parties);
+        // `pads[o][holder slot][key] = (T, Q)`.
+        let mut pads: Vec<Vec<Vec<(SecretVec<Value>, SecretVec<Value>)>>> =
+            Vec::with_capacity(parties);
+        for owner in 0..parties {
+            let mut extended: SecretVec<Value> = inputs[owner].iter().copied().collect();
+            for _ in count..total {
+                let mask = self.sample(owner, d);
+                extended.push(mask);
+            }
+            let own_key = self.field_keys[owner][field.index()];
+            let mut shares: Vec<SecretVec<Value>> = (0..parties)
+                .map(|_| SecretVec::from(vec![ZERO; total]))
+                .collect();
+            for k in 0..total {
+                shares[owner][k] = mac_scale(d, own_key, extended[k]);
+            }
+            let mut owner_pads = Vec::with_capacity(parties - 1);
+            for holder in (0..parties).filter(|&h| h != owner) {
+                let mut by_key = Vec::with_capacity(keys);
+                for key in 0..keys {
+                    let (t, q) = self.cope(field, owner, holder, key, &extended);
+                    for k in 0..total {
+                        let own = d.sub(part(d, shares[owner][k], key), t[k]);
+                        set_part(d, &mut shares[owner][k], key, own);
+                        set_part(d, &mut shares[holder][k], key, q[k]);
+                    }
+                    by_key.push((t, q));
+                }
+                (self.fault)(Fault::CopeHolderShare {
+                    field,
+                    owner,
+                    holder,
+                    macs: &mut shares[holder],
+                });
+                owner_pads.push(by_key);
+            }
+            values.push(extended);
+            macs.push(shares);
+            pads.push(owner_pads);
+        }
+
+        let mut challenges = self.coin(b"authenticate")?;
+        let mut sigmas: Vec<SecretVec<u64>> = (0..parties).map(|_| SecretVec::new()).collect();
+        self.transcript.label(b"input check");
+        for owner in 0..parties {
+            for instance in 0..keys {
+                let mask = masked + instance;
+                let mut opened = values[owner][mask];
+                let mut sigma: SecretVec<Value> =
+                    (0..parties).map(|p| macs[owner][p][mask]).collect();
+                for k in 0..masked {
+                    let r = challenges.element(d);
+                    opened = d.add(opened, d.mul(r, values[owner][k]));
+                    for p in 0..parties {
+                        sigma[p] = mac_add(d, sigma[p], mac_scale(d, macs[owner][p][k], r));
+                    }
+                }
+                // The owner broadcasts the combination.
+                self.transcript.element(d, &opened);
+                for p in 0..parties {
+                    let key = self.field_key_for(field, Some(owner), p);
+                    let share = mac_sub(d, sigma[p], mac_scale(d, key, opened));
+                    sigmas[p].extend_from_slice(&share);
+                }
+            }
+        }
+        self.commit_then_open(b"input check sigma", &sigmas)?;
+        for entry in 0..parties * keys {
+            let sum = (0..parties).fold(ZERO, |sum, p| {
+                let share: Value = sigmas[p][4 * entry..4 * entry + 4].try_into().unwrap();
+                mac_add(d, sum, share)
+            });
+            if sum != ZERO {
+                return Err(Check::InputConsistency.into());
+            }
+        }
+
+        if !bits.is_empty() {
+            self.prove_bits(field, &values, &pads, bits, count, &mut challenges)?;
+        }
+
+        Ok((0..parties)
+            .map(|owner| {
+                (0..parties)
+                    .map(|p| {
+                        (0..count)
+                            .map(|k| {
+                                [
+                                    if p == owner { values[owner][k] } else { ZERO },
+                                    macs[owner][p][k],
+                                ]
+                            })
+                            .collect()
+                    })
+                    .collect()
+            })
+            .collect())
+    }
+
+    /// Each owner proves to each holder, under each of the holder's keys,
+    /// that its items in `bits` satisfy `x² = x`.
+    ///
+    /// The pair holds `Q_k = T_k + key · x_k` (`T`, `x` with the owner, `Q`,
+    /// `key` with the holder). Then
+    /// `Q_k² − key·Q_k = T_k² + key·(2x_k − 1)·T_k + key²·(x_k² − x_k)`.
+    /// With coin `χ` (drawn after the corrections that fix `Q`, `T`, `x`) and
+    /// one authenticated random mask `(x*, T*, Q*)` per holder and key, the
+    /// owner sends `U = Σ χ_k T_k² + T*` and `V = Σ χ_k (2x_k − 1) T_k + x*`,
+    /// and the holder accepts iff `Σ χ_k (Q_k² − key·Q_k) + Q* = U + key·V`.
+    ///
+    /// Soundness (QuickSilver, Section 4, degree-2 case): if some `x_k` is
+    /// not a bit, `Σ χ_k (x_k² − x_k) ≠ 0` except with probability `1/|F|`,
+    /// and then the acceptance equation is a quadratic in the holder's key
+    /// with nonzero leading coefficient that the owner fixed without knowing
+    /// the key: at most 2 roots. Error at most `3/|F|` per key; the two
+    /// Goldilocks keys use independent `χ` and both must accept, `2^-124`.
+    /// Zero knowledge: `(U, V)` is uniform on the line the holder's equation
+    /// defines, because `x*` is uniform and used once. A failed check tells a
+    /// corrupted owner that its guess of the holder's key missed.
+    fn prove_bits(
+        &mut self,
+        field: ThresholdField,
+        values: &[SecretVec<Value>],
+        pads: &[Vec<Vec<(SecretVec<Value>, SecretVec<Value>)>>],
+        bits: Range<usize>,
+        count: usize,
+        challenges: &mut Challenges,
+    ) -> Result<(), Abort> {
+        let d = field.domain();
+        let parties = self.parties;
+        let keys = key_count(d);
+        let mut accepted = true;
+        self.transcript.label(b"bit proof");
+        for owner in 0..parties {
+            let chi: Vec<Vec<Value>> = (0..keys)
+                .map(|_| bits.clone().map(|_| challenges.element(d)).collect())
+                .collect();
+            for (slot, holder) in (0..parties).filter(|&h| h != owner).enumerate() {
+                for key in 0..keys {
+                    let (t, q) = &pads[owner][slot][key];
+                    let mask = count + slot * keys + key;
+                    // Owner.
+                    let mut u = t[mask];
+                    let mut v = values[owner][mask];
+                    for (chi, k) in chi[key].iter().zip(bits.clone()) {
+                        let x = values[owner][k];
+                        let slope = d.mul(d.sub(d.add(x, x), ONE), t[k]);
+                        u = d.add(u, d.mul(*chi, d.mul(t[k], t[k])));
+                        v = d.add(v, d.mul(*chi, slope));
+                    }
+                    self.transcript.element(d, &u);
+                    self.transcript.element(d, &v);
+                    // Holder.
+                    let alpha = part(d, self.pair_field_keys[owner][holder][field.index()], key);
+                    let mut left = q[mask];
+                    for (chi, k) in chi[key].iter().zip(bits.clone()) {
+                        let term = d.mul(q[k], d.sub(q[k], alpha));
+                        left = d.add(left, d.mul(*chi, term));
+                    }
+                    accepted &= left == d.add(u, d.mul(alpha, v));
+                }
+            }
+        }
+        if accepted {
+            Ok(())
+        } else {
+            Err(Check::Bitness.into())
+        }
+    }
+
+    /// Partially open a value: every party sends its value share; the MAC
+    /// shares wait in `queue`.
+    fn open(
+        &mut self,
+        field: ThresholdField,
+        check: Check,
+        queue: &mut FieldQueue,
+        shares: impl Iterator<Item = Share>,
+    ) -> Value {
+        let d = field.domain();
+        let mut value = ZERO;
+        for (party, mut share) in shares.enumerate() {
+            (self.fault)(Fault::FieldOpening {
+                field,
+                party,
+                check,
+                share: &mut share[0],
+            });
+            self.transcript.element(d, &share[0]);
+            value = d.add(value, share[0]);
+            queue.macs[party].push(share[1]);
+        }
+        queue.values.push(value);
+        queue.owners.push(None);
+        value
+    }
+
+    /// Queue a value that must be zero: its MAC shares must sum to zero.
+    fn expect_zero(
+        queue: &mut FieldQueue,
+        owner: Option<usize>,
+        macs: impl Iterator<Item = Value>,
+    ) {
+        for (party, mac) in macs.enumerate() {
+            queue.macs[party].push(mac);
+        }
+        queue.values.push(ZERO);
+        queue.owners.push(owner);
+    }
+
+    /// Batch MAC check of `queue`: a coin drawn after all queued values are
+    /// public fixes `χ` (independently per key); every party commits to and
+    /// then opens `σ_p = Σ χ_j (m_j − key_p · v_j)`; the sum must be zero.
+    ///
+    /// A wrong opened value `v + e` (or a nonzero value claimed zero) leaves
+    /// `key · Σ χ_j e_j` in the sum, which the adversary can cancel only if
+    /// `Σ χ_j e_j = 0` or by predicting the key: at most `2/|F|` per key,
+    /// `2^-126` for Goldilocks and below `2^-253` for the large fields.
+    fn check_field_queue(
+        &mut self,
+        field: ThresholdField,
+        queue: FieldQueue,
+        site: Check,
+    ) -> Result<(), Abort> {
+        if queue.values.is_empty() {
+            return Ok(());
+        }
+        let d = field.domain();
+        let parties = self.parties;
+        let mut challenges = self.coin(b"field mac check")?;
+        let mut sigma: SecretVec<Value> = SecretVec::from(vec![ZERO; parties]);
+        for key in 0..key_count(d) {
+            for (entry, value) in queue.values.iter().enumerate() {
+                let chi = challenges.element(d);
+                for p in 0..parties {
+                    let share_key = part(d, self.field_key_for(field, queue.owners[entry], p), key);
+                    let term = d.sub(part(d, queue.macs[p][entry], key), d.mul(share_key, *value));
+                    let sum = d.add(part(d, sigma[p], key), d.mul(chi, term));
+                    set_part(d, &mut sigma[p], key, sum);
+                }
+            }
+        }
+        let payloads: Vec<SecretVec<u64>> =
+            sigma.iter().map(|s| s.iter().copied().collect()).collect();
+        self.commit_then_open(b"field sigma", &payloads)?;
+        if sigma.iter().fold(ZERO, |sum, s| mac_add(d, sum, *s)) != ZERO {
+            return Err(site.into());
+        }
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------------
+    // Field triples
+    // ------------------------------------------------------------------------
+
+    /// MASCOT Protocol 4, Multiply and Combine, for `count` triples. Returns
+    /// per party and triple the values to authenticate:
+    /// `a, b, c, â_1, ĉ_1, …`.
+    ///
+    /// Every party samples `a ∈ F^τ` and `b ∈ F` per triple. For each ordered
+    /// pair the party holding `a` is the OT receiver with the bits of `a` as
+    /// choice bits, so its input is the same in every OT by construction; the
+    /// sender offsets pad differences by its `b`. A sender that uses another
+    /// offset in some OT corrupts the product only if that bit of `a` is 1,
+    /// which the sacrifice then detects: the leak about `a` this allows is
+    /// removed by the combination (module documentation, `τ`).
+    fn multiply(
+        &mut self,
+        field: ThresholdField,
+        count: usize,
+    ) -> Result<Vec<SecretVec<Value>>, Abort> {
+        let d = field.domain();
+        let parties = self.parties;
+        let tau = tau(field);
+        let per = triple_inputs(field);
+        if count == 0 {
+            return Ok((0..parties).map(|_| SecretVec::new()).collect());
+        }
+        let width = d.width();
+        let words = limbs_of(d);
+
+        let mut a: Vec<SecretVec<Value>> = Vec::with_capacity(parties);
+        let mut b: Vec<SecretVec<Value>> = Vec::with_capacity(parties);
+        let mut c: Vec<SecretVec<Value>> = Vec::with_capacity(parties);
+        for party in 0..parties {
+            let a_p: SecretVec<Value> = (0..count * tau).map(|_| self.sample(party, d)).collect();
+            let b_p: SecretVec<Value> = (0..count).map(|_| self.sample(party, d)).collect();
+            c.push(
+                (0..count * tau)
+                    .map(|e| d.mul(a_p[e], b_p[e / tau]))
+                    .collect(),
+            );
+            a.push(a_p);
+            b.push(b_p);
+        }
+        for receiver in 0..parties {
+            let choices: SecretVec<u64> = a[receiver]
+                .iter()
+                .flat_map(|value| value[..words].iter().copied())
+                .collect();
+            for sender in (0..parties).filter(|&s| s != receiver) {
+                let (send, receive) = self
+                    .mesh
+                    .run_correlated_ot_words(sender, receiver, &choices, self.rngs)
+                    .map_err(|_| Check::Ot)?;
+                self.transcript.label(b"multiply");
+                for e in 0..count * tau {
+                    let (mut sender_sum, mut receiver_sum) = (ZERO, ZERO);
+                    let choice = a[receiver][e];
+                    for bit in (0..width).rev() {
+                        let index = 64 * words * e + bit;
+                        let (zero, one) = &send[index];
+                        let zero = pad_element(d, zero);
+                        let one = pad_element(d, one);
+                        let chosen = pad_element(d, &receive[index]);
+                        let mut correlation = b[sender][e / tau];
+                        (self.fault)(Fault::TripleCorrelation {
+                            field,
+                            sender,
+                            receiver,
+                            triple: e / tau,
+                            slot: e % tau,
+                            bit,
+                            correlation: &mut correlation,
+                        });
+                        // Sender to receiver.
+                        let correction = d.add(d.sub(zero, one), correlation);
+                        self.transcript.element(d, &correction);
+                        let select = 0u64.wrapping_sub((choice[bit / 64] >> (bit % 64)) & 1);
+                        let received = d.add(chosen, correction.map(|limb| limb & select));
+                        sender_sum = d.add(d.add(sender_sum, sender_sum), zero);
+                        receiver_sum = d.add(d.add(receiver_sum, receiver_sum), received);
+                    }
+                    // receiver_sum − sender_sum = a_receiver[e] · b_sender.
+                    c[receiver][e] = d.add(c[receiver][e], receiver_sum);
+                    c[sender][e] = d.sub(c[sender][e], sender_sum);
+                }
+            }
+        }
+        for party in 0..parties {
+            (self.fault)(Fault::TripleProduct {
+                field,
+                party,
+                products: &mut c[party],
+            });
+        }
+
+        // Combine with public coefficients drawn after all corrections.
+        let mut challenges = self.coin(b"combine")?;
+        let combos = 1 + sacrifices(field);
+        let mut out: Vec<SecretVec<Value>> = (0..parties)
+            .map(|_| SecretVec::with_capacity(count * per))
+            .collect();
+        for triple in 0..count {
+            let coefficients: Vec<Value> =
+                (0..combos * tau).map(|_| challenges.element(d)).collect();
+            for party in 0..parties {
+                let combine = |values: &[Value], combo: usize| {
+                    (0..tau).fold(ZERO, |sum, slot| {
+                        d.add(
+                            sum,
+                            d.mul(
+                                coefficients[combo * tau + slot],
+                                values[triple * tau + slot],
+                            ),
+                        )
+                    })
+                };
+                out[party].push(combine(&a[party], 0));
+                out[party].push(b[party][triple]);
+                out[party].push(combine(&c[party], 0));
+                for combo in 1..combos {
+                    out[party].push(combine(&a[party], combo));
+                    out[party].push(combine(&c[party], combo));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// MASCOT Protocol 4, Sacrifice. `joint[p]` holds party `p`'s shares of
+    /// the authenticated `a, b, c, â_1, ĉ_1, …` per triple. For each
+    /// sacrificial pair a coin `s` (drawn after authentication), the opening
+    /// `ρ = s·a − â` and the zero check of `s·c − ĉ − ρ·b`.
+    ///
+    /// If `c = ab + e` and `ĉ = âb + ê`, the checked value is `s·e − ê`,
+    /// zero with probability `1/|F|` when `e ≠ 0`; with the independent
+    /// second pair for Goldilocks `2^-128`. The check consumes the `â, ĉ`
+    /// and reveals `ρ`, which the uniform `â` masks.
+    fn sacrifice(
+        &mut self,
+        field: ThresholdField,
+        joint: &[SecretVec<Share>],
+        count: usize,
+    ) -> Result<Vec<SecretVec<[Share; 3]>>, Abort> {
+        let d = field.domain();
+        let parties = self.parties;
+        let per = triple_inputs(field);
+        let mut queue = FieldQueue::new(parties);
+        if count != 0 {
+            let mut challenges = self.coin(b"sacrifice")?;
+            self.transcript.label(b"sacrifice");
+            for triple in 0..count {
+                let at = triple * per;
+                for pair in 0..sacrifices(field) {
+                    let s = challenges.element(d);
+                    let hat = at + 3 + 2 * pair;
+                    let rho = self.open(
+                        field,
+                        Check::TripleSacrifice,
+                        &mut queue,
+                        (0..parties)
+                            .map(|p| share_sub(d, share_scale(d, joint[p][at], s), joint[p][hat])),
+                    );
+                    Self::expect_zero(
+                        &mut queue,
+                        None,
+                        (0..parties).map(|p| {
+                            let left = mac_sub(
+                                d,
+                                mac_scale(d, joint[p][at + 2][1], s),
+                                joint[p][hat + 1][1],
+                            );
+                            mac_sub(d, left, mac_scale(d, joint[p][at + 1][1], rho))
+                        }),
+                    );
+                }
+            }
+        }
+        self.check_field_queue(field, queue, Check::TripleSacrifice)?;
+        Ok((0..parties)
+            .map(|p| {
+                (0..count)
+                    .map(|t| {
+                        [
+                            joint[p][t * per],
+                            joint[p][t * per + 1],
+                            joint[p][t * per + 2],
+                        ]
+                    })
+                    .collect()
+            })
+            .collect())
+    }
+
+    // ------------------------------------------------------------------------
+    // Boolean material
+    // ------------------------------------------------------------------------
+
+    /// Run qsag-core's `Π_triple_f2` n-of-n over the quorum for `count`
+    /// triple words and convert every party's vault. Sets the Boolean key
+    /// shares. Returns `[p][triple] = [a, b, c]`.
+    ///
+    /// The ceremony shares each bit as a degree-`(m − 1)` Shamir sharing of
+    /// 0 or 1 in `GF(2^8)` with MACs under a two-lane key in the tower basis.
+    /// Scaling party `p`'s shares by its Lagrange weight at zero gives
+    /// additive shares; the bit is coefficient 0 of the scaled value share.
+    /// One key lane is kept (soundness `2^-128` per check), and the MAC and
+    /// key shares are mapped to the polynomial basis by the field
+    /// isomorphism, which preserves `Σ m_p = bit · key`.
+    fn boolean_stage(&mut self, count: usize) -> Result<Vec<Vec<[AuthWord; 3]>>, Abort> {
+        let parties = self.parties;
+        if count == 0 {
+            for party in 0..parties {
+                let key = self.rngs[party].next_u128();
+                self.boolean_keys.push(key);
+            }
+            return Ok((0..parties).map(|_| Vec::new()).collect());
+        }
+        let points: Vec<TowerGf256> = (1..=parties as u8).map(TowerGf256).collect();
+        let weights = lagrange_weights_zero_gf256(&points).ok_or(Abort::Config)?;
+        let session = cshake256_framed_32(b"QSAG.MIGRATE.PREP.BOOLEAN.V1", &[&self.session]);
+        let vaults =
+            run_dealerless_pi_triple_f2(session, parties, &points, count, self.mesh, self.rngs)
+                .map_err(|_| Check::BooleanCeremony)?;
+        self.transcript.label(b"boolean ceremony");
+        let mut out = Vec::with_capacity(parties);
+        for (vault, &weight) in vaults.iter().zip(&weights) {
+            if vault.triples_slice().len() != count {
+                return Err(Check::BooleanCeremony.into());
+            }
+            let mut key = [vault.mac_alpha_lanes[0].mul_gf256(weight).0];
+            qsag_asm::tower128_to_poly128_batch_ct(&mut key);
+            self.boolean_keys.push(key[0]);
+            qsag_asm::volatile_fill(&mut key, 0);
+            let scale = PublicGf256Matrix::from_public_scalar(weight);
+            let word = |planes: &[u64; 8], tags: &[qsag_core::field::tower::Tower128; 64]| {
+                let mut macs: [u128; 64] =
+                    core::array::from_fn(|lane| tags[lane].mul_gf256(weight).0);
+                qsag_asm::tower128_to_poly128_x64_ct(&mut macs);
+                AuthWord {
+                    share: scale.scale_planes(planes)[0],
+                    macs,
+                }
+            };
+            out.push(
+                vault
+                    .triples_slice()
+                    .iter()
+                    .map(|t| {
+                        [
+                            word(&t.a, &t.a_mac[0]),
+                            word(&t.b, &t.b_mac[0]),
+                            word(&t.c, &t.c_mac[0]),
+                        ]
+                    })
+                    .collect(),
+            );
+        }
+        Ok(out)
+    }
+
+    /// Every owner samples its candidate bits and authenticates them under
+    /// the Boolean key: for each holder and each of the holder's 128 key
+    /// bits the owner sends `t0 ⊕ t1 ⊕ bits`, the holder obtains
+    /// `t0 ⊕ keybit · bits`, and bit `l` of a MAC share is taken from key
+    /// bit `l`. The holder's share is `T ⊕ bit · key_h`, the owner's is
+    /// `T ⊕ bit · key_o` over all holders' `T`.
+    ///
+    /// **Input check** (the correlation check of KOS, Keller, Orsini, Scholl,
+    /// CRYPTO 2015, in MASCOT's opened form). A coin fixes `χ_k ∈ GF(2^128)`;
+    /// the owner opens `y = Σ χ_k b_k ⊕ Σ_l X^l · mask_l` over the candidates
+    /// and [`MASK_BITS`] sacrificed mask candidates, and every party commits
+    /// to and opens `σ_p = Σ χ_k m_k ⊕ Σ X^l m_mask,l ⊕ y · key_p`; the XOR
+    /// must be zero. As in [`Self::authenticate`], an owner that encodes
+    /// different bits under different key bits passes only if the holder's
+    /// key lies in a set fixed in advance, so a failure leaks only that the
+    /// key lies outside it; `y` is uniformly masked.
+    fn boolean_candidates(&mut self, layout: &Layout) -> Result<Candidates, Abort> {
+        let parties = self.parties;
+        let total = layout.total;
+        let words = total / 64;
+        let mut bits: Vec<SecretVec<u64>> = Vec::with_capacity(parties);
+        let mut macs: Vec<Vec<SecretVec<u128>>> = Vec::with_capacity(parties);
+        for owner in 0..parties {
+            let own: SecretVec<u64> = (0..words).map(|_| self.rngs[owner].next_u64()).collect();
+            let own_key = self.boolean_keys[owner];
+            let mut shares: Vec<SecretVec<u128>> = (0..parties)
+                .map(|_| SecretVec::from(vec![0u128; total]))
+                .collect();
+            for k in 0..total {
+                shares[owner][k] =
+                    own_key & 0u128.wrapping_sub(((own[k / 64] >> (k % 64)) & 1) as u128);
+            }
+            for holder in (0..parties).filter(|&h| h != owner) {
+                let key = self.pair_boolean_keys[owner][holder];
+                let Self {
+                    pairs,
+                    fault,
+                    transcript,
+                    ..
+                } = self;
+                let pair = pairs[owner][holder].as_mut().unwrap();
+                let zeros = || SecretVec::from(vec![0u64; words]);
+                let (mut zero, mut one, mut chosen, mut encoded) =
+                    (zeros(), zeros(), zeros(), zeros());
+                transcript.label(b"boolean cope");
+                for bit in 0..128 {
+                    pair.send[BOOLEAN_BASE + bit][0].words(&mut zero);
+                    pair.send[BOOLEAN_BASE + bit][1].words(&mut one);
+                    pair.receive[BOOLEAN_BASE + bit].words(&mut chosen);
+                    encoded.copy_from_slice(&own);
+                    fault(Fault::BooleanInput {
+                        owner,
+                        holder,
+                        bit,
+                        words: &mut encoded,
+                    });
+                    let select = 0u64.wrapping_sub(((key >> bit) & 1) as u64);
+                    for w in 0..words {
+                        let correction = zero[w] ^ one[w] ^ encoded[w];
+                        transcript.bytes(&correction.to_le_bytes());
+                        let received = chosen[w] ^ (correction & select);
+                        for lane in 0..64 {
+                            let k = 64 * w + lane;
+                            shares[owner][k] ^= (((zero[w] >> lane) & 1) as u128) << bit;
+                            shares[holder][k] |= (((received >> lane) & 1) as u128) << bit;
+                        }
+                    }
+                }
+            }
+            bits.push(own);
+            macs.push(shares);
+        }
+
+        let mut challenges = self.coin(b"boolean input")?;
+        let mut sigmas: Vec<SecretVec<u64>> = (0..parties).map(|_| SecretVec::new()).collect();
+        self.transcript.label(b"boolean input check");
+        let mask = layout.input_mask;
+        let checked = (0..total).filter(move |k| !(mask..mask + MASK_BITS).contains(k));
+        for owner in 0..parties {
+            let chi: Vec<u128> = checked.clone().map(|_| challenges.u128()).collect();
+            let mut opened = mask_value(&bits[owner], mask / 64);
+            for (chi, k) in chi.iter().zip(checked.clone()) {
+                opened ^= chi & 0u128.wrapping_sub(((bits[owner][k / 64] >> (k % 64)) & 1) as u128);
+            }
+            self.transcript.bytes(&opened.to_le_bytes());
+            for p in 0..parties {
+                let row = &macs[owner][p];
+                let selected: SecretVec<u128> = checked.clone().map(|k| row[k]).collect();
+                let sigma = qsag_asm::gf2_128_dot(&chi, &selected)
+                    ^ mask_mac(&row[mask..mask + MASK_BITS])
+                    ^ gf2_128_mul(self.boolean_key_for(Some(owner), p), opened);
+                sigmas[p].extend_from_slice(&[sigma as u64, (sigma >> 64) as u64]);
+            }
+        }
+        self.commit_then_open(b"boolean input sigma", &sigmas)?;
+        for owner in 0..parties {
+            let sum = (0..parties).fold([0u64; 2], |sum, p| {
+                [
+                    sum[0] ^ sigmas[p][2 * owner],
+                    sum[1] ^ sigmas[p][2 * owner + 1],
+                ]
+            });
+            if sum != [0; 2] {
+                return Err(Check::BooleanInput.into());
+            }
+        }
+        Ok(Candidates { bits, macs })
+    }
+
+    /// Batch MAC check of partially opened Boolean values, as
+    /// [`Self::check_field_queue`]; soundness `2^-127`.
+    fn check_boolean_queue(&mut self, queue: BooleanQueue, site: Check) -> Result<(), Abort> {
+        if queue.values.is_empty() {
+            return Ok(());
+        }
+        let parties = self.parties;
+        let mut challenges = self.coin(b"boolean mac check")?;
+        let chi: Vec<u128> = queue.values.iter().map(|_| challenges.u128()).collect();
+        let mut sigmas: Vec<SecretVec<u64>> = Vec::with_capacity(parties);
+        for p in 0..parties {
+            let mut sigma = qsag_asm::gf2_128_dot(&chi, &queue.macs[p]);
+            for (entry, value) in queue.values.iter().enumerate() {
+                let key = self.boolean_key_for(queue.owners[entry], p);
+                sigma ^= gf2_128_mul(key, gf2_128_mul(chi[entry], *value));
+            }
+            sigmas.push([sigma as u64, (sigma >> 64) as u64].into_iter().collect());
+        }
+        self.commit_then_open(b"boolean sigma", &sigmas)?;
+        if sigmas
+            .iter()
+            .fold([0u64; 2], |sum, s| [sum[0] ^ s[0], sum[1] ^ s[1]])
+            != [0; 2]
+        {
+            return Err(site.into());
+        }
+        Ok(())
+    }
+
+    /// The Boolean key each party used as a holder in
+    /// [`Self::boolean_candidates`] must be its key share of the triple
+    /// ceremony. With `X3 = Σ X^l · bit_l` over 128 sacrificed bits of the
+    /// triple ceremony and `X4 = Σ_o Σ X^l · candidate_{o,l}` over every
+    /// owner's sacrificed key-mask candidates, the parties open
+    /// `Y = X3 ⊕ X4` and MAC-check it under their key shares.
+    ///
+    /// If corrupted holders used keys towards honest owner `o` that differ
+    /// from their shares by `ε_o` in total, the MAC shares sum to
+    /// `Y · key ⊕ Σ_o X4_o · ε_o`. `X3` is uniform and unknown to the
+    /// adversary, so `Y` hides every honest `X4_o`, and for some `ε_o ≠ 0`
+    /// the error is uniform in `GF(2^128)`: the check passes with
+    /// probability `2^-128`. Both sides are sacrificed, so `Y` reveals
+    /// nothing about the output.
+    fn check_boolean_keys(
+        &mut self,
+        candidates: &Candidates,
+        layout: &Layout,
+        spare: &[&[AuthWord; 3]],
+    ) -> Result<(), Abort> {
+        let parties = self.parties;
+        let at = layout.key_mask;
+        let mut opened = 0u128;
+        let mut sigmas: Vec<SecretVec<u64>> = Vec::with_capacity(parties);
+        let mut macs: SecretVec<u128> = SecretVec::with_capacity(parties);
+        self.transcript.label(b"boolean key check");
+        for p in 0..parties {
+            let [a, b, _] = spare[p];
+            let share = (a.share as u128) | ((b.share as u128) << 64);
+            let share = share ^ mask_value(&candidates.bits[p], at / 64);
+            let mut mac =
+                pack_macs(&a.macs, u64::MAX) ^ gf2_128_mul(pack_macs(&b.macs, u64::MAX), 1 << 64);
+            for owner in 0..parties {
+                mac ^= mask_mac(&candidates.macs[owner][p][at..at + MASK_BITS]);
+            }
+            self.transcript.bytes(&share.to_le_bytes());
+            opened ^= share;
+            macs.push(mac);
+        }
+        for p in 0..parties {
+            let sigma = macs[p] ^ gf2_128_mul(self.boolean_keys[p], opened);
+            sigmas.push([sigma as u64, (sigma >> 64) as u64].into_iter().collect());
+        }
+        self.commit_then_open(b"boolean key sigma", &sigmas)?;
+        if sigmas
+            .iter()
+            .fold([0u64; 2], |sum, s| [sum[0] ^ s[0], sum[1] ^ s[1]])
+            != [0; 2]
+        {
+            return Err(Check::BooleanKeyConsistency.into());
+        }
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------------
+    // One field
+    // ------------------------------------------------------------------------
+
+    /// All material of one field: triples, randoms and doubly authenticated
+    /// bits, appended to `stores`.
+    fn field_stage(
+        &mut self,
+        field: ThresholdField,
+        demand: &Demand,
+        candidates: Option<&Candidates>,
+        layout: &Layout,
+        stores: &mut [PartyPreprocessing],
+    ) -> Result<(), Abort> {
+        let d = field.domain();
+        let index = field.index();
+        let parties = self.parties;
+        let retained = layout.retained[index];
+        let output_triples = demand.field_triples[index];
+        let triples = output_triples + (parties - 1) * retained;
+        let randoms = demand.field_randoms[index];
+        if triples + randoms + retained == 0 {
+            return Ok(());
+        }
+        let keys = key_count(d);
+        let per = triple_inputs(field);
+        let candidate_count = if retained == 0 {
+            0
+        } else {
+            retained + CROSS_REPS
+        };
+
+        // Batch: triple values, randoms, key-consistency values, candidate bits.
+        let random_at = triples * per;
+        let key_at = random_at + randoms;
+        let bit_at = key_at + keys;
+        let mut inputs = self.multiply(field, triples)?;
+        for owner in 0..parties {
+            for _ in random_at..bit_at {
+                let value = self.sample(owner, d);
+                inputs[owner].push(value);
+            }
+            if let Some(candidates) = candidates.filter(|_| retained != 0) {
+                let bits = &candidates.bits[owner];
+                for k in layout.at[index]..layout.at[index] + candidate_count {
+                    inputs[owner].push([(bits[k / 64] >> (k % 64)) & 1, 0, 0, 0]);
+                }
+                (self.fault)(Fault::DaBitFieldInput {
+                    field,
+                    owner,
+                    values: &mut inputs[owner][bit_at..],
+                });
+            }
+        }
+        let shares = self.authenticate(field, &inputs, bit_at..bit_at + candidate_count)?;
+        let joint: Vec<SecretVec<Share>> = (0..parties)
+            .map(|p| {
+                (0..bit_at)
+                    .map(|k| {
+                        (1..parties)
+                            .fold(shares[0][p][k], |sum, o| share_add(d, sum, shares[o][p][k]))
+                    })
+                    .collect()
+            })
+            .collect();
+
+        // Key consistency. A holder can commit to different keys in its base
+        // OTs with different owners; each owner's batch is then valid under a
+        // different global key. Every owner contributed uniformly random
+        // items (two for Goldilocks); the sum of each item over the owners is
+        // opened and MAC-checked on its own, with no random combination. If
+        // the keys towards two honest owners differ by `ε` in some key, the
+        // MAC shares of an opened sum are off by `ε` times one honest
+        // owner's item, which the sum does not determine: each item passes
+        // with probability `1/|F|`. The two Goldilocks items are separate
+        // equations, so a difference in a single 64-bit key is also caught
+        // except with probability `2^-128`. A failure reveals nothing beyond
+        // the sacrificed items.
+        let mut sigmas: Vec<SecretVec<u64>> = (0..parties).map(|_| SecretVec::new()).collect();
+        self.transcript.label(b"key consistency");
+        for k in key_at..bit_at {
+            let mut opened = ZERO;
+            for p in 0..parties {
+                self.transcript.element(d, &joint[p][k][0]);
+                opened = d.add(opened, joint[p][k][0]);
+            }
+            for p in 0..parties {
+                let key = self.field_keys[p][index];
+                sigmas[p].extend_from_slice(&mac_sub(d, joint[p][k][1], mac_scale(d, key, opened)));
+            }
+        }
+        self.commit_then_open(b"key consistency sigma", &sigmas)?;
+        for item in 0..keys {
+            let sum = (0..parties).fold(ZERO, |sum, p| {
+                let share: Value = sigmas[p][4 * item..4 * item + 4].try_into().unwrap();
+                mac_add(d, sum, share)
+            });
+            if sum != ZERO {
+                return Err(Check::KeyConsistency.into());
+            }
+        }
+
+        let checked = self.sacrifice(field, &joint, triples)?;
+        for p in 0..parties {
+            stores[p].add_field_triples(
+                field,
+                checked[p][..output_triples]
+                    .iter()
+                    .map(|t| FieldTriple(t.map(FieldShare))),
+            );
+            stores[p].add_field_randoms(
+                field,
+                joint[p][random_at..key_at].iter().map(|s| FieldShare(*s)),
+            );
+        }
+        let Some(candidates) = candidates.filter(|_| retained != 0) else {
+            return Ok(());
+        };
+        let base = layout.at[index];
+
+        // Cross-domain equality. Every candidate's field form is a bit
+        // (proved in `authenticate`). A coin fixes CROSS_REPS subsets of the
+        // retained candidates. For subset `S` and its own mask candidate the
+        // owner opens the Boolean parity `π = ⊕_S b ⊕ b_mask` and
+        // authenticates (as bits) the binary digits `w` of
+        // `(Σ_S β + β_mask − π) / 2`; the parties check
+        // `Σ_S β + β_mask − π − 2·Σ 2^l w_l = 0` on the field shares. All
+        // terms are bits and the weights are small, so the relation holds
+        // over the integers, and the parity of the field forms equals the
+        // opened parity of the Boolean forms. With `δ_k = β_k ⊕ b_k` fixed
+        // before the coin, a repetition passes iff `⊕_S δ ⊕ δ_mask = 0`:
+        // probability exactly 1/2 unless every retained `δ_k` is zero,
+        // `2^-128` over the repetitions. Only `π` is opened, and the unused
+        // mask bit makes it uniform; the digits stay shared.
+        let subset_words = retained / 64;
+        let mut challenges = self.coin(b"cross domain")?;
+        let mut subsets = vec![0u64; CROSS_REPS * subset_words];
+        challenges.words(&mut subsets);
+        let digits = (usize::BITS - retained.div_ceil(2).leading_zeros()) as usize;
+        let member =
+            |rep: usize, k: usize| (subsets[rep * subset_words + k / 64] >> (k % 64)) & 1 != 0;
+
+        let mut parities = vec![vec![0u64; CROSS_REPS]; parties];
+        let mut digit_inputs: Vec<SecretVec<Value>> = Vec::with_capacity(parties);
+        self.transcript.label(b"parities");
+        for owner in 0..parties {
+            let bits = &candidates.bits[owner];
+            let bit = |k: usize| (bits[(base + k) / 64] >> ((base + k) % 64)) & 1;
+            let mut values = SecretVec::with_capacity(CROSS_REPS * digits);
+            for rep in 0..CROSS_REPS {
+                let mut parity = bit(retained + rep);
+                let mut weight = inputs[owner][bit_at + retained + rep][0];
+                for k in (0..retained).filter(|&k| member(rep, k)) {
+                    parity ^= bit(k);
+                    weight = weight.wrapping_add(inputs[owner][bit_at + k][0]);
+                }
+                (self.fault)(Fault::Parity {
+                    field,
+                    owner,
+                    repetition: rep,
+                    parity: &mut parity,
+                });
+                parity &= 1;
+                // The owner broadcasts its parity.
+                self.transcript.bytes(&[parity as u8]);
+                parities[owner][rep] = parity;
+                let half = weight.wrapping_sub(parity) >> 1;
+                for digit in 0..digits {
+                    values.push([(half >> digit) & 1, 0, 0, 0]);
+                }
+            }
+            digit_inputs.push(values);
+        }
+        let digit_shares = self.authenticate(field, &digit_inputs, 0..CROSS_REPS * digits)?;
+
+        let mut boolean_queue = BooleanQueue::new(parties);
+        let mut queue = FieldQueue::new(parties);
+        for owner in 0..parties {
+            for rep in 0..CROSS_REPS {
+                let parity = parities[owner][rep];
+                let members: Vec<usize> = (0..retained).filter(|&k| member(rep, k)).collect();
+                boolean_queue.values.push(parity as u128);
+                boolean_queue.owners.push(Some(owner));
+                for p in 0..parties {
+                    let macs = &candidates.macs[owner][p];
+                    let mac = members
+                        .iter()
+                        .fold(macs[base + retained + rep], |sum, &k| sum ^ macs[base + k]);
+                    boolean_queue.macs[p].push(mac);
+
+                    let row = &shares[owner][p];
+                    let mut sum = members
+                        .iter()
+                        .fold(row[bit_at + retained + rep][1], |sum, &k| {
+                            mac_add(d, sum, row[bit_at + k][1])
+                        });
+                    let key = self.field_key_for(field, Some(owner), p);
+                    sum = mac_sub(d, sum, mac_scale(d, key, [parity, 0, 0, 0]));
+                    for digit in 0..digits {
+                        let weight = [2u64 << digit, 0, 0, 0];
+                        let mac = digit_shares[owner][p][rep * digits + digit][1];
+                        sum = mac_sub(d, sum, mac_scale(d, mac, weight));
+                    }
+                    queue.macs[p].push(sum);
+                }
+                queue.values.push(ZERO);
+                queue.owners.push(Some(owner));
+            }
+        }
+        self.check_boolean_queue(boolean_queue, Check::ParityOpening)?;
+        self.check_field_queue(field, queue, Check::CrossDomain)?;
+
+        // XOR over the owners: free on the Boolean side, `x + y − 2xy` with
+        // one checked triple per owner after the first on the field side.
+        let mut bits: Vec<SecretVec<Share>> = (0..parties)
+            .map(|p| {
+                shares[0][p][bit_at..bit_at + retained]
+                    .iter()
+                    .copied()
+                    .collect()
+            })
+            .collect();
+        let mut queue = FieldQueue::new(parties);
+        self.transcript.label(b"xor chain");
+        for owner in 1..parties {
+            for k in 0..retained {
+                let triple = output_triples + (owner - 1) * retained + k;
+                let delta = self.open(
+                    field,
+                    Check::XorChain,
+                    &mut queue,
+                    (0..parties).map(|p| share_sub(d, bits[p][k], checked[p][triple][0])),
+                );
+                let epsilon = self.open(
+                    field,
+                    Check::XorChain,
+                    &mut queue,
+                    (0..parties)
+                        .map(|p| share_sub(d, shares[owner][p][bit_at + k], checked[p][triple][1])),
+                );
+                let constant = d.mul(delta, epsilon);
+                for p in 0..parties {
+                    let [a, b, c] = checked[p][triple];
+                    let key = self.field_keys[p][index];
+                    let public = [
+                        if p == 0 { constant } else { ZERO },
+                        mac_scale(d, key, constant),
+                    ];
+                    let product = share_add(
+                        d,
+                        share_add(d, c, public),
+                        share_add(d, share_scale(d, b, delta), share_scale(d, a, epsilon)),
+                    );
+                    let sum = share_add(d, bits[p][k], shares[owner][p][bit_at + k]);
+                    bits[p][k] = share_sub(d, sum, share_add(d, product, product));
+                }
+            }
+        }
+        self.check_field_queue(field, queue, Check::XorChain)?;
+
+        for p in 0..parties {
+            stores[p].add_dabits(
+                field,
+                (0..retained / 64).map(|word| DaBitWord {
+                    bits: AuthWord {
+                        share: candidates.bits[p][base / 64 + word],
+                        macs: core::array::from_fn(|lane| {
+                            (0..parties).fold(0, |sum, owner| {
+                                sum ^ candidates.macs[owner][p][base + 64 * word + lane]
+                            })
+                        }),
+                    },
+                    field: core::array::from_fn(|lane| FieldShare(bits[p][64 * word + lane])),
+                }),
+            );
+        }
+        Ok(())
+    }
+
+    fn run(mut self, demand: &Demand) -> Result<Vec<(MacKeyShare, PartyPreprocessing)>, Abort> {
+        let parties = self.parties;
+        if demand.dabits.iter().any(|&words| words > MAX_DABITS / 64) {
+            return Err(Abort::Config);
+        }
+        let dabits = demand.dabits.iter().any(|&words| words != 0);
+        let word_triples = demand.auth_words.div_ceil(2);
+        let boolean_count = demand.boolean_triples + word_triples + usize::from(dabits);
+        let mut boolean = self.boolean_stage(boolean_count)?;
+        self.sample_field_keys();
+        self.establish_pairs()?;
+
+        let layout = Layout::new(demand);
+        let candidates = if dabits {
+            Some(self.boolean_candidates(&layout)?)
+        } else {
+            None
+        };
+        let mut stores: Vec<PartyPreprocessing> =
+            (0..parties).map(|_| PartyPreprocessing::new()).collect();
+        for field in ThresholdField::ALL {
+            self.field_stage(field, demand, candidates.as_ref(), &layout, &mut stores)?;
+        }
+        if let Some(candidates) = &candidates {
+            let spare: Vec<&[AuthWord; 3]> =
+                boolean.iter().map(|row| row.last().unwrap()).collect();
+            self.check_boolean_keys(candidates, &layout, &spare)?;
+        }
+
+        // Boolean triples first; then both uniform inputs of further triples
+        // as authenticated words, their products discarded.
+        let mut out = Vec::with_capacity(parties);
+        for (p, mut store) in stores.into_iter().enumerate() {
+            let mut words = Vec::with_capacity(2 * word_triples);
+            let mut row = core::mem::take(&mut boolean[p]).into_iter();
+            store.add_boolean_triples(
+                row.by_ref()
+                    .take(demand.boolean_triples)
+                    .map(|[a, b, c]| BooleanTriple { a, b, c }),
+            );
+            for [a, b, _] in row.by_ref().take(word_triples) {
+                words.push(a);
+                words.push(b);
+            }
+            words.truncate(demand.auth_words);
+            store.add_auth_words(words);
+            out.push((
+                MacKeyShare {
+                    boolean: self.boolean_keys[p],
+                    field: self.field_keys[p],
+                },
+                store,
+            ));
+        }
+        Ok(out)
+    }
+}
+
+fn ceremony(
+    session: [u8; 32],
+    config: &ThresholdConfig,
+    demand: &Demand,
+    mesh: &mut OtMesh,
+    rngs: &mut [PartyPrivateRng],
+    fault: &mut dyn FnMut(Fault<'_>),
+) -> Result<Vec<(MacKeyShare, PartyPreprocessing)>, Abort> {
+    if rngs.len() != config.quorum().len() {
+        return Err(Abort::Config);
+    }
+    let mut encoded = Vec::with_capacity(8 * 11);
+    for count in [demand.boolean_triples, demand.auth_words]
+        .into_iter()
+        .chain(demand.field_triples)
+        .chain(demand.field_randoms)
+        .chain(demand.dabits)
+    {
+        encoded.extend_from_slice(&(count as u64).to_le_bytes());
+    }
+    let session = cshake256_framed_32(
+        b"QSAG.MIGRATE.PREP.DEALERLESS.V1",
+        &[&session, &config.binding(), &encoded],
+    );
+    Ceremony::new(session, mesh, rngs, fault)?.run(demand)
+}
+
+/// Run the preprocessing ceremony of one quorum in this process and return
+/// every member's key shares and material, in quorum order.
+///
+/// `mesh` is the OT mesh over the quorum members and `rngs` their private
+/// generators, both indexed by quorum position. All steps of all members run
+/// here on separated per-party state. On any failed check the result is
+/// [`Error::MultiplicationCheck`], nothing is returned, and all key shares
+/// and material are erased as their owners go out of scope.
