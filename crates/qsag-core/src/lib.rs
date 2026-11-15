@@ -2,8 +2,9 @@
 //! signature library implementing NIST FIPS 205 `SLH-DSA-SHAKE` (`128s`, `128f`,
 //! `192s`, `192f`, `256s`, `256f`) and the pure-hash threshold suite:
 //!
-//! * [`baggy`] — stateless 2-of-3 `WOTS+C` / `FORS+C` hypertree signatures on the 256-lane
-//!   replicated engine ([`rss256`]), with the `Waistband` top-layer cache;
+//! * [`baggy`] — stateless `WOTS+C` hypertree signatures over `FORS+C` or [`pors_fp`], on the
+//!   2-of-3 256-lane replicated engine ([`rss256`]) or the `t`-of-`n` engine
+//!   ([`spdz_sweep`]), with the `Waistband` top-layer cache;
 //! * [`jorts`] — stateful single-tree 2-of-3 signatures gated by the durable
 //!   [`belt_latch`];
 //! * [`corduroy`] — the algebraic Poseidon2 hypertree custody scheme;
@@ -61,6 +62,9 @@ pub mod pors_fp;
 
 #[forbid(unsafe_code)]
 pub mod baggy;
+
+#[forbid(unsafe_code)]
+pub mod spdz_sweep;
 
 #[forbid(unsafe_code)]
 pub mod jorts;

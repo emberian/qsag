@@ -68,7 +68,7 @@ pub const fn batch_active_mask(batch_len: usize) -> u64 {
 /// Errors emitted by distributed `Keccak-f[1600]` MPC execution (RSS and SPDZ Shamir).
 type RssCutShares = ([[u64; 256]; 3], [[u64; 256]; 3]);
 /// Lane-0 and lane-1 `Tower128` MAC shares of the 64 values packed in one word.
-type SpdzMacWord = [[Tower128; 64]; 2];
+pub(crate) type SpdzMacWord = [[Tower128; 64]; 2];
 /// Per-party instance-bitsliced shares and MAC shares, one word per bit position.
 type SpdzBitShares = (Vec<Vec<BitslicedGf256x64>>, Vec<Vec<SpdzMacWord>>);
 
@@ -3243,7 +3243,7 @@ fn xor_spdz_macs_assign(dst: &mut [[Tower128; 64]; 2], rhs: &[[Tower128; 64]; 2]
 }
 
 #[inline]
-fn add_public_u64_to_spdz_word(
+pub(crate) fn add_public_u64_to_spdz_word(
     pub_word: u64,
     sh: &mut BitslicedGf256x64,
     mac: &mut [[Tower128; 64]; 2],
@@ -3355,7 +3355,7 @@ fn commit_and_open_beaver_de_batch(
     clippy::too_many_arguments,
     reason = "Preserve the existing explicit protocol interface for callers"
 )]
-fn verify_pending_spdz_mac_batch(
+pub(crate) fn verify_pending_spdz_mac_batch(
     session_id: &[u8; 32],
     phase: &'static str,
     t: usize,
@@ -4062,6 +4062,33 @@ impl fmt::Debug for SpdzAuthenticatedKeyShare {
             "SpdzAuthenticatedKeyShare(party={}, n={}, [REDACTED])",
             self.party_id, self.key_len
         )
+    }
+}
+
+impl SpdzAuthenticatedKeyShare {
+    /// The 32-byte scheme identity recorded in this share, if any. The record is the same
+    /// write-once latch a FIPS 205 profile occupies, so a share serves one scheme only.
+    pub(crate) fn scheme_identity(&self) -> Result<Option<[u8; 32]>, KeccakMpcError> {
+        let words = self
+            .slh_profile
+            .enrolled()
+            .map_err(|()| KeccakMpcError::KeyBindingMismatch)?;
+        Ok(words.map(|w| {
+            let mut out = [0u8; 32];
+            for (chunk, word) in out.as_chunks_mut::<8>().0.iter_mut().zip(w) {
+                *chunk = word.to_le_bytes();
+            }
+            out
+        }))
+    }
+
+    /// Record `identity` once; a share that already carries another value refuses.
+    pub(crate) fn bind_scheme_identity(&self, identity: &[u8; 32]) -> Result<(), KeccakMpcError> {
+        let words: [u64; 4] =
+            core::array::from_fn(|i| u64::from_le_bytes(identity.as_chunks::<8>().0[i]));
+        self.slh_profile
+            .bind(words)
+            .map_err(|()| KeccakMpcError::KeyBindingMismatch)
     }
 }
 
@@ -5727,7 +5754,7 @@ pub fn sign_stateless_tsw_rss_mpc(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::fips205::{
         fips205_prf_msg, slh_keygen_internal, slh_keygen_mpc, slh_sign_mpc, slh_verify,
@@ -6953,7 +6980,7 @@ mod tests {
     /// Test-only trusted dealer for authenticated SPDZ Shamir material: degree-`< t` shares over
     /// `TowerGf256` and matching 2-lane `Tower128` MAC shares under one global key. It replaces
     /// dealerless preprocessing in these tests, which exercise the online protocol only.
-    struct SpdzTestDealer {
+    pub(crate) struct SpdzTestDealer {
         t: usize,
         pts: Vec<TowerGf256>,
         alpha: [Tower128; 2],
@@ -6961,7 +6988,7 @@ mod tests {
     }
 
     impl SpdzTestDealer {
-        fn new(tag: &[u8], t: usize, pts: &[TowerGf256]) -> Self {
+        pub(crate) fn new(tag: &[u8], t: usize, pts: &[TowerGf256]) -> Self {
             let mid = crate::sponge::keccak::cshake256_static_midstate(b"QSAG.TEST.SPDZ.DEALER/v1");
             let mut dealer = Self {
                 t,
@@ -7052,7 +7079,7 @@ mod tests {
             (sh, mac)
         }
 
-        fn vaults(&mut self, triples: usize) -> Vec<PreprocessedKeccakPartyVault> {
+        pub(crate) fn vaults(&mut self, triples: usize) -> Vec<PreprocessedKeccakPartyVault> {
             let n = self.pts.len();
             let alpha_shares = self.alpha_shares();
             let mut per_party: Vec<Vec<KeccakBitTripleShare64>> =
@@ -7088,7 +7115,7 @@ mod tests {
                 .collect()
         }
 
-        fn key_shares(
+        pub(crate) fn key_shares(
             &mut self,
             key_len: usize,
             pk_seed: [u8; 32],
