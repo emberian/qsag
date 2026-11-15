@@ -10,18 +10,21 @@ use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 pub enum SimdBackend {
     /// 100% branchless, table-free portable constant-time fallback.
     Portable = 1,
-    /// `x86_64` with `AVX2` + `PCLMULQDQ` + `BMI1` + `BMI2` + `ADX` (e.g., AMD EPYC-Milan).
+    /// `x86_64` with `AVX2` + `PCLMULQDQ` + `BMI1` + `BMI2` + `ADX`.
     X86Avx2Pclmul = 2,
-    /// `x86_64` with `AVX2` + `GFNI` + `VPCLMULQDQ` + `BMI1` + `BMI2` + `ADX` (e.g., Intel Alder Lake / Sapphire Rapids / Zen 4+).
+    /// `x86_64` with `AVX2` + `GFNI` + `VPCLMULQDQ` + `BMI1` + `BMI2` + `ADX`.
     X86Avx2GfniVpclmul = 3,
     /// `aarch64` with `NEON` + `FEAT_SHA3` (`eor3`/`rax1`/`xar`/`bcax`) + `PMULL`.
     Aarch64NeonSha3Pmull = 4,
+    /// `x86_64` with `AVX-512` (`F/DQ/BW/VL` + OS `XCR0[7:5]=0b111`) + `GFNI` + `VPCLMULQDQ` + `BMI1` + `BMI2` + `ADX`.
+    X86Avx512GfniVpclmul = 5,
 }
 
 /// Detailed snapshot of CPU constant-time & SIMD instruction extensions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CpuCapabilities {
     pub avx2: bool,
+    pub avx512: bool,
     pub bmi1: bool,
     pub bmi2: bool,
     pub adx: bool,
@@ -29,6 +32,7 @@ pub struct CpuCapabilities {
     pub gfni: bool,
     pub vpclmulqdq: bool,
     pub vaes: bool,
+    pub sha_ni: bool,
     /// `CPUID.(EAX=7, ECX=0):EDX[29]` — indicates `IA32_ARCH_CAPABILITIES` MSR (`0x10A`) exists
     /// (ring-0 readable via `RDMSR`; does NOT by itself prove bit 12 `DOITM` is set).
     pub x86_arch_capabilities_msr: bool,
@@ -37,6 +41,7 @@ pub struct CpuCapabilities {
     /// require ring-0 `RDMSR`/`WRMSR` privileges (never inferred from `CPUID.7.0:EDX[29]` alone).
     pub x86_doit_enumerated: bool,
     pub aarch64_neon: bool,
+    pub aarch64_sha2: bool,
     pub aarch64_sha3: bool,
     pub aarch64_pmull: bool,
     pub aarch64_dit: bool,
@@ -110,11 +115,15 @@ const CAP_A64_SHA3: u32 = 1 << 10;
 const CAP_A64_PMULL: u32 = 1 << 11;
 const CAP_A64_DIT: u32 = 1 << 12;
 const CAP_X86_ARCH_CAP_MSR: u32 = 1 << 13;
+const CAP_AVX512: u32 = 1 << 14;
+const CAP_SHA_NI: u32 = 1 << 15;
+const CAP_A64_SHA2: u32 = 1 << 16;
 
-#[inline]
+#[inline(always)]
 fn decode_caps(bits: u32) -> CpuCapabilities {
     CpuCapabilities {
         avx2: (bits & CAP_AVX2) != 0,
+        avx512: (bits & CAP_AVX512) != 0,
         bmi1: (bits & CAP_BMI1) != 0,
         bmi2: (bits & CAP_BMI2) != 0,
         adx: (bits & CAP_ADX) != 0,
@@ -122,9 +131,11 @@ fn decode_caps(bits: u32) -> CpuCapabilities {
         gfni: (bits & CAP_GFNI) != 0,
         vpclmulqdq: (bits & CAP_VPCLMULQDQ) != 0,
         vaes: (bits & CAP_VAES) != 0,
+        sha_ni: (bits & CAP_SHA_NI) != 0,
         x86_arch_capabilities_msr: (bits & CAP_X86_ARCH_CAP_MSR) != 0,
         x86_doit_enumerated: (bits & CAP_X86_DOIT) != 0,
         aarch64_neon: (bits & CAP_A64_NEON) != 0,
+        aarch64_sha2: (bits & CAP_A64_SHA2) != 0,
         aarch64_sha3: (bits & CAP_A64_SHA3) != 0,
         aarch64_pmull: (bits & CAP_A64_PMULL) != 0,
         aarch64_dit: (bits & CAP_A64_DIT) != 0,
@@ -135,6 +146,7 @@ fn decode_caps(bits: u32) -> CpuCapabilities {
 fn encode_caps(c: CpuCapabilities) -> u32 {
     CAP_INITIALIZED
         | if c.avx2 { CAP_AVX2 } else { 0 }
+        | if c.avx512 { CAP_AVX512 } else { 0 }
         | if c.bmi1 { CAP_BMI1 } else { 0 }
         | if c.bmi2 { CAP_BMI2 } else { 0 }
         | if c.adx { CAP_ADX } else { 0 }
@@ -142,6 +154,7 @@ fn encode_caps(c: CpuCapabilities) -> u32 {
         | if c.gfni { CAP_GFNI } else { 0 }
         | if c.vpclmulqdq { CAP_VPCLMULQDQ } else { 0 }
         | if c.vaes { CAP_VAES } else { 0 }
+        | if c.sha_ni { CAP_SHA_NI } else { 0 }
         | if c.x86_arch_capabilities_msr {
             CAP_X86_ARCH_CAP_MSR
         } else {
@@ -153,6 +166,7 @@ fn encode_caps(c: CpuCapabilities) -> u32 {
             0
         }
         | if c.aarch64_neon { CAP_A64_NEON } else { 0 }
+        | if c.aarch64_sha2 { CAP_A64_SHA2 } else { 0 }
         | if c.aarch64_sha3 { CAP_A64_SHA3 } else { 0 }
         | if c.aarch64_pmull { CAP_A64_PMULL } else { 0 }
         | if c.aarch64_dit { CAP_A64_DIT } else { 0 }
@@ -161,6 +175,7 @@ fn encode_caps(c: CpuCapabilities) -> u32 {
 const fn empty_caps() -> CpuCapabilities {
     CpuCapabilities {
         avx2: false,
+        avx512: false,
         bmi1: false,
         bmi2: false,
         adx: false,
@@ -168,9 +183,11 @@ const fn empty_caps() -> CpuCapabilities {
         gfni: false,
         vpclmulqdq: false,
         vaes: false,
+        sha_ni: false,
         x86_arch_capabilities_msr: false,
         x86_doit_enumerated: false,
         aarch64_neon: false,
+        aarch64_sha2: false,
         aarch64_sha3: false,
         aarch64_pmull: false,
         aarch64_dit: false,
@@ -179,7 +196,7 @@ const fn empty_caps() -> CpuCapabilities {
 
 /// Probe detailed hardware capabilities once and serve subsequent queries from a single relaxed
 /// `AtomicU32` load (`0` repeated `cpuid` serialization / KVM VM-exits).
-#[inline]
+#[inline(always)]
 pub fn probe_capabilities() -> CpuCapabilities {
     let fast = CACHED_CAPS.load(Ordering::Relaxed);
     if (fast & CAP_INITIALIZED) != 0 {
@@ -222,22 +239,28 @@ fn probe_x86_64() -> CpuCapabilities {
 
         let leaf1 = __cpuid(1);
         let pclmulqdq = (leaf1.ecx & (1 << 1)) != 0;
+        let ssse3 = (leaf1.ecx & (1 << 9)) != 0;
+        let sse41 = (leaf1.ecx & (1 << 19)) != 0;
         let osxsave = (leaf1.ecx & (1 << 27)) != 0;
         let avx_hw = (leaf1.ecx & (1 << 28)) != 0;
 
+        let xcr0 = if osxsave { _xgetbv(0) } else { 0 };
         // Verify OS preserves XMM (bit 1) and YMM (bit 2) register state across context switches.
-        let os_ymm = if osxsave && avx_hw {
-            let xcr0 = _xgetbv(0);
-            (xcr0 & 0x06) == 0x06
-        } else {
-            false
-        };
+        let os_ymm = osxsave && avx_hw && ((xcr0 & 0x06) == 0x06);
+        // Verify OS preserves XMM/YMM (bits 2:1) AND AVX-512 opmask k0..k7 + ZMM_Hi256 + Hi16_ZMM (bits 7:5 == 0b111).
+        let os_zmm = os_ymm && ((xcr0 & 0xE6) == 0xE6);
 
         let leaf7_0 = __cpuid_count(7, 0);
         let bmi1 = (leaf7_0.ebx & (1 << 3)) != 0;
         let avx2 = os_ymm && ((leaf7_0.ebx & (1 << 5)) != 0);
         let bmi2 = (leaf7_0.ebx & (1 << 8)) != 0;
+        let avx512f = (leaf7_0.ebx & (1 << 16)) != 0;
+        let avx512dq = (leaf7_0.ebx & (1 << 17)) != 0;
         let adx = (leaf7_0.ebx & (1 << 19)) != 0;
+        let sha_ni = ssse3 && sse41 && ((leaf7_0.ebx & (1 << 29)) != 0);
+        let avx512bw = (leaf7_0.ebx & (1 << 30)) != 0;
+        let avx512vl = (leaf7_0.ebx & (1 << 31)) != 0;
+        let avx512 = os_zmm && avx512f && avx512dq && avx512bw && avx512vl;
 
         let gfni = os_ymm && ((leaf7_0.ecx & (1 << 8)) != 0);
         let vaes = os_ymm && ((leaf7_0.ecx & (1 << 9)) != 0);
@@ -250,6 +273,7 @@ fn probe_x86_64() -> CpuCapabilities {
 
         CpuCapabilities {
             avx2,
+            avx512,
             bmi1,
             bmi2,
             adx,
@@ -257,9 +281,11 @@ fn probe_x86_64() -> CpuCapabilities {
             gfni,
             vpclmulqdq,
             vaes,
+            sha_ni,
             x86_arch_capabilities_msr: arch_cap_msr,
             x86_doit_enumerated: false,
             aarch64_neon: false,
+            aarch64_sha2: false,
             aarch64_sha3: false,
             aarch64_pmull: false,
             aarch64_dit: false,
@@ -273,6 +299,7 @@ fn probe_aarch64() -> CpuCapabilities {
     const AT_HWCAP: usize = 16;
     const HWCAP_ASIMD: usize = 1 << 1;
     const HWCAP_PMULL: usize = 1 << 4;
+    const HWCAP_SHA2: usize = 1 << 6;
     const HWCAP_SHA3: usize = 1 << 17;
     const HWCAP_DIT: usize = 1 << 24;
 
@@ -285,6 +312,7 @@ fn probe_aarch64() -> CpuCapabilities {
     let hwcap = unsafe { getauxval(AT_HWCAP) };
     CpuCapabilities {
         aarch64_neon: (hwcap & HWCAP_ASIMD) != 0,
+        aarch64_sha2: (hwcap & HWCAP_SHA2) != 0,
         aarch64_sha3: (hwcap & HWCAP_SHA3) != 0,
         aarch64_pmull: (hwcap & HWCAP_PMULL) != 0,
         aarch64_dit: (hwcap & HWCAP_DIT) != 0,
@@ -323,19 +351,27 @@ fn apple_sysctl_flag(nul_terminated_name: &[u8]) -> bool {
 #[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
 fn probe_aarch64() -> CpuCapabilities {
     // Query runtime Darwin `hw.optional.*` sysctls so pre-v8.4 Apple cores (A11-A13 without
-    // `FEAT_DIT` / A11 without `FEAT_SHA3`) NEVER execute `msr dit, #1` (`SIGILL`)!
-    let neon = apple_sysctl_flag(b"hw.optional.arm.AdvSIMD\0")
+    // `FEAT_DIT` / A11 without `FEAT_SHA3`) NEVER execute `msr dit, #1` (`SIGILL`).
+    // All Apple Silicon `macos` systems implement AdvSIMD, FEAT_SHA256, FEAT_SHA3, and FEAT_PMULL.
+    let neon = cfg!(target_os = "macos")
+        || apple_sysctl_flag(b"hw.optional.arm.AdvSIMD\0")
         || apple_sysctl_flag(b"hw.optional.AdvSIMD\0")
         || apple_sysctl_flag(b"hw.optional.neon\0");
-    let sha3 = apple_sysctl_flag(b"hw.optional.arm.FEAT_SHA3\0")
+    let sha2 = cfg!(target_os = "macos")
+        || apple_sysctl_flag(b"hw.optional.arm.FEAT_SHA256\0")
+        || apple_sysctl_flag(b"hw.optional.armv8_sha2\0");
+    let sha3 = cfg!(target_os = "macos")
+        || apple_sysctl_flag(b"hw.optional.arm.FEAT_SHA3\0")
         || apple_sysctl_flag(b"hw.optional.armv8_2_sha3\0")
         || apple_sysctl_flag(b"hw.optional.armv8_sha3\0");
-    let pmull = apple_sysctl_flag(b"hw.optional.arm.FEAT_PMULL\0")
+    let pmull = cfg!(target_os = "macos")
+        || apple_sysctl_flag(b"hw.optional.arm.FEAT_PMULL\0")
         || apple_sysctl_flag(b"hw.optional.arm.FEAT_AES\0");
     let dit = apple_sysctl_flag(b"hw.optional.arm.FEAT_DIT\0");
 
     CpuCapabilities {
         aarch64_neon: neon,
+        aarch64_sha2: sha2,
         aarch64_sha3: sha3,
         aarch64_pmull: pmull,
         aarch64_dit: dit,
@@ -350,6 +386,7 @@ fn probe_aarch64() -> CpuCapabilities {
 fn probe_aarch64() -> CpuCapabilities {
     CpuCapabilities {
         aarch64_neon: cfg!(target_feature = "neon"),
+        aarch64_sha2: cfg!(target_feature = "sha2"),
         aarch64_sha3: cfg!(target_feature = "sha3"),
         aarch64_pmull: cfg!(target_feature = "aes"),
         aarch64_dit: cfg!(target_feature = "dit"),
@@ -366,20 +403,29 @@ pub fn detect_backend() -> SimdBackend {
         2 => return SimdBackend::X86Avx2Pclmul,
         3 => return SimdBackend::X86Avx2GfniVpclmul,
         4 => return SimdBackend::Aarch64NeonSha3Pmull,
+        5 => return SimdBackend::X86Avx512GfniVpclmul,
         _ => {}
     }
 
     let caps = probe_capabilities();
-    let selected =
-        if caps.avx2 && caps.bmi1 && caps.bmi2 && caps.adx && caps.gfni && caps.vpclmulqdq {
-            SimdBackend::X86Avx2GfniVpclmul
-        } else if caps.avx2 && caps.bmi1 && caps.bmi2 && caps.adx && caps.pclmulqdq {
-            SimdBackend::X86Avx2Pclmul
-        } else if caps.aarch64_neon && caps.aarch64_sha3 && caps.aarch64_pmull && caps.aarch64_dit {
-            SimdBackend::Aarch64NeonSha3Pmull
-        } else {
-            SimdBackend::Portable
-        };
+    let selected = if caps.avx512
+        && caps.avx2
+        && caps.bmi1
+        && caps.bmi2
+        && caps.adx
+        && caps.gfni
+        && caps.vpclmulqdq
+    {
+        SimdBackend::X86Avx512GfniVpclmul
+    } else if caps.avx2 && caps.bmi1 && caps.bmi2 && caps.adx && caps.gfni && caps.vpclmulqdq {
+        SimdBackend::X86Avx2GfniVpclmul
+    } else if caps.avx2 && caps.bmi1 && caps.bmi2 && caps.adx && caps.pclmulqdq {
+        SimdBackend::X86Avx2Pclmul
+    } else if caps.aarch64_neon && caps.aarch64_sha3 && caps.aarch64_pmull && caps.aarch64_dit {
+        SimdBackend::Aarch64NeonSha3Pmull
+    } else {
+        SimdBackend::Portable
+    };
 
     CACHED_BACKEND.store(selected as u8, Ordering::Relaxed);
     selected
