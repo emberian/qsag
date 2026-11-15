@@ -1670,6 +1670,104 @@ def sharedFinalizeCutOpen (p : Fips205Params) (cIdx : Fin 3)
       else
         .inl (.cutOpenMismatch cIdx.val)
 
+/-- Accepted corrupt cut openings cannot change the bytes reconstructed from the
+    honest cut shares. This is the output-origin obligation used by the strengthened
+    ideal-delivery boundary below. -/
+theorem checkRound3ActiveOpen_output (L : Nat) (cIdx : Fin 3) (cutSh : RssByteShares)
+    (corr : List (Nat × ByteArray)) (opened : List UInt8)
+    (h : checkRound3ActiveOpen L cIdx cutSh corr = some opened) :
+    opened = reconstructRssBytes cutSh := by
+  unfold checkRound3ActiveOpen at h
+  cases hf : corr.find? (fun pr => pr.1 == cIdx.val) with
+  | none => rw [hf] at h; cases h
+  | some pair =>
+    rw [hf] at h
+    dsimp only at h
+    split at h
+    · unfold verifyRssActiveOpenBytes at h
+      split at h
+      · rename_i hc
+        simp only [Bool.and_eq_true, decide_eq_true_eq] at hc
+        have heq := hc.1.1.2
+        simp only [heq] at h
+        cases h
+        rfl
+      · cases h
+    · split at h
+      · unfold verifyRssActiveOpenBytes at h
+        split at h
+        · rename_i hc
+          simp only [Bool.and_eq_true, decide_eq_true_eq] at hc
+          have heq := hc.1.2
+          simp only [← heq] at h
+          cases h
+          rfl
+        · cases h
+      · unfold verifyRssActiveOpenBytes at h
+        split at h
+        · rename_i hc
+          simp only [Bool.and_eq_true, decide_eq_true_eq] at hc
+          have heq := hc.2
+          simp only [← heq] at h
+          cases h
+          rfl
+        · cases h
+
+theorem sharedFinalizeCutOpen_output (p : Fips205Params) (cIdx : Fin 3)
+    (pk : SlhPublicKey) (req : SessionScheduleReq) (cutSh : RssByteShares)
+    (corr : List (Nat × ByteArray)) (out : ByteArray)
+    (h : sharedFinalizeCutOpen p cIdx pk req cutSh corr = .inr out) :
+    out = packWireBytes (reconstructRssBytes cutSh) := by
+  unfold sharedFinalizeCutOpen at h
+  cases hc : checkRound3ActiveOpen p.sigBytes cIdx cutSh corr with
+  | none => rw [hc] at h; cases h
+  | some opened =>
+    rw [hc] at h
+    dsimp only at h
+    have heq := checkRound3ActiveOpen_output p.sigBytes cIdx cutSh corr opened hc
+    cases hd : decodeSlhSig p opened with
+    | none => rw [hd] at h; cases h
+    | some sig =>
+      rw [hd] at h
+      dsimp only at h
+      split at h
+      · cases h
+        exact congrArg packWireBytes heq
+      · cases h
+
+private theorem reconstructRssBytes_masked_eq :
+    ∀ {s b0 b1 : List UInt8},
+      s.length = b0.length →
+      b0.length = b1.length →
+      reconstructRssBytes ⟨b0, b1, xorByteStream s (xorByteStream b0 b1)⟩ = s
+  | [], [], [], _, _ => rfl
+  | x :: xs, u :: us, v :: tailV, h1, h2 => by
+    simp only [reconstructRssBytes, xorByteStream, List.zipWith_cons_cons, List.cons.injEq]
+    refine ⟨?_, reconstructRssBytes_masked_eq (Nat.succ.inj h1) (Nat.succ.inj h2)⟩
+    apply UInt8.eq_of_toBitVec_eq
+    apply BitVec.eq_of_getLsbD_eq
+    intro i _
+    simp only [UInt8.toBitVec_xor, BitVec.getLsbD_xor]
+    cases u.toBitVec.getLsbD i <;> cases v.toBitVec.getLsbD i <;> cases x.toBitVec.getLsbD i <;> rfl
+
+theorem sharedFinalizeCutOpen_deliver_exact (p : Fips205Params) (cIdx : Fin 3)
+    (pk : SlhPublicKey) (req : SessionScheduleReq) (s b0 b1 : List UInt8)
+    (h0 : s.length = b0.length) (h1 : b0.length = b1.length)
+    (corr : List (Nat × ByteArray)) :
+    (match sharedFinalizeCutOpen p cIdx pk req
+        ⟨b0, b1, xorByteStream s (xorByteStream b0 b1)⟩ corr with
+     | .inl err => .inl err
+     | .inr _ => .inr (packWireBytes s)) =
+    sharedFinalizeCutOpen p cIdx pk req
+      ⟨b0, b1, xorByteStream s (xorByteStream b0 b1)⟩ corr := by
+  cases hf : sharedFinalizeCutOpen p cIdx pk req
+      ⟨b0, b1, xorByteStream s (xorByteStream b0 b1)⟩ corr with
+  | inl err => rfl
+  | inr out =>
+    have heq := sharedFinalizeCutOpen_output p cIdx pk req _ corr out hf
+    rw [reconstructRssBytes_masked_eq h0 h1] at heq
+    rw [heq]
+
 /-- Public tag of a coin commitment: the public key, the request (session id, epoch, message,
     hedge, approvers), the monotonic mask cursor and the committing party. -/
 structure RssCoinTag where
@@ -2341,7 +2439,7 @@ theorem execRealSession_eq_execIdealSession_unless_bad {AdvState : Type}
             some (corruptRssView cIdx seedSh prfSh) := by
           rw [hShares]; exact corruptViewOfVault_deal cIdx seedSh prfSh
         unfold rssSlhInteractiveProtocol rssSlhCoinProtocol Sim_RssSlh slhIdealSignOracle
-          sharedCoinTossBarrier committedCoin
+          sharedCoinTossBarrier committedCoin BlackBoxUcSimulator.finalizeIdealCut
         dsimp only
         rw [← hCurEq, ← hCorrEq, hTapeSimEq]
         dsimp only [shifts]
@@ -2419,11 +2517,18 @@ theorem execRealSession_eq_execIdealSession_unless_bad {AdvState : Type}
                 (encodeSlhSig_slhSignInternal_length p
                   (A.scheduleSession advSt).1.msg sk (A.scheduleSession advSt).1.optRand)
             rw [hPreCutEq, unpackWireBytes_packWireBytes]
-            cases sharedFinalizeCutOpen p cIdx cl.tsig.pk _ _ _ with
+            cases hFin : sharedFinalizeCutOpen p cIdx cl.tsig.pk _ _ _ with
             | inl cutErr =>
               dsimp only [poisonRealCluster, poisonIdealCluster, walQuarantine]
               exact ⟨rfl, rfl, rfl, ⟨rfl, hThEq, hNpEq, rfl, hCheatEq, rfl, rfl, fun hp => by cases hp⟩⟩
             | inr outSigBytes =>
+              have hOut := sharedFinalizeCutOpen_output p cIdx cl.tsig.pk _ _ _ outSigBytes hFin
+              rw [reconstructRssBytes_masked_eq
+                ((encodeSlhSig_slhSignInternal_length p _ sk _).trans
+                  (bvToFixedBytes_length p.sigBytes _).symm)
+                ((bvToFixedBytes_length p.sigBytes _).trans
+                  (bvToFixedBytes_length p.sigBytes _).symm)] at hOut
+              subst outSigBytes
               dsimp only
               exact ⟨rfl, rfl, rfl, ⟨rfl, hThEq, hNpEq, rfl, hCheatEq, rfl, rfl, fun _ => rfl⟩⟩
 
@@ -4315,21 +4420,6 @@ theorem rss_slh_fresh_enrollment_euf_cma_bound {AdvState : Type}
   exact hT
 
 /-! ## 5. Crown-Jewel Theorem 3: Perfect Quorum & Sharing Privacy (`threshold_slh_output_perfect_quorum_privacy`) -/
-
-private theorem reconstructRssBytes_masked_eq :
-    ∀ {s b0 b1 : List UInt8},
-      s.length = b0.length →
-      b0.length = b1.length →
-      reconstructRssBytes ⟨b0, b1, xorByteStream s (xorByteStream b0 b1)⟩ = s
-  | [], [], [], _, _ => rfl
-  | x :: xs, u :: us, v :: tailV, h1, h2 => by
-    simp only [reconstructRssBytes, xorByteStream, List.zipWith_cons_cons, List.cons.injEq]
-    refine ⟨?_, reconstructRssBytes_masked_eq (Nat.succ.inj h1) (Nat.succ.inj h2)⟩
-    apply UInt8.eq_of_toBitVec_eq
-    apply BitVec.eq_of_getLsbD_eq
-    intro i _
-    simp only [UInt8.toBitVec_xor, BitVec.getLsbD_xor]
-    cases u.toBitVec.getLsbD i <;> cases v.toBitVec.getLsbD i <;> cases x.toBitVec.getLsbD i <;> rfl
 
 private theorem encodeSlhSig_length {p : Fips205Params} {sig : SlhSignature}
     (hWt : sig.WellTyped p) :
@@ -6390,6 +6480,48 @@ theorem witness_private_stream_changed :
 
 #tooth_pair Qsag.verifyPrivateChiWires_any_changed_gate_count vs Qsag.tooth_verifyPrivateChiWires_rejects_truncation
 #verify_inhabited Qsag.verifyPrivateChiWires_any_changed_gate_count Qsag.witness_private_stream_changed
+
+/-- Nonvacuity of the actual SLH cut path. For arbitrary key seeds, message,
+    supplied randomness, corrupt position, and cut masks, the prescribed honest
+    echo produces the standalone generated signature. This is a cut-boundary
+    execution witness, not a distributed gate-transcript simulation. -/
+theorem witness_generated_slh_cut_release
+    (p : Fips205Params) (hWf : p.wellFormed = true)
+    (skSeed skPrf pkSeed msg optRand : List UInt8) (cIdx : Fin 3)
+    (mask0 mask1 : BitVec (8 * p.sigBytes)) :
+    let key := slhKeygenInternal p skSeed skPrf pkSeed
+    let req : SessionScheduleReq := ⟨0, 0, msg, optRand, []⟩
+    let encoded := encodeSlhSig (slhSignInternal p msg key.1 optRand)
+    let b0 := bvToFixedBytes p.sigBytes mask0
+    let b1 := bvToFixedBytes p.sigBytes mask1
+    let cut : RssByteShares := ⟨b0, b1, xorByteStream encoded (xorByteStream b0 b1)⟩
+    ∃ corr,
+      sharedFinalizeCutOpen p cIdx key.2 req cut corr = .inr (packWireBytes encoded) := by
+  intro key req encoded b0 b1 cut
+  have hSigLen : encoded.length = p.sigBytes :=
+    encodeSlhSig_slhSignInternal_length p msg key.1 optRand
+  have h0 : b0.length = p.sigBytes := bvToFixedBytes_length _ _
+  have h1 : b1.length = p.sigBytes := bvToFixedBytes_length _ _
+  have h2 : cut.b2.length = p.sigBytes := by
+    change (xorByteStream encoded (xorByteStream b0 b1)).length = p.sigBytes
+    rw [xorByteStream_length]
+    · exact hSigLen
+    · rw [xorByteStream_length (h0.trans h1.symm), h0, hSigLen]
+  have hRec : reconstructRssBytes cut = encoded :=
+    reconstructRssBytes_masked_eq (hSigLen.trans h0.symm) (h0.trans h1.symm)
+  refine ⟨[(cIdx.val, echoHonestRound3 p.sigBytes (buildHonestRound3Msgs cIdx cut))], ?_⟩
+  unfold sharedFinalizeCutOpen
+  rw [checkRound3ActiveOpen_echoHonestRound3 p.sigBytes cIdx cut h0 h1 h2, hRec]
+  dsimp only
+  rw [decodeSlhSig_encodeSlhSig (slhSignInternal_wellTyped p msg key.1 optRand)]
+  have hVerify : slhVerifyInternal p msg (slhSignInternal p msg key.1 optRand) key.2 = true :=
+    slhVerifyInternal_slhSignInternal p hWf skSeed skPrf pkSeed msg optRand
+  dsimp only [req]
+  rw [hVerify]
+  rfl
+
+#verify_constructive checkRound3ActiveOpen_output sharedFinalizeCutOpen_output
+  sharedFinalizeCutOpen_deliver_exact witness_generated_slh_cut_release
 
 end Qsag
 end
