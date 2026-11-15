@@ -6091,5 +6091,248 @@ theorem execActiveShamirBlocks_honest_eq {ls keys prep}
       authShamirBlocksLimbs, shamirAbsorbLimbStream, ← heq]
     exact ih (i + 1) mid vm (fun c hc => hb c (List.mem_cons_of_mem b hc))
 
+/-! ### Constructive `GoldilocksExt2` Enumeration, Degree-`< t` Sacrificial Consistency & Active MAC Pin Bounds -/
+
+theorem goldilocksPrime_pos : 0 < goldilocksPrime := by decide
+
+def goldilocksExt2Card : Nat := goldilocksPrime * goldilocksPrime
+
+theorem goldilocksExt2Card_pos : 0 < goldilocksExt2Card := by
+  unfold goldilocksExt2Card
+  exact Nat.mul_pos goldilocksPrime_pos goldilocksPrime_pos
+
+theorem goldilocksExt2Card_gt_two_pow_126 : 2 ^ 126 < goldilocksExt2Card := by
+  unfold goldilocksExt2Card goldilocksPrime
+  decide
+
+/-- Constructive `0 Classical.choice` bijection `Fin goldilocksPrime ≃ Goldilocks`. -/
+def enumGoldilocks : SimpleEquiv (Fin goldilocksPrime) Goldilocks :=
+  { toFun := fun i => ⟨i.val, i.isLt⟩
+    invFun := fun x => ⟨x.val, x.isLt⟩
+    left_inv := fun ⟨_, _⟩ => rfl
+    right_inv := fun ⟨_, _⟩ => rfl }
+
+/-- Constructive `0 Classical.choice` bijection `Fin (goldilocksPrime^2) ≃ GoldilocksExt2`. -/
+def enumGoldilocksExt2 : SimpleEquiv (Fin goldilocksExt2Card) GoldilocksExt2 :=
+  { toFun := fun idx =>
+      ⟨enumGoldilocks.toFun (ucSplitLeft goldilocksPrime_pos idx),
+       enumGoldilocks.toFun (ucSplitRight goldilocksPrime_pos idx)⟩
+    invFun := fun x =>
+      ucPairFin (enumGoldilocks.invFun x.c0) (enumGoldilocks.invFun x.c1)
+    left_inv := fun idx => by
+      change ucPairFin (ucSplitLeft goldilocksPrime_pos idx)
+          (ucSplitRight goldilocksPrime_pos idx) = idx
+      exact ucPair_split goldilocksPrime_pos idx
+    right_inv := fun ⟨c0, c1⟩ => by
+      apply GoldilocksExt2.ext
+      · change (ucSplitLeft goldilocksPrime_pos
+            (ucPairFin (enumGoldilocks.invFun c0) (enumGoldilocks.invFun c1)) |> enumGoldilocks.toFun) = c0
+        rw [ucSplitLeft_pair goldilocksPrime_pos]
+        rfl
+      · change (ucSplitRight goldilocksPrime_pos
+            (ucPairFin (enumGoldilocks.invFun c0) (enumGoldilocks.invFun c1)) |> enumGoldilocks.toFun) = c1
+        rw [ucSplitRight_pair goldilocksPrime_pos]
+        rfl }
+
+/-- Constructive `0 Classical.choice` bijection `Fin (ucPow goldilocksPrime t) ≃ ShamirPadPoly Goldilocks t`. -/
+def enumShamirPadPolyGoldilocks :
+    (t : Nat) → SimpleEquiv (Fin (ucPow goldilocksPrime t)) (ShamirPadPoly Goldilocks t)
+  | 0 =>
+    { toFun := fun _ => ⟨[], rfl⟩
+      invFun := fun _ => ⟨0, Nat.zero_lt_one⟩
+      left_inv := fun ⟨v, hv⟩ => by
+        have hv1 : v < 1 := hv
+        have hv0 : v = 0 := by omega
+        subst hv0; rfl
+      right_inv := fun ⟨l, hl⟩ => Subtype.ext (List.eq_nil_of_length_eq_zero hl).symm }
+  | k + 1 =>
+    let prev := enumShamirPadPolyGoldilocks k
+    { toFun := fun idx =>
+        let p := prev.toFun (ucSplitLeft goldilocksPrime_pos idx)
+        let c := enumGoldilocks.toFun (ucSplitRight goldilocksPrime_pos idx)
+        ⟨c :: p.1, by simp [p.2]⟩
+      invFun := fun ⟨l, hl⟩ =>
+        let hd := l.headD Goldilocks.zero
+        let tl : ShamirPadPoly Goldilocks k := ⟨l.tail, by rw [List.length_tail, hl]; omega⟩
+        ucPairFin (prev.invFun tl) (enumGoldilocks.invFun hd)
+      left_inv := fun idx => by
+        change ucPairFin
+            (prev.invFun ⟨(prev.toFun (ucSplitLeft goldilocksPrime_pos idx)).1, _⟩)
+            (enumGoldilocks.invFun (enumGoldilocks.toFun (ucSplitRight goldilocksPrime_pos idx))) = idx
+        have hSub : (⟨(prev.toFun (ucSplitLeft goldilocksPrime_pos idx)).1,
+            (prev.toFun (ucSplitLeft goldilocksPrime_pos idx)).2⟩ : ShamirPadPoly Goldilocks k) =
+            prev.toFun (ucSplitLeft goldilocksPrime_pos idx) := by
+          cases prev.toFun (ucSplitLeft goldilocksPrime_pos idx); rfl
+        rw [hSub, prev.left_inv, enumGoldilocks.left_inv]
+        exact ucPair_split goldilocksPrime_pos idx
+      right_inv := fun ⟨l, hl⟩ => by
+        apply Subtype.ext
+        cases l with
+        | nil => cases hl
+        | cons x xs =>
+          have hxs : xs.length = k := Nat.succ.inj hl
+          change enumGoldilocks.toFun
+              (ucSplitRight goldilocksPrime_pos
+                (ucPairFin (prev.invFun ⟨xs, hxs⟩) (enumGoldilocks.invFun x))) ::
+            (prev.toFun
+              (ucSplitLeft goldilocksPrime_pos
+                (ucPairFin (prev.invFun ⟨xs, hxs⟩) (enumGoldilocks.invFun x)))).1 = x :: xs
+          rw [ucSplitRight_pair goldilocksPrime_pos, ucSplitLeft_pair goldilocksPrime_pos,
+              enumGoldilocks.right_inv, prev.right_inv] }
+
+/-- Degree-`< t` Shamir sacrificial / polynomial consistency check over evaluation points `pts`. -/
+def verifyShamirPolyConsistent (t : Nat) (polyCoeffs : List Goldilocks)
+    (pts shares : List Goldilocks) : Bool :=
+  decide (polyCoeffs.length = t) &&
+  decide (pts.length = shares.length) &&
+  (List.zip pts shares).all (fun xy => decide (RoundPoly.evalCoeffs polyCoeffs xy.1 = xy.2))
+
+/-- **Degree-`< t` Shamir Consistency Uniqueness (`shamirPolyConsistent_unique_at_zero`)**:
+    Any two length-`t` (degree `< t`) polynomials certified by `verifyShamirPolyConsistent` against
+    the same share vector `shares` on `≥ t` duplicate-free evaluation points `pts` have **identical**
+    reconstructed secret `evalCoeffs P 0 = evalCoeffs Q 0`. -/
+theorem shamirPolyConsistent_unique_at_zero (t : Nat)
+    (P Q : List Goldilocks) (pts shares : List Goldilocks)
+    (hNodup : pts.Nodup) (hQuorum : t ≤ pts.length)
+    (hP : verifyShamirPolyConsistent t P pts shares = true)
+    (hQ : verifyShamirPolyConsistent t Q pts shares = true) :
+    RoundPoly.evalCoeffs P Goldilocks.zero = RoundPoly.evalCoeffs Q Goldilocks.zero := by
+  unfold verifyShamirPolyConsistent at hP hQ
+  simp only [Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true] at hP hQ
+  rcases hP with ⟨⟨hPLen, hPtsLen⟩, hPZip⟩
+  rcases hQ with ⟨⟨hQLen, _⟩, hQZip⟩
+  cases t with
+  | zero =>
+    rw [List.eq_nil_of_length_eq_zero hPLen, List.eq_nil_of_length_eq_zero hQLen]
+  | succ d =>
+    by_cases hEq0 : RoundPoly.evalCoeffs P Goldilocks.zero = RoundPoly.evalCoeffs Q Goldilocks.zero
+    · exact hEq0
+    · exfalso
+      let diff := polySubFixed P Q
+      have hDiffLen : diff.length ≤ d + 1 := by
+        rw [polySubFixed_length P Q (hPLen.trans hQLen.symm), hPLen]
+        exact Nat.le_refl (d + 1)
+      have hNz0 : RoundPoly.evalCoeffs diff Goldilocks.zero ≠ CommRingOps.zero := by
+        rw [evalCoeffs_subFixed P Q Goldilocks.zero (hPLen.trans hQLen.symm)]
+        intro hSub0
+        exact hEq0 (LawfulCommRing.sub_eq_zero_iff.mp hSub0)
+      have hAgreePts : ∀ x ∈ pts, RoundPoly.evalCoeffs P x = RoundPoly.evalCoeffs Q x := by
+        have hZipAll : ∀ (xs ys : List Goldilocks) (x : Goldilocks),
+            xs.length = ys.length → x ∈ xs → ∃ y, (x, y) ∈ List.zip xs ys := by
+          intro xs
+          induction xs with
+          | nil =>
+            intro _ _ _ hx
+            cases hx
+          | cons a as ih =>
+            intro ys x hLen hx
+            cases ys with
+            | nil => cases hLen
+            | cons b bs =>
+              rcases List.mem_cons.mp hx with rfl | hRest
+              · exact ⟨b, .head _⟩
+              · obtain ⟨y, hy⟩ := ih bs x (Nat.succ.inj hLen) hRest
+                exact ⟨y, .tail _ hy⟩
+        intro x hx
+        obtain ⟨y, hy⟩ := hZipAll pts shares x hPtsLen hx
+        exact (hPZip (x, y) hy).trans (hQZip (x, y) hy).symm
+      have hFiltAll :
+          pts.filter (fun r => decide (RoundPoly.evalCoeffs diff r = CommRingOps.zero)) = pts := by
+        apply List.filter_eq_self.mpr
+        intro x hx
+        rw [decide_eq_true_eq, evalCoeffs_subFixed P Q x (hPLen.trans hQLen.symm),
+            hAgreePts x hx, LawfulCommRing.sub_self]
+      have hRoots := RoundPoly.roots_nodup_length_le d diff pts hNodup hDiffLen ⟨Goldilocks.zero, hNz0⟩
+      rw [hFiltAll] at hRoots
+      omega
+
+/-- `#tooth`: Without enforcing the `< t` degree check (`P.length ≤ t`), a degree-`t` polynomial
+    (`length = t + 1`) agrees with an honest constant sharing on `t = 1` evaluation point (`x = 1`)
+    while forging a distinct reconstructed secret at `x = 0`! -/
+theorem tooth_shamir_unbounded_degree_forges_secret_at_zero :
+    ∃ (P Q : List Goldilocks) (pt : Goldilocks),
+      pt ≠ Goldilocks.zero ∧
+      P.length = 1 ∧
+      Q.length = 2 ∧
+      RoundPoly.evalCoeffs P pt = RoundPoly.evalCoeffs Q pt ∧
+      RoundPoly.evalCoeffs P Goldilocks.zero ≠ RoundPoly.evalCoeffs Q Goldilocks.zero := by
+  refine ⟨[Goldilocks.one], [Goldilocks.zero, Goldilocks.one], Goldilocks.one, ?_, rfl, rfl, ?_, ?_⟩
+  · decide +kernel
+  · decide +kernel
+  · decide +kernel
+
+/-- Boolean test for whether global SPDZ MAC key `alpha : GoldilocksExt2` is pinned by a gate
+    opening deviation `(deltaD, sigmaSum)`. -/
+def spdzGatePinsAlpha (alpha : GoldilocksExt2) (deltaD : Goldilocks)
+    (sigmaSum : GoldilocksExt2) : Bool :=
+  decide (deltaD ≠ Goldilocks.zero ∧
+    alpha = CommRingOps.mul sigmaSum (GoldilocksExt2.inv (GoldilocksExt2.ofBase deltaD)))
+
+/-- For any fixed gate deviation `(deltaD, sigmaSum)`, at most `1` of the `p^2` global MAC keys
+    in `GoldilocksExt2` satisfies `spdzGatePinsAlpha`. -/
+theorem spdzGatePinsAlpha_count_le_one (deltaD : Goldilocks) (sigmaSum : GoldilocksExt2) :
+    finSum goldilocksExt2Card
+      (fun idx => if spdzGatePinsAlpha (enumGoldilocksExt2.toFun idx) deltaD sigmaSum then 1 else 0) ≤ 1 := by
+  apply finSum_indicator_le_one_of_unique
+  intro i j hi hj
+  unfold spdzGatePinsAlpha at hi hj
+  rcases of_decide_eq_true hi with ⟨_, hEqI⟩
+  rcases of_decide_eq_true hj with ⟨_, hEqJ⟩
+  have hSame : enumGoldilocksExt2.toFun i = enumGoldilocksExt2.toFun j := hEqI.trans hEqJ.symm
+  have hInv := congrArg enumGoldilocksExt2.invFun hSame
+  rw [enumGoldilocksExt2.left_inv, enumGoldilocksExt2.left_inv] at hInv
+  exact hInv
+
+/-- Boolean test for whether any gate in `gates` pins global MAC key `alpha`. -/
+def anyGatePinsAlpha (alpha : GoldilocksExt2) (gates : List (Goldilocks × GoldilocksExt2)) : Bool :=
+  gates.any (fun g => spdzGatePinsAlpha alpha g.1 g.2)
+
+theorem anyGatePinsAlpha_nil (alpha : GoldilocksExt2) : anyGatePinsAlpha alpha [] = false := by
+  rfl
+
+/-- Across `gates.length` active SPDZ gates, at most `gates.length` out of `goldilocksExt2Card`
+    global `GoldilocksExt2` MAC keys are pinned. -/
+theorem spdzGateStream_pin_count_le :
+    ∀ (gates : List (Goldilocks × GoldilocksExt2)),
+      finSum goldilocksExt2Card
+        (fun idx => if anyGatePinsAlpha (enumGoldilocksExt2.toFun idx) gates then 1 else 0) ≤
+        gates.length
+  | [] => by
+    have hZ : finSum goldilocksExt2Card
+        (fun idx => if anyGatePinsAlpha (enumGoldilocksExt2.toFun idx) [] then 1 else 0) =
+        finSum goldilocksExt2Card (fun _ => 0) :=
+      finSum_congr (fun _ => rfl)
+    rw [hZ, finSum_const]
+    omega
+  | g :: gs => by
+    have hOr := finSum_indicator_or_le
+      (fun idx => spdzGatePinsAlpha (enumGoldilocksExt2.toFun idx) g.1 g.2)
+      (fun idx => anyGatePinsAlpha (enumGoldilocksExt2.toFun idx) gs)
+    have hHead := spdzGatePinsAlpha_count_le_one g.1 g.2
+    have hTail := spdzGateStream_pin_count_le gs
+    have hStep :
+        finSum goldilocksExt2Card
+          (fun idx => if anyGatePinsAlpha (enumGoldilocksExt2.toFun idx) (g :: gs) then 1 else 0) =
+        finSum goldilocksExt2Card
+          (fun i => if (spdzGatePinsAlpha (enumGoldilocksExt2.toFun i) g.1 g.2 ||
+                        anyGatePinsAlpha (enumGoldilocksExt2.toFun i) gs) then 1 else 0) :=
+      finSum_congr (fun _ => rfl)
+    rw [hStep]
+    exact Nat.le_trans hOr
+      (by rw [List.length_cons, Nat.add_comm gs.length 1]; exact Nat.add_le_add hHead hTail)
+
+theorem witness_shamirPolyConsistent_inhabited :
+    ∃ (t : Nat) (P Q : List Goldilocks) (pts shares : List Goldilocks),
+      pts.Nodup ∧ t ≤ pts.length ∧
+      verifyShamirPolyConsistent t P pts shares = true ∧
+      verifyShamirPolyConsistent t Q pts shares = true := by
+  refine ⟨1, [Goldilocks.one], [Goldilocks.one], [Goldilocks.one], [Goldilocks.one],
+    by decide, by decide, ?_, ?_⟩
+  · decide +kernel
+  · decide +kernel
+
+#tooth_pair Qsag.shamirPolyConsistent_unique_at_zero vs Qsag.tooth_shamir_unbounded_degree_forges_secret_at_zero
+#verify_inhabited Qsag.shamirPolyConsistent_unique_at_zero Qsag.witness_shamirPolyConsistent_inhabited
+
 end Qsag
 end
